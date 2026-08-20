@@ -22,8 +22,11 @@ one line per proposed split child (`automerge (K/N) <child title>: grant|withhol
 visually verifiable UI work, or irreversible migration/data changes, and whenever uncertain,
 applied independently per ticket; this section is not written into the ticket body. A split's
 `### Suggested Split` carries each child as a decision-complete block (`### Goal`,
-`### Decisions`, `### Assumptions (auto-adopted)`, `### Acceptance Criteria`,
-`### Dependencies`) so it is plannable without undocumented parent context. Do not edit
+`### Size`, `### Decisions`, `### Assumptions (auto-adopted)`, `### Acceptance Criteria`,
+`### Dependencies`) so it is plannable without undocumented parent context — each child's
+`### Size` is grounded in a bounded enumeration of that child's affected files/components
+found during exploration, and is always S or M, never L (an L split child means the parent's
+partition was wrong, not that the child needs further splitting). Do not edit
 GitHub in Plan mode. Hand off `$cenci:refine apply <ticket> <approved-plan>` to normal mode.
 
 The pre-confirmation phase performs only read-only GitHub calls (`gh issue view`, `gh api
@@ -84,8 +87,8 @@ true`), then append `--add-label "automerge:ok"` when the effective grant holds,
 computed grant/withhold from the same gate, applied when that child is created (see below) —
 never inherited from the parent.
 Before the Confirmation Gate renders its manifest, when a split is proposed, first verify each child block is structurally complete — every child in the
-adopted `### Suggested Split` has all five subsections present (`### Goal`, `### Decisions`, `### Assumptions (auto-adopted)`, `### Acceptance criteria`, `### Dependencies`), each satisfying its emptiness
-rule: `### Goal` non-empty prose; `### Dependencies` non-empty ("None." valid); `### Decisions` and
+adopted `### Suggested Split` has all six subsections present (`### Goal`, `### Size`, `### Decisions`, `### Assumptions (auto-adopted)`, `### Acceptance criteria`, `### Dependencies`), each satisfying its emptiness
+rule: `### Goal` non-empty prose; `### Size` a real `<S/M> — <reasoning>` value, never empty and never the "None." sentinel; `### Dependencies` non-empty ("None." valid); `### Decisions` and
 `### Assumptions (auto-adopted)` each non-empty or exactly "None."; `### Acceptance criteria` empty only
 for a child the partition assigned zero criteria; a missing or empty-violating child aborts the split
 before any GitHub write, before the gate renders a manifest, and before the acceptance-criteria partition check runs. This structural check only
@@ -109,7 +112,7 @@ before that child's own `ensure-issue.sh ensure` call; a child with no blockers 
 never rewritten (`ensure-issue.sh`'s `bodyHash` is recorded at `init` but never read back, so this
 in-place rewrite is safe). Each child body then carries its own `### Acceptance Criteria` section —
 its slice of the parent's partition — after the dependency lines and description, plus that
-child's own `### Decisions` and `### Assumptions (auto-adopted)` persisted from its
+child's own `### Size`, `### Decisions` and `### Assumptions (auto-adopted)` persisted from its
 `### Suggested Split` block.
 
 **Creation checkpoint (idempotent create/recover/repair/link, #876)**: every split child and the

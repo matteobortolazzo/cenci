@@ -128,6 +128,19 @@ if [[ -n "${refiner}" ]]; then
   assert_contains "${refiner}" "When an entailed decision fixes a security posture or is otherwise irreversible, ask a confirm/overrule question that states the entailed decision and its derivation — but never one that re-opens the full option space." "agents/refiner.md #978 entailed confirm/overrule requirement"
 fi
 
+# --- evidence-grounded sizing (refine evidence/sizing fix, PR 2 of 3) -------
+#
+# Why this exists: split-child sizing used to be a qualitative guess
+# disconnected from the refiner's own Glob/Grep exploration. This pins the
+# requirement that each child's ### Size cites a bounded enumeration of the
+# files/components the refiner actually found, and that the parent's own
+# ### Size Estimate reasoning is grounded the same way.
+
+if [[ -n "${refiner}" ]]; then
+  assert_contains "${refiner}" "grounded in a bounded enumeration of files/components affected by that child" "agents/refiner.md evidence-grounded child sizing requirement"
+  assert_contains "${refiner}" "Ground the reasoning in the specific files/components found via Glob/Grep during exploration" "agents/refiner.md evidence-grounded parent Size Estimate requirement"
+fi
+
 # --- skills/refine/SKILL.md — sonnet orchestrator, delegation, one-question relay ---
 
 require_doc skill "skills/refine/SKILL.md" || true
