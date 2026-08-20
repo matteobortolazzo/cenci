@@ -14,7 +14,7 @@ This is a different axis from PR size. `docs/git-workflow.md` states there is **
 
 ## Why this is estimated, not measured
 
-Neither `/cenci:refine` nor the `planner` agent do deep codebase exploration before producing a size estimate — refine works from the ticket text and user answers, and planner's exploration is bounded (see `docs/git-workflow.md` for PR conventions, and the planner's own "Before Planning" exploration limits). Neither can compute an actual token count for an implementation that hasn't happened yet. So sizing is a **qualitative estimate** based on structural signals visible in the refined ticket, not a numeric per-file or per-line token formula.
+`/cenci:refine`'s refiner agent does explore the codebase (Glob/Grep) before producing a size estimate, and grounds a split's per-child sizing in a bounded enumeration of that child's affected files/components found during that exploration — cited by name in the child's `### Size` reasoning. That exploration is still not a full implementation pass, though: neither refine nor the `planner` agent can compute an actual token count for an implementation that hasn't happened yet, and the planner's own exploration is bounded (see `docs/git-workflow.md` for PR conventions, and the planner's own "Before Planning" exploration limits). The planner treats a refine-time `### Size Estimate` already persisted in the ticket body as a **prior** — it inherits that estimate rather than re-deriving from scratch, and only overrides it when it has genuinely new evidence beyond what refine enumerated, naming specifically what changed. So sizing stays a **qualitative estimate** grounded in cited structural evidence, not a numeric per-file or per-line token formula.
 
 ## Structural signals
 

@@ -57,8 +57,9 @@ assert_file_contains() {
 
 # skills/refine/SKILL.md — structural completeness check, ordered before
 # the AC-partition check, within the same Coverage gate
-SKILL_FIVE_SECTIONS_MARKER='verify all five subsections are present: `### Goal`, `### Decisions`, `### Assumptions (auto-adopted)`, `### Acceptance criteria`, and `### Dependencies`'
+SKILL_SIX_SECTIONS_MARKER='verify all six subsections are present: `### Goal`, `### Size`, `### Decisions`, `### Assumptions (auto-adopted)`, `### Acceptance criteria`, and `### Dependencies`'
 SKILL_GOAL_EMPTINESS_MARKER='`### Goal` must contain non-empty prose'
+SKILL_SIZE_EMPTINESS_MARKER='`### Size` must contain a real `<S/M> — <reasoning>` value — never empty, and never the "None." sentinel'
 SKILL_DEPENDENCIES_EMPTINESS_MARKER='`### Dependencies` must be non-empty'
 SKILL_DEPENDENCIES_NONE_VALID_MARKER='"None." is a valid value'
 SKILL_DECISIONS_ASSUMPTIONS_EMPTINESS_MARKER='`### Decisions` and `### Assumptions (auto-adopted)` must each be non-empty or exactly "None."'
@@ -72,18 +73,23 @@ SKILL_PARTITION_AFTER_STRUCTURE_MARKER='Only after the structural completeness c
 REFINER_SENTINEL_HEADING_MARKER='"None." sentinel rule'
 REFINER_SENTINEL_ALWAYS_PRESENT_MARKER='`### Decisions`, `### Assumptions (auto-adopted)`, and `### Dependencies` are always present in every child block, even when genuinely empty'
 REFINER_SENTINEL_NEVER_OMITTED_MARKER='write exactly "None." rather than omitting the subsection or leaving it blank'
+REFINER_SIZE_SENTINEL_MARKER='joins this "always present, never omitted" list too, but it is never itself the "None." sentinel'
+REFINER_SIZE_NEVER_L_MARKER='so `### Size` on a child is always S or M, never L'
 
 # skills/refine/codex.md — portability parity
 CODEX_STRUCTURE_MARKER='first verify each child block is structurally complete'
-CODEX_STRUCTURE_FIVE_SECTIONS_MARKER='all five subsections present (`### Goal`, `### Decisions`, `### Assumptions (auto-adopted)`, `### Acceptance criteria`, `### Dependencies`)'
+CODEX_STRUCTURE_SIX_SECTIONS_MARKER='all six subsections present (`### Goal`, `### Size`, `### Decisions`, `### Assumptions (auto-adopted)`, `### Acceptance criteria`, `### Dependencies`)'
 CODEX_STRUCTURE_ORDER_MARKER='before the acceptance-criteria partition check'
+CODEX_STRUCTURE_SIZE_EMPTINESS_MARKER='`### Size` a real `<S/M> — <reasoning>` value, never empty and never the "None." sentinel'
 
 # --- skills/refine/SKILL.md -------------------------------------------------
 
-assert_file_contains "${REFINE_SKILL}" "${SKILL_FIVE_SECTIONS_MARKER}" \
-  "must require all five child subsections in the structural completeness check"
+assert_file_contains "${REFINE_SKILL}" "${SKILL_SIX_SECTIONS_MARKER}" \
+  "must require all six child subsections in the structural completeness check"
 assert_file_contains "${REFINE_SKILL}" "${SKILL_GOAL_EMPTINESS_MARKER}" \
   "must require non-empty prose for a child's Goal section"
+assert_file_contains "${REFINE_SKILL}" "${SKILL_SIZE_EMPTINESS_MARKER}" \
+  "must require a real, non-None. value for a child's Size section"
 assert_file_contains "${REFINE_SKILL}" "${SKILL_DEPENDENCIES_EMPTINESS_MARKER}" \
   "must require a non-empty Dependencies section"
 assert_file_contains "${REFINE_SKILL}" "${SKILL_DEPENDENCIES_NONE_VALID_MARKER}" \
@@ -109,15 +115,21 @@ assert_file_contains "${REFINER_AGENT}" "${REFINER_SENTINEL_ALWAYS_PRESENT_MARKE
   "must require Decisions, Assumptions, and Dependencies always present even when empty"
 assert_file_contains "${REFINER_AGENT}" "${REFINER_SENTINEL_NEVER_OMITTED_MARKER}" \
   "must forbid omitting or blanking those sections in favor of a None. sentinel"
+assert_file_contains "${REFINER_AGENT}" "${REFINER_SIZE_SENTINEL_MARKER}" \
+  "must state ### Size joins the always-present list but is never itself the None. sentinel"
+assert_file_contains "${REFINER_AGENT}" "${REFINER_SIZE_NEVER_L_MARKER}" \
+  "must state a split child's ### Size is always S or M, never L"
 
 # --- skills/refine/codex.md -------------------------------------------------
 
 assert_file_contains "${REFINE_CODEX}" "${CODEX_STRUCTURE_MARKER}" \
   "must mirror the structural completeness check"
-assert_file_contains "${REFINE_CODEX}" "${CODEX_STRUCTURE_FIVE_SECTIONS_MARKER}" \
-  "must mirror the five required child subsections"
+assert_file_contains "${REFINE_CODEX}" "${CODEX_STRUCTURE_SIX_SECTIONS_MARKER}" \
+  "must mirror the six required child subsections"
 assert_file_contains "${REFINE_CODEX}" "${CODEX_STRUCTURE_ORDER_MARKER}" \
   "must mirror the structural check running before the partition check"
+assert_file_contains "${REFINE_CODEX}" "${CODEX_STRUCTURE_SIZE_EMPTINESS_MARKER}" \
+  "must mirror the Size emptiness rule"
 
 echo "split-decision-completeness.test.sh: failures=${failures}"
 [[ "${failures}" -eq 0 ]]

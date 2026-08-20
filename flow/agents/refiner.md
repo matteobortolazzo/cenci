@@ -170,15 +170,23 @@ Only when questions are `None.`, output the complete proposal. The skill persist
     ### Size Estimate
     <S/M/L> — <reasoning, sized against the context budget in `docs/ticket-sizing.md`>
 
+    Ground the reasoning in the specific files/components found via Glob/Grep during exploration (`## Before Analyzing` step 3) — cite them by name — rather than a generic guess from the ticket text alone. This grounds the qualitative estimate in evidence; it stays an estimate, not a measured token count (`docs/ticket-sizing.md`'s "estimated, not measured" framing).
+
     ### Suggested Split (only if L AND NOT `isSplitChild` — real risk of exceeding the context budget per `docs/ticket-sizing.md`)
 
-    Each child is a **decision-complete block** — plannable without undocumented parent context (AC 5), never a one-line description. Ticket #848's own body is the reference shape: every child carries its own `### Goal`, `### Decisions`, `### Assumptions (auto-adopted)`, `### Acceptance criteria`, and `### Dependencies`.
+    Each child is a **decision-complete block** — plannable without undocumented parent context (AC 5), never a one-line description. Ticket #848's own body is the reference shape: every child carries its own `### Goal`, `### Size`, `### Decisions`, `### Assumptions (auto-adopted)`, `### Acceptance criteria`, and `### Dependencies`.
 
-    **"None." sentinel rule**: `### Decisions`, `### Assumptions (auto-adopted)`, and `### Dependencies` are always present in every child block, even when genuinely empty — when a child has no scoped decision, assumption, or dependency, write exactly "None." rather than omitting the subsection or leaving it blank, so the coverage gate's structural completeness check (`skills/refine/SKILL.md`) is deterministic.
+    **Ground each child's sizing in evidence.** Each child's `### Size` must be grounded in a bounded enumeration of files/components affected by that child — found via Glob/Grep during exploration (`## Before Analyzing` step 3) and cited by name — never a generic guess untethered from what was actually found in the codebase.
+
+    **A split child's `### Size` is never L.** L on a split child means the parent's partition was wrong, not that this child should be split further (see "Split children are never split again" below) — so `### Size` on a child is always S or M, never L.
+
+    **"None." sentinel rule**: `### Decisions`, `### Assumptions (auto-adopted)`, and `### Dependencies` are always present in every child block, even when genuinely empty — when a child has no scoped decision, assumption, or dependency, write exactly "None." rather than omitting the subsection or leaving it blank, so the coverage gate's structural completeness check (`skills/refine/SKILL.md`) is deterministic. `### Size` joins this "always present, never omitted" list too, but it is never itself the "None." sentinel: a child is always part of a split of an L-sized parent, so it always has a real size — write its actual `<S/M> — <reasoning>` value, never "None."
 
     **Ticket 1 (1/N): <title>**
     ### Goal
     <what this child delivers, standalone>
+    ### Size
+    <S/M> — <one-line reasoning citing the enumerated files/components>
     ### Decisions
     - <settled decision this child needs, scoped from the parent's ### Decisions above>
     ### Assumptions (auto-adopted)
@@ -191,6 +199,8 @@ Only when questions are `None.`, output the complete proposal. The skill persist
     **Ticket 2 (2/N): <title>** — depends on Ticket 1
     ### Goal
     <what this child delivers, standalone>
+    ### Size
+    <S/M> — <one-line reasoning citing the enumerated files/components>
     ### Decisions
     - <settled decision this child needs, scoped from the parent's ### Decisions above>
     ### Assumptions (auto-adopted)
@@ -203,6 +213,8 @@ Only when questions are `None.`, output the complete proposal. The skill persist
     **Ticket 3 (3/N): <title>** — parallel with Ticket 2
     ### Goal
     <what this child delivers, standalone>
+    ### Size
+    <S/M> — <one-line reasoning citing the enumerated files/components>
     ### Decisions
     - <settled decision this child needs, scoped from the parent's ### Decisions above>
     ### Assumptions (auto-adopted)

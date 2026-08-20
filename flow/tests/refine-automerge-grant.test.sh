@@ -98,6 +98,11 @@ CODEX_AUTOMERGE_GRANT_MARKER='automerge:ok'
 # Coverage`... with no `### Automation` spliced in, so this must NOT match.
 AUTOMATION_IN_BODY_SECTION_LIST_MARKER='`### Technical Notes`, `### Automation`, plus `### Design Coverage`'
 
+# Positive coverage (refine evidence/sizing fix, PR 2 of 3): ### Size Estimate
+# now IS persisted into the parent body, inserted right after ### Technical
+# Notes and before the "when present" design sections.
+SIZE_ESTIMATE_IN_BODY_SECTION_LIST_MARKER='`### Technical Notes`, `### Size Estimate`, plus `### Design Coverage`'
+
 # --- agents/refiner.md — question-policy inversion + new sections ----------
 
 assert_file_contains "${REFINER_AGENT}" "${ASSUMPTIONS_SECTION_MARKER}" \
@@ -146,6 +151,8 @@ assert_file_contains "${REFINE_CODEX}" "${CODEX_AUTOMERGE_GRANT_MARKER}" \
 
 assert_file_lacks "${REFINE_SKILL}" "${AUTOMATION_IN_BODY_SECTION_LIST_MARKER}" \
   "step-10 body-file section list must not also name ### Automation among the persisted sections"
+assert_file_contains "${REFINE_SKILL}" "${SIZE_ESTIMATE_IN_BODY_SECTION_LIST_MARKER}" \
+  "step-10 body-file section list must persist ### Size Estimate right after ### Technical Notes"
 
 echo "refine-automerge-grant.test.sh: failures=${failures}"
 [[ "${failures}" -eq 0 ]]

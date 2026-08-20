@@ -195,6 +195,8 @@ Before finalizing the plan, explicitly identify:
 
     (For backend-only tickets, write "N/A — backend only" and skip the table.)
 
+    When the ticket body carries a refine-time `### Size Estimate` (and, for a split child, its own `### Size`), inherit it as the prior — do not re-derive from scratch — and only override it with genuinely new evidence, naming specifically what changed (e.g. "files the refinement didn't enumerate").
+
     ### Size Estimate
     <S/M/L> — <reasoning, sized against the context budget in `docs/ticket-sizing.md`>
 
