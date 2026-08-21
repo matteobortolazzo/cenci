@@ -502,10 +502,14 @@ Everything persists in the home volume — only needs to happen once per instanc
 | Docker CLI + engine | latest | — (monolith and `dind`-enabled per-repo images only) |
 
 The baked `PLAYWRIGHT_VERSION` fixes a Chromium *build revision*, and a repo pinning a
-different `@playwright/test` needs a different one. That drift is expected and self-heals:
-`PLAYWRIGHT_BROWSERS_PATH=/ms-playwright` is owned by `dev` (and re-owned to your host
-user by the UID/GID remap), so a project-local `npx playwright install chromium` adds the
-missing build to the shared cache rather than failing against a root-owned path (#1096).
+different `@playwright/test` needs a different one. That drift is recoverable rather than
+fatal: `PLAYWRIGHT_BROWSERS_PATH=/ms-playwright` is owned by `dev` (and re-owned to your
+host user by the UID/GID remap), so a project-local `npx playwright install chromium` adds
+the missing build itself instead of failing against a root-owned path (#1096). Note it
+recovers *per session*: `/ms-playwright` lives in the container's writable layer, not a
+volume, and workload containers run `--rm` — so a build fetched that way is gone when the
+session ends and is re-downloaded on the next one. Keeping this pin current is what avoids
+the download; the ownership only guarantees a drifted repo still works.
 
 Override versions at build time. The monolith `Dockerfile` builds `FROM
 cenci-sandbox-base:${BASE_VERSION}`, so build (or pull) the base image first and pass

@@ -427,6 +427,33 @@ else
         "the host UID won't literally be 1234; the in-container id check above is authoritative."
 fi
 
+# ── The Playwright browser cache survives the remap (#1096) ──────────
+# The build-time `chown dev:dev /ms-playwright` records ownership by uid, so
+# on its own it only helps a host user who happens to be uid/gid 1000. This is
+# the case that covers the entrypoint's re-own: same real-entrypoint path as
+# the remap case above, asserting the *remapped* dev both owns the cache and
+# can extend it — which is what a project-local `playwright install` needs to
+# fetch the Chromium build revision its pinned @playwright/test requires.
+echo "case: the remapped dev owns and can write the Playwright browser cache"
+MSPW_OUT="$(run_with_timeout "${RUNTIME}" run --rm --user root \
+    -e HOST_UID=1234 -e HOST_GID=1234 \
+    -v "${SMOKE_NPM_FAKE}:/usr/bin/npm:ro" \
+    cenci-sandbox:latest \
+    -c 'stat -c "%u:%g" /ms-playwright && mkdir /ms-playwright/chromium-probe && rmdir /ms-playwright/chromium-probe')"
+MSPW_STATUS=$?
+if [[ "${MSPW_STATUS}" -eq 124 ]]; then
+    fail "container run timed out while exercising the /ms-playwright re-own"
+elif [[ "${MSPW_STATUS}" -eq 0 ]]; then
+    MSPW_OWNER="$(printf '%s\n' "${MSPW_OUT}" | tail -n 1)"
+    if [[ "${MSPW_OWNER}" == "1234:1234" ]]; then
+        pass
+    else
+        fail "expected /ms-playwright to be owned by 1234:1234 after the remap, got: ${MSPW_OWNER}"
+    fi
+else
+    fail "the remapped dev could not own or write /ms-playwright (exit ${MSPW_STATUS}): ${MSPW_OUT}"
+fi
+
 # ── No-op regression: unset HOST_UID/HOST_GID must not remap dev (#154) ──
 # Same real-entrypoint path as above, but without HOST_UID/HOST_GID set, so
 # the usermod/groupmod/chown remap itself must stay a no-op for the existing
