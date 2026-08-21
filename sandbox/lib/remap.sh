@@ -19,6 +19,13 @@
 #
 #     chown: changing ownership of '/home/dev/.gitconfig': Read-only file system
 #
+# entrypoint.sh calls chown_home_tree() for a second tree too: the Playwright
+# browser cache at /ms-playwright (#1096), which is owned by `dev` at build
+# time so a project-local `playwright install` can add the Chromium build its
+# pinned @playwright/test needs. That ownership is by uid, so it has to follow
+# the remap as well. The helper is tree-generic despite its name; only that
+# call site treats a failure as a warning rather than fatal.
+#
 # chown_home_tree() prunes every mount point nested under the home root
 # instead. Those nested mounts are host-owned by design and the workload only
 # reads them, so their ownership is none of the remap's business — while

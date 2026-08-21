@@ -489,7 +489,7 @@ Everything persists in the home volume — only needs to happen once per instanc
 | .NET SDK | 10.0.100 | `DOTNET_SDK_VERSION` |
 | Node.js | 24.x | `NODE_MAJOR` |
 | Go | 1.24.1 | `GO_VERSION` |
-| Playwright | 1.61.1 | `PLAYWRIGHT_VERSION` |
+| Playwright | 1.62.1 | `PLAYWRIGHT_VERSION` |
 | Codex CLI | verified latest in shared volume | `cenci sandbox update-agent --agent codex [--version X.Y.Z]` |
 | Claude Code CLI | verified latest in shared volume | `cenci sandbox update-agent [--version X.Y.Z]` |
 | OpenCode CLI | verified latest in shared volume | `cenci sandbox update-agent --agent opencode [--version X.Y.Z]` |
@@ -500,6 +500,12 @@ Everything persists in the home volume — only needs to happen once per instanc
 | Python 3 | latest | — |
 | uv | latest | `UV_VERSION` |
 | Docker CLI + engine | latest | — (monolith and `dind`-enabled per-repo images only) |
+
+The baked `PLAYWRIGHT_VERSION` fixes a Chromium *build revision*, and a repo pinning a
+different `@playwright/test` needs a different one. That drift is expected and self-heals:
+`PLAYWRIGHT_BROWSERS_PATH=/ms-playwright` is owned by `dev` (and re-owned to your host
+user by the UID/GID remap), so a project-local `npx playwright install chromium` adds the
+missing build to the shared cache rather than failing against a root-owned path (#1096).
 
 Override versions at build time. The monolith `Dockerfile` builds `FROM
 cenci-sandbox-base:${BASE_VERSION}`, so build (or pull) the base image first and pass

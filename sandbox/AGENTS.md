@@ -182,6 +182,11 @@ Image dependency versions are pinned via Dockerfile `ARG`s, all checked daily by
   - `PLAYWRIGHT_VERSION` — `Dockerfile` (+ `fragments/playwright.dockerfile`,
     byte-identical). Bump by hand and rebuild; add it to the auto-bumped tier above in a
     follow-up if it proves stable enough to auto-merge like Go/uv.
+    A stale pin is degraded, not fatal, since #1096: `/ms-playwright` is owned by `dev` at
+    build time and re-owned by `entrypoint.sh`'s remap, so a repo whose `@playwright/test`
+    needs a different Chromium build installs it into the shared cache itself. Keep both
+    properties when touching this block — root ownership silently turns that recoverable
+    drift back into a hard failure that only a manual in-container `chown` clears.
   - `PEN_CLI_VERSION` — `fragments/pencil.dockerfile` only (config-selected fragment, no
     monolith block — like `python`/`rust`, this repo's own stack doesn't use it). Bump by
     hand; affected repos pick it up by re-running `/cenci:configure` and then `cenci

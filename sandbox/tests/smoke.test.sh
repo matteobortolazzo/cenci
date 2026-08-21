@@ -314,6 +314,22 @@ else
     fail "Playwright CLI or Chromium is missing, unusable, or stale in cenci-sandbox:latest"
 fi
 
+# Regression guard for the browser-cache drift bug (#1096): the baked Chromium
+# build revision is tied to this image's PLAYWRIGHT_VERSION, so a repo pinning
+# a different @playwright/test needs a build that simply is not here. That is
+# recoverable — `npx playwright install` fetches the missing build into the
+# shared cache — but only if the user running it may write there. A root-owned
+# /ms-playwright made it unrecoverable and forced a manual in-container chown.
+# Runs as the default non-root `dev` user (no --user override), the same user
+# a project-local `playwright install` runs as at runtime.
+echo "case: the default dev user can write the Playwright browser cache in cenci-sandbox:latest"
+if "${RUNTIME}" run --rm --entrypoint /bin/bash cenci-sandbox:latest -c \
+    'test -w /ms-playwright && mkdir -p /ms-playwright/chromium-probe && rmdir /ms-playwright/chromium-probe'; then
+    pass
+else
+    fail "/ms-playwright is not writable by dev — a project-local 'playwright install' cannot add the Chromium build a differently-pinned @playwright/test needs"
+fi
+
 # ── ccline (Claude Code status line) renders from a settings payload ──
 # ccline reads Claude Code's statusline JSON on stdin; a static build that
 # fails here (bad extraction, wrong arch) would leave every sandbox session
