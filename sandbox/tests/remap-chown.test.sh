@@ -283,6 +283,43 @@ else
     pass
 fi
 
+# -- case 8: the Playwright browser cache follows the remap ------------------
+#
+# The cache is owned by `dev` at build time (#1096) so a project-local
+# `playwright install` can add the Chromium build its pinned @playwright/test
+# needs. That ownership is recorded by uid, not by name, so a remapped `dev`
+# loses write access to it unless the remap re-owns it too — reintroducing
+# exactly the failure the build-time chown fixes, on every host whose user is
+# not uid/gid 1000.
+
+echo "case: entrypoint.sh re-owns the Playwright browser cache through chown_home_tree"
+# shellcheck disable=SC2016 # literal call site we grep for in entrypoint.sh, not expanded here
+if grep -q 'chown_home_tree "\${HOST_UID}" "\${HOST_GID}" /ms-playwright' "${ENTRYPOINT}"; then
+    pass
+else
+    fail "entrypoint.sh does not re-own /ms-playwright during the remap — a non-1000 host user cannot write the browser cache"
+fi
+
+echo "case: the /ms-playwright re-own is guarded on the directory existing"
+if grep -q '\[\[ -d /ms-playwright \]\]' "${ENTRYPOINT}"; then
+    pass
+else
+    fail "entrypoint.sh does not guard the /ms-playwright re-own on the directory existing — per-repo images built without the playwright fragment have no such path"
+fi
+
+echo "case: a failed /ms-playwright re-own warns instead of killing the container"
+# shellcheck disable=SC2016 # literal call site we grep for in entrypoint.sh, not expanded here
+MSPW_LINE="$(grep -n -A2 -F 'chown_home_tree "${HOST_UID}" "${HOST_GID}" /ms-playwright' "${ENTRYPOINT}" || true)"
+if [[ -z "${MSPW_LINE}" ]]; then
+    fail "could not locate the /ms-playwright re-own in entrypoint.sh"
+elif [[ "${MSPW_LINE}" == *"exit 1"* ]]; then
+    fail "a failed /ms-playwright re-own exits the container; a stale browser cache degrades verify-ui, it does not make the sandbox unusable"
+elif [[ "${MSPW_LINE}" == *"warning:"* ]]; then
+    pass
+else
+    fail "a failed /ms-playwright re-own is silent — it must warn so a broken browser cache is diagnosable"
+fi
+
 echo "case: the remap failure message does not blame the home volume's age"
 REMAP_FAIL_LINE="$(grep -F 'remap: chown /home/dev failed' "${ENTRYPOINT}" || true)"
 if [[ -z "${REMAP_FAIL_LINE}" ]]; then

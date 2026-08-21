@@ -136,6 +136,20 @@ if [[ "$(id -u)" -eq 0 ]]; then
             find /workspace -mindepth 1 -exec chown -h "${HOST_UID}:${HOST_GID}" {} + \
                 || echo "warning: failed to chown /workspace to ${HOST_UID}:${HOST_GID} — files written into this mount may be owned by the wrong user on the host; see the chown error above for the path that refused" >&2
         fi
+        # The Playwright browser cache is owned by `dev` at build time (#1096)
+        # so a project-local `playwright install` can add the Chromium build
+        # its pinned @playwright/test needs, instead of failing against a
+        # root-owned path. That ownership is recorded by uid, so the remap has
+        # to follow it — otherwise every host whose user is not uid/gid 1000
+        # gets the root-owned behavior back. Guarded on the directory existing:
+        # per-repo images built without the `playwright` fragment have no such
+        # path. Non-fatal, unlike the home volume above — a browser cache the
+        # workload cannot extend degrades verify-ui, it does not make the
+        # sandbox unusable, and no other subsystem depends on it.
+        if [[ -d /ms-playwright ]]; then
+            chown_home_tree "${HOST_UID}" "${HOST_GID}" /ms-playwright \
+                || echo "warning: failed to chown /ms-playwright to ${HOST_UID}:${HOST_GID} — a project-local 'playwright install' may be unable to add the Chromium build its pinned @playwright/test needs; see the chown error above for the path that refused" >&2
+        fi
     elif [[ "${HOST_UID:-}" == "0" || "${HOST_GID:-}" == "0" ]]; then
         echo "warning: HOST_UID/HOST_GID of 0 requested — ignoring remap to avoid running the workload as root" >&2
     fi
