@@ -15,7 +15,7 @@ grep -q '.cenci/checkpoints' "$runtime" || fail "checkpoint contract"
 grep -q 'Arm a native Codex goal only after' "$runtime" || fail "goal arm contract"
 grep -q 'Clear it before human input' "$runtime" || fail "goal clear contract"
 grep -q 'built-in' "$runtime" && grep -q 'same bounded role prompt' "$runtime" || fail "agent fallback contract"
-count="$(find "${ROOT}/templates/codex/agents" -name '*.toml' | wc -l)"
+count="$(find "${ROOT}/templates/codex/agent-roles" -name '*.toml' | wc -l)"
 test "$count" -ge 5 || fail "Codex agent templates"
 echo "workflows.test.sh: failures=${failures}"
 [[ "$failures" -eq 0 ]]

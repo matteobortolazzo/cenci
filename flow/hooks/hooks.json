@@ -74,6 +74,11 @@
           },
           {
             "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/check-agent-role-drift.sh",
+            "timeout": 5000
+          },
+          {
+            "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/maintenance-reminder.sh",
             "timeout": 5000
           }

@@ -892,7 +892,7 @@ Run `gh auth status` and check it returns authenticated. If not, instruct the us
 After gathering answers:
 
 0. **Generate Codex agent adapters**: copy the reviewed TOML role templates from
-   `templates/codex/agents/` into `.codex/agents/`. Preserve unknown user-authored agent
+   `templates/codex/agent-roles/` into `.codex/agents/`. Preserve unknown user-authored agent
    files. Planning, implementation, and critical review use GPT-5.6/high; gathering and
    read-heavy analysis use GPT-5.6-terra/medium. Native procedures must fall back to built-in
    workers with the same role prompt when an adapter is unavailable.

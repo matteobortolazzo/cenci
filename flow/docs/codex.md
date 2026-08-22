@@ -44,6 +44,26 @@ a skill change must reconcile, and [`adapter-contract.md`](adapter-contract.md) 
 narrower eight-property behavioral-parity contract the implement pipeline's Claude Code
 and Codex adapters both have to satisfy.
 
+## Agent role templates
+
+Role TOMLs live at `templates/codex/agent-roles/`, not `templates/codex/agents/`
+(#1040). An unscoped directory literally named `agents` sitting inside this Codex
+plugin's own root (`flow/`) is suspected of being auto-discovered by Codex's plugin
+loader as a second source of the same role names, which would explain the
+"duplicate agent role name ... declared in the same config layer" warning users saw
+alongside "must define a description" on every startup — the flow plugin's own
+source is the one place that carries both the installed copies (`.codex/agents/`)
+and the template source side by side. This couldn't be confirmed against a live
+Codex binary; the rename removes the collision regardless of the exact mechanism.
+
+`install-agents.sh` never overwrites an existing `.codex/agents/*.toml` (they're
+user-editable), so a repo configured before a template fix lands stays on the
+broken shape indefinitely. `hooks/scripts/check-agent-role-drift.sh` is a
+SessionStart advisory (mirroring `check-config-staleness.sh`) that flags this: it
+runs `codex/validate-agent-roles.sh --plain` against the installed
+`.codex/agents/`, and surfaces a report-only nudge when validation fails. It never
+rewrites files. The same validator backs `/cenci:maintain`'s `agent-roles` check.
+
 ## Attention behavior
 
 Cenci `need-input` renders a red/dim foreground `!`. A red tmux background without `!`
