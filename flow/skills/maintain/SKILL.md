@@ -143,7 +143,14 @@ Choosing it must end after reporting: no worktree, file mutation, ticket/label m
 small items, promote), mutating no repository files — so it creates no worktree, branch, commit, or
 PR, and does not run the `scripts/check.sh`/health-gate re-verify below. For `backlog`, follow the
 GitHub-issue apply path in `modes/backlog.md` instead of the worktree procedure here; the rest of
-this section applies to the four repo-audit modes.
+this section applies to the four repo-audit modes, and follows `base-freshness.md` for the base
+resolution, freshness probe, integration, push-policy, and gate mechanics below.
+
+**Resolve `<base>`**, before generating the run token or creating the worktree, per
+`base-freshness.md`'s `Resolve <base>` step: `git -C <repo-root> symbolic-ref --short
+refs/remotes/origin/HEAD` prints `origin/<name>` — strip the `origin/` prefix; if it errors because
+no remote HEAD is set, fall back to `main`. Carry `<base>` forward as literal text; it replaces
+every hardcoded `main` below.
 
 **Run token**: Generate a per-run token once, before creating the worktree, per AGENTS.md's rule
 against unchecked command substitution for security-critical paths:
@@ -161,7 +168,7 @@ step; never re-derive it.
 Create a dedicated worktree following the `worktrees` skill:
 
 ```bash
-git -C <repo-root> worktree add .worktrees/maintain-<run-token> -b chore/maintain-<run-token> main
+git -C <repo-root> worktree add .worktrees/maintain-<run-token> -b chore/maintain-<run-token> <base>
 ```
 
 **Hard gate**: every filesystem mutation in this phase — including `Edit` and `Write` — MUST
@@ -176,6 +183,13 @@ CWD set to the verified absolute `<worktree-path>` working directory. Regenerate
 indexes (`scripts/check.sh --write` when a Generated index drift finding was approved and
 `maintenance.generatedDocs` is not explicitly `false`).
 
+**Gate A** — with the approved edits complete, run `base-freshness.md`'s freshness probe against
+`<base>` now, before the verification below. If the probe reports the base advanced, integrate it
+via `base-freshness.md`'s Integrate the base routine (rebase when the branch is unpublished, a
+non-rewriting merge when it's already published), then rerun the complete verification before
+continuing. An unfetchable base or a genuine probe error stops the run here, fail closed, same as
+the Hard gate above.
+
 **Verify the repair before shipping it**: Run the executable/default checker only now,
 after approval and worktree creation, by invoking `scripts/check.sh` from that verified
 absolute worktree CWD. Re-run it after any repair to confirm the repair holds, then run
@@ -186,10 +200,27 @@ the health gate still reports fail (or warn) after the repair, **stop here** —
 gate above — do not commit, push, or open a PR. Report the failure to the user via
 `AskUserQuestion` instead: never open a PR carrying an unverified repair.
 
-Once both re-checks are clean, review the diff, then commit and push the branch, and open the PR:
+Once both re-checks are clean, review the diff, then commit.
+
+**Gate B** — immediately before the first push, run the freshness probe again. If the base advanced
+again, integrate it, rerun the complete verification, and probe again.
+Repeat until the probe reports fresh in the same turn as the push.
+Never push, and never open a PR, from a tree the probe has not just confirmed fresh. Once fresh,
+push the branch:
 
 ```bash
-gh pr create --title "chore: maintain — <mode> <n> applied" --body-file <pr-body-path> --head chore/maintain-<run-token> --base main
+git -C <worktree-path> push -u origin chore/maintain-<run-token>
+```
+
+per `base-freshness.md`'s push policy: a plain push only, never a history-rewriting or
+hook-skipping flag of any kind. A non-fast-forward rejection means the remote branch advanced
+further: fetch it, integrate with a non-rewriting merge, rerun the complete verification, push
+again — never force.
+
+Then open the PR:
+
+```bash
+gh pr create --title "chore: maintain — <mode> <n> applied" --body-file <pr-body-path> --head chore/maintain-<run-token> --base <base>
 ```
 
 If `gh pr create` fails because the branch already has an open PR ("a pull request for branch ...
@@ -198,8 +229,20 @@ treat that as an error. For any other failure, show the exact failing command an
 use `AskUserQuestion` to let the user resolve it before continuing (mirroring `phase-9-pr.md`'s
 canonical PR-create failure contract) — never fabricate a PR number or URL.
 
+**Gate C** — after `gh pr create` succeeds or an existing PR is recovered above, follow
+`base-freshness.md`'s Gate C mergeability query. A `CONFLICTING` result means the run is **not**
+complete: integrate the base, resolve conflicts, rerun the complete verification, push, and
+re-query, bounded to two repair attempts. If still `CONFLICTING` after two attempts, stop, retain
+the worktree and branch, report the PR URL and the conflicting state, and use `AskUserQuestion` to
+ask the user how to proceed.
+Never report the run as successfully completed on a `CONFLICTING` PR.
+An `UNKNOWN` result is re-queried up to three times and, if still unresolved, reported as
+mergeability explicitly unverified — never claimed mergeable and never claimed conflicting.
+
 ## Completion summary
 
 End with a chat-level summary the user can read without opening any file: the Phase 2/Phase 3
 finding counts, which approval option was chosen, what was applied (or "report only — nothing
-applied"), and the PR URL when Phase 6 ran.
+applied"), the PR URL when Phase 6 ran, whether the base advanced and how it was integrated at each
+gate, and the final mergeability state (`MERGEABLE`, unverified `UNKNOWN`, or a still-`CONFLICTING`
+PR reported for the user).

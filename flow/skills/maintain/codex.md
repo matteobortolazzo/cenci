@@ -84,20 +84,33 @@ branch, commit, or PR, and skips the `check.sh`/health-gate re-verify — follow
 GitHub-issue apply path in `modes/backlog.md`. Its title-carrying polish-ticket create uses
 `gh api ... --input` with a payload `jq`-composed from file-tool-authored raw title/body
 inputs, never an inline `--title` and never a hand-escaped JSON literal. The rest of this
-section applies to the four repo-audit modes.
+section applies to the four repo-audit modes, and follows `base-freshness.md` for the base
+resolution, freshness probe, integration, push-policy, and gate mechanics below.
+
+Resolve `<base>` first, before generating the run token: `git -C <repo-root> symbolic-ref
+--short refs/remotes/origin/HEAD` prints `origin/<name>` — strip the `origin/` prefix; if
+it errors because no remote HEAD is set, fall back to `main`. Carry `<base>` forward as
+literal text; the dedicated worktree branches from `<base>`, never a hardcoded `main`.
 
 Verify the normal-mode invocation includes the approved apply plan. Persist a maintain
 checkpoint, then generate and validate one run token following the shared worktree
 procedure; reject an empty, dot-only, traversal-containing, or non-portable token. Create
-the dedicated worktree from the verified repository root and record its resolved absolute
-path as `<worktree-path>`. Arm the native goal only after both the approved plan and
-worktree are established.
+the dedicated worktree from `<base>` and the verified repository root and record its
+resolved absolute path as `<worktree-path>`. Arm the native goal only after both the
+approved plan and worktree are established.
 
 Create the dedicated worktree before any repository mutation. Every edit and generated
 file must resolve beneath the absolute `<worktree-path>` and contain a `/.worktrees/`
 segment. Apply only the selected repairs. Run `check.sh --write` only when a selected
 Generated index drift repair requires it and `maintenance.generatedDocs` is not explicitly
 `false`.
+
+**Gate A** — with the approved edits complete, run `base-freshness.md`'s freshness probe
+against `<base>` now, before the verification below. If the probe reports the base
+advanced, integrate it via `base-freshness.md`'s Integrate the base routine (rebase when
+the branch is unpublished, a non-rewriting merge when it's already published), then rerun
+the complete verification before continuing. An unfetchable base or a genuine probe error
+stops the run here, fail closed, the same as any other Phase 6 failure below.
 
 Every checker invocation in this phase uses the shell tool working directory set to the verified absolute `<worktree-path>`. Run the executable/default checker only after approval:
 `bash flow/skills/maintain/scripts/check.sh`. Re-run it after any approved `--write` or
@@ -110,8 +123,38 @@ the health gate is not green, checkpoint the run, clear the goal, retain the wor
 branch, and stop without committing, pushing, or opening a PR. Report the distinct failure
 and its captured output.
 
-After both verification layers are clean, review the diff, commit, push the branch, and
-open one PR containing only the approved maintenance repairs. Recover an already-open PR
-for the branch by reading its real URL; never fabricate one. Clear the goal only after the
-PR exists. Finish with deterministic and worker finding counts, incomplete categories,
-the approval choice, applied finding IDs, verification results, and the PR URL.
+**Gate B** — immediately before the first push, run the freshness probe again. If the base
+advanced again, integrate it, rerun the complete verification, and probe again.
+Repeat until the probe reports fresh in the same turn as the push.
+Never push, and never open a PR, from a tree the probe has not just confirmed fresh. Once
+fresh, push the branch:
+
+```bash
+git -C <worktree-path> push -u origin chore/maintain-<run-token>
+```
+
+per `base-freshness.md`'s push policy: a plain push only, never a history-rewriting or
+hook-skipping flag of any kind. A non-fast-forward rejection means the remote branch
+advanced further: fetch it, integrate with a non-rewriting merge, rerun the complete
+verification, push again — never force.
+
+After both verification layers are clean and Gate B confirms freshness, review the diff,
+commit, push the branch (above), and open one PR containing only the approved maintenance
+repairs, targeting `<base>`.
+Recover an already-open PR for the branch by reading its real URL; never fabricate one.
+
+**Gate C** — after the PR exists or is recovered above, follow `base-freshness.md`'s Gate C
+mergeability query. A `CONFLICTING` result means the run is **not** complete: integrate the
+base, resolve conflicts, rerun the complete verification, push, and re-query.
+Bound the repair to two attempts.
+If still `CONFLICTING` after two attempts, checkpoint the run, clear the goal, retain the
+worktree and branch, report the PR URL and the conflicting state, and ask exactly one
+blocking question with Codex's available user-input mechanism.
+Never report the run as successfully completed on a `CONFLICTING` PR.
+An `UNKNOWN` result is re-queried up to three times and, if still unresolved, reported as
+mergeability explicitly unverified — never claimed mergeable and never claimed conflicting.
+
+Clear the goal only after the PR exists and its mergeability is confirmed not
+`CONFLICTING`. Finish with deterministic and worker finding counts, incomplete categories,
+the approval choice, applied finding IDs, verification results, the PR URL, whether the
+base advanced and how it was integrated at each gate, and the final mergeability state.

@@ -660,6 +660,7 @@ generate_workflow_deps_section() {
     procedures="$(list_join "$(
       {
         [[ -f "${d}codex.md" ]] && printf '%s\n' "codex.md"
+        find "${d}" -maxdepth 1 -name '*.md' ! -name 'SKILL.md' ! -name 'codex.md' -printf '%f\n' 2>/dev/null
         find "${d}modes" -maxdepth 1 -name '*.md' -printf 'modes/%f\n' 2>/dev/null
         find "${d}phases" -maxdepth 1 -name '*.md' -printf 'phases/%f\n' 2>/dev/null
       } | sort
