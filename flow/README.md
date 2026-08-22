@@ -183,7 +183,7 @@ companion) for every skill, including the internal ones not listed above.
 | `design` | codex.md | attachments, codex-runtime, pencil-api, project-core, shell-rules, ticket-ownership, verify-ui | — | — |
 | `frontend-classification` | — | implement, refine | — | — |
 | `implement` | codex.md, phases/phase-1-plan.md, phases/phase-2-worktree.md, phases/phase-3-test-red.md, phases/phase-4-implement-green.md, phases/phase-5-refactor.md, phases/phase-6-7-review.md, phases/phase-8-docs.md, phases/phase-9-pr.md | attachments, babysit, codex-runtime, frontend-classification, project-core, review, shell-rules, subagent-safety, testing, ticket-ownership, verify-ui | run-artifact-dir.sh | code-reviewer, context-gatherer, implementer, lessons-collector, planner, security-reviewer, silent-failure-hunter |
-| `maintain` | codex.md, modes/backlog.md, modes/clients.md, modes/docs.md, modes/rules.md, modes/structure.md | codex-runtime, project-core, shell-rules, subagent-safety, worktrees | check.sh | backlog-maintainer, docs-maintainer, portability-maintainer, rules-maintainer, structure-maintainer |
+| `maintain` | base-freshness.md, codex.md, modes/backlog.md, modes/clients.md, modes/docs.md, modes/rules.md, modes/structure.md | codex-runtime, project-core, shell-rules, subagent-safety, worktrees | check.sh | backlog-maintainer, docs-maintainer, portability-maintainer, rules-maintainer, structure-maintainer |
 | `pencil-api` | — | configure, design, implement, verify-ui | — | — |
 | `pr-comment-filter` | — | address-review, babysit | — | — |
 | `project-core` | — | — | — | — |
