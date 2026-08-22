@@ -93,6 +93,7 @@ Key Conventions"
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || { echo "check.sh: failed to resolve script directory." >&2; exit 2; }
 RUN_GATE_SH="${SELF_DIR}/../../../hooks/scripts/run-gate.sh"
 STALENESS_SH="${SELF_DIR}/../../../hooks/scripts/check-config-staleness.sh"
+AGENT_ROLE_DRIFT_SH="${SELF_DIR}/../../../hooks/scripts/check-agent-role-drift.sh"
 
 MARKER_IDS=(skills agents workflow-deps docs-nav)
 
@@ -461,6 +462,8 @@ is_relevant() {
         case "$f" in *.json) return 0 ;; esac ;;
       config-version)
         case "$f" in .cenci/config.json) return 0 ;; esac ;;
+      agent-roles)
+        case "$f" in .codex/agents/*|flow/templates/codex/agent-roles/*) return 0 ;; esac ;;
       shell-syntax)
         case "$f" in *.sh) return 0 ;; esac ;;
       stale-generated|capability-table|adapter-drift)
@@ -1008,6 +1011,47 @@ check_config_version() {
       ;;
     *)
       add_result config-version "(repo)" skip "could not determine config staleness (resolver said: ${out:-nothing})" ""
+      ;;
+  esac
+}
+
+# check_agent_roles — do this repo's installed .codex/agents/*.toml files
+# still satisfy the Codex agent-role schema? (#1040) Delegated to
+# hooks/scripts/check-agent-role-drift.sh --plain (the same script the
+# SessionStart hook runs), so this check and the session-start advisory can
+# never disagree. Drift is advisory: a warn, never a fail; every unreadable
+# input degrades to skip.
+check_agent_roles() {
+  local agents_dir="$ROOT/.codex/agents"
+  if [[ ! -d "$agents_dir" ]]; then
+    add_result agent-roles "(repo)" skip "no .codex/agents/ — repo has no installed Codex agent roles" ""
+    return
+  fi
+  if [[ ! -f "$AGENT_ROLE_DRIFT_SH" ]]; then
+    add_result agent-roles "(repo)" skip "bundled check-agent-role-drift.sh not found next to this checker" ""
+    return
+  fi
+  local out
+  out="$(cd "$ROOT" && bash "$AGENT_ROLE_DRIFT_SH" --plain 2>/dev/null)" || {
+    add_result agent-roles "(repo)" skip "agent-role-drift resolver failed" ""
+    return
+  }
+  local state rest
+  read -r state rest <<< "$out"
+  case "$state" in
+    clean)
+      add_result agent-roles "(repo)" pass "installed .codex/agents/*.toml satisfy the agent-role schema" ""
+      ;;
+    drift)
+      add_result agent-roles "(repo)" warn \
+        "installed .codex/agents/*.toml no longer satisfy the agent-role schema: ${rest}" \
+        "review a diff against flow/templates/codex/agent-roles/ and repair by hand — install-agents.sh never overwrites an existing agent file"
+      ;;
+    absent)
+      add_result agent-roles "(repo)" skip "no .codex/agents/ — repo has no installed Codex agent roles" ""
+      ;;
+    *)
+      add_result agent-roles "(repo)" skip "could not determine agent-role drift (resolver said: ${out:-nothing})" ""
       ;;
   esac
 }
@@ -1940,6 +1984,7 @@ main() {
   is_relevant topic-docs && check_topic_docs
   is_relevant invalid-json && check_invalid_json
   is_relevant config-version && check_config_version
+  is_relevant agent-roles && check_agent_roles
   is_relevant shell-syntax && check_shell_syntax
   is_relevant capability-table && check_capability_table
   is_relevant adapter-drift && check_adapter_drift

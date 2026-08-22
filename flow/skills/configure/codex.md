@@ -67,8 +67,10 @@ fallback.
 
 Install missing native agents with `PLUGIN_ROOT=<plugin-root> sh
 "${PLUGIN_ROOT}/codex/install-agents.sh" .`. Never overwrite an existing agent file;
-show a diff and ask before updating one. Validate each installed TOML by starting Codex
-with `--strict-config` in a read-only smoke check.
+show a diff and ask before updating one. Validate each installed TOML against the
+agent-role schema with `bash "${PLUGIN_ROOT}/codex/validate-agent-roles.sh"
+.codex/agents`, in addition to the existing read-only `--strict-config` Codex smoke
+check.
 
 Fleet dispatch enrollment mirrors the Claude procedure's `### Fleet Dispatch Enrollment`
 section exactly. Container guard: In-container, the section asks nothing, runs nothing, and writes nothing
