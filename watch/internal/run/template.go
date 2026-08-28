@@ -19,16 +19,6 @@ import (
 // are substituted at build time.
 type WorkflowTemplate struct {
 	Args []string `json:"args"`
-	// Host, when true, pins this workflow to the host launch regardless of
-	// the resolved sandbox default: an explicit --sandbox is then a usage
-	// error (see run.ErrHostOnlyWorkflow) rather than a silent override. It
-	// is a pointer, mirroring FileConfig.Sandbox, so "unset" is
-	// distinguishable from an explicit false and a config.json can opt back
-	// into sandbox dispatch. design is the only built-in host-only workflow
-	// today (the Pencil desktop app it drives is never reachable inside the
-	// sandbox); if a second host-only workflow is added, the host-only error
-	// message must become reason-carrying instead of Pencil-specific.
-	Host *bool `json:"host"`
 }
 
 // AgentConfig describes how to launch one agent CLI.
@@ -42,7 +32,7 @@ type AgentConfig struct {
 	// otherwise appended as "--model <model>". A specific model value is never
 	// hardcoded in the built-ins — it is purely a config/flag concern.
 	Model string `json:"model"`
-	// Workflows maps a workflow name (refine/design/implement/...) to its template.
+	// Workflows maps a workflow name (refine/implement/...) to its template.
 	Workflows map[string]WorkflowTemplate `json:"workflows"`
 }
 
@@ -58,7 +48,7 @@ type FileConfig struct {
 	Agents map[string]AgentConfig `json:"agents"`
 }
 
-// builtinConfig returns the zero-config defaults: claude refine/design/implement
+// builtinConfig returns the zero-config defaults: claude refine/implement
 // calling the matching cenci skill, with `cenci open` as the sandbox command.
 // Fresh maps are constructed on each call so callers may mutate the result freely.
 func builtinConfig() FileConfig {
@@ -67,12 +57,6 @@ func builtinConfig() FileConfig {
 	}
 	codexWF := func(wf string) WorkflowTemplate {
 		return WorkflowTemplate{Args: []string{"{codex_stage}$cenci:" + wf + " {ticket}"}}
-	}
-	// hostDesignWF builds a design template pinned to the host: a fresh *bool
-	// per call so mutating one agent's Host pointer can never affect another's.
-	hostDesignWF := func(wt WorkflowTemplate) WorkflowTemplate {
-		wt.Host = hostPtr(true)
-		return wt
 	}
 	// OpenCode shares Claude's "/cenci:<workflow>" skill-invocation format
 	// (unlike Codex's "$cenci:" convention). Per ticket #488 Q&A, dispatch is
@@ -92,7 +76,6 @@ func builtinConfig() FileConfig {
 				SandboxCommand: "cenci open",
 				Workflows: map[string]WorkflowTemplate{
 					"refine":            claudeWF("refine"),
-					"design":            hostDesignWF(claudeWF("design")),
 					"implement":         claudeWF("implement"),
 					"address-review":    claudeWF("address-review"),
 					"babysit":           claudeWF("babysit"),
@@ -105,8 +88,8 @@ func builtinConfig() FileConfig {
 				SandboxCommand: "cenci open",
 				Workflows: map[string]WorkflowTemplate{
 					"configure": codexWF("configure"), "refine": codexWF("refine"),
-					"design": hostDesignWF(codexWF("design")), "implement": codexWF("implement"),
-					"review": codexWF("review"), "address-review": codexWF("address-review"),
+					"implement": codexWF("implement"),
+					"review":    codexWF("review"), "address-review": codexWF("address-review"),
 					"refactor": codexWF("refactor"), "sync": codexWF("sync"),
 					"maintain": codexWF("maintain"), "babysit": codexWF("babysit"), "babysit-attention": codexWF("babysit-attention"), "ci-repair": codexWF("ci-repair"),
 				},
@@ -115,7 +98,6 @@ func builtinConfig() FileConfig {
 				Command: "opencode",
 				Workflows: map[string]WorkflowTemplate{
 					"refine":            openCodeWF("refine"),
-					"design":            hostDesignWF(openCodeWF("design")),
 					"implement":         openCodeWF("implement"),
 					"address-review":    openCodeWF("address-review"),
 					"babysit":           openCodeWF("babysit"),
@@ -202,40 +184,21 @@ func merge(base, over FileConfig) FileConfig {
 			ba.Workflows = map[string]WorkflowTemplate{}
 		}
 		// Merge per field, not whole-struct replacement: a file entry that
-		// overrides only Args (a common partial override, e.g. tweaking
-		// design's skill invocation) must not silently drop the built-in
-		// Host pin. Args overrides when non-empty; Host overrides when
-		// non-nil. Deliberate behavior change: an explicit "args": [] in
-		// config.json is now treated as unset (it no longer clears the
-		// built-in args) since empty args produced an unusable launch
-		// anyway.
+		// overrides only Args (a common partial override) must not silently
+		// drop other built-in fields. Args overrides when non-empty.
+		// Deliberate behavior change: an explicit "args": [] in config.json
+		// is now treated as unset (it no longer clears the built-in args)
+		// since empty args produced an unusable launch anyway.
 		for wf, wt := range oa.Workflows {
 			existing := ba.Workflows[wf]
 			if len(wt.Args) > 0 {
 				existing.Args = wt.Args
-			}
-			if wt.Host != nil {
-				existing.Host = wt.Host
 			}
 			ba.Workflows[wf] = existing
 		}
 		base.Agents[name] = ba
 	}
 	return base
-}
-
-// hostOnly reports whether workflow is pinned to the host launch for agent,
-// per the resolved (built-in + config.json) WorkflowTemplate.Host field.
-func (fc FileConfig) hostOnly(agent, workflow string) bool {
-	ac, ok := fc.Agents[agent]
-	if !ok {
-		return false
-	}
-	wt, ok := ac.Workflows[workflow]
-	if !ok {
-		return false
-	}
-	return wt.Host != nil && *wt.Host
 }
 
 // BuildCommand resolves the full argv for (agent, workflow). When sandbox is
@@ -293,15 +256,9 @@ func (fc FileConfig) BuildCommand(agent, workflow, ticket, model string, sandbox
 	return argv, nil
 }
 
-// hostPtr returns a fresh *bool holding v, so each call site (e.g. each
-// agent's design template) owns an independent pointer.
-func hostPtr(v bool) *bool {
-	return &v
-}
-
 func codexPlanningWorkflow(workflow string) bool {
 	switch workflow {
-	case "configure", "refine", "implement", "address-review", "refactor", "maintain", "design":
+	case "configure", "refine", "implement", "address-review", "refactor", "maintain":
 		return true
 	}
 	return false

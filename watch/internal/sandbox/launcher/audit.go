@@ -100,7 +100,6 @@ const (
 	MountKindCodexCreds     = "codex-creds"
 	MountKindOpencodeCreds  = "opencode-creds"
 	MountKindGhCreds        = "gh-creds"
-	MountKindPencilCreds    = "pencil-creds"
 	MountKindAzureCreds     = "azure-creds"
 
 	// MountKindUnknown is an explicit sentinel for a mount destination that
@@ -117,7 +116,6 @@ const (
 	CredentialTypeCodex    = "codex"
 	CredentialTypeOpencode = "opencode"
 	CredentialTypeGh       = "gh"
-	CredentialTypePencil   = "pencil"
 	CredentialTypeAzure    = "azure"
 )
 
@@ -236,7 +234,7 @@ type ForwardedEnvVar struct {
 // CredentialProbeError), so an unreadable/non-regular-file state is never
 // silently collapsed into a reassuring "absent". Applicable reports whether
 // Type's credential ever applies to the audited agent at all (mirroring the
-// per-agent mount-plan rules in launch.go: claude/gh/pencil apply to every
+// per-agent mount-plan rules in launch.go: claude/gh apply to every
 // agent, codex only to "codex", opencode only to "opencode"). Staged
 // reports whether the credential is ACTUALLY staged for this specific
 // launch — read directly from the already-computed mount set Audit builds
@@ -540,8 +538,6 @@ func mountKindForDestination(destination string) string {
 		return MountKindOpencodeCreds
 	case "/tmp/host-gh-config/hosts.yml":
 		return MountKindGhCreds
-	case "/tmp/host-pencil-creds/session-cli.json":
-		return MountKindPencilCreds
 	default:
 		return MountKindUnknown
 	}
@@ -603,7 +599,6 @@ var forwardedEnvVarNames = map[string]bool{
 	"CONTEXT7_API_KEY":  true,
 	"ANTHROPIC_API_KEY": true,
 	"OPENAI_API_KEY":    true,
-	"PEN_CLI_KEY":       true,
 }
 
 // isSecretEnvName reports whether name is one of the provider-API-key names
@@ -654,9 +649,6 @@ var credentialSourceSpecs = []struct {
 	{CredentialTypeGh, MountKindGhCreds, func(home string) string {
 		return filepath.Join(home, ".config", "gh", "hosts.yml")
 	}},
-	{CredentialTypePencil, MountKindPencilCreds, func(home string) string {
-		return filepath.Join(home, ".pencil", "session-cli.json")
-	}},
 	// Azure stages a set of files (azureCredFiles), but azureProfile.json is
 	// the one that decides whether there is a login at all — the other two are
 	// the token cache and service-principal secrets belonging to the identity
@@ -668,8 +660,8 @@ var credentialSourceSpecs = []struct {
 }
 
 // credentialAppliesToAgent reports whether typ's credential is ever staged
-// for agent at all, mirroring the mount plan's per-agent rules: claude/gh/
-// pencil creds are staged for every agent by assembleVolumeMounts; codex
+// for agent at all, mirroring the mount plan's per-agent rules: claude/gh
+// creds are staged for every agent by assembleVolumeMounts; codex
 // creds only for agent=="codex" and opencode creds only for
 // agent=="opencode" (both gated in validateCredentials).
 func credentialAppliesToAgent(typ, agent string) bool {

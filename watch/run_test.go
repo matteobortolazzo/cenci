@@ -86,55 +86,9 @@ func TestRunDryRunSandboxUsesSandboxCommand(t *testing.T) {
 	}
 }
 
-// --- Host-only design guard (#647) ---
-
-// TestRunDesignSandboxDryRunExitsTwoWithHostOnlyHint pins the binary-level
-// contract: an explicit --sandbox on the host-only design workflow is a
-// usage error, exit 2, with the exact one-line stderr hint from ticket
-// #647's Q1 — the guard fires before dry-run resolution (Q2), so this is the
-// entire process output.
-func TestRunDesignSandboxDryRunExitsTwoWithHostOnlyHint(t *testing.T) {
-	noCfg := filepath.Join(t.TempDir(), "none.json")
-	cmd := exec.Command(binaryPath, "run", "design", "42",
-		"--session", "demo", "--config", noCfg, "--sandbox", "--dry-run")
-	output, err := cmd.CombinedOutput()
-
-	exitErr, ok := err.(*exec.ExitError)
-	if !ok {
-		t.Fatalf("expected *exec.ExitError, got %T: %v\n%s", err, err, output)
-	}
-	if exitErr.ExitCode() != 2 {
-		t.Errorf("exit code = %d, want 2\n%s", exitErr.ExitCode(), output)
-	}
-	want := "cenci run: design runs on the host only — the Pencil desktop app is unreachable inside the sandbox; drop --sandbox (or pass --no-sandbox)\n"
-	if string(output) != want {
-		t.Errorf("output = %q, want exactly %q", output, want)
-	}
-}
-
-// TestRunDesignDryRunNoSandboxFlagResolvesHost covers the default path (no
-// sandbox flags, default config): design resolves the host command and
-// exits 0 with no `cenci open` in the printed resolution.
-func TestRunDesignDryRunNoSandboxFlagResolvesHost(t *testing.T) {
-	noCfg := filepath.Join(t.TempDir(), "none.json")
-	cmd := exec.Command(binaryPath, "run", "design", "42",
-		"--session", "demo", "--config", noCfg, "--dry-run")
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("design dry-run failed: %v\n%s", err, output)
-	}
-	s := string(output)
-	if strings.Contains(s, "cenci open") {
-		t.Errorf("design must resolve host, not sandbox, got:\n%s", s)
-	}
-	if !strings.Contains(s, "42-design") || !strings.Contains(s, "/cenci:design 42") {
-		t.Errorf("expected the host design command, got:\n%s", s)
-	}
-}
-
-// TestRunImplementSandboxDryRunStillResolvesSandbox guards the negative
-// case: implement is not host-only, so `--sandbox` must still resolve
-// `cenci open` exactly as before the host-only guard was introduced.
+// TestRunImplementSandboxDryRunStillResolvesSandbox pins the ordinary
+// sandbox-resolution path: `--sandbox` on a normal workflow resolves `cenci
+// open`.
 func TestRunImplementSandboxDryRunStillResolvesSandbox(t *testing.T) {
 	noCfg := filepath.Join(t.TempDir(), "none.json")
 	cmd := exec.Command(binaryPath, "run", "implement", "42",

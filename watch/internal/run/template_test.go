@@ -21,7 +21,7 @@ func equalArgs(a, b []string) bool {
 
 func TestBuiltinClaudeTemplatesResolve(t *testing.T) {
 	cfg := builtinConfig()
-	for _, wf := range []string{"refine", "design", "implement"} {
+	for _, wf := range []string{"refine", "implement"} {
 		argv, err := cfg.BuildCommand("claude", wf, "40", "", false)
 		if err != nil {
 			t.Fatalf("BuildCommand(claude, %s): %v", wf, err)
@@ -104,7 +104,7 @@ func TestUnknownAgentAndWorkflowError(t *testing.T) {
 
 func TestCodexNativeWorkflowTemplates(t *testing.T) {
 	cfg := builtinConfig()
-	for _, workflow := range []string{"configure", "refine", "design", "implement", "review", "address-review", "refactor", "sync", "maintain"} {
+	for _, workflow := range []string{"configure", "refine", "implement", "review", "address-review", "refactor", "sync", "maintain"} {
 		argv, err := cfg.BuildCommand("codex", workflow, "42", "", false)
 		if err != nil {
 			t.Fatalf("%s: %v", workflow, err)
@@ -151,7 +151,7 @@ func TestLoadMissingFileReturnsBuiltins(t *testing.T) {
 
 func TestBuiltinOpenCodeTemplatesResolve(t *testing.T) {
 	cfg := builtinConfig()
-	for _, wf := range []string{"refine", "design", "implement", "address-review", "babysit", "babysit-attention", "ci-repair"} {
+	for _, wf := range []string{"refine", "implement", "address-review", "babysit", "babysit-attention", "ci-repair"} {
 		argv, err := cfg.BuildCommand("opencode", wf, "40", "", false)
 		if err != nil {
 			t.Fatalf("BuildCommand(opencode, %s): %v", wf, err)
@@ -249,106 +249,6 @@ func TestOpenCodeSandboxWiringOutOfScope(t *testing.T) {
 	}
 	if argv[0] != "opencode" {
 		t.Errorf("opencode sandbox=true argv[0] = %q, want %q (no sandboxCommand configured yet, #490)", argv[0], "opencode")
-	}
-}
-
-// --- Host-only design guard (#647) ---
-//
-// design is the only built-in workflow that is host-only: the Pencil desktop
-// app it drives is never reachable inside the cenci sandbox. Host is a
-// pointer (mirroring FileConfig.Sandbox) so "unset" is distinguishable from
-// an explicit false, letting a user config.json opt back into sandbox
-// dispatch for design deliberately.
-
-func TestBuiltinDesignIsHostOnlyOnAllAgents(t *testing.T) {
-	cfg := builtinConfig()
-	for _, agent := range []string{"claude", "codex", "opencode"} {
-		wt, ok := cfg.Agents[agent].Workflows["design"]
-		if !ok {
-			t.Fatalf("agent %s: no design workflow template", agent)
-		}
-		if wt.Host == nil || !*wt.Host {
-			t.Errorf("agent %s design: Host = %v, want true", agent, wt.Host)
-		}
-	}
-}
-
-func TestBuiltinNonDesignWorkflowsHaveNilHost(t *testing.T) {
-	cfg := builtinConfig()
-	for _, agent := range []string{"claude", "codex", "opencode"} {
-		for wf, wt := range cfg.Agents[agent].Workflows {
-			if wf == "design" {
-				continue
-			}
-			if wt.Host != nil {
-				t.Errorf("agent %s workflow %s: Host = %v, want nil (unset)", agent, wf, *wt.Host)
-			}
-		}
-	}
-}
-
-// TestBuiltinDesignHostPointersAreIndependentPerAgent guards a shared-pointer
-// aliasing bug: each agent's design template must own a fresh *bool so
-// mutating one agent's Host cannot affect another's.
-func TestBuiltinDesignHostPointersAreIndependentPerAgent(t *testing.T) {
-	cfg := builtinConfig()
-	claudeWT := cfg.Agents["claude"].Workflows["design"]
-	codexWT := cfg.Agents["codex"].Workflows["design"]
-	if claudeWT.Host == nil || codexWT.Host == nil {
-		t.Fatalf("expected both claude and codex design templates to carry a Host pointer")
-	}
-	if claudeWT.Host == codexWT.Host {
-		t.Fatalf("claude and codex design templates share the same *bool (Host pointer aliasing)")
-	}
-	*claudeWT.Host = false
-	if !*codexWT.Host {
-		t.Errorf("mutating claude's Host affected codex's: %v", *codexWT.Host)
-	}
-}
-
-// TestMergePreservesHostUnderArgsOnlyPartialOverride pins the fix to merge():
-// a user config.json overriding only design's args (without touching host)
-// must not silently drop the built-in host:true and re-enable sandbox
-// launches for design.
-func TestMergePreservesHostUnderArgsOnlyPartialOverride(t *testing.T) {
-	base := builtinConfig()
-	over := FileConfig{
-		Agents: map[string]AgentConfig{
-			"claude": {
-				Workflows: map[string]WorkflowTemplate{
-					"design": {Args: []string{"--", "/cenci:design {ticket} extra"}},
-				},
-			},
-		},
-	}
-	merged := merge(base, over)
-	wt := merged.Agents["claude"].Workflows["design"]
-	if wt.Host == nil || !*wt.Host {
-		t.Errorf("Host = %v, want true (preserved from built-in under an args-only override)", wt.Host)
-	}
-	if !equalArgs(wt.Args, []string{"--", "/cenci:design {ticket} extra"}) {
-		t.Errorf("Args = %v, want the overridden args", wt.Args)
-	}
-}
-
-// TestMergeExplicitHostFalseWins pins the pointer's opt-out: an explicit
-// "host": false in config.json must win over the built-in host:true.
-func TestMergeExplicitHostFalseWins(t *testing.T) {
-	base := builtinConfig()
-	f := false
-	over := FileConfig{
-		Agents: map[string]AgentConfig{
-			"claude": {
-				Workflows: map[string]WorkflowTemplate{
-					"design": {Host: &f},
-				},
-			},
-		},
-	}
-	merged := merge(base, over)
-	wt := merged.Agents["claude"].Workflows["design"]
-	if wt.Host == nil || *wt.Host {
-		t.Errorf("Host = %v, want explicit false to win over the built-in true", wt.Host)
 	}
 }
 

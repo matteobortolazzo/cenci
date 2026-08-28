@@ -3,7 +3,6 @@ package run
 import (
 	"bytes"
 	"errors"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -526,16 +525,16 @@ func TestWindowName(t *testing.T) {
 	if got := windowName("255", "implement", ""); got != "255-implement" {
 		t.Errorf("numeric implement = %q, want 255-implement", got)
 	}
-	if got := windowName("412", "design", ""); got != "412-design" {
-		t.Errorf("numeric design = %q, want 412-design", got)
+	if got := windowName("412", "babysit", ""); got != "412-babysit" {
+		t.Errorf("numeric babysit = %q, want 412-babysit", got)
 	}
 	// Trailing context after a numeric id is ignored: the name is skill-only.
 	if got := windowName("42 focus on the API layer", "refine", ""); got != "42-refine" {
 		t.Errorf("id+context = %q, want 42-refine", got)
 	}
 	// A leading '#' on the id is stripped.
-	if got := windowName("#1 focus on API", "design", ""); got != "1-design" {
-		t.Errorf("hash id = %q, want 1-design", got)
+	if got := windowName("#1 focus on API", "babysit", ""); got != "1-babysit" {
+		t.Errorf("hash id = %q, want 1-babysit", got)
 	}
 	// --slug is ignored for a numeric ticket — the name is always the skill.
 	if got := windowName("42 raw context", "implement", "chosen"); got != "42-implement" {
@@ -562,142 +561,10 @@ func TestWindowName(t *testing.T) {
 	}
 }
 
-// --- Host-only design guard (#647) ---
-//
-// design is host-only: an explicit --sandbox must be rejected as a usage
-// error (never a silent downgrade, per docs/cli-conventions.md:26-28), while
-// the resolution otherwise forces host regardless of the built-in default or
-// a config-level "sandbox": true.
-
-// TestRunDesignSandboxFlagReturnsHostOnlySentinel is the direct package-
-// boundary unit test mandated by watch/docs/error-handling.md (#412): a
-// refactor could break errors.Is() while message-based integration
-// assertions still pass, so the sentinel itself must be asserted directly.
-func TestRunDesignSandboxFlagReturnsHostOnlySentinel(t *testing.T) {
-	m := &mockCtrl{session: "work"}
-	opts := noConfigOpts(t)
-	opts.Workflow, opts.Ticket = "design", "40"
-	opts.SandboxSet, opts.Sandbox = true, true
-
-	err := Run(opts, m)
-	if err == nil {
-		t.Fatal("expected an error for --sandbox on the host-only design workflow")
-	}
-	if !errors.Is(err, ErrHostOnlyWorkflow) {
-		t.Errorf("error = %v, want errors.Is match against ErrHostOnlyWorkflow", err)
-	}
-	if len(m.windows) != 0 {
-		t.Errorf("must not spawn a window, got %+v", m.windows)
-	}
-}
-
-// TestRunDesignDefaultConfigResolvesHost covers the default config, no
-// sandbox flags case: design must resolve the host command, never `cenci
-// open`.
-func TestRunDesignDefaultConfigResolvesHost(t *testing.T) {
-	m := &mockCtrl{session: "work"}
-	opts := noConfigOpts(t)
-	opts.Workflow, opts.Ticket = "design", "40"
-
-	if err := Run(opts, m); err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if len(m.windows) != 1 {
-		t.Fatalf("expected 1 NewWindow, got %d", len(m.windows))
-	}
-	cmd := m.windows[0].cmd
-	if strings.Contains(cmd, "cenci open") {
-		t.Errorf("design must resolve host, not sandbox: %q", cmd)
-	}
-	if !strings.Contains(cmd, "claude") || !strings.Contains(cmd, "/cenci:design 40") {
-		t.Errorf("command = %q, want the host claude design launcher", cmd)
-	}
-}
-
-// TestRunDesignConfigSandboxTrueStillResolvesHost covers a top-level
-// "sandbox": true config: the host-only pin must still win.
-func TestRunDesignConfigSandboxTrueStillResolvesHost(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "config.json")
-	if err := os.WriteFile(path, []byte(`{"sandbox": true}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	m := &mockCtrl{session: "work"}
-	opts := Opts{ConfigPath: path, EnsureDaemon: func() {}}
-	opts.Workflow, opts.Ticket = "design", "40"
-
-	if err := Run(opts, m); err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if len(m.windows) != 1 {
-		t.Fatalf("expected 1 NewWindow, got %d", len(m.windows))
-	}
-	if strings.Contains(m.windows[0].cmd, "cenci open") {
-		t.Errorf("design with config sandbox:true must still resolve host: %q", m.windows[0].cmd)
-	}
-}
-
-// TestRunDesignHostFalseOptBackInRestoresSandbox covers the pointer's
-// documented opt-out: an explicit "host": false on design restores sandbox
-// resolution.
-func TestRunDesignHostFalseOptBackInRestoresSandbox(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "config.json")
-	body := `{
-	  "agents": {
-	    "claude": {
-	      "workflows": { "design": { "host": false } }
-	    }
-	  }
-	}`
-	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	m := &mockCtrl{session: "work"}
-	opts := Opts{ConfigPath: path, EnsureDaemon: func() {}}
-	opts.Workflow, opts.Ticket = "design", "40"
-
-	if err := Run(opts, m); err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if len(m.windows) != 1 {
-		t.Fatalf("expected 1 NewWindow, got %d", len(m.windows))
-	}
-	if !strings.Contains(m.windows[0].cmd, "cenci open") {
-		t.Errorf("explicit host:false must restore the sandbox default: %q", m.windows[0].cmd)
-	}
-}
-
-// TestRunDesignSandboxDryRunErrorsWithNoOutput pins Q2: the host-only guard
-// fires before BuildCommand and before the dry-run print, so `--sandbox
-// --dry-run` errors with an empty Out buffer — never a printed resolution
-// followed by an error.
-func TestRunDesignSandboxDryRunErrorsWithNoOutput(t *testing.T) {
-	m := &mockCtrl{session: "work"}
-	var buf bytes.Buffer
-	opts := noConfigOpts(t)
-	opts.Workflow, opts.Ticket = "design", "40"
-	opts.SandboxSet, opts.Sandbox = true, true
-	opts.DryRun = true
-	opts.Out = &buf
-
-	err := Run(opts, m)
-	if err == nil {
-		t.Fatal("expected an error for --sandbox --dry-run on design")
-	}
-	if !errors.Is(err, ErrHostOnlyWorkflow) {
-		t.Errorf("error = %v, want errors.Is match against ErrHostOnlyWorkflow", err)
-	}
-	if buf.Len() != 0 {
-		t.Errorf("Out buffer must stay empty when the guard fires, got %q", buf.String())
-	}
-	if len(m.windows) != 0 {
-		t.Errorf("must not spawn, got %+v", m.windows)
-	}
-}
-
-// TestRunImplementExplicitSandboxUnaffectedByHostOnlyGuard guards the
-// negative case: implement is not host-only, so an explicit --sandbox must
-// keep resolving the sandbox launcher exactly as before.
-func TestRunImplementExplicitSandboxUnaffectedByHostOnlyGuard(t *testing.T) {
+// TestRunImplementExplicitSandboxFlagResolvesSandbox pins that an explicit
+// --sandbox flag (SandboxSet && Sandbox) resolves the sandbox launcher, the
+// same as the default (#98).
+func TestRunImplementExplicitSandboxFlagResolvesSandbox(t *testing.T) {
 	m := &mockCtrl{session: "work"}
 	opts := noConfigOpts(t)
 	opts.Workflow, opts.Ticket = "implement", "40"
