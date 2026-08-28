@@ -311,6 +311,51 @@ If no frontend framework is detected, skip this section entirely (do not set `pe
    `cenci run design {number} --no-sandbox` is how the generated board dispatches
    it (see the `D` action below).
 
+### UI Conventions
+
+**Condition**: Only ask question 5c when a frontend framework is detected in the stack from
+question 1. Frontend frameworks include: Angular, React, Next.js, Vue, Svelte, or any UI
+framework.
+
+If no frontend framework is detected, skip this section entirely.
+
+5c. **UI conventions**: The answers here become guidance prose in the generated `AGENTS.md`
+   `## UI Conventions` section — they are **not** written to `.cenci/config.json`. There is no
+   config key for this.
+
+   Ask using AskUserQuestion:
+
+   "Your project includes `<detected-frontend-framework>`. Where does its shared component
+    library live? (Path relative to the repo root — leave blank if there isn't one yet.)"
+
+   Options: offer any directory the repository scan suggests — for example a `components/`,
+   `ui/`, or `design-system/` directory, or a workspace library under `libs/` or `packages/` —
+   plus "None yet".
+
+   Then ask:
+
+   "Is there a component catalog app — Storybook, an Angular component workshop, or a similar
+    browsable gallery — and how is it run?"
+
+   Options: offer the detected candidates — a `storybook` or `ng serve <app>` script in
+   `package.json`, an `.storybook/` directory, or a dedicated showcase project in the
+   `projects` array — plus "None".
+
+   **Writing the answers**: fill the `## UI Conventions` block in the generated `AGENTS.md`
+   (from `templates/agents-md-project.md` for a monorepo project, or
+   `templates/agents-md-root.md` / `templates/agents-md-root-monorepo.md` for the root):
+   - `<path-to-component-library>` becomes the library path; drop the bullet when "None yet".
+   - `<storybook-like-app-path>` and `<catalog-command>` become the catalog's path and its run
+     command; drop the bullet when "None".
+   - `<project-specific UI rules populated during configure>` stays as a placeholder for the
+     user to fill in later, or is removed when no conventions are known yet.
+
+   Keep the reuse-before-authoring bullet verbatim in every case — it is the rule the planner
+   and implementer look for, and it holds whether or not a library exists yet.
+
+   In a monorepo, ask per frontend project when the projects have different libraries; ask
+   once and write the shared answer into the root `AGENTS.md` when they share one.
+
 ### Playwright CLI Setup
 
 **Condition**: Only ask this when a frontend framework is detected in the stack from question 1 AND `detection.playwrightTest` is `true` (manual fallback: `@playwright/test` found in root `devDependencies`).
