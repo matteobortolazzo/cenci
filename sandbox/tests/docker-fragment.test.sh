@@ -7,7 +7,7 @@
 # Docker — so it must not live in the stack-agnostic base image every derived
 # image inherits ("Keep the image minimal", sandbox/AGENTS.md). It belongs in
 # fragments/docker.dockerfile, config-selected by /cenci:configure exactly
-# like pencil, plus a verbatim block in the monolith so `cenci open --dind`
+# like azure, plus a verbatim block in the monolith so `cenci open --dind`
 # keeps working in a git repo that has no .cenci/Dockerfile.
 #
 # The byte-identity of the fragment against the monolith block is owned by

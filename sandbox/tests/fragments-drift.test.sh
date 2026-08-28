@@ -34,7 +34,6 @@ DOCKERFILE="${SANDBOX_DIR}/Dockerfile"
 MONOLITH_LESS=(
     python.dockerfile
     rust.dockerfile
-    pencil.dockerfile
     azure.dockerfile
 )
 
