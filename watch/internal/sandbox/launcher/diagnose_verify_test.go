@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/matteobortolazzo/cenci/watch/internal/errcode"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/errcode"
 )
 
 // -- Engine.Verify -------------------------------------------------------

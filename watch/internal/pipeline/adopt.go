@@ -27,7 +27,7 @@ import (
 	"fmt"
 	"strconv"
 
-	"github.com/matteobortolazzo/cenci/watch/internal/planfile"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/planfile"
 )
 
 // adoptPlanFileStage implements the ticket #688 plan's "Detection semantics

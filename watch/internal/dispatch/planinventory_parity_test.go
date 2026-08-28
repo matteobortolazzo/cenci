@@ -30,7 +30,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/matteobortolazzo/cenci/watch/internal/pipeline"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/pipeline"
 )
 
 // validParityPlanBody supplies the three sections plan-check requires

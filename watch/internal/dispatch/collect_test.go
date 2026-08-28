@@ -12,7 +12,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/matteobortolazzo/cenci/watch/internal/planfile"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/planfile"
 )
 
 func installFakeGH(t *testing.T, script string) {

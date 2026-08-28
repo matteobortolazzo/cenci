@@ -9,8 +9,8 @@ import (
 	"strings"
 	"text/tabwriter"
 
-	"github.com/matteobortolazzo/cenci/watch/internal/sandbox"
-	"github.com/matteobortolazzo/cenci/watch/internal/sandbox/launcher"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/sandbox"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/sandbox/launcher"
 )
 
 // This file implements the `cenci sandbox <verb>` group (build, build-base,

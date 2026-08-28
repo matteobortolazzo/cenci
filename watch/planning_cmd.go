@@ -7,7 +7,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/matteobortolazzo/cenci/watch/internal/dispatch"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/dispatch"
 )
 
 // runPlanning implements `cenci planning` (#1086): a new top-level noun,

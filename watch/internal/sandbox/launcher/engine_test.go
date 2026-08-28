@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/matteobortolazzo/cenci/watch/internal/exectest"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/exectest"
 )
 
 // buildEngine wires an Engine to a fake docker whose image listing is either

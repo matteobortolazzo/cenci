@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/matteobortolazzo/cenci/watch/internal/errcode"
-	"github.com/matteobortolazzo/cenci/watch/internal/ipc"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/errcode"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/ipc"
 )
 
 // Severity classifies how urgently a diagnose finding needs attention.

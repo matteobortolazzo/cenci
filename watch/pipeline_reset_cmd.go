@@ -14,7 +14,7 @@ import (
 	"io"
 	"os"
 
-	"github.com/matteobortolazzo/cenci/watch/internal/pipeline"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/pipeline"
 )
 
 const pipelineResetUsage = "cenci pipeline reset: usage: cenci pipeline reset <id> [--state-dir DIR] [--repo PATH]"

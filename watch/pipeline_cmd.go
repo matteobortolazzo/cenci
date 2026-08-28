@@ -9,7 +9,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/matteobortolazzo/cenci/watch/internal/pipeline"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/pipeline"
 )
 
 // pipelineUsage is the one-line hint printed for every malformed-CLI

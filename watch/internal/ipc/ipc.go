@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/matteobortolazzo/cenci/watch/pkg/watch"
+	"github.com/matteobortolazzo/cenci/watch/v2/pkg/watch"
 )
 
 // The read-side contract (state types and streaming client) lives in the public

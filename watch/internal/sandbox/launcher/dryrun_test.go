@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/matteobortolazzo/cenci/watch/internal/ipc"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/ipc"
 )
 
 // -- cenci open --dry-run (ticket #589) ----------------------------------

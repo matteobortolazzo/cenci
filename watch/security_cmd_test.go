@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/matteobortolazzo/cenci/watch/internal/sandbox/launcher"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/sandbox/launcher"
 )
 
 // -- cenci security explain (ticket #594) -----------------------------------

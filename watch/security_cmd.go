@@ -7,7 +7,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/matteobortolazzo/cenci/watch/internal/sandbox/launcher"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/sandbox/launcher"
 )
 
 // This file implements the `cenci security <verb>` group (ticket #594):

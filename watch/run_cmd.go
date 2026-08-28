@@ -6,8 +6,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/matteobortolazzo/cenci/watch/internal/run"
-	"github.com/matteobortolazzo/cenci/watch/internal/tmux"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/run"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/tmux"
 )
 
 func runRun(args []string) {

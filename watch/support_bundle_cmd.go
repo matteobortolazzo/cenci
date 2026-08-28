@@ -15,11 +15,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/matteobortolazzo/cenci/watch/internal/daemon"
-	"github.com/matteobortolazzo/cenci/watch/internal/ipc"
-	"github.com/matteobortolazzo/cenci/watch/internal/run"
-	"github.com/matteobortolazzo/cenci/watch/internal/sandbox"
-	"github.com/matteobortolazzo/cenci/watch/internal/sandbox/launcher"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/daemon"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/ipc"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/run"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/sandbox"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/sandbox/launcher"
 )
 
 // runSupportBundle implements `cenci support-bundle [--output|-o PATH]

@@ -33,7 +33,7 @@ plugin-local daemon, waits briefly, and retries the same event. Explicit custom 
 sockets remain under the caller's control.
 
 **Manual / Codex-only install** (alternative): install the binary yourself
-(`go install github.com/matteobortolazzo/cenci/watch@latest` or
+(`go install github.com/matteobortolazzo/cenci/watch/v2@latest` or
 `make build`) and start the daemon once (`cenci`). See the main
 [README](../../README.md#advanced--development).
 

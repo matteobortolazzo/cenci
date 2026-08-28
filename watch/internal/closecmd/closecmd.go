@@ -13,8 +13,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/matteobortolazzo/cenci/watch/internal/detect"
-	"github.com/matteobortolazzo/cenci/watch/pkg/watch"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/detect"
+	"github.com/matteobortolazzo/cenci/watch/v2/pkg/watch"
 )
 
 // Action describes what Run decided to do about one matched window.

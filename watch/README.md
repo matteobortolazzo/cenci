@@ -2100,7 +2100,7 @@ hack on cenci-watch, or run against a local plugin directory.
 ### Install the binary manually
 
 ```bash
-go install github.com/matteobortolazzo/cenci/watch@latest
+go install github.com/matteobortolazzo/cenci/watch/v2@latest
 ```
 
 Or build from source:
@@ -2455,13 +2455,13 @@ The public `pkg/watch` package lets any Go tool subscribe to that stream — for
 example to badge kanban cards or dashboards with per-window agent status.
 
 ```bash
-go get github.com/matteobortolazzo/cenci/watch
+go get github.com/matteobortolazzo/cenci/watch/v2
 ```
 
 It versions via the existing `watch/v*` submodule tags.
 
 ```go
-import "github.com/matteobortolazzo/cenci/watch/pkg/watch"
+import "github.com/matteobortolazzo/cenci/watch/v2/pkg/watch"
 
 c, err := watch.Dial(watch.DefaultSocketPath())
 // ... handle err; defer c.Close()

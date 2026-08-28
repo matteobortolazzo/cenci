@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/matteobortolazzo/cenci/watch/internal/exectest"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/exectest"
 )
 
 // This file covers the engine-level half of ticket #629's dual-runtime

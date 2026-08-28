@@ -17,7 +17,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/matteobortolazzo/cenci/watch/internal/pipeline"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/pipeline"
 )
 
 const (

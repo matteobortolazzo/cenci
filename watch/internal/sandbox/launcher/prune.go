@@ -7,7 +7,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/matteobortolazzo/cenci/watch/internal/sandbox"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/sandbox"
 )
 
 // repoImagePattern matches per-repo derived images (cenci-sandbox-<slug>:latest,

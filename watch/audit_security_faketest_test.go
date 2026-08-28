@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/matteobortolazzo/cenci/watch/internal/exectest"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/exectest"
 )
 
 // -- ticket #627: fake runtime for `cenci audit`/`cenci security explain`

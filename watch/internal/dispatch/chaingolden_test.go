@@ -28,7 +28,7 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/matteobortolazzo/cenci/watch/internal/pipeline"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/pipeline"
 )
 
 // goldenAssignee mirrors the fixture's `assignees[{login}]` shape.

@@ -45,8 +45,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/matteobortolazzo/cenci/watch/internal/ipc"
-	"github.com/matteobortolazzo/cenci/watch/pkg/watch"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/ipc"
+	"github.com/matteobortolazzo/cenci/watch/v2/pkg/watch"
 )
 
 // -- ghWorld: the persisted fake-GitHub model --------------------------------

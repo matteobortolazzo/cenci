@@ -5,7 +5,7 @@ import (
 	"io"
 	"strings"
 
-	"github.com/matteobortolazzo/cenci/watch/internal/run"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/run"
 )
 
 // ErrSessionUnconfigured is the sentinel every repo with >=1 ActionDispatch

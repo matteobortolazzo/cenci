@@ -7,7 +7,7 @@ import (
 	"io"
 	"os"
 
-	"github.com/matteobortolazzo/cenci/watch/internal/sandbox/launcher"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/sandbox/launcher"
 )
 
 // runAudit implements `cenci audit [flags]` (ticket #588): a read-only

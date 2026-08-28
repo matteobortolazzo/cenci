@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/matteobortolazzo/cenci/watch/internal/ipc"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/ipc"
 )
 
 // -- daemon start --json / CENCI_LOG_JSON ---------------------------------

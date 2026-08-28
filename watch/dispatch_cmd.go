@@ -7,9 +7,9 @@ import (
 	"os"
 	"strings"
 
-	"github.com/matteobortolazzo/cenci/watch/internal/dispatch"
-	"github.com/matteobortolazzo/cenci/watch/internal/tmux"
-	"github.com/matteobortolazzo/cenci/watch/pkg/watch"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/dispatch"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/tmux"
+	"github.com/matteobortolazzo/cenci/watch/v2/pkg/watch"
 )
 
 func runDispatch(args []string) {
