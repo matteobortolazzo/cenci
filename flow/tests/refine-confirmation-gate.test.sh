@@ -44,10 +44,14 @@
 #   - flow/agents/refiner.md (per-ticket ### Automation registry, per-child
 #     decision-complete split blocks, parent/last-child grant implication)
 #   - flow/skills/refine/SKILL.md (the ## Confirmation Gate section, the
-#     10-entry lifecycle exclusion set, step 13's declined branch)
+#     10-entry lifecycle exclusion set including the legacy-compat
+#     "Design","Designed" markers, step 13's declined branch)
 #   - flow/skills/refine/codex.md (portability parity)
-#   - flow/skills/implement/phases/phase-9-pr.md (followup exclusion)
-#   - flow/skills/address-review/SKILL.md (followup exclusion)
+#   - flow/skills/implement/phases/phase-9-pr.md (followup exclusion, the
+#     same 10-entry legacy-compat set -- see the note at EXCLUSION_10_MARKER
+#     below)
+#   - flow/skills/address-review/SKILL.md (followup exclusion, same
+#     10-entry legacy-compat set)
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || { echo "refine-confirmation-gate.test.sh: failed to resolve script directory." >&2; exit 2; }
@@ -122,19 +126,29 @@ CHILD_PLANNABLE_STANDALONE_MARKER='plannable without undocumented parent context
 CHILD_OWN_BLOCK_TEXT_MARKER="that child's own block text"
 CHILD_BROWSER_QUESTION_MARKER='Does child (K/N)'
 CHILD_BROWSER_QUESTION_BATCH_MARKER='Batch up to 4 children per `AskUserQuestion` call, one question per child, in child order'
-CHILD_DESIGN_SKIP_MARKER='Skip entirely for a design-only child'
+# The design-only-child skip was folded into the general "no frontend/
+# browser signal" skip when Pencil/design was removed -- there is no
+# separate design classification for a child to be "design-only" any more.
+CHILD_NO_SIGNAL_SKIP_MARKER='A child with no frontend/browser signal is not asked at all'
 PARENT_ANSWER_NOT_PROPAGATED_MARKER='is never propagated to any child'
 
 # --- Block 6: Stale parent labels -------------------------------------------
+# EXCLUSION_10_MARKER: every ticket-creation site -- refine/SKILL.md's own
+# ensure-issue.sh-based child-creation path AND phase-9-pr.md/address-review/
+# SKILL.md's legacy jq-based followup-creation sites -- intentionally still
+# excludes "Design","Designed" as a defensive legacy-compat measure: a
+# parent ticket refined before the Pencil/design removal may still carry one
+# of those labels, and it must never be inherited onto a new child or
+# followup ticket. See the note at refine/SKILL.md's own call site.
 EXCLUSION_10_MARKER='"Refined","Working","Planned","In Review","Implemented","Design","Designed","automerge:ok","Browser","ui:visual-check"'
 REREFINE_DEFERRAL_TEXT_MARKER='deferred to a later ticket'
 GATE_LABELS_APPLIED_EXPLICITLY_MARKER='applied explicitly from the gate'
 
 # --- Block 7: Followup inheritance ------------------------------------------
-# EXCLUSION_10_MARKER (above) is reused here: it is a literal substring of
-# the 11-entry followup-site array (10 entries + "Followup" appended), the
-# same technique flow/tests/followup-ticket-inheritance.test.sh already uses
-# for its 7-entry LIFECYCLE_EXCLUSION_MARKER against the 8-entry
+# EXCLUSION_10_MARKER (above) is reused here too: it is a literal substring
+# of the 11-entry followup-site array (10 entries + "Followup" appended),
+# the same technique flow/tests/followup-ticket-inheritance.test.sh already
+# uses for its 7-entry LIFECYCLE_EXCLUSION_MARKER against the 8-entry
 # (7 + "Followup") followup arrays.
 
 # --- Codex parity (Test Strategy: "Same suite's parity block") -------------
@@ -214,7 +228,7 @@ assert_file_contains "${REFINER_AGENT}" "${CHILD_PLANNABLE_STANDALONE_MARKER}" \
 # =====================================================================
 # Block 5: Safety overrides per child — per-child frontend-classification,
 # per-child browser question (batched up to 4 per AskUserQuestion call,
-# mirroring step 6's batched-round rule), the design-child skip, and the
+# mirroring step 6's batched-round rule), the no-signal skip, and the
 # explicit non-propagation of the parent's step-8 answer.
 # =====================================================================
 
@@ -224,18 +238,18 @@ assert_file_contains "${REFINE_SKILL}" "${CHILD_BROWSER_QUESTION_MARKER}" \
   "must ask the browser question once per flagged child, scoped to that child"
 assert_file_contains "${REFINE_SKILL}" "${CHILD_BROWSER_QUESTION_BATCH_MARKER}" \
   "must batch up to 4 children per AskUserQuestion call, one question per child, in child order, mirroring step 6's batched-round rule"
-assert_file_contains "${REFINE_SKILL}" "${CHILD_DESIGN_SKIP_MARKER}" \
-  "must skip the per-child browser question entirely for a design-only child"
+assert_file_contains "${REFINE_SKILL}" "${CHILD_NO_SIGNAL_SKIP_MARKER}" \
+  "must skip the per-child browser question entirely for a child with no frontend/browser signal"
 assert_file_contains "${REFINE_SKILL}" "${PARENT_ANSWER_NOT_PROPAGATED_MARKER}" \
   "must state the parent's step-8 browser answer is never propagated to any child"
 
 # =====================================================================
-# Block 6: Stale parent labels — the 10-entry exclusion set at both refine
-# creation sites, plus the removed "deferred to a later ticket" text.
+# Block 6: Stale parent labels — the 10-entry exclusion set at refine's own
+# creation site, plus the removed "deferred to a later ticket" text.
 # =====================================================================
 
 assert_file_contains "${REFINE_SKILL}" "${EXCLUSION_10_MARKER}" \
-  "must extend the lifecycle exclusion array to 10 entries (adding automerge:ok, Browser, ui:visual-check) at the refine creation sites"
+  "must extend the lifecycle exclusion array to 10 entries (adding automerge:ok, Browser, ui:visual-check) at the refine creation site"
 assert_file_lacks "${REFINE_SKILL}" "${REREFINE_DEFERRAL_TEXT_MARKER}" \
   "must remove the stale 're-refine exception ... deferred to a later ticket' text now that the gap is closed"
 assert_file_contains "${REFINE_SKILL}" "${GATE_LABELS_APPLIED_EXPLICITLY_MARKER}" \
@@ -243,12 +257,13 @@ assert_file_contains "${REFINE_SKILL}" "${GATE_LABELS_APPLIED_EXPLICITLY_MARKER}
 
 # =====================================================================
 # Block 7: Followup inheritance — the extended exclusion set asserted
-# across all four ticket-creation sites in one place (refine child, refine
-# design ticket, phase-9-pr.md, address-review/SKILL.md), pinning the
-# repo-wide invariant that a grant is never inherited anywhere one ticket
-# creates another (see watch/internal/babysit/automerge_test.go:190 for
-# AC 6's already-covered half, and flow/docs/followup-triage.md for the
-# untriaged-capture-queue rationale).
+# across all three ticket-creation sites in one place (refine child,
+# phase-9-pr.md, address-review/SKILL.md), pinning the repo-wide invariant
+# that a grant is never inherited anywhere one ticket creates another (see
+# watch/internal/babysit/automerge_test.go:190 for AC 6's already-covered
+# half, and flow/docs/followup-triage.md for the untriaged-capture-queue
+# rationale). All three use the same legacy-compat 10-entry set
+# (EXCLUSION_10_MARKER) that still names "Design","Designed".
 # =====================================================================
 
 for FILE in "${REFINE_SKILL}" "${PHASE_9}" "${ADDRESS_REVIEW_SKILL}"; do

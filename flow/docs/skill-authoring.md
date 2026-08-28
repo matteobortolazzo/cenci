@@ -19,7 +19,7 @@ written down.
 | OpenCode | symlink of the skill directory | `PORTABLE_SKILLS` in `opencode/install-skills.sh` |
 
 Reconciling does not mean "make every skill support every client". Most exclusions are
-correct: the pipeline skills (`implement`, `configure`, `refine`, `design`, `maintain`,
+correct: the pipeline skills (`implement`, `configure`, `refine`, `maintain`,
 `address-review`, `review`, `sync`, `ci-repair`, `ticket-ownership`,
 `babysit-attention`) assume Claude Code's interactive approval flow, and `codex-runtime`
 is a Codex-only adapter. What is not acceptable is an exclusion nobody decided — the
@@ -31,7 +31,7 @@ does.
 
 OpenCode installs a symlink to the skill directory and nothing else. A portable skill
 that is **directed to consult** another skill ("Read `project-core`", "Use the
-`shell-rules` skill", "per `pencil-api`") therefore needs that skill to be portable too,
+`shell-rules` skill") therefore needs that skill to be portable too,
 or OpenCode users receive a skill pointing at one they do not have. `#1042` is the case
 that produced this rule: `babysit` was portable, `project-core` was not, and the
 "Read `project-core`" instruction on OpenCode pointed at nothing.

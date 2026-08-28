@@ -16,18 +16,6 @@ Monorepo with <N> projects. <ticket-system> for tracking. <pr-system> for PRs.
 |-----------|-------|-------------|
 | `<path>` | <stack> | <description> |
 
-<!-- IF pencil.enabled AND pencil.shared -->
-## Design Files (shared)
-- Design spec: `<designPath>/DESIGN.md` — screens, components, tokens, naming conventions
-- Design file: `<designPath>/<name>.pen` — open in Pencil, read with Pencil MCP tools
-- ALWAYS read DESIGN.md before implementing any frontend feature
-<!-- END IF -->
-<!-- IF pencil.enabled AND NOT pencil.shared -->
-## Design Files
-Each frontend project has its own design directory. See per-project CLAUDE.md for paths.
-- ALWAYS read the project's DESIGN.md before implementing any frontend feature
-<!-- END IF -->
-
 <!-- IF sandbox.enabled -->
 ## Sandbox Image
 - `.cenci/Dockerfile` — committed, single per-repo image covering the union of every project's stack; the whole team builds the same image

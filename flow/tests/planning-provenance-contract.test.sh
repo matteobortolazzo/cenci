@@ -279,8 +279,15 @@ assert_file_contains "${CONTEXT_GATHERER}" "${SECTION1_NO_TOPLEVEL_FIELD}" \
   "§1 must record why gh issue view cannot supply the ticket's own authorAssociation"
 assert_file_lacks "${REFINE_SKILL}" "--json number,title,body,labels,state,assignees,milestone,comments,author,authorAssociation" \
   "refine's step-1 fetch must not request a top-level authorAssociation from gh issue view either (same invalid field)"
-assert_file_contains "${REFINE_SKILL}" "${SECTION1_ASSOCIATION_CALL}" \
-  "refine must read the ticket's own author association from the REST issue endpoint too"
+# refine/SKILL.md's own copy of the REST author_association read (originally
+# added only to feed the since-removed Design Coverage Check's per-comment
+# node-ID trust screen) has no remaining consumer anywhere in refine/
+# refiner.md/refine's codex.md -- unlike context-gatherer.md's copy, which
+# planner.md's refinement-settled-posture suppression rule still reads via
+# the digest's `ticketAuthor:` line. It was removed along with the rest of
+# Pencil/design rather than kept as unused dead code.
+assert_file_lacks "${REFINE_SKILL}" "${SECTION1_ASSOCIATION_CALL}" \
+  "refine's own gh api .../issues/<number> --jq '.author_association' read must be gone -- it had no consumer left after the Design Coverage Check was removed"
 
 SKILL_TICKETAUTHOR_STORAGE_MARKER='`ticketAuthor:` — stored **verbatim** and retained for the whole session'
 SKILL_LABELS_SECOND_CONSUMER_MARKER='forwarded unconditionally as the label half of the planner'"'"'s provenance gate'

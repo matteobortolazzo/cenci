@@ -93,8 +93,7 @@ func gitCommitPlanFileWithStatus(t *testing.T, repoRoot, id, slug, sha, createdA
 		"---\n" +
 		"## Ticket Details\nsome ticket details\n\n" +
 		"## Implementation Plan\ndo the thing\n\n" +
-		"## Architectural Context\nsome architectural context\n\n" +
-		"## Design Context\nsome design context\n"
+		"## Architectural Context\nsome architectural context\n"
 	path := filepath.Join(dir, id+"-"+slug+".md")
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("write plan file: %v", err)
@@ -134,8 +133,7 @@ func gitCommitPlanFileAwaitingInputWithEscalation(t *testing.T, repoRoot, id, sl
 	content += "---\n" +
 		"## Ticket Details\nsome ticket details\n\n" +
 		"## Implementation Plan\ndo the thing\n\n" +
-		"## Architectural Context\nsome architectural context\n\n" +
-		"## Design Context\nsome design context\n"
+		"## Architectural Context\nsome architectural context\n"
 	path := filepath.Join(dir, id+"-"+slug+".md")
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("write plan file: %v", err)
@@ -578,7 +576,7 @@ func TestPipelinePlanCheck_MalformedPlan_Exit1(t *testing.T) {
 		t.Fatalf("mkdir .plans: %v", err)
 	}
 	// Missing front matter entirely.
-	content := "## Ticket Details\nx\n## Implementation Plan\nx\n## Architectural Context\nx\n## Design Context\nx\n"
+	content := "## Ticket Details\nx\n## Implementation Plan\nx\n## Architectural Context\nx\n"
 	if err := os.WriteFile(filepath.Join(dir, "42-add-thing.md"), []byte(content), 0o644); err != nil {
 		t.Fatalf("write plan file: %v", err)
 	}

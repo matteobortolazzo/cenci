@@ -38,7 +38,7 @@ import (
 	"testing"
 )
 
-// mustWriteValidAdoptPlan writes a valid .plans/<id>-<slug>.md (all four
+// mustWriteValidAdoptPlan writes a valid .plans/<id>-<slug>.md (all three
 // required sections, a well-formed slug, ticketId matching id) under
 // repoRoot, returning its path. Mirrors planfile_test.go's own fixture
 // construction (defaultPlanFields + validPlanBody) so this file does not
@@ -204,9 +204,6 @@ some ticket details
 
 ## Implementation Plan
 do the thing
-
-## Design Context
-some design context
 ` // missing "## Architectural Context"
 	fields := defaultPlanFields("42", "add-thing", "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", "2026-07-20T20:00:00Z")
 	writePlanFile(t, repoRoot, "42", "add-thing", fields, malformedBody)

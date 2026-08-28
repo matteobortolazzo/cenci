@@ -7,7 +7,7 @@ bash "$FLOW/codex/workflows.test.sh"
 bash "$FLOW/codex/runtime.test.sh"
 bash "$FLOW/scripts/migrate-project-core.test.sh"
 
-for workflow in configure refine implement review address-review refactor sync maintain babysit design; do
+for workflow in configure refine implement review address-review refactor sync maintain babysit; do
   test -f "$FLOW/skills/$workflow/SKILL.md"
 done
 

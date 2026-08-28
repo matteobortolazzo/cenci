@@ -89,7 +89,6 @@ LIFECYCLE_EXCLUSION_MARKER='"Refined","Working","Planned","In Review","Implement
 LIFECYCLE_EXCLUSION_10_MARKER='"Refined","Working","Planned","In Review","Implemented","Design","Designed","automerge:ok","Browser","ui:visual-check"'
 SLURPFILE_MARKER='--slurpfile meta'
 CHILD_SEED_MARKER='(["Refined"] +'
-DESIGN_SEED_MARKER='(["Refined","Design"] +'
 PARENT_META_CLEANUP_MARKER='-parent-meta.json'
 # #878: the fetch is now unconditional and runs before the first write; a
 # failure after one retry fails closed with zero writes (D1) rather than
@@ -122,8 +121,14 @@ assert_file_contains "${REFINE_ENSURE_ISSUE_SCRIPT}" "${SLURPFILE_MARKER}" \
   "must consume the fetched parent metadata mechanically via jq --slurpfile, never by interpolating label names into a command line (retargeted from refine/SKILL.md by #876)"
 assert_file_contains "${REFINE_ENSURE_ISSUE_SCRIPT}" "${CHILD_SEED_MARKER}" \
   "must seed a split child's labels array with Refined plus the carried-over parent labels (retargeted from refine/SKILL.md's Pass 1 by #876)"
-assert_file_contains "${REFINE_ENSURE_ISSUE_SCRIPT}" "${DESIGN_SEED_MARKER}" \
-  "must seed the design-ticket labels array with Refined,Design plus the carried-over parent labels (retargeted from refine/SKILL.md by #876)"
+# The DESIGN_SEED_MARKER companion-design-ticket jq example was removed from
+# ensure-issue.sh's comments along with the rest of Pencil/design -- refine
+# no longer creates a companion design ticket at all, so there is no
+# design-ticket seed-array example left to document. The 10-entry
+# LIFECYCLE_EXCLUSION_10_MARKER above still keeps "Design","Designed" for
+# legacy compat (a pre-removal parent's leftover label must never be
+# inherited onto a new child) -- only the design-ticket-creation example is
+# gone.
 assert_file_contains "${REFINE_ENSURE_ISSUE_SCRIPT}" "${PARENT_META_CLEANUP_MARKER}" \
   "must name/own the parent-meta temp file's lifecycle (retargeted from refine/SKILL.md's step 13 rm -f cleanup list by #876 -- the script is now what consumes --parent-meta and, when SKILL.md's own fail-closed fetch already guarantees it exists, is the sole remaining consumer of that path)"
 

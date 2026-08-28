@@ -333,7 +333,7 @@ The `## Checklist` Maintenance check line is derived from `$RUN_DIR/maintain-sta
 
 Any reported or deferred maintenance findings (from a `— reported` status) each append one line to `## Notes`. An `— overridden` status appends the checker's failing lines the same way, prefixed with "Accepted red pipeline:" so the accepted failure is named, not just counted. The Cleanup step's `rm -rf "$RUN_DIR"` already removes `maintain-status.txt` with the rest of the run's artifacts — no new cleanup line is needed.
 
-`## Screenshots` appears only when `isUiTicket` is true: one `### <name>` + image per captured screen/state, or the fallback note from the Screenshots section above. Omit the section entirely for non-UI work. If the user chose "Proceed without design" at the Design Check, add "Implemented without design spec — extra visual review recommended." to `## Notes`.
+`## Screenshots` appears only when `isUiTicket` is true: one `### <name>` + image per captured screen/state, or the fallback note from the Screenshots section above. Omit the section entirely for non-UI work.
 
 ## Labels
 

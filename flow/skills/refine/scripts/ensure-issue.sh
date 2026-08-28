@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ensure-issue.sh -- deterministic create/recover/repair/link helper for one
-# refine manifest entry (a split-child or companion-design issue), ticket
+# refine manifest entry (a split-child issue), ticket
 # #876 (2/12 of #661). Invoked identically by refine/SKILL.md (Claude) and
 # refine/codex.md (Codex) so a confirmed manifest entry resolves to at most
 # one GitHub issue across timeouts, retries, crashes, and resumed
@@ -47,7 +47,8 @@
 #     "schemaVersion": 1, "repo": "<owner>/<repo>", "parent": <n>,
 #     "creatorLogin": "<login>", "createdAt": "<RFC3339>",
 #     "entries": [
-#       { "slot": "child-K-of-N" | "design", "nonce": "<32 hex>",
+#       { "slot": "<caller-chosen string, free-form -- e.g. child-K-of-N>",
+#         "nonce": "<32 hex>",
 #         "titleHash": "<sha256>", "bodyHash": "<sha256>",
 #         "labels": "<compact JSON array, stored as a string>",
 #         "milestone": <n|null>, "issueNumber": <n|null>,
@@ -86,18 +87,15 @@
 # Canonical with-meta / no-meta label-inheritance forms (documentation --
 # the real merge below is parameterized over the manifest's own seed
 # array, but every site follows exactly this shape, ported from
-# refine/SKILL.md's former Pass 1 / companion-design jq snippets, #876):
+# refine/SKILL.md's former Pass 1 jq snippet, #876):
 #   With-meta (child):
 #     jq -n --rawfile title <title> --rawfile body <body> --slurpfile meta <parent-meta>
 #       '{title: ($title | rtrimstr("\n")), body: $body,
 #         labels: (["Refined"] + [$meta[0].labels[].name | select(. as $n |
 #           (["Refined","Working","Planned","In Review","Implemented","Design","Designed","automerge:ok","Browser","ui:visual-check"] | index($n)) | not)])}'
-#   With-meta (design ticket):
-#     ... labels: (["Refined","Design"] + [$meta[0].labels[].name | select(...)]) ...
 #   No-meta fallback (the parent-metadata fetch failed after its one retry
 #   -- graceful degrade, never a STOP; see docs/pipeline-safety.md):
 #     child:  '{title: ..., body: ..., labels: ["Refined"]}'
-#     design: '{title: ..., body: ..., labels: ["Refined","Design"]}'
 #   When the parent-metadata fetch fails, the caller passes no
 #   --parent-meta and this script notes that milestone/label inheritance
 #   was skipped rather than aborting -- a child created without the

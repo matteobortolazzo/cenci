@@ -568,15 +568,16 @@ run_guard_with_tmpdir "${TMPDIR_REPO}" "${TEST_ROOT}/no-such-dir" "{\"tool_input
 assert_exit "TMPDIR non-existent dir: source write blocked" 2
 
 # ── Deferred item 4 cross-file pin (#749) ────────────────────────────
-# design's two Write targets: <designPath>/DESIGN.md (main-worktree design
-# artifact, allowlisted via the existing */DESIGN.md arm) and
-# ${TMPDIR:-/tmp}/cenci/design-comment-<number>.md (the body-file convention,
-# allowlisted by the TMPDIR widening above). Pinning both here means a
-# future change to either target's shape fails in this suite rather than
-# silently prompting at runtime.
-echo "case: cross-file pin -- design's designs/DESIGN.md Write target"
+# Pencil/design's *.pen | */DESIGN.md | */designs/* allowlist arm was
+# removed entirely along with the rest of Pencil/design -- this deliberately
+# TIGHTENS the guard, so a main-worktree write under designs/ is now blocked
+# like any other source path rather than allowlisted. The
+# ${TMPDIR:-/tmp}/cenci/design-comment-<number>.md body-file convention is
+# unaffected: it stays allowed on its own merits via the general TMPDIR
+# widening below, not via any design-specific arm.
+echo "case: designs/DESIGN.md Write target is now blocked (Pencil/design allowlist arm removed)"
 run_guard_with_tmpdir "${TMPDIR_REPO}" "${CUSTOM_TMP}" "{\"tool_input\":{\"file_path\":\"${TMPDIR_REPO}/designs/DESIGN.md\"}}"
-assert_exit "cross-file pin: designs/DESIGN.md" 0
+assert_exit "designs/DESIGN.md write blocked" 2
 
 echo "case: cross-file pin -- design's \${TMPDIR}/cenci/design-comment-<n>.md Write target"
 run_guard_with_tmpdir "${TMPDIR_REPO}" "${CUSTOM_TMP}" "{\"tool_input\":{\"file_path\":\"${CUSTOM_TMP}/cenci/design-comment-749.md\"}}"
@@ -1792,9 +1793,9 @@ assert_exit "in-repo feature-worktree .claude/settings.json allowed (#1072 regre
 # AC 3 non-regression: a Write|Edit .plans/ path was not previously pinned by
 # a dedicated case (only the Bash-mode arm has one) -- add it here so the
 # SCOPE_ROOT refactor cannot silently regress it. .worktrees/ (Case 4),
-# .claude/plans/ (Cases 9-10), designs/DESIGN.md (the cross-file pin above),
-# the TMPDIR-widening allow cases, and in-repo source writes staying blocked
-# (Case 3) are already pinned elsewhere in this suite.
+# .claude/plans/ (Cases 9-10), designs/DESIGN.md now blocked (the cross-file
+# pin above), the TMPDIR-widening allow cases, and in-repo source writes
+# staying blocked (Case 3) are already pinned elsewhere in this suite.
 echo "case: configured repo still allows .plans/ Write|Edit targets (#1072 AC 3 non-regression)"
 run_guard "${REPO}" "{\"tool_input\":{\"file_path\":\"${REPO}/.plans/1-foo.md\"}}"
 assert_exit "configured repo allows .plans/ Write|Edit target (#1072 AC 3)" 0

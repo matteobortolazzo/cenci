@@ -58,7 +58,7 @@ import (
 //     filename's numeric prefix to equal the front-matter ticketId for a
 //     claim to resolve healthy.
 //  5. That single match passes parseAndValidatePlan -- the identical gate
-//     plan-check applies (front matter, all four required sections, slug).
+//     plan-check applies (front matter, all three required sections, slug).
 //  6. (#884, Q4: unify) A plan file whose front matter carries no ticketId
 //     at all (a legacy plan pre-dating the field) is NO LONGER exempt --
 //     Select's identity contract already denied it at gate (4) above

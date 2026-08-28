@@ -79,9 +79,13 @@ import (
 
 // -- fixtures ---------------------------------------------------------------
 
-// validPlanBody supplies all four sections plan-check requires per the
+// validPlanBody supplies all three sections plan-check requires per the
 // plan's Assumptions ("## Ticket Details", "## Implementation Plan",
-// "## Architectural Context", "## Design Context").
+// "## Architectural Context"). "## Design Context" was dropped from
+// requiredPlanSections along with Pencil/design removal -- see
+// TestCheckPlan_Valid_LegacyDesignContextSectionStillValidates below for the
+// backward-compatibility guarantee that an older plan file still carrying
+// that heading keeps validating.
 const validPlanBody = `
 ## Ticket Details
 some ticket details
@@ -91,9 +95,6 @@ do the thing
 
 ## Architectural Context
 some architectural context
-
-## Design Context
-some design context
 `
 
 // defaultPlanFields builds a realistic v1 front-matter field set for id/slug,
@@ -284,6 +285,46 @@ func TestCheckPlan_Valid_FreshShaAndOpenTicket_ReturnsResume(t *testing.T) {
 	}
 }
 
+// TestCheckPlan_Valid_LegacyDesignContextSectionStillValidates pins the
+// backward-compatibility guarantee behind dropping "## Design Context" from
+// requiredPlanSections (Pencil/design removal): an older plan file that
+// still carries that heading -- written before the removal, or never
+// cleaned up -- must keep validating rather than suddenly failing
+// plan-check. parseAndValidatePlan checks each required section via
+// strings.Contains, never an exact/exhaustive section list, so an extra,
+// no-longer-required heading is simply ignored.
+func TestCheckPlan_Valid_LegacyDesignContextSectionStillValidates(t *testing.T) {
+	repoRoot := t.TempDir()
+	initGitRepoWithCommit(t, repoRoot)
+	sha := gitHeadSha(t, repoRoot)
+	createdAt := "2026-07-20T20:00:00Z"
+	bodyWithLegacyDesignContext := `
+## Ticket Details
+some ticket details
+
+## Implementation Plan
+do the thing
+
+## Architectural Context
+some architectural context
+
+## Design Context
+some design context
+`
+	writePlanFile(t, repoRoot, "42", "add-thing", defaultPlanFields("42", "add-thing", sha, createdAt), bodyWithLegacyDesignContext)
+
+	gh := newFakeGhTicket(t, "OPEN", "2026-07-20T19:00:00Z") // updatedAt <= createdAt
+	gh.install()
+
+	_, check, err := CheckPlan(PlanCheckOpts{ID: "42", RepoRoot: repoRoot, RepoSlug: "o/r"})
+	if err != nil {
+		t.Fatalf("CheckPlan with a legacy ## Design Context section present: want no error, got %v", err)
+	}
+	if check.Decision != "resume" {
+		t.Errorf("Decision = %q, want resume", check.Decision)
+	}
+}
+
 // -- malformed: distinct failure classes, all ErrPlanMalformed --------------
 
 func TestCheckPlan_Malformed_MissingImplementationPlanSection_ReturnsErrPlanMalformed(t *testing.T) {
@@ -295,9 +336,6 @@ some ticket details
 
 ## Architectural Context
 some architectural context
-
-## Design Context
-some design context
 `
 	writePlanFile(t, repoRoot, "42", "add-thing", defaultPlanFields("42", "add-thing", "deadbeef", "2026-07-20T20:00:00Z"), bodyMissingSection)
 
@@ -321,9 +359,9 @@ some design context
 
 func TestCheckPlan_Malformed_MissingOrUnterminatedFrontMatter_ReturnsErrPlanMalformed(t *testing.T) {
 	cases := map[string]string{
-		"no front matter at all": "## Ticket Details\nx\n## Implementation Plan\nx\n## Architectural Context\nx\n## Design Context\nx\n",
+		"no front matter at all": "## Ticket Details\nx\n## Implementation Plan\nx\n## Architectural Context\nx\n",
 		"unterminated front matter": "---\nversion: 1\nmode: ticket\nticketId: 42\nslug: add-thing\n" +
-			"## Ticket Details\nx\n## Implementation Plan\nx\n## Architectural Context\nx\n## Design Context\nx\n",
+			"## Ticket Details\nx\n## Implementation Plan\nx\n## Architectural Context\nx\n",
 	}
 	for name, content := range cases {
 		t.Run(name, func(t *testing.T) {

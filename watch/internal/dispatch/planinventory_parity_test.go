@@ -33,12 +33,12 @@ import (
 	"github.com/matteobortolazzo/cenci/watch/internal/pipeline"
 )
 
-// validParityPlanBody supplies the four sections plan-check requires
+// validParityPlanBody supplies the three sections plan-check requires
 // (mirrors internal/pipeline/planfile_test.go's validPlanBody), so a
 // pipeline.CheckPlan call against a fixture written here never fails
 // ErrPlanMalformed's section scan for reasons unrelated to the failure
 // class under test.
-const validParityPlanBody = "## Ticket Details\nx\n\n## Implementation Plan\nx\n\n## Architectural Context\nx\n\n## Design Context\nx\n"
+const validParityPlanBody = "## Ticket Details\nx\n\n## Implementation Plan\nx\n\n## Architectural Context\nx\n"
 
 // writeParityPlan writes repoRoot/.plans/name with content, creating .plans
 // if needed, and returns the file's full path.
