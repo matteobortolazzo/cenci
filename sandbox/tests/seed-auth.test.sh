@@ -146,44 +146,7 @@ assert_eq "returns success" "0" "$?"
 assert_eq "overwrites with staged OpenCode credential" '{"chain":"host-new"}' "$(cat "${DEST}")"
 assert_eq "restores mode 600" "600" "$(stat -c '%a' "${DEST}")"
 
-# ── Case 7: Pencil CLI session seed-once ───────────────────────────
-# Mirrors case 1/case 2 at Pencil's session path (~/.pencil/session-cli.json)
-# — headless design reads (`pen interactive`) authenticate with this seeded
-# session when no PEN_CLI_KEY is forwarded. Session tokens are treated as
-# rotating like the agent OAuth chains, so the seed-once contract applies.
-echo "case: seeds Pencil session-cli.json when destination is missing"
-STAGED="${TMPDIR_TEST}/case7/staged.json"
-DEST="${TMPDIR_TEST}/case7/home/.pencil/session-cli.json"
-mkdir -p "$(dirname "${STAGED}")"
-echo '{"chain":"host"}' > "${STAGED}"
-seed_credential "${STAGED}" "${DEST}"
-assert_eq "returns success" "0" "$?"
-assert_eq "copies staged Pencil session" '{"chain":"host"}' "$(cat "${DEST}" 2>/dev/null)"
-assert_eq "sets mode 600" "600" "$(stat -c '%a' "${DEST}" 2>/dev/null)"
-
-echo "case: never overwrites an existing Pencil session-cli.json"
-STAGED="${TMPDIR_TEST}/case7b/staged.json"
-DEST="${TMPDIR_TEST}/case7b/home/.pencil/session-cli.json"
-mkdir -p "$(dirname "${STAGED}")" "$(dirname "${DEST}")"
-echo '{"chain":"host-stale"}' > "${STAGED}"
-echo '{"chain":"volume-live"}' > "${DEST}"
-seed_credential "${STAGED}" "${DEST}"
-assert_eq "returns success" "0" "$?"
-assert_eq "keeps the volume Pencil session" '{"chain":"volume-live"}' "$(cat "${DEST}")"
-
-# ── Case 8: entrypoint wires the Pencil staging → home-volume path ─
-# The generic function contract above is meaningless if entrypoint.sh never
-# calls it for Pencil's paths. Assert the exact wiring line (full staged and
-# destination paths on one line, matched as a fixed string).
-echo "case: entrypoint.sh seeds the staged Pencil session into the home volume"
-if grep -qF "seed_credential /tmp/host-pencil-creds/session-cli.json /home/dev/.pencil/session-cli.json" \
-    "${SCRIPT_DIR}/../entrypoint.sh"; then
-    pass
-else
-    fail "entrypoint.sh does not seed /tmp/host-pencil-creds/session-cli.json to /home/dev/.pencil/session-cli.json"
-fi
-
-# ── Case 9: GitHub CLI hosts.yml is seeded only when it carries a token ──
+# ── Case 7: GitHub CLI hosts.yml is seeded only when it carries a token ──
 # gh has no refresh cycle, so its copies never fork into the independent token
 # chains the seed-once contract above guards against, and the host copy stays
 # canonical — but only when the host file actually holds the token. (Canonical
@@ -201,8 +164,8 @@ HOSTS_WITH_TOKEN=$'github.com:\n    git_protocol: https\n    users:\n        oct
 HOSTS_NO_TOKEN=$'github.com:\n    git_protocol: https\n    users:\n        octocat:\n    user: octocat\n'
 
 echo "case: seeds hosts.yml when the staged host file carries an oauth_token"
-STAGED="${TMPDIR_TEST}/case9/hosts.yml"
-DEST="${TMPDIR_TEST}/case9/home/.config/gh/hosts.yml"
+STAGED="${TMPDIR_TEST}/case7/hosts.yml"
+DEST="${TMPDIR_TEST}/case7/home/.config/gh/hosts.yml"
 mkdir -p "$(dirname "${STAGED}")"
 printf '%s' "${HOSTS_WITH_TOKEN}" > "${STAGED}"
 seed_gh_hosts "${STAGED}" "${DEST}"
@@ -211,8 +174,8 @@ assert_eq "copies staged hosts.yml" "${HOSTS_WITH_TOKEN%$'\n'}" "$(cat "${DEST}"
 assert_eq "sets mode 600" "600" "$(stat -c '%a' "${DEST}" 2>/dev/null)"
 
 echo "case: a token-carrying host file still overwrites an existing hosts.yml"
-STAGED="${TMPDIR_TEST}/case9b/hosts.yml"
-DEST="${TMPDIR_TEST}/case9b/home/.config/gh/hosts.yml"
+STAGED="${TMPDIR_TEST}/case7b/hosts.yml"
+DEST="${TMPDIR_TEST}/case7b/home/.config/gh/hosts.yml"
 mkdir -p "$(dirname "${STAGED}")" "$(dirname "${DEST}")"
 printf '%s' "${HOSTS_WITH_TOKEN}" > "${STAGED}"
 printf 'github.com:\n    oauth_token: gho_containertoken\n' > "${DEST}"
@@ -221,12 +184,12 @@ assert_eq "returns success" "0" "$?"
 assert_eq "host re-auth propagates" "${HOSTS_WITH_TOKEN%$'\n'}" "$(cat "${DEST}")"
 
 echo "case: never copies a token-less host file over an existing container login"
-STAGED="${TMPDIR_TEST}/case9c/hosts.yml"
-DEST="${TMPDIR_TEST}/case9c/home/.config/gh/hosts.yml"
+STAGED="${TMPDIR_TEST}/case7c/hosts.yml"
+DEST="${TMPDIR_TEST}/case7c/home/.config/gh/hosts.yml"
 mkdir -p "$(dirname "${STAGED}")" "$(dirname "${DEST}")"
 printf '%s' "${HOSTS_NO_TOKEN}" > "${STAGED}"
 printf 'github.com:\n    oauth_token: gho_containertoken\n' > "${DEST}"
-STDERR_FILE="${TMPDIR_TEST}/case9c/stderr.txt"
+STDERR_FILE="${TMPDIR_TEST}/case7c/stderr.txt"
 seed_gh_hosts "${STAGED}" "${DEST}" 2> "${STDERR_FILE}"
 assert_eq "returns success" "0" "$?"
 assert_eq "keeps the in-container gh login" \
@@ -239,11 +202,11 @@ else
 fi
 
 echo "case: a token-less host file with no container login is skipped, not copied"
-STAGED="${TMPDIR_TEST}/case9d/hosts.yml"
-DEST="${TMPDIR_TEST}/case9d/home/.config/gh/hosts.yml"
+STAGED="${TMPDIR_TEST}/case7d/hosts.yml"
+DEST="${TMPDIR_TEST}/case7d/home/.config/gh/hosts.yml"
 mkdir -p "$(dirname "${STAGED}")"
 printf '%s' "${HOSTS_NO_TOKEN}" > "${STAGED}"
-STDERR_FILE="${TMPDIR_TEST}/case9d/stderr.txt"
+STDERR_FILE="${TMPDIR_TEST}/case7d/stderr.txt"
 seed_gh_hosts "${STAGED}" "${DEST}" 2> "${STDERR_FILE}"
 assert_eq "returns success" "0" "$?"
 if [[ -e "${DEST}" ]]; then
@@ -258,8 +221,8 @@ else
 fi
 
 echo "case: an oauth_token key with an empty value counts as token-less"
-STAGED="${TMPDIR_TEST}/case9e/hosts.yml"
-DEST="${TMPDIR_TEST}/case9e/home/.config/gh/hosts.yml"
+STAGED="${TMPDIR_TEST}/case7e/hosts.yml"
+DEST="${TMPDIR_TEST}/case7e/home/.config/gh/hosts.yml"
 mkdir -p "$(dirname "${STAGED}")"
 printf 'github.com:\n    user: octocat\n    oauth_token:\n' > "${STAGED}"
 seed_gh_hosts "${STAGED}" "${DEST}" 2>/dev/null
@@ -271,8 +234,8 @@ else
 fi
 
 echo "case: missing staged hosts.yml is a no-op"
-STAGED="${TMPDIR_TEST}/case9f/absent.yml"
-DEST="${TMPDIR_TEST}/case9f/home/.config/gh/hosts.yml"
+STAGED="${TMPDIR_TEST}/case7f/absent.yml"
+DEST="${TMPDIR_TEST}/case7f/home/.config/gh/hosts.yml"
 mkdir -p "$(dirname "${DEST}")"
 printf 'github.com:\n    oauth_token: gho_containertoken\n' > "${DEST}"
 seed_gh_hosts "${STAGED}" "${DEST}"
@@ -281,7 +244,7 @@ assert_eq "leaves destination untouched" \
     'github.com:
     oauth_token: gho_containertoken' "$(cat "${DEST}")"
 
-# ── Case 10: entrypoint wires gh staging → home volume via seed_gh_hosts ──
+# ── Case 8: entrypoint wires gh staging → home volume via seed_gh_hosts ──
 # The contract above is meaningless if entrypoint.sh still does its own
 # unconditional `cp` of the staged hosts.yml.
 echo "case: entrypoint.sh seeds the staged gh hosts.yml through seed_gh_hosts"
@@ -299,7 +262,7 @@ else
     pass
 fi
 
-# ── Case 11 (#1080): the Azure CLI auth set is seeded atomically ──────
+# ── Case 9 (#1080): the Azure CLI auth set is seeded atomically ──────
 # `az` splits its auth across several files under ~/.azure that only make
 # sense together: azureProfile.json names the identity, msal_token_cache.json
 # holds that identity's tokens, service_principal_entries.json holds SP
@@ -319,8 +282,8 @@ azure_staged() {
 }
 
 echo "case: seeds the whole Azure auth set when the destination has none"
-STAGED_DIR="${TMPDIR_TEST}/case11/staged"
-DEST_DIR="${TMPDIR_TEST}/case11/home/.azure"
+STAGED_DIR="${TMPDIR_TEST}/case9/staged"
+DEST_DIR="${TMPDIR_TEST}/case9/home/.azure"
 azure_staged "${STAGED_DIR}"
 seed_azure_creds "${STAGED_DIR}" "${DEST_DIR}"
 assert_eq "returns success" "0" "$?"
@@ -331,8 +294,8 @@ assert_eq "sets mode 600 on the token cache" "600" "$(stat -c '%a' "${DEST_DIR}/
 assert_eq "sets mode 700 on the .azure directory" "700" "$(stat -c '%a' "${DEST_DIR}" 2>/dev/null)"
 
 echo "case: a container-side login blocks the whole set, not just its own files"
-STAGED_DIR="${TMPDIR_TEST}/case11b/staged"
-DEST_DIR="${TMPDIR_TEST}/case11b/home/.azure"
+STAGED_DIR="${TMPDIR_TEST}/case9b/staged"
+DEST_DIR="${TMPDIR_TEST}/case9b/home/.azure"
 azure_staged "${STAGED_DIR}"
 mkdir -p "${DEST_DIR}"
 # Only the profile exists in the volume — as after an in-container `az login`
@@ -345,8 +308,8 @@ assert_eq "keeps the volume profile" '{"subscriptions":[{"id":"volume-sub"}]}' "
 assert_eq "does not seed the host token cache alongside it" "absent" "$([[ -e "${DEST_DIR}/msal_token_cache.json" ]] && echo present || echo absent)"
 
 echo "case: CENCI_SANDBOX_RESEED_CREDS=1 forces the Azure set to be re-copied"
-STAGED_DIR="${TMPDIR_TEST}/case11c/staged"
-DEST_DIR="${TMPDIR_TEST}/case11c/home/.azure"
+STAGED_DIR="${TMPDIR_TEST}/case9c/staged"
+DEST_DIR="${TMPDIR_TEST}/case9c/home/.azure"
 azure_staged "${STAGED_DIR}"
 mkdir -p "${DEST_DIR}"
 echo '{"subscriptions":[{"id":"volume-dead"}]}' > "${DEST_DIR}/azureProfile.json"
@@ -356,14 +319,14 @@ assert_eq "overwrites the dead profile" '{"subscriptions":[{"id":"host-sub"}]}' 
 assert_eq "brings the matching token cache with it" '{"RefreshToken":{"host":"chain"}}' "$(cat "${DEST_DIR}/msal_token_cache.json" 2>/dev/null)"
 
 echo "case: an absent staging directory is a no-op"
-DEST_DIR="${TMPDIR_TEST}/case11d/home/.azure"
-seed_azure_creds "${TMPDIR_TEST}/case11d/nonexistent" "${DEST_DIR}"
+DEST_DIR="${TMPDIR_TEST}/case9d/home/.azure"
+seed_azure_creds "${TMPDIR_TEST}/case9d/nonexistent" "${DEST_DIR}"
 assert_eq "returns success" "0" "$?"
 assert_eq "creates no destination" "absent" "$([[ -e "${DEST_DIR}" ]] && echo present || echo absent)"
 
 echo "case: only the auth files are copied, never the rest of ~/.azure"
-STAGED_DIR="${TMPDIR_TEST}/case11e/staged"
-DEST_DIR="${TMPDIR_TEST}/case11e/home/.azure"
+STAGED_DIR="${TMPDIR_TEST}/case9e/staged"
+DEST_DIR="${TMPDIR_TEST}/case9e/home/.azure"
 azure_staged "${STAGED_DIR}"
 mkdir -p "${STAGED_DIR}/commands"
 echo 'telemetry' > "${STAGED_DIR}/telemetry.txt"
@@ -374,17 +337,17 @@ assert_eq "skips telemetry.txt" "absent" "$([[ -e "${DEST_DIR}/telemetry.txt" ]]
 assert_eq "skips the commands cache" "absent" "$([[ -e "${DEST_DIR}/commands" ]] && echo present || echo absent)"
 
 echo "case: replaces a dangling symlinked Azure credential on seed"
-STAGED_DIR="${TMPDIR_TEST}/case11f/staged"
-DEST_DIR="${TMPDIR_TEST}/case11f/home/.azure"
+STAGED_DIR="${TMPDIR_TEST}/case9f/staged"
+DEST_DIR="${TMPDIR_TEST}/case9f/home/.azure"
 azure_staged "${STAGED_DIR}"
 mkdir -p "${DEST_DIR}"
-ln -s "${TMPDIR_TEST}/case11f/gone.json" "${DEST_DIR}/azureProfile.json"
+ln -s "${TMPDIR_TEST}/case9f/gone.json" "${DEST_DIR}/azureProfile.json"
 seed_azure_creds "${STAGED_DIR}" "${DEST_DIR}"
 assert_eq "returns success" "0" "$?"
 assert_eq "destination is a regular file" "regular" "$([[ -L "${DEST_DIR}/azureProfile.json" ]] && echo symlink || echo regular)"
 assert_eq "holds the staged profile" '{"subscriptions":[{"id":"host-sub"}]}' "$(cat "${DEST_DIR}/azureProfile.json" 2>/dev/null)"
 
-# ── Case 12 (#1080): entrypoint wires the Azure staging → home volume ──
+# ── Case 10 (#1080): entrypoint wires the Azure staging → home volume ──
 # The function contract above is meaningless if entrypoint.sh never calls it.
 # The staged path must also match azureCredsStageDir in
 # watch/internal/sandbox/launcher/azure.go, which mounts the files there.
