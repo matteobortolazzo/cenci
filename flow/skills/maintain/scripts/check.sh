@@ -1760,7 +1760,12 @@ CONFIG_SCHEMA=(
   'cenci.diffContextMode|string' 'cenci.liteReviewEnabled|boolean'
   'cenci.planComment|boolean'
   'cicd|object' 'cicd.enabled|boolean' 'cicd.platform|string'
-  'sandbox|object' 'sandbox.enabled|boolean' 'sandbox.baseVersion|string,null'
+  'sandbox|object' 'sandbox.enabled|boolean'
+  # sandbox.baseVersion is retired (#1115) -- /cenci:configure no longer
+  # writes it. Kept here solely so this schema still tolerates a legacy
+  # committed config or a doc example that still shows the key; it is not a
+  # live field.
+  'sandbox.baseVersion|string,null'
   'sandbox.dind|boolean'
   'lazyboards|object' 'lazyboards.enabled|boolean'
   'lazyboards.serveCommand|string' 'lazyboards.boardKey|string'

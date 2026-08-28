@@ -484,7 +484,7 @@ Include the server in `.lsp.json` regardless — it activates once the binary is
 
    A stack token that matches no row above (e.g. `markdown-shell`, `docker-shell`) contributes no additional project fragment. This is not an error — the generated Dockerfile still contains the mandatory Node runtime fragment.
 
-   **.NET version substitution** (the only row with a version-from-token adjustment): `sandbox/fragments/dotnet.dockerfile` ships with `ARG DOTNET_SDK_VERSION=10.0.100` as its own default. When including this fragment, replace that default's version with `<major>.0.100`, where `<major>` is extracted from the stack token using the same extraction as the CI mapping's version-pinning table above (`dotnet10` → `10`) — e.g. a `dotnet8` stack writes `ARG DOTNET_SDK_VERSION=8.0.100`. **Monorepo tie-break**: when multiple projects map to the dotnet fragment with different major versions (e.g. one project on `dotnet8`, another on `dotnet10`), use the **highest** major version found across all matching projects. If no major version can be extracted from the token, leave the fragment's own default (`10.0.100`) unmodified — and add an inline comment immediately after the `ARG DOTNET_SDK_VERSION` line noting the version could not be auto-detected from the stack token and the fragment's default was used instead, e.g. `# .NET version could not be auto-detected from the stack token — using fragment default. See sandbox/README.md to pin manually.` (mirrors the unresolved-`baseVersion` comment pattern in the baseVersion resolution above). The other fragments (node, playwright, go, python, rust, docker, azure) are included verbatim with their own `ARG` defaults unmodified — every fragment `ARG` (including `DOTNET_SDK_VERSION` and `BASE_VERSION`) remains overridable at build time via `--build-arg`, so an unmodified default is never a hard lock-in.
+   **.NET version substitution** (the only row with a version-from-token adjustment): `sandbox/fragments/dotnet.dockerfile` ships with `ARG DOTNET_SDK_VERSION=10.0.100` as its own default. When including this fragment, replace that default's version with `<major>.0.100`, where `<major>` is extracted from the stack token using the same extraction as the CI mapping's version-pinning table above (`dotnet10` → `10`) — e.g. a `dotnet8` stack writes `ARG DOTNET_SDK_VERSION=8.0.100`. **Monorepo tie-break**: when multiple projects map to the dotnet fragment with different major versions (e.g. one project on `dotnet8`, another on `dotnet10`), use the **highest** major version found across all matching projects. If no major version can be extracted from the token, leave the fragment's own default (`10.0.100`) unmodified — and add an inline comment immediately after the `ARG DOTNET_SDK_VERSION` line noting the version could not be auto-detected from the stack token and the fragment's default was used instead, e.g. `# .NET version could not be auto-detected from the stack token — using fragment default. See sandbox/README.md to pin manually.` The other fragments (node, playwright, go, python, rust, docker, azure) are included verbatim with their own `ARG` defaults unmodified — every fragment `ARG` (including `DOTNET_SDK_VERSION` and `BASE_VERSION`) remains overridable at build time via `--build-arg`, so an unmodified default is never a hard lock-in.
 
    > **Sync obligation**: `sandbox/fragments/*.dockerfile` is the source of truth for these blocks; the mapping table above mirrors their content and existence, not their byte contents (generation reads the fragment files directly — see step 5e). If a fragment is added, removed, or renamed, this table needs a matching manual update. Low risk in practice — both live in the same monorepo and are maintained together — but currently unenforced by tooling.
 
@@ -1501,21 +1501,13 @@ For each MCP selected in question 5:
 
 5e. **Generate `.cenci/Dockerfile`** (from question 9, only if user selected Yes):
 
-   **Resolve `baseVersion`** — try (a), then fall back to (b), then (c):
-
-   (a) **Dogfooding path**: if the repo being configured contains `sandbox/.claude-plugin/plugin.json` (i.e. this is the `cenci` repo itself), read its `.version` field directly and use that as `baseVersion`.
-
-   (b) **Installed-plugin path**: otherwise, read `~/.claude/plugins/installed_plugins.json` and look for keys matching `cenci-sandbox@<marketplace>` under `.plugins` (any marketplace suffix; the key format is `<plugin-name>@<marketplace>` and the plugin's name per `sandbox/.claude-plugin/plugin.json` is `cenci-sandbox` — a bare `sandbox@<marketplace>` never matches). If more than one key matches, use the entry with the **highest semver** among the matching entries' `.plugins["cenci-sandbox@<marketplace>"][0].version` values as `baseVersion` — never an arbitrary/first-found tie-break. When more than one match exists, note in the final completion summary (see the "Report what was created" instruction near the end of this file) which marketplace/version was resolved, so the choice is visible to the user rather than silent.
-
-   **Validation (applies to both (a) and (b))**: before writing a resolved `baseVersion` anywhere (the Dockerfile's `ARG BASE_VERSION=` line or `.cenci/config.json`), validate it against a strict version pattern: `^[0-9]+\.[0-9]+\.[0-9]+$` (matching the real plugin.json version format, e.g. `"0.9.0"`). This guards against a compromised marketplace entry or a tampered plugin.json in a fork injecting arbitrary content (embedded newlines, `#` comments, Dockerfile directives, or even a spoofed `# cenci:managed-end` sequence) into a file that's later `docker build`'d. If the resolved value does not match the pattern, treat `baseVersion` as unresolved and fall through to (c) — do not write the raw value into the Dockerfile or config.json.
-
-   (c) **Unresolved**: if neither (a) nor (b) yields a version that passes validation, `baseVersion` is unresolved. Store `"baseVersion": null` in `.cenci/config.json`'s `sandbox` field. The Dockerfile is still generated (fragments are still selected and written) — the `ARG BASE_VERSION=` line falls back to `latest` (matching `sandbox/Dockerfile`'s own default and the `cenci-sandbox-base:latest` alias tag that `cenci sandbox build-base` always produces), followed by an inline comment pointing at `sandbox/README.md` for a manual pin. An empty default must never be written: Docker's `InvalidDefaultArgInFrom` lint check flags any `ARG` used in a `FROM` whose default resolves to an empty or invalid image reference, and it evaluates the file statically — it fires on every build regardless of the `--build-arg BASE_VERSION=...` override `cenci sandbox build`'s per-repo image build always passes at build time.
+   **`BASE_VERSION` is always `latest`** — there is no resolution step. `buildBase` (`watch/internal/sandbox/launcher/engine.go:337-349`) only ever tags the base image `cenci-sandbox-base:<12-hex content hash>` and `cenci-sandbox-base:latest`; no semver tag exists in any environment, so the ARG default can only ever be the `latest` alias. `cenci sandbox build` always overrides it at build time via `--build-arg BASE_VERSION=...` (`engine.go:372,392`), so the default is never load-bearing for that path — it only matters for a bare manual `docker build`, where `latest` is exactly the recipe `sandbox/README.md` documents. An empty default must never be written instead: Docker's `InvalidDefaultArgInFrom` lint check flags any `ARG` used in a `FROM` whose default resolves to an empty or invalid image reference, and it evaluates the file statically regardless of a build-time override — so the literal `latest` (never empty, never unresolved) is what step 5e always writes.
 
    **Generated file format** — always emit the ARG/FROM pair below, **never** a literal `FROM cenci-sandbox-base:<version>`. `cenci sandbox build` always passes `--build-arg BASE_VERSION=...` at build time; a literal `FROM` would silently drift from what's actually built:
 
    ```dockerfile
    # cenci:managed-begin
-   ARG BASE_VERSION=<resolved-version-or-latest>
+   ARG BASE_VERSION=latest
    FROM cenci-sandbox-base:${BASE_VERSION}
 
    SHELL ["/bin/bash", "-o", "pipefail", "-c"]
@@ -1531,9 +1523,6 @@ For each MCP selected in question 5:
    # cenci:managed-end
    ```
 
-   - If `baseVersion` resolved (path a or b): write it as the ARG default, e.g. `ARG BASE_VERSION=0.9.0`.
-   - If unresolved (path c): write `ARG BASE_VERSION=latest`, then a comment line immediately after: `# No cenci-sandbox plugin version detected — using the :latest base image alias. See sandbox/README.md to pin BASE_VERSION manually, or install the cenci-sandbox plugin and re-run /cenci:configure.`
-
    **Per-fragment markers**: wrap each fragment's content in a `# cenci:fragment-begin <name>` / `# cenci:fragment-end <name>` marker pair, placed immediately before and after that fragment's own content within the managed block (see the example above). `<name>` is the fragment file's basename without `.dockerfile` (e.g. `sandbox/fragments/docker.dockerfile` → `docker`). This lets `watch/internal/sandbox/launcher`'s fragment-drift detector (#1048) identify exactly which installed fragment a block of content came from; an already-generated block with no per-fragment markers still gets detected, via that detector's legacy banner-line fallback.
 
    **Fragment concatenation order** (when multiple fragments apply, e.g. a monorepo union): **dotnet → node → playwright → go → python → rust → docker → azure**, regardless of the order projects were discovered in. Node is mandatory; the remaining fragments are stack-selected (docker and azure are config-selected — see the mapping table's Docker and Azure rules). Concatenate the selected `sandbox/fragments/*.dockerfile` file contents in that fixed order, each wrapped in its own per-fragment marker pair, applying the **.NET version substitution** from the mapping table above to the dotnet fragment only — every other fragment is included verbatim. Deduplicate — each fragment appears at most once even when multiple monorepo projects map to the same fragment.
@@ -1546,7 +1535,7 @@ For each MCP selected in question 5:
      Options: "Overwrite — wrap it in managed markers and replace with the generated block", "Skip — keep the existing file, still record `sandbox` in config.json", "Show existing — display the current file contents"
      - If Skip: still record `sandbox` in config.json, don't write the file.
      - If Show existing: read and display the file, then re-ask Overwrite/Skip.
-   - **File exists with malformed markers** (exactly one of `# cenci:managed-begin` / `# cenci:managed-end` present, markers out of order, or duplicate marker pairs): do **not** attempt a partial text replace — a malformed marker pair cannot be trusted to safely bound the managed block (and could itself be the result of a spoofed end-marker smuggled in via an unvalidated `baseVersion` — see the validation step above). Route this through the exact same Overwrite/Skip/Show conflict-check UX as the "no markers" case above — same prompt text, same three options, same behavior.
+   - **File exists with malformed markers** (exactly one of `# cenci:managed-begin` / `# cenci:managed-end` present, markers out of order, or duplicate marker pairs): do **not** attempt a partial text replace — a malformed marker pair cannot be trusted to safely bound the managed block. Route this through the exact same Overwrite/Skip/Show conflict-check UX as the "no markers" case above — same prompt text, same three options, same behavior.
 
    **Monorepo**: fragments are the mandatory Node runtime fragment plus the deduplicated union described in the Stack-to-fragment mapping table under question 9, concatenated in the dotnet → node → playwright → go → python → rust → docker → azure order above — one `.cenci/Dockerfile` for the whole repo, not one per project.
 
@@ -1889,7 +1878,6 @@ For each MCP selected in question 5:
   },
   "sandbox": {
     "enabled": true,
-    "baseVersion": "0.9.0",
     "dind": true,
     "azure": true
   },
@@ -1935,27 +1923,25 @@ The `sandbox` field carries three **independently toggled** sub-answers — ques
 ```bash
 bash "${CLAUDE_PLUGIN_ROOT}/skills/configure/scripts/merge-sandbox-config.sh" <path to existingConfig, or "-" for stdin> \
   --dockerfile <true|false, from question 9> \
-  --base-version <resolved baseVersion, or the literal "null" if unresolved or Q9=No> \
   --dind <true|false, from question 9b> \
   --azure <true|false, from question 9c>
 ```
 
 Run it as its own Bash call (per `cenci:shell-rules`). If `existingConfig` is null (first-ever configure run), pass `-` as the config argument and pipe `{}` in as stdin. The script prints the **full merged config** (not just the `sandbox` object) to stdout — treat that stdout as the new full config content going into step 6's write (after also stamping `configVersion` per above).
 
-`scripts/merge-sandbox-config.sh` (tested by its own `scripts/merge-sandbox-config.test.sh`) is the source of truth for the merge; the schema and outcomes below document its contract, not a procedure to hand-execute. On any non-zero exit from the script, do not use its (possibly empty) stdout as the new config content — read stderr for the cause. The script fails closed (exit 2) for several distinct reasons: `jq` missing, an unreadable existing config, invalid existing JSON, a missing/invalid `--dockerfile`/`--dind`/`--azure`/`--base-version` value, or an unknown argument. Every boolean flag is **required** — an omitted one would default to false and silently delete an existing opt-in, so the script refuses instead. If `jq` is genuinely unavailable, fall back to this manual procedure; for any other validation failure, fix the inputs (e.g. re-check the existing config's readability/JSON validity, the resolved flag values) and retry the script rather than falling back:
-- `sandbox.enabled` — `true` if the user opted in to question 9; omit the key entirely if declined (same pattern as `cicd` — never write `enabled: false`)
-- `sandbox.baseVersion` — the resolved sandbox plugin version baked into the generated `.cenci/Dockerfile`'s `ARG BASE_VERSION` default (see the baseVersion resolution algorithm in step 5e), or `null` when it could not be resolved; only present alongside `sandbox.enabled: true`
+`scripts/merge-sandbox-config.sh` (tested by its own `scripts/merge-sandbox-config.test.sh`) is the source of truth for the merge; the schema and outcomes below document its contract, not a procedure to hand-execute. On any non-zero exit from the script, do not use its (possibly empty) stdout as the new config content — read stderr for the cause. The script fails closed (exit 2) for several distinct reasons: `jq` missing, an unreadable existing config, invalid existing JSON, a missing/invalid `--dockerfile`/`--dind`/`--azure` value, or an unknown argument. Every boolean flag is **required** — an omitted one would default to false and silently delete an existing opt-in, so the script refuses instead. If `jq` is genuinely unavailable, fall back to this manual procedure; for any other validation failure, fix the inputs (e.g. re-check the existing config's readability/JSON validity, the resolved flag values) and retry the script rather than falling back:
+- `sandbox.enabled` — `true` if the user opted in to question 9; omit the key entirely if declined (same pattern as `cicd` — never write `enabled: false`). The script also deletes a legacy `sandbox.baseVersion` it finds on the existing config — that key is retired (see step 5e above).
 - `sandbox.dind` — `true` if the user opted in to question 9b; omit the key entirely if declined (never write `dind: false`)
 - `sandbox.azure` — `true` if the user opted in to question 9c; omit the key entirely if declined (never write `azure: false`). Read by `/cenci:configure` (to select `sandbox/fragments/azure.dockerfile`) **and** at launch by `cenci open`/`cenci audit` (`RepoAzureConfig` in `watch/internal/sandbox/launcher/azure.go`), which stage the host's `~/.azure` auth files read-only only for repos that set it
 
 Because the answers are independent, `sandbox` is written whenever **any** of them is Yes:
-- Q9=Yes, 9b=No, 9c=No → `"sandbox": { "enabled": true, "baseVersion": "<resolved>" }` (no `dind`/`azure` keys)
-- Q9=No, 9b=Yes, 9c=No → `"sandbox": { "dind": true }` (no `enabled`/`baseVersion` keys)
-- Q9=No, 9b=No, 9c=Yes → `"sandbox": { "azure": true }` (no `enabled`/`baseVersion`/`dind` keys)
-- Q9=Yes, 9b=Yes, 9c=Yes → `"sandbox": { "enabled": true, "baseVersion": "<resolved>", "dind": true, "azure": true }`
+- Q9=Yes, 9b=No, 9c=No → `"sandbox": { "enabled": true }` (no `dind`/`azure` keys)
+- Q9=No, 9b=Yes, 9c=No → `"sandbox": { "dind": true }` (no `enabled`/`azure` keys)
+- Q9=No, 9b=No, 9c=Yes → `"sandbox": { "azure": true }` (no `enabled`/`dind` keys)
+- Q9=Yes, 9b=Yes, 9c=Yes → `"sandbox": { "enabled": true, "dind": true, "azure": true }`
 - All No → omit `sandbox` entirely (same pattern as `cicd`)
 
-On re-configuration, merge into any existing `sandbox` object rather than replacing it wholesale — this preserves the sibling keys when only one answer changes (e.g. a dind-only re-config that answers 9b=No must drop only `dind` and retain an already-enabled `sandbox.enabled`/`baseVersion`/`azure`, and so on for each sibling).
+On re-configuration, merge into any existing `sandbox` object rather than replacing it wholesale — this preserves the sibling keys when only one answer changes (e.g. a dind-only re-config that answers 9b=No must drop only `dind` and retain an already-enabled `sandbox.enabled`/`azure`, and so on for each sibling).
 
 > **Not the same as `.claude/settings.json`'s `sandbox.enabled`.** Step 4 above always writes `"sandbox": { "enabled": false }` into `.claude/settings.json` — that key disables **Claude Code's own host sandbox**, because the cenci-sandbox container is the security boundary instead. This `.cenci/config.json` `sandbox` field is unrelated: it's this ticket's per-repo `.cenci/Dockerfile` toggle, consumed by cenci's configure skill and by `cenci sandbox build`'s per-repo image build — not by Claude Code itself. Same field name (`sandbox.enabled`), two different files, two different consumers, two unrelated meanings. Do not conflate them when reading or writing either file.
 
@@ -2070,8 +2056,7 @@ legacy one.
     "platform": "github-actions"
   },
   "sandbox": {
-    "enabled": true,
-    "baseVersion": "0.9.0"
+    "enabled": true
   }
 }
 ```
@@ -2251,7 +2236,7 @@ When migrating from an older config that has `ticketSystem`, `prSystem`, `ticket
    rm -f ${TMPDIR:-/tmp}/cenci/cenci-configure-<slug>-pr-body.md
    ```
 
-Report what was created and suggest next steps (e.g., "Try `/cenci:refine <ticket-id>` on a ticket"), including the PR URL from step 7. If question 14 (`### Autonomy Settings`) scaffolded an `automerge` block this run, say so explicitly and flag it for review, then point at the fleet-side next steps: `cenci dispatch plan-refined on` (once `planning.autonomy` is `lean` on `origin/main`) and `cenci automerge on` (once the scaffolded block has been reviewed) — the same verbs named in `### Autonomy Settings`'s own "Next step" block. If `sandbox.enabled` is `true`, mention the generated `.cenci/Dockerfile` and that `cenci sandbox build` (run from inside the repo, after the PR merges) builds the repo's own tailored image on top of the shared base. If `lazyboards.enabled` is `true`, list the generated `.lazyboards.yml` In Review actions with their keys, serve, and test commands (e.g., "`W` opens web-client's PR worktree, `S w` serves it with `ng serve`, `T w` runs its tests with `ng test --watch=false`") and point at `docs/orchestration.md` for the board recipe. Repeat the trust caveat here too, since this run's file ships as a PR: the generated shell actions and `cleanup` stay inert until `lazyboards trust` is run against the file's exact content, so trust must be re-granted after the PR merges if review changed a byte — and every teammate runs it once on their own clone. When the suggest-or-skip branch ran instead, report what happened (added actions, migrated to `keymaps:`, or "already complete — no changes"). If `sandbox.baseVersion` resolved to `null` (unresolved — see the baseVersion resolution in step 5e), the chat summary must explicitly say so (e.g., "Base version could not be auto-detected — see `sandbox/README.md` to pin `BASE_VERSION` manually") rather than leaving it only as an inline Dockerfile comment, so a user who doesn't open the generated file still learns the base version wasn't pinned.
+Report what was created and suggest next steps (e.g., "Try `/cenci:refine <ticket-id>` on a ticket"), including the PR URL from step 7. If question 14 (`### Autonomy Settings`) scaffolded an `automerge` block this run, say so explicitly and flag it for review, then point at the fleet-side next steps: `cenci dispatch plan-refined on` (once `planning.autonomy` is `lean` on `origin/main`) and `cenci automerge on` (once the scaffolded block has been reviewed) — the same verbs named in `### Autonomy Settings`'s own "Next step" block. If `sandbox.enabled` is `true`, mention the generated `.cenci/Dockerfile` and that `cenci sandbox build` (run from inside the repo, after the PR merges) builds the repo's own tailored image on top of the shared base. If `lazyboards.enabled` is `true`, list the generated `.lazyboards.yml` In Review actions with their keys, serve, and test commands (e.g., "`W` opens web-client's PR worktree, `S w` serves it with `ng serve`, `T w` runs its tests with `ng test --watch=false`") and point at `docs/orchestration.md` for the board recipe. Repeat the trust caveat here too, since this run's file ships as a PR: the generated shell actions and `cleanup` stay inert until `lazyboards trust` is run against the file's exact content, so trust must be re-granted after the PR merges if review changed a byte — and every teammate runs it once on their own clone. When the suggest-or-skip branch ran instead, report what happened (added actions, migrated to `keymaps:`, or "already complete — no changes").
 
 ### Board lifecycle labels
 
