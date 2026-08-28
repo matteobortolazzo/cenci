@@ -26,7 +26,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/matteobortolazzo/cenci/watch/internal/babysit"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/babysit"
 )
 
 // The following mirror internal/babysit's own unexported automerge reason

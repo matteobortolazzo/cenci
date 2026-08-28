@@ -5,7 +5,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/matteobortolazzo/cenci/watch/internal/ipc"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/ipc"
 )
 
 func TestDeliverEventSucceedsWithoutRecovery(t *testing.T) {

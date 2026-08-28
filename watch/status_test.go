@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/matteobortolazzo/cenci/watch/internal/ipc"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/ipc"
 )
 
 // TestWidgetJSONAndWaybarSubcommandsBothRoute covers the widget-json split

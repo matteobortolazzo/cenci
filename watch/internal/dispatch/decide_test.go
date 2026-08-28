@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/matteobortolazzo/cenci/watch/pkg/watch"
+	"github.com/matteobortolazzo/cenci/watch/v2/pkg/watch"
 )
 
 // testConfig has generous caps so no gate trips unless a case sets it.

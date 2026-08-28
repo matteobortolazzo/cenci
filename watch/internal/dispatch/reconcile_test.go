@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/matteobortolazzo/cenci/watch/pkg/watch"
+	"github.com/matteobortolazzo/cenci/watch/v2/pkg/watch"
 )
 
 // reconcileConfig has a 5m grace and a retry budget of 2 so a case can drive

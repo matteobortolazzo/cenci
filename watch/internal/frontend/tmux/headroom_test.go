@@ -4,8 +4,8 @@ import (
 	"math"
 	"testing"
 
-	"github.com/matteobortolazzo/cenci/watch/internal/config"
-	"github.com/matteobortolazzo/cenci/watch/internal/tmux/tmuxtest"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/config"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/tmux/tmuxtest"
 )
 
 // TestRenderHeadroom_SingleAgent covers #171: a single agent-type's headroom

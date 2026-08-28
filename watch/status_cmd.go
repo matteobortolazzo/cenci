@@ -8,12 +8,12 @@ import (
 	"os"
 	"strings"
 
-	"github.com/matteobortolazzo/cenci/watch/internal/config"
-	"github.com/matteobortolazzo/cenci/watch/internal/daemon"
-	"github.com/matteobortolazzo/cenci/watch/internal/dispatch"
-	"github.com/matteobortolazzo/cenci/watch/internal/frontend/status"
-	"github.com/matteobortolazzo/cenci/watch/internal/ipc"
-	"github.com/matteobortolazzo/cenci/watch/pkg/watch"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/config"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/daemon"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/dispatch"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/frontend/status"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/ipc"
+	"github.com/matteobortolazzo/cenci/watch/v2/pkg/watch"
 )
 
 // runWidgetJSON implements the hidden plumbing subcommand `widget-json`

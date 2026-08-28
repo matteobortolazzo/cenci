@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/matteobortolazzo/cenci/watch/pkg/watch"
+	"github.com/matteobortolazzo/cenci/watch/v2/pkg/watch"
 )
 
 func TestFailedWindowsMapping(t *testing.T) {

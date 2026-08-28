@@ -10,13 +10,13 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/matteobortolazzo/cenci/watch/internal/config"
-	"github.com/matteobortolazzo/cenci/watch/internal/daemon"
-	"github.com/matteobortolazzo/cenci/watch/internal/dispatch"
-	tmuxfe "github.com/matteobortolazzo/cenci/watch/internal/frontend/tmux"
-	"github.com/matteobortolazzo/cenci/watch/internal/ipc"
-	"github.com/matteobortolazzo/cenci/watch/internal/logging"
-	"github.com/matteobortolazzo/cenci/watch/internal/tmux"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/config"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/daemon"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/dispatch"
+	tmuxfe "github.com/matteobortolazzo/cenci/watch/v2/internal/frontend/tmux"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/ipc"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/logging"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/tmux"
 )
 
 // daemonRestartReadyTimeout bounds how long `daemon restart` waits for the

@@ -10,9 +10,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/matteobortolazzo/cenci/watch/internal/planfile"
-	"github.com/matteobortolazzo/cenci/watch/internal/run"
-	"github.com/matteobortolazzo/cenci/watch/pkg/watch"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/planfile"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/run"
+	"github.com/matteobortolazzo/cenci/watch/v2/pkg/watch"
 )
 
 // runFn is the spawn seam: applyDispatch calls it instead of run.Run directly

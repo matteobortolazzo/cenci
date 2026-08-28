@@ -8,12 +8,12 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/matteobortolazzo/cenci/watch/internal/babysit"
-	"github.com/matteobortolazzo/cenci/watch/internal/closecmd"
-	"github.com/matteobortolazzo/cenci/watch/internal/dispatch"
-	"github.com/matteobortolazzo/cenci/watch/internal/ipc"
-	"github.com/matteobortolazzo/cenci/watch/internal/tmux"
-	"github.com/matteobortolazzo/cenci/watch/pkg/watch"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/babysit"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/closecmd"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/dispatch"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/ipc"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/tmux"
+	"github.com/matteobortolazzo/cenci/watch/v2/pkg/watch"
 )
 
 // registerPendingClose sends w to the daemon's default event socket as a

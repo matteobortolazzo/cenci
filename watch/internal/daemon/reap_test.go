@@ -5,10 +5,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/matteobortolazzo/cenci/watch/internal/frontend"
-	"github.com/matteobortolazzo/cenci/watch/internal/ipc"
-	"github.com/matteobortolazzo/cenci/watch/internal/tmux"
-	"github.com/matteobortolazzo/cenci/watch/internal/tmux/tmuxtest"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/frontend"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/ipc"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/tmux"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/tmux/tmuxtest"
 )
 
 // TestDaemon_SweepPaneGoneTriggersOneReap covers the Phase-2 stale-window

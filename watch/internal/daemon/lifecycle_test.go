@@ -5,10 +5,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/matteobortolazzo/cenci/watch/internal/detect"
-	"github.com/matteobortolazzo/cenci/watch/internal/ipc"
-	"github.com/matteobortolazzo/cenci/watch/internal/tmux"
-	"github.com/matteobortolazzo/cenci/watch/internal/tmux/tmuxtest"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/detect"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/ipc"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/tmux"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/tmux/tmuxtest"
 )
 
 func TestDaemon_FullLifecycle(t *testing.T) {

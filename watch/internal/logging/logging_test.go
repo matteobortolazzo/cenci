@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/matteobortolazzo/cenci/watch/internal/logging"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/logging"
 )
 
 // decodeJSONLine parses a single JSON log line, failing the test if it

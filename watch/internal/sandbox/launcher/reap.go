@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/matteobortolazzo/cenci/watch/internal/sandbox"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/sandbox"
 )
 
 // reapScanScript is the minimal POSIX in-container scan (originally ported

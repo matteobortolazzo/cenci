@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/matteobortolazzo/cenci/watch/internal/errcode"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/errcode"
 )
 
 // ociCreateStderr is the verbatim shape Docker streams when the OCI runtime

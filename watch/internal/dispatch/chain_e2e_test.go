@@ -27,9 +27,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/matteobortolazzo/cenci/watch/internal/babysit"
-	"github.com/matteobortolazzo/cenci/watch/internal/pipeline"
-	"github.com/matteobortolazzo/cenci/watch/internal/run"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/babysit"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/pipeline"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/run"
 )
 
 const chainRepoConfigLean = `{"planning":{"autonomy":"lean"},"automerge":{"maxChangedFiles":50,"maxDiffLines":5000,"protectedPaths":[],"mergeMethod":"squash"}}`

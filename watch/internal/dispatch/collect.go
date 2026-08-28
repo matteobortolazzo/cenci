@@ -9,9 +9,9 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/matteobortolazzo/cenci/watch/internal/pipeline"
-	"github.com/matteobortolazzo/cenci/watch/internal/planfile"
-	"github.com/matteobortolazzo/cenci/watch/pkg/watch"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/pipeline"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/planfile"
+	"github.com/matteobortolazzo/cenci/watch/v2/pkg/watch"
 )
 
 // currentGitHubLogin returns the login of the active gh account. Dispatch uses

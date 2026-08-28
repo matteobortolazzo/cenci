@@ -5,7 +5,7 @@ import (
 	"io"
 	"strings"
 
-	"github.com/matteobortolazzo/cenci/watch/internal/errcode"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/errcode"
 )
 
 // ociRuntimeCreateMarker is the substring the container runtime's daemon puts

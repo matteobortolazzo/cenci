@@ -12,10 +12,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/matteobortolazzo/cenci/watch/internal/daemon"
-	"github.com/matteobortolazzo/cenci/watch/internal/errcode"
-	"github.com/matteobortolazzo/cenci/watch/internal/ipc"
-	"github.com/matteobortolazzo/cenci/watch/internal/sandbox"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/daemon"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/errcode"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/ipc"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/sandbox"
 )
 
 // Options are the launch parameters `cenci open` collects: which agent and

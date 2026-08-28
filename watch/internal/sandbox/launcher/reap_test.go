@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/matteobortolazzo/cenci/watch/internal/exectest"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/exectest"
 )
 
 // writeReapFakes writes fake docker + tmux for the two smoke cases below (the

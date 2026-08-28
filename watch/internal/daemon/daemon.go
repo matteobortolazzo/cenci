@@ -7,14 +7,14 @@ import (
 	"os"
 	"time"
 
-	"github.com/matteobortolazzo/cenci/watch/internal/babysit"
-	"github.com/matteobortolazzo/cenci/watch/internal/config"
-	"github.com/matteobortolazzo/cenci/watch/internal/detect"
-	"github.com/matteobortolazzo/cenci/watch/internal/frontend"
-	"github.com/matteobortolazzo/cenci/watch/internal/ipc"
-	"github.com/matteobortolazzo/cenci/watch/internal/reap"
-	"github.com/matteobortolazzo/cenci/watch/internal/tmux"
-	"github.com/matteobortolazzo/cenci/watch/pkg/watch"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/babysit"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/config"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/detect"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/frontend"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/ipc"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/reap"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/tmux"
+	"github.com/matteobortolazzo/cenci/watch/v2/pkg/watch"
 )
 
 // windowKiller is the minimal seam the daemon needs to kill a tmux window on

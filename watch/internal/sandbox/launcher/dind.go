@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"runtime"
 
-	"github.com/matteobortolazzo/cenci/watch/internal/sandbox"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/sandbox"
 )
 
 // RepoDindConfig reads <repoRoot>/.cenci/config.json's "sandbox.dind" key
