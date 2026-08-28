@@ -169,8 +169,8 @@ Every ticket this workflow creates — each split child — inherits the parent'
 omitted entirely when the parent has none) and every parent label except the 10 lifecycle/transient
 and refinement-granted markers (`Refined`, `Working`, `Planned`, `In Review`, `Implemented`,
 `Design`, `Designed`, `automerge:ok`, `Browser`, `ui:visual-check` -- `Design`/`Designed` are
-kept purely for legacy compat, so a pre-Pencil-removal parent's leftover label is never
-inherited onto a new child), on top of its own seed
+kept purely for legacy compat, so a parent's leftover label from before the design-stage
+removal is never inherited onto a new child), on top of its own seed
 labels — `automerge:ok`, `Browser`, `ui:visual-check` are never inherited from the parent's
 current labels; each child's own copy of those three, if any, comes only from the Confirmation
 Gate above; the parent-metadata fetch is unconditional and runs before any write — if it fails

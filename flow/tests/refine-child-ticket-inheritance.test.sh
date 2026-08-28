@@ -122,8 +122,8 @@ assert_file_contains "${REFINE_ENSURE_ISSUE_SCRIPT}" "${SLURPFILE_MARKER}" \
 assert_file_contains "${REFINE_ENSURE_ISSUE_SCRIPT}" "${CHILD_SEED_MARKER}" \
   "must seed a split child's labels array with Refined plus the carried-over parent labels (retargeted from refine/SKILL.md's Pass 1 by #876)"
 # The DESIGN_SEED_MARKER companion-design-ticket jq example was removed from
-# ensure-issue.sh's comments along with the rest of Pencil/design -- refine
-# no longer creates a companion design ticket at all, so there is no
+# ensure-issue.sh's comments along with the rest of the design-stage removal
+# -- refine no longer creates a companion design ticket at all, so there is no
 # design-ticket seed-array example left to document. The 10-entry
 # LIFECYCLE_EXCLUSION_10_MARKER above still keeps "Design","Designed" for
 # legacy compat (a pre-removal parent's leftover label must never be

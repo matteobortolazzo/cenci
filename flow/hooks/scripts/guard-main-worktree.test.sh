@@ -568,14 +568,14 @@ run_guard_with_tmpdir "${TMPDIR_REPO}" "${TEST_ROOT}/no-such-dir" "{\"tool_input
 assert_exit "TMPDIR non-existent dir: source write blocked" 2
 
 # ── Deferred item 4 cross-file pin (#749) ────────────────────────────
-# Pencil/design's *.pen | */DESIGN.md | */designs/* allowlist arm was
-# removed entirely along with the rest of Pencil/design -- this deliberately
+# The *.pen | */DESIGN.md | */designs/* allowlist arm was removed entirely
+# along with the rest of the design-stage removal -- this deliberately
 # TIGHTENS the guard, so a main-worktree write under designs/ is now blocked
 # like any other source path rather than allowlisted. The
 # ${TMPDIR:-/tmp}/cenci/design-comment-<number>.md body-file convention is
 # unaffected: it stays allowed on its own merits via the general TMPDIR
 # widening below, not via any design-specific arm.
-echo "case: designs/DESIGN.md Write target is now blocked (Pencil/design allowlist arm removed)"
+echo "case: designs/DESIGN.md Write target is now blocked (design-stage allowlist arm removed)"
 run_guard_with_tmpdir "${TMPDIR_REPO}" "${CUSTOM_TMP}" "{\"tool_input\":{\"file_path\":\"${TMPDIR_REPO}/designs/DESIGN.md\"}}"
 assert_exit "designs/DESIGN.md write blocked" 2
 

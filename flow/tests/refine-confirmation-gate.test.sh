@@ -127,7 +127,7 @@ CHILD_OWN_BLOCK_TEXT_MARKER="that child's own block text"
 CHILD_BROWSER_QUESTION_MARKER='Does child (K/N)'
 CHILD_BROWSER_QUESTION_BATCH_MARKER='Batch up to 4 children per `AskUserQuestion` call, one question per child, in child order'
 # The design-only-child skip was folded into the general "no frontend/
-# browser signal" skip when Pencil/design was removed -- there is no
+# browser signal" skip when the design stage was removed -- there is no
 # separate design classification for a child to be "design-only" any more.
 CHILD_NO_SIGNAL_SKIP_MARKER='A child with no frontend/browser signal is not asked at all'
 PARENT_ANSWER_NOT_PROPAGATED_MARKER='is never propagated to any child'
@@ -137,7 +137,7 @@ PARENT_ANSWER_NOT_PROPAGATED_MARKER='is never propagated to any child'
 # ensure-issue.sh-based child-creation path AND phase-9-pr.md/address-review/
 # SKILL.md's legacy jq-based followup-creation sites -- intentionally still
 # excludes "Design","Designed" as a defensive legacy-compat measure: a
-# parent ticket refined before the Pencil/design removal may still carry one
+# parent ticket refined before the design-stage removal may still carry one
 # of those labels, and it must never be inherited onto a new child or
 # followup ticket. See the note at refine/SKILL.md's own call site.
 EXCLUSION_10_MARKER='"Refined","Working","Planned","In Review","Implemented","Design","Designed","automerge:ok","Browser","ui:visual-check"'

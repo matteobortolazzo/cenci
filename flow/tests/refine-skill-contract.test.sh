@@ -365,8 +365,8 @@ fi
 # #1055 -- restore a human-visible `Depends on #<n>` prose dependency line
 # alongside the native `--add-blocked-by` link, as a PERMANENT supplement
 # (never a replacement, never a transitional shim). Design-path coverage was
-# dropped along with the design/pencil removal (the companion-design-ticket
-# dependency line no longer exists — see the Pencil removal work); the
+# dropped along with the design-stage removal (the companion-design-ticket
+# dependency line no longer exists — see that removal work); the
 # non-design sibling-dependency coverage below still applies.
 # =====================================================================
 

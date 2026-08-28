@@ -161,10 +161,10 @@ if [[ -n "${configure_skill}" ]]; then
   # Vacuity gating (#813, root AGENTS.md): each negative below is preceded
   # by the positive anchor that proves its host section still exists, so a
   # section deletion/rename cannot make the negative pass vacuously.
-  # NOTE: the former "- **editor**:" legend bullet was Pencil-specific
-  # ("Provided by the Pencil editor over its own connection") and was
-  # removed along with the rest of Pencil/design; no MCP catalog row uses
-  # "editor" scope any more, so that positive assertion is gone too.
+  # NOTE: the former "- **editor**:" legend bullet was design-tool-specific
+  # ("Provided by the design editor over its own connection") and was
+  # removed along with the rest of the design-stage removal; no MCP catalog
+  # row uses "editor" scope any more, so that positive assertion is gone too.
   assert_not_contains "${configure_skill}" \
     "- **plugin**: Already defined in cenci's" \
     "796 skills/configure/SKILL.md: stale plugin-scope legend bullet still present"
@@ -311,8 +311,8 @@ fi
 # =====================================================================
 # 8. (removed) formerly: flow/skills/design/SKILL.md heading renumbering +
 #    Label "Working" (at start) placement. skills/design/ was deleted along
-#    with the rest of Pencil/design (see PR 2 of the Pencil removal) — there
-#    is no longer a design skill to assert structure on.
+#    with the rest of the design-stage removal (see PR 2 of that removal) —
+#    there is no longer a design skill to assert structure on.
 # =====================================================================
 
 # =====================================================================
@@ -367,7 +367,7 @@ fi
 #     its own two contract suites are out of scope here (AC #5) — this case
 #     covers only the four non-escalation sites plus the two PR-only sites.
 #     (The design-summary site was removed along with skills/design/ — see
-#     the Pencil/design removal.)
+#     the design-stage removal.)
 # =====================================================================
 
 # Pinned literals (byte-exact — see 951-pinned-literals.md's Non-escalation

@@ -285,7 +285,7 @@ assert_file_lacks "${REFINE_SKILL}" "--json number,title,body,labels,state,assig
 # refiner.md/refine's codex.md -- unlike context-gatherer.md's copy, which
 # planner.md's refinement-settled-posture suppression rule still reads via
 # the digest's `ticketAuthor:` line. It was removed along with the rest of
-# Pencil/design rather than kept as unused dead code.
+# the design-stage removal rather than kept as unused dead code.
 assert_file_lacks "${REFINE_SKILL}" "${SECTION1_ASSOCIATION_CALL}" \
   "refine's own gh api .../issues/<number> --jq '.author_association' read must be gone -- it had no consumer left after the Design Coverage Check was removed"
 

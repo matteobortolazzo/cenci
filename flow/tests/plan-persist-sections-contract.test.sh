@@ -12,10 +12,10 @@
 #   - `flow/skills/implement/codex.md`'s mirror clause (adapter-contract
 #     parity per `docs/adapter-contract.md`).
 #
-# NOTE (Pencil/design removal): the required-heading count dropped from four
+# NOTE (design-stage removal): the required-heading count dropped from four
 # to three when `## Design Context` and its self-repair path (append
 # `## Design Context` / `N/A`, report the repair) were removed along with
-# the rest of Pencil/design — all three remaining headings (`## Ticket
+# the rest of the design-stage removal — all three remaining headings (`## Ticket
 # Details`, `## Implementation Plan`, `## Architectural Context`) are now
 # hard-stop-only, with no self-repair branch for any of them. The
 # `watch/internal/pipeline/planfile.go` cross-boundary check below was
@@ -201,7 +201,7 @@ HEAD_TICKET='## Ticket Details'
 HEAD_IMPL='## Implementation Plan'
 HEAD_ARCH='## Architectural Context'
 # HEAD_DESIGN / `## Design Context` was dropped from requiredPlanSections
-# along with the rest of Pencil/design -- plan-check now requires exactly
+# along with the rest of the design-stage removal -- plan-check now requires exactly
 # three headings, and watch/internal/pipeline/planfile.go's
 # requiredPlanSections literal was updated to match (see the cross-boundary
 # sync check at the bottom of this file).
@@ -290,7 +290,7 @@ if require_doc CONTENT2 "${FILE2}"; then
   # `## Ticket Details` already appears once elsewhere in codex.md (the
   # Technical Notes fallback) and would pass vacuously on its own.
   # `## Design Context` was dropped from this parenthetical along with the
-  # rest of Pencil/design, and there is no self-repair left to assert on
+  # rest of the design-stage removal, and there is no self-repair left to assert on
   # (all three remaining headings are hard-stop-only).
   CODEX_THREE_HEADING_MARKER='(`## Ticket Details`, `## Implementation Plan`, `## Architectural Context` — the `requiredPlanSections` list in `watch/internal/pipeline/planfile.go`)'
   assert_contains_ws "${CONTENT2}" "${CODEX_THREE_HEADING_MARKER}" "${FILE2} (three-heading parenthetical + planfile.go reference)"

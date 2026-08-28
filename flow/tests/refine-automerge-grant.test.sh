@@ -76,7 +76,7 @@ AUTOMERGE_DESCRIPTION_MARKER='Human granted hands-off merge at refinement — ba
 # an exact "NOT <identifier>"/hyphenated substring, not the bare identifier,
 # since the bare identifiers already exist elsewhere in the file today.
 # `isDesignTicket` was dropped from this formula along with the rest of
-# Pencil/design (there is no longer a design-ticket classification to
+# the design-stage removal (there is no longer a design-ticket classification to
 # override on) — only the browser/visual-check overrides remain.
 AUTOMERGE_WITHHOLD_BROWSER_MARKER='NOT browserRequired'
 AUTOMERGE_WITHHOLD_VISUALCHECK_MARKER='visual-check-signals-match'

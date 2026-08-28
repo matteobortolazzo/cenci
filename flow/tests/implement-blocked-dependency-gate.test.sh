@@ -9,7 +9,7 @@
 #      `gh issue view <number> --repo <owner>/<repo> --json blockedBy` call
 #      (never merged into §1's field list), renumbering the existing
 #      `### 6. Write the bundle file` accordingly (numbering as of #1054;
-#      the later Pencil/design removal dropped the `### 4. Design context`
+#      the later design-stage removal dropped the `### 4. Design context`
 #      step entirely and shifted every step below it down by one, taking
 #      that step's own `(see §N)` cross-reference with it), and a mandatory
 #      `blockers:` digest line with a five-form grammar (none / entry list / incomplete /
@@ -351,7 +351,7 @@ require_content CTX_CONTENT "${CONTEXT_GATHERER}" "context-gatherer.md"
 #
 # Numbering note: skills/design/ and agents/context-gatherer.md's own
 # `### 4. Design context (if a design path was provided)` step were removed
-# entirely by the Pencil/design removal, which renumbered every later step
+# entirely by the design-stage removal, which renumbered every later step
 # down by one (old §5 Blocking dependencies -> §4 Project context stays
 # §4... see the file itself: the surviving order is 1 Fetch the ticket,
 # 2 Parent-child detection, 3 Discover attachments, 4 Project context,
@@ -443,7 +443,7 @@ assert_file_contains "${IMPLEMENT_SKILL}" "The single exception is \`## Blocked-
   "SKILL.md's post-digest 'do not re-fetch the ticket in the main agent' rule must name the gate's fallback probe as its exception"
 # The former "not the precedent for this probe" correction (### Design Check
 # already issuing this idiom) no longer applies -- `### Design Check (hard
-# gate)` was removed entirely by the Pencil/design removal, so there is no
+# gate)` was removed entirely by the design-stage removal, so there is no
 # stale claim left to correct.
 
 # --- The digest store list must retain the blockers: line, since Phase 1's
@@ -522,7 +522,7 @@ if require_section GATE_SECTION "${SKILL_CONTENT}" "## Blocked-Dependency Gate" 
     "SKILL.md (## Blocked-Dependency Gate) already-claimed branch must forbid leaving the stranded board state unreported"
 
   # Design-ticket routing (removed): `### Design Check (hard gate)` and its
-  # `/cenci:design` routing were removed entirely by the Pencil/design
+  # `/cenci:design` routing were removed entirely by the design-stage
   # removal, so there is no design-ticket case for this gate to name or
   # route to any more.
 fi

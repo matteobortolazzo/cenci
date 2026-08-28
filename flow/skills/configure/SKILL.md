@@ -1970,10 +1970,6 @@ The `lazyboards` field is present when question 10 was answered Yes **or** a
 
 Omit `lazyboards` entirely when the user says No (same pattern as `cicd`/`sandbox`).
 
-A `pencil` object left over from a configure run that predates cenci's removal of the
-Pencil design stage is **inert** — nothing reads it. Leave it in place on merge (it is
-harmless) or drop it; neither choice changes behavior, and its presence is never an error.
-
 The `security` field is optional and is **never written by a configure prompt** — there is
 no question for it. It is a manually-editable escape hatch that lets a project extend
 implement's Trivial-Ticket Triage sensitive-path backstop (see `skills/implement/SKILL.md`,
