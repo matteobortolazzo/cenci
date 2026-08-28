@@ -37,7 +37,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/matteobortolazzo/cenci/watch/internal/run"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/run"
 )
 
 // chainRunOnceExpectingError runs one real dispatch.RunOnce pass against cfg,

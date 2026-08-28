@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/matteobortolazzo/cenci/watch/internal/sandbox"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/sandbox"
 )
 
 // -- cenci audit (ticket #588) -------------------------------------------

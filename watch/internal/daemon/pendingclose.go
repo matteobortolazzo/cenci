@@ -5,9 +5,9 @@ import (
 	"log"
 	"time"
 
-	"github.com/matteobortolazzo/cenci/watch/internal/detect"
-	"github.com/matteobortolazzo/cenci/watch/internal/frontend"
-	"github.com/matteobortolazzo/cenci/watch/internal/ipc"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/detect"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/frontend"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/ipc"
 )
 
 // pendingCloseRecheckInterval throttles how often one blocked pending-close

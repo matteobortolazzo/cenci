@@ -27,7 +27,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/matteobortolazzo/cenci/watch/internal/planfile"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/planfile"
 )
 
 // Sentinel errors, detectable via errors.Is at the package boundary (rule

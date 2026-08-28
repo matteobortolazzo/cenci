@@ -7,7 +7,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/matteobortolazzo/cenci/watch/internal/daemon"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/daemon"
 )
 
 // ErrWindowSpawned is the sentinel a caller detects via errors.Is to

@@ -10,8 +10,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/matteobortolazzo/cenci/watch/internal/dispatch"
-	"github.com/matteobortolazzo/cenci/watch/pkg/watch"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/dispatch"
+	"github.com/matteobortolazzo/cenci/watch/v2/pkg/watch"
 )
 
 // -- dispatch enroll/unenroll/status sub-verbs (ticket #121) ---------------

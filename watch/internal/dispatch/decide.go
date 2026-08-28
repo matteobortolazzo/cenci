@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/matteobortolazzo/cenci/watch/internal/pipeline"
-	"github.com/matteobortolazzo/cenci/watch/pkg/watch"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/pipeline"
+	"github.com/matteobortolazzo/cenci/watch/v2/pkg/watch"
 )
 
 // Stage-gate skip reasons (#732). reasonStageProbeUnknown is deliberately

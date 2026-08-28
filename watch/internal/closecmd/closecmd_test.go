@@ -4,8 +4,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/matteobortolazzo/cenci/watch/internal/closecmd"
-	"github.com/matteobortolazzo/cenci/watch/pkg/watch"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/closecmd"
+	"github.com/matteobortolazzo/cenci/watch/v2/pkg/watch"
 )
 
 type fakeKiller struct {

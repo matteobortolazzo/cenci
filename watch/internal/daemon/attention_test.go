@@ -3,9 +3,9 @@ package daemon
 import (
 	"testing"
 
-	"github.com/matteobortolazzo/cenci/watch/internal/ipc"
-	"github.com/matteobortolazzo/cenci/watch/internal/tmux/tmuxtest"
-	"github.com/matteobortolazzo/cenci/watch/pkg/watch"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/ipc"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/tmux/tmuxtest"
+	"github.com/matteobortolazzo/cenci/watch/v2/pkg/watch"
 )
 
 func TestBuildSnapshot_AttentionOverlayAppendsFailed(t *testing.T) {

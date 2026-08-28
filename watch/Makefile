@@ -1,5 +1,5 @@
 BINARY := cenci
-MODULE := github.com/matteobortolazzo/cenci/watch
+MODULE := github.com/matteobortolazzo/cenci/watch/v2
 VERSION ?= dev
 
 PLATFORMS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64

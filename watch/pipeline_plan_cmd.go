@@ -88,7 +88,7 @@ import (
 	"io"
 	"os"
 
-	"github.com/matteobortolazzo/cenci/watch/internal/pipeline"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/pipeline"
 )
 
 const pipelinePlanCheckUsage = "cenci pipeline plan-check: usage: cenci pipeline plan-check <id> " +

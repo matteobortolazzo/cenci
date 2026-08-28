@@ -5,9 +5,9 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/matteobortolazzo/cenci/watch/internal/detect"
-	"github.com/matteobortolazzo/cenci/watch/internal/frontend"
-	tmuxc "github.com/matteobortolazzo/cenci/watch/internal/tmux"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/detect"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/frontend"
+	tmuxc "github.com/matteobortolazzo/cenci/watch/v2/internal/tmux"
 )
 
 const logMaxLen = 50

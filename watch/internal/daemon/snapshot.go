@@ -4,8 +4,8 @@ import (
 	"sort"
 	"time"
 
-	"github.com/matteobortolazzo/cenci/watch/internal/detect"
-	"github.com/matteobortolazzo/cenci/watch/internal/ipc"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/detect"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/ipc"
 )
 
 func (d *Daemon) broadcast() {

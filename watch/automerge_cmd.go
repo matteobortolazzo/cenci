@@ -8,7 +8,7 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/matteobortolazzo/cenci/watch/internal/dispatch"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/dispatch"
 )
 
 // runAutomerge implements `cenci automerge on|off|status` (#964): the CLI

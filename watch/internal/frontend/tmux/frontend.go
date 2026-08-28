@@ -9,11 +9,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/matteobortolazzo/cenci/watch/internal/config"
-	"github.com/matteobortolazzo/cenci/watch/internal/detect"
-	"github.com/matteobortolazzo/cenci/watch/internal/frontend"
-	"github.com/matteobortolazzo/cenci/watch/internal/ipc"
-	tmuxc "github.com/matteobortolazzo/cenci/watch/internal/tmux"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/config"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/detect"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/frontend"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/ipc"
+	tmuxc "github.com/matteobortolazzo/cenci/watch/v2/internal/tmux"
 )
 
 // Frontend styles tmux windows to mirror agent session state.

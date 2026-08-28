@@ -30,7 +30,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/matteobortolazzo/cenci/watch/internal/exectest"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/exectest"
 )
 
 // -- usage/exit-2 cases for each new verb's required flags -----------------

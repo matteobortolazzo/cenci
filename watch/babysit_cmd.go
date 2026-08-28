@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/matteobortolazzo/cenci/watch/internal/babysit"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/babysit"
 )
 
 // babysitUsage is the one-line usage hint for `cenci babysit <pr> --agent

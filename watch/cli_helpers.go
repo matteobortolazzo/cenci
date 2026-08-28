@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/matteobortolazzo/cenci/watch/internal/sandbox/launcher"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/sandbox/launcher"
 )
 
 // rejectExtra enforces the strict-parsing convention shared by every cenci

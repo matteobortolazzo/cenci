@@ -7,8 +7,8 @@ import (
 	"io"
 	"os"
 
-	"github.com/matteobortolazzo/cenci/watch/internal/sandbox"
-	"github.com/matteobortolazzo/cenci/watch/internal/sandbox/launcher"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/sandbox"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/sandbox/launcher"
 )
 
 // diagnoseUsage is the one-line grammar shown on a diagnose usage error (a
