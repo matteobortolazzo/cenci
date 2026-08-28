@@ -10,7 +10,7 @@
 #
 # Usage:
 #   merge-sandbox-config.sh <existing-config-path|-> \
-#     --dockerfile <true|false> --base-version <version|null> \
+#     --dockerfile <true|false> \
 #     --dind <true|false> --azure <true|false>
 #
 # <existing-config-path|-> is the current .cenci/config.json contents: a
@@ -21,8 +21,9 @@
 #
 # Merge rules:
 #   sandbox := .sandbox // {}
-#   --dockerfile true  -> sandbox.enabled = true, sandbox.baseVersion = <v|null>
-#   --dockerfile false -> delete sandbox.enabled and sandbox.baseVersion
+#   --dockerfile true  -> sandbox.enabled = true, and delete any legacy
+#                          sandbox.baseVersion
+#   --dockerfile false -> delete sandbox.enabled and legacy sandbox.baseVersion
 #                          (leaves other sandbox keys, including dind, untouched)
 #   --dind true         -> sandbox.dind = true
 #   --dind false        -> delete sandbox.dind
@@ -41,7 +42,7 @@
 set -uo pipefail
 
 usage() {
-  echo "usage: merge-sandbox-config.sh <existing-config-path|-> --dockerfile <true|false> --base-version <version|null> --dind <true|false> --azure <true|false>" >&2
+  echo "usage: merge-sandbox-config.sh <existing-config-path|-> --dockerfile <true|false> --dind <true|false> --azure <true|false>" >&2
   exit 2
 }
 
@@ -52,7 +53,6 @@ CONFIG_SRC="$1"
 shift
 
 DOCKERFILE=""
-BASE_VERSION=""
 DIND=""
 AZURE=""
 
@@ -64,10 +64,6 @@ while [[ $# -gt 0 ]]; do
       ;;
     --dockerfile)
       DOCKERFILE="${2:-}"
-      shift 2 || usage
-      ;;
-    --base-version)
-      BASE_VERSION="${2:-}"
       shift 2 || usage
       ;;
     --dind)
@@ -90,8 +86,6 @@ done
 # from a repo that had opted in. Fail closed instead, like every other flag.
 [[ "$AZURE" == "true" || "$AZURE" == "false" ]] \
   || { echo "merge-sandbox-config.sh: --azure must be true or false" >&2; exit 2; }
-[[ -n "$BASE_VERSION" ]] \
-  || { echo "merge-sandbox-config.sh: --base-version is required (a version string or the literal \"null\")" >&2; exit 2; }
 
 if [[ "$CONFIG_SRC" == "-" ]]; then
   if ! EXISTING_RAW="$(cat)"; then
@@ -113,15 +107,13 @@ EXISTING="$(jq -c '. // {}' <<<"$EXISTING_RAW" 2>/dev/null)" \
 
 jq -c \
   --argjson dockerfileOn "$DOCKERFILE" \
-  --arg baseVersion "$BASE_VERSION" \
   --argjson dindOn "$DIND" \
   --argjson azureOn "$AZURE" \
   '
-  ($baseVersion | if . == "null" then null else . end) as $bv
-  | (.sandbox // {}) as $sandbox
+  (.sandbox // {}) as $sandbox
   | (
       if $dockerfileOn then
-        $sandbox + {enabled: true, baseVersion: $bv}
+        (($sandbox + {enabled: true}) | del(.baseVersion))
       else
         ($sandbox | del(.enabled, .baseVersion))
       end

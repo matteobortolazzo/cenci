@@ -500,6 +500,10 @@ docker build --build-arg BASE_VERSION=latest \
              -t cenci-sandbox:latest sandbox/
 ```
 
+A generated per-repo `.cenci/Dockerfile` (see [Per-repo images](#per-repo-images) below)
+carries that same `ARG BASE_VERSION=latest` default, so a bare `docker build -f
+.cenci/Dockerfile .cenci` also works once `cenci sandbox build-base` has run.
+
 ## Architecture
 
 ### Two-image model: base + monolith
@@ -550,6 +554,10 @@ which repos still exist on disk.
 
 `/cenci:configure` generates and maintains `.cenci/Dockerfile` automatically
 from the repo's detected stack (question 9) — you normally don't hand-write this file.
+The generated `ARG BASE_VERSION` always defaults to `latest` — never a
+plugin-version-derived pin — since `cenci-sandbox-base` is never tagged with a semver;
+`cenci sandbox build` always overrides it at build time with the content-hash tag
+described above.
 Every generated image includes the Node fragment so the isolated updater can install either
 npm-distributed agent; it adds the remaining fragments required by the detected stack.
 The fragments are wrapped in

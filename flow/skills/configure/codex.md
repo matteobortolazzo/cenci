@@ -45,7 +45,6 @@ JSON for both clients:
 bash "${PLUGIN_ROOT}/skills/configure/scripts/merge-sandbox-config.sh" \
   <path to existingConfig, or "-" piped from stdin when null> \
   --dockerfile <true|false, from the sandbox Dockerfile question> \
-  --base-version <resolved baseVersion, or the literal "null"> \
   --dind <true|false, from the nested Docker question> \
   --azure <true|false, from the Azure CLI question>
 ```
@@ -55,7 +54,7 @@ On success (exit 0), write its stdout as the new `.cenci/config.json` content
 (possibly empty) stdout as the new config content — read stderr for the
 cause. The script fails closed (exit 2) for several distinct reasons: `jq`
 missing, an unreadable existing config, invalid existing JSON, a
-missing/invalid `--dockerfile`/`--dind`/`--azure`/`--base-version` value, or an
+missing/invalid `--dockerfile`/`--dind`/`--azure` value, or an
 unknown argument. Every boolean flag is required — omitting one would default
 it to false and silently delete an existing opt-in. If `jq` is genuinely
 unavailable, fall back to the merge

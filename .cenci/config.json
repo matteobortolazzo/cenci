@@ -128,8 +128,7 @@
   "autoCompactDisabled": true,
   "pinSubagents200K": false,
   "sandbox": {
-    "enabled": true,
-    "baseVersion": "1.18.1"
+    "enabled": true
   },
   "lazyboards": {
     "enabled": true
