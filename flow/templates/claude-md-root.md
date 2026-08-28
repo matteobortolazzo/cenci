@@ -13,13 +13,6 @@
 - Keep tickets well-scoped. 1 ticket = 1 PR.
 - Use git worktrees for all feature work. Never modify code in main worktree.
 
-<!-- IF pencil.enabled -->
-## Design Files
-- Design spec: `<designPath>/DESIGN.md` — screens, components, tokens, naming conventions
-- Design file: `<designPath>/<name>.pen` — open in Pencil, read with Pencil MCP tools
-- ALWAYS read DESIGN.md before implementing any frontend feature
-<!-- END IF -->
-
 <!-- IF sandbox.enabled -->
 ## Sandbox Image
 - `.cenci/Dockerfile` — committed, per-repo image tailored to this repo's stack; the whole team builds the same image

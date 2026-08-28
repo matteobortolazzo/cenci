@@ -4,13 +4,15 @@
 # blocker surfaces only as a lean-planning clarifying question that parks the
 # ticket on `Input Needed`. Five coordinated prose changes, no Go:
 #
-#   1. flow/agents/context-gatherer.md -- a new `### 6. Blocking dependencies
+#   1. flow/agents/context-gatherer.md -- a new `### 5. Blocking dependencies
 #      (ticket mode only)` step issuing its own read-only
 #      `gh issue view <number> --repo <owner>/<repo> --json blockedBy` call
 #      (never merged into §1's field list), renumbering the existing
-#      `### 6. Write the bundle file` -> `### 7.` (and its one `(see §6)`
-#      cross-reference -> `(see §7)`), and a mandatory `blockers:` digest
-#      line with a five-form grammar (none / entry list / incomplete /
+#      `### 6. Write the bundle file` accordingly (numbering as of #1054;
+#      the later design-stage removal dropped the `### 4. Design context`
+#      step entirely and shifted every step below it down by one, taking
+#      that step's own `(see §N)` cross-reference with it), and a mandatory
+#      `blockers:` digest line with a five-form grammar (none / entry list / incomplete /
 #      unsupported / unknown), same-repo `#<n>` vs cross-repo
 #      `<owner>/<repo>#<n>` ref rendering, `UNKNOWN` for a non-OPEN/
 #      non-CLOSED node state, a fail-closed `<unresolvable> UNKNOWN`
@@ -105,9 +107,9 @@
 # before this test was written.
 #
 # Covered files:
-#   - flow/agents/context-gatherer.md (new §6 step + renumbered §7 + §6/§7
-#     cross-reference + blockers: five-form grammar + same-repo/cross-repo
-#     ref rendering + UNKNOWN state)
+#   - flow/agents/context-gatherer.md (§5 blocking-dependencies step +
+#     renumbered §6 write-the-bundle step + blockers: five-form grammar +
+#     same-repo/cross-repo ref rendering + UNKNOWN state)
 #   - flow/skills/implement/SKILL.md (## Blocked-Dependency Gate placement,
 #     mode branches, classification table, stop wording, ## Attachments
 #     effective-order sentence, ## Pipeline fifth named shape)
@@ -345,22 +347,23 @@ assert_marker_precedes_in_content() {
 
 require_content CTX_CONTENT "${CONTEXT_GATHERER}" "context-gatherer.md"
 
-# --- New ### 6. Blocking dependencies step + renumbered ### 7. ------------
+# --- ### 5. Blocking dependencies step + renumbered ### 6. -----------------
+#
+# Numbering note: skills/design/ and agents/context-gatherer.md's own
+# `### 4. Design context (if a design path was provided)` step were removed
+# entirely by the design-stage removal, which renumbered every later step
+# down by one (old §5 Blocking dependencies -> §4 Project context stays
+# §4... see the file itself: the surviving order is 1 Fetch the ticket,
+# 2 Parent-child detection, 3 Discover attachments, 4 Project context,
+# 5 Blocking dependencies, 6 Write the bundle file). This test's numbered
+# markers below were shifted down by one to match; the design-context
+# subsection and its now-nonexistent "(see §N)" cross-reference no longer
+# exist, so both are dropped rather than renumbered.
 
-assert_file_contains "${CONTEXT_GATHERER}" "### 6. Blocking dependencies (ticket mode only)" \
-  "must add a new ### 6. Blocking dependencies (ticket mode only) procedure step"
-assert_file_contains "${CONTEXT_GATHERER}" "### 7. Write the bundle file" \
-  "must renumber the existing ### 6. Write the bundle file step to ### 7."
-assert_file_contains "${CONTEXT_GATHERER}" "(see §7)" \
-  "must update the .pen-path resolution paragraph's stale (see §6) cross-reference to (see §7)"
-# Scoped to the design-context step that owns the renumbered cross-reference,
-# NOT file-wide: after this ticket, §6 is a real section (Blocking
-# dependencies), so a file-wide ban on the string would reject any future
-# legitimate reference to it and fail this suite for no reason.
-if require_subsection CTX_S4_CONTENT "${CTX_CONTENT}" "### 4. Design context (if a design path was provided)" "context-gatherer.md"; then
-  assert_section_lacks "${CTX_S4_CONTENT}" "(see §6)" \
-    "context-gatherer.md (### 4. Design context) must not leave the stale (see §6) cross-reference after renumbering"
-fi
+assert_file_contains "${CONTEXT_GATHERER}" "### 5. Blocking dependencies (ticket mode only)" \
+  "must add a new ### 5. Blocking dependencies (ticket mode only) procedure step"
+assert_file_contains "${CONTEXT_GATHERER}" "### 6. Write the bundle file" \
+  "must renumber the existing ### 6. Write the bundle file step correctly"
 
 CTX_GH_CALL='gh issue view <number> --repo <owner>/<repo> --json blockedBy'
 assert_file_contains "${CONTEXT_GATHERER}" "${CTX_GH_CALL}" \
@@ -413,7 +416,7 @@ assert_file_contains "${CONTEXT_GATHERER}" "Known divergence from the Go gate on
 
 # --- Digest template renders one concrete form, never the placeholder -----
 
-assert_file_contains "${CONTEXT_GATHERER}" "blockers: <exactly one of §6's five forms, rendered — never this placeholder text>" \
+assert_file_contains "${CONTEXT_GATHERER}" "blockers: <exactly one of §5's five forms, rendered — never this placeholder text>" \
   "digest template's blockers: line must be a placeholder like every other template line, not a literal alternation of all five forms"
 assert_file_contains "${CONTEXT_GATHERER}" "The \`blockers:\` line is rendered, never echoed" \
   "must tell the gatherer to emit one concrete form, since a template-shaped line reads as unparseable to the gate"
@@ -438,8 +441,10 @@ assert_file_contains "${IMPLEMENT_SKILL}" "There are exactly two exceptions, bot
   "SKILL.md's ticket-mode no-fetch rule must name the gate's blockedBy probe alongside cenci pipeline plan-check as its second exception"
 assert_file_contains "${IMPLEMENT_SKILL}" "The single exception is \`## Blocked-Dependency Gate\`'s \`gh issue view <number> --repo <owner>/<repo> --json blockedBy\` fallback probe" \
   "SKILL.md's post-digest 'do not re-fetch the ticket in the main agent' rule must name the gate's fallback probe as its exception"
-assert_file_contains "${IMPLEMENT_SKILL}" "not the precedent for this probe" \
-  "SKILL.md must correct the claim that ### Design Check (hard gate) already issues this idiom -- that command is text shown to the user, not a call the skill makes"
+# The former "not the precedent for this probe" correction (### Design Check
+# already issuing this idiom) no longer applies -- `### Design Check (hard
+# gate)` was removed entirely by the design-stage removal, so there is no
+# stale claim left to correct.
 
 # --- The digest store list must retain the blockers: line, since Phase 1's
 #     ## Planner Delegation forwards it verbatim and unconditionally -------
@@ -461,13 +466,13 @@ assert_marker_precedes "${IMPLEMENT_SKILL}" "## Blocked-Dependency Gate" "## Att
 assert_marker_precedes "${IMPLEMENT_SKILL}" "## Blocked-Dependency Gate" "${SKILL_LABEL_WORKING_CMD}" \
   "SKILL.md ## Blocked-Dependency Gate must precede ## Ticket Ownership's cenci pipeline label <id> --transition working call"
 
-# --- blockedBy occurrence count: already once (Design Check) today, must
-#     become >= 2, and the new occurrence must live inside the gate itself
-#     (marker-precision: a bare file-wide presence check would vacuously
-#     pass against the pre-existing Design Check mention alone) -----------
+# --- blockedBy occurrence count: must be >= 2, and one occurrence must
+#     live inside the gate itself (marker-precision: a bare file-wide
+#     presence check would vacuously pass against a mention anywhere else
+#     in the file) -----------------------------------------------------
 
 assert_file_occurs_at_least "${IMPLEMENT_SKILL}" "blockedBy" 2 \
-  "must reference blockedBy a second time (beyond the pre-existing Design Check mention) inside the new gate"
+  "must reference blockedBy at least twice, with one occurrence inside the new gate"
 
 if require_section GATE_SECTION "${SKILL_CONTENT}" "## Blocked-Dependency Gate" "SKILL.md"; then
   assert_section_contains "${GATE_SECTION}" "blockedBy" \
@@ -516,15 +521,10 @@ if require_section GATE_SECTION "${SKILL_CONTENT}" "## Blocked-Dependency Gate" 
   assert_section_contains "${GATE_SECTION}" "Never leave that residual state unreported" \
     "SKILL.md (## Blocked-Dependency Gate) already-claimed branch must forbid leaving the stranded board state unreported"
 
-  # Design-ticket routing: /cenci:refine links every implementation ticket to
-  # its companion design ticket, so this gate now intercepts exactly the case
-  # ### Design Check (hard gate)'s routing was written for.
-  assert_section_contains "${GATE_SECTION}" "**Name the design-ticket case.**" \
-    "SKILL.md (## Blocked-Dependency Gate) must name the design-ticket case, which /cenci:refine's --add-blocked-by link makes the most common blocked case"
-  assert_section_contains "${GATE_SECTION}" "\`/cenci:design <design-ticket-id>\`" \
-    "SKILL.md (## Blocked-Dependency Gate) must carry ### Design Check (hard gate)'s /cenci:design routing, which this gate would otherwise make unreachable"
-  assert_section_contains "${GATE_SECTION}" "this gate issues no second probe to fetch them" \
-    "SKILL.md (## Blocked-Dependency Gate) must state the design routing conditionally rather than adding a label-fetching probe"
+  # Design-ticket routing (removed): `### Design Check (hard gate)` and its
+  # `/cenci:design` routing were removed entirely by the design-stage
+  # removal, so there is no design-ticket case for this gate to name or
+  # route to any more.
 fi
 
 # --- ## Attachments -- extended effective-order sentence ------------------

@@ -1,6 +1,6 @@
 ---
 name: ticket-ownership
-description: Establish and verify exclusive ownership of a GitHub issue before refine, design, or implementation work begins. Use from ticket-mode workflows that must claim an unassigned issue for the active GitHub CLI user without replacing existing assignees.
+description: Establish and verify exclusive ownership of a GitHub issue before refine or implementation work begins. Use from ticket-mode workflows that must claim an unassigned issue for the active GitHub CLI user without replacing existing assignees.
 user-invocable: false
 ---
 
@@ -71,5 +71,5 @@ assignee. If the edit or fetch fails, or another assignee appeared concurrently,
 stop and report the observed state. Do not remove or replace assignees to repair
 a conflict automatically.
 
-Ticket creation is not a claim. Split children and companion design tickets remain
+Ticket creation is not a claim. Split children remain
 unassigned until a primary workflow is invoked for each one.

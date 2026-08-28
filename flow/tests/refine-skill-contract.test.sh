@@ -20,7 +20,6 @@
 #   - skills/refine/SKILL.md
 #   - agents/context-gatherer.md
 #   - skills/refine/codex.md
-#   - skills/design/SKILL.md
 #   - skills/implement/SKILL.md
 set -uo pipefail
 
@@ -100,7 +99,7 @@ if [[ -n "${skill}" ]]; then
   # a `Depends on #N` body line) — mirroring the native sub-issue migration
   # asserted above. The write is `--add-blocked-by`; the read-back
   # verification is the `blockedBy` JSON field. A permanent, human-visible
-  # `Depends on #<sibling>` / `Depends on #<D> (design)` prose line
+  # `Depends on #<sibling>` prose line
   # supplements the native link (never replaces it) so a human reading the
   # body sees the dependency too -- see the #1055 positive/negative block
   # below.
@@ -365,125 +364,45 @@ fi
 # =====================================================================
 # #1055 -- restore a human-visible `Depends on #<n>` prose dependency line
 # alongside the native `--add-blocked-by` link, as a PERMANENT supplement
-# (never a replacement, never a transitional shim), and correct four stale
-# "legacy/transitional" framings across refine/design/implement. None of
-# these production edits exist yet at RED-phase time (Phase 4's job) -- every
-# positive assertion below is expected to fail until then. The negative
-# assertions may already pass today (the stale strings are still present at
-# RED time) -- that is expected and noted in the phase-3 report, not a bug.
+# (never a replacement, never a transitional shim). Design-path coverage was
+# dropped along with the design-stage removal (the companion-design-ticket
+# dependency line no longer exists — see that removal work); the
+# non-design sibling-dependency coverage below still applies.
 # =====================================================================
 
 if [[ -n "${skill}" ]]; then
   # Positive: SKILL.md's child-body template carries the permanent
-  # supplementary prose line for a blocking sibling, and the design-path
-  # step carries its own annotated prose form.
+  # supplementary prose line for a blocking sibling.
   assert_contains "${skill}" "Depends on #<sibling>" "1055 skills/refine/SKILL.md child prose dependency line"
-  assert_contains "${skill}" "Depends on #<D> (design)" "1055 skills/refine/SKILL.md design-path prose dependency line"
 
-  # Negative: the "This replaces the former ... body line(s)" framing --
-  # present at two sites (child blockers step and design-path step) -- is
-  # gone. A single substring check covers both occurrences, since either
-  # surviving occurrence would fail this check.
+  # Negative: the "This replaces the former ... body line(s)" framing is gone.
   assert_not_contains "${skill}" "This replaces the former" "1055 skills/refine/SKILL.md stale replaces-the-former framing"
+
+  # #1059 (restored -- this guard is NOT design-related): the split-child
+  # body template's first write must never carry a blank placeholder or a
+  # bracketed placeholder for a blocked child's `Depends on` line -- that
+  # line is deliberately omitted entirely on the first write (the blocking
+  # sibling's issue number isn't known yet) and inserted later by the
+  # deferred re-Write. This behavior is unrelated to the removed
+  # design-path capture-gate machinery and is still live.
+  assert_not_contains "${skill}" "[Depends on #<blocking-sibling-number> for each blocking sibling]" \
+    "1059 skills/refine/SKILL.md child-body template placeholder contradicting the deferred re-Write"
 fi
 
 # `codex` was already read above; reuse it.
 if [[ -n "${codex}" ]]; then
   # Positive: codex.md reaches full parity -- the native write, its
-  # verification, and both permanent supplementary prose forms, plus the new
+  # verification, and the permanent supplementary prose form, plus the new
   # `child-blockers:K` write-order op token.
   assert_contains "${codex}" "--add-blocked-by" "1055 skills/refine/codex.md native --add-blocked-by write"
   assert_contains "${codex}" "blockedBy" "1055 skills/refine/codex.md blockedBy verification field"
   assert_contains "${codex}" "Depends on #<sibling>" "1055 skills/refine/codex.md child prose dependency line"
-  assert_contains "${codex}" "Depends on #<D> (design)" "1055 skills/refine/codex.md design-path prose dependency line"
   assert_contains "${codex}" "child-blockers:" "1055 skills/refine/codex.md child-blockers:K write-order op token"
-fi
-
-# Positive/negative for the two newly covered docs (design/SKILL.md,
-# implement/SKILL.md), reusing require_doc per the established idiom.
-require_doc design "skills/design/SKILL.md" || true
-if [[ -n "${design}" ]]; then
-  assert_not_contains "${design}" "drop this query once no open ticket uses the form" "1055 skills/design/SKILL.md stale transitional-query framing"
 fi
 
 require_doc implement "skills/implement/SKILL.md" || true
 if [[ -n "${implement}" ]]; then
   assert_not_contains "${implement}" "for a ticket refined before native links" "1055 skills/implement/SKILL.md stale legacy-line framing"
-fi
-
-# =====================================================================
-# #1059 review -- the supplementary design-path prose-line step must not be
-# able to destroy or duplicate the ticket body it prepends to. Four distinct
-# defects are pinned here, each of which verified CLEAN under the step's own
-# checks before the fix (which is exactly why they need a contract test):
-#   1. an unguarded capture redirect posts a truncated fetch as the whole
-#      body, and the length check cannot see it -- it compares the remote
-#      against the same truncated file;
-#   2. a blind recompose-and-retry after a verification failure prepends the
-#      line a second time, and the retry's own checks then pass;
-#   3. a raw byte-length equality assumes a trailing-newline/CRLF round-trip
-#      nothing here establishes, so it fails on good writes;
-#   4. the idempotency check keys on the current <D> only, so a re-refine
-#      stacks a superseded design dependency in front of the live one.
-# =====================================================================
-
-if [[ -n "${skill}" ]]; then
-  # 1. The capture redirect is guarded, exactly like the parent-meta fetch
-  # it mirrors: a shell redirect truncates its target before `gh` runs.
-  assert_contains "${skill}" "-design-dep-orig-body.md || rm -f" \
-    "1059 skills/refine/SKILL.md guarded design-dep body capture redirect"
-  assert_contains "${skill}" "Capture gate — fail closed" \
-    "1059 skills/refine/SKILL.md capture gate before composing from the captured body"
-
-  # 2. The verification-failure retry re-checks idempotency before any
-  # recompose, so it can never prepend the prose line twice.
-  assert_contains "${skill}" "Never recompose blind" \
-    "1059 skills/refine/SKILL.md verification-failure retry must re-check idempotency first"
-
-  # The failure enumeration must name the steps that can actually corrupt
-  # the body (capture + concatenation), not only the ones that cannot.
-  assert_contains "${skill}" "the **capture gate**" \
-    "1059 skills/refine/SKILL.md failure enumeration names the capture gate"
-
-  # 3. Lengths are compared normalized (CRLF folded, trailing newlines
-  # stripped) on both sides -- never as raw byte counts.
-  assert_contains "${skill}" "gsub(\"\\r\\n\";\"\\n\")" \
-    "1059 skills/refine/SKILL.md normalized-length CRLF folding"
-  assert_not_contains "${skill}" "body | length'" \
-    "1059 skills/refine/SKILL.md raw byte-length comparison"
-
-  # 4. A superseded `Depends on #<n> (design)` line is replaced, not stacked.
-  assert_contains "${skill}" "sub(\"^Depends on #[0-9]+ \\\\(design\\\\)" \
-    "1059 skills/refine/SKILL.md superseded design-dependency line is stripped, not stacked"
-
-  # The child-body template and the sentence after it must agree: the first
-  # write carries no `Depends on` line at all, not a bracketed placeholder.
-  assert_not_contains "${skill}" "[Depends on #<blocking-sibling-number> for each blocking sibling]" \
-    "1059 skills/refine/SKILL.md child-body template placeholder contradicting the deferred re-Write"
-fi
-
-if [[ -n "${codex}" ]]; then
-  assert_contains "${codex}" "|| rm -f <orig-body file>" \
-    "1059 skills/refine/codex.md guarded design-dep body capture redirect"
-  assert_contains "${codex}" "Capture gate — fail closed" \
-    "1059 skills/refine/codex.md capture gate before composing from the captured body"
-  assert_contains "${codex}" "never recompose blind" \
-    "1059 skills/refine/codex.md verification-failure retry must re-check idempotency first"
-  assert_contains "${codex}" "normalized length" \
-    "1059 skills/refine/codex.md normalized-length comparison"
-  assert_contains "${codex}" "sub(\"^Depends on #[0-9]+ \\\\(design\\\\)" \
-    "1059 skills/refine/codex.md superseded design-dependency line is stripped, not stacked"
-fi
-
-# The prose line is written only for a ticket that actually has a blocking
-# sibling or a companion design ticket -- never "on every refined ticket".
-if [[ -n "${design}" ]]; then
-  assert_not_contains "${design}" "on every refined ticket, never a transitional form" \
-    "1059 skills/design/SKILL.md overclaim that every refined ticket carries the prose line"
-fi
-if [[ -n "${implement}" ]]; then
-  assert_not_contains "${implement}" "alongside the native link on every refined ticket)" \
-    "1059 skills/implement/SKILL.md overclaim that every refined ticket carries the prose line"
 fi
 
 if [[ "${failures}" -gt 0 ]]; then

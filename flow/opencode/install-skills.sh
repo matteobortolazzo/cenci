@@ -6,7 +6,7 @@ ACTION=${1:?usage: install-skills.sh install|remove}
 
 # Portable convention skills that are safe to expose to any client (no
 # Claude-only tool/UX dependency). Pipeline/interactive skills (implement,
-# configure, refine, design, maintain, address-review, review, sync,
+# configure, refine, maintain, address-review, review, sync,
 # ci-repair, ticket-ownership, babysit-attention) are intentionally excluded
 # — they assume Claude Code's interactive approval flow. codex-runtime is
 # excluded as a Codex-only adapter. This list is the single source of truth;

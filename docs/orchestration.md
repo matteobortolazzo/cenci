@@ -32,14 +32,13 @@ So the board and the cenci workflow skills share one vocabulary: the skills rela
 issue, and the card moves on the next refresh. The lifecycle is:
 
 ```
-New → Refined → [Designed] → Planned → Working → In Review → Implemented
+New → Refined → Planned → Working → In Review → Implemented
 ```
 
 | Transition | cenci skill | Label change |
 |---|---|---|
 | New → Refined | `/cenci:refine` | `+Working` while running, then `+Refined` `−Working` |
-| Refined → Designed (optional) | `/cenci:design` on the dedicated design ticket | Propagates `+Designed` to dependent implementation tickets |
-| Refined/Designed → Planned | `/cenci:implement` planning | Persists `.plans/<id>-*.md`, then `+Planned` `−Working` (trivial-ticket fast path and lean planning with no escalations: `Working` is retained, not removed — see note below) |
+| Refined → Planned | `/cenci:implement` planning | Persists `.plans/<id>-*.md`, then `+Planned` `−Working` (trivial-ticket fast path and lean planning with no escalations: `Working` is retained, not removed — see note below) |
 | Refined → Working (planning pickup) | `cenci dispatch` (planning pickup, `dispatch.planRefined: true`) | `+Working`; `Refined` retained — no plan file existed yet, so `cenci run implement <n>` launches a fresh planning session unattended, in lean-planning repos only |
 | Planned → Working | plan-file implementation or `cenci dispatch` pickup | `+Working`; `Planned` remains as a milestone |
 | Planned → Working (re-plan) | `cenci dispatch` (autonomous re-plan, `dispatch.planRefined: true`) | `+Working`; `Planned` retained — the existing plan was stale (past `planStalenessTolerance`), so `cenci run implement "<n> replan"` relaunches planning against it unattended instead of terminally skipping |
@@ -48,7 +47,7 @@ New → Refined → [Designed] → Planned → Working → In Review → Impleme
 | Working → In Review | `/cenci:implement` phase 9 | `+In Review` `−Working` when the PR opens |
 | In Review → Implemented | `/cenci:babysit` (on PR merge, including merge-time split-parent reconciliation) | `+Implemented` `−In Review` |
 
-`automerge:ok` is a per-ticket grant confirmed at refine's Confirmation Gate, never inherited — a split child, the companion design ticket, and a followup ticket each earn it (or not) on their own merit, never from the parent.
+`automerge:ok` is a per-ticket grant confirmed at refine's Confirmation Gate, never inherited — a split child and a followup ticket each earn it (or not) on their own merit, never from the parent.
 
 `In Review` is applied when the PR **opens**, not when it merges — so a PR still
 looping through review is visibly distinct from a merged one. `/cenci:babysit` owns
@@ -214,10 +213,10 @@ starts and removes it when it hands off, so a card shows "an agent is on this ri
 now" while staying in its current column. `Planned` is the durable handoff and can be
 picked up automatically by cenci dispatch.
 
-**One GitHub assignee is the exclusive ticket owner.** Ticket-mode `refine`,
-`design`, and `implement` workflows claim an unassigned issue for the active `gh`
+**One GitHub assignee is the exclusive ticket owner.** Ticket-mode `refine` and
+`implement` workflows claim an unassigned issue for the active `gh`
 account, but never replace an existing assignee. They stop on foreign or multiple
-assignees. Split children and companion design tickets remain unassigned until their
+assignees. Split children remain unassigned until their
 own workflow starts. Dispatch applies the same rule: only a `Planned` ticket solely
 assigned to the active `gh` user is eligible, so teammates can run independent
 dispatch loops without selecting each other's work.
@@ -233,7 +232,7 @@ board card  ──dispatch──▶  tmux window  ──daemon──▶  status 
 ```
 
 `cenci run` names a numbered ticket's window `<number>-<skill>` — the skill is
-the running workflow (`refine` / `design` / `implement`) — and sets
+the running workflow (`refine` / `implement`) — and sets
 `automatic-rename off`. These names are short and uniform, so many tabs fit on the
 tmux status line at once. When the cenci daemon later tracks that window it sees
 the manual name and preserves it instead of overwriting it with the detected task — so
@@ -289,14 +288,11 @@ cleanup: "cenci close {number}"
 ```
 
 **Per-column bindings** dispatch a workflow onto the selected card. The generated
-keys are single letters (`R`, `Z`, `I`) — any key of any case can be bound, there
+keys are single letters (`R`, `I`) — any key of any case can be bound, there
 is no reserved namespace; `cenci run <workflow> {number}`
 builds the `<number>-<skill>` window and launches the agent.
-`cenci run` chooses `refine`/`design`/`implement` from its built-in Claude templates
-with zero extra config. The design workflow — design dispatches on the host, since the
-Pencil desktop app it drives is never reachable inside the cenci sandbox — always
-resolves to the host command regardless of the sandbox default, and an explicit
-`--sandbox` for it is a usage error.
+`cenci run` chooses `refine`/`implement` from its built-in Claude templates
+with zero extra config.
 
 **`cleanup`** fires when a card leaves the column (detected on refresh). A single
 top-level `cleanup` covers every column that doesn't define its own. `cenci close
@@ -380,14 +376,11 @@ and either suggests the missing actions (e.g. an absent test action) or, when th
 file is already complete, skips silently with a short log line. Because a local
 `columns:` list replaces the global list entirely (it never merges), the generated
 file declares every column and its bindings inline under `keymaps.columns`: `New`
-gets a local `R` (Refine) action, `Refined` gets local `I` (Implement) and, when
-`pencil.enabled` is on, a gated `Z` (Design) action — `cenci run design {number}
---no-sandbox`, since design dispatches on the host. Design is on `Z`, not `D`:
-`D` is lazyboards' own dispatch panel, and a user binding wins over the built-in
-default, so binding `D` would shadow it. `Planned` gets a local `I` (Implement)
+gets a local `R` (Refine) action, `Refined` gets a local `I` (Implement) action,
+and `Planned` gets a local `I` (Implement)
 action so an already-planned ticket can still be manually re-dispatched from the
-board, plus `E` (Edit plan) and `V` (View plan) actions on its saved plan file. `Designed`
-and `Implemented` are labels in the ticket lifecycle but not board columns — only
+board, plus `E` (Edit plan) and `V` (View plan) actions on its saved plan file.
+`Implemented` is a label in the ticket lifecycle but not a board column — only
 `New`, `Refined`, `Planned`, and `In Review` are generated. When a repo has zero
 runnable projects, `In Review` still carries `W` (Open worktree) — there is no
 Checkout PR fallback beyond it.
@@ -546,7 +539,7 @@ dispatched Codex card sees the same project context as a Claude Code card. `cenc
 ships built-in Claude templates; merge
 [`flow/templates/cenci-codex-config.json`](../flow/templates/cenci-codex-config.json)
 into `~/.config/cenci/config.json` to add the Codex `implement` template, while
-interactive `refine` and `design` remain Claude Code-only. Codex support across the
+interactive `refine` remains Claude Code-only. Codex support across the
 package is tracked in
 [#33](https://github.com/matteobortolazzo/cenci/issues/33); see
 [cenci-watch's README](../watch/README.md#dispatching-workflows-cenci-run)

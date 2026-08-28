@@ -77,7 +77,7 @@ variable — the same skills marked `Yes` in the OpenCode column of the root
 These are portable because each one avoids depending on a Claude Code-only tool or
 approval mechanism.
 
-Pipeline and interactive skills — `implement`, `configure`, `refine`, `design`,
+Pipeline and interactive skills — `implement`, `configure`, `refine`,
 `maintain`, `address-review`, `review`, `refactor`, `sync`, `codex-runtime`,
 `ci-repair`, `ticket-ownership`, `babysit-attention` — are **not**
 linked. They assume

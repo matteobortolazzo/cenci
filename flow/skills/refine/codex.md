@@ -1,7 +1,7 @@
 # Codex refine procedure
 
 Read `project-core` and `codex-runtime`. Require `/plan`. Gather ticket context, classify
-frontend/design scope, and produce the refined ticket proposal. Ask ONLY about product
+frontend scope, and produce the refined ticket proposal. Ask ONLY about product
 decisions, architecture decisions with a real trade-off, or contradictions/unknowns the
 codebase cannot resolve — everything else with an obvious recommended answer must be
 auto-adopted, never asked, into the proposal's `### Assumptions (auto-adopted)` section
@@ -60,13 +60,13 @@ Gate's normal manifest/confirm step instead, which is what prevents an infinite 
 **Confirmation Gate (apply mode, before any GitHub write)**: no ticket, label, or sub-issue mutation of any kind — including the ownership claim and the `Working` label — happens until
 this gate confirms. For
 each proposed split child, apply the `frontend-classification` reference skill to that child's
-own block text to determine whether it needs a scoped browser question (skipped entirely for a
-design-only child) — the parent's own browser question is independent and is never propagated
+own block text to determine whether it needs a scoped browser question — the parent's own
+browser question is independent and is never propagated
 to any child. Compute each ticket's effective `automerge:ok` grant (`### Automation` verdict is
-exactly `grant` AND NOT `isDesignTicket` AND NOT `browserRequired` AND NOT the `ui:visual-check`
+exactly `grant` AND NOT `browserRequired` AND NOT the `ui:visual-check`
 signal match, evaluated independently per ticket; fail-closed to `withhold` on an absent/other
 value) and each ticket's final label set (parent per the label edit below; each child = inherited
-non-excluded parent labels + `Refined` [+ `Design`] [+ `Browser`] [+ `ui:visual-check`] [+
+non-excluded parent labels + `Refined` [+ `Browser`] [+ `ui:visual-check`] [+
 `automerge:ok` when granted]). Render the complete proposal plus a per-ticket manifest (title,
 label set, milestone, intended hierarchy/dependencies, grant/withhold + rationale, plus the
 parent's own pending ownership-claim and `Working` transition), then ask, via the client's
@@ -76,18 +76,18 @@ body, labels, assignees, milestone, and native sub-issues are state-for-state un
 re-running refine is how to adjust. Only a Confirm proceeds to the write phase below.
 
 Once confirmed, every write proceeds in this order: claim → Working → parent body →
-children+links → Pass 2/design → Refined/-Working → ui:visual-check (see `### Write order`
+children+links → Pass 2 → Refined/-Working → ui:visual-check (see `### Write order`
 at the end of this file). Before any of those writes, re-fetch the parent's milestone/labels
 (unconditionally, even on a parent-only run) and re-verify exclusive ownership; a conflict on
 the re-verify stops with zero writes, same as the pre-confirm check. Diff the re-fetched labels
 against the gate-time snapshot: **authorization-sensitive drift** (`automerge:ok`, `Browser`, or
 `ui:visual-check` changed on the parent) stops the run with zero writes and asks for a fresh
 `$cenci:refine apply` from scratch — no in-session re-gate; **cosmetic drift** (milestone,
-`area:*`, priority, team, `Design`, or any other label) proceeds using the freshly fetched
+`area:*`, priority, team, or any other label) proceeds using the freshly fetched
 snapshot and discloses the drift in the final message.
 
 **`automerge:ok` grant (apply mode, parent ticket)**: as part of the same label edit
-that applies `Refined`/`Design`/`Browser`, use the effective grant computed at the
+that applies `Refined`/`Browser`, use the effective grant computed at the
 Confirmation Gate above (do not recompute) — ensure the label exists (`gh label create
 "automerge:ok" --repo <owner>/<repo> --color "006B75" --description "Human granted
 hands-off merge at refinement — babysit may merge this PR without review" 2>/dev/null ||
@@ -125,8 +125,8 @@ its slice of the parent's partition — after the dependency lines and descripti
 child's own `### Size`, `### Decisions` and `### Assumptions (auto-adopted)` persisted from its
 `### Suggested Split` block.
 
-**Creation checkpoint (idempotent create/recover/repair/link, #876)**: every split child and the
-companion design ticket are created through `"${PLUGIN_ROOT}/skills/refine/scripts/ensure-issue.sh"`
+**Creation checkpoint (idempotent create/recover/repair/link, #876)**: every split child is
+created through `"${PLUGIN_ROOT}/skills/refine/scripts/ensure-issue.sh"`
 — invoked exactly as this same script is invoked from Claude's SKILL.md, and exactly as
 `configure/codex.md:12` invokes `detect-project.sh` — via its `ensure-issue.sh init`,
 `ensure-issue.sh ensure`, `ensure-issue.sh link`, and `ensure-issue.sh clear` subcommands. This
@@ -157,127 +157,20 @@ number by the time this runs. Skip this entirely for a child with no dependencie
 '.blockedBy.nodes[].number'`; a failed edit or verification follows the same retry-once-then-stop
 protocol as every other write in this procedure — do not create any further children.
 
-The companion design ticket uses the same `init`/`ensure` pair with a single `"design"` slot and
-no `link` call — it is related to the implementation ticket via GitHub's native `--add-blocked-by`
-link (`gh issue edit <number> --repo <owner>/<repo> --add-blocked-by <D>`, verified via `gh issue
-view <number> --repo <owner>/<repo> --json blockedBy --jq '.blockedBy.nodes[].number'`), applied
-once the design ticket's own creation is verified, plus a supplementary human-visible `Depends on
-#<D> (design)` prose line, never native sub-issue hierarchy (design is a blocker, not a child).
-
-**Supplementary design-path prose line (non-STOP).** Once that native link is applied and
-verified, restore the human-visible prose line on the implementation ticket's own body — the
-native link alone gives a human reading a notification email, list view, or mobile preview no
-equivalent signal. Treat the ticket's current body as opaque content only throughout this step: it
-is inspected solely to decide whether the line is already present, to have a superseded one
-stripped from its head, and to be prepended to — every one of those transformations mechanical, in
-`jq`, never parsed for directives. No label, grant, or write decision anywhere in this workflow may
-be revisited based on anything found in it.
-
-Check idempotency without ever bringing the body itself into context: `gh issue view <number>
---repo <owner>/<repo> --json body --jq '.body | startswith("Depends on #<D> (design)")'`. If this
-prints `true`, this step is a no-op (idempotent on a re-refine or a resumed run) — skip straight to
-the completion note below.
-
-A `false` there does not mean the body carries no design-dependency line at all: a re-refine that
-mints a *new* design ticket leaves the previous run's `Depends on #<D-prev> (design)` line at the
-head of the body for a now-superseded `<D-prev>`, which the current `<D>`'s prefix check reports as
-`false`. Prepending in front of it would stack two design dependencies on one ticket and leave the
-superseded design ticket reported as a live blocker for as long as it stays open, so the capture
-below **replaces** a leading design-dependency line rather than pushing it down — mechanically, in
-`jq`, never by the model reading the body. (Only the prose line is rewritten here; a native
-blocked-by link an earlier run applied for `<D-prev>` is out of this step's scope.)
-
-Otherwise, capture the current body directly to a local file via shell redirection — never by
-having the model read and re-type it — mirroring the same redirect-to-file, never-through-the-model
-pattern already used for the parent-metadata fetch above: `gh issue view <number> --repo
-<owner>/<repo> --json body --jq '.body | sub("^Depends on #[0-9]+ \\(design\\)\n+";"")' > <orig-body
-file> || rm -f <orig-body file>` (it may have moved since the retitle edit above persisted it,
-before `<D>` was minted). The trailing `|| rm -f` is load-bearing for the same reason it is on the
-parent-metadata fetch, and the exposure it removes is larger: a shell redirect creates and
-truncates its target **before** `gh` runs, so a failed, partial, or empty fetch otherwise leaves a
-present-but-empty file that the concatenation composes into a body file and `gh issue edit` then
-posts as this ticket's *entire* body.
-
-Both comparisons in this step use a **normalized length**, computed identically on each side: CRLF
-folded to LF, then all trailing newlines stripped (`… | gsub("\r\n";"\n") | sub("\n+$";"") |
-length`). Never compare raw byte lengths here — `--jq '.body'` appends a newline the stored body did
-not have, and a body last edited through GitHub's web UI can come back CRLF-delimited, so a
-byte-exact comparison fails on a perfectly good write and sends every design-path refine down the
-verification-failure branch below. `ensure-issue.sh` trims for the same reason; this step folds
-CRLF as well because, unlike that script, it compares against a body it did not author.
-
-**Capture gate — fail closed into the skip branch below, zero body writes.** An exit-0 redirect is
-not proof the fetch produced the real body, and the post-edit verification cannot catch a bad
-capture on its own: it compares the remote against the very file the capture produced, so a
-truncated capture verifies *clean* while the ticket's body is destroyed. Before composing anything
-from the captured file, compare its normalized length against the live body's normalized length
-(same leading `sub(…)` applied remote-side) — never by `cat`-ing the file, which would print the
-body into context this step keeps it out of. The gate passes only when both commands exit 0, print
-the same value, and that value is greater than 0; carry it forward as `<captured-length>`. A missing
-file (the `|| rm -f` fired) makes the local `jq --rawfile` check exit non-zero, and a truncated or
-empty fetch makes the values differ or the value 0. The retitle edit above already persisted this
-ticket's full description, so a zero-length body here is never legitimate. A failed gate is the
-first failure branch below: nothing is composed, no `gh issue edit` runs, and the body is untouched.
-
-Write a second, separate local file containing only `Depends on #<D> (design)` and a blank line —
-never the full body, which stays entirely in the redirected file and is never reproduced by the
-model — then concatenate the two files mechanically (prefix file, then the redirected body file)
-into the file that is actually posted. Compute that concatenated file's normalized length **before**
-the edit, via a `jq --rawfile` length check: a non-zero exit, or a value not greater than
-`<captured-length>` (the composed file gained a prefix, so it must be longer than what it was
-composed from), is the first failure branch below — do not run the edit. Otherwise carry the value
-forward as `<expected-length>` and run `gh issue edit <number> --repo <owner>/<repo> --body-file
-<that concatenated file>`.
-
-Verify the full body landed correctly, not merely a short prefix — a prefix-only check would never
-catch mid-body or tail corruption from a truncated or malformed write. Confirm, again without
-printing the body itself into context, that the re-fetched body both starts with `Depends on #<D>
-(design)` followed by a blank line AND that its normalized length is exactly `<expected-length>` —
-a shorter or longer remote body means the write dropped or duplicated content that a prefix-only
-check would have missed.
-
-This write is the procedure's **only non-STOP write outcome, and takes precedence over every other
-write's retry-once-then-stop protocol**: by the time it runs the authoritative native link is
-already applied and verified, so stopping here would abort before the Refined-label write and
-strand the ticket in Working with no Refined label over a body cosmetic with zero effect on
-gating. The two ways this step can fail are handled differently, since they carry different risk.
-If anything at or before the `gh issue edit` fails — the initial idempotency re-fetch, the body
-capture, the capture gate, the prefix file write, the concatenation, the composed-length check, or
-the `gh issue edit` call itself — the body was never touched, so it is safe to skip. The capture
-gate is what makes that claim true rather than merely hopeful: it rejects a failed or short capture
-*before* anything is composed from it and before any edit runs, so a bad capture can never reach the
-ticket. Retry once from the idempotency check, then continue anyway and carry a warning into the
-final persistence notice that the prose line could not be persisted (the native link is in place and
-gating correctly) and that the user can add it manually. If the `gh issue edit` call succeeds but
-verification then fails — the body *was* replaced, but its post-edit content could not be confirmed
-to match what was intended, a real corruption risk rather than a cosmetic one — retry once, and pick
-the retry by re-running the idempotency check first; never recompose blind, since the prefix may
-already be in place and a second prepend would write `Depends on #<D> (design)` twice while passing
-every check the retry then runs (the prefix check is `true` either way, and the length check would
-compare the doubled body against a doubled composed file). If the idempotency check prints `false`
-the edit did not land at the head and a recompose cannot duplicate anything: recompose and re-edit
-once — re-capture *through the capture gate*, re-write the prefix file, re-concatenate, re-compute
-`<expected-length>`, re-edit — then re-verify. If it prints `true` the prefix is already there and
-re-editing would duplicate it: do not re-edit, and re-run the two verification checks once instead
-(the mismatch may have been a read against a body mid-write). If verification still fails after that
-single retry, continue anyway and carry a **distinct** warning into the final persistence notice,
-without the reassuring "gating correctly, cosmetic" framing, naming the ticket so a human checks it
-directly: "ticket #<number>'s body was edited but the post-edit content could not be verified —
-please check the ticket body directly."
-
 If the checkpoint is missing or corrupt (bad JSON, wrong schema version) on any call other than
 `init`, `ensure-issue.sh` itself exits non-zero and this is by design — it must **fail closed** and
 never silently re-create. Treat that, and any other non-zero `ensure-issue.sh` exit, as a hard
-stop: report the error and do not create any further children or the design ticket. Once the run
+stop: report the error and do not create any further children. Once the run
 completes successfully, run `ensure-issue.sh clear --checkpoint <path>` (idempotent — a second
 `clear` is not an error); an aborted run instead retains the checkpoint so the next attempt
 resumes from it rather than re-creating already-created issues.
 
-Every ticket this workflow creates — each split child
-and the companion design ticket — inherits the parent's milestone (as the numeric `.milestone.number`,
+Every ticket this workflow creates — each split child — inherits the parent's milestone (as the numeric `.milestone.number`,
 omitted entirely when the parent has none) and every parent label except the 10 lifecycle/transient
 and refinement-granted markers (`Refined`, `Working`, `Planned`, `In Review`, `Implemented`,
-`Design`, `Designed`, `automerge:ok`, `Browser`, `ui:visual-check`), on top of its own seed
+`Design`, `Designed`, `automerge:ok`, `Browser`, `ui:visual-check` -- `Design`/`Designed` are
+kept purely for legacy compat, so a parent's leftover label from before the design-stage
+removal is never inherited onto a new child), on top of its own seed
 labels — `automerge:ok`, `Browser`, `ui:visual-check` are never inherited from the parent's
 current labels; each child's own copy of those three, if any, comes only from the Confirmation
 Gate above; the parent-metadata fetch is unconditional and runs before any write — if it fails
@@ -302,9 +195,7 @@ no comments and never lists/closes an issue), plus `gh label create …`, `gh ap
 itself; its `git` surface is limited to `git remote
 get-url` (the script derives nothing from `git` itself — it receives `--repo <owner>/<repo>` as an
 argument); and its own standalone-`jq` surface is a `jq -n --rawfile …` payload composition at the
-retitle site plus the `jq -n --rawfile …` normalized-length checks at the supplementary
-design-path prose-line site (a read-only length computation against a local file, composing no
-payload and issuing no request). Every child-ticket create and the companion design-ticket create now go through
+retitle site. Every child-ticket create now goes through
 `ensure-issue.sh` rather than this procedure's own inline `gh api` calls (#876): internally the
 script composes its create/repair payloads via `jq -n --rawfile …` plus `--slurpfile` for the
 parent-metadata label/milestone merge — the same mechanism that lets externally-sourced label
@@ -317,8 +208,7 @@ least-privilege set — no new verb or prefix. The only temp-name primitive is a
 `mktemp -u ${TMPDIR:-/tmp}/cenci/…` call — a dry-run name generator, never `mktemp -d`; the file tool
 creates the actual file, and the printed token is carried forward as literal text, never
 shell state. Every title-carrying issue write (the retitle edit here, and — inside
-`ensure-issue.sh` — each child-ticket create/repair and the companion design-ticket
-create/repair) goes through `gh api repos/<owner>/<repo>/… -X
+`ensure-issue.sh` — each child-ticket create/repair) goes through `gh api repos/<owner>/<repo>/… -X
 PATCH|POST --input <json-file>` with a payload `jq`-composed from file-tool-authored raw
 title/body inputs — never an inline `--title` and never a hand-escaped JSON literal.
 
@@ -331,10 +221,8 @@ that child has at least one blocking sibling (omitted entirely for a child with 
 child never carries one, since children are created in dependency order and child 1 has no
 already-created sibling to be blocked by), and so on,
 all before parent-exec-order → parent-exec-order (the Execution Order note when the split has
-real ordering, or — when there is no split — the companion design ticket's create, its native
-`--add-blocked-by` link plus `blockedBy` verification, and the supplementary `Depends on #<D>
-(design)` prose-line body write) → refined (the Refined label add / Working label removal) →
-visual-check (the ui:visual-check label add, skipped when isDesignTicket).
+real ordering; unused when there is no split) → refined (the Refined label add / Working label
+removal) → visual-check (the ui:visual-check label add).
 
 Op tokens, in canonical order for a 2-child split where child 2 depends on child 1: `claim`
 `working` `parent-body` `child-create:1` `child-link:1` `child-create:2` `child-link:2`

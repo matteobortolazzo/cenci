@@ -56,7 +56,7 @@ Create the worktree now, before any file is written (including a migration `--ap
 2. Derive a slug: `init` when `existingConfig` is null (first-ever configure run), `update` for a plain reconfiguration, or a short kebab-case description of the user's focus when `$ARGUMENTS` names one (e.g. "refresh MCP servers" → `mcp-refresh`).
 3. Create the worktree: `git worktree add .worktrees/configure-<slug> -b chore/configure-<slug> main`. If that branch/directory name is already taken by an unrelated prior run, append `-2`, `-3`, etc. until it's free.
 
-From this point on, `<worktree-path>` is `.worktrees/configure-<slug>`. Every file this skill reads or writes below — `.cenci/config.json`, `AGENTS.md`, `CLAUDE.md`, `.mcp.json`, `.lsp.json`, `.gitignore`, `.claudeignore`, `.claude/settings.json`, `.github/workflows/`, `.cenci/Dockerfile`, `.lazyboards.yml`, `.codex/`, `designs/` — and every "the repo root" / "the project root" reference in the steps below resolves against `<worktree-path>`, never the main checkout. Use absolute paths rooted at `<worktree-path>` for every Write/Edit; verify the CWD before Bash commands rather than relying on a single `cd` persisting across calls. `gh label create` / `gh issue` calls (step 3c) are GitHub API calls, not file writes, and run the same regardless of worktree.
+From this point on, `<worktree-path>` is `.worktrees/configure-<slug>`. Every file this skill reads or writes below — `.cenci/config.json`, `AGENTS.md`, `CLAUDE.md`, `.mcp.json`, `.lsp.json`, `.gitignore`, `.claudeignore`, `.claude/settings.json`, `.github/workflows/`, `.cenci/Dockerfile`, `.lazyboards.yml`, `.codex/` — and every "the repo root" / "the project root" reference in the steps below resolves against `<worktree-path>`, never the main checkout. Use absolute paths rooted at `<worktree-path>` for every Write/Edit; verify the CWD before Bash commands rather than relying on a single `cd` persisting across calls. `gh label create` / `gh issue` calls (step 3c) are GitHub API calls, not file writes, and run the same regardless of worktree.
 
 ### Scripted Detection
 
@@ -122,7 +122,6 @@ This detection is a **non-blocking advisory** — it never gates configuration a
 | 2. Project structure | `isMonorepo` | Pre-select based on existing value |
 | 3. Branching strategy | `branchPattern` | Pre-fill with existing pattern |
 | 5. MCP Servers | `mcpServers` | Keep-or-change gate (see below); only "change" enters the multi-select, pre-sorted with enabled servers first |
-| 5b. Pencil design | `pencil` | Pre-select based on `pencil.enabled`; if field absent, ask normally |
 | 6. LSP Servers | `lspServers` | Keep-or-change gate (see below); only "change" enters the multi-select, pre-sorted with enabled servers first |
 | 7. Auto-compact | `autoCompactDisabled` | Pre-select Yes/No |
 | 7b. Pin subagents to 200K | `pinSubagents200K` | Pre-select Yes/No |
@@ -207,13 +206,11 @@ The dependency scan is scripted: `detection.mcpServers` carries the MCP catalog 
 | Trigger Package | Server Name | Command | Args | Env Vars | Scope |
 |---|---|---|---|---|---|
 | *(always available)* | context7 | `npx` | `["-y", "@upstash/context7-mcp@3.2.5"]` | `CONTEXT7_API_KEY` | project |
-| *(Pencil editor open)* | pencil | (connected via editor) | — | — | editor |
 | `@angular/core` | angular | `npx` | `["-y", "@angular/cli", "mcp"]` | — | project |
 | `primeng` | primeng | `npx` | `["-y", "@primeng/mcp"]` | — | project |
 
 **Scope:**
 - **project**: Add to the project's root `.mcp.json`.
-- **editor**: Provided by the Pencil editor over its own connection — nothing is written to `.mcp.json`; enablement is driven by `pencil.enabled` in `.cenci/config.json`.
 
 ### LSP Server Catalog
 
@@ -252,64 +249,6 @@ The dependency scan is scripted: `detection.mcpServers` carries the MCP catalog 
    If only Context7 is available (no framework-specific MCPs detected), still present it:
    "Do you want to enable Context7 for live documentation lookup?
     (Requires a free API key from context7.com/dashboard)"
-
-### Pencil Design Workflows
-
-**Condition**: Only ask question 5b when a frontend framework is detected in the stack from question 1. Frontend frameworks include: Angular, React, Next.js, Vue, Svelte, or any UI framework.
-
-If no frontend framework is detected, skip this section entirely (do not set `pencil` in config).
-
-5b. **Pencil design workflows**: Present using AskUserQuestion:
-
-   "Your project includes `<detected-frontend-framework>`. Do you want to enable Pencil design workflows?
-    (Visual designs, auto-generated design specs with component mappings and tokens.
-    Requires the Pencil editor.)"
-
-   Options: "Yes — enable Pencil design workflows", "No — skip"
-
-   **If Yes AND monorepo with multiple frontend projects** (i.e., `isMonorepo` is true and more than one project in the `projects` array has a frontend stack):
-
-   "Should frontend projects share one design file, or have separate design files?"
-
-   Options: "Shared (single `designs/` at repo root)", "Separate (per-project `designs/`)"
-
-   - **Shared**: `pencil.designPath = "designs/"`, `pencil.shared = true`
-   - **Separate**: each frontend project entry in the `projects` array gets its own `designPath` (e.g., `"<project-path>/designs/"`)
-
-   **If Yes AND single project** (or monorepo with only one frontend project):
-   - `pencil.designPath = "designs/"`, `pencil.shared` is omitted
-
-   **After the user confirms Yes** (regardless of monorepo choice), detect `pen interactive` support:
-
-   Run `pen interactive --help 2>/dev/null` and check both the exit code **and** the
-   output: require exit 0 **and** the output containing `--app`. The `--app` flag is
-   specific to the npm CLI's (`@pen.dev/cli`) `interactive` subcommand help — a
-   desktop-app-installed `pen` symlink instead launches the GUI application on any
-   unrecognized argument, including `--help`, and can also exit 0 without ever
-   printing `--app`. Checking the exit code alone would misdetect that desktop-symlink
-   host as `cli-app` mode; the combined check is how `cli-app` vs. `editor` mode is
-   auto-detected without that false positive.
-   - **Both conditions hold** → Write `pencil.mode: "cli-app"` to the config. Inform the user:
-     "Pencil `interactive` mode detected. Design skills will use `pen interactive` to communicate with the Pencil editor — this is more token-efficient than the MCP server.
-     For maximum token savings, you can disable the Pencil MCP server in your editor settings (Pencil → Preferences → MCP Server). cenci uses the CLI directly and does not need the MCP server."
-   - **Either condition fails, or the command is not found** → Write `pencil.mode: "editor"` to the config. Inform the user:
-     "Pencil `interactive` mode not available. Design skills will use the Pencil MCP server (requires the MCP connection to be active in your editor).
-     For better token efficiency, install the `pen` command (`npm install -g @pen.dev/cli`, or from within the Pencil app: File → Install `pen` command into PATH) and re-run `/cenci:configure` — this switches to `cli-app` mode which avoids loading MCP tool schemas into every conversation."
-
-   **Sandbox note** (no extra config value needed): inside the cenci sandbox neither the
-   desktop editor nor its MCP server is reachable, so with either mode above the
-   pipeline's availability probe (implement's Design Context Loading) falls back at
-   runtime to `pen interactive` **headless** mode — the CLI's own editor engine, no
-   GUI — using the `pen` binary baked into the sandbox image by
-   `sandbox/fragments/pencil.dockerfile` (included when `pencil.enabled` is true; see
-   question 9). Headless auth comes from the host's `~/.pencil/session-cli.json`
-   (created by `pen login`, staged into the container automatically) or a
-   `PEN_CLI_KEY` set in the host environment (forwarded per agent session, never baked
-   into the image). This headless fallback covers the *pipeline's* reads only:
-   design itself is host-only and refuses to run in-container — `/cenci:design`
-   fails fast with host-session guidance (see `design/SKILL.md` Phase 0.5).
-   `cenci run design {number} --no-sandbox` is how the generated board dispatches
-   it (see the `D` action below).
 
 ### UI Conventions
 
@@ -518,14 +457,6 @@ Include the server in `.lsp.json` regardless — it activates once the binary is
    backend/API project gets the Node block without paying Chromium's image-size cost for a
    visual-verification step it will never run.
 
-   **Pencil fragment** (config-selected, not stack-token-selected): when the config being
-   written enables Pencil design workflows (`pencil.enabled: true`, question 5b),
-   additionally include `sandbox/fragments/pencil.dockerfile` — it bakes the
-   `@pen.dev/cli` npm package into the image so `implement`/`verify-ui` can run their
-   design reads in the CLI's headless mode inside the sandbox, where the host's desktop
-   editor and its MCP server are unreachable. Like Playwright, it is scoped to repos that
-   actually need it rather than every Node image.
-
    **Docker fragment** (config-selected, not stack-token-selected): when the config being
    written enables nested Docker (`sandbox.dind: true`, question 9b), additionally include
    `sandbox/fragments/docker.dockerfile` — it installs the Docker CLI, the `docker-ce`
@@ -553,7 +484,7 @@ Include the server in `.lsp.json` regardless — it activates once the binary is
 
    A stack token that matches no row above (e.g. `markdown-shell`, `docker-shell`) contributes no additional project fragment. This is not an error — the generated Dockerfile still contains the mandatory Node runtime fragment.
 
-   **.NET version substitution** (the only row with a version-from-token adjustment): `sandbox/fragments/dotnet.dockerfile` ships with `ARG DOTNET_SDK_VERSION=10.0.100` as its own default. When including this fragment, replace that default's version with `<major>.0.100`, where `<major>` is extracted from the stack token using the same extraction as the CI mapping's version-pinning table above (`dotnet10` → `10`) — e.g. a `dotnet8` stack writes `ARG DOTNET_SDK_VERSION=8.0.100`. **Monorepo tie-break**: when multiple projects map to the dotnet fragment with different major versions (e.g. one project on `dotnet8`, another on `dotnet10`), use the **highest** major version found across all matching projects. If no major version can be extracted from the token, leave the fragment's own default (`10.0.100`) unmodified — and add an inline comment immediately after the `ARG DOTNET_SDK_VERSION` line noting the version could not be auto-detected from the stack token and the fragment's default was used instead, e.g. `# .NET version could not be auto-detected from the stack token — using fragment default. See sandbox/README.md to pin manually.` (mirrors the unresolved-`baseVersion` comment pattern in the baseVersion resolution above). The other fragments (node, playwright, go, python, rust, pencil, docker, azure) are included verbatim with their own `ARG` defaults unmodified — every fragment `ARG` (including `DOTNET_SDK_VERSION` and `BASE_VERSION`) remains overridable at build time via `--build-arg`, so an unmodified default is never a hard lock-in.
+   **.NET version substitution** (the only row with a version-from-token adjustment): `sandbox/fragments/dotnet.dockerfile` ships with `ARG DOTNET_SDK_VERSION=10.0.100` as its own default. When including this fragment, replace that default's version with `<major>.0.100`, where `<major>` is extracted from the stack token using the same extraction as the CI mapping's version-pinning table above (`dotnet10` → `10`) — e.g. a `dotnet8` stack writes `ARG DOTNET_SDK_VERSION=8.0.100`. **Monorepo tie-break**: when multiple projects map to the dotnet fragment with different major versions (e.g. one project on `dotnet8`, another on `dotnet10`), use the **highest** major version found across all matching projects. If no major version can be extracted from the token, leave the fragment's own default (`10.0.100`) unmodified — and add an inline comment immediately after the `ARG DOTNET_SDK_VERSION` line noting the version could not be auto-detected from the stack token and the fragment's default was used instead, e.g. `# .NET version could not be auto-detected from the stack token — using fragment default. See sandbox/README.md to pin manually.` (mirrors the unresolved-`baseVersion` comment pattern in the baseVersion resolution above). The other fragments (node, playwright, go, python, rust, docker, azure) are included verbatim with their own `ARG` defaults unmodified — every fragment `ARG` (including `DOTNET_SDK_VERSION` and `BASE_VERSION`) remains overridable at build time via `--build-arg`, so an unmodified default is never a hard lock-in.
 
    > **Sync obligation**: `sandbox/fragments/*.dockerfile` is the source of truth for these blocks; the mapping table above mirrors their content and existence, not their byte contents (generation reads the fragment files directly — see step 5e). If a fragment is added, removed, or renamed, this table needs a matching manual update. Low risk in practice — both live in the same monorepo and are maintained together — but currently unenforced by tooling.
 
@@ -582,7 +513,7 @@ Bash call, per `cenci:shell-rules`) and branch:
 
 - **No `.lazyboards.yml` at the repo root** → ask **question 10** below (offer to
   generate one). On "No", omit `lazyboards` from config.json (same pattern as
-  `cicd`/`pencil`/`sandbox`).
+  `cicd`/`sandbox`).
 - **`.lazyboards.yml` already exists** → **skip question 10** and jump to
   **Existing config: suggest or skip** below (analyze the file against the
   recommended action set, suggest what's missing, or skip quietly with a small log).
@@ -592,9 +523,8 @@ Bash call, per `cenci:shell-rules`) and branch:
     `lazyboards.enabled: true` recorded from a prior run, or `$ARGUMENTS` requesting a
     narrower focus or a skip, never authorizes silently regenerating
     `.lazyboards.yml` without asking again this session: "Generate a per-repo
-    `.lazyboards.yml` for the lazyboards board? (Wires Refine/Implement keybindings —
-    and, when `pencil.enabled` is on, a Design keybinding on `Z` — onto the New/
-    Refined/Planned columns, Edit-plan and View-plan keybindings on Planned that open
+    `.lazyboards.yml` for the lazyboards board? (Wires Refine/Implement keybindings onto
+    the New/Refined/Planned columns, Edit-plan and View-plan keybindings on Planned that open
     the ticket's saved plan in `$EDITOR` / a pager, plus In Review actions that open a
     PR's registered worktree in a tmux window (`W`) and, per project, serve or test it
     with a mnemonic key sequence — reviewing a PR becomes a couple of keypresses on
@@ -651,9 +581,8 @@ Bash call, per `cenci:shell-rules`) and branch:
    than erroring. Never assign any of them:
    `?` `q` `n` `e` `c` `o` `r` `p` `x` `d` `P` `m` `A` `G` `D` `s` `f` `a` `/`
    `j` `k` `l` `h` `tab` `shift+tab` `1`–`9` `ctrl+c`, plus the `g` prefix (`g a`,
-   `g r`). Of the keys cenci generates, only `D` collides — it is lazyboards' own
-   dispatch panel (`view.dispatch`), which is why **Design is bound to `Z`**.
-   `R I E V W C X S T Z` are all free.
+   `g r`). Of the keys cenci generates, none collides with lazyboards' own bindings —
+   `R I E V W C X S T` are all free.
 
    **Never bind or unbind `ctrl+c`.** It always force-quits, ahead of any table
    lookup; a `ctrl+c` token anywhere in any key or sequence — even as an explicit
@@ -692,7 +621,7 @@ Bash call, per `cenci:shell-rules`) and branch:
    Never use `C` or `X` (the generated file's own `keymaps.normal`/`keymaps.detail`
    tables claim them for the Claude/Codex board-level launch actions), never use `E`
    or `V` (the Planned column's Edit-plan and View-plan actions claim them), never
-   use `Z` (Design on `Refined`), never reuse a key or key sequence already assigned
+   reuse a key or key sequence already assigned
    to a serve action, never repurpose `W` for anything but Open worktree, and never
    assign a leading letter already bound as a standalone key anywhere in the
    resolved namespace per the prefix constraint above.
@@ -1007,10 +936,6 @@ After gathering answers:
    - `<test-command>`: detected or user-provided test command
    - `<project-specific rules populated during configure>`: leave as a placeholder for the user to fill in later, or remove the bullet if no conventions are known yet
 
-3b. **Create design directories** (only if Pencil was enabled in question 5b):
-   - **Single project or shared monorepo** (`pencil.shared` is `true` or not a monorepo): Create `designs/` at the repo root: `mkdir -p designs/`
-   - **Separate monorepo**: For each frontend project that has a `designPath`, create its directory: `mkdir -p <project-path>/designs/`
-
 3c. **Ensure board lifecycle labels exist**: `gh issue edit --add-label` fails when the label is missing from the repository, so create the lifecycle set now. Run `gh label list --repo <owner>/<repo> --limit 100 --json name` once, then for each **missing** label run its own `gh label create` call (never modify or recolor a label that already exists):
 
    ```bash
@@ -1019,10 +944,8 @@ After gathering answers:
 
    | Label | Color | Description |
    |---|---|---|
-   | `Working` | `FBCA04` | Actively being refined, designed, or implemented |
-   | `Refined` | `0E8A16` | Ready for design/implementation |
-   | `Design` | `D93F0B` | Design-only ticket — deliverable is a design spec |
-   | `Designed` | `5319E7` | Design spec approved |
+   | `Working` | `FBCA04` | Actively being refined or implemented |
+   | `Refined` | `0E8A16` | Ready for implementation |
    | `Planned` | `1D76DB` | Plan on disk, ready to pick up |
    | `In Review` | `A2EEEF` | PR open, under review / CI running |
    | `Implemented` | `6F42C1` | PR merged — done |
@@ -1274,7 +1197,6 @@ After gathering answers:
      and add entries in the format `mcp__<server-name>__<tool-name>` (for project-scoped).
      Known tools:
      - **Context7**: `mcp__context7__resolve-library-id`, `mcp__context7__query-docs`
-     - **Pencil** (only if `pencil.enabled` is `true`): `mcp__pencil__*` (auto-allow all Pencil editor MCP tools — only relevant when Pencil editor is open)
      - **Angular**: `mcp__angular__:*` (auto-allow all Angular CLI MCP tools)
      - **PrimeNG**: `mcp__primeng__:*` (auto-allow all PrimeNG MCP tools)
 
@@ -1614,7 +1536,7 @@ For each MCP selected in question 5:
 
    **Per-fragment markers**: wrap each fragment's content in a `# cenci:fragment-begin <name>` / `# cenci:fragment-end <name>` marker pair, placed immediately before and after that fragment's own content within the managed block (see the example above). `<name>` is the fragment file's basename without `.dockerfile` (e.g. `sandbox/fragments/docker.dockerfile` → `docker`). This lets `watch/internal/sandbox/launcher`'s fragment-drift detector (#1048) identify exactly which installed fragment a block of content came from; an already-generated block with no per-fragment markers still gets detected, via that detector's legacy banner-line fallback.
 
-   **Fragment concatenation order** (when multiple fragments apply, e.g. a monorepo union): **dotnet → node → playwright → go → python → rust → pencil → docker → azure**, regardless of the order projects were discovered in. Node is mandatory; the remaining fragments are stack-selected (pencil, docker and azure are config-selected — see the mapping table's Pencil, Docker and Azure rules). Concatenate the selected `sandbox/fragments/*.dockerfile` file contents in that fixed order, each wrapped in its own per-fragment marker pair, applying the **.NET version substitution** from the mapping table above to the dotnet fragment only — every other fragment is included verbatim. Deduplicate — each fragment appears at most once even when multiple monorepo projects map to the same fragment.
+   **Fragment concatenation order** (when multiple fragments apply, e.g. a monorepo union): **dotnet → node → playwright → go → python → rust → docker → azure**, regardless of the order projects were discovered in. Node is mandatory; the remaining fragments are stack-selected (docker and azure are config-selected — see the mapping table's Docker and Azure rules). Concatenate the selected `sandbox/fragments/*.dockerfile` file contents in that fixed order, each wrapped in its own per-fragment marker pair, applying the **.NET version substitution** from the mapping table above to the dotnet fragment only — every other fragment is included verbatim. Deduplicate — each fragment appears at most once even when multiple monorepo projects map to the same fragment.
 
    **Merge-safe regeneration**: the whole block above (from `# cenci:managed-begin` through `# cenci:managed-end` inclusive) is the managed block.
    - **File doesn't exist**: create `.cenci/` (`mkdir -p .cenci`) and write the managed block as the full file content.
@@ -1626,7 +1548,7 @@ For each MCP selected in question 5:
      - If Show existing: read and display the file, then re-ask Overwrite/Skip.
    - **File exists with malformed markers** (exactly one of `# cenci:managed-begin` / `# cenci:managed-end` present, markers out of order, or duplicate marker pairs): do **not** attempt a partial text replace — a malformed marker pair cannot be trusted to safely bound the managed block (and could itself be the result of a spoofed end-marker smuggled in via an unvalidated `baseVersion` — see the validation step above). Route this through the exact same Overwrite/Skip/Show conflict-check UX as the "no markers" case above — same prompt text, same three options, same behavior.
 
-   **Monorepo**: fragments are the mandatory Node runtime fragment plus the deduplicated union described in the Stack-to-fragment mapping table under question 9, concatenated in the dotnet → node → playwright → go → python → rust → pencil → docker → azure order above — one `.cenci/Dockerfile` for the whole repo, not one per project.
+   **Monorepo**: fragments are the mandatory Node runtime fragment plus the deduplicated union described in the Stack-to-fragment mapping table under question 9, concatenated in the dotnet → node → playwright → go → python → rust → docker → azure order above — one `.cenci/Dockerfile` for the whole repo, not one per project.
 
    **Committed, not ignored**: `.cenci/Dockerfile` is committed to the repo. Do **not** add `.cenci/` or `.cenci/Dockerfile` to `.gitignore` — the whole point is a team-shared, reviewed Dockerfile that the launcher's per-repo image selection (see `sandbox/README.md`) builds identically for every teammate.
 
@@ -1641,9 +1563,8 @@ For each MCP selected in question 5:
    - A local `columns:` list **replaces** the global column list entirely — it
      **never merges**. Because the generated file must stand alone, it never relies
      on inheritance from a global config cenci no longer creates: every column the
-     board should show is declared here. `Designed` and `Implemented` are dropped
-     from the generated file entirely — they are labels in the ticket lifecycle,
-     not board columns.
+     board should show is declared here. `Implemented` is dropped from the generated
+     file entirely — it is a label in the ticket lifecycle, not a board column.
    - **Every key binding goes in the `keymaps:` namespace.** Per-column bindings
      live under `keymaps.columns.<name>` (matched case-insensitively); board-level
      bindings go in **both** `keymaps.normal` and `keymaps.detail`, since
@@ -1686,10 +1607,6 @@ For each MCP selected in question 5:
            name: Implement
            type: shell
            command: "cenci run implement {number}"
-         Z:
-           name: Design
-           type: shell
-           command: "cenci run design {number} --no-sandbox"
 
        Planned:
          I:
@@ -1741,12 +1658,6 @@ For each MCP selected in question 5:
      never reused for serve, test, or any other action. `command:` is omitted
      deliberately: on an action that sets `window:`, lazyboards treats "open a
      window on this directory" as complete and runs the default shell there.
-   - **`Refined`'s `Z` (Design) action is gated on the single top-level
-     `pencil.enabled` field** (from `.cenci/config.json` — never a per-project
-     field): emit `Z` only when `pencil.enabled` is `true`; when it is `false` or
-     absent, omit `Z` and keep only `I` on that column. Design is on `Z`, not `D`:
-     `D` is lazyboards' built-in dispatch panel (`view.dispatch`), and a user
-     binding wins over the default, so binding `D` would shadow the panel.
    - `Planned` gets a local `I` (Implement) action too, so a ticket that already
      passed planning can still be manually re-dispatched straight from the board, plus
      local `E` (Edit plan, opens in `${EDITOR:-vi}`) and `V` (View plan, opens in
@@ -1758,7 +1669,7 @@ For each MCP selected in question 5:
      actions glob `.plans/{number}-*.md` (the same resolution the implement skill
      uses) and no-op when no plan file is present (e.g. already consumed in Phase 9).
      `{number}` is a validated integer, safe to interpolate.
-   - `Designed` and `Implemented` are **never** re-emitted as generated columns in
+   - `Implemented` is **never** re-emitted as a generated column in
      `.lazyboards.yml` — only `New`, `Refined`, `Planned`, and `In Review` appear.
    - `C` and `X` are board-level Claude/Codex launch actions, emitted under
      **`keymaps.normal` and `keymaps.detail`** — never under
@@ -1808,7 +1719,7 @@ For each MCP selected in question 5:
    - `{pr_worktree}` resolves the PR branch's registered Git worktree at action
      time, so the file stays machine-independent — never embed absolute paths.
      `{number}` (used in `command: "cenci run refine {number}"` /
-     `implement {number}` / `design {number}`) is a validated GitHub issue/PR
+     `implement {number}`) is a validated GitHub issue/PR
      integer, not free text, so it is safe to interpolate without additional
      escaping. `window:` and `cwd:` are template-expanded like `url:`/`command:`,
      so they count for scope inference and the scope variable restrictions too — a
@@ -1860,9 +1771,7 @@ For each MCP selected in question 5:
      recorded flag:
      1. Read the existing file and derive the **recommended action set** this repo
         would generate above: Refine/Implement on `New`/`Refined`/`Planned`,
-        pencil-gated Design on `Refined` (recommended command:
-        `cenci run design {number} --no-sandbox`), Edit-plan (`E`) and View-plan (`V`)
-        actions on `Planned`, an unconditional `W` (Open worktree) on `In Review`, and
+        Edit-plan (`E`) and View-plan (`V`) actions on `Planned`, an unconditional `W` (Open worktree) on `In Review`, and
         per runnable/testable project a serve (`S`/`"S b"`/`"S f"`/…) and test
         (`T`/`"T b"`/`"T f"`/…) In Review action. Outside the per-column tables it also includes the board-level `C`/`X` launch actions and `cleanup: "cenci close {number}"`.
      2. Compute the **delta** = recommended actions absent from the existing file,
@@ -1878,13 +1787,6 @@ For each MCP selected in question 5:
         such as a custom `S: Sync` board-level action) that would prefix-collide
         with the proposed `S`/`T` key, pick a different leading letter for that
         action instead.
-        - **Design-only exception (narrow, do not generalize to other actions)**:
-          an existing Design action whose command lacks `--no-sandbox` still
-          matches by intent, so it is not flagged as "missing" — but it counts
-          toward the delta as an **update** (not an "add"), since its command must
-          become `cenci run design {number} --no-sandbox`. Separately, a Design
-          action bound to `D` is always an **update** to `Z` regardless of its
-          command, since `D` is lazyboards' built-in dispatch panel.
         - **Hand-written tmux (any action, add or carry-over)**: an existing
           action whose `command:` starts with `tmux new-window` matches by intent
           — it is not "missing" — but counts toward the delta as an **update** to
@@ -1970,11 +1872,6 @@ For each MCP selected in question 5:
     "typescript": true,
     "csharp-ls": true
   },
-  "pencil": {
-    "enabled": true,
-    "designPath": "designs/",
-    "mode": "editor"
-  },
   "autoCompactDisabled": true,
   "pinSubagents200K": true,
   "cenci": {
@@ -2031,7 +1928,7 @@ The `cicd` field is only present when the user selected Yes in question 8. Schem
 - `cicd.enabled` — `true` if user opted in, omit `cicd` entirely if declined
 - `cicd.platform` — `"github-actions"`
 
-Omit `cicd` entirely when the user says No (same pattern as `pencil`).
+Omit `cicd` entirely when the user says No.
 
 The `sandbox` field carries three **independently toggled** sub-answers — question 9 (Sandbox Dockerfile), question 9b (Nested Docker/dind) and question 9c (Azure CLI) — that do not gate each other. Its merge into `existingConfig` (or a fresh config) is delegated to a shared, deterministic script rather than hand-merged, so Claude Code and Codex configure runs produce byte-equivalent `sandbox` JSON for equivalent answers — "prose presence alone is not evidence that generated JSON is correct" (#632):
 
@@ -2046,7 +1943,7 @@ bash "${CLAUDE_PLUGIN_ROOT}/skills/configure/scripts/merge-sandbox-config.sh" <p
 Run it as its own Bash call (per `cenci:shell-rules`). If `existingConfig` is null (first-ever configure run), pass `-` as the config argument and pipe `{}` in as stdin. The script prints the **full merged config** (not just the `sandbox` object) to stdout — treat that stdout as the new full config content going into step 6's write (after also stamping `configVersion` per above).
 
 `scripts/merge-sandbox-config.sh` (tested by its own `scripts/merge-sandbox-config.test.sh`) is the source of truth for the merge; the schema and outcomes below document its contract, not a procedure to hand-execute. On any non-zero exit from the script, do not use its (possibly empty) stdout as the new config content — read stderr for the cause. The script fails closed (exit 2) for several distinct reasons: `jq` missing, an unreadable existing config, invalid existing JSON, a missing/invalid `--dockerfile`/`--dind`/`--azure`/`--base-version` value, or an unknown argument. Every boolean flag is **required** — an omitted one would default to false and silently delete an existing opt-in, so the script refuses instead. If `jq` is genuinely unavailable, fall back to this manual procedure; for any other validation failure, fix the inputs (e.g. re-check the existing config's readability/JSON validity, the resolved flag values) and retry the script rather than falling back:
-- `sandbox.enabled` — `true` if the user opted in to question 9; omit the key entirely if declined (same pattern as `cicd`/`pencil` — never write `enabled: false`)
+- `sandbox.enabled` — `true` if the user opted in to question 9; omit the key entirely if declined (same pattern as `cicd` — never write `enabled: false`)
 - `sandbox.baseVersion` — the resolved sandbox plugin version baked into the generated `.cenci/Dockerfile`'s `ARG BASE_VERSION` default (see the baseVersion resolution algorithm in step 5e), or `null` when it could not be resolved; only present alongside `sandbox.enabled: true`
 - `sandbox.dind` — `true` if the user opted in to question 9b; omit the key entirely if declined (never write `dind: false`)
 - `sandbox.azure` — `true` if the user opted in to question 9c; omit the key entirely if declined (never write `azure: false`). Read by `/cenci:configure` (to select `sandbox/fragments/azure.dockerfile`) **and** at launch by `cenci open`/`cenci audit` (`RepoAzureConfig` in `watch/internal/sandbox/launcher/azure.go`), which stage the host's `~/.azure` auth files read-only only for repos that set it
@@ -2056,7 +1953,7 @@ Because the answers are independent, `sandbox` is written whenever **any** of th
 - Q9=No, 9b=Yes, 9c=No → `"sandbox": { "dind": true }` (no `enabled`/`baseVersion` keys)
 - Q9=No, 9b=No, 9c=Yes → `"sandbox": { "azure": true }` (no `enabled`/`baseVersion`/`dind` keys)
 - Q9=Yes, 9b=Yes, 9c=Yes → `"sandbox": { "enabled": true, "baseVersion": "<resolved>", "dind": true, "azure": true }`
-- All No → omit `sandbox` entirely (same pattern as `cicd`/`pencil`)
+- All No → omit `sandbox` entirely (same pattern as `cicd`)
 
 On re-configuration, merge into any existing `sandbox` object rather than replacing it wholesale — this preserves the sibling keys when only one answer changes (e.g. a dind-only re-config that answers 9b=No must drop only `dind` and retain an already-enabled `sandbox.enabled`/`baseVersion`/`azure`, and so on for each sibling).
 
@@ -2065,21 +1962,13 @@ On re-configuration, merge into any existing `sandbox` object rather than replac
 The `lazyboards` field is present when question 10 was answered Yes **or** a
 `.lazyboards.yml` already existed (the suggest-or-skip branch also records
 `enabled: true`). Schema:
-- `lazyboards.enabled` — `true` if a board config exists (generated or pre-existing); omit `lazyboards` entirely when the user declines question 10 and no file exists (same pattern as `cicd`/`pencil`/`sandbox`)
+- `lazyboards.enabled` — `true` if a board config exists (generated or pre-existing); omit `lazyboards` entirely when the user declines question 10 and no file exists (same pattern as `cicd`/`sandbox`)
 - **Single project**: `lazyboards.serveCommand` + `lazyboards.boardKey` record the generated serve action, and `lazyboards.testCommand` + `lazyboards.testKey` record the generated test action (command and its key — a single letter, or a multi-key mnemonic sequence like `"S b"`/`"T f"` in a monorepo). Omit the test pair when the project is not testable. `W` (Open worktree) is never recorded here — it carries no command and isn't project-specific.
 - `boardKey`/`testKey` are written in lazyboards' **canonical space-separated** sequence form (`"S b"`, `"T f"`) — the same spelling the generated `.lazyboards.yml` uses. A concatenated value read from `existingConfig` (`"Sb"`, `"Tf"`) is the **same key**, not a different one: normalize it to the space-separated form on write rather than treating it as a distinct binding or as a key collision. A single-letter key (`"S"`, `"T"`) is already canonical and is written unchanged.
 - **Monorepo**: `serveCommand`/`boardKey` and `testCommand`/`testKey` live on each project entry in the `projects` array instead (a project gets the serve pair only when runnable and the test pair only when testable), and the top-level `lazyboards` field carries only `enabled`
 - These recorded values are advisory: the suggest-or-skip analyzer re-derives serve/test commands from the derivation tables above, so a config missing them still works.
 
-Omit `lazyboards` entirely when the user says No (same pattern as `cicd`/`pencil`/`sandbox`).
-
-The `pencil` field is only present when the user was asked question 5b (frontend framework detected). Schema:
-- `pencil.enabled` — gating flag for all design features (`true` if user opted in, `false` if declined)
-- `pencil.designPath` — where `.pen` and `DESIGN.md` files live (default: `"designs/"`)
-- `pencil.mode` — Pencil connection mode: `"editor"` (default, GUI with MCP), `"headless"` (future, npm package), or `"auto"` (future, try headless then editor)
-- `pencil.shared` — only present when `isMonorepo: true` and user chose shared design files (`true` for shared, omitted for separate)
-
-Omit `pencil` entirely if no frontend framework was detected.
+Omit `lazyboards` entirely when the user says No (same pattern as `cicd`/`sandbox`).
 
 The `security` field is optional and is **never written by a configure prompt** — there is
 no question for it. It is a manually-editable escape hatch that lets a project extend
@@ -2166,7 +2055,6 @@ legacy one.
       "testCommand": "npm test",
       "lintCommand": "ng lint",
       "gateCommand": "npm run build && npm test -- --watch=false",
-      "designPath": "apps/web-client/designs/",
       "serveCommand": "ng serve",
       "boardKey": "S f",
       "testKey": "T f"
@@ -2174,11 +2062,6 @@ legacy one.
   ],
   "lazyboards": {
     "enabled": true
-  },
-  "pencil": {
-    "enabled": true,
-    "designPath": "designs/",
-    "shared": true
   },
   "autoCompactDisabled": true,
   "pinSubagents200K": true,
@@ -2318,10 +2201,6 @@ Only include servers in `lspServers` that were detected and presented in questio
 
 When migrating from an older config that has `ticketSystem`, `prSystem`, `ticketPrefix`, `adoOrg`, `adoProject`, `adoRepo`, `profile`, or `sandboxEnabled` fields, remove them during the merge.
 
-**Monorepo `pencil` notes:**
-- When `pencil.shared` is `true`: `pencil.designPath` holds the shared path (e.g., `"designs/"`). Individual projects do **not** have `designPath`.
-- When `pencil.shared` is `false` (separate): `pencil.designPath` is omitted. Each frontend project in the `projects` array gets a `designPath` field (e.g., `"apps/web-client/designs/"`). Non-frontend projects do not get `designPath`.
-
 7. **Commit, Push, and Open PR**: configure's changes live in `<worktree-path>` — ship them the same way every other change in this repo ships.
 
    Read `<worktree-path>/docs/git-workflow.md` for the commit/branch/PR conventions used below. Target the worktree explicitly with `git -C <worktree-path>` on every command below so they resolve against the worktree and stay auto-approved (see `cenci:shell-rules` — never compound `cd` with the git command itself).
@@ -2385,10 +2264,8 @@ in the completion summary so the user can mirror it as columns on their board:
 
 | Label | Applied by | Meaning |
 |---|---|---|
-| `Working` | refine (after the confirmation gate) / design / implement (at start) | Actively being refined, designed, or implemented |
-| `Refined` | refine | Ready for design/implementation |
-| `Design` | refine | Design-only ticket — deliverable is a design spec; implement redirects to `/cenci:design` |
-| `Designed` | design | Design spec approved — propagated from the completed design ticket to the implementation tickets that depend on it |
+| `Working` | refine (after the confirmation gate) / implement (at start) | Actively being refined or implemented |
+| `Refined` | refine | Ready for implementation |
 | `Planned` | implement Phase 1 (plan persisted) | Plan on disk, ready to pick up |
 | `In Review` | implement Phase 9 (at PR-open) | PR is open, under review / CI running |
 | `Implemented` | babysit (on PR merge) | PR merged — done |
@@ -2396,17 +2273,17 @@ in the completion summary so the user can mirror it as columns on their board:
 
 `Followup` is orthogonal to the linear lifecycle above — it is never part of the `New → … → Implemented` chain and applies to a separate followup ticket (not the original). It is a capture-queue marker, never release-blocking; it is removed when the item is triaged out of the queue — promoted to real work via `/cenci:refine`, or grouped/superseded via `/cenci:maintain backlog` (see `docs/followup-triage.md`).
 
-`Browser`, `ui:visual-check`, and `automerge:ok` are likewise refine-applied orthogonal markers, not columns in the `New → … → Implemented` chain — like `Followup`, they are not rows in the "Applied by / Meaning" table above, which enumerates board columns only; `automerge:ok` in particular is a per-ticket grant made by `/cenci:refine` at refinement time, with no repo-level default (there is no `automerge.defaultRisk` setting) — granted per ticket at refine's confirmation gate; never inherited by split children, the companion design ticket, or followups.
+`Browser`, `ui:visual-check`, and `automerge:ok` are likewise refine-applied orthogonal markers, not columns in the `New → … → Implemented` chain — like `Followup`, they are not rows in the "Applied by / Meaning" table above, which enumerates board columns only; `automerge:ok` in particular is a per-ticket grant made by `/cenci:refine` at refinement time, with no repo-level default (there is no `automerge.defaultRisk` setting) — granted per ticket at refine's confirmation gate; never inherited by split children or followups.
 
 A ticket judged trivial by implement's Trivial-Ticket Triage still transits through `Planned` — same labels, same board columns as any other ticket — just collapsed into one session instead of a stop-and-relaunch between `Planned` and `Working`. No new label state is introduced by the trivial-ticket fast path.
 
-**Reconciler-managed labels**: `dispatch-failed`, `plan-invalid`, and `reconcile-stuck` are not applied by refine, design, or implement — cenci's dispatch reconciler applies them automatically when it detects a stuck or failed automation state (dispatched work exhausted its retry budget, a `Planned` ticket has no parseable plan file, or reconciliation itself is stuck with its apply-retry budget exhausted). Like `Followup`, they are orthogonal to the `New → … → Implemented` lifecycle above and are not columns in that chain.
+**Reconciler-managed labels**: `dispatch-failed`, `plan-invalid`, and `reconcile-stuck` are not applied by refine or implement — cenci's dispatch reconciler applies them automatically when it detects a stuck or failed automation state (dispatched work exhausted its retry budget, a `Planned` ticket has no parseable plan file, or reconciliation itself is stuck with its apply-retry budget exhausted). Like `Followup`, they are orthogonal to the `New → … → Implemented` lifecycle above and are not columns in that chain.
 
 `Input Needed` is likewise orthogonal — like `Followup`, it is never part of the `New → … → Implemented` chain and is not a column in it. Unlike the skill-applied lifecycle labels above (which self-heal via each skill's own `gh label create … || true` fallback), `Input Needed` is applied by implement's unattended lean-mode escalation path via the `cenci pipeline label --transition input-needed` CLI call, which self-heals the label's existence through cenci's Go `ghLabelCreate` — the same mechanism `dispatch-failed`/`plan-invalid`/`reconcile-stuck` use, not a skill-level fallback. It is removed (swapping back to `Working`) when the ticket resumes.
 
-Lifecycle: `New → Refined → [Designed] → Planned → Working → In Review → Implemented`.
+Lifecycle: `New → Refined → Planned → Working → In Review → Implemented`.
 
-Design always happens on a dedicated design ticket — refine creates one (companion ticket, or first child of a split) whenever a frontend ticket lacks an approved design. Design tickets (labeled `Design`) follow a shorter path: `New → Refined → Designed → closed` — `/cenci:design` commits the spec on main, propagates `Designed` to the implementation tickets that depend on it (that propagated label is what satisfies implement's Design gate), and closes the design ticket; no plan, no PR (the one exception to "1 ticket = 1 PR"). `/cenci:implement` redirects `Design`-labeled tickets to `/cenci:design`. On a board, the `Designed` column therefore holds implementation tickets whose design is ready, not design tickets.
+UI conventions — the component library, its browsable catalog, and the reuse-before-authoring rule — live in each project's `AGENTS.md` `## UI Conventions` section (question 5c), which the planner and implementer read via the plan's `## Project Context`. There is no separate design stage or design ticket.
 
 **Migration note for existing boards** (state this when re-configuring a project that predates
 `In Review`): add an **`In Review`** column/label. Previously, tickets dropped straight into
@@ -2416,7 +2293,7 @@ that carry `Implemented` from before this change but whose PRs are still open ca
 `In Review` by hand; new work follows the split automatically.
 
 **Migration note for existing boards** (state this when re-configuring a project that predates
-`Planned`): add a **`Planned`** column/label between `Designed` and `Working`. Previously, a
+`Planned`): add a **`Planned`** column/label between `Refined` and `Working`. Previously, a
 planning session applied `Working` at pipeline start and then stopped once the plan was saved —
 so the board showed `Working` on a ticket nobody was actively working. Now a planning session
 lands the ticket on `Planned` ("a plan exists on disk, ready to pick up"); the swap to

@@ -12,14 +12,12 @@ scope and planning decisions human-gated.
 
 1. **Refine the issue.** Clarify intent, split oversized work, and surface risks before
    implementation starts.
-2. **Design when the interface matters.** UI tickets take a dedicated Pencil design
-   pass by default before code is approved.
-3. **Save the plan.** Planning produces a durable `.plans/` handoff that can be reviewed,
+2. **Save the plan.** Planning produces a durable `.plans/` handoff that can be reviewed,
    resumed, or picked up by automatic dispatch.
-4. **Run the engineering loop.** cenci creates an isolated worktree, proves the tests red,
+3. **Run the engineering loop.** cenci creates an isolated worktree, proves the tests red,
    implements them green, refactors, and runs security, quality, and silent-failure
    reviews.
-5. **Open and follow the PR.** The pipeline rebases, pushes, and opens the pull request;
+4. **Open and follow the PR.** The pipeline rebases, pushes, and opens the pull request;
    babysitting can then drive CI and review activity through merge.
 
 The implementation loop runs inside [cenci-sandbox](../sandbox/README.md), while
@@ -37,10 +35,6 @@ from the target repository and run:
 /cenci:implement 42
 ```
 
-For UI work, refinement creates or identifies a separate design ticket. Run the
-host-only `/cenci:design <design-ticket-id>` from a host Claude Code session before
-implementing ticket 42; the Pencil desktop app is not reachable from the container.
-
 The complete interactive workflow is Claude Code-only today. Codex has the portable
 engineering conventions and native workflow foundations described in
 [the Codex guide](docs/codex.md).
@@ -51,7 +45,6 @@ engineering conventions and native workflow foundations described in
 |-------|-------------|
 | `/cenci:configure` | Interactive project setup: tech stack, sandboxing, MCP/LSP servers |
 | `/cenci:refine <ticket-id>` | Iterative ticket refinement until it's ready for planning |
-| `/cenci:design <ticket-id \| description>` | **[host-only]** Interactive design reasoning and `.pen` file creation using Pencil; refuses to run inside the cenci sandbox |
 | `/cenci:implement <ticket-id>` | Full pipeline: plan, test, implement, refactor, security review, code review, lessons, PR |
 | `/cenci:refactor [scope]` | Analyze a codebase with specialized subagents and propose refactoring tickets |
 | `/cenci:review <pr-number \| file-paths>` | Review code with specialized security, quality, and silent-failure subagents |
@@ -88,12 +81,11 @@ Codex and OpenCode so neither mistakes a pipeline command for a supported workfl
 | `stack-go` | Yes | Yes | Yes | Framework and test conventions; documentation lookup is client-neutral |
 | `subagent-safety` | Yes | Yes | Yes | Shared delegation boundary with client-specific notes |
 | `testing` | Yes | Yes | Yes | TDD and test-quality conventions |
-| `verify-ui` | Yes | Yes | Yes | Playwright/Pencil visual-verification procedure; browser tooling availability is client-neutral |
+| `verify-ui` | Yes | Yes | Yes | Playwright visual-verification procedure; browser tooling availability is client-neutral |
 | `worktrees` | Yes | Yes | Yes | Git worktree conventions |
 | `address-review` | Yes | In development | No | Native approval/checkpoint foundation |
 | `babysit` | Yes | Yes | Yes | Thin wrapper over the client-neutral `cenci babysit` supervisor |
 | `configure` | Yes | In development | No | Neutral/adapters foundation present |
-| `design` | Yes | In development | No | Optional Pencil procedure |
 | `implement` | Yes | In development | No | Agents/checkpoints foundation |
 | `maintain` | Yes | Yes | No | Full six-phase deterministic-check + worker-audit procedure |
 | `refactor` | Yes | In development | No | Native analysis foundation |
@@ -123,11 +115,9 @@ companion) for every skill, including the internal ones not listed above.
 | `ci-repair` | Diagnose and repair failing CI for an existing pull request without reopening the implementation pipeline. | No | No | Yes | No |
 | `codex-runtime` | Shared native Codex stage, checkpoint, goal, and agent-adapter contract. | No | No | Yes | No |
 | `configure` | Configure cenci's neutral project core and generate Claude/Codex adapters. | No | Yes | Yes | Yes |
-| `design` | Run interactive design reasoning and create .pen files using Pencil. | No | Yes | Yes | Yes |
 | `frontend-classification` | Classify whether a ticket is frontend or UI work. Use when deciding whether design-aware planning, visual verification, UI tests, or screenshot capture applies. | Yes | No | Yes | Yes |
 | `implement` | Run the full cenci plan, test, implementation, review, and pull-request pipeline. | No | Yes | Yes | Yes |
 | `maintain` | Audit and repair structure, documentation, client-portability, and rule/lesson-hygiene drift through a deterministic check plus specialized agents, gated by human approval. | No | Yes | Yes | Yes |
-| `pencil-api` | The current Pencil MCP tool surface, `execute` idiom catalog, transport table, and document-discipline rules. Read before any Pencil call, in either `cli-app` or `editor` mode. | No | No | Yes | No |
 | `pr-comment-filter` | Decide which pull-request review comments are actionable. Use when addressing review feedback, monitoring a PR, or filtering already-handled comments. | Yes | No | Yes | Yes |
 | `project-core` | Resolve cenci's neutral project configuration and shared guidance consistently. | Yes | No | Yes | Yes |
 | `refactor` | Analyze a codebase with specialized agents and propose refactoring tickets. | No | Yes | Yes | Yes |
@@ -140,8 +130,8 @@ companion) for every skill, including the internal ones not listed above.
 | `subagent-safety` | Decide which work is safe to delegate to worker agents. Use before delegating tasks that may require user interaction, approval, authentication, external writes, or shared-state mutation. | Yes | No | Yes | Yes |
 | `sync` | Sync main, rebase active worktrees, and clean up merged branches safely. | No | Yes | Yes | Yes |
 | `testing` | TDD patterns and test quality guidelines. Use when writing tests, setting up test infrastructure, TDD workflow, integration tests, unit tests, test strategy, mocking, test fixtures, test helpers, assertion patterns, test coverage, red-green-refactor cycle, failing tests, test quality review, or test anti-patterns. | Yes | No | Yes | Yes |
-| `ticket-ownership` | Establish and verify exclusive ownership of a GitHub issue before refine, design, or implementation work begins. Use from ticket-mode workflows that must claim an unassigned issue for the active GitHub CLI user without replacing existing assignees. | No | No | Yes | No |
-| `verify-ui` | Visually verify UI changes with Playwright screenshots and Pencil layout checks before proceeding. Use when a change touches frontend/UI files and needs visual confirmation, not just passing tests. | Yes | No | Yes | Yes |
+| `ticket-ownership` | Establish and verify exclusive ownership of a GitHub issue before refine or implementation work begins. Use from ticket-mode workflows that must claim an unassigned issue for the active GitHub CLI user without replacing existing assignees. | No | No | Yes | No |
+| `verify-ui` | Visually verify UI changes with Playwright screenshots before proceeding. Use when a change touches frontend/UI files and needs visual confirmation, not just passing tests. | Yes | No | Yes | Yes |
 | `worktrees` | Git worktree patterns for isolated parallel development. Use when creating feature branches, managing git worktrees, isolating feature work, parallel development, setting up a worktree, listing worktrees, worktree naming conventions, or cleaning up worktrees. | Yes | No | Yes | Yes |
 <!-- cenci-maintain:skills:end -->
 
@@ -152,7 +142,7 @@ companion) for every skill, including the internal ones not listed above.
 |---|---|---|
 | `backlog-maintainer` | Audits the open Followup-ticket backlog for duplicates and small items worth grouping, producing consolidation findings with proposed merges, promotions, and batch polish tickets. Use from the /cenci:maintain skill's backlog mode. Read-only: it inventories issues and classifies them, it never closes, edits, or creates anything. | maintain |
 | `code-reviewer` | Strict senior developer that reviews PRs for quality, conventions, bugs, and test coverage. Use after implementation for final review before PR. | configure,implement |
-| `context-gatherer` | Gathers ticket, design, and project context into a compact bundle file before planning. Use at the start of the implement pipeline so large context (ticket body, comments, DESIGN.md, per-project CLAUDE.md) stays out of the main conversation. | attachments,implement |
+| `context-gatherer` | Gathers ticket and project context into a compact bundle file before planning. Use at the start of the implement pipeline so large context (ticket body, comments, per-project CLAUDE.md) stays out of the main conversation. | attachments,implement |
 | `docs-maintainer` | Audits the flow project's documentation and generated-index consistency for maintenance drift, producing findings with proposed repairs. Use from the /cenci:maintain skill's docs and all modes. | maintain |
 | `duplication-analyzer` | Analyzes codebase for duplicated code patterns, copy-paste code, and extraction opportunities. Use when checking for repeated logic across files. | — |
 | `implementer` | Senior developer that implements features using TDD — writes tests first, then implementation. Use for writing code, tests, and making builds pass. | implement |
@@ -179,12 +169,10 @@ companion) for every skill, including the internal ones not listed above.
 | `babysit` | — | project-core, shell-rules | — | — |
 | `ci-repair` | — | project-core, shell-rules, subagent-safety, testing | — | — |
 | `codex-runtime` | — | — | — | — |
-| `configure` | codex.md | babysit, codex-runtime, implement, project-core, shell-rules, testing, verify-ui | detect-project.sh, merge-sandbox-config.sh | code-reviewer |
-| `design` | codex.md | attachments, codex-runtime, pencil-api, project-core, shell-rules, ticket-ownership, verify-ui | — | — |
+| `configure` | codex.md | babysit, codex-runtime, project-core, shell-rules, testing, verify-ui | detect-project.sh, merge-sandbox-config.sh | code-reviewer |
 | `frontend-classification` | — | implement, refine | — | — |
 | `implement` | codex.md, phases/phase-1-plan.md, phases/phase-2-worktree.md, phases/phase-3-test-red.md, phases/phase-4-implement-green.md, phases/phase-5-refactor.md, phases/phase-6-7-review.md, phases/phase-8-docs.md, phases/phase-9-pr.md | attachments, babysit, codex-runtime, frontend-classification, project-core, review, shell-rules, subagent-safety, testing, ticket-ownership, verify-ui | run-artifact-dir.sh | code-reviewer, context-gatherer, implementer, lessons-collector, planner, security-reviewer, silent-failure-hunter |
 | `maintain` | base-freshness.md, codex.md, modes/backlog.md, modes/clients.md, modes/docs.md, modes/rules.md, modes/structure.md | codex-runtime, project-core, shell-rules, subagent-safety, worktrees | check.sh | backlog-maintainer, docs-maintainer, portability-maintainer, rules-maintainer, structure-maintainer |
-| `pencil-api` | — | configure, design, implement, verify-ui | — | — |
 | `pr-comment-filter` | — | address-review, babysit | — | — |
 | `project-core` | — | — | — | — |
 | `refactor` | codex.md | codex-runtime, project-core, shell-rules, subagent-safety | — | — |
@@ -408,9 +396,7 @@ The skills drive a ticket through a label-based state machine (`gh issue edit`).
 
 | State | Applied by | Meaning |
 |---|---|---|
-| `Refined` | `/cenci:refine` | Scoped and ready for design/implementation |
-| `Design` | `/cenci:refine` | Design-only ticket — the deliverable is a design spec, not code |
-| `Designed` | `/cenci:design` | Design spec approved — propagated from the completed design ticket to the implementation tickets that depend on it |
+| `Refined` | `/cenci:refine` | Scoped and ready for implementation |
 | `Planned` | `/cenci:implement` — Phase 1, when the plan is persisted | Plan on disk (`.plans/`), ready to pick up |
 | `Working` | `/cenci:implement` — at pipeline start | Actively being implemented |
 | `In Review` | `/cenci:implement` — Phase 9, at PR-open | PR is open, under review / CI running |
@@ -419,9 +405,9 @@ The skills drive a ticket through a label-based state machine (`gh issue edit`).
 
 `Followup` is a separate capture tag applied to followup tickets created at PR time (and appended to by `address-review`'s Acknowledge action) — it is an untriaged capture queue, never release-blocking, not a board-progression state, and not part of the linear lifecycle below. Items leave the queue only when triaged: grouped and supersede-closed via `/cenci:maintain backlog`, or promoted via `/cenci:refine` (see `flow/docs/followup-triage.md`).
 
-`automerge:ok` is likewise a non-column marker: a per-ticket grant confirmed by the human at `/cenci:refine`'s Confirmation Gate (never a repo-level default) that tells `/cenci:babysit` it may merge that ticket's PR without human review — granted independently for the parent and every split child, and never inherited by a split child, the companion design ticket, or a followup ticket. Split children can likewise earn `Browser`/`ui:visual-check` on their own merit at the same gate, rather than only ever carrying the parent's.
+`automerge:ok` is likewise a non-column marker: a per-ticket grant confirmed by the human at `/cenci:refine`'s Confirmation Gate (never a repo-level default) that tells `/cenci:babysit` it may merge that ticket's PR without human review — granted independently for the parent and every split child, and never inherited by a split child or a followup ticket. Split children can likewise earn `Browser`/`ui:visual-check` on their own merit at the same gate, rather than only ever carrying the parent's.
 
-Full lifecycle: `New → Refined → [Designed] → Planned → Working → In Review → Implemented`. **Design always happens on a dedicated design ticket**: when a frontend ticket lacks an approved design, `/cenci:refine` creates a `Design`-labeled companion ticket (or leads a split with a design child) that the implementation ticket depends on. `/cenci:implement` redirects `Design` tickets to `/cenci:design`, which commits the spec on main, propagates `Designed` to the dependent implementation tickets (satisfying implement's design gate), and closes the design ticket (`New → Refined → Designed → closed`; no PR — the one exception to "1 ticket = 1 PR"). On the board, the `Designed` column holds implementation tickets whose design is ready. A planning session ends on **`Planned`** — a saved plan sits in `.plans/`, waiting; picking it up with `/cenci:implement .plans/<file>` swaps `Planned → Working` — except the Trivial Fast Path and the Lean Approval Path, both of which continue into Phase 2 without a separate plan-file relaunch. Opening the PR (Phase 9) only advances the ticket to **`In Review`**; the transition to **`Implemented`** happens when the PR merges — [babysit](#babysitting-a-pr) performs that swap using the merged PR's `closingIssuesReferences`. (`configure` documents these labels but does not create them; add the matching columns to your board.)
+Full lifecycle: `New → Refined → Planned → Working → In Review → Implemented`. A planning session ends on **`Planned`** — a saved plan sits in `.plans/`, waiting; picking it up with `/cenci:implement .plans/<file>` swaps `Planned → Working` — except the Trivial Fast Path and the Lean Approval Path, both of which continue into Phase 2 without a separate plan-file relaunch. Opening the PR (Phase 9) only advances the ticket to **`In Review`**; the transition to **`Implemented`** happens when the PR merges — [babysit](#babysitting-a-pr) performs that swap using the merged PR's `closingIssuesReferences`. (`configure` documents these labels but does not create them; add the matching columns to your board.)
 
 ### Babysitting a PR
 
@@ -504,9 +490,8 @@ schema and defaults.
 
 ### UI tickets
 
-UI implementations are the most error-prone, so the pipeline adds two guards for tickets classified as frontend:
+UI implementations are the most error-prone, so the pipeline adds a guard for tickets classified as frontend:
 
-- **Design gate (hard)** — a UI ticket without the `Designed` label stops the pipeline and points at the feature's design ticket: run `/cenci:design <design-ticket-id>` if one exists (completing it propagates `Designed` here), or `/cenci:refine` to create one — or proceed anyway. An existing `DESIGN.md` doesn't bypass the gate, since the design path persists across tickets.
 - **PR screenshots** — screenshots captured during visual verification (`playwright-cli`) are embedded in the PR body to speed up review. They're hosted in a temporary **secret gist** rather than committed to the repo; delete it after merge with `gh gist delete <gist-id>` (the PR body includes the command).
 
 ### Usage controls
@@ -555,7 +540,7 @@ After restarting Claude Code, Bash commands are rewritten through RTK automatica
 
 ## Ticket Splitting
 
-When a ticket is sized L during `/cenci:refine`, the skill suggests splitting it into numbered child tickets (e.g., "(1/3)", "(2/3)", "(3/3)") with explicit dependency ordering — which children can be implemented in parallel and which are sequential. Each child references the parent in its body and is linked to the parent as a native GitHub sub-issue, so the parent renders the child enumeration and progress directly in the GitHub UI; dependency ordering lives in the child bodies (and, when non-trivial, a short prose "Execution Order" note on the parent). Children — and the companion design ticket, when one is created — inherit the parent's milestone and every parent label except the lifecycle markers and per-ticket refinement grants (`Refined`, `Working`, `Planned`, `In Review`, `Implemented`, `Design`, `Designed`, `automerge:ok`, `Browser`, `ui:visual-check`), so a split never drops its children out of the milestone. The latter three are never inherited — each child earns them independently, or not, at refine's Confirmation Gate. When `/cenci:implement` creates a PR for the last open child, phase 9's Parent Close Gate audits the parent's acceptance criteria first: the PR closes the parent alongside the child only when every criterion has concrete delivered evidence (in this worktree's diff or a merged sibling PR); on any gap the PR references the parent as `Related to`, the unmet criteria are posted as a comment on the parent, and the parent stays open for triage (#661) — and a retry reconciles the commit trailer, PR body, and GitHub's closing reference to whatever verdict this entry's fresh audit produces, not the verdict an earlier attempt may have written (#879). That trailer only makes the parent eligible: parent completion itself is reconciled by `cenci babysit` at merge time from the live native sub-issue graph plus the gap-report check — a plan-time `isLastChild` value recorded when the plan was written is never what actually closes the parent, since concurrent sibling merges can race past it (#811).
+When a ticket is sized L during `/cenci:refine`, the skill suggests splitting it into numbered child tickets (e.g., "(1/3)", "(2/3)", "(3/3)") with explicit dependency ordering — which children can be implemented in parallel and which are sequential. Each child references the parent in its body and is linked to the parent as a native GitHub sub-issue, so the parent renders the child enumeration and progress directly in the GitHub UI; dependency ordering lives in the child bodies (and, when non-trivial, a short prose "Execution Order" note on the parent). Children inherit the parent's milestone and every parent label except the lifecycle markers and per-ticket refinement grants (`Refined`, `Working`, `Planned`, `In Review`, `Implemented`, `automerge:ok`, `Browser`, `ui:visual-check`), so a split never drops its children out of the milestone. The latter three are never inherited — each child earns them independently, or not, at refine's Confirmation Gate. When `/cenci:implement` creates a PR for the last open child, phase 9's Parent Close Gate audits the parent's acceptance criteria first: the PR closes the parent alongside the child only when every criterion has concrete delivered evidence (in this worktree's diff or a merged sibling PR); on any gap the PR references the parent as `Related to`, the unmet criteria are posted as a comment on the parent, and the parent stays open for triage (#661) — and a retry reconciles the commit trailer, PR body, and GitHub's closing reference to whatever verdict this entry's fresh audit produces, not the verdict an earlier attempt may have written (#879). That trailer only makes the parent eligible: parent completion itself is reconciled by `cenci babysit` at merge time from the live native sub-issue graph plus the gap-report check — a plan-time `isLastChild` value recorded when the plan was written is never what actually closes the parent, since concurrent sibling merges can race past it (#811).
 
 ## Architecture
 
@@ -575,7 +560,7 @@ The plugin uses specialized agents with isolated contexts:
 | **security-analyzer** | OWASP audit for `/cenci:refactor` | sonnet | high (pinned) | plan (read-only) |
 | **lessons-collector** | Routes genuine mistakes to `docs/<topic>.md` or `CLAUDE.md` | haiku | n/a (haiku) | acceptEdits |
 
-**Model & effort tiering**: Opus where judgment is concentrated — `/cenci:design` pins `model: opus` because UX structure drives everything downstream, and the **refiner**, **planner**, and **security-reviewer** agents run opus because refinement scope, acceptance criteria, and splits steer every later phase, the saved plan steers the whole unattended pipeline, and a missed vulnerability is the costliest review failure. Refinement's opus lives in the **refiner agent** rather than the refine skill's frontmatter because a skill-level `model:` pin only lasts the invoking turn — in a multi-turn Q&A loop every follow-up turn silently reverts to the session model, while an agent-level pin holds for the agent's entire run. Sonnet for pipeline orchestration and implementation (`/cenci:refine` and `/cenci:implement` pin `model: sonnet` for orchestration, relaying, and writes; `/cenci:babysit` pins `model: sonnet` so long-lived loop ticks stay cheap). Haiku for mechanical work — context-gatherer, structure-analyzer, lessons-collector, and `/cenci:sync`.
+**Model & effort tiering**: Opus where judgment is concentrated — the **refiner**, **planner**, and **security-reviewer** agents run opus because refinement scope, acceptance criteria, and splits steer every later phase, the saved plan steers the whole unattended pipeline, and a missed vulnerability is the costliest review failure. Refinement's opus lives in the **refiner agent** rather than the refine skill's frontmatter because a skill-level `model:` pin only lasts the invoking turn — in a multi-turn Q&A loop every follow-up turn silently reverts to the session model, while an agent-level pin holds for the agent's entire run. Sonnet for pipeline orchestration and implementation (`/cenci:refine` and `/cenci:implement` pin `model: sonnet` for orchestration, relaying, and writes; `/cenci:babysit` pins `model: sonnet` so long-lived loop ticks stay cheap). Haiku for mechanical work — context-gatherer, structure-analyzer, lessons-collector, and `/cenci:sync`.
 
 Effort is the second lever: model picks how *capable* the agent is (failures that look like "it didn't know enough"), effort picks how *thorough* it is (failures that look like "it didn't try hard enough"). Subagents inherit the **session** effort level by default, so a session running at low effort would silently degrade the unattended pipeline's planning, implementation, and reviews. Every non-haiku agent therefore pins `effort: high` — thoroughness is guaranteed regardless of the session setting. Skills deliberately stay unpinned: they run during interactive phases, where the user's session effort preference should win. Haiku agents can't be tuned — haiku doesn't support effort.
 
@@ -583,7 +568,7 @@ Tiering intentionally stops at Opus. Fable is a specialist tier at the highest p
 
 These pins are visible in each skill's and agent's frontmatter and override the session model for that skill/agent only. **Caveat**: the `CLAUDE_CODE_SUBAGENT_MODEL` pin (see Troubleshooting) overrides agent frontmatter and flattens the model tiering — set it only on 1M-context sessions where the delegation gate applies. Likewise, the `CLAUDE_CODE_EFFORT_LEVEL` env var overrides `effort:` frontmatter and flattens the effort tiering while set.
 
-External integrations use the `gh` CLI rather than MCP servers, keeping permissions simple and avoiding token overhead. Optional MCP servers: Context7 (live documentation lookup) and Pencil (design file creation via `/cenci:design`).
+External integrations use the `gh` CLI rather than MCP servers, keeping permissions simple and avoiding token overhead. Optional MCP servers: Context7 (live documentation lookup).
 
 > **Migration (Context7 moved to project scope)**: existing users lose the plugin-provided
 > Context7 server when they update to this version — cenci no longer ships a plugin-scoped

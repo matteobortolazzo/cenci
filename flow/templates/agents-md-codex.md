@@ -187,5 +187,4 @@ to invoke the corresponding Claude workflow skills:
 
 - `.plans/` plan files.
 - Babysit label automation and the board lifecycle.
-- Pencil design tooling.
 - `.claude/settings.json`, hooks, and `CLAUDE_PLUGIN_ROOT`.

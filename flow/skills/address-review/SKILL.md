@@ -213,11 +213,9 @@ using the `verify-ui` reference skill's file-path heuristic — address-review h
 ticket to classify from, only a diff.
 
 - **If `isUiChange` is true**: read and follow `verify-ui`'s shared core (screenshot
-  capture, Pencil `snapshot_layout` check if available, fix-before-proceeding,
-  never-silently-skip). Skip the two steps `verify-ui` documents as `implement`-only: the
-  Pencil design-comparison-against-plan step (address-review has no plan file or design
-  context) and the PR-persistence step (address-review edits an already-open PR and does
-  not touch its screenshot section).
+  capture, fix-before-proceeding, never-silently-skip). Skip the step `verify-ui`
+  documents as `implement`-only: the PR-persistence step (address-review edits an
+  already-open PR and does not touch its screenshot section).
 - **If `isUiChange` is false**: skip this step entirely.
 
 After all individual fixes are applied, run the full build and test suite:

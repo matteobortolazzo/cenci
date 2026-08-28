@@ -75,7 +75,9 @@ AUTOMERGE_DESCRIPTION_MARKER='Human granted hands-off merge at refinement — ba
 # Withhold-override formula (step 11): each identifier below is asserted as
 # an exact "NOT <identifier>"/hyphenated substring, not the bare identifier,
 # since the bare identifiers already exist elsewhere in the file today.
-AUTOMERGE_WITHHOLD_DESIGN_MARKER='NOT isDesignTicket'
+# `isDesignTicket` was dropped from this formula along with the rest of
+# the design-stage removal (there is no longer a design-ticket classification to
+# override on) — only the browser/visual-check overrides remain.
 AUTOMERGE_WITHHOLD_BROWSER_MARKER='NOT browserRequired'
 AUTOMERGE_WITHHOLD_VISUALCHECK_MARKER='visual-check-signals-match'
 
@@ -105,7 +107,7 @@ CODEX_AUTOMERGE_GRANT_MARKER='automerge:ok'
 # within that span breaks the exact-substring match, so this is both the
 # positive "### Size Estimate is in the right place" pin and the
 # negative "### Automation is nowhere in the list" pin at once.
-FULL_BODY_SECTION_LIST_MARKER='`### Updated Description`, `### Acceptance Criteria`, `### Assumptions (auto-adopted)`, `### Decisions`, `### Technical Notes`, `### Size Estimate`, plus `### Design Coverage`/`### Design Direction` when present'
+FULL_BODY_SECTION_LIST_MARKER='`### Updated Description`, `### Acceptance Criteria`, `### Assumptions (auto-adopted)`, `### Decisions`, `### Technical Notes`, `### Size Estimate`, plus `### Design Direction` when present'
 
 # --- agents/refiner.md — question-policy inversion + new sections ----------
 
@@ -128,8 +130,6 @@ assert_file_contains "${REFINE_SKILL}" "${AUTOMERGE_COLOR_MARKER}" \
   "must ensure the automerge:ok label with color 006B75 before the label edit"
 assert_file_contains "${REFINE_SKILL}" "${AUTOMERGE_DESCRIPTION_MARKER}" \
   "must use the exact automerge:ok label description"
-assert_file_contains "${REFINE_SKILL}" "${AUTOMERGE_WITHHOLD_DESIGN_MARKER}" \
-  "must name isDesignTicket as a step-11 withhold override on the automerge:ok verdict"
 assert_file_contains "${REFINE_SKILL}" "${AUTOMERGE_WITHHOLD_BROWSER_MARKER}" \
   "must name browserRequired as a step-11 withhold override on the automerge:ok verdict"
 assert_file_contains "${REFINE_SKILL}" "${AUTOMERGE_WITHHOLD_VISUALCHECK_MARKER}" \

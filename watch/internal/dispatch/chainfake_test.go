@@ -565,9 +565,9 @@ func setFleetAutomergeEnabled(t *testing.T, enabled bool) {
 
 // requiredPlanBody assembles a minimal plan body carrying every section
 // pipeline.CheckPlan requires (## Ticket Details / Implementation Plan /
-// Architectural Context / Design Context), so every plan file this harness
-// writes is valid input to CheckPlan as well as ReadPlans.
-const requiredPlanBody = "## Ticket Details\nDetails.\n\n## Implementation Plan\nPlan.\n\n## Architectural Context\nContext.\n\n## Design Context\nN/A.\n"
+// Architectural Context), so every plan file this harness writes is valid
+// input to CheckPlan as well as ReadPlans.
+const requiredPlanBody = "## Ticket Details\nDetails.\n\n## Implementation Plan\nPlan.\n\n## Architectural Context\nContext.\n"
 
 // writeChainPlan writes a `.plans/<number>-chain.md` file under dir with the
 // given front-matter pairs (order-preserving) plus requiredPlanBody, so it

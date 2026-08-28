@@ -6,7 +6,7 @@ The thing that actually limits how big a ticket can be is the **implementing age
 
 **This is a deliberate budget, not the model's context window.** Do not raise it to match whatever window the session model currently advertises — most current models expose far more than 200k, and the target is still 200k. Three constraints hold it in place independently of the window:
 
-- **The `haiku` agent tier is hard-capped at 200k.** `context-gatherer` runs first in the implement pipeline and bundles the ticket, its comments, design context, and per-project instructions. It has no headroom above 200k regardless of the session model, so a ticket that overflows this budget fails at the *first* step, before any implementing agent sees it.
+- **The `haiku` agent tier is hard-capped at 200k.** `context-gatherer` runs first in the implement pipeline and bundles the ticket, its comments, and per-project instructions. It has no headroom above 200k regardless of the session model, so a ticket that overflows this budget fails at the *first* step, before any implementing agent sees it.
 - **Auto-compaction may be off.** Where `autoCompactDisabled` is set in `.cenci/config.json`, a session that reaches its window stops rather than degrading gracefully. The budget is the margin that keeps it from getting there.
 - **1 ticket = 1 PR.** A ticket that legitimately consumes a million tokens of implementation produces a diff no human reviews properly. The budget is doing review-burden work, not only token work.
 

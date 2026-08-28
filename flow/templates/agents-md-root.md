@@ -29,13 +29,6 @@
   rather than beside the feature that needed it.
 <!-- END IF -->
 
-<!-- IF pencil.enabled -->
-## Design Files
-
-- Design spec: `<designPath>/DESIGN.md`
-- Pencil file: `<designPath>/<name>.pen`
-<!-- END IF -->
-
 <!-- IF sandbox.enabled -->
 ## Sandbox Image
 

@@ -9,9 +9,8 @@
 # but hooks still run.
 # Writes that legitimately live in the main worktree are allowlisted below:
 # saved plans (.plans/), Claude Code's own native Plan Mode storage
-# (.claude/plans/, e.g. ~/.claude/plans/), design artifacts (designs/, *.pen,
-# DESIGN.md — the one documented exception, /cenci:design commits directly
-# on main), and temp paths. /cenci:configure writes (.cenci/, .claude/,
+# (.claude/plans/, e.g. ~/.claude/plans/), and temp paths.
+# /cenci:configure writes (.cenci/, .claude/,
 # AGENTS.md, CLAUDE.md, .gitignore, .mcp.json, and everything else it
 # generates) are NOT allowlisted here — configure creates its own feature
 # worktree and ships its changes as a PR like every other skill; see
@@ -19,7 +18,7 @@
 #
 # TMPDIR widening (#749): several skills follow shell-rules' repo-wide
 # `${TMPDIR:-/tmp}/cenci/<name>-<scope>.md` body-file convention (e.g.
-# design's `${TMPDIR:-/tmp}/cenci/design-comment-<number>.md` ticket-comment
+# refine's `${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-body.md` ticket-body
 # temp file). Under a custom TMPDIR that write is outside the pre-existing
 # /tmp/*, /private/tmp/*, /var/folders/* arms and would be blocked. Below,
 # the allowlist additionally admits paths under a canonicalized $TMPDIR,
@@ -34,7 +33,7 @@
 # `~/src/cenci/AGENTS.md` in *this* repo's own main worktree would be
 # silently allowed too — gutting the guard for the very repo it protects.
 # Canonicalizing $TMPDIR itself has no such repo-name hole and automatically
-# covers every skill's convention, not just design's.
+# covers every skill's convention, not just one.
 #
 # Symmetric out-of-repo-root policy (#1072): BOTH arms below allow an
 # absolute target that canonicalizes to somewhere OUTSIDE the repository's
@@ -538,8 +537,6 @@ bash_target_allowed() {
     */.claude/plans/*) return 0 ;;
     # Temp paths: body files, context bundles, attachments, scratchpads
     /tmp/* | /private/tmp/* | /var/folders/* | */cenci-attachments-*/*) return 0 ;;
-    # Design artifacts live in the main worktree by design (/cenci:design)
-    *.pen | */DESIGN.md | */designs/*) return 0 ;;
   esac
   # TMPDIR widening (#749) — see the guard above for the full rationale. A
   # quoted "$TMPDIR_ALLOW" is matched literally by POSIX sh case patterns, so
@@ -633,8 +630,6 @@ if [ -n "$FILE_PATH" ]; then
     */.claude/plans/* | .claude/plans/*) exit 0 ;;
     # Temp paths: body files, context bundles, attachments, scratchpads
     /tmp/* | /private/tmp/* | /var/folders/* | */cenci-attachments-*/*) exit 0 ;;
-    # Design artifacts live in the main worktree by design (/cenci:design)
-    *.pen | */DESIGN.md | DESIGN.md | */designs/* | designs/*) exit 0 ;;
   esac
 
   # The TMPDIR widening is a separate, guarded case rather than an arm folded
@@ -1007,7 +1002,7 @@ elif [ -n "$TOOL_COMMAND" ]; then
           # symlink to protected source.
           {
             echo "BLOCKED: guard-main-worktree.sh cannot verify the relative Bash write target '$BWT_EXPANDED' in: $TOOL_COMMAND"
-            echo "The relative write target cannot be verified against the command's effective cwd or canonicalized safely; use an absolute feature-worktree, plan, design, or temp path."
+            echo "The relative write target cannot be verified against the command's effective cwd or canonicalized safely; use an absolute feature-worktree, plan, or temp path."
           } >&2
           exit 2
         fi
