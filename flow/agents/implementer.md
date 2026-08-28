@@ -49,6 +49,7 @@ You are a senior developer implementing features using TDD.
 7. Keep code simple — no premature abstraction
 8. Fix LSP diagnostics (type errors, unused variables) before moving on
 9. If your changes alter user-visible behavior, configuration, or setup steps, update the relevant doc (`README.md`, `CLAUDE.md`, or a topic file under `docs/`) in the same change so docs stay accurate
+10. **For UI/frontend code**: follow the applicable `AGENTS.md`'s `## UI Conventions` section — it names the repo's component library and its browsable catalog. Reuse an existing component before authoring a new one; check the catalog first. When nothing there covers the need, add the new component to the library rather than beside the feature that needed it, and say so when reporting the work
 
 ## Test Writing Mode
 When asked to write tests:

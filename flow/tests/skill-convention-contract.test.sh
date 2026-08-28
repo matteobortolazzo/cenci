@@ -161,9 +161,10 @@ if [[ -n "${configure_skill}" ]]; then
   # Vacuity gating (#813, root AGENTS.md): each negative below is preceded
   # by the positive anchor that proves its host section still exists, so a
   # section deletion/rename cannot make the negative pass vacuously.
-  assert_contains "${configure_skill}" \
-    "- **editor**:" \
-    "796 skills/configure/SKILL.md: new editor-scope legend bullet missing"
+  # NOTE: the former "- **editor**:" legend bullet was design-tool-specific
+  # ("Provided by the design editor over its own connection") and was
+  # removed along with the rest of the design-stage removal; no MCP catalog
+  # row uses "editor" scope any more, so that positive assertion is gone too.
   assert_not_contains "${configure_skill}" \
     "- **plugin**: Already defined in cenci's" \
     "796 skills/configure/SKILL.md: stale plugin-scope legend bullet still present"
@@ -308,55 +309,11 @@ if [[ -n "${backlog}" ]]; then
 fi
 
 # =====================================================================
-# 8. flow/skills/design/SKILL.md — Design heading renumbering + Label
-#    "Working" (at start) placement, verified via line-number comparisons
+# 8. (removed) formerly: flow/skills/design/SKILL.md heading renumbering +
+#    Label "Working" (at start) placement. skills/design/ was deleted along
+#    with the rest of the design-stage removal (see PR 2 of that removal) —
+#    there is no longer a design skill to assert structure on.
 # =====================================================================
-
-design_path="${FLOW_DIR}/skills/design/SKILL.md"
-if [[ -r "${design_path}" ]]; then
-  line_gen="$(grep -nF '## Phase 5 — Generate DESIGN.md' "${design_path}" | head -1 | cut -d: -f1)"
-  line_report="$(grep -nF '## Phase 6 — Report Summary' "${design_path}" | head -1 | cut -d: -f1)"
-  line_commit="$(grep -nF '## Phase 7 — Commit Design' "${design_path}" | head -1 | cut -d: -f1)"
-
-  if [[ -z "${line_gen}" ]]; then
-    fail "772 flow/skills/design/SKILL.md: no '## Phase 5 — Generate DESIGN.md' heading found"
-  fi
-  if [[ -z "${line_report}" ]]; then
-    fail "772 flow/skills/design/SKILL.md: no '## Phase 6 — Report Summary' heading found"
-  fi
-  if [[ -z "${line_commit}" ]]; then
-    fail "772 flow/skills/design/SKILL.md: no '## Phase 7 — Commit Design' heading found"
-  fi
-  if [[ -n "${line_gen}" && -n "${line_report}" && -n "${line_commit}" ]]; then
-    if (( line_gen >= line_report )); then
-      fail "772 flow/skills/design/SKILL.md: '## Phase 5 — Generate DESIGN.md' (line ${line_gen}) does not precede '## Phase 6 — Report Summary' (line ${line_report})"
-    fi
-    if (( line_report >= line_commit )); then
-      fail "772 flow/skills/design/SKILL.md: '## Phase 6 — Report Summary' (line ${line_report}) does not precede '## Phase 7 — Commit Design' (line ${line_commit})"
-    fi
-  fi
-
-  line_phase2="$(grep -nF '## Phase 2 —' "${design_path}" | head -1 | cut -d: -f1)"
-  line_phase25="$(grep -nF '## Phase 2.5 —' "${design_path}" | head -1 | cut -d: -f1)"
-  line_label="$(grep -nF '### Label "Working" (at start)' "${design_path}" | head -1 | cut -d: -f1)"
-
-  if [[ -z "${line_phase2}" ]]; then
-    fail "772 flow/skills/design/SKILL.md: no '## Phase 2 —' heading found"
-  fi
-  if [[ -z "${line_phase25}" ]]; then
-    fail "772 flow/skills/design/SKILL.md: no '## Phase 2.5 —' heading found"
-  fi
-  if [[ -z "${line_label}" ]]; then
-    fail "772 flow/skills/design/SKILL.md: no '### Label \"Working\" (at start)' heading found"
-  fi
-  if [[ -n "${line_phase2}" && -n "${line_phase25}" && -n "${line_label}" ]]; then
-    if (( line_label <= line_phase2 || line_label >= line_phase25 )); then
-      fail "772 flow/skills/design/SKILL.md: '### Label \"Working\" (at start)' (line ${line_label}) is not between '## Phase 2 —' (line ${line_phase2}) and '## Phase 2.5 —' (line ${line_phase25})"
-    fi
-  fi
-else
-  fail "772 skills/design/SKILL.md: doc not found/unreadable: ${design_path}"
-fi
 
 # =====================================================================
 # 9. flow/skills/implement/phases/phase-9-pr.md — ticketless-only framing
@@ -402,13 +359,15 @@ fi
 
 # =====================================================================
 # 11. #951 — cenci attribution banners + `<!-- cenci-<kind> -->` markers on
-#     every flow-posted comment. Covers the five non-escalation call sites
-#     (plan-comment, design-summary, parent-gap-report, followup-tracked,
-#     plus the two PR-comment banner-only sites), each marker's exactly-one-
-#     file uniqueness, and the bidirectional registry sync against the new
+#     every flow-posted comment. Covers the four non-escalation call sites
+#     (plan-comment, parent-gap-report, followup-tracked, plus the two
+#     PR-comment banner-only sites), each marker's exactly-one-file
+#     uniqueness, and the bidirectional registry sync against the new
 #     flow/docs/comment-attribution.md doc. The escalation banner itself and
 #     its own two contract suites are out of scope here (AC #5) — this case
-#     covers only the five non-escalation sites plus the two PR-only sites.
+#     covers only the four non-escalation sites plus the two PR-only sites.
+#     (The design-summary site was removed along with skills/design/ — see
+#     the design-stage removal.)
 # =====================================================================
 
 # Pinned literals (byte-exact — see 951-pinned-literals.md's Non-escalation
@@ -417,8 +376,6 @@ fi
 # line-wrapping rule.
 PIN_951_PLAN_COMMENT_BANNER='> 🤖 **cenci** — implementation plan posted by `/cenci:implement` (planning).'
 PIN_951_PLAN_COMMENT_MARKER='<!-- cenci-plan-comment -->'
-PIN_951_DESIGN_SUMMARY_BANNER='> 🤖 **cenci** — design summary posted by `/cenci:design` (design handoff).'
-PIN_951_DESIGN_SUMMARY_MARKER='<!-- cenci-design-summary -->'
 PIN_951_PARENT_GAP_BANNER='> 🤖 **cenci** — parent acceptance-criteria gap report posted by `/cenci:implement` (Phase 9).'
 PIN_951_PARENT_GAP_MARKER='<!-- cenci-parent-gap-report -->'
 PIN_951_FOLLOWUP_TRACKED_BANNER='> 🤖 **cenci** — followup tracking note posted by `/cenci:implement` (Phase 9).'
@@ -434,14 +391,6 @@ if [[ -n "${phase1_plan_951}" ]]; then
     "951 flow/skills/implement/phases/phase-1-plan.md ## Persist the Plan planComment step: attribution banner missing"
   assert_contains "${phase1_plan_951}" "${PIN_951_PLAN_COMMENT_MARKER}" \
     "951 flow/skills/implement/phases/phase-1-plan.md ## Persist the Plan planComment step: cenci-plan-comment marker missing"
-fi
-
-require_doc design_skill_951 "skills/design/SKILL.md" || true
-if [[ -n "${design_skill_951}" ]]; then
-  assert_contains "${design_skill_951}" "${PIN_951_DESIGN_SUMMARY_BANNER}" \
-    "951 flow/skills/design/SKILL.md Step 7B: attribution banner missing"
-  assert_contains "${design_skill_951}" "${PIN_951_DESIGN_SUMMARY_MARKER}" \
-    "951 flow/skills/design/SKILL.md Step 7B: cenci-design-summary marker missing"
 fi
 
 # phase-9-pr.md was already loaded into ${phase9} by case 9 above; reuse it
@@ -470,9 +419,9 @@ if [[ -n "${address_review}" ]]; then
     "951 flow/skills/address-review/SKILL.md general PR comment: attribution banner missing"
 fi
 
-# --- 11b. Each of the four new `<!-- cenci-<kind> -->` markers occurs in
-#     exactly one file under flow/skills/. Scoped to the four non-escalation
-#     marker-bearing sites (plan-comment, design-summary, parent-gap-report,
+# --- 11b. Each of the three new `<!-- cenci-<kind> -->` markers occurs in
+#     exactly one file under flow/skills/. Scoped to the three non-escalation
+#     marker-bearing sites (plan-comment, parent-gap-report,
 #     followup-tracked) — planner-escalation is deliberately excluded here:
 #     it legitimately appears in two files today (phase-1-plan.md, the
 #     producer, and implement/SKILL.md, which restates the same cross-lane
@@ -490,8 +439,6 @@ assert_marker_in_exactly_one_file() {
 
 assert_marker_in_exactly_one_file "cenci-plan-comment" \
   "951 cenci-plan-comment marker uniqueness"
-assert_marker_in_exactly_one_file "cenci-design-summary" \
-  "951 cenci-design-summary marker uniqueness"
 assert_marker_in_exactly_one_file "cenci-parent-gap-report" \
   "951 cenci-parent-gap-report marker uniqueness"
 assert_marker_in_exactly_one_file "cenci-followup-tracked" \

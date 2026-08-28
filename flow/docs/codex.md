@@ -18,7 +18,7 @@ Review changed plugin hooks with `/hooks`. cenci never changes hook trust automa
 
 Explicitly mention `$cenci:configure`, `$cenci:refine`, `$cenci:implement`,
 `$cenci:review`, `$cenci:address-review`, `$cenci:refactor`, `$cenci:sync`,
-`$cenci:maintain`, `$cenci:babysit`, or optional `$cenci:design`.
+`$cenci:maintain`, or `$cenci:babysit`.
 
 The staged procedures are under active development. Their intended contract is: planning workflows enter `/plan`, gather material choices, and produce an approved plan
 without mutations. A second normal-mode invocation persists plans, updates GitHub, and
@@ -33,8 +33,6 @@ cenci run refine 42 --agent codex
 cenci run implement 42 --agent codex
 cenci babysit 123 --agent codex --interval 15m
 ```
-
-Pencil design remains optional and requires its CLI/MCP dependencies.
 
 **Authoring for Codex.** A skill reaches Codex through a `skills/<name>/codex.md`
 companion — a separate procedure for a client with different primitives, not a

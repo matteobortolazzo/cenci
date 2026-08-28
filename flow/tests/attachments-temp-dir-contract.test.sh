@@ -6,7 +6,7 @@
 # is an assignment wrapper -- `shell-rules` forbids command substitution
 # where the agent can run the command and read the result, and an assignment
 # wrapper never matches a `Bash(mktemp -d:*)` prefix grant (so it would keep
-# prompting even from design, which now grants that exact invocation shape).
+# prompting any caller granting that exact invocation shape).
 # Worse, `${ATTACH_DIR}` is referenced in later, separate Bash calls where
 # Bash-tool shell state does not persist -- so it already expands to empty
 # and every `${ATTACH_DIR}/<file>` path silently collapses to a
@@ -24,7 +24,6 @@
 #
 # Covered files:
 #   - flow/skills/attachments/SKILL.md
-#   - flow/skills/design/SKILL.md (cross-file pin only)
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || { echo "attachments-temp-dir-contract.test.sh: failed to resolve script directory." >&2; exit 2; }
@@ -95,16 +94,6 @@ if [[ -n "${skill}" ]]; then
   # All four downstream reference sites now use the <attach-dir> literal
   # placeholder instead of ${ATTACH_DIR}.
   assert_contains "${skill}" "<attach-dir>" "749 skills/attachments/SKILL.md <attach-dir> literal placeholder"
-fi
-
-# --- Cross-file pin: design's granted Bash(mktemp -d:*) prefix and
-# attachments' own mktemp -d invocation shape must never drift apart -- a
-# caller granting exactly `Bash(mktemp -d:*)` depends on attachments' command
-# actually beginning with `mktemp -d `.
-require_doc design_skill "skills/design/SKILL.md" || true
-if [[ -n "${skill}" && -n "${design_skill}" ]]; then
-  assert_contains "${design_skill}" "Bash(mktemp -d:*)" "749 cross-file pin: skills/design/SKILL.md grants Bash(mktemp -d:*)"
-  assert_contains "${skill}" "mktemp -d " "749 cross-file pin: skills/attachments/SKILL.md invocation begins mktemp -d "
 fi
 
 if [[ "${failures}" -gt 0 ]]; then

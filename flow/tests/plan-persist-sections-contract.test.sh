@@ -1,39 +1,45 @@
 #!/usr/bin/env bash
 # Contract test for ticket #782 — phase-1's "Persist the Plan" step must
-# mechanically verify the assembled plan file contains all four required
-# headings before the plan is announced or the ticket is labeled, self-repair
-# a missing `## Design Context` (append `## Design Context` / `N/A`, report
-# the repair), and hard-stop on any of the other three (no `planComment`
-# audit comment, no `Planned` label transition, no plan-artifact recording,
-# no `hasPlanFile = true`). Pins:
+# mechanically verify the assembled plan file contains all required headings
+# before the plan is announced or the ticket is labeled, and hard-stop when
+# any is missing (no `planComment` audit comment, no `Planned` label
+# transition, no plan-artifact recording, no `hasPlanFile = true`). Pins:
 #   - `flow/skills/implement/phases/phase-1-plan.md`'s new numbered step 3
-#     under `## Persist the Plan` (the grep loop, the `planfile.go:49-55`
-#     citation, the self-repair bullet, the hard-stop bullet, the ordering
-#     rationale), its strict position between the bundle append and the
-#     `gh issue comment` / label-transition / artifact-recording calls, and
-#     the Trivial Fast Path's explicit inheritance clause.
+#     under `## Persist the Plan` (the grep loop, the hard-stop bullet, the
+#     ordering rationale), its strict position between the bundle append and
+#     the `gh issue comment` / label-transition / artifact-recording calls,
+#     and the Trivial Fast Path's explicit inheritance clause.
 #   - `flow/skills/implement/codex.md`'s mirror clause (adapter-contract
 #     parity per `docs/adapter-contract.md`).
 #
+# NOTE (design-stage removal): the required-heading count dropped from four
+# to three when `## Design Context` and its self-repair path (append
+# `## Design Context` / `N/A`, report the repair) were removed along with
+# the rest of the design-stage removal — all three remaining headings (`## Ticket
+# Details`, `## Implementation Plan`, `## Architectural Context`) are now
+# hard-stop-only, with no self-repair branch for any of them. The
+# `watch/internal/pipeline/planfile.go` cross-boundary check below was
+# updated to match, and `planfile.go`'s own `requiredPlanSections` literal
+# was updated in the same change so the two stay in sync.
+#
 # Marker choice, per docs/shell-scripting-gotchas.md rule 3 (assert the
 # specific replacement text at the edit site, never a generic marker that may
-# already match unrelated prose elsewhere): the four heading literals
-# (`## Ticket Details`, `## Implementation Plan`, `## Architectural Context`,
-# `## Design Context`) legitimately recur elsewhere in phase-1-plan.md — the
-# front-matter template block, the Trivial Fast Path prose, and assembly step
-# 2 all mention them — so every heading assertion below is scoped to the
-# extracted `## Persist the Plan` section and then to the extracted step-3
-# sub-step region, never asserted whole-file. Only markers that are genuinely
-# unique to the new text (the `planfile.go:49-55` citation, the `do **not**`
-# hard-stop clauses, the step-3 heading line, the fast-path inheritance
-# sentence) are asserted whole-file, and those are additionally checked with
-# `assert_occurs_once` so a future duplicate insertion is caught too.
+# already match unrelated prose elsewhere): the three heading literals
+# (`## Ticket Details`, `## Implementation Plan`, `## Architectural Context`)
+# legitimately recur elsewhere in phase-1-plan.md — the front-matter template
+# block, the Trivial Fast Path prose, and assembly step 2 all mention them —
+# so every heading assertion below is scoped to the extracted `## Persist the
+# Plan` section and then to the extracted step-3 sub-step region, never
+# asserted whole-file. Only markers that are genuinely unique to the new text
+# (the `do **not**` hard-stop clauses, the step-3 heading line, the
+# fast-path inheritance sentence) are asserted whole-file, and those are
+# additionally checked with `assert_occurs_once` so a future duplicate
+# insertion is caught too.
 #
 # Deliberate cross-project read: this test also reads
-# `watch/internal/pipeline/planfile.go` (the source of truth for the four
-# literals, `requiredPlanSections`) across the project boundary — precedent:
-# `flow/tests/design-sandbox-guard.test.sh`'s `read_repo_doc`. Per ticket Q&A
-# #2, the read is best-effort: when the file is present it's a real
+# `watch/internal/pipeline/planfile.go` (the source of truth for the three
+# literals, `requiredPlanSections`) across the project boundary. Per ticket
+# Q&A #2, the read is best-effort: when the file is present it's a real
 # set-equality cross-check; when absent (flow distributed standalone, no
 # `watch/` checkout) the test prints a visible `SKIP:` line on stdout and
 # passes that leg without asserting anything.
@@ -194,14 +200,18 @@ require_first_line() {
 HEAD_TICKET='## Ticket Details'
 HEAD_IMPL='## Implementation Plan'
 HEAD_ARCH='## Architectural Context'
-HEAD_DESIGN='## Design Context'
+# HEAD_DESIGN / `## Design Context` was dropped from requiredPlanSections
+# along with the rest of the design-stage removal -- plan-check now requires exactly
+# three headings, and watch/internal/pipeline/planfile.go's
+# requiredPlanSections literal was updated to match (see the cross-boundary
+# sync check at the bottom of this file).
 
 MARK_STEP3_HEADING='3. **Verify the assembled plan.**'
-MARK_PLANFILE_CITATION='watch/internal/pipeline/planfile.go:49-55'
 MARK_MUST_UPDATE='MUST update this step in the same PR'
-MARK_APPEND_DESIGN_CONTEXT='append the two lines `## Design Context` and `N/A`'
-MARK_NEVER_SILENT='never silent'
-MARK_REPORT_FINAL_MESSAGE="report it in this phase's final message"
+# The former Design Context self-repair path (append `## Design Context` /
+# `N/A`, "never silent", "report it in this phase's final message") is gone
+# -- all three remaining required headings are hard-stop-only now, so there
+# is no self-repair branch left to assert on.
 MARK_DO_NOT_POST='do **not** post the `planComment` audit comment'
 MARK_DO_NOT_LABEL='do **not** run the `Planned` label transition'
 MARK_DO_NOT_ARTIFACT='do **not** record the plan artifact'
@@ -209,8 +219,9 @@ MARK_DO_NOT_HASPLANFILE='do **not** set `hasPlanFile = true`'
 MARK_CONTEXT_BUNDLE_VS_PLANNER='context bundle vs. planner sections'
 MARK_NEVER_POSTED='never posted to the ticket'
 MARK_NEVER_RECORDED='never recorded for a plan that would fail validation'
+MARK_DO_NOT_SELF_REPAIR='Do **not** self-repair'
 
-MARK_FAST_PATH_INHERITANCE="Then run assembly step 3's four-heading verification exactly as written"
+MARK_FAST_PATH_INHERITANCE="Then run assembly step 3's three-heading verification exactly as written"
 
 # --- flow/skills/implement/phases/phase-1-plan.md ----------------------------
 
@@ -244,12 +255,8 @@ if require_doc CONTENT1 "${FILE1}"; then
       assert_contains "${VERIFY_SUBSTEP}" "${HEAD_TICKET}" "${FILE1} (step 3: ## Ticket Details heading)"
       assert_contains "${VERIFY_SUBSTEP}" "${HEAD_IMPL}" "${FILE1} (step 3: ## Implementation Plan heading)"
       assert_contains "${VERIFY_SUBSTEP}" "${HEAD_ARCH}" "${FILE1} (step 3: ## Architectural Context heading)"
-      assert_contains "${VERIFY_SUBSTEP}" "${HEAD_DESIGN}" "${FILE1} (step 3: ## Design Context heading)"
-      assert_contains "${VERIFY_SUBSTEP}" "${MARK_PLANFILE_CITATION}" "${FILE1} (step 3: planfile.go citation)"
       assert_contains "${VERIFY_SUBSTEP}" "${MARK_MUST_UPDATE}" "${FILE1} (step 3: same-PR co-update requirement)"
-      assert_contains "${VERIFY_SUBSTEP}" "${MARK_APPEND_DESIGN_CONTEXT}" "${FILE1} (step 3: Design Context self-repair)"
-      assert_contains "${VERIFY_SUBSTEP}" "${MARK_NEVER_SILENT}" "${FILE1} (step 3: self-repair never silent)"
-      assert_contains "${VERIFY_SUBSTEP}" "${MARK_REPORT_FINAL_MESSAGE}" "${FILE1} (step 3: repair reported in final message)"
+      assert_contains "${VERIFY_SUBSTEP}" "${MARK_DO_NOT_SELF_REPAIR}" "${FILE1} (step 3: no self-repair for any of the three headings)"
       assert_contains "${VERIFY_SUBSTEP}" "${MARK_DO_NOT_POST}" "${FILE1} (step 3: hard-stop no planComment)"
       assert_contains "${VERIFY_SUBSTEP}" "${MARK_DO_NOT_LABEL}" "${FILE1} (step 3: hard-stop no label transition)"
       assert_contains "${VERIFY_SUBSTEP}" "${MARK_DO_NOT_ARTIFACT}" "${FILE1} (step 3: hard-stop no artifact recording)"
@@ -265,7 +272,6 @@ if require_doc CONTENT1 "${FILE1}"; then
   assert_occurs_once "${CONTENT1}" "${MARK_DO_NOT_LABEL}" "${FILE1} (occurs-once: do not run label transition)"
   assert_occurs_once "${CONTENT1}" "${MARK_DO_NOT_ARTIFACT}" "${FILE1} (occurs-once: do not record plan artifact)"
   assert_occurs_once "${CONTENT1}" "${MARK_DO_NOT_HASPLANFILE}" "${FILE1} (occurs-once: do not set hasPlanFile)"
-  assert_occurs_once "${CONTENT1}" "${MARK_PLANFILE_CITATION}" "${FILE1} (occurs-once: planfile.go citation)"
   assert_occurs_once "${CONTENT1}" "${MARK_MUST_UPDATE}" "${FILE1} (occurs-once: same-PR co-update requirement)"
   assert_occurs_once "${CONTENT1}" "${MARK_STEP3_HEADING}" "${FILE1} (occurs-once: step-3 heading line)"
 
@@ -279,14 +285,15 @@ fi
 
 FILE2="skills/implement/codex.md"
 if require_doc CONTENT2 "${FILE2}"; then
-  # The full four-heading parenthetical, asserted as a single whitespace-
+  # The full three-heading parenthetical, asserted as a single whitespace-
   # normalized marker together with the planfile.go reference — bare
   # `## Ticket Details` already appears once elsewhere in codex.md (the
   # Technical Notes fallback) and would pass vacuously on its own.
-  CODEX_FOUR_HEADING_MARKER='(`## Ticket Details`, `## Implementation Plan`, `## Architectural Context`, `## Design Context` — the `requiredPlanSections` list in `watch/internal/pipeline/planfile.go`)'
-  assert_contains_ws "${CONTENT2}" "${CODEX_FOUR_HEADING_MARKER}" "${FILE2} (four-heading parenthetical + planfile.go reference)"
-  assert_contains_ws "${CONTENT2}" 'append `## Design Context` and `N/A`' "${FILE2} (Design Context self-repair)"
-  assert_contains_ws "${CONTENT2}" 'report the repair' "${FILE2} (self-repair reported)"
+  # `## Design Context` was dropped from this parenthetical along with the
+  # rest of the design-stage removal, and there is no self-repair left to assert on
+  # (all three remaining headings are hard-stop-only).
+  CODEX_THREE_HEADING_MARKER='(`## Ticket Details`, `## Implementation Plan`, `## Architectural Context` — the `requiredPlanSections` list in `watch/internal/pipeline/planfile.go`)'
+  assert_contains_ws "${CONTENT2}" "${CODEX_THREE_HEADING_MARKER}" "${FILE2} (three-heading parenthetical + planfile.go reference)"
   assert_contains_ws "${CONTENT2}" 'stop before the checkpoint/label mutations' "${FILE2} (hard stop before checkpoint/label mutations)"
 else
   fail "${FILE2}: could not read file, skipping its assertions"
@@ -301,16 +308,16 @@ if [[ -f "${PLANFILE_GO}" && -r "${PLANFILE_GO}" ]]; then
     on && /^\}/ { exit }
     on { print }
   ' "${PLANFILE_GO}" | grep -oE '"[^"]*"' | sed 's/^"//; s/"$//' | LC_ALL=C sort)"
-  expected_literals="$(printf '%s\n' "${HEAD_TICKET}" "${HEAD_IMPL}" "${HEAD_ARCH}" "${HEAD_DESIGN}" | LC_ALL=C sort)"
+  expected_literals="$(printf '%s\n' "${HEAD_TICKET}" "${HEAD_IMPL}" "${HEAD_ARCH}" | LC_ALL=C sort)"
   if [[ "${extracted_literals}" != "${expected_literals}" ]]; then
-    fail "watch/internal/pipeline/planfile.go: requiredPlanSections literals do not equal the four pinned headings:
+    fail "watch/internal/pipeline/planfile.go: requiredPlanSections literals do not equal the three pinned headings:
 --- extracted ---
 ${extracted_literals}
 --- expected ---
 ${expected_literals}"
   fi
 else
-  echo "SKIP: watch/internal/pipeline/planfile.go not present (flow installed standalone); four-heading literals not cross-checked"
+  echo "SKIP: watch/internal/pipeline/planfile.go not present (flow installed standalone); three-heading literals not cross-checked"
 fi
 
 echo "plan-persist-sections-contract.test.sh: failures=${failures}"

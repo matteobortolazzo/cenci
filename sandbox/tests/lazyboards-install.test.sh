@@ -658,22 +658,11 @@ assert_contains "${NEW_COL}" "name: Refine"
 assert_contains "${NEW_COL}" 'command: "cenci run refine {number}"'
 grep -q '^      R:$' "${NEW_COL}"
 
-echo "case: 5f template gives the Refined column I (Implement) and pencil-gated Z (Design) bindings"
+echo "case: 5f template gives the Refined column an I (Implement) binding"
 REFINED_COL="${WORK}/skill-5f-col-refined.md"
 extract_keymap_column "Refined" >"${REFINED_COL}"
 assert_contains "${REFINED_COL}" "name: Implement"
 assert_contains "${REFINED_COL}" 'command: "cenci run implement {number}"'
-assert_contains "${REFINED_COL}" "name: Design"
-assert_contains "${REFINED_COL}" 'command: "cenci run design {number} --no-sandbox"'
-grep -q '^      Z:$' "${REFINED_COL}"
-assert_contains "${EXTRACTED_5F}" "pencil.enabled"
-# Design must never be bound to `D` — that is lazyboards' built-in dispatch
-# panel (view.dispatch), and a user binding silently wins over the default.
-if grep -qE '^      D:' "${REFINED_COL}"; then
-    echo "FAIL: Design is bound to D, shadowing lazyboards' dispatch panel" >&2
-    cat "${REFINED_COL}" >&2
-    exit 1
-fi
 
 echo "case: 5f template gives the Planned column I (Implement), E (Edit plan), and V (View plan) bindings"
 PLANNED_COL="${WORK}/skill-5f-col-planned.md"
@@ -818,7 +807,5 @@ assert_contains "${Q10_REGION}" "load-time config error"
 assert_contains "${Q10_REGION}" "built-in defaults"
 # ctrl+c may never be bound *or* unbound.
 assert_contains "${Q10_REGION}" "Never bind or unbind \`ctrl+c\`"
-# Design moved off `D` because `D` is the built-in dispatch panel.
-assert_contains "${Q10_REGION}" "Design is bound to \`Z\`"
 
 echo "passed: opt-in install, explicit update skip, checksum gate, doctor, board-config drift guard, safe board actions"

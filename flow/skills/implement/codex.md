@@ -34,12 +34,10 @@ value branch of its own (`skills/implement/phases/phase-1-plan.md`'s
 Claude Code paths write). If this procedure ever gains a path that persists a
 plan without that stop, it must write the matching value instead.
 In normal apply mode persist `.plans/<ticket>-<slug>.md`, then verify the
-assembled file contains all four required headings (`## Ticket Details`, `## Implementation
-Plan`, `## Architectural Context`, `## Design Context` — the `requiredPlanSections` list in
-`watch/internal/pipeline/planfile.go`): if `## Design Context` alone is missing, append `##
-Design Context` and `N/A`, re-check, and report the repair — if the re-check still fails, stop
-before the checkpoint/label mutations and report the append failure instead; if any of the other three is
-missing, stop before the checkpoint/label mutations and report the missing heading(s). Otherwise,
+assembled file contains all three required headings (`## Ticket Details`, `## Implementation
+Plan`, `## Architectural Context` — the `requiredPlanSections` list in
+`watch/internal/pipeline/planfile.go`): if any is missing, stop before the checkpoint/label
+mutations and report the missing heading(s). Otherwise,
 initialize the checkpoint, create the worktree, then run the baseline gate: resolve affected projects
 by matching the plan's `## Project Context` `# Project: <name>` headers against
 `.cenci/config.json`'s `projects[].name` to get each `slug`. When the primary signal

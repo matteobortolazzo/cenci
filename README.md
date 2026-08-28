@@ -48,8 +48,7 @@ documentation, client adapters, and accumulated rules without requiring lazyboar
 
 ## How the pieces work together
 
-1. **Frame the work.** Start from a GitHub issue, refine its scope, and complete a
-   design pass for UI work.
+1. **Frame the work.** Start from a GitHub issue and refine its scope.
 2. **Approve the handoff.** cenci saves the implementation plan in `.plans/`; that
    file preserves the decisions behind the run and makes it resumable.
 3. **Deliver inside the boundary.** The implementation run creates a worktree, writes
@@ -203,7 +202,7 @@ for unattended work.
 
 | Client | Ready today |
 |---|---|
-| **Claude Code** | Full gated workflow, sandbox isolation, live monitoring, optional design, and PR babysitting |
+| **Claude Code** | Full gated workflow, sandbox isolation, live monitoring, and PR babysitting |
 | **Codex** | Sandbox isolation, live monitoring, portable conventions, and PR babysitting; native gated workflow in development |
 | **OpenCode** | Direct sandbox sessions, live monitoring, and portable engineering conventions via `--agent opencode`; opt-in during install and requires an existing Claude Code or Codex install; no native gated workflow, workflow dispatch, usage-budget tracking, or corrective PR babysitting yet |
 

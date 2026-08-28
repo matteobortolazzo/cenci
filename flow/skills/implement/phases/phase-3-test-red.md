@@ -24,7 +24,7 @@ If the plan file's `## Implementation Plan` contains a `### Parallel Lanes` sect
 **Eligibility re-check (main agent, before any fan-out).** The planner's declaration is a proposal, not authorization. Verify all of the following against the plan file; if any check fails, ignore the lanes section entirely and run the standard sequential Phase 3 → Phase 4 flow — never partially:
 
 - Every file across all lanes' `Files:` lists appears in exactly one lane. Any overlap → sequential.
-- `isUiTicket` is false. UI work always takes the sequential path (design pre-read and visual verification live in the standard Phase 4).
+- `isUiTicket` is false. UI work always takes the sequential path (visual verification lives in the standard Phase 4).
 - No lane file matches the sensitive-path pattern set from `SKILL.md`'s `## Sensitive-path backstop` (built-in defaults unioned with `security.sensitivePaths`). Any match → sequential.
 - Each lane declares `Files:`, `Tests:`, and `Scope:`. A malformed lane → sequential.
 
@@ -51,7 +51,6 @@ Pass:
 - Files to modify/create and planner notes.
 - Acceptance criteria, edge cases, and error scenarios.
 - Attachment paths if relevant.
-- Design Components table and Design Tokens from the plan file's `## Design Context` section, if present.
 
 ## Test Priorities
 

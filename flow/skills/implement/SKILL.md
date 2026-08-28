@@ -6,7 +6,7 @@ argument-hint: <ticket-id | task description> [additional context]
 user-invocable: true
 disable-model-invocation: true
 model: sonnet
-allowed-tools: Read, Write, Edit, Bash, Glob, Grep, Task, AskUserQuestion, mcp__context7__resolve-library-id, mcp__context7__query-docs, mcp__pencil__batch_get, mcp__pencil__get_variables, mcp__pencil__get_screenshot, mcp__pencil__snapshot_layout, mcp__pencil__get_editor_state
+allowed-tools: Read, Write, Edit, Bash, Glob, Grep, Task, AskUserQuestion, mcp__context7__resolve-library-id, mcp__context7__query-docs
 ---
 
 > **Client dispatch**: In Codex, read `codex-runtime` and `implement/codex.md`, execute that native procedure, and do not continue into the Claude procedure below.
@@ -31,44 +31,6 @@ If `isMonorepo` is `true` in the resolved config:
 1. **Do not read per-project AGENTS.md files in the main agent.** The context-gatherer determines affected projects and bundles their AGENTS.md content; pass it the `projects` array.
 2. **Use project-specific commands**: When delegating to subagents, use the affected project's `buildCommand`, `testCommand`, and `lintCommand` (when set) from config instead of inferring them globally (the digest names the affected projects).
 3. **Point subagents at context, don't paste it**: When delegating to planner/implementer, pass the bundle path (or plan file path) for project context. Tell the subagent to read relevant `docs/<topic>.md` files (and the legacy `.claude/rules/lessons-learned.md` or `.claude/rules/lessons-learned-<slug>.md` if those legacy files exist). Do not pre-read those in the main agent.
-
-### Design Context Loading
-
-If `pencil.enabled` is `true` in the resolved config:
-
-1. **Determine design path**: Read `pencil.designPath` from config. If the project is a monorepo with `pencil.shared: false`, pass all per-project `designPath` entries to the context-gatherer — it determines the affected project(s) and resolves which design path applies.
-2. **Do not read or parse DESIGN.md in the main agent.** Pass the design path to the context-gatherer (see Context Gathering below), which sources screen node IDs by preference — ticket-carried node IDs first, DESIGN.md tables as a legacy fallback — and writes them into the bundle's `## Design Context` section along with DESIGN.md's conventions text. The digest reports which source won and the `.pen` path. Phase 4 sources `designScreenIds` and `designTokens` from the plan file's `## Design Context` section; `designComponentMap` is populated only when DESIGN.md tables resolved it, and the section's `guidance` line instead carries the phase-4 `context`-property pointer when no DESIGN.md table exists. Do not read the `.pen` file — subagents cannot use Pencil tools, so `.pen` content must be pre-read by the main agent only when needed (Phase 4).
-3. **Pencil availability probe**: Read `pencil.mode` from config (default: `"editor"`). Store as `$PENCIL_MODE`. Before any Pencil calls later in the pipeline, attempt a lightweight probe:
-
-   **CLI-app mode** (`pencil.mode` is `"cli-app"`):
-   ```bash
-   pencil interactive -a desktop <<'EOF'
-   get_editor_state({ include_schema: false })
-   EOF
-   ```
-   If it succeeds → set `pencilAvailable = true`. If it fails → run the **headless fallback probe** below.
-
-   **Editor mode** (`pencil.mode` is `"editor"`):
-   ```
-   Call `get_editor_state()` via MCP — if it succeeds, set `pencilAvailable = true`.
-   If it fails or times out, run the headless fallback probe below.
-   ```
-
-   **Headless fallback probe** (both modes): when the primary probe fails and the `pencil` binary is on `PATH` (`command -v pencil`), the CLI can still run the full editor engine with no GUI or desktop app — the normal situation inside the cenci sandbox, where the host's desktop editor and its MCP server are unreachable. Probe it:
-
-   ```bash
-   pencil interactive -o "${TMPDIR:-/tmp}/cenci-pencil-probe-$$.pen" <<'EOF'
-   get_editor_state({ include_schema: false })
-   EOF
-   rm -f "${TMPDIR:-/tmp}/cenci-pencil-probe-$$.pen"
-   ```
-
-   If it succeeds → set `pencilAvailable = true` and `pencilHeadless = true` — Phase 4 design reads then run `pencil interactive` against the design `.pen` file directly instead of a desktop connection. If it fails too (binary missing, or no auth — headless mode needs a seeded `~/.pencil/session-cli.json` or a `PEN_CLI_KEY` env var) → set `pencilAvailable = false`.
-
-   If every probe fails, inform the user: "Pencil unavailable — proceeding with DESIGN.md text content only. Open Pencil (or provide headless CLI auth via `pencil login` / `PEN_CLI_KEY`) and retry if live design reads are needed."
-   This probe runs once during context loading. Do not auto-launch Pencil.
-
-If `pencil.enabled` is not `true` or `pencil` is absent, skip this section.
 
 **Shell rules**: Read the `shell-rules` skill before generating any shell in this pipeline — it covers the heredoc temp-file pattern, zsh-safe portability (no bash associative arrays), and the rule against `cd <dir> && …` compounds and hand-rescuing stranded worktree edits.
 
@@ -115,7 +77,7 @@ A numeric ticket ID is now known whenever this is ticket mode — either from th
 
 **Ticket mode only**, immediately after Auth Verification passes (this call invokes `gh`, so it must not run before authentication is confirmed): invoke `cenci pipeline plan-check <id>`, passing `--replan-requested` when the user context contains a standalone token like `replan`/`re-plan` or an explicit instruction to discard/redo the existing plan (this is the **re-plan over an existing plan** path referenced in the Label "Working" section). The CLI owns discovery — a shared `.plans` directory-enumeration and identity contract (numeric filename prefix matched against front-matter `ticketId`), not a bare glob — validation (front matter, required sections, slug), and the freshness/resume decision — do not enumerate `.plans/` or hand-parse front matter yourself; consume the returned `plan` metadata (`mode`, `slug`, `ticketId`, `isChild`, `isLastChild`, `parentId`) instead. An unreadable/partially-read `.plans` directory or a filename/front-matter identity mismatch both arrive through the same **Unrecognized/empty `decision`** branch below — there is no separate branch for them. Store the returned `decision` as `planCheckDecision` (Phase 1 reads it) and render its verdict:
 
-- **`resume`** → switch to plan file mode: set `hasPlanFile = true`, `Read` the plan file at the returned `artifacts[0]` path for its full content (the CLI validates and echoes metadata only, not file content) — source ticket details, user context, Q&A, implementation plan, architectural context, design context, and attachment summaries from it — and tell the user in one line: "Found saved plan `.plans/<filename>` — resuming implementation from it (pass `replan` as context to discard it instead)." Do **not** ask — a plan file only exists because a Phase 1 planning session persisted it after the user answered its clarifying questions, launching this run is the human authorization to execute it, and scripted launches (`cenci run implement <id>`) rely on this being non-interactive.
+- **`resume`** → switch to plan file mode: set `hasPlanFile = true`, `Read` the plan file at the returned `artifacts[0]` path for its full content (the CLI validates and echoes metadata only, not file content) — source ticket details, user context, Q&A, implementation plan, architectural context, and attachment summaries from it — and tell the user in one line: "Found saved plan `.plans/<filename>` — resuming implementation from it (pass `replan` as context to discard it instead)." Do **not** ask — a plan file only exists because a Phase 1 planning session persisted it after the user answered its clarifying questions, launching this run is the human authorization to execute it, and scripted launches (`cenci run implement <id>`) rely on this being non-interactive.
 - **`stale`** → same as `resume` above (set `hasPlanFile = true`, read the plan file) but do **not** print the resuming notice — Phase 1's `## Existing Plan` renders the stored `planCheckDecision` and asks the human before continuing (see `phases/phase-1-plan.md`).
 - **`replan`** → ignore the plan file (leave `hasPlanFile` unset) and proceed in normal ticket mode.
 - **`none`** → proceed in normal ticket mode. This is the everyday outcome for a first `/cenci:implement <ticket-id>` run on a ticket with no saved plan yet — not an error. Do not surface its `errors[]` entry to the user as a failure.
@@ -145,9 +107,9 @@ Runs **after** the Pre-flight Check above — the `gh auth status` check is the 
 
 - The ticket number and `owner/repo`
 - The bundle output path: `${TMPDIR:-/tmp}/cenci/cenci-context-<ticket-id>.md`
-- Config facts: `isMonorepo`, `projects`, and the design path when enabled
+- Config facts: `isMonorepo` and `projects`
 
-The gatherer fetches the ticket and comments, performs parent-child detection, discovers attachments, loads design and per-project context, writes the bundle file, and returns a compact digest. From the digest, store:
+The gatherer fetches the ticket and comments, performs parent-child detection, discovers attachments, loads per-project context, writes the bundle file, and returns a compact digest. From the digest, store:
 
 - `isChild`, `isLastChild`, `parentId` — for commit, PR body, and labeling
 - `labels` — the raw digest line, stored **verbatim** and retained for the whole session (never normalized to a flag, summarized, or collapsed — `labels: unknown` and `labels: none` are different answers and must stay distinguishable at Phase 1) — for the Ticket Readiness checks, and separately forwarded unconditionally as the label half of the planner's provenance gate (see `ticketAuthor:` below and `phases/phase-1-plan.md`'s `## Planner Delegation`)
@@ -156,11 +118,11 @@ The gatherer fetches the ticket and comments, performs parent-child detection, d
 - `blockers:` — the raw digest line, stored **verbatim** and retained for the whole session: `## Blocked-Dependency Gate` below classifies it, and Phase 1's `## Planner Delegation` forwards it to the planner unchanged and unconditionally, including `blockers: none` (see `phases/phase-1-plan.md`). Do not summarize it, normalize it, or drop it once the gate has passed — the planner-side backstop depends on the original line still being in hand at Phase 1.
 - `ticketAuthor:` — stored **verbatim** and retained for the whole session: Phase 1's `## Planner Delegation` forwards it to the planner unchanged and unconditionally, alongside `labels`, as the trusted-provenance gate for the refinement-settled-posture suppression rule (see `agents/planner.md`). Absent in ticketless mode, exactly as `blockers:` is.
 
-If the digest reports errors (ticket not found, auth failure), surface them to the user and stop. Do **not** re-fetch the ticket or re-read DESIGN.md in the main agent — the digest and bundle are the source of truth. The single exception is `## Blocked-Dependency Gate`'s `gh issue view <number> --repo <owner>/<repo> --json blockedBy` fallback probe, which fires only when the digest's `blockers:` line is missing, unparseable, or reports `unknown — …`, and reads that one field only.
+If the digest reports errors (ticket not found, auth failure), surface them to the user and stop. Do **not** re-fetch the ticket in the main agent — the digest and bundle are the source of truth. The single exception is `## Blocked-Dependency Gate`'s `gh issue view <number> --repo <owner>/<repo> --json blockedBy` fallback probe, which fires only when the digest's `blockers:` line is missing, unparseable, or reports `unknown — …`, and reads that one field only.
 
 After the digest is stored, invoke `cenci pipeline prepare <id>` to record `prepared` state and confirm the ticket exists (the command itself re-verifies via a retried `gh issue view <id>`). Render the returned `next_actions` and `warnings` as the pre-flight status update instead of narrating what comes next — a `warnings` entry here means this `prepare` call was a monotonic no-op (the ticket's persisted stage was already at or past `prepared`), which is worth showing in the transcript like every other stage call site. If it returns non-empty `errors[]`, surface them to the user and stop — do not proceed to Attachments/Ticket Readiness. Ticketless mode: skip this call — the pipeline commands operate on ticket IDs.
 
-**If ticketless mode:** Delegate to the `context-gatherer` only when there is context to bundle (design enabled or monorepo), with the task description in place of the ticket and bundle path `${TMPDIR:-/tmp}/cenci/cenci-context-<slug>.md`. Otherwise skip — the task description is the entire input.
+**If ticketless mode:** Delegate to the `context-gatherer` only when there is context to bundle (a monorepo), with the task description in place of the ticket and bundle path `${TMPDIR:-/tmp}/cenci/cenci-context-<slug>.md`. Otherwise skip — the task description is the entire input.
 
 **Parent-child edge cases** (resolved inside the gatherer, recorded here for downstream phases):
 - Parent already closed → `isLastChild = false` (skip auto-close)
@@ -174,7 +136,7 @@ Runs after Context Gathering (Delegated) and before Attachments — therefore be
 
 **Ticket mode**: classify the digest's `blockers:` line using the classification table below.
 
-**Plan-file mode** (Context Gathering is skipped): issue the same one-field probe directly from the main agent — `gh issue view <number> --repo <owner>/<repo> --json blockedBy` — then classify identically. This is one of the two named exceptions to "do not fetch the ticket in the main agent" recorded in `## Context`'s mode-detection wrap-up and in `## Context Gathering (Delegated)` above; both were amended for it, and the exception covers exactly this one field on exactly this section's two probe paths. (`### Design Check (hard gate)` below shows a similar command, but that is text printed *to the user* inside a stop message, not a call this skill makes — it is not the precedent for this probe.)
+**Plan-file mode** (Context Gathering is skipped): issue the same one-field probe directly from the main agent — `gh issue view <number> --repo <owner>/<repo> --json blockedBy` — then classify identically. This is one of the two named exceptions to "do not fetch the ticket in the main agent" recorded in `## Context`'s mode-detection wrap-up and in `## Context Gathering (Delegated)` above; both were amended for it, and the exception covers exactly this one field on exactly this section's two probe paths.
 
 **Ticketless mode**: explicit documented no-op — there is no ticket to check.
 
@@ -195,8 +157,6 @@ The stop reports every blocking ref and its state and tells the user to re-run o
 - **Not yet claimed** — the ordinary ticket-mode path, which runs before `## Ticket Ownership`: state that the run ended before claiming the ticket.
 - **Already claimed** — plan-file mode, or any re-run of a ticket an earlier session already claimed (a blocker linked after that session assigned the ticket and applied `Working` is exactly the case this branch exists for). The digest's `assignees`/`labels` lines answer this in ticket mode; in plan-file mode, the presence of a persisted plan means an earlier session reached `## Ticket Ownership`, so assume claimed unless something says otherwise. Do **not** say the run stopped before claiming. Report the residual board state instead: the ticket stays assigned and labelled `Working` from that earlier run, this gate is forbidden from touching either, and nothing later in this run will reconcile them — so if the blockers will not close soon, the user should unassign or relabel by hand. Never leave that residual state unreported.
 
-**Name the design-ticket case.** `/cenci:refine` links every implementation ticket to its companion design ticket with `gh issue edit --add-blocked-by`, so a UI ticket awaiting design is *natively blocked* and reaches this gate before `### Design Check (hard gate)` below ever runs. A bare "wait for the blockers to close" would therefore hide the one actionable route in the most common blocked case. The blocker's labels are not in the `blockedBy` payload and this gate issues no second probe to fetch them, so state the route conditionally rather than deciding it: tell the user that if any listed blocker is this ticket's companion design ticket (design tickets carry the `Design` label), the way forward is `/cenci:design <design-ticket-id>` — completing it closes the design ticket and propagates `Designed` here, which both unblocks this ticket and satisfies `### Design Check (hard gate)` in one step.
-
 ## Attachments
 
 Runs after Context Gathering (which itself runs after the Pre-flight Check). The effective order is: mode detection → Pre-flight Check → Context Gathering → Blocked-Dependency Gate → Attachments → Ticket Readiness.
@@ -211,24 +171,13 @@ Store each attachment's file path for passing to subagents (subagents share the 
 
 ## Ticket Readiness
 
-**If ticketless mode:** Skip the Ticket Readiness check entirely and proceed to the Pipeline. Still set `isUiTicket = true` when the task description matches the frontend classification in the Design Check below (there are no labels to gate on, so the gate itself is skipped, but Phases 4 and 9 use the flag for screenshots).
+**If ticketless mode:** Skip the Ticket Readiness check entirely and proceed to the Pipeline. Still set `isUiTicket = true` when the task description matches the frontend classification in `### UI Classification` below (there are no labels to gate on, but Phases 4 and 9 use the flag for screenshots).
 
 **If plan file mode:** Skip this check — readiness was verified when the plan was created. Set `isUiTicket` from the plan's ticket title/requirements using the same frontend classification.
 
 **If ticket mode:** After context gathering, inspect the ticket's labels/tags before starting the pipeline:
 
 Check the `labels` line from the context-gatherer digest.
-
-### Design-Ticket Router (first check)
-
-If the labels include **"Design"**, this is a design-only ticket — its deliverable is a design spec (`.pen` + `DESIGN.md`) produced by `/cenci:design`, not code. Ask via `AskUserQuestion`:
-
-> "This ticket is labeled `Design` — its deliverable is a design spec, not a code change. It should be run through `/cenci:design <ticket-id>` instead. How do you want to proceed?"
-
-- **"Stop — route to /cenci:design (Recommended)"** — stop the pipeline immediately. Tell the user to run `/cenci:design <ticket-id>`. No labels change (the "Working" label has not been applied yet at this point).
-- **"Proceed with implementation anyway"** — the label may be stale or wrong. Continue with the remaining readiness checks below, and tell the user to remove the `Design` label (or re-run `/cenci:refine`) if the ticket genuinely includes implementation work.
-
-Do not proceed past this check without an explicit answer. (Plan-file mode skips Ticket Readiness entirely, which is fine — a design-only ticket never produces a plan file.)
 
 ### Remaining Readiness Checks
 
@@ -247,22 +196,11 @@ If the digest's `labels` include **"Planned"** but this run is **not** plan-file
 
 If the user says no → stop. If yes → proceed (a fresh plan re-applies `Planned` at the end). This is a warning only — it does not block.
 
-### Design Check (hard gate)
+### UI Classification
 
-Read the `frontend-classification` reference skill and apply its rule to the ticket title and digest summary. If the ticket is classified as frontend, set `isUiTicket = true`. Phase 4 and Phase 9 use this flag for screenshot capture and PR embedding.
-
-If `isUiTicket` is true and the ticket does **not** have a "Designed" label/tag, **stop and ask** before starting the pipeline. UI tickets implemented without an approved design are the most error-prone, even with a design system in place.
-
-A bundled `DESIGN.md` does **not** satisfy this gate on its own: the design path persists across tickets, so an existing `DESIGN.md` may describe a previous ticket's design. Only the "Designed" label on this ticket counts.
-
-Ask via `AskUserQuestion`:
-
-> "This UI ticket has no "Designed" label. [If the digest reports a bundled `DESIGN.md`, add: A `DESIGN.md` was found at `<path>`, but it may belong to an earlier ticket.] How do you want to proceed?"
-
-- **"Stop — design first (Recommended)"** — stop the pipeline. Design lives on a dedicated design ticket, so tell the user: if this ticket already depends on a `Design`-labeled ticket (check the ticket's blocked-by set with `gh issue view <ticket-id> --repo <owner>/<repo> --json blockedBy --jq '.blockedBy.nodes[].number'`, or a `Depends on #<n>` line in the ticket body / digest summary — the permanent, human-visible supplement `/cenci:refine` writes alongside the native link on every refined ticket that has such a dependency), run `/cenci:design <design-ticket-id>` — completing it closes the design ticket and propagates `Designed` to this one. If no design ticket exists, re-run `/cenci:refine <ticket-id>` to create the companion design ticket. Re-run `/cenci:implement` once this ticket carries the "Designed" label.
-- **"Proceed without design"** — continue the pipeline. Record the choice; Phase 9 notes "implemented without design spec" in the PR body.
-
-Do not proceed past this gate without an explicit answer.
+Read the `frontend-classification` reference skill and apply its rule to the ticket title
+and digest summary. If the ticket is classified as frontend, set `isUiTicket = true`. Phase 4
+and Phase 9 use this flag for screenshot capture and PR embedding.
 
 ### Visual Check Reminder
 
@@ -277,13 +215,13 @@ This is informational only — it does not block the pipeline.
 
 **If ticket mode:** before triage, invoke `cenci pipeline label <id> --transition working` — the CLI now owns both the ownership verify/auto-claim logic (mirroring the `ticket-ownership` reference skill's own logic: verify exclusive ownership, auto-claim an unassigned ticket, never replace an existing assignee) **and** applying the `Working` label in one call (see the **Label "Working"** section below, which this same call also satisfies). Render the returned `state`/`next_actions`/`warnings`/`errors` as this step's status update; if it returns non-empty `errors[]` (foreign/multiple assignee, wrong pipeline stage), surface them and stop before proceeding to triage or the pipeline.
 
-The `ticket-ownership` reference skill itself stays in place — it is still read directly by `/cenci:refine` and `/cenci:design`, which don't run through the pipeline CLI. This call site no longer reads it directly; the CLI reimplements the same logic instead.
+The `ticket-ownership` reference skill itself stays in place — it is still read directly by `/cenci:refine`, which doesn't run through the pipeline CLI. This call site no longer reads it directly; the CLI reimplements the same logic instead.
 
 ## Trivial-Ticket Triage
 
 **Ticket mode only.** Skip this section entirely in ticketless mode, in plan file mode, and when `resumeFromDraft` is set — plan file mode already has a persisted plan, ticketless mode has no ticket body to triage against, and a resumed escalation (`resumeFromDraft`) must never take the Trivial Fast Path: doing so would silently discard the draft and its already-collected human answers instead of routing through `## Resume From Draft`'s freshness-aware resume/re-plan split.
 
-Runs after every Ticket Readiness gate above (Design-Ticket Router, "Refined" check, "Designed" hard gate) — a ticket disqualified by those gates never reaches triage.
+Runs after every Ticket Readiness gate above (the "Refined" check and the warnings beside it) — a ticket disqualified by those gates never reaches triage.
 
 This is a cheap heuristic the main agent evaluates directly over the context-gatherer digest already fetched, plus (see below) a single direct read of the already-gathered bundle file — no subagent invocation, no codebase exploration, no additional tool calls beyond that one `Read`.
 

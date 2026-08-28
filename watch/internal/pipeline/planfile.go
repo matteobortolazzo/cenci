@@ -63,12 +63,13 @@ var (
 )
 
 // requiredPlanSections are the headings plan-check requires, per the plan's
-// Assumptions.
+// Assumptions. "## Design Context" was dropped along with Pencil/design
+// removal (flow/skills/implement/phases/phase-1-plan.md's "Persist the
+// Plan" step no longer writes or verifies it).
 var requiredPlanSections = []string{
 	"## Ticket Details",
 	"## Implementation Plan",
 	"## Architectural Context",
-	"## Design Context",
 }
 
 // planSlugPattern mirrors flow/skills/implement/SKILL.md's existing slug

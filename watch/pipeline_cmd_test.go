@@ -716,7 +716,7 @@ func TestPipelineReset_NeverEmitsNullInJSON(t *testing.T) {
 // -- ticket #688: plan-file-triggered stage adoption (closing #718 item 1) --
 
 // writePlanFileForCLITest writes a minimal, validly-shaped
-// `.plans/<id>-<slug>.md` under repoDir (all four sections adoptPlanFileStage's
+// `.plans/<id>-<slug>.md` under repoDir (all three sections adoptPlanFileStage's
 // reused parseAndValidatePlan requires, plus a matching slug/ticketId). This
 // file lives in package main_test, a separate package from
 // internal/pipeline's own test fixtures (adopt_test.go's writePlanFile), so
@@ -734,8 +734,7 @@ func writePlanFileForCLITest(t *testing.T, repoDir, id, slug string) string {
 		"---\n" +
 		"\n## Ticket Details\nsome details\n\n" +
 		"## Implementation Plan\ndo things\n\n" +
-		"## Architectural Context\nsome context\n\n" +
-		"## Design Context\nsome design\n"
+		"## Architectural Context\nsome context\n"
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("write plan file: %v", err)
 	}

@@ -50,12 +50,11 @@ different quoting — the banner blockquoted, the marker/anchor bare.
 
 Every marker-bearing flow comment uses one of the `<kind>` values below;
 `<kind>` is unique per call site so a consumer can tell which flow code path
-produced a given comment. flow's six kinds:
+produced a given comment. flow's five kinds:
 
 | Kind | File / call site | Marker | Consumers |
 |---|---|---|---|
 | `plan-comment` | `skills/implement/phases/phase-1-plan.md` — `## Persist the Plan`'s `planComment` step | `<!-- cenci-plan-comment -->` | `isCenciAuthored` (`watch/internal/dispatch/resume.go`) |
-| `design-summary` | `skills/design/SKILL.md` — Step 7B (Step 7C reuses the same banner-carrying file for each dependent post) | `<!-- cenci-design-summary -->` | `isCenciAuthored` (`watch/internal/dispatch/resume.go`) |
 | `parent-gap-report` | `skills/implement/phases/phase-9-pr.md` — the parent acceptance-criteria gap report | `<!-- cenci-parent-gap-report -->` | `isCenciAuthored` (`watch/internal/dispatch/resume.go`); `watch/internal/babysit` (merge-time parent-close gate) |
 | `followup-tracked` | `skills/implement/phases/phase-9-pr.md` — the followups-tracked comment | `<!-- cenci-followup-tracked -->` | `isCenciAuthored` (`watch/internal/dispatch/resume.go`) |
 | `planner-escalation` | `skills/implement/phases/phase-1-plan.md` — `## Escalation Anchor` and its four call sites | `<!-- cenci-planner-escalation:<nonce> -->` | `isCenciAuthored` (`watch/internal/dispatch/resume.go`) |
@@ -133,8 +132,8 @@ Answer-detection treats *"positioned after the anchor + no `<!-- cenci-`
 marker + non-bot author + write permission"* as the human's answer
 (`skills/implement/phases/phase-1-plan.md`'s `## Resume From Draft` step 2).
 flow's marker-less comments did not previously collide with this rule only
-by ordering happening to save them — design comments precede implement, and
-while a ticket sits `awaiting-input` the flow session has stopped, so the
+by ordering happening to save them — while a ticket sits `awaiting-input`
+the flow session has stopped, so the
 only comments still arriving are `watch`'s, which are all marked already.
 That safety was incidental, not structural: any future flow comment posted
 on a ticket after its anchor, under the operator's own account, would

@@ -1401,7 +1401,7 @@ check_github_labels() {
     return
   fi
   local any_fail=0 l
-  for l in Refined Design Designed Planned Working "In Review" Implemented Followup \
+  for l in Refined Planned Working "In Review" Implemented Followup \
     dispatch-failed plan-invalid reconcile-stuck; do
     if ! jq -e --arg l "$l" '[.[] | select(.name==$l)] | length > 0' <<< "$labels_json" >/dev/null 2>&1; then
       add_result github-labels "$owner_repo" fail "missing lifecycle label '$l'" \
@@ -1750,7 +1750,7 @@ CONFIG_SCHEMA=(
   'projects[].buildCommand|string' 'projects[].testCommand|string'
   'projects[].lintCommand|string' 'projects[].gateCommand|string'
   'projects[].serveCommand|string' 'projects[].babysitInterval|string'
-  'projects[].designPath|string' 'projects[].boardKey|string' 'projects[].testKey|string'
+  'projects[].boardKey|string' 'projects[].testKey|string'
   'mcpServers|object' 'mcpServers.*|boolean'
   'lspServers|object' 'lspServers.*|boolean'
   'playwrightCli|boolean'
@@ -1765,8 +1765,6 @@ CONFIG_SCHEMA=(
   'lazyboards|object' 'lazyboards.enabled|boolean'
   'lazyboards.serveCommand|string' 'lazyboards.boardKey|string'
   'lazyboards.testCommand|string' 'lazyboards.testKey|string'
-  'pencil|object' 'pencil.enabled|boolean' 'pencil.designPath|string'
-  'pencil.mode|string' 'pencil.shared|boolean'
   'planning|object' 'planning.autonomy|string'
   'security|object' 'security.sensitivePaths|array' 'security.sensitivePaths[]|string'
   'maintenance|object' 'maintenance.enabled|boolean'
