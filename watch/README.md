@@ -159,7 +159,7 @@ and watcher snapshots together. It replaces the personal dispatch scripts that u
 live in `~/.config/lazyboards/scripts/`.
 
 ```bash
-# Refine/design/implement ticket 40 with Claude in the current tmux session
+# Refine/implement ticket 40 with Claude in the current tmux session
 cenci run implement 40
 
 # Inspect the resolution without spawning anything
@@ -183,7 +183,7 @@ cenci run implement add dark mode toggle
 ```
 
 When the first token is a numeric ticket id, the window is named `<number>-<skill>`
-(the skill being the workflow: `refine` / `design` / `implement`) — short, uniform, and
+(the skill being the workflow: `refine` / `implement`) — short, uniform, and
 matched by external tools on the number prefix, so the ticket title is deliberately
 omitted. `--slug` and trailing context do not change a numbered window's name. A
 non-numeric first token (a free-text task description) has no ticket number and keeps a
@@ -192,7 +192,7 @@ descriptive slug: `--slug` if given, else the whole description slugified.
 | Flag | Purpose |
 |------|---------|
 | `--agent <name>` | Agent to launch (`claude`, `codex`, …); default from config, else `claude` |
-| `--sandbox` / `--no-sandbox` | Sandbox is the default (`claude`→`cenci open`, the container being the mandatory runtime); `--no-sandbox` is the host opt-out. Both override the config default. Exception: `design` is host-only (the Pencil desktop app it drives is unreachable inside the sandbox) — passing `--sandbox` for it is a usage error, exit 2 |
+| `--sandbox` / `--no-sandbox` | Sandbox is the default (`claude`→`cenci open`, the container being the mandatory runtime); `--no-sandbox` is the host opt-out. Both override the config default |
 | `--model <model>` | Model override passed to the agent (substituted into `{model}`, else appended as `--model`) |
 | `--session <name>` | Target tmux session (default: the current session) |
 | `--dir <path>` | Working directory the window starts in (default: current); prepended as a `cd '<dir>' &&` prefix on the launched command, visible in `--dry-run` output too |
@@ -221,13 +221,12 @@ spawn into a grouped session (non-zero exit, no window created). Pass an ungroup
 
 ### Configuration
 
-Built-in Go templates cover Claude `refine`/`design`/`implement` with zero config. An
+Built-in Go templates cover Claude `refine`/`implement` with zero config. An
 optional `config.json` (respecting `$XDG_CONFIG_HOME`, or `--config`) overrides the
 defaults and adds agents or workflows — the tokens `{ticket}` and `{model}` are
-substituted at launch. Launches run inside the cenci-sandbox container by default,
-**except `design`, which is host-only** (see below); the `"sandbox"` field below is
-optional and, when set to `false`, opts every non-host-only launch out to the host (the
-same as passing `--no-sandbox`):
+substituted at launch. Launches run inside the cenci-sandbox container by default; the
+`"sandbox"` field below is optional and, when set to `false`, opts every launch out to
+the host (the same as passing `--no-sandbox`):
 
 ```json
 {
@@ -238,8 +237,7 @@ same as passing `--no-sandbox`):
       "command": "claude",
       "sandboxCommand": "cenci open",
       "workflows": {
-        "implement": { "args": ["--", "/cenci:implement {ticket}"] },
-        "design": { "host": true }
+        "implement": { "args": ["--", "/cenci:implement {ticket}"] }
       }
     },
     "codex": {
@@ -258,13 +256,6 @@ same as passing `--no-sandbox`):
   }
 }
 ```
-
-Each workflow entry may also carry a `"host"` field (a nullable boolean; unset is
-distinct from `false`). When `true`, that (agent, workflow) always resolves the host
-command — an explicit `--sandbox` becomes a usage error (exit 2) instead of a silent
-override. `design` ships `"host": true` for all three built-in agents (the Pencil
-desktop app it drives is never reachable inside the sandbox); set `"host": false` in
-your `config.json` to opt a workflow back into sandbox dispatch.
 
 Only the built-in Claude templates ship today; Codex and opencode require a
 `config.json` entry. Until one is configured, `--agent codex` exits with a helpful "no
@@ -874,9 +865,7 @@ autonomous *re-plan* instead of a terminal `plan stale, re-plan` skip. Both laun
 `cenci run implement`; every other gate (assignee, dependency, sibling
 serialization, capacity, budget, quiet hours) applies identically to an ordinary
 `Planned` pickup, because it is literally the same gate chain — see [Ticket
-dependency gate](#ticket-dependency-gate) above. `Designed` needs no separate
-handling: it is always propagated alongside `Refined`, so the `Refined` check
-covers it.
+dependency gate](#ticket-dependency-gate) above.
 
 **Lean-planning repos only.** `dispatch.planRefined` remains the fleet-wide kill
 switch, but it is no longer sufficient authorization on its own (#851): after the
@@ -1803,7 +1792,7 @@ performs (starting the events daemon on demand) that the read-only preview
 never performs itself; when that outcome can't be determined read-only, the
 create argv omits the wiring mounts and the report says so explicitly instead
 of claiming to be exact. Any forwarded secret env var (`OPENAI_API_KEY`,
-`ANTHROPIC_API_KEY`, `CONTEXT7_API_KEY`, `PEN_CLI_KEY`) renders as a bare `-e NAME` — no
+`ANTHROPIC_API_KEY`, `CONTEXT7_API_KEY`) renders as a bare `-e NAME` — no
 `=value` at all, since the runtime CLI (docker/podman) resolves `NAME`
 client-side from its own inherited environment rather than from argv. This
 also means the value never appears in `ps` output while an attached session

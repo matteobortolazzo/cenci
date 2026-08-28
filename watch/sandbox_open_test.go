@@ -1569,7 +1569,7 @@ func openTestEnv(t *testing.T, fakeDir, assets string) (env []string, home, sock
 		"TERM=xterm-256color",
 		"TMUX_PANE=%7",
 		"COLORTERM=", "CONTEXT7_API_KEY=", "OPENAI_API_KEY=", "CENCI_SANDBOX=",
-		"PEN_CLI_KEY=", "ANTHROPIC_API_KEY=",
+		"ANTHROPIC_API_KEY=",
 		"FAKE_VOLUMES=cenci-agent-cli-claude\ncenci-agent-cli-codex\n",
 		"FAKE_IMAGE_BASE_VERSION="+tag,
 	)

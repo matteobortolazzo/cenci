@@ -36,7 +36,7 @@ func RepoAzureConfig(repoRoot string) (bool, error) {
 
 // ResolveAzure reports whether this launch stages the host's Azure CLI
 // credentials. Unlike dind there is no flag pair to reconcile — the repo's
-// `sandbox.azure` opt-in is the only input — and unlike the claude/gh/pencil
+// `sandbox.azure` opt-in is the only input — and unlike the claude/gh
 // credentials, which every sandbox gets, Azure credentials are staged ONLY
 // into repos that asked for the Azure CLI. Cloud-subscription credentials
 // have a blast radius well beyond the repo, so the mount plan follows

@@ -102,24 +102,23 @@ func TestAssembleRunArgs_NoCreationTimeTmuxPane(t *testing.T) {
 // as opposed to strings.Contains against the joined argv, which would also
 // match the value-bearing "NAME=value" form.
 
-// providerSecretEnvNames are the four host env vars whose VALUES must never
+// providerSecretEnvNames are the three host env vars whose VALUES must never
 // appear in any assembled argv token (ticket #759's AC list).
-var providerSecretEnvNames = []string{"CONTEXT7_API_KEY", "PEN_CLI_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"}
+var providerSecretEnvNames = []string{"CONTEXT7_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"}
 
 // TestAssembleExecEnvAndAssembleEnv_NeverEmitProviderSecretValues is the
-// core AC test: with distinct sentinel values set for all four provider
+// core AC test: with distinct sentinel values set for all three provider
 // secret names, neither assembleExecEnv (every agent) nor Engine.assembleEnv
 // (the create-time CONTEXT7_API_KEY forward) may ever emit a sentinel value
-// anywhere in their argv, or a "NAME=" prefixed token for any of the four
+// anywhere in their argv, or a "NAME=" prefixed token for any of the three
 // names -- only the bare "-e NAME" form. Per-agent scoping (#490) is
 // verified against the actual assembleExecEnv switch: opencode forwards
 // ANTHROPIC_API_KEY+OPENAI_API_KEY, codex forwards OPENAI_API_KEY only,
-// claude forwards neither -- CONTEXT7_API_KEY/PEN_CLI_KEY are unscoped
-// (forwarded for every agent when set).
+// claude forwards neither -- CONTEXT7_API_KEY is unscoped (forwarded for
+// every agent when set).
 func TestAssembleExecEnvAndAssembleEnv_NeverEmitProviderSecretValues(t *testing.T) {
 	sentinels := map[string]string{
 		"CONTEXT7_API_KEY":  "sentinel-secret-value-context7",
-		"PEN_CLI_KEY":       "sentinel-secret-value-pencli",
 		"ANTHROPIC_API_KEY": "sentinel-secret-value-anthropic",
 		"OPENAI_API_KEY":    "sentinel-secret-value-openai",
 	}
@@ -134,17 +133,17 @@ func TestAssembleExecEnvAndAssembleEnv_NeverEmitProviderSecretValues(t *testing.
 	}{
 		{
 			agent:          "claude",
-			wantExecNames:  []string{"CONTEXT7_API_KEY", "PEN_CLI_KEY"},
+			wantExecNames:  []string{"CONTEXT7_API_KEY"},
 			wantExecAbsent: []string{"ANTHROPIC_API_KEY", "OPENAI_API_KEY"},
 		},
 		{
 			agent:          "codex",
-			wantExecNames:  []string{"CONTEXT7_API_KEY", "PEN_CLI_KEY", "OPENAI_API_KEY"},
+			wantExecNames:  []string{"CONTEXT7_API_KEY", "OPENAI_API_KEY"},
 			wantExecAbsent: []string{"ANTHROPIC_API_KEY"},
 		},
 		{
 			agent:         "opencode",
-			wantExecNames: []string{"CONTEXT7_API_KEY", "PEN_CLI_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"},
+			wantExecNames: []string{"CONTEXT7_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"},
 		},
 	}
 

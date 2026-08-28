@@ -361,84 +361,6 @@ func TestAudit_ClaudeAndGhCredentials_PresentAndAbsent(t *testing.T) {
 	}
 }
 
-// TestAudit_PencilCredentialSource_PresentAndAbsent covers the Pencil CLI
-// session's optional staged credential (headless design reads inside the
-// sandbox): the pencil credentialSources entry must always be reported with
-// its resolved host path, flipping Present only once
-// ~/.pencil/session-cli.json actually exists.
-func TestAudit_PencilCredentialSource_PresentAndAbsent(t *testing.T) {
-	repo := newAuditTestRepo(t)
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Chdir(repo)
-	eng := auditEngine()
-
-	posture, err := eng.Audit(Options{Agent: "claude"})
-	if err != nil {
-		t.Fatalf("Audit (no pencil session): %v", err)
-	}
-	src := findCredentialSource(posture.CredentialSources, CredentialTypePencil)
-	if src == nil {
-		t.Fatalf("expected a pencil credentialSources entry, got %+v", posture.CredentialSources)
-	}
-	if src.Present {
-		t.Errorf("pencil credential source Present = true without a staged file, want false")
-	}
-	wantPath := filepath.Join(home, ".pencil", "session-cli.json")
-	if src.HostPath != wantPath {
-		t.Errorf("pencil credential source HostPath = %q, want %q", src.HostPath, wantPath)
-	}
-
-	writeFile(t, wantPath, `{"token":"sentinel"}`)
-	posture, err = eng.Audit(Options{Agent: "claude"})
-	if err != nil {
-		t.Fatalf("Audit (with pencil session): %v", err)
-	}
-	src = findCredentialSource(posture.CredentialSources, CredentialTypePencil)
-	if src == nil || !src.Present {
-		t.Fatalf("expected a present pencil credentialSources entry, got %+v", posture.CredentialSources)
-	}
-}
-
-// TestAudit_ForwardedEnv_IncludesPenCliKeyNameOnly covers the PEN_CLI_KEY
-// per-exec passthrough (Pencil CLI auth for headless design reads): once set
-// on the host it must be reported in ForwardedEnv by name, marked Secret,
-// and its value must never appear in the marshaled posture.
-func TestAudit_ForwardedEnv_IncludesPenCliKeyNameOnly(t *testing.T) {
-	repo := newAuditTestRepo(t)
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Chdir(repo)
-	const penSecret = "sentinel-secret-value-pen789"
-	t.Setenv("PEN_CLI_KEY", penSecret)
-
-	posture, err := auditEngine().Audit(Options{Agent: "claude"})
-	if err != nil {
-		t.Fatalf("Audit: %v", err)
-	}
-
-	found := false
-	for _, ev := range posture.ForwardedEnv {
-		if ev.Name == "PEN_CLI_KEY" {
-			found = true
-			if !ev.Secret {
-				t.Errorf("PEN_CLI_KEY forwarded env Secret = false, want true")
-			}
-		}
-	}
-	if !found {
-		t.Errorf("expected PEN_CLI_KEY in ForwardedEnv names, got %+v", posture.ForwardedEnv)
-	}
-
-	data, err := json.Marshal(posture)
-	if err != nil {
-		t.Fatalf("Marshal: %v", err)
-	}
-	if strings.Contains(string(data), penSecret) {
-		t.Errorf("JSON output leaks the PEN_CLI_KEY sentinel value:\n%s", data)
-	}
-}
-
 // -- cross-agent applicability / staging (ticket #598) ---------------------
 
 // TestAudit_CrossAgentCredential_CodexPresentButNotApplicable_NotStaged is
@@ -510,7 +432,6 @@ func TestAudit_StagedImpliesApplicableAndPresent_AcrossAgents(t *testing.T) {
 	writeFile(t, filepath.Join(home, ".codex", "auth.json"), `{"token":"sentinel"}`)
 	writeFile(t, filepath.Join(home, ".local", "share", "opencode", "auth.json"), `{"token":"sentinel"}`)
 	writeFile(t, filepath.Join(home, ".config", "gh", "hosts.yml"), "github.com:\n  oauth_token: sentinel\n")
-	writeFile(t, filepath.Join(home, ".pencil", "session-cli.json"), `{"token":"sentinel"}`)
 
 	for _, agent := range []string{"claude", "codex", "opencode"} {
 		posture, err := auditEngine().Audit(Options{Agent: agent})
@@ -662,7 +583,6 @@ func TestForwardedEnvVarNames_CoversEverySecretSuffixedEnvName(t *testing.T) {
 	// "only forward when set" conditional must be set here, or its forwarded
 	// name never appears in the argv this test parses (blind spot 2 above).
 	t.Setenv("CONTEXT7_API_KEY", "sentinel-context7")
-	t.Setenv("PEN_CLI_KEY", "sentinel-pencil")
 	t.Setenv("ANTHROPIC_API_KEY", "sentinel-anthropic")
 	t.Setenv("OPENAI_API_KEY", "sentinel-openai")
 	t.Setenv("TERM", "xterm-256color")
@@ -722,13 +642,13 @@ func TestForwardedEnvVarNames_CoversEverySecretSuffixedEnvName(t *testing.T) {
 		}
 	}
 
-	// Anti-vacuity guard: assert each of the four currently-registered
+	// Anti-vacuity guard: assert each of the three currently-registered
 	// secrets was actually observed emitted somewhere above. This is a
 	// per-name presence check (not a bare "not empty" — watch/docs/
 	// test-strategy.md #914), and deliberately a SUBSET check rather than set
 	// equality: a legitimately added-and-registered future secret must not
 	// fail this test.
-	for _, want := range []string{"CONTEXT7_API_KEY", "PEN_CLI_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"} {
+	for _, want := range []string{"CONTEXT7_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"} {
 		if !seen[want] {
 			t.Errorf("expected %q to be emitted by some agent/branch combination (gate var not driving emission?), got emitted set %v", want, seen)
 		}
@@ -936,13 +856,10 @@ func TestAudit_SecretLeakRegression_NeverEmitsSecretValues(t *testing.T) {
 
 	const contextSecret = "sentinel-secret-value-xyz123"
 	const openaiSecret = "sentinel-secret-value-openai456"
-	const penSecret = "sentinel-secret-value-pen789"
 	t.Setenv("CONTEXT7_API_KEY", contextSecret)
 	t.Setenv("OPENAI_API_KEY", openaiSecret)
-	t.Setenv("PEN_CLI_KEY", penSecret)
 	writeFile(t, filepath.Join(home, ".codex", "auth.json"), `{"token":"`+contextSecret+`"}`)
 	writeFile(t, filepath.Join(home, ".claude", ".credentials.json"), `{"token":"`+openaiSecret+`"}`)
-	writeFile(t, filepath.Join(home, ".pencil", "session-cli.json"), `{"token":"`+penSecret+`"}`)
 
 	posture, err := auditEngine().Audit(Options{Agent: "codex"})
 	if err != nil {
@@ -959,9 +876,6 @@ func TestAudit_SecretLeakRegression_NeverEmitsSecretValues(t *testing.T) {
 	if strings.Contains(textBuf.String(), openaiSecret) {
 		t.Errorf("text output leaks the OPENAI_API_KEY sentinel value:\n%s", textBuf.String())
 	}
-	if strings.Contains(textBuf.String(), penSecret) {
-		t.Errorf("text output leaks the PEN_CLI_KEY sentinel value:\n%s", textBuf.String())
-	}
 
 	jsonBytes, err := json.MarshalIndent(posture, "", "  ")
 	if err != nil {
@@ -972,9 +886,6 @@ func TestAudit_SecretLeakRegression_NeverEmitsSecretValues(t *testing.T) {
 	}
 	if strings.Contains(string(jsonBytes), openaiSecret) {
 		t.Errorf("JSON output leaks the OPENAI_API_KEY sentinel value:\n%s", jsonBytes)
-	}
-	if strings.Contains(string(jsonBytes), penSecret) {
-		t.Errorf("JSON output leaks the PEN_CLI_KEY sentinel value:\n%s", jsonBytes)
 	}
 
 	// Extend the regression to the new cross-agent (present-but-not-staged)
@@ -997,7 +908,7 @@ func TestAudit_SecretLeakRegression_NeverEmitsSecretValues(t *testing.T) {
 	if err := crossPosture.WriteText(&crossTextBuf); err != nil {
 		t.Fatalf("WriteText (cross-agent): %v", err)
 	}
-	for _, secret := range []string{contextSecret, openaiSecret, penSecret} {
+	for _, secret := range []string{contextSecret, openaiSecret} {
 		if strings.Contains(crossTextBuf.String(), secret) {
 			t.Errorf("cross-agent text output leaks a sentinel secret value:\n%s", crossTextBuf.String())
 		}
@@ -1007,7 +918,7 @@ func TestAudit_SecretLeakRegression_NeverEmitsSecretValues(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MarshalIndent (cross-agent): %v", err)
 	}
-	for _, secret := range []string{contextSecret, openaiSecret, penSecret} {
+	for _, secret := range []string{contextSecret, openaiSecret} {
 		if strings.Contains(string(crossJSONBytes), secret) {
 			t.Errorf("cross-agent JSON output leaks a sentinel secret value:\n%s", crossJSONBytes)
 		}
@@ -1029,11 +940,9 @@ func TestAudit_JSON_EmptySlicesSerializeAsEmptyArrayNotNull(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	// Explicitly clear every provider API key assembleExecEnv would forward
-	// for "claude" (CONTEXT7_API_KEY, PEN_CLI_KEY) so forwardedEnv is
-	// deterministically empty regardless of the host process's own
-	// environment.
+	// for "claude" (CONTEXT7_API_KEY) so forwardedEnv is deterministically
+	// empty regardless of the host process's own environment.
 	t.Setenv("CONTEXT7_API_KEY", "")
-	t.Setenv("PEN_CLI_KEY", "")
 	t.Chdir(repo)
 
 	posture, err := auditEngine().Audit(Options{Agent: "claude"})
@@ -1426,7 +1335,7 @@ func TestAudit_ObservedMode_NextExecQualifier_ForwardedEnvAndReseedCreds(t *test
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Chdir(repo)
-	t.Setenv("PEN_CLI_KEY", "sentinel-secret-value-nextexec1")
+	t.Setenv("CONTEXT7_API_KEY", "sentinel-secret-value-nextexec1")
 
 	scope := ComputeScope("claude", "", repo, home)
 	eng, _ := auditEngineWithFakeRuntime(t)
@@ -1440,7 +1349,7 @@ func TestAudit_ObservedMode_NextExecQualifier_ForwardedEnvAndReseedCreds(t *test
 		t.Fatalf("Basis = %q, want %q (precondition for this test)", posture.Basis, PostureBasisRunning)
 	}
 	if len(posture.ForwardedEnv) == 0 {
-		t.Fatalf("ForwardedEnv is empty, want PEN_CLI_KEY (planned-derivation values still populate observed mode)")
+		t.Fatalf("ForwardedEnv is empty, want CONTEXT7_API_KEY (planned-derivation values still populate observed mode)")
 	}
 	if !posture.ReseedCreds {
 		t.Fatalf("ReseedCreds = false, want true (planned-derivation value still populates observed mode)")
