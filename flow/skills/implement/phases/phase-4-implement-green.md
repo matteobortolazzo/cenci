@@ -14,13 +14,15 @@ Pass:
 - Attachment paths if relevant.
 - LSP diagnostic reminder if configured.
 - The project's `buildCommand`, `testCommand`, and `lintCommand` (when set).
+- Resolved topic docs: at most 3 `docs/<topic>.md` paths matched to Files to Modify/Create.
 
 ## Rules
 
 - Follow the plan exactly.
 - Make tests pass with the simplest correct implementation.
-- Consult only relevant `docs/<topic>.md` files.
-- Honor `CLAUDE.md` and `README.md`; update docs if behavior, setup, configuration, or user-visible contracts change.
+- Consult only the topic docs passed in the Delegation Context above.
+- Honor applicable `AGENTS.md` guidance; never read `README.md` wholesale — `Grep` it for the specific contract being touched.
+- Do not edit documentation (`README.md`, `AGENTS.md`/`CLAUDE.md`, or `docs/**`) incidentally — Phase 8 owns those, except a doc file explicitly named in the plan's Files to Modify/Create. Instead, emit the `Docs to update:` section in its report, one line per doc or the literal `None.`.
 - No premature abstractions, dead code, commented-out code, or TODOs without ticket references.
 
 ## Verification

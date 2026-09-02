@@ -12,6 +12,7 @@ Pass:
 - Changed file list.
 - LSP diagnostic reminder if configured.
 - The project's `lintCommand` (when set).
+- Resolved topic docs: at most 3 `docs/<topic>.md` paths matched to Files to Modify/Create.
 
 Review changed code for:
 

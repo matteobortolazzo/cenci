@@ -32,6 +32,10 @@ printf '%s\n' "<Reuse Check: line>" ... >> "$RUN_DIR/reuse-notes.txt"
 
 Write nothing when Phase 5 reported none (the common case); Phase 9 treats an absent file as "none". Do this once, on first entry into this phase, alongside the artifacts above — a fix-and-rerun cycle must not append the same lines twice.
 
+**Carry the implementer's `Docs to update:` report forward.** Phase 4 (or, in compact mode, Phase 3's folded delegation, or Phase 5) reports needed doc updates as `Docs to update:` lines in its summary. Persist them here, alongside `reuse-notes.txt`, so Phase 8 can consume them even in a compacted or fresh session. Use the client's file tool (`Write`) to create `$RUN_DIR/docs-to-update.txt` directly with the reported lines — never a shell `printf`/`>>` interpolating the implementer's free-text report, which can contain `"`, a backtick, or `$(...)` and break out of a double-quoted shell argument (see the `shell-rules` skill's `## Body Files and Heredocs`). Confirm the write succeeded (the file exists and its content matches what was written) before treating the persistence as done. If that confirmation fails, retry the write once; if it still fails, report `docs: error (docs-to-update.txt persistence failed)` for Phase 9 rather than silently continuing — mirroring the same error-reporting shape `## Update CLAUDE.md`'s trigger uses in `phase-8-docs.md` for its own read-failure case.
+
+Write nothing when the report was the literal `None.` (the common case); Phase 8 treats an absent file as "none". Do this once, on first entry into this phase, never re-appended by a fix-and-rerun cycle. In Parallel Lanes, or when phases 3/4/5 are folded into one delegation, concatenate and de-duplicate each report's `Docs to update:` lines before writing them here.
+
 For small diffs and `cenci.diffContextMode` not set to `"file"`, inline the diff. For large diffs or file mode, pass reviewers the patch path, changed file list, stat, ticket requirements, and implementation plan. Tell reviewers to read only relevant hunks/files.
 
 Source ticket requirements and plan from the plan file when `hasPlanFile` is true.
