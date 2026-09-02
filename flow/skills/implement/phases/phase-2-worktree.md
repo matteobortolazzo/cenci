@@ -76,6 +76,7 @@ Parse stdout for the `GATE_STATUS=` line:
 - `GATE_STATUS=green` or `GATE_STATUS=unset` → this target passes.
 - `GATE_STATUS=red` → this target fails as **"gate failed"** — capture the project slug (or "top-level" for single-repo) and the command's output.
 - Non-zero exit with **no** `GATE_STATUS=` line at all → this target fails as **"gate could not run"** — capture the project slug and stderr/output. This is a script error (missing `jq`, malformed config, missing project directory, no-match/ambiguous slug), distinct from a red gate, and must be reported with visibly different wording than the "gate failed" case above.
+- The captured stdout shows at most `cenci.gateOutputLines` trailing lines (default 120) of the gate command's combined stdout+stderr, not necessarily the whole thing; a red gate's stdout also carries a `GATE_LOG=<absolute path>` line where the full untruncated output is retrievable. Read the log rather than expecting the captured output to be complete.
 
 ### 5. Proceed
 
@@ -85,5 +86,5 @@ If every invoked target passes (green or unset), continue to Phase 3 — render 
 
 If any target fails (either "gate failed" or "gate could not run"):
 
-1. Hard-stop and report which project's gate failed (or could not run), using the distinct wording from step 4, plus its captured output. Do not call `AskUserQuestion` — there is no choice to offer here, only a report.
+1. Hard-stop and report which project's gate failed (or could not run), using the distinct wording from step 4, plus its captured output. When a `GATE_LOG=` line was captured, locate the failing detail in that full log with `Grep`, then read only the failing region with `Read`, rather than assuming the truncated tail already contains everything relevant. Do not call `AskUserQuestion` — there is no choice to offer here, only a report.
 2. State explicitly that the worktree and branch are left in place, and that the user should fix the baseline and re-run `/cenci:implement .plans/<filename>` to retry.

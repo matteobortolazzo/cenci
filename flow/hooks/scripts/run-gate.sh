@@ -128,6 +128,37 @@ else
   fi
 fi
 
+# cenci.gateOutputLines (#1101): number of trailing lines of the gate
+# command's combined stdout+stderr to print. Read before jq_err_cleanup so
+# its stderr routes through the established fd-9 indirection and the child
+# gate process still never inherits fd 9 (#550). Deliberately does not
+# `exit 1` on a read failure like the sibling gateCommand/path reads above:
+# truncation is an ergonomic aid, not part of the gate's pass/fail contract,
+# so a jq failure here must never turn a healthy gate red.
+GATE_OUTPUT_LINES=120
+if ! GATE_OUTPUT_LINES_RAW=$(jq -r '
+    if (.cenci? | type) == "object" then
+      (if (.cenci.gateOutputLines // null) == null then "" else (.cenci.gateOutputLines | tostring) end)
+    else "" end
+  ' "${CONFIG}" 2>&9); then
+  echo "run-gate.sh: warning: failed to read cenci.gateOutputLines: $(jq_err_detail); using default ${GATE_OUTPUT_LINES}" >&2
+else
+  case "${GATE_OUTPUT_LINES_RAW}" in
+    '')
+      ;;
+    *[!0-9]*)
+      echo "run-gate.sh: warning: invalid cenci.gateOutputLines value '${GATE_OUTPUT_LINES_RAW}'; using default ${GATE_OUTPUT_LINES}" >&2
+      ;;
+    *)
+      if [ "${GATE_OUTPUT_LINES_RAW}" -ge 1 ]; then
+        GATE_OUTPUT_LINES="${GATE_OUTPUT_LINES_RAW}"
+      else
+        echo "run-gate.sh: warning: invalid cenci.gateOutputLines value '${GATE_OUTPUT_LINES_RAW}'; using default ${GATE_OUTPUT_LINES}" >&2
+      fi
+      ;;
+  esac
+fi
+
 jq_err_cleanup
 
 if [ -z "${GATE_COMMAND}" ]; then
@@ -200,13 +231,79 @@ if [ ! -d "${ABS_DIR}" ]; then
   exit 1
 fi
 
-( cd "${ABS_DIR}" && sh -c "${GATE_COMMAND}" )
-rc=$?
+# Mint a run-scoped log for the gate command's combined output (#1101).
+# TMPDIR is trusted only when absolute; an unset or relative TMPDIR falls
+# back to /tmp/cenci rather than an unchecked relative path (root AGENTS.md:
+# never unchecked command substitution for security-critical temp paths).
+case "${TMPDIR:-/tmp}" in
+  /*) GATE_LOG_BASE_DIR="${TMPDIR:-/tmp}/cenci" ;;
+  *) GATE_LOG_BASE_DIR="/tmp/cenci" ;;
+esac
+
+# Harden the shared base dir against symlink/TOCTOU attacks on a shared/
+# multi-user host: `mkdir -p` alone succeeds silently even when the
+# directory already exists as a symlink or is owned by another user, which
+# would otherwise hand an attacker a symlink-swap write primitive into
+# wherever the base dir points. `-m 700` only takes effect when mkdir
+# actually creates the directory, so an already-existing directory is
+# additionally checked for a symlink and for current-user ownership
+# (POSIX-portable via `find -user "$(id -u)"`, no bashisms) before mktemp
+# is ever allowed to write inside it. Any check failing routes into the
+# exact same fail-open fallback used for a plain mkdir/mktemp failure.
+LOG=""
+if mkdir -p -m 700 "${GATE_LOG_BASE_DIR}" 2>/dev/null && \
+   [ ! -L "${GATE_LOG_BASE_DIR}" ] && \
+   [ -n "$(find "${GATE_LOG_BASE_DIR}" -maxdepth 0 -user "$(id -u)" 2>/dev/null)" ] && \
+   LOG="$(mktemp "${GATE_LOG_BASE_DIR}/gate-output-XXXXXX" 2>/dev/null)" && \
+   [ -f "${LOG}" ]; then
+  :
+else
+  LOG=""
+  echo "run-gate.sh: warning: failed to create gate output log; falling back to untruncated output" >&2
+fi
+
+if [ -n "${LOG}" ]; then
+  ( cd "${ABS_DIR}" && sh -c "${GATE_COMMAND}" ) >"${LOG}" 2>&1
+  rc=$?
+
+  if ! TOTAL_LINES="$(awk 'END { print NR }' "${LOG}" 2>&1)"; then
+    echo "run-gate.sh: warning: failed to count gate output lines; truncation notice may be inaccurate" >&2
+    TOTAL_LINES=0
+  fi
+  # Additive to the awk exit-status check above: this validates that a
+  # successful awk run actually returned a plain digit count, not a
+  # replacement for it.
+  case "${TOTAL_LINES}" in
+    ''|*[!0-9]*) TOTAL_LINES=0 ;;
+  esac
+
+  if [ "${TOTAL_LINES}" -gt "${GATE_OUTPUT_LINES}" ]; then
+    echo "run-gate.sh: output truncated: showing the last ${GATE_OUTPUT_LINES} of ${TOTAL_LINES} lines."
+  fi
+  if ! tail -n "${GATE_OUTPUT_LINES}" "${LOG}"; then
+    echo "run-gate.sh: warning: failed to read gate output log for display" >&2
+  fi
+
+  # Normalize a missing trailing newline so the GATE_STATUS= envelope line
+  # below stays ^-anchored instead of concatenating onto the gate's own
+  # unterminated last line (check.sh:1312 requires an exact `^GATE_STATUS=`
+  # match).
+  if [ "$(tail -c 1 "${LOG}" | wc -l | tr -d '[:space:]')" -eq 0 ]; then
+    printf '\n'
+  fi
+else
+  ( cd "${ABS_DIR}" && sh -c "${GATE_COMMAND}" )
+  rc=$?
+fi
 
 if [ "${rc}" -eq 0 ]; then
+  if [ -n "${LOG}" ] && ! rm -f "${LOG}"; then
+    echo "run-gate.sh: warning: failed to remove gate output log ${LOG}" >&2
+  fi
   echo "GATE_STATUS=green"
   exit 0
 else
   echo "GATE_STATUS=red"
+  [ -n "${LOG}" ] && echo "GATE_LOG=${LOG}"
   exit "${rc}"
 fi

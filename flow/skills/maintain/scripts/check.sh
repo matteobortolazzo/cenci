@@ -1758,7 +1758,7 @@ CONFIG_SCHEMA=(
   'cenci|object' 'cenci.compactImplementation|boolean'
   'cenci.reviewConcurrency|string' 'cenci.implementerConcurrency|string'
   'cenci.diffContextMode|string' 'cenci.liteReviewEnabled|boolean'
-  'cenci.planComment|boolean'
+  'cenci.planComment|boolean' 'cenci.gateOutputLines|number'
   'cicd|object' 'cicd.enabled|boolean' 'cicd.platform|string'
   'sandbox|object' 'sandbox.enabled|boolean'
   # sandbox.baseVersion is retired (#1115) -- /cenci:configure no longer

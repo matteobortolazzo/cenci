@@ -1869,7 +1869,8 @@ For each MCP selected in question 5:
     "implementerConcurrency": "parallel",
     "diffContextMode": "inline",
     "liteReviewEnabled": true,
-    "planComment": false
+    "planComment": false,
+    "gateOutputLines": 120
   },
   "planning": { "autonomy": "interactive" },
   "cicd": {
@@ -1907,6 +1908,7 @@ The `cenci` field is optional. If present, preserve existing user values during 
 - `diffContextMode` — `"inline"` passes small diffs directly to reviewers; `"file"` writes the diff to this implement run's artifact directory (`$RUN_DIR/diff.patch` — see implement Phase 6 + 7) and passes paths so reviewers read targeted hunks. Default: `"inline"`.
 - `liteReviewEnabled` — `true` (default) lets Phase 6 + 7 classify each diff into `full` (all three reviewers), `lite-docs` (no reviewers, docs-only), or `lite-small` (`code-reviewer` only, small config/data-only diffs); `false` forces the full trio on every run regardless of diff size or content. See Phase 6 + 7 for the precedence-ordered classification rules.
 - `planComment` — `true` makes implement Phase 1 also post the saved plan as a ticket comment (ticket mode only) right before marking the ticket `Planned` (the label call stays the last ticket edit — it records the plan-freshness baseline), for audit / off-host visibility; `.plans/` stays the executable source of truth. Default: `false` (no comment).
+- `gateOutputLines` — the number of trailing lines of a gate command's combined stdout+stderr that `hooks/scripts/run-gate.sh` prints (see `docs/health-gates.md`); the full untruncated output stays retrievable at `GATE_LOG` on a red gate. Default: `120`.
 
 Configure always writes `sandbox: { "enabled": false }` in `.claude/settings.json` (no `network`/`excludedCommands`/`autoAllowBashIfSandboxed`) — the cenci-sandbox container is the security boundary. The config no longer carries `profile` or `sandboxEnabled` fields; re-config strips them from older configs (see the migration-removal list below).
 
