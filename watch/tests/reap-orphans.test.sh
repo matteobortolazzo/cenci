@@ -17,13 +17,15 @@
 #     host-side to running containers matching ^(claude-cenci-|codex-cenci-)$.
 #   - In-container scan: `<runtime> exec -u dev <container> sh -c '<POSIX
 #     script scanning /proc/*/environ for a line matching ^TMUX_PANE=>'`,
-#     emitting one `<pid>\t<pane>\t<start>` line per process that carries the
-#     TMUX_PANE key (pane may be empty; <start> is that process's start time,
-#     read from /proc/<pid>/stat field 22 in the same scan pass), to stdout,
-#     exit 0 on success. Scan runs as the fixed `dev` sandbox agent user so
-#     same-uid /proc/<pid>/environ reads succeed without CAP_SYS_PTRACE
-#     (root lacks it under docker's default caps). For a process whose environ
-#     failed to read (and still exists), the scan instead emits a
+#     emitting one `<pid>\t<pane>\t<start>\t<socket>` line per process that
+#     carries the TMUX_PANE key (pane may be empty; <start> is that process's
+#     start time, read from /proc/<pid>/stat field 22 in the same scan pass;
+#     <socket> is that process's CENCI_TMUX_SOCKET value, empty for a legacy
+#     row that never carried the var, #1007), to stdout, exit 0 on success.
+#     Scan runs as the fixed `dev` sandbox agent user so same-uid
+#     /proc/<pid>/environ reads succeed without CAP_SYS_PTRACE (root lacks it
+#     under docker's default caps). For a process whose environ failed to
+#     read (and still exists), the scan instead emits a
 #     `__UNREADABLE__\t<pid>` marker line (#361); the host counts these per
 #     container, excludes pid 1 (root-owned init, always unreadable by design
 #     on a healthy container), and prints an always-on
@@ -37,6 +39,27 @@
 #     `%1x`) is treated like a missing/empty pane (never signaled) and logged
 #     with a distinct note: "Note: process <pid> in container <container>
 #     has a malformed TMUX_PANE value; skipping."
+#   - (socket, pane) pair matching (#1007): liveness is no longer a single
+#     global pane-id set. Every distinct, shape-validated (absolute path)
+#     socket a container's scan output references is resolved at most once
+#     per sweep via `tmux -S <path> list-panes -a -F '#{pane_id}'` (the child
+#     env is rebuilt from an explicit PATH/HOME/TERM/LANG allowlist rather
+#     than inherited, so no ambient secret reaches the queried socket;
+#     memoized across containers/runtimes),
+#     and a process is live iff its (socket, pane) pair is in that socket's
+#     set — never a union of pane ids across sockets (both a personal default
+#     server and the `cenci` server allocate ids from `%0`, so a union would
+#     make a genuinely-dead pane on one server look live via an unrelated
+#     server's same-numbered pane). A row whose socket field is absent
+#     (legacy, pre-#1007 launcher) OR malformed (not an absolute path) fails
+#     open: never signaled, counted into a per-container aggregated
+#     "Note: <n> process(es) in container <container> carried no
+#     CENCI_TMUX_SOCKET; failing open and treating as live so no in-flight
+#     agent work is ever killed." diagnostic, and never
+#     passed to `tmux`. A well-formed socket whose server is gone still
+#     yields an empty live set for that socket (its panes are orphans,
+#     reaped), with the same "No tmux server detected" note scoped to that
+#     socket.
 #   - Liveness / signaling, always `-u root` (see sandbox/CLAUDE.md's
 #     "docker run --user X persists" entrypoint pattern for why):
 #       `<runtime> exec -u root <container> kill -TERM <pid>`
@@ -59,12 +82,13 @@
 #         - stdout matches the recorded start time -> genuinely still the
 #           same process; proceed to SIGKILL.
 #       `<runtime> exec -u root <container> kill -KILL <pid>`
-#   - Host tmux liveness: `tmux list-panes -a -F '#{pane_id}'`, capturing
-#     stdout/stderr/exit separately. Non-zero exit + stderr matching
-#     "no server running" -> proceed with an empty live-pane set and print a
-#     note containing "No tmux server detected". Any other non-zero exit is a
-#     hard error (exit non-zero, reap nothing, print an "Error:"-prefixed
-#     message, matching this script's existing error convention).
+#   - Host tmux liveness: `tmux -S <socket> list-panes -a -F '#{pane_id}'`,
+#     capturing stdout/stderr/exit separately, per referenced socket. Non-zero
+#     exit + stderr matching "no server running" -> proceed with an empty
+#     live-pane set for that socket and print a note containing "No tmux
+#     server detected". Any other non-zero exit is a hard error (exit
+#     non-zero, reap nothing, print an "Error:"-prefixed message, matching
+#     this script's existing error convention).
 #   - Output: one `reaped\t<container>\t<pid>\t<pane>` line per reaped
 #     process (SIGTERM already sent, regardless of later grace-window
 #     outcome), plus a final count line ("Reaped N orphaned process(es)." /
@@ -91,6 +115,15 @@ MAIN_CONTAINER="claude-cenci-${REPO_SLUG}"
 
 TEST_ROOT="$(mktemp -d)"
 trap 'rm -rf "${TEST_ROOT}"' EXIT
+
+# Two canonical socket paths (#1007): DEFAULT_SOCKET is the one write_scan
+# auto-appends to every pre-existing 3-field fixture (cases 1-23), so those
+# cases keep exercising a real per-socket query via the existing
+# TMUX_MODE/LIVE_PANES mock_set knobs unchanged. CENCI_SOCKET is the
+# non-default "cenci" server new (socket, pane) pair-matching cases target
+# explicitly via write_scan_legacy.
+CENCI_SOCKET="${TEST_ROOT}/tmux-cenci"
+DEFAULT_SOCKET="${TEST_ROOT}/tmux-default"
 
 BIN_DIR="${TEST_ROOT}/bin"
 CALLS_FILE="${TEST_ROOT}/calls"
@@ -160,9 +193,13 @@ case "${1:-}" in
                 # canned data source keyed by container name (SCAN_DIR) — all
                 # decision logic (skip-empty-pane, skip-malformed-pane,
                 # skip-live-pane, reap-dead-pane, TERM->KILL escalation,
-                # PID-reuse detection, no-tmux handling) lives host-side in
-                # reap_orphans(), never here. Fixture lines are three
-                # tab-separated columns: <pid>\t<pane>\t<start>.
+                # PID-reuse detection, no-tmux handling, (socket, pane)
+                # matching / fail-open) lives host-side in reap_orphans(),
+                # never here. Fixture lines are four tab-separated columns:
+                # <pid>\t<pane>\t<start>\t<socket> (write_scan auto-appends
+                # DEFAULT_SOCKET to a 3-field line; write_scan_legacy writes
+                # verbatim, for a genuinely-legacy no-socket row or an
+                # explicit non-default socket).
                 if [[ "${USER_FLAG}" != dev ]]; then
                     echo "mock: TMUX_PANE scan on ${CONTAINER} must run as -u dev" >&2
                     exit 6
@@ -249,33 +286,84 @@ chmod +x "${BIN_DIR}/docker"
 ln -s docker "${BIN_DIR}/podman"
 
 # ── Mock tmux ────────────────────────────────────────────────────────
-cat > "${BIN_DIR}/tmux" <<'MOCK'
+# Socket-aware (#1007): parses an explicit `-S <path>` out of its argv
+# (production is expected to always pass one, scrubbing its own ambient
+# TMUX/TMUX_PANE — see watch/docs/tmux.md) and answers per socket via two
+# independently configurable slots, keyed by the CENCI_SOCKET/DEFAULT_SOCKET
+# path constants above:
+#   - DEFAULT_SOCKET: TMUX_MODE / LIVE_PANES (unchanged names, so every
+#     pre-#1007 case 1-23 fixture -- auto-tagged with DEFAULT_SOCKET by
+#     write_scan -- keeps working without modification).
+#   - CENCI_SOCKET: TMUX_MODE_CENCI / LIVE_PANES_CENCI.
+# Any `-S` target that matches neither configured socket (including a
+# missing `-S`, which production should never emit) answers "no server
+# running" — an unscoped/unexpected query must never accidentally observe
+# live panes.
+#
+# #1007 review fix: the reap binary now runs this process under a minimal,
+# explicit allowlisted env (buildMinimalTmuxEnv, reap.go) that forwards only
+# PATH/HOME/TERM/LANG -- an ambient MOCK_TMUX_MODE*/MOCK_LIVE_PANES* export
+# (or even CALLS_FILE) set only in the parent test script's own process can
+# no longer reach this process. CALLS_FILE is therefore baked in as a literal
+# at generation time (like CENCI_SOCKET/DEFAULT_SOCKET already were), and the
+# TMUX_MODE*/LIVE_PANES* knobs are read back from files under $HOME
+# (mock_get, the counterpart of the parent script's mock_set) instead of from
+# an inherited env var.
+cat > "${BIN_DIR}/tmux" <<MOCKGEN
 #!/usr/bin/env bash
 set -euo pipefail
 {
     printf 'tmux '
-    printf '%q ' "$@"
+    printf '%q ' "\$@"
     printf '\n'
 } >> "${CALLS_FILE}"
 
-case "${MOCK_TMUX_MODE:-ok}" in
+mock_get() {
+    local f="\${HOME}/.mock_reap_\$1"
+    if [[ -f "\${f}" ]]; then cat "\${f}"; else printf '%s' "\$2"; fi
+}
+
+CENCI_SOCKET="${CENCI_SOCKET}"
+DEFAULT_SOCKET="${DEFAULT_SOCKET}"
+
+SOCKET=""
+prev=""
+for arg in "\$@"; do
+    if [[ "\${prev}" == "-S" ]]; then
+        SOCKET="\${arg}"
+    fi
+    prev="\${arg}"
+done
+
+if [[ -n "\${SOCKET}" && "\${SOCKET}" == "\${CENCI_SOCKET}" ]]; then
+    MODE="\$(mock_get TMUX_MODE_CENCI ok)"
+    PANES="\$(mock_get LIVE_PANES_CENCI '')"
+elif [[ -n "\${SOCKET}" && "\${SOCKET}" == "\${DEFAULT_SOCKET}" ]]; then
+    MODE="\$(mock_get TMUX_MODE ok)"
+    PANES="\$(mock_get LIVE_PANES '')"
+else
+    MODE="noserver"
+    PANES=""
+fi
+
+case "\${MODE}" in
     ok)
-        printf '%s\n' "${MOCK_LIVE_PANES:-}"
+        printf '%s\n' "\${PANES}"
         exit 0
         ;;
     noserver)
-        echo "no server running on /tmp/tmux-1000/default" >&2
+        echo "no server running on \${SOCKET}" >&2
         exit 1
         ;;
     error)
-        echo "tmux: error connecting to /tmp/tmux-1000/default (unrelated failure)" >&2
+        echo "tmux: error connecting to \${SOCKET} (unrelated failure)" >&2
         exit 1
         ;;
     *)
         exit 0
         ;;
 esac
-MOCK
+MOCKGEN
 chmod +x "${BIN_DIR}/tmux"
 
 # No `claude` mock: the reaper never resolves a host agent binary (both agent
@@ -289,6 +377,23 @@ export PATH="${BIN_DIR}:/usr/bin:/bin"
 # shellcheck source=../../sandbox/tests/lib/assert.sh
 source "${REPO_ROOT}/sandbox/tests/lib/assert.sh"
 
+# mock_set writes a fake-tmux configuration value (TMUX_MODE, LIVE_PANES,
+# TMUX_MODE_CENCI, LIVE_PANES_CENCI) to a file under $HOME, read back by the
+# mock tmux script's own mock_get (#1007 review fix): the reap binary now
+# runs the tmux child under a minimal, explicit allowlisted env
+# (buildMinimalTmuxEnv, watch/internal/sandbox/launcher/reap.go) that never
+# forwards arbitrary ambient vars, so a MOCK_TMUX_MODE*/MOCK_LIVE_PANES*
+# export set only in this test script's own process can no longer reach the
+# mock tmux process -- the file travels via $HOME instead, which IS in that
+# allowlist. Every other MOCK_* var below (MOCK_PODMAN_CONTAINERS,
+# MOCK_PS_FAIL, MOCK_SCAN_FAIL, MOCK_TERM_FAIL, MOCK_KILL_FAIL,
+# MOCK_LIVENESS_FAIL) is read only by the mock docker/podman binary, whose
+# `exec.Command` call sites in reap.go were never touched by this review fix
+# and still inherit the full ambient env -- those stay plain `export`.
+mock_set() {
+    printf '%s' "$2" > "${HOME}/.mock_reap_$1"
+}
+
 reset_state() {
     : > "${CALLS_FILE}"
     rm -rf "${SCAN_DIR}" "${LIVENESS_DIR}"
@@ -300,8 +405,10 @@ reset_state() {
     export MOCK_TERM_FAIL=""
     export MOCK_KILL_FAIL=""
     export MOCK_LIVENESS_FAIL=""
-    export MOCK_TMUX_MODE="ok"
-    export MOCK_LIVE_PANES=""
+    mock_set TMUX_MODE "ok"
+    mock_set LIVE_PANES ""
+    mock_set TMUX_MODE_CENCI "ok"
+    mock_set LIVE_PANES_CENCI ""
     export CENCI_SANDBOX_REAP_GRACE_SECS=0
 }
 
@@ -318,6 +425,33 @@ ${1}"
 }
 
 write_scan() {
+    local container="$1"
+    shift
+    local line
+    for line in "$@"; do
+        if [[ "${line}" == __UNREADABLE__* ]]; then
+            # Marker lines are two fields (marker + pid), never a scan row --
+            # no socket to append.
+            printf '%s\n' "${line}" >> "${SCAN_DIR}/${container}"
+        else
+            # Every pre-#1007 fixture line is the legacy 3-field shape
+            # (<pid>\t<pane>\t<start>); auto-append DEFAULT_SOCKET so cases
+            # 1-23 keep exercising a real per-socket (socket, pane) query
+            # against the mock instead of silently falling into the new
+            # no-socket fail-open branch. write_scan_legacy below is the
+            # explicit opt-in for a genuinely-legacy (no-socket) row, or for
+            # a row that needs an explicit non-default socket.
+            printf '%s\t%s\n' "${line}" "${DEFAULT_SOCKET}" >> "${SCAN_DIR}/${container}"
+        fi
+    done
+}
+
+# write_scan_legacy <container> <line...>: writes each line verbatim, with no
+# socket auto-append. Used for (a) the genuine pre-#1007 legacy shape (no
+# CENCI_TMUX_SOCKET field at all -- must fail open, never killed) and (b) any
+# fixture row that needs an explicit non-default socket (e.g. CENCI_SOCKET),
+# since write_scan's auto-append only ever targets DEFAULT_SOCKET.
+write_scan_legacy() {
     local container="$1"
     shift
     printf '%s\n' "$@" >> "${SCAN_DIR}/${container}"
@@ -422,7 +556,7 @@ case_1_orphan_termed() {
     local container="claude-cenci-orphan1"
     add_podman_container "${container}"
     write_scan "${container}" $'5001\t%1\t1000'
-    export MOCK_LIVE_PANES="%99"
+    mock_set LIVE_PANES "%99"
     set_gone 5001
     run_reap
     assert_exit_zero
@@ -437,7 +571,7 @@ case_2_term_resistant_escalates_to_kill() {
     local container="claude-cenci-orphan2"
     add_podman_container "${container}"
     write_scan "${container}" $'5002\t%2\t2000'
-    export MOCK_LIVE_PANES="%99"
+    mock_set LIVE_PANES "%99"
     set_live_start 5002 2000
     run_reap
     assert_exit_zero
@@ -453,7 +587,7 @@ case_3_empty_pane_never_signaled() {
     local container="claude-cenci-orphan3"
     add_podman_container "${container}"
     write_scan "${container}" $'5003\t\t' $'5004\t%3\t3000'
-    export MOCK_LIVE_PANES="%99"
+    mock_set LIVE_PANES "%99"
     set_gone 5004
     run_reap
     assert_exit_zero
@@ -471,7 +605,7 @@ case_4_live_pane_never_signaled() {
     local container="claude-cenci-orphan4"
     add_podman_container "${container}"
     write_scan "${container}" $'5005\t%4\t4000' $'5006\t%5\t5000'
-    export MOCK_LIVE_PANES="%4"
+    mock_set LIVE_PANES "%4"
     set_gone 5006
     run_reap
     assert_exit_zero
@@ -489,7 +623,7 @@ case_5_no_tmux_server_reaps_everything() {
     local container="claude-cenci-notmux"
     add_podman_container "${container}"
     write_scan "${container}" $'6001\t%6\t6000' $'6002\t%7\t6001' $'6003\t\t'
-    export MOCK_TMUX_MODE="noserver"
+    mock_set TMUX_MODE "noserver"
     set_gone 6001
     set_gone 6002
     run_reap
@@ -509,7 +643,7 @@ case_6_genuine_tmux_error_hard_fails() {
     local container="claude-cenci-tmuxerr"
     add_podman_container "${container}"
     write_scan "${container}" $'6101\t%8\t6100'
-    export MOCK_TMUX_MODE="error"
+    mock_set TMUX_MODE "error"
     run_reap
     assert_exit_nonzero
     assert_contains "Error:"
@@ -528,7 +662,7 @@ case_7_both_runtimes_scanned() {
     add_podman_container "${podman_container}"
     write_scan "${docker_container}" $'7001\t%9\t7000'
     write_scan "${podman_container}" $'7002\t%10\t7001'
-    export MOCK_LIVE_PANES="%20"
+    mock_set LIVE_PANES "%20"
     set_gone 7001
     set_gone 7002
     run_reap
@@ -546,7 +680,7 @@ case_8_nothing_to_reap() {
     local container="claude-cenci-clean"
     add_podman_container "${container}"
     write_scan "${container}" $'8001\t%11\t8000'
-    export MOCK_LIVE_PANES="%11"
+    mock_set LIVE_PANES "%11"
     run_reap
     assert_exit_zero
     assert_contains "No orphaned processes found."
@@ -577,7 +711,7 @@ case_10_genuine_term_failure_hard_fails() {
     local container="claude-cenci-termfail"
     add_podman_container "${container}"
     write_scan "${container}" $'10001\t%13\t10000'
-    export MOCK_LIVE_PANES="%99"
+    mock_set LIVE_PANES "%99"
     export MOCK_TERM_FAIL="${container}"
     # The process is still alive at the post-failure probe, so this is a
     # genuine delivery failure — not the benign exited-before-TERM race
@@ -597,7 +731,7 @@ case_11_genuine_kill_failure_hard_fails() {
     local container="claude-cenci-killfail"
     add_podman_container "${container}"
     write_scan "${container}" $'11001\t%14\t11000'
-    export MOCK_LIVE_PANES="%99"
+    mock_set LIVE_PANES "%99"
     export MOCK_KILL_FAIL="${container}"
     set_live_start 11001 11000
     run_reap
@@ -616,7 +750,7 @@ case_12_malformed_pane_skipped() {
         $'12002\tbad\t1000' \
         $'12003\t%1x\t1000' \
         $'12004\t%15\t1000'
-    export MOCK_LIVE_PANES="%99"
+    mock_set LIVE_PANES "%99"
     set_gone 12004
     run_reap
     assert_exit_zero
@@ -639,7 +773,7 @@ case_13_pid_reuse_during_grace_skips_kill() {
     local container="claude-cenci-reused"
     add_podman_container "${container}"
     write_scan "${container}" $'13001\t%16\t1000'
-    export MOCK_LIVE_PANES="%99"
+    mock_set LIVE_PANES "%99"
     # Recorded start (scan time) is 1000; the pre-SIGKILL probe reports 9999
     # -- an unrelated process now owns pid 13001. SIGTERM was already sent
     # (and is reported reaped) before the mismatch is discovered.
@@ -658,7 +792,7 @@ case_14_liveness_transport_failure_hard_fails() {
     local container="claude-cenci-transportfail"
     add_podman_container "${container}"
     write_scan "${container}" $'14001\t%17\t1000'
-    export MOCK_LIVE_PANES="%99"
+    mock_set LIVE_PANES "%99"
     export MOCK_LIVENESS_FAIL="${container}"
     run_reap
     assert_exit_nonzero
@@ -683,7 +817,7 @@ case_15_corrupted_scan_start_falls_back_to_kill() {
     # back to best-effort SIGKILL instead of treating this as a PID-reuse
     # mismatch.
     write_scan "${container}" $'15001\t%18\t9x9'
-    export MOCK_LIVE_PANES="%99"
+    mock_set LIVE_PANES "%99"
     set_live_start 15001 15000
     run_reap
     assert_exit_zero
@@ -700,7 +834,7 @@ case_16_corrupted_probe_output_falls_back_to_kill() {
     local container="claude-cenci-corruptprobe"
     add_podman_container "${container}"
     write_scan "${container}" $'16001\t%19\t16000'
-    export MOCK_LIVE_PANES="%99"
+    mock_set LIVE_PANES "%99"
     # Probe output is corrupted (non-numeric, and neither __GONE__ nor
     # __NOSTAT__) -- a strictly-numeric identity comparison can't trust it,
     # so it must fall back to best-effort SIGKILL instead of treating this as
@@ -726,7 +860,7 @@ case_17_container_init_never_signaled() {
     # every agent session exec'd into it. The skip precedes pane-liveness
     # classification entirely, so it also holds in no-tmux-server mode.
     write_scan "${container}" $'1\t%20\t50' $'27001\t%21\t17000'
-    export MOCK_LIVE_PANES="%99"
+    mock_set LIVE_PANES "%99"
     set_gone 27001
     run_reap
     assert_exit_zero
@@ -748,7 +882,7 @@ case_18_gone_before_term_is_benign() {
     # and reports itself, but has always exited by kill time. Must not abort
     # the run (which would leave later containers unscanned).
     write_scan "${container}" $'18001\t%22\t18000'
-    export MOCK_LIVE_PANES="%99"
+    mock_set LIVE_PANES "%99"
     export MOCK_TERM_FAIL="${container}"
     set_gone 18001
     run_reap
@@ -773,7 +907,7 @@ case_19_dev_scan_finds_dev_owned_orphan() {
     local container="claude-cenci-devowned"
     add_podman_container "${container}"
     write_scan "${container}" $'19001\t%23\t19000'
-    export MOCK_LIVE_PANES="%99"
+    mock_set LIVE_PANES "%99"
     set_gone 19001
     run_reap
     assert_exit_zero
@@ -798,7 +932,7 @@ case_20_empty_recorded_start_silently_falls_back_to_kill() {
     # is false, probeNumeric is true, and recordedStart == "" -- the silent
     # (Note-free) fallback branch, not the noted one.
     write_scan "${container}" $'20001\t%24\t'
-    export MOCK_LIVE_PANES="%99"
+    mock_set LIVE_PANES "%99"
     set_live_start 20001 20000
     run_reap
     assert_exit_zero
@@ -819,7 +953,7 @@ case_21_nostat_probe_silently_falls_back_to_kill() {
     # probeNumeric is false, and probeStart == "__NOSTAT__" -- the silent
     # (Note-free) fallback branch, not the noted one.
     write_scan "${container}" $'21001\t%25\t1000'
-    export MOCK_LIVE_PANES="%99"
+    mock_set LIVE_PANES "%99"
     set_nostat 21001
     run_reap
     assert_exit_zero
@@ -840,7 +974,7 @@ case_22_unreadable_environ_note_fires() {
     local container="claude-cenci-unreadable"
     add_podman_container "${container}"
     write_scan "${container}" $'__UNREADABLE__\t22002' $'22001\t%26\t22000'
-    export MOCK_LIVE_PANES="%99"
+    mock_set LIVE_PANES "%99"
     set_gone 22001
     run_reap
     assert_exit_zero
@@ -859,12 +993,116 @@ case_23_unreadable_pid1_no_note() {
     local container="claude-cenci-unreadablepid1"
     add_podman_container "${container}"
     write_scan "${container}" $'__UNREADABLE__\t1' $'23001\t%27\t23000'
-    export MOCK_LIVE_PANES="%99"
+    mock_set LIVE_PANES "%99"
     set_gone 23001
     run_reap
     assert_exit_zero
     assert_contains "$(reaped_line "${container}" 23001 "%27")"
     assert_not_contains "unreadable during the -u dev scan"
+}
+
+# ---------------------------------------------------------------------------
+# #1007: (socket, pane) pair matching. A legacy 3-field scan row (no
+# CENCI_TMUX_SOCKET field at all -- a container launched before this change)
+# must fail open: never signaled, exit 0, with an aggregated per-container
+# Note.
+case_24_legacy_no_socket_fails_open() {
+    echo "case: a legacy 3-field scan row (no CENCI_TMUX_SOCKET) fails open -- never killed, exit 0, with an aggregated note"
+    reset_state
+    local container="claude-cenci-legacynosocket"
+    add_podman_container "${container}"
+    write_scan_legacy "${container}" $'24001\t%28\t24000'
+    run_reap
+    assert_exit_zero
+    local skip_needle
+    skip_needle=$'\t24001\t'
+    assert_not_contains "${skip_needle}"
+    assert_calls_not_contains "kill -TERM 24001"
+    assert_contains "No orphaned processes found."
+    assert_contains "Note: 1 process(es) in container ${container} carried no CENCI_TMUX_SOCKET; failing open and treating as live so no in-flight agent work is ever killed."
+}
+
+# ---------------------------------------------------------------------------
+# #1007: an agent pane live on the `cenci` tmux server must never be killed
+# while a personal default server is also running, and the reaper must have
+# actually queried the cenci socket (via an explicit -S) -- not silently
+# skipped liveness resolution for it.
+case_25_cross_server_no_kill() {
+    echo "case: an agent pane live on the cenci tmux server is never killed while a personal default server is also running, and the cenci socket is queried via -S"
+    reset_state
+    local container="claude-cenci-crossserver"
+    add_podman_container "${container}"
+    local row
+    row="$(printf '25001\t%%29\t25000\t%s' "${CENCI_SOCKET}")"
+    write_scan_legacy "${container}" "${row}"
+    mock_set TMUX_MODE_CENCI "ok"
+    mock_set LIVE_PANES_CENCI "%29"
+    # A personal default server is also running, with its own (unrelated)
+    # live panes; this container's row never references it.
+    mock_set TMUX_MODE "ok"
+    mock_set LIVE_PANES "%99"
+    run_reap
+    assert_exit_zero
+    local skip_needle
+    skip_needle=$'\t25001\t'
+    assert_not_contains "${skip_needle}"
+    assert_contains "No orphaned processes found."
+    assert_calls_contains "-S ${CENCI_SOCKET} list-panes -a"
+}
+
+# ---------------------------------------------------------------------------
+# #1007 union-match regression: both servers allocate pane ids from %0, so a
+# union of live panes across sockets would make a pane genuinely dead on its
+# own socket look live merely because an unrelated socket happens to reuse
+# the same id. Pair matching must keep the genuinely-live pane alive (26001)
+# and still reap the genuinely-dead one (26002).
+case_26_union_regression_dead_on_own_socket_still_reaped() {
+    echo "case: a pane dead on its own (cenci) socket is still reaped even though its pane id is LIVE on an unrelated (personal default) socket -- a sibling pane genuinely live on its own socket is never signaled"
+    reset_state
+    local container="claude-cenci-unionregress"
+    add_podman_container "${container}"
+    local row1 row2
+    row1="$(printf '26001\t%%30\t26000\t%s' "${CENCI_SOCKET}")"
+    row2="$(printf '26002\t%%31\t26001\t%s' "${CENCI_SOCKET}")"
+    write_scan_legacy "${container}" "${row1}" "${row2}"
+    mock_set TMUX_MODE_CENCI "ok"
+    mock_set LIVE_PANES_CENCI "%30"
+    # %31 is dead on the cenci socket but LIVE on the unrelated personal
+    # default socket -- a union match would wrongly treat 26002 as live too.
+    mock_set TMUX_MODE "ok"
+    mock_set LIVE_PANES "%31"
+    set_gone 26002
+    run_reap
+    assert_exit_zero
+    local skip_needle
+    skip_needle=$'\t26001\t'
+    assert_not_contains "${skip_needle}"
+    assert_contains "$(reaped_line "${container}" 26002 "%31")"
+    assert_calls_not_contains "kill -TERM 26001"
+    assert_calls_contains "podman exec -u root ${container} kill -TERM 26002"
+}
+
+# ---------------------------------------------------------------------------
+# #1007: a socket value that is not a well-formed absolute path (a container
+# process fully controls its own environ) fails open exactly like a missing
+# socket -- and, critically, must never be passed to tmux (mirrors the
+# existing malformed-TMUX_PANE handling).
+case_27_malformed_socket_fails_open() {
+    echo "case: a malformed CENCI_TMUX_SOCKET value (not an absolute path) fails open -- never killed, never passed to tmux, exit 0"
+    reset_state
+    local container="claude-cenci-malformedsocket"
+    add_podman_container "${container}"
+    local row
+    row="$(printf '27001\t%%32\t27000\trelative/not/absolute')"
+    write_scan_legacy "${container}" "${row}"
+    run_reap
+    assert_exit_zero
+    local skip_needle
+    skip_needle=$'\t27001\t'
+    assert_not_contains "${skip_needle}"
+    assert_calls_not_contains "kill -TERM 27001"
+    assert_calls_not_contains "relative/not/absolute"
+    assert_contains "No orphaned processes found."
 }
 
 # ---------------------------------------------------------------------------
@@ -891,6 +1129,10 @@ case_20_empty_recorded_start_silently_falls_back_to_kill
 case_21_nostat_probe_silently_falls_back_to_kill
 case_22_unreadable_environ_note_fires
 case_23_unreadable_pid1_no_note
+case_24_legacy_no_socket_fails_open
+case_25_cross_server_no_kill
+case_26_union_regression_dead_on_own_socket_still_reaped
+case_27_malformed_socket_fails_open
 
 print_summary
 [[ "${FAILURES}" -eq 0 ]]
