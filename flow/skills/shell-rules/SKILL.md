@@ -39,6 +39,26 @@ user-invocable: false
   babysit` is the reference case: it detaches its own supervisor, so its launching shell
   exits normally and there is nothing to reap.
 
+## Command Output Discipline
+
+- A long-running build or test run's stdout+stderr belongs in a log file, not inline in the
+  transcript: redirect it to an absolute path under `${TMPDIR:-/tmp}/cenci/<name>-<scope>.log`,
+  reusing `## Body Files and Heredocs`'s `<scope>` uniqueness and `^[A-Za-z0-9._-]+$`
+  validation rule so concurrent runs never collide on a shared fixed name.
+- Locate a failure with the client's search tool rather than scanning full output by eye — in
+  Claude Code, `Grep` over the log; in Codex, `rg`. Then read only the failing region with the
+  client's read tool (Claude Code's `Read`, or the portable equivalent) instead of the whole
+  file.
+- Do not paste a full command run back into the conversation: never inline a whole suite run
+  into the transcript. A full passing or failing run dumped verbatim wastes context on lines
+  nobody needs and, on retry, repeats the cost every time.
+- Precedence: a single `>… 2>&1` redirect into that log is one command and does not violate
+  `## Command Shape`'s one-command-per-call rule — it is a plain redirection, not a pipeline or
+  compound. `## Worktrees and Cross-Directory Writes`'s absolute-path requirement still binds:
+  `guard-main-worktree.sh` refuses a relative redirect target, so the log path in the redirect
+  must itself be absolute (`${TMPDIR:-/tmp}`/`$TMPDIR`/`$HOME`/`$PWD` are its supported
+  expansions).
+
 ## Search and File Operations
 
 Use the client's native read, search, glob, and patch tools when available. In Codex,

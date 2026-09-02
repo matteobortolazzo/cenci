@@ -52,6 +52,10 @@ run** (a script/config error, e.g. missing `jq`, malformed config, bad project p
 the same slug and output. Either stop: run `checkpoint.mjs block`, clear the goal, retain the worktree and branch, report
 the distinct diagnostic plus its captured output, and tell the user to fix the baseline gate
 and re-run `cenci run implement apply`.
+The captured output above shows at most `cenci.gateOutputLines` trailing lines (default 120) of
+the gate command's combined stdout+stderr; a red gate's output also carries a `GATE_LOG=<absolute
+path>` line where the full untruncated output is retrievable — locate the failing detail there
+with the client's search tool rather than assuming the truncated tail already contains everything.
 Arm
 the native goal and implement test-first. Then, before the reviews, run the reuse check: for each
 named unit this change *adds* (helper, constant, fixture — additions only, capped at the 10

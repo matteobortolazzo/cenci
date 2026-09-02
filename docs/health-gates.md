@@ -47,14 +47,39 @@ calls:
 2. It `cd`s into the project's `path` (repo root for single-repo, the
    project's configured `path` for a monorepo entry).
 3. It runs the resolved command via `sh -c`.
-4. It reports the outcome on stdout as `GATE_STATUS=green|red|unset` and
-   exits accordingly.
+4. It captures the resolved command's combined stdout+stderr to a run-scoped
+   log, prints at most `cenci.gateOutputLines` trailing lines of it (default
+   `120`, top-level `.cenci/config.json` field), then reports the outcome on
+   stdout as `GATE_STATUS=green|red|unset` and exits accordingly. A red gate
+   additionally prints a `GATE_LOG=<absolute path>` line naming where the
+   full untruncated output is retrievable; a green gate deletes the log and
+   prints no `GATE_LOG=` line.
 
 **Trust boundary**: the `gateCommand` string comes only from trusted,
 committed `.cenci/config.json` content — never from untrusted input — so it's
 executed via `sh -c` without further sanitization. The only externally
 influenced input to `run-gate.sh` is the optional `slug` argument, which is
 never string-interpolated into a shell command or jq program.
+
+## Reading gate output
+
+`GATE_STATUS=` and `GATE_LOG=` are position-independent, additive lines:
+parse each with a last-match scan (`grep -oE '^GATE_STATUS=[a-z]+$' |
+tail -n1`, mirroring `flow/skills/maintain/scripts/check.sh`'s
+`check_gate_command`), never the first match — a spoofed `GATE_STATUS=`- or
+`GATE_LOG=`-shaped line inside the gate command's own output can never win a
+last-match parse of the real envelope, which `run-gate.sh` always prints
+last.
+
+The captured stdout is truncated to `cenci.gateOutputLines` trailing lines
+(default `120`) of the gate command's combined stdout+stderr — it is not
+guaranteed to be the whole thing. On a red gate, the full untruncated output
+stays retrievable at the path named by `GATE_LOG=<absolute path>`; locate the
+failing detail with the client's search tool (e.g. Claude Code's `Grep`,
+Codex's `rg`), then read only the failing region rather than inlining the
+whole log. `GATE_LOG` is red-only: a green gate deletes its log and prints no
+`GATE_LOG=` line, so retention never accumulates on a healthy repo — only
+under `${TMPDIR:-/tmp}/cenci/` for gates that are currently red.
 
 ## Authoring guidance
 
