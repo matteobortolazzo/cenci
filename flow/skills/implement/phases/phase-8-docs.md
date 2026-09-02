@@ -10,6 +10,8 @@ All file edits must land inside `<worktree-path>`. Use absolute paths rooted at 
 
 Before any sub-step writes or delegates, verify `<worktree-path>` (from Phase 2) is an **absolute** path containing a `/.worktrees/` segment. If it is relative or has no `/.worktrees/` segment, do not delegate — stop and report, since any edit would be stranded in the main worktree.
 
+**Documentation ownership.** Phase 8 is the owner of `README.md`, `AGENTS.md`/`CLAUDE.md`, and `docs/**` updates for an implement run — earlier phases must not edit these except under the plan-named-file carve-out: a doc file explicitly named in the plan's `### Files to Modify` / `### Files to Create` stays the implementer's job and is not routed through the sub-steps below.
+
 ## Capture Lessons
 
 Run `lessons-collector` only if at least one occurred:
@@ -27,13 +29,27 @@ Lessons must be specific, actionable, non-duplicate, and worth keeping permanent
 
 ## Update CLAUDE.md
 
+**Trigger:** an entry in `$RUN_DIR/docs-to-update.txt` naming `AGENTS.md` (root or per-project) or the legacy `CLAUDE.md`, or a genuine new architectural pattern, integration rule, or project-wide convention discovered in this phase. Skip when `$RUN_DIR/docs-to-update.txt` is absent and no such pattern was discovered — treat an absent file as "none". If the file exists but a read attempt fails (permission error, I/O error), that is a genuine failure, not "none": a `Docs to update:` need was already identified and persisted in Phase 6 + 7, so silently skipping would lose it without a trace. Report `docs: error (docs-to-update.txt unreadable)` in this phase's status update instead of skipping — mirroring `## Maintenance Check`'s own report-directly-for-Phase-9 fallback below.
+
+An `AGENTS.md` entry is written to `AGENTS.md` when that file exists, `CLAUDE.md` only as the legacy fallback.
+
 Update only for new architectural patterns, integration rules, or project-wide conventions future work must follow.
 
 Append under `## Critical Rules`; do not rewrite existing content.
 
 ## Update README.md
 
+**Trigger:** an entry in `$RUN_DIR/docs-to-update.txt` naming `README.md` (root or per-project), or a genuine user-visible feature, command, API endpoint, configuration, setup, or prerequisite change discovered in this phase. Skip when `$RUN_DIR/docs-to-update.txt` is absent and no such change was discovered — treat an absent file as "none". If the file exists but a read attempt fails, treat that as a genuine failure exactly as `## Update CLAUDE.md` above does: report `docs: error (docs-to-update.txt unreadable)` in this phase's status update rather than silently skipping.
+
 Update only for user-visible features, commands, API endpoints, configuration, setup, or prerequisites. Keep changes minimal and match existing style.
+
+## Update Topic Docs
+
+**Trigger:** an entry in `$RUN_DIR/docs-to-update.txt` naming a file under `docs/**`. Skip when `$RUN_DIR/docs-to-update.txt` is absent — treat that as "none". If the file exists but a read attempt fails, treat that as a genuine failure exactly as `## Update CLAUDE.md` above does: report `docs: error (docs-to-update.txt unreadable)` in this phase's status update rather than silently skipping.
+
+For each named path, accept it only if it is repo-relative, contains no `..` path segment, is not absolute, and matches `docs/*.md` or `<project-path>/docs/*.md` for a project declared in the resolved config — never write to a path outside that shape. Skip and report any entry that doesn't match (name it in this phase's status update) rather than writing it; this sub-step's write target is a free-text path the implementer's report names, rather than being anchored to one well-known basename the way `## Update CLAUDE.md`/`## Update README.md`'s triggers are, so it needs this explicit shape guard where those two don't; without it, a malformed entry (e.g. `docs/../../.github/workflows/ci.yml`) could otherwise steer a write outside `docs/**`.
+
+For each named `docs/<topic>.md` path, apply the implementer's reported doc-content update. This is distinct from `## Capture Lessons` above: that sub-step remains the opt-in `lessons-collector` route for genuine mistakes, while this sub-step applies the doc-content updates the implementer already identified while implementing the plan. Both may write `docs/**` in the same run — `## Capture Lessons` runs first, keeping the existing file order.
 
 ## Maintenance Check
 
@@ -60,7 +76,7 @@ explicit equality with `false` — do not use a jq `//` fallback, because jq tre
 
 **Applicability guard**: run this sub-step only if `<worktree-path>/flow/skills/maintain/scripts/check.sh` exists. This scopes the step to the cenci monorepo itself (dogfooding) — in a consumer repo the flow plugin is installed, not present in the target tree, so the file is absent and the step is a clean skip.
 
-**Trigger guard**: obtain the changed-file list from `$RUN_DIR/files.txt` (written in Phase 6 + 7's Shared Context step), checking that the file read itself succeeds. If `$RUN_DIR` is unknown (lost to compaction, or a re-run in a fresh session), recompute it with `git -C <worktree-path> diff --name-only origin/main`, capturing output in a temporary file and checking the `git diff` exit status before reading it. Never use process substitution for changed-file discovery: an acquisition failure must not collapse into an empty list. If either the expected `files.txt` read or the fallback `git diff` fails, write `maintenance: error (changed-file discovery failed)` to `$RUN_DIR/maintain-status.txt` when `$RUN_DIR` is known, otherwise report that status directly for Phase 9, then stop this sub-step. Run the checker only if at least one successfully discovered changed path matches:
+**Trigger guard**: obtain the changed-file list from `$RUN_DIR/files.txt` (written in Phase 6 + 7's Shared Context step), checking that the file read itself succeeds. Recompute the changed-file list the same way as the `$RUN_DIR`-unknown case below when any doc sub-step in this phase wrote a file (`## Capture Lessons`, `## Update CLAUDE.md`, `## Update README.md`, or `## Update Topic Docs`): do not trust the stale `$RUN_DIR/files.txt` snapshot captured back in Phase 6 + 7, before this phase's writes existed, so this phase's own doc writes are visible to the checker. If `$RUN_DIR` is unknown (lost to compaction, or a re-run in a fresh session), recompute it with `git -C <worktree-path> diff --name-only origin/main`, capturing output in a temporary file and checking the `git diff` exit status before reading it. Never use process substitution for changed-file discovery: an acquisition failure must not collapse into an empty list. If either the expected `files.txt` read or the fallback `git diff` fails, write `maintenance: error (changed-file discovery failed)` to `$RUN_DIR/maintain-status.txt` when `$RUN_DIR` is known, otherwise report that status directly for Phase 9, then stop this sub-step. Run the checker only if at least one successfully discovered changed path matches:
 
 ```
 flow/skills/**

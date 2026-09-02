@@ -51,6 +51,7 @@ Pass:
 - Files to modify/create and planner notes.
 - Acceptance criteria, edge cases, and error scenarios.
 - Attachment paths if relevant.
+- Resolved topic docs: at most 3 `docs/<topic>.md` paths matched to Files to Modify/Create.
 
 ## Test Priorities
 

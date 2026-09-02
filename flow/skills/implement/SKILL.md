@@ -30,7 +30,7 @@ If `isMonorepo` is `true` in the resolved config:
 
 1. **Do not read per-project AGENTS.md files in the main agent.** The context-gatherer determines affected projects and bundles their AGENTS.md content; pass it the `projects` array.
 2. **Use project-specific commands**: When delegating to subagents, use the affected project's `buildCommand`, `testCommand`, and `lintCommand` (when set) from config instead of inferring them globally (the digest names the affected projects).
-3. **Point subagents at context, don't paste it**: When delegating to planner/implementer, pass the bundle path (or plan file path) for project context. Tell the subagent to read relevant `docs/<topic>.md` files (and the legacy `.claude/rules/lessons-learned.md` or `.claude/rules/lessons-learned-<slug>.md` if those legacy files exist). Do not pre-read those in the main agent.
+3. **Point subagents at context, don't paste it**: When delegating to planner/implementer, pass the bundle path (or plan file path) for project context. Tell the planner to read relevant `docs/<topic>.md` files (and the legacy `.claude/rules/lessons-learned.md` or `.claude/rules/lessons-learned-<slug>.md` if those legacy files exist); do not pre-read those in the main agent. When delegating to the implementer, pass only the Delegation Context's resolved topic-doc list instead — at most 3 `docs/<topic>.md` paths matched to the plan's Files to Modify/Create.
 
 **Shell rules**: Read the `shell-rules` skill before generating any shell in this pipeline — it covers the heredoc temp-file pattern, zsh-safe portability (no bash associative arrays), and the rule against `cd <dir> && …` compounds and hand-rescuing stranded worktree edits.
 

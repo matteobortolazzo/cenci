@@ -387,7 +387,7 @@ When you run `/cenci:implement <ticket-id>`, the pipeline executes these phases:
 5. **Refactor** — Implementer agent simplifies and cleans up
 6. **Security Review** — Security reviewer agent checks for OWASP vulnerabilities
 7. **Code Review** — Code reviewer agent does a final PR-style review
-8. **Capture Lessons** — Lessons collector routes genuine mistakes into the relevant `docs/<topic>.md` or `CLAUDE.md` (opt-in; most sessions capture nothing)
+8. **Capture Lessons** — Lessons collector routes genuine mistakes into the relevant `docs/<topic>.md` or `CLAUDE.md` (opt-in; most sessions capture nothing); this phase also owns doc ownership: `README.md`, `AGENTS.md`/`CLAUDE.md`, and `docs/**` updates for the run
 9. **Create PR** — Rebases on latest main, commits, pushes, and creates a pull request; UI tickets get a `## Screenshots` section in the PR body
 
 ### Board lifecycle
