@@ -42,7 +42,9 @@ cenci <verb> [subverb] [args] [flags]
 
 ## Environment variables
 
-- Host-side variables the cenci binary reads or sets are prefixed `CENCI_`.
+- Host-side variables the cenci binary reads or sets are prefixed `CENCI_`
+  (e.g. `CENCI_TMUX_SOCKET`, the absolute host tmux socket path injected
+  per-exec alongside `TMUX_PANE`).
 - Sandbox-launcher variables are prefixed `CENCI_SANDBOX_`
   (e.g. `CENCI_SANDBOX_AGENT`, `CENCI_SANDBOX_REAP_GRACE_SECS`,
   `CENCI_SANDBOX_RESEED_CREDS`, `CENCI_SANDBOX_ASSETS`, `CENCI_SANDBOX_DIND`,

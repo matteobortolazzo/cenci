@@ -778,7 +778,9 @@ The launcher automatically:
   at container creation
 - Passes `$TMUX_PANE` per exec session (never at container creation, where it
   would land in PID 1's environment and go stale once the creating pane
-  closes — #356) for tmux window status updates
+  closes — #356) for tmux window status updates, and `CENCI_TMUX_SOCKET`
+  (the absolute host tmux socket path) alongside it, per exec session only,
+  so `cenci sandbox reap-orphans` can tell which tmux server owns the pane
 
 A container's mounts are fixed for its whole lifetime. If the shared container
 was created while the events socket directory was unavailable, later launches
@@ -923,11 +925,19 @@ retroactively kills container-side agent processes whose owning tmux pane no lon
 exists on the host (SIGTERM, then SIGKILL after a grace period — 5 seconds by default,
 override with `CENCI_SANDBOX_REAP_GRACE_SECS`, e.g. `=0` for fast/CI runs). It scans
 every running `*-cenci-*` container across all installed runtimes (docker and podman).
-If no tmux server is running, every `TMUX_PANE`-carrying process is treated as orphaned
-and the output says so explicitly. Processes with a missing/empty `TMUX_PANE` (manual
-non-tmux launches) are never signaled, and neither is PID 1 (the container's init,
-which carries a stale creation-time `TMUX_PANE` on containers created by older
-launchers — killing it would destroy the whole shared container, #356).
+Liveness is matched on the `(socket, pane)` pair, not on pane alone: for each distinct
+`CENCI_TMUX_SOCKET` a container's processes reference, the reaper queries that socket's
+own tmux server for its live pane set — so a pane id shared by two different tmux servers
+never causes a false "still live" match, and an agent pane on a non-default tmux server is
+never mistaken for orphaned just because the default server doesn't know about it. If a
+referenced socket's tmux server is gone, every pane on that socket is treated as orphaned
+and the output says so explicitly ("No tmux server detected"). A process carrying no
+`CENCI_TMUX_SOCKET` (a container launched by a pre-#1007 launcher) or a malformed one
+fails open — it is never signaled, and is counted into an aggregated per-container note
+instead. Processes with a missing/empty `TMUX_PANE` (manual non-tmux launches) are never
+signaled, and neither is PID 1 (the container's init, which carries a stale creation-time
+`TMUX_PANE` on containers created by older launchers — killing it would destroy the whole
+shared container, #356).
 Prints one `reaped\t<container>\t<pid>\t<pane>`
 line per reaped process plus a final count, and exits non-zero on a genuine runtime
 error (e.g. exec failure) rather than swallowing it.

@@ -1568,6 +1568,11 @@ func openTestEnv(t *testing.T, fakeDir, assets string) (env []string, home, sock
 		"XDG_RUNTIME_DIR="+xdg,
 		"TERM=xterm-256color",
 		"TMUX_PANE=%7",
+		// CENCI_TMUX_SOCKET (#1007) is derived from the first comma-separated
+		// field of $TMUX; set explicitly here (rather than left ambient) so
+		// the derived value is deterministic across test environments,
+		// including ones not run inside tmux at all.
+		"TMUX=/tmp/tmux-1000/cenci,12345,0",
 		"COLORTERM=", "CONTEXT7_API_KEY=", "OPENAI_API_KEY=", "CENCI_SANDBOX=",
 		"ANTHROPIC_API_KEY=",
 		"FAKE_VOLUMES=cenci-agent-cli-claude\ncenci-agent-cli-codex\n",
@@ -1737,6 +1742,13 @@ func TestOpen_FreshCreate_PinsEntrypointContract(t *testing.T) {
 	if strings.Contains(runLine, "TMUX_PANE") {
 		t.Errorf("run argv must not carry TMUX_PANE (#356):\n%s", runLine)
 	}
+	// CENCI_TMUX_SOCKET is pane-scoped identity exactly like TMUX_PANE (#1007):
+	// baked into the container-lifetime env it would go stale the same way,
+	// and reap-orphans' (socket, pane) matching would misclassify using a
+	// stale socket.
+	if strings.Contains(runLine, "CENCI_TMUX_SOCKET") {
+		t.Errorf("run argv must not carry CENCI_TMUX_SOCKET (#1007):\n%s", runLine)
+	}
 	if strings.Contains(runLine, "DISABLE_UPDATES") {
 		t.Errorf("DISABLE_UPDATES must be scoped to Claude agent execs, not plugin provisioning:\n%s", runLine)
 	}
@@ -1751,7 +1763,7 @@ func TestOpen_FreshCreate_PinsEntrypointContract(t *testing.T) {
 
 	// The attach itself runs as dev with the in-container marker set.
 	line := attachLine(t, lines)
-	for _, want := range []string{"-u dev", "-e CENCI_SANDBOX=1", "-e CENCI_SANDBOX_AGENT=claude", "-e TMUX_PANE=%7", "-e DISABLE_UPDATES=1", "/opt/cenci-agent/current/node_modules/.bin/claude"} {
+	for _, want := range []string{"-u dev", "-e CENCI_SANDBOX=1", "-e CENCI_SANDBOX_AGENT=claude", "-e TMUX_PANE=%7", "-e CENCI_TMUX_SOCKET=/tmp/tmux-1000/cenci", "-e DISABLE_UPDATES=1", "/opt/cenci-agent/current/node_modules/.bin/claude"} {
 		if !strings.Contains(line, want) {
 			t.Errorf("attach argv missing %q:\n%s", want, line)
 		}

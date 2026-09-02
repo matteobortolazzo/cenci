@@ -438,9 +438,27 @@ func appendSecretEnvPassthrough(args []string, name string) []string {
 	return args
 }
 
+// hostTmuxSocket returns the absolute path of the host tmux server the
+// current process's pane belongs to — the first comma-separated field of
+// $TMUX (tmux's own documented format is
+// "<socket-path>,<pid>,<session-id>") — or "" when $TMUX is unset (not
+// running inside tmux at all). Consumed as `tmux -S <path>` by `cenci
+// sandbox reap-orphans` (#1007): a path round-trips exactly, whereas
+// deriving a socket name back from a path would be lossy.
+func hostTmuxSocket() string {
+	tmux := os.Getenv("TMUX")
+	if tmux == "" {
+		return ""
+	}
+	socket, _, _ := strings.Cut(tmux, ",")
+	return socket
+}
+
 // assembleExecEnv builds the per-exec (not create-time) "-e"/"-u" argument
-// list every agent exec session receives: the attach user, pane identity,
-// the CENCI_SANDBOX marker/agent name, and provider API key passthroughs
+// list every agent exec session receives: the attach user, pane identity
+// (TMUX_PANE and, alongside it, the owning tmux socket CENCI_TMUX_SOCKET —
+// #1007, consumed by the reaper's (socket, pane) pair matching), the
+// CENCI_SANDBOX marker/agent name, and provider API key passthroughs
 // forwarded per-exec only (never baked into the container-lifetime
 // create-time env/PID-1 environ) as bare "-e NAME" tokens (see
 // appendSecretEnvPassthrough; #759), scoped to the agent that can use them:
@@ -452,6 +470,7 @@ func appendSecretEnvPassthrough(args []string, name string) []string {
 func assembleExecEnv(agent string) []string {
 	execEnvArgs := []string{"-u", "dev",
 		"-e", "TMUX_PANE=" + os.Getenv("TMUX_PANE"),
+		"-e", "CENCI_TMUX_SOCKET=" + hostTmuxSocket(),
 		"-e", "CENCI_SANDBOX=1",
 		"-e", "CENCI_SANDBOX_AGENT=" + agent}
 	execEnvArgs = appendSecretEnvPassthrough(execEnvArgs, "CONTEXT7_API_KEY")
@@ -693,7 +712,11 @@ func (e *Engine) assembleVolumeMounts(agent, cenciBin, socketDir string, cenciAv
 	// creation-time value lands in /proc/1/environ of the long-lived shared
 	// container and goes stale once the creating pane closes, which made
 	// reap-orphans kill PID 1 and tear down every attached session (#356).
-	// Pane identity is injected per exec session instead (execEnvArgs).
+	// CENCI_TMUX_SOCKET is pane-scoped identity exactly like TMUX_PANE
+	// (#1007) and is bound by the same reasoning: a creation-time socket
+	// value would go stale the same way, and reap-orphans' (socket, pane)
+	// pair matching would misclassify using it. Both are injected per exec
+	// session instead (execEnvArgs).
 	if cenciAvailable {
 		args = append(args,
 			"-v", cenciBin+":/usr/local/bin/cenci:ro",
