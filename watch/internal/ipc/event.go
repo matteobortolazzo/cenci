@@ -1,5 +1,7 @@
 package ipc
 
+import "time"
+
 // HookEvent represents an agent hook event delivered via cenci notify.
 type HookEvent struct {
 	EventType        string `json:"event_type"`                   // hook_event_name from stdin
@@ -30,4 +32,33 @@ type PendingClose struct {
 	Session     string `json:"session"`
 	WindowIndex string `json:"window_index"`
 	WindowName  string `json:"window_name"`
+}
+
+// armRequestKind is the "kind" discriminator value for a babysit-arm request
+// sent over the event socket (#1094). It follows the pending-close precedent
+// exactly: an absent/unknown "kind" still routes to the pre-existing
+// Events() channel unchanged — see event_receiver.go.
+const armRequestKind = "babysit-arm"
+
+// ArmRequest is the in-container `cenci babysit`/`babysit stop` client's
+// request to have the host daemon spawn (or verify) a supervisor on its
+// behalf (#1094). PR/Repo are validated daemon-side before the request ever
+// reaches the injectable spawn seam; Agent is validated against the same
+// closed set `parseBabysitArgs` accepts. Interval and TmuxPane carry the
+// arguments #1095's host spawn needs.
+type ArmRequest struct {
+	PR       string        `json:"pr"`
+	Repo     string        `json:"repo"`
+	Agent    string        `json:"agent"`
+	Interval time.Duration `json:"interval"`
+	TmuxPane string        `json:"tmux_pane"`
+}
+
+// ArmResponse is the daemon's single ack-or-nack reply to an ArmRequest,
+// written on the same connection before it closes (#1094). Reason is only
+// meaningful when OK is false; the client relays it verbatim and never
+// re-derives or re-words it.
+type ArmResponse struct {
+	OK     bool   `json:"ok"`
+	Reason string `json:"reason,omitempty"`
 }

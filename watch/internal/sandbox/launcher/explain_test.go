@@ -271,6 +271,38 @@ func TestWriteExplanation_Mounts_ExplainsEachDetectedKind(t *testing.T) {
 	if !strings.Contains(out, "named container-runtime") {
 		t.Errorf("expected the agent-cli/home named-volume mounts to be explained, got:\n%s", out)
 	}
+
+	// #1094 AC6: the cenci-socket paragraph must enumerate the socket's exact
+	// message set (hook events, pending-close registrations, babysit arm
+	// requests) and state that a validated arm request spawns a host-side
+	// `cenci babysit` supervisor with `cenci run`/automerge capability --
+	// not the self-contradictory "no other host process" claim (#1094
+	// security review: the supervisor itself runs cenci run and, with
+	// automerge enabled, can merge PRs).
+	if !strings.Contains(out, "hook events") {
+		t.Errorf("expected the cenci-socket explanation to mention hook events, got:\n%s", out)
+	}
+	if !strings.Contains(out, "pending-close") {
+		t.Errorf("expected the cenci-socket explanation to mention pending-close registrations, got:\n%s", out)
+	}
+	if !strings.Contains(out, "babysit arm") {
+		t.Errorf("expected the cenci-socket explanation to mention babysit arm requests, got:\n%s", out)
+	}
+	if !strings.Contains(out, "cenci babysit") {
+		t.Errorf("expected the cenci-socket explanation to name the `cenci babysit` supervisor spawn, got:\n%s", out)
+	}
+	if !strings.Contains(out, "cenci run") {
+		t.Errorf("expected the cenci-socket explanation to state the spawned supervisor runs `cenci run` agent workflows, got:\n%s", out)
+	}
+	if !strings.Contains(out, "automerge") {
+		t.Errorf("expected the cenci-socket explanation to state the spawned supervisor can merge PRs with automerge enabled, got:\n%s", out)
+	}
+	if strings.Contains(out, "can only emit hook events") {
+		t.Errorf("expected the retired \"can only emit hook events\" claim to be removed now that arm requests exist, got:\n%s", out)
+	}
+	if strings.Contains(out, "no other host process") {
+		t.Errorf("expected the self-contradictory \"no other host process\" claim to be removed -- the spawned supervisor runs cenci run and can merge PRs, got:\n%s", out)
+	}
 }
 
 // TestWriteExplanation_Mounts_DindVolumeExplained covers MountKindDindVolume

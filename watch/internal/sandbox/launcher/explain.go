@@ -252,9 +252,12 @@ func writeOtherMountsExplanation(bw *bufio.Writer, mounts []MountPosture) {
 		wroteAny = true
 		_, _ = fmt.Fprintln(bw, "The cenci event socket is bind-mounted into the container read-only. Unlike")
 		_, _ = fmt.Fprintln(bw, "a general host control-plane socket, this is a narrow, purpose-built IPC")
-		_, _ = fmt.Fprintln(bw, "channel: the agent can only emit hook events back to the host's cenci")
-		_, _ = fmt.Fprintln(bw, "daemon over it — it carries no ability to control the host's container")
-		_, _ = fmt.Fprintln(bw, "runtime or any other host process.")
+		_, _ = fmt.Fprintln(bw, "channel with exactly three message kinds the container can send: hook events,")
+		_, _ = fmt.Fprintln(bw, "pending-close registrations, and babysit arm requests. A babysit arm request,")
+		_, _ = fmt.Fprintln(bw, "after the daemon rejects any request whose PR, repo, agent, interval, or")
+		_, _ = fmt.Fprintln(bw, "tmux pane fails validation, causes a host-side `cenci babysit` supervisor")
+		_, _ = fmt.Fprintln(bw, "process to spawn — that supervisor runs `cenci run` agent workflows and, with")
+		_, _ = fmt.Fprintln(bw, "automerge enabled, can merge pull requests on your behalf.")
 	}
 
 	if present[MountKindCenciBin] || present[MountKindGitconfig] {

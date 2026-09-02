@@ -267,6 +267,14 @@ func Run(o Options) error {
 	if err != nil {
 		return err
 	}
+	// Forward to the host daemon over the event socket instead of spawning a
+	// local supervisor (#1094): CENCI_SANDBOX=1 marks a container-side
+	// invocation, CENCI_BABYSIT_SUPERVISOR is only ever set on the detached
+	// supervisor child itself (never the container's outer invocation), and
+	// --once never forwards -- unchanged in and out of the container.
+	if !o.Once && os.Getenv("CENCI_BABYSIT_SUPERVISOR") == "" && os.Getenv("CENCI_SANDBOX") == "1" {
+		return armOnHost(o, repo)
+	}
 	dir, err := stateDir(o.StateDir)
 	if err != nil {
 		return err
@@ -704,6 +712,15 @@ func save(path string, s State) error {
 	return os.Rename(tmp, path)
 }
 func Stop(pr, explicit string) error {
+	// The supervisor this would stop runs on the host, not inside this
+	// sandbox (#1094 AC5); `babysit stop` sends no disarm message, it only
+	// reports the host-supervision fact and exits non-zero. Checked before
+	// stateDir/repository so this never needs a state directory or a gh
+	// call.
+	if os.Getenv("CENCI_SANDBOX") == "1" {
+		cleanPR := strings.TrimPrefix(pr, "#")
+		return fmt.Errorf("the supervisor for PR #%s runs on the host, not inside this sandbox; run `cenci babysit stop %s` from a host tmux pane", cleanPR, cleanPR)
+	}
 	dir, err := stateDir(explicit)
 	if err != nil {
 		return err
