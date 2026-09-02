@@ -1305,6 +1305,15 @@ stdout/stderr are written to a `0600` append-mode log file under the state
 directory (one per repo/PR, printed on arming), so a failed repair launch is
 readable there instead of being silently discarded.
 
+Running `cenci babysit`/`cenci babysit stop` from inside a `cenci sandbox`-launched
+container (`CENCI_SANDBOX=1`) never supervises locally — the container has no host
+tmux to arm against. Instead it forwards the request to the host daemon over the
+event socket and reports one of three outcomes: **armed**, **not armed** (the host
+rejected the request; the reason is relayed verbatim), or **arm status unknown**
+(the host didn't respond within 5s — verify or repair by running
+`cenci babysit <pr> --agent <agent>` from a host tmux pane, which safely no-ops if a
+supervisor is already running).
+
 - The fleet-wide kill switch `automerge.enabled` is `true` in
   `~/.config/cenci/config.json` (default `false` — off everywhere until set).
   Managed via `cenci automerge on|off|status` — the same atomic,

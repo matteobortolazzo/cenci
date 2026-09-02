@@ -286,6 +286,12 @@ func TestArmDetachWiresSupervisorLogAndLaunchFlags(t *testing.T) {
 	installHarmlessSelfExecShim(t)
 	dir := t.TempDir()
 	t.Setenv("CENCI_BABYSIT_SUPERVISOR", "")
+	// #1094 isolation fix (watch/docs/test-isolation.md #202): CENCI_SANDBOX=1
+	// is ambient in this dev container, and #1094 adds a CENCI_SANDBOX=1
+	// forward branch to Run that would otherwise silently divert this
+	// non-Once arming path into the container-forward path instead of the
+	// detached-supervisor path this test actually exercises.
+	t.Setenv("CENCI_SANDBOX", "")
 
 	var captured *exec.Cmd
 	originalStartSupervisor := startSupervisor
@@ -355,6 +361,9 @@ func TestSupervisorLogFileIs0600Append(t *testing.T) {
 	installHarmlessSelfExecShim(t)
 	dir := t.TempDir()
 	t.Setenv("CENCI_BABYSIT_SUPERVISOR", "")
+	// #1094 isolation fix (watch/docs/test-isolation.md #202): see the
+	// identical comment in TestArmDetachWiresSupervisorLogAndLaunchFlags.
+	t.Setenv("CENCI_SANDBOX", "")
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -504,6 +513,9 @@ func TestArmInsideTmuxSupervisionOtherwiseUnchanged(t *testing.T) {
 	shimPath := installHarmlessSelfExecShim(t)
 	dir := t.TempDir()
 	t.Setenv("CENCI_BABYSIT_SUPERVISOR", "")
+	// #1094 isolation fix (watch/docs/test-isolation.md #202): see the
+	// identical comment in TestArmDetachWiresSupervisorLogAndLaunchFlags.
+	t.Setenv("CENCI_SANDBOX", "")
 
 	var captured *exec.Cmd
 	originalStartSupervisor := startSupervisor

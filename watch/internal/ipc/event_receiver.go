@@ -10,10 +10,11 @@ import (
 )
 
 const (
-	eventReadDeadline = 5 * time.Second
-	eventChanCap      = 64
-	maxEventConns     = 64
-	eventMaxBytes     = 4096
+	eventReadDeadline  = 5 * time.Second
+	eventWriteDeadline = 5 * time.Second
+	eventChanCap       = 64
+	maxEventConns      = 64
+	eventMaxBytes      = 4096
 )
 
 // EventReceiver listens on a Unix socket for hook events from cenci notify.
@@ -23,6 +24,13 @@ type EventReceiver struct {
 	events       chan HookEvent
 	pendingClose chan PendingClose
 	activeSem    chan struct{}
+
+	// armHandler is the synchronous, injectable babysit-arm handler (#1094).
+	// It executes on the connection goroutine, outside any daemon loop, so it
+	// must stay pure/bounded over whatever state it closes over. Nil until
+	// SetArmHandler is called; a request arriving before then still nacks
+	// (fail closed) rather than falling through to Events().
+	armHandler func(ArmRequest) ArmResponse
 }
 
 // NewEventReceiver creates a receiver listening on the given Unix socket path.
@@ -49,6 +57,14 @@ func (r *EventReceiver) Events() <-chan HookEvent {
 // registrations sent by SendPendingClose (#522).
 func (r *EventReceiver) PendingCloses() <-chan PendingClose {
 	return r.pendingClose
+}
+
+// SetArmHandler installs the synchronous handler invoked for each incoming
+// babysit-arm request (#1094); call before Accept. A request that arrives
+// before any handler is installed still gets a nack response rather than
+// being silently dropped or routed to Events() (fail closed).
+func (r *EventReceiver) SetArmHandler(h func(ArmRequest) ArmResponse) {
+	r.armHandler = h
 }
 
 // Accept accepts connections until ctx is cancelled. Each connection sends one
@@ -113,6 +129,11 @@ func (r *EventReceiver) handleConn(conn net.Conn) {
 		return
 	}
 
+	if envelope.Kind == armRequestKind {
+		r.handleArmRequestConn(conn, scanner.Bytes())
+		return
+	}
+
 	// Every other kind (including empty/absent, the pre-#522 wire format)
 	// routes to the existing hook-event path unchanged.
 	var event HookEvent
@@ -125,6 +146,46 @@ func (r *EventReceiver) handleConn(conn net.Conn) {
 	case r.events <- event:
 	default:
 		log.Printf("event: channel full, dropping %s event", event.EventType)
+	}
+}
+
+// armRequestUnmarshalNack is the stable nack reason for a babysit-arm
+// envelope whose body fails to unmarshal into ArmRequest (#1094).
+const armRequestUnmarshalNack = "malformed arm request"
+
+// armRequestNoHandlerNack is the stable nack reason for a babysit-arm
+// request arriving before SetArmHandler was ever called (#1094 fail-closed
+// contract).
+const armRequestNoHandlerNack = "no arm handler installed"
+
+// handleArmRequestConn implements the write-then-close half of the
+// babysit-arm contract (#1094): unmarshal the request body, dispatch to the
+// injected handler (nacking, fail closed, on a nil handler or an unmarshal
+// failure without ever invoking the handler), then write exactly one
+// ack-or-nack JSON line under a write deadline before the caller's deferred
+// conn.Close() runs.
+func (r *EventReceiver) handleArmRequestConn(conn net.Conn, raw []byte) {
+	var resp ArmResponse
+	var req ArmRequest
+	if err := json.Unmarshal(raw, &req); err != nil {
+		log.Printf("event: invalid arm-request JSON: %v", err)
+		resp = ArmResponse{OK: false, Reason: armRequestUnmarshalNack}
+	} else if r.armHandler == nil {
+		log.Printf("event: arm request received with no handler installed")
+		resp = ArmResponse{OK: false, Reason: armRequestNoHandlerNack}
+	} else {
+		resp = r.armHandler(req)
+	}
+
+	data, err := json.Marshal(resp)
+	if err != nil {
+		log.Printf("event: marshal arm response: %v", err)
+		return
+	}
+	data = append(data, '\n')
+	_ = conn.SetWriteDeadline(time.Now().Add(eventWriteDeadline))
+	if _, err := conn.Write(data); err != nil {
+		log.Printf("event: write arm response: %v", err)
 	}
 }
 

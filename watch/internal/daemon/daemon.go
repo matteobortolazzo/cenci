@@ -73,6 +73,15 @@ type Daemon struct {
 	// carried alongside attention on the same channel. Nil until the loop's
 	// first publish.
 	dispatch *watch.DispatchState
+
+	// armSpawn is the injectable seam a validated babysit-arm request (#1094)
+	// delegates to, mirroring closeGuard/killer/reaper. It executes on the
+	// ipc.EventReceiver's connection goroutine (see handleArmRequest), not
+	// d.loop, so it must stay pure/bounded over immutable daemon state.
+	// Production defaults to defaultArmSpawn, which nacks every request with
+	// ReasonHostRepoResolutionUnavailable until #1095 supplies the real host
+	// repo resolver.
+	armSpawn func(ipc.ArmRequest) ipc.ArmResponse
 }
 
 // newDaemon creates a Daemon with the given dependencies.
@@ -89,6 +98,7 @@ func newDaemon(cfg config.Config, fe frontend.Frontend, events <-chan ipc.HookEv
 		closeGuard: func(ticket string) (bool, string) {
 			return babysit.BlocksClose(ticket, "", "")
 		},
+		armSpawn: defaultArmSpawn,
 	}
 }
 
@@ -111,7 +121,6 @@ func Run(ctx context.Context, cfg config.Config, fe frontend.Frontend, attention
 		}
 		return err
 	}
-	go recv.Accept(ctx)
 	defer func() { _ = recv.Close() }()
 	if cfg.Verbose {
 		log.Printf("event socket: %s", cfg.EventSocketPath)
@@ -123,6 +132,13 @@ func Run(ctx context.Context, cfg config.Config, fe frontend.Frontend, attention
 
 	d := newDaemon(cfg, fe, recv.Events(), reap.NewExecReaper(cfg.Verbose))
 	d.pendingCloses = recv.PendingCloses()
+	// Install the arm handler before Accept starts serving connections
+	// (#1094): nothing between NewEventReceiver and Accept depends on
+	// accepting, and a nil handler still nacks, but installing it first
+	// keeps the window where an arm request could race an unset handler at
+	// zero rather than merely small.
+	recv.SetArmHandler(d.handleArmRequest)
+	go recv.Accept(ctx)
 
 	if cfg.SocketPath != "" {
 		srv, err := ipc.NewServer(cfg.SocketPath)

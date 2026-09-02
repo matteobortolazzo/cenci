@@ -355,6 +355,36 @@ func TestEventReceiver_HookEventWithoutKindRoutesToEvents(t *testing.T) {
 	case <-time.After(200 * time.Millisecond):
 		// Good -- hook events never land on PendingCloses().
 	}
+
+	// #1094 AC2 regression: an *unknown* kind (not just an absent one, and
+	// not "pending-close" or "babysit-arm") must also still route to
+	// Events() unchanged -- the fallback is "every other kind", not just
+	// "no kind at all".
+	unknownKindLine := `{"kind":"some-future-kind","event_type":"Stop","session_id":"sess-unknown-kind","tmux_pane":"%9","timestamp":"2024-01-01T00:00:00Z"}` + "\n"
+	conn, err := net.Dial("unix", path)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	if _, err := conn.Write([]byte(unknownKindLine)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	_ = conn.Close()
+
+	select {
+	case got := <-recv.Events():
+		if got.EventType != "Stop" || got.SessionID != "sess-unknown-kind" {
+			t.Errorf("Events() = %+v, want EventType=Stop SessionID=sess-unknown-kind for an unrecognized kind", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the unknown-kind hook event")
+	}
+
+	select {
+	case pc := <-recv.PendingCloses():
+		t.Fatalf("expected no pending-close from an unrecognized-kind message, but got: %+v", pc)
+	case <-time.After(200 * time.Millisecond):
+		// Good -- an unrecognized kind never lands on PendingCloses() either.
+	}
 }
 
 func TestEventReceiver_ContextCancelStopsAccept(t *testing.T) {
