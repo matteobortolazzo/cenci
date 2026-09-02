@@ -57,7 +57,7 @@ RUN NPM_CONFIG_PREFIX=/usr/local npm install -g playwright@${PLAYWRIGHT_VERSION}
 
 USER dev
 
-ARG GO_VERSION=1.24.1
+ARG GO_VERSION=1.27.1
 
 USER root
 
