@@ -370,16 +370,16 @@ func TestHandleArmRequest_ValidRequestInvokesSpawnAndRelaysVerbatim(t *testing.T
 }
 
 // TestHandleArmRequest_DefaultSpawnNacksHostRepoResolutionUnavailable pins
-// the interim-honesty contract (#1094 Goal): until #1095 supplies the real
-// resolver, newDaemon's default armSpawn nacks every otherwise-valid request
-// with this exact, stable reason.
+// the interim-honesty contract (#1094 Goal): newDaemon's default armSpawn
+// nacks every otherwise-valid request with this exact, stable reason --
+// only a live Run installs the real resolver (#1095's hostArmSpawn).
 func TestHandleArmRequest_DefaultSpawnNacksHostRepoResolutionUnavailable(t *testing.T) {
 	d := newTestDaemon(&tmuxtest.MockClient{})
 	// newTestDaemon does not override armSpawn -- exercise newDaemon's real
 	// default seam.
 	resp := d.handleArmRequest(validArmRequest())
 	if resp.OK {
-		t.Fatal("resp.OK = true, want the default seam to nack until #1095 lands")
+		t.Fatal("resp.OK = true, want the default seam to nack")
 	}
 	if resp.Reason != "host repo resolution unavailable" {
 		t.Errorf("resp.Reason = %q, want %q", resp.Reason, "host repo resolution unavailable")

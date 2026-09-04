@@ -38,10 +38,53 @@ const (
 	// PR/Repo/Agent before ever reaching armSpawn.
 	ReasonInvalidTmuxPane = "tmux pane must match %<digits>"
 	// ReasonHostRepoResolutionUnavailable is the default armSpawn seam's
-	// nack reason until #1095 supplies the real host repo resolver (#1094
-	// Goal: an interim state strictly better than today, because the
-	// container-side supervisor it replaces never worked).
+	// nack reason (#1094 Goal: an interim state strictly better than today,
+	// because the container-side supervisor it replaces never worked).
+	// newDaemon's constructor always defaults to this seam (defaultArmSpawn);
+	// Run installs the real resolver (#1095's hostArmSpawn, armspawn.go).
 	ReasonHostRepoResolutionUnavailable = "host repo resolution unavailable"
+
+	// -- #1095: hostArmSpawn's own nack reasons, alongside the validation
+	// reasons above. Same conventions: plain exported string constants (not
+	// CENCI-* codes), no host paths or runtime output -- the client relays
+	// them verbatim, and the nack crosses the container<-host trust boundary
+	// (#1095 auto-adopted answer #6).
+
+	// ReasonArmRateLimited is returned when the daemon's own in-process
+	// spawn-rate token bucket has no tokens left. It is the *first* check in
+	// hostArmSpawn, before any pane/repo resolution work, so an over-rate
+	// request never burns a cross-runtime inspect, a git remote resolution,
+	// a tmux lookup, or a fork/exec (#1095 Decisions). Carries no counts or
+	// retry-after timestamps -- retry is always safe.
+	ReasonArmRateLimited = "arm requests are rate limited"
+	// ReasonArmPaneUnresolvable is returned when the request's TmuxPane
+	// cannot be resolved to a live tmux session (an empty
+	// `tmux display-message` result, or the underlying command failing to
+	// run at all for a reason other than the resolution budget expiring).
+	ReasonArmPaneUnresolvable = "tmux pane could not be resolved to a session"
+	// ReasonArmHostRepoNotFound is returned when hostrepo.Resolve finds no
+	// running sandbox container whose origin remote matches the request's
+	// repo (hostrepo.ErrNoMatch).
+	ReasonArmHostRepoNotFound = "host repo could not be resolved"
+	// ReasonArmHostRepoAmbiguous is returned when hostrepo.Resolve finds
+	// more than one distinct host checkout matching the request's repo
+	// (hostrepo.ErrAmbiguous) -- e.g. two worktrees of the same repo, each
+	// running its own sandbox container.
+	ReasonArmHostRepoAmbiguous = "host repo is ambiguous"
+	// ReasonArmHostRepoProbeFailed is returned when hostrepo.Resolve fails
+	// for any reason other than ErrNoMatch/ErrAmbiguous (a failed or
+	// unparsable container-runtime inspect) -- fail closed, never guessed
+	// (#1095 Decisions).
+	ReasonArmHostRepoProbeFailed = "host repo resolution failed"
+	// ReasonArmResolutionTimedOut is returned when the pane or host-repo
+	// resolution work does not complete inside hostArmSpawn's own bounded
+	// budget (comfortably inside ipc.armResponseDeadline).
+	ReasonArmResolutionTimedOut = "host repo resolution timed out"
+	// ReasonArmSpawnFailed is returned when the resolved-and-validated
+	// request could not actually be turned into a running detached
+	// supervisor (os.Executable failure, or the armStartBabysit seam
+	// itself failing to start the process).
+	ReasonArmSpawnFailed = "failed to spawn host babysit supervisor"
 )
 
 // armRepoPattern matches a single "owner/repo" pair shaped like GitHub's own
@@ -73,8 +116,9 @@ const (
 var armAgents = map[string]bool{"claude": true, "codex": true, "opencode": true}
 
 // defaultArmSpawn is newDaemon's default armSpawn seam: it nacks every
-// otherwise-valid request until #1095 supplies the real host repo resolver
-// (#1094 Goal).
+// otherwise-valid request (#1094 Goal). Run installs the real resolver
+// (#1095's d.hostArmSpawn, armspawn.go) so newDaemon-based tests keep
+// defaulting to this seam and never shell out.
 func defaultArmSpawn(ipc.ArmRequest) ipc.ArmResponse {
 	return ipc.ArmResponse{OK: false, Reason: ReasonHostRepoResolutionUnavailable}
 }

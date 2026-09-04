@@ -1314,6 +1314,21 @@ rejected the request; the reason is relayed verbatim), or **arm status unknown**
 `cenci babysit <pr> --agent <agent>` from a host tmux pane, which safely no-ops if a
 supervisor is already running).
 
+On a forwarded arm request, the host daemon resolves the target checkout itself by
+inspecting running sandbox containers' `/workspace` bind sources under both docker
+and podman and matching each source's `origin` remote against the request's
+`owner/repo` — the container never supplies a host path. This requires the repo to
+be running under exactly one sandboxed checkout: zero matches nacks **host repo not
+found**, and two or more running sandboxes of the same repo (e.g. two worktrees)
+nacks **ambiguous** rather than guessing which one to target. A failed or
+unparsable container inspect nacks as a **probe failed** rather than being treated
+as "no match". The daemon also resolves the tmux session from the forwarded pane;
+an unresolvable pane nacks separately. All of these, plus a resolution that runs
+past its time budget, are relayed to the container as their own distinguishable
+reason, the same way an ordinary "not armed" reason is. The host also bounds the
+rate of forwarded arm requests — a burst past that bound nacks with its own
+distinguishable reason and is safe to retry once the rate has settled.
+
 - The fleet-wide kill switch `automerge.enabled` is `true` in
   `~/.config/cenci/config.json` (default `false` — off everywhere until set).
   Managed via `cenci automerge on|off|status` — the same atomic,

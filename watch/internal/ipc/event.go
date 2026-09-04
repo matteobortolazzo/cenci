@@ -45,7 +45,7 @@ const armRequestKind = "babysit-arm"
 // behalf (#1094). PR/Repo are validated daemon-side before the request ever
 // reaches the injectable spawn seam; Agent is validated against the same
 // closed set `parseBabysitArgs` accepts. Interval and TmuxPane carry the
-// arguments #1095's host spawn needs.
+// arguments the host-side spawn (#1095's hostArmSpawn) needs.
 type ArmRequest struct {
 	PR       string        `json:"pr"`
 	Repo     string        `json:"repo"`
