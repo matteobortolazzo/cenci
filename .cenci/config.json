@@ -138,5 +138,8 @@
     "checkDuringImplement": true,
     "remindAfterDays": 30,
     "generatedDocs": true
+  },
+  "cenci": {
+    "diffContextMode": "file"
   }
 }
