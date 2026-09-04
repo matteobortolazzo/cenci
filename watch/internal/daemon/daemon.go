@@ -78,10 +78,19 @@ type Daemon struct {
 	// delegates to, mirroring closeGuard/killer/reaper. It executes on the
 	// ipc.EventReceiver's connection goroutine (see handleArmRequest), not
 	// d.loop, so it must stay pure/bounded over immutable daemon state.
-	// Production defaults to defaultArmSpawn, which nacks every request with
-	// ReasonHostRepoResolutionUnavailable until #1095 supplies the real host
-	// repo resolver.
+	// Production defaults to defaultArmSpawn (nacks every request with
+	// ReasonHostRepoResolutionUnavailable); Run installs the real seam,
+	// d.hostArmSpawn (armspawn.go), so newDaemon-based tests keep defaulting
+	// to defaultArmSpawn and never shell out.
 	armSpawn func(ipc.ArmRequest) ipc.ArmResponse
+
+	// armLimiter is hostArmSpawn's mutex-guarded token bucket (armspawn.go),
+	// gating the whole arm path -- before pane/repo resolution, not just the
+	// fork (#1095 Decisions). Its zero value is a full bucket on first use.
+	// Reached only from the ipc.EventReceiver connection goroutine (see
+	// hostArmSpawn); it must never touch d.sessions/d.pending/d.attention or
+	// any d.loop-owned field.
+	armLimiter armTokenBucket
 }
 
 // newDaemon creates a Daemon with the given dependencies.
@@ -132,6 +141,10 @@ func Run(ctx context.Context, cfg config.Config, fe frontend.Frontend, attention
 
 	d := newDaemon(cfg, fe, recv.Events(), reap.NewExecReaper(cfg.Verbose))
 	d.pendingCloses = recv.PendingCloses()
+	// Install the real host-side arm seam (#1095): newDaemon's constructor
+	// keeps defaulting to defaultArmSpawn so newDaemon-based tests never
+	// shell out, and only a live Run installs the resolver/spawn seam.
+	d.armSpawn = d.hostArmSpawn
 	// Install the arm handler before Accept starts serving connections
 	// (#1094): nothing between NewEventReceiver and Accept depends on
 	// accepting, and a nil handler still nacks, but installing it first

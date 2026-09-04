@@ -782,6 +782,12 @@ The launcher automatically:
   (the absolute host tmux socket path) alongside it, per exec session only,
   so `cenci sandbox reap-orphans` can tell which tmux server owns the pane
 
+The same events socket also carries `cenci babysit` arm requests: a container
+running `cenci babysit` forwards the request to the host daemon, which resolves
+the target checkout and tmux session itself and spawns a detached host
+`cenci babysit` supervisor — see `watch/README.md`'s Automerge section for the
+host-side resolution and nack behavior.
+
 A container's mounts are fixed for its whole lifetime. If the shared container
 was created while the events socket directory was unavailable, later launches
 warn that its sessions won't report to the host status bars; stop the container
