@@ -75,8 +75,8 @@ func recheckAutomergeInputs(s *State, first automergeInputs) (automergeInputs, s
 	if err := ghJSON(&pr, "pr", "view", s.PR, "--repo", s.Repo, "--json", prViewFields); err != nil {
 		return automergeInputs{}, reasonUpstreamPRUnreadable, err
 	}
-	var checks []check
-	if err := ghJSON(&checks, "pr", "checks", s.PR, "--repo", s.Repo, "--json", "bucket,name,state"); err != nil {
+	checks, err := fetchChecks(s.PR, s.Repo)
+	if err != nil {
 		return automergeInputs{}, reasonUpstreamChecksUnreadable, err
 	}
 	comments, commentsComplete, err := fetchPaged[comment]("repos/" + s.Repo + "/pulls/" + s.PR + "/comments")

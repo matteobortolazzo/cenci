@@ -1265,9 +1265,16 @@ Caveats on the babysit guard:
   makes **no** network calls — a board refresh may run `cenci close` constantly.
   That state is refreshed once per supervision interval (default `15m`), so a
   window can stay closable-but-open for up to one interval after CI turns green.
-- Every read failure (no state directory, unreadable or corrupt file) fails
-  *open*: the window closes. A machine that never runs `cenci babysit` behaves
-  exactly as it did before.
+- Every *state-file* read failure (no state directory, unreadable or corrupt
+  file) fails *open*: the window closes. A machine that never runs
+  `cenci babysit` behaves exactly as it did before. This is distinct from a
+  *live* supervisor's own `gh` read failure (its own `pr view`/`pr checks`
+  call genuinely failing, not a benign "checks still pending" or "no checks
+  reported" shape) — that records CI status `unknown` in the state file and
+  holds the window closed, unbounded for as long as the supervisor keeps
+  running, since a live supervisor's own failed read never self-heals on its
+  own. Use `cenci close --force` to close anyway, or `cenci babysit stop
+  <pr>` to stop the supervisor.
 - `cenci close` scopes the match to the current checkout's repo root, but the
   daemon's deferred re-check has no repo context (a registered pending-close
   carries none) and matches on ticket number alone. Two repos babysitting PRs
