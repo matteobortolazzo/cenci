@@ -25,6 +25,32 @@ func emptyStateHome(t *testing.T) []string {
 	return append(os.Environ(), "XDG_STATE_HOME="+t.TempDir())
 }
 
+// startCloseIPCServer starts a real ipc.Server on a temp socket and
+// broadcasts snapshot to it, giving a `close` test a live daemon socket to
+// query without needing a real tmux binary — shared by every test below that
+// exercises `close`/`close --dry-run` against a crafted window snapshot.
+// Cleanup is registered via t.Cleanup; the two sleeps give the accept
+// goroutine and the broadcast time to land before the close subcommand
+// connects.
+func startCloseIPCServer(t *testing.T, snapshot ipc.StateSnapshot) string {
+	t.Helper()
+	socket := filepath.Join(t.TempDir(), "close.sock")
+	srv, err := ipc.NewServer(socket)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	t.Cleanup(func() { _ = srv.Close() })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go srv.Accept(ctx)
+	time.Sleep(20 * time.Millisecond)
+
+	srv.Broadcast(snapshot)
+	time.Sleep(20 * time.Millisecond)
+	return socket
+}
+
 // TestClose_UnreachableDaemon_ErrorsExit1_NoKill locks in the hard fail-safe:
 // when the daemon socket cannot be reached, `close` exits 1 and never reports
 // a closed window (i.e. it never reached a tmux call).
@@ -78,25 +104,12 @@ func TestClose_TrailingUnexpectedArg_Exits2(t *testing.T) {
 // asserts the decision lines without ever requiring a real tmux binary
 // (--dry-run never calls the killer).
 func TestClose_DryRun_PrintsCloseAndSkipDecisions(t *testing.T) {
-	socket := filepath.Join(t.TempDir(), "aw.sock")
-	srv, err := ipc.NewServer(socket)
-	if err != nil {
-		t.Fatalf("NewServer: %v", err)
-	}
-	defer func() { _ = srv.Close() }()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go srv.Accept(ctx)
-	time.Sleep(20 * time.Millisecond)
-
-	srv.Broadcast(ipc.StateSnapshot{
+	socket := startCloseIPCServer(t, ipc.StateSnapshot{
 		Windows: []ipc.WindowState{
 			{Session: "sess-a", WindowIndex: "0", WindowName: "77-implement", Status: "done"},
 			{Session: "sess-a", WindowIndex: "1", WindowName: "77-review", Status: "running"},
 		},
 	})
-	time.Sleep(20 * time.Millisecond)
 
 	cmd := exec.Command(binaryPath, "close", "77", "--dry-run", "--socket", socket)
 	cmd.Env = emptyStateHome(t)
@@ -128,24 +141,11 @@ func TestClose_DryRun_PrintsCloseAndSkipDecisions(t *testing.T) {
 // killer is never reached, so no tmux binary is required), while `--force`
 // bypasses the guard.
 func TestClose_BabysitSupervisedWindow_SkippedAndForceable(t *testing.T) {
-	socket := filepath.Join(t.TempDir(), "babysit.sock")
-	srv, err := ipc.NewServer(socket)
-	if err != nil {
-		t.Fatalf("NewServer: %v", err)
-	}
-	defer func() { _ = srv.Close() }()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go srv.Accept(ctx)
-	time.Sleep(20 * time.Millisecond)
-
-	srv.Broadcast(ipc.StateSnapshot{
+	socket := startCloseIPCServer(t, ipc.StateSnapshot{
 		Windows: []ipc.WindowState{
 			{Session: "sess-a", WindowIndex: "0", WindowName: "77-implement", Status: "done"},
 		},
 	})
-	time.Sleep(20 * time.Millisecond)
 
 	// A supervisor paused for human input records PID 0 but is still working
 	// on the PR — that state blocks the close without needing a live process.
@@ -195,30 +195,72 @@ func TestClose_BabysitSupervisedWindow_SkippedAndForceable(t *testing.T) {
 	}
 }
 
+// TestClose_ArmingZeroChecksWindow_GraceBounded covers two #924 additions at
+// once against the real binary: a supervisor recorded as "arming" (PID 0, no
+// process to check) now counts as live, and an "unknown" CI verdict blocks
+// only inside the settle grace -- a fresh checksAbsentSince still blocks the
+// close, while one already past checksSettleGrace (10m) allows it.
+func TestClose_ArmingZeroChecksWindow_GraceBounded(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		checksAbsentSince time.Time
+		wantBlocks        bool
+	}{
+		{"fresh clock blocks", time.Now().UTC().Add(-2 * time.Minute), true},
+		{"past-grace clock allows", time.Now().UTC().Add(-11 * time.Minute), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			socket := startCloseIPCServer(t, ipc.StateSnapshot{
+				Windows: []ipc.WindowState{
+					{Session: "sess-a", WindowIndex: "0", WindowName: "77-implement", Status: "done"},
+				},
+			})
+
+			stateHome := t.TempDir()
+			stateDir := filepath.Join(stateHome, "cenci", "babysit")
+			if err := os.MkdirAll(stateDir, 0700); err != nil {
+				t.Fatal(err)
+			}
+			state := `{"schemaVersion":2,"pr":"790","repo":"o/r","agent":"claude","closingIssues":[77],"ciStatus":"unknown","status":"arming","pid":0,"updatedAt":"` + time.Now().UTC().Format(time.RFC3339Nano) + `","checksAbsentSince":"` + tc.checksAbsentSince.Format(time.RFC3339Nano) + `"}`
+			if err := os.WriteFile(filepath.Join(stateDir, "abc123-790.json"), []byte(state), 0600); err != nil {
+				t.Fatal(err)
+			}
+
+			cmd := exec.Command(binaryPath, "close", "77", "--dry-run", "--socket", socket)
+			cmd.Env = append(os.Environ(), "XDG_STATE_HOME="+stateHome)
+			output, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("close --dry-run: %v\n%s", err, output)
+			}
+
+			if tc.wantBlocks {
+				wantLine := "skip 77-implement (sess-a:0): babysit supervising PR #790, CI not green — will close once CI passes (or use --force now)"
+				if !strings.Contains(string(output), wantLine) {
+					t.Errorf("output missing the babysit skip line for an arming PID-0 supervisor within the settle grace\n want: %s\n  got:\n%s", wantLine, output)
+				}
+			} else {
+				if !strings.Contains(string(output), "would close 77-implement") {
+					t.Errorf("output missing the would-close line once the settle grace has elapsed, got:\n%s", output)
+				}
+				if strings.Contains(string(output), "babysit supervising") {
+					t.Errorf("a checksAbsentSince past the settle grace must not block, got:\n%s", output)
+				}
+			}
+		})
+	}
+}
+
 // TestClose_NoMatches_EmptyStdoutExit0 locks in the quieted no-op output
 // (#522): a target that matches zero windows must produce no stdout and
 // exit 0 -- replacing the old `no matching windows for %q` line, which
 // lazyboards surfaced as a spurious "warning" for a legitimate no-op (there
 // is nothing actionable to report).
 func TestClose_NoMatches_EmptyStdoutExit0(t *testing.T) {
-	socket := filepath.Join(t.TempDir(), "empty.sock")
-	srv, err := ipc.NewServer(socket)
-	if err != nil {
-		t.Fatalf("NewServer: %v", err)
-	}
-	defer func() { _ = srv.Close() }()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go srv.Accept(ctx)
-	time.Sleep(20 * time.Millisecond)
-
-	srv.Broadcast(ipc.StateSnapshot{
+	socket := startCloseIPCServer(t, ipc.StateSnapshot{
 		Windows: []ipc.WindowState{
 			{Session: "sess-a", WindowIndex: "0", WindowName: "99-other", Status: "done"},
 		},
 	})
-	time.Sleep(20 * time.Millisecond)
 
 	cmd := exec.Command(binaryPath, "close", "42", "--socket", socket)
 	cmd.Env = emptyStateHome(t)

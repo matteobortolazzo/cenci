@@ -24,6 +24,12 @@ const fixCap = 3
 // PendingKeys for any state below this version, so a supervisor upgraded
 // mid-episode does not fire one spurious address-review relaunch for work
 // already dispatched under the old schema.
+//
+// #924 adds ChecksAbsentSince/ChecksAbsentHeadSHA without bumping this: both
+// are purely additive `omitempty` fields with no migration to run (their
+// zero value already means "clock not running" / "already elapsed"), and a
+// bump would re-run the LaunchedKeys migration above on every already-healthy
+// v2 state file, which can suppress an address-review dispatch (#885).
 const stateSchemaVersion = 2
 
 type Options struct {
@@ -98,17 +104,36 @@ type State struct {
 	// ClosingIssues are the issue numbers the supervised PR closes — the
 	// ticket half of BlocksClose's join key (#787).
 	ClosingIssues []int `json:"closingIssues,omitempty"`
-	// CIStatus is the collapsed CI verdict for the supervised PR: "green",
-	// "failing", "pending", ciStatusUnknown ("unknown"), or "" when unknown
-	// (no checks at all, or no tick has completed yet). ciStatusUnknown is
-	// distinct from "": it records that this tick's own gh pr view or gh pr
-	// checks read genuinely failed, as opposed to a PR that legitimately has
-	// zero checks configured. "failing", "pending", and ciStatusUnknown all
-	// hold a window open (#787, #923) -- ciStatusUnknown's hold is unbounded
-	// while the supervisor lives, since a live supervisor's own read failure
-	// never self-heals on its own; `cenci close --force` and `cenci babysit
-	// stop <pr>` are the documented remedies.
+	// CIStatus is the collapsed CI verdict for the supervised PR:
+	// ciStatusGreen, ciStatusFailing, ciStatusPending, ciStatusUnknown, or ""
+	// when no tick has completed yet. ciStatusUnknown covers two distinct
+	// causes -- a PR with zero checks configured, and a genuine gh pr
+	// view/gh pr checks read failure -- both bound by the same
+	// ChecksAbsentSince/ChecksAbsentHeadSHA settle clock (#924).
+	// ciStatusFailing, ciStatusPending, and ciStatusUnknown all hold a
+	// window open (#787, #923), but ciStatusUnknown's hold is now bounded to
+	// up to checksSettleGrace (10 minutes) rather than unbounded while the
+	// supervisor lives (#924's deliberate narrowing of #923 -- a lost
+	// network or bad gh auth must not wedge every babysat window on the
+	// board open forever with no self-heal); `cenci close --force` and
+	// `cenci babysit stop <pr>` remain the documented remedies.
 	CIStatus string `json:"ciStatus,omitempty"`
+	// ChecksAbsentSince records when ciStatusUnknown was first observed for
+	// the current ChecksAbsentHeadSHA (#924): set/maintained by
+	// noteChecksUnknown at every tick site that publishes ciStatusUnknown
+	// (zero checks or a genuine gh read failure), cleared by
+	// clearChecksClock once real checks show up again. BlocksClose reads it
+	// at decision time -- not tick -- to decide whether checksSettleGrace has
+	// elapsed. A zero, missing, or future-dated value is treated as "already
+	// elapsed" (fail open), covering legacy pre-#924 state files and
+	// anomalous hand-edited timestamps alike.
+	ChecksAbsentSince time.Time `json:"checksAbsentSince,omitempty"`
+	// ChecksAbsentHeadSHA is the HeadRefOID the current ChecksAbsentSince
+	// observation window is scoped to (#924): a new head commit invalidates
+	// the previous window entirely, even if checks are still absent,
+	// restarting the clock rather than letting a stale observation from a
+	// since-superseded commit count toward the grace.
+	ChecksAbsentHeadSHA string `json:"checksAbsentHeadSha,omitempty"`
 
 	// Automerge fields (#824). The supervisor's detached mode sets
 	// cmd.Stdout = nil, so the automerge decision log line only reaches a
@@ -298,6 +323,62 @@ func Run(o Options) error {
 		if err := os.Chmod(dir, 0700); err != nil {
 			return err
 		}
+		// Resolve the PR's closing issues and publish the close guard's
+		// join key *before* forking the child (#924 D3): `cenci babysit`
+		// returns as soon as it has detached its child, so the child's own
+		// eager save (below) gives Phase 9 no happens-before edge. A failed
+		// gh pr view here is non-fatal (AC 9) -- arming must still succeed
+		// even when gh/the network is unavailable; the child's own first
+		// tick will retry the same read.
+		var pr prView
+		ghErr := ghJSON(&pr, "pr", "view", o.PR, "--repo", repo, "--json", prViewFields)
+		_, statErr := os.Stat(path)
+		preexisting := statErr == nil
+		s := load(path)
+		if s.Repo != "" && (s.Repo != repo || s.Agent != o.Agent) {
+			return errors.New("existing supervisor state belongs to different repository or agent")
+		}
+		s.PR = o.PR
+		s.SchemaVersion = stateSchemaVersion
+		s.Repo = repo
+		s.Agent = o.Agent
+		s.Status = "arming"
+		s.PID = 0
+		if ghErr == nil {
+			s.ClosingIssues = nil
+			for _, i := range pr.ClosingIssuesReferences {
+				s.ClosingIssues = append(s.ClosingIssues, i.Number)
+			}
+			// Never downgrade an already-recorded verdict on a re-arm
+			// (Decision, AC 12/13) -- only fill it in when nothing has
+			// published one yet.
+			if s.CIStatus == "" {
+				s.CIStatus = ciStatusUnknown
+			}
+			// The settle clock must be maintained whenever the verdict being
+			// published is ciStatusUnknown, whether freshly set above or
+			// inherited as-is from the loaded state (#924 Q&A 16) -- a re-arm
+			// over a state whose CIStatus was already "unknown" from a prior
+			// episode still needs its clock restarted against the fresh
+			// HeadRefOID just read, or a stale/already-elapsed clock would
+			// carry forward untouched and BlocksClose would fail open
+			// immediately after arming.
+			if s.CIStatus == ciStatusUnknown {
+				noteChecksUnknown(&s, pr.HeadRefOID)
+			}
+		} else {
+			// Best-effort only (AC 9): the arm must still proceed even when
+			// gh/the network is unavailable, but a silent failure here would
+			// leave ClosingIssues/CIStatus unpublished until the detached
+			// child's own first tick succeeds -- with zero operator-visible
+			// signal in the exact window #924 exists to close (mirrors
+			// resolveLaunchTarget's own best-effort stderr convention below).
+			fmt.Fprintf(os.Stderr, "cenci babysit: could not resolve closing issues yet (%v); the guard will pick them up on the first tick\n", ghErr)
+		}
+		s.UpdatedAt = time.Now().UTC()
+		if err := save(path, s); err != nil {
+			return err
+		}
 		session, launchDir := resolveLaunchTarget(o)
 		lp := logPath(dir, repo, o.PR)
 		logFile, err := openSupervisorLog(lp)
@@ -312,6 +393,22 @@ func Run(o Options) error {
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 		if err := startSupervisor(cmd); err != nil {
 			_ = logFile.Close()
+			if !preexisting {
+				// Only a state file the parent itself created fresh is
+				// removed on failure -- a pre-existing supervisor state
+				// must never be wiped out by a failed re-arm (#924). The
+				// `preexisting` stat, however, was taken before this
+				// parent's own save/Start ran, so a concurrent `cenci
+				// babysit` for the same PR can race in between: re-load the
+				// file now and only remove it if it still looks like this
+				// parent's own untouched arming write (Status "arming", PID
+				// 0, same repo/PR) -- if some other arm's child has already
+				// taken it over (e.g. a nonzero PID), leave it alone rather
+				// than clobbering a supervisor that now owns it.
+				if reloaded := load(path); reloaded.Status == "arming" && reloaded.PID == 0 && reloaded.Repo == repo && reloaded.PR == o.PR {
+					_ = os.Remove(path)
+				}
+			}
 			return fmt.Errorf("start supervisor: %w", err)
 		}
 		// The parent's own fd is no longer needed once the child inherits it
@@ -353,6 +450,18 @@ func Run(o Options) error {
 	s.Status = "running"
 	s.RepoRoot = localRepoRoot()
 	s.LaunchSession, s.LaunchDir = resolveLaunchTarget(o)
+	// Fill in a blocking verdict + settle clock only when nothing has
+	// published one yet (#924 AC 13): a re-arm over an existing state file
+	// (e.g. one the detaching parent already wrote, or a prior episode's
+	// verdict) must never be downgraded, but a truly fresh state (no parent,
+	// e.g. `--once`) needs *some* verdict recorded before the first tick, or
+	// this eager save (below) publishes ClosingIssues with no CIStatus to
+	// pair it with, and BlocksClose's closesIssue match finds an empty
+	// verdict that (pre-#924) allowed the close outright.
+	if s.CIStatus == "" {
+		s.CIStatus = ciStatusUnknown
+		noteChecksUnknown(&s, "")
+	}
 	// Persist once *before* the first poll: `cenci close` reads this file to
 	// decide whether a supervisor still owns the ticket, and without an eager
 	// save there is an arm-to-first-poll window (a full interval wide) in
@@ -403,6 +512,12 @@ func tick(s *State) (bool, time.Duration, error) {
 	var pr prView
 	if err := ghJSON(&pr, "pr", "view", s.PR, "--repo", s.Repo, "--json", prViewFields); err != nil {
 		s.CIStatus = ciStatusUnknown
+		// The PR body never decoded, so there is no fresh HeadRefOID to bind
+		// the clock to; noteChecksUnknown with a blank headSHA neither
+		// restarts nor adopts anything -- it only starts the clock if none
+		// is running yet (#924 Q1: a genuine read failure shares the same
+		// settle clock as the zero-checks cause).
+		noteChecksUnknown(s, "")
 		recordUpstreamReadFailure(s, reasonUpstreamPRUnreadable, err)
 		return false, 0, err
 	}
@@ -448,11 +563,22 @@ func tick(s *State) (bool, time.Duration, error) {
 	checks, err := fetchChecks(s.PR, s.Repo)
 	if err != nil {
 		s.CIStatus = ciStatusUnknown
+		noteChecksUnknown(s, pr.HeadRefOID)
 		recordUpstreamReadFailure(s, reasonUpstreamChecksUnreadable, err)
 		return false, 0, err
 	}
 	s.CIStatus = ciStatus(checks)
-	actionable := s.CIStatus == "pending" || (s.CIStatus == "failing" && s.RepairPending)
+	if s.CIStatus == ciStatusUnknown {
+		// Zero checks reported (#924 D2): start/maintain the same settle
+		// clock a genuine read failure above uses.
+		noteChecksUnknown(s, pr.HeadRefOID)
+	} else {
+		// Real checks are present again -- wipe any clock a prior tick's
+		// zero-checks or read-failure observation started, so a later gap
+		// starts its own fresh window (#924).
+		clearChecksClock(s)
+	}
+	actionable := s.CIStatus == ciStatusPending || (s.CIStatus == ciStatusFailing && s.RepairPending)
 	var failing []string
 	for _, c := range checks {
 		if c.Bucket == "fail" {
@@ -802,34 +928,104 @@ func localRepoRoot() string {
 	return gitToplevel()
 }
 
-// ciStatusUnknown records that this tick's own gh pr view or gh pr checks
-// read genuinely failed (#923) -- distinct from ciStatus's own "" return,
-// which means "the PR legitimately has zero checks configured", a state
-// that must never hold the close guard open. ciStatusUnknown does hold it
-// open, alongside "failing"/"pending" (BlocksClose below).
+// ciStatusUnknown records that either this tick's own gh pr view or gh pr
+// checks read genuinely failed (#923), or the PR legitimately has zero
+// checks configured at all (#924 D2) -- "not started" is not the same as
+// "passed", so a zero-checks PR must never read as green. Both causes hold
+// the close guard open, bound by the same ChecksAbsentSince/
+// ChecksAbsentHeadSHA settle clock (see checksSettleGrace below).
 const ciStatusUnknown = "unknown"
 
-// ciStatus collapses a PR's check buckets into the guard's verdict: any
-// failing check wins, then any pending one, otherwise green. A PR with no
-// checks at all reports "" (unknown), which never holds a window open — a
-// repo without CI must not wedge its windows open forever (#787).
+// ciStatusGreen, ciStatusFailing, and ciStatusPending are the guard's other
+// three verdicts, collapsed by ciStatus below (#924: named alongside
+// ciStatusUnknown instead of inline string literals, so every verdict site
+// in this file references one constant set).
+const (
+	ciStatusGreen   = "green"
+	ciStatusFailing = "failing"
+	ciStatusPending = "pending"
+)
+
+// checksSettleGrace bounds how long BlocksClose keeps a ciStatusUnknown
+// verdict blocking a close, evaluated read-side at BlocksClose's call time
+// from ChecksAbsentSince (#924): a supervisor whose every poll fails (bad gh
+// auth, no network) never republishes anything, so bounding this at tick's
+// write side instead would leave its window blocked forever with no
+// self-heal. Kept a package const, not a `now` seam (no test needs to fake
+// the clock -- grace boundaries are computed relative to time.Now()).
+const checksSettleGrace = 10 * time.Minute
+
+// noteChecksUnknown records/maintains the checks-absent settle clock on s
+// whenever a tick (or the arming parent) publishes ciStatusUnknown, from
+// either cause (#924 Q&A 11/16): starts ChecksAbsentSince the first time the
+// clock is unset, restarts both fields when a new headSHA invalidates the
+// previous observation window, and adopts headSHA once the recorded SHA is
+// still empty. A blank headSHA (the gh pr view failure site, where the PR
+// body never decoded) neither restarts nor adopts anything -- it just
+// leaves an already-running clock alone.
+func noteChecksUnknown(s *State, headSHA string) {
+	if s.ChecksAbsentHeadSHA != "" && headSHA != "" && headSHA != s.ChecksAbsentHeadSHA {
+		s.ChecksAbsentSince = time.Now().UTC()
+		s.ChecksAbsentHeadSHA = headSHA
+		return
+	}
+	if s.ChecksAbsentSince.IsZero() {
+		s.ChecksAbsentSince = time.Now().UTC()
+	}
+	if s.ChecksAbsentHeadSHA == "" {
+		s.ChecksAbsentHeadSHA = headSHA
+	}
+}
+
+// clearChecksClock wipes the checks-absent settle clock once real checks
+// show up again (#924): a later gap (e.g. a genuine read failure) must start
+// its own fresh window rather than inherit a stale one.
+func clearChecksClock(s *State) {
+	s.ChecksAbsentSince = time.Time{}
+	s.ChecksAbsentHeadSHA = ""
+}
+
+// settleGraceElapsed reports whether s's checks-absent clock has crossed
+// checksSettleGrace, treating a missing (zero) or future-dated
+// ChecksAbsentSince as "already elapsed" (#924 Q&A 2/15): a legacy state
+// file predating this ticket, or one bearing an anomalous hand-edited
+// timestamp, must fail open rather than wedge a window forever.
+func settleGraceElapsed(s State) bool {
+	if s.ChecksAbsentSince.IsZero() {
+		return true
+	}
+	elapsed := time.Since(s.ChecksAbsentSince)
+	if elapsed < 0 {
+		return true
+	}
+	return elapsed >= checksSettleGrace
+}
+
+// ciStatus collapses a PR's check buckets into the guard's verdict:
+// ciStatusFailing if any check failed, else ciStatusPending if any check is
+// still pending, else ciStatusGreen. A PR with no checks at all reports
+// ciStatusUnknown, not green -- "not started" is not the same as "passed",
+// and a repo without CI configured yet must not read as a clean PR (#787,
+// #924 D2). ciStatusUnknown's hold is bounded by the settle clock
+// (checksSettleGrace), maintained by the caller via noteChecksUnknown/
+// clearChecksClock, not by ciStatus itself (a pure classifier).
 func ciStatus(checks []check) string {
 	if len(checks) == 0 {
-		return ""
+		return ciStatusUnknown
 	}
 	pending := false
 	for _, c := range checks {
 		switch c.Bucket {
 		case "fail":
-			return "failing"
+			return ciStatusFailing
 		case "pending":
 			pending = true
 		}
 	}
 	if pending {
-		return "pending"
+		return ciStatusPending
 	}
-	return "green"
+	return ciStatusGreen
 }
 
 // BlocksClose reports whether a live supervisor owns a PR that closes the
@@ -871,8 +1067,22 @@ func BlocksClose(ticket, repoRoot, stateDirOverride string) (bool, string) {
 		if repoRoot != "" && s.RepoRoot != "" && repoRoot != s.RepoRoot {
 			continue
 		}
-		if s.CIStatus != "failing" && s.CIStatus != "pending" && s.CIStatus != ciStatusUnknown {
+		// Default-deny (#924 D1): only an explicit ciStatusGreen verdict
+		// allows the close unconditionally. ciStatusFailing/ciStatusPending
+		// block unconditionally too (unchanged from #787/#923). Every other
+		// value -- ciStatusUnknown, "", or anything unrecognized -- blocks
+		// only subject to the settle-grace escape below (Q&A 15; never a
+		// silent catch-all allow, watch/AGENTS.md's Critical Rule).
+		switch s.CIStatus {
+		case ciStatusGreen:
 			continue
+		case ciStatusFailing, ciStatusPending:
+			// falls through to the liveness check below: blocks
+			// unconditionally.
+		default:
+			if settleGraceElapsed(s) {
+				continue
+			}
 		}
 		if !supervisorLive(s) {
 			continue
@@ -892,14 +1102,33 @@ func closesIssue(s State, number int) bool {
 	return false
 }
 
+// armingLivenessGrace bounds how long a "arming" (Status "arming", PID 0)
+// state is treated as live with no process to check yet (#924): it covers
+// normal fork-to-first-tick latency between the parent's pre-Start save and
+// the detached child's own first save (the parent's own gh pr view is itself
+// bounded by ghTimeout, so 2 minutes safely exceeds that latency). Without a
+// bound, a child that crashes or exits before its first save leaves an
+// orphaned "arming" state that supervisorLive would treat as live forever,
+// blocking a close unconditionally with no grace escape -- the unbounded-hold
+// pattern watch/AGENTS.md's #1079 convention forbids.
+const armingLivenessGrace = 2 * time.Minute
+
 // supervisorLive reports whether the supervisor described by s is still on
 // the hook for its PR. A running supervisor is identified by its own pid; a
 // supervisor paused for human input deliberately zeroes its pid (see Run's
 // errNeedsInput branch) but has *not* finished the work, so its window must
-// stay open too (#787).
+// stay open too (#787). A supervisor mid-arm (Status "arming", PID 0 -- the
+// detaching parent's pre-Start write, #924 D3) is live too: there is no
+// process to check yet, but the guard must still hold before the child's
+// first tick ever runs -- bounded by armingLivenessGrace so an orphaned arm
+// (child crashed before its own first save) eventually stops counting as
+// live.
 func supervisorLive(s State) bool {
 	if s.PID > 0 && processOwned(s.PID, s.PR) {
 		return true
 	}
-	return s.Status == "needs-input"
+	if s.Status == "needs-input" {
+		return true
+	}
+	return s.Status == "arming" && time.Since(s.UpdatedAt) < armingLivenessGrace
 }

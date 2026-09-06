@@ -1,9 +1,12 @@
 package daemon
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
+	tmuxfe "github.com/matteobortolazzo/cenci/watch/v2/internal/frontend/tmux"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/ipc"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/tmux"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/tmux/tmuxtest"
@@ -332,5 +335,42 @@ func TestDaemon_SubagentSessionEndDoesNotKillPendingClose(t *testing.T) {
 
 	if len(fk.killed) != 0 {
 		t.Errorf("killed = %v, want none for a subagent SessionEnd", fk.killed)
+	}
+}
+
+// TestDaemon_PendingCloseHeldByArmingPidZeroState drives the pending-close
+// path through the *real* BlocksClose (newDaemon's default closeGuard, not
+// newTestDaemon's nil-disabled one), proving #924's arming-liveness branch
+// end to end: a supervisor state recorded as "arming" (PID 0, no live
+// process to check) still holds a deferred pending-close open, closing
+// ticket #782 exactly as a live PID would (ticket #782, closing issue for
+// #790 as the joined supervised PR).
+func TestDaemon_PendingCloseHeldByArmingPidZeroState(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", dir)
+	stateDir := filepath.Join(dir, "cenci", "babysit")
+	if err := os.MkdirAll(stateDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	state := `{"schemaVersion":2,"pr":"790","repo":"o/r","agent":"claude","closingIssues":[782],"ciStatus":"pending","status":"arming","pid":0,"updatedAt":"` + time.Now().UTC().Format(time.RFC3339Nano) + `"}`
+	if err := os.WriteFile(filepath.Join(stateDir, "abc123-790.json"), []byte(state), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	mc := babysitTrackedMock()
+	cfg := testConfig()
+	ch := make(chan ipc.HookEvent, 16)
+	d := newDaemon(cfg, tmuxfe.New(cfg, mc), ch, &mockReaper{})
+	fk := &fakeKiller{}
+	d.killer = fk
+
+	startTrackedSession(d)
+	d.handleEvent(ipc.HookEvent{EventType: "SessionEnd", SessionID: "sess1", TmuxPane: "%0"})
+
+	if len(fk.killed) != 0 {
+		t.Fatalf("killed = %v, want none while an arming (PID 0) supervisor still owns the ticket", fk.killed)
+	}
+	if len(d.pending) != 1 {
+		t.Fatalf("pending registry size = %d, want the entry retained for a later retry", len(d.pending))
 	}
 }

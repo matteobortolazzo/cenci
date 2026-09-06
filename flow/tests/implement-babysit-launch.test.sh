@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # implement-babysit-launch.test.sh — contract test for ticket #616: at the end
-# of implement Phase 9 (after the PR exists and the Working -> In Review swap),
-# both client adapters must auto-launch the persistent `cenci babysit`
-# supervisor for the new PR, non-blocking, treating "supervisor already running"
-# as expected success (re-run idempotency). The watch interval
+# of implement Phase 9 (after the PR exists), the Claude adapter must auto-launch
+# the persistent `cenci babysit` supervisor for the new PR, non-blocking, treating
+# "supervisor already running" as expected success (re-run idempotency). Per
+# #924, `## Babysit` is no longer the literal final Phase-9 action -- `## Labels`
+# (the Working -> In Review swap) was moved after it, so the supervisor is armed
+# before the card moves and fires lazyboards' cleanup. The watch interval
 # is resolved from `.cenci/config.json`'s optional `babysitInterval` via the new
 # shared resolver, falling back to babysit's built-in `15m` default.
 #
@@ -72,6 +74,22 @@ assert_contains_ws() {
   [[ "${nc}" == *"${np}"* ]] || fail "${label}: expected text not found: [${phrase}]"
 }
 
+# assert_before <content> <first> <second> <label>
+# Ordering contract, copied from maintain-client-config-contract.test.sh:50-59.
+# Newline-anchored markers (per docs/shell-scripting-gotchas.md rule 3) so a
+# recurring "## Heading" mention elsewhere in the doc (e.g. inside the PR-body
+# template) can never vacuously satisfy the ordering check.
+assert_before() {
+  local content="$1" first="$2" second="$3" label="$4"
+  local before_first before_second
+  [[ -n "${first}" && -n "${second}" ]] || { fail "${label}: empty ordering marker (test bug)"; return; }
+  [[ "${content}" == *"${first}"* ]] || { fail "${label}: first marker missing: [${first}]"; return; }
+  [[ "${content}" == *"${second}"* ]] || { fail "${label}: second marker missing: [${second}]"; return; }
+  before_first="${content%%"${first}"*}"
+  before_second="${content%%"${second}"*}"
+  [[ "${#before_first}" -lt "${#before_second}" ]] || fail "${label}: markers are out of order"
+}
+
 # =====================================================================
 # The shared resolver script must exist and be non-empty (the interval source
 # of truth both adapters and the standalone babysit skill reference).
@@ -80,10 +98,12 @@ RESOLVER="${FLOW_DIR}/hooks/scripts/resolve-babysit-interval.sh"
 [[ -s "${RESOLVER}" ]] || fail "hooks/scripts/resolve-babysit-interval.sh: missing or empty resolver script"
 
 # =====================================================================
-# skills/implement/phases/phase-9-pr.md (Claude adapter) — the final Phase-9
-# action, after Cleanup, must launch babysit for the new PR with --agent claude,
+# skills/implement/phases/phase-9-pr.md (Claude adapter) — the `## Babysit`
+# step, after Cleanup, must launch babysit for the new PR with --agent claude,
 # resolve the interval via the shared resolver, and treat "already running" as
-# expected success.
+# expected success. #924: `## Babysit` must now precede `## Labels` (the
+# Working -> In Review card move), so the supervisor is armed and its guard
+# is live before the label swap can fire lazyboards' cleanup.
 # =====================================================================
 FILE="skills/implement/phases/phase-9-pr.md"
 if require_doc CONTENT "${FILE}"; then
@@ -91,6 +111,7 @@ if require_doc CONTENT "${FILE}"; then
   assert_contains "${CONTENT}" "--agent claude" "${FILE} (babysit launch)"
   assert_contains "${CONTENT}" "resolve-babysit-interval.sh" "${FILE} (interval resolution)"
   assert_contains "${CONTENT}" "supervisor already running for PR #" "${FILE} (idempotent re-entry treated as success)"
+  assert_before "${CONTENT}" $'\n## Babysit\n' $'\n## Labels\n' "${FILE} (#924: babysit must arm before the Labels card move)"
 fi
 
 # =====================================================================
