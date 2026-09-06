@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -601,7 +602,10 @@ func TestTickRecordsClosingIssuesAndCIStatus(t *testing.T) {
 		{"failing beats pending", `[{"bucket":"pending","name":"a"},{"bucket":"fail","name":"b"}]`, "failing"},
 		{"pending beats pass", `[{"bucket":"pass","name":"a"},{"bucket":"pending","name":"b"}]`, "pending"},
 		{"all pass is green", `[{"bucket":"pass","name":"a"}]`, "green"},
-		{"no checks stays empty", `[]`, ""},
+		// #924: zero checks now reports ciStatusUnknown instead of "" (D2) --
+		// "not started" must not read as "passed" -- and the first such
+		// observation must also start the settle clock (checked below).
+		{"no checks is unknown", `[]`, ciStatusUnknown},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var calls [][]string
@@ -615,6 +619,9 @@ func TestTickRecordsClosingIssuesAndCIStatus(t *testing.T) {
 			}
 			if s.CIStatus != tc.want {
 				t.Errorf("CIStatus = %q, want %q", s.CIStatus, tc.want)
+			}
+			if tc.want == ciStatusUnknown && s.ChecksAbsentSince.IsZero() {
+				t.Error("ChecksAbsentSince is zero, want tick to start the settle clock on the first zero-checks observation (#924)")
 			}
 		})
 	}
@@ -759,8 +766,8 @@ func TestTickChecksUndecodableExitOneNoChecksReportedIsBenign(t *testing.T) {
 	if _, _, err := tick(&s); err != nil {
 		t.Fatalf("tick: %v, want the 'no checks reported' fallback to succeed with zero checks", err)
 	}
-	if s.CIStatus != "" {
-		t.Errorf("CIStatus = %q, want %q (zero checks)", s.CIStatus, "")
+	if s.CIStatus != ciStatusUnknown {
+		t.Errorf("CIStatus = %q, want %q (zero checks) (#924)", s.CIStatus, ciStatusUnknown)
 	}
 	if _, found := launchCallArgs(calls, "ci-repair"); found {
 		t.Fatalf("ci-repair must not launch when there are zero checks: %#v", calls)
@@ -910,6 +917,129 @@ func TestTickPRViewReadFailureSetsCIStatusUnknown(t *testing.T) {
 	if s.CIStatus != ciStatusUnknown {
 		t.Fatalf("CIStatus = %q, want ciStatusUnknown %q", s.CIStatus, ciStatusUnknown)
 	}
+	if s.ChecksAbsentSince.IsZero() {
+		t.Error("ChecksAbsentSince is zero, want tick to start the settle clock on a gh pr view failure too (#924 Q1: both unknown causes share the clock)")
+	}
+}
+
+// -- checks-absent settle clock lifecycle (#924) -----------------------------
+//
+// Bounds the two ciStatusUnknown-writing causes (zero checks, and a genuine
+// gh read failure) with the same checksSettleGrace clock (Q&A 11's Q1
+// reconciliation with #923): tick starts/maintains ChecksAbsentSince and
+// ChecksAbsentHeadSHA at every unknown-writing site, restarts on a new head
+// SHA, and clears once real checks show up again.
+
+// TestTickKeepsChecksAbsentClockAcrossRepeatedZeroChecksTicks pins that a
+// second consecutive zero-checks tick, on the same head SHA, must not
+// restart the clock -- otherwise a supervisor that keeps polling a no-CI PR
+// would never cross the settle grace.
+func TestTickKeepsChecksAbsentClockAcrossRepeatedZeroChecksTicks(t *testing.T) {
+	prWithIssue := `{"number":42,"title":"Change","state":"OPEN","headRefName":"feature","headRefOid":"abc","url":"https://example/pr/42","closingIssuesReferences":[{"number":782}]}`
+	var calls [][]string
+	withCommands(t, []string{prWithIssue, `[]`, `[]`, `[]`}, &calls)
+	original := time.Now().UTC().Add(-5 * time.Minute)
+	s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 60, ChecksAbsentSince: original, ChecksAbsentHeadSHA: "abc"}
+	if _, _, err := tick(&s); err != nil {
+		t.Fatal(err)
+	}
+	if s.CIStatus != ciStatusUnknown {
+		t.Fatalf("CIStatus = %q, want ciStatusUnknown", s.CIStatus)
+	}
+	if !s.ChecksAbsentSince.Equal(original) {
+		t.Errorf("ChecksAbsentSince = %v, want unchanged %v: a repeated zero-checks observation on the same head SHA must not restart the clock", s.ChecksAbsentSince, original)
+	}
+}
+
+// TestTickRestartsChecksAbsentClockOnNewHeadSHA pins the reset half: a new
+// head commit invalidates the previous observation window entirely, even if
+// checks are still zero.
+func TestTickRestartsChecksAbsentClockOnNewHeadSHA(t *testing.T) {
+	prWithIssue := `{"number":42,"title":"Change","state":"OPEN","headRefName":"feature","headRefOid":"def","url":"https://example/pr/42","closingIssuesReferences":[{"number":782}]}`
+	var calls [][]string
+	withCommands(t, []string{prWithIssue, `[]`, `[]`, `[]`}, &calls)
+	stale := time.Now().UTC().Add(-20 * time.Minute)
+	s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 60, ChecksAbsentSince: stale, ChecksAbsentHeadSHA: "abc"}
+	before := time.Now().UTC()
+	if _, _, err := tick(&s); err != nil {
+		t.Fatal(err)
+	}
+	if !s.ChecksAbsentSince.After(stale) || s.ChecksAbsentSince.Before(before) {
+		t.Errorf("ChecksAbsentSince = %v, want a fresh timestamp at/after %v (a new head SHA must restart the clock)", s.ChecksAbsentSince, before)
+	}
+	if s.ChecksAbsentHeadSHA != "def" {
+		t.Errorf("ChecksAbsentHeadSHA = %q, want %q", s.ChecksAbsentHeadSHA, "def")
+	}
+}
+
+// TestTickClearsChecksAbsentClockWhenChecksAppear pins the clear side: once
+// real checks show up, the clock and its head SHA must be wiped so a later
+// gap (e.g. a genuine read failure) starts its own fresh window instead of
+// inheriting a stale one.
+func TestTickClearsChecksAbsentClockWhenChecksAppear(t *testing.T) {
+	prWithIssue := `{"number":42,"title":"Change","state":"OPEN","headRefName":"feature","headRefOid":"abc","url":"https://example/pr/42","closingIssuesReferences":[{"number":782}]}`
+	var calls [][]string
+	withCommands(t, []string{prWithIssue, `[{"bucket":"pass","name":"a"}]`, `[]`, `[]`}, &calls)
+	s := State{
+		PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 60,
+		ChecksAbsentSince: time.Now().UTC().Add(-5 * time.Minute), ChecksAbsentHeadSHA: "abc",
+	}
+	if _, _, err := tick(&s); err != nil {
+		t.Fatal(err)
+	}
+	if s.CIStatus != "green" {
+		t.Fatalf("CIStatus = %q, want green", s.CIStatus)
+	}
+	if !s.ChecksAbsentSince.IsZero() {
+		t.Errorf("ChecksAbsentSince = %v, want zero once real checks appear", s.ChecksAbsentSince)
+	}
+	if s.ChecksAbsentHeadSHA != "" {
+		t.Errorf("ChecksAbsentHeadSHA = %q, want empty once real checks appear", s.ChecksAbsentHeadSHA)
+	}
+}
+
+// TestTickStartsChecksAbsentClockOnGenuineChecksReadFailure covers the Q1
+// reconciliation: a genuine (non-tolerated) gh pr checks failure must also
+// start the settle clock, exactly like the zero-checks case, so a broken gh
+// auth or a lost network eventually stops wedging the window open forever.
+func TestTickStartsChecksAbsentClockOnGenuineChecksReadFailure(t *testing.T) {
+	prWithIssue := `{"number":42,"title":"Change","state":"OPEN","headRefName":"feature","headRefOid":"abc","url":"https://example/pr/42","closingIssuesReferences":[{"number":782}]}`
+	var calls [][]string
+	withScriptedCommands(t, []scriptedCall{
+		{out: prWithIssue},
+		{out: "not json", err: &ghExitError{code: 1, err: errors.New("exit status 1")}, stderr: "rate limit exceeded"},
+	}, &calls)
+	s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 60}
+	before := time.Now().UTC()
+	if _, _, err := tick(&s); err == nil {
+		t.Fatal("tick: err = nil, want the genuine checks read failure to surface")
+	}
+	if s.ChecksAbsentSince.Before(before) {
+		t.Errorf("ChecksAbsentSince = %v, want a timestamp at/after %v", s.ChecksAbsentSince, before)
+	}
+	if s.ChecksAbsentHeadSHA != "abc" {
+		t.Errorf("ChecksAbsentHeadSHA = %q, want %q", s.ChecksAbsentHeadSHA, "abc")
+	}
+}
+
+// TestTickKeepsChecksAbsentClockAcrossRepeatedChecksReadFailures pins the
+// same no-restart rule for the read-failure cause: repeated failures on the
+// same head SHA must not push the settle window out indefinitely.
+func TestTickKeepsChecksAbsentClockAcrossRepeatedChecksReadFailures(t *testing.T) {
+	prWithIssue := `{"number":42,"title":"Change","state":"OPEN","headRefName":"feature","headRefOid":"abc","url":"https://example/pr/42","closingIssuesReferences":[{"number":782}]}`
+	var calls [][]string
+	withScriptedCommands(t, []scriptedCall{
+		{out: prWithIssue},
+		{out: "not json", err: &ghExitError{code: 1, err: errors.New("exit status 1")}, stderr: "rate limit exceeded"},
+	}, &calls)
+	original := time.Now().UTC().Add(-5 * time.Minute)
+	s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 60, ChecksAbsentSince: original, ChecksAbsentHeadSHA: "abc"}
+	if _, _, err := tick(&s); err == nil {
+		t.Fatal("tick: err = nil, want the genuine checks read failure to surface")
+	}
+	if !s.ChecksAbsentSince.Equal(original) {
+		t.Errorf("ChecksAbsentSince = %v, want unchanged %v across repeated failures on the same head SHA", s.ChecksAbsentSince, original)
+	}
 }
 
 // TestTickFailingCIActionableOnlyWhileRepairPending exercises the
@@ -959,9 +1089,128 @@ func TestTickFailingCIActionableOnlyWhileRepairPending(t *testing.T) {
 // (#787): `cenci babysit` writes its state file before the supervisor loop
 // starts polling, so a lazyboards cleanup firing between "supervisor armed"
 // and "first tick completed" can already see that a supervisor owns the PR.
+//
+// #924 AC 13 extends this to the eager save's own CIStatus/clock/
+// ClosingIssues handling: a state with no prior verdict fills ciStatusUnknown
+// and starts the settle clock (this is the no-parent, `--once`/detached-child
+// arm path -- there is no parent-resolved verdict to inherit yet), but an
+// already-recorded verdict (a re-arm over an existing state file) must never
+// be downgraded, and an existing ClosingIssues join key must survive
+// untouched either way (Q&A 5).
 func TestRunWritesStateBeforeFirstTick(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		seed             *State
+		wantCIStatus     string
+		wantClockSet     bool
+		wantClosingIssue int
+	}{
+		{
+			name:         "no prior state fills unknown and starts the clock",
+			wantCIStatus: ciStatusUnknown,
+			wantClockSet: true,
+		},
+		{
+			name:         "existing green verdict is never downgraded",
+			seed:         &State{PR: "42", Repo: "o/r", Agent: "claude", CIStatus: "green"},
+			wantCIStatus: "green",
+			wantClockSet: false,
+		},
+		{
+			name:             "existing ClosingIssues and unknown verdict survive the eager save",
+			seed:             &State{PR: "42", Repo: "o/r", Agent: "claude", CIStatus: ciStatusUnknown, ClosingIssues: []int{782}, ChecksAbsentSince: time.Now().UTC().Add(-time.Minute)},
+			wantCIStatus:     ciStatusUnknown,
+			wantClockSet:     true,
+			wantClosingIssue: 782,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if tc.seed != nil {
+				if err := save(statePath(dir, "o/r", "42"), *tc.seed); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var atFirstTick *State
+			originalCommand := command
+			command = func(name string, args ...string) ([]byte, error) {
+				if name == "git" {
+					return []byte("/repo/root\n"), nil
+				}
+				return []byte(""), nil
+			}
+			originalExecGh := execGh
+			execGh = func(args ...string) (string, string, error) {
+				switch {
+				case len(args) > 0 && args[0] == "repo":
+					return "o/r\n", "", nil
+				case len(args) > 1 && args[0] == "pr" && args[1] == "view":
+					s := load(statePath(dir, "o/r", "42"))
+					atFirstTick = &s
+					return "", "", errors.New("exit status 1")
+				}
+				return "", "", nil
+			}
+			t.Cleanup(func() {
+				command = originalCommand
+				execGh = originalExecGh
+			})
+
+			if err := Run(Options{PR: "42", Agent: "claude", StateDir: dir, Interval: time.Minute, Once: true}); err == nil {
+				t.Fatal("Run: want the stubbed gh failure to surface")
+			}
+			if atFirstTick == nil {
+				t.Fatal("the first tick never ran")
+			}
+			if atFirstTick.PR != "42" {
+				t.Errorf("state at first tick has PR %q, want the state file already written with PR 42", atFirstTick.PR)
+			}
+			if atFirstTick.RepoRoot != "/repo/root" {
+				t.Errorf("state at first tick has RepoRoot %q, want /repo/root", atFirstTick.RepoRoot)
+			}
+			if atFirstTick.PID != os.Getpid() {
+				t.Errorf("state at first tick has PID %d, want the supervisor's own pid %d", atFirstTick.PID, os.Getpid())
+			}
+			if atFirstTick.CIStatus != tc.wantCIStatus {
+				t.Errorf("state at first tick has CIStatus %q, want %q", atFirstTick.CIStatus, tc.wantCIStatus)
+			}
+			if tc.wantClockSet && atFirstTick.ChecksAbsentSince.IsZero() {
+				t.Error("state at first tick has a zero ChecksAbsentSince, want the eager save to start/keep the settle clock")
+			}
+			if !tc.wantClockSet && !atFirstTick.ChecksAbsentSince.IsZero() {
+				t.Error("state at first tick has a non-zero ChecksAbsentSince, want no clock started when downgrading is refused")
+			}
+			if tc.wantClosingIssue != 0 {
+				if !reflect.DeepEqual(atFirstTick.ClosingIssues, []int{tc.wantClosingIssue}) {
+					t.Errorf("state at first tick has ClosingIssues = %v, want [%d] preserved from the seeded state", atFirstTick.ClosingIssues, tc.wantClosingIssue)
+				}
+			}
+		})
+	}
+}
+
+// -- detaching parent's pre-Start write (#924) -------------------------------
+//
+// `cenci babysit` returns as soon as it has detached its child, so the
+// child's own eager save gives Phase 9 no happens-before edge (D3). The
+// detaching parent must resolve the PR's closing issues with one gh pr view
+// and persist the guard-visible state -- ClosingIssues, a blocking
+// ciStatusUnknown verdict, and its settle clock -- *before* cmd.Start()
+// runs. Every test here drives Run's real forking-parent branch (isolated
+// per Q&A 20 from the ambient CENCI_SANDBOX/CENCI_BABYSIT_SUPERVISOR env in
+// this dev container, mirroring launch_test.go:288-294) and asserts from
+// inside the startSupervisor seam callback -- the one point guaranteed to
+// run only after the parent's own save.
+
+// TestRunParentArmWritesJoinKeyBeforeStart pins the ordering contract itself:
+// by the time startSupervisor is invoked, the state file on disk already
+// carries the join key and a blocking verdict.
+func TestRunParentArmWritesJoinKeyBeforeStart(t *testing.T) {
 	dir := t.TempDir()
-	var atFirstTick *State
+	t.Setenv("CENCI_SANDBOX", "")
+	t.Setenv("CENCI_BABYSIT_SUPERVISOR", "")
+
+	prWithIssue := `{"number":42,"title":"Change","state":"OPEN","headRefName":"feature","headRefOid":"abc","url":"https://example/pr/42","closingIssuesReferences":[{"number":782}]}`
 	originalCommand := command
 	command = func(name string, args ...string) ([]byte, error) {
 		if name == "git" {
@@ -975,31 +1224,351 @@ func TestRunWritesStateBeforeFirstTick(t *testing.T) {
 		case len(args) > 0 && args[0] == "repo":
 			return "o/r\n", "", nil
 		case len(args) > 1 && args[0] == "pr" && args[1] == "view":
-			s := load(statePath(dir, "o/r", "42"))
-			atFirstTick = &s
-			return "", "", errors.New("exit status 1")
+			return prWithIssue, "", nil
 		}
 		return "", "", nil
+	}
+	originalCurrentTmuxSession := currentTmuxSession
+	currentTmuxSession = func() (string, error) { return "host-session", nil }
+	var atStart *State
+	originalStartSupervisor := startSupervisor
+	startSupervisor = func(cmd *exec.Cmd) error {
+		s := load(statePath(dir, "o/r", "42"))
+		atStart = &s
+		return nil
 	}
 	t.Cleanup(func() {
 		command = originalCommand
 		execGh = originalExecGh
+		currentTmuxSession = originalCurrentTmuxSession
+		startSupervisor = originalStartSupervisor
 	})
 
-	if err := Run(Options{PR: "42", Agent: "claude", StateDir: dir, Interval: time.Minute, Once: true}); err == nil {
-		t.Fatal("Run: want the stubbed gh failure to surface")
+	if err := Run(Options{PR: "42", Agent: "claude", StateDir: dir, Interval: time.Minute}); err != nil {
+		t.Fatalf("Run (arm): %v", err)
 	}
-	if atFirstTick == nil {
-		t.Fatal("the first tick never ran")
+	if atStart == nil {
+		t.Fatal("startSupervisor was never invoked")
 	}
-	if atFirstTick.PR != "42" {
-		t.Errorf("state at first tick has PR %q, want the state file already written with PR 42", atFirstTick.PR)
+	if !reflect.DeepEqual(atStart.ClosingIssues, []int{782}) {
+		t.Errorf("state before Start has ClosingIssues = %v, want [782]", atStart.ClosingIssues)
 	}
-	if atFirstTick.RepoRoot != "/repo/root" {
-		t.Errorf("state at first tick has RepoRoot %q, want /repo/root", atFirstTick.RepoRoot)
+	if atStart.CIStatus != ciStatusUnknown {
+		t.Errorf("state before Start has CIStatus = %q, want ciStatusUnknown %q", atStart.CIStatus, ciStatusUnknown)
 	}
-	if atFirstTick.PID != os.Getpid() {
-		t.Errorf("state at first tick has PID %d, want the supervisor's own pid %d", atFirstTick.PID, os.Getpid())
+	if atStart.ChecksAbsentSince.IsZero() {
+		t.Error("state before Start has a zero ChecksAbsentSince, want the parent to start the settle clock")
+	}
+	if atStart.Status != "arming" {
+		t.Errorf("state before Start has Status = %q, want %q", atStart.Status, "arming")
+	}
+	if atStart.PID != 0 {
+		t.Errorf("state before Start has PID = %d, want 0 (only the child fills its own pid)", atStart.PID)
+	}
+}
+
+// TestRunParentArmGhPrViewFailureIsNonFatal pins AC 9: a failed parent-side
+// gh pr view must not fail the arm itself -- Run still succeeds and still
+// reaches startSupervisor. It also pins finding 4 from the Phase 6+7 review
+// of #924: the failure must not be silent -- mirroring resolveLaunchTarget's
+// own best-effort stderr convention, one line must be written to stderr so an
+// operator has some signal during the window where ClosingIssues/CIStatus
+// stay unpublished until the detached child's own first tick succeeds.
+func TestRunParentArmGhPrViewFailureIsNonFatal(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CENCI_SANDBOX", "")
+	t.Setenv("CENCI_BABYSIT_SUPERVISOR", "")
+
+	originalCommand := command
+	command = func(name string, args ...string) ([]byte, error) {
+		if name == "git" {
+			return []byte("/repo/root\n"), nil
+		}
+		return []byte(""), nil
+	}
+	originalExecGh := execGh
+	execGh = func(args ...string) (string, string, error) {
+		if len(args) > 0 && args[0] == "repo" {
+			return "o/r\n", "", nil
+		}
+		return "", "", errors.New("exit status 1")
+	}
+	originalCurrentTmuxSession := currentTmuxSession
+	currentTmuxSession = func() (string, error) { return "host-session", nil }
+	startCalled := false
+	originalStartSupervisor := startSupervisor
+	startSupervisor = func(cmd *exec.Cmd) error {
+		startCalled = true
+		return nil
+	}
+	t.Cleanup(func() {
+		command = originalCommand
+		execGh = originalExecGh
+		currentTmuxSession = originalCurrentTmuxSession
+		startSupervisor = originalStartSupervisor
+	})
+
+	r, w, pipeErr := os.Pipe()
+	if pipeErr != nil {
+		t.Fatalf("os.Pipe: %v", pipeErr)
+	}
+	originalStderr := os.Stderr
+	os.Stderr = w
+	runErr := Run(Options{PR: "42", Agent: "claude", StateDir: dir, Interval: time.Minute})
+	_ = w.Close()
+	os.Stderr = originalStderr
+	out, readErr := io.ReadAll(r)
+	if readErr != nil {
+		t.Fatalf("read captured stderr: %v", readErr)
+	}
+
+	if runErr != nil {
+		t.Fatalf("Run (arm): %v, want a failed parent-side gh pr view to be non-fatal", runErr)
+	}
+	if !startCalled {
+		t.Fatal("startSupervisor was never invoked; a failed gh pr view must not abort the arm")
+	}
+	if !strings.Contains(string(out), "could not resolve closing issues") {
+		t.Errorf("captured stderr = %q, want a message reporting the failed parent-side gh pr view", string(out))
+	}
+}
+
+// TestRunParentArmRemovesFreshStateFileOnStartFailure pins the cleanup half
+// of the parent's pre-Start write: when the parent creates a brand-new state
+// file (no prior supervisor for this PR) and cmd.Start() then fails, the
+// parent-created file must be removed -- a failed arm must not leave behind
+// a phantom "supervisor owns this ticket" record the close guard would
+// wrongly honor.
+func TestRunParentArmRemovesFreshStateFileOnStartFailure(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CENCI_SANDBOX", "")
+	t.Setenv("CENCI_BABYSIT_SUPERVISOR", "")
+
+	prWithIssue := `{"number":42,"title":"Change","state":"OPEN","headRefName":"feature","headRefOid":"abc","url":"https://example/pr/42","closingIssuesReferences":[{"number":782}]}`
+	originalCommand := command
+	command = func(name string, args ...string) ([]byte, error) {
+		if name == "git" {
+			return []byte("/repo/root\n"), nil
+		}
+		return []byte(""), nil
+	}
+	originalExecGh := execGh
+	execGh = func(args ...string) (string, string, error) {
+		switch {
+		case len(args) > 0 && args[0] == "repo":
+			return "o/r\n", "", nil
+		case len(args) > 1 && args[0] == "pr" && args[1] == "view":
+			return prWithIssue, "", nil
+		}
+		return "", "", nil
+	}
+	originalCurrentTmuxSession := currentTmuxSession
+	currentTmuxSession = func() (string, error) { return "host-session", nil }
+	originalStartSupervisor := startSupervisor
+	startSupervisor = func(cmd *exec.Cmd) error {
+		return errors.New("fork/exec failed")
+	}
+	t.Cleanup(func() {
+		command = originalCommand
+		execGh = originalExecGh
+		currentTmuxSession = originalCurrentTmuxSession
+		startSupervisor = originalStartSupervisor
+	})
+
+	if err := Run(Options{PR: "42", Agent: "claude", StateDir: dir, Interval: time.Minute}); err == nil {
+		t.Fatal("Run (arm): err = nil, want the stubbed Start failure to surface")
+	}
+	if _, err := os.Stat(statePath(dir, "o/r", "42")); !os.IsNotExist(err) {
+		t.Fatalf("state file still exists after a failed Start on a fresh arm: %v", err)
+	}
+}
+
+// TestRunParentArmPreservesExistingStateFileOnStartFailure is the sibling of
+// the above: a re-arm over an *existing* supervisor state file must not wipe
+// it out on a failed Start -- only a state file the parent itself created
+// fresh is removed, and the pre-existing verdict is never downgraded.
+func TestRunParentArmPreservesExistingStateFileOnStartFailure(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CENCI_SANDBOX", "")
+	t.Setenv("CENCI_BABYSIT_SUPERVISOR", "")
+
+	path := statePath(dir, "o/r", "42")
+	if err := save(path, State{PR: "42", Repo: "o/r", Agent: "claude", CIStatus: "green"}); err != nil {
+		t.Fatal(err)
+	}
+
+	prWithIssue := `{"number":42,"title":"Change","state":"OPEN","headRefName":"feature","headRefOid":"abc","url":"https://example/pr/42","closingIssuesReferences":[{"number":782}]}`
+	originalCommand := command
+	command = func(name string, args ...string) ([]byte, error) {
+		if name == "git" {
+			return []byte("/repo/root\n"), nil
+		}
+		return []byte(""), nil
+	}
+	originalExecGh := execGh
+	execGh = func(args ...string) (string, string, error) {
+		switch {
+		case len(args) > 0 && args[0] == "repo":
+			return "o/r\n", "", nil
+		case len(args) > 1 && args[0] == "pr" && args[1] == "view":
+			return prWithIssue, "", nil
+		}
+		return "", "", nil
+	}
+	originalCurrentTmuxSession := currentTmuxSession
+	currentTmuxSession = func() (string, error) { return "host-session", nil }
+	originalStartSupervisor := startSupervisor
+	startSupervisor = func(cmd *exec.Cmd) error {
+		return errors.New("fork/exec failed")
+	}
+	t.Cleanup(func() {
+		command = originalCommand
+		execGh = originalExecGh
+		currentTmuxSession = originalCurrentTmuxSession
+		startSupervisor = originalStartSupervisor
+	})
+
+	if err := Run(Options{PR: "42", Agent: "claude", StateDir: dir, Interval: time.Minute}); err == nil {
+		t.Fatal("Run (arm): err = nil, want the stubbed Start failure to surface")
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("pre-existing state file was removed after a failed re-arm Start: %v", err)
+	}
+	s := load(path)
+	if s.CIStatus != "green" {
+		t.Errorf("CIStatus = %q after a failed re-arm, want the pre-existing green verdict preserved, not downgraded to unknown", s.CIStatus)
+	}
+}
+
+// TestRunParentArmRestartsClockForInheritedUnknownVerdict pins finding 1 from
+// the Phase 6+7 review of #924: the parent must call noteChecksUnknown
+// whenever the verdict it publishes is ciStatusUnknown, whether freshly
+// filled in or inherited as-is from the loaded state (Q&A 16) -- not only
+// when CIStatus was previously empty. A re-arm over an existing state file
+// already carrying ciStatusUnknown, a stale/past-grace ChecksAbsentSince, and
+// an old ChecksAbsentHeadSHA must restart the clock against the freshly-read
+// HeadRefOID, not leave it stale/elapsed.
+func TestRunParentArmRestartsClockForInheritedUnknownVerdict(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CENCI_SANDBOX", "")
+	t.Setenv("CENCI_BABYSIT_SUPERVISOR", "")
+
+	path := statePath(dir, "o/r", "42")
+	staleSince := time.Now().UTC().Add(-(checksSettleGrace + time.Hour))
+	if err := save(path, State{
+		PR:                  "42",
+		Repo:                "o/r",
+		Agent:               "claude",
+		CIStatus:            ciStatusUnknown,
+		ChecksAbsentSince:   staleSince,
+		ChecksAbsentHeadSHA: "old-sha",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	prNewHead := `{"number":42,"title":"Change","state":"OPEN","headRefName":"feature","headRefOid":"new-sha","url":"https://example/pr/42","closingIssuesReferences":[{"number":782}]}`
+	originalCommand := command
+	command = func(name string, args ...string) ([]byte, error) {
+		if name == "git" {
+			return []byte("/repo/root\n"), nil
+		}
+		return []byte(""), nil
+	}
+	originalExecGh := execGh
+	execGh = func(args ...string) (string, string, error) {
+		switch {
+		case len(args) > 0 && args[0] == "repo":
+			return "o/r\n", "", nil
+		case len(args) > 1 && args[0] == "pr" && args[1] == "view":
+			return prNewHead, "", nil
+		}
+		return "", "", nil
+	}
+	originalCurrentTmuxSession := currentTmuxSession
+	currentTmuxSession = func() (string, error) { return "host-session", nil }
+	originalStartSupervisor := startSupervisor
+	startSupervisor = func(cmd *exec.Cmd) error { return nil }
+	t.Cleanup(func() {
+		command = originalCommand
+		execGh = originalExecGh
+		currentTmuxSession = originalCurrentTmuxSession
+		startSupervisor = originalStartSupervisor
+	})
+
+	if err := Run(Options{PR: "42", Agent: "claude", StateDir: dir, Interval: time.Minute}); err != nil {
+		t.Fatalf("Run (re-arm): %v", err)
+	}
+
+	s := load(path)
+	if s.CIStatus != ciStatusUnknown {
+		t.Fatalf("CIStatus = %q after re-arm, want %q preserved", s.CIStatus, ciStatusUnknown)
+	}
+	if s.ChecksAbsentHeadSHA != "new-sha" {
+		t.Errorf("ChecksAbsentHeadSHA = %q after re-arm, want the freshly-read head SHA %q", s.ChecksAbsentHeadSHA, "new-sha")
+	}
+	if !s.ChecksAbsentSince.After(staleSince) {
+		t.Errorf("ChecksAbsentSince = %v, want the clock restarted (after the stale %v), not left stale/elapsed", s.ChecksAbsentSince, staleSince)
+	}
+}
+
+// TestRunParentArmDoesNotRemoveConcurrentlyArmedStateFileOnStartFailure pins
+// finding 3 from the Phase 6+7 review of #924: `preexisting` is computed from
+// an os.Stat taken before this parent's own save/Start, so a concurrent
+// `cenci babysit` for the same PR can race past that stat, save its own
+// arming write, and have its child start successfully before this parent's
+// own Start fails. The failed-arm cleanup must not unconditionally remove
+// the file in that case -- it must re-load it and only remove it if it still
+// looks like this parent's own untouched write (Status "arming", PID 0),
+// leaving a state some other process has since taken over in place.
+func TestRunParentArmDoesNotRemoveConcurrentlyArmedStateFileOnStartFailure(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CENCI_SANDBOX", "")
+	t.Setenv("CENCI_BABYSIT_SUPERVISOR", "")
+
+	path := statePath(dir, "o/r", "42")
+	// No pre-existing state file at this parent's own stat: preexisting ==
+	// false for this arm.
+
+	originalCommand := command
+	command = func(name string, args ...string) ([]byte, error) {
+		if name == "git" {
+			return []byte("/repo/root\n"), nil
+		}
+		return []byte(""), nil
+	}
+	originalExecGh := execGh
+	execGh = func(args ...string) (string, string, error) {
+		if len(args) > 0 && args[0] == "repo" {
+			return "o/r\n", "", nil
+		}
+		return "", "", errors.New("exit status 1")
+	}
+	originalCurrentTmuxSession := currentTmuxSession
+	currentTmuxSession = func() (string, error) { return "host-session", nil }
+	originalStartSupervisor := startSupervisor
+	startSupervisor = func(cmd *exec.Cmd) error {
+		// Simulate a concurrent arm for the same PR that raced past this
+		// parent's own preexisting stat, saved its own arming write, and
+		// then had its child start successfully (a nonzero PID) -- all
+		// before this parent's own Start returns its failure below.
+		if err := save(path, State{PR: "42", Repo: "o/r", Agent: "claude", Status: "running", PID: 99999}); err != nil {
+			t.Fatal(err)
+		}
+		return errors.New("fork/exec failed")
+	}
+	t.Cleanup(func() {
+		command = originalCommand
+		execGh = originalExecGh
+		currentTmuxSession = originalCurrentTmuxSession
+		startSupervisor = originalStartSupervisor
+	})
+
+	if err := Run(Options{PR: "42", Agent: "claude", StateDir: dir, Interval: time.Minute}); err == nil {
+		t.Fatal("Run (arm): err = nil, want the stubbed Start failure to surface")
+	}
+	s := load(path)
+	if s.PID != 99999 || s.Status != "running" {
+		t.Fatalf("state file after failed Start = %+v, want the concurrently-armed live state (PID 99999, Status running) left in place, not removed/clobbered", s)
 	}
 }
 
@@ -1029,6 +1598,10 @@ func stubProcessOwned(t *testing.T, owned bool) {
 
 func TestBlocksCloseMatrix(t *testing.T) {
 	live := State{PR: "790", RepoRoot: "/repo/root", ClosingIssues: []int{782}, CIStatus: "failing", PID: 4242, Status: "running"}
+	now := time.Now().UTC()
+	insideGrace := now.Add(-2 * time.Minute)
+	pastGrace := now.Add(-(checksSettleGrace + time.Minute))
+	futureDated := now.Add(time.Hour)
 	for _, tc := range []struct {
 		name       string
 		state      State
@@ -1040,15 +1613,54 @@ func TestBlocksCloseMatrix(t *testing.T) {
 		{"live supervisor with failing CI blocks", live, true, "782", "/repo/root", true},
 		{"live supervisor with pending CI blocks", func() State { s := live; s.CIStatus = "pending"; return s }(), true, "782", "/repo/root", true},
 		{"green CI allows", func() State { s := live; s.CIStatus = "green"; return s }(), true, "782", "/repo/root", false},
-		{"unknown CI allows", func() State { s := live; s.CIStatus = ""; return s }(), true, "782", "/repo/root", false},
-		// #923: a genuine gh read failure (as opposed to "no checks reported
-		// yet", which still collapses to "" above) now writes the dedicated
-		// ciStatusUnknown value and must hold the guard just like
-		// "failing"/"pending" -- the "" and "green" allow rows above stay
-		// green, unchanged by this ticket.
-		{"unknown CI (read failure) blocks", func() State { s := live; s.CIStatus = ciStatusUnknown; return s }(), true, "782", "/repo/root", true},
+		{"green CI with a fresh clock still allows (green is unconditional)", func() State { s := live; s.CIStatus = "green"; s.ChecksAbsentSince = insideGrace; return s }(), true, "782", "/repo/root", false},
+
+		// #924 D2/AC 14: zero checks ("") is now default-deny -- it splits
+		// into a fresh-clock row that blocks and a legacy-state row (no clock
+		// ever recorded) that still allows, per the missing/zero ⇒
+		// already-elapsed audit rule (Q&A 15, kept verbatim per Q1).
+		{"zero checks with a fresh clock blocks (AC 14 inversion)", func() State { s := live; s.CIStatus = ""; s.ChecksAbsentSince = insideGrace; return s }(), true, "782", "/repo/root", true},
+		{"zero checks with no clock (legacy state) allows", func() State { s := live; s.CIStatus = ""; return s }(), true, "782", "/repo/root", false},
+		{"zero checks with a future-dated clock allows (anomalous timestamp audit)", func() State { s := live; s.CIStatus = ""; s.ChecksAbsentSince = futureDated; return s }(), true, "782", "/repo/root", false},
+		{"zero checks past the settle grace allows", func() State { s := live; s.CIStatus = ""; s.ChecksAbsentSince = pastGrace; return s }(), true, "782", "/repo/root", false},
+
+		// #923/#924 Q1: a genuine gh read failure writes ciStatusUnknown and
+		// must gain its own fresh settle clock to keep blocking -- otherwise
+		// the missing-clock allow rule above would silently give it a
+		// zero-second hold, reverting #923.
+		{"unknown CI (read failure) with a fresh clock blocks", func() State { s := live; s.CIStatus = ciStatusUnknown; s.ChecksAbsentSince = insideGrace; return s }(), true, "782", "/repo/root", true},
+		{"unknown CI (read failure) past the settle grace allows", func() State { s := live; s.CIStatus = ciStatusUnknown; s.ChecksAbsentSince = pastGrace; return s }(), true, "782", "/repo/root", false},
+		{"unknown CI (read failure) with no clock (legacy state) allows", func() State { s := live; s.CIStatus = ciStatusUnknown; return s }(), true, "782", "/repo/root", false},
+		{"unknown CI (read failure) with a future-dated clock allows", func() State { s := live; s.CIStatus = ciStatusUnknown; s.ChecksAbsentSince = futureDated; return s }(), true, "782", "/repo/root", false},
+
+		// Unrecognized verdicts fall under the same default-deny + grace rule
+		// as unknown/"" -- never a silent catch-all allow (watch/AGENTS.md's
+		// Critical Rule against broadening a match-miss exclusion).
+		{"unrecognized CI value with a fresh clock blocks", func() State { s := live; s.CIStatus = "weird-value"; s.ChecksAbsentSince = insideGrace; return s }(), true, "782", "/repo/root", true},
+		{"unrecognized CI value with no clock allows", func() State { s := live; s.CIStatus = "weird-value"; return s }(), true, "782", "/repo/root", false},
+		{"unrecognized CI value past the settle grace allows", func() State { s := live; s.CIStatus = "weird-value"; s.ChecksAbsentSince = pastGrace; return s }(), true, "782", "/repo/root", false},
+
 		{"dead supervisor allows", live, false, "782", "/repo/root", false},
 		{"paused supervisor with no pid blocks", func() State { s := live; s.PID = 0; s.Status = "needs-input"; return s }(), false, "782", "/repo/root", true},
+		// #924: arming (PID 0, Status "arming") must count as live, so a
+		// re-armed supervisor's inherited-blocking verdict still blocks the
+		// close before the child's own first tick runs -- as long as the
+		// arm-time UpdatedAt is still within armingLivenessGrace.
+		{"arming supervisor with PID 0 blocks", func() State { s := live; s.PID = 0; s.Status = "arming"; s.UpdatedAt = now; return s }(), false, "782", "/repo/root", true},
+		// #924 (finding 2): an orphaned arm -- the child crashed/exited before
+		// its own first save -- must not hold the guard forever; once
+		// UpdatedAt is older than armingLivenessGrace, arming no longer
+		// counts as live and the inherited verdict's own settle-grace rule
+		// applies (here CIStatus "failing" blocks unconditionally once
+		// non-live, matching supervisorLive's fall-through unrelated to
+		// arming).
+		{"stale arming supervisor with PID 0 is no longer live", func() State {
+			s := live
+			s.PID = 0
+			s.Status = "arming"
+			s.UpdatedAt = now.Add(-(armingLivenessGrace + time.Minute))
+			return s
+		}(), false, "782", "/repo/root", false},
 		{"another ticket allows", live, true, "999", "/repo/root", false},
 		{"different repo root allows", live, true, "782", "/other/root", false},
 		{"unknown caller repo root fails open to blocking", live, true, "782", "", true},

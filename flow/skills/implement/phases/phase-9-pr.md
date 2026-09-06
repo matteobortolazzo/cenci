@@ -335,30 +335,6 @@ Any reported or deferred maintenance findings (from a `— reported` status) eac
 
 `## Screenshots` appears only when `isUiTicket` is true: one `### <name>` + image per captured screen/state, or the fallback note from the Screenshots section above. Omit the section entirely for non-UI work.
 
-## Labels
-
-Ticket mode: after PR creation, apply "In Review" and retire both working-lifecycle labels, "Working" and "Planned" (the PR is open but not yet merged, and the ticket is no longer queued for pickup):
-
-```bash
-cenci pipeline label <id> --transition in-review
-```
-
-Render the returned `state`/`next_actions`/`warnings`/`errors`. The CLI self-heals `In Review`'s existence in the repository and treats "already exists" as success, so no separate self-heal call is needed.
-
-If `isLastChild` and the Parent Close Gate verdict is `close`, pass `--parent <parentId>` on the same call so the CLI also cascades "In Review" to the parent ticket:
-
-```bash
-cenci pipeline label <id> --transition in-review --parent <parentId>
-```
-
-On a `hold` verdict, omit `--parent` — the parent is not completing with this PR; it stays open with the gate's gap comment, outside this PR's label lifecycle.
-
-If an earlier attempt already cascaded `--parent` under a prior `close` verdict and this entry's fresh audit now returns `hold`, the parent's `In Review` label cannot be un-cascaded from here — there is no CLI transition that removes it once applied — so report in the final session summary that the parent may retain a stale `In Review` label from that earlier attempt, for manual remediation; no new label-removal mechanism is built here (that would pull `watch/` into scope, out of scope for this fix).
-
-The parent's real completion is reconciled by `cenci babysit` at merge time, not decided here: babysit re-reads the live native sub-issue graph and the parent's comment thread for a `parent-gap-report` marker on every merged PR, and closes/relabels the parent to `Implemented` only when every sub-issue reads `CLOSED` and no marker is present (see the babysit skill's Safety guarantees section). A `close` verdict here only makes the last-child commit carry `Fixes #<parentId>` (see Commit above), so the parent appears in the PR's `closingIssuesReferences` and this merge is the tick that triggers babysit's reconciliation — a plan-time `isLastChild` value is never itself what closes the parent.
-
-The `Working` → `In Review` → `Implemented` progression finishes on merge: the `cenci babysit` supervisor swaps `In Review` for `Implemented` on any issue closed by the merged PR (see the babysit skill's Safety guarantees section). PR-open never applies `Implemented`.
-
 ## Followup Ticket
 
 The `## Notes` section above — **excluding its `### Considered and discarded` subsection** — is the sole source of tracked/deferred items (deferred Should Fix items, Medium/Low security findings, deferred non-critical silent-failure warnings). Entries under `### Considered and discarded` are recorded for review visibility only and never feed Followup ticket creation.
@@ -543,11 +519,11 @@ The `## Babysit` launch below is exempt: `cenci babysit` detaches its own superv
 
 ## Babysit
 
-This is the **final** Phase-9 action — do it only after `## Cleanup` above has settled the session's own completion (the plan file was archived). Ordering matters: this step arms an *unattended* `cenci babysit` supervisor that keeps running after this session exits, so the session's own cleanup must be finished before an external watcher is live.
+Do this only after `## Cleanup` above has settled the session's own completion (the plan file was archived) — but *before* `## Labels` below moves the card out of `Working` (#924). Ordering matters two ways: this step arms an *unattended* `cenci babysit` supervisor that keeps running after this session exits, so the session's own cleanup must be finished before an external watcher is live; and the supervisor must be armed, and its close guard live, before the `Working` → `In Review` label swap can fire a board-cleanup pass against this ticket's window (see `## Labels` below for the full rationale).
 
 The PR is open but unverified — CI has not run, review feedback has not arrived, and the ticket is still `In Review`, not `Implemented`. Hand the PR off to the persistent supervisor, which carries it the rest of the way (CI watch, review handling, and the final `In Review` → `Implemented` relabel on merge) exactly as the standalone `babysit` skill does when invoked by hand. `cenci babysit` detaches its own background supervisor and returns immediately, so this launch is non-blocking — the session ends here; babysit runs on.
 
-**Skip entirely in ticketless mode** — there is no PR number tracked as an artifact in ticketless mode; the babysit hand-off is a ticket-mode step, like the Labels and artifact calls above. (A ticketless run still opened a real PR; the user can `cenci babysit <pr> <interval>` it manually via the `babysit` skill.)
+**Skip entirely in ticketless mode** — there is no PR number tracked as an artifact in ticketless mode; the babysit hand-off is a ticket-mode step, like the artifact calls above and the Labels transition below. (A ticketless run still opened a real PR; the user can `cenci babysit <pr> <interval>` it manually via the `babysit` skill.)
 
 1. **Resolve the interval.** The watch cadence is the optional `babysitInterval` field in `.cenci/config.json`, resolved with the shared resolver — top-level for a single-repo, or the affected project's value in a monorepo. Pass the single affected project slug when one was resolved at Phase 2's Baseline Gate Check (the same `projects[].slug` used for the baseline gate); otherwise resolve top-level with no slug argument:
 
@@ -574,7 +550,7 @@ The PR is open but unverified — CI has not run, review feedback has not arrive
    - **Arm status unknown** — the launch fails with an error whose text starts with `arm status unknown: `. The host daemon did not respond before the deadline — this is genuinely unknown, textually distinct from a rejection, and is not the same outcome as "not armed."
    - **Other launch failure** — any other non-zero exit (auth, network, missing binary). Report it to the user; do not fail the phase over it.
 
-Finally, report the terminal state using whichever of these two forms matches the classification above — never a single unconditional claim that the PR is being watched:
+Then, report the terminal state using whichever of these two forms matches the classification above — never a single unconditional claim that the PR is being watched:
 
 **Watched form** — host-armed, forwarded-armed, or already-running:
 
@@ -587,3 +563,29 @@ On the forwarded-armed outcome, add one line stating the supervisor runs on the 
 > PR #<pr-number> open, not being watched by babysit → <pr-url>
 > Reason: <the CLI's verbatim reason/error text>
 > Re-arm from a host tmux pane: `cenci babysit <pr-number> --agent claude`
+
+## Labels
+
+This is the **final** Phase-9 action — moved here, after `## Cleanup` and `## Babysit` above, instead of its old position right after `## PR` (#924). Ordering matters: `cenci babysit`'s close guard only blocks a `cenci close` once a supervisor state file names this ticket's closing PR, and moving this label swap ahead of arming left a window — sometimes minutes wide — where `Working` had already flipped to `In Review` with no supervisor yet live to stop lazyboards' `cleanup: "cenci close {number}"` from reaping the ticket's agent window mid-flight. Doing the label swap last closes that window: by the time this step runs, `## Babysit` above has already armed the supervisor (or reported why it could not), so the guard is live before this transition can ever fire a board-cleanup pass against this ticket. This proceeds regardless of `## Babysit`'s own arm outcome — a not-armed or arm-status-unknown PR simply has no supervisor state file yet, so the close guard fails open exactly as it did before this ticket, same as any other not-yet-armed PR; this step never blocks on, or retries against, `## Babysit`'s result.
+
+Ticket mode: after PR creation, apply "In Review" and retire both working-lifecycle labels, "Working" and "Planned" (the PR is open but not yet merged, and the ticket is no longer queued for pickup):
+
+```bash
+cenci pipeline label <id> --transition in-review
+```
+
+Render the returned `state`/`next_actions`/`warnings`/`errors`. The CLI self-heals `In Review`'s existence in the repository and treats "already exists" as success, so no separate self-heal call is needed.
+
+If `isLastChild` and the Parent Close Gate verdict is `close`, pass `--parent <parentId>` on the same call so the CLI also cascades "In Review" to the parent ticket:
+
+```bash
+cenci pipeline label <id> --transition in-review --parent <parentId>
+```
+
+On a `hold` verdict, omit `--parent` — the parent is not completing with this PR; it stays open with the gate's gap comment, outside this PR's label lifecycle.
+
+If an earlier attempt already cascaded `--parent` under a prior `close` verdict and this entry's fresh audit now returns `hold`, the parent's `In Review` label cannot be un-cascaded from here — there is no CLI transition that removes it once applied — so report in the final session summary that the parent may retain a stale `In Review` label from that earlier attempt, for manual remediation; no new label-removal mechanism is built here (that would pull `watch/` into scope, out of scope for this fix).
+
+The parent's real completion is reconciled by `cenci babysit` at merge time, not decided here: babysit re-reads the live native sub-issue graph and the parent's comment thread for a `parent-gap-report` marker on every merged PR, and closes/relabels the parent to `Implemented` only when every sub-issue reads `CLOSED` and no marker is present (see the babysit skill's Safety guarantees section). A `close` verdict here only makes the last-child commit carry `Fixes #<parentId>` (see Commit above), so the parent appears in the PR's `closingIssuesReferences` and this merge is the tick that triggers babysit's reconciliation — a plan-time `isLastChild` value is never itself what closes the parent.
+
+The `Working` → `In Review` → `Implemented` progression finishes on merge: the `cenci babysit` supervisor swaps `In Review` for `Implemented` on any issue closed by the merged PR (see the babysit skill's Safety guarantees section). PR-open never applies `Implemented`.

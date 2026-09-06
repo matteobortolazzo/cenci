@@ -305,13 +305,16 @@ end — no second `cenci close` invocation (from lazyboards or anything else) is
 required.
 
 `cenci close` also refuses to kill a window whose ticket is still owned by a live
-`cenci babysit` supervisor whose PR's CI is not green — including through the
-deferred pending-close path above, where the daemon re-checks the guard instead of
-killing at `SessionEnd`. This matters because Phase 9 relabels the ticket `Working` →
-`In Review` (moving the card, which fires `cleanup`) and *then* arms the supervisor:
-without the guard, cleanup reaps the window while CI is still running and review
-feedback has not arrived. The skip is reported, `--force` overrides it, and the close
-happens by itself once CI passes or the supervisor stops. Two caveats:
+`cenci babysit` supervisor unless the supervisor's PR reads fully CI-green —
+including through the deferred pending-close path above, where the daemon re-checks
+the guard instead of killing at `SessionEnd`. The guard is default-deny: failing,
+pending, unknown, and "never polled" all block, not just failing/pending, subject to
+the settle-grace escape below. This matters because Phase 9 now arms the supervisor
+*before* relabeling the ticket `Working` → `In Review` (moving the card, which fires
+`cleanup`): the guard is live before the label swap can ever move the card, so
+cleanup can no longer reap the window while CI is still running and review feedback
+has not arrived. The skip is reported, `--force` overrides it, and the close happens
+by itself once CI passes or the supervisor stops. Caveats:
 
 - **The daemon's re-check matches on ticket number alone.** A registered
   pending-close carries no repo, so two repos babysitting PRs that close the same
@@ -324,6 +327,18 @@ happens by itself once CI passes or the supervisor stops. Two caveats:
   network calls, since lazyboards runs it on every board refresh. Everything unknown
   or unreadable fails *open* (closes), so machines that never run babysit are
   unaffected.
+- **An `unknown` CI verdict blocks only up to `checksSettleGrace` (10 minutes)**,
+  timed from when it was first observed for the current commit — not unbounded.
+  This bounds both causes of `unknown` (a PR with zero checks configured yet, and a
+  genuine `gh pr view`/`gh pr checks` read failure), so a lost network connection or
+  bad `gh` auth cannot wedge a window open forever with no self-heal; past the
+  grace the guard stops blocking even if the supervisor's own polls keep failing.
+- **Arming from inside a sandboxed `/cenci:implement` run has a residual race.**
+  Arming forwards to the host daemon, which acknowledges the request as soon as the
+  host-side parent process has started — before that parent's `gh pr view` call and
+  state-file write actually complete — leaving a brief window where arming reports
+  success but the guard is not yet live. A host-run `/cenci:implement` has no such
+  gap.
 
 When no window matches at all, `cenci close` produces no output and exits
 `0` — safe on cards that never had an agent, and quiet enough that lazyboards never

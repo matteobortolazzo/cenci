@@ -1251,16 +1251,20 @@ Behavior:
   skip 782-implement (main:3): babysit supervising PR #790, CI not green — will close once CI passes (or use --force now)
   ```
 
-  This covers the window `/cenci:implement` leaves behind — Phase 9 relabels the
-  ticket to `In Review` (which fires a board's cleanup hook) and only then arms
-  the supervisor, so the session is already idle while CI is still running. The
-  daemon applies the same guard to a deferred pending-close, re-checking it on
-  its sweep instead of killing at session end, and closes the window on its own
-  once the guard clears.
+  This covers the window `/cenci:implement` leaves behind — Phase 9 arms the
+  supervisor *before* relabeling the ticket to `In Review` (which fires a
+  board's cleanup hook), so the guard is already live before the label swap
+  can move the card, and the session is already idle while CI is still
+  running. The daemon applies the same guard to a deferred pending-close,
+  re-checking it on its sweep instead of killing at session end, and closes
+  the window on its own once the guard clears.
 - No matching windows is not an error — it exits 0 with no output, so it's safe
   to run unconditionally after a window may already be gone.
 
 Caveats on the babysit guard:
+- The guard is default-deny: a close is allowed only once CI reads fully
+  green. Any other verdict — failing, pending, unknown, or "never polled" —
+  blocks, subject to the settle-grace escape below.
 - It reads `cenci babysit`'s state files (`$XDG_STATE_HOME/cenci/babysit`) and
   makes **no** network calls — a board refresh may run `cenci close` constantly.
   That state is refreshed once per supervision interval (default `15m`), so a
@@ -1268,18 +1272,29 @@ Caveats on the babysit guard:
 - Every *state-file* read failure (no state directory, unreadable or corrupt
   file) fails *open*: the window closes. A machine that never runs
   `cenci babysit` behaves exactly as it did before. This is distinct from a
-  *live* supervisor's own `gh` read failure (its own `pr view`/`pr checks`
-  call genuinely failing, not a benign "checks still pending" or "no checks
-  reported" shape) — that records CI status `unknown` in the state file and
-  holds the window closed, unbounded for as long as the supervisor keeps
-  running, since a live supervisor's own failed read never self-heals on its
-  own. Use `cenci close --force` to close anyway, or `cenci babysit stop
-  <pr>` to stop the supervisor.
+  *live* supervisor recording CI status `unknown` in the state file — either
+  because the PR has zero checks configured yet, or because the supervisor's
+  own `gh pr view`/`gh pr checks` call is genuinely failing (not a benign
+  "checks still pending" or "no checks reported" shape). Both causes hold the
+  window closed for up to `checksSettleGrace` (10 minutes) from when `unknown`
+  was first observed for the current commit — not unbounded — after which the
+  guard stops blocking even if the supervisor's polls keep failing, so a lost
+  network connection or bad `gh` auth cannot wedge the window open forever
+  with no self-heal. Use `cenci close --force` to close anyway, or `cenci
+  babysit stop <pr>` to stop the supervisor sooner.
 - `cenci close` scopes the match to the current checkout's repo root, but the
   daemon's deferred re-check has no repo context (a registered pending-close
   carries none) and matches on ticket number alone. Two repos babysitting PRs
   that close the same issue number concurrently cross-match; the only effect is
   a window staying open longer, and `--force` overrides.
+- Arming from inside a sandboxed `/cenci:implement` run forwards to the host
+  daemon instead of forking a supervisor locally; the daemon acknowledges the
+  arm request as soon as the host-side parent process has started, before
+  that parent's `gh pr view` call and state-file write actually complete,
+  leaving a brief (sub-second-to-low-single-digit-second) window where arming
+  reported success but the guard is not yet live. A host-run
+  `/cenci:implement` has no such gap — the guard is live before the process
+  that requested the arm returns.
 
 This is the recommended cleanup command for any tool driving cenci-managed
 tmux windows, e.g. a kanban board's column-cleanup hook:
