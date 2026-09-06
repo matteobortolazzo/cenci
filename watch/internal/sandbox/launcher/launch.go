@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/daemon"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/dispatch"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/errcode"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/ipc"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/sandbox"
@@ -454,25 +455,87 @@ func hostTmuxSocket() string {
 	return socket
 }
 
+// attendedEnvName is the container-side variable carrying the resolved
+// planning.attended posture (#1087), always emitted with one of exactly two
+// values: "1" (a human is at this machine's keyboard and expects to be asked)
+// or "0" (nobody is). Absent is deliberately NOT one of them here — it is a
+// meaningful third state for the consuming skill ("no launcher resolved this;
+// query the host config yourself"), reachable only on a host run that never
+// went through this launcher.
+const attendedEnvName = "CENCI_ATTENDED"
+
+// attendedOn/attendedOff are the only two values ever forwarded, so the
+// consumer never has to parse a third.
+const (
+	attendedOn  = "1"
+	attendedOff = "0"
+)
+
+// resolveAttendedFlag resolves the value CENCI_ATTENDED is forwarded with.
+//
+// The host's ~/.config/cenci/config.json cannot simply be mounted in: the
+// sandbox gives each repo its own named /home/dev volume, so the container's
+// copy of that path is a container-local file no host process ever writes,
+// and a file-level bind would pin the pre-toggle inode forever (the fleet
+// config is written temp-file-then-rename, dispatch.writeRawConfig), while a
+// directory bind would expose the whole fleet config — repos list included —
+// to every sandbox. So the flag is resolved on the host, at exec time, and
+// forwarded as a value.
+//
+// A non-empty CENCI_ATTENDED in this process's own environment wins over the
+// host config: that is how a `cenci dispatch` spawn pins the flag off for a
+// session nobody is watching (run.Opts.Unattended). Any non-empty value other
+// than the exact "1" folds to "0" — the restrictive direction, and the same
+// closed-set discipline the two forwarded values themselves keep. An EMPTY
+// value is not a pin: it reads as unset and falls through to the host config,
+// matching the "set and non-empty" gate the provider-key forwards in this
+// same file already use, so a caller scrubbing its child environment with a
+// bare `CENCI_ATTENDED=` never accidentally asserts a posture.
+//
+// A missing, malformed, or unreadable fleet config resolves to "0" rather
+// than failing: a broken fleet config must never make the sandbox unusable,
+// and "0" is exactly today's behavior for every session that predates this
+// flag.
+func resolveAttendedFlag() string {
+	if pinned := os.Getenv(attendedEnvName); pinned != "" {
+		if pinned == attendedOn {
+			return attendedOn
+		}
+		return attendedOff
+	}
+	attended, err := dispatch.QueryPlanningAttended("")
+	if err != nil || !attended {
+		return attendedOff
+	}
+	return attendedOn
+}
+
 // assembleExecEnv builds the per-exec (not create-time) "-e"/"-u" argument
 // list every agent exec session receives: the attach user, pane identity
 // (TMUX_PANE and, alongside it, the owning tmux socket CENCI_TMUX_SOCKET —
 // #1007, consumed by the reaper's (socket, pane) pair matching), the
-// CENCI_SANDBOX marker/agent name, and provider API key passthroughs
+// CENCI_SANDBOX marker/agent name, the resolved CENCI_ATTENDED planning
+// posture (#1087 — see resolveAttendedFlag; forwarded at exec time, not
+// container-create time, so a mid-session host toggle takes effect on the
+// next `cenci open` instead of needing the container recreated), and provider
+// API key passthroughs
 // forwarded per-exec only (never baked into the container-lifetime
 // create-time env/PID-1 environ) as bare "-e NAME" tokens (see
 // appendSecretEnvPassthrough; #759), scoped to the agent that can use them:
 // OpenCode reads ANTHROPIC_API_KEY/OPENAI_API_KEY natively, Codex only
-// OPENAI_API_KEY, and Claude neither (#490). Pure aside from reading host
-// env vars — it depends only on agent, so both Launch and Audit's posture
-// classification (audit.go) can call it and stay byte-identical to each
-// other rather than re-deriving this list independently.
+// OPENAI_API_KEY, and Claude neither (#490). Side-effect free, but it reads
+// host state — env vars, plus the fleet config behind resolveAttendedFlag
+// (#1087) — so its result depends on the host, not on agent alone. That is
+// exactly why both Launch and Audit's posture classification (audit.go) call
+// it rather than re-deriving this list independently: whatever the host says
+// right now, they stay byte-identical to each other.
 func assembleExecEnv(agent string) []string {
 	execEnvArgs := []string{"-u", "dev",
 		"-e", "TMUX_PANE=" + os.Getenv("TMUX_PANE"),
 		"-e", "CENCI_TMUX_SOCKET=" + hostTmuxSocket(),
 		"-e", "CENCI_SANDBOX=1",
-		"-e", "CENCI_SANDBOX_AGENT=" + agent}
+		"-e", "CENCI_SANDBOX_AGENT=" + agent,
+		"-e", attendedEnvName + "=" + resolveAttendedFlag()}
 	execEnvArgs = appendSecretEnvPassthrough(execEnvArgs, "CONTEXT7_API_KEY")
 	if agent == "opencode" {
 		execEnvArgs = appendSecretEnvPassthrough(execEnvArgs, "ANTHROPIC_API_KEY")

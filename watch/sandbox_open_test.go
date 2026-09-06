@@ -1575,6 +1575,21 @@ func openTestEnv(t *testing.T, fakeDir, assets string) (env []string, home, sock
 		"TMUX=/tmp/tmux-1000/cenci,12345,0",
 		"COLORTERM=", "CONTEXT7_API_KEY=", "OPENAI_API_KEY=", "CENCI_SANDBOX=",
 		"ANTHROPIC_API_KEY=",
+		// #1087: the launcher resolves planning.attended from the fleet
+		// config, whose path comes from XDG_CONFIG_HOME (falling back to
+		// $HOME/.config). Pin it inside the fixture home so these black-box
+		// runs can never read the developer's or CI runner's REAL fleet
+		// config — an ambient `planning.attended: true` would otherwise flip
+		// the forwarded CENCI_ATTENDED value and make the assertions below
+		// machine-dependent. CENCI_ATTENDED itself is scrubbed to the empty
+		// value for the same reason -- an ambient pin would override the
+		// fixture config entirely. Empty is deliberately NOT a pin
+		// (resolveAttendedFlag's "set and non-empty" gate), so the scrub
+		// leaves the fixture home's own fleet config in charge: absent by
+		// default, and whatever a test writes there when it exercises the
+		// attended path.
+		"XDG_CONFIG_HOME="+filepath.Join(home, ".config"),
+		"CENCI_ATTENDED=",
 		"FAKE_VOLUMES=cenci-agent-cli-claude\ncenci-agent-cli-codex\n",
 		"FAKE_IMAGE_BASE_VERSION="+tag,
 	)
@@ -4097,5 +4112,168 @@ func TestCenciSandArgv0_TombstoneExits2WithMigrationMap(t *testing.T) {
 	}
 	if lines := callLogLines(t, callLog); len(lines) > 0 {
 		t.Errorf("expected no runtime calls from the tombstone, got: %v", lines)
+	}
+}
+
+// -- ticket #1087: CENCI_ATTENDED reaches the container ---------------------
+
+// TestOpenClaude_ForwardsResolvedAttendedFlag is the end-to-end half of
+// #1087: the unit tests pin assembleExecEnv's resolution, this one proves the
+// resolved value actually survives the whole `cenci open` path into the
+// attach argv, reading the fleet config from its real resolved location
+// rather than an injected path. Every host state is covered in one table so
+// the "always explicit, never unset" contract is visible as a set: absent
+// must stay meaningful as its own third state for the consuming skill, so an
+// off, missing, or broken host flag has to say "0" rather than omit the
+// variable — and a broken fleet config must never fail the launch.
+func TestOpenClaude_ForwardsResolvedAttendedFlag(t *testing.T) {
+	cases := []struct {
+		name        string
+		fleetConfig string
+		want        string
+	}{
+		{name: "attended on", fleetConfig: `{"planning": {"attended": true}}`, want: "CENCI_ATTENDED=1"},
+		{name: "attended off", fleetConfig: `{"planning": {"attended": false}}`, want: "CENCI_ATTENDED=0"},
+		{name: "no fleet config", fleetConfig: "", want: "CENCI_ATTENDED=0"},
+		{name: "malformed fleet config", fleetConfig: `{"planning": `, want: "CENCI_ATTENDED=0"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fakeDir := t.TempDir()
+			callLog := writeScriptedRuntimes(t, fakeDir)
+			assets := writeAssetFixture(t)
+			env, home, _ := openTestEnv(t, fakeDir, assets)
+
+			if tc.fleetConfig != "" {
+				writeFleetConfigFixture(t, home, tc.fleetConfig)
+			}
+
+			cmd := exec.Command(binaryPath, "open", "ch")
+			cmd.Env = env
+			cmd.Dir = t.TempDir()
+			if output, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("open ch: %v\n%s", err, output)
+			}
+
+			line := attachLine(t, callLogLines(t, callLog))
+			if !strings.Contains(line, "-e "+tc.want) {
+				t.Errorf("attach exec args missing %q; got:\n%s", "-e "+tc.want, line)
+			}
+		})
+	}
+}
+
+// TestOpenClaude_PinnedAttendedEnvOverridesFleetConfig proves the
+// dispatch-pin precedence end to end: `cenci dispatch` spawns its window with
+// CENCI_ATTENDED=0 already in the environment (run.Opts.Unattended), and that
+// pin must survive `cenci open` even when the host fleet config says
+// attended. A dispatched session that reached an interactive question inside
+// a detached tmux window would wait there forever with its ticket on Working.
+func TestOpenClaude_PinnedAttendedEnvOverridesFleetConfig(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, home, _ := openTestEnv(t, fakeDir, assets)
+	writeFleetConfigFixture(t, home, `{"planning": {"attended": true}}`)
+
+	cmd := exec.Command(binaryPath, "open", "ch")
+	cmd.Env = append(env, "CENCI_ATTENDED=0")
+	cmd.Dir = t.TempDir()
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("open ch: %v\n%s", err, output)
+	}
+
+	line := attachLine(t, callLogLines(t, callLog))
+	if !strings.Contains(line, "-e CENCI_ATTENDED=0") {
+		t.Errorf("attach exec args must honor the pinned CENCI_ATTENDED=0 over the host fleet config; got:\n%s", line)
+	}
+	if strings.Contains(line, "CENCI_ATTENDED=1") {
+		t.Errorf("attach exec args must never forward CENCI_ATTENDED=1 for a pinned-unattended launch; got:\n%s", line)
+	}
+}
+
+// writeFleetConfigFixture writes body to the fleet config path openTestEnv's
+// pinned XDG_CONFIG_HOME resolves to, so a black-box run reads it exactly the
+// way the launcher resolves the real one.
+func writeFleetConfigFixture(t *testing.T, home, body string) {
+	t.Helper()
+	dir := filepath.Join(home, ".config", "cenci")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("mkdir fleet config dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(body), 0o600); err != nil {
+		t.Fatalf("write fleet config: %v", err)
+	}
+}
+
+// TestOpenAttachToRunning_ForwardsCurrentAttendedFlag covers the AC that
+// toggling planning.attended on the host and running `cenci open` again
+// against an ALREADY-RUNNING container yields the new value with no container
+// recreation. This is the whole reason the flag rides at exec time rather
+// than container-create time: the sandbox container is long-lived and every
+// later launch only execs into it, so a create-time forward would freeze the
+// posture the container happened to be created with.
+func TestOpenAttachToRunning_ForwardsCurrentAttendedFlag(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, home, _ := openTestEnv(t, fakeDir, assets)
+	writeFleetConfigFixture(t, home, `{"planning": {"attended": true}}`)
+
+	cmd := exec.Command(binaryPath, "open", "ch")
+	cmd.Env = append(env,
+		"FAKE_PS=claude-cenci-default\n",
+		"FAKE_INSPECT_LABEL=detached",
+		"FAKE_INSPECT_MOUNTS=/workspace\n/home/dev\n/run/user/1000/cenci\n",
+	)
+	cmd.Dir = t.TempDir()
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("open ch (running): %v\n%s", err, output)
+	}
+
+	lines := callLogLines(t, callLog)
+	if _, ok := findLineWithPrefix(lines, "run --name "); ok {
+		t.Fatalf("expected no container create when already running, got calls:\n%s", strings.Join(lines, "\n"))
+	}
+	line := attachLine(t, lines)
+	if !strings.Contains(line, "-e CENCI_ATTENDED=1") {
+		t.Errorf("attach into a running container must forward the CURRENT host attended flag; got:\n%s", line)
+	}
+}
+
+// TestOpenClaude_AttendedFlagAddsNoFleetConfigMount covers the AC that the
+// forward introduces no new bind mount of ~/.config/cenci or any file under
+// it. The fleet config is read on the host and forwarded as a value precisely
+// so the container never sees the file: a file-level bind would pin the
+// pre-toggle inode (the config is written temp-file-then-rename), and a
+// directory bind would expose the whole fleet config — repos list included —
+// to every sandbox.
+func TestOpenClaude_AttendedFlagAddsNoFleetConfigMount(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, home, _ := openTestEnv(t, fakeDir, assets)
+	writeFleetConfigFixture(t, home, `{"planning": {"attended": true}}`)
+
+	cmd := exec.Command(binaryPath, "open", "ch")
+	cmd.Env = env
+	cmd.Dir = t.TempDir()
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("open ch: %v\n%s", err, output)
+	}
+
+	lines := callLogLines(t, callLog)
+	runLine, ok := findLineWithPrefix(lines, "run --name ")
+	if !ok {
+		t.Fatalf("expected a container run, got calls:\n%s", strings.Join(lines, "\n"))
+	}
+	for _, forbidden := range []string{
+		filepath.Join(home, ".config", "cenci"),
+		".config/cenci",
+	} {
+		if strings.Contains(runLine, forbidden) {
+			t.Errorf("create-time run args must never mount the host fleet config (%q); got:\n%s", forbidden, runLine)
+		}
 	}
 }
