@@ -53,10 +53,10 @@ importing `@AGENTS.md`; settings and native agent files remain client-specific a
 
 | Old | New |
 |---|---|
-| `$XDG_RUNTIME_DIR/agentwatch/agentwatch.sock` | `$XDG_RUNTIME_DIR/cenci/cenci.sock` |
-| `$XDG_RUNTIME_DIR/agentwatch/agentwatch.pid` | `$XDG_RUNTIME_DIR/cenci/cenci.pid` |
-| `$XDG_RUNTIME_DIR/agentwatch/agentwatch-events.sock` | `$XDG_RUNTIME_DIR/cenci/cenci-events.sock` |
-| `/tmp/agentwatch-<uid>.sock` / `.pid` | `/tmp/cenci-<uid>.sock` / `.pid` |
+| `$XDG_RUNTIME_DIR/agentwatch/agentwatch.sock` | `$XDG_STATE_HOME/cenci/run/cenci.sock` (default `~/.local/state/cenci/run/cenci.sock`; `$CENCI_SOCKET_DIR/cenci.sock` if set) |
+| `$XDG_RUNTIME_DIR/agentwatch/agentwatch.pid` | `$XDG_STATE_HOME/cenci/run/cenci.pid` (default `~/.local/state/cenci/run/cenci.pid`; `$CENCI_SOCKET_DIR/cenci.pid` if set) |
+| `$XDG_RUNTIME_DIR/agentwatch/agentwatch-events.sock` | `$XDG_STATE_HOME/cenci/run/cenci-events.sock` (default `~/.local/state/cenci/run/cenci-events.sock`; `$CENCI_SOCKET_DIR/cenci-events.sock` if set) |
+| `/tmp/agentwatch-<uid>.sock` / `.pid` | `/tmp/cenci-<uid>/cenci/cenci.sock` / `/tmp/cenci-<uid>/cenci/cenci.pid` (tier-3 fallback, only reached when the state tier above is unresolvable) |
 | `~/.config/agentwatch/config.json` | `~/.config/cenci/config.json` |
 | `.claude/config.json`'s `"agentflow"` settings block | `"cenci"` settings block |
 | `${TMPDIR:-/tmp}/agentwatch-bootstrap.log` | `${TMPDIR:-/tmp}/cenci-bootstrap.log` |

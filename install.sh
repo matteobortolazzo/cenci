@@ -2230,20 +2230,61 @@ uninstall_stop_daemon_fallback() {
 
 # uninstall_default_socket_dir computes the daemon's managed-state dir the
 # same way the daemon itself resolves it when no binary is available to ask
-# via `socket-dir` (see SocketDir in watch/pkg/watch/socket.go): the daemon
-# joins a "cenci" segment onto its base runtime dir, so this is
-# $XDG_RUNTIME_DIR/cenci when set, else /tmp/cenci-<uid>/cenci. The uid lookup is checked
-# explicitly per AGENTS.md's rule against unchecked command substitution for
+# via `socket-dir` (see ResolveSocketDir's three-tier chain in
+# watch/pkg/watch/socket.go): $CENCI_SOCKET_DIR verbatim when set, else
+# $XDG_STATE_HOME/cenci/run (default $HOME/.local/state/cenci/run), else
+# /tmp/cenci-<uid>/cenci. Tiers 1 and 2 ($CENCI_SOCKET_DIR and
+# $XDG_STATE_HOME/cenci/run) are each rejected (return 1) unless their
+# resolved value is an absolute path, mirroring resolveSocketDir's
+# `filepath.IsAbs` hard-error — a relative value (a spec-violating but
+# user-settable $CENCI_SOCKET_DIR or $XDG_STATE_HOME) must never flow through
+# to a later `rm -rf` resolved against the installer's cwd. Neither tier
+# falls through to the next on rejection — both return failure outright, so
+# the caller's "warn + skip cleanup" handling stays consistent regardless of
+# which tier's value was misconfigured. Tier 2 is gated on
+# whether $XDG_STATE_HOME or $HOME is actually set and non-empty, not on the
+# concatenated `${XDG_STATE_HOME:-$HOME/.local/state}` string's non-emptiness
+# — that string is never empty even when $HOME is unset, which would
+# otherwise make tier 3 permanently unreachable and silently resolve to a
+# root-relative path. The uid lookup in tier 3 is checked explicitly per
+# AGENTS.md's rule against unchecked command substitution for
 # security-critical paths — an unchecked `id -u` failing silently would
 # collapse this to /tmp/cenci-/cenci. Prints nothing but the resolved path
 # (or nothing at all) on stdout and reports failure only via exit status —
 # never `warn` here, since every call site captures this function's stdout
-# via `$(...)`, and a `warn` call here would get swallowed into the
-# captured string instead of reaching the terminal.
+# via `$(...)`, and a `warn` call here would get swallowed into the captured
+# string instead of reaching the terminal.
 uninstall_default_socket_dir() {
-	if [ -n "${XDG_RUNTIME_DIR:-}" ]; then
-		printf '%s\n' "$XDG_RUNTIME_DIR/cenci"
-		return 0
+	if [ -n "${CENCI_SOCKET_DIR:-}" ]; then
+		case "$CENCI_SOCKET_DIR" in
+		/*)
+			printf '%s\n' "$CENCI_SOCKET_DIR"
+			return 0
+			;;
+		*)
+			return 1
+			;;
+		esac
+	fi
+	if [ -n "${XDG_STATE_HOME:-}" ] || [ -n "${HOME:-}" ]; then
+		local state_home
+		state_home="${XDG_STATE_HOME:-$HOME/.local/state}"
+		# A relative $XDG_STATE_HOME is spec-violating but user-settable, and
+		# must be rejected the same way tier 1 rejects a relative
+		# $CENCI_SOCKET_DIR above — never let it flow through to a later
+		# `rm -rf` resolved against the installer's cwd. Return failure (not
+		# a fall-through to tier 3): this is a user misconfiguration, exactly
+		# like tier 1's relative $CENCI_SOCKET_DIR, so the caller handles it
+		# the same way (warn + skip cleanup, not silently try another tier).
+		case "$state_home/cenci/run" in
+		/*)
+			printf '%s\n' "$state_home/cenci/run"
+			return 0
+			;;
+		*)
+			return 1
+			;;
+		esac
 	fi
 	local uid
 	uid="$(id -u 2>/dev/null)" || return 1
@@ -2252,16 +2293,61 @@ uninstall_default_socket_dir() {
 	return 0
 }
 
+# uninstall_normalize_path resolves <path> to its canonical, symlink-free
+# absolute form via `cd -P && pwd -P`, so that unnormalized variants of the
+# same real directory (a trailing slash, "/.", a doubled "//") all collapse
+# to one comparable string. The `cd -P` is checked explicitly per AGENTS.md's
+# rule against unchecked command substitution for security-critical paths:
+# an unresolvable path (doesn't exist, not a directory, permission denied)
+# fails loudly via a non-zero return instead of silently yielding an empty
+# or partial string a caller might mistake for a real path.
+uninstall_normalize_path() {
+	local p="$1" out
+	# CDPATH is cleared for this subshell only: if it's exported and $p is
+	# relative, `cd` can print the resolved directory to stdout as an extra
+	# line (per POSIX cd behavior), corrupting $out into a two-line value
+	# that can never match the blocklist in uninstall_socket_dir_is_safe — a
+	# normalization bypass.
+	out="$(CDPATH='' cd -P -- "$p" 2>/dev/null && pwd -P)" || return 1
+	printf '%s\n' "$out"
+	return 0
+}
+
 # uninstall_socket_dir_is_safe rejects a small blocklist of paths a resolved
 # socket_dir must never equal before it's handed to `rm -rf` — every other
 # rm -rf target in this file is built from constants; this is the one path
-# that can come from a subprocess (`cenci socket-dir`), so it gets its own
-# bound.
+# that can come from a subprocess (`cenci socket-dir`) or the user-supplied
+# $CENCI_SOCKET_DIR, so it gets its own bound. The state-tier root
+# ($state_root) and its bare "cenci" child ($state_root/cenci) are blocked
+# the same way as $HOME/$cfg_home below — each is an exact-equality `case`
+# arm, never a prefix glob, so the legitimate "$state_root/cenci/run" leaf a
+# resolved socket_dir actually equals is never swallowed by an over-broad
+# blocklist entry. Both the candidate and every blocklist constant are
+# normalized via uninstall_normalize_path first — comparing raw,
+# unnormalized strings would let a trailing slash, "/.", or "//" variant of
+# a blocked directory (e.g. "$HOME/") bypass the exact-equality match
+# entirely while still resolving to the same real directory on disk. A
+# candidate that can't be normalized (doesn't exist, unreadable, ...) is
+# treated as unsafe-to-determine and rejected — never rm -rf'd — matching
+# this function's "return 1 means don't touch it" convention; a blocklist
+# constant that fails to normalize (e.g. that directory was never created)
+# simply can't match anything and is skipped rather than aborting the whole
+# check.
 uninstall_socket_dir_is_safe() {
-	local dir="$1" cfg_home
+	local dir="$1" cfg_home state_root
+	local norm norm_home norm_cfg_home norm_cfg_home_cenci norm_state_root norm_state_root_cenci
 	cfg_home="${XDG_CONFIG_HOME:-$HOME/.config}"
-	case "$dir" in
-	"/" | "$HOME" | "$cfg_home" | "$cfg_home/cenci")
+	state_root="${XDG_STATE_HOME:-$HOME/.local/state}"
+
+	norm="$(uninstall_normalize_path "$dir")" || return 1
+	norm_home="$(uninstall_normalize_path "$HOME")" || norm_home=""
+	norm_cfg_home="$(uninstall_normalize_path "$cfg_home")" || norm_cfg_home=""
+	norm_cfg_home_cenci="$(uninstall_normalize_path "$cfg_home/cenci")" || norm_cfg_home_cenci=""
+	norm_state_root="$(uninstall_normalize_path "$state_root")" || norm_state_root=""
+	norm_state_root_cenci="$(uninstall_normalize_path "$state_root/cenci")" || norm_state_root_cenci=""
+
+	case "$norm" in
+	"/" | "$norm_home" | "$norm_cfg_home" | "$norm_cfg_home_cenci" | "$norm_state_root" | "$norm_state_root_cenci")
 		return 1
 		;;
 	esac
@@ -2283,7 +2369,7 @@ uninstall_stop_daemon() {
 		socket_dir="$("$bin" socket-dir 2>/dev/null || true)"
 		if [ -z "$socket_dir" ]; then
 			if ! socket_dir="$(uninstall_default_socket_dir)"; then
-				warn "could not determine the current uid — skipping the default managed-state cleanup"
+				warn "could not resolve a usable socket dir — skipping the default managed-state cleanup"
 				socket_dir=""
 			fi
 		fi
@@ -2301,7 +2387,7 @@ uninstall_stop_daemon() {
 			stopped=1
 		fi
 		if ! socket_dir="$(uninstall_default_socket_dir)"; then
-			warn "could not determine the current uid — skipping the default managed-state cleanup"
+			warn "could not resolve a usable socket dir — skipping the default managed-state cleanup"
 			socket_dir=""
 		fi
 	fi

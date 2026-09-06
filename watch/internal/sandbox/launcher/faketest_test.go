@@ -57,9 +57,12 @@ import (
 //	                     Named to mirror sandbox_open_test.go's
 //	                     writeScriptedRuntime FAKE_INSPECT_MOUNTS var (#493
 //	                     keep-in-sync note), though that fake's var answers a
-//	                     different inspect format (the plain ".Destination"
-//	                     shape warnIfUnwired uses) since this package's DryRun
-//	                     only ever needs the ".RW" shared-agent-mount check.
+//	                     different inspect format (the "<source>::<destination>"
+//	                     per-mount shape warnIfUnwired uses to compare a reused
+//	                     container's cenci socket-mount source against the
+//	                     currently-resolved host socket dir, ticket #1143)
+//	                     since this package's DryRun only ever needs the ".RW"
+//	                     shared-agent-mount check.
 //	FAKE_REUSE_POSTURE → `inspect --format ...` stdout for the combined
 //	                     reuse-posture probe (ticket #628's
 //	                     inspectReusePosture: the `cenci-sand.dind` label,

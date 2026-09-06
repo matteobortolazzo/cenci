@@ -172,7 +172,9 @@ if [[ "$(id -u)" -eq 0 ]]; then
     # secure_path in /etc/sudoers strips PATH additions (~/.local/bin,
     # ~/go/bin) even with --preserve-env=PATH; the explicit env "PATH=..."
     # assignment defeats that. --preserve-env carries everything else
-    # (TERM, XDG_RUNTIME_DIR, CENCI_SANDBOX, ...) across.
+    # (TERM, XDG_RUNTIME_DIR, CENCI_SOCKET_DIR, CENCI_SANDBOX, ...) across —
+    # create-time env is already inherited by `docker exec` and this
+    # `sudo --preserve-env` re-exec alike.
     exec sudo --preserve-env -u dev env "PATH=${PATH}" "HOME=/home/dev" \
         /usr/local/bin/entrypoint.sh "$@"
 fi

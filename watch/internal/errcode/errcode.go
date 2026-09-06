@@ -217,7 +217,7 @@ var registry = map[Code]Entry{
 		Message: "The cenci daemon's event socket does not exist.",
 		Causes: []string{
 			"The daemon has never been started on this host.",
-			"XDG_RUNTIME_DIR (or its fallback socket directory) was cleared, removing the socket.",
+			"The resolved socket directory (CENCI_SOCKET_DIR, or the XDG_STATE_HOME/.local/state state tier, or the /tmp fallback tier) was cleared, removing the socket.",
 		},
 		Hints: []string{
 			"cenci daemon start",
