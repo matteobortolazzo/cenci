@@ -118,8 +118,15 @@ func (p Posture) WriteExplanation(w io.Writer) error {
 		_, _ = fmt.Fprintln(bw, "(next-exec — not observed from the running container; these are the values")
 		_, _ = fmt.Fprintln(bw, "the NEXT exec into this container would forward)")
 	}
+	// Unreachable in practice since #1087: CENCI_ATTENDED is forwarded on
+	// every exec, so a launcher-derived posture always carries at least one
+	// entry. Retained for a hand-constructed or future Posture whose
+	// ForwardedEnv is genuinely empty — the alternative, dropping the branch,
+	// would print a bare header with nothing under it. Worded for the general
+	// case rather than provider keys alone, since the list is no longer
+	// secrets-only.
 	if len(p.ForwardedEnv) == 0 {
-		_, _ = fmt.Fprintln(bw, "No provider API keys are forwarded for this agent.")
+		_, _ = fmt.Fprintln(bw, "No environment variables are forwarded for this agent.")
 	}
 	for _, e := range p.ForwardedEnv {
 		secretMark := ""

@@ -395,6 +395,14 @@ func applyDispatch(cfg Config, deps dispatchDeps, ctrl run.Controller, mut Ticke
 			// consults ctrl.CurrentSession(); config is the only source.
 			Session: sessionByRepo[d.Ticket.Repo],
 			Dir:     dirByRepo[d.Ticket.Repo],
+			// Unattended (#1087): every dispatched session pins
+			// CENCI_ATTENDED=0 in its own window environment. #1086's fleet
+			// gate already refuses to start a planning session while
+			// planning.attended is on; this is the defense-in-depth layer for
+			// a flag toggled mid-flight, since a detached tmux window has
+			// nobody to answer an interactive question and would sit there
+			// with the ticket stuck on Working.
+			Unattended: true,
 		}, ctrl)
 		if err != nil {
 			logf(out, "dispatch: #%d run failed: %v\n", d.Ticket.Number, err)

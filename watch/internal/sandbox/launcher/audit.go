@@ -601,6 +601,19 @@ var forwardedEnvVarNames = map[string]bool{
 	"OPENAI_API_KEY":    true,
 }
 
+// postureEnvVarNames are the non-secret per-exec forwards whose VALUE changes
+// how the session behaves rather than merely identifying it, so `cenci audit`
+// must report them alongside the secret-classified provider keys (#1087).
+// CENCI_ATTENDED decides whether a lean-planning session asks its clarifying
+// question in chat or posts it to the ticket and stops — an operator auditing
+// a sandbox has to be able to see which of those a launch would do. The pure
+// identity/plumbing forwards (TMUX_PANE, CENCI_TMUX_SOCKET, CENCI_SANDBOX,
+// CENCI_SANDBOX_AGENT) stay out: they say who the session is, not what it is
+// permitted to do, and ForwardedEnv is a posture report.
+var postureEnvVarNames = map[string]bool{
+	attendedEnvName: true,
+}
+
 // isSecretEnvName reports whether name is one of the provider-API-key names
 // that must never have its value shown — wrapping forwardedEnvVarNames
 // (the single source of truth) rather than forking a second classification
@@ -610,16 +623,22 @@ func isSecretEnvName(name string) bool {
 	return forwardedEnvVarNames[name]
 }
 
-// forwardedEnvVars reports the per-exec provider API keys assembleExecEnv
-// would actually forward for agent — names only, Secret:true, and only when
-// the corresponding host env var is actually set (matching assembleExecEnv's
-// own "only listed when they would actually be forwarded" behavior).
+// forwardedEnvVars reports the per-exec forwards assembleExecEnv would
+// actually make for agent that belong in a security/behavior posture — names
+// only, never values: the provider API keys (Secret:true, and only when the
+// corresponding host env var is actually set, matching assembleExecEnv's own
+// "only listed when they would actually be forwarded" behavior), plus the
+// non-secret posture forwards registered in postureEnvVarNames (Secret:false,
+// #1087).
 func forwardedEnvVars(agent string) []ForwardedEnvVar {
 	envNames := classifyEnvNames(assembleExecEnv(agent))
 	forwarded := make([]ForwardedEnvVar, 0, len(envNames))
 	for _, name := range envNames {
-		if isSecretEnvName(name.Name) {
+		switch {
+		case isSecretEnvName(name.Name):
 			forwarded = append(forwarded, ForwardedEnvVar{Name: name.Name, Secret: true})
+		case postureEnvVarNames[name.Name]:
+			forwarded = append(forwarded, ForwardedEnvVar{Name: name.Name, Secret: false})
 		}
 	}
 	return forwarded
