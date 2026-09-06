@@ -79,6 +79,17 @@ else
     ok "plugin.ts does not log prompt/tool-arg/credential content"
 fi
 
+# Structural assertion (#1152): plugin.ts must resolve the cenci binary from
+# multiple known locations, not hard-pin the single plugin-local path a
+# missing/failed release download leaves unusable.
+if [ -f "$PLUGIN_TS" ] && grep -q 'candidateBinPaths' "$PLUGIN_TS" 2>/dev/null \
+    && grep -q '/usr/local/bin/cenci' "$PLUGIN_TS" 2>/dev/null \
+    && grep -q '/opt/homebrew/bin/cenci' "$PLUGIN_TS" 2>/dev/null; then
+    ok "plugin.ts resolves multiple candidate binary locations, not a single hard-pinned path"
+else
+    bad "plugin.ts resolves multiple candidate binary locations, not a single hard-pinned path"
+fi
+
 # --- Bootstrap end-to-end (mirrors lib/test-common.sh; self-contained) ------
 # OpenCode's bootstrap.sh has no root env override, so build the real relative
 # layout <tmp>/opencode|lib|bin and run the copied script from that position.
@@ -122,6 +133,7 @@ if command -v jq >/dev/null 2>&1 && command -v bash >/dev/null 2>&1; then
             mkdir -p "$layout/opencode" "$layout/lib" "$layout/bin"
             cp "$BOOTSTRAP" "$layout/opencode/bootstrap.sh"
             cp "$DIR/../lib/bootstrap-common.sh" "$layout/lib/bootstrap-common.sh"
+            cp "$DIR/../lib/resolve-bin.sh" "$layout/lib/resolve-bin.sh"
             cp "$PACKAGE_JSON" "$layout/opencode/package.json"
 
             cat >"$layout/bin/cenci" <<STUB
@@ -203,6 +215,134 @@ STUB
         else
             bad "daemon invoked when CENCI_SANDBOX unset"
         fi
+
+        # --- Binary fallback resolution (#1152), mirroring lib/test-common.sh
+        # cases 1 and 3 -------------------------------------------------------
+        #
+        # run_opencode_bootstrap_nobin builds the same real-relative
+        # <layout>/opencode|lib|bin tree as run_opencode_bootstrap above, but
+        # WITHOUT pre-creating bin/cenci and WITHOUT stamping .cenci-version,
+        # so install_binary() genuinely reaches its download path. A stub
+        # curl/wget (both exit 1) ahead of a minimal PATH forces that download
+        # to fail offline and reproducibly -- the real "download failed"
+        # branch, with no network and no new production seam. The fixed-prefix
+        # candidates are pointed at nonexistent test paths via resolve-bin.sh's
+        # test-only overrides, and HOME is a fresh empty dir, so a real
+        # /usr/local/bin/cenci or ambient plugin cache in the dev/CI container
+        # can never make the "no candidate" case vacuously pass
+        # (watch/docs/test-isolation.md). CENCI_SANDBOX=1 is pinned explicitly
+        # per the same doc's ambient-daemon-socket guidance. Runs bootstrap.sh
+        # under <shell> (bash or dash) so this new POSIX code is covered under
+        # both.
+        run_opencode_bootstrap_nobin() {
+            local shell="$1" layout="$2" logdir="$3" candidate_bin="$4"
+
+            mkdir -p "$layout/opencode" "$layout/lib"
+            cp "$BOOTSTRAP" "$layout/opencode/bootstrap.sh"
+            cp "$DIR/../lib/bootstrap-common.sh" "$layout/lib/bootstrap-common.sh"
+            cp "$DIR/../lib/resolve-bin.sh" "$layout/lib/resolve-bin.sh"
+            cp "$PACKAGE_JSON" "$layout/opencode/package.json"
+
+            local stubdir
+            stubdir="$(mktemp -d "$TMP/stub.XXXX")" || {
+                echo "FAIL - bootstrap e2e: mktemp failed for stub PATH fixture" >&2
+                return 1
+            }
+            cat >"$stubdir/curl" <<STUB
+#!/usr/bin/env bash
+printf 'curl\n' >> "$logdir/download-attempts"
+exit 1
+STUB
+            cat >"$stubdir/wget" <<STUB
+#!/usr/bin/env bash
+printf 'wget\n' >> "$logdir/download-attempts"
+exit 1
+STUB
+            chmod +x "$stubdir/curl" "$stubdir/wget"
+
+            local home
+            home="$(mktemp -d "$TMP/home.XXXX")" || {
+                echo "FAIL - bootstrap e2e: mktemp failed for \$HOME fixture" >&2
+                return 1
+            }
+
+            (
+                unset CENCI_SANDBOX
+                export TMPDIR="$logdir" HOME="$home" PATH="$stubdir:/usr/bin:/bin"
+                export CENCI_SANDBOX=1
+                export CENCI_RESOLVE_USR_LOCAL_BIN="$TMP/no-such-usr-local-cenci"
+                export CENCI_RESOLVE_HOMEBREW_BIN="$TMP/no-such-homebrew-cenci"
+                if [ -n "$candidate_bin" ]; then
+                    export CENCI_BIN="$candidate_bin"
+                fi
+                "$shell" "$layout/opencode/bootstrap.sh"
+            )
+        }
+
+        for HOOK_SHELL in bash dash; do
+            if ! command -v "$HOOK_SHELL" >/dev/null 2>&1; then
+                echo "SKIP - $HOOK_SHELL not found; skipping its fallback-resolution mirror case"
+                continue
+            fi
+
+            shell_tmp="$TMP/$HOOK_SHELL"
+            mkdir -p "$shell_tmp"
+
+            # --- Mirrors case 1: adopts a fallback when the download fails --
+            fixture_dir="$shell_tmp/fixture"
+            mkdir -p "$fixture_dir"
+            fixture_bin="$fixture_dir/cenci"
+            cat >"$fixture_bin" <<'STUB'
+#!/usr/bin/env bash
+exit 0
+STUB
+            chmod +x "$fixture_bin"
+
+            layout_adopt="$shell_tmp/layout-adopt"
+            log_adopt="$shell_tmp/log-adopt"
+            mkdir -p "$log_adopt"
+
+            run_opencode_bootstrap_nobin "$HOOK_SHELL" "$layout_adopt" "$log_adopt" "$fixture_bin"
+
+            adopted_bin="$layout_adopt/bin/cenci"
+            if [ -x "$adopted_bin" ] && [ ! -L "$adopted_bin" ] && cmp -s "$adopted_bin" "$fixture_bin"; then
+                ok "[$HOOK_SHELL] adopts a fallback binary (real copy, not a symlink) when the download fails"
+            else
+                bad "[$HOOK_SHELL] did not adopt the fallback binary as a real copy at bin/cenci"
+            fi
+
+            if grep -q "adopted fallback cenci from $fixture_bin" "$log_adopt/cenci-bootstrap.log" 2>/dev/null; then
+                ok "[$HOOK_SHELL] log names the adopted fallback's source path"
+            else
+                bad "[$HOOK_SHELL] log did not name the adopted fallback's source path"
+            fi
+
+            # --- Mirrors case 3: no candidate -> still exits 0, and says why -
+            layout_none="$shell_tmp/layout-none"
+            log_none="$shell_tmp/log-none"
+            mkdir -p "$log_none"
+
+            run_opencode_bootstrap_nobin "$HOOK_SHELL" "$layout_none" "$log_none" ""
+            rc_none=$?
+
+            if [ "$rc_none" -eq 0 ]; then
+                ok "[$HOOK_SHELL] bootstrap exits 0 when no cenci binary can be resolved anywhere"
+            else
+                bad "[$HOOK_SHELL] bootstrap exited $rc_none when no cenci binary could be resolved"
+            fi
+
+            if [ ! -e "$layout_none/bin/cenci" ]; then
+                ok "[$HOOK_SHELL] no bin/cenci is created when nothing resolves"
+            else
+                bad "[$HOOK_SHELL] bin/cenci unexpectedly exists when nothing should have resolved"
+            fi
+
+            if grep -q "no cenci binary available" "$log_none/cenci-bootstrap.log" 2>/dev/null; then
+                ok "[$HOOK_SHELL] log names the no-candidate-found reason"
+            else
+                bad "[$HOOK_SHELL] log did not name the no-candidate-found reason"
+            fi
+        done
     fi
 else
     echo "SKIP - jq/bash unavailable; skipping bootstrap end-to-end test"

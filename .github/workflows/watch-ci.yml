@@ -78,6 +78,7 @@ jobs:
       - run: go build -o cenci .
       - run: ./plugin/hooks/test.sh
       - run: ./plugin/codex/test.sh
+      - run: ./plugin/opencode/test.sh
       - run: bash tests/reap-orphans.test.sh
         env:
           CENCI_BIN: ${{ github.workspace }}/watch/cenci
@@ -110,7 +111,7 @@ jobs:
         working-directory: watch
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - run: shellcheck plugin/*/install.sh
+      - run: shellcheck plugin/*/install.sh plugin/lib/*.sh plugin/*/bootstrap.sh plugin/*/notify.sh
       - run: bash plugin/gnome/test.sh
       - run: bash plugin/plasma/test.sh
       - run: bash plugin/macos/test.sh

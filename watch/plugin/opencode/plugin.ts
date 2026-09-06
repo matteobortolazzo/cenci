@@ -29,6 +29,8 @@
 import type { Plugin } from "@opencode-ai/plugin"
 import { spawn } from "node:child_process"
 import { fileURLToPath } from "node:url"
+import fs from "node:fs"
+import os from "node:os"
 import path from "node:path"
 
 // A tool call fires tool.execute.before *and* tool.execute.after for every
@@ -43,10 +45,121 @@ function pluginDir(): string {
   return path.dirname(fileURLToPath(import.meta.url))
 }
 
-// cenciBinPath resolves the plugin-local binary bootstrap.sh installs,
-// shared with the Claude Code/Codex plugins (watch/plugin/bin/cenci).
-function cenciBinPath(): string {
+// cenciLocalBinPath is the plugin-local binary bootstrap.sh installs,
+// shared with the Claude Code/Codex plugins (watch/plugin/bin/cenci). It is
+// always the first resolution candidate (see candidateBinPaths below) and
+// also the fallback "best guess" a still-cold resolution attempts, mirroring
+// this function's own pre-#1152 behavior of always returning a path
+// regardless of whether it currently exists.
+function cenciLocalBinPath(): string {
   return path.join(pluginDir(), "..", "bin", "cenci")
+}
+
+// isExecutable is the fs.accessSync-based existence+executability probe
+// every candidate below is filtered through. No `--version` subprocess is
+// run here (unlike the shell resolver, ../lib/resolve-bin.sh) — that check
+// is only worth its cost off the hot event path; sendEvent()'s
+// child.on("error") swallow is the equivalent safety net for an
+// arch-mismatched/truncated binary and stays the last line of defence.
+function isExecutable(p: string): boolean {
+  try {
+    fs.accessSync(p, fs.constants.X_OK)
+    return true
+  } catch {
+    return false
+  }
+}
+
+// listDirs returns the subdirectory names of `dir`, or an empty array when
+// `dir` doesn't exist / isn't readable — used to expand the sibling
+// plugin-cache glob candidates below without a glob library dependency.
+function listDirs(dir: string): string[] {
+  try {
+    return fs
+      .readdirSync(dir, { withFileTypes: true })
+      .filter((e) => e.isDirectory())
+      .map((e) => e.name)
+  } catch {
+    return []
+  }
+}
+
+// expandCacheGlob mirrors the shell resolver's
+// "<base>/*/cenci-watch/*/bin/cenci" glob candidate for a given cache root.
+function expandCacheGlob(base: string): string[] {
+  const out: string[] = []
+  for (const marketplace of listDirs(base)) {
+    const watchDir = path.join(base, marketplace, "cenci-watch")
+    for (const version of listDirs(watchDir)) {
+      out.push(path.join(watchDir, version, "bin", "cenci"))
+    }
+  }
+  return out
+}
+
+// expandMarketplaceGlob mirrors the shell resolver's
+// "<base>/*/watch/plugin/bin/cenci" glob candidate.
+function expandMarketplaceGlob(base: string): string[] {
+  return listDirs(base).map((marketplace) => path.join(base, marketplace, "watch", "plugin", "bin", "cenci"))
+}
+
+// pathCandidate mirrors the shell resolver's final `command -v cenci`
+// candidate: the first directory on $PATH containing an executable named
+// cenci.
+function pathCandidate(): string | undefined {
+  const pathEnv = process.env.PATH
+  if (!pathEnv) return undefined
+  for (const dir of pathEnv.split(path.delimiter)) {
+    if (!dir) continue
+    const candidate = path.join(dir, "cenci")
+    if (isExecutable(candidate)) return candidate
+  }
+  return undefined
+}
+
+// candidateBinPaths lists every resolution candidate, in the SAME order as
+// the shared shell resolver (../lib/resolve-bin.sh) — starting with the
+// plugin-local path bootstrap.sh installs (the common case once bootstrap
+// has run), then $CENCI_BIN, the fixed install prefixes, sibling plugin
+// caches, and finally a $PATH scan.
+function candidateBinPaths(): string[] {
+  const home = os.homedir()
+  const candidates: Array<string | undefined> = [
+    cenciLocalBinPath(),
+    process.env.CENCI_BIN,
+    "/usr/local/bin/cenci",
+    "/opt/homebrew/bin/cenci",
+    ...expandCacheGlob(path.join(home, ".claude", "plugins", "cache")),
+    ...expandCacheGlob(path.join(home, ".codex", "plugins", "cache")),
+    ...expandMarketplaceGlob(path.join(home, ".claude", "plugins", "marketplaces")),
+    pathCandidate(),
+  ]
+  return candidates.filter((p): p is string => typeof p === "string" && p.length > 0)
+}
+
+// cachedBinPath memoizes the last resolution across sendEvent() calls — per-
+// event candidate scanning is unnecessary once a working binary is found.
+// invalidateCenciBinCache() (called from sendEvent()'s child.on("error")
+// handler) clears it so a binary installed seconds later by bootstrap is
+// picked up on the very next event with no polling.
+let cachedBinPath: string | undefined
+
+// resolveCenciBin returns the first candidate that exists and is
+// executable. When none do (e.g. bootstrap hasn't run yet), it still
+// returns the plugin-local path as a best guess so sendEvent() has
+// something to attempt — spawn's own async ENOENT failure (caught by
+// child.on("error") below) is what triggers the next resolution attempt,
+// exactly like this function's pre-#1152 unconditional-return behavior.
+function resolveCenciBin(): string {
+  if (cachedBinPath !== undefined) return cachedBinPath
+  cachedBinPath = candidateBinPaths().find(isExecutable) ?? cenciLocalBinPath()
+  return cachedBinPath
+}
+
+// invalidateCenciBinCache drops the memoized resolution so the next
+// sendEvent() call re-resolves candidateBinPaths() from scratch.
+function invalidateCenciBinCache(): void {
+  cachedBinPath = undefined
 }
 
 // sendEvent reports one hook event via `cenci notify -agent opencode`,
@@ -55,12 +168,15 @@ function cenciBinPath(): string {
 // swallowed: delivery is best-effort and must never surface into OpenCode.
 function sendEvent(payload: Record<string, unknown>): void {
   try {
-    const child = spawn(cenciBinPath(), "notify -agent opencode".split(" "), {
+    const child = spawn(resolveCenciBin(), "notify -agent opencode".split(" "), {
       stdio: ["pipe", "ignore", "ignore"],
       detached: true,
     })
     child.on("error", () => {
-      // Missing/broken binary — nothing to report yet, and nothing to throw.
+      // Missing/broken binary — nothing to report yet, and nothing to
+      // throw. Invalidate so the next event re-resolves from scratch (the
+      // plugin-local binary — or a fallback — may exist by then).
+      invalidateCenciBinCache()
     })
     child.stdin?.on("error", () => {
       // Daemon-side pipe closed early; safe to ignore.

@@ -21,6 +21,9 @@ BIN="$ROOT/bin/cenci"
 MARKER="$ROOT/bin/.cenci-version"
 PLUGIN_JSON="$ROOT/$PLUGIN_MANIFEST_REL"
 
+# shellcheck source=./resolve-bin.sh
+. "$(dirname "$0")/../lib/resolve-bin.sh"
+
 log() {
 	printf '%s cenci-bootstrap: %s\n' \
 		"$(date '+%Y-%m-%dT%H:%M:%S' 2>/dev/null || echo '-')" "$1" >>"$LOG" 2>/dev/null || true
@@ -53,10 +56,10 @@ download() {
 	fi
 }
 
-# install_binary downloads, verifies, and installs the release artifact. Returns
-# non-zero (after logging) on any failure so the caller can still try to start an
-# existing daemon.
-install_binary() {
+# download_binary downloads, verifies, and installs the release artifact.
+# Returns non-zero (after logging) on any failure so install_binary can fall
+# back to adopt_fallback_binary.
+download_binary() {
 	VERSION=$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$PLUGIN_JSON" 2>/dev/null | head -n1)
 	if [ -z "$VERSION" ]; then
 		log "could not read version from $PLUGIN_JSON"
@@ -144,6 +147,50 @@ install_binary() {
 	rm -rf "$tmp"
 	log "installed cenci $VERSION ($os/$arch)"
 	return 0
+}
+
+# adopt_fallback_binary copies a working cenci binary found via
+# resolve_cenci_bin() (see lib/resolve-bin.sh) into place when the real
+# download failed, so a hook event on this session still has a usable
+# binary. The adopted marker value ("fallback:<source-path>") can never
+# equal a real $VERSION string, so download_binary()'s own
+# already-installed short-circuit above cannot latch onto it — a correct
+# release supersedes the fallback automatically on the next session.
+# Returns non-zero (after logging) when no candidate resolves.
+adopt_fallback_binary() {
+	# A healthy fallback (or a real install that raced ahead of us) is
+	# already in place — never re-copy or re-probe on later sessions.
+	[ -x "$BIN" ] && return 0
+
+	candidate=$(resolve_cenci_bin) || return 1
+	[ -n "$candidate" ] || return 1
+
+	mkdir -p "$ROOT/bin" 2>/dev/null || true
+	if ! cp "$candidate" "$BIN" 2>/dev/null; then
+		log "failed to adopt fallback cenci from $candidate"
+		return 1
+	fi
+	chmod +x "$BIN" 2>/dev/null || true
+	printf 'fallback:%s\n' "$candidate" >"$MARKER" 2>/dev/null || true
+	log "adopted fallback cenci from $candidate (no release artifact for ${VERSION:-unknown})"
+	return 0
+}
+
+# install_binary wraps download_binary with a fallback-adoption attempt: if
+# the real download fails for any reason, try to adopt a working cenci
+# binary found elsewhere (see resolve-bin.sh) before giving up. Adoption is
+# only ever attempted AFTER download_binary's own attempt fails, never
+# before — adopting first would pay a copy cost on every healthy plugin
+# version bump. Never blocks, never exits non-zero.
+install_binary() {
+	if download_binary; then
+		return 0
+	fi
+	if adopt_fallback_binary; then
+		return 0
+	fi
+	log "no cenci binary available: download failed and no fallback found"
+	return 1
 }
 
 # install_on_path maintains one predictable launcher at ~/.local/bin/cenci.

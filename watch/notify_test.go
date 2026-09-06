@@ -228,7 +228,14 @@ func TestCodexHooksJSONHasNoUnknownKeys(t *testing.T) {
 	}
 }
 
-func TestCodexHooksUsePluginLocalBinary(t *testing.T) {
+// TestCodexHooksUseNotifyWrapper guards the Codex hooks.json contract
+// (#1152): every hook command must go through the codex/notify.sh wrapper,
+// which resolves a working cenci binary (the plugin-local path first,
+// falling back through lib/resolve-bin.sh) rather than hard-pinning the
+// plugin-local path directly in the command string — a missing/failed
+// release download must not leave every hook permanently broken with no
+// fallback.
+func TestCodexHooksUseNotifyWrapper(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join("plugin", "codex", "hooks.json"))
 	if err != nil {
 		t.Fatalf("read codex hooks.json: %v", err)
@@ -245,12 +252,12 @@ func TestCodexHooksUsePluginLocalBinary(t *testing.T) {
 		t.Fatalf("parse codex hooks.json: %v", err)
 	}
 
-	const localBinary = `"${PLUGIN_ROOT}/bin/cenci" notify`
+	const notifyWrapper = `"${PLUGIN_ROOT}/codex/notify.sh"`
 	for event, groups := range root.Hooks {
 		for i, group := range groups {
 			for j, hook := range group.Hooks {
-				if !strings.Contains(hook.Command, localBinary) {
-					t.Errorf("%s[%d].hooks[%d] does not use plugin-local binary: %q", event, i, j, hook.Command)
+				if !strings.Contains(hook.Command, notifyWrapper) {
+					t.Errorf("%s[%d].hooks[%d] does not use the codex/notify.sh wrapper: %q", event, i, j, hook.Command)
 				}
 			}
 		}
