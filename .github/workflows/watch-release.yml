@@ -56,13 +56,42 @@ jobs:
         with:
           go-version: '1.25.x'
 
+      # OSS GoReleaser can't strip a monorepo tag prefix (watch/vX.Y.Z) — that's
+      # Pro-only — so it is pointed at a clean semver via GORELEASER_CURRENT_TAG,
+      # and the prefixed tag is published by the step further below. Until
+      # goreleaser v2.18.1 that name did not have to resolve to anything; v2.18.1
+      # started reading the current tag's contents and aborts when the lookup
+      # comes back empty ("couldn't get tag contents: unexpected git tag output
+      # for \"vX.Y.Z\": \"\""), which broke the watch/v2.2.1 release and, through
+      # the version-matched bootstrap download, silently killed watch in every
+      # sandbox container (#1139). Materialising the alias as a real annotated tag
+      # keeps the workaround self-contained instead of resting on how leniently
+      # goreleaser happens to treat a dangling GORELEASER_CURRENT_TAG.
+      #
+      # The alias is local to this runner's checkout and is never pushed. It is
+      # deliberately not part of the `watch/v*` namespace, so the previous-tag
+      # lookup in the publish step below (`git tag -l 'watch/v*'`) cannot see it.
+      - name: Materialise the clean-semver alias tag for GoReleaser
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+          TAG: ${{ steps.v.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if ! git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+            echo "::error::expected tag ${TAG} to be present in this checkout" >&2
+            exit 1
+          fi
+          git tag -f -a "v${VERSION}" -m "cenci-watch v${VERSION}" "refs/tags/${TAG}^{commit}"
+
       - name: Build release artifacts
         uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
         with:
-          version: '~> v2'
-          # OSS GoReleaser can't strip a monorepo tag prefix (watch/vX.Y.Z) —
-          # that's Pro-only — so feed it a clean semver via GORELEASER_CURRENT_TAG,
-          # skip publish/validate, and publish to the prefixed tag ourselves below.
+          # Pin the GoReleaser *binary* to an exact version. A floating '~> v2'
+          # silently adopts every upstream minor/patch on the next release run:
+          # v2.18.1's stricter current-tag handling landed that way and took the
+          # release job down with no change on our side (#1139). This mirrors the
+          # cosign-release pin below, which exists for the same reason.
+          version: 'v2.18.1'
           args: release --clean --skip=publish,validate
           workdir: watch
         env:

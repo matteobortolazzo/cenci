@@ -115,6 +115,65 @@ else
     fail "the verification step must not hardcode a --certificate-identity-regexp literal — it must grep the value out of install.sh"
 fi
 
+# ── the GoReleaser *binary* must be pinned to an exact version, never a
+# floating range (#1139). '~> v2' silently adopted goreleaser v2.18.1, whose
+# stricter current-tag handling aborted the release for watch/v2.2.1 with no
+# change on our side; because sandbox containers always resolve the newest
+# plugin version, the resulting missing release artifact silently killed the
+# watch attention layer in every container. Mirrors the cosign-release pin,
+# which exists for the same class of upstream drift. ──
+GORELEASER_LINE="$(grep -n 'uses: goreleaser/goreleaser-action@' "$RELEASE" | sed -n 1p | cut -d: -f1)"
+if [[ -z "$GORELEASER_LINE" ]]; then
+  fail "watch-release.yml missing a goreleaser/goreleaser-action step"
+else
+  GORELEASER_BLOCK="$(sed -n "${GORELEASER_LINE},/^      - /p" "$RELEASE")"
+  GORELEASER_VERSION="$(echo "$GORELEASER_BLOCK" | sed -n "s/^[[:space:]]*version:[[:space:]]*'\{0,1\}\([^'#]*\)'\{0,1\}[[:space:]]*$/\1/p" | head -n1)"
+  if [[ -z "$GORELEASER_VERSION" ]]; then
+    fail "the goreleaser-action step must declare an explicit 'version:' input"
+  elif [[ ! "$GORELEASER_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    fail "the goreleaser binary must be pinned to an exact vX.Y.Z (got '${GORELEASER_VERSION}') — a floating range adopts upstream breakage on the next release run (#1139)"
+  fi
+fi
+
+# ── GORELEASER_CURRENT_TAG names a clean semver that is NOT a real tag in
+# this repo (tags are the monorepo-prefixed watch/vX.Y.Z). goreleaser v2.18.1
+# reads that tag's contents and aborts when the lookup returns empty, so the
+# alias has to be materialised as a real annotated tag before goreleaser runs
+# (#1139). Ordering is asserted by line number: an alias created after the
+# build step would be useless. ──
+ALIAS_LINE="$(grep -n 'name: Materialise the clean-semver alias tag for GoReleaser' "$RELEASE" | sed -n 1p | cut -d: -f1)"
+if [[ -z "$ALIAS_LINE" ]]; then
+  fail "watch-release.yml missing the step that materialises the clean-semver alias tag GORELEASER_CURRENT_TAG points at (#1139)"
+else
+  if [[ -n "$GORELEASER_LINE" ]]; then
+    (( ALIAS_LINE < GORELEASER_LINE )) ||
+      fail "the alias-tag step (line ${ALIAS_LINE}) must run before the goreleaser build step (line ${GORELEASER_LINE}) — goreleaser resolves GORELEASER_CURRENT_TAG at build time"
+  fi
+  if [[ -n "$TAGGED_CHECKOUT_LINE" ]]; then
+    (( ALIAS_LINE > TAGGED_CHECKOUT_LINE )) ||
+      fail "the alias-tag step (line ${ALIAS_LINE}) must run after the tagged checkout (line ${TAGGED_CHECKOUT_LINE}) — the watch/v<version> tag it aliases isn't on disk before it"
+  fi
+
+  ALIAS_BLOCK="$(sed -n "${ALIAS_LINE},/^      - /p" "$RELEASE")"
+  # Annotated, so `git tag -l --format='%(contents)'` returns the tag message.
+  # A lightweight alias would leave the contents lookup dependent on the
+  # underlying commit message, which is exactly the fragility being fixed.
+  block_contains "$ALIAS_BLOCK" "git tag -f -a" \
+    "the alias tag must be annotated so goreleaser's tag-contents lookup returns a non-empty value"
+  # The alias must be built from the real prefixed tag, not from HEAD, or it
+  # can silently pin the release to the wrong commit.
+  block_contains "$ALIAS_BLOCK" 'refs/tags/${TAG}' \
+    "the alias tag must be created from refs/tags/\${TAG} (the real watch/v<version> tag), never from HEAD"
+  # The alias must stay local. Pushing it would publish a second, competing
+  # tag namespace for every release.
+  [[ "$ALIAS_BLOCK" != *"git push"* ]] ||
+    fail "the alias tag must never be pushed — it exists only for this runner's goreleaser invocation"
+  # It must not land in the watch/v* namespace, which the publish step's
+  # previous-tag lookup globs over for release notes.
+  [[ "$ALIAS_BLOCK" != *'"watch/v${VERSION}"'* ]] ||
+    fail "the alias tag must not be created inside the watch/v* namespace — the publish step's previous-tag glob would pick it up"
+fi
+
 # Sanity-check the file is actually being read (a typo'd $RELEASE path
 # would otherwise make every check above vacuously pass on an empty var).
 contains "$RELEASE" "name: watch — Release" "unexpected watch-release.yml content — wrong file resolved?"
