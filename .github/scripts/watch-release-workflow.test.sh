@@ -172,6 +172,24 @@ else
   # previous-tag lookup globs over for release notes.
   [[ "$ALIAS_BLOCK" != *'"watch/v${VERSION}"'* ]] ||
     fail "the alias tag must not be created inside the watch/v* namespace — the publish step's previous-tag glob would pick it up"
+
+  # An *annotated* tag is a real git object, so git demands a committer
+  # identity to write it. A GitHub runner's checkout has none, so `git tag -a`
+  # dies with "fatal: empty ident name ... not allowed" (exit 128) — which is
+  # exactly how the #1139 fix shipped, failing every release from watch/v2.2.1
+  # through v2.4.2 and leaving sandbox containers with no downloadable binary
+  # for the plugin version the marketplace serves them. The identity must be
+  # configured in this same step (each `run:` block is its own shell, and no
+  # earlier step sets one) and before the tag is written.
+  ALIAS_NAME_LINE="$(echo "$ALIAS_BLOCK" | grep -n 'git config user\.name' | sed -n 1p | cut -d: -f1)"
+  ALIAS_EMAIL_LINE="$(echo "$ALIAS_BLOCK" | grep -n 'git config user\.email' | sed -n 1p | cut -d: -f1)"
+  ALIAS_TAG_LINE="$(echo "$ALIAS_BLOCK" | grep -n 'git tag -f -a' | sed -n 1p | cut -d: -f1)"
+  if [[ -z "$ALIAS_NAME_LINE" || -z "$ALIAS_EMAIL_LINE" ]]; then
+    fail "the alias-tag step must configure git user.name and user.email — an annotated tag without a committer identity fails with 'fatal: empty ident name' (exit 128)"
+  elif [[ -n "$ALIAS_TAG_LINE" ]]; then
+    (( ALIAS_NAME_LINE < ALIAS_TAG_LINE && ALIAS_EMAIL_LINE < ALIAS_TAG_LINE )) ||
+      fail "the alias-tag step must configure the committer identity before it runs 'git tag -f -a'"
+  fi
 fi
 
 # Sanity-check the file is actually being read (a typo'd $RELEASE path
