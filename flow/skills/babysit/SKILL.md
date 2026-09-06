@@ -66,6 +66,32 @@ cenci babysit stop <pr>
 Report the command's result. Do not reproduce the polling pipeline in the agent session,
 arm Claude `/loop`, create a Codex goal, or maintain `${TMPDIR:-/tmp}/cenci` state.
 
+## Where the supervisor runs
+
+The supervisor always runs on the host — never inside a `cenci sandbox` container. Running
+`cenci babysit` from inside a sandboxed session (`CENCI_SANDBOX=1`) never starts a local
+supervisor there; the CLI forwards the arm request to the host daemon over its event socket
+and reports one of three outcomes: **armed** (the supervisor now runs on the host), **not
+armed** (the host daemon rejected the request — its reason is relayed verbatim, never
+re-derived or re-worded), or **arm status unknown** (the host daemon did not respond before
+the deadline; verify or re-arm from a host tmux pane: `cenci babysit <pr> --agent <agent>`,
+which safely no-ops if a supervisor is already running). `cenci babysit stop` behaves the
+same way from inside a sandbox: it sends no disarm message, it only reports that the
+supervisor runs on the host and exits non-zero, naming the host command to run instead.
+
+**Verify from the host.** From a host tmux pane (not from inside a sandbox), check the
+supervisor's own state directory:
+
+```text
+$XDG_STATE_HOME/cenci/babysit   (fallback: ~/.local/state/cenci/babysit)
+  <12-hex-repo-hash>-<pr>.json  — the supervisor's persisted state for that PR
+  <12-hex-repo-hash>-<pr>.log   — the detached supervisor's stdout/stderr
+```
+
+A `<pr>.json`/`<pr>.log` pair present for the PR means a supervisor is (or was) running for
+it; there is no `cenci babysit status` subcommand, so this state-dir read is the only
+verification available.
+
 ## Safety guarantees
 
 The supervisor never force-pushes. It launches the selected client through `cenci run`

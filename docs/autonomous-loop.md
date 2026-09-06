@@ -310,6 +310,13 @@ references the branch). A merge rejected by branch protection is logged and retr
 never bypassed. A zero-exit `gh pr merge` isn't taken as proof: babysit refetches
 once and requires `MERGED`, otherwise the tick is indeterminate, not successful.
 
+**Arming from a sandbox is forwarded, not local.** Inside a `cenci sandbox` container,
+sandboxed arming is forwarded to the host daemon, which spawns the supervisor host-side —
+`cenci babysit` never starts a supervisor inside the container itself. A rejected forward is
+**not armed**: implement's Phase 9 prints the reason and the host re-arm command instead of
+claiming the PR is being watched, and the loop stalls honestly on that PR — an unarmed PR
+never reaches an automerge tick — rather than silently pretending it is supervised.
+
 ## Reading a decision
 
 Every enabled tick logs exactly one line per PR, including ticks that failed to read
@@ -419,3 +426,4 @@ Accepted and documented, not bugs:
 | The `automerge` config schema, field by field | [configure skill](../flow/skills/configure/SKILL.md) |
 | Lean planning as the planner actually executes it | [Phase 1 — Plan](../flow/skills/implement/phases/phase-1-plan.md) |
 | Which test pins which claim on this page | [Pipeline coverage map](pipeline-coverage-map.md) |
+| Where the supervisor runs, forwarded arming, and the arming/host verification recipe | [cenci-watch README — Automerge](../watch/README.md#automerge-cenci-babysit) |
