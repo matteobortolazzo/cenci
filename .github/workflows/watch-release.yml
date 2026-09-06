@@ -71,6 +71,17 @@ jobs:
       # The alias is local to this runner's checkout and is never pushed. It is
       # deliberately not part of the `watch/v*` namespace, so the previous-tag
       # lookup in the publish step below (`git tag -l 'watch/v*'`) cannot see it.
+      #
+      # An annotated tag is a real git object, so git writes a tagger line and
+      # refuses without a committer identity. A runner's checkout has none, so
+      # the step as first shipped died with "fatal: empty ident name ... not
+      # allowed" (exit 128) and took every release from watch/v2.2.1 through
+      # v2.4.2 down with it — the same silent-watch-in-every-sandbox outage
+      # #1139 was opened for, just one step further along. The identity is set
+      # here rather than in an earlier step because each `run:` block is its
+      # own shell and no other step in this job configures one; it matches the
+      # `github-actions[bot]` identity plugin-version-bump.yml and deps-bump.yml
+      # already use.
       - name: Materialise the clean-semver alias tag for GoReleaser
         env:
           VERSION: ${{ steps.v.outputs.version }}
@@ -81,6 +92,8 @@ jobs:
             echo "::error::expected tag ${TAG} to be present in this checkout" >&2
             exit 1
           fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
           git tag -f -a "v${VERSION}" -m "cenci-watch v${VERSION}" "refs/tags/${TAG}^{commit}"
 
       - name: Build release artifacts
