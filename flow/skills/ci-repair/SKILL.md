@@ -2,7 +2,8 @@
 name: ci-repair
 description: Diagnose and repair failing CI for an existing pull request without reopening the implementation pipeline.
 argument-hint: <pr-number> <head-branch> <failing-checks>
-user-invocable: false
+user-invocable: true
+disable-model-invocation: true
 ---
 
 Read `project-core`, `testing`, `shell-rules`, and `subagent-safety`. Diagnose the named
