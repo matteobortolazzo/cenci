@@ -127,6 +127,18 @@ const (
 	// but successfully-read non-MERGED state.
 	reasonMergeIndeterminate    = "gh pr merge exited zero but PR is not MERGED"
 	reasonMergeVerifyUnreadable = "post-merge verification read failed"
+	// reasonMergeHeadMismatch (#897): the post-merge refetch reports MERGED,
+	// but its headRefOid is either empty or does not byte-equal the headSHA
+	// executeMerge was called with (the same commit --match-head-commit
+	// pinned) -- a refetch reporting MERGED is not, by itself, proof that
+	// babysit's own merge is what landed; another actor could have merged a
+	// different commit in the race between the pre-merge head-SHA validation
+	// and this refetch. Covers both the mismatch and the empty-headRefOid
+	// case (fail closed per watch/docs/error-handling.md's default-deny
+	// rule -- absence is never proof); Detail distinguishes them. Sets no
+	// FailureClass: no `gh` transport failure occurred, only a refetch that
+	// disproves this was babysit's own merge.
+	reasonMergeHeadMismatch = "PR merged at a different head commit"
 
 	// One-decision-per-tick (Decision 7): every enabled automerge tick
 	// persists and logs exactly one full decision, including an upstream
@@ -268,7 +280,7 @@ type automergeInputs struct {
 	RepairPending bool
 	PendingKeys   []string
 	// FeedbackHold is the feedback-resolution verdict for this evaluation
-	// pass -- reconcileFeedback's (tick's mutating end-of-tick pass) or
+	// pass -- reconcileFeedback's (tick's own mutating resolution pass) or
 	// revalidateFeedback's (the pre-merge recheck's read-only pass, #885):
 	// one of the five feedback-hold reason constants (unreadable, truncated,
 	// unknown, unsupported, or reopened) when GitHub's review-feedback state
@@ -1051,12 +1063,14 @@ func recordUpstreamReadFailure(s *State, reason string, err error) {
 // a PR held by an earlier stage costs zero extra `gh` calls beyond the
 // labels fetch. verdict is reconcileFeedback's already-computed result
 // (#850, generalized by #885 to reclassify AddressedKeys too): tick calls
-// reconcileFeedback once, unconditionally, at the end of tick -- after the
-// reviews loop, after this tick's new keys are recorded onto PendingKeys,
-// and after the single PendingKeys-\-LaunchedKeys address-review launch --
-// immediately before calling runAutomerge, so s.PendingKeys/s.AddressedKeys
-// already reflect GitHub-authoritative resolution (including any reopen) by
-// the time runAutomerge reads them below. It persists exactly one decision via
+// reconcileFeedback once, unconditionally, right after the reviews fetch --
+// before this tick's new keys are even detected via detectNewFeedbackKeys and
+// appended onto PendingKeys, and before the single PendingKeys-\-LaunchedKeys
+// address-review launch (#897: reordered so a brand-new comment on an
+// already-resolved thread is not silently classified away in the same tick it
+// lands) -- immediately before calling runAutomerge, so s.PendingKeys/
+// s.AddressedKeys already reflect GitHub-authoritative resolution (including
+// any reopen) by the time runAutomerge reads them below. It persists exactly one decision via
 // recordDecision and returns whether a merge was actually issued this tick,
 // so tick can reset the backoff delay.
 func runAutomerge(s *State, pr prView, checks []check, verdict feedbackVerdict, commentsComplete, reviewsComplete bool) bool {

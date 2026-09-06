@@ -30,6 +30,32 @@ import "strings"
 // for machine-readable state.
 const mergeAttributionBanner = "> 🤖 **cenci** — merged automatically by `cenci babysit` (automerge policy). No human approved this merge."
 
+// commentBannerPrefix (#897) is the prefix -- through the em dash -- of the
+// cenci attribution banner every flow-posted comment opens with, per
+// flow/docs/comment-attribution.md (source of truth for the exact literal).
+// detectNewFeedbackKeys (babysit.go) is the one sanctioned machine-read of
+// this banner, named as a narrow, explicitly-scoped exception in that doc: it
+// matches a comment's first line against this prefix only -- never a
+// substring scan of the whole body -- to exclude cenci's own address-review
+// inline replies (flow/skills/address-review/SKILL.md's "Posting Replies"
+// template, the one producer this filter's consumer pairs with) from
+// re-triggering dispatch once a reply lands on an already-resolved thread. A
+// prefix, not one full banner literal, since every cenci-posted comment body
+// this filter must recognize shares this same opening regardless of which
+// call site produced it. A drift in this prefix against the doc's literal
+// would silently un-filter cenci's own replies.
+const commentBannerPrefix = "> 🤖 **cenci** —"
+
+// isCommentBannerFirstLine reports whether body's first line opens with
+// commentBannerPrefix -- narrowly scoped to the first line only (never a
+// substring scan of the whole body), so a human quoting cenci's own reply
+// later in a genuine new comment is still detected normally
+// (watch/AGENTS.md's narrow-the-exclusion rule).
+func isCommentBannerFirstLine(body string) bool {
+	firstLine, _, _ := strings.Cut(body, "\n")
+	return strings.HasPrefix(firstLine, commentBannerPrefix)
+}
+
 // mergeAttributionTrustNote is the disclaimer every attribution comment
 // carries. flow/docs/comment-attribution.md is explicit that the banner is
 // human-facing attribution only and never a trust signal: `gh` acts under

@@ -419,6 +419,25 @@ if [[ -n "${address_review}" ]]; then
     "951 flow/skills/address-review/SKILL.md general PR comment: attribution banner missing"
 fi
 
+# --- 11d (#897). The inline thread-reply template in "## Posting Replies"
+#     (the pulls/<number>/comments/<comment-id>/replies call) must open with
+#     the SAME attribution banner the general-PR-comment path in the same
+#     section already carries (ticket #897 Assumption: no new banner
+#     variant) -- without it, watch's new banner-first-line detection filter
+#     (#897 Item 3) matches zero comments, and every address-review reply
+#     round re-triggers a spurious dispatch. Scoped to the inline-reply block
+#     only (from the "## Posting Replies" heading up to the "For general PR
+#     review comments" paragraph) per docs/skill-authoring.md's
+#     scope-the-predicate rule, so this never re-uses (or is satisfied by)
+#     case 11a's already-pinned general-PR-comment occurrence of the same
+#     literal below it. -----------------------------------------------------
+
+if [[ -n "${address_review}" ]]; then
+  INLINE_REPLY_BLOCK_897="$(awk '/^## Posting Replies$/{flag=1} flag && /^For general PR review comments/{exit} flag' <<<"${address_review}")"
+  assert_contains "${INLINE_REPLY_BLOCK_897}" "${PIN_951_ADDRESS_REVIEW_BANNER}" \
+    "897 flow/skills/address-review/SKILL.md Posting Replies inline-reply template: attribution banner missing"
+fi
+
 # --- 11b. Each of the three new `<!-- cenci-<kind> -->` markers occurs in
 #     exactly one file under flow/skills/. Scoped to the three non-escalation
 #     marker-bearing sites (plan-comment, parent-gap-report,

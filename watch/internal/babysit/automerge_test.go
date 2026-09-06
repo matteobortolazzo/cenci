@@ -1419,6 +1419,12 @@ func TestTickAutomergePostMergeVerificationConfirmsMerged(t *testing.T) {
 	if viewCalls != 3 {
 		t.Fatalf("pr view calls = %d, want exactly 3: the tick's own fetch, the pre-merge re-check's re-fetch, plus one post-merge verification refetch", viewCalls)
 	}
+	// #897: a matching headRefOid must still confirm success and post exactly
+	// one attribution comment -- the new head-SHA guard must never suppress
+	// this pre-existing, unchanged behavior.
+	if n := commentCallCount(calls); n != 1 {
+		t.Fatalf("gh pr comment calls = %d, want exactly 1: a matching head-SHA refetch must still post the attribution comment", n)
+	}
 }
 
 // TestTickAutomergePostMergeVerificationIndeterminateWhenNotMerged pins
@@ -1470,6 +1476,164 @@ func TestTickAutomergePostMergeVerificationReadFailureIsDistinctReason(t *testin
 	}
 	if s.AutomergeReason != reasonMergeVerifyUnreadable {
 		t.Fatalf("AutomergeReason = %q, want %q: a refetch failure must be distinct from reasonMergeIndeterminate", s.AutomergeReason, reasonMergeVerifyUnreadable)
+	}
+}
+
+// commentCallCount counts how many `gh pr comment` invocations appear in
+// calls -- the automerge attribution comment (#1049) must fire on a
+// confirmed merge and must never fire on any hold path, including the new
+// #897 head-SHA-mismatch/empty holds below.
+func commentCallCount(calls [][]string) int {
+	n := 0
+	for _, c := range calls {
+		if len(c) > 2 && c[1] == "pr" && c[2] == "comment" {
+			n++
+		}
+	}
+	return n
+}
+
+// -- #897: post-merge head-SHA verification -----------------------------------
+//
+// executeMerge's refetch reporting state == "MERGED" is not, by itself, proof
+// that headSHA (the exact commit --match-head-commit pinned) is the commit
+// that actually got merged: another actor could have merged a different
+// commit in the narrow race between babysit's own pre-merge validation and
+// this post-merge refetch. Every case below must hold under the new
+// reasonMergeHeadMismatch, with FailureClass empty (no `gh` transport error
+// occurred), Detail naming both the pinned and observed head SHA, and zero
+// `gh pr comment` calls -- the attribution comment must never fire for a
+// merge babysit did not confirm it performed.
+
+// mergedPRWithHeadRefOID renders a `pr view` MERGED-state fixture identical
+// to automergeEligiblePR() except for headRefOid, so a test can isolate the
+// post-merge refetch's reported head commit as the single mutated field.
+func mergedPRWithHeadRefOID(headRefOID string) string {
+	return fmt.Sprintf(`{"number":42,"title":"Change","state":"MERGED","headRefName":"feature","headRefOid":%q,"baseRefName":"main","mergeable":"MERGEABLE","isDraft":false,"changedFiles":1,"additions":5,"deletions":2,"files":[{"path":"watch/internal/babysit/x.go"}],"url":"https://example/pr/42","closingIssuesReferences":[{"number":9}]}`, headRefOID)
+}
+
+// TestTickAutomergePostMergeHeadMismatchZeroExitHoldsUnderDistinctReason is
+// AC 1/2/4's zero-exit half: `gh pr merge` reports success, but the
+// unconditional post-merge refetch reports MERGED at a *different* head
+// commit than the one --match-head-commit pinned -- this must never be
+// recorded as a confirmed merge, regardless of the merge command's own exit
+// status.
+func TestTickAutomergePostMergeHeadMismatchZeroExitHoldsUnderDistinctReason(t *testing.T) {
+	withFleetAutomergeEnabled(t, true)
+	var calls [][]string
+	mismatchedPR := mergedPRWithHeadRefOID("different")
+	script := automergeFirstPassScript() // pinned head commit "abc" throughout
+	script = append(script, automergeGreenRecheckScript()...)
+	script = append(script,
+		scriptedCall{out: "Merged pull request #42 (o/r)"}, // gh pr merge, zero exit
+		scriptedCall{out: mismatchedPR},                    // post-merge refetch: MERGED, but at a different head commit
+	)
+	withScriptedCommands(t, script, &calls)
+
+	s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 900}
+	if _, _, err := tick(&s); err != nil {
+		t.Fatal(err)
+	}
+	if s.AutomergeDecision != "held" {
+		t.Fatalf("AutomergeDecision = %q, want \"held\": a refetch reporting MERGED at a different head commit must never be confirmed success", s.AutomergeDecision)
+	}
+	if s.AutomergeReason != reasonMergeHeadMismatch {
+		t.Fatalf("AutomergeReason = %q, want %q", s.AutomergeReason, reasonMergeHeadMismatch)
+	}
+	if s.AutomergeFailureClass != "" {
+		t.Fatalf("AutomergeFailureClass = %q, want empty: no gh transport failure occurred, only a merged-at-the-wrong-commit mismatch", s.AutomergeFailureClass)
+	}
+	if !strings.Contains(s.AutomergeDetail, "abc") || !strings.Contains(s.AutomergeDetail, "different") {
+		t.Fatalf("AutomergeDetail = %q, want it to name both the pinned SHA (abc) and the observed SHA (different)", s.AutomergeDetail)
+	}
+	if n := commentCallCount(calls); n != 0 {
+		t.Fatalf("gh pr comment calls = %d, want 0: a head-SHA mismatch must never post the attribution comment", n)
+	}
+	if n := mergeCallCount(calls); n != 1 {
+		t.Fatalf("gh pr merge calls = %d, want exactly 1: no retry", n)
+	}
+}
+
+// TestTickAutomergePostMergeHeadMismatchNonzeroExitHoldsUnderDistinctReason is
+// AC 1/2/4's nonzero-exit half: the same head-SHA mismatch, but this time
+// `gh pr merge` itself also exited nonzero -- Detail must still name both
+// SHAs, plus fold in the merge command's own stderr (the mismatch branch
+// returns directly and must never fall through to reasonMergeFailed, which
+// would otherwise be the only place that stderr is captured).
+func TestTickAutomergePostMergeHeadMismatchNonzeroExitHoldsUnderDistinctReason(t *testing.T) {
+	withFleetAutomergeEnabled(t, true)
+	var calls [][]string
+	mismatchedPR := mergedPRWithHeadRefOID("different")
+	script := automergeFirstPassScript()
+	script = append(script, automergeGreenRecheckScript()...)
+	script = append(script,
+		scriptedCall{out: "merge conflict detected mid-flight", err: errors.New("exit status 1")}, // gh pr merge, nonzero exit
+		scriptedCall{out: mismatchedPR}, // post-merge refetch: MERGED, but at a different head commit
+	)
+	withScriptedCommands(t, script, &calls)
+
+	s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 900}
+	if _, _, err := tick(&s); err != nil {
+		t.Fatal(err)
+	}
+	if s.AutomergeReason != reasonMergeHeadMismatch {
+		t.Fatalf("AutomergeReason = %q, want %q: mismatch must hold under the new reason regardless of the merge command's own exit status", s.AutomergeReason, reasonMergeHeadMismatch)
+	}
+	if s.AutomergeReason == reasonMergeFailed {
+		t.Fatal("AutomergeReason must never fall through to reasonMergeFailed once the refetch itself proves a head-commit mismatch")
+	}
+	if s.AutomergeFailureClass != "" {
+		t.Fatalf("AutomergeFailureClass = %q, want empty", s.AutomergeFailureClass)
+	}
+	if !strings.Contains(s.AutomergeDetail, "abc") || !strings.Contains(s.AutomergeDetail, "different") {
+		t.Fatalf("AutomergeDetail = %q, want it to name both the pinned SHA (abc) and the observed SHA (different)", s.AutomergeDetail)
+	}
+	if !strings.Contains(s.AutomergeDetail, "merge conflict detected mid-flight") {
+		t.Fatalf("AutomergeDetail = %q, want it to also fold in the merge command's own stderr since it exited nonzero", s.AutomergeDetail)
+	}
+	if n := commentCallCount(calls); n != 0 {
+		t.Fatalf("gh pr comment calls = %d, want 0", n)
+	}
+}
+
+// TestTickAutomergePostMergeEmptyHeadRefOidHoldsFailClosed is AC 3: an empty
+// headRefOid on the post-merge refetch must hold identically to an explicit
+// mismatch (watch/docs/error-handling.md's default-deny rule -- absence is
+// never proof), not be tolerated the way the separate pre-merge TOCTOU guard
+// (automerge.go:1194) tolerates an empty headRefOid.
+func TestTickAutomergePostMergeEmptyHeadRefOidHoldsFailClosed(t *testing.T) {
+	withFleetAutomergeEnabled(t, true)
+	var calls [][]string
+	emptyHeadRefOidPR := mergedPRWithHeadRefOID("")
+	script := automergeFirstPassScript()
+	script = append(script, automergeGreenRecheckScript()...)
+	script = append(script,
+		scriptedCall{out: "Merged pull request #42 (o/r)"}, // gh pr merge, zero exit
+		scriptedCall{out: emptyHeadRefOidPR},               // post-merge refetch: MERGED, but headRefOid empty
+	)
+	withScriptedCommands(t, script, &calls)
+
+	s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 900}
+	if _, _, err := tick(&s); err != nil {
+		t.Fatal(err)
+	}
+	if s.AutomergeDecision != "held" {
+		t.Fatalf("AutomergeDecision = %q, want \"held\": an empty headRefOid must fail closed, never be read as proof of anything", s.AutomergeDecision)
+	}
+	if s.AutomergeReason != reasonMergeHeadMismatch {
+		t.Fatalf("AutomergeReason = %q, want %q", s.AutomergeReason, reasonMergeHeadMismatch)
+	}
+	if s.AutomergeFailureClass != "" {
+		t.Fatalf("AutomergeFailureClass = %q, want empty", s.AutomergeFailureClass)
+	}
+	if !strings.Contains(s.AutomergeDetail, "abc") {
+		t.Fatalf("AutomergeDetail = %q, want it to name the pinned SHA (abc)", s.AutomergeDetail)
+	}
+	if !strings.Contains(s.AutomergeDetail, `observed ""`) {
+		t.Fatalf("AutomergeDetail = %q, want it to name the observed value as explicitly empty (observed \"\")", s.AutomergeDetail)
+	}
+	if n := commentCallCount(calls); n != 0 {
+		t.Fatalf("gh pr comment calls = %d, want 0", n)
 	}
 }
 

@@ -506,34 +506,91 @@ func tick(s *State) (bool, time.Duration, error) {
 		recordUpstreamReadFailure(s, reasonUpstreamReviewsUnreadable, err)
 		return false, 0, err
 	}
-	keys, newest := detectNewFeedbackKeys(s, comments, reviews)
+	// #897: snapshot the entry-time watermark before reconcileFeedback runs
+	// below -- reconcileFeedback can advance s.LastCommentAt, so
+	// detectNewFeedbackKeys compares this tick's new comments against this
+	// snapshot rather than the (possibly already-advanced) live value. See
+	// detectNewFeedbackKeys' own doc comment for why (AC 8's same-second
+	// non-narrowing case).
+	since := s.LastCommentAt
+	// #850/#885/#897: re-fetch authoritative review-feedback state before
+	// this tick's own new-feedback detection runs (reordered from "after,"
+	// #897 AC 6/7/8) -- a brand-new comment on a thread GitHub already
+	// reports resolved must not be classified away by this same tick's own
+	// reconcile pass before the PendingKeys \ LaunchedKeys launch trigger
+	// below ever sees it. Runs unconditionally, regardless of whether
+	// automerge itself is enabled, since the launch-dedup/AddressedKeys
+	// bookkeeping it performs matters independent of automerge.
+	// reconcileFeedback also reclassifies every previously-addressed key
+	// against fresh GitHub state (#885), so a reopened thread or review is
+	// caught here even though its key already lives in AddressedKeys;
+	// verdict.Reopened names any such key.
+	verdict := reconcileFeedback(s, reviews, reviewsComplete)
+	if len(verdict.Reopened) > 0 {
+		actionable = true
+	}
+	keys, newest := detectNewFeedbackKeys(s, comments, reviews, since)
 	if len(keys) > 0 {
 		s.PendingKeys = append(s.PendingKeys, keys...)
 		s.PendingCommentAt = newest
 		s.PendingHeadSHA = pr.HeadRefOID
 		actionable = true
 	}
-	// #850/#885: re-fetch authoritative review-feedback state at the end of
-	// tick, after this tick's new keys are recorded, and immediately before
-	// deciding what (if anything) to (re)launch -- runs unconditionally,
-	// regardless of whether automerge itself is enabled, since the
-	// launch-dedup/AddressedKeys bookkeeping it performs matters independent
-	// of automerge. reconcileFeedback also reclassifies every previously-
-	// addressed key against fresh GitHub state (#885), so a reopened thread
-	// or review is caught here even though its key already lives in
-	// AddressedKeys; verdict.Reopened names any such key.
-	verdict := reconcileFeedback(s, reviews, reviewsComplete)
-	if len(verdict.Reopened) > 0 {
-		actionable = true
+	// #897 (guards a #920 chain-suite regression): a newly-detected
+	// CHANGES_REQUESTED review already superseded by a later effective
+	// review from the same reviewer resolves immediately, in this same
+	// tick -- unlike a comment on an already-resolved thread, a review's
+	// resolution is fully determined by this tick's own already-fetched
+	// reviews list (latestEffectiveReview), with no separate async fetch
+	// whose result could go stale between detection and classification, so
+	// there is no reason to defer it to the next tick the way the
+	// comment-on-resolved-thread fix above must. Scoped to only the review
+	// keys detectNewFeedbackKeys just returned -- never touches any
+	// already-tracked pending/addressed key -- so it can never reintroduce
+	// the comment-swallow bug the reorder above exists to fix. Gated on
+	// reviewsComplete (#854): an unproven-complete reviews read must never
+	// be trusted to declare a review already superseded.
+	if reviewsComplete {
+		resolvedAny := false
+		for _, key := range keys {
+			id, ok := strings.CutPrefix(key, "review:")
+			if !ok {
+				continue
+			}
+			reviewID, err := strconv.ParseInt(id, 10, 64)
+			if err != nil {
+				continue
+			}
+			target := findReview(reviews, reviewID)
+			if target == nil {
+				continue
+			}
+			latest, ok := latestEffectiveReview(reviews, target.User.Login)
+			if !ok || latest.ID == target.ID {
+				continue
+			}
+			if latest.State != "APPROVED" && latest.State != "DISMISSED" {
+				continue
+			}
+			s.PendingKeys = removeKeys(s.PendingKeys, []string{key})
+			s.AddressedKeys = append(s.AddressedKeys, key)
+			resolvedAny = true
+		}
+		if resolvedAny && len(s.PendingKeys) == 0 && s.PendingCommentAt != "" {
+			s.LastCommentAt = s.PendingCommentAt
+			s.PendingCommentAt, s.PendingHeadSHA = "", ""
+		}
 	}
-	// #885: the single per-tick address-review launch trigger, driven by
+	// #885/#897: the single per-tick address-review launch trigger, driven by
 	// PendingKeys \ LaunchedKeys -- covers both this tick's brand-new keys
-	// and any key reconcileFeedback just reopened above, exactly once per
-	// resolution episode (Decision 3). A launch failure still leaves the
-	// keys recorded as pending (merge safety must not depend on launch
-	// success) but out of LaunchedKeys, so the very next tick retries --
-	// matching today's effectively-unbounded retry behavior, no
-	// fixCap-style cap.
+	// (detected above, after reconcileFeedback) and any key reconcileFeedback
+	// just reopened above, exactly once per resolution episode (Decision 3).
+	// Runs last, after both reconcileFeedback and detectNewFeedbackKeys, so
+	// it always sees this tick's complete PendingKeys. A launch failure
+	// still leaves the keys recorded as pending (merge safety must not
+	// depend on launch success) but out of LaunchedKeys, so the very next
+	// tick retries -- matching today's effectively-unbounded retry behavior,
+	// no fixCap-style cap.
 	if toLaunch := removeKeys(s.PendingKeys, s.LaunchedKeys); len(toLaunch) > 0 {
 		if err := launch(s, "address-review", s.PR); err != nil {
 			recordUpstreamReadFailure(s, reasonWorkflowLaunchFailed, err)
@@ -597,12 +654,24 @@ func launch(s *State, workflow, arg string) error {
 // that function mutates State and re-fetches GraphQL thread
 // resolution, risking double-bookkeeping and unable to detect feedback that
 // landed strictly between this tick's own fetch and the merge attempt).
-// Given s's already-recorded AddressedKeys/PendingKeys and LastCommentAt, it
-// reports every comment/review key in comments/reviews not already seen,
-// ignoring bot authors, plus the newest timestamp found (s.LastCommentAt
-// when nothing new was found) -- identical to tick's pre-#854 inline
-// computation, just factored out; it mutates nothing.
-func detectNewFeedbackKeys(s *State, comments []comment, reviews []review) (keys []string, newest string) {
+// Given s's already-recorded AddressedKeys/PendingKeys and an explicit since
+// watermark, it reports every comment/review key in comments/reviews not
+// already seen, timestamped strictly after since, ignoring bot authors and
+// cenci's own banner-first-line replies (#897 -- see commentBannerPrefix's
+// doc comment in attribution.go), plus the newest timestamp found (seeded
+// from the live s.LastCommentAt, never from since, so the watermark this
+// returns can never move backward).
+//
+// since (#897, Decision/Q2) is an explicit parameter rather than always
+// reading s.LastCommentAt directly: tick's caller snapshots s.LastCommentAt
+// *before* reconcileFeedback runs and passes that snapshot here, since
+// reconcileFeedback can advance s.LastCommentAt earlier in the same tick.
+// Without this, a same-second comment landing after a prior tick's fetch
+// would be permanently dropped once reconcile advances the watermark to that
+// same second -- narrowing detection, which AC 8 forbids. The pre-merge
+// recheck (merge.go's recheckAutomergeInputs) passes s.LastCommentAt
+// directly, preserving its existing behavior byte-for-byte.
+func detectNewFeedbackKeys(s *State, comments []comment, reviews []review, since string) (keys []string, newest string) {
 	seen := map[string]bool{}
 	for _, key := range append(append([]string{}, s.AddressedKeys...), s.PendingKeys...) {
 		seen[key] = true
@@ -614,7 +683,7 @@ func detectNewFeedbackKeys(s *State, comments []comment, reviews []review) (keys
 			ts = c.CreatedAt
 		}
 		key := "comment:" + strconv.FormatInt(c.ID, 10)
-		if !seen[key] && ts > s.LastCommentAt && !strings.HasSuffix(c.User.Login, "[bot]") {
+		if !seen[key] && ts > since && !strings.HasSuffix(c.User.Login, "[bot]") && !isCommentBannerFirstLine(c.Body) {
 			keys = append(keys, key)
 			if ts > newest {
 				newest = ts
@@ -623,7 +692,7 @@ func detectNewFeedbackKeys(s *State, comments []comment, reviews []review) (keys
 	}
 	for _, r := range reviews {
 		key := "review:" + strconv.FormatInt(r.ID, 10)
-		if r.State == "CHANGES_REQUESTED" && !seen[key] && r.SubmittedAt > s.LastCommentAt && !strings.HasSuffix(r.User.Login, "[bot]") {
+		if r.State == "CHANGES_REQUESTED" && !seen[key] && r.SubmittedAt > since && !strings.HasSuffix(r.User.Login, "[bot]") {
 			keys = append(keys, key)
 			if r.SubmittedAt > newest {
 				newest = r.SubmittedAt

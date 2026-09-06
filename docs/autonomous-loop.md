@@ -355,7 +355,12 @@ late flip is never confused with an ordinary first-pass hold.
 **Merges are squash-only** and never `--delete-branch` (a PR worktree still
 references the branch). A merge rejected by branch protection is logged and retried,
 never bypassed. A zero-exit `gh pr merge` isn't taken as proof: babysit refetches
-once and requires `MERGED`, otherwise the tick is indeterminate, not successful.
+once and requires the refetch to report `MERGED` **at the head commit babysit
+pinned** — a refetch reporting `MERGED` at a different (or empty) head commit
+holds under its own distinct reason, never confirmed success, since another actor
+could have merged a different commit in the race between babysit's own
+validation and this refetch. Otherwise (not `MERGED` at all) the tick is
+indeterminate, not successful.
 
 **Arming from a sandbox is forwarded, not local.** Inside a `cenci sandbox` container,
 sandboxed arming is forwarded to the host daemon, which spawns the supervisor host-side —

@@ -116,7 +116,7 @@ func recheckAutomergeInputs(s *State, first automergeInputs) (automergeInputs, s
 		in.IssueLabels, in.LabelsErr = fetchClosingIssueLabels(s.Repo, in.ClosingIssues)
 	}
 
-	newKeys, _ := detectNewFeedbackKeys(s, comments, reviews)
+	newKeys, _ := detectNewFeedbackKeys(s, comments, reviews, s.LastCommentAt)
 	in.PendingKeys = append(append([]string{}, revalidatedPending...), newKeys...)
 
 	cfg, err := fetchPolicy(s.Repo, pr.BaseRefName)
@@ -193,18 +193,24 @@ func fetchMergeQueueState(repo, pr string) (inQueue, enabled *bool, headRefOID s
 // no polling), regardless of the merge command's own exit code (#886): a
 // client-side timeout or transient network blip can make `gh pr merge`
 // itself report failure even though the merge actually landed, so the
-// refetch -- not the exit code -- is the sole source of truth. Four
+// refetch -- not the exit code -- is the sole source of truth. Five
 // outcomes: (a) the refetch itself is unreadable -> reasonMergeVerifyUnreadable,
 // never success, regardless of what the merge command reported; (b) the
-// refetch reports state == MERGED -> success, regardless of the merge
+// refetch reports state == MERGED with a headRefOid that is non-empty and
+// byte-equal to headSHA -> confirmed success, regardless of the merge
 // command's exit code (a nonzero exit here gets a diagnostic Detail noting
-// the discrepancy, since it's otherwise silently lost); (c) the refetch is
-// readable but not MERGED and the merge command exited nonzero ->
-// reasonMergeFailed, with the merge command's own stderr (or stdout, if
-// stderr is empty) as Detail; (d) the refetch is readable but not MERGED and
-// the merge command exited zero -> reasonMergeIndeterminate (Decision 6):
-// the exit status alone is never proof. Returns whether the merge was
-// confirmed, plus decision updated with the final
+// the discrepancy, since it's otherwise silently lost); (c) the refetch
+// reports state == MERGED but headRefOid is empty or does not equal headSHA
+// (#897) -> reasonMergeHeadMismatch, never success, regardless of the merge
+// command's exit code -- fail closed (watch/docs/error-handling.md's
+// default-deny rule: an empty headRefOid is not proof of anything) and
+// returns directly, so this never falls through to reasonMergeFailed below;
+// (d) the refetch is readable, not MERGED, and the merge command exited
+// nonzero -> reasonMergeFailed, with the merge command's own stderr (or
+// stdout, if stderr is empty) as Detail; (e) the refetch is readable, not
+// MERGED, and the merge command exited zero -> reasonMergeIndeterminate
+// (Decision 6): the exit status alone is never proof. Returns whether the
+// merge was confirmed, plus decision updated with the final
 // Merge/Reason/Detail/FailureClass.
 func executeMerge(s *State, headSHA string, decision automergeDecision) (bool, automergeDecision) {
 	mergeStdout, mergeStderr, mergeErr := execGh("pr", "merge", s.PR, "--repo", s.Repo, "--squash", "--match-head-commit", headSHA)
@@ -219,6 +225,23 @@ func executeMerge(s *State, headSHA string, decision automergeDecision) (bool, a
 	}
 
 	if fresh.State == "MERGED" {
+		if fresh.HeadRefOID == "" || fresh.HeadRefOID != headSHA {
+			decision.Merge = false
+			decision.Reason = reasonMergeHeadMismatch
+			decision.FailureClass = ""
+			detail := fmt.Sprintf("PR reports MERGED but the post-merge refetch's head commit does not match the pinned head commit: pinned %q, observed %q", headSHA, fresh.HeadRefOID)
+			if mergeErr != nil {
+				stderrOrStdout := strings.TrimSpace(mergeStderr)
+				if stderrOrStdout == "" {
+					stderrOrStdout = strings.TrimSpace(mergeStdout)
+				}
+				if stderrOrStdout != "" {
+					detail = fmt.Sprintf("%s; gh pr merge exited nonzero: %s", detail, stderrOrStdout)
+				}
+			}
+			decision.Detail = sanitizeDetail(detail)
+			return false, decision
+		}
 		decision.Merge = true
 		decision.Reason = ""
 		decision.Detail = ""

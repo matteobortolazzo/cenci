@@ -19,6 +19,20 @@ machine-trustworthy signals are the `<!-- cenci-<kind> -->` marker — read
 banner-only comment with no real marker never passes — and, for the one
 nonce-bearing kind, the posting comment's own immutable numeric ID.
 
+**Narrow exception (#897): `watch/internal/babysit`'s new-feedback detection
+filter.** This is the one sanctioned machine-read of the banner text itself,
+and it takes precedence over the "none ever should" rule above for this one
+bounded case only. `detectNewFeedbackKeys` (`watch/internal/babysit/babysit.go`)
+matches a PR comment's **first line only** against the banner's documented
+prefix (`> 🤖 **cenci** —`, through the em dash) to exclude cenci's own
+address-review inline replies from re-triggering dispatch once a reply lands
+on an already-resolved thread. Blast radius is bounded and one-directional: a
+forged or quoted banner can only suppress that *same* comment's own ability
+to register as new feedback — it can never forge resolution of another
+comment, and it authenticates nothing. Every other consumer, and the
+`<!-- cenci-<kind> -->` marker's own role as the sole *authentication*
+signal, are unchanged by this exception.
+
 ## The convention
 
 Every flow-posted comment body opens with a **blockquoted** cenci attribution
@@ -156,13 +170,15 @@ the tree, not because either one carries an attribution banner:
 
 ## PR comments: banner only, no marker
 
-Three call sites post to a **PR** thread rather than the ticket's issue
+Four call sites post to a **PR** thread rather than the ticket's issue
 thread — `skills/review/SKILL.md`'s Phase 4 report,
-`skills/address-review/SKILL.md`'s general PR comment, and `watch`'s
-post-merge automerge attribution comment
-(`watch/internal/babysit/attribution.go`, #1049). All three carry the
-attribution banner but no `<!-- cenci-<kind> -->` marker. The marker
-invariant this doc documents is issue-thread-scoped: `classifyComments`
+`skills/address-review/SKILL.md`'s general PR comment and inline
+thread-reply template, and `watch`'s post-merge automerge attribution
+comment (`watch/internal/babysit/attribution.go`, #1049). All four carry the
+attribution banner but no `<!-- cenci-<kind> -->` marker: this covers inline
+review-thread replies as well as general PR comments, so the banner-only
+rule reads as universal across both PR posting paths. The marker invariant
+this doc documents is issue-thread-scoped: `classifyComments`
 (`watch/internal/dispatch/resume.go`) only ever scans
 `repos/<owner>/<repo>/issues/<number>/comments` on the ticket itself, never a
 PR's own comment thread, so a marker on a PR comment would never be read by
