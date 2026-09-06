@@ -2,7 +2,8 @@
 name: babysit-attention
 description: Resolve a paused PR supervisor decision with explicit human input.
 argument-hint: <pr-number> <reason>
-user-invocable: false
+user-invocable: true
+disable-model-invocation: true
 ---
 
 This window was opened by the persistent babysit supervisor because automated progress is

@@ -85,6 +85,8 @@ Codex and OpenCode so neither mistakes a pipeline command for a supported workfl
 | `worktrees` | Yes | Yes | Yes | Git worktree conventions |
 | `address-review` | Yes | In development | No | Native approval/checkpoint foundation |
 | `babysit` | Yes | Yes | Yes | Thin wrapper over the client-neutral `cenci babysit` supervisor |
+| `babysit-attention` | Yes | No | No | Launcher-dispatched by `cenci babysit` when a decision needs a human; no Codex/OpenCode companion yet |
+| `ci-repair` | Yes | No | No | Launcher-dispatched by `cenci babysit` on failing CI; no Codex/OpenCode companion yet |
 | `configure` | Yes | In development | No | Neutral/adapters foundation present |
 | `implement` | Yes | In development | No | Agents/checkpoints foundation |
 | `maintain` | Yes | Yes | No | Full six-phase deterministic-check + worker-audit procedure |
@@ -110,9 +112,9 @@ companion) for every skill, including the internal ones not listed above.
 |---|---|---|---|---|---|
 | `address-review` | Address PR review comments by fetching, evaluating, fixing, replying, pushing, and re-requesting review. | No | Yes | Yes | Yes |
 | `attachments` | Discover, select, download, and inspect GitHub ticket attachments. Use when an issue or pull request contains screenshots, mockups, documents, or uploaded files needed as task context. | Yes | No | Yes | Yes |
-| `babysit-attention` | Resolve a paused PR supervisor decision with explicit human input. | No | No | Yes | No |
+| `babysit-attention` | Resolve a paused PR supervisor decision with explicit human input. | No | Yes | Yes | No |
 | `babysit` | Follow an open PR with the client-neutral cenci supervisor until it merges or closes. | Yes | Yes | Yes | Yes |
-| `ci-repair` | Diagnose and repair failing CI for an existing pull request without reopening the implementation pipeline. | No | No | Yes | No |
+| `ci-repair` | Diagnose and repair failing CI for an existing pull request without reopening the implementation pipeline. | No | Yes | Yes | No |
 | `codex-runtime` | Shared native Codex stage, checkpoint, goal, and agent-adapter contract. | No | No | Yes | No |
 | `configure` | Configure cenci's neutral project core and generate Claude/Codex adapters. | No | Yes | Yes | Yes |
 | `frontend-classification` | Classify whether a ticket is frontend or UI work. Use when deciding whether design-aware planning, visual verification, UI tests, or screenshot capture applies. | Yes | No | Yes | Yes |
