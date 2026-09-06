@@ -2734,8 +2734,13 @@ same read-only probe and reports `[pass]`/`[fail]` to confirm it worked.
 **Binary/daemon didn't bootstrap**: The SessionStart bootstrap fails silently so it
 never blocks the agent. Check the bootstrap log at
 `${TMPDIR:-/tmp}/cenci-bootstrap.log` — it records download, checksum, arch,
-and network failures (e.g. no release published yet, or an unsupported OS/arch). If
-bootstrap can't run, install the binary manually and start the daemon (see
+and network failures (e.g. no release published yet, or an unsupported OS/arch), and
+two more outcomes: a fallback binary was adopted from another known location
+(`/usr/local/bin/cenci`, a sibling plugin-cache version, `$PATH`, …) when the release
+download failed, naming the source path; or no binary could be resolved anywhere,
+naming that too. Either line still means the download itself failed — the log
+records it as the reason regardless of whether a fallback was found. If bootstrap
+can't run, install the binary manually and start the daemon (see
 [Advanced / development](#advanced--development)).
 
 **Names not restoring**: cenci restores names on clean exit (Ctrl+C / SIGTERM) and via the stale sweep. If it was killed with SIGKILL, manually rename windows or restart tmux.
