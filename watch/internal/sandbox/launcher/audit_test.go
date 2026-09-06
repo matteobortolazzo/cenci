@@ -928,20 +928,29 @@ func TestAudit_SecretLeakRegression_NeverEmitsSecretValues(t *testing.T) {
 // TestAudit_JSON_EmptySlicesSerializeAsEmptyArrayNotNull is a dedicated,
 // content-specific regression test (per watch/docs/error-handling.md's
 // rule on error/content-specific assertions (#446)): for the default (no
-// --dind, no --host-network) case, boundaryWeakenings and forwardedEnv
-// must both be empty — Go's json.Marshal serializes a nil slice as
-// `null`, not `[]`, and since "no boundary weakenings" / "no forwarded
-// env" are the common default-safe cases, a nil slice here would routinely break
-// jq '.boundaryWeakenings[]'-style scripting consumers. Asserted via
-// strings.Contains on the raw JSON bytes (not by unmarshaling back into a Go
-// slice, which wouldn't distinguish null from [] after unmarshaling).
+// --dind, no --host-network) case, boundaryWeakenings must be empty — Go's
+// json.Marshal serializes a nil slice as `null`, not `[]`, and since "no
+// boundary weakenings" is the common default-safe case, a nil slice here
+// would routinely break jq '.boundaryWeakenings[]'-style scripting
+// consumers. Asserted via strings.Contains on the raw JSON bytes (not by
+// unmarshaling back into a Go slice, which wouldn't distinguish null from []
+// after unmarshaling).
+//
+// forwardedEnv is covered differently since #1087: a real Audit can no longer
+// produce an empty one, because CENCI_ATTENDED is forwarded on every exec
+// regardless of host state. Its nil-slice guarantee therefore lives at the
+// producer — forwardedEnvVars must return a non-nil slice — plus a marshal of
+// that same emptied slice to prove the serialization itself, so the `null`
+// regression stays closed for any future Posture whose ForwardedEnv genuinely
+// is empty.
 func TestAudit_JSON_EmptySlicesSerializeAsEmptyArrayNotNull(t *testing.T) {
 	repo := newAuditTestRepo(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	// Explicitly clear every provider API key assembleExecEnv would forward
-	// for "claude" (CONTEXT7_API_KEY) so forwardedEnv is deterministically
-	// empty regardless of the host process's own environment.
+	// for "claude" (CONTEXT7_API_KEY) so forwardedEnv carries only the
+	// unconditional CENCI_ATTENDED entry regardless of the host process's own
+	// environment.
 	t.Setenv("CONTEXT7_API_KEY", "")
 	t.Chdir(repo)
 
@@ -959,14 +968,26 @@ func TestAudit_JSON_EmptySlicesSerializeAsEmptyArrayNotNull(t *testing.T) {
 	if !strings.Contains(out, `"boundaryWeakenings":[]`) {
 		t.Errorf("JSON output does not contain \"boundaryWeakenings\":[], want an explicitly empty array (not null); got:\n%s", out)
 	}
-	if !strings.Contains(out, `"forwardedEnv":[]`) {
-		t.Errorf("JSON output does not contain \"forwardedEnv\":[], want an explicitly empty array (not null); got:\n%s", out)
-	}
 	if strings.Contains(out, `"boundaryWeakenings":null`) {
 		t.Errorf("JSON output contains \"boundaryWeakenings\":null; regression — must be an empty array; got:\n%s", out)
 	}
-	if strings.Contains(out, `"forwardedEnv":null`) {
-		t.Errorf("JSON output contains \"forwardedEnv\":null; regression — must be an empty array; got:\n%s", out)
+
+	// forwardedEnv's nil-slice guarantee, at the producer (#1087).
+	if posture.ForwardedEnv == nil {
+		t.Fatal("posture.ForwardedEnv is nil; forwardedEnvVars must always return an allocated slice so the JSON never serializes as null")
+	}
+	emptied := posture
+	emptied.ForwardedEnv = posture.ForwardedEnv[:0]
+	emptiedData, err := json.Marshal(emptied)
+	if err != nil {
+		t.Fatalf("Marshal (emptied forwardedEnv): %v", err)
+	}
+	emptiedOut := string(emptiedData)
+	if !strings.Contains(emptiedOut, `"forwardedEnv":[]`) {
+		t.Errorf("JSON output does not contain \"forwardedEnv\":[], want an explicitly empty array (not null); got:\n%s", emptiedOut)
+	}
+	if strings.Contains(emptiedOut, `"forwardedEnv":null`) {
+		t.Errorf("JSON output contains \"forwardedEnv\":null; regression — must be an empty array; got:\n%s", emptiedOut)
 	}
 }
 
