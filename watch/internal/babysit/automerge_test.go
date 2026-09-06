@@ -82,6 +82,17 @@ func withScriptedCommands(t *testing.T, script []scriptedCall, calls *[][]string
 		}
 		c := script[i]
 		i++
+		// #923: a non-empty stderr always serves out on stdout and stderr on
+		// stderr, regardless of err -- the only way to script "nonzero exit
+		// with valid JSON on stdout AND diagnostic text on stderr" at once,
+		// which every one of gh pr checks' documented exit-8/exit-1 shapes
+		// needs and the err-only convention below cannot express (an error
+		// entry's body always landed on stderr, never stdout). Leaving
+		// stderr empty (the zero value) preserves today's exact behavior for
+		// every pre-existing call site.
+		if c.stderr != "" {
+			return c.out, c.stderr, c.err
+		}
 		if c.err != nil {
 			return "", c.out, c.err
 		}
@@ -96,6 +107,10 @@ func withScriptedCommands(t *testing.T, script []scriptedCall, calls *[][]string
 type scriptedCall struct {
 	out string
 	err error
+	// stderr is additive (#923): see withScriptedCommands' routing rule
+	// above. Every pre-#923 call site leaves it unset ("") and is
+	// unaffected.
+	stderr string
 }
 
 // withFleetAutomergeEnabled points the fleetConfigPath seam at a temp fleet

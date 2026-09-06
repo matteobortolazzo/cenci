@@ -99,8 +99,15 @@ type State struct {
 	// ticket half of BlocksClose's join key (#787).
 	ClosingIssues []int `json:"closingIssues,omitempty"`
 	// CIStatus is the collapsed CI verdict for the supervised PR: "green",
-	// "failing", "pending", or "" when unknown (no checks at all, or no tick
-	// has completed yet). Only "failing"/"pending" hold a window open (#787).
+	// "failing", "pending", ciStatusUnknown ("unknown"), or "" when unknown
+	// (no checks at all, or no tick has completed yet). ciStatusUnknown is
+	// distinct from "": it records that this tick's own gh pr view or gh pr
+	// checks read genuinely failed, as opposed to a PR that legitimately has
+	// zero checks configured. "failing", "pending", and ciStatusUnknown all
+	// hold a window open (#787, #923) -- ciStatusUnknown's hold is unbounded
+	// while the supervisor lives, since a live supervisor's own read failure
+	// never self-heals on its own; `cenci close --force` and `cenci babysit
+	// stop <pr>` are the documented remedies.
 	CIStatus string `json:"ciStatus,omitempty"`
 
 	// Automerge fields (#824). The supervisor's detached mode sets
@@ -395,6 +402,7 @@ func Run(o Options) error {
 func tick(s *State) (bool, time.Duration, error) {
 	var pr prView
 	if err := ghJSON(&pr, "pr", "view", s.PR, "--repo", s.Repo, "--json", prViewFields); err != nil {
+		s.CIStatus = ciStatusUnknown
 		recordUpstreamReadFailure(s, reasonUpstreamPRUnreadable, err)
 		return false, 0, err
 	}
@@ -430,19 +438,21 @@ func tick(s *State) (bool, time.Duration, error) {
 		fmt.Printf("PR #%s %s: %s %s\n", s.PR, strings.ToLower(pr.State), pr.Title, pr.URL)
 		return true, 0, nil
 	}
-	var checks []check
-	if err := ghJSON(&checks, "pr", "checks", s.PR, "--repo", s.Repo, "--json", "bucket,name,state"); err != nil {
-		recordUpstreamReadFailure(s, reasonUpstreamChecksUnreadable, err)
-		return false, 0, err
-	}
-	// Publish the close guard's join key and verdict from data this tick
-	// already fetched — no extra API calls (#787).
+	// Publish the close guard's join key from data this tick already fetched
+	// — no extra API calls (#787) -- before the checks fetch runs, so a
+	// checks failure still leaves it populated (#923).
 	s.ClosingIssues = nil
 	for _, i := range pr.ClosingIssuesReferences {
 		s.ClosingIssues = append(s.ClosingIssues, i.Number)
 	}
+	checks, err := fetchChecks(s.PR, s.Repo)
+	if err != nil {
+		s.CIStatus = ciStatusUnknown
+		recordUpstreamReadFailure(s, reasonUpstreamChecksUnreadable, err)
+		return false, 0, err
+	}
 	s.CIStatus = ciStatus(checks)
-	actionable := false
+	actionable := s.CIStatus == "pending" || (s.CIStatus == "failing" && s.RepairPending)
 	var failing []string
 	for _, c := range checks {
 		if c.Bucket == "fail" {
@@ -792,6 +802,13 @@ func localRepoRoot() string {
 	return gitToplevel()
 }
 
+// ciStatusUnknown records that this tick's own gh pr view or gh pr checks
+// read genuinely failed (#923) -- distinct from ciStatus's own "" return,
+// which means "the PR legitimately has zero checks configured", a state
+// that must never hold the close guard open. ciStatusUnknown does hold it
+// open, alongside "failing"/"pending" (BlocksClose below).
+const ciStatusUnknown = "unknown"
+
 // ciStatus collapses a PR's check buckets into the guard's verdict: any
 // failing check wins, then any pending one, otherwise green. A PR with no
 // checks at all reports "" (unknown), which never holds a window open — a
@@ -854,7 +871,7 @@ func BlocksClose(ticket, repoRoot, stateDirOverride string) (bool, string) {
 		if repoRoot != "" && s.RepoRoot != "" && repoRoot != s.RepoRoot {
 			continue
 		}
-		if s.CIStatus != "failing" && s.CIStatus != "pending" {
+		if s.CIStatus != "failing" && s.CIStatus != "pending" && s.CIStatus != ciStatusUnknown {
 			continue
 		}
 		if !supervisorLive(s) {

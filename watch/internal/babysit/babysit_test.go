@@ -580,6 +580,315 @@ func TestCancelBucketCIStillAllowsClose(t *testing.T) {
 	}
 }
 
+// -- CI exit-code tolerance (#923) -------------------------------------------
+//
+// gh pr checks documents two non-zero "normal state" exit codes -- 8
+// (pending) and 1 (a check failed) -- and both still write complete, valid
+// JSON to stdout. The bare ghJSON call at both of tick's/
+// recheckAutomergeInputs' checks-fetch sites treats every nonzero exit as a
+// hard read failure, so a normal pending or failing poll aborts the tick
+// early, leaving s.ClosingIssues/s.CIStatus unpublished (the close guard's
+// join key and verdict) and never reaching the ci-repair launch or
+// automerge evaluation below it. These tests drive that fetch through tick
+// itself (never an unexported helper directly) via the extended
+// withScriptedCommands stub, which can now express "nonzero exit with JSON
+// on stdout AND text on stderr" in a single scripted call.
+
+// TestTickPendingCIExitCodeToleranceKeepsPollingAtInterval pins the exit-8
+// (pending) carve-out: the checks fetch still decodes the pending-bucket
+// JSON despite the nonzero exit, so the tick reaches the CIStatus/
+// ClosingIssues publication and must not back off (a pending CI poll is a
+// normal, actionable state, not a quiet no-op).
+func TestTickPendingCIExitCodeToleranceKeepsPollingAtInterval(t *testing.T) {
+	prWithIssue := `{"number":42,"title":"Change","state":"OPEN","headRefName":"feature","headRefOid":"abc","url":"https://example/pr/42","closingIssuesReferences":[{"number":782}]}`
+	var calls [][]string
+	withScriptedCommands(t, []scriptedCall{
+		{out: prWithIssue},
+		{
+			out:    `[{"bucket":"pending","name":"test","state":"PENDING"}]`,
+			err:    &ghExitError{code: 8, err: errors.New("exit status 8")},
+			stderr: "Some checks are still pending",
+		},
+		{out: `[]`},
+		{out: `[]`},
+	}, &calls)
+
+	// CurrentDelaySeconds starts already backed off, so an unfixed tick that
+	// still treats this as a quiet no-op (or a hard failure) is visible: the
+	// former would double it further, the latter would leave it untouched.
+	s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 900}
+	if _, _, err := tick(&s); err != nil {
+		t.Fatalf("tick: %v, want a pending-CI poll to succeed", err)
+	}
+	if s.CIStatus != "pending" {
+		t.Errorf("CIStatus = %q, want %q", s.CIStatus, "pending")
+	}
+	if !reflect.DeepEqual(s.ClosingIssues, []int{782}) {
+		t.Errorf("ClosingIssues = %v, want [782]", s.ClosingIssues)
+	}
+	if s.CurrentDelaySeconds != s.IntervalSeconds {
+		t.Errorf("CurrentDelaySeconds = %d, want %d (IntervalSeconds): a pending CI poll must not back off", s.CurrentDelaySeconds, s.IntervalSeconds)
+	}
+	if s.Status == "retrying" {
+		t.Errorf("Status = %q, want tick to never leave the supervisor in a retrying state for a successful pending-CI poll", s.Status)
+	}
+}
+
+// TestTickFailingCIExitCodeToleranceLaunchesCIRepair pins the exit-1
+// (failing) carve-out: the checks fetch still decodes the fail-bucket JSON
+// despite the nonzero exit, reaching the existing failing-checks branch that
+// launches ci-repair -- today's bare ghJSON call aborts before ever getting
+// there. withScriptedCommands (unlike withCommands) installs no tmux seam
+// defaults, so this stubs tmuxHasSession and sets LaunchSession itself
+// (launch_test.go's pattern), or the launch would fail and the tick would
+// exercise reasonWorkflowLaunchFailed instead.
+func TestTickFailingCIExitCodeToleranceLaunchesCIRepair(t *testing.T) {
+	prWithIssue := `{"number":42,"title":"Change","state":"OPEN","headRefName":"feature","headRefOid":"abc","url":"https://example/pr/42","closingIssuesReferences":[{"number":782}]}`
+	var calls [][]string
+	withScriptedCommands(t, []scriptedCall{
+		{out: prWithIssue},
+		{
+			out:    `[{"bucket":"fail","name":"test","state":"FAILURE"}]`,
+			err:    &ghExitError{code: 1, err: errors.New("exit status 1")},
+			stderr: "1 of 1 checks failing",
+		},
+		{out: `[]`},
+		{out: `[]`},
+	}, &calls)
+	originalTmuxHasSession := tmuxHasSession
+	tmuxHasSession = func(string) (bool, error) { return true, nil }
+	t.Cleanup(func() { tmuxHasSession = originalTmuxHasSession })
+
+	s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 60, LaunchSession: "work"}
+	if _, _, err := tick(&s); err != nil {
+		t.Fatalf("tick: %v, want a failing-CI poll to succeed", err)
+	}
+	if s.CIStatus != "failing" {
+		t.Errorf("CIStatus = %q, want %q", s.CIStatus, "failing")
+	}
+	if _, found := launchCallArgs(calls, "ci-repair"); !found {
+		t.Fatalf("ci-repair was not launched: %#v", calls)
+	}
+}
+
+// TestTickChecksUndecodableExitOneNoChecksReportedIsBenign pins the narrow
+// exit-1-only stderr fallback: when stdout does not decode at all AND
+// stderr matches "no checks reported", the PR genuinely has no checks yet --
+// a benign, non-error state, not a read failure.
+func TestTickChecksUndecodableExitOneNoChecksReportedIsBenign(t *testing.T) {
+	prWithIssue := `{"number":42,"title":"Change","state":"OPEN","headRefName":"feature","headRefOid":"abc","url":"https://example/pr/42","closingIssuesReferences":[{"number":782}]}`
+	var calls [][]string
+	withScriptedCommands(t, []scriptedCall{
+		{out: prWithIssue},
+		{
+			out:    "not json",
+			err:    &ghExitError{code: 1, err: errors.New("exit status 1")},
+			stderr: "no checks reported on the 'x' branch",
+		},
+		{out: `[]`},
+		{out: `[]`},
+	}, &calls)
+
+	s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 60}
+	if _, _, err := tick(&s); err != nil {
+		t.Fatalf("tick: %v, want the 'no checks reported' fallback to succeed with zero checks", err)
+	}
+	if s.CIStatus != "" {
+		t.Errorf("CIStatus = %q, want %q (zero checks)", s.CIStatus, "")
+	}
+	if _, found := launchCallArgs(calls, "ci-repair"); found {
+		t.Fatalf("ci-repair must not launch when there are zero checks: %#v", calls)
+	}
+}
+
+// TestTickChecksUndecodableExitOneUnrelatedStderrIsHardFailure narrows the
+// "no checks reported" fallback to its exact stderr match (watch/AGENTS.md's
+// Critical Rule against broadening a match-miss exclusion into a silent
+// catch-all): undecodable stdout plus unrelated stderr text must remain a
+// hard read failure, routed through reasonUpstreamChecksUnreadable. The
+// fleet automerge switch is enabled so the recorded reason surfaces the read
+// failure itself, rather than recordUpstreamReadFailure's kill-switch
+// override (automerge.go:1032-1038: with the switch off, every hold reason
+// collapses to reasonAutomergeDisabled).
+func TestTickChecksUndecodableExitOneUnrelatedStderrIsHardFailure(t *testing.T) {
+	withFleetAutomergeEnabled(t, true)
+	prWithIssue := `{"number":42,"title":"Change","state":"OPEN","headRefName":"feature","headRefOid":"abc","url":"https://example/pr/42","closingIssuesReferences":[{"number":782}]}`
+	var calls [][]string
+	withScriptedCommands(t, []scriptedCall{
+		{out: prWithIssue},
+		{
+			out:    "not json",
+			err:    &ghExitError{code: 1, err: errors.New("exit status 1")},
+			stderr: "rate limit exceeded",
+		},
+	}, &calls)
+
+	s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 60}
+	if _, _, err := tick(&s); err == nil {
+		t.Fatal("tick: err = nil, want unrelated stderr text to remain a hard read failure")
+	}
+	if s.AutomergeReason != reasonUpstreamChecksUnreadable {
+		t.Fatalf("AutomergeReason = %q, want %q", s.AutomergeReason, reasonUpstreamChecksUnreadable)
+	}
+}
+
+// TestTickChecksExitEightUndecodableIsHardFailureEvenWithNoChecksStderr pins
+// that the exit-1-only stderr fallback never widens to exit 8: undecodable
+// stdout on exit 8 must be a hard failure even when stderr happens to match
+// the "no checks reported" pattern.
+func TestTickChecksExitEightUndecodableIsHardFailureEvenWithNoChecksStderr(t *testing.T) {
+	prWithIssue := `{"number":42,"title":"Change","state":"OPEN","headRefName":"feature","headRefOid":"abc","url":"https://example/pr/42","closingIssuesReferences":[{"number":782}]}`
+	var calls [][]string
+	withScriptedCommands(t, []scriptedCall{
+		{out: prWithIssue},
+		{
+			out:    "not json",
+			err:    &ghExitError{code: 8, err: errors.New("exit status 8")},
+			stderr: "no checks reported on the 'x' branch",
+		},
+	}, &calls)
+
+	s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 60}
+	if _, _, err := tick(&s); err == nil {
+		t.Fatal("tick: err = nil, want exit 8 with undecodable stdout to remain a hard failure regardless of stderr content")
+	}
+}
+
+// TestTickChecksNonCommandFailureClassesAreNotSwallowed is the single most
+// important new test: the exit-code tolerance must be gated on
+// classifyGhFailure(err) == failureClassCommand, so a timeout, cancellation,
+// or truncation joined alongside an otherwise-qualifying ghExitError must
+// still be a hard read failure, even though the wrapped exit code (8,
+// pending) and stdout (decodable pending JSON) would otherwise qualify for
+// the carve-out.
+func TestTickChecksNonCommandFailureClassesAreNotSwallowed(t *testing.T) {
+	prWithIssue := `{"number":42,"title":"Change","state":"OPEN","headRefName":"feature","headRefOid":"abc","url":"https://example/pr/42","closingIssuesReferences":[{"number":782}]}`
+	pendingJSON := `[{"bucket":"pending","name":"test","state":"PENDING"}]`
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"truncated", errors.Join(&ghExitError{code: 8, err: errors.New("exit status 8")}, errGhOutputTruncated)},
+		{"timeout", errors.Join(&ghExitError{code: 8, err: errors.New("exit status 8")}, errGhTimeout)},
+		{"cancelled", errors.Join(&ghExitError{code: 8, err: errors.New("exit status 8")}, errGhCancelled)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := classifyGhFailure(tc.err); got == failureClassCommand {
+				t.Fatalf("test setup: classifyGhFailure(%v) = %q, want a non-command class -- otherwise this case does not exercise the gate", tc.err, got)
+			}
+			var calls [][]string
+			withScriptedCommands(t, []scriptedCall{
+				{out: prWithIssue},
+				{out: pendingJSON, err: tc.err, stderr: "still pending"},
+			}, &calls)
+			s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 60}
+			if _, _, err := tick(&s); err == nil {
+				t.Fatalf("tick: err = nil, want a %s checks-fetch failure to remain a hard failure even though the wrapped exit code (8, pending) and stdout would otherwise qualify for the tolerance", tc.name)
+			}
+		})
+	}
+}
+
+// TestTickGenuineChecksReadFailureKeepsClosingIssuesAndSetsCIStatusUnknown
+// covers the on-disk half of the close guard's AC: a genuine (non-tolerated)
+// checks read failure must still leave s.ClosingIssues populated (published
+// before the checks fetch now runs, from the already-completed pr view) and
+// must set the new ciStatusUnknown value -- and BlocksClose, reading that
+// state back off disk for a live supervisor, must hold.
+func TestTickGenuineChecksReadFailureKeepsClosingIssuesAndSetsCIStatusUnknown(t *testing.T) {
+	stubProcessOwned(t, true)
+	dir := t.TempDir()
+	prWithIssue := `{"number":42,"title":"Change","state":"OPEN","headRefName":"feature","headRefOid":"abc","url":"https://example/pr/42","closingIssuesReferences":[{"number":782}]}`
+	var calls [][]string
+	withScriptedCommands(t, []scriptedCall{
+		{out: prWithIssue},
+		{
+			out:    "not json",
+			err:    &ghExitError{code: 1, err: errors.New("exit status 1")},
+			stderr: "rate limit exceeded",
+		},
+	}, &calls)
+
+	s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 60, PID: 4242}
+	if _, _, err := tick(&s); err == nil {
+		t.Fatal("tick: err = nil, want the genuine checks-fetch failure to surface")
+	}
+	if !reflect.DeepEqual(s.ClosingIssues, []int{782}) {
+		t.Fatalf("ClosingIssues = %v, want [782]: the close-guard join key must be published before the checks fetch, even when the checks fetch itself fails", s.ClosingIssues)
+	}
+	if s.CIStatus != ciStatusUnknown {
+		t.Fatalf("CIStatus = %q, want ciStatusUnknown %q", s.CIStatus, ciStatusUnknown)
+	}
+
+	writeGuardState(t, dir, s)
+	blocks, _ := BlocksClose("782", "", dir)
+	if !blocks {
+		t.Fatal("BlocksClose = false, want true: a live supervisor whose last checks read genuinely failed must hold the close guard, not fail open")
+	}
+}
+
+// TestTickPRViewReadFailureSetsCIStatusUnknown covers the other tick
+// upstream-read-failure site: a gh pr view failure (before ClosingIssues can
+// even be published, since it comes from the pr view response itself) must
+// still record ciStatusUnknown.
+func TestTickPRViewReadFailureSetsCIStatusUnknown(t *testing.T) {
+	var calls [][]string
+	withScriptedCommands(t, []scriptedCall{
+		{err: errors.New("exit status 1")},
+	}, &calls)
+
+	s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 60}
+	if _, _, err := tick(&s); err == nil {
+		t.Fatal("tick: err = nil, want the pr view failure to surface")
+	}
+	if s.CIStatus != ciStatusUnknown {
+		t.Fatalf("CIStatus = %q, want ciStatusUnknown %q", s.CIStatus, ciStatusUnknown)
+	}
+}
+
+// TestTickFailingCIActionableOnlyWhileRepairPending exercises the
+// RepairPending scoping in both directions, on a tick where the head SHA is
+// unchanged (LastHeadSHA pinned to the fixture PR's headRefOid, per
+// watch/docs/test-strategy.md's fixture-pinning rule) so the pre-existing
+// "new failing head" branch never fires and only the new actionable-seeding
+// logic is under test: a failing CIStatus is actionable while RepairPending
+// is true (the supervisor keeps polling at IntervalSeconds, since a repair
+// agent is expected to push), and still backs off when RepairPending is
+// false.
+func TestTickFailingCIActionableOnlyWhileRepairPending(t *testing.T) {
+	prWithIssue := `{"number":42,"title":"Change","state":"OPEN","headRefName":"feature","headRefOid":"abc","url":"https://example/pr/42","closingIssuesReferences":[{"number":782}]}`
+	failJSON := `[{"bucket":"fail","name":"test","state":"FAILURE"}]`
+	for _, tc := range []struct {
+		name          string
+		repairPending bool
+		wantDelay     int64
+	}{
+		{"RepairPending true stays at interval (actionable)", true, 60},
+		{"RepairPending false still backs off (not actionable)", false, 1800},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls [][]string
+			withScriptedCommands(t, []scriptedCall{
+				{out: prWithIssue},
+				{out: failJSON},
+				{out: `[]`},
+				{out: `[]`},
+			}, &calls)
+			s := State{
+				PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 900,
+				LastHeadSHA:   "abc",
+				RepairPending: tc.repairPending,
+			}
+			if _, _, err := tick(&s); err != nil {
+				t.Fatalf("tick: %v", err)
+			}
+			if s.CurrentDelaySeconds != tc.wantDelay {
+				t.Fatalf("CurrentDelaySeconds = %d, want %d", s.CurrentDelaySeconds, tc.wantDelay)
+			}
+		})
+	}
+}
+
 // TestRunWritesStateBeforeFirstTick covers the arm-to-first-poll window
 // (#787): `cenci babysit` writes its state file before the supervisor loop
 // starts polling, so a lazyboards cleanup firing between "supervisor armed"
@@ -666,6 +975,12 @@ func TestBlocksCloseMatrix(t *testing.T) {
 		{"live supervisor with pending CI blocks", func() State { s := live; s.CIStatus = "pending"; return s }(), true, "782", "/repo/root", true},
 		{"green CI allows", func() State { s := live; s.CIStatus = "green"; return s }(), true, "782", "/repo/root", false},
 		{"unknown CI allows", func() State { s := live; s.CIStatus = ""; return s }(), true, "782", "/repo/root", false},
+		// #923: a genuine gh read failure (as opposed to "no checks reported
+		// yet", which still collapses to "" above) now writes the dedicated
+		// ciStatusUnknown value and must hold the guard just like
+		// "failing"/"pending" -- the "" and "green" allow rows above stay
+		// green, unchanged by this ticket.
+		{"unknown CI (read failure) blocks", func() State { s := live; s.CIStatus = ciStatusUnknown; return s }(), true, "782", "/repo/root", true},
 		{"dead supervisor allows", live, false, "782", "/repo/root", false},
 		{"paused supervisor with no pid blocks", func() State { s := live; s.PID = 0; s.Status = "needs-input"; return s }(), false, "782", "/repo/root", true},
 		{"another ticket allows", live, true, "999", "/repo/root", false},
