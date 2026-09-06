@@ -43,6 +43,7 @@ jobs:
               - 'docs/pipeline-coverage-map.md'
               - 'docs/autonomous-loop.md'
               - 'watch/**/*_test.go'
+              - 'watch/internal/babysit/arm.go'
             maintenance:
               - 'flow/skills/**'
               - 'flow/agents/**'

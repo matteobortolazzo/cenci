@@ -565,8 +565,25 @@ The PR is open but unverified — CI has not run, review feedback has not arrive
 
    Drop `--interval <interval>` when step 1 resolved nothing.
 
-3. **Non-fatal & idempotent.** If the launch prints `supervisor already running for PR #<pr-number>`, that is **expected success**, not an error — an earlier attempt already armed the watcher, and `cenci babysit` refuses to start a second supervisor for the same PR. Treat it exactly like the "PR already exists" / "label already exists" cases earlier in this phase: proceed to the report below. Any *other* launch failure (auth, network, missing binary) is reported to the user but does **not** fail the phase — the PR already exists and is the pipeline's real deliverable; a failed watcher launch just means the user should arm it manually.
+3. **Classify the outcome — every branch below keeps the phase green.** `cenci babysit`'s own stdout/stderr is what distinguishes which of these happened; never guess from `CENCI_SANDBOX` — that variable only changes what the CLI does internally, not what this step reports. None of these six outcomes fails the phase: the PR already exists and is the pipeline's real deliverable, so a failed or unknown arm just means the user should re-arm it by hand. No PR comment is posted for any of the failure outcomes below — this is terminal-output-only reporting.
 
-Finally, report the terminal state as the PR being open and watched, not as done/merged:
+   - **Host-armed** — the launch exits 0 outside a sandboxed session. The supervisor is now running, right here on the host.
+   - **Forwarded-armed** — the launch exits 0 and prints that the supervisor now runs on the host (`cenci babysit`, invoked inside `cenci sandbox`, forwarded the arm request to the host daemon — see the babysit skill's `## Where the supervisor runs` section). The supervisor is now running, but on the host, never inside this sandbox.
+   - **Already-running** — the launch prints `supervisor already running for PR #<pr-number>`. Expected success, exactly as before: an earlier attempt already armed the watcher, and `cenci babysit` refuses to start a second supervisor for the same PR. Treat it like the "PR already exists" / "label already exists" cases earlier in this phase.
+   - **Not armed** — the launch fails with an error whose text starts with `not armed: `. The daemon rejected the arm request; relay the reason verbatim after that prefix in the report below — never re-derive or re-word it.
+   - **Arm status unknown** — the launch fails with an error whose text starts with `arm status unknown: `. The host daemon did not respond before the deadline — this is genuinely unknown, textually distinct from a rejection, and is not the same outcome as "not armed."
+   - **Other launch failure** — any other non-zero exit (auth, network, missing binary). Report it to the user; do not fail the phase over it.
+
+Finally, report the terminal state using whichever of these two forms matches the classification above — never a single unconditional claim that the PR is being watched:
+
+**Watched form** — host-armed, forwarded-armed, or already-running:
 
 > PR #<pr-number> open and being watched by babysit → <pr-url> (stop with `cenci babysit stop <pr-number>`)
+
+On the forwarded-armed outcome, add one line stating the supervisor runs on the host, not inside this sandbox.
+
+**Not-watched form** — not armed, arm status unknown, or other launch failure. This form never claims the PR is being watched, and the phase still stays green:
+
+> PR #<pr-number> open, not being watched by babysit → <pr-url>
+> Reason: <the CLI's verbatim reason/error text>
+> Re-arm from a host tmux pane: `cenci babysit <pr-number> --agent claude`

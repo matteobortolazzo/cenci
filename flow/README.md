@@ -439,6 +439,10 @@ pacing back to the base interval.
 
 - **Session-independent.** State is stored under `$XDG_STATE_HOME/cenci/babysit` (or
   `~/.local/state/cenci/babysit`) and survives the invoking Claude or Codex session.
+- **Always host-side.** The supervisor always runs on the host. Arming from inside a `cenci
+  sandbox` container forwards the arm request to the host daemon instead of starting a local
+  supervisor in the container, so the state dir above is always the host's own — never the
+  sandbox's.
 - **CLI control.** Use `cenci babysit <pr> --agent <claude|codex> --interval 15m`, add
   `--once` for one foreground tick, or run `cenci babysit stop <pr>` to stop it.
 - **Human gates preserved.** The `address-review` approval, the CI-escalation question, and

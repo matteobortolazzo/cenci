@@ -116,6 +116,12 @@ project's slug), then launch `cenci babysit <pr> --agent codex --interval <inter
 `--interval` when the resolver prints nothing, letting the CLI use its built-in `15m` default.
 This launch is non-blocking (the supervisor detaches and survives session exit) and
 best-effort: treat `supervisor already running for PR #<pr>` as expected success (a re-entry
-already armed it), and report any other launch failure without failing the run — the open PR
-is the real deliverable. Never force-push or bypass
+already armed it), same as an exit-0 arm — whether it armed a supervisor right here (host-armed)
+or forwarded the request to the host daemon from inside `cenci sandbox` and armed one there
+instead (forwarded-armed) — report which of the two happened. An arm failure whose message starts with `not armed: `
+or `arm status unknown: ` never fails the run — the open PR is the real deliverable — but never
+report the PR as being watched either: report "PR open, not being watched," the CLI's reason
+verbatim (never re-derived or re-worded), and the host re-arm command, `cenci babysit <pr>
+--agent codex`, run from a host tmux pane. Any other launch failure (auth, network, missing
+binary) is reported the same not-watched way, without failing the run. Never force-push or bypass
 security/design/approval gates.
