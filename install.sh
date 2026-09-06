@@ -2308,7 +2308,7 @@ uninstall_normalize_path() {
 	# line (per POSIX cd behavior), corrupting $out into a two-line value
 	# that can never match the blocklist in uninstall_socket_dir_is_safe — a
 	# normalization bypass.
-	out="$(CDPATH= cd -P -- "$p" 2>/dev/null && pwd -P)" || return 1
+	out="$(CDPATH='' cd -P -- "$p" 2>/dev/null && pwd -P)" || return 1
 	printf '%s\n' "$out"
 	return 0
 }
