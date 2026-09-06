@@ -14,7 +14,7 @@ import (
 
 // -- daemon lifecycle subcommands (daemon start|stop|restart|status) --------
 //
-// Every test in this section sets its own isolated XDG_RUNTIME_DIR so the
+// Every test in this section sets its own isolated CENCI_SOCKET_DIR so the
 // real "cenci daemon start" subprocess it spawns never touches a real
 // daemon's sockets/PID file, and so parallel test runs never collide.
 
@@ -29,7 +29,7 @@ type bgDaemon struct {
 // (not context-bound: these tests need it to keep running until explicitly
 // stopped, unlike the bounded-context daemon smoke tests elsewhere in this
 // file) and waits for its PID file to appear before returning. The caller's
-// test must have already set XDG_RUNTIME_DIR via t.Setenv.
+// test must have already set CENCI_SOCKET_DIR via t.Setenv.
 //
 // The reaping goroutine below is started immediately (not lazily, on-demand
 // later) so the moment the daemon process actually exits — however it dies,
@@ -77,7 +77,7 @@ func waitForFile(t *testing.T, path string, timeout time.Duration) {
 // PID) once the daemon is up, and is removed again on a clean SIGTERM
 // shutdown.
 func TestDaemonStart_WritesPIDFile_RemovedOnCleanShutdown(t *testing.T) {
-	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("CENCI_SOCKET_DIR", t.TempDir())
 	bg := startDaemonBackground(t)
 	pidPath := ipc.DefaultPIDPath()
 
@@ -106,7 +106,7 @@ func TestDaemonStart_WritesPIDFile_RemovedOnCleanShutdown(t *testing.T) {
 // TestDaemonStatus_NotRunning covers `daemon status` against an empty
 // runtime dir: it must report not-running and exit non-zero.
 func TestDaemonStatus_NotRunning(t *testing.T) {
-	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("CENCI_SOCKET_DIR", t.TempDir())
 
 	cmd := exec.Command(binaryPath, "daemon", "status")
 	output, err := cmd.CombinedOutput()
@@ -126,7 +126,7 @@ func TestDaemonStatus_NotRunning(t *testing.T) {
 // TestDaemonStatus_Running covers `daemon status` against a real,
 // live-spawned daemon: it must report running (with the PID) and exit 0.
 func TestDaemonStatus_Running(t *testing.T) {
-	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("CENCI_SOCKET_DIR", t.TempDir())
 	startDaemonBackground(t)
 
 	cmd := exec.Command(binaryPath, "daemon", "status")
@@ -146,7 +146,7 @@ func TestDaemonStatus_Running(t *testing.T) {
 // black-box regression: `daemon stop` against a real, live-spawned daemon
 // must remove the PID file and the process must actually be gone.
 func TestDaemonStop_RemovesPIDFileAndKillsProcess(t *testing.T) {
-	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("CENCI_SOCKET_DIR", t.TempDir())
 	bg := startDaemonBackground(t)
 	pidPath := ipc.DefaultPIDPath()
 	pid := bg.cmd.Process.Pid
@@ -177,7 +177,7 @@ func TestDaemonStop_RemovesPIDFileAndKillsProcess(t *testing.T) {
 // TestDaemonStop_NothingRunningIsNoop covers the idempotent no-op path: with
 // nothing running, `daemon stop` exits 0 and reports "daemon not running".
 func TestDaemonStop_NothingRunningIsNoop(t *testing.T) {
-	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("CENCI_SOCKET_DIR", t.TempDir())
 
 	cmd := exec.Command(binaryPath, "daemon", "stop")
 	output, err := cmd.CombinedOutput()
@@ -193,7 +193,7 @@ func TestDaemonStop_NothingRunningIsNoop(t *testing.T) {
 // tear down an existing daemon and bring up a fresh one reachable at the
 // same socket, reporting the old PID and a "restarted" confirmation.
 func TestDaemonRestart_StopsOldAndStartsNew(t *testing.T) {
-	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("CENCI_SOCKET_DIR", t.TempDir())
 	oldBg := startDaemonBackground(t)
 	oldPID := oldBg.cmd.Process.Pid
 

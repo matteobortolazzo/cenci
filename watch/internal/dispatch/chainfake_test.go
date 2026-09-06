@@ -890,7 +890,7 @@ type chainReconcileSummary struct {
 // crash-safe Load/Save cycle survives a real process boundary (#883's
 // torn-write/held-lock risk) rather than only an in-process call.
 // os.Environ() is passed through explicitly so the child inherits the gh
-// PATH shim, XDG_RUNTIME_DIR (the live snapshot socket), and
+// PATH shim, CENCI_SOCKET_DIR (the live snapshot socket), and
 // XDG_STATE_HOME.
 //
 // The FIRST call against a given harness runs a real (non-dry-run) pass, so
@@ -1004,25 +1004,27 @@ func TestTruncateReconcileStateProducesDecodeError(t *testing.T) {
 // -- serveChainSnapshot: a real daemon-socket double -------------------------
 
 // serveChainSnapshot serves snap over a real ipc broadcast server bound at
-// watch.DefaultSocketPath(), redirecting XDG_RUNTIME_DIR to a short,
+// watch.DefaultSocketPath(), redirecting CENCI_SOCKET_DIR to a short,
 // freshly-created temp dir first (Unix socket paths are capped around 108
 // bytes; os.MkdirTemp("", "cenci") keeps the base short, unlike t.TempDir(),
-// which embeds the full test name). This lets dispatch.RunOnce's
-// ReadSnapshot dial a real snapshot instead of failing closed on "daemon
-// unreachable" (decide.go's Inputs.Snapshot == nil gate) -- the plan's
-// deliberate inversion of dispatch_run_test.go's isolateDaemonSocket
-// precedent (which asserts the OPPOSITE: no daemon reachable).
+// which embeds the full test name -- CENCI_SOCKET_DIR's tier-1 override is
+// verbatim, so this short base IS the sun_path validation surface, not just
+// a nicety). This lets dispatch.RunOnce's ReadSnapshot dial a real snapshot
+// instead of failing closed on "daemon unreachable" (decide.go's
+// Inputs.Snapshot == nil gate) -- the plan's deliberate inversion of
+// dispatch_run_test.go's isolateDaemonSocket precedent (which asserts the
+// OPPOSITE: no daemon reachable).
 func serveChainSnapshot(t *testing.T, snap watch.StateSnapshot) {
 	t.Helper()
-	runtimeDir, err := os.MkdirTemp("", "cenci")
+	socketDir, err := os.MkdirTemp("", "cenci")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(runtimeDir, 0o700); err != nil {
+	if err := os.Chmod(socketDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.RemoveAll(runtimeDir) })
-	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+	t.Cleanup(func() { _ = os.RemoveAll(socketDir) })
+	t.Setenv("CENCI_SOCKET_DIR", socketDir)
 
 	srv, err := ipc.NewServer(watch.DefaultSocketPath())
 	if err != nil {

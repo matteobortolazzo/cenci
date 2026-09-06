@@ -39,7 +39,7 @@ func auditRepoDir(t *testing.T) string {
 
 // Every test below uses auditSecurityEnv (audit_security_faketest_test.go)
 // for its subprocess environment: an isolated HOME and a fresh
-// XDG_RUNTIME_DIR with no live daemon socket — audit must never start one
+// CENCI_SOCKET_DIR with no live daemon socket — audit must never start one
 // (it probes read-only, unlike Launch's resolveCenciWiring) — plus PATH
 // pinned to a fake docker/podman (writeAuditFakeRuntimes) whose FAKE_PS
 // defaults to empty (no running container). Ticket #627's
@@ -386,7 +386,7 @@ func TestAudit_MalformedSandboxPluginsConfig_Exits1(t *testing.T) {
 }
 
 // TestAudit_NeverStartsADaemon pins audit's read-only contract: no live
-// event socket or PID file exists under XDG_RUNTIME_DIR after the run —
+// event socket or PID file exists under CENCI_SOCKET_DIR after the run —
 // audit must probe wiring read-only and never call daemon.EnsureRunning(),
 // unlike Launch's resolveCenciWiring (see sandbox_open_test.go's
 // TestOpen_NoEventsSocket_LaunchesUnwiredWithWarning for the contrasting

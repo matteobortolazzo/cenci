@@ -3,7 +3,6 @@ package launcher
 import (
 	"bytes"
 	"net"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -38,7 +37,7 @@ var verifyScope = Scope{
 // class from any other verifiable check (the #446 content-specific-marker
 // rule).
 func TestVerify_DaemonSocketStillMissing_ReportsFailWithCode(t *testing.T) {
-	t.Setenv("XDG_RUNTIME_DIR", t.TempDir()) // empty runtime dir -> no socket file at all
+	t.Setenv("CENCI_SOCKET_DIR", t.TempDir()) // empty socket dir -> no socket file at all
 
 	var stdout, stderr bytes.Buffer
 	e := &Engine{
@@ -68,12 +67,8 @@ func TestVerify_DaemonSocketStillMissing_ReportsFailWithCode(t *testing.T) {
 // line for the daemon check and must not report DaemonSocketMissing or
 // DaemonConnUnreachable — the same two codes it fails on above.
 func TestVerify_DaemonReachable_ReportsPass(t *testing.T) {
-	xdg := t.TempDir()
-	t.Setenv("XDG_RUNTIME_DIR", xdg)
-	socketDir := filepath.Join(xdg, "cenci")
-	if err := os.Mkdir(socketDir, 0o700); err != nil {
-		t.Fatalf("mkdir socket dir: %v", err)
-	}
+	socketDir := t.TempDir()
+	t.Setenv("CENCI_SOCKET_DIR", socketDir)
 	l, err := net.Listen("unix", filepath.Join(socketDir, "cenci-events.sock"))
 	if err != nil {
 		t.Fatalf("listen events socket: %v", err)
@@ -112,8 +107,7 @@ func TestVerify_DaemonReachable_ReportsPass(t *testing.T) {
 // Diagnose's own "Status: unknown (runtime unreachable)" reporting for this
 // same inconclusive case.
 func TestVerify_ContainerExistenceInconclusive_ReportsSkip(t *testing.T) {
-	xdg := t.TempDir()
-	t.Setenv("XDG_RUNTIME_DIR", xdg) // no daemon socket -> daemon check fails, unrelated to this assertion
+	t.Setenv("CENCI_SOCKET_DIR", t.TempDir()) // no daemon socket -> daemon check fails, unrelated to this assertion
 
 	var stdout, stderr bytes.Buffer
 	e := &Engine{

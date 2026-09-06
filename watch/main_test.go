@@ -185,15 +185,26 @@ func TestVersionStampedViaLdflags(t *testing.T) {
 // to stdout and exit 0, so shell consumers (widget scripts, tests) don't
 // reimplement the XDG-vs-fallback logic themselves.
 func TestSocketDirSubcommandPrintsResolvedDir(t *testing.T) {
-	xdgDir := t.TempDir()
+	socketDir := t.TempDir()
+	// t.TempDir() alone is created 0755 (masked by the process umask, not
+	// 0700 — see testing.common.TempDir), which is looser than
+	// CENCI_SOCKET_DIR's tier-1 leaf hardening tolerates without a warning
+	// (#1142's verbatim override means socketDir IS the leaf); chmod it
+	// explicitly so the exact-output assertion below isn't polluted by a
+	// spurious loose-permissions warning on stderr.
+	if err := os.Chmod(socketDir, 0700); err != nil {
+		t.Fatalf("hardening CENCI_SOCKET_DIR %q: %v", socketDir, err)
+	}
 	cmd := exec.Command(binaryPath, "socket-dir")
-	cmd.Env = append(os.Environ(), "XDG_RUNTIME_DIR="+xdgDir)
+	cmd.Env = append(os.Environ(), "CENCI_SOCKET_DIR="+socketDir)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("socket-dir: %v\n%s", err, output)
 	}
 
-	want := filepath.Join(xdgDir, "cenci")
+	// Verbatim override semantics (#1142): the resolved dir is the override
+	// value itself, with no appended "cenci/" segment.
+	want := socketDir
 	got := strings.TrimSpace(string(output))
 	if got != want {
 		t.Errorf("socket-dir output = %q, want %q", got, want)

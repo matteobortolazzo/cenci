@@ -148,7 +148,9 @@ func runVersion() {
 
 // runSocketDir prints the resolved cenci socket directory to stdout and
 // exits 0, so shell consumers (widget scripts, tests) don't reimplement
-// the XDG-vs-fallback logic themselves and risk drift. Exits 1 on error.
+// the three-tier $CENCI_SOCKET_DIR -> $XDG_STATE_HOME/cenci/run ->
+// /tmp/cenci-<uid>/cenci resolution chain themselves and risk drift. Exits 1
+// on error.
 func runSocketDir() {
 	dir, err := ipc.DefaultSocketDir()
 	if err != nil {

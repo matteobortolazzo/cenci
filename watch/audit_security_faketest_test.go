@@ -79,7 +79,7 @@ func writeAuditFakeRuntimes(t *testing.T, dir string) string {
 // command-level black-box test in audit_cmd_test.go and security_cmd_test.go
 // that doesn't go through auditFakeRuntimeCmd: a fresh scripted docker/podman
 // fake (writeAuditFakeRuntimes) wired onto PATH, plus an isolated HOME/
-// XDG_RUNTIME_DIR. Consolidated here (rather than duplicated as auditEnv/
+// CENCI_SOCKET_DIR. Consolidated here (rather than duplicated as auditEnv/
 // securityEnv, byte-identical function bodies in their respective files)
 // during the Phase 5 refactor pass that already consolidated a similar
 // 5x-duplicated helper into auditFakeRuntimeCmd above.
@@ -87,16 +87,26 @@ func auditSecurityEnv(t *testing.T, home, xdg string) []string {
 	t.Helper()
 	fakeDir := t.TempDir()
 	writeAuditFakeRuntimes(t, fakeDir)
+	// t.TempDir() returns a directory created 0755 (masked by the process
+	// umask, not 0700 — see testing.common.TempDir), which is looser than
+	// CENCI_SOCKET_DIR's tier-1 leaf hardening tolerates without warning
+	// (#1142's verbatim override means xdg IS the leaf, not a not-yet-
+	// existing "cenci" subdir under it). Harden it explicitly so these
+	// exact-output/JSON assertions aren't polluted by a spurious loose-
+	// permissions warning on stderr.
+	if err := os.Chmod(xdg, 0700); err != nil {
+		t.Fatalf("hardening CENCI_SOCKET_DIR %q: %v", xdg, err)
+	}
 	return append(os.Environ(),
 		"PATH="+fakeDir+":"+os.Getenv("PATH"),
 		"HOME="+home,
-		"XDG_RUNTIME_DIR="+xdg,
+		"CENCI_SOCKET_DIR="+xdg,
 	)
 }
 
 // auditFakeRuntimeCmd builds an *exec.Cmd for the built `cenci` binary,
 // wired to a fresh scripted docker/podman fake (writeAuditFakeRuntimes) via
-// PATH, plus an isolated HOME/XDG_RUNTIME_DIR — the shared setup every
+// PATH, plus an isolated HOME/CENCI_SOCKET_DIR — the shared setup every
 // command-level observed-mode test in audit_cmd_test.go/security_cmd_test.go
 // needs before scripting FAKE_PS/FAKE_OBSERVED_POSTURE/FAKE_PS_EXIT via
 // t.Setenv and running the command. Callers that don't need it (most do
@@ -105,11 +115,16 @@ func auditFakeRuntimeCmd(t *testing.T, repo, home string, args ...string) (cmd *
 	t.Helper()
 	fakeDir := t.TempDir()
 	callLog = writeAuditFakeRuntimes(t, fakeDir)
+	// See auditSecurityEnv above: t.TempDir() alone is 0755, not 0700.
+	socketDir := t.TempDir()
+	if err := os.Chmod(socketDir, 0700); err != nil {
+		t.Fatalf("hardening CENCI_SOCKET_DIR %q: %v", socketDir, err)
+	}
 	cmd = exec.Command(binaryPath, args...)
 	cmd.Env = append(os.Environ(),
 		"PATH="+fakeDir+":"+os.Getenv("PATH"),
 		"HOME="+home,
-		"XDG_RUNTIME_DIR="+t.TempDir(),
+		"CENCI_SOCKET_DIR="+socketDir,
 	)
 	cmd.Dir = repo
 	return cmd, callLog

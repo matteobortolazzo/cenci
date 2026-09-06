@@ -78,8 +78,8 @@ func TestSafeListen_RemovesStaleSocket(t *testing.T) {
 }
 
 func TestDefaultEventSocketPath_UsesSecureDir(t *testing.T) {
-	xdgDir := t.TempDir()
-	t.Setenv("XDG_RUNTIME_DIR", xdgDir)
+	socketDir := t.TempDir()
+	t.Setenv("CENCI_SOCKET_DIR", socketDir)
 
 	got := DefaultEventSocketPath()
 	secureDir, err := watch.SocketDir()

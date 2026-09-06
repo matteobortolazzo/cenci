@@ -3,8 +3,8 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
-	"os"
 	"time"
 
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/babysit"
@@ -135,8 +135,13 @@ func Run(ctx context.Context, cfg config.Config, fe frontend.Frontend, attention
 		log.Printf("event socket: %s", cfg.EventSocketPath)
 	}
 
-	if os.Getenv("XDG_RUNTIME_DIR") == "" && (cfg.EventSocketPath == ipc.DefaultEventSocketPath() || cfg.SocketPath == ipc.DefaultSocketPath()) {
-		log.Printf("warning: XDG_RUNTIME_DIR is not set; socket paths fall back to /tmp (less secure on multi-user systems)")
+	usingDefaults := cfg.EventSocketPath == ipc.DefaultEventSocketPath() || cfg.SocketPath == ipc.DefaultSocketPath()
+	if res, rerr := watch.ResolveSocketDir(); rerr == nil {
+		if msg := socketTierWarning(res, usingDefaults); msg != "" {
+			log.Print(msg)
+		}
+	} else {
+		log.Printf("warning: could not evaluate socket-dir resolution for startup warning: %v", rerr)
 	}
 
 	d := newDaemon(cfg, fe, recv.Events(), reap.NewExecReaper(cfg.Verbose))
@@ -169,6 +174,22 @@ func Run(ctx context.Context, cfg config.Config, fe frontend.Frontend, attention
 		onStarted()
 	}
 	return d.loop(ctx, attention)
+}
+
+// socketTierWarning decides whether the daemon's startup warning should
+// fire, given the winning tier of watch.ResolveSocketDir() and whether the
+// caller is using the default socket paths (usingDefaults mirrors the
+// pre-existing guard: an operator who explicitly passed
+// -socket/-event-socket has opted out of the default path entirely, so
+// landing on the /tmp tier is expected and must not warn). Only a
+// resolution that landed on the tmp tier is worth flagging — the override
+// and state tiers are both secure, XDG/CENCI_SOCKET_DIR-aware locations. It
+// is a pure function (no I/O) so it is unit-testable without running Run().
+func socketTierWarning(res watch.SocketDirResolution, usingDefaults bool) string {
+	if !usingDefaults || res.Tier != watch.TierTmp {
+		return ""
+	}
+	return fmt.Sprintf("warning: socket dir resolution fell back to /tmp (%s); socket paths are less secure on multi-user systems", res.Reason)
 }
 
 // loop is the main event-driven loop. The attention channel is always live

@@ -2,15 +2,26 @@ package daemon
 
 import (
 	"net"
+	"os"
 	"testing"
 	"time"
 
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/ipc"
 )
 
+// useTempSocketDir isolates a test's CENCI_SOCKET_DIR to a fresh, empty temp
+// dir. t.TempDir() alone is created 0755 (masked by the process umask, not
+// 0700 — see testing.common.TempDir), which is looser than CENCI_SOCKET_DIR's
+// tier-1 leaf hardening tolerates without a warning (#1142's verbatim
+// override means dir IS the leaf); chmod it explicitly to avoid a spurious
+// loose-permissions warning on stderr.
 func useTempSocketDir(t *testing.T) {
 	t.Helper()
-	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0700); err != nil {
+		t.Fatalf("hardening CENCI_SOCKET_DIR %q: %v", dir, err)
+	}
+	t.Setenv("CENCI_SOCKET_DIR", dir)
 }
 
 func TestAliveFalseWhenNothingListening(t *testing.T) {

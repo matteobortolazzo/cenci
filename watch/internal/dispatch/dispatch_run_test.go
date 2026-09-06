@@ -891,7 +891,7 @@ esac
 // dev/CI machine.
 func isolateDaemonSocket(t *testing.T) {
 	t.Helper()
-	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("CENCI_SOCKET_DIR", t.TempDir())
 }
 
 // TestRunOnce_InteractiveRepoConfigDeniesPlanningPickup covers the

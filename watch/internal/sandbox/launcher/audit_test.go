@@ -575,9 +575,10 @@ func TestCredentialStatusText_UnrecognizedProbe_NotRenderedAsAbsent(t *testing.T
 //     see the emitted name at all.
 //  3. "-e" names emitted OUTSIDE assembleExecEnv/assembleEnv are out of
 //     scope for this test (AC #1): assembleVolumeMounts's XDG_RUNTIME_DIR
-//     forward and buildAgentExecArgv's DISABLE_UPDATES forward (both
-//     launch.go), and engine.go's maintenanceRunArgs. None of the three
-//     emits a secret-suffixed name today.
+//     and CENCI_SOCKET_DIR forwards and buildAgentExecArgv's
+//     DISABLE_UPDATES forward (all launch.go), and engine.go's
+//     maintenanceRunArgs. None of the four emits a secret-suffixed name
+//     today.
 func TestForwardedEnvVarNames_CoversEverySecretSuffixedEnvName(t *testing.T) {
 	// Every host gate var assembleExecEnv/assembleEnv currently read behind an
 	// "only forward when set" conditional must be set here, or its forwarded

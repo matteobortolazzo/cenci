@@ -836,7 +836,7 @@ func TestDiagnose_Collision_SameContainerUnderBothRuntimes_ActsOnBothReportsBoth
 		"PATH="+fakeDir+":/usr/bin:/bin",
 		"HOME="+home,
 		"CENCI_SANDBOX_ASSETS="+assets,
-		"XDG_RUNTIME_DIR="+xdg,
+		"CENCI_SOCKET_DIR="+xdg,
 		"FAKE_VOLUMES=cenci-agent-cli-claude\ncenci-agent-cli-codex\n",
 		"FAKE_IMAGE_BASE_VERSION="+tag,
 		"FAKE_PS_DOCKER=claude-cenci-default\n",
@@ -885,7 +885,7 @@ func TestDiagnose_RunningFirstTieBreak_RunningOwnerReportedBeforeStoppedOwner(t 
 		"PATH="+fakeDir+":/usr/bin:/bin",
 		"HOME="+home,
 		"CENCI_SANDBOX_ASSETS="+assets,
-		"XDG_RUNTIME_DIR="+xdg,
+		"CENCI_SOCKET_DIR="+xdg,
 		"FAKE_VOLUMES=cenci-agent-cli-claude\ncenci-agent-cli-codex\n",
 		"FAKE_IMAGE_BASE_VERSION="+tag,
 		// docker's copy is stopped (tab-shaped row passed through verbatim);
@@ -935,7 +935,7 @@ func TestDiagnose_OneRuntimeContainerQueryFails_HealthyRuntimeStillDiagnosedNonZ
 		"PATH="+fakeDir+":/usr/bin:/bin",
 		"HOME="+home,
 		"CENCI_SANDBOX_ASSETS="+assets,
-		"XDG_RUNTIME_DIR="+xdg,
+		"CENCI_SOCKET_DIR="+xdg,
 		"FAKE_VOLUMES=cenci-agent-cli-claude\ncenci-agent-cli-codex\n",
 		"FAKE_IMAGE_BASE_VERSION="+tag,
 		"FAKE_PS_EXIT_DOCKER=1", // docker's ps -a container-listing query fails outright

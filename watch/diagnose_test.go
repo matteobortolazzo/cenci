@@ -27,22 +27,20 @@ import (
 // read-only and must never spawn its own daemon (see launch.go's
 // resolveCenciWiring, which diagnose deliberately does not call), so
 // withSocket controls whether a live events-socket listener is pre-created
-// under XDG_RUNTIME_DIR: true mirrors openTestEnv for the "daemon
-// reachable" cases, false leaves an empty runtime dir (no socket file at
-// all) for the "event socket missing" case.
+// under CENCI_SOCKET_DIR: true mirrors openTestEnv for the "daemon
+// reachable" cases, false leaves an empty socket dir (no socket file at
+// all) for the "event socket missing" case. CENCI_SOCKET_DIR's tier-1
+// override is verbatim (no appended "cenci/" segment, #1142), so socketDir
+// IS the resolved socket dir directly.
 func diagEnv(t *testing.T, fakeDir, assets string, withSocket bool) (env []string, home string) {
 	t.Helper()
 	home = t.TempDir()
-	xdg := t.TempDir()
+	socketDir := t.TempDir()
 	tag, err := launcher.BaseTag(assets)
 	if err != nil {
 		t.Fatalf("BaseTag: %v", err)
 	}
 	if withSocket {
-		socketDir := filepath.Join(xdg, "cenci")
-		if err := os.Mkdir(socketDir, 0o700); err != nil {
-			t.Fatalf("mkdir socket dir: %v", err)
-		}
 		l, err := net.Listen("unix", filepath.Join(socketDir, "cenci-events.sock"))
 		if err != nil {
 			t.Fatalf("listen events socket: %v", err)
@@ -53,7 +51,7 @@ func diagEnv(t *testing.T, fakeDir, assets string, withSocket bool) (env []strin
 		"PATH="+fakeDir+":/usr/bin:/bin",
 		"HOME="+home,
 		"CENCI_SANDBOX_ASSETS="+assets,
-		"XDG_RUNTIME_DIR="+xdg,
+		"CENCI_SOCKET_DIR="+socketDir,
 		"FAKE_VOLUMES=cenci-agent-cli-claude\ncenci-agent-cli-codex\n",
 		"FAKE_IMAGE_BASE_VERSION="+tag,
 	)
