@@ -203,13 +203,16 @@ func TestTickQuietBacksOff(t *testing.T) {
 
 func TestTickLaunchesAddressReviewForNewFeedback(t *testing.T) {
 	var calls [][]string
-	// A new comment:7 key is appended to PendingKeys before reconcileFeedback's
-	// end-of-tick resolution pass runs later in the same tick, so the lazy
-	// GraphQL thread fetch fires immediately -- the 5th scripted response.
-	// Left unresolved so PendingKeys still equals [comment:7] afterward,
-	// matching the assertions below; the #885 dedup-driven address-review
-	// launch (PendingKeys \ LaunchedKeys, fired after reconcile) still finds
-	// comment:7 unlaunched and dispatches it.
+	// #897: reconcileFeedback now runs before detectNewFeedbackKeys, so the
+	// new comment:7 key does not exist yet when reconcileFeedback's own
+	// hasCommentKey gate is evaluated (PendingKeys/AddressedKeys are both
+	// still empty at that point) -- its lazy GraphQL thread fetch never fires
+	// this tick, and the 5th scripted response below (unresolvedThread) is
+	// never consumed; withCommands tolerates the surplus. comment:7 is added
+	// to PendingKeys only after reconcileFeedback returns, so it still
+	// reaches the #885 dedup-driven address-review launch (PendingKeys \
+	// LaunchedKeys) unlaunched, and PendingKeys still equals [comment:7]
+	// afterward, matching the assertions below.
 	unresolvedThread := `{"data":{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false,"endCursor":""},"nodes":[{"isResolved":false,"comments":{"totalCount":1,"nodes":[{"databaseId":7}]}}]}}}}}`
 	withCommands(t, []string{openPR(), `[]`, `[{"id":7,"updated_at":"2026-01-02T00:00:00Z","user":{"login":"reviewer"}}]`, `[]`, unresolvedThread}, &calls)
 	s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 300, CurrentDelaySeconds: 900, LaunchSession: "work"}
@@ -220,6 +223,9 @@ func TestTickLaunchesAddressReviewForNewFeedback(t *testing.T) {
 	if delay != 300*time.Second || s.PendingCommentAt == "" || !reflect.DeepEqual(s.PendingKeys, []string{"comment:7"}) {
 		t.Fatalf("unexpected state: %#v", s)
 	}
+	if !reflect.DeepEqual(s.LaunchedKeys, []string{"comment:7"}) {
+		t.Fatalf("LaunchedKeys = %v, want [comment:7]: still dispatched exactly once, holding automerge until GitHub reports resolution", s.LaunchedKeys)
+	}
 	found := false
 	for _, c := range calls {
 		if len(c) > 3 && c[1] == "run" && c[2] == "address-review" && c[3] == "42" {
@@ -228,6 +234,66 @@ func TestTickLaunchesAddressReviewForNewFeedback(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("address-review was not launched: %#v", calls)
+	}
+}
+
+// TestTickBannerFirstLineCommentIsExcludedFromDetection is #897 Item 3 (AC
+// 10): an inline comment whose first line is the cenci attribution banner
+// must be ignored entirely by detectNewFeedbackKeys -- no key recorded, no
+// dispatch, no automerge hold, and no contribution to PendingCommentAt --
+// since once Item 2 makes post-resolution comments actionable, cenci's own
+// address-review reply would otherwise re-trigger dispatch indefinitely.
+func TestTickBannerFirstLineCommentIsExcludedFromDetection(t *testing.T) {
+	bannerBody := "> 🤖 **cenci** — review reply posted by `/cenci:address-review` (posting replies).\n\nJust re-checking this."
+	bodyJSON, err := json.Marshal(bannerBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	comments := fmt.Sprintf(`[{"id":7,"body":%s,"updated_at":"2026-01-02T00:00:00Z","user":{"login":"reviewer"}}]`, bodyJSON)
+	var calls [][]string
+	withCommands(t, []string{openPR(), `[{"bucket":"pass","name":"test","state":"SUCCESS"}]`, comments, `[]`}, &calls)
+	s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 300, CurrentDelaySeconds: 900, LaunchSession: "work"}
+	if _, _, err := tick(&s); err != nil {
+		t.Fatal(err)
+	}
+	if len(s.PendingKeys) != 0 {
+		t.Fatalf("PendingKeys = %v, want empty: a banner-first-line comment must never become a key", s.PendingKeys)
+	}
+	if s.PendingCommentAt != "" {
+		t.Fatalf("PendingCommentAt = %q, want empty: a banner-excluded comment must not contribute to the newest timestamp either", s.PendingCommentAt)
+	}
+	if n := countAddressReviewLaunches(calls); n != 0 {
+		t.Fatalf("address-review launches = %d, want 0: a banner-excluded comment must never dispatch: %#v", n, calls)
+	}
+}
+
+// TestTickBannerOnLaterLineIsStillDetectedNormally is #897 Item 3's
+// watch/AGENTS.md-mandated regression case: the banner exclusion is narrowed
+// to the comment's *first* line only -- a comment that merely contains the
+// banner text somewhere later in its body (e.g. a human quoting cenci's own
+// reply while raising a new point) must still be detected exactly as an
+// ordinary new comment would be.
+func TestTickBannerOnLaterLineIsStillDetectedNormally(t *testing.T) {
+	quotedBannerBody := "Some genuine new review text.\n\n> 🤖 **cenci** — review reply posted by `/cenci:address-review` (posting replies)."
+	bodyJSON, err := json.Marshal(quotedBannerBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	comments := fmt.Sprintf(`[{"id":7,"body":%s,"updated_at":"2026-01-02T00:00:00Z","user":{"login":"reviewer"}}]`, bodyJSON)
+	var calls [][]string
+	withCommands(t, []string{openPR(), `[{"bucket":"pass","name":"test","state":"SUCCESS"}]`, comments, `[]`}, &calls)
+	s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 300, CurrentDelaySeconds: 900, LaunchSession: "work"}
+	if _, _, err := tick(&s); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(s.PendingKeys, []string{"comment:7"}) {
+		t.Fatalf("PendingKeys = %v, want [comment:7]: the banner exclusion must be scoped to the first line only", s.PendingKeys)
+	}
+	if s.PendingCommentAt == "" {
+		t.Fatal("PendingCommentAt = \"\", want the comment's timestamp recorded")
+	}
+	if n := countAddressReviewLaunches(calls); n != 1 {
+		t.Fatalf("address-review launches = %d, want exactly 1: %#v", n, calls)
 	}
 }
 
@@ -1218,6 +1284,181 @@ func TestTickResolvedThreadClearsPendingKey(t *testing.T) {
 	}
 }
 
+// TestTickReorderDetectsAndResolvesResolvedThreadCommentAcrossTwoTicks is
+// #897 Item 2 (AC 6/7/8): a brand-new comment on a thread GitHub already
+// classifies as resolved must not be silently dropped in the same tick it is
+// detected. Before the fix, detectNewFeedbackKeys appended the new key to
+// PendingKeys before reconcileFeedback ran, so reconcileFeedback's own
+// end-of-tick fetch (triggered by the very key just added) immediately
+// classified it resolved and moved it straight to AddressedKeys -- no
+// dispatch, no hold, ever. After the fix, reconcileFeedback runs first (when
+// the key does not exist yet, so its lazy GraphQL thread fetch does not even
+// fire) and detectNewFeedbackKeys runs after, so the new key survives to the
+// PendingKeys \ LaunchedKeys launch trigger this same tick. The *next* tick
+// is the one that authoritatively reclassifies it once GitHub's thread state
+// is actually consulted for a now-tracked key.
+func TestTickReorderDetectsAndResolvesResolvedThreadCommentAcrossTwoTicks(t *testing.T) {
+	withFleetAutomergeEnabled(t, true)
+	s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 300, CurrentDelaySeconds: 900, LaunchSession: "work"}
+
+	// Tick 1: the new comment lands on a thread GitHub will later report
+	// resolved, but PendingKeys/AddressedKeys are both still empty when this
+	// tick's reconcileFeedback pass runs, so its lazy GraphQL thread fetch
+	// never fires (hasCommentKey is computed from the pre-tick state) --
+	// exactly 5 gh calls, no threads probe.
+	var calls1 [][]string
+	newComment := `[{"id":7,"updated_at":"2026-01-02T00:00:00Z","user":{"login":"reviewer"}}]`
+	withCommands(t, []string{
+		automergeEligiblePR(),
+		`[{"bucket":"pass","name":"test","state":"SUCCESS"}]`,
+		newComment,
+		`[]`,
+		`{"labels":[{"name":"automerge:ok"}]}`,
+	}, &calls1)
+	if _, _, err := tick(&s); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(s.PendingKeys, []string{"comment:7"}) {
+		t.Fatalf("tick 1: PendingKeys = %v, want [comment:7]: the new comment must survive this tick's reconcile pass, never be silently classified away", s.PendingKeys)
+	}
+	if !reflect.DeepEqual(s.LaunchedKeys, []string{"comment:7"}) {
+		t.Fatalf("tick 1: LaunchedKeys = %v, want [comment:7]: the reorder must let this tick's own launch trigger see the new key", s.LaunchedKeys)
+	}
+	if len(s.AddressedKeys) != 0 {
+		t.Fatalf("tick 1: AddressedKeys = %v, want empty: nothing may resolve a key before its own thread state was ever consulted", s.AddressedKeys)
+	}
+	if n := countAddressReviewLaunches(calls1); n != 1 {
+		t.Fatalf("tick 1: address-review launches = %d, want exactly 1: %#v", n, calls1)
+	}
+	if s.AutomergeDecision != "held" || s.AutomergeReason != reasonReviewPending {
+		t.Fatalf("tick 1: AutomergeDecision/Reason = %q/%q, want held/%q: the freshly-detected key must hold automerge this same tick", s.AutomergeDecision, s.AutomergeReason, reasonReviewPending)
+	}
+	if s.LastCommentAt != "" {
+		t.Fatalf("tick 1: LastCommentAt = %q, want unchanged (empty): nothing resolved yet, so the watermark must not advance", s.LastCommentAt)
+	}
+	tick1PendingCommentAt := s.PendingCommentAt
+	if tick1PendingCommentAt == "" {
+		t.Fatal("tick 1: PendingCommentAt = \"\", want the new comment's timestamp recorded")
+	}
+
+	// Tick 2: GitHub now reports the thread resolved. No new comments arrive,
+	// so this is purely reconcileFeedback reclassifying the key tick 1
+	// recorded -- the key moves to AddressedKeys, drops out of LaunchedKeys,
+	// triggers no second dispatch, and the feedback-specific automerge hold
+	// clears. The labels response deliberately omits "automerge:ok" so this
+	// tick's own automerge outcome holds for an unrelated reason, keeping the
+	// assertion scoped to "no longer reasonReviewPending" rather than
+	// requiring a full green merge chain.
+	var calls2 [][]string
+	withCommands(t, []string{
+		automergeEligiblePR(),
+		`[{"bucket":"pass","name":"test","state":"SUCCESS"}]`,
+		`[]`,
+		`[]`,
+		resolvedThreadFor(7),
+		`{"labels":[]}`,
+	}, &calls2)
+	if _, _, err := tick(&s); err != nil {
+		t.Fatal(err)
+	}
+	if len(s.PendingKeys) != 0 {
+		t.Fatalf("tick 2: PendingKeys = %v, want empty once GitHub reports the thread resolved", s.PendingKeys)
+	}
+	if !reflect.DeepEqual(s.AddressedKeys, []string{"comment:7"}) {
+		t.Fatalf("tick 2: AddressedKeys = %v, want [comment:7]", s.AddressedKeys)
+	}
+	if len(s.LaunchedKeys) != 0 {
+		t.Fatalf("tick 2: LaunchedKeys = %v, want empty: a resolved key's episode is over", s.LaunchedKeys)
+	}
+	if n := countAddressReviewLaunches(calls2); n != 0 {
+		t.Fatalf("tick 2: address-review must not relaunch for an already-launched, now-resolved key: %#v", calls2)
+	}
+	if s.AutomergeReason == reasonReviewPending {
+		t.Fatal("tick 2: AutomergeReason still reasonReviewPending, want the feedback hold cleared now that the key resolved")
+	}
+	if s.LastCommentAt != tick1PendingCommentAt {
+		t.Fatalf("tick 2: LastCommentAt = %q, want it advanced to tick 1's PendingCommentAt (%q) -- monotonic, never regressing", s.LastCommentAt, tick1PendingCommentAt)
+	}
+	if s.PendingCommentAt != "" || s.PendingHeadSHA != "" {
+		t.Fatalf("tick 2: PendingCommentAt/PendingHeadSHA = %q/%q, want both cleared once the pending set empties", s.PendingCommentAt, s.PendingHeadSHA)
+	}
+}
+
+// TestDetectNewFeedbackKeysSameSecondCommentNotNarrowedBySinceWatermark is a
+// direct unit test on detectNewFeedbackKeys -- the one deliberate exception
+// to this ticket's integration-first strategy, justified because AC 8's
+// same-second non-narrowing case requires a comment timestamp that is
+// byte-equal to the watermark reconcileFeedback advances s.LastCommentAt to
+// *during the same tick*, strictly before detectNewFeedbackKeys itself runs.
+// A tick-level fixture cannot express this deterministically: it would
+// require reconcileFeedback's own advance and the new comment's `updated_at`
+// to land on the exact same value it independently computes. Calling
+// detectNewFeedbackKeys directly lets the test hold `since` (the entry-time
+// watermark, snapshotted before reconcileFeedback ran) and s.LastCommentAt
+// (already advanced by a simulated reconcileFeedback pass) as two distinct,
+// explicit values.
+//
+// #897 Decision/Q2: without threading an explicit `since` parameter, a
+// same-second comment landing after a prior tick's fetch would be
+// permanently dropped once reconcileFeedback advances s.LastCommentAt to
+// that same second -- exactly the narrowing AC 8 forbids.
+func TestDetectNewFeedbackKeysSameSecondCommentNotNarrowedBySinceWatermark(t *testing.T) {
+	const (
+		since             = "2026-01-01T00:00:00Z" // entry-time watermark, snapshotted before reconcileFeedback ran this tick
+		advancedWatermark = "2026-01-02T00:00:00Z" // s.LastCommentAt, already advanced by this same tick's reconcileFeedback pass
+	)
+
+	t.Run("comment at the entry-time watermark exactly is not new", func(t *testing.T) {
+		s := &State{LastCommentAt: advancedWatermark}
+		comments := []comment{{ID: 1, UpdatedAt: since, User: struct{ Login string }{"reviewer"}}}
+		keys, newest := detectNewFeedbackKeys(s, comments, nil, since)
+		if len(keys) != 0 {
+			t.Fatalf("keys = %v, want empty: a comment timestamped exactly at `since` is not strictly newer", keys)
+		}
+		if newest != advancedWatermark {
+			t.Fatalf("newest = %q, want unchanged %q", newest, advancedWatermark)
+		}
+	})
+
+	t.Run("comment at the just-advanced LastCommentAt (same second) is still new against the older since watermark", func(t *testing.T) {
+		s := &State{LastCommentAt: advancedWatermark}
+		comments := []comment{{ID: 2, UpdatedAt: advancedWatermark, User: struct{ Login string }{"reviewer"}}}
+		keys, newest := detectNewFeedbackKeys(s, comments, nil, since)
+		if !reflect.DeepEqual(keys, []string{"comment:2"}) {
+			t.Fatalf("keys = %v, want [comment:2]: AC 8 -- a same-second comment must not be narrowed out just because reconcileFeedback already advanced LastCommentAt to that same second", keys)
+		}
+		// newest is seeded from the live s.LastCommentAt (never from `since`),
+		// so the watermark can never move backward: this comment's own
+		// timestamp equals that seed, so newest must stay exactly at it, not
+		// regress to `since`.
+		if newest != advancedWatermark {
+			t.Fatalf("newest = %q, want %q: the watermark must never move backward from the live LastCommentAt seed", newest, advancedWatermark)
+		}
+	})
+
+	t.Run("comment newer than the live LastCommentAt advances newest beyond it", func(t *testing.T) {
+		const newer = "2026-01-03T00:00:00Z"
+		s := &State{LastCommentAt: advancedWatermark}
+		comments := []comment{{ID: 3, UpdatedAt: newer, User: struct{ Login string }{"reviewer"}}}
+		keys, newest := detectNewFeedbackKeys(s, comments, nil, since)
+		if !reflect.DeepEqual(keys, []string{"comment:3"}) {
+			t.Fatalf("keys = %v, want [comment:3]", keys)
+		}
+		if newest != newer {
+			t.Fatalf("newest = %q, want %q", newest, newer)
+		}
+	})
+
+	t.Run("an already-seen key is skipped regardless of the since/LastCommentAt split", func(t *testing.T) {
+		s := &State{LastCommentAt: advancedWatermark, PendingKeys: []string{"comment:4"}}
+		comments := []comment{{ID: 4, UpdatedAt: advancedWatermark, User: struct{ Login string }{"reviewer"}}}
+		keys, _ := detectNewFeedbackKeys(s, comments, nil, since)
+		if len(keys) != 0 {
+			t.Fatalf("keys = %v, want empty: an already-tracked key must never be re-reported as new", keys)
+		}
+	})
+}
+
 // TestTickDismissedOrSupersededChangeRequestClears is AC 3's review path:
 // a CHANGES_REQUESTED review clears only when it is DISMISSED or the
 // reviewer's latest effective review is APPROVED -- asserted as separate
@@ -1254,6 +1495,56 @@ func TestTickDismissedOrSupersededChangeRequestClears(t *testing.T) {
 			for _, c := range calls {
 				if len(c) > 2 && c[1] == "api" && c[2] == "graphql" {
 					t.Fatalf("a review:-only pending set must never call the GraphQL thread fetch: %#v", calls)
+				}
+			}
+		})
+	}
+}
+
+// TestTickFreshlyDetectedReviewSupersededSameTickClears is the Should-Fix
+// follow-up from #897 Phase 6/7 review: pins the same-tick review-supersession
+// block (babysit.go's #897/#920 fix, gated on reviewsComplete) for a review
+// key detectNewFeedbackKeys returns brand-new THIS tick -- unlike
+// TestTickDismissedOrSupersededChangeRequestClears above, which pre-seeds
+// PendingKeys with the review key and exercises the pre-existing
+// classifyPendingKey path. Here the CHANGES_REQUESTED review is never
+// pre-seeded: it is only ever discovered by this tick's own
+// detectNewFeedbackKeys call, already superseded by a later same-login
+// APPROVED/DISMISSED review in that very same reviews fetch. It must resolve
+// straight to AddressedKeys without ever surfacing in PendingKeys or
+// LaunchedKeys, and without triggering an address-review launch.
+func TestTickFreshlyDetectedReviewSupersededSameTickClears(t *testing.T) {
+	pr := `{"number":42,"title":"Change","state":"OPEN","headRefName":"feature","headRefOid":"new-sha","closingIssuesReferences":[],"url":"https://example/pr/42"}`
+	for _, tc := range []struct {
+		name    string
+		reviews string
+	}{
+		{"superseded by approved", `[{"id":10,"state":"CHANGES_REQUESTED","submitted_at":"2026-01-01T00:00:00Z","user":{"login":"alice"}},{"id":11,"state":"APPROVED","submitted_at":"2026-01-02T00:00:00Z","user":{"login":"alice"}}]`},
+		{"superseded by dismissed", `[{"id":10,"state":"CHANGES_REQUESTED","submitted_at":"2026-01-01T00:00:00Z","user":{"login":"alice"}},{"id":11,"state":"DISMISSED","submitted_at":"2026-01-02T00:00:00Z","user":{"login":"alice"}}]`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls [][]string
+			withCommands(t, []string{pr, `[{"bucket":"pass","name":"test","state":"SUCCESS"}]`, `[]`, tc.reviews}, &calls)
+			s := State{
+				PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 60,
+				LastHeadSHA:   "old-sha",
+				LaunchSession: "work",
+			}
+			if _, _, err := tick(&s); err != nil {
+				t.Fatal(err)
+			}
+			if len(s.PendingKeys) != 0 {
+				t.Fatalf("PendingKeys = %v, want empty: a freshly-detected but already-superseded review must never surface as pending", s.PendingKeys)
+			}
+			if len(s.LaunchedKeys) != 0 {
+				t.Fatalf("LaunchedKeys = %v, want empty", s.LaunchedKeys)
+			}
+			if !reflect.DeepEqual(s.AddressedKeys, []string{"review:10"}) {
+				t.Fatalf("AddressedKeys = %v, want [review:10]", s.AddressedKeys)
+			}
+			for _, c := range calls {
+				if len(c) > 2 && c[1] == "run" && c[2] == "address-review" {
+					t.Fatalf("a freshly-detected review already superseded in the same tick must never trigger an address-review launch: %#v", calls)
 				}
 			}
 		})

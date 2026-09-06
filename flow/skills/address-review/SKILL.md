@@ -73,7 +73,7 @@ gh api repos/<owner>/<repo>/pulls/<number>/comments
 
 ## Step 1D: Filter to Actionable Comments
 
-Read the `pr-comment-filter` reference skill and apply its include/exclude filter to the fetched comments. That skill is the single source of truth for this filter — `babysit` applies the same one, and its watermark only works if the two match.
+Read the `pr-comment-filter` reference skill and apply its include/exclude filter to the fetched comments. That skill is the single source of truth for this filter — `babysit` applies the same one, and its watermark only works if the two match. A resolved thread with new activity since resolution is in scope (`pr-comment-filter`'s Include list) — do not skip it just because GitHub reports the thread resolved.
 
 If **no actionable comments** remain after filtering → report "No actionable review comments found on this PR." and stop.
 
@@ -327,9 +327,18 @@ Capture `<n>` (found or created) for the Acknowledge reply template below. If th
 ## Posting Replies
 
 For each inline review comment, use the `Write` tool to create
-`${TMPDIR:-/tmp}/cenci/pr-reply-<comment-id>.md` with the `<reply text>` as its content. Build the
-payload with the `shell-rules` skill's canonical `jq -n --rawfile` snippet (body-only form,
-no title), as its own standalone Bash call:
+`${TMPDIR:-/tmp}/cenci/pr-reply-<comment-id>.md`, opening with the cenci attribution banner
+(blockquoted) before the `<reply text>`, matching the general-PR-comment template below:
+
+```markdown
+> 🤖 **cenci** — review reply posted by `/cenci:address-review` (posting replies).
+
+<reply text>
+```
+
+No `<!-- cenci-<kind> -->` marker here either — the same issue-thread-scoped rule below applies.
+Build the payload with the `shell-rules` skill's canonical `jq -n --rawfile` snippet (body-only
+form, no title), as its own standalone Bash call:
 ```bash
 jq -n --rawfile body ${TMPDIR:-/tmp}/cenci/pr-reply-<comment-id>.md '{body: $body}' > ${TMPDIR:-/tmp}/cenci/pr-reply-<comment-id>-payload.json
 ```

@@ -21,9 +21,10 @@ import (
 // silently resolving (watch/docs/error-handling.md's default-deny rule).
 //
 // #885 extends this same default-deny discipline to previously-resolved
-// keys: AddressedKeys is not a permanent verdict either. Both the end-of-tick
-// pass (reconcileFeedback) and the pre-merge boundary (revalidateFeedback)
-// reclassify AddressedKeys against fresh GitHub state every time, so a
+// keys: AddressedKeys is not a permanent verdict either. Both tick's own
+// resolution pass (reconcileFeedback) and the pre-merge boundary
+// (revalidateFeedback) reclassify AddressedKeys against fresh GitHub state
+// every time, so a
 // resolved thread/review GitHub later reports reopened returns to pending
 // under its own reasonFeedbackReopened hold, and an addressed key GitHub no
 // longer reports at all holds under reasonReviewStateUnknown rather than
@@ -465,8 +466,10 @@ func fetchAndClassifyFeedback(s *State, reviews []review, reviewsComplete bool) 
 	return classifyFeedback(s.PendingKeys, s.AddressedKeys, fs), "", "", true
 }
 
-// reconcileFeedback is the end-of-tick, GitHub-authoritative resolution pass
-// (Q6, generalized by #885 to reclassify AddressedKeys too): it runs
+// reconcileFeedback is tick's GitHub-authoritative resolution pass (Q6,
+// generalized by #885 to reclassify AddressedKeys too; reordered by #897 to
+// run before this tick's own new-feedback detection, rather than after --
+// see babysit.go's tick for the current call order): it runs
 // fetchAndClassifyFeedback and applies the verdict onto State -- resolved
 // keys move PendingKeys -> AddressedKeys and drop out of LaunchedKeys (their
 // episode is over, #885's split of resolution truth from launch dedup);

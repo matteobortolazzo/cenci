@@ -1360,7 +1360,10 @@ distinguishable reason and is safe to retry once the rate has settled.
   failure) never gets silently treated as a complete read. Detection still
   fires normally for any feedback key actually found on the pages read; a
   truncated read additionally forces its own hold reason on top of that, since
-  babysit can't yet rule out a fresher offstage item.
+  babysit can't yet rule out a fresher offstage item. An inline comment whose
+  first line is the cenci attribution banner is excluded from detection
+  entirely — cenci's own address-review replies never count as new feedback
+  and never re-trigger a dispatch.
 - Any review-feedback state babysit can't positively confirm holds automerge
   under its own reason: unreadable (API/parse failure), truncated (incomplete
   pagination), unknown (GitHub stopped reporting the item, or reported an
@@ -1406,10 +1409,15 @@ When every condition passes, babysit merges with `gh pr merge --squash` (never
 squash is an allowed merge method on the repo. A merge rejected by branch
 protection is logged and retried on the next tick, never bypassed. A zero-exit
 `gh pr merge` doesn't by itself prove the merge landed, so babysit refetches
-the PR exactly once afterward and requires it to report `MERGED`; a zero-exit
-result that isn't `MERGED` on that single refetch is treated as indeterminate,
-never as success. See `flow/skills/configure/SKILL.md`'s `automerge` schema
-section for the full field reference.
+the PR exactly once afterward and requires it to report `MERGED` **at the
+head commit babysit pinned** (the same SHA `--match-head-commit` validated):
+a refetch reporting `MERGED` at a *different* head commit, or with an empty
+head commit, holds under its own distinct reason instead of being read as
+confirmed success — another actor could have merged a different commit in
+the narrow race between babysit's own validation and this refetch. A
+zero-exit result that isn't `MERGED` at all on that single refetch is treated
+as indeterminate, never as success. See `flow/skills/configure/SKILL.md`'s
+`automerge` schema section for the full field reference.
 
 Once that refetch confirms `MERGED`, babysit posts one comment to the PR
 recording that the merge was automatic — the cenci attribution banner, the head
