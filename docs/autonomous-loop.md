@@ -23,7 +23,7 @@ independently reversible.
 | 2 | `dispatch.planRefined: true` | `~/.config/cenci/config.json` | `false` | The **manual planning launch**. `cenci dispatch` starts planning sessions for `Refined` tickets and re-plans stale plans by itself. |
 | 3 | `automerge` policy block | repo `.cenci/config.json` (committed) | absent = deny | Nothing on its own — it *defines* the risk envelope automerge is allowed to act inside. |
 | 4 | `automerge.enabled: true` | `~/.config/cenci/config.json` | `false` | The **merge gate**. `cenci babysit` merges the PR itself once every condition holds. |
-| 5 | `planning.attended: true` | `~/.config/cenci/config.json` | `false` | The **inverse of switch 2, per machine**: suppresses unattended planning pickups/re-plans for lean repos on this machine specifically, for when a human is at the keyboard right now and could just answer a clarifying question instead. |
+| 5 | `planning.attended: true` | `~/.config/cenci/config.json` | `false` | The **override on switch 1, per machine**, for when a human is at the keyboard right now and could just answer a clarifying question. `cenci dispatch` stops picking lean repos up for unattended planning here, and a planning session you launch yourself in a `"lean"` repo plans *interactively* — it asks you instead of posting the question to the ticket, and stops for plan review instead of self-approving. |
 
 Switches 1 and 3 are per-repo and committed, so the repo decides its own autonomy.
 Switches 2 and 4 are fleet-wide kill switches on your machine: they can only ever
@@ -33,7 +33,10 @@ Switch 5 is fleet-wide too, but runs the other direction: it can only ever *narr
 what a repo already opted into (turning `"lean"` into a denial on this machine),
 never grant lean to a repo that hasn't committed it, and never mask a distinct
 reason a repo was already denied for (missing/malformed config, an unreadable
-probe, an unconfirmed fetch each keep their own reason).
+probe, an unconfirmed fetch each keep their own reason). It narrows in two places
+for the same reason — dispatch stops starting unattended planning sessions here, and
+a planning session that does run treats the repo as `"interactive"`; see
+[The attended override](#the-attended-override) below.
 
 ## What the loop looks like
 
@@ -75,7 +78,9 @@ Two off-ramps exist and both are normal:
 
 - **`Input Needed`** — planning hit one of five escalation classes (security-sensitive,
   destructive/irreversible, contradicts the refined ticket, genuine product ambiguity,
-  scope blowup). It writes a draft plan, posts the question on the ticket, and stops.
+  scope blowup). It writes a draft plan, posts the question on the ticket, and stops
+  — unless attended mode is on for this machine, in which case planning asks you directly instead
+  (see [The attended override](#the-attended-override)).
   The posted question opens with a cenci banner telling you that replying on the ticket
   is what resumes the run. Answer on the ticket and dispatch resumes it on its next pass
   — no manual re-run.
@@ -140,6 +145,47 @@ ticket, and the plan those answers produced was never shown to you). `approval: 
 is the ordinary path where you read the plan and launched the run. Plans written before
 this key existed carry none — that means unrecorded, not unapproved.
 
+#### The attended override
+
+`planning.autonomy: "lean"` is a property of the repo, not of whoever is sitting in
+front of it. When you launch `/cenci:implement` yourself, being asked a question and
+answering it in one turn beats having it posted to the ticket and picked up a pass
+later. `cenci planning attended on` (switch 5) says so, fleet-wide on this machine:
+
+```bash
+cenci planning attended on             # or: off
+cenci planning attended status --json  # {"attended":true,...}
+```
+
+With it on, a planning session in a `"lean"` repo behaves as `"interactive"`:
+
+- a clarifying question is asked directly instead of being posted to the ticket — no
+  `Input Needed` label, no `awaiting-input` draft, and no waiting for the next dispatch pass;
+- a plan with no escalations is **not** self-approved: it is saved, the session stops for
+  you to read it, and its front matter records `approval: human`, not `approval: lean`.
+
+This is an override, not a sixth switch: it only ever suspends switch 1, never grants it.
+An `"interactive"` repo is unaffected — attended mode gives it nothing it did not already
+have. The trivial fast path (which never consults autonomy) and a draft resumed after an
+earlier unattended escalation (still `approval: lean-resumed`) are unaffected too.
+
+**In the sandbox.** The host's `~/.config/cenci/config.json` is invisible inside a `cenci
+sandbox` container, so the flag is forwarded at exec time as `CENCI_ATTENDED=1` or
+`CENCI_ATTENDED=0` — always explicitly, never "unset means off". Toggling it on the host
+takes effect on the next `cenci open`, with no container rebuild. Sessions `cenci
+dispatch` launches are pinned to `CENCI_ATTENDED=0` whatever the host flag says: a
+detached tmux window must never stall on a question nobody is there to answer.
+
+**The resolution order** a planning session follows, first match wins:
+
+1. `CENCI_ATTENDED=1` → attended; plan interactively.
+2. `CENCI_ATTENDED=0` → use the repo's `planning.autonomy` as-is.
+3. Variable absent (an ordinary host run) → `cenci planning attended status --json`, read its `attended` field.
+4. Anything else, including a failed or unparseable query → use the repo's `planning.autonomy`, and say so in one line.
+
+Nothing reads `~/.config/cenci/config.json` directly — the flag is only ever resolved
+through the `cenci` binary or the forwarded variable.
+
 ### 2. Let dispatch start planning sessions
 
 In `~/.config/cenci/config.json`:
@@ -185,7 +231,8 @@ than `planStalenessTolerance` commits behind becomes an autonomous re-plan.
 > repo whose commit was already denied for another reason keeps that reason. `cenci
 > planning attended status` shows the fleet flag, this repo's remote-confirmed
 > autonomy, `dispatch.planRefined`, and the same combined verdict `dispatch
-> plan-refined status` prints — the two commands can never disagree.
+> plan-refined status` prints — the two commands can never disagree. It also changes how
+> a planning session that *does* run behaves; see [The attended override](#the-attended-override).
 
 ### 3. Declare what a merge is allowed to touch
 
@@ -387,7 +434,7 @@ comment at all — if there is no comment, no automerge landed.
 | Merging for one ticket | Remove `automerge:ok` from the issue | Next tick |
 | Autonomous planning, everywhere | `cenci dispatch plan-refined off` | Next pass |
 | Autonomous planning for one repo | Push `planning.autonomy` off `"lean"` to `origin/main` | Next pass with a successful fetch |
-| Autonomous planning on this machine only, while a human is around | `cenci planning attended on` | Next pass |
+| Autonomous planning on this machine only, while a human is around | `cenci planning attended on` | Next dispatch pass; and the next planning session you launch |
 | All dispatch | `cenci dispatch loop off` | Immediately; in-flight sessions finish |
 
 A revocation pushed to `origin/main` is honored even if your local checkout still has
@@ -425,5 +472,6 @@ Accepted and documented, not bugs:
 | Every automerge condition, in full | [cenci-watch README — Automerge](../watch/README.md#automerge-cenci-babysit) |
 | The `automerge` config schema, field by field | [configure skill](../flow/skills/configure/SKILL.md) |
 | Lean planning as the planner actually executes it | [Phase 1 — Plan](../flow/skills/implement/phases/phase-1-plan.md) |
+| How a session resolves attended vs. the repo's autonomy | [Phase 1 — Plan, `## Resolve Planning Autonomy`](../flow/skills/implement/phases/phase-1-plan.md) |
 | Which test pins which claim on this page | [Pipeline coverage map](pipeline-coverage-map.md) |
 | Where the supervisor runs, forwarded arming, and the arming/host verification recipe | [cenci-watch README — Automerge](../watch/README.md#automerge-cenci-babysit) |
