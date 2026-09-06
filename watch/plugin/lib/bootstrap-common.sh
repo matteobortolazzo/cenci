@@ -21,6 +21,7 @@ BIN="$ROOT/bin/cenci"
 MARKER="$ROOT/bin/.cenci-version"
 PLUGIN_JSON="$ROOT/$PLUGIN_MANIFEST_REL"
 
+# shellcheck source-path=SCRIPTDIR
 # shellcheck source=./resolve-bin.sh
 . "$(dirname "$0")/../lib/resolve-bin.sh"
 

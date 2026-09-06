@@ -23,5 +23,6 @@ ROOT="${CLAUDE_PLUGIN_ROOT:-$(dirname "$0")/..}"
 PLUGIN_MANIFEST_REL=".claude-plugin/plugin.json"
 PATH_AUDIENCE="bare cenci invocations resolve"
 
+# shellcheck source-path=SCRIPTDIR
 # shellcheck source=../lib/bootstrap-common.sh
 . "$(dirname "$0")/../lib/bootstrap-common.sh"

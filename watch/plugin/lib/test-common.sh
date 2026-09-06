@@ -77,6 +77,7 @@ STUB
   else
     (
       unset CENCI_SANDBOX
+      # shellcheck disable=SC2030,SC2031 # intentionally subshell-scoped
       export TMPDIR="$logdir" HOME="$home"
       export "${ROOT_VAR_NAME}=${root}"
       bash "$BOOTSTRAP"
@@ -186,6 +187,7 @@ STUB
 
   (
     unset CENCI_SANDBOX
+    # shellcheck disable=SC2030,SC2031 # intentionally subshell-scoped
     export TMPDIR="$logdir" HOME="$home" PATH="$stubdir:/usr/bin:/bin"
     export "${ROOT_VAR_NAME}=${root}"
     export CENCI_SANDBOX=1
@@ -208,6 +210,7 @@ RESOLVE_BIN_SH="$DIR/../lib/resolve-bin.sh"
 run_resolve() {
   local shell="$1"
   shift
+  # shellcheck disable=SC2016 # single-quoted: $0 expands in the invoked shell, not here
   env "$@" "$shell" -c '. "$0"; resolve_cenci_bin' "$RESOLVE_BIN_SH" 2>/dev/null
 }
 

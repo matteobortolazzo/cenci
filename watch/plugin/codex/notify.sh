@@ -20,6 +20,7 @@ ROOT="${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-$(dirname "$0")/..}}"
 BIN="$ROOT/bin/cenci"
 
 if [ ! -x "$BIN" ]; then
+	# shellcheck source-path=SCRIPTDIR
 	# shellcheck source=../lib/resolve-bin.sh
 	. "$(dirname "$0")/../lib/resolve-bin.sh"
 	BIN="$(resolve_cenci_bin 2>/dev/null)" || exit 0

@@ -27,5 +27,6 @@ ROOT="$(dirname "$0")/.."
 PLUGIN_MANIFEST_REL="opencode/package.json"
 PATH_AUDIENCE="the OpenCode plugin can find it"
 
+# shellcheck source-path=SCRIPTDIR
 # shellcheck source=../lib/bootstrap-common.sh
 . "$(dirname "$0")/../lib/bootstrap-common.sh"
