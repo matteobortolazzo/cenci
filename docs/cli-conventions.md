@@ -44,7 +44,8 @@ cenci <verb> [subverb] [args] [flags]
 
 - Host-side variables the cenci binary reads or sets are prefixed `CENCI_`
   (e.g. `CENCI_TMUX_SOCKET`, the absolute host tmux socket path injected
-  per-exec alongside `TMUX_PANE`).
+  per-exec alongside `TMUX_PANE`; `CENCI_SOCKET_DIR`, the tier-1 override for
+  where the daemon's Unix domain socket lives — see the Sockets row below).
 - Sandbox-launcher variables are prefixed `CENCI_SANDBOX_`
   (e.g. `CENCI_SANDBOX_AGENT`, `CENCI_SANDBOX_REAP_GRACE_SECS`,
   `CENCI_SANDBOX_RESEED_CREDS`, `CENCI_SANDBOX_ASSETS`, `CENCI_SANDBOX_DIND`,
@@ -53,8 +54,9 @@ cenci <verb> [subverb] [args] [flags]
   container; hooks and the daemon use it to detect "I am inside the sandbox"
   and skip host-only behavior.
 - Never introduce un-prefixed names for cenci-owned state; host-standard
-  variables (`TERM`, `TMUX_PANE`, `XDG_RUNTIME_DIR`, third-party API keys)
-  keep their standard names.
+  variables (`TERM`, `TMUX_PANE`, `XDG_STATE_HOME`, third-party API keys)
+  keep their standard names. `XDG_RUNTIME_DIR` is not load-bearing for socket
+  resolution — see the Sockets row below.
 
 ## Runtime object naming
 
@@ -70,7 +72,7 @@ cenci <verb> [subverb] [args] [flags]
 | Base image | `cenci-sandbox-base:<content-hash>` (+ `:latest` alias) |
 | Container hostname | `sandbox-<slug>` |
 | Config | `~/.config/cenci/config.json` |
-| Sockets | `$XDG_RUNTIME_DIR/cenci/` (fallback `/tmp/cenci-<uid>/`) |
+| Sockets | `$CENCI_SOCKET_DIR` (verbatim) → `$XDG_STATE_HOME/cenci/run` (default `~/.local/state/cenci/run`) → `/tmp/cenci-<uid>/cenci` |
 | Readiness marker | `/tmp/cenci-ready` (inside the container) |
 | Per-repo Dockerfile | `<repo-root>/.cenci/Dockerfile` |
 

@@ -520,14 +520,14 @@ kill -9 "${FAKE_DAEMON_PID}" 2>/dev/null || true
 # Still exercised the rest of the removal path without hanging or crashing.
 [[ ! -e "${home}/.config/cenci/config.json" ]]
 
-# --- case 10: XDG_RUNTIME_DIR default-socket-dir fallback ----------------------
-echo "case: with no resolvable binary but XDG_RUNTIME_DIR set, uninstall removes the daemon's real managed-state dir (\$XDG_RUNTIME_DIR/cenci — not a doubled \$XDG_RUNTIME_DIR/cenci/cenci)"
-name="xdg-default-socket"
+# --- case 10: three-tier default-socket-dir chain (#1143) ---------------------
+echo "case: with no resolvable binary, uninstall_default_socket_dir mirrors the three-tier chain: \$CENCI_SOCKET_DIR (verbatim) -> \${XDG_STATE_HOME:-\$HOME/.local/state}/cenci/run"
+name="tier1-socket-override"
 home="${WORK}/${name}/home"
 bin="${WORK}/${name}/bin"
 call_log="${WORK}/${name}/calls"
-xdg="${WORK}/${name}/xdg"
-mkdir -p "${home}" "${bin}" "${xdg}"
+override_dir="${WORK}/${name}/override"
+mkdir -p "${home}" "${bin}" "${override_dir}"
 : >"${call_log}"
 
 make_common_tools "${bin}"
@@ -538,26 +538,240 @@ mkdir -p "${home}/.config/cenci"
 printf '{}\n' >"${home}/.config/cenci/config.json"
 # No ~/.local/bin/cenci and no plugins/cache/cenci binary, so
 # resolve_uninstall_cenci_binary finds nothing and uninstall_stop_daemon
-# cannot ask `socket-dir` — it must compute the default from XDG_RUNTIME_DIR.
-# The daemon nests a "cenci" segment under its runtime base (SocketDir in
-# watch/pkg/watch/socket.go), so the real managed-state dir is
-# $XDG_RUNTIME_DIR/cenci — a doubled $XDG_RUNTIME_DIR/cenci/cenci would leak it.
-real_socket_dir="${xdg}/cenci"
+# cannot ask `socket-dir` — it must compute the default itself. With
+# CENCI_SOCKET_DIR set, tier 1 wins: the value is used VERBATIM, with no
+# appended "cenci" segment (unlike the old XDG_RUNTIME_DIR-based tier this
+# replaces).
+real_socket_dir="${override_dir}"
+touch "${real_socket_dir}/cenci.pid" "${real_socket_dir}/cenci.sock"
+
+LAYOUT_HOME="${home}"
+LAYOUT_BIN="${bin}"
+LAYOUT_CALL_LOG="${call_log}"
+run_uninstall CENCI_SOCKET_DIR="${override_dir}" -- --yes
+[[ "${UNINSTALL_EXIT}" -eq 0 ]]
+
+if [[ -d "${real_socket_dir}" ]]; then
+    echo "FAIL: expected the daemon's real managed-state dir (${real_socket_dir}) to be removed via the CENCI_SOCKET_DIR tier-1 override, used verbatim" >&2
+    cat "${UNINSTALL_OUTPUT}" >&2
+    exit 1
+fi
+[[ ! -e "${home}/.config/cenci/config.json" ]]
+
+# --- case 10b: tier-2 state-root default (no CENCI_SOCKET_DIR) -----------------
+echo "case: with no resolvable binary and no \$CENCI_SOCKET_DIR, uninstall removes the daemon's real managed-state dir at \${XDG_STATE_HOME:-\$HOME/.local/state}/cenci/run"
+name="tier2-state-default"
+home="${WORK}/${name}/home"
+bin="${WORK}/${name}/bin"
+call_log="${WORK}/${name}/calls"
+state_home="${WORK}/${name}/xdg-state"
+mkdir -p "${home}" "${bin}" "${state_home}"
+: >"${call_log}"
+
+make_common_tools "${bin}"
+make_claude "${bin}"
+make_codex "${bin}"
+
+mkdir -p "${home}/.config/cenci"
+printf '{}\n' >"${home}/.config/cenci/config.json"
+# With no CENCI_SOCKET_DIR, tier 2 ($XDG_STATE_HOME/cenci/run) is next.
+real_socket_dir="${state_home}/cenci/run"
 mkdir -p "${real_socket_dir}"
 touch "${real_socket_dir}/cenci.pid" "${real_socket_dir}/cenci.sock"
 
 LAYOUT_HOME="${home}"
 LAYOUT_BIN="${bin}"
 LAYOUT_CALL_LOG="${call_log}"
-run_uninstall XDG_RUNTIME_DIR="${xdg}" -- --yes
+run_uninstall XDG_STATE_HOME="${state_home}" -- --yes
 [[ "${UNINSTALL_EXIT}" -eq 0 ]]
 
 if [[ -d "${real_socket_dir}" ]]; then
-    echo "FAIL: expected the daemon's real managed-state dir (${real_socket_dir}) to be removed via the XDG_RUNTIME_DIR default; a doubled cenci/cenci path would leave it behind" >&2
+    echo "FAIL: expected the daemon's real managed-state dir (${real_socket_dir}) to be removed via the tier-2 XDG_STATE_HOME default" >&2
     cat "${UNINSTALL_OUTPUT}" >&2
     exit 1
 fi
 [[ ! -e "${home}/.config/cenci/config.json" ]]
+
+# --- case 10c: uninstall_socket_dir_is_safe blocklist (#1143) ------------------
+echo "case: uninstall_socket_dir_is_safe rejects the bare state root and its bare 'cenci' child as rm -rf targets, but still allows the legitimate '.../cenci/run' leaf"
+name="socket-dir-blocklist"
+home="${WORK}/${name}/home"
+bin="${WORK}/${name}/bin"
+call_log="${WORK}/${name}/calls"
+state_home="${WORK}/${name}/xdg-state"
+mkdir -p "${home}" "${bin}"
+
+make_common_tools "${bin}"
+make_claude "${bin}"
+make_codex "${bin}"
+
+mkdir -p "${home}/.config/cenci"
+printf '{}\n' >"${home}/.config/cenci/config.json"
+
+# Sub-case: CENCI_SOCKET_DIR pointed at the bare state root itself (an
+# over-broad or misconfigured value) must be rejected, not rm -rf'd.
+mkdir -p "${state_home}"
+touch "${state_home}/unrelated-state-file"
+: >"${call_log}"
+LAYOUT_HOME="${home}"
+LAYOUT_BIN="${bin}"
+LAYOUT_CALL_LOG="${call_log}"
+run_uninstall XDG_STATE_HOME="${state_home}" CENCI_SOCKET_DIR="${state_home}" -- --yes
+[[ "${UNINSTALL_EXIT}" -eq 0 ]]
+if [[ ! -e "${state_home}/unrelated-state-file" ]]; then
+    echo "FAIL: expected the bare state root (${state_home}) to be rejected as unsafe and left untouched" >&2
+    cat "${UNINSTALL_OUTPUT}" >&2
+    exit 1
+fi
+assert_contains "${UNINSTALL_OUTPUT}" "looks unexpected"
+
+# Sub-case: CENCI_SOCKET_DIR pointed at "<state root>/cenci" (one level short
+# of the real ".../cenci/run" leaf) must also be rejected.
+state_cenci_dir="${state_home}/cenci"
+mkdir -p "${state_cenci_dir}"
+touch "${state_cenci_dir}/unrelated-cenci-file"
+: >"${call_log}"
+run_uninstall XDG_STATE_HOME="${state_home}" CENCI_SOCKET_DIR="${state_cenci_dir}" -- --yes
+[[ "${UNINSTALL_EXIT}" -eq 0 ]]
+if [[ ! -e "${state_cenci_dir}/unrelated-cenci-file" ]]; then
+    echo "FAIL: expected '<state root>/cenci' (${state_cenci_dir}) to be rejected as unsafe and left untouched" >&2
+    cat "${UNINSTALL_OUTPUT}" >&2
+    exit 1
+fi
+assert_contains "${UNINSTALL_OUTPUT}" "looks unexpected"
+
+# Sub-case: the legitimate ".../cenci/run" leaf must still be removed — the
+# blocklist above must be exact-equality only, never a prefix glob that would
+# also swallow this real target.
+real_socket_dir="${state_cenci_dir}/run"
+mkdir -p "${real_socket_dir}"
+touch "${real_socket_dir}/cenci.pid" "${real_socket_dir}/cenci.sock"
+: >"${call_log}"
+run_uninstall XDG_STATE_HOME="${state_home}" CENCI_SOCKET_DIR="${real_socket_dir}" -- --yes
+[[ "${UNINSTALL_EXIT}" -eq 0 ]]
+if [[ -d "${real_socket_dir}" ]]; then
+    echo "FAIL: expected the legitimate leaf (${real_socket_dir}) to still be removed, not swallowed by the blocklist" >&2
+    cat "${UNINSTALL_OUTPUT}" >&2
+    exit 1
+fi
+[[ -e "${state_cenci_dir}/unrelated-cenci-file" ]] # parent untouched
+[[ ! -e "${home}/.config/cenci/config.json" ]]
+
+# --- case 10d: HOME and XDG_STATE_HOME both unset/empty falls through to the
+#     tier-3 uid-based fallback (#1143, silent-failure-hunter finding 1) -----
+echo "case: with no resolvable binary and both \$HOME and \$XDG_STATE_HOME unset/empty, uninstall_default_socket_dir falls through to the tier-3 /tmp/cenci-<uid>/cenci fallback instead of silently resolving to a root-relative path"
+current_uid="$(id -u)"
+real_socket_dir="/tmp/cenci-${current_uid}/cenci"
+# Safety guard (#1143 follow-up, LOW finding 3): this case operates on the
+# REAL host path above, outside ${WORK}'s sandbox, because proving tier 3 is
+# reachable requires the actual uid-based fallback path. If a live daemon on
+# the machine running this suite is genuinely using that exact tier-3 path,
+# running the case's rm -rf/assertions would destroy its socket/pid files.
+# Skip cleanly instead of touching it — this is not counted as a failure.
+if [[ -e "${real_socket_dir}/cenci.sock" || -e "${real_socket_dir}/cenci.pid" ]]; then
+    echo "skipping case 10d: a live tier-3 socket/pid already exists at ${real_socket_dir} — this case cannot safely run"
+else
+    name="tier3-home-unset"
+    home="${WORK}/${name}/home"
+    bin="${WORK}/${name}/bin"
+    call_log="${WORK}/${name}/calls"
+    mkdir -p "${home}" "${bin}"
+    : >"${call_log}"
+
+    make_common_tools "${bin}"
+    make_claude "${bin}"
+    make_codex "${bin}"
+    # No ~/.local/bin/cenci and no plugins/cache/cenci binary, so
+    # resolve_uninstall_cenci_binary finds nothing and uninstall_stop_daemon must
+    # compute the default socket dir itself. With HOME forced empty and no
+    # XDG_STATE_HOME, both tier 1 ($CENCI_SOCKET_DIR) and tier 2
+    # ($XDG_STATE_HOME/cenci/run) are unavailable, so tier 3
+    # (/tmp/cenci-<uid>/cenci) must be the one actually reached and cleaned up —
+    # proving tier 3 is reachable again (it was permanently dead code before
+    # this fix, since the old tier-2 gate always considered
+    # "$HOME/.local/state" non-empty even with $HOME unset).
+    rm -rf "${real_socket_dir}"
+    mkdir -p "${real_socket_dir}"
+    touch "${real_socket_dir}/cenci.pid" "${real_socket_dir}/cenci.sock"
+
+    LAYOUT_HOME="${home}"
+    LAYOUT_BIN="${bin}"
+    LAYOUT_CALL_LOG="${call_log}"
+    run_uninstall HOME= -- --yes
+    [[ "${UNINSTALL_EXIT}" -eq 0 ]]
+
+    if [[ -d "${real_socket_dir}" ]]; then
+        echo "FAIL: expected the tier-3 fallback (${real_socket_dir}) to be reached and removed when \$HOME and \$XDG_STATE_HOME are both unset/empty" >&2
+        cat "${UNINSTALL_OUTPUT}" >&2
+        rm -rf "${real_socket_dir}"
+        exit 1
+    fi
+    rm -rf "${real_socket_dir}"
+fi
+
+# --- case 10e: a relative $CENCI_SOCKET_DIR is rejected cleanly, never
+#     resolved relative to install.sh's cwd (#1143, security-reviewer
+#     finding 2) --------------------------------------------------------------
+echo "case: a relative \$CENCI_SOCKET_DIR value fails uninstall_default_socket_dir cleanly — the default managed-state cleanup is skipped with a warning, never resolved as a path relative to the installer's cwd"
+name="tier1-relative-rejected"
+home="${WORK}/${name}/home"
+bin="${WORK}/${name}/bin"
+call_log="${WORK}/${name}/calls"
+mkdir -p "${home}" "${bin}"
+: >"${call_log}"
+
+make_common_tools "${bin}"
+make_claude "${bin}"
+make_codex "${bin}"
+mkdir -p "${home}/.config/cenci"
+printf '{}\n' >"${home}/.config/cenci/config.json"
+# No resolvable binary, so uninstall_stop_daemon must compute the default
+# itself; CENCI_SOCKET_DIR is a relative value here, which must be rejected
+# outright (tier 1 requires an absolute path, mirroring resolveSocketDir's
+# filepath.IsAbs hard-error) instead of being resolved relative to
+# install.sh's cwd and handed to a later rm -rf.
+
+LAYOUT_HOME="${home}"
+LAYOUT_BIN="${bin}"
+LAYOUT_CALL_LOG="${call_log}"
+run_uninstall CENCI_SOCKET_DIR="relative-socket-dir" -- --yes
+[[ "${UNINSTALL_EXIT}" -eq 0 ]]
+assert_contains "${UNINSTALL_OUTPUT}" "could not resolve a usable socket dir — skipping the default managed-state cleanup"
+# The rest of uninstall must still proceed (cleanup skipped, not aborted).
+[[ ! -e "${home}/.config/cenci/config.json" ]]
+
+# --- case 10f: unnormalized $HOME variants (trailing slash, "/.", double
+#     slash) are still blocked by uninstall_socket_dir_is_safe (#1143,
+#     security-reviewer finding 3) --------------------------------------------
+echo "case: uninstall_socket_dir_is_safe rejects \$HOME even through unnormalized trailing-slash / '/.' / double-slash variants that resolve to the same real directory, leaving it untouched"
+name="socket-dir-normalize"
+home="${WORK}/${name}/home"
+bin="${WORK}/${name}/bin"
+call_log="${WORK}/${name}/calls"
+mkdir -p "${home}" "${bin}"
+
+make_common_tools "${bin}"
+make_claude "${bin}"
+make_codex "${bin}"
+
+home_marker="${home}/HOME_MARKER"
+touch "${home_marker}"
+
+LAYOUT_HOME="${home}"
+LAYOUT_BIN="${bin}"
+
+for variant in "${home}/" "${home}/." "${home}//"; do
+    : >"${call_log}"
+    LAYOUT_CALL_LOG="${call_log}"
+    run_uninstall CENCI_SOCKET_DIR="${variant}" -- --yes
+    [[ "${UNINSTALL_EXIT}" -eq 0 ]]
+    if [[ ! -e "${home_marker}" ]]; then
+        echo "FAIL: expected \$HOME (via the unnormalized variant '${variant}') to be rejected by uninstall_socket_dir_is_safe's normalization fix and left untouched" >&2
+        cat "${UNINSTALL_OUTPUT}" >&2
+        exit 1
+    fi
+    assert_contains "${UNINSTALL_OUTPUT}" "looks unexpected"
+done
 
 # --- case 11: machine-wide sandbox sweep ---------------------------------------
 echo "case: machine-wide sandbox sweep removes every cenci-owned container/image/volume across multiple repos (including OpenCode) and leaves non-cenci objects (and OpenCode-look-alikes) untouched"

@@ -344,7 +344,7 @@ func (e *Engine) Launch(opts Options) error {
 		// its whole lifetime, so only warn about missing cenci wiring (#195)
 		// and wait for the async entrypoint when the lifecycle label says we
 		// created it detached.
-		if err := e.warnIfUnwired(ctx.Scope.ContainerName, cenciAvailable); err != nil {
+		if err := e.warnIfUnwired(ctx.Scope.ContainerName, cenciAvailable, socketDir); err != nil {
 			return err
 		}
 		e.warnSandboxPluginsDrift(ctx)
@@ -1122,27 +1122,70 @@ func isHostSocketBasename(path string) bool {
 	return base == "docker.sock" || base == "podman.sock"
 }
 
-// warnIfUnwired detects a running container that was created while the host
-// events socket was missing — attaching can never bring the cenci wiring
-// back (mounts are fixed for the container's lifetime), so say how to fix it
-// instead of letting sessions silently vanish from the host status bars
-// (#195).
-func (e *Engine) warnIfUnwired(name string, cenciAvailable bool) error {
+// warnIfUnwired detects a running container that either was created while
+// the host events socket was missing, or was wired to a cenci socket dir
+// that has since moved — attaching can never bring the cenci wiring back or
+// repoint an existing bind mount (mounts are fixed for the container's
+// lifetime), so say how to fix it instead of letting sessions silently
+// vanish from the host status bars (#195) or silently keep writing to a
+// stale, no-longer-watched host directory (#1143).
+//
+// The inspect template widens from destination-only to "source::destination"
+// per mount so the cenci socket mount's SOURCE (not just its destination) can
+// be compared against socketDir, the host socket dir currently resolved by
+// resolveCenciWiring. Three outcomes:
+//   - no mount's destination matches cenciSocketMountDest: unwired container,
+//     the existing #195 warning.
+//   - a matching-destination mount's source (after filepath.Clean on both
+//     sides) differs from filepath.Clean(socketDir): the container is wired
+//     to a stale socket dir, a NEW warning distinct from the #195 wording.
+//   - a matching-destination mount's source matches: no warning.
+//
+// A mount line that fails to split on "::" is treated the same as no
+// matching mount at all (the conservative #195 warning) rather than silently
+// skipped, since the unparseable line could be hiding exactly the cenci
+// socket mount this check depends on (watch/docs/go-gotchas.md #598: never
+// collapse an unrecognized shape into the permissive branch).
+func (e *Engine) warnIfUnwired(name string, cenciAvailable bool, socketDir string) error {
 	if !cenciAvailable {
 		return nil
 	}
 	out, err := exec.Command(e.Runtime, "inspect", "--format",
-		`{{range .Mounts}}{{.Destination}}{{"\n"}}{{end}}`, name).Output()
+		`{{range .Mounts}}{{.Source}}::{{.Destination}}{{"\n"}}{{end}}`, name).Output()
 	if err != nil {
 		return fmt.Errorf("%s inspect %s mounts: %w", e.Runtime, name, err)
 	}
+	wantSocketDir := filepath.Clean(socketDir)
 	for _, line := range splitLines(string(out)) {
-		if line == cenciSocketMountDest {
+		if line == "" {
+			continue
+		}
+		source, dest, ok := strings.Cut(line, "::")
+		if !ok {
+			e.warnUnwired(name)
 			return nil
 		}
+		if dest != cenciSocketMountDest {
+			continue
+		}
+		if filepath.Clean(source) != wantSocketDir {
+			e.warnStaleSocketMount(name, source, socketDir)
+		}
+		return nil
 	}
-	_, _ = fmt.Fprintf(e.Stderr, "Warning: container '%s' was created without cenci wiring; its sessions will not report to the host status bars. Run '%s stop %s' and relaunch to fix.\n", name, e.Runtime, name)
+	e.warnUnwired(name)
 	return nil
+}
+
+// warnUnwired prints the #195 "no cenci wiring at all" warning.
+func (e *Engine) warnUnwired(name string) {
+	_, _ = fmt.Fprintf(e.Stderr, "Warning: container '%s' was created without cenci wiring; its sessions will not report to the host status bars. Run '%s stop %s' and relaunch to fix.\n", name, e.Runtime, name)
+}
+
+// warnStaleSocketMount prints the #1143 "wired to a since-moved socket dir"
+// warning, distinct from warnUnwired's wording.
+func (e *Engine) warnStaleSocketMount(name, source, socketDir string) {
+	_, _ = fmt.Fprintf(e.Stderr, "Warning: container '%s' has a stale cenci socket mount (source %s), but the host socket dir is now %s; its sessions will not report to the host status bars. Run '%s stop %s' and relaunch to fix.\n", name, source, socketDir, e.Runtime, name)
 }
 
 // maybePrintSandboxPluginsNote prints one informational line to e.Stdout,

@@ -294,7 +294,9 @@ cenci diagnose --name <session>
    socket and reports `[pass]` once the daemon answers.
 
 **Platform notes**: None specific to this code — the event socket is a Unix
-domain socket under `$XDG_RUNTIME_DIR/cenci/`, resolved identically on every
+domain socket under the resolved socket directory (`$CENCI_SOCKET_DIR`, or
+`$XDG_STATE_HOME/cenci/run`, or the `/tmp/cenci-<uid>/cenci` fallback — see
+`docs/cli-conventions.md`'s Sockets row), resolved identically on every
 supported Linux/macOS host.
 
 ## CENCI-DAEMON-SOCKET-001
@@ -306,8 +308,7 @@ where the socket file exists but nothing answers).
 
 **Common causes**:
 - The daemon has never been started on this host.
-- `XDG_RUNTIME_DIR` (or its fallback socket directory) was cleared, removing
-  the socket.
+- The resolved socket directory (CENCI_SOCKET_DIR, or the XDG_STATE_HOME/.local/state state tier, or the /tmp fallback tier) was cleared, removing the socket.
 
 **Diagnostic commands**:
 ```bash
@@ -322,9 +323,15 @@ cenci diagnose --name <session>
 3. Re-run `cenci diagnose --name <session> --verify` — it re-checks for the same
    socket path and reports `[pass]` once the daemon has started.
 
-**Platform notes**: On systems where `$XDG_RUNTIME_DIR` is unset, cenci
-falls back to a per-user socket directory; if that fallback directory was
-cleared by a tmp-cleaning cron job (common on some Linux distros), the
-socket disappears with it even though the daemon process may still think it
-is running — check `cenci daemon status` first before assuming the daemon
-itself has died.
+**Platform notes**: cenci resolves the socket directory through a three-tier
+chain: `$CENCI_SOCKET_DIR` (verbatim, if set), then
+`$XDG_STATE_HOME/cenci/run` (default `~/.local/state/cenci/run`), and only
+when that state tier is itself unresolvable (e.g. `$HOME` is unset or the
+state directory cannot be created) does it fall back to
+`/tmp/cenci-<uid>/cenci`. The tmp-cleaning-cron hazard that used to affect
+every host now applies only to that last tier: if a tmp-cleaning cron job
+(common on some Linux distros) removes `/tmp/cenci-<uid>/cenci`, the socket
+disappears with it even though the daemon process may still think it is
+running — check `cenci daemon status` first before assuming the daemon
+itself has died. The state tier (`~/.local/state/...`) is not subject to
+this hazard, since tmp-cleaning cron jobs do not target it.

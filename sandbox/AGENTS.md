@@ -67,6 +67,8 @@ black-box tests in `watch/sandbox_open_test.go` plus the reap contract suite
 - Never bake secrets or credentials into the image layers.
 - Validate any host paths mounted into the container.
 - Bind-mount host paths read-only (`:ro`) unless the container genuinely needs write access — containers should be as restrictive as possible. Audit all new and existing mounts the launcher assembles (`watch/internal/sandbox/launcher`) against this principle.
+- When porting a Go fallback chain to shell, don't test a concatenated fallback string for emptiness to detect an unresolved source — `result="${VAR:-$OTHER/path}"` is always non-empty. Test the source vars directly: `[ -n "${VAR:-}" ] || [ -n "${OTHER:-}" ]` (#1143).
+- Normalize paths before exact-string blocklist comparisons in security-critical `rm -rf` guards — raw strings miscompare on trailing slashes/dots. Use checked `CDPATH= cd -P -- "$p" && pwd -P` (#1143).
 
 ## Image architecture: base + fragments
 `Dockerfile.base` builds the stack-agnostic `cenci-sandbox-base:<content-hash>` image

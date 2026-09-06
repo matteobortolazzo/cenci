@@ -89,8 +89,11 @@ effect immediately.
 
 - **Pill never appears**: first confirm the bar can *find* the binary. GUI/compositor bars inherit the **login** PATH, which typically lacks `~/.local/bin` — so a bare `cenci` the daemon set up for your shell may be invisible to DMS. Reproduce the bar's environment with a minimal PATH:
   ```sh
-  env -i HOME=$HOME XDG_RUNTIME_DIR=/run/user/$(id -u) PATH=/usr/local/bin:/usr/bin sh -c 'cenci waybar'
+  env -i HOME=$HOME XDG_STATE_HOME=$XDG_STATE_HOME CENCI_SOCKET_DIR=$CENCI_SOCKET_DIR PATH=/usr/local/bin:/usr/bin sh -c 'cenci waybar'
   ```
+  Forward `XDG_STATE_HOME`/`CENCI_SOCKET_DIR` (not `XDG_RUNTIME_DIR`, which is
+  inert for socket resolution — see `docs/cli-conventions.md`'s Sockets row) so
+  this reproduction resolves the SAME socket dir as your actual daemon.
   If that says "command not found", link the binary onto the login PATH (re-run `install.sh` and accept the GUI-bar prompt, or `sudo ln -sf "$HOME/.local/bin/cenci" /usr/local/bin/cenci`) or set `cenciPath` to its full path. If it prints `"alt": "none"` there are no live sessions and the fleet dispatch loop is off — start a Claude Code or Codex tmux pane and try again (`"alt": "dispatch-only"` means the pill stays visible even with no sessions, because the dispatch loop is enabled).
 - **Pill is stuck**: check the cenci daemon (`pgrep -a cenci`). If it is
   absent after a login or restart, the next installed Claude or Codex lifecycle hook

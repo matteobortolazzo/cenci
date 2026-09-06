@@ -2228,12 +2228,18 @@ now print usage and exit 2 instead — the daemon only starts via the explicit `
 subcommand group. Update any script or shortcut that ran bare `cenci` to run
 `cenci daemon start` (or `cenci daemon`) instead.
 
-`daemon start` writes a PID file at `$XDG_RUNTIME_DIR/cenci/cenci.pid`
+`daemon start` writes a PID file at `<socket dir>/cenci.pid`
 once it has become the one live daemon (never on the "already running" no-op path
 below), and removes it on clean shutdown (SIGINT/SIGTERM). A second `cenci
 daemon start` against a socket that's already bound is a safe no-op — it detects the
 running daemon, logs "daemon already running", and exits without disturbing it or
 touching the PID file.
+
+The socket dir resolves through a three-tier chain: `$CENCI_SOCKET_DIR` (used
+verbatim, if set), then `$XDG_STATE_HOME/cenci/run` (default
+`~/.local/state/cenci/run`), and only when that state tier is itself
+unresolvable does it fall back to `/tmp/cenci-<uid>/cenci`. Run `cenci
+socket-dir` to print the resolved path for the current environment.
 
 ```bash
 cenci daemon stop      # SIGTERM, then SIGKILL if still alive after a few seconds; exits 0 whether or not anything was running
@@ -2251,8 +2257,8 @@ file is always removed once it's known stale.
 |------|---------|-------------|
 | `-v` | `false` | Verbose logging |
 | `-json` | `false` (or `CENCI_LOG_JSON`, see below) | Emit `-v` start/signal lines as structured JSON (`{timestamp, severity, code, message}`) instead of plain text |
-| `-event-socket` | `$XDG_RUNTIME_DIR/cenci/cenci-events.sock` | Event socket for hook notifications |
-| `-socket` | `$XDG_RUNTIME_DIR/cenci/cenci.sock` | Broadcast socket for widget clients |
+| `-event-socket` | `<socket dir>/cenci-events.sock` (see the socket-dir chain above) | Event socket for hook notifications |
+| `-socket` | `<socket dir>/cenci.sock` (see the socket-dir chain above) | Broadcast socket for widget clients |
 | `-sweep` | `1` | Stale session reconciliation interval in seconds |
 | `-session-ttl` | `2h` | Idle TTL for paneless sessions (Go duration); sessions without a pane are expired after this duration if no `SessionEnd` fires |
 | `-style-running` | `fg=blue,dim` | tmux style for running state (inactive windows) |
@@ -2308,7 +2314,7 @@ cenci widget-json
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `-socket` | `$XDG_RUNTIME_DIR/cenci/cenci.sock` | Broadcast socket path |
+| `-socket` | `<socket dir>/cenci.sock` (see the socket-dir chain in `daemon start` above) | Broadcast socket path |
 | `-symbol-running` | `▶` | Symbol for running count |
 | `-symbol-done` | `✓` | Symbol for done count |
 | `-symbol-input` | `!` | Symbol for need-input count |
@@ -2475,10 +2481,10 @@ Bridge it explicitly with OpenSSH's Unix-socket forwarding (OpenSSH 6.7+):
 ```bash
 # Find the remote socket path:
 ssh myhost cenci socket-dir
-# /run/user/1000/cenci
+# /home/you/.local/state/cenci/run
 
 # Forward it to a local path and leave the tunnel running:
-ssh -N -L "$HOME/.cenci-myhost.sock:/run/user/1000/cenci/cenci.sock" myhost &
+ssh -N -L "$HOME/.cenci-myhost.sock:/home/you/.local/state/cenci/run/cenci.sock" myhost &
 
 # Read it locally exactly like a local daemon:
 cenci widget-json -socket "$HOME/.cenci-myhost.sock"
@@ -2682,6 +2688,22 @@ harmlessly orphaned. A client on the upgraded binary computes the new nested pat
 can't reach that old daemon, and the existing `EnsureRunning()` self-heal spawns a fresh
 daemon at the new location on the next call — the same self-heal already documented
 above for any other daemon-absent case. No special migration steps are needed.
+
+**Upgrading past the socket-dir chain change (#1143)**: the socket dir moved off
+`$XDG_RUNTIME_DIR` entirely, onto the three-tier `$CENCI_SOCKET_DIR` →
+`$XDG_STATE_HOME/cenci/run` → `/tmp/cenci-<uid>/cenci` chain described above. The
+cutover happens at the daemon's next start — automatically via `cenci update`, or
+by hand via `cenci daemon restart` — the same `EnsureRunning()` self-heal moves any
+still-connecting client onto the new path with no separate migration step. One
+exception: a long-lived sandbox container created before this change has its
+`CENCI_SOCKET_DIR` mount baked in for its whole lifetime (mounts can't be
+repointed on a running container — see `cenci open`'s stale-socket-mount
+warning), so it must be stopped and relaunched, not just have the host daemon
+restarted. If you previously ran `loginctl enable-linger` as a workaround to keep
+`$XDG_RUNTIME_DIR` (and its socket) alive across logout — needed because that
+directory was tied to your login session — it is no longer required for cenci:
+the state-tier default survives logout. Treat it as a pre-fix mitigation you can
+remove, not a supported configuration to keep maintaining.
 
 ## Verifying release artifacts
 

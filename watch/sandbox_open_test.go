@@ -138,7 +138,17 @@ func joinArgv(argv []string) string {
 //	                        with internal/sandbox/launcher/faketest_test.go's
 //	                        writeFakeRuntime (#493 keep-in-sync note).
 //	FAKE_INSPECT_LABEL   — container `inspect` stdout for label lookups
-//	FAKE_INSPECT_MOUNTS  — container `inspect` stdout for mount lookups
+//	FAKE_INSPECT_MOUNTS  — container `inspect` stdout for warnIfUnwired's
+//	                        mount probe. One "<source>::<destination>" line
+//	                        per mount — the same shape as FAKE_REUSE_POSTURE's
+//	                        mount lines below — so warnIfUnwired can compare a
+//	                        reused container's cenci socket-mount source
+//	                        against the currently-resolved host socket dir, not
+//	                        just its destination (ticket #1143). Must stay
+//	                        byte-parallel with
+//	                        internal/sandbox/launcher/faketest_test.go's
+//	                        writeFakeRuntime FAKE_INSPECT_MOUNTS doc comment
+//	                        (#493 keep-in-sync note).
 //	FAKE_REUSE_POSTURE   — container `inspect` stdout for the combined
 //	                        reuse-posture probe (ticket #628's
 //	                        inspectReusePosture: the `cenci-sand.dind` label,
@@ -2668,11 +2678,11 @@ func TestOpen_FreshCreate_EmptyPluginsList_PrintsDistinctInformationalLine(t *te
 // container).
 func openAttachEnvFor(t *testing.T, fakeDir, assets, containerName, containerEnv string) []string {
 	t.Helper()
-	env, _, _ := openTestEnv(t, fakeDir, assets)
+	env, _, socketDir := openTestEnv(t, fakeDir, assets)
 	return append(env,
 		"FAKE_PS="+containerName+"\n",
 		"FAKE_INSPECT_LABEL=detached",
-		"FAKE_INSPECT_MOUNTS=/workspace\n/home/dev\n/run/user/1000/cenci\n",
+		"FAKE_INSPECT_MOUNTS=/workspace::/workspace\n/home/dev::/home/dev\n"+socketDir+"::/run/user/1000/cenci\n",
 		"FAKE_CONTAINER_ENV="+containerEnv,
 	)
 }
@@ -3008,14 +3018,14 @@ func TestOpenDind_DockerdMarkerPresent_AttachToRunning_WarnsBeforeAttach(t *test
 	fakeDir := t.TempDir()
 	callLog := writeDockerOnlyRuntime(t, fakeDir)
 	assets := writeAssetFixture(t)
-	env, _, _ := openTestEnv(t, fakeDir, assets)
+	env, _, socketDir := openTestEnv(t, fakeDir, assets)
 	const marker = "2026-07-24T09:05:00Z dockerd exited with status 137: killed"
 	env = append(env,
 		`FAKE_INFO_RUNTIMES={"sysbox-runc":{},"runc":{}}`,
 		"FAKE_DOCKERD_MARKER="+marker,
 		"FAKE_PS=claude-cenci-"+slug+"\n",
 		"FAKE_INSPECT_LABEL=detached",
-		"FAKE_INSPECT_MOUNTS=/workspace\n/home/dev\n/run/user/1000/cenci\n",
+		"FAKE_INSPECT_MOUNTS=/workspace::/workspace\n/home/dev::/home/dev\n"+socketDir+"::/run/user/1000/cenci\n",
 		"FAKE_REUSE_POSTURE=on|sysbox-runc|1\nworkspace-vol::/workspace\ndind-vol::/var/lib/docker\n\n",
 	)
 
@@ -3417,13 +3427,13 @@ func TestOpen_AttachToRunning_SkipsCreate(t *testing.T) {
 	fakeDir := t.TempDir()
 	callLog := writeScriptedRuntimes(t, fakeDir)
 	assets := writeAssetFixture(t)
-	env, _, _ := openTestEnv(t, fakeDir, assets)
+	env, _, socketDir := openTestEnv(t, fakeDir, assets)
 
 	cmd := exec.Command(binaryPath, "open", "ch")
 	cmd.Env = append(env,
 		"FAKE_PS=claude-cenci-default\n",
 		"FAKE_INSPECT_LABEL=detached",
-		"FAKE_INSPECT_MOUNTS=/workspace\n/home/dev\n/run/user/1000/cenci\n",
+		"FAKE_INSPECT_MOUNTS=/workspace::/workspace\n/home/dev::/home/dev\n"+socketDir+"::/run/user/1000/cenci\n",
 	)
 	cmd.Dir = t.TempDir()
 	output, err := cmd.CombinedOutput()
@@ -3441,6 +3451,9 @@ func TestOpen_AttachToRunning_SkipsCreate(t *testing.T) {
 	attachLine(t, lines)
 	if strings.Contains(string(output), "created without cenci wiring") {
 		t.Errorf("wired container must not warn, got:\n%s", output)
+	}
+	if strings.Contains(string(output), "stale cenci socket mount") {
+		t.Errorf("a matching-source cenci socket mount must not trigger the stale-mount warning, got:\n%s", output)
 	}
 }
 
@@ -3882,7 +3895,7 @@ func TestOpen_AttachToUnwiredRunning_Warns(t *testing.T) {
 	cmd.Env = append(env,
 		"FAKE_PS=claude-cenci-default\n",
 		"FAKE_INSPECT_LABEL=detached",
-		"FAKE_INSPECT_MOUNTS=/workspace\n/home/dev\n", // no cenci socket mount
+		"FAKE_INSPECT_MOUNTS=/workspace::/workspace\n/home/dev::/home/dev\n", // no cenci socket mount
 	)
 	cmd.Dir = t.TempDir()
 	output, err := cmd.CombinedOutput()
@@ -3892,6 +3905,54 @@ func TestOpen_AttachToUnwiredRunning_Warns(t *testing.T) {
 
 	if !strings.Contains(string(output), "was created without cenci wiring") {
 		t.Errorf("expected the #195 unwired warning, got:\n%s", output)
+	}
+	attachLine(t, callLogLines(t, callLog))
+}
+
+// TestOpen_AttachToRunning_StaleSocketMount_Warns pins the new (#1143)
+// stale-mount check: a reused container whose cenci socket mount's
+// DESTINATION matches (so the existing #195 "created without cenci wiring"
+// check sees it as wired) but whose SOURCE is the old host socket path (the
+// pre-#1146 default, coincidentally identical to the in-container
+// destination) — while CENCI_SOCKET_DIR now resolves the host socket dir to
+// a different path (openTestEnv's fresh t.TempDir()) — must still warn, but
+// with wording distinct from the "created without cenci wiring" line (that
+// literal is asserted for the missing-mount case above and must not appear
+// here), naming stop-and-relaunch as the remedy.
+func TestOpen_AttachToRunning_StaleSocketMount_Warns(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets)
+
+	cmd := exec.Command(binaryPath, "open", "ch")
+	cmd.Env = append(env,
+		"FAKE_PS=claude-cenci-default\n",
+		"FAKE_INSPECT_LABEL=detached",
+		// Source is the pre-#1146 default host socket path, which
+		// coincidentally is the same string as the in-container destination;
+		// the currently-resolved host socket dir (CENCI_SOCKET_DIR, set by
+		// openTestEnv to a fresh t.TempDir()) is guaranteed to differ.
+		"FAKE_INSPECT_MOUNTS=/workspace::/workspace\n/home/dev::/home/dev\n/run/user/1000/cenci::/run/user/1000/cenci\n",
+	)
+	cmd.Dir = t.TempDir()
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("open ch (stale socket mount): %v\n%s", err, output)
+	}
+
+	out := string(output)
+	if strings.Contains(out, "was created without cenci wiring") {
+		t.Errorf("a stale-source mismatch must use wording distinct from the missing-mount warning, got:\n%s", out)
+	}
+	if !strings.Contains(out, "stale cenci socket mount") {
+		t.Errorf("expected a stale cenci socket mount warning, got:\n%s", out)
+	}
+	if !strings.Contains(out, "stop claude-cenci-default") {
+		t.Errorf("expected the warning to name the 'stop' remedy, got:\n%s", out)
+	}
+	if !strings.Contains(out, "relaunch") {
+		t.Errorf("expected the warning to name relaunching as part of the remedy, got:\n%s", out)
 	}
 	attachLine(t, callLogLines(t, callLog))
 }
@@ -4222,14 +4283,14 @@ func TestOpenAttachToRunning_ForwardsCurrentAttendedFlag(t *testing.T) {
 	fakeDir := t.TempDir()
 	callLog := writeScriptedRuntimes(t, fakeDir)
 	assets := writeAssetFixture(t)
-	env, home, _ := openTestEnv(t, fakeDir, assets)
+	env, home, socketDir := openTestEnv(t, fakeDir, assets)
 	writeFleetConfigFixture(t, home, `{"planning": {"attended": true}}`)
 
 	cmd := exec.Command(binaryPath, "open", "ch")
 	cmd.Env = append(env,
 		"FAKE_PS=claude-cenci-default\n",
 		"FAKE_INSPECT_LABEL=detached",
-		"FAKE_INSPECT_MOUNTS=/workspace\n/home/dev\n/run/user/1000/cenci\n",
+		"FAKE_INSPECT_MOUNTS=/workspace::/workspace\n/home/dev::/home/dev\n"+socketDir+"::/run/user/1000/cenci\n",
 	)
 	cmd.Dir = t.TempDir()
 	if output, err := cmd.CombinedOutput(); err != nil {
