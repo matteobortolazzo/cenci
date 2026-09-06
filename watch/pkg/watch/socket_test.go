@@ -23,474 +23,636 @@ func captureLog(t *testing.T) *bytes.Buffer {
 	return &buf
 }
 
-func TestSecureSocketDir_UsesXDGWhenSet(t *testing.T) {
-	xdgDir := t.TempDir()
-	t.Setenv("XDG_RUNTIME_DIR", xdgDir)
+// -- shared tier fixtures ----------------------------------------------------
 
-	got, err := secureSocketDir()
-	if err != nil {
-		t.Fatalf("secureSocketDir() error: %v", err)
-	}
-	if got != xdgDir {
-		t.Errorf("expected %q, got %q", xdgDir, got)
+// socketDirTier configures the process environment so ResolveSocketDir()
+// lands on one specific tier of the $CENCI_SOCKET_DIR -> $XDG_STATE_HOME ->
+// /tmp chain, and reports the exact leaf directory that tier will resolve
+// to. The leaf is always built from primitives (t.TempDir(), fmt.Sprintf),
+// never from a live ResolveSocketDir()/SocketDir() call, so a test comparing
+// against it stays red until the resolver genuinely produces that path.
+type socketDirTier struct {
+	name      string
+	configure func(t *testing.T) (leaf string)
+}
+
+// socketDirTiers returns the three tier fixtures shared by every hardening
+// test below (AC #2), so each behavior gets an explicit test case per tier
+// rather than one shared assertion across a table that only covers a subset.
+func socketDirTiers() []socketDirTier {
+	return []socketDirTier{
+		{
+			name: "override",
+			configure: func(t *testing.T) string {
+				t.Setenv("XDG_STATE_HOME", "") // irrelevant: override always wins outright
+				base := t.TempDir()
+				// Short leaf name deliberately: t.TempDir()'s own path already
+				// embeds this (sub)test's full name, and the longest test name
+				// in this file combined with a verbose leaf name can land
+				// exactly on sunPathMax (#1142 Phase 6+7 review Fix 2 tightened
+				// the bound from "<= sunPathMax" to "< sunPathMax"), making the
+				// override tier spuriously hard-error. "sock" keeps every
+				// caller safely under the bound regardless of test name length.
+				leaf := filepath.Join(base, "sock")
+				t.Setenv("CENCI_SOCKET_DIR", leaf)
+				return leaf
+			},
+		},
+		{
+			name: "state",
+			configure: func(t *testing.T) string {
+				t.Setenv("CENCI_SOCKET_DIR", "")
+				base := t.TempDir()
+				t.Setenv("XDG_STATE_HOME", base)
+				return filepath.Join(base, "cenci", "run")
+			},
+		},
+		{
+			name: "tmp",
+			configure: func(t *testing.T) string {
+				t.Setenv("CENCI_SOCKET_DIR", "")
+				t.Setenv("XDG_STATE_HOME", "")
+				t.Setenv("HOME", "") // force $XDG_STATE_HOME's default-derivation to fail too
+				tmpRoot := t.TempDir()
+				t.Setenv("TMPDIR", tmpRoot)
+				return filepath.Join(tmpRoot, fmt.Sprintf("cenci-%d", os.Getuid()), "cenci")
+			},
+		},
 	}
 }
 
-func TestSecureSocketDir_CreatesTmpDirWhenNoXDG(t *testing.T) {
-	t.Setenv("XDG_RUNTIME_DIR", "")
-
-	got, err := secureSocketDir()
-	if err != nil {
-		t.Fatalf("secureSocketDir() error: %v", err)
-	}
-
-	expectedSuffix := fmt.Sprintf("cenci-%d", os.Getuid())
-	if !strings.HasSuffix(got, expectedSuffix) {
-		t.Errorf("expected path ending with %q, got %q", expectedSuffix, got)
-	}
-
-	info, err := os.Stat(got)
-	if err != nil {
-		t.Fatalf("stat(%q) error: %v", got, err)
-	}
-	if !info.IsDir() {
-		t.Errorf("expected directory, got file")
-	}
-	if perm := info.Mode().Perm(); perm != 0700 {
-		t.Errorf("expected permissions 0700, got %04o", perm)
+// ensureParentDir pre-creates leaf's parent directory so a test can plant a
+// fixture (symlink, plain file, pre-existing dir) directly at the leaf path
+// before calling the resolver, even for tiers whose leaf is nested two
+// levels below a not-yet-existing base (e.g. the state tier's
+// <XDG_STATE_HOME>/cenci/run).
+func ensureParentDir(t *testing.T, leaf string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(leaf), 0700); err != nil {
+		t.Fatalf("pre-creating parent of %q: %v", leaf, err)
 	}
 }
 
-func TestSecureSocketDir_ValidatesExistingDir(t *testing.T) {
-	t.Setenv("XDG_RUNTIME_DIR", "")
+// -- AC #1: three-tier chain resolution --------------------------------------
 
-	// Create the directory with wrong permissions before calling secureSocketDir.
-	dir := filepath.Join(t.TempDir(), fmt.Sprintf("cenci-%d", os.Getuid()))
-	if err := os.Mkdir(dir, 0777); err != nil {
-		t.Fatal(err)
-	}
+// TestResolveSocketDir_OverrideTierWins covers the top of the chain:
+// $CENCI_SOCKET_DIR, when set, wins verbatim (no appended segment) over
+// every lower tier.
+func TestResolveSocketDir_OverrideTierWins(t *testing.T) {
+	base := t.TempDir()
+	leaf := filepath.Join(base, "sock")
+	t.Setenv("CENCI_SOCKET_DIR", leaf)
+	t.Setenv("XDG_STATE_HOME", t.TempDir()) // present but must lose to the override
 
-	// Override TMP so secureSocketDir uses our test directory's parent.
-	t.Setenv("TMPDIR", filepath.Dir(dir))
-
-	got, err := secureSocketDir()
+	res, err := ResolveSocketDir()
 	if err != nil {
-		t.Fatalf("secureSocketDir() error: %v", err)
+		t.Fatalf("ResolveSocketDir() error: %v", err)
 	}
-	if got != dir {
-		t.Errorf("expected %q, got %q", dir, got)
+	if res.Dir != leaf {
+		t.Errorf("Dir = %q, want %q (verbatim override, no appended segment)", res.Dir, leaf)
 	}
-
-	info, err := os.Stat(got)
-	if err != nil {
-		t.Fatalf("stat(%q) error: %v", got, err)
-	}
-	if perm := info.Mode().Perm(); perm != 0700 {
-		t.Errorf("expected permissions fixed to 0700, got %04o", perm)
+	if res.Tier != TierOverride {
+		t.Errorf("Tier = %q, want %q", res.Tier, TierOverride)
 	}
 }
 
-func TestSecureSocketDir_RejectsInsecureXDG(t *testing.T) {
-	// Create a directory with world-writable permissions.
-	insecureDir := filepath.Join(t.TempDir(), "insecure-xdg")
-	if err := os.Mkdir(insecureDir, 0700); err != nil {
-		t.Fatal(err)
-	}
-	// Chmod bypasses umask, ensuring the directory is actually world-writable.
-	if err := os.Chmod(insecureDir, 0777); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("XDG_RUNTIME_DIR", insecureDir)
+// TestResolveSocketDir_StateTierWins covers the middle tier: with no
+// override set, $XDG_STATE_HOME/cenci/run wins.
+func TestResolveSocketDir_StateTierWins(t *testing.T) {
+	t.Setenv("CENCI_SOCKET_DIR", "")
+	base := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", base)
 
-	got, err := secureSocketDir()
+	want := filepath.Join(base, "cenci", "run")
+	res, err := ResolveSocketDir()
 	if err != nil {
-		t.Fatalf("secureSocketDir() error: %v", err)
+		t.Fatalf("ResolveSocketDir() error: %v", err)
 	}
-	// Should NOT return the insecure XDG dir; should fall through to /tmp.
-	if got == insecureDir {
-		t.Errorf("secureSocketDir() returned insecure XDG dir %q; expected /tmp fallback", insecureDir)
+	if res.Dir != want {
+		t.Errorf("Dir = %q, want %q", res.Dir, want)
+	}
+	if res.Tier != TierState {
+		t.Errorf("Tier = %q, want %q", res.Tier, TierState)
 	}
 }
 
-// TestDefaultSocketPath_ResolvesUnderNestedSocketDir replaces the former
-// TestDefaultSocketPath_UsesSecureDir: defaultSocketPath must route through the
-// nested SocketDir() (not secureSocketDir() directly), so cenci.sock lands
-// in the same dedicated cenci/ subdirectory as the events socket (#217).
-func TestDefaultSocketPath_ResolvesUnderNestedSocketDir(t *testing.T) {
-	xdgDir := t.TempDir()
-	t.Setenv("XDG_RUNTIME_DIR", xdgDir)
-
-	got := DefaultSocketPath()
-
-	// Deliberately built from primitives (not from a live SocketDir() call):
-	// once SocketDir() is nested but defaultSocketPath is NOT yet rerouted to
-	// build on it, comparing against a live SocketDir() call would coincidentally
-	// still pass. This pins the actual nested-path shape from the AC.
-	want := filepath.Join(xdgDir, "cenci", "cenci.sock")
-	if got != want {
-		t.Errorf("DefaultSocketPath() = %q, want %q (must resolve under the nested SocketDir(), not the flat secureSocketDir())", got, want)
-	}
-}
-
-// TestSocketDir_NestsCenciSubdirUnderXDG covers the AC: when
-// $XDG_RUNTIME_DIR is valid, SocketDir() must return a dedicated cenci/
-// subdirectory nested under it (not the shared XDG dir itself, which also
-// holds wayland/pulse/keyring sockets), created with 0700 if missing.
-func TestSocketDir_NestsCenciSubdirUnderXDG(t *testing.T) {
-	xdgDir := t.TempDir()
-	t.Setenv("XDG_RUNTIME_DIR", xdgDir)
-
-	got, err := SocketDir()
-	if err != nil {
-		t.Fatalf("SocketDir() error: %v", err)
-	}
-
-	want := filepath.Join(xdgDir, "cenci")
-	if got != want {
-		t.Errorf("SocketDir() = %q, want %q (nested cenci/ subdir under XDG_RUNTIME_DIR)", got, want)
-	}
-
-	info, err := os.Stat(got)
-	if err != nil {
-		t.Fatalf("stat(%q) error: %v", got, err)
-	}
-	if !info.IsDir() {
-		t.Fatalf("SocketDir() %q is not a directory", got)
-	}
-	if perm := info.Mode().Perm(); perm != 0700 {
-		t.Errorf("SocketDir() dir permissions = %04o, want 0700", perm)
-	}
-}
-
-// TestSocketDir_NestsCenciSubdirUnderTmpFallback covers the AC: the /tmp
-// fallback branch must nest cenci/ one level deeper than today's flat
-// /tmp/cenci-<uid>/ directory, created with 0700 if missing.
-func TestSocketDir_NestsCenciSubdirUnderTmpFallback(t *testing.T) {
-	t.Setenv("XDG_RUNTIME_DIR", "")
+// TestResolveSocketDir_TmpTierWins covers the bottom tier: with no override
+// and no usable state root, /tmp/cenci-<uid>/cenci wins.
+func TestResolveSocketDir_TmpTierWins(t *testing.T) {
+	t.Setenv("CENCI_SOCKET_DIR", "")
+	t.Setenv("XDG_STATE_HOME", "")
+	t.Setenv("HOME", "")
 	tmpRoot := t.TempDir()
 	t.Setenv("TMPDIR", tmpRoot)
 
-	got, err := SocketDir()
-	if err != nil {
-		t.Fatalf("SocketDir() error: %v", err)
-	}
-
 	want := filepath.Join(tmpRoot, fmt.Sprintf("cenci-%d", os.Getuid()), "cenci")
-	if got != want {
-		t.Errorf("SocketDir() = %q, want %q (nested one level deeper than the /tmp fallback dir)", got, want)
-	}
-
-	info, err := os.Stat(got)
+	res, err := ResolveSocketDir()
 	if err != nil {
-		t.Fatalf("stat(%q) error: %v", got, err)
+		t.Fatalf("ResolveSocketDir() error: %v", err)
 	}
-	if !info.IsDir() {
-		t.Fatalf("SocketDir() %q is not a directory", got)
+	if res.Dir != want {
+		t.Errorf("Dir = %q, want %q", res.Dir, want)
 	}
-	if perm := info.Mode().Perm(); perm != 0700 {
-		t.Errorf("SocketDir() dir permissions = %04o, want 0700", perm)
+	if res.Tier != TierTmp {
+		t.Errorf("Tier = %q, want %q", res.Tier, TierTmp)
 	}
 }
 
-// TestSocketDir_IdempotentAgainstPreCreatedDir covers the container bind-mount
-// case called out in the plan's Risks section: a container may pre-create the
-// nested cenci/ mountpoint (with host ownership) before cenci itself
-// ever runs. SocketDir() must not error against that, and repeated calls must
-// keep resolving to the same path without error.
-func TestSocketDir_IdempotentAgainstPreCreatedDir(t *testing.T) {
-	tests := []struct {
-		name  string
-		setup func(t *testing.T) (parentOfNestedDir string)
-	}{
-		{
-			name: "xdg branch",
-			setup: func(t *testing.T) string {
-				xdgDir := t.TempDir()
-				t.Setenv("XDG_RUNTIME_DIR", xdgDir)
-				return xdgDir
-			},
-		},
-		{
-			name: "tmp fallback branch",
-			setup: func(t *testing.T) string {
-				t.Setenv("XDG_RUNTIME_DIR", "")
-				tmpRoot := t.TempDir()
-				t.Setenv("TMPDIR", tmpRoot)
-				return filepath.Join(tmpRoot, fmt.Sprintf("cenci-%d", os.Getuid()))
-			},
-		},
+// TestResolveSocketDir_BogusXDGRuntimeDirHasNoEffect covers the removal half
+// of AC #1: no socket-resolution code path reads $XDG_RUNTIME_DIR anymore, so
+// a set-but-bogus value must never influence the resolved directory.
+func TestResolveSocketDir_BogusXDGRuntimeDirHasNoEffect(t *testing.T) {
+	t.Setenv("CENCI_SOCKET_DIR", "")
+	base := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", base)
+	t.Setenv("XDG_RUNTIME_DIR", "/nonexistent/bogus/xdg-runtime-dir-must-be-ignored")
+
+	want := filepath.Join(base, "cenci", "run")
+	res, err := ResolveSocketDir()
+	if err != nil {
+		t.Fatalf("ResolveSocketDir() error: %v", err)
+	}
+	if res.Dir != want {
+		t.Errorf("a bogus XDG_RUNTIME_DIR affected resolution: Dir = %q, want %q", res.Dir, want)
+	}
+	if res.Tier != TierState {
+		t.Errorf("Tier = %q, want %q", res.Tier, TierState)
+	}
+}
+
+// -- AC #2: leaf hardening per tier (12 cases: 4 behaviors x 3 tiers, plus a
+// 0700 no-warn counter-case per tier) ----------------------------------------
+
+// TestSocketDir_HardensFreshLeafTo0700 covers the "created 0700 when absent"
+// behavior of AC #2, for each of the three tiers.
+func TestSocketDir_HardensFreshLeafTo0700(t *testing.T) {
+	for _, tier := range socketDirTiers() {
+		t.Run(tier.name, func(t *testing.T) {
+			leaf := tier.configure(t)
+
+			res, err := ResolveSocketDir()
+			if err != nil {
+				t.Fatalf("ResolveSocketDir() error: %v", err)
+			}
+			if res.Dir != leaf {
+				t.Errorf("Dir = %q, want %q", res.Dir, leaf)
+			}
+			info, err := os.Stat(leaf)
+			if err != nil {
+				t.Fatalf("stat(%q): %v", leaf, err)
+			}
+			if !info.IsDir() {
+				t.Fatalf("%q is not a directory", leaf)
+			}
+			if perm := info.Mode().Perm(); perm != 0700 {
+				t.Errorf("leaf permissions = %04o, want 0700", perm)
+			}
+		})
+	}
+}
+
+// TestSocketDir_RejectsSymlinkAtLeaf covers the "symlink path rejected"
+// behavior of AC #2, for each of the three tiers: the resolver must refuse
+// to follow the symlink and must leave it untouched.
+func TestSocketDir_RejectsSymlinkAtLeaf(t *testing.T) {
+	for _, tier := range socketDirTiers() {
+		t.Run(tier.name, func(t *testing.T) {
+			leaf := tier.configure(t)
+			ensureParentDir(t, leaf)
+
+			target := t.TempDir()
+			if err := os.Symlink(target, leaf); err != nil {
+				t.Fatalf("planting symlink %q -> %q: %v", leaf, target, err)
+			}
+
+			_, err := ResolveSocketDir()
+			if err == nil {
+				t.Fatalf("ResolveSocketDir() error = nil, want error when the leaf is a symlink")
+			}
+			if !strings.Contains(err.Error(), "symlink") {
+				t.Errorf("error = %q, want it to mention %q", err.Error(), "symlink")
+			}
+
+			linkInfo, lerr := os.Lstat(leaf)
+			if lerr != nil {
+				t.Fatalf("Lstat(%q): %v", leaf, lerr)
+			}
+			if linkInfo.Mode()&os.ModeSymlink == 0 {
+				t.Fatalf("expected %q to still be a symlink, got mode %v", leaf, linkInfo.Mode())
+			}
+			gotTarget, rerr := os.Readlink(leaf)
+			if rerr != nil {
+				t.Fatalf("Readlink(%q): %v", leaf, rerr)
+			}
+			if gotTarget != target {
+				t.Errorf("symlink target changed: got %q, want %q", gotTarget, target)
+			}
+		})
+	}
+}
+
+// TestSocketDir_RejectsPlainFileAtLeaf covers the "non-directory path
+// rejected" behavior of AC #2, for each of the three tiers.
+func TestSocketDir_RejectsPlainFileAtLeaf(t *testing.T) {
+	for _, tier := range socketDirTiers() {
+		t.Run(tier.name, func(t *testing.T) {
+			leaf := tier.configure(t)
+			ensureParentDir(t, leaf)
+
+			if err := os.WriteFile(leaf, []byte("not a directory"), 0600); err != nil {
+				t.Fatalf("planting plain file at %q: %v", leaf, err)
+			}
+
+			_, err := ResolveSocketDir()
+			if err == nil {
+				t.Fatalf("ResolveSocketDir() error = nil, want error when the leaf is a plain file")
+			}
+			if !strings.Contains(err.Error(), "not a directory") {
+				t.Errorf("error = %q, want it to mention %q", err.Error(), "not a directory")
+			}
+		})
+	}
+}
+
+// TestSocketDir_WarnsOnLoosePermissionsWithoutChmod covers the "loose
+// permission (0077) warning without chmod on a pre-existing directory"
+// behavior of AC #2, for each of the three tiers: the resolver must still
+// succeed (no chmod fight with an already-mounted dir) but must log a
+// non-fatal warning.
+func TestSocketDir_WarnsOnLoosePermissionsWithoutChmod(t *testing.T) {
+	for _, tier := range socketDirTiers() {
+		t.Run(tier.name, func(t *testing.T) {
+			leaf := tier.configure(t)
+			ensureParentDir(t, leaf)
+
+			if err := os.MkdirAll(leaf, 0700); err != nil {
+				t.Fatalf("pre-creating leaf %q: %v", leaf, err)
+			}
+			// Chmod bypasses umask, ensuring the dir is actually group/world
+			// accessible regardless of the process umask.
+			if err := os.Chmod(leaf, 0755); err != nil {
+				t.Fatalf("chmod %q: %v", leaf, err)
+			}
+
+			logBuf := captureLog(t)
+			res, err := ResolveSocketDir()
+			if err != nil {
+				t.Fatalf("ResolveSocketDir() error: %v", err)
+			}
+			if res.Dir != leaf {
+				t.Errorf("Dir = %q, want %q", res.Dir, leaf)
+			}
+			if !strings.Contains(strings.ToLower(logBuf.String()), "warning") {
+				t.Errorf("expected a warning to be logged for loose permissions on %q, got log output: %q", leaf, logBuf.String())
+			}
+
+			info, err := os.Stat(leaf)
+			if err != nil {
+				t.Fatalf("stat(%q): %v", leaf, err)
+			}
+			if perm := info.Mode().Perm(); perm != 0755 {
+				t.Errorf("leaf permissions changed to %04o, want unchanged 0755 (no chmod fight)", perm)
+			}
+		})
+	}
+}
+
+// TestSocketDir_NoWarnOnStrictPermissions is the counter-case of the
+// preceding test: a pre-existing leaf that is already 0700 or stricter must
+// not trigger any warning, for each of the three tiers.
+func TestSocketDir_NoWarnOnStrictPermissions(t *testing.T) {
+	for _, tier := range socketDirTiers() {
+		t.Run(tier.name, func(t *testing.T) {
+			leaf := tier.configure(t)
+			ensureParentDir(t, leaf)
+
+			if err := os.MkdirAll(leaf, 0700); err != nil {
+				t.Fatalf("pre-creating leaf %q: %v", leaf, err)
+			}
+			// Chmod explicitly (bypassing umask) so the dir is provably 0700
+			// regardless of the process umask.
+			if err := os.Chmod(leaf, 0700); err != nil {
+				t.Fatalf("chmod %q: %v", leaf, err)
+			}
+
+			logBuf := captureLog(t)
+			res, err := ResolveSocketDir()
+			if err != nil {
+				t.Fatalf("ResolveSocketDir() error: %v", err)
+			}
+			if res.Dir != leaf {
+				t.Errorf("Dir = %q, want %q", res.Dir, leaf)
+			}
+			if strings.Contains(strings.ToLower(logBuf.String()), "warning") {
+				t.Errorf("expected no warning for strict permissions on %q, got log output: %q", leaf, logBuf.String())
+			}
+		})
+	}
+}
+
+// TestSocketDir_RejectsWritableLeaf covers the "group/other-writable
+// pre-existing directory hard-rejected" behavior restored by the #1142
+// Phase 6+7 review (Fix 1): unlike the read/execute-only 0755 case above
+// (which only warns), a leaf that is group- or other-**writable** must hard
+// error instead of merely warning, for each of the three tiers.
+func TestSocketDir_RejectsWritableLeaf(t *testing.T) {
+	for _, tier := range socketDirTiers() {
+		t.Run(tier.name, func(t *testing.T) {
+			leaf := tier.configure(t)
+			ensureParentDir(t, leaf)
+
+			if err := os.MkdirAll(leaf, 0700); err != nil {
+				t.Fatalf("pre-creating leaf %q: %v", leaf, err)
+			}
+			// Chmod bypasses umask, ensuring the dir is actually
+			// group/other writable regardless of the process umask.
+			if err := os.Chmod(leaf, 0777); err != nil {
+				t.Fatalf("chmod %q: %v", leaf, err)
+			}
+
+			_, err := ResolveSocketDir()
+			if err == nil {
+				t.Fatalf("ResolveSocketDir() error = nil, want error when the leaf is group/other writable")
+			}
+			lower := strings.ToLower(err.Error())
+			if !strings.Contains(lower, "writable") && !strings.Contains(lower, "insecure permissions") {
+				t.Errorf("error = %q, want it to mention %q or %q", err.Error(), "writable", "insecure permissions")
+			}
+
+			info, statErr := os.Stat(leaf)
+			if statErr != nil {
+				t.Fatalf("stat(%q): %v", leaf, statErr)
+			}
+			if perm := info.Mode().Perm(); perm != 0777 {
+				t.Errorf("leaf permissions changed to %04o, want unchanged 0777 (no chmod fight)", perm)
+			}
+		})
+	}
+}
+
+// -- AC #3: sun_path length validation ---------------------------------------
+
+// TestResolveSocketDir_TierTwoOverBound_LogsLengthAndBoundThenFallsToTierThree
+// shrinks sunPathMax via the package test seam so a tier-2 path that would
+// otherwise win is provably over the bound, and asserts the resolver logs
+// both the computed length and the bound before falling back to tier 3.
+func TestResolveSocketDir_TierTwoOverBound_LogsLengthAndBoundThenFallsToTierThree(t *testing.T) {
+	orig := sunPathMax
+	sunPathMax = 40
+	t.Cleanup(func() { sunPathMax = orig })
+
+	t.Setenv("CENCI_SOCKET_DIR", "")
+	base := t.TempDir() // embeds the full (long) test name -- easily over 40 bytes alone
+	t.Setenv("XDG_STATE_HOME", base)
+	tier2Leaf := filepath.Join(base, "cenci", "run")
+	computedLen := len(tier2Leaf) + 1 + len(EventSocketBasename)
+	if computedLen <= sunPathMax {
+		t.Fatalf("test fixture invalid: computed length %d does not exceed the shrunk bound %d", computedLen, sunPathMax)
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			parent := tt.setup(t)
+	tmpRoot := t.TempDir()
+	t.Setenv("TMPDIR", tmpRoot)
+	wantTier3 := filepath.Join(tmpRoot, fmt.Sprintf("cenci-%d", os.Getuid()), "cenci")
 
-			// Simulate a container bind-mounting the nested dir before
-			// cenci ever runs (host pre-creates the mountpoint).
-			preCreated := filepath.Join(parent, "cenci")
-			if err := os.MkdirAll(preCreated, 0700); err != nil {
-				t.Fatalf("pre-creating %q: %v", preCreated, err)
+	logBuf := captureLog(t)
+	res, err := ResolveSocketDir()
+	if err != nil {
+		t.Fatalf("ResolveSocketDir() error: %v", err)
+	}
+	if res.Tier != TierTmp {
+		t.Errorf("Tier = %q, want %q (an over-bound tier-2 path must fall through to tier 3)", res.Tier, TierTmp)
+	}
+	if res.Dir != wantTier3 {
+		t.Errorf("Dir = %q, want %q", res.Dir, wantTier3)
+	}
+
+	logOut := logBuf.String()
+	if !strings.Contains(logOut, fmt.Sprintf("%d", computedLen)) {
+		t.Errorf("log output missing the computed length %d, got: %q", computedLen, logOut)
+	}
+	if !strings.Contains(logOut, fmt.Sprintf("%d", sunPathMax)) {
+		t.Errorf("log output missing the sun_path bound %d, got: %q", sunPathMax, logOut)
+	}
+}
+
+// TestResolveSocketDir_TierTwoOverBound_RealBoundWithoutShrinkingSeam
+// exercises the same fallback WITHOUT touching the sunPathMax test seam: a
+// genuinely deep $XDG_STATE_HOME naturally exceeds the platform's real
+// default bound, proving the bound isn't only enforced when a test shrinks
+// it artificially.
+func TestResolveSocketDir_TierTwoOverBound_RealBoundWithoutShrinkingSeam(t *testing.T) {
+	t.Setenv("CENCI_SOCKET_DIR", "")
+	deepBase := filepath.Join(t.TempDir(), strings.Repeat("a", 40), strings.Repeat("b", 40), strings.Repeat("c", 40))
+	t.Setenv("XDG_STATE_HOME", deepBase)
+	tier2Leaf := filepath.Join(deepBase, "cenci", "run")
+	if computedLen := len(tier2Leaf) + 1 + len(EventSocketBasename); computedLen <= sunPathMax {
+		t.Fatalf("test fixture invalid: computed length %d does not exceed the real bound %d", computedLen, sunPathMax)
+	}
+
+	tmpRoot := t.TempDir()
+	t.Setenv("TMPDIR", tmpRoot)
+	wantTier3 := filepath.Join(tmpRoot, fmt.Sprintf("cenci-%d", os.Getuid()), "cenci")
+
+	res, err := ResolveSocketDir()
+	if err != nil {
+		t.Fatalf("ResolveSocketDir() error: %v", err)
+	}
+	if res.Tier != TierTmp {
+		t.Errorf("Tier = %q, want %q", res.Tier, TierTmp)
+	}
+	if res.Dir != wantTier3 {
+		t.Errorf("Dir = %q, want %q", res.Dir, wantTier3)
+	}
+}
+
+// -- AC #4: an unusable $CENCI_SOCKET_DIR hard-errors, never falls through ---
+
+// TestResolveSocketDir_OverrideUnusable_HardErrorsWithNoFallThrough covers
+// five distinct tier-1 failure classes. Each asserts a content-specific
+// error substring (never just non-nil, watch/docs/error-handling.md #446)
+// and that the result is not the tier-2 or tier-3 path that would have won
+// had tier 1 fallen through.
+func TestResolveSocketDir_OverrideUnusable_HardErrorsWithNoFallThrough(t *testing.T) {
+	// nonWinners configures tier 2/3 to genuinely resolvable paths (so a
+	// silent fall-through would be observable) and returns what they'd be.
+	nonWinners := func(t *testing.T) (tier2, tier3 string) {
+		t.Helper()
+		stateBase := t.TempDir()
+		t.Setenv("XDG_STATE_HOME", stateBase)
+		tmpRoot := t.TempDir()
+		t.Setenv("TMPDIR", tmpRoot)
+		return filepath.Join(stateBase, "cenci", "run"), filepath.Join(tmpRoot, fmt.Sprintf("cenci-%d", os.Getuid()), "cenci")
+	}
+
+	assertHardError := func(t *testing.T, wantSubstr, tier2, tier3 string) {
+		t.Helper()
+		res, err := ResolveSocketDir()
+		if err == nil {
+			t.Fatalf("ResolveSocketDir() error = nil, want a hard error naming %q", wantSubstr)
+		}
+		if !strings.Contains(err.Error(), wantSubstr) {
+			t.Errorf("error = %q, want it to mention %q", err.Error(), wantSubstr)
+		}
+		if res.Dir == tier2 {
+			t.Errorf("silently fell through to the tier-2 path %q instead of hard-erroring", tier2)
+		}
+		if res.Dir == tier3 {
+			t.Errorf("silently fell through to the tier-3 path %q instead of hard-erroring", tier3)
+		}
+	}
+
+	t.Run("relative_path", func(t *testing.T) {
+		tier2, tier3 := nonWinners(t)
+		t.Setenv("CENCI_SOCKET_DIR", "relative/socket-dir")
+		assertHardError(t, "absolute", tier2, tier3)
+	})
+
+	t.Run("over_sun_path_bound", func(t *testing.T) {
+		tier2, tier3 := nonWinners(t)
+		orig := sunPathMax
+		sunPathMax = 20
+		t.Cleanup(func() { sunPathMax = orig })
+		base := t.TempDir()
+		long := filepath.Join(base, strings.Repeat("x", 40))
+		t.Setenv("CENCI_SOCKET_DIR", long)
+		assertHardError(t, fmt.Sprintf("%d", sunPathMax), tier2, tier3)
+	})
+
+	t.Run("symlink", func(t *testing.T) {
+		tier2, tier3 := nonWinners(t)
+		base := t.TempDir()
+		target := t.TempDir()
+		leaf := filepath.Join(base, "sock")
+		if err := os.Symlink(target, leaf); err != nil {
+			t.Fatalf("planting symlink: %v", err)
+		}
+		t.Setenv("CENCI_SOCKET_DIR", leaf)
+		assertHardError(t, "symlink", tier2, tier3)
+	})
+
+	t.Run("plain_file", func(t *testing.T) {
+		tier2, tier3 := nonWinners(t)
+		base := t.TempDir()
+		leaf := filepath.Join(base, "sock")
+		if err := os.WriteFile(leaf, []byte("nope"), 0600); err != nil {
+			t.Fatalf("planting plain file: %v", err)
+		}
+		t.Setenv("CENCI_SOCKET_DIR", leaf)
+		assertHardError(t, "not a directory", tier2, tier3)
+	})
+
+	t.Run("uncreatable_parent", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("running as root bypasses Unix directory permission checks; cannot simulate an uncreatable parent")
+		}
+		tier2, tier3 := nonWinners(t)
+		parent := t.TempDir()
+		if err := os.Chmod(parent, 0500); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(parent, 0700) })
+		leaf := filepath.Join(parent, "sock")
+		t.Setenv("CENCI_SOCKET_DIR", leaf)
+		assertHardError(t, "permission denied", tier2, tier3)
+	})
+}
+
+// -- AC #5: unresolvable/uncreatable state root falls back to tier 3 --------
+
+// TestResolveSocketDir_HomeAndStateHomeBothEmpty_LogsReasonAndFallsToTierThree
+// covers the case where neither $HOME nor $XDG_STATE_HOME can produce a
+// state root at all.
+func TestResolveSocketDir_HomeAndStateHomeBothEmpty_LogsReasonAndFallsToTierThree(t *testing.T) {
+	t.Setenv("CENCI_SOCKET_DIR", "")
+	t.Setenv("XDG_STATE_HOME", "")
+	t.Setenv("HOME", "")
+	tmpRoot := t.TempDir()
+	t.Setenv("TMPDIR", tmpRoot)
+	want := filepath.Join(tmpRoot, fmt.Sprintf("cenci-%d", os.Getuid()), "cenci")
+
+	logBuf := captureLog(t)
+	res, err := ResolveSocketDir()
+	if err != nil {
+		t.Fatalf("ResolveSocketDir() error: %v", err)
+	}
+	if res.Tier != TierTmp {
+		t.Errorf("Tier = %q, want %q", res.Tier, TierTmp)
+	}
+	if res.Dir != want {
+		t.Errorf("Dir = %q, want %q", res.Dir, want)
+	}
+	logOut := strings.ToLower(logBuf.String())
+	if !strings.Contains(logOut, "home") {
+		t.Errorf("expected a logged reason naming HOME/XDG_STATE_HOME resolution failure, got: %q", logBuf.String())
+	}
+}
+
+// TestResolveSocketDir_StateDirUncreatable_LogsReasonAndFallsToTierThree
+// covers the case where $XDG_STATE_HOME resolves but the directory itself
+// cannot be created (e.g. a read-only parent).
+func TestResolveSocketDir_StateDirUncreatable_LogsReasonAndFallsToTierThree(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root bypasses Unix directory permission checks; cannot simulate an uncreatable state dir")
+	}
+	t.Setenv("CENCI_SOCKET_DIR", "")
+	parent := t.TempDir()
+	if err := os.Chmod(parent, 0500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(parent, 0700) })
+	t.Setenv("XDG_STATE_HOME", filepath.Join(parent, "state"))
+	tmpRoot := t.TempDir()
+	t.Setenv("TMPDIR", tmpRoot)
+	want := filepath.Join(tmpRoot, fmt.Sprintf("cenci-%d", os.Getuid()), "cenci")
+
+	logBuf := captureLog(t)
+	res, err := ResolveSocketDir()
+	if err != nil {
+		t.Fatalf("ResolveSocketDir() error: %v", err)
+	}
+	if res.Tier != TierTmp {
+		t.Errorf("Tier = %q, want %q", res.Tier, TierTmp)
+	}
+	if res.Dir != want {
+		t.Errorf("Dir = %q, want %q", res.Dir, want)
+	}
+	if !strings.Contains(strings.ToLower(logBuf.String()), "warning") {
+		t.Errorf("expected a logged reason for the uncreatable state dir, got: %q", logBuf.String())
+	}
+}
+
+// -- Regression: container bind-mount idempotency and shared socket parent --
+
+// TestSocketDir_IdempotentAgainstPreCreatedDir covers the container
+// bind-mount case called out in the plan's Risks section: a container may
+// pre-create the leaf mountpoint (with host ownership) before cenci itself
+// ever runs. SocketDir() must not error against that, and repeated calls
+// must keep resolving to the same path without error.
+func TestSocketDir_IdempotentAgainstPreCreatedDir(t *testing.T) {
+	for _, tier := range socketDirTiers() {
+		t.Run(tier.name, func(t *testing.T) {
+			leaf := tier.configure(t)
+
+			// Simulate a container bind-mounting the leaf before cenci ever
+			// runs (host pre-creates the mountpoint).
+			if err := os.MkdirAll(leaf, 0700); err != nil {
+				t.Fatalf("pre-creating %q: %v", leaf, err)
 			}
 
 			got, err := SocketDir()
 			if err != nil {
 				t.Fatalf("SocketDir() must not error against a pre-existing dir: %v", err)
 			}
-			if got != preCreated {
-				t.Errorf("SocketDir() = %q, want %q", got, preCreated)
+			if got != leaf {
+				t.Errorf("SocketDir() = %q, want %q", got, leaf)
 			}
 
-			// A second call must be idempotent: same path, no error.
 			second, err := SocketDir()
 			if err != nil {
 				t.Fatalf("second SocketDir() call error (must be idempotent): %v", err)
 			}
-			if second != preCreated {
-				t.Errorf("second SocketDir() call = %q, want %q", second, preCreated)
-			}
-		})
-	}
-}
-
-// TestSocketDir_ErrorsWhenNestedPathIsFile covers the review-flagged edge
-// case: if a plain file (not a directory) already occupies the nested
-// cenci/ path, SocketDir() must return a clear error itself rather than
-// silently succeeding and letting socket creation fail later with a
-// confusing "not a directory" error.
-func TestSocketDir_ErrorsWhenNestedPathIsFile(t *testing.T) {
-	tests := []struct {
-		name  string
-		setup func(t *testing.T) (parentOfNestedDir string)
-	}{
-		{
-			name: "xdg branch",
-			setup: func(t *testing.T) string {
-				xdgDir := t.TempDir()
-				t.Setenv("XDG_RUNTIME_DIR", xdgDir)
-				return xdgDir
-			},
-		},
-		{
-			name: "tmp fallback branch",
-			setup: func(t *testing.T) string {
-				t.Setenv("XDG_RUNTIME_DIR", "")
-				tmpRoot := t.TempDir()
-				t.Setenv("TMPDIR", tmpRoot)
-				return filepath.Join(tmpRoot, fmt.Sprintf("cenci-%d", os.Getuid()))
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			parent := tt.setup(t)
-
-			// Pre-create the /tmp-fallback branch's parent dir so writing the
-			// plain file at the nested path succeeds even when the parent
-			// itself doesn't exist yet.
-			if err := os.MkdirAll(parent, 0700); err != nil {
-				t.Fatalf("pre-creating parent %q: %v", parent, err)
-			}
-
-			// Simulate a plain file already occupying the nested cenci/
-			// path (instead of a pre-created directory).
-			preCreatedFile := filepath.Join(parent, "cenci")
-			if err := os.WriteFile(preCreatedFile, []byte("not a directory"), 0600); err != nil {
-				t.Fatalf("pre-creating file %q: %v", preCreatedFile, err)
-			}
-
-			_, err := SocketDir()
-			if err == nil {
-				t.Fatalf("SocketDir() error = nil, want error when a plain file occupies the nested path")
-			}
-		})
-	}
-}
-
-// TestSocketDir_RejectsSymlinkAtNestedPath covers the symlink-hygiene gap
-// (#224): if the nested cenci/ path is a symlink, SocketDir() must
-// refuse to follow it and must return a clear error, leaving the symlink
-// itself untouched.
-func TestSocketDir_RejectsSymlinkAtNestedPath(t *testing.T) {
-	tests := []struct {
-		name  string
-		setup func(t *testing.T) (parentOfNestedDir string)
-	}{
-		{
-			name: "xdg branch",
-			setup: func(t *testing.T) string {
-				xdgDir := t.TempDir()
-				t.Setenv("XDG_RUNTIME_DIR", xdgDir)
-				return xdgDir
-			},
-		},
-		{
-			name: "tmp fallback branch",
-			setup: func(t *testing.T) string {
-				t.Setenv("XDG_RUNTIME_DIR", "")
-				tmpRoot := t.TempDir()
-				t.Setenv("TMPDIR", tmpRoot)
-				return filepath.Join(tmpRoot, fmt.Sprintf("cenci-%d", os.Getuid()))
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			parent := tt.setup(t)
-
-			// Pre-create the /tmp-fallback branch's parent dir so planting the
-			// symlink at the nested path succeeds even when the parent itself
-			// doesn't exist yet.
-			if err := os.MkdirAll(parent, 0700); err != nil {
-				t.Fatalf("pre-creating parent %q: %v", parent, err)
-			}
-
-			targetDir := t.TempDir()
-			nested := filepath.Join(parent, "cenci")
-			if err := os.Symlink(targetDir, nested); err != nil {
-				t.Fatalf("planting symlink %q -> %q: %v", nested, targetDir, err)
-			}
-
-			_, err := SocketDir()
-			if err == nil {
-				t.Fatalf("SocketDir() error = nil, want error when nested path is a symlink")
-			}
-			if !strings.Contains(err.Error(), "symlink") {
-				t.Errorf("SocketDir() error = %q, want error mentioning %q", err.Error(), "symlink")
-			}
-
-			// The symlink itself must not have been followed or replaced.
-			linkInfo, lerr := os.Lstat(nested)
-			if lerr != nil {
-				t.Fatalf("Lstat(%q) error: %v", nested, lerr)
-			}
-			if linkInfo.Mode()&os.ModeSymlink == 0 {
-				t.Fatalf("expected %q to still be a symlink, got mode %v", nested, linkInfo.Mode())
-			}
-			gotTarget, rerr := os.Readlink(nested)
-			if rerr != nil {
-				t.Fatalf("Readlink(%q) error: %v", nested, rerr)
-			}
-			if gotTarget != targetDir {
-				t.Errorf("symlink target changed: got %q, want %q", gotTarget, targetDir)
-			}
-		})
-	}
-}
-
-// TestSocketDir_WarnsOnLoosePermissions covers the silent loose-permission
-// gap (#224): when a pre-existing nested cenci/ dir is group/world
-// accessible, SocketDir() must still succeed (idempotent, no chmod fight)
-// but must log a non-fatal warning.
-func TestSocketDir_WarnsOnLoosePermissions(t *testing.T) {
-	tests := []struct {
-		name  string
-		setup func(t *testing.T) (parentOfNestedDir string)
-	}{
-		{
-			name: "xdg branch",
-			setup: func(t *testing.T) string {
-				xdgDir := t.TempDir()
-				t.Setenv("XDG_RUNTIME_DIR", xdgDir)
-				return xdgDir
-			},
-		},
-		{
-			name: "tmp fallback branch",
-			setup: func(t *testing.T) string {
-				t.Setenv("XDG_RUNTIME_DIR", "")
-				tmpRoot := t.TempDir()
-				t.Setenv("TMPDIR", tmpRoot)
-				return filepath.Join(tmpRoot, fmt.Sprintf("cenci-%d", os.Getuid()))
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			parent := tt.setup(t)
-
-			nested := filepath.Join(parent, "cenci")
-			if err := os.MkdirAll(nested, 0700); err != nil {
-				t.Fatalf("pre-creating nested dir %q: %v", nested, err)
-			}
-			// Chmod bypasses umask, ensuring the dir is actually group/world
-			// accessible regardless of the process umask.
-			if err := os.Chmod(nested, 0755); err != nil {
-				t.Fatalf("chmod %q: %v", nested, err)
-			}
-
-			logBuf := captureLog(t)
-
-			got, err := SocketDir()
-			if err != nil {
-				t.Fatalf("SocketDir() error: %v", err)
-			}
-			if got != nested {
-				t.Errorf("SocketDir() = %q, want %q", got, nested)
-			}
-
-			if !strings.Contains(strings.ToLower(logBuf.String()), "warning") {
-				t.Errorf("expected a warning to be logged for loose permissions on %q, got log output: %q", nested, logBuf.String())
-			}
-		})
-	}
-}
-
-// TestSocketDir_NoWarnOnStrictPermissions covers the flip side of #224: a
-// pre-existing nested cenci/ dir that is already 0700 or stricter must
-// not trigger any warning.
-func TestSocketDir_NoWarnOnStrictPermissions(t *testing.T) {
-	tests := []struct {
-		name  string
-		setup func(t *testing.T) (parentOfNestedDir string)
-	}{
-		{
-			name: "xdg branch",
-			setup: func(t *testing.T) string {
-				xdgDir := t.TempDir()
-				t.Setenv("XDG_RUNTIME_DIR", xdgDir)
-				return xdgDir
-			},
-		},
-		{
-			name: "tmp fallback branch",
-			setup: func(t *testing.T) string {
-				t.Setenv("XDG_RUNTIME_DIR", "")
-				tmpRoot := t.TempDir()
-				t.Setenv("TMPDIR", tmpRoot)
-				return filepath.Join(tmpRoot, fmt.Sprintf("cenci-%d", os.Getuid()))
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			parent := tt.setup(t)
-
-			nested := filepath.Join(parent, "cenci")
-			if err := os.MkdirAll(nested, 0700); err != nil {
-				t.Fatalf("pre-creating nested dir %q: %v", nested, err)
-			}
-			// Chmod explicitly (bypassing umask) so the dir is provably 0700
-			// regardless of the process umask.
-			if err := os.Chmod(nested, 0700); err != nil {
-				t.Fatalf("chmod %q: %v", nested, err)
-			}
-
-			logBuf := captureLog(t)
-
-			got, err := SocketDir()
-			if err != nil {
-				t.Fatalf("SocketDir() error: %v", err)
-			}
-			if got != nested {
-				t.Errorf("SocketDir() = %q, want %q", got, nested)
-			}
-
-			if strings.Contains(strings.ToLower(logBuf.String()), "warning") {
-				t.Errorf("expected no warning for strict permissions on %q, got log output: %q", nested, logBuf.String())
+			if second != leaf {
+				t.Errorf("second SocketDir() call = %q, want %q", second, leaf)
 			}
 		})
 	}
@@ -500,38 +662,13 @@ func TestSocketDir_NoWarnOnStrictPermissions(t *testing.T) {
 // plan: if defaultSocketPath isn't rerouted through SocketDir(), the
 // broadcast and events sockets would split across two different
 // directories. Both must resolve inside whichever directory SocketDir()
-// returns, in both the XDG and /tmp-fallback branches.
+// returns, across all three tiers.
 func TestSocketNames_ShareSocketDirParent(t *testing.T) {
-	tests := []struct {
-		name  string
-		setup func(t *testing.T) (wantParent string)
-	}{
-		{
-			name: "xdg branch",
-			setup: func(t *testing.T) string {
-				xdgDir := t.TempDir()
-				t.Setenv("XDG_RUNTIME_DIR", xdgDir)
-				return filepath.Join(xdgDir, "cenci")
-			},
-		},
-		{
-			name: "tmp fallback branch",
-			setup: func(t *testing.T) string {
-				t.Setenv("XDG_RUNTIME_DIR", "")
-				tmpRoot := t.TempDir()
-				t.Setenv("TMPDIR", tmpRoot)
-				return filepath.Join(tmpRoot, fmt.Sprintf("cenci-%d", os.Getuid()), "cenci")
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
+	for _, tier := range socketDirTiers() {
+		t.Run(tier.name, func(t *testing.T) {
 			// wantParent is built from primitives (not a live SocketDir()
-			// call): pins the actual nested-path shape from the AC, so this
-			// stays red until both SocketDir() nests AND defaultSocketPath is
-			// rerouted through it (the exact split-sockets risk from the plan).
-			wantParent := tt.setup(t)
+			// call): pins the actual leaf-path shape from the AC.
+			wantParent := tier.configure(t)
 
 			broadcast := DefaultSocketPath()
 			events := defaultSocketPath("cenci-events")

@@ -264,7 +264,8 @@ func writeOtherMountsExplanation(bw *bufio.Writer, mounts []MountPosture) {
 		_, _ = fmt.Fprintln(bw, "after the daemon rejects any request whose PR, repo, agent, interval, or")
 		_, _ = fmt.Fprintln(bw, "tmux pane fails validation, causes a host-side `cenci babysit` supervisor")
 		_, _ = fmt.Fprintln(bw, "process to spawn — that supervisor runs `cenci run` agent workflows and, with")
-		_, _ = fmt.Fprintln(bw, "automerge enabled, can merge pull requests on your behalf.")
+		_, _ = fmt.Fprintln(bw, "automerge enabled, can merge pull requests on your behalf. The container's")
+		_, _ = fmt.Fprintln(bw, "cenci is pointed at this mount via the CENCI_SOCKET_DIR env set at create time.")
 	}
 
 	if present[MountKindCenciBin] || present[MountKindGitconfig] {

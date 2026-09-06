@@ -541,8 +541,8 @@ func TestDryRun_MissingInitialDaemonSocket_OmitsWiringMountsAndFlagsIndeterminat
 	t.Setenv("HOME", home)
 	t.Chdir(repo)
 
-	xdgDir := t.TempDir()
-	t.Setenv("XDG_RUNTIME_DIR", xdgDir)
+	socketDir := t.TempDir()
+	t.Setenv("CENCI_SOCKET_DIR", socketDir)
 
 	fakeDir := t.TempDir()
 	callLog := filepath.Join(fakeDir, "calls.txt")
@@ -572,6 +572,9 @@ func TestDryRun_MissingInitialDaemonSocket_OmitsWiringMountsAndFlagsIndeterminat
 	if strings.Contains(joined, "XDG_RUNTIME_DIR=") {
 		t.Errorf("CreateArgv includes the cenci wiring XDG_RUNTIME_DIR env despite indeterminate wiring; got:\n%s", joined)
 	}
+	if strings.Contains(joined, "CENCI_SOCKET_DIR=") {
+		t.Errorf("CreateArgv includes the cenci wiring CENCI_SOCKET_DIR env despite indeterminate wiring; got:\n%s", joined)
+	}
 
 	var out bytes.Buffer
 	if err := plan.WriteText(&out); err != nil {
@@ -600,8 +603,8 @@ func TestDryRun_DeterminateWiring_LiveSocketIncludesMountsAndClearsUnknownFlag(t
 	t.Setenv("HOME", home)
 	t.Chdir(repo)
 
-	xdgDir := t.TempDir()
-	t.Setenv("XDG_RUNTIME_DIR", xdgDir)
+	socketDir := t.TempDir()
+	t.Setenv("CENCI_SOCKET_DIR", socketDir)
 
 	eventsSocket := ipc.DefaultEventSocketPath()
 	ln, err := net.Listen("unix", eventsSocket)
@@ -632,6 +635,9 @@ func TestDryRun_DeterminateWiring_LiveSocketIncludesMountsAndClearsUnknownFlag(t
 	}
 	if !strings.Contains(joined, "XDG_RUNTIME_DIR=/run/user/1000") {
 		t.Errorf("CreateArgv missing the cenci wiring XDG_RUNTIME_DIR env despite a live events socket; got:\n%s", joined)
+	}
+	if !strings.Contains(joined, "CENCI_SOCKET_DIR=/run/user/1000/cenci") {
+		t.Errorf("CreateArgv missing the cenci wiring CENCI_SOCKET_DIR env despite a live events socket; got:\n%s", joined)
 	}
 }
 

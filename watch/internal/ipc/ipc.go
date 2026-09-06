@@ -82,13 +82,14 @@ func DefaultPIDPath() string { return watch.DefaultPIDPath() }
 
 // DefaultEventSocketPath returns the default event (inbound) socket path the
 // daemon listens on for hook notifications. This write-side socket stays
-// internal; it is rebuilt from the shared watch.SocketDir so the runtime-dir
-// fallback logic lives in exactly one place.
+// internal; it is rebuilt from the shared watch.SocketDir and
+// watch.EventSocketBasename so the socket-dir resolution chain and its
+// sun_path length check live in exactly one place.
 func DefaultEventSocketPath() string {
 	dir, err := watch.SocketDir()
 	if err != nil {
 		log.Printf("warning: could not create secure socket dir: %v; using fallback event-socket path", err)
 		return filepath.Join(os.TempDir(), fmt.Sprintf("cenci-events-%d.sock", os.Getuid()))
 	}
-	return filepath.Join(dir, "cenci-events.sock")
+	return filepath.Join(dir, watch.EventSocketBasename)
 }

@@ -67,14 +67,14 @@ func armChildEnv(t *testing.T, ghShimDir string) []string {
 	)
 }
 
-// armTestSocketPath isolates XDG_RUNTIME_DIR to a temp dir (so both this
+// armTestSocketPath isolates CENCI_SOCKET_DIR to a temp dir (so both this
 // test process's ipc.NewEventReceiver and the child's own
 // ipc.DefaultEventSocketPath() resolve to the identical socket path) and
 // XDG_STATE_HOME to an empty temp dir (watch/docs/test-isolation.md), then
 // returns the resolved event-socket path.
 func armTestSocketPath(t *testing.T) string {
 	t.Helper()
-	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("CENCI_SOCKET_DIR", t.TempDir())
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	return ipc.DefaultEventSocketPath()
 }

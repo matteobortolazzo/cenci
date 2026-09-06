@@ -1532,17 +1532,19 @@ func TestSandboxStop_WithFilterArg_OnlyStopsMatchingName(t *testing.T) {
 // openTestEnv builds the black-box environment for native `cenci open` runs:
 // the scripted runtimes on PATH, an isolated HOME, the asset fixture,
 // deterministic TERM/TMUX_PANE, scrubbed optional env passthroughs, and a live
-// events socket under a private 0700 XDG_RUNTIME_DIR — pre-created here so the
-// subprocess wires cenci without ever spawning a real daemon. No host `claude`
-// is installed: agents live in the container's persistent home, so the launcher
-// never resolves an agent binary from the host.
+// events socket under a private 0700 CENCI_SOCKET_DIR — pre-created here so
+// the subprocess wires cenci without ever spawning a real daemon.
+// CENCI_SOCKET_DIR's tier-1 override is verbatim (no appended "cenci/"
+// segment, #1142), so socketDir (a fresh t.TempDir(), chmod'd to 0700) IS the
+// resolved socket dir directly. No host `claude` is installed: agents live in
+// the container's persistent home, so the launcher never resolves an agent
+// binary from the host.
 func openTestEnv(t *testing.T, fakeDir, assets string) (env []string, home, socketDir string) {
 	t.Helper()
 	home = t.TempDir()
-	xdg := t.TempDir()
-	socketDir = filepath.Join(xdg, "cenci")
-	if err := os.Mkdir(socketDir, 0o700); err != nil {
-		t.Fatalf("mkdir socket dir: %v", err)
+	socketDir = t.TempDir()
+	if err := os.Chmod(socketDir, 0700); err != nil {
+		t.Fatalf("chmod socketDir: %v", err)
 	}
 	l, err := net.Listen("unix", filepath.Join(socketDir, "cenci-events.sock"))
 	if err != nil {
@@ -1565,7 +1567,7 @@ func openTestEnv(t *testing.T, fakeDir, assets string) (env []string, home, sock
 		"PATH="+fakeDir+":/usr/bin:/bin",
 		"HOME="+home,
 		"CENCI_SANDBOX_ASSETS="+assets,
-		"XDG_RUNTIME_DIR="+xdg,
+		"CENCI_SOCKET_DIR="+socketDir,
 		"TERM=xterm-256color",
 		"TMUX_PANE=%7",
 		// CENCI_TMUX_SOCKET (#1007) is derived from the first comma-separated
@@ -1741,6 +1743,7 @@ func TestOpen_FreshCreate_PinsEntrypointContract(t *testing.T) {
 		"-v " + socketDir + ":/run/user/1000/cenci:ro",
 		":/usr/local/bin/cenci:ro",
 		"-e XDG_RUNTIME_DIR=/run/user/1000",
+		"-e CENCI_SOCKET_DIR=/run/user/1000/cenci",
 	} {
 		if !strings.Contains(runLine, want) {
 			t.Errorf("run argv missing %q:\n%s", want, runLine)
@@ -3899,12 +3902,13 @@ func TestOpen_NoEventsSocket_LaunchesUnwiredWithWarning(t *testing.T) {
 	assets := writeAssetFixture(t)
 	env, _, _ := openTestEnv(t, fakeDir, assets)
 
-	// Point XDG at a fresh dir with no live socket. CENCI_SANDBOX=1 keeps
-	// daemon.EnsureRunning inert (the launcher reads it nowhere else), so the
-	// subprocess never spawns a real daemon; the 3s socket poll then expires.
+	// Point the socket dir at a fresh dir with no live socket. CENCI_SANDBOX=1
+	// keeps daemon.EnsureRunning inert (the launcher reads it nowhere else),
+	// so the subprocess never spawns a real daemon; the 3s socket poll then
+	// expires.
 	cmd := exec.Command(binaryPath, "open", "ch")
 	cmd.Env = append(env,
-		"XDG_RUNTIME_DIR="+t.TempDir(),
+		"CENCI_SOCKET_DIR="+t.TempDir(),
 		"CENCI_SANDBOX=1",
 	)
 	cmd.Dir = t.TempDir()

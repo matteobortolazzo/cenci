@@ -1,21 +1,25 @@
 #!/usr/bin/env python3
 """Fake cenci daemon for the README GIF recording.
 
-Two pieces, both scoped to a throwaway $XDG_RUNTIME_DIR so they die with the
+Two pieces, both scoped to a throwaway $CENCI_SOCKET_DIR so they die with the
 recording shell and never touch a real daemon:
 
 1. Broadcast socket — serves scripted StateSnapshot NDJSON lines (the daemon's
    public wire format, see watch/pkg/watch) on
-   $XDG_RUNTIME_DIR/cenci/cenci.sock, so the demo board shows live agent
+   $CENCI_SOCKET_DIR/cenci.sock, so the demo board shows live agent
    badges, status-bar counts, and the ⟳ dispatch segment without real agents.
+   CENCI_SOCKET_DIR is cenci's tier-1 socket-dir override (#1142): it wins
+   verbatim, so a pkg/watch consumer (like lazyboards) resolves to exactly
+   this directory, no appended "cenci/" segment.
 
-2. cenci CLI shim — written to $XDG_RUNTIME_DIR/bin/cenci (demo.tape prepends
-   that dir to PATH). It answers the `cenci version` / `cenci dispatch status
-   --json` queries lazyboards' dispatch panel makes, absorbs everything else,
-   and records each `cenci run <skill> <number>` as a flag file. The broadcast
-   loop picks flags up on its next 1s tick and adds a running
-   `<number>-<skill>` window — so pressing a column action in the recording
-   makes its agent badge appear live, deterministically, with no real agent.
+2. cenci CLI shim — written to $CENCI_SOCKET_DIR/bin/cenci (demo.tape
+   prepends that dir to PATH). It answers the `cenci version` / `cenci
+   dispatch status --json` queries lazyboards' dispatch panel makes, absorbs
+   everything else, and records each `cenci run <skill> <number>` as a flag
+   file. The broadcast loop picks flags up on its next 1s tick and adds a
+   running `<number>-<skill>` window — so pressing a column action in the
+   recording makes its agent badge appear live, deterministically, with no
+   real agent.
 
 Window names join demo-repo cards by ticket-number prefix: keep them in sync
 with the issues seeded by demo-repo-seed.sh (#12/#9 New, #6 Refined) and with
@@ -28,19 +32,18 @@ import stat
 import threading
 import time
 
-runtime_dir = os.environ["XDG_RUNTIME_DIR"]
+socket_dir = os.environ["CENCI_SOCKET_DIR"]
 
-sock_dir = os.path.join(runtime_dir, "cenci")
-os.makedirs(sock_dir, mode=0o700, exist_ok=True)
-sock_path = os.path.join(sock_dir, "cenci.sock")
+os.makedirs(socket_dir, mode=0o700, exist_ok=True)
+sock_path = os.path.join(socket_dir, "cenci.sock")
 if os.path.exists(sock_path):
     os.unlink(sock_path)
 
-flags_dir = os.path.join(runtime_dir, "cenci-demo-flags")
+flags_dir = os.path.join(socket_dir, "cenci-demo-flags")
 os.makedirs(flags_dir, mode=0o700, exist_ok=True)
 
 # ---- cenci CLI shim (dispatch panel queries + run-action flags) ----
-bin_dir = os.path.join(runtime_dir, "bin")
+bin_dir = os.path.join(socket_dir, "bin")
 os.makedirs(bin_dir, mode=0o700, exist_ok=True)
 shim_path = os.path.join(bin_dir, "cenci")
 with open(shim_path, "w") as f:

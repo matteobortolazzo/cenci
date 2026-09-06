@@ -3,6 +3,7 @@ package main_test
 import (
 	"bytes"
 	"encoding/json"
+	"os"
 	"os/exec"
 	"strings"
 	"syscall"
@@ -11,6 +12,23 @@ import (
 
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/ipc"
 )
+
+// setTempSocketDir isolates a test's CENCI_SOCKET_DIR to a fresh, empty temp
+// dir. t.TempDir() alone is created 0755 (masked by the process umask, not
+// 0700 — see testing.common.TempDir), which is looser than CENCI_SOCKET_DIR's
+// tier-1 leaf hardening tolerates without a warning (#1142's verbatim
+// override means the value passed here IS the leaf, not a not-yet-existing
+// "cenci" subdir under it); chmod it explicitly so these exact-output/JSON
+// assertions aren't polluted by a spurious loose-permissions warning on
+// stderr.
+func setTempSocketDir(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0700); err != nil {
+		t.Fatalf("hardening CENCI_SOCKET_DIR %q: %v", dir, err)
+	}
+	t.Setenv("CENCI_SOCKET_DIR", dir)
+}
 
 // -- daemon start --json / CENCI_LOG_JSON ---------------------------------
 //
@@ -36,7 +54,7 @@ type capturingDaemon struct {
 // startDaemonCapturingStderr spawns `cenci daemon start` with extraArgs,
 // waits for its PID file (proving it actually started, not just parsed
 // flags), and returns it with stderr captured. The caller's test must have
-// already set XDG_RUNTIME_DIR via t.Setenv, and any CENCI_LOG_JSON value it
+// already set CENCI_SOCKET_DIR via t.Setenv, and any CENCI_LOG_JSON value it
 // wants via t.Setenv before calling this helper.
 func startDaemonCapturingStderr(t *testing.T, extraArgs ...string) *capturingDaemon {
 	t.Helper()
@@ -97,7 +115,7 @@ func firstNonEmptyLine(t *testing.T, s string) string {
 // single parseable JSON object with severity "info" and a message
 // mentioning the startup line, not the old plain-text format.
 func TestDaemonStart_JSONFlag_EmitsParseableJSONStartupLine(t *testing.T) {
-	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	setTempSocketDir(t)
 	d := startDaemonCapturingStderr(t, "-v", "--json")
 
 	out := stopAndCollectStderr(t, d)
@@ -122,7 +140,7 @@ func TestDaemonStart_JSONFlag_EmitsParseableJSONStartupLine(t *testing.T) {
 // exactly like every other CENCI_-prefixed host var per
 // docs/cli-conventions.md.
 func TestDaemonStart_CENCI_LOG_JSON_DefaultsJSONWithoutFlag(t *testing.T) {
-	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	setTempSocketDir(t)
 	t.Setenv("CENCI_LOG_JSON", "1")
 	d := startDaemonCapturingStderr(t, "-v")
 
@@ -142,7 +160,7 @@ func TestDaemonStart_CENCI_LOG_JSON_DefaultsJSONWithoutFlag(t *testing.T) {
 // --json=false must win over CENCI_LOG_JSON=1 (the env var only supplies
 // the flag's default), leaving the startup line in plain text.
 func TestDaemonStart_JSONFlagOverridesEnvVar(t *testing.T) {
-	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	setTempSocketDir(t)
 	t.Setenv("CENCI_LOG_JSON", "1")
 	d := startDaemonCapturingStderr(t, "-v", "--json=false")
 
@@ -157,11 +175,29 @@ func TestDaemonStart_JSONFlagOverridesEnvVar(t *testing.T) {
 	}
 }
 
+// TestDaemonStart_SocketDirResolutionError_LogsWarning covers the #1142
+// Phase 6+7 review fix (Fix 3): when watch.ResolveSocketDir() itself errors
+// (e.g. an unusable $CENCI_SOCKET_DIR that hard-errors at tier 1 instead of
+// falling through), Run() must log that failure at its own call site rather
+// than silently skipping the startup-warning check. An invalid, relative
+// CENCI_SOCKET_DIR still lets the daemon start (defaultSocketPath's own
+// fallback keeps the event/broadcast/PID paths usable), so this only
+// exercises the extra log line, not startup itself.
+func TestDaemonStart_SocketDirResolutionError_LogsWarning(t *testing.T) {
+	t.Setenv("CENCI_SOCKET_DIR", "relative/socket-dir")
+	d := startDaemonCapturingStderr(t, "-v")
+
+	out := stopAndCollectStderr(t, d)
+	if !strings.Contains(out, "could not evaluate socket-dir resolution") {
+		t.Errorf("expected a logged warning naming the socket-dir resolution failure, got stderr:\n%s", out)
+	}
+}
+
 // TestDaemonStart_WithoutJSONFlagOrEnv_PlainTextUnchanged is the baseline
 // regression: with neither --json nor CENCI_LOG_JSON set, the startup line
 // must remain today's plain text, never JSON.
 func TestDaemonStart_WithoutJSONFlagOrEnv_PlainTextUnchanged(t *testing.T) {
-	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	setTempSocketDir(t)
 	d := startDaemonCapturingStderr(t, "-v")
 
 	out := stopAndCollectStderr(t, d)

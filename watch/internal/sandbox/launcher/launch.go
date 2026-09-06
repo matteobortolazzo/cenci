@@ -56,7 +56,9 @@ func IsUsage(err error) bool {
 
 // cenciSocketMountDest is the container-side mount point for the host socket
 // directory (matches the 'dev' user's uid 1000, so its XDG_RUNTIME_DIR lands
-// here regardless of the host uid).
+// here regardless of the host uid). It also doubles as the value of the
+// CENCI_SOCKET_DIR env forwarded into the container, so the container's own
+// cenci resolves its tier-1 override verbatim onto exactly this mount.
 const cenciSocketMountDest = "/run/user/1000/cenci"
 
 // readyPollInterval is the wait_until_ready poll cadence; a package var so
@@ -739,8 +741,9 @@ func (e *Engine) baseRunArgs(scope Scope, dindOn bool) []string {
 
 // assembleVolumeMounts builds every bind/named-volume mount: the workspace
 // and home volumes, git config (read-only, if present), the optional cenci
-// binary + host socket dir wiring (paired with its own XDG_RUNTIME_DIR env
-// under the same cenciAvailable guard as the mount itself),
+// binary + host socket dir wiring (paired with its own XDG_RUNTIME_DIR and
+// CENCI_SOCKET_DIR envs under the same cenciAvailable guard as the mount
+// itself),
 // claude credentials staging, GitHub CLI credentials staging, and — only
 // under azureOn, the repo's `sandbox.azure` opt-in — Azure CLI auth
 // staging. Agent CLIs
@@ -785,6 +788,7 @@ func (e *Engine) assembleVolumeMounts(agent, cenciBin, socketDir string, cenciAv
 			"-v", cenciBin+":/usr/local/bin/cenci:ro",
 			"-v", socketDir+":"+cenciSocketMountDest+":ro",
 			"-e", "XDG_RUNTIME_DIR=/run/user/1000",
+			"-e", "CENCI_SOCKET_DIR="+cenciSocketMountDest,
 		)
 	}
 

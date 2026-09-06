@@ -21,16 +21,19 @@ Set Framerate 30
 
 # ---- Silent setup ----
 Hide
-# Throwaway runtime dir for the fake daemon (mktemp verified before use —
+# Throwaway socket dir for the fake daemon (mktemp verified before use —
 # an unchecked failure would silently collapse to a root-relative path).
-Type@5ms `export XDG_RUNTIME_DIR="$(mktemp -d)" && test -d "$XDG_RUNTIME_DIR" || exit 1` Enter
+# CENCI_SOCKET_DIR is cenci's tier-1 socket-dir override (#1142): it wins
+# verbatim over $XDG_STATE_HOME/$HOME, so a pkg/watch consumer (like
+# lazyboards) resolves straight to this throwaway dir.
+Type@5ms `export CENCI_SOCKET_DIR="$(mktemp -d)" && test -d "$CENCI_SOCKET_DIR" || exit 1` Enter
 # Fake cenci daemon: scripted snapshots give deterministic agent badges
 # (▶/✓/!) and the ⟳ dispatch segment; it also writes a cenci CLI shim that
 # answers the dispatch panel and turns `cenci run` column actions into new
 # running badges. Both die with this shell.
 Type@5ms "python3 docs/demo-cenci-fake.py &" Enter
 Sleep 500ms
-Type@5ms `export PATH="$XDG_RUNTIME_DIR/bin:$PATH"` Enter
+Type@5ms `export PATH="$CENCI_SOCKET_DIR/bin:$PATH"` Enter
 # The recording shell inherits $TMUX when vhs is launched from inside tmux;
 # lazyboards would then scope its Agents modal to that real session and hide
 # the fake windows (lazyboards#410). The demo is not "inside" any session.

@@ -303,6 +303,11 @@ func TestWriteExplanation_Mounts_ExplainsEachDetectedKind(t *testing.T) {
 	if strings.Contains(out, "no other host process") {
 		t.Errorf("expected the self-contradictory \"no other host process\" claim to be removed -- the spawned supervisor runs cenci run and can merge PRs, got:\n%s", out)
 	}
+	// #1142 AC #7: the explain surface must name CENCI_SOCKET_DIR as the env
+	// that points the container's cenci at the bind-mounted socket dir.
+	if !strings.Contains(out, "CENCI_SOCKET_DIR") {
+		t.Errorf("expected the cenci-socket explanation to name CENCI_SOCKET_DIR, got:\n%s", out)
+	}
 }
 
 // TestWriteExplanation_Mounts_DindVolumeExplained covers MountKindDindVolume

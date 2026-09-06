@@ -40,7 +40,7 @@ func securityRepoDir(t *testing.T) string {
 
 // Every test below uses auditSecurityEnv (audit_security_faketest_test.go)
 // for its subprocess environment: an isolated HOME and a fresh
-// XDG_RUNTIME_DIR with no live daemon socket — explain reuses Audit's
+// CENCI_SOCKET_DIR with no live daemon socket — explain reuses Audit's
 // read-only posture derivation and must never start one either — plus PATH
 // pinned to a fake docker/podman (writeAuditFakeRuntimes) whose FAKE_PS
 // defaults to empty (no running container). Ticket #627's
@@ -189,7 +189,7 @@ func TestSecurity_BareInvocation_Exit2WithSubcommandHint(t *testing.T) {
 
 // TestSecurityExplain_NeverStartsADaemon mirrors audit_cmd_test.go's
 // TestAudit_NeverStartsADaemon: no live event socket or PID file exists
-// under XDG_RUNTIME_DIR after the run — security explain reuses Audit's
+// under CENCI_SOCKET_DIR after the run — security explain reuses Audit's
 // read-only posture derivation and must never call daemon.EnsureRunning()
 // either.
 func TestSecurityExplain_NeverStartsADaemon(t *testing.T) {

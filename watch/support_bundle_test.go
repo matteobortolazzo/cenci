@@ -53,7 +53,7 @@ func sbEnv(t *testing.T, fakeDir, assets string) (env []string, home string) {
 		"HOME="+home,
 		"XDG_CONFIG_HOME="+filepath.Join(home, ".config"),
 		"CENCI_SANDBOX_ASSETS="+assets,
-		"XDG_RUNTIME_DIR="+xdg,
+		"CENCI_SOCKET_DIR="+xdg,
 		"FAKE_VOLUMES=cenci-agent-cli-claude\ncenci-agent-cli-codex\n",
 		"FAKE_IMAGE_BASE_VERSION="+tag,
 	)
