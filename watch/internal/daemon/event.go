@@ -76,6 +76,18 @@ func (d *Daemon) handleEvent(event ipc.HookEvent) {
 		} else {
 			d.frontend.OnSessionEnd(sess)
 			d.killPendingClose(wi)
+			// Teardown drops the daemon's last binding to this pane:
+			// OnSessionEnd forgets the frontend's tracking entry and the
+			// session is already deleted above, so the sweep can never flag
+			// this pane gone afterward. Any container process still holding
+			// the pane -- including one stranded by the pending-close kill
+			// that just destroyed the window -- would otherwise survive until
+			// the next daemon restart (#1171). Narrowed to pane-bound
+			// sessions: a paneless one never had a (socket, pane) pair for
+			// the reaper to match on.
+			if sess.TmuxPane != "" {
+				d.triggerReap()
+			}
 		}
 		d.broadcast()
 		return

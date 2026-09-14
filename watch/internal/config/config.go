@@ -9,6 +9,15 @@ type Config struct {
 	EventSocketPath string // event socket for hook notifications
 	SweepInterval   time.Duration
 	SessionTTL      time.Duration // idle expiry for paneless sessions
+	// ReapInterval is the period of the daemon's orphan-reap backstop
+	// (#1171). The pane-gone sweep only reaps when the daemon still holds a
+	// pane binding at the moment the pane dies; every path that drops that
+	// binding earlier (SessionEnd teardown, a handoff whose successor never
+	// reports, a daemon-side restart of tracking) leaves the pane's death
+	// unobservable and strands a live container process. This tick bounds
+	// that accumulation regardless of which binding path was lost.
+	// Non-positive disables the backstop.
+	ReapInterval    time.Duration
 	StyleIdle       string
 	StyleRunning    string
 	StyleDone       string
@@ -33,6 +42,7 @@ func Default() Config {
 		LogJSON:         false,
 		SweepInterval:   time.Second,
 		SessionTTL:      2 * time.Hour,
+		ReapInterval:    5 * time.Minute,
 		StyleIdle:       "dim",
 		StyleRunning:    "fg=blue,dim",
 		StyleDone:       "fg=green,dim",

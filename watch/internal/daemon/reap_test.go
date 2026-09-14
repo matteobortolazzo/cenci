@@ -161,3 +161,164 @@ func TestDaemon_StartupTriggersOneReap(t *testing.T) {
 		t.Errorf("expected exactly 1 startup Reap() call, got %d", got)
 	}
 }
+
+// TestDaemon_PeriodicReapBackstopFires asserts the daemon runs reap passes on
+// its own periodic tick, independently of any PaneGone sweep action (#1171).
+// This is the backstop for every path that drops a session's pane binding
+// before the pane dies, leaving that pane's death unobservable.
+func TestDaemon_PeriodicReapBackstopFires(t *testing.T) {
+	mc := &tmuxtest.MockClient{}
+	d := newTestDaemon(mc)
+	d.cfg.ReapInterval = 10 * time.Millisecond
+	mr := d.reaper.(*mockReaper)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- d.loop(ctx, nil)
+	}()
+
+	// Startup contributes 1; require two further passes so this cannot pass
+	// on the startup call alone.
+	deadline := time.After(2 * time.Second)
+	for mr.calls.Load() < 3 {
+		select {
+		case <-deadline:
+			cancel()
+			<-done
+			t.Fatalf("expected periodic reap passes, got %d call(s) in 2s", mr.calls.Load())
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	cancel()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("expected nil error from loop, got %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("loop did not exit after cancel")
+	}
+}
+
+// TestDaemon_PeriodicReapDisabledWhenIntervalZero asserts a non-positive
+// ReapInterval disables the periodic backstop entirely, leaving only the
+// startup pass (#1171) — the ticker is never constructed, so the escape
+// hatch is a real off switch rather than a very fast tick.
+func TestDaemon_PeriodicReapDisabledWhenIntervalZero(t *testing.T) {
+	mc := &tmuxtest.MockClient{}
+	d := newTestDaemon(mc)
+	d.cfg.ReapInterval = 0
+	mr := d.reaper.(*mockReaper)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- d.loop(ctx, nil)
+	}()
+
+	time.Sleep(60 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("expected nil error from loop, got %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("loop did not exit after cancel")
+	}
+
+	if got := mr.calls.Load(); got != 1 {
+		t.Errorf("expected only the startup Reap() call with ReapInterval=0, got %d", got)
+	}
+}
+
+// TestDaemon_SessionEndTeardownTriggersReap covers the binding-loss path that
+// strands a live container process: OnSessionEnd forgets the frontend's
+// window tracking and the session is deleted, so nothing is left to observe
+// this pane's eventual death — including when cenci destroys the window
+// itself via the pending-close kill (#1171).
+func TestDaemon_SessionEndTeardownTriggersReap(t *testing.T) {
+	mc := &tmuxtest.MockClient{
+		Panes: []tmux.PaneInfo{
+			{SessionName: "main", WindowIndex: "0", WindowName: "bash", PaneIndex: "0",
+				PaneCurrentCmd: "claude", PaneTitle: "⠋ working", PaneID: "%0"},
+		},
+	}
+
+	d := newTestDaemon(mc)
+	mr := d.reaper.(*mockReaper)
+	d.handleEvent(ipc.HookEvent{EventType: "SessionStart", SessionID: "sess1", TmuxPane: "%0"})
+	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "sess1", TmuxPane: "%0"})
+
+	d.handleEvent(ipc.HookEvent{EventType: "SessionEnd", SessionID: "sess1", TmuxPane: "%0"})
+
+	if got := mr.calls.Load(); got != 1 {
+		t.Errorf("expected exactly 1 Reap() call for a pane-bound SessionEnd teardown, got %d", got)
+	}
+}
+
+// TestDaemon_SessionEndHandoffDoesNotTriggerReap asserts a "clear"/"resume"
+// handoff does not reap: OnSessionHandoff deliberately keeps the frontend's
+// window tracking, so the pane stays observable and Phase 2 still flags its
+// eventual death. Narrowed to the exact continuation reasons, mirroring the
+// handoff branch itself (#707, #1171).
+func TestDaemon_SessionEndHandoffDoesNotTriggerReap(t *testing.T) {
+	mc := &tmuxtest.MockClient{
+		Panes: []tmux.PaneInfo{
+			{SessionName: "main", WindowIndex: "0", WindowName: "bash", PaneIndex: "0",
+				PaneCurrentCmd: "claude", PaneTitle: "⠋ working", PaneID: "%0"},
+		},
+	}
+
+	d := newTestDaemon(mc)
+	mr := d.reaper.(*mockReaper)
+	d.handleEvent(ipc.HookEvent{EventType: "SessionStart", SessionID: "sess1", TmuxPane: "%0"})
+	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "sess1", TmuxPane: "%0"})
+
+	d.handleEvent(ipc.HookEvent{EventType: "SessionEnd", SessionID: "sess1", TmuxPane: "%0", SessionEndReason: "clear"})
+
+	if got := mr.calls.Load(); got != 0 {
+		t.Errorf("expected zero Reap() calls for a handoff SessionEnd, got %d", got)
+	}
+}
+
+// TestDaemon_SessionEndPanelessDoesNotTriggerReap asserts the SessionEnd
+// trigger stays narrowed to sessions that actually held a pane. A paneless
+// session never had a (socket, pane) pair for the reaper to match on, so
+// firing a pass for it would be pure noise (#1171).
+func TestDaemon_SessionEndPanelessDoesNotTriggerReap(t *testing.T) {
+	mc := &tmuxtest.MockClient{}
+	d := newTestDaemon(mc)
+	mr := d.reaper.(*mockReaper)
+
+	d.handleEvent(ipc.HookEvent{EventType: "SessionStart", SessionID: "sess1"})
+	d.handleEvent(ipc.HookEvent{EventType: "SessionEnd", SessionID: "sess1"})
+
+	if got := mr.calls.Load(); got != 0 {
+		t.Errorf("expected zero Reap() calls for a paneless SessionEnd, got %d", got)
+	}
+}
+
+// TestDaemon_SubagentSessionEndDoesNotTriggerReap asserts a subagent's own
+// SessionEnd (non-empty AgentID) never reaps: it does not tear down the main
+// session's window, so no binding is lost (#656, #1171).
+func TestDaemon_SubagentSessionEndDoesNotTriggerReap(t *testing.T) {
+	mc := &tmuxtest.MockClient{
+		Panes: []tmux.PaneInfo{
+			{SessionName: "main", WindowIndex: "0", WindowName: "bash", PaneIndex: "0",
+				PaneCurrentCmd: "claude", PaneTitle: "⠋ working", PaneID: "%0"},
+		},
+	}
+
+	d := newTestDaemon(mc)
+	mr := d.reaper.(*mockReaper)
+	d.handleEvent(ipc.HookEvent{EventType: "SessionStart", SessionID: "sess1", TmuxPane: "%0"})
+	d.handleEvent(ipc.HookEvent{EventType: "SessionEnd", SessionID: "sess1", TmuxPane: "%0", AgentID: "sub1"})
+
+	if got := mr.calls.Load(); got != 0 {
+		t.Errorf("expected zero Reap() calls for a subagent SessionEnd, got %d", got)
+	}
+}
