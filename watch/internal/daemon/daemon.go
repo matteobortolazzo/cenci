@@ -202,6 +202,16 @@ func (d *Daemon) loop(ctx context.Context, attention <-chan ipc.AttentionUpdate)
 	sweep := time.NewTicker(d.cfg.SweepInterval)
 	defer sweep.Stop()
 
+	// Periodic orphan-reap backstop (#1171). A non-positive interval leaves
+	// reapC nil, so the select case is never selectable -- a real off switch
+	// rather than a very fast tick.
+	var reapC <-chan time.Time
+	if d.cfg.ReapInterval > 0 {
+		reapTick := time.NewTicker(d.cfg.ReapInterval)
+		defer reapTick.Stop()
+		reapC = reapTick.C
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -213,6 +223,8 @@ func (d *Daemon) loop(ctx context.Context, attention <-chan ipc.AttentionUpdate)
 			d.registerPendingClose(pc)
 		case <-sweep.C:
 			d.runSweep()
+		case <-reapC:
+			d.triggerReap()
 		case u := <-attention:
 			d.attention = u.Windows
 			d.headroom = u.Headroom
@@ -271,8 +283,8 @@ func (d *Daemon) runSweep() {
 			}
 		}
 	}
-	if paneGone && d.reaper != nil {
-		d.reaper.Reap()
+	if paneGone {
+		d.triggerReap()
 	}
 	if d.backgroundHoldSweep() {
 		changed = true
@@ -293,6 +305,18 @@ func (d *Daemon) runSweep() {
 // closed while the daemon was down or restarting (#292 AC2). Window state is
 // in-memory only, so the live sweep alone has a restart blind spot.
 func (d *Daemon) reapOnStartup() {
+	d.triggerReap()
+}
+
+// triggerReap fires one orphan-reap pass if a reaper is wired. Every trigger
+// goes through here: startup (#292 AC2), the pane-gone sweep (#292 AC1), the
+// periodic backstop, and SessionEnd teardown (both #1171). Extra passes are
+// safe by construction -- ReapOrphans only kills a process whose own
+// (socket, pane) pair is already dead -- so the cost of an unnecessary
+// trigger is one container scan, while a missing one strands a live process
+// until the daemon restarts. Reap() is itself single-flight and async
+// (internal/reap), so concurrent triggers coalesce.
+func (d *Daemon) triggerReap() {
 	if d.reaper != nil {
 		d.reaper.Reap()
 	}

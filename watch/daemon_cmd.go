@@ -73,6 +73,7 @@ func runDaemonStart(args []string) {
 	sweepSec := int(cfg.SweepInterval / time.Second)
 	fs.IntVar(&sweepSec, "sweep", sweepSec, "stale session sweep interval in seconds")
 	fs.DurationVar(&cfg.SessionTTL, "session-ttl", cfg.SessionTTL, "idle expiry for sessions outside tmux (e.g. 2h)")
+	fs.DurationVar(&cfg.ReapInterval, "reap-interval", cfg.ReapInterval, "period of the sandbox orphan-reap backstop (e.g. 5m); 0 disables it")
 
 	fs.StringVar(&cfg.StyleIdle, "style-idle", cfg.StyleIdle, "tmux style for idle state")
 	fs.StringVar(&cfg.StyleRunning, "style-running", cfg.StyleRunning, "tmux style for running state")
