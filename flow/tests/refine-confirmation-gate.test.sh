@@ -124,12 +124,11 @@ CHILD_PLANNABLE_STANDALONE_MARKER='plannable without undocumented parent context
 
 # --- Block 5: Safety overrides per child ------------------------------------
 CHILD_OWN_BLOCK_TEXT_MARKER="that child's own block text"
-CHILD_BROWSER_QUESTION_MARKER='Does child (K/N)'
-CHILD_BROWSER_QUESTION_BATCH_MARKER='Batch up to 4 children per `AskUserQuestion` call, one question per child, in child order'
-# The design-only-child skip was folded into the general "no frontend/
-# browser signal" skip when the design stage was removed -- there is no
-# separate design classification for a child to be "design-only" any more.
-CHILD_NO_SIGNAL_SKIP_MARKER='A child with no frontend/browser signal is not asked at all'
+# Browser requirement is derived from classification, never asked: UI work
+# is verified in a browser, so a question would only restate the classifier.
+CHILD_BROWSER_DERIVED_MARKER="derive \`childBrowserRequired(K)\` from that child's own block text exactly as step 8 derives the parent's value, never by asking"
+PARENT_BROWSER_DERIVED_MARKER='**Derive `browserRequired` — never ask.**'
+BROWSER_QUESTION_TEXT_MARKER='need interactive browser access during implementation?'
 PARENT_ANSWER_NOT_PROPAGATED_MARKER='is never propagated to any child'
 
 # --- Block 6: Stale parent labels -------------------------------------------
@@ -227,21 +226,22 @@ assert_file_contains "${REFINER_AGENT}" "${CHILD_PLANNABLE_STANDALONE_MARKER}" \
 
 # =====================================================================
 # Block 5: Safety overrides per child — per-child frontend-classification,
-# per-child browser question (batched up to 4 per AskUserQuestion call,
-# mirroring step 6's batched-round rule), the no-signal skip, and the
-# explicit non-propagation of the parent's step-8 answer.
+# per-child browser derivation (never a question), the parent's own
+# derivation, and the explicit non-propagation of the parent's step-8 value.
 # =====================================================================
 
 assert_file_contains "${REFINE_SKILL}" "${CHILD_OWN_BLOCK_TEXT_MARKER}" \
   "must apply frontend-classification to each child's own block text, never an inlined keyword list"
-assert_file_contains "${REFINE_SKILL}" "${CHILD_BROWSER_QUESTION_MARKER}" \
-  "must ask the browser question once per flagged child, scoped to that child"
-assert_file_contains "${REFINE_SKILL}" "${CHILD_BROWSER_QUESTION_BATCH_MARKER}" \
-  "must batch up to 4 children per AskUserQuestion call, one question per child, in child order, mirroring step 6's batched-round rule"
-assert_file_contains "${REFINE_SKILL}" "${CHILD_NO_SIGNAL_SKIP_MARKER}" \
-  "must skip the per-child browser question entirely for a child with no frontend/browser signal"
+assert_file_contains "${REFINE_SKILL}" "${CHILD_BROWSER_DERIVED_MARKER}" \
+  "must derive each child's browser requirement from its own classification, never by asking"
+assert_file_contains "${REFINE_SKILL}" "${PARENT_BROWSER_DERIVED_MARKER}" \
+  "must derive the parent's browserRequired from classification, never by asking"
+assert_file_lacks "${REFINE_SKILL}" "${BROWSER_QUESTION_TEXT_MARKER}" \
+  "must not ask a browser-access question for the parent or any child"
+assert_file_lacks "${REFINE_CODEX}" "browser question" \
+  "codex.md must mirror the derived (never asked) browser requirement"
 assert_file_contains "${REFINE_SKILL}" "${PARENT_ANSWER_NOT_PROPAGATED_MARKER}" \
-  "must state the parent's step-8 browser answer is never propagated to any child"
+  "must state the parent's step-8 browser value is never propagated to any child"
 
 # =====================================================================
 # Block 6: Stale parent labels — the 10-entry exclusion set at refine's own
