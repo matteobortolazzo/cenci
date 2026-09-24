@@ -60,8 +60,10 @@ Gate's normal manifest/confirm step instead, which is what prevents an infinite 
 **Confirmation Gate (apply mode, before any GitHub write)**: no ticket, label, or sub-issue mutation of any kind — including the ownership claim and the `Working` label — happens until
 this gate confirms. For
 each proposed split child, apply the `frontend-classification` reference skill to that child's
-own block text to determine whether it needs a scoped browser question — the parent's own
-browser question is independent and is never propagated
+own block text and derive its `Browser` requirement from that classification (frontend/UI, or a
+mention of web scraping, browser automation, or manual browser testing) — never ask the user;
+the parent's own `browserRequired` is derived the same way from the parent ticket, is
+independent, and is never propagated
 to any child. Compute each ticket's effective `automerge:ok` grant (`### Automation` verdict is
 exactly `grant` AND NOT `browserRequired` AND NOT the `ui:visual-check`
 signal match, evaluated independently per ticket; fail-closed to `withhold` on an absent/other
