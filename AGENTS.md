@@ -17,6 +17,7 @@ Each project has its own `AGENTS.md` with project-specific context — ALWAYS re
 - Keep tickets well-scoped. 1 ticket = 1 PR.
 - ALWAYS work in a git worktree — for any change (code, docs, config), not just feature work. Never modify files in the main worktree.
 - Deliver every change as a PR unless told otherwise: commit in the worktree, push the branch, open a PR. Never commit directly to main.
+- When a step doesn't need the user's input, keep going and put status notes in the same message as the next action. Stop and ask only when you cannot continue without the user, or before anything destructive: deleting data, force-pushing, or changing anything outside this repository.
 - Never use unchecked command substitution for security-critical paths (especially temp directories and config files) — explicitly verify command success before use; unchecked failures silently collapse to root-relative paths and undermine hardening.
 - When implementing from a plan or ticket, cross-check literal implementation against every section's stated intent — not just the Files to Modify wording — per `docs/plan-fidelity.md`.
 - Never report CI green from `conclusion` values — a running check's conclusion is empty, so a conclusion-only scan reads "still running" as "passed" (#900). Read `gh pr checks <pr> --json bucket,name,state`: green needs every bucket `pass`; name any `pending`. See `shell-rules`.
