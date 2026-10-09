@@ -74,11 +74,15 @@ Branch on the classification result written above:
 
   Default: launch all three in one message. If `cenci.reviewConcurrency` is `"sequential"`, run the same reviewers one at a time in this order: security, code, silent-failure. Do not skip a reviewer.
 
+## Verify Before Fixing
+
+A reviewer's finding is a claim, not evidence — per Anthropic's Opus 5.5 guidance for subagent fan-out, when a subagent reports back, check its evidence before you accept it. Before delegating or applying any fix for a **Must Fix**, **Critical**, or **High** finding from any of the three reviewers, the orchestrating agent reads the cited file and line itself and confirms the finding holds against the actual code (the defect is really there, in the form claimed). A finding that does not hold is **not** fixed: record it as a one-line `Considered and discarded` entry in the PR's `## Notes` (see `phase-9-pr.md`) stating what was claimed and why it does not hold, so the rejection stays visible rather than silently vanishing. Findings below those tiers follow the fix-now-or-discard rules in the Actions sections below unchanged; this check adds no temp file, gate, or phase — it is a read of the cited location before the first fix is dispatched.
+
 ## Security Review Actions
 
 The security reviewer checks OWASP, auth/authz, validation, injection, sensitive data, logging, and error exposure.
 
-- Critical/High: fix immediately, rerun tests, rerun security review.
+- Critical/High: confirm the finding first (see Verify Before Fixing), then fix immediately, rerun tests, rerun security review.
 - Medium/Low: **Fix now** if the fix is straightforward. Otherwise, discard by default — test-coverage gaps, doc polish, "consider X" suggestions, and refactor/tech-debt observations are never tracked, only recorded as a one-line "Considered and discarded" entry in the PR's `## Notes` (see `phase-9-pr.md`), which never becomes a Followup ticket. **Track** it only when it is an actual defect with a concrete, realistic trigger path a user can hit in real use by noting it in the PR's `## Notes` for the Followup Ticket step.
 - Unclear fix: ask the user via `AskUserQuestion`.
 
@@ -88,7 +92,7 @@ Security-critical findings take priority over code quality findings.
 
 The code reviewer uses confidence scoring and reports only findings >= 50.
 
-- Must Fix >= 90: fix all, rerun tests.
+- Must Fix >= 90: confirm each finding first (see Verify Before Fixing), then fix all that hold, rerun tests.
 - Should Fix 75-89: **Fix now** if the fix is straightforward. Otherwise, discard by default — test-coverage gaps, doc polish, "consider X" suggestions, and refactor/tech-debt observations are never tracked, only recorded as a one-line "Considered and discarded" entry in the PR's `## Notes` (see `phase-9-pr.md`), which never becomes a Followup ticket. **Track** it only when it is an actual defect with a concrete, realistic trigger path a user can hit in real use by noting it in the PR's `## Notes` for the Followup Ticket step.
 - Nitpicks 50-74: ignore unless trivial.
 - Human decision: stop and ask the user via `AskUserQuestion`.
@@ -101,6 +105,6 @@ After any fix-and-rerun cycle that changes the diff, re-run the Shared Context g
 
 The silent-failure hunter checks for swallowed errors, empty catch blocks, silent fallbacks, and missing error propagation.
 
-- Critical in auth/payment/data-loss paths: fix immediately.
+- Critical in auth/payment/data-loss paths: confirm the finding first (see Verify Before Fixing), then fix immediately.
 - Warning in non-critical paths: **Fix now** if the fix is straightforward. Otherwise, discard by default — test-coverage gaps, doc polish, "consider X" suggestions, and refactor/tech-debt observations are never tracked, only recorded as a one-line "Considered and discarded" entry in the PR's `## Notes` (see `phase-9-pr.md`), which never becomes a Followup ticket. **Track** it only when it is an actual defect with a concrete, realistic trigger path a user can hit in real use by noting it in the PR's `## Notes` for the Followup Ticket step.
 - Info with intentional suppression and comments: no action.
