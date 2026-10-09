@@ -75,8 +75,8 @@ type State struct {
 	// advances LastHeadSHA on a non-green tick at all -- see its own
 	// comment for why that staleness is deliberate.
 	//
-	// Set only inside the failing-checks branch, including on the #995
-	// conflict-suppressed path (bookkeeping still advances literally).
+	// Set only after a CI repair launch succeeds. A conflicting tick defers
+	// CI repair without consuming this dispatch marker or its retry budget.
 	LastRepairedSHA string   `json:"lastRepairedCiHeadSha,omitempty"`
 	FixAttempts     int      `json:"ciFixAttempts"`
 	RepairPending   bool     `json:"ciRepairPending"`
@@ -159,18 +159,16 @@ type State struct {
 	// since-superseded commit count toward the grace.
 	ChecksAbsentHeadSHA string `json:"checksAbsentHeadSha,omitempty"`
 
-	// ConflictNotifiedSHA (#995) is the head commit SHA the conflict
-	// escalation last opened a babysit-attention window for -- purely
-	// additive `omitempty`, no stateSchemaVersion bump, mirroring
-	// ChecksAbsentSince/ChecksAbsentHeadSHA above: its zero value already
-	// means "never notified", so no migration is needed for a state file
-	// written before this field existed. Dedicated rather than reusing
-	// LastHeadSHA (which is CI-repair edge-detection state, advanced and
-	// reset by the failing-checks branch for unrelated reasons) -- see the
-	// ticket's rejected-alternative writeup. Cleared once a later tick
-	// observes the conflict has resolved, releasing the Status ==
-	// "needs-input" hold (#1079's bounded-hold convention).
+	// ConflictNotifiedSHA preserves legacy attention notifications and now
+	// deduplicates retry-cap attention. It must not suppress a first repair
+	// when a supervisor is upgraded from the attention-only behavior.
 	ConflictNotifiedSHA string `json:"conflictNotifiedHeadSha,omitempty"`
+	// ConflictRepairSHA records that this episode observed or dispatched a worker. Worker
+	// liveness, rather than SHA equality, gates another launch. Attempts are
+	// bounded even when an ended worker left the head unchanged. Only a known
+	// non-conflicting observation resets the episode.
+	ConflictRepairSHA   string `json:"conflictRepairHeadSha,omitempty"`
+	ConflictFixAttempts int    `json:"conflictFixAttempts,omitempty"`
 
 	// Automerge fields (#824). The supervisor's detached mode sets
 	// cmd.Stdout = nil, so the automerge decision log line only reaches a
@@ -239,6 +237,20 @@ func prConflicting(pr prView) bool {
 		return true
 	}
 	return false
+}
+
+func prConflictCleared(pr prView) bool {
+	if prConflicting(pr) {
+		return false
+	}
+	switch pr.MergeStateStatus {
+	case "CLEAN", "UNSTABLE", "HAS_HOOKS", "BLOCKED", "BEHIND", "DRAFT":
+		return true
+	case "":
+		return pr.Mergeable == "MERGEABLE"
+	default:
+		return false
+	}
 }
 
 type check struct{ Bucket, Name, State string }
@@ -635,47 +647,49 @@ func tick(s *State) (bool, time.Duration, error) {
 		clearChecksClock(s)
 	}
 	actionable := s.CIStatus == ciStatusPending || (s.CIStatus == ciStatusFailing && s.RepairPending)
-	// conflicting (#995) is computed once, up front, so the failing-checks
-	// branch below can gate its two existing launches on it (Decision:
-	// conflict wins over CI repair/retry-cap in the same tick) before the
-	// conflict escalation block itself runs, further down.
+	// Conflict repair owns the branch ahead of CI repair and review work.
 	conflicting := prConflicting(pr)
+	if prConflictCleared(pr) && (s.ConflictNotifiedSHA != "" || s.ConflictRepairSHA != "" || s.ConflictFixAttempts != 0) {
+		// Release before CI dispatch: even a CI retry-cap return must retain
+		// the authoritative observation that this conflict episode ended.
+		s.ConflictNotifiedSHA = ""
+		s.ConflictRepairSHA = ""
+		s.ConflictFixAttempts = 0
+		s.Status = "running"
+	}
+	// UNKNOWN is not proof that a repair finished. Keep other branch writers
+	// deferred until GitHub authoritatively reports this episode clear.
+	conflictHeld := conflicting || s.ConflictRepairSHA != "" || s.ConflictNotifiedSHA != "" || s.ConflictFixAttempts != 0
+	if conflictHeld {
+		actionable = true
+	}
 	var failing []string
 	for _, c := range checks {
 		if c.Bucket == "fail" {
 			failing = append(failing, c.Name)
 		}
 	}
-	if len(failing) > 0 && pr.HeadRefOID != s.LastRepairedSHA {
+	if !conflictHeld && len(failing) > 0 && pr.HeadRefOID != s.LastRepairedSHA {
 		if s.FixAttempts >= fixCap {
-			if !conflicting {
-				s.Status = "needs-input"
-				if err := launch(s, "babysit-attention", s.PR+" CI retry cap reached; decide whether to retry, pause, or stop"); err != nil {
-					// One-decision-per-tick (Decision 7, #854): without this, a
-					// failed workflow dispatch on an enabled automerge tick
-					// returned tick's error with no automerge decision recorded
-					// at all, leaving a stale decision from the previous tick
-					// displayed.
-					recordUpstreamReadFailure(s, reasonWorkflowLaunchFailed, err)
-					return false, 0, err
-				}
-				return false, 0, errNeedsInput
+			s.Status = "needs-input"
+			if err := launch(s, "babysit-attention", s.PR+" CI retry cap reached; decide whether to retry, pause, or stop"); err != nil {
+				// One-decision-per-tick (Decision 7, #854): without this, a
+				// failed workflow dispatch on an enabled automerge tick
+				// returned tick's error with no automerge decision recorded
+				// at all, leaving a stale decision from the previous tick
+				// displayed.
+				recordUpstreamReadFailure(s, reasonWorkflowLaunchFailed, err)
+				return false, 0, err
 			}
+			return false, 0, errNeedsInput
 		} else {
-			if !conflicting {
-				prompt := fmt.Sprintf("PR #%s (%s) has failing CI checks: %s. Diagnose, fix, test, commit, and push without force-pushing.", s.PR, pr.HeadRefName, strings.Join(failing, ", "))
-				if err := launch(s, "ci-repair", prompt); err != nil {
-					recordUpstreamReadFailure(s, reasonWorkflowLaunchFailed, err)
-					return false, 0, err
-				}
+			prompt := fmt.Sprintf("PR #%s (%s) has failing CI checks: %s. Diagnose, fix, test, commit, and push without force-pushing.", s.PR, pr.HeadRefName, strings.Join(failing, ", "))
+			if err := launch(s, "ci-repair", prompt); err != nil {
+				recordUpstreamReadFailure(s, reasonWorkflowLaunchFailed, err)
+				return false, 0, err
 			}
 		}
-		// Bookkeeping still advances literally even when the launches above
-		// were skipped for a conflicting PR (#995 Q&A 1): a conflicting,
-		// repeatedly-failing-CI PR still needs FixAttempts/RepairPending/
-		// LastHeadSHA/LastRepairedSHA to track this tick's observation, so a
-		// later push that both clears the conflict and still fails CI takes
-		// the normal ci-repair path with accurate bookkeeping.
+		// Consume the CI retry budget and dedup marker only for work dispatched.
 		s.FixAttempts++
 		s.RepairPending = true
 		s.LastHeadSHA = pr.HeadRefOID
@@ -684,75 +698,61 @@ func tick(s *State) (bool, time.Duration, error) {
 		// keeps advancing for its unrelated retry-budget-reset job.
 		s.LastRepairedSHA = pr.HeadRefOID
 		actionable = true
-	} else if pr.HeadRefOID != s.LastHeadSHA {
-		// Retry-budget reset is gated on CI actually being observed GREEN at
-		// the new head SHA (code-review follow-up to #1169): a still-pending
-		// or ciStatusUnknown (#924) observation only means "CI hasn't
-		// reported red yet", not "the repair succeeded". Resetting
-		// unconditionally on any head-SHA change made fixCap unreachable on
-		// a persistently-red PR, because a pending tick landing between two
-		// distinct failing head SHAs -- the exact tick/CI race #1169 itself
-		// closed for the dispatch guard above -- zeroed FixAttempts every
-		// time, leaving ci-repair dispatch unbounded. Deliberately
-		// conservative: only a genuine green result proves the repair
-		// worked.
-		//
-		// s.LastHeadSHA = pr.HeadRefOID moves INSIDE this if (a second
-		// code-review follow-up to #1169): this branch's `!=` comparison is
-		// its own only trigger, so advancing LastHeadSHA on a non-green tick
-		// permanently spends that trigger for this head SHA -- a later tick
-		// observing that SAME SHA has now gone green can never re-enter the
-		// branch, and RepairPending stays stuck true forever, wedging
-		// automerge.go:543's `!RepairPending` gate on the ordinary case (CI
-		// reports pending at least once before it reports green). LastHeadSHA
-		// has no other reader in this package (grep confirms: only this
-		// branch's own guard and the dispatch branch's unconditional write
-		// above, which always keeps it current on every failing tick
-		// regardless), so leaving it stale across every non-green tick at a
-		// new SHA is coherent: it comes to mean "the last SHA confirmed
-		// green or already dispatched a repair for", not "the last SHA ever
-		// observed".
+	} else if !conflictHeld && pr.HeadRefOID != s.LastHeadSHA {
+		// Only green CI at a new head proves a repair succeeded. Keep the
+		// previous head across pending/unknown ticks so a later green result
+		// at this same SHA can still clear RepairPending and reset the budget.
 		if s.CIStatus == ciStatusGreen {
 			s.FixAttempts = 0
 			s.RepairPending = false
 			s.LastHeadSHA = pr.HeadRefOID
 		}
 	}
-	// Merge-conflict observation and escalation (#995): independent of
-	// automerge.enabled, never returns errNeedsInput -- the loop keeps
-	// polling at IntervalSeconds so a pushed rebase self-heals the
-	// supervisor (ticket Decision). Falls through unconditionally so
-	// runAutomerge below still runs and can record its own refined
-	// reasonMergeConflicts/reasonBranchBehind decision.
+	// Merge repair is independent of automerge policy. A successful dispatch
+	// keeps polling so a repaired push can release the conflict hold.
 	if conflicting {
 		actionable = true
+		// Probe even before our first recorded dispatch: a manually-started
+		// repair owns the same branch and must not receive a second writer.
+		workerActive, err := mergeRepairActive(s.LaunchSession, s.PR)
+		if err != nil {
+			recordUpstreamReadFailure(s, reasonWorkflowLaunchFailed, err)
+			return false, 0, err
+		}
 		switch {
 		case pr.HeadRefOID == "":
 			// No key to dedup on -- opening a window every tick would be
 			// wrong (the Assumptions' degenerate case), so this only
-			// observes and prints, leaving ConflictNotifiedSHA untouched.
+			// observes and prints, leaving repair bookkeeping untouched.
 			// reasonHeadSHAUnknown's own automerge hold already covers the
 			// same underlying condition.
-			fmt.Printf("PR #%s has merge conflicts but its head commit SHA is unknown; not opening a new babysit-attention window\n", s.PR)
-		case s.ConflictNotifiedSHA == pr.HeadRefOID:
-			fmt.Printf("PR #%s has merge conflicts at head commit %s; already notified, no new window opened\n", s.PR, pr.HeadRefOID)
+			fmt.Printf("PR #%s has merge conflicts but its head commit SHA is unknown; not opening a new merge-repair window\n", s.PR)
+		case workerActive:
+			if s.ConflictRepairSHA == "" {
+				// Retain manual-worker ownership across a later UNKNOWN tick.
+				s.ConflictRepairSHA = pr.HeadRefOID
+			}
+			s.Status = "running"
+			fmt.Printf("PR #%s has merge conflicts at head commit %s; repair already dispatched and still active, no new window opened\n", s.PR, pr.HeadRefOID)
+		case s.ConflictFixAttempts >= fixCap:
+			if s.ConflictNotifiedSHA != pr.HeadRefOID {
+				if err := launch(s, "babysit-attention", s.PR+" merge repair retry cap reached; decide whether to retry, pause, or stop"); err != nil {
+					recordUpstreamReadFailure(s, reasonWorkflowLaunchFailed, err)
+					return false, 0, err
+				}
+				s.ConflictNotifiedSHA = pr.HeadRefOID
+			}
+			s.Status = "needs-input"
 		default:
-			if err := launch(s, "babysit-attention", s.PR+" has merge conflicts with its base branch; decide whether to leave paused or stop babysitting"); err != nil {
+			if err := launch(s, "merge-repair", s.PR); err != nil {
 				recordUpstreamReadFailure(s, reasonWorkflowLaunchFailed, err)
 				return false, 0, err
 			}
-			s.ConflictNotifiedSHA = pr.HeadRefOID
-			s.Status = "needs-input"
-			fmt.Printf("PR #%s has merge conflicts at head commit %s; opened babysit-attention\n", s.PR, pr.HeadRefOID)
+			s.ConflictRepairSHA = pr.HeadRefOID
+			s.ConflictFixAttempts++
+			s.Status = "running"
+			fmt.Printf("PR #%s has merge conflicts at head commit %s; opened merge-repair with Claude Opus\n", s.PR, pr.HeadRefOID)
 		}
-	} else if s.ConflictNotifiedSHA != "" {
-		// Bounded-hold release (#1079): the conflict has cleared, so the
-		// Status == "needs-input" hold opened above must release, keyed on
-		// ConflictNotifiedSHA rather than Status itself -- a tick error can
-		// clobber Status to "retrying" in between, but this reset survives
-		// that (see the ticket's Risks section).
-		s.ConflictNotifiedSHA = ""
-		s.Status = "running"
 	}
 	// Fully paginated (#854): fetchPaged follows every page up to
 	// maxFeedbackPages, so a PR with more comments than one page no longer
@@ -857,7 +857,7 @@ func tick(s *State) (bool, time.Duration, error) {
 	// depend on launch success) but out of LaunchedKeys, so the very next
 	// tick retries -- matching today's effectively-unbounded retry behavior,
 	// no fixCap-style cap.
-	if toLaunch := removeKeys(s.PendingKeys, s.LaunchedKeys); len(toLaunch) > 0 {
+	if toLaunch := removeKeys(s.PendingKeys, s.LaunchedKeys); !conflictHeld && len(toLaunch) > 0 {
 		if err := launch(s, "address-review", s.PR); err != nil {
 			recordUpstreamReadFailure(s, reasonWorkflowLaunchFailed, err)
 			return false, 0, err
@@ -902,7 +902,14 @@ func launch(s *State, workflow, arg string) error {
 	if !exists {
 		return fmt.Errorf("launch %s: recorded tmux session %q no longer exists", workflow, s.LaunchSession)
 	}
-	args := []string{"run", workflow, arg, "--agent", s.Agent, "--session", s.LaunchSession}
+	agent := s.Agent
+	if workflow == "merge-repair" {
+		agent = "claude"
+	}
+	args := []string{"run", workflow, arg, "--agent", agent, "--session", s.LaunchSession}
+	if workflow == "merge-repair" {
+		args = append(args, "--model", "opus")
+	}
 	if s.LaunchDir != "" {
 		args = append(args, "--dir", s.LaunchDir)
 	}

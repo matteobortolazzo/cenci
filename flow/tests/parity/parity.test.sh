@@ -164,6 +164,10 @@ result_p8_good1="$(verify_push_policy "git push -u origin feature/42-demo")"; co
 assert_exit_zero "${code_p8_good1}" "P8 push-policy good sim (plain git push)"
 result_p8_good2="$(verify_push_policy "git push --force-with-lease -u origin feature/42-demo")"; code_p8_good2=$?
 assert_exit_zero "${code_p8_good2}" "P8 push-policy good sim (--force-with-lease)"
+_check_push_policy_text "git push --force-with-lease=refs/heads/feature/42-demo:abc123 origin HEAD:refs/heads/feature/42-demo"
+assert_exit_zero "$?" "P8 push-policy accepts a SHA-pinned lease"
+_check_push_policy_text "git push --force-with-lease=refs/heads/feature/42-demo:abc123 --force origin HEAD:refs/heads/feature/42-demo"
+assert_exit_nonzero "$?" "P8 pinned lease cannot disguise bare force"
 result_p8_bad1="$(verify_push_policy "git push --force -u origin feature/42-demo")"; code_p8_bad1=$?
 assert_exit_nonzero "${code_p8_bad1}" "P8 push-policy bad sim (bare --force)"
 result_p8_bad2="$(verify_push_policy "git push -f -u origin feature/42-demo")"; code_p8_bad2=$?

@@ -16,22 +16,49 @@ Target the worktree explicitly with `git -C <worktree-path>` on every rebase/com
 
 ## Rebase
 
-Fetch and rebase:
+Before rewriting any commits, resolve the feature branch with `git -C
+<worktree-path> symbolic-ref --quiet --short HEAD` and read its remote head
+with `git -C <worktree-path> ls-remote --exit-code origin refs/heads/<branch>`.
+Exit 0 must yield exactly that ref and a valid commit SHA: retain it as
+`<expected-head-sha>` through verification and Push. Exit 2 means this branch
+has never been pushed, so no force-with-lease retry is allowed. Any other
+failure stops before rebase. On a fresh attempt the observed remote head
+must belong to this branch's local history; a divergent remote needs
+inspection. An interrupted publish may reuse its previously recorded lease
+only while the live remote still equals it. Never refresh a recorded lease
+to overwrite a concurrent writer, and never derive it from a tracking ref
+that a background fetch can update.
+
+Refresh and rebase onto the remote base using the shared helper. Never rebase
+onto local `main`, whose checkout may lag behind GitHub. The helper fetches an
+explicit refspec into `origin/main`, stops on a failed fetch, and preserves
+uncommitted implementation edits with autostash. Stage this task's intended
+new files first (ordinary `git add <paths>`, not intent-to-add), so autostash
+includes their content; do not stage another session's files:
 
 ```bash
-git -C <worktree-path> fetch origin main
-git -C <worktree-path> rebase origin/main
+sh "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/rebase-remote-base.sh" "<worktree-path>" main
 ```
+
+Only exit 0 with `REBASE_STATUS=ready` permits continuing. A conflict when
+restoring autostashed edits is a failure too, even if Git's rebase command
+itself returned 0. Preserve the recovery stash until the edits are confirmed
+restored; never drop or blindly re-apply it.
 
 If rebase succeeds, rerun full build and tests, then lint (when `lintCommand` is set). An absent `lintCommand` skips the lint step cleanly — no error. If build, tests, or lint fail, stop and report the rebase-induced failure. Lint is an unconditional hard gate here, exactly like build/test: no PR is created if it fails.
 
-If rebase conflicts, abort, report conflicting files, and stop:
+If the helper fails because of conflicts, delegate local conflict resolution
+to an Opus subagent in this same feature worktree. Read `subagent-safety`
+first. Pass the conflicting paths and both branches' intent; the delegate
+may edit and complete the rebase but must not push, post, or change labels.
+Resolve by preserving both changes' intended behavior, never by blanket
+ours/theirs selection. The root agent verifies the resulting diff and
+restarts at Rebase before any commit or push. A fetch/config error is
+reported as such, never treated as a conflict. If Opus cannot resolve the
+conflict without a product decision, report that concrete ambiguity and stop.
 
-```bash
-git -C <worktree-path> rebase --abort
-```
-
-Tell the user to resolve manually. Per the atomicity rule above, the next entry into this phase still restarts at the Rebase step, not at Commit — the fetch+rebase is a no-op once the user has already resolved and completed it locally, and this guarantees a fresh build/test/lint pass on the rebased tree before Commit runs.
+Per the atomicity rule, every recovery restarts at Rebase and repeats
+build/test/lint on the resolved tree before Commit runs.
 
 ## Parent Close Gate (last child only)
 
@@ -168,9 +195,9 @@ Push the branch:
   This is `feature/<ticket-id>-<description>` on the standard path, or a non-standard branch when this run reused an existing worktree via `cenci pipeline worktree <id> --attach <path>` at Phase 2 — see `phase-2-worktree.md`'s `## Create Worktree`. Then push that branch: `git -C <worktree-path> push -u origin "$BRANCH"`.
 - Ticketless mode: `git -C <worktree-path> push -u origin feature/<auto-slug>` — unchanged; ticketless mode has no pipeline artifact to source a branch from.
 
-If this branch was already pushed by an earlier attempt and the atomicity rule's mandatory Rebase restart above rewrote local commit SHAs, the plain push above is rejected as non-fast-forward — this is expected, not a failure. Retry once with `git -C <worktree-path> push --force-with-lease -u origin <branch>`: `--force-with-lease` still refuses if the remote tip isn't what this rebase started from (i.e. someone else pushed to the branch), which surfaces as a genuine conflict to report rather than silently overwriting work.
+If this branch was already pushed by an earlier attempt and the atomicity rule's mandatory Rebase restart above rewrote local commit SHAs, the plain push above is rejected as non-fast-forward — this is expected, not a failure. Retry once with `git -C <worktree-path> push --force-with-lease=refs/heads/<branch>:<expected-head-sha> -u origin <branch>` using the SHA retained before Rebase: the explicit lease refuses if someone else pushed to the branch, even if a background fetch refreshed its tracking ref. A lease refusal stops and reports the concurrent change.
 
-A commit-message amend performed by the Commit step's parent-reference reconciliation above has exactly the same effect as a rebase: it rewrites the local HEAD SHA, so the plain push above is rejected as non-fast-forward for the same reason. Reuse the identical retry contract described above — `git -C <worktree-path> push --force-with-lease -u origin <branch>` — never a bare `--force`, `-f`, or `--no-verify`, on this or any other push in this phase (`flow/docs/adapter-contract.md`'s `push-policy` property forbids it); a `--force-with-lease` refusal remains the existing genuine-conflict path to report, unchanged.
+A commit-message amend performed by the Commit step's parent-reference reconciliation above has exactly the same effect as a rebase: it rewrites the local HEAD SHA, so the plain push above is rejected as non-fast-forward for the same reason. Reuse the identical retry contract described above — `git -C <worktree-path> push --force-with-lease=refs/heads/<branch>:<expected-head-sha> -u origin <branch>` — never a bare `--force`, `-f`, or `--no-verify`, on this or any other push in this phase (`flow/docs/adapter-contract.md`'s `push-policy` property forbids it); a `--force-with-lease` refusal remains the existing genuine-conflict path to report, unchanged.
 
 After a successful push (plain or force-with-lease retry), verify the remote tip actually carries the reconciled reference (last child only — non-last-child and ticketless pushes have no `<parentId>`/verdict to check against) — a push can succeed while still not proving the intended content landed:
 

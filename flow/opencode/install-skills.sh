@@ -10,6 +10,8 @@ ACTION=${1:?usage: install-skills.sh install|remove}
 # ci-repair, ticket-ownership, babysit-attention) are intentionally excluded
 # — they assume Claude Code's interactive approval flow. codex-runtime is
 # excluded as a Codex-only adapter. This list is the single source of truth;
+# merge-repair is Claude-only: babysit explicitly dispatches it to Claude Opus
+# for every supervising client; it has no Codex companion or OpenCode symlink.
 # the README's generated skill inventory
 # (`<!-- cenci-maintain:skills:start -->`) OpenCode column must match it
 # exactly — drift is caught by flow/skills/maintain/scripts/check.sh's

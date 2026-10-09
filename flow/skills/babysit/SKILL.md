@@ -14,7 +14,7 @@ allowed-tools: Read, Bash(cenci babysit:*), Bash(sh "${CLAUDE_PLUGIN_ROOT}/hooks
 This skill is a thin client adapter over the persistent `cenci babysit` supervisor. The
 supervisor owns polling and retry state outside the repository, so it keeps running after
 the invoking agent session exits. It launches an agent only when CI fails, actionable
-review feedback arrives, or a retry cap needs human input.
+review feedback arrives, merge conflicts need repair, or a retry cap needs human input.
 
 Read the shared `shell-rules` skill before invoking the CLI.
 
@@ -94,8 +94,18 @@ verification available.
 
 ## Safety guarantees
 
-The supervisor never force-pushes. It launches the selected client through `cenci run`
-for CI repair or review handling, preserving those workflows' approval gates. Launched
+The supervisor never pushes itself. It launches the selected client through `cenci run`
+for CI repair or review handling. Merge conflicts automatically launch `merge-repair`
+with `--agent claude --model opus`, regardless of the supervising client. The repair
+fetches the actual remote PR base, resolves in the PR's feature worktree, verifies
+locally, and updates the same branch with an explicit SHA-pinned `--force-with-lease`.
+It asks for human input only when resolution requires an unresolved decision. CI
+and review repair dispatch waits while the PR conflicts, avoiding competing edits.
+The supervisor waits while the recorded repair window has a live worker, including
+across head changes, and keeps polling. If the worker exits while conflicts remain,
+it retries even at the same head SHA; three launches in a continuous conflict
+episode exhaust the budget and open an attention window. Probe failures are reported
+without launching a second worker. A confirmed conflict-free state resets that budget. Launched
 repair agents confirm a fix against the project's local gate (`docs/health-gates.md`,
 exit-0-is-healthy) before pushing, so a broken fix is caught locally instead of via a
 CI round-trip. After three failed repair launches it pauses and opens a visible babysit

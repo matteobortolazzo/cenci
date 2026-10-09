@@ -423,9 +423,16 @@ unreadable`, `review feedback state unknown` (GitHub stopped reporting a comment
 thread — deleted or purged), and `unsupported review feedback type`. Merge those by
 hand.
 
-`PR has merge conflicts` also needs a human, but unlike the three above it is not
-permanent: babysit keeps polling at its normal interval, and once someone pushes a
-rebase the hold clears on its own on the next tick — no re-arm required.
+`PR has merge conflicts` automatically launches Claude Opus to resolve the conflicts
+against the fetched remote base, run local verification, and update the same PR with
+a SHA-pinned `--force-with-lease`. This happens for every supervising client and
+independently of automerge being enabled. CI/review repair dispatch waits while that
+conflict episode is active. An active repair window suppresses duplicate launches,
+including across head changes. If that worker exits with conflicts remaining, babysit
+retries at the same head SHA, up to three launches per continuous conflict episode;
+an exhausted budget opens an attention window. An ambiguous resolution still needs a human. Babysit keeps polling
+at its normal interval and releases the hold once GitHub confirms the conflict has
+cleared — no re-arm required.
 
 ## Knowing a merge was automatic
 

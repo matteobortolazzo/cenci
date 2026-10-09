@@ -87,6 +87,7 @@ Codex and OpenCode so neither mistakes a pipeline command for a supported workfl
 | `babysit` | Yes | Yes | Yes | Thin wrapper over the client-neutral `cenci babysit` supervisor |
 | `babysit-attention` | Yes | No | No | Launcher-dispatched by `cenci babysit` when a decision needs a human; no Codex/OpenCode companion yet |
 | `ci-repair` | Yes | No | No | Launcher-dispatched by `cenci babysit` on failing CI; no Codex/OpenCode companion yet |
+| `merge-repair` | Yes | No | No | Babysit always dispatches conflict resolution to Claude Opus, including for Codex/OpenCode supervisors |
 | `configure` | Yes | In development | No | Neutral/adapters foundation present |
 | `implement` | Yes | In development | No | Agents/checkpoints foundation |
 | `maintain` | Yes | Yes | No | Full six-phase deterministic-check + worker-audit procedure |
@@ -120,6 +121,7 @@ companion) for every skill, including the internal ones not listed above.
 | `frontend-classification` | Classify whether a ticket is frontend or UI work. Use when deciding whether design-aware planning, visual verification, UI tests, or screenshot capture applies. | Yes | No | Yes | Yes |
 | `implement` | Run the full cenci plan, test, implementation, review, and pull-request pipeline. | No | Yes | Yes | Yes |
 | `maintain` | Audit and repair structure, documentation, client-portability, and rule/lesson-hygiene drift through a deterministic check plus specialized agents, gated by human approval. | No | Yes | Yes | Yes |
+| `merge-repair` | Resolve an existing pull request's conflicts with its remote base, verify locally, and update that PR branch. | No | Yes | Yes | No |
 | `pr-comment-filter` | Decide which pull-request review comments are actionable. Use when addressing review feedback, monitoring a PR, or filtering already-handled comments. | Yes | No | Yes | Yes |
 | `project-core` | Resolve cenci's neutral project configuration and shared guidance consistently. | Yes | No | Yes | Yes |
 | `refactor` | Analyze a codebase with specialized agents and propose refactoring tickets. | No | Yes | Yes | Yes |
@@ -167,14 +169,15 @@ companion) for every skill, including the internal ones not listed above.
 |---|---|---|---|---|
 | `address-review` | codex.md | babysit, codex-runtime, implement, pr-comment-filter, project-core, shell-rules, subagent-safety, verify-ui | — | — |
 | `attachments` | — | shell-rules | — | context-gatherer |
-| `babysit-attention` | — | — | — | — |
-| `babysit` | — | project-core, shell-rules | — | — |
+| `babysit-attention` | — | merge-repair | — | — |
+| `babysit` | — | merge-repair, project-core, shell-rules | — | — |
 | `ci-repair` | — | project-core, shell-rules, subagent-safety, testing | — | — |
 | `codex-runtime` | — | — | — | — |
 | `configure` | codex.md | babysit, codex-runtime, project-core, shell-rules, testing, verify-ui | detect-project.sh, merge-sandbox-config.sh | code-reviewer |
 | `frontend-classification` | — | implement, refine | — | — |
 | `implement` | codex.md, phases/phase-1-plan.md, phases/phase-2-worktree.md, phases/phase-3-test-red.md, phases/phase-4-implement-green.md, phases/phase-5-refactor.md, phases/phase-6-7-review.md, phases/phase-8-docs.md, phases/phase-9-pr.md | attachments, babysit, ci-repair, codex-runtime, frontend-classification, project-core, review, shell-rules, subagent-safety, testing, ticket-ownership, verify-ui | run-artifact-dir.sh | code-reviewer, context-gatherer, implementer, lessons-collector, planner, security-reviewer, silent-failure-hunter |
 | `maintain` | base-freshness.md, codex.md, modes/backlog.md, modes/clients.md, modes/docs.md, modes/rules.md, modes/structure.md | codex-runtime, project-core, shell-rules, subagent-safety, worktrees | check.sh | backlog-maintainer, docs-maintainer, portability-maintainer, rules-maintainer, structure-maintainer |
+| `merge-repair` | — | project-core, shell-rules, worktrees | — | — |
 | `pr-comment-filter` | — | address-review, babysit | — | — |
 | `project-core` | — | — | — | — |
 | `refactor` | codex.md | codex-runtime, project-core, shell-rules, subagent-safety | — | — |

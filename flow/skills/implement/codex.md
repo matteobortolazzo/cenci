@@ -90,7 +90,38 @@ A checker `fail` is CI-blocking: gate on it through the client's available user-
 with a fix / stop / explicit push-anyway choice, and never push an unresolved `fail` —
 CI runs the identical `--changed` invocation, so shipping one is a guaranteed red pipeline.
 `warn` and `skip` stay advisory. On a push-anyway override, name the accepted failure in the PR
-body and never render it as a passing check. Then commit, push, and open the PR. Clear the goal
+body and never render it as a passing check. Before rewriting commits, resolve
+the feature branch with `git -C <abs-worktree-path> symbolic-ref --quiet --short HEAD`
+and read its live remote head using `git -C <abs-worktree-path> ls-remote --exit-code
+origin refs/heads/<branch>`. Exit 0 must return exactly that ref and a valid commit
+SHA: retain it as `<expected-head-sha>` through rebase/verification/push. Exit 2
+means no remote branch exists (plain push only); other failures stop. On a fresh
+attempt require the remote head to belong to local history; a divergent head needs
+inspection. An interrupted publish can reuse its recorded lease only while the
+live remote still equals it; never refresh that lease to overwrite another writer.
+Stage this task's intended new files with ordinary `git add <paths>` so
+autostash includes their content (intent-to-add is insufficient), then before
+committing or pushing, run:
+
+```bash
+sh "${PLUGIN_ROOT}/hooks/scripts/rebase-remote-base.sh" "<abs-worktree-path>" main
+```
+
+This fetches `origin/main` with an explicit destination and rebases onto it,
+never onto the potentially stale local `main`. It preserves uncommitted edits
+with autostash and fails if either the rebase or autostash restoration conflicts.
+Only exit 0 with `REBASE_STATUS=ready` allows continuing. On conflicts, resolve
+in the feature worktree, preserving both branches' intent and any recovery stash;
+delegate to an Opus-capable worker when available, otherwise perform the local
+resolution in this session. Stop only for an unresolved product decision or an
+actual fetch/config/verification failure. After resolution restart this helper.
+After every successful rebase, repeat full build, tests, lint when configured,
+and the maintenance check on the resulting tree before commit/push/PR. Every
+re-entry restarts at this fetch/rebase step. Push normally; if a previous push
+exists and rebase rewrote commits, use
+`--force-with-lease=refs/heads/<branch>:<expected-head-sha>` pinned to the
+remote head observed before rebasing, and stop if the lease refuses.
+Then commit, push, and open the PR. Clear the goal
 before any question/error and after PR creation. After a successful PR creation (never on a
 failed `gh pr create`), archive the consumed plan file instead of deleting it. `.plans/` lives
 only in the main checkout (repo root), not in the worktree, so anchor the command to

@@ -139,8 +139,8 @@ func TestArmResolvesAndPersistsLaunchTargetBeforeFirstTick(t *testing.T) {
 
 // -- AC 3: every launch() call site passes the recorded target --------------
 
-// TestLaunchPassesRecordedSessionAndDir drives tick() through all three
-// launch() call sites (ci-repair, babysit-attention, address-review) with a
+// TestLaunchPassesRecordedSessionAndDir drives tick() through every
+// launch() call site (ci-repair, babysit-attention, merge-repair, address-review) with a
 // recorded LaunchSession/LaunchDir on State, and asserts the exact
 // --session/--dir values reach the launched `cenci run` argv at every site.
 func TestLaunchPassesRecordedSessionAndDir(t *testing.T) {
@@ -181,18 +181,14 @@ func TestLaunchPassesRecordedSessionAndDir(t *testing.T) {
 			workflow:  "address-review",
 		},
 		{
-			// #995: the conflict-escalation launch site, alongside the
-			// existing FixAttempts: fixCap attention case above -- unlike
-			// that case, the conflict path never returns errNeedsInput
-			// (wantNeedsInput stays false, the ticket's Decision).
-			name: "babysit-attention-conflict",
+			name: "merge-repair-conflict",
 			state: State{
 				PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 300, CurrentDelaySeconds: 900,
 				LastHeadSHA:   "abc",
 				LaunchSession: "work", LaunchDir: "/repo/root",
 			},
 			responses: []string{conflictingOpenPR("abc"), `[{"bucket":"pass","name":"test","state":"SUCCESS"}]`, `[]`, `[]`},
-			workflow:  "babysit-attention",
+			workflow:  "merge-repair",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -260,8 +256,8 @@ func TestLaunchFailsWhenRecordedSessionGone(t *testing.T) {
 
 // TestLaunchFailsForConflictWhenRecordedSessionGone is #995's conflict-path
 // analogue of TestLaunchFailsWhenRecordedSessionGone: a DIRTY PR whose
-// recorded tmux session no longer exists must fail the babysit-attention
-// launch loudly, issue zero `cenci run` calls, leave ConflictNotifiedSHA
+// recorded tmux session no longer exists must fail the merge-repair
+// launch loudly, issue zero `cenci run` calls, leave ConflictRepairSHA
 // unset (so the next tick retries), and persist
 // AutomergeReason == reasonWorkflowLaunchFailed through the existing
 // recordUpstreamReadFailure retry path.
@@ -293,8 +289,8 @@ func TestLaunchFailsForConflictWhenRecordedSessionGone(t *testing.T) {
 	if s.AutomergeReason != reasonWorkflowLaunchFailed {
 		t.Fatalf("AutomergeReason = %q, want %q", s.AutomergeReason, reasonWorkflowLaunchFailed)
 	}
-	if s.ConflictNotifiedSHA != "" {
-		t.Fatalf("ConflictNotifiedSHA = %q, want empty: a failed launch must never record the dedup marker", s.ConflictNotifiedSHA)
+	if s.ConflictRepairSHA != "" || s.ConflictFixAttempts != 0 {
+		t.Fatalf("a failed launch consumed repair state: %+v", s)
 	}
 }
 
