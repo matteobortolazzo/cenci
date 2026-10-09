@@ -12,6 +12,7 @@
 - No PII or stack traces in user-facing error responses.
 - Keep tickets well-scoped. 1 ticket = 1 PR.
 - Use git worktrees for all feature work. Never modify code in main worktree.
+- Keep going when a step doesn't need the user's input; put status notes in the same message as the next action. Stop and ask only when you cannot continue without the user, or before anything destructive: deleting data, force-pushing, or changing anything outside this repository.
 
 <!-- IF sandbox.enabled -->
 ## Sandbox Image

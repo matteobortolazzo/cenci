@@ -10,6 +10,7 @@ Monorepo with <N> projects. <ticket-system> for tracking. <pr-system> for pull r
 - Never expose PII or stack traces in user-facing errors.
 - Keep tickets well scoped: one ticket equals one pull request.
 - Use feature worktrees; never implement directly in the main worktree.
+- When a step does not need the user's input, keep going and put status notes in the same message as the next action. Stop and ask only when you cannot continue without the user, or before anything destructive: deleting data, force-pushing, or changing anything outside this repository.
 
 ## Projects
 
