@@ -242,7 +242,7 @@ the host (the same as passing `--no-sandbox`):
     },
     "codex": {
       "command": "codex",
-      "model": "gpt-5.6-sol",
+      "model": "gpt-6.1-sol",
       "workflows": {
         "implement": { "args": ["exec", "/cenci:implement {ticket}"] }
       }
@@ -1776,8 +1776,8 @@ cenci sandbox stop agentstack   # only containers whose name contains "agentstac
 
 # Launch or attach an interactive session
 cenci open ch                   # claude + haiku
-cenci open xs                   # codex + gpt-5.6-sol
-cenci open --agent codex --model gpt-5.6-terra --name mybox
+cenci open xs                   # codex + gpt-6.1-sol
+cenci open xa                   # codex + gpt-6-astra
 cenci open --agent opencode --name mybox
 cenci open ch -- --resume       # forward flags after -- straight to the agent CLI
 cenci open ch --dry-run -- --resume
@@ -1832,7 +1832,7 @@ period on any host that keeps launching sandboxes — set
 | Shortcut | Agent | Model |
 |---|---|---|
 | `ch` / `cs` / `co` / `cf` | claude | haiku / sonnet / opus / fable |
-| `xl` / `xt` / `xs` | codex | gpt-5.6-luna / gpt-5.6-terra / gpt-5.6-sol |
+| `xl` / `xt` / `xa` / `xs` | codex | gpt-6-luna / gpt-5.6-terra / gpt-6-astra / gpt-6.1-sol |
 
 OpenCode has no one-token shortcut yet — launch it with `--agent opencode`.
 

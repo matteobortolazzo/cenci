@@ -120,9 +120,9 @@ Without the installed plugin, point the launcher at a local checkout's assets:
 ```bash
 # Launch or attach a session (full permissions — the container is the security boundary)
 cn                    # Claude Code (`cn <args>` is exactly `cenci open <args>`)
-cn xt                 # Codex, gpt-5.6-terra
-cn ch                 # Claude, haiku (shortcuts: ch/cs/co/cf, xl/xt/xs)
-cenci open --agent codex --model gpt-5.6-sol --name mybox
+cn xa                 # Codex, gpt-6-astra
+cn ch                 # Claude, haiku (shortcuts: ch/cs/co/cf, xl/xt/xa/xs)
+cenci open --agent codex --model gpt-6.1-sol --name mybox
 cenci open --agent opencode --name mybox     # OpenCode (no cenci-side shortcuts yet)
 
 # Pass args through to the agent CLI — everything after a bare -- is forwarded verbatim
@@ -194,7 +194,7 @@ it.
 ### Choosing an agent
 
 `cenci open` launches Claude Code by default. Pass `--agent codex` (or use an
-`xl`/`xt`/`xs` shortcut) to launch Codex instead, or `--agent opencode` to launch OpenCode
+`xl`/`xt`/`xa`/`xs` shortcut) to launch Codex instead, or `--agent opencode` to launch OpenCode
 (no cenci-side shortcuts for OpenCode yet). All three agents run at full permission
 inside the container — Claude with `--dangerously-skip-permissions`, Codex with
 `--dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust`. OpenCode has no
