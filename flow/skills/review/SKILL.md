@@ -157,9 +157,6 @@ A reviewer's finding is a claim, not evidence — per Anthropic's Opus 5.5 guida
 ### Considered and discarded
 - <One line per Critical-tier finding that did not hold on verification — what was claimed + why it does not hold — or "None">
 
-### Positive Notes
-- <what was done well>
-
 ### Verdict
 <CLEAN | HAS_ISSUES | NEEDS_WORK>
 - CLEAN: No critical or important findings
