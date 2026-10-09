@@ -108,6 +108,10 @@ If multiple reviewers flag the same location:
 - Note which reviewers flagged it (adds confidence)
 - Don't report the same issue twice
 
+### Verify Critical findings
+
+A reviewer's finding is a claim, not evidence — per Anthropic's Opus 5.5 guidance for subagent fan-out, when a subagent reports back, check its evidence before you accept it. Before any **Critical**-tier finding (security CRITICAL/HIGH, code Must Fix, critical silent failure) is presented in the report — and before any fix is delegated or applied, if a caller later acts on it — read the cited file and line yourself; accept the finding only once that read confirms the finding holds against the actual code. A finding that does not hold is not reported as Critical: list it under `### Considered and discarded` in the report, one line stating what was claimed and why it does not hold, so the rejection stays visible. Important and Suggestion tiers are reported as-is; this adds no temp file or extra phase.
+
 ### Report Format
 
 ```markdown
@@ -150,8 +154,8 @@ If multiple reviewers flag the same location:
 ### Passed Checks
 - [x] <checks that passed from all reviewers>
 
-### Positive Notes
-- <what was done well>
+### Considered and discarded
+- <One line per Critical-tier finding that did not hold on verification — what was claimed + why it does not hold — or "None">
 
 ### Verdict
 <CLEAN | HAS_ISSUES | NEEDS_WORK>
