@@ -233,5 +233,3 @@ Before finalizing the plan, explicitly identify:
     - **Conventions that bind this work**: <naming, structure, error-handling, or testing conventions>
     - **Integration points**: <interfaces, seams, or contracts this change plugs into>
     - **Constraints**: <architectural decisions or critical rules that shaped the plan>
-
-Use ultrathink for complex analysis.
