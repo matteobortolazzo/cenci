@@ -1224,7 +1224,7 @@ assert_contains "${CASE_CALLS}" "claude plugin install cenci@cenci"
 assert_contains "${CASE_CALLS}" "claude plugin install cenci-watch@cenci"
 assert_contains "${CASE_CALLS}" "claude plugin install cenci-sandbox@cenci"
 assert_contains "${CASE_OUTPUT}" "cn ch|cs|co|cf"
-assert_not_contains "${CASE_OUTPUT}" "cn xl|xt|xs"
+assert_not_contains "${CASE_OUTPUT}" "cn xl|xt|xa|xs"
 [[ -L "${CASE_HOME}/.local/bin/cn" ]]
 [[ -x "${CASE_HOME}/.local/bin/cenci" ]]
 [[ -x "${CASE_HOME}/.local/bin/cn" ]]
@@ -1237,7 +1237,7 @@ run_case codex codex
 assert_contains "${CASE_CALLS}" "codex plugin add cenci@cenci"
 assert_contains "${CASE_CALLS}" "codex plugin add cenci-watch@cenci"
 assert_contains "${CASE_CALLS}" "codex plugin add cenci-sandbox@cenci"
-assert_contains "${CASE_OUTPUT}" "cn xl|xt|xs"
+assert_contains "${CASE_OUTPUT}" "cn xl|xt|xa|xs"
 assert_not_contains "${CASE_OUTPUT}" "cn ch|cs|co|cf"
 assert_not_contains "${CASE_OUTPUT}" "/cenci:configure"
 [[ -L "${CASE_HOME}/.local/bin/cn" ]]

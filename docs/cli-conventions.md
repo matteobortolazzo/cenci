@@ -33,7 +33,7 @@ cenci <verb> [subverb] [args] [flags]
   `cenci open`. `cn <args>` behaves exactly as `cenci open <args>`. No other
   alias binaries, symlinked spellings, or wrapper scripts.
 - One-token agent+model shortcuts (`ch`/`cs`/`co`/`cf` for Claude,
-  `xl`/`xt`/`xs` for Codex) are accepted only as the first argument of
+  `xl`/`xt`/`xa`/`xs` for Codex) are accepted only as the first argument of
   `cenci open`/`cn`, so they can never shadow a later flag or prompt string.
 - The shortcut tables are defined in exactly **one place in code**
   (`watch/internal/sandbox`) and documented in exactly **one place in docs**

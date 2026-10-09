@@ -22,7 +22,7 @@ import (
 // runtime in place of this process so the interactive session owns the TTY
 // and its exit code propagates.
 //
-// Grammar: an optional one-token shortcut (ch/cs/co/cf, xl/xt/xs — the
+// Grammar: an optional one-token shortcut (ch/cs/co/cf, xl/xt/xa/xs — the
 // internal/sandbox shortcut tables) may appear first; after that, only the
 // recognized flags below and an optional "--" passthrough sentinel are
 // accepted. Any other leading positional is a usage error, matching the
@@ -33,7 +33,7 @@ func runOpen(args []string) {
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
 		agent, model, ok := sandbox.ResolveShortcut(args[0])
 		if !ok {
-			fmt.Fprintf(os.Stderr, "cenci open: unrecognized shortcut %q (expected one of ch, cs, co, cf, xl, xt, xs)\n", args[0])
+			fmt.Fprintf(os.Stderr, "cenci open: unrecognized shortcut %q (expected one of ch, cs, co, cf, xl, xt, xa, xs)\n", args[0])
 			os.Exit(2)
 		}
 		shortcutToken, shortcutAgent, shortcutModel = args[0], agent, model

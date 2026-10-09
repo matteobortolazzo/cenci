@@ -41,15 +41,16 @@ var ClaudeModelShortcuts = map[string]string{
 }
 
 // CodexModelShortcuts is the source-of-truth table for the Codex one-token
-// shortcuts: xl/xt/xs select Codex with the gpt-5.6-luna/terra/sol model.
+// shortcuts: xl/xt/xa/xs select Codex with the luna/terra/astra/sol models.
 var CodexModelShortcuts = map[string]string{
-	"xl": "gpt-5.6-luna",
+	"xl": "gpt-6-luna",
 	"xt": "gpt-5.6-terra",
-	"xs": "gpt-5.6-sol",
+	"xa": "gpt-6-astra",
+	"xs": "gpt-6.1-sol",
 }
 
 // ResolveShortcut returns the agent and model a one-token shortcut (ch/cs/co/cf,
-// xl/xt/xs) implies, and whether token matched either table.
+// xl/xt/xa/xs) implies, and whether token matched either table.
 func ResolveShortcut(token string) (agent, model string, ok bool) {
 	if m, found := ClaudeModelShortcuts[token]; found {
 		return "claude", m, true

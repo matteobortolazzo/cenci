@@ -2002,7 +2002,7 @@ final_summary() {
 			say "    cn ch|cs|co|cf    # Claude in the container: haiku/sonnet/opus/fable"
 		fi
 		if [ "$HAS_CODEX" -eq 1 ]; then
-			say "    cn xl|xt|xs       # Codex in the container: luna/terra/sol"
+			say "    cn xl|xt|xa|xs    # Codex in the container: luna/terra/astra/sol"
 		fi
 	fi
 	if selected cenci && [ "$HAS_CLAUDE" -eq 1 ]; then

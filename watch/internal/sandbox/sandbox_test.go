@@ -30,9 +30,10 @@ func TestResolveShortcut_ClaudeShortcuts(t *testing.T) {
 
 func TestResolveShortcut_CodexShortcuts(t *testing.T) {
 	cases := map[string]string{
-		"xl": "gpt-5.6-luna",
+		"xl": "gpt-6-luna",
 		"xt": "gpt-5.6-terra",
-		"xs": "gpt-5.6-sol",
+		"xa": "gpt-6-astra",
+		"xs": "gpt-6.1-sol",
 	}
 	for token, wantModel := range cases {
 		agent, model, ok := ResolveShortcut(token)
