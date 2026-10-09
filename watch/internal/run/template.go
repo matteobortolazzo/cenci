@@ -19,6 +19,10 @@ import (
 // are substituted at build time.
 type WorkflowTemplate struct {
 	Args []string `json:"args"`
+	// SandboxArgs, when non-empty, replaces Args only when SandboxCommand
+	// replaces the host command. It has the same placeholder substitutions.
+	// This lets host CLI flags follow a sandbox launcher's passthrough marker.
+	SandboxArgs []string `json:"sandboxArgs,omitempty"`
 }
 
 // AgentConfig describes how to launch one agent CLI.
@@ -81,6 +85,12 @@ func builtinConfig() FileConfig {
 					"babysit":           claudeWF("babysit"),
 					"babysit-attention": claudeWF("babysit-attention"),
 					"ci-repair":         claudeWF("ci-repair"),
+					// Babysit selects Claude Opus explicitly for conflict repair,
+					// regardless of the client that originally armed supervision.
+					"merge-repair": {
+						Args:        []string{"--print", "--", "/cenci:merge-repair {ticket}"},
+						SandboxArgs: []string{"--", "--print", "/cenci:merge-repair {ticket}"},
+					},
 				},
 			},
 			"codex": {
@@ -185,14 +195,16 @@ func merge(base, over FileConfig) FileConfig {
 		}
 		// Merge per field, not whole-struct replacement: a file entry that
 		// overrides only Args (a common partial override) must not silently
-		// drop other built-in fields. Args overrides when non-empty.
-		// Deliberate behavior change: an explicit "args": [] in config.json
-		// is now treated as unset (it no longer clears the built-in args)
-		// since empty args produced an unusable launch anyway.
+		// drop other built-in fields. Args and SandboxArgs each override
+		// when non-empty; an explicit empty array is treated as unset and
+		// does not clear the corresponding built-in arguments.
 		for wf, wt := range oa.Workflows {
 			existing := ba.Workflows[wf]
 			if len(wt.Args) > 0 {
 				existing.Args = wt.Args
+			}
+			if len(wt.SandboxArgs) > 0 {
+				existing.SandboxArgs = wt.SandboxArgs
 			}
 			ba.Workflows[wf] = existing
 		}
@@ -218,8 +230,12 @@ func (fc FileConfig) BuildCommand(agent, workflow, ticket, model string, sandbox
 	}
 
 	cmd := ac.Command
+	args := tmpl.Args
 	if sandbox && ac.SandboxCommand != "" {
 		cmd = ac.SandboxCommand
+		if len(tmpl.SandboxArgs) > 0 {
+			args = tmpl.SandboxArgs
+		}
 	}
 	if cmd == "" {
 		return nil, fmt.Errorf("agent %q has no command configured", agent)
@@ -234,8 +250,8 @@ func (fc FileConfig) BuildCommand(agent, workflow, ticket, model string, sandbox
 	if agent == "codex" && codexPlanningWorkflow(workflow) && !codexApplyTarget(ticket) {
 		codexStage = "/plan\n"
 	}
-	rest := make([]string, 0, len(tmpl.Args))
-	for _, a := range tmpl.Args {
+	rest := make([]string, 0, len(args))
+	for _, a := range args {
 		if strings.Contains(a, "{model}") {
 			usedModelPlaceholder = true
 		}

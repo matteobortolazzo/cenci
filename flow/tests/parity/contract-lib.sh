@@ -96,7 +96,7 @@ _check_push_policy_text() {
             --force) bad=1 ;;
             -f) bad=1 ;;
             --no-verify) bad=1 ;;
-            --force-with-lease) saw_force_with_lease=1 ;;
+            --force-with-lease|--force-with-lease=?*) saw_force_with_lease=1 ;;
           esac
         done
         set +f

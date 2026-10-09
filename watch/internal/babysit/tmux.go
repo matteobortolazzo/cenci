@@ -48,7 +48,36 @@ func execTmux(args ...string) (stdout, stderr string, err error) {
 	cmd.Stdout = &outBuf
 	cmd.Stderr = &errBuf
 	runErr := cmd.Run()
+	if outBuf.truncated || errBuf.truncated {
+		runErr = errors.Join(runErr, errors.New("tmux output exceeded bounded cap"))
+	}
 	return outBuf.String(), errBuf.String(), runErr
+}
+
+var mergeRepairActive = defaultMergeRepairActive
+
+// defaultMergeRepairActive observes every pane in the recorded session. A
+// retained dead pane is not a worker; a live pane in the exact repair window is.
+// Unreadable or malformed output cannot safely authorize another writer.
+func defaultMergeRepairActive(session, pr string) (bool, error) {
+	stdout, stderr, err := execTmux("list-panes", "-s", "-t", "="+session, "-F", "#{window_name}\t#{pane_dead}")
+	if err != nil {
+		return false, fmt.Errorf("observe merge repair in tmux session %q: %s: %w", session, strings.TrimSpace(stderr), err)
+	}
+	if stdout == "" {
+		return false, fmt.Errorf("observe merge repair in tmux session %q: empty pane inventory", session)
+	}
+	active := false
+	for _, line := range strings.Split(strings.TrimSuffix(stdout, "\n"), "\n") {
+		fields := strings.Split(line, "\t")
+		if len(fields) != 2 || fields[0] == "" || (fields[1] != "0" && fields[1] != "1") {
+			return false, fmt.Errorf("observe merge repair in tmux session %q: malformed pane inventory", session)
+		}
+		if fields[0] == pr+"-merge-repair" && fields[1] == "0" {
+			active = true
+		}
+	}
+	return active, nil
 }
 
 var currentTmuxSession = defaultCurrentTmuxSession

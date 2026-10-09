@@ -3,6 +3,7 @@ package run
 import (
 	"bytes"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -197,6 +198,123 @@ func TestRunNoSandboxForcesHost(t *testing.T) {
 	}
 	if !strings.Contains(cmd, "claude") {
 		t.Errorf("command = %q, want host claude launcher", cmd)
+	}
+}
+
+func TestRunMergeRepairExplicitClaudeOpusOverridesDefaults(t *testing.T) {
+	for _, defaultAgent := range []string{"claude", "codex", "opencode"} {
+		for _, sandbox := range []bool{false, true} {
+			runtime := "host"
+			wantCommand := "claude --model opus --print -- '/cenci:merge-repair 42'"
+			if sandbox {
+				runtime = "sandbox"
+				wantCommand = "cenci open --model opus -- --print '/cenci:merge-repair 42'"
+			}
+			t.Run(defaultAgent+"/"+runtime, func(t *testing.T) {
+				opts := noConfigOpts(t)
+				config := `{"defaultAgent":"` + defaultAgent + `","agents":{"claude":{"model":"sonnet"}}}`
+				if err := os.WriteFile(opts.ConfigPath, []byte(config), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				opts.Workflow, opts.Ticket = "merge-repair", "42"
+				opts.Agent, opts.Model = "claude", "opus"
+				opts.SandboxSet, opts.Sandbox = true, sandbox
+				ctrl := &mockCtrl{session: "work"}
+
+				if err := Run(opts, ctrl); err != nil {
+					t.Fatalf("Run: %v", err)
+				}
+				if len(ctrl.windows) != 1 {
+					t.Fatalf("windows = %v, want one merge-repair window", ctrl.windows)
+				}
+				window := ctrl.windows[0]
+				if window.name != "42-merge-repair" || window.session != "=work" {
+					t.Errorf("window = %+v, want 42-merge-repair in =work", window)
+				}
+				if window.cmd != wantCommand {
+					t.Errorf("command = %q, want %q", window.cmd, wantCommand)
+				}
+			})
+		}
+	}
+}
+
+func TestRunMergeRepairTemplateOverridesPreserveOtherRuntime(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		override    string
+		wantHost    string
+		wantSandbox string
+	}{
+		{
+			name:        "host args only",
+			override:    `{"args":["--print","--","/repair-native {ticket}"]}`,
+			wantHost:    "claude --model opus --print -- '/repair-native 42'",
+			wantSandbox: "cenci open --model opus -- --print '/cenci:merge-repair 42'",
+		},
+		{
+			name:        "sandbox args only",
+			override:    `{"sandboxArgs":["--","--print","/repair-sandbox {ticket}"]}`,
+			wantHost:    "claude --model opus --print -- '/cenci:merge-repair 42'",
+			wantSandbox: "cenci open --model opus -- --print '/repair-sandbox 42'",
+		},
+		{
+			name:        "empty args preserve defaults",
+			override:    `{"args":[],"sandboxArgs":[]}`,
+			wantHost:    "claude --model opus --print -- '/cenci:merge-repair 42'",
+			wantSandbox: "cenci open --model opus -- --print '/cenci:merge-repair 42'",
+		},
+		{
+			name:        "sandbox model placeholder",
+			override:    `{"sandboxArgs":["--model","{model}","--","--print","/repair-sandbox {ticket}"]}`,
+			wantHost:    "claude --model opus --print -- '/cenci:merge-repair 42'",
+			wantSandbox: "cenci open --model opus -- --print '/repair-sandbox 42'",
+		},
+	} {
+		for _, sandbox := range []bool{false, true} {
+			runtime, wantCommand := "host", tc.wantHost
+			if sandbox {
+				runtime, wantCommand = "sandbox", tc.wantSandbox
+			}
+			t.Run(tc.name+"/"+runtime, func(t *testing.T) {
+				opts := noConfigOpts(t)
+				config := `{"agents":{"claude":{"workflows":{"merge-repair":` + tc.override + `}}}}`
+				if err := os.WriteFile(opts.ConfigPath, []byte(config), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				opts.Workflow, opts.Ticket = "merge-repair", "42"
+				opts.Agent, opts.Model = "claude", "opus"
+				opts.SandboxSet, opts.Sandbox = true, sandbox
+				ctrl := &mockCtrl{session: "work"}
+
+				if err := Run(opts, ctrl); err != nil {
+					t.Fatalf("Run: %v", err)
+				}
+				if len(ctrl.windows) != 1 || ctrl.windows[0].cmd != wantCommand {
+					t.Errorf("windows = %+v, want command %q", ctrl.windows, wantCommand)
+				}
+			})
+		}
+	}
+}
+
+func TestRunSandboxArgsRequireSandboxCommand(t *testing.T) {
+	opts := noConfigOpts(t)
+	config := `{"agents":{"custom":{"command":"claude","workflows":{"repair":{"args":["--print","--","/repair-host {ticket}"],"sandboxArgs":["--","--print","/repair-sandbox {ticket}"]}}}}}`
+	if err := os.WriteFile(opts.ConfigPath, []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	opts.Workflow, opts.Ticket = "repair", "42"
+	opts.Agent, opts.Model = "custom", "opus"
+	opts.SandboxSet, opts.Sandbox = true, true
+	ctrl := &mockCtrl{session: "work"}
+
+	if err := Run(opts, ctrl); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	wantCommand := "claude --model opus --print -- '/repair-host 42'"
+	if len(ctrl.windows) != 1 || ctrl.windows[0].cmd != wantCommand {
+		t.Errorf("windows = %+v, want host fallback command %q", ctrl.windows, wantCommand)
 	}
 }
 

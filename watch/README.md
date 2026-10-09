@@ -261,6 +261,13 @@ Only the built-in Claude templates ship today; Codex and opencode require a
 `config.json` entry. Until one is configured, `--agent codex` exits with a helpful "no
 launch template" error.
 
+A workflow can optionally define `sandboxArgs` to replace its host `args` when
+`sandboxCommand` is selected. Both support the same placeholders and merge
+independently; an empty array keeps the built-in value. For example, one-shot
+Claude uses host `args: ["--print", "--", "<prompt>"]`, but needs
+`sandboxArgs: ["--", "--print", "<prompt>"]` to forward print mode through
+`cenci open` rather than treating it as a launcher flag.
+
 **OpenCode:** this adapter requires OpenCode 1.18.3 or newer — `cenci-installer
 doctor` enforces this same minimum when it detects OpenCode on the host (see
 [Installer integration](#installer-integration-cenci-doctor-cenci-update-cenci-uninstall)
@@ -1321,7 +1328,7 @@ Arming (`cenci babysit <pr> --agent <agent>`, run from a host tmux pane)
 resolves the tmux session and start directory it will target — the current
 tmux session (`$TMUX_PANE`) and `git rev-parse --show-toplevel`, or the
 explicit `--session`/`--dir` flags when passed — and persists both into the
-state file *before* the first poll. Every later `ci-repair`/`babysit-attention`/
+state file *before* the first poll. Every later `ci-repair`/`merge-repair`/`babysit-attention`/
 `address-review` launch targets that recorded session explicitly, rather than
 whatever tmux pane happens to be live by the time a much-later tick actually
 fires; if the recorded session is gone, the launch fails loudly (retried next
@@ -1419,13 +1426,22 @@ distinguishable reason and is safe to retry once the rate has settled.
   `squash` is ever executed: a `merge` or `rebase` policy holds under its own
   reason instead of being validated or executed.
 
-A conflicting PR (`mergeStateStatus` `DIRTY`) is escalated by `cenci babysit`
+A conflicting PR (`mergeStateStatus` `DIRTY`) is repaired by `cenci babysit`
 independently of `automerge.enabled` — this fires whether or not automerge is on.
-The supervisor opens a `babysit-attention` window once per head SHA (a still-conflicting
-tick on the same SHA opens no second window), sets `Status = "needs-input"`, and keeps
-polling at its normal interval. It never mutates the branch or resolves the conflict
-itself; the hold clears on its own, resetting `Status` back to `"running"`, once a rebase
-is pushed and the next tick observes the PR mergeable again.
+The supervisor launches `merge-repair` with `--agent claude --model opus`, including
+when its selected client is Codex or OpenCode. Its one-shot Claude print-mode
+worker exits after completion or failure so retries cannot stall at an interactive
+prompt. Host tool permissions remain in effect. Opus fetches the actual PR base from
+origin, resolves conflicts in the PR worktree, runs the affected local gates and
+build/test/lint checks, and updates that branch with a SHA-pinned `--force-with-lease`.
+It preserves both branches' intent and stops for a concrete unresolved decision.
+The supervisor stays `running` while the repair window has a live worker and
+keeps polling, without launching duplicates even if the head changes. If the worker
+exits while conflicts remain, it retries at the same head SHA. It defers CI and
+review repair dispatch during the conflict episode. After three repair launches,
+an unresolved conflict opens a deduplicated `babysit-attention` window and sets
+`Status = "needs-input"`; polling continues so a later confirmed conflict-free state
+releases the hold and resets the budget. Unknown mergeability never resets that budget.
 
 A denied or held tick is logged once, e.g.:
 
