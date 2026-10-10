@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -50,7 +51,9 @@ type Pipeline struct {
 
 func Branch(key string) string { return "cenci/incident/" + key }
 func git(ctx context.Context, dir string, args ...string) (string, error) {
-	return command(ctx, dir, append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=", "SSH_ASKPASS_REQUIRE=never", "GIT_SSH_COMMAND=ssh -o BatchMode=yes"), nil, "git", append([]string{"-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false"}, args...)...)
+	// Git also runs fsmonitor commands while inspecting embedded repositories.
+	// Propagate this override to child Git processes handling candidate files.
+	return command(ctx, dir, append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=", "SSH_ASKPASS_REQUIRE=never", "GIT_SSH_COMMAND=ssh -o BatchMode=yes"), nil, "git", append([]string{"-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "commit.gpgsign=false"}, args...)...)
 }
 
 type publication struct {
@@ -101,8 +104,28 @@ func (p *Pipeline) Execute(ctx context.Context, s Incident, r Resource, mark fun
 		if err := json.Unmarshal(b, &receipt); err != nil {
 			return Outcome{Status: "review", Report: "Publication receipt is corrupt; inspect the stable branch and GitHub manually. No create request was sent."}, nil
 		}
+		if err := ctx.Err(); err != nil {
+			return Outcome{}, err
+		}
+		for _, path := range []string{worktree, filepath.Join(worktree, ".git")} {
+			if _, err := os.Stat(path); err != nil {
+				if os.IsNotExist(err) || errors.Is(err, syscall.ENOTDIR) {
+					return Outcome{Status: "review", Report: "Publication worktree or Git metadata is missing; inspect the verified branch and receipt manually: " + worktree}, nil
+				}
+				return Outcome{}, err
+			}
+		}
 		head, err := git(ctx, worktree, "rev-parse", "HEAD")
 		if err != nil {
+			// An interrupted probe or unavailable Git executable can recover on
+			// retry. Git rejecting retained metadata requires operator repair.
+			if checkInfrastructure(err) {
+				return Outcome{}, err
+			}
+			var exit *exec.ExitError
+			if errors.As(err, &exit) && exit.ExitCode() >= 0 {
+				return Outcome{Status: "review", Report: "Publication worktree Git metadata cannot resolve the verified head; human review required: " + excerpt(err.Error(), 4000)}, nil
+			}
 			return Outcome{}, err
 		}
 		if head != receipt.Head {
@@ -245,6 +268,7 @@ func (p *Pipeline) Execute(ctx context.Context, s Incident, r Resource, mark fun
 		return review(investigation.Report + "\nBaseline regression command failed before new tests:\n" + baseline + "\n" + err.Error())
 	}
 	req.Phase = "regression"
+	req.Evidence += "\nInvestigation:\n" + investigation.Report
 	req.Instructions += "\nWrite only a behavioral regression test that reproduces the incident. Do not modify production code."
 	regression, err := p.Agent.Run(ctx, req)
 	if err != nil {
@@ -293,7 +317,7 @@ func (p *Pipeline) Execute(ctx context.Context, s Incident, r Resource, mark fun
 		return Outcome{}, ctx.Err()
 	}
 	req.Phase = "fix"
-	req.Evidence += "\nInvestigation:\n" + investigation.Report + "\nRegression failure:\n" + red
+	req.Evidence += "\nRegression failure:\n" + red
 	req.Instructions = instructions + "\nImplement the code fix. Preserve the regression test exactly; do not weaken or remove tests."
 	fix, err := p.Agent.Run(ctx, req)
 	if err != nil {

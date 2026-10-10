@@ -49,7 +49,11 @@ func TestCrashRecoveryStopsOwnedContainersAndReportsCleanupFailure(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(b), "label=cenci.incident.owner="+a.owner()) || !strings.Contains(string(b), "rm -f abcdef012345") {
+	owner, err := os.ReadFile(filepath.Join(a.Config.StateDir, "owner-id"))
+	if err != nil || len(owner) != 24 {
+		t.Fatalf("missing persisted owner identity: %q %v", owner, err)
+	}
+	if !strings.Contains(string(b), "label=cenci.incident.owner="+string(owner)) || !strings.Contains(string(b), "rm -f abcdef012345") {
 		t.Fatalf("orphan not recovered %s", b)
 	}
 	t.Setenv("CENCI_INCIDENT_TEST_REMOVE_EXIT", "1")
