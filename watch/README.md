@@ -281,6 +281,25 @@ usage-budget headroom tracking (see [Budget headroom](#budget-headroom)
 below); and it has no one-token `open` shortcut yet (see the shortcut table
 below) — launch it with `--agent opencode`.
 
+## Local incident worker (`cenci incident`)
+
+The optional incident worker consumes Azure Monitor common-schema alerts from
+Service Bus, persists/deduplicates incident jobs, investigates with read-only
+telemetry, and produces a draft fix PR or a report for human review. It runs
+separately from the attention daemon and is disabled until explicitly configured.
+
+```bash
+cenci incident run --config /absolute/path/incidents.json
+cenci incident status --state-dir /absolute/path/incident-state
+cenci incident cancel --state-dir /absolute/path/incident-state --id INCIDENT_KEY
+```
+
+`run` stays in the foreground for a service manager to supervise. `status` prints
+persistent JSON without Azure or agent access. `cancel` stops queued/active work;
+it preserves reports, branches, and existing PRs. Merge, deployment, and production
+changes require human review. See [setup, policy, limits, and recovery](docs/incident-worker.md)
+before opting in. The initial adapter uses Claude Code in an isolated container.
+
 ## Auto-dispatch (`cenci dispatch`)
 
 Once planning is human-gated and a planned plan shows up on the board as the

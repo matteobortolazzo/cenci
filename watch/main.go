@@ -64,6 +64,8 @@ Details: docs/migrating-to-cenci.md in the cenci repo.
 		runBabysit(os.Args[2:])
 	case "dispatch":
 		runDispatch(os.Args[2:])
+	case "incident":
+		runIncident(os.Args[2:])
 	case "automerge":
 		runAutomerge(os.Args[2:])
 	case "planning":
@@ -119,6 +121,7 @@ Commands:
   run                                dispatch a workflow into a new tmux window
   babysit                            supervise an open PR until it merges or closes
   dispatch                           fleet auto-dispatch (enroll/unenroll/status/loop/plan-refined)
+  incident run|status|cancel          opt-in local Azure incident worker, durable status and cancellation
   automerge on|off|status            toggle or inspect the fleet-wide automerge kill switch (automerge.enabled)
   planning attended on|off|status    toggle or inspect the fleet-wide planning.attended narrowing switch (suppresses unattended lean-planning pickups on this machine)
   close                              close a finished/idle agent window
