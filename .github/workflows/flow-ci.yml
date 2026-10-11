@@ -102,6 +102,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+      # The checker's gate-command check runs the flow gateCommand
+      # (flow/scripts/run-checks.sh), which includes codex/hooks-launch.test.sh;
+      # under CI=true that suite fails, rather than skips, when a login shell is missing.
+      - name: Install login shells for hook launch tests
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zsh fish
       - name: Run maintain checker (changed files)
         if: ${{ github.event_name == 'pull_request' }}
         env:
