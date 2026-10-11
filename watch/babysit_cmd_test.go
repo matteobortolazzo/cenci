@@ -8,22 +8,22 @@ package main
 // isolates just the parsing/validation logic so both outcomes can be
 // asserted without a subprocess or os.Exit.
 //
-// Ticket #771: `cenci babysit <pr> --agent opencode` is rejected by a stale
+// Ticket #771: `cenci babysit <pr> --agent opencode` was rejected by a stale
 // two-agent whitelist even though every other surface (usage string,
-// flow/README.md, install-skills.sh, watch/internal/run/template.go)
-// advertises opencode support. These tests pin the three valid agents and
-// the two usage-error paths so the guard cannot silently regress back to
-// claude/codex only.
+// flow/README.md, install-skills.sh) accepted opencode. These tests pin the
+// three names the parser accepts and the two usage-error paths so the guard
+// cannot silently regress back to claude/codex only. Parsing only validates
+// the name: runBabysit refuses a disabled agent after parsing.
 
 import (
 	"testing"
 	"time"
 )
 
-// TestParseBabysitArgs_ValidAgents_OK covers the three agents the CLI
-// promises support for (usage string, README, install-skills.sh, and
-// template.go all advertise claude|codex|opencode): each must parse
-// successfully with the given PR carried through unchanged.
+// TestParseBabysitArgs_ValidAgents_OK covers the three agent names the
+// parser accepts (claude|codex|opencode): each must parse successfully with
+// the given PR carried through unchanged. The disabled-agent refusal for
+// opencode happens after parsing, in runBabysit.
 func TestParseBabysitArgs_ValidAgents_OK(t *testing.T) {
 	for _, agent := range []string{"claude", "codex", "opencode"} {
 		t.Run(agent, func(t *testing.T) {
