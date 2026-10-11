@@ -141,5 +141,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+      - name: Install login shells for hook launch tests
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zsh fish
       - name: Run flow checks
         run: bash flow/scripts/run-checks.sh

@@ -3,6 +3,7 @@ set -euo pipefail
 FLOW="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 bash "$FLOW/codex/hooks.test.sh"
+bash "$FLOW/codex/hooks-launch.test.sh"
 bash "$FLOW/codex/workflows.test.sh"
 bash "$FLOW/codex/runtime.test.sh"
 bash "$FLOW/scripts/migrate-project-core.test.sh"

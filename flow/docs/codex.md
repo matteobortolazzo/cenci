@@ -62,6 +62,34 @@ runs `codex/validate-agent-roles.sh --plain` against the installed
 `.codex/agents/`, and surfaces a report-only nudge when validation fails. It never
 rewrites files. The same validator backs `/cenci:maintain`'s `agent-roles` check.
 
+## Hook launch failures
+
+Codex runs every hook as `$SHELL -lc "<command>"` with `${PLUGIN_ROOT}` substituted into the
+command text. When a guard or handler cannot start, the exit code and stderr tell you why.
+`codex/hooks-launch.test.sh` runs every handler in `codex/hooks.json` through each launch
+failure below and fails if this table lacks a row for any exit code the fixtures observe.
+
+"What Codex does" is derived from the codex-rs source (exit 2 with non-empty stderr is
+reported as Blocked; any other non-zero exit is reported as Failed and the tool call is not
+blocked). It has not been confirmed against a native Codex binary; that confirmation belongs
+to #1212. The login-shell raw-form code for fish is recorded by the suite when fish is
+installed; no fish row is listed because it has not been observed.
+
+| Exit code | Stderr signature | Cause | Classification | What Codex does | Fix |
+|---|---|---|---|---|---|
+| 0 | none | The handler ran and allowed the call, or a lifecycle handler returned its payload. | allowed | Continues; lifecycle stdout is used as the hook output. | None needed. |
+| 0 | `hook-output.sh: jq not found on PATH; emitting no additionalContext.` | `jq` is missing from the login-shell PATH; `hook-output.sh` degrades to an empty payload. | allowed (degraded: no additionalContext) | Continues, but the SessionStart, PreCompact, or Stop context is not injected. | Install `jq` where a login shell finds it (`~/.profile`, not only `~/.bashrc`). |
+| 2 | Policy marker such as `Refusing to write` or `targets the main worktree` | A guard ran and refused the call by policy. | denied | Blocked: the tool call does not run and stderr is shown as the reason. | Make the change from a worktree or a non-sensitive path; this is the guard working. |
+| 2 | `BLOCKED: jq is required ...` or `... requires awk ...` | A required tool is missing from the login-shell PATH; the guard fails closed. | denied | Blocked: every tool call the guard matches is refused until the tool is available. | Install `jq` and `awk` where a login shell finds them. |
+| 2 | empty | `${PLUGIN_ROOT}` was substituted into the path but not exported, so `hook-output.sh` aborts without a reason. | handler not running | Failed (exit 2 without stderr is not Blocked); the tool call is not blocked. | Run the hook from a plugin-bundled source; config-layer hook files do not get `PLUGIN_ROOT` exported. |
+| 126 | `Permission denied` naming the full script path | The script lost its execute bit (a lossy copy, archive, or checkout). | guard not running for PreToolUse guards; handler not running otherwise | Failed; the tool call is not blocked, so a guard that should refuse does not. | Restore the bit with `chmod +x` or reinstall the plugin. |
+| 127 | `No such file or directory` for a path starting `/hooks/` or `/codex/` | `PLUGIN_ROOT` is unset or empty and the command was not substituted, or hooks were copied into a config-layer file. | guard not running for PreToolUse guards; handler not running otherwise | Failed; the tool call is not blocked. | Use the plugin-bundled hooks only; never copy `codex/hooks.json` entries into `config.toml` or `hooks.json` of a repo. |
+| 127 | `No such file or directory` naming the full plugin path | The script is missing: a broken or partial plugin install. | guard not running for PreToolUse guards; handler not running otherwise | Failed; the tool call is not blocked. | Reinstall with `codex plugin add cenci@cenci`. |
+| 127 | `/usr/bin/env: 'bash': No such file or directory` | `bash` is missing from the login-shell PATH; only the bash-shebang handlers (`check-pending-plans.sh`, `maintenance-reminder.sh`) are affected. The `#!/bin/sh` guards and `hook-output.sh` still run. | handler not running | Failed; the tool call is not blocked and the SessionStart reminders are skipped. | Put `bash` on the PATH a login shell sees. |
+
+Review changed hooks with `/hooks`, and rerun `bash flow/codex/hooks-launch.test.sh` after
+changing `codex/hooks.json` or any script it names.
+
 ## Attention behavior
 
 Cenci `need-input` renders a red/dim foreground `!`. A red tmux background without `!`
