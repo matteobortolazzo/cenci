@@ -17,7 +17,12 @@ for interpreter in sh bash; do
 done
 
 # Simulate a legacy install: removal still cleans only our own links.
-DEST="$TEST_HOME/.config/opencode/skills"
+# Pin XDG_CONFIG_HOME as well as HOME: install-skills.sh prefers
+# XDG_CONFIG_HOME, and CI runners export it, so an unpinned value would point
+# removal at the runner's real config dir instead of this fixture.
+export HOME="$TEST_HOME"
+export XDG_CONFIG_HOME="$TEST_HOME/.config"
+DEST="$XDG_CONFIG_HOME/opencode/skills"
 mkdir -p "$DEST/stack-go"
 ln -s "$FLOW/skills/testing" "$DEST/testing"
 ln -s "$TEST_HOME/foreign-target" "$DEST/babysit"
