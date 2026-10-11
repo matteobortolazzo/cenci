@@ -365,8 +365,13 @@ func TestDryRun_NoSideEffects_NoMutatingRuntimeCallsAndExecAttachNeverCalled(t *
 		if len(fields) == 0 {
 			continue
 		}
-		if verb := fields[0]; verb != "ps" && verb != "inspect" {
-			t.Errorf("DryRun issued an unexpected runtime call %q; want only read-only ps/inspect probes, calls:\n%s", line, strings.Join(lines, "\n"))
+		// `info` is the read-only host-memory query the create branch makes to
+		// derive the default memory limit (#1216); any other `info` form is
+		// still unexpected.
+		verb := fields[0]
+		isMemTotalQuery := verb == "info" && strings.Contains(line, "MemTotal")
+		if verb != "ps" && verb != "inspect" && !isMemTotalQuery {
+			t.Errorf("DryRun issued an unexpected runtime call %q; want only read-only ps/inspect/info-MemTotal probes, calls:\n%s", line, strings.Join(lines, "\n"))
 		}
 	}
 }
@@ -829,12 +834,17 @@ func TestDryRun_Dind_SuccessfulPreviewShowsSysboxRuntimeWithNoSideEffects(t *tes
 		t.Errorf("CreateArgv missing \"--runtime=sysbox-runc\", got:\n%s", joined)
 	}
 
-	// Two invocations: the sysbox-runc registration probe (dindPreflight) and
-	// the read-only containerRunning disposition probe planArgvs now always
-	// performs (#620) -- both reads, zero container/volume side effects.
+	// Three invocations: the sysbox-runc registration probe (dindPreflight),
+	// the read-only containerRunning disposition probe planArgvs always
+	// performs (#620), and -- since the create branch derives the default
+	// memory limit from the runtime's total host memory (#1216) -- the
+	// read-only MemTotal query. All reads, zero container/volume side effects.
 	lines := readCallLog(t, callLog)
-	if len(lines) != 2 || !strings.HasPrefix(lines[0], "info") || !strings.HasPrefix(lines[1], "ps ") {
-		t.Errorf("expected exactly the sysbox-runc registration probe followed by the read-only containerRunning probe, want zero container/volume side effects; got calls:\n%s", strings.Join(lines, "\n"))
+	if len(lines) != 3 ||
+		!strings.HasPrefix(lines[0], "info") || strings.Contains(lines[0], "MemTotal") ||
+		!strings.HasPrefix(lines[1], "ps ") ||
+		!strings.HasPrefix(lines[2], "info") || !strings.Contains(lines[2], "MemTotal") {
+		t.Errorf("expected exactly the sysbox-runc registration probe, the read-only containerRunning probe, then the MemTotal query, want zero container/volume side effects; got calls:\n%s", strings.Join(lines, "\n"))
 	}
 }
 

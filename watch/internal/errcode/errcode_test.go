@@ -327,3 +327,85 @@ func TestSandboxSocketUnwiredCode_HintsNameContainerRecreation(t *testing.T) {
 		t.Errorf("Lookup(%s).Hints = %#v; want a hint naming `cenci sandbox stop <name>` (container recreation)", SandboxSocketUnwired, entry.Hints)
 	}
 }
+
+// TestSandboxLimitsCodes_ExistAndAreRegistered pins the three resource-limit
+// codes (#1216, AC11): their literal values, the documented format, a
+// complete registry entry each (renderFinding prints Hints verbatim, so an
+// entry without them degrades diagnose output), and pairwise distinctness
+// from every other registered code.
+func TestSandboxLimitsCodes_ExistAndAreRegistered(t *testing.T) {
+	cases := []struct {
+		name string
+		code Code
+		want string
+	}{
+		{"host memory unreadable", SandboxLimitsHostMemoryUnreadable, "CENCI-SANDBOX-LIMITS-001"},
+		{"create rejected because of a limit", SandboxLimitsCreateRejected, "CENCI-SANDBOX-LIMITS-002"},
+		{"cgroup OOM kills", SandboxLimitsOOMKills, "CENCI-SANDBOX-LIMITS-003"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if string(tc.code) != tc.want {
+				t.Fatalf("code = %q, want %q", tc.code, tc.want)
+			}
+			if !codeFormat.MatchString(string(tc.code)) {
+				t.Errorf("code %q does not match format %s", tc.code, codeFormat.String())
+			}
+			entry, ok := Lookup(tc.code)
+			if !ok {
+				t.Fatalf("Lookup(%s) = _, false; want a registered entry", tc.code)
+			}
+			if entry.Message == "" {
+				t.Errorf("Lookup(%s).Message is empty", tc.code)
+			}
+			if len(entry.Causes) == 0 {
+				t.Errorf("Lookup(%s).Causes is empty", tc.code)
+			}
+			if len(entry.Hints) == 0 {
+				t.Errorf("Lookup(%s).Hints is empty", tc.code)
+			}
+			inAllCodes := false
+			for _, c := range AllCodes() {
+				if c == tc.code {
+					inAllCodes = true
+				}
+			}
+			if !inAllCodes {
+				t.Errorf("AllCodes() does not include %s; it must be added to allCodes in errcode.go", tc.code)
+			}
+		})
+	}
+
+	limits := map[Code]bool{
+		SandboxLimitsHostMemoryUnreadable: true,
+		SandboxLimitsCreateRejected:       true,
+		SandboxLimitsOOMKills:             true,
+	}
+	if len(limits) != 3 {
+		t.Fatalf("the three LIMITS codes must be pairwise distinct, got %d distinct values", len(limits))
+	}
+	for _, other := range AllCodes() {
+		if limits[other] {
+			continue
+		}
+		if strings.HasPrefix(string(other), "CENCI-SANDBOX-LIMITS-") {
+			t.Errorf("unexpected extra LIMITS code %s registered", other)
+		}
+	}
+}
+
+// TestSandboxLimitsCreateRejectedHints_NameBothOptOutKeys pins that the
+// create-rejected entry points at the two documented escape hatches, since
+// the diagnose/launch output reuses these hints verbatim (AC6).
+func TestSandboxLimitsCreateRejectedHints_NameBothOptOutKeys(t *testing.T) {
+	entry, ok := Lookup(SandboxLimitsCreateRejected)
+	if !ok {
+		t.Fatalf("Lookup(%s) = _, false; want true", SandboxLimitsCreateRejected)
+	}
+	joined := strings.Join(entry.Hints, "\n")
+	for _, want := range []string{"memoryLimit", "pidsLimit"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("Lookup(%s).Hints = %#v; want a hint naming the %q opt-out key", SandboxLimitsCreateRejected, entry.Hints, want)
+		}
+	}
+}

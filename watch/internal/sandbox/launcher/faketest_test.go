@@ -167,6 +167,49 @@ import (
 //	                     writeScriptedRuntime (#493 keep-in-sync note).
 //	FAKE_INSPECT_IMAGE_EXIT — the per-container combined probe's exit code
 //	                     (default 0); nonzero simulates that probe failing.
+//	FAKE_INFO_MEMTOTAL — (#1216) `info --format ...` stdout when the format
+//	                     names MemTotal ({{.MemTotal}} on docker,
+//	                     {{.Host.MemTotal}} on podman), i.e. the runtime's
+//	                     total host memory in bytes; defaults to
+//	                     "17179869184" (16 GiB, so the default memory limit
+//	                     resolves to 50% = 8192 MiB). Told apart from the
+//	                     sysbox-registration probe above by the `MemTotal`
+//	                     format-string token (checked first, so the generic
+//	                     FAKE_INFO_RUNTIMES answer never shadows it).
+//	                     FAKE_INFO_MEMTOTAL_EXIT (default 0) is that probe's
+//	                     own exit code — deliberately NOT FAKE_INFO_EXIT, so
+//	                     a test can fail just the memory query without also
+//	                     failing dind's sysbox-registration probe. Must stay
+//	                     byte-parallel with sandbox_open_test.go's
+//	                     writeScriptedRuntime (#493 keep-in-sync note).
+//	FAKE_CONTAINER_LIMITS — (#1216) `inspect --format ...` stdout for the
+//	                     container-limits probe (the attach-path drift check
+//	                     and Diagnose's limits line), told apart by the
+//	                     `.HostConfig.PidsLimit` format-string token (checked
+//	                     before every broader inspect arm). The value is
+//	                     "<memory bytes>|<memory+swap bytes>|<pids limit>"
+//	                     verbatim, the raw .HostConfig.Memory,
+//	                     .HostConfig.MemorySwap and .HostConfig.PidsLimit
+//	                     values — which for an unlimited container are "0"
+//	                     (or "-1" on podman) and may be "<nil>" for pids.
+//	                     Defaults to "8589934592|8589934592|4096" (an 8 GiB,
+//	                     no-swap, 4096-pid container: what a default launch
+//	                     creates against the FAKE_INFO_MEMTOTAL default, so
+//	                     existing attach/diagnose tests stay drift-free).
+//	                     FAKE_CONTAINER_LIMITS_EXIT (default 0) is that
+//	                     probe's exit code. Must stay byte-parallel with
+//	                     sandbox_open_test.go's writeScriptedRuntime (#493).
+//	FAKE_MEMORY_EVENTS — (#1216) `exec <name> /bin/cat
+//	                     /sys/fs/cgroup/memory.events` stdout (Diagnose's
+//	                     cgroup OOM-kill count), told apart by the
+//	                     `memory.events` token alone (not the cat path, so the
+//	                     fake survives a change of cat binary). Defaults to
+//	                     "oom 0\noom_kill 0\n". FAKE_MEMORY_EVENTS_EXIT
+//	                     (default 0) is that exec's exit code — nonzero
+//	                     simulates a container that is not running or a
+//	                     cgroup file that cannot be read. Must stay
+//	                     byte-parallel with sandbox_open_test.go's
+//	                     writeScriptedRuntime (#493).
 //
 // Every FAKE_<VERB>[_EXIT] var above also has a FAKE_<VERB>_DOCKER/
 // FAKE_<VERB>_PODMAN (or FAKE_<VERB>_EXIT_DOCKER/FAKE_<VERB>_EXIT_PODMAN)
@@ -271,7 +314,12 @@ volume)
   ls) fv VOLUMES ""; exit "$(fe VOLUME_LS)" ;;
   esac
   ;;
-info) fv INFO_RUNTIMES "{}"; exit "$(fe INFO)" ;;
+info)
+  case "$*" in
+  *MemTotal*) fv INFO_MEMTOTAL "17179869184"; printf '\n'; exit "$(fe INFO_MEMTOTAL)" ;;
+  esac
+  fv INFO_RUNTIMES "{}"; exit "$(fe INFO)"
+  ;;
 run)
   case "$*" in
   *'/bin/cat'*)
@@ -283,8 +331,14 @@ run)
   esac
   ;;
 logs) fv LOGS ""; exit "$(fe LOGS)" ;;
+exec)
+  case "$*" in
+  *'memory.events'*) fvb MEMORY_EVENTS "oom 0\noom_kill 0\n"; exit "$(fe MEMORY_EVENTS)" ;;
+  esac
+  ;;
 inspect)
   case "$*" in
+  *'.HostConfig.PidsLimit'*) fv CONTAINER_LIMITS "8589934592|8589934592|4096"; printf '\n'; exit "$(fe CONTAINER_LIMITS)" ;;
   *'.HostConfig.NetworkMode'*) fvb OBSERVED_POSTURE "cenci-sandbox:latest|bridge|runc||\n\n"; exit "$(fe OBSERVED_POSTURE)" ;;
   *'{{.Image}}'*)
     name="$4"

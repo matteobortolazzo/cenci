@@ -26,7 +26,7 @@ func TestCreateFailureError_DindOCIFailureNamesSysboxAndEscapeHatch(t *testing.T
 	e := &Engine{Runtime: "docker"}
 	runErr := errors.New("exit status 125")
 
-	got := e.createFailureError(true, ociCreateStderr, runErr)
+	got := e.createFailureError(true, false, ociCreateStderr, runErr)
 	if got == nil {
 		t.Fatal("createFailureError returned nil for a failed dind create; want an error")
 	}
@@ -58,7 +58,7 @@ func TestCreateFailureError_DindNonOCIFailureKeepsPlainWording(t *testing.T) {
 	stderr := `docker: Error response from daemon: invalid mount config for type "bind": ` +
 		`bind source path does not exist: /nope`
 
-	got := e.createFailureError(true, stderr, runErr)
+	got := e.createFailureError(true, false, stderr, runErr)
 	if got == nil {
 		t.Fatal("createFailureError returned nil for a failed create; want an error")
 	}
@@ -78,7 +78,7 @@ func TestCreateFailureError_NonDindKeepsPlainWording(t *testing.T) {
 	e := &Engine{Runtime: "docker"}
 	runErr := errors.New("exit status 125")
 
-	got := e.createFailureError(false, ociCreateStderr, runErr)
+	got := e.createFailureError(false, false, ociCreateStderr, runErr)
 	if got == nil {
 		t.Fatal("createFailureError returned nil for a failed create; want an error")
 	}
@@ -95,7 +95,7 @@ func TestCreateFailureError_NonDindKeepsPlainWording(t *testing.T) {
 // matching the pre-#1077 "%s run: %w" contract.
 func TestCreateFailureError_PodmanRuntimeNamedInPlainWording(t *testing.T) {
 	e := &Engine{Runtime: "podman"}
-	got := e.createFailureError(false, "", errors.New("exit status 1"))
+	got := e.createFailureError(false, false, "", errors.New("exit status 1"))
 	if want := "podman run: exit status 1"; got.Error() != want {
 		t.Errorf("createFailureError = %q, want %q", got.Error(), want)
 	}
@@ -162,7 +162,7 @@ func TestCapturedStderr_ClassifiesAcrossChunkBoundaries(t *testing.T) {
 	}
 
 	e := &Engine{Runtime: "docker"}
-	got := e.createFailureError(true, c.String(), errors.New("exit status 125"))
+	got := e.createFailureError(true, false, c.String(), errors.New("exit status 125"))
 	if !strings.Contains(got.Error(), "sysbox-runc") {
 		t.Errorf("a marker split across writes was not classified; got:\n%s", got.Error())
 	}
@@ -195,4 +195,207 @@ func TestDindRuntimeCreateFailed_IsRegistered(t *testing.T) {
 	if len(entry.Hints) == 0 {
 		t.Error("registered entry has no Hints")
 	}
+}
+
+// -- ticket #1216: limit-rejection classification (AC6) ----------------------
+//
+// Real runtime create failures, kept as literals (not substrings of the
+// matcher's own markers) so a matcher loosened to match nothing real still
+// fails these tests. The runc/moby shapes are the verbatim form Docker
+// streams when a memory or pids cgroup controller is not delegated to the
+// engine; the crun shape is podman's.
+const (
+	runcMemoryMaxStderr = `docker: Error response from daemon: failed to create task for container: ` +
+		`failed to create shim task: OCI runtime create failed: runc create failed: unable to start container process: ` +
+		`error during container init: error setting cgroup config for procHooks process: ` +
+		`openat2 /sys/fs/cgroup/docker/0d3c1f/memory.max: no such file or directory: unknown`
+	runcMemorySwapMaxStderr = `docker: Error response from daemon: failed to create task for container: ` +
+		`failed to create shim task: OCI runtime create failed: runc create failed: unable to start container process: ` +
+		`error during container init: error setting cgroup config for procHooks process: ` +
+		`openat2 /sys/fs/cgroup/docker/0d3c1f/memory.swap.max: no such file or directory: unknown`
+	runcPidsMaxStderr = `docker: Error response from daemon: failed to create task for container: ` +
+		`failed to create shim task: OCI runtime create failed: runc create failed: unable to start container process: ` +
+		`error during container init: error setting cgroup config for procHooks process: ` +
+		`openat2 /sys/fs/cgroup/docker/0d3c1f/pids.max: no such file or directory: unknown`
+	runcCgroupV1MemoryStderr = `docker: Error response from daemon: failed to create task for container: ` +
+		`failed to create shim task: OCI runtime create failed: runc create failed: unable to start container process: ` +
+		`error during container init: error setting cgroup config for procHooks process: ` +
+		`open /sys/fs/cgroup/memory/docker/0d3c1f/memory.limit_in_bytes: no such file or directory: unknown`
+	crunPidsControllerStderr   = "Error: crun: the requested cgroup controller `pids` is not available: OCI runtime error"
+	crunMemoryControllerStderr = "Error: crun: the requested cgroup controller `memory` is not available: OCI runtime error"
+	mobyMinimumMemoryStderr    = `docker: Error response from daemon: Minimum memory limit allowed is 6MB.`
+)
+
+// assertLimitsRejectedError asserts the LIMITS-002 error contract shared by
+// every limit-rejection case: the wrapped run error is preserved, the code is
+// present, both opt-out keys are named, and the sysbox explanation is absent.
+func assertLimitsRejectedError(t *testing.T, got, runErr error) {
+	t.Helper()
+	if got == nil {
+		t.Fatal("createFailureError returned nil for a failed create; want an error")
+	}
+	msg := got.Error()
+	for _, want := range []string{
+		string(errcode.SandboxLimitsCreateRejected),
+		`"memoryLimit": "none"`,
+		`"pidsLimit": 0`,
+		"docker run:",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("limit-rejection error missing %q; got:\n%s", want, msg)
+		}
+	}
+	if !errors.Is(got, runErr) {
+		t.Errorf("limit-rejection error dropped the underlying error from the %%w chain; got:\n%s", msg)
+	}
+	if strings.Contains(msg, string(errcode.SandboxDindRuntimeCreateFailed)) || strings.Contains(msg, "sysbox-runc") {
+		t.Errorf("limit-rejection error must not carry the DinD sysbox explanation; got:\n%s", msg)
+	}
+}
+
+// TestCreateFailureError_LimitRejection_NamesCauseCodeAndBothOptOuts is AC6:
+// a create the runtime rejected because of a sent limit flag maps to
+// CENCI-SANDBOX-LIMITS-002 naming the cause and both opt-out keys.
+func TestCreateFailureError_LimitRejection_NamesCauseCodeAndBothOptOuts(t *testing.T) {
+	cases := []struct {
+		name   string
+		stderr string
+		// cause is the verbatim runtime marker the error must quote; empty
+		// where the marker is a free-form sentence not worth pinning.
+		cause string
+	}{
+		{"runc cgroup v2 memory.max", runcMemoryMaxStderr, "memory.max"},
+		{"runc cgroup v2 memory.swap.max", runcMemorySwapMaxStderr, "memory.swap.max"},
+		{"runc cgroup v2 pids.max", runcPidsMaxStderr, "pids.max"},
+		{"runc cgroup v1 memory.limit_in_bytes", runcCgroupV1MemoryStderr, "memory.limit_in_bytes"},
+		{"crun pids controller not available", crunPidsControllerStderr, ""},
+		{"crun memory controller not available", crunMemoryControllerStderr, ""},
+		{"moby minimum memory limit", mobyMinimumMemoryStderr, "Minimum memory limit"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := &Engine{Runtime: "docker"}
+			runErr := errors.New("exit status 125")
+
+			got := e.createFailureError(false, true, tc.stderr, runErr)
+
+			assertLimitsRejectedError(t, got, runErr)
+			if tc.cause != "" && !strings.Contains(got.Error(), tc.cause) {
+				t.Errorf("limit-rejection error does not name the cause %q; got:\n%s", tc.cause, got.Error())
+			}
+		})
+	}
+}
+
+// TestCreateFailureError_LimitRejection_WinsOverDindOCIFailure pins the
+// marker precedence: runc's cgroup errors arrive wrapped in the same "OCI
+// runtime create failed" text the DinD mapping keys on, so with both dind and
+// limits on, the more specific limit marker must win -- blaming sysbox for a
+// missing memory controller would send the user to the wrong fix.
+func TestCreateFailureError_LimitRejection_WinsOverDindOCIFailure(t *testing.T) {
+	e := &Engine{Runtime: "docker"}
+	runErr := errors.New("exit status 125")
+
+	got := e.createFailureError(true, true, runcMemoryMaxStderr, runErr)
+
+	assertLimitsRejectedError(t, got, runErr)
+}
+
+// TestCreateFailureError_DindOCIFailureWithoutLimitMarkers_KeepsDind003 is
+// the regression for the narrowing: with limits on, a dind OCI failure that
+// carries no limit marker (the #1077 time-namespace case) keeps its
+// DIND-003 explanation, never LIMITS-002.
+func TestCreateFailureError_DindOCIFailureWithoutLimitMarkers_KeepsDind003(t *testing.T) {
+	e := &Engine{Runtime: "docker"}
+	runErr := errors.New("exit status 125")
+
+	got := e.createFailureError(true, true, ociCreateStderr, runErr)
+	if got == nil {
+		t.Fatal("createFailureError returned nil for a failed dind create; want an error")
+	}
+	msg := got.Error()
+	if !strings.Contains(msg, string(errcode.SandboxDindRuntimeCreateFailed)) {
+		t.Errorf("a dind OCI failure without limit markers lost its DIND-003 explanation; got:\n%s", msg)
+	}
+	if strings.Contains(msg, string(errcode.SandboxLimitsCreateRejected)) {
+		t.Errorf("a dind OCI failure without limit markers was misclassified as LIMITS-002; got:\n%s", msg)
+	}
+}
+
+// TestCreateFailureError_LimitsOff_NeverYieldsLimits002 pins that the
+// classification is gated on a limit flag actually having been sent: with
+// both opt-outs active no limit flag was on the argv, so even a stderr full
+// of limit markers cannot be the limits' doing and keeps the original path.
+func TestCreateFailureError_LimitsOff_NeverYieldsLimits002(t *testing.T) {
+	runErr := errors.New("exit status 125")
+	for name, stderr := range map[string]string{
+		"runc memory.max":  runcMemoryMaxStderr,
+		"runc pids.max":    runcPidsMaxStderr,
+		"crun pids":        crunPidsControllerStderr,
+		"moby minimum mem": mobyMinimumMemoryStderr,
+	} {
+		t.Run("non-dind "+name, func(t *testing.T) {
+			e := &Engine{Runtime: "docker"}
+			got := e.createFailureError(false, false, stderr, runErr)
+			if want := "docker run: exit status 125"; got.Error() != want {
+				t.Errorf("createFailureError(limitsOn=false) = %q, want the plain wording %q", got.Error(), want)
+			}
+		})
+	}
+
+	t.Run("dind keeps DIND-003 not LIMITS-002", func(t *testing.T) {
+		e := &Engine{Runtime: "docker"}
+		got := e.createFailureError(true, false, runcMemoryMaxStderr, runErr)
+		msg := got.Error()
+		if strings.Contains(msg, string(errcode.SandboxLimitsCreateRejected)) {
+			t.Errorf("createFailureError(limitsOn=false) yielded LIMITS-002; got:\n%s", msg)
+		}
+		if !strings.Contains(msg, string(errcode.SandboxDindRuntimeCreateFailed)) {
+			t.Errorf("createFailureError(dindOn, limitsOn=false) on an OCI failure lost DIND-003; got:\n%s", msg)
+		}
+	})
+}
+
+// TestCreateFailureError_NonLimitFailureWithLimitsOn_KeepsPlainWording is the
+// match-miss regression (watch/AGENTS.md critical rule): the limit markers
+// are narrow, so an unrelated create failure -- including ones whose text
+// merely mentions memory or a different cgroup controller -- keeps its
+// visible plain "<runtime> run: <err>" wording.
+func TestCreateFailureError_NonLimitFailureWithLimitsOn_KeepsPlainWording(t *testing.T) {
+	cases := []struct {
+		name   string
+		stderr string
+	}{
+		{"name conflict", `docker: Error response from daemon: Conflict. The container name "/claude-cenci-repo" is already in use by container "0d3c1f".`},
+		{"bad bind mount", `docker: Error response from daemon: invalid mount config for type "bind": bind source path does not exist: /nope`},
+		{"fork cannot allocate memory", `docker: Error response from daemon: failed to create task for container: fork/exec /usr/bin/runc: cannot allocate memory`},
+		{"different cgroup controller", "Error: crun: the requested cgroup controller `cpuset` is not available: OCI runtime error"},
+		{"empty stderr", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := &Engine{Runtime: "docker"}
+			got := e.createFailureError(false, true, tc.stderr, errors.New("exit status 125"))
+			if want := "docker run: exit status 125"; got.Error() != want {
+				t.Errorf("createFailureError = %q, want the plain wording %q", got.Error(), want)
+			}
+		})
+	}
+}
+
+// TestCreateFailureError_LimitMarkerSplitAcrossWrites_Classifies mirrors the
+// dind chunk-boundary regression for the limit markers: the retained prefix
+// is one contiguous buffer, so a marker split across two Write calls still
+// classifies.
+func TestCreateFailureError_LimitMarkerSplitAcrossWrites_Classifies(t *testing.T) {
+	c := newCapturedStderr(io.Discard)
+	for _, chunk := range []string{"openat2 /sys/fs/cgroup/docker/0d3c1f/mem", "ory.max: no such file or directory: unknown"} {
+		if _, err := c.Write([]byte(chunk)); err != nil {
+			t.Fatalf("Write returned error: %v", err)
+		}
+	}
+
+	e := &Engine{Runtime: "docker"}
+	runErr := errors.New("exit status 125")
+	assertLimitsRejectedError(t, e.createFailureError(false, true, c.String(), runErr), runErr)
 }

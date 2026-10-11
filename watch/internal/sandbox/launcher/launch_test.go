@@ -78,7 +78,7 @@ func TestAssembleRunArgs_NoCreationTimeTmuxPane(t *testing.T) {
 		WorkspaceScope:    "repo",
 	}
 
-	args, err := e.assembleRunArgs("claude", "/usr/local/bin/cenci", "/run/user/1000/cenci", true, scope, Options{Agent: "claude"}, home, false, false, DefaultSandboxPlugins())
+	args, err := e.assembleRunArgs("claude", "/usr/local/bin/cenci", "/run/user/1000/cenci", true, scope, Options{Agent: "claude"}, home, false, false, DefaultSandboxPlugins(), nil)
 	if err != nil {
 		t.Fatalf("assembleRunArgs: %v", err)
 	}
@@ -88,6 +88,95 @@ func TestAssembleRunArgs_NoCreationTimeTmuxPane(t *testing.T) {
 			t.Errorf("container-creation args must not carry TMUX_PANE (goes stale on the shared container, #356); got %q in:\n%s", a, strings.Join(args, " "))
 		}
 	}
+}
+
+// -- ticket #1216: resource-limit flags in the assembled create argv --------
+
+// limitsTestScope is a minimal repo scope with a dind volume, shared by the
+// #1216 argv-composition tests below.
+func limitsTestScope(t *testing.T) Scope {
+	t.Helper()
+	return Scope{
+		ContainerName:     "claude-cenci-repo",
+		VolumeName:        "claude-cenci-repo-home",
+		DindVolumeName:    "claude-cenci-dind-repo",
+		Hostname:          "cenci-repo",
+		Image:             "claude-cenci-repo:latest",
+		WorkspaceBindHost: t.TempDir(),
+		Workdir:           "/workspace",
+		WorkspaceScope:    "repo",
+	}
+}
+
+// TestAssembleRunArgs_LimitArgsAreCarriedVerbatim pins that assembleRunArgs
+// stays pure: the limit flags it is handed appear in the create argv
+// unchanged, and handing it none (a launch with both opt-outs) adds no limit
+// flag at all.
+func TestAssembleRunArgs_LimitArgsAreCarriedVerbatim(t *testing.T) {
+	e := &Engine{Runtime: "docker", Stderr: &bytes.Buffer{}}
+	scope := limitsTestScope(t)
+	limitArgs := []string{"--memory", "8192m", "--memory-swap", "8192m", "--pids-limit", "4096"}
+
+	with, err := e.assembleRunArgs("claude", "/usr/local/bin/cenci", "/run/user/1000/cenci", true, scope, Options{Agent: "claude"}, t.TempDir(), false, false, DefaultSandboxPlugins(), limitArgs)
+	if err != nil {
+		t.Fatalf("assembleRunArgs with limits: %v", err)
+	}
+	if !containsSubsequence(with, limitArgs) {
+		t.Errorf("assembleRunArgs dropped or reordered the limit flags %v; got:\n%s", limitArgs, strings.Join(with, " "))
+	}
+
+	without, err := e.assembleRunArgs("claude", "/usr/local/bin/cenci", "/run/user/1000/cenci", true, scope, Options{Agent: "claude"}, t.TempDir(), false, false, DefaultSandboxPlugins(), nil)
+	if err != nil {
+		t.Fatalf("assembleRunArgs without limits: %v", err)
+	}
+	for _, flag := range []string{"--memory", "--memory-swap", "--pids-limit"} {
+		if slices.Contains(without, flag) {
+			t.Errorf("assembleRunArgs emitted %s although no limit flags were passed; got:\n%s", flag, strings.Join(without, " "))
+		}
+	}
+}
+
+// TestAssembleRunArgs_Dind_LimitFlagsAlongsideSysboxRuntime is AC8: limits
+// also apply in DinD mode, so the limit flags and --runtime=sysbox-runc must
+// be in the same create argv, with sysbox-runc still the last flag before the
+// image + command.
+func TestAssembleRunArgs_Dind_LimitFlagsAlongsideSysboxRuntime(t *testing.T) {
+	e := &Engine{Runtime: "docker", Stderr: &bytes.Buffer{}}
+	scope := limitsTestScope(t)
+	limitArgs := []string{"--memory", "8192m", "--memory-swap", "8192m", "--pids-limit", "4096"}
+
+	args, err := e.assembleRunArgs("claude", "/usr/local/bin/cenci", "/run/user/1000/cenci", true, scope, Options{Agent: "claude"}, t.TempDir(), true, false, DefaultSandboxPlugins(), limitArgs)
+	if err != nil {
+		t.Fatalf("assembleRunArgs (dind): %v", err)
+	}
+
+	if !containsSubsequence(args, limitArgs) {
+		t.Errorf("dind create argv is missing the limit flags %v; got:\n%s", limitArgs, strings.Join(args, " "))
+	}
+	runtimeIdx := slices.Index(args, "--runtime=sysbox-runc")
+	if runtimeIdx < 0 {
+		t.Fatalf("dind create argv is missing --runtime=sysbox-runc; got:\n%s", strings.Join(args, " "))
+	}
+	if runtimeIdx != len(args)-1 {
+		t.Errorf("--runtime=sysbox-runc must stay the last assembled flag (before the image + command); got:\n%s", strings.Join(args, " "))
+	}
+	if pidsIdx := slices.Index(args, "--pids-limit"); pidsIdx < 0 || pidsIdx > runtimeIdx {
+		t.Errorf("limit flags must precede --runtime=sysbox-runc; got:\n%s", strings.Join(args, " "))
+	}
+}
+
+// containsSubsequence reports whether want appears in args as one contiguous
+// run of tokens (a flag and its value must stay adjacent).
+func containsSubsequence(args, want []string) bool {
+	if len(want) == 0 {
+		return true
+	}
+	for i := 0; i+len(want) <= len(args); i++ {
+		if slices.Equal(args[i:i+len(want)], want) {
+			return true
+		}
+	}
+	return false
 }
 
 // -- ticket #759: provider API key VALUES must never appear in argv ---------
@@ -502,7 +591,7 @@ func buildRunArgvTrailingCommand(t *testing.T, dindOn bool) string {
 		WorkspaceScope:    "repo",
 	}
 
-	argv, err := e.buildRunArgv("claude", "/usr/local/bin/cenci", "/run/user/1000/cenci", true, scope, Options{Agent: "claude"}, home, dindOn, false, DefaultSandboxPlugins())
+	argv, err := e.buildRunArgv("claude", "/usr/local/bin/cenci", "/run/user/1000/cenci", true, scope, Options{Agent: "claude"}, home, dindOn, false, DefaultSandboxPlugins(), nil)
 	if err != nil {
 		t.Fatalf("buildRunArgv(dindOn=%v): %v", dindOn, err)
 	}

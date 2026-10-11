@@ -1,7 +1,6 @@
 package launcher
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -135,6 +134,10 @@ type launchCtx struct {
 	DindOn  bool
 	AzureOn bool
 	Plugins []string
+	// Limits is the parsed sandbox.memoryLimit/pidsLimit configuration (#1216).
+	// Only the config is resolved here; the runtime's total memory is queried
+	// later, in planArgvs' create branch, so an attach never depends on it.
+	Limits workloadLimits
 }
 
 // resolveLaunchContext resolves the shared preamble: agent/model
@@ -142,8 +145,11 @@ type launchCtx struct {
 // (ResolveDind's flag/config decision plus the macOS platform gate — a
 // UsageError on conflicting/misplaced --dind flags), container-runtime
 // resolution (mutates e.Runtime only when unset — docker-first under dind,
-// else podman-first), and dindPreflight when dind is on. Both Launch and
-// DryRun call this so their failure modes for these steps can never diverge.
+// else podman-first), and dindPreflight when dind is on. The sandbox.plugins,
+// sandbox.azure and sandbox.memoryLimit/pidsLimit config reads happen before
+// runtime resolution, so a malformed value makes no runtime call. Both Launch
+// and DryRun call this so their failure modes for these steps can never
+// diverge.
 func (e *Engine) resolveLaunchContext(opts Options) (launchCtx, error) {
 	agent := opts.Agent
 	if agent == "" {
@@ -199,6 +205,17 @@ func (e *Engine) resolveLaunchContext(opts Options) (launchCtx, error) {
 		return launchCtx{}, err
 	}
 
+	// Parsed on every path, before runtime resolution, with the same fail-
+	// closed rule (#632, #1216): a malformed "sandbox.memoryLimit"/
+	// "sandbox.pidsLimit" hard-fails the launch (create, attach and --dry-run
+	// alike) before any runtime call, rather than silently launching with a
+	// default limit. Only the config is read here; the default memory limit's
+	// runtime query is deferred to planArgvs' create branch.
+	limits, err := ResolveWorkloadLimits(scope)
+	if err != nil {
+		return launchCtx{}, err
+	}
+
 	if e.Runtime == "" {
 		if dindOn {
 			e.Runtime, err = sandbox.ContainerRuntimePreferDocker()
@@ -215,7 +232,7 @@ func (e *Engine) resolveLaunchContext(opts Options) (launchCtx, error) {
 		}
 	}
 
-	return launchCtx{Agent: agent, Model: model, Home: home, Scope: scope, DindOn: dindOn, AzureOn: azureOn, Plugins: plugins}, nil
+	return launchCtx{Agent: agent, Model: model, Home: home, Scope: scope, DindOn: dindOn, AzureOn: azureOn, Plugins: plugins, Limits: limits}, nil
 }
 
 // planArgvs performs the read-only container-disposition probing
@@ -231,13 +248,16 @@ func (e *Engine) resolveLaunchContext(opts Options) (launchCtx, error) {
 //     attaching; a host Docker/Podman socket mount, an ambiguous
 //     `cenci-sand.dind` label, or a DinD-mode mismatch against the
 //     requested launch all reject with a plain error (ticket #628).
-//     Otherwise attaching=true, createArgv=nil — a real launch only
-//     attaches, never creates.
+//     Otherwise a best-effort limits drift warning is printed
+//     (warnLimitsDrift, #1216) and attaching=true, createArgv=nil — a real
+//     launch only attaches, never creates.
 //   - running + incompatible (predates the shared read-only agent-CLI
 //     mount): the same hard error Launch has always returned.
-//   - not running: createArgv is built via buildRunArgv (credential
-//     validation included — its hard error propagates unchanged),
-//     attaching=false.
+//   - not running: the limit flags are resolved first (limitRunArgs — the only
+//     step that may query the runtime, for the default memory limit; its
+//     LIMITS-001 error propagates unchanged), then createArgv is built via
+//     buildRunArgv (credential validation included — its hard error
+//     propagates unchanged), attaching=false.
 //
 // attachArgv is always built (buildAgentExecArgv is pure and cannot fail)
 // since both branches need it: Launch's runAgent rebuilds it from the same
@@ -282,10 +302,18 @@ func (e *Engine) planArgvs(ctx launchCtx, opts Options, cenciBin, socketDir stri
 			return nil, nil, false, fmt.Errorf("running container '%s' was created without --dind; run 'cenci sandbox stop %s', then relaunch", ctx.Scope.ContainerName, ctx.Scope.ContainerName)
 		}
 
+		e.warnLimitsDrift(ctx)
 		return nil, attachArgv, true, nil
 	}
 
-	createArgv, err = e.buildRunArgv(ctx.Agent, cenciBin, socketDir, cenciAvailable, ctx.Scope, opts, ctx.Home, ctx.DindOn, ctx.AzureOn, ctx.Plugins)
+	// The only place the runtime is queried for the default memory limit
+	// (limitRunArgs): an attach never reaches here, so it cannot fail because
+	// of limit resolution (#1216).
+	limitArgs, err := e.limitRunArgs(ctx.Limits)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	createArgv, err = e.buildRunArgv(ctx.Agent, cenciBin, socketDir, cenciAvailable, ctx.Scope, opts, ctx.Home, ctx.DindOn, ctx.AzureOn, ctx.Plugins, limitArgs)
 	if err != nil {
 		return nil, nil, false, err
 	}
@@ -389,12 +417,13 @@ func (e *Engine) Launch(opts Options) error {
 	create := exec.Command(e.Runtime, createArgv...)
 	create.Stdout = nil // cenci-sand discards the container id (>/dev/null)
 	// Stderr still streams to e.Stderr verbatim; the capture only retains a
-	// bounded copy so createFailureError can tell a dind runtime rejection
-	// apart from an ordinary create failure (#1077).
+	// bounded copy so createFailureError can tell a limit rejection (#1216)
+	// or a dind runtime rejection (#1077) apart from an ordinary create
+	// failure.
 	createErr := newCapturedStderr(e.Stderr)
 	create.Stderr = createErr
 	if err := create.Run(); err != nil {
-		return e.createFailureError(ctx.DindOn, createErr.String(), err)
+		return e.createFailureError(ctx.DindOn, ctx.Limits.sendsFlags(), createErr.String(), err)
 	}
 
 	// The entrypoint performs credential and plugin setup before running the
@@ -626,12 +655,14 @@ func isSocket(path string) bool {
 // The full arg list is assembled by delegating to focused sub-methods below
 // (base flags, volume mounts, env vars, codex credential validation, and
 // opt-in features), called in sequence and threaded through a single args
-// slice. Grouping by theme means some -v/-e flags end up in a different
+// slice, followed by the caller-resolved limitArgs (--memory/--memory-swap/
+// --pids-limit, appended after the opt-in features and before the dind
+// --runtime flag). Grouping by theme means some -v/-e flags end up in a different
 // relative order than cenci-sand's original single-block layout; that's
 // behaviorally identical since docker/podman treat flag order between
 // distinct -v/-e flags as independent — only the trailing image + command
 // (appended by the caller, buildRunArgv, after this returns) must stay last.
-func (e *Engine) assembleRunArgs(agent, cenciBin, socketDir string, cenciAvailable bool, scope Scope, opts Options, home string, dindOn, azureOn bool, plugins []string) ([]string, error) {
+func (e *Engine) assembleRunArgs(agent, cenciBin, socketDir string, cenciAvailable bool, scope Scope, opts Options, home string, dindOn, azureOn bool, plugins []string, limitArgs []string) ([]string, error) {
 	args := e.baseRunArgs(scope, dindOn)
 	args = append(args, e.assembleVolumeMounts(agent, cenciBin, socketDir, cenciAvailable, scope, home, dindOn, azureOn)...)
 	args = append(args, e.assembleEnv(agent, scope, opts, dindOn, plugins)...)
@@ -643,6 +674,11 @@ func (e *Engine) assembleRunArgs(agent, cenciBin, socketDir string, cenciAvailab
 	args = append(args, credArgs...)
 
 	args = append(args, e.assembleOptionalFeatures(opts)...)
+
+	// The resource-limit flags (--memory/--memory-swap/--pids-limit, #1216)
+	// arrive pre-resolved from planArgvs, which owns the one runtime query
+	// they may need; this function stays pure. They apply in dind mode too.
+	args = append(args, limitArgs...)
 
 	// The sysbox-runc OCI runtime replaces the default runc for this
 	// container only, in dind mode. Appended last (still before the trailing
@@ -662,8 +698,8 @@ func (e *Engine) assembleRunArgs(agent, cenciBin, socketDir string, cenciAvailab
 // container. Shared by Launch and DryRun so the create argv can never drift
 // between a real launch and its dry-run preview. The validateCredentials hard
 // error (inside assembleRunArgs) propagates through unchanged.
-func (e *Engine) buildRunArgv(agent, cenciBin, socketDir string, cenciAvailable bool, scope Scope, opts Options, home string, dindOn, azureOn bool, plugins []string) ([]string, error) {
-	runArgs, err := e.assembleRunArgs(agent, cenciBin, socketDir, cenciAvailable, scope, opts, home, dindOn, azureOn, plugins)
+func (e *Engine) buildRunArgv(agent, cenciBin, socketDir string, cenciAvailable bool, scope Scope, opts Options, home string, dindOn, azureOn bool, plugins []string, limitArgs []string) ([]string, error) {
+	runArgs, err := e.assembleRunArgs(agent, cenciBin, socketDir, cenciAvailable, scope, opts, home, dindOn, azureOn, plugins, limitArgs)
 	if err != nil {
 		return nil, err
 	}
@@ -1252,16 +1288,8 @@ const inspectContainerSandboxPluginsTimeout = 3 * time.Second
 // full env can carry secrets (e.g. CONTEXT7_API_KEY) that have no business
 // transiting the launcher (#1002 security review).
 func (e *Engine) inspectContainerSandboxPlugins(name string) (value string, found, ok bool) {
-	ctx, cancel := context.WithTimeout(context.Background(), inspectContainerSandboxPluginsTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, e.Runtime, "inspect", "--format",
+	out, err := runtimeOutput(inspectContainerSandboxPluginsTimeout, e.Runtime, "inspect", "--format",
 		`{{range .Config.Env}}{{if eq (index (split . "=") 0) "CENCI_SANDBOX_PLUGINS"}}{{.}}{{end}}{{end}}`, name)
-	// WaitDelay bounds how long Wait (called internally by Output) waits for
-	// stdout/stderr pipes to close after the context kills the process — a
-	// grandchild process could otherwise hold those pipes open indefinitely,
-	// silently defeating the timeout above (watch/docs/go-gotchas.md #26).
-	cmd.WaitDelay = inspectContainerSandboxPluginsTimeout
-	out, err := cmd.Output()
 	if err != nil {
 		return "", false, false
 	}

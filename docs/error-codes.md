@@ -71,6 +71,9 @@ This prevents readers and future implementers from assuming the code is actively
 | `CENCI-SANDBOX-DIND-001` | Sandbox / Dind | The nested Docker daemon (DinD) failed to start, or crashed/OOMed after starting, without an intentional-shutdown sentinel superseding the marker. Attached by the launcher's before-attach warning and by `cenci diagnose`. |
 | `CENCI-SANDBOX-DIND-002` | Sandbox / Dind | Nested Docker was requested (`--dind` or `sandbox.dind`) on a host that can never register `sysbox-runc` — macOS — so the sandbox launched without it. Attached by the launcher's degrade warning and reported by `cenci audit` as the `platform-unsupported` dind source. |
 | `CENCI-SANDBOX-DIND-003` | Sandbox / Dind | A dind launch's container create was rejected by the OCI runtime: `sysbox-runc` is registered with Docker (so `dindPreflight` passed) but could not create the container. Attached by the launcher's create-failure mapping. |
+| `CENCI-SANDBOX-LIMITS-001` | Sandbox / Limits | The container runtime's total host memory could not be read (or was unusable), so the default `--memory` limit cannot be derived and the launch fails before any create. Attached by the launcher's host-memory query. |
+| `CENCI-SANDBOX-LIMITS-002` | Sandbox / Limits | The container runtime rejected the create because of a memory or pids limit (e.g. an undelegated cgroup controller). Attached by the launcher's create-failure mapping; names both opt-out keys. |
+| `CENCI-SANDBOX-LIMITS-003` | Sandbox / Limits | The sandbox container's cgroup recorded out-of-memory kills (`oom_kill` above 0). Attached by `cenci diagnose`. |
 | `CENCI-SANDBOX-SOCKET-001` | Sandbox / Socket | A failed in-sandbox hook-event delivery is unrecoverable and container-scoped: the event-socket directory's bind mount is dangling or was never wired in (or the mount probe was inconclusive). Attached by `internal/daemon`'s delivery-failure classifier and surfaced by `cenci diagnose`'s "Event delivery:" section. |
 | `CENCI-DAEMON-CONN-001` | Daemon / Conn | The cenci daemon's event socket exists but did not answer a read-only dial. Attached by `cenci diagnose`. |
 | `CENCI-DAEMON-SOCKET-001` | Daemon / Socket | The cenci daemon's event socket does not exist at all. Attached by `cenci diagnose`. |
@@ -134,6 +137,22 @@ DIND-002 before the launch (the host can never register `sysbox-runc`),
 DIND-003 during container create (registered but non-functional),
 DIND-001 after create (the container exists, the inner `dockerd` didn't
 start or later died).
+
+The three `CENCI-SANDBOX-LIMITS-*` codes (#1216) cover the workload
+container's `--memory`/`--memory-swap`/`--pids-limit` flags. `LIMITS-001` fires
+in `limits.go`'s host-memory query, only when a create argv is built with the
+default `memoryLimit`: `info` failed, timed out, or reported something that is
+not a positive whole number of bytes (or under 2 MiB, which would derive a
+sub-1-MiB limit); an attach, an explicit size, and `"memoryLimit": "none"`
+never query it. `LIMITS-002` fires in `dindcreate.go`'s `createFailureError`
+when at least one limit flag was sent and the create's captured stderr carries
+a narrow limit marker (`memory.max`, `pids.max`, an unavailable `memory`/`pids`
+cgroup controller, ...); that check runs before the DinD `OCI runtime create
+failed` mapping, and both opt-out keys are named. `LIMITS-003` is attached by
+`cenci diagnose` when the cgroup's `memory.events` `oom_kill` count is above 0;
+an unreadable count is a code-less warning, never `0`. `LIMITS-001` and
+`LIMITS-002` are `Fatal` (no container is created); `LIMITS-003` is `Degraded`
+(the session works but processes were killed).
 
 `CENCI-SANDBOX-SOCKET-001` (#1122) is attached by `internal/daemon`'s
 `classifyDeliveryFailure`, called from `deliverEvent` when an in-sandbox
