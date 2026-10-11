@@ -13,6 +13,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/sandbox"
 )
 
 const fixCap = 3
@@ -354,6 +356,9 @@ func openSupervisorLog(path string) (*os.File, error) {
 }
 
 func Run(o Options) error {
+	if reason := sandbox.AgentDisabledReason(o.Agent); reason != "" {
+		return fmt.Errorf("%s", reason)
+	}
 	if o.Interval < time.Minute {
 		o.Interval = time.Minute
 	}

@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/daemon"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/sandbox"
 )
 
 // ErrWindowSpawned is the sentinel a caller detects via errors.Is to
@@ -116,6 +117,9 @@ func Run(opts Opts, ctrl Controller) error {
 	}
 	if agent == "" {
 		agent = "claude"
+	}
+	if reason := sandbox.AgentDisabledReason(agent); reason != "" {
+		return fmt.Errorf("%s", reason)
 	}
 
 	// Resolve sandbox: explicit flag wins, else config default, else sandbox

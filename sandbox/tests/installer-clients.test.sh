@@ -1628,7 +1628,7 @@ echo "case: OpenCode detected reports itself and its version in doctor output"
 run_opencode_doctor_case opencode-version-ok claude 1.18.3
 [[ "${DOCTOR_EXIT}" -eq 0 ]]
 assert_contains "${DOCTOR_OUTPUT}" "OpenCode detected"
-assert_contains "${DOCTOR_OUTPUT}" "OpenCode 1.18.3 supports cenci integration"
+assert_contains "${DOCTOR_OUTPUT}" "OpenCode is temporarily disabled"
 
 echo "case: an OpenCode version below 1.18.3 is flagged unsupported, not a hard doctor failure"
 run_opencode_doctor_case opencode-version-old claude 1.17.0
@@ -1696,7 +1696,7 @@ env -i HOME="${CASE_HOME}" PATH="${CASE_BIN}" CALLS_FILE="${CASE_CALLS}" \
 skills_only_exit=$?
 set -e
 [[ "${skills_only_exit}" -eq 0 ]]
-assert_contains "${output}" "OpenCode 1.18.3 supports cenci integration"
+assert_contains "${output}" "OpenCode is temporarily disabled"
 assert_contains "${output}" "OpenCode skills linked"
 assert_contains "${output}" "OpenCode plugin not registered"
 
@@ -1722,14 +1722,19 @@ set -e
 assert_contains "${output}" "OpenCode plugin registered"
 assert_contains "${output}" "OpenCode skills not linked"
 
-echo "case: re-running install links OpenCode's portable skills idempotently and never duplicates the plugin entry"
+echo "case: install and rerun leave OpenCode untouched during the pause"
 name=opencode-idempotent
 run_case_opencode "${name}" claude 1.18.3
 [[ "${CASE_EXIT}" -eq 0 ]]
-assert_contains "${CASE_OUTPUT}" "linked: 13, skipped: 0"
-[[ -L "${CASE_HOME}/.config/opencode/skills/testing" ]]
-[[ "$(grep -c 'watch/plugin/opencode' "${CASE_HOME}/.config/opencode/opencode.json")" -eq 1 ]]
+assert_contains "${CASE_OUTPUT}" "OpenCode is temporarily disabled"
+assert_not_contains "${CASE_OUTPUT}" "Setting up OpenCode integration"
+[[ ! -e "${CASE_HOME}/.config/opencode" ]]
 
+# Existing user configuration and skills must also survive install/update unchanged.
+mkdir -p "${CASE_HOME}/.config/opencode/skills"
+printf '{"theme":"dark","plugin":["user-plugin"],"permission":{"*":"ask"}}\n' >"${CASE_HOME}/.config/opencode/opencode.json"
+cp "${CASE_HOME}/.config/opencode/opencode.json" "${WORK}/${name}/original-config"
+printf 'user skill\n' >"${CASE_HOME}/.config/opencode/skills/my-skill"
 second_output="${WORK}/${name}/second-run-output"
 set +e
 env -i HOME="${CASE_HOME}" PATH="${CASE_BIN}" CALLS_FILE="${CASE_CALLS}" \
@@ -1739,13 +1744,27 @@ env -i HOME="${CASE_HOME}" PATH="${CASE_BIN}" CALLS_FILE="${CASE_CALLS}" \
 second_run_exit=$?
 set -e
 [[ "${second_run_exit}" -eq 0 ]]
-assert_contains "${second_output}" "linked: 0, skipped: 13"
-[[ "$(grep -c 'watch/plugin/opencode' "${CASE_HOME}/.config/opencode/opencode.json")" -eq 1 ]]
+assert_contains "${second_output}" "OpenCode is temporarily disabled"
+cmp "${WORK}/${name}/original-config" "${CASE_HOME}/.config/opencode/opencode.json"
+assert_contains "${CASE_HOME}/.config/opencode/skills/my-skill" "user skill"
+
+update_output="${WORK}/${name}/update-output"
+env -i HOME="${CASE_HOME}" PATH="${CASE_BIN}" CALLS_FILE="${CASE_CALLS}" \
+    CLAUDE_MARKETPLACE_FILE="${WORK}/${name}/claude-marketplace" \
+    CLAUDE_INSTALLED_FILE="${WORK}/${name}/claude-installed" \
+    bash "${ROOT}/install.sh" update --yes --no-build >"${update_output}" 2>&1
+assert_contains "${update_output}" "OpenCode is temporarily disabled"
+cmp "${WORK}/${name}/original-config" "${CASE_HOME}/.config/opencode/opencode.json"
+assert_contains "${CASE_HOME}/.config/opencode/skills/my-skill" "user skill"
 
 echo "case: uninstall removes only cenci's OpenCode skill symlinks and plugin entry, preserving the user's own config and skills"
 name=opencode-uninstall
 run_case_opencode "${name}" claude 1.18.3
 [[ "${CASE_EXIT}" -eq 0 ]]
+# Seed a legacy installation; the paused installer must not recreate it.
+mkdir -p "${CASE_HOME}/.config/opencode/skills"
+ln -s "${CASE_HOME}/.claude/plugins/marketplaces/cenci/flow/skills/testing" "${CASE_HOME}/.config/opencode/skills/testing"
+printf '{"plugin":["file://%s/watch/plugin/opencode"],"permission":{"*":"allow"},"autoupdate":false}\n' "${CASE_HOME}/.claude/plugins/marketplaces/cenci" >"${CASE_HOME}/.config/opencode/opencode.json"
 echo "user content" >"${CASE_HOME}/.config/opencode/skills/my-own-skill"
 jq '. + {"theme": "dark"}' "${CASE_HOME}/.config/opencode/opencode.json" >"${CASE_HOME}/.config/opencode/opencode.json.tmp"
 mv "${CASE_HOME}/.config/opencode/opencode.json.tmp" "${CASE_HOME}/.config/opencode/opencode.json"
@@ -1762,6 +1781,8 @@ set -e
 [[ ! -e "${CASE_HOME}/.config/opencode/skills/testing" ]]
 [[ -f "${CASE_HOME}/.config/opencode/skills/my-own-skill" ]]
 assert_contains "${CASE_HOME}/.config/opencode/opencode.json" "theme"
+assert_contains "${CASE_HOME}/.config/opencode/opencode.json" "permission"
+assert_contains "${CASE_HOME}/.config/opencode/opencode.json" "autoupdate"
 assert_not_contains "${CASE_HOME}/.config/opencode/opencode.json" "watch/plugin/opencode"
 
 echo "case: OpenCode plugin registration is recognized (install, doctor, and uninstall) even when find_plugin_path resolves watch/plugin/opencode via the plugin-cache fallback branch, not the marketplace checkout (#491 review fix — substring-matching bug)"
@@ -1776,6 +1797,9 @@ make_opencode "${bin}" 1.18.3
 prepare_checkout "${home}" claude
 prepare_bootstrap_cenci "${home}" claude
 prepare_opencode_cache_fallback_assets "${home}" claude
+# Simulate the registration left by an older installer/cache layout.
+mkdir -p "${home}/.config/opencode"
+printf '{"plugin":["file://%s/.claude/plugins/cache/cenci/cenci-watch/1.0.0/opencode"]}\n' "${home}" >"${home}/.config/opencode/opencode.json"
 
 set +e
 env -i HOME="${home}" PATH="${bin}" CALLS_FILE="${calls}" \
@@ -1785,7 +1809,7 @@ env -i HOME="${home}" PATH="${bin}" CALLS_FILE="${calls}" \
 cache_fallback_install_exit=$?
 set -e
 [[ "${cache_fallback_install_exit}" -eq 0 ]]
-assert_contains "${output}" "OpenCode plugin registered"
+assert_contains "${output}" "OpenCode is temporarily disabled"
 assert_contains "${home}/.config/opencode/opencode.json" "cenci-watch/1.0.0/opencode"
 
 doctor_output="${WORK}/${name}/doctor-output"

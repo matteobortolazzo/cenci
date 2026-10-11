@@ -1,5 +1,12 @@
 # OpenCode support
 
+> **Temporarily disabled (2026-10-11).** Installation, direct sessions, workflow runs
+> (including custom templates), dispatch, and babysit are paused. Work resumes only
+> after owner opt-in in the [deferred milestone](https://github.com/matteobortolazzo/cenci/milestone/18).
+> The implementation and design reference below are retained for that future work;
+> installation and launch examples currently refuse. `install-skills.sh remove`
+> remains available, and existing host configuration and resources are preserved.
+
 cenci ships its portable convention skills to [OpenCode](https://opencode.ai) as real
 filesystem symlinks. OpenCode has no plugin marketplace or hook system today, so there is
 no executable OpenCode primary agent or `/cenci:*` command in this ticket — AGENTS.md

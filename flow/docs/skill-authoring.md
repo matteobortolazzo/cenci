@@ -7,6 +7,13 @@ from external or semi-trusted sources).
 
 ## Client surfaces
 
+**OpenCode pause:** OpenCode is temporarily disabled. Its delivery implementation and
+inventory are retained, but new OpenCode features, adapters, and native acceptance
+work are deferred to the [owner-opt-in milestone](https://github.com/matteobortolazzo/cenci/milestone/18).
+During the pause, consciously leaving that surface unchanged is the default reconciliation
+decision under the rule below. Keep retained-source consistency checks passing; Claude/Codex
+work must preserve the disable and must not wait for OpenCode parity or re-enablement.
+
 A skill is not one file with one audience. flow ships skills to three clients through
 three different mechanisms, and **a change to a skill is not finished until all three
 have been reconciled** — either updated, or consciously left alone for a reason that is

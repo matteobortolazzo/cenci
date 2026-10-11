@@ -145,7 +145,7 @@ func runSandboxBuild(args []string) {
 // "pinned".
 func runSandboxUpdateAgent(args []string) {
 	fs := flag.NewFlagSet("sandbox update-agent", flag.ExitOnError)
-	agent := fs.String("agent", "claude", "agent CLI to update (claude, codex, or opencode)")
+	agent := fs.String("agent", "claude", "agent CLI to update (claude or codex; OpenCode is temporarily disabled)")
 	version := fs.String("version", "", "exact semantic version (default: official latest)")
 	unpin := fs.Bool("unpin", false, "clear the shared volume's version pin (if any), then update to latest")
 	all := fs.Bool("all", false, "refresh every existing agent-CLI volume across every installed runtime, leaving pinned volumes untouched")
@@ -177,7 +177,7 @@ func runSandboxUpdateAgent(args []string) {
 		os.Exit(2)
 	}
 
-	if err := launcher.ValidateAgent(*agent); err != nil {
+	if err := launcher.ValidateActiveAgent(*agent); err != nil {
 		fmt.Fprintf(os.Stderr, "cenci sandbox update-agent: %v\n", err)
 		os.Exit(2)
 	}
@@ -286,6 +286,9 @@ func runSandboxUpdateAgentAll() {
 	// refreshed.
 	var errs []error
 	for _, agent := range sandbox.SupportedAgents {
+		if sandbox.AgentDisabledReason(agent) != "" {
+			continue
+		}
 		volumeName := launcher.AgentCLIVolumeName(agent)
 		owners, err := sandbox.RuntimesWithVolume(runtimes, volumeName)
 		if err != nil {
@@ -332,7 +335,7 @@ func runSandboxBuildBase(args []string) {
 // host-wide sweep would silently ignore.
 func runSandboxUpdatePlugins(args []string) {
 	fs := flag.NewFlagSet("sandbox update-plugins", flag.ExitOnError)
-	agent := fs.String("agent", "claude", "agent whose plugins to update (claude, codex, or opencode)")
+	agent := fs.String("agent", "claude", "agent whose plugins to update (claude or codex; OpenCode is temporarily disabled)")
 	name := fs.String("name", "", "sandbox instance name")
 	all := fs.Bool("all", false, "refresh plugins in every running sandbox container on the host")
 	_ = fs.Parse(args)
@@ -361,7 +364,7 @@ func runSandboxUpdatePlugins(args []string) {
 		return
 	}
 
-	if err := launcher.ValidateAgent(*agent); err != nil {
+	if err := launcher.ValidateActiveAgent(*agent); err != nil {
 		fmt.Fprintf(os.Stderr, "cenci sandbox update-plugins: %v\n", err)
 		os.Exit(2)
 	}

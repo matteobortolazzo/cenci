@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/pipeline"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/sandbox"
 	"github.com/matteobortolazzo/cenci/watch/v2/pkg/watch"
 )
 
@@ -593,6 +594,13 @@ func decideTicket(t Ticket, in Inputs, planByTicket map[string]*Plan, dispatched
 		return skip("quiet hours")
 	}
 
+	primary := t.Agent
+	if primary == "" {
+		primary = in.Config.DefaultAgent
+	}
+	if reason := sandbox.AgentDisabledReason(primary); reason != "" {
+		return skip(reason)
+	}
 	agent := resolveAgent(t, in)
 	if agent == "" {
 		return skip("budget exhausted")
@@ -681,6 +689,9 @@ func ticketByNumber(tickets []Ticket, repo string, n int) *Ticket {
 // all agents are exhausted.
 func resolveAgent(t Ticket, in Inputs) string {
 	for _, agent := range agentPreference(t, in.Config) {
+		if sandbox.AgentDisabledReason(agent) != "" {
+			continue
+		}
 		b := in.Budgets.Budget(agent)
 		if b.Unlimited || b.Remaining > 0 {
 			return agent

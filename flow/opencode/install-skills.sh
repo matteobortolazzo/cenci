@@ -4,6 +4,12 @@ set -eu
 PLUGIN_ROOT=${PLUGIN_ROOT:?PLUGIN_ROOT is required}
 ACTION=${1:?usage: install-skills.sh install|remove}
 
+# Retain removal and the implementation for a future owner-authorized restart.
+if [ "$ACTION" = install ]; then
+  echo "OpenCode is temporarily disabled; skill installation is paused (https://github.com/matteobortolazzo/cenci/milestone/18)" >&2
+  exit 1
+fi
+
 # Portable convention skills that are safe to expose to any client (no
 # Claude-only tool/UX dependency). Pipeline/interactive skills (implement,
 # configure, refine, maintain, address-review, review, sync,

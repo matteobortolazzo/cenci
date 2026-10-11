@@ -27,7 +27,7 @@ func (e *Engine) agentUnpinRunArgs(agent string) []string {
 // UpdateAgent for the same owner after a failed UnpinAgent — an uncleared pin
 // would make that following call re-refuse.
 func (e *Engine) UnpinAgent(agent string) error {
-	if err := ValidateAgent(agent); err != nil {
+	if err := ValidateActiveAgent(agent); err != nil {
 		return err
 	}
 	if err := e.EnsureMonolithImage(); err != nil {
@@ -47,7 +47,7 @@ func (e *Engine) UnpinAgent(agent string) error {
 // exact version; agent-cli.sh's --skip-if-pinned contract (#708) leaves a
 // pinned volume untouched and exits 0 instead.
 func (e *Engine) UpdateAgentSkipIfPinned(agent string) error {
-	if err := ValidateAgent(agent); err != nil {
+	if err := ValidateActiveAgent(agent); err != nil {
 		return err
 	}
 	if err := e.EnsureMonolithImage(); err != nil {

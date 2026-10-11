@@ -70,6 +70,15 @@ func ResolveShortcut(token string) (agent, model string, ok bool) {
 // to bring prune and `sandbox ls`/`sandbox stop` in sync (#528).
 var SupportedAgents = []string{"claude", "codex", "opencode"}
 
+// AgentDisabledReason gates new activity without hiding legacy resources from
+// listing, diagnosis, stopping, or cleanup. Custom workflow agents are unaffected.
+func AgentDisabledReason(agent string) string {
+	if strings.TrimSpace(agent) == "opencode" {
+		return "OpenCode is temporarily disabled; development resumes only after owner opt-in (https://github.com/matteobortolazzo/cenci/milestone/18)"
+	}
+	return ""
+}
+
 // init guards SupportedAgents against ever being left empty by a future
 // edit. sandboxNamePatternSource/homeVolumePatternSource/
 // agentCLIVolumePatternSource all derive their regexes from this slice, and

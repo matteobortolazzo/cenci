@@ -14,11 +14,12 @@ ticket delivers one PR.
 
 | Order | Milestone | Outcome |
 |---|---|---|
-| P1 | [Safe execution and reliable Codex workflows](https://github.com/matteobortolazzo/cenci/milestone/17) | Close host-permission, sandbox-fallback, and container-resource gaps; deliver native Codex planning, recovery, guards, repair, and end-to-end acceptance |
+| P1 | [Safe execution and reliable Codex workflows](https://github.com/matteobortolazzo/cenci/milestone/17) | Close shared capability, sandbox-fallback, and container-resource gaps; deliver native Codex planning, recovery, guards, repair, and end-to-end acceptance |
 | P2 | [Lean workflows and reliable recovery](https://github.com/matteobortolazzo/cenci/milestone/13) | Reduce unnecessary questions while preserving material decisions; repair stage/label and checkpoint recovery |
 | P3 | [Pipeline efficiency and maintainability](https://github.com/matteobortolazzo/cenci/milestone/14) | Reduce measured context use, repeated verification, and duplicated guidance without weakening correctness |
 | P4 | [Runtime reliability and daily usability](https://github.com/matteobortolazzo/cenci/milestone/15) | Improve daemon startup, diagnostics, health gates, sandbox usability, and the dedicated tmux workspace |
 | Later | [Optional capabilities and advanced hardening](https://github.com/matteobortolazzo/cenci/milestone/16) | Unscheduled selective setup, enterprise connectivity, stacked delivery, optional integrations, and additional trust hardening |
+| Owner opt-in | [Deferred — OpenCode](https://github.com/matteobortolazzo/cenci/milestone/18) | OpenCode-only work is paused with no due date; resume only when the owner decides it is worth pursuing |
 
 Work follows the dependency chains in milestone descriptions and native issue links;
 independent tickets may proceed together. For example, P1's Codex acceptance consumes
@@ -48,13 +49,17 @@ claim that every client adapter or deferred trust-hardening item is complete.
 - Existing parents #938 (installer selection), #939 (plugin provisioning), and #1100
   (pipeline token usage) retain their child scopes. Grouping does not turn them into
   additional implementation PRs.
+- OpenCode is temporarily disabled by [#1219](https://github.com/matteobortolazzo/cenci/issues/1219).
+  Host registration (#1018), skill distribution (#1217), diagnostics (#1220), provisioning
+  (#1221), and re-enablement (#1222) are deferred. Shared safety (#1019/#1214/#1215),
+  diagnostics polish (#762), and Claude/Codex provisioning (#1003) keep their milestones.
 
 ## Available now
 
 - One verified installer and updater for Claude Code, Codex, or a dual-client setup
 - Docker/Podman isolation with per-repository mounts and tailored images
 - Claude Code's gated ticket-to-reviewed-PR workflow
-- Native Claude Code and Codex monitoring plus OpenCode live-session integration
+- Native Claude Code and Codex monitoring
 - tmux and optional Linux desktop/macOS menu-bar status surfaces; no board required
 - Persisted-plan handoff, planned-ticket pickup, capacity gates, and reconciliation
 - Client-neutral persistent PR babysitting, subject to each client's corrective-workflow capability
@@ -66,9 +71,9 @@ claim that every client adapter or deferred trust-hardening item is complete.
   deferred under [#938](https://github.com/matteobortolazzo/cenci/issues/938).
 - The complete interactive ticket-to-PR path is stable for Claude Code. Codex has the
   native workflow foundation but remains in behavioral end-to-end acceptance.
-- OpenCode supports direct sandbox sessions, monitoring, and portable conventions. It
-  does not currently have native cenci workflows or supported workflow dispatch; see
-  [#1019](https://github.com/matteobortolazzo/cenci/issues/1019).
+- OpenCode is temporarily disabled. New sessions, workflows, dispatch, babysit,
+  installation, and updates refuse; existing resources remain available for diagnosis,
+  stopping, and cleanup. Implementation is retained for an owner-authorized restart.
 - Full autonomy remains an advanced opt-in. P1/P2 address current execution and
   recovery gaps; additional trust hardening remains explicitly deferred in Later.
   Every switch remains off by default and the per-ticket merge grant remains explicit.
