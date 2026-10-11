@@ -172,7 +172,8 @@ cenci run implement 40
 cenci run implement 40 --dry-run
 # session: my-tmux-session
 # window:  40-implement
-# command: claude -- '/cenci:implement 40'
+# command: cenci open -- '/cenci:implement 40'
+# template: built-in
 ```
 
 Positional args are `<workflow> [ticket-id | task description] [additional context]`;
@@ -198,13 +199,13 @@ descriptive slug: `--slug` if given, else the whole description slugified.
 | Flag | Purpose |
 |------|---------|
 | `--agent <name>` | Agent to launch (`claude`, `codex`, …); default from config, else `claude` |
-| `--sandbox` / `--no-sandbox` | Sandbox is the default (`claude`→`cenci open`, the container being the mandatory runtime); `--no-sandbox` is the host opt-out. Both override the config default |
+| `--sandbox` / `--no-sandbox` | Sandbox is the default (`claude`→`cenci open`, the container being the mandatory runtime); `--no-sandbox` is the host opt-out. Both override the config default. A sandbox request for an agent with no `sandboxCommand` fails before spawn (no host fallback) — see [Configuration](#configuration) |
 | `--model <model>` | Model override passed to the agent (substituted into `{model}`, else appended as `--model`) |
 | `--session <name>` | Target tmux session (default: the current session) |
 | `--dir <path>` | Working directory the window starts in (default: current); prepended as a `cd '<dir>' &&` prefix on the launched command, visible in `--dry-run` output too |
 | `--slug <slug>` | Window-name slug for free-text runs; ignored for numeric tickets (named `<number>-<skill>`) |
 | `--config <path>` | Config file (default: `$XDG_CONFIG_HOME/cenci/config.json`) |
-| `--dry-run` | Print the resolved session, window name, and command without spawning |
+| `--dry-run` | Print the resolved session, window name, command, and template provenance without spawning; refusals (missing template, unsatisfied sandbox, disabled agent) still fail |
 
 A board column action shrinks to a single line:
 
@@ -227,12 +228,34 @@ spawn into a grouped session (non-zero exit, no window created). Pass an ungroup
 
 ### Configuration
 
-Built-in Go templates cover Claude `refine`/`implement` with zero config. An
+Built-in Go templates cover the Claude and Codex workflows below with zero config. An
 optional `config.json` (respecting `$XDG_CONFIG_HOME`, or `--config`) overrides the
 defaults and adds agents or workflows — the tokens `{ticket}` and `{model}` are
 substituted at launch. Launches run inside the cenci-sandbox container by default; the
 `"sandbox"` field below is optional and, when set to `false`, opts every launch out to
-the host (the same as passing `--no-sandbox`):
+the host (the same as passing `--no-sandbox`). The table is generated from the built-in
+templates and checked by a test (`go test ./internal/run -run
+TestReadmeCapabilityTableInSync -update-readme` regenerates it):
+
+<!-- cenci:capability-table:begin -->
+| Workflow | claude | codex |
+|---|---|---|
+| `address-review` | yes | yes |
+| `babysit` | yes | yes |
+| `babysit-attention` | yes | yes |
+| `ci-repair` | yes | yes |
+| `configure` | — | yes |
+| `implement` | yes | yes |
+| `maintain` | — | yes |
+| `merge-repair` | yes | — |
+| `refactor` | — | yes |
+| `refine` | yes | yes |
+| `review` | — | yes |
+| `sync` | — | yes |
+| sandbox command | `cenci open` | `cenci open` |
+
+`opencode`: OpenCode is temporarily disabled; development resumes only after owner opt-in (https://github.com/matteobortolazzo/cenci/milestone/18)
+<!-- cenci:capability-table:end -->
 
 ```json
 {
@@ -257,8 +280,25 @@ the host (the same as passing `--no-sandbox`):
 }
 ```
 
-Claude Code and Codex have built-in templates. OpenCode is temporarily disabled;
-adding a `config.json` entry does not bypass the pause.
+A launch that cannot succeed is refused **before** any tmux window is created, in
+`--dry-run` too (exit 1, no resolved command):
+
+- **Missing template:** an unknown agent, or an agent without the requested workflow,
+  fails naming the agent, the workflow, and the remedy (`define
+  agents.<agent>.workflows.<workflow> in <config path>`). Only the pairs in the table
+  above ship built in; anything else needs a `config.json` entry.
+- **Unsatisfied sandbox:** the sandbox is requested by `--sandbox`, by `"sandbox": true`
+  in the config, or by default. An agent without a `sandboxCommand` (an empty or
+  whitespace-only value counts as unset) cannot satisfy it, and `run` does **not** fall
+  back to the host command. Either configure `agents.<agent>.sandboxCommand`, or opt out
+  explicitly with `--no-sandbox` / `"sandbox": false`. Both built-in agents already
+  define `sandboxCommand`, so only custom agents are affected.
+- **Disabled agent:** OpenCode is temporarily disabled; adding a `config.json` entry
+  does not bypass the pause (see the OpenCode note below).
+
+`--dry-run` also prints a `template:` line saying where the template came from:
+`built-in`, or `user-defined (<config path>)` for a pair that exists only in the config
+file. Overriding only the `args` of a built-in workflow still counts as `built-in`.
 
 A workflow can optionally define `sandboxArgs` to replace its host `args` when
 `sandboxCommand` is selected. Both support the same placeholders and merge

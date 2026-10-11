@@ -8,7 +8,6 @@ import (
 	"strings"
 
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/daemon"
-	"github.com/matteobortolazzo/cenci/watch/v2/internal/sandbox"
 )
 
 // ErrWindowSpawned is the sentinel a caller detects via errors.Is to
@@ -118,23 +117,32 @@ func Run(opts Opts, ctrl Controller) error {
 	if agent == "" {
 		agent = "claude"
 	}
-	if reason := sandbox.AgentDisabledReason(agent); reason != "" {
-		return fmt.Errorf("%s", reason)
+	// A disabled agent is refused before sandbox resolution or session lookup.
+	// BuildCommand repeats the check so it protects its other callers too.
+	if err := checkAgentEnabled(agent); err != nil {
+		return err
 	}
 
 	// Resolve sandbox: explicit flag wins, else config default, else sandbox
 	// (the container is the mandatory runtime — #98). --no-sandbox opts out.
-	sandbox := opts.Sandbox
-	if !opts.SandboxSet {
-		if cfg.Sandbox != nil {
-			sandbox = *cfg.Sandbox
-		} else {
-			sandbox = true
-		}
+	// sandboxSource records which of the three asked for it, so a sandbox
+	// request the agent cannot satisfy can say where the request came from.
+	sandbox, sandboxSource := opts.Sandbox, "with --sandbox"
+	switch {
+	case opts.SandboxSet:
+	case cfg.Sandbox != nil:
+		sandbox, sandboxSource = *cfg.Sandbox, `by "sandbox": true in `+cfg.configRef()
+	default:
+		sandbox, sandboxSource = true, "by the sandbox-on default (#98)"
 	}
 
-	// 2 + 5. Resolve template and build the launcher command.
+	// 2 + 5. Resolve template and build the launcher command. Every refusal
+	// here (disabled agent, missing template, unsatisfied sandbox) precedes
+	// session resolution, so nothing is spawned and none wraps ErrWindowSpawned.
 	argv, err := cfg.BuildCommand(agent, opts.Workflow, opts.Ticket, opts.Model, sandbox)
+	if errors.Is(err, ErrSandboxUnavailable) {
+		return fmt.Errorf("%w (sandbox requested %s)", err, sandboxSource)
+	}
 	if err != nil {
 		return err
 	}
@@ -191,7 +199,8 @@ func Run(opts Opts, ctrl Controller) error {
 
 	// 7. Dry-run: print the resolution and stop before touching tmux state.
 	if opts.DryRun {
-		_, err := fmt.Fprintf(out, "session: %s\nwindow:  %s\ncommand: %s\n", session, name, shellCommand)
+		_, err := fmt.Fprintf(out, "session: %s\nwindow:  %s\ncommand: %s\ntemplate: %s\n",
+			session, name, shellCommand, cfg.TemplateProvenance(agent, opts.Workflow))
 		return err
 	}
 

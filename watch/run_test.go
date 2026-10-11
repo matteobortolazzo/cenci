@@ -1,11 +1,43 @@
 package main_test
 
 import (
+	"bytes"
+	"errors"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// writeRunConfig writes a `cenci run --config` file and returns its path.
+func writeRunConfig(t *testing.T, body string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// runDryRun runs `cenci run <args> --dry-run` and returns stdout, stderr and
+// the process exit code (0 on success).
+func runDryRun(t *testing.T, args ...string) (stdout, stderr string, exitCode int) {
+	t.Helper()
+	cmd := exec.Command(binaryPath, append([]string{"run"}, append(args, "--dry-run")...)...)
+	var outBuf, errBuf bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &outBuf, &errBuf
+	err := cmd.Run()
+	var exitErr *exec.ExitError
+	switch {
+	case err == nil:
+	case errors.As(err, &exitErr):
+		exitCode = exitErr.ExitCode()
+	default:
+		t.Fatalf("running %s: %v", binaryPath, err)
+	}
+	return outBuf.String(), errBuf.String(), exitCode
+}
 
 func TestRunSubcommandRoutes(t *testing.T) {
 	// `run` with no workflow is a usage error (exit 2) — but must never be
@@ -136,5 +168,126 @@ func TestRunCodexUsesBuiltinWorkflowTemplate(t *testing.T) {
 	}
 	if !strings.Contains(string(output), "cenci open") || !strings.Contains(string(output), "$cenci:implement 40") {
 		t.Errorf("expected built-in Codex skill invocation, got:\n%s", output)
+	}
+}
+
+// #1214: dry run labels where the resolved template came from.
+func TestRunDryRunLabelsTemplateProvenance(t *testing.T) {
+	noCfg := filepath.Join(t.TempDir(), "none.json")
+	override := writeRunConfig(t, `{"agents":{"claude":{"workflows":{"implement":{"args":["--","/overridden {ticket}"]},"file-added":{"args":["--","/added {ticket}"]}}},"acme":{"command":"acme","workflows":{"refine":{"args":["--task","{ticket}"]}}}}}`)
+
+	cases := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"built-in", []string{"implement", "40", "--session", "demo", "--config", noCfg}, "template: built-in"},
+		{"args-only override stays built-in", []string{"implement", "40", "--session", "demo", "--config", override}, "template: built-in"},
+		{"file-added workflow", []string{"file-added", "40", "--session", "demo", "--config", override}, "template: user-defined (" + override + ")"},
+		{"custom agent", []string{"refine", "40", "--agent", "acme", "--no-sandbox", "--session", "demo", "--config", override}, "template: user-defined (" + override + ")"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			stdout, stderr, code := runDryRun(t, tc.args...)
+			if code != 0 {
+				t.Fatalf("dry-run exited %d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+			}
+			found := false
+			for _, line := range strings.Split(stdout, "\n") {
+				if strings.TrimSpace(line) == tc.want {
+					found = true
+				}
+			}
+			if !found {
+				t.Errorf("dry-run output missing line %q:\n%s", tc.want, stdout)
+			}
+		})
+	}
+}
+
+// #1214 AC 3: a sandbox request (default, flag, or config) the agent cannot
+// satisfy fails the dry run too, with exit 1 and no resolved command.
+func TestRunDryRunUnsatisfiedSandboxFailsClosed(t *testing.T) {
+	acme := `"agents":{"acme":{"command":"acme","workflows":{"refine":{"args":["--task","{ticket}"]}}}}`
+	cases := []struct {
+		name   string
+		config string
+		flags  []string
+	}{
+		{"default", `{` + acme + `}`, nil},
+		{"--sandbox flag", `{` + acme + `}`, []string{"--sandbox"}},
+		{"config sandbox true", `{"sandbox":true,` + acme + `}`, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := writeRunConfig(t, tc.config)
+			args := append([]string{"refine", "40", "--agent", "acme", "--session", "demo", "--config", cfg}, tc.flags...)
+			stdout, stderr, code := runDryRun(t, args...)
+			if code != 1 {
+				t.Errorf("exit code = %d, want 1\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+			}
+			if strings.Contains(stdout, "command:") {
+				t.Errorf("a failed dry run must not print a resolved command:\n%s", stdout)
+			}
+			for _, want := range []string{"acme", "sandboxCommand", "--no-sandbox", `"sandbox": false`} {
+				if !strings.Contains(stderr, want) {
+					t.Errorf("stderr missing %q:\n%s", want, stderr)
+				}
+			}
+		})
+	}
+}
+
+// #1214 AC 2: a custom agent without the requested workflow fails the dry run
+// naming agent, workflow and remedy.
+func TestRunDryRunMissingTemplateFails(t *testing.T) {
+	cfg := writeRunConfig(t, `{"agents":{"acme":{"command":"acme","workflows":{"refine":{"args":["--task","{ticket}"]}}}}}`)
+	stdout, stderr, code := runDryRun(t, "implement", "40", "--agent", "acme", "--no-sandbox", "--session", "demo", "--config", cfg)
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	if strings.Contains(stdout, "command:") {
+		t.Errorf("a failed dry run must not print a resolved command:\n%s", stdout)
+	}
+	for _, want := range []string{"acme", "implement", "agents.acme.workflows.implement"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("stderr missing %q:\n%s", want, stderr)
+		}
+	}
+}
+
+// #1214 AC 5/7: OpenCode stays disabled at the binary boundary -- by flag, by
+// config defaultAgent, and even when a config override supplies workflows and a
+// sandboxCommand -- and never suggests a config override can bypass it.
+func TestRunDryRunDisabledOpenCodeFails(t *testing.T) {
+	override := `{"agents":{"opencode":{"command":"opencode","sandboxCommand":"cenci open","workflows":{"implement":{"args":["--auto","--prompt","/cenci:implement {ticket}"]}}}}}`
+	noCfg := filepath.Join(t.TempDir(), "none.json")
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{"--agent opencode", []string{"--agent", "opencode", "--config", noCfg}},
+		{"config defaultAgent", []string{"--config", writeRunConfig(t, `{"defaultAgent":"opencode"}`)}},
+		{"config override", []string{"--agent", "opencode", "--config", writeRunConfig(t, override)}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			args := append([]string{"implement", "40", "--session", "demo"}, tc.args...)
+			stdout, stderr, code := runDryRun(t, args...)
+			if code != 1 {
+				t.Errorf("exit code = %d, want 1\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+			}
+			if strings.Contains(stdout, "command:") {
+				t.Errorf("a failed dry run must not print a resolved command:\n%s", stdout)
+			}
+			if !strings.Contains(stderr, "temporarily disabled") {
+				t.Errorf("stderr missing \"temporarily disabled\":\n%s", stderr)
+			}
+			for _, banned := range []string{"config.json", "add one"} {
+				if strings.Contains(stderr, banned) {
+					t.Errorf("stderr must not suggest a config override (%q):\n%s", banned, stderr)
+				}
+			}
+		})
 	}
 }
