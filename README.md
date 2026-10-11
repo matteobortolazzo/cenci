@@ -4,7 +4,7 @@
 
 [![Claude Code](https://img.shields.io/badge/Claude_Code-supported-d97757?style=flat-square)](#claude-code-codex-and-opencode)
 [![Codex](https://img.shields.io/badge/Codex-supported-10a37f?style=flat-square)](flow/docs/codex.md)
-[![OpenCode](https://img.shields.io/badge/OpenCode-partial-fab040?style=flat-square)](flow/docs/opencode.md)
+[![OpenCode](https://img.shields.io/badge/OpenCode-paused-grey?style=flat-square)](flow/docs/opencode.md)
 [![Platforms](https://img.shields.io/badge/Linux_%C2%B7_macOS_%C2%B7_WSL2-supported-64748b?style=flat-square)](docs/getting-started.md)
 [![License](https://img.shields.io/badge/license-MIT-8b5cf6?style=flat-square)](LICENSE)
 
@@ -65,7 +65,7 @@ documentation, client adapters, and accumulated rules without requiring lazyboar
 ![Agent hooks send live session state to cenci, which updates tmux and optional desktop status surfaces](docs/assets/cenci-surfaces.svg)
 
 cenci-watch marks each tmux window `▶` running, `!` needing input, or `✓` done.
-Native Claude Code, Codex, and OpenCode integrations update that state immediately;
+Native Claude Code and Codex integrations update that state immediately;
 the same signal can appear in Linux desktop bars and the macOS menu bar. No board is
 required.
 
@@ -75,8 +75,8 @@ required.
 
 Requirements: Linux, macOS, or WSL2; git; curl; jq; cosign; Docker or Podman; and
 Claude Code, Codex, or both. GitHub delivery also needs an authenticated `gh` CLI.
-[OpenCode](flow/docs/opencode.md) is supported as an additional, opt-in agent — it
-layers on top of an existing Claude Code or Codex install rather than standing alone.
+[OpenCode](flow/docs/opencode.md) is temporarily disabled. Its work is parked in an
+[owner-opt-in milestone](https://github.com/matteobortolazzo/cenci/milestone/18).
 
 **1. Install and verify.**
 
@@ -204,14 +204,14 @@ for unattended work.
 |---|---|
 | **Claude Code** | Full gated workflow, sandbox isolation, live monitoring, and PR babysitting |
 | **Codex** | Sandbox isolation, live monitoring, portable conventions, and PR babysitting; native gated workflow in development |
-| **OpenCode** | Direct sandbox sessions, live monitoring, and portable engineering conventions via `--agent opencode`; opt-in during install and requires an existing Claude Code or Codex install; no native gated workflow, workflow dispatch, usage-budget tracking, or corrective PR babysitting yet |
+| **OpenCode** | Temporarily disabled; implementation retained, development deferred until owner opt-in |
 
-All three clients can share one install, repository, and status surface. Workflow run,
+Claude Code and Codex can share one install, repository, and status surface. Workflow run,
 dispatch, and babysit availability must follow executable client capabilities, not an
 `agent:<name>` label.
 
-A direct OpenCode session is supported; OpenCode pipeline dispatch is not currently a
-supported contract.
+OpenCode launch, workflow run, dispatch, babysit, and installation paths refuse while
+paused. Existing resources remain visible for diagnosis, stopping, and cleanup.
 
 [See current delivery status →](docs/roadmap.md) ·
 [Read the Codex implementation guide →](flow/docs/codex.md) ·

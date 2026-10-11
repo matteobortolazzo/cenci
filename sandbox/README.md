@@ -1,5 +1,10 @@
 # cenci-sandbox
 
+> **OpenCode is temporarily disabled.** New sessions and agent/plugin updates refuse;
+> bulk updates skip it. Existing resources can still be inspected, stopped, and cleaned
+> up. OpenCode implementation details below are retained for future work in the
+> [owner-opt-in milestone](https://github.com/matteobortolazzo/cenci/milestone/18).
+
 > Part of [cenci](../README.md) — the **isolation layer**. See the root README for
 > the one-command install and how the isolation, workflow, and attention layers fit together.
 
@@ -123,7 +128,7 @@ cn                    # Claude Code (`cn <args>` is exactly `cenci open <args>`)
 cn xa                 # Codex, gpt-6-astra
 cn ch                 # Claude, haiku (shortcuts: ch/cs/co/cf, xl/xt/xa/xs)
 cenci open --agent codex --model gpt-6.1-sol --name mybox
-cenci open --agent opencode --name mybox     # OpenCode (no cenci-side shortcuts yet)
+# OpenCode launches are temporarily disabled.
 
 # Pass args through to the agent CLI — everything after a bare -- is forwarded verbatim
 cn -- -p "fix the tests"
@@ -194,8 +199,8 @@ it.
 ### Choosing an agent
 
 `cenci open` launches Claude Code by default. Pass `--agent codex` (or use an
-`xl`/`xt`/`xa`/`xs` shortcut) to launch Codex instead, or `--agent opencode` to launch OpenCode
-(no cenci-side shortcuts for OpenCode yet). All three agents run at full permission
+`xl`/`xt`/`xa`/`xs` shortcut) to launch Codex instead. `--agent opencode` currently refuses
+because OpenCode is temporarily disabled. Enabled agents run at full permission
 inside the container — Claude with `--dangerously-skip-permissions`, Codex with
 `--dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust`. OpenCode has no
 equivalent CLI flag; its permissions are config-driven via a seeded `opencode.json` instead —

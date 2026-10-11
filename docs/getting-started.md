@@ -40,8 +40,7 @@ Claude Code is required for the complete interactive ticket-to-PR workflow. A
 Codex-only installation still provides container isolation, monitoring, portable
 engineering conventions, and the [Codex implementation recipe](../flow/docs/codex.md).
 
-[OpenCode](https://opencode.ai) is an additional, opt-in agent layered on top of an
-existing Claude Code or Codex install — it is not a standalone option. See
+[OpenCode](../flow/docs/opencode.md) is temporarily disabled. See
 [OpenCode support](#opencode-support-additional-opt-in-agent) below.
 
 Optional features have separate dependencies:
@@ -205,40 +204,21 @@ lose and how to replace it, and the residual gaps that have no mitigation.
 
 ## OpenCode support (additional, opt-in agent)
 
-> **Host-safety notice:** [#1018](https://github.com/matteobortolazzo/cenci/issues/1018)
-> tracks a host OpenCode configuration bug in the current installer. Until it lands,
-> do not accept the OpenCode integration prompt on a corporate or otherwise trusted
-> host. Direct OpenCode support must also not be treated as workflow-dispatch support;
-> [#1019](https://github.com/matteobortolazzo/cenci/issues/1019) makes that boundary
-> fail closed.
+OpenCode is temporarily disabled. The installer detects it and reports the pause,
+but does not offer setup, link skills, or modify its configuration. Direct sessions,
+workflow runs (including user templates), dispatch, babysit, and explicit agent/plugin
+updates refuse; bulk updates skip OpenCode.
 
-The installer also detects [OpenCode](https://opencode.ai) and, when found, offers an
-opt-in integration on top of your existing Claude Code or Codex install — OpenCode is
-never a standalone option; `install.sh` still requires Claude Code, Codex, or both.
+Existing host settings, credentials, containers, and volumes remain intact.
+`cenci doctor` reports the pause and can inspect legacy registration/authentication.
+Diagnosis, stopping, and cleanup remain available; `cenci uninstall` can remove
+cenci-owned skill symlinks and plugin registration while preserving other settings.
 
-When OpenCode is detected during install or update, you're asked:
-
-```text
-OpenCode detected — link cenci's skills and register its plugin?
-```
-
-Accepting symlinks cenci's portable convention skills into OpenCode's skills directory
-(see [flow's OpenCode support](../flow/docs/opencode.md)) and registers the cenci-watch
-OpenCode plugin (`watch/plugin/opencode`) in `opencode.json`, so OpenCode sessions report
-live status the same way Claude Code and Codex sessions do. `cenci uninstall` reverses
-both when it runs.
-
-`cenci doctor` reports, separately: whether the detected OpenCode is new enough to
-support this integration (the pinned minimum version and known limitations live in
-[cenci-watch's OpenCode adapter section](../watch/README.md#dispatching-workflows-cenci-run)),
-whether skills are linked and the plugin is registered, and whether a provider is
-authenticated. Provider auth is checked via either `ANTHROPIC_API_KEY`/`OPENAI_API_KEY`
-in your environment or the presence of `opencode auth login`'s
-`~/.local/share/opencode/auth.json` — never a live API call.
-
-Once set up, launch OpenCode with `--agent opencode` (see
-[Choosing an agent](../sandbox/README.md#choosing-an-agent)); there is no one-token
-shortcut for it yet.
+OpenCode-only fixes and scope extracted from shared tickets are parked in the
+[owner-opt-in milestone](https://github.com/matteobortolazzo/cenci/milestone/18),
+with no due date. Re-enablement is tracked by
+[#1222](https://github.com/matteobortolazzo/cenci/issues/1222) and requires an explicit
+owner decision. Shared Claude/Codex work continues in its existing milestones.
 
 ## Update
 

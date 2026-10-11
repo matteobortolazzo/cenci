@@ -569,8 +569,8 @@ doctor_sysbox() {
 
 # opencode_config_dir — OpenCode's config directory, matching the exact
 # expression flow/opencode/install-skills.sh uses for its own TARGET_DIR, so
-# doctor's file-based checks below stay in sync with what that script (and
-# sandbox/lib/opencode-config.sh's seed_opencode_config) actually writes to.
+# doctor and uninstall inspect the same legacy paths. Host setup is paused;
+# sandbox/lib/opencode-config.sh remains a retained container-side helper.
 opencode_config_dir() {
 	printf '%s' "${XDG_CONFIG_HOME:-$HOME/.config}/opencode"
 }
@@ -595,7 +595,7 @@ opencode_skills_linked() {
 
 # OPENCODE_PLUGIN_SPEC_PATTERN — an extended-regex fragment matching the
 # cenci-watch OpenCode plugin's file:// spec regardless of which
-# find_plugin_path branch resolved it when step_opencode_setup registered it:
+# find_plugin_path branch resolved it when a legacy installer registered it:
 # the marketplace-checkout branch's path ends in watch/plugin/opencode, while
 # the plugin-cache fallback branch strips the watch/plugin/ prefix before
 # searching, producing .../cenci-watch/<version>/opencode instead — with no
@@ -606,7 +606,7 @@ opencode_skills_linked() {
 OPENCODE_PLUGIN_SPEC_PATTERN='watch/plugin/opencode|cenci-watch/[^/"]+/opencode'
 
 # opencode_plugin_registered — true when the cenci-watch OpenCode plugin's
-# file:// spec (registered by seed_opencode_config) is present in
+# file:// spec from a legacy installation is present in
 # opencode.json's .plugin array.
 opencode_plugin_registered() {
 	local config
@@ -626,11 +626,12 @@ opencode_plugin_registered() {
 # — not duplicated here.
 doctor_opencode_support() {
 	[ "$HAS_OPENCODE" -eq 1 ] || return 0
+	warn "OpenCode is temporarily disabled; existing resources remain available for diagnosis and removal"
 	local raw version
 	raw="$(opencode --version 2>/dev/null || true)"
 	version="$(printf '%s' "$raw" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
 	if [ -n "$version" ] && printf '%s\n%s\n' "$OPENCODE_MIN_VERSION" "$version" | sort -V -C 2>/dev/null; then
-		ok "OpenCode ${version} supports cenci integration"
+		ok "OpenCode ${version} meets the retained minimum version (integration paused)"
 	else
 		warn "OpenCode ${version:-unknown} is unsupported — cenci requires ${OPENCODE_MIN_VERSION} or newer"
 	fi
@@ -1374,55 +1375,12 @@ step_cenci_watch_setup() {
 	fi
 }
 
-# step_opencode_setup is OpenCode's opt-in counterpart to the SwiftBar block
-# above: an already-detected optional integration, offered here rather than
-# gating install on it (OpenCode-only hosts stay unsupported — see
-# have_supported_client). Guards on HAS_OPENCODE plus every asset it needs
-# being resolvable from the marketplace checkout, mirroring the SwiftBar
-# script's own silent-skip-if-unresolvable shape. Also gates on `selected
-# cenci-watch` like every other opt-in step below (step_cenci_watch_setup,
-# etc.): the plugin it registers belongs to cenci-watch, so a user who
-# deselected it (SELECTED pruned by prune_selected_to_installed) must not
-# have it silently registered anyway. Idempotent and safe to re-run:
-# flow/opencode/install-skills.sh only links what's missing, and
-# seed_opencode_config only seeds what's absent and dedups the plugin entry —
-# never reimplemented here, just called.
+# OpenCode setup is paused on both install and update. Retain detection and
+# doctor/uninstall support for existing installations, but never prompt, link
+# skills, or seed host config. Re-enablement is #1222 and must address #1018.
 step_opencode_setup() {
 	[ "$HAS_OPENCODE" -eq 1 ] || return 0
-	selected cenci-watch || return 0
-	local skills_script watch_dir config_lib plugin_root opencode_json
-
-	skills_script=$(find_plugin_path "flow/opencode/install-skills.sh") || return 0
-	watch_dir=$(find_plugin_path "watch/plugin/opencode") || return 0
-	config_lib=$(find_plugin_path "sandbox/lib/opencode-config.sh") || return 0
-
-	step "Setting up OpenCode integration"
-	if ! ask_yn "OpenCode detected — link cenci's skills and register its plugin?" y; then
-		say "  ${DIM}skipped — re-run the installer to set it up${RESET}"
-		return 0
-	fi
-
-	plugin_root="$(dirname "$(dirname "$skills_script")")"
-	chmod +x "$skills_script" 2>/dev/null || true
-	if ! PLUGIN_ROOT="$plugin_root" bash "$skills_script" install; then
-		warn "OpenCode skill linking failed — see flow/opencode/install-skills.sh"
-		INSTALL_FAILED=1
-	fi
-
-	# shellcheck source=/dev/null
-	source "$config_lib"
-	opencode_json="$(opencode_config_dir)/opencode.json"
-	seed_opencode_config "$opencode_json" "file://$watch_dir" || true
-	# seed_opencode_config can return 0 without actually registering anything
-	# (e.g. an existing opencode.json that isn't valid JSON is left
-	# untouched) — verify the entry actually landed rather than trusting its
-	# exit code alone, so a silent no-op doesn't get reported as success.
-	if opencode_plugin_registered; then
-		ok "OpenCode plugin registered ($opencode_json)"
-	else
-		warn "OpenCode plugin registration may not have applied — check $opencode_json manually"
-		INSTALL_FAILED=1
-	fi
+	warn "OpenCode is temporarily disabled; skipping integration setup"
 }
 
 # setup_cenci_linux_path makes bar widgets (DMS, noctalia, waybar) able to

@@ -55,7 +55,7 @@ func runOpen(args []string) {
 	}
 
 	fs := flag.NewFlagSet("open", flag.ExitOnError)
-	agentFlag := fs.String("agent", "", "agent to launch (claude, codex, or opencode)")
+	agentFlag := fs.String("agent", "", "agent to launch (claude or codex; OpenCode is temporarily disabled)")
 	modelFlag := fs.String("model", "", "model override")
 	nameFlag := fs.String("name", "", "sandbox instance name")
 	shellFlag := fs.Bool("shell", false, "attach a shell instead of launching the agent")
@@ -79,6 +79,10 @@ func runOpen(args []string) {
 	finalAgent := shortcutAgent
 	if *agentFlag != "" {
 		finalAgent = *agentFlag
+	}
+	if reason := sandbox.AgentDisabledReason(finalAgent); reason != "" {
+		fmt.Fprintf(os.Stderr, "cenci open: %s\n", reason)
+		os.Exit(2)
 	}
 
 	finalModel := shortcutModel

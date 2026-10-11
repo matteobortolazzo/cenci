@@ -606,7 +606,7 @@ func (e *Engine) maintenanceRunArgs(agent string, scope Scope, command string, p
 // this ensures that image exists/is current first, independent of whatever
 // image the caller's launch scope selected.
 func (e *Engine) UpdateAgent(agent, version string) error {
-	if err := ValidateAgent(agent); err != nil {
+	if err := ValidateActiveAgent(agent); err != nil {
 		return err
 	}
 	if err := e.EnsureMonolithImage(); err != nil {
@@ -892,7 +892,7 @@ func (e *Engine) refreshRunningContainerPlugins(agent, containerName string) err
 // for scope, propagating a malformed-config error unchanged (a running
 // target must never hard-fail on a config problem it doesn't even read).
 func (e *Engine) UpdatePlugins(agent string, scope Scope) error {
-	if err := ValidateAgent(agent); err != nil {
+	if err := ValidateActiveAgent(agent); err != nil {
 		return err
 	}
 
@@ -952,7 +952,7 @@ func (e *Engine) RefreshRunningPlugins() error {
 	}
 	for _, rc := range all {
 		agent, ok := sandbox.AgentForContainerName(rc.Name)
-		if !ok {
+		if !ok || sandbox.AgentDisabledReason(agent) != "" {
 			continue
 		}
 		if err := e.WithRuntime(rc.Runtime).refreshRunningContainerPlugins(agent, rc.Name); err != nil {

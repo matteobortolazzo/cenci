@@ -1,5 +1,11 @@
 # cenci-watch
 
+> **OpenCode is temporarily disabled.** New sessions, workflows (including custom
+> templates), dispatch, babysit, and agent/plugin updates refuse. Bulk updates skip it.
+> Existing OpenCode resources remain discoverable for diagnosis, stopping, and cleanup.
+> Retained OpenCode details describe the previous implementation. Development resumes
+> only after owner opt-in in the [deferred milestone](https://github.com/matteobortolazzo/cenci/milestone/18).
+
 > Part of [cenci](../README.md) — the **attention layer**. See the root README for
 > the one-command install and how the isolation, workflow, and attention layers fit together.
 
@@ -246,20 +252,13 @@ the host (the same as passing `--no-sandbox`):
       "workflows": {
         "implement": { "args": ["exec", "/cenci:implement {ticket}"] }
       }
-    },
-    "opencode": {
-      "command": "opencode",
-      "workflows": {
-        "implement": { "args": ["run", "implement {ticket}"] }
-      }
     }
   }
 }
 ```
 
-Only the built-in Claude templates ship today; Codex and opencode require a
-`config.json` entry. Until one is configured, `--agent codex` exits with a helpful "no
-launch template" error.
+Claude Code and Codex have built-in templates. OpenCode is temporarily disabled;
+adding a `config.json` entry does not bypass the pause.
 
 A workflow can optionally define `sandboxArgs` to replace its host `args` when
 `sandboxCommand` is selected. Both support the same placeholders and merge
@@ -268,8 +267,8 @@ Claude uses host `args: ["--print", "--", "<prompt>"]`, but needs
 `sandboxArgs: ["--", "--print", "<prompt>"]` to forward print mode through
 `cenci open` rather than treating it as a launcher flag.
 
-**OpenCode:** this adapter requires OpenCode 1.18.3 or newer — `cenci-installer
-doctor` enforces this same minimum when it detects OpenCode on the host (see
+**OpenCode (paused):** the retained adapter targets OpenCode 1.18.3 or newer. Doctor
+reports the pause and inspects legacy integration state (see
 [Installer integration](#installer-integration-cenci-doctor-cenci-update-cenci-uninstall)
 below). Model/provider resolution follows the same override chain as the
 `--model` flag above: an explicit `--model` flag on the command line overrides
@@ -279,7 +278,7 @@ provider/model OpenCode itself would default to when neither is set.
 Known limitations: no `TokenReader` is wired for OpenCode yet, so it has no
 usage-budget headroom tracking (see [Budget headroom](#budget-headroom)
 below); and it has no one-token `open` shortcut yet (see the shortcut table
-below) — launch it with `--agent opencode`.
+below). `--agent opencode` currently refuses.
 
 ## Local incident worker (`cenci incident`)
 
@@ -1783,7 +1782,7 @@ cenci sandbox prune             # remove superseded base tags, dangling images, 
 cenci sandbox prune --images    # …and prompt ([y/N], default deny) for per-repo images (cenci-sandbox-<slug>:latest)
 cenci sandbox prune --volumes   # …and prompt ([y/N], default deny) for home and shared CLI volumes
                                 # --images and --volumes are independent; combine them for both prompts
-cenci sandbox update-agent [--agent claude|codex|opencode] [--version <exact-semver>]
+cenci sandbox update-agent [--agent claude|codex] [--version <exact-semver>]
                                 # atomically update the host-global, workload-read-only CLI volume;
                                 # refuses (exit 2) if the volume is pinned, naming --unpin/--version
 cenci sandbox update-agent --unpin
@@ -1795,7 +1794,7 @@ cenci sandbox update-agent --all
                                 # volume that doesn't exist; ignores TTL/backoff; skips a pinned
                                 # volume with a notice instead of refusing; usage error if combined
                                 # with an explicit --agent, --version, or --unpin
-cenci sandbox update-plugins [--agent claude|codex|opencode] [--name <n>]
+cenci sandbox update-plugins [--agent claude|codex] [--name <n>]
                                 # force-refresh the plugins inside the container/volume (ttl 0)
 cenci sandbox update-plugins --all
                                 # force-refresh plugins in every running sandbox container on the host;
@@ -1813,7 +1812,7 @@ cenci sandbox stop agentstack   # only containers whose name contains "agentstac
 cenci open ch                   # claude + haiku
 cenci open xs                   # codex + gpt-6.1-sol
 cenci open xa                   # codex + gpt-6-astra
-cenci open --agent opencode --name mybox
+# OpenCode launches are temporarily disabled.
 cenci open ch -- --resume       # forward flags after -- straight to the agent CLI
 cenci open ch --dry-run -- --resume
                                  # print the exact launch commands (and posture) without creating anything
@@ -1869,7 +1868,7 @@ period on any host that keeps launching sandboxes — set
 | `ch` / `cs` / `co` / `cf` | claude | haiku / sonnet / opus / fable |
 | `xl` / `xt` / `xa` / `xs` | codex | gpt-6-luna / gpt-5.6-terra / gpt-6-astra / gpt-6.1-sol |
 
-OpenCode has no one-token shortcut yet — launch it with `--agent opencode`.
+OpenCode is temporarily disabled; `--agent opencode` refuses, including dry runs.
 
 Without a shortcut or `--model`, the model defaults per agent (claude→`sonnet`,
 codex→`gpt-5.6-terra`, opencode→ no default, config-driven). A shortcut and a

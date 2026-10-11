@@ -1,5 +1,9 @@
 # OpenCode smoke matrix
 
+> **Paused:** OpenCode is temporarily disabled. This checklist is retained for
+> [owner-authorized re-enablement (#1222)](https://github.com/matteobortolazzo/cenci/issues/1222);
+> it is not an active release gate or a supported launch recipe during the pause.
+
 > **Manual, maintainer-run checklist — not automated, not CI-gated.** Nothing in this
 > repository executes the steps below: they require a real OpenCode CLI, real
 > Anthropic/OpenAI credentials, and a real GitHub issue/PR. Running them is an explicit

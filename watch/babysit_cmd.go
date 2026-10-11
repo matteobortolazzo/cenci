@@ -9,11 +9,12 @@ import (
 	"time"
 
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/babysit"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/sandbox"
 )
 
 // babysitUsage is the one-line usage hint for `cenci babysit <pr> --agent
 // ...`, printed to stderr on a malformed-CLI invocation (exit 2).
-const babysitUsage = "cenci babysit: usage: cenci babysit <pr> --agent <claude|codex|opencode> [--interval 15m] [--once] [--session <name>] [--dir <path>]"
+const babysitUsage = "cenci babysit: usage: cenci babysit <pr> --agent <claude|codex> [--interval 15m] [--once] [--session <name>] [--dir <path>]"
 
 // parseBabysitArgs parses and validates the arguments for the main (non-
 // "stop") `cenci babysit <pr> --agent <agent> ...` invocation. It performs no
@@ -25,7 +26,7 @@ const babysitUsage = "cenci babysit: usage: cenci babysit <pr> --agent <claude|c
 func parseBabysitArgs(args []string) (babysit.Options, bool) {
 	fs := flag.NewFlagSet("babysit", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	agent := fs.String("agent", "", "agent to launch for actionable work (claude, codex, or opencode)")
+	agent := fs.String("agent", "", "agent to launch for actionable work (claude or codex; OpenCode is temporarily disabled)")
 	interval := fs.Duration("interval", 15*time.Minute, "base polling interval")
 	once := fs.Bool("once", false, "run one tick in the foreground")
 	stateDir := fs.String("state-dir", "", "state directory (default: $XDG_STATE_HOME/cenci/babysit)")
@@ -66,6 +67,10 @@ func runBabysit(args []string) {
 	opts, ok := parseBabysitArgs(args)
 	if !ok {
 		fmt.Fprintln(os.Stderr, babysitUsage)
+		os.Exit(2)
+	}
+	if reason := sandbox.AgentDisabledReason(opts.Agent); reason != "" {
+		fmt.Fprintf(os.Stderr, "cenci babysit: %s\n", reason)
 		os.Exit(2)
 	}
 	if err := babysit.Run(opts); err != nil {

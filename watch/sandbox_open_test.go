@@ -1141,7 +1141,7 @@ func TestSandboxUpdateAgent_All_NeverBootstraps_OnlyRefreshesExistingVolume(t *t
 	assets := writeAssetFixture(t)
 
 	cmd := exec.Command(binaryPath, "sandbox", "update-agent", "--all")
-	cmd.Env = append(batchEnv(t, fakeDir, assets), "FAKE_VOLUMES=cenci-agent-cli-claude\n")
+	cmd.Env = append(batchEnv(t, fakeDir, assets), "FAKE_VOLUMES=cenci-agent-cli-claude\ncenci-agent-cli-opencode\n")
 	cmd.Dir = t.TempDir()
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -1238,7 +1238,7 @@ func TestSandboxUpdatePluginsAll_RefreshesEveryRunningContainer(t *testing.T) {
 	assets := writeAssetFixture(t)
 
 	cmd := exec.Command(binaryPath, "sandbox", "update-plugins", "--all")
-	cmd.Env = append(batchEnv(t, fakeDir, assets), "FAKE_PS=claude-cenci-one\nclaude-cenci-two\ncodex-cenci-three\n")
+	cmd.Env = append(batchEnv(t, fakeDir, assets), "FAKE_PS=claude-cenci-one\nclaude-cenci-two\ncodex-cenci-three\nopencode-cenci-paused\n")
 	cmd.Dir = t.TempDir()
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -1250,6 +1250,9 @@ func TestSandboxUpdatePluginsAll_RefreshesEveryRunningContainer(t *testing.T) {
 		if !anyLineContains(lines, "exec -u dev "+name+" /bin/bash -c") {
 			t.Errorf("expected a plugin refresh exec for %q, got calls:\n%s", name, strings.Join(lines, "\n"))
 		}
+	}
+	if anyLineContains(lines, "exec -u dev opencode-cenci-paused") {
+		t.Fatalf("bulk plugin refresh touched disabled OpenCode: %v", lines)
 	}
 }
 
@@ -3443,54 +3446,21 @@ func TestOpenCodex_ForwardsProviderKeyPerExecOnly(t *testing.T) {
 	}
 }
 
-// TestOpenOpencode_FreshCreate_PinsBareInvocationAndScopesProviderKeys pins
-// #490's launch contract for OpenCode: a bare `opencode` invocation (no
-// --dangerously-skip-permissions equivalent — permissions are config-driven
-// via the seeded opencode.json), and ANTHROPIC_API_KEY/OPENAI_API_KEY
-// forwarded only at exec time (per-session), never baked into the
-// container-lifetime create-time env/PID-1 environ.
-func TestOpenOpencode_FreshCreate_PinsBareInvocationAndScopesProviderKeys(t *testing.T) {
+// Authenticated OpenCode launches also refuse before runtime side effects.
+func TestOpenOpencodeDisabledWithCredentialsDoesNotTouchRuntime(t *testing.T) {
 	fakeDir := t.TempDir()
 	callLog := writeScriptedRuntimes(t, fakeDir)
 	assets := writeAssetFixture(t)
 	env, _, _ := openTestEnv(t, fakeDir, assets)
-
 	cmd := exec.Command(binaryPath, "open", "--agent", "opencode")
 	cmd.Env = append(env, "ANTHROPIC_API_KEY=sk-test-anthropic", "OPENAI_API_KEY=sk-test-openai")
 	cmd.Dir = t.TempDir()
-	if output, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("open --agent opencode: %v\n%s", err, output)
+	out, err := cmd.CombinedOutput()
+	if err == nil || !strings.Contains(string(out), "OpenCode is temporarily disabled") {
+		t.Fatalf("expected pause refusal: %v %s", err, out)
 	}
-
-	lines := callLogLines(t, callLog)
-	runLine, ok := findLineWithPrefix(lines, "run --name ")
-	if !ok {
-		t.Fatalf("expected a container run, got calls:\n%s", strings.Join(lines, "\n"))
-	}
-	for _, forbidden := range []string{"ANTHROPIC_API_KEY", "OPENAI_API_KEY"} {
-		if strings.Contains(runLine, forbidden) {
-			t.Errorf("create-time run args must never bake provider keys into the PID-1 environ; got %q in:\n%s", forbidden, runLine)
-		}
-	}
-
-	line := attachLine(t, lines)
-	if !strings.HasSuffix(line, "/opt/cenci-agent/current/node_modules/.bin/opencode") {
-		t.Errorf("attach argv = %q, want a bare opencode invocation with no permission-skip flag and no forced --model", line)
-	}
-	for _, name := range []string{"ANTHROPIC_API_KEY", "OPENAI_API_KEY"} {
-		if !strings.Contains(line, "-e "+name) {
-			t.Errorf("attach argv missing bare -e %s (opencode-only per-exec provider key forwarding):\n%s", name, line)
-		}
-	}
-	for _, secret := range []string{"sk-test-anthropic", "sk-test-openai"} {
-		if strings.Contains(line, secret) {
-			t.Errorf("attach argv must never carry a provider key secret VALUE (readable via ps for the whole session, #759); got:\n%s", line)
-		}
-	}
-	for _, forbidden := range []string{"ANTHROPIC_API_KEY=", "OPENAI_API_KEY="} {
-		if strings.Contains(line, forbidden) {
-			t.Errorf("attach argv must forward provider keys value-less (bare -e NAME, #759); got %q in:\n%s", forbidden, line)
-		}
+	if lines := callLogLines(t, callLog); len(lines) != 0 {
+		t.Fatalf("disabled launch touched runtime: %v", lines)
 	}
 }
 
@@ -3565,12 +3535,8 @@ func TestOpenClaude_ForwardsContext7KeyValuelessAtCreateTime(t *testing.T) {
 	}
 }
 
-// TestOpenOpencodeWithoutAuth_Exits1 mirrors TestOpenCodexWithoutAuth_Exits1:
-// OpenCode has a hard credential requirement (ANTHROPIC_API_KEY,
-// OPENAI_API_KEY, or a staged ~/.local/share/opencode/auth.json), so a launch
-// with none of those present must fail before ever creating the workload
-// container.
-func TestOpenOpencodeWithoutAuth_Exits1(t *testing.T) {
+// A missing credential must not mask the explicit product pause.
+func TestOpenOpencodeWithoutAuth_ReportsDisabled(t *testing.T) {
 	fakeDir := t.TempDir()
 	callLog := writeScriptedRuntimes(t, fakeDir)
 	assets := writeAssetFixture(t)
@@ -3585,11 +3551,11 @@ func TestOpenOpencodeWithoutAuth_Exits1(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected *exec.ExitError, got %T: %v\n%s", err, err, output)
 	}
-	if exitErr.ExitCode() != 1 {
-		t.Errorf("exit code = %d, want 1\n%s", exitErr.ExitCode(), output)
+	if exitErr.ExitCode() != 2 {
+		t.Errorf("exit code = %d, want 2\n%s", exitErr.ExitCode(), output)
 	}
-	if !strings.Contains(string(output), "OpenCode") || !strings.Contains(string(output), "auth") {
-		t.Errorf("expected an OpenCode auth error, got:\n%s", output)
+	if !strings.Contains(string(output), "OpenCode is temporarily disabled") {
+		t.Errorf("expected an OpenCode pause refusal, got:\n%s", output)
 	}
 	if lines := callLogLines(t, callLog); anyLineContains(lines, "run --name ") {
 		t.Errorf("expected no workload container run without opencode auth, got:\n%s", strings.Join(lines, "\n"))

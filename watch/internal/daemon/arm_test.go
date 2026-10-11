@@ -8,6 +8,7 @@ package daemon
 import (
 	"bytes"
 	"log"
+	"strings"
 	"testing"
 	"time"
 
@@ -44,6 +45,18 @@ func (s *recordingArmSpawn) spawn(req ipc.ArmRequest) ipc.ArmResponse {
 
 func validArmRequest() ipc.ArmRequest {
 	return ipc.ArmRequest{PR: "42", Repo: "o/r", Agent: "claude", Interval: 15 * time.Minute, TmuxPane: "%3"}
+}
+
+func TestHandleArmRequest_DisabledOpenCodeNeverSpawns(t *testing.T) {
+	spawn := &recordingArmSpawn{resp: ipc.ArmResponse{OK: true}}
+	d := newTestDaemon(&tmuxtest.MockClient{})
+	d.armSpawn = spawn.spawn
+	req := validArmRequest()
+	req.Agent = "opencode"
+	resp := d.handleArmRequest(req)
+	if resp.OK || !strings.Contains(resp.Reason, "OpenCode is temporarily disabled") || len(spawn.calls) != 0 {
+		t.Fatalf("disabled arm must nack without spawn: %+v, calls=%+v", resp, spawn.calls)
+	}
 }
 
 // -- validation: PR must be a positive integer -------------------------------

@@ -89,6 +89,18 @@ func ValidateAgent(agent string) error {
 	return usageErrorf("unknown agent %q. Valid agents: claude, codex, opencode.", agent)
 }
 
+// ValidateActiveAgent also refuses paused clients on launch/update paths.
+// ValidateAgent remains available for read-only and legacy-resource operations.
+func ValidateActiveAgent(agent string) error {
+	if err := ValidateAgent(agent); err != nil {
+		return err
+	}
+	if reason := sandbox.AgentDisabledReason(agent); reason != "" {
+		return usageErrorf("%s", reason)
+	}
+	return nil
+}
+
 // IsExactSemver rejects npm tags and ranges while allowing exact stable and
 // prerelease versions for controlled rollout or rollback.
 func IsExactSemver(version string) bool {
@@ -137,7 +149,7 @@ func (e *Engine) resolveLaunchContext(opts Options) (launchCtx, error) {
 	if agent == "" {
 		agent = "claude"
 	}
-	if err := ValidateAgent(agent); err != nil {
+	if err := ValidateActiveAgent(agent); err != nil {
 		return launchCtx{}, err
 	}
 	model := opts.Model

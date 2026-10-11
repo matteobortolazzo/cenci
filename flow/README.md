@@ -57,11 +57,11 @@ engineering conventions and native workflow foundations described in
 implementation workflow as a documented `AGENTS.md` equivalent. The interactive
 pipeline itself remains Claude Code-only. See [`docs/codex.md`](docs/codex.md).
 
-**OpenCode support**: OpenCode receives the same portable convention skills as real
-symlinks via `opencode/install-skills.sh`, plus project guidance as `AGENTS.md` prose.
-OpenCode has no plugin marketplace or hook system today, so there is no executable
-OpenCode primary agent or `/cenci:*` command yet, and the interactive pipeline itself
-remains Claude Code-only. See [`docs/opencode.md`](docs/opencode.md).
+**OpenCode support is temporarily disabled.** Skill installation refuses; removal of
+legacy cenci symlinks remains available. Implementation and the portable-skill inventory
+below are retained for a future restart, not an active support claim. Work resumes only
+upon owner opt-in in the [deferred milestone](https://github.com/matteobortolazzo/cenci/milestone/18).
+See [`docs/opencode.md`](docs/opencode.md).
 
 ## Skill portability
 

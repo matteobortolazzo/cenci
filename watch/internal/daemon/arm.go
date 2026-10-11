@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/ipc"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/sandbox"
 )
 
 // Stable nack reason constants for a rejected babysit-arm request (#1094).
@@ -145,6 +146,10 @@ func (d *Daemon) handleArmRequest(req ipc.ArmRequest) ipc.ArmResponse {
 	if !armAgents[req.Agent] {
 		d.logArmReject(req, ReasonInvalidAgent)
 		return ipc.ArmResponse{OK: false, Reason: ReasonInvalidAgent}
+	}
+	if reason := sandbox.AgentDisabledReason(req.Agent); reason != "" {
+		d.logArmReject(req, reason)
+		return ipc.ArmResponse{OK: false, Reason: reason}
 	}
 	if req.Interval < armIntervalMin || req.Interval > armIntervalMax {
 		d.logArmReject(req, ReasonInvalidInterval)

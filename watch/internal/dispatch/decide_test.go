@@ -328,7 +328,10 @@ func TestDecideAgentRouting(t *testing.T) {
 	// No label ⇒ config DefaultAgent.
 	in = baseInputs()
 	in.Config.DefaultAgent = "opencode"
-	assertDecisions(t, Decide(in), []wantDecision{{42, ActionDispatch, "dispatch", "opencode"}})
+	got := Decide(in)
+	if len(got) != 1 || got[0].Action != ActionSkip || !strings.Contains(got[0].Reason, "OpenCode is temporarily disabled") {
+		t.Fatalf("expected a pause refusal: %+v", got)
+	}
 }
 
 func TestDecideAgentFallback(t *testing.T) {
@@ -378,18 +381,12 @@ func TestDecideAgentFallback(t *testing.T) {
 	})
 }
 
-// TestDecideAgentFallbackToOpenCodeWhenPreferredExhausted is a #488
-// regression/confirmation test: agentPreference and Decide's budget-fallback
-// walk are already fully agent-neutral (opencode is just another string),
-// so this is expected to pass without any dispatch package changes — it
-// pins that "opencode" specifically (not just an arbitrary agent name)
-// survives as the exhausted-fallback target and stays Unlimited absent a
-// floor/reader for it.
-func TestDecideAgentFallbackToOpenCodeWhenPreferredExhausted(t *testing.T) {
+// Disabled clients must not become an unlimited budget fallback.
+func TestDecideDisabledOpenCodeCannotBeBudgetFallback(t *testing.T) {
 	in := baseInputs()
 	in.Budgets = FloorProvider{Floors: map[string]float64{"claude": 0, "codex": 0}}
 	in.Config.AgentPreference = []string{"claude", "codex", "opencode"}
-	assertDecisions(t, Decide(in), []wantDecision{{42, ActionDispatch, "dispatch", "opencode"}})
+	assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, "budget exhausted", ""}})
 }
 
 func TestDecideOrderingDeterminism(t *testing.T) {
