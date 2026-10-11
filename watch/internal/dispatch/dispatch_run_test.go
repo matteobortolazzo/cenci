@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/exectest"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/run"
 	"github.com/matteobortolazzo/cenci/watch/v2/pkg/watch"
 )
@@ -1860,4 +1861,466 @@ esac
 	if dryDecisions[0].Reason != realDecisions[0].Reason {
 		t.Fatalf("dry-run reason %q != real-pass reason %q, want identical (AC5)", dryDecisions[0].Reason, realDecisions[0].Reason)
 	}
+}
+
+// -- #1218: orphaned container sessions in the capacity gate (RunOnce wiring) --
+//
+// Every RunOnce test in this package runs under main_test.go's hermetic
+// default probe (0, nil), so none of them can exec into a developer's real
+// docker/podman. The tests below either stub the seam to assert the wiring, or
+// restore the real default probe against fake runtimes on a restricted PATH.
+
+// stubContainerSessionProbe installs a probe seam returning (count, err) for
+// the duration of the test and returns a pointer to its call counter.
+func stubContainerSessionProbe(t *testing.T, count int, err error) *int {
+	t.Helper()
+	calls := 0
+	restore := containerSessionProbeFn
+	containerSessionProbeFn = func() (int, error) {
+		calls++
+		return count, err
+	}
+	t.Cleanup(func() { containerSessionProbeFn = restore })
+	return &calls
+}
+
+// useRealContainerSessionProbe restores the production probe over main_test.go's
+// hermetic default stub; callers must also restrict PATH to fakes first.
+func useRealContainerSessionProbe(t *testing.T) {
+	t.Helper()
+	restore := containerSessionProbeFn
+	containerSessionProbeFn = defaultContainerSessionProbe
+	t.Cleanup(func() { containerSessionProbeFn = restore })
+}
+
+// restrictPATHToFakes replaces PATH with a private directory holding only the
+// fake gh already installed (symlinked), the real git (RunOnce's main sync
+// needs it), and the given fake executables (name -> shell body). It fails
+// the test if the resolved gh is not the fake or an ambient docker/podman is
+// still resolvable that the caller did not provide, so a passing test can
+// never have exec'd a real container runtime.
+func restrictPATHToFakes(t *testing.T, fakes map[string]string) {
+	t.Helper()
+	dir := t.TempDir()
+	for _, tool := range []string{"gh", "git"} {
+		src, err := exec.LookPath(tool)
+		if err != nil {
+			t.Fatalf("LookPath(%s): %v", tool, err)
+		}
+		if err := os.Symlink(src, filepath.Join(dir, tool)); err != nil {
+			t.Fatalf("symlink %s: %v", tool, err)
+		}
+	}
+	for name, body := range fakes {
+		exectest.WriteExecutable(t, filepath.Join(dir, name), "#!/bin/sh\n"+body)
+	}
+	t.Setenv("PATH", dir)
+
+	if p, err := exec.LookPath("gh"); err != nil || filepath.Dir(p) != dir {
+		t.Fatalf("gh resolves to %q (err %v), want the fake inside %s", p, err, dir)
+	}
+	for _, rt := range []string{"docker", "podman"} {
+		if _, provided := fakes[rt]; provided {
+			continue
+		}
+		if p, err := exec.LookPath(rt); err == nil {
+			t.Fatalf("ambient %s resolvable at %s; the test would reach a real container runtime", rt, p)
+		}
+	}
+}
+
+// gatePassRepo is one enrolled repo of a gate-pass fixture and the Planned
+// ticket numbers (each with a fresh, planned plan file) it carries.
+type gatePassRepo struct {
+	repo    string
+	tickets []int
+}
+
+// setupGatePass builds a real-git, fake-gh, served-daemon-snapshot fixture in
+// which every listed ticket is dispatchable (every other gate passes), so any
+// skip in the pass is attributable to the container-session gate. It returns
+// the Config to hand to RunOnce.
+func setupGatePass(t *testing.T, snap watch.StateSnapshot, repos ...gatePassRepo) Config {
+	t.Helper()
+	mainSyncGitEnv(t)
+	serveChainSnapshot(t, snap)
+
+	cfg := testConfig()
+	var issueCases strings.Builder
+	for _, r := range repos {
+		local, _ := initOriginAndLocal(t)
+		planSha := gitTest(t, local, "rev-parse", "HEAD")
+		issues := make([]string, 0, len(r.tickets))
+		for _, n := range r.tickets {
+			writePlan(t, local, fmt.Sprintf("%d-x.md", n),
+				fmt.Sprintf("---\nticketId: %d\nstatus: planned\nplanCommitSha: %s\n---\nbody\n", n, planSha))
+			issues = append(issues, fmt.Sprintf(`{"number":%d,"title":"Ticket %d","labels":[{"name":"Planned"}],"assignees":[{"login":"octocat"}]}`, n, n))
+		}
+		fmt.Fprintf(&issueCases, "      *%q*) printf '[%s]' ;;\n", r.repo, strings.Join(issues, ","))
+		cfg.Repos = append(cfg.Repos, RepoConfig{Repo: r.repo, Dir: local, Session: "test-session"})
+	}
+
+	installFakeGHOnPath(t, `
+case "$1 $2" in
+  "issue list")
+    case "$*" in
+`+issueCases.String()+`      *) printf '[]' ;;
+    esac
+    ;;
+  "api graphql") printf '`+emptyOpenPRPageJSON+`' ;;
+  "api user") printf 'octocat\n' ;;
+  *) exit 1 ;;
+esac
+`)
+	return cfg
+}
+
+// recordSpawns swaps runFn for a recorder of each spawned ticket number
+// (run.Opts.WindowTicket).
+func recordSpawns(t *testing.T) *[]string {
+	t.Helper()
+	var spawned []string
+	stubRunFn(t, func(o run.Opts, _ run.Controller) error {
+		spawned = append(spawned, o.WindowTicket)
+		return nil
+	})
+	return &spawned
+}
+
+// failOnSpawn swaps runFn for a stub that fails the test if anything spawns.
+func failOnSpawn(t *testing.T) {
+	t.Helper()
+	stubRunFn(t, func(o run.Opts, _ run.Controller) error {
+		t.Errorf("nothing may spawn in this pass, but ticket %s was spawned", o.WindowTicket)
+		return nil
+	})
+}
+
+// AC18: the probe runs exactly once per pass, however many tickets and repos
+// the pass collected, and a zero count adds nothing to the log (the existing
+// byte-identical-log tests depend on that).
+func TestRunOnce_ContainerSessionProbe_RunsOncePerPassAcrossTicketsAndRepos(t *testing.T) {
+	cfg := setupGatePass(t, watch.StateSnapshot{},
+		gatePassRepo{repo: "o/a", tickets: []int{42, 43}},
+		gatePassRepo{repo: "o/b", tickets: []int{7}},
+	)
+	calls := stubContainerSessionProbe(t, 0, nil)
+	spawned := recordSpawns(t)
+
+	var buf bytes.Buffer
+	decisions, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, &buf, nil)
+	if err != nil {
+		t.Fatalf("RunOnce returned unexpected error: %v", err)
+	}
+
+	if *calls != 1 {
+		t.Errorf("probe ran %d times in one pass over 3 tickets in 2 repos, want exactly 1", *calls)
+	}
+	if len(decisions) != 3 {
+		t.Fatalf("decisions = %+v, want 3", decisions)
+	}
+	for _, d := range decisions {
+		if d.Action != ActionDispatch {
+			t.Errorf("#%d action = %q reason %q, want dispatch (zero orphans adds no hold)", d.Ticket.Number, d.Action, d.Reason)
+		}
+	}
+	if len(*spawned) != 3 {
+		t.Errorf("spawned %v, want all 3 tickets", *spawned)
+	}
+	if strings.Contains(buf.String(), "container session probe") {
+		t.Errorf("a zero-orphan, healthy probe must leave the log untouched, got:\n%s", buf.String())
+	}
+}
+
+// AC18: a pass that collected no ticket never probes.
+func TestRunOnce_ContainerSessionProbe_NotCalledWhenNoTicketsCollected(t *testing.T) {
+	cfg := setupGatePass(t, watch.StateSnapshot{},
+		gatePassRepo{repo: "o/a"},
+		gatePassRepo{repo: "o/b"},
+	)
+	calls := stubContainerSessionProbe(t, 0, nil)
+	failOnSpawn(t)
+
+	decisions, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, io.Discard, nil)
+	if err != nil {
+		t.Fatalf("RunOnce returned unexpected error: %v", err)
+	}
+	if len(decisions) != 0 {
+		t.Fatalf("decisions = %+v, want none", decisions)
+	}
+	if *calls != 0 {
+		t.Errorf("probe ran %d times in a pass that collected no tickets, want 0", *calls)
+	}
+}
+
+// AC16: a failing probe holds every candidate at the capacity gate with the
+// fail-closed reason, spawns and claims nothing, leaves the daily-quota tally
+// alone, logs the cause, and is NOT a RunOnce error (a returned error would
+// terminate RunLoop on a transient docker outage).
+func TestRunOnce_ContainerSessionProbeError_HoldsEveryCandidateAndSpawnsNothing(t *testing.T) {
+	cfg := setupGatePass(t, watch.StateSnapshot{},
+		gatePassRepo{repo: "o/a", tickets: []int{42, 43}},
+		gatePassRepo{repo: "o/b", tickets: []int{7}},
+	)
+	probeErr := errors.New("docker ps: Cannot connect to the Docker daemon")
+	calls := stubContainerSessionProbe(t, 0, probeErr)
+	failOnSpawn(t)
+
+	mut := &fakeMutator{}
+	prior := 0
+	var buf bytes.Buffer
+	decisions, err := RunOnce(cfg, fakeController{}, mut, false, &buf, &prior)
+	if err != nil {
+		t.Fatalf("RunOnce returned %v; a probe failure must hold the pass, not fail it", err)
+	}
+
+	if *calls != 1 {
+		t.Errorf("probe ran %d times, want 1", *calls)
+	}
+	if len(decisions) != 3 {
+		t.Fatalf("decisions = %+v, want 3", decisions)
+	}
+	for _, d := range decisions {
+		if d.Action != ActionSkip || d.Reason != reasonProbeFailedWant {
+			t.Errorf("#%d = %q %q, want skip %q", d.Ticket.Number, d.Action, d.Reason, reasonProbeFailedWant)
+		}
+	}
+	if len(mut.labelEdits) != 0 {
+		t.Errorf("label edits = %+v, want none (nothing may be claimed)", mut.labelEdits)
+	}
+	if prior != 0 {
+		t.Errorf("prior = %d, want 0", prior)
+	}
+
+	var causeLine string
+	for _, line := range strings.Split(buf.String(), "\n") {
+		if strings.Contains(line, reasonProbeFailedWant) && strings.Contains(line, probeErr.Error()) {
+			causeLine = line
+		}
+	}
+	if causeLine == "" {
+		t.Fatalf("expected one log line naming the probe failure and its cause %q, got:\n%s", probeErr, buf.String())
+	}
+	if strings.Contains(causeLine, " skip:") || strings.Contains(causeLine, " dispatch ") {
+		t.Errorf("the probe log line %q must not carry the lazyboards-reserved \" skip:\"/\" dispatch \" substrings", causeLine)
+	}
+}
+
+// The probe is read-only, so a dry run runs it too and prints the same table
+// a real pass would (#851/#881 dry-run parity).
+func TestRunOnce_ContainerSessionProbeError_DryRunStillProbesAndHolds(t *testing.T) {
+	cfg := setupGatePass(t, watch.StateSnapshot{}, gatePassRepo{repo: "o/a", tickets: []int{42}})
+	calls := stubContainerSessionProbe(t, 0, errors.New("docker ps: boom"))
+	failOnSpawn(t)
+
+	decisions, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, true, io.Discard, nil)
+	if err != nil {
+		t.Fatalf("RunOnce returned unexpected error: %v", err)
+	}
+	if *calls != 1 {
+		t.Errorf("dry-run probe ran %d times, want 1", *calls)
+	}
+	if len(decisions) != 1 || decisions[0].Action != ActionSkip || decisions[0].Reason != reasonProbeFailedWant {
+		t.Fatalf("decisions = %+v, want one skip %q", decisions, reasonProbeFailedWant)
+	}
+}
+
+// AC13/AC17: the probed count reaches Decide. Daemon Running=1, cap 3.
+func TestRunOnce_ContainerSessionProbeCount_ReachesTheCapAndTheReason(t *testing.T) {
+	t.Run("one orphan leaves room for one dispatch, then holds the next with the suffix", func(t *testing.T) {
+		cfg := setupGatePass(t, watch.StateSnapshot{Summary: watch.StatusSummary{Running: 1}},
+			gatePassRepo{repo: "o/a", tickets: []int{42, 43}})
+		cfg.ConcurrencyCap = 3
+		stubContainerSessionProbe(t, 1, nil)
+		spawned := recordSpawns(t)
+
+		var buf bytes.Buffer
+		decisions, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, &buf, nil)
+		if err != nil {
+			t.Fatalf("RunOnce returned unexpected error: %v", err)
+		}
+
+		// Running 1 + orphans 1 + dispatched 0 < 3 dispatches #42; then
+		// 1 + 1 + 1 >= 3 holds #43.
+		assertDecisions(t, decisions, []wantDecision{
+			{42, ActionDispatch, "dispatch", ""},
+			{43, ActionSkip, "concurrency cap reached (1 orphaned container sessions)", ""},
+		})
+		if len(*spawned) != 1 || (*spawned)[0] != "42" {
+			t.Errorf("spawned %v, want only ticket 42", *spawned)
+		}
+
+		const countLine = "dispatch: container session probe: 1 orphaned session(s)"
+		if !strings.Contains(buf.String(), countLine) {
+			t.Errorf("expected the log line %q, got:\n%s", countLine, buf.String())
+		}
+		for _, line := range strings.Split(buf.String(), "\n") {
+			if strings.Contains(line, "container session probe") && (strings.Contains(line, " skip:") || strings.Contains(line, " dispatch ")) {
+				t.Errorf("probe log line %q must not carry the lazyboards-reserved \" skip:\"/\" dispatch \" substrings", line)
+			}
+		}
+	})
+
+	t.Run("orphans that fill the cap hold every ticket", func(t *testing.T) {
+		cfg := setupGatePass(t, watch.StateSnapshot{Summary: watch.StatusSummary{Running: 1}},
+			gatePassRepo{repo: "o/a", tickets: []int{42, 43}})
+		cfg.ConcurrencyCap = 3
+		stubContainerSessionProbe(t, 2, nil)
+		failOnSpawn(t)
+
+		decisions, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, io.Discard, nil)
+		if err != nil {
+			t.Fatalf("RunOnce returned unexpected error: %v", err)
+		}
+		assertDecisions(t, decisions, []wantDecision{
+			{42, ActionSkip, "concurrency cap reached (2 orphaned container sessions)", ""},
+			{43, ActionSkip, "concurrency cap reached (2 orphaned container sessions)", ""},
+		})
+	})
+}
+
+// AC16 no-runtime: with the REAL default probe and no docker or podman on PATH
+// the count is 0, that is not a failure, and the ticket dispatches.
+func TestRunOnce_RealContainerSessionProbe_NoRuntimeOnPathCountsZeroAndDispatches(t *testing.T) {
+	cfg := setupGatePass(t, watch.StateSnapshot{}, gatePassRepo{repo: "o/a", tickets: []int{42}})
+	restrictPATHToFakes(t, nil)
+	useRealContainerSessionProbe(t)
+	spawned := recordSpawns(t)
+
+	var buf bytes.Buffer
+	decisions, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, &buf, nil)
+	if err != nil {
+		t.Fatalf("RunOnce returned unexpected error: %v", err)
+	}
+	assertDecisions(t, decisions, []wantDecision{{42, ActionDispatch, "dispatch", ""}})
+	if len(*spawned) != 1 {
+		t.Errorf("spawned %v, want ticket 42", *spawned)
+	}
+	if strings.Contains(buf.String(), "container session probe") {
+		t.Errorf("no runtime on PATH is a silent zero, got log:\n%s", buf.String())
+	}
+}
+
+// Regression for the narrow no-runtime exclusion (watch/AGENTS.md match-miss
+// rule): a runtime that IS on PATH but whose `ps` fails is a probe failure,
+// never folded into "no runtime => 0".
+func TestRunOnce_RealContainerSessionProbe_RuntimePresentButPsFailsFailsClosed(t *testing.T) {
+	cfg := setupGatePass(t, watch.StateSnapshot{}, gatePassRepo{repo: "o/a", tickets: []int{42}})
+	restrictPATHToFakes(t, map[string]string{
+		"docker": "case \"$1\" in\nps) echo 'Cannot connect to the Docker daemon' >&2; exit 1 ;;\nesac\nexit 0\n",
+	})
+	useRealContainerSessionProbe(t)
+	failOnSpawn(t)
+
+	mut := &fakeMutator{}
+	var buf bytes.Buffer
+	decisions, err := RunOnce(cfg, fakeController{}, mut, false, &buf, nil)
+	if err != nil {
+		t.Fatalf("RunOnce returned unexpected error: %v", err)
+	}
+	assertDecisions(t, decisions, []wantDecision{{42, ActionSkip, reasonProbeFailedWant, ""}})
+	if len(mut.labelEdits) != 0 {
+		t.Errorf("label edits = %+v, want none", mut.labelEdits)
+	}
+
+	const cause = "Cannot connect to the Docker daemon"
+	var causeLine string
+	for _, line := range strings.Split(buf.String(), "\n") {
+		if strings.HasPrefix(line, "dispatch: container session probe failed:") {
+			causeLine = line
+		}
+	}
+	if !strings.Contains(causeLine, cause) {
+		t.Errorf("the probe-failed log line %q must carry the runtime's stderr cause %q", causeLine, cause)
+	}
+}
+
+// A probe that outlives the whole-probe deadline fails closed (an error, so the
+// pass holds every candidate) instead of stalling the pass.
+func TestRunOnce_RealContainerSessionProbe_DeadlineOverrunFailsClosed(t *testing.T) {
+	cfg := setupGatePass(t, watch.StateSnapshot{}, gatePassRepo{repo: "o/a", tickets: []int{42}})
+	sleepBin, err := exec.LookPath("sleep")
+	if err != nil {
+		t.Fatalf("the hung-ps fixture needs a sleep binary: %v", err)
+	}
+	restrictPATHToFakes(t, map[string]string{
+		// exec so the deadline kill reaches the sleeper, not a shell parent
+		// holding the pipes open.
+		"docker": "case \"$1\" in\nps) exec " + sleepBin + " 30 ;;\nesac\nexit 0\n",
+	})
+	useRealContainerSessionProbe(t)
+	failOnSpawn(t)
+
+	const deadline = 300 * time.Millisecond
+	const promptly = 10 * time.Second
+	restore := containerSessionProbeTimeout
+	containerSessionProbeTimeout = deadline
+	t.Cleanup(func() { containerSessionProbeTimeout = restore })
+
+	var buf bytes.Buffer
+	start := time.Now()
+	decisions, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, &buf, nil)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("RunOnce returned unexpected error: %v", err)
+	}
+	assertDecisions(t, decisions, []wantDecision{{42, ActionSkip, reasonProbeFailedWant, ""}})
+	if elapsed >= promptly {
+		t.Errorf("pass took %s, want it bounded near the %s probe deadline (ps sleeps 30s)", elapsed, deadline)
+	}
+	if !strings.Contains(buf.String(), "dispatch: container session probe failed:") {
+		t.Errorf("expected a probe-failed log line, got:\n%s", buf.String())
+	}
+}
+
+// End to end through the real probe against a fake docker + tmux: a dead pane
+// is counted into the gate, a live pane is not.
+func TestRunOnce_RealContainerSessionProbe_CountsDeadPaneNotLivePane(t *testing.T) {
+	const fakeDocker = `case "$1" in
+ps) printf 'claude-cenci-orphan\n' ;;
+exec)
+  case "$*" in
+  *TMUX_PANE=*) printf '9001\t%%3\t100\t/fake/tmux-sock\n' ;;
+  esac
+  ;;
+esac
+exit 0
+`
+
+	t.Run("dead pane counts and holds the ticket at cap 1", func(t *testing.T) {
+		cfg := setupGatePass(t, watch.StateSnapshot{}, gatePassRepo{repo: "o/a", tickets: []int{42}})
+		cfg.ConcurrencyCap = 1
+		restrictPATHToFakes(t, map[string]string{
+			"docker": fakeDocker,
+			"tmux":   "echo 'no server running on /fake/tmux-sock' >&2\nexit 1\n",
+		})
+		useRealContainerSessionProbe(t)
+		failOnSpawn(t)
+
+		decisions, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, io.Discard, nil)
+		if err != nil {
+			t.Fatalf("RunOnce returned unexpected error: %v", err)
+		}
+		assertDecisions(t, decisions, []wantDecision{{42, ActionSkip, "concurrency cap reached (1 orphaned container sessions)", ""}})
+	})
+
+	t.Run("live pane does not count and the ticket dispatches at cap 1", func(t *testing.T) {
+		cfg := setupGatePass(t, watch.StateSnapshot{}, gatePassRepo{repo: "o/a", tickets: []int{42}})
+		cfg.ConcurrencyCap = 1
+		restrictPATHToFakes(t, map[string]string{
+			"docker": fakeDocker,
+			"tmux":   "printf '%%3\\n'\nexit 0\n",
+		})
+		useRealContainerSessionProbe(t)
+		spawned := recordSpawns(t)
+
+		decisions, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, io.Discard, nil)
+		if err != nil {
+			t.Fatalf("RunOnce returned unexpected error: %v", err)
+		}
+		assertDecisions(t, decisions, []wantDecision{{42, ActionDispatch, "dispatch", ""}})
+		if len(*spawned) != 1 {
+			t.Errorf("spawned %v, want ticket 42", *spawned)
+		}
+	})
 }

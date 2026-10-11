@@ -2,13 +2,17 @@ package launcher
 
 import (
 	"bytes"
+	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/exectest"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/sandbox"
 )
 
 // readFakeCfg is the fake-tmux-side counterpart of writeFakeTmuxValue: reads
@@ -23,7 +27,7 @@ const readFakeCfg = `read_fake_cfg() { if [ -f "$HOME/$1" ]; then IFS= read -r r
 // writeFakeTmuxValue writes a fake-tmux configuration value (e.g.
 // FAKE_LIVE_PANES) to a file under dir, read back via readFakeCfg (#1007
 // review fix: production now runs the tmux child under a minimal, explicit
-// allowlisted env — buildMinimalTmuxEnv, in reap.go — that never forwards
+// allowlisted env — buildMinimalTmuxEnv, in internal/sandbox/orphans.go — that never forwards
 // arbitrary ambient vars, so a FAKE_* test knob set only via t.Setenv can no
 // longer reach the fake tmux process; the file travels via $HOME instead,
 // which IS in that allowlist).
@@ -325,7 +329,7 @@ func TestReapOrphans_DeadPaneOrphanIsTermed(t *testing.T) {
 
 // The in-container /proc/*/environ scan must run as -u dev (same-uid reads
 // need no CAP_SYS_PTRACE, so dev-owned agent processes become visible),
-// while SIGTERM keeps running as -u root (see reap.go's scan comment and the
+// while SIGTERM keeps running as -u root (see ScanContainer's comment in internal/sandbox/orphans.go and the
 // sandbox CLAUDE.md's "docker run --user X persists" entrypoint pattern for
 // why every exec call site needs its own explicit -u flag). writeReapFakes'
 // mock docker doesn't guard on the -u value, so this only pins the exec
@@ -552,5 +556,82 @@ func TestReapOrphans_GoneBeforeTermIsSkippedNotFatal(t *testing.T) {
 	}
 	if calls := readCallLog(t, callLog); containsPrefix(calls, "exec -u root claude-cenci-race kill -KILL") {
 		t.Errorf("SIGKILL must not follow a gone-before-TERM skip; calls:\n%s", strings.Join(calls, "\n"))
+	}
+}
+
+// TestReapOrphans_ReapedPairsMatchSharedOrphanCount is the #1218 AC14
+// evidence: the dispatch capacity gate's count (sandbox.CountOrphanedSessions)
+// and the reaper classify through one shared scan, so on a single fixture the
+// number of distinct (socket, pane) pairs ReapOrphans reports as `reaped` must
+// equal the count. The fixture mixes every classification: duplicate pane
+// ids across pids and across sockets, a pane that is dead on its own socket
+// but live on another, a live pane, a legacy no-socket row, a malformed pane,
+// PID 1, and an unreadable marker.
+func TestReapOrphans_ReapedPairsMatchSharedOrphanCount(t *testing.T) {
+	const (
+		cenciSocket    = "/tmp/tmux-1000/cenci"
+		personalSocket = "/tmp/tmux-1000/default"
+		container      = "claude-cenci-parity"
+	)
+	type row struct{ pid, pane, start, socket string }
+	rows := []row{
+		{"3001", "%3", "1000", cenciSocket},    // dead
+		{"3002", "%3", "2000", cenciSocket},    // same pair as 3001 on another pid
+		{"3003", "%3", "3000", personalSocket}, // same pane id, other socket: dead
+		{"3004", "%9", "4000", cenciSocket},    // live on its own socket
+		{"3005", "%7", "5000", cenciSocket},    // dead here, live id on the other socket
+		{"3006", "%2", "6000", ""},             // no socket: fail open
+		{"3007", "not-a-pane", "7000", cenciSocket},
+		{"1", "%1", "50", cenciSocket}, // container init
+	}
+	var scan strings.Builder
+	socketByPid := map[string]string{}
+	for _, r := range rows {
+		scan.WriteString(r.pid + "\t" + r.pane + "\t" + r.start + "\t" + r.socket + "\n")
+		socketByPid[r.pid] = r.socket
+	}
+	scan.WriteString("__UNREADABLE__\t3008\n")
+
+	dir := t.TempDir()
+	callLog := filepath.Join(dir, "calls.txt")
+	writeSocketAwareReapFakes(t, dir, callLog)
+	t.Setenv("PATH", dir)
+	t.Setenv("CENCI_SANDBOX_REAP_GRACE_SECS", "0")
+	t.Setenv("FAKE_PS", container+"\n")
+	t.Setenv("FAKE_SCAN", scan.String())
+	writeFakeTmuxValue(t, dir, "FAKE_SOCKET_1", cenciSocket)
+	writeFakeTmuxValue(t, dir, "FAKE_LIVE_PANES_1", "%9")
+	writeFakeTmuxValue(t, dir, "FAKE_SOCKET_2", personalSocket)
+	writeFakeTmuxValue(t, dir, "FAKE_LIVE_PANES_2", "%7")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	counted, err := sandbox.CountOrphanedSessions(ctx, []string{"docker"}, io.Discard, io.Discard)
+	if err != nil {
+		t.Fatalf("CountOrphanedSessions: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if err := ReapOrphans(&stdout, &stderr); err != nil {
+		t.Fatalf("ReapOrphans: %v\nstderr: %s", err, stderr.String())
+	}
+
+	reapedPairs := map[string]bool{}
+	for _, line := range strings.Split(stdout.String(), "\n") {
+		fields := strings.Split(line, "\t")
+		if len(fields) != 4 || fields[0] != "reaped" {
+			continue
+		}
+		pid, pane := fields[2], fields[3]
+		reapedPairs[socketByPid[pid]+"\x00"+pane] = true
+	}
+
+	// (cenci,%3), (personal,%3) and (cenci,%7) -- not the four reaped pids.
+	const wantPairs = 3
+	if len(reapedPairs) != wantPairs {
+		t.Fatalf("fixture drift: ReapOrphans reaped %d distinct pairs, want %d; stdout:\n%s", len(reapedPairs), wantPairs, stdout.String())
+	}
+	if counted != len(reapedPairs) {
+		t.Errorf("CountOrphanedSessions = %d, ReapOrphans reaped %d distinct (socket, pane) pairs; the gate and the reaper must agree", counted, len(reapedPairs))
 	}
 }
