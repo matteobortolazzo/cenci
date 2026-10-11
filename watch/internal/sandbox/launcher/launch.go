@@ -1560,16 +1560,5 @@ func trimTrailingNewline(s string) string {
 // splitLines splits command output into lines without the trailing empty
 // element a final newline would produce.
 func splitLines(s string) []string {
-	var lines []string
-	start := 0
-	for i := 0; i < len(s); i++ {
-		if s[i] == '\n' {
-			lines = append(lines, s[start:i])
-			start = i + 1
-		}
-	}
-	if start < len(s) {
-		lines = append(lines, s[start:])
-	}
-	return lines
+	return sandbox.SplitLines(s)
 }

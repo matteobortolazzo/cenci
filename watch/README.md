@@ -548,7 +548,17 @@ failing gate is the logged skip reason):
 7. the daemon is reachable (else `daemon unreachable` — never dispatch on unknown
    state);
 8. fewer than `needInputThreshold` windows are awaiting input;
-9. `running + dispatched-this-pass` is below `concurrencyCap`;
+9. `running + orphaned container sessions + dispatched-this-pass` is below
+   `concurrencyCap`. Orphaned container sessions are the distinct (tmux socket,
+   pane) pairs that `cenci sandbox reap-orphans` would classify as dead-pane
+   reap targets, across every sandbox container on every available runtime;
+   counting them is read-only and never signals a process. When orphans
+   contribute, the skip reason reads `concurrency cap reached (N orphaned
+   container sessions)`. The scan runs at most once per pass, and only when the
+   pass collected a ticket. If the scan fails (runtime `ps`/`exec` error, tmux
+   query error, or timeout) every candidate is skipped with `container session
+   probe failed` (fail-closed); with no docker or podman on PATH the count is 0
+   and dispatch proceeds;
 10. the daily quota is not yet spent;
 11. the current local time is outside `quietHours`;
 12. the resolved agent still has budget (see [Usage budgets](#usage-budgets) — when
@@ -1067,7 +1077,7 @@ Dispatch reads the same `config.json` as `run`, under a top-level `"dispatch"` b
 | Key | Default | Purpose |
 |-----|---------|---------|
 | `repos` | — | Repos to scan; each entry requires `repo`, `dir` (holds that repo's `.plans/` and git tree), and `session` (the tmux session that repo's dispatched windows target — never an ambient/current session). Normally managed via `cenci dispatch enroll`/`unenroll` (see [Enrollment](#enrollment-cenci-dispatch-enrollunenrollstatus)) rather than hand-edited, though hand-editing remains supported. A repo whose `session` is empty or names a tmux session that doesn't exist is skipped entirely for that pass (`dispatch: no target tmux session for <repo>; set repos[].session in <config path>`, or the equivalent "not found in tmux" line naming the remedy `tmux new-session -d -s <name>`) — every other enrolled repo still dispatches normally in the same pass. |
-| `concurrencyCap` | `3` | Max concurrent running sessions (counts in-flight windows plus this pass's dispatches) |
+| `concurrencyCap` | `3` | Max concurrent running sessions (counts in-flight windows, orphaned container sessions still alive after their pane closed, and this pass's dispatches) |
 | `needInputThreshold` | `1` | Pause dispatch when at least this many windows await input |
 | `dailyQuota` | `20` | Max dispatches per process run (resets on restart) |
 | `quietHours` | none | Local-clock window to suppress dispatch; `startHour > endHour` wraps midnight, `start == end` disables |
