@@ -80,6 +80,13 @@ type dispatchDeps struct {
 	// a repo whose `.plans` directory could not be fully enumerated (Q5),
 	// without doing any I/O itself.
 	PlanInventories map[string]PlanInventory
+
+	// OrphanedContainerSessions and ContainerSessionProbe (#1218) are the
+	// once-per-pass orphan count and its trust status, resolved by
+	// resolveContainerSessions before applyDispatch/Decide ever run --
+	// threaded straight through to the same-named Inputs fields.
+	OrphanedContainerSessions int
+	ContainerSessionProbe     ContainerSessionProbe
 }
 
 // RunOnce gathers inputs (tickets, plans, snapshot, clock), runs the pure
@@ -146,6 +153,13 @@ func RunOnce(cfg Config, ctrl run.Controller, mut TicketMutator, dryRun bool, ou
 
 	snap, _ := ReadSnapshot(watch.DefaultSocketPath()) // nil on error ⇒ Decide skips safely
 
+	// Orphaned container sessions (#1218) count against the concurrency cap
+	// alongside the daemon's Running count, probed at most once per pass and
+	// only when the pass collected a ticket. A probe failure is logged and
+	// fails closed at the capacity gate; it never feeds collectErr, matching
+	// the answers probe below.
+	orphanedSessions, sessionProbe := resolveContainerSessions(tickets, out)
+
 	// Probe every `Input Needed` ticket for a human answer to its escalation
 	// (#827/#849), keyed by planKey so Decide's Inputs.Answers can look it
 	// up -- mirrors RunReconcileOnce's countAttempts loop, a label-scoped
@@ -165,15 +179,17 @@ func RunOnce(cfg Config, ctrl run.Controller, mut TicketMutator, dryRun bool, ou
 	logLegacyTopLevelSessionDeprecation(cfg, out)
 
 	decisions, applyErr := applyDispatch(cfg, dispatchDeps{
-		Tickets:         tickets,
-		Plans:           plans,
-		Snapshot:        snap,
-		Now:             time.Now(),
-		CurrentUser:     currentUser,
-		Answers:         answers,
-		RepoAutonomy:    autonomies,
-		PlanProbes:      planProbes,
-		PlanInventories: planInventories,
+		Tickets:                   tickets,
+		Plans:                     plans,
+		Snapshot:                  snap,
+		Now:                       time.Now(),
+		CurrentUser:               currentUser,
+		Answers:                   answers,
+		RepoAutonomy:              autonomies,
+		PlanProbes:                planProbes,
+		PlanInventories:           planInventories,
+		OrphanedContainerSessions: orphanedSessions,
+		ContainerSessionProbe:     sessionProbe,
 	}, ctrl, mut, dryRun, out, prior)
 
 	// #927: the per-repo session gate's sentinel(s) must outrank a same-pass
@@ -311,18 +327,20 @@ func applyDispatch(cfg Config, deps dispatchDeps, ctrl run.Controller, mut Ticke
 	}
 
 	decisions := Decide(Inputs{
-		Tickets:         deps.Tickets,
-		Plans:           deps.Plans,
-		Snapshot:        deps.Snapshot,
-		Budgets:         buildBudgetProvider(cfg, deps.Now),
-		Now:             deps.Now,
-		Prior:           priorVal,
-		CurrentUser:     deps.CurrentUser,
-		Config:          cfg,
-		Answers:         deps.Answers,
-		RepoAutonomy:    deps.RepoAutonomy,
-		PlanProbes:      deps.PlanProbes,
-		PlanInventories: deps.PlanInventories,
+		Tickets:                   deps.Tickets,
+		Plans:                     deps.Plans,
+		Snapshot:                  deps.Snapshot,
+		Budgets:                   buildBudgetProvider(cfg, deps.Now),
+		Now:                       deps.Now,
+		Prior:                     priorVal,
+		CurrentUser:               deps.CurrentUser,
+		Config:                    cfg,
+		Answers:                   deps.Answers,
+		RepoAutonomy:              deps.RepoAutonomy,
+		PlanProbes:                deps.PlanProbes,
+		PlanInventories:           deps.PlanInventories,
+		OrphanedContainerSessions: deps.OrphanedContainerSessions,
+		ContainerSessionProbe:     deps.ContainerSessionProbe,
 	})
 
 	// Surface the pinned model in the same log stream as the decision table so

@@ -154,6 +154,19 @@ const (
 	reasonPlanInventoryUnknown    = "plan inventory probe unrecognized"
 )
 
+// Capacity-gate skip reasons (#1218). reasonContainerSessionProbeUnknown is
+// deliberately distinct from reasonContainerSessionProbeFailed for the same
+// reason reasonPlanInventoryUnknown is distinct from its siblings above: a
+// regression collapsing the gate switch's default branch into a known case
+// must be caught by a content-specific assertion (#446/#598).
+// reasonConcurrencyCapOrphansFmt takes the orphaned container session count.
+const (
+	reasonContainerSessionProbeFailed  = "container session probe failed"
+	reasonContainerSessionProbeUnknown = "container session probe unrecognized"
+	reasonConcurrencyCap               = "concurrency cap reached"
+	reasonConcurrencyCapOrphansFmt     = "concurrency cap reached (%d orphaned container sessions)"
+)
+
 // Resume-gate skip reasons (#827). reasonAnswerProbeUnknown is deliberately
 // distinct from the enumerated probe-class reasons below, for the same
 // reason reasonStageProbeUnknown is distinct from reasonPipelineUnreadable
@@ -274,6 +287,17 @@ type Inputs struct {
 	// mirroring RepoAutonomy's own map-miss convention documented at
 	// types.go.
 	PlanInventories map[string]PlanInventory
+
+	// OrphanedContainerSessions is the number of distinct (tmux socket, pane)
+	// pairs `cenci sandbox reap-orphans` would classify as dead-pane reap
+	// targets across every sandbox container (#1218), added to
+	// Snapshot.Summary.Running at the capacity gate. ContainerSessionProbe
+	// says whether that count is trustworthy. Both are resolved by
+	// resolveContainerSessions (containers.go) before Decide is ever called --
+	// all I/O for the probe happens in RunOnce, never inside this gate chain
+	// (Decide's own purity contract, mirroring PlanInventories above).
+	OrphanedContainerSessions int
+	ContainerSessionProbe     ContainerSessionProbe
 }
 
 // Decide is pure: identical Inputs yield an identical ordered []Decision with no
@@ -554,8 +578,14 @@ func decideTicket(t Ticket, in Inputs, planByTicket map[string]*Plan, dispatched
 	if in.Snapshot.Summary.NeedInput >= in.Config.NeedInputThreshold {
 		return skip("need-input pause")
 	}
-	if in.Snapshot.Summary.Running+dispatchedThisPass >= in.Config.ConcurrencyCap {
-		return skip("concurrency cap reached")
+	if reason, gated := containerSessionProbeSkip(in.ContainerSessionProbe); gated {
+		return skip(reason)
+	}
+	if in.Snapshot.Summary.Running+in.OrphanedContainerSessions+dispatchedThisPass >= in.Config.ConcurrencyCap {
+		if in.OrphanedContainerSessions > 0 {
+			return skip(fmt.Sprintf(reasonConcurrencyCapOrphansFmt, in.OrphanedContainerSessions))
+		}
+		return skip(reasonConcurrencyCap)
 	}
 	if in.Prior+dispatchedThisPass >= in.Config.DailyQuota {
 		return skip("daily quota reached")
@@ -844,6 +874,24 @@ func planInventorySkip(inv PlanInventory) (string, bool) {
 		// distinct reason so a regression collapsing this branch is caught
 		// by assertion, per #446/#598.
 		return reasonPlanInventoryUnknown, true
+	}
+}
+
+// containerSessionProbeSkip evaluates the container-session probe gate (#1218)
+// for probe. It returns (reason, true) when the orphan count is unknown
+// (ContainerSessionProbeFailed) or the value is unrecognized, and ("", false)
+// only for ContainerSessionProbeOK (the permissive zero value).
+func containerSessionProbeSkip(probe ContainerSessionProbe) (string, bool) {
+	switch probe {
+	case ContainerSessionProbeOK:
+		return "", false
+	case ContainerSessionProbeFailed:
+		return reasonContainerSessionProbeFailed, true
+	default:
+		// Unrecognized ContainerSessionProbe value: default-deny with its
+		// own distinct reason so a regression collapsing this branch is
+		// caught by assertion, per #446/#598.
+		return reasonContainerSessionProbeUnknown, true
 	}
 }
 

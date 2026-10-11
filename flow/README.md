@@ -668,7 +668,8 @@ flow/
 │   └── hooks.json
 ├── codex/
 │   ├── hooks.json             # Explicitly empty: isolates Claude lifecycle hooks
-│   └── hooks.test.sh          # Codex hook-path and client-separation regression
+│   ├── hooks.test.sh          # Codex hook-path and client-separation regression
+│   └── hooks-launch.test.sh   # Manifest-driven launch, login-shell, and failure-table verification
 ├── opencode/
 │   ├── install-skills.sh      # Symlinks portable skills into OpenCode's global skills dir
 │   └── install-skills.test.sh # Install/remove/idempotency regression

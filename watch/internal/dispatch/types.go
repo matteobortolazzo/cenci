@@ -487,6 +487,30 @@ const (
 	PlanInventoryPartial PlanInventory = "partial"
 )
 
+// ContainerSessionProbe classifies the once-per-pass read of the orphaned
+// container-session count (#1218, containers.go's resolveContainerSessions)
+// that feeds the capacity gate. ContainerSessionProbeOK is the zero value ("")
+// so every existing Inputs construction site (decide_test.go, chain*_test.go)
+// keeps today's ungated behavior without being touched -- mirrors
+// PlanInventoryVerified above, and carries the same discipline: the single
+// production writer (applyDispatch, from resolveContainerSessions) has an
+// explicit RunOnce wiring test, so the permissive zero value is never silently
+// relied upon in production. Unlike the zero value, every other value is a
+// broken-input class that default-denies at the capacity gate: without a
+// trustworthy count the gate cannot prove there is headroom.
+type ContainerSessionProbe string
+
+const (
+	// ContainerSessionProbeOK is the zero value: the count is trustworthy
+	// (including 0 because no container runtime is installed).
+	ContainerSessionProbeOK ContainerSessionProbe = ""
+	// ContainerSessionProbeFailed means the probe errored (runtime `ps`/`exec`
+	// failure, tmux query failure, or timeout): the count is unknown, so every
+	// candidate this pass is held (fail closed, consistent with the
+	// daemon-unreachable skip).
+	ContainerSessionProbeFailed ContainerSessionProbe = "failed"
+)
+
 // OpenPRProbe classifies the collector's bounded, cursor-paginated `gh api
 // graphql` open-PR inventory read (#881, openpr.go's openPRInventory) into a
 // closed set, rather than collapsing distinct failure classes

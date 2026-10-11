@@ -2412,3 +2412,232 @@ func TestDecideOpenPRGate_GatesEveryPickupType(t *testing.T) {
 		assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, wantReason, ""}})
 	})
 }
+
+// -- #1218: orphaned container sessions count against the capacity gate -------
+//
+// Decide is the pure contract for the capacity gate, so its precedence and
+// exact reason strings are pinned here as a table (a RunOnce integration test
+// cannot enumerate them cheaply); the RunOnce wiring is covered separately in
+// dispatch_run_test.go.
+
+const (
+	reasonProbeFailedWant  = "container session probe failed"
+	reasonProbeUnknownWant = "container session probe unrecognized"
+	reasonCapWant          = "concurrency cap reached"
+)
+
+// TestContainerSessionProbeZeroValueIsOK locks in the permissive zero value:
+// an Inputs literal that never sets ContainerSessionProbe (every pre-#1218
+// construction site) keeps today's ungated behavior.
+func TestContainerSessionProbeZeroValueIsOK(t *testing.T) {
+	var in Inputs
+	if in.ContainerSessionProbe != ContainerSessionProbeOK {
+		t.Errorf("zero-value Inputs.ContainerSessionProbe = %q, want ContainerSessionProbeOK", in.ContainerSessionProbe)
+	}
+	if ContainerSessionProbeOK != "" {
+		t.Errorf("ContainerSessionProbeOK = %q, want the empty string (the zero value)", string(ContainerSessionProbeOK))
+	}
+	if ContainerSessionProbeFailed == ContainerSessionProbeOK {
+		t.Error("ContainerSessionProbeFailed must be distinct from ContainerSessionProbeOK")
+	}
+}
+
+func TestDecideContainerSessionCapGate(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(in *Inputs)
+		want   wantDecision
+	}{
+		{
+			// Running 1 + orphans 1 = 2 >= cap 2 skips. Taking the larger of
+			// the two counts (max(1,1) = 1 < 2) would wrongly dispatch.
+			name: "sum not max: running plus orphans reach the cap",
+			mutate: func(in *Inputs) {
+				in.Config.ConcurrencyCap = 2
+				in.Snapshot = snapshot(1, 0)
+				in.OrphanedContainerSessions = 1
+			},
+			want: wantDecision{42, ActionSkip, "concurrency cap reached (1 orphaned container sessions)", ""},
+		},
+		{
+			name: "orphans leave headroom: running plus orphans below the cap dispatches",
+			mutate: func(in *Inputs) {
+				in.Config.ConcurrencyCap = 3
+				in.Snapshot = snapshot(1, 0)
+				in.OrphanedContainerSessions = 1
+			},
+			want: wantDecision{42, ActionDispatch, "dispatch", "claude"},
+		},
+		{
+			name: "orphans alone reach the cap",
+			mutate: func(in *Inputs) {
+				in.Config.ConcurrencyCap = 2
+				in.Snapshot = snapshot(0, 0)
+				in.OrphanedContainerSessions = 2
+			},
+			want: wantDecision{42, ActionSkip, "concurrency cap reached (2 orphaned container sessions)", ""},
+		},
+		{
+			// Q1: the suffix appears whenever the cap check fails and
+			// orphans > 0, even when Running >= cap on its own.
+			name: "suffix even when running alone already meets the cap",
+			mutate: func(in *Inputs) {
+				in.Config.ConcurrencyCap = 2
+				in.Snapshot = snapshot(2, 0)
+				in.OrphanedContainerSessions = 1
+			},
+			want: wantDecision{42, ActionSkip, "concurrency cap reached (1 orphaned container sessions)", ""},
+		},
+		{
+			name: "no orphans keeps the plain reason",
+			mutate: func(in *Inputs) {
+				in.Config.ConcurrencyCap = 1
+				in.Snapshot = snapshot(1, 0)
+				in.OrphanedContainerSessions = 0
+			},
+			want: wantDecision{42, ActionSkip, reasonCapWant, ""},
+		},
+		{
+			name:   "zero orphans and zero value probe dispatch exactly as before",
+			mutate: func(in *Inputs) {},
+			want:   wantDecision{42, ActionDispatch, "dispatch", "claude"},
+		},
+		{
+			name: "probe failed skips even with plenty of headroom",
+			mutate: func(in *Inputs) {
+				in.ContainerSessionProbe = ContainerSessionProbeFailed
+			},
+			want: wantDecision{42, ActionSkip, reasonProbeFailedWant, ""},
+		},
+		{
+			// A failed probe has no trustworthy count; the failure reason wins
+			// over the cap reason (and carries no orphan suffix).
+			name: "probe failed outranks the cap check",
+			mutate: func(in *Inputs) {
+				in.Config.ConcurrencyCap = 1
+				in.Snapshot = snapshot(1, 0)
+				in.OrphanedContainerSessions = 3
+				in.ContainerSessionProbe = ContainerSessionProbeFailed
+			},
+			want: wantDecision{42, ActionSkip, reasonProbeFailedWant, ""},
+		},
+		{
+			name: "probe failed outranks the daily quota gate",
+			mutate: func(in *Inputs) {
+				in.Config.DailyQuota = 1
+				in.Prior = 1
+				in.ContainerSessionProbe = ContainerSessionProbeFailed
+			},
+			want: wantDecision{42, ActionSkip, reasonProbeFailedWant, ""},
+		},
+		{
+			name: "daemon unreachable is reported before a probe failure",
+			mutate: func(in *Inputs) {
+				in.Snapshot = nil
+				in.ContainerSessionProbe = ContainerSessionProbeFailed
+			},
+			want: wantDecision{42, ActionSkip, "daemon unreachable", ""},
+		},
+		{
+			name: "need-input pause is reported before a probe failure",
+			mutate: func(in *Inputs) {
+				in.Config.NeedInputThreshold = 1
+				in.Snapshot = snapshot(0, 1)
+				in.ContainerSessionProbe = ContainerSessionProbeFailed
+			},
+			want: wantDecision{42, ActionSkip, "need-input pause", ""},
+		},
+		{
+			// Default-deny with its own reason, per #446/#598: an unrecognized
+			// value must not collapse into the failed-probe reason.
+			name: "unrecognized probe value default-denies with a distinct reason",
+			mutate: func(in *Inputs) {
+				in.ContainerSessionProbe = ContainerSessionProbe("bogus")
+			},
+			want: wantDecision{42, ActionSkip, reasonProbeUnknownWant, ""},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			in := baseInputs()
+			tc.mutate(&in)
+			assertDecisions(t, Decide(in), []wantDecision{tc.want})
+		})
+	}
+
+	if reasonProbeFailedWant == reasonProbeUnknownWant {
+		t.Fatal("the failed and unrecognized probe reasons must be distinct")
+	}
+}
+
+// TestDecideContainerSessionProbeFailed_SkipsEveryCandidate proves the failure
+// holds the whole pass, not just the first ticket.
+func TestDecideContainerSessionProbeFailed_SkipsEveryCandidate(t *testing.T) {
+	in := baseInputs()
+	in.Tickets = []Ticket{
+		{Repo: "o/r", Number: 1, Labels: []string{"Planned"}, Assignees: []string{"octocat"}},
+		{Repo: "o/r", Number: 2, Labels: []string{"Planned"}, Assignees: []string{"octocat"}},
+		{Repo: "o/other", Number: 3, Labels: []string{"Planned"}, Assignees: []string{"octocat"}},
+	}
+	in.Plans = []Plan{
+		{Repo: "o/r", Path: ".plans/1.md", TicketID: 1, Status: "planned"},
+		{Repo: "o/r", Path: ".plans/2.md", TicketID: 2, Status: "planned"},
+		{Repo: "o/other", Path: ".plans/3.md", TicketID: 3, Status: "planned"},
+	}
+	in.ContainerSessionProbe = ContainerSessionProbeFailed
+
+	assertDecisions(t, Decide(in), []wantDecision{
+		{1, ActionSkip, reasonProbeFailedWant, ""},
+		{2, ActionSkip, reasonProbeFailedWant, ""},
+		{3, ActionSkip, reasonProbeFailedWant, ""},
+	})
+}
+
+// TestDecideContainerSessionOrphans_CountWithDispatchedThisPass proves orphans
+// and in-pass dispatches fill the cap together: with cap 2 and one orphan, the
+// first ticket dispatches (0 + 1 + 0 < 2) and the second is held
+// (0 + 1 + 1 >= 2).
+func TestDecideContainerSessionOrphans_CountWithDispatchedThisPass(t *testing.T) {
+	in := baseInputs()
+	in.Config.ConcurrencyCap = 2
+	in.OrphanedContainerSessions = 1
+	in.Tickets = []Ticket{
+		{Repo: "o/r", Number: 1, Labels: []string{"Planned"}, Assignees: []string{"octocat"}},
+		{Repo: "o/r", Number: 2, Labels: []string{"Planned"}, Assignees: []string{"octocat"}},
+	}
+	in.Plans = []Plan{
+		{Repo: "o/r", Path: ".plans/1.md", TicketID: 1, Status: "planned"},
+		{Repo: "o/r", Path: ".plans/2.md", TicketID: 2, Status: "planned"},
+	}
+
+	assertDecisions(t, Decide(in), []wantDecision{
+		{1, ActionDispatch, "dispatch", ""},
+		{2, ActionSkip, "concurrency cap reached (1 orphaned container sessions)", ""},
+	})
+}
+
+// TestDecideContainerSessionGate_AppliesToEveryPickupType proves the orphan
+// count and the probe failure gate resume and planning pickups through the
+// same capacity chain as an ordinary Planned dispatch.
+func TestDecideContainerSessionGate_AppliesToEveryPickupType(t *testing.T) {
+	pickups := []struct {
+		name   string
+		inputs func() Inputs
+	}{
+		{"resume", resumeInputs},
+		{"fresh Refined planning candidate", planningCandidateInputs},
+	}
+	for _, p := range pickups {
+		t.Run(p.name+" held by orphans at the cap", func(t *testing.T) {
+			in := p.inputs()
+			in.Config.ConcurrencyCap = 1
+			in.OrphanedContainerSessions = 1
+			assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, "concurrency cap reached (1 orphaned container sessions)", ""}})
+		})
+		t.Run(p.name+" held by a probe failure", func(t *testing.T) {
+			in := p.inputs()
+			in.ContainerSessionProbe = ContainerSessionProbeFailed
+			assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, reasonProbeFailedWant, ""}})
+		})
+	}
+}
