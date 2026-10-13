@@ -78,7 +78,10 @@ Two off-ramps exist and both are normal:
 
 - **`Input Needed`** — planning hit one of five escalation classes (security-sensitive,
   destructive/irreversible, contradicts the refined ticket, genuine product ambiguity,
-  scope blowup). It writes a draft plan, posts the question on the ticket, and stops
+  scope blowup — where contradictions and ambiguities with exactly one grounded resolution
+  are auto-adopted rather than escalated, the resolution being fixed by a project doc or a
+  checkable codebase/package fact, and scope blowup means a real split recommendation).
+  It writes a draft plan, posts the question on the ticket, and stops
   — unless attended mode is on for this machine, in which case planning asks you directly instead
   (see [The attended override](#the-attended-override)).
   The posted question opens with a cenci banner telling you that replying on the ticket
@@ -330,7 +333,8 @@ the fast path:
 - no file in `### Files to Modify`/`### Files to Create` matching the sensitive-path
   set (auth, session, credential, token, `.pem`, `.env`, permission, rbac, crypto,
   payment, migration, schema, … unioned with your `security.sensitivePaths`);
-- size estimate is not `L` and there's no split recommendation;
+- size estimate is not `L` unless the planner's `### Split Recommendation` is a
+  well-formed `None — <rationale>`, and there's no real split recommendation;
 - no `awaiting-input` draft already on disk for the ticket.
 
 Anything inconclusive — an unreadable `.plans/` directory, a malformed config —

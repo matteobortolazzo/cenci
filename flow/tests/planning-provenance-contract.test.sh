@@ -217,10 +217,12 @@ assert_occurs_exactly "${PLANNER_AGENT}" '**security-sensitive**' 2 \
   "security-sensitive escalation class occurrence count must be unchanged (AC3 regression)"
 assert_occurs_exactly "${PLANNER_AGENT}" '**destructive or irreversible**' 2 \
   "destructive-or-irreversible escalation class occurrence count must be unchanged (AC3 regression)"
-assert_occurs_exactly "${PLANNER_AGENT}" '**contradicts the refined ticket**' 1 \
-  "contradicts-the-refined-ticket escalation class occurrence count must be unchanged (AC4 regression)"
-assert_occurs_exactly "${PLANNER_AGENT}" '**genuine product ambiguity the ticket doesn'"'"'t settle**' 1 \
-  "genuine-product-ambiguity escalation class occurrence count must be unchanged (AC3 regression)"
+# #1199: the two grounded-resolution classes are named once more, by design, in
+# the Self-Answer Policy's single **Grounded resolution** paragraph (baseline 1 -> 2).
+assert_occurs_exactly "${PLANNER_AGENT}" '**contradicts the refined ticket**' 2 \
+  "contradicts-the-refined-ticket class: its bullet plus the one Grounded resolution paragraph (#1199)"
+assert_occurs_exactly "${PLANNER_AGENT}" '**genuine product ambiguity the ticket doesn'"'"'t settle**' 2 \
+  "genuine-product-ambiguity class: its bullet plus the one Grounded resolution paragraph (#1199)"
 assert_occurs_exactly "${PLANNER_AGENT}" '**scope blowup**' 1 \
   "scope-blowup escalation class occurrence count must be unchanged (AC3 regression)"
 

@@ -500,5 +500,448 @@ assert_file_occurs_at_most_once "${PHASE1_PLAN}" 'do **not** record the plan art
 assert_file_occurs_at_most_once "${PHASE1_PLAN}" 'do **not** set `hasPlanFile = true`' \
   "must not duplicate plan-persist-sections-contract.test.sh's do-not-set-hasPlanFile marker"
 
+# =====================================================================
+# #1199 (Part 2) -- reasoned no-split verdicts. In lean ticket mode a
+# `### Size Estimate` of `L` plus a well-formed `None — <rationale>`
+# `### Split Recommendation` passes the Split Gate and the Lean Approval Path
+# Split Gate disqualifier (format only, fail-closed), recorded as an
+# auto-adopted Q&A entry; every other mode and every other trigger is
+# unchanged. The planner's output contract is tightened to match.
+#
+# Acceptance-criterion map (each AC has at least one explicit assertion):
+#   - planner emits real split or `None — <one-line rationale>` whenever L
+#       -> PLANNER_* markers (## Plan Output)
+#   - L + well-formed verdict: no escalation, continues through the Lean
+#     Approval Path, Q&A records the auto-adopted proceed decision
+#       -> CARVEOUT_* markers + LEAN_STEP2_* + LEAN_DISQUALIFIER_* markers
+#   - real split recommendation escalates exactly as today (incl. the
+#     split-child parent-feedback write)
+#       -> CARVEOUT_REAL_SPLIT_MARKER + the pre-existing #1093 markers above
+#   - missing/empty/bare/malformed verdict still escalates; missing/malformed
+#     Size Estimate still fires
+#       -> VERDICT_FAILCLOSED_* markers + SIZE_ESTIMATE_* markers
+#   - no child-specific exemption
+#       -> CARVEOUT_NO_CHILD_EXEMPTION_MARKER
+#   - interactive / ticketless / attended / resume unchanged
+#       -> UNCHANGED_MODES_MARKER + the interactive-branch negative snippet
+#   - shapes 2, 3 and 4 in SKILL.md and docs/autonomous-loop.md in sync
+#       -> SHAPE*_ and LOOP_DOC_* markers
+#   - the old `TRIGGER_MARKER` / `LEAN_ROUTE_MARKER` /
+#     `LEAN_UNCONDITIONAL_WRITE_MARKER` / `RESUME_EXEMPTION_MARKER` and
+#     `CAN_ONLY_DISQUALIFY_MARKER` (>= 2) assertions above stay in force
+#     unchanged as the regression guard for the additive edit.
+# =====================================================================
+
+PLANNER_AGENT="${FLOW_DIR}/agents/planner.md"
+REPO_ROOT="$(cd "${FLOW_DIR}/.." && pwd)" || { echo "implement-split-gate-contract.test.sh: failed to resolve repo root." >&2; exit 2; }
+LOOP_DOC="${REPO_ROOT}/docs/autonomous-loop.md"
+
+# normalize_ws <content> -- collapse newlines and repeated whitespace so a
+# markdown-wrapped sentence matches as one substring (shell-scripting-gotchas.md
+# line-wrapping pitfall). Mirrors attended-autonomy-contract.test.sh.
+normalize_ws() {
+  local content="$1"
+  content="${content//$'\n'/ }"
+  printf '%s' "${content}" | tr -s ' \t'
+}
+
+# assert_contains_ws / assert_lacks_ws <content> <needle> <label>
+assert_contains_ws() {
+  local content="$1" needle="$2" label="$3"
+  [[ -n "${needle}" ]] || { fail "${label}: empty required pattern (test bug)"; return; }
+  local norm
+  norm="$(normalize_ws "${content}")"
+  [[ "${norm}" == *"${needle}"* ]] || fail "${label}: required text missing (whitespace-normalized): [${needle}]"
+}
+assert_lacks_ws() {
+  local content="$1" needle="$2" label="$3"
+  [[ -n "${needle}" ]] || { fail "${label}: empty forbidden pattern (test bug)"; return; }
+  local norm
+  norm="$(normalize_ws "${content}")"
+  [[ "${norm}" != *"${needle}"* ]] || fail "${label}: forbidden text present (whitespace-normalized): [${needle}]"
+}
+
+# extract_subsection <content> <exact-heading-line> -- pure, fence-aware: the
+# body of a "### <heading>" subsection through the next real "## " or "### "
+# heading ("#### " sub-subsections stay inside), or EOF.
+extract_subsection() {
+  awk -v want="$2" '
+    $0 == want && !on { on=1; print; next }
+    /^```/ { infence = !infence; if (on) print; next }
+    on && !infence && (/^## / || /^### /) { exit }
+    on { print }
+  ' <<<"$1"
+}
+
+# extract_block <content> <start-needle> -- pure: from the first line containing
+# the needle through the line before the next blank line, numbered-step line
+# ("N. "), or bullet line ("- "). Keeps a wrapped paragraph/step/bullet together
+# and scopes a marker to the one construct it belongs to.
+extract_block() {
+  awk -v want="$2" '
+    !on && index($0, want) { on=1; print; next }
+    on && (/^[[:space:]]*$/ || /^[0-9]+\. / || /^- /) { exit }
+    on { print }
+  ' <<<"$1"
+}
+
+require_subsection() {
+  local -n _res="$1"
+  local _body
+  _body="$(extract_subsection "$2" "$3")"
+  if [[ -z "${_body}" ]]; then
+    fail "$4: could not locate '$3' subsection"
+    _res=""
+    return 1
+  fi
+  _res="${_body}"
+}
+require_block() {
+  local -n _res="$1"
+  local _body
+  _body="$(extract_block "$2" "$3")"
+  if [[ -z "${_body}" ]]; then
+    fail "$4: could not locate block starting at '$3'"
+    _res=""
+    return 1
+  fi
+  _res="${_body}"
+}
+
+# --- planner.md ## Plan Output: the Split Recommendation output contract ------
+
+PLANNER_REQUIRED_WHEN_L_MARKER='whenever the `### Size Estimate` is `L`'
+PLANNER_VERDICT_FORM_MARKER='either a real split or `None — <one-line rationale>`'
+PLANNER_SM_MARKER='omit it or write `None`'
+PLANNER_PATHS_ONLY_MARKER='repo-relative paths or identifiers only'
+PLANNER_OLD_HEADING='### Split Recommendation (only if L — real risk'
+PLANNER_WHOLE_SECTION_MARKER='`None — <one-line rationale>` must be the whole section: exactly one non-blank line'
+PLANNER_FURTHER_CONTENT_MARKER='any further non-blank content after that line (for example `Ticket N:` lines or bullets) makes it no verdict and the gate fails closed'
+
+if require_content PLANNER_CONTENT "${PLANNER_AGENT}" "planner.md" \
+   && require_section PLAN_OUTPUT_SECTION "${PLANNER_CONTENT}" "## Plan Output" "planner.md"; then
+  assert_contains_ws "${PLAN_OUTPUT_SECTION}" "${PLANNER_REQUIRED_WHEN_L_MARKER}" \
+    "planner.md (## Plan Output) must require ### Split Recommendation whenever the size estimate is L"
+  assert_contains_ws "${PLAN_OUTPUT_SECTION}" "${PLANNER_VERDICT_FORM_MARKER}" \
+    "planner.md (## Plan Output) must require the L Split Recommendation to be a real split or None — <one-line rationale>"
+  assert_contains_ws "${PLAN_OUTPUT_SECTION}" "${PLANNER_SM_MARKER}" \
+    "planner.md (## Plan Output) must say an S/M estimate omits the Split Recommendation or writes None"
+  assert_contains_ws "${PLAN_OUTPUT_SECTION}" "${PLANNER_PATHS_ONLY_MARKER}" \
+    "planner.md (## Plan Output) must restrict the None-verdict rationale to repo-relative paths or identifiers only (it reaches a possibly-public ticket)"
+  assert_contains_ws "${PLAN_OUTPUT_SECTION}" "${PLANNER_WHOLE_SECTION_MARKER}" \
+    "planner.md (## Plan Output) must require the None — <one-line rationale> verdict to be the whole section: exactly one non-blank line"
+  assert_contains_ws "${PLAN_OUTPUT_SECTION}" "${PLANNER_FURTHER_CONTENT_MARKER}" \
+    "planner.md (## Plan Output) must state any further non-blank content after the verdict line makes it no verdict and the gate fails closed"
+  assert_lacks_ws "${PLAN_OUTPUT_SECTION}" "${PLANNER_OLD_HEADING}" \
+    "planner.md (## Plan Output) must no longer carry the old non-deterministic '(only if L — ...)' heading text"
+  # The heading itself must now be deterministic for the gate: a plain
+  # `### Split Recommendation` line (the template block is indented).
+  if ! grep -qE '^[[:space:]]*### Split Recommendation[[:space:]]*$' "${PLANNER_AGENT}"; then
+    fail "planner.md (## Plan Output) must carry a plain '### Split Recommendation' heading line (deterministic for the Split Gate)"
+  fi
+fi
+
+# --- phase-1-plan.md ### Split Gate: reasoned no-split verdict + carve-out ----
+
+SPLIT_GATE_LABEL_MARKER='**Reasoned no-split verdict.**'
+VERDICT_FORMAT_MARKER='first non-blank line is `None`, then an em dash or a spaced hyphen, then non-empty rationale text'
+VERDICT_FAILCLOSED_MISSING_MARKER='a missing heading'
+VERDICT_FAILCLOSED_EMPTY_MARKER='an empty section'
+VERDICT_FAILCLOSED_BARE_MARKER='a bare `None`/`None.`'
+VERDICT_FAILCLOSED_FREETEXT_MARKER='free text such as'
+VERDICT_FORMAT_ONLY_MARKER='format only, never the rationale'"'"'s quality'
+VERDICT_NONE_EXACT_MARKER='the section counts as "None" only if its entire trimmed text is exactly `None` or `None.`'
+VERDICT_NONE_SINGLE_LINE_MARKER='or it is a single-line well-formed reasoned no-split verdict'
+VERDICT_NONE_REAL_TEXT_MARKER='is real text and fires the gate as before'
+VERDICT_NONE_PREFIX_EXAMPLES_MARKER='`Nonetheless…`, `None of these fit… split into…`, or `None.` followed by split bullets'
+VERDICT_NONE_PREFIX_PHRASE='text starts with `None`'
+VERDICT_ONE_LINE_MARKER='is exactly one non-blank line'
+VERDICT_FURTHER_CONTENT_MARKER='any further non-blank content after that line (for example `Ticket N:` lines or bullets) is no verdict and fails closed'
+UNCHANGED_MODES_MARKER='unchanged in interactive mode, ticketless mode, attended sessions, and on the resume-mode re-plan return'
+SIZE_ESTIMATE_FIRES_MARKER='a missing or malformed estimate is never read as "doesn'"'"'t trigger."'
+SIZE_ESTIMATE_CARVEOUT_MARKER='never applies to a missing or malformed `### Size Estimate`'
+
+CARVEOUT_LABEL_MARKER='**Reasoned-proceed carve-out'
+CARVEOUT_LEAN_ONLY_MARKER='lean ticket mode'
+CARVEOUT_CONDITION_MARKER='`### Size Estimate` of `L` plus a reasoned no-split verdict'
+CARVEOUT_NO_ESCALATION_MARKER='no escalation'
+CARVEOUT_NO_QUESTION_MARKER='no synthesized split question'
+CARVEOUT_NO_FEEDBACK_MARKER='no Feedback-to-the-parent write'
+CARVEOUT_NO_PIPELINE_MARKER='the gate itself makes no `cenci pipeline` call (the Lean Approval Path'"'"'s own calls still run)'
+SECRECY_RATIONALE_MARKER='must be repo-relative paths or identifiers only'
+SECRECY_PRECEDENCE_MARKER='secrecy takes precedence over verbatim recording'
+CARVEOUT_CONTINUES_MARKER='continues to `## Lean Approval Path`'
+CARVEOUT_QANDA_QUESTION_MARKER='Q: Split the oversized plan?'
+PROCEED_ENTRY_MARKER='auto-adopted: Proceed as a single PR — <planner rationale>'
+CARVEOUT_VERBATIM_MARKER='stays verbatim in the plan'
+CARVEOUT_NO_CHILD_EXEMPTION_MARKER='no child-specific exemption'
+CARVEOUT_REAL_SPLIT_MARKER='a real split recommendation escalates exactly as below'
+CARVEOUT_OTHER_TRIGGERS_MARKER='every other trigger escalates exactly as below'
+
+if require_subsection SPLIT_GATE_SUBSECTION "${PHASE1_CONTENT}" "### Split Gate" "phase-1-plan.md"; then
+  assert_contains_ws "${SPLIT_GATE_SUBSECTION}" "${SPLIT_GATE_LABEL_MARKER}" \
+    "phase-1-plan.md (### Split Gate) must define the reasoned no-split verdict once, in the gate"
+  # Scope every verdict marker to the one **Reasoned no-split verdict.**
+  # paragraph (not the whole gate): 'a missing heading' etc. recur elsewhere.
+  if require_block VERDICT_BLOCK "${SPLIT_GATE_SUBSECTION}" "${SPLIT_GATE_LABEL_MARKER}" "phase-1-plan.md (### Split Gate)"; then
+    assert_contains_ws "${VERDICT_BLOCK}" "${VERDICT_FORMAT_MARKER}" \
+      "phase-1-plan.md (### Split Gate) must define the verdict format: None, then an em dash or spaced hyphen, then non-empty rationale text"
+    assert_contains_ws "${VERDICT_BLOCK}" "${VERDICT_ONE_LINE_MARKER}" \
+      "phase-1-plan.md (### Split Gate) the verdict must be exactly one non-blank line"
+    assert_contains_ws "${VERDICT_BLOCK}" "${VERDICT_FURTHER_CONTENT_MARKER}" \
+      "phase-1-plan.md (### Split Gate) any further non-blank content after the verdict line must fail closed"
+    assert_contains_ws "${VERDICT_BLOCK}" "${VERDICT_FAILCLOSED_MISSING_MARKER}" \
+      "phase-1-plan.md (### Split Gate) must treat a missing Split Recommendation heading as no verdict (fail closed)"
+    assert_contains_ws "${VERDICT_BLOCK}" "${VERDICT_FAILCLOSED_EMPTY_MARKER}" \
+      "phase-1-plan.md (### Split Gate) must treat an empty Split Recommendation section as no verdict (fail closed)"
+    assert_contains_ws "${VERDICT_BLOCK}" "${VERDICT_FAILCLOSED_BARE_MARKER}" \
+      "phase-1-plan.md (### Split Gate) must treat a bare None/None. as no verdict (fail closed)"
+    assert_contains_ws "${VERDICT_BLOCK}" "${VERDICT_FAILCLOSED_FREETEXT_MARKER}" \
+      "phase-1-plan.md (### Split Gate) must treat free text (e.g. 'No split recommended...') as no verdict (fail closed)"
+    assert_contains_ws "${VERDICT_BLOCK}" "${VERDICT_FORMAT_ONLY_MARKER}" \
+      "phase-1-plan.md (### Split Gate) must state the gate checks the format only, never the rationale's quality"
+    assert_contains_ws "${VERDICT_BLOCK}" "${VERDICT_NONE_EXACT_MARKER}" \
+      "phase-1-plan.md (### Split Gate) must define \"None\" for the split-text condition as exactly None or None. (no prefix match)"
+    assert_contains_ws "${VERDICT_BLOCK}" "${VERDICT_NONE_SINGLE_LINE_MARKER}" \
+      "phase-1-plan.md (### Split Gate) must also count a single-line well-formed reasoned no-split verdict as \"None\""
+    assert_contains_ws "${VERDICT_BLOCK}" "${VERDICT_NONE_PREFIX_EXAMPLES_MARKER}" \
+      "phase-1-plan.md (### Split Gate) must name the None-prefixed counter-examples (Nonetheless, None of these fit, None. followed by bullets)"
+    assert_contains_ws "${VERDICT_BLOCK}" "${VERDICT_NONE_REAL_TEXT_MARKER}" \
+      "phase-1-plan.md (### Split Gate) must state None-prefixed text that is not exactly None/None./a verdict is real text and fires the gate"
+    assert_contains_ws "${VERDICT_BLOCK}" "${UNCHANGED_MODES_MARKER}" \
+      "phase-1-plan.md (### Split Gate) must state Split Gate behavior is unchanged in interactive, ticketless, attended and resume-mode runs"
+  fi
+  assert_file_lacks "${PHASE1_PLAN}" "${VERDICT_NONE_PREFIX_PHRASE}" \
+    "must not carry the retired fail-open prefix rule (a Split Recommendation whose text starts with None counts as None)"
+  assert_contains_ws "${SPLIT_GATE_SUBSECTION}" "${SIZE_ESTIMATE_FIRES_MARKER}" \
+    "#1199 regression: a missing or malformed Size Estimate must still fire the gate"
+  assert_contains_ws "${SPLIT_GATE_SUBSECTION}" "${SIZE_ESTIMATE_CARVEOUT_MARKER}" \
+    "phase-1-plan.md (### Split Gate) the reasoned-proceed carve-out must never apply to a missing or malformed Size Estimate"
+
+  if require_block CARVEOUT_BLOCK "${SPLIT_GATE_SUBSECTION}" "${CARVEOUT_LABEL_MARKER}" "phase-1-plan.md (### Split Gate)"; then
+    assert_contains_ws "${CARVEOUT_BLOCK}" "${CARVEOUT_LEAN_ONLY_MARKER}" \
+      "phase-1-plan.md (### Split Gate) reasoned-proceed carve-out must be scoped to lean ticket mode"
+    assert_contains_ws "${CARVEOUT_BLOCK}" "${CARVEOUT_CONDITION_MARKER}" \
+      "phase-1-plan.md (### Split Gate) reasoned-proceed carve-out must require a Size Estimate of L plus a reasoned no-split verdict"
+    assert_contains_ws "${CARVEOUT_BLOCK}" "${CARVEOUT_NO_ESCALATION_MARKER}" \
+      "phase-1-plan.md (### Split Gate) reasoned-proceed carve-out must not escalate"
+    assert_contains_ws "${CARVEOUT_BLOCK}" "${CARVEOUT_NO_QUESTION_MARKER}" \
+      "phase-1-plan.md (### Split Gate) reasoned-proceed carve-out must not synthesize a split question"
+    assert_contains_ws "${CARVEOUT_BLOCK}" "${CARVEOUT_NO_FEEDBACK_MARKER}" \
+      "phase-1-plan.md (### Split Gate) reasoned-proceed carve-out must not run the Feedback-to-the-parent write"
+    assert_contains_ws "${CARVEOUT_BLOCK}" "${CARVEOUT_NO_PIPELINE_MARKER}" \
+      "phase-1-plan.md (### Split Gate) reasoned-proceed carve-out must say the gate itself makes no cenci pipeline call while the Lean Approval Path's own calls still run"
+    assert_contains_ws "${CARVEOUT_BLOCK}" "${VERDICT_FURTHER_CONTENT_MARKER}" \
+      "phase-1-plan.md (### Split Gate) reasoned-proceed carve-out must restate that further non-blank content after the verdict line is no verdict (fails closed)"
+    assert_contains_ws "${CARVEOUT_BLOCK}" "${SECRECY_RATIONALE_MARKER}" \
+      "phase-1-plan.md (### Split Gate) reasoned-proceed carve-out must restate that the recorded planner rationale is repo-relative paths or identifiers only (reaches a possibly-public ticket)"
+    assert_contains_ws "${CARVEOUT_BLOCK}" "${SECRECY_PRECEDENCE_MARKER}" \
+      "phase-1-plan.md (### Split Gate) reasoned-proceed carve-out must state secrecy takes precedence over verbatim recording"
+    assert_contains_ws "${CARVEOUT_BLOCK}" "${CARVEOUT_CONTINUES_MARKER}" \
+      "phase-1-plan.md (### Split Gate) reasoned-proceed carve-out must continue to ## Lean Approval Path"
+    assert_contains_ws "${CARVEOUT_BLOCK}" "${CARVEOUT_QANDA_QUESTION_MARKER}" \
+      "phase-1-plan.md (### Split Gate) reasoned-proceed carve-out must record the Split the oversized plan? question in ## Q&A from Planning"
+    assert_contains_ws "${CARVEOUT_BLOCK}" "${PROCEED_ENTRY_MARKER}" \
+      "phase-1-plan.md (### Split Gate) reasoned-proceed carve-out must record the auto-adopted proceed decision with the planner's rationale"
+    assert_contains_ws "${CARVEOUT_BLOCK}" "${CARVEOUT_VERBATIM_MARKER}" \
+      "phase-1-plan.md (### Split Gate) reasoned-proceed carve-out must keep the Split Recommendation verbatim in the plan"
+    assert_contains_ws "${CARVEOUT_BLOCK}" "${CARVEOUT_NO_CHILD_EXEMPTION_MARKER}" \
+      "phase-1-plan.md (### Split Gate) reasoned-proceed carve-out must state there is no child-specific exemption"
+    assert_contains_ws "${CARVEOUT_BLOCK}" "${CARVEOUT_REAL_SPLIT_MARKER}" \
+      "phase-1-plan.md (### Split Gate) reasoned-proceed carve-out must state a real split recommendation still escalates exactly as before"
+    assert_contains_ws "${CARVEOUT_BLOCK}" "${CARVEOUT_OTHER_TRIGGERS_MARKER}" \
+      "phase-1-plan.md (### Split Gate) reasoned-proceed carve-out must state every other trigger escalates exactly as before"
+  fi
+
+  # Negative: the whole interactive/ticketless Stop/Proceed region -- from its
+  # bold header through the Feedback-to-the-parent subsection, i.e. everything
+  # before the lean-only carve-out paragraph -- must carry no reasoned-proceed
+  # carve-out and never mention the reasoned verdict. The carve-out paragraph
+  # itself sits between that region and **Lean ticket mode**, so the ordering
+  # assertion below proves the region really spans up to the lean branch.
+  INTERACTIVE_REGION="$(awk '
+    index($0, "**Interactive mode, and ticketless mode**") { on=1 }
+    on && index($0, "**Reasoned-proceed carve-out") { exit }
+    on { print }
+  ' <<<"${SPLIT_GATE_SUBSECTION}")"
+  if [[ -z "${INTERACTIVE_REGION}" ]]; then
+    fail "phase-1-plan.md: could not locate the interactive/ticketless Stop region for the no-carve-out negative check"
+  elif [[ "${INTERACTIVE_REGION,,}" == *"reasoned"* ]]; then
+    fail "phase-1-plan.md (### Split Gate) interactive/ticketless Stop region must not mention a reasoned no-split carve-out (found 'reasoned')"
+  fi
+  INTERACTIVE_LINE="$(grep -nF -m1 -- '**Interactive mode, and ticketless mode**' <<<"${SPLIT_GATE_SUBSECTION}" | cut -d: -f1)"
+  CARVEOUT_LINE="$(grep -nF -m1 -- "${CARVEOUT_LABEL_MARKER}" <<<"${SPLIT_GATE_SUBSECTION}" | cut -d: -f1)"
+  LEAN_LINE="$(grep -nF -m1 -- '**Lean ticket mode** (' <<<"${SPLIT_GATE_SUBSECTION}" | cut -d: -f1)"
+  if [[ -z "${INTERACTIVE_LINE}" || -z "${CARVEOUT_LINE}" || -z "${LEAN_LINE}" ]]; then
+    fail "phase-1-plan.md (### Split Gate): could not locate the interactive / carve-out / lean branch headers to prove the negative-check region spans up to the lean branch"
+  elif ! [[ "${INTERACTIVE_LINE}" -lt "${CARVEOUT_LINE}" && "${CARVEOUT_LINE}" -lt "${LEAN_LINE}" ]]; then
+    fail "phase-1-plan.md (### Split Gate): expected order interactive (${INTERACTIVE_LINE}) < carve-out (${CARVEOUT_LINE}) < lean ticket mode (${LEAN_LINE})"
+  fi
+
+  # Parent-feedback staging (#1199 review fix C): a None-led well-formed verdict
+  # or any malformed/free-text Split Recommendation is "no split text" and
+  # gets the one-line L statement -- never posted verbatim to the parent as
+  # split evidence. Only genuinely real split text is staged verbatim.
+  STAGING_NO_SPLIT_TEXT_MARKER='holds no genuine split text'
+  STAGING_NONE_LED_MARKER='a well-formed `None — <rationale>` verdict'
+  STAGING_MALFORMED_MARKER='any malformed or free-text section such as "No split recommended…"'
+  STAGING_NEVER_VERBATIM_MARKER='never post that text verbatim to the parent as split evidence'
+  STAGING_ONLY_REAL_MARKER='only genuinely real split text'
+  if require_block STAGING_BLOCK "${ROUTE_SECTION}" "${UNDEFINED_CONTENT_HEADING_MARKER}" "phase-1-plan.md (### Split Gate parent-feedback staging)"; then
+    assert_contains_ws "${STAGING_BLOCK}" "${STAGING_NO_SPLIT_TEXT_MARKER}" \
+      "phase-1-plan.md (### Split Gate parent-feedback staging) must define the no-split-text substitution condition"
+    assert_contains_ws "${STAGING_BLOCK}" "${STAGING_NONE_LED_MARKER}" \
+      "phase-1-plan.md (### Split Gate parent-feedback staging) must treat a well-formed None — <rationale> verdict as no split text"
+    assert_contains_ws "${STAGING_BLOCK}" "${STAGING_MALFORMED_MARKER}" \
+      "phase-1-plan.md (### Split Gate parent-feedback staging) must treat a malformed or free-text Split Recommendation as no split text"
+    assert_contains_ws "${STAGING_BLOCK}" "${STAGING_NEVER_VERBATIM_MARKER}" \
+      "phase-1-plan.md (### Split Gate parent-feedback staging) must never post no-split text verbatim to the parent as split evidence"
+    assert_contains_ws "${STAGING_BLOCK}" "${STAGING_ONLY_REAL_MARKER}" \
+      "phase-1-plan.md (### Split Gate parent-feedback staging) must stage only genuinely real split text verbatim"
+  fi
+  LEAN_BRANCH_QUESTION_MARKER='the planner'"'"'s `### Split Recommendation` when it is genuinely real split text, or otherwise a one-line statement of the `L` size estimate'
+  LEAN_BRANCH_NEVER_VERBATIM_MARKER='a malformed, free-text, or `None`-led no-split section is never posted verbatim as the question'
+  if require_block LEAN_BRANCH_BLOCK "${SPLIT_GATE_SUBSECTION}" "**Lean ticket mode** (" "phase-1-plan.md (### Split Gate lean ticket mode)"; then
+    assert_contains_ws "${LEAN_BRANCH_BLOCK}" "${LEAN_BRANCH_QUESTION_MARKER}" \
+      "phase-1-plan.md (### Split Gate lean ticket mode) the synthesized question must use the planner's text only when it is genuinely real split text, else the one-line L statement"
+    assert_contains_ws "${LEAN_BRANCH_BLOCK}" "${LEAN_BRANCH_NEVER_VERBATIM_MARKER}" \
+      "phase-1-plan.md (### Split Gate lean ticket mode) a malformed, free-text, or None-led no-split section must never be posted verbatim as the synthesized question"
+  fi
+fi
+
+# --- phase-1-plan.md ## Lean Approval Path: disqualifier carve-out, step 2,
+#     step 8 -------------------------------------------------------------------
+
+LEAN_DISQUALIFIER_START='- **Split Gate.**'
+LEAN_DISQUALIFIER_VERDICT_MARKER='reasoned no-split verdict'
+LEAN_DISQUALIFIER_MISSING_MARKER='a missing heading'
+LEAN_DISQUALIFIER_EMPTY_MARKER='an empty section'
+LEAN_DISQUALIFIER_BARE_MARKER='a bare `None`/`None.`'
+LEAN_DISQUALIFIER_FREETEXT_MARKER='free text such as'
+LEAN_DISQUALIFIER_REAL_SPLIT_MARKER='a real split recommendation'
+LEAN_DISQUALIFIER_SIZE_MARKER='missing or malformed `### Size Estimate`'
+LEAN_STEP2_START='2. Write the plan file'
+LEAN_STEP2_QUESTION_MARKER='Q: Split the oversized plan?'
+LEAN_STEP2_ROUTE_MARKER='reasoned-proceed route'
+LEAN_STEP8_START='8. Emit a 3-5 line status summary'
+LEAN_STEP8_ROUTE_MARKER='reasoned-proceed route'
+LEAN_STEP8_ESTIMATE_MARKER='names the `L` estimate'
+
+if require_section LEAN_APPROVAL_1199 "${PHASE1_CONTENT}" "## Lean Approval Path" "phase-1-plan.md"; then
+  if require_block LEAN_DISQUALIFIER_BLOCK "${LEAN_APPROVAL_1199}" "${LEAN_DISQUALIFIER_START}" "phase-1-plan.md (## Lean Approval Path)"; then
+    assert_contains_ws "${LEAN_DISQUALIFIER_BLOCK}" "${LEAN_DISQUALIFIER_VERDICT_MARKER}" \
+      "phase-1-plan.md (## Lean Approval Path) Split Gate disqualifier must carve out an L estimate with a reasoned no-split verdict"
+    assert_contains_ws "${LEAN_DISQUALIFIER_BLOCK}" "${LEAN_DISQUALIFIER_MISSING_MARKER}" \
+      "phase-1-plan.md (## Lean Approval Path) Split Gate disqualifier must restate: a missing heading is no verdict (restate, don't reference)"
+    assert_contains_ws "${LEAN_DISQUALIFIER_BLOCK}" "${LEAN_DISQUALIFIER_EMPTY_MARKER}" \
+      "phase-1-plan.md (## Lean Approval Path) Split Gate disqualifier must restate: an empty section is no verdict"
+    assert_contains_ws "${LEAN_DISQUALIFIER_BLOCK}" "${LEAN_DISQUALIFIER_BARE_MARKER}" \
+      "phase-1-plan.md (## Lean Approval Path) Split Gate disqualifier must restate: a bare None/None. is no verdict"
+    assert_contains_ws "${LEAN_DISQUALIFIER_BLOCK}" "${LEAN_DISQUALIFIER_FREETEXT_MARKER}" \
+      "phase-1-plan.md (## Lean Approval Path) Split Gate disqualifier must restate: free text is no verdict"
+    assert_contains_ws "${LEAN_DISQUALIFIER_BLOCK}" "${VERDICT_NONE_EXACT_MARKER}" \
+      "phase-1-plan.md (## Lean Approval Path) Split Gate disqualifier must restate (not reference) the exact-None/None. definition of \"None\", with no prefix match"
+    assert_contains_ws "${LEAN_DISQUALIFIER_BLOCK}" "${VERDICT_NONE_SINGLE_LINE_MARKER}" \
+      "phase-1-plan.md (## Lean Approval Path) Split Gate disqualifier must restate that a single-line well-formed verdict also counts as \"None\""
+    assert_contains_ws "${LEAN_DISQUALIFIER_BLOCK}" "${VERDICT_NONE_PREFIX_EXAMPLES_MARKER}" \
+      "phase-1-plan.md (## Lean Approval Path) Split Gate disqualifier must restate the None-prefixed counter-examples that still disqualify"
+    assert_contains_ws "${LEAN_DISQUALIFIER_BLOCK}" "${VERDICT_ONE_LINE_MARKER}" \
+      "phase-1-plan.md (## Lean Approval Path) Split Gate disqualifier must restate that the verdict is exactly one non-blank line"
+    assert_contains_ws "${LEAN_DISQUALIFIER_BLOCK}" "${VERDICT_FURTHER_CONTENT_MARKER}" \
+      "phase-1-plan.md (## Lean Approval Path) Split Gate disqualifier must restate that further non-blank content after the verdict line is no verdict (fails closed)"
+    assert_contains_ws "${LEAN_DISQUALIFIER_BLOCK}" "${LEAN_DISQUALIFIER_REAL_SPLIT_MARKER}" \
+      "phase-1-plan.md (## Lean Approval Path) Split Gate disqualifier must keep disqualifying on a real split recommendation"
+    assert_contains_ws "${LEAN_DISQUALIFIER_BLOCK}" "${LEAN_DISQUALIFIER_SIZE_MARKER}" \
+      "phase-1-plan.md (## Lean Approval Path) Split Gate disqualifier must keep disqualifying on a missing or malformed Size Estimate"
+    assert_contains_ws "${LEAN_DISQUALIFIER_BLOCK}" "${CAN_ONLY_DISQUALIFY_MARKER}" \
+      "phase-1-plan.md (## Lean Approval Path) Split Gate disqualifier must keep the can-only-disqualify-never-promote clause"
+  fi
+  if require_block LEAN_STEP2_BLOCK "${LEAN_APPROVAL_1199}" "${LEAN_STEP2_START}" "phase-1-plan.md (## Lean Approval Path step 2)"; then
+    assert_contains_ws "${LEAN_STEP2_BLOCK}" "${LEAN_STEP2_QUESTION_MARKER}" \
+      "phase-1-plan.md (## Lean Approval Path step 2) must record the Split the oversized plan? question for the reasoned-proceed route"
+    assert_contains_ws "${LEAN_STEP2_BLOCK}" "${PROCEED_ENTRY_MARKER}" \
+      "phase-1-plan.md (## Lean Approval Path step 2) must record the auto-adopted proceed entry with the planner's rationale in ## Q&A from Planning"
+    assert_contains_ws "${LEAN_STEP2_BLOCK}" "${LEAN_STEP2_ROUTE_MARKER}" \
+      "phase-1-plan.md (## Lean Approval Path step 2) must name the reasoned-proceed route"
+    assert_contains_ws "${LEAN_STEP2_BLOCK}" "${SECRECY_RATIONALE_MARKER}" \
+      "phase-1-plan.md (## Lean Approval Path step 2) must restate that the recorded planner rationale is repo-relative paths or identifiers only"
+    assert_contains_ws "${LEAN_STEP2_BLOCK}" "${SECRECY_PRECEDENCE_MARKER}" \
+      "phase-1-plan.md (## Lean Approval Path step 2) must state secrecy takes precedence over verbatim recording"
+  fi
+  if require_block LEAN_STEP8_BLOCK "${LEAN_APPROVAL_1199}" "${LEAN_STEP8_START}" "phase-1-plan.md (## Lean Approval Path step 8)"; then
+    assert_contains_ws "${LEAN_STEP8_BLOCK}" "${LEAN_STEP8_ROUTE_MARKER}" \
+      "phase-1-plan.md (## Lean Approval Path step 8) must name the reasoned-proceed route in the status summary"
+    assert_contains_ws "${LEAN_STEP8_BLOCK}" "${LEAN_STEP8_ESTIMATE_MARKER}" \
+      "phase-1-plan.md (## Lean Approval Path step 8) status summary must name the L estimate on the reasoned-proceed route"
+  fi
+fi
+
+# --- phase-1-plan.md ## Persist the Plan: the ## Q&A from Planning template
+#     documents the Phase-1 reasoned-proceed entry form --------------------------
+
+if require_section PERSIST_1199 "${PHASE1_CONTENT}" "## Persist the Plan" "phase-1-plan.md"; then
+  assert_contains_ws "${PERSIST_1199}" "${PROCEED_ENTRY_MARKER}" \
+    "phase-1-plan.md (## Persist the Plan) ## Q&A from Planning template must document the Phase-1 reasoned-proceed entry form"
+fi
+
+# --- SKILL.md ## Pipeline: session shapes 2, 3 and 4 in sync -------------------
+
+SHAPE2_START='2. **Trivial Fast Path continues to Phase 2**'
+SHAPE2_ROUTE_MARKER='reasoned-proceed route'
+SHAPE3_START='3. **Escalation stop**'
+SHAPE3_QUALIFIER_MARKER='without a well-formed reasoned no-split verdict'
+SHAPE4_START='4. **Split Gate stop'
+SHAPE4_NONE_MARKER='a non-empty, non-`None` `### Split Recommendation`'
+SHAPE4_NO_CARVEOUT_MARKER='the reasoned-proceed carve-out never applies in interactive or ticketless mode'
+NONE_NOT_PREFIX_MARKER='`None` here means exactly `None`/`None.` or a single-line well-formed `None — <rationale>`, never a prefix match'
+
+if require_section PIPELINE_1199 "${SKILL_CONTENT}" "## Pipeline" "SKILL.md"; then
+  if require_block SHAPE2_BLOCK "${PIPELINE_1199}" "${SHAPE2_START}" "SKILL.md (## Pipeline shape 2)"; then
+    assert_contains_ws "${SHAPE2_BLOCK}" "${SHAPE2_ROUTE_MARKER}" \
+      "SKILL.md (## Pipeline) shape (2) must also continue to Phase 2 on the lean reasoned-proceed route"
+  fi
+  if require_block SHAPE3_BLOCK "${PIPELINE_1199}" "${SHAPE3_START}" "SKILL.md (## Pipeline shape 3)"; then
+    assert_contains_ws "${SHAPE3_BLOCK}" "${SHAPE3_QUALIFIER_MARKER}" \
+      "SKILL.md (## Pipeline) shape (3) must qualify the Split-Gate-synthesized question as a real split or an L/missing/malformed estimate without a well-formed reasoned no-split verdict"
+  fi
+  if require_block SHAPE4_BLOCK "${PIPELINE_1199}" "${SHAPE4_START}" "SKILL.md (## Pipeline shape 4)"; then
+    assert_contains_ws "${SHAPE4_BLOCK}" "${SHAPE4_NONE_MARKER}" \
+      "SKILL.md (## Pipeline) shape (4) must say a non-empty, non-None Split Recommendation triggers the stop"
+    assert_contains_ws "${SHAPE4_BLOCK}" "${SHAPE4_NO_CARVEOUT_MARKER}" \
+      "SKILL.md (## Pipeline) shape (4) must say the reasoned-proceed carve-out never applies in interactive or ticketless mode"
+    assert_contains_ws "${SHAPE4_BLOCK}" "${NONE_NOT_PREFIX_MARKER}" \
+      "SKILL.md (## Pipeline) shape (4) must define None as exact/single-line-verdict, never claim a prefix rule"
+  fi
+fi
+
+# --- docs/autonomous-loop.md "Planning refuses to guess" condition list ---------
+#     (whitespace-normalized: the doc is hard-wrapped)
+
+LOOP_DOC_NEW_SIZE_BULLET='size estimate is not `L` unless the planner'"'"'s `### Split Recommendation` is a well-formed `None — <rationale>`, and there'"'"'s no real split recommendation'
+LOOP_DOC_OLD_SIZE_BULLET='size estimate is not `L` and there'"'"'s no split recommendation;'
+LOOP_DOC_SENSITIVE_BULLET='no file in `### Files to Modify`/`### Files to Create` matching the sensitive-path'
+
+if require_content LOOP_CONTENT "${LOOP_DOC}" "docs/autonomous-loop.md"; then
+  assert_contains_ws "${LOOP_CONTENT}" "${LOOP_DOC_NEW_SIZE_BULLET}" \
+    "docs/autonomous-loop.md 'Planning refuses to guess' list must allow an L estimate only with a well-formed None — <rationale> verdict and no real split recommendation"
+  assert_lacks_ws "${LOOP_CONTENT}" "${LOOP_DOC_OLD_SIZE_BULLET}" \
+    "docs/autonomous-loop.md must no longer carry the old unconditional 'size estimate is not L' bullet"
+  assert_contains_ws "${LOOP_CONTENT}" "${LOOP_DOC_SENSITIVE_BULLET}" \
+    "#1199 regression: the sensitive-path bullet of the 'Planning refuses to guess' list must stay unchanged"
+fi
+
+# --- codex.md: trigger wording aligned (no behavior change, still portable) ----
+
+CODEX_NONE_MARKER='a non-empty, non-`None` `### Split Recommendation`'
+if require_content CODEX_CONTENT "${CODEX_MD}" "codex.md"; then
+  assert_contains_ws "${CODEX_CONTENT}" "${CODEX_NONE_MARKER}" \
+    "codex.md Split Gate trigger must align to a non-empty, non-None Split Recommendation (no behavior change: Codex still asks on any L)"
+  assert_contains_ws "${CODEX_CONTENT}" "${NONE_NOT_PREFIX_MARKER}" \
+    "codex.md must define None as exact/single-line-verdict, never claim a prefix rule"
+  assert_lacks_ws "${CODEX_CONTENT}" "${VERDICT_NONE_PREFIX_PHRASE}" \
+    "codex.md must not carry the retired fail-open prefix rule"
+fi
+# AskUserQuestion stays absent from codex.md: asserted above (assert_file_lacks).
+
 echo "implement-split-gate-contract.test.sh: failures=${failures}"
 [[ "${failures}" -eq 0 ]]
