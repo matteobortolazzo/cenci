@@ -32,6 +32,9 @@ func TestSeverityForCode_MapsRegisteredCodesToTheirTier(t *testing.T) {
 		{"daemon unreachable", errcode.DaemonConnUnreachable, SeverityDegraded},
 		{"event socket missing", errcode.DaemonSocketMissing, SeverityDegraded},
 		{"dind startup failure", errcode.SandboxDindStartupFailure, SeverityDegraded},
+		{"limits: host memory unreadable", errcode.SandboxLimitsHostMemoryUnreadable, SeverityFatal},
+		{"limits: create rejected", errcode.SandboxLimitsCreateRejected, SeverityFatal},
+		{"limits: cgroup OOM kills", errcode.SandboxLimitsOOMKills, SeverityDegraded},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1227,5 +1230,244 @@ func TestDiagnose_PluginManifestReadFailed_UnitContract(t *testing.T) {
 	}
 	if got := pluginManifestVersionDisplay("", status); got != "unknown (read failed)" {
 		t.Errorf("pluginManifestVersionDisplay(\"\", homeVolumeReadFailed) = %q, want %q", got, "unknown (read failed)")
+	}
+}
+
+// -- ticket #1216: resource limits and cgroup OOM kills (AC10) ---------------
+//
+// Diagnose always prints four lines -- "Memory limit:", "Memory swap:",
+// "Pids limit:" and "OOM kills (cgroup):" -- mirroring the always-on "Nested Docker:" /
+// "Event delivery:" convention. The limits come from the container's
+// .HostConfig (FAKE_CONTAINER_LIMITS) and the kill count from the
+// `oom_kill` line of the container's cgroup memory.events
+// (FAKE_MEMORY_EVENTS). A count above 0 is a registered, degraded finding; a
+// count (or limits) that could not be read is "unknown" with a code-less
+// warning, never a silent 0.
+
+// limitsDiagnoseReport runs Diagnose against a fake docker with the given
+// extra environment and returns the stdout report.
+func limitsDiagnoseReport(t *testing.T, env map[string]string) string {
+	t.Helper()
+	fakeDir := t.TempDir()
+	callLog := filepath.Join(fakeDir, "calls.txt")
+	writeFakeRuntime(t, fakeDir, "docker", callLog)
+	t.Setenv("PATH", fakeDir+":"+os.Getenv("PATH"))
+	for k, v := range env {
+		t.Setenv(k, v)
+	}
+
+	var stdout, stderr bytes.Buffer
+	e := &Engine{Runtime: "docker", Stdout: &stdout, Stderr: &stderr}
+	if err := e.Diagnose(dindDiagnoseScope()); err != nil {
+		t.Fatalf("Diagnose: %v", err)
+	}
+	return stdout.String()
+}
+
+// reportLinesContaining returns the report lines containing every sub.
+func reportLinesContaining(report string, subs ...string) []string {
+	var out []string
+	for _, line := range strings.Split(report, "\n") {
+		all := true
+		for _, s := range subs {
+			if !strings.Contains(line, s) {
+				all = false
+				break
+			}
+		}
+		if all {
+			out = append(out, line)
+		}
+	}
+	return out
+}
+
+func TestDiagnose_ResourceLimits_ShowsLimitsAndZeroOOMWithoutFinding(t *testing.T) {
+	out := limitsDiagnoseReport(t, nil)
+
+	for _, want := range []string{
+		"Memory limit: 8192 MiB",
+		"Memory swap: 8192 MiB",
+		"Pids limit: 4096",
+		"OOM kills (cgroup): 0",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("report missing %q for a default 8 GiB / 4096-pid container with no OOM kills; got:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "CENCI-SANDBOX-LIMITS-") {
+		t.Errorf("did not expect any LIMITS finding for a healthy container, got:\n%s", out)
+	}
+}
+
+func TestDiagnose_ResourceLimits_UnlimitedContainerReportsUnlimited(t *testing.T) {
+	// An unlimited container (e.g. one created before limits shipped): memory 0,
+	// swap 0 and a nil pids limit as docker prints it.
+	out := limitsDiagnoseReport(t, map[string]string{"FAKE_CONTAINER_LIMITS": "0|0|<nil>"})
+
+	for _, want := range []string{"Memory limit: unlimited", "Memory swap: unlimited", "Pids limit: unlimited"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("report missing %q for an unlimited container; got:\n%s", want, out)
+		}
+	}
+}
+
+func TestDiagnose_ResourceLimits_PodmanUnlimitedMinusOneReportsUnlimited(t *testing.T) {
+	out := limitsDiagnoseReport(t, map[string]string{"FAKE_CONTAINER_LIMITS": "-1|-1|-1"})
+
+	for _, want := range []string{"Memory limit: unlimited", "Memory swap: unlimited", "Pids limit: unlimited"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("report missing %q for podman's -1 unlimited encoding; got:\n%s", want, out)
+		}
+	}
+}
+
+func TestDiagnose_OOMKills_AboveZero_AttachesDegradedLimits003Finding(t *testing.T) {
+	out := limitsDiagnoseReport(t, map[string]string{
+		"FAKE_MEMORY_EVENTS": "low 0\nhigh 0\nmax 4\noom 2\noom_kill 2\n",
+	})
+
+	if !strings.Contains(out, "OOM kills (cgroup): 2") {
+		t.Errorf("report missing the OOM count line for 2 kills; got:\n%s", out)
+	}
+	finding := reportLinesContaining(out, "["+string(SeverityDegraded)+"]", string(errcode.SandboxLimitsOOMKills))
+	if len(finding) != 1 {
+		t.Errorf("want exactly one degraded %s finding, got %d; report:\n%s", errcode.SandboxLimitsOOMKills, len(finding), out)
+	}
+}
+
+// TestDiagnose_OOMKills_CountsOomKillNotOom pins which memory.events line is
+// the kill count: "oom" counts times the limit was hit (including ones the
+// kernel resolved without killing), only "oom_kill" is processes actually
+// killed.
+func TestDiagnose_OOMKills_CountsOomKillNotOom(t *testing.T) {
+	out := limitsDiagnoseReport(t, map[string]string{
+		"FAKE_MEMORY_EVENTS": "low 0\nhigh 0\nmax 9\noom 5\noom_kill 0\n",
+	})
+
+	if !strings.Contains(out, "OOM kills (cgroup): 0") {
+		t.Errorf("report should show 0 kills when oom_kill is 0 even though oom is 5; got:\n%s", out)
+	}
+	if strings.Contains(out, string(errcode.SandboxLimitsOOMKills)) {
+		t.Errorf("did not expect %s when oom_kill is 0, got:\n%s", errcode.SandboxLimitsOOMKills, out)
+	}
+}
+
+// TestDiagnose_OOMKills_UnreadableCount_ReportsUnknownWithCodelessWarning pins
+// AC10's "never 0" rule for every way the count can fail to be read: the
+// exec failing (container not running, no cgroup file), no oom_kill line at
+// all (cgroup v1, or a host cgroup namespace showing someone else's file),
+// and a non-numeric value.
+func TestDiagnose_OOMKills_UnreadableCount_ReportsUnknownWithCodelessWarning(t *testing.T) {
+	cases := []struct {
+		name string
+		env  map[string]string
+	}{
+		{"exec fails", map[string]string{"FAKE_MEMORY_EVENTS_EXIT": "1"}},
+		{"no oom_kill line", map[string]string{"FAKE_MEMORY_EVENTS": "low 0\nhigh 0\nmax 0\noom 0\n"}},
+		{"empty output", map[string]string{"FAKE_MEMORY_EVENTS": ""}},
+		{"non-numeric count", map[string]string{"FAKE_MEMORY_EVENTS": "oom_kill many\n"}},
+		// A valid-looking prefix followed by more than the probe's byte cap:
+		// the output is not a memory.events file, so it must be refused, never
+		// truncated and parsed into a (wrong) count.
+		{"oversized output", map[string]string{"FAKE_MEMORY_EVENTS": "oom_kill 0\n" + strings.Repeat("pad 0\n", 1000)}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out := limitsDiagnoseReport(t, tc.env)
+
+			if !strings.Contains(out, "OOM kills (cgroup): unknown") {
+				t.Errorf("an unreadable OOM count must print \"unknown\"; got:\n%s", out)
+			}
+			if strings.Contains(out, "OOM kills (cgroup): 0") {
+				t.Errorf("an unreadable OOM count must never print 0; got:\n%s", out)
+			}
+			if strings.Contains(out, string(errcode.SandboxLimitsOOMKills)) {
+				t.Errorf("an unreadable count must not attach %s (nothing was found); got:\n%s", errcode.SandboxLimitsOOMKills, out)
+			}
+			warning := reportLinesContaining(out, "["+string(SeverityWarning)+"]", "OOM")
+			if len(warning) != 1 {
+				t.Errorf("want exactly one code-less [warning] finding naming the OOM count, got %d; report:\n%s", len(warning), out)
+			}
+			for _, line := range warning {
+				if strings.Contains(line, "CENCI-") {
+					t.Errorf("the unreadable-count warning must be code-less; got %q", line)
+				}
+			}
+		})
+	}
+}
+
+// TestDiagnose_ResourceLimits_SwapIsShownSeparatelyFromMemory pins that the
+// swap line reports the container's memory+swap total, not a copy of the
+// memory line: a container with swap allowed shows a larger swap value.
+func TestDiagnose_ResourceLimits_SwapIsShownSeparatelyFromMemory(t *testing.T) {
+	// 8 GiB memory, 16 GiB memory+swap, 4096 pids.
+	out := limitsDiagnoseReport(t, map[string]string{"FAKE_CONTAINER_LIMITS": "8589934592|17179869184|4096"})
+
+	for _, want := range []string{"Memory limit: 8192 MiB", "Memory swap: 16384 MiB"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("report missing %q for a container with swap allowed; got:\n%s", want, out)
+		}
+	}
+}
+
+// TestDiagnose_ResourceLimits_UnparseableSwap_ReportsUnknownWithCodelessWarning
+// pins that a swap value the runtime prints in a form we cannot read is
+// "unknown" with the code-less warning, never a guessed number.
+func TestDiagnose_ResourceLimits_UnparseableSwap_ReportsUnknownWithCodelessWarning(t *testing.T) {
+	out := limitsDiagnoseReport(t, map[string]string{"FAKE_CONTAINER_LIMITS": "8589934592|garbage|4096"})
+
+	if !strings.Contains(out, "Memory swap: unknown") {
+		t.Errorf("an unparseable swap value must print \"Memory swap: unknown\"; got:\n%s", out)
+	}
+	warning := reportLinesContaining(out, "["+string(SeverityWarning)+"]", "swap")
+	if len(warning) == 0 {
+		t.Errorf("want a code-less [warning] finding naming the unreadable swap limit; report:\n%s", out)
+	}
+	for _, line := range warning {
+		if strings.Contains(line, "CENCI-") {
+			t.Errorf("the unreadable-limits warning must be code-less; got %q", line)
+		}
+	}
+}
+
+func TestDiagnose_ResourceLimits_UnreadableLimits_ReportsUnknownWithCodelessWarning(t *testing.T) {
+	out := limitsDiagnoseReport(t, map[string]string{"FAKE_CONTAINER_LIMITS_EXIT": "1"})
+
+	for _, want := range []string{"Memory limit: unknown", "Memory swap: unknown", "Pids limit: unknown"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("report missing %q when the limits probe fails; got:\n%s", want, out)
+		}
+	}
+	warning := reportLinesContaining(out, "["+string(SeverityWarning)+"]", "limit")
+	if len(warning) == 0 {
+		t.Errorf("want a code-less [warning] finding naming the unreadable limits; report:\n%s", out)
+	}
+	for _, line := range warning {
+		if strings.Contains(line, "CENCI-") {
+			t.Errorf("the unreadable-limits warning must be code-less; got %q", line)
+		}
+	}
+}
+
+// TestDiagnose_ResourceLimits_ContainerNotRunning_PrintsUnknownLines pins that
+// the four lines are always printed -- even for an exited container whose
+// cgroup and HostConfig can no longer be read -- instead of being silently
+// dropped from the report.
+func TestDiagnose_ResourceLimits_ContainerNotRunning_PrintsUnknownLines(t *testing.T) {
+	out := limitsDiagnoseReport(t, map[string]string{
+		"FAKE_INSPECT_STATE":         "exited 137",
+		"FAKE_CONTAINER_LIMITS_EXIT": "1",
+		"FAKE_MEMORY_EVENTS_EXIT":    "1",
+	})
+
+	for _, want := range []string{"Memory limit: unknown", "Memory swap: unknown", "Pids limit: unknown", "OOM kills (cgroup): unknown"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("report missing %q for a container that is not running; got:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, string(errcode.SandboxLimitsOOMKills)) {
+		t.Errorf("did not expect %s for a container whose count could not be read; got:\n%s", errcode.SandboxLimitsOOMKills, out)
 	}
 }

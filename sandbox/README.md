@@ -628,6 +628,34 @@ OpenCode (`--agent opencode`) has no per-flag "skip permissions" equivalent to b
   [Per-repo containers](#per-repo-containers)
 - Outbound network only (no inbound ports published)
 
+### Resource limits
+
+Every newly created workload container (the long-lived `claude-cenci-…` / `codex-cenci-…` container, with or without nested Docker) is created with a memory and a pids limit, so a runaway build or fork bomb in one sandbox cannot take the host down. The short-lived updater, build and home-volume-read containers are not limited.
+
+| Limit | Default | Flags |
+|-------|---------|-------|
+| Memory | 50% of the container engine host's total RAM, rounded down to whole MiB | `--memory <N>m --memory-swap <N>m` |
+| Pids | 4096 | `--pids-limit 4096` |
+
+"Total RAM" is what `docker info` (`.MemTotal`) or `podman info` (`.Host.MemTotal`) reports, so under Docker Desktop or `podman machine` it is the VM's memory, not the Mac's. `--memory-swap` equals `--memory`, so the container gets **no swap**. Everything inside the container counts against the one limit, including containers started by [nested Docker](#nested-docker-sysbox).
+
+Override or disable either limit per repo in `.cenci/config.json` (repo scope is the only place to override; outside a repo the defaults apply):
+
+```json
+{ "sandbox": { "memoryLimit": "16g", "pidsLimit": 2048 } }
+```
+
+| Key | Values | Effect |
+|-----|--------|--------|
+| `sandbox.memoryLimit` | a size matching `^[1-9][0-9]*[mg]$` (binary units: `m` = MiB, `g` = GiB), or `"none"` | A size is used verbatim for `--memory` and `--memory-swap` and skips the host-memory query; `"none"` omits both flags. |
+| `sandbox.pidsLimit` | an integer >= 1, or `0` | The value is used for `--pids-limit`; `0` omits the flag. On podman, an omitted flag falls back to the engine's `containers.conf` `pids_limit` (normally 2048), so `0` is not "unlimited" there. |
+
+Both keys are independent. They are read on every `cenci open`, create or attach, and fail closed like the other `sandbox.*` keys: a malformed value (wrong JSON type including `null`, `"16G"`, `"16gb"`, a negative or fractional pids limit, a size too large for int64 bytes) is a plain error naming the key, never a silent default. If the default memory limit cannot be derived because the runtime's total memory cannot be read, the launch fails before creating anything with `CENCI-SANDBOX-LIMITS-001`; if the runtime rejects the create because of a limit (for example an undelegated memory or pids cgroup controller), the launch fails with `CENCI-SANDBOX-LIMITS-002` and the runtime's own stderr is still shown. Both errors name the opt-outs, `"memoryLimit": "none"` and `"pidsLimit": 0`. Note that Docker may instead silently discard a limit it cannot enforce rather than reject it; `cenci diagnose` then shows the container as unlimited.
+
+Limits are fixed when a container is created and running containers are never recreated automatically. If you change a key, or attach to a container created before limits existed (unlimited), `cenci open` prints one warning, naming which of the memory and pids limits differs (with the container's value and the configured one), when the running container's limit differs from the resolved config; run `cenci sandbox stop <name>` and relaunch to apply it. The check is best-effort: if the runtime cannot be inspected in time, no warning is printed and the attach continues. A configured `pidsLimit` of `0` is never reported as pids drift.
+
+`cenci diagnose` prints the container's `Memory limit:`, `Memory swap:` (the memory+swap total, equal to the memory limit when the container has no swap), `Pids limit:` and `OOM kills (cgroup):` (the `oom_kill` counter of the container's `memory.events`). A count above 0 is reported as `CENCI-SANDBOX-LIMITS-003`; a count that cannot be read shows as `unknown` with a warning, never `0`.
+
 ### What persists (home volume)
 
 | Path | Contents |

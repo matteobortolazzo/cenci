@@ -48,8 +48,13 @@ func assertOnlyReadOnlyContainerProbeCalls(t *testing.T, lines []string) {
 		if len(fields) == 0 {
 			continue
 		}
-		if verb := fields[0]; verb != "ps" && verb != "inspect" {
-			t.Errorf("expected only read-only ps/inspect container-runtime calls, got unexpected call %q; calls:\n%s", line, strings.Join(lines, "\n"))
+		verb := fields[0]
+		// `info` is the read-only host-memory query the create branch makes to
+		// derive the default memory limit (#1216); any other `info` form is
+		// still unexpected.
+		isMemTotalQuery := verb == "info" && strings.Contains(line, "MemTotal")
+		if verb != "ps" && verb != "inspect" && !isMemTotalQuery {
+			t.Errorf("expected only read-only ps/inspect/info-MemTotal container-runtime calls, got unexpected call %q; calls:\n%s", line, strings.Join(lines, "\n"))
 		}
 	}
 }

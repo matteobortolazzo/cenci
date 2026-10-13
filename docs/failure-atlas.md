@@ -271,6 +271,104 @@ docker run --rm alpine readlink /proc/self/ns/time # a container reports
 `CENCI-SANDBOX-DIND-002` before any create is attempted, so this code can
 never be reached there.
 
+## CENCI-SANDBOX-LIMITS-001
+
+**Meaning**: The launch needed the default memory limit (50% of the container
+runtime's total memory) but could not read that total, so it failed before
+creating anything. Attached by the launcher's host-memory query
+(`limits.go`). Fatal tier: no container was created. The query runs only when
+a create argv is built and `sandbox.memoryLimit` is unset; an explicit size or
+`"none"` never asks, and an attach never fails because of it. The error
+quotes the real cause: the runtime's stderr (one line, at most 512 bytes) from
+the runtime-appropriate `info` query, followed by the fallback query's error
+(the other runtime's template is tried once); a query that times out is
+reported as "timed out after <duration>" and is not retried.
+
+**Common causes**:
+- `docker info` / `podman info` failed or timed out (daemon unreachable, a
+  wedged Docker Desktop or podman machine VM).
+- The runtime reported a total that is not a positive whole number of bytes,
+  or one under 2 MiB, which would derive a limit below 1 MiB.
+
+**Diagnostic commands**:
+```bash
+docker info --format '{{.MemTotal}}'
+podman info --format '{{.Host.MemTotal}}'
+```
+
+**Recovery procedure**:
+1. Fix the runtime so the commands above print a byte count (start the
+   daemon / the podman machine).
+2. Or skip the query by setting an explicit size, `"sandbox": {"memoryLimit":
+   "8g"}`, or opt out with `"sandbox": {"memoryLimit": "none"}` in the repo's
+   `.cenci/config.json`. Outside a repo scope there is no override place.
+
+**Platform notes**: Under Docker Desktop and `podman machine` the total is the
+VM's memory, not the Mac's.
+
+## CENCI-SANDBOX-LIMITS-002
+
+**Meaning**: The container runtime rejected the create because of a memory or
+pids limit cenci sent (`--memory`, `--memory-swap` or `--pids-limit`). Attached
+by the launcher's `createFailureError` (`dindcreate.go`), which runs before the
+DinD `OCI runtime create failed` mapping when both could match. Fatal tier: no
+container was created. The runtime's own stderr is still streamed, and the
+error quotes the marker that matched.
+
+**Common causes**:
+- The `memory` or `pids` cgroup controller is not delegated to the runtime
+  (typical for rootless podman or a restricted cgroup v2 hierarchy), so the
+  runtime cannot write `memory.max` / `memory.swap.max` / `pids.max`.
+- The limit is below the runtime's minimum or unsupported by the kernel.
+- Docker on a host without the controller may instead discard the limit and
+  create the container unlimited; `cenci diagnose` and the attach drift warning
+  then show it as unlimited.
+
+**Diagnostic commands**:
+```bash
+cenci open <shortcut> --dry-run   # previews the exact limit flags
+cat /sys/fs/cgroup/cgroup.controllers
+cat /sys/fs/cgroup/user.slice/user-$(id -u).slice/user@$(id -u).service/cgroup.controllers
+```
+
+**Recovery procedure**:
+1. Delegate the missing controller (for rootless podman, a systemd drop-in
+   with `Delegate=cpu cpuset io memory pids` for `user@.service`).
+2. Or opt out in the repo's `.cenci/config.json`: `"sandbox": {"memoryLimit":
+   "none"}` and/or `"sandbox": {"pidsLimit": 0}`.
+
+**Platform notes**: Linux hosts only in practice; Docker Desktop and `podman
+machine` VMs delegate both controllers.
+
+## CENCI-SANDBOX-LIMITS-003
+
+**Meaning**: The sandbox container's cgroup `memory.events` file records
+`oom_kill` above 0: the kernel killed processes in the container for exceeding
+its memory limit. Attached by `cenci diagnose`'s "OOM kills (cgroup):" line.
+Degraded tier: the session works, but processes were killed. An unreadable
+count (container not running, cgroup v1, a host cgroup namespace, or `cat`
+output larger than 4 KiB, which is not a `memory.events` file) prints
+`unknown` with a code-less warning, never `0`.
+
+**Common causes**:
+- A build, test run or agent task needed more memory than the container's
+  limit; nested DinD containers count against the same limit.
+
+**Diagnostic commands**:
+```bash
+cenci diagnose --name <session>
+docker/podman exec <container> cat /sys/fs/cgroup/memory.events
+```
+
+**Recovery procedure**:
+1. Raise the limit with `"sandbox": {"memoryLimit": "16g"}` in the repo's
+   `.cenci/config.json` (or `"none"` to remove it).
+2. A running container keeps its create-time limit: `cenci sandbox stop
+   <name>`, then relaunch.
+
+**Platform notes**: `oom_kill` is a cgroup v2 counter; on cgroup v1 hosts the
+count is reported as unknown.
+
 ## CENCI-DAEMON-CONN-001
 
 **Meaning**: The cenci daemon's event socket exists but nothing answers a

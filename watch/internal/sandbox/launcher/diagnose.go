@@ -53,10 +53,11 @@ type finding struct {
 func severityForCode(code errcode.Code) Severity {
 	switch code {
 	case errcode.SandboxStartAgentCLIMissing, errcode.SandboxStartGenericEntrypoint, errcode.SandboxSessionNotFound,
-		errcode.SandboxDindRuntimeCreateFailed:
+		errcode.SandboxDindRuntimeCreateFailed,
+		errcode.SandboxLimitsHostMemoryUnreadable, errcode.SandboxLimitsCreateRejected:
 		return SeverityFatal
 	case errcode.SandboxStartReadinessTimeout, errcode.DaemonConnUnreachable, errcode.DaemonSocketMissing, errcode.SandboxDindStartupFailure,
-		errcode.SandboxSocketUnwired:
+		errcode.SandboxSocketUnwired, errcode.SandboxLimitsOOMKills:
 		return SeverityDegraded
 	default:
 		return SeverityWarning
@@ -489,6 +490,53 @@ func (e *Engine) eventDeliveryFinding(scope Scope) (line string, f *finding) {
 	}
 }
 
+// resourceLimitsFinding implements #1216's always-on "Memory limit:", "Memory
+// swap:", "Pids limit:" and "OOM kills (cgroup):" lines, mirroring
+// nestedDockerFinding's failure-visibility convention (#572): the four lines
+// are always printed (the swap line shows the container's memory+swap total,
+// equal to the memory limit when the container has no swap),
+// and "we could not look" is shown as "unknown" with a code-less
+// SeverityWarning, never as a silent 0 or "unlimited". A cgroup OOM-kill
+// count above 0 is a LIMITS-003 finding (Degraded: the session works, but the
+// kernel killed processes). The limits come from the container's .HostConfig
+// (inspectContainerLimits); the count comes from the cgroup's memory.events
+// oom_kill line, not from .State.OOMKilled (which only reports PID 1).
+func (e *Engine) resourceLimitsFinding(scope Scope) []finding {
+	var findings []finding
+
+	limits, limitsOK := e.inspectContainerLimits(scope.ContainerName)
+	if !limitsOK {
+		limits = containerLimits{Memory: "unknown", Swap: "unknown", Pids: "unknown"}
+		findings = append(findings, finding{
+			Message:  "the container's memory, swap and pids limits could not be read",
+			Severity: SeverityWarning,
+		})
+	}
+	_, _ = fmt.Fprintf(e.Stdout, "Memory limit: %s\n", memoryLimitDisplay(limits.Memory))
+	_, _ = fmt.Fprintf(e.Stdout, "Memory swap: %s\n", memoryLimitDisplay(limits.Swap))
+	_, _ = fmt.Fprintf(e.Stdout, "Pids limit: %s\n", pidsLimitDisplay(limits.Pids))
+
+	kills, killsOK := e.oomKillCount(scope.ContainerName)
+	switch {
+	case !killsOK:
+		_, _ = fmt.Fprintln(e.Stdout, "OOM kills (cgroup): unknown")
+		findings = append(findings, finding{
+			Message:  "the cgroup OOM-kill count could not be read (the container may not be running, or its cgroup has no memory.events oom_kill counter)",
+			Severity: SeverityWarning,
+		})
+	case kills > 0:
+		_, _ = fmt.Fprintf(e.Stdout, "OOM kills (cgroup): %d\n", kills)
+		findings = append(findings, finding{
+			Message:  fmt.Sprintf("the container's cgroup recorded %d OOM kill(s): the kernel killed processes for exceeding the container's memory limit", kills),
+			Code:     errcode.SandboxLimitsOOMKills,
+			Severity: severityForCode(errcode.SandboxLimitsOOMKills),
+		})
+	default:
+		_, _ = fmt.Fprintln(e.Stdout, "OOM kills (cgroup): 0")
+	}
+	return findings
+}
+
 // daemonDialTimeout bounds diagnose's read-only reachability probe.
 const daemonDialTimeout = 200 * time.Millisecond
 
@@ -614,7 +662,8 @@ func (e *Engine) Verify(scope Scope) error {
 // Diagnose writes a read-only, human-readable report for scope's sandbox
 // session to e.Stdout: container status/exit, the timestamped startup
 // marker (surfaced verbatim via startupFailureDetail), recent logs, mounted
-// volumes, daemon/event-socket reachability, and plugin + image versions.
+// volumes, daemon/event-socket reachability, plugin + image versions, and the
+// container's memory, swap and pids limits and cgroup OOM-kill count.
 // Every failure is annotated with a registered errcode.Code and its
 // fatal/degraded/warning severity via renderFinding. Diagnose is a report,
 // not a gate: it always returns nil on a successful render, even when it
@@ -737,6 +786,8 @@ func (e *Engine) Diagnose(scope Scope) error {
 	if eventDeliveryFnd != nil {
 		findings = append(findings, *eventDeliveryFnd)
 	}
+
+	findings = append(findings, e.resourceLimitsFinding(scope)...)
 
 	if len(findings) == 0 {
 		_, _ = fmt.Fprintln(e.Stdout, "No issues found.")

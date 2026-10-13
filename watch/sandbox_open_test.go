@@ -1,6 +1,7 @@
 package main_test
 
 import (
+	"bytes"
 	"fmt"
 	"net"
 	"os"
@@ -265,6 +266,53 @@ func joinArgv(argv []string) string {
 //	FAKE_INSPECT_IMAGE_EXIT — the per-container combined probe's exit code
 //	                        (default 0); nonzero simulates that probe
 //	                        failing.
+//	FAKE_INFO_MEMTOTAL   — (#1216) `info --format ...` stdout when the format
+//	                        names MemTotal ({{.MemTotal}} on docker,
+//	                        {{.Host.MemTotal}} on podman): the runtime's total
+//	                        host memory in bytes; defaults to "17179869184"
+//	                        (16 GiB, so the default memory limit resolves to
+//	                        50% = 8192 MiB). Told apart from the sysbox-
+//	                        registration probe by the `MemTotal` format-string
+//	                        token, checked first so FAKE_INFO_RUNTIMES never
+//	                        shadows it. FAKE_INFO_MEMTOTAL_EXIT (default 0) is
+//	                        that probe's own exit code — deliberately NOT
+//	                        FAKE_INFO_EXIT, so a test can fail just the memory
+//	                        query without failing dind's sysbox probe. Must
+//	                        stay byte-parallel with
+//	                        internal/sandbox/launcher/faketest_test.go's
+//	                        writeFakeRuntime (#493 keep-in-sync note).
+//	FAKE_CONTAINER_LIMITS — (#1216) container `inspect` stdout for the
+//	                        container-limits probe (attach-path drift check and
+//	                        Diagnose's limits line), told apart by the
+//	                        `.HostConfig.PidsLimit` format-string token
+//	                        (placed before every broader inspect arm). The value
+//	                        is "<memory bytes>|<memory+swap bytes>|<pids limit>"
+//	                        verbatim — the raw .HostConfig.Memory,
+//	                        .HostConfig.MemorySwap and .HostConfig.PidsLimit
+//	                        values, which for an unlimited container are "0"
+//	                        (or "-1" on podman) and may be "<nil>" for pids.
+//	                        Defaults to "8589934592|8589934592|4096" (an 8 GiB,
+//	                        no-swap, 4096-pid container: what a default launch
+//	                        creates against the FAKE_INFO_MEMTOTAL default, so
+//	                        pre-existing attach tests stay drift-free). Its
+//	                        exit code is the SEPARATE FAKE_CONTAINER_LIMITS_EXIT
+//	                        (default 0), not FAKE_CONTAINER_INSPECT_EXIT, so a
+//	                        test can fail just this best-effort probe. Must stay
+//	                        byte-parallel with the launcher fake (#493).
+//	FAKE_MEMORY_EVENTS   — (#1216) `exec <name> /bin/cat
+//	                        /sys/fs/cgroup/memory.events` stdout (Diagnose's
+//	                        cgroup OOM-kill count), told apart by the
+//	                        `memory.events` token alone (not the cat path, so
+//	                        the fake survives a change of cat binary). Defaults to
+//	                        "oom 0\noom_kill 0\n". FAKE_MEMORY_EVENTS_EXIT
+//	                        (default 0) is that exec's exit code. Must stay
+//	                        byte-parallel with the launcher fake (#493).
+//	FAKE_CREATE_STDERR   — (#1216) text written to stderr by the container
+//	                        CREATE `run --name ...` call (not by any other
+//	                        `run`); FAKE_CREATE_EXIT (default 0) is that
+//	                        call's exit code. Together they script a runtime
+//	                        rejecting the create (e.g. an undelegated memory
+//	                        cgroup controller) with its real stderr text.
 //	FAKE_CONTAINER_ENV   — (#1002) the attach-path CENCI_SANDBOX_PLUGINS
 //	                        drift probe's `inspect --format
 //	                        '{{range .Config.Env}}{{if eq (index (split . "=")
@@ -420,7 +468,12 @@ volume)
   ls) fv VOLUMES ""; exit "$(fe VOLUME_LS)" ;;
   esac
   ;;
-info) fv INFO_RUNTIMES "{}"; exit "$(fe INFO)" ;;
+info)
+  case "$*" in
+  *MemTotal*) fv INFO_MEMTOTAL "17179869184"; printf '\n'; exit "$(fe INFO_MEMTOTAL)" ;;
+  esac
+  fv INFO_RUNTIMES "{}"; exit "$(fe INFO)"
+  ;;
 rm) exit 0 ;;
 run) case "$*" in
   *'/bin/cat'*)
@@ -440,9 +493,14 @@ run) case "$*" in
     exit "$(fe AGENT_CHECK)"
     ;;
   esac
+  if [ "$2" = "--name" ]; then
+    cs="$(fv CREATE_STDERR "")"; [ -z "$cs" ] || printf '%s\n' "$cs" >&2
+    ce="$(fe CREATE)"; [ "$ce" = 0 ] || exit "$ce"
+  fi
   printf '%s\n' fake-container-id ;;
 inspect)
   case "$*" in
+  *'.HostConfig.PidsLimit'*) fv CONTAINER_LIMITS "8589934592|8589934592|4096"; printf '\n'; exit "$(fe CONTAINER_LIMITS)" ;;
   *'{{.Image}}'*)
     name="$4"
     result=""
@@ -470,7 +528,7 @@ inspect)
   esac
   ;;
 logs) fv LOGS "" ;;
-exec) if [ "$2" = "-it" ]; then exit "$(fe ATTACH)"; fi; case "$*" in *'/tmp/cenci-ready'*) exit "$(fe READY)" ;; esac; exit 0 ;;
+exec) if [ "$2" = "-it" ]; then exit "$(fe ATTACH)"; fi; case "$*" in *'/tmp/cenci-ready'*) exit "$(fe READY)" ;; *'memory.events'*) fvb MEMORY_EVENTS "oom 0\noom_kill 0\n"; exit "$(fe MEMORY_EVENTS)" ;; esac; exit 0 ;;
 esac
 exit 0
 `
@@ -4480,4 +4538,525 @@ func TestOpenClaude_AttendedFlagAddsNoFleetConfigMount(t *testing.T) {
 			t.Errorf("create-time run args must never mount the host fleet config (%q); got:\n%s", forbidden, runLine)
 		}
 	}
+}
+
+// -- ticket #1216: memory and pids limits on the workload container ----------
+//
+// `cenci open` applies --memory/--memory-swap/--pids-limit to the long-lived
+// workload container (sandbox.memoryLimit / sandbox.pidsLimit in the repo's
+// .cenci/config.json; default 50% of the runtime's reported RAM with no swap,
+// and 4096 pids). These black-box tests drive the real binary against the
+// scripted runtime (FAKE_INFO_MEMTOTAL, FAKE_CONTAINER_LIMITS,
+// FAKE_CREATE_STDERR/FAKE_CREATE_EXIT; see writeScriptedRuntime).
+
+// openRun is one finished `cenci` invocation with its streams kept apart:
+// the limit tests assert on stderr (errors, warnings) separately from stdout
+// (the dry-run preview).
+type openRun struct {
+	stdout   string
+	stderr   string
+	exitCode int
+}
+
+// runCenci runs the built binary with env in dir and captures both streams.
+func runCenci(t *testing.T, env []string, dir string, args ...string) openRun {
+	t.Helper()
+	cmd := exec.Command(binaryPath, args...)
+	cmd.Env = env
+	cmd.Dir = dir
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	run := openRun{stdout: stdout.String(), stderr: stderr.String()}
+	if err != nil {
+		exitErr, ok := err.(*exec.ExitError)
+		if !ok {
+			t.Fatalf("run cenci %v: %v", args, err)
+		}
+		run.exitCode = exitErr.ExitCode()
+	}
+	return run
+}
+
+// limitFlagTokens extracts, in order of appearance, every limit flag and its
+// value from a space-joined argv line: ["--memory","8192m","--memory-swap",
+// "8192m","--pids-limit","4096"] for a default launch.
+func limitFlagTokens(line string) []string {
+	var out []string
+	fields := strings.Fields(line)
+	for i, f := range fields {
+		if (f == "--memory" || f == "--memory-swap" || f == "--pids-limit") && i+1 < len(fields) {
+			out = append(out, f, fields[i+1])
+		}
+	}
+	return out
+}
+
+// limitFlagValue returns the value following flag in a space-joined argv line.
+func limitFlagValue(line, flag string) (string, bool) {
+	fields := strings.Fields(line)
+	for i, f := range fields {
+		if f == flag && i+1 < len(fields) {
+			return fields[i+1], true
+		}
+	}
+	return "", false
+}
+
+// containerNameFor is the scoped container name `cenci open` derives for a
+// claude launch in repoRoot.
+func containerNameFor(repoRoot string) string {
+	return "claude-cenci-" + launcher.Slugify(filepath.Base(repoRoot))
+}
+
+// defaultPluginsContainerEnv is the FAKE_CONTAINER_ENV answer that keeps the
+// (separate, #1002) plugins drift check quiet in the limits attach tests, so
+// the limit-drift line is the only drift line that can appear.
+const defaultPluginsContainerEnv = "CENCI_SANDBOX_PLUGINS=cenci cenci-watch\n"
+
+// stopRemedyLines returns the output lines carrying the stop-and-relaunch
+// remedy ("cenci sandbox stop <name>") the drift warnings end with.
+func stopRemedyLines(output, containerName string) []string {
+	var out []string
+	for _, line := range strings.Split(output, "\n") {
+		if strings.Contains(line, "cenci sandbox stop "+containerName) {
+			out = append(out, line)
+		}
+	}
+	return out
+}
+
+// -- AC1: a fresh create carries the default limits --------------------------
+
+func TestOpen_FreshCreate_AppliesDefaultMemorySwapAndPidsLimits(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets)
+
+	run := runCenci(t, env, t.TempDir(), "open", "ch")
+	if run.exitCode != 0 {
+		t.Fatalf("open ch: exit %d\n%s", run.exitCode, run.stderr)
+	}
+
+	lines := callLogLines(t, callLog)
+	runLine, ok := findLineWithPrefix(lines, "run --name ")
+	if !ok {
+		t.Fatalf("expected a container run, got calls:\n%s", strings.Join(lines, "\n"))
+	}
+	// FAKE_INFO_MEMTOTAL defaults to 16 GiB: 50% is 8192 MiB, no swap.
+	for flag, want := range map[string]string{"--memory": "8192m", "--memory-swap": "8192m", "--pids-limit": "4096"} {
+		if got, _ := limitFlagValue(runLine, flag); got != want {
+			t.Errorf("%s = %q, want %q; run argv:\n%s", flag, got, want, runLine)
+		}
+	}
+}
+
+// -- AC4: malformed limit config fails closed on every path -------------------
+
+// TestOpen_MalformedLimitsConfig_FailsClosedOnCreateAttachAndDryRun is AC4:
+// a wrong-typed, mis-formatted or out-of-range sandbox.memoryLimit /
+// sandbox.pidsLimit makes `cenci open` (create AND attach paths) and `cenci
+// open --dry-run` fail with a plain error (exit 1, never the usage exit 2)
+// naming the key -- before any runtime call, and never by falling back to a
+// default.
+func TestOpen_MalformedLimitsConfig_FailsClosedOnCreateAttachAndDryRun(t *testing.T) {
+	configs := []struct {
+		name   string
+		config string
+		key    string
+	}{
+		{"memory bad unit case", `{"sandbox":{"memoryLimit":"16G"}}`, "memoryLimit"},
+		{"memory wrong JSON type", `{"sandbox":{"memoryLimit":16}}`, "memoryLimit"},
+		{"memory null", `{"sandbox":{"memoryLimit":null}}`, "memoryLimit"},
+		{"pids negative", `{"sandbox":{"pidsLimit":-1}}`, "pidsLimit"},
+		{"pids non-integer", `{"sandbox":{"pidsLimit":1.5}}`, "pidsLimit"},
+		{"pids string", `{"sandbox":{"pidsLimit":"4096"}}`, "pidsLimit"},
+	}
+	modes := []struct {
+		name      string
+		args      []string
+		attaching bool
+	}{
+		{"create", []string{"open"}, false},
+		{"attach", []string{"open"}, true},
+		{"dry-run", []string{"open", "--dry-run"}, false},
+		{"dry-run against a running container", []string{"open", "--dry-run"}, true},
+	}
+	for _, c := range configs {
+		for _, m := range modes {
+			t.Run(c.name+"/"+m.name, func(t *testing.T) {
+				repoRoot := configuredRepoEnv(t, c.config)
+				fakeDir := t.TempDir()
+				callLog := writeScriptedRuntimes(t, fakeDir)
+				assets := writeAssetFixture(t)
+				var env []string
+				if m.attaching {
+					env = openAttachEnvFor(t, fakeDir, assets, containerNameFor(repoRoot), defaultPluginsContainerEnv)
+				} else {
+					env, _, _ = openTestEnv(t, fakeDir, assets)
+				}
+
+				run := runCenci(t, env, repoRoot, m.args...)
+
+				if run.exitCode != 1 {
+					t.Fatalf("expected a malformed %s to exit 1 (plain error, not a usage error), got %d\nstdout:\n%s\nstderr:\n%s", c.key, run.exitCode, run.stdout, run.stderr)
+				}
+				if !strings.Contains(run.stderr, c.key) {
+					t.Errorf("expected the error to name %q, got stderr:\n%s", c.key, run.stderr)
+				}
+				if !strings.Contains(run.stderr, "config.json") {
+					t.Errorf("expected a path-bearing error naming config.json, got stderr:\n%s", run.stderr)
+				}
+				if lines := callLogLines(t, callLog); len(lines) != 0 {
+					t.Errorf("expected no runtime calls once the limits config hard-fails (no silent default), got:\n%s", strings.Join(lines, "\n"))
+				}
+			})
+		}
+	}
+}
+
+// -- AC5: unreadable host memory fails the launch before any create -----------
+
+func TestOpen_DefaultMemoryUnresolvable_FailsBeforeCreateNamingTheOptOut(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets)
+	env = append(env, "FAKE_INFO_MEMTOTAL_EXIT=1")
+
+	run := runCenci(t, env, t.TempDir(), "open", "ch")
+
+	if run.exitCode != 1 {
+		t.Fatalf("expected an unreadable host memory total to exit 1, got %d\nstderr:\n%s", run.exitCode, run.stderr)
+	}
+	for _, want := range []string{"CENCI-SANDBOX-LIMITS-001", `"memoryLimit": "none"`} {
+		if !strings.Contains(run.stderr, want) {
+			t.Errorf("expected the error to contain %q, got stderr:\n%s", want, run.stderr)
+		}
+	}
+	lines := callLogLines(t, callLog)
+	if _, created := findLineWithPrefix(lines, "run --name "); created {
+		t.Errorf("no container may be created when the memory limit cannot be resolved, got calls:\n%s", strings.Join(lines, "\n"))
+	}
+	if _, removed := findLineWithPrefix(lines, "rm "); removed {
+		t.Errorf("no container may be removed when the launch fails before create, got calls:\n%s", strings.Join(lines, "\n"))
+	}
+	if _, attached := findLineWithPrefix(lines, "exec -it "); attached {
+		t.Errorf("the launch must not attach after failing, got calls:\n%s", strings.Join(lines, "\n"))
+	}
+}
+
+// TestOpen_MemoryNoneOptOut_LaunchesDespiteUnreadableHostMemory pins that the
+// error's own advice works: with "memoryLimit": "none" the same unreadable
+// total no longer matters, the memory flags are omitted and the pids limit
+// stays.
+func TestOpen_MemoryNoneOptOut_LaunchesDespiteUnreadableHostMemory(t *testing.T) {
+	repoRoot := configuredRepoEnv(t, `{"sandbox":{"memoryLimit":"none"}}`)
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets)
+	env = append(env, "FAKE_INFO_MEMTOTAL_EXIT=1")
+
+	run := runCenci(t, env, repoRoot, "open")
+	if run.exitCode != 0 {
+		t.Fatalf("open with the memory opt-out: exit %d\n%s", run.exitCode, run.stderr)
+	}
+
+	runLine, ok := findLineWithPrefix(callLogLines(t, callLog), "run --name ")
+	if !ok {
+		t.Fatalf("expected a container run, got calls:\n%s", strings.Join(callLogLines(t, callLog), "\n"))
+	}
+	if flags := limitFlagTokens(runLine); strings.Join(flags, " ") != "--pids-limit 4096" {
+		t.Errorf("limit flags = %v, want only --pids-limit 4096 (memory opted out); run argv:\n%s", flags, runLine)
+	}
+}
+
+// -- AC6: a create rejected because of a limit --------------------------------
+
+// runcMemoryMaxCreateStderr is the stderr Docker streams when the engine's
+// cgroup has no delegated memory controller: the runc failure arrives
+// wrapped in the daemon's "OCI runtime create failed" text.
+const runcMemoryMaxCreateStderr = `docker: Error response from daemon: failed to create task for container: ` +
+	`failed to create shim task: OCI runtime create failed: runc create failed: unable to start container process: ` +
+	`error during container init: error setting cgroup config for procHooks process: ` +
+	`openat2 /sys/fs/cgroup/docker/0d3c1f/memory.max: no such file or directory: unknown`
+
+func TestOpen_CreateRejectedForLimit_StreamsStderrAndNamesCodeAndBothOptOuts(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets)
+	env = append(env, "FAKE_CREATE_STDERR="+runcMemoryMaxCreateStderr, "FAKE_CREATE_EXIT=125")
+
+	run := runCenci(t, env, t.TempDir(), "open", "ch")
+
+	if run.exitCode != 1 {
+		t.Fatalf("expected a limit-rejected create to exit 1, got %d\nstderr:\n%s", run.exitCode, run.stderr)
+	}
+	// The runtime's own diagnostics keep streaming through verbatim.
+	if !strings.Contains(run.stderr, runcMemoryMaxCreateStderr) {
+		t.Errorf("the runtime's stderr must still be streamed to the user; got stderr:\n%s", run.stderr)
+	}
+	for _, want := range []string{"CENCI-SANDBOX-LIMITS-002", `"memoryLimit": "none"`, `"pidsLimit": 0`} {
+		if !strings.Contains(run.stderr, want) {
+			t.Errorf("expected the failure to contain %q, got stderr:\n%s", want, run.stderr)
+		}
+	}
+	if _, ok := findLineWithPrefix(callLogLines(t, callLog), "run --name "); !ok {
+		t.Errorf("expected the create to have been attempted, got calls:\n%s", strings.Join(callLogLines(t, callLog), "\n"))
+	}
+}
+
+// TestOpen_CreateFailureUnrelatedToLimits_KeepsPlainErrorPath is AC6's
+// regression half: a create failure that is not about a limit keeps the
+// existing "<runtime> run: <err>" path, with no LIMITS code.
+func TestOpen_CreateFailureUnrelatedToLimits_KeepsPlainErrorPath(t *testing.T) {
+	const conflictStderr = `docker: Error response from daemon: Conflict. The container name "/claude-cenci-default" is already in use by container "0d3c1f".`
+	fakeDir := t.TempDir()
+	writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets)
+	env = append(env, "FAKE_CREATE_STDERR="+conflictStderr, "FAKE_CREATE_EXIT=125")
+
+	run := runCenci(t, env, t.TempDir(), "open", "ch")
+
+	if run.exitCode != 1 {
+		t.Fatalf("expected a failed create to exit 1, got %d\nstderr:\n%s", run.exitCode, run.stderr)
+	}
+	if !strings.Contains(run.stderr, conflictStderr) {
+		t.Errorf("the runtime's stderr must still be streamed; got stderr:\n%s", run.stderr)
+	}
+	if !strings.Contains(run.stderr, "run: exit status 125") {
+		t.Errorf("an unrelated create failure must keep the plain \"<runtime> run: exit status 125\" wording; got stderr:\n%s", run.stderr)
+	}
+	if strings.Contains(run.stderr, "CENCI-SANDBOX-LIMITS") {
+		t.Errorf("an unrelated create failure must not carry a LIMITS code; got stderr:\n%s", run.stderr)
+	}
+}
+
+// TestOpen_LimitLikeStderrWithBothOptOuts_KeepsPlainErrorPath pins that the
+// classification follows what was actually sent: with both opt-outs no limit
+// flag is on the argv, so even a memory.max-shaped rejection cannot be the
+// limits' doing.
+func TestOpen_LimitLikeStderrWithBothOptOuts_KeepsPlainErrorPath(t *testing.T) {
+	repoRoot := configuredRepoEnv(t, `{"sandbox":{"memoryLimit":"none","pidsLimit":0}}`)
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets)
+	env = append(env, "FAKE_CREATE_STDERR="+runcMemoryMaxCreateStderr, "FAKE_CREATE_EXIT=125")
+
+	run := runCenci(t, env, repoRoot, "open")
+
+	if run.exitCode != 1 {
+		t.Fatalf("expected a failed create to exit 1, got %d\nstderr:\n%s", run.exitCode, run.stderr)
+	}
+	if strings.Contains(run.stderr, "CENCI-SANDBOX-LIMITS") {
+		t.Errorf("no limit flag was sent, so the failure must not be classified as a limit rejection; got stderr:\n%s", run.stderr)
+	}
+	runLine, ok := findLineWithPrefix(callLogLines(t, callLog), "run --name ")
+	if !ok {
+		t.Fatalf("expected the create to have been attempted, got calls:\n%s", strings.Join(callLogLines(t, callLog), "\n"))
+	}
+	if flags := limitFlagTokens(runLine); len(flags) != 0 {
+		t.Errorf("both opt-outs must leave every limit flag off the argv, got %v in:\n%s", flags, runLine)
+	}
+}
+
+// -- AC7: --dry-run previews exactly what a real create applies ---------------
+
+// TestOpenDryRun_LimitFlagsMatchTheRealCreate runs `open --dry-run` and then
+// the real `open` in the same repo and asserts the two carry the identical
+// limit flags -- for the default, an override, and the opt-outs.
+func TestOpenDryRun_LimitFlagsMatchTheRealCreate(t *testing.T) {
+	cases := []struct {
+		name   string
+		config string
+		want   string
+	}{
+		{"default", `{}`, "--memory 8192m --memory-swap 8192m --pids-limit 4096"},
+		{"override", `{"sandbox":{"memoryLimit":"2g","pidsLimit":512}}`, "--memory 2g --memory-swap 2g --pids-limit 512"},
+		{"memory opt-out", `{"sandbox":{"memoryLimit":"none"}}`, "--pids-limit 4096"},
+		{"pids opt-out", `{"sandbox":{"pidsLimit":0}}`, "--memory 8192m --memory-swap 8192m"},
+		{"both opt-outs", `{"sandbox":{"memoryLimit":"none","pidsLimit":0}}`, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			repoRoot := configuredRepoEnv(t, tc.config)
+			fakeDir := t.TempDir()
+			callLog := writeScriptedRuntimes(t, fakeDir)
+			assets := writeAssetFixture(t)
+			env, _, _ := openTestEnv(t, fakeDir, assets)
+
+			dry := runCenci(t, env, repoRoot, "open", "--dry-run")
+			if dry.exitCode != 0 {
+				t.Fatalf("open --dry-run: exit %d\n%s", dry.exitCode, dry.stderr)
+			}
+			var previewLine string
+			for _, line := range strings.Split(dry.stdout, "\n") {
+				if strings.Contains(line, " run --name ") {
+					previewLine = line
+				}
+			}
+			if previewLine == "" {
+				t.Fatalf("expected the create argv in the dry-run preview, got:\n%s", dry.stdout)
+			}
+			if got := strings.Join(limitFlagTokens(previewLine), " "); got != tc.want {
+				t.Errorf("dry-run limit flags = %q, want %q; preview:\n%s", got, tc.want, previewLine)
+			}
+
+			real := runCenci(t, env, repoRoot, "open")
+			if real.exitCode != 0 {
+				t.Fatalf("open: exit %d\n%s", real.exitCode, real.stderr)
+			}
+			runLine, ok := findLineWithPrefix(callLogLines(t, callLog), "run --name ")
+			if !ok {
+				t.Fatalf("expected a container run, got calls:\n%s", strings.Join(callLogLines(t, callLog), "\n"))
+			}
+			if got, preview := strings.Join(limitFlagTokens(runLine), " "), strings.Join(limitFlagTokens(previewLine), " "); got != preview {
+				t.Errorf("the real create's limit flags %q differ from the dry-run preview's %q", got, preview)
+			}
+		})
+	}
+}
+
+// -- AC9: attach-path drift warning -------------------------------------------
+
+// TestOpenAttach_LimitsDrift_WarnsExactlyOnceAndAttachContinues covers the
+// drift matrix: a differing limit (including an unlimited container created
+// before limits shipped) prints exactly one warning line with the
+// stop-and-relaunch remedy and the attach goes on; matching limits, the
+// pidsLimit-0 opt-out, and a failed probe print nothing. An attach never
+// creates, never queries host memory, and never fails because of limit
+// resolution.
+func TestOpenAttach_LimitsDrift_WarnsExactlyOnceAndAttachContinues(t *testing.T) {
+	const (
+		gib8      = "8589934592"
+		matching8 = gib8 + "|" + gib8 + "|4096"
+	)
+	cases := []struct {
+		name       string
+		config     string
+		limits     string // FAKE_CONTAINER_LIMITS
+		extraEnv   []string
+		warnings   int
+		mentions   []string // case-insensitive substrings the single warning line must contain
+		notMention []string
+	}{
+		{name: "unlimited legacy container, default config", config: `{}`, limits: "0|0|<nil>", warnings: 1, mentions: []string{"memory limit differs", "pids limit differs"}},
+		{name: "unlimited podman container (-1), default config", config: `{}`, limits: "-1|-1|-1", warnings: 1, mentions: []string{"memory limit differs", "pids limit differs"}},
+		{name: "memory drift against an explicit size", config: `{"sandbox":{"memoryLimit":"16g"}}`, limits: matching8, warnings: 1, mentions: []string{"memory limit differs", "container 8192 mib", "configured 16g"}, notMention: []string{"pids"}},
+		{name: "pids drift", config: `{"sandbox":{"pidsLimit":2048}}`, limits: matching8, warnings: 1, mentions: []string{"pids limit differs", "container 4096", "configured 2048"}, notMention: []string{"memory"}},
+		{name: "memory opt-out but container is limited", config: `{"sandbox":{"memoryLimit":"none"}}`, limits: matching8, warnings: 1, mentions: []string{"memory limit differs", "configured none"}, notMention: []string{"pids"}},
+
+		{name: "default config, default-limited container", config: `{}`, limits: matching8, warnings: 0},
+		{name: "default config, container at another size is not drift", config: `{}`, limits: "4294967296|4294967296|4096", warnings: 0},
+		{name: "explicit size matches exactly", config: `{"sandbox":{"memoryLimit":"8g","pidsLimit":4096}}`, limits: matching8, warnings: 0},
+		{name: "memory opt-out, unlimited container", config: `{"sandbox":{"memoryLimit":"none"}}`, limits: "0|0|4096", warnings: 0},
+		{name: "pidsLimit 0 never differs, container pids nil", config: `{"sandbox":{"pidsLimit":0}}`, limits: gib8 + "|" + gib8 + "|<nil>", warnings: 0},
+		{name: "pidsLimit 0 never differs, container pids unlimited", config: `{"sandbox":{"pidsLimit":0}}`, limits: gib8 + "|" + gib8 + "|-1", warnings: 0},
+		{name: "pidsLimit 0 never differs, container pids 4096", config: `{"sandbox":{"pidsLimit":0}}`, limits: matching8, warnings: 0},
+		{name: "pidsLimit 0 does not hide a memory drift", config: `{"sandbox":{"pidsLimit":0}}`, limits: "0|0|<nil>", warnings: 1, mentions: []string{"memory limit differs"}, notMention: []string{"pids"}},
+
+		{name: "probe failure prints nothing", config: `{}`, limits: "0|0|<nil>", extraEnv: []string{"FAKE_CONTAINER_LIMITS_EXIT=1"}, warnings: 0},
+		{name: "unreadable host memory never fails an attach", config: `{}`, limits: matching8, extraEnv: []string{"FAKE_INFO_MEMTOTAL_EXIT=1"}, warnings: 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			repoRoot := configuredRepoEnv(t, tc.config)
+			containerName := containerNameFor(repoRoot)
+			fakeDir := t.TempDir()
+			callLog := writeScriptedRuntimes(t, fakeDir)
+			assets := writeAssetFixture(t)
+			env := openAttachEnvFor(t, fakeDir, assets, containerName, defaultPluginsContainerEnv)
+			env = append(env, "FAKE_CONTAINER_LIMITS="+tc.limits)
+			env = append(env, tc.extraEnv...)
+
+			run := runCenci(t, env, repoRoot, "open")
+
+			if run.exitCode != 0 {
+				t.Fatalf("open (attach): exit %d, want the attach to continue\nstderr:\n%s", run.exitCode, run.stderr)
+			}
+			lines := callLogLines(t, callLog)
+			attachLine(t, lines)
+			if _, created := findLineWithPrefix(lines, "run --name "); created {
+				t.Errorf("a drifted container must be warned about, never recreated; got calls:\n%s", strings.Join(lines, "\n"))
+			}
+			if anyLineContains(lines, "MemTotal") {
+				t.Errorf("an attach must not query the runtime for total memory; got calls:\n%s", strings.Join(lines, "\n"))
+			}
+
+			remedy := stopRemedyLines(run.stderr+run.stdout, containerName)
+			if len(remedy) != tc.warnings {
+				t.Fatalf("got %d drift warning line(s) with the stop remedy, want %d:\n%s\nstderr:\n%s", len(remedy), tc.warnings, strings.Join(remedy, "\n"), run.stderr)
+			}
+			for _, line := range remedy {
+				// The container name is derived from the temp repo path; keep it
+				// out of the substring checks so it can never satisfy or trip them.
+				lower := strings.ReplaceAll(strings.ToLower(line), strings.ToLower(containerName), "")
+				for _, m := range tc.mentions {
+					if !strings.Contains(lower, m) {
+						t.Errorf("the drift warning must mention %q; got: %s", m, line)
+					}
+				}
+				for _, m := range tc.notMention {
+					if strings.Contains(lower, m) {
+						t.Errorf("the drift warning must not mention %q; got: %s", m, line)
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestOpenAttach_LimitsProbeTimesOut_NoWarningAndAttachContinues is AC9's
+// timeout half: a limits inspect that never returns is cut off by the probe's
+// bounded timeout, prints no warning, and the attach still goes ahead. The
+// wrapper runtime hangs only on the limits inspect (recording that it was
+// reached) and delegates everything else to the scripted fake.
+func TestOpenAttach_LimitsProbeTimesOut_NoWarningAndAttachContinues(t *testing.T) {
+	repoRoot := configuredRepoEnv(t, `{}`)
+	containerName := containerNameFor(repoRoot)
+	fakeDir := t.TempDir()
+	callLog := filepath.Join(fakeDir, "calls.txt")
+	hangLog := filepath.Join(fakeDir, "hung.txt")
+	for _, rt := range []string{"docker", "podman"} {
+		writeScriptedRuntime(t, fakeDir, rt+".real", callLog)
+		// `exec sleep` (never a bare sleep) so the context kill reaches the
+		// process that holds the output pipes (watch/docs/go-gotchas.md).
+		wrapper := "#!/bin/sh\n" +
+			"case \"$*\" in\n" +
+			"*'.HostConfig.PidsLimit'*)\n" +
+			"  printf '%s\\n' \"$*\" >> " + exectest.ShellQuote(hangLog) + "\n" +
+			"  exec sleep 60\n" +
+			"  ;;\n" +
+			"esac\n" +
+			"exec \"$0.real\" \"$@\"\n"
+		exectest.WriteExecutable(t, filepath.Join(fakeDir, rt), wrapper)
+	}
+	assets := writeAssetFixture(t)
+	env := openAttachEnvFor(t, fakeDir, assets, containerName, defaultPluginsContainerEnv)
+	// Would warn (unlimited container) if the probe ever answered.
+	env = append(env, "FAKE_CONTAINER_LIMITS=0|0|<nil>")
+
+	start := time.Now()
+	run := runCenci(t, env, repoRoot, "open")
+	elapsed := time.Since(start)
+
+	if run.exitCode != 0 {
+		t.Fatalf("open (attach, hung limits probe): exit %d, want the attach to continue\nstderr:\n%s", run.exitCode, run.stderr)
+	}
+	if elapsed > 30*time.Second {
+		t.Errorf("the attach took %v: the limits probe must be bounded by a short timeout, not wait for the hung runtime", elapsed)
+	}
+	if hung, err := os.ReadFile(hangLog); err != nil || !strings.Contains(string(hung), ".HostConfig.PidsLimit") {
+		t.Errorf("the limits probe was never reached, so this test proved nothing (hang log: %q, err: %v)", hung, err)
+	}
+	if remedy := stopRemedyLines(run.stderr+run.stdout, containerName); len(remedy) != 0 {
+		t.Errorf("a timed-out probe must print no warning; got:\n%s", strings.Join(remedy, "\n"))
+	}
+	attachLine(t, callLogLines(t, callLog))
 }

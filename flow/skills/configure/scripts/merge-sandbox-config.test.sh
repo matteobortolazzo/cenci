@@ -222,6 +222,25 @@ grep -q -- "unknown argument: --base-version" <<<"${OUT}" \
   || fail "case19 must name --base-version in its unknown-argument error (got: ${OUT})"
 rm -f "${CFG}"
 
+# --- Case 20 (#1216): hand-added sandbox.memoryLimit / sandbox.pidsLimit ----
+# --- survive a re-run of /cenci:configure, even the opt-out values ("none" --
+# --- and 0) a naive "drop falsy values" merge would delete ------------------
+CFG="$(write_config '{"sandbox":{"enabled":true,"memoryLimit":"none","pidsLimit":0}}')"
+run_merge "${CFG}" --dockerfile true --dind true --azure false
+assert_eq "${CODE}" "0" "case20 exit"
+assert_json_eq "${OUT}" '{"sandbox":{"enabled":true,"dind":true,"memoryLimit":"none","pidsLimit":0}}' "case20 hand-added memoryLimit/pidsLimit opt-outs preserved across a re-run"
+printf '%s' "${OUT}" | jq -e '.sandbox | (.memoryLimit == "none") and (.pidsLimit == 0)' >/dev/null 2>&1 \
+  || fail "case20 memoryLimit \"none\" and pidsLimit 0 must both survive verbatim (got: ${OUT})"
+rm -f "${CFG}"
+
+# Same keys with every configure-owned sibling switched off: the emptied-object
+# rule must not drop a sandbox object that still holds the limit keys.
+CFG="$(write_config '{"sandbox":{"enabled":true,"dind":true,"memoryLimit":"16g","pidsLimit":2048}}')"
+run_merge "${CFG}" --dockerfile false --dind false --azure false
+assert_eq "${CODE}" "0" "case20b exit"
+assert_json_eq "${OUT}" '{"sandbox":{"memoryLimit":"16g","pidsLimit":2048}}' "case20b limit keys keep the sandbox object alive when the siblings are switched off"
+rm -f "${CFG}"
+
 # --- Case 11: both client adapters invoke merge-sandbox-config.sh ----------
 # Prose presence alone is not evidence generated JSON is correct — this only
 # asserts BOTH adapters call the shared script (byte-equivalence is

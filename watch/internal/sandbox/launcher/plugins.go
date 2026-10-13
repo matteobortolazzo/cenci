@@ -2,10 +2,7 @@ package launcher
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 )
 
@@ -47,35 +44,14 @@ func DefaultSandboxPlugins() []string {
 // hard-fails the caller (exit 1) instead of silently launching with a
 // default or deduped plugin list (#632, #1002).
 func RepoSandboxPlugins(repoRoot string) ([]string, error) {
-	configPath := filepath.Join(repoRoot, ".cenci", "config.json")
-	data, err := os.ReadFile(configPath)
+	sandboxObj, present, err := readRepoSandboxObject(repoRoot)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return DefaultSandboxPlugins(), nil
-		}
-		return nil, fmt.Errorf("reading %s: %w", configPath, err)
+		return nil, err
 	}
-
-	var top map[string]json.RawMessage
-	if err := json.Unmarshal(data, &top); err != nil {
-		var typeErr *json.UnmarshalTypeError
-		if errors.As(err, &typeErr) {
-			return nil, fmt.Errorf("%s: top level must be an object: %w", configPath, err)
-		}
-		return nil, fmt.Errorf("parsing %s: %w", configPath, err)
-	}
-	if top == nil {
-		return nil, fmt.Errorf("%s: top level must be an object", configPath)
-	}
-
-	sandboxRaw, ok := top["sandbox"]
-	if !ok {
+	if !present {
 		return DefaultSandboxPlugins(), nil
 	}
-	var sandboxObj map[string]json.RawMessage
-	if err := json.Unmarshal(sandboxRaw, &sandboxObj); err != nil {
-		return nil, fmt.Errorf("%s: \"sandbox\" must be an object: %w", configPath, err)
-	}
+	configPath := repoConfigPath(repoRoot)
 
 	pluginsRaw, ok := sandboxObj["plugins"]
 	if !ok {

@@ -109,6 +109,21 @@ const (
 	SandboxDindRuntimeCreateFailed Code = "CENCI-SANDBOX-DIND-003"
 )
 
+// Sandbox resource-limit codes (CENCI-SANDBOX-LIMITS-*) for the workload
+// container's memory and pids limits (#1216).
+const (
+	// SandboxLimitsHostMemoryUnreadable: the container runtime's total host
+	// memory could not be read, so the default memory limit cannot be derived.
+	SandboxLimitsHostMemoryUnreadable Code = "CENCI-SANDBOX-LIMITS-001"
+
+	// SandboxLimitsCreateRejected: the runtime rejected the container create
+	// because of a memory or pids limit.
+	SandboxLimitsCreateRejected Code = "CENCI-SANDBOX-LIMITS-002"
+
+	// SandboxLimitsOOMKills: the container's cgroup recorded OOM kills.
+	SandboxLimitsOOMKills Code = "CENCI-SANDBOX-LIMITS-003"
+)
+
 // Sandbox socket codes (CENCI-SANDBOX-SOCKET-*), attached by
 // watch/internal/daemon's in-sandbox hook-event delivery-failure classifier
 // (classifyDeliveryFailure) and surfaced host-side by
@@ -220,6 +235,38 @@ var registry = map[Code]Entry{
 			"cenci open <shortcut> --no-dind to launch without nested Docker",
 		},
 	},
+	SandboxLimitsHostMemoryUnreadable: {
+		Message: "The container runtime's total host memory could not be read, so the default memory limit cannot be derived.",
+		Causes: []string{
+			"`<runtime> info` failed or timed out, so the host (or Docker Desktop / podman machine VM) memory total is unknown.",
+			"The runtime reported a total that is not a positive whole number of bytes, or one too small to give the sandbox at least 1 MiB.",
+		},
+		Hints: []string{
+			"set \"sandbox\": {\"memoryLimit\": \"none\"} or an explicit size such as \"memoryLimit\": \"8g\" in the repo's .cenci/config.json",
+			"docker info --format '{{.MemTotal}}' (podman info --format '{{.Host.MemTotal}}') to see what the runtime reports",
+		},
+	},
+	SandboxLimitsCreateRejected: {
+		Message: "The container runtime rejected the sandbox container because of its memory or pids limit.",
+		Causes: []string{
+			"The memory or pids cgroup controller is not delegated to the runtime on this host (typical for rootless podman or a restricted cgroup v2 tree).",
+			"The configured or derived limit is below the runtime's minimum, or the kernel does not support it.",
+		},
+		Hints: []string{
+			"set \"sandbox\": {\"memoryLimit\": \"none\"} in the repo's .cenci/config.json to launch without a memory limit",
+			"set \"sandbox\": {\"pidsLimit\": 0} in the repo's .cenci/config.json to launch without a pids limit",
+		},
+	},
+	SandboxLimitsOOMKills: {
+		Message: "The sandbox container's cgroup recorded out-of-memory kills.",
+		Causes: []string{
+			"A process in the container exceeded the container's memory limit and was killed by the kernel (nested DinD containers count against the same limit).",
+		},
+		Hints: []string{
+			"raise the limit with \"sandbox\": {\"memoryLimit\": \"16g\"} in the repo's .cenci/config.json",
+			"cenci sandbox stop <name>, then relaunch the session to apply a changed limit",
+		},
+	},
 	SandboxSocketUnwired: {
 		Message: "The sandbox event-socket directory's bind mount is dangling or was never wired in.",
 		Causes: []string{
@@ -267,6 +314,9 @@ var allCodes = []Code{
 	SandboxDindStartupFailure,
 	SandboxDindPlatformUnsupported,
 	SandboxDindRuntimeCreateFailed,
+	SandboxLimitsHostMemoryUnreadable,
+	SandboxLimitsCreateRejected,
+	SandboxLimitsOOMKills,
 	SandboxSocketUnwired,
 	DaemonConnUnreachable,
 	DaemonSocketMissing,
