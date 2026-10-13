@@ -105,18 +105,28 @@
 # that produce zero extracted targets retain the bounded backstop/residual
 # documented in the Bash-arm comment below and adapter-contract.md.
 #
-# EXCEPTION (#1036): a relative target declared inside a recognized,
-# strictly-shaped apply_patch envelope (bwt_is_apply_patch_payload /
-# bwt_apply_patch_targets in lib/bash-write-targets.sh) is resolved against
-# this hook's own cwd instead of being rejected. The #810 cwd-distrust
-# rationale above does not apply to that shape: the strict envelope
-# precondition means no `cd`/`&&`/`;`/pipe/assignment/subshell can appear
-# anywhere in the command, so nothing in it can change the effective cwd
-# before this hook runs against the same cwd Codex invoked it from.
-# Resolution is cwd-join-then-canonicalize (never lexical trust) -- the
-# joined path is still fed through the same canonicalize_target the rest of
-# this arm uses, so a `..`-escape out of an allowlisted-looking relative
-# shape is still caught before the allowlist/repo-scope decision.
+# EXCEPTION (#1036, narrowed by #1212): a relative target declared inside a
+# recognized, strictly-shaped apply_patch envelope (bwt_is_apply_patch_payload
+# / bwt_apply_patch_targets in lib/bash-write-targets.sh) is resolved against
+# this hook's own cwd instead of being rejected -- but only when the call's
+# effective working directory can be shown to BE that cwd. The #810
+# cwd-distrust rationale above does not apply to the command TEXT of that
+# shape: the strict envelope precondition means no `cd`/`&&`/`;`/pipe/
+# assignment/subshell can appear anywhere in the command. It says nothing
+# about the tool's per-call `workdir`, which Codex omits from the PreToolUse
+# payload: a Bash-routed `apply_patch <<'EOF'` can run in a directory this hook
+# never sees. The join therefore requires tool_name == "apply_patch" (a direct
+# patch call, whose directory is the session cwd) AND a payload `cwd` that is
+# an absolute, control-character-free path whose canonical form equals the
+# canonical form of this hook's cwd. Anything else -- a missing or Bash
+# tool_name, a missing/relative/odd cwd, a cwd naming a different directory --
+# exits 2 with "effective working directory cannot be determined; use an
+# absolute feature-worktree path" (over-block, never allow). Resolution is
+# still cwd-join-then-canonicalize (never lexical trust) -- the joined path is
+# fed through the same canonicalize_target the rest of this arm uses, so a
+# `..`-escape out of an allowlisted-looking relative shape is still caught
+# before the allowlist/repo-scope decision. Absolute declared targets never
+# needed a cwd and are decided exactly as before.
 
 # Only enforce in repos configured for cenci. .cenci/config.json is canonical;
 # .claude/config.json remains a read-only migration signal. In unconfigured repos this
@@ -133,6 +143,47 @@ command -v jq >/dev/null 2>&1 || {
 }
 
 INPUT=$(cat)
+
+# Capture tap (#1212): evidence plumbing for flow/codex/native-hooks.test.sh,
+# which needs the payload cwd and this hook process's cwd from a REAL Codex run
+# (they are the inputs to the relative apply_patch predicate below). Inert
+# unless CENCI_CODEX_HOOK_CAPTURE_DIR names an absolute, existing, non-symlink
+# directory owned by the current user and not group/world-writable. Write-only:
+# it writes exactly one JSON line (tool_name, payload cwd, hook pwd, whether
+# tool_input carries a `workdir`) into a fresh per-call mktemp file, and never
+# the command or diff body. Every failure is swallowed and
+# the function always returns 0, so it can never change this hook's exit code
+# or stderr. It runs before any decision on purpose: a call that is later
+# blocked is exactly the one the runner needs to see.
+capture_tap() {
+  [ -n "${CENCI_CODEX_HOOK_CAPTURE_DIR:-}" ] || return 0
+  case "$CENCI_CODEX_HOOK_CAPTURE_DIR" in
+    /*) ;;
+    *) return 0 ;;
+  esac
+  { [ -d "$CENCI_CODEX_HOOK_CAPTURE_DIR" ] && [ ! -L "$CENCI_CODEX_HOOK_CAPTURE_DIR" ] && [ -O "$CENCI_CODEX_HOOK_CAPTURE_DIR" ]; } || return 0
+  # A group/world-writable directory lets another user pre-plant entries, so
+  # the tap stays off there (mode string chars 6 and 9 are the group and
+  # other write bits). Each call then creates its OWN file with mktemp (an
+  # O_EXCL regular file), never appending to a pre-existing path that could
+  # be a FIFO, device or swapped symlink.
+  _cap_mode=$(ls -ld "$CENCI_CODEX_HOOK_CAPTURE_DIR" 2>/dev/null) || return 0
+  case "$_cap_mode" in
+    ?????w* | ????????w*) return 0 ;;
+  esac
+  _cap_pwd=$(pwd 2>/dev/null) || return 0
+  _cap_line=$(printf '%s' "$INPUT" | jq -c --arg hook_pwd "$_cap_pwd" '{
+      tool_name: (.tool_name // null),
+      payload_cwd: (.cwd // null),
+      hook_pwd: $hook_pwd,
+      tool_input_has_workdir: (.tool_input | if type == "object" then has("workdir") else false end)
+    }' 2>/dev/null) || return 0
+  [ -n "$_cap_line" ] || return 0
+  _cap_file=$(mktemp "$CENCI_CODEX_HOOK_CAPTURE_DIR/guard-main-worktree.XXXXXX" 2>/dev/null) || return 0
+  { printf '%s\n' "$_cap_line" > "$_cap_file"; } 2>/dev/null
+  return 0
+}
+capture_tap
 
 # mktemp-failure fallback (#550): if a temp file can be created, jq's stderr
 # is captured there (fd 9 points at it) so the normal-path message keeps its
@@ -195,6 +246,25 @@ if ! JQ_OUT=$(printf '%s' "$INPUT" | jq -r '
   jq_err_cleanup
   exit 2
 fi
+
+# Direct-apply_patch shape and payload cwd (#1212), read separately so the
+# command-bearing extraction above keeps its exact contract. Line 1 is "1" only
+# when tool_name is exactly "apply_patch" (the tool Codex names for a direct
+# patch call; a Bash-routed heredoc arrives as "Bash"), else "0". Line 2 is the
+# payload `cwd` only when it is a string that starts with "/" and carries no
+# control character (a newline would split this two-line protocol, and the
+# `$(...)` below would strip a trailing one), else empty. Validation lives in
+# jq so a hostile value never reaches the shell as a newline.
+if ! JQ_SHAPE=$(printf '%s' "$INPUT" | jq -r '
+    (if .tool_name == "apply_patch" then "1" else "0" end),
+    (.cwd | if type == "string" and startswith("/")
+               and (explode | all(. >= 32 and . != 127))
+            then . else "" end)
+  ' 2>&9); then
+  echo "BLOCKED: guard-main-worktree.sh could not parse the tool call's JSON input: $(jq_err_detail)" >&2
+  jq_err_cleanup
+  exit 2
+fi
 jq_err_cleanup
 
 # Split JQ_OUT's two logical values without depending on sed (kept out of
@@ -203,6 +273,8 @@ jq_err_cleanup
 # embedded newlines in a multi-line Bash command.
 FILE_PATH=$(printf '%s\n' "$JQ_OUT" | { IFS= read -r JQ_LINE1; printf '%s' "$JQ_LINE1"; })
 TOOL_COMMAND=$(printf '%s\n' "$JQ_OUT" | { IFS= read -r JQ_DISCARD; cat; })
+PAYLOAD_DIRECT_PATCH=$(printf '%s\n' "$JQ_SHAPE" | { IFS= read -r JQ_LINE1; printf '%s' "$JQ_LINE1"; })
+PAYLOAD_CWD=$(printf '%s\n' "$JQ_SHAPE" | { IFS= read -r JQ_DISCARD; cat; })
 
 [ -z "$FILE_PATH" ] && [ -z "$TOOL_COMMAND" ] && exit 0
 
@@ -783,6 +855,22 @@ elif [ -n "$TOOL_COMMAND" ]; then
     exit 2
   fi
 
+  # apply_patch_cwd_determinable (#1212): can this call's effective working
+  # directory be shown to equal this hook's own cwd? True only when ALL hold:
+  # tool_name is exactly "apply_patch" (PAYLOAD_DIRECT_PATCH=1), the payload
+  # `cwd` is a valid absolute path with no control character (PAYLOAD_CWD is
+  # non-empty -- the jq read above blanks anything else), and
+  # canonical(PAYLOAD_CWD) == canonical(this hook's cwd). Both
+  # canonicalizations are checked; a failure of either is "not determinable".
+  # Returns 1 on any doubt -- the predicate can only over-block.
+  apply_patch_cwd_determinable() {
+    [ "$PAYLOAD_DIRECT_PATCH" = "1" ] || return 1
+    [ -n "$PAYLOAD_CWD" ] || return 1
+    _apcd_payload=$(resolve_path "$PAYLOAD_CWD" 2>/dev/null) || return 1
+    _apcd_hook=$(resolve_path "$BWT_CWD" 2>/dev/null) || return 1
+    [ -n "$_apcd_payload" ] && [ "$_apcd_payload" = "$_apcd_hook" ]
+  }
+
   # Empty-parse backstop (#795): zero extracted targets is byte-identical
   # for "this command genuinely writes nothing" and "the tokenizer met a
   # construct it does not model". When the command still looks like it might
@@ -991,6 +1079,20 @@ elif [ -n "$TOOL_COMMAND" ]; then
           # distrust rationale below does not apply, since the command
           # cannot itself change the effective cwd before this hook runs.
           # Resolution is cwd-join-then-canonicalize, never lexical trust.
+          #
+          # #1212: that argument covers the COMMAND TEXT, not the tool's
+          # per-call workdir. Codex drops `workdir` from the PreToolUse
+          # payload, so for a Bash-routed `apply_patch <<'EOF'` the directory
+          # the write resolves against can differ from this hook's cwd (a
+          # worktree session whose call runs with the repo root as workdir
+          # writes a relative AGENTS.md into the MAIN worktree). The join is
+          # therefore taken only when the effective directory can be shown to
+          # equal this hook's cwd; otherwise fail closed. The message names
+          # the declared target only, never the diff body.
+          if ! apply_patch_cwd_determinable; then
+            echo "BLOCKED: guard-main-worktree.sh: the effective working directory cannot be determined for the relative apply_patch target '$BWT_EXPANDED' (tool_name must be apply_patch and the payload cwd must be an absolute path equal to this hook's cwd); use an absolute feature-worktree path." >&2
+            exit 2
+          fi
           BWT_ABS="$BWT_CWD/$BWT_EXPANDED"
         else
           # Relative-target policy (#810 Fix 2): a relative Bash write target

@@ -91,11 +91,20 @@
 #     body still blocks (over-block, never a new bypass).
 #   - A recognized apply_patch envelope's RELATIVE declared targets are
 #     resolved against this hook's own process `$(pwd)` (guard-main-
-#     worktree.sh's checked BWT_CWD), trusted as the apply_patch call's
-#     effective working directory -- this is NOT independently verified
-#     against any client-supplied workdir parameter the Codex tool call
-#     might carry (#1036 Q9, accepted residual, deliberately not reopened
-#     in this fix pass).
+#     worktree.sh's checked BWT_CWD) ONLY when the call's effective working
+#     directory can be shown to equal it (#1212, closing the #1036 Q9
+#     residual): tool_name must be exactly "apply_patch" and the payload
+#     `cwd` must be an absolute, control-character-free path whose canonical
+#     form equals the canonical form of the hook's cwd. Codex's PreToolUse
+#     payload omits the per-call `workdir`, so a Bash-routed apply_patch
+#     heredoc (tool_name "Bash") or any payload whose cwd differs, is
+#     missing, or is malformed exits 2 ("effective working directory cannot
+#     be determined; use an absolute feature-worktree path") instead of being
+#     joined. What remains: a DIRECT apply_patch call is trusted to run in
+#     the session cwd the payload reports, and check-sensitive-files.sh keeps
+#     joining relative targets to its own cwd (#1212 Q5), so a symlink that
+#     exists only in an invisible workdir is a documented, narrow residual
+#     there. Absolute declared targets never needed a cwd.
 #
 #   Comparison-context recognition is intentionally narrow, PERMANENTLY
 #   (#810, round-3 stabilization review — this is a settled design choice,

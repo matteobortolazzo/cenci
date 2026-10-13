@@ -52,6 +52,51 @@ command -v jq >/dev/null 2>&1 || {
 
 INPUT=$(cat)
 
+# Capture tap (#1212): evidence plumbing for flow/codex/native-hooks.test.sh,
+# which needs the payload cwd and this hook process's cwd from a REAL Codex run.
+# Inert unless CENCI_CODEX_HOOK_CAPTURE_DIR names an absolute, existing,
+# non-symlink directory owned by the current user and not group/world-writable.
+# Write-only: it writes exactly one JSON line (tool_name, payload cwd, hook
+# pwd, whether tool_input carries a `workdir`) into a fresh per-call mktemp
+# file, and never the command or diff body. Every failure is
+# swallowed and the function always returns 0, so it can never change this
+# hook's exit code or stderr. It runs before any decision on purpose: a call
+# that is later blocked is exactly the one the runner needs to see. This hook's
+# POLICY is unchanged (#1212 Q5): it does not adopt guard-main-worktree.sh's
+# "payload cwd must equal the hook cwd" rule for relative apply_patch targets
+# and keeps joining them to its own cwd. The narrow residual: a Bash-routed
+# apply_patch whose per-call workdir (invisible here -- Codex drops it from the
+# payload) holds a symlink to a sensitive file that the hook's own cwd lacks.
+capture_tap() {
+  [ -n "${CENCI_CODEX_HOOK_CAPTURE_DIR:-}" ] || return 0
+  case "$CENCI_CODEX_HOOK_CAPTURE_DIR" in
+    /*) ;;
+    *) return 0 ;;
+  esac
+  { [ -d "$CENCI_CODEX_HOOK_CAPTURE_DIR" ] && [ ! -L "$CENCI_CODEX_HOOK_CAPTURE_DIR" ] && [ -O "$CENCI_CODEX_HOOK_CAPTURE_DIR" ]; } || return 0
+  # A group/world-writable directory lets another user pre-plant entries, so
+  # the tap stays off there (mode string chars 6 and 9 are the group and
+  # other write bits). Each call then creates its OWN file with mktemp (an
+  # O_EXCL regular file), never appending to a pre-existing path that could
+  # be a FIFO, device or swapped symlink.
+  _cap_mode=$(ls -ld "$CENCI_CODEX_HOOK_CAPTURE_DIR" 2>/dev/null) || return 0
+  case "$_cap_mode" in
+    ?????w* | ????????w*) return 0 ;;
+  esac
+  _cap_pwd=$(pwd 2>/dev/null) || return 0
+  _cap_line=$(printf '%s' "$INPUT" | jq -c --arg hook_pwd "$_cap_pwd" '{
+      tool_name: (.tool_name // null),
+      payload_cwd: (.cwd // null),
+      hook_pwd: $hook_pwd,
+      tool_input_has_workdir: (.tool_input | if type == "object" then has("workdir") else false end)
+    }' 2>/dev/null) || return 0
+  [ -n "$_cap_line" ] || return 0
+  _cap_file=$(mktemp "$CENCI_CODEX_HOOK_CAPTURE_DIR/check-sensitive-files.XXXXXX" 2>/dev/null) || return 0
+  { printf '%s\n' "$_cap_line" > "$_cap_file"; } 2>/dev/null
+  return 0
+}
+capture_tap
+
 # mktemp-failure fallback (#550): if a temp file can be created, jq's stderr
 # is captured there (fd 9 points at it) so the normal-path message keeps its
 # exact inline-detail format. If mktemp fails (e.g. TMPDIR exhaustion), fd 9
