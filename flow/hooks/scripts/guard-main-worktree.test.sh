@@ -134,6 +134,9 @@ trap 'rm -rf "${TEST_ROOT}"' EXIT
 # single invocation via run_guard_with_tmpdir; every other case must run with
 # TMPDIR genuinely unset.
 unset TMPDIR
+# #1212: the capture tap is opt-in per invocation; an inherited value would make
+# every case write evidence files.
+unset CENCI_CODEX_HOOK_CAPTURE_DIR
 
 make_git_repo() {
     local dir="$1"
@@ -1336,6 +1339,15 @@ make_git_repo "${APPLY_PATCH_REPO}"
 mkdir -p "${APPLY_PATCH_REPO}/.cenci"
 touch "${APPLY_PATCH_REPO}/.cenci/config.json"
 
+# #1212: the payload shape Codex really sends for a direct apply_patch call
+# carries tool_name "apply_patch" and the session cwd next to
+# tool_input.command. The relative-target resolution below is gated on that
+# shape (the guard joins a relative target to cwd only when it can show the
+# payload cwd is the directory the write resolves against), so the #1036 /
+# #1045 envelope fixtures send it. Fixtures that deliberately model the
+# shell-prefixed / Bash-routed fall-back keep the bare {tool_input} shape.
+AP_SHAPE='{tool_name:"apply_patch",cwd:$cwd,tool_input:{command:$cmd}}'
+
 # (a) all declared targets under <root>/.worktrees/<id>-<desc>/, body
 # containing =>, List<Foo>, >>, "committee" -> exit 0. Proves arrow
 # operators in the diff BODY never trip the relative-target rejection once
@@ -1350,7 +1362,7 @@ JSON=$(jq -n --arg cmd "*** Begin Patch
 +    y >> z
 +    return committee
 +}
-*** End Patch" '{tool_input:{command:$cmd}}')
+*** End Patch" --arg cwd "${APPLY_PATCH_REPO}" "${AP_SHAPE}")
 run_guard "${APPLY_PATCH_REPO}" "${JSON}"
 assert_exit "apply_patch envelope, all targets in .worktrees/, arrow-heavy body allowed" 0
 
@@ -1359,7 +1371,7 @@ assert_exit "apply_patch envelope, all targets in .worktrees/, arrow-heavy body 
 echo "case: apply_patch envelope declaring a relative main-worktree target is blocked with the existing feature-worktree guidance (#1036 AC 2)"
 JSON=$(jq -n --arg cmd "*** Begin Patch
 *** Update File: AGENTS.md
-*** End Patch" '{tool_input:{command:$cmd}}')
+*** End Patch" --arg cwd "${APPLY_PATCH_REPO}" "${AP_SHAPE}")
 run_guard "${APPLY_PATCH_REPO}" "${JSON}"
 assert_exit "apply_patch envelope relative AGENTS.md target blocked" 2
 if [[ "${GUARD_STDERR}" == *"targets the main worktree, not a feature worktree"* ]]; then
@@ -1372,7 +1384,7 @@ fi
 echo "case: apply_patch envelope declaring an absolute main-worktree target is blocked"
 JSON=$(jq -n --arg cmd "*** Begin Patch
 *** Update File: ${APPLY_PATCH_REPO}/AGENTS.md
-*** End Patch" '{tool_input:{command:$cmd}}')
+*** End Patch" --arg cwd "${APPLY_PATCH_REPO}" "${AP_SHAPE}")
 run_guard "${APPLY_PATCH_REPO}" "${JSON}"
 assert_exit "apply_patch envelope absolute AGENTS.md target blocked" 2
 
@@ -1382,7 +1394,7 @@ echo "case: apply_patch envelope declaring a relative .worktrees/ target resolve
 JSON=$(jq -n --arg cmd "*** Begin Patch
 *** Add File: .worktrees/1036-x/f.txt
 +new
-*** End Patch" '{tool_input:{command:$cmd}}')
+*** End Patch" --arg cwd "${APPLY_PATCH_REPO}" "${AP_SHAPE}")
 run_guard "${APPLY_PATCH_REPO}" "${JSON}"
 assert_exit "apply_patch envelope relative .worktrees/ target allowed" 0
 
@@ -1393,7 +1405,7 @@ assert_exit "apply_patch envelope relative .worktrees/ target allowed" 0
 echo "case: apply_patch envelope target escaping .worktrees/ via .. is blocked -- canonicalize-then-decide, not lexical trust (#1036, load-bearing)"
 JSON=$(jq -n --arg cmd "*** Begin Patch
 *** Update File: .worktrees/1036-x/../../AGENTS.md
-*** End Patch" '{tool_input:{command:$cmd}}')
+*** End Patch" --arg cwd "${APPLY_PATCH_REPO}" "${AP_SHAPE}")
 run_guard "${APPLY_PATCH_REPO}" "${JSON}"
 assert_exit "apply_patch envelope .worktrees/../../ escape blocked" 2
 
@@ -1406,7 +1418,7 @@ JSON=$(jq -n --arg cmd "*** Begin Patch
 @@
 -old
 +new
-*** End Patch" '{tool_input:{command:$cmd}}')
+*** End Patch" --arg cwd "${APPLY_PATCH_REPO}" "${AP_SHAPE}")
 run_guard "${APPLY_PATCH_REPO}" "${JSON}"
 assert_exit "apply_patch envelope Move to main-worktree destination blocked" 2
 
@@ -1417,7 +1429,7 @@ JSON=$(jq -n --arg cmd "*** Begin Patch
 *** Update File: AGENTS.md
 @@
 -old
-+new" '{tool_input:{command:$cmd}}')
++new" --arg cwd "${APPLY_PATCH_REPO}" "${AP_SHAPE}")
 run_guard "${APPLY_PATCH_REPO}" "${JSON}"
 assert_exit "malformed apply_patch envelope (missing End Patch) blocked" 2
 if [[ "${GUARD_STDERR,,}" == *"apply_patch"* ]]; then
@@ -1431,7 +1443,7 @@ JSON=$(jq -n --arg cmd "apply_patch <<EOF
 *** Begin Patch
 *** Update File: AGENTS.md
 *** End Patch
-EOF" '{tool_input:{command:$cmd}}')
+EOF" --arg cwd "${APPLY_PATCH_REPO}" "${AP_SHAPE}")
 run_guard "${APPLY_PATCH_REPO}" "${JSON}"
 assert_exit "apply_patch unquoted heredoc delimiter blocked" 2
 if [[ "${GUARD_STDERR,,}" == *"apply_patch"* ]]; then
@@ -1447,7 +1459,7 @@ echo "case: malformed apply_patch envelope whose body contains secret-shaped mat
 JSON=$(jq -n --arg cmd "*** Begin Patch
 *** Add File: AGENTS.md
 +API_KEY=sk-supersecretvalue12345
-@@ missing end sentinel" '{tool_input:{command:$cmd}}')
+@@ missing end sentinel" --arg cwd "${APPLY_PATCH_REPO}" "${AP_SHAPE}")
 run_guard "${APPLY_PATCH_REPO}" "${JSON}"
 assert_exit "malformed apply_patch envelope with secret-shaped body blocked" 2
 if [[ "${GUARD_STDERR}" == *"sk-supersecretvalue12345"* ]]; then
@@ -1472,7 +1484,7 @@ echo "case: an apply_patch declared path containing '(' resolves normally -- ins
 JSON=$(jq -n --arg cmd "*** Begin Patch
 *** Add File: .worktrees/1036-x/reports/summary (1).csv
 +col
-*** End Patch" '{tool_input:{command:$cmd}}')
+*** End Patch" --arg cwd "${APPLY_PATCH_REPO}" "${AP_SHAPE}")
 run_guard "${APPLY_PATCH_REPO}" "${JSON}"
 assert_exit "apply_patch declared path with '(' inside .worktrees/ allowed" 0
 
@@ -1484,7 +1496,7 @@ echo "case: the same '('-containing declared path targeting the main worktree is
 JSON=$(jq -n --arg cmd "*** Begin Patch
 *** Add File: reports/summary (1).csv
 +API_KEY=sk-supersecretvalue12345
-*** End Patch" '{tool_input:{command:$cmd}}')
+*** End Patch" --arg cwd "${APPLY_PATCH_REPO}" "${AP_SHAPE}")
 run_guard "${APPLY_PATCH_REPO}" "${JSON}"
 assert_exit "apply_patch declared path with '(' in the main worktree blocked" 2
 if [[ "${GUARD_STDERR}" == *"sk-supersecretvalue12345"* ]]; then
@@ -1512,7 +1524,7 @@ JSON=$(jq -n --arg cmd "apply_patch <<-'EOF'
 ${AP_TAB}*** Begin Patch
 ${AP_TAB}*** Update File: AGENTS.md
 ${AP_TAB}*** End Patch
-${AP_TAB}EOF" '{tool_input:{command:$cmd}}')
+${AP_TAB}EOF" --arg cwd "${APPLY_PATCH_REPO}" "${AP_SHAPE}")
 run_guard "${APPLY_PATCH_REPO}" "${JSON}"
 assert_exit "tab-indented <<-'EOF' envelope targeting AGENTS.md blocked" 2
 if [[ "${GUARD_STDERR}" == *"targets the main worktree"* ]]; then
@@ -1527,7 +1539,7 @@ ${AP_TAB}*** Begin Patch
 ${AP_TAB}*** Add File: .worktrees/1036-x/tabbed.txt
 ${AP_TAB}+x
 ${AP_TAB}*** End Patch
-${AP_TAB}EOF" '{tool_input:{command:$cmd}}')
+${AP_TAB}EOF" --arg cwd "${APPLY_PATCH_REPO}" "${AP_SHAPE}")
 run_guard "${APPLY_PATCH_REPO}" "${JSON}"
 assert_exit "tab-indented <<-'EOF' envelope targeting .worktrees/ allowed" 0
 
@@ -1539,13 +1551,13 @@ for spelling in "apply_patch << 'EOF'" "apply_patch <<\\EOF" "apply_patch<<'EOF'
 *** Begin Patch
 *** Update File: AGENTS.md
 *** End Patch
-EOF" '{tool_input:{command:$cmd}}')
+EOF" --arg cwd "${APPLY_PATCH_REPO}" "${AP_SHAPE}")
     run_guard "${APPLY_PATCH_REPO}" "${JSON}"
     assert_exit "delimiter spelling <${spelling}> targeting AGENTS.md blocked" 2
 done
 
 echo "case: an apply_patch here-STRING invocation, whose payload this parser cannot see, fails closed rather than falling through to the tokenizer (#1045 Fix 7)"
-JSON=$(jq -n --arg cmd 'apply_patch <<<"$patch"' '{tool_input:{command:$cmd}}')
+JSON=$(jq -n --arg cmd 'apply_patch <<<"$patch"' --arg cwd "${APPLY_PATCH_REPO}" "${AP_SHAPE}")
 run_guard "${APPLY_PATCH_REPO}" "${JSON}"
 assert_exit "apply_patch here-string invocation blocked" 2
 
@@ -1562,7 +1574,7 @@ JSON=$(jq -n --arg cmd "*** Begin Patch
 -old
 +new
 *** End of File
-*** End Patch" '{tool_input:{command:$cmd}}')
+*** End Patch" --arg cwd "${APPLY_PATCH_REPO}" "${AP_SHAPE}")
 run_guard "${APPLY_PATCH_REPO}" "${JSON}"
 assert_exit "envelope with *** End of File marker and a .worktrees/ target allowed" 0
 if [[ "${GUARD_STDERR}" == *"End of File"* ]]; then
@@ -1620,7 +1632,7 @@ echo "case: apply_patch envelope declaring an out-of-repo-root absolute target i
 JSON=$(jq -n --arg cmd "*** Begin Patch
 *** Add File: ${TEST_ROOT}/apply-patch-outside/f.txt
 +new
-*** End Patch" '{tool_input:{command:$cmd}}')
+*** End Patch" --arg cwd "${APPLY_PATCH_REPO}" "${AP_SHAPE}")
 run_guard "${APPLY_PATCH_REPO}" "${JSON}"
 assert_exit "apply_patch envelope out-of-root absolute target allowed (Q1a)" 0
 
@@ -1630,7 +1642,7 @@ echo "case: apply_patch envelope declaring a relative target under a dangling sy
 ln -s "${TEST_ROOT}/apply-patch-nonexistent-target" "${APPLY_PATCH_REPO}/dangling-link"
 JSON=$(jq -n --arg cmd "*** Begin Patch
 *** Update File: dangling-link/sub.txt
-*** End Patch" '{tool_input:{command:$cmd}}')
+*** End Patch" --arg cwd "${APPLY_PATCH_REPO}" "${AP_SHAPE}")
 run_guard "${APPLY_PATCH_REPO}" "${JSON}"
 assert_exit "apply_patch envelope relative target under dangling symlink blocked" 2
 
@@ -1646,6 +1658,328 @@ JSON=$(jq -n --arg cmd "*** Begin Patch
 *** End Patch" '{tool_input:{command:$cmd}}')
 run_guard "${APPLY_PATCH_UNCONFIGURED_REPO}" "${JSON}"
 assert_exit "apply_patch envelope unconfigured repo no-op" 0
+
+# ── Ticket #1212: relative apply_patch targets need a determinable cwd ─────
+# #1036 resolved a relative apply_patch target against THIS hook process's
+# cwd. Codex's exec_command PreToolUse payload carries only {command} -- the
+# per-call `workdir` is dropped -- so for a Bash-routed `apply_patch <<'EOF'`
+# the directory the write really resolves against can differ from the hook's
+# cwd: a worktree session whose exec_command runs with workdir = the repo
+# root writes a relative AGENTS.md into the MAIN worktree while the guard
+# joined it to the worktree and allowed it. The guard now joins a relative
+# target only when tool_name is "apply_patch" and the payload cwd is an
+# absolute, newline-free path whose canonical form equals the canonical form
+# of the hook's own cwd. Anything else fails closed (over-block, never allow).
+RAP_REPO="${TEST_ROOT}/relative-apply-patch"
+RAP_WT="${RAP_REPO}/.worktrees/1212-wt"
+RAP_OTHER="${TEST_ROOT}/relative-apply-patch-other"
+RAP_SECRET='API_KEY=sk-supersecretvalue12345'
+make_git_repo "${RAP_REPO}"
+mkdir -p "${RAP_REPO}/.cenci" "${RAP_WT}" "${RAP_OTHER}"
+touch "${RAP_REPO}/.cenci/config.json"
+
+# ap_env <add|update|delete|move> <dir-prefix> -- an apply_patch envelope whose
+# targets live under <dir-prefix> (empty, or a relative path ending in "/").
+# Bodies carry secret-shaped text so a message that echoes the diff is caught.
+ap_env() {
+    local kind="$1" d="$2"
+    case "${kind}" in
+        add) printf '*** Begin Patch\n*** Add File: %snew.txt\n+%s\n*** End Patch' "${d}" "${RAP_SECRET}" ;;
+        update) printf '*** Begin Patch\n*** Update File: %sAGENTS.md\n@@\n-old\n+%s\n*** End Patch' "${d}" "${RAP_SECRET}" ;;
+        delete) printf '*** Begin Patch\n*** Delete File: %sold.txt\n*** End Patch' "${d}" ;;
+        move) printf '*** Begin Patch\n*** Update File: %sa.txt\n*** Move to: %sb.txt\n@@\n-old\n+%s\n*** End Patch' "${d}" "${d}" "${RAP_SECRET}" ;;
+    esac
+}
+
+# ap_heredoc <env> -- the same envelope wrapped the way a Bash-routed call
+# carries it.
+ap_heredoc() {
+    printf "apply_patch <<'EOF'\n%s\nEOF" "$1"
+}
+
+# ap_payload <tool_name|-> <cwd|-> <command> -- a PreToolUse payload; "-"
+# omits that field entirely.
+ap_payload() {
+    jq -n --arg t "$1" --arg c "$2" --arg cmd "$3" \
+        '{tool_input: {command: $cmd}}
+         + (if $t == "-" then {} else {tool_name: $t} end)
+         + (if $c == "-" then {} else {cwd: $c} end)'
+}
+
+# assert_undeterminable <label> -- exit 2, the dedicated message, and no diff
+# body echoed into it.
+assert_undeterminable() {
+    local label="$1"
+    assert_exit "${label}" 2
+    if [[ "${GUARD_STDERR}" == *BLOCKED* \
+        && "${GUARD_STDERR}" == *"effective working directory cannot be determined"* \
+        && "${GUARD_STDERR}" == *"use an absolute feature-worktree path"* ]]; then
+        pass
+    else
+        fail "${label}: stderr should be the undeterminable-cwd BLOCKED message, got: ${GUARD_STDERR}"
+    fi
+    if [[ "${GUARD_STDERR}" == *"${RAP_SECRET}"* ]]; then
+        fail "${label}: BLOCKED message leaked the diff body, got: ${GUARD_STDERR}"
+    else
+        pass
+    fi
+}
+
+for kind in add update delete move; do
+    # Worktree session, cwd == hook pwd, relative targets: legitimate, allowed.
+    echo "case: relative ${kind} from a worktree session whose payload cwd is the hook cwd is allowed (#1212)"
+    run_guard "${RAP_WT}" "$(ap_payload apply_patch "${RAP_WT}" "$(ap_env "${kind}" '')")"
+    assert_exit "relative ${kind} in a worktree session allowed" 0
+
+    # Root session, cwd == hook pwd, relative target resolving to the main worktree.
+    echo "case: relative ${kind} from a main-worktree session is blocked on the main-worktree decision (#1212)"
+    run_guard "${RAP_REPO}" "$(ap_payload apply_patch "${RAP_REPO}" "$(ap_env "${kind}" '')")"
+    assert_exit "relative ${kind} resolving to the main worktree blocked" 2
+    if [[ "${GUARD_STDERR}" == *"targets the main worktree"* ]]; then
+        pass
+    else
+        fail "relative ${kind} resolving to the main worktree blocked: stderr should be the main-worktree message, got: ${GUARD_STDERR}"
+    fi
+
+    # The same in-worktree relative target from the root is allowed today
+    # (repo-root cwd + .worktrees/ prefix); it must still be, with the real shape.
+    echo "case: relative ${kind} under .worktrees/ from a main-worktree session with the real payload shape is allowed (#1212, #1036 preserved)"
+    run_guard "${RAP_REPO}" "$(ap_payload apply_patch "${RAP_REPO}" "$(ap_env "${kind}" '.worktrees/1212-wt/')")"
+    assert_exit "relative ${kind} under .worktrees/ with the real shape allowed" 0
+
+    # Missing tool_name: cannot show this is a direct apply_patch call.
+    echo "case: relative ${kind} with no tool_name fails closed (#1212)"
+    run_guard "${RAP_REPO}" "$(ap_payload - "${RAP_REPO}" "$(ap_env "${kind}" '.worktrees/1212-wt/')")"
+    assert_undeterminable "relative ${kind} without tool_name"
+
+    # Bash-routed heredoc: exec_command's workdir is invisible to the hook.
+    echo "case: relative ${kind} inside a Bash-routed apply_patch heredoc fails closed (#1212, the worktree-session / root-workdir bypass shape)"
+    run_guard "${RAP_WT}" "$(ap_payload Bash "${RAP_WT}" "$(ap_heredoc "$(ap_env "${kind}" '')")")"
+    assert_undeterminable "relative ${kind} in a tool_name=Bash heredoc"
+
+    # Payload cwd differs from the hook's cwd (both directions).
+    echo "case: relative ${kind} whose payload cwd differs from the hook cwd fails closed (#1212)"
+    run_guard "${RAP_WT}" "$(ap_payload apply_patch "${RAP_REPO}" "$(ap_env "${kind}" '')")"
+    assert_undeterminable "relative ${kind} with payload cwd != hook cwd (worktree hook, root payload)"
+    run_guard "${RAP_REPO}" "$(ap_payload apply_patch "${RAP_WT}" "$(ap_env "${kind}" '.worktrees/1212-wt/')")"
+    assert_undeterminable "relative ${kind} with payload cwd != hook cwd (root hook, worktree payload)"
+
+    # A cwd that is not a clean absolute path.
+    echo "case: relative ${kind} with a newline-bearing, relative or missing payload cwd fails closed (#1212)"
+    run_guard "${RAP_WT}" "$(ap_payload apply_patch "${RAP_WT}"$'\n'"/elsewhere" "$(ap_env "${kind}" '')")"
+    assert_undeterminable "relative ${kind} with an embedded-newline cwd"
+    run_guard "${RAP_WT}" "$(ap_payload apply_patch "${RAP_WT}"$'\n' "$(ap_env "${kind}" '')")"
+    assert_undeterminable "relative ${kind} with a trailing-newline cwd"
+    run_guard "${RAP_REPO}" "$(ap_payload apply_patch "." "$(ap_env "${kind}" '.worktrees/1212-wt/')")"
+    assert_undeterminable "relative ${kind} with a relative cwd"
+    run_guard "${RAP_REPO}" "$(ap_payload apply_patch - "$(ap_env "${kind}" '.worktrees/1212-wt/')")"
+    assert_undeterminable "relative ${kind} with no cwd"
+done
+
+# A symlinked spelling of the same directory is the SAME directory: the
+# comparison is canonical(cwd) == canonical(pwd), not a string compare, so
+# this must not over-block.
+echo "case: relative add whose payload cwd is a symlink to the hook cwd is allowed (canonical comparison, #1212)"
+ln -s "${RAP_WT}" "${TEST_ROOT}/relative-apply-patch-link"
+run_guard "${RAP_WT}" "$(ap_payload apply_patch "${TEST_ROOT}/relative-apply-patch-link" "$(ap_env add '')")"
+assert_exit "payload cwd symlinked to hook cwd allowed" 0
+
+# Absolute targets never needed a cwd: the new predicate must not touch them.
+echo "case: absolute targets are decided exactly as before even when the payload shape is incomplete (#1212)"
+run_guard "${RAP_WT}" "$(ap_payload - - "$(ap_env add "${RAP_WT}/")")"
+assert_exit "absolute worktree target with no tool_name/cwd allowed" 0
+run_guard "${RAP_WT}" "$(ap_payload - - "$(ap_env update "${RAP_REPO}/")")"
+assert_exit "absolute main-worktree target with no tool_name/cwd blocked" 2
+
+# Bash relative targets get no cwd-join exception, whatever the payload says
+# (#810): the redirect's effective directory is unknowable from the hook.
+echo "case: a plain relative Bash redirect stays rejected even with tool_name=Bash and cwd == hook cwd (#810 preserved)"
+run_guard "${RAP_WT}" "$(ap_payload Bash "${RAP_WT}" 'printf x > notes.txt')"
+assert_exit "relative Bash redirect still rejected" 2
+if [[ "${GUARD_STDERR}" == *"cannot verify the relative Bash write target"* ]]; then
+    pass
+else
+    fail "relative Bash redirect still rejected: stderr should be the #810 relative-target message, got: ${GUARD_STDERR}"
+fi
+
+# ── Ticket #1212: env-gated capture tap ────────────────────────────────
+# CENCI_CODEX_HOOK_CAPTURE_DIR lets the native runner record the payload cwd
+# and the hook process cwd. It is write-only evidence plumbing inside a
+# security guard: gated on an absolute, existing, non-symlink directory, and it
+# must never change a decision or the stderr a caller sees.
+
+# cap_entries <dir> -- number of filesystem entries below <dir>. A missing
+# directory yields the non-numeric "missing-dir" (never 0), so an assertion
+# of "nothing was written there" cannot pass vacuously on a wrong path.
+cap_entries() {
+    local listing
+    [[ -d "$1" ]] || { echo "missing-dir"; return 0; }
+    listing="$(find "$1" -mindepth 1)" || { echo "find-failed"; return 0; }
+    if [[ -z "${listing}" ]]; then echo 0; else printf '%s\n' "${listing}" | wc -l | tr -d '[:space:]'; fi
+}
+
+# cap_lines <dir> -- total lines across every regular file below <dir>
+# ("missing-dir" / "find-failed" when it cannot be counted).
+cap_lines() {
+    local content
+    [[ -d "$1" ]] || { echo "missing-dir"; return 0; }
+    content="$(find "$1" -type f -exec cat {} +)" || { echo "find-failed"; return 0; }
+    if [[ -z "${content}" ]]; then echo 0; else printf '%s\n' "${content}" | wc -l | tr -d '[:space:]'; fi
+}
+
+# cap_tree <dir> -- sorted listing of every entry below <dir> outside .git, so
+# a before/after comparison proves the tap wrote nothing into the cwd.
+cap_tree() {
+    find "$1" -mindepth 1 -not -path '*/.git' -not -path '*/.git/*' | LC_ALL=C sort
+}
+
+# run_guard_capture <cwd> <capture-dir-value> <json> -- run_guard with the tap
+# variable set to <capture-dir-value> for this one invocation.
+run_guard_capture() {
+    local cwd="$1" capdir="$2" json="$3"
+    GUARD_STDERR="$(cd "${cwd}" && echo "${json}" | CENCI_CODEX_HOOK_CAPTURE_DIR="${capdir}" "${HOOK_SHELL}" "${GUARD_SH}" 2>&1 >/dev/null)"
+    GUARD_EXIT=$?
+}
+
+# Payloads: an allowed absolute envelope, a main-worktree denial, an
+# undeterminable-cwd denial (no tool_name), and a Write|Edit file_path call.
+TAP_ALLOW="$(ap_payload apply_patch "${RAP_OTHER}" "$(ap_env add "${RAP_WT}/")")"
+TAP_DENY_MAIN="$(ap_payload apply_patch "${RAP_OTHER}" "$(ap_env update "${RAP_REPO}/")")"
+TAP_DENY_CWD="$(ap_payload - "${RAP_OTHER}" "$(ap_env add '.worktrees/1212-wt/')")"
+TAP_WRITE="$(jq -n --arg c "${RAP_OTHER}" --arg f "${RAP_WT}/x.txt" '{tool_name: "Write", cwd: $c, tool_input: {file_path: $f}}')"
+
+echo "case: capture tap unset or empty writes nothing into the cwd or a stray directory (#1212)"
+TAP_DIR="${TEST_ROOT}/tap-unset"
+mkdir -p "${TAP_DIR}"
+chmod 700 "${TAP_DIR}"
+TAP_BEFORE="$(cap_tree "${RAP_REPO}")"
+run_guard "${RAP_REPO}" "${TAP_ALLOW}"
+assert_exit "tap unset, allowed call" 0
+run_guard_capture "${RAP_REPO}" "" "${TAP_ALLOW}"
+assert_exit "tap empty, allowed call" 0
+if [[ "$(cap_tree "${RAP_REPO}")" == "${TAP_BEFORE}" && "$(cap_entries "${TAP_DIR}")" == 0 ]]; then
+    pass
+else
+    fail "tap unset/empty: the cwd listing changed or the unrelated directory received entries (found $(cap_entries "${TAP_DIR}"))"
+fi
+if [[ "$(cap_entries "${TEST_ROOT}/tap-does-not-exist")" == "missing-dir" ]]; then
+    pass
+else
+    fail "cap_entries must report a nonexistent directory as missing-dir, never 0"
+fi
+
+for tap_case in "allow|${TAP_ALLOW}|0" "deny-main|${TAP_DENY_MAIN}|2" "deny-cwd|${TAP_DENY_CWD}|2" "write|${TAP_WRITE}|0"; do
+    tap_name="${tap_case%%|*}"
+    tap_rest="${tap_case#*|}"
+    tap_json="${tap_rest%|*}"
+    tap_expect="${tap_rest##*|}"
+    echo "case: capture tap set to a valid directory writes exactly one line (${tap_name}), before the decision (#1212)"
+    TAP_DIR="${TEST_ROOT}/tap-set-${tap_name}"
+    mkdir -p "${TAP_DIR}"
+    chmod 700 "${TAP_DIR}"
+    run_guard_capture "${RAP_REPO}" "${TAP_DIR}" "${tap_json}"
+    assert_exit "tap set, ${tap_name} call keeps its decision" "${tap_expect}"
+    if [[ "$(cap_lines "${TAP_DIR}")" == 1 ]]; then
+        pass
+    else
+        fail "tap set (${tap_name}): expected exactly one captured line, found $(cap_lines "${TAP_DIR}")"
+    fi
+    # Each call owns its file (mktemp, O_EXCL): a second call adds a second
+    # file rather than appending to the first.
+    run_guard_capture "${RAP_REPO}" "${TAP_DIR}" "${tap_json}"
+    if [[ "$(cap_entries "${TAP_DIR}")" == 2 && "$(cap_lines "${TAP_DIR}")" == 2 ]]; then
+        pass
+    else
+        fail "tap set (${tap_name}): two calls must leave two per-call files of one line each, found $(cap_entries "${TAP_DIR}") entries / $(cap_lines "${TAP_DIR}") lines"
+    fi
+    rm -f "${TAP_DIR}"/guard-main-worktree.*
+    run_guard_capture "${RAP_REPO}" "${TAP_DIR}" "${tap_json}"
+    # The line records both directories (payload cwd and hook cwd) and never
+    # the patch body.
+    TAP_CONTENT="$(find "${TAP_DIR}" -type f -exec cat {} +)"
+    if [[ "${TAP_CONTENT}" == *"${RAP_OTHER}"* && "${TAP_CONTENT}" == *"${RAP_REPO}"* ]]; then
+        pass
+    else
+        fail "tap set (${tap_name}): the captured line should carry the payload cwd (${RAP_OTHER}) and the hook cwd (${RAP_REPO}), got: ${TAP_CONTENT}"
+    fi
+    if [[ "${TAP_CONTENT}" == *"${RAP_SECRET}"* ]]; then
+        fail "tap set (${tap_name}): the captured line leaked the diff body"
+    else
+        pass
+    fi
+done
+
+echo "case: capture tap set to a symlinked, relative or missing directory writes nothing (#1212)"
+TAP_REAL="${TEST_ROOT}/tap-real"
+mkdir -p "${TAP_REAL}"
+ln -s "${TAP_REAL}" "${TEST_ROOT}/tap-link"
+run_guard_capture "${RAP_REPO}" "${TEST_ROOT}/tap-link" "${TAP_ALLOW}"
+assert_exit "tap via symlinked directory keeps the decision" 0
+if [[ "$(cap_entries "${TAP_REAL}")" == 0 ]]; then
+    pass
+else
+    fail "tap via symlinked directory: the symlink target must stay empty, found $(cap_entries "${TAP_REAL}") entries"
+fi
+mkdir -p "${RAP_REPO}/tap-relative"
+run_guard_capture "${RAP_REPO}" "tap-relative" "${TAP_ALLOW}"
+assert_exit "tap via relative directory keeps the decision" 0
+if [[ "$(cap_entries "${RAP_REPO}/tap-relative")" == 0 ]]; then
+    pass
+else
+    fail "tap via relative directory: expected no capture entries, found $(cap_entries "${RAP_REPO}/tap-relative")"
+fi
+run_guard_capture "${RAP_REPO}" "${TEST_ROOT}/tap-missing" "${TAP_ALLOW}"
+assert_exit "tap via missing directory keeps the decision" 0
+if [[ -e "${TEST_ROOT}/tap-missing" ]]; then
+    fail "tap via missing directory: the guard must not create the directory"
+else
+    pass
+fi
+
+echo "case: capture tap set to a group/world-writable directory writes nothing (#1212)"
+for tap_mode in 770 707 777; do
+    TAP_WW="${TEST_ROOT}/tap-writable-${tap_mode}"
+    mkdir -p "${TAP_WW}"
+    chmod "${tap_mode}" "${TAP_WW}"
+    run_guard_capture "${RAP_REPO}" "${TAP_WW}" "${TAP_ALLOW}"
+    assert_exit "tap via mode-${tap_mode} directory keeps the decision" 0
+    if [[ "$(cap_entries "${TAP_WW}")" == 0 ]]; then
+        pass
+    else
+        fail "tap via mode-${tap_mode} directory: expected no capture entries, found $(cap_entries "${TAP_WW}")"
+    fi
+done
+
+echo "case: capture tap never writes through a pre-planted symlink at the legacy shared file name (#1212)"
+TAP_PLANT="${TEST_ROOT}/tap-planted"
+TAP_VICTIM="${TEST_ROOT}/tap-victim.txt"
+mkdir -p "${TAP_PLANT}"
+chmod 700 "${TAP_PLANT}"
+printf 'untouched\n' > "${TAP_VICTIM}"
+ln -s "${TAP_VICTIM}" "${TAP_PLANT}/guard-main-worktree.log"
+run_guard_capture "${RAP_REPO}" "${TAP_PLANT}" "${TAP_ALLOW}"
+assert_exit "tap with a planted symlink keeps the decision" 0
+if [[ "$(cat "${TAP_VICTIM}")" == untouched && "$(cap_entries "${TAP_PLANT}")" == 2 ]]; then
+    pass
+else
+    fail "tap with a planted symlink: the victim file must stay untouched and the call must get its own new file (victim: $(cat "${TAP_VICTIM}"), entries: $(cap_entries "${TAP_PLANT}"))"
+fi
+
+echo "case: the exit code and stderr are identical with and without the capture tap (#1212)"
+TAP_DIR="${TEST_ROOT}/tap-parity"
+mkdir -p "${TAP_DIR}"
+chmod 700 "${TAP_DIR}"
+for parity_json in "${TAP_ALLOW}" "${TAP_DENY_MAIN}" "${TAP_DENY_CWD}" "${TAP_WRITE}"; do
+    run_guard "${RAP_REPO}" "${parity_json}"
+    PARITY_EXIT="${GUARD_EXIT}"
+    PARITY_STDERR="${GUARD_STDERR}"
+    run_guard_capture "${RAP_REPO}" "${TAP_DIR}" "${parity_json}"
+    if [[ "${GUARD_EXIT}" -eq "${PARITY_EXIT}" && "${GUARD_STDERR}" == "${PARITY_STDERR}" ]]; then
+        pass
+    else
+        fail "tap parity: exit ${GUARD_EXIT} vs ${PARITY_EXIT} without the tap; stderr differs: '${GUARD_STDERR}' vs '${PARITY_STDERR}'"
+    fi
+done
 
 # ── Ticket #1072: Write|Edit targets that canonicalize outside the repo ────
 # The Bash arm already allows absolute targets that canonicalize outside the

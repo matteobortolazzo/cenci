@@ -90,6 +90,10 @@ installed; no fish row is listed because it has not been observed.
 Review changed hooks with `/hooks`, and rerun `bash flow/codex/hooks-launch.test.sh` after
 changing `codex/hooks.json` or any script it names.
 
+The opt-in runner `codex/native-hooks.test.sh` (`CENCI_CODEX_NATIVE=1`) runs a real `codex exec`
+against these hooks. Its sanitized results are recorded in
+[`codex-native-evidence.md`](codex-native-evidence.md).
+
 ## Attention behavior
 
 Cenci `need-input` renders a red/dim foreground `!`. A red tmux background without `!`

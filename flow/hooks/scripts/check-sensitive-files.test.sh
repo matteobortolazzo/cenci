@@ -18,6 +18,9 @@ CHECK_SH="${SCRIPT_DIR}/check-sensitive-files.sh"
 # available shell so bash-only bugs cannot hide behind whichever shell
 # /bin/sh happens to be on this host.
 HOOK_SHELL="${HOOK_SHELL:-sh}"
+# #1212: the capture tap is opt-in per invocation; an inherited value would make
+# every case write evidence files.
+unset CENCI_CODEX_HOOK_CAPTURE_DIR
 
 FAILURES=0
 PASSES=0
@@ -752,12 +755,21 @@ done <<< "${CS_PATTERNS}"
 APPLY_PATCH_DIR="${BASH_TEST_ROOT}/apply-patch"
 mkdir -p "${APPLY_PATCH_DIR}"
 
+# #1212: the payload shape Codex really sends for a direct apply_patch call
+# carries tool_name "apply_patch" and the session cwd next to
+# tool_input.command. This hook's decisions do not depend on either (Q5: it
+# keeps its marker-based policy and resolves a relative target against its own
+# cwd), so the envelope fixtures send the real shape purely so that a future
+# change cannot pass here on a fixture shape Codex never produces. Fixtures
+# that model the shell-prefixed fall-back keep the bare {tool_input} shape.
+AP_SHAPE='{tool_name:"apply_patch",cwd:$cwd,tool_input:{command:$cmd}}'
+
 # (a) *** Add File: .env, >-free body -> exit 2.
 echo "case: apply_patch envelope declaring a relative .env Add File target is blocked (#1036 AC 3)"
 JSON=$(jq -n --arg cmd "*** Begin Patch
 *** Add File: .env
 +SECRET=1
-*** End Patch" '{tool_input:{command:$cmd}}')
+*** End Patch" --arg cwd "${APPLY_PATCH_DIR}" "${AP_SHAPE}")
 run_check_in_dir "${APPLY_PATCH_DIR}" "${JSON}"
 assert_exit "apply_patch envelope relative .env Add File blocked" 2
 assert_blocked_stderr "apply_patch envelope relative .env Add File blocked"
@@ -766,7 +778,7 @@ assert_blocked_stderr "apply_patch envelope relative .env Add File blocked"
 echo "case: apply_patch envelope declaring an absolute credentials.yml Delete File target is blocked"
 JSON=$(jq -n --arg cmd "*** Begin Patch
 *** Delete File: ${BASH_TEST_ROOT}/config/credentials.yml
-*** End Patch" '{tool_input:{command:$cmd}}')
+*** End Patch" --arg cwd "${APPLY_PATCH_DIR}" "${AP_SHAPE}")
 run_check "${JSON}"
 assert_exit "apply_patch envelope absolute credentials.yml Delete File blocked" 2
 assert_blocked_stderr "apply_patch envelope absolute credentials.yml Delete File blocked"
@@ -779,7 +791,7 @@ JSON=$(jq -n --arg cmd "*** Begin Patch
 @@
 -old
 +new
-*** End Patch" '{tool_input:{command:$cmd}}')
+*** End Patch" --arg cwd "${APPLY_PATCH_DIR}" "${AP_SHAPE}")
 run_check_in_dir "${APPLY_PATCH_DIR}" "${JSON}"
 assert_exit "apply_patch envelope relative Move to secrets.env blocked" 2
 assert_blocked_stderr "apply_patch envelope relative Move to secrets.env blocked"
@@ -797,7 +809,7 @@ JSON=$(jq -n --arg cmd "*** Begin Patch
 +    y >> z
 +    return committee
 +}
-*** End Patch" '{tool_input:{command:$cmd}}')
+*** End Patch" --arg cwd "${APPLY_PATCH_DIR}" "${AP_SHAPE}")
 run_check_in_dir "${APPLY_PATCH_DIR}" "${JSON}"
 assert_exit "apply_patch envelope benign target with arrow-heavy body allowed" 0
 
@@ -807,7 +819,7 @@ JSON=$(jq -n --arg cmd "*** Begin Patch
 *** Update File: notes.txt
 @@
 -old
-+new" '{tool_input:{command:$cmd}}')
++new" --arg cwd "${APPLY_PATCH_DIR}" "${AP_SHAPE}")
 run_check_in_dir "${APPLY_PATCH_DIR}" "${JSON}"
 assert_exit "malformed apply_patch envelope (missing End Patch) blocked" 2
 assert_blocked_stderr "malformed apply_patch envelope (missing End Patch) blocked"
@@ -820,7 +832,7 @@ echo "case: malformed apply_patch envelope whose body contains secret-shaped mat
 JSON=$(jq -n --arg cmd "*** Begin Patch
 *** Add File: notes.txt
 +API_KEY=sk-supersecretvalue12345
-@@ missing end sentinel" '{tool_input:{command:$cmd}}')
+@@ missing end sentinel" --arg cwd "${APPLY_PATCH_DIR}" "${AP_SHAPE}")
 run_check_in_dir "${APPLY_PATCH_DIR}" "${JSON}"
 assert_exit "malformed apply_patch envelope with secret-shaped body blocked" 2
 assert_blocked_stderr "malformed apply_patch envelope with secret-shaped body blocked"
@@ -845,7 +857,7 @@ echo "case: an apply_patch declared path containing '(' is checked against the b
 JSON=$(jq -n --arg cmd "*** Begin Patch
 *** Add File: reports/summary (1).csv
 +col
-*** End Patch" '{tool_input:{command:$cmd}}')
+*** End Patch" --arg cwd "${APPLY_PATCH_DIR}" "${AP_SHAPE}")
 run_check_in_dir "${APPLY_PATCH_DIR}" "${JSON}"
 assert_exit "benign apply_patch declared path with '(' allowed" 0
 
@@ -857,7 +869,7 @@ echo "case: a sensitive apply_patch declared path containing '(' is blocked on t
 JSON=$(jq -n --arg cmd "*** Begin Patch
 *** Add File: config (1).env
 +API_KEY=sk-supersecretvalue12345
-*** End Patch" '{tool_input:{command:$cmd}}')
+*** End Patch" --arg cwd "${APPLY_PATCH_DIR}" "${AP_SHAPE}")
 run_check_in_dir "${APPLY_PATCH_DIR}" "${JSON}"
 assert_exit "sensitive apply_patch declared path with '(' blocked" 2
 assert_blocked_stderr "sensitive apply_patch declared path with '(' blocked"
@@ -886,7 +898,7 @@ ${AP_TAB}*** Begin Patch
 ${AP_TAB}*** Add File: .env
 ${AP_TAB}+API_KEY=sk-supersecretvalue12345
 ${AP_TAB}*** End Patch
-${AP_TAB}EOF" '{tool_input:{command:$cmd}}')
+${AP_TAB}EOF" --arg cwd "${APPLY_PATCH_DIR}" "${AP_SHAPE}")
 run_check_in_dir "${APPLY_PATCH_DIR}" "${JSON}"
 assert_exit "tab-indented <<-'EOF' envelope declaring .env blocked" 2
 assert_blocked_stderr "tab-indented <<-'EOF' envelope declaring .env blocked"
@@ -902,14 +914,14 @@ for spelling in "apply_patch << 'EOF'" "apply_patch <<\\EOF" "apply_patch<<'EOF'
 *** Add File: .env
 +API_KEY=sk-supersecretvalue12345
 *** End Patch
-EOF" '{tool_input:{command:$cmd}}')
+EOF" --arg cwd "${APPLY_PATCH_DIR}" "${AP_SHAPE}")
     run_check_in_dir "${APPLY_PATCH_DIR}" "${JSON}"
     assert_exit "delimiter spelling <${spelling}> declaring .env blocked" 2
     assert_blocked_stderr "delimiter spelling <${spelling}> declaring .env blocked"
 done
 
 echo "case: an apply_patch here-STRING invocation, whose payload this hook cannot see, fails closed rather than falling through to the tokenizer (#1045 Fix 7)"
-JSON=$(jq -n --arg cmd 'apply_patch <<<"$patch"' '{tool_input:{command:$cmd}}')
+JSON=$(jq -n --arg cmd 'apply_patch <<<"$patch"' --arg cwd "${APPLY_PATCH_DIR}" "${AP_SHAPE}")
 run_check_in_dir "${APPLY_PATCH_DIR}" "${JSON}"
 assert_exit "apply_patch here-string invocation blocked" 2
 assert_blocked_stderr "apply_patch here-string invocation blocked"
@@ -925,7 +937,7 @@ JSON=$(jq -n --arg cmd "*** Begin Patch
 -old
 +new
 *** End of File
-*** End Patch" '{tool_input:{command:$cmd}}')
+*** End Patch" --arg cwd "${APPLY_PATCH_DIR}" "${AP_SHAPE}")
 run_check_in_dir "${APPLY_PATCH_DIR}" "${JSON}"
 assert_exit "envelope with *** End of File marker and a benign target allowed" 0
 
@@ -945,6 +957,222 @@ JSON=$(jq -n --arg cmd "${BASH_CMD_FALLBACK}" '{tool_input:{command:$cmd}}')
 run_check_in_dir "${APPLY_PATCH_DIR}" "${JSON}"
 assert_exit "shell-prefixed apply_patch invocation falls back and blocks via the existing tokenizer path" 2
 assert_blocked_stderr "shell-prefixed apply_patch invocation falls back and blocks via the existing tokenizer path"
+
+# ── Ticket #1212: Q5 residual -- relative targets resolve against THIS hook's
+# cwd only ───────────────────────────────────────────────────────────────
+# Unlike guard-main-worktree.sh, this hook does NOT adopt the "payload cwd must
+# equal the hook cwd" rule: it keeps its marker-based policy and joins a
+# relative target to its own cwd. The narrow residual: an exec_command whose
+# per-call workdir (invisible to the hook, Codex drops it from the payload)
+# holds a symlink such as link.txt -> .env, while the hook's own cwd holds no
+# such file. Pinned here so it cannot change silently, and so the control
+# below proves it is the cwd -- not the payload -- that decides.
+RESIDUAL_HOOK_DIR="${BASH_TEST_ROOT}/residual-hook-cwd"
+RESIDUAL_WORKDIR="${BASH_TEST_ROOT}/residual-real-workdir"
+mkdir -p "${RESIDUAL_HOOK_DIR}" "${RESIDUAL_WORKDIR}"
+printf 'SECRET=1\n' > "${RESIDUAL_WORKDIR}/.env"
+ln -s .env "${RESIDUAL_WORKDIR}/link.txt"
+RESIDUAL_ENVELOPE="*** Begin Patch
+*** Update File: link.txt
+@@
+-old
++new
+*** End Patch"
+
+echo "case: DOCUMENTED RESIDUAL -- a relative target whose symlink lives in a workdir the hook cannot see (payload cwd != hook cwd) is decided on the hook's own cwd and allowed (#1212 Q5, pinned)"
+JSON=$(jq -n --arg cmd "${RESIDUAL_ENVELOPE}" --arg cwd "${RESIDUAL_WORKDIR}" "${AP_SHAPE}")
+run_check_in_dir "${RESIDUAL_HOOK_DIR}" "${JSON}"
+assert_exit "DOCUMENTED RESIDUAL: symlink in a different, invisible workdir is not consulted" 0
+
+echo "case: the same envelope is blocked when the hook's own cwd is the directory holding the symlink (control for the residual, #1212 Q5)"
+run_check_in_dir "${RESIDUAL_WORKDIR}" "${JSON}"
+assert_exit "relative symlink to .env in the hook's own cwd blocked" 2
+assert_blocked_stderr "relative symlink to .env in the hook's own cwd blocked"
+
+# ── Ticket #1212: env-gated capture tap ────────────────────────────────
+# CENCI_CODEX_HOOK_CAPTURE_DIR lets the native runner record the payload cwd
+# and the hook process cwd. It is write-only evidence plumbing inside a
+# security guard: gated on an absolute, existing, non-symlink directory, and it
+# must never change a decision or the stderr a caller sees.
+TAP_SECRET='API_KEY=sk-supersecretvalue12345'
+TAP_OTHER="${BASH_TEST_ROOT}/tap-payload-cwd"
+mkdir -p "${TAP_OTHER}"
+
+# cap_entries <dir> -- number of filesystem entries below <dir>. A missing
+# directory yields the non-numeric "missing-dir" (never 0), so an assertion
+# of "nothing was written there" cannot pass vacuously on a wrong path.
+cap_entries() {
+    local listing
+    [[ -d "$1" ]] || { echo "missing-dir"; return 0; }
+    listing="$(find "$1" -mindepth 1)" || { echo "find-failed"; return 0; }
+    if [[ -z "${listing}" ]]; then echo 0; else printf '%s\n' "${listing}" | wc -l | tr -d '[:space:]'; fi
+}
+
+# cap_lines <dir> -- total lines across every regular file below <dir>
+# ("missing-dir" / "find-failed" when it cannot be counted).
+cap_lines() {
+    local content
+    [[ -d "$1" ]] || { echo "missing-dir"; return 0; }
+    content="$(find "$1" -type f -exec cat {} +)" || { echo "find-failed"; return 0; }
+    if [[ -z "${content}" ]]; then echo 0; else printf '%s\n' "${content}" | wc -l | tr -d '[:space:]'; fi
+}
+
+# cap_tree <dir> -- sorted listing of every entry below <dir> outside .git, so
+# a before/after comparison proves the tap wrote nothing into the cwd.
+cap_tree() {
+    find "$1" -mindepth 1 -not -path '*/.git' -not -path '*/.git/*' | LC_ALL=C sort
+}
+
+# run_check_capture <cwd> <capture-dir-value> <json> -- run_check_in_dir with the
+# tap variable set to <capture-dir-value> for this one invocation.
+run_check_capture() {
+    local cwd="$1" capdir="$2" json="$3"
+    CHECK_STDERR="$(cd "${cwd}" && echo "${json}" | CENCI_CODEX_HOOK_CAPTURE_DIR="${capdir}" "${HOOK_SHELL}" "${CHECK_SH}" 2>&1 >/dev/null)"
+    CHECK_EXIT=$?
+}
+
+TAP_ALLOW="$(jq -n --arg cmd "*** Begin Patch
+*** Add File: ${BASH_TEST_ROOT}/tap-ok.txt
++${TAP_SECRET}
+*** End Patch" --arg cwd "${TAP_OTHER}" "${AP_SHAPE}")"
+TAP_DENY="$(jq -n --arg cmd "*** Begin Patch
+*** Add File: ${BASH_TEST_ROOT}/tap.env
++${TAP_SECRET}
+*** End Patch" --arg cwd "${TAP_OTHER}" "${AP_SHAPE}")"
+TAP_WRITE="$(jq -n --arg c "${TAP_OTHER}" --arg f "${BASH_TEST_ROOT}/tap-write.txt" '{tool_name: "Write", cwd: $c, tool_input: {file_path: $f}}')"
+
+echo "case: capture tap unset or empty writes nothing into the cwd or a stray directory (#1212)"
+TAP_DIR="${BASH_TEST_ROOT}/tap-unset"
+mkdir -p "${TAP_DIR}"
+chmod 700 "${TAP_DIR}"
+TAP_BEFORE="$(cap_tree "${APPLY_PATCH_DIR}")"
+run_check_in_dir "${APPLY_PATCH_DIR}" "${TAP_ALLOW}"
+assert_exit "tap unset, allowed call" 0
+run_check_capture "${APPLY_PATCH_DIR}" "" "${TAP_ALLOW}"
+assert_exit "tap empty, allowed call" 0
+if [[ "$(cap_tree "${APPLY_PATCH_DIR}")" == "${TAP_BEFORE}" && "$(cap_entries "${TAP_DIR}")" == 0 ]]; then
+    pass
+else
+    fail "tap unset/empty: the cwd listing changed or the unrelated directory received entries (found $(cap_entries "${TAP_DIR}"))"
+fi
+if [[ "$(cap_entries "${BASH_TEST_ROOT}/tap-does-not-exist")" == "missing-dir" ]]; then
+    pass
+else
+    fail "cap_entries must report a nonexistent directory as missing-dir, never 0"
+fi
+
+for tap_case in "allow|${TAP_ALLOW}|0" "deny|${TAP_DENY}|2" "write|${TAP_WRITE}|0"; do
+    tap_name="${tap_case%%|*}"
+    tap_rest="${tap_case#*|}"
+    tap_json="${tap_rest%|*}"
+    tap_expect="${tap_rest##*|}"
+    echo "case: capture tap set to a valid directory writes exactly one line (${tap_name}), before the decision (#1212)"
+    TAP_DIR="${BASH_TEST_ROOT}/tap-set-${tap_name}"
+    mkdir -p "${TAP_DIR}"
+    chmod 700 "${TAP_DIR}"
+    run_check_capture "${APPLY_PATCH_DIR}" "${TAP_DIR}" "${tap_json}"
+    assert_exit "tap set, ${tap_name} call keeps its decision" "${tap_expect}"
+    if [[ "$(cap_lines "${TAP_DIR}")" == 1 ]]; then
+        pass
+    else
+        fail "tap set (${tap_name}): expected exactly one captured line, found $(cap_lines "${TAP_DIR}")"
+    fi
+    # Each call owns its file (mktemp, O_EXCL): a second call adds a second
+    # file rather than appending to the first.
+    run_check_capture "${APPLY_PATCH_DIR}" "${TAP_DIR}" "${tap_json}"
+    if [[ "$(cap_entries "${TAP_DIR}")" == 2 && "$(cap_lines "${TAP_DIR}")" == 2 ]]; then
+        pass
+    else
+        fail "tap set (${tap_name}): two calls must leave two per-call files of one line each, found $(cap_entries "${TAP_DIR}") entries / $(cap_lines "${TAP_DIR}") lines"
+    fi
+    rm -f "${TAP_DIR}"/check-sensitive-files.*
+    run_check_capture "${APPLY_PATCH_DIR}" "${TAP_DIR}" "${tap_json}"
+    # The line records both directories (payload cwd and hook cwd) and never
+    # the patch body.
+    TAP_CONTENT="$(find "${TAP_DIR}" -type f -exec cat {} +)"
+    if [[ "${TAP_CONTENT}" == *"${TAP_OTHER}"* && "${TAP_CONTENT}" == *"${APPLY_PATCH_DIR}"* ]]; then
+        pass
+    else
+        fail "tap set (${tap_name}): the captured line should carry the payload cwd (${TAP_OTHER}) and the hook cwd (${APPLY_PATCH_DIR}), got: ${TAP_CONTENT}"
+    fi
+    if [[ "${TAP_CONTENT}" == *"${TAP_SECRET}"* ]]; then
+        fail "tap set (${tap_name}): the captured line leaked the diff body"
+    else
+        pass
+    fi
+done
+
+echo "case: capture tap set to a symlinked, relative or missing directory writes nothing (#1212)"
+TAP_REAL="${BASH_TEST_ROOT}/tap-real"
+mkdir -p "${TAP_REAL}"
+ln -s "${TAP_REAL}" "${BASH_TEST_ROOT}/tap-link"
+run_check_capture "${APPLY_PATCH_DIR}" "${BASH_TEST_ROOT}/tap-link" "${TAP_ALLOW}"
+assert_exit "tap via symlinked directory keeps the decision" 0
+if [[ "$(cap_entries "${TAP_REAL}")" == 0 ]]; then
+    pass
+else
+    fail "tap via symlinked directory: the symlink target must stay empty, found $(cap_entries "${TAP_REAL}") entries"
+fi
+mkdir -p "${APPLY_PATCH_DIR}/tap-relative"
+run_check_capture "${APPLY_PATCH_DIR}" "tap-relative" "${TAP_ALLOW}"
+assert_exit "tap via relative directory keeps the decision" 0
+if [[ "$(cap_entries "${APPLY_PATCH_DIR}/tap-relative")" == 0 ]]; then
+    pass
+else
+    fail "tap via relative directory: expected no capture entries, found $(cap_entries "${APPLY_PATCH_DIR}/tap-relative")"
+fi
+run_check_capture "${APPLY_PATCH_DIR}" "${BASH_TEST_ROOT}/tap-missing" "${TAP_ALLOW}"
+assert_exit "tap via missing directory keeps the decision" 0
+if [[ -e "${BASH_TEST_ROOT}/tap-missing" ]]; then
+    fail "tap via missing directory: the hook must not create the directory"
+else
+    pass
+fi
+
+echo "case: capture tap set to a group/world-writable directory writes nothing (#1212)"
+for tap_mode in 770 707 777; do
+    TAP_WW="${BASH_TEST_ROOT}/tap-writable-${tap_mode}"
+    mkdir -p "${TAP_WW}"
+    chmod "${tap_mode}" "${TAP_WW}"
+    run_check_capture "${APPLY_PATCH_DIR}" "${TAP_WW}" "${TAP_ALLOW}"
+    assert_exit "tap via mode-${tap_mode} directory keeps the decision" 0
+    if [[ "$(cap_entries "${TAP_WW}")" == 0 ]]; then
+        pass
+    else
+        fail "tap via mode-${tap_mode} directory: expected no capture entries, found $(cap_entries "${TAP_WW}")"
+    fi
+done
+
+echo "case: capture tap never writes through a pre-planted symlink at the legacy shared file name (#1212)"
+TAP_PLANT="${BASH_TEST_ROOT}/tap-planted"
+TAP_VICTIM="${BASH_TEST_ROOT}/tap-victim.txt"
+mkdir -p "${TAP_PLANT}"
+chmod 700 "${TAP_PLANT}"
+printf 'untouched\n' > "${TAP_VICTIM}"
+ln -s "${TAP_VICTIM}" "${TAP_PLANT}/check-sensitive-files.log"
+run_check_capture "${APPLY_PATCH_DIR}" "${TAP_PLANT}" "${TAP_ALLOW}"
+assert_exit "tap with a planted symlink keeps the decision" 0
+if [[ "$(cat "${TAP_VICTIM}")" == untouched && "$(cap_entries "${TAP_PLANT}")" == 2 ]]; then
+    pass
+else
+    fail "tap with a planted symlink: the victim file must stay untouched and the call must get its own new file (victim: $(cat "${TAP_VICTIM}"), entries: $(cap_entries "${TAP_PLANT}"))"
+fi
+
+echo "case: the exit code and stderr are identical with and without the capture tap (#1212)"
+TAP_DIR="${BASH_TEST_ROOT}/tap-parity"
+mkdir -p "${TAP_DIR}"
+chmod 700 "${TAP_DIR}"
+for parity_json in "${TAP_ALLOW}" "${TAP_DENY}" "${TAP_WRITE}"; do
+    run_check_in_dir "${APPLY_PATCH_DIR}" "${parity_json}"
+    PARITY_EXIT="${CHECK_EXIT}"
+    PARITY_STDERR="${CHECK_STDERR}"
+    run_check_capture "${APPLY_PATCH_DIR}" "${TAP_DIR}" "${parity_json}"
+    if [[ "${CHECK_EXIT}" -eq "${PARITY_EXIT}" && "${CHECK_STDERR}" == "${PARITY_STDERR}" ]]; then
+        pass
+    else
+        fail "tap parity: exit ${CHECK_EXIT} vs ${PARITY_EXIT} without the tap; stderr differs: '${CHECK_STDERR}' vs '${PARITY_STDERR}'"
+    fi
+done
 
 # ── Summary ──────────────────────────────────────────────────────────
 echo
