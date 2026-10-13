@@ -1232,8 +1232,10 @@ cannot be read, it defers rather than guess.
 
 **Escalated tickets (ticket #826).** A ticket labeled `Input Needed` (the unattended
 planner's escalation label, applied by `cenci pipeline label <id> --transition
-input-needed`) is recorded separately and never touched again: no recovery is
-attempted, and it is never counted into the `Failed` list above. This is deliberate —
+input-needed`) is recorded separately and not crash-recovered: it is never retried,
+and it is never counted into the `Failed` list above. The only exceptions are the
+stray-`Working` cleanup and the plan-driven heal below, both narrow and plan-file-driven.
+This is deliberate —
 the escalating run stopped cleanly (it is not a stranded/crashed session), so treating
 it as a dispatch failure or retrying it would be wrong. The reconciler feeds the
 daemon a synthetic `escalated` entry (distinct status from `failed`), which the status
@@ -1242,9 +1244,22 @@ output counts into `StatusSummary.Escalated`, never `StatusSummary.Failed` or
 
 `Input Needed` is no longer only a reconciler no-op, though (ticket #827): it is also
 now a *dispatch* input. The reconciler's own handling above is unchanged — it still
-never touches an `Input Needed` ticket — but each dispatch pass separately probes it
+never crash-recovers an `Input Needed` ticket — but each dispatch pass separately probes it
 for a human answer and auto-resumes it once one arrives; see [Escalation
 auto-resume](#escalation-auto-resume) above.
+
+**Plan-driven heal (ticket #926).** A ready plan on disk with the wrong board labels is
+healed from the plan file rather than left stranded. Two shapes converge to `Planned`:
+a `Refined` ticket with neither `Planned` nor `Working` whose matched plan reads
+`status: planned` gets `+Planned`; an `Input Needed` ticket whose matched plan reads
+`status: planned` (a stale escalation left when the draft's promoting `mv` had in fact
+landed) gets `+Planned`, with `Working` and `Input Needed` removed. Both use the same
+never-act-blind guards as the failure path (verified plan inventory, readable daemon
+snapshot, complete open-PR probe, no live window, no open PR, elapsed `gracePeriod`),
+post a marked comment that never counts as a dispatch attempt, and do not consume
+`retryBudget`. A `Refined` + `Working` ticket keeps the budgeted failure path above, and an
+`Input Needed` ticket whose plan reads `awaiting-input` is untouched. See
+[`docs/dispatch-reconcile.md`](docs/dispatch-reconcile.md#plan-driven-heal-ticket-926).
 
 Run it two ways:
 

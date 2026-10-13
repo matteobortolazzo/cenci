@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -40,6 +41,17 @@ func workingInputs() ReconcileInputs {
 		Attempts:     map[string]int{},
 		Config:       reconcileConfig(),
 	}
+}
+
+// awaitingInputPlans is the realistic plan shape for an Input Needed ticket
+// (watch/docs/test-strategy.md rule 17): the unattended planner escalated, so
+// its draft on disk reads status: awaiting-input. workingInputs() carries a
+// status: planned plan, which for an Input Needed ticket is the contradictory
+// #926 shape the plan-driven heal converges -- the pre-#926 Input Needed
+// fixtures therefore swap to this plan so they keep pinning the unchanged
+// escalation behavior (zero recoveries, stray-Working cleanup).
+func awaitingInputPlans() []Plan {
+	return []Plan{{Repo: "o/r", Path: ".plans/42-x.md", TicketID: 42, Status: "awaiting-input"}}
 }
 
 func onlyRecovery(t *testing.T, res ReconcileResult) Recovery {
@@ -244,6 +256,7 @@ func hasEscalated(res ReconcileResult, repo string, number int) bool {
 func TestReconcileInputNeededTicket_EscalatedNeverFailed(t *testing.T) {
 	in := workingInputs()
 	in.Tickets = []Ticket{{Repo: "o/r", Number: 42, Labels: []string{"Input Needed"}}}
+	in.Plans = awaitingInputPlans() // realistic Input Needed shape; a planned plan would trip the #926 heal
 	res := Reconcile(in)
 
 	if len(res.Recoveries) != 0 {
@@ -508,6 +521,7 @@ func TestReconcileFailurePath_CompleteOpenPRProbe_StillProducesRecoveryRetry(t *
 func TestReconcileInputNeededAndWorking_NonCompleteOpenPRProbe_DefersAndPreservesObservation(t *testing.T) {
 	in := workingInputs()
 	in.Tickets = []Ticket{{Repo: "o/r", Number: 42, Labels: []string{"Input Needed", "Working"}, OpenPRProbe: OpenPRProbeUnreadable}}
+	in.Plans = awaitingInputPlans() // realistic Input Needed shape; a planned plan would trip the #926 heal
 	firstSeen := reconcileNow.Add(-10 * time.Minute)
 	in.Observations = map[string]time.Time{"o/r#42": firstSeen}
 
@@ -534,6 +548,7 @@ func TestReconcileInputNeededAndWorking_NonCompleteOpenPRProbe_DefersAndPreserve
 func TestReconcileInputNeededAndWorking_CompleteOpenPRProbe_StillProducesCleanupRecovery(t *testing.T) {
 	in := workingInputs()
 	in.Tickets = []Ticket{{Repo: "o/r", Number: 42, Labels: []string{"Input Needed", "Working"}, OpenPRProbe: OpenPRProbeComplete}}
+	in.Plans = awaitingInputPlans() // realistic Input Needed shape; a planned plan would trip the #926 heal
 	in.Observations = map[string]time.Time{"o/r#42": reconcileNow.Add(-10 * time.Minute)}
 
 	res := Reconcile(in)
@@ -624,6 +639,7 @@ func TestCommentHelpersEachCarryADistinctCenciMarker(t *testing.T) {
 		"failedComment":         failedComment(2, "42-x", "gone"),
 		"planInvalidComment":    planInvalidComment(),
 		"reconcileStuckComment": reconcileStuckComment(),
+		"planHealComment":       planHealComment(),
 	}
 
 	markers := make(map[string]string, len(bodies))
@@ -906,7 +922,7 @@ func TestReconcileCrashedPlanningPickup_RetryBudgetExhaustionStillEscalates(t *t
 func resumeAwaitingInputInputs() ReconcileInputs {
 	in := workingInputs()
 	in.Tickets = []Ticket{{Repo: "o/r", Number: 42, Labels: []string{"Working"}}}
-	in.Plans = []Plan{{Repo: "o/r", Path: ".plans/42-x.md", TicketID: 42, Status: "awaiting-input"}}
+	in.Plans = awaitingInputPlans()
 	return in
 }
 
@@ -1031,6 +1047,7 @@ func TestReconcileDeadWorkingAwaitingInputPlan_PartialInventoryDefers(t *testing
 func inputNeededAndWorkingInputs() ReconcileInputs {
 	in := workingInputs()
 	in.Tickets = []Ticket{{Repo: "o/r", Number: 42, Labels: []string{"Input Needed", "Working"}}}
+	in.Plans = awaitingInputPlans() // realistic Input Needed shape; a planned plan would trip the #926 heal
 	return in
 }
 
@@ -1149,22 +1166,23 @@ func TestResumeInterruptedComment_SharesAttemptMarkerButContentDistinctFromRetry
 	}
 }
 
-// TestCountAttempts_CountsResumeInterruptedComment is the direct
-// countAttempts-boundary regression for the shared-marker wiring (mirrors
-// TestCountAttemptsRegressionAgainstTheThreeNewMarkers's pattern, but
-// asserts the OPPOSITE: unlike failedMarker/planInvalidMarker/
-// reconcileStuckMarker, a resumeInterruptedComment MUST be counted, since it
-// consumes the same durable budget retryComment does.
-func TestCountAttempts_CountsResumeInterruptedComment(t *testing.T) {
+// installFakeGHComments installs a fake `gh` that answers with a
+// `{"comments":[{"body":...}]}` payload holding the given comment bodies. The
+// payload is written to a file and `cat`, rather than shell-quoted inline,
+// since comment bodies contain apostrophes (e.g. "ticket's") that would break a
+// single-quoted shell literal. It uses installFakeGHOnPath (not installFakeGH)
+// because the script shells out to the real `cat`, which installFakeGH's
+// wholesale PATH replacement would make unresolvable.
+func installFakeGHComments(t *testing.T, bodies ...string) {
+	t.Helper()
 	type payloadComment struct {
 		Body string `json:"body"`
 	}
 	payload := struct {
 		Comments []payloadComment `json:"comments"`
-	}{
-		Comments: []payloadComment{
-			{Body: resumeInterruptedComment(1, "42-x", "gone")},
-		},
+	}{}
+	for _, b := range bodies {
+		payload.Comments = append(payload.Comments, payloadComment{Body: b})
 	}
 	data, err := json.Marshal(payload)
 	if err != nil {
@@ -1175,6 +1193,16 @@ func TestCountAttempts_CountsResumeInterruptedComment(t *testing.T) {
 		t.Fatalf("writing fixture payload: %v", err)
 	}
 	installFakeGHOnPath(t, fmt.Sprintf("cat %q\n", fixture))
+}
+
+// TestCountAttempts_CountsResumeInterruptedComment is the direct
+// countAttempts-boundary regression for the shared-marker wiring (mirrors
+// TestCountAttemptsRegressionAgainstTheThreeNewMarkers's pattern, but
+// asserts the OPPOSITE: unlike failedMarker/planInvalidMarker/
+// reconcileStuckMarker, a resumeInterruptedComment MUST be counted, since it
+// consumes the same durable budget retryComment does.
+func TestCountAttempts_CountsResumeInterruptedComment(t *testing.T) {
+	installFakeGHComments(t, resumeInterruptedComment(1, "42-x", "gone"))
 
 	n, err := countAttempts("o/r", 42)
 	if err != nil {
@@ -1192,33 +1220,7 @@ func TestCountAttempts_CountsResumeInterruptedComment(t *testing.T) {
 // attemptMarker -- none of them must be misclassified as a dispatch-attempt
 // comment.
 func TestCountAttemptsRegressionAgainstTheThreeNewMarkers(t *testing.T) {
-	type payloadComment struct {
-		Body string `json:"body"`
-	}
-	payload := struct {
-		Comments []payloadComment `json:"comments"`
-	}{
-		Comments: []payloadComment{
-			{Body: failedComment(3, "42-x", "gone")},
-			{Body: planInvalidComment()},
-			{Body: reconcileStuckComment()},
-		},
-	}
-	data, err := json.Marshal(payload)
-	if err != nil {
-		t.Fatalf("marshaling fixture payload: %v", err)
-	}
-	// Written to a file and `cat`, rather than shell-quoted inline, since the
-	// comment bodies contain apostrophes (e.g. "ticket's") that would
-	// otherwise break a single-quoted shell literal.
-	fixture := filepath.Join(t.TempDir(), "comments.json")
-	if err := os.WriteFile(fixture, data, 0o644); err != nil {
-		t.Fatalf("writing fixture payload: %v", err)
-	}
-	// installFakeGHOnPath (not installFakeGH): the script below shells out to
-	// the real `cat`, which installFakeGH's wholesale PATH replacement would
-	// make unresolvable.
-	installFakeGHOnPath(t, fmt.Sprintf("cat %q\n", fixture))
+	installFakeGHComments(t, failedComment(3, "42-x", "gone"), planInvalidComment(), reconcileStuckComment())
 
 	n, err := countAttempts("o/r", 42)
 	if err != nil {
@@ -1243,5 +1245,542 @@ func TestCountAttempts_LargeGhOutputOnFailure_ErrorBounded(t *testing.T) {
 	}
 	if got := len(err.Error()); got > maxProbeLogDetailBytes+200 {
 		t.Fatalf("error string not bounded: got %d bytes (want roughly <= %d): %q", got, maxProbeLogDetailBytes, err.Error()[:200])
+	}
+}
+
+// -- #926: plan-driven heal ---------------------------------------------------
+//
+// Two plan-file-driven heals converge a ticket whose plan already reads
+// status: planned but whose board labels never caught up:
+//
+//	A. Refined, no Planned, no Working  -> +Planned
+//	B. Input Needed (stale escalation)  -> +Planned -Working -Input Needed
+//
+// Fixtures use realistic combined labels (watch/docs/test-strategy.md rule 17)
+// and seed an elapsed observation (a virgin ticket always defers on its first
+// pass, dispatch-reconcile.md rule 5) unless a case is about the first pass.
+// Guard tables assert the exact NextObservations value (rule 22).
+
+const planHealKey = "o/r#42"
+
+// planHealRefinedInputs is heal A's happy path: #42 carries Refined (plus an
+// unrelated "bug" label) but neither Planned nor Working, its matched plan
+// reads status: planned, its window is gone, no open PR, and grace elapsed.
+func planHealRefinedInputs() ReconcileInputs {
+	in := workingInputs() // planned plan, empty snapshot, observation 10m old
+	in.Tickets = []Ticket{{Repo: "o/r", Number: 42, Title: "Fix thing", Labels: []string{"bug", "Refined"}}}
+	return in
+}
+
+// planHealInputNeededInputs is heal B's happy path: #42 carries the given
+// labels (always including Input Needed) and a matched status: planned plan --
+// the contradictory shape an escalation restore leaves when the draft's
+// promoting `mv` had in fact landed.
+func planHealInputNeededInputs(labels ...string) ReconcileInputs {
+	in := workingInputs()
+	in.Tickets = []Ticket{{Repo: "o/r", Number: 42, Title: "Fix thing", Labels: labels}}
+	return in
+}
+
+// requirePlanHealRecovery asserts the exact shape both heals emit and returns
+// the recovery: a label-convergence RecoveryRetry (never a budgeted retry), the
+// plan-heal marker (never the attempt marker), no attempt increment, and no
+// leakage into Failed or a lingering grace observation.
+func requirePlanHealRecovery(t *testing.T, res ReconcileResult, wantRemove []string, wantDetailPrefix string) Recovery {
+	t.Helper()
+	rec := onlyRecovery(t, res)
+	if rec.Kind != RecoveryRetry {
+		t.Errorf("kind = %q, want %q", rec.Kind, RecoveryRetry)
+	}
+	if want := []string{labelPlanned}; !slices.Equal(rec.AddLabels, want) {
+		t.Errorf("AddLabels = %v, want exactly %v", rec.AddLabels, want)
+	}
+	if !slices.Equal(rec.RemoveLabels, wantRemove) {
+		t.Errorf("RemoveLabels = %v, want exactly %v", rec.RemoveLabels, wantRemove)
+	}
+	if rec.Attempt != 0 {
+		t.Errorf("Attempt = %d, want 0 (label convergence is not a retry of failed work)", rec.Attempt)
+	}
+	if !strings.Contains(rec.Comment, planHealMarker) {
+		t.Errorf("comment must carry %q, got %q", planHealMarker, rec.Comment)
+	}
+	if strings.Contains(rec.Comment, attemptMarker) {
+		t.Errorf("comment must never carry %q (countAttempts would tally the heal as a dispatch attempt), got %q", attemptMarker, rec.Comment)
+	}
+	if !strings.HasPrefix(rec.Detail, wantDetailPrefix) {
+		t.Errorf("Detail = %q, want prefix %q", rec.Detail, wantDetailPrefix)
+	}
+	if len(res.Failed) != 0 {
+		t.Errorf("a heal must never surface the ticket in Failed, got %+v", res.Failed)
+	}
+	if ts, ok := res.NextObservations[planHealKey]; ok {
+		t.Errorf("the grace observation must be cleared once the heal fires, got %v", ts)
+	}
+	return rec
+}
+
+// requireObservation asserts NextObservations holds exactly one entry for #42
+// equal to want.
+func requireObservation(t *testing.T, res ReconcileResult, want time.Time) {
+	t.Helper()
+	ts, ok := res.NextObservations[planHealKey]
+	if !ok || !ts.Equal(want) {
+		t.Errorf("NextObservations[%s] = %v (present=%v), want %v", planHealKey, ts, ok, want)
+	}
+	if len(res.NextObservations) != 1 {
+		t.Errorf("NextObservations = %v, want exactly the one %s entry", res.NextObservations, planHealKey)
+	}
+}
+
+// planHealGuardCase blocks exactly one guard signal of a plan heal. The two
+// heals share the signals but not the live-window/open-PR behavior: heal A
+// defers (keeps the pending observation) on every guard, heal B drops the
+// observation on those two, mirroring its stray-Working cleanup.
+type planHealGuardCase struct {
+	name                  string
+	seed                  time.Time
+	healBDropsObservation bool // heal B drops (rather than keeps) the seeded observation
+	mutate                func(in *ReconcileInputs)
+}
+
+func planHealGuardCases() []planHealGuardCase {
+	elapsed := reconcileNow.Add(-10 * time.Minute)
+	return []planHealGuardCase{
+		{"inventory unreadable", elapsed, false, func(in *ReconcileInputs) {
+			in.PlanInventories = map[string]PlanInventory{"o/r": PlanInventoryUnreadable}
+		}},
+		{"inventory partial", elapsed, false, func(in *ReconcileInputs) {
+			in.PlanInventories = map[string]PlanInventory{"o/r": PlanInventoryPartial}
+		}},
+		{"nil snapshot", elapsed, false, func(in *ReconcileInputs) { in.Snapshot = nil }},
+		{"open-PR probe unreadable", elapsed, false, func(in *ReconcileInputs) {
+			in.Tickets[0].OpenPRProbe = OpenPRProbeUnreadable
+		}},
+		{"live window", elapsed, true, func(in *ReconcileInputs) {
+			in.Snapshot = &watch.StateSnapshot{Windows: []watch.WindowState{{WindowName: "42-x", Status: "running"}}}
+		}},
+		{"open PR", elapsed, true, func(in *ReconcileInputs) { in.Tickets[0].HasOpenPR = true }},
+		{"grace not elapsed", reconcileNow.Add(-2 * time.Minute), false, func(in *ReconcileInputs) {}},
+	}
+}
+
+// requireNoObservation asserts no observation was recorded for #42.
+func requireNoObservation(t *testing.T, res ReconcileResult) {
+	t.Helper()
+	if ts, ok := res.NextObservations[planHealKey]; ok {
+		t.Errorf("expected no grace observation for %s, got %v", planHealKey, ts)
+	}
+}
+
+// -- heal A: Refined, no Planned, no Working ---------------------------------
+
+// TestReconcilePlanHeal_RefinedWithPlannedPlan_AddsPlanned covers AC "Refined,
+// without Planned and without Working, whose matched plan reads status:
+// planned, converges to Planned" and "-> +Planned, comment posted, no attempt
+// increment".
+func TestReconcilePlanHeal_RefinedWithPlannedPlan_AddsPlanned(t *testing.T) {
+	res := Reconcile(planHealRefinedInputs())
+
+	// wantRemove nil: heal A removes nothing (Working is provably absent).
+	rec := requirePlanHealRecovery(t, res, nil, "plan heal (Refined):")
+	if hasEscalated(res, "o/r", 42) {
+		t.Error("a Refined ticket must never be surfaced in Escalated")
+	}
+
+	// The two entry paths stay distinguishable in the reconcile report.
+	ordinary := onlyRecovery(t, Reconcile(workingInputs()))
+	if rec.Detail == ordinary.Detail {
+		t.Errorf("heal A Detail %q must differ from the ordinary retry's %q", rec.Detail, ordinary.Detail)
+	}
+}
+
+// TestReconcilePlanHeal_Refined_FirstPassOnlyStartsGraceThenHeals pins
+// dispatch-reconcile.md rule 5 for heal A: a virgin ticket records exactly
+// NextObservations[key] == Now on its first pass, and a later pass past grace
+// (fed pass 1's observations) heals it.
+func TestReconcilePlanHeal_Refined_FirstPassOnlyStartsGraceThenHeals(t *testing.T) {
+	in := planHealRefinedInputs()
+	in.Observations = map[string]time.Time{}
+
+	pass1 := Reconcile(in)
+	if len(pass1.Recoveries) != 0 {
+		t.Fatalf("a virgin ticket must defer on its first pass, got %+v", pass1.Recoveries)
+	}
+	requireObservation(t, pass1, reconcileNow)
+
+	in.Now = reconcileNow.Add(6 * time.Minute) // past the 5m grace
+	in.Observations = pass1.NextObservations
+	requirePlanHealRecovery(t, Reconcile(in), nil, "plan heal (Refined):")
+}
+
+// TestReconcilePlanHeal_Refined_GuardsDeferAndPreserveObservation covers the
+// AC "each guard independently defers the no-Working heal -- unverified
+// inventory, nil snapshot, incomplete open-PR probe, live window, open PR,
+// grace not elapsed -- and the pending grace observation survives into
+// NextObservations in every deferring case". Every case blocks exactly one
+// signal; the prior observation must come out byte-identical.
+func TestReconcilePlanHeal_Refined_GuardsDeferAndPreservesObservation(t *testing.T) {
+	for _, c := range planHealGuardCases() {
+		t.Run(c.name, func(t *testing.T) {
+			in := planHealRefinedInputs()
+			c.mutate(&in)
+			in.Observations = map[string]time.Time{planHealKey: c.seed}
+
+			res := Reconcile(in)
+
+			if len(res.Recoveries) != 0 {
+				t.Fatalf("a guarded heal must produce no recovery, got %+v", res.Recoveries)
+			}
+			requireObservation(t, res, c.seed)
+			if len(res.Failed) != 0 {
+				t.Errorf("a deferred heal must never surface Failed, got %+v", res.Failed)
+			}
+		})
+	}
+}
+
+// TestReconcilePlanHeal_Refined_ConvergesAfterHeal pins convergence: once the
+// heal's +Planned has landed, the ticket (Refined + Planned, plan present) is
+// excluded from the heal's own predicate -- no recovery, no observation -- so
+// the budget-free heal cannot loop.
+func TestReconcilePlanHeal_Refined_ConvergesAfterHeal(t *testing.T) {
+	in := planHealRefinedInputs()
+	in.Tickets[0].Labels = []string{"bug", "Refined", "Planned"}
+	res := Reconcile(in)
+
+	if len(res.Recoveries) != 0 {
+		t.Fatalf("a healed ticket must not match the heal again, got %+v", res.Recoveries)
+	}
+	requireNoObservation(t, res)
+}
+
+// -- heal A: Working shapes keep the budgeted failure path -------------------
+
+// TestReconcilePlanHeal_RefinedWorking_PlannedPlan_KeepsBudgetedRetry covers
+// the AC pinning that the heal did not claim a Working ticket: the ordinary
+// +Planned -Working RecoveryRetry with retryComment and an incremented attempt.
+func TestReconcilePlanHeal_RefinedWorking_PlannedPlan_KeepsBudgetedRetry(t *testing.T) {
+	in := workingInputs()
+	in.Tickets = []Ticket{{Repo: "o/r", Number: 42, Labels: []string{"Refined", "Working"}}}
+	in.Attempts = map[string]int{planHealKey: 0}
+	res := Reconcile(in)
+
+	rec := onlyRecovery(t, res)
+	if rec.Kind != RecoveryRetry {
+		t.Errorf("kind = %q, want %q", rec.Kind, RecoveryRetry)
+	}
+	if want := []string{labelPlanned}; !slices.Equal(rec.AddLabels, want) {
+		t.Errorf("AddLabels = %v, want exactly %v", rec.AddLabels, want)
+	}
+	if want := []string{labelWorking}; !slices.Equal(rec.RemoveLabels, want) {
+		t.Errorf("RemoveLabels = %v, want exactly %v", rec.RemoveLabels, want)
+	}
+	if rec.Attempt != 1 {
+		t.Errorf("Attempt = %d, want 1 (the budgeted path increments)", rec.Attempt)
+	}
+	if !strings.Contains(rec.Comment, attemptMarker) || strings.Contains(rec.Comment, planHealMarker) {
+		t.Errorf("a Working ticket must keep retryComment (attemptMarker, not planHealMarker), got %q", rec.Comment)
+	}
+	if strings.HasPrefix(rec.Detail, "plan heal") {
+		t.Errorf("Detail = %q: the heal must not claim a Working ticket", rec.Detail)
+	}
+}
+
+// TestReconcilePlanHeal_RefinedWorking_AttemptsUnknownDefers proves the
+// budgeted path still owns the shape: an unreadable attempt count defers with
+// the observation kept, exactly as before.
+func TestReconcilePlanHeal_RefinedWorking_AttemptsUnknownDefers(t *testing.T) {
+	in := workingInputs()
+	in.Tickets = []Ticket{{Repo: "o/r", Number: 42, Labels: []string{"Refined", "Working"}}}
+	in.AttemptsUnknown = map[string]bool{planHealKey: true}
+	res := Reconcile(in)
+
+	if len(res.Recoveries) != 0 {
+		t.Fatalf("unknown attempt count must defer, got %+v", res.Recoveries)
+	}
+	requireObservation(t, res, reconcileNow.Add(-10*time.Minute))
+}
+
+// TestReconcilePlanHeal_RefinedWorking_BudgetExhaustedStillFails pins that
+// terminal escalation survives: attempts >= RetryBudget yields RecoveryFailed
+// (+dispatch-failed -Working) and the ticket lands in Failed.
+func TestReconcilePlanHeal_RefinedWorking_BudgetExhaustedStillFails(t *testing.T) {
+	in := workingInputs()
+	in.Tickets = []Ticket{{Repo: "o/r", Number: 42, Labels: []string{"Refined", "Working"}}}
+	in.Attempts = map[string]int{planHealKey: 2} // == RetryBudget
+	res := Reconcile(in)
+
+	rec := onlyRecovery(t, res)
+	if rec.Kind != RecoveryFailed {
+		t.Errorf("kind = %q, want %q", rec.Kind, RecoveryFailed)
+	}
+	if want := []string{labelDispatchFailed}; !slices.Equal(rec.AddLabels, want) {
+		t.Errorf("AddLabels = %v, want exactly %v", rec.AddLabels, want)
+	}
+	if want := []string{labelWorking}; !slices.Equal(rec.RemoveLabels, want) {
+		t.Errorf("RemoveLabels = %v, want exactly %v", rec.RemoveLabels, want)
+	}
+	if !hasFailed(res, "o/r", 42) {
+		t.Error("a budget-exhausted ticket must appear in Failed")
+	}
+}
+
+// TestReconcilePlanHeal_StrandedByNilAddLabelsRetry_HealsOncePlanBecomesVisible
+// is the regression for the self-inflicted stranding: pass 1 recovers a
+// Refined+Working ticket whose plan is verified absent with AddLabels nil
+// (dropping only Working, leaving bare Refined); pass 2 sees the plan appear
+// and starts the grace clock; pass 3, past grace, heals to +Planned. Before
+// #926 the ticket sat at bare Refined forever.
+func TestReconcilePlanHeal_StrandedByNilAddLabelsRetry_HealsOncePlanBecomesVisible(t *testing.T) {
+	in := workingInputs()
+	in.Tickets = []Ticket{{Repo: "o/r", Number: 42, Labels: []string{"Refined", "Working"}}}
+	in.Plans = nil
+	in.Attempts = map[string]int{planHealKey: 0}
+
+	pass1 := Reconcile(in)
+	rec := onlyRecovery(t, pass1)
+	if rec.Kind != RecoveryRetry || len(rec.AddLabels) != 0 {
+		t.Fatalf("pass 1 must be the stage-aware retry with nil AddLabels, got %+v", rec)
+	}
+	if want := []string{labelWorking}; !slices.Equal(rec.RemoveLabels, want) {
+		t.Fatalf("pass 1 RemoveLabels = %v, want %v", rec.RemoveLabels, want)
+	}
+
+	// Pass 2: Working removed, the plan file is now visible; the heal starts
+	// its own grace clock rather than acting on first sight.
+	pass2Now := reconcileNow.Add(time.Minute)
+	in2 := workingInputs()
+	in2.Tickets = []Ticket{{Repo: "o/r", Number: 42, Labels: []string{"Refined"}}}
+	in2.Now = pass2Now
+	in2.Observations = pass1.NextObservations
+	pass2 := Reconcile(in2)
+	if len(pass2.Recoveries) != 0 {
+		t.Fatalf("pass 2 must only start the grace clock, got %+v", pass2.Recoveries)
+	}
+	requireObservation(t, pass2, pass2Now)
+
+	// Pass 3: past grace, the plan still reads planned -> +Planned.
+	in3 := in2
+	in3.Now = pass2Now.Add(6 * time.Minute)
+	in3.Observations = pass2.NextObservations
+	requirePlanHealRecovery(t, Reconcile(in3), nil, "plan heal (Refined):")
+}
+
+// -- heal A: left alone ------------------------------------------------------
+
+// TestReconcilePlanHeal_Refined_PlanNotPlannedLeftAlone covers the AC "a ticket
+// whose matched plan is neither planned nor awaiting-input is left alone" (the
+// normal human-in-loop state): no recovery, and no grace observation recorded.
+func TestReconcilePlanHeal_Refined_PlanNotPlannedLeftAlone(t *testing.T) {
+	in := planHealRefinedInputs()
+	in.Plans = []Plan{{Repo: "o/r", Path: ".plans/42-x.md", TicketID: 42, Status: "draft"}}
+	res := Reconcile(in)
+
+	if len(res.Recoveries) != 0 {
+		t.Fatalf("a draft plan must be left alone, got %+v", res.Recoveries)
+	}
+	requireNoObservation(t, res)
+}
+
+// TestReconcilePlanHeal_NoRefinedLabelLeftAlone covers the AC "a ticket without
+// Refined whose matched plan reads status: planned is left alone": the heal
+// never overrides a human who parked a ticket by removing board-state labels.
+func TestReconcilePlanHeal_NoRefinedLabelLeftAlone(t *testing.T) {
+	for _, labels := range [][]string{{}, {"bug"}} {
+		t.Run(fmt.Sprintf("labels=%v", labels), func(t *testing.T) {
+			in := planHealRefinedInputs()
+			in.Tickets[0].Labels = labels
+			res := Reconcile(in)
+
+			if len(res.Recoveries) != 0 {
+				t.Fatalf("a ticket without Refined must be left alone, got %+v", res.Recoveries)
+			}
+			requireNoObservation(t, res)
+		})
+	}
+}
+
+// TestReconcilePlanHeal_TerminalLabelsLeftAlone covers the AC "a ticket
+// carrying dispatch-failed, plan-invalid, or reconcile-stuck plus a matched
+// status: planned plan is left alone": the terminal short-circuit still wins
+// (ticket surfaced in Failed, never healed), including ahead of heal B's
+// Input Needed branch.
+func TestReconcilePlanHeal_TerminalLabelsLeftAlone(t *testing.T) {
+	cases := [][]string{
+		{"Refined", labelDispatchFailed},
+		{"Refined", labelPlanInvalid},
+		{"Refined", labelReconcileStuck},
+		{"Refined", "Input Needed", labelDispatchFailed},
+	}
+	for _, labels := range cases {
+		t.Run(fmt.Sprintf("labels=%v", labels), func(t *testing.T) {
+			in := planHealRefinedInputs()
+			in.Tickets[0].Labels = labels
+			res := Reconcile(in)
+
+			if len(res.Recoveries) != 0 {
+				t.Fatalf("a terminal ticket must not be healed, got %+v", res.Recoveries)
+			}
+			if !hasFailed(res, "o/r", 42) {
+				t.Error("a terminal ticket must stay surfaced in Failed")
+			}
+			if hasEscalated(res, "o/r", 42) {
+				t.Error("a terminal ticket must not be re-classified as Escalated")
+			}
+		})
+	}
+}
+
+// -- heal B: Input Needed with a planned plan --------------------------------
+
+// TestReconcilePlanHeal_InputNeededWithPlannedPlan_HealsAndStaysEscalated
+// covers the AC "Refined + Input Needed + matched status: planned plan ->
+// +Planned -Working -Input Needed; ticket still present in result.Escalated".
+func TestReconcilePlanHeal_InputNeededWithPlannedPlan_HealsAndStaysEscalated(t *testing.T) {
+	res := Reconcile(planHealInputNeededInputs("Refined", "Input Needed"))
+
+	requirePlanHealRecovery(t, res, []string{labelWorking, labelInputNeeded}, "plan heal (Input Needed):")
+	if !hasEscalated(res, "o/r", 42) {
+		t.Error("an Input Needed ticket must be appended to Escalated on every pass, including the pass the heal fires")
+	}
+}
+
+// TestReconcilePlanHeal_InputNeededWorkingWithPlannedPlan_HealSupersedesStrayWorkingCleanup
+// covers the AC "Refined + Input Needed + Working + planned plan -> the heal
+// fires (not the stray-Working cleanup)".
+func TestReconcilePlanHeal_InputNeededWorkingWithPlannedPlan_HealSupersedesStrayWorkingCleanup(t *testing.T) {
+	res := Reconcile(planHealInputNeededInputs("Refined", "Input Needed", "Working"))
+
+	rec := requirePlanHealRecovery(t, res, []string{labelWorking, labelInputNeeded}, "plan heal (Input Needed):")
+	if rec.Kind == RecoveryResumeInterrupted {
+		t.Error("the plan heal must supersede the stray-Working cleanup, not yield RecoveryResumeInterrupted")
+	}
+	if !hasEscalated(res, "o/r", 42) {
+		t.Error("an Input Needed ticket must still be appended to Escalated")
+	}
+}
+
+// TestReconcilePlanHeal_InputNeededWithoutRefinedStillHeals pins the ticket's
+// assumption that heal B carries no Refined requirement: its predicate is
+// Input Needed + a matched status: planned plan only.
+func TestReconcilePlanHeal_InputNeededWithoutRefinedStillHeals(t *testing.T) {
+	res := Reconcile(planHealInputNeededInputs("Input Needed"))
+
+	requirePlanHealRecovery(t, res, []string{labelWorking, labelInputNeeded}, "plan heal (Input Needed):")
+}
+
+// TestReconcilePlanHeal_InputNeeded_FirstPassOnlyStartsGraceThenHeals is heal
+// B's rule-5 twin: a virgin Input Needed ticket records exactly Now on its
+// first pass (still Escalated), and a later pass past grace heals it.
+func TestReconcilePlanHeal_InputNeeded_FirstPassOnlyStartsGraceThenHeals(t *testing.T) {
+	in := planHealInputNeededInputs("Refined", "Input Needed")
+	in.Observations = map[string]time.Time{}
+
+	pass1 := Reconcile(in)
+	if len(pass1.Recoveries) != 0 {
+		t.Fatalf("a virgin ticket must defer on its first pass, got %+v", pass1.Recoveries)
+	}
+	if !hasEscalated(pass1, "o/r", 42) {
+		t.Error("the ticket must be Escalated on the deferring pass")
+	}
+	requireObservation(t, pass1, reconcileNow)
+
+	in.Now = reconcileNow.Add(6 * time.Minute)
+	in.Observations = pass1.NextObservations
+	requirePlanHealRecovery(t, Reconcile(in), []string{labelWorking, labelInputNeeded}, "plan heal (Input Needed):")
+}
+
+// TestReconcilePlanHeal_InputNeededAwaitingInput_UnchangedEscalation covers the
+// AC "Input Needed whose matched plan reads awaiting-input is unchanged": with
+// no Working, zero recoveries and no observation; with a stray Working, today's
+// cleanup (RecoveryResumeInterrupted, remove only Working) -- never the heal.
+func TestReconcilePlanHeal_InputNeededAwaitingInput_UnchangedEscalation(t *testing.T) {
+	t.Run("without Working", func(t *testing.T) {
+		in := planHealInputNeededInputs("Refined", "Input Needed")
+		in.Plans = awaitingInputPlans()
+		res := Reconcile(in)
+
+		if len(res.Recoveries) != 0 {
+			t.Fatalf("an awaiting-input escalation must not be touched, got %+v", res.Recoveries)
+		}
+		if !hasEscalated(res, "o/r", 42) {
+			t.Error("the ticket must be Escalated")
+		}
+		requireNoObservation(t, res)
+	})
+	t.Run("with stray Working", func(t *testing.T) {
+		in := planHealInputNeededInputs("Refined", "Input Needed", "Working")
+		in.Plans = awaitingInputPlans()
+		res := Reconcile(in)
+
+		rec := onlyRecovery(t, res)
+		if rec.Kind != RecoveryResumeInterrupted {
+			t.Errorf("kind = %q, want %q (today's stray-Working cleanup)", rec.Kind, RecoveryResumeInterrupted)
+		}
+		if len(rec.AddLabels) != 0 {
+			t.Errorf("AddLabels = %v, want none (cleanup, not a restore)", rec.AddLabels)
+		}
+		if want := []string{labelWorking}; !slices.Equal(rec.RemoveLabels, want) {
+			t.Errorf("RemoveLabels = %v, want exactly %v", rec.RemoveLabels, want)
+		}
+		if strings.Contains(rec.Comment, planHealMarker) {
+			t.Errorf("the stray-Working cleanup must not carry the plan-heal marker, got %q", rec.Comment)
+		}
+		if !hasEscalated(res, "o/r", 42) {
+			t.Error("the ticket must be Escalated")
+		}
+	})
+}
+
+// TestReconcilePlanHeal_InputNeeded_GuardsDeferAndStayEscalated covers the AC
+// "each guard independently defers the Input Needed heal, with the ticket still
+// recorded in result.Escalated on the deferred pass", including the inline
+// inventory check -- reachable here with a matched plan under a Partial
+// inventory because this branch runs upstream of the top-level hold. The
+// deferObservation guards keep the seeded observation; the live-window and
+// open-PR guards mirror the branch's stray-Working cleanup and drop it.
+func TestReconcilePlanHeal_InputNeeded_GuardsDeferAndStayEscalated(t *testing.T) {
+	for _, c := range planHealGuardCases() {
+		t.Run(c.name, func(t *testing.T) {
+			in := planHealInputNeededInputs("Refined", "Input Needed")
+			c.mutate(&in)
+			in.Observations = map[string]time.Time{planHealKey: c.seed}
+
+			res := Reconcile(in)
+
+			if len(res.Recoveries) != 0 {
+				t.Fatalf("a guarded heal must produce no recovery, got %+v", res.Recoveries)
+			}
+			if !hasEscalated(res, "o/r", 42) {
+				t.Error("the ticket must still be recorded in Escalated on a deferred pass")
+			}
+			if hasFailed(res, "o/r", 42) {
+				t.Error("an escalated ticket must never leak into Failed")
+			}
+			if c.healBDropsObservation {
+				requireNoObservation(t, res)
+			} else {
+				requireObservation(t, res, c.seed)
+			}
+		})
+	}
+}
+
+// -- plan-heal comment marker ------------------------------------------------
+
+// TestCountAttempts_DoesNotCountPlanHealComment is the gh-boundary regression
+// for the marker rule: countAttempts must return 0 for a thread whose only
+// cenci comment is a plan-heal comment, so a heal never consumes the durable
+// RetryBudget. Justified unit-level test: the tally happens behind the gh
+// boundary and cannot be observed through Reconcile.
+func TestCountAttempts_DoesNotCountPlanHealComment(t *testing.T) {
+	installFakeGHComments(t, planHealComment())
+
+	n, err := countAttempts("o/r", 42)
+	if err != nil {
+		t.Fatalf("countAttempts returned unexpected error: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("countAttempts = %d, want 0 (planHealMarker is distinct from attemptMarker)", n)
 	}
 }
