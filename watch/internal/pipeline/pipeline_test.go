@@ -18,6 +18,7 @@ package pipeline
 import (
 	"errors"
 	"path/filepath"
+	"slices"
 	"testing"
 )
 
@@ -333,5 +334,71 @@ func TestRun_PlanApproveFromPreparedNoPlanFile_StillHardFailsNoWarnings(t *testi
 	}
 	if out.State != string(StagePrepared) {
 		t.Errorf("Output.State = %q, want unchanged %q", out.State, StagePrepared)
+	}
+}
+
+// -- ticket #925: the plan-then-label call order the unattended planning paths
+// issue -----------------------------------------------------------------------
+
+// TestPlanningSequence_UnattendedPaths_PreparedThenPlanThenTrivialPlannedLabel
+// pins the one CLI sequence that flow's Trivial Fast Path and Lean Approval
+// Path (phases/phase-1-plan.md) both issue, byte-identically, after
+// Pre-flight's prepare + working label leave the ticket at `prepared`:
+// `cenci pipeline plan <id>`, then `cenci pipeline label <id> --transition
+// planned --trivial`. One test covers both paths because they cannot be told
+// apart at the CLI. `plan` must come first -- the `planned` label gate needs
+// the persisted stage at or past waiting_for_plan_approval -- and it makes no
+// gh call, so the label call stays the last call that touches the ticket and
+// its post-edit updatedAt remains the plan-freshness baseline. The `--trivial`
+// label call adds Planned and retains Working (the session continues into
+// Phase 2 instead of stopping), asserted on both the recorded gh edit calls and
+// the returned State.Labels.
+//
+// This is a characterization pin: the CLI is unchanged by #925 (only the
+// documented call order in phase-1-plan.md was wrong), so it passes on first
+// run. The inverted order is already covered by labels_test.go's
+// TestApplyLabelTransition_Planned_WrongStage_ReturnsErrWrongStageForLabel.
+func TestPlanningSequence_UnattendedPaths_PreparedThenPlanThenTrivialPlannedLabel(t *testing.T) {
+	stateDir := t.TempDir()
+	mustSeedStateWithLabels(t, stateDir, "42", StagePrepared, []string{"Refined", "Working"})
+	gh := newFakeGh(t, "octocat", []string{"octocat"})
+	gh.install()
+
+	out, err := Run(Opts{Stage: "plan", ID: "42", StateDir: stateDir})
+	if err != nil {
+		t.Fatalf("Run(plan) from prepared: unexpected error: %v", err)
+	}
+	if len(out.Errors) != 0 {
+		t.Errorf("Output.Errors = %v, want none", out.Errors)
+	}
+	if out.State != string(StageWaitingForPlanApproval) {
+		t.Errorf("Output.State = %q, want %q", out.State, StageWaitingForPlanApproval)
+	}
+	if len(gh.calls) != 0 {
+		t.Errorf("plan made %d gh call(s) %v, want none: the label call must stay the last ticket-editing call", len(gh.calls), gh.calls)
+	}
+
+	s, err := ApplyLabelTransition(LabelOpts{ID: "42", StateDir: stateDir, RepoSlug: "o/r", Transition: "planned", Trivial: true})
+	if err != nil {
+		t.Fatalf("ApplyLabelTransition(planned, trivial) after plan: unexpected error: %v", err)
+	}
+
+	plannedAdded := false
+	for _, c := range gh.callsMatching("issue", "edit") {
+		if c.hasFlag("--add-label", "Planned") {
+			plannedAdded = true
+		}
+		if slices.Contains(c.flagValues("--remove-label"), "Working") {
+			t.Errorf("--trivial planned transition must retain Working, but a gh issue edit removed it: %v", c)
+		}
+	}
+	if !plannedAdded {
+		t.Error("expected a `gh issue edit --add-label Planned` call")
+	}
+	if !slices.Contains(s.Labels, "Planned") {
+		t.Errorf("returned Labels = %v, want it to contain %q", s.Labels, "Planned")
+	}
+	if !slices.Contains(s.Labels, "Working") {
+		t.Errorf("returned Labels = %v, want %q retained", s.Labels, "Working")
 	}
 }
