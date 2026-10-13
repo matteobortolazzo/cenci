@@ -61,11 +61,18 @@ const (
 	reconcileStuckMarker = cenciMarkerPrefix + "reconcile-stuck -->"
 )
 
+// planHealMarker (#926) is stamped on the comment both plan-driven heals post.
+// It is deliberately distinct from attemptMarker, so countAttempts never
+// tallies a heal as a dispatch attempt: a heal is label convergence toward a
+// plan file that already reads status: planned, not a retry of failed work, and
+// must never consume the durable RetryBudget.
+const planHealMarker = cenciMarkerPrefix + "plan-heal -->"
+
 // RecoveryKind is the class of leak a Recovery addresses.
 type RecoveryKind string
 
 const (
-	RecoveryRetry       RecoveryKind = "retry"        // Working→Planned, re-enters the dispatch queue
+	RecoveryRetry       RecoveryKind = "retry"        // Working→Planned (or the #926 plan heals: +Planned), re-enters the dispatch queue
 	RecoveryFailed      RecoveryKind = "failed"       // Working→dispatch-failed, surfaced for a human
 	RecoveryPlanInvalid RecoveryKind = "plan-invalid" // Planned with no parseable plan file
 	RecoveryOrphanPlan  RecoveryKind = "orphan-plan"  // plan file whose ticket is not open (report only)
@@ -133,11 +140,13 @@ type ReconcileInputs struct {
 	// proven this pass -- preserving the grace clock -- before it can ever
 	// reach a plan-dependent recovery decision (the inverse-leak
 	// plan-invalid escalation, the interrupted-resume restore, the
-	// stage-aware AddLabels-nil branch, and the ordinary +Planned retry
-	// alike). Those individual branches keep their own inline
-	// PlanInventoryVerified checks as defense-in-depth, but are no longer
-	// the only thing standing between an unproven directory read and a
-	// durable GitHub mutation.
+	// stage-aware AddLabels-nil branch, the ordinary +Planned retry, and
+	// the Refined plan heal A alike). Those individual branches keep their
+	// own inline PlanInventoryVerified checks as defense-in-depth, but are
+	// no longer the only thing standing between an unproven directory read
+	// and a durable GitHub mutation. The one exception is the Input Needed
+	// plan heal B (#926): its branch runs upstream of the top-level hold,
+	// so its inline check is the only inventory gate that ticket gets.
 	PlanInventories map[string]PlanInventory
 }
 
@@ -203,9 +212,74 @@ func Reconcile(in ReconcileInputs) ReconcileResult {
 		// human a question. Its window is gone by design (the escalating run
 		// exited, not crashed), so it must never enter crash-recovery -- record
 		// it and move on, distinct from every leak state above (never Failed)
-		// and never reconciled (no Recovery, no grace observation).
+		// and never crash-recovered. It is reconciled only in two narrow,
+		// plan-file-driven ways, each below: the plan heal (#926) when the
+		// matched plan already reads status: planned, and the stray-Working
+		// cleanup (#853) otherwise. An awaiting-input plan, or no matched plan,
+		// produces no Recovery and no grace observation.
 		if hasLabel(t.Labels, labelInputNeeded) {
 			res.Escalated = append(res.Escalated, t)
+
+			// Plan heal B (#926): an Input Needed ticket whose matched plan
+			// already reads status: planned is a stale escalation -- the
+			// escalation restore (flow phase-1 "Resume From Draft" step 6) can
+			// record Input Needed after the draft's promoting `mv` had in fact
+			// landed, leaving the board at Input Needed while the plan is
+			// ready. Decide would skip it forever (the draft is not
+			// awaiting-input), so converge it: +Planned, and drop both Working
+			// and Input Needed, whether or not Working is present.
+			//
+			// This is evaluated BEFORE the stray-Working cleanup below and
+			// supersedes it when the predicate holds: that cleanup would only
+			// remove Working and leave the ticket stranded at Input Needed, and
+			// this branch never reaches the budgeted failure path, so there is
+			// no other recovery for it. The ticket stays in Escalated on every
+			// pass, whether the heal fires or a guard defers it. An
+			// awaiting-input plan or no matched plan falls through to the
+			// stray-Working cleanup untouched, and records no observation.
+			//
+			// This branch runs upstream of the top-level plan-inventory hold,
+			// so it carries its own inventory check: a matched plan under an
+			// unverified inventory (reachable here, unlike in the later
+			// branches) must never drive a durable label mutation.
+			//
+			// The guards mirror the stray-Working cleanup's: a live window or
+			// open PR drops the observation (plain continue); every blind or
+			// unverified signal defers it (deferObservation).
+			if p := planByTicket[key]; p != nil && p.Status == "planned" {
+				if in.PlanInventories[t.Repo] != PlanInventoryVerified {
+					deferObservation(in.Observations, res.NextObservations, key)
+					continue
+				}
+				if in.Snapshot == nil {
+					deferObservation(in.Observations, res.NextObservations, key)
+					continue
+				}
+				if t.OpenPRProbe != OpenPRProbeComplete {
+					deferObservation(in.Observations, res.NextObservations, key)
+					continue
+				}
+				if hasLiveWindow(t.Number, in.Snapshot) || t.HasOpenPR {
+					continue
+				}
+				firstSeen, ok := in.Observations[key]
+				if !ok {
+					firstSeen = in.Now
+				}
+				if in.Now.Sub(firstSeen) < in.Config.GracePeriod {
+					res.NextObservations[key] = firstSeen
+					continue
+				}
+				res.Recoveries = append(res.Recoveries, Recovery{
+					Ticket:       t,
+					Kind:         RecoveryRetry,
+					AddLabels:    []string{labelPlanned},
+					RemoveLabels: []string{labelWorking, labelInputNeeded},
+					Comment:      planHealComment(),
+					Detail:       "plan heal (Input Needed): plan already reads status: planned; applying Planned and clearing the stale escalation",
+				})
+				continue
+			}
 
 			// Crash-after-partial-label-mutation cleanup (#853 AC3): a
 			// ticket carrying BOTH Input Needed and Working is the
@@ -359,6 +433,71 @@ func Reconcile(in ReconcileInputs) ReconcileResult {
 			})
 			res.Failed = append(res.Failed, t)
 			continue
+		}
+
+		// Plan heal A (#926): a Refined ticket carrying neither Planned nor
+		// Working whose matched plan already reads status: planned never got its
+		// Planned label (a plan that became visible after the stage-aware retry
+		// below dropped only Working, a late write, a plan under a path the
+		// collector had not scanned yet). Decide skips it as "not Planned" and
+		// nothing else claims it, so converge it: +Planned.
+		//
+		// Disjoint by construction from its neighbors: the inverse-leak branch
+		// above requires Planned (absent here), and the failure path below
+		// requires Working (absent here), so a ticket matches at most one of the
+		// three. A Refined+Working ticket therefore keeps the budgeted failure
+		// path verbatim -- its AttemptsUnknown deferral, attempt tally, and
+		// RecoveryFailed terminal.
+		//
+		// Budget-free: this is label convergence toward a plan that is already
+		// ready, not a retry of failed work, so it posts planHealComment (never
+		// attemptMarker) and leaves Attempt at zero. It cannot loop: once
+		// +Planned lands the ticket carries Planned and no longer matches, and a
+		// later crash lands in the budgeted failure path, which still terminates
+		// at dispatch-failed.
+		//
+		// Every deferring guard -- including the live-window and open-PR ones,
+		// unlike heal B -- keeps the pending grace observation via
+		// deferObservation, in the same order the failure path applies them.
+		// The inventory check is defense-in-depth: the top-level hold above
+		// already defers every ticket in a repo whose inventory is unverified.
+		// A predicate miss (any other plan status, no matched plan) falls through
+		// to the Working gate below and records no observation.
+		if hasLabel(t.Labels, labelRefined) && !hasLabel(t.Labels, labelPlanned) && !hasLabel(t.Labels, labelWorking) {
+			if p := planByTicket[key]; p != nil && p.Status == "planned" {
+				if in.PlanInventories[t.Repo] != PlanInventoryVerified {
+					deferObservation(in.Observations, res.NextObservations, key)
+					continue
+				}
+				if in.Snapshot == nil {
+					deferObservation(in.Observations, res.NextObservations, key)
+					continue
+				}
+				if t.OpenPRProbe != OpenPRProbeComplete {
+					deferObservation(in.Observations, res.NextObservations, key)
+					continue
+				}
+				if hasLiveWindow(t.Number, in.Snapshot) || t.HasOpenPR {
+					deferObservation(in.Observations, res.NextObservations, key)
+					continue
+				}
+				firstSeen, ok := in.Observations[key]
+				if !ok {
+					firstSeen = in.Now
+				}
+				if in.Now.Sub(firstSeen) < in.Config.GracePeriod {
+					res.NextObservations[key] = firstSeen
+					continue
+				}
+				res.Recoveries = append(res.Recoveries, Recovery{
+					Ticket:    t,
+					Kind:      RecoveryRetry,
+					AddLabels: []string{labelPlanned},
+					Comment:   planHealComment(),
+					Detail:    "plan heal (Refined): plan already reads status: planned; applying the missing Planned label",
+				})
+				continue
+			}
 		}
 
 		// Failure path: dispatched work that may have stranded. Only Working
@@ -646,6 +785,16 @@ func resumeInterruptedComment(attempt int, window, status string) string {
 func failedComment(attempts int, window, status string) string {
 	return fmt.Sprintf("%s\n⛔ cenci dispatch failed after %d attempt(s): window `%s` is gone (last status %s). "+
 		"Labeled `%s` — clear the label or re-plan to retry.", failedMarker, attempts, window, status, labelDispatchFailed)
+}
+
+// planHealComment (#926) is posted by both plan-driven heals (Refined without
+// Planned, and a stale Input Needed escalation): the ticket's plan file already
+// reads status: planned, so Planned was applied (and a stale Input Needed
+// cleared, if present). It carries planHealMarker -- never attemptMarker.
+func planHealComment() string {
+	return fmt.Sprintf("%s\n🩹 cenci: this ticket's plan file already reads `status: planned`, so `%s` was applied "+
+		"(and a stale `%s` escalation cleared, if present). The ticket is back in the dispatch queue.",
+		planHealMarker, labelPlanned, labelInputNeeded)
 }
 
 func planInvalidComment() string {
