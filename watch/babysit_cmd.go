@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/babysit"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/run"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/sandbox"
 )
 
@@ -45,6 +46,18 @@ func parseBabysitArgs(args []string) (babysit.Options, bool) {
 	return babysit.Options{PR: pr, Agent: *agent, Interval: *interval, Once: *once, StateDir: *stateDir, Session: *session, Dir: *dir}, true
 }
 
+// babysitAgentRefusal returns the reason `cenci babysit` must refuse to arm
+// agent, or "" when arming may proceed. A disabled agent (OpenCode) keeps its
+// own disabled reason; otherwise the agent must provide every arm-time workflow
+// according to has (#1215). runBabysit passes run.BuiltinCapability; tests
+// inject a stub predicate.
+func babysitAgentRefusal(agent string, has func(agent, workflow string) bool) string {
+	if reason := sandbox.AgentDisabledReason(agent); reason != "" {
+		return reason
+	}
+	return babysit.CapabilityRefusal(agent, has)
+}
+
 func runBabysit(args []string) {
 	if len(args) > 0 && args[0] == "stop" {
 		fs := flag.NewFlagSet("babysit stop", flag.ExitOnError)
@@ -69,7 +82,7 @@ func runBabysit(args []string) {
 		fmt.Fprintln(os.Stderr, babysitUsage)
 		os.Exit(2)
 	}
-	if reason := sandbox.AgentDisabledReason(opts.Agent); reason != "" {
+	if reason := babysitAgentRefusal(opts.Agent, run.BuiltinCapability); reason != "" {
 		fmt.Fprintf(os.Stderr, "cenci babysit: %s\n", reason)
 		os.Exit(2)
 	}

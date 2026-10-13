@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/pipeline"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/run"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/sandbox"
 	"github.com/matteobortolazzo/cenci/watch/v2/pkg/watch"
 )
@@ -221,6 +222,14 @@ const (
 	reasonOpenPRTimeout      = "open PR state unreadable: probe timed out"
 	reasonOpenPRUnreadable   = "open PR state unreadable: pagination failed"
 	reasonOpenPRProbeUnknown = "open PR probe unrecognized"
+)
+
+// Agent-capability gate (#1215): dispatch launches only the built-in
+// "implement" workflow, so a primary agent without that capability skips the
+// ticket with an explicit reason that names the agent as trimmed.
+const (
+	dispatchWorkflow                = "implement"
+	reasonAgentNoBuiltinWorkflowFmt = "agent %q has no built-in %q workflow"
 )
 
 // Inputs is the full, explicit input to Decide. Now is an injected clock value
@@ -601,6 +610,12 @@ func decideTicket(t Ticket, in Inputs, planByTicket map[string]*Plan, dispatched
 	if reason := sandbox.AgentDisabledReason(primary); reason != "" {
 		return skip(reason)
 	}
+	// An unsupported primary agent skips the ticket outright rather than
+	// falling through to another agent (#1215, #1156: never silently switch
+	// agents). An empty primary is not gated; the fallback walk filters it.
+	if name := strings.TrimSpace(primary); name != "" && !run.BuiltinCapability(name, dispatchWorkflow) {
+		return skip(fmt.Sprintf(reasonAgentNoBuiltinWorkflowFmt, name, dispatchWorkflow))
+	}
 	agent := resolveAgent(t, in)
 	if agent == "" {
 		return skip("budget exhausted")
@@ -685,11 +700,12 @@ func ticketByNumber(tickets []Ticket, repo string, n int) *Ticket {
 }
 
 // resolveAgent walks the agent preference list — ticket label, then config
-// preferences — and returns the first agent with budget. An empty return means
-// all agents are exhausted.
+// preferences — and returns the first agent with budget. Agents without a
+// built-in dispatch workflow are passed over silently (#1215). An empty return
+// means all usable agents are exhausted.
 func resolveAgent(t Ticket, in Inputs) string {
 	for _, agent := range agentPreference(t, in.Config) {
-		if sandbox.AgentDisabledReason(agent) != "" {
+		if !run.BuiltinCapability(strings.TrimSpace(agent), dispatchWorkflow) {
 			continue
 		}
 		b := in.Budgets.Budget(agent)

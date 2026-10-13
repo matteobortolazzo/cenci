@@ -84,6 +84,11 @@ type Daemon struct {
 	// to defaultArmSpawn and never shell out.
 	armSpawn func(ipc.ArmRequest) ipc.ArmResponse
 
+	// armCapable is the injected built-in capability predicate (#1215). It
+	// cannot be run.BuiltinCapability directly because internal/run imports
+	// this package. Nil (newDaemon's default) must refuse every arm request.
+	armCapable func(agent, workflow string) bool
+
 	// armLimiter is hostArmSpawn's mutex-guarded token bucket (armspawn.go),
 	// gating the whole arm path -- before pane/repo resolution, not just the
 	// fork (#1095 Decisions). Its zero value is a full bucket on first use.
@@ -119,8 +124,10 @@ func newDaemon(cfg config.Config, fe frontend.Frontend, events <-chan ipc.HookEv
 // — i.e. once this call has become the one live daemon — and before the main
 // loop blocks. It is never invoked on the "already running" no-op path below,
 // so a caller that writes a PID file from onStarted never clobbers a
-// different, already-running daemon's PID file.
-func Run(ctx context.Context, cfg config.Config, fe frontend.Frontend, attention <-chan ipc.AttentionUpdate, onStarted func()) error {
+// different, already-running daemon's PID file. armCapable is the built-in
+// capability query babysit-arm requests are gated on (#1215); nil refuses every
+// arm request.
+func Run(ctx context.Context, cfg config.Config, fe frontend.Frontend, attention <-chan ipc.AttentionUpdate, onStarted func(), armCapable func(agent, workflow string) bool) error {
 	// Start event receiver.
 	recv, err := ipc.NewEventReceiver(cfg.EventSocketPath)
 	if err != nil {
@@ -150,6 +157,7 @@ func Run(ctx context.Context, cfg config.Config, fe frontend.Frontend, attention
 	// keeps defaulting to defaultArmSpawn so newDaemon-based tests never
 	// shell out, and only a live Run installs the resolver/spawn seam.
 	d.armSpawn = d.hostArmSpawn
+	d.armCapable = armCapable
 	// Install the arm handler before Accept starts serving connections
 	// (#1094): nothing between NewEventReceiver and Accept depends on
 	// accepting, and a nil handler still nacks, but installing it first

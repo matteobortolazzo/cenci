@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/babysit"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/ipc"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/sandbox"
 )
@@ -86,6 +87,13 @@ const (
 	// supervisor (os.Executable failure, or the armStartBabysit seam
 	// itself failing to start the process).
 	ReasonArmSpawnFailed = "failed to spawn host babysit supervisor"
+
+	// ReasonArmCapabilityUnavailable is returned when no capability predicate
+	// was injected (#1215): defaults refuse, so a daemon built without the
+	// query nacks every arm request instead of guessing. An agent missing a
+	// required workflow is nacked with babysit.CapabilityRefusal's own text,
+	// which names the agent and the workflow.
+	ReasonArmCapabilityUnavailable = "babysit capability check unavailable"
 )
 
 // armRepoPattern matches a single "owner/repo" pair shaped like GitHub's own
@@ -148,6 +156,14 @@ func (d *Daemon) handleArmRequest(req ipc.ArmRequest) ipc.ArmResponse {
 		return ipc.ArmResponse{OK: false, Reason: ReasonInvalidAgent}
 	}
 	if reason := sandbox.AgentDisabledReason(req.Agent); reason != "" {
+		d.logArmReject(req, reason)
+		return ipc.ArmResponse{OK: false, Reason: reason}
+	}
+	if d.armCapable == nil {
+		d.logArmReject(req, ReasonArmCapabilityUnavailable)
+		return ipc.ArmResponse{OK: false, Reason: ReasonArmCapabilityUnavailable}
+	}
+	if reason := babysit.CapabilityRefusal(req.Agent, d.armCapable); reason != "" {
 		d.logArmReject(req, reason)
 		return ipc.ArmResponse{OK: false, Reason: reason}
 	}

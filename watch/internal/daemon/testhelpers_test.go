@@ -71,5 +71,12 @@ func newTestDaemon(mc *tmuxtest.MockClient) *Daemon {
 	// reads the developer's ambient supervisor state directory (#787); the
 	// guard's own tests wire an explicit fake.
 	d.closeGuard = nil
+	// newDaemon's armCapable is nil, which refuses every arm request (#1215).
+	// The shared fixture installs a permissive predicate so the many existing
+	// arm tests that expect an ack or a spawn keep exercising their own branch;
+	// the capability gate's tests (arm_test.go, arm_capability_external_test.go)
+	// override it explicitly, and the nil default is pinned by building through
+	// newDaemon directly.
+	d.armCapable = func(agent, workflow string) bool { return true }
 	return d
 }

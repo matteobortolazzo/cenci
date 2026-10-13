@@ -16,8 +16,14 @@ package main
 // the name: runBabysit refuses a disabled agent after parsing.
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/babysit"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/run"
 )
 
 // TestParseBabysitArgs_ValidAgents_OK covers the three agent names the
@@ -104,4 +110,81 @@ func TestParseBabysitArgs_SessionAndDirCarryThrough(t *testing.T) {
 	if opts.Dir != "/repo/root" {
 		t.Errorf("Dir = %q, want %q", opts.Dir, "/repo/root")
 	}
+}
+
+// TestBabysitAgentRefusal pins the gate runBabysit applies after parsing: a
+// disabled agent keeps its own disabled text, a non-disabled agent lacking an
+// arm-time workflow is refused naming it, and claude/codex pass with the real
+// built-in query (#1215).
+func TestBabysitAgentRefusal(t *testing.T) {
+	t.Run("opencode keeps the disabled text", func(t *testing.T) {
+		got := babysitAgentRefusal("opencode", run.BuiltinCapability)
+		if !strings.Contains(got, "OpenCode is temporarily disabled") {
+			t.Fatalf("babysitAgentRefusal(opencode) = %q, want the OpenCode disabled text", got)
+		}
+	})
+
+	t.Run("a denying predicate refuses a non-disabled agent naming ci-repair", func(t *testing.T) {
+		denyCIRepair := func(agent, workflow string) bool { return workflow != "ci-repair" }
+		got := babysitAgentRefusal("claude", denyCIRepair)
+		if got == "" || !strings.Contains(got, "ci-repair") {
+			t.Fatalf("babysitAgentRefusal = %q, want a reason naming ci-repair", got)
+		}
+	})
+
+	for _, agent := range []string{"claude", "codex"} {
+		t.Run(agent+" passes with the built-in capability query", func(t *testing.T) {
+			if got := babysitAgentRefusal(agent, run.BuiltinCapability); got != "" {
+				t.Fatalf("babysitAgentRefusal(%q) = %q, want empty", agent, got)
+			}
+		})
+	}
+}
+
+// TestBabysitCapabilityRefusal_UsesBuiltinCapabilityQuery pins the real query
+// runBabysit hands to babysit.CapabilityRefusal (#1215): claude and codex have
+// built-in address-review, babysit-attention and ci-repair; opencode (disabled,
+// no workflows) and a custom agent do not. A config.json that defines
+// fakeagent's workflows must not change the answer, because unattended arming
+// accepts only built-in pairs.
+func TestBabysitCapabilityRefusal_UsesBuiltinCapabilityQuery(t *testing.T) {
+	for _, agent := range []string{"claude", "codex"} {
+		t.Run("accepts "+agent, func(t *testing.T) {
+			if got := babysit.CapabilityRefusal(agent, run.BuiltinCapability); got != "" {
+				t.Fatalf("CapabilityRefusal(%q) = %q, want empty", agent, got)
+			}
+		})
+	}
+	for _, agent := range []string{"opencode", "fakeagent"} {
+		t.Run("refuses "+agent, func(t *testing.T) {
+			if got := babysit.CapabilityRefusal(agent, run.BuiltinCapability); got == "" {
+				t.Fatalf("CapabilityRefusal(%q) = empty, want a refusal", agent)
+			}
+		})
+	}
+
+	t.Run("a user-defined fakeagent config is still refused", func(t *testing.T) {
+		xdg := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(xdg, "cenci"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		cfg := `{"agents":{"fakeagent":{"command":"fakeagent","sandboxCommand":"cenci open","workflows":{` +
+			`"address-review":{"args":["x"]},"babysit-attention":{"args":["x"]},"ci-repair":{"args":["x"]}}}}}`
+		if err := os.WriteFile(filepath.Join(xdg, "cenci", "config.json"), []byte(cfg), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("XDG_CONFIG_HOME", xdg)
+		fc, err := run.Load("")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, wf := range babysit.ArmWorkflows {
+			if _, ok := fc.Agents["fakeagent"].Workflows[wf]; !ok {
+				t.Fatalf("fixture config does not define fakeagent %s", wf)
+			}
+		}
+		if got := babysit.CapabilityRefusal("fakeagent", run.BuiltinCapability); got == "" {
+			t.Fatal("a config.json-defined agent passed the arm-time capability gate")
+		}
+	})
 }

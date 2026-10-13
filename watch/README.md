@@ -296,6 +296,11 @@ A launch that cannot succeed is refused **before** any tmux window is created, i
 - **Disabled agent:** OpenCode is temporarily disabled; adding a `config.json` entry
   does not bypass the pause (see the OpenCode note below).
 
+Unattended paths — `cenci dispatch` and `cenci babysit` arming — are stricter than
+`run`: they accept only built-in (agent, workflow) pairs from the table above, and a
+`config.json` entry never counts. A custom agent, or one defined only in the config
+file, is skipped by dispatch and refused at babysit arming.
+
 `--dry-run` also prints a `template:` line saying where the template came from:
 `built-in`, or `user-defined (<config path>)` for a pair that exists only in the config
 file. Overriding only the `args` of a built-in workflow still counts as `built-in`.
@@ -1127,16 +1132,18 @@ Dispatch reads the same `config.json` as `run`, under a top-level `"dispatch"` b
 | `retryBudget` | `2` | Retries (`Working` → `Planned`) a stranded ticket gets before it is marked `dispatch-failed`; an explicit `0` disables retries |
 | `daemonInterval` | none | Dispatch cadence once the embedded loop is enabled (Go duration string); setting this alone does **not** start dispatch — see `loopEnabled`. Configuration is independently polled at least every 60 seconds; nonpositive values use a 60s internal fallback but are not reported as a configured interval |
 | `loopEnabled` | `false` | Explicitly toggles the embedded fleet dispatch loop; managed via `cenci dispatch loop on\|off` (see [Loop toggle](#loop-toggle-cenci-dispatch-loop-onoffstatus)). Defaults to disabled — a bare `daemonInterval` no longer auto-enables the loop; run `dispatch loop on` (or set `loopEnabled: true` directly) to start dispatching |
-| `defaultAgent` | `claude` | Agent used when a ticket has no `agent:<name>` label |
+| `defaultAgent` | `claude` | Agent used when a ticket has no `agent:<name>` label. It must have a built-in `implement` workflow: a ticket whose primary agent (label or `defaultAgent`) lacks one is skipped with `agent "<name>" has no built-in "implement" workflow` and never falls through to another agent (a disabled agent such as OpenCode keeps its own disabled reason, the #1219 text, instead of the "no built-in implement workflow" reason) |
 | `model` | none | Model override for every dispatched session (overrides `agents.*.model`); the `--model` CLI flag overrides this. Pin this to avoid a dispatched session silently inheriting whatever ambient/account-level default model is active at spawn time |
-| `agentPreference` | none | Fallback agent order tried when the primary agent (label or `defaultAgent`) is out of budget; first agent with budget wins |
+| `agentPreference` | none | Fallback agent order tried when the primary agent (label or `defaultAgent`) is out of budget; first agent with budget wins; entries without a built-in `implement` workflow are passed over |
 | `agentBudgetFloors` | none | Per-agent budget floor (see [Usage budgets](#usage-budgets)); with `agentLimits` it is a headroom safety margin, without it a static `Remaining` where `0` pins the agent to "budget exhausted" |
 | `agentLimits` | none | Per-agent token caps enabling real usage accounting; each agent takes `fiveHourTokens` and/or `weeklyTokens` (omit or `0` to disable that window) |
 | `claudeSessionDir` | `~/.claude/projects` | Override for the Claude session-JSONL directory scanned for output-token usage |
 | `codexDBPath` | `~/.codex/state_5.sqlite` | Override for the Codex SQLite DB queried for per-thread token usage (requires the `sqlite3` CLI) |
 
 An agent is routed per ticket from an `agent:<name>` label, falling back to
-`defaultAgent`, then to the `agentPreference` list.
+`defaultAgent`, then to the `agentPreference` list. Only agents with a built-in
+`implement` workflow are dispatchable; `config.json` templates and custom agent names
+never make a ticket dispatchable.
 
 A separate top-level `"planning"` block (sibling to `"dispatch"`, not nested
 inside it) carries the fleet-scoped [attended mode](#attended-mode-cenci-planning-attended-onoffstatus)
@@ -1391,6 +1398,12 @@ cleanup: 'cenci close {number}'
 
 The same `cenci babysit` supervisor that watches CI and review feedback can also
 merge a PR itself, once every one of these holds on a given tick:
+
+Arming requires the agent to have the built-in `address-review`, `babysit-attention`
+and `ci-repair` workflows, since those are what the supervisor launches; an agent
+without them (OpenCode, or any custom agent) is refused before any state is written,
+with exit code 2 from `cenci babysit` and a nack from the host daemon for a forwarded
+request. `merge-repair` is not required: it stays pinned to Claude.
 
 Arming (`cenci babysit <pr> --agent <agent>`, run from a host tmux pane)
 resolves the tmux session and start directory it will target — the current

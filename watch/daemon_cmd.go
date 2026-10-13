@@ -16,6 +16,7 @@ import (
 	tmuxfe "github.com/matteobortolazzo/cenci/watch/v2/internal/frontend/tmux"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/ipc"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/logging"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/run"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/tmux"
 )
 
@@ -135,7 +136,7 @@ func runDaemonStart(args []string) {
 		}
 	}()
 
-	if err := daemon.Run(ctx, cfg, fe, attention, onStarted); err != nil {
+	if err := daemon.Run(ctx, cfg, fe, attention, onStarted, run.BuiltinCapability); err != nil {
 		fmt.Fprintf(os.Stderr, "cenci: %v\n", err)
 		os.Exit(1)
 	}

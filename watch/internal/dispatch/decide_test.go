@@ -389,6 +389,94 @@ func TestDecideDisabledOpenCodeCannotBeBudgetFallback(t *testing.T) {
 	assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, "budget exhausted", ""}})
 }
 
+// unsupportedAgentReason is the exact skip reason for an agent with no built-in
+// "implement" workflow (#1215). "fakeagent" is a custom name that is neither
+// disabled nor in the built-in capability table, so it proves the general gate
+// independently of the temporary OpenCode pause.
+func unsupportedAgentReason(agent string) string {
+	return fmt.Sprintf("agent %q has no built-in %q workflow", agent, "implement")
+}
+
+// An unsupported primary agent (label or defaultAgent) skips the ticket with an
+// explicit reason and never falls through to a supported agent, even when
+// agentPreference lists supported agents with unlimited budget (#1215).
+func TestDecideUnsupportedPrimaryAgentSkipsWithoutFallthrough(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(in *Inputs)
+		want   string
+	}{
+		{
+			name: "agent label",
+			mutate: func(in *Inputs) {
+				in.Tickets[0].Agent = "fakeagent"
+			},
+			want: unsupportedAgentReason("fakeagent"),
+		},
+		{
+			name: "default agent",
+			mutate: func(in *Inputs) {
+				in.Config.DefaultAgent = "fakeagent"
+			},
+			want: unsupportedAgentReason("fakeagent"),
+		},
+		{
+			name: "default agent with surrounding whitespace names the trimmed agent",
+			mutate: func(in *Inputs) {
+				in.Config.DefaultAgent = " fakeagent "
+			},
+			want: unsupportedAgentReason("fakeagent"),
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			in := baseInputs()
+			in.Budgets = FloorProvider{} // every agent unlimited: only the gate can stop a fallthrough
+			in.Config.AgentPreference = []string{"claude", "codex"}
+			tc.mutate(&in)
+			assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, tc.want, ""}})
+		})
+	}
+}
+
+// Agent names are trimmed before the capability check, so a padded defaultAgent
+// that run.Run and AgentDisabledReason already accept keeps dispatching.
+func TestDecidePaddedSupportedDefaultAgentStillDispatches(t *testing.T) {
+	in := baseInputs()
+	in.Config.DefaultAgent = " claude "
+	assertDecisions(t, Decide(in), []wantDecision{{42, ActionDispatch, "dispatch", " claude "}})
+}
+
+// An empty primary agent is not gated: the fallback walk still runs over the
+// agentPreference entries (#1215 Assumptions).
+func TestDecideEmptyPrimaryAgentIsNotGated(t *testing.T) {
+	in := baseInputs()
+	in.Config.DefaultAgent = ""
+	in.Config.AgentPreference = []string{"codex"}
+	assertDecisions(t, Decide(in), []wantDecision{{42, ActionDispatch, "dispatch", "codex"}})
+}
+
+// During the budget fallback walk an unsupported agentPreference entry is
+// passed over silently; when nothing supported remains the reason stays
+// "budget exhausted" (#1215).
+func TestDecideUnsupportedAgentIsPassedOverInFallbackWalk(t *testing.T) {
+	claudeExhausted := FloorProvider{Floors: map[string]float64{"claude": 0}}
+
+	t.Run("skips unsupported entry and dispatches to the next supported one", func(t *testing.T) {
+		in := baseInputs()
+		in.Budgets = claudeExhausted
+		in.Config.AgentPreference = []string{"fakeagent", "codex"}
+		assertDecisions(t, Decide(in), []wantDecision{{42, ActionDispatch, "dispatch", "codex"}})
+	})
+
+	t.Run("only unsupported entries remaining keeps budget exhausted", func(t *testing.T) {
+		in := baseInputs()
+		in.Budgets = claudeExhausted
+		in.Config.AgentPreference = []string{"fakeagent"}
+		assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, "budget exhausted", ""}})
+	})
+}
+
 func TestDecideOrderingDeterminism(t *testing.T) {
 	in := baseInputs()
 	// Supplied out of order; output must be sorted by ticket number.
