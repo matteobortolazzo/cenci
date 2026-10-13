@@ -63,9 +63,23 @@ In lean mode, resolve your own questions whenever a clearly recommended answer e
 - **destructive or irreversible** — data migrations, schema changes, deletions, history rewrites, or anything else without a cheap rollback.
 - **contradicts the refined ticket** — the codebase and the ticket's AC/`### Decisions` disagree, and the ticket cannot be satisfied as written.
 - **genuine product ambiguity the ticket doesn't settle**.
-- **scope blowup** — would change the size estimate or require a split: size against the budget in `docs/ticket-sizing.md`; split only on real budget risk (tier L).
+- **scope blowup** — the plan would need a split: size against the budget in `docs/ticket-sizing.md`; split only on real budget risk (tier L). The planner asks a scope-blowup clarifying question only when it actually recommends a split; an `L` estimate with a reasoned no-split verdict, or a size change without a split, is recorded in `### Size Estimate` / `### Split Recommendation` and goes through the Split Gate rather than being asked.
 
 Nothing outside these five classes may be asked; anything self-resolved must appear in `## Auto-Adopted Answers` — never asked, never left unresolved, never silently guessed. A question that is genuinely unresolvable from the ticket, codebase, and docs, yet doesn't fit any of these five classes, goes under `### Open Questions` in the plan output instead — never a silent guess, and never asked via a sixth ad-hoc class.
+
+**Grounded resolution** — this rule applies to the **contradicts the refined ticket** and **genuine product ambiguity the ticket doesn't settle** classes only. When a question in either class has a **unique mechanical resolution**, do not ask it: the planner auto-adopts it into `## Auto-Adopted Answers` and cites the grounding. A **unique mechanical resolution** has exactly one correct answer, fixed by a project doc (`AGENTS.md`, `README.md`, `docs/<topic>.md`) or a checkable codebase/package fact — something you verify by opening a file or reading a package declaration, not by weighing options. Everything else is **product judgment**: a question that needs product judgment, which still escalates under its class exactly as before, is any of (i) a contradiction that makes an acceptance criterion unsatisfiable as written; (ii) a resolution that would change an acceptance criterion's literal text — auto-adoption never edits an acceptance criterion's literal text, only the interpretation of a `### Decisions` detail may be resolved mechanically; or (iii) more than one defensible resolution.
+
+Cite the grounding in the auto-adopted rationale by repo-relative path or package identifier only — `grounded in `<repo-relative path>`` or `grounded in package `<identifier>`` — never file contents, configuration values, or command output (the same restriction `## Clarifying Questions` below applies, because `## Auto-Adopted Answers` can reach a possibly-public ticket through the plan comment). The auto-adopted answer text is held to the same restriction as the citation: it may name a public identifier (such as a package-declared family name like `Inter Variable`) but never configuration values, file contents, or command output. Precedence (#979): secrecy wins over recording the answer in full — if an answer cannot be stated without such material, drop the offending content and state only the identifier-level part.
+
+Precedence: a grounded answer never suppresses a security or irreversibility ask — when a question fits both, the security/destructive class wins and you ask via `## Clarifying Questions`. The settled-posture paragraph under `## Clarifying Questions` below is untouched by this rule.
+
+Worked examples:
+
+- Auto-adopt (a): the ticket's `### Decisions` order two steps one way, but a project doc prescribes the sequencing the other way in `docs/<topic>.md`. One correct answer, fixed by a doc: auto-adopt the doc's order and record `grounded in `docs/<topic>.md``.
+- Auto-adopt (b): a `### Decisions` detail says the stylesheet uses the font family `Inter`, but the installed package `@fontsource-variable/inter` declares the family `Inter Variable`. One correct answer, fixed by a checkable package fact: auto-adopt `Inter Variable` and record `grounded in package `@fontsource-variable/inter``.
+- Counter-example (c): the codebase contradicts an acceptance criterion so that it cannot be satisfied as written, even though a doc hints at a workaround. Fixing it would change the criterion's literal text, so it is product judgment: escalate under the contradicts-the-refined-ticket class.
+- Counter-example (d): the ticket does not say whether a new option belongs in the CLI flag or the config file, and the codebase already has both patterns. Two defensible resolutions, so it is product judgment: escalate under the genuine-product-ambiguity class.
+- Precedence (e): the ticket and a doc agree on a mechanical detail, but the detail sits on an auth or secret-handling path. The security-sensitive class wins over the grounded rule, so ask.
 
 ## Clarifying Questions
 
@@ -207,11 +221,15 @@ Before finalizing the plan, explicitly identify:
     ### Size Estimate
     <S/M/L> — <reasoning, sized against the context budget in `docs/ticket-sizing.md`>
 
-    ### Split Recommendation (only if L — real risk of exceeding the context budget per `docs/ticket-sizing.md`)
-    If there's a real risk of exceeding the implementing agent's context budget, recommend that the user go back to `/refine` to split it into separate independent tickets. Do not recommend a split for S or M estimates just because the ticket touches multiple independent concerns. Suggest the split:
+    ### Split Recommendation
+    Required whenever the `### Size Estimate` is `L`: write either a real split or `None — <one-line rationale>`. For an `S` or `M` estimate, omit it or write `None`. Do not recommend a split for S or M estimates just because the ticket touches multiple independent concerns.
+
+    A real split (only when there's a real risk of exceeding the implementing agent's context budget per `docs/ticket-sizing.md`): recommend that the user go back to `/refine` to split it into separate independent tickets. Suggest the split:
     - Ticket 1: <description>
     - Ticket 2: <description>
     - Ticket 3: <description>
+
+    A no-split verdict on an `L` estimate: the first non-blank line is `None`, then ` — ` (an em dash) or ` - `, then a non-empty one-line rationale for why the plan fits one PR despite the `L` estimate (e.g. `None — one coupled prose change plus its contract tests`). The `None — <one-line rationale>` must be the whole section: exactly one non-blank line, because any further non-blank content after that line (for example `Ticket N:` lines or bullets) makes it no verdict and the gate fails closed. The rationale cites repo-relative paths or identifiers only — never file contents, configuration values, or command output — because it reaches the plan file's `## Q&A from Planning` and, through the plan comment, a possibly-public ticket. A bare `None`, an empty section, or free text such as "No split recommended" is not a verdict and is treated as no verdict.
 
     > Note: Do not create tickets from the planner. The main agent will recommend the user run `/refine` to split.
 

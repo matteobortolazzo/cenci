@@ -446,5 +446,269 @@ CONFIRM_OVERRULE_PRIORITY_MARKER='When the cap would otherwise already be exhaus
 assert_file_contains "${PLANNER_AGENT}" "${CONFIRM_OVERRULE_PRIORITY_MARKER}" \
   "the confirm/overrule question must always take priority over a lower-priority escalation-class question when the 6-question cap would otherwise be exhausted, never silently dropped (Fix 4)"
 
+# =====================================================================
+# #1199 (Part 1) -- grounded resolution of the contradicts-the-refined-
+# ticket and genuine-product-ambiguity classes in agents/planner.md's
+# ## Self-Answer Policy (lean only), plus the matching doc sync in
+# docs/autonomous-loop.md.
+#
+# Acceptance-criterion map (each AC has at least one explicit assertion):
+#   - velka#2330 shape (doc-prescribed sequencing auto-adopts, doc cited)
+#       -> GROUNDED_DOC_EXAMPLE_MARKER + GROUNDED_CITE_PATH_MARKER
+#   - velka#2329 shape (package-declared fact auto-adopts, package cited)
+#       -> GROUNDED_PACKAGE_EXAMPLE_* markers + GROUNDED_CITE_PACKAGE_MARKER
+#   - AC unsatisfiable as written still escalates
+#       -> GROUNDED_AC_UNSATISFIABLE_MARKER + GROUNDED_AC_TEXT_IMMUTABLE_MARKER
+#   - more than one defensible resolution still escalates
+#       -> GROUNDED_MULTI_RESOLUTION_MARKER
+#   - security-sensitive / destructive bullets byte-for-byte unchanged
+#       -> SECURITY_BULLET_LINE / DESTRUCTIVE_BULLET_LINE whole-line pins
+#         (these PASS on the unedited file by design; they guard against edits)
+#   - grounded answer never suppresses a security/irreversibility ask
+#       -> GROUNDED_PRECEDENCE_* markers
+#   - explicit "unique mechanical resolution" vs "product judgment" boundary
+#     with worked examples and at least one counter-example
+#       -> GROUNDED_MECHANICAL_* / GROUNDED_JUDGMENT_* / counter-example count
+#   - scope-blowup class asks only when a split is actually recommended
+#       -> SCOPE_BLOWUP_ONLY_SPLIT_MARKER
+#   - docs/autonomous-loop.md in sync (Input Needed off-ramp)
+#       -> LOOP_DOC_* markers (whitespace-normalized: the doc is hard-wrapped)
+# =====================================================================
+
+REPO_ROOT="$(cd "${FLOW_DIR}/.." && pwd)" || { echo "lean-planning-contract.test.sh: failed to resolve repo root." >&2; exit 2; }
+LOOP_DOC="${REPO_ROOT}/docs/autonomous-loop.md"
+
+# load_content <file> -- pure read, no fail() side effect (safe inside $(...)).
+load_content() {
+  cat "$1" 2>/dev/null
+}
+
+# require_content <result-var> <file> <label> -- nameref wrapper; fails closed
+# and assigns "" on a read failure. Must NOT be invoked via $(...).
+require_content() {
+  local -n _res="$1"
+  local _c
+  if ! _c="$(load_content "$2")"; then
+    fail "$3: could not read file: $2"
+    _res=""
+    return 1
+  fi
+  _res="${_c}"
+}
+
+# extract_section <content> <exact-heading-line> -- pure, fence-aware: the body
+# of the named "## <heading>" section through the next real (unfenced) "## "
+# heading, or EOF.
+extract_section() {
+  awk -v want="$2" '
+    $0 == want && !on { on=1; print; next }
+    /^```/ { infence = !infence; if (on) print; next }
+    on && !infence && /^## / { exit }
+    on { print }
+  ' <<<"$1"
+}
+
+# extract_block <content> <start-needle> -- pure: from the first line containing
+# the needle through the line before the next blank line, numbered-step line
+# ("N. "), or bullet line ("- "). Keeps a wrapped paragraph/step/bullet together
+# and scopes a marker to the one construct it belongs to.
+extract_block() {
+  awk -v want="$2" '
+    !on && index($0, want) { on=1; print; next }
+    on && (/^[[:space:]]*$/ || /^[0-9]+\. / || /^- /) { exit }
+    on { print }
+  ' <<<"$1"
+}
+
+# require_section / require_block <result-var> <content> <anchor> <label> --
+# nameref wrappers; fail closed (never an empty-but-present masquerade).
+require_section() {
+  local -n _res="$1"
+  local _body
+  _body="$(extract_section "$2" "$3")"
+  if [[ -z "${_body}" ]]; then
+    fail "$4: could not locate '$3' section"
+    _res=""
+    return 1
+  fi
+  _res="${_body}"
+}
+require_block() {
+  local -n _res="$1"
+  local _body
+  _body="$(extract_block "$2" "$3")"
+  if [[ -z "${_body}" ]]; then
+    fail "$4: could not locate block starting at '$3'"
+    _res=""
+    return 1
+  fi
+  _res="${_body}"
+}
+
+# normalize_ws <content> -- collapse newlines and repeated whitespace so a
+# markdown-wrapped sentence matches as one substring (shell-scripting-gotchas.md
+# line-wrapping pitfall). Mirrors attended-autonomy-contract.test.sh.
+normalize_ws() {
+  local content="$1"
+  content="${content//$'\n'/ }"
+  printf '%s' "${content}" | tr -s ' \t'
+}
+
+# assert_contains_ws <content> <needle> <label>
+assert_contains_ws() {
+  local content="$1" needle="$2" label="$3"
+  [[ -n "${needle}" ]] || { fail "${label}: empty required pattern (test bug)"; return; }
+  local norm
+  norm="$(normalize_ws "${content}")"
+  [[ "${norm}" == *"${needle}"* ]] || fail "${label}: required text missing (whitespace-normalized): [${needle}]"
+}
+
+# assert_count_at_least_ws <content> <needle> <min> <label> -- occurrence count
+# (grep -o, never -c, per shell-scripting-gotchas.md) on normalized content.
+assert_count_at_least_ws() {
+  local content="$1" needle="$2" min="$3" label="$4"
+  [[ -n "${needle}" ]] || { fail "${label}: empty required pattern (test bug)"; return; }
+  local norm count
+  norm="$(normalize_ws "${content}")"
+  count="$(grep -oF -- "${needle}" <<<"${norm}" | wc -l | tr -d '[:space:]')"
+  [[ "${count}" -ge "${min}" ]] || fail "${label}: expected at least ${min} occurrences, found ${count}: [${needle}]"
+}
+
+# assert_file_has_line <file> <exact-line> <label> -- whole-line match
+# (grep -qxF): pins a full bullet byte-for-byte, so any edit to it fails.
+assert_file_has_line() {
+  [[ -n "$2" ]] || { fail "$3: empty line (test bug)"; return; }
+  [[ -f "$1" ]] || { fail "$3: file not found: $1"; return; }
+  grep -qxF -- "$2" "$1" || fail "$(basename "$1") $3 (expected an exact whole line: $2)"
+}
+
+# --- AC: security-sensitive and destructive bullets are byte-for-byte
+#     unchanged (both full lines pinned; expected to PASS on the unedited
+#     file and keep passing) ---------------------------------------------------
+
+SECURITY_BULLET_LINE='- **security-sensitive** — auth, credentials/secrets, crypto, payment/billing, or anything matching the union of `skills/implement/SKILL.md`'"'"'s `### Sensitive-path backstop (deterministic)` pattern set (the built-in default sensitive-path patterns) and the project'"'"'s `security.sensitivePaths` — not `security.sensitivePaths` alone.'
+DESTRUCTIVE_BULLET_LINE='- **destructive or irreversible** — data migrations, schema changes, deletions, history rewrites, or anything else without a cheap rollback.'
+
+assert_file_has_line "${PLANNER_AGENT}" "${SECURITY_BULLET_LINE}" \
+  "the security-sensitive escalation bullet must stay byte-for-byte unchanged (#1199)"
+assert_file_has_line "${PLANNER_AGENT}" "${DESTRUCTIVE_BULLET_LINE}" \
+  "the destructive-or-irreversible escalation bullet must stay byte-for-byte unchanged (#1199)"
+
+# --- ## Self-Answer Policy: the grounded-resolution rule ---------------------
+
+GROUNDED_LABEL_MARKER='**Grounded resolution**'
+GROUNDED_BOTH_CLASSES_MARKER='applies to the **contradicts the refined ticket** and **genuine product ambiguity the ticket doesn'"'"'t settle** classes only'
+GROUNDED_AUTOADOPT_MARKER='auto-adopts it into `## Auto-Adopted Answers`'
+GROUNDED_MECHANICAL_MARKER='**unique mechanical resolution**'
+GROUNDED_MECHANICAL_ONE_ANSWER_MARKER='exactly one correct answer'
+GROUNDED_MECHANICAL_GROUNDING_MARKER='a project doc (`AGENTS.md`, `README.md`, `docs/<topic>.md`) or a checkable codebase/package fact'
+GROUNDED_JUDGMENT_MARKER='**product judgment**'
+GROUNDED_JUDGMENT_ESCALATES_MARKER='product judgment, which still escalates'
+GROUNDED_AC_UNSATISFIABLE_MARKER='makes an acceptance criterion unsatisfiable as written'
+GROUNDED_AC_TEXT_IMMUTABLE_MARKER='auto-adoption never edits an acceptance criterion'"'"'s literal text, only the interpretation of a `### Decisions` detail may be resolved mechanically'
+GROUNDED_MULTI_RESOLUTION_MARKER='or (iii) more than one defensible resolution.'
+GROUNDED_ANSWER_TEXT_MARKER='The auto-adopted answer text is held to the same restriction'
+GROUNDED_ANSWER_PUBLIC_IDENT_MARKER='may name a public identifier (such as a package-declared family name like `Inter Variable`) but never configuration values, file contents, or command output'
+GROUNDED_ANSWER_SECRECY_WINS_MARKER='secrecy wins over recording the answer in full'
+GROUNDED_CITE_PATH_MARKER='grounded in `<repo-relative path>`'
+GROUNDED_CITE_PACKAGE_MARKER='grounded in package `<identifier>`'
+GROUNDED_CITE_PATHS_ONLY_MARKER='repo-relative path or package identifier'
+GROUNDED_CITE_NO_CONTENTS_MARKER='never file contents, configuration values, or command output'
+GROUNDED_PRECEDENCE_NEVER_SUPPRESSES_MARKER='a grounded answer never suppresses a security or irreversibility ask'
+GROUNDED_PRECEDENCE_WINS_MARKER='the security/destructive class wins'
+GROUNDED_PACKAGE_EXAMPLE_PKG_MARKER='@fontsource-variable/inter'
+GROUNDED_PACKAGE_EXAMPLE_FAMILY_MARKER='Inter Variable'
+GROUNDED_DOC_EXAMPLE_MARKER='a project doc prescribes the sequencing'
+COUNTEREXAMPLE_MARKER='Counter-example'
+
+if require_content PLANNER_CONTENT "${PLANNER_AGENT}" "planner.md" \
+   && require_section POLICY_SECTION "${PLANNER_CONTENT}" "## Self-Answer Policy" "planner.md"; then
+  assert_contains_ws "${POLICY_SECTION}" "${GROUNDED_LABEL_MARKER}" \
+    "planner.md (## Self-Answer Policy) must add a Grounded resolution rule"
+  assert_contains_ws "${POLICY_SECTION}" "${GROUNDED_BOTH_CLASSES_MARKER}" \
+    "planner.md (## Self-Answer Policy) grounded rule must name both the contradicts and ambiguity classes, and only those"
+  assert_contains_ws "${POLICY_SECTION}" "${GROUNDED_AUTOADOPT_MARKER}" \
+    "planner.md (## Self-Answer Policy) grounded rule must record the answer in ## Auto-Adopted Answers"
+  assert_contains_ws "${POLICY_SECTION}" "${GROUNDED_MECHANICAL_MARKER}" \
+    "planner.md (## Self-Answer Policy) must define a unique mechanical resolution"
+  assert_contains_ws "${POLICY_SECTION}" "${GROUNDED_MECHANICAL_ONE_ANSWER_MARKER}" \
+    "planner.md (## Self-Answer Policy) unique mechanical resolution must require exactly one correct answer"
+  assert_contains_ws "${POLICY_SECTION}" "${GROUNDED_MECHANICAL_GROUNDING_MARKER}" \
+    "planner.md (## Self-Answer Policy) unique mechanical resolution must be grounded in a project doc or a checkable codebase/package fact"
+  assert_contains_ws "${POLICY_SECTION}" "${GROUNDED_JUDGMENT_MARKER}" \
+    "planner.md (## Self-Answer Policy) must define the product judgment side of the boundary"
+  assert_contains_ws "${POLICY_SECTION}" "${GROUNDED_JUDGMENT_ESCALATES_MARKER}" \
+    "planner.md (## Self-Answer Policy) must state product judgment still escalates"
+  assert_contains_ws "${POLICY_SECTION}" "${GROUNDED_AC_UNSATISFIABLE_MARKER}" \
+    "planner.md (## Self-Answer Policy) must keep escalating a contradiction that makes an AC unsatisfiable as written"
+  assert_contains_ws "${POLICY_SECTION}" "${GROUNDED_AC_TEXT_IMMUTABLE_MARKER}" \
+    "planner.md (## Self-Answer Policy) must state auto-adoption can never change an acceptance criterion's literal text"
+  assert_contains_ws "${POLICY_SECTION}" "${GROUNDED_MULTI_RESOLUTION_MARKER}" \
+    "planner.md (## Self-Answer Policy) must keep escalating when more than one defensible resolution exists"
+  assert_contains_ws "${POLICY_SECTION}" "${GROUNDED_CITE_PATH_MARKER}" \
+    "planner.md (## Self-Answer Policy) must require a grounding citation by repo-relative path"
+  assert_contains_ws "${POLICY_SECTION}" "${GROUNDED_CITE_PACKAGE_MARKER}" \
+    "planner.md (## Self-Answer Policy) must require a grounding citation by package identifier"
+  assert_contains_ws "${POLICY_SECTION}" "${GROUNDED_CITE_PATHS_ONLY_MARKER}" \
+    "planner.md (## Self-Answer Policy) must restrict citations to a repo-relative path or package identifier"
+  assert_contains_ws "${POLICY_SECTION}" "${GROUNDED_CITE_NO_CONTENTS_MARKER}" \
+    "planner.md (## Self-Answer Policy) must restate the paths/identifiers-only restriction (never file contents, config values, or command output) for grounding citations"
+  assert_contains_ws "${POLICY_SECTION}" "${GROUNDED_ANSWER_TEXT_MARKER}" \
+    "planner.md (## Self-Answer Policy) must extend the paths/identifiers-only restriction to the auto-adopted answer text itself, not just the citation"
+  assert_contains_ws "${POLICY_SECTION}" "${GROUNDED_ANSWER_PUBLIC_IDENT_MARKER}" \
+    "planner.md (## Self-Answer Policy) must allow the answer text to name public identifiers but never configuration values, file contents, or command output"
+  assert_contains_ws "${POLICY_SECTION}" "${GROUNDED_ANSWER_SECRECY_WINS_MARKER}" \
+    "planner.md (## Self-Answer Policy) must state secrecy wins over recording the answer in full (state precedence, #979)"
+  assert_contains_ws "${POLICY_SECTION}" "${GROUNDED_PRECEDENCE_NEVER_SUPPRESSES_MARKER}" \
+    "planner.md (## Self-Answer Policy) must state a grounded answer never suppresses a security or irreversibility ask"
+  assert_contains_ws "${POLICY_SECTION}" "${GROUNDED_PRECEDENCE_WINS_MARKER}" \
+    "planner.md (## Self-Answer Policy) must state the security/destructive class wins when a question fits both"
+  assert_contains_ws "${POLICY_SECTION}" "${GROUNDED_PACKAGE_EXAMPLE_PKG_MARKER}" \
+    "planner.md (## Self-Answer Policy) must include the velka#2329 worked example naming the package"
+  assert_contains_ws "${POLICY_SECTION}" "${GROUNDED_PACKAGE_EXAMPLE_FAMILY_MARKER}" \
+    "planner.md (## Self-Answer Policy) must include the velka#2329 worked example naming the font family the package declares"
+  assert_contains_ws "${POLICY_SECTION}" "${GROUNDED_DOC_EXAMPLE_MARKER}" \
+    "planner.md (## Self-Answer Policy) must include the velka#2330 worked example (a project doc prescribes the sequencing)"
+  assert_count_at_least_ws "${POLICY_SECTION}" "${COUNTEREXAMPLE_MARKER}" 2 \
+    "planner.md (## Self-Answer Policy) must include counter-examples that still escalate (AC unsatisfiable, and more than one defensible resolution)"
+
+  # --- scope-blowup class: asks only on an actual split recommendation -------
+  SCOPE_BLOWUP_ONLY_SPLIT_MARKER='only when it actually recommends a split'
+  SCOPE_BLOWUP_SPLIT_GATE_MARKER='goes through the Split Gate rather than being asked'
+  if require_block SCOPE_BLOWUP_BULLET "${POLICY_SECTION}" '- **scope blowup**' "planner.md (## Self-Answer Policy)"; then
+    assert_contains_ws "${SCOPE_BLOWUP_BULLET}" "${SCOPE_BLOWUP_ONLY_SPLIT_MARKER}" \
+      "planner.md scope-blowup class must ask a clarifying question only when the planner actually recommends a split"
+    assert_contains_ws "${SCOPE_BLOWUP_BULLET}" "${SCOPE_BLOWUP_SPLIT_GATE_MARKER}" \
+      "planner.md scope-blowup class must route an L estimate with a reasoned no-split verdict (or a size change) through the Split Gate instead of asking"
+    assert_contains_ws "${SCOPE_BLOWUP_BULLET}" "${TICKET_SIZING_TRIGGER_MARKER}" \
+      "planner.md scope-blowup class must keep sizing against the budget in docs/ticket-sizing.md, splitting only on real budget risk (tier L)"
+  fi
+fi
+
+# --- Regression: the opening sentence of the #1069 settled-posture paragraph
+#     (## Clarifying Questions) must stay byte-identical. -----------------------
+
+SETTLED_POSTURE_OPENING_MARKER='When that entailed decision is a security-sensitive or irreversible posture already fixed verbatim by the refined ticket'"'"'s own `### Decisions` or `### Assumptions (auto-adopted)`, this posture is auto-adopted instead of asked'
+assert_file_contains "${PLANNER_AGENT}" "${SETTLED_POSTURE_OPENING_MARKER}" \
+  "#1199 regression: the #1069 settled-posture paragraph's opening sentence must stay untouched"
+
+# --- docs/autonomous-loop.md: Input Needed off-ramp + escalation-class
+#     description in sync (whitespace-normalized: the doc is hard-wrapped) ---
+
+LOOP_OFFRAMP_MARKER='unless attended mode is on for this machine, in which case planning asks you directly instead'
+LOOP_DOC_GROUNDED_MARKER='contradictions and ambiguities with exactly one grounded resolution are auto-adopted'
+LOOP_DOC_SCOPE_BLOWUP_MARKER='scope blowup means a real split recommendation'
+
+if require_content LOOP_CONTENT "${LOOP_DOC}" "docs/autonomous-loop.md"; then
+  if require_block LOOP_OFFRAMP_BLOCK "${LOOP_CONTENT}" '**`Input Needed`**' "docs/autonomous-loop.md (Input Needed off-ramp)"; then
+    assert_contains_ws "${LOOP_OFFRAMP_BLOCK}" "${LOOP_DOC_GROUNDED_MARKER}" \
+      "docs/autonomous-loop.md Input Needed off-ramp must say contradictions and ambiguities with one grounded resolution are auto-adopted, not escalated"
+    assert_contains_ws "${LOOP_OFFRAMP_BLOCK}" "${LOOP_DOC_SCOPE_BLOWUP_MARKER}" \
+      "docs/autonomous-loop.md Input Needed off-ramp must say scope blowup means a real split recommendation"
+    assert_contains_ws "${LOOP_OFFRAMP_BLOCK}" "${LOOP_OFFRAMP_MARKER}" \
+      "#1199 regression: the attended-mode clause of the Input Needed off-ramp must stay unchanged"
+  fi
+fi
+
 echo "lean-planning-contract.test.sh: failures=${failures}"
 [[ "${failures}" -eq 0 ]]

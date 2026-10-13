@@ -8,8 +8,9 @@ Split-depth guard derives it: `gh issue view <ticket> --repo <owner>/<repo> --js
 that parent, giving `isChild`/`parentId`), falling back to a `Related to #<number>` first
 non-empty body line for older convention-linked tickets or a non-zero primary command —
 run once during context gathering, before the Split Gate is ever evaluated.
-When the planner's output carries a non-empty
-`### Split Recommendation` or a `### Size Estimate` of `L`, the Split Gate asks, via
+When the planner's output carries a non-empty, non-`None`
+`### Split Recommendation` (`None` here means exactly `None`/`None.` or a single-line
+well-formed `None — <rationale>`, never a prefix match) or a `### Size Estimate` of `L`, the Split Gate asks, via
 the client's available user-input mechanism, whether to stop — split via
 `/cenci:refine`, persisting nothing — or proceed as a single PR; only Proceed
 continues planning. When the ticket is itself a split child (`isChild` true), the stop
