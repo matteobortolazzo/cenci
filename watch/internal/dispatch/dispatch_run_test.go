@@ -2324,3 +2324,105 @@ exit 0
 		}
 	})
 }
+
+// unsupportedAgentModeDeps builds the applyDispatch fixture for one dispatch
+// mode (ordinary, resume, planning pickup), enabling PlanRefined for planning.
+func unsupportedAgentModeDeps(mode string, now time.Time) (Config, dispatchDeps) {
+	cfg := dispatchTestConfig()
+	deps := dispatchableDeps(now)
+	switch mode {
+	case "resume":
+		deps = resumeDispatchDeps(now)
+	case "planning":
+		cfg.PlanRefined = true
+		deps = planningDispatchDeps(now)
+	}
+	return cfg, deps
+}
+
+// A primary agent without a built-in "implement" workflow (#1215) must never
+// reach runFn nor change a label or the quota, on the ordinary, resume and
+// planning-pickup paths, whether it comes from the agent: label or defaultAgent.
+// "fakeagent" is a custom name, so this proves the general gate independently of
+// the temporary OpenCode pause (opencode_disabled_test.go).
+func TestUnsupportedAgentNeverSpawnsOrChangesLabels(t *testing.T) {
+	now := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
+	wantReason := unsupportedAgentReason("fakeagent")
+	for _, mode := range []string{"ordinary", "resume", "planning"} {
+		for _, selection := range []string{"label", "default", "default with whitespace"} {
+			t.Run(mode+"/"+selection, func(t *testing.T) {
+				cfg, deps := unsupportedAgentModeDeps(mode, now)
+				switch selection {
+				case "label":
+					deps.Tickets[0].Agent = "fakeagent"
+				case "default":
+					cfg.DefaultAgent = "fakeagent"
+				case "default with whitespace":
+					cfg.DefaultAgent = " fakeagent "
+				}
+				cfg.AgentPreference = []string{"codex", "claude"}
+				stubRunFn(t, func(run.Opts, run.Controller) error {
+					t.Fatal("unsupported primary must never spawn or silently switch agents")
+					return nil
+				})
+				mut := &fakeMutator{}
+				prior := 0
+				got, err := applyDispatch(cfg, deps, fakeController{}, mut, false, nil, &prior)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(got) != 1 || got[0].Action != ActionSkip || got[0].Reason != wantReason {
+					t.Fatalf("expected skip with reason %q: %+v", wantReason, got)
+				}
+				if len(mut.labelEdits) != 0 || prior != 0 {
+					t.Fatalf("refusal changed labels/quota: %+v, %d", mut.labelEdits, prior)
+				}
+			})
+		}
+	}
+}
+
+// A user-defined template in config.json never makes a ticket dispatchable:
+// unattended paths accept only built-in (agent, workflow) pairs (#1215).
+func TestUserDefinedImplementTemplateDoesNotMakeAgentDispatchable(t *testing.T) {
+	xdg := t.TempDir()
+	cenciDir := filepath.Join(xdg, "cenci")
+	if err := os.MkdirAll(cenciDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	userConfig := `{"agents":{"fakeagent":{"command":"fakeagent","sandboxCommand":"cenci open","workflows":{"implement":{"args":["--","/cenci:implement {ticket}"]}}}}}`
+	if err := os.WriteFile(filepath.Join(cenciDir, "config.json"), []byte(userConfig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+
+	// Prove the fixture: the config really defines the template for run.Load,
+	// so only the built-in-only gate can be what refuses the ticket.
+	fc, err := run.Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := fc.Agents["fakeagent"].Workflows["implement"]; !ok {
+		t.Fatal("fixture config does not define fakeagent implement")
+	}
+
+	cfg := dispatchTestConfig()
+	deps := dispatchableDeps(time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC))
+	deps.Tickets[0].Agent = "fakeagent"
+	stubRunFn(t, func(run.Opts, run.Controller) error {
+		t.Fatal("a user-defined template must never make a ticket dispatchable")
+		return nil
+	})
+	mut := &fakeMutator{}
+	prior := 0
+	got, err := applyDispatch(cfg, deps, fakeController{}, mut, false, nil, &prior)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := unsupportedAgentReason("fakeagent"); len(got) != 1 || got[0].Action != ActionSkip || got[0].Reason != want {
+		t.Fatalf("expected skip with reason %q: %+v", want, got)
+	}
+	if len(mut.labelEdits) != 0 || prior != 0 {
+		t.Fatalf("refusal changed labels/quota: %+v, %d", mut.labelEdits, prior)
+	}
+}

@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	tmuxfe "github.com/matteobortolazzo/cenci/watch/v2/internal/frontend/tmux"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/ipc"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/tmux/tmuxtest"
 )
@@ -326,12 +327,20 @@ func TestHandleArmRequest_ValidationReasonsAreDistinctPerCategory(t *testing.T) 
 	badInterval.Interval = 0
 	badTmuxPane := validArmRequest()
 	badTmuxPane.TmuxPane = "not-a-pane-id"
+	// Capability categories (#1215): a codex request whose predicate denies
+	// ci-repair, and a daemon whose predicate was never injected (nil).
+	lacksCapability := validArmRequest()
+	lacksCapability.Agent = "codex"
+	d.armCapable = denyArmCapability("codex", "ci-repair")
 
 	prReason := d.handleArmRequest(badPR).Reason
 	repoReason := d.handleArmRequest(badRepo).Reason
 	agentReason := d.handleArmRequest(badAgent).Reason
 	intervalReason := d.handleArmRequest(badInterval).Reason
 	tmuxPaneReason := d.handleArmRequest(badTmuxPane).Reason
+	lacksCapabilityReason := d.handleArmRequest(lacksCapability).Reason
+	d.armCapable = nil
+	capabilityUnavailableReason := d.handleArmRequest(validArmRequest()).Reason
 
 	reasons := map[string]string{
 		"pr":        prReason,
@@ -339,6 +348,9 @@ func TestHandleArmRequest_ValidationReasonsAreDistinctPerCategory(t *testing.T) 
 		"agent":     agentReason,
 		"interval":  intervalReason,
 		"tmux_pane": tmuxPaneReason,
+
+		"lacks_capability":       lacksCapabilityReason,
+		"capability_unavailable": capabilityUnavailableReason,
 	}
 	seen := make(map[string]string, len(reasons))
 	for category, reason := range reasons {
@@ -421,5 +433,123 @@ func TestHandleArmRequest_RejectLogsUnderVerbose(t *testing.T) {
 	d.handleArmRequest(req)
 	if buf.Len() == 0 {
 		t.Error("log output with cfg.Verbose=true: empty, want the reject branch to log")
+	}
+}
+
+// -- capability gate (#1215) --------------------------------------------------
+
+// denyArmCapability returns a capability predicate that is true for every pair
+// except the one (agent, workflow) denial.
+func denyArmCapability(agent, workflow string) func(string, string) bool {
+	return func(a, w string) bool { return a != agent || w != workflow }
+}
+
+// TestHandleArmRequest_AgentLackingArmCapabilityNacksWithoutSpawn covers the
+// daemon half of the arm-time capability gate: an agent missing any of the
+// workflows babysit launches (here codex without ci-repair) is nacked with a
+// reason naming the missing workflow and never reaches the spawn seam, while a
+// different agent is unaffected by that denial.
+func TestHandleArmRequest_AgentLackingArmCapabilityNacksWithoutSpawn(t *testing.T) {
+	spawn := &recordingArmSpawn{resp: ipc.ArmResponse{OK: true}}
+	d := newTestDaemon(&tmuxtest.MockClient{})
+	d.armSpawn = spawn.spawn
+	d.armCapable = denyArmCapability("codex", "ci-repair")
+
+	req := validArmRequest()
+	req.Agent = "codex"
+	resp := d.handleArmRequest(req)
+	if resp.OK {
+		t.Fatal("resp.OK = true, want a nack for an agent without built-in ci-repair")
+	}
+	if !strings.Contains(resp.Reason, "ci-repair") {
+		t.Errorf("resp.Reason = %q, want it to name the missing ci-repair workflow", resp.Reason)
+	}
+	if len(spawn.calls) != 0 {
+		t.Fatalf("armSpawn calls = %d, want 0 -- the capability gate must fail closed before the spawn seam", len(spawn.calls))
+	}
+
+	other := d.handleArmRequest(validArmRequest()) // claude: not denied
+	if !other.OK || len(spawn.calls) != 1 {
+		t.Errorf("claude resp = %+v, armSpawn calls = %d, want an ack and exactly 1 call: the denial is codex-only", other, len(spawn.calls))
+	}
+}
+
+// TestHandleArmRequest_DenyingEachArmWorkflowNacks pins that every required arm
+// workflow gates arming, not just the one the previous test denies.
+func TestHandleArmRequest_DenyingEachArmWorkflowNacks(t *testing.T) {
+	for _, wf := range []string{"address-review", "babysit-attention", "ci-repair"} {
+		t.Run(wf, func(t *testing.T) {
+			spawn := &recordingArmSpawn{resp: ipc.ArmResponse{OK: true}}
+			d := newTestDaemon(&tmuxtest.MockClient{})
+			d.armSpawn = spawn.spawn
+			d.armCapable = denyArmCapability("claude", wf)
+
+			resp := d.handleArmRequest(validArmRequest())
+			if resp.OK || !strings.Contains(resp.Reason, wf) || len(spawn.calls) != 0 {
+				t.Fatalf("resp = %+v, armSpawn calls = %d, want a nack naming %q and 0 spawns", resp, len(spawn.calls), wf)
+			}
+		})
+	}
+}
+
+// TestHandleArmRequest_MergeRepairIsNotAnArmRequirement pins that merge-repair
+// (pinned to Claude at launch time) does not gate arming for another agent.
+func TestHandleArmRequest_MergeRepairIsNotAnArmRequirement(t *testing.T) {
+	spawn := &recordingArmSpawn{resp: ipc.ArmResponse{OK: true}}
+	d := newTestDaemon(&tmuxtest.MockClient{})
+	d.armSpawn = spawn.spawn
+	d.armCapable = denyArmCapability("codex", "merge-repair")
+
+	req := validArmRequest()
+	req.Agent = "codex"
+	if resp := d.handleArmRequest(req); !resp.OK || len(spawn.calls) != 1 {
+		t.Fatalf("resp = %+v, armSpawn calls = %d, want an ack and exactly 1 spawn", resp, len(spawn.calls))
+	}
+}
+
+// TestHandleArmRequest_NilCapabilityPredicateRefusesByDefault pins the
+// default-refuse rule (watch/docs/error-handling.md): a daemon constructed
+// through newDaemon, which leaves armCapable nil, nacks even an otherwise-valid
+// claude request with ReasonArmCapabilityUnavailable and never spawns.
+func TestHandleArmRequest_NilCapabilityPredicateRefusesByDefault(t *testing.T) {
+	cfg := testConfig()
+	d := newDaemon(cfg, tmuxfe.New(cfg, &tmuxtest.MockClient{}), make(chan ipc.HookEvent, 1), &mockReaper{})
+	spawn := &recordingArmSpawn{resp: ipc.ArmResponse{OK: true}}
+	d.armSpawn = spawn.spawn
+
+	resp := d.handleArmRequest(validArmRequest())
+	if resp.OK || resp.Reason != ReasonArmCapabilityUnavailable {
+		t.Fatalf("resp = %+v, want a nack with reason %q", resp, ReasonArmCapabilityUnavailable)
+	}
+	if len(spawn.calls) != 0 {
+		t.Fatalf("armSpawn calls = %d, want 0 -- an uninjected predicate must refuse", len(spawn.calls))
+	}
+}
+
+// TestHandleArmRequest_CapabilityRefusalLogsUnderVerbose covers the reject-branch
+// logging rule (watch/docs/hook-events.md) for both capability reject branches.
+func TestHandleArmRequest_CapabilityRefusalLogsUnderVerbose(t *testing.T) {
+	for name, capable := range map[string]func(string, string) bool{
+		"denied":      denyArmCapability("claude", "ci-repair"),
+		"unavailable": nil,
+	} {
+		t.Run(name, func(t *testing.T) {
+			d := newTestDaemon(&tmuxtest.MockClient{})
+			d.armCapable = capable
+
+			buf := captureLog(t)
+			d.cfg.Verbose = false
+			d.handleArmRequest(validArmRequest())
+			if buf.Len() != 0 {
+				t.Errorf("log output with cfg.Verbose=false: %q, want no output", buf.String())
+			}
+
+			buf.Reset()
+			d.cfg.Verbose = true
+			d.handleArmRequest(validArmRequest())
+			if buf.Len() == 0 {
+				t.Error("log output with cfg.Verbose=true: empty, want the capability reject branch to log")
+			}
+		})
 	}
 }
