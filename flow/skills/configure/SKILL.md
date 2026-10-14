@@ -1899,6 +1899,8 @@ keeping `interactive` — writes nothing, since a missing key already resolves t
 - the plugin's SessionStart hook (`hooks/scripts/check-config-staleness.sh`) — nudges the user at session start when the stamp's major.minor is behind the installed plugin (or missing entirely), so they learn a `/cenci:configure` re-run would pick up new configure features without watching the changelog;
 - maintain's `config-version` check (`/cenci:maintain`, via the same staleness resolver) — reports the same staleness as an advisory `warn`.
 
+Both consumers name the unconditional questions a re-run would ask, computed by `scripts/resolve-delta.sh` from the committed `question-keys.json` table (tested by its own `scripts/resolve-delta.test.sh`). The configure flow itself does not call the resolver yet; that wiring is tracked in #1246.
+
 Patch-only drift is deliberately silent: configure features that warrant a re-run land in minor (`feat`) or major bumps per the plugin-version-bump workflow. Do **not** add `configVersion` to the migration-removal list below — it is a managed field, not a legacy one.
 
 The `cenci` field is optional. If present, preserve existing user values during reconfiguration. Schema:

@@ -11,11 +11,20 @@
 #   --plain    machine-readable one-liner for scripted consumers (maintain's
 #              check.sh config-version check, and this script's own tests):
 #                current <configVersion> <pluginVersion>
-#                stale <configVersion> <pluginVersion>
-#                unstamped - <pluginVersion>
+#                stale <configVersion> <pluginVersion> [<missingKeys>]
+#                unstamped - <pluginVersion> [<missingKeys>]
 #                absent
 #                unknown <reason>
+#              <missingKeys> (stale/unstamped only) is the comma-joined list
+#              of unconditional config keys a configure re-run would ask
+#              about, or "-" when there are none. It comes from
+#              skills/configure/scripts/resolve-delta.sh and is omitted
+#              entirely when the resolver is missing or misbehaves.
 #              Always exits 0 — staleness is advisory, never a gate.
+#
+# Missing keys only enrich the stale/unstamped message ("A re-run would ask N
+# new questions for config keys it is missing: ..."); they never trigger the
+# nudge on their own, and the resolver is not run when the config is current.
 #
 # Staleness rule (single source of truth — check.sh delegates to this script
 # so the hook and the maintain check can never disagree): the config is stale
@@ -81,23 +90,65 @@ else
   fi
 fi
 
+# resolve_missing_keys — sets MISSING_KEYS to the comma-joined unconditional
+# config keys a /cenci:configure re-run would ask about, "-" when there are
+# none, or "" when that is unknown (resolver missing, failing, or printing
+# anything but the expected shape). Conditional questions are left out: they
+# depend on detection this hook cannot run. Every unconditional row's key
+# equals its ID (pinned by resolve-delta.test.sh), so ask minus conditional
+# is the key list. IDs are charset-checked before they can reach the message.
+resolve_missing_keys() {
+  MISSING_KEYS=""
+  local resolver="${PLUGIN_ROOT}/skills/configure/scripts/resolve-delta.sh"
+  local resolved keys
+  [[ -f "$resolver" ]] || return 0
+  resolved="$(bash "$resolver" "$CONFIG_FILE" 2>/dev/null)" || return 0
+  keys="$(jq -r -e '
+    def ids: type == "array" and all(.[]; type == "string" and test("\\A[A-Za-z0-9_.]+\\z"));
+    if (.ask | ids) and (.conditional | ids)
+    then ((.ask - .conditional) | if length == 0 then "-" else join(",") end)
+    else empty end
+  ' <<<"$resolved" 2>/dev/null)" || return 0
+  MISSING_KEYS="$keys"
+}
+
+# key_sentence — prints the advisory sentence naming MISSING_KEYS; prints
+# nothing when the keys are unknown or there are none, so the message stays
+# exactly today's.
+key_sentence() {
+  [[ -n "$MISSING_KEYS" && "$MISSING_KEYS" != "-" ]] || return 0
+  local -a key_list
+  IFS=',' read -r -a key_list <<<"$MISSING_KEYS"
+  if [[ "${#key_list[@]}" -eq 1 ]]; then
+    printf 'A re-run would ask 1 new question for a config key it is missing: %s.' "${MISSING_KEYS//,/, }"
+  else
+    printf 'A re-run would ask %s new questions for config keys it is missing: %s.' "${#key_list[@]}" "${MISSING_KEYS//,/, }"
+  fi
+}
+
+SURFACE_TAIL="Surface this to the user at a natural moment; do not run /cenci:configure unprompted."
+
 case "$STATE" in
   current)
     finish_quiet "current ${CONFIG_VERSION} ${PLUGIN_VERSION}"
     ;;
   stale)
+    resolve_missing_keys
     if [[ "$MODE" == "plain" ]]; then
-      printf 'stale %s %s\n' "$CONFIG_VERSION" "$PLUGIN_VERSION"
+      printf 'stale %s %s%s\n' "$CONFIG_VERSION" "$PLUGIN_VERSION" "${MISSING_KEYS:+ ${MISSING_KEYS}}"
       exit 0
     fi
-    CTX="This repo's .cenci/config.json was written by /cenci:configure v${CONFIG_VERSION}, but the installed cenci flow plugin is v${PLUGIN_VERSION}. Re-running /cenci:configure would pick up configure features added since — existing answers are offered back as defaults. Surface this to the user at a natural moment; do not run /cenci:configure unprompted."
+    KEYS_SENTENCE="$(key_sentence)"
+    CTX="This repo's .cenci/config.json was written by /cenci:configure v${CONFIG_VERSION}, but the installed cenci flow plugin is v${PLUGIN_VERSION}. Re-running /cenci:configure would pick up configure features added since — existing answers are offered back as defaults. ${KEYS_SENTENCE:+${KEYS_SENTENCE} }${SURFACE_TAIL}"
     ;;
   unstamped)
+    resolve_missing_keys
     if [[ "$MODE" == "plain" ]]; then
-      printf 'unstamped - %s\n' "$PLUGIN_VERSION"
+      printf 'unstamped - %s%s\n' "$PLUGIN_VERSION" "${MISSING_KEYS:+ ${MISSING_KEYS}}"
       exit 0
     fi
-    CTX="This repo's .cenci/config.json has no configVersion stamp — it was written by a /cenci:configure older than the installed cenci flow plugin (v${PLUGIN_VERSION}). Re-running /cenci:configure would pick up configure features added since and stamp configVersion — existing answers are offered back as defaults. Surface this to the user at a natural moment; do not run /cenci:configure unprompted."
+    KEYS_SENTENCE="$(key_sentence)"
+    CTX="This repo's .cenci/config.json has no configVersion stamp — it was written by a /cenci:configure older than the installed cenci flow plugin (v${PLUGIN_VERSION}). Re-running /cenci:configure would pick up configure features added since and stamp configVersion — existing answers are offered back as defaults. ${KEYS_SENTENCE:+${KEYS_SENTENCE} }${SURFACE_TAIL}"
     ;;
 esac
 
