@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/detect"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/tmux"
 	"github.com/matteobortolazzo/cenci/watch/v2/pkg/watch"
 )
 
@@ -81,6 +82,13 @@ type Opts struct {
 	// false) on any error, and must make no network calls — lazyboards runs
 	// `cenci close` on every board refresh.
 	Guard func(ticket string) (bool, string)
+	// KillProcesses, if non-nil, kills the process tree behind a resolved
+	// window target ("=session:index") before KillWindow runs (#1253).
+	// Production: a closure over windowproc.Killer. It runs only for windows
+	// about to be closed -- never for --dry-run, busy or babysit-skipped
+	// windows -- and its error is collected but never stops KillWindow: a failed
+	// process kill must not strand the window.
+	KillProcesses func(target string) error
 }
 
 // Run reads a one-shot snapshot from the daemon, matches Target against the
@@ -89,7 +97,10 @@ type Opts struct {
 // matching or killing happens, so a stopped or unreachable daemon results in
 // zero tmux calls. Individual kill failures are collected rather than
 // aborting the rest of the matches (mirrors the per-repo best-effort
-// collection in internal/dispatch/collect.go's CollectTickets).
+// collection in internal/dispatch/collect.go's CollectTickets). For each
+// window it closes, Run first kills the window's process tree through
+// Opts.KillProcesses (#1253); a failure there is collected and the window is
+// still killed.
 func Run(opts Opts) ([]Decision, error) {
 	snap, err := opts.ReadSnapshot(opts.SocketPath)
 	if err != nil {
@@ -142,7 +153,15 @@ func Run(opts Opts) ([]Decision, error) {
 		// "=" forces an exact session-name match so a target never
 		// accidentally resolves against a same-prefixed session.
 		target := fmt.Sprintf("=%s:%s", w.Session, w.WindowIndex)
-		if kerr := opts.Killer.KillWindow(target); kerr != nil {
+		if opts.KillProcesses != nil {
+			if perr := opts.KillProcesses(target); perr != nil {
+				errs = append(errs, fmt.Errorf("killing processes of %s (%s): %w", w.WindowName, target, perr))
+			}
+		}
+		// A window that closed itself between the snapshot and now (its agent
+		// exited) is closed, not a failure; any other kill-window error is still
+		// reported.
+		if kerr := opts.Killer.KillWindow(target); kerr != nil && !errors.Is(kerr, tmux.ErrWindowGone) {
 			errs = append(errs, fmt.Errorf("killing %s (%s): %w", w.WindowName, target, kerr))
 			continue
 		}

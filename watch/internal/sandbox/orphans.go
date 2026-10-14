@@ -48,8 +48,8 @@ import (
 // fail-open on a missing/malformed socket or launch ID, reap-dead, and
 // counting/reporting __UNREADABLE__ markers (including PID-1 exclusion) —
 // happens host-side in OrphanScanner.ScanContainer, never inside this canned
-// scan; the reaper's TERM→KILL escalation, PID-reuse detection, and no-tmux
-// handling stay in launcher.ReapOrphans.
+// scan; the reaper's signaling stays in launcher.ReapOrphans, which drives the
+// TERM→poll→KILL escalation and PID-reuse detection in escalate.go.
 const reapScanScript = `for e in /proc/[0-9]*/environ; do [ -f "$e" ] || continue; p=${e#/proc/}; p=${p%/environ}; line=$(grep --null-data --text --only-matching --max-count=1 '^TMUX_PANE=.*' "$e" 2>/dev/null); rc=$?; if [ "$rc" -eq 2 ]; then [ -e "$e" ] && printf "__UNREADABLE__\t%s\n" "$p"; continue; fi; [ "$rc" -eq 0 ] || continue; pane=${line#TMUX_PANE=}; case "$pane" in *[!%0123456789]*) pane=` + malformedFieldMarker + `;; esac; sock=$(grep --null-data --text --only-matching --max-count=1 '^CENCI_TMUX_SOCKET=.*' "$e" 2>/dev/null); sockrc=$?; if [ "$sockrc" -eq 0 ]; then sock=${sock#CENCI_TMUX_SOCKET=}; else sock=""; fi; case "$sock" in *[[:cntrl:]]*) sock=` + malformedFieldMarker + `;; esac; lid=$(grep --null-data --text --only-matching --max-count=1 '^` + LaunchIDEnvName + `=.*' "$e" 2>/dev/null); lidrc=$?; if [ "$lidrc" -eq 0 ]; then lid=${lid#` + LaunchIDEnvName + `=}; else lid=""; fi; case "$lid" in *[!0123456789abcdef]*) lid=` + malformedFieldMarker + `;; esac; st=$(cat "/proc/$p/stat" 2>/dev/null); st=${st##*) }; set -- $st; if [ "$#" -ge 20 ]; then shift 19; start=$1; else start=""; fi; printf "%s\t%s\t%s\t%s\t%s\n" "$p" "$pane" "$start" "$sock" "$lid"; done`
 
 // panePattern is tmux's real pane-id format; anything else in a TMUX_PANE
