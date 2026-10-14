@@ -31,7 +31,7 @@ This procedure has no autonomous approval path: `/plan` always stops before
 mutations and returns the plan in the conversation for a human to approve, so
 every plan it persists is `approval: human` by construction and needs no
 value branch of its own (`skills/implement/phases/phase-1-plan.md`'s
-`## Persist the Plan` documents the key and the three autonomous values the
+`## Persist the Plan` documents the key and the four autonomous values the
 Claude Code paths write). If this procedure ever gains a path that persists a
 plan without that stop, it must write the matching value instead.
 In normal apply mode persist `.plans/<ticket>-<slug>.md`, then verify the

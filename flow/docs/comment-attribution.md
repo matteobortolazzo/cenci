@@ -64,7 +64,7 @@ different quoting — the banner blockquoted, the marker/anchor bare.
 
 Every marker-bearing flow comment uses one of the `<kind>` values below;
 `<kind>` is unique per call site so a consumer can tell which flow code path
-produced a given comment. flow's five kinds:
+produced a given comment. flow's six kinds:
 
 | Kind | File / call site | Marker | Consumers |
 |---|---|---|---|
@@ -73,6 +73,7 @@ produced a given comment. flow's five kinds:
 | `followup-tracked` | `skills/implement/phases/phase-9-pr.md` — the followups-tracked comment | `<!-- cenci-followup-tracked -->` | `isCenciAuthored` (`watch/internal/dispatch/resume.go`) |
 | `planner-escalation` | `skills/implement/phases/phase-1-plan.md` — `## Escalation Anchor` and its four call sites | `<!-- cenci-planner-escalation:<nonce> -->` | `isCenciAuthored` (`watch/internal/dispatch/resume.go`) |
 | `oversize-child` | `skills/implement/phases/phase-1-plan.md` — the Split Gate's split-child Stop branch and its lean-ticket-mode escalation branch (two call sites) | `<!-- cenci-oversize-child -->` | `isCenciAuthored` (`watch/internal/dispatch/resume.go`) |
+| `decision` | `skills/implement/phases/phase-1-plan.md` — `## Decision Comment` and its three call sites (Lean Approval Path step 4, `## Persist the Plan`'s Mark-Planned prose, `## Resume From Draft` step 7) | `<!-- cenci-decision -->` | `isCenciAuthored` (`watch/internal/dispatch/resume.go`) |
 
 ### `parent-gap-report` is a cross-project contract
 
@@ -98,9 +99,9 @@ appear under `flow/skills/`:
 | `plan-invalid` | `<!-- cenci-plan-invalid -->` |
 | `reconcile-stuck` | `<!-- cenci-reconcile-stuck -->` |
 
-### `plan-comment` is the one kind with two banner forms
+### `plan-comment` is the one kind with three banner forms
 
-Every other kind has exactly one banner literal. `plan-comment` has two,
+Every other kind has exactly one banner literal. `plan-comment` has three,
 selected by the plan's `approval` front-matter key (`skills/implement/phases/phase-1-plan.md`'s
 `## Persist the Plan`). A human-approved plan keeps the original wording:
 
@@ -108,18 +109,32 @@ selected by the plan's `approval` front-matter key (`skills/implement/phases/pha
 > 🤖 **cenci** — implementation plan posted by `/cenci:implement` (planning).
 ```
 
-Every other `approval` value — `lean`, `trivial`, `lean-resumed` — uses the
-auto-approved variant instead:
+Every other `approval` value except `lean-decided` — `lean`, `trivial`,
+`lean-resumed` — uses the auto-approved variant instead:
 
 ```markdown
 > 🤖 **cenci** — implementation plan posted by `/cenci:implement` (planning — auto-approved, no human review).
 ```
 
+A `lean-decided` plan uses the planner-decisions variant instead (the plan
+carries at least one `decided:` entry, which replaces `lean`, `lean-resumed` and
+`human`):
+
+```markdown
+> 🤖 **cenci** — implementation plan posted by `/cenci:implement` (planning — with planner decisions; see the decision comment, overrule on the PR).
+```
+
+The selection rule: `human` takes the original form, `lean-decided` takes the
+planner-decisions form, and every other value takes the auto-approved form. The
+third form deliberately avoids the words "auto-approved": a lean plan persisted
+through the `## New Plan` fallback still stops for human review, so
+"auto-approved" would be false for it.
+
 Only the banner line differs; the `<!-- cenci-plan-comment -->` marker and its
-own non-blockquoted line are identical in both forms, so the marker invariant
+own non-blockquoted line are identical in all three forms, so the marker invariant
 and every `isCenciAuthored` consumer are unaffected by which form was posted.
 The split exists because the plan comment is the only view of a plan most
-readers ever open, and three of the four paths that persist a plan never stop
+readers ever open, and most of the paths that persist a plan never stop
 for human review — a merged ticket whose plan nobody read should say so in the
 line a thread-scanner actually sees. This is attribution, not authorization:
 like every banner in this doc it is public, forgeable text, and no consumer may

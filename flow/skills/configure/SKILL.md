@@ -1991,8 +1991,11 @@ and `skills/implement/phases/phase-1-plan.md`'s `## Lean Approval Path`). Schema
   any other value all resolve to `"interactive"` (today's behavior: the planner asks up to 6
   clarifying questions via `AskUserQuestion` and never self-answers). `"lean"` activates
   `agents/planner.md`'s `## Self-Answer Policy`: the planner self-resolves everything except
-  its five named escalation classes (a contradiction or ambiguity with exactly one grounded
-  resolution is still self-resolved), and a plan persisted with no escalations — including an
+  its three stop classes (security-sensitive, destructive or irreversible, scope blowup), and
+  decides the contradiction and product-ambiguity questions it can justify from the repo
+  (recorded as `decided:` entries, announced in one ticket comment and the PR body; a
+  contradiction or ambiguity with exactly one grounded resolution is still self-resolved
+  silently), and a plan persisted with no escalations — including an
   `L` estimate carrying a reasoned `None — <rationale>` no-split verdict — is implicitly
   approved and continues straight into Phase 2 in the same session.
 

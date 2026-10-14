@@ -76,11 +76,14 @@ re-planned automatically instead of being skipped as unusable.
 
 Two off-ramps exist and both are normal:
 
-- **`Input Needed`** — planning hit one of five escalation classes (security-sensitive,
-  destructive/irreversible, contradicts the refined ticket, genuine product ambiguity,
-  scope blowup — where contradictions and ambiguities with exactly one grounded resolution
-  are auto-adopted rather than escalated, the resolution being fixed by a project doc or a
-  checkable codebase/package fact, and scope blowup means a real split recommendation).
+- **`Input Needed`** — planning hit one of three stop classes (security-sensitive,
+  destructive/irreversible, scope blowup), where scope blowup means a real split
+  recommendation; a unique grounded resolution is still auto-adopted silently (the
+  resolution being fixed by a project doc or a checkable codebase/package fact), and
+  contradictions and product ambiguities the planner can justify from the repo are decided
+  and flagged rather than asked (see [Planner decisions](#1-let-plans-approve-themselves));
+  they still stop when the contradiction makes an acceptance criterion unsatisfiable or
+  changes its literal text, or when no option can be justified from the repo.
   It writes a draft plan, posts the question on the ticket, and stops
   — unless attended mode is on for this machine, in which case planning asks you directly instead
   (see [The attended override](#the-attended-override)).
@@ -141,12 +144,36 @@ ordinary one:
 > 🤖 **cenci** — implementation plan posted by `/cenci:implement` (planning — auto-approved, no human review).
 ```
 
-Two other paths reach a plan without human review and are labelled distinctly:
-`approval: trivial` (triage judged the ticket trivial and skipped planning entirely)
-and `approval: lean-resumed` (planning escalated, you answered the questions on the
-ticket, and the plan those answers produced was never shown to you). `approval: human`
+Other paths reach a plan without human review and are labelled distinctly:
+`approval: trivial` (triage judged the ticket trivial and skipped planning entirely),
+`approval: lean-resumed` (planning escalated, you answered the questions on the
+ticket, and the plan those answers produced was never shown to you),
+and `approval: lean-decided` (the plan carries at least one planner decision, and its plan comment names them). `approval: human`
 is the ordinary path where you read the plan and launched the run. Plans written before
 this key existed carry none — that means unrecorded, not unapproved.
+
+**Planner decisions.** In lean mode the planner no longer stops to ask the contradiction
+and product-ambiguity questions it can justify from the repo (one option, with a rationale
+citing the ticket, the codebase, or project docs); it decides them and tells you. The
+notification is one comment on the ticket listing each decided question, the option chosen,
+and the alternative (opening with the cenci banner and carrying `<!-- cenci-decision -->`,
+posted before the plan is labelled), and the pull request body lists the same decisions
+under `## Planner Decisions`. The plan comment opens with a third banner naming the
+decisions instead of the auto-approved one:
+
+```markdown
+> 🤖 **cenci** — implementation plan posted by `/cenci:implement` (planning — with planner decisions; see the decision comment, overrule on the PR).
+```
+
+Overruling happens on the pull request: to overrule a decision, comment on the pull request
+this run opens. Babysit already relaunches `address-review` for any new non-bot PR comment,
+so no new mechanism is involved, and a reply left only on the ticket is not acted on. A
+failed decision comment does not hold back the run — the pull request body is the durable
+notice. Security-sensitive, destructive/irreversible, and scope-blowup questions are never
+decided, and neither is a contradiction that would make an acceptance criterion
+unsatisfiable. On automerge, there is no extra automerge hold: a `lean-decided` ticket carrying `automerge:ok` merges like any other, and
+babysit's pre-merge feedback recheck still catches an overruling PR comment posted before the
+merge; after a merge, overruling means a revert or a follow-up ticket.
 
 #### The attended override
 
@@ -165,7 +192,8 @@ With it on, a planning session in a `"lean"` repo behaves as `"interactive"`:
 - a clarifying question is asked directly instead of being posted to the ticket — no
   `Input Needed` label, no `awaiting-input` draft, and no waiting for the next dispatch pass;
 - a plan with no escalations is **not** self-approved: it is saved, the session stops for
-  you to read it, and its front matter records `approval: human`, not `approval: lean`.
+  you to read it, and its front matter records `approval: human`, not `approval: lean`;
+- contradiction and product-ambiguity questions are asked in the session, never decided: the planner emits no `decided:` entry and the plan never records `approval: lean-decided`.
 
 This is an override, not a sixth switch: it only ever suspends switch 1, never grants it.
 An `"interactive"` repo is unaffected — attended mode gives it nothing it did not already
@@ -328,7 +356,7 @@ running.
 *all* of these hold. Each can only disqualify — none can ever promote a ticket onto
 the fast path:
 
-- no escalation in the five named classes;
+- no stop-class escalation (security-sensitive, destructive or irreversible, scope blowup) and no contradiction or product-ambiguity question that must stop;
 - no unresolved `### Open Questions` in the planner's output;
 - no file in `### Files to Modify`/`### Files to Create` matching the sensitive-path
   set (auth, session, credential, token, `.pem`, `.env`, permission, rbac, crypto,
