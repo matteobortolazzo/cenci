@@ -53,6 +53,8 @@ engineering conventions and native workflow foundations described in
 | `/cenci:sync` | Pull latest main, rebase active worktrees, prune stale remotes, clean up merged branches |
 | `/cenci:maintain [structure\|docs\|clients\|rules\|backlog]` | Audit and repair the project's workflow structure, documentation and generated indexes, client-adapter consistency (Claude Code, Codex, OpenCode), accumulated rules, and the open `Followup` backlog — `rules` replaces the retired garden skill. Runs the four repo-audit modes by default, or a single named mode; `backlog` mutates GitHub issues instead of repo files and is excluded from the default run, so it must be requested explicitly. Reports findings with proposed repairs for approval, then applies them in one PR (except `backlog`, which applies as GitHub-issue mutations, no PR). Independent of lazyboards |
 
+**Configure re-runs**: a re-run of `/cenci:configure` asks only new or never-offered questions; `/cenci:configure --all` replays every question. Answers you already gave (including declines) are carried through and listed in the end-of-run summary, and a marker-managed `.cenci/Dockerfile` is refreshed without asking.
+
 **Codex support**: Codex receives the portable convention skills below plus the full
 implementation workflow as a documented `AGENTS.md` equivalent. The interactive
 pipeline itself remains Claude Code-only. See [`docs/codex.md`](docs/codex.md).
@@ -582,7 +584,7 @@ External integrations use the `gh` CLI rather than MCP servers, keeping permissi
 
 > **Migration (Context7 moved to project scope)**: existing users lose the plugin-provided
 > Context7 server when they update to this version — cenci no longer ships a plugin-scoped
-> `.mcp.json`. Re-run `/cenci:configure` and select Context7 to write it into the project's
+> `.mcp.json`. Re-run `/cenci:configure --all` and select Context7 to write it into the project's
 > own `.mcp.json` (pinned to a specific version, with `CONTEXT7_API_KEY` read from the shell
 > environment). The same run also heals any stale `mcp__plugin_cenci_context7__*` permission
 > entries left over from the old plugin-scoped setup.
@@ -613,7 +615,7 @@ The pipeline ran inline and skipped the dedicated reviewer agents (security-revi
 
 The `[1m]` flag is session-level: every subagent inherits it but **not** the session's extra-usage entitlement, so `Task` delegation is gated — even with a `model: sonnet` override and even with usage credits enabled (Claude Code bug [#51060](https://github.com/anthropics/claude-code/issues/51060) / [#57249](https://github.com/anthropics/claude-code/issues/57249)). cenci's reviewers need the standard 200K context.
 
-- **Permanently (keeps your main session on 1M):** run `/cenci:configure` and answer **Yes** to "Pin subagents to 200K" — it sets `CLAUDE_CODE_SUBAGENT_MODEL=claude-sonnet-5` in `~/.claude/settings.json` so every subagent runs on Sonnet 200K while your main session keeps 1M. Restart for it to take effect. (Pin Sonnet, not Opus: Opus auto-upgrades to 1M on Max/Team/Enterprise plans and would re-trigger the gate. Note the pin overrides agent `model:` frontmatter, flattening cenci's model tiering while set — unset it on standard 200K sessions.)
+- **Permanently (keeps your main session on 1M):** run `/cenci:configure --all` and answer **Yes** to "Pin subagents to 200K" — it sets `CLAUDE_CODE_SUBAGENT_MODEL=claude-sonnet-5` in `~/.claude/settings.json` so every subagent runs on Sonnet 200K while your main session keeps 1M. Restart for it to take effect. (Pin Sonnet, not Opus: Opus auto-upgrades to 1M on Max/Team/Enterprise plans and would re-trigger the gate. Note the pin overrides agent `model:` frontmatter, flattening cenci's model tiering while set — unset it on standard 200K sessions.)
 - **Now (this session), or if pinning doesn't clear the gate:** run `/model sonnet` to put the whole session on 200K, then re-invoke the skill. Note `/model opus` will *not* drop you to 200K on a plan that auto-upgrades Opus to 1M.
 
 ## Project Structure

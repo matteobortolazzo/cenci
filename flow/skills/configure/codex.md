@@ -80,7 +80,7 @@ resolution uses the same `git rev-parse --path-format=absolute --git-common-dir`
 (logging one informational line before falling back to the Scripted Detection root on
 failure), and the
 same three-way branch runs on `cenci dispatch status --json --dir '<main-checkout>'`:
-`enrolled: false` asks the enroll question then the session question;
+`enrolled: false` asks the enroll question (unless a delta run finds `dispatchEnroll` in `configureOffered`) then the session question;
 `enrolled: true, session: ""` asks only the session question; `enrolled: true, session: "<set>"` skips
 both. The procedure never reads, modifies, or writes ~/.config/cenci/config.json itself
 — every mutation goes through a single combined `cenci dispatch enroll --dir
@@ -90,10 +90,68 @@ procedure. Because the fleet dispatch enroll is a mutation and therefore runs on
 gathers the enroll/session answers but never calls `cenci dispatch enroll` itself —
 never during `/plan`.
 
-Autonomy Settings mirrors the Claude procedure's `### Autonomy Settings` section: it asks
-about `planning` and `automerge` only when absent — an already-present value (top-level or,
+Delta re-runs mirror the Claude procedure's `### Delta Resolution` section. On a re-run
+(an `existingConfig` exists, or a `migrationBase` merged from both `.cenci/config.json` and
+`.claude/config.json`), run `bash
+"${PLUGIN_ROOT}/skills/configure/scripts/resolve-delta.sh" <config-path>` as its own
+command, and use its JSON line. A `migrationBase` is materialized to a slug-scoped scratch
+file first, and that file is removed afterwards even when the resolver or a later overlay
+fails. A legacy-only run (only `.claude/config.json`, no `.cenci/config.json`) is a full run
+and never calls the resolver. Delta mode asks only the question IDs the resolver lists in `ask` and carries the rest,
+so a carried answer skips only the prompt and its value still drives every generation
+step. A leading `--all` in the user's request replays every question and ignores the ledger
+(it never removes ledger entries); under `--all`, question 13 re-offers "Keep current (Recommended)" or a switch, and question 14 re-offers "Keep current block(s) (Recommended)" or "Remove the block(s)".
+If the resolver fails, it falls back to a full replay and says why. A resolver result whose
+`ask` or `carried` is not a JSON array fails the same check
+(`jq -e '(.ask | type) == "array" and (.carried | type) == "array"'`) and falls back the same way.
+A fallback full replay is not an `--all` run: it does not re-offer a present `planning` or
+`automerge` value, so a fallback never puts the destructive "Remove the block(s)" option in front of the user.
+
+Sandbox flags for `merge-sandbox-config.sh` are derived per question ID on a delta run. Questions
+9, 9b and 9c (`sandbox.enabled`, `sandbox.dind`, `sandbox.azure`) listed in the resolver's `carried`
+are never asked, so the flag for a carried ID is derived from the existing `sandbox.*` value
+(`true` when it is `true`, `false` only for an absent key), never a bare `false` that would delete
+an opt-in; an ID listed in `ask` (for example `sandbox.dind` and `sandbox.azure` on a config that
+predates them) uses the answer collected this run, so a just-answered Yes is written and consumed.
+Generate or refresh the managed `.cenci/Dockerfile` whenever the effective `sandbox.enabled` is
+`true`, carried or just answered.
+
+Every write stamps `configureOffered`: Codex stamps `configureOffered` with the same sorted, de-duplicated union as the Claude procedure,
+recording only the questions actually put to the user and applied or explicitly declined. The question 13/14 overlays and
+the ledger stamp use the exact programs the Claude procedure keeps between its
+`cenci:configure-q13-switch`, `cenci:configure-q14-remove` and
+`cenci:configure-offered-ledger` markers: Codex uses the same marker-bounded jq programs as `SKILL.md`,
+and validates each overlay before the write: the `jq` call must exit 0 and the result must pass
+`jq -e 'type == "object"'` (an empty output passes `jq empty`, so that alone is not a gate). When a question 13/14 overlay
+falls back, its answer was not applied: the apply step tells the user (that the question will be asked
+again on the next delta run only when its key is absent and its ID is not already in the existing ledger,
+otherwise to re-run `/cenci:configure --all` to apply it), removes that question's ID
+from the offered set before stamping the ledger, and reports only the overlay actually applied
+(including the `## Review required — automerge policy removed` section). `dispatchEnroll` is recorded
+only after a successful `cenci dispatch enroll` or an explicit "No"; an enroll failure is reported and not recorded.
+
+On a delta run, Codex refreshes a valid marker-managed `.cenci/Dockerfile` without asking, and leaves a `.cenci/Dockerfile` with no markers or malformed markers untouched and reported;
+`--all` restores the Overwrite/Skip/Show prompt. The Q12 dispatch session repair is still asked on a delta run. Board Config's
+suggest-or-skip analyzer only reports on a delta run. Plan mode and the apply step split the work: the resolver runs read-only during `/plan`; the ledger, overlay and Dockerfile writes happen only in the apply step
+(`cenci run configure apply <checkpoint-id> --agent codex`). The offered IDs and the collected
+answers (the resolver's `ask` and `carried`, the effective sandbox flags, and the question 11/13/14 answers)
+travel in the plan/apply checkpoint; the apply step reads them from there and never re-derives
+them from the resolver, whose result may differ by then.
+
+The apply step's report carries the same obligations as the Claude procedure's final report: the
+carried-through summary (question IDs and config key names, never values in the PR body, and saying
+`--all` would re-open them), the Dockerfile report (the block diff for a refreshed block, or "left untouched"
+for no or malformed markers), the lazyboards report including the notice when question 10 is carried but
+`.lazyboards.yml` is missing (it is not regenerated; `--all` re-offers it), and a ledger-not-stamped
+notice when the ledger overlay fell back, so this run's questions will be asked again. A fallen-back
+question 13/14 overlay or a failed `cenci dispatch enroll` is reported the same conditional way: asked
+again on the next delta run only when the key is absent and the ID is not already in the existing ledger,
+otherwise re-run `/cenci:configure --all`.
+
+Autonomy Settings mirrors the Claude procedure's `### Autonomy Settings` section: the procedure on a delta run asks
+about `planning` and `automerge` only when absent and not already offered — an already-present value (top-level or,
 for `automerge`, any `projects[]` entry) is reported verbatim and never re-prompted, narrowed,
-or removed. It defaults both offers to the conservative answer — `interactive` for planning,
+or removed on a delta run, and `--all` re-offers both with keep-or-change options. It defaults both offers to the conservative answer — `interactive` for planning,
 no automerge block — and the automerge offer stays binary (skip vs. scaffold a starter block
 for hand review), never a field-by-field sub-wizard. Because both keys land in the apply
 step's config write, never during `/plan`, Plan mode only gathers the answers and previews the

@@ -2,10 +2,10 @@
 name: configure
 description: "Configure cenci's neutral project core and generate Claude/Codex adapters."
 compatibility: Requires Claude Code settings, plugin environment variables, and AskUserQuestion.
-argument-hint: [additional context]
+argument-hint: [--all] [additional context]
 user-invocable: true
 disable-model-invocation: true
-allowed-tools: Read, Write, Edit, Glob, Grep, AskUserQuestion, Bash(bash "${CLAUDE_PLUGIN_ROOT}/skills/configure/scripts/detect-project.sh"), Bash(bash "${CLAUDE_PLUGIN_ROOT}/skills/configure/scripts/merge-sandbox-config.sh":*), Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/migrate-project-core.sh":*), Bash(pen interactive --help:*), Bash(test:*), Bash(which:*), Bash(jq:*), Bash(mv ~/.claude/settings.json.tmp ~/.claude/settings.json), Bash(mkdir -p:*), Bash(rm -f .claude/hooks/check-pending-plans.sh), Bash(rmdir .claude/hooks:*), Bash(gh auth status:*), Bash(gh label list:*), Bash(gh label create:*), Bash(gh pr create:*), Bash(gh pr view:*), Bash(git rev-parse:*), Bash(git add:*), Bash(git commit:*), Bash(git worktree add:*), Bash(git -C:*), Bash(git diff --no-index:*), Bash(rm -f ${TMPDIR:-/tmp}/cenci/cenci-configure-:*), Bash(cenci dispatch status:*), Bash(cenci dispatch enroll:*)
+allowed-tools: Read, Write, Edit, Glob, Grep, AskUserQuestion, Bash(bash "${CLAUDE_PLUGIN_ROOT}/skills/configure/scripts/detect-project.sh"), Bash(bash "${CLAUDE_PLUGIN_ROOT}/skills/configure/scripts/merge-sandbox-config.sh":*), Bash(bash "${CLAUDE_PLUGIN_ROOT}/skills/configure/scripts/resolve-delta.sh":*), Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/migrate-project-core.sh":*), Bash(pen interactive --help:*), Bash(test:*), Bash(which:*), Bash(jq:*), Bash(mv ~/.claude/settings.json.tmp ~/.claude/settings.json), Bash(mkdir -p:*), Bash(rm -f .claude/hooks/check-pending-plans.sh), Bash(rmdir .claude/hooks:*), Bash(gh auth status:*), Bash(gh label list:*), Bash(gh label create:*), Bash(gh pr create:*), Bash(gh pr view:*), Bash(git rev-parse:*), Bash(git add:*), Bash(git commit:*), Bash(git worktree add:*), Bash(git -C:*), Bash(git diff --no-index:*), Bash(rm -f ${TMPDIR:-/tmp}/cenci/cenci-configure-:*), Bash(cenci dispatch status:*), Bash(cenci dispatch enroll:*)
 ---
 
 > **Client dispatch**: In Codex, read `codex-runtime` and `configure/codex.md`, execute that native procedure, and do not continue into the Claude procedure below.
@@ -18,7 +18,10 @@ Help the user set up this project for the cenci plugin.
 
 ### Parse `$ARGUMENTS`
 
-All of `$ARGUMENTS` is optional **user context** (additional instructions or focus areas).
+`$ARGUMENTS` is optional. `--all` is a reserved leading token of `$ARGUMENTS`; everything after it is user context.
+When the first token is `--all`, the run replays every question (see the Delta Resolution subsection below); a `--all` anywhere
+else is ordinary user context. The remaining text is optional **user context** (additional instructions or focus
+areas). Strip the `--all` token before deriving the slug (see Create Worktree below).
 If empty, proceed normally with defaults.
 
 ### Existing Config Detection
@@ -41,8 +44,9 @@ Rerun it with `--apply` only after approval, with `<root>` set to `<worktree-pat
 Create Worktree below — the worktree exists by the time any `--apply` can run). Never
 rewrite or delete `.claude/config.json`; it is a read-only compatibility artifact.
 
-When `existingConfig` is present, tell the user before starting questions:
-"Found existing configuration. Each question will show your current setting as the default — select it to keep it unchanged."
+When `existingConfig` (or `migrationBase`) is present, tell the user before starting questions, according to the run mode (resolved in the Delta Resolution subsection below):
+- **`delta` run** (the default): "Found existing configuration. Only new or never-offered questions will be asked; answers you already gave are carried through. Run `/cenci:configure --all` to re-open every question."
+- **`--all` or `full` run**: "Found existing configuration. Each question will show your current setting as the default — select it to keep it unchanged."
 
 Reconfiguration runs are how a project picks up configure features added since its config was written. The plugin's SessionStart hook (`hooks/scripts/check-config-staleness.sh`) compares `existingConfig.configVersion` against the installed flow plugin version and nudges the user to re-run this skill when the config is stale or unstamped; completing this run refreshes the stamp (step 6) and clears the nudge.
 
@@ -53,7 +57,7 @@ Reconfiguration runs are how a project picks up configure features added since i
 Create the worktree now, before any file is written (including a migration `--apply` above) and before the detection/question steps below, since none of them depend on it existing yet:
 
 1. Verify at least one commit exists: `git rev-parse HEAD 2>/dev/null`. If the repository has no commits, create an initial commit as two standalone Bash calls (never compound `&&` — shell-rules: every segment of a compound is evaluated independently by the approval system): `git add -A`, then `git commit -m "chore: initial commit" --allow-empty`.
-2. Derive a slug: `init` when `existingConfig` is null (first-ever configure run), `update` for a plain reconfiguration, or a short kebab-case description of the user's focus when `$ARGUMENTS` names one (e.g. "refresh MCP servers" → `mcp-refresh`).
+2. Derive a slug: `init` when `existingConfig` is null (first-ever configure run), `update` for a plain reconfiguration, or a short kebab-case description of the user's focus when the user context (the `$ARGUMENTS` text left after the `--all` token is stripped) names one. A bare `--all` carries no focus, so it also derives `update`. User context never re-opens an already-answered question — only `--all` does (see the Delta Resolution subsection below).
 3. Create the worktree: `git worktree add .worktrees/configure-<slug> -b chore/configure-<slug> main`. If that branch/directory name is already taken by an unrelated prior run, append `-2`, `-3`, etc. until it's free.
 
 From this point on, `<worktree-path>` is `.worktrees/configure-<slug>`. Every file this skill reads or writes below — `.cenci/config.json`, `AGENTS.md`, `CLAUDE.md`, `.mcp.json`, `.lsp.json`, `.gitignore`, `.claudeignore`, `.claude/settings.json`, `.github/workflows/`, `.cenci/Dockerfile`, `.lazyboards.yml`, `.codex/` — and every "the repo root" / "the project root" reference in the steps below resolves against `<worktree-path>`, never the main checkout. Use absolute paths rooted at `<worktree-path>` for every Write/Edit; verify the CWD before Bash commands rather than relying on a single `cd` persisting across calls. `gh label create` / `gh issue` calls (step 3c) are GitHub API calls, not file writes, and run the same regardless of worktree.
@@ -79,6 +83,39 @@ bash "${CLAUDE_PLUGIN_ROOT}/skills/configure/scripts/detect-project.sh"
 - `detection.warnings` — non-fatal detection notes; relay them to the user as informational messages
 
 If the script exits non-zero or its output is not valid JSON, fall back to the **manual fallback** procedure kept in each consuming section below — a detection either comes from `detection` or from its manual fallback, never silently skipped. The script only detects: every question, catalog decision, and user choice stays in this skill.
+
+### Delta Resolution
+
+A re-run of this skill is a **delta** by default: questions whose answer is already recorded, or that an earlier run already offered, are skipped, while every generation step still runs. The deterministic answer to "which questions does this run ask?" comes from `scripts/resolve-delta.sh` and the committed `question-keys.json` table (see the `ID` column of the defaults table under Container Detection).
+
+**Run mode.** The run mode is `delta` only when `existingConfig` (or `migrationBase`) exists, `--all` is absent, and the resolver succeeds; otherwise the run mode is `full` and every question is asked with `--all` semantics, except questions 13 and 14 (see Fallback). That is today's behavior: each question shows the current setting as its default. A first run (`existingConfig` null), a legacy-only migration run (only `.claude/config.json` exists, so there is no `.cenci/config.json`, no `existingConfig` and no `migrationBase` to resolve against) and a `--all` run never call the resolver; all three are `full` runs by the first and second conditions, not by a resolver failure.
+
+**Resolver call.** Run the resolver as its **own** Bash call (per `cenci:shell-rules`), after Scripted Detection and before the first question — it only reads, nothing is written:
+
+```bash
+bash "${CLAUDE_PLUGIN_ROOT}/skills/configure/scripts/resolve-delta.sh" <config-path>
+```
+
+`<config-path>` is the file `existingConfig` was read from (`.cenci/config.json` in the repository root of the main checkout). On a migration run where both `.cenci/config.json` and `.claude/config.json` exist, the input is `migrationBase`: `migrationBase` is written to `${TMPDIR:-/tmp}/cenci/cenci-configure-<slug>-delta-input.json` first and removed afterwards (`mkdir -p ${TMPDIR:-/tmp}/cenci` beforehand, then `rm -f ${TMPDIR:-/tmp}/cenci/cenci-configure-<slug>-delta-input.json` as its own Bash call once the resolver has run — whether it succeeded, failed or failed the shape check below). A legacy-only run has no canonical config to resolve against, so it is a `full` run and never calls the resolver. Parse its single stdout JSON line as `delta`: `delta.ask` (question IDs to ask), `delta.carried` (IDs to skip), `delta.missingKeys` and `delta.conditional`. The output holds question IDs and config key names only, never config values.
+
+**Result shape check.** Valid JSON is not enough: before using it, require that `delta.ask` and `delta.carried` are both JSON arrays — for example `jq -e '(.ask | type) == "array" and (.carried | type) == "array"'` over the stdout line, exit 0. A result that fails the check (a bare scalar, an object without the arrays, `null`) is treated exactly like a resolver failure in the fallback below; never ask "nothing" because an unusable result was read as an empty `delta.ask`.
+
+**Fallback.** If the resolver exits non-zero, prints invalid JSON, or its JSON fails the shape check above, treat the run as `full` and tell the user why. Give one informational line naming the stderr cause (or the failed shape check); a resolver failure never blocks configuration and never silently skips a question. A `full` run caused by a resolver failure does **not** re-offer a present `planning` or `automerge` value — only an explicit `--all` does (see `### Autonomy Settings`): a fallback must never put the destructive "Remove the block(s)" option in front of the user.
+
+**Using the result.** Ask only the question IDs in `delta.ask` and carry every ID in `delta.carried`. When `delta.ask` is empty, ask no questions and still run every generation step. A carried answer skips only the prompt — its value still drives every generation step. That covers `.mcp.json`, `.lsp.json`, `~/.claude/settings.json`, the AGENTS/CLAUDE marker sections and `.cenci/Dockerfile`: read the value from `existingConfig` instead of asking. Question IDs map to the numbered questions through the `ID` column of the defaults table; a question whose ID is not in `delta.ask` is skipped even when its numbered section below says "ask".
+
+**Offered ledger.** Only questions actually put to the user this run are recorded as offered (step 6 stamps them into `configureOffered`). A conditional question whose detection condition fails (5c without a frontend framework, Playwright without `@playwright/test`, question 6 without detected LSP servers, question 10 when `.lazyboards.yml` exists, question 11 in a container or when the status probe fails) is not recorded, and question 12 and Steps 2a/2b have no ID and are never recorded. An ID is recorded only for an answer that was applied or explicitly declined: when the question 13/14 overlay falls back in step 6, that question's ID is removed from the offered set before the ledger is stamped (the next delta run asks it again only when its key is absent and its ID is not already in the existing ledger; otherwise `/cenci:configure --all` applies it), and question 11 is recorded only after a successful `cenci dispatch enroll` or an explicit "No" (see `### Fleet Dispatch Enrollment`).
+
+**Named exceptions** — the only things asked or re-opened beyond `delta.ask` on a delta run:
+- The `enrolled: true, session: ""` repair (question 12) is still asked on a delta run (see `### Fleet Dispatch Enrollment`).
+- The only re-offers a detected stack change causes are question 1 pre-filled with the detected stack, Steps 2a/2b for new monorepo projects, and questions 5/6 for servers missing from the existing maps. The keep-or-change gate still applies to the servers already recorded.
+
+**Things that are not configure questions on a delta run.**
+- Free-text user context never re-opens an answered question on a delta run; if it names one, say that `/cenci:configure --all` re-opens it. Context still steers the questions that are asked and the generation steps.
+- When question 8 is carried, `ci.yml` is neither regenerated nor prompted for. The conflict check is part of question 8, and `ci.yml` carries no managed markers.
+- A carried `uiConventions` keeps the existing `## UI Conventions` section verbatim. That answer lives only in the generated `AGENTS.md`.
+- The substantive-guidance diff-approval gate in step 1 stays a safety gate, not a configure question: it still fires whenever existing guidance would be replaced.
+- The `.lazyboards.yml` suggest-or-skip analyzer only reports on a delta run, and a managed `.cenci/Dockerfile` is refreshed without asking (see step 5e and `### Board Config (lazyboards)`).
 
 ### Platform Detection
 
@@ -112,26 +149,33 @@ This detection is a **non-blocking advisory** — it never gates configuration a
 - **In container**: emit an informational message: "Detected the cenci-sandbox container — the container is the security boundary. Claude Code's host sandbox stays disabled." Then continue normally.
 - **Not in container**: emit an advisory and continue anyway: "cenci is designed to run inside the cenci-sandbox container (the security boundary). You appear to be running on the host — continuing, but running outside the container is unsupported." Proceed with the same container-shaped output.
 
-**Default values from existing config**: When `existingConfig` is not null, each question below MUST present the existing value as the pre-selected default (list it first, marked "(current)"). The user can accept with one click or change it. New fields not in `existingConfig` (e.g., `lspServers` when upgrading from a pre-LSP config) have no default and are asked normally.
+**Default values from existing config**: When `existingConfig` is not null, each question below that is actually asked (every question on an `--all` or `full` run; only the IDs in `delta.ask` on a `delta` run — see `### Delta Resolution`) MUST present the existing value as the pre-selected default (list it first, marked "(current)"). The user can accept with one click or change it. New fields not in `existingConfig` (e.g., `lspServers` when upgrading from a pre-LSP config) have no default and are asked normally.
 
 **`AskUserQuestion` cannot pre-check `multiSelect` options** — its options only carry `label`/`description`/`preview`, no "selected by default" field. So for the two multi-select questions (5. MCP Servers, 6. LSP Servers), "pre-select" cannot mean a pre-ticked checkbox — re-asking the full multi-select on every reconfigure would force re-clicking every already-enabled server one at a time. Instead, gate behind a single Keep/Change confirmation first (see *Keep-or-change gate* under each question below): when `existingConfig` already has a value for that field, ask one Yes/No question summarizing the current selections; only "No — let me change them" drops into the full multi-select. This is a single click to keep everything unchanged, instead of one click per server.
 
-| Question | `existingConfig` field | Default when field exists |
-|---|---|---|
-| 1. Tech stack | `stack` | Pre-fill with formatted stack |
-| 2. Project structure | `isMonorepo` | Pre-select based on existing value |
-| 3. Branching strategy | `branchPattern` | Pre-fill with existing pattern |
-| 5. MCP Servers | `mcpServers` | Keep-or-change gate (see below); only "change" enters the multi-select, pre-sorted with enabled servers first |
-| 6. LSP Servers | `lspServers` | Keep-or-change gate (see below); only "change" enters the multi-select, pre-sorted with enabled servers first |
-| 7. Auto-compact | `autoCompactDisabled` | Pre-select Yes/No |
-| 7b. Pin subagents to 200K | `pinSubagents200K` | Pre-select Yes/No |
-| 8. CI/CD pipeline | `cicd` | Pre-select Yes/No based on `cicd.enabled` |
-| 9. Sandbox Dockerfile | `sandbox` | Pre-select Yes/No based on `sandbox.enabled` |
-| 9b. Nested Docker (dind) | `sandbox` | Pre-select Yes/No based on `existingConfig.sandbox.dind` (else Yes when a Testcontainers/Docker-SDK trigger was detected, No otherwise) |
-| 9c. Azure CLI | `sandbox` | Pre-select Yes/No based on `existingConfig.sandbox.azure`; if field absent, ask normally |
-| 10. Board config (lazyboards) | `lazyboards` | Only asked when no `.lazyboards.yml` exists; if one exists, suggest missing actions or skip (see *Board Config*) |
+The `ID` column is the question's identifier in `question-keys.json` — the value `resolve-delta.sh` returns in `delta.ask`/`delta.carried` and step 6 stores in `configureOffered`. IDs are a stable contract persisted in users' ledgers.
 
-Ask these questions one at a time using the `AskUserQuestion` tool:
+| Question | ID | `existingConfig` field | Default when field exists |
+|---|---|---|---|
+| 1. Tech stack | `stack` | `stack` | Pre-fill with formatted stack |
+| 2. Project structure | `isMonorepo` | `isMonorepo` | Pre-select based on existing value |
+| 3. Branching strategy | `branchPattern` | `branchPattern` | Pre-fill with existing pattern |
+| 5. MCP Servers | `mcpServers` | `mcpServers` | Keep-or-change gate (see below); only "change" enters the multi-select, pre-sorted with enabled servers first |
+| 5c. UI conventions | `uiConventions` | *(none — guidance prose only; ledger-tracked)* | Conditional on a detected frontend framework; a carried answer keeps the existing `## UI Conventions` section |
+| Playwright CLI setup | `playwrightCli` | `playwrightCli` | Conditional on a frontend framework plus `detection.playwrightTest`; pre-select Yes/No |
+| 6. LSP Servers | `lspServers` | `lspServers` | Keep-or-change gate (see below); only "change" enters the multi-select, pre-sorted with enabled servers first |
+| 7. Auto-compact | `autoCompactDisabled` | `autoCompactDisabled` | Pre-select Yes/No |
+| 7b. Pin subagents to 200K | `pinSubagents200K` | `pinSubagents200K` | Pre-select Yes/No |
+| 8. CI/CD pipeline | `cicd` | `cicd` | Pre-select Yes/No based on `cicd.enabled` |
+| 9. Sandbox Dockerfile | `sandbox.enabled` | `sandbox` | Pre-select Yes/No based on `sandbox.enabled` |
+| 9b. Nested Docker (dind) | `sandbox.dind` | `sandbox` | Pre-select Yes/No based on `existingConfig.sandbox.dind` (else Yes when a Testcontainers/Docker-SDK trigger was detected, No otherwise) |
+| 9c. Azure CLI | `sandbox.azure` | `sandbox` | Pre-select Yes/No based on `existingConfig.sandbox.azure`; if field absent, ask normally |
+| 10. Board config (lazyboards) | `lazyboards` | `lazyboards` | Only asked when no `.lazyboards.yml` exists; if one exists, the suggest-or-skip analyzer reports (and prompts only under `--all`/`full`) — see *Board Config* |
+| 11. Fleet dispatch enrollment | `dispatchEnroll` | *(none — user-level `~/.config/cenci/config.json`; ledger-tracked)* | Asked only when `cenci dispatch status --json` reports `enrolled: false` (see *Fleet Dispatch Enrollment*) |
+| 13. Plan approval autonomy | `planning` | `planning` | Delta run: asked only when the key is absent and not already offered; `--all` re-offers it with the committed value pre-selected (see *Autonomy Settings*) |
+| 14. Automerge policy block | `automerge` | `automerge` (top-level or any `projects[]` entry) | Delta run: asked only when absent and not already offered; `--all` re-offers it with "Keep current block(s) (Recommended)" pre-selected (see *Autonomy Settings*) |
+
+Ask these questions one at a time using the `AskUserQuestion` tool (on a `delta` run, only those whose ID is in `delta.ask` — skip the rest and carry their recorded values):
 
 1. **Tech stack**: "What's your tech stack?" (capture for stack pack selection)
    - Backend framework + version
@@ -512,17 +556,20 @@ gate. Check whether a board config already exists (run the check as its **own**
 Bash call, per `cenci:shell-rules`) and branch:
 
 - **No `.lazyboards.yml` at the repo root** → ask **question 10** below (offer to
-  generate one). On "No", omit `lazyboards` from config.json (same pattern as
-  `cicd`/`sandbox`).
+  generate one) when its ID `lazyboards` is in `delta.ask` (always on an `--all` or
+  `full` run). On "No", omit `lazyboards` from config.json (same pattern as
+  `cicd`/`sandbox`). A declined question 10 is recorded in `configureOffered` and is not re-asked on a delta run.
+  If question 10 is carried but `.lazyboards.yml` is missing, do not regenerate it — report it and say `/cenci:configure --all` re-offers it.
 - **`.lazyboards.yml` already exists** → **skip question 10** and jump to
   **Existing config: suggest or skip** below (analyze the file against the
-  recommended action set, suggest what's missing, or skip quietly with a small log).
+  recommended action set and suggest what's missing, or skip quietly with a small log).
+  On a delta run with an existing `.lazyboards.yml`, the suggest-or-skip analyzer reports new board actions in the end-of-run summary and never prompts; `--all` restores the Apply/Overwrite/Keep/Show prompt.
 
 10. **Board config** (no existing `.lazyboards.yml`): present this Yes/No
-    confirmation via `AskUserQuestion` **in this session** — a pre-existing
-    `lazyboards.enabled: true` recorded from a prior run, or `$ARGUMENTS` requesting a
+    confirmation via `AskUserQuestion` — a pre-existing
+    `lazyboards.enabled: true` recorded from a prior run, or user context requesting a
     narrower focus or a skip, never authorizes silently regenerating
-    `.lazyboards.yml` without asking again this session: "Generate a per-repo
+    `.lazyboards.yml` without a question: "Generate a per-repo
     `.lazyboards.yml` for the lazyboards board? (Wires Refine/Implement keybindings onto
     the New/Refined/Planned columns, Edit-plan and View-plan keybindings on Planned that open
     the ticket's saved plan in `$EDITOR` / a pager, plus In Review actions that open a
@@ -685,18 +732,29 @@ parse its stdout as JSON.
 
 **Three-way branch** on the parsed object's `enrolled`/`session` fields:
 
-- `enrolled: false` → ask question 11 below.
+- `enrolled: false` → ask question 11 below when `dispatchEnroll` is in `delta.ask`
+  (always on an `--all` or `full` run); when it is carried, ask nothing and log one
+  informational line.
 - `enrolled: true, session: ""` → the repo is already enrolled but has no session yet —
   the state lazyboards' board-driven enrollment leaves behind (see the "Fleet dispatch
   from the board" section of `docs/orchestration.md`), so this is the common repair
-  path, not an edge case. Skip question 11 and ask only question 12.
+  path, not an edge case. Skip question 11 and ask only question 12. The `enrolled: true, session: ""` repair (question 12) is still asked on a delta run, whatever the ledger says: it repairs a half-enrolled state rather than re-offering a declined question, and it has no ID and is never recorded.
 - `enrolled: true, session: "<set>"` → skip both questions, log the resolved session
   quietly, and fall through.
 
-Re-running `/cenci:configure` on an already-configured repo never re-prompts and never
-rewrites the config. If the enrolled `dir` reported by `status --json` differs from the
-resolved `<main-checkout>`, log the mismatch as an informational line only — never
-re-enroll to correct it; the no-rewrite rule wins.
+In the session-set branch, re-running `/cenci:configure` on an already-enrolled repo never
+re-prompts and never rewrites the config. If the enrolled `dir` reported by `status --json`
+differs from the resolved `<main-checkout>`, log the mismatch as an informational line
+only — never re-enroll to correct it; the no-rewrite rule wins.
+
+Question 11 is recorded as offered (`dispatchEnroll` in `configureOffered`) only when the
+`enrolled: false` branch actually put it to the user; the container guard, the
+path-validation skip, a failed status probe, and the other two branches record nothing.
+Even then, `dispatchEnroll` is recorded only after a successful `cenci dispatch enroll`
+or an explicit "No — skip": when the answer was "Yes" and the enroll call fails, do not
+record it, report the failure (the exact error, plus that the next delta run asks question
+11 again only when `dispatchEnroll` is not already in the existing ledger — otherwise
+`/cenci:configure --all` re-offers it), and leave the rest of the run unchanged.
 
 11. **Enroll in fleet dispatch**: ask via `AskUserQuestion`: "Enroll this repo in fleet
     dispatch? This lets `cenci dispatch` and the fleet dispatch loop pick up approved
@@ -705,8 +763,7 @@ re-enroll to correct it; the no-rewrite rule wins.
     `.cenci/config.json` — and the effect is immediate, not part of this PR."
     - Options: "Yes — enroll this repo", "No — skip"
     - On "No", write nothing to `~/.config/cenci/config.json` and leave any existing
-      block untouched. A decline is not recorded anywhere — this section re-asks on the
-      next invocation, mirroring the Board Config (lazyboards) precedent. There is no
+      block untouched. A decline of question 11 is recorded in `configureOffered`; a delta run does not re-ask it, and `--all` does. The ledger lives in this repo's `.cenci/config.json`, so the decline lands in this run's PR. There is no
       unenroll offer here.
 
 12. **Fleet dispatch session name** (asked via `AskUserQuestion` when question 11 was
@@ -725,7 +782,8 @@ re-enroll to correct it; the no-rewrite rule wins.
     Once a valid session name is collected, issue a single combined write — both
     enrollment and session in one call, never two separate writes — as its own Bash
     call: `cenci dispatch enroll --dir '<main-checkout>' --session '<name>'`, with both
-    `<main-checkout>` and `<name>` single-quoted.
+    `<main-checkout>` and `<name>` single-quoted. A non-zero exit means nothing was
+    enrolled: do not add `dispatchEnroll` to the offered set, and report the failure.
 
 **Scope.** `dispatch.*` lives in `~/.config/cenci/config.json` (or
 `$XDG_CONFIG_HOME/cenci/config.json`) — user-level and fleet-wide, the same file
@@ -735,8 +793,9 @@ never reads, modifies, or writes ~/.config/cenci/config.json itself: every mutat
 `cenci dispatch enroll`, which already owns the atomic, key-preserving write path
 (`EnrollRepo`, `watch/internal/dispatch/enroll.go`), including creating the file and its
 parent directory. The effect is immediate and user-level, so nothing lands in
-`<worktree-path>` and no key is added to this repo's `.cenci/config.json` — this
-section contributes nothing to the configure PR diff.
+`<worktree-path>` and no dispatch key is added to this repo's `.cenci/config.json` — the only
+thing this section can contribute to the configure PR diff is the `dispatchEnroll` entry
+in the `configureOffered` ledger (step 6).
 
 **Next step.** After a successful enroll, point the user at `cenci dispatch loop on` as
 the explicit next step to start the recurring dispatch loop — that command already
@@ -751,8 +810,13 @@ land inside this run's PR, so an in-container run is fine. Both questions below 
 collect an answer; neither writes anything itself — step 6 below performs the actual
 write, overlaying whatever was collected here onto the merged config.
 
-**Absent-only rule.** When `planning` or `automerge` is already present, report the
+**Absent-only rule (delta runs).** On a delta run, questions 13 and 14 are asked only when the key is absent and the ID is not in `configureOffered`; nothing is written on a skip. On a delta run, when `planning` or `automerge` is already present, report the
 existing value verbatim, never re-prompt, never narrow, and never remove it.
+
+**`--all` re-offers.** `--all` is the one way to change or remove a present value, and it
+always shows the current value first. Under `--all`, question 13 is re-offered even when `planning` is present, with the committed value pre-selected. Under `--all`, question 14 is re-offered even when `automerge` is present, with "Keep current block(s) (Recommended)" pre-selected. When the key is absent, `--all` asks the ordinary question below. Declining or keeping never writes anything but the `configureOffered` ledger stamp (step 6).
+
+**Resolver-failure `full` runs do not re-offer.** A `full` run caused by a resolver failure (see `### Delta Resolution`) is not an `--all` run: for a present `planning` or `automerge` key it behaves like a delta run — report the existing value verbatim and do NOT re-offer it, so a fallback can never reach the destructive "Remove the block(s)" option. Only a leading `--all` token re-offers a present value. An absent key is asked as the ordinary question.
 
 **Presence detection**, read from `existingConfig` (already in hand from Existing Config
 Detection above):
@@ -762,8 +826,9 @@ Detection above):
   top-level-only check would wrongly re-offer the question on a repo whose policy lives
   entirely in `projects[]`.
 
-13. **Plan approval autonomy** (asked via `AskUserQuestion` only when `planning` is
-    absent): "Should plan approval stay interactive, or switch to lean self-approval?
+13. **Plan approval autonomy** (asked via `AskUserQuestion` when `planning` is
+    absent and, on a delta run, `planning` is in `delta.ask`; under `--all` it is also
+    asked when `planning` is present, in the keep-or-change form below): "Should plan approval stay interactive, or switch to lean self-approval?
     `interactive` keeps today's behavior — the planner asks up to 6 clarifying questions
     and never self-answers. `lean` lets a plan with no escalations continue straight into
     implementation in the same session, and also authorizes `cenci dispatch`'s unattended
@@ -771,9 +836,26 @@ Detection above):
     `docs/autonomous-loop.md`'s \"Let plans approve themselves\")."
     - Options: "Keep `interactive` (Recommended)", "Switch to `lean`"
     - Declining omits the `planning` key entirely — no `planning` key is written.
+    - **`--all` with `planning` present**: ask "`planning.autonomy` is currently
+      `<current>`. Keep it or switch?" with the options "Keep current (Recommended)" and
+      one switch option for the other value — "Switch to `interactive`" when the committed
+      value is the exact string `lean`, "Switch to `lean`" otherwise (a value other than
+      the exact string `lean` is treated as `interactive`, so it pre-selects Keep and
+      offers the switch to `lean`). Keeping the current value writes nothing. Switching to `interactive` writes `planning.autonomy: "interactive"` explicitly, preserving sibling keys.
+    - **Overlay program.** Every Q13 write — the switch above, and the ordinary
+      "Switch to `lean`" answer when `planning` is absent — is this fixed program, applied
+      to the candidate config with `--arg autonomy interactive|lean` and validated in
+      step 6 (exit 0 and `jq -e 'type == "object"'`); it keeps every sibling key of `planning`:
 
-14. **Automerge policy block** (asked via `AskUserQuestion` only when `automerge` is
-    absent): "Scaffold a starter `automerge` policy block for this repo? This does not
+<!-- cenci:configure-q13-switch:begin -->
+```jq
+.planning = ((.planning | if type == "object" then . else {} end) + {autonomy: $autonomy})
+```
+<!-- cenci:configure-q13-switch:end -->
+
+14. **Automerge policy block** (asked via `AskUserQuestion` when `automerge` is
+    absent and, on a delta run, `automerge` is in `delta.ask`; under `--all` it is also
+    asked when `automerge` is present, in the keep-or-remove form below): "Scaffold a starter `automerge` policy block for this repo? This does not
     enable automerge by itself — it only seeds a deny-by-default policy that a human must
     still review, and the fleet-wide `automerge.enabled` switch (see
     `docs/autonomous-loop.md`) stays off until you flip it separately. This section never
@@ -848,6 +930,20 @@ Detection above):
       per-`projects[]` blocks) — a complete, valid, most-restrictive policy on its own
       that needs no per-project path derivation; the PR-body review flag (below) tells the
       human to consider splitting it into per-project blocks if that fits the repo better.
+
+    - **`--all` with `automerge` present** (top-level or in any `projects[]` entry): never
+      offer the scaffold. Ask "An `automerge` policy block is already present. Keep it or
+      remove it?" with the options "Keep current block(s) (Recommended)" and "Remove the block(s)".
+      Keeping leaves every `automerge` block byte-identical — never removed and never narrowed. "Remove the block(s)" deletes the top-level `automerge` key and the `automerge` key of every `projects[]` entry. Nothing else changes. Removal is the one
+      path that deletes a policy, so it always adds the `## Review required — automerge
+      policy removed` section to the PR body (step 7). The removal is this fixed program,
+      applied to the candidate config and validated in step 6 (exit 0 and `jq -e 'type == "object"'`):
+
+<!-- cenci:configure-q14-remove:begin -->
+```jq
+del(.automerge) | if (.projects | type) == "array" then .projects |= map(if type == "object" then del(.automerge) else . end) else . end
+```
+<!-- cenci:configure-q14-remove:end -->
 
 **Next step.** Point the user at the fleet-side verbs from #964/#968 as the explicit next
 steps — neither is flipped by this skill:
@@ -1439,7 +1535,7 @@ For each MCP selected in question 5:
      ```
    This writes to `~/.claude/settings.json` (user-level Claude Code settings). Takes effect on **new** sessions only — remind the user to restart if the current session is on a `[1m]` model.
 
-5d. **Generate CI/CD pipeline** (from question 8, only if user selected Yes):
+5d. **Generate CI/CD pipeline** (from question 8, only if user selected Yes — on a delta run where question 8 is carried, `ci.yml` is not regenerated and this step is skipped):
 
    **GitHub Actions** — write `.github/workflows/ci.yml`:
 
@@ -1499,7 +1595,7 @@ For each MCP selected in question 5:
 
    After writing the file, create the parent directory if needed (`mkdir -p .github/workflows` for GitHub Actions).
 
-5e. **Generate `.cenci/Dockerfile`** (from question 9, only if user selected Yes):
+5e. **Generate `.cenci/Dockerfile`** (from question 9, only if the effective `sandbox.enabled` is `true` — the user's Yes to question 9 this run, or on a delta run the carried existing `sandbox.enabled: true`):
 
    **`BASE_VERSION` is always `latest`** — there is no resolution step. `buildBase` (`watch/internal/sandbox/launcher/engine.go:337-349`) only ever tags the base image `cenci-sandbox-base:<12-hex content hash>` and `cenci-sandbox-base:latest`; no semver tag exists in any environment, so the ARG default can only ever be the `latest` alias. `cenci sandbox build` always overrides it at build time via `--build-arg BASE_VERSION=...` (`engine.go:372,392`), so the default is never load-bearing for that path — it only matters for a bare manual `docker build`, where `latest` is exactly the recipe `sandbox/README.md` documents. An empty default must never be written instead: Docker's `InvalidDefaultArgInFrom` lint check flags any `ARG` used in a `FROM` whose default resolves to an empty or invalid image reference, and it evaluates the file statically regardless of a build-time override — so the literal `latest` (never empty, never unresolved) is what step 5e always writes.
 
@@ -1529,13 +1625,14 @@ For each MCP selected in question 5:
 
    **Merge-safe regeneration**: the whole block above (from `# cenci:managed-begin` through `# cenci:managed-end` inclusive) is the managed block.
    - **File doesn't exist**: create `.cenci/` (`mkdir -p .cenci`) and write the managed block as the full file content.
-   - **File exists with both markers present**: replace only the text from `# cenci:managed-begin` through `# cenci:managed-end` (inclusive) with the freshly generated block. Preserve everything before the begin marker and everything after the end marker exactly as-is — this is where a team can hand-append their own `RUN` steps across re-runs.
-   - **File exists with no markers** (e.g. a hand-authored legacy `.cenci/Dockerfile`): do not silently overwrite it. Reuse the exact Overwrite/Skip/Show conflict-check UX already used for CI/CD generation (question 8 / step 5d) — same three options, same behavior:
+   - **Effective sandbox flags, per ID**: the fragment selection uses the effective `sandbox.enabled`, `sandbox.dind` and `sandbox.azure` values, decided per question ID. An ID in `delta.carried` reads the existing config value; an ID in `delta.ask` this run (its key was absent and it was never offered, e.g. a config with `sandbox.enabled: true` that predates questions 9b/9c asks `sandbox.dind` and `sandbox.azure`) uses the answer just collected, so a just-answered Yes is consumed by this same generation. A Dockerfile is generated or refreshed whenever the effective `sandbox.enabled` is `true`, whether it was carried or just answered. The refresh itself never asks a question.
+   - **File exists with both markers present**: replace only the text from `# cenci:managed-begin` through `# cenci:managed-end` (inclusive) with the freshly generated block. Preserve everything before the begin marker and everything after the end marker exactly as-is — this is where a team can hand-append their own `RUN` steps across re-runs. On a delta run with valid `# cenci:managed-begin` / `# cenci:managed-end` markers, refresh the managed block silently — no Q9/Q9b/Q9c prompt — and leave every byte outside the markers unchanged. Report the block diff with `git -C <worktree-path> diff -- .cenci/Dockerfile`. Only an ID that is in `delta.ask` (key absent and never offered) puts a Q9/Q9b/Q9c question to the user on a delta run; the markers never cause one.
+   - **File exists with no markers** (e.g. a hand-authored legacy `.cenci/Dockerfile`): do not silently overwrite it. On a delta run, a `.cenci/Dockerfile` with no markers or malformed markers is left untouched and reported — no prompt. On an `--all` or `full` run, a `.cenci/Dockerfile` with no markers or malformed markers gets the Overwrite/Skip/Show prompt. It reuses the conflict-check UX already used for CI/CD generation (question 8 / step 5d) — same three options, same behavior:
      "Found existing `.cenci/Dockerfile` without cenci's managed markers. What would you like to do?"
      Options: "Overwrite — wrap it in managed markers and replace with the generated block", "Skip — keep the existing file, still record `sandbox` in config.json", "Show existing — display the current file contents"
      - If Skip: still record `sandbox` in config.json, don't write the file.
      - If Show existing: read and display the file, then re-ask Overwrite/Skip.
-   - **File exists with malformed markers** (exactly one of `# cenci:managed-begin` / `# cenci:managed-end` present, markers out of order, or duplicate marker pairs): do **not** attempt a partial text replace — a malformed marker pair cannot be trusted to safely bound the managed block. Route this through the exact same Overwrite/Skip/Show conflict-check UX as the "no markers" case above — same prompt text, same three options, same behavior.
+   - **File exists with malformed markers** (exactly one of `# cenci:managed-begin` / `# cenci:managed-end` present, markers out of order, or duplicate marker pairs): do **not** attempt a partial text replace — a malformed marker pair cannot be trusted to safely bound the managed block, and a replacement span is never guessed. On a delta run it is left untouched and reported exactly like the "no markers" case above (no prompt); on an `--all` or `full` run it takes the same Overwrite/Skip/Show prompt — same prompt text, same three options, same behavior.
 
    **Monorepo**: fragments are the mandatory Node runtime fragment plus the deduplicated union described in the Stack-to-fragment mapping table under question 9, concatenated in the dotnet → node → playwright → go → python → rust → docker → azure order above — one `.cenci/Dockerfile` for the whole repo, not one per project.
 
@@ -1789,7 +1886,10 @@ For each MCP selected in question 5:
           stays a plain `command:` and is **not** flagged. These two bullets are
           the only command-content comparisons in the delta; every other action is
           matched by intent alone, never diff-compared.
-     3. **Delta non-empty** → present the concrete additions via `AskUserQuestion`,
+     3. **Delta non-empty** → on a `delta` run, do **not** prompt: leave the file
+        untouched and list the missing actions (with the key each would use) in the
+        end-of-run lazyboards report, saying `/cenci:configure --all` offers to add
+        them. On an `--all` or `full` run, present the concrete additions via `AskUserQuestion`,
         e.g. "`.lazyboards.yml` is missing a PR-worktree test action: `T` → run tests
         (`dotnet test`) in the PR worktree. Add it?" — or, when a leading letter had
         to be substituted for the reason above, surface it explicitly, e.g.
@@ -1832,15 +1932,33 @@ For each MCP selected in question 5:
    answered `lean`, and `automergeAnswer` contributes the scaffolded `automerge` key only
    when question 14 above was asked and answered "Scaffold a starter block for hand
    review" — a declined answer contributes no key. When either question was skipped
-   because its key was already present in `existingConfig`, there is no collected answer
-   to overlay — the existing value simply survives the merge semantics above untouched.
-   After overlaying `planningAnswer`/`automergeAnswer` onto the merge script's stdout,
-   validate the resulting JSON is well-formed (`jq empty`) before writing it — the same
-   fail-closed discipline as the adjacent `sandbox` merge above: if the overlaid result
-   is not valid JSON, do not write it, report the failure, and fall back to the
-   pre-overlay config content (the merge script's stdout as-is).
+   because its key was already present in `existingConfig` (or carried on a delta run),
+   there is no collected answer to overlay — the existing value simply survives the merge
+   semantics above untouched. Under `--all`, a collected "Switch to …" answer for question
+   13 is applied with the `cenci:configure-q13-switch` program (`--arg autonomy
+   interactive|lean`), and a collected "Remove the block(s)" answer for question 14 with
+   the `cenci:configure-q14-remove` program (`### Autonomy Settings`); "Keep current"
+   answers contribute nothing.
+
+   **Overlay order and validation.** The overlay order is `merge-sandbox-config.sh` stdout, then the question 13/14 overlays (`cenci:configure-q13-switch`, `cenci:configure-q14-remove`), then the `configureOffered` ledger (`cenci:configure-offered-ledger`). Run each overlay with `jq` over the candidate config as its own Bash call (write the candidate to `${TMPDIR:-/tmp}/cenci/cenci-configure-<slug>-config.json` as the scratch input and remove it afterwards under the existing `rm -f` grant — that `rm -f` also runs when an overlay fails validation, so no scratch file is left behind). An overlay result is valid only when the `jq` call exits 0 and the result passes `jq -e 'type == "object"'`: an empty output passes `jq empty`, so `jq empty` alone never gates a write. Apply that check after each overlay and before every write — the same fail-closed discipline as the adjacent `sandbox` merge above: if an overlaid result fails it, do not write it, report the failure, and fall back to the content before that overlay (the previous step's output as-is). A fallback that drops the ledger overlay still writes, but tell the user the ledger could not be stamped, so the questions offered this run will be asked again.
+
+   **A fallen-back question 13/14 overlay was not applied.** When a question 13 or 14 overlay fails the check above, the collected answer is not in the written config. Tell the user which question's answer was not applied, and either that it will be asked again on the next delta run (only when its key is absent and its ID is not already in the existing ledger) or, otherwise (an `--all` change, an ID already in the existing ledger, or a present key), to re-run `/cenci:configure --all` to apply it; remove that question's ID (`planning` for question 13, `automerge` for question 14) from the offered set before the ledger overlay runs, so the ledger never records an offer whose answer was dropped; and key step 7 to the overlay actually applied — a fallen-back "Remove the block(s)" never emits the `## Review required — automerge policy removed` section and is never reported as removed, and a fallen-back scaffold never emits `## Review required — automerge policy`.
+
+   **Sandbox flags are derived per question ID.** For an ID in `delta.carried`, the Q9/Q9b/Q9c flag is derived from the existing `sandbox.*` value, never passed as a bare `false`: pass `true` for each of `--dockerfile`, `--dind` and `--azure` whose existing `sandbox.enabled`/`dind`/`azure` is `true`, and `false` only for a key that is absent (a recorded decline) — so a carried opt-in is never deleted by the merge script's required flags. For an ID in `delta.ask` (a key that was absent and never offered, e.g. `sandbox.dind` and `sandbox.azure` on a config that predates questions 9b/9c), and for every question on an `--all` or `full` run, the flag is the answer collected this run. Generate or refresh the `.cenci/Dockerfile` (step 5e) whenever the effective `sandbox.enabled` is `true`, carried or just answered; a just-answered Yes for `--dind` or `--azure` selects its fragment in that same generation.
 
    **Always stamp `configVersion`** on every write (fresh or re-config): set it to `detection.pluginVersion`. If Scripted Detection was unavailable, read `.version` from `${CLAUDE_PLUGIN_ROOT}/.claude-plugin/plugin.json` with jq, verifying the command succeeded before using its output. If neither resolves, preserve any existing `configVersion` unchanged and tell the user the stamp could not be refreshed — never invent a version.
+
+Always stamp `configureOffered` on every write as the sorted, de-duplicated union of the existing ledger and the question IDs offered this run; `--all` never removes ledger entries. Only questions actually put to the user this run are recorded as offered (the IDs from the `ID` column of the defaults table): a carried question, a conditional question whose detection condition failed, and question 12 are never recorded, and entries are never pruned. String entries of an existing `configureOffered` array are kept and non-strings are dropped. An empty result is still written as `[]`. Apply this fixed program last in the overlay order, with `--argjson offered '[<ids>]'` (the JSON array of offered IDs, `[]` when no question was asked — minus any ID removed above because its overlay fell back, or because question 11's enroll failed), then validate it like every other overlay (exit 0 and `jq -e 'type == "object"'`):
+
+<!-- cenci:configure-offered-ledger:begin -->
+```jq
+.configureOffered = (
+  ((.configureOffered // []) | if type == "array" then map(select(type == "string")) else [] end)
+  + ($offered | map(select(type == "string")))
+  | unique
+)
+```
+<!-- cenci:configure-offered-ledger:end -->
 
 ```json
 {
@@ -1891,15 +2009,14 @@ For each MCP selected in question 5:
 ```
 
 (The `planning` value shown above is illustrative of the schema, not something this skill
-writes by default: question 13 (`### Autonomy Settings`) writes the `planning` key only when
-you explicitly choose `lean`, or when it was already present in `existingConfig`; declining —
-keeping `interactive` — writes nothing, since a missing key already resolves to `interactive`.)
+writes by default: question 13 (`### Autonomy Settings`) writes `planning.autonomy` only when you explicitly choose `lean` (or switch under `--all`); a `planning` key already present in `existingConfig` is left verbatim
+on a delta run; `--all` re-offers it. Declining — keeping `interactive` — writes nothing, since a missing key already resolves to `interactive`.)
 
 `configVersion` records the flow plugin version that last wrote this config (managed by this skill — always overwritten with the current plugin version in step 6, never a question). Consumers:
 - the plugin's SessionStart hook (`hooks/scripts/check-config-staleness.sh`) — nudges the user at session start when the stamp's major.minor is behind the installed plugin (or missing entirely), so they learn a `/cenci:configure` re-run would pick up new configure features without watching the changelog;
 - maintain's `config-version` check (`/cenci:maintain`, via the same staleness resolver) — reports the same staleness as an advisory `warn`.
 
-Both consumers name the unconditional questions a re-run would ask, computed by `scripts/resolve-delta.sh` from the committed `question-keys.json` table (tested by its own `scripts/resolve-delta.test.sh`). The configure flow itself does not call the resolver yet; that wiring is tracked in #1246.
+Both consumers name the unconditional questions a re-run would ask, computed by `scripts/resolve-delta.sh` from the committed `question-keys.json` table (tested by its own `scripts/resolve-delta.test.sh`). The configure flow calls this resolver itself — see `### Delta Resolution`.
 
 Patch-only drift is deliberately silent: configure features that warrant a re-run land in minor (`feat`) or major bumps per the plugin-version-bump workflow. Do **not** add `configVersion` to the migration-removal list below — it is a managed field, not a legacy one.
 
@@ -1981,9 +2098,9 @@ untouched** across re-configuration. Do **not** add `security` to the migration-
 below — it is a supported optional field, not a legacy one.
 
 The `planning` field is optional. `### Autonomy Settings` question 13 above asks for it only
-when absent, defaulting to `interactive`; when the key is already present, this skill reports
-it verbatim and never re-prompts, narrows, or removes it — merge semantics (step 6) preserve a
-hand-added or previously-written value untouched across reconfiguration either way. It is a
+when absent, defaulting to `interactive`. A key already present is reported verbatim and is never re-prompted, narrowed, or removed
+on a delta run; `--all` re-offers it with the committed value pre-selected. Merge semantics (step 6) preserve a
+hand-added or previously-written value untouched across reconfiguration unless you choose a switch under `--all`. It is a
 safety/checkpoint toggle read by the implement skill's Phase 1 (see `skills/implement/SKILL.md`
 and `skills/implement/phases/phase-1-plan.md`'s `## Lean Approval Path`). Schema:
 - `planning.autonomy` — `"lean"` or `"interactive"`, default `"interactive"`. Only the exact
@@ -2087,10 +2204,10 @@ Each project entry's `gateCommand` is optional — unlike `lintCommand`, its pre
 Existing single-project configs (no `isMonorepo` field) work unchanged.
 
 The `automerge` field is optional. `### Autonomy Settings` question 14 above offers to
-scaffold a conservative starter block only when absent (top-level or per-`projects[]`);
-when a block is already present, this skill reports it verbatim and never re-prompts,
-narrows, or removes it — merge semantics (step 6) preserve a hand-added or
-previously-scaffolded value untouched across reconfiguration either way. Do **not** add
+scaffold a conservative starter block only when absent (top-level or per-`projects[]`).
+A block already present is reported verbatim and is never re-prompted, narrowed, or removed
+on a delta run; `--all` re-offers it ("Keep current block(s) (Recommended)" or "Remove the block(s)"). Merge semantics (step 6) preserve a hand-added or
+previously-scaffolded value untouched across reconfiguration unless "Remove the block(s)" is chosen under `--all`. Do **not** add
 `automerge` to the migration-removal list below — it is a supported optional field, not a
 legacy one.
 
@@ -2206,7 +2323,7 @@ When migrating from an older config that has `ticketSystem`, `prSystem`, `ticket
 
    <bullet list of generated/updated files>"
    ```
-   If nothing is staged (a re-run that changed nothing), skip Commit/Push/PR entirely and report "No configuration changes — nothing to commit" instead of opening an empty PR.
+   If nothing is staged (a re-run that changed nothing), skip Commit/Push/PR entirely and report "No configuration changes — nothing to commit" instead of opening an empty PR. A stamp-only diff still opens a PR; "No configuration changes — nothing to commit" applies only when nothing is staged. For example, a run that offered a new question and recorded the decline in `configureOffered` changes `.cenci/config.json` and so is not empty.
 
    **Push**:
    ```bash
@@ -2230,13 +2347,28 @@ When migrating from an older config that has `ticketSystem`, `prSystem`, `ticket
    N/A — configuration/tooling only, no application code changed.
    ```
    Append a `## Review required — automerge policy` section — emitted only when question
-   14 scaffolded a block this run (`### Autonomy Settings`), never on a re-config that
+   14 scaffolded a block this run (`### Autonomy Settings`) and that block was actually written (a scaffold whose overlay fell back in step 6 emits nothing here), never on a re-config that
    reported an existing block verbatim:
    ```markdown
    ## Review required — automerge policy
    This PR scaffolds a starter `automerge` policy block (`protectedPaths`, size caps,
    `mergeMethod`). Review it before enabling automerge fleet-wide — see
    `docs/autonomous-loop.md#3-declare-what-a-merge-is-allowed-to-touch`.
+   ```
+   Append a `## Review required — automerge policy removed` section — emitted only when question 14 removed the block(s) this run (`--all`, "Remove the block(s)") and the removal overlay passed step 6's validation and was written, never on a run that kept, never touched, or fell back from removing an existing block:
+   ```markdown
+   ## Review required — automerge policy removed
+   This PR removes the `automerge` policy block(s) — the top-level block and every
+   `projects[]` block. Without a block, automerge is denied for every PR (deny-by-default).
+   Confirm this is intended — see
+   `docs/autonomous-loop.md#3-declare-what-a-merge-is-allowed-to-touch`.
+   ```
+   On a delta run, also append a `## Carried through (delta run)` section that lists the carried question IDs and config key names only — never config values — and says `/cenci:configure --all` would re-open them. The PR may be public and config values can be sensitive, so the verbatim `planning`/`automerge` report stays in the terminal:
+   ```markdown
+   ## Carried through (delta run)
+   Question IDs carried from the existing configuration: <comma-separated `delta.carried` IDs>.
+   Config keys left as-is: <comma-separated key names, e.g. `stack`, `mcpServers`, `planning`>.
+   Run `/cenci:configure --all` to re-open them.
    ```
    If `gh pr create` fails because a PR for this branch already exists (re-entry after a prior turn already created it), recover the URL with `gh pr view chore/configure-<slug> --json url -q .url` and continue. For any other failure (auth, network, validation), show the exact error and use `AskUserQuestion` ("Created, continue" / "Abort") to let the user resolve it before continuing.
 
@@ -2245,7 +2377,9 @@ When migrating from an older config that has `ticketSystem`, `prSystem`, `ticket
    rm -f ${TMPDIR:-/tmp}/cenci/cenci-configure-<slug>-pr-body.md
    ```
 
-Report what was created and suggest next steps (e.g., "Try `/cenci:refine <ticket-id>` on a ticket"), including the PR URL from step 7. If question 14 (`### Autonomy Settings`) scaffolded an `automerge` block this run, say so explicitly and flag it for review, then point at the fleet-side next steps: `cenci dispatch plan-refined on` (once `planning.autonomy` is `lean` on `origin/main`) and `cenci automerge on` (once the scaffolded block has been reviewed) — the same verbs named in `### Autonomy Settings`'s own "Next step" block. If `sandbox.enabled` is `true`, mention the generated `.cenci/Dockerfile` and that `cenci sandbox build` (run from inside the repo, after the PR merges) builds the repo's own tailored image on top of the shared base. If `lazyboards.enabled` is `true`, list the generated `.lazyboards.yml` In Review actions with their keys, serve, and test commands (e.g., "`W` opens web-client's PR worktree, `S w` serves it with `ng serve`, `T w` runs its tests with `ng test --watch=false`") and point at `docs/orchestration.md` for the board recipe. Repeat the trust caveat here too, since this run's file ships as a PR: the generated shell actions and `cleanup` stay inert until `lazyboards trust` is run against the file's exact content, so trust must be re-granted after the PR merges if review changed a byte — and every teammate runs it once on their own clone. When the suggest-or-skip branch ran instead, report what happened (added actions, migrated to `keymaps:`, or "already complete — no changes").
+Report what was created and suggest next steps (e.g., "Try `/cenci:refine <ticket-id>` on a ticket"), including the PR URL from step 7. If question 14 (`### Autonomy Settings`) scaffolded an `automerge` block this run, say so explicitly and flag it for review, then point at the fleet-side next steps: `cenci dispatch plan-refined on` (once `planning.autonomy` is `lean` on `origin/main`) and `cenci automerge on` (once the scaffolded block has been reviewed) — the same verbs named in `### Autonomy Settings`'s own "Next step" block. If `sandbox.enabled` is `true`, mention the generated `.cenci/Dockerfile` and that `cenci sandbox build` (run from inside the repo, after the PR merges) builds the repo's own tailored image on top of the shared base. If `lazyboards.enabled` is `true`, list the generated `.lazyboards.yml` In Review actions with their keys, serve, and test commands (e.g., "`W` opens web-client's PR worktree, `S w` serves it with `ng serve`, `T w` runs its tests with `ng test --watch=false`") and point at `docs/orchestration.md` for the board recipe. Repeat the trust caveat here too, since this run's file ships as a PR: the generated shell actions and `cleanup` stay inert until `lazyboards trust` is run against the file's exact content, so trust must be re-granted after the PR merges if review changed a byte — and every teammate runs it once on their own clone. When the suggest-or-skip branch ran instead, report what happened (added actions, migrated to `keymaps:`, or "already complete — no changes"); on a delta run it only reports, so list the missing actions and say `/cenci:configure --all` offers to add them.
+
+On a delta run, the final report also covers what was carried and what was refreshed. The final report repeats the carried-through summary, the Dockerfile report, and the lazyboards report. The carried-through summary names the carried question IDs and config keys and says `/cenci:configure --all` would re-open them; for a carried `planning` or `automerge` value it also states the existing value verbatim (terminal only, never the PR body). The Dockerfile report is the block diff (`git -C <worktree-path> diff -- .cenci/Dockerfile`) for a refreshed managed block, or "left untouched — no markers or malformed markers" with the `--all` pointer. The lazyboards report is the missing-actions list, "already covers all recommended actions", or the carried-but-missing-file notice from question 10. If the resolver failed and the run fell back to `full`, say so and why. If question 14 removed the `automerge` block(s) this run (the removal overlay was applied), say so explicitly and flag the PR's `## Review required — automerge policy removed` section. Report what was actually applied, never what was collected: when a question 13/14 overlay fell back, say its answer was not applied, and either that it will be asked again on the next delta run (only when its key is absent and its ID is not already in the existing ledger) or, otherwise (an `--all` change, an ID already in the existing ledger, or a present key), to re-run `/cenci:configure --all` to apply it; when the ledger overlay fell back, say the ledger was not stamped so this run's questions will be asked again; when question 11's enroll failed, report the failure and that question 11 will be asked again only when `dispatchEnroll` is not already in the existing ledger, else to re-run `/cenci:configure --all`.
 
 ### Board lifecycle labels
 

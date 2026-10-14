@@ -128,8 +128,9 @@ In the repo's committed `.cenci/config.json`:
 Any value other than the exact string `"lean"` — including a missing block — means
 `"interactive"`, unchanged behavior.
 
-`/cenci:configure` offers `planning.autonomy` when the key is absent, defaulting to
-`interactive`.
+`/cenci:configure` offers `planning.autonomy` on a delta run when the key is absent
+and has not been offered before, defaulting to `interactive`; `/cenci:configure --all`
+re-offers it with the committed value pre-selected.
 
 **Commit and push this to `main`.** Dispatch reads it from
 `refs/remotes/origin/main` after a successful `git fetch`, never from your working
@@ -305,8 +306,11 @@ the longest matching `path` prefix, then to the top-level block). When one PR sp
 several blocks the effective policy is the *most restrictive* merge: the minimum of
 each cap and the union of every `protectedPaths`.
 
-`/cenci:configure` offers to scaffold this block only when `automerge` is absent — an
-existing block is reported verbatim and never re-prompted, narrowed, or removed.
+`/cenci:configure` offers to scaffold this block on a delta run only when `automerge`
+is absent and has not been offered before — an existing block is reported verbatim and
+never re-prompted, narrowed, or removed. `/cenci:configure --all` re-offers it with
+"Keep current block(s) (Recommended)" pre-selected; choosing "Remove the block(s)"
+deletes the top-level block and every `projects[]` block.
 
 ### 4. Arm the merge
 

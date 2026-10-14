@@ -428,6 +428,7 @@ require_doc configure "skills/configure/SKILL.md" || true
 if [[ -n "${configure}" ]]; then
   CONFIGURE_EXPECTED_GRANTS='Bash(bash "${CLAUDE_PLUGIN_ROOT}/skills/configure/scripts/detect-project.sh")
 Bash(bash "${CLAUDE_PLUGIN_ROOT}/skills/configure/scripts/merge-sandbox-config.sh":*)
+Bash(bash "${CLAUDE_PLUGIN_ROOT}/skills/configure/scripts/resolve-delta.sh":*)
 Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/migrate-project-core.sh":*)
 Bash(pen interactive --help:*)
 Bash(test:*)
