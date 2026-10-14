@@ -307,6 +307,12 @@ Ticket mode body includes:
 ## Testing
 <commands and results>
 
+## Planner Decisions
+<Only when the plan file has a `decided:` entry — see below; omit this whole section otherwise>
+A comment on this PR overrules a decision.
+
+1. <question> — chosen: <chosen option> (alternative: <alternative option>) — <rationale>
+
 ## Review
 <Review line — see below>
 
@@ -330,6 +336,8 @@ _Temporary secret gist, not part of the repo — delete after merge: `gh gist de
 ```
 
 For child tickets that are not last child — and for a last child whose Parent Close Gate verdict is `hold` — use `Related to #<parentId>` for the parent so it is not auto-closed. For ticketless mode, omit `## Ticket`.
+
+`## Planner Decisions` lists every `decided:` entry from the plan file's `## Q&A from Planning`, one numbered item per entry with the question, the chosen option, the alternative not taken, and the recorded rationale, under the sentence "A comment on this PR overrules a decision" — the PR is the overrule channel: babysit relaunches `address-review` for any new non-bot PR comment, and a reply left only on the ticket is not acted on. Detection is deterministic: read the plan file this run implements and check whether a `decided:` entry exists; never re-judge the planner's classification. Omit `## Planner Decisions` entirely when the plan file has no `decided:` entry — no heading, no placeholder, no "None". One exception to omitting silently: when the plan file's front matter says `approval: lean-decided` but zero well-formed `decided:` entries parse from its `## Q&A from Planning`, still omit the section but print a one-line warning in the status summary (the plan claims decisions it does not carry). This section applies in ticket mode and in ticketless mode. Keep the entries to repo-relative paths or identifiers only, never file contents, configuration values, or command output; secrecy wins over listing a decision verbatim — drop the offending content and state only the identifier-level part (#979), because a PR body can reach a possibly-public repository.
 
 `## Review` reports which Phase 6 + 7 path ran, sourced from `$RUN_DIR/review-path.txt` (written during Phase 6 + 7's Review Path Classification):
 

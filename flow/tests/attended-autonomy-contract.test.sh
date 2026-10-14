@@ -49,6 +49,11 @@
 #     `## Resolve Planning Autonomy` section and every rewired consumer)
 #   - flow/skills/implement/SKILL.md (the Cost Controls restatement)
 #   - docs/autonomous-loop.md (cross-project doc-of-record)
+#   - flow/agents/planner.md -- #1131 only: an attended session asks, never
+#     decides (phase-1 `## Resolve Planning Autonomy`, planner.md's
+#     `## Self-Answer Policy`, and the doc-of-record's attended-override list
+#     all carry the claim; lean-planning-contract.test.sh owns the rest of
+#     the decide-and-notify contract)
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || { echo "attended-autonomy-contract.test.sh: failed to resolve script directory." >&2; exit 2; }
@@ -155,6 +160,20 @@ extract_h2_section() {
   ' <<<"${content}"
 }
 
+# extract_heading_block <content> <exact-heading-line> — pure, fence-aware
+# extractor for a `#`-heading subsection of any level: the heading line through
+# the line before the next heading line (a real, unfenced line starting with
+# `#`), or EOF. Used for the doc-of-record's `#### The attended override`.
+extract_heading_block() {
+  local content="$1" heading="$2"
+  awk -v heading="${heading}" '
+    $0 == heading && !on { on=1; print; next }
+    /^```/ { infence = !infence; if (on) print; next }
+    on && !infence && /^#/ { exit }
+    on { print }
+  ' <<<"${content}"
+}
+
 # extract_bullet <content> <bullet-prefix> — pure extractor returning the one
 # top-level `- ` bullet whose text starts with <bullet-prefix>, up to (not
 # including) the next top-level `- ` bullet or the next heading. Used to
@@ -223,6 +242,8 @@ CONSUMER_SPLIT_GATE_MARKER='`### Split Gate`'"'"'s **Lean ticket mode** branch b
 NONCONSUMER_TRIVIAL_MARKER='**`## Trivial Fast Path`** never consults autonomy in either mode'
 NONCONSUMER_RESUME_MARKER='still finalizes to `approval: lean-resumed` even when the resuming session is attended'
 NONCONSUMER_TICKETLESS_MARKER='**Ticketless mode**, which already behaves as interactive for any question the planner cannot self-answer'
+# #1131 -- attended means asked in-session, never decided.
+ATTENDED_NEVER_DECIDES_MARKER='Because `interactive` stands `agents/planner.md`'"'"'s `## Self-Answer Policy` down, an attended session never decides: contradiction and product-ambiguity questions are asked in-session via `AskUserQuestion`, no `decided:` entry is recorded, and the plan never carries `approval: lean-decided`'
 
 if require_doc PHASE1 "${PHASE1_REL}"; then
   assert_contains "${PHASE1}" "${RESOLVE_HEADING}" \
@@ -268,6 +289,11 @@ if require_doc PHASE1 "${PHASE1_REL}"; then
     assert_contains_ws "${RESOLVE_SECTION}" "${NONCONSUMER_TRIVIAL_MARKER}" "${L} must exempt the Trivial Fast Path"
     assert_contains_ws "${RESOLVE_SECTION}" "${NONCONSUMER_RESUME_MARKER}" "${L} must exempt ## Resume From Draft (approval: lean-resumed still applies)"
     assert_contains_ws "${RESOLVE_SECTION}" "${NONCONSUMER_TICKETLESS_MARKER}" "${L} must exempt ticketless mode"
+    # #1131: attended means asked in-session, never decided. Narrowing to
+    # `interactive` stands the planner's Decide and notify down with the rest of
+    # its Self-Answer Policy, so the contradiction and product-ambiguity
+    # questions it would have decided are put to the human instead.
+    assert_contains_ws "${RESOLVE_SECTION}" "${ATTENDED_NEVER_DECIDES_MARKER}" "${L} must state an attended session asks contradiction/ambiguity questions in-session and never decides them (#1131)"
   fi
 
   # --- Consumer 1: ## Planner Delegation ----------------------------------
@@ -346,6 +372,26 @@ if require_doc PHASE1 "${PHASE1_REL}"; then
 fi
 
 # =====================================================================
+# flow/agents/planner.md — #1131: an attended session states
+# `Planning autonomy: interactive`, which stands Decide and notify down with
+# the rest of ## Self-Answer Policy, so nothing is decided on the human's
+# behalf while they sit at the keyboard.
+# =====================================================================
+
+PLANNER_REL="agents/planner.md"
+PLANNER_ATTENDED_MARKER='When the delegation states `Planning autonomy: interactive` — including an attended session in a `"lean"` repo — contradiction and product-ambiguity questions are asked, never decided'
+
+if require_doc PLANNER "${PLANNER_REL}"; then
+  PLANNER_POLICY="$(extract_h2_section "${PLANNER}" "## Self-Answer Policy")"
+  if [[ -z "${PLANNER_POLICY}" ]]; then
+    fail "agents/planner.md: could not locate the '## Self-Answer Policy' section"
+  else
+    assert_contains_ws "${PLANNER_POLICY}" "${PLANNER_ATTENDED_MARKER}" \
+      "agents/planner.md (## Self-Answer Policy) must state an attended/interactive delegation asks contradiction and product-ambiguity questions and never decides them (#1131)"
+  fi
+fi
+
+# =====================================================================
 # flow/skills/implement/SKILL.md — Cost Controls restatement
 # =====================================================================
 
@@ -385,6 +431,8 @@ LOOP_TABLE_ROW5_MARKER='and a planning session you launch yourself in a `"lean"`
 LOOP_OFFRAMP_MARKER='unless attended mode is on for this machine, in which case planning asks you directly instead'
 # The Turning-it-off row must name both effects.
 LOOP_TURNOFF_MARKER='Next dispatch pass; and the next planning session you launch'
+# #1131: attended means asked in-session, never decided.
+LOOP_ATTENDED_NEVER_DECIDED_MARKER='contradiction and product-ambiguity questions are asked in the session, never decided: the planner emits no `decided:` entry and the plan never records `approval: lean-decided`'
 
 if require_repo_doc LOOP_DOC "${LOOP_REL}"; then
   assert_contains "${LOOP_DOC}" "${LOOP_OVERRIDE_HEADING}" \
@@ -415,6 +463,16 @@ if require_repo_doc LOOP_DOC "${LOOP_REL}"; then
     "docs/autonomous-loop.md Input Needed off-ramp must note the attended exception"
   assert_contains_ws "${LOOP_DOC}" "${LOOP_TURNOFF_MARKER}" \
     "docs/autonomous-loop.md Turning it off row must name both effects of cenci planning attended on"
+  # #1131: the override list must also say attended asks and never decides.
+  # Scoped to the `#### The attended override` subsection -- the phrase would
+  # otherwise be satisfiable by the separate Planner decisions note.
+  LOOP_OVERRIDE_SECTION="$(extract_heading_block "${LOOP_DOC}" "${LOOP_OVERRIDE_HEADING}")"
+  if [[ -z "${LOOP_OVERRIDE_SECTION}" ]]; then
+    fail "docs/autonomous-loop.md: could not locate the '${LOOP_OVERRIDE_HEADING}' subsection"
+  else
+    assert_contains_ws "${LOOP_OVERRIDE_SECTION}" "${LOOP_ATTENDED_NEVER_DECIDED_MARKER}" \
+      "docs/autonomous-loop.md attended-override list must say contradiction and product-ambiguity questions are asked in the session, never decided (#1131)"
+  fi
   # No contradiction left: the old row-5 wording that scoped the switch to
   # dispatch pickups alone must be gone, checked non-vacuously against the
   # new subsection's own existence.
