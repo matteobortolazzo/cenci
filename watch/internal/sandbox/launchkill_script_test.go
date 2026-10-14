@@ -31,8 +31,14 @@ var scriptUnreadableRowPattern = regexp.MustCompile(`^__UNREADABLE__\t([0-9]+)$`
 func runLaunchProbeScript(t *testing.T, id string, extraEnv ...string) (rows map[string]string, probePID int) {
 	t.Helper()
 	rows, unreadable, probePID := runLaunchProbeScriptWithUnreadable(t, id, extraEnv...)
-	if len(unreadable) != 0 {
-		t.Fatalf("script reported unreadable pids %v, want none", unreadable)
+	// A host can hold processes whose environ nobody of this uid may read (a CI
+	// runner's non-dumpable helpers), so the probe rightly reports them. Only a
+	// pid this process can read itself is a false report by the script.
+	for pid := range unreadable {
+		if f, err := os.Open(fmt.Sprintf("/proc/%s/environ", pid)); err == nil {
+			_ = f.Close()
+			t.Fatalf("script reported readable pid %s as unreadable (unreadable: %v)", pid, unreadable)
+		}
 	}
 	return rows, probePID
 }
