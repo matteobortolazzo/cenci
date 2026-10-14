@@ -1,0 +1,22 @@
+{
+  "description": "Single source of truth for which /cenci:configure questions a re-run would ask (#1245). Each row maps a question ID to the .cenci/config.json keys that record its answer. Question IDs are persisted in users' configureOffered ledgers, so they are a stable contract. keys are dotted config paths (empty = tracked only through the ledger); conditional marks questions that depend on detection; projectsAware also accepts the key inside any projects[] entry.",
+  "questions": [
+    { "id": "stack", "keys": ["stack"], "conditional": false, "projectsAware": true },
+    { "id": "isMonorepo", "keys": ["isMonorepo"], "conditional": false },
+    { "id": "branchPattern", "keys": ["branchPattern"], "conditional": false },
+    { "id": "mcpServers", "keys": ["mcpServers"], "conditional": false },
+    { "id": "uiConventions", "keys": [], "conditional": true },
+    { "id": "playwrightCli", "keys": ["playwrightCli"], "conditional": true },
+    { "id": "lspServers", "keys": ["lspServers"], "conditional": true },
+    { "id": "autoCompactDisabled", "keys": ["autoCompactDisabled"], "conditional": false },
+    { "id": "pinSubagents200K", "keys": ["pinSubagents200K"], "conditional": false },
+    { "id": "cicd", "keys": ["cicd"], "conditional": false },
+    { "id": "sandbox.enabled", "keys": ["sandbox.enabled"], "conditional": false },
+    { "id": "sandbox.dind", "keys": ["sandbox.dind"], "conditional": false },
+    { "id": "sandbox.azure", "keys": ["sandbox.azure"], "conditional": false },
+    { "id": "lazyboards", "keys": ["lazyboards"], "conditional": true },
+    { "id": "dispatchEnroll", "keys": [], "conditional": true },
+    { "id": "planning", "keys": ["planning"], "conditional": false },
+    { "id": "automerge", "keys": ["automerge"], "conditional": false, "projectsAware": true }
+  ]
+}

@@ -971,7 +971,10 @@ check_invalid_json() {
 # hooks/scripts/check-config-staleness.sh --plain (the same script the
 # SessionStart hook runs), so this check and the session-start advisory can
 # never disagree. Staleness is advisory: stale/unstamped is a warn, never a
-# fail; every unreadable input degrades to skip.
+# fail; every unreadable input degrades to skip. On stale/unstamped lines the
+# hook's optional fourth field lists the unconditional config keys a re-run
+# would ask about (#1245); the warn names them, and an absent or "-" field
+# keeps the plain wording.
 check_config_version() {
   local cfg="$ROOT/.cenci/config.json"
   if [[ ! -f "$cfg" ]]; then
@@ -991,20 +994,26 @@ check_config_version() {
     add_result config-version "(repo)" skip "config-staleness resolver failed" ""
     return
   }
-  local state cfg_v plug_v
-  read -r state cfg_v plug_v <<< "$out"
+  local state cfg_v plug_v missing_keys keys_note=""
+  read -r state cfg_v plug_v missing_keys <<< "$out"
+  # The fourth field (stale/unstamped only) is the comma-joined missing keys,
+  # "-" for none, or absent when unknown. It is re-checked against the key
+  # charset before it can reach the message.
+  if [[ -n "$missing_keys" && "$missing_keys" != "-" && "$missing_keys" =~ ^[A-Za-z0-9_.,]+$ ]]; then
+    keys_note="; a re-run would ask about missing keys: ${missing_keys//,/, }"
+  fi
   case "$state" in
     current)
       add_result config-version "(repo)" pass "configVersion ${cfg_v} is current for the installed flow plugin v${plug_v}" ""
       ;;
     stale)
       add_result config-version "(repo)" warn \
-        ".cenci/config.json was written by /cenci:configure v${cfg_v}; the installed flow plugin is v${plug_v}" \
+        ".cenci/config.json was written by /cenci:configure v${cfg_v}; the installed flow plugin is v${plug_v}${keys_note}" \
         "re-run /cenci:configure to pick up configure features added since (existing answers become defaults) and refresh configVersion"
       ;;
     unstamped)
       add_result config-version "(repo)" warn \
-        ".cenci/config.json has no configVersion stamp (written by a pre-stamping /cenci:configure)" \
+        ".cenci/config.json has no configVersion stamp (written by a pre-stamping /cenci:configure)${keys_note}" \
         "re-run /cenci:configure to stamp configVersion (existing answers become defaults)"
       ;;
     absent)

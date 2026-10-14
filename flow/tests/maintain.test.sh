@@ -1482,6 +1482,93 @@ run_check "${ROOT}" --changed .cenci/config.json
 assert_check_ran "config-version" "case31e config-version runs when .cenci/config.json changed"
 rm -rf "${ROOT}"
 
+# 31f-31i (#1245): the warn names the config keys a configure re-run would ask
+# about. The configureOffered ledger is built from the REAL question table so
+# these cases track the table: every ID is ledgered except the ones under test.
+QUESTION_TABLE="${FLOW_DIR}/skills/configure/question-keys.json"
+
+# ledger_without <id>... — JSON array of every table ID except the given ones.
+ledger_without() {
+  jq -c '[.questions[].id] - $ARGS.positional' "${QUESTION_TABLE}" --args "$@" 2>/dev/null
+}
+
+# config_version_message — the config-version result's message(s), joined.
+# Reading the result (not REPORT_TEXT) keeps other checks' text out of scope.
+config_version_message() {
+  printf '%s' "${REPORT_JSON}" | jq -r \
+    '[.results[]? | select(.check == "config-version") | .message] | join(" | ")' 2>/dev/null
+}
+
+# set_config <root> <jq-filter> <ledger-json> — rewrites the base fixture's
+# config: filter applied, then configureOffered set to the given ledger.
+set_config() {
+  local root="$1" filter="$2" ledger="$3"
+  jq --argjson ledger "${ledger}" "${filter} | .configureOffered = \$ledger" \
+    "${root}/.cenci/config.json" > "${root}/.cenci/config.json.tmp" \
+    && mv "${root}/.cenci/config.json.tmp" "${root}/.cenci/config.json"
+}
+
+# 31f: stale config missing planning + automerge -> warn naming exactly them
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+LEDGER="$(ledger_without planning automerge)"
+[[ -n "${LEDGER}" ]] || fail "case31f: could not build the ledger from ${QUESTION_TABLE}"
+set_config "${ROOT}" '.configVersion = "0.0.1"' "${LEDGER}"
+bootstrap_markers "${ROOT}"
+run_check "${ROOT}"
+assert_exit_zero "case31f stale config with missing keys is still advisory"
+assert_has_result "config-version" "warn" "case31f stale config warns"
+MSG="$(config_version_message)"
+assert_contains "${MSG}" "planning" "case31f warn names the missing planning key"
+assert_contains "${MSG}" "automerge" "case31f warn names the missing automerge key"
+[[ "${MSG}" != *cicd* ]] || fail "case31f: warn must not name a ledgered key (cicd): ${MSG}"
+assert_contains "${MSG}" "0.0.1" "case31f warn still names the stamped version"
+assert_all_fixes_present "case31f config-version warn must carry a fix"
+rm -rf "${ROOT}"
+
+# 31g: unstamped config missing planning + automerge -> warn naming them
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+LEDGER="$(ledger_without planning automerge)"
+[[ -n "${LEDGER}" ]] || fail "case31g: could not build the ledger from ${QUESTION_TABLE}"
+set_config "${ROOT}" 'del(.configVersion)' "${LEDGER}"
+bootstrap_markers "${ROOT}"
+run_check "${ROOT}"
+assert_exit_zero "case31g unstamped config with missing keys is still advisory"
+assert_has_result "config-version" "warn" "case31g unstamped config warns"
+MSG="$(config_version_message)"
+assert_contains "${MSG}" "planning" "case31g warn names the missing planning key"
+assert_contains "${MSG}" "automerge" "case31g warn names the missing automerge key"
+[[ "${MSG}" != *cicd* ]] || fail "case31g: warn must not name a ledgered key (cicd): ${MSG}"
+assert_all_fixes_present "case31g config-version warn must carry a fix"
+rm -rf "${ROOT}"
+
+# 31h: stale config with nothing missing -> still warns, no key sentence
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+LEDGER="$(ledger_without)"
+[[ -n "${LEDGER}" ]] || fail "case31h: could not build the ledger from ${QUESTION_TABLE}"
+set_config "${ROOT}" '.configVersion = "0.0.1"' "${LEDGER}"
+bootstrap_markers "${ROOT}"
+run_check "${ROOT}"
+assert_exit_zero "case31h stale config is advisory"
+assert_has_result "config-version" "warn" "case31h stale config warns even with nothing missing"
+MSG="$(config_version_message)"
+assert_contains "${MSG}" "0.0.1" "case31h warn names the stamped version"
+[[ "${MSG}" != *"would ask"* ]] || fail "case31h: nothing is missing, so the warn must not say a re-run would ask: ${MSG}"
+assert_all_fixes_present "case31h config-version warn must carry a fix"
+rm -rf "${ROOT}"
+
+# 31i: no .cenci/config.json -> config-version is skipped (the absent state)
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+rm -f "${ROOT}/.cenci/config.json"
+run_check "${ROOT}"
+assert_has_result "config-version" "skip" "case31i absent config skips config-version"
+n_cv_warn="$(count_results "config-version" "warn")"
+is_eq0 "${n_cv_warn}" || fail "case31i: absent config must not warn (got ${n_cv_warn})"
+rm -rf "${ROOT}"
+
 # =====================================================================
 # Ticket #666 checker hardening
 # =====================================================================
