@@ -11,6 +11,14 @@ func TestDefaultSweepInterval(t *testing.T) {
 	}
 }
 
+// TestDefaultWindowCleanupInterval pins the finished-ticket window-cleanup
+// pass's zero-config period (#1251): every 2 minutes, enabled by default.
+func TestDefaultWindowCleanupInterval(t *testing.T) {
+	if got := Default().WindowCleanupInterval; got != 2*time.Minute {
+		t.Fatalf("WindowCleanupInterval = %s, want 2m", got)
+	}
+}
+
 // TestDefaultSymbolEscalated_DistinctFromNeedInputAndFailed (#826) pins the
 // escalated-status default glyph and, more importantly, that it is a
 // distinct rune from both SymbolNeedInput ("!") and SymbolFailed ("✗") --

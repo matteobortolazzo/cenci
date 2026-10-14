@@ -1406,6 +1406,56 @@ tmux windows, e.g. a kanban board's column-cleanup hook:
 cleanup: 'cenci close {number}'
 ```
 
+### Automatic cleanup of finished tickets
+
+The daemon also closes the windows of finished tickets on its own, so a window does
+not linger when no board is running a `cleanup:` hook. The pass runs on its own timer,
+`-window-cleanup-interval` (default `2m`; `0` or any non-positive value disables it),
+and never on the 1-second sweep, because it reads GitHub.
+
+It is additive to a board's `cleanup: 'cenci close {number}'` hook: both paths use the
+same guards and both are idempotent, so whichever fires first closes the window and the
+other finds nothing to do.
+
+A ticket counts as *finished* when its issue is closed, or when the issue is still open
+but has a merged closing PR (the verdict comes from `internal/ticketstate`). An
+`Unknown` verdict or a read error counts as *not* finished.
+
+Only windows whose name starts with a ticket number are considered. Before each kill the
+daemon re-checks, on its event loop, that the window is still the one that was evaluated
+and:
+- never closes a window whose status is `running` or `need-input`;
+- holds the window while a `cenci babysit` supervisor owns the ticket (the same guard
+  as `cenci close`).
+
+The pass is fail-open: a failed read, a repo that cannot be resolved, a malformed
+`.cenci/config.json`, or an unknown verdict closes nothing for that scope. Each is
+logged.
+
+To opt a repo out, set this in its `.cenci/config.json`; the pass then makes no GitHub
+reads for that repo's windows:
+
+```json
+{ "windowCleanup": { "enabled": false } }
+```
+
+The config is read from the checkout the window was launched in (recorded by `cenci run`
+as the `@cenci-repo-dir` window option).
+
+The kill targets the window's tracked tmux pane id (`%N`), not `session:index`, because
+it runs after the close grace wait; renumbering or index reuse in between cannot
+redirect it to another window.
+
+Limitations:
+- Windows launched before `@cenci-repo-dir` was recorded (or where recording it failed)
+  are skipped.
+- After a daemon restart a window is not tracked again until its next hook event, so it
+  is not a candidate until then (see [Daemon restart](#daemon-restart)).
+- The repo is identified from the checkout's `origin` remote. A fork checkout looks the
+  ticket number up in the fork, not the upstream.
+- An open issue that was reopened after a merged closing PR can read as finished (a known
+  limitation of the reader).
+
 ### Automerge (`cenci babysit`)
 
 > Turning this on, and what it combines with: [The autonomous
@@ -2407,6 +2457,7 @@ file is always removed once it's known stale.
 | `-sweep` | `1` | Stale session reconciliation interval in seconds |
 | `-session-ttl` | `2h` | Idle TTL for paneless sessions (Go duration); sessions without a pane are expired after this duration if no `SessionEnd` fires |
 | `-reap-interval` | `5m` | Period of the sandbox orphan-reap backstop (Go duration); `0` disables it, leaving only the startup and pane-gone triggers |
+| `-window-cleanup-interval` | `2m` | Period of the finished-ticket window-cleanup pass (Go duration; see [Automatic cleanup of finished tickets](#automatic-cleanup-of-finished-tickets)); `0` (or any non-positive value) disables it |
 | `-style-running` | `fg=blue,dim` | tmux style for running state (inactive windows) |
 | `-style-done` | `fg=green,dim` | tmux style for done state (inactive windows) |
 | `-style-input` | `fg=red,dim` | tmux style for need-input state (inactive windows) |
@@ -2825,6 +2876,8 @@ see it on their next poll. Custom `-event-socket` instances are never started
 automatically. To restart deliberately (e.g. after a config change), use `cenci
 daemon restart` instead of waiting for the next hook — see
 [Daemon lifecycle](#daemon-lifecycle-cenci-daemon-startstoprestartstatus) above.
+Until a window's next hook event the daemon does not track it, so the
+[finished-ticket window cleanup](#automatic-cleanup-of-finished-tickets) skips it.
 
 **Upgrading past the socket-directory nesting change**: sockets moved from
 `$XDG_RUNTIME_DIR/cenci*.sock` to `$XDG_RUNTIME_DIR/cenci/cenci*.sock`

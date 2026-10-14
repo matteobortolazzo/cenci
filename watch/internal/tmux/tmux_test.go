@@ -102,7 +102,7 @@ func failingTmux(t *testing.T, stderrText string) {
 
 // goneMessages are tmux's stderr texts for a window or session that does not
 // exist.
-var goneMessages = []string{"can't find window: 7", "can't find session: work"}
+var goneMessages = []string{"can't find window: 7", "can't find session: work", "can't find pane: %7"}
 
 // notGoneMessages are tmux failures that say nothing about the target being
 // missing; they must stay plain errors so a real problem is never reported as

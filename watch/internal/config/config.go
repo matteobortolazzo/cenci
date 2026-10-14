@@ -17,18 +17,22 @@ type Config struct {
 	// unobservable and strands a live container process. This tick bounds
 	// that accumulation regardless of which binding path was lost.
 	// Non-positive disables the backstop.
-	ReapInterval    time.Duration
-	StyleIdle       string
-	StyleRunning    string
-	StyleDone       string
-	StyleNeedInput  string
-	StyleStopped    string
-	SymbolIdle      string
-	SymbolRunning   string
-	SymbolDone      string
-	SymbolNeedInput string
-	SymbolStopped   string
-	SymbolFailed    string
+	ReapInterval time.Duration
+	// WindowCleanupInterval is the period of the daemon's finished-ticket
+	// window-cleanup pass (#1251), which closes the windows of tickets whose work
+	// is over. Non-positive disables the pass.
+	WindowCleanupInterval time.Duration
+	StyleIdle             string
+	StyleRunning          string
+	StyleDone             string
+	StyleNeedInput        string
+	StyleStopped          string
+	SymbolIdle            string
+	SymbolRunning         string
+	SymbolDone            string
+	SymbolNeedInput       string
+	SymbolStopped         string
+	SymbolFailed          string
 	// SymbolEscalated (#826) is the glyph for a ticket the unattended
 	// planner escalated (Input Needed), deliberately distinct from
 	// SymbolNeedInput ("!", a live session waiting mid-turn) and
@@ -55,5 +59,7 @@ func Default() Config {
 		SymbolStopped:   "⏹",
 		SymbolFailed:    "✗",
 		SymbolEscalated: "?",
+
+		WindowCleanupInterval: 2 * time.Minute,
 	}
 }
