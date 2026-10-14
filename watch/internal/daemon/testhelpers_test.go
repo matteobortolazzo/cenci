@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"sync/atomic"
 	"time"
 
@@ -63,9 +64,32 @@ func lastRename(renames []tmuxtest.RenameCall, target string) (string, bool) {
 // likewise always injected (#522) so pending-close tests can type-assert
 // d.killer.(*fakeKiller) without touching a real tmux binary.
 func newTestDaemon(mc *tmuxtest.MockClient) *Daemon {
+	d, _ := newTestDaemonWithRunner(mc)
+	return d
+}
+
+// syncOffLoop is the synchronous stand-in for the daemon's off-loop runner
+// (#1253): it runs fn inline with a background context and records the timeout
+// the daemon asked for, so tests are deterministic and can still assert the
+// bound. Tests that exercise the production goroutine runner build the daemon
+// with newDaemon directly instead.
+type syncOffLoop struct {
+	timeouts []time.Duration
+}
+
+func (s *syncOffLoop) run(timeout time.Duration, fn func(ctx context.Context)) {
+	s.timeouts = append(s.timeouts, timeout)
+	fn(context.Background())
+}
+
+// newTestDaemonWithRunner is newTestDaemon plus access to the synchronous
+// off-loop runner it installed.
+func newTestDaemonWithRunner(mc *tmuxtest.MockClient) (*Daemon, *syncOffLoop) {
 	ch := make(chan ipc.HookEvent, 16)
 	cfg := testConfig()
 	d := newDaemon(cfg, tmuxfe.New(cfg, mc), ch, &mockReaper{})
+	runner := &syncOffLoop{}
+	d.runOffLoop = runner.run
 	d.killer = &fakeKiller{}
 	// The babysit close guard is disabled by default so the suite never
 	// reads the developer's ambient supervisor state directory (#787); the
@@ -78,5 +102,5 @@ func newTestDaemon(mc *tmuxtest.MockClient) *Daemon {
 	// override it explicitly, and the nil default is pinned by building through
 	// newDaemon directly.
 	d.armCapable = func(agent, workflow string) bool { return true }
-	return d
+	return d, runner
 }

@@ -14,6 +14,7 @@ import (
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/ipc"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/reap"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/tmux"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/windowproc"
 	"github.com/matteobortolazzo/cenci/watch/v2/pkg/watch"
 )
 
@@ -24,6 +25,12 @@ import (
 // documented on tmux.ExecClient.KillWindow (#522).
 type windowKiller interface {
 	KillWindow(target string) error
+}
+
+// windowProcKiller kills the process tree behind a tmux window target before
+// the window itself is killed (#1253). Production is *windowproc.Killer.
+type windowProcKiller interface {
+	KillWindowProcesses(ctx context.Context, target string) error
 }
 
 // Daemon manages the event-driven loop and per-session core state. All tmux
@@ -38,6 +45,17 @@ type Daemon struct {
 	now           func() time.Time        // injectable clock for TTL tests
 	reaper        reap.Reaper             // triggers cenci sandbox reap-orphans on pane-gone sweep/startup (#292)
 	killer        windowKiller            // kills a pending-close window's target at SessionEnd (#522)
+
+	// procKiller kills a pending-close window's process tree before killer runs
+	// (#1253). Nil (newDaemon's default) skips it, so newDaemon-based tests never
+	// touch real processes; Run installs the real windowproc.Killer.
+	procKiller windowProcKiller
+	// runOffLoop runs fn off the event loop with a ctx bounded by timeout
+	// (#1253): the process kill waits out a SIGTERM->SIGKILL grace window and
+	// runtime execs can hang, neither of which may stall d.loop. Production
+	// (newDaemon) is a goroutine; newTestDaemon installs a synchronous runner.
+	// fn must not touch d.sessions, d.pending or any other loop-owned field.
+	runOffLoop func(timeout time.Duration, fn func(ctx context.Context))
 
 	// closeGuard reports whether a window's ticket is still owned by a live
 	// `cenci babysit` supervisor with CI not green, holding back a deferred
@@ -109,11 +127,37 @@ func newDaemon(cfg config.Config, fe frontend.Frontend, events <-chan ipc.HookEv
 		reaper:   reaper,
 		killer:   &tmux.ExecClient{},
 		pending:  make(map[string]*pendingCloseEntry),
+		// procKiller stays nil here: Run installs the real one.
+		runOffLoop: runInGoroutine,
 		closeGuard: func(ticket string) (bool, string) {
 			return babysit.BlocksClose(ticket, "", "")
 		},
 		armSpawn: defaultArmSpawn,
 	}
+}
+
+// installHostSeams installs the daemon's real host-side seams, the ones that
+// shell out or signal processes: the babysit-arm resolver/spawn (#1095), its
+// capability predicate (#1215), and the window-process killer (#1253, its
+// diagnostics going to the daemon log). newDaemon leaves them inert -- the arm
+// seam nacks, procKiller is nil -- so newDaemon-based tests never shell out or
+// signal real processes. Run is the only production caller, and
+// TestInstallHostSeams_InstallsTheRealProcessKiller pins that it wires the real
+// killer, so dropping it cannot go unnoticed.
+func (d *Daemon) installHostSeams(armCapable func(agent, workflow string) bool) {
+	d.armSpawn = d.hostArmSpawn
+	d.armCapable = armCapable
+	d.procKiller = windowproc.New(log.Writer())
+}
+
+// runInGoroutine is the production Daemon.runOffLoop: fn runs on its own
+// goroutine with a context that expires after timeout.
+func runInGoroutine(timeout time.Duration, fn func(ctx context.Context)) {
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		fn(ctx)
+	}()
 }
 
 // Run starts the event-driven daemon with the given interactive frontend.
@@ -153,11 +197,10 @@ func Run(ctx context.Context, cfg config.Config, fe frontend.Frontend, attention
 
 	d := newDaemon(cfg, fe, recv.Events(), reap.NewExecReaper(cfg.Verbose))
 	d.pendingCloses = recv.PendingCloses()
-	// Install the real host-side arm seam (#1095): newDaemon's constructor
-	// keeps defaulting to defaultArmSpawn so newDaemon-based tests never
-	// shell out, and only a live Run installs the resolver/spawn seam.
-	d.armSpawn = d.hostArmSpawn
-	d.armCapable = armCapable
+	// Install the real host-side seams (#1095, #1253): newDaemon's constructor
+	// keeps its inert defaults so newDaemon-based tests never shell out or
+	// signal real processes, and only a live Run installs the real ones.
+	d.installHostSeams(armCapable)
 	// Install the arm handler before Accept starts serving connections
 	// (#1094): nothing between NewEventReceiver and Accept depends on
 	// accepting, and a nil handler still nacks, but installing it first

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"io"
@@ -12,7 +13,9 @@ import (
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/closecmd"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/dispatch"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/ipc"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/sandbox"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/tmux"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/windowproc"
 	"github.com/matteobortolazzo/cenci/watch/v2/pkg/watch"
 )
 
@@ -28,6 +31,25 @@ func registerPendingClose(w watch.WindowState) error {
 		WindowIndex: w.WindowIndex,
 		WindowName:  w.WindowName,
 	})
+}
+
+// windowProcKiller kills the process tree behind a tmux window target;
+// production is *windowproc.Killer.
+type windowProcKiller interface {
+	KillWindowProcesses(ctx context.Context, target string) error
+}
+
+// killProcessesFunc returns the production closecmd.Opts.KillProcesses. Each
+// window's kill runs under its own deadline -- the SIGTERM->SIGKILL grace window
+// plus sandbox.CloseKillMargin, the same bound the daemon's off-loop close uses
+// -- so a hung runtime exec can never hang `cenci close`, while windows closed
+// one after another each get the full bound instead of sharing one.
+func killProcessesFunc(k windowProcKiller) func(target string) error {
+	return func(target string) error {
+		ctx, cancel := context.WithTimeout(context.Background(), sandbox.GraceFromEnv()+sandbox.CloseKillMargin)
+		defer cancel()
+		return k.KillWindowProcesses(ctx, target)
+	}
 }
 
 // babysitCloseGuard returns the production closecmd.Opts.Guard: a check for a
@@ -59,8 +81,9 @@ func gitRepoRoot() string {
 // [--dry-run] [--socket PATH]`. It resolves the target against the daemon's
 // live window registry (never re-derives a tmux target itself) and closes
 // every matched window that isn't running/waiting for input, unless --force
-// is given. See internal/closecmd for the matching/kill/guard logic; this
-// function only parses flags and renders the result.
+// is given. Each closed window's process tree is killed first (#1253). See
+// internal/closecmd for the matching/kill/guard logic; this function only
+// parses flags and renders the result.
 func runClose(args []string) {
 	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
 		fmt.Fprintln(os.Stderr, "cenci close: usage: cenci close <ticket-number|window-name> [--force] [--dry-run] [--socket PATH]")
@@ -79,15 +102,17 @@ func runClose(args []string) {
 	// the "dispatch"/"dispatch loop" trailing-positional guards above.
 	rejectExtra("cenci close", fs.Args())
 
+	// Each window's process tree is killed before the window itself (#1253).
 	decisions, err := closecmd.Run(closecmd.Opts{
-		Target:       target,
-		Force:        *force,
-		DryRun:       *dryRun,
-		SocketPath:   *socketPath,
-		ReadSnapshot: dispatch.ReadSnapshot,
-		Killer:       &tmux.ExecClient{},
-		Register:     registerPendingClose,
-		Guard:        babysitCloseGuard(),
+		Target:        target,
+		Force:         *force,
+		DryRun:        *dryRun,
+		SocketPath:    *socketPath,
+		ReadSnapshot:  dispatch.ReadSnapshot,
+		Killer:        &tmux.ExecClient{},
+		Register:      registerPendingClose,
+		Guard:         babysitCloseGuard(),
+		KillProcesses: killProcessesFunc(windowproc.New(os.Stderr)),
 	})
 	if err != nil && len(decisions) == 0 {
 		// Daemon unreachable (or every match failed to kill): fail safe, no

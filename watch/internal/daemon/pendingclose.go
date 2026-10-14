@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"log"
 	"time"
@@ -8,6 +10,8 @@ import (
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/detect"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/frontend"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/ipc"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/sandbox"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/tmux"
 )
 
 // pendingCloseRecheckInterval throttles how often one blocked pending-close
@@ -51,7 +55,8 @@ func (d *Daemon) registerPendingClose(pc ipc.PendingClose) {
 	}
 }
 
-// killPendingClose kills wi's window if it matches a registered
+// killPendingClose kills wi's window (and, first, the processes behind it, off
+// the event loop -- see killWindowByKey) if it matches a registered
 // pending-close, and removes the entry regardless of kill success (a
 // disappeared window is nothing to retry). wi is nil for paneless sessions,
 // which never have a tracked window to match against.
@@ -126,12 +131,34 @@ func (d *Daemon) babysitBlocks(entry *pendingCloseEntry) (bool, string) {
 	return d.closeGuard(ticket)
 }
 
-// killWindowByKey kills the window a "session:index" registry key names.
+// killWindowByKey kills the window a "session:index" registry key names:
+// first the processes behind it, then the window itself (#1253). Both run off
+// the event loop through runOffLoop, because the process kill waits out a grace
+// window and a runtime exec can hang; the caller has already removed the
+// registry entry on the loop. The off-loop function captures only locals --
+// never d.sessions, d.pending or any other loop-owned state.
+//
+// A failed process kill is logged and never stops kill-window. A window that is
+// already gone counts as closed and is logged only under Verbose.
 func (d *Daemon) killWindowByKey(key string) {
 	target := fmt.Sprintf("=%s", key)
-	if err := d.killer.KillWindow(target); err != nil {
-		log.Printf("pending-close: error killing %s: %v", target, err)
-	}
+	killer, procKiller, verbose := d.killer, d.procKiller, d.cfg.Verbose
+	d.runOffLoop(sandbox.GraceFromEnv()+sandbox.CloseKillMargin, func(ctx context.Context) {
+		if procKiller != nil {
+			if err := procKiller.KillWindowProcesses(ctx, target); err != nil {
+				log.Printf("pending-close: error killing processes of %s: %v", target, err)
+			}
+		}
+		err := killer.KillWindow(target)
+		switch {
+		case errors.Is(err, tmux.ErrWindowGone):
+			if verbose {
+				log.Printf("pending-close: %s already gone, counted as closed", target)
+			}
+		case err != nil:
+			log.Printf("pending-close: error killing %s: %v", target, err)
+		}
+	})
 }
 
 // prunePendingCloseForWindow removes any pending-close registry entry for

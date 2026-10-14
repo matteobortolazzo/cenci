@@ -1,39 +1,13 @@
 package launcher
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
-	"os"
-	"os/exec"
-	"regexp"
-	"strconv"
-	"strings"
-	"time"
 
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/sandbox"
 )
-
-// reapLivenessScript is the pre-SIGKILL liveness/identity probe, copied
-// VERBATIM from sandbox/cenci-sand's REAP_LIVENESS_SCRIPT: invoked as
-// `sh -c "<script>" _ <pid>` (pid passed as an argument, never interpolated).
-// Prints the process's *current* start time if alive, the sentinel __GONE__
-// if not, or __NOSTAT__ if alive but unverifiable. Always exits 0 if it ran
-// at all, so a non-zero exit from the surrounding `exec` means the exec
-// transport itself failed — see the escalation loop for the host-side
-// classification.
-const reapLivenessScript = `pid="$1"; st=$(cat "/proc/$pid/stat" 2>/dev/null); if [ -z "$st" ]; then printf "__GONE__\n"; exit 0; fi; st=${st##*) }; set -- $st; if [ "$#" -ge 20 ]; then shift 19; printf "%s\n" "$1"; else printf "__NOSTAT__\n"; fi; exit 0`
-
-// numericPattern validates start times before trusting a mismatch as genuine
-// PID reuse (a forging process can corrupt its own stat field 22).
-var numericPattern = regexp.MustCompile(`^[0-9]+$`)
-
-// reapSleep is the SIGTERM→SIGKILL grace sleep, a package var so tests could
-// stub it; CENCI_SANDBOX_REAP_GRACE_SECS already tunes the duration to 0 for
-// fast test runs, matching the bash suite's usage.
-var reapSleep = time.Sleep
 
 // ReapOrphans kills container-side agent processes whose owning tmux pane (or
 // launch) no longer exists on the host. Ownership is recorded via the
@@ -66,12 +40,7 @@ var reapSleep = time.Sleep
 func ReapOrphans(stdout, stderr io.Writer) error {
 	// CENCI_SANDBOX_REAP_GRACE_SECS lets callers tune the SIGTERM → SIGKILL
 	// grace window (e.g. to 0 for fast test runs).
-	grace := 5.0
-	if v := os.Getenv("CENCI_SANDBOX_REAP_GRACE_SECS"); v != "" {
-		if parsed, err := strconv.ParseFloat(v, 64); err == nil {
-			grace = parsed
-		}
-	}
+	grace := sandbox.GraceFromEnv()
 
 	// The scanner memoizes per-socket live-pane resolution across every
 	// container/runtime in this sweep (#1007).
@@ -104,7 +73,7 @@ func ReapOrphans(stdout, stderr io.Writer) error {
 				return err
 			}
 
-			var termPids, termStarts []string
+			var termed []sandbox.ProcTarget
 			for _, r := range scanned.Rows {
 				pid, pane, start := r.PID, r.Pane, r.Start
 
@@ -123,35 +92,20 @@ func ReapOrphans(stdout, stderr io.Writer) error {
 					continue
 				}
 
-				// -u root: `docker run --user X` persists as the container's
-				// Config.User for the container's lifetime, not just its
-				// initial process, so every exec call site must carry its
-				// own explicit -u rather than relying on the container's
-				// default user (see sandbox project's CLAUDE.md). Signaling
-				// stays root regardless of which user the scan runs as.
-				term := exec.Command(rt, "exec", "-u", "root", container, "kill", "-TERM", pid)
-				term.Stdout = stdout
-				term.Stderr = stderr
-				if err := term.Run(); err != nil {
-					// A pid can legitimately exit between the scan and the
-					// signal. One guaranteed source on containers created by
-					// pre-#356 launchers: the scan's own in-container sh
-					// inherits the container-lifetime TMUX_PANE (docker/podman
-					// exec merges Config.Env), so once that baked pane goes
-					// stale the scan reports itself as an orphan — and it has
-					// always exited by kill time. Probe before classifying:
-					// __GONE__ means the TERM raced an exit, not a failure.
-					if start, perr := probeStartTime(rt, container, pid); perr == nil && start == "__GONE__" {
-						_, _ = fmt.Fprintf(stdout, "Note: process %s in container %s exited before SIGTERM could be delivered; skipping.\n", pid, container)
-						continue
-					}
+				// A pid that exited between the scan and the signal is a Note,
+				// not a failure (see sandbox.SignalTerm).
+				gone, err := sandbox.SignalTerm(ctx, rt, container, pid, stdout, stderr)
+				if err != nil {
 					_, _ = fmt.Fprintf(stderr, "Error: failed to send SIGTERM to pid %s in container %s.\n", pid, container)
-					return fmt.Errorf("%s exec kill -TERM: %w", rt, err)
+					return err
+				}
+				if gone {
+					_, _ = fmt.Fprintf(stdout, "Note: process %s in container %s exited before SIGTERM could be delivered; skipping.\n", pid, container)
+					continue
 				}
 				_, _ = fmt.Fprintf(stdout, "reaped\t%s\t%s\t%s\n", container, pid, pane)
 				reapedCount++
-				termPids = append(termPids, pid)
-				termStarts = append(termStarts, start)
+				termed = append(termed, sandbox.ProcTarget{PID: pid, Start: start})
 			}
 
 			// (pre-#1007 launcher): the ticket reference stays in this
@@ -170,62 +124,15 @@ func ReapOrphans(stdout, stderr io.Writer) error {
 				_, _ = fmt.Fprintf(stdout, "Note: %d process environ(s) in container %s were unreadable during the -u dev scan; if this persists it may mean the scan user's UID no longer matches the agent process UID, so orphans could go undetected.\n", scanned.UnreadableCount, container)
 			}
 
-			if len(termPids) == 0 {
+			if len(termed) == 0 {
 				continue
 			}
-			reapSleep(time.Duration(grace * float64(time.Second)))
-			for i, pid := range termPids {
-				recordedStart := termStarts[i]
-
-				// -u root: `docker run --user X` persists as the container's
-				// Config.User for the container's lifetime, so this exec
-				// call site carries its own explicit -u (see sandbox
-				// project's CLAUDE.md). A non-zero exit here means the exec
-				// transport itself failed, not "process gone" — a hard
-				// error, not swallowed.
-				probeStart, err := probeStartTime(rt, container, pid)
-				if err != nil {
-					_, _ = fmt.Fprintf(stderr, "Error: failed to probe liveness of pid %s in container %s: %v\n", pid, container, err)
-					return fmt.Errorf("%s exec liveness probe: %w", rt, err)
-				}
-
-				// __GONE__: process already gone by probe time — no-op, not
-				// an error.
-				if probeStart == "__GONE__" {
-					continue
-				}
-
-				// A recorded start and a probe start that are both strictly
-				// numeric and differ means the pid was reused by an unrelated
-				// process during the grace window — treat as already-gone,
-				// skip SIGKILL. Both sides must be numeric before trusting a
-				// mismatch as genuine PID reuse (a forging process can
-				// corrupt its own stat field 22; the scan sanitizes the pane,
-				// socket and launch-ID fields so a hostile value can no longer
-				// shift the TSV columns, and any corruption is confined to the
-				// forging process's own record, so this is unparseable-value
-				// handling, not a security boundary). __NOSTAT__ and an empty
-				// recorded start fall back to liveness-only silently; a
-				// non-empty but non-numeric value on either side falls back
-				// the same way but is noted since it's unexpected.
-				recordedNumeric := numericPattern.MatchString(recordedStart)
-				probeNumeric := numericPattern.MatchString(probeStart)
-				if recordedNumeric && probeNumeric {
-					if probeStart != recordedStart {
-						continue
-					}
-				} else if (recordedStart != "" && !recordedNumeric) ||
-					(probeStart != "__NOSTAT__" && !probeNumeric) {
-					_, _ = fmt.Fprintf(stdout, "Note: process %s in container %s has an unparseable start-time value; proceeding best-effort.\n", pid, container)
-				}
-
-				kill := exec.Command(rt, "exec", "-u", "root", container, "kill", "-KILL", pid)
-				kill.Stdout = stdout
-				kill.Stderr = stderr
-				if err := kill.Run(); err != nil {
-					_, _ = fmt.Fprintf(stderr, "Error: failed to send SIGKILL to pid %s in container %s.\n", pid, container)
-					return fmt.Errorf("%s exec kill -KILL: %w", rt, err)
-				}
+			// Wait out the grace window (stopping early once every pid is
+			// gone), then SIGKILL whatever is still the same live process.
+			// With a zero grace window the wait issues no probes at all.
+			sandbox.AwaitExit(ctx, rt, container, termed, grace)
+			if err := sandbox.KillSurvivors(ctx, rt, container, termed, stdout, stderr); err != nil {
+				return err
 			}
 		}
 	}
@@ -236,24 +143,4 @@ func ReapOrphans(stdout, stderr io.Writer) error {
 		_, _ = fmt.Fprintln(stdout, "No orphaned processes found.")
 	}
 	return nil
-}
-
-// probeStartTime runs the in-container liveness/identity probe for pid and
-// returns its output: the process's current /proc stat start time, __GONE__
-// (process gone), or __NOSTAT__ (alive but unverifiable). Pid is passed as an
-// argument to the probe, never interpolated. An error means the exec
-// transport itself failed; the probe's stderr is folded into the error text.
-func probeStartTime(rt, container, pid string) (string, error) {
-	// -u root: `docker run --user X` persists as the container's Config.User
-	// for the container's lifetime, so this exec call site carries its own
-	// explicit -u (see sandbox project's CLAUDE.md). The probe stays root
-	// regardless of which user the scan runs as.
-	var probeOut, probeErr bytes.Buffer
-	probe := exec.Command(rt, "exec", "-u", "root", container, "sh", "-c", reapLivenessScript, "_", pid)
-	probe.Stdout = &probeOut
-	probe.Stderr = &probeErr
-	if err := probe.Run(); err != nil {
-		return "", fmt.Errorf("%w: %s", err, strings.TrimRight(probeErr.String(), "\n"))
-	}
-	return strings.TrimRight(probeOut.String(), "\n"), nil
 }

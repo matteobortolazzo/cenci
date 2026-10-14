@@ -1,10 +1,19 @@
 package closecmd_test
 
 import (
+	"context"
 	"errors"
+	"fmt"
+	"io"
+	"slices"
+	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/closecmd"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/tmux"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/windowproc"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/windowproc/windowproctest"
 	"github.com/matteobortolazzo/cenci/watch/v2/pkg/watch"
 )
 
@@ -523,5 +532,332 @@ func TestRun_NoMatchesNoKillsNoError(t *testing.T) {
 	}
 	if len(killer.killed) != 0 {
 		t.Errorf("killer.killed = %v, want none", killer.killed)
+	}
+}
+
+// -- process-tree kill before kill-window (#1253) ----------------------------
+//
+// These run closecmd.Run with the real windowproc.Killer, the real
+// tmux.ExecClient and fake tmux/docker/podman binaries alone on PATH
+// (windowproctest, whose Install verifies the fakes are what PATH resolves
+// to). The grace window is 0 unless a test says otherwise.
+
+const (
+	ccLaunchID = "0123456789abcdef0123456789abcdef"
+	ccTarget   = "=s1:1"
+	ccWindow   = "42-implement"
+)
+
+// stubbornProcs are two processes that ignore SIGTERM, so a close has to
+// escalate to SIGKILL.
+func stubbornProcs() []windowproctest.Proc {
+	return []windowproctest.Proc{
+		{PID: "101", Start: "5001", IgnoreTerm: true},
+		{PID: "102", Start: "5002", IgnoreTerm: true},
+	}
+}
+
+func realProcessKiller() func(string) error {
+	k := windowproc.New(io.Discard)
+	return func(target string) error { return k.KillWindowProcesses(context.Background(), target) }
+}
+
+func closeSnapshot(status string) *watch.StateSnapshot {
+	return &watch.StateSnapshot{Windows: []watch.WindowState{
+		{Session: "s1", WindowIndex: "1", WindowName: ccWindow, Status: status},
+	}}
+}
+
+func realCloseOpts(snap *watch.StateSnapshot) closecmd.Opts {
+	return closecmd.Opts{
+		Target:        "42",
+		ReadSnapshot:  fakeReadSnapshot(snap, nil),
+		Killer:        &tmux.ExecClient{},
+		KillProcesses: realProcessKiller(),
+	}
+}
+
+func requireClosedOnce(t *testing.T, decisions []closecmd.Decision) {
+	t.Helper()
+	if len(decisions) != 1 || decisions[0].Action != closecmd.ActionClosed {
+		t.Fatalf("decisions = %+v, want exactly one closed window", decisions)
+	}
+}
+
+// AC10 + AC15: closing a sandbox window TERMs, then KILLs, every process of the
+// pane's launch -- through the runtime the pane recorded, for Claude and Codex
+// containers -- and only then kills the window. The whole call log is asserted
+// line by line: the listing with the exact format, the -u dev probe with the ID
+// as argv, -u root signals, the liveness checks, the bounded re-list, and
+// kill-window last.
+func TestRun_SandboxWindowLaunchProcessesAreTermedThenKilledBeforeKillWindow(t *testing.T) {
+	for _, f := range windowproctest.Flavors {
+		t.Run(f.Name, func(t *testing.T) {
+			t.Setenv("CENCI_SANDBOX_REAP_GRACE_SECS", "0")
+			fakes := windowproctest.Install(t, f.SandboxSpec(ccLaunchID, windowproctest.HarmlessPanePID(t), stubbornProcs()...))
+
+			decisions, err := closecmd.Run(realCloseOpts(closeSnapshot("done")))
+
+			if err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			requireClosedOnce(t, decisions)
+			want := windowproctest.SandboxCloseCalls(f.Runtime, f.Container, ccLaunchID, ccTarget, "101", "102")
+			if got := fakes.Calls(t); !slices.Equal(got, want) {
+				t.Errorf("calls:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+			}
+		})
+	}
+}
+
+// AC12: a host pane's process group is TERMed before kill-window, a member of
+// that group dies with it, and a process under Setsid (the babysit supervisor
+// shape) survives. The fake kill-window records whether the group's processes
+// were already gone when it ran.
+func TestRun_HostWindowProcessGroupIsTermedBeforeKillWindowAndSetsidProcessSurvives(t *testing.T) {
+	leader, member, survivor := windowproctest.StartCooperativeGroup(t)
+	t.Setenv("CENCI_SANDBOX_REAP_GRACE_SECS", "5")
+	fakes := windowproctest.Install(t, windowproctest.Spec{
+		Panes:                 []windowproctest.Pane{{ID: "%1", PanePID: fmt.Sprint(leader.PID)}},
+		ProbePIDsAtKillWindow: []string{fmt.Sprint(leader.PID), fmt.Sprint(member.PID)},
+	})
+
+	decisions, err := closecmd.Run(realCloseOpts(closeSnapshot("done")))
+
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	requireClosedOnce(t, decisions)
+	leader.RequireDeathBy(t, "group leader", syscall.SIGTERM)
+	member.RequireDeathBy(t, "group member", syscall.SIGTERM)
+	survivor.RequireAlive(t, "Setsid process")
+	want := append(windowproctest.ListCalls(ccTarget), []string{
+		"tmux kill-window -t " + ccTarget,
+		fmt.Sprintf("tmux kill-window-check %d gone", leader.PID),
+		fmt.Sprintf("tmux kill-window-check %d gone", member.PID),
+	}...)
+	if got := fakes.Calls(t); !slices.Equal(got, want) {
+		t.Errorf("calls:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+// AC12: a group that ignores SIGTERM is KILLed, and the window is still closed.
+func TestRun_HostWindowProcessGroupIgnoringTermIsKilledThenWindowClosed(t *testing.T) {
+	leader, member := windowproctest.StartTermIgnoringGroup(t)
+	t.Setenv("CENCI_SANDBOX_REAP_GRACE_SECS", "0")
+	fakes := windowproctest.Install(t, windowproctest.Spec{
+		Panes: []windowproctest.Pane{{ID: "%1", PanePID: fmt.Sprint(leader.PID)}},
+	})
+
+	decisions, err := closecmd.Run(realCloseOpts(closeSnapshot("done")))
+
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	requireClosedOnce(t, decisions)
+	leader.RequireDeathBy(t, "TERM-ignoring group leader", syscall.SIGKILL)
+	member.RequireDeathBy(t, "group member", syscall.SIGTERM, syscall.SIGKILL)
+	want := append(windowproctest.ListCalls(ccTarget), []string{
+		"tmux kill-window -t " + ccTarget,
+	}...)
+	if got := fakes.Calls(t); !slices.Equal(got, want) {
+		t.Errorf("calls:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+// AC13: a failed process kill (the container is gone) never strands the window:
+// kill-window still runs and the window counts as closed, but Run returns the
+// failure -- naming the window and carrying the runtime's own message -- so
+// `cenci close` exits non-zero.
+func TestRun_FailedProcessKillStillClosesWindowAndReportsTheError(t *testing.T) {
+	for _, f := range windowproctest.Flavors {
+		t.Run(f.Name, func(t *testing.T) {
+			t.Setenv("CENCI_SANDBOX_REAP_GRACE_SECS", "0")
+			spec := f.SandboxSpec(ccLaunchID, windowproctest.HarmlessPanePID(t), stubbornProcs()...)
+			spec.ProbeFails = true
+			fakes := windowproctest.Install(t, spec)
+
+			decisions, err := closecmd.Run(realCloseOpts(closeSnapshot("done")))
+
+			if err == nil {
+				t.Fatal("Run err = nil, want the failed process kill reported")
+			}
+			for _, want := range []string{"killing processes of " + ccWindow + " (" + ccTarget + ")", windowproctest.TransportMarker} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("Run err = %q, want it to contain %q", err, want)
+				}
+			}
+			requireClosedOnce(t, decisions)
+			calls := fakes.Calls(t)
+			if len(calls) == 0 || calls[len(calls)-1] != "tmux kill-window -t "+ccTarget {
+				t.Errorf("calls:\n%s\nwant kill-window to still run last", strings.Join(calls, "\n"))
+			}
+			if slices.ContainsFunc(calls, func(c string) bool { return strings.Contains(c, "kill -") }) {
+				t.Errorf("a signal was sent although the probe failed; calls:\n%s", strings.Join(calls, "\n"))
+			}
+		})
+	}
+}
+
+// AC13: a process-kill failure of any kind lets kill-window run. Recorded in
+// one shared log so the order is part of the assertion.
+func TestRun_KillProcessesErrorDoesNotSkipKillWindow(t *testing.T) {
+	var log []string
+	opts := closecmd.Opts{
+		Target:       "42",
+		ReadSnapshot: fakeReadSnapshot(closeSnapshot("done"), nil),
+		Killer:       &logKiller{log: &log},
+		KillProcesses: func(target string) error {
+			log = append(log, "kill-processes "+target)
+			return errors.New("exec transport broke")
+		},
+	}
+
+	decisions, err := closecmd.Run(opts)
+
+	if err == nil || !strings.Contains(err.Error(), "exec transport broke") {
+		t.Fatalf("Run err = %v, want the process-kill error", err)
+	}
+	requireClosedOnce(t, decisions)
+	want := []string{"kill-processes " + ccTarget, "kill-window " + ccTarget}
+	if !slices.Equal(log, want) {
+		t.Errorf("order = %v, want %v", log, want)
+	}
+}
+
+// logKiller records kill-window calls into a log shared with other fakes.
+type logKiller struct {
+	log *[]string
+	err error
+}
+
+func (k *logKiller) KillWindow(target string) error {
+	*k.log = append(*k.log, "kill-window "+target)
+	return k.err
+}
+
+// AC13: if kill-window fails because the window already closed itself after its
+// agent exited, that counts as closed -- no error -- whether the window was
+// already gone at the pane listing or vanished between the listing and the kill.
+func TestRun_WindowAlreadyGoneCountsAsClosedNotAnError(t *testing.T) {
+	for _, f := range windowproctest.Flavors {
+		t.Run(f.Name+"/vanished before kill-window", func(t *testing.T) {
+			t.Setenv("CENCI_SANDBOX_REAP_GRACE_SECS", "0")
+			spec := f.SandboxSpec(ccLaunchID, windowproctest.HarmlessPanePID(t), stubbornProcs()...)
+			spec.KillWindowGone = true
+			windowproctest.Install(t, spec)
+
+			decisions, err := closecmd.Run(realCloseOpts(closeSnapshot("done")))
+
+			if err != nil {
+				t.Fatalf("Run err = %v, want nil for a window that already closed itself", err)
+			}
+			requireClosedOnce(t, decisions)
+		})
+		t.Run(f.Name+"/gone at the pane listing", func(t *testing.T) {
+			t.Setenv("CENCI_SANDBOX_REAP_GRACE_SECS", "0")
+			spec := f.SandboxSpec(ccLaunchID, windowproctest.HarmlessPanePID(t), stubbornProcs()...)
+			spec.ListGone = true
+			spec.KillWindowGone = true
+			fakes := windowproctest.Install(t, spec)
+
+			decisions, err := closecmd.Run(realCloseOpts(closeSnapshot("done")))
+
+			if err != nil {
+				t.Fatalf("Run err = %v, want nil for a window that is already gone", err)
+			}
+			requireClosedOnce(t, decisions)
+			if calls := fakes.Calls(t); slices.ContainsFunc(calls, func(c string) bool { return strings.Contains(c, " exec ") }) {
+				t.Errorf("a runtime exec was issued for a gone window; calls:\n%s", strings.Join(calls, "\n"))
+			}
+		})
+	}
+}
+
+// AC13 guard: only a missing-window message counts as closed. Any other
+// kill-window failure is still a reported error, with no closed decision.
+func TestRun_KillWindowFailureOtherThanGoneIsStillAnError(t *testing.T) {
+	t.Setenv("CENCI_SANDBOX_REAP_GRACE_SECS", "0")
+	spec := windowproctest.Flavors[0].SandboxSpec(ccLaunchID, windowproctest.HarmlessPanePID(t), stubbornProcs()...)
+	spec.KillWindowFails = true
+	fakes := windowproctest.Install(t, spec)
+
+	decisions, err := closecmd.Run(realCloseOpts(closeSnapshot("done")))
+
+	if err == nil || !strings.Contains(err.Error(), windowproctest.TmuxUnrelatedErrorText) {
+		t.Fatalf("Run err = %v, want the tmux failure %q", err, windowproctest.TmuxUnrelatedErrorText)
+	}
+	if len(decisions) != 0 {
+		t.Errorf("decisions = %+v, want none for a window that could not be killed", decisions)
+	}
+	// The processes were still killed first; only the window kill failed.
+	want := windowproctest.SandboxCloseCalls(windowproctest.Flavors[0].Runtime, windowproctest.Flavors[0].Container, ccLaunchID, ccTarget, "101", "102")
+	if got := fakes.Calls(t); !slices.Equal(got, want) {
+		t.Errorf("calls:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+// AC14: --dry-run, a busy skip and a babysit skip send no signal and read no
+// pane at all -- not a single tmux or runtime call -- and their decisions are
+// exactly what they were before the process kill existed.
+func TestRun_DryRunAndSkippedWindowsNeverTouchProcesses(t *testing.T) {
+	const guardReason = "babysit supervising PR #790, CI not green"
+	tests := []struct {
+		name   string
+		status string
+		mutate func(*closecmd.Opts)
+		want   closecmd.Decision
+	}{
+		{"dry run", "done", func(o *closecmd.Opts) { o.DryRun = true }, closecmd.Decision{Action: closecmd.ActionWouldClose}},
+		{"busy window", "running", func(o *closecmd.Opts) {}, closecmd.Decision{Action: closecmd.ActionSkippedBusy}},
+		{"dry run of a busy window", "need-input", func(o *closecmd.Opts) { o.DryRun = true }, closecmd.Decision{Action: closecmd.ActionSkippedBusy}},
+		{"babysit guard", "done", func(o *closecmd.Opts) {
+			fg := &fakeGuard{blocked: map[string]string{"42": guardReason}}
+			o.Guard = fg.Guard
+		}, closecmd.Decision{Action: closecmd.ActionSkippedBabysit, Reason: guardReason}},
+	}
+	for _, f := range windowproctest.Flavors[:1] {
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				t.Setenv("CENCI_SANDBOX_REAP_GRACE_SECS", "0")
+				fakes := windowproctest.Install(t, f.SandboxSpec(ccLaunchID, windowproctest.HarmlessPanePID(t), stubbornProcs()...))
+				snap := closeSnapshot(tt.status)
+				var killProcessCalls []string
+				real := realProcessKiller()
+				opts := realCloseOpts(snap)
+				opts.KillProcesses = func(target string) error {
+					killProcessCalls = append(killProcessCalls, target)
+					return real(target)
+				}
+				tt.mutate(&opts)
+
+				decisions, err := closecmd.Run(opts)
+
+				if err != nil {
+					t.Fatalf("Run: %v", err)
+				}
+				want := tt.want
+				want.Window = snap.Windows[0]
+				if len(decisions) != 1 || decisions[0] != want {
+					t.Errorf("decisions = %+v, want [%+v]", decisions, want)
+				}
+				if len(killProcessCalls) != 0 {
+					t.Errorf("KillProcesses called for %v, want no call", killProcessCalls)
+				}
+				if calls := fakes.Calls(t); len(calls) != 0 {
+					t.Errorf("calls:\n%s\nwant no tmux or runtime call at all", strings.Join(calls, "\n"))
+				}
+
+				// Control: the same wiring does read the window's panes on a real
+				// close, so the empty log above cannot be an unwired call log.
+				if _, err := closecmd.Run(realCloseOpts(closeSnapshot("done"))); err != nil {
+					t.Fatalf("control close: %v", err)
+				}
+				control := fakes.Calls(t)
+				if len(control) == 0 || !strings.HasPrefix(control[0], "tmux list-panes -t "+ccTarget) {
+					t.Errorf("control close calls = %q, want it to start with the pane listing", control)
+				}
+			})
+		}
 	}
 }
