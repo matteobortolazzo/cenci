@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/frontend"
 )
 
 // mockCtrl records launcher calls for assertions.
@@ -19,6 +21,10 @@ type mockCtrl struct {
 	// optErr, when set, is returned by every SetWindowOption call -- the
 	// post-NewWindow failure ErrWindowSpawned wraps (#853).
 	optErr error
+	// optErrByKey fails SetWindowOption for one option key only (#1250); a key
+	// present here wins over the optErr catch-all, and a nil value there makes
+	// that key succeed.
+	optErrByKey map[string]error
 	// hasSession/hasSessionErr are HasSession's canned return (#927). Run
 	// itself never calls HasSession (that's dispatch's per-repo gate, not the
 	// interactive `cenci run` path), so no existing Run test depends on these;
@@ -45,6 +51,9 @@ func (m *mockCtrl) NewWindow(session, name, cmd string) error {
 }
 func (m *mockCtrl) SetWindowOption(target, key, value string) error {
 	m.options = append(m.options, optCall{target, key, value})
+	if err, ok := m.optErrByKey[key]; ok {
+		return err
+	}
 	return m.optErr
 }
 func (m *mockCtrl) HasSession(string) (bool, error) { return m.hasSession, m.hasSessionErr }
@@ -118,8 +127,15 @@ func TestRunTreatsLeadingEqualsAsPartOfRawSessionName(t *testing.T) {
 	if len(m.windows) != 1 || m.windows[0].session != "==work" {
 		t.Errorf("window calls = %+v, want the raw name =work encoded as exact target ==work", m.windows)
 	}
-	if len(m.options) != 1 || m.options[0].target != "==work:=40-implement" {
-		t.Errorf("option calls = %+v, want exact target ==work:=40-implement", m.options)
+	// automatic-rename off, then the repo-dir option (#1250): both must carry
+	// the exact target.
+	if len(m.options) != 2 {
+		t.Fatalf("option calls = %+v, want automatic-rename and the repo-dir option", m.options)
+	}
+	for _, o := range m.options {
+		if o.target != "==work:=40-implement" {
+			t.Errorf("option call %+v, want exact target ==work:=40-implement", o)
+		}
 	}
 }
 
@@ -1069,5 +1085,254 @@ func TestRunForwardsFullTicketArgument(t *testing.T) {
 	// The window name is the skill only — trailing context does not leak in.
 	if w.name != "42-implement" {
 		t.Errorf("window name = %q, want 42-implement", w.name)
+	}
+}
+
+// --- #1250: recording the launch repo directory on every spawned window ---
+
+// repoDirCalls returns the SetWindowOption calls that wrote the repo-dir option.
+func repoDirCalls(m *mockCtrl) []optCall {
+	var calls []optCall
+	for _, o := range m.options {
+		if o.key == frontend.RepoDirOption {
+			calls = append(calls, o)
+		}
+	}
+	return calls
+}
+
+// requireOneRepoDir asserts the window got exactly one repo-dir write, aimed
+// at the window Run just named, and returns its value.
+func requireOneRepoDir(t *testing.T, m *mockCtrl) string {
+	t.Helper()
+	calls := repoDirCalls(m)
+	if len(calls) != 1 {
+		t.Fatalf("repo-dir option writes = %+v, want exactly one (all options: %+v)", calls, m.options)
+	}
+	if calls[0].target != "=work:=40-implement" {
+		t.Errorf("repo-dir target = %q, want =work:=40-implement", calls[0].target)
+	}
+	return calls[0].value
+}
+
+func TestRepoDirOptionName(t *testing.T) {
+	if frontend.RepoDirOption != "@cenci-repo-dir" {
+		t.Errorf("RepoDirOption = %q, want @cenci-repo-dir (the @cenci-* window-option naming)", frontend.RepoDirOption)
+	}
+}
+
+func TestRunRecordsAbsoluteDirOnSpawnedWindow(t *testing.T) {
+	dir := t.TempDir()
+	m := &mockCtrl{session: "work"}
+	var warn bytes.Buffer
+	opts := noConfigOpts(t)
+	opts.Workflow, opts.Ticket, opts.Dir, opts.Warn = "implement", "40", dir, &warn
+
+	if err := Run(opts, m); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got := requireOneRepoDir(t, m); got != dir {
+		t.Errorf("repo-dir value = %q, want the absolute launch dir %q", got, dir)
+	}
+	// automatic-rename off is still written first, then the repo dir.
+	if len(m.options) < 2 || m.options[0].key != "automatic-rename" || m.options[1].key != frontend.RepoDirOption {
+		t.Errorf("options = %+v, want automatic-rename first and the repo-dir option right after it", m.options)
+	}
+	if warn.Len() != 0 {
+		t.Errorf("a successful launch must not warn, got %q", warn.String())
+	}
+}
+
+func TestRunRecordsTrimmedDir(t *testing.T) {
+	dir := t.TempDir()
+	m := &mockCtrl{session: "work"}
+	opts := noConfigOpts(t)
+	opts.Workflow, opts.Ticket, opts.Dir = "implement", "40", "  "+dir+"\t\n"
+
+	if err := Run(opts, m); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got := requireOneRepoDir(t, m); got != dir {
+		t.Errorf("repo-dir value = %q, want the trimmed dir %q", got, dir)
+	}
+}
+
+func TestRunMakesRelativeDirAbsoluteAgainstCwd(t *testing.T) {
+	base := t.TempDir()
+	t.Chdir(base)
+	m := &mockCtrl{session: "work"}
+	opts := noConfigOpts(t)
+	opts.Workflow, opts.Ticket, opts.Dir = "implement", "40", filepath.Join("repos", "app")
+
+	if err := Run(opts, m); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	want := filepath.Join(base, "repos", "app")
+	if got := requireOneRepoDir(t, m); got != want {
+		t.Errorf("repo-dir value = %q, want %q (relative Dir made absolute against the cwd)", got, want)
+	}
+}
+
+func TestRunRecordsCwdWhenDirIsUnset(t *testing.T) {
+	for _, dir := range []string{"", "   "} {
+		t.Run("Dir="+strings.ReplaceAll(dir, " ", "_"), func(t *testing.T) {
+			base := t.TempDir()
+			t.Chdir(base)
+			m := &mockCtrl{session: "work"}
+			opts := noConfigOpts(t)
+			opts.Workflow, opts.Ticket, opts.Dir = "implement", "40", dir
+
+			if err := Run(opts, m); err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if got := requireOneRepoDir(t, m); got != base {
+				t.Errorf("repo-dir value = %q, want the working directory %q", got, base)
+			}
+		})
+	}
+}
+
+// TestRunRepoDirFailureWarnsButLaunchSucceeds pins AC 1's soft-failure clause:
+// the window exists and runs, so a failed repo-dir write only costs the
+// window its auto-close and must never surface as an error (let alone
+// ErrWindowSpawned, which dispatch treats as a launch failure).
+func TestRunRepoDirFailureWarnsButLaunchSucceeds(t *testing.T) {
+	setErr := errors.New("tmux set-option exploded")
+	m := &mockCtrl{session: "work", optErrByKey: map[string]error{frontend.RepoDirOption: setErr}}
+	var warn bytes.Buffer
+	opts := noConfigOpts(t)
+	opts.Workflow, opts.Ticket, opts.Dir, opts.Warn = "implement", "40", t.TempDir(), &warn
+
+	err := Run(opts, m)
+	if err != nil {
+		t.Fatalf("Run = %v, want nil: the window was created and a repo-dir failure is only a warning", err)
+	}
+	if errors.Is(err, ErrWindowSpawned) {
+		t.Error("a repo-dir failure must not wrap ErrWindowSpawned")
+	}
+	if len(m.windows) != 1 {
+		t.Errorf("windows = %+v, want the window created", m.windows)
+	}
+	if len(repoDirCalls(m)) != 1 {
+		t.Errorf("repo-dir writes = %+v, want exactly one attempt", repoDirCalls(m))
+	}
+	msg := warn.String()
+	if lines := strings.Split(strings.TrimSpace(msg), "\n"); len(lines) != 1 || lines[0] == "" {
+		t.Fatalf("warning = %q, want exactly one line", msg)
+	}
+	for _, want := range []string{"40-implement", setErr.Error(), "auto-closed"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("warning = %q, want it to contain %q", msg, want)
+		}
+	}
+}
+
+// TestRunUnresolvableCwdWarnsButLaunchSucceeds covers the other half of the
+// soft-failure clause: the cwd fallback cannot be determined at all.
+func TestRunUnresolvableCwdWarnsButLaunchSucceeds(t *testing.T) {
+	gone := t.TempDir()
+	t.Chdir(gone)
+	if err := os.Remove(gone); err != nil {
+		t.Fatalf("removing the working directory: %v", err)
+	}
+	if _, err := os.Getwd(); err == nil {
+		t.Skip("this platform still resolves a removed working directory")
+	}
+	m := &mockCtrl{session: "work"}
+	var warn bytes.Buffer
+	opts := noConfigOpts(t)
+	opts.Workflow, opts.Ticket, opts.Warn = "implement", "40", &warn
+
+	if err := Run(opts, m); err != nil {
+		t.Fatalf("Run = %v, want nil: an unresolvable cwd only costs the window its auto-close", err)
+	}
+	if len(m.windows) != 1 {
+		t.Errorf("windows = %+v, want the window created", m.windows)
+	}
+	if calls := repoDirCalls(m); len(calls) != 0 {
+		t.Errorf("repo-dir writes = %+v, want none when the dir cannot be resolved", calls)
+	}
+	msg := warn.String()
+	if lines := strings.Split(strings.TrimSpace(msg), "\n"); len(lines) != 1 || lines[0] == "" {
+		t.Fatalf("warning = %q, want exactly one line", msg)
+	}
+	for _, want := range []string{"40-implement", "auto-closed"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("warning = %q, want it to contain %q", msg, want)
+		}
+	}
+}
+
+// TestRunRepoDirWarningDefaultsToStderr pins "nil Warn means os.Stderr".
+func TestRunRepoDirWarningDefaultsToStderr(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	orig := os.Stderr
+	os.Stderr = w
+	restored := false
+	restore := func() {
+		if !restored {
+			os.Stderr = orig
+			restored = true
+		}
+	}
+	defer restore()
+
+	m := &mockCtrl{session: "work", optErrByKey: map[string]error{frontend.RepoDirOption: errors.New("boom-on-repo-dir")}}
+	opts := noConfigOpts(t)
+	opts.Workflow, opts.Ticket, opts.Dir = "implement", "40", t.TempDir()
+	runErr := Run(opts, m)
+	restore()
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var captured bytes.Buffer
+	if _, err := captured.ReadFrom(r); err != nil {
+		t.Fatal(err)
+	}
+	if runErr != nil {
+		t.Fatalf("Run: %v", runErr)
+	}
+	if !strings.Contains(captured.String(), "boom-on-repo-dir") {
+		t.Errorf("stderr = %q, want the warning when Opts.Warn is nil", captured.String())
+	}
+}
+
+// TestRunDryRunRecordsNothing: --dry-run touches no tmux state, so no option
+// (including the repo dir) is written and nothing is warned.
+func TestRunDryRunRecordsNothing(t *testing.T) {
+	m := &mockCtrl{session: "work"}
+	var out, warn bytes.Buffer
+	opts := noConfigOpts(t)
+	opts.Workflow, opts.Ticket, opts.Dir = "implement", "40", t.TempDir()
+	opts.DryRun, opts.Out, opts.Warn = true, &out, &warn
+
+	if err := Run(opts, m); err != nil {
+		t.Fatal(err)
+	}
+	if len(m.options) != 0 || len(m.windows) != 0 {
+		t.Errorf("dry-run touched tmux: windows=%+v options=%+v", m.windows, m.options)
+	}
+	if warn.Len() != 0 {
+		t.Errorf("dry-run warned: %q", warn.String())
+	}
+}
+
+// TestRunAutomaticRenameFailureNeverRecordsRepoDir pins the plan assumption
+// that the repo dir is written only after automatic-rename succeeds: a failed
+// rename keeps today's ErrWindowSpawned error and writes nothing further.
+func TestRunAutomaticRenameFailureNeverRecordsRepoDir(t *testing.T) {
+	m := &mockCtrl{session: "work", optErrByKey: map[string]error{"automatic-rename": errors.New("rename refused")}}
+	opts := noConfigOpts(t)
+	opts.Workflow, opts.Ticket, opts.Dir = "implement", "40", t.TempDir()
+
+	err := Run(opts, m)
+	if !errors.Is(err, ErrWindowSpawned) {
+		t.Fatalf("err = %v, want errors.Is(_, ErrWindowSpawned)", err)
+	}
+	if calls := repoDirCalls(m); len(calls) != 0 {
+		t.Errorf("repo-dir writes = %+v, want none after an automatic-rename failure", calls)
 	}
 }
