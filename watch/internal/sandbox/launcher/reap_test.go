@@ -224,7 +224,7 @@ func TestReapOrphans_CrossServerNeverKillsLiveCenciPaneWithPersonalServerRunning
 		t.Errorf("missing no-op summary; stdout:\n%s", stdout.String())
 	}
 	calls := readCallLog(t, callLog)
-	if !containsLine(calls, "-S "+cenciSocket+" list-panes -a -F #{pane_id}") {
+	if !containsLine(calls, "-S "+cenciSocket+" list-panes -a -F #{pane_id}\t#{@cenci-launch-id}") {
 		t.Errorf("expected the cenci socket to be queried via an explicit -S; calls:\n%s", strings.Join(calls, "\n"))
 	}
 }
@@ -633,5 +633,66 @@ func TestReapOrphans_ReapedPairsMatchSharedOrphanCount(t *testing.T) {
 	}
 	if counted != len(reapedPairs) {
 		t.Errorf("CountOrphanedSessions = %d, ReapOrphans reaped %d distinct (socket, pane) pairs; the gate and the reaper must agree", counted, len(reapedPairs))
+	}
+}
+
+// TestReapOrphans_LaunchIDRowsMatchSharedOrphanCountAndMalformedIDNotes is the
+// #1252 counterpart of the parity test above, with launch-ID rows: two dead
+// launches that both used pane %0 are two orphaned sessions for the count and
+// two reaped processes for the reaper, a live launch on the same pane is left
+// alone by both, and the malformed launch ID is never signaled, never counted
+// and reported in one aggregated Note.
+func TestReapOrphans_LaunchIDRowsMatchSharedOrphanCountAndMalformedIDNotes(t *testing.T) {
+	const (
+		socket    = "/tmp/tmux-1000/cenci"
+		container = "codex-cenci-launchids"
+		liveID    = "0123456789abcdef0123456789abcdef"
+		deadOne   = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		deadTwo   = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	)
+	scan := "4001\t%0\t1000\t" + socket + "\t" + deadOne + "\n" +
+		"4002\t%0\t2000\t" + socket + "\t" + deadTwo + "\n" +
+		"4003\t%0\t3000\t" + socket + "\t" + liveID + "\n" +
+		"4004\t%0\t4000\t" + socket + "\t" + strings.ToUpper(liveID) + "\n"
+
+	dir := t.TempDir()
+	callLog := filepath.Join(dir, "calls.txt")
+	writeSocketAwareReapFakes(t, dir, callLog)
+	t.Setenv("PATH", dir)
+	t.Setenv("CENCI_SANDBOX_REAP_GRACE_SECS", "0")
+	t.Setenv("FAKE_PS", container+"\n")
+	t.Setenv("FAKE_SCAN", scan)
+	writeFakeTmuxValue(t, dir, "FAKE_SOCKET_1", socket)
+	writeFakeTmuxValue(t, dir, "FAKE_LIVE_PANES_1", "%0\t"+liveID)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	counted, err := sandbox.CountOrphanedSessions(ctx, []string{"docker"}, io.Discard, io.Discard)
+	if err != nil {
+		t.Fatalf("CountOrphanedSessions: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if err := ReapOrphans(&stdout, &stderr); err != nil {
+		t.Fatalf("ReapOrphans: %v\nstderr: %s", err, stderr.String())
+	}
+
+	out := stdout.String()
+	for _, pid := range []string{"4001", "4002"} {
+		if !strings.Contains(out, "reaped\t"+container+"\t"+pid+"\t%0\n") {
+			t.Errorf("dead launch pid %s was not reaped; stdout:\n%s", pid, out)
+		}
+	}
+	for _, pid := range []string{"4003", "4004"} {
+		if strings.Contains(out, "\t"+pid+"\t") {
+			t.Errorf("pid %s (live / malformed launch ID) was signaled; stdout:\n%s", pid, out)
+		}
+	}
+	if counted != 2 {
+		t.Errorf("CountOrphanedSessions = %d, want 2 (the two dead launches); the gate and the reaper must agree", counted)
+	}
+	wantNote := fmt.Sprintf("Note: 1 process(es) in container %s carried a malformed CENCI_LAUNCH_ID; failing open and treating as live so no in-flight agent work is ever killed.", container)
+	if strings.Count(out, wantNote) != 1 {
+		t.Errorf("want the aggregated malformed-launch-ID note exactly once:\n%s\ngot stdout:\n%s", wantNote, out)
 	}
 }

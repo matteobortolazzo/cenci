@@ -297,9 +297,10 @@ type Inputs struct {
 	// types.go.
 	PlanInventories map[string]PlanInventory
 
-	// OrphanedContainerSessions is the number of distinct (tmux socket, pane)
-	// pairs `cenci sandbox reap-orphans` would classify as dead-pane reap
-	// targets across every sandbox container (#1218), added to
+	// OrphanedContainerSessions is the number of distinct (tmux socket, launch
+	// ID) launches (or (tmux socket, pane) pairs for processes without a launch
+	// ID) `cenci sandbox reap-orphans` would classify as dead reap targets
+	// across every sandbox container (#1218, #1252), added to
 	// Snapshot.Summary.Running at the capacity gate. ContainerSessionProbe
 	// says whether that count is trustworthy. Both are resolved by
 	// resolveContainerSessions (containers.go) before Decide is ever called --

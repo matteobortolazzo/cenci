@@ -65,6 +65,11 @@ type DryRunPlan struct {
 // mounts are fixed for its lifetime and are not re-derived read-only (no
 // read-only equivalent of warnIfUnwired here — see the plan's Assumption).
 //
+// The attach argv carries `-e CENCI_LAUNCH_ID=<generated-per-launch>` exactly
+// where a real launch would tag its pane (planArgvs' launchTagContext
+// predicate, #1252). DryRun never generates an ID and never calls tmux, so
+// its output stays deterministic and the random value never appears.
+//
 // The Posture breakdown is composed by calling Audit on a shallow engine
 // copy with Stderr discarded: DryRun's own create-argv build already prints
 // the --host-network isolation warning once (on the real engine, e), so

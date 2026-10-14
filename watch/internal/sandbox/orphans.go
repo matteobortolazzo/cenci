@@ -18,30 +18,39 @@ import (
 // verbatim from sandbox/cenci-sand's REAP_SCAN_SCRIPT; it now runs inside the
 // container via `exec -u dev sh -c`; see ScanContainer's comment for why,
 // #361 for the environ-unreadable diagnostics added below, #373 for the
-// null-delimited match below, and #1007 for the 4th socket field): emits
-// "<pid>\t<pane>\t<start>\t<socket>" for every process whose environ carries
-// a TMUX_PANE key (pane may be empty; <start> is /proc/<pid>/stat field 22,
-// read in the same loop pass, empty if the stat line couldn't be
-// read/parsed; <socket> is that process's CENCI_TMUX_SOCKET value, empty for
-// a legacy process that never carried the var), skipping processes lacking
-// the TMUX_PANE key entirely. Both the TMUX_PANE and CENCI_TMUX_SOCKET lines
-// are matched directly against the raw NUL-delimited environ file via `grep
-// --null-data` (the long-form flag, not `-z`, since some grep-compatible
-// tools repurpose `-z` for `--decompress`) instead of translating NUL to
-// newline first — a process fully controls its own environ, so a
-// NUL→newline translation would let an embedded literal newline inside some
-// other variable's value forge what looks like a `TMUX_PANE=` or
-// `CENCI_TMUX_SOCKET=` line. If a process's environ fails to read but the
-// process still exists, the scan instead emits a raw I/O fact —
-// `__UNREADABLE__\t<pid>` — rather than silently skipping it. All
-// classification — skip-empty-pane, skip-malformed-pane, skip-init,
-// skip-live-pane (now (socket, pane) pair matching, #1007), fail-open on a
-// missing/malformed socket, reap-dead-pane, and counting/reporting
-// __UNREADABLE__ markers (including PID-1 exclusion) — happens host-side in
-// OrphanScanner.ScanContainer, never inside this canned scan; the reaper's
-// TERM→KILL escalation, PID-reuse detection, and no-tmux handling stay in
-// launcher.ReapOrphans.
-const reapScanScript = `for e in /proc/[0-9]*/environ; do [ -f "$e" ] || continue; p=${e#/proc/}; p=${p%/environ}; line=$(grep --null-data --text --only-matching --max-count=1 '^TMUX_PANE=.*' "$e" 2>/dev/null); rc=$?; if [ "$rc" -eq 2 ]; then [ -e "$e" ] && printf "__UNREADABLE__\t%s\n" "$p"; continue; fi; [ "$rc" -eq 0 ] || continue; sock=$(grep --null-data --text --only-matching --max-count=1 '^CENCI_TMUX_SOCKET=.*' "$e" 2>/dev/null); sockrc=$?; if [ "$sockrc" -eq 0 ]; then sock=${sock#CENCI_TMUX_SOCKET=}; else sock=""; fi; st=$(cat "/proc/$p/stat" 2>/dev/null); st=${st##*) }; set -- $st; if [ "$#" -ge 20 ]; then shift 19; start=$1; else start=""; fi; printf "%s\t%s\t%s\t%s\n" "$p" "${line#TMUX_PANE=}" "$start" "$sock"; done`
+// null-delimited match below, #1007 for the 4th socket field, and #1252 for
+// the 5th launch-ID field and the field sanitization): emits
+// "<pid>\t<pane>\t<start>\t<socket>\t<launch id>" for every process whose
+// environ carries a TMUX_PANE key (pane may be empty; <start> is
+// /proc/<pid>/stat field 22, read in the same loop pass, empty if the stat
+// line couldn't be read/parsed; <socket> is that process's CENCI_TMUX_SOCKET
+// value, empty for a legacy process that never carried the var; <launch id>
+// is its CENCI_LAUNCH_ID value, empty for a process from before launch IDs),
+// skipping processes lacking the TMUX_PANE key entirely. The TMUX_PANE,
+// CENCI_TMUX_SOCKET and CENCI_LAUNCH_ID lines are matched directly against the
+// raw NUL-delimited environ file via `grep --null-data` (the long-form flag,
+// not `-z`, since some grep-compatible tools repurpose `-z` for
+// `--decompress`) instead of translating NUL to newline first — a process
+// fully controls its own environ, so a NUL→newline translation would let an
+// embedded literal newline inside some other variable's value forge what
+// looks like a `TMUX_PANE=` or `CENCI_TMUX_SOCKET=` line. The matched values
+// are still process-controlled and may themselves carry a newline or tab, so
+// each is sanitized in-script before it is printed: a pane with anything
+// outside `%0-9`, a socket containing a control character, or a launch ID
+// with any byte outside lowercase hex (the digits are spelled out, never an
+// `a-f` range, so locale collation cannot change matching) is replaced by
+// malformedFieldMarker, which no host-side shape check accepts — so a hostile
+// value can neither forge a row nor shift a column, and fails open host-side.
+// If a process's environ fails to read but the process still exists, the scan
+// instead emits a raw I/O fact — `__UNREADABLE__\t<pid>` — rather than
+// silently skipping it. All classification — skip-empty-pane,
+// skip-malformed-pane, skip-init, launch-ID and (socket, pane) liveness,
+// fail-open on a missing/malformed socket or launch ID, reap-dead, and
+// counting/reporting __UNREADABLE__ markers (including PID-1 exclusion) —
+// happens host-side in OrphanScanner.ScanContainer, never inside this canned
+// scan; the reaper's TERM→KILL escalation, PID-reuse detection, and no-tmux
+// handling stay in launcher.ReapOrphans.
+const reapScanScript = `for e in /proc/[0-9]*/environ; do [ -f "$e" ] || continue; p=${e#/proc/}; p=${p%/environ}; line=$(grep --null-data --text --only-matching --max-count=1 '^TMUX_PANE=.*' "$e" 2>/dev/null); rc=$?; if [ "$rc" -eq 2 ]; then [ -e "$e" ] && printf "__UNREADABLE__\t%s\n" "$p"; continue; fi; [ "$rc" -eq 0 ] || continue; pane=${line#TMUX_PANE=}; case "$pane" in *[!%0123456789]*) pane=` + malformedFieldMarker + `;; esac; sock=$(grep --null-data --text --only-matching --max-count=1 '^CENCI_TMUX_SOCKET=.*' "$e" 2>/dev/null); sockrc=$?; if [ "$sockrc" -eq 0 ]; then sock=${sock#CENCI_TMUX_SOCKET=}; else sock=""; fi; case "$sock" in *[[:cntrl:]]*) sock=` + malformedFieldMarker + `;; esac; lid=$(grep --null-data --text --only-matching --max-count=1 '^` + LaunchIDEnvName + `=.*' "$e" 2>/dev/null); lidrc=$?; if [ "$lidrc" -eq 0 ]; then lid=${lid#` + LaunchIDEnvName + `=}; else lid=""; fi; case "$lid" in *[!0123456789abcdef]*) lid=` + malformedFieldMarker + `;; esac; st=$(cat "/proc/$p/stat" 2>/dev/null); st=${st##*) }; set -- $st; if [ "$#" -ge 20 ]; then shift 19; start=$1; else start=""; fi; printf "%s\t%s\t%s\t%s\t%s\n" "$p" "$pane" "$start" "$sock" "$lid"; done`
 
 // panePattern is tmux's real pane-id format; anything else in a TMUX_PANE
 // value is malformed and never signaled.
@@ -117,7 +126,11 @@ const containerCmdWaitDelay = 5 * time.Second
 
 // OrphanRowClass is the host-side classification of one scanned process row.
 // The precedence ScanContainer applies is: malformed pane, container init,
-// missing/malformed socket, unresolved socket, live pane, dead pane.
+// missing/malformed/unresolved socket, malformed launch ID, then liveness: a
+// row carrying a launch ID is live iff that ID is recorded (@cenci-launch-id)
+// on a live pane of its socket (strict: a live pane without that ID does not
+// keep it alive); a row without one is live iff its (socket, pane) pair is a
+// live pane (the pre-#1252 rule).
 type OrphanRowClass int
 
 const (
@@ -131,18 +144,28 @@ const (
 	// OrphanNoSocket: no CENCI_TMUX_SOCKET, a malformed one, or one that did
 	// not resolve. Fails open: treated as live, never a target.
 	OrphanNoSocket
-	// OrphanLive: the (socket, pane) pair is present in the socket's live
-	// pane set.
+	// OrphanLive: the row's launch ID is recorded on a live pane of its
+	// socket, or (no launch ID) its (socket, pane) pair is a live pane.
 	OrphanLive
-	// OrphanDeadPane: the pair is absent from its socket's live pane set (or
-	// the socket has no tmux server): the only reap target.
+	// OrphanDeadPane: dead pane or dead launch -- the launch ID is recorded on
+	// no live pane of its socket, or (no launch ID) the (socket, pane) pair is
+	// absent from the socket's live pane set (or the socket has no tmux
+	// server): the only reap target.
 	OrphanDeadPane
+	// OrphanMalformedLaunchID: the CENCI_LAUNCH_ID value is not 32 lowercase
+	// hex (including the scan's malformed marker). Fails open: treated as live,
+	// never a target.
+	OrphanMalformedLaunchID
 )
 
 // OrphanScanRow is one scanned process with its classification.
 type OrphanScanRow struct {
 	PID, Pane, Start, Socket string
-	Class                    OrphanRowClass
+	// LaunchID is the scan's 5th field: the process's CENCI_LAUNCH_ID, empty
+	// for a process from before launch IDs, or the malformed marker for an
+	// unsafe value (#1252).
+	LaunchID string
+	Class    OrphanRowClass
 }
 
 // ContainerOrphanScan is one container's classified scan: Rows in scan order,
@@ -153,6 +176,8 @@ type ContainerOrphanScan struct {
 	UnreadableCount int
 	// NoSocketCount counts rows classified OrphanNoSocket.
 	NoSocketCount int
+	// MalformedLaunchIDCount counts rows classified OrphanMalformedLaunchID.
+	MalformedLaunchIDCount int
 }
 
 // ScanError is returned by ScanContainer when the in-container scan command
@@ -174,15 +199,17 @@ func (e *ScanError) Error() string {
 func (e *ScanError) Unwrap() error { return e.Err }
 
 // socketLiveness is the memoized per-socket resolution result: the set of
-// live pane ids on that socket. Populated once per distinct socket per sweep
-// by resolveSocketLiveness and cached in the scanner's map.
+// live pane ids on that socket, and the set of well-formed launch IDs recorded
+// (@cenci-launch-id) on those live panes. Populated once per distinct socket
+// per sweep by resolveSocketLiveness and cached in the scanner's map.
 type socketLiveness struct {
-	live map[string]bool
+	live      map[string]bool
+	launchIDs map[string]bool
 }
 
 // OrphanScanner runs the shared orphan scan: container listing, the
 // in-container environ scan, and the per-row classification. It is shared by
-// launcher.ReapOrphans (which then signals dead-pane rows) and
+// launcher.ReapOrphans (which then signals dead-pane/dead-launch rows) and
 // CountOrphanedSessions (which never signals anything). Socket liveness is
 // memoized across every container/runtime scanned by one scanner. Stdout and
 // Stderr receive the "Note:" and "Error:" diagnostics a sweep prints.
@@ -302,7 +329,7 @@ func (s *OrphanScanner) ScanContainer(ctx context.Context, rt, container string)
 			continue
 		}
 
-		parts := strings.SplitN(line, "\t", 4)
+		parts := strings.SplitN(line, "\t", 5)
 		row := OrphanScanRow{PID: parts[0]}
 		if len(parts) > 1 {
 			row.Pane = parts[1]
@@ -312,6 +339,9 @@ func (s *OrphanScanner) ScanContainer(ctx context.Context, rt, container string)
 		}
 		if len(parts) > 3 {
 			row.Socket = parts[3]
+		}
+		if len(parts) > 4 {
+			row.LaunchID = parts[4]
 		}
 		if row.PID == "" || row.Pane == "" {
 			continue
@@ -338,8 +368,11 @@ func (s *OrphanScanner) ScanContainer(ctx context.Context, rt, container string)
 
 	for _, r := range rows {
 		r.Class = s.classify(r)
-		if r.Class == OrphanNoSocket {
+		switch r.Class {
+		case OrphanNoSocket:
 			scanned.NoSocketCount++
+		case OrphanMalformedLaunchID:
+			scanned.MalformedLaunchIDCount++
 		}
 		scanned.Rows = append(scanned.Rows, r)
 	}
@@ -382,14 +415,40 @@ func (s *OrphanScanner) classify(r OrphanScanRow) OrphanRowClass {
 	if !ok {
 		return OrphanNoSocket
 	}
+
+	// A row with a launch ID is judged by that ID alone: live iff it is
+	// recorded on a live pane of this socket. A live pane that records no ID
+	// (a pane id reused after a tmux server restart) does not keep it alive.
+	// An empty value is "no launch ID", not malformed.
+	if r.LaunchID != "" {
+		if !ValidLaunchID(r.LaunchID) {
+			return OrphanMalformedLaunchID
+		}
+		if sl.launchIDs[r.LaunchID] {
+			return OrphanLive
+		}
+		return OrphanDeadPane
+	}
+
 	if sl.live[r.Pane] {
 		return OrphanLive
 	}
 	return OrphanDeadPane
 }
 
-// resolveSocketLiveness resolves and memoizes socket's live pane-id set via
-// `tmux -S <socket> list-panes -a -F '#{pane_id}'`, run with a minimal
+// socketListFormat is the `list-panes -F` format the reaper queries each
+// socket with: the pane id, a literal TAB, then the pane's recorded launch ID
+// (@cenci-launch-id; tmux expands an unset user option to the empty string, so
+// a pane without one prints a trailing TAB and nothing after it).
+const socketListFormat = "#{pane_id}\t#{" + PaneOptionLaunchID + "}"
+
+// resolveSocketLiveness resolves and memoizes socket's live pane-id set and
+// the launch IDs recorded on those panes via
+// `tmux -S <socket> list-panes -a -F '#{pane_id}<TAB>#{@cenci-launch-id}'`
+// (socketListFormat; a line with no tab or an empty second column is a pane
+// with no ID; a non-empty line whose pane part is not a pane id, or whose
+// second column is non-empty but fails ValidLaunchID, is an unexpected tmux
+// format and hard-fails like any other tmux resolution error), run with a minimal
 // allowlisted env (buildMinimalTmuxEnv) so no ambient secret is ever
 // available to hand to a hostile peer, and bounded by tmuxQueryTimeout/
 // tmuxQueryWaitDelay (and the caller's ctx) so a peer that never completes the
@@ -412,17 +471,34 @@ func (s *OrphanScanner) resolveSocketLiveness(ctx context.Context, socket string
 	defer cancel()
 
 	var tmuxStdout, tmuxStderr bytes.Buffer
-	tmuxCmd := exec.CommandContext(cctx, "tmux", "-S", socket, "list-panes", "-a", "-F", "#{pane_id}")
+	tmuxCmd := exec.CommandContext(cctx, "tmux", "-S", socket, "list-panes", "-a", "-F", socketListFormat)
 	tmuxCmd.Stdout = &tmuxStdout
 	tmuxCmd.Stderr = &tmuxStderr
 	tmuxCmd.Env = buildMinimalTmuxEnv()
 	tmuxCmd.WaitDelay = tmuxQueryWaitDelay
 
-	sl := socketLiveness{live: map[string]bool{}}
+	sl := socketLiveness{live: map[string]bool{}, launchIDs: map[string]bool{}}
 	if err := tmuxCmd.Run(); err == nil {
-		for _, pane := range SplitLines(tmuxStdout.String()) {
-			if pane != "" {
-				sl.live[pane] = true
+		for _, line := range SplitLines(tmuxStdout.String()) {
+			if line == "" {
+				continue
+			}
+			pane, id, _ := strings.Cut(line, "\t")
+			// A line whose pane part is not a pane id means tmux did not
+			// honor the format (an escaped tab, an unexpected build): folding
+			// it into the live set would silently drop that pane's launch ID
+			// and reap its agent. Hard-fail like any other tmux resolution
+			// error, before anything is signaled. The same holds for a valid
+			// pane whose launch-ID column is non-empty but malformed: dropping
+			// it would class the process carrying that pane's real ID as a
+			// dead pane. Only an empty column means "no launch ID".
+			if !ValidPaneID(pane) || (id != "" && !ValidLaunchID(id)) {
+				_, _ = fmt.Fprintf(s.stderr, "Error: unexpected tmux list-panes output on %q: line %q\n", socket, line)
+				return socketLiveness{}, fmt.Errorf("tmux -S %s list-panes: unexpected output line %s", logSafeText(socket), logSafeText(line))
+			}
+			sl.live[pane] = true
+			if id != "" {
+				sl.launchIDs[id] = true
 			}
 		}
 	} else if strings.Contains(strings.ToLower(tmuxStderr.String()), "no server running") {
@@ -437,18 +513,21 @@ func (s *OrphanScanner) resolveSocketLiveness(ctx context.Context, socket string
 	return sl, nil
 }
 
-// CountOrphanedSessions returns the number of distinct (tmux socket, pane)
-// pairs that `cenci sandbox reap-orphans` would classify as dead-pane reap
-// targets across every sandbox container on runtimes (#1218). It shares the
+// CountOrphanedSessions returns the number of distinct orphaned sessions that
+// `cenci sandbox reap-orphans` would classify as dead reap targets across every
+// sandbox container on runtimes (#1218). A session is identified by (tmux
+// socket, launch ID) when its process carries a launch ID and by (tmux socket,
+// pane) when it does not (#1252), so two dead launches that both used pane %0
+// count as two and a live launch on %0 never hides a dead one. It shares the
 // reaper's scan and classification (OrphanScanner) and is strictly read-only:
 // it issues the -u dev environ scan and the tmux list-panes query only, and
 // never signals any process. Any listing, scan, or tmux failure (including a
 // ctx timeout) returns an error and no partial count, so a caller can fail
 // closed. The container and runtime are not part of the identity: the same
-// pair seen from several containers counts once.
+// session seen from several containers counts once.
 func CountOrphanedSessions(ctx context.Context, runtimes []string, stdout, stderr io.Writer) (int, error) {
 	scanner := NewOrphanScanner(stdout, stderr)
-	pairs := map[[2]string]struct{}{}
+	sessions := map[[3]string]struct{}{}
 	for _, rt := range runtimes {
 		containers, err := scanner.RunningContainers(ctx, rt)
 		if err != nil {
@@ -461,12 +540,23 @@ func CountOrphanedSessions(ctx context.Context, runtimes []string, stdout, stder
 			}
 			for _, r := range scanned.Rows {
 				if r.Class == OrphanDeadPane {
-					pairs[[2]string{r.Socket, r.Pane}] = struct{}{}
+					sessions[orphanSessionKey(r)] = struct{}{}
 				}
 			}
 		}
 	}
-	return len(pairs), nil
+	return len(sessions), nil
+}
+
+// orphanSessionKey is the identity CountOrphanedSessions counts a dead row
+// under: {"launch", socket, launch ID} for a row carrying a launch ID, else
+// {"pane", socket, pane}. The leading kind keeps the two identity spaces from
+// colliding.
+func orphanSessionKey(r OrphanScanRow) [3]string {
+	if r.LaunchID != "" {
+		return [3]string{"launch", r.Socket, r.LaunchID}
+	}
+	return [3]string{"pane", r.Socket, r.Pane}
 }
 
 // SplitLines splits command output into lines without the trailing empty
