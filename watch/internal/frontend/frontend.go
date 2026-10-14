@@ -50,6 +50,14 @@ type SessionState struct {
 // window inside the same sitting.
 const BackgroundHoldTTL = 2 * time.Minute
 
+// RepoDirOption is the tmux window user option `cenci run` writes on every
+// window it spawns (#1250): the absolute directory the window was launched in.
+// The window-cleanup pass (#1251) reads it back to resolve the window's
+// repository. A reader must trust the value only when it is an absolute path
+// to an existing directory; anything else is treated as "repo unknown" and the
+// window is left alone.
+const RepoDirOption = "@cenci-repo-dir"
+
 // Key returns the session key used in the daemon's sessions map: the agent
 // session ID when known, otherwise a pane-derived fallback.
 func (s *SessionState) Key() string {

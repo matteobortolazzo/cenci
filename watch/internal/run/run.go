@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/daemon"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/frontend"
 )
 
 // ErrWindowSpawned is the sentinel a caller detects via errors.Is to
@@ -83,6 +85,10 @@ type Opts struct {
 	// Out receives dry-run output; nil defaults to os.Stdout.
 	Out io.Writer
 
+	// Warn receives the warning printed when the launch directory cannot be
+	// recorded on the new window (#1250); nil defaults to os.Stderr.
+	Warn io.Writer
+
 	// EnsureDaemon starts the cenci daemon if it isn't already running,
 	// and waits briefly for it to come up; nil uses the real implementation
 	// (daemon.EnsureRunning). Called right before the window is
@@ -97,7 +103,10 @@ type Opts struct {
 // Run resolves the (agent, workflow) command and spawns a detached tmux window
 // named <number>-<skill> running it. The window is set automatic-rename off so
 // the daemon later preserves the join key instead of overwriting it with a
-// detected task name. With DryRun it prints the resolution and spawns nothing.
+// detected task name. It then records the absolute launch directory as the
+// frontend.RepoDirOption window option (#1250); failing to do so prints a
+// warning to Opts.Warn and still returns nil. With DryRun it prints the
+// resolution and spawns nothing.
 func Run(opts Opts, ctrl Controller) error {
 	out := opts.Out
 	if out == nil {
@@ -238,7 +247,42 @@ func Run(opts Opts, ctrl Controller) error {
 		displayTarget := session + ":" + name
 		return fmt.Errorf("setting automatic-rename off on %q: %w: %w", displayTarget, err, ErrWindowSpawned)
 	}
+
+	// Record the launch directory so the window-cleanup pass can resolve this
+	// window's repository later (#1250). The window is already running, so a
+	// failure here only costs it the auto-close: warn and report success. This
+	// failure must never wrap ErrWindowSpawned, which dispatch reads as a failed
+	// launch.
+	if err := recordRepoDir(ctrl, target, opts.Dir); err != nil {
+		warn := opts.Warn
+		if warn == nil {
+			warn = os.Stderr
+		}
+		_, _ = fmt.Fprintf(warn, "warning: could not record the launch directory on window %s: %v; window will not be auto-closed\n",
+			session+":"+name, err)
+	}
 	return nil
+}
+
+// recordRepoDir writes the absolute launch directory onto the window as
+// frontend.RepoDirOption.
+func recordRepoDir(ctrl Controller, target, dir string) error {
+	repoDir, err := launchRepoDir(dir)
+	if err != nil {
+		return err
+	}
+	return ctrl.SetWindowOption(target, frontend.RepoDirOption, repoDir)
+}
+
+// launchRepoDir returns the absolute directory the new window starts in: the
+// trimmed Dir made absolute against the caller's cwd, else the cwd itself.
+// `tmux new-window` without -c starts in the calling client's cwd, so os.Getwd
+// matches where an unset Dir window really lands.
+func launchRepoDir(dir string) (string, error) {
+	if dir = strings.TrimSpace(dir); dir != "" {
+		return filepath.Abs(dir)
+	}
+	return os.Getwd()
 }
 
 // shellJoin quotes each arg and joins them into a single POSIX shell command
