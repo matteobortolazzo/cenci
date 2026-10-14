@@ -958,5 +958,271 @@ run_ensure_issue clear --checkpoint "${CHECKPOINT}"
 assert_eq "${CODE}" "0" "clear: re-running against an already-absent checkpoint is still a no-op success (got: ${OUT})"
 rm -rf "${ROOT}"
 
+# =====================================================================
+# #891: fail closed on an unreadable or invalid checkpoint field (exit 11)
+# and on an unreadable or invalid candidate-derived value (exit 12), always
+# before any create, repair PATCH, or sub-issue link.
+#
+# Two kinds of case, one explicit call line each (no generated loops):
+#   - run_injection_case: a `jq` PATH shim fails exactly one read (command
+#     failure). The shim lives in ${ROOT}/bin, is installed only by these
+#     cases (never by make_env), and delegates to the real jq (resolved
+#     below, before any PATH override) unless one argument is EXACTLY the
+#     filter named in ${GH_FIXTURE_CTL_DIR}/jq-fail-filter. Exact-argument
+#     matching (not substring) keeps generic filters such as `.title` from
+#     colliding with the fake gh's own jq calls.
+#   - run_shape_case: a hand-edited checkpoint or store holds a value of
+#     the wrong shape, and the read itself succeeds.
+# Each asserts: the expected exit code, that the named field and slot are
+# in the error, that the fake-gh store and the checkpoint are byte-identical
+# to their pre-run snapshots, and that no create POST was accepted.
+# =====================================================================
+REAL_JQ="$(command -v jq)" || { echo "ensure-issue.test.sh: jq not found on PATH." >&2; exit 2; }
+[[ -n "${REAL_JQ}" && "${REAL_JQ}" == /* ]] || { echo "ensure-issue.test.sh: command -v jq did not return an absolute path (got: ${REAL_JQ})." >&2; exit 2; }
+
+CASE_SLOT="child-1-of-1"
+
+# install_jq_shim <filter> -- writes ${ROOT}/bin/jq and arms it: any jq call
+# with an argument exactly equal to <filter> touches jq-fail-fired, prints an
+# error, and exits 5; every other call execs the real jq.
+install_jq_shim() {
+  local filter="$1"
+  [[ -n "${filter}" ]] || { fail "install_jq_shim: refusing an empty filter (it would never match)"; return 1; }
+  cat > "${ROOT}/bin/jq" <<EOF
+#!/usr/bin/env bash
+ctl="\${GH_FIXTURE_CTL_DIR:-}"
+if [[ -n "\${ctl}" && -f "\${ctl}/jq-fail-filter" ]]; then
+  target="\$(cat "\${ctl}/jq-fail-filter")" || exit 97
+  if [[ -n "\${target}" ]]; then
+    for arg in "\$@"; do
+      if [[ "\${arg}" == "\${target}" ]]; then
+        : > "\${ctl}/jq-fail-fired"
+        echo "fixture jq shim: injected failure" >&2
+        exit 5
+      fi
+    done
+  fi
+fi
+exec "${REAL_JQ}" "\$@"
+EOF
+  chmod +x "${ROOT}/bin/jq"
+  printf '%s' "${filter}" > "${GH_FIXTURE_CTL_DIR}/jq-fail-filter"
+}
+
+# mutate_json_file <file> <jq-filter> -- rewrites <file> in place with the
+# real jq (the test shell's PATH never carries the shim).
+mutate_json_file() {
+  local file="$1" filter="$2" tmp
+  tmp="$(mktemp "${file}.XXXXXX")" || { fail "mutate_json_file: mktemp failed for ${file}"; return 1; }
+  if ! jq -c "${filter}" "${file}" > "${tmp}"; then
+    rm -f -- "${tmp}"
+    fail "mutate_json_file: mutation [${filter}] failed against ${file}"
+    return 1
+  fi
+  mv -f -- "${tmp}" "${file}"
+}
+
+# snapshot_case_state -- copies store.json and the checkpoint aside so the
+# assert_*_unchanged helpers can do a full-content compare after the run.
+snapshot_case_state() {
+  cp -- "${GH_FIXTURE_STORE}" "${ROOT}/store.snapshot" || fail "snapshot_case_state: could not snapshot the store"
+  cp -- "${CHECKPOINT}" "${ROOT}/checkpoint.snapshot" || fail "snapshot_case_state: could not snapshot the checkpoint"
+}
+
+# assert_file_unchanged <file> <snapshot> <label> -- full-content cmp, so any
+# create, PATCH, link, or checkpoint write shows up, not just a count change.
+assert_file_unchanged() {
+  [[ -f "$2" ]] || { fail "$3: snapshot $2 is missing (harness error)"; return 1; }
+  cmp -s -- "$1" "$2" || fail "$3: $1 changed during the run (expected byte-identical to its pre-run snapshot)"
+}
+assert_store_unchanged() { assert_file_unchanged "${GH_FIXTURE_STORE}" "$1" "$2: fake-gh store"; }
+
+# assert_case_outcome <label> <sub> <expected-code> <field> <posts-before> <phrase>
+# <phrase> pins which guard fired: "could not read" is the `|| *_read_fail`
+# command-failure guard, "failed validation" is the shape check behind it. Both
+# helpers name the field and slot, so without it deleting a read guard would
+# leave an injection case passing on the shape check alone.
+assert_case_outcome() {
+  local label="$1" sub="$2" expected="$3" field="$4" posts_before="$5" phrase="$6"
+  assert_eq "${CODE}" "${expected}" "${label}: exit code (output: ${OUT})"
+  [[ "${OUT}" == *"field ${field} for slot ${CASE_SLOT}"* ]] \
+    || fail "${label}: the error must name 'field ${field} for slot ${CASE_SLOT}' (got: ${OUT})"
+  [[ "${OUT}" == *"${phrase}"* ]] \
+    || fail "${label}: the error must say '${phrase}' (got: ${OUT})"
+  assert_store_unchanged "${ROOT}/store.snapshot" "${label}"
+  assert_file_unchanged "${CHECKPOINT}" "${ROOT}/checkpoint.snapshot" "${label}: checkpoint"
+  assert_eq "$(post_call_count)" "${posts_before}" "${label}: no create POST may be accepted"
+  if [[ "${sub}" == "reconcile" ]]; then
+    assert_ne "$(checkpoint_field '.entries[0].verification')" "mismatch" "${label}: checkpoint verification must not be recorded as mismatch"
+  fi
+}
+
+# run_case_subcommand <sub> -- sub is ensure, link, or reconcile (an ensure
+# run against a slot whose issue already exists, so the reconcile path runs).
+run_case_subcommand() {
+  case "$1" in
+    link) run_ensure_issue link --checkpoint "${CHECKPOINT}" --repo acme/widgets --slot "${CASE_SLOT}" --parent 100 ;;
+    *) run_ensure_issue ensure --checkpoint "${CHECKPOINT}" --repo acme/widgets --slot "${CASE_SLOT}" --title "${ROOT}/inputs/title.txt" --body "${ROOT}/inputs/body.md" ;;
+  esac
+}
+
+# prep_case_env <sub> -- builds a fresh ROOT for the case, shim NOT installed:
+#   ensure    -> initialized checkpoint, nothing created
+#   link      -> parent #100 seeded, child created and verified (shim off)
+#   reconcile -> child created, then its stored title set to WRONG TITLE so
+#                any run getting past the guards would PATCH it
+prep_case_env() {
+  setup_single_entry_env
+  case "$1" in
+    ensure) ;;
+    link)
+      seed_issue 100 "Parent" "The parent ticket." '[]' 'null' "cenci-bot"
+      run_case_subcommand ensure
+      assert_eq "${CODE}" "0" "prep_case_env link: child create exits 0 (got: ${OUT})"
+      ;;
+    reconcile)
+      run_case_subcommand ensure
+      assert_eq "${CODE}" "0" "prep_case_env reconcile: child create exits 0 (got: ${OUT})"
+      mutate_json_file "${GH_FIXTURE_STORE}" '(.issues[] | select(.number == 500) | .title) = "WRONG TITLE"'
+      ;;
+    *) fail "prep_case_env: unknown subcommand [$1]" ;;
+  esac
+}
+
+# run_injection_case <label> <sub> <filter> <expected-code> <field>
+run_injection_case() {
+  local label="$1" sub="$2" filter="$3" expected="$4" field="$5" posts_before
+  prep_case_env "${sub}"
+  snapshot_case_state
+  posts_before="$(post_call_count)"
+  install_jq_shim "${filter}" || { rm -rf "${ROOT}"; return 1; }
+  run_case_subcommand "${sub}"
+  [[ -f "${GH_FIXTURE_CTL_DIR}/jq-fail-fired" ]] \
+    || fail "${label}: the jq shim never fired for filter [${filter}] -- the read this case targets did not run as one jq call with that exact filter (output: ${OUT})"
+  assert_case_outcome "${label}" "${sub}" "${expected}" "${field}" "${posts_before}" "could not read"
+  rm -rf "${ROOT}"
+}
+
+# run_shape_case <label> <sub> <checkpoint|store> <jq-mutation> <expected-code> <field>
+run_shape_case() {
+  local label="$1" sub="$2" target="$3" mutation="$4" expected="$5" field="$6" target_file posts_before
+  prep_case_env "${sub}"
+  case "${target}" in
+    checkpoint) target_file="${CHECKPOINT}" ;;
+    store) target_file="${GH_FIXTURE_STORE}" ;;
+    *) fail "${label}: unknown mutation target [${target}]"; rm -rf "${ROOT}"; return 1 ;;
+  esac
+  mutate_json_file "${target_file}" "${mutation}" || { rm -rf "${ROOT}"; return 1; }
+  snapshot_case_state
+  posts_before="$(post_call_count)"
+  run_case_subcommand "${sub}"
+  assert_case_outcome "${label}" "${sub}" "${expected}" "${field}" "${posts_before}" "failed validation"
+  rm -rf "${ROOT}"
+}
+
+# run_accept_case <label> <checkpoint-mutation> -- a valid-but-unusual
+# checkpoint value must still be accepted: ensure exits 0 and creates exactly
+# one issue.
+run_accept_case() {
+  local label="$1" mutation="$2"
+  prep_case_env ensure
+  mutate_json_file "${CHECKPOINT}" "${mutation}" || { rm -rf "${ROOT}"; return 1; }
+  run_case_subcommand ensure
+  assert_eq "${CODE}" "0" "${label}: a valid checkpoint value must still be accepted (got: ${OUT})"
+  assert_eq "$(store_issue_count)" "1" "${label}: exactly one issue is created"
+  assert_eq "$(post_call_count)" "1" "${label}: exactly one create POST"
+  assert_eq "$(checkpoint_field '.entries[0].verification')" "verified" "${label}: the entry is recorded as verified"
+  rm -rf "${ROOT}"
+}
+
+# --- ensure: command failure on each checkpoint-entry read (exit 11) ---
+run_injection_case "ensure-cmdfail-idx" ensure '[.entries[].slot] | index($slot) // "null"' 11 idx
+run_injection_case "ensure-cmdfail-nonce" ensure '.entries[$idx].nonce' 11 nonce
+run_injection_case "ensure-cmdfail-labels" ensure '.entries[$idx].labels' 11 labels
+run_injection_case "ensure-cmdfail-milestone" ensure '.entries[$idx].milestone' 11 milestone
+run_injection_case "ensure-cmdfail-creatorLogin" ensure '.creatorLogin' 11 creatorLogin
+run_injection_case "ensure-cmdfail-createdAt" ensure '.createdAt' 11 createdAt
+
+# --- ensure: wrong-shape value on each checkpoint-entry read (exit 11) ---
+# A two-document checkpoint passes checkpoint_json_raw's `jq -e` (the last
+# document has schemaVersion 1) but makes the idx read print two lines.
+run_shape_case "ensure-shape-idx-two-documents" ensure checkpoint '., .' 11 idx
+run_shape_case "ensure-shape-nonce-null" ensure checkpoint '.entries[0].nonce = null' 11 nonce
+run_shape_case "ensure-shape-nonce-missing" ensure checkpoint 'del(.entries[0].nonce)' 11 nonce
+run_shape_case "ensure-shape-nonce-uppercase-hex" ensure checkpoint '.entries[0].nonce = "ABCDEF0123456789ABCDEF0123456789"' 11 nonce
+run_shape_case "ensure-shape-nonce-31-chars" ensure checkpoint '.entries[0].nonce = "0123456789abcdef0123456789abcde"' 11 nonce
+run_shape_case "ensure-shape-labels-non-string-element" ensure checkpoint '.entries[0].labels = ["Refined", 5]' 11 labels
+run_shape_case "ensure-shape-labels-not-json" ensure checkpoint '.entries[0].labels = "not json"' 11 labels
+run_shape_case "ensure-shape-milestone-zero" ensure checkpoint '.entries[0].milestone = 0' 11 milestone
+run_shape_case "ensure-shape-milestone-string" ensure checkpoint '.entries[0].milestone = "5"' 11 milestone
+run_shape_case "ensure-shape-creatorLogin-null" ensure checkpoint '.creatorLogin = null' 11 creatorLogin
+run_shape_case "ensure-shape-creatorLogin-empty" ensure checkpoint '.creatorLogin = ""' 11 creatorLogin
+run_shape_case "ensure-shape-creatorLogin-query-injection" ensure checkpoint '.creatorLogin = "cenci-bot&state=open"' 11 creatorLogin
+run_shape_case "ensure-shape-createdAt-offset-form" ensure checkpoint '.createdAt = "2026-01-01T00:00:00+00:00"' 11 createdAt
+
+# --- ensure: valid-but-unusual logins stay accepted (no compatibility break) ---
+# GitHub Enterprise Managed User logins carry an underscore (Q2: the regex
+# allows `_` in the body), and bot accounts carry a `[bot]` suffix.
+run_accept_case "ensure-accept-creatorLogin-underscore" '.creatorLogin = "octocat_acme"'
+run_accept_case "ensure-accept-creatorLogin-bot-suffix" '.creatorLogin = "cenci-bot[bot]"'
+
+# --- link: command failure and wrong-shape reads (exit 11, no edit) ---
+run_injection_case "link-cmdfail-idx" link '[.entries[].slot] | index($slot) // "null"' 11 idx
+run_injection_case "link-cmdfail-issueNumber" link '.entries[$idx].issueNumber' 11 issueNumber
+run_shape_case "link-shape-issueNumber-zero" link checkpoint '.entries[0].issueNumber = 0' 11 issueNumber
+run_shape_case "link-shape-issueNumber-string" link checkpoint '.entries[0].issueNumber = "abc"' 11 issueNumber
+
+# A valid `null` issueNumber keeps the existing exit-2 "run ensure first".
+setup_single_entry_env
+seed_issue 100 "Parent" "The parent ticket." '[]' 'null' "cenci-bot"
+snapshot_case_state
+run_case_subcommand link
+assert_eq "${CODE}" "2" "link-null-issueNumber: a valid null issueNumber keeps exit 2 (got ${CODE}: ${OUT})"
+[[ "${OUT}" == *"run ensure first"* ]] || fail "link-null-issueNumber: the error must say to run ensure first (got: ${OUT})"
+assert_store_unchanged "${ROOT}/store.snapshot" "link-null-issueNumber"
+rm -rf "${ROOT}"
+
+# --- reconcile: exactly one marker match, repair would PATCH if reached ---
+# Candidate-derived reads exit 12; checkpoint-derived (expected) reads exit 11.
+run_injection_case "reconcile-cmdfail-candidate" reconcile '.[0]' 12 candidate
+run_injection_case "reconcile-cmdfail-number" reconcile '.number' 12 number
+run_injection_case "reconcile-cmdfail-actual-labels" reconcile '[.labels[].name] | sort' 12 labels
+run_injection_case "reconcile-cmdfail-actual-milestone" reconcile '.milestone.number // null' 12 milestone
+run_injection_case "reconcile-cmdfail-title" reconcile '.title' 12 title
+run_injection_case "reconcile-cmdfail-body" reconcile '.body' 12 body
+run_injection_case "reconcile-cmdfail-expected-labels" reconcile 'sort' 11 labels
+run_injection_case "reconcile-cmdfail-expected-milestone" reconcile '.' 11 milestone
+# The marker-bearing candidate's number is 0, not a positive integer.
+run_shape_case "reconcile-shape-candidate-number-zero" reconcile store '(.issues[] | select(.number == 500) | .number) = 0' 12 number
+
+# =====================================================================
+# #891 explicit regression cases: valid flows must keep working.
+# =====================================================================
+
+# Re-running `ensure` on an already-verified slot creates nothing.
+setup_single_entry_env
+run_case_subcommand ensure
+assert_eq "${CODE}" "0" "regress-ensure-verified-rerun: first ensure exits 0 (got: ${OUT})"
+assert_eq "$(post_call_count)" "1" "regress-ensure-verified-rerun: first ensure issues exactly one POST"
+assert_eq "$(checkpoint_field '.entries[0].verification')" "verified" "regress-ensure-verified-rerun: first ensure records verified"
+run_case_subcommand ensure
+assert_eq "${CODE}" "0" "regress-ensure-verified-rerun: re-running ensure on a verified slot exits 0 (got: ${OUT})"
+assert_eq "$(post_call_count)" "1" "regress-ensure-verified-rerun: the re-run must not POST again"
+assert_eq "$(store_issue_count)" "1" "regress-ensure-verified-rerun: still exactly one issue"
+assert_eq "$(checkpoint_field '.entries[0].issueNumber')" "500" "regress-ensure-verified-rerun: the same issue number is kept"
+assert_eq "$(checkpoint_field '.entries[0].verification')" "verified" "regress-ensure-verified-rerun: still verified"
+rm -rf "${ROOT}"
+
+# A second `link` after a verified link is an idempotent no-op.
+prep_case_env link
+run_case_subcommand link
+assert_eq "${CODE}" "0" "regress-link-idempotent: first link exits 0 (got: ${OUT})"
+assert_eq "$(checkpoint_field '.entries[0].link')" "verified" "regress-link-idempotent: first link records verified"
+run_case_subcommand link
+assert_eq "${CODE}" "0" "regress-link-idempotent: a second link after a verified link exits 0 (got: ${OUT})"
+assert_eq "$(store_issue_field 100 '.subIssues')" "[500]" "regress-link-idempotent: parent subIssues is still exactly the one child"
+assert_eq "$(checkpoint_field '.entries[0].link')" "verified" "regress-link-idempotent: still verified"
+rm -rf "${ROOT}"
+
 echo "ensure-issue.test.sh: failures=${failures}"
 [[ "${failures}" -eq 0 ]]
