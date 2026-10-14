@@ -2,11 +2,13 @@ package tmux
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 )
 
 // PaneInfo holds the relevant fields from a tmux pane listing.
@@ -159,6 +161,43 @@ func (c *ExecClient) HasSession(session string) (bool, error) {
 func (c *ExecClient) KillWindow(target string) error {
 	_, err := tmuxCmd("kill-window", "-t", target)
 	return err
+}
+
+// setPaneOptionTimeout bounds one SetPaneOption call so a wedged tmux server
+// can never stall a sandbox launch indefinitely.
+const setPaneOptionTimeout = 5 * time.Second
+
+// setPaneOptionWaitDelay bounds how long Cmd.Wait can block after the timeout
+// has killed tmux, in case a lingering grandchild keeps the output pipes open
+// (watch/docs/go-gotchas.md).
+const setPaneOptionWaitDelay = 2 * time.Second
+
+// SetPaneOption sets the pane-scoped user option key (e.g. @cenci-launch-id)
+// on pane through the server at socket: `tmux -S <socket> set-option -p -t
+// <pane> -- <key> <value>`. Pane options need tmux 3.0+; on older tmux the
+// call fails and the caller decides how to degrade. The explicit -S and -t
+// mean it never depends on the ambient $TMUX/$TMUX_PANE ownership resolution
+// (watch/docs/tmux.md). The socket is the caller's own trusted $TMUX socket, so
+// unlike the reaper's queries against container-supplied sockets the child env
+// is inherited rather than allowlisted. A package function (not a method on
+// ExecClient or the daemon-facing Client interface): the sandbox launcher holds
+// no tmux client.
+func SetPaneOption(socket, pane, key, value string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), setPaneOptionTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "tmux", "-S", socket, "set-option", "-p", "-t", pane, "--", key, value)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	cmd.WaitDelay = setPaneOptionWaitDelay
+	err := cmd.Run()
+	if err == nil {
+		return nil
+	}
+	if ctx.Err() == context.DeadlineExceeded || errors.Is(err, exec.ErrWaitDelay) {
+		err = errors.Join(err, context.DeadlineExceeded)
+	}
+	return fmt.Errorf("tmux set-option %s: %w: %s", key, err, strings.TrimSpace(stderr.String()))
 }
 
 func tmuxCmd(args ...string) (string, error) {

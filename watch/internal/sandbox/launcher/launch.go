@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/errcode"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/ipc"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/sandbox"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/tmux"
 )
 
 // Options are the launch parameters `cenci open` collects: which agent and
@@ -76,6 +78,84 @@ const readyPollAttempts = 600
 // runtime still exercise the real exec path.
 var execAttach = func(path string, argv, env []string) error {
 	return syscall.Exec(path, argv, env)
+}
+
+// setPaneOption is the seam through which a launch records pane-scoped user
+// options (@cenci-launch-id, @cenci-container, @cenci-runtime) on its own pane
+// via the pane's own socket (#1252). A package var so launcher tests never
+// reach a real tmux server.
+var setPaneOption = tmux.SetPaneOption
+
+// dryRunLaunchIDValue is the fixed stand-in `cenci open --dry-run` shows for
+// the per-launch ID, so its output stays deterministic and the random value
+// never appears in it (#1252).
+const dryRunLaunchIDValue = "<generated-per-launch>"
+
+// tagRuntimeSupported reports whether runtime is one @cenci-runtime may name:
+// the closed set docker/podman, validated when the option is written.
+func tagRuntimeSupported(runtime string) bool {
+	return runtime == "docker" || runtime == "podman"
+}
+
+// launchTagContext is the one predicate deciding whether a launch tags its
+// pane: it returns the launching pane's own tmux socket (from $TMUX) and
+// pane id (from $TMUX_PANE) when both are well-formed and the runtime is one
+// @cenci-runtime may name, or ok=false. Launch tags through it and DryRun
+// previews through it, so the preview never claims a tag a real launch would
+// not attempt (#1252).
+func (e *Engine) launchTagContext() (socket, pane string, ok bool) {
+	if !tagRuntimeSupported(e.Runtime) {
+		return "", "", false
+	}
+	socket, pane = hostTmuxSocket(), os.Getenv("TMUX_PANE")
+	if !sandbox.ValidSocketPath(socket) || !sandbox.ValidPaneID(pane) {
+		return "", "", false
+	}
+	return socket, pane, true
+}
+
+// withLaunchIDEnv returns execEnvArgs plus the "-e CENCI_LAUNCH_ID=<value>"
+// pair, without modifying execEnvArgs.
+func withLaunchIDEnv(execEnvArgs []string, value string) []string {
+	return append(slices.Clone(execEnvArgs), "-e", sandbox.LaunchIDEnvName+"="+value)
+}
+
+// tagLaunchPane records a fresh launch ID, the container and the runtime as
+// pane options on $TMUX_PANE through the pane's own socket (#1252), and returns
+// the per-exec env args that carry the same ID into the agent session. It
+// returns nil — no ID injected, so the reaper falls back to (socket, pane)
+// liveness and can never false-kill — when the runtime is not docker/podman
+// (silently: nothing to record), or when the launch is not in a usable tmux
+// pane or any step fails (with a single-line warning). All three options must
+// be set before the ID is handed out; the ID is never create-time env (#356).
+// @cenci-container and @cenci-runtime are written first and @cenci-launch-id
+// last, so a partial failure never overwrites the launch ID a previous live
+// launch on this pane recorded (that launch stays live by its own ID).
+func (e *Engine) tagLaunchPane(container string) []string {
+	if !tagRuntimeSupported(e.Runtime) {
+		return nil
+	}
+	socket, pane, ok := e.launchTagContext()
+	if !ok {
+		_, _ = fmt.Fprintln(e.Stderr, "Warning: not running inside a usable tmux pane ($TMUX/$TMUX_PANE); this session's orphans will be reaped by tmux pane liveness only.")
+		return nil
+	}
+	id, err := sandbox.NewLaunchID()
+	if err != nil {
+		_, _ = fmt.Fprintf(e.Stderr, "Warning: could not generate a launch ID (%q); this session's orphans will be reaped by tmux pane liveness only.\n", err.Error())
+		return nil
+	}
+	for _, opt := range []struct{ key, value string }{
+		{sandbox.PaneOptionContainer, container},
+		{sandbox.PaneOptionRuntime, e.Runtime},
+		{sandbox.PaneOptionLaunchID, id},
+	} {
+		if err := setPaneOption(socket, pane, opt.key, opt.value); err != nil {
+			_, _ = fmt.Fprintf(e.Stderr, "Warning: could not record %s on tmux pane %s (%q; pane options need tmux 3.0+); this session's orphans will be reaped by tmux pane liveness only.\n", opt.key, pane, err.Error())
+			return nil
+		}
+	}
+	return withLaunchIDEnv(nil, id)
 }
 
 // ValidateAgent checks the agent value the way cenci-sand does, as a usage
@@ -270,6 +350,11 @@ func (e *Engine) resolveLaunchContext(opts Options) (launchCtx, error) {
 func (e *Engine) planArgvs(ctx launchCtx, opts Options, cenciBin, socketDir string, cenciAvailable bool) (createArgv, attachArgv []string, attaching bool, err error) {
 	agentCmdArgs := buildAgentCmdArgs(ctx.Agent, ctx.Model)
 	execEnvArgs := assembleExecEnv(ctx.Agent)
+	// Show the launch ID placeholder only where a real launch would try to tag
+	// the pane (Q1); the random value is never generated here.
+	if _, _, ok := e.launchTagContext(); ok {
+		execEnvArgs = withLaunchIDEnv(execEnvArgs, dryRunLaunchIDValue)
+	}
 	attachArgv = buildAgentExecArgv(ctx.Scope.ContainerName, ctx.Agent, agentCmdArgs, execEnvArgs, opts)
 
 	running, err := e.containerRunning(ctx.Scope.ContainerName)
@@ -398,6 +483,7 @@ func (e *Engine) Launch(opts Options) error {
 			}
 		}
 		e.warnDockerdStartupFailure(ctx)
+		execEnvArgs = append(execEnvArgs, e.tagLaunchPane(ctx.Scope.ContainerName)...)
 		return e.runAgent(ctx.Scope.ContainerName, ctx.Agent, agentCmdArgs, execEnvArgs, opts)
 	}
 
@@ -433,6 +519,7 @@ func (e *Engine) Launch(opts Options) error {
 		return err
 	}
 	e.warnDockerdStartupFailure(ctx)
+	execEnvArgs = append(execEnvArgs, e.tagLaunchPane(ctx.Scope.ContainerName)...)
 	return e.runAgent(ctx.Scope.ContainerName, ctx.Agent, agentCmdArgs, execEnvArgs, opts)
 }
 
@@ -556,7 +643,8 @@ func resolveAttendedFlag() string {
 // assembleExecEnv builds the per-exec (not create-time) "-e"/"-u" argument
 // list every agent exec session receives: the attach user, pane identity
 // (TMUX_PANE and, alongside it, the owning tmux socket CENCI_TMUX_SOCKET —
-// #1007, consumed by the reaper's (socket, pane) pair matching), the
+// #1007, consumed by the reaper's (socket, pane) fallback matching, and the
+// socket the launch ID is looked up on), the
 // CENCI_SANDBOX marker/agent name, the resolved CENCI_ATTENDED planning
 // posture (#1087 — see resolveAttendedFlag; forwarded at exec time, not
 // container-create time, so a mid-session host toggle takes effect on the
@@ -841,7 +929,11 @@ func (e *Engine) assembleVolumeMounts(agent, cenciBin, socketDir string, cenciAv
 	// (#1007) and is bound by the same reasoning: a creation-time socket
 	// value would go stale the same way, and reap-orphans' (socket, pane)
 	// pair matching would misclassify using it. Both are injected per exec
-	// session instead (execEnvArgs).
+	// session instead (execEnvArgs). CENCI_LAUNCH_ID (#1252) is the same kind
+	// of pane-scoped identity and must never be create-time env either: it
+	// would land in /proc/1/environ, outlive its pane and name a launch that
+	// no longer exists. tagLaunchPane injects it per exec, after the pane
+	// options are recorded.
 	if cenciAvailable {
 		args = append(args,
 			"-v", cenciBin+":/usr/local/bin/cenci:ro",

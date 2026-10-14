@@ -2,10 +2,14 @@ package launcher
 
 import (
 	"bytes"
+	"errors"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/tmux/tmuxtest"
 )
 
 // TestValidateAgent pins the launcher's single agent gate: claude, codex, and
@@ -765,5 +769,285 @@ func TestWarnDockerdStartupFailure_EmbeddedNewlineInMarker_RenderedSingleLine(t 
 	}
 	if len(lines) == 1 && lines[0] == "Warning: forged second line" {
 		t.Errorf("the marker's embedded \"\\n\" forged a standalone warning line; got:\n%q", out)
+	}
+}
+
+// -- ticket #1252: per-launch ID, recorded on the launching pane -------------
+//
+// tagLaunchPane is the launch-time step that records @cenci-launch-id,
+// @cenci-container and @cenci-runtime on $TMUX_PANE through the pane's own
+// socket and hands back the per-exec env args carrying CENCI_LAUNCH_ID, but
+// only when all three sets succeeded. The tmux call goes through the
+// setPaneOption seam, so these tests never reach a real tmux server; the
+// end-to-end wiring (the attach line carries the same ID that was set, the run
+// line never does) is asserted black-box in sandbox_open_test.go.
+
+const (
+	// launchTestSocket and launchTestPane are what $TMUX / $TMUX_PANE hold in
+	// the tagging tests: the first comma-separated field of $TMUX is the
+	// socket path, exactly as hostTmuxSocket reads it.
+	launchTestSocket = "/tmp/tmux-1000/cenci"
+	launchTestPane   = "%7"
+	launchIDEnvName  = "CENCI_LAUNCH_ID"
+
+	optLaunchID  = "@cenci-launch-id"
+	optContainer = "@cenci-container"
+	optRuntime   = "@cenci-runtime"
+)
+
+// launchIDPattern is the contract for a launch ID: 32 lowercase hex.
+var launchIDPattern = regexp.MustCompile(`^[0-9a-f]{32}$`)
+
+// launchTestAgents are the agents every launch-ID test runs for (AC8).
+var launchTestAgents = []string{"claude", "codex"}
+
+// unusableTmuxContexts are the $TMUX / $TMUX_PANE combinations in which a real
+// launch cannot tag its pane (and so injects no launch ID).
+var unusableTmuxContexts = []struct {
+	name       string
+	tmux, pane string
+}{
+	{"TMUX unset", "", launchTestPane},
+	{"TMUX_PANE unset", launchTestSocket + ",4242,0", ""},
+	{"TMUX_PANE malformed", launchTestSocket + ",4242,0", "pane-7"},
+	{"TMUX socket not absolute", "relative/socket,4242,0", launchTestPane},
+}
+
+// installPaneOptionRecorder swaps the setPaneOption seam for a recorder for
+// the test's duration.
+func installPaneOptionRecorder(t *testing.T) *tmuxtest.PaneOptionRecorder {
+	t.Helper()
+	rec := &tmuxtest.PaneOptionRecorder{}
+	orig := setPaneOption
+	setPaneOption = rec.SetPaneOption
+	t.Cleanup(func() { setPaneOption = orig })
+	return rec
+}
+
+// inTmux points $TMUX / $TMUX_PANE at the test socket and pane.
+func inTmux(t *testing.T) {
+	t.Helper()
+	t.Setenv("TMUX", launchTestSocket+",4242,0")
+	t.Setenv("TMUX_PANE", launchTestPane)
+}
+
+// attachArgvWithTag assembles the agent-attach argv exactly as a launch does:
+// the per-exec env plus whatever tagLaunchPane returned.
+func attachArgvWithTag(agent, container string, tag []string) []string {
+	execEnv := append(assembleExecEnv(agent), tag...)
+	return buildAgentExecArgv(container, agent, buildAgentCmdArgs(agent, DefaultModel(agent)), execEnv, Options{Agent: agent})
+}
+
+// launchIDEnvTokens returns every "CENCI_LAUNCH_ID=<value>" token of argv that
+// is passed as an "-e" value.
+func launchIDEnvTokens(argv []string) []string {
+	var out []string
+	for i := 0; i+1 < len(argv); i++ {
+		if argv[i] == "-e" && strings.HasPrefix(argv[i+1], launchIDEnvName+"=") {
+			out = append(out, argv[i+1])
+		}
+	}
+	return out
+}
+
+// requireSingleLineWarning fails the test unless stderr is exactly one
+// "Warning:" line.
+func requireSingleLineWarning(t *testing.T, stderr string) {
+	t.Helper()
+	if !strings.HasPrefix(stderr, "Warning:") || strings.Count(strings.TrimSuffix(stderr, "\n"), "\n") != 0 {
+		t.Errorf("stderr = %q, want exactly one single-line \"Warning:\" message", stderr)
+	}
+}
+
+// AC1: a launch inside tmux sets the three pane options on $TMUX_PANE through
+// the pane's own socket and injects CENCI_LAUNCH_ID=<the same 32-hex value> in
+// the exec env -- for both agents and both supported runtimes.
+func TestTagLaunchPane_SetsThreePaneOptionsAndInjectsTheSameIDInTheExecEnv(t *testing.T) {
+	for _, agent := range launchTestAgents {
+		for _, runtime := range []string{"docker", "podman"} {
+			t.Run(agent+"/"+runtime, func(t *testing.T) {
+				inTmux(t)
+				rec := installPaneOptionRecorder(t)
+				var stderr bytes.Buffer
+				e := &Engine{Runtime: runtime, Stderr: &stderr}
+				container := agent + "-cenci-repo"
+
+				tag := e.tagLaunchPane(container)
+
+				for _, c := range rec.Calls {
+					if c.Socket != launchTestSocket || c.Pane != launchTestPane {
+						t.Errorf("option %s set on socket %q pane %q, want the launching pane %s on its own socket %s", c.Key, c.Socket, c.Pane, launchTestPane, launchTestSocket)
+					}
+				}
+				values := rec.Values()
+				if len(rec.Calls) != 3 || len(values) != 3 {
+					t.Fatalf("pane option calls = %+v, want exactly the three options %s, %s, %s", rec.Calls, optLaunchID, optContainer, optRuntime)
+				}
+				id := values[optLaunchID]
+				if !launchIDPattern.MatchString(id) {
+					t.Errorf("%s = %q, want 32 lowercase hex characters", optLaunchID, id)
+				}
+				if values[optContainer] != container {
+					t.Errorf("%s = %q, want %q", optContainer, values[optContainer], container)
+				}
+				if values[optRuntime] != runtime {
+					t.Errorf("%s = %q, want %q", optRuntime, values[optRuntime], runtime)
+				}
+
+				argv := attachArgvWithTag(agent, container, tag)
+				if got := launchIDEnvTokens(argv); !slices.Equal(got, []string{launchIDEnvName + "=" + id}) {
+					t.Errorf("attach argv CENCI_LAUNCH_ID tokens = %v, want exactly [%s=%s] (the value recorded on the pane); argv: %v", got, launchIDEnvName, id, argv)
+				}
+				if stderr.Len() != 0 {
+					t.Errorf("a fully tagged launch printed %q, want no warning", stderr.String())
+				}
+			})
+		}
+	}
+}
+
+// Every launch gets a fresh ID: two launches in the same pane differ, and each
+// ID is the one recorded for that launch.
+func TestTagLaunchPane_EveryLaunchGetsAFreshID(t *testing.T) {
+	for _, agent := range launchTestAgents {
+		t.Run(agent, func(t *testing.T) {
+			inTmux(t)
+			rec := installPaneOptionRecorder(t)
+			e := &Engine{Runtime: "docker", Stderr: &bytes.Buffer{}}
+			container := agent + "-cenci-repo"
+
+			first := launchIDEnvTokens(attachArgvWithTag(agent, container, e.tagLaunchPane(container)))
+			firstRecorded := rec.Values()[optLaunchID]
+			second := launchIDEnvTokens(attachArgvWithTag(agent, container, e.tagLaunchPane(container)))
+			secondRecorded := rec.Values()[optLaunchID]
+
+			if len(first) != 1 || len(second) != 1 {
+				t.Fatalf("launch ID env tokens = %v then %v, want one each", first, second)
+			}
+			if first[0] == second[0] {
+				t.Errorf("two launches carried the same %s", first[0])
+			}
+			if first[0] != launchIDEnvName+"="+firstRecorded || second[0] != launchIDEnvName+"="+secondRecorded {
+				t.Errorf("env %v / %v do not match the recorded IDs %q / %q", first, second, firstRecorded, secondRecorded)
+			}
+		})
+	}
+}
+
+// AC1: if setting any one of the three options fails, no CENCI_LAUNCH_ID is
+// injected (a half-tagged pane must never look launch-ID-live) and a
+// single-line warning is printed.
+func TestTagLaunchPane_AnyFailedOptionMeansNoIDAndAWarning(t *testing.T) {
+	for _, agent := range launchTestAgents {
+		for _, failing := range []string{optLaunchID, optContainer, optRuntime} {
+			t.Run(agent+"/"+failing, func(t *testing.T) {
+				inTmux(t)
+				rec := installPaneOptionRecorder(t)
+				rec.ErrByKey = map[string]error{failing: errors.New("tmux: unknown option")}
+				var stderr bytes.Buffer
+				e := &Engine{Runtime: "docker", Stderr: &stderr}
+				container := agent + "-cenci-repo"
+
+				tag := e.tagLaunchPane(container)
+
+				if len(rec.Calls) == 0 {
+					t.Fatalf("no pane option was attempted, so the failure path was not exercised")
+				}
+				if got := launchIDEnvTokens(attachArgvWithTag(agent, container, tag)); len(got) != 0 {
+					t.Errorf("attach argv carries %v although setting %s failed", got, failing)
+				}
+				requireSingleLineWarning(t, stderr.String())
+			})
+		}
+	}
+}
+
+// The launch ID is written LAST: a partial failure must never overwrite the
+// launch ID a previous live launch on the same pane recorded, so a failed
+// container or runtime set leaves @cenci-launch-id untouched (never attempted).
+func TestTagLaunchPane_LaunchIDIsWrittenLastAndNeverAfterAFailedSet(t *testing.T) {
+	t.Run("order", func(t *testing.T) {
+		inTmux(t)
+		rec := installPaneOptionRecorder(t)
+		e := &Engine{Runtime: "docker", Stderr: &bytes.Buffer{}}
+
+		e.tagLaunchPane("claude-cenci-repo")
+
+		var keys []string
+		for _, c := range rec.Calls {
+			keys = append(keys, c.Key)
+		}
+		if want := []string{optContainer, optRuntime, optLaunchID}; !slices.Equal(keys, want) {
+			t.Errorf("pane options written in order %v, want %v (launch ID last)", keys, want)
+		}
+	})
+	for _, failing := range []string{optContainer, optRuntime} {
+		t.Run("failed "+failing+" never writes the launch ID", func(t *testing.T) {
+			inTmux(t)
+			rec := installPaneOptionRecorder(t)
+			rec.ErrByKey = map[string]error{failing: errors.New("tmux: unknown option")}
+			e := &Engine{Runtime: "docker", Stderr: &bytes.Buffer{}}
+
+			e.tagLaunchPane("claude-cenci-repo")
+
+			if len(rec.Calls) == 0 {
+				t.Fatalf("no pane option was attempted, so the failure path was not exercised")
+			}
+			for _, c := range rec.Calls {
+				if c.Key == optLaunchID {
+					t.Errorf("%s was written although setting %s failed; calls: %+v", optLaunchID, failing, rec.Calls)
+				}
+			}
+		})
+	}
+}
+
+// AC1: outside tmux (no $TMUX) nothing is tagged -- no tmux call at all, no ID
+// in the exec env, and a warning is printed. The same holds when $TMUX_PANE is
+// not a pane id or $TMUX does not name an absolute socket path.
+func TestTagLaunchPane_OutsideTmuxMakesNoTmuxCallInjectsNoIDAndWarns(t *testing.T) {
+	for _, agent := range launchTestAgents {
+		for _, tc := range unusableTmuxContexts {
+			t.Run(agent+"/"+tc.name, func(t *testing.T) {
+				t.Setenv("TMUX", tc.tmux)
+				t.Setenv("TMUX_PANE", tc.pane)
+				rec := installPaneOptionRecorder(t)
+				var stderr bytes.Buffer
+				e := &Engine{Runtime: "docker", Stderr: &stderr}
+				container := agent + "-cenci-repo"
+
+				tag := e.tagLaunchPane(container)
+
+				if len(rec.Calls) != 0 {
+					t.Errorf("tmux was called outside a usable tmux pane: %+v", rec.Calls)
+				}
+				if got := launchIDEnvTokens(attachArgvWithTag(agent, container, tag)); len(got) != 0 {
+					t.Errorf("attach argv carries %v outside tmux", got)
+				}
+				requireSingleLineWarning(t, stderr.String())
+			})
+		}
+	}
+}
+
+// AC1 / Assumptions: @cenci-runtime is validated against the closed set
+// docker/podman when written. Any other runtime tags nothing and injects no ID.
+func TestTagLaunchPane_UnsupportedRuntimeTagsNothing(t *testing.T) {
+	for _, agent := range launchTestAgents {
+		t.Run(agent, func(t *testing.T) {
+			inTmux(t)
+			rec := installPaneOptionRecorder(t)
+			e := &Engine{Runtime: "nerdctl", Stderr: &bytes.Buffer{}}
+			container := agent + "-cenci-repo"
+
+			tag := e.tagLaunchPane(container)
+
+			if len(rec.Calls) != 0 {
+				t.Errorf("pane options were set for an unsupported runtime: %+v", rec.Calls)
+			}
+			if got := launchIDEnvTokens(attachArgvWithTag(agent, container, tag)); len(got) != 0 {
+				t.Errorf("attach argv carries %v for an unsupported runtime", got)
+			}
+		})
 	}
 }

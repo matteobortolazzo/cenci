@@ -154,3 +154,56 @@ func TestCurrentSessionTargetsTmuxPaneSession(t *testing.T) {
 		t.Errorf("CurrentSession() = %q, want %q (the pane's own session)", session, "A")
 	}
 }
+
+// reaperListFormat is the `list-panes -F` format the orphan reaper queries a
+// socket with (sandbox.socketListFormat, #1252): pane id, a literal TAB, the
+// pane's recorded launch ID.
+const reaperListFormat = "#{pane_id}\t#{@cenci-launch-id}"
+
+// TestSetPaneOptionRoundTripsThroughTheReapersListFormat sets a pane user
+// option on one of two panes of a real scratch server and reads it back with
+// the reaper's -F format: the tagged pane prints "<pane>\t<id>", the untagged
+// one prints "<pane>\t" (an unset @option expands to the empty string, it is
+// not an error and not a missing column), and the tag did not leak to the other
+// pane.
+func TestSetPaneOptionRoundTripsThroughTheReapersListFormat(t *testing.T) {
+	requireTmux(t)
+
+	socket, _, run := startScratchServer(t, "A", "B")
+	paneA := strings.TrimSpace(run("display-message", "-t", "A", "-p", "#{pane_id}"))
+	paneB := strings.TrimSpace(run("display-message", "-t", "B", "-p", "#{pane_id}"))
+	const launchID = "0123456789abcdef0123456789abcdef"
+
+	if err := SetPaneOption(socket, paneA, "@cenci-launch-id", launchID); err != nil {
+		t.Fatalf("SetPaneOption: %v", err)
+	}
+
+	got := map[string]string{}
+	// TrimRight "\n" only: TrimSpace would also strip the trailing TAB of the
+	// last line when its pane has no launch ID ("%1\t" -> "%1").
+	for _, line := range strings.Split(strings.TrimRight(run("list-panes", "-a", "-F", reaperListFormat), "\n"), "\n") {
+		pane, id, found := strings.Cut(line, "\t")
+		if !found {
+			t.Fatalf("list-panes line %q has no TAB; the format must always print the second column", line)
+		}
+		got[pane] = id
+	}
+	if got[paneA] != launchID {
+		t.Errorf("pane %s launch id = %q, want %q", paneA, got[paneA], launchID)
+	}
+	if id, ok := got[paneB]; !ok || id != "" {
+		t.Errorf("untagged pane %s = (%q, present=%v), want present with an empty id", paneB, id, ok)
+	}
+}
+
+// TestSetPaneOptionFailsForAPaneThatDoesNotExist asserts a failed tmux call is
+// surfaced as an error (the launcher withholds the launch ID on any failure).
+func TestSetPaneOptionFailsForAPaneThatDoesNotExist(t *testing.T) {
+	requireTmux(t)
+
+	socket, _, _ := startScratchServer(t, "only")
+
+	if err := SetPaneOption(socket, "%999", "@cenci-launch-id", "x"); err == nil {
+		t.Fatal("SetPaneOption on a nonexistent pane returned nil, want an error")
+	}
+}

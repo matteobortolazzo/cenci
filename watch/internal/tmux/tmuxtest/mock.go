@@ -114,3 +114,37 @@ func LastRename(renames []RenameCall, target string) (string, bool) {
 	}
 	return "", false
 }
+
+// PaneOptionCall records one SetPaneOption call (a pane-scoped user option
+// written through the pane's own socket, #1252).
+type PaneOptionCall struct {
+	Socket string
+	Pane   string
+	Key    string
+	Value  string
+}
+
+// PaneOptionRecorder is a recording stand-in for tmux.SetPaneOption, shaped to
+// be installed in the launcher's setPaneOption seam. Every attempt is recorded
+// (a failed set included, in call order); ErrByKey makes a set of that option
+// key fail with the given error.
+type PaneOptionRecorder struct {
+	Calls    []PaneOptionCall
+	ErrByKey map[string]error
+}
+
+// SetPaneOption records the call and returns the error configured for key, if
+// any.
+func (r *PaneOptionRecorder) SetPaneOption(socket, pane, key, value string) error {
+	r.Calls = append(r.Calls, PaneOptionCall{Socket: socket, Pane: pane, Key: key, Value: value})
+	return r.ErrByKey[key]
+}
+
+// Values returns the recorded value for each option key (the last write wins).
+func (r *PaneOptionRecorder) Values() map[string]string {
+	out := make(map[string]string, len(r.Calls))
+	for _, c := range r.Calls {
+		out[c.Key] = c.Value
+	}
+	return out
+}

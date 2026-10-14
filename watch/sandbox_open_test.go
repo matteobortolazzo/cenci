@@ -2,11 +2,14 @@ package main_test
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -535,13 +538,43 @@ exit 0
 	exectest.WriteExecutable(t, filepath.Join(dir, name), body)
 }
 
+// fakeTmuxLogPath is where writeFakeTmux's fake logs its invocations. It is a
+// file of its own (not the runtime call log): the many exact-call-log
+// assertions in this suite must not see tmux lines whenever a test's ambient
+// $TMUX/$TMUX_PANE makes the launcher tag its pane (#1252).
+func fakeTmuxLogPath(dir string) string {
+	return filepath.Join(dir, "tmux-calls.txt")
+}
+
+// writeFakeTmux writes a fake `tmux` to dir so the real /usr/bin/tmux (which
+// sits on the same `PATH=<dir>:/usr/bin:/bin` the open tests use) can never
+// tag a developer's real pane when the launcher records its launch ID
+// (#1252, watch/docs/test-isolation.md). It appends each invocation's argv
+// (space-joined) to fakeTmuxLogPath(dir) and exits 0; a non-empty
+// FAKE_TMUX_SET_FAIL makes every call fail, to exercise the launcher's
+// "no launch ID, warn" fallback.
+func writeFakeTmux(t *testing.T, dir string) {
+	t.Helper()
+	body := `#!/bin/sh
+printf '%s\n' "$*" >> ` + exectest.ShellQuote(fakeTmuxLogPath(dir)) + `
+if [ -n "${FAKE_TMUX_SET_FAIL:-}" ]; then
+  echo "fake tmux: set-option refused" >&2
+  exit 1
+fi
+exit 0
+`
+	exectest.WriteExecutable(t, filepath.Join(dir, "tmux"), body)
+}
+
 // writeScriptedRuntimes writes the same scripted fake as both docker and
-// podman and returns the shared call log path.
+// podman, plus a fake tmux (writeFakeTmux), and returns the shared call log
+// path.
 func writeScriptedRuntimes(t *testing.T, dir string) string {
 	t.Helper()
 	callLog := filepath.Join(dir, "calls.txt")
 	writeScriptedRuntime(t, dir, "docker", callLog)
 	writeScriptedRuntime(t, dir, "podman", callLog)
+	writeFakeTmux(t, dir)
 	return callLog
 }
 
@@ -557,6 +590,7 @@ func writeScriptedRuntimePair(t *testing.T, dir string) (dockerLog, podmanLog st
 	podmanLog = filepath.Join(dir, "podman-calls.txt")
 	writeScriptedRuntime(t, dir, "docker", dockerLog)
 	writeScriptedRuntime(t, dir, "podman", podmanLog)
+	writeFakeTmux(t, dir)
 	return dockerLog, podmanLog
 }
 
@@ -568,6 +602,7 @@ func writeDockerOnlyRuntime(t *testing.T, dir string) string {
 	t.Helper()
 	callLog := filepath.Join(dir, "calls.txt")
 	writeScriptedRuntime(t, dir, "docker", callLog)
+	writeFakeTmux(t, dir)
 	return callLog
 }
 
@@ -578,6 +613,7 @@ func writePodmanOnlyRuntime(t *testing.T, dir string) string {
 	t.Helper()
 	callLog := filepath.Join(dir, "calls.txt")
 	writeScriptedRuntime(t, dir, "podman", callLog)
+	writeFakeTmux(t, dir)
 	return callLog
 }
 
@@ -1609,6 +1645,18 @@ func TestSandboxStop_WithFilterArg_OnlyStopsMatchingName(t *testing.T) {
 // (flag-parsing), and the #195 cenci wiring (cenci-wiring) that the retired
 // bash suites used to pin against cenci-sand.
 
+// stageCodexAuth plants the host ~/.codex/auth.json codex refuses to launch
+// without, inside the fixture home returned by openTestEnv.
+func stageCodexAuth(t *testing.T, home string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(home, ".codex"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".codex", "auth.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // openTestEnv builds the black-box environment for native `cenci open` runs:
 // the scripted runtimes on PATH, an isolated HOME, the asset fixture,
 // deterministic TERM/TMUX_PANE, scrubbed optional env passthroughs, and a live
@@ -1621,6 +1669,13 @@ func TestSandboxStop_WithFilterArg_OnlyStopsMatchingName(t *testing.T) {
 // binary from the host.
 func openTestEnv(t *testing.T, fakeDir, assets string) (env []string, home, socketDir string) {
 	t.Helper()
+	// Fail safe (#1252): TMUX/TMUX_PANE below make the launcher tag its pane
+	// through `tmux` on PATH, and PATH keeps /usr/bin, so a fakeDir built by
+	// hand without a fake tmux would reach the real tmux server at the fixed
+	// TMUX socket. Install the logging fake when the test did not.
+	if _, statErr := os.Stat(filepath.Join(fakeDir, "tmux")); errors.Is(statErr, fs.ErrNotExist) {
+		writeFakeTmux(t, fakeDir)
+	}
 	home = t.TempDir()
 	socketDir = t.TempDir()
 	if err := os.Chmod(socketDir, 0700); err != nil {
@@ -1713,13 +1768,7 @@ func TestOpenAllShortcuts_AttachTheirAgentAndModel(t *testing.T) {
 			assets := writeAssetFixture(t)
 			env, home, _ := openTestEnv(t, fakeDir, assets)
 			if tc.agent == "codex" {
-				// Codex refuses to launch without auth staged from the host.
-				if err := os.MkdirAll(filepath.Join(home, ".codex"), 0o755); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(filepath.Join(home, ".codex", "auth.json"), []byte("{}"), 0o600); err != nil {
-					t.Fatal(err)
-				}
+				stageCodexAuth(t, home)
 			}
 
 			cmd := exec.Command(binaryPath, "open", tc.token)
@@ -1739,6 +1788,148 @@ func TestOpenAllShortcuts_AttachTheirAgentAndModel(t *testing.T) {
 			}
 			if tc.agent == "codex" && strings.Contains(line, "DISABLE_UPDATES") {
 				t.Errorf("Claude-only update env leaked into Codex: %s", line)
+			}
+		})
+	}
+}
+
+// -- ticket #1252: the per-launch ID ------------------------------------------
+
+// launchIDOptionCalls parses the fake tmux's call log into the value set for
+// each pane option, requiring every call to be a `set-option -p` on the
+// launching pane (%7, openTestEnv's TMUX_PANE) through the launching pane's
+// own socket (the first field of openTestEnv's TMUX).
+func launchIDOptionCalls(t *testing.T, tmuxLog string) map[string]string {
+	t.Helper()
+	const prefix = "-S /tmp/tmux-1000/cenci set-option -p -t %7 -- "
+	values := map[string]string{}
+	lines := callLogLines(t, tmuxLog)
+	for _, line := range lines {
+		rest, ok := strings.CutPrefix(line, prefix)
+		if !ok {
+			t.Fatalf("tmux call %q is not a set-option -p on the launching pane via its own socket (%q); all calls:\n%s", line, prefix, strings.Join(lines, "\n"))
+		}
+		key, value, _ := strings.Cut(rest, " ")
+		values[key] = value
+	}
+	return values
+}
+
+// TestOpen_LaunchID_AttachCarriesTheIDRecordedOnThePane is AC1 end to end for
+// both agents and both branches: whether the launcher creates the container
+// or attaches to a running one, the three pane options are set on %7 through
+// the pane's own socket and the attach line carries CENCI_LAUNCH_ID=<the very
+// value set on the pane> -- while the create (run) line never carries it.
+func TestOpen_LaunchID_AttachCarriesTheIDRecordedOnThePane(t *testing.T) {
+	cases := []struct {
+		token, agent string
+		running      bool
+	}{
+		{"ch", "claude", false},
+		{"ch", "claude", true},
+		{"xl", "codex", false},
+		{"xl", "codex", true},
+	}
+	for _, tc := range cases {
+		name := tc.agent + "/create"
+		if tc.running {
+			name = tc.agent + "/attach-to-running"
+		}
+		t.Run(name, func(t *testing.T) {
+			fakeDir := t.TempDir()
+			callLog := writeScriptedRuntimes(t, fakeDir)
+			assets := writeAssetFixture(t)
+			env, home, socketDir := openTestEnv(t, fakeDir, assets)
+			if tc.agent == "codex" {
+				stageCodexAuth(t, home)
+			}
+			container := tc.agent + "-cenci-default"
+			if tc.running {
+				env = append(env,
+					"FAKE_PS="+container+"\n",
+					"FAKE_INSPECT_LABEL=detached",
+					"FAKE_AGENT_MOUNTS=cenci-agent-cli-"+tc.agent+"|/opt/cenci-agent|false\n",
+					"FAKE_INSPECT_MOUNTS=/workspace::/workspace\n/home/dev::/home/dev\n"+socketDir+"::/run/user/1000/cenci\n",
+				)
+			}
+
+			cmd := exec.Command(binaryPath, "open", tc.token)
+			cmd.Env = env
+			cmd.Dir = t.TempDir()
+			output, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("open %s: %v\n%s", tc.token, err, output)
+			}
+
+			values := launchIDOptionCalls(t, fakeTmuxLogPath(fakeDir))
+			if len(values) != 3 {
+				t.Fatalf("pane options set = %v, want exactly @cenci-launch-id, @cenci-container, @cenci-runtime", values)
+			}
+			id := values["@cenci-launch-id"]
+			if !regexp.MustCompile(`^[0-9a-f]{32}$`).MatchString(id) {
+				t.Errorf("@cenci-launch-id = %q, want 32 lowercase hex", id)
+			}
+			if values["@cenci-container"] != container {
+				t.Errorf("@cenci-container = %q, want %q", values["@cenci-container"], container)
+			}
+			if rt := values["@cenci-runtime"]; rt != "docker" && rt != "podman" {
+				t.Errorf("@cenci-runtime = %q, want docker or podman", rt)
+			}
+			if strings.Contains(string(output), "Warning: could not record") {
+				t.Errorf("a fully tagged launch warned:\n%s", output)
+			}
+
+			lines := callLogLines(t, callLog)
+			if got := attachLine(t, lines); !strings.Contains(got, " -e CENCI_LAUNCH_ID="+id+" ") {
+				t.Errorf("attach argv does not carry CENCI_LAUNCH_ID=%s (the value set on the pane):\n%s", id, got)
+			}
+			for _, line := range lines {
+				if strings.HasPrefix(line, "exec -it ") {
+					continue
+				}
+				if strings.Contains(line, "CENCI_LAUNCH_ID") {
+					t.Errorf("a non-attach runtime call carries CENCI_LAUNCH_ID (it must never be create-time env):\n%s", line)
+				}
+			}
+		})
+	}
+}
+
+// AC1: if a pane option cannot be set (older tmux without `set-option -p`, a
+// vanished pane) the launch still proceeds, but no CENCI_LAUNCH_ID is
+// injected and a single-line warning is printed -- the legacy (socket, pane)
+// rule then covers that session.
+func TestOpen_LaunchID_FailedPaneTagInjectsNoIDAndWarns(t *testing.T) {
+	for _, agent := range []struct{ token, name string }{{"ch", "claude"}, {"xl", "codex"}} {
+		t.Run(agent.name, func(t *testing.T) {
+			fakeDir := t.TempDir()
+			callLog := writeScriptedRuntimes(t, fakeDir)
+			assets := writeAssetFixture(t)
+			env, home, _ := openTestEnv(t, fakeDir, assets)
+			if agent.name == "codex" {
+				stageCodexAuth(t, home)
+			}
+
+			cmd := exec.Command(binaryPath, "open", agent.token)
+			cmd.Env = append(env, "FAKE_TMUX_SET_FAIL=1")
+			cmd.Dir = t.TempDir()
+			output, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("open %s: %v\n%s", agent.token, err, output)
+			}
+
+			lines := callLogLines(t, callLog)
+			if got := attachLine(t, lines); strings.Contains(got, "CENCI_LAUNCH_ID") {
+				t.Errorf("attach argv carries a launch ID although tagging the pane failed:\n%s", got)
+			}
+			var warnings []string
+			for _, line := range strings.Split(string(output), "\n") {
+				if strings.HasPrefix(line, "Warning: could not record ") {
+					warnings = append(warnings, line)
+				}
+			}
+			if len(warnings) != 1 {
+				t.Errorf("want exactly one single-line tagging warning, got %d in output:\n%s", len(warnings), output)
 			}
 		})
 	}
@@ -2183,12 +2374,7 @@ func TestOpen_GenericEntrypointFailureSurfacesBootLog(t *testing.T) {
 			assets := writeAssetFixture(t)
 			env, home, _ := openTestEnv(t, fakeDir, assets)
 			if tc.name == "codex" {
-				if err := os.MkdirAll(filepath.Join(home, ".codex"), 0o755); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(filepath.Join(home, ".codex", "auth.json"), []byte("{}"), 0o600); err != nil {
-					t.Fatal(err)
-				}
+				stageCodexAuth(t, home)
 			}
 
 			const bootLog = "boot log: mkdir /workspace/.cenci: permission denied"
@@ -4303,12 +4489,7 @@ func TestCnArgv0_RoutesToOpen(t *testing.T) {
 	callLog := writeScriptedRuntimes(t, fakeDir)
 	assets := writeAssetFixture(t)
 	env, home, _ := openTestEnv(t, fakeDir, assets)
-	if err := os.MkdirAll(filepath.Join(home, ".codex"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(home, ".codex", "auth.json"), []byte("{}"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	stageCodexAuth(t, home)
 
 	cmd := exec.Command(cnPath, "xs")
 	cmd.Env = env
@@ -5037,6 +5218,9 @@ func TestOpenAttach_LimitsProbeTimesOut_NoWarningAndAttachContinues(t *testing.T
 			"exec \"$0.real\" \"$@\"\n"
 		exectest.WriteExecutable(t, filepath.Join(fakeDir, rt), wrapper)
 	}
+	// The launcher tags its pane through `tmux` on PATH (#1252): a fake keeps
+	// the real /usr/bin/tmux away from a developer's live pane.
+	writeFakeTmux(t, fakeDir)
 	assets := writeAssetFixture(t)
 	env := openAttachEnvFor(t, fakeDir, assets, containerName, defaultPluginsContainerEnv)
 	// Would warn (unlimited container) if the probe ever answered.

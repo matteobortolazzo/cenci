@@ -17,11 +17,22 @@
 #     host-side to running containers matching ^(claude-cenci-|codex-cenci-)$.
 #   - In-container scan: `<runtime> exec -u dev <container> sh -c '<POSIX
 #     script scanning /proc/*/environ for a line matching ^TMUX_PANE=>'`,
-#     emitting one `<pid>\t<pane>\t<start>\t<socket>` line per process that
-#     carries the TMUX_PANE key (pane may be empty; <start> is that process's
-#     start time, read from /proc/<pid>/stat field 22 in the same scan pass;
-#     <socket> is that process's CENCI_TMUX_SOCKET value, empty for a legacy
-#     row that never carried the var, #1007), to stdout, exit 0 on success.
+#     emitting one `<pid>\t<pane>\t<start>\t<socket>\t<launch_id>` line per
+#     process that carries the TMUX_PANE key (pane may be empty; <start> is
+#     that process's start time, read from /proc/<pid>/stat field 22 in the
+#     same scan pass; <socket> is that process's CENCI_TMUX_SOCKET value, empty
+#     for a legacy row that never carried the var, #1007; <launch_id> is that
+#     process's CENCI_LAUNCH_ID value, empty for a process from before launch
+#     IDs existed, #1252 -- AC9), to stdout, exit 0 on success. Every
+#     environ-derived field is sanitized IN the scan, before printing: a
+#     <launch_id> with any byte outside lowercase hex, a <pane> with anything
+#     outside `%0-9`, or a <socket> containing a control character (newline,
+#     tab, ...) is replaced by the fixed marker `__MALFORMED__`, so a hostile
+#     environ value can neither forge a row nor shift a column. The host then
+#     fails open on the marker (a marker pane is a malformed pane, a marker
+#     socket is a no-socket row, a marker launch ID is a malformed launch ID).
+#     A pre-#1252 4-field row (no <launch_id> column) is a row with no launch
+#     ID.
 #     Scan runs as the fixed `dev` sandbox agent user so same-uid
 #     /proc/<pid>/environ reads succeed without CAP_SYS_PTRACE (root lacks it
 #     under docker's default caps). For a process whose environ failed to
@@ -39,15 +50,37 @@
 #     `%1x`) is treated like a missing/empty pane (never signaled) and logged
 #     with a distinct note: "Note: process <pid> in container <container>
 #     has a malformed TMUX_PANE value; skipping."
+#   - Launch-ID liveness (#1252, AC9): the launcher records a per-launch
+#     `@cenci-launch-id` pane option on the launch's pane and passes the same
+#     value to the agent as CENCI_LAUNCH_ID. The liveness query is therefore
+#     `tmux -S <path> list-panes -a -F '#{pane_id}<TAB>#{@cenci-launch-id}'`
+#     (a literal tab; a pane with no recorded ID prints an empty second
+#     column, and a line with no tab at all is a pane with no ID). The check
+#     order for one scanned row is fixed:
+#       malformed pane -> container init (pid 1) -> missing/malformed/
+#       unresolved socket (fail open) -> malformed launch ID (fail open,
+#       aggregated per-container "Note: <n> process(es) in container
+#       <container> carried a malformed CENCI_LAUNCH_ID; failing open and
+#       treating as live so no in-flight agent work is ever killed.") ->
+#       launch ID present: live iff that ID is recorded on a live pane of the
+#       row's own socket, else dead -> no launch ID: the (socket, pane) rule
+#       below (the pane-ID fallback, kept for processes started before this
+#       change).
+#     The launch-ID rule is STRICT: a live pane without a recorded ID (or with
+#     a different one) does not keep alive a process that carries a launch ID,
+#     which is what reaps an orphan whose pane id (%0) was reused by a new
+#     session after a tmux server restart. A launch-ID row on a socket whose
+#     server is gone is dead like any other row there.
 #   - (socket, pane) pair matching (#1007): liveness is no longer a single
 #     global pane-id set. Every distinct, shape-validated (absolute path)
 #     socket a container's scan output references is resolved at most once
-#     per sweep via `tmux -S <path> list-panes -a -F '#{pane_id}'` (the child
+#     per sweep via `tmux -S <path> list-panes -a -F ...` (the format above;
+#     the child
 #     env is rebuilt from an explicit PATH/HOME/TERM/LANG allowlist rather
 #     than inherited, so no ambient secret reaches the queried socket;
 #     memoized across containers/runtimes),
-#     and a process is live iff its (socket, pane) pair is in that socket's
-#     set — never a union of pane ids across sockets (both a personal default
+#     and a process without a launch ID is live iff its (socket, pane) pair is
+#     in that socket's set — never a union of pane ids across sockets (both a personal default
 #     server and the `cenci` server allocate ids from `%0`, so a union would
 #     make a genuinely-dead pane on one server look live via an unrelated
 #     server's same-numbered pane). A row whose socket field is absent
@@ -82,7 +115,8 @@
 #         - stdout matches the recorded start time -> genuinely still the
 #           same process; proceed to SIGKILL.
 #       `<runtime> exec -u root <container> kill -KILL <pid>`
-#   - Host tmux liveness: `tmux -S <socket> list-panes -a -F '#{pane_id}'`,
+#   - Host tmux liveness: `tmux -S <socket> list-panes -a -F
+#     '#{pane_id}<TAB>#{@cenci-launch-id}'`,
 #     capturing stdout/stderr/exit separately, per referenced socket. Non-zero
 #     exit + stderr matching "no server running" -> proceed with an empty
 #     live-pane set for that socket and print a note containing "No tmux
@@ -327,13 +361,18 @@ CENCI_SOCKET="${CENCI_SOCKET}"
 DEFAULT_SOCKET="${DEFAULT_SOCKET}"
 
 SOCKET=""
+FMT=""
 prev=""
 for arg in "\$@"; do
     if [[ "\${prev}" == "-S" ]]; then
         SOCKET="\${arg}"
     fi
+    if [[ "\${prev}" == "-F" ]]; then
+        FMT="\${arg}"
+    fi
     prev="\${arg}"
 done
+TAB="\$(printf '\t')"
 
 if [[ -n "\${SOCKET}" && "\${SOCKET}" == "\${CENCI_SOCKET}" ]]; then
     MODE="\$(mock_get TMUX_MODE_CENCI ok)"
@@ -348,7 +387,18 @@ fi
 
 case "\${MODE}" in
     ok)
-        printf '%s\n' "\${PANES}"
+        # A configured pane line is "<pane>" or "<pane><TAB><launch id>" (the
+        # recorded @cenci-launch-id, #1252). Like real tmux the mock honors
+        # the requested -F: asked for just '#{pane_id}' it prints only the
+        # pane column, so a reaper that has not switched to the launch-ID
+        # format can never observe a recorded ID.
+        if [[ "\${FMT}" == '#{pane_id}' ]]; then
+            while IFS= read -r line; do
+                printf '%s\n' "\${line%%"\${TAB}"*}"
+            done <<<"\${PANES}"
+        else
+            printf '%s\n' "\${PANES}"
+        fi
         exit 0
         ;;
     noserver)
@@ -455,6 +505,23 @@ write_scan_legacy() {
     local container="$1"
     shift
     printf '%s\n' "$@" >> "${SCAN_DIR}/${container}"
+}
+
+# write_scan_launch <container> <socket> <line...>: writes the 5-field scan
+# shape (#1252). Each <line> is `<pid>\t<pane>\t<start>\t<launch_id>` (launch_id
+# may be empty for a process without CENCI_LAUNCH_ID); <socket> is inserted as
+# the 4th column so the fixture reads like the real scan output
+# `<pid>\t<pane>\t<start>\t<socket>\t<launch_id>`. Rows that need a hostile or
+# otherwise unusual column layout go through write_scan_legacy verbatim.
+write_scan_launch() {
+    local container="$1" socket="$2"
+    shift 2
+    local line head id
+    for line in "$@"; do
+        head="${line%$'\t'*}"
+        id="${line##*$'\t'}"
+        printf '%s\t%s\t%s\n' "${head}" "${socket}" "${id}" >> "${SCAN_DIR}/${container}"
+    done
 }
 
 # set_live_start <pid> <start>: pid is still alive at the pre-SIGKILL probe;
@@ -1106,6 +1173,310 @@ case_27_malformed_socket_fails_open() {
 }
 
 # ---------------------------------------------------------------------------
+# #1252: launch-ID-keyed liveness. Every case below runs once per agent
+# prefix (claude-cenci-*, codex-cenci-*) -- AC8. Launch IDs are 32 lowercase
+# hex; MALFORMED_MARKER is the fixed value the in-container scan prints in place
+# of a sanitized field (it must match the scan's marker verbatim).
+ID_OLD="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+ID_NEW="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+MALFORMED_MARKER="__MALFORMED__"
+AGENT_PREFIXES=(claude codex)
+
+# assert_launch_format_queried: the liveness query used the launch-ID -F
+# format (the call log holds the shell-quoted argv, so build the expectation
+# with the same %q quoting).
+assert_launch_format_queried() {
+    local socket="$1" quoted
+    quoted="$(printf '%q' $'#{pane_id}\t#{@cenci-launch-id}')"
+    assert_calls_contains "-S ${socket} list-panes -a -F ${quoted}"
+}
+
+# ---------------------------------------------------------------------------
+# AC3: a tmux server restart reuses pane %0. The old session's agent (launch
+# ID_OLD) must be reaped while the new session (same pane id, launch ID_NEW,
+# recorded on the live pane) is left untouched.
+case_28_restart_reusing_pane_reaps_only_old_launch() {
+    local prefix container
+    for prefix in "${AGENT_PREFIXES[@]}"; do
+        echo "case: ${prefix}: after a restart that reuses %0, the old launch ID is reaped and the new one (same pane id) is untouched"
+        reset_state
+        container="${prefix}-cenci-restart"
+        add_podman_container "${container}"
+        write_scan_launch "${container}" "${DEFAULT_SOCKET}" \
+            $'28001\t%0\t1000\t'"${ID_OLD}" \
+            $'28002\t%0\t2000\t'"${ID_NEW}"
+        mock_set LIVE_PANES "%0"$'\t'"${ID_NEW}"
+        set_gone 28001
+        run_reap
+        assert_exit_zero
+        assert_contains "$(reaped_line "${container}" 28001 "%0")"
+        assert_calls_contains "podman exec -u root ${container} kill -TERM 28001"
+        assert_calls_not_contains "kill -TERM 28002"
+        local skip_needle
+        skip_needle=$'\t28002\t'
+        assert_not_contains "${skip_needle}"
+        assert_contains "Reaped 1 orphaned process(es)."
+        assert_launch_format_queried "${DEFAULT_SOCKET}"
+    done
+}
+
+# ---------------------------------------------------------------------------
+# The strict rule: a live pane that records no launch ID (or another one) does
+# not keep alive a process that carries a launch ID -- while a legacy process
+# (empty 5th field) on that same live pane is still kept alive by the
+# (socket, pane) fallback.
+case_29_strict_rule_live_pane_without_recorded_id() {
+    local prefix container
+    for prefix in "${AGENT_PREFIXES[@]}"; do
+        echo "case: ${prefix}: a live pane with no recorded launch ID does not keep a launch-ID process alive, but still keeps a no-ID process alive"
+        reset_state
+        container="${prefix}-cenci-strict"
+        add_podman_container "${container}"
+        write_scan_launch "${container}" "${DEFAULT_SOCKET}" \
+            $'29001\t%0\t1000\t'"${ID_OLD}" \
+            $'29002\t%0\t2000\t'
+        mock_set LIVE_PANES "%0"$'\t'
+        set_gone 29001
+        run_reap
+        assert_exit_zero
+        assert_contains "$(reaped_line "${container}" 29001 "%0")"
+        assert_calls_not_contains "kill -TERM 29002"
+        local skip_needle
+        skip_needle=$'\t29002\t'
+        assert_not_contains "${skip_needle}"
+        assert_contains "Reaped 1 orphaned process(es)."
+    done
+}
+
+# ---------------------------------------------------------------------------
+# A launch ID is live wherever it is recorded on a live pane of its socket: the
+# stale TMUX_PANE value of the process is not the identity.
+case_30_launch_id_recorded_on_another_live_pane_is_live() {
+    local prefix container
+    for prefix in "${AGENT_PREFIXES[@]}"; do
+        echo "case: ${prefix}: a launch ID recorded on another live pane of its socket is live; a sibling launch ID recorded nowhere is reaped"
+        reset_state
+        container="${prefix}-cenci-moved"
+        add_podman_container "${container}"
+        write_scan_launch "${container}" "${DEFAULT_SOCKET}" \
+            $'30001\t%0\t1000\t'"${ID_NEW}" \
+            $'30002\t%0\t2000\t'"${ID_OLD}"
+        mock_set LIVE_PANES "%5"$'\t'"${ID_NEW}"
+        set_gone 30002
+        run_reap
+        assert_exit_zero
+        assert_contains "$(reaped_line "${container}" 30002 "%0")"
+        assert_calls_not_contains "kill -TERM 30001"
+        local skip_needle
+        skip_needle=$'\t30001\t'
+        assert_not_contains "${skip_needle}"
+    done
+}
+
+# ---------------------------------------------------------------------------
+# Liveness is per socket: an ID recorded on a live pane of a DIFFERENT socket
+# proves nothing. The scan carries a second row on the OTHER socket (where the
+# ID is recorded live) so BOTH sockets are resolved in the same sweep: a
+# union-across-sockets implementation would see the ID live for the first row
+# too and reap nothing, so only per-socket liveness passes.
+case_31_launch_id_recorded_on_other_socket_is_dead() {
+    local prefix container
+    for prefix in "${AGENT_PREFIXES[@]}"; do
+        echo "case: ${prefix}: a launch ID recorded only on an unrelated socket is dead on its own socket (both sockets resolved; the row live on its own socket is untouched)"
+        reset_state
+        container="${prefix}-cenci-othersock"
+        add_podman_container "${container}"
+        write_scan_launch "${container}" "${CENCI_SOCKET}" $'31001\t%0\t1000\t'"${ID_OLD}"
+        write_scan_launch "${container}" "${DEFAULT_SOCKET}" $'31002\t%0\t2000\t'"${ID_OLD}"
+        mock_set TMUX_MODE_CENCI "ok"
+        mock_set LIVE_PANES_CENCI "%0"$'\t'
+        mock_set TMUX_MODE "ok"
+        mock_set LIVE_PANES "%0"$'\t'"${ID_OLD}"
+        set_gone 31001
+        run_reap
+        assert_exit_zero
+        assert_calls_contains "-S ${CENCI_SOCKET} list-panes"
+        assert_calls_contains "-S ${DEFAULT_SOCKET} list-panes"
+        assert_contains "$(reaped_line "${container}" 31001 "%0")"
+        assert_calls_contains "podman exec -u root ${container} kill -TERM 31001"
+        assert_calls_not_contains "kill -TERM 31002"
+        local skip_needle
+        skip_needle=$'\t31002\t'
+        assert_not_contains "${skip_needle}"
+        assert_contains "Reaped 1 orphaned process(es)."
+    done
+}
+
+# ---------------------------------------------------------------------------
+# AC5: a launch-ID row whose socket is missing or malformed fails open exactly
+# like a legacy row -- never signaled, never passed to tmux.
+case_32_launch_id_row_without_usable_socket_fails_open() {
+    local prefix container
+    for prefix in "${AGENT_PREFIXES[@]}"; do
+        echo "case: ${prefix}: a launch-ID row with a missing or malformed socket fails open -- never killed, never passed to tmux"
+        reset_state
+        container="${prefix}-cenci-idnosocket"
+        add_podman_container "${container}"
+        write_scan_legacy "${container}" \
+            $'32001\t%1\t1000\t\t'"${ID_OLD}" \
+            $'32002\t%2\t1000\trelative/not/absolute\t'"${ID_OLD}" \
+            $'32003\t%3\t1000\t'"${MALFORMED_MARKER}"$'\t'"${ID_OLD}"
+        run_reap
+        assert_exit_zero
+        assert_calls_not_contains "kill -TERM 32001"
+        assert_calls_not_contains "kill -TERM 32002"
+        assert_calls_not_contains "kill -TERM 32003"
+        assert_calls_not_contains "relative/not/absolute"
+        assert_contains "No orphaned processes found."
+        assert_contains "Note: 3 process(es) in container ${container} carried no CENCI_TMUX_SOCKET; failing open and treating as live so no in-flight agent work is ever killed."
+    done
+}
+
+# ---------------------------------------------------------------------------
+# AC5: a malformed launch ID (anything but 32 lowercase hex) is never signaled
+# and is reported in ONE aggregated per-container Note. A well-formed legacy
+# orphan in the same container is still reaped (the scan really ran).
+case_33_malformed_launch_id_fails_open_with_aggregated_note() {
+    local prefix container
+    for prefix in "${AGENT_PREFIXES[@]}"; do
+        echo "case: ${prefix}: malformed launch IDs are never signaled and produce one aggregated Note; a paired legacy orphan is still reaped"
+        reset_state
+        container="${prefix}-cenci-badid"
+        add_podman_container "${container}"
+        write_scan_launch "${container}" "${DEFAULT_SOCKET}" \
+            $'33001\t%1\t1000\t'"${ID_OLD:0:31}" \
+            $'33002\t%2\t1000\t'"${ID_OLD^^}" \
+            $'33003\t%3\t1000\t'"${ID_OLD}0" \
+            $'33004\t%4\t1000\t'
+        mock_set LIVE_PANES "%99"$'\t'"${ID_NEW}"
+        set_gone 33004
+        run_reap
+        assert_exit_zero
+        assert_calls_not_contains "kill -TERM 33001"
+        assert_calls_not_contains "kill -TERM 33002"
+        assert_calls_not_contains "kill -TERM 33003"
+        assert_contains "$(reaped_line "${container}" 33004 "%4")"
+        assert_contains "Reaped 1 orphaned process(es)."
+        assert_contains "Note: 3 process(es) in container ${container} carried a malformed CENCI_LAUNCH_ID; failing open and treating as live so no in-flight agent work is ever killed."
+    done
+}
+
+# ---------------------------------------------------------------------------
+# AC6: what the in-container scan prints for an unsafe CENCI_LAUNCH_ID is the
+# marker (field 5); a row carrying it is never signaled. A 5th field that
+# itself contains a tab (extra columns) is also malformed -- never signaled.
+case_34_marker_and_tabbed_launch_id_never_signaled() {
+    local prefix container
+    for prefix in "${AGENT_PREFIXES[@]}"; do
+        echo "case: ${prefix}: the scan's malformed marker and a 5th field with an embedded tab are never signaled; a paired legacy orphan is still reaped"
+        reset_state
+        container="${prefix}-cenci-marker"
+        add_podman_container "${container}"
+        write_scan_legacy "${container}" \
+            $'34001\t%1\t1000\t'"${DEFAULT_SOCKET}"$'\t'"${MALFORMED_MARKER}" \
+            $'34002\t%2\t1000\t'"${DEFAULT_SOCKET}"$'\t'"${ID_OLD}"$'\t'"${ID_NEW}" \
+            $'34003\t%3\t1000\t'"${DEFAULT_SOCKET}"$'\t'
+        mock_set LIVE_PANES "%99"$'\t'
+        set_gone 34003
+        run_reap
+        assert_exit_zero
+        assert_calls_not_contains "kill -TERM 34001"
+        assert_calls_not_contains "kill -TERM 34002"
+        assert_contains "$(reaped_line "${container}" 34003 "%3")"
+        assert_contains "Note: 2 process(es) in container ${container} carried a malformed CENCI_LAUNCH_ID; failing open and treating as live so no in-flight agent work is ever killed."
+    done
+}
+
+# ---------------------------------------------------------------------------
+# A launch-ID row on a socket whose tmux server is gone is dead like every
+# other row there: reaped, with the usual no-server note. A malformed-ID row on
+# the same socket is still left alone.
+case_35_launch_id_row_on_no_server_socket_is_reaped() {
+    local prefix container
+    for prefix in "${AGENT_PREFIXES[@]}"; do
+        echo "case: ${prefix}: a launch-ID row on a socket with no tmux server is reaped; a malformed-ID row beside it is not"
+        reset_state
+        container="${prefix}-cenci-noserverid"
+        add_podman_container "${container}"
+        write_scan_launch "${container}" "${DEFAULT_SOCKET}" \
+            $'35001\t%0\t1000\t'"${ID_OLD}" \
+            $'35002\t%0\t2000\t'"${MALFORMED_MARKER}"
+        mock_set TMUX_MODE "noserver"
+        set_gone 35001
+        run_reap
+        assert_exit_zero
+        assert_contains "$(reaped_line "${container}" 35001 "%0")"
+        assert_calls_not_contains "kill -TERM 35002"
+        assert_contains "No tmux server detected"
+        assert_contains "Reaped 1 orphaned process(es)."
+    done
+}
+
+# ---------------------------------------------------------------------------
+# A non-empty list-panes line whose pane part is not a pane id (garbage with no
+# tab, or an escaped tab) means tmux did not honor the format. It is a genuine
+# tmux-format error: the sweep hard-fails before any kill rather than folding
+# the line into a live pane that records no ID (which would reap its agent).
+# A dead launch-ID row beside it proves nothing is signaled.
+case_36_unexpected_list_panes_line_hard_fails_without_killing() {
+    local prefix container bad
+    for prefix in "${AGENT_PREFIXES[@]}"; do
+        for bad in "garbage-line" '%0\t'"${ID_OLD}"; do
+            echo "case: ${prefix}: an unexpected list-panes line (${bad}) hard-fails with an Error: and signals nothing"
+            reset_state
+            container="${prefix}-cenci-badpanes"
+            add_podman_container "${container}"
+            write_scan_launch "${container}" "${DEFAULT_SOCKET}" $'36001\t%0\t1000\t'"${ID_OLD}"
+            mock_set LIVE_PANES "${bad}"
+            set_gone 36001
+            run_reap
+            assert_exit_nonzero
+            assert_contains "Error:"
+            assert_contains "unexpected tmux list-panes output"
+            # The Error: line names the offending line Go-%q-quoted: wrapped in
+            # double quotes with every backslash doubled.
+            assert_contains "\"${bad//\\/\\\\}\""
+            assert_calls_not_contains "kill -TERM"
+            local reaped_needle
+            reaped_needle=$'reaped\t'
+            assert_not_contains "${reaped_needle}"
+        done
+    done
+}
+
+# ---------------------------------------------------------------------------
+# A list-panes line with a valid pane but a NON-EMPTY, malformed launch-ID
+# column is equally unexpected: dropping it as "no ID" would class the process
+# carrying that pane's real ID as a dead pane and kill it. The sweep hard-fails
+# before any kill (an empty second column stays valid -- cases 29 and 35). A
+# dead launch-ID row beside it proves nothing is signaled.
+case_37_malformed_launch_id_column_hard_fails_without_killing() {
+    local prefix container bad quoted reaped_needle
+    reaped_needle=$'reaped\t'
+    for prefix in "${AGENT_PREFIXES[@]}"; do
+        for bad in "%0"$'\t'"not-a-launch-id" "%0"$'\t'"${ID_OLD^^}"; do
+            echo "case: ${prefix}: a malformed launch-ID column hard-fails with an Error: and signals nothing"
+            reset_state
+            container="${prefix}-cenci-badidcol"
+            add_podman_container "${container}"
+            write_scan_launch "${container}" "${DEFAULT_SOCKET}" $'37001\t%0\t1000\t'"${ID_OLD}"
+            mock_set LIVE_PANES "${bad}"
+            set_gone 37001
+            run_reap
+            assert_exit_nonzero
+            assert_contains "Error:"
+            assert_contains "unexpected tmux list-panes output"
+            # The Error: line names the offending line Go-%q-quoted: wrapped in
+            # double quotes with the TAB rendered as the two characters \t.
+            quoted="\"${bad//$'\t'/\\t}\""
+            assert_contains "${quoted}"
+            assert_calls_not_contains "kill -TERM"
+            assert_not_contains "${reaped_needle}"
+        done
+    done
+}
+
+# ---------------------------------------------------------------------------
 case_1_orphan_termed
 case_2_term_resistant_escalates_to_kill
 case_3_empty_pane_never_signaled
@@ -1133,6 +1504,16 @@ case_24_legacy_no_socket_fails_open
 case_25_cross_server_no_kill
 case_26_union_regression_dead_on_own_socket_still_reaped
 case_27_malformed_socket_fails_open
+case_28_restart_reusing_pane_reaps_only_old_launch
+case_29_strict_rule_live_pane_without_recorded_id
+case_30_launch_id_recorded_on_another_live_pane_is_live
+case_31_launch_id_recorded_on_other_socket_is_dead
+case_32_launch_id_row_without_usable_socket_fails_open
+case_33_malformed_launch_id_fails_open_with_aggregated_note
+case_34_marker_and_tabbed_launch_id_never_signaled
+case_35_launch_id_row_on_no_server_socket_is_reaped
+case_36_unexpected_list_panes_line_hard_fails_without_killing
+case_37_malformed_launch_id_column_hard_fails_without_killing
 
 print_summary
 [[ "${FAILURES}" -eq 0 ]]

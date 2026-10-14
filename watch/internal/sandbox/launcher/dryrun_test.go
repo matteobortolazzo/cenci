@@ -5,10 +5,13 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/ipc"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/tmux/tmuxtest"
 )
 
 // -- cenci open --dry-run (ticket #589) ----------------------------------
@@ -888,5 +891,129 @@ func TestDryRun_DarwinDindConfig_PreviewsDegradedArgv(t *testing.T) {
 	}
 	if plan.Posture.Dind.Source != DindSourcePlatformUnsupported {
 		t.Errorf("Posture.Dind.Source = %q, want %q", plan.Posture.Dind.Source, DindSourcePlatformUnsupported)
+	}
+}
+
+// -- ticket #1252: the CENCI_LAUNCH_ID placeholder ---------------------------
+//
+// A real launch inside a tmux pane tags the pane and passes
+// CENCI_LAUNCH_ID=<random> in the attach env. --dry-run must stay deterministic
+// and side-effect free, so it shows a fixed placeholder instead -- but only
+// where a real launch would actually try to tag the pane (a usable $TMUX /
+// $TMUX_PANE and a docker/podman runtime). The random value never appears.
+
+const launchIDPlaceholder = "CENCI_LAUNCH_ID=<generated-per-launch>"
+
+// realLaunchIDValue matches a value-bearing CENCI_LAUNCH_ID token, i.e. a real
+// generated ID leaking into output.
+var realLaunchIDValue = regexp.MustCompile(`CENCI_LAUNCH_ID=[0-9a-f]{32}`)
+
+// dryRunIn prepares a hermetic dry-run environment (temp repo and HOME, fake
+// docker with nothing running, codex auth satisfied, the pane-option seam
+// recorded) for a pane described by $TMUX / $TMUX_PANE, and returns the plan,
+// its rendered text and the recorder.
+func dryRunIn(t *testing.T, agent, tmuxEnv, paneEnv string) (DryRunPlan, string, *tmuxtest.PaneOptionRecorder) {
+	t.Helper()
+	repo := newAuditTestRepo(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Chdir(repo)
+	t.Setenv("OPENAI_API_KEY", "sentinel-dry-run-codex-auth") // satisfies codex's credential check
+	setFakeDockerNotRunning(t)
+	t.Setenv("TMUX", tmuxEnv)
+	t.Setenv("TMUX_PANE", paneEnv)
+	rec := installPaneOptionRecorder(t)
+
+	plan, err := dryRunEngine().DryRun(Options{Agent: agent})
+	if err != nil {
+		t.Fatalf("DryRun(%s): %v", agent, err)
+	}
+	var out bytes.Buffer
+	if err := plan.WriteText(&out); err != nil {
+		t.Fatalf("WriteText: %v", err)
+	}
+	return plan, out.String(), rec
+}
+
+// AC2: inside tmux the attach argv carries the placeholder exactly once (as an
+// "-e" value), the create argv never carries a launch ID (it must not be
+// create-time env), the rendered text shows the placeholder once, no random
+// value appears anywhere, and dry-run makes no tmux call.
+func TestDryRun_InTmux_AttachArgvCarriesTheLaunchIDPlaceholderExactlyOnce(t *testing.T) {
+	for _, agent := range launchTestAgents {
+		t.Run(agent, func(t *testing.T) {
+			plan, text, rec := dryRunIn(t, agent, launchTestSocket+",4242,0", launchTestPane)
+
+			if got := launchIDEnvTokens(plan.AttachArgv); !slices.Equal(got, []string{launchIDPlaceholder}) {
+				t.Errorf("AttachArgv CENCI_LAUNCH_ID tokens = %v, want exactly [%s]; argv: %v", got, launchIDPlaceholder, plan.AttachArgv)
+			}
+			for _, tok := range plan.CreateArgv {
+				if strings.Contains(tok, "CENCI_LAUNCH_ID") {
+					t.Errorf("CreateArgv carries %q; the launch ID must never be create-time env", tok)
+				}
+			}
+			if n := strings.Count(text, launchIDPlaceholder); n != 1 {
+				t.Errorf("rendered dry-run text shows the placeholder %d times, want exactly once (the attach line); text:\n%s", n, text)
+			}
+			if realLaunchIDValue.MatchString(text) {
+				t.Errorf("rendered dry-run text leaks a real launch ID value:\n%s", text)
+			}
+			if len(rec.Calls) != 0 {
+				t.Errorf("dry-run set pane options (%+v); it must make no tmux call", rec.Calls)
+			}
+		})
+	}
+}
+
+// AC2: the dry-run output is byte-identical between two runs, and the audit
+// Posture body it embeds never mentions the launch ID (audit output does not
+// change).
+func TestDryRun_InTmux_OutputIsByteIdenticalBetweenRunsAndPostureIsUnchanged(t *testing.T) {
+	for _, agent := range launchTestAgents {
+		t.Run(agent, func(t *testing.T) {
+			first, firstText, _ := dryRunIn(t, agent, launchTestSocket+",4242,0", launchTestPane)
+
+			// A second dry run in the same repo, HOME and environment.
+			second, err := dryRunEngine().DryRun(Options{Agent: agent})
+			if err != nil {
+				t.Fatalf("second DryRun: %v", err)
+			}
+			var secondText, posture bytes.Buffer
+			if err := second.WriteText(&secondText); err != nil {
+				t.Fatalf("second WriteText: %v", err)
+			}
+			if err := first.Posture.WriteText(&posture); err != nil {
+				t.Fatalf("Posture.WriteText: %v", err)
+			}
+
+			if firstText != secondText.String() {
+				t.Errorf("dry-run output differs between two runs:\n--- run 1 ---\n%s\n--- run 2 ---\n%s", firstText, secondText.String())
+			}
+			if !strings.Contains(firstText, launchIDPlaceholder) {
+				t.Errorf("dry-run output inside tmux has no %s placeholder; text:\n%s", launchIDPlaceholder, firstText)
+			}
+			if strings.Contains(posture.String(), "CENCI_LAUNCH_ID") {
+				t.Errorf("the audit Posture body mentions CENCI_LAUNCH_ID; audit output must not change:\n%s", posture.String())
+			}
+		})
+	}
+}
+
+// Q1: the placeholder is gated by the same predicate a real launch uses to
+// decide whether to tag the pane. Outside tmux (or with an unusable
+// $TMUX_PANE / $TMUX socket) a real launch injects no ID, so dry-run shows none.
+func TestDryRun_WhereARealLaunchWouldNotTagThePane_ShowsNoLaunchID(t *testing.T) {
+	for _, agent := range launchTestAgents {
+		for _, tc := range unusableTmuxContexts {
+			t.Run(agent+"/"+tc.name, func(t *testing.T) {
+				_, text, rec := dryRunIn(t, agent, tc.tmux, tc.pane)
+
+				if strings.Contains(text, "CENCI_LAUNCH_ID") {
+					t.Errorf("dry-run output mentions CENCI_LAUNCH_ID where a real launch injects none:\n%s", text)
+				}
+				if len(rec.Calls) != 0 {
+					t.Errorf("dry-run set pane options (%+v); it must make no tmux call", rec.Calls)
+				}
+			})
+		}
 	}
 }

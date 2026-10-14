@@ -319,10 +319,10 @@ func (d *Daemon) reapOnStartup() {
 // triggerReap fires one orphan-reap pass if a reaper is wired. Every trigger
 // goes through here: startup (#292 AC2), the pane-gone sweep (#292 AC1), the
 // periodic backstop, and SessionEnd teardown (both #1171). Extra passes are
-// safe by construction -- ReapOrphans only kills a process whose own
-// (socket, pane) pair is already dead -- so the cost of an unnecessary
-// trigger is one container scan, while a missing one strands a live process
-// until the daemon restarts. Reap() is itself single-flight and async
+// safe by construction -- ReapOrphans only kills a process whose own launch
+// (or, for one without a launch ID, (socket, pane) pair) is already dead -- so
+// the cost of an unnecessary trigger is one container scan, while a missing one
+// strands a live process until the daemon restarts. Reap() is itself single-flight and async
 // (internal/reap), so concurrent triggers coalesce.
 func (d *Daemon) triggerReap() {
 	if d.reaper != nil {

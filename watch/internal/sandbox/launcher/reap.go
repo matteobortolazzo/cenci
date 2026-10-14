@@ -35,20 +35,24 @@ var numericPattern = regexp.MustCompile(`^[0-9]+$`)
 // fast test runs, matching the bash suite's usage.
 var reapSleep = time.Sleep
 
-// ReapOrphans kills container-side agent processes whose owning tmux pane no
-// longer exists on the host. Ownership is recorded via the TMUX_PANE and
-// CENCI_TMUX_SOCKET env vars injected into every exec'd session (#1007),
-// present in /proc/<pid>/environ of every container-side agent process and
-// descendants. A process is live iff its (socket, pane) pair is present in
-// that socket's resolved live-pane set — never a union of pane ids across
-// sockets, since both a personal default tmux server and the `cenci` server
-// allocate pane ids from %0. Every distinct, shape-validated socket a
-// container's scan output references is resolved at most once per sweep
-// (memoized across containers/runtimes) before any signal is sent in that
-// container. A row carrying no socket (pre-#1007 launcher) or a malformed
-// one fails open: treated as live, never signaled — a false kill here is
-// irreversible loss of in-flight agent work. It is a global sweep (not
-// scoped to the current repo) and scans every installed runtime, since
+// ReapOrphans kills container-side agent processes whose owning tmux pane (or
+// launch) no longer exists on the host. Ownership is recorded via the
+// TMUX_PANE, CENCI_TMUX_SOCKET and CENCI_LAUNCH_ID env vars injected into every
+// exec'd session (#1007, #1252), present in /proc/<pid>/environ of every
+// container-side agent process and descendants. A process carrying a launch ID
+// is live iff that ID is recorded (@cenci-launch-id) on a live pane of its own
+// socket, which reaps an orphan whose pane id was reused by a new session after
+// a tmux restart. A process without one (started before launch IDs) is live iff
+// its (socket, pane) pair is present in that socket's resolved live-pane set —
+// never a union of pane ids across sockets, since both a personal default tmux
+// server and the `cenci` server allocate pane ids from %0. Every distinct,
+// shape-validated socket a container's scan output references is resolved at
+// most once per sweep (memoized across containers/runtimes) before any signal
+// is sent in that container. A row carrying no socket (pre-#1007 launcher), a
+// malformed one, or a malformed launch ID fails open: treated as live, never
+// signaled — a false kill here is irreversible loss of in-flight agent work.
+// It is a global sweep (not scoped to the current repo) and scans every
+// installed runtime, since
 // orphans can exist under either docker or podman regardless of which one
 // the launcher prefers.
 //
@@ -112,8 +116,9 @@ func ReapOrphans(stdout, stderr io.Writer) error {
 					_, _ = fmt.Fprintf(stdout, "Note: process 1 in container %s is the container init; skipping.\n", container)
 					continue
 				}
-				// Only a dead pane is signaled; no-socket and live rows fail
-				// open, and a class unknown here is never signaled either.
+				// Only a dead pane or dead launch is signaled; no-socket,
+				// malformed-launch-ID and live rows fail open, and a class
+				// unknown here is never signaled either.
 				if r.Class != sandbox.OrphanDeadPane {
 					continue
 				}
@@ -157,6 +162,10 @@ func ReapOrphans(stdout, stderr io.Writer) error {
 				_, _ = fmt.Fprintf(stdout, "Note: %d process(es) in container %s carried no CENCI_TMUX_SOCKET; failing open and treating as live so no in-flight agent work is ever killed.\n", scanned.NoSocketCount, container)
 			}
 
+			if scanned.MalformedLaunchIDCount > 0 {
+				_, _ = fmt.Fprintf(stdout, "Note: %d process(es) in container %s carried a malformed CENCI_LAUNCH_ID; failing open and treating as live so no in-flight agent work is ever killed.\n", scanned.MalformedLaunchIDCount, container)
+			}
+
 			if scanned.UnreadableCount > 0 {
 				_, _ = fmt.Fprintf(stdout, "Note: %d process environ(s) in container %s were unreadable during the -u dev scan; if this persists it may mean the scan user's UID no longer matches the agent process UID, so orphans could go undetected.\n", scanned.UnreadableCount, container)
 			}
@@ -191,13 +200,14 @@ func ReapOrphans(stdout, stderr io.Writer) error {
 				// process during the grace window — treat as already-gone,
 				// skip SIGKILL. Both sides must be numeric before trusting a
 				// mismatch as genuine PID reuse (a forging process can
-				// corrupt its own stat field 22 or shift the scan's TSV
-				// columns; both vectors are confined to the forging process's
-				// own record, so this is unparseable-value handling, not a
-				// security boundary). __NOSTAT__ and an empty recorded start
-				// fall back to liveness-only silently; a non-empty but
-				// non-numeric value on either side falls back the same way
-				// but is noted since it's unexpected.
+				// corrupt its own stat field 22; the scan sanitizes the pane,
+				// socket and launch-ID fields so a hostile value can no longer
+				// shift the TSV columns, and any corruption is confined to the
+				// forging process's own record, so this is unparseable-value
+				// handling, not a security boundary). __NOSTAT__ and an empty
+				// recorded start fall back to liveness-only silently; a
+				// non-empty but non-numeric value on either side falls back
+				// the same way but is noted since it's unexpected.
 				recordedNumeric := numericPattern.MatchString(recordedStart)
 				probeNumeric := numericPattern.MatchString(probeStart)
 				if recordedNumeric && probeNumeric {

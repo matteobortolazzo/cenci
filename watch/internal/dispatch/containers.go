@@ -21,7 +21,8 @@ var containerSessionProbeFn = defaultContainerSessionProbe
 var containerSessionProbeTimeout = 60 * time.Second
 
 // defaultContainerSessionProbe counts the orphaned container-side agent
-// sessions (distinct dead-pane (socket, pane) pairs, the same classification
+// sessions (distinct dead (socket, launch ID) launches, or (socket, pane) pairs
+// for processes without a launch ID -- the same classification
 // `cenci sandbox reap-orphans` acts on) across every sandbox container on every
 // installed runtime. It is read-only and its subprocesses are bounded
 // (sandbox.CountOrphanedSessions). The one exclusion is "no container runtime
