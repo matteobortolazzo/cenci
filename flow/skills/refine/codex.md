@@ -159,9 +159,10 @@ number by the time this runs. Skip this entirely for a child with no dependencie
 '.blockedBy.nodes[].number'`; a failed edit or verification follows the same retry-once-then-stop
 protocol as every other write in this procedure — do not create any further children.
 
-If the checkpoint is missing or corrupt (bad JSON, wrong schema version) on any call other than
-`init`, `ensure-issue.sh` itself exits non-zero and this is by design — it must **fail closed** and
-never silently re-create. Treat that, and any other non-zero `ensure-issue.sh` exit, as a hard
+If the checkpoint is missing or corrupt (bad JSON, wrong schema version), or a checkpoint field
+can't be read or fails validation, on any call other than `init`, `ensure-issue.sh` itself exits
+non-zero (11) and this is by design — it must **fail closed** and never silently re-create. A
+candidate-derived value that can't be read or fails validation exits 12 the same way, before any write. Treat that, and any other non-zero `ensure-issue.sh` exit, as a hard
 stop: report the error and do not create any further children. Once the run
 completes successfully, run `ensure-issue.sh clear --checkpoint <path>` (idempotent — a second
 `clear` is not an error); an aborted run instead retains the checkpoint so the next attempt

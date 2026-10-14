@@ -32,9 +32,12 @@
 #      or malformed manifest, invalid --checkpoint path shape, unknown slot)
 #   10 multiple marker matches for one nonce -- fail closed, no write, a
 #      partial-state report naming every candidate issue number
-#   11 checkpoint missing or corrupt (bad JSON / wrong schemaVersion) on any
+#   11 checkpoint missing or corrupt (bad JSON / wrong schemaVersion), or a
+#      checkpoint field that can't be read or fails validation, on any
 #      subcommand other than `init` -- fail closed, never silently re-POST
-#   12 candidate-list call itself failed -- fail closed, no POST
+#   12 candidate-list call itself failed, or a candidate-derived value in
+#      ensure_reconcile can't be read or fails validation -- fail closed, no
+#      POST and no repair PATCH
 #   13 an existing issue diverged from the manifest and the repair PATCH
 #      itself failed -- unrepairable this run, verification recorded as
 #      "mismatch" so a human can reconcile manually
@@ -389,6 +392,25 @@ since_floor() {
   date -u -d "@$((epoch - 300))" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || printf '%s' "${created_at}"
 }
 
+# --- fail-closed read helpers (#891) --------------------------------------
+# cp_read_fail / cp_invalid <sub> <field> <slot> -- a checkpoint-derived read
+# failed (command failure) or returned a value of the wrong shape: exit 11,
+# before any create, repair PATCH, or sub-issue link. cand_read_fail /
+# cand_invalid are the candidate-derived twins: exit 12. Messages name the
+# subcommand, field, and slot only -- never the raw value read.
+cp_read_fail() {
+  die 11 "$1: could not read checkpoint field $2 for slot $3 -- fail closed, no write"
+}
+cp_invalid() {
+  die 11 "$1: checkpoint field $2 for slot $3 failed validation -- fail closed, no write"
+}
+cand_read_fail() {
+  die 12 "$1: could not read candidate field $2 for slot $3 -- fail closed, no write"
+}
+cand_invalid() {
+  die 12 "$1: candidate field $2 for slot $3 failed validation -- fail closed, no write"
+}
+
 entry_index_for_slot() {
   local checkpoint_json="$1" slot="$2"
   jq -r --arg slot "${slot}" '[.entries[].slot] | index($slot) // "null"' <<<"${checkpoint_json}"
@@ -555,16 +577,43 @@ cmd_ensure() {
   [[ -f "${title_file}" ]] || die 2 "ensure: --title must be a readable file: ${title_file}"
   [[ -f "${body_file}" ]] || die 2 "ensure: --body must be a readable file: ${body_file}"
 
+  # Every checkpoint-entry read below is its own assignment with its own
+  # `|| cp_read_fail` (command failure) followed by a shape check
+  # (`cp_invalid`), both exit 11 before any candidate list, POST, or PATCH
+  # (#891). A failed or malformed read must never degrade into a value that
+  # passes the guards and reaches an external write (e.g. an empty idx
+  # spanning every entry, or a "null" nonce becoming a real marker).
   local idx
-  idx="$(entry_index_for_slot "${checkpoint_json}" "${slot}")"
+  idx="$(entry_index_for_slot "${checkpoint_json}" "${slot}")" || cp_read_fail ensure idx "${slot}"
+  [[ "${idx}" =~ ^(null|[0-9]+)$ ]] || cp_invalid ensure idx "${slot}"
   [[ "${idx}" != "null" ]] || die 2 "ensure: no checkpoint entry for slot: ${slot}"
 
   local nonce labels_json milestone_json login created_at
-  nonce="$(jq -r ".entries[${idx}].nonce" <<<"${checkpoint_json}")"
-  labels_json="$(jq -r ".entries[${idx}].labels" <<<"${checkpoint_json}")"
-  milestone_json="$(jq -c ".entries[${idx}].milestone" <<<"${checkpoint_json}")"
-  login="$(jq -r '.creatorLogin' <<<"${checkpoint_json}")"
-  created_at="$(jq -r '.createdAt' <<<"${checkpoint_json}")"
+  nonce="$(jq -r --argjson idx "${idx}" '.entries[$idx].nonce' <<<"${checkpoint_json}")" \
+    || cp_read_fail ensure nonce "${slot}"
+  [[ "${nonce}" =~ ^[0-9a-f]{32}$ ]] || cp_invalid ensure nonce "${slot}"
+
+  labels_json="$(jq -r --argjson idx "${idx}" '.entries[$idx].labels' <<<"${checkpoint_json}")" \
+    || cp_read_fail ensure labels "${slot}"
+  jq -e -s 'length == 1 and (.[0] | type == "array" and all(.[]; type == "string"))' \
+    >/dev/null 2>&1 <<<"${labels_json}" || cp_invalid ensure labels "${slot}"
+
+  milestone_json="$(jq -c --argjson idx "${idx}" '.entries[$idx].milestone' <<<"${checkpoint_json}")" \
+    || cp_read_fail ensure milestone "${slot}"
+  [[ "${milestone_json}" =~ ^(null|[1-9][0-9]*)$ ]] || cp_invalid ensure milestone "${slot}"
+
+  # The login is spliced into the candidate-list query string, so it must be
+  # a plain GitHub login (optionally a [bot] account) -- never empty, the
+  # literal "null" (jq -r cannot tell JSON null from the string), or anything
+  # carrying query metacharacters. The regex lives in a variable so the
+  # escaped brackets survive `=~` unquoted.
+  local login_re='^[A-Za-z0-9][A-Za-z0-9_-]*(\[bot\])?$'
+  login="$(jq -r '.creatorLogin' <<<"${checkpoint_json}")" || cp_read_fail ensure creatorLogin "${slot}"
+  [[ "${login}" != "null" && "${login}" =~ ${login_re} ]] || cp_invalid ensure creatorLogin "${slot}"
+
+  created_at="$(jq -r '.createdAt' <<<"${checkpoint_json}")" || cp_read_fail ensure createdAt "${slot}"
+  [[ "${created_at}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] \
+    || cp_invalid ensure createdAt "${slot}"
 
   local marker="${MARKER_PREFIX}${nonce}${MARKER_SUFFIX}"
   local since
@@ -600,8 +649,10 @@ cmd_ensure() {
   fi
 
   if [[ "${match_count}" -eq 1 ]]; then
+    local candidate_json
+    candidate_json="$(jq -c '.[0]' <<<"${matches_json}")" || cand_read_fail ensure candidate "${slot}"
     ensure_reconcile "${checkpoint}" "${checkpoint_json}" "${idx}" "${slot}" "${repo}" \
-      "$(jq -c '.[0]' <<<"${matches_json}")" "${title_file}" "${body_file}" "${labels_json}" "${milestone_json}" "${marker}"
+      "${candidate_json}" "${title_file}" "${body_file}" "${labels_json}" "${milestone_json}" "${marker}"
     return $?
   fi
 
@@ -666,8 +717,13 @@ ensure_reconcile() {
   local checkpoint="$1" checkpoint_json="$2" idx="$3" slot="$4" repo="$5" candidate="$6"
   local title_file="$7" body_file="$8" labels_json="$9" milestone_json="${10}" marker="${11}"
 
+  # Every read before the repair PATCH fails closed (#891): the candidate
+  # number decides which issue the PATCH targets, so it must be a positive
+  # integer (exit 12); the expected values come from the checkpoint (exit 11)
+  # and the actual values from the candidate (exit 12).
   local number
-  number="$(jq -r '.number' <<<"${candidate}")"
+  number="$(jq -r '.number' <<<"${candidate}")" || cand_read_fail ensure number "${slot}"
+  [[ "${number}" =~ ^[1-9][0-9]*$ ]] || cand_invalid ensure number "${slot}"
 
   # Computed via jq --rawfile + rtrimstr("\n") -- the exact same
   # transformation ensure_create's payload applies -- rather than
@@ -685,16 +741,16 @@ ensure_reconcile() {
   expected_body="${expected_body_core}"$'\n\n'"${marker}"
 
   local expected_labels_sorted actual_labels_sorted
-  expected_labels_sorted="$(jq -c 'sort' <<<"${labels_json}")"
-  actual_labels_sorted="$(jq -c '[.labels[].name] | sort' <<<"${candidate}")"
+  expected_labels_sorted="$(jq -c 'sort' <<<"${labels_json}")" || cp_read_fail ensure labels "${slot}"
+  actual_labels_sorted="$(jq -c '[.labels[].name] | sort' <<<"${candidate}")" || cand_read_fail ensure labels "${slot}"
 
   local expected_milestone actual_milestone
-  expected_milestone="$(jq -c '.' <<<"${milestone_json}")"
-  actual_milestone="$(jq -c '.milestone.number // null' <<<"${candidate}")"
+  expected_milestone="$(jq -c '.' <<<"${milestone_json}")" || cp_read_fail ensure milestone "${slot}"
+  actual_milestone="$(jq -c '.milestone.number // null' <<<"${candidate}")" || cand_read_fail ensure milestone "${slot}"
 
   local actual_title actual_body
-  actual_title="$(jq -r '.title' <<<"${candidate}")"
-  actual_body="$(jq -r '.body' <<<"${candidate}")"
+  actual_title="$(jq -r '.title' <<<"${candidate}")" || cand_read_fail ensure title "${slot}"
+  actual_body="$(jq -r '.body' <<<"${candidate}")" || cand_read_fail ensure body "${slot}"
 
   if [[ "${actual_title}" == "${expected_title}" \
         && "${actual_body}" == "${expected_body}" \
@@ -809,11 +865,14 @@ cmd_link() {
   require_checkpoint_json checkpoint_json "${checkpoint}"
 
   local idx
-  idx="$(entry_index_for_slot "${checkpoint_json}" "${slot}")"
+  idx="$(entry_index_for_slot "${checkpoint_json}" "${slot}")" || cp_read_fail link idx "${slot}"
+  [[ "${idx}" =~ ^(null|[0-9]+)$ ]] || cp_invalid link idx "${slot}"
   [[ "${idx}" != "null" ]] || die 2 "link: no checkpoint entry for slot: ${slot}"
 
   local number
-  number="$(jq -r ".entries[${idx}].issueNumber" <<<"${checkpoint_json}")"
+  number="$(jq -r --argjson idx "${idx}" '.entries[$idx].issueNumber' <<<"${checkpoint_json}")" \
+    || cp_read_fail link issueNumber "${slot}"
+  [[ "${number}" =~ ^(null|[1-9][0-9]*)$ ]] || cp_invalid link issueNumber "${slot}"
   [[ "${number}" != "null" ]] || die 2 "link: slot ${slot} has no issueNumber yet -- run ensure first"
 
   # parent_subissues_raw <parent> <repo> -- the raw (unfiltered) parent
