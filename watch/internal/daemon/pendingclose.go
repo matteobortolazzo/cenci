@@ -85,7 +85,7 @@ func (d *Daemon) killPendingClose(wi *frontend.WindowInfo) {
 		return
 	}
 	delete(d.pending, key)
-	d.killWindowByKey(key)
+	d.killWindowByKey(key, "pending-close")
 }
 
 // retryBlockedPendingCloses re-evaluates every pending-close the babysit
@@ -112,7 +112,7 @@ func (d *Daemon) retryBlockedPendingCloses() {
 		if d.cfg.Verbose {
 			log.Printf("pending-close: babysit guard cleared for %s (%s), closing now", key, entry.pc.WindowName)
 		}
-		d.killWindowByKey(key)
+		d.killWindowByKey(key, "pending-close")
 	}
 }
 
@@ -140,23 +140,33 @@ func (d *Daemon) babysitBlocks(entry *pendingCloseEntry) (bool, string) {
 //
 // A failed process kill is logged and never stops kill-window. A window that is
 // already gone counts as closed and is logged only under Verbose.
-func (d *Daemon) killWindowByKey(key string) {
+func (d *Daemon) killWindowByKey(key, prefix string) {
 	target := fmt.Sprintf("=%s", key)
+	d.killWindowTarget(target, target, prefix)
+}
+
+// killWindowTarget is killWindowByKey for an explicit tmux target. desc names
+// the window in log lines (it equals target for the pending-close path). A
+// deferred kill must pass a target that cannot drift to another window between
+// scheduling and the kill: a "=session:index" is resolved again at kill time,
+// after the grace wait, so a renumber or index reuse in between would hit the
+// wrong window; a pane id ("%N") is never reused while the tmux server runs.
+func (d *Daemon) killWindowTarget(target, desc, prefix string) {
 	killer, procKiller, verbose := d.killer, d.procKiller, d.cfg.Verbose
 	d.runOffLoop(sandbox.GraceFromEnv()+sandbox.CloseKillMargin, func(ctx context.Context) {
 		if procKiller != nil {
 			if err := procKiller.KillWindowProcesses(ctx, target); err != nil {
-				log.Printf("pending-close: error killing processes of %s: %v", target, err)
+				log.Printf("%s: error killing processes of %s: %v", prefix, desc, err)
 			}
 		}
 		err := killer.KillWindow(target)
 		switch {
 		case errors.Is(err, tmux.ErrWindowGone):
 			if verbose {
-				log.Printf("pending-close: %s already gone, counted as closed", target)
+				log.Printf("%s: %s already gone, counted as closed", prefix, desc)
 			}
 		case err != nil:
-			log.Printf("pending-close: error killing %s: %v", target, err)
+			log.Printf("%s: error killing %s: %v", prefix, desc, err)
 		}
 	})
 }

@@ -154,7 +154,9 @@ func (c *ExecClient) HasSession(session string) (bool, error) {
 // KillWindow kills the tmux window at target (typically an exact
 // "=SESSION:INDEX" target resolved from the daemon's window registry, so it
 // unambiguously identifies one window regardless of which session the caller
-// happens to be running in). A target tmux reports as missing comes back
+// happens to be running in), or a pane id ("%5") that tmux resolves to the
+// pane's window and that survives index renumbering (the window-cleanup pass
+// kills this way, #1251). A target tmux reports as missing comes back
 // wrapping ErrWindowGone, so a caller can count a window that already closed
 // itself as closed. Kept off the Client interface for the same
 // reason as CurrentSession/IsGroupedSession/NewWindow above: this is a
@@ -168,14 +170,14 @@ func (c *ExecClient) KillWindow(target string) error {
 
 // ErrWindowGone marks a tmux target (window or session) that no longer exists:
 // KillWindow and ListWindowPaneProcs wrap it when tmux's stderr says it cannot
-// find the window or session. Every other tmux failure (no server, a protocol
+// find the window, session or pane. Every other tmux failure (no server, a protocol
 // mismatch, a timeout) stays a plain error so a real problem is never read as
 // "already closed".
 var ErrWindowGone = errors.New("tmux window is gone")
 
 // missingTargetMessages are the tmux stderr texts for a window or session that
 // does not exist (watch/docs/tmux.md).
-var missingTargetMessages = []string{"can't find window", "can't find session"}
+var missingTargetMessages = []string{"can't find window", "can't find session", "can't find pane"}
 
 func isMissingTarget(stderr string) bool {
 	return slices.ContainsFunc(missingTargetMessages, func(m string) bool {

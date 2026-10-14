@@ -590,5 +590,7 @@ func (f *Frontend) WindowInfo(sessionKey string) *frontend.WindowInfo {
 		WindowIndex:   winIdx,
 		WindowName:    winName,
 		ManuallyNamed: ws.ManuallyNamed,
+		RepoDir:       ws.RepoDir,
+		PaneID:        ws.PaneID,
 	}
 }

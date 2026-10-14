@@ -13,6 +13,7 @@ import (
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/frontend"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/ipc"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/reap"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/ticketstate"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/tmux"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/windowproc"
 	"github.com/matteobortolazzo/cenci/watch/v2/pkg/watch"
@@ -107,6 +108,18 @@ type Daemon struct {
 	// this package. Nil (newDaemon's default) must refuse every arm request.
 	armCapable func(agent, workflow string) bool
 
+	// Window-cleanup pass seams and state (#1251); see windowcleanup.go.
+	// cleanupReader is nil (newDaemon's default) so the pass does nothing and
+	// newDaemon-based tests never shell out to gh; installHostSeams installs the
+	// real reader and resolver factory. cleanupInFlight is loop-owned; the worker
+	// reports through cleanupResults, whose capacity of 1 lets it finish without
+	// the loop receiving.
+	cleanupReader      ticketReader
+	newCleanupResolver func() repoResolver
+	cleanupEnabled     func(toplevel string) (bool, error)
+	cleanupInFlight    bool
+	cleanupResults     chan windowCleanupResult
+
 	// armLimiter is hostArmSpawn's mutex-guarded token bucket (armspawn.go),
 	// gating the whole arm path -- before pane/repo resolution, not just the
 	// fork (#1095 Decisions). Its zero value is a full bucket on first use.
@@ -133,21 +146,28 @@ func newDaemon(cfg config.Config, fe frontend.Frontend, events <-chan ipc.HookEv
 			return babysit.BlocksClose(ticket, "", "")
 		},
 		armSpawn: defaultArmSpawn,
+		// cleanupReader stays nil here: installHostSeams installs the real one.
+		cleanupEnabled: ticketstate.CleanupEnabled,
+		cleanupResults: make(chan windowCleanupResult, 1),
 	}
 }
 
 // installHostSeams installs the daemon's real host-side seams, the ones that
 // shell out or signal processes: the babysit-arm resolver/spawn (#1095), its
 // capability predicate (#1215), and the window-process killer (#1253, its
-// diagnostics going to the daemon log). newDaemon leaves them inert -- the arm
-// seam nacks, procKiller is nil -- so newDaemon-based tests never shell out or
-// signal real processes. Run is the only production caller, and
-// TestInstallHostSeams_InstallsTheRealProcessKiller pins that it wires the real
-// killer, so dropping it cannot go unnoticed.
+// diagnostics going to the daemon log), and the window-cleanup pass's ticket
+// reader and resolver factory (#1251). newDaemon leaves them inert -- the arm
+// seam nacks, procKiller and cleanupReader are nil -- so newDaemon-based tests
+// never shell out or signal real processes. Run is the only production caller,
+// and TestInstallHostSeams_InstallsTheRealProcessKiller and
+// TestInstallHostSeams_InstallsTheRealTicketReader pin that it wires the real
+// ones, so dropping either cannot go unnoticed.
 func (d *Daemon) installHostSeams(armCapable func(agent, workflow string) bool) {
 	d.armSpawn = d.hostArmSpawn
 	d.armCapable = armCapable
 	d.procKiller = windowproc.New(log.Writer())
+	d.cleanupReader = &ticketstate.Reader{}
+	d.newCleanupResolver = func() repoResolver { return &ticketstate.Resolver{} }
 }
 
 // runInGoroutine is the production Daemon.runOffLoop: fn runs on its own
@@ -263,6 +283,15 @@ func (d *Daemon) loop(ctx context.Context, attention <-chan ipc.AttentionUpdate)
 		reapC = reapTick.C
 	}
 
+	// Finished-ticket window-cleanup pass (#1251), on its own interval and never
+	// on the sweep tick. A non-positive interval leaves cleanupC nil, as for reapC.
+	var cleanupC <-chan time.Time
+	if d.cfg.WindowCleanupInterval > 0 {
+		cleanupTick := time.NewTicker(d.cfg.WindowCleanupInterval)
+		defer cleanupTick.Stop()
+		cleanupC = cleanupTick.C
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -276,6 +305,10 @@ func (d *Daemon) loop(ctx context.Context, attention <-chan ipc.AttentionUpdate)
 			d.runSweep()
 		case <-reapC:
 			d.triggerReap()
+		case <-cleanupC:
+			d.startWindowCleanup()
+		case res := <-d.cleanupResults:
+			d.applyWindowCleanup(res)
 		case u := <-attention:
 			d.attention = u.Windows
 			d.headroom = u.Headroom

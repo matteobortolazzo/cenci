@@ -52,10 +52,11 @@ const BackgroundHoldTTL = 2 * time.Minute
 
 // RepoDirOption is the tmux window user option `cenci run` writes on every
 // window it spawns (#1250): the absolute directory the window was launched in.
-// The window-cleanup pass (#1251) reads it back to resolve the window's
-// repository. A reader must trust the value only when it is an absolute path
-// to an existing directory; anything else is treated as "repo unknown" and the
-// window is left alone.
+// The tmux frontend reads it once, when the window is first tracked, and
+// exposes it as WindowInfo.RepoDir; the window-cleanup pass (#1251) uses it to
+// resolve the window's repository. A reader must trust the value only when it
+// is an absolute path to an existing directory; anything else is treated as
+// "repo unknown" and the window is left alone.
 const RepoDirOption = "@cenci-repo-dir"
 
 // Key returns the session key used in the daemon's sessions map: the agent
@@ -130,4 +131,13 @@ type WindowInfo struct {
 	WindowIndex   string
 	WindowName    string
 	ManuallyNamed bool
+	// RepoDir is the raw, unvalidated value of the window's RepoDirOption, read
+	// when the window was first tracked ("" when unset or unreadable). Only
+	// ticketstate.Resolver validates it.
+	RepoDir string
+	// PaneID is the tmux pane id (e.g. "%5") of the tracked agent pane. Unlike
+	// Session:WindowIndex it is never reused or shifted while the tmux server
+	// runs, so a deferred kill bound to it cannot land on another window (#1251).
+	// Daemon-internal: it is not copied into the IPC snapshot.
+	PaneID string
 }

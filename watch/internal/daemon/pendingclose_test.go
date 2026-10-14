@@ -15,6 +15,7 @@ import (
 
 	tmuxfe "github.com/matteobortolazzo/cenci/watch/v2/internal/frontend/tmux"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/ipc"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/ticketstate"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/tmux"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/tmux/tmuxtest"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/windowproc"
@@ -711,6 +712,38 @@ func TestInstallHostSeams_InstallsTheRealProcessKiller(t *testing.T) {
 	}
 	if d.armCapable == nil {
 		t.Error("armCapable = nil, want the capability predicate installed")
+	}
+}
+
+// The window-cleanup pass (#1251) is inert until installHostSeams: newDaemon
+// leaves the ticket reader nil so newDaemon-based tests never shell out to gh,
+// and Run's installHostSeams must install the real reader and a real resolver
+// factory (one fresh Resolver per call, never shared across passes), or the
+// production pass would silently do nothing.
+func TestInstallHostSeams_InstallsTheRealTicketReader(t *testing.T) {
+	d := newTestDaemon(babysitTrackedMock())
+	if d.cleanupReader != nil {
+		t.Fatalf("test daemon cleanupReader = %T, want nil so tests never shell out to gh", d.cleanupReader)
+	}
+	if d.cleanupEnabled == nil {
+		t.Error("cleanupEnabled = nil on a newDaemon daemon, want ticketstate.CleanupEnabled as the default")
+	}
+
+	d.installHostSeams(func(agent, workflow string) bool { return true })
+
+	reader, ok := d.cleanupReader.(*ticketstate.Reader)
+	if !ok || reader == nil {
+		t.Fatalf("cleanupReader = %T, want a non-nil *ticketstate.Reader", d.cleanupReader)
+	}
+	if d.newCleanupResolver == nil {
+		t.Fatal("newCleanupResolver = nil, want the real resolver factory installed")
+	}
+	first, ok := d.newCleanupResolver().(*ticketstate.Resolver)
+	if !ok || first == nil {
+		t.Fatalf("newCleanupResolver() = %T, want a non-nil *ticketstate.Resolver", d.newCleanupResolver())
+	}
+	if second := d.newCleanupResolver(); second == repoResolver(first) {
+		t.Error("newCleanupResolver returned the same Resolver twice, want a fresh one per pass (a long-lived one can cache a stale origin)")
 	}
 }
 

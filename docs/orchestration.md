@@ -304,6 +304,15 @@ pending-close, and the daemon closes it itself the moment it observes that sessi
 end — no second `cenci close` invocation (from lazyboards or anything else) is
 required.
 
+The `cleanup` hook only fires while a lazyboards instance is running. The daemon's
+window-cleanup pass is the backstop for when none is: every `-window-cleanup-interval`
+(default `2m`, `0` disables it) it closes the windows of tickets whose issue is closed or
+whose closing PR has merged, under the same busy and babysit guards. It is additive and
+idempotent alongside `cleanup`. A repo opts out with `windowCleanup.enabled: false` in
+`.cenci/config.json`. Windows without a recorded launch checkout, and windows the daemon
+has not seen a hook event from since its last restart, are skipped. See
+[Automatic cleanup of finished tickets](../watch/README.md#automatic-cleanup-of-finished-tickets).
+
 `cenci close` also refuses to kill a window whose ticket is still owned by a live
 `cenci babysit` supervisor unless the supervisor's PR reads fully CI-green —
 including through the deferred pending-close path above, where the daemon re-checks

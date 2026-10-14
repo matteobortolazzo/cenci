@@ -37,6 +37,7 @@ type windowState struct {
 	SessionID             string // agent session ID for correlating events
 	SessionKey            string // daemon core session key owning this window
 	Agent                 string // agent name, if known
+	RepoDir               string // raw @cenci-repo-dir, read once when tracking began ("" when unset)
 }
 
 const symbolPrefix = "#{@cenci-symbol} "
@@ -85,6 +86,14 @@ func (f *Frontend) trackWindow(windowTarget string, paneInfo *tmuxc.PaneInfo, se
 		origCurrentFormat = ""
 	}
 
+	// Record the launch directory `cenci run` wrote. An unset or unreadable
+	// option leaves it empty, which the window-cleanup pass treats as "repo
+	// unknown".
+	repoDir, err := f.client.GetWindowOption(windowTarget, frontend.RepoDirOption)
+	if err != nil {
+		repoDir = ""
+	}
+
 	ws := &windowState{
 		OriginalName:          currentName,
 		OriginalStyle:         origStyle,
@@ -95,6 +104,7 @@ func (f *Frontend) trackWindow(windowTarget string, paneInfo *tmuxc.PaneInfo, se
 		PaneID:                paneInfo.PaneID,
 		SessionID:             sessionID,
 		Agent:                 inferAgent(paneInfo.PaneCurrentCmd),
+		RepoDir:               repoDir,
 	}
 	f.windows[windowTarget] = ws
 
