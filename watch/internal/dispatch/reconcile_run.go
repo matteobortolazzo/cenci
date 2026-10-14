@@ -490,15 +490,16 @@ func applyReconcile(cfg Config, deps reconcileDeps, mut TicketMutator, dryRun bo
 			// Reuses rec.RemoveLabels as-is: the retry/failed/plan-invalid/
 			// resume-interrupted (#853) kinds each remove exactly the one
 			// source label (Working/Planned) the escalation must also
-			// remove. The plan heals (#926) pass through intentionally too,
-			// with a different set: heal A removes nothing (Working is
+			// remove. The plan heals (#926, #1241) pass through intentionally
+			// too, with a different set: heal A removes nothing (Working is
 			// provably absent), so the escalation is +reconcile-stuck with
-			// an empty remove; heal B removes Working and Input Needed, so
-			// the escalated ticket drops Input Needed and becomes terminal
-			// reconcile-stuck (shown under Failed, since the terminal
-			// short-circuit runs first on later passes). Revisit this
-			// passthrough if a future recovery kind needs a different
-			// escalation removal set.
+			// an empty remove; heal C removes nothing either, so Planned
+			// stays and the ticket becomes terminal reconcile-stuck; heal B
+			// removes Working and Input Needed, so the escalated ticket drops
+			// Input Needed and becomes terminal reconcile-stuck (shown under
+			// Failed, since the terminal short-circuit runs first on later
+			// passes). Revisit this passthrough if a future recovery kind
+			// needs a different escalation removal set.
 			RemoveLabels: rec.RemoveLabels,
 			Comment:      reconcileStuckComment(),
 			Detail:       fmt.Sprintf("apply-retry budget (%d) exhausted: %s", cfg.ApplyRetryBudget, rec.Detail),

@@ -1250,16 +1250,22 @@ for a human answer and auto-resumes it once one arrives; see [Escalation
 auto-resume](#escalation-auto-resume) above.
 
 **Plan-driven heal (ticket #926).** A ready plan on disk with the wrong board labels is
-healed from the plan file rather than left stranded. Two shapes converge to `Planned`:
+healed from the plan file rather than left stranded. Three shapes are healed. Two
+converge to `Planned`:
 a `Refined` ticket with neither `Planned` nor `Working` whose matched plan reads
 `status: planned` gets `+Planned`; an `Input Needed` ticket whose matched plan reads
 `status: planned` (a stale escalation left when the draft's promoting `mv` had in fact
-landed) gets `+Planned`, with `Working` and `Input Needed` removed. Both use the same
+landed) gets `+Planned`, with `Working` and `Input Needed` removed. The third (#1241)
+converges to the escalated state: a `Planned` ticket with neither `Working` nor
+`Input Needed` whose matched plan reads `status: awaiting-input` gets `+Input Needed`
+(`Planned` kept) and rejoins the escalated view and auto-resume. All three use the same
 never-act-blind guards as the failure path (verified plan inventory, readable daemon
 snapshot, complete open-PR probe, no live window, no open PR, elapsed `gracePeriod`),
 post a marked comment that never counts as a dispatch attempt, and do not consume
-`retryBudget`. A `Refined` + `Working` ticket keeps the budgeted failure path above, and an
-`Input Needed` ticket whose plan reads `awaiting-input` is untouched. See
+`retryBudget`. A `Refined` + `Working` ticket keeps the budgeted failure path above, a
+`Planned` + `Working` ticket with an `awaiting-input` plan keeps the budgeted
+interrupted-resume path, and an `Input Needed` ticket whose plan reads `awaiting-input`
+is untouched. See
 [`docs/dispatch-reconcile.md`](docs/dispatch-reconcile.md#plan-driven-heal-ticket-926).
 
 Run it two ways:
