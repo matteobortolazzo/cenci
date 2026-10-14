@@ -8,6 +8,7 @@ import (
 	"math"
 	"os/exec"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -44,6 +45,52 @@ type Result struct {
 	Err     error
 }
 
+// Outcome is the closed set of detailed answers to "what happened to this
+// ticket?". OutcomeUnknown is the zero value so an unset Outcome never reads as
+// one that qualifies for removal.
+type Outcome int
+
+const (
+	OutcomeUnknown Outcome = iota
+	OutcomeOpen
+	OutcomeIssueClosed
+	OutcomePRMerged
+	OutcomePRClosedUnmerged
+)
+
+// String names the outcome for logs and test output. A value outside the closed
+// set renders as "Outcome(N)", never as one of the valid names.
+func (o Outcome) String() string {
+	switch o {
+	case OutcomeUnknown:
+		return "Unknown"
+	case OutcomeOpen:
+		return "Open"
+	case OutcomeIssueClosed:
+		return "IssueClosed"
+	case OutcomePRMerged:
+		return "PRMerged"
+	case OutcomePRClosedUnmerged:
+		return "PRClosedUnmerged"
+	default:
+		return fmt.Sprintf("Outcome(%d)", int(o))
+	}
+}
+
+// OutcomeResult is one ticket's detailed outcome. Err is non-nil exactly when
+// Outcome is OutcomeUnknown, so a caller can never act on an outcome without a
+// successful read. Heads holds the validated head SHAs of the merged PR (the
+// number itself, or every merged closing PR of an issue), de-duplicated, and is
+// non-empty exactly when Outcome is OutcomePRMerged. For an issue whose closing-PR
+// list was truncated (more than the 25 fetched), Heads may be a partial set: it is
+// valid only as a positive "this head merged" match, never as the complete set of
+// merged heads.
+type OutcomeResult struct {
+	Outcome Outcome
+	Heads   []string
+	Err     error
+}
+
 // Repo identifies a GitHub repository.
 type Repo struct {
 	Owner string
@@ -56,6 +103,11 @@ const MaxBatch = 50
 // repoPartRE is the shape accepted for a repo owner or name. Both reach gh only
 // as `-f` variables, but a leading dash would still be parsed by gh as a flag.
 var repoPartRE = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+
+// headSHARE is the shape accepted for a head SHA: lowercase hex, 40 (SHA-1) or
+// 64 (SHA-256) characters. A consumer may pass the value to git as an argument,
+// so a leading dash or any other shape must never get through (go-gotchas rule 16).
+var headSHARE = regexp.MustCompile(`^(?:[0-9a-f]{40}|[0-9a-f]{64})$`)
 
 // maxTicketNumber is the largest number sent. GraphQL Int is 32-bit, and an
 // out-of-range literal is an un-aliased coercion error that would fail the
@@ -75,7 +127,58 @@ type Reader struct{}
 // carrying the cause. A whole-call failure errors every number in its batch; a
 // failure tied to a single alias errors only that number.
 func (r *Reader) Read(ctx context.Context, repo Repo, nums []int) map[int]Result {
-	results := make(map[int]Result, len(nums))
+	fetched := fetch(ctx, repo, nums)
+	results := make(map[int]Result, len(fetched))
+	for n, f := range fetched {
+		if f.err != nil {
+			results[n] = Result{Err: f.err}
+			continue
+		}
+		verdict, err := classify(f.raw)
+		if err != nil {
+			results[n] = Result{Err: fmt.Errorf("#%d: %w", n, err)}
+			continue
+		}
+		results[n] = Result{Verdict: verdict}
+	}
+	return results
+}
+
+// ReadOutcomes returns one OutcomeResult per distinct requested number, through
+// the same single query, batching and failure handling as Read. It fails open
+// the same way and more strictly: a removable outcome (issue closed, PR merged,
+// PR closed unmerged) is only ever produced from a successfully decoded, fully
+// recognized node, and any other case is OutcomeUnknown carrying the cause.
+func (r *Reader) ReadOutcomes(ctx context.Context, repo Repo, nums []int) map[int]OutcomeResult {
+	fetched := fetch(ctx, repo, nums)
+	results := make(map[int]OutcomeResult, len(fetched))
+	for n, f := range fetched {
+		if f.err != nil {
+			results[n] = OutcomeResult{Err: f.err}
+			continue
+		}
+		outcome, heads, err := classifyOutcome(f.raw)
+		if err != nil {
+			results[n] = OutcomeResult{Err: fmt.Errorf("#%d: %w", n, err)}
+			continue
+		}
+		results[n] = OutcomeResult{Outcome: outcome, Heads: heads}
+	}
+	return results
+}
+
+// fetchResult is one number's raw alias node, or the reason it could not be read.
+type fetchResult struct {
+	raw json.RawMessage
+	err error
+}
+
+// fetch validates the repo and the numbers, then reads every distinct valid
+// number in batches of at most MaxBatch, one gh call per batch. It returns one
+// entry per distinct requested number; a number that could not be read carries
+// its error and no node.
+func fetch(ctx context.Context, repo Repo, nums []int) map[int]fetchResult {
+	results := make(map[int]fetchResult, len(nums))
 	var valid []int
 	seen := make(map[int]bool, len(nums))
 	for _, n := range nums {
@@ -84,11 +187,11 @@ func (r *Reader) Read(ctx context.Context, repo Repo, nums []int) map[int]Result
 		}
 		seen[n] = true
 		if n <= 0 {
-			results[n] = Result{Err: fmt.Errorf("invalid ticket number %d", n)}
+			results[n] = fetchResult{err: fmt.Errorf("invalid ticket number %d", n)}
 			continue
 		}
 		if n > maxTicketNumber {
-			results[n] = Result{Err: fmt.Errorf("invalid ticket number %d: exceeds GraphQL Int range (max %d)", n, maxTicketNumber)}
+			results[n] = fetchResult{err: fmt.Errorf("invalid ticket number %d: exceeds GraphQL Int range (max %d)", n, maxTicketNumber)}
 			continue
 		}
 		valid = append(valid, n)
@@ -96,7 +199,7 @@ func (r *Reader) Read(ctx context.Context, repo Repo, nums []int) map[int]Result
 
 	if err := validateRepo(repo); err != nil {
 		for _, n := range valid {
-			results[n] = Result{Err: err}
+			results[n] = fetchResult{err: err}
 		}
 		return results
 	}
@@ -132,8 +235,8 @@ func buildQuery(nums []int) string {
 	for _, n := range nums {
 		num := strconv.Itoa(n)
 		b.WriteString(" " + aliasPrefix + num + ": issueOrPullRequest(number:" + num + "){__typename" +
-			" ... on Issue{state closedByPullRequestsReferences(first: 25, includeClosedPrs: true){pageInfo{hasNextPage} nodes{merged}}}" +
-			" ... on PullRequest{state merged}}")
+			" ... on Issue{state closedByPullRequestsReferences(first: 25, includeClosedPrs: true){pageInfo{hasNextPage} nodes{merged headRefOid}}}" +
+			" ... on PullRequest{state merged headRefOid}}")
 	}
 	b.WriteString("}}")
 	return b.String()
@@ -151,13 +254,14 @@ type gqlResponse struct {
 	Errors []gqlError `json:"errors"`
 }
 
-// readChunk makes one gh call for nums and classifies every one of them.
-func readChunk(ctx context.Context, repo Repo, nums []int) map[int]Result {
-	out := make(map[int]Result, len(nums))
-	failAll := func(err error) map[int]Result {
+// readChunk makes one gh call for nums and returns every one of their raw nodes
+// or per-number errors.
+func readChunk(ctx context.Context, repo Repo, nums []int) map[int]fetchResult {
+	out := make(map[int]fetchResult, len(nums))
+	failAll := func(err error) map[int]fetchResult {
 		err = fmt.Errorf("reading ticket state from %s/%s: %w", repo.Owner, repo.Name, err)
 		for _, n := range nums {
-			out[n] = Result{Err: err}
+			out[n] = fetchResult{err: err}
 		}
 		return out
 	}
@@ -206,20 +310,15 @@ func readChunk(ctx context.Context, repo Repo, nums []int) map[int]Result {
 	for _, n := range nums {
 		alias := aliasPrefix + strconv.Itoa(n)
 		if msg, errored := aliasErrs[alias]; errored {
-			out[n] = Result{Err: fmt.Errorf("#%d: %s", n, msg)}
+			out[n] = fetchResult{err: fmt.Errorf("#%d: %s", n, msg)}
 			continue
 		}
 		raw, ok := resp.Data.Repository[alias]
 		if !ok {
-			out[n] = Result{Err: fmt.Errorf("#%d: missing from gh response", n)}
+			out[n] = fetchResult{err: fmt.Errorf("#%d: missing from gh response", n)}
 			continue
 		}
-		verdict, err := classify(raw)
-		if err != nil {
-			out[n] = Result{Err: fmt.Errorf("#%d: %w", n, err)}
-			continue
-		}
-		out[n] = Result{Verdict: verdict}
+		out[n] = fetchResult{raw: raw}
 	}
 	return out
 }
@@ -262,31 +361,43 @@ func errorSuffix(errs []gqlError) string {
 // node is one issueOrPullRequest result. Pointer fields keep an absent or null
 // field distinguishable from a zero value (go-gotchas rules 18 and 23).
 type node struct {
-	Typename *string `json:"__typename"`
-	State    *string `json:"state"`
-	Merged   *bool   `json:"merged"`
-	Closing  *struct {
+	Typename   *string `json:"__typename"`
+	State      *string `json:"state"`
+	Merged     *bool   `json:"merged"`
+	HeadRefOid *string `json:"headRefOid"`
+	Closing    *struct {
 		PageInfo *struct {
 			HasNextPage *bool `json:"hasNextPage"`
 		} `json:"pageInfo"`
 		Nodes []struct {
-			Merged *bool `json:"merged"`
+			Merged     *bool   `json:"merged"`
+			HeadRefOid *string `json:"headRefOid"`
 		} `json:"nodes"`
 	} `json:"closedByPullRequestsReferences"`
+}
+
+// decodeNode decodes one alias node and requires the two fields every
+// classification starts from.
+func decodeNode(raw json.RawMessage) (*node, error) {
+	var n *node
+	if err := json.Unmarshal(raw, &n); err != nil {
+		return nil, fmt.Errorf("decoding node: %w", err)
+	}
+	if n == nil {
+		return nil, errors.New("node is null")
+	}
+	if n.Typename == nil || n.State == nil {
+		return nil, errors.New("node has no __typename or state")
+	}
+	return n, nil
 }
 
 // classify maps one alias node to a verdict. Anything it does not recognise is
 // an error (Unknown), never a benign answer.
 func classify(raw json.RawMessage) (Verdict, error) {
-	var n *node
-	if err := json.Unmarshal(raw, &n); err != nil {
-		return Unknown, fmt.Errorf("decoding node: %w", err)
-	}
-	if n == nil {
-		return Unknown, errors.New("node is null")
-	}
-	if n.Typename == nil || n.State == nil {
-		return Unknown, errors.New("node has no __typename or state")
+	n, err := decodeNode(raw)
+	if err != nil {
+		return Unknown, err
 	}
 
 	switch *n.Typename {
@@ -340,4 +451,118 @@ func classifyOpenIssue(n *node) (Verdict, error) {
 		return Unknown, errors.New("closing-PR list truncated")
 	}
 	return NotFinished, nil
+}
+
+// classifyOutcome maps one alias node to a detailed outcome. It is stricter than
+// classify: it may answer OutcomeUnknown where classify says Finished, but never
+// a removable outcome where classify says NotFinished or Unknown. Anything it
+// does not fully recognise, and any merged node without a valid head SHA, is an
+// error (OutcomeUnknown), never a benign answer.
+func classifyOutcome(raw json.RawMessage) (Outcome, []string, error) {
+	n, err := decodeNode(raw)
+	if err != nil {
+		return OutcomeUnknown, nil, err
+	}
+
+	switch *n.Typename {
+	case "Issue":
+		return classifyIssueOutcome(n)
+	case "PullRequest":
+		return classifyPROutcome(n)
+	default:
+		return OutcomeUnknown, nil, fmt.Errorf("unrecognized __typename %q", *n.Typename)
+	}
+}
+
+// classifyPROutcome: a merged PR (merged flag or MERGED state) carries its own
+// head SHA. A CLOSED PR is only "closed unmerged" when the merged flag is
+// explicitly false; a null or missing flag cannot prove it.
+func classifyPROutcome(n *node) (Outcome, []string, error) {
+	state := *n.State
+	switch state {
+	case "OPEN", "CLOSED", "MERGED":
+	default:
+		return OutcomeUnknown, nil, fmt.Errorf("unrecognized %s state %q", *n.Typename, state)
+	}
+
+	if state == "MERGED" || (n.Merged != nil && *n.Merged) {
+		head, err := validHead(n.HeadRefOid)
+		if err != nil {
+			return OutcomeUnknown, nil, fmt.Errorf("merged PR: %w", err)
+		}
+		return OutcomePRMerged, []string{head}, nil
+	}
+	if state == "OPEN" {
+		return OutcomeOpen, nil, nil
+	}
+	if n.Merged == nil {
+		return OutcomeUnknown, nil, errors.New("closed PR has no merged flag")
+	}
+	return OutcomePRClosedUnmerged, nil, nil
+}
+
+// classifyIssueOutcome: any merged closing PR makes the issue "PR merged", even
+// when the list is truncated, since a merge anywhere settles it; the heads of a
+// truncated list are then partial, and a head that was not fetched can only make
+// a consumer keep more. A merged entry whose own SHA is missing or malformed is
+// different: it makes the whole number an error (OutcomeUnknown), never a merge
+// with a partial head set. Without a merge, a truncated or incomplete list cannot
+// prove "closed" or "open" and is an error: that includes an absent or null nodes
+// list and any entry that is null or lacks a merged flag.
+func classifyIssueOutcome(n *node) (Outcome, []string, error) {
+	state := *n.State
+	switch state {
+	case "OPEN", "CLOSED":
+	default:
+		return OutcomeUnknown, nil, fmt.Errorf("unrecognized %s state %q", *n.Typename, state)
+	}
+	if n.Closing == nil || n.Closing.PageInfo == nil || n.Closing.PageInfo.HasNextPage == nil {
+		return OutcomeUnknown, nil, fmt.Errorf("%s issue has no closing-PR pagination info", strings.ToLower(state))
+	}
+
+	var heads []string
+	incomplete := n.Closing.Nodes == nil
+	for _, pr := range n.Closing.Nodes {
+		if pr.Merged == nil {
+			// A null entry decodes to the zero value, so it lands here too.
+			incomplete = true
+			continue
+		}
+		if !*pr.Merged {
+			continue
+		}
+		head, err := validHead(pr.HeadRefOid)
+		if err != nil {
+			return OutcomeUnknown, nil, fmt.Errorf("merged closing PR: %w", err)
+		}
+		if !slices.Contains(heads, head) {
+			heads = append(heads, head)
+		}
+	}
+	if len(heads) > 0 {
+		return OutcomePRMerged, heads, nil
+	}
+	if incomplete {
+		return OutcomeUnknown, nil, fmt.Errorf("%s issue has a missing or malformed closing-PR nodes list", strings.ToLower(state))
+	}
+	if *n.Closing.PageInfo.HasNextPage {
+		return OutcomeUnknown, nil, errors.New("closing-PR list truncated")
+	}
+	if state == "CLOSED" {
+		return OutcomeIssueClosed, nil, nil
+	}
+	return OutcomeOpen, nil, nil
+}
+
+// validHead returns the head SHA only when it is present and well-formed, so a
+// value that later reaches git as an argument can never be a flag or a ref. The
+// rejected value is never echoed: it is outside text.
+func validHead(head *string) (string, error) {
+	if head == nil {
+		return "", errors.New("no head SHA")
+	}
+	if !headSHARE.MatchString(*head) {
+		return "", errors.New("malformed head SHA")
+	}
+	return *head, nil
 }
