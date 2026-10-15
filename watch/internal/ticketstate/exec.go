@@ -1,8 +1,11 @@
 // Package ticketstate answers "is this ticket's work over?" for a batch of
 // ticket numbers in one repository, resolves a recorded launch directory to
 // its git toplevel and owner/name, and reads the per-repo windowCleanup
-// opt-out (#1250). It is a leaf package: it must not import internal/dispatch,
-// internal/run or internal/daemon.
+// opt-out (#1250). The same single query also yields a detailed outcome per
+// number (open, issue closed, PR merged with its head SHAs, PR closed
+// unmerged), and the worktreeCleanup config reader returns the worktree-cleanup
+// enabled flag and staleAfter (#1263). It is a leaf package: it must not import
+// internal/dispatch, internal/run or internal/daemon.
 package ticketstate
 
 import (
