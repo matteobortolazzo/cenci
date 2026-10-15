@@ -217,8 +217,12 @@ SECTION_HEADING='### Autonomy Settings'
 Q13_MARKER='13. **Plan approval autonomy**'
 Q14_MARKER='14. **Automerge policy block**'
 
-# Absent-only rule, stated once and scoped to both keys.
-ABSENT_ONLY_RULE='When `planning` or `automerge` is already present, report the existing value verbatim, never re-prompt, never narrow, and never remove it.'
+# Absent-only rule, stated once and scoped to both keys. Ticket #1246 scopes
+# it to a delta run (the default re-run mode): `--all` re-offers both
+# questions (see flow/tests/configure-delta-rerun.test.sh), so the old
+# unconditional wording is retired (paired-absence check below).
+ABSENT_ONLY_RULE='On a delta run, when `planning` or `automerge` is already present, report the existing value verbatim, never re-prompt, never narrow, and never remove it.'
+OLD_UNCONDITIONAL_ABSENT_ONLY_RULE='When `planning` or `automerge` is already present, report the existing value verbatim, never re-prompt, never narrow, and never remove it.'
 
 # Presence detection — `automerge` explicitly covers projects[] (monorepo
 # automerge can be per-project only; this repo itself has no top-level
@@ -297,7 +301,8 @@ BABYSIT_NO_QUESTION_CLAIM='`babysitInterval` is an optional field — there is *
 
 # codex.md parity paragraph.
 CODEX_AUTONOMY_HEADING_MIRROR_MARKER='Autonomy Settings mirrors the Claude procedure'"'"'s `### Autonomy Settings` section'
-CODEX_AUTONOMY_ABSENT_ONLY_MARKER='asks about `planning` and `automerge` only when absent'
+CODEX_AUTONOMY_ABSENT_ONLY_MARKER='on a delta run asks about `planning` and `automerge` only when absent and not already offered'
+OLD_CODEX_AUTONOMY_UNCONDITIONAL_MARKER='asks about `planning` and `automerge` only when absent — an already-present value'
 CODEX_AUTONOMY_CONSERVATIVE_DEFAULT_MARKER='defaults both offers to the conservative answer — `interactive` for planning, no automerge block'
 CODEX_AUTONOMY_PLAN_MODE_MARKER='both keys land in the apply step'"'"'s config write, never during `/plan`'
 
@@ -306,8 +311,12 @@ CODEX_AUTONOMY_PLAN_MODE_MARKER='both keys land in the apply step'"'"'s config w
 AUTONOMOUS_LOOP_SECTION3_HEADING='### 3. Declare what a merge is allowed to touch'
 AUTONOMOUS_LOOP_SECTION1_HEADING='### 1. Let plans approve themselves'
 OLD_AUTOMERGE_DOC_CLAIM='`/cenci:configure` never writes or removes this block — it'"'"'s a hand-edited escape hatch that survives reconfiguration untouched.'
-NEW_AUTOMERGE_DOC_CLAIM='`/cenci:configure` offers to scaffold this block only when `automerge` is absent — an existing block is reported verbatim and never re-prompted, narrowed, or removed.'
-NEW_PLANNING_DOC_CLAIM='`/cenci:configure` offers `planning.autonomy` when the key is absent, defaulting to `interactive`.'
+# Ticket #1246 delta-scopes both claims (the `--all` re-offer and Q14's
+# "Remove the block(s)" option are pinned in configure-delta-rerun.test.sh).
+NEW_AUTOMERGE_DOC_CLAIM='`/cenci:configure` offers to scaffold this block on a delta run only when `automerge` is absent and has not been offered before — an existing block is reported verbatim and never re-prompted, narrowed, or removed.'
+NEW_PLANNING_DOC_CLAIM='`/cenci:configure` offers `planning.autonomy` on a delta run when the key is absent and has not been offered before, defaulting to `interactive`; `/cenci:configure --all` re-offers it with the committed value pre-selected.'
+OLD_UNCONDITIONAL_AUTOMERGE_DOC_CLAIM='`/cenci:configure` offers to scaffold this block only when `automerge` is absent — an existing block is reported verbatim and never re-prompted, narrowed, or removed.'
+OLD_UNCONDITIONAL_PLANNING_DOC_CLAIM='`/cenci:configure` offers `planning.autonomy` when the key is absent, defaulting to `interactive`.'
 
 # --- skills/configure/SKILL.md ----------------------------------------------
 
@@ -321,6 +330,7 @@ if [[ -n "${skill}" ]]; then
 
   # Absent-only rule + projects[]-aware presence detection.
   assert_contains_ws "${skill}" "${ABSENT_ONLY_RULE}" "SKILL.md absent-only rule (never re-prompt/narrow/remove)"
+  assert_absent_paired_ws "${skill}" "${ABSENT_ONLY_RULE}" "${OLD_UNCONDITIONAL_ABSENT_ONLY_RULE}" "SKILL.md retired unconditional absent-only rule (now delta-scoped, #1246)"
   assert_contains_ws "${skill}" "${PLANNING_PRESENCE_MARKER}" "SKILL.md planning presence detection"
   assert_contains_ws "${skill}" "${AUTOMERGE_PRESENCE_MARKER}" "SKILL.md automerge presence detection covers projects[]"
 
@@ -414,7 +424,8 @@ fi
 require_doc codex "skills/configure/codex.md" || true
 if [[ -n "${codex}" ]]; then
   assert_contains_ws "${codex}" "${CODEX_AUTONOMY_HEADING_MIRROR_MARKER}" "codex.md Autonomy Settings parity paragraph mirrors the Claude section"
-  assert_contains_ws "${codex}" "${CODEX_AUTONOMY_ABSENT_ONLY_MARKER}" "codex.md Autonomy Settings parity paragraph states the absent-only rule"
+  assert_contains_ws "${codex}" "${CODEX_AUTONOMY_ABSENT_ONLY_MARKER}" "codex.md Autonomy Settings parity paragraph states the delta-scoped absent-only rule"
+  assert_absent_paired_ws "${codex}" "${CODEX_AUTONOMY_ABSENT_ONLY_MARKER}" "${OLD_CODEX_AUTONOMY_UNCONDITIONAL_MARKER}" "codex.md retired unconditional absent-only claim (now delta-scoped, #1246)"
   assert_contains_ws "${codex}" "${CODEX_AUTONOMY_CONSERVATIVE_DEFAULT_MARKER}" "codex.md Autonomy Settings parity paragraph states conservative defaults"
   assert_contains_ws "${codex}" "${CODEX_AUTONOMY_PLAN_MODE_MARKER}" "codex.md Autonomy Settings parity paragraph states the apply-step-only / never-during-plan rule"
 fi
@@ -428,11 +439,13 @@ if [[ -n "${loop_doc}" ]]; then
   assert_absent_paired_ws "${loop_doc}" "${AUTONOMOUS_LOOP_SECTION3_HEADING}" "${OLD_AUTOMERGE_DOC_CLAIM}" "docs/autonomous-loop.md stale automerge never-writes-or-removes claim removed"
 
   # §3: new offer-when-absent sentence present.
-  assert_contains_ws "${loop_doc}" "${NEW_AUTOMERGE_DOC_CLAIM}" "docs/autonomous-loop.md new automerge offer-when-absent sentence"
+  assert_contains_ws "${loop_doc}" "${NEW_AUTOMERGE_DOC_CLAIM}" "docs/autonomous-loop.md new delta-scoped automerge offer-when-absent sentence"
+  assert_absent_paired_ws "${loop_doc}" "${NEW_AUTOMERGE_DOC_CLAIM}" "${OLD_UNCONDITIONAL_AUTOMERGE_DOC_CLAIM}" "docs/autonomous-loop.md retired unconditional automerge offer-when-absent sentence (#1246)"
+  assert_absent_paired_ws "${loop_doc}" "${NEW_PLANNING_DOC_CLAIM}" "${OLD_UNCONDITIONAL_PLANNING_DOC_CLAIM}" "docs/autonomous-loop.md retired unconditional planning offer-when-absent sentence (#1246)"
 
   # §1: new one-line pointer that configure offers planning.autonomy when
   # absent, defaulting to interactive.
-  assert_contains_ws "${loop_doc}" "${NEW_PLANNING_DOC_CLAIM}" "docs/autonomous-loop.md new planning.autonomy offer-when-absent pointer in section 1"
+  assert_contains_ws "${loop_doc}" "${NEW_PLANNING_DOC_CLAIM}" "docs/autonomous-loop.md new delta-scoped planning.autonomy offer-when-absent pointer in section 1"
 
   # Sanity: section 1 heading itself must still exist, or the pointer above
   # would be floating free of its documented location.

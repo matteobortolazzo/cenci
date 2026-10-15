@@ -71,9 +71,11 @@ safety properties, not skill authoring generally.
 - When prose claims a generated artifact is "drawn from," "based on," or "sourced from" another location (e.g., a starter config "seeded from the implement skill's backstop default pattern list"), verify complete fidelity by exhaustively comparing the artifact against the source — not by sampling or spot-checking. Test assertions claiming full coverage must validate every element in the claimed source set, not a representative sample. A narrowed scaffold that samples from the source yet claims comprehensive derivation is a silent correctness gap, only detectable by independent review counting all elements. During PR review, verify that both the generated artifact and its test suite fully reflect the claimed source.
 - Marker-based "merge-safe" regeneration (`# tool:managed-begin` / `# tool:managed-end`)
   must define behavior for malformed marker states too (one marker only, out-of-order,
-  duplicate pairs), not just "both present" and "no markers" — route them through the
-  same manual Overwrite/Skip/Show conflict prompt used for "no markers," never guess a
-  replacement span.
+  duplicate pairs), not just "both present" and "no markers". When a user can answer,
+  route them through the same manual Overwrite/Skip/Show conflict prompt used for
+  "no markers" and never guess a replacement span. On an unattended or delta run with
+  no one to answer a prompt, leave the file untouched and report it — still never guess
+  a replacement span.
 - When resolving an ambiguous choice among multiple candidates read from a shared file
   (e.g. several plugin entries matching a lookup key), never silently pick the first
   match — use a deterministic tie-break rule (e.g. highest semver) and surface which
