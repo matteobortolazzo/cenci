@@ -392,11 +392,61 @@ func TestRunReconcilePlanHealInputNeeded_EditRemovesBothLabels(t *testing.T) {
 	}
 }
 
+// TestRunReconcilePlanHealPlanned_AppliesAddInputNeededEditAndMarkedComment
+// covers heal C end to end: a Planned ticket whose plan reads awaiting-input
+// gets exactly one label edit adding Input Needed and removing nothing,
+// followed by one comment carrying planHealMarker (never attemptMarker). The
+// call order is exactly edit then comment, which also proves zero EnsureLabels
+// calls (Input Needed is not a cenci-managed label).
+func TestRunReconcilePlanHealPlanned_AppliesAddInputNeededEditAndMarkedComment(t *testing.T) {
+	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+	deps := planHealDeps(now, "bug", "Refined", "Planned")
+	deps.Plans = awaitingInputPlans()
+	mut := &fakeMutator{}
+	store := &memStore{state: ReconcileState{Observations: map[string]time.Time{"o/r#42": now.Add(-10 * time.Minute)}}}
+
+	res, err := applyReconcile(reconcileConfig(), deps, mut, false, nil, store)
+	if err != nil {
+		t.Fatalf("applyReconcile returned unexpected error: %v", err)
+	}
+
+	if len(mut.labelEdits) != 1 {
+		t.Fatalf("expected 1 label edit, got %+v", mut.labelEdits)
+	}
+	e := mut.labelEdits[0]
+	if e.number != 42 || !slices.Equal(e.add, []string{labelInputNeeded}) || len(e.remove) != 0 {
+		t.Errorf("label edit = %+v, want add=[%s] remove=[]", e, labelInputNeeded)
+	}
+	if len(mut.comments) != 1 || mut.comments[0].number != 42 {
+		t.Fatalf("expected 1 comment on #42, got %+v", mut.comments)
+	}
+	if !strings.Contains(mut.comments[0].body, planHealMarker) || strings.Contains(mut.comments[0].body, attemptMarker) {
+		t.Errorf("heal comment must carry %q and not %q, got %q", planHealMarker, attemptMarker, mut.comments[0].body)
+	}
+	if want := []string{"edit", "comment"}; !slices.Equal(mut.callOrder, want) {
+		t.Errorf("call order = %v, want exactly %v (label edit, then the marked comment, no EnsureLabels)", mut.callOrder, want)
+	}
+	if hasFailed(res, "o/r", 42) {
+		t.Error("a healed ticket must not be surfaced in Failed")
+	}
+	if _, ok := store.state.Observations["o/r#42"]; ok {
+		t.Error("the grace observation must be cleared once the heal lands")
+	}
+}
+
 // driveHealToEscalation runs the plan heal for #42 (carrying labels) through
 // escalatingMutator until the apply-retry budget is spent, and returns the
 // reconcile-stuck label edit it produced (fatal if none), the last pass's
 // result and error, and the store.
 func driveHealToEscalation(t *testing.T, labels ...string) (labelEdit, ReconcileResult, *memStore, error) {
+	t.Helper()
+	return driveHealToEscalationWithPlans(t, nil, labels...)
+}
+
+// driveHealToEscalationWithPlans is driveHealToEscalation with the deps' plans
+// overridden (nil keeps planHealDeps' status: planned plan), so a heal keyed on
+// another plan status -- heal C's awaiting-input -- can be driven the same way.
+func driveHealToEscalationWithPlans(t *testing.T, plans []Plan, labels ...string) (labelEdit, ReconcileResult, *memStore, error) {
 	t.Helper()
 	cfg := reconcileConfig()
 	cfg.ApplyRetryBudget = 3
@@ -404,6 +454,9 @@ func driveHealToEscalation(t *testing.T, labels ...string) (labelEdit, Reconcile
 	start := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
 	store := &memStore{state: ReconcileState{Observations: map[string]time.Time{"o/r#42": start.Add(-10 * time.Minute)}}}
 	deps := planHealDeps(start, labels...)
+	if plans != nil {
+		deps.Plans = plans
+	}
 
 	var res ReconcileResult
 	var lastErr error
@@ -427,6 +480,28 @@ func driveHealToEscalation(t *testing.T, labels ...string) (labelEdit, Reconcile
 // rec.RemoveLabels) must add reconcile-stuck with an empty remove set.
 func TestApplyReconcilePlanHealRefined_EscalatesToReconcileStuckWithEmptyRemove(t *testing.T) {
 	escalation, res, store, lastErr := driveHealToEscalation(t, "Refined")
+
+	if lastErr != nil {
+		t.Errorf("the escalating pass must not surface an error once reconcile-stuck is applied: %v", lastErr)
+	}
+	if !slices.Equal(escalation.add, []string{labelReconcileStuck}) || len(escalation.remove) != 0 {
+		t.Errorf("escalation edit = %+v, want add=[%s] remove=[]", escalation, labelReconcileStuck)
+	}
+	if !hasFailed(res, "o/r", 42) {
+		t.Error("an escalated ticket must be surfaced in Failed")
+	}
+	if _, ok := store.state.Observations["o/r#42"]; ok {
+		t.Error("the grace observation must be dropped once escalation succeeds")
+	}
+}
+
+// TestApplyReconcilePlanHealPlanned_EscalatesToReconcileStuckWithEmptyRemove
+// drives heal C through escalatingMutator until the apply-retry budget is
+// spent. Heal C removes nothing, so the escalation (which reuses
+// rec.RemoveLabels) must add reconcile-stuck with an empty remove set -- the
+// ticket keeps Planned and becomes terminal.
+func TestApplyReconcilePlanHealPlanned_EscalatesToReconcileStuckWithEmptyRemove(t *testing.T) {
+	escalation, res, store, lastErr := driveHealToEscalationWithPlans(t, awaitingInputPlans(), "bug", "Refined", "Planned")
 
 	if lastErr != nil {
 		t.Errorf("the escalating pass must not surface an error once reconcile-stuck is applied: %v", lastErr)

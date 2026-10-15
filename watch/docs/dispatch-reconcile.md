@@ -79,7 +79,7 @@ stays resumable on the very next pass without waiting on the grace period.
 
 `Reconcile`'s `hasLiveWindow(...) || t.HasOpenPR` label-mutation sites (the
 `Input Needed` + `Working` crash-cleanup branch, the ordinary failure path,
-and the two plan-driven heals added by ticket #926) all additionally guard on
+and the plan-driven heals: #926 A/B, #1241 C) all additionally guard on
 `t.OpenPRProbe`, mirroring the existing blind `in.Snapshot == nil` guard's
 shape immediately above each: a non-complete probe means `t.HasOpenPR` could
 not actually be proven false this pass, so no site may mutate a
@@ -105,8 +105,8 @@ before ticket #881 whenever the probe is complete.
 `deferObservation(observations, next, key)` (`reconcile.go`) is the shared
 helper every "must not act on unverified/blind input" guard in `Reconcile`
 calls — the nil-snapshot guard, this section's non-complete-open-PR-probe
-guard (both sites), and the inverse-leak branch's plan-probe-error guard —
-so the "preserve the pending grace observation, no `Recovery`, `continue`"
+guard (both sites), the inverse-leak branch's plan-probe-error guard, and
+plan heals A and C's guards — so the "preserve the pending grace observation, no `Recovery`, `continue`"
 shape stays byte-identical across every guard site instead of being
 hand-duplicated per guard.
 
@@ -115,11 +115,12 @@ hand-duplicated per guard.
 A ticket whose plan file already reads `status: planned` but whose board labels
 never caught up was invisible to the reconciler: the failure path requires
 `Working`, the inverse-leak branch requires `Planned`, and `Decide` skips a
-`Refined` ticket without `Planned` as "not Planned". `Reconcile` now has two
-plan-file-driven heals, both emitting `Kind: RecoveryRetry` with `Attempt: 0`
-and a `planHealComment()` body, told apart from the ordinary retry (and from each
-other) only by `Detail`: `plan heal (Refined): ...` and `plan heal (Input
-Needed): ...`.
+`Refined` ticket without `Planned` as "not Planned". `Reconcile` now has three
+plan-file-driven heals, all emitting `Kind: RecoveryRetry` with `Attempt: 0`,
+told apart from the ordinary retry (and from each other) only by `Detail`:
+`plan heal (Refined): ...`, `plan heal (Input Needed): ...` and `plan heal
+(Planned): ...`. Heals A and B post a `planHealComment()` body; heal C (#1241)
+posts `planHealAwaitingInputComment()`.
 
 **Heal A, the `Refined` entry path.** Predicate: carries `Refined`, carries
 neither `Planned` nor `Working`, and has a matched plan with `Status ==
@@ -146,25 +147,28 @@ whether the heal fires or a guard defers it. An `Input Needed` ticket whose plan
 reads `awaiting-input`, or with no matched plan, is untouched and records no
 observation.
 
-**Guards, in order** (both heals): verified plan inventory, `in.Snapshot !=
+**Guards, in order** (all three heals): verified plan inventory, `in.Snapshot !=
 nil`, `OpenPRProbe == OpenPRProbeComplete`, no live window and no open PR, then
 an elapsed `GracePeriod` observation. A new ticket always defers on its first pass
 (rule 5). Heal B's inventory check is inline and load-bearing: its branch runs
 upstream of the top-level plan-inventory hold, so a matched plan under a
-`Partial` inventory is reachable there. Heal A's is defense-in-depth behind the
-top-level hold.
+`Partial` inventory is reachable there. Heals A's and C's are defense-in-depth
+behind the top-level hold.
 
 **The live-window difference.** The unverified-signal guards (inventory,
-snapshot, probe) defer via `deferObservation` in both heals. A live window or open
-PR differs: heal A also defers (keeps the pending grace observation), while heal B
-does a plain `continue` that drops it, copying the `Input Needed` branch's
-existing stray-`Working` cleanup. Grace-not-elapsed keeps `firstSeen` in both.
+snapshot, probe) defer via `deferObservation` in all three heals. A live window or
+open PR differs: heals A and C also defer (keep the pending grace observation),
+while heal B does a plain `continue` that drops it, copying the `Input Needed`
+branch's existing stray-`Working` cleanup. Grace-not-elapsed keeps `firstSeen` in
+all three.
 
-**Why budget-free.** A heal is label convergence toward a plan that is already
-ready, not a retry of failed work, so it never consumes `RetryBudget`. It cannot
-loop: once `+Planned` lands the ticket no longer matches heal A (and heal B no
-longer sees `Input Needed`), and a later crash lands in the budgeted failure path,
-which still terminates at `dispatch-failed`.
+**Why budget-free.** A heal is label convergence toward a plan file whose state
+the board has not caught up with, not a retry of failed work, so it never consumes
+`RetryBudget`. It cannot loop: once `+Planned` lands the ticket no longer matches
+heal A (and heal B no longer sees `Input Needed`), and a later crash lands in the
+budgeted failure path, which still terminates at `dispatch-failed`. Heal C cannot
+loop either: once `+Input Needed` lands, the `Input Needed` branch owns the ticket
+and it no longer matches heal C.
 
 **Why heal B supersedes the stray-`Working` cleanup.** It is evaluated first, and
 when it fires the cleanup never runs: the cleanup would remove `Working` and leave
@@ -178,13 +182,36 @@ and it carries the `<!-- cenci-` prefix so the escalation answer classifier neve
 mistakes it for a human reply. The runner's escalation passthrough reuses
 `rec.RemoveLabels` as-is: an exhausted apply of heal A becomes `+reconcile-stuck`
 with an empty remove; heal B drops `Working` and `Input Needed` and becomes
-terminal `reconcile-stuck`.
+terminal `reconcile-stuck`; heal C, like heal A, removes nothing, so `Planned`
+stays and the ticket becomes terminal `reconcile-stuck`.
 
-**Out of scope: the mirror drift.** A ticket carrying `Planned` whose matched plan
-reads `awaiting-input` is stranded the same way (`Decide` skips it on the plan
-status) but is not healed here; it is tracked as a separate `Followup` ticket.
-`Decide` is also deliberately unchanged: it must not dispatch off a plan file
-directly, since that would race the reconciler.
+**Heal C, the `Planned` entry path (#1241).** The mirror of heal A and B.
+Predicate: carries `Planned`, carries neither `Working` nor `Input Needed` (nor a
+terminal label), and has a matched plan with `Status == "awaiting-input"` (no
+`Refined` requirement). `Decide` skips such a ticket as "plan not ready", and
+without `Input Needed` the `resuming` path is never taken; the inverse-leak branch
+`continue`d on any matched plan, so nothing claimed it. It lives inside the
+inverse-leak branch's matched-plan block, before its `continue`. Action:
+`+Input Needed`, `Planned` kept, no `RemoveLabels` (the shape
+`--transition input-needed` natively produces for a re-planned ticket), with a
+`planHealAwaitingInputComment()` body. Guards: the same order as the other heals,
+all via `deferObservation` (inventory is defense-in-depth behind the top-level
+hold). Budget-free: a heal is label convergence, so it posts `planHealMarker`,
+leaves `Attempt` at zero and never consumes `RetryBudget`.
+
+It cannot loop: once `Input Needed` lands, the `Input Needed` branch owns the
+ticket. On the next pass it is recorded in `Escalated` (not `Failed`), and
+dispatch auto-resume picks it up once a human answers, under its existing anchor
+and permission gates. A `Planned` + `Working` ticket with an `awaiting-input` plan
+never reaches this branch and keeps the budgeted interrupted-resume path.
+
+Human dismissal: if a human removes `Input Needed` again while the draft still
+reads `awaiting-input`, the heal re-adds it after another grace period. This is
+documented, not gated. The ways out are to answer the escalation, delete or
+replace the draft, or remove `Planned`.
+
+`Decide` is deliberately unchanged: it must not dispatch off a plan file directly,
+since that would race the reconciler.
 
 **Pipeline stage after heal B.** After a successful HS-R12 `mv` the pipeline stage
 may still read `waiting_for_input`. `stageGateSkip` does not gate that stage, so
