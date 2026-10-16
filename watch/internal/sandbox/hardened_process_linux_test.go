@@ -42,7 +42,7 @@ func TestHardenedProcessHelper(t *testing.T) {
 			if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 				panic(err)
 			}
-			defer f.Close()
+			defer func() { _ = f.Close() }()
 		}
 		fmt.Println(os.Getpid())
 		_, _ = io.Copy(io.Discard, os.Stdin)
@@ -68,7 +68,7 @@ func TestCloseHardenedLaunchReleasesConversationLock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer lock.Close()
+	defer func() { _ = lock.Close() }()
 	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != syscall.EWOULDBLOCK {
 		t.Fatalf("fixture must hold the conversation lock before cleanup: %v", err)
 	}
