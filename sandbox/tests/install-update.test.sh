@@ -10,12 +10,9 @@
 #   2. installed_plugin_version <claude|codex> <plugin> must report the
 #      client's authoritative active-install state (#492) — Claude's
 #      ~/.claude/plugins/installed_plugins.json, Codex's `plugin list --json`
-#      — not a guess derived from plugin-cache manifest mtimes. The
-#      cache-mtime machinery (newest_cenci_root/current_cenci_binary) stays
-#      in place for binary/asset resolution, which is explicitly out of scope
-#      for #492; the authoritative-state fixtures below deliberately keep
-#      cache mtimes static or misleading so they can't accidentally make the
-#      old heuristic pass.
+#      — not a guess derived from plugin-cache manifest mtimes. Binary
+#      selection must agree with that state even when cache timestamps tie
+#      or point at an inactive version.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -33,7 +30,7 @@ trap cleanup EXIT
 make_tools() {
     local bin="$1" tool
     mkdir -p "${bin}"
-    for tool in bash cat touch uname grep git mkdir dirname ln readlink sleep nohup chmod sed head rm mv jq; do
+    for tool in bash cat touch uname grep git mkdir dirname ln readlink sleep nohup chmod sed head tail sort rm mv jq; do
         ln -s "$(command -v "${tool}")" "${bin}/${tool}"
     done
     cat >"${bin}/docker" <<'EOF'
@@ -331,12 +328,9 @@ assert_not_leaked() {
 # ---------------------------------------------------------------------------
 # Authoritative-state fixtures (#492): installed_plugin_version <claude|codex>
 # <plugin> must report the client's authoritative active-install state, not a
-# guess derived from plugin-cache manifest mtimes. newest_cenci_root /
-# current_cenci_binary (binary/asset resolution) stay cache-mtime based —
-# explicitly out of scope for this ticket — so every fixture below still
-# seeds a working version-pinned cenci-watch cache purely so the update can
-# reach daemon restart, but never relies on that cache's mtime to prove a
-# version-reporting assertion.
+# guess derived from plugin-cache manifest mtimes. The transition cases also
+# assert the resulting host launcher so version reporting cannot mask a
+# stale binary selection.
 # ---------------------------------------------------------------------------
 
 # new_layout <name> <client> [jq=yes|no] provisions a fresh fake HOME + mock
@@ -562,7 +556,7 @@ if ! grep -qx "daemon" "${LAYOUT_CALL_LOG}"; then
     cat "${LAYOUT_CALL_LOG}" >&2
     exit 1
 fi
-if ! grep -q "restarted cenci with the updated binary" "${WORK}/last-output"; then
+if ! grep -q "restarted cenci with the selected binary" "${WORK}/last-output"; then
     echo "FAIL: expected the fallback restart to report success" >&2
     cat "${WORK}/last-output" >&2
     exit 1
@@ -692,6 +686,10 @@ if ! grep -q 'Claude: cenci-watch 1.0.0 → 2.0.0' "${WORK}/last-output"; then
     cat "${WORK}/last-output" >&2
     exit 1
 fi
+if [[ "$(readlink "${LAYOUT_HOME}/.local/bin/cenci")" != "${CACHE_DIR}/2.0.0/bin/cenci" ]]; then
+    echo "FAIL: update reported 2.0.0 but linked the old Claude binary" >&2
+    exit 1
+fi
 # This layout's plugin list reports only cenci-watch. Reconciliation must add
 # both missing components instead of treating update as a no-op for
 # partially-installed stacks.
@@ -702,9 +700,12 @@ if ! grep -q 'Claude: cenci installed$' "${WORK}/last-output" || \
     exit 1
 fi
 
-echo "case: Codex real transition — authoritative state moves 1.0.0 -> 2.0.0 while the version-pinned cache stays untouched (#492 regression 2)"
+echo "case: Codex real transition — authoritative state and linked binary move 1.0.0 -> 2.0.0 despite tied cache timestamps"
 new_layout codex-transition codex
 seed_watch_cache "${LAYOUT_HOME}" codex 1.0.0
+seed_watch_cache "${LAYOUT_HOME}" codex 2.0.0
+CACHE_DIR="$(watch_cache_dir "${LAYOUT_HOME}" codex)"
+touch -r "${CACHE_DIR}/1.0.0/.codex-plugin/plugin.json" "${CACHE_DIR}/2.0.0/.codex-plugin/plugin.json"
 STATE_FILE="${WORK}/codex-transition/codex-state.json"
 printf '%s\n' "$(codex_state_json "cenci-watch@cenci=1.0.0")" >"${STATE_FILE}"
 ADD_CASES=$(cat <<CASE_EOF
@@ -719,6 +720,64 @@ run_update
 if ! grep -q 'Codex: cenci-watch 1.0.0 → 2.0.0' "${WORK}/last-output"; then
     echo "FAIL: expected 'Codex: cenci-watch 1.0.0 → 2.0.0' in the update output" >&2
     cat "${WORK}/last-output" >&2
+    exit 1
+fi
+if [[ "$(readlink "${LAYOUT_HOME}/.local/bin/cenci")" != "${CACHE_DIR}/2.0.0/bin/cenci" ]]; then
+    echo "FAIL: update reported 2.0.0 but linked the old Codex binary" >&2
+    exit 1
+fi
+
+echo "case: dual-client update uses the newer active version, ignoring foreign and inactive caches"
+new_layout dual-active claude
+seed_watch_cache "${LAYOUT_HOME}" claude 2.9.0
+seed_watch_cache "${LAYOUT_HOME}" codex 2.10.0
+seed_watch_cache "${LAYOUT_HOME}" codex 9.0.0
+META="$(claude_meta_file "${LAYOUT_HOME}")"
+CLAUDE_CACHE="$(watch_cache_dir "${LAYOUT_HOME}" claude)"
+CODEX_CACHE="$(watch_cache_dir "${LAYOUT_HOME}" codex)"
+printf '%s\n' "$(claude_meta_json "cenci-watch@cenci=2.9.0=${CLAUDE_CACHE}/2.9.0")" >"${META}"
+make_claude_version_stub "${LAYOUT_BIN}" 'cenci-watch@cenci' ''
+STATE_FILE="${WORK}/dual-active/codex-state.json"
+printf '%s\n' "$(codex_state_json 'cenci-watch@cenci=2.10.0')" >"${STATE_FILE}"
+make_codex_version_stub "${LAYOUT_BIN}" "${STATE_FILE}" 'cenci-watch@cenci installed' ''
+FOREIGN_ROOT="${LAYOUT_HOME}/.claude/plugins/cache/foreign/cenci-watch/99.0.0"
+make_cenci "${FOREIGN_ROOT}/bin/cenci"
+mkdir -p "${FOREIGN_ROOT}/.claude-plugin"
+printf '%s\n' '{"version":"99.0.0"}' >"${FOREIGN_ROOT}/.claude-plugin/plugin.json"
+run_update
+[[ "${UPDATE_EXIT}" -eq 0 ]]
+[[ "$(readlink "${LAYOUT_HOME}/.local/bin/cenci")" == "${CODEX_CACHE}/2.10.0/bin/cenci" ]]
+
+echo "case: missing active binary preserves a fallback but fails the update visibly"
+new_layout active-unavailable claude
+seed_watch_cache "${LAYOUT_HOME}" claude 1.0.0
+CACHE_DIR="$(watch_cache_dir "${LAYOUT_HOME}" claude)"
+META="$(claude_meta_file "${LAYOUT_HOME}")"
+printf '%s\n' "$(claude_meta_json "cenci-watch@cenci=2.0.0=${CACHE_DIR}/2.0.0")" >"${META}"
+make_claude_version_stub "${LAYOUT_BIN}" 'cenci-watch@cenci' ''
+run_update
+[[ "${UPDATE_EXIT}" -ne 0 ]]
+grep -q 'cenci binary update incomplete' "${WORK}/last-output"
+[[ "$(readlink "${LAYOUT_HOME}/.local/bin/cenci")" == "${CACHE_DIR}/1.0.0/bin/cenci" ]]
+
+echo "case: macOS relinks an already-provisioned active binary"
+setup_layout macos-active claude 0
+rm "${LAYOUT_BIN}/uname"
+cat >"${LAYOUT_BIN}/uname" <<'EOF'
+#!/bin/sh
+case "$1" in
+    -s) echo Darwin ;;
+    -m) echo arm64 ;;
+    *) exit 1 ;;
+esac
+EOF
+chmod +x "${LAYOUT_BIN}/uname"
+mkdir -p "${LAYOUT_HOME}/.local/bin"
+ln -s /old/cenci "${LAYOUT_HOME}/.local/bin/cenci"
+run_update
+[[ "${UPDATE_EXIT}" -eq 0 ]]
+if [[ "$(readlink "${LAYOUT_HOME}/.local/bin/cenci")" != "${LAYOUT_NEW_BIN}" ]]; then
+    echo "FAIL: macOS update left the old host launcher in place" >&2
     exit 1
 fi
 

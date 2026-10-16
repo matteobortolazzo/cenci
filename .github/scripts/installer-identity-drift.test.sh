@@ -3,9 +3,10 @@
 # (#736): install.sh's verify_installer_asset() is the single source of
 # truth for the --certificate-identity-regexp value that install.sh itself
 # uses to verify its own downloaded bytes, but the same literal is also
-# quoted verbatim in seven doc locations across six README files plus this
+# quoted verbatim in seven places across three README files plus this
 # repo's docs/ (watch/README.md quotes it twice: the installer quickstart
-# and the checksums.txt verification section) so users can run the same
+# and the checksums.txt verification section; the root README.md links to
+# docs/getting-started.md for manual verification instead of quoting it) so users can run the same
 # verification by hand. #736 fixed a bug where that
 # literal only matched a `watch/v*` tag-push identity, silently rejecting
 # every automated release (dispatched with `--ref main`) — if the doc
@@ -65,11 +66,10 @@ if [[ -z "$CANONICAL" ]]; then
   fail "extracted an empty --certificate-identity-regexp value from install.sh — extraction is broken or the value itself is empty"
 fi
 
-# The seven documented copies (#736's plan step 2): six files, watch/README.md
-# quoting the value twice (the installer quickstart and the checksums.txt
+# The seven documented copies: six files, watch/README.md quoting the value
+# twice (the installer quickstart and the checksums.txt
 # verification section).
 DOC_FILES=(
-  "README.md"
   "flow/README.md"
   "sandbox/README.md"
   "watch/README.md"
@@ -106,13 +106,13 @@ done
 
 # Sanity-check the expected number of documented copies is actually present
 # (a typo'd path or an accidentally-deleted doc mention would otherwise make
-# the loop above vacuously pass with zero comparisons). 8 total: one each in
-# README.md, flow/README.md, sandbox/README.md, docs/getting-started.md,
+# the loop above vacuously pass with zero comparisons). 7 total: one each in
+# flow/README.md, sandbox/README.md, docs/getting-started.md,
 # docs/migrating-to-cenci.md, and docs/release-hygiene.md, plus two in
 # watch/README.md (the installer quickstart and the checksums.txt
-# verification section) — 7 documented locations, 8 quoted occurrences.
-if [[ "$total_copies" -ne 8 ]]; then
-  fail "expected exactly 8 documented --certificate-identity-regexp copies across ${#DOC_FILES[@]} files, found ${total_copies} — a doc copy was added, removed, or a file failed to resolve"
+# verification section) — 6 documented locations, 7 quoted occurrences.
+if [[ "$total_copies" -ne 7 ]]; then
+  fail "expected exactly 7 documented --certificate-identity-regexp copies across ${#DOC_FILES[@]} files, found ${total_copies} — a doc copy was added, removed, or a file failed to resolve"
 fi
 
 echo "installer-identity-drift.test.sh: failures=${failures}"

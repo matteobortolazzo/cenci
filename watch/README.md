@@ -2325,6 +2325,12 @@ if you need them. If `cenci-installer` isn't on `PATH`, all three exit 1 with a 
 error instead of silently doing nothing — re-run the [installer](#installation) to
 create it.
 
+The host binary is selected from the active cenci-watch installation records;
+old cache timestamps cannot override the installed version. With both clients
+installed, the newer active version supplies the shared binary. If provisioning
+fails, the installer preserves an available older binary but exits nonzero with
+an incomplete-update message. See [update recovery](../docs/getting-started.md#troubleshooting-cenci-update-reports-success-but-the-version-never-changes).
+
 `cenci update` also best-effort refreshes plugins in every currently running
 sandbox container (`cenci sandbox update-plugins --all`, after the image
 build/daemon-restart steps), so an already-running sandbox doesn't stay on a

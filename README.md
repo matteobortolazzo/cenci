@@ -16,6 +16,44 @@ you keep the authorization decisions that cross that boundary or merge code.
 [Try it](#quickstart) · [See the workflow](#approve-decisions-not-commands) ·
 [Read the security model](SECURITY.md) · [Browse the docs](#learn-more)
 
+## Quickstart
+
+On Linux, macOS, or WSL2, install git, curl, jq,
+[cosign](https://docs.sigstore.dev/system_config/installation/), Docker or Podman,
+and Claude Code or Codex. Then run one command:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/cenci/main/install.sh | bash
+```
+
+The script downloads and verifies the latest release installer, sets up all three
+cenci components for your detected clients, and installs `cenci` and `cn` in
+`~/.local/bin`. Add that directory to your `PATH` if the installer asks you to.
+
+From a git repository:
+
+```bash
+cenci doctor   # check setup
+cn             # launch Claude Code
+cn xt          # launch Codex
+```
+
+Update with the same tool:
+
+```bash
+cenci update
+```
+
+If an older installation cannot update itself, rerun the install command above.
+Restart your agent session after updating to load refreshed plugins.
+
+For the GitHub ticket-to-PR workflow, authenticate `gh`, launch Claude Code, and run
+`/cenci:configure`, then `/cenci:refine 42` and `/cenci:implement 42`.
+The full interactive workflow is currently Claude Code-only; Codex supports
+isolation, monitoring, portable conventions, and PR babysitting.
+
+[Prerequisites, manual verification, and troubleshooting →](docs/getting-started.md)
+
 ![cenci combines isolation, workflow, and attention into a safe path from issue to reviewed pull request](docs/assets/cenci-overview.svg)
 
 ## Choose your starting point
@@ -70,71 +108,6 @@ the same signal can appear in Linux desktop bars and the macOS menu bar. No boar
 required.
 
 [Explore tmux, status commands, and desktop integrations →](watch/README.md)
-
-## Quickstart
-
-Requirements: Linux, macOS, or WSL2; git; curl; jq; cosign; Docker or Podman; and
-Claude Code, Codex, or both. GitHub delivery also needs an authenticated `gh` CLI.
-[OpenCode](flow/docs/opencode.md) is temporarily disabled. Its work is parked in an
-[owner-opt-in milestone](https://github.com/matteobortolazzo/cenci/milestone/18).
-
-**1. Install and verify.**
-
-```bash
-curl -fsSL -o install.sh https://github.com/matteobortolazzo/cenci/releases/latest/download/install.sh
-curl -fsSL -o install.sh.bundle https://github.com/matteobortolazzo/cenci/releases/latest/download/install.sh.bundle
-cosign verify-blob --bundle install.sh.bundle \
-  --certificate-identity-regexp '^https://github\.com/matteobortolazzo/cenci/\.github/workflows/watch-release\.yml@refs/(heads/main|tags/watch/v[0-9]+\.[0-9]+\.[0-9]+)$' \
-  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
-  install.sh
-bash install.sh
-cenci doctor
-```
-
-Requires [cosign](https://docs.sigstore.dev/system_config/installation/) — the installer
-verifies its own bytes against the release before running, and fails closed with no
-fallback to an unverified ref. The legacy one-liner still works and re-execs itself
-through this same verified path:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/cenci/main/install.sh | bash
-```
-
-Resolves to the latest release tag by default. That resolved ref pins the client
-marketplace manifests and all three plugins' content — not just which install.sh
-runs — for every install, update, and repair run. Set `CENCI_REF=main` (or pass
-`--ref main`) to explicitly opt into bleeding-edge, unverified main instead (unsafe;
-development use only) — it is the only path that intentionally tracks main.
-
-The installer detects your clients, reconciles all three layers on every run (adding
-missing components and refreshing existing ones), and puts `cenci` and its `cn` launch
-alias on your PATH. `doctor` reports what is ready and what needs attention without
-changing anything.
-
-**2. Launch from a git repository.**
-
-```bash
-cn      # Claude Code
-cn xt   # Codex (or: cn --agent codex)
-```
-
-Only that repository is mounted at `/workspace`. The first session also provisions
-cenci-watch and starts its shared host daemon.
-
-**3. Run the gated workflow with Claude Code.**
-
-```text
-/cenci:configure
-/cenci:refine 42
-/cenci:implement 42
-/cenci:babysit <pr-number>
-```
-
-The complete interactive ticket-to-PR workflow is Claude Code-only today. Codex
-already supports isolation, monitoring, portable engineering conventions, and PR
-babysitting; its native gated workflow is in development.
-
-[Continue with setup details and troubleshooting →](docs/getting-started.md)
 
 ## Approve decisions, not commands
 

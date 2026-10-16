@@ -793,7 +793,8 @@ echo "case: 5f only runs on an in-session Yes answer to question 10, not a stale
 Q10_REGION="${WORK}/skill-q10-region.md"
 awk '/^### Board Config \(lazyboards\)$/{f=1} f && /^### Auth Verification$/{exit} f{print}' \
     "${SKILL_MD}" >"${Q10_REGION}"
-assert_contains "${Q10_REGION}" "in this session"
+assert_contains "${Q10_REGION}" "recorded from a prior run"
+assert_contains "${Q10_REGION}" "never authorizes silently regenerating"
 assert_contains "${EXTRACTED_5F}" "question 10 was asked and answered Yes"
 assert_contains "${EXTRACTED_5F}" "in this session"
 

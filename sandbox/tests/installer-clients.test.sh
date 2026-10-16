@@ -1377,10 +1377,10 @@ run_case_broken_cenci_cache bootstrap-unavailable-update update
 [[ "${CASE_EXIT}" -ne 0 ]]
 assert_contains "${CASE_OUTPUT}" "could not provision the cenci binary from the installed cenci-watch plugin"
 
-echo "case: an update tolerates an unpublished newest release by keeping the previously provisioned binary"
+echo "case: an incomplete update keeps the previously provisioned binary and returns failure"
 run_case_stale_newest_cenci_cache bootstrap-stale-newest-update update
-[[ "${CASE_EXIT}" -eq 0 ]]
-assert_contains "${CASE_OUTPUT}" "the newest cenci-watch release isn't available yet"
+[[ "${CASE_EXIT}" -ne 0 ]]
+assert_contains "${CASE_OUTPUT}" "cenci binary update incomplete"
 assert_not_contains "${CASE_OUTPUT}" "could not provision the cenci binary from the installed cenci-watch plugin"
 # Fell back to the previously provisioned (1.0.0) binary and restarted the daemon with it.
 assert_contains "${CASE_CALLS}" "cenci daemon restart"

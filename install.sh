@@ -18,16 +18,8 @@
 #                                and every cenci sandbox container/image/
 #                                volume on this machine
 #
-#   The canonical install is a download-verify-run sequence: fetch install.sh
-#   and its cosign sign-blob bundle from the latest `watch/vX.Y.Z` release
-#   asset, verify the bundle against cenci's pinned release identity with
-#   `cosign verify-blob`, then run only the verified bytes (see
-#   docs/getting-started.md for the exact commands). cosign
-#   (https://docs.sigstore.dev/system_config/installation/) is required —
-#   verification fails closed with no fallback to any unverified ref.
-#
-#   The legacy one-liner (`curl -fsSL .../main/install.sh | bash`) still
-#   works: piped runs with CENCI_REF unset re-exec themselves through the
+#   Install with `curl -fsSL .../main/install.sh | bash`: piped runs with
+#   CENCI_REF unset re-exec themselves through the
 #   same verified download-verify-run path, from the newest `<layer>/vX.Y.Z`
 #   release tag's install.sh — never live main. That same resolved ref then
 #   pins the client marketplace registration and all three installed
@@ -36,6 +28,8 @@
 #   CENCI_REF=main (or pass --ref main) to explicitly opt into bleeding-edge,
 #   unverified main instead (unsafe; development use only) — it is the only
 #   path that intentionally tracks main.
+#   cosign is required. For verification before executing the bootstrap,
+#   see docs/getting-started.md's manual download-verify-run sequence.
 #
 # Flags:
 #   --yes                                 accept defaults, never prompt
@@ -1161,14 +1155,41 @@ step_sandbox_update_agents() {
 	fi
 }
 
-# newest_cenci_root — path to the most recently installed version-pinned
-# Claude plugin cache root. Plugin updates refresh the active manifest, making
-# it a reliable selector even before that version's binary has bootstrapped.
+# newest_cenci_root — choose the newest active client version, never an old
+# cache whose manifest happens to have a newer timestamp. On dual-client
+# installs the shared host binary follows the newer active version. If that
+# cache is missing, return failure so provisioning cannot silently use an old
+# binary. Retain the timestamp fallback only for legacy clients without
+# readable version records.
 newest_cenci_root() {
-	local newest_manifest="" manifest
+	local newest_manifest="" manifest client version best="" claude_version="" codex_version=""
+	[ "$HAS_CLAUDE" -eq 0 ] || claude_version="$(installed_plugin_version claude cenci-watch)"
+	[ "$HAS_CODEX" -eq 0 ] || codex_version="$(installed_plugin_version codex cenci-watch)"
+	for version in "$claude_version" "$codex_version"; do
+		[ -n "$version" ] || continue
+		best="$(printf '%s\n' "${best:-$version}" "$version" | sort -t . -k1,1n -k2,2n -k3,3n | tail -n 1)" || return 1
+		[ -n "$best" ] || return 1
+	done
+	if [ -n "$best" ]; then
+		for client in claude codex; do
+			case "$client" in
+			claude) version="$claude_version" ;;
+			codex) version="$codex_version" ;;
+			esac
+			[ "$version" = "$best" ] || continue
+			for manifest in "$HOME/.${client}/plugins/cache/cenci/cenci-watch/"*/".${client}-plugin/plugin.json"; do
+				[ -f "$manifest" ] || continue
+				version="$(jq -r '.version // empty' "$manifest" 2>/dev/null)" || continue
+				[ "$version" = "$best" ] || continue
+				dirname "$(dirname "$manifest")"
+				return 0
+			done
+		done
+		return 1
+	fi
 	for manifest in \
-		"$HOME"/.claude/plugins/cache/*/cenci-watch/*/.claude-plugin/plugin.json \
-		"$HOME"/.codex/plugins/cache/*/cenci-watch/*/.codex-plugin/plugin.json; do
+		"$HOME"/.claude/plugins/cache/cenci/cenci-watch/*/.claude-plugin/plugin.json \
+		"$HOME"/.codex/plugins/cache/cenci/cenci-watch/*/.codex-plugin/plugin.json; do
 		[ -f "$manifest" ] || continue
 		if [ -z "$newest_manifest" ] || [ "$manifest" -nt "$newest_manifest" ]; then
 			newest_manifest="$manifest"
@@ -1183,14 +1204,13 @@ newest_cenci_root() {
 # binaries already present on disk. Used as an update-mode fallback when the
 # newest plugin version's release isn't published yet (the manifest bump reaches
 # the plugin cache before the release assets exist, so its bootstrap download
-# 404s) — a routine manifest-ahead-of-release race must not turn `cenci update`
-# into a hard failure while a previous version's binary, and the daemon running
-# on it, remain perfectly usable. Mirrors newest_cenci_root's glob.
+# 404s). Keeps the previous binary usable while the update reports failure.
+# Mirrors newest_cenci_root's marketplace-specific glob.
 newest_provisioned_cenci_binary() {
 	local newest_manifest="" newest_bin="" manifest root bin
 	for manifest in \
-		"$HOME"/.claude/plugins/cache/*/cenci-watch/*/.claude-plugin/plugin.json \
-		"$HOME"/.codex/plugins/cache/*/cenci-watch/*/.codex-plugin/plugin.json; do
+		"$HOME"/.claude/plugins/cache/cenci/cenci-watch/*/.claude-plugin/plugin.json \
+		"$HOME"/.codex/plugins/cache/cenci/cenci-watch/*/.codex-plugin/plugin.json; do
 		[ -f "$manifest" ] || continue
 		root="$(dirname "$(dirname "$manifest")")"
 		bin="$root/bin/cenci"
@@ -1255,7 +1275,7 @@ current_cenci_binary() {
 restart_cenci_daemon() {
 	local bin="$1"
 	if [ -x "$bin" ] && "$bin" daemon restart >/dev/null 2>&1; then
-		ok "restarted cenci with the updated binary"
+		ok "restarted cenci with the selected binary"
 		return 0
 	fi
 	warn "'$bin daemon restart' did not succeed — falling back to a manual restart"
@@ -1295,7 +1315,7 @@ restart_cenci_daemon_fallback() {
 	pid=$!
 	sleep 0.2
 	if kill -0 "$pid" 2>/dev/null; then
-		ok "restarted cenci with the updated binary"
+		ok "restarted cenci with the selected binary"
 	else
 		fail "the updated cenci daemon did not stay running"
 		return 1
@@ -1314,15 +1334,15 @@ step_cenci_watch_setup() {
 			# reaches the plugin cache before the release assets exist, so the
 			# bootstrap download 404s). Fall back to the newest previously
 			# provisioned binary if one exists: the daemon keeps running on it
-			# and the update completes as a deferred no-op for the binary rather
-			# than a hard failure.
+			# while the nonzero result makes the incomplete update visible.
 			cache_bin="$(newest_provisioned_cenci_binary || true)"
 			if [ -z "$cache_bin" ]; then
 				fail "could not provision the cenci binary from the installed cenci-watch plugin"
 				INSTALL_FAILED=1
 				return 0
 			fi
-			warn "the newest cenci-watch release isn't available yet — keeping the currently provisioned binary; it updates once the release publishes"
+			fail "cenci binary update incomplete — could not provision the active cenci-watch version; keeping a previously provisioned binary. Retry cenci update after checking the bootstrap log"
+			INSTALL_FAILED=1
 			say "  ${DIM}log: \${TMPDIR:-/tmp}/cenci-bootstrap.log${RESET}"
 		else
 			# A fresh install stays useful without the binary: widgets come from
@@ -1345,6 +1365,10 @@ step_cenci_watch_setup() {
 			INSTALL_FAILED=1
 		fi
 		return 0
+	fi
+	# A cached binary skips bootstrap, so macOS must refresh the launcher too.
+	if [ -n "$cache_bin" ] && ! link_launcher cenci "$cache_bin"; then
+		INSTALL_FAILED=1
 	fi
 	if [ "$MODE" = update ] && ! restart_cenci_daemon "$cache_bin"; then
 		INSTALL_FAILED=1
@@ -2763,13 +2787,11 @@ Usage:
                                 and every cenci sandbox container/image/
                                 volume on this machine
 
-Initial install (canonical — download, verify, run):
-  See docs/getting-started.md for the download-verify-run sequence: fetch
-  install.sh + install.sh.bundle from the latest release, verify with
-  `cosign verify-blob`, then run only the verified bytes. cosign is required.
+Initial install (one command):
+  curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/cenci/main/install.sh | bash
 
-  The legacy one-liner still works:
-    curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/cenci/main/install.sh | bash
+  Requires cosign to verify the downloaded release installer. See
+  docs/getting-started.md to verify before executing the bootstrap itself.
 
   Resolves to the latest release tag by default (not live main) — a piped
   run with CENCI_REF unset re-execs itself, verified, from the newest
