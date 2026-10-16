@@ -1,8 +1,10 @@
 package launcher
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -483,6 +485,17 @@ func (e *Engine) Launch(opts Options) error {
 			}
 		}
 		e.warnDockerdStartupFailure(ctx)
+		if ctx.Agent == "codex" && !opts.Shell {
+			// An immediate resume must not race the daemon's asynchronous
+			// reap. Finish this container's cleanup before starting Codex;
+			// other live panes keep their writers and are never signaled.
+			reapCtx, cancel := context.WithTimeout(context.Background(), sandbox.GraceFromEnv()+sandbox.CloseKillMargin)
+			err := reapOrphans(reapCtx, []string{e.Runtime}, ctx.Scope.ContainerName, io.Discard, e.Stderr)
+			cancel()
+			if err != nil {
+				_, _ = fmt.Fprintf(e.Stderr, "Warning: could not clean up closed Codex sessions: %v\n", err)
+			}
+		}
 		execEnvArgs = append(execEnvArgs, e.tagLaunchPane(ctx.Scope.ContainerName)...)
 		return e.runAgent(ctx.Scope.ContainerName, ctx.Agent, agentCmdArgs, execEnvArgs, opts)
 	}

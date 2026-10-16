@@ -41,8 +41,10 @@ import (
 // `a-f` range, so locale collation cannot change matching) is replaced by
 // malformedFieldMarker, which no host-side shape check accepts — so a hostile
 // value can neither forge a row nor shift a column, and fails open host-side.
-// If a process's environ fails to read but the process still exists, the scan
-// instead emits a raw I/O fact — `__UNREADABLE__\t<pid>` — rather than
+// If a process's environ fails to read, parentEnvironScript first tries its
+// same-user launcher ancestry. The child retains its own PID/start time. If
+// ownership remains unknown and the process still exists, the scan emits a
+// raw I/O fact — `__UNREADABLE__\t<pid>` — rather than
 // silently skipping it. All classification — skip-empty-pane,
 // skip-malformed-pane, skip-init, launch-ID and (socket, pane) liveness,
 // fail-open on a missing/malformed socket or launch ID, reap-dead, and
@@ -50,7 +52,33 @@ import (
 // happens host-side in OrphanScanner.ScanContainer, never inside this canned
 // scan; the reaper's signaling stays in launcher.ReapOrphans, which drives the
 // TERM→poll→KILL escalation and PID-reuse detection in escalate.go.
-const reapScanScript = `for e in /proc/[0-9]*/environ; do [ -f "$e" ] || continue; p=${e#/proc/}; p=${p%/environ}; line=$(grep --null-data --text --only-matching --max-count=1 '^TMUX_PANE=.*' "$e" 2>/dev/null); rc=$?; if [ "$rc" -eq 2 ]; then [ -e "$e" ] && printf "__UNREADABLE__\t%s\n" "$p"; continue; fi; [ "$rc" -eq 0 ] || continue; pane=${line#TMUX_PANE=}; case "$pane" in *[!%0123456789]*) pane=` + malformedFieldMarker + `;; esac; sock=$(grep --null-data --text --only-matching --max-count=1 '^CENCI_TMUX_SOCKET=.*' "$e" 2>/dev/null); sockrc=$?; if [ "$sockrc" -eq 0 ]; then sock=${sock#CENCI_TMUX_SOCKET=}; else sock=""; fi; case "$sock" in *[[:cntrl:]]*) sock=` + malformedFieldMarker + `;; esac; lid=$(grep --null-data --text --only-matching --max-count=1 '^` + LaunchIDEnvName + `=.*' "$e" 2>/dev/null); lidrc=$?; if [ "$lidrc" -eq 0 ]; then lid=${lid#` + LaunchIDEnvName + `=}; else lid=""; fi; case "$lid" in *[!0123456789abcdef]*) lid=` + malformedFieldMarker + `;; esac; st=$(cat "/proc/$p/stat" 2>/dev/null); st=${st##*) }; set -- $st; if [ "$#" -ge 20 ]; then shift 19; start=$1; else start=""; fi; printf "%s\t%s\t%s\t%s\t%s\n" "$p" "$pane" "$start" "$sock" "$lid"; done`
+const reapScanScript = parentEnvironScript + `for e in /proc/[0-9]*/environ; do
+  [ -f "$e" ] || continue
+  p=${e#/proc/}; p=${p%/environ}
+  line=$(grep --null-data --text --only-matching --max-count=1 '^TMUX_PANE=.*' "$e" 2>/dev/null); rc=$?
+  if [ "$rc" -eq 2 ]; then
+    if ancestor=$(cenci_parent_environ "$p"); then
+      e=$ancestor
+      line=$(grep --null-data --text --only-matching --max-count=1 '^TMUX_PANE=.*' "$e" 2>/dev/null); rc=$?
+    fi
+    if [ "$rc" -ne 0 ]; then
+      [ -e "/proc/$p/environ" ] && printf "__UNREADABLE__\t%s\n" "$p"
+      continue
+    fi
+  fi
+  [ "$rc" -eq 0 ] || continue
+  pane=${line#TMUX_PANE=}
+  case "$pane" in *[!%0123456789]*) pane=` + malformedFieldMarker + `;; esac
+  sock=$(grep --null-data --text --only-matching --max-count=1 '^CENCI_TMUX_SOCKET=.*' "$e" 2>/dev/null); sockrc=$?
+  if [ "$sockrc" -eq 0 ]; then sock=${sock#CENCI_TMUX_SOCKET=}; else sock=""; fi
+  case "$sock" in *[[:cntrl:]]*) sock=` + malformedFieldMarker + `;; esac
+  lid=$(grep --null-data --text --only-matching --max-count=1 '^` + LaunchIDEnvName + `=.*' "$e" 2>/dev/null); lidrc=$?
+  if [ "$lidrc" -eq 0 ]; then lid=${lid#` + LaunchIDEnvName + `=}; else lid=""; fi
+  case "$lid" in *[!0123456789abcdef]*) lid=` + malformedFieldMarker + `;; esac
+  st=$(cat "/proc/$p/stat" 2>/dev/null); st=${st##*) }; set -- $st
+  if [ "$#" -ge 20 ]; then shift 19; start=$1; else start=""; fi
+  printf "%s\t%s\t%s\t%s\t%s\n" "$p" "$pane" "$start" "$sock" "$lid"
+done`
 
 // panePattern is tmux's real pane-id format; anything else in a TMUX_PANE
 // value is malformed and never signaled.

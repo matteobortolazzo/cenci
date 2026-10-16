@@ -2826,6 +2826,21 @@ The daemon has two sweep mechanisms:
 
 **Sandbox orphan reap**: When the pane-based sweep detects one or more tmux-backed sessions whose pane no longer exists, the daemon triggers a single `cenci sandbox reap-orphans` pass (coalesced — not one per stale window, self-exec'd via the daemon's own binary) to kill any orphaned container-side agent processes for those sessions. The daemon also runs one reap pass at startup, covering panes that closed while it was down or restarting, and one on a periodic backstop tick (default `5m`, configurable with `-reap-interval`, `0` to disable). The backstop exists because the pane-gone trigger only fires while the daemon still holds a pane binding at the moment the pane dies: every path that drops that binding earlier — a `SessionEnd` teardown, a `clear`/`resume` handoff whose successor never reports, tracking that never succeeded — leaves that pane's death unobservable, stranding a live container process until the next daemon restart. A `SessionEnd` teardown of a pane-bound session triggers a pass for the same reason, covering the process left behind when cenci's own pending-close kill destroys the window. The reap is fire-and-forget, non-blocking for the event loop, and self-no-ops when there's nothing to reap. Liveness is launch-ID keyed: every sandbox launch gets a unique `CENCI_LAUNCH_ID`, also recorded as a pane option on its tmux pane, and a process carrying one is live only while that ID is recorded on a live pane of its own tmux server — so an orphan on a pane id reused after a tmux restart is still reaped. Processes without a launch ID (started before this change, or outside tmux) fall back to the `(socket, pane)` pair — each container process carries the host tmux socket it belongs to (`CENCI_TMUX_SOCKET`) alongside its pane id (`TMUX_PANE`), so a process is only ever classified live against its own tmux server's pane set, not a bare pane-id union across servers.
 
+Before attaching Codex to an existing sandbox, `cenci open` also completes a
+bounded orphan sweep of that container, so an immediate resume does not race the
+daemon's next sweep. Cleanup errors warn and leave the launch available. Shell
+attachments and new containers do not need this sweep.
+
+Codex's native process can make its environment unreadable. Both the orphan
+reaper and `cenci close` then recover ownership through a still-running launcher
+of the same user, rechecking the ancestor chain's parent IDs and start times.
+The child keeps its own PID and start time for termination and escalation.
+The orphan reaper also supports older launchers with only socket/pane metadata.
+If no readable, tagged ancestor remains, ownership is unknown: the process is
+not signaled, and an explicit `cenci sandbox reap-orphans` reports it as
+unreadable. An unreadable-process note can also
+come from container services; it does not by itself identify an orphan.
+
 ### Paneless sessions
 
 `cenci notify` accepts events even when `$TMUX_PANE` is unset. Sessions running in plain terminals or cenci-sandbox without a tmux pane appear in `cenci widget-json` output with empty `session` and `window_index` fields; their tooltip line reads `(no session) - name (agent) (status)` rather than the tmux-backed `session:index - name (agent) (status)`.

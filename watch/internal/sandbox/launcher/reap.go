@@ -38,6 +38,17 @@ import (
 // bash launcher whose retargeted test suite asserts these exact strings);
 // the returned error only signals a non-zero exit to the caller.
 func ReapOrphans(stdout, stderr io.Writer) error {
+	runtimes, err := sandbox.AvailableRuntimes()
+	if err != nil {
+		_, _ = fmt.Fprintln(stderr, "Error: no container runtime (docker/podman) found on PATH.")
+		return fmt.Errorf("no container runtime found")
+	}
+	return reapOrphans(context.Background(), runtimes, "", stdout, stderr)
+}
+
+// onlyContainer scopes an attach-time sweep to the container being reopened.
+// The explicit reap command leaves it empty to scan all sandbox containers.
+func reapOrphans(ctx context.Context, runtimes []string, onlyContainer string, stdout, stderr io.Writer) error {
 	// CENCI_SANDBOX_REAP_GRACE_SECS lets callers tune the SIGTERM → SIGKILL
 	// grace window (e.g. to 0 for fast test runs).
 	grace := sandbox.GraceFromEnv()
@@ -45,21 +56,17 @@ func ReapOrphans(stdout, stderr io.Writer) error {
 	// The scanner memoizes per-socket live-pane resolution across every
 	// container/runtime in this sweep (#1007).
 	scanner := sandbox.NewOrphanScanner(stdout, stderr)
-	ctx := context.Background()
-
-	// ── Runtimes to scan (independent of the single preferred runtime) ──
-	runtimes, err := sandbox.AvailableRuntimes()
-	if err != nil {
-		_, _ = fmt.Fprintln(stderr, "Error: no container runtime (docker/podman) found on PATH.")
-		return fmt.Errorf("no container runtime found")
-	}
 
 	reapedCount := 0
 	for _, rt := range runtimes {
-		containers, err := scanner.RunningContainers(ctx, rt)
-		if err != nil {
-			_, _ = fmt.Fprintf(stderr, "Error: failed to list running containers for %s.\n", rt)
-			return err
+		containers := []string{onlyContainer}
+		if onlyContainer == "" {
+			var err error
+			containers, err = scanner.RunningContainers(ctx, rt)
+			if err != nil {
+				_, _ = fmt.Fprintf(stderr, "Error: failed to list running containers for %s.\n", rt)
+				return err
+			}
 		}
 
 		for _, container := range containers {

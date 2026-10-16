@@ -1887,8 +1887,11 @@ func TestOpen_LaunchID_AttachCarriesTheIDRecordedOnThePane(t *testing.T) {
 				if strings.HasPrefix(line, "exec -it ") {
 					continue
 				}
-				if strings.Contains(line, "CENCI_LAUNCH_ID") {
-					t.Errorf("a non-attach runtime call carries CENCI_LAUNCH_ID (it must never be create-time env):\n%s", line)
+				// The pre-attach orphan scan reads this key in its script;
+				// only an environment assignment would bake launch ownership
+				// into a non-interactive invocation or the container init.
+				if strings.Contains(line, " -e CENCI_LAUNCH_ID=") {
+					t.Errorf("a non-attach runtime call injects CENCI_LAUNCH_ID (it must never be create-time env):\n%s", line)
 				}
 			}
 		})
