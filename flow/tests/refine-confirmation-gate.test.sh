@@ -284,5 +284,115 @@ assert_file_contains "${REFINE_CODEX}" "${CODEX_DECLINE_MARKER}" \
 assert_file_contains "${REFINE_CODEX}" "${CODEX_EXCLUSION_TRIO_MARKER}" \
   "codex.md must mirror the extended exclusion set naming automerge:ok, Browser, and ui:visual-check"
 
+# =====================================================================
+# Block 8 (#1273): the lean Confirmation Gate. In lean mode the gate shows
+# every `### Assumptions (auto-adopted)` item and every `decided:` entry as a
+# numbered A1...An list, lists the entries decided over the question cap first
+# under their own heading (security and destructive first), and accepts one
+# freeform overrule that re-runs the analysis exactly once before a re-rendered
+# Confirm/Decline-only gate. No GitHub write happens before Confirm; the
+# interactive gate is unchanged. Asserted for SKILL.md and codex.md alike.
+#
+# The "retention" assertions (the Confirm/Decline question, the
+# `No adjust loop` / `no adjust loop` sentence, the fail-closed default) already
+# hold today and pass before the edit by design: they guard AC10 (interactive
+# gate unchanged) and AC11 against the lean edit rewriting the interactive path.
+# =====================================================================
+
+LEAN_LIST_MARKER='numbers every `### Assumptions (auto-adopted)` item and every `decided:` entry continuously as `A1…An`'
+LEAN_LIST_DISPLAY_ONLY_MARKER='The numbering is display-only; the persisted `### Assumptions (auto-adopted)` keeps plain `-` bullets'
+LEAN_OVER_CAP_HEADING_MARKER='Decided over the cap — review before confirming'
+LEAN_OVER_CAP_FIRST_MARKER='lists the entries decided over the cap first, under that heading, with security and destructive entries first'
+LEAN_OVER_CAP_SUFFIX_MARKER='(over the cap: <class>)'
+LEAN_WITHHELD_FALLBACK_MARKER='marked "no recorded decision"'
+LEAN_OVERRULE_RECORD_MARKER='Q: Confirmation Gate overrule'
+LEAN_OVERRULE_ONCE_PER_RUN_MARKER='The overrule is available once per run'
+LEAN_OVERRULE_RERENDER_MARKER='The re-rendered gate offers only Confirm and Decline'
+LEAN_OTHER_IS_DECLINE_MARKER='Any answer other than Confirm counts as Decline'
+LEAN_OVERRULE_NO_WRITE_MARKER='the overrule itself performs no GitHub write'
+LEAN_INTERACTIVE_UNCHANGED_MARKER='In interactive mode the gate is unchanged'
+LEAN_NO_AUTOMERGE_MARKER='Lean mode never grants automerge by itself'
+LEAN_SKILL_REINVOKE_MARKER='re-invokes the refiner exactly once'
+LEAN_SKILL_REROUTE_MARKER='the new proposal re-routes through Process step 9 and this Confirmation Gate from the top'
+LEAN_CODEX_REANALYZE_MARKER='re-runs the analysis inline exactly once, read-only'
+
+for FILE in "${REFINE_SKILL}" "${REFINE_CODEX}"; do
+  assert_file_contains "${FILE}" "${LEAN_LIST_MARKER}" \
+    "lean gate must number every auto-adopted item and every decided: entry A1…An (AC8)"
+  assert_file_contains "${FILE}" "${LEAN_LIST_DISPLAY_ONLY_MARKER}" \
+    "lean gate numbering must be display-only, the persisted assumptions keep plain bullets (AC8)"
+  assert_file_contains "${FILE}" "${LEAN_OVER_CAP_HEADING_MARKER}" \
+    "lean gate must name the over-the-cap group heading verbatim (AC6)"
+  assert_file_contains "${FILE}" "${LEAN_OVER_CAP_FIRST_MARKER}" \
+    "lean gate must list over-cap decided entries first, security and destructive first (AC6)"
+  assert_file_contains "${FILE}" "${LEAN_OVER_CAP_SUFFIX_MARKER}" \
+    "lean gate must identify over-cap entries by the (over the cap: <class>) suffix (AC6)"
+  assert_file_contains "${FILE}" "${LEAN_WITHHELD_FALLBACK_MARKER}" \
+    "lean gate must list a withheld question with no matching decided entry as no recorded decision, so nothing withheld is invisible at Confirm (AC6)"
+  assert_file_contains "${FILE}" "${LEAN_OVERRULE_RECORD_MARKER}" \
+    "lean gate must record the overrule as Q: Confirmation Gate overrule (AC9)"
+  assert_file_contains "${FILE}" "${LEAN_OVERRULE_ONCE_PER_RUN_MARKER}" \
+    "lean gate overrule must be available once per run (AC9)"
+  assert_file_contains "${FILE}" "${LEAN_OVERRULE_RERENDER_MARKER}" \
+    "lean gate must re-render offering only Confirm and Decline after the overrule (AC9)"
+  assert_file_contains "${FILE}" "${LEAN_OTHER_IS_DECLINE_MARKER}" \
+    "at the re-rendered lean gate any answer other than Confirm must count as Decline (AC9)"
+  assert_file_contains "${FILE}" "${LEAN_OVERRULE_NO_WRITE_MARKER}" \
+    "the overrule must perform no GitHub write before Confirm (AC9)"
+  assert_file_contains "${FILE}" "${LEAN_INTERACTIVE_UNCHANGED_MARKER}" \
+    "must state the interactive gate is unchanged: Confirm/Decline, no adjust loop (AC10)"
+  assert_file_contains "${FILE}" "${LEAN_NO_AUTOMERGE_MARKER}" \
+    "must state lean mode never grants automerge by itself (AC11)"
+  assert_file_contains "${FILE}" "${GATE_QUESTION_MARKER}" \
+    "retention (AC10): the interactive confirmation question must stay verbatim in both modes"
+done
+
+assert_file_contains "${REFINE_SKILL}" "${GATE_FAIL_CLOSED_MARKER}" \
+  "retention (AC11): SKILL.md's fail-closed withhold default must stay in both modes"
+assert_file_contains "${REFINE_CODEX}" 'fail-closed to `withhold`' \
+  "retention (AC11): codex.md's fail-closed withhold default must stay in both modes"
+
+assert_file_contains "${REFINE_SKILL}" "${LEAN_SKILL_REINVOKE_MARKER}" \
+  "SKILL.md lean gate overrule must re-invoke the refiner exactly once (AC9)"
+assert_file_contains "${REFINE_SKILL}" "${LEAN_SKILL_REROUTE_MARKER}" \
+  "SKILL.md lean gate overrule must re-route the new proposal through step 9 and the gate from the top (AC9)"
+assert_file_contains "${REFINE_SKILL}" "No adjust loop" \
+  "retention (AC10): SKILL.md interactive gate must keep its no-adjust-loop sentence"
+assert_file_contains "${REFINE_CODEX}" "${LEAN_CODEX_REANALYZE_MARKER}" \
+  "codex.md lean gate overrule must re-run the analysis inline exactly once, read-only (AC9)"
+assert_file_contains "${REFINE_CODEX}" "no adjust loop" \
+  "retention (AC10): codex.md interactive gate must keep its no-adjust-loop wording"
+
+# Review-fix literals: the gate orders and reconciles the over-cap group from
+# its own record of withheld questions, a freeform answer is always an overrule
+# (empty text is a decline), and the overrule is one pass whose failure modes
+# STOP with zero writes.
+LEAN_OWN_RECORD_MARKER='from its own record of the questions it withheld and the class tags it saw'
+LEAN_FREEFORM_IS_OVERRULE_MARKER='A freeform answer is always an overrule, even when its text reads like "no" or "decline"'
+LEAN_EMPTY_OTHER_IS_DECLINE_MARKER='Empty or whitespace-only "Other" text is treated as Decline'
+LEAN_ONE_PASS_MARKER='This is one overrule pass, never a second overrule'
+
+for FILE in "${REFINE_SKILL}" "${REFINE_CODEX}"; do
+  assert_file_contains "${FILE}" "${LEAN_OWN_RECORD_MARKER}" \
+    "lean gate must order the over-cap group and run the no-recorded-decision fallback from its own record of withheld questions and class tags"
+  assert_file_contains "${FILE}" "${LEAN_FREEFORM_IS_OVERRULE_MARKER}" \
+    "a freeform answer must always be an overrule even when it reads like no or decline (AC9)"
+  assert_file_contains "${FILE}" "${LEAN_EMPTY_OTHER_IS_DECLINE_MARKER}" \
+    "empty or whitespace-only Other text must be treated as Decline (AC9)"
+  assert_file_contains "${FILE}" "${LEAN_ONE_PASS_MARKER}" \
+    "the overrule must be one pass that includes its cap-exempt re-invocations, never a second overrule (AC9)"
+done
+
+assert_file_contains "${REFINE_SKILL}" 'reconciles after every refiner output, including the overrule output' \
+  "SKILL.md lean gate must reconcile withheld questions after every refiner output, the overrule output included"
+assert_file_contains "${REFINE_CODEX}" 'reconciles after every analysis pass, including the overrule re-analysis' \
+  "codex.md lean gate must reconcile withheld questions after every analysis pass, the overrule re-analysis included"
+assert_file_contains "${REFINE_SKILL}" 'During the overrule pass, a failed `Task`, an output with neither a proposal nor questions, a malformed proposal, or any non-exempt question is a lean-contract violation' \
+  "SKILL.md overrule pass must treat a failed Task, an empty output, a malformed proposal or a non-exempt question as a lean-contract violation"
+assert_file_contains "${REFINE_CODEX}" 'During the overrule pass, a re-analysis with neither a proposal nor questions, a malformed proposal, or any non-exempt question is a lean-contract violation' \
+  "codex.md overrule pass must treat an empty re-analysis, a malformed proposal or a non-exempt question as a lean-contract violation"
+assert_file_contains "${REFINE_SKILL}" 'cap-exempt questions the refiner raises during it are relayed through step 6' \
+  "SKILL.md overrule pass must relay cap-exempt questions through the lean relay sub-procedure before the single final proposal"
+
 echo "refine-confirmation-gate.test.sh: failures=${failures}"
 [[ "${failures}" -eq 0 ]]
