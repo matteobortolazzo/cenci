@@ -1424,8 +1424,10 @@ same guards and both are idempotent, so whichever fires first closes the window 
 other finds nothing to do.
 
 A ticket counts as *finished* when its issue is closed, or when the issue is still open
-but has a merged closing PR (the verdict comes from `internal/ticketstate`). An
-`Unknown` verdict or a read error counts as *not* finished.
+but has a closing PR merged into the default branch after the issue's last reopen (the
+verdict comes from `internal/ticketstate`). An open issue whose merged closing PRs do
+not qualify, or cannot be checked, reads as `Unknown`. An `Unknown` verdict or a read
+error counts as *not* finished.
 
 Only windows whose name starts with a ticket number are considered. Before each kill the
 daemon re-checks, on its event loop, that the window is still the one that was evaluated
@@ -1459,8 +1461,6 @@ Limitations:
   is not a candidate until then (see [Daemon restart](#daemon-restart)).
 - The repo is identified from the checkout's `origin` remote. A fork checkout looks the
   ticket number up in the fork, not the upstream.
-- An open issue that was reopened after a merged closing PR can read as finished (a known
-  limitation of the reader).
 
 ### Automerge (`cenci babysit`)
 
