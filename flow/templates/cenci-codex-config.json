@@ -2,7 +2,7 @@
   "agents": {
     "codex": {
       "command": "codex",
-      "model": "gpt-5.6-sol",
+      "model": "gpt-6.1-sol",
       "workflows": {
         "implement": {
           "args": [
