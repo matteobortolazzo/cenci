@@ -59,7 +59,7 @@ Gate's normal manifest/confirm step instead, which is what prevents an infinite 
 
 **Confirmation Gate (apply mode, before any GitHub write)**: For a split, follow `parent-blockers.md` before rendering the manifest. Fetch and validate the parent's native blockers and select only OPEN issues. Each child's effective blockers are the deduplicated union: **inherited open parent blockers + blocking siblings**. Include that set in every child's manifest, including the first child. Repeat the shared revalidation before the first write; a changed open set requires fresh confirmation.
 
-No ticket, label, or sub-issue mutation of any kind — including the ownership claim and the `Working` label — happens until
+**Mutation boundary:** no ticket, label, or sub-issue mutation of any kind — including the ownership claim and the `Working` label — happens until
 this gate confirms. For
 each proposed split child, apply the `frontend-classification` reference skill to that child's
 own block text and derive its `Browser` requirement from that classification (frontend/UI, or a
