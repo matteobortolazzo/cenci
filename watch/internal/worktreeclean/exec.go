@@ -1,9 +1,11 @@
 // Package worktreeclean lists a repo's .worktrees/* worktrees from either side
 // of the sandbox mount and reports each one's git and filesystem facts (#1264).
-// It is strictly read-only: it never fetches, prunes or refreshes an index, and
-// every work-tree git call is pinned to an explicit --git-dir/--work-tree. It
-// is a leaf package: it must not import internal/dispatch, internal/run,
-// internal/daemon or internal/pipeline.
+// Its reads go through Inspect and never fetch, prune or refresh an index, and
+// every work-tree git call is pinned to an explicit --git-dir/--work-tree; the
+// only mutating surface (deleting a worktree's directory and admin dir, and a
+// finished worktree's branch) lives in remove.go. It is a leaf package: it must
+// not import internal/dispatch, internal/run, internal/daemon or
+// internal/pipeline.
 package worktreeclean
 
 import (
@@ -119,10 +121,11 @@ func wtArgs(gitDir, workTree string, args []string) []string {
 
 // execCapture runs git in dir (the current directory when empty) under
 // gitTimeout with stdout and stderr captured separately, so a stderr diagnostic
-// can never splice into bytes a caller parses.
-func execCapture(ctx context.Context, dir string, args []string) (stdout, stderr string, err error) {
+// can never splice into bytes a caller parses. extraEnv (KEY=value entries) is
+// appended after the hardened environment, so it wins over it.
+func execCapture(ctx context.Context, dir string, args []string, extraEnv ...string) (stdout, stderr string, err error) {
 	out := boundedWriter{max: maxStdoutBytes}
-	stderr, err = runBounded(ctx, gitTimeout, dir, args, &out)
+	stderr, err = runBounded(ctx, gitTimeout, dir, args, &out, extraEnv...)
 	if out.truncated {
 		err = errors.Join(err, errOutputTruncated)
 	}
@@ -130,15 +133,15 @@ func execCapture(ctx context.Context, dir string, args []string) (stdout, stderr
 }
 
 // runBounded runs git under a timeout-bounded child of ctx with stdin unset and
-// the hardened environment, writing stdout to the given writer. The returned
-// error carries errTimeout for a deadline or WaitDelay kill and
-// errOutputTruncated for a stderr stream over its cap.
-func runBounded(ctx context.Context, timeout time.Duration, dir string, args []string, stdout io.Writer) (stderr string, err error) {
+// the hardened environment (plus extraEnv, appended last), writing stdout to the
+// given writer. The returned error carries errTimeout for a deadline or
+// WaitDelay kill and errOutputTruncated for a stderr stream over its cap.
+func runBounded(ctx context.Context, timeout time.Duration, dir string, args []string, stdout io.Writer, extraEnv ...string) (stderr string, err error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
-	cmd.Env = gitEnv()
+	cmd.Env = append(gitEnv(), extraEnv...)
 	cmd.WaitDelay = waitDelay
 	errBuf := boundedWriter{max: maxStderrBytes}
 	cmd.Stdout = stdout
