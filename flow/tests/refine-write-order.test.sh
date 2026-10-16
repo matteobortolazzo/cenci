@@ -182,8 +182,8 @@ assert_eq "$(classify_drift "${BASELINE_LABELS}" "${MIXED_DRIFT_LABELS}")" "auth
 
 GOOD_NO_SPLIT_SEQ="claim working parent-body refined visual-check"
 # The canonical 2-child split: child-blockers:K is optional per child, and
-# child 1 never carries one -- children are created in dependency order, so
-# the first child has no already-created sibling to be blocked by. This is
+# this example has no open parent blockers, so child 1 has no blockers.
+# When open parent blockers exist, even child 1 has a blockers op. This is
 # the sequence the docs' `### Write order` sections and the adversarial-chain
 # golden fixture pin, so it must be the one called canonical here too.
 GOOD_SPLIT_SEQ="claim working parent-body child-create:1 child-link:1 child-create:2 child-link:2 child-blockers:2 parent-exec-order refined visual-check"
@@ -198,8 +198,8 @@ verify_refine_write_order ""; rc=$?
 assert_ok "${rc}" "verify_refine_write_order: the empty sequence (zero writes) must be vacuously accepted -- the shape produced by a decline, a post-confirm ownership conflict, or an unreadable parent"
 
 # Positive (#1055): the oracle is a shape checker, not a dependency-order
-# checker -- a blockers op on EVERY child is still a well-formed shape it
-# must accept, even though the procedure itself cannot emit one for child 1.
+# checker -- inherited open parent blockers require a blockers op on EVERY
+# child, including child 1, even when it has no blocking sibling.
 BLOCKERS_EVERY_CHILD_SEQ="claim working parent-body child-create:1 child-link:1 child-blockers:1 child-create:2 child-link:2 child-blockers:2 parent-exec-order refined visual-check"
 verify_refine_write_order "${BLOCKERS_EVERY_CHILD_SEQ}"; rc=$?
 assert_ok "${rc}" "verify_refine_write_order: a shape carrying child-blockers:K on every child must still be accepted -- the oracle checks adjacency/ordering, not which children can have blockers"

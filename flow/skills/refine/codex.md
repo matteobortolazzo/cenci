@@ -57,7 +57,9 @@ not already being set, a re-derived proposal that still concludes L on the same 
 does not re-trigger the ask on this second pass — it flows straight to the Confirmation
 Gate's normal manifest/confirm step instead, which is what prevents an infinite re-ask loop.
 
-**Confirmation Gate (apply mode, before any GitHub write)**: no ticket, label, or sub-issue mutation of any kind — including the ownership claim and the `Working` label — happens until
+**Confirmation Gate (apply mode, before any GitHub write)**: For a split, follow `parent-blockers.md` before rendering the manifest. Fetch and validate the parent's native blockers and select only OPEN issues. Each child's effective blockers are the deduplicated union: **inherited open parent blockers + blocking siblings**. Include that set in every child's manifest, including the first child. Repeat the shared revalidation before the first write; a changed open set requires fresh confirmation.
+
+**Mutation boundary:** no ticket, label, or sub-issue mutation of any kind — including the ownership claim and the `Working` label — happens until
 this gate confirms. For
 each proposed split child, apply the `frontend-classification` reference skill to that child's
 own block text and derive its `Browser` requirement from that classification (frontend/UI, or a
@@ -75,7 +77,8 @@ parent's own pending ownership-claim and `Working` transition), then ask, via th
 available user-input mechanism, "Apply this refinement as shown?" with Confirm/Decline options —
 no adjust loop. A **Decline** performs zero GitHub writes and requires no cleanup mutation: title,
 body, labels, assignees, milestone, and native sub-issues are state-for-state unchanged, and
-re-running refine is how to adjust. Only a Confirm proceeds to the write phase below.
+re-running refine is how to adjust. Remove the pre-confirmation parent-blocker scratch
+file on Decline, per `parent-blockers.md`. Only a Confirm proceeds to the write phase below.
 
 Once confirmed, every write proceeds in this order: claim → Working → parent body →
 children+links → Pass 2 → Refined/-Working → ui:visual-check (see `### Write order`
@@ -86,7 +89,9 @@ against the gate-time snapshot: **authorization-sensitive drift** (`automerge:ok
 `ui:visual-check` changed on the parent) stops the run with zero writes and asks for a fresh
 `$cenci:refine apply` from scratch — no in-session re-gate; **cosmetic drift** (milestone,
 `area:*`, priority, team, or any other label) proceeds using the freshly fetched
-snapshot and discloses the drift in the final message.
+snapshot and discloses the drift in the final message. For a split, also repeat
+`parent-blockers.md`'s open-blocker fetch and comparison here before claiming ownership;
+a read/validation failure or changed open set stops with zero writes.
 
 **`automerge:ok` grant (apply mode, parent ticket)**: as part of the same label edit
 that applies `Refined`/`Browser`, use the effective grant computed at the
@@ -111,15 +116,15 @@ proposal partitions the parent's acceptance criteria:
 every parent criterion assigned to exactly one child (integration-scoped criteria on a child that
 depends on all others); an unassigned or duplicated criterion aborts the split before any GitHub
 write. Each child body opens with `Related to #<parent>` and, immediately after it and before any
-`Parallel with #<sibling>` line, one `Depends on #<sibling>` line per blocking sibling (each on
-its own line) — a **permanent, human-visible supplement** to the native `--add-blocked-by` link
+`Parallel with #<sibling>` line, one `Depends on #<blocker>` line per effective blocker (each on
+its own line; `Depends on #<sibling>` for siblings) — a **permanent, human-visible supplement** to the native `--add-blocked-by` link
 applied after creation (below), never a replacement for it: `mergeDependencies` unions native and
 prose sources with native state winning on any collision, and the prose line costs zero extra `gh`
 calls once the native link is already applied. A child with no blockers gets no `Depends on` line
 at all. Because Pass 1 creates children in dependency order, every blocker's own issue number is
-known by the time its dependent is created — except at the moment the dependent's own body file is
-first written, which is why that initial write omits its `Depends on` line(s) entirely (never a
-blank placeholder), and the same body-file path is re-written with the resolved numbers immediately
+known by the time its dependent is created. Inherited open parent blocker numbers come from the validated snapshot. The dependent's body file is
+first written without any `Depends on` lines; that initial write omits them entirely (never a
+blank placeholder), and the same body-file path is re-written with the complete effective set immediately
 before that child's own `ensure-issue.sh ensure` call; a child with no blockers is written once and
 never rewritten (`ensure-issue.sh`'s `bodyHash` is recorded at `init` but never read back, so this
 in-place rewrite is safe). Each child body then carries its own `### Acceptance Criteria` section —
@@ -150,13 +155,14 @@ from the parent side before returning success; do not append a child-ticket mark
 the native sub-issue list carries the enumeration.
 
 **Mark each child's blockers, immediately after its own `link` call succeeds** — one
-`--add-blocked-by` per sibling this child depends on, using GitHub's native issue-dependency
+`--add-blocked-by` per missing effective blocker after the shared `parent-blockers.md` read-before-add check, using GitHub's native issue-dependency
 relationship (requires `gh` >= 2.94.0): `gh issue edit <child-number> --repo <owner>/<repo>
---add-blocked-by <blocking-sibling-number>` (several combinable via a comma-separated list or
+--add-blocked-by <blocker-number>` (several combinable via a comma-separated list or
 repeated flags). Creating children in dependency order guarantees every blocker already has a
-number by the time this runs. Skip this entirely for a child with no dependencies. Verify with
-`gh issue view <child-number> --repo <owner>/<repo> --json blockedBy --jq
-'.blockedBy.nodes[].number'`; a failed edit or verification follows the same retry-once-then-stop
+number by the time this runs. Use the same inherited-open-plus-sibling set as the body, including on the first child. Skip this entirely only for an empty effective blocker set. Verify every expected blocker is present with
+`gh issue view <child-number> --repo <owner>/<repo> --json blockedBy`;
+validate completeness and compare the returned numbers against the entire expected set.
+A failed edit, invalid response, or missing expected link follows the same retry-once-then-stop
 protocol as every other write in this procedure — do not create any further children.
 
 If the checkpoint is missing or corrupt (bad JSON, wrong schema version), or a checkpoint field
@@ -165,7 +171,8 @@ non-zero (11) and this is by design — it must **fail closed** and never silent
 candidate-derived value that can't be read or fails validation exits 12 the same way, before any write. Treat that, and any other non-zero `ensure-issue.sh` exit, as a hard
 stop: report the error and do not create any further children. Once the run
 completes successfully, run `ensure-issue.sh clear --checkpoint <path>` (idempotent — a second
-`clear` is not an error); an aborted run instead retains the checkpoint so the next attempt
+`clear` is not an error), then perform `parent-blockers.md`'s explicit scratch-file cleanup;
+an aborted run instead retains the checkpoint so the next attempt
 resumes from it rather than re-creating already-created issues.
 
 Every ticket this workflow creates — each split child — inherits the parent's milestone (as the numeric `.milestone.number`,
@@ -197,8 +204,8 @@ no comments and never lists/closes an issue), plus `gh label create …`, `gh ap
 (via `ticket-ownership`), `gh api repos/…`, and `"${PLUGIN_ROOT}/skills/refine/scripts/ensure-issue.sh"`
 itself; its `git` surface is limited to `git remote
 get-url` (the script derives nothing from `git` itself — it receives `--repo <owner>/<repo>` as an
-argument); and its own standalone-`jq` surface is a `jq -n --rawfile …` payload composition at the
-retitle site. Every child-ticket create now goes through
+argument); its standalone-`jq` surface includes `jq -n --rawfile …` payload composition at the
+retitle site and `jq -e` validation/filtering in `parent-blockers.md`. Every child-ticket create now goes through
 `ensure-issue.sh` rather than this procedure's own inline `gh api` calls (#876): internally the
 script composes its create/repair payloads via `jq -n --rawfile …` plus `--slurpfile` for the
 parent-metadata label/milestone merge — the same mechanism that lets externally-sourced label
@@ -220,14 +227,14 @@ title/body inputs — never an inline `--title` and never a hand-escaped JSON li
 claim (the ownership claim, first write) → working (the Working label ensure + add) →
 parent body (the parent ticket edit) → for each split child in dependency order, child-create
 immediately followed by its own child-link, immediately followed by its own child-blockers when
-that child has at least one blocking sibling (omitted entirely for a child with none — the first
-child never carries one, since children are created in dependency order and child 1 has no
-already-created sibling to be blocked by), and so on,
+that child has any effective blocker (inherited open parent blocker or blocking sibling).
+The first child runs its blockers op too when it inherits an open parent blocker; omit the op
+only for an empty effective set, and so on,
 all before parent-exec-order → parent-exec-order (the Execution Order note when the split has
 real ordering; unused when there is no split) → refined (the Refined label add / Working label
 removal) → visual-check (the ui:visual-check label add).
 
-Op tokens, in canonical order for a 2-child split where child 2 depends on child 1: `claim`
+Op tokens, in canonical order for a 2-child split with no open parent blockers, where child 2 depends on child 1: `claim`
 `working` `parent-body` `child-create:1` `child-link:1` `child-create:2` `child-link:2`
 `child-blockers:2` `parent-exec-order` `refined` `visual-check` — child 1 carries no blockers op,
-because it has no already-created sibling to be blocked by.
+because this illustration has neither inherited open blockers nor a blocking sibling for child 1.
