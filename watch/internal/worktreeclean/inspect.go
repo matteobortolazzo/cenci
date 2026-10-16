@@ -71,10 +71,32 @@ var branchPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]*$`)
 // entry that does not map now yields ErrUnmapped with the reason and no facts. A
 // Repo that is not a canonical main checkout (see validRepo) is refused too.
 //
-// Every fact is read with explicit --git-dir/--work-tree and without writing
-// anything or running a repo-configured command: a clean or process filter in
-// the repository's own configuration makes Inspect refuse, since `git status`
-// would run it on any stat-dirty file.
+// Every git read runs against a private snapshot git dir that Inspect builds for
+// this one call (#1278), with --work-tree pointing at the real worktree. The
+// snapshot holds copies of the repository and worktree config, HEAD, the index
+// and the refs, made without following symlinks and within size and count
+// limits, and reaches the live objects through alternates. The configuration and
+// refs git reads are therefore copies only cenci can write: a sandboxed agent
+// that edits the live repo after the checks cannot change what the later reads
+// use, so what is checked is what is used. The snapshot is always removed before
+// Inspect returns, and a failed removal is joined into the returned error.
+//
+// Inspect refuses (an error and no facts, so the worktree is kept) when a snapshot
+// source is a symlink or not a regular file, when a size or count limit is
+// exceeded, when the copied config holds an include.* or includeIf.* key (git
+// would read the included file live again), when extensions.refStorage is
+// anything but files (a reftable cannot be copied as loose files), and for a
+// split index (the shared index file is not copied, so git fails). A clean or
+// process filter in the copied configuration makes Inspect refuse too, since
+// `git status` would run it on any stat-dirty file. Nothing is written to the live
+// repo, and no repo-configured command is run.
+//
+// Not everything comes from the snapshot: the worktree's files and .gitattributes
+// are read live, which is the point of the inspection, and the lock file, index
+// and HEAD-log mtimes are read from the live admin dir with Lstat. The snapshot
+// is not a point-in-time view of the repo: an agent writing during the copy can
+// leave HEAD, the index and the refs out of step, which at worst yields a git
+// error or an unborn or unpushed HEAD (both keep the worktree).
 //
 // Worktrees containing submodules are reported as errors (kept) by design, a
 // deliberate limit: any worktree whose index or HEAD tree holds a gitlink (mode
@@ -100,7 +122,22 @@ func Inspect(ctx context.Context, repo Repo, entry Entry) (Facts, error) {
 	if m.Mapping == MappingUnmapped {
 		return Facts{}, fmt.Errorf("%w: %s (admin entry %q)", ErrUnmapped, m.Reason, entry.AdminName)
 	}
-	if err := rejectConfiguredFilters(ctx, m); err != nil {
+	snap, err := newSnapshot(ctx, repo, m)
+	if err != nil {
+		return Facts{}, err
+	}
+	if afterSnapshot != nil {
+		afterSnapshot(snap.dir)
+	}
+	facts, err := inspectSnapshot(ctx, m, snap.dir)
+	return facts, errors.Join(err, snap.remove())
+}
+
+// inspectSnapshot gathers the facts of the mapped worktree m, running every git
+// read against the snapshot git dir gitDir. Only the lock file and the admin
+// index and HEAD-log mtimes still come from m.AdminDir.
+func inspectSnapshot(ctx context.Context, m Entry, gitDir string) (Facts, error) {
+	if err := rejectConfiguredFilters(ctx, m, gitDir); err != nil {
 		return Facts{}, err
 	}
 
@@ -108,7 +145,7 @@ func Inspect(ctx context.Context, repo Repo, entry Entry) (Facts, error) {
 	// before status runs; HEAD's tree needs the SHA status reports, so it is
 	// checked right after. Neither order matters for safety: --ignore-submodules=all
 	// below means status never starts a process inside a gitlink directory.
-	if err := rejectGitlinksInIndex(ctx, m); err != nil {
+	if err := rejectGitlinksInIndex(ctx, m, gitDir); err != nil {
 		return Facts{}, err
 	}
 
@@ -117,25 +154,25 @@ func Inspect(ctx context.Context, repo Repo, entry Entry) (Facts, error) {
 	// would load that submodule's own agent-writable config and attributes (and run
 	// its clean filter or fsmonitor hook). It also overrides every way a submodule
 	// can be configured, so the setting cannot vary with .gitmodules or repo config.
-	stdout, stderr, err := execGitWT(ctx, m.AdminDir, m.LocalPath,
+	stdout, stderr, err := execGitWT(ctx, gitDir, m.LocalPath,
 		"status", "--porcelain=v2", "-z", "--branch", "--untracked-files=normal", "--ignore-submodules=all")
 	if err != nil {
 		return Facts{}, fmt.Errorf("git status in %s: %w", m.LocalPath, withStderr(err, stderr))
 	}
 	facts, err := parseStatus(stdout)
 	if err != nil {
-		return facts, fmt.Errorf("parse git status of %s: %w", m.LocalPath, err)
+		return Facts{}, fmt.Errorf("parse git status of %s: %w", m.LocalPath, err)
 	}
 
 	// =all also hides a staged add or delete of a gitlink, so HEAD's tree is
 	// checked as well; the index is re-read to catch a gitlink added since the
 	// first check.
 	if facts.HeadSHA != "" {
-		if err := rejectGitlinksInHead(ctx, m, facts.HeadSHA); err != nil {
+		if err := rejectGitlinksInHead(ctx, m, gitDir, facts.HeadSHA); err != nil {
 			return Facts{}, err
 		}
 	}
-	if err := rejectGitlinksInIndex(ctx, m); err != nil {
+	if err := rejectGitlinksInIndex(ctx, m, gitDir); err != nil {
 		return Facts{}, err
 	}
 
@@ -146,12 +183,12 @@ func Inspect(ctx context.Context, repo Repo, entry Entry) (Facts, error) {
 
 	var commitDate time.Time
 	if facts.HeadSHA != "" {
-		facts.ReachableFromRemote, err = reachableFromRemote(ctx, m, facts.HeadSHA)
+		facts.ReachableFromRemote, err = reachableFromRemote(ctx, m, gitDir, facts.HeadSHA)
 		errs = append(errs, err)
-		commitDate, err = lastCommitDate(ctx, m, facts.HeadSHA)
+		commitDate, err = lastCommitDate(ctx, m, gitDir, facts.HeadSHA)
 		errs = append(errs, err)
 	}
-	facts.LastActivity, err = lastActivity(ctx, m, commitDate)
+	facts.LastActivity, err = lastActivity(ctx, m, gitDir, commitDate)
 	errs = append(errs, err)
 	facts.SizeBytes, err = diskUsage(ctx, m.LocalPath)
 	errs = append(errs, err)
@@ -160,8 +197,8 @@ func Inspect(ctx context.Context, repo Repo, entry Entry) (Facts, error) {
 
 // validRepo refuses a caller-supplied Repo that is not exactly what ResolveRepo
 // returns: absolute, cleaned paths with CommonDir being MainRoot/.git. Inspect
-// feeds both into --git-dir/--work-tree arguments and pointer comparisons, so a
-// hand-built or corrupted value must not steer it.
+// feeds both into the snapshot's copy sources and alternates and into pointer
+// comparisons, so a hand-built or corrupted value must not steer it.
 func validRepo(repo Repo) error {
 	for _, f := range []struct{ name, path string }{{"MainRoot", repo.MainRoot}, {"CommonDir", repo.CommonDir}} {
 		if !filepath.IsAbs(f.path) || filepath.Clean(f.path) != f.path {
@@ -179,14 +216,15 @@ func validRepo(repo Repo) error {
 const filterKeyPattern = `^filter\..*\.(clean|process)$`
 
 // rejectConfiguredFilters refuses a worktree whose repository (local or
-// worktree scope) or command-line configuration defines a clean or process
-// filter. Which files use a filter is decided by .gitattributes, which the same
-// agent can write, so the presence of the configuration is enough to deny.
-// System and global scopes are the host's own and are tolerated (git-lfs
-// installs its filters there). Only a clean "no match" (exit 1, no output at
-// all) passes; every other outcome of the probe is an error.
-func rejectConfiguredFilters(ctx context.Context, m Entry) error {
-	stdout, stderr, err := execGitWT(ctx, m.AdminDir, m.LocalPath,
+// worktree scope, as copied into the snapshot gitDir) or command-line
+// configuration defines a clean or process filter. Which files use a filter is
+// decided by .gitattributes, which the same agent can write, so the presence of
+// the configuration is enough to deny. System and global scopes are the host's
+// own and are tolerated (git-lfs installs its filters there). Only a clean "no
+// match" (exit 1, no output at all) passes; every other outcome of the probe is
+// an error.
+func rejectConfiguredFilters(ctx context.Context, m Entry, gitDir string) error {
+	stdout, stderr, err := execGitWT(ctx, gitDir, m.LocalPath,
 		"config", "--show-scope", "--get-regexp", filterKeyPattern)
 	if err != nil {
 		// Compared by type, not errors.As: a timeout or truncation joined to the
@@ -212,9 +250,9 @@ const gitlinkMode = "160000"
 var modePattern = regexp.MustCompile(`^[0-7]{6}$`)
 
 // rejectGitlinksInIndex refuses a worktree whose index holds a gitlink.
-func rejectGitlinksInIndex(ctx context.Context, m Entry) error {
+func rejectGitlinksInIndex(ctx context.Context, m Entry, gitDir string) error {
 	// ls-files --stage entries: "<mode> <object> <stage>\t<path>".
-	err := execGitWTStream(ctx, m.AdminDir, m.LocalPath, gitlinkScanner("index"), "ls-files", "--stage", "-z")
+	err := execGitWTStream(ctx, gitDir, m.LocalPath, gitlinkScanner("index"), "ls-files", "--stage", "-z")
 	if err != nil {
 		return fmt.Errorf("scan the index of %s for submodules: %w", m.LocalPath, err)
 	}
@@ -223,12 +261,12 @@ func rejectGitlinksInIndex(ctx context.Context, m Entry) error {
 
 // rejectGitlinksInHead refuses a worktree whose HEAD commit tree holds a gitlink.
 // sha must be the hex-validated object name status reported.
-func rejectGitlinksInHead(ctx context.Context, m Entry, sha string) error {
+func rejectGitlinksInHead(ctx context.Context, m Entry, gitDir, sha string) error {
 	if !isHexSHA(sha) {
 		return fmt.Errorf("scan HEAD of %s for submodules: malformed HEAD %q", m.LocalPath, sha)
 	}
 	// ls-tree entries: "<mode> <type> <object>\t<path>".
-	err := execGitWTStream(ctx, m.AdminDir, m.LocalPath, gitlinkScanner("HEAD tree"), "ls-tree", "-r", "-z", sha)
+	err := execGitWTStream(ctx, gitDir, m.LocalPath, gitlinkScanner("HEAD tree"), "ls-tree", "-r", "-z", sha)
 	if err != nil {
 		return fmt.Errorf("scan HEAD of %s for submodules: %w", m.LocalPath, err)
 	}
@@ -358,8 +396,8 @@ func isLocked(adminDir string) (bool, error) {
 
 // reachableFromRemote reports whether sha is contained in any remote-tracking
 // ref, using only the local refs/remotes as of the last fetch.
-func reachableFromRemote(ctx context.Context, m Entry, sha string) (bool, error) {
-	stdout, stderr, err := execGitWT(ctx, m.AdminDir, m.LocalPath,
+func reachableFromRemote(ctx context.Context, m Entry, gitDir, sha string) (bool, error) {
+	stdout, stderr, err := execGitWT(ctx, gitDir, m.LocalPath,
 		"for-each-ref", "--count=1", "--format=%(refname)", "--contains", sha, "refs/remotes")
 	if err != nil {
 		return false, fmt.Errorf("git for-each-ref --contains in %s: %w", m.LocalPath, withStderr(err, stderr))
@@ -368,8 +406,8 @@ func reachableFromRemote(ctx context.Context, m Entry, sha string) (bool, error)
 }
 
 // lastCommitDate is the committer date of sha.
-func lastCommitDate(ctx context.Context, m Entry, sha string) (time.Time, error) {
-	stdout, stderr, err := execGitWT(ctx, m.AdminDir, m.LocalPath, "log", "-1", "--no-show-signature", "--format=%ct", sha, "--")
+func lastCommitDate(ctx context.Context, m Entry, gitDir, sha string) (time.Time, error) {
+	stdout, stderr, err := execGitWT(ctx, gitDir, m.LocalPath, "log", "-1", "--no-show-signature", "--format=%ct", sha, "--")
 	if err != nil {
 		return time.Time{}, fmt.Errorf("git log in %s: %w", m.LocalPath, withStderr(err, stderr))
 	}
@@ -380,12 +418,14 @@ func lastCommitDate(ctx context.Context, m Entry, sha string) (time.Time, error)
 	return time.Unix(secs, 0), nil
 }
 
-// lastActivity is the newest of the commit date, the admin index and HEAD-log
-// mtimes and the mtime of every tracked or untracked non-ignored file (ignored
-// trees are never walked). A future-dated mtime is not clamped: it makes the
-// worktree look recently active, which keeps it. A missing file is skipped; any
-// other failure, and an unfinished listing, is an error.
-func lastActivity(ctx context.Context, m Entry, commitDate time.Time) (time.Time, error) {
+// lastActivity is the newest of the commit date, the live admin dir's index and
+// HEAD-log mtimes (read with Lstat, not through git, so they are the real
+// activity signal and not the snapshot's) and the mtime of every tracked or
+// untracked non-ignored file listed through the snapshot gitDir (ignored trees
+// are never walked). A future-dated mtime is not clamped: it makes the worktree
+// look recently active, which keeps it. A missing file is skipped; any other
+// failure, and an unfinished listing, is an error.
+func lastActivity(ctx context.Context, m Entry, gitDir string, commitDate time.Time) (time.Time, error) {
 	newest := commitDate
 	consider := func(path string) error {
 		info, err := os.Lstat(path)
@@ -408,7 +448,7 @@ func lastActivity(ctx context.Context, m Entry, commitDate time.Time) (time.Time
 			return newest, fmt.Errorf("stat %s: %w", p, err)
 		}
 	}
-	err := execGitWTStream(ctx, m.AdminDir, m.LocalPath, func(rel string) error {
+	err := execGitWTStream(ctx, gitDir, m.LocalPath, func(rel string) error {
 		if !filepath.IsLocal(rel) {
 			return fmt.Errorf("git listed a path outside the worktree: %q", rel)
 		}

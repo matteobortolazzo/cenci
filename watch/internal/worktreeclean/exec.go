@@ -1,11 +1,13 @@
 // Package worktreeclean lists a repo's .worktrees/* worktrees from either side
 // of the sandbox mount and reports each one's git and filesystem facts (#1264).
 // Its reads go through Inspect and never fetch, prune or refresh an index, and
-// every work-tree git call is pinned to an explicit --git-dir/--work-tree; the
-// only mutating surface (deleting a worktree's directory and admin dir, and a
-// finished worktree's branch) lives in remove.go. It is a leaf package: it must
-// not import internal/dispatch, internal/run, internal/daemon or
-// internal/pipeline.
+// every work-tree git call is pinned to an explicit --git-dir/--work-tree. For
+// Inspect that --git-dir is a per-call private snapshot git dir (snapshot.go,
+// #1278), never the live admin or common dir, so the configuration a call checks
+// is the configuration it uses. The only mutating surface (deleting a worktree's
+// directory and admin dir, and a finished worktree's branch) lives in remove.go.
+// It is a leaf package: it must not import internal/dispatch, internal/run,
+// internal/daemon or internal/pipeline.
 package worktreeclean
 
 import (
@@ -40,6 +42,15 @@ var (
 	maxStdoutBytes     = 1 << 20
 	maxStderrBytes     = 64 << 10
 	maxActivityEntries = 500000
+	// maxSnapshotBytes caps the total bytes copied into one snapshot git dir and
+	// maxSnapshotRefs the entries of its loose-refs walk; going over either wraps
+	// errOutputTruncated.
+	maxSnapshotBytes = 256 << 20
+	maxSnapshotRefs  = 100000
+	// snapshotParent is where snapshot git dirs are created ("" means
+	// os.TempDir()); removeSnapshotDir deletes one. Both are test seams.
+	snapshotParent    = ""
+	removeSnapshotDir = os.RemoveAll
 )
 
 // maxStreamEntryBytes bounds one streamed entry (a path); PATH_MAX is 4096, so
@@ -85,10 +96,11 @@ func execGit(ctx context.Context, dir string, args ...string) (stdout, stderr st
 	return execCapture(ctx, "", append([]string{"-C", dir}, args...))
 }
 
-// execGitWT runs git against one worktree with an explicit --git-dir and
-// --work-tree, never touching the index: --no-optional-locks (plus
-// GIT_OPTIONAL_LOCKS=0 in the environment) stops `status` from refreshing it and
-// core.fsmonitor=false stops a configured fsmonitor hook from running.
+// execGitWT runs git against one worktree with an explicit --git-dir (Inspect
+// passes its snapshot) and --work-tree, never touching the index:
+// --no-optional-locks (plus GIT_OPTIONAL_LOCKS=0 in the environment) stops
+// `status` from refreshing it and core.fsmonitor=false stops a configured
+// fsmonitor hook from running.
 func execGitWT(ctx context.Context, gitDir, workTree string, args ...string) (stdout, stderr string, err error) {
 	return execCapture(ctx, workTree, wtArgs(gitDir, workTree, args))
 }
