@@ -1,5 +1,10 @@
 # Codex review procedure
 
+Before accepting reviews or acting on findings, apply the security and silent-failure
+triggers in the plugin's `docs/model-escalation.md`. When triggered, delegate a bounded
+second opinion to `domain-specialist` with the existing reviews and source paths;
+validate its evidence using the rules below and retain all required normal reviews.
+
 Read `project-core`, `codex-runtime`, and `subagent-safety`. Gather the diff once, then use
 the generated code/security reviewer adapters (or equivalent built-in workers) for bounded
 parallel review. Validate every finding against the diff and report only actionable issues;

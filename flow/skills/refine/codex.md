@@ -1,5 +1,10 @@
 # Codex refine procedure
 
+Before presenting questions or accepting a candidate proposal, apply the planning
+triggers in the plugin's `docs/model-escalation.md`. When triggered, delegate a
+bounded second opinion to `domain-specialist`; validate its evidence and reconcile
+the proposal without reopening settled decisions. Carry the result across Q&A rounds.
+
 Read `project-core` and `codex-runtime`. Require `/plan`. Gather ticket context, classify
 frontend scope, and produce the refined ticket proposal. Ask ONLY about product
 decisions, architecture decisions with a real trade-off, or contradictions/unknowns the

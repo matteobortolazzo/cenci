@@ -6,6 +6,13 @@ user-invocable: true
 disable-model-invocation: true
 ---
 
+For Claude and Codex, apply the diagnosis trigger in the plugin's
+`docs/model-escalation.md`: after two failed attempts at the same unexplained
+defect, delegate a bounded second opinion to `domain-specialist` with logs,
+source paths, and attempted fixes. Validate its evidence before applying advice.
+This does not add repair attempts or defer the ambiguity stop below; if that stop
+already applies, return the diagnosis through it without another fix attempt.
+
 Read `project-core`, `testing`, `shell-rules`, and `subagent-safety`. Diagnose the named
 failing jobs, work only in the PR branch worktree, reproduce the root cause locally, make
 the smallest test-backed fix, verify the fix is green via the project's local gate

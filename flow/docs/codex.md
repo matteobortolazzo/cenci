@@ -44,6 +44,14 @@ and Codex adapters both have to satisfy.
 
 ## Agent role templates
 
+`domain-specialist` is the escalation role for qualifying tasks, pinned to `gpt-6-astra`
+with high reasoning effort. The [shared policy](model-escalation.md) defines the
+triggers, bounded read-only dispatch, evidence validation, and unavailable-model
+fallback. Normal planner, implementer, reviewer, and context roles keep their
+existing pins. Re-running configure installs the new missing role; existing role
+customizations are preserved. The repository's installed specialist mirrors its
+template. These pins are configuration, not a guarantee of account-level access.
+
 Role TOMLs live at `templates/codex/agent-roles/`, not `templates/codex/agents/`
 (#1040). An unscoped directory literally named `agents` sitting inside this Codex
 plugin's own root (`flow/`) is suspected of being auto-discovered by Codex's plugin

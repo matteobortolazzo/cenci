@@ -107,6 +107,12 @@ Launch all 3 analyzers as parallel Task tool calls in a **SINGLE message**.
 
 Parse each agent's structured output and merge findings into a unified list.
 
+Before presenting proposals, apply the synthesis, security, and silent-failure
+triggers in the plugin's `docs/model-escalation.md`. When triggered, delegate a
+bounded second opinion to `domain-specialist`, supplying the completed findings
+and source paths. Validate its evidence and preserve the original finding IDs,
+categories, and approval scope; routine deduplication needs no specialist.
+
 ### Deduplication
 
 If multiple analyzers flag the same file/location:

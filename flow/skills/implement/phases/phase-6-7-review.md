@@ -76,6 +76,13 @@ Branch on the classification result written above:
 
 ## Verify Before Fixing
 
+Before accepting reviews or acting on findings, apply the security and silent-failure
+triggers in the plugin's `docs/model-escalation.md`. When triggered, delegate one
+bounded second opinion to `domain-specialist`, including the normal reviewers'
+findings and the relevant source paths. Preserve the reviewer set selected above,
+review concurrency, and all fix/retry limits. Validate specialist findings with the
+same source-reading rule below; do not treat model choice as evidence.
+
 A reviewer's finding is a claim, not evidence — per Anthropic's Opus 5.5 guidance for subagent fan-out, when a subagent reports back, check its evidence before you accept it. Before delegating or applying any fix for a **Must Fix**, **Critical**, or **High** finding from any of the three reviewers, the orchestrating agent reads the cited file and line itself and confirms the finding holds against the actual code (the defect is really there, in the form claimed). A finding that does not hold is **not** fixed: record it as a one-line `Considered and discarded` entry in the PR's `## Notes` (see `phase-9-pr.md`) stating what was claimed and why it does not hold, so the rejection stays visible rather than silently vanishing. Findings below those tiers follow the fix-now-or-discard rules in the Actions sections below unchanged; this check adds no temp file, gate, or phase — it is a read of the cited location before the first fix is dispatched.
 
 ## Security Review Actions

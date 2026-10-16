@@ -1,5 +1,11 @@
 # Codex address-review procedure
 
+Before fixing in-scope feedback, apply the security, silent-failure, and diagnosis
+triggers in the plugin's `docs/model-escalation.md`. When triggered, delegate a
+bounded second opinion to `domain-specialist` using the cited sources, feedback,
+and any failed attempts. Validate its evidence; preserve actionability filtering,
+approved scope, existing stop rules, and the prohibition on extra review cycles.
+
 Read `project-core`, `codex-runtime`, and `pr-comment-filter`. Fetch review threads and evaluate
 actionability against `pr-comment-filter`'s Include/Exclude lists — in scope: unresolved threads
 and resolved threads with new activity since resolution; excluded: bot comments, cenci's own

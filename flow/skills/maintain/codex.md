@@ -50,6 +50,12 @@ category, or imply that category was verified clean.
 
 ## Phase 4 — Report
 
+Before presenting recommendations, apply the synthesis trigger in the plugin's
+`docs/model-escalation.md`. When completed audits contain conflicting architectural
+recommendations, delegate their bounded reconciliation to `domain-specialist`.
+Validate its source evidence and retain finding IDs, the eight-field schema, and
+every incomplete-audit status; this pass does not expand the audit or approval scope.
+
 Present the deterministic results grouped by pass, warn, fail, and skip, including each
 non-pass result's concrete fix. Then list worker findings grouped by Structure,
 Documentation drift, Generated index drift, Client mismatch, Test gap, Rule hygiene, and
