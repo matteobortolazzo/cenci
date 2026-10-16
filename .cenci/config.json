@@ -141,5 +141,8 @@
   },
   "cenci": {
     "diffContextMode": "file"
+  },
+  "refinement": {
+    "autonomy": "lean"
   }
 }
