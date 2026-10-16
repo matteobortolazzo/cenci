@@ -24,6 +24,8 @@ import (
 // skipped. Only "<pid>\t<start>" rows are printed (start is /proc/<pid>/stat
 // field 22, empty if it could not be read), never anything process-controlled.
 //
+// A non-dumpable child's ownership can come from a tagged, same-user launcher
+// ancestor (parentEnvironScript), while retaining the child's own PID/start.
 // A grep that exits above 1 (2: the environ could not be read; 127: grep could
 // not run) is not a "no match": folding it into one would let a blind probe
 // report a clean kill. Mirroring reapScanScript, a process that still exists
@@ -31,7 +33,29 @@ import (
 // real user, whose environ an unprivileged probe is never meant to read (a root
 // helper in the container would otherwise make every close look blind). The
 // uid check fails toward reporting: an unreadable status or uid reports.
-const launchProbeScript = `id="$1"; me=$$; uid=$(id -u 2>/dev/null); set --; for e in /proc/[0-9]*/environ; do p=${e#/proc/}; p=${p%/environ}; [ "$p" = 1 ] && continue; [ "$p" = "$me" ] && continue; grep --null-data --text --quiet --line-regexp --fixed-strings -e "` + LaunchIDEnvName + `=$id" "$e" 2>/dev/null; rc=$?; if [ "$rc" -gt 1 ]; then if [ -e "$e" ]; then u=$(sed -n 's/^Uid:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "/proc/$p/status" 2>/dev/null); if [ -z "$u" ] || [ -z "$uid" ] || [ "$u" = "$uid" ]; then printf "__UNREADABLE__\t%s\n" "$p"; fi; fi; continue; fi; [ "$rc" -eq 0 ] || continue; st=$(cat "/proc/$p/stat" 2>/dev/null); st=${st##*) }; set -- $st; if [ "$#" -ge 20 ]; then shift 19; start=$1; else start=""; fi; printf "%s\t%s\n" "$p" "$start"; done`
+const launchProbeScript = parentEnvironScript + `id="$1"; me=$$; uid=$(id -u 2>/dev/null); set --
+for e in /proc/[0-9]*/environ; do
+  p=${e#/proc/}; p=${p%/environ}
+  [ "$p" = 1 ] && continue
+  [ "$p" = "$me" ] && continue
+  grep --null-data --text --quiet --line-regexp --fixed-strings -e "` + LaunchIDEnvName + `=$id" "$e" 2>/dev/null; rc=$?
+  if [ "$rc" -eq 2 ]; then
+    if ancestor=$(cenci_parent_environ "$p" launch); then
+      grep --null-data --text --quiet --line-regexp --fixed-strings -e "` + LaunchIDEnvName + `=$id" "$ancestor" 2>/dev/null; rc=$?
+    fi
+  fi
+  if [ "$rc" -gt 1 ]; then
+    if [ -e "$e" ]; then
+      u=$(sed -n 's/^Uid:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "/proc/$p/status" 2>/dev/null)
+      if [ -z "$u" ] || [ -z "$uid" ] || [ "$u" = "$uid" ]; then printf "__UNREADABLE__\t%s\n" "$p"; fi
+    fi
+    continue
+  fi
+  [ "$rc" -eq 0 ] || continue
+  st=$(cat "/proc/$p/stat" 2>/dev/null); st=${st##*) }; set -- $st
+  if [ "$#" -ge 20 ]; then shift 19; start=$1; else start=""; fi
+  printf "%s\t%s\n" "$p" "$start"
+done`
 
 // launchRowPattern is the only shape a probe output line may have: a positive
 // PID without leading zeros (so "0" and "01" can never name the caller's group
