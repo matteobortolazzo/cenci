@@ -98,6 +98,12 @@ as a silent "no findings".
 
 ## Phase 4 — Report
 
+Before presenting recommendations, apply the synthesis trigger in the plugin's
+`docs/model-escalation.md`. When completed audits contain conflicting architectural
+recommendations, delegate their bounded reconciliation to `domain-specialist`.
+Validate its source evidence and retain finding IDs, the eight-field schema, and
+every incomplete-audit status; this pass does not expand the audit or approval scope.
+
 Categories in scope for this ticket: Structure, Documentation drift, Generated index drift, Client
 mismatch, Test gap, Rule hygiene, Followup backlog.
 

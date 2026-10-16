@@ -2,6 +2,13 @@
 
 Read this file only when Phase 3 starts.
 
+Apply the implementation diagnosis trigger in the plugin's `docs/model-escalation.md`
+to compact implementation and parallel lanes as well as ordinary test work. Tell
+implementers to return evidence after two unsuccessful attempts at the same unexplained
+defect; expected red tests are not failed repair attempts. The orchestrator delegates
+the bounded diagnosis to `domain-specialist` and feeds back only validated advice.
+Existing retry limits and the lane verification barrier still apply.
+
 Delegate to the `implementer` agent to write tests first. Tests should fail.
 
 ## Compact Implementation

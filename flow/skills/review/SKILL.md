@@ -80,6 +80,12 @@ Wait for all three to complete.
 
 ## Phase 3: Consolidate Results
 
+Before accepting reviews or acting on findings, apply the security and silent-failure
+triggers in the plugin's `docs/model-escalation.md`. When triggered, delegate a bounded
+second opinion to `domain-specialist` with the existing reviews and source paths.
+Validate its cited evidence under the same rules as the normal reviewers; keep all
+three original reviews and their findings in scope.
+
 Merge findings from all three reviewers into a unified report.
 
 ### Categorization

@@ -150,6 +150,7 @@ companion) for every skill, including the internal ones not listed above.
 | `code-reviewer` | Strict senior developer that reviews PRs for quality, conventions, bugs, and test coverage. Use after implementation for final review before PR. | configure,implement |
 | `context-gatherer` | Gathers ticket and project context into a compact bundle file before planning. Use at the start of the implement pipeline so large context (ticket body, comments, per-project CLAUDE.md) stays out of the main conversation. | attachments,implement |
 | `docs-maintainer` | Audits the flow project's documentation and generated-index consistency for maintenance drift, producing findings with proposed repairs. Use from the /cenci:maintain skill's docs and all modes. | maintain |
+| `domain-specialist` | Read-only second opinion for difficult architecture, security boundaries, silent failures, unresolved bugs, and conflicting audit findings. Invoke only for a bounded escalation under docs/model-escalation.md. | address-review,ci-repair implement,maintain refactor,refine review |
 | `duplication-analyzer` | Analyzes codebase for duplicated code patterns, copy-paste code, and extraction opportunities. Use when checking for repeated logic across files. | — |
 | `implementer` | Senior developer that implements features using TDD — writes tests first, then implementation. Use for writing code, tests, and making builds pass. | implement |
 | `lessons-collector` | Reviews implementation sessions and routes genuine mistakes into topic-specific docs (or CLAUDE.md) for future prevention. Use after implementation only when something actually went wrong. | implement |
@@ -169,22 +170,22 @@ companion) for every skill, including the internal ones not listed above.
 
 | Skill | Procedure files | Reference skills | Scripts | Agents |
 |---|---|---|---|---|
-| `address-review` | codex.md | babysit, codex-runtime, implement, pr-comment-filter, project-core, shell-rules, subagent-safety, verify-ui | — | — |
+| `address-review` | codex.md | babysit, codex-runtime, implement, pr-comment-filter, project-core, shell-rules, subagent-safety, verify-ui | — | domain-specialist |
 | `attachments` | — | shell-rules | — | context-gatherer |
 | `babysit-attention` | — | merge-repair | — | — |
 | `babysit` | — | merge-repair, project-core, shell-rules | — | — |
-| `ci-repair` | — | project-core, shell-rules, subagent-safety, testing | — | — |
+| `ci-repair` | — | project-core, shell-rules, subagent-safety, testing | — | domain-specialist |
 | `codex-runtime` | — | — | — | — |
 | `configure` | codex.md | babysit, codex-runtime, project-core, shell-rules, testing, verify-ui | detect-project.sh, merge-sandbox-config.sh, resolve-delta.sh | code-reviewer |
 | `frontend-classification` | — | implement, refine | — | — |
-| `implement` | codex.md, phases/phase-1-plan.md, phases/phase-2-worktree.md, phases/phase-3-test-red.md, phases/phase-4-implement-green.md, phases/phase-5-refactor.md, phases/phase-6-7-review.md, phases/phase-8-docs.md, phases/phase-9-pr.md | address-review, attachments, babysit, ci-repair, codex-runtime, frontend-classification, project-core, review, shell-rules, subagent-safety, testing, ticket-ownership, verify-ui | run-artifact-dir.sh | code-reviewer, context-gatherer, implementer, lessons-collector, planner, security-reviewer, silent-failure-hunter |
-| `maintain` | base-freshness.md, codex.md, modes/backlog.md, modes/clients.md, modes/docs.md, modes/rules.md, modes/structure.md | codex-runtime, project-core, shell-rules, subagent-safety, worktrees | check.sh | backlog-maintainer, docs-maintainer, portability-maintainer, rules-maintainer, structure-maintainer |
+| `implement` | codex.md, phases/phase-1-plan.md, phases/phase-2-worktree.md, phases/phase-3-test-red.md, phases/phase-4-implement-green.md, phases/phase-5-refactor.md, phases/phase-6-7-review.md, phases/phase-8-docs.md, phases/phase-9-pr.md | address-review, attachments, babysit, ci-repair, codex-runtime, frontend-classification, project-core, review, shell-rules, subagent-safety, testing, ticket-ownership, verify-ui | run-artifact-dir.sh | code-reviewer, context-gatherer, domain-specialist, implementer, lessons-collector, planner, security-reviewer, silent-failure-hunter |
+| `maintain` | base-freshness.md, codex.md, modes/backlog.md, modes/clients.md, modes/docs.md, modes/rules.md, modes/structure.md | codex-runtime, project-core, shell-rules, subagent-safety, worktrees | check.sh | backlog-maintainer, docs-maintainer, domain-specialist, portability-maintainer, rules-maintainer, structure-maintainer |
 | `merge-repair` | — | project-core, shell-rules, worktrees | — | — |
 | `pr-comment-filter` | — | address-review, babysit | — | — |
 | `project-core` | — | — | — | — |
-| `refactor` | codex.md | codex-runtime, project-core, shell-rules, subagent-safety | — | — |
-| `refine` | codex.md, parent-blockers.md | attachments, codex-runtime, frontend-classification, project-core, shell-rules, subagent-safety, ticket-ownership | ensure-issue.sh | refiner |
-| `review` | codex.md | codex-runtime, project-core, shell-rules, subagent-safety | — | — |
+| `refactor` | codex.md | codex-runtime, project-core, shell-rules, subagent-safety | — | domain-specialist |
+| `refine` | codex.md, parent-blockers.md | attachments, codex-runtime, frontend-classification, project-core, shell-rules, subagent-safety, ticket-ownership | ensure-issue.sh | domain-specialist, refiner |
+| `review` | codex.md | codex-runtime, project-core, shell-rules, subagent-safety | — | domain-specialist |
 | `shell-rules` | — | implement | — | — |
 | `stack-angular` | — | testing | — | — |
 | `stack-dotnet` | — | — | — | — |
@@ -210,6 +211,7 @@ companion) for every skill, including the internal ones not listed above.
 - `docs/comment-attribution.md`
 - `docs/followup-triage.md`
 - `docs/git-workflow.md`
+- `docs/model-escalation.md`
 - `docs/pipeline-safety.md`
 - `docs/shell-scripting-gotchas.md`
 - `docs/skill-authoring.md`
@@ -570,13 +572,14 @@ The plugin uses specialized agents with isolated contexts:
 | **duplication-analyzer** | Copy-paste and extraction analysis for `/cenci:refactor` | sonnet | high (pinned) | plan (read-only) |
 | **structure-analyzer** | File-size and test-organization analysis for `/cenci:refactor` | haiku | n/a (haiku) | plan (read-only) |
 | **security-analyzer** | OWASP audit for `/cenci:refactor` | sonnet | high (pinned) | plan (read-only) |
+| **domain-specialist** | Bounded second opinion for difficult planning, security, diagnosis, and conflicting findings | fable | high (pinned) | plan (read-only) |
 | **lessons-collector** | Routes genuine mistakes to `docs/<topic>.md` or `CLAUDE.md` | haiku | n/a (haiku) | acceptEdits |
 
 **Model & effort tiering**: Opus where judgment is concentrated — the **refiner**, **planner**, and **security-reviewer** agents run opus because refinement scope, acceptance criteria, and splits steer every later phase, the saved plan steers the whole unattended pipeline, and a missed vulnerability is the costliest review failure. Refinement's opus lives in the **refiner agent** rather than the refine skill's frontmatter because a skill-level `model:` pin only lasts the invoking turn — in a multi-turn Q&A loop every follow-up turn silently reverts to the session model, while an agent-level pin holds for the agent's entire run. Sonnet for pipeline orchestration and implementation (`/cenci:refine` and `/cenci:implement` pin `model: sonnet` for orchestration, relaying, and writes; `/cenci:babysit` pins `model: sonnet` so long-lived loop ticks stay cheap). Haiku for mechanical work — context-gatherer, structure-analyzer, lessons-collector, and `/cenci:sync`.
 
 Effort is the second lever: model picks how *capable* the agent is (failures that look like "it didn't know enough"), effort picks how *thorough* it is (failures that look like "it didn't try hard enough"). Subagents inherit the **session** effort level by default, so a session running at low effort would silently degrade the unattended pipeline's planning, implementation, and reviews. Every non-haiku agent therefore pins `effort: high` — thoroughness is guaranteed regardless of the session setting. Anthropic's Opus 5.5 guidance reports low-effort Opus 5.5 reviewing at least as well as prior high-effort Opus, so lowering reviewer effort is a reasonable experiment once you trust the baseline — the pins stay so a low-effort session never silently degrades the unattended pipeline. Skills deliberately stay unpinned: they run during interactive phases, where the user's session effort preference should win. Haiku agents can't be tuned — haiku doesn't support effort.
 
-Tiering intentionally stops at Opus. Fable is a specialist tier at the highest per-token cost; for a genuinely hard domain you can escalate an individual agent by setting `model: fable` in its frontmatter.
+Routine tiering stops at Opus. The **domain-specialist** adds a read-only Fable second opinion for difficult planning, security boundaries, silent failures, repeated unexplained defects, and conflicting audit findings. Codex ships the same role pinned to **gpt-6-astra**, high effort. Skills apply the bounded triggers in [Selective model escalation](docs/model-escalation.md); the normal agents retain their models and all edits, questions, approval gates, and verification stay with their existing owners. Model-access failures are reported, never silently downgraded, and do not extend repair budgets. OpenCode remains paused.
 
 These pins are visible in each skill's and agent's frontmatter and override the session model for that skill/agent only. **Caveat**: the `CLAUDE_CODE_SUBAGENT_MODEL` pin (see Troubleshooting) overrides agent frontmatter and flattens the model tiering — set it only on 1M-context sessions where the delegation gate applies. Likewise, the `CLAUDE_CODE_EFFORT_LEVEL` env var overrides `effort:` frontmatter and flattens the effort tiering while set.
 

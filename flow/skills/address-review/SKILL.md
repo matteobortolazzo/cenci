@@ -14,6 +14,12 @@ allowed-tools: Read, Write, Edit, Glob, Grep, Task, AskUserQuestion, Bash(gh pr 
 
 Read the `subagent-safety` reference skill before delegating work to subagents.
 
+Before fixing in-scope feedback, apply the security, silent-failure, and diagnosis
+triggers in the plugin's `docs/model-escalation.md`. When triggered, delegate a
+bounded second opinion to `domain-specialist` using the cited sources, feedback,
+and any failed attempts. Validate its evidence; preserve actionability filtering,
+approved scope, existing stop rules, and the prohibition on extra review cycles.
+
 ## Context
 
 Read `project-core` and resolve neutral configuration before continuing.

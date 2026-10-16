@@ -4,6 +4,12 @@ Read this file only when Phase 4 starts. Skip this separate phase if Phase 3 is 
 
 Delegate to the `implementer` agent to make failing tests pass.
 
+For ordinary implementation and the Lane Verification Barrier, apply the diagnosis
+trigger in the plugin's `docs/model-escalation.md`. After two failed attempts at the
+same unexplained defect, the implementer returns its evidence to the orchestrator,
+which delegates a bounded diagnosis to `domain-specialist` before the next permitted
+attempt. Feed validated advice back to the implementer; retain the three-attempt cap.
+
 ## Delegation Context
 
 Pass:
@@ -11,6 +17,7 @@ Pass:
 - Worktree path. Tell the agent: target the worktree explicitly on every command — via `git -C <worktree-path>` for git commands, absolute paths for file operations, or the client's working-directory option — do **not** prefix every command with `cd <path> &&` (a `cd … && git …` compound can never be auto-approved; use `git -C <path>` if git must target another directory). If a `Write`/`Edit` is blocked or stranded, re-issue the same edit to the correct `.worktrees/<id>-<desc>/` path — never hand-rescue it with `git stash`/`git checkout`/`git apply`. See the `shell-rules` skill for command patterns.
 - Plan file sections: `## Ticket Details`, `## Implementation Plan`, and `## Architectural Context`.
 - The failing tests and their failure output.
+- Return evidence to the orchestrator after two failed attempts at the same unexplained defect, before spending the next attempt; do not delegate diagnosis yourself.
 - Attachment paths if relevant.
 - LSP diagnostic reminder if configured.
 - The project's `buildCommand`, `testCommand`, and `lintCommand` (when set).
@@ -50,6 +57,11 @@ If `isUiTicket` is true, save a final screenshot of every affected screen/state 
 ## Lane Verification Barrier
 
 Runs only when Phase 3 ran Parallel Lanes, after every lane has reported red→green. This is the single authoritative verification for the whole change — lane implementers deliberately never run the full suite (see Phase 3's `## Parallel Lanes`), so nothing before this point has proven the lanes work together.
+
+Include the return-after-two-failed-attempts instruction in this fresh implementer's
+prompt. Before its next permitted attempt, the orchestrator applies the diagnosis
+trigger in the plugin's `docs/model-escalation.md` and delegates to `domain-specialist`.
+Validate the advice and return it to the implementer without extending the three-attempt cap.
 
 Delegate one `implementer` with the standard Delegation Context above (worktree path, plan sections, build/test/lint commands) plus each lane's `Scope:` summary, instructed to:
 
