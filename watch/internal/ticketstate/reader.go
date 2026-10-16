@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Verdict is the closed set of answers to "is this ticket's work over?".
@@ -80,11 +81,13 @@ func (o Outcome) String() string {
 // OutcomeResult is one ticket's detailed outcome. Err is non-nil exactly when
 // Outcome is OutcomeUnknown, so a caller can never act on an outcome without a
 // successful read. Heads holds the validated head SHAs of the merged PR (the
-// number itself, or every merged closing PR of an issue), de-duplicated, and is
-// non-empty exactly when Outcome is OutcomePRMerged. For an issue whose closing-PR
-// list was truncated (more than the 25 fetched), Heads may be a partial set: it is
-// valid only as a positive "this head merged" match, never as the complete set of
-// merged heads.
+// number itself), or of an issue's merged closing PRs, de-duplicated, and is
+// non-empty exactly when Outcome is OutcomePRMerged. For a closed issue that is
+// every merged closing PR; for an open issue it is only the qualifying ones (merged
+// into the default branch after the issue's last reopen). For an issue whose
+// closing-PR list was truncated (more than the 25 fetched), Heads may be a partial
+// set: it is valid only as a positive "this head merged" match, never as the
+// complete set of merged heads.
 type OutcomeResult struct {
 	Outcome Outcome
 	Heads   []string
@@ -134,7 +137,7 @@ func (r *Reader) Read(ctx context.Context, repo Repo, nums []int) map[int]Result
 			results[n] = Result{Err: f.err}
 			continue
 		}
-		verdict, err := classify(f.raw)
+		verdict, err := classify(f.raw, f.defaultBranch)
 		if err != nil {
 			results[n] = Result{Err: fmt.Errorf("#%d: %w", n, err)}
 			continue
@@ -157,7 +160,7 @@ func (r *Reader) ReadOutcomes(ctx context.Context, repo Repo, nums []int) map[in
 			results[n] = OutcomeResult{Err: f.err}
 			continue
 		}
-		outcome, heads, err := classifyOutcome(f.raw)
+		outcome, heads, err := classifyOutcome(f.raw, f.defaultBranch)
 		if err != nil {
 			results[n] = OutcomeResult{Err: fmt.Errorf("#%d: %w", n, err)}
 			continue
@@ -168,9 +171,13 @@ func (r *Reader) ReadOutcomes(ctx context.Context, repo Repo, nums []int) map[in
 }
 
 // fetchResult is one number's raw alias node, or the reason it could not be read.
+// defaultBranch is the repository's default branch name, read once per batch and
+// shared by every number in it; it is empty when the response did not carry a
+// usable one, which only matters to an open issue with a merged closing PR.
 type fetchResult struct {
-	raw json.RawMessage
-	err error
+	raw           json.RawMessage
+	defaultBranch string
+	err           error
 }
 
 // fetch validates the repo and the numbers, then reads every distinct valid
@@ -228,14 +235,18 @@ func validateRepo(repo Repo) error {
 }
 
 // buildQuery returns the single-line batch query for nums, which must all be
-// validated positive ints.
+// validated positive ints. Besides each number's state and closing PRs it selects
+// the repository's default branch once, each closing PR's base branch and merge
+// time, and each issue's most recent reopen event: what an open issue's merged
+// closing PR needs to prove it qualifies. Everything but the aliases is constant.
 func buildQuery(nums []int) string {
 	var b strings.Builder
-	b.WriteString("query($owner:String!,$name:String!){repository(owner:$owner,name:$name){")
+	b.WriteString("query($owner:String!,$name:String!){repository(owner:$owner,name:$name){defaultBranchRef{name}")
 	for _, n := range nums {
 		num := strconv.Itoa(n)
 		b.WriteString(" " + aliasPrefix + num + ": issueOrPullRequest(number:" + num + "){__typename" +
-			" ... on Issue{state closedByPullRequestsReferences(first: 25, includeClosedPrs: true){pageInfo{hasNextPage} nodes{merged headRefOid}}}" +
+			" ... on Issue{state timelineItems(itemTypes:[REOPENED_EVENT], last:1){nodes{... on ReopenedEvent{createdAt}}}" +
+				" closedByPullRequestsReferences(first: 25, includeClosedPrs: true){pageInfo{hasNextPage} nodes{merged headRefOid mergedAt baseRefName}}}" +
 			" ... on PullRequest{state merged headRefOid}}")
 	}
 	b.WriteString("}}")
@@ -255,7 +266,8 @@ type gqlResponse struct {
 }
 
 // readChunk makes one gh call for nums and returns every one of their raw nodes
-// or per-number errors.
+// or per-number errors. The batch's default branch name rides on every node; a
+// missing or unusable one does not fail the batch.
 func readChunk(ctx context.Context, repo Repo, nums []int) map[int]fetchResult {
 	out := make(map[int]fetchResult, len(nums))
 	failAll := func(err error) map[int]fetchResult {
@@ -307,6 +319,7 @@ func readChunk(ctx context.Context, repo Repo, nums []int) map[int]fetchResult {
 		return failAll(withStderr(runErr, stderr))
 	}
 
+	defaultBranch := decodeDefaultBranch(resp.Data.Repository["defaultBranchRef"])
 	for _, n := range nums {
 		alias := aliasPrefix + strconv.Itoa(n)
 		if msg, errored := aliasErrs[alias]; errored {
@@ -318,9 +331,22 @@ func readChunk(ctx context.Context, repo Repo, nums []int) map[int]fetchResult {
 			out[n] = fetchResult{err: fmt.Errorf("#%d: missing from gh response", n)}
 			continue
 		}
-		out[n] = fetchResult{raw: raw}
+		out[n] = fetchResult{raw: raw, defaultBranch: defaultBranch}
 	}
 	return out
+}
+
+// decodeDefaultBranch returns the default branch name from a raw defaultBranchRef,
+// or "" when it is absent, null, of the wrong shape or empty. The batch still
+// reads: only an open issue with a merged closing PR needs the name.
+func decodeDefaultBranch(raw json.RawMessage) string {
+	var ref *struct {
+		Name *string `json:"name"`
+	}
+	if err := json.Unmarshal(raw, &ref); err != nil || ref == nil || ref.Name == nil {
+		return ""
+	}
+	return *ref.Name
 }
 
 // splitErrors attributes each GraphQL error to a known alias via its path
@@ -359,19 +385,28 @@ func errorSuffix(errs []gqlError) string {
 }
 
 // node is one issueOrPullRequest result. Pointer fields keep an absent or null
-// field distinguishable from a zero value (go-gotchas rules 18 and 23).
+// field distinguishable from a zero value (go-gotchas rules 18 and 23). Timeline
+// holds an issue's most recent reopen event; each closing node carries the merge
+// time and base branch an open issue needs to decide whether that merge qualifies.
 type node struct {
 	Typename   *string `json:"__typename"`
 	State      *string `json:"state"`
 	Merged     *bool   `json:"merged"`
 	HeadRefOid *string `json:"headRefOid"`
-	Closing    *struct {
+	Timeline   *struct {
+		Nodes []*struct {
+			CreatedAt *string `json:"createdAt"`
+		} `json:"nodes"`
+	} `json:"timelineItems"`
+	Closing *struct {
 		PageInfo *struct {
 			HasNextPage *bool `json:"hasNextPage"`
 		} `json:"pageInfo"`
 		Nodes []struct {
-			Merged     *bool   `json:"merged"`
-			HeadRefOid *string `json:"headRefOid"`
+			Merged      *bool   `json:"merged"`
+			HeadRefOid  *string `json:"headRefOid"`
+			MergedAt    *string `json:"mergedAt"`
+			BaseRefName *string `json:"baseRefName"`
 		} `json:"nodes"`
 	} `json:"closedByPullRequestsReferences"`
 }
@@ -394,7 +429,7 @@ func decodeNode(raw json.RawMessage) (*node, error) {
 
 // classify maps one alias node to a verdict. Anything it does not recognise is
 // an error (Unknown), never a benign answer.
-func classify(raw json.RawMessage) (Verdict, error) {
+func classify(raw json.RawMessage, defaultBranch string) (Verdict, error) {
 	n, err := decodeNode(raw)
 	if err != nil {
 		return Unknown, err
@@ -406,7 +441,7 @@ func classify(raw json.RawMessage) (Verdict, error) {
 		case "CLOSED":
 			return Finished, nil
 		case "OPEN":
-			return classifyOpenIssue(n)
+			return classifyOpenIssue(n, defaultBranch)
 		}
 	case "PullRequest":
 		if n.Merged != nil && *n.Merged {
@@ -424,15 +459,133 @@ func classify(raw json.RawMessage) (Verdict, error) {
 	return Unknown, fmt.Errorf("unrecognized %s state %q", *n.Typename, *n.State)
 }
 
-// classifyOpenIssue: an open issue is Finished once any linked closing PR has
-// merged, even when the list is truncated, since a merge anywhere settles it.
-// Without a merge, a truncated or incomplete list cannot prove NotFinished: that
+// Fixed cause texts for a merged closing PR that does not settle an open issue.
+// They never echo a branch name or timestamp from the response.
+const (
+	causeNoBase     = "merged closing PR has no base branch"
+	causeNoDefault  = "repository default branch unknown"
+	causeNonDefault = "merged closing PR targets a non-default branch"
+	causeMergedAt   = "merged closing PR has a missing or malformed mergedAt"
+	causeTimeline   = "issue reopen timeline missing or malformed"
+	causePreReopen  = "merged closing PR did not merge after the issue's last reopen"
+)
+
+// unqualifiedCauseOrder is the fixed order distinct causes are reported in.
+var unqualifiedCauseOrder = []string{causeNoBase, causeNoDefault, causeNonDefault, causeMergedAt, causeTimeline, causePreReopen}
+
+// qualifier decides which of an open issue's merged closing PRs qualify: base
+// branch equal to the repository's default branch, and merged strictly after the
+// issue's last reopen (or the issue never reopened). A merged entry that cannot be
+// checked does not qualify. Both classifiers share it, so Read and ReadOutcomes
+// agree by construction. The reopen time is derived on the first merged entry only,
+// so a malformed timeline never matters to an issue without a merged closing PR.
+type qualifier struct {
+	n             *node
+	defaultBranch string
+	reopenKnown   bool
+	reopen        time.Time // zero when the issue was never reopened
+	reopenErr     bool
+	unmet         map[string]bool
+}
+
+// qualifies reports whether a merged closing PR settles the open issue, recording
+// the cause when it does not.
+func (q *qualifier) qualifies(base, mergedAt *string) bool {
+	cause := q.unmetCause(base, mergedAt)
+	if cause == "" {
+		return true
+	}
+	if q.unmet == nil {
+		q.unmet = make(map[string]bool)
+	}
+	q.unmet[cause] = true
+	return false
+}
+
+// unmetCause returns the fixed cause a merged closing PR does not qualify, or ""
+// when it does. The checks run cheapest first; the reopen timeline is read lazily.
+func (q *qualifier) unmetCause(base, mergedAt *string) string {
+	if base == nil {
+		return causeNoBase
+	}
+	if q.defaultBranch == "" {
+		return causeNoDefault
+	}
+	if *base != q.defaultBranch {
+		return causeNonDefault
+	}
+	if mergedAt == nil {
+		return causeMergedAt
+	}
+	merged, err := time.Parse(time.RFC3339, *mergedAt)
+	if err != nil {
+		return causeMergedAt
+	}
+	if !q.reopenKnown {
+		q.reopen, q.reopenErr = lastReopen(q.n)
+		q.reopenKnown = true
+	}
+	if q.reopenErr {
+		return causeTimeline
+	}
+	if !merged.After(q.reopen) {
+		return causePreReopen
+	}
+	return ""
+}
+
+// cause joins the distinct causes recorded so far in a fixed order, or "" when no
+// merged closing PR failed to qualify.
+func (q *qualifier) cause() string {
+	var causes []string
+	for _, c := range unqualifiedCauseOrder {
+		if q.unmet[c] {
+			causes = append(causes, c)
+		}
+	}
+	return strings.Join(causes, "; ")
+}
+
+// lastReopen returns the time of the issue's most recent reopen, or the zero time
+// when the timeline is present and empty (never reopened). A missing or null
+// timeline or nodes list, a null entry, or a missing or unparseable createdAt is
+// reported as malformed. Should more than one entry come back, the latest counts
+// and every entry must parse.
+func lastReopen(n *node) (time.Time, bool) {
+	if n.Timeline == nil || n.Timeline.Nodes == nil {
+		return time.Time{}, true
+	}
+	var latest time.Time
+	for _, entry := range n.Timeline.Nodes {
+		if entry == nil || entry.CreatedAt == nil {
+			return time.Time{}, true
+		}
+		at, err := time.Parse(time.RFC3339, *entry.CreatedAt)
+		if err != nil {
+			return time.Time{}, true
+		}
+		if at.After(latest) {
+			latest = at
+		}
+	}
+	return latest, false
+}
+
+// classifyOpenIssue: an open issue is Finished once a linked closing PR that
+// qualifies has merged, even when the list is truncated, since a qualifying merge
+// anywhere settles it. A PR qualifies when it merged into the repository's default
+// branch strictly after the issue's last reopen, or the issue was never reopened.
+// Merged closing PRs of which none qualify, or cannot be checked, leave the issue
+// Unknown with the distinct causes: the old merge may predate a reopen, or sit on
+// a stacked branch that has not reached the default branch. Without a merged
+// closing PR, a truncated or incomplete list cannot prove NotFinished: that
 // includes an absent or null nodes list and any entry that is null or lacks a
 // merged flag, since such an entry might have been the merged PR.
-func classifyOpenIssue(n *node) (Verdict, error) {
+func classifyOpenIssue(n *node, defaultBranch string) (Verdict, error) {
 	if n.Closing == nil || n.Closing.PageInfo == nil || n.Closing.PageInfo.HasNextPage == nil {
 		return Unknown, errors.New("open issue has no closing-PR pagination info")
 	}
+	q := qualifier{n: n, defaultBranch: defaultBranch}
 	incomplete := n.Closing.Nodes == nil
 	for _, pr := range n.Closing.Nodes {
 		if pr.Merged == nil {
@@ -440,9 +593,12 @@ func classifyOpenIssue(n *node) (Verdict, error) {
 			incomplete = true
 			continue
 		}
-		if *pr.Merged {
+		if *pr.Merged && q.qualifies(pr.BaseRefName, pr.MergedAt) {
 			return Finished, nil
 		}
+	}
+	if cause := q.cause(); cause != "" {
+		return Unknown, errors.New(cause)
 	}
 	if incomplete {
 		return Unknown, errors.New("open issue has a missing or malformed closing-PR nodes list")
@@ -458,7 +614,7 @@ func classifyOpenIssue(n *node) (Verdict, error) {
 // a removable outcome where classify says NotFinished or Unknown. Anything it
 // does not fully recognise, and any merged node without a valid head SHA, is an
 // error (OutcomeUnknown), never a benign answer.
-func classifyOutcome(raw json.RawMessage) (Outcome, []string, error) {
+func classifyOutcome(raw json.RawMessage, defaultBranch string) (Outcome, []string, error) {
 	n, err := decodeNode(raw)
 	if err != nil {
 		return OutcomeUnknown, nil, err
@@ -466,7 +622,7 @@ func classifyOutcome(raw json.RawMessage) (Outcome, []string, error) {
 
 	switch *n.Typename {
 	case "Issue":
-		return classifyIssueOutcome(n)
+		return classifyIssueOutcome(n, defaultBranch)
 	case "PullRequest":
 		return classifyPROutcome(n)
 	default:
@@ -501,15 +657,20 @@ func classifyPROutcome(n *node) (Outcome, []string, error) {
 	return OutcomePRClosedUnmerged, nil, nil
 }
 
-// classifyIssueOutcome: any merged closing PR makes the issue "PR merged", even
-// when the list is truncated, since a merge anywhere settles it; the heads of a
-// truncated list are then partial, and a head that was not fetched can only make
-// a consumer keep more. A merged entry whose own SHA is missing or malformed is
-// different: it makes the whole number an error (OutcomeUnknown), never a merge
-// with a partial head set. Without a merge, a truncated or incomplete list cannot
-// prove "closed" or "open" and is an error: that includes an absent or null nodes
-// list and any entry that is null or lacks a merged flag.
-func classifyIssueOutcome(n *node) (Outcome, []string, error) {
+// classifyIssueOutcome: a closed issue with any merged closing PR is "PR merged",
+// even when the list is truncated, since a merge anywhere settles it; an open
+// issue is "PR merged" only through a qualifying merged closing PR (merged into
+// the default branch strictly after the issue's last reopen, or never reopened),
+// and merged closing PRs of which none qualify, or cannot be checked, make it an
+// error with the distinct causes. The heads of a truncated list are partial, and a
+// head that was not fetched can only make a consumer keep more; an open issue's
+// heads are only the qualifying ones. A merged entry whose own SHA is missing or
+// malformed is different, qualifying or not: it makes the whole number an error
+// (OutcomeUnknown), never a merge with a partial head set. Without a merge, a
+// truncated or incomplete list cannot prove "closed" or "open" and is an error:
+// that includes an absent or null nodes list and any entry that is null or lacks a
+// merged flag.
+func classifyIssueOutcome(n *node, defaultBranch string) (Outcome, []string, error) {
 	state := *n.State
 	switch state {
 	case "OPEN", "CLOSED":
@@ -520,6 +681,7 @@ func classifyIssueOutcome(n *node) (Outcome, []string, error) {
 		return OutcomeUnknown, nil, fmt.Errorf("%s issue has no closing-PR pagination info", strings.ToLower(state))
 	}
 
+	q := qualifier{n: n, defaultBranch: defaultBranch}
 	var heads []string
 	incomplete := n.Closing.Nodes == nil
 	for _, pr := range n.Closing.Nodes {
@@ -535,12 +697,18 @@ func classifyIssueOutcome(n *node) (Outcome, []string, error) {
 		if err != nil {
 			return OutcomeUnknown, nil, fmt.Errorf("merged closing PR: %w", err)
 		}
+		if state == "OPEN" && !q.qualifies(pr.BaseRefName, pr.MergedAt) {
+			continue
+		}
 		if !slices.Contains(heads, head) {
 			heads = append(heads, head)
 		}
 	}
 	if len(heads) > 0 {
 		return OutcomePRMerged, heads, nil
+	}
+	if cause := q.cause(); cause != "" {
+		return OutcomeUnknown, nil, errors.New(cause)
 	}
 	if incomplete {
 		return OutcomeUnknown, nil, fmt.Errorf("%s issue has a missing or malformed closing-PR nodes list", strings.ToLower(state))

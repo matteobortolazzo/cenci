@@ -69,11 +69,10 @@ exit %d`, code))
 func (f *fakeGh) respondAllClosed(t *testing.T) {
 	t.Helper()
 	f.behave(t, `for a in "$@"; do case "$a" in query=*) q="$a" ;; esac; done
-sep=''
-printf '{"data":{"repository":{'
+sep=','
+printf '{"data":{"repository":{"defaultBranchRef":{"name":"main"}'
 for alias in $(printf '%s' "$q" | grep -o 'n[0-9][0-9]*:' | tr -d ':'); do
-  printf '%s"%s":{"__typename":"Issue","state":"CLOSED","closedByPullRequestsReferences":{"pageInfo":{"hasNextPage":false},"nodes":[]}}' "$sep" "$alias"
-  sep=','
+  printf '%s"%s":{"__typename":"Issue","state":"CLOSED","timelineItems":{"nodes":[]},"closedByPullRequestsReferences":{"pageInfo":{"hasNextPage":false},"nodes":[]}}' "$sep" "$alias"
 done
 printf '}}}'
 exit 0`)
@@ -129,32 +128,55 @@ func queryAliases(query string) []string {
 
 // --- canned GraphQL bodies ---
 
+// The branch and timestamps the fixtures use. The timestamps are fixed so every
+// ordering comparison in a test is explicit: reopenedAt falls between
+// testMergedAt (before it) and laterMergedAt (after it).
+const (
+	testDefaultBranch = "main"
+	// stackBranch is a distinctive non-default base: a cause string that echoed it
+	// would be caught by the no-echo assertions (the default branch name "main"
+	// is too common a substring to prove anything).
+	stackBranch   = "stack/feature-x"
+	testMergedAt  = "2026-03-10T12:00:00Z"
+	reopenedAt    = "2026-03-12T08:00:00Z"
+	laterMergedAt = "2026-03-15T10:00:00Z"
+)
+
+// issueJSON builds an Issue whose closing list holds one node per linkedMerged
+// flag; a merged node targets the default branch and carries a merge time.
 func issueJSON(state string, hasNext bool, linkedMerged ...bool) string {
 	nodes := make([]string, len(linkedMerged))
 	for i, m := range linkedMerged {
-		nodes[i] = fmt.Sprintf(`{"merged":%t}`, m)
+		nodes[i] = closingPR(m, noHead)
 	}
-	return fmt.Sprintf(`{"__typename":"Issue","state":%q,"closedByPullRequestsReferences":{"pageInfo":{"hasNextPage":%t},"nodes":[%s]}}`,
-		state, hasNext, strings.Join(nodes, ","))
+	return issueWithClosing(state, hasNext, nodes...)
 }
 
-// openIssueClosing builds an OPEN issue whose closedByPullRequestsReferences
-// has hasNextPage:false and the given raw extra member (e.g. `"nodes":[null]`),
-// for shapes issueJSON cannot express.
+// openIssueClosing builds an OPEN, never-reopened issue whose
+// closedByPullRequestsReferences has hasNextPage:false and the given raw extra
+// member (e.g. `"nodes":[null]`), for shapes issueJSON cannot express.
 func openIssueClosing(extra string) string {
-	if extra != "" {
-		extra = "," + extra
-	}
-	return `{"__typename":"Issue","state":"OPEN","closedByPullRequestsReferences":{"pageInfo":{"hasNextPage":false}` + extra + `}}`
+	return issueWithClosingRaw("OPEN", extra)
 }
 
 func prJSON(state string, merged bool) string {
 	return fmt.Sprintf(`{"__typename":"PullRequest","state":%q,"merged":%t}`, state, merged)
 }
 
-// repoBody builds a successful response keyed by the n<N> aliases the reader sends.
+// repoBody builds a successful response keyed by the n<N> aliases the reader
+// sends, with the repository's default branch set to testDefaultBranch.
 func repoBody(nodes map[int]string) string {
-	parts := make([]string, 0, len(nodes))
+	return repoBodyWithBranch(nodes, fmt.Sprintf(`{"name":%q}`, testDefaultBranch))
+}
+
+// repoBodyWithBranch is repoBody with the raw JSON value of the repository's
+// defaultBranchRef (e.g. `null`, `{}`, `{"name":""}`); an empty rawRef omits the
+// key entirely.
+func repoBodyWithBranch(nodes map[int]string, rawRef string) string {
+	parts := make([]string, 0, len(nodes)+1)
+	if rawRef != "" {
+		parts = append(parts, `"defaultBranchRef":`+rawRef)
+	}
 	for n, node := range nodes {
 		parts = append(parts, fmt.Sprintf(`"n%d":%s`, n, node))
 	}
@@ -237,8 +259,62 @@ func TestReadVerdictTable(t *testing.T) {
 		{"issue OPEN, closing nodes key absent", openIssueClosing(``), Unknown},
 		{"issue OPEN, closing nodes is null", openIssueClosing(`"nodes":null`), Unknown},
 		{"issue OPEN, unmerged then merged-less closing nodes", openIssueClosing(`"nodes":[{"merged":false},{}]`), Unknown},
-		{"issue OPEN, null entry beside a merged PR still wins", openIssueClosing(`"nodes":[null,{"merged":true}]`), Finished},
+		{"issue OPEN, null entry beside a merged PR still wins", openIssueClosing(`"nodes":[null,` + closingPR(true, noHead) + `]`), Finished},
 		{"issue OPEN, empty closing nodes list", openIssueClosing(`"nodes":[]`), NotFinished},
+
+		// An open issue is settled only by a merged closing PR that qualifies: it
+		// targets the default branch and merged strictly after the issue's last
+		// reopen (or the issue was never reopened).
+		{"issue OPEN, never reopened, merged into the default branch", issueWithClosing("OPEN", false, closingPR(true, headA)), Finished},
+		{"issue OPEN, merged PR merged before the last reopen",
+			issueWithTimeline("OPEN", false, reopenedTimeline(reopenedAt), closingPR(true, headA)), Unknown},
+		{"issue OPEN, merged PR merged at exactly the last reopen",
+			issueWithTimeline("OPEN", false, reopenedTimeline(testMergedAt), closingPR(true, headA)), Unknown},
+		{"issue OPEN, merged PR merged one second after the last reopen",
+			issueWithTimeline("OPEN", false, reopenedTimeline("2026-03-10T11:59:59Z"), closingPR(true, headA)), Finished},
+		{"issue OPEN, merged PR targets a non-default branch",
+			issueWithClosing("OPEN", false, closingPRFull(true, headA, stackBranch, testMergedAt)), Unknown},
+		{"issue OPEN, reopened, one PR after the reopen beside a pre-reopen one and a non-default one",
+			issueWithTimeline("OPEN", false, reopenedTimeline(reopenedAt),
+				closingPRFull(true, headB, testDefaultBranch, testMergedAt),
+				closingPRFull(true, headSHA64, stackBranch, laterMergedAt),
+				closingPRFull(true, headA, testDefaultBranch, laterMergedAt)), Finished},
+		{"issue OPEN, truncated list holding a qualifying PR", issueWithClosing("OPEN", true, closingPR(true, headA)), Finished},
+		{"issue OPEN, unqualifying merged PR beside an unmerged one",
+			issueWithClosing("OPEN", false, closingPR(false, headA), closingPRFull(true, headB, stackBranch, testMergedAt)), Unknown},
+		{"issue OPEN, unqualifying merged PR in a truncated list",
+			issueWithClosing("OPEN", true, closingPRFull(true, headA, stackBranch, testMergedAt)), Unknown},
+		{"issue OPEN, merged PR with no mergedAt", issueWithClosing("OPEN", false, closingPRFull(true, headA, testDefaultBranch, noMergedAt)), Unknown},
+		{"issue OPEN, merged PR with a null mergedAt", issueWithClosing("OPEN", false, closingPRFull(true, headA, testDefaultBranch, nullMergedAt)), Unknown},
+		{"issue OPEN, merged PR with an unparseable mergedAt", issueWithClosing("OPEN", false, closingPRFull(true, headA, testDefaultBranch, notATime)), Unknown},
+		{"issue OPEN, merged PR with no baseRefName", issueWithClosing("OPEN", false, closingPRFull(true, headA, noBase, testMergedAt)), Unknown},
+		{"issue OPEN, merged PR with a null baseRefName", issueWithClosing("OPEN", false, closingPRFull(true, headA, nullBase, testMergedAt)), Unknown},
+		{"issue OPEN, timelineItems absent", issueWithTimeline("OPEN", false, "", closingPR(true, headA)), Unknown},
+		{"issue OPEN, timelineItems null", issueWithTimeline("OPEN", false, `"timelineItems":null`, closingPR(true, headA)), Unknown},
+		{"issue OPEN, timeline nodes absent", issueWithTimeline("OPEN", false, `"timelineItems":{}`, closingPR(true, headA)), Unknown},
+		{"issue OPEN, timeline nodes null", issueWithTimeline("OPEN", false, `"timelineItems":{"nodes":null}`, closingPR(true, headA)), Unknown},
+		{"issue OPEN, timeline nodes holds a null entry", issueWithTimeline("OPEN", false, `"timelineItems":{"nodes":[null]}`, closingPR(true, headA)), Unknown},
+		{"issue OPEN, timeline entry has no createdAt", issueWithTimeline("OPEN", false, `"timelineItems":{"nodes":[{}]}`, closingPR(true, headA)), Unknown},
+		{"issue OPEN, timeline entry has a null createdAt", issueWithTimeline("OPEN", false, `"timelineItems":{"nodes":[{"createdAt":null}]}`, closingPR(true, headA)), Unknown},
+		{"issue OPEN, timeline entry has an unparseable createdAt", issueWithTimeline("OPEN", false, reopenedTimeline(notATime), closingPR(true, headA)), Unknown},
+		{"issue OPEN, an uncheckable merged PR beside a qualifying one",
+			issueWithClosing("OPEN", false, closingPRFull(true, headB, testDefaultBranch, noMergedAt), closingPR(true, headA)), Finished},
+		{"issue OPEN, a non-default merged PR beside a qualifying one",
+			issueWithClosing("OPEN", false, closingPRFull(true, headB, stackBranch, testMergedAt), closingPR(true, headA)), Finished},
+
+		// Regressions for the non-matching cases: the qualification rule applies
+		// to an open issue's merged closing PRs only.
+		{"issue OPEN, only unmerged PRs, none of the new fields present",
+			`{"__typename":"Issue","state":"OPEN","closedByPullRequestsReferences":{"pageInfo":{"hasNextPage":false},"nodes":[{"merged":false}]}}`, NotFinished},
+		{"issue OPEN, only unmerged PRs, reopened", issueWithTimeline("OPEN", false, reopenedTimeline(reopenedAt), closingPR(false, headA)), NotFinished},
+		{"issue CLOSED, merged PR with none of the new fields",
+			`{"__typename":"Issue","state":"CLOSED","closedByPullRequestsReferences":{"pageInfo":{"hasNextPage":false},"nodes":[{"merged":true}]}}`, Finished},
+		{"issue CLOSED, merged PR targets a non-default branch",
+			issueWithClosing("CLOSED", false, closingPRFull(true, headA, stackBranch, testMergedAt)), Finished},
+		{"issue CLOSED, merged PR merged before the last reopen",
+			issueWithTimeline("CLOSED", false, reopenedTimeline(reopenedAt), closingPR(true, headA)), Finished},
+		{"issue CLOSED, merged PR with a malformed timeline",
+			issueWithTimeline("CLOSED", false, `"timelineItems":null`, closingPRFull(true, headA, noBase, noMergedAt)), Finished},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -320,9 +396,13 @@ func TestReadMakesOneCallPerBatchOfAtMostFifty(t *testing.T) {
 			}
 			seen := map[string]bool{}
 			for _, argv := range calls {
-				aliases := queryAliases(queryArg(t, argv))
+				query := queryArg(t, argv)
+				aliases := queryAliases(query)
 				if len(aliases) > MaxBatch {
 					t.Errorf("a call carried %d numbers, want at most %d", len(aliases), MaxBatch)
+				}
+				if refs := strings.Count(query, "defaultBranchRef"); refs != 1 {
+					t.Errorf("a call selects defaultBranchRef %d times, want once per call, not once per number", refs)
 				}
 				for _, a := range aliases {
 					if seen[a] {
@@ -384,6 +464,9 @@ func TestReadPassesOwnerAndNameOnlyAsVariablesAndPinsTheQuery(t *testing.T) {
 		"closedByPullRequestsReferences(first: 25, includeClosedPrs: true)",
 		"issueOrPullRequest(number:7)",
 		"n7:",
+		"defaultBranchRef{name}",
+		"timelineItems(itemTypes:[REOPENED_EVENT], last:1)",
+		"... on ReopenedEvent{createdAt}",
 	} {
 		if !strings.Contains(query, want) {
 			t.Errorf("query is missing %q:\n%s", want, query)
@@ -821,34 +904,88 @@ const (
 )
 
 func headField(head string) string {
-	switch head {
-	case noHead:
+	return optionalField("headRefOid", head)
+}
+
+const (
+	// noBase and noMergedAt omit the baseRefName / mergedAt key from a built node.
+	noBase     = ""
+	noMergedAt = ""
+	// nullBase and nullMergedAt render the key as JSON null.
+	nullBase     = "<null>"
+	nullMergedAt = "<null>"
+	// notATime is a mergedAt / createdAt value that is not RFC 3339.
+	notATime = "not-a-time"
+)
+
+// optionalField renders `,"key":"value"`, omitting the key for "" and rendering
+// null for "<null>" (the noHead/nullHead, noBase/nullBase and
+// noMergedAt/nullMergedAt sentinels).
+func optionalField(key, value string) string {
+	switch value {
+	case "":
 		return ""
-	case nullHead:
-		return `,"headRefOid":null`
+	case "<null>":
+		return fmt.Sprintf(`,%q:null`, key)
 	default:
-		return fmt.Sprintf(`,"headRefOid":%q`, head)
+		return fmt.Sprintf(`,%q:%q`, key, value)
 	}
 }
 
-// closingPR builds one closedByPullRequestsReferences node.
+// closingPR builds one closedByPullRequestsReferences node. A merged node
+// targets the default branch and merged at testMergedAt; an unmerged node
+// carries neither.
 func closingPR(merged bool, head string) string {
-	return fmt.Sprintf(`{"merged":%t%s}`, merged, headField(head))
+	if merged {
+		return closingPRFull(true, head, testDefaultBranch, testMergedAt)
+	}
+	return closingPRFull(false, head, noBase, noMergedAt)
 }
 
-// issueWithClosing builds an Issue whose closing-PR list holds the given raw nodes.
+// closingPRFull builds a closing-PR node with an explicit base branch and merge
+// time; base and mergedAt take the noBase/nullBase and noMergedAt/nullMergedAt
+// sentinels.
+func closingPRFull(merged bool, head, base, mergedAt string) string {
+	return fmt.Sprintf(`{"merged":%t%s%s%s}`, merged, headField(head), optionalField("baseRefName", base), optionalField("mergedAt", mergedAt))
+}
+
+// emptyTimeline is the raw timelineItems member of an issue that was never reopened.
+const emptyTimeline = `"timelineItems":{"nodes":[]}`
+
+// reopenedTimeline builds the raw timelineItems member holding one ReopenedEvent
+// node per createdAt.
+func reopenedTimeline(createdAts ...string) string {
+	nodes := make([]string, len(createdAts))
+	for i, c := range createdAts {
+		nodes[i] = fmt.Sprintf(`{"createdAt":%q}`, c)
+	}
+	return `"timelineItems":{"nodes":[` + strings.Join(nodes, ",") + `]}`
+}
+
+// issueWithTimeline builds an Issue with the given raw timelineItems member
+// (an empty timeline omits the key) and closing-PR list holding the given raw nodes.
+func issueWithTimeline(state string, hasNext bool, timeline string, nodes ...string) string {
+	if timeline != "" {
+		timeline = "," + timeline
+	}
+	return fmt.Sprintf(`{"__typename":"Issue","state":%q%s,"closedByPullRequestsReferences":{"pageInfo":{"hasNextPage":%t},"nodes":[%s]}}`,
+		state, timeline, hasNext, strings.Join(nodes, ","))
+}
+
+// issueWithClosing builds a never-reopened Issue whose closing-PR list holds the
+// given raw nodes.
 func issueWithClosing(state string, hasNext bool, nodes ...string) string {
-	return fmt.Sprintf(`{"__typename":"Issue","state":%q,"closedByPullRequestsReferences":{"pageInfo":{"hasNextPage":%t},"nodes":[%s]}}`,
-		state, hasNext, strings.Join(nodes, ","))
+	return issueWithTimeline(state, hasNext, emptyTimeline, nodes...)
 }
 
-// issueWithClosingRaw builds an Issue whose closedByPullRequestsReferences has
-// hasNextPage:false plus the given raw extra member, for malformed list shapes.
+// issueWithClosingRaw builds a never-reopened Issue whose
+// closedByPullRequestsReferences has hasNextPage:false plus the given raw extra
+// member, for malformed list shapes.
 func issueWithClosingRaw(state, extra string) string {
 	if extra != "" {
 		extra = "," + extra
 	}
-	return fmt.Sprintf(`{"__typename":"Issue","state":%q,"closedByPullRequestsReferences":{"pageInfo":{"hasNextPage":false}%s}}`, state, extra)
+	return fmt.Sprintf(`{"__typename":"Issue","state":%q,%s,"closedByPullRequestsReferences":{"pageInfo":{"hasNextPage":false}%s}}`, state, emptyTimeline, extra)
 }
 
 // prWithHead builds a PullRequest node carrying its own head SHA.
@@ -958,6 +1095,46 @@ func TestReadOutcomesTable(t *testing.T) {
 		{"issue CLOSED, malformed merged SHA beside a valid one", issueWithClosing("CLOSED", false, closingPR(true, headA), closingPR(true, "xyz")), OutcomeUnknown, nil},
 		{"issue OPEN, malformed merged SHA beside a valid one", issueWithClosing("OPEN", false, closingPR(true, "xyz"), closingPR(true, headA)), OutcomeUnknown, nil},
 
+		// An open issue is PR merged only through a merged closing PR that
+		// qualifies (default-branch base, merged strictly after the last reopen);
+		// Heads then holds only the qualifying PRs' heads.
+		{"issue OPEN, only a merge into a non-default branch",
+			issueWithClosing("OPEN", false, closingPRFull(true, headA, stackBranch, testMergedAt)), OutcomeUnknown, nil},
+		{"issue OPEN, only a merge before the last reopen",
+			issueWithTimeline("OPEN", false, reopenedTimeline(reopenedAt), closingPR(true, headA)), OutcomeUnknown, nil},
+		{"issue OPEN, only a merge at exactly the last reopen",
+			issueWithTimeline("OPEN", false, reopenedTimeline(testMergedAt), closingPR(true, headA)), OutcomeUnknown, nil},
+		{"issue OPEN, merged PR with no mergedAt", issueWithClosing("OPEN", false, closingPRFull(true, headA, testDefaultBranch, noMergedAt)), OutcomeUnknown, nil},
+		{"issue OPEN, merged PR with no baseRefName", issueWithClosing("OPEN", false, closingPRFull(true, headA, noBase, testMergedAt)), OutcomeUnknown, nil},
+		{"issue OPEN, merged PR with a malformed reopen timeline",
+			issueWithTimeline("OPEN", false, `"timelineItems":null`, closingPR(true, headA)), OutcomeUnknown, nil},
+		{"issue OPEN, reopened, merge after the reopen into the default branch",
+			issueWithTimeline("OPEN", false, reopenedTimeline(reopenedAt), closingPRFull(true, headA, testDefaultBranch, laterMergedAt)), OutcomePRMerged, []string{headA}},
+		{"issue OPEN, qualifying merge beside pre-reopen and non-default merges lists only the qualifying head",
+			issueWithTimeline("OPEN", false, reopenedTimeline(reopenedAt),
+				closingPRFull(true, headB, testDefaultBranch, testMergedAt),
+				closingPRFull(true, headSHA64, stackBranch, laterMergedAt),
+				closingPRFull(true, headA, testDefaultBranch, laterMergedAt)),
+			OutcomePRMerged, []string{headA}},
+		{"issue OPEN, qualifying merge beside an uncheckable merge lists only the qualifying head",
+			issueWithClosing("OPEN", false, closingPRFull(true, headB, testDefaultBranch, noMergedAt), closingPR(true, headA)), OutcomePRMerged, []string{headA}},
+		{"issue OPEN, malformed SHA on a non-default merge beside a qualifying one",
+			issueWithClosing("OPEN", false, closingPRFull(true, "xyz", stackBranch, testMergedAt), closingPR(true, headA)), OutcomeUnknown, nil},
+		{"issue OPEN, truncated list holding only an unqualifying merge",
+			issueWithClosing("OPEN", true, closingPRFull(true, headA, stackBranch, testMergedAt)), OutcomeUnknown, nil},
+
+		// A closed issue keeps listing every merged closing PR, wherever it
+		// merged and whenever.
+		{"issue CLOSED, merged PR targets a non-default branch",
+			issueWithClosing("CLOSED", false, closingPRFull(true, headA, stackBranch, testMergedAt)), OutcomePRMerged, []string{headA}},
+		{"issue CLOSED, merged PR merged before the last reopen",
+			issueWithTimeline("CLOSED", false, reopenedTimeline(reopenedAt), closingPR(true, headA)), OutcomePRMerged, []string{headA}},
+		{"issue CLOSED, merged PR with no mergedAt, no baseRefName and no timeline",
+			issueWithTimeline("CLOSED", false, "", closingPRFull(true, headA, noBase, noMergedAt)), OutcomePRMerged, []string{headA}},
+		{"issue OPEN, only unmerged PRs, none of the new fields",
+			`{"__typename":"Issue","state":"OPEN","closedByPullRequestsReferences":{"pageInfo":{"hasNextPage":false},"nodes":[{"merged":false,"headRefOid":"` + headA + `"}]}}`,
+			OutcomeOpen, nil},
+
 		// Malformed closing-PR lists with no merge seen: neither open nor closed
 		// can be proven.
 		{"issue OPEN, closing nodes holds a null entry", issueWithClosingRaw("OPEN", `"nodes":[null]`), OutcomeUnknown, nil},
@@ -1006,6 +1183,209 @@ func TestReadOutcomesTable(t *testing.T) {
 	}
 }
 
+const (
+	// useDefaultRef makes a case's response carry the usual default branch.
+	useDefaultRef = ""
+	// absentRef makes a case's response omit the defaultBranchRef key entirely.
+	absentRef = "<absent>"
+)
+
+// TestOpenIssueClosingPRQualification pins which merged closing PRs settle an
+// OPEN issue. Every case runs through both Read and ReadOutcomes against the same
+// response and must agree: a qualifying PR (default-branch base, merged strictly
+// after the issue's last reopen or never reopened) settles it, Heads lists only
+// qualifying heads, and merged PRs that do not qualify or cannot be checked leave
+// it Unknown with a cause. A cause never echoes the response's branch names or
+// timestamps. Non-matching cases (closed issues, PR numbers, open issues with no
+// merged closing PR) must not change.
+func TestOpenIssueClosingPRQualification(t *testing.T) {
+	const n = 7
+	const (
+		wantNonDefault = "non-default branch"
+		wantPreReopen  = "after the issue's last reopen"
+		wantNoDefault  = "default branch unknown"
+		wantTimeline   = "reopen timeline missing or malformed"
+		wantMergedAt   = "missing or malformed mergedAt"
+		wantNoBase     = "no base branch"
+	)
+	// earlierReopenAt precedes testMergedAt, which precedes reopenedAt: a PR
+	// merged at testMergedAt falls between the two reopens of a two-entry timeline.
+	const earlierReopenAt = "2026-03-08T09:00:00Z"
+	// Outside text a cause must never echo (rejected values are never echoed).
+	leaks := []string{stackBranch, testMergedAt, reopenedAt, laterMergedAt, earlierReopenAt, notATime, "2026-03", "T12:00", "T08:00", "T10:00", "T09:00"}
+
+	reopened := reopenedTimeline(reopenedAt)
+	unknown := func(name, node, ref string, causes ...string) qualificationCase {
+		return qualificationCase{name: name, node: node, ref: ref, wantVerdict: Unknown, wantOutcome: OutcomeUnknown, wantCauses: causes}
+	}
+	settled := func(name, node string, heads ...string) qualificationCase {
+		return qualificationCase{name: name, node: node, wantVerdict: Finished, wantOutcome: OutcomePRMerged, wantHeads: heads}
+	}
+
+	cases := []qualificationCase{
+		// Qualifying merged closing PRs settle the issue.
+		settled("never reopened, merged into the default branch",
+			issueWithClosing("OPEN", false, closingPR(true, headA)), headA),
+		settled("reopened, merged after the reopen into the default branch",
+			issueWithTimeline("OPEN", false, reopened, closingPRFull(true, headA, testDefaultBranch, laterMergedAt)), headA),
+		settled("two qualifying PRs are both listed",
+			issueWithClosing("OPEN", false, closingPR(true, headA), closingPR(true, headB)), headA, headB),
+		settled("mixed: Heads holds only the qualifying head",
+			issueWithTimeline("OPEN", false, reopened,
+				closingPRFull(true, headB, testDefaultBranch, testMergedAt),
+				closingPRFull(true, headSHA64, stackBranch, laterMergedAt),
+				closingPRFull(true, headA, testDefaultBranch, laterMergedAt)), headA),
+		settled("an uncheckable merged PR beside a qualifying one is not listed",
+			issueWithClosing("OPEN", false, closingPRFull(true, headB, testDefaultBranch, noMergedAt), closingPR(true, headA)), headA),
+		settled("a non-default merged PR beside a qualifying one is not listed",
+			issueWithClosing("OPEN", false, closingPRFull(true, headB, stackBranch, testMergedAt), closingPR(true, headA)), headA),
+		settled("truncated list holding a qualifying PR",
+			issueWithClosing("OPEN", true, closingPR(true, headA)), headA),
+		settled("two reopens, merged after the latest",
+			issueWithTimeline("OPEN", false, reopenedTimeline(earlierReopenAt, reopenedAt), closingPRFull(true, headA, testDefaultBranch, laterMergedAt)), headA),
+
+		// Merged closing PRs that do not qualify.
+		unknown("merged before the last reopen",
+			issueWithTimeline("OPEN", false, reopened, closingPR(true, headA)), useDefaultRef, wantPreReopen),
+		unknown("merged at exactly the last reopen",
+			issueWithTimeline("OPEN", false, reopenedTimeline(testMergedAt), closingPR(true, headA)), useDefaultRef, wantPreReopen),
+		unknown("merged into a non-default branch",
+			issueWithClosing("OPEN", false, closingPRFull(true, headA, stackBranch, testMergedAt)), useDefaultRef, wantNonDefault),
+		unknown("one PR on a non-default branch and one before the reopen name both causes",
+			issueWithTimeline("OPEN", false, reopened,
+				closingPRFull(true, headA, stackBranch, laterMergedAt),
+				closingPRFull(true, headB, testDefaultBranch, testMergedAt)), useDefaultRef, wantNonDefault, wantPreReopen),
+		unknown("truncated list holding only an unqualifying PR",
+			issueWithClosing("OPEN", true, closingPRFull(true, headA, stackBranch, testMergedAt)), useDefaultRef, wantNonDefault),
+
+		// Merged closing PRs that cannot be checked.
+		unknown("mergedAt missing", issueWithClosing("OPEN", false, closingPRFull(true, headA, testDefaultBranch, noMergedAt)), useDefaultRef, wantMergedAt),
+		unknown("mergedAt null", issueWithClosing("OPEN", false, closingPRFull(true, headA, testDefaultBranch, nullMergedAt)), useDefaultRef, wantMergedAt),
+		unknown("mergedAt unparseable", issueWithClosing("OPEN", false, closingPRFull(true, headA, testDefaultBranch, notATime)), useDefaultRef, wantMergedAt),
+		unknown("baseRefName missing", issueWithClosing("OPEN", false, closingPRFull(true, headA, noBase, testMergedAt)), useDefaultRef, wantNoBase),
+		unknown("baseRefName null", issueWithClosing("OPEN", false, closingPRFull(true, headA, nullBase, testMergedAt)), useDefaultRef, wantNoBase),
+		unknown("timelineItems absent", issueWithTimeline("OPEN", false, "", closingPR(true, headA)), useDefaultRef, wantTimeline),
+		unknown("timelineItems null", issueWithTimeline("OPEN", false, `"timelineItems":null`, closingPR(true, headA)), useDefaultRef, wantTimeline),
+		unknown("timeline nodes absent", issueWithTimeline("OPEN", false, `"timelineItems":{}`, closingPR(true, headA)), useDefaultRef, wantTimeline),
+		unknown("timeline nodes null", issueWithTimeline("OPEN", false, `"timelineItems":{"nodes":null}`, closingPR(true, headA)), useDefaultRef, wantTimeline),
+		unknown("timeline nodes holds a null entry", issueWithTimeline("OPEN", false, `"timelineItems":{"nodes":[null]}`, closingPR(true, headA)), useDefaultRef, wantTimeline),
+		unknown("timeline entry without createdAt", issueWithTimeline("OPEN", false, `"timelineItems":{"nodes":[{}]}`, closingPR(true, headA)), useDefaultRef, wantTimeline),
+		unknown("timeline entry with a null createdAt", issueWithTimeline("OPEN", false, `"timelineItems":{"nodes":[{"createdAt":null}]}`, closingPR(true, headA)), useDefaultRef, wantTimeline),
+		unknown("timeline entry with an unparseable createdAt", issueWithTimeline("OPEN", false, reopenedTimeline(notATime), closingPR(true, headA)), useDefaultRef, wantTimeline),
+
+		// A multi-entry reopen timeline: the latest createdAt wins wherever it sits
+		// in the list, and every entry must parse.
+		unknown("two reopens, merged between them (earlier first)",
+			issueWithTimeline("OPEN", false, reopenedTimeline(earlierReopenAt, reopenedAt), closingPR(true, headA)), useDefaultRef, wantPreReopen),
+		unknown("two reopens, merged between them (latest first)",
+			issueWithTimeline("OPEN", false, reopenedTimeline(reopenedAt, earlierReopenAt), closingPR(true, headA)), useDefaultRef, wantPreReopen),
+		unknown("two reopens, the second createdAt unparseable",
+			issueWithTimeline("OPEN", false, reopenedTimeline(earlierReopenAt, notATime), closingPRFull(true, headA, testDefaultBranch, laterMergedAt)), useDefaultRef, wantTimeline),
+
+		// The repository's default branch is missing or unusable.
+		unknown("default branch ref absent", issueWithClosing("OPEN", false, closingPR(true, headA)), absentRef, wantNoDefault),
+		unknown("default branch ref null", issueWithClosing("OPEN", false, closingPR(true, headA)), `null`, wantNoDefault),
+		unknown("default branch ref empty object", issueWithClosing("OPEN", false, closingPR(true, headA)), `{}`, wantNoDefault),
+		unknown("default branch name null", issueWithClosing("OPEN", false, closingPR(true, headA)), `{"name":null}`, wantNoDefault),
+		unknown("default branch name empty", issueWithClosing("OPEN", false, closingPR(true, headA)), `{"name":""}`, wantNoDefault),
+		unknown("default branch name a number", issueWithClosing("OPEN", false, closingPR(true, headA)), `{"name":123}`, wantNoDefault),
+		unknown("default branch ref a string", issueWithClosing("OPEN", false, closingPR(true, headA)), `"main"`, wantNoDefault),
+
+		// Regressions for the non-matching cases: nothing outside an open issue's
+		// merged closing PRs depends on the new fields, even when they are unusable.
+		{name: "open issue with only an unmerged PR, no default branch", node: issueWithClosing("OPEN", false, closingPR(false, headA)),
+			ref: absentRef, wantVerdict: NotFinished, wantOutcome: OutcomeOpen},
+		{name: "open issue with only an unmerged PR, reopened", node: issueWithTimeline("OPEN", false, reopened, closingPR(false, headA)),
+			wantVerdict: NotFinished, wantOutcome: OutcomeOpen},
+		{name: "open issue with only an unmerged PR, malformed timeline", node: issueWithTimeline("OPEN", false, `"timelineItems":null`, closingPR(false, headA)),
+			wantVerdict: NotFinished, wantOutcome: OutcomeOpen},
+		{name: "open issue with no closing PRs, no default branch", node: issueWithClosing("OPEN", false),
+			ref: absentRef, wantVerdict: NotFinished, wantOutcome: OutcomeOpen},
+		{name: "closed issue with no closing PRs, no default branch", node: issueWithClosing("CLOSED", false),
+			ref: absentRef, wantVerdict: Finished, wantOutcome: OutcomeIssueClosed},
+		{name: "closed issue, merged PR, no default branch", node: issueWithClosing("CLOSED", false, closingPR(true, headA)),
+			ref: absentRef, wantVerdict: Finished, wantOutcome: OutcomePRMerged, wantHeads: []string{headA}},
+		{name: "closed issue, merged PR on a non-default branch", node: issueWithClosing("CLOSED", false, closingPRFull(true, headA, stackBranch, testMergedAt)),
+			wantVerdict: Finished, wantOutcome: OutcomePRMerged, wantHeads: []string{headA}},
+		{name: "closed issue, merged PR before the last reopen", node: issueWithTimeline("CLOSED", false, reopened, closingPR(true, headA)),
+			wantVerdict: Finished, wantOutcome: OutcomePRMerged, wantHeads: []string{headA}},
+		{name: "closed issue, merged PR with no base, no mergedAt and no timeline", node: issueWithTimeline("CLOSED", false, "", closingPRFull(true, headA, noBase, noMergedAt)),
+			wantVerdict: Finished, wantOutcome: OutcomePRMerged, wantHeads: []string{headA}},
+		{name: "merged PR number, no default branch", node: prWithHead("MERGED", true, headA),
+			ref: absentRef, wantVerdict: Finished, wantOutcome: OutcomePRMerged, wantHeads: []string{headA}},
+		{name: "open PR number, no default branch", node: prWithHead("OPEN", false, headA),
+			ref: absentRef, wantVerdict: NotFinished, wantOutcome: OutcomeOpen},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gh := installFakeGh(t)
+			gh.respond(t, tc.body(n), 0, "")
+
+			read := requireResult(t, (&Reader{}).Read(context.Background(), testRepo, []int{n}), n)
+			outcome := requireOutcome(t, (&Reader{}).ReadOutcomes(context.Background(), testRepo, []int{n}), n)
+
+			if read.Verdict != tc.wantVerdict {
+				t.Errorf("Read verdict = %v (err %v), want %v", read.Verdict, read.Err, tc.wantVerdict)
+			}
+			if outcome.Outcome != tc.wantOutcome {
+				t.Errorf("ReadOutcomes outcome = %v (err %v), want %v", outcome.Outcome, outcome.Err, tc.wantOutcome)
+			}
+			gotHeads := slices.Sorted(slices.Values(outcome.Heads))
+			wantHeads := slices.Sorted(slices.Values(tc.wantHeads))
+			if !slices.Equal(gotHeads, wantHeads) {
+				t.Errorf("heads = %v, want exactly %v", outcome.Heads, tc.wantHeads)
+			}
+
+			for who, err := range map[string]error{"Read": read.Err, "ReadOutcomes": outcome.Err} {
+				if err == nil {
+					continue
+				}
+				for _, cause := range tc.wantCauses {
+					if !strings.Contains(err.Error(), cause) {
+						t.Errorf("%s err = %q, want it to name the cause %q", who, err, cause)
+					}
+				}
+				for _, leak := range leaks {
+					if strings.Contains(err.Error(), leak) {
+						t.Errorf("%s err = %q, must not echo the response value %q", who, err, leak)
+					}
+				}
+			}
+			if len(tc.wantCauses) > 0 && (read.Err == nil || outcome.Err == nil) {
+				t.Errorf("want an Err naming %q from both readers, got Read=%v ReadOutcomes=%v", tc.wantCauses, read.Err, outcome.Err)
+			}
+		})
+	}
+}
+
+// qualificationCase is one TestOpenIssueClosingPRQualification row: a response
+// node (with an optional raw defaultBranchRef value, see useDefaultRef and
+// absentRef) and the verdict, outcome, heads and cause substrings both readers
+// must give.
+type qualificationCase struct {
+	name        string
+	node        string
+	ref         string
+	wantVerdict Verdict
+	wantOutcome Outcome
+	wantHeads   []string
+	wantCauses  []string
+}
+
+// body builds the response for the case's node as ticket n.
+func (c qualificationCase) body(n int) string {
+	nodes := map[int]string{n: c.node}
+	switch c.ref {
+	case useDefaultRef:
+		return repoBody(nodes)
+	case absentRef:
+		return repoBodyWithBranch(nodes, "")
+	default:
+		return repoBodyWithBranch(nodes, c.ref)
+	}
+}
+
 // TestMalformedPaginationAndWrongTypedFieldsAreUnknown pins the fail-closed
 // reading of a missing, null or wrongly typed pagination flag and of wrongly
 // typed fields: ReadOutcomes must answer Unknown with a cause for every row, so
@@ -1048,6 +1428,22 @@ func TestMalformedPaginationAndWrongTypedFieldsAreUnknown(t *testing.T) {
 		row{"issue CLOSED, merged closing node headRefOid is a number", issueWithClosingRaw("CLOSED", `"nodes":[{"merged":true,"headRefOid":123}]`), true},
 		row{"issue state is a number", `{"__typename":"Issue","state":123,"closedByPullRequestsReferences":{"pageInfo":{"hasNextPage":false},"nodes":[]}}`, true},
 		row{"PR state is a number", `{"__typename":"PullRequest","state":123,"merged":false}`, true},
+		// The new fields are typed pointers, so a wrong-typed value fails the whole
+		// node's decode (Unknown) rather than being skipped, even for a CLOSED issue.
+		row{"issue OPEN, merged closing node mergedAt is a number",
+			issueWithClosingRaw("OPEN", `"nodes":[{"merged":true,"headRefOid":"`+headA+`","baseRefName":"main","mergedAt":123}]`), true},
+		row{"issue CLOSED, merged closing node mergedAt is a number",
+			issueWithClosingRaw("CLOSED", `"nodes":[{"merged":true,"headRefOid":"`+headA+`","baseRefName":"main","mergedAt":123}]`), true},
+		row{"issue OPEN, merged closing node baseRefName is a number",
+			issueWithClosingRaw("OPEN", `"nodes":[{"merged":true,"headRefOid":"`+headA+`","baseRefName":123,"mergedAt":"`+testMergedAt+`"}]`), true},
+		row{"issue OPEN, timelineItems is a string",
+			issueWithTimeline("OPEN", false, `"timelineItems":"none"`, closingPR(true, headA)), true},
+		row{"issue CLOSED, timelineItems is a string",
+			issueWithTimeline("CLOSED", false, `"timelineItems":"none"`, closingPR(true, headA)), true},
+		row{"issue OPEN, timeline nodes is an object",
+			issueWithTimeline("OPEN", false, `"timelineItems":{"nodes":{}}`, closingPR(true, headA)), true},
+		row{"issue OPEN, timeline createdAt is a number",
+			issueWithTimeline("OPEN", false, `"timelineItems":{"nodes":[{"createdAt":123}]}`, closingPR(true, headA)), true},
 	)
 
 	const n = 7
@@ -1100,8 +1496,29 @@ func TestReadOutcomesNeverRemovableWhereReadIsNotFinished(t *testing.T) {
 		{"issue OPEN, closing nodes key absent", openIssueClosing(``)},
 		{"issue OPEN, closing nodes is null", openIssueClosing(`"nodes":null`)},
 		{"issue OPEN, unmerged then merged-less closing nodes", openIssueClosing(`"nodes":[{"merged":false},{}]`)},
-		{"issue OPEN, null entry beside a merged PR still wins", openIssueClosing(`"nodes":[null,{"merged":true}]`)},
+		{"issue OPEN, null entry beside a merged PR still wins", openIssueClosing(`"nodes":[null,` + closingPR(true, noHead) + `]`)},
 		{"issue OPEN, empty closing nodes list", openIssueClosing(`"nodes":[]`)},
+
+		// Open-issue qualification rows with heads: a merged closing PR that is
+		// not a default-branch merge after the last reopen, or cannot be checked,
+		// must not read as removable in ReadOutcomes where Read is not Finished.
+		{"qualification: merged before the last reopen", issueWithTimeline("OPEN", false, reopenedTimeline(reopenedAt), closingPR(true, headA))},
+		{"qualification: merged at exactly the last reopen", issueWithTimeline("OPEN", false, reopenedTimeline(testMergedAt), closingPR(true, headA))},
+		{"qualification: non-default base", issueWithClosing("OPEN", false, closingPRFull(true, headA, stackBranch, testMergedAt))},
+		{"qualification: missing mergedAt", issueWithClosing("OPEN", false, closingPRFull(true, headA, testDefaultBranch, noMergedAt))},
+		{"qualification: missing baseRefName", issueWithClosing("OPEN", false, closingPRFull(true, headA, noBase, testMergedAt))},
+		{"qualification: malformed timeline", issueWithTimeline("OPEN", false, `"timelineItems":null`, closingPR(true, headA))},
+		{"qualification: unparseable reopen createdAt", issueWithTimeline("OPEN", false, reopenedTimeline(notATime), closingPR(true, headA))},
+		{"qualification: truncated list holding only an unqualifying merge", issueWithClosing("OPEN", true, closingPRFull(true, headA, stackBranch, testMergedAt))},
+		{"qualification: merged after the last reopen into the default branch",
+			issueWithTimeline("OPEN", false, reopenedTimeline(reopenedAt), closingPRFull(true, headA, testDefaultBranch, laterMergedAt))},
+		{"qualification: qualifying merge beside pre-reopen and non-default merges",
+			issueWithTimeline("OPEN", false, reopenedTimeline(reopenedAt),
+				closingPRFull(true, headB, testDefaultBranch, testMergedAt),
+				closingPRFull(true, headSHA64, stackBranch, laterMergedAt),
+				closingPRFull(true, headA, testDefaultBranch, laterMergedAt))},
+		{"qualification: closed issue, non-default merge", issueWithClosing("CLOSED", false, closingPRFull(true, headA, stackBranch, testMergedAt))},
+		{"qualification: closed issue, merge before the last reopen", issueWithTimeline("CLOSED", false, reopenedTimeline(reopenedAt), closingPR(true, headA))},
 
 		// Variants carrying head SHAs, so the removable outcomes are reachable.
 		{"with heads: issue OPEN with a merged linked PR", issueWithClosing("OPEN", false, closingPR(true, headA))},
@@ -1115,11 +1532,26 @@ func TestReadOutcomesNeverRemovableWhereReadIsNotFinished(t *testing.T) {
 		{"with heads: issue OPEN, truncated, unmerged", issueWithClosing("OPEN", true, closingPR(false, headA))},
 	}
 	const n = 7
-	sawRemovable, sawOpen := false, false
+
+	// Rows whose response needs its own repository body: a default branch that is
+	// missing or unusable, which no per-node shape can express.
+	type invariantRow struct{ name, body string }
+	qualifying := map[int]string{n: issueWithClosing("OPEN", false, closingPR(true, headA))}
+	var all []invariantRow
 	for _, tc := range rows {
+		all = append(all, invariantRow{tc.name, repoBody(map[int]string{n: tc.node})})
+	}
+	all = append(all,
+		invariantRow{"qualification: default branch absent", repoBodyWithBranch(qualifying, "")},
+		invariantRow{"qualification: default branch null", repoBodyWithBranch(qualifying, `null`)},
+		invariantRow{"qualification: default branch name empty", repoBodyWithBranch(qualifying, `{"name":""}`)},
+	)
+
+	sawRemovable, sawOpen := false, false
+	for _, tc := range all {
 		t.Run(tc.name, func(t *testing.T) {
 			gh := installFakeGh(t)
-			gh.respond(t, repoBody(map[int]string{n: tc.node}), 0, "")
+			gh.respond(t, tc.body, 0, "")
 
 			verdict := (&Reader{}).Read(context.Background(), testRepo, []int{n})[n].Verdict
 			r := requireOutcome(t, (&Reader{}).ReadOutcomes(context.Background(), testRepo, []int{n}), n)
@@ -1174,9 +1606,13 @@ func TestReadOutcomesMakesOneCallPerBatchOfAtMostFifty(t *testing.T) {
 			}
 			seen := map[string]bool{}
 			for _, argv := range calls {
-				aliases := queryAliases(queryArg(t, argv))
+				query := queryArg(t, argv)
+				aliases := queryAliases(query)
 				if len(aliases) > MaxBatch {
 					t.Errorf("a call carried %d numbers, want at most %d", len(aliases), MaxBatch)
+				}
+				if refs := strings.Count(query, "defaultBranchRef"); refs != 1 {
+					t.Errorf("a call selects defaultBranchRef %d times, want once per call, not once per number", refs)
 				}
 				for _, a := range aliases {
 					if seen[a] {
@@ -1332,8 +1768,10 @@ func TestHeadRefOidIsRequestedInBothSelections(t *testing.T) {
 				return rest[:end]
 			}
 			closingNodes := selection("closedByPullRequestsReferences(first: 25, includeClosedPrs: true){pageInfo{hasNextPage} nodes{")
-			if !strings.Contains(closingNodes, "merged") || !strings.Contains(closingNodes, "headRefOid") {
-				t.Errorf("closing-PR nodes selection = %q, want merged and headRefOid", closingNodes)
+			for _, field := range []string{"merged", "headRefOid", "mergedAt", "baseRefName"} {
+				if !strings.Contains(closingNodes, field) {
+					t.Errorf("closing-PR nodes selection = %q, want %s", closingNodes, field)
+				}
 			}
 			prFragment := selection("... on PullRequest{")
 			for _, field := range []string{"state", "merged", "headRefOid"} {
