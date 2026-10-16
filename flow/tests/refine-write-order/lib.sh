@@ -321,7 +321,7 @@ classify_drift() {
 # expected write order: claim -> working -> parent-body ->
 # (child-create:K immediately followed by its own child-link:K, for every
 # child K, optionally followed immediately by that same child's own
-# child-blockers:K when K has at least one blocking sibling -- omitted
+# child-blockers:K when K has an inherited open or sibling blocker -- omitted
 # entirely for a child with none -- all before parent-exec-order) ->
 # parent-exec-order -> refined -> visual-check. child-blockers:K is
 # rejected fail-closed as: a duplicate (the same K appearing twice), an
