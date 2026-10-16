@@ -54,6 +54,20 @@ Optional features have separate dependencies:
 
 ## 2. Install
 
+Run one command:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/cenci/main/install.sh | bash
+```
+
+The bootstrap downloads the latest release's installer and signature bundle,
+verifies them with cosign, then runs the verified installer. Verification failure
+stops installation. The initial bootstrap itself is fetched over HTTPS from main.
+
+### Optional: verify before executing any downloaded script
+
+If you prefer to verify the installer before running even the bootstrap, use:
+
 ```bash
 curl -fsSL -o install.sh https://github.com/matteobortolazzo/cenci/releases/latest/download/install.sh
 curl -fsSL -o install.sh.bundle https://github.com/matteobortolazzo/cenci/releases/latest/download/install.sh.bundle
@@ -68,12 +82,6 @@ Requires [cosign](https://docs.sigstore.dev/system_config/installation/) — the
 `cosign verify-blob` step checks the downloaded `install.sh` against cenci's pinned
 release identity before it runs; verification fails closed, with no fallback to an
 unverified ref.
-
-The legacy one-liner still works and re-execs itself through this same verified path:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/cenci/main/install.sh | bash
-```
 
 Resolves to the latest release tag by default. That resolved ref pins the client
 marketplace manifests and all three plugins' content — not just which install.sh
@@ -233,6 +241,13 @@ replaces a stale running cenci daemon with the updated binary. Use
 `cenci update --lazyboards` to install or reconcile the optional board binary; an
 already-managed lazyboards installation is also refreshed by a normal update.
 
+The host binary follows the active installed cenci-watch version, ignoring older
+cache timestamps. If both clients are installed, it uses the newer active version.
+If that binary cannot be provisioned, an available older binary remains usable,
+but the update exits nonzero and reports that the binary update is incomplete.
+Check the bootstrap log (`${TMPDIR:-/tmp}/cenci-bootstrap.log`) and retry
+`cenci update`. Restart agent sessions to load updated plugins.
+
 The components version independently. In particular, a `watch/v0.5.4` release is the
 `cenci-watch` plugin release, so update output correctly reports it on the
 `cenci-watch` line rather than the `cenci` workflow-plugin line.
@@ -245,23 +260,20 @@ instead of silently falling back to the currently-installed (possibly stale) ins
 
 ### Troubleshooting: `cenci update` reports success but the version never changes
 
-Installs pinned before this fix (below `watch/v0.28.1` / `sandbox/v1.14.4` /
-`flow/v0.26.0`) ran `cenci update` from their own on-disk, stale installer, which could
-never move its own marketplace pin — every step reported success while nothing actually
-changed. `cenci doctor` on an affected install now warns that the pin is stale and
-prints the recovery commands; if you're not sure, or `cenci doctor` isn't available yet,
-recover manually:
+Older installations can run a stale local updater or select an old cached binary.
+Rerun the current installer to repair the installation using the latest release:
 
 ```bash
-claude plugin marketplace remove cenci
-claude plugin marketplace add matteobortolazzo/cenci@watch/v0.28.3
-cenci update
-cenci --version   # expect >= 0.28.2
+curl -fsSL https://raw.githubusercontent.com/matteobortolazzo/cenci/main/install.sh | bash
+cenci --version
+cenci doctor
 ```
 
-Substitute the Codex equivalent (`codex plugin marketplace remove/add`) if you use
-Codex instead of Claude Code. Once reinstalled at a current release, `cenci update`
-self-heals for all future releases and this manual step is no longer needed.
+This detects Claude Code and Codex automatically. Compare `cenci --version` with
+the installer's **cenci-watch** version; the workflow and sandbox components have
+independent version numbers. An unchanged version can also mean you already have
+the latest published release. Updates use that release's snapshot of all three
+components; changes on main reach this channel when a new Watch release is published.
 
 ## Uninstall
 
