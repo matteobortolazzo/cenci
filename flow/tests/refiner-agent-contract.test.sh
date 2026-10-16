@@ -184,6 +184,75 @@ if [[ -n "${codex}" ]]; then
   assert_contains "${codex}" "refiner agent split is Claude-only" "skills/refine/codex.md"
 fi
 
+# --- #1273 — lean refinement policy (refinement.autonomy: "lean") ----------
+#
+# Why this exists: every refiner question used to cost the human a decision
+# the planner would not have escalated. Lean mode narrows questions to four
+# classes, one round, at most 3 questions plus the cap-exempt confirm/overrule
+# question, and makes the SKILL (not the refiner) enforce that cap. Interactive
+# refine must stay exactly as above. Marker wording is shared with
+# refine-lean-contract.test.sh (cross-file literals) — each phrase sits on a
+# single source line in the production prose (docs/shell-scripting-gotchas.md).
+#
+# The "retention" assertions (interactive sentences that already exist today)
+# pass before the edit by design: they guard that the lean edit only adds and
+# scopes, never rewrites, the interactive path (#979 restatement-site rule).
+
+if [[ -n "${refiner}" ]]; then
+  # Heading and gating sentence (planner.md ## Self-Answer Policy idiom).
+  assert_contains "${refiner}" "## Lean Question Policy" "agents/refiner.md #1273 lean section heading"
+  assert_contains "${refiner}" 'This section applies **only** when the bundle states `refinementAutonomy: lean`.' "agents/refiner.md #1273 lean gating sentence"
+  assert_contains "${refiner}" 'ignore this entire section and follow `## Questions` below exactly as written' "agents/refiner.md #1273 interactive/absent flag falls back to ## Questions unchanged"
+
+  # The four question classes (AC3).
+  assert_contains "${refiner}" '**security-sensitive**' "agents/refiner.md #1273 class: security-sensitive"
+  assert_contains "${refiner}" '**destructive or irreversible**' "agents/refiner.md #1273 class: destructive or irreversible"
+  assert_contains "${refiner}" '**scope blowup (split)**' "agents/refiner.md #1273 class: scope blowup / split"
+  assert_contains "${refiner}" '**product ambiguity with no recommendable option**' "agents/refiner.md #1273 class: product ambiguity"
+  assert_contains "${refiner}" 'Recommendable means exactly one option is justifiable from the repo' "agents/refiner.md #1273 recommendable definition"
+
+  # Non-class decisions are decided, not asked (AC3).
+  assert_contains "${refiner}" 'Architecture trade-offs, resolvable contradictions, and recommendable product choices are recorded in `### Decisions` as `decided:` entries' "agents/refiner.md #1273 decide-not-ask classes"
+  assert_contains "${refiner}" 'decided: <answer> — <rationale> (alternative: <option label>)' "agents/refiner.md #1273 decided: entry format (shared with planner.md)"
+  assert_contains "${refiner}" 'interactive mode never emits a `decided:` entry' "agents/refiner.md #1273 interactive never emits decided:"
+
+  # Zero-question path (AC2).
+  assert_contains "${refiner}" 'a ticket with only conventional decisions reaches the Confirmation Gate with zero questions asked' "agents/refiner.md #1273 zero-question path"
+
+  # One round, at most 3 questions, exempt confirm/overrule (AC4).
+  assert_contains "${refiner}" 'one question round and at most 3 questions' "agents/refiner.md #1273 one round and 3-question cap"
+  assert_contains "${refiner}" '(confirm/overrule — cap-exempt)' "agents/refiner.md #1273 exempt tag"
+  assert_contains "${refiner}" 'is always asked and never dropped, even when the 3-question cap is already full' "agents/refiner.md #1273 exempt question never dropped (anti-starvation)"
+
+  # Class tags the skill sorts by (Q1 answer) and the overflow rank (AC6).
+  assert_contains "${refiner}" 'Tag every non-exempt question with exactly one class tag: `(security)`, `(destructive)`, `(split)`, or `(product)`.' "agents/refiner.md #1273 class tags"
+  assert_contains "${refiner}" 'confirm/overrule, security, destructive, split, product ambiguity' "agents/refiner.md #1273 overflow rank"
+  assert_contains "${refiner}" '(over the cap: <class>)' "agents/refiner.md #1273 over-cap suffix on the decided entry"
+  assert_contains "${refiner}" 'Not asked — over the lean question cap; decide it under the overflow rule.' "agents/refiner.md #1273 overflow sentinel answer"
+  assert_contains "${refiner}" 'treat that question as withheld and decide it under the overflow rule' "agents/refiner.md #1273 sentinel handling"
+
+  # Retention: interactive per-round cap survives, now scoped to interactive mode.
+  assert_contains "${refiner}" "at most 4 questions per round" "agents/refiner.md #1273 retention of the interactive per-round cap"
+  assert_contains "${refiner}" 'Interactive mode: at most 4 questions per round' "agents/refiner.md #1273 interactive per-round cap scoped to interactive mode"
+fi
+
+if [[ -n "${skill}" ]]; then
+  # Step 6: interactive path labelled unchanged, lean relay added (AC5).
+  assert_contains "${skill}" 'Interactive mode — unchanged' "skills/refine/SKILL.md #1273 step 6 interactive bullets labelled unchanged"
+  assert_contains "${skill}" 'This skill enforces the lean cap itself and does not rely on the refiner to obey it.' "skills/refine/SKILL.md #1273 skill-side cap enforcement"
+  assert_contains "${skill}" 'at most 3 non-exempt questions in round 1' "skills/refine/SKILL.md #1273 round 1 relays at most 3 non-exempt questions"
+  assert_contains "${skill}" 'after round 1 only cap-exempt questions are relayed' "skills/refine/SKILL.md #1273 after round 1 only exempt questions"
+  assert_contains "${skill}" 'stable-sort the non-exempt questions by class tag in this rank order: confirm/overrule, security, destructive, split, product ambiguity' "skills/refine/SKILL.md #1273 tag sort in rank order"
+  assert_contains "${skill}" 'An untagged question ranks last and counts against the cap' "skills/refine/SKILL.md #1273 untagged ranks last"
+  assert_contains "${skill}" 'Withheld questions are never relayed to the user' "skills/refine/SKILL.md #1273 withheld questions never relayed"
+  assert_contains "${skill}" 'Not asked — over the lean question cap; decide it under the overflow rule.' "skills/refine/SKILL.md #1273 sentinel fed back to the refiner"
+  assert_contains "${skill}" 'STOP with zero GitHub writes and report a lean-contract violation' "skills/refine/SKILL.md #1273 loop-guard STOP"
+  assert_contains "${skill}" 'it never removes a confirmation, a STOP, or a fail-closed default' "skills/refine/SKILL.md #1273 precedence: lean never removes a safety gate"
+  # Retention: the interactive batched-round sentences survive verbatim.
+  assert_contains "${skill}" "Present the round's questions in a single \`AskUserQuestion\` call" "skills/refine/SKILL.md #1273 retention of the interactive batched call"
+  assert_contains "${skill}" 'The refiner asks at most 4 questions per round and rounds continue until it returns `None.`.' "skills/refine/SKILL.md #1273 retention of the interactive round cap sentence"
+fi
+
 if [[ "${failures}" -gt 0 ]]; then
   echo "refiner-agent-contract.test.sh: ${failures} failure(s)." >&2
   exit 1
