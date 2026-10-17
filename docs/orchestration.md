@@ -45,7 +45,7 @@ New → Refined → Planned → Working → In Review → Implemented
 | Working → Input Needed (escalation) | `/cenci:implement` planning (unattended, `planning.autonomy: "lean"`) | Persists a draft `.plans/<id>-*.md` (`status: awaiting-input`), then `+Input Needed` `−Working` (`Refined` retained) |
 | Input Needed → Working (resume) | `cenci dispatch` (auto-resume) or a manual `/cenci:implement <id>` re-run | `+Working` `−Input Needed` (atomic, one label call) once a qualifying human reply is detected after the escalation anchor; `Refined` retained. Reverses to `+Input Needed` `−Working` on a failed auto-resume launch (unless the tmux window was demonstrably created) or on the reconciler's bounded interrupted-resume recovery |
 | Working → In Review | `/cenci:implement` phase 9 | `+In Review` `−Working` when the PR opens |
-| In Review → Implemented | `/cenci:babysit` (on PR merge, including merge-time split-parent reconciliation) | `+Implemented` `−In Review` |
+| In Review → Implemented | `/cenci:babysit` (on PR merge, including merge-time split-parent reconciliation); `/cenci:close` (a split parent, after its coverage review) | `+Implemented` `−In Review` |
 
 `automerge:ok` is a per-ticket grant confirmed at refine's Confirmation Gate, never inherited — a split child and a followup ticket each earn it (or not) on their own merit, never from the parent.
 
@@ -69,6 +69,15 @@ parent to `Implemented` too — unless the parent's comment thread carries a liv
 `parent-gap-report` marker (the same one the Parent Close Gate posts above), in
 which case the parent is left open and reported as held for human triage; a stale
 gap report holds the parent indefinitely until a human resolves it.
+
+The explicit way to resolve a held parent — or to close any split parent with the
+coverage review on record — is `/cenci:close <parent>`: it refuses while any child is
+open, has the acceptance reviewer compare the parent's original acceptance criteria and
+edge cases item by item against the **merged** child PRs and their tests and docs (never
+the child issue bodies), posts the result on the parent as a
+`<!-- cenci-parent-close-review -->` comment, creates a new child under the same parent
+(with the parent's milestone) for every partial or missing item and exits without closing,
+and closes the parent only when zero items are partial or missing.
 
 `/cenci:babysit`'s merge is squash-only — no other merge method is ever
 issued — and its evaluation immediately before issuing the merge command

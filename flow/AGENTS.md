@@ -26,7 +26,7 @@ On-demand topic docs live at `docs/`:
 - `docs/git-workflow.md` — branching, commits, PRs, versioning
 - `docs/skill-authoring.md` — the three client surfaces (Claude Code `SKILL.md`, Codex `codex.md`, OpenCode `PORTABLE_SKILLS`) every skill change must reconcile before it is finished; and writing skills that generate/regenerate files, especially with external-sourced values
 - `docs/model-escalation.md` — bounded Fable/Astra specialist triggers, dispatch, evidence validation, and failure handling; read before changing model escalation or its workflow call sites
-- `docs/ticket-sizing.md` — how tickets are sized against the ~200k agent context budget and when to split
+- `docs/ticket-sizing.md` — the S/M/L ticket-size table (file/line bounds, lane size, the half-window context budget) mirrored from the Velka workflow docs, the four points where it is enforced (refine, planner Size Check, implementation lanes, PR size line), and when to split; read before touching any of those
 - `docs/pipeline-safety.md` — restart/recovery, risk-profile re-evaluation, and shared-temp-file scoping rules for multi-phase pipelines
 - `docs/shell-scripting-gotchas.md` — narrow shell/jq/grep pitfalls (CWD persistence, jq fallback semantics, contract-test markers)
 - `docs/adapter-contract.md` — the 8-property behavioral-parity contract client adapters (Claude Code, Codex) must satisfy, and its enforcement points

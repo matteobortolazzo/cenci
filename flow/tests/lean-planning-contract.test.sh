@@ -129,7 +129,7 @@ assert_file_occurs_at_most_once() {
 LEAN_GATE_MARKER='This section applies **only** when the delegation states `Planning autonomy: lean`.'
 AUTOADOPTED_FORMAT_MARKER='auto-adopted: <answer> — <rationale>'
 AUTOADOPTED_HEADING_MARKER='## Auto-Adopted Answers'
-TICKET_SIZING_TRIGGER_MARKER='size against the budget in `docs/ticket-sizing.md`; split only on real budget risk (tier L)'
+TICKET_SIZING_TRIGGER_MARKER='size against the S/M/L table in `docs/ticket-sizing.md`'
 TICKET_SIZING_TIER_RESTATEMENT_MARKER='Many files spanning multiple independent concerns'
 
 ESCALATION_SECURITY_MARKER='**security-sensitive**'
@@ -873,7 +873,7 @@ DECIDED_FORM_MARKER='decided: <answer> — <rationale> (alternative: <option lab
 #     scope-blowup bullet is pinned here. These PASS on the unedited file by
 #     design -- they are edit guards, not red-phase assertions. -------------
 
-SCOPE_BULLET_LINE='- **scope blowup** — the plan would need a split: size against the budget in `docs/ticket-sizing.md`; split only on real budget risk (tier L). The planner asks a scope-blowup clarifying question only when it actually recommends a split; an `L` estimate with a reasoned no-split verdict, or a size change without a split, is recorded in `### Size Estimate` / `### Split Recommendation` and goes through the Split Gate rather than being asked.'
+SCOPE_BULLET_LINE='- **scope blowup** — the plan would need a split: size against the S/M/L table in `docs/ticket-sizing.md`. A plan whose `### Size Check` verdict is `exceeds` (the plan'"'"'s files or lines exceed the ticket'"'"'s size bound, or the plan needs a shape the letter forbids) always returns a real split in `### Split Recommendation` — never a `None —` verdict and never a question, since the Split Gate stops on it unconditionally. The planner asks a scope-blowup clarifying question only when it actually recommends a split for a ticket whose bound is not exceeded; an `L` estimate within its bound with a reasoned no-split verdict, or a size change without a split, is recorded in `### Size Estimate` / `### Split Recommendation` and goes through the Split Gate rather than being asked.'
 assert_file_has_line "${PLANNER_AGENT}" "${SCOPE_BULLET_LINE}" \
   "the scope-blowup stop-class bullet must stay byte-for-byte unchanged (#1131)"
 
@@ -1370,8 +1370,8 @@ fi
 ATTRIBUTION_DOC_PATH="${FLOW_DIR}/docs/comment-attribution.md"
 ATTR_DECISION_ROW_MARKER='| `decision` | `skills/implement/phases/phase-1-plan.md` — `## Decision Comment`'
 ATTR_DECISION_MARKER_MARKER='`<!-- cenci-decision -->`'
-ATTR_SIX_KINDS_MARKER="flow's six kinds:"
-ATTR_FIVE_KINDS_MARKER="flow's five kinds:"
+ATTR_SIX_KINDS_MARKER="flow's seven kinds:"
+ATTR_FIVE_KINDS_MARKER="flow's six kinds:"
 
 if require_content ATTR_CONTENT "${ATTRIBUTION_DOC_PATH}" "comment-attribution.md"; then
   assert_contains_ws "${ATTR_CONTENT}" "${ATTR_DECISION_ROW_MARKER}" \

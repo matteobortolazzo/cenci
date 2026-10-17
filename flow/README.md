@@ -10,15 +10,20 @@ scope and planning decisions human-gated.
 
 ## How a ticket becomes a PR
 
-1. **Refine the issue.** Clarify intent, split oversized work, and surface risks before
-   implementation starts.
+1. **Refine the issue.** Clarify intent, write concrete acceptance criteria and edge cases,
+   size the ticket (`S`/`M`/`L` with its bound — see [Ticket sizes](#ticket-sizes)), split
+   work that exceeds L as a coverage exercise, and surface risks before implementation starts.
 2. **Save the plan.** Planning produces a durable `.plans/` handoff that can be reviewed,
-   resumed, or picked up by automatic dispatch.
+   resumed, or picked up by automatic dispatch — after checking the plan still fits the
+   ticket's size bound (growth is a split trigger) and inventorying its delegation lanes.
 3. **Run the engineering loop.** cenci creates an isolated worktree, proves the tests red,
-   implements them green, refactors, and runs security, quality, and silent-failure
-   reviews.
-4. **Open and follow the PR.** The pipeline rebases, pushes, and opens the pull request;
-   babysitting can then drive CI and review activity through merge.
+   implements them green (every lane briefed with a context budget of about half its model's
+   window), refactors, grades the result against the ticket item by item (the acceptance
+   review), and only then runs security, quality, and silent-failure reviews.
+4. **Open and follow the PR.** The pipeline rebases, pushes, and opens the pull request with
+   its measured size and the acceptance table in the body; babysitting can then drive CI and
+   review activity through merge. A split parent closes through `/cenci:close`, after a
+   coverage review of its merged child PRs.
 
 The implementation loop runs inside [cenci-sandbox](../sandbox/README.md), while
 [cenci-watch](../watch/README.md) publishes live session state to tmux and optional
@@ -47,7 +52,8 @@ engineering conventions and native workflow foundations described in
 | `/cenci:refine <ticket-id>` | Iterative ticket refinement until it's ready for planning |
 | `/cenci:implement <ticket-id>` | Full pipeline: plan, test, implement, refactor, security review, code review, lessons, PR |
 | `/cenci:refactor [scope]` | Analyze a codebase with specialized subagents and propose refactoring tickets |
-| `/cenci:review <pr-number \| file-paths>` | Review code with specialized security, quality, and silent-failure subagents |
+| `/cenci:review <pr-number \| file-paths>` | Review code with specialized security, quality, and silent-failure subagents; in PR mode the acceptance reviewer grades the PR against its ticket first |
+| `/cenci:close <parent-ticket-id>` | Close a split parent only after every child is closed and the acceptance reviewer has compared the parent's original criteria and edge cases, item by item, against the merged child PRs — a partial or missing item becomes a new child instead |
 | `/cenci:address-review <pr-number>` | Address PR review comments — fetch, evaluate, fix, reply, push, re-request review |
 | `/cenci:babysit <pr-number>` | Persistent PR follow-through — periodically checks CI and new review comments and drives them to resolution until the PR merges or closes |
 | `/cenci:sync` | Pull latest main, rebase active worktrees, prune stale remotes, clean up merged branches |
@@ -89,6 +95,7 @@ Codex and OpenCode so neither mistakes a pipeline command for a supported workfl
 | `babysit` | Yes | Yes | Yes | Thin wrapper over the client-neutral `cenci babysit` supervisor |
 | `babysit-attention` | Yes | No | No | Launcher-dispatched by `cenci babysit` when a decision needs a human; no Codex/OpenCode companion yet |
 | `ci-repair` | Yes | No | No | Launcher-dispatched by `cenci babysit` on failing CI; no Codex/OpenCode companion yet |
+| `close` | Yes | In development | No | Split-parent coverage review before closing; the writes run through `scripts/close-parent.sh` on both clients |
 | `merge-repair` | Yes | No | No | Babysit always dispatches conflict resolution to Claude Opus, including for Codex/OpenCode supervisors |
 | `configure` | Yes | In development | No | Neutral/adapters foundation present |
 | `implement` | Yes | In development | No | Agents/checkpoints foundation |
@@ -118,6 +125,7 @@ companion) for every skill, including the internal ones not listed above.
 | `babysit-attention` | Resolve a paused PR supervisor decision with explicit human input. | No | Yes | Yes | No |
 | `babysit` | Follow an open PR with the client-neutral cenci supervisor until it merges or closes. | Yes | Yes | Yes | Yes |
 | `ci-repair` | Diagnose and repair failing CI for an existing pull request without reopening the implementation pipeline. | No | Yes | Yes | No |
+| `close` | Close a split parent ticket only after an item-by-item coverage review of its merged child PRs. | No | Yes | Yes | Yes |
 | `codex-runtime` | Shared native Codex stage, checkpoint, goal, and agent-adapter contract. | No | No | Yes | No |
 | `configure` | Configure cenci's neutral project core and generate Claude/Codex adapters. | No | Yes | Yes | Yes |
 | `frontend-classification` | Classify whether a ticket is frontend or UI work. Use when deciding whether design-aware planning, visual verification, UI tests, or screenshot capture applies. | Yes | No | Yes | Yes |
@@ -146,8 +154,9 @@ companion) for every skill, including the internal ones not listed above.
 
 | Agent | Purpose | Referencing skills |
 |---|---|---|
+| `acceptance-reviewer` | Acceptance reviewer that compares a ticket's acceptance criteria, edge cases, boundaries and documentation items — item by item — against a PR's code, tests, docs and screenshots, and reports each as covered, partial, missing, or unrequested. Use after implementation and before code review, in `/cenci:review` PR mode, and when closing a split parent. | close,implement review |
 | `backlog-maintainer` | Audits the open Followup-ticket backlog for duplicates and small items worth grouping, producing consolidation findings with proposed merges, promotions, and batch polish tickets. Use from the /cenci:maintain skill's backlog mode. Read-only: it inventories issues and classifies them, it never closes, edits, or creates anything. | maintain |
-| `code-reviewer` | Strict senior developer that reviews PRs for quality, conventions, bugs, and test coverage. Use after implementation for final review before PR. | configure,implement |
+| `code-reviewer` | Strict senior developer that reviews PRs for quality, conventions, bugs, and test coverage. Use after implementation for final review before PR. | configure,implement review |
 | `context-gatherer` | Gathers ticket and project context into a compact bundle file before planning. Use at the start of the implement pipeline so large context (ticket body, comments, per-project CLAUDE.md) stays out of the main conversation. | attachments,implement |
 | `docs-maintainer` | Audits the flow project's documentation and generated-index consistency for maintenance drift, producing findings with proposed repairs. Use from the /cenci:maintain skill's docs and all modes. | maintain |
 | `domain-specialist` | Read-only second opinion for difficult architecture, security boundaries, silent failures, unresolved bugs, and conflicting audit findings. Invoke only for a bounded escalation under docs/model-escalation.md. | address-review,ci-repair implement,maintain refactor,refine review |
@@ -175,17 +184,18 @@ companion) for every skill, including the internal ones not listed above.
 | `babysit-attention` | — | merge-repair | — | — |
 | `babysit` | — | merge-repair, project-core, shell-rules | — | — |
 | `ci-repair` | — | project-core, shell-rules, subagent-safety, testing | — | domain-specialist |
+| `close` | codex.md | babysit, codex-runtime, project-core, shell-rules, subagent-safety | close-parent.sh | acceptance-reviewer |
 | `codex-runtime` | — | — | — | — |
 | `configure` | codex.md | babysit, codex-runtime, project-core, shell-rules, testing, verify-ui | detect-project.sh, merge-sandbox-config.sh, resolve-delta.sh | code-reviewer |
 | `frontend-classification` | — | implement, refine | — | — |
-| `implement` | codex.md, phases/phase-1-plan.md, phases/phase-2-worktree.md, phases/phase-3-test-red.md, phases/phase-4-implement-green.md, phases/phase-5-refactor.md, phases/phase-6-7-review.md, phases/phase-8-docs.md, phases/phase-9-pr.md | address-review, attachments, babysit, ci-repair, codex-runtime, frontend-classification, project-core, review, shell-rules, subagent-safety, testing, ticket-ownership, verify-ui | run-artifact-dir.sh | code-reviewer, context-gatherer, domain-specialist, implementer, lessons-collector, planner, security-reviewer, silent-failure-hunter |
+| `implement` | codex.md, phases/phase-1-plan.md, phases/phase-2-worktree.md, phases/phase-3-test-red.md, phases/phase-4-implement-green.md, phases/phase-5-refactor.md, phases/phase-6-7-review.md, phases/phase-8-docs.md, phases/phase-9-pr.md | address-review, attachments, babysit, ci-repair, close, codex-runtime, frontend-classification, project-core, review, shell-rules, subagent-safety, testing, ticket-ownership, verify-ui | pr-size.sh, run-artifact-dir.sh | acceptance-reviewer, code-reviewer, context-gatherer, domain-specialist, implementer, lessons-collector, planner, security-reviewer, silent-failure-hunter |
 | `maintain` | base-freshness.md, codex.md, modes/backlog.md, modes/clients.md, modes/docs.md, modes/rules.md, modes/structure.md | codex-runtime, project-core, shell-rules, subagent-safety, worktrees | check.sh | backlog-maintainer, docs-maintainer, domain-specialist, portability-maintainer, rules-maintainer, structure-maintainer |
 | `merge-repair` | — | project-core, shell-rules, worktrees | — | — |
 | `pr-comment-filter` | — | address-review, babysit | — | — |
 | `project-core` | — | — | — | — |
 | `refactor` | codex.md | codex-runtime, project-core, shell-rules, subagent-safety | — | domain-specialist |
-| `refine` | codex.md, parent-blockers.md | attachments, codex-runtime, frontend-classification, project-core, shell-rules, subagent-safety, ticket-ownership | ensure-issue.sh | domain-specialist, refiner |
-| `review` | codex.md | codex-runtime, project-core, shell-rules, subagent-safety | — | domain-specialist |
+| `refine` | codex.md, parent-blockers.md | attachments, close, codex-runtime, frontend-classification, project-core, shell-rules, subagent-safety, ticket-ownership | coverage-map.sh, ensure-issue.sh | domain-specialist, refiner |
+| `review` | codex.md | close, codex-runtime, project-core, shell-rules, subagent-safety | acceptance-verdict.sh | acceptance-reviewer, code-reviewer, domain-specialist |
 | `shell-rules` | — | implement | — | — |
 | `stack-angular` | — | testing | — | — |
 | `stack-dotnet` | — | — | — | — |
@@ -390,15 +400,15 @@ Lessons are routed by topic (`docs/caching.md`, `docs/migrations.md`, …) rathe
 
 When you run `/cenci:implement <ticket-id>`, the pipeline executes these phases:
 
-1. **Plan** — Context-gatherer agent bundles the ticket, design, and project context into a file (only a short digest enters the main context); planner agent reads the bundle, analyzes the codebase, and asks clarifying questions where your answers would change the plan; once none remain, the plan is saved directly — no approval prompt — and presented for you to review before launching implementation. **Trivial-ticket fast path**: a narrowly-scoped, unambiguous, non-UI/non-security/auth/payment/migration ticket that is fully specified by its own body skips the planner and Q&A entirely and proceeds straight into implementation in the same session — it still passes through the `Planned` label milestone with a minimal plan file on disk.
+1. **Plan** — Context-gatherer agent bundles the ticket, design, and project context into a file (only a short digest enters the main context); planner agent reads the bundle, analyzes the codebase, and asks clarifying questions where your answers would change the plan; it then compares its Files to Modify against the ticket's `### Size Estimate: <letter>` bound (`### Size Check`) — a plan that exceeds the bound stops before any implementation mutation and returns a split proposal, in every mode — records the confirmed size, and inventories the `### Delegation Preflight` lanes (each at most one M; an L ticket is always several lanes). Once no questions remain, the plan is saved directly — no approval prompt — and presented for you to review before launching implementation. **Trivial-ticket fast path**: a narrowly-scoped, unambiguous, non-UI/non-security/auth/payment/migration ticket that is fully specified by its own body skips the planner and Q&A entirely and proceeds straight into implementation in the same session — it still passes through the `Planned` label milestone with a minimal plan file on disk.
 2. **Worktree Setup** — Creates an isolated git worktree for the feature branch
 3. **Test First (Red)** — Implementer agent writes failing tests
-4. **Implement (Green)** — Implementer agent makes tests pass; UI tickets also get visual verification, with final screenshots persisted for the PR
+4. **Implement (Green)** — Implementer agent makes tests pass; UI tickets also get visual verification, with final screenshots persisted for the PR in `en-US` and `it-IT` (screens and gallery). Every implementer lane is briefed that its working budget is about half its model's advertised context window with autocompact disabled; a lane reporting low context, or needing a second resume, stops the run as a split signal — it is never retried with a longer lane
 5. **Refactor** — Implementer agent simplifies and cleans up
-6. **Security Review** — Security reviewer agent checks for OWASP vulnerabilities
+6. **Acceptance Review** — Acceptance reviewer agent (opus) reads the ticket before the code and grades every acceptance criterion, edge case, boundary and documentation item as covered (naming the proving test, screenshot or doc), partial, missing, or unrequested; a UI ticket needs the gallery and secret-gist screenshots in `en-US` and `it-IT` as evidence. Any partial or missing item returns the run to implementation before code review starts. Then **Security Review** — Security reviewer agent checks for OWASP vulnerabilities
 7. **Code Review** — Code reviewer agent does a final PR-style review
 8. **Capture Lessons** — Lessons collector routes genuine mistakes into the relevant `docs/<topic>.md` or `CLAUDE.md` (opt-in; most sessions capture nothing); this phase also owns doc ownership: `README.md`, `AGENTS.md`/`CLAUDE.md`, and `docs/**` updates for the run
-9. **Create PR** — Rebases on latest main, commits, pushes, and creates a pull request; UI tickets get a `## Screenshots` section in the PR body
+9. **Create PR** — Rebases on latest main, commits, pushes, measures the final diff against the size table (`Size: <letter> (<files> files, <lines> lines) vs ticket <letter>` in the PR body, flagged when the PR is one size above its ticket — such a PR is reported to the founder and must not be merged on green checks alone), embeds the acceptance reviewer's item table, and creates a pull request; UI tickets get a `## Screenshots` section in the PR body
 
 ### Board lifecycle
 
@@ -410,7 +420,7 @@ The skills drive a ticket through a label-based state machine (`gh issue edit`).
 | `Planned` | `/cenci:implement` — Phase 1, when the plan is persisted | Plan on disk (`.plans/`), ready to pick up |
 | `Working` | `/cenci:implement` — at pipeline start | Actively being implemented |
 | `In Review` | `/cenci:implement` — Phase 9, at PR-open | PR is open, under review / CI running |
-| `Implemented` | `/cenci:babysit` — on PR merge, including split-parent reconciliation from the live sub-issue graph | PR merged — done; a split parent closes only when every native sub-issue is closed and no `parent-gap-report` marker holds it |
+| `Implemented` | `/cenci:babysit` — on PR merge, including split-parent reconciliation from the live sub-issue graph; `/cenci:close` — on a split parent, after the coverage review | PR merged — done; a split parent closes only when every native sub-issue is closed and no `parent-gap-report` marker holds it, or when `/cenci:close`'s item-by-item review of the merged child PRs finds zero partial or missing items |
 | `Followup` | `/cenci:implement` — Phase 9, and `/cenci:address-review` | Deferred/out-of-scope item captured from a session — triage before working |
 
 `Followup` is a separate capture tag applied to followup tickets created at PR time (and appended to by `address-review`'s Acknowledge action) — it is an untriaged capture queue, never release-blocking, not a board-progression state, and not part of the linear lifecycle below. Items leave the queue only when triaged: grouped and supersede-closed via `/cenci:maintain backlog`, or promoted via `/cenci:refine` (see `flow/docs/followup-triage.md`).
@@ -552,9 +562,21 @@ rtk init -g
 
 After restarting Claude Code, Bash commands are rewritten through RTK automatically where supported. Claude Code built-in tools such as `Read`, `Grep`, and `Glob` do not pass through RTK hooks, so keep using cenci's lazy phase files and concise agent outputs for context reduction inside the plugin itself.
 
+## Ticket sizes
+
+Every refined ticket carries `### Size Estimate: <letter>` with the letter's bound line and a rationale — the contract in [`docs/ticket-sizing.md`](docs/ticket-sizing.md), mirrored from the Velka workflow docs:
+
+| Size | Bound | Review |
+|---|---|---|
+| **S** | `<= 10 changed files, <= 400 changed lines`, one concern in one project, no schema change, no automerge protected path | Bot review; automergeable |
+| **M** (default) | `<= 30 changed files, <= 2,000 changed lines`, one feature slice, API plus UI allowed, at most one migration | Bot review plus founder skim |
+| **L** | `<= 60 changed files, <= 5,000 changed lines`, several coupled slices — only with a recorded reason why they cannot ship as a stacked series of M PRs | Bot review plus full founder read |
+
+Lines are insertions plus deletions, generated files and lockfiles included. Anything beyond L is split, never written as one ticket; model capability is never a reason to size up; the automerge gate stays at the S bound (`maxChangedFiles` 10 / `maxDiffLines` 400). The size is enforced four times: `/cenci:refine` writes it (and rejects vague acceptance criteria — every criterion names an observable behavior, state or output, and edge cases are listed individually); the planner's `### Size Check` stops an over-bound plan before any implementation mutation; every implementation lane is at most one M with a context budget of about half the model's window; and Phase 9 writes the measured `Size: … vs ticket …` line into the PR body, flagging a PR one size above its ticket.
+
 ## Ticket Splitting
 
-When a ticket is sized L during `/cenci:refine`, the skill suggests splitting it into numbered child tickets (e.g., "(1/3)", "(2/3)", "(3/3)") with explicit dependency ordering — which children can be implemented in parallel and which are sequential. Each child references the parent in its body and is linked to the parent as a native GitHub sub-issue, so the parent renders the child enumeration and progress directly in the GitHub UI; dependency ordering lives in the child bodies (and, when non-trivial, a short prose "Execution Order" note on the parent). Children inherit the parent's milestone and every parent label except the lifecycle markers and per-ticket refinement grants (`Refined`, `Working`, `Planned`, `In Review`, `Implemented`, `automerge:ok`, `Browser`, `ui:visual-check`), so a split never drops its children out of the milestone. The latter three are never inherited — each child earns them independently, or not, at refine's Confirmation Gate. When `/cenci:implement` creates a PR for the last open child, phase 9's Parent Close Gate audits the parent's acceptance criteria first: the PR closes the parent alongside the child only when every criterion has concrete delivered evidence (in this worktree's diff or a merged sibling PR); on any gap the PR references the parent as `Related to`, the unmet criteria are posted as a comment on the parent, and the parent stays open for triage (#661) — and a retry reconciles the commit trailer, PR body, and GitHub's closing reference to whatever verdict this entry's fresh audit produces, not the verdict an earlier attempt may have written (#879). That trailer only makes the parent eligible: parent completion itself is reconciled by `cenci babysit` at merge time from the live native sub-issue graph plus the gap-report check — a plan-time `isLastChild` value recorded when the plan was written is never what actually closes the parent, since concurrent sibling merges can race past it (#811).
+When a ticket's scope exceeds L during `/cenci:refine`, the skill splits it into numbered child tickets (e.g., "(1/3)", "(2/3)", "(3/3)") with explicit dependency ordering — which children can be implemented in parallel and which are sequential. Splitting is a **coverage exercise**: the refiner enumerates every acceptance criterion, edge case, verification step, documentation item and boundary of the parent as a numbered list and assigns each number to exactly one child, whose acceptance criteria are the parent items it owns copied verbatim plus its own (never a summary, never an edge case compressed into a heading); an item that fits no child fails the split — `scripts/coverage-map.sh` checks this mechanically before any write and again against the created children, and the parent gains a `### Coverage map` naming each item's owner while its own criteria stay unchanged. Each child carries its own `### Size Estimate` (at most M unless it records why it is L), its series position and sibling names, the parent's milestone, and native relations only. Each child references the parent in its body and is linked to the parent as a native GitHub sub-issue, so the parent renders the child enumeration and progress directly in the GitHub UI; dependency ordering lives in the child bodies (and, when non-trivial, a short prose "Execution Order" note on the parent). Closing the parent is `/cenci:close`'s job: it refuses until every child is closed and the acceptance reviewer has compared the parent's original criteria and edge cases, item by item, against the **merged** child PRs and their tests and docs (never the child issue bodies), posts the result on the parent, turns every partial or missing item into a new child under the same parent, and closes only on zero gaps. Children inherit the parent's milestone and every parent label except the lifecycle markers and per-ticket refinement grants (`Refined`, `Working`, `Planned`, `In Review`, `Implemented`, `automerge:ok`, `Browser`, `ui:visual-check`), so a split never drops its children out of the milestone. The latter three are never inherited — each child earns them independently, or not, at refine's Confirmation Gate. When `/cenci:implement` creates a PR for the last open child, phase 9's Parent Close Gate audits the parent's acceptance criteria first: the PR closes the parent alongside the child only when every criterion has concrete delivered evidence (in this worktree's diff or a merged sibling PR); on any gap the PR references the parent as `Related to`, the unmet criteria are posted as a comment on the parent, and the parent stays open for triage (#661) — and a retry reconciles the commit trailer, PR body, and GitHub's closing reference to whatever verdict this entry's fresh audit produces, not the verdict an earlier attempt may have written (#879). That trailer only makes the parent eligible: parent completion itself is reconciled by `cenci babysit` at merge time from the live native sub-issue graph plus the gap-report check — a plan-time `isLastChild` value recorded when the plan was written is never what actually closes the parent, since concurrent sibling merges can race past it (#811).
 
 ## Architecture
 
@@ -567,6 +589,7 @@ The plugin uses specialized agents with isolated contexts:
 | **planner** | Analyzes tickets, produces implementation plans | opus | high (pinned) | plan (read-only) |
 | **implementer** | TDD: writes tests first, then implementation | sonnet | high (pinned) | acceptEdits |
 | **security-reviewer** | OWASP-focused security review | opus | high (pinned) | plan (read-only) |
+| **acceptance-reviewer** | Grades a PR against its ticket's acceptance criteria, edge cases, boundaries and documentation items (covered/partial/missing/unrequested); runs after implementation, before code review, in `/cenci:review` PR mode, and for `/cenci:close` | opus | high (pinned) | plan (read-only) |
 | **code-reviewer** | PR-style quality review | sonnet | high (pinned) | plan (read-only) |
 | **silent-failure-hunter** | Swallowed-error and silent-fallback detection | sonnet | high (pinned) | plan (read-only) |
 | **duplication-analyzer** | Copy-paste and extraction analysis for `/cenci:refactor` | sonnet | high (pinned) | plan (read-only) |
@@ -575,7 +598,7 @@ The plugin uses specialized agents with isolated contexts:
 | **domain-specialist** | Bounded second opinion for difficult planning, security, diagnosis, and conflicting findings | fable | high (pinned) | plan (read-only) |
 | **lessons-collector** | Routes genuine mistakes to `docs/<topic>.md` or `CLAUDE.md` | haiku | n/a (haiku) | acceptEdits |
 
-**Model & effort tiering**: Opus where judgment is concentrated — the **refiner**, **planner**, and **security-reviewer** agents run opus because refinement scope, acceptance criteria, and splits steer every later phase, the saved plan steers the whole unattended pipeline, and a missed vulnerability is the costliest review failure. Refinement's opus lives in the **refiner agent** rather than the refine skill's frontmatter because a skill-level `model:` pin only lasts the invoking turn — in a multi-turn Q&A loop every follow-up turn silently reverts to the session model, while an agent-level pin holds for the agent's entire run. Sonnet for pipeline orchestration and implementation (`/cenci:refine` and `/cenci:implement` pin `model: sonnet` for orchestration, relaying, and writes; `/cenci:babysit` pins `model: sonnet` so long-lived loop ticks stay cheap). Haiku for mechanical work — context-gatherer, structure-analyzer, lessons-collector, and `/cenci:sync`.
+**Model & effort tiering**: Opus where judgment is concentrated — the **refiner**, **planner**, **acceptance-reviewer**, and **security-reviewer** agents run opus because refinement scope, acceptance criteria, and splits steer every later phase, the saved plan steers the whole unattended pipeline, deciding whether a ticket was actually delivered is the judgment the founder relies on most, and a missed vulnerability is the costliest review failure. Refinement's opus lives in the **refiner agent** rather than the refine skill's frontmatter because a skill-level `model:` pin only lasts the invoking turn — in a multi-turn Q&A loop every follow-up turn silently reverts to the session model, while an agent-level pin holds for the agent's entire run. Sonnet for pipeline orchestration and implementation (`/cenci:refine` and `/cenci:implement` pin `model: sonnet` for orchestration, relaying, and writes; `/cenci:babysit` pins `model: sonnet` so long-lived loop ticks stay cheap). Haiku for mechanical work — context-gatherer, structure-analyzer, lessons-collector, and `/cenci:sync`.
 
 Effort is the second lever: model picks how *capable* the agent is (failures that look like "it didn't know enough"), effort picks how *thorough* it is (failures that look like "it didn't try hard enough"). Subagents inherit the **session** effort level by default, so a session running at low effort would silently degrade the unattended pipeline's planning, implementation, and reviews. Every non-haiku agent therefore pins `effort: high` — thoroughness is guaranteed regardless of the session setting. Anthropic's Opus 5.5 guidance reports low-effort Opus 5.5 reviewing at least as well as prior high-effort Opus, so lowering reviewer effort is a reasonable experiment once you trust the baseline — the pins stay so a low-effort session never silently degrades the unattended pipeline. Skills deliberately stay unpinned: they run during interactive phases, where the user's session effort preference should win. Haiku agents can't be tuned — haiku doesn't support effort.
 
@@ -695,7 +718,7 @@ flow/
 ├── docs/
 │   ├── git-workflow.md             # On-demand reference (read by skills as needed)
 │   ├── skill-authoring.md          # Writing skills that generate/regenerate files from external-sourced values
-│   ├── ticket-sizing.md            # How tickets are sized against the ~200k agent context budget, and when to split
+│   ├── ticket-sizing.md            # The S/M/L size table (bounds, lanes, context budget), where it is enforced, and when to split
 │   ├── pipeline-safety.md          # Restart/recovery, risk-profile re-evaluation, and shared-temp-file scoping for multi-phase pipelines
 │   ├── shell-scripting-gotchas.md  # Narrow shell/jq/grep pitfalls (CWD persistence, jq fallback semantics, contract-test markers)
 │   ├── adapter-contract.md         # The 8-property behavioral-parity contract client adapters (Claude Code, Codex) must satisfy

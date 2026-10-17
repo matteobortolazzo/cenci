@@ -1,69 +1,177 @@
 # Ticket Sizing
 
-## The real constraint: context budget, not line count
+Every implementation ticket carries a size of **S**, **M** or **L** in its body — the
+`### Size Estimate: <letter>` section written at refinement. The size bounds the single PR
+the ticket maps to (1 ticket = 1 PR). It protects three things, in this order: how much one
+reviewer pass (bot or human) can read with full attention, how much one implementation lane
+must hold in its working set, and how much a rollback undoes. It does not estimate effort or
+wall-clock time, and **model capability is never a reason to size up**: a more capable model
+earns fewer review rounds per PR, not a larger PR.
 
-The thing that actually limits how big a ticket can be is the **implementing agent's context budget** — a working target of roughly **200k tokens** of main-agent context for the whole implementation session (reading the ticket, exploring the codebase, writing code and tests, running builds/tests, reviewing, iterating on feedback).
+This file is cenci's copy of the contract defined in the Velka repository's
+`docs/dev/workflow/branches-and-tickets.md` ("Ticket sizes", "Splitting a ticket") and
+`docs/agent-workflow.md` ("Lane size and context budget"). Those sections are authoritative;
+the numbers below are theirs and must never be restated with different values.
 
-**This is a deliberate budget, not the model's context window.** Do not raise it to match whatever window the session model currently advertises — most current models expose far more than 200k, and the target is still 200k. Three constraints hold it in place independently of the window:
+## The size scale
 
-- **The `haiku` agent tier is hard-capped at 200k.** `context-gatherer` runs first in the implement pipeline and bundles the ticket, its comments, and per-project instructions. It has no headroom above 200k regardless of the session model, so a ticket that overflows this budget fails at the *first* step, before any implementing agent sees it.
-- **Auto-compaction may be off.** Where `autoCompactDisabled` is set in `.cenci/config.json`, a session that reaches its window stops rather than degrading gracefully. The budget is the margin that keeps it from getting there.
-- **1 ticket = 1 PR.** A ticket that legitimately consumes a million tokens of implementation produces a diff no human reviews properly. The budget is doing review-burden work, not only token work.
+| Size | Shape | Hard proxies for the PR | Review and merge |
+|---|---|---|---|
+| **S** | One concern in one project; no schema change; no path in the automerge protected list | `<= 10 changed files, <= 400 changed lines` | Bot review; automergeable |
+| **M** | One feature slice; API plus UI allowed; at most one migration; one or two delegation lanes | `<= 30 changed files, <= 2,000 changed lines` | Bot review plus founder skim — **the default** |
+| **L** | Several coupled slices that cannot ship separately; allowed only with a recorded reason why they cannot ship as a stacked series of M PRs; always several delegation lanes with exclusive file ownership | `<= 60 changed files, <= 5,000 changed lines` | Bot review plus a full founder read |
 
-This is a different axis from PR size. `docs/git-workflow.md` states there is **no hard PR size limit**, and that stands — a PR can be as large as the change genuinely requires. This doc does not contradict that. The ~200k budget is a constraint on what one agent can *do* in one implementation pass, not a line-count cap on the diff it produces. A ticket can still be "too big" even if its resulting diff would be small, and a ticket with a large diff (e.g. a mechanical rename) can be well within budget.
+Changed lines are **insertions plus deletions over the whole PR, generated files and lockfiles
+included**. Anything beyond L is **split, never written as one ticket**. The S proxies are the
+automerge thresholds in `.cenci/config.json` (`maxChangedFiles` 10 / `maxDiffLines` 400): the
+automerge gate stays at the S bound, and the two must change together.
+
+### The bound lines, verbatim
+
+Every `### Size Estimate: <letter>` section — on a refined ticket, in a planner's confirmed
+size, and on every split child — writes the size's bound on the line right after the heading,
+exactly as below, followed by a `Rationale:` line of one or two sentences:
+
+```
+### Size Estimate: S
+Bound: <= 10 changed files, <= 400 changed lines, one concern in one project, no schema change, no automerge protected path.
+Rationale: <one or two sentences>
+
+### Size Estimate: M
+Bound: <= 30 changed files, <= 2,000 changed lines, one feature slice, at most one migration.
+Rationale: <one or two sentences>
+
+### Size Estimate: L
+Bound: <= 60 changed files, <= 5,000 changed lines, several coupled slices; reason they cannot ship as a stacked series of M PRs: <reason>.
+Rationale: <one or two sentences>
+```
+
+An L estimate without a filled-in reason is not an L estimate: the refine skill rejects it, and
+the planner's Split Gate treats it as a split trigger.
+
+## Where the size is enforced
+
+The estimate is checked at four points, each against the same table:
+
+1. **Refinement** (`skills/refine/SKILL.md`, `agents/refiner.md`) writes the letter with its
+   bound and rationale, and proposes a split when the scope exceeds L.
+2. **Planning** (`agents/planner.md`, `skills/implement/phases/phase-1-plan.md`): after
+   `### Files to Modify`, the planner compares the plan against the ticket's bound in a
+   `### Size Check`. A plan that exceeds the bound stops before any implementation mutation
+   and returns a split proposal — **growth during planning is a split trigger**, not a reason
+   to continue. The confirmed size is recorded in the plan.
+3. **Implementation lanes** (`skills/implement/phases/phase-3-test-red.md`,
+   `phase-4-implement-green.md`, `agents/implementer.md`): each lane in the plan's
+   `### Delegation Preflight` is at most one M; an L ticket is always several lanes with
+   exclusive file ownership, never one lane.
+4. **PR creation** (`skills/implement/phases/phase-9-pr.md`, `scripts/pr-size.sh`): the final
+   diff's file and line counts are classified and written as
+   `Size: <letter> (<files> files, <lines> lines) vs ticket <letter>` in the PR body. A PR one
+   size above its ticket is flagged in the body and to the founder, and must not be merged on
+   green checks alone.
+
+## Lane size and context budget
+
+An implementation lane is at most one M ticket's worth of change; an L ticket is delivered as
+several lanes with exclusive file ownership. Size a lane so the worker finishes using **about
+half of the model's advertised context window**; the ceiling itself is not a sizing unit.
+Quality degrades well before a window fills (skipped enumerated items, forgotten guide rules),
+and automatic compaction is disabled (`autoCompactDisabled` in `.cenci/config.json`), so a lane
+that nears its ceiling stops rather than degrading gracefully. Every implementer is briefed
+with exactly this budget. A worker that reports running low on context, or a lane that needs a
+second resume, is evidence the ticket is one size larger than written: the orchestrator reports
+it to the root agent as a **split signal** and stops — it never retries with a longer lane.
+
+The `haiku` agent tier is hard-capped at 200k tokens regardless of the session model, and
+`context-gatherer` runs first in the implement pipeline, so a ticket whose bundle overflows that
+tier fails at the first step. This is a second, independent reason the S/M/L proxies above are
+not a line-count-only concern.
 
 ## Why this is estimated, not measured
 
-`/cenci:refine`'s refiner agent does explore the codebase (Glob/Grep) before producing a size estimate, and grounds a split's per-child sizing in a bounded enumeration of that child's affected files/components found during that exploration — cited by name in the child's `### Size` reasoning. That exploration is still not a full implementation pass, though: neither refine nor the `planner` agent can compute an actual token count for an implementation that hasn't happened yet, and the planner's own exploration is bounded (see `docs/git-workflow.md` for PR conventions, and the planner's own "Before Planning" exploration limits). The planner treats a refine-time `### Size Estimate` already persisted in the ticket body as a **prior** — it inherits that estimate rather than re-deriving from scratch, and only overrides it when it has genuinely new evidence beyond what refine enumerated, naming specifically what changed. So sizing stays a **qualitative estimate** grounded in cited structural evidence, not a numeric per-file or per-line token formula.
-
-## Structural signals
-
-Estimate budget risk from two signals present in a refined ticket's Technical Notes:
-
-1. **Breadth** — the count of distinct affected files/components (services, modules, screens, packages) the ticket names.
-2. **Concern spread** — the count of independent concerns named (e.g. API, database, UI, tests, infra/config) — each concern typically requires its own read-explore-implement-verify pass.
-
-## Tiers (qualitative, not a formula)
-
-| Tier | Signal | Budget risk |
-|---|---|---|
-| Comfortably in budget | 1-2 files/components, a single concern (or two tightly coupled concerns, e.g. one API endpoint plus its test) | Low — one agent can read, implement, and verify well within 200k |
-| Moderate | A handful of files within one component/area, or 2-3 related concerns (e.g. API + DB migration for one feature) | Low-to-moderate — still normally fits, but worth a second look if the ticket also has unusually deep exploration needs (large unfamiliar codebase area, complex existing logic to reconcile) |
-| Budget risk | Many files spanning multiple independent concerns (e.g. API + DB + UI + tests across unrelated components, or several unrelated components each needing their own exploration) | High — real risk of exhausting the 200k budget partway through implementation, review, or fix-up iteration |
-
-These tiers are judgment calls, not thresholds to count against. Treat "many files spanning multiple independent concerns" as the trigger, not any single number of files or concerns in isolation.
-
-If a ticket could plausibly land in either Moderate or Budget risk, don't resolve the ambiguity silently in favor of not splitting — classify it as Budget risk and say so explicitly in the Size Estimate reasoning (e.g. "L — borderline with Moderate, erring toward split because <reason>"). A close call that gets silently rounded down to Moderate/M loses the one signal that would have let a human catch it before the implementing agent runs out of budget mid-task.
+`/cenci:refine`'s refiner agent explores the codebase (Glob/Grep) before producing a size
+estimate, and grounds a split's per-child sizing in a bounded enumeration of that child's
+affected files/components — cited by name in the child's size reasoning. That exploration is
+still not an implementation pass: neither refine nor the `planner` agent can count a diff that
+does not exist yet. The planner treats a refine-time `### Size Estimate` already persisted in
+the ticket body as a **prior** — it inherits that estimate rather than re-deriving from scratch,
+and overrides it only with genuinely new evidence beyond what refine enumerated, naming
+specifically what changed. The PR step is the only point where the size is measured rather than
+estimated, which is why a mismatch there is a reviewable flag rather than a silent correction.
 
 ## When to split
 
-Split a ticket **only when there is a real risk of exceeding the ~200k budget** — i.e., the ticket lands in the "Budget risk" tier above.
+Split a ticket when its scope exceeds the L bound, when the planner's `### Size Check` finds the
+plan exceeds the ticket's bound, or when an implementation lane reports the context-budget
+signal above. Do **not** split on any of these grounds alone:
 
-Do **not** split on any of these grounds alone:
-- The ticket touches multiple independent concerns, but each is small (e.g. a small API change plus a small UI change plus its test) — multiple small independent concerns still comfortably fit one implementation pass.
-- Splitting would be "cleaner" or more theoretically parallelizable — theoretical parallelism is not a budget concern, and splitting has its own coordination cost (dependency tracking, multiple PRs, multiple review cycles).
-- The ticket could be organized into logical commits — that's what multi-commit PRs are for (see `docs/git-workflow.md`); it doesn't require separate tickets.
+- The ticket touches multiple independent concerns, but each is small and the whole fits M —
+  M is the default and allows API plus UI in one slice.
+- Splitting would be "cleaner" or more theoretically parallelizable — parallelism is a
+  Delegation Preflight concern (lanes inside one ticket), not a reason for more tickets.
+- The ticket could be organized into logical commits — that's what multi-commit PRs are for.
 
-Splitting is a tool for managing context budget risk, not a tool for organizing work into smaller pieces for its own sake.
+Splitting is a **coverage exercise**, not a work-division exercise: every acceptance criterion,
+edge case, verification step, documentation item and boundary of the parent gets exactly one
+child owner, the parent keeps its original items verbatim and gains a `### Coverage map`, and
+a split parent closes only after a coverage review against the merged child PRs (see the
+`refine` and `close` skills).
 
 ## Split children are presumed sized
 
-Split depth is one. A ticket created as a child of a split — a native GitHub sub-issue, or an older ticket carrying the `Related to #<parent>` first-body-line convention — was already sized when its parent's partition was designed, and refinement must never split it again, regardless of its own size estimate. Re-splitting diverges instead of converging: each refinement round adds structure (decision-complete child blocks, per-child criteria, dependency lines), which inflates both structural signals above, and the borderline-rounds-up rule then re-classifies the child as L — a guardless pipeline splits the same work 3-4 levels deep without any real budget signal changing.
+Split depth is one. A ticket created as a child of a split — a native GitHub sub-issue, or an
+older ticket carrying the `Related to #<parent>` first-body-line convention — was already sized
+when its parent's partition was designed, and refinement must never split it again, regardless
+of its own size estimate. Re-splitting diverges instead of converging: each refinement round adds
+structure (decision-complete child blocks, per-child criteria, dependency lines), which inflates
+the estimate, and a guardless pipeline splits the same work 3-4 levels deep without any real
+signal changing.
 
-When a split child still sizes L, that is a signal the **parent's partition was wrong**, not a trigger for another split. The refiner keeps the honest L verdict and recommends re-partitioning the parent in its `### Size Estimate` reasoning; the refine skill then surfaces the choice to a human — proceed with the oversize child as-is, decline so the parent's partition can be redone, or explicitly authorize splitting the child anyway. Grandchild tickets are never created automatically.
+When a split child still sizes L, that is a signal the **parent's partition was wrong**, not a trigger for another split.
+The refiner keeps the honest L verdict and recommends re-partitioning
+the parent in its `### Size Estimate` rationale; the refine skill then surfaces the choice to a
+human — proceed with the oversize child as-is, decline so the parent's partition can be redone,
+or explicitly authorize splitting the child anyway. Grandchild tickets are never created
+automatically.
 
 ### Human-authorized exception
 
-Split depth is hard-capped at one by default because the #929 incident was about automatic recursive splitting with no human in the loop — the guardless pipeline reached its own conclusion and acted on it, repeatedly, 3-4 levels deep, without a person deciding anything. A human explicitly choosing to split an oversize child anyway does not reintroduce that failure mode: the refine skill's Oversize split child escalation offers a third option, alongside Proceed and Decline, that a human must actively select in that run, for that specific child, before a resulting grandchild ticket is ever created. The refiner never proposes this on its own — it only evaluates a split for a split child when the invocation explicitly carries `resplitAuthorized: true`, which is set solely by that escalation's third option, never inferred and never carried over from a prior run.
+Split depth is hard-capped at one by default because the #929 incident was about automatic recursive splitting with no human in the loop —
+the guardless pipeline reached its own conclusion
+and acted on it, repeatedly, 3-4 levels deep, without a person deciding anything. A human
+explicitly choosing to split an oversize child anyway does not reintroduce that failure mode: the
+refine skill's Oversize split child escalation offers a third option, alongside Proceed and
+Decline, that a human must actively select in that run, for that specific child, before a
+resulting grandchild ticket is ever created. The refiner never proposes this on its own — it only
+evaluates a split for a split child when the invocation explicitly carries
+`resplitAuthorized: true`, which is set solely by that escalation's third option, never inferred
+and never carried over from a prior run.
 
-This does not relax the "split depth is one" default rule — the default is unchanged, and every split child is still presumed sized and never automatically re-split. This is a narrow, explicit, human-triggered exception to that default, not a new default: a grandchild created this way is still just a split child one level down from an already-split child, so split depth stays bounded at two, and its existence is traceable to one specific human decision rather than to an unattended pipeline run. The refiner treats an authorized resplit exactly like a normal split once authorized — same Coverage gate, same Confirmation Gate manifest and single confirmation, same Pass 1/Pass 2 child creation — no special-cased bypass of any of those checks.
+This does not relax the "split depth is one" default rule — the default is unchanged, and every
+split child is still presumed sized and never automatically re-split. This is a narrow,
+explicit, human-triggered exception to that default, not a new default: a grandchild created
+this way is still just a split child one level down from an already-split child, so split depth
+stays bounded at two, and its existence is traceable to one specific human decision rather than
+to an unattended pipeline run. The refiner treats an authorized resplit exactly like a normal
+split once authorized — same Coverage gate, same Confirmation Gate manifest and single
+confirmation, same Pass 1/Pass 2 child creation — no special-cased bypass of any of those checks.
 
 ## Mapping to S/M/L
 
-- **S** — comfortably in budget. One ticket, one PR, no split, even if it touches a couple of small independent concerns.
-- **M** — moderate. One ticket, one PR, no split. Note any exploration-depth concerns in the reasoning, but do not split on concern count alone.
-- **L** — budget risk. Only L triggers a split recommendation — because L is the only tier where the estimate indicates the ~200k budget may genuinely be exceeded during implementation. Exception: an L estimate on a split child never triggers a split — it triggers the parent re-partition escalation above.
+- **S** — one concern in one project. One ticket, one PR, no split; eligible for automerge.
+- **M** — one feature slice. One ticket, one PR, no split. The default.
+- **L** — several coupled slices. One ticket, one PR, several lanes; only with a recorded reason
+  why the slices cannot ship as a stacked series of M PRs. An L estimate on a split child never
+  triggers a split — it triggers the parent re-partition escalation above.
+- **Beyond L** — split, never written as one ticket.
 
 ## For skill/agent authors
 
-This doc is read by both an interactive Claude skill (`skills/refine/SKILL.md`) and a plan-time agent (`agents/planner.md`). Keep references to it as short trigger lines ("size against the budget in `docs/ticket-sizing.md`; split only on real budget risk (tier L)") rather than restating the tiers or the split rule inline — the tiers and rule live here, once, so wording doesn't drift between touchpoints.
+This doc is read by an interactive Claude skill (`skills/refine/SKILL.md`), a plan-time agent
+(`agents/planner.md`), the implementation phases, the acceptance reviewer, and the `close`
+skill. Keep references to it as short trigger lines ("size against the table in
+`docs/ticket-sizing.md`") and quote the bound lines verbatim from the block above rather than
+restating the numbers in prose — the table lives here, once, so wording cannot drift between
+touchpoints. `scripts/pr-size.sh` under `skills/implement/` is the executable form of the same
+table; a change to the bounds updates the Velka source, this file, that script, and
+`.cenci/config.json`'s S-bound automerge thresholds together.

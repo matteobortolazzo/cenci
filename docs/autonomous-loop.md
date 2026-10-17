@@ -288,7 +288,11 @@ fallback thresholds.
 ```
 
 - `maxChangedFiles` and `maxDiffLines` are **required** whenever the block exists.
-  Missing or non-positive makes the whole block malformed, which denies.
+  Missing or non-positive makes the whole block malformed, which denies. Keep them at
+  the **S bound** of the ticket-size table (`10` files / `400` lines —
+  `flow/docs/ticket-sizing.md`): S is the only size that is automergeable, and the two
+  thresholds and the table change together. The values in the example above are
+  illustrative of the shape only.
 - `protectedPaths` are globs where `*` matches any character including `/`,
   case-insensitive. Any changed file matching any pattern denies that PR. A pattern
   ending in `/` with no trailing `*` matches that directory and everything under it

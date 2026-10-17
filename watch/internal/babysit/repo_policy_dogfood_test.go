@@ -43,8 +43,8 @@ func TestRepositoryAutomergePolicyDogfood(t *testing.T) {
 	}{
 		{"flow/docs/orchestration.md", 8, 400},
 		{"flow/tests/example.test.sh", 8, 400},
-		{"watch/docs/tmux.md", 10, 500},
-		{"watch/tests/example.test.sh", 10, 500},
+		{"watch/docs/tmux.md", 10, 400},
+		{"watch/tests/example.test.sh", 10, 400},
 		{"sandbox/docs/runtime.md", 8, 400},
 		{"sandbox/tests/example.test.sh", 8, 400},
 	}

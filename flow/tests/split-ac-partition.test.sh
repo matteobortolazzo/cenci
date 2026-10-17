@@ -53,7 +53,7 @@ assert_file_contains() {
 # agents/refiner.md — split format + partition rules
 REFINER_TEMPLATE_AC_MARKER='criterion assigned to this child'
 REFINER_PARTITION_RULE_MARKER='must be assigned to exactly one child'
-REFINER_NO_WEAKENING_MARKER='reworded only to scope them to the child, never weakened'
+REFINER_NO_WEAKENING_MARKER='never reworded, weakened or summarized'
 REFINER_INTEGRATION_RULE_MARKER='a child that depends on every other child'
 REFINER_ADD_INTEGRATION_CHILD_MARKER='add a final integration child'
 REFINER_ZERO_CRITERIA_CHILD_MARKER='the rule constrains criteria, not children'

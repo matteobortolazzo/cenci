@@ -144,6 +144,7 @@ If an earlier attempt already committed this work (a re-run re-entering after Co
 Ticket mode:
 
 - Normal child/non-child: `Fixes #<childId or ticketId>`.
+- A split parent is never closed by a child PR's trailer alone any more than before: parent closure is the `close` skill's coverage review (`skills/close/SKILL.md`), and the Parent Close Gate above is what keeps the last child's trailer honest in the meantime.
 - Last child with a `close` verdict from the Parent Close Gate: `Fixes #<childId>` plus `Fixes #<parentId>` — the parent-closing trailer is written only on a `close` verdict, never from `isLastChild` alone.
 - Last child with a `hold` verdict: `Fixes #<childId>` plus `Related to #<parentId>` — the parent stays open; its unmet criteria were posted on the parent by the gate.
 
@@ -242,6 +243,23 @@ Screenshots are temporary review aids — never commit them to the repo. Host th
    git -C ${TMPDIR:-/tmp}/cenci/cenci-gist-<gist-id> push
    ```
 5. **Build embed URLs**: `https://gist.githubusercontent.com/<gh-user>/<gist-id>/raw/<filename>.png`, where `<gh-user>` comes from `gh api user -q .login`. These go into the PR body's `## Screenshots` section (template below). If any gist step fails (auth, network), do not block PR creation — write `## Screenshots` with "Not uploaded (<reason>); local copies at `${TMPDIR:-/tmp}/cenci/cenci-screenshots/<ticket-id-or-slug>/`" instead.
+6. **Complete the acceptance evidence.** Append to `$RUN_DIR/acceptance.md` (Phase 6 + 7's persisted acceptance table) one `Evidence: gist en-US: <url>` and one `Evidence: gist it-IT: <url>` line for the uploaded locale captures, and `Evidence: gallery en-US: <url>` / `Evidence: gallery it-IT: <url>` for the uploaded gallery captures, then re-run the verdict in its final form:
+   ```bash
+   bash "${CLAUDE_PLUGIN_ROOT}/skills/review/scripts/acceptance-verdict.sh" "$RUN_DIR/acceptance.md" --ui
+   ```
+   and overwrite `$RUN_DIR/acceptance-verdict.txt` with its first line. When the gist upload failed, the `gist` lines cannot be written and the verdict is `fail` with `ui-evidence-missing:` lines — that is the honest state: the PR body's `## Acceptance` section reports it, the `## Checklist` carries `- [ ] Acceptance: UI evidence incomplete (secret-gist screenshots missing — not mergeable on green checks)`, and the final session summary names it. Never report a UI ticket's acceptance as passed on local captures alone.
+
+## Size
+
+Runs after Push and before PR creation (and again on every re-entry, so the line always reflects the pushed diff). Measure the final diff against the S/M/L table in `docs/ticket-sizing.md` — files and lines (insertions plus deletions, generated files and lockfiles included) — and compare it with the ticket's confirmed size:
+
+```bash
+bash "${CLAUDE_PLUGIN_ROOT}/skills/implement/scripts/pr-size.sh" "<worktree-path>" origin/main --plan "<repo-root>/.plans/<filename>"
+```
+
+The script reads the ticket's letter from the plan's confirmed `### Size Estimate: <letter>` (pass `--ticket <letter>` instead when the plan was already archived or the letter is known another way; ticketless mode, which carries no size, reports `vs ticket unknown`). Its output is three things, consumed below: the machine line `files=… lines=… size=… ticket=… mismatch=none|above|below|beyond|unknown`, the PR-body line `Size: <letter> (<files> files, <lines> lines) vs ticket <letter>`, and — only on `above`, `beyond` or `unknown` — a flag line. Write the complete output to `$RUN_DIR/size.txt` (use the `Write` tool with the script's output; if `RUN_DIR` is unknown, keep the lines in hand for this entry only). A non-zero exit (the diff could not be measured) is reported in the PR body as `Size: unmeasured (<reason>) vs ticket <letter>` plus an unchecked checklist line — never as a pass.
+
+**A PR one size above its ticket is flagged, not fixed here.** On `mismatch=above` (or `beyond`): the flag line goes into the PR body's `## Size` section verbatim, the `## Checklist` carries `- [ ] Size: one above ticket — founder decision required before merge` (or `- [ ] Size: beyond L — must be split`), and the final session summary says so to the founder in its own line, naming the PR and the two letters. Such a PR **must not be merged on green checks alone**: it needs the founder's recorded decision (a re-size of the ticket through `/cenci:refine`, a recorded exception, or a split). The automerge gate is already at the S bound, so babysit never automerges it; the flag is what keeps a human merge honest too. `below` and `none` need no flag.
 
 ## PR
 
@@ -307,6 +325,13 @@ Ticket mode body includes:
 ## Testing
 <commands and results>
 
+## Size
+Size: <letter> (<files> files, <lines> lines) vs ticket <letter>
+<flag line — only on mismatch above/beyond/unknown; omit otherwise>
+
+## Acceptance
+<the `## Acceptance Review` table from `$RUN_DIR/acceptance.md`, verbatim — one row per acceptance criterion, edge case, boundary and documentation item with covered/partial/missing/unrequested and its proof, the `Evidence:` lines for a UI ticket, and the verdict line from `$RUN_DIR/acceptance-verdict.txt`>
+
 ## Planner Decisions
 <Only when the plan file has a `decided:` entry — see below; omit this whole section otherwise>
 A comment on this PR overrules a decision.
@@ -324,6 +349,8 @@ _Temporary secret gist, not part of the repo — delete after merge: `gh gist de
 
 ## Checklist
 - [x] Tests pass
+<Size checklist line — `- [x] Size within ticket bound (<letter>)`, `- [ ] Size: one above ticket — founder decision required before merge`, `- [ ] Size: beyond L — must be split`, or `- [ ] Size: unverified (ticket carries no size estimate)` — from `$RUN_DIR/size.txt`>
+<Acceptance checklist line — `- [x] Acceptance review passed (<covered> items covered)` or `- [ ] Acceptance: <partial> partial / <missing> missing items — not mergeable` or `- [ ] Acceptance: UI evidence incomplete (secret-gist screenshots missing — not mergeable on green checks)` — from `$RUN_DIR/acceptance-verdict.txt`>
 <Security checklist line — see below>
 <Maintenance check checklist line — see below>
 - [ ] Documentation updated
@@ -369,6 +396,10 @@ The `## Checklist` Maintenance check line is derived from `$RUN_DIR/maintain-sta
 Any reported or deferred maintenance findings (from a `— reported` status) each append one line to `## Notes`. An `— overridden` status appends the checker's failing lines the same way, prefixed with "Accepted red pipeline:" so the accepted failure is named, not just counted. The Cleanup step's `rm -rf "$RUN_DIR"` already removes `maintain-status.txt` with the rest of the run's artifacts — no new cleanup line is needed.
 
 `## Screenshots` appears only when `isUiTicket` is true: one `### <name>` + image per captured screen/state, or the fallback note from the Screenshots section above. Omit the section entirely for non-UI work.
+
+`## Size` is sourced from `$RUN_DIR/size.txt` (written by the `## Size` step above): always the `Size: <letter> (<files> files, <lines> lines) vs ticket <letter>` line, plus the flag line on a mismatch. If `$RUN_DIR` is unknown, re-run `scripts/pr-size.sh` directly for this entry — the measurement is cheap and read-only — rather than omitting the section; never write a size line from memory.
+
+`## Acceptance` is sourced from `$RUN_DIR/acceptance.md` and `$RUN_DIR/acceptance-verdict.txt` (Phase 6 + 7's `## Acceptance Review`, completed by the Screenshots step's gist evidence for a UI ticket): the reviewer's item table verbatim and the verdict line. In ticketless mode write `Acceptance: n/a (ticketless)`. If `$RUN_DIR` is unknown or the file is absent, write `Acceptance: unknown (RUN_DIR lost — the acceptance review could not be read back; verify manually before merge)` and the matching unchecked checklist line — mirroring the Review/Security "RUN_DIR lost" honesty rule, never a claimed pass. A `fail` verdict should not normally reach this phase (Phase 6 + 7 returns the run to implementation first); when it does (a UI ticket whose gist upload failed, or a re-entry in a fresh session), the table and its blocking rows are rendered honestly and the checklist line stays unchecked.
 
 ## Followup Ticket
 

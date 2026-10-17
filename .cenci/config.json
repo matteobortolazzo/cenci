@@ -78,7 +78,7 @@
           "*secret*"
         ],
         "maxChangedFiles": 10,
-        "maxDiffLines": 500,
+        "maxDiffLines": 400,
         "mergeMethod": "squash"
       }
     },

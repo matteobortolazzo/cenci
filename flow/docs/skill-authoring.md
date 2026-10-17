@@ -26,7 +26,7 @@ written down.
 | OpenCode | symlink of the skill directory | `PORTABLE_SKILLS` in `opencode/install-skills.sh` |
 
 Reconciling does not mean "make every skill support every client". Most exclusions are
-correct: the pipeline skills (`implement`, `configure`, `refine`, `maintain`,
+correct: the pipeline skills (`implement`, `configure`, `refine`, `close`, `maintain`,
 `address-review`, `review`, `sync`, `ci-repair`, `ticket-ownership`,
 `babysit-attention`) assume Claude Code's interactive approval flow, and `codex-runtime`
 is a Codex-only adapter. What is not acceptable is an exclusion nobody decided — the

@@ -48,7 +48,9 @@ and Codex adapters both have to satisfy.
 with high reasoning effort. The [shared policy](model-escalation.md) defines the
 triggers, bounded read-only dispatch, evidence validation, and unavailable-model
 fallback. Normal planner, implementer, reviewer, and context roles keep their
-existing pins. Re-running configure installs the new missing role; existing role
+existing pins. `acceptance-reviewer` — the item-by-item ticket-coverage review that runs
+after implementation and before `critical-reviewer`, in `$cenci:review` PR mode, and for
+`$cenci:close` — ships on the same pin as `planner`. Re-running configure installs the new missing role; existing role
 customizations are preserved. The repository's installed specialist mirrors its
 template. These pins are configuration, not a guarantee of account-level access.
 

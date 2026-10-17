@@ -61,7 +61,7 @@ In lean mode, resolve your own questions whenever a clearly recommended answer e
 
 - **security-sensitive** — auth, credentials/secrets, crypto, payment/billing, or anything matching the union of `skills/implement/SKILL.md`'s `### Sensitive-path backstop (deterministic)` pattern set (the built-in default sensitive-path patterns) and the project's `security.sensitivePaths` — not `security.sensitivePaths` alone.
 - **destructive or irreversible** — data migrations, schema changes, deletions, history rewrites, or anything else without a cheap rollback.
-- **scope blowup** — the plan would need a split: size against the budget in `docs/ticket-sizing.md`; split only on real budget risk (tier L). The planner asks a scope-blowup clarifying question only when it actually recommends a split; an `L` estimate with a reasoned no-split verdict, or a size change without a split, is recorded in `### Size Estimate` / `### Split Recommendation` and goes through the Split Gate rather than being asked.
+- **scope blowup** — the plan would need a split: size against the S/M/L table in `docs/ticket-sizing.md`. A plan whose `### Size Check` verdict is `exceeds` (the plan's files or lines exceed the ticket's size bound, or the plan needs a shape the letter forbids) always returns a real split in `### Split Recommendation` — never a `None —` verdict and never a question, since the Split Gate stops on it unconditionally. The planner asks a scope-blowup clarifying question only when it actually recommends a split for a ticket whose bound is not exceeded; an `L` estimate within its bound with a reasoned no-split verdict, or a size change without a split, is recorded in `### Size Estimate` / `### Split Recommendation` and goes through the Split Gate rather than being asked.
 
 Two further classes are decide-and-notify classes: they are asked only when a stop condition under **Decide and notify** below applies, and are otherwise decided.
 
@@ -185,9 +185,24 @@ Before finalizing the plan, explicitly identify:
     ### Files to Create
     - `path/to/new/file` — <purpose>
 
+    ### Size Check
+    Ticket size: <S|M|L|unknown> — <from the ticket body's `### Size Estimate: <letter>` (the `unknown` value only when the ticket carries none, e.g. ticketless mode or an unrefined ticket)>
+    Plan: <n> files to modify/create, ~<n> changed lines estimated
+    Verdict: within | exceeds | unknown — <one line>
+
+    Compare the plan against the ticket's bound **right after Files to Modify/Create, before anything below is written**: count the files in both lists, estimate changed lines (insertions plus deletions, generated files and lockfiles included), and compare against the letter's bound line in `docs/ticket-sizing.md` (`S`: <= 10 files, <= 400 lines, one concern in one project, no schema change, no automerge protected path; `M`: <= 30 files, <= 2,000 lines, one feature slice, at most one migration; `L`: <= 60 files, <= 5,000 lines). `within` when every proxy and the shape hold; `exceeds` when any file or line proxy is exceeded, or the plan needs a shape the letter forbids (a schema change or a protected path on an S, a second migration on an M, a scope beyond L on anything); `unknown` when the ticket carries no size. **Growth during planning is a split trigger, not a reason to continue**: on `exceeds` write a real split in `### Split Recommendation` below and stop there — the main agent's Split Gate ends the run before any implementation mutation. Model capability is never a reason to raise the verdict to `within`.
+
     ### Implementation Order
     1. <step>
     2. <step>
+
+    ### Delegation Preflight
+    | Lane | Delegated to (role, model, effort) | Owned files (exclusive) | Verification | Lane size | Retention reason |
+    |---|---|---|---|---|---|
+    | 1 | implementer (sonnet, high) | <exact subset of Files to Modify/Create> | <lane-scoped test command> | S | — |
+    | root | retained by the root agent | <files, or none> | — | — | <concrete ineligibility reason: GitHub mutation, user decision, shared branch/worktree state — never "small" or "easier inline"> |
+
+    Always present. Inventory every independent implementation lane, including work retained by the root agent, with an exclusive owned-file set that overlaps no other lane and the verification the worker must run; a retained lane records a concrete ineligibility reason. **A lane is at most one M** — its owned files and estimated lines fit the M bound (<= 30 changed files, <= 2,000 changed lines) and it is sized so the worker finishes inside about half of its model's advertised context window, which is the budget every implementer is briefed with (`docs/ticket-sizing.md`, "Lane size and context budget"). **An L ticket is always several lanes** with exclusive file ownership, never one lane — a single-lane L plan is malformed, and the main agent's Split Gate treats it like an `exceeds` verdict. A lane that cannot be cut below M is a split signal: write it in `### Split Recommendation` instead of widening the lane. When two or more lanes also pass the `### Parallel Lanes` eligibility conditions below, declare them there too so the pipeline can fan out; lanes that fail those conditions (UI work, sensitive paths) still run as separate, sequential implementer delegations — the preflight is the lane contract, `### Parallel Lanes` only decides concurrency.
 
     ### Parallel Lanes (optional — omit by default)
     Declare lanes ONLY when every condition holds; when in doubt, omit this section
@@ -228,15 +243,16 @@ Before finalizing the plan, explicitly identify:
 
     (For backend-only tickets, write "N/A — backend only" and skip the table.)
 
-    When the ticket body carries a refine-time `### Size Estimate` (and, for a split child, its own `### Size`), inherit it as the prior — do not re-derive from scratch — and only override it with genuinely new evidence, naming specifically what changed (e.g. "files the refinement didn't enumerate").
+    When the ticket body carries a refine-time `### Size Estimate: <letter>` (every refined ticket and every split child carries one), inherit it as the prior — do not re-derive from scratch — and only override it with genuinely new evidence, naming specifically what changed (e.g. "files the refinement didn't enumerate"). This is the **confirmed size** recorded in the plan: the letter `### Size Check` compared against, or the letter the planner now assigns when the ticket carried none.
 
-    ### Size Estimate
-    <S/M/L> — <reasoning, sized against the context budget in `docs/ticket-sizing.md`>
+    ### Size Estimate: <S|M|L>
+    Bound: <that letter's bound line, verbatim from `docs/ticket-sizing.md`>
+    Rationale: <one or two sentences — the refine-time prior and what, if anything, changed; sized against the S/M/L table in `docs/ticket-sizing.md`>
 
     ### Split Recommendation
-    Required whenever the `### Size Estimate` is `L`: write either a real split or `None — <one-line rationale>`. For an `S` or `M` estimate, omit it or write `None`. Do not recommend a split for S or M estimates just because the ticket touches multiple independent concerns.
+    Required whenever the `### Size Estimate` is `L` or the `### Size Check` verdict is `exceeds`: write either a real split or `None — <one-line rationale>`. On an `exceeds` verdict only a real split is valid — a `None —` verdict there is malformed and the gate fails closed. For an `S` or `M` estimate within its bound, omit it or write `None`. Do not recommend a split for S or M estimates just because the ticket touches multiple independent concerns.
 
-    A real split (only when there's a real risk of exceeding the implementing agent's context budget per `docs/ticket-sizing.md`): recommend that the user go back to `/refine` to split it into separate independent tickets. Suggest the split:
+    A real split (the plan exceeds the ticket's size bound, the scope exceeds L, or a lane cannot be cut to at most M — see `docs/ticket-sizing.md`): recommend that the user go back to `/refine` to split it into separate independent tickets. Suggest the split:
     - Ticket 1: <description>
     - Ticket 2: <description>
     - Ticket 3: <description>

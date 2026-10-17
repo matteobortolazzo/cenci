@@ -16,6 +16,7 @@ Pass:
 
 - Worktree path. Tell the agent: target the worktree explicitly on every command — via `git -C <worktree-path>` for git commands, absolute paths for file operations, or the client's working-directory option — do **not** prefix every command with `cd <path> &&` (a `cd … && git …` compound can never be auto-approved; use `git -C <path>` if git must target another directory). If a `Write`/`Edit` is blocked or stranded, re-issue the same edit to the correct `.worktrees/<id>-<desc>/` path — never hand-rescue it with `git stash`/`git checkout`/`git apply`. See the `shell-rules` skill for command patterns.
 - Plan file sections: `## Ticket Details`, `## Implementation Plan`, and `## Architectural Context`.
+- Phase 3's `## Context Budget` brief, verbatim (`phases/phase-3-test-red.md`): the working budget is about half of the model's advertised context window, automatic compaction is disabled, and a low-context state is reported as `Context: low — …`, never pushed through.
 - The failing tests and their failure output.
 - Return evidence to the orchestrator after two failed attempts at the same unexplained defect, before spending the next attempt; do not delegate diagnosis yourself.
 - Attachment paths if relevant.
@@ -43,6 +44,8 @@ After implementation:
 
 If build/tests/lint fail, analyze root cause, fix, and rerun. Retry up to 3 times, then stop, reporting exact errors, attempts, and best hypothesis. Lint failures are held to the same hard gate as build/test failures — no silent pass-through.
 
+**Context-budget signal.** A summary opening with `Context: low`, or a delegation that would need a second resume to finish the same work, is a split signal per Phase 3's `## Context Budget`: report it to the root agent and stop at the error gate `Context budget exceeded in lane <n>: <done>/<remaining>`, recommending `/cenci:refine <id>` (or `/cenci:refine <parentId>` for a split child). Never retry with a longer lane or a third delegation.
+
 ## Visual Verification
 
 For frontend plans with visual components, read the `verify-ui` reference skill and
@@ -52,7 +55,7 @@ Fix significant discrepancies or get explicit user acceptance before Phase 5.
 
 ### Persist Screenshots For The PR
 
-If `isUiTicket` is true, save a final screenshot of every affected screen/state to `${TMPDIR:-/tmp}/cenci/cenci-screenshots/<ticket-id-or-slug>/` with descriptive kebab-case filenames (e.g. `login-form-error-state.png`). Capture with `playwright-cli screenshot` against the running dev build, or copy the relevant Playwright Test `toHaveScreenshot` output. Capture **after** visual verification passes so the images show the final state — Phase 9 uploads them and embeds them in the PR body as review aids. If no browser tooling is available, skip this step; Phase 9 will note the gap in the PR.
+If `isUiTicket` is true, save a final screenshot of every affected screen/state to `${TMPDIR:-/tmp}/cenci/cenci-screenshots/<ticket-id-or-slug>/` with descriptive kebab-case filenames suffixed by locale — **both `en-US` and `it-IT` for every capture** (e.g. `login-form-error-state-en-US.png`, `login-form-error-state-it-IT.png`) — plus the component gallery page in both locales (`gallery-en-US.png`, `gallery-it-IT.png`). Phase 6 + 7's `## Acceptance Review` requires exactly these four kinds of evidence for a UI ticket; a missing locale or a missing gallery capture fails the acceptance review, never silently passes it. Capture with `playwright-cli screenshot` against the running dev build, or copy the relevant Playwright Test `toHaveScreenshot` output. Capture **after** visual verification passes so the images show the final state — Phase 9 uploads them and embeds them in the PR body as review aids. If no browser tooling is available, skip this step; Phase 9 will note the gap in the PR.
 
 ## Lane Verification Barrier
 
@@ -63,7 +66,7 @@ prompt. Before its next permitted attempt, the orchestrator applies the diagnosi
 trigger in the plugin's `docs/model-escalation.md` and delegates to `domain-specialist`.
 Validate the advice and return it to the implementer without extending the three-attempt cap.
 
-Delegate one `implementer` with the standard Delegation Context above (worktree path, plan sections, build/test/lint commands) plus each lane's `Scope:` summary, instructed to:
+Delegate one `implementer` with the standard Delegation Context above (worktree path, plan sections, build/test/lint commands, the `## Context Budget` brief) plus each lane's `Scope:` summary, instructed to:
 
 1. Run the full build.
 2. Run the full test suite.
