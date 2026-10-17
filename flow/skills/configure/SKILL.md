@@ -2232,7 +2232,9 @@ legacy one.
     missing or non-positive value makes the whole block malformed (denied), it does **not**
     fall back to a built-in default.
   - `automerge.maxDiffLines` — required on the same terms as `maxChangedFiles` (additions +
-    deletions combined).
+    deletions combined). Both thresholds are the **S bound** of the ticket-size table in
+    `flow/docs/ticket-sizing.md` (`10` files / `400` lines) and stay there: S is the only
+    automergeable size, and the thresholds and the table change together.
   - `automerge.mergeMethod` — one of `"squash"`, `"merge"`, `"rebase"`; defaults to
     `"squash"` when omitted. The field stays readable for configuration compatibility, but
     only `"squash"` is ever executed at merge time: a `"merge"` or `"rebase"` value produces

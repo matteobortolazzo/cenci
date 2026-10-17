@@ -214,7 +214,8 @@ Bash(cat ${TMPDIR:-/tmp}/cenci/:*)
 Bash(rm -f ${TMPDIR:-/tmp}/cenci/:*)
 Bash(jq -n:*)
 Bash(jq -e:*)
-Bash(bash "${CLAUDE_PLUGIN_ROOT}/skills/refine/scripts/ensure-issue.sh":*)'
+Bash(bash "${CLAUDE_PLUGIN_ROOT}/skills/refine/scripts/ensure-issue.sh":*)
+Bash(bash "${CLAUDE_PLUGIN_ROOT}/skills/refine/scripts/coverage-map.sh":*)'
   allowed_line="$(grep -m1 '^allowed-tools:' "${skill_path}")"
   actual_bash_grants="$(printf '%s\n' "${allowed_line}" | grep -o 'Bash([^)]*)' | LC_ALL=C sort -u)"
   expected_bash_grants="$(printf '%s\n' "${EXPECTED_BASH_GRANTS}" | LC_ALL=C sort -u)"

@@ -1,0 +1,2 @@
+{"number":480,"state":"OPEN","labels":[{"name":"In Review"}],"milestone":{"number":7,"title":"v1.2"},
+ "subIssues":{"totalCount":2,"nodes":[{"number":481,"state":"CLOSED"},{"number":482,"state":"OPEN"}]},"subIssuesSummary":{"total":2,"completed":1}}

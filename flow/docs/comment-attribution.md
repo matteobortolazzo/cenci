@@ -64,7 +64,7 @@ different quoting — the banner blockquoted, the marker/anchor bare.
 
 Every marker-bearing flow comment uses one of the `<kind>` values below;
 `<kind>` is unique per call site so a consumer can tell which flow code path
-produced a given comment. flow's six kinds:
+produced a given comment. flow's seven kinds:
 
 | Kind | File / call site | Marker | Consumers |
 |---|---|---|---|
@@ -74,6 +74,7 @@ produced a given comment. flow's six kinds:
 | `planner-escalation` | `skills/implement/phases/phase-1-plan.md` — `## Escalation Anchor` and its four call sites | `<!-- cenci-planner-escalation:<nonce> -->` | `isCenciAuthored` (`watch/internal/dispatch/resume.go`) |
 | `oversize-child` | `skills/implement/phases/phase-1-plan.md` — the Split Gate's split-child Stop branch and its lean-ticket-mode escalation branch (two call sites) | `<!-- cenci-oversize-child -->` | `isCenciAuthored` (`watch/internal/dispatch/resume.go`) |
 | `decision` | `skills/implement/phases/phase-1-plan.md` — `## Decision Comment` and its three call sites (Lean Approval Path step 4, `## Persist the Plan`'s Mark-Planned prose, `## Resume From Draft` step 7) | `<!-- cenci-decision -->` | `isCenciAuthored` (`watch/internal/dispatch/resume.go`) |
+| `parent-close-review` | `skills/close/scripts/close-parent.sh` (invoked by `skills/close/SKILL.md` step 5 and `skills/close/codex.md`) — the split-parent coverage review posted on the parent before it is closed or gains gap children | `<!-- cenci-parent-close-review -->` | `isCenciAuthored` (`watch/internal/dispatch/resume.go`); human triage of the parent |
 
 ### `parent-gap-report` is a cross-project contract
 

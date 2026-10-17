@@ -4,7 +4,7 @@ Read this file only when Phase 6 + 7 starts.
 
 Ticket mode: at entry, invoke `cenci pipeline review <id>` to advance to `reviewed` and obtain this stage's `next_actions`/`warnings`/`errors`. Render them as this phase's status update — the lite-docs branch below renders this same call's `next_actions` instead of narrating its own transition (see Execution). This call runs inside the feature worktree, a different tree than where `prepare`/`plan`/`execute` ran (main checkout), but pipeline state is now anchored to the main-checkout root and reliably shared across that boundary, so a non-empty `errors[]` here is an **authoritative hard-stop**, exactly like every other stage transition in this pipeline: stop and report the errors. Do **not** fall through to the rest of this phase's prose-driven procedure when `errors[]` is non-empty. Ticketless mode: skip this call — the pipeline commands operate on ticket IDs.
 
-These quality gates are mandatory. `cenci.reviewConcurrency` controls only whether reviewers run in parallel or sequentially.
+These quality gates are mandatory. `cenci.reviewConcurrency` controls only whether reviewers run in parallel or sequentially. The `## Acceptance Review` below runs first, on every review path, before any code reviewer is launched — a partial or missing acceptance item returns the run to implementation before code review starts.
 
 Any point below that stops for the user — an unclear security fix, a code-review human decision, an issue that persists after 2 fix attempts — is an error gate: stop and ask.
 
@@ -40,6 +40,20 @@ For small diffs and `cenci.diffContextMode` not set to `"file"`, inline the diff
 
 Source ticket requirements and plan from the plan file when `hasPlanFile` is true.
 
+## Acceptance Review
+
+Runs after Shared Context and **before** Review Path Classification, on every path (`full`, `lite-docs`, `lite-small` alike — the classification below never skips it). Ticketless mode: skip, and record `acceptance: n/a (ticketless — no acceptance criteria to grade)` for Phase 9's `## Acceptance` section. Ticket mode:
+
+1. **Delegate to the `acceptance-reviewer` agent** with, by path never by paste: the plan file path (its `## Ticket Details` is the ticket body; `## Implementation Plan`, `## Q&A from Planning` and `### Decisions`/`### Design Direction` are the design record), `$RUN_DIR/diff.patch` and `$RUN_DIR/files.txt`, the worktree path, `isUiTicket`, and — for a UI ticket — the screenshot directory `${TMPDIR:-/tmp}/cenci/cenci-screenshots/<ticket-id-or-slug>/`. Tell it this is the pipeline's **pre-gist** pass (Phase 9 uploads the gist later), so its UI evidence lines use the `capture` form for local screen captures. It reads the ticket before the code and never grades the diff alone; it makes no code-quality comments.
+2. **Persist the table.** Use the `Write` tool to create `$RUN_DIR/acceptance.md` with the reviewer's `## Acceptance Review` output verbatim (table, `Evidence:` lines, verdict). Confirm the write landed before the next step.
+3. **Compute the verdict mechanically** — the script, not the reviewer's prose, gates the pipeline:
+   ```bash
+   bash "${CLAUDE_PLUGIN_ROOT}/skills/review/scripts/acceptance-verdict.sh" "$RUN_DIR/acceptance.md"
+   ```
+   append `--ui-local` when `isUiTicket` is true (requires `Evidence: gallery en-US`, `gallery it-IT`, `capture en-US`, `capture it-IT` lines — a UI ticket reviewed from the diff alone fails here by construction). Record the first output line (`covered=… partial=… missing=… unrequested=… verdict=…`) to `$RUN_DIR/acceptance-verdict.txt`. Exit 2 (malformed table, zero rows) is treated as a fail: re-delegate the reviewer once with the script's message; a second malformed output is an error gate — stop and ask the user.
+4. **Fail → back to implementation, before any code review.** On exit 1, delegate the `implementer` (Phase 3 → Phase 4 discipline: failing test first, then green, lane-scoped, with the `## Context Budget` brief) with exactly the `blocking:` rows the script printed (each partial/missing item, verbatim, and for a UI ticket each `ui-evidence-missing:` capture) — never the whole table re-read as a to-do list. After it reports green, re-run Phase 4's verification, regenerate the Shared Context artifacts into the same `$RUN_DIR`, and re-run steps 1-3. At most **two** such rounds; if the verdict is still `fail`, stop at an error gate via `AskUserQuestion` listing the blocking rows (the ticket may be mis-sized or mis-specified — `/cenci:refine <id>` is the usual answer). `unrequested` rows never block: they are carried into the PR body's `## Acceptance` table for the human and are visible to `code-reviewer` as scope context.
+5. **Pass → continue** to Review Path Classification. Only a `verdict=pass` ever reaches the code reviewers.
+
 ## Review Path Classification
 
 Classify this diff into one of three review paths before launching any reviewer. Before evaluating any rule, delete/overwrite `$RUN_DIR/review-path.txt` (e.g. `rm -f`) so a stale value from an earlier run of this ticket can never be trusted if this classification is interrupted partway (e.g. context compaction mid-phase) — an absent file is safer than a stale one: it causes Phase 9 to report the review status as honestly unknown rather than trusting a value that may no longer match what actually ran. Evaluate the rules below **in order — first match wins**. Read `$RUN_DIR/files.txt` (changed file list) and `$RUN_DIR/stat.txt` (total changed lines) from the Shared Context step above.
@@ -64,7 +78,7 @@ Write the chosen path string — `full`, `lite-docs`, or `lite-small` — to `$R
 
 Branch on the classification result written above:
 
-- **`lite-docs`**: launch no reviewers. Docs-only changes skip Phase 6 + 7 review entirely; render the `next_actions` from the `cenci pipeline review <id>` call above (see the entry note) as this run's status update instead of narrating what comes next.
+- **`lite-docs`**: launch no code reviewers (the `## Acceptance Review` above already ran and passed). Docs-only changes skip the code-review trio entirely; render the `next_actions` from the `cenci pipeline review <id>` call above (see the entry note) as this run's status update instead of narrating what comes next.
 - **`lite-small`**: launch `code-reviewer` only, with the same diff/path, changed files, ticket requirements, and implementation plan it would receive on the full path. The existing Code Review Actions below apply unchanged — this is a narrower reviewer set, not a cheaper model tier. `cenci.reviewConcurrency` has no effect with a single reviewer.
 - **`full`**: launch all three reviewers:
 

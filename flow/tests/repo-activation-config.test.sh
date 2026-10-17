@@ -61,7 +61,7 @@ else
       | .maxChangedFiles == 8 and .maxDiffLines == 400)
     and
     (.projects[] | select(.slug == "watch") | .automerge
-      | .maxChangedFiles == 10 and .maxDiffLines == 500)
+      | .maxChangedFiles == 10 and .maxDiffLines == 400)
     and
     (.projects[] | select(.slug == "sandbox") | .automerge
       | .maxChangedFiles == 8 and .maxDiffLines == 400)

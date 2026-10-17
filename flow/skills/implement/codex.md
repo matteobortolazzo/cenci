@@ -32,6 +32,19 @@ never blocks either outcome, and this write never happens for a non-child ticket
 (`skills/implement/phases/phase-1-plan.md`'s `### Split Gate` is authoritative for the
 exact procedure). One run persists at most one plan file and opens at most one PR:
 never persist a second plan file or open a second or stacked PR for one ticket.
+The plan also carries a `### Size Check` — the plan's files and estimated changed lines
+compared against the ticket's `### Size Estimate: <letter>` bound from `docs/ticket-sizing.md`
+— the confirmed `### Size Estimate: <letter>` (bound line verbatim, rationale), and a
+`### Delegation Preflight` in which every lane is at most one M and an L ticket is always
+several lanes with exclusive file ownership. A `### Size Check` verdict of `exceeds` (growth
+during planning), or a single-lane L, is a hard stop with no proceed option in any mode:
+return the planner's split proposal, persist nothing, and point at `/cenci:refine` (the parent
+for a split child) — model capability never raises the verdict. Every implementer delegation
+in `apply` is briefed verbatim that its working budget is about half of its model's advertised
+context window, that automatic compaction is disabled, and that a low-context state is reported
+as `Context: low — done: …; remaining: …`; a worker reporting that line, or a lane needing a
+second resume, is reported to the root as a split signal and stops the run — never retried
+with a longer lane.
 Then return an approved plan in the conversation without writing files or labels.
 Stop before mutations and instruct `cenci run implement apply <ticket> --agent codex`.
 This procedure has no autonomous approval path: `/plan` always stops before
@@ -78,6 +91,13 @@ current callers. This is bounded to new code — never a repo-wide duplication s
 Any consolidation made here is covered by the same full-suite-and-lint run as the rest of the
 phase — re-run both before proceeding — and a reported near-duplicate is recorded for review
 visibility only, never tracked or turned into a Followup ticket.
+Then, before any code review, run the acceptance review: delegate the `acceptance-reviewer`
+role with the ticket body, its design record (the persisted plan) and the diff — never the
+diff alone — and persist its `## Acceptance Review` table; compute the verdict with
+`"${PLUGIN_ROOT}/skills/review/scripts/acceptance-verdict.sh" <table> [--ui-local]`
+(`--ui-local` for a UI ticket, which requires gallery and screen captures in en-US and it-IT; a
+diff-only review of a UI ticket fails). A partial or missing item returns the run to
+implementation (at most two rounds, then stop and ask); only a pass reaches the code reviews.
 Then run the configured reviews. A reviewer's finding is a claim, not evidence — per Anthropic's
 Opus 5.5 guidance for subagent fan-out, when a subagent reports back, check its evidence before you accept it:
 before delegating or applying any fix for a Must Fix, Critical, or High finding, read the cited
@@ -129,7 +149,14 @@ re-entry restarts at this fetch/rebase step. Push normally; if a previous push
 exists and rebase rewrote commits, use
 `--force-with-lease=refs/heads/<branch>:<expected-head-sha>` pinned to the
 remote head observed before rebasing, and stop if the lease refuses.
-Then commit, push, and open the PR. Clear the goal
+Then commit, push, measure the final diff with
+`"${PLUGIN_ROOT}/skills/implement/scripts/pr-size.sh" "<abs-worktree-path>" origin/main --plan
+"<repo-root>/.plans/<filename>"`, and open the PR with a `## Size` section carrying its
+`Size: <letter> (<files> files, <lines> lines) vs ticket <letter>` line and an `## Acceptance`
+section carrying the acceptance table and verdict (for a UI ticket, add the gist evidence
+lines after the upload and re-run the verdict with `--ui`). A PR one size above its ticket is
+flagged in the body, in the checklist, and to the founder in the final summary, and must not be
+merged on green checks alone. Clear the goal
 before any question/error and after PR creation. After a successful PR creation (never on a
 failed `gh pr create`), archive the consumed plan file instead of deleting it. `.plans/` lives
 only in the main checkout (repo root), not in the worktree, so anchor the command to

@@ -37,6 +37,16 @@ You are a senior developer implementing features using TDD.
 
 > **Context7**: When the Context7 MCP server is enabled, tools `resolve-library-id` and `query-docs` are available. **Always prefer Context7 over reading dependency source files** (e.g., `node_modules/`, `vendor/`, Go module cache). Use Context7 to look up current API documentation for the project's tech stack before writing code.
 
+> **Context budget**: Your working budget is about half of your model's advertised context window
+> — plan to finish the delegated lane inside it; the window's ceiling is not a sizing unit.
+> Automatic compaction is disabled (`autoCompactDisabled` in `.cenci/config.json`), so a session
+> that reaches its window stops rather than degrading gracefully. When you judge you are past
+> roughly half your window with work remaining, stop at a clean point (tests green, or clearly
+> red with the failure named) and make the first line of your summary
+> `Context: low — done: <what>; remaining: <what>`. The orchestrator treats that line as a split
+> signal for the ticket (`docs/ticket-sizing.md`) — never push through it, never ask for a
+> longer lane, and never silently drop enumerated items to fit.
+
 > **LSP Diagnostics**: When LSP servers are configured, Claude Code surfaces real-time
 > diagnostics after each edit — type errors, unused variables, dead code warnings.
 > Fix type errors and unused code warnings immediately. Do not suppress with ignore comments.
@@ -81,6 +91,7 @@ If build, tests, or lint fail:
 2. Fix the root cause (not just the symptom)
 3. Re-run build, tests, and lint
 4. If stuck after 3 attempts, report the issue clearly
+5. If you are low on context (see the Context budget note above), stop at a clean point and report `Context: low — …` as the first summary line instead of starting another attempt
 
 ## Working Directory
 When given a worktree path, target it explicitly on every command — Bash CWD does not reliably persist across calls. Use `git -C <worktree-path> ...` for git commands, absolute paths for file operations, and the client's working-directory option where available.

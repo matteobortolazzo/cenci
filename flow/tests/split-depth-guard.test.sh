@@ -72,7 +72,7 @@ assert_file_lacks() {
 REFINER_INPUT_FLAG_MARKER='`isSplitChild` (with its `parentNumber`)'
 REFINER_NO_RESPLIT_MARKER='never emit a `### Suggested Split` section — regardless of the size estimate'
 REFINER_REPARTITION_MARKER="an oversize child means the parent's partition was wrong, not that this child should fan out again"
-REFINER_SPLIT_HEADER_MARKER='### Suggested Split (only if L AND (NOT `isSplitChild` OR `resplitAuthorized`)'
+REFINER_SPLIT_HEADER_MARKER='### Suggested Split (only if the scope exceeds L AND (NOT `isSplitChild` OR `resplitAuthorized`)'
 REFINER_OLD_SPLIT_HEADER='### Suggested Split (only if L — real risk'
 # #1093 (PR 3/3) — human-authorized resplit exception
 REFINER_RESPLIT_AUTH_INPUT_MARKER='present, and `true`, only on a re-invocation following the refine skill'\''s Oversize split child escalation'

@@ -51,8 +51,8 @@ Each invocation from the refine skill provides:
 
 Work through what's missing or ambiguous:
 
-- Are acceptance criteria specific and testable?
-- Are edge cases covered?
+- Are acceptance criteria **concrete and testable**? Each criterion must name an observable behavior, state or output — a command and its exit code or output, an HTTP status and response shape, a visible UI state, a persisted record, a doc line. Reject and rewrite any criterion of the "works correctly", "works as expected", "handles edge cases", "handles errors gracefully", "is robust/performant/secure" shape: those name no observable, so no test can prove them and no acceptance review can grade them. The refine skill fails closed on such a criterion before any write (its **Acceptance-criteria concreteness check**).
+- Are edge cases **listed individually**, one `- [ ]` item each under `### Edge Cases`, each as concrete as a criterion? "Handles edge cases" is never an edge case; "an empty list renders the `No items yet` placeholder" is.
 - Is the scope clear? Could it hide complexity?
 - Are API contracts defined (request/response shapes)?
 - Are there dependencies on other tickets?
@@ -65,7 +65,7 @@ Work through what's missing or ambiguous:
 - Are there security considerations?
 - Is it estimable? If not, what's blocking estimation?
 - If the ticket references existing apps ("like X", "similar to Y"), are the key UX patterns of those references captured (layout model, navigation, interaction patterns)?
-- Does this ticket risk exceeding the implementing agent's context budget (see `docs/ticket-sizing.md`)? If so, should it be split? **If `isSplitChild` and `resplitAuthorized` is not `true`** — skip the should-it-be-split question entirely: a split child is presumed sized by its parent's refinement and is never split again (split depth is one; see `docs/ticket-sizing.md`). **If `isSplitChild` and `resplitAuthorized` is `true`** — the human has explicitly authorized re-evaluating this child for a split (see the refine skill's Oversize split child escalation): actually evaluate whether a split is warranted here, exactly as you would for a non-child ticket, rather than skipping the question.
+- What size is this ticket against the S/M/L table in `docs/ticket-sizing.md` — S, M (the default) or L — and does its scope **exceed L**? Only scope beyond L is a split trigger at refinement; L itself is allowed when the bound line records why the slices cannot ship as a stacked series of M PRs, and model capability is never a reason to size up. **If `isSplitChild` and `resplitAuthorized` is not `true`** — skip the should-it-be-split question entirely: a split child is presumed sized by its parent's refinement and is never split again (split depth is one; see `docs/ticket-sizing.md`). **If `isSplitChild` and `resplitAuthorized` is `true`** — the human has explicitly authorized re-evaluating this child for a split (see the refine skill's Oversize split child escalation): actually evaluate whether a split is warranted here, exactly as you would for a non-child ticket, rather than skipping the question.
 
 ## Lean Question Policy
 
@@ -144,6 +144,13 @@ Only when questions are `None.`, output the complete proposal. The skill persist
     ### Acceptance Criteria
     - [ ] <specific, testable criterion>
 
+    Every criterion names an observable behavior, state or output (what a test asserts, what a screenshot shows, what a doc line says) — never "works correctly", "works as expected", "handles edge cases", "handles errors gracefully" or a bare quality adjective. The refine skill's **Acceptance-criteria concreteness check** rejects a vague criterion before any write; the acceptance reviewer later grades each one as covered/partial/missing, which is only possible when the criterion says what to look for.
+
+    ### Edge Cases
+    - [ ] <one edge case per item, as concrete as a criterion — e.g. "an empty list renders the `No items yet` placeholder">
+
+    Always present. Edge cases are listed individually, never compressed into a heading or a "handles edge cases" line; when the refinement genuinely finds none, write exactly `None.` on the next line. This section is persisted into the ticket body right after `### Acceptance Criteria`, and each item is a coverage-map item on a split and an acceptance-review row at PR time.
+
     ### Assumptions (auto-adopted)
     - <assumption> — <adopted answer and why it is obvious>
 
@@ -183,60 +190,96 @@ Only when questions are `None.`, output the complete proposal. The skill persist
 
     One parent line always, plus one `automerge (K/N) <child title>` line per ticket proposed in `### Suggested Split` below (omit the child lines entirely when the proposal carries no split) — this is a per-ticket verdict **registry**, not a single value. Withhold by default when the ticket touches security-sensitive paths, release/CI workflow files, is visually verifiable UI work, or performs an irreversible migration/data change — and withhold whenever uncertain; apply this rule independently to the parent and to every child (a child can grant while a sibling withholds, and vice versa). The human's single confirmation at the refine skill's `## Confirmation Gate` authorizes every verdict listed here — not the proposal review earlier in the Q&A loop, which shapes content, not authorization. Granting the parent on a split authorizes the last child's PR to merge the epic: that PR carries `Fixes #<parentId>` and so closes both parent and child in one merge, and `evaluateAutomerge` requires an explicit `automerge:ok` grant on *every* issue a PR closes — so the parent's grant is a precondition for that automation, not a formality. This section is **not** written into the ticket body — it drives only the refine skill's per-ticket label decisions.
 
-    ### Size Estimate
-    <S/M/L> — <reasoning, sized against the context budget in `docs/ticket-sizing.md`>
+    ### Size Estimate: <S|M|L>
+    Bound: <the bound line for that letter, verbatim from the three below>
+    Rationale: <one or two sentences>
 
-    Ground the reasoning in the specific files/components found via Glob/Grep during exploration (`## Before Analyzing` step 3) — cite them by name — rather than a generic guess from the ticket text alone. This grounds the qualitative estimate in evidence; it stays an estimate, not a measured token count (`docs/ticket-sizing.md`'s "estimated, not measured" framing).
+    The letter follows the heading on the same line, the bound line is copied verbatim from `docs/ticket-sizing.md`, and the rationale is one or two sentences. Size against the table there: **M is the default**; S is one concern in one project with no schema change and no automerge protected path; L is several coupled slices and is written only when the bound line's `<reason>` placeholder is filled in with why they cannot ship as a stacked series of M PRs — an L without that reason is rejected by the refine skill. Model capability is never a reason to size up. The three bound lines, verbatim:
 
-    ### Suggested Split (only if L AND (NOT `isSplitChild` OR `resplitAuthorized`) — real risk of exceeding the context budget per `docs/ticket-sizing.md`)
+    ```
+    ### Size Estimate: S
+    Bound: <= 10 changed files, <= 400 changed lines, one concern in one project, no schema change, no automerge protected path.
+    Rationale: <one or two sentences>
+
+    ### Size Estimate: M
+    Bound: <= 30 changed files, <= 2,000 changed lines, one feature slice, at most one migration.
+    Rationale: <one or two sentences>
+
+    ### Size Estimate: L
+    Bound: <= 60 changed files, <= 5,000 changed lines, several coupled slices; reason they cannot ship as a stacked series of M PRs: <reason>.
+    Rationale: <one or two sentences>
+    ```
+
+    Ground the reasoning in the specific files/components found via Glob/Grep during exploration (`## Before Analyzing` step 3) — cite them by name — rather than a generic guess from the ticket text alone. This grounds the qualitative estimate in evidence; it stays an estimate, not a measured diff (`docs/ticket-sizing.md`'s "estimated, not measured" framing) — the PR step measures the final diff against the same bounds. Changed lines are insertions plus deletions, generated files and lockfiles included. A scope that exceeds the L bound is **never written as one ticket**: write `### Size Estimate: L` with the honest rationale that the scope exceeds L, and propose the split below.
+
+    ### Suggested Split (only if the scope exceeds L AND (NOT `isSplitChild` OR `resplitAuthorized`) — anything beyond the L bound in `docs/ticket-sizing.md` is split, never written as one ticket)
+
+    Splitting is a **coverage exercise**, not a work-division exercise. Open the section with the parent's complete numbered item list, then the children:
+
+    #### Parent items
+    1. [acceptance criterion] <verbatim text of the first `### Acceptance Criteria` item>
+    2. [edge case] <verbatim text of the first `### Edge Cases` item>
+    3. [verification step] <a verification step the ticket or its Technical Notes name>
+    4. [documentation item] <a doc the ticket or its Technical Notes name as needing a change>
+    5. [boundary] <a stated limit, exclusion or non-functional constraint>
+
+    Enumerate **every** acceptance criterion, edge case, verification step, documentation item and boundary of the parent, one per line, in the exact shape `<n>. [<kind>] <text>` with the kind in `acceptance criterion | edge case | verification step | documentation item | boundary` — this list is parsed mechanically by `skills/refine/scripts/coverage-map.sh`. Then assign **each number to exactly one child**: a child's `### Acceptance criteria` carries the parent items it owns **copied verbatim** (prefixed `(P<n>)`), plus the child's own criteria; never compress an edge case into a heading, never summarize a criterion, never reword beyond scoping. If an item fits no child, the split is wrong — add or re-cut a child; never drop the item and never leave it on the parent alone. The refine skill verifies the assignment before any write and fails the split on an unowned or doubly-owned item.
 
     Each child is a **decision-complete block** — plannable without undocumented parent context (AC 5), never a one-line description. Ticket #848's own body is the reference shape: every child carries its own `### Goal`, `### Size`, `### Decisions`, `### Assumptions (auto-adopted)`, `### Acceptance criteria`, and `### Dependencies`.
 
-    **Ground each child's sizing in evidence.** Each child's `### Size` must be grounded in a bounded enumeration of files/components affected by that child — found via Glob/Grep during exploration (`## Before Analyzing` step 3) and cited by name — never a generic guess untethered from what was actually found in the codebase.
+    **Ground each child's sizing in evidence.** Each child's `### Size` must be grounded in a bounded enumeration of files/components affected by that child — found via Glob/Grep during exploration (`## Before Analyzing` step 3) and cited by name — never a generic guess untethered from what was actually found in the codebase. Its value is `<S|M|L> — Bound: <that letter's bound line, verbatim>. Rationale: <one line citing the enumerated files/components>`; the refine skill persists it into the child ticket as that child's own `### Size Estimate: <letter>` section, so every child carries its size exactly as a refined ticket does.
 
-    **A split child's `### Size` is never L.** L on a split child means the parent's partition was wrong, not that this child should be split further (see "Split children are never split again" below) — so `### Size` on a child is always S or M, never L. If a child's evidence-grounded enumeration genuinely sizes L, re-partition the split until every child is S or M — never write a smaller size than the enumeration supports.
+    **A split child is at most M unless it records why it is L.** L on a split child means the parent's partition was wrong, not that this child should be split further (see "Split children are never split again" below) — a child's `### Size` is always S or M unless its own bound line fills in the `<reason>` placeholder with why that child's coupled slices cannot ship as a stacked series of M PRs. If a child's evidence-grounded enumeration genuinely sizes L and no such reason exists, re-partition the split until every child is S or M — never write a smaller size than the enumeration supports.
+
+    **Series position and siblings.** Every child of a stacked series carries a `Series:` line right under its title — `Series: (K/N) — previous: Ticket K-1 "<title>" | next: Ticket K+1 "<title>"` (`none` at either end) — so a reader of one child knows what a sibling already shipped and what is deferred to the next. Independent (non-stacked) children write `Series: (K/N) — independent`. The refine skill persists the line into the child body.
 
     **"None." sentinel rule**: `### Decisions`, `### Assumptions (auto-adopted)`, and `### Dependencies` are always present in every child block, even when genuinely empty — when a child has no scoped decision, assumption, or dependency, write exactly "None." rather than omitting the subsection or leaving it blank, so the coverage gate's structural completeness check (`skills/refine/SKILL.md`) is deterministic. `### Size` joins this "always present, never omitted" list too, but it is never itself the "None." sentinel: a child is always part of a split of an L-sized parent, so it always has a real size — write its actual `<S/M> — <reasoning>` value, never "None."
 
     **Ticket 1 (1/N): <title>**
+    Series: (1/N) — previous: none | next: Ticket 2 "<title>"
     ### Goal
     <what this child delivers, standalone>
     ### Size
-    <S/M> — <one-line reasoning citing the enumerated files/components>
+    <S|M|L> — Bound: <that letter's bound line, verbatim>. Rationale: <one line citing the enumerated files/components>
     ### Decisions
     - <settled decision this child needs, scoped from the parent's ### Decisions above>
     ### Assumptions (auto-adopted)
     - <assumption this child needs, scoped from the parent's ### Assumptions (auto-adopted) above>
     ### Acceptance criteria
-    - [ ] <criterion assigned to this child from ### Acceptance Criteria above>
+    - [ ] (P1) <parent item 1 — the criterion assigned to this child, copied verbatim from #### Parent items>
+    - [ ] <this child's own additional criterion>
     ### Dependencies
     None.
 
     **Ticket 2 (2/N): <title>** — depends on Ticket 1
+    Series: (2/N) — previous: Ticket 1 "<title>" | next: Ticket 3 "<title>"
     ### Goal
     <what this child delivers, standalone>
     ### Size
-    <S/M> — <one-line reasoning citing the enumerated files/components>
+    <S|M|L> — Bound: <that letter's bound line, verbatim>. Rationale: <one line citing the enumerated files/components>
     ### Decisions
     - <settled decision this child needs, scoped from the parent's ### Decisions above>
     ### Assumptions (auto-adopted)
     - <assumption this child needs, scoped from the parent's ### Assumptions (auto-adopted) above>
     ### Acceptance criteria
-    - [ ] <criterion assigned to this child from ### Acceptance Criteria above>
+    - [ ] (P2) <parent item 2, copied verbatim>
+    - [ ] (P4) <parent item 4, copied verbatim>
     ### Dependencies
     Depends on Ticket 1.
 
     **Ticket 3 (3/N): <title>** — parallel with Ticket 2
+    Series: (3/N) — previous: Ticket 2 "<title>" | next: none
     ### Goal
     <what this child delivers, standalone>
     ### Size
-    <S/M> — <one-line reasoning citing the enumerated files/components>
+    <S|M|L> — Bound: <that letter's bound line, verbatim>. Rationale: <one line citing the enumerated files/components>
     ### Decisions
     - <settled decision this child needs, scoped from the parent's ### Decisions above>
     ### Assumptions (auto-adopted)
     - <assumption this child needs, scoped from the parent's ### Assumptions (auto-adopted) above>
     ### Acceptance criteria
-    - [ ] <criterion assigned to this child from ### Acceptance Criteria above>
+    - [ ] (P3) <parent item 3, copied verbatim>
+    - [ ] (P5) <parent item 5, copied verbatim>
     ### Dependencies
     Depends on Ticket 1. Parallel with Ticket 2.
 
@@ -246,6 +289,6 @@ Only when questions are `None.`, output the complete proposal. The skill persist
 
 **Split children are never split again — unless a human explicitly authorized it, this run.** When the bundle's `isSplitChild` flag is true, never emit a `### Suggested Split` section — regardless of the size estimate — unless the invocation explicitly carries `resplitAuthorized: true`, set only by the refine skill's Oversize split child escalation when the human chose its third option ("Split this child anyway") in this same run — nothing else ever sets it, and it is never inferred or carried over from a prior run. If analysis still concludes L **and `resplitAuthorized` is not `true`**, keep the honest L verdict in `### Size Estimate` and state an explicit parent re-partition recommendation naming the parent (e.g. "L on a split child — recommend re-partitioning parent #<parentNumber> rather than splitting further"): an oversize child means the parent's partition was wrong, not that this child should fan out again (split depth is one — `docs/ticket-sizing.md`). The refine skill fails closed on a split proposal for a split child and surfaces the L verdict to the human at its Confirmation Gate — this is the **default** behavior. When `resplitAuthorized` **is** `true`, a `### Suggested Split` is expected and routes through the normal split path — no special-cased bypass — exactly like any other split proposal (see `docs/ticket-sizing.md`'s human-authorized exception for why this narrow case does not weaken the default rule).
 
-When analyzing a split, determine which child tickets have data/API/schema dependencies on others (sequential) vs. which touch independent areas (parallel), and annotate each. Do not propose a split for S or M tickets just because they touch multiple independent concerns — the budget-risk-only trigger in `docs/ticket-sizing.md` governs.
+When analyzing a split, determine which child tickets have data/API/schema dependencies on others (sequential) vs. which touch independent areas (parallel), and annotate each. Do not propose a split for S, M or L tickets just because they touch multiple independent concerns — only scope beyond the L bound in `docs/ticket-sizing.md` triggers a split at refinement.
 
-**Acceptance-criteria partition.** A split does not just divide the work — it divides the proof. Every criterion in the proposal's `### Acceptance Criteria` must be assigned to exactly one child's `### Acceptance criteria` checklist — none left unassigned, none duplicated across children — so that "every child closed" is by construction equivalent to "every parent criterion delivered" (#661). Criteria may be reworded only to scope them to the child, never weakened. Integration-scoped criteria — those only verifiable once every child's work is assembled (end-to-end flows, cross-cutting docs, config surfaces spanning children) — must be assigned to a child that depends on every other child; when no such child exists naturally, add a final integration child to carry them. A child may carry zero parent criteria — the rule constrains criteria, not children. The refine skill verifies this partition before creating any child and rejects the split if a criterion is unassigned or duplicated.
+**Acceptance-criteria partition — the coverage exercise.** A split does not just divide the work — it divides the proof. Every numbered item in `#### Parent items` — every acceptance criterion, edge case, verification step, documentation item and boundary — must be assigned to exactly one child's `### Acceptance criteria` checklist, copied verbatim with its `(P<n>)` tag — none left unassigned, none duplicated across children — so that "every child closed" is by construction equivalent to "every parent item delivered" (#661). Items may be prefixed to scope them to the child, never reworded, weakened or summarized; the parent's own `### Acceptance Criteria` and `### Edge Cases` stay unchanged, and the refine skill writes a `### Coverage map` on the parent naming each item's owning child. Integration-scoped criteria — those only verifiable once every child's work is assembled (end-to-end flows, cross-cutting docs, config surfaces spanning children) — must be assigned to a child that depends on every other child; when no such child exists naturally, add a final integration child to carry them. A child may carry zero parent criteria — the rule constrains criteria, not children. The refine skill verifies this partition before creating any child and rejects the split if a criterion is unassigned or duplicated.

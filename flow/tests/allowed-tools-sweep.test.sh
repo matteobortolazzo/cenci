@@ -281,7 +281,10 @@ if [[ -n "${review}" ]]; then
 Bash(git remote get-url:*)
 Bash(gh pr diff:*)
 Bash(gh pr view:*)
-Bash(gh pr comment:*)'
+Bash(gh pr comment:*)
+Bash(gh issue view:*)
+Bash(bash "${CLAUDE_PLUGIN_ROOT}/skills/review/scripts/acceptance-verdict.sh":*)
+Bash(rm -f ${TMPDIR:-/tmp}/cenci/:*)'
   check_bash_grant_set "${review_path}" "${REVIEW_EXPECTED_GRANTS}" "skills/review/SKILL.md"
   assert_dropped_blanket_grants "${review}" "skills/review/SKILL.md"
   assert_grant_field "${review_path}" "Write" "skills/review/SKILL.md"
@@ -304,7 +307,7 @@ Bash(gh pr comment:*)'
   while IFS= read -r cmd; do
     [[ -n "${cmd}" ]] || continue
     case "${cmd}" in
-      "gh pr diff"*|"gh pr view"*|"gh pr comment"*) ;;
+      "gh pr diff"*|"gh pr view"*|"gh pr comment"*|"gh issue view"*) ;;
       *) fail "skills/review/SKILL.md: ungranted gh invocation: [${cmd}]" ;;
     esac
   done < <(extract_bash_fences "${review_path}" | grep -oE '\bgh [a-z]+( [a-z]+)?' | LC_ALL=C sort -u)

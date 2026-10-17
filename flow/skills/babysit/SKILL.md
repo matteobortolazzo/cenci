@@ -124,5 +124,7 @@ human triage instead. An unreadable, empty, or truncated sub-issue graph, or an
 unreadable or truncated comment read, fails closed with no parent mutation. An
 already-closed parent is an idempotent no-op. A stale gap report holds the parent
 indefinitely until a human resolves it — by editing or deleting the comment, or by
-closing the parent manually; babysit only detects a recorded gap report, it never
-supersedes or re-audits one. A PR closed without merging leaves labels unchanged.
+closing the parent manually, or — the supported path — running `/cenci:close <parent>`,
+whose item-by-item coverage review of the merged child PRs closes the parent on zero
+gaps and otherwise turns each gap into a new child; babysit only detects a recorded
+gap report, it never supersedes or re-audits one. A PR closed without merging leaves labels unchanged.

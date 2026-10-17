@@ -17,6 +17,8 @@ Resolve `refinementAutonomy` on every invocation, both `/plan` and `apply`, from
 
 every question with options marks one recommended option first with a one-line rationale, and every open-ended question leads with the refiner's proposed answer.
 
+**Concrete criteria, sized ticket.** Every `### Acceptance Criteria` item names an observable behavior, state or output; `### Edge Cases` lists each edge case individually (or exactly `None.`). A vague criterion — `works correctly`, `works as expected`, `handles edge cases`, `handles errors gracefully`, a bare quality adjective, or an item naming no concrete command/response/state/file/UI element — stops the run before any write (the acceptance-criteria concreteness check), naming the rejected item. The proposal carries `### Size Estimate: <S|M|L>` with the letter's bound line copied verbatim from `docs/ticket-sizing.md` on the next line and a one-or-two-sentence `Rationale:`; M is the default, an L must fill in the reason its slices cannot ship as a stacked series of M PRs, model capability is never a reason to size up, and a scope that exceeds L is split, never written as one ticket (a missing/malformed size, or an over-L scope with no split, stops before any write — the Size Estimate check). The persisted body carries `### Updated Description`, `### Acceptance Criteria`, `### Edge Cases`, `### Assumptions (auto-adopted)`, `### Decisions`, `### Technical Notes`, `### Size Estimate: <letter>` (with its `Bound:`/`Rationale:` lines) and `### Design Direction` when present.
+
 entailed questions — those already fixed by a recorded answer — are forbidden; auto-adopt them into `### Decisions` with a `follows from Q<n> (round <m>)` citation, and when the entailed decision fixes a security posture or is otherwise irreversible, ask via the client's available user-input mechanism a confirm/overrule question that states the decision and its derivation without re-opening the full option space. This confirm/overrule question is exempt from any per-round question cap and must be asked before a round can conclude with no remaining questions — never deferred, never silently dropped.
 
 **Lean refinement** (only when `refinementAutonomy` is `lean`; interactive refine follows every rule above unchanged, never emits a `decided:` entry, and keeps its own per-round cap of at most 4 questions). In lean mode ask only in four classes: security-sensitive, destructive or irreversible, scope blowup (split), and product ambiguity with no recommendable option. Recommendable means exactly one option is justifiable from the repo, with a rationale citing the ticket, the codebase, or project docs by repo-relative path or identifier. Architecture trade-offs, resolvable contradictions, and recommendable product choices are recorded in `### Decisions` as `decided:` entries instead of being asked: `decided: <answer> — <rationale> (alternative: <option label>)`, naming the main alternative not taken. In lean mode a ticket with only conventional decisions reaches the Confirmation Gate with zero questions asked — every such decision is recorded in `### Assumptions (auto-adopted)` or `### Decisions`, never silently dropped. Lean mode allows one question round and at most 3 questions, asked via the client's available user-input mechanism, and after round 1 only cap-exempt questions are asked. Tag every non-exempt question with exactly one class tag: `(security)`, `(destructive)`, `(split)`, or `(product)`. An untagged question ranks last and counts against the cap, and its class is `product` for the over-cap suffix and ordering. The one exception to the cap is the confirm/overrule question tagged `(confirm/overrule — cap-exempt)`: it is always asked and never dropped, even when the 3-question cap is already full, and it does not count toward the 3. A security-sensitive or irreversible entailed decision still gets its cap-exempt confirm/overrule question, even when the cap is already full. When more than 3 non-exempt questions are warranted, sort them by class tag and rank them confirm/overrule, security, destructive, split, product ambiguity; the top 3 are asked. A question over the cap is never asked: record it as a `Q:` / `A:` pair whose answer is the overflow sentinel and decide it under the overflow rule — the sentinel is `Not asked — over the lean question cap; decide it under the overflow rule.` — recording the decision as `decided: <answer> — <rationale> (alternative: <option label>) (over the cap: <class>)`. Non-exempt questions are decided this way at most once: if the analysis after round 1, after the Confirmation Gate's overrule, or after the `resplitAuthorized` re-run still produces a non-exempt question, STOP with zero GitHub writes and report a lean-contract violation. A cap-exempt question whose wording is identical to one already answered is not asked again: the recorded answer is re-fed once, and if the analysis repeats the question after that, STOP with zero GitHub writes and report a lean-contract violation. At most 3 cap-exempt-only rounds follow round 1 in each pass (the question loop is one pass, the overrule pass another); a further round is a lean-contract violation, so STOP with zero GitHub writes and report it. Lean mode only reduces or reorders questions; it never removes a confirmation, a stop, or a fail-closed default. Lean mode does not change the `Browser` derivation: it is still derived from classification, never asked, and the `Browser` label is still applied from it. Lean mode never grants automerge by itself — the `### Automation` verdicts and the Confirmation Gate's fail-closed grant computation are identical in both modes.
@@ -121,9 +123,16 @@ confirms presence/absence and does not itself judge whether an empty `### Accept
 legitimate — the partition check below is the sole verifier of correct assignment, and a child wrongly left
 empty will surface there as an unassigned criterion. Only then verify the
 proposal partitions the parent's acceptance criteria:
-every parent criterion assigned to exactly one child (integration-scoped criteria on a child that
-depends on all others); an unassigned or duplicated criterion aborts the split before any GitHub
-write. Each child body opens with `Related to #<parent>` and, immediately after it and before any
+the proposal's `#### Parent items` list enumerates every acceptance criterion, edge case, verification
+step, documentation item and boundary of the parent as `<n>. [<kind>] <text>`, and every item is
+assigned to exactly one child, copied verbatim with its `(P<n>)` tag (integration-scoped items on a
+child that depends on all others); an unassigned or duplicated item aborts the split before any
+GitHub write — the item is never dropped. Then run the mechanical check,
+`"${PLUGIN_ROOT}/skills/refine/scripts/coverage-map.sh" check --items <items-file> --child
+"<label>=<child-criteria-file>" …` (one `--child` per child): exit 3 (an item with no owner) or 4
+(two owners) aborts the split on the same zero-write terms, reporting the script's `unowned:`/
+`duplicate:` lines; exit 0 yields the `items=`/`owned=`/`children=` counts for the manifest. Each
+child is at most M unless its `### Size` bound line records why it is L. Each child body opens with `Related to #<parent>` and, immediately after it and before any
 `Parallel with #<sibling>` line, one `Depends on #<blocker>` line per effective blocker (each on
 its own line; `Depends on #<sibling>` for siblings) — a **permanent, human-visible supplement** to the native `--add-blocked-by` link
 applied after creation (below), never a replacement for it: `mergeDependencies` unions native and
@@ -136,9 +145,20 @@ blank placeholder), and the same body-file path is re-written with the complete 
 before that child's own `ensure-issue.sh ensure` call; a child with no blockers is written once and
 never rewritten (`ensure-issue.sh`'s `bodyHash` is recorded at `init` but never read back, so this
 in-place rewrite is safe). Each child body then carries its own `### Acceptance Criteria` section —
-its slice of the parent's partition — after the dependency lines and description, plus that
+its slice of the parent's partition (the owned parent items verbatim, `(P<n>)`-tagged, plus its own)
+— after the dependency lines and description, plus that
 child's own `### Size`, `### Decisions` and `### Assumptions (auto-adopted)` persisted from its
-`### Suggested Split` block.
+`### Suggested Split` block — the `### Size` value is written as the child's own
+`### Size Estimate: <letter>` section (letter, `Bound:` line, `Rationale:` line), and the child's
+`Series: (K/N) — previous: … | next: …` line (sibling titles, or `independent`) follows the
+dependency lines. After every child exists and is linked, re-run `coverage-map.sh check` against
+the children's live bodies (`gh issue view <child> --json body`) with `#<number> (K/N)` labels:
+a non-zero exit stops with the partial state reported (never repaired by editing the parent's
+criteria); exit 0 yields the rendered `### Coverage map`, which Pass 2 appends to the parent body
+verbatim on every split — one row per numbered parent item with its owning child — alongside the
+Execution Order note when the split has real ordering, leaving the parent's own
+`### Acceptance Criteria` and `### Edge Cases` unchanged. The final message reports the item and
+owner counts.
 
 **Creation checkpoint (idempotent create/recover/repair/link, #876)**: every split child is
 created through `"${PLUGIN_ROOT}/skills/refine/scripts/ensure-issue.sh"`

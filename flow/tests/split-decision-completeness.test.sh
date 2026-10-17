@@ -74,7 +74,7 @@ REFINER_SENTINEL_HEADING_MARKER='"None." sentinel rule'
 REFINER_SENTINEL_ALWAYS_PRESENT_MARKER='`### Decisions`, `### Assumptions (auto-adopted)`, and `### Dependencies` are always present in every child block, even when genuinely empty'
 REFINER_SENTINEL_NEVER_OMITTED_MARKER='write exactly "None." rather than omitting the subsection or leaving it blank'
 REFINER_SIZE_SENTINEL_MARKER='joins this "always present, never omitted" list too, but it is never itself the "None." sentinel'
-REFINER_SIZE_NEVER_L_MARKER='so `### Size` on a child is always S or M, never L'
+REFINER_SIZE_NEVER_L_MARKER='a child'"'"'s `### Size` is always S or M unless its own bound line fills in the `<reason>` placeholder'
 
 # skills/refine/codex.md — portability parity
 CODEX_STRUCTURE_MARKER='first verify each child block is structurally complete'
