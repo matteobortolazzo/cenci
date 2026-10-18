@@ -6,8 +6,10 @@
 // #1278), never the live admin or common dir, so the configuration a call checks
 // is the configuration it uses. The only mutating surface (deleting a worktree's
 // directory and admin dir, and a finished worktree's branch) lives in remove.go.
-// It is a leaf package: it must not import internal/dispatch, internal/run,
-// internal/daemon or internal/pipeline.
+// guards.go reads what is live (tmux, the daemon snapshot) and builds the in-use
+// and babysit guards, so the package may import internal/tmux, internal/detect,
+// internal/babysit and pkg/watch. It is a leaf package: it must not import
+// internal/dispatch, internal/run, internal/daemon or internal/pipeline.
 package worktreeclean
 
 import (

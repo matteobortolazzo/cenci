@@ -188,10 +188,10 @@ func isMissingTarget(stderr string) bool {
 // windowCmdTimeout bounds one window-scoped tmux call (list-panes, kill-window)
 // so a wedged tmux server can never stall the close path indefinitely; the
 // matching WaitDelay covers a lingering grandchild holding the output pipes.
-const (
-	windowCmdTimeout   = 5 * time.Second
-	windowCmdWaitDelay = 2 * time.Second
-)
+// windowCmdTimeout is a variable only so a test can shorten it.
+var windowCmdTimeout = 5 * time.Second
+
+const windowCmdWaitDelay = 2 * time.Second
 
 // windowCmd runs `tmux <args...>` against the ambient server with
 // windowCmdTimeout. A missing-target failure wraps ErrWindowGone; tmux's own
@@ -213,8 +213,11 @@ func windowCmd(args ...string) (string, error) {
 		err = errors.Join(err, context.DeadlineExceeded)
 	}
 	text := strings.TrimSpace(stderr.String())
-	if isMissingTarget(text) {
+	switch {
+	case isMissingTarget(text):
 		return "", fmt.Errorf("tmux %s: %w: %w: %s", args[0], err, ErrWindowGone, text)
+	case strings.Contains(text, noServerMessage):
+		return "", fmt.Errorf("tmux %s: %w: %w: %s", args[0], err, ErrNoServer, text)
 	}
 	return "", fmt.Errorf("tmux %s: %w: %s", args[0], err, text)
 }
@@ -318,6 +321,117 @@ func ListWindowPaneProcs(target string) ([]PaneProc, error) {
 		}
 	}
 	return panes, errors.Join(errs...)
+}
+
+// LivePane is one pane of the live tmux server as ListLivePanes reads it.
+type LivePane struct {
+	PaneID, WindowName, CurrentPath string
+}
+
+// ErrNoServer marks "no tmux server is running": windowCmd wraps it when tmux's
+// stderr says so, and it is the one benign failure of ListLivePanes (there are
+// no windows to find). Every other tmux failure, "error connecting to" included,
+// stays a plain error so a real problem is never read as "no windows".
+var ErrNoServer = errors.New("tmux: no server running")
+
+// noServerMessage is tmux's stderr text for a missing server (unverified against
+// a real tmux, watch/docs/tmux.md).
+const noServerMessage = "no server running"
+
+// errLivePaneMismatch marks two listings that disagree on which panes exist,
+// which ListLivePanes retries once.
+var errLivePaneMismatch = errors.New("tmux list-panes: the listings disagree on which panes exist")
+
+// The two listings ListLivePanes joins on the pane id. The pane id comes first
+// in both and is tmux-owned; the window name and path are free text that can
+// hold a newline or tab, so neither listing is trusted beyond its own rows.
+const (
+	liveWindowFormat = "#{pane_id}\t#{window_name}"
+	livePathFormat   = "#{pane_id}\t#{pane_current_path}"
+)
+
+// ListLivePanes lists every pane of the ambient server with its window name and
+// current path, from two listings joined on the pane id. A row whose first column
+// is not a pane id, a pane id listed twice in one listing, or listings that
+// still disagree on the pane set after one retry make the whole read an error: a
+// forged or partial picture of what is live is never returned. A tmux that
+// reports no server returns ErrNoServer. Only the trailing newline is trimmed
+// and a row splits on its first TAB: an empty path keeps its row
+// (watch/docs/tmux.md).
+func ListLivePanes() ([]LivePane, error) {
+	panes, err := readLivePanes()
+	if errors.Is(err, errLivePaneMismatch) {
+		panes, err = readLivePanes()
+	}
+	return panes, err
+}
+
+func readLivePanes() ([]LivePane, error) {
+	windowOut, err := windowCmd("list-panes", "-a", "-F", liveWindowFormat)
+	if err != nil {
+		return nil, err
+	}
+	pathOut, err := windowCmd("list-panes", "-a", "-F", livePathFormat)
+	if err != nil {
+		return nil, err
+	}
+	windows, order, err := parseLiveRows(windowOut)
+	if err != nil {
+		return nil, err
+	}
+	paths, _, err := parseLiveRows(pathOut)
+	if err != nil {
+		return nil, err
+	}
+	if len(windows) != len(paths) {
+		return nil, fmt.Errorf("%w: %d panes with window names, %d with paths", errLivePaneMismatch, len(windows), len(paths))
+	}
+	panes := make([]LivePane, 0, len(order))
+	for _, id := range order {
+		path, ok := paths[id]
+		if !ok {
+			return nil, fmt.Errorf("%w: pane %q has no path row", errLivePaneMismatch, id)
+		}
+		panes = append(panes, LivePane{PaneID: id, WindowName: windows[id], CurrentPath: path})
+	}
+	return panes, nil
+}
+
+// isPaneID reports whether s is a tmux pane id: "%" and one or more ASCII digits.
+func isPaneID(s string) bool {
+	digits, ok := strings.CutPrefix(s, "%")
+	if !ok || digits == "" {
+		return false
+	}
+	for _, r := range digits {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// parseLiveRows reads`<pane id><TAB><value>` rows into a map by pane id, with
+// the ids in listing order. A malformed row or a repeated pane id is an error.
+func parseLiveRows(out string) (map[string]string, []string, error) {
+	rows := map[string]string{}
+	var order []string
+	out = strings.TrimRight(out, "\n")
+	if out == "" {
+		return rows, order, nil
+	}
+	for _, line := range strings.Split(out, "\n") {
+		id, value, ok := strings.Cut(line, "\t")
+		if !ok || !isPaneID(id) {
+			return nil, nil, fmt.Errorf("tmux list-panes: unexpected line %q: want a pane id, a TAB and a value", line)
+		}
+		if _, dup := rows[id]; dup {
+			return nil, nil, fmt.Errorf("tmux list-panes: pane %q is listed more than once", id)
+		}
+		rows[id] = value
+		order = append(order, id)
+	}
+	return rows, order, nil
 }
 
 // setPaneOptionTimeout bounds one SetPaneOption call so a wedged tmux server

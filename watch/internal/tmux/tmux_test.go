@@ -1,11 +1,17 @@
 package tmux
 
 import (
+	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"slices"
+	"sort"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/exectest"
 )
@@ -334,5 +340,243 @@ func TestListWindowPaneProcs_NoPanesIsEmptyNotAnError(t *testing.T) {
 	}
 	if len(got) != 0 {
 		t.Errorf("panes = %+v, want none", got)
+	}
+}
+
+// -- ListLivePanes (#1266) ---------------------------------------------------
+
+// liveTmux installs a fake tmux that serves ListLivePanes and logs each argv
+// line to argsFile. A listing is told apart by the format it asks for (the one
+// naming window_name or the one naming pane_current_path), so the tests do not
+// pin the exact format strings. The n-th window-name listing answers
+// windows[n-1] and the n-th path listing paths[n-1]; the last answer repeats.
+func liveTmux(t *testing.T, argsFile string, windows, paths []string) {
+	t.Helper()
+	dir := t.TempDir()
+	for kind, answers := range map[string][]string{"w": windows, "p": paths} {
+		for i, a := range answers {
+			if err := os.WriteFile(filepath.Join(dir, kind+"."+strconv.Itoa(i+1)), []byte(a), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.WriteFile(filepath.Join(dir, kind+".last"), []byte(answers[len(answers)-1]), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	d, log := exectest.ShellQuote(dir), exectest.ShellQuote(argsFile)
+	installFakeTmuxOnPath(t, "printf '%s\\n' \"$*\" >> "+log+"\n"+
+		"kind=w; case \"$*\" in *pane_current_path*) kind=p;; esac\n"+
+		"n=$(cat "+d+"/$kind.n 2>/dev/null || echo 0); n=$((n+1)); echo $n > "+d+"/$kind.n\n"+
+		"f="+d+"/$kind.$n; [ -f \"$f\" ] || f="+d+"/$kind.last\n"+
+		"cat \"$f\"\n")
+}
+
+func sortedPanes(p []LivePane) []LivePane {
+	out := append([]LivePane(nil), p...)
+	sort.Slice(out, func(i, j int) bool { return out[i].PaneID < out[j].PaneID })
+	return out
+}
+
+// A pane's window name and cwd come from two listings joined on the pane id, in
+// whatever order each listing prints its rows.
+func TestListLivePanes_JoinsWindowNamesAndCwdsOnPaneID(t *testing.T) {
+	argsFile := filepath.Join(t.TempDir(), "args")
+	liveTmux(t, argsFile,
+		[]string{"%1\t42-implement\n%2\tscratch pad\n"},
+		[]string{"%2\t/home/dev\n%1\t/repo/.worktrees/42-x\n"})
+
+	got, err := ListLivePanes()
+	if err != nil {
+		t.Fatalf("ListLivePanes: %v", err)
+	}
+
+	want := []LivePane{
+		{PaneID: "%1", WindowName: "42-implement", CurrentPath: "/repo/.worktrees/42-x"},
+		{PaneID: "%2", WindowName: "scratch pad", CurrentPath: "/home/dev"},
+	}
+	if !slices.Equal(sortedPanes(got), want) {
+		t.Errorf("panes = %+v, want %+v", got, want)
+	}
+	args, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("fake tmux was not invoked: %v", err)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(args)), "\n") {
+		if !strings.HasPrefix(line, "list-panes -a ") {
+			t.Errorf("tmux argv = %q, want a server-wide `list-panes -a` call", line)
+		}
+	}
+}
+
+// Only the trailing newline is trimmed and a row splits on its first TAB: an
+// empty cwd keeps its row (TrimSpace would swallow the trailing TAB and break
+// it), and a TAB inside the value belongs to the value (watch/docs/tmux.md).
+func TestListLivePanes_KeepsEmptyAndTabbedValues(t *testing.T) {
+	liveTmux(t, filepath.Join(t.TempDir(), "args"),
+		[]string{"%1\t42-implement\n%2\t\n%3\tx\n"},
+		[]string{"%1\t\n%2\t/tmp/a\tb\n%3\t/ok\n"})
+
+	got, err := ListLivePanes()
+	if err != nil {
+		t.Fatalf("ListLivePanes: %v", err)
+	}
+
+	want := []LivePane{
+		{PaneID: "%1", WindowName: "42-implement", CurrentPath: ""},
+		{PaneID: "%2", WindowName: "", CurrentPath: "/tmp/a\tb"},
+		{PaneID: "%3", WindowName: "x", CurrentPath: "/ok"},
+	}
+	if !slices.Equal(sortedPanes(got), want) {
+		t.Errorf("panes = %+v, want %+v", got, want)
+	}
+}
+
+func TestListLivePanes_NoPanesIsEmptyNotAnError(t *testing.T) {
+	liveTmux(t, filepath.Join(t.TempDir(), "args"), []string{""}, []string{""})
+
+	got, err := ListLivePanes()
+	if err != nil || len(got) != 0 {
+		t.Errorf("ListLivePanes = %+v, %v; want no panes and no error", got, err)
+	}
+}
+
+func TestListLivePanes_NoServerIsErrNoServer(t *testing.T) {
+	failingTmux(t, "no server running on /tmp/tmux-1000/default")
+
+	got, err := ListLivePanes()
+
+	if !errors.Is(err, ErrNoServer) {
+		t.Fatalf("ListLivePanes err = %v, want errors.Is(err, ErrNoServer)", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("panes = %+v, want none", got)
+	}
+}
+
+// Regression for the narrow match: only "no server running" is benign. Every
+// other tmux failure, "error connecting to" (a socket that is missing or
+// refused) included, stays a plain error so a real problem is never read as
+// "no windows".
+func TestListLivePanes_OtherFailuresStayPlainErrors(t *testing.T) {
+	for _, msg := range []string{
+		"error connecting to /tmp/tmux-1000/default (No such file or directory)",
+		"protocol version mismatch (client 8, server 7)",
+		"permission denied",
+		"can't find pane: %7",
+	} {
+		t.Run(msg, func(t *testing.T) {
+			failingTmux(t, msg)
+
+			got, err := ListLivePanes()
+
+			if err == nil {
+				t.Fatal("ListLivePanes err = nil, want the tmux failure")
+			}
+			if errors.Is(err, ErrNoServer) {
+				t.Errorf("ListLivePanes err = %v, must not be classified as no server", err)
+			}
+			if !strings.Contains(err.Error(), msg) {
+				t.Errorf("ListLivePanes err = %q, want tmux's message %q in it", err, msg)
+			}
+			if len(got) != 0 {
+				t.Errorf("panes = %+v, want none alongside an error", got)
+			}
+		})
+	}
+}
+
+// A row tmux did not produce for a real pane, or two listings that disagree on
+// which panes exist, make the whole read fail: the caller treats the live state
+// as unreadable rather than trusting a partial or forged picture.
+func TestListLivePanes_MalformedForgedOrMismatchedListingsFail(t *testing.T) {
+	tests := []struct {
+		name           string
+		windows, paths string
+	}{
+		{"first column is not a pane id", "foo\t42-x\n", "foo\t/tmp\n"},
+		{"bare percent sign", "%\t42-x\n", "%\t/tmp\n"},
+		{"pane id with trailing text", "%12abc\t42-x\n", "%12abc\t/tmp\n"},
+		{"non-ASCII digits", "%١٢\t42-x\n", "%١٢\t/tmp\n"},
+		{"row without a TAB", "%1\n", "%1\t/tmp\n"},
+		{"pane id listed twice", "%1\ta\n%1\tb\n", "%1\t/p\n"},
+		{"window name forges an extra row", "%1\tx\n%9\t42-fake\n", "%1\t/p\n"},
+		{"pane missing from the path listing", "%1\ta\n%2\tb\n", "%1\t/p\n"},
+		{"pane missing from the window listing", "%1\ta\n", "%1\t/p\n%2\t/q\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			liveTmux(t, filepath.Join(t.TempDir(), "args"), []string{tt.windows}, []string{tt.paths})
+
+			got, err := ListLivePanes()
+
+			if err == nil {
+				t.Fatalf("ListLivePanes = %+v, nil; want an error", got)
+			}
+			if errors.Is(err, ErrNoServer) {
+				t.Errorf("err = %v, must not read as no server", err)
+			}
+			if len(got) != 0 {
+				t.Errorf("panes = %+v, want none alongside an error", got)
+			}
+		})
+	}
+}
+
+// A pane that opens or closes between the two listings makes their pane-id sets
+// differ once; the read is retried and succeeds when the next pair agrees.
+func TestListLivePanes_RetriesATransientSetMismatch(t *testing.T) {
+	liveTmux(t, filepath.Join(t.TempDir(), "args"),
+		[]string{"%1\ta\n%2\tb\n", "%1\ta\n%2\tb\n"},
+		[]string{"%1\t/p\n", "%1\t/p\n%2\t/q\n"})
+
+	got, err := ListLivePanes()
+	if err != nil {
+		t.Fatalf("ListLivePanes: %v", err)
+	}
+
+	want := []LivePane{
+		{PaneID: "%1", WindowName: "a", CurrentPath: "/p"},
+		{PaneID: "%2", WindowName: "b", CurrentPath: "/q"},
+	}
+	if !slices.Equal(sortedPanes(got), want) {
+		t.Errorf("panes = %+v, want %+v", got, want)
+	}
+}
+
+// A tmux that cannot be run at all, or that hangs past the call bound, is an
+// unreadable window list, never "no server" and never an empty one.
+func TestListLivePanes_MissingBinaryAndTimeoutFailClosed(t *testing.T) {
+	tests := []struct {
+		name      string
+		setup     func(t *testing.T)
+		wantInErr error
+	}{
+		{name: "tmux is not installed", setup: func(t *testing.T) { t.Setenv("PATH", t.TempDir()) }, wantInErr: exec.ErrNotFound},
+		{name: "tmux hangs", wantInErr: context.DeadlineExceeded, setup: func(t *testing.T) {
+			installFakeTmuxOnPath(t, "exec sleep 30\n")
+			old := windowCmdTimeout
+			windowCmdTimeout = 100 * time.Millisecond
+			t.Cleanup(func() { windowCmdTimeout = old })
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tt.setup(t)
+
+			got, err := ListLivePanes()
+
+			if err == nil {
+				t.Fatalf("ListLivePanes = %+v, nil; want an error", got)
+			}
+			if errors.Is(err, ErrNoServer) {
+				t.Errorf("err = %v, must not read as no server", err)
+			}
+			if !errors.Is(err, tt.wantInErr) {
+				t.Errorf("err = %v, want it to wrap %v", err, tt.wantInErr)
+			}
+			if len(got) != 0 {
+				t.Errorf("panes = %+v, want none alongside an error", got)
+			}
+		})
 	}
 }

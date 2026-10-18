@@ -76,6 +76,8 @@ Details: docs/migrating-to-cenci.md in the cenci repo.
 		runPipeline(os.Args[2:])
 	case "sandbox":
 		runSandboxGroup(os.Args[2:])
+	case "worktrees":
+		runWorktrees(os.Args[2:])
 	case "open":
 		runOpen(os.Args[2:])
 	case "diagnose":
@@ -127,6 +129,8 @@ Commands:
   close                              close a finished/idle agent window
   pipeline                           drive the implement pipeline's stage state machine (prepare|plan|await-input|execute|review|finalize) plus mechanics verbs (label|worktree|worktree-cleanup|artifact|plan-check)
   sandbox                            manage the sandbox container (build|build-base|prune|update-agent|update-plugins|reseed-creds|reap-orphans|ls|stop)
+  worktrees ls                       list this repo's .worktrees/* worktrees with verdict, reason and size, changing nothing
+  worktrees prune [--dry-run]        remove this repo's finished and stale worktrees, or with --dry-run print what would go
   open [shortcut]                    launch or attach an interactive sandbox session (aliased by the "cn" binary name)
   diagnose [flags]                   read-only report on a sandbox session's container/daemon/version health
   audit [flags]                      read-only report on the effective sandbox security posture the launcher would apply (mounts, env names, network, dind, credential sources, boundary weakenings)
