@@ -243,7 +243,7 @@ NONCONSUMER_TRIVIAL_MARKER='**`## Trivial Fast Path`** never consults autonomy i
 NONCONSUMER_RESUME_MARKER='still finalizes to `approval: lean-resumed` even when the resuming session is attended'
 NONCONSUMER_TICKETLESS_MARKER='**Ticketless mode**, which already behaves as interactive for any question the planner cannot self-answer'
 # #1131 -- attended means asked in-session, never decided.
-ATTENDED_NEVER_DECIDES_MARKER='Because `interactive` stands `agents/planner.md`'"'"'s `## Self-Answer Policy` down, an attended session never decides: contradiction and product-ambiguity questions are asked in-session via `AskUserQuestion`, no `decided:` entry is recorded, and the plan never carries `approval: lean-decided`'
+ATTENDED_NEVER_DECIDES_MARKER='supported choices are recorded as `auto-adopted:` with their reasoning, and only unresolved or consequential questions are asked in-session via `AskUserQuestion`. No `decided:` entry is recorded, and the fresh plan never carries `approval: lean-decided`'
 
 if require_doc PHASE1 "${PHASE1_REL}"; then
   assert_contains "${PHASE1}" "${RESOLVE_HEADING}" \
@@ -289,11 +289,9 @@ if require_doc PHASE1 "${PHASE1_REL}"; then
     assert_contains_ws "${RESOLVE_SECTION}" "${NONCONSUMER_TRIVIAL_MARKER}" "${L} must exempt the Trivial Fast Path"
     assert_contains_ws "${RESOLVE_SECTION}" "${NONCONSUMER_RESUME_MARKER}" "${L} must exempt ## Resume From Draft (approval: lean-resumed still applies)"
     assert_contains_ws "${RESOLVE_SECTION}" "${NONCONSUMER_TICKETLESS_MARKER}" "${L} must exempt ticketless mode"
-    # #1131: attended means asked in-session, never decided. Narrowing to
-    # `interactive` stands the planner's Decide and notify down with the rest of
-    # its Self-Answer Policy, so the contradiction and product-ambiguity
-    # questions it would have decided are put to the human instead.
-    assert_contains_ws "${RESOLVE_SECTION}" "${ATTENDED_NEVER_DECIDES_MARKER}" "${L} must state an attended session asks contradiction/ambiguity questions in-session and never decides them (#1131)"
+    # Attended preserves human approval: supported choices are auto-adopted,
+    # remaining questions use the tool, and no lean decision marker is emitted.
+    assert_contains_ws "${RESOLVE_SECTION}" "${ATTENDED_NEVER_DECIDES_MARKER}" "${L} must keep attended resolutions auto-adopted and unresolved questions in-session"
   fi
 
   # --- Consumer 1: ## Planner Delegation ----------------------------------
@@ -307,8 +305,8 @@ if require_doc PHASE1 "${PHASE1_REL}"; then
       "phase-1-plan.md (## Planner Delegation) must keep the literal Planning autonomy: interactive delegation value"
     assert_contains_ws "${DELEGATION_SECTION}" '`resolvedAutonomy` from `## Resolve Planning Autonomy` above, verbatim' \
       "phase-1-plan.md (## Planner Delegation) must forward resolvedAutonomy rather than re-reading planning.autonomy"
-    assert_contains_ws "${DELEGATION_SECTION}" 'an attended session in a `"lean"` repo states `Planning autonomy: interactive`, which is what stands `agents/planner.md`'"'"'s `## Self-Answer Policy` down' \
-      "phase-1-plan.md (## Planner Delegation) must say the attended session stands the Self-Answer Policy down"
+    assert_contains_ws "${DELEGATION_SECTION}" 'an attended session in a `"lean"` repo states `Planning autonomy: interactive`, which changes question routing and approval provenance, not the shared self-answer threshold' \
+      "phase-1-plan.md (## Planner Delegation) must preserve shared filtering when an attended session changes routing"
     # Non-vacuous absence: the delegation bullet must no longer derive the
     # value from the raw config key itself (that read now lives in Step A).
     assert_absent_paired_ws "${DELEGATION_SECTION}" \
@@ -373,13 +371,12 @@ fi
 
 # =====================================================================
 # flow/agents/planner.md — #1131: an attended session states
-# `Planning autonomy: interactive`, which stands Decide and notify down with
-# the rest of ## Self-Answer Policy, so nothing is decided on the human's
-# behalf while they sit at the keyboard.
+# `Planning autonomy: interactive`: shared filtering still applies, with
+# auto-adopted recording and human plan review rather than lean provenance.
 # =====================================================================
 
 PLANNER_REL="agents/planner.md"
-PLANNER_ATTENDED_MARKER='When the delegation states `Planning autonomy: interactive` — including an attended session in a `"lean"` repo — contradiction and product-ambiguity questions are asked, never decided'
+PLANNER_ATTENDED_MARKER='Question selection is identical in interactive and lean mode, including when autonomy is absent or an attended session narrows a lean repo to interactive'
 
 if require_doc PLANNER "${PLANNER_REL}"; then
   PLANNER_POLICY="$(extract_h2_section "${PLANNER}" "## Self-Answer Policy")"
@@ -387,7 +384,7 @@ if require_doc PLANNER "${PLANNER_REL}"; then
     fail "agents/planner.md: could not locate the '## Self-Answer Policy' section"
   else
     assert_contains_ws "${PLANNER_POLICY}" "${PLANNER_ATTENDED_MARKER}" \
-      "agents/planner.md (## Self-Answer Policy) must state an attended/interactive delegation asks contradiction and product-ambiguity questions and never decides them (#1131)"
+      "agents/planner.md (## Self-Answer Policy) must share question filtering with attended and interactive delegations"
   fi
 fi
 
@@ -432,7 +429,7 @@ LOOP_OFFRAMP_MARKER='unless attended mode is on for this machine, in which case 
 # The Turning-it-off row must name both effects.
 LOOP_TURNOFF_MARKER='Next dispatch pass; and the next planning session you launch'
 # #1131: attended means asked in-session, never decided.
-LOOP_ATTENDED_NEVER_DECIDED_MARKER='contradiction and product-ambiguity questions are asked in the session, never decided: the planner emits no `decided:` entry and the plan never records `approval: lean-decided`'
+LOOP_ATTENDED_NEVER_DECIDED_MARKER='supported contradiction and product-ambiguity choices are recorded as `auto-adopted:` answers for plan review; only consequential or unresolved questions are asked in the session. The planner emits no `decided:` entry and the fresh plan never records `approval: lean-decided`'
 
 if require_repo_doc LOOP_DOC "${LOOP_REL}"; then
   assert_contains "${LOOP_DOC}" "${LOOP_OVERRIDE_HEADING}" \
@@ -471,7 +468,7 @@ if require_repo_doc LOOP_DOC "${LOOP_REL}"; then
     fail "docs/autonomous-loop.md: could not locate the '${LOOP_OVERRIDE_HEADING}' subsection"
   else
     assert_contains_ws "${LOOP_OVERRIDE_SECTION}" "${LOOP_ATTENDED_NEVER_DECIDED_MARKER}" \
-      "docs/autonomous-loop.md attended-override list must say contradiction and product-ambiguity questions are asked in the session, never decided (#1131)"
+      "docs/autonomous-loop.md attended-override list must describe shared filtering without lean approval provenance"
   fi
   # No contradiction left: the old row-5 wording that scoped the switch to
   # dispatch pickups alone must be gone, checked non-vacuously against the

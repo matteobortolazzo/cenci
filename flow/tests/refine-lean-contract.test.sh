@@ -6,7 +6,8 @@
 # of at most 3 questions plus the always-asked cap-exempt confirm/overrule
 # question; the refine skill enforces that cap itself; the Confirmation Gate
 # lists every auto-adopted item and `decided:` entry as A1...An and accepts one
-# freeform overrule; Codex mirrors all of it. Interactive refine is unchanged.
+# freeform overrule; Codex mirrors all of it. Interactive refine shares question selection,
+# but keeps its own relay and confirmation rather than lean overflow/overrule.
 #
 # Follows the fixture-free, grep-based idiom of
 # flow/tests/lean-planning-contract.test.sh: `set -uo pipefail`, a `failures`
@@ -235,8 +236,8 @@ assert_file_contains "${REFINE_CODEX}" "${UNRECOGNIZED_NOTICE_MARKER}" \
 # procedure must state in codex.md, which has no refiner agent to lean on.
 # =====================================================================
 
-CODEX_CLASSES_MARKER='In lean mode ask only in four classes: security-sensitive, destructive or irreversible, scope blowup (split), and product ambiguity with no recommendable option'
-CODEX_DECIDED_MARKER='Architecture trade-offs, resolvable contradictions, and recommendable product choices are recorded in `### Decisions` as `decided:` entries'
+CODEX_CLASSES_MARKER='Ask only in four classes: security-sensitive, destructive or irreversible, scope blowup (split), and product ambiguity with no recommendable option'
+CODEX_DECIDED_MARKER='Architecture trade-offs, resolvable contradictions, and recommendable product choices are settled instead of being asked'
 CODEX_TAG_SENTENCE_MARKER='Tag every non-exempt question with exactly one class tag: `(security)`, `(destructive)`, `(split)`, or `(product)`.'
 CODEX_SENTINEL_FEEDBACK_MARKER='A question over the cap is never asked: record it as a `Q:` / `A:` pair whose answer is the overflow sentinel and decide it under the overflow rule'
 

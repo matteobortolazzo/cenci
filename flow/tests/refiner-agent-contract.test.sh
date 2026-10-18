@@ -202,7 +202,7 @@ if [[ -n "${refiner}" ]]; then
   # Heading and gating sentence (planner.md ## Self-Answer Policy idiom).
   assert_contains "${refiner}" "## Lean Question Policy" "agents/refiner.md #1273 lean section heading"
   assert_contains "${refiner}" 'This section applies **only** when the bundle states `refinementAutonomy: lean`.' "agents/refiner.md #1273 lean gating sentence"
-  assert_contains "${refiner}" 'ignore this entire section and follow `## Questions` below exactly as written' "agents/refiner.md #1273 interactive/absent flag falls back to ## Questions unchanged"
+  assert_contains "${refiner}" 'Interactive mode uses `## Shared Question Policy` and `## Questions`' "agents/refiner.md #1273 interactive mode uses the shared question filter"
 
   # The four question classes (AC3).
   assert_contains "${refiner}" '**security-sensitive**' "agents/refiner.md #1273 class: security-sensitive"
@@ -212,7 +212,7 @@ if [[ -n "${refiner}" ]]; then
   assert_contains "${refiner}" 'Recommendable means exactly one option is justifiable from the repo' "agents/refiner.md #1273 recommendable definition"
 
   # Non-class decisions are decided, not asked (AC3).
-  assert_contains "${refiner}" 'Architecture trade-offs, resolvable contradictions, and recommendable product choices are recorded in `### Decisions` as `decided:` entries' "agents/refiner.md #1273 decide-not-ask classes"
+  assert_contains "${refiner}" 'Architecture trade-offs, resolvable contradictions, and recommendable product choices are settled instead of being asked' "agents/refiner.md #1273 decide-not-ask classes"
   assert_contains "${refiner}" 'decided: <answer> — <rationale> (alternative: <option label>)' "agents/refiner.md #1273 decided: entry format (shared with planner.md)"
   assert_contains "${refiner}" 'interactive mode never emits a `decided:` entry' "agents/refiner.md #1273 interactive never emits decided:"
 
@@ -238,7 +238,7 @@ fi
 
 if [[ -n "${skill}" ]]; then
   # Step 6: interactive path labelled unchanged, lean relay added (AC5).
-  assert_contains "${skill}" 'Interactive mode — unchanged' "skills/refine/SKILL.md #1273 step 6 interactive bullets labelled unchanged"
+  assert_contains "${skill}" 'Interactive relay — unchanged' "skills/refine/SKILL.md #1273 step 6 interactive bullets labelled unchanged"
   assert_contains "${skill}" 'This skill enforces the lean cap itself and does not rely on the refiner to obey it.' "skills/refine/SKILL.md #1273 skill-side cap enforcement"
   assert_contains "${skill}" 'at most 3 non-exempt questions in round 1' "skills/refine/SKILL.md #1273 round 1 relays at most 3 non-exempt questions"
   assert_contains "${skill}" 'after round 1 only cap-exempt questions are relayed' "skills/refine/SKILL.md #1273 after round 1 only exempt questions"

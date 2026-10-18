@@ -65,7 +65,7 @@ AUTOMATION_SECTION_MARKER='### Automation'
 # Pinned verbatim: flow/agents/refiner.md's ## Questions section must state
 # this exact inverted-policy sentence. Phase 4 (green) must write this
 # sentence into refiner.md character-for-character.
-INVERTED_POLICY_MARKER='Ask ONLY about product decisions, architecture decisions with a real trade-off, or contradictions/unknowns the codebase cannot resolve — everything else with an obvious recommended answer must be auto-adopted, never asked.'
+INVERTED_POLICY_MARKER='Ask ONLY about consequential or unresolved choices in its four classes — everything else with an obvious recommended answer must be auto-adopted, never asked.'
 
 AUTOMERGE_ADD_LABEL_MARKER='--add-label "automerge:ok"'
 AUTOMERGE_REMOVE_LABEL_MARKER='--remove-label "automerge:ok"'
@@ -118,7 +118,7 @@ assert_file_contains "${REFINER_AGENT}" "${DECISIONS_SECTION_MARKER}" \
 assert_file_contains "${REFINER_AGENT}" "${AUTOMATION_SECTION_MARKER}" \
   "must add the ### Automation proposal section"
 assert_file_contains "${REFINER_AGENT}" "${INVERTED_POLICY_MARKER}" \
-  "must state the exact inverted question-policy sentence restricting questions to product decisions, real-tradeoff architecture decisions, and unresolvable contradictions"
+  "must restrict questions to consequential or unresolved choices and auto-adopt obvious answers"
 
 # --- skills/refine/SKILL.md — step 11 automerge:ok grant/withhold ----------
 

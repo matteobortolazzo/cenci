@@ -126,7 +126,13 @@ In the repo's committed `.cenci/config.json`:
 ```
 
 Any value other than the exact string `"lean"` — including a missing block — means
-`"interactive"`, unchanged behavior.
+`"interactive"`: repo-supported choices are resolved and recorded, remaining consequential
+or unresolved questions use the question tool, and the plan stops for human review.
+Both modes use the same grounding and recommendation threshold; neither fills a
+question quota. Interactive planning records its resolutions as `auto-adopted:`
+answers (with rationale and the alternative for judgment calls), not lean decision
+notifications. Refinement follows the same minimal-question approach in both modes
+and still requires its final confirmation before writing to GitHub.
 
 `/cenci:configure` offers `planning.autonomy` on a delta run when the key is absent
 and has not been offered before, defaulting to `interactive`; `/cenci:configure --all`
@@ -194,7 +200,7 @@ With it on, a planning session in a `"lean"` repo behaves as `"interactive"`:
   `Input Needed` label, no `awaiting-input` draft, and no waiting for the next dispatch pass;
 - a plan with no escalations is **not** self-approved: it is saved, the session stops for
   you to read it, and its front matter records `approval: human`, not `approval: lean`;
-- contradiction and product-ambiguity questions are asked in the session, never decided: the planner emits no `decided:` entry and the plan never records `approval: lean-decided`.
+- supported contradiction and product-ambiguity choices are recorded as `auto-adopted:` answers for plan review; only consequential or unresolved questions are asked in the session. The planner emits no `decided:` entry and the fresh plan never records `approval: lean-decided`.
 
 This is an override, not a sixth switch: it only ever suspends switch 1, never grants it.
 An `"interactive"` repo is unaffected — attended mode gives it nothing it did not already

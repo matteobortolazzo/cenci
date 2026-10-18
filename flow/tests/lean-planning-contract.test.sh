@@ -126,7 +126,7 @@ assert_file_occurs_at_most_once() {
 # ## Auto-Adopted Answers output section.
 # =====================================================================
 
-LEAN_GATE_MARKER='This section applies **only** when the delegation states `Planning autonomy: lean`.'
+LEAN_GATE_MARKER='Question selection is identical in interactive and lean mode'
 AUTOADOPTED_FORMAT_MARKER='auto-adopted: <answer> — <rationale>'
 AUTOADOPTED_HEADING_MARKER='## Auto-Adopted Answers'
 TICKET_SIZING_TRIGGER_MARKER='size against the S/M/L table in `docs/ticket-sizing.md`'
@@ -139,7 +139,7 @@ ESCALATION_AMBIGUITY_MARKER="**genuine product ambiguity the ticket doesn't sett
 ESCALATION_SCOPE_MARKER='**scope blowup**'
 
 assert_file_contains "${PLANNER_AGENT}" "${LEAN_GATE_MARKER}" \
-  "must open ## Self-Answer Policy with the exact lean-gate sentence, pinned verbatim"
+  "must apply self-answer filtering in both planning modes"
 assert_file_contains "${PLANNER_AGENT}" "${ESCALATION_SECURITY_MARKER}" \
   "must name the security-sensitive escalation class"
 assert_file_contains "${PLANNER_AGENT}" "${ESCALATION_DESTRUCTIVE_MARKER}" \
@@ -354,7 +354,7 @@ BOTH_MODES_ENTAILMENT_MARKER='The entailment ban above applies in **both** inter
 FOLLOWS_FROM_QN_MARKER='Auto-adopt an entailed decision into `## Auto-Adopted Answers` with a `follows from Q<n>` citation.'
 NOT_SIXTH_CLASS_TIE_IN_MARKER='coincides with the existing **security-sensitive** and **destructive or irreversible** escalation classes above, not a sixth class'
 ENTAILMENT_SOURCE_MARKER='entailment sources include the refined ticket'"'"'s persisted `### Decisions` and `### Assumptions (auto-adopted)`'
-TRAILING_CLAUSE_CARVEOUT_MARKER='except entailment-derived entries, which `## Clarifying Questions` below permits in both modes'
+TRAILING_CLAUSE_CARVEOUT_MARKER='Interactive resolutions use `auto-adopted:`'
 
 assert_file_contains "${PLANNER_AGENT}" "${BOTH_MODES_ENTAILMENT_MARKER}" \
   "the entailment ban must state it applies in both interactive and lean mode (AC3)"
@@ -365,7 +365,7 @@ assert_file_contains "${PLANNER_AGENT}" "${NOT_SIXTH_CLASS_TIE_IN_MARKER}" \
 assert_file_contains "${PLANNER_AGENT}" "${ENTAILMENT_SOURCE_MARKER}" \
   "entailment sources must include the refined ticket's persisted ### Decisions and ### Assumptions (auto-adopted) (AC3)"
 assert_file_contains "${PLANNER_AGENT}" "${TRAILING_CLAUSE_CARVEOUT_MARKER}" \
-  "planner.md:51's trailing clause must gain the interactive-mode entailment carve-out, with LEAN_GATE_MARKER's first sentence staying byte-identical (AC3)"
+  "interactive resolutions must use auto-adopted provenance"
 
 # --- AC2 (relay) in phase-1-plan.md ----------------------------------------
 
@@ -398,7 +398,7 @@ assert_file_lacks "${PHASE1_PLAN}" "${RETIRED_BYTE_UNCHANGED_MARKER}" \
 # --- Regression: #823's markers must remain untouched by the #979 edit ---
 
 assert_file_contains "${PLANNER_AGENT}" "${LEAN_GATE_MARKER}" \
-  "#979 regression: ## Self-Answer Policy's lean-gate sentence must stay byte-identical"
+  "shared self-answer policy must remain explicit"
 assert_file_contains "${PLANNER_AGENT}" "${AUTOADOPTED_FORMAT_MARKER}" \
   "#979 regression: the auto-adopted: <answer> — <rationale> format string must be unchanged"
 assert_file_contains "${PLANNER_AGENT}" "${AUTOADOPTED_HEADING_MARKER}" \
@@ -886,14 +886,14 @@ RETIRED_NOTHING_OUTSIDE_MARKER='Nothing outside these five classes may be asked'
 RETIRED_FIVE_ABOVE_MARKER='the five escalation classes above'
 
 DECIDE_LABEL_MARKER='**Decide and notify**'
-DECIDE_LEAN_ONLY_MARKER='**Decide and notify** applies in lean mode only, to the two decide classes'
+DECIDE_LEAN_ONLY_MARKER='**Decide and notify** uses the same recommendation threshold in both modes, for the two decide classes'
 DECIDE_STOP_AC_MARKER='A decide-class question still stops when (a) the contradiction makes an acceptance criterion unsatisfiable as written, or resolving it would change the literal text of an acceptance criterion'
 DECIDE_STOP_BAR_MARKER='or (b) the planner cannot recommend an option it can justify from the repo'
 DECIDE_BAR_DEF_MARKER='Justify from the repo means exactly one option, with a rationale citing the ticket, the codebase, or project docs by repo-relative path or identifier'
 DECIDE_BAR_PREFERENCE_MARKER='A question whose only basis would be preference or facts outside the repo is not recommendable and stops'
 DECIDE_UNIQUE_MARKER='a unique grounded resolution stays `auto-adopted:` and triggers no notification'
 DECIDE_PRECEDENCE_MARKER='The security-sensitive and destructive or irreversible stop classes override decide-and-notify: when a question fits both, ask'
-MIXED_ALONGSIDE_MARKER='When the run has at least one stop-class question, its decide-class questions are asked alongside it instead of being decided'
+MIXED_ALONGSIDE_MARKER='In lean mode, when the run has at least one stop-class question, its decide-class questions are asked alongside it instead of being decided'
 MIXED_ORDER_MARKER='confirm/overrule questions first, then stop-class questions, then decide-class questions, under the 6-question cap'
 MIXED_OVERFLOW_MARKER='any decide-class question that does not fit under the cap stays decided and is recorded in `## Auto-Adopted Answers`'
 DECIDE_SECRECY_SCOPE_MARKER='The decided answer, rationale, and alternative are held to the same restriction: repo-relative paths and identifiers only, never file contents, configuration values, or command output'
@@ -918,7 +918,7 @@ if require_section POLICY_1131 "${PLANNER_CONTENT}" "## Self-Answer Policy" "pla
   assert_contains_ws "${POLICY_1131}" "${DECIDE_LABEL_MARKER}" \
     "planner.md (## Self-Answer Policy) must add a Decide and notify rule"
   assert_contains_ws "${POLICY_1131}" "${DECIDE_LEAN_ONLY_MARKER}" \
-    "planner.md Decide and notify must apply in lean mode only, naming the two decide classes in plain wording (no extra bold class names: planning-provenance-contract pins those counts)"
+    "planner.md Decide and notify must share the recommendation threshold while retaining the two decide classes"
   assert_contains_ws "${POLICY_1131}" "${DECIDED_FORM_MARKER}" \
     "planner.md (## Self-Answer Policy) must define the decided: <answer> — <rationale> (alternative: <option label>) form (AC2)"
   assert_contains_ws "${POLICY_1131}" "${DECIDE_UNIQUE_MARKER}" \
