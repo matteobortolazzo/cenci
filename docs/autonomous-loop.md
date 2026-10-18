@@ -3,7 +3,7 @@
 > Refine a ticket, walk away, review the merged PR.
 
 cenci's default posture is human-gated: you approve the refined ticket, you approve
-the plan, you approve the merge. Five opt-in switches remove those gates one at a
+the plan, you approve the merge. Six opt-in switches remove those gates one at a
 time, up to a loop that runs **refine → plan → implement → PR → merge → next ticket**
 with no human touch between refinement and merge.
 
@@ -12,7 +12,7 @@ the machine, and how to read a decision when it doesn't do what you expected. Th
 exhaustive reference for each piece lives elsewhere — see
 [Where the details live](#where-the-details-live) at the bottom.
 
-## The five switches
+## The six switches
 
 Nothing here is on by default, and no switch implies another. Each one is
 independently reversible.
@@ -24,8 +24,10 @@ independently reversible.
 | 3 | `automerge` policy block | repo `.cenci/config.json` (committed) | absent = deny | Nothing on its own — it *defines* the risk envelope automerge is allowed to act inside. |
 | 4 | `automerge.enabled: true` | `~/.config/cenci/config.json` | `false` | The **merge gate**. `cenci babysit` merges the PR itself once every condition holds. |
 | 5 | `planning.attended: true` | `~/.config/cenci/config.json` | `false` | The **override on switch 1, per machine**, for when a human is at the keyboard right now and could just answer a clarifying question. `cenci dispatch` stops picking lean repos up for unattended planning here, and a planning session you launch yourself in a `"lean"` repo plans *interactively* — it asks you instead of posting the question to the ticket, and stops for plan review instead of self-approving. |
+| 6 | `refinement.autonomy: "lean"` | repo `.cenci/config.json` (committed) | `"interactive"` | The **refinement interview**. `/cenci:refine` asks one round of at most 3 questions plus the cap-exempt confirm/overrule question, decides the rest itself and lists those decisions as A1…An at the Confirmation Gate for one overrule. |
 
-Switches 1 and 3 are per-repo and committed, so the repo decides its own autonomy.
+Switches 1, 3 and 6 are per-repo and committed, so the repo decides its own autonomy.
+Switch 6 has no fleet counterpart: it is read from the local checkout, so nothing on your machine can flip it for a repo.
 Switches 2 and 4 are fleet-wide kill switches on your machine: they can only ever
 *permit* what a repo already opted into, never grant it. Turning on `planRefined`
 fleet-wide does nothing to a repo that hasn't committed `planning.autonomy: "lean"`.
@@ -202,7 +204,7 @@ With it on, a planning session in a `"lean"` repo behaves as `"interactive"`:
   you to read it, and its front matter records `approval: human`, not `approval: lean`;
 - supported contradiction and product-ambiguity choices are recorded as `auto-adopted:` answers for plan review; only consequential or unresolved questions are asked in the session. The planner emits no `decided:` entry and the fresh plan never records `approval: lean-decided`.
 
-This is an override, not a sixth switch: it only ever suspends switch 1, never grants it.
+This is an override on switch 1, not an independent switch: it only ever suspends switch 1, never grants it.
 An `"interactive"` repo is unaffected — attended mode gives it nothing it did not already
 have. The trivial fast path (which never consults autonomy) and a draft resumed after an
 earlier unattended escalation (still `approval: lean-resumed`) are unaffected too.
@@ -361,6 +363,30 @@ A good first run: refine one small ticket with `automerge:ok` granted, then watc
 land. `cenci status` shows live sessions; babysit's decision line (below) shows why a
 PR did or didn't merge.
 
+### 6. Ask fewer questions at refinement
+
+Switch 6 is about the start of the loop rather than the end. By default
+`/cenci:refine` runs a full question interview before it shows you the Confirmation
+Gate. With `refinement.autonomy: "lean"` committed in the repo's `.cenci/config.json`,
+refinement runs one round of at most 3 questions plus the cap-exempt confirm/overrule
+question. It decides everything else itself and lists those decisions as A1…An at the
+Confirmation Gate, so you can read them in one place and overrule once if you disagree.
+
+```json
+{ "refinement": { "autonomy": "lean" } }
+```
+
+This switch reduces questions; it never grants `automerge:ok` and does not remove the Confirmation Gate.
+Nothing is written to the ticket before you confirm, and the `automerge:ok` grant in
+[step 4](#4-arm-the-merge) stays a separate human decision at that same gate.
+
+Only the exact string `"lean"` changes behavior. A missing `refinement` block, a
+missing `autonomy` key, or any other value means `"interactive"`.
+`refinement.autonomy` is read from the local `.cenci/config.json` through `project-core`, never from `origin/main`, and no fleet switch exists for it.
+
+`/cenci:configure` offers `refinement.autonomy` on a delta run when the key is absent and has not been offered before, recommending `lean` while an absent key still resolves to `interactive`; `/cenci:configure --all` re-offers it with the committed value pre-selected.
+Declining writes nothing.
+
 ## What still stops the machine
 
 These are not configurable away, and they're the reason the loop is safe to leave
@@ -511,6 +537,7 @@ comment at all — if there is no comment, no automerge landed.
 | Autonomous planning, everywhere | `cenci dispatch plan-refined off` | Next pass |
 | Autonomous planning for one repo | Push `planning.autonomy` off `"lean"` to `origin/main` | Next pass with a successful fetch |
 | Autonomous planning on this machine only, while a human is around | `cenci planning attended on` | Next dispatch pass; and the next planning session you launch |
+| Lean refinement for one repo | Set `refinement.autonomy` to anything other than `"lean"` | Next `/cenci:refine` |
 | All dispatch | `cenci dispatch loop off` | Immediately; in-flight sessions finish |
 
 A revocation pushed to `origin/main` is honored even if your local checkout still has
@@ -550,6 +577,7 @@ Accepted and documented, not bugs:
 | Dispatch gates, pickup rules, reconciliation, config reference | [cenci-watch README — Auto-dispatch](../watch/README.md#auto-dispatch-cenci-dispatch) |
 | Every automerge condition, in full | [cenci-watch README — Automerge](../watch/README.md#automerge-cenci-babysit) |
 | The `automerge` config schema, field by field | [configure skill](../flow/skills/configure/SKILL.md) |
+| Lean refinement as the refine skill executes it | [Refine skill](../flow/skills/refine/SKILL.md) |
 | Lean planning as the planner actually executes it | [Phase 1 — Plan](../flow/skills/implement/phases/phase-1-plan.md) |
 | How a session resolves attended vs. the repo's autonomy | [Phase 1 — Plan, `## Resolve Planning Autonomy`](../flow/skills/implement/phases/phase-1-plan.md) |
 | Which test pins which claim on this page | [Pipeline coverage map](pipeline-coverage-map.md) |

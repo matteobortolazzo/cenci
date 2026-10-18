@@ -409,7 +409,10 @@ fi
 
 LOOP_REL="docs/autonomous-loop.md"
 LOOP_OVERRIDE_HEADING='#### The attended override'
-LOOP_NOT_A_SWITCH_MARKER='This is an override, not a sixth switch: it only ever suspends switch 1, never grants it.'
+# #1274: the sixth switch (refinement.autonomy) now exists, so the old "not a
+# sixth switch" wording would be false; attended is an override on switch 1.
+LOOP_NOT_A_SWITCH_MARKER='This is an override on switch 1, not an independent switch: it only ever suspends switch 1, never grants it.'
+OLD_LOOP_NOT_A_SWITCH_MARKER='This is an override, not a sixth switch: it only ever suspends switch 1, never grants it.'
 LOOP_ASKED_MARKER='a clarifying question is asked directly instead of being posted to the ticket — no `Input Needed` label, no `awaiting-input` draft, and no waiting for the next dispatch pass'
 LOOP_APPROVAL_HUMAN_MARKER='a plan with no escalations is **not** self-approved: it is saved, the session stops for you to read it, and its front matter records `approval: human`, not `approval: lean`'
 LOOP_SANDBOX_MARKER='the flag is forwarded at exec time as `CENCI_ATTENDED=1` or `CENCI_ATTENDED=0` — always explicitly, never "unset means off"'
@@ -436,6 +439,8 @@ if require_repo_doc LOOP_DOC "${LOOP_REL}"; then
     "docs/autonomous-loop.md must add the ${LOOP_OVERRIDE_HEADING} subsection"
   assert_contains_ws "${LOOP_DOC}" "${LOOP_NOT_A_SWITCH_MARKER}" \
     "docs/autonomous-loop.md must describe attended as an override on switch 1, not a new switch"
+  assert_absent_paired_ws "${LOOP_DOC}" "${LOOP_NOT_A_SWITCH_MARKER}" "${OLD_LOOP_NOT_A_SWITCH_MARKER}" \
+    "docs/autonomous-loop.md must no longer call attended 'not a sixth switch' now that switch 6 exists (#1274)"
   assert_contains_ws "${LOOP_DOC}" "${LOOP_ASKED_MARKER}" \
     "docs/autonomous-loop.md must state the no-comment/no-label/no-draft attended behavior"
   assert_contains_ws "${LOOP_DOC}" "${LOOP_APPROVAL_HUMAN_MARKER}" \

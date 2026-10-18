@@ -179,7 +179,8 @@ ANSWERED='{
   "cicd": {"enabled": false},
   "sandbox": {"enabled": false, "dind": false, "azure": false},
   "planning": {"autonomy": "interactive"},
-  "automerge": {"enabled": false}
+  "automerge": {"enabled": false},
+  "refinement": {"autonomy": "interactive"}
 }'
 
 # write_config <jq-filter> [version] — writes ROOT/.cenci/config.json as
@@ -228,6 +229,17 @@ assert_contains "${CTX}" "planning" "case12 advisory names planning"
 assert_contains "${CTX}" "1" "case12 advisory counts one missing key"
 assert_not_contains "${CTX}" "2" "case12 advisory must not claim two keys"
 assert_not_contains "${CTX}" "automerge" "case12 advisory must not name a present key"
+cleanup_fixture
+
+# --- Case 12b (#1274): a missing refinement key is named like any other ----
+make_fixture_with_resolver "${PLUG_NEW}"
+write_config 'del(.refinement)'
+run_hook --plain
+assert_eq "${OUT}" "stale ${CFG_OLD} ${PLUG_NEW} refinement" "case12b plain line names the missing refinement key"
+run_hook
+CTX="$(hook_context)"
+assert_contains "${CTX}" "refinement" "case12b advisory names refinement"
+assert_not_contains "${CTX}" "planning" "case12b advisory must not name a present key"
 cleanup_fixture
 
 # --- Case 13: unstamped, keys missing -> named alongside the stamp nudge ----
