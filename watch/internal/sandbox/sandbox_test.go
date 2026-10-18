@@ -811,3 +811,60 @@ func TestRunningSandboxContainersAll_OneRuntimeFails_ReturnsPartialPlusAggregate
 		t.Errorf("got = %+v, want the healthy docker entry still present", got)
 	}
 }
+
+// TestSlugify pins the repo-directory-name to container-suffix mapping that
+// moved here from launcher (#1290): dispatch cannot import launcher, so both
+// the launcher's session names and dispatch's memory probe derive the
+// workload container name from this one function.
+func TestSlugify(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"my-project", "my-project"},
+		{"MyProject", "myproject"},
+		{"My Project", "my-project"},
+		{"a/b", "a-b"},
+		{"under_score.dot-dash", "under_score.dot-dash"},
+		// One dash per RUNE, not per byte: É (2 bytes) -> one dash.
+		{"Émoji Repo", "-moji-repo"},
+		{"naïve", "na-ve"},
+		{"", ""},
+	}
+	for _, tc := range cases {
+		if got := Slugify(tc.in); got != tc.want {
+			t.Errorf("Slugify(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestRepoWorkloadContainerNames: a repo's workload containers are one
+// <agent>-cenci-<slug of the repo root's basename> per supported agent, and
+// every name is recognized by the sandbox listing filter (otherwise the
+// dispatch memory probe would never see a running one).
+func TestRepoWorkloadContainerNames(t *testing.T) {
+	cases := []struct {
+		name     string
+		repoRoot string
+		slug     string
+	}{
+		{"plain basename", "/home/u/Repos/my-repo", "my-repo"},
+		{"uppercase and space are slugged", "/home/u/Repos/My Repo", "my-repo"},
+		{"trailing slash is ignored", "/home/u/Repos/Other_Repo.v2/", "other_repo.v2"},
+		{"only the basename counts", "/Some Dir/nested/leaf", "leaf"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := RepoWorkloadContainerNames(tc.repoRoot)
+			if len(got) != len(SupportedAgents) {
+				t.Fatalf("RepoWorkloadContainerNames(%q) = %v, want one name per supported agent (%v)", tc.repoRoot, got, SupportedAgents)
+			}
+			for i, agent := range SupportedAgents {
+				want := agent + "-cenci-" + tc.slug
+				if got[i] != want {
+					t.Errorf("name[%d] = %q, want %q", i, got[i], want)
+				}
+				if !IsSandboxContainerName(got[i]) {
+					t.Errorf("name %q is not recognized as a sandbox container name", got[i])
+				}
+			}
+		})
+	}
+}

@@ -3,6 +3,7 @@ package dispatch
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -459,5 +460,125 @@ func TestLoadConfigPlanningAttended_WholeFileCorruptionStillErrors(t *testing.T)
 
 	if _, err := LoadConfig(path); err == nil {
 		t.Error("LoadConfig on malformed whole-file JSON returned nil error, want error (unchanged reloadConfig tick-skip behavior)")
+	}
+}
+
+// -- dispatch.memoryHeadroom (#1290) ----------------------------------------
+
+// writeMemoryHeadroomConfig writes a config.json whose dispatch block carries
+// the given raw JSON value under "memoryHeadroom" (or no such key when raw is
+// empty) and returns its path.
+func writeMemoryHeadroomConfig(t *testing.T, raw string) string {
+	t.Helper()
+	body := `{"dispatch": {"concurrencyCap": 2}}`
+	if raw != "" {
+		body = `{"dispatch": {"concurrencyCap": 2, "memoryHeadroom": ` + raw + `}}`
+	}
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("writing config: %v", err)
+	}
+	return path
+}
+
+// TestLoadConfig_MemoryHeadroom_DefaultIs25: an unset key means 25 -- whether
+// the dispatch block omits it, there is no dispatch block, or there is no
+// config file at all -- so existing fleets get the gate on upgrade.
+func TestLoadConfig_MemoryHeadroom_DefaultIs25(t *testing.T) {
+	if got := DefaultConfig().MemoryHeadroom; got != 25 {
+		t.Errorf("DefaultConfig().MemoryHeadroom = %d, want 25", got)
+	}
+
+	noKey := writeMemoryHeadroomConfig(t, "")
+	noDispatchBlock := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(noDispatchBlock, []byte(`{"planning": {"attended": false}}`), 0o600); err != nil {
+		t.Fatalf("writing config: %v", err)
+	}
+	missingFile := filepath.Join(t.TempDir(), "absent.json")
+
+	for name, path := range map[string]string{
+		"dispatch block without the key": noKey,
+		"no dispatch block":              noDispatchBlock,
+		"no config file":                 missingFile,
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg, err := LoadConfig(path)
+			if err != nil {
+				t.Fatalf("LoadConfig: %v", err)
+			}
+			if cfg.MemoryHeadroom != 25 {
+				t.Errorf("cfg.MemoryHeadroom = %d, want the default 25", cfg.MemoryHeadroom)
+			}
+		})
+	}
+}
+
+// TestLoadConfig_MemoryHeadroom_Explicit40: AC2, a configured value moves the
+// threshold, and the merge does not disturb neighbouring keys.
+func TestLoadConfig_MemoryHeadroom_Explicit40(t *testing.T) {
+	cfg, err := LoadConfig(writeMemoryHeadroomConfig(t, "40"))
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.MemoryHeadroom != 40 {
+		t.Errorf("cfg.MemoryHeadroom = %d, want 40", cfg.MemoryHeadroom)
+	}
+	if cfg.ConcurrencyCap != 2 {
+		t.Errorf("cfg.ConcurrencyCap = %d, want 2 (neighbouring key unaffected)", cfg.ConcurrencyCap)
+	}
+}
+
+// TestLoadConfig_MemoryHeadroom_ZeroAccepted: an explicit 0 disables the gate
+// and must not be mistaken for "unset" (which would resolve to 25).
+func TestLoadConfig_MemoryHeadroom_ZeroAccepted(t *testing.T) {
+	cfg, err := LoadConfig(writeMemoryHeadroomConfig(t, "0"))
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.MemoryHeadroom != 0 {
+		t.Errorf("cfg.MemoryHeadroom = %d, want 0 (explicit zero disables the gate)", cfg.MemoryHeadroom)
+	}
+}
+
+// TestLoadConfig_MemoryHeadroom_AcceptsUpperBound: 100 is the largest valid
+// percent.
+func TestLoadConfig_MemoryHeadroom_AcceptsUpperBound(t *testing.T) {
+	cfg, err := LoadConfig(writeMemoryHeadroomConfig(t, "100"))
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.MemoryHeadroom != 100 {
+		t.Errorf("cfg.MemoryHeadroom = %d, want 100", cfg.MemoryHeadroom)
+	}
+}
+
+// TestLoadConfig_MemoryHeadroom_RejectsInvalid: AC2, a non-integer, null,
+// negative or >100 value is an error that names the key and the config path --
+// never a silent default.
+func TestLoadConfig_MemoryHeadroom_RejectsInvalid(t *testing.T) {
+	cases := []struct{ name, raw string }{
+		{"fractional", `40.5`},
+		{"string", `"40"`},
+		{"null", `null`},
+		{"negative", `-1`},
+		{"above 100", `101`},
+		{"boolean", `true`},
+		{"array", `[40]`},
+		{"object", `{"percent": 40}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeMemoryHeadroomConfig(t, tc.raw)
+			_, err := LoadConfig(path)
+			if err == nil {
+				t.Fatalf("LoadConfig with memoryHeadroom %s returned nil error, want an error", tc.raw)
+			}
+			if !strings.Contains(err.Error(), "memoryHeadroom") {
+				t.Errorf("error %q must name the key memoryHeadroom", err)
+			}
+			if !strings.Contains(err.Error(), path) {
+				t.Errorf("error %q must name the config path %s", err, path)
+			}
+		})
 	}
 }

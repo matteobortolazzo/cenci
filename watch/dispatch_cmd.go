@@ -215,19 +215,30 @@ func runDispatchStatus(args []string) {
 		enrollment.Dir = identity.Dir
 	}
 
+	// memoryHeadroom (#1290) is fleet-wide, so it is reported for a repo that
+	// is not enrolled too. An invalid value is the same LoadConfig error the
+	// dispatch loop pauses on, so surface it instead of a confident status.
+	cfg, err := dispatch.LoadConfig(*configPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cenci dispatch status: %v\n", err)
+		os.Exit(1)
+	}
+
 	if *jsonOut {
 		out := struct {
-			Repo     string              `json:"repo"`
-			Dir      string              `json:"dir"`
-			Enrolled bool                `json:"enrolled"`
-			Session  string              `json:"session"`
-			Loop     watch.DispatchState `json:"loop"`
+			Repo           string              `json:"repo"`
+			Dir            string              `json:"dir"`
+			Enrolled       bool                `json:"enrolled"`
+			Session        string              `json:"session"`
+			Loop           watch.DispatchState `json:"loop"`
+			MemoryHeadroom int                 `json:"memoryHeadroom"`
 		}{
-			Repo:     enrollment.Repo,
-			Dir:      enrollment.Dir,
-			Enrolled: enrollment.Enrolled,
-			Session:  enrollment.Session,
-			Loop:     dispatch.ResolveDispatchState(*configPath, watch.DefaultSocketPath(), os.Stderr),
+			Repo:           enrollment.Repo,
+			Dir:            enrollment.Dir,
+			Enrolled:       enrollment.Enrolled,
+			Session:        enrollment.Session,
+			Loop:           dispatch.ResolveDispatchState(*configPath, watch.DefaultSocketPath(), os.Stderr),
+			MemoryHeadroom: cfg.MemoryHeadroom,
 		}
 		data, err := json.Marshal(out)
 		if err != nil {
@@ -245,6 +256,11 @@ func runDispatchStatus(args []string) {
 		fmt.Printf("Enrolled %s (%s) → session %s\n", enrollment.Repo, enrollment.Dir, enrollment.Session)
 	default:
 		fmt.Printf("Enrolled %s (%s); no tmux session set\n", enrollment.Repo, enrollment.Dir)
+	}
+	if cfg.MemoryHeadroom == 0 {
+		fmt.Println("Memory headroom: disabled")
+	} else {
+		fmt.Printf("Memory headroom: %d%%\n", cfg.MemoryHeadroom)
 	}
 }
 

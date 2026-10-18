@@ -830,6 +830,199 @@ func TestDispatchStatusJSON_IncludesLoopKey(t *testing.T) {
 	}
 }
 
+// -- dispatch.memoryHeadroom in `dispatch status` (#1290) -------------------
+
+// writeStatusConfig seeds a config.json whose dispatch block enrolls dir and
+// carries extra (a raw `"key": value` fragment, or empty) alongside it.
+func writeStatusConfig(t *testing.T, dir, extra string) string {
+	t.Helper()
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	fragment := ""
+	if extra != "" {
+		fragment = ", " + extra
+	}
+	cfgJSON := fmt.Sprintf(`{"dispatch": {"repos": [{"repo": "owner/name", "dir": %q, "session": "a-work"}]%s}}`, dir, fragment)
+	if err := os.WriteFile(configPath, []byte(cfgJSON), 0o600); err != nil {
+		t.Fatalf("seeding config: %v", err)
+	}
+	return configPath
+}
+
+// TestDispatchStatusJSON_MemoryHeadroom: `dispatch status --json` gains a
+// top-level integer `memoryHeadroom` -- 25 when the key is unset, the
+// configured value (including 0) otherwise -- for enrolled and not-enrolled
+// repos alike, since it is a fleet-wide value.
+func TestDispatchStatusJSON_MemoryHeadroom(t *testing.T) {
+	cases := []struct {
+		name  string
+		extra string // raw dispatch-block fragment
+		want  float64
+	}{
+		{"unset defaults to 25", "", 25},
+		{"configured 40", `"memoryHeadroom": 40`, 40},
+		{"configured 0 (disabled)", `"memoryHeadroom": 0`, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			useTempSocketDir(t)
+			dir := initGitRemote(t, "git@github.com:owner/name.git")
+			configPath := writeStatusConfig(t, dir, tc.extra)
+
+			output, err := exec.Command(binaryPath, "dispatch", "status", "--dir", dir, "--config", configPath, "--json").CombinedOutput()
+			if err != nil {
+				t.Fatalf("dispatch status --json: %v\n%s", err, output)
+			}
+			var raw map[string]any
+			if uerr := json.Unmarshal(output, &raw); uerr != nil {
+				t.Fatalf("unmarshal status --json output %q: %v", output, uerr)
+			}
+			got, ok := raw["memoryHeadroom"]
+			if !ok {
+				t.Fatalf("status --json output %s missing top-level key %q", output, "memoryHeadroom")
+			}
+			// encoding/json decodes every JSON number to float64; the value must
+			// be an integer, not a fraction or a string.
+			if got != tc.want {
+				t.Errorf("memoryHeadroom = %v (%T), want the integer %v", got, got, tc.want)
+			}
+			// Additive key: every pre-existing key is still present.
+			for _, key := range []string{"repo", "dir", "enrolled", "session", "loop"} {
+				if _, present := raw[key]; !present {
+					t.Errorf("status --json output %s lost pre-existing key %q", output, key)
+				}
+			}
+		})
+	}
+
+	t.Run("not enrolled repo still reports the fleet value", func(t *testing.T) {
+		useTempSocketDir(t)
+		dir := initGitRemote(t, "git@github.com:owner/name.git")
+		configPath := filepath.Join(t.TempDir(), "config.json")
+		if err := os.WriteFile(configPath, []byte(`{"dispatch": {"memoryHeadroom": 40}}`), 0o600); err != nil {
+			t.Fatalf("seeding config: %v", err)
+		}
+
+		output, err := exec.Command(binaryPath, "dispatch", "status", "--dir", dir, "--config", configPath, "--json").CombinedOutput()
+		if err != nil {
+			t.Fatalf("dispatch status --json (not enrolled): %v\n%s", err, output)
+		}
+		var raw map[string]any
+		if uerr := json.Unmarshal(output, &raw); uerr != nil {
+			t.Fatalf("unmarshal status --json output %q: %v", output, uerr)
+		}
+		if raw["memoryHeadroom"] != float64(40) {
+			t.Errorf("memoryHeadroom = %v, want 40 (fleet-wide, independent of enrollment)", raw["memoryHeadroom"])
+		}
+		if raw["enrolled"] != false {
+			t.Errorf("enrolled = %v, want false", raw["enrolled"])
+		}
+	})
+}
+
+// TestDispatchStatus_HumanOutput_MemoryHeadroom: the human output gains a
+// `Memory headroom: <N>%` line (`disabled` for 0), on both the enrolled and the
+// not-enrolled shapes, without disturbing the existing enrollment line.
+func TestDispatchStatus_HumanOutput_MemoryHeadroom(t *testing.T) {
+	cases := []struct {
+		name  string
+		extra string
+		want  string
+	}{
+		{"unset defaults to 25%", "", "Memory headroom: 25%"},
+		{"configured 40%", `"memoryHeadroom": 40`, "Memory headroom: 40%"},
+		{"zero is disabled", `"memoryHeadroom": 0`, "Memory headroom: disabled"},
+	}
+	for _, tc := range cases {
+		t.Run("enrolled/"+tc.name, func(t *testing.T) {
+			dir := initGitRemote(t, "git@github.com:owner/name.git")
+			configPath := writeStatusConfig(t, dir, tc.extra)
+
+			output, err := exec.Command(binaryPath, "dispatch", "status", "--dir", dir, "--config", configPath).CombinedOutput()
+			if err != nil {
+				t.Fatalf("dispatch status: %v\n%s", err, output)
+			}
+			if !strings.Contains(string(output), tc.want) {
+				t.Errorf("status output = %q, want it to contain %q", output, tc.want)
+			}
+			if want := "Enrolled owner/name (" + dir + ") → session a-work"; !strings.Contains(string(output), want) {
+				t.Errorf("status output = %q, want the enrollment line %q kept", output, want)
+			}
+		})
+	}
+
+	t.Run("not enrolled shows the fleet value too", func(t *testing.T) {
+		dir := initGitRemote(t, "git@github.com:owner/name.git")
+		configPath := filepath.Join(t.TempDir(), "config.json")
+		if err := os.WriteFile(configPath, []byte(`{"dispatch": {"memoryHeadroom": 0}}`), 0o600); err != nil {
+			t.Fatalf("seeding config: %v", err)
+		}
+
+		output, err := exec.Command(binaryPath, "dispatch", "status", "--dir", dir, "--config", configPath).CombinedOutput()
+		if err != nil {
+			t.Fatalf("dispatch status (not enrolled): %v\n%s", err, output)
+		}
+		for _, want := range []string{"Not enrolled: owner/name", "Memory headroom: disabled"} {
+			if !strings.Contains(string(output), want) {
+				t.Errorf("status output = %q, want it to contain %q", output, want)
+			}
+		}
+	})
+
+	t.Run("no config file at all shows the default", func(t *testing.T) {
+		dir := initGitRemote(t, "git@github.com:owner/name.git")
+		configPath := filepath.Join(t.TempDir(), "absent.json")
+
+		output, err := exec.Command(binaryPath, "dispatch", "status", "--dir", dir, "--config", configPath).CombinedOutput()
+		if err != nil {
+			t.Fatalf("dispatch status (no config): %v\n%s", err, output)
+		}
+		if !strings.Contains(string(output), "Memory headroom: 25%") {
+			t.Errorf("status output = %q, want it to contain %q", output, "Memory headroom: 25%")
+		}
+	})
+}
+
+// TestDispatchStatus_InvalidMemoryHeadroomExits1: an out-of-range or mistyped
+// memoryHeadroom makes `dispatch status` print `cenci dispatch status:
+// <error>` naming the key and exit 1 -- in human and --json modes -- rather
+// than rendering a confident status for a config the dispatch loop will refuse.
+func TestDispatchStatus_InvalidMemoryHeadroomExits1(t *testing.T) {
+	for _, jsonOut := range []bool{false, true} {
+		name := "human"
+		if jsonOut {
+			name = "json"
+		}
+		t.Run(name, func(t *testing.T) {
+			useTempSocketDir(t)
+			dir := initGitRemote(t, "git@github.com:owner/name.git")
+			configPath := writeStatusConfig(t, dir, `"memoryHeadroom": 101`)
+
+			args := []string{"dispatch", "status", "--dir", dir, "--config", configPath}
+			if jsonOut {
+				args = append(args, "--json")
+			}
+			output, err := exec.Command(binaryPath, args...).CombinedOutput()
+
+			exitErr, ok := err.(*exec.ExitError)
+			if !ok {
+				t.Fatalf("expected *exec.ExitError, got %T: %v\n%s", err, err, output)
+			}
+			if exitErr.ExitCode() != 1 {
+				t.Errorf("exit code = %d, want 1\n%s", exitErr.ExitCode(), output)
+			}
+			if !strings.Contains(string(output), "cenci dispatch status: ") {
+				t.Errorf("output = %q, want the %q prefix", output, "cenci dispatch status: ")
+			}
+			if !strings.Contains(string(output), "memoryHeadroom") {
+				t.Errorf("output = %q, want the error to name memoryHeadroom", output)
+			}
+			if strings.Contains(string(output), "Memory headroom:") || strings.Contains(string(output), `"memoryHeadroom":`) {
+				t.Errorf("output = %q must not render a status for an invalid config", output)
+			}
+		})
+	}
+}
+
 func TestDispatchFlagRouting_DryRunUnaffectedBySubVerbPeel(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.json")
 

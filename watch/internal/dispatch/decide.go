@@ -2,6 +2,7 @@ package dispatch
 
 import (
 	"fmt"
+	"math/big"
 	"sort"
 	"strconv"
 	"strings"
@@ -168,6 +169,17 @@ const (
 	reasonConcurrencyCapOrphansFmt     = "concurrency cap reached (%d orphaned container sessions)"
 )
 
+// Memory-headroom gate skip reasons (#1290). reasonMemoryProbeUnknown is
+// deliberately distinct from reasonMemoryProbeFailed for the same reason
+// reasonContainerSessionProbeUnknown is distinct above (#446/#598).
+// reasonMemoryHeadroomFmt takes the threshold percent, the repo, and the used
+// percent of the repo's most-loaded limited container.
+const (
+	reasonMemoryHeadroomFmt  = "memory headroom below %d%% (%s container at %d%%)"
+	reasonMemoryProbeFailed  = "memory probe failed"
+	reasonMemoryProbeUnknown = "memory probe unrecognized"
+)
+
 // Resume-gate skip reasons (#827). reasonAnswerProbeUnknown is deliberately
 // distinct from the enumerated probe-class reasons below, for the same
 // reason reasonStageProbeUnknown is distinct from reasonPipelineUnreadable
@@ -308,6 +320,12 @@ type Inputs struct {
 	// (Decide's own purity contract, mirroring PlanInventories above).
 	OrphanedContainerSessions int
 	ContainerSessionProbe     ContainerSessionProbe
+
+	// RepoMemory maps repo -> that repo's most-loaded limited container
+	// reading this pass (#1290), resolved by resolveMemoryHeadroom
+	// (containers.go) before Decide is ever called. A missing entry is the
+	// permissive zero value.
+	RepoMemory map[string]RepoMemory
 }
 
 // Decide is pure: identical Inputs yield an identical ordered []Decision with no
@@ -589,6 +607,9 @@ func decideTicket(t Ticket, in Inputs, planByTicket map[string]*Plan, dispatched
 		return skip("need-input pause")
 	}
 	if reason, gated := containerSessionProbeSkip(in.ContainerSessionProbe); gated {
+		return skip(reason)
+	}
+	if reason, gated := memoryHeadroomSkip(in.Config.MemoryHeadroom, t.Repo, in.RepoMemory[t.Repo]); gated {
 		return skip(reason)
 	}
 	if in.Snapshot.Summary.Running+in.OrphanedContainerSessions+dispatchedThisPass >= in.Config.ConcurrencyCap {
@@ -910,6 +931,45 @@ func containerSessionProbeSkip(probe ContainerSessionProbe) (string, bool) {
 		// caught by assertion, per #446/#598.
 		return reasonContainerSessionProbeUnknown, true
 	}
+}
+
+// memoryHeadroomSkip evaluates the memory-headroom gate (#1290) for repo's
+// reading mem. headroom 0 disables the gate entirely, including on a failed
+// probe. Otherwise it returns (reason, true) when the probe failed, the status
+// or a limited reading is unusable (unrecognized status, non-positive Max:
+// default-deny, never a division by zero), or the most-loaded limited
+// container has less than headroom percent of its limit free; and ("", false)
+// for a healthy reading with enough room, or no limited container at all (none
+// running, or all unlimited). The comparison is exact big-integer arithmetic,
+// (max-current)*100 < headroom*max, so a byte-scale limit can never overflow;
+// the reported used percent is current*100/max, integer division, unclamped.
+func memoryHeadroomSkip(headroom int, repo string, mem RepoMemory) (string, bool) {
+	if headroom == 0 {
+		return "", false
+	}
+	switch mem.Probe {
+	case MemoryProbeOK:
+	case MemoryProbeFailed:
+		return reasonMemoryProbeFailed, true
+	default:
+		return reasonMemoryProbeUnknown, true
+	}
+	if !mem.Limited {
+		return "", false
+	}
+	if mem.Max <= 0 {
+		return reasonMemoryProbeUnknown, true
+	}
+	maxBytes := big.NewInt(mem.Max)
+	free := new(big.Int).Sub(maxBytes, big.NewInt(mem.Current))
+	free.Mul(free, big.NewInt(100))
+	need := new(big.Int).Mul(big.NewInt(int64(headroom)), maxBytes)
+	if free.Cmp(need) >= 0 {
+		return "", false
+	}
+	used := new(big.Int).Mul(big.NewInt(mem.Current), big.NewInt(100))
+	used.Quo(used, maxBytes)
+	return fmt.Sprintf(reasonMemoryHeadroomFmt, headroom, repo, used), true
 }
 
 // planStalenessSkip evaluates the staleness-calculation half of the
