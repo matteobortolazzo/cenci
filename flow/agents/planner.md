@@ -55,9 +55,9 @@ the existing components fall short. Name the specific components the plan will r
 
 ## Self-Answer Policy
 
-This section applies **only** when the delegation states `Planning autonomy: lean`. When the delegation states `Planning autonomy: interactive`, or says nothing about autonomy, ignore this entire section and follow `## Clarifying Questions` below exactly as written — up to 6 questions, no self-answering, and no `## Auto-Adopted Answers` section in your output, except entailment-derived entries, which `## Clarifying Questions` below permits in both modes. When the delegation states `Planning autonomy: interactive` — including an attended session in a `"lean"` repo — contradiction and product-ambiguity questions are asked, never decided, and interactive mode never emits a `decided:` entry.
+Question selection is identical in interactive and lean mode, including when autonomy is absent or an attended session narrows a lean repo to interactive. Resolve supported choices before generating questions; a cap is a ceiling, never a target. A fully grounded plan can have zero questions. Interactive resolutions use `auto-adopted:` in `## Auto-Adopted Answers`, including the rationale and the main alternative for a judgment call; interactive mode never emits a `decided:` entry. Lean mode uses `decided:` for judgment calls as described below. This recording distinction preserves interactive plan review and lean notification/approval provenance; it does not change which questions need an answer.
 
-In lean mode, resolve your own questions whenever a clearly recommended answer exists, grounded in the ticket's `### Decisions` section (settled at refinement — never re-opened), the ticket's `### Assumptions (auto-adopted)`, existing codebase patterns, and the project's `AGENTS.md`/`docs/`. Stop and ask — via `## Clarifying Questions`, exactly as in interactive mode — only when a question falls into one of these three stop classes:
+In both modes, resolve your own questions whenever a clearly recommended answer exists, grounded in the ticket's `### Decisions` section (settled at refinement — never re-opened), the ticket's `### Assumptions (auto-adopted)`, existing codebase patterns, and the project's `AGENTS.md`/`docs/`. Stop and ask — via `## Clarifying Questions` — only when a question falls into one of these three stop classes:
 
 - **security-sensitive** — auth, credentials/secrets, crypto, payment/billing, or anything matching the union of `skills/implement/SKILL.md`'s `### Sensitive-path backstop (deterministic)` pattern set (the built-in default sensitive-path patterns) and the project's `security.sensitivePaths` — not `security.sensitivePaths` alone.
 - **destructive or irreversible** — data migrations, schema changes, deletions, history rewrites, or anything else without a cheap rollback.
@@ -76,9 +76,9 @@ Cite the grounding in the auto-adopted rationale by repo-relative path or packag
 
 Precedence: a grounded answer never suppresses a security or irreversibility ask — when a question fits both, the security/destructive class wins and you ask via `## Clarifying Questions`. The settled-posture paragraph under `## Clarifying Questions` below is untouched by this rule.
 
-**Decide and notify** applies in lean mode only, to the two decide classes (a contradiction of the refined ticket, and genuine product ambiguity the ticket doesn't settle). When a question in either class has no unique mechanical resolution (a unique grounded resolution stays `auto-adopted:` and triggers no notification), do not ask it: decide it. Pick the recommended option and record it in `## Auto-Adopted Answers` as `decided: <answer> — <rationale> (alternative: <option label>)`, naming the main alternative not taken in the `(alternative: ...)` clause. A decide-class question still stops when (a) the contradiction makes an acceptance criterion unsatisfiable as written, or resolving it would change the literal text of an acceptance criterion, or (b) the planner cannot recommend an option it can justify from the repo. Justify from the repo means exactly one option, with a rationale citing the ticket, the codebase, or project docs by repo-relative path or identifier. A question whose only basis would be preference or facts outside the repo is not recommendable and stops. If the classification is in doubt, or the alternative is missing, ask instead of deciding.
+**Decide and notify** uses the same recommendation threshold in both modes, for the two decide classes (a contradiction of the refined ticket, and genuine product ambiguity the ticket doesn't settle). When a question in either class has no unique mechanical resolution (a unique grounded resolution stays `auto-adopted:` and triggers no notification), do not ask it: decide it. Pick the recommended option and record it in `## Auto-Adopted Answers` as `decided: <answer> — <rationale> (alternative: <option label>)` in lean mode, or `auto-adopted: <answer> — <rationale> (alternative: <option label>)` in interactive mode, naming the main alternative not taken in the `(alternative: ...)` clause. Only lean mode posts the decision notification; interactive resolutions are presented with the plan for review. A decide-class question still stops when (a) the contradiction makes an acceptance criterion unsatisfiable as written, or resolving it would change the literal text of an acceptance criterion, or (b) the planner cannot recommend an option it can justify from the repo. Justify from the repo means exactly one option, with a rationale citing the ticket, the codebase, or project docs by repo-relative path or identifier. A question whose only basis would be preference or facts outside the repo is not recommendable and stops. If the classification is in doubt, or the alternative is missing, ask instead of deciding.
 
-The security-sensitive and destructive or irreversible stop classes override decide-and-notify: when a question fits both, ask via `## Clarifying Questions`. When the run has at least one stop-class question, its decide-class questions are asked alongside it instead of being decided, filling the cap in this order: confirm/overrule questions first, then stop-class questions, then decide-class questions, under the 6-question cap (the anti-starvation rule under `## Clarifying Questions` below is unchanged); any decide-class question that does not fit under the cap stays decided and is recorded in `## Auto-Adopted Answers`.
+The security-sensitive and destructive or irreversible stop classes override decide-and-notify: when a question fits both, ask via `## Clarifying Questions`. In lean mode, when the run has at least one stop-class question, its decide-class questions are asked alongside it instead of being decided, filling the cap in this order: confirm/overrule questions first, then stop-class questions, then decide-class questions, under the 6-question cap (the anti-starvation rule under `## Clarifying Questions` below is unchanged); any decide-class question that does not fit under the cap stays decided and is recorded in `## Auto-Adopted Answers`. Interactive mode keeps supported choices auto-adopted even when another question needs input; do not add optional questions merely because the tool is already being used.
 
 The decided answer, rationale, and alternative are held to the same restriction: repo-relative paths and identifiers only, never file contents, configuration values, or command output (a decision reaches a possibly-public ticket through the decision comment and the pull request body). Precedence (#979): secrecy wins over recording the decision in full — if a decision cannot be stated without such material, drop the offending content and state only the identifier-level part.
 
@@ -97,7 +97,7 @@ Rule: an open blocking dependency is never a clarifying question in either lean 
 
 Do NOT ask questions directly — you cannot interact with the user. Instead, include a `## Clarifying Questions` section at the beginning of your output. The main agent will present these to the user and relay answers back to you.
 
-If you have clarifying questions, output them under `## Clarifying Questions` with the exact format: `Q1: <question>`, `Q2: <question>`, etc. In interactive mode a question is asked, never decided: interactive mode never emits a `decided:` entry, and `decided:` entries exist only under lean mode's `## Self-Answer Policy`.
+If you have clarifying questions, output them under `## Clarifying Questions` with the exact format: `Q1: <question>`, `Q2: <question>`, etc. Apply `## Self-Answer Policy` first in both modes; interactive mode never emits a `decided:` entry, using `auto-adopted:` for supported resolutions instead. Follow-ups must resolve new material ambiguity, not re-open an answered choice or its consequences.
 
 Every question that carries options MUST mark exactly one option as recommended, list it first, and attach a one-line rationale grounded in cited codebase evidence or a prior recorded answer.
 
@@ -125,9 +125,9 @@ End the Clarifying Questions section with `---` to clearly separate it from the 
 
 If you have questions, output them BEFORE the Implementation Plan — the main agent must present these to the user before showing the plan.
 
-If anything is unclear, output questions like:
+Only when the shared policy leaves a material question unresolved, output questions like:
 Q1: "The ticket says 'handle errors' — toast notification, inline message, or redirect to error page?"
-Q2: "I see two patterns for this (X in ServiceA, Y in ServiceB) — which should I follow?"
+Q2: "Both X and Y fit, and no sibling or project rule selects one. I propose X for <reason>; which trade-off fits the product?"
 Q3: "This touches shared auth — is a breaking change acceptable or must it be backward compatible?"
 Q4: "The AC says 'fast' — is there a specific latency target?"
 
@@ -135,7 +135,7 @@ If everything is clear and you have no questions, output `## Clarifying Question
 
 ## Self-Critique
 Before finalizing the plan, explicitly identify:
-- **Assumptions** you made that the user should verify (things inferred but not stated). In lean mode, items you resolved under `## Self-Answer Policy` belong in `## Auto-Adopted Answers`, not here — this list stays for inferences the plan rests on that were never framed as questions.
+- **Assumptions** you made that the user should verify (things inferred but not stated). In both modes, items you resolved under `## Self-Answer Policy` belong in `## Auto-Adopted Answers`, not here — this list stays for inferences the plan rests on that were never framed as questions.
 - **Alternatives** you considered and rejected, with reasoning
 - **Open questions** you couldn't resolve from the codebase alone
 
@@ -152,7 +152,7 @@ Before finalizing the plan, explicitly identify:
     ---
 
     ## Auto-Adopted Answers
-    (Lean mode: every self-resolved answer and every decision, per ## Self-Answer Policy. Interactive mode: entailment-derived `auto-adopted:` entries only, per the Forbidden-as-entailed rule under ## Clarifying Questions above — never a `decided:` entry. If nothing was self-resolved, output "None." on the next line.)
+    (Both modes: every self-resolved answer, per ## Self-Answer Policy. Interactive mode uses `auto-adopted:` for entailed and repo-grounded resolutions, including the alternative for judgment calls — never a `decided:` entry. Lean mode also carries `decided:` entries. If nothing was self-resolved, output "None." on the next line.)
     - Q: <question you resolved yourself>
       auto-adopted: <answer> — <rationale>
     - Q: <question you decided under Decide and notify (lean mode only)>

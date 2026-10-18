@@ -829,8 +829,8 @@ Detection above):
 13. **Plan approval autonomy** (asked via `AskUserQuestion` when `planning` is
     absent and, on a delta run, `planning` is in `delta.ask`; under `--all` it is also
     asked when `planning` is present, in the keep-or-change form below): "Should plan approval stay interactive, or switch to lean self-approval?
-    `interactive` keeps today's behavior — the planner asks up to 6 clarifying questions
-    and never self-answers. `lean` lets a plan with no escalations continue straight into
+    `interactive` resolves repo-grounded choices, asks only consequential or unresolved
+    questions through the question tool (up to 6, never a quota), and stops for plan review. `lean` lets a plan with no escalations continue straight into
     implementation in the same session, and also authorizes `cenci dispatch`'s unattended
     planning pickup and autonomous re-plan once pushed to `main` (see
     `docs/autonomous-loop.md`'s \"Let plans approve themselves\")."
@@ -2105,9 +2105,9 @@ safety/checkpoint toggle read by the implement skill's Phase 1 (see `skills/impl
 and `skills/implement/phases/phase-1-plan.md`'s `## Lean Approval Path`). Schema:
 - `planning.autonomy` — `"lean"` or `"interactive"`, default `"interactive"`. Only the exact
   string `"lean"` changes behavior — a missing `planning` block, a missing `autonomy` key, or
-  any other value all resolve to `"interactive"` (today's behavior: the planner asks up to 6
-  clarifying questions via `AskUserQuestion` and never self-answers). `"lean"` activates
-  `agents/planner.md`'s `## Self-Answer Policy`: the planner self-resolves everything except
+  any other value all resolve to `"interactive"` (the planner resolves repo-grounded choices,
+  asks remaining consequential or unresolved questions via `AskUserQuestion`, and stops for
+  human plan review). Both modes use `agents/planner.md`'s `## Self-Answer Policy`; in `"lean"`, the planner self-resolves everything except
   its three stop classes (security-sensitive, destructive or irreversible, scope blowup), and
   decides the contradiction and product-ambiguity questions it can justify from the repo
   (recorded as `decided:` entries, announced in one ticket comment and the PR body; a
