@@ -24,6 +24,7 @@ package main_test
 
 import (
 	"encoding/json"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -538,5 +539,163 @@ func TestPipelineCrossWorktreeContinuity_MainCheckoutAndLinkedWorktreeShareState
 	strayPath := filepath.Join(worktreeDir, ".cenci", "pipeline", "42.json")
 	if _, err := os.Stat(strayPath); !os.IsNotExist(err) {
 		t.Errorf("found a stray state file at the linked worktree's own path %s -- review/finalize must anchor on the main checkout root, not the worktree's own root", strayPath)
+	}
+}
+
+// -- `label --transition working` records the launch triple (#1292) ----------
+
+// writeFakeGhForWorkingClaim is a fake `gh` covering the working transition's
+// whole call set: the login lookup, the combined assignees+labels read (the
+// ticket is already assigned to that login), label create/apply, and the
+// post-edit updatedAt baseline.
+func writeFakeGhForWorkingClaim(t *testing.T, dir string) {
+	t.Helper()
+	body := "#!/bin/sh\n" +
+		"if [ \"$1\" = \"api\" ] && [ \"$2\" = \"user\" ]; then echo octocat; exit 0; fi\n" +
+		"if [ \"$1\" = \"label\" ] && [ \"$2\" = \"create\" ]; then exit 0; fi\n" +
+		"if [ \"$1\" = \"issue\" ] && [ \"$2\" = \"edit\" ]; then exit 0; fi\n" +
+		"if [ \"$1\" = \"issue\" ] && [ \"$2\" = \"view\" ]; then\n" +
+		"  case \"$*\" in\n" +
+		"    *updatedAt*) echo '{\"updatedAt\":\"2024-01-01T00:00:00Z\"}' ;;\n" +
+		"    *) echo '{\"assignees\":[{\"login\":\"octocat\"}],\"labels\":[]}' ;;\n" +
+		"  esac\n" +
+		"  exit 0\n" +
+		"fi\n" +
+		"echo \"unexpected gh invocation: $*\" 1>&2\n" +
+		"exit 1\n"
+	exectest.WriteExecutable(t, filepath.Join(dir, "gh"), body)
+}
+
+// runWorkingClaim seeds a prepared ticket whose session already records a stale
+// launch plus a runId, runs `pipeline label 42 --transition working` with extra
+// layered on the scrubbed environment, and returns the contract and the
+// on-disk session.
+func runWorkingClaim(t *testing.T, extra ...string) (pipelineContract, map[string]string) {
+	t.Helper()
+	fakeDir := t.TempDir()
+	writeFakeGhForWorkingClaim(t, fakeDir)
+	stateDir := t.TempDir()
+	statePath := filepath.Join(stateDir, "42.json")
+	stale := `{"schemaVersion":2,"id":"42","stage":"prepared","updatedAt":"2024-01-01T00:00:00Z",` +
+		`"session":{"launchId":"fedcba9876543210fedcba9876543210","container":"codex-cenci-old","runtime":"podman","runId":"run-7"}}`
+	if err := os.WriteFile(statePath, []byte(stale), 0o644); err != nil {
+		t.Fatalf("seed state: %v", err)
+	}
+
+	cmd := exec.Command(binaryPath, "pipeline", "label", "42", "--transition", "working", "--state-dir", stateDir, "--repo-slug", "octo/repo")
+	cmd.Env = append(pipelineEnv(fakeDir), extra...)
+	output, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("pipeline label working: %v (a malformed launch must still exit 0)\n%s", err, output)
+	}
+	var c pipelineContract
+	if jerr := json.Unmarshal(output, &c); jerr != nil {
+		t.Fatalf("stdout is not valid JSON: %v\n%s", jerr, output)
+	}
+	assertArraysNonNil(t, "label working", c)
+	if len(c.Errors) != 0 {
+		t.Errorf("errors = %v, want none", c.Errors)
+	}
+
+	raw, rerr := os.ReadFile(statePath)
+	if rerr != nil {
+		t.Fatalf("read state: %v", rerr)
+	}
+	var onDisk struct {
+		Session map[string]string `json:"session"`
+	}
+	if jerr := json.Unmarshal(raw, &onDisk); jerr != nil {
+		t.Fatalf("decode state: %v\n%s", jerr, raw)
+	}
+	return c, onDisk.Session
+}
+
+const cliLaunchID = "0123456789abcdef0123456789abcdef"
+
+// AC1: the three launch variables in the process environment are recorded
+// verbatim under session, with no warning.
+func TestPipelineLabelWorking_RecordsTheLaunchFromTheEnvironment(t *testing.T) {
+	c, session := runWorkingClaim(t,
+		"CENCI_LAUNCH_ID="+cliLaunchID, "CENCI_SANDBOX_CONTAINER=claude-cenci-repo", "CENCI_SANDBOX_RUNTIME=docker")
+
+	want := map[string]string{"launchId": cliLaunchID, "container": "claude-cenci-repo", "runtime": "docker", "runId": "run-7"}
+	if !maps.Equal(session, want) {
+		t.Errorf("session = %v, want %v", session, want)
+	}
+	if len(c.Warnings) != 0 {
+		t.Errorf("warnings = %v, want none for a valid launch", c.Warnings)
+	}
+}
+
+// AC2: a malformed or partial launch is not recorded, the stale triple is
+// removed, the claim still exits 0, and warnings[] has exactly one entry naming
+// the rejected variable (never its value).
+func TestPipelineLabelWorking_MalformedLaunchWarnsOnceAndClearsTheStaleTriple(t *testing.T) {
+	cases := []struct {
+		name  string
+		env   []string
+		named string
+		other []string
+	}{
+		{
+			name:  "runtime sh",
+			env:   []string{"CENCI_LAUNCH_ID=" + cliLaunchID, "CENCI_SANDBOX_CONTAINER=claude-cenci-repo", "CENCI_SANDBOX_RUNTIME=sh"},
+			named: "CENCI_SANDBOX_RUNTIME",
+			other: []string{"CENCI_LAUNCH_ID", "CENCI_SANDBOX_CONTAINER"},
+		},
+		{
+			name:  "hostile container",
+			env:   []string{"CENCI_LAUNCH_ID=" + cliLaunchID, "CENCI_SANDBOX_CONTAINER=claude-cenci-x;reboot", "CENCI_SANDBOX_RUNTIME=docker"},
+			named: "CENCI_SANDBOX_CONTAINER",
+			other: []string{"CENCI_LAUNCH_ID", "CENCI_SANDBOX_RUNTIME"},
+		},
+		{
+			name:  "only the launch id",
+			env:   []string{"CENCI_LAUNCH_ID=" + cliLaunchID},
+			named: "CENCI_SANDBOX_CONTAINER",
+			other: []string{"CENCI_LAUNCH_ID"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c, session := runWorkingClaim(t, tc.env...)
+
+			if len(c.Warnings) != 1 {
+				t.Fatalf("warnings = %v, want exactly one entry", c.Warnings)
+			}
+			if !strings.Contains(c.Warnings[0], tc.named) {
+				t.Errorf("warning %q does not name %s", c.Warnings[0], tc.named)
+			}
+			for _, name := range tc.other {
+				if strings.Contains(c.Warnings[0], name) {
+					t.Errorf("warning %q names %s, which was fine", c.Warnings[0], name)
+				}
+			}
+			for _, kv := range tc.env {
+				if _, value, _ := strings.Cut(kv, "="); len(value) > 3 && strings.Contains(c.Warnings[0], value) {
+					t.Errorf("warning %q echoes the value %q", c.Warnings[0], value)
+				}
+			}
+			if _, ok := session["launchId"]; ok {
+				t.Errorf("session still records a launch: %v", session)
+			}
+			if session["runId"] != "run-7" || len(session) != 1 {
+				t.Errorf("session = %v, want only the unrelated runId kept", session)
+			}
+		})
+	}
+}
+
+// Edge case: a claim run outside a sandbox (none of the three variables, even
+// when the developer's shell had them ambiently -- pipelineEnv strips them)
+// removes a stale triple silently.
+func TestPipelineLabelWorking_NoLaunchVariablesRemovesTheStaleTripleSilently(t *testing.T) {
+	c, session := runWorkingClaim(t)
+
+	if len(c.Warnings) != 0 {
+		t.Errorf("warnings = %v, want none when no launch variable is set", c.Warnings)
+	}
+	if len(session) != 1 || session["runId"] != "run-7" {
+		t.Errorf("session = %v, want only runId", session)
 	}
 }

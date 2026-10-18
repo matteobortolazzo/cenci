@@ -789,6 +789,8 @@ const (
 	launchTestSocket = "/tmp/tmux-1000/cenci"
 	launchTestPane   = "%7"
 	launchIDEnvName  = "CENCI_LAUNCH_ID"
+	containerEnvName = "CENCI_SANDBOX_CONTAINER"
+	runtimeEnvName   = "CENCI_SANDBOX_RUNTIME"
 
 	optLaunchID  = "@cenci-launch-id"
 	optContainer = "@cenci-container"
@@ -838,16 +840,38 @@ func attachArgvWithTag(agent, container string, tag []string) []string {
 	return buildAgentExecArgv(container, agent, buildAgentCmdArgs(agent, DefaultModel(agent)), execEnv, Options{Agent: agent})
 }
 
-// launchIDEnvTokens returns every "CENCI_LAUNCH_ID=<value>" token of argv that
-// is passed as an "-e" value.
-func launchIDEnvTokens(argv []string) []string {
+// envTokens returns every "<name>=<value>" token of argv that is passed as an
+// "-e" value.
+func envTokens(argv []string, name string) []string {
 	var out []string
 	for i := 0; i+1 < len(argv); i++ {
-		if argv[i] == "-e" && strings.HasPrefix(argv[i+1], launchIDEnvName+"=") {
+		if argv[i] == "-e" && strings.HasPrefix(argv[i+1], name+"=") {
 			out = append(out, argv[i+1])
 		}
 	}
 	return out
+}
+
+// launchIDEnvTokens returns every "CENCI_LAUNCH_ID=<value>" token of argv that
+// is passed as an "-e" value.
+func launchIDEnvTokens(argv []string) []string {
+	return envTokens(argv, launchIDEnvName)
+}
+
+// launchTripleEnvNames are the three per-exec variables a successfully tagged
+// launch exports (#1292): the launch ID plus the container and runtime the
+// recorded launch lives in.
+var launchTripleEnvNames = []string{launchIDEnvName, containerEnvName, runtimeEnvName}
+
+// requireNoLaunchTriple fails the test when argv carries any of the three
+// launch variables.
+func requireNoLaunchTriple(t *testing.T, argv []string, context string) {
+	t.Helper()
+	for _, name := range launchTripleEnvNames {
+		if got := envTokens(argv, name); len(got) != 0 {
+			t.Errorf("%s: argv carries %v, want no %s", context, got, name)
+		}
+	}
 }
 
 // requireSingleLineWarning fails the test unless stderr is exactly one
@@ -897,6 +921,14 @@ func TestTagLaunchPane_SetsThreePaneOptionsAndInjectsTheSameIDInTheExecEnv(t *te
 				argv := attachArgvWithTag(agent, container, tag)
 				if got := launchIDEnvTokens(argv); !slices.Equal(got, []string{launchIDEnvName + "=" + id}) {
 					t.Errorf("attach argv CENCI_LAUNCH_ID tokens = %v, want exactly [%s=%s] (the value recorded on the pane); argv: %v", got, launchIDEnvName, id, argv)
+				}
+				// #1292: the container and runtime travel in the same per-exec env,
+				// with exactly the values recorded on the pane.
+				if got := envTokens(argv, containerEnvName); !slices.Equal(got, []string{containerEnvName + "=" + container}) {
+					t.Errorf("attach argv %s tokens = %v, want exactly [%s=%s]; argv: %v", containerEnvName, got, containerEnvName, container, argv)
+				}
+				if got := envTokens(argv, runtimeEnvName); !slices.Equal(got, []string{runtimeEnvName + "=" + runtime}) {
+					t.Errorf("attach argv %s tokens = %v, want exactly [%s=%s]; argv: %v", runtimeEnvName, got, runtimeEnvName, runtime, argv)
 				}
 				if stderr.Len() != 0 {
 					t.Errorf("a fully tagged launch printed %q, want no warning", stderr.String())
@@ -953,9 +985,7 @@ func TestTagLaunchPane_AnyFailedOptionMeansNoIDAndAWarning(t *testing.T) {
 				if len(rec.Calls) == 0 {
 					t.Fatalf("no pane option was attempted, so the failure path was not exercised")
 				}
-				if got := launchIDEnvTokens(attachArgvWithTag(agent, container, tag)); len(got) != 0 {
-					t.Errorf("attach argv carries %v although setting %s failed", got, failing)
-				}
+				requireNoLaunchTriple(t, attachArgvWithTag(agent, container, tag), "setting "+failing+" failed")
 				requireSingleLineWarning(t, stderr.String())
 			})
 		}
@@ -1021,9 +1051,7 @@ func TestTagLaunchPane_OutsideTmuxMakesNoTmuxCallInjectsNoIDAndWarns(t *testing.
 				if len(rec.Calls) != 0 {
 					t.Errorf("tmux was called outside a usable tmux pane: %+v", rec.Calls)
 				}
-				if got := launchIDEnvTokens(attachArgvWithTag(agent, container, tag)); len(got) != 0 {
-					t.Errorf("attach argv carries %v outside tmux", got)
-				}
+				requireNoLaunchTriple(t, attachArgvWithTag(agent, container, tag), "outside a usable tmux pane")
 				requireSingleLineWarning(t, stderr.String())
 			})
 		}
@@ -1045,9 +1073,7 @@ func TestTagLaunchPane_UnsupportedRuntimeTagsNothing(t *testing.T) {
 			if len(rec.Calls) != 0 {
 				t.Errorf("pane options were set for an unsupported runtime: %+v", rec.Calls)
 			}
-			if got := launchIDEnvTokens(attachArgvWithTag(agent, container, tag)); len(got) != 0 {
-				t.Errorf("attach argv carries %v for an unsupported runtime", got)
-			}
+			requireNoLaunchTriple(t, attachArgvWithTag(agent, container, tag), "unsupported runtime")
 		})
 	}
 }

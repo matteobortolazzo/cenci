@@ -35,6 +35,12 @@ const (
 	labelReconcileStuck = "reconcile-stuck"
 )
 
+// hasTerminalLabel reports whether labels carry one of the reconciler's terminal
+// leak labels: such a ticket is surfaced for a human and never touched again.
+func hasTerminalLabel(labels []string) bool {
+	return hasLabel(labels, labelDispatchFailed) || hasLabel(labels, labelPlanInvalid) || hasLabel(labels, labelReconcileStuck)
+}
+
 // cenciMarkerPrefix is the hidden-HTML-comment prefix every cenci-authored
 // ticket comment must carry, from #827 onward: the escalation answer
 // classifier (resume.go's classifyComments/isCenciAuthored) treats any
@@ -150,6 +156,14 @@ type ReconcileInputs struct {
 	// upstream of the top-level hold, so its inline check is the only
 	// inventory gate that ticket gets.
 	PlanInventories map[string]PlanInventory
+
+	// LaunchVerdicts maps planKey(repo, number) -> the launch-ID liveness
+	// verdict resolveLaunchVerdicts computed for a Working ticket with a
+	// recorded launch this pass (#1292). A missing key (the zero value,
+	// LaunchVerdictNone) means "no recorded launch to judge by": the two
+	// Working-gated branches then keep the hasLiveWindow rule. Precomputed by the
+	// impure runner like Attempts, so Reconcile stays pure.
+	LaunchVerdicts map[string]LaunchVerdict
 }
 
 // ReconcileResult is Reconcile's output. NextObservations is the grace map to
@@ -205,7 +219,7 @@ func Reconcile(in ReconcileInputs) ReconcileResult {
 		// (#265) is terminal too: once the apply-retry budget escalates a
 		// ticket, reconciliation stops touching it so reconcile_pass_failed
 		// never resurfaces for it again.
-		if hasLabel(t.Labels, labelDispatchFailed) || hasLabel(t.Labels, labelPlanInvalid) || hasLabel(t.Labels, labelReconcileStuck) {
+		if hasTerminalLabel(t.Labels) {
 			res.Failed = append(res.Failed, t)
 			continue
 		}
@@ -307,7 +321,17 @@ func Reconcile(in ReconcileInputs) ReconcileResult {
 					deferObservation(in.Observations, res.NextObservations, key)
 					continue
 				}
-				if hasLiveWindow(t.Number, in.Snapshot) || t.HasOpenPR {
+				// Launch-ID liveness (#1292), shared with the failure path
+				// below: a recorded launch is judged by its verdict, anything
+				// else by hasLiveWindow. An open PR still resets the ticket;
+				// only an otherwise-actionable ticket defers on an unproven
+				// verdict.
+				live, deferred := sessionLive(t, key, in)
+				if live || t.HasOpenPR {
+					continue
+				}
+				if deferred {
+					deferObservation(in.Observations, res.NextObservations, key)
 					continue
 				}
 				firstSeen, ok := in.Observations[key]
@@ -580,10 +604,18 @@ func Reconcile(in ReconcileInputs) ReconcileResult {
 			continue
 		}
 
-		// A live window or an open PR means the work reached far enough (phase 9
+		// A live session or an open PR means the work reached far enough (phase 9
 		// opens the PR before moving the label). Clear the grace clock and leave
-		// it alone.
-		if hasLiveWindow(t.Number, in.Snapshot) || t.HasOpenPR {
+		// it alone. The session is live by launch-ID verdict when the ticket has
+		// a recorded launch (#1292), else by the window-name rule; an unproven
+		// verdict (unknown, or unrecognized) defers exactly like the blind
+		// guards above, preserving the grace observation.
+		live, deferred := sessionLive(t, key, in)
+		if live || t.HasOpenPR {
+			continue
+		}
+		if deferred {
+			deferObservation(in.Observations, res.NextObservations, key)
 			continue
 		}
 
@@ -609,6 +641,15 @@ func Reconcile(in ReconcileInputs) ReconcileResult {
 		attempts := in.Attempts[key]
 		win := matchingWindow(t.Number, in.Snapshot)
 		name, lastStatus := windowDetail(t.Number, win)
+		// Dead in a surviving pane (#1292): the launch is provably dead but a
+		// window named for the ticket is still open, so the comments say so
+		// instead of claiming the window is gone. Only a dead verdict with a
+		// surviving window changes any text; every other case keeps today's.
+		comments := recoveryComments{
+			window:     name,
+			status:     lastStatus,
+			deadInPane: in.LaunchVerdicts[key] == LaunchVerdictDead && win != nil,
+		}
 
 		if attempts < in.Config.RetryBudget {
 			attempt := attempts + 1
@@ -658,7 +699,7 @@ func Reconcile(in ReconcileInputs) ReconcileResult {
 					Kind:         RecoveryResumeInterrupted,
 					AddLabels:    []string{labelInputNeeded},
 					RemoveLabels: []string{labelWorking},
-					Comment:      resumeInterruptedComment(attempt, name, lastStatus),
+					Comment:      comments.resumeInterrupted(attempt),
 					Attempt:      attempt,
 					Detail:       fmt.Sprintf("window %s, last status %s (attempt %d): resume interrupted, restoring Input Needed", name, lastStatus, attempt),
 				})
@@ -710,7 +751,7 @@ func Reconcile(in ReconcileInputs) ReconcileResult {
 				Kind:         RecoveryRetry,
 				AddLabels:    addLabels,
 				RemoveLabels: []string{labelWorking},
-				Comment:      retryComment(attempt, name, lastStatus),
+				Comment:      comments.retry(attempt),
 				Attempt:      attempt,
 				Detail:       fmt.Sprintf("window %s, last status %s (attempt %d)", name, lastStatus, attempt),
 			})
@@ -724,7 +765,7 @@ func Reconcile(in ReconcileInputs) ReconcileResult {
 			Kind:         RecoveryFailed,
 			AddLabels:    []string{labelDispatchFailed},
 			RemoveLabels: []string{labelWorking},
-			Comment:      failedComment(attempts, name, lastStatus),
+			Comment:      comments.failed(attempts),
 			Attempt:      attempts,
 			Detail:       fmt.Sprintf("window %s, last status %s (%d attempts exhausted)", name, lastStatus, attempts),
 		})
@@ -792,6 +833,30 @@ func hasLiveWindow(number int, snap *watch.StateSnapshot) bool {
 	return false
 }
 
+// sessionLive reports whether t's session counts as live in the two
+// Working-gated branches (#1292), and whether the judgment must be deferred.
+// The ticket's launch-ID verdict decides when it has one: live is live, dead is
+// not live whatever the window is named or says, and unknown -- or any value
+// outside the closed set, failing closed -- is neither: deferred=true, and the
+// caller preserves the grace observation and produces no Recovery. A ticket with
+// no verdict (LaunchVerdictNone: no recorded launch, an invalid one, or an
+// unreadable state file) keeps the window-name rule, hasLiveWindow, unchanged.
+//
+// Only the failure path and the Input Needed + Working stray cleanup call it;
+// the plan heals A, B and C keep hasLiveWindow.
+func sessionLive(t Ticket, key string, in ReconcileInputs) (live, deferred bool) {
+	switch in.LaunchVerdicts[key] {
+	case LaunchVerdictNone:
+		return hasLiveWindow(t.Number, in.Snapshot), false
+	case LaunchVerdictLive:
+		return true, false
+	case LaunchVerdictDead:
+		return false, false
+	default: // LaunchVerdictUnknown and anything unrecognized
+		return false, true
+	}
+}
+
 // matchingWindow returns the first window named for this ticket, regardless of
 // status, so a recovery can report the dead window's name and last status.
 func matchingWindow(number int, snap *watch.StateSnapshot) *watch.WindowState {
@@ -819,6 +884,62 @@ func windowDetail(number int, w *watch.WindowState) (name, status string) {
 		status = "unknown"
 	}
 	return w.WindowName, status
+}
+
+// recoveryComments picks, per recovery kind, between today's comment (the
+// window is gone) and the dead-in-pane variant (#1292: the window survived but
+// its launch has no process left). Both variants of a kind carry the same
+// marker, so countAttempts and the escalation-answer classifier treat them
+// alike.
+type recoveryComments struct {
+	window, status string
+	deadInPane     bool
+}
+
+func (c recoveryComments) retry(attempt int) string {
+	if c.deadInPane {
+		return retryDeadInPaneComment(attempt, c.window, c.status)
+	}
+	return retryComment(attempt, c.window, c.status)
+}
+
+func (c recoveryComments) resumeInterrupted(attempt int) string {
+	if c.deadInPane {
+		return resumeInterruptedDeadInPaneComment(attempt, c.window, c.status)
+	}
+	return resumeInterruptedComment(attempt, c.window, c.status)
+}
+
+func (c recoveryComments) failed(attempts int) string {
+	if c.deadInPane {
+		return failedDeadInPaneComment(attempts, c.window, c.status)
+	}
+	return failedComment(attempts, c.window, c.status)
+}
+
+// deadInPaneText is the phrase every dead-in-pane comment carries (AC8). It
+// names only the window -- never the launch ID or container, which are internals.
+const deadInPaneText = "is still open but its agent process was gone"
+
+// retryDeadInPaneComment is retryComment for a window that survived its dead
+// agent (#1292); same attemptMarker.
+func retryDeadInPaneComment(attempt int, window, status string) string {
+	return fmt.Sprintf("%s\n🔄 cenci dispatch attempt %d: window `%s` %s (last status %s). "+
+		"Re-queuing the ticket for pickup.", attemptMarker, attempt, window, deadInPaneText, status)
+}
+
+// resumeInterruptedDeadInPaneComment is resumeInterruptedComment for a window
+// that survived its dead agent (#1292); same attemptMarker.
+func resumeInterruptedDeadInPaneComment(attempt int, window, status string) string {
+	return fmt.Sprintf("%s\n↩️ cenci dispatch attempt %d: the resumed session's window `%s` %s (last status %s) "+
+		"before it could finish. Restoring `%s` so the escalation can be re-triggered.", attemptMarker, attempt, window, deadInPaneText, status, labelInputNeeded)
+}
+
+// failedDeadInPaneComment is failedComment for a window that survived its dead
+// agent (#1292); same failedMarker.
+func failedDeadInPaneComment(attempts int, window, status string) string {
+	return fmt.Sprintf("%s\n⛔ cenci dispatch failed after %d attempt(s): window `%s` %s (last status %s). "+
+		"Labeled `%s` — clear the label or re-plan to retry.", failedMarker, attempts, window, deadInPaneText, status, labelDispatchFailed)
 }
 
 func retryComment(attempt int, window, status string) string {

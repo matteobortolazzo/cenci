@@ -16,6 +16,26 @@ import (
 // the container-lifetime PID-1 environ and go stale, #356).
 const LaunchIDEnvName = "CENCI_LAUNCH_ID"
 
+// SandboxContainerEnvName and SandboxRuntimeEnvName are the per-exec env vars
+// that carry the container a launch lives in and the runtime that runs it,
+// next to LaunchIDEnvName (#1292). They are exported only when the pane tag
+// succeeded (the same moment as the ID) and, like the ID, are never
+// create-time env. `cenci pipeline label --transition working` reads all three
+// to record the launch on the ticket's pipeline state; the CENCI_SANDBOX_
+// prefix is the launcher-variable convention (docs/cli-conventions.md).
+const (
+	SandboxContainerEnvName = "CENCI_SANDBOX_CONTAINER"
+	SandboxRuntimeEnvName   = "CENCI_SANDBOX_RUNTIME"
+)
+
+// ValidLaunchRuntime reports whether rt is a runtime a launch may record: the
+// closed set docker/podman. Anything else (including "") is rejected, so a
+// recorded runtime can never reach an exec argv as a command name of the
+// writer's choosing.
+func ValidLaunchRuntime(rt string) bool {
+	return rt == "docker" || rt == "podman"
+}
+
 // The tmux pane user options a launch records on its own pane (#1252). The
 // launch ID is the identity the reaper matches; the container and runtime
 // let a later consumer (#1253) find the container a pane's launch lives in.

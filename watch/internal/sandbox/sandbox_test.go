@@ -1,6 +1,8 @@
 package sandbox
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,6 +11,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/exectest"
 )
@@ -863,6 +866,82 @@ func TestRepoWorkloadContainerNames(t *testing.T) {
 				}
 				if !IsSandboxContainerName(got[i]) {
 					t.Errorf("name %q is not recognized as a sandbox container name", got[i])
+				}
+			}
+		})
+	}
+}
+
+// RunningContainerNames as used by the dispatch launch probe (#1292) is the bounded, stderr-capturing
+// running-container listing the dispatch launch probe consults after a failed
+// probe, to tell "container gone" from "runtime unreachable".
+func TestRunningContainerNames_LaunchProbeContract(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell fakes only")
+	}
+	tests := []struct {
+		name      string
+		body      string
+		ctxLimit  time.Duration
+		wantNames []string
+		wantErr   string
+		wantDL    bool
+	}{
+		{
+			name:      "lists only sandbox containers, foreign names dropped",
+			body:      `[ "$1 $2 $3" = "ps --format {{.Names}}" ] || { echo "bad argv: $*" >&2; exit 9; }; printf 'claude-cenci-a\nnginx\ncodex-cenci-b\n'`,
+			ctxLimit:  10 * time.Second,
+			wantNames: []string{"claude-cenci-a", "codex-cenci-b"},
+		},
+		{
+			name:     "runtime failure carries its stderr",
+			body:     `echo 'Cannot connect to the Docker daemon' >&2; exit 1`,
+			ctxLimit: 10 * time.Second,
+			wantErr:  "Cannot connect to the Docker daemon",
+		},
+		{
+			name:     "hung runtime is cut off at the context deadline",
+			body:     `while :; do :; done`, // a shell builtin loop: PATH holds only the fake, and no grandchild keeps the pipe open
+			ctxLimit: 300 * time.Millisecond,
+			wantErr:  "docker ps",
+			wantDL:   true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeFakeBinary(t, dir, "docker", tt.body)
+			t.Setenv("PATH", dir)
+
+			ctx, cancel := context.WithTimeout(context.Background(), tt.ctxLimit)
+			defer cancel()
+			start := time.Now()
+			got, err := RunningContainerNames(ctx, "docker")
+
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("RunningContainerNames: %v", err)
+				}
+				if !reflect.DeepEqual(got, tt.wantNames) {
+					t.Errorf("names = %v, want %v", got, tt.wantNames)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("want error containing %q, got names %v", tt.wantErr, got)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("error = %v, want it to contain %q", err, tt.wantErr)
+			}
+			if got != nil {
+				t.Errorf("names = %v, want nil alongside an error", got)
+			}
+			if tt.wantDL {
+				if !errors.Is(err, context.DeadlineExceeded) {
+					t.Errorf("error = %v, want it to wrap context.DeadlineExceeded", err)
+				}
+				if elapsed := time.Since(start); elapsed > 10*time.Second {
+					t.Errorf("call took %v, want it bounded by the context deadline", elapsed)
 				}
 			}
 		})

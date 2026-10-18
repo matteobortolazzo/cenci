@@ -1216,13 +1216,61 @@ forever. Reconciliation is the recovery half — a pass that detects stranded wo
 either re-queues or surfaces it.
 
 A `Working` ticket is treated as stranded only when **all** hold: it has no live tmux
-window (gone, or `stopped`), no open linked PR, and that signal has held continuously for
-`gracePeriod`. When it strands:
+window (gone, or `stopped`; or, when the ticket has a recorded sandbox launch, no live
+launch — see "Launch-ID liveness" below), no open linked PR,
+and that signal has held continuously for `gracePeriod`. When it strands:
 
 - **under `retryBudget`** → `Working` → `Planned` plus an attempt comment; the plan file
   still exists, so the ticket re-enters the dispatch queue naturally;
 - **at `retryBudget`** → `Working` → `dispatch-failed`, surfaced for a human and never
   touched again.
+
+**Launch-ID liveness (ticket #1292).** "Has no live tmux window" is the fallback rule, not
+the whole story. When a `Working` ticket has a *recorded sandbox launch*, the reconciler
+asks whether that launch still has a process instead of looking at window names, in two
+steps:
+
+- **Recorded launch → probe it.** Any process carrying the launch ID in its container
+  means live, whatever the window is named (a session opened by hand with `cn` is no
+  longer re-dispatched in parallel); no process means dead, whatever the window says
+  (an agent the kernel OOM-killed inside a surviving pane is finally recovered). The
+  probe is read-only, bounded, and runs at most once per ticket per pass.
+- **No usable recorded launch → the window-name rule, unchanged.** A window named
+  `<number>` or `<number>-…` that is not `stopped` is live. A recorded launch that
+  fails re-validation (a malformed or incomplete triple) falls back to this rule and
+  logs one line naming the ticket, as does a ticket whose pipeline state file cannot be
+  read; neither defers the ticket on its own.
+
+Further rules:
+
+- **A failed probe defers, it does not decide.** A probe error or timeout leaves the
+  ticket's grace clock untouched and makes no label write, exactly like an unreachable
+  daemon snapshot. Unreadable processes beside at least one match still count as live;
+  unreadable processes with no match cannot prove death, so they defer.
+- **A container that is gone counts as dead.** After a failed probe the reconciler lists
+  the runtime's running containers once per pass; a recorded container missing from a
+  *successful* listing (removed, or stopped) is dead, while a failed listing defers.
+- **Dead in a surviving pane.** When the launch is dead but a window named for the
+  ticket is still open, the recovery comment names that window and says its "agent
+  process was gone". The reconciler never closes the window or signals anything; the
+  finished-ticket window cleanup owns that.
+- **The dispatcher clears the record at spawn.** Before it spawns a session for a
+  ticket, the dispatcher removes any recorded launch from that ticket's
+  `.cenci/pipeline/<id>.json` (other `session` keys are kept), so a freshly dispatched
+  session starts on the window-name rule until its own claim records its launch. If the
+  clear fails on a readable but corrupt state file, that ticket is skipped for the pass
+  (logged); a missing file is not a failure.
+- **Where the record comes from.** `cenci pipeline label <id> --transition working` run
+  *inside a sandbox* records the launch (ID, container, runtime) from the environment the
+  launcher exported. A manually opened session is therefore protected only once its run
+  has claimed the ticket through that call; before then, and for any run outside a
+  sandbox, the window-name rule applies.
+- **Limits.** A process that scrubs its environment (`env -i`) is invisible to the probe
+  and reads as dead, the same limit the orphan reaper and `cenci close` have. The
+  recorded values live in the repo-mounted state file, so the agent can write them: a
+  hostile agent can at most keep its own ticket looking live by recording a long-lived
+  process's ID, and every recorded value is re-validated (launch-ID grammar, sandbox
+  container name, runtime `docker`/`podman`) before it reaches an exec argument.
 
 **Crashed planning pickup (ticket #828).** A `Working` ticket that still carries
 `Refined` with no matched plan file is a crashed *planning*

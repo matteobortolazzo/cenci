@@ -27,6 +27,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/sandbox"
 )
 
 // Sentinel errors, detectable via errors.Is at the package boundary (rule
@@ -103,6 +105,13 @@ type LabelOpts struct {
 	// last-child PR-open case -- see
 	// flow/skills/implement/phases/phase-9-pr.md's Labels section).
 	ParentID string
+
+	// Launch, meaningful only for the "working" transition, is the sandbox
+	// launch triple the command layer read from its environment (#1292). A
+	// valid triple is recorded under State.Session; a zero or invalid one
+	// removes any previously recorded triple. The package never reads the
+	// environment itself.
+	Launch LaunchEnv
 }
 
 // ApplyLabelTransition executes one of the label-lifecycle transitions
@@ -112,7 +121,9 @@ type LabelOpts struct {
 // (ErrForeignAssignee / ErrMultipleAssignees on conflict, auto-claim when
 // unassigned; "input-needed" and the other transitions carry no ownership
 // check), then self-healingly creates and applies the corresponding gh
-// label(s), returning the resulting State.
+// label(s), returning the resulting State. "working" additionally records
+// o.Launch under State.Session when it is a valid triple and removes any
+// earlier record otherwise (#1292); the other transitions leave it untouched.
 func ApplyLabelTransition(o LabelOpts) (State, error) {
 	minimum, ok := labelStagePrecondition[o.Transition]
 	if !ok {
@@ -222,7 +233,66 @@ func ApplyLabelTransition(o LabelOpts) (State, error) {
 		return State{}, err
 	}
 
-	return recordLabelState(path, name, removeLabels, ticketUpdatedAt)
+	// Only the "working" claim speaks for the launch it runs in (#1292): it
+	// records the launch when the triple is valid and clears any earlier one
+	// otherwise (the agent-writable env is re-validated here even though the
+	// command layer already ran CheckLaunchEnv). planned, input-needed and
+	// in-review never touch it -- a Trivial planned keeps Working, so the
+	// recorded launch must survive it.
+	var launch *LaunchEnv
+	if o.Transition == "working" {
+		recorded := LaunchEnv{}
+		if ValidLaunchTriple(o.Launch.ID, o.Launch.Container, o.Launch.Runtime) {
+			recorded = o.Launch
+		}
+		launch = &recorded
+	}
+
+	return recordLabelState(path, name, removeLabels, ticketUpdatedAt, launch)
+}
+
+// LaunchEnv is the sandbox launch triple a `working` claim runs in: the
+// values of CENCI_LAUNCH_ID, CENCI_SANDBOX_CONTAINER and CENCI_SANDBOX_RUNTIME
+// as read by the command layer (never by this package, so an ambient launch ID
+// in a developer's sandbox cannot leak into library callers and their tests).
+type LaunchEnv struct {
+	ID        string
+	Container string
+	Runtime   string
+}
+
+// CheckLaunchEnv judges the launch triple a `working` claim read from its
+// environment. All three empty means the claim is not running in a sandbox
+// launch: not ok, no warning, and the caller clears any recorded triple
+// silently. Any other combination that is not three valid values -- a bad
+// value, or a partial set such as a bare CENCI_LAUNCH_ID from an older
+// launcher -- is malformed: not ok, and exactly one warning that names every
+// rejected or missing variable by NAME only (the values are agent-controlled
+// and never echoed). A valid triple is returned unchanged.
+func CheckLaunchEnv(in LaunchEnv) (LaunchEnv, bool, string) {
+	if in == (LaunchEnv{}) {
+		return LaunchEnv{}, false, ""
+	}
+	var problems []string
+	for _, f := range []struct {
+		name, value string
+		valid       func(string) bool
+	}{
+		{sandbox.LaunchIDEnvName, in.ID, sandbox.ValidLaunchID},
+		{sandbox.SandboxContainerEnvName, in.Container, sandbox.ValidSandboxContainerName},
+		{sandbox.SandboxRuntimeEnvName, in.Runtime, sandbox.ValidLaunchRuntime},
+	} {
+		switch {
+		case f.value == "":
+			problems = append(problems, f.name+" is not set")
+		case !f.valid(f.value):
+			problems = append(problems, f.name+" is malformed")
+		}
+	}
+	if len(problems) == 0 {
+		return in, true, ""
+	}
+	return LaunchEnv{}, false, "sandbox launch not recorded (any earlier record was cleared): " + strings.Join(problems, ", ")
 }
 
 // verifyAndClaimOwnership mirrors flow/skills/ticket-ownership/SKILL.md's
@@ -281,7 +351,13 @@ func checkSoleAssignee(id string, assignees []string, login string) error {
 // SetArtifacts use. The gh edit and this persisted set are two separate
 // writes; both must retire the same labels or later readers keep seeing a
 // label the board no longer shows (#834).
-func recordLabelState(path, add string, remove []string, ticketUpdatedAt string) (State, error) {
+//
+// launch, when non-nil, is the session's launch triple to apply in the same
+// write: a zero LaunchEnv deletes the three launch keys, anything else sets
+// them, other session keys untouched. A nil launch leaves the session as it
+// is, and a session that was nil stays nil, so a state file with no launch
+// recorded round-trips unchanged.
+func recordLabelState(path, add string, remove []string, ticketUpdatedAt string, launch *LaunchEnv) (State, error) {
 	var result State
 	lockErr := withLock(path+".lock", defaultRetryConfig(), func() error {
 		s, lerr := loadState(path)
@@ -294,6 +370,18 @@ func recordLabelState(path, add string, remove []string, ticketUpdatedAt string)
 		}
 		labels = addLabelToSlice(labels, add)
 		s.Labels = labels
+		if launch != nil {
+			if *launch == (LaunchEnv{}) {
+				deleteLaunchKeys(&s)
+			} else {
+				if s.Session == nil {
+					s.Session = map[string]string{}
+				}
+				s.Session[SessionKeyLaunchID] = launch.ID
+				s.Session[SessionKeyContainer] = launch.Container
+				s.Session[SessionKeyRuntime] = launch.Runtime
+			}
+		}
 		s.TicketUpdatedAt = ticketUpdatedAt
 		s.SchemaVersion = CurrentSchemaVersion
 		s.UpdatedAt = time.Now().UTC()

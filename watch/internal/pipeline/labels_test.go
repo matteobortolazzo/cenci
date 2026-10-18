@@ -16,6 +16,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -1063,5 +1065,277 @@ func TestLabelSentinelErrors_AreDistinctAndDetectableViaErrorsIs(t *testing.T) {
 			t.Errorf("%s and %s must be distinct sentinel values, got the same error", name, other)
 		}
 		seen[sentinel] = name
+	}
+}
+
+// -- recorded launch triple (#1292) ------------------------------------------
+
+const (
+	launchTestID        = "0123456789abcdef0123456789abcdef"
+	launchTestOtherID   = "fedcba9876543210fedcba9876543210"
+	launchTestContainer = "claude-cenci-repo"
+)
+
+var validLaunchEnv = LaunchEnv{ID: launchTestID, Container: launchTestContainer, Runtime: "docker"}
+
+// seedLaunchState writes a state file at stage whose session carries session.
+func seedLaunchState(t *testing.T, stateDir, id string, stage Stage, session map[string]string) {
+	t.Helper()
+	path := filepath.Join(stateDir, id+".json")
+	if err := saveState(path, State{SchemaVersion: CurrentSchemaVersion, ID: id, Stage: stage, UpdatedAt: time.Now().UTC(), Session: session}); err != nil {
+		t.Fatalf("seed state: %v", err)
+	}
+}
+
+// rawSession decodes the state file's "session" object straight from the JSON
+// bytes, so the on-disk key names (not the Go constants) are what is asserted.
+func rawSession(t *testing.T, stateDir, id string) (map[string]string, map[string]json.RawMessage) {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(stateDir, id+".json"))
+	if err != nil {
+		t.Fatalf("read state file: %v", err)
+	}
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(b, &top); err != nil {
+		t.Fatalf("decode state file: %v\n%s", err, b)
+	}
+	var session map[string]string
+	if raw, ok := top["session"]; ok {
+		if err := json.Unmarshal(raw, &session); err != nil {
+			t.Fatalf("decode session: %v\n%s", err, raw)
+		}
+	}
+	return session, top
+}
+
+func staleLaunchSession() map[string]string {
+	return map[string]string{
+		"launchId": launchTestOtherID, "container": "codex-cenci-old", "runtime": "podman",
+		"runId": "run-7", "reviewPath": "/tmp/review.md",
+	}
+}
+
+// requireTripleAbsent fails unless none of the three launch keys is on disk and
+// the unrelated session keys survived.
+func requireTripleAbsent(t *testing.T, stateDir, id string) {
+	t.Helper()
+	session, _ := rawSession(t, stateDir, id)
+	for _, k := range []string{"launchId", "container", "runtime"} {
+		if _, ok := session[k]; ok {
+			t.Errorf("session still carries %q: %v", k, session)
+		}
+	}
+	if session["runId"] != "run-7" || session["reviewPath"] != "/tmp/review.md" {
+		t.Errorf("unrelated session keys were not kept: %v", session)
+	}
+}
+
+func runWorking(t *testing.T, stateDir string, launch LaunchEnv) State {
+	t.Helper()
+	gh := newFakeGh(t, "octocat", []string{"octocat"})
+	gh.install()
+	s, err := ApplyLabelTransition(LabelOpts{ID: "42", StateDir: stateDir, RepoSlug: "o/r", Transition: "working", Launch: launch})
+	if err != nil {
+		t.Fatalf("ApplyLabelTransition(working): %v", err)
+	}
+	return s
+}
+
+// AC1: a working claim with a valid launch writes the exact values under
+// session.launchId / container / runtime and keeps the other session keys.
+func TestApplyLabelTransition_Working_RecordsTheLaunchTripleExactly(t *testing.T) {
+	stateDir := t.TempDir()
+	seedLaunchState(t, stateDir, "42", StagePrepared, map[string]string{"runId": "run-7"})
+
+	s := runWorking(t, stateDir, LaunchEnv{ID: launchTestID, Container: launchTestContainer, Runtime: "podman"})
+
+	session, _ := rawSession(t, stateDir, "42")
+	want := map[string]string{"launchId": launchTestID, "container": launchTestContainer, "runtime": "podman", "runId": "run-7"}
+	if !maps.Equal(session, want) {
+		t.Errorf("on-disk session = %v, want %v", session, want)
+	}
+	if !maps.Equal(s.Session, want) {
+		t.Errorf("returned State.Session = %v, want %v", s.Session, want)
+	}
+}
+
+// AC1: with no launch and no recorded triple the file gains no session key at
+// all, so a no-launch run leaves the state file as it was before this feature.
+func TestApplyLabelTransition_Working_WithoutLaunch_AddsNoSessionToTheFile(t *testing.T) {
+	stateDir := t.TempDir()
+	mustSeedState(t, stateDir, "42", StagePrepared)
+
+	runWorking(t, stateDir, LaunchEnv{})
+
+	_, top := rawSession(t, stateDir, "42")
+	if _, ok := top["session"]; ok {
+		t.Errorf("a no-launch working claim introduced a session key: %s", top["session"])
+	}
+	for _, key := range []string{"schemaVersion", "id", "stage", "updatedAt", "labels", "ticketUpdatedAt"} {
+		delete(top, key)
+	}
+	if len(top) != 0 {
+		t.Errorf("state file gained unexpected keys %v", top)
+	}
+}
+
+// Edge case: a second launch resuming the ticket overwrites the recorded triple.
+func TestApplyLabelTransition_Working_SecondLaunchOverwritesTheRecordedTriple(t *testing.T) {
+	stateDir := t.TempDir()
+	seedLaunchState(t, stateDir, "42", StageExecuted, staleLaunchSession())
+
+	runWorking(t, stateDir, validLaunchEnv)
+
+	session, _ := rawSession(t, stateDir, "42")
+	want := map[string]string{"launchId": launchTestID, "container": launchTestContainer, "runtime": "docker", "runId": "run-7", "reviewPath": "/tmp/review.md"}
+	if !maps.Equal(session, want) {
+		t.Errorf("session after re-launch = %v, want %v", session, want)
+	}
+}
+
+// Edge case: a working claim run outside a sandbox (no launch variables)
+// removes the stale triple so the host-run session is judged by the window name.
+func TestApplyLabelTransition_Working_HostRunClaimRemovesTheStaleTriple(t *testing.T) {
+	stateDir := t.TempDir()
+	seedLaunchState(t, stateDir, "42", StageExecuted, staleLaunchSession())
+
+	s := runWorking(t, stateDir, LaunchEnv{})
+
+	requireTripleAbsent(t, stateDir, "42")
+	if _, ok := s.Session["launchId"]; ok {
+		t.Errorf("returned State.Session still carries the stale launch: %v", s.Session)
+	}
+}
+
+// AC2 (defense in depth): ApplyLabelTransition re-validates a triple handed to
+// it, so a caller that skipped CheckLaunchEnv cannot record a malformed value.
+func TestApplyLabelTransition_Working_MalformedLaunchIsNotRecordedAndClearsThePreviousOne(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		launch LaunchEnv
+	}{
+		{"container with option injection", LaunchEnv{ID: launchTestID, Container: "claude-cenci-x --privileged", Runtime: "docker"}},
+		{"container without sandbox prefix", LaunchEnv{ID: launchTestID, Container: "nginx", Runtime: "docker"}},
+		{"uppercase id", LaunchEnv{ID: strings.ToUpper(launchTestID), Container: launchTestContainer, Runtime: "docker"}},
+		{"31 char id", LaunchEnv{ID: launchTestID[:31], Container: launchTestContainer, Runtime: "docker"}},
+		{"runtime sh", LaunchEnv{ID: launchTestID, Container: launchTestContainer, Runtime: "sh"}},
+		{"only the id", LaunchEnv{ID: launchTestID}},
+		{"id and container without runtime", LaunchEnv{ID: launchTestID, Container: launchTestContainer}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stateDir := t.TempDir()
+			seedLaunchState(t, stateDir, "42", StageExecuted, staleLaunchSession())
+
+			runWorking(t, stateDir, tc.launch)
+
+			requireTripleAbsent(t, stateDir, "42")
+		})
+	}
+}
+
+// Edge case: only the working transition touches the triple. A Trivial planned
+// (which keeps Working), a plain planned, input-needed and in-review all leave
+// it exactly as recorded, even when handed a different valid launch.
+func TestApplyLabelTransition_OtherTransitionsLeaveTheRecordedTripleUntouched(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		transition string
+		trivial    bool
+		stage      Stage
+	}{
+		{"planned trivial", "planned", true, StageWaitingForPlanApproval},
+		{"planned", "planned", false, StageWaitingForPlanApproval},
+		{"input-needed", "input-needed", false, StageWaitingForInput},
+		{"in-review", "in-review", false, StageFinalized},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stateDir := t.TempDir()
+			seedLaunchState(t, stateDir, "42", tc.stage, staleLaunchSession())
+			gh := newFakeGh(t, "octocat", []string{"octocat"})
+			gh.install()
+
+			_, err := ApplyLabelTransition(LabelOpts{ID: "42", StateDir: stateDir, RepoSlug: "o/r", Transition: tc.transition, Trivial: tc.trivial, Launch: validLaunchEnv})
+			if err != nil {
+				t.Fatalf("ApplyLabelTransition(%s): %v", tc.transition, err)
+			}
+
+			session, _ := rawSession(t, stateDir, "42")
+			if !maps.Equal(session, staleLaunchSession()) {
+				t.Errorf("session after %s = %v, want it untouched: %v", tc.name, session, staleLaunchSession())
+			}
+		})
+	}
+}
+
+// AC2: CheckLaunchEnv is the single validator. Justified as a unit test: the
+// hostile-input matrix is wider than a CLI run can sample. All three empty is
+// "absent" (silent); anything else that is not a fully valid triple is
+// malformed and yields exactly one warning naming every rejected or missing
+// variable by name and never echoing a value.
+func TestCheckLaunchEnv_Matrix(t *testing.T) {
+	const (
+		idName        = "CENCI_LAUNCH_ID"
+		containerName = "CENCI_SANDBOX_CONTAINER"
+		runtimeName   = "CENCI_SANDBOX_RUNTIME"
+	)
+	all := []string{idName, containerName, runtimeName}
+	cases := []struct {
+		name   string
+		in     LaunchEnv
+		ok     bool
+		silent bool
+		named  []string
+	}{
+		{name: "valid docker", in: validLaunchEnv, ok: true, silent: true},
+		{name: "valid podman", in: LaunchEnv{ID: launchTestID, Container: "opencode-cenci-repo-feature", Runtime: "podman"}, ok: true, silent: true},
+		{name: "all empty is absent", in: LaunchEnv{}, silent: true},
+		{name: "uppercase id", in: LaunchEnv{ID: strings.ToUpper(launchTestID), Container: launchTestContainer, Runtime: "docker"}, named: []string{idName}},
+		{name: "31 char id", in: LaunchEnv{ID: launchTestID[:31], Container: launchTestContainer, Runtime: "docker"}, named: []string{idName}},
+		{name: "33 char id", in: LaunchEnv{ID: launchTestID + "a", Container: launchTestContainer, Runtime: "docker"}, named: []string{idName}},
+		{name: "container shell metachar", in: LaunchEnv{ID: launchTestID, Container: "claude-cenci-x;reboot", Runtime: "docker"}, named: []string{containerName}},
+		{name: "container leading dash", in: LaunchEnv{ID: launchTestID, Container: "--privileged", Runtime: "docker"}, named: []string{containerName}},
+		{name: "container with space", in: LaunchEnv{ID: launchTestID, Container: "claude-cenci-x y", Runtime: "docker"}, named: []string{containerName}},
+		{name: "container not a sandbox name", in: LaunchEnv{ID: launchTestID, Container: "postgres", Runtime: "docker"}, named: []string{containerName}},
+		{name: "runtime sh", in: LaunchEnv{ID: launchTestID, Container: launchTestContainer, Runtime: "sh"}, named: []string{runtimeName}},
+		{name: "runtime uppercase", in: LaunchEnv{ID: launchTestID, Container: launchTestContainer, Runtime: "Docker"}, named: []string{runtimeName}},
+		{name: "two bad values", in: LaunchEnv{ID: "nothex", Container: "nginx", Runtime: "docker"}, named: []string{idName, containerName}},
+		{name: "only id (older launcher)", in: LaunchEnv{ID: launchTestID}, named: []string{containerName, runtimeName}},
+		{name: "only container", in: LaunchEnv{Container: launchTestContainer}, named: []string{idName, runtimeName}},
+		{name: "only runtime", in: LaunchEnv{Runtime: "docker"}, named: []string{idName, containerName}},
+		{name: "id and container", in: LaunchEnv{ID: launchTestID, Container: launchTestContainer}, named: []string{runtimeName}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok, warning := CheckLaunchEnv(tc.in)
+
+			if ok != tc.ok {
+				t.Fatalf("ok = %v, want %v", ok, tc.ok)
+			}
+			if tc.ok && got != tc.in {
+				t.Errorf("valid triple returned %+v, want it unchanged %+v", got, tc.in)
+			}
+			if !tc.ok && got != (LaunchEnv{}) {
+				t.Errorf("rejected triple returned %+v, want the zero value", got)
+			}
+			if tc.silent {
+				if warning != "" {
+					t.Errorf("warning = %q, want none", warning)
+				}
+				return
+			}
+			if strings.Contains(warning, "\n") {
+				t.Errorf("warning is not a single line: %q", warning)
+			}
+			for _, name := range all {
+				if want := slices.Contains(tc.named, name); strings.Contains(warning, name) != want {
+					t.Errorf("warning %q mentions %s = %v, want %v", warning, name, !want, want)
+				}
+			}
+			for _, value := range []string{tc.in.ID, tc.in.Container, tc.in.Runtime} {
+				if len(value) >= 3 && strings.Contains(warning, value) {
+					t.Errorf("warning %q echoes the value %q; it must name variables only", warning, value)
+				}
+			}
+		})
 	}
 }

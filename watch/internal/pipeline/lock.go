@@ -31,7 +31,9 @@ var flockFn = syscall.Flock
 // (rule #446) — so callers can distinguish "we never got the lock" from "we
 // got the lock but the operation itself failed".
 func withLock(lockPath string, cfg retryConfig, fn func() error) error {
-	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	// O_NOFOLLOW: the lock file sits beside an agent-writable state file, so a
+	// planted symlink must fail the open (ELOOP) instead of being followed.
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
 		return fmt.Errorf("open lock file %s: %w", lockPath, err)
 	}

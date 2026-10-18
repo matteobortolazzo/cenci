@@ -67,8 +67,11 @@ type DryRunPlan struct {
 //
 // The attach argv carries `-e CENCI_LAUNCH_ID=<generated-per-launch>` exactly
 // where a real launch would tag its pane (planArgvs' launchTagContext
-// predicate, #1252). DryRun never generates an ID and never calls tmux, so
-// its output stays deterministic and the random value never appears.
+// predicate, #1252), together with `-e CENCI_SANDBOX_CONTAINER=<container>` and
+// `-e CENCI_SANDBOX_RUNTIME=<runtime>` (#1292) — both deterministic, so shown
+// with their real values and only ever alongside the placeholder. DryRun never
+// generates an ID and never calls tmux, so its output stays deterministic and
+// the random value never appears.
 //
 // The Posture breakdown is composed by calling Audit on a shallow engine
 // copy with Stderr discarded: DryRun's own create-argv build already prints

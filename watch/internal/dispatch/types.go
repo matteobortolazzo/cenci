@@ -594,6 +594,44 @@ const (
 	OpenPRProbeUnreadable OpenPRProbe = "unreadable"
 )
 
+// RecordedLaunch is the sandbox launch a ticket's `working` claim recorded in
+// its pipeline state (`session.launchId`/`container`/`runtime`, #1292),
+// collector-filled from the same state-file read as Stage. It holds the raw
+// values: the state file lives in the bind-mounted repo, so the values are
+// agent-writable and the launch probe re-validates them (resolveLaunchVerdicts)
+// before any of them reaches an exec argv. The zero value means no launch is
+// recorded.
+type RecordedLaunch struct {
+	ID        string
+	Container string
+	Runtime   string
+}
+
+// LaunchVerdict is the once-per-pass launch-ID liveness verdict for one Working
+// ticket (#1292), a closed set rather than a bool so a failed probe is never
+// folded into "dead" (watch/docs/go-gotchas.md, watch/docs/error-handling.md).
+// LaunchVerdictNone is the zero value: the ticket has no usable recorded launch
+// (or none was probed), so Reconcile judges it by the window-name rule exactly
+// as before. Every other value is produced only by resolveLaunchVerdicts.
+type LaunchVerdict string
+
+const (
+	// LaunchVerdictNone is the zero value: no recorded launch to judge by.
+	LaunchVerdictNone LaunchVerdict = ""
+	// LaunchVerdictLive means the probe found at least one process carrying the
+	// recorded launch ID: the session is alive whatever its window is named.
+	LaunchVerdictLive LaunchVerdict = "live"
+	// LaunchVerdictDead means the launch has no process left: the probe listed
+	// zero processes, or the recorded container is absent from a successful
+	// listing of the runtime's running containers (gone or stopped).
+	LaunchVerdictDead LaunchVerdict = "dead"
+	// LaunchVerdictUnknown means death could not be proven: the probe and the
+	// running-container listing both failed, the pass's probe budget ran out, or
+	// unreadable processes were the only evidence. Reconcile defers the ticket
+	// (grace preserved, no Recovery); an unrecognized value is treated the same.
+	LaunchVerdictUnknown LaunchVerdict = "unknown"
+)
+
 // Ticket is one open GitHub issue, as collected from a repo. Labels carry the
 // board state (Planned, Blocked, agent:<name>, ...); Assignees carry GitHub
 // logins; Agent is the pre-resolved agent:<name> value, if any.
@@ -670,6 +708,13 @@ type Ticket struct {
 	// without being touched; collectRepoTickets, the sole production
 	// construction site, always stamps this field explicitly.
 	OpenPRProbe OpenPRProbe
+
+	// Launch is the sandbox launch recorded in the ticket's pipeline state
+	// (collector-filled, #1292, from the same GetArtifacts read as Stage; mirrors
+	// StageProbe above). Raw and unvalidated; the zero value (no state file, an
+	// unreadable one, or no launch keys) means no recorded launch, so every
+	// pre-#1292 Ticket construction site keeps today's window-name liveness rule.
+	Launch RecordedLaunch
 }
 
 // Plan is the parsed front matter of one .plans/<id>-<slug>.md file.

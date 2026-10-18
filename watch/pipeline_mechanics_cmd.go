@@ -18,6 +18,7 @@ import (
 	"strings"
 
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/pipeline"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/sandbox"
 )
 
 const (
@@ -98,7 +99,8 @@ func mechanicsID(rest []string, usageExit func()) string {
 //
 // warnings (ticket #688) is every non-stage-command advisory a mechanics
 // verb wants to surface -- today only AttachWorktree's "replaced tracked
-// worktree" notice; every other call site passes nil, which marshals as the
+// worktree" notice, and `label --transition working`'s malformed-launch notice
+// (#1292); every other call site passes nil, which marshals as the
 // #588-mandated `[]`, never `null`.
 func renderMechanicsOutput(id, repoRoot, stateDir string, state pipeline.State, artifacts []string, warnings []string, err error) {
 	if err != nil && state.Stage == "" {
@@ -182,6 +184,24 @@ func runPipelineLabel(rest []string) {
 		pipelineLabelUsageExit()
 	}
 
+	// The sandbox launch this claim runs in is read here, in the command layer,
+	// and handed to the pipeline package through LabelOpts (#1292): only the
+	// "working" claim records it, and a malformed or partial set never fails
+	// the transition -- it is cleared and surfaced as one warning.
+	var launch pipeline.LaunchEnv
+	var warnings []string
+	if *transition == "working" {
+		var warning string
+		launch, _, warning = pipeline.CheckLaunchEnv(pipeline.LaunchEnv{
+			ID:        os.Getenv(sandbox.LaunchIDEnvName),
+			Container: os.Getenv(sandbox.SandboxContainerEnvName),
+			Runtime:   os.Getenv(sandbox.SandboxRuntimeEnvName),
+		})
+		if warning != "" {
+			warnings = []string{warning}
+		}
+	}
+
 	s, err := pipeline.ApplyLabelTransition(pipeline.LabelOpts{
 		ID:         id,
 		RepoRoot:   *repo,
@@ -190,8 +210,9 @@ func runPipelineLabel(rest []string) {
 		Transition: *transition,
 		Trivial:    *trivial,
 		ParentID:   *parent,
+		Launch:     launch,
 	})
-	renderMechanicsOutput(id, *repo, *stateDir, s, []string{}, nil, err)
+	renderMechanicsOutput(id, *repo, *stateDir, s, []string{}, warnings, err)
 }
 
 // runPipelineWorktree implements `cenci pipeline worktree <id> (--slug SLUG

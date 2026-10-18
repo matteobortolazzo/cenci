@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/pipeline"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/planfile"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/run"
 	"github.com/matteobortolazzo/cenci/watch/v2/pkg/watch"
@@ -19,6 +20,10 @@ import (
 // so tests never ensure a real daemon or tmux window (same idiom as
 // internal/daemon's spawn var).
 var runFn = run.Run
+
+// clearLaunchFn is the recorded-launch clearing seam (#1292): applyDispatch
+// calls it before each spawn so tests can inject a failure.
+var clearLaunchFn = pipeline.ClearLaunch
 
 // replanContextToken (#828) is the escape-hatch token appended to the run
 // Ticket argument for an autonomous re-plan dispatch ("<number> replan"), so
@@ -390,6 +395,23 @@ func applyDispatch(cfg Config, deps dispatchDeps, ctrl run.Controller, mut Ticke
 		// re-plan kinds, all of which carry a non-nil Plan.
 		if d.Action != ActionDispatch || (d.Plan == nil && !d.Planning) {
 			continue
+		}
+
+		// Clear the ticket's recorded launch (#1292) BEFORE the resume claim
+		// below and before the spawn: the new session starts on the window-name
+		// liveness rule until its own `working` claim records its launch, so a
+		// dead launch recorded before a crash can never make it read dead. A
+		// failed clear (an unreadable state file) skips this ticket entirely --
+		// no spawn, no label edit -- so a stale launch is never left behind a new
+		// session. It is logged, not returned: one ticket's broken state file must
+		// not fail the whole pass (RunLoop treats a returned error as fatal). An
+		// empty repo dir is never touched (pipeline would fall back to the
+		// process cwd); the collector reads no launch for it either.
+		if dir := dirByRepo[d.Ticket.Repo]; dir != "" {
+			if err := clearLaunchFn(pipeline.ArtifactOpts{ID: strconv.Itoa(d.Ticket.Number), RepoRoot: dir}); err != nil {
+				logf(out, "dispatch: #%d clearing recorded launch failed: %v\n", d.Ticket.Number, err)
+				continue
+			}
 		}
 
 		// Resume path (#827): swap Input Needed -> Working BEFORE spawning,

@@ -19,6 +19,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/sandbox"
 )
 
 // CurrentSchemaVersion tags the on-disk state format (mirrors babysit's
@@ -59,6 +61,30 @@ type State struct {
 	// Stored as a string (not time.Time) so an absent baseline round-trips
 	// as "" under omitempty.
 	TicketUpdatedAt string `json:"ticketUpdatedAt,omitempty"`
+}
+
+// The State.Session keys that record the sandbox launch a ticket's `working`
+// claim ran in (#1292): the launch ID, the container it lives in and the
+// runtime that runs it. They are written by `pipeline label --transition
+// working` (labels.go) and removed by ClearLaunch (the dispatcher, before it
+// spawns a new session). The session map already round-trips and merges key by
+// key, so these need no CurrentSchemaVersion bump; the existing keys (runId,
+// reviewPath) do not collide. The values are agent-writable (.cenci/pipeline/
+// lives in the bind-mounted repo), so every reader must re-check them with
+// ValidLaunchTriple before use.
+const (
+	SessionKeyLaunchID  = "launchId"
+	SessionKeyContainer = "container"
+	SessionKeyRuntime   = "runtime"
+)
+
+// ValidLaunchTriple reports whether id, container and runtime together form a
+// recordable launch: a well-formed launch ID, a sandbox container name within
+// the runtime's name grammar, and a runtime in the closed set docker/podman.
+// It is the one check shared by the write side (labels.go) and any consumer
+// that reads the triple back before it reaches an exec argv.
+func ValidLaunchTriple(id, container, runtime string) bool {
+	return sandbox.ValidLaunchID(id) && sandbox.ValidSandboxContainerName(container) && sandbox.ValidLaunchRuntime(runtime)
 }
 
 // idPattern is the validation gate every <id> must pass before it is used to
@@ -104,9 +130,9 @@ func resolveRepoRoot(cwd string) (string, error) {
 	return filepath.Dir(commonDir), nil
 }
 
-// saveState writes s to path atomically: marshal, write to a sibling .tmp
-// file, then os.Rename over the target so a reader never observes a
-// partially-written file.
+// saveState writes s to path atomically: marshal, write to a fresh sibling
+// temp file (exclusive create, random name), then os.Rename over the target so
+// a reader never observes a partially-written file.
 func saveState(path string, s State) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("create state dir: %w", err)
@@ -115,11 +141,30 @@ func saveState(path string, s State) error {
 	if err != nil {
 		return fmt.Errorf("marshal state: %w", err)
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+	// The state dir lives in the agent-writable bind-mounted repo, so the temp
+	// file must be a fresh O_EXCL create under an unpredictable name: a fixed
+	// "<path>.tmp" could be a planted symlink that os.WriteFile would follow.
+	f, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return fmt.Errorf("create temp state file: %w", err)
+	}
+	tmp := f.Name()
+	if _, err := f.Write(b); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
 		return fmt.Errorf("write temp state file: %w", err)
 	}
+	if err := f.Chmod(0o644); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return fmt.Errorf("chmod temp state file: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("close temp state file: %w", err)
+	}
 	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
 		return fmt.Errorf("rename temp state file: %w", err)
 	}
 	return nil
@@ -142,4 +187,120 @@ func loadState(path string) (State, error) {
 		return State{}, fmt.Errorf("decode state file: %w", err)
 	}
 	return s, nil
+}
+
+// ClearLaunch removes the recorded launch triple (SessionKeyLaunchID,
+// SessionKeyContainer, SessionKeyRuntime) from the ticket's persisted
+// session, keeping every other session key, under the same per-ticket flock the
+// other state writers take (#1292). The dispatcher calls it before spawning a
+// session, so the new session starts on the window-name rule until its own
+// `working` claim records the new launch.
+//
+// A missing state file is the normal "nothing recorded yet" case: it is a
+// no-op that creates neither the file, its directory nor the lock file. A file
+// that carries none of the three keys is left byte-for-byte as it is (no
+// write). An unreadable or corrupt file is an error, so a caller never
+// proceeds believing a stale launch was cleared.
+//
+// Because .cenci/ lives in the agent-writable bind-mounted repo, a symlinked
+// .cenci or .cenci/pipeline directory would redirect the host-side lock, read,
+// temp file and rename outside the repo. checkStateDirContained refuses both
+// (and any state directory that resolves outside the repo root) before the
+// lock is taken. This closes the static symlink case only: a swap that races
+// the check (TOCTOU) is a known residual, tracked as a followup together with
+// a repo-wide os.Root migration of the other state writers.
+func ClearLaunch(o ArtifactOpts) error {
+	path, err := resolveStatePath(Opts{ID: o.ID, RepoRoot: o.RepoRoot, StateDir: o.StateDir})
+	if err != nil {
+		return err
+	}
+	// Lstat, not Stat: the state file is agent-writable, so a planted symlink
+	// (or directory, device) at the path is refused rather than read or
+	// rewritten through by this host-side writer.
+	info, statErr := os.Lstat(path)
+	if os.IsNotExist(statErr) {
+		return nil
+	}
+	if statErr != nil {
+		return fmt.Errorf("stat state file %s: %w", path, statErr)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("state file %s is not a regular file (mode %s), refusing to clear its launch", path, info.Mode().Type())
+	}
+	if err := checkStateDirContained(path, o.StateDir == ""); err != nil {
+		return err
+	}
+	return withLock(path+".lock", defaultRetryConfig(), func() error {
+		s, lerr := loadState(path)
+		if lerr != nil {
+			return lerr
+		}
+		if !deleteLaunchKeys(&s) {
+			return nil
+		}
+		s.UpdatedAt = time.Now().UTC()
+		return saveState(path, s)
+	})
+}
+
+// checkStateDirContained refuses a state directory that an agent-planted
+// symlink could redirect outside the repo. It Lstat-checks the directory that
+// holds the state file and, when the path is the canonical
+// <repoRoot>/.cenci/pipeline/<id>.json (repoLayout), the .cenci directory too:
+// each must be a real directory, not a symlink. It then compares the fully
+// resolved state directory against the resolved repo root and refuses unless it
+// is inside. An explicit StateDir override has no repo root, so only the
+// state directory's own Lstat check applies. The errors name paths only, never
+// recorded values.
+func checkStateDirContained(stateFile string, repoLayout bool) error {
+	stateDir := filepath.Dir(stateFile)
+	dirs := []string{stateDir}
+	repoRoot := ""
+	if repoLayout {
+		cenciDir := filepath.Dir(stateDir)
+		repoRoot = filepath.Dir(cenciDir)
+		dirs = []string{cenciDir, stateDir}
+	}
+	for _, d := range dirs {
+		info, err := os.Lstat(d)
+		if err != nil {
+			return fmt.Errorf("stat state directory %s: %w", d, err)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("state directory %s is not a plain directory (mode %s), refusing to clear its launch", d, info.Mode().Type())
+		}
+	}
+	if repoRoot == "" {
+		return nil
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(repoRoot)
+	if err != nil {
+		return fmt.Errorf("resolve repo root %s: %w", repoRoot, err)
+	}
+	resolvedState, err := filepath.EvalSymlinks(stateDir)
+	if err != nil {
+		return fmt.Errorf("resolve state directory %s: %w", stateDir, err)
+	}
+	rel, err := filepath.Rel(resolvedRoot, resolvedState)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("state directory %s resolves outside the repo root %s, refusing to clear its launch", stateDir, repoRoot)
+	}
+	return nil
+}
+
+// deleteLaunchKeys removes the three launch keys from s.Session and reports
+// whether any was present. An emptied session is set back to nil so omitempty
+// drops it from the file.
+func deleteLaunchKeys(s *State) bool {
+	removed := false
+	for _, k := range []string{SessionKeyLaunchID, SessionKeyContainer, SessionKeyRuntime} {
+		if _, ok := s.Session[k]; ok {
+			delete(s.Session, k)
+			removed = true
+		}
+	}
+	if len(s.Session) == 0 {
+		s.Session = nil
+	}
+	return removed
 }

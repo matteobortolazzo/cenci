@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -2035,5 +2036,295 @@ func TestPlanHealAwaitingInputComment_StartsWithPlanHealMarker(t *testing.T) {
 	}
 	if strings.Contains(body, attemptMarker) {
 		t.Errorf("comment must never carry %q (countAttempts would tally it as a dispatch attempt), got %q", attemptMarker, body)
+	}
+}
+
+// -- #1292: launch-ID liveness in the two Working-gated branches --------------
+
+// The recorded launch every #1292 test uses. The values are well-formed on
+// purpose (32 lowercase hex, a sandbox container name, a supported runtime) so a
+// test that wants the probe to reject them has to say so.
+const (
+	testLaunchID        = "0123456789abcdef0123456789abcdef"
+	testLaunchContainer = "claude-cenci-demo"
+	testLaunchRuntime   = "docker"
+)
+
+var testLaunch = RecordedLaunch{ID: testLaunchID, Container: testLaunchContainer, Runtime: testLaunchRuntime}
+
+// launchInputs is workingInputs() (a Working+Planned ticket #42, no open PR,
+// observed failing 10m ago so grace has elapsed) with a recorded launch, the
+// given probe verdict and a snapshot holding exactly windows.
+func launchInputs(verdict LaunchVerdict, windows ...watch.WindowState) ReconcileInputs {
+	in := workingInputs()
+	in.Tickets[0].Launch = testLaunch
+	in.LaunchVerdicts = map[string]LaunchVerdict{"o/r#42": verdict}
+	in.Snapshot = &watch.StateSnapshot{Windows: windows}
+	return in
+}
+
+var (
+	runningImplementWindow = watch.WindowState{WindowName: "42-implement", Status: "running"}
+	doneImplementWindow    = watch.WindowState{WindowName: "42-implement", Status: "done"}
+	stoppedImplementWindow = watch.WindowState{WindowName: "42-implement", Status: "stopped"}
+)
+
+// TestReconcileLaunchVerdict_FailurePath covers AC3, AC4, AC5 and AC6 for the
+// failure path: a recorded launch is judged by its verdict whatever the window
+// is named or says (dead recovers even beside a running or done window, live
+// protects even with no window), an unknown or unrecognized verdict defers with
+// the grace observation preserved and no Recovery, and a ticket without a
+// verdict keeps the window-name rule.
+func TestReconcileLaunchVerdict_FailurePath(t *testing.T) {
+	elapsed := reconcileNow.Add(-10 * time.Minute)
+	tests := []struct {
+		name         string
+		verdict      LaunchVerdict
+		windows      []watch.WindowState
+		wantRecovery bool
+		wantObsKept  bool // NextObservations still holds the seeded first-seen time
+	}{
+		{"dead beside a running window recovers (AC3)", LaunchVerdictDead, []watch.WindowState{runningImplementWindow}, true, false},
+		{"dead beside a done window recovers (AC3)", LaunchVerdictDead, []watch.WindowState{doneImplementWindow}, true, false},
+		{"dead with no window recovers", LaunchVerdictDead, nil, true, false},
+		{"live with no window is left alone, observation cleared (AC4)", LaunchVerdictLive, nil, false, false},
+		{"live beside a stopped window is left alone", LaunchVerdictLive, []watch.WindowState{stoppedImplementWindow}, false, false},
+		{"unknown with no window defers, observation kept (AC6)", LaunchVerdictUnknown, nil, false, true},
+		{"unknown beside a running window defers, observation kept (AC6)", LaunchVerdictUnknown, []watch.WindowState{runningImplementWindow}, false, true},
+		{"unrecognized verdict fails closed like unknown", LaunchVerdict("bogus"), nil, false, true},
+		{"no verdict and a running window: window-name rule says live (AC5)", LaunchVerdictNone, []watch.WindowState{runningImplementWindow}, false, false},
+		{"no verdict and no window: window-name rule says dead (AC5)", LaunchVerdictNone, nil, true, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			res := Reconcile(launchInputs(tt.verdict, tt.windows...))
+
+			if tt.wantRecovery {
+				if rec := onlyRecovery(t, res); rec.Kind != RecoveryRetry {
+					t.Errorf("kind = %q, want %q", rec.Kind, RecoveryRetry)
+				}
+			} else if len(res.Recoveries) != 0 {
+				t.Fatalf("want no recovery, got %+v", res.Recoveries)
+			}
+			ts, kept := res.NextObservations["o/r#42"]
+			if tt.wantObsKept {
+				if !kept || !ts.Equal(elapsed) {
+					t.Errorf("NextObservations[o/r#42] = %v (present=%v), want the seeded %v preserved", ts, kept, elapsed)
+				}
+			} else if kept {
+				t.Errorf("NextObservations[o/r#42] = %v, want no entry", ts)
+			}
+		})
+	}
+}
+
+// TestReconcileLaunchVerdict_DeadGraceNotElapsed: a dead verdict still honors
+// the grace clock, keeping the original first-seen time.
+func TestReconcileLaunchVerdict_DeadGraceNotElapsed(t *testing.T) {
+	in := launchInputs(LaunchVerdictDead, runningImplementWindow)
+	seed := reconcileNow.Add(-2 * time.Minute)
+	in.Observations = map[string]time.Time{"o/r#42": seed}
+
+	res := Reconcile(in)
+
+	if len(res.Recoveries) != 0 {
+		t.Fatalf("want no recovery before grace, got %+v", res.Recoveries)
+	}
+	requireObservation(t, res, seed)
+}
+
+// TestReconcileLaunchVerdict_OpenPRBeatsEveryVerdict: an open PR resets the
+// ticket whatever the verdict, including an unknown one that would otherwise
+// defer.
+func TestReconcileLaunchVerdict_OpenPRBeatsEveryVerdict(t *testing.T) {
+	for _, v := range []LaunchVerdict{LaunchVerdictDead, LaunchVerdictLive, LaunchVerdictUnknown} {
+		t.Run(string(v), func(t *testing.T) {
+			in := launchInputs(v)
+			in.Tickets[0].HasOpenPR = true
+			res := Reconcile(in)
+			if len(res.Recoveries) != 0 {
+				t.Fatalf("an open PR must produce no recovery, got %+v", res.Recoveries)
+			}
+			requireNoObservation(t, res)
+		})
+	}
+}
+
+// TestReconcileLaunchVerdict_DeadInPaneComments covers AC8 for all three
+// recovery kinds. With a dead verdict and a surviving window the comment names
+// the window and says its agent process was gone; the marker is unchanged
+// (attemptMarker for retry and resume-interrupted, failedMarker for failed); no
+// launch ID or container leaks. With a dead verdict and no window the comment is
+// today's text byte for byte.
+func TestReconcileLaunchVerdict_DeadInPaneComments(t *testing.T) {
+	tests := []struct {
+		name        string
+		prep        func(in *ReconcileInputs)
+		wantKind    RecoveryKind
+		wantMarker  string
+		otherMarker string
+		noWindow    string // the comment today's code posts for a missing window
+	}{
+		{
+			name:        "ordinary retry",
+			prep:        func(in *ReconcileInputs) {},
+			wantKind:    RecoveryRetry,
+			wantMarker:  attemptMarker,
+			otherMarker: failedMarker,
+			noWindow:    retryComment(1, "42", "gone"),
+		},
+		{
+			name: "interrupted resume",
+			prep: func(in *ReconcileInputs) {
+				in.Tickets[0].Labels = []string{"Working"}
+				in.Plans = awaitingInputPlans()
+			},
+			wantKind:    RecoveryResumeInterrupted,
+			wantMarker:  attemptMarker,
+			otherMarker: failedMarker,
+			noWindow:    resumeInterruptedComment(1, "42", "gone"),
+		},
+		{
+			name: "budget exhausted",
+			prep: func(in *ReconcileInputs) {
+				in.Attempts = map[string]int{"o/r#42": 2}
+			},
+			wantKind:    RecoveryFailed,
+			wantMarker:  failedMarker,
+			otherMarker: attemptMarker,
+			noWindow:    failedComment(2, "42", "gone"),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name+" with a surviving window", func(t *testing.T) {
+			in := launchInputs(LaunchVerdictDead, runningImplementWindow)
+			tt.prep(&in)
+
+			rec := onlyRecovery(t, Reconcile(in))
+
+			if rec.Kind != tt.wantKind {
+				t.Errorf("kind = %q, want %q", rec.Kind, tt.wantKind)
+			}
+			for _, want := range []string{"`42-implement`", "agent process was gone", tt.wantMarker} {
+				if !strings.Contains(rec.Comment, want) {
+					t.Errorf("comment %q does not contain %q", rec.Comment, want)
+				}
+			}
+			for _, bad := range []string{tt.otherMarker, testLaunchID, testLaunchContainer} {
+				if strings.Contains(rec.Comment, bad) {
+					t.Errorf("comment %q must not contain %q", rec.Comment, bad)
+				}
+			}
+			if first, _, _ := strings.Cut(rec.Comment, "\n"); first != tt.wantMarker {
+				t.Errorf("first line = %q, want exactly the marker %q", first, tt.wantMarker)
+			}
+		})
+		t.Run(tt.name+" with no window keeps today's text", func(t *testing.T) {
+			in := launchInputs(LaunchVerdictDead)
+			tt.prep(&in)
+
+			rec := onlyRecovery(t, Reconcile(in))
+
+			if rec.Comment != tt.noWindow {
+				t.Errorf("comment = %q, want today's %q", rec.Comment, tt.noWindow)
+			}
+		})
+	}
+}
+
+// TestReconcileLaunchVerdict_NoVerdictCommentIsUnchanged: a surviving window
+// with no verdict never gets the dead-in-pane wording (AC5).
+func TestReconcileLaunchVerdict_NoVerdictCommentIsUnchanged(t *testing.T) {
+	in := launchInputs(LaunchVerdictNone, stoppedImplementWindow)
+
+	rec := onlyRecovery(t, Reconcile(in))
+
+	if want := retryComment(1, "42-implement", "stopped"); rec.Comment != want {
+		t.Errorf("comment = %q, want %q", rec.Comment, want)
+	}
+}
+
+// TestReconcileLaunchVerdict_InputNeededAndWorkingCleanup covers the second
+// Working-gated branch: the stray-Working cleanup uses the verdict exactly like
+// the failure path does, and the ticket stays in Escalated either way.
+func TestReconcileLaunchVerdict_InputNeededAndWorkingCleanup(t *testing.T) {
+	elapsed := reconcileNow.Add(-10 * time.Minute)
+	tests := []struct {
+		name         string
+		verdict      LaunchVerdict
+		windows      []watch.WindowState
+		wantRecovery bool
+		wantObsKept  bool
+	}{
+		{"dead beside a running window cleans up", LaunchVerdictDead, []watch.WindowState{runningImplementWindow}, true, false},
+		{"live with no window is left alone", LaunchVerdictLive, nil, false, false},
+		{"unknown defers, observation kept", LaunchVerdictUnknown, nil, false, true},
+		{"unrecognized defers, observation kept", LaunchVerdict("bogus"), []watch.WindowState{runningImplementWindow}, false, true},
+		{"no verdict and a running window: window-name rule says live", LaunchVerdictNone, []watch.WindowState{runningImplementWindow}, false, false},
+		{"no verdict and no window: window-name rule says dead", LaunchVerdictNone, nil, true, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			in := inputNeededAndWorkingInputs()
+			in.Tickets[0].Launch = testLaunch
+			in.LaunchVerdicts = map[string]LaunchVerdict{"o/r#42": tt.verdict}
+			in.Snapshot = &watch.StateSnapshot{Windows: tt.windows}
+
+			res := Reconcile(in)
+
+			if !hasEscalated(res, "o/r", 42) {
+				t.Error("the ticket must stay in Escalated")
+			}
+			if tt.wantRecovery {
+				rec := onlyRecovery(t, res)
+				if rec.Kind != RecoveryResumeInterrupted || len(rec.AddLabels) != 0 || !slices.Equal(rec.RemoveLabels, []string{labelWorking}) {
+					t.Errorf("recovery = %+v, want the cleanup (resume-interrupted, remove [Working])", rec)
+				}
+			} else if len(res.Recoveries) != 0 {
+				t.Fatalf("want no recovery, got %+v", res.Recoveries)
+			}
+			ts, kept := res.NextObservations["o/r#42"]
+			if tt.wantObsKept != kept || (kept && !ts.Equal(elapsed)) {
+				t.Errorf("NextObservations[o/r#42] = %v (present=%v), want present=%v at %v", ts, kept, tt.wantObsKept, elapsed)
+			}
+		})
+	}
+}
+
+// TestReconcileLaunchVerdict_HealBranchesIgnoreVerdicts: heals A, B and C keep
+// the window-name rule, so a verdict map changes nothing about their result,
+// beside a live window or without one.
+func TestReconcileLaunchVerdict_HealBranchesIgnoreVerdicts(t *testing.T) {
+	heals := []struct {
+		name  string
+		build func() ReconcileInputs
+	}{
+		{"heal A (Refined)", planHealRefinedInputs},
+		{"heal B (Input Needed)", func() ReconcileInputs { return planHealInputNeededInputs("Input Needed") }},
+		{"heal C (Planned awaiting-input)", planHealPlannedAwaitingInputInputs},
+	}
+	windowSets := map[string][]watch.WindowState{
+		"no window":      nil,
+		"running window": {{WindowName: "42-x", Status: "running"}},
+	}
+	for _, h := range heals {
+		for wname, windows := range windowSets {
+			base := h.build()
+			base.Tickets[0].Launch = testLaunch
+			base.Snapshot = &watch.StateSnapshot{Windows: windows}
+			want := Reconcile(base)
+			if wname == "no window" && len(want.Recoveries) != 1 {
+				t.Fatalf("%s: fixture must fire its heal without a window, got %+v", h.name, want.Recoveries)
+			}
+			for _, v := range []LaunchVerdict{LaunchVerdictLive, LaunchVerdictDead, LaunchVerdictUnknown} {
+				t.Run(h.name+"/"+wname+"/"+string(v), func(t *testing.T) {
+					in := base
+					in.LaunchVerdicts = map[string]LaunchVerdict{"o/r#42": v}
+					if got := Reconcile(in); !reflect.DeepEqual(got, want) {
+						t.Errorf("result with verdict %q = %+v, want it identical to the no-verdict result %+v", v, got, want)
+					}
+				})
+			}
+		}
 	}
 }
