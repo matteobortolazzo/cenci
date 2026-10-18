@@ -115,6 +115,21 @@ func LastRename(renames []RenameCall, target string) (string, bool) {
 	return "", false
 }
 
+// LivePaneLister is a fake for the strict live-pane listing (tmux.ListLivePanes):
+// it returns Panes and Err, and counts the reads in Calls so a test can prove a
+// path never consulted tmux at all.
+type LivePaneLister struct {
+	Panes []tmux.LivePane
+	Err   error
+	Calls int
+}
+
+// ListLivePanes records the call and returns the configured panes and error.
+func (l *LivePaneLister) ListLivePanes() ([]tmux.LivePane, error) {
+	l.Calls++
+	return l.Panes, l.Err
+}
+
 // PaneOptionCall records one SetPaneOption call (a pane-scoped user option
 // written through the pane's own socket, #1252).
 type PaneOptionCall struct {
