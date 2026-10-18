@@ -1,5 +1,5 @@
 {
-  "configVersion": "1.8.0",
+  "configVersion": "1.15.0",
   "branchPattern": "feature/<id>-<description>",
   "isMonorepo": true,
   "stack": {
@@ -144,5 +144,10 @@
   },
   "refinement": {
     "autonomy": "lean"
-  }
+  },
+  "configureOffered": [
+    "cicd",
+    "sandbox.azure",
+    "sandbox.dind"
+  ]
 }
