@@ -1161,6 +1161,256 @@ func TestCheckPlan_StageAgnostic_EchoesPersistedStageWithoutMutating(t *testing.
 	}
 }
 
+// -- pipeline info (#1293): CheckPlan echoes the persisted pipeline state
+// alongside the decision, including whether the recorded worktree is proven
+// registered. It never changes the decision or the returned error.
+
+// seedStateWithWorktree persists a state carrying the given stage and
+// worktree artifacts.
+func seedStateWithWorktree(t *testing.T, stateDir, id string, stage Stage, worktreePath, branch string) {
+	t.Helper()
+	path := filepath.Join(stateDir, id+".json")
+	s := State{SchemaVersion: CurrentSchemaVersion, ID: id, Stage: stage, WorktreePath: worktreePath, Branch: branch}
+	if err := saveState(path, s); err != nil {
+		t.Fatalf("seed state: %v", err)
+	}
+}
+
+// pipelineInfoRepo returns a git repo with a plan file for ticket 42 (so a
+// --replan-requested CheckPlan succeeds with no gh round-trip).
+func pipelineInfoRepo(t *testing.T) string {
+	t.Helper()
+	repoRoot := t.TempDir()
+	initGitRepoWithCommit(t, repoRoot)
+	writePlanFile(t, repoRoot, "42", "add-thing", defaultPlanFields("42", "add-thing", gitHeadSha(t, repoRoot), "2026-07-20T20:00:00Z"), validPlanBody)
+	return repoRoot
+}
+
+func TestCheckPlan_PipelineInfo_NoState_IsNewAndUnregisteredWithNoGitCall(t *testing.T) {
+	repoRoot := pipelineInfoRepo(t)
+	calls := recordingCommand(t)
+
+	_, check, err := CheckPlan(PlanCheckOpts{ID: "42", RepoRoot: repoRoot, StateDir: t.TempDir(), ReplanRequested: true})
+	if err != nil {
+		t.Fatalf("CheckPlan: %v", err)
+	}
+	if want := (PipelineInfo{Stage: "new"}); check.Pipeline != want {
+		t.Errorf("Pipeline = %+v, want %+v", check.Pipeline, want)
+	}
+	if len(check.PipelineWarnings) != 0 {
+		t.Errorf("PipelineWarnings = %v, want none", check.PipelineWarnings)
+	}
+	if len(*calls) != 0 {
+		t.Errorf("git/gh calls = %v, want none (no recorded worktree to prove)", *calls)
+	}
+}
+
+func TestCheckPlan_PipelineInfo_StateWithoutWorktree_RunsNoGitWorktreeList(t *testing.T) {
+	repoRoot := pipelineInfoRepo(t)
+	stateDir := t.TempDir()
+	mustSeedState(t, stateDir, "42", StagePrepared)
+	calls := recordingCommand(t)
+
+	_, check, err := CheckPlan(PlanCheckOpts{ID: "42", RepoRoot: repoRoot, StateDir: stateDir, ReplanRequested: true})
+	if err != nil {
+		t.Fatalf("CheckPlan: %v", err)
+	}
+	if want := (PipelineInfo{Stage: "prepared"}); check.Pipeline != want {
+		t.Errorf("Pipeline = %+v, want %+v", check.Pipeline, want)
+	}
+	if len(*calls) != 0 {
+		t.Errorf("git calls = %v, want none when the state records no worktree path and branch", *calls)
+	}
+}
+
+func TestCheckPlan_PipelineInfo_RegisteredWorktree_EchoesStateAndIsRegistered(t *testing.T) {
+	repoRoot := pipelineInfoRepo(t)
+	stateDir := t.TempDir()
+	wt, _, err := CreateWorktree(WorktreeOpts{ID: "42", Slug: "add-thing", RepoRoot: repoRoot, StateDir: stateDir})
+	if err != nil {
+		t.Fatalf("CreateWorktree: %v", err)
+	}
+	seedStateWithWorktree(t, stateDir, "42", StageExecuted, wt.WorktreePath, wt.Branch)
+
+	_, check, err := CheckPlan(PlanCheckOpts{ID: "42", RepoRoot: repoRoot, StateDir: stateDir, ReplanRequested: true})
+	if err != nil {
+		t.Fatalf("CheckPlan: %v", err)
+	}
+	want := PipelineInfo{Stage: "executed", WorktreePath: wt.WorktreePath, Branch: wt.Branch, WorktreeRegistered: true}
+	if check.Pipeline != want {
+		t.Errorf("Pipeline = %+v, want %+v", check.Pipeline, want)
+	}
+	if len(check.PipelineWarnings) != 0 {
+		t.Errorf("PipelineWarnings = %v, want none", check.PipelineWarnings)
+	}
+}
+
+func TestCheckPlan_PipelineInfo_FinalizedWithPR_EchoesPRFields(t *testing.T) {
+	repoRoot := pipelineInfoRepo(t)
+	stateDir := t.TempDir()
+	path := filepath.Join(stateDir, "42.json")
+	s := State{SchemaVersion: CurrentSchemaVersion, ID: "42", Stage: StageFinalized, PRURL: "https://github.com/o/r/pull/7", PRNumber: 7}
+	if err := saveState(path, s); err != nil {
+		t.Fatalf("seed state: %v", err)
+	}
+
+	_, check, err := CheckPlan(PlanCheckOpts{ID: "42", RepoRoot: repoRoot, StateDir: stateDir, ReplanRequested: true})
+	if err != nil {
+		t.Fatalf("CheckPlan: %v", err)
+	}
+	want := PipelineInfo{Stage: "finalized", PRURL: "https://github.com/o/r/pull/7", PRNumber: 7}
+	if check.Pipeline != want {
+		t.Errorf("Pipeline = %+v, want %+v", check.Pipeline, want)
+	}
+}
+
+func TestCheckPlan_PipelineInfo_RecordedWorktreeGone_IsUnregisteredWithoutWarning(t *testing.T) {
+	repoRoot := pipelineInfoRepo(t)
+	stateDir := t.TempDir()
+	gone := filepath.Join(repoRoot, ".worktrees", "42-add-thing")
+	seedStateWithWorktree(t, stateDir, "42", StageExecuted, gone, "feature/42-add-thing")
+
+	_, check, err := CheckPlan(PlanCheckOpts{ID: "42", RepoRoot: repoRoot, StateDir: stateDir, ReplanRequested: true})
+	if err != nil {
+		t.Fatalf("CheckPlan: %v", err)
+	}
+	if check.Pipeline.WorktreeRegistered {
+		t.Error("WorktreeRegistered = true for a worktree git does not list, want false")
+	}
+	if check.Pipeline.WorktreePath != gone || check.Pipeline.Stage != "executed" {
+		t.Errorf("Pipeline = %+v, want the recorded stage and path echoed", check.Pipeline)
+	}
+	if len(check.PipelineWarnings) != 0 {
+		t.Errorf("PipelineWarnings = %v, want none (an unlisted worktree is a normal answer, not a failure)", check.PipelineWarnings)
+	}
+}
+
+func TestCheckPlan_PipelineInfo_RecordedBranchDeletedButDirStays_IsUnregisteredWithoutWarning(t *testing.T) {
+	for _, how := range []string{"detach", "update-ref"} {
+		t.Run(how, func(t *testing.T) {
+			repoRoot := pipelineInfoRepo(t)
+			stateDir := t.TempDir()
+			wt, _, err := CreateWorktree(WorktreeOpts{ID: "42", Slug: "add-thing", RepoRoot: repoRoot, StateDir: stateDir})
+			if err != nil {
+				t.Fatalf("CreateWorktree: %v", err)
+			}
+			seedStateWithWorktree(t, stateDir, "42", StageExecuted, wt.WorktreePath, wt.Branch)
+			deleteRecordedBranchKeepingDir(t, how, repoRoot, wt.WorktreePath, wt.Branch)
+
+			_, check, err := CheckPlan(PlanCheckOpts{ID: "42", RepoRoot: repoRoot, StateDir: stateDir, ReplanRequested: true})
+			if err != nil {
+				t.Fatalf("CheckPlan: %v", err)
+			}
+			if check.Pipeline.WorktreeRegistered {
+				t.Error("WorktreeRegistered = true although the recorded branch was deleted, want false")
+			}
+			if check.Pipeline.WorktreePath != wt.WorktreePath || check.Pipeline.Branch != wt.Branch {
+				t.Errorf("Pipeline = %+v, want the recorded path and branch echoed", check.Pipeline)
+			}
+			if len(check.PipelineWarnings) != 0 {
+				t.Errorf("PipelineWarnings = %v, want none", check.PipelineWarnings)
+			}
+		})
+	}
+}
+
+func TestCheckPlan_PipelineInfo_GitWorktreeListFails_UnregisteredWithOneWarningDecisionUnchanged(t *testing.T) {
+	repoRoot := pipelineInfoRepo(t)
+	stateDir := t.TempDir()
+	seedStateWithWorktree(t, stateDir, "42", StageExecuted, filepath.Join(repoRoot, ".worktrees", "42-add-thing"), "feature/42-add-thing")
+	original := command
+	command = func(name string, args ...string) ([]byte, error) {
+		if name == "git" && strings.Contains(strings.Join(args, " "), "worktree list") {
+			return []byte("fatal: boom"), errors.New("exit status 128")
+		}
+		return original(name, args...)
+	}
+	t.Cleanup(func() { command = original })
+
+	_, check, err := CheckPlan(PlanCheckOpts{ID: "42", RepoRoot: repoRoot, StateDir: stateDir, ReplanRequested: true})
+	if err != nil {
+		t.Fatalf("CheckPlan: %v (a git failure must not become an error)", err)
+	}
+	if check.Decision != "replan" {
+		t.Errorf("Decision = %q, want replan (unchanged by the git failure)", check.Decision)
+	}
+	if check.Pipeline.WorktreeRegistered {
+		t.Error("WorktreeRegistered = true after a git failure, want false")
+	}
+	if len(check.PipelineWarnings) != 1 {
+		t.Fatalf("PipelineWarnings = %v, want exactly one entry", check.PipelineWarnings)
+	}
+	if !strings.Contains(check.PipelineWarnings[0], "git worktree list --porcelain") {
+		t.Errorf("warning = %q, want it to name the git failure", check.PipelineWarnings[0])
+	}
+}
+
+func TestCheckPlan_PipelineInfo_ShowRefFailsNonExit1_UnregisteredWithOneWarning(t *testing.T) {
+	repoRoot := pipelineInfoRepo(t)
+	stateDir := t.TempDir()
+	wt, _, err := CreateWorktree(WorktreeOpts{ID: "42", Slug: "add-thing", RepoRoot: repoRoot, StateDir: stateDir})
+	if err != nil {
+		t.Fatalf("CreateWorktree: %v", err)
+	}
+	seedStateWithWorktree(t, stateDir, "42", StageExecuted, wt.WorktreePath, wt.Branch)
+	failShowRefWith(t, exitErrorWithCode(t, 128))
+
+	_, check, err := CheckPlan(PlanCheckOpts{ID: "42", RepoRoot: repoRoot, StateDir: stateDir, ReplanRequested: true})
+	if err != nil {
+		t.Fatalf("CheckPlan: %v (a git failure must not become an error)", err)
+	}
+	if check.Decision != "replan" {
+		t.Errorf("Decision = %q, want replan (unchanged by the git failure)", check.Decision)
+	}
+	if check.Pipeline.WorktreeRegistered {
+		t.Error("WorktreeRegistered = true after a show-ref failure, want false")
+	}
+	if len(check.PipelineWarnings) != 1 || !strings.HasPrefix(check.PipelineWarnings[0], "could not verify worktree registration for 42: ") {
+		t.Errorf("PipelineWarnings = %v, want exactly one 'could not verify worktree registration for 42: ...' entry", check.PipelineWarnings)
+	}
+}
+
+func TestCheckPlan_PipelineInfo_CorruptState_NoStageUnregisteredWithOneWarning(t *testing.T) {
+	repoRoot := pipelineInfoRepo(t)
+	stateDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(stateDir, "42.json"), []byte("{not json"), 0o644); err != nil {
+		t.Fatalf("write corrupt state: %v", err)
+	}
+
+	_, check, err := CheckPlan(PlanCheckOpts{ID: "42", RepoRoot: repoRoot, StateDir: stateDir, ReplanRequested: true})
+	if err != nil {
+		t.Fatalf("CheckPlan: %v (an unreadable state must not become an error)", err)
+	}
+	if check.Decision != "replan" {
+		t.Errorf("Decision = %q, want replan (unchanged by the unreadable state)", check.Decision)
+	}
+	if check.Pipeline != (PipelineInfo{}) {
+		t.Errorf("Pipeline = %+v, want the zero value (no stage, unregistered)", check.Pipeline)
+	}
+	if len(check.PipelineWarnings) != 1 || !strings.HasPrefix(check.PipelineWarnings[0], "could not read pipeline state for 42: ") {
+		t.Errorf("PipelineWarnings = %v, want exactly one 'could not read pipeline state for 42: ...' entry", check.PipelineWarnings)
+	}
+}
+
+func TestCheckPlan_PipelineInfo_UnknownPersistedStage_EchoedVerbatimDecisionUnchanged(t *testing.T) {
+	repoRoot := pipelineInfoRepo(t)
+	stateDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(stateDir, "42.json"), []byte(`{"schemaVersion":1,"id":"42","stage":"quantum"}`), 0o644); err != nil {
+		t.Fatalf("write state: %v", err)
+	}
+
+	_, check, err := CheckPlan(PlanCheckOpts{ID: "42", RepoRoot: repoRoot, StateDir: stateDir, ReplanRequested: true})
+	if err != nil {
+		t.Fatalf("CheckPlan: %v", err)
+	}
+	if check.Decision != "replan" {
+		t.Errorf("Decision = %q, want replan", check.Decision)
+	}
+	if check.Pipeline.Stage != "quantum" {
+		t.Errorf("Pipeline.Stage = %q, want the unknown stage echoed verbatim", check.Pipeline.Stage)
+	}
+}
+
 // -- escalation anchor echo (#849): PlanMeta gains EscalationNonce/
 // EscalationCommentID, echoed alongside every other front-matter field on
 // the awaiting-input decision. Per the plan's Assumptions, this echo is

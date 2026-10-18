@@ -1826,7 +1826,7 @@ cenci pipeline label 42 --transition working                     # verifies/clai
 cenci pipeline label 42 --transition input-needed                 # applies "Input Needed", removes "Working" (ticket #826 escalation swap; no ownership check)
 cenci pipeline label 42 --transition planned [--trivial]          # applies "Planned", removes "Working" unless --trivial
 cenci pipeline label 42 --transition in-review [--parent 10]      # applies "In Review", removes "Working"; --parent cascades to the parent ticket
-cenci pipeline worktree 42 --slug add-thing                       # git worktree add .worktrees/42-add-thing -b feature/42-add-thing
+cenci pipeline worktree 42 --slug add-thing                       # git worktree add .worktrees/42-add-thing -b feature/42-add-thing; reuses the recorded worktree when resuming a crashed run
 cenci pipeline worktree 42 --attach /path/to/existing-worktree     # reuse mode: validates against `git worktree list --porcelain`, records Branch+WorktreePath, creates nothing
 cenci pipeline worktree-cleanup 42 --slug add-thing               # removes both the worktree dir and the branch (creation-failure rollback only)
 cenci pipeline artifact 42 --plan .plans/42-add-thing.md --branch feature/42-add-thing --session runId=abc123
@@ -1854,6 +1854,20 @@ Behavior:
   `worktree-cleanup` removes both the worktree and its branch and is used
   only on that rollback path (not on a "baseline gate failed" retry path,
   which deliberately keeps the worktree/branch around).
+- `worktree --slug` is idempotent for a crashed run (ticket #1293): when
+  the target `.worktrees/<id>-<slug>` directory already exists **and** the
+  pipeline state records exactly that path and the `feature/<id>-<slug>`
+  branch **and** `git worktree list --porcelain` lists it as a linked,
+  non-detached worktree on that branch, it reuses the worktree instead of
+  failing. It creates nothing (no `git worktree add`, no branch), goes
+  through the same checks as `--attach`, exits `0`, and emits the
+  `warnings[]` entry `reusing existing worktree` (followed by any attach
+  warning). Anything else that already exists — a directory or branch the
+  state does not record, or one it records but git no longer lists on the
+  recorded branch — still fails with the unchanged `worktree dir <dir>
+  already exists` / `branch <branch> already exists` error, so a foreign
+  worktree is never adopted. Paths are compared after symlink resolution;
+  a path that cannot be resolved never matches.
 - `worktree --attach PATH` (ticket #688, closing #718) is the reuse-mode
   counterpart to `--slug`: exactly one of `--slug`/`--attach` is required
   (neither or both is a usage error, exit `2` — conflicting inputs are
@@ -1888,10 +1902,29 @@ Behavior:
   state/`updatedAt`. The `awaiting-input` check runs with zero `git`/`gh`
   calls, same as `--replan-requested`. It never gates on or mutates the
   persisted pipeline stage — read-only, like `artifact --get`. Its JSON
-  output adds two fields beyond the shared contract: `decision` (one of
-  `resume` | `stale` | `replan` | `awaiting-input` | `none` | `multiple`)
-  and `plan` (the validated front-matter metadata, present on every
-  decision except `none` and `multiple`).
+  output adds three fields beyond the shared contract: `decision` (one of
+  `resume` | `stale` | `replan` | `awaiting-input` | `none` | `multiple`),
+  `plan` (the validated front-matter metadata, present on every
+  decision except `none` and `multiple`), and `pipeline` (ticket #1293,
+  below).
+  - **`pipeline` object** (present on *every* decision, including the
+    hard-stop empty one): the persisted state the implement skill routes a
+    resumed run on — `stage`, `worktreePath`, `branch`, `prUrl`, `prNumber`
+    (each omitted when empty/zero) and `worktreeRegistered` (always
+    present). With no state file the object is exactly
+    `{"stage":"new","worktreeRegistered":false}`. `worktreeRegistered` is
+    `true` only when all of these hold: the recorded `worktreePath` is a
+    record in `git worktree list --porcelain`, it is not the first record
+    (the main checkout), it is not on a detached HEAD, its branch equals
+    the recorded `branch`, and that branch still exists as a local ref
+    (`refs/heads/<branch>`). It is `false` without any git call when the state
+    records no path or no branch. The object is purely additive: decisions,
+    exit codes and every other key are unchanged. A git failure while
+    listing worktrees yields `worktreeRegistered: false` plus exactly one
+    `warnings[]` entry naming the failure; an unreadable or corrupt state
+    file yields an object with no `stage` and `worktreeRegistered: false`
+    plus one `could not read pipeline state for <id>: …` warning. A stage
+    value outside the known set is echoed verbatim in `stage`.
   - **Exit-code framing deliberately deviates from the other mechanics
     verbs' blanket "errors[] non-empty → exit 1"**: `none` (no plan file
     yet — the everyday first-run outcome) and `multiple` (ambiguous — ask

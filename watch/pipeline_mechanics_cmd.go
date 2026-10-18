@@ -98,10 +98,11 @@ func mechanicsID(rest []string, usageExit func()) string {
 // lock-contention fallback does.
 //
 // warnings (ticket #688) is every non-stage-command advisory a mechanics
-// verb wants to surface -- today only AttachWorktree's "replaced tracked
-// worktree" notice, and `label --transition working`'s malformed-launch notice
-// (#1292); every other call site passes nil, which marshals as the
-// #588-mandated `[]`, never `null`.
+// verb wants to surface -- AttachWorktree's "replaced tracked worktree"
+// notice, for `worktree --slug`, CreateWorktree's "reusing existing
+// worktree" resume notice (#1293), and `label --transition working`'s
+// malformed-launch notice (#1292); every other call site passes nil, which
+// marshals as the #588-mandated `[]`, never `null`.
 func renderMechanicsOutput(id, repoRoot, stateDir string, state pipeline.State, artifacts []string, warnings []string, err error) {
 	if err != nil && state.Stage == "" {
 		if fallback, gerr := pipeline.GetArtifacts(pipeline.ArtifactOpts{ID: id, RepoRoot: repoRoot, StateDir: stateDir}); gerr == nil {
@@ -217,10 +218,12 @@ func runPipelineLabel(rest []string) {
 
 // runPipelineWorktree implements `cenci pipeline worktree <id> (--slug SLUG
 // | --attach PATH) [--state-dir DIR] [--repo PATH]`. Exactly one of --slug
-// (create mode, pipeline.CreateWorktree) / --attach (reuse mode, ticket
-// #688's pipeline.AttachWorktree) is required: neither or both set is a
-// conflicting-input usage error (exit 2), never silent precedence
-// (docs/cli-conventions.md).
+// (create mode, pipeline.CreateWorktree -- idempotent since #1293: it reuses
+// the worktree the state already records when git still lists it on the
+// recorded branch, with the warning "reusing existing worktree") / --attach
+// (reuse mode, ticket #688's pipeline.AttachWorktree) is required: neither or
+// both set is a conflicting-input usage error (exit 2), never silent
+// precedence (docs/cli-conventions.md).
 func runPipelineWorktree(rest []string) {
 	id := mechanicsID(rest, pipelineWorktreeUsageExit)
 
@@ -264,7 +267,7 @@ func runPipelineWorktree(rest []string) {
 	if attachSet {
 		s, warnings, err = pipeline.AttachWorktree(pipeline.WorktreeOpts{ID: id, RepoRoot: *repo, StateDir: *stateDir, AttachPath: *attach})
 	} else {
-		s, err = pipeline.CreateWorktree(pipeline.WorktreeOpts{ID: id, Slug: *slug, RepoRoot: *repo, StateDir: *stateDir})
+		s, warnings, err = pipeline.CreateWorktree(pipeline.WorktreeOpts{ID: id, Slug: *slug, RepoRoot: *repo, StateDir: *stateDir})
 	}
 	artifacts := []string{}
 	if s.WorktreePath != "" {

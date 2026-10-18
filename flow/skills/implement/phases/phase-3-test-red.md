@@ -75,6 +75,38 @@ Pass:
 - Acceptance criteria, edge cases, and error scenarios.
 - Attachment paths if relevant.
 - Resolved topic docs: at most 3 `docs/<topic>.md` paths matched to Files to Modify/Create.
+- On a resume attach route, the `## Resume Brief` below.
+
+## Resume Brief
+
+Applies only when Phase 2 took a resume attach route (it printed the `Resuming #<id> from stage <stage> in ...` line) and the stage routed here: `plan_approved` or `executed`, or the clean-worktree fallback of `reviewed`/`finalized`. A crashed run's work is almost always uncommitted in the worktree — the pipeline commits only in Phase 9 — so the dirty worktree is the progress signal; never stash or discard it.
+
+If the worktree is clean (no output from `git -C <worktree-path> status --short`, no commits from `git -C <worktree-path> log --oneline main..HEAD`), print `Resumed worktree is clean — running Phase 3 with the standard brief` and delegate with the standard Delegation Context, no resume brief.
+
+Otherwise, gather the three outputs with `git -C <worktree-path> status --short`, `git -C <worktree-path> diff --stat HEAD` and `git -C <worktree-path> log --oneline main..HEAD`, and add this to the Delegation Context:
+
+```text
+Resume brief — an earlier run of this ticket crashed partway through implementation
+and left this worktree as it is. Nothing is committed unless it appears in the log below.
+
+git status --short:
+<output>
+
+git diff --stat HEAD:
+<output>
+
+git log --oneline main..HEAD:
+<output>
+
+Before implementing any plan task, check which plan tasks are already done in the
+worktree (the files above and the tests that already exist) and continue from what
+exists; do not redo finished work. Never stash, reset, checkout over or discard these
+changes, and do not stage or commit them.
+```
+
+The brief goes to every lane — the single implementer, each parallel or sequential lane (`## Parallel Lanes`), and the compact implementer (`## Compact Implementation`). It overrides the per-lane "write the lane's tests first; tests should fail" order only where a task is already done: tests that already exist and pass because the implementation is present are expected on a resume, not a red-phase violation. Tasks that are not yet done follow the normal red-before-green order.
+
+A crash-resume re-brief is not a second resume for `## Context Budget`'s split signal: that count is per session, and the crash was a memory kill, not context exhaustion.
 
 ## Test Priorities
 

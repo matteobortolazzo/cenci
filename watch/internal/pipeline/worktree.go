@@ -6,7 +6,9 @@ package pipeline
 // as resolveRepoRoot (store.go) so this always anchors on the MAIN
 // checkout, never a linked worktree's own root. CreateWorktree records the
 // resulting Branch + WorktreePath into the persisted pipeline State (via
-// the artifacts API) and rolls back any partial state on failure.
+// the artifacts API) and rolls back any partial state on failure. When the
+// state already records that exact, still-registered worktree (a crashed
+// run being resumed, ticket #1293) it reuses it via AttachWorktree instead.
 // CleanupWorktree removes both the worktree directory (`git worktree
 // remove`) and the branch (`git branch -D`) -- used only on the
 // creation-failure rollback path, never on a "baseline gate failed" path
@@ -23,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -145,31 +148,50 @@ func gitBranchExists(root, branch string) bool {
 // state, and rolls back any partial state (dir and/or branch) on failure.
 // Returns ErrWorktreeExists (errors.Is-detectable) when the target
 // dir/branch already exists.
-func CreateWorktree(o WorktreeOpts) (State, error) {
+//
+// Idempotent resume (ticket #1293): when the target dir exists AND the
+// persisted state records exactly this dir + branch AND git lists that dir as
+// a linked worktree on that branch (isWorktreeRegistered), the call reuses it
+// through AttachWorktree instead of failing, creating nothing. The returned
+// warnings then start with "reusing existing worktree", followed by any
+// AttachWorktree warnings. Anything that cannot be proven -- no recorded
+// state, a different path or branch, an unreadable state, a git failure, an
+// unregistered or detached or other-branch worktree -- keeps today's
+// ErrWorktreeExists text, so a foreign worktree is never adopted. The reuse
+// check runs only on the dir-exists branch: a missing dir can never be
+// registered, so the branch-exists path is unchanged.
+func CreateWorktree(o WorktreeOpts) (State, []string, error) {
 	if err := validateSlug(o.Slug); err != nil {
-		return State{}, err
+		return State{}, nil, err
 	}
 
 	mainRoot, err := resolveMainRoot(o.RepoRoot)
 	if err != nil {
-		return State{}, fmt.Errorf("resolve main checkout root: %w", err)
+		return State{}, nil, fmt.Errorf("resolve main checkout root: %w", err)
 	}
 
 	dir, branch := worktreeNames(mainRoot, o.ID, o.Slug)
 
 	if _, statErr := os.Stat(dir); statErr == nil {
-		return State{}, fmt.Errorf("worktree dir %s already exists: %w", dir, ErrWorktreeExists)
+		reused, warnings, reusable, reuseErr := reuseRecordedWorktree(o, mainRoot, dir, branch)
+		if reuseErr != nil {
+			return State{}, nil, reuseErr
+		}
+		if reusable {
+			return reused, warnings, nil
+		}
+		return State{}, nil, fmt.Errorf("worktree dir %s already exists: %w", dir, ErrWorktreeExists)
 	}
 	if gitBranchExists(mainRoot, branch) {
-		return State{}, fmt.Errorf("branch %s already exists: %w", branch, ErrWorktreeExists)
+		return State{}, nil, fmt.Errorf("branch %s already exists: %w", branch, ErrWorktreeExists)
 	}
 
 	if out, cmdErr := command("git", "-C", mainRoot, "worktree", "add", dir, "-b", branch); cmdErr != nil {
 		gitErr := fmt.Errorf("git worktree add %s -b %s: %s: %w", dir, branch, strings.TrimSpace(string(out)), cmdErr)
 		if rbErr := cleanupWorktreeAndBranch(mainRoot, dir, branch); rbErr != nil {
-			return State{}, fmt.Errorf("%w (rollback also failed: %v)", gitErr, rbErr)
+			return State{}, nil, fmt.Errorf("%w (rollback also failed: %v)", gitErr, rbErr)
 		}
-		return State{}, gitErr
+		return State{}, nil, gitErr
 	}
 
 	result, artErr := SetArtifacts(ArtifactOpts{
@@ -182,11 +204,37 @@ func CreateWorktree(o WorktreeOpts) (State, error) {
 	if artErr != nil {
 		recordErr := fmt.Errorf("record worktree artifacts: %w", artErr)
 		if rbErr := cleanupWorktreeAndBranch(mainRoot, dir, branch); rbErr != nil {
-			return State{}, fmt.Errorf("%w (rollback also failed: %v)", recordErr, rbErr)
+			return State{}, nil, fmt.Errorf("%w (rollback also failed: %v)", recordErr, rbErr)
 		}
-		return State{}, recordErr
+		return State{}, nil, recordErr
 	}
-	return result, nil
+	return result, nil, nil
+}
+
+// reuseRecordedWorktree implements CreateWorktree's resume path: it attaches
+// dir when the persisted state records exactly dir + branch and git lists dir
+// as a linked worktree on branch. reusable=false with a nil error means "not
+// provably the recorded worktree" (default-deny: the caller returns
+// ErrWorktreeExists); a non-nil error is an AttachWorktree failure on a
+// worktree that did prove out.
+func reuseRecordedWorktree(o WorktreeOpts, mainRoot, dir, branch string) (State, []string, bool, error) {
+	recorded, err := GetArtifacts(ArtifactOpts{ID: o.ID, RepoRoot: o.RepoRoot, StateDir: o.StateDir})
+	if err != nil {
+		// An unreadable state proves nothing: fall back to ErrWorktreeExists.
+		return State{}, nil, false, nil
+	}
+	if recorded.Branch != branch || recorded.WorktreePath == "" || !samePath(recorded.WorktreePath, dir) {
+		return State{}, nil, false, nil
+	}
+	// A failed `git worktree list` cannot prove registration either.
+	if registered, err := isWorktreeRegistered(mainRoot, dir, branch); err != nil || !registered {
+		return State{}, nil, false, nil
+	}
+	attached, attachWarnings, err := AttachWorktree(WorktreeOpts{ID: o.ID, RepoRoot: o.RepoRoot, StateDir: o.StateDir, AttachPath: dir})
+	if err != nil {
+		return State{}, nil, false, fmt.Errorf("reuse existing worktree %s: %w", dir, err)
+	}
+	return attached, append([]string{"reusing existing worktree"}, attachWarnings...), true, nil
 }
 
 // CleanupWorktree removes both the worktree directory (`git worktree
@@ -286,6 +334,60 @@ func listWorktrees(mainRoot string) ([]worktreeRecord, error) {
 	}
 	flush()
 	return records, nil
+}
+
+// samePath reports whether a and b name the same location after symlink
+// resolution and cleaning (AttachWorktree records the resolved path while
+// CreateWorktree records the joined one). A path that cannot be resolved is
+// never "the same" -- default-deny.
+func samePath(a, b string) bool {
+	resolvedA, err := filepath.EvalSymlinks(a)
+	if err != nil {
+		return false
+	}
+	resolvedB, err := filepath.EvalSymlinks(b)
+	if err != nil {
+		return false
+	}
+	return filepath.Clean(resolvedA) == filepath.Clean(resolvedB)
+}
+
+// isWorktreeRegistered reports whether path is a linked worktree of the repo
+// at mainRoot, checked out on branch (ticket #1293: the `worktreeRegistered`
+// rule behind plan-check's `pipeline` object and CreateWorktree's resume). It
+// is true only when git lists path, the record is not the first one (the main
+// checkout), is not detached, carries exactly branch, and that branch still
+// exists as a ref (an unborn/deleted branch is not registered). The errors are
+// the `git worktree list` failure and a `git show-ref` failure other than exit
+// 1 (ref absent), reported alongside false so a caller can surface them
+// without ever treating the worktree as registered.
+func isWorktreeRegistered(mainRoot, path, branch string) (bool, error) {
+	records, err := listWorktrees(mainRoot)
+	if err != nil {
+		return false, err
+	}
+	for i, rec := range records {
+		if i == 0 || !samePath(rec.Path, path) {
+			continue
+		}
+		if rec.Detached || branch == "" || rec.Branch != branch {
+			return false, nil
+		}
+		// The record only names the branch HEAD points at: after a
+		// `git update-ref -d` the ref is gone yet the worktree still lists it.
+		// Exit 1 is show-ref's "ref absent"; any other failure (exit 128, an
+		// exec error) means the check itself could not run, so it is surfaced.
+		out, refErr := command("git", "-C", mainRoot, "show-ref", "--verify", "--quiet", "refs/heads/"+branch)
+		if refErr == nil {
+			return true, nil
+		}
+		var exitErr *exec.ExitError
+		if errors.As(refErr, &exitErr) && exitErr.ExitCode() == 1 {
+			return false, nil
+		}
+		return false, fmt.Errorf("git show-ref --verify refs/heads/%s: %s: %w", branch, strings.TrimSpace(string(out)), refErr)
+	}
+	return false, nil
 }
 
 // resolveAttachPath resolves attachPath (relative paths join against

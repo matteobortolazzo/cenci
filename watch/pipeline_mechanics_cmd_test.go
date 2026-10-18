@@ -699,3 +699,105 @@ func TestPipelineLabelWorking_NoLaunchVariablesRemovesTheStaleTripleSilently(t *
 		t.Errorf("session = %v, want only runId", session)
 	}
 }
+
+// -- ticket #1293: idempotent `cenci pipeline worktree <id> --slug SLUG` ----
+
+// writeGitShim writes a `git` wrapper to dir: it appends every invocation's
+// arguments to logPath, fails with exit 128 when the arguments contain
+// failFragment (skipped when empty), and otherwise execs the real git
+// resolved at call time.
+func writeGitShim(t *testing.T, dir, logPath, failFragment string) {
+	t.Helper()
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatalf("locate real git: %v", err)
+	}
+	body := "#!/bin/sh\n" +
+		"echo \"$*\" >> " + exectest.ShellQuote(logPath) + "\n"
+	if failFragment != "" {
+		body += "case \"$*\" in *" + exectest.ShellQuote(failFragment) + "*) echo 'fatal: simulated git failure' 1>&2; exit 128;; esac\n"
+	}
+	body += "exec " + exectest.ShellQuote(realGit) + " \"$@\"\n"
+	exectest.WriteExecutable(t, filepath.Join(dir, "git"), body)
+}
+
+func runPipelineWorktreeSlug(t *testing.T, repoDir, stateDir string, env []string) (pipelineContract, int) {
+	t.Helper()
+	cmd := exec.Command(binaryPath, "pipeline", "worktree", "42", "--slug", "add-thing", "--repo", repoDir, "--state-dir", stateDir)
+	if env != nil {
+		cmd.Env = env
+	}
+	output, err := cmd.Output()
+	exit := 0
+	if err != nil {
+		exitErr, ok := err.(*exec.ExitError)
+		if !ok {
+			t.Fatalf("pipeline worktree --slug: unexpected non-ExitError: %v", err)
+		}
+		exit = exitErr.ExitCode()
+	}
+	var c pipelineContract
+	if jerr := json.Unmarshal(output, &c); jerr != nil {
+		t.Fatalf("pipeline worktree --slug: stdout is not valid JSON: %v\n%s", jerr, output)
+	}
+	return c, exit
+}
+
+func TestPipelineWorktree_SlugOnRecordedRegisteredWorktree_ReusesWithWarningAndCreatesNothing(t *testing.T) {
+	repoDir := t.TempDir()
+	initGitRepoWithCommitForCLITest(t, repoDir)
+	stateDir := t.TempDir()
+	if _, exit := runPipelineWorktreeSlug(t, repoDir, stateDir, nil); exit != 0 {
+		t.Fatalf("first pipeline worktree --slug: exit = %d, want 0", exit)
+	}
+
+	shimDir := t.TempDir()
+	gitLog := filepath.Join(t.TempDir(), "git.log")
+	writeGitShim(t, shimDir, gitLog, "")
+	c, exit := runPipelineWorktreeSlug(t, repoDir, stateDir, pipelineEnv(shimDir))
+	if exit != 0 {
+		t.Fatalf("second pipeline worktree --slug on the recorded worktree: exit = %d, want 0 (reuse)\n%+v", exit, c)
+	}
+	if len(c.Errors) != 0 {
+		t.Errorf("errors = %v, want none on reuse", c.Errors)
+	}
+	if len(c.Warnings) != 1 || c.Warnings[0] != "reusing existing worktree" {
+		t.Errorf("warnings = %v, want exactly [%q]", c.Warnings, "reusing existing worktree")
+	}
+	wantDir, evalErr := filepath.EvalSymlinks(filepath.Join(repoDir, ".worktrees", "42-add-thing"))
+	if evalErr != nil {
+		t.Fatalf("EvalSymlinks(worktree dir): %v", evalErr)
+	}
+	if len(c.Artifacts) != 1 || c.Artifacts[0] != wantDir {
+		t.Errorf("artifacts = %v, want [%s]", c.Artifacts, wantDir)
+	}
+
+	logged, err := os.ReadFile(gitLog)
+	if err != nil {
+		t.Fatalf("read git log: %v", err)
+	}
+	if strings.Contains(string(logged), "worktree add") || strings.Contains(string(logged), " -b ") {
+		t.Errorf("git log shows creation on reuse, want no `worktree add` and no branch creation:\n%s", logged)
+	}
+}
+
+func TestPipelineWorktree_SlugOnForeignDirectory_Exit1WithTodaysErrorText(t *testing.T) {
+	repoDir := t.TempDir()
+	initGitRepoWithCommitForCLITest(t, repoDir)
+	dir := filepath.Join(repoDir, ".worktrees", "42-add-thing")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	c, exit := runPipelineWorktreeSlug(t, repoDir, t.TempDir(), nil)
+	if exit != 1 {
+		t.Errorf("exit = %d, want 1 (a foreign worktree is never adopted)", exit)
+	}
+	want := "worktree dir " + dir + " already exists: pipeline: worktree or branch already exists"
+	if len(c.Errors) != 1 || c.Errors[0] != want {
+		t.Errorf("errors = %v, want [%q]", c.Errors, want)
+	}
+	if len(c.Warnings) != 0 {
+		t.Errorf("warnings = %v, want none on a refusal", c.Warnings)
+	}
+}

@@ -410,6 +410,22 @@ When you run `/cenci:implement <ticket-id>`, the pipeline executes these phases:
 8. **Capture Lessons** — Lessons collector routes genuine mistakes into the relevant `docs/<topic>.md` or `CLAUDE.md` (opt-in; most sessions capture nothing); this phase also owns doc ownership: `README.md`, `AGENTS.md`/`CLAUDE.md`, and `docs/**` updates for the run
 9. **Create PR** — Rebases on latest main, commits, pushes, measures the final diff against the size table (`Size: <letter> (<files> files, <lines> lines) vs ticket <letter>` in the PR body, flagged when the PR is one size above its ticket — such a PR is reported to the founder and must not be merged on green checks alone), embeds the acceptance reviewer's item table, and creates a pull request; UI tickets get a `## Screenshots` section in the PR body
 
+### Resuming a crashed run
+
+`cenci pipeline plan-check <id>` echoes the ticket's persisted pipeline state (`stage`, `worktreePath`, `branch`, `prUrl`, `prNumber`, and whether the recorded worktree is still registered). When `/cenci:implement <id>` finds a saved plan (`resume`, or `stale` once you confirm), it routes on that stage instead of starting over. A stage is recorded when its phase starts, so the route follows the phase the crashed run entered:
+
+| Recorded stage | What happens |
+|---|---|
+| `new`, `prepared`, `waiting_for_input`, `waiting_for_plan_approval` | the normal flow |
+| `plan_approved`, `executed` | Phase 2 attaches the recorded worktree, then Phase 3 re-runs with a resume brief (`git status --short`, `git diff --stat HEAD`, `git log --oneline main..HEAD`) so implementers check which plan tasks are already done |
+| `reviewed`, `finalized` without a PR | Phase 2 attaches, then the run continues at Phase 6 |
+| `finalized` with a PR | stops with `#<id> already has PR <prUrl> — nothing to resume`; the In Review label and the babysit arm may not have run |
+| anything else | stops with `Unknown pipeline stage <stage> for #<id> — not resuming` |
+
+The pipeline commits only in Phase 9, so a crashed run's work is usually uncommitted in the worktree. It is kept, never stashed or discarded; the baseline health gate runs on an attached worktree only when it has no uncommitted files. A recorded worktree whose directory is gone is recreated; a leftover directory or branch stops with the `ErrWorktreeExists` error and is never removed for you.
+
+Re-planning (`replan`, or "Re-plan from scratch" at the `stale` or `multiple` prompt) over a ticket whose state records a worktree runs `cenci pipeline reset <id>` then `cenci pipeline prepare <id>` before the planner. The worktree and branch on disk are left alone, so the new plan's Phase 2 fails until you remove them, and the new plan records that in its risks.
+
 ### Board lifecycle
 
 The skills drive a ticket through a label-based state machine (`gh issue edit`). Each label maps to a board column:
