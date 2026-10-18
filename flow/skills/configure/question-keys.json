@@ -17,6 +17,7 @@
     { "id": "lazyboards", "keys": ["lazyboards"], "conditional": true },
     { "id": "dispatchEnroll", "keys": [], "conditional": true },
     { "id": "planning", "keys": ["planning"], "conditional": false },
-    { "id": "automerge", "keys": ["automerge"], "conditional": false, "projectsAware": true }
+    { "id": "automerge", "keys": ["automerge"], "conditional": false, "projectsAware": true },
+    { "id": "refinement", "keys": ["refinement"], "conditional": false }
   ]
 }

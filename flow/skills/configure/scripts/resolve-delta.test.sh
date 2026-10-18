@@ -36,9 +36,9 @@ SCRATCH="$(mktemp -d)" || { echo "mktemp failed" >&2; exit 1; }
 [[ -n "${SCRATCH}" && -d "${SCRATCH}" ]] || { echo "mktemp returned an unusable path" >&2; exit 1; }
 trap 'rm -rf "${SCRATCH}"' EXIT
 
-# The 17 question IDs, in configure-question order. They are persisted in
+# The 18 question IDs, in configure-question order. They are persisted in
 # users' configureOffered ledgers, so this list is a stable contract.
-ALL_IDS='["stack","isMonorepo","branchPattern","mcpServers","uiConventions","playwrightCli","lspServers","autoCompactDisabled","pinSubagents200K","cicd","sandbox.enabled","sandbox.dind","sandbox.azure","lazyboards","dispatchEnroll","planning","automerge"]'
+ALL_IDS='["stack","isMonorepo","branchPattern","mcpServers","uiConventions","playwrightCli","lspServers","autoCompactDisabled","pinSubagents200K","cicd","sandbox.enabled","sandbox.dind","sandbox.azure","lazyboards","dispatchEnroll","planning","automerge","refinement"]'
 CONDITIONAL_IDS='["uiConventions","playwrightCli","lspServers","lazyboards","dispatchEnroll"]'
 KEYLESS_IDS='["uiConventions","dispatchEnroll"]'
 
@@ -57,6 +57,7 @@ COMPLETE='{
   "sandbox": {"enabled": false, "dind": false, "azure": false},
   "planning": {"autonomy": "interactive"},
   "automerge": {"enabled": false},
+  "refinement": {"autonomy": "interactive"},
   "configureOffered": ["uiConventions","playwrightCli","lspServers","lazyboards","dispatchEnroll"]
 }'
 
@@ -116,7 +117,7 @@ make_copy() {
 # =====================================================================
 tj() { jq -c "$1" "${TABLE}" 2>/dev/null; }
 
-assert_eq "$(tj '[.questions[].id]')" "${ALL_IDS}" "table: the 17 IDs in configure-question order"
+assert_eq "$(tj '[.questions[].id]')" "${ALL_IDS}" "table: the 18 IDs in configure-question order"
 assert_eq "$(tj 'type')" '"object"' "table: top level is an object"
 assert_eq "$(tj '(.description | type)')" '"string"' "table: carries a description string"
 assert_eq "$(tj '[.questions[] | (.conditional | type)] | unique')" '["boolean"]' "table: every conditional flag is a boolean"
@@ -154,7 +155,7 @@ assert_eq "${CODE}" "0" "10b exit"
 assert_eq "$(jv '.ask')" '["planning"]' "10b exactly the missing key's question"
 assert_eq "$(jv '.missingKeys')" '["planning"]' "10b the missing key is named"
 assert_eq "$(jv '.conditional')" '[]' "10b planning is not conditional"
-assert_eq "$(jv '.carried | length')" "16" "10b the other 16 rows are carried"
+assert_eq "$(jv '.carried | length')" "17" "10b the other 17 rows are carried"
 assert_eq "$(jv '.carried | index("planning")')" 'null' "10b planning is not carried"
 
 # --- 10c: missing key whose ID is in the ledger -> zero questions -----
@@ -174,11 +175,50 @@ assert_eq "$(jv '.carried')" '[]' "10d --all carries nothing"
 assert_eq "$(jv '.conditional')" "${CONDITIONAL_IDS}" "10d --all flags the conditional rows"
 # --all asks the conditional rows too, so their (detection-dependent) keys may
 # be reported missing; but an answered unconditional key never is.
-assert_eq "$(jv '[.missingKeys[] | select(IN("stack","isMonorepo","branchPattern","mcpServers","autoCompactDisabled","pinSubagents200K","cicd","sandbox.enabled","sandbox.dind","sandbox.azure","planning","automerge"))]')" '[]' \
+assert_eq "$(jv '[.missingKeys[] | select(IN("stack","isMonorepo","branchPattern","mcpServers","autoCompactDisabled","pinSubagents200K","cicd","sandbox.enabled","sandbox.dind","sandbox.azure","planning","automerge","refinement"))]')" '[]' \
   "10d --all does not report answered unconditional keys as missing"
 
 run_resolver "$(write_cfg no-planning-all "$(printf '%s' "${COMPLETE}" | jq 'del(.planning)')")" --all
 assert_eq "$(jv '.missingKeys | index("planning") != null')" 'true' "10d --all still reports an absent key as missing"
+
+# --- 10f: refinement mirrors planning (#1274) -------------------------
+# absent -> asked, and its missing key is named
+CFG="$(write_cfg no-refinement "$(printf '%s' "${COMPLETE}" | jq 'del(.refinement)')")"
+run_resolver "${CFG}"
+assert_eq "${CODE}" "0" "10f exit"
+assert_eq "$(jv '.ask')" '["refinement"]' "10f an absent refinement key asks exactly the refinement question"
+assert_eq "$(jv '.missingKeys')" '["refinement"]' "10f the missing refinement key is named"
+assert_eq "$(jv '.conditional')" '[]' "10f refinement is not conditional"
+assert_eq "$(jv '.carried | length')" "17" "10f the other 17 rows are carried"
+assert_eq "$(jv '.carried | index("refinement")')" 'null' "10f refinement is not carried"
+
+# ledgered (declined) -> carried, never asked again
+CFG="$(write_cfg no-refinement-ledgered "$(printf '%s' "${COMPLETE}" | jq 'del(.refinement) | .configureOffered += ["refinement"]')")"
+run_resolver "${CFG}"
+assert_eq "${CODE}" "0" "10f ledgered exit"
+assert_eq "$(jv '.ask')" '[]' "10f a ledgered (declined) refinement question is not asked again"
+assert_eq "$(jv '.missingKeys')" '[]' "10f a ledgered refinement question reports no missing key"
+assert_eq "$(jv '.carried | index("refinement") != null')" 'true' "10f refinement moves to carried"
+
+# projectsAware is per-row: refinement is NOT projects[]-aware
+CFG="$(write_cfg refinement-in-projects "$(printf '%s' "${COMPLETE}" | jq 'del(.refinement) | .projects = [{"slug":"a","refinement":{"autonomy":"lean"}}]')")"
+run_resolver "${CFG}"
+assert_eq "$(jv '.ask')" '["refinement"]' "10f refinement under projects[] does not count (not projectsAware)"
+
+# null is absent
+CFG="$(write_cfg refinement-null "$(printf '%s' "${COMPLETE}" | jq '.refinement = null')")"
+run_resolver "${CFG}"
+assert_eq "$(jv '.ask')" '["refinement"]' "10f a null refinement key counts as absent"
+
+# --all re-asks refinement even when its key is present, without calling it missing
+run_resolver "$(write_cfg complete-all-refinement "${COMPLETE}")" --all
+assert_eq "$(jv '.ask | index("refinement") != null')" 'true' "10f --all asks refinement though its key is present"
+assert_eq "$(jv '.missingKeys | index("refinement")')" 'null' "10f --all does not report a present refinement key as missing"
+
+# refinement sits after automerge in the table (stable question order)
+assert_eq "$(tj '[.questions[] | select(.id == "refinement")] | map(.keys == ["refinement"] and .conditional == false and (has("projectsAware") | not))')" '[true]' \
+  "10f table: one refinement row, keys == [refinement], unconditional, not projectsAware"
+assert_eq "$(tj '.questions[-1].id')" '"refinement"' "10f table: refinement is the last row, after automerge"
 
 # --- 10e: automerge only under projects[] counts as present -----------
 CFG="$(write_cfg automerge-in-projects "$(printf '%s' "${COMPLETE}" | jq 'del(.automerge) | .projects = [{"slug":"a","automerge":{"enabled":true}}]')")"
@@ -233,7 +273,7 @@ assert_eq "${CODE}" "0" "AC11 exit"
 assert_eq "$(jv '.carried')" '["stack","branchPattern","autoCompactDisabled","cicd","sandbox.dind","planning"]' \
   "AC11 every present key (falsy ones included) is carried, in table order"
 assert_eq "$(jv '.ask | (unique | length) == length')" 'true' "AC11 no duplicate question IDs"
-assert_eq "$(jv '.ask | length')" "11" "AC11 the other 11 rows are asked"
+assert_eq "$(jv '.ask | length')" "12" "AC11 the other 12 rows are asked"
 assert_eq "$(jv '[.ask[], .carried[]] | sort')" "$(printf '%s' "${ALL_IDS}" | jq -c 'sort')" \
   "AC11 ask and carried partition the table"
 assert_eq "$(jv '.ask | index("sandbox.enabled") != null and index("sandbox.azure") != null')" 'true' \
@@ -241,9 +281,9 @@ assert_eq "$(jv '.ask | index("sandbox.enabled") != null and index("sandbox.azur
 assert_eq "$(jv '.ask | index("sandbox.dind")')" 'null' "AC11 sandbox.dind: false is present, not asked"
 assert_eq "$(jv '[.missingKeys[] | select(. == "stack" or . == "branchPattern" or . == "autoCompactDisabled" or . == "cicd" or . == "sandbox.dind" or . == "planning")]')" '[]' \
   "AC11 present keys are never reported missing"
-assert_eq "$(jv '[.ask[] | select(. == "isMonorepo" or . == "mcpServers" or . == "pinSubagents200K" or . == "sandbox.enabled" or . == "sandbox.azure" or . == "automerge")] | length')" "6" \
+assert_eq "$(jv '[.ask[] | select(. == "isMonorepo" or . == "mcpServers" or . == "pinSubagents200K" or . == "sandbox.enabled" or . == "sandbox.azure" or . == "automerge" or . == "refinement")] | length')" "7" \
   "AC11 every absent unconditional question is asked"
-assert_eq "$(jv '["isMonorepo","mcpServers","pinSubagents200K","sandbox.enabled","sandbox.azure","automerge"] - .missingKeys')" '[]' \
+assert_eq "$(jv '["isMonorepo","mcpServers","pinSubagents200K","sandbox.enabled","sandbox.azure","automerge","refinement"] - .missingKeys')" '[]' \
   "AC11 every absent unconditional key is reported missing"
 assert_eq "$(jv '.ask | index("uiConventions") != null and index("dispatchEnroll") != null')" 'true' \
   "AC11 keyless questions are asked until they enter the ledger"
@@ -263,7 +303,7 @@ CFG="$(write_cfg partly-ledgered '{"configureOffered":["uiConventions","dispatch
 run_resolver "${CFG}"
 assert_eq "$(jv '.conditional')" '["playwrightCli","lspServers","lazyboards"]' \
   "conditional lists only ask IDs (ledgered conditional rows drop out)"
-assert_eq "$(jv '.ask | length')" "15" "partly ledgered: 15 questions remain"
+assert_eq "$(jv '.ask | length')" "16" "partly ledgered: 16 questions remain"
 
 # --- ledger robustness -------------------------------------------------
 CFG="$(write_cfg unknown-ledger-ids "$(printf '%s' "${COMPLETE}" | jq 'del(.planning) | .configureOffered += ["notAQuestion","planning"]')")"

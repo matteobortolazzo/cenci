@@ -43,6 +43,10 @@
 #       Inside `### Autonomy Settings`. No arguments. Deletes the top-level
 #       `automerge` key and the `automerge` key of every projects[] entry;
 #       everything else is unchanged.
+#   <!-- cenci:configure-q15-switch:begin --> ... :end -->
+#       Inside `### Autonomy Settings` (#1274). Takes `--arg autonomy
+#       <interactive|lean>`. Sets .refinement.autonomy to $autonomy,
+#       preserving every sibling key (question 15 mirrors question 13).
 #
 # Idioms follow flow/tests/configure-autonomy-questions.test.sh and
 # flow/docs/shell-scripting-gotchas.md: pinned constants, assert_contains_ws
@@ -250,6 +254,8 @@ LEDGER_END='<!-- cenci:configure-offered-ledger:end -->'
 Q13_SWITCH_BEGIN='<!-- cenci:configure-q13-switch:begin -->'
 Q13_SWITCH_END='<!-- cenci:configure-q13-switch:end -->'
 Q14_REMOVE_BEGIN='<!-- cenci:configure-q14-remove:begin -->'
+Q15_SWITCH_BEGIN='<!-- cenci:configure-q15-switch:begin -->'
+Q15_SWITCH_END='<!-- cenci:configure-q15-switch:end -->'
 Q14_REMOVE_END='<!-- cenci:configure-q14-remove:end -->'
 
 # Frontmatter.
@@ -269,7 +275,8 @@ RERUN_ALL_MESSAGE='Found existing configuration. Each question will show your cu
 # `### Delta Resolution` (new subsection between Scripted Detection and
 # Platform Detection).
 DELTA_HEADING='### Delta Resolution'
-DR_MODE_RULE='The run mode is `delta` only when `existingConfig` (or `migrationBase`) exists, `--all` is absent, and the resolver succeeds; otherwise the run mode is `full` and every question is asked with `--all` semantics, except questions 13 and 14 (see Fallback).'
+DR_MODE_RULE='The run mode is `delta` only when `existingConfig` (or `migrationBase`) exists, `--all` is absent, and the resolver succeeds; otherwise the run mode is `full` and every question is asked with `--all` semantics, except questions 13, 14 and 15 (see Fallback).'
+OLD_DR_MODE_RULE_Q13_Q14='except questions 13 and 14 (see Fallback)'
 DR_LEGACY_FULL_BY_DEFINITION='all three are `full` runs by the first and second conditions, not by a resolver failure.'
 OLD_DR_MODE_RULE_UNQUALIFIED='every question is asked with `--all` semantics. That is today'"'"'s behavior'
 DR_OWN_CALL='Run the resolver as its **own** Bash call'
@@ -283,13 +290,15 @@ OLD_DR_FALLBACK='If the resolver exits non-zero or prints invalid JSON, treat th
 SHAPE_CHECK_EXPR='(.ask | type) == "array" and (.carried | type) == "array"'
 DR_SHAPE_CHECK='before using it, require that `delta.ask` and `delta.carried` are both JSON arrays'
 DR_SHAPE_CHECK_EXPR="for example \`jq -e '${SHAPE_CHECK_EXPR}'\` over the stdout line, exit 0"
-DR_FALLBACK_NO_REOFFER='A `full` run caused by a resolver failure does **not** re-offer a present `planning` or `automerge` value — only an explicit `--all` does'
+DR_FALLBACK_NO_REOFFER='A `full` run caused by a resolver failure does **not** re-offer a present `planning`, `automerge` or `refinement` value — only an explicit `--all` does'
+OLD_DR_FALLBACK_NO_REOFFER='does **not** re-offer a present `planning` or `automerge` value'
 DR_LEGACY_ONLY_FULL='A legacy-only run has no canonical config to resolve against, so it is a `full` run and never calls the resolver.'
 DR_LEGACY_ONLY_NEVER_CALLS='a legacy-only migration run (only `.claude/config.json` exists, so there is no `.cenci/config.json`, no `existingConfig` and no `migrationBase` to resolve against) and a `--all` run never call the resolver'
 OLD_DR_LEGACY_INPUT='(or `legacyConfig` when `.cenci/config.json` does not exist)'
 DR_SCRATCH_RM_ON_FAILURE='whether it succeeded, failed or failed the shape check below'
 DR_OFFERED_APPLIED_ONLY='An ID is recorded only for an answer that was applied or explicitly declined'
-DR_OFFERED_OVERLAY_FALLBACK='when the question 13/14 overlay falls back in step 6, that question'"'"'s ID is removed from the offered set before the ledger is stamped'
+DR_OFFERED_OVERLAY_FALLBACK='when the question 13/14/15 overlay falls back in step 6, that question'"'"'s ID is removed from the offered set before the ledger is stamped'
+OLD_DR_OFFERED_OVERLAY_FALLBACK='when the question 13/14 overlay falls back in step 6'
 DR_OFFERED_Q11='question 11 is recorded only after a successful `cenci dispatch enroll` or an explicit "No"'
 DR_USER_CONTEXT='Free-text user context never re-opens an answered question on a delta run; if it names one, say that `/cenci:configure --all` re-opens it.'
 DR_STACK_REOFFERS='The only re-offers a detected stack change causes are question 1 pre-filled with the detected stack, Steps 2a/2b for new monorepo projects, and questions 5/6 for servers missing from the existing maps.'
@@ -315,7 +324,8 @@ OLD_NEVER_REPROMPTS='Re-running `/cenci:configure` on an already-configured repo
 # Autonomy Settings (`--all` re-offers; the delta-scoped absent-only rule is
 # pinned in configure-autonomy-questions.test.sh as ABSENT_ONLY_RULE).
 AUTONOMY_HEADING='### Autonomy Settings'
-Q13_Q14_DELTA_RULE='On a delta run, questions 13 and 14 are asked only when the key is absent and the ID is not in `configureOffered`; nothing is written on a skip.'
+Q13_Q14_DELTA_RULE='On a delta run, questions 13, 14 and 15 are asked only when the key is absent and the ID is not in `configureOffered`; nothing is written on a skip.'
+OLD_Q13_Q14_DELTA_RULE='On a delta run, questions 13 and 14 are asked only when the key is absent and the ID is not in `configureOffered`; nothing is written on a skip.'
 Q13_ALL_REOFFER='Under `--all`, question 13 is re-offered even when `planning` is present, with the committed value pre-selected.'
 Q13_ALL_OPTION_KEEP='"Keep current (Recommended)"'
 Q13_ALL_OPTION_SWITCH_INTERACTIVE='"Switch to `interactive`"'
@@ -351,13 +361,18 @@ STEP7_END='### Board lifecycle labels'
 STEP6_ALWAYS_STAMP='Always stamp `configVersion`'
 STEP6_LEDGER_UNION='Always stamp `configureOffered` on every write as the sorted, de-duplicated union of the existing ledger and the question IDs offered this run; `--all` never removes ledger entries.'
 STEP6_EMPTY_LEDGER='An empty result is still written as `[]`.'
-STEP6_OVERLAY_ORDER='The overlay order is `merge-sandbox-config.sh` stdout, then the question 13/14 overlays (`cenci:configure-q13-switch`, `cenci:configure-q14-remove`), then the `configureOffered` ledger (`cenci:configure-offered-ledger`).'
+STEP6_OVERLAY_ORDER='The overlay order is `merge-sandbox-config.sh` stdout, then the question 13/14/15 overlays (`cenci:configure-q13-switch`, `cenci:configure-q14-remove`, `cenci:configure-q15-switch`), then the `configureOffered` ledger (`cenci:configure-offered-ledger`).'
+OLD_STEP6_OVERLAY_ORDER='then the question 13/14 overlays (`cenci:configure-q13-switch`, `cenci:configure-q14-remove`), then the `configureOffered` ledger'
 OBJECT_GATE_EXPR='type == "object"'
 STEP6_OBJECT_GATE="An overlay result is valid only when the \`jq\` call exits 0 and the result passes \`jq -e '${OBJECT_GATE_EXPR}'\`: an empty output passes \`jq empty\`, so \`jq empty\` alone never gates a write."
 STEP6_GATE_TIMING='Apply that check after each overlay and before every write'
 OLD_STEP6_JQ_EMPTY='Validate with `jq empty` after each overlay and before every write'
 STEP6_SCRATCH_RM='that `rm -f` also runs when an overlay fails validation'
-STEP6_FALLBACK_NOT_APPLIED='When a question 13 or 14 overlay fails the check above, the collected answer is not in the written config. Tell the user which question'"'"'s answer was not applied, and either that it will be asked again on the next delta run (only when its key is absent and its ID is not already in the existing ledger) or, otherwise (an `--all` change, an ID already in the existing ledger, or a present key), to re-run `/cenci:configure --all` to apply it; remove that question'"'"'s ID (`planning` for question 13, `automerge` for question 14) from the offered set before the ledger overlay runs'
+STEP6_FALLBACK_NOT_APPLIED='When a question 13, 14 or 15 overlay fails the check above, the collected answer is not in the written config. Tell the user which question'"'"'s answer was not applied, and either that it will be asked again on the next delta run (only when its key is absent and its ID is not already in the existing ledger) or, otherwise (an `--all` change, an ID already in the existing ledger, or a present key), to re-run `/cenci:configure --all` to apply it; remove that question'"'"'s ID (`planning` for question 13, `automerge` for question 14, `refinement` for question 15) from the offered set before the ledger overlay runs'
+OLD_STEP6_FALLBACK_Q13_Q14='When a question 13 or 14 overlay fails the check above'
+OLD_STEP6_FALLBACK_IDS_Q13_Q14='(`planning` for question 13, `automerge` for question 14) from the offered set'
+STEP6_FALLBACK_HEADING='**A fallen-back question 13/14/15 overlay was not applied.**'
+OLD_STEP6_FALLBACK_HEADING='**A fallen-back question 13/14 overlay was not applied.**'
 STEP6_FALLBACK_KEYS_STEP7='a fallen-back "Remove the block(s)" never emits the `## Review required — automerge policy removed` section and is never reported as removed'
 STEP6_CARRIED_FLAGS='For an ID in `delta.carried`, the Q9/Q9b/Q9c flag is derived from the existing `sandbox.*` value, never passed as a bare `false`'
 STEP6_ASKED_FLAGS='For an ID in `delta.ask` (a key that was absent and never offered, e.g. `sandbox.dind` and `sandbox.azure` on a config that predates questions 9b/9c), and for every question on an `--all` or `full` run, the flag is the answer collected this run.'
@@ -371,7 +386,10 @@ DOCKERFILE_MARKERS_NEVER_ASK='Only an ID that is in `delta.ask` (key absent and 
 OLD_DOCKERFILE_ALL_CARRIED='on a delta run the Q9/Q9b/Q9c answers are carried, so the fragment selection'
 OLD_5E_HEADER_CARRIED='only if the carried `sandbox.enabled` is `true`'
 STEP7_REMOVED_APPLIED='and the removal overlay passed step 6'"'"'s validation and was written'
-STEP7_FINAL_REPORT_FELL_BACK='when a question 13/14 overlay fell back, say its answer was not applied, and either that it will be asked again on the next delta run (only when its key is absent and its ID is not already in the existing ledger) or, otherwise (an `--all` change, an ID already in the existing ledger, or a present key), to re-run `/cenci:configure --all` to apply it; when the ledger overlay fell back, say the ledger was not stamped so this run'"'"'s questions will be asked again; when question 11'"'"'s enroll failed, report the failure and that question 11 will be asked again only when `dispatchEnroll` is not already in the existing ledger, else to re-run `/cenci:configure --all`.'
+STEP7_FINAL_REPORT_FELL_BACK='when a question 13/14/15 overlay fell back, say its answer was not applied, and either that it will be asked again on the next delta run (only when its key is absent and its ID is not already in the existing ledger) or, otherwise (an `--all` change, an ID already in the existing ledger, or a present key), to re-run `/cenci:configure --all` to apply it; when the ledger overlay fell back, say the ledger was not stamped so this run'"'"'s questions will be asked again; when question 11'"'"'s enroll failed, report the failure and that question 11 will be asked again only when `dispatchEnroll` is not already in the existing ledger, else to re-run `/cenci:configure --all`.'
+OLD_STEP7_FELL_BACK_Q13_Q14='when a question 13/14 overlay fell back'
+STEP7_CARRIED_VALUES='for a carried `planning`, `automerge` or `refinement` value it also states the existing value verbatim (terminal only, never the PR body)'
+OLD_STEP7_CARRIED_VALUES='for a carried `planning` or `automerge` value it also states the existing value verbatim'
 OLD_STEP6_FALLBACK_UNCONDITIONAL='was not applied and that it will be asked again on the next delta run; remove'
 OLD_STEP7_FALLBACK_UNCONDITIONAL='say its answer was not applied and will be asked again on the next delta run;'
 OLD_STEP7_Q11_UNCONDITIONAL='report the failure and that question 11 will be asked again.'
@@ -379,7 +397,8 @@ OLD_DR_OFFERED_UNCONDITIONAL='(so the next delta run asks it again)'
 DR_OFFERED_CONDITIONAL_REASK='the next delta run asks it again only when its key is absent and its ID is not already in the existing ledger; otherwise `/cenci:configure --all` applies it'
 Q11_ENROLL_REASK_CONDITIONAL='asks question 11 again only when `dispatchEnroll` is not already in the existing ledger'
 Q11_ENROLL_FAILURE='`dispatchEnroll` is recorded only after a successful `cenci dispatch enroll` or an explicit "No — skip"'
-Q13_Q14_FULL_NO_REOFFER='A `full` run caused by a resolver failure (see `### Delta Resolution`) is not an `--all` run: for a present `planning` or `automerge` key it behaves like a delta run — report the existing value verbatim and do NOT re-offer it'
+Q13_Q14_FULL_NO_REOFFER='A `full` run caused by a resolver failure (see `### Delta Resolution`) is not an `--all` run: for a present `planning`, `automerge` or `refinement` key it behaves like a delta run — report the existing value verbatim and do NOT re-offer it'
+OLD_Q13_Q14_FULL_NO_REOFFER='for a present `planning` or `automerge` key it behaves like a delta run'
 STEP7_CARRIED_HEADING='## Carried through (delta run)'
 STEP7_CARRIED_SUMMARY='lists the carried question IDs and config key names only — never config values — and says `/cenci:configure --all` would re-open them.'
 STEP7_STAMP_ONLY='A stamp-only diff still opens a PR; "No configuration changes — nothing to commit" applies only when nothing is staged.'
@@ -398,14 +417,16 @@ NEW_RESOLVER_WIRED='The configure flow calls this resolver itself — see `### D
 # codex.md parity paragraph.
 CODEX_DELTA_MODE='Delta mode asks only the question IDs the resolver lists in `ask` and carries the rest'
 CODEX_ALL_TOKEN='A leading `--all` in the user'"'"'s request replays every question and ignores the ledger'
-CODEX_Q13_Q14_ALL='under `--all`, question 13 re-offers "Keep current (Recommended)" or a switch, and question 14 re-offers "Keep current block(s) (Recommended)" or "Remove the block(s)"'
+CODEX_Q13_Q14_ALL='under `--all`, question 13 re-offers "Keep current (Recommended)" or a switch, question 14 re-offers "Keep current block(s) (Recommended)" or "Remove the block(s)", and question 15 re-offers "Keep current (Recommended)" or a switch'
+OLD_CODEX_Q13_Q14_ALL='and question 14 re-offers "Keep current block(s) (Recommended)" or "Remove the block(s)"'
 CODEX_LEDGER='stamps `configureOffered` with the same sorted, de-duplicated union as the Claude procedure'
 CODEX_SHARED_PROGRAMS='uses the same marker-bounded jq programs as `SKILL.md`'
 CODEX_DOCKERFILE='refreshes a valid marker-managed `.cenci/Dockerfile` without asking, and leaves a `.cenci/Dockerfile` with no markers or malformed markers untouched and reported'
 CODEX_Q12='The Q12 dispatch session repair is still asked on a delta run'
 CODEX_FALLBACK='If the resolver fails, it falls back to a full replay and says why'
 CODEX_PLAN_MODE='the resolver runs read-only during `/plan`; the ledger, overlay and Dockerfile writes happen only in the apply step'
-CODEX_AUTONOMY_ABSENT_ONLY_DELTA='on a delta run asks about `planning` and `automerge` only when absent and not already offered'
+CODEX_AUTONOMY_ABSENT_ONLY_DELTA='on a delta run asks about `planning`, `automerge` and `refinement` only when absent and not already offered'
+OLD_CODEX_AUTONOMY_ABSENT_ONLY_DELTA='on a delta run asks about `planning` and `automerge` only when absent and not already offered'
 OLD_CODEX_AUTONOMY_UNCONDITIONAL='asks about `planning` and `automerge` only when absent — an already-present value'
 CODEX_AUTONOMY_MIRROR='Autonomy Settings mirrors the Claude procedure'"'"'s `### Autonomy Settings` section'
 CODEX_SANDBOX_CARRIED='the flag for a carried ID is derived from the existing `sandbox.*` value (`true` when it is `true`, `false` only for an absent key), never a bare `false`'
@@ -414,11 +435,19 @@ CODEX_SANDBOX_EFFECTIVE='Generate or refresh the managed `.cenci/Dockerfile` whe
 CODEX_OBJECT_GATE='the `jq` call must exit 0 and the result must pass `jq -e '"'"'type == "object"'"'"'` (an empty output passes `jq empty`, so that alone is not a gate)'
 OLD_CODEX_JQ_EMPTY='validating each overlay with `jq empty` before the write'
 CODEX_SHAPE_CHECK="A resolver result whose \`ask\` or \`carried\` is not a JSON array fails the same check (\`jq -e '${SHAPE_CHECK_EXPR}'\`) and falls back the same way."
-CODEX_FALLBACK_NO_REOFFER='A fallback full replay is not an `--all` run: it does not re-offer a present `planning` or `automerge` value'
+CODEX_FALLBACK_NO_REOFFER='A fallback full replay is not an `--all` run: it does not re-offer a present `planning`, `automerge` or `refinement` value'
+OLD_CODEX_FALLBACK_NO_REOFFER='it does not re-offer a present `planning` or `automerge` value'
 CODEX_SCRATCH_RM='is removed afterwards even when the resolver or a later overlay fails'
 CODEX_LEGACY_ONLY='A legacy-only run (only `.claude/config.json`, no `.cenci/config.json`) is a full run and never calls the resolver.'
-CODEX_OVERLAY_FELL_BACK='When a question 13/14 overlay falls back, its answer was not applied: the apply step tells the user (that the question will be asked again on the next delta run only when its key is absent and its ID is not already in the existing ledger, otherwise to re-run `/cenci:configure --all` to apply it), removes that question'"'"'s ID from the offered set before stamping the ledger, and reports only the overlay actually applied'
+CODEX_OVERLAY_FELL_BACK='When a question 13/14/15 overlay falls back, its answer was not applied: the apply step tells the user (that the question will be asked again on the next delta run only when its key is absent and its ID is not already in the existing ledger, otherwise to re-run `/cenci:configure --all` to apply it), removes that question'"'"'s ID from the offered set before stamping the ledger, and reports only the overlay actually applied'
 OLD_CODEX_OVERLAY_UNCONDITIONAL='the apply step tells the user, removes that question'"'"'s ID'
+OLD_CODEX_OVERLAY_FELL_BACK_Q13_Q14='When a question 13/14 overlay falls back, its answer'
+CODEX_OVERLAY_PROGRAMS='The question 13/14/15 overlays and the ledger stamp use the exact programs the Claude procedure keeps between its `cenci:configure-q13-switch`, `cenci:configure-q14-remove`, `cenci:configure-q15-switch` and `cenci:configure-offered-ledger` markers'
+OLD_CODEX_OVERLAY_PROGRAMS='The question 13/14 overlays and the ledger stamp use the exact programs the Claude procedure keeps between its `cenci:configure-q13-switch`, `cenci:configure-q14-remove` and `cenci:configure-offered-ledger` markers'
+CODEX_CHECKPOINT_ANSWERS='the effective sandbox flags, and the question 11/13/14/15 answers)'
+OLD_CODEX_CHECKPOINT_ANSWERS='the effective sandbox flags, and the question 11/13/14 answers)'
+CODEX_REPORT_FELL_BACK='A fallen-back question 13/14/15 overlay or a failed `cenci dispatch enroll` is reported the same conditional way'
+OLD_CODEX_REPORT_FELL_BACK='A fallen-back question 13/14 overlay or a failed `cenci dispatch enroll` is reported the same conditional way'
 CODEX_Q11_ENROLL='`dispatchEnroll` is recorded only after a successful `cenci dispatch enroll` or an explicit "No"; an enroll failure is reported and not recorded.'
 CODEX_CHECKPOINT='travel in the plan/apply checkpoint; the apply step reads them from there and never re-derives them from the resolver'
 CODEX_REPORT_CARRIED_SUMMARY='the carried-through summary (question IDs and config key names, never values in the PR body, and saying `--all` would re-open them)'
@@ -462,6 +491,7 @@ step7_region=""
 LEDGER_PROG=""
 Q13_PROG=""
 Q14_PROG=""
+Q15_PROG=""
 if [[ -n "${skill}" ]]; then
   parse_body="$(extract_section_body_raw "${skill}" "${PARSE_HEADING}")"
   delta_body="$(extract_section_body_raw "${skill}" "${DELTA_HEADING}")"
@@ -474,6 +504,7 @@ if [[ -n "${skill}" ]]; then
   LEDGER_PROG="$(extract_marked_block_raw "${skill}" "${LEDGER_BEGIN}" "${LEDGER_END}")"
   Q13_PROG="$(extract_marked_block_raw "${autonomy_body}" "${Q13_SWITCH_BEGIN}" "${Q13_SWITCH_END}")"
   Q14_PROG="$(extract_marked_block_raw "${autonomy_body}" "${Q14_REMOVE_BEGIN}" "${Q14_REMOVE_END}")"
+  Q15_PROG="$(extract_marked_block_raw "${autonomy_body}" "${Q15_SWITCH_BEGIN}" "${Q15_SWITCH_END}")"
 fi
 
 # need_prog <program-text> <label> -- fails (in the parent shell) when an
@@ -526,6 +557,7 @@ COMPLETE_CFG='{
   "lazyboards": {"enabled": false},
   "planning": {"autonomy": "interactive", "note": "keep-me"},
   "automerge": {"maxChangedFiles": 5},
+  "refinement": {"autonomy": "interactive", "note": "keep-me"},
   "configureOffered": ["dispatchEnroll", "uiConventions"],
   "cenci": {"gateOutputLines": 80},
   "security": {"sensitivePaths": ["*vault*"]}
@@ -795,6 +827,10 @@ case_C_overlay_gate_rejects_what_jq_empty_accepts() {
     out="$(jq_apply "${Q14_PROG}" "${COMPLETE_CFG}")"
     passes_object_gate "${out}" || fail "C: the Q14 program output does not pass the object gate"
   fi
+  if need_prog "${Q15_PROG}" "C Q15 program"; then
+    out="$(jq_apply "${Q15_PROG}" "${COMPLETE_CFG}" --arg autonomy lean)"
+    passes_object_gate "${out}" || fail "C: the Q15 program output does not pass the object gate"
+  fi
 }
 
 case_E_shape_check_rejects_unusable_resolver_results() {
@@ -849,6 +885,7 @@ case_contract_delta_resolution_section() {
     fail "SKILL.md: ${DELTA_HEADING} must sit after Scripted Detection and before Platform Detection"
   fi
   assert_contains_ws "${delta_body}" "${DR_MODE_RULE}" "Delta Resolution run-mode rule"
+  assert_absent_paired_ws "${delta_body}" "${DR_MODE_RULE}" "${OLD_DR_MODE_RULE_Q13_Q14}" "Delta Resolution retired run-mode exception naming only questions 13 and 14 (#1274)"
   assert_contains_ws "${delta_body}" "${DR_OWN_CALL}" "Delta Resolution resolver runs as its own Bash call"
   assert_contains_ws "${delta_body}" "${DR_CALL_CMD}" "Delta Resolution names the resolver invocation"
   assert_contains_ws "${delta_body}" "${DR_MIGRATION_INPUT}" "Delta Resolution materializes migrationBase to a slug-scoped temp file"
@@ -859,13 +896,15 @@ case_contract_delta_resolution_section() {
   assert_absent_paired_ws "${delta_body}" "${DR_FALLBACK}" "${OLD_DR_FALLBACK}" "Delta Resolution retired fallback that ignored a wrongly shaped result"
   assert_contains_ws "${delta_body}" "${DR_SHAPE_CHECK}" "Delta Resolution requires ask/carried to be arrays after valid JSON"
   assert_contains_ws "${delta_body}" "${DR_SHAPE_CHECK_EXPR}" "Delta Resolution names the jq -e shape-check expression"
-  assert_contains_ws "${delta_body}" "${DR_FALLBACK_NO_REOFFER}" "Delta Resolution: a resolver-failure full run does not re-offer present planning/automerge"
+  assert_contains_ws "${delta_body}" "${DR_FALLBACK_NO_REOFFER}" "Delta Resolution: a resolver-failure full run does not re-offer present planning/automerge/refinement"
+  assert_absent_paired_ws "${delta_body}" "${DR_FALLBACK_NO_REOFFER}" "${OLD_DR_FALLBACK_NO_REOFFER}" "Delta Resolution retired no-re-offer sentence naming only planning/automerge (#1274)"
   assert_contains_ws "${delta_body}" "${DR_LEGACY_ONLY_FULL}" "Delta Resolution: a legacy-only migration run is a full run"
   assert_contains_ws "${delta_body}" "${DR_LEGACY_ONLY_NEVER_CALLS}" "Delta Resolution: a legacy-only run never calls the resolver"
   assert_absent_paired_ws "${delta_body}" "${DR_MODE_RULE}" "${OLD_DR_LEGACY_INPUT}" "Delta Resolution retired legacyConfig resolver input (contradicted the run-mode rule)"
   assert_contains_ws "${delta_body}" "${DR_SCRATCH_RM_ON_FAILURE}" "Delta Resolution: the scratch input is removed whether the resolver succeeded or failed"
   assert_contains_ws "${delta_body}" "${DR_OFFERED_APPLIED_ONLY}" "Delta Resolution: an ID is recorded only for an applied or declined answer"
-  assert_contains_ws "${delta_body}" "${DR_OFFERED_OVERLAY_FALLBACK}" "Delta Resolution: a fallen-back Q13/Q14 overlay drops its ID from the offered set"
+  assert_contains_ws "${delta_body}" "${DR_OFFERED_OVERLAY_FALLBACK}" "Delta Resolution: a fallen-back Q13/Q14/Q15 overlay drops its ID from the offered set"
+  assert_absent_paired_ws "${delta_body}" "${DR_OFFERED_OVERLAY_FALLBACK}" "${OLD_DR_OFFERED_OVERLAY_FALLBACK}" "Delta Resolution retired offered-ledger overlay fallback naming only Q13/Q14 (#1274)"
   assert_contains_ws "${delta_body}" "${DR_OFFERED_Q11}" "Delta Resolution: Q11 is recorded only after a successful enroll or an explicit No"
   assert_contains_ws "${delta_body}" "${DR_OFFERED_CONDITIONAL_REASK}" "Delta Resolution: a dropped answer is re-asked only when the key is absent and the ID is not in the existing ledger"
   assert_absent_paired_ws "${delta_body}" "${DR_OFFERED_CONDITIONAL_REASK}" "${OLD_DR_OFFERED_UNCONDITIONAL}" "Delta Resolution retired unconditional 'next delta run asks it again'"
@@ -930,7 +969,8 @@ case_AC4_contract_all_token() {
   assert_contains_ws "${parse_body}" "${ARGS_ALL_RULE}" "AC4 Parse \$ARGUMENTS: --all is a reserved leading token"
   assert_contains_ws "${autonomy_body}" "${Q13_ALL_REOFFER}" "AC4 Autonomy Settings: --all ignores the ledger/presence for Q13"
   assert_contains_ws "${autonomy_body}" "${Q14_ALL_REOFFER}" "AC4 Autonomy Settings: --all ignores the ledger/presence for Q14"
-  assert_contains_ws "${autonomy_body}" "${Q13_Q14_FULL_NO_REOFFER}" "Autonomy Settings: a resolver-failure full run never re-offers a present planning/automerge value"
+  assert_contains_ws "${autonomy_body}" "${Q13_Q14_FULL_NO_REOFFER}" "Autonomy Settings: a resolver-failure full run never re-offers a present planning/automerge/refinement value"
+  assert_absent_paired_ws "${autonomy_body}" "${Q13_Q14_FULL_NO_REOFFER}" "${OLD_Q13_Q14_FULL_NO_REOFFER}" "Autonomy Settings retired resolver-failure sentence naming only planning/automerge (#1274)"
 }
 
 case_AC5_contract_carried_summary() {
@@ -947,7 +987,8 @@ case_AC7_contract_q13_all_offer() {
     fail "AC7: ${AUTONOMY_HEADING} section body not found"
     return
   fi
-  assert_contains_ws "${autonomy_body}" "${Q13_Q14_DELTA_RULE}" "AC7 Autonomy Settings: delta runs ask Q13/Q14 only when absent and not offered"
+  assert_contains_ws "${autonomy_body}" "${Q13_Q14_DELTA_RULE}" "AC7 Autonomy Settings: delta runs ask Q13/Q14/Q15 only when absent and not offered"
+  assert_absent_paired_ws "${autonomy_body}" "${Q13_Q14_DELTA_RULE}" "${OLD_Q13_Q14_DELTA_RULE}" "AC7 Autonomy Settings retired delta rule naming only questions 13 and 14 (#1274)"
   assert_contains_ws "${autonomy_body}" "${Q13_ALL_REOFFER}" "AC7 Autonomy Settings: --all re-offers Q13 with the committed value pre-selected"
   assert_contains "${autonomy_body}" "${Q13_ALL_OPTION_KEEP}" "AC7 Q13 --all Keep option"
   assert_contains "${autonomy_body}" "${Q13_ALL_OPTION_SWITCH_INTERACTIVE}" "AC7 Q13 --all switch-to-interactive option"
@@ -973,6 +1014,9 @@ case_AC8_AC9_contract_q14_all_offer() {
   assert_contains_ws "${step7_region}" "${STEP7_REMOVED_CONDITIONAL}" "AC9 step 7 removed section is conditional on a removal this run"
   assert_contains_ws "${step7_region}" "${STEP7_REMOVED_APPLIED}" "step 7 removed section is keyed to the overlay actually applied"
   assert_contains_ws "${step7_region}" "${STEP7_FINAL_REPORT_FELL_BACK}" "step 7 final report names fallen-back overlays, an unstamped ledger and a failed enroll"
+  assert_absent_paired_ws "${step7_region}" "${STEP7_FINAL_REPORT_FELL_BACK}" "${OLD_STEP7_FELL_BACK_Q13_Q14}" "step 7 retired fallen-back overlay report naming only Q13/Q14 (#1274)"
+  assert_contains_ws "${step7_region}" "${STEP7_CARRIED_VALUES}" "step 7 final report states a carried planning/automerge/refinement value verbatim (terminal only)"
+  assert_absent_paired_ws "${step7_region}" "${STEP7_CARRIED_VALUES}" "${OLD_STEP7_CARRIED_VALUES}" "step 7 retired carried-value sentence naming only planning/automerge (#1274)"
   assert_absent_paired_ws "${step7_region}" "${STEP7_FINAL_REPORT_FELL_BACK}" "${OLD_STEP7_FALLBACK_UNCONDITIONAL}" "step 7 retired unconditional overlay re-ask claim"
   assert_absent_paired_ws "${step7_region}" "${STEP7_FINAL_REPORT_FELL_BACK}" "${OLD_STEP7_Q11_UNCONDITIONAL}" "step 7 retired unconditional Q11 re-ask claim"
 }
@@ -981,6 +1025,7 @@ case_marker_programs_sit_where_the_plan_puts_them() {
   [[ -n "${skill}" ]] || { fail "contract: SKILL.md missing"; return; }
   [[ -n "${Q13_PROG}" ]] || fail "SKILL.md: Q13-switch program not found between [${Q13_SWITCH_BEGIN}] / [${Q13_SWITCH_END}] inside ${AUTONOMY_HEADING}"
   [[ -n "${Q14_PROG}" ]] || fail "SKILL.md: Q14-remove program not found between [${Q14_REMOVE_BEGIN}] / [${Q14_REMOVE_END}] inside ${AUTONOMY_HEADING}"
+  [[ -n "${Q15_PROG}" ]] || fail "SKILL.md: Q15-switch program not found between [${Q15_SWITCH_BEGIN}] / [${Q15_SWITCH_END}] inside ${AUTONOMY_HEADING}"
   [[ -n "${LEDGER_PROG}" ]] || fail "SKILL.md: ledger program not found between [${LEDGER_BEGIN}] / [${LEDGER_END}]"
   local stamp_at ledger_at
   stamp_at="$(offset_of "${skill}" "${STEP6_ALWAYS_STAMP}")"
@@ -1000,12 +1045,17 @@ case_AC14_contract_step6_ledger_and_overlay_order() {
   assert_contains_ws "${step6_region}" "${STEP6_LEDGER_UNION}" "AC14 step 6: every write stamps the merged configureOffered ledger; --all never removes entries"
   assert_contains_ws "${step6_region}" "${STEP6_EMPTY_LEDGER}" "AC14 step 6: an empty ledger is still written as []"
   assert_contains_ws "${step6_region}" "${DR_OFFERED_ONLY_ASKED}" "AC14 step 6: only questions actually put to the user are recorded"
-  assert_contains_ws "${step6_region}" "${STEP6_OVERLAY_ORDER}" "AC14 step 6: overlay order names the three marker programs it consumes"
+  assert_contains_ws "${step6_region}" "${STEP6_OVERLAY_ORDER}" "AC14 step 6: overlay order names the Q13/Q14/Q15 marker programs and the ledger program it consumes"
+  assert_absent_paired_ws "${step6_region}" "${STEP6_OVERLAY_ORDER}" "${OLD_STEP6_OVERLAY_ORDER}" "AC14 step 6 retired overlay order omitting the Q15 program (#1274)"
   assert_contains_ws "${step6_region}" "${STEP6_OBJECT_GATE}" "step 6: an overlay must exit 0 and pass the object gate (jq empty alone is not a gate)"
   assert_contains_ws "${step6_region}" "${STEP6_GATE_TIMING}" "step 6: the gate runs after each overlay and before every write"
   assert_absent_paired_ws "${step6_region}" "${STEP6_OBJECT_GATE}" "${OLD_STEP6_JQ_EMPTY}" "step 6 retired jq-empty-only overlay validation"
   assert_contains_ws "${step6_region}" "${STEP6_SCRATCH_RM}" "step 6: the scratch file is removed even when an overlay fails"
-  assert_contains_ws "${step6_region}" "${STEP6_FALLBACK_NOT_APPLIED}" "step 6: a fallen-back Q13/Q14 overlay is reported and its ID leaves the offered set"
+  assert_contains_ws "${step6_region}" "${STEP6_FALLBACK_NOT_APPLIED}" "step 6: a fallen-back Q13/Q14/Q15 overlay is reported and its ID leaves the offered set"
+  assert_absent_paired_ws "${step6_region}" "${STEP6_FALLBACK_NOT_APPLIED}" "${OLD_STEP6_FALLBACK_Q13_Q14}" "step 6 retired fallen-back overlay opener naming only Q13/Q14 (#1274)"
+  assert_absent_paired_ws "${step6_region}" "${STEP6_FALLBACK_NOT_APPLIED}" "${OLD_STEP6_FALLBACK_IDS_Q13_Q14}" "step 6 retired fallen-back ID list omitting refinement (#1274)"
+  assert_contains_ws "${step6_region}" "${STEP6_FALLBACK_HEADING}" "step 6: the fallen-back overlay paragraph heading covers question 15"
+  assert_absent_paired_ws "${step6_region}" "${STEP6_FALLBACK_HEADING}" "${OLD_STEP6_FALLBACK_HEADING}" "step 6 retired fallen-back overlay paragraph heading naming only 13/14 (#1274)"
   assert_absent_paired_ws "${step6_region}" "${STEP6_FALLBACK_NOT_APPLIED}" "${OLD_STEP6_FALLBACK_UNCONDITIONAL}" "step 6 retired unconditional 'will be asked again on the next delta run'"
   assert_contains_ws "${step6_region}" "${STEP6_FALLBACK_KEYS_STEP7}" "step 6: step 7 sections are keyed to the overlay actually applied"
   assert_contains_ws "${step6_region}" "${STEP6_LEDGER_FELL_BACK_IDS}" "step 6: the ledger offered set excludes fallen-back overlays and a failed enroll"
@@ -1056,7 +1106,8 @@ case_AC17_codex_parity() {
   assert_contains_ws "${codex}" "${CODEX_AUTONOMY_MIRROR}" "AC17 codex.md Autonomy Settings paragraph still mirrors the Claude section"
   assert_contains_ws "${codex}" "${CODEX_DELTA_MODE}" "AC17 codex.md describes delta mode"
   assert_contains_ws "${codex}" "${CODEX_ALL_TOKEN}" "AC17 codex.md describes the leading --all token"
-  assert_contains_ws "${codex}" "${CODEX_Q13_Q14_ALL}" "AC17 codex.md names the Q13/Q14 --all options"
+  assert_contains_ws "${codex}" "${CODEX_Q13_Q14_ALL}" "AC17 codex.md names the Q13/Q14/Q15 --all options"
+  assert_absent_paired_ws "${codex}" "${CODEX_Q13_Q14_ALL}" "${OLD_CODEX_Q13_Q14_ALL}" "AC17 codex.md retired --all sentence omitting question 15 (#1274)"
   assert_contains_ws "${codex}" "${CODEX_LEDGER}" "AC17 codex.md stamps the same configureOffered ledger"
   assert_contains_ws "${codex}" "${CODEX_SHARED_PROGRAMS}" "AC17 codex.md uses the same marker-bounded jq programs"
   assert_contains_ws "${codex}" "${CODEX_DOCKERFILE}" "AC17 codex.md describes the Dockerfile delta rule"
@@ -1064,6 +1115,9 @@ case_AC17_codex_parity() {
   assert_contains_ws "${codex}" "${CODEX_PLAN_MODE}" "AC17 codex.md keeps the resolver read-only in /plan and writes in apply"
   assert_contains_ws "${codex}" "${CODEX_AUTONOMY_ABSENT_ONLY_DELTA}" "AC17 codex.md scopes the absent-only rule to delta runs"
   assert_absent_paired_ws "${codex}" "${CODEX_AUTONOMY_ABSENT_ONLY_DELTA}" "${OLD_CODEX_AUTONOMY_UNCONDITIONAL}" "AC17 codex.md retired unconditional absent-only claim"
+  assert_absent_paired_ws "${codex}" "${CODEX_AUTONOMY_ABSENT_ONLY_DELTA}" "${OLD_CODEX_AUTONOMY_ABSENT_ONLY_DELTA}" "AC17 codex.md retired absent-only claim naming only planning/automerge (#1274)"
+  assert_contains_ws "${codex}" "${CODEX_OVERLAY_PROGRAMS}" "AC17 codex.md lists the Q13/Q14/Q15 overlay programs and the ledger program"
+  assert_absent_paired_ws "${codex}" "${CODEX_OVERLAY_PROGRAMS}" "${OLD_CODEX_OVERLAY_PROGRAMS}" "AC17 codex.md retired overlay-program list omitting the Q15 marker (#1274)"
 
   assert_contains_ws "${codex}" "${CODEX_SANDBOX_CARRIED}" "codex.md: a carried Q9/Q9b/Q9c flag is derived from the existing sandbox value, never a bare false"
   assert_contains_ws "${codex}" "${CODEX_SANDBOX_ASKED}" "codex.md: an asked sandbox ID uses the collected answer"
@@ -1071,13 +1125,19 @@ case_AC17_codex_parity() {
   assert_contains_ws "${codex}" "${CODEX_OBJECT_GATE}" "codex.md: overlays must exit 0 and pass the object gate"
   assert_absent_paired_ws "${codex}" "${CODEX_OBJECT_GATE}" "${OLD_CODEX_JQ_EMPTY}" "codex.md retired jq-empty-only overlay validation"
   assert_contains_ws "${codex}" "${CODEX_SHAPE_CHECK}" "codex.md: a wrongly shaped resolver result falls back like a failure"
-  assert_contains_ws "${codex}" "${CODEX_FALLBACK_NO_REOFFER}" "codex.md: a fallback full replay never re-offers a present planning/automerge value"
+  assert_contains_ws "${codex}" "${CODEX_FALLBACK_NO_REOFFER}" "codex.md: a fallback full replay never re-offers a present planning/automerge/refinement value"
+  assert_absent_paired_ws "${codex}" "${CODEX_FALLBACK_NO_REOFFER}" "${OLD_CODEX_FALLBACK_NO_REOFFER}" "codex.md retired fallback no-re-offer sentence naming only planning/automerge (#1274)"
   assert_contains_ws "${codex}" "${CODEX_SCRATCH_RM}" "codex.md: the scratch migrationBase file is removed even on failure"
   assert_contains_ws "${codex}" "${CODEX_LEGACY_ONLY}" "codex.md: a legacy-only run is a full run that never calls the resolver"
-  assert_contains_ws "${codex}" "${CODEX_OVERLAY_FELL_BACK}" "codex.md: a fallen-back Q13/Q14 overlay is reported and leaves the offered set"
+  assert_contains_ws "${codex}" "${CODEX_OVERLAY_FELL_BACK}" "codex.md: a fallen-back Q13/Q14/Q15 overlay is reported and leaves the offered set"
+  assert_absent_paired_ws "${codex}" "${CODEX_OVERLAY_FELL_BACK}" "${OLD_CODEX_OVERLAY_FELL_BACK_Q13_Q14}" "codex.md retired fallen-back overlay opener naming only Q13/Q14 (#1274)"
   assert_absent_paired_ws "${codex}" "${CODEX_OVERLAY_FELL_BACK}" "the apply step tells the user, removes that question's ID" "codex.md retired unconditional fallen-back overlay wording"
   assert_contains_ws "${codex}" "${CODEX_Q11_ENROLL}" "codex.md: Q11 is recorded only after a successful enroll or an explicit No"
   assert_contains_ws "${codex}" "${CODEX_CHECKPOINT}" "codex.md: offered IDs and answers travel in the plan/apply checkpoint"
+  assert_contains_ws "${codex}" "${CODEX_CHECKPOINT_ANSWERS}" "codex.md: the checkpoint carries the question 11/13/14/15 answers"
+  assert_absent_paired_ws "${codex}" "${CODEX_CHECKPOINT_ANSWERS}" "${OLD_CODEX_CHECKPOINT_ANSWERS}" "codex.md retired checkpoint answer list omitting question 15 (#1274)"
+  assert_contains_ws "${codex}" "${CODEX_REPORT_FELL_BACK}" "codex.md: the apply report names a fallen-back Q13/Q14/Q15 overlay conditionally"
+  assert_absent_paired_ws "${codex}" "${CODEX_REPORT_FELL_BACK}" "${OLD_CODEX_REPORT_FELL_BACK}" "codex.md retired fallen-back report sentence naming only Q13/Q14 (#1274)"
   assert_contains_ws "${codex}" "${CODEX_REPORT_CARRIED_SUMMARY}" "codex.md: the apply report carries the carried-through summary"
   assert_contains_ws "${codex}" "${CODEX_REPORT_DOCKERFILE}" "codex.md: the apply report carries the Dockerfile report"
   assert_contains_ws "${codex}" "${CODEX_REPORT_LAZYBOARDS_MISSING}" "codex.md: the apply report carries the carried-but-missing .lazyboards.yml notice"

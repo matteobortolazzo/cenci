@@ -88,7 +88,7 @@ If the script exits non-zero or its output is not valid JSON, fall back to the *
 
 A re-run of this skill is a **delta** by default: questions whose answer is already recorded, or that an earlier run already offered, are skipped, while every generation step still runs. The deterministic answer to "which questions does this run ask?" comes from `scripts/resolve-delta.sh` and the committed `question-keys.json` table (see the `ID` column of the defaults table under Container Detection).
 
-**Run mode.** The run mode is `delta` only when `existingConfig` (or `migrationBase`) exists, `--all` is absent, and the resolver succeeds; otherwise the run mode is `full` and every question is asked with `--all` semantics, except questions 13 and 14 (see Fallback). That is today's behavior: each question shows the current setting as its default. A first run (`existingConfig` null), a legacy-only migration run (only `.claude/config.json` exists, so there is no `.cenci/config.json`, no `existingConfig` and no `migrationBase` to resolve against) and a `--all` run never call the resolver; all three are `full` runs by the first and second conditions, not by a resolver failure.
+**Run mode.** The run mode is `delta` only when `existingConfig` (or `migrationBase`) exists, `--all` is absent, and the resolver succeeds; otherwise the run mode is `full` and every question is asked with `--all` semantics, except questions 13, 14 and 15 (see Fallback). That is today's behavior: each question shows the current setting as its default. A first run (`existingConfig` null), a legacy-only migration run (only `.claude/config.json` exists, so there is no `.cenci/config.json`, no `existingConfig` and no `migrationBase` to resolve against) and a `--all` run never call the resolver; all three are `full` runs by the first and second conditions, not by a resolver failure.
 
 **Resolver call.** Run the resolver as its **own** Bash call (per `cenci:shell-rules`), after Scripted Detection and before the first question — it only reads, nothing is written:
 
@@ -100,11 +100,11 @@ bash "${CLAUDE_PLUGIN_ROOT}/skills/configure/scripts/resolve-delta.sh" <config-p
 
 **Result shape check.** Valid JSON is not enough: before using it, require that `delta.ask` and `delta.carried` are both JSON arrays — for example `jq -e '(.ask | type) == "array" and (.carried | type) == "array"'` over the stdout line, exit 0. A result that fails the check (a bare scalar, an object without the arrays, `null`) is treated exactly like a resolver failure in the fallback below; never ask "nothing" because an unusable result was read as an empty `delta.ask`.
 
-**Fallback.** If the resolver exits non-zero, prints invalid JSON, or its JSON fails the shape check above, treat the run as `full` and tell the user why. Give one informational line naming the stderr cause (or the failed shape check); a resolver failure never blocks configuration and never silently skips a question. A `full` run caused by a resolver failure does **not** re-offer a present `planning` or `automerge` value — only an explicit `--all` does (see `### Autonomy Settings`): a fallback must never put the destructive "Remove the block(s)" option in front of the user.
+**Fallback.** If the resolver exits non-zero, prints invalid JSON, or its JSON fails the shape check above, treat the run as `full` and tell the user why. Give one informational line naming the stderr cause (or the failed shape check); a resolver failure never blocks configuration and never silently skips a question. A `full` run caused by a resolver failure does **not** re-offer a present `planning`, `automerge` or `refinement` value — only an explicit `--all` does (see `### Autonomy Settings`): a fallback must never put the destructive "Remove the block(s)" option in front of the user.
 
 **Using the result.** Ask only the question IDs in `delta.ask` and carry every ID in `delta.carried`. When `delta.ask` is empty, ask no questions and still run every generation step. A carried answer skips only the prompt — its value still drives every generation step. That covers `.mcp.json`, `.lsp.json`, `~/.claude/settings.json`, the AGENTS/CLAUDE marker sections and `.cenci/Dockerfile`: read the value from `existingConfig` instead of asking. Question IDs map to the numbered questions through the `ID` column of the defaults table; a question whose ID is not in `delta.ask` is skipped even when its numbered section below says "ask".
 
-**Offered ledger.** Only questions actually put to the user this run are recorded as offered (step 6 stamps them into `configureOffered`). A conditional question whose detection condition fails (5c without a frontend framework, Playwright without `@playwright/test`, question 6 without detected LSP servers, question 10 when `.lazyboards.yml` exists, question 11 in a container or when the status probe fails) is not recorded, and question 12 and Steps 2a/2b have no ID and are never recorded. An ID is recorded only for an answer that was applied or explicitly declined: when the question 13/14 overlay falls back in step 6, that question's ID is removed from the offered set before the ledger is stamped (the next delta run asks it again only when its key is absent and its ID is not already in the existing ledger; otherwise `/cenci:configure --all` applies it), and question 11 is recorded only after a successful `cenci dispatch enroll` or an explicit "No" (see `### Fleet Dispatch Enrollment`).
+**Offered ledger.** Only questions actually put to the user this run are recorded as offered (step 6 stamps them into `configureOffered`). A conditional question whose detection condition fails (5c without a frontend framework, Playwright without `@playwright/test`, question 6 without detected LSP servers, question 10 when `.lazyboards.yml` exists, question 11 in a container or when the status probe fails) is not recorded, and question 12 and Steps 2a/2b have no ID and are never recorded. An ID is recorded only for an answer that was applied or explicitly declined: when the question 13/14/15 overlay falls back in step 6, that question's ID is removed from the offered set before the ledger is stamped (the next delta run asks it again only when its key is absent and its ID is not already in the existing ledger; otherwise `/cenci:configure --all` applies it), and question 11 is recorded only after a successful `cenci dispatch enroll` or an explicit "No" (see `### Fleet Dispatch Enrollment`).
 
 **Named exceptions** — the only things asked or re-opened beyond `delta.ask` on a delta run:
 - The `enrolled: true, session: ""` repair (question 12) is still asked on a delta run (see `### Fleet Dispatch Enrollment`).
@@ -174,6 +174,7 @@ The `ID` column is the question's identifier in `question-keys.json` — the val
 | 11. Fleet dispatch enrollment | `dispatchEnroll` | *(none — user-level `~/.config/cenci/config.json`; ledger-tracked)* | Asked only when `cenci dispatch status --json` reports `enrolled: false` (see *Fleet Dispatch Enrollment*) |
 | 13. Plan approval autonomy | `planning` | `planning` | Delta run: asked only when the key is absent and not already offered; `--all` re-offers it with the committed value pre-selected (see *Autonomy Settings*) |
 | 14. Automerge policy block | `automerge` | `automerge` (top-level or any `projects[]` entry) | Delta run: asked only when absent and not already offered; `--all` re-offers it with "Keep current block(s) (Recommended)" pre-selected (see *Autonomy Settings*) |
+| 15. Refinement autonomy | `refinement` | `refinement` | Delta run: asked only when the key is absent and not already offered; `--all` re-offers it with "Keep current (Recommended)" pre-selected (see *Autonomy Settings*) |
 
 Ask these questions one at a time using the `AskUserQuestion` tool (on a `delta` run, only those whose ID is in `delta.ask` — skip the rest and carry their recorded values):
 
@@ -805,18 +806,18 @@ about the dispatch loop's enable flag or interval setting itself.
 ### Autonomy Settings
 
 **This section runs on every configure invocation** — there is no container guard: unlike
-Fleet Dispatch Enrollment above, `planning` and `automerge` are repo-committed keys that
-land inside this run's PR, so an in-container run is fine. Both questions below only
-collect an answer; neither writes anything itself — step 6 below performs the actual
+Fleet Dispatch Enrollment above, `planning`, `automerge` and `refinement` are repo-committed keys that
+land inside this run's PR, so an in-container run is fine. The questions below only
+collect an answer; none writes anything itself — step 6 below performs the actual
 write, overlaying whatever was collected here onto the merged config.
 
-**Absent-only rule (delta runs).** On a delta run, questions 13 and 14 are asked only when the key is absent and the ID is not in `configureOffered`; nothing is written on a skip. On a delta run, when `planning` or `automerge` is already present, report the
+**Absent-only rule (delta runs).** On a delta run, questions 13, 14 and 15 are asked only when the key is absent and the ID is not in `configureOffered`; nothing is written on a skip. On a delta run, when `planning`, `automerge` or `refinement` is already present, report the
 existing value verbatim, never re-prompt, never narrow, and never remove it.
 
 **`--all` re-offers.** `--all` is the one way to change or remove a present value, and it
-always shows the current value first. Under `--all`, question 13 is re-offered even when `planning` is present, with the committed value pre-selected. Under `--all`, question 14 is re-offered even when `automerge` is present, with "Keep current block(s) (Recommended)" pre-selected. When the key is absent, `--all` asks the ordinary question below. Declining or keeping never writes anything but the `configureOffered` ledger stamp (step 6).
+always shows the current value first. Under `--all`, question 13 is re-offered even when `planning` is present, with the committed value pre-selected. Under `--all`, question 14 is re-offered even when `automerge` is present, with "Keep current block(s) (Recommended)" pre-selected. Under `--all`, question 15 is re-offered even when `refinement` is present, with "Keep current (Recommended)" pre-selected. When the key is absent, `--all` asks the ordinary question below. Declining or keeping never writes anything but the `configureOffered` ledger stamp (step 6).
 
-**Resolver-failure `full` runs do not re-offer.** A `full` run caused by a resolver failure (see `### Delta Resolution`) is not an `--all` run: for a present `planning` or `automerge` key it behaves like a delta run — report the existing value verbatim and do NOT re-offer it, so a fallback can never reach the destructive "Remove the block(s)" option. Only a leading `--all` token re-offers a present value. An absent key is asked as the ordinary question.
+**Resolver-failure `full` runs do not re-offer.** A `full` run caused by a resolver failure (see `### Delta Resolution`) is not an `--all` run: for a present `planning`, `automerge` or `refinement` key it behaves like a delta run — report the existing value verbatim and do NOT re-offer it, so a fallback can never reach the destructive "Remove the block(s)" option. Only a leading `--all` token re-offers a present value. An absent key is asked as the ordinary question.
 
 **Presence detection**, read from `existingConfig` (already in hand from Existing Config
 Detection above):
@@ -825,6 +826,7 @@ Detection above):
   carries its own `automerge` key — monorepo automerge can be per-project only, so a
   top-level-only check would wrongly re-offer the question on a repo whose policy lives
   entirely in `projects[]`.
+- `refinement` is present iff `existingConfig.refinement` exists.
 
 13. **Plan approval autonomy** (asked via `AskUserQuestion` when `planning` is
     absent and, on a delta run, `planning` is in `delta.ask`; under `--all` it is also
@@ -945,13 +947,37 @@ del(.automerge) | if (.projects | type) == "array" then .projects |= map(if type
 ```
 <!-- cenci:configure-q14-remove:end -->
 
+15. **Refinement autonomy** (asked via `AskUserQuestion` when `refinement` is absent and, on a delta run, `refinement` is in `delta.ask`; under `--all` it is also asked when `refinement` is present, in the keep-or-change form below): "Should `/cenci:refine` keep its full question interview, or switch to lean refinement?
+    `interactive` runs the full question interview and stops for the Confirmation Gate. `lean` runs one question round of at most 3 questions plus the cap-exempt confirm/overrule question, decides the rest itself and lists those decisions as A1…An at the Confirmation Gate for one overrule (see
+    `docs/autonomous-loop.md`'s \"Ask fewer questions at refinement\"). Lean refinement never grants `automerge:ok` and does not remove the Confirmation Gate."
+    - Options: "Switch to `lean` (Recommended)", "Keep `interactive`"
+    - Question 15 deliberately departs from question 13's recommend-interactive pattern: the owner wants lean refinement as the normal mode, so the offer recommends `lean`. "Switch to `lean` (Recommended)" applies only to the ordinary form, when `refinement` is absent; the runtime default is unchanged, because an absent `refinement` key still resolves to `interactive`.
+    - Declining omits the `refinement` key entirely — no `refinement` key is written.
+    - **`--all` with `refinement` present**: ask "`refinement.autonomy` is currently
+      `<current>`. Keep it or switch?" with the options "Keep current (Recommended)" and
+      one switch option for the other value — "Switch to `interactive`" when the committed
+      value is the exact string `lean`, "Switch to `lean`" otherwise (a value other than
+      the exact string `lean` is treated as `interactive`, so it pre-selects Keep and
+      offers the switch to `lean`). Keeping the current value writes nothing. Switching to `interactive` writes `refinement.autonomy: "interactive"` explicitly, preserving sibling keys.
+    - **Overlay program.** Every Q15 write — the switch above, and the ordinary
+      "Switch to `lean` (Recommended)" answer when `refinement` is absent — is this fixed program, applied
+      to the candidate config with `--arg autonomy interactive|lean` and validated in
+      step 6 (exit 0 and `jq -e 'type == "object"'`); it keeps every sibling key of `refinement`:
+
+<!-- cenci:configure-q15-switch:begin -->
+```jq
+.refinement = ((.refinement | if type == "object" then . else {} end) + {autonomy: $autonomy})
+```
+<!-- cenci:configure-q15-switch:end -->
+
 **Next step.** Point the user at the fleet-side verbs from #964/#968 as the explicit next
 steps — neither is flipped by this skill:
 - `cenci dispatch plan-refined on|off|status` to let dispatch pick up unattended planning
   once `planning.autonomy` is `lean` on `origin/main`.
 - `cenci automerge on|off|status` to arm the fleet-wide automerge kill switch once a
   policy block exists.
-- See `docs/autonomous-loop.md` for the full walkthrough of all four switches.
+- Switch 6 (`refinement.autonomy`) has no fleet verb: it is read from the local checkout, so there is nothing to flip fleet-wide.
+- See `docs/autonomous-loop.md` for the full walkthrough of all six switches.
 
 ### Auth Verification
 
@@ -1926,23 +1952,24 @@ For each MCP selected in question 5:
    - If `existingConfig` is not null: start from the existing object, overwrite each field with the user's answers. This preserves fields the skill doesn't manage.
    - If `existingConfig` is null: create the file fresh.
 
-   **Autonomy Settings wiring.** `planningAnswer`/`automergeAnswer` are overlaid onto
+   **Autonomy Settings wiring.** `planningAnswer`/`automergeAnswer`/`refinementAnswer` are overlaid onto
    `merge-sandbox-config.sh`'s stdout before the write: `planningAnswer` contributes a
    `planning: { "autonomy": "lean" }` key only when question 13 above was asked and
-   answered `lean`, and `automergeAnswer` contributes the scaffolded `automerge` key only
+   answered `lean`, `automergeAnswer` contributes the scaffolded `automerge` key only
    when question 14 above was asked and answered "Scaffold a starter block for hand
-   review" — a declined answer contributes no key. When either question was skipped
+   review", and `refinementAnswer` contributes a `refinement: { "autonomy": "lean" }` key
+   only when question 15 above was asked and answered `lean` — a declined answer contributes no key. When any of the three questions was skipped
    because its key was already present in `existingConfig` (or carried on a delta run),
    there is no collected answer to overlay — the existing value simply survives the merge
    semantics above untouched. Under `--all`, a collected "Switch to …" answer for question
    13 is applied with the `cenci:configure-q13-switch` program (`--arg autonomy
-   interactive|lean`), and a collected "Remove the block(s)" answer for question 14 with
+   interactive|lean`), a collected "Switch to …" answer for question 15 is applied with the `cenci:configure-q15-switch` program (`--arg autonomy interactive|lean`), and a collected "Remove the block(s)" answer for question 14 with
    the `cenci:configure-q14-remove` program (`### Autonomy Settings`); "Keep current"
    answers contribute nothing.
 
-   **Overlay order and validation.** The overlay order is `merge-sandbox-config.sh` stdout, then the question 13/14 overlays (`cenci:configure-q13-switch`, `cenci:configure-q14-remove`), then the `configureOffered` ledger (`cenci:configure-offered-ledger`). Run each overlay with `jq` over the candidate config as its own Bash call (write the candidate to `${TMPDIR:-/tmp}/cenci/cenci-configure-<slug>-config.json` as the scratch input and remove it afterwards under the existing `rm -f` grant — that `rm -f` also runs when an overlay fails validation, so no scratch file is left behind). An overlay result is valid only when the `jq` call exits 0 and the result passes `jq -e 'type == "object"'`: an empty output passes `jq empty`, so `jq empty` alone never gates a write. Apply that check after each overlay and before every write — the same fail-closed discipline as the adjacent `sandbox` merge above: if an overlaid result fails it, do not write it, report the failure, and fall back to the content before that overlay (the previous step's output as-is). A fallback that drops the ledger overlay still writes, but tell the user the ledger could not be stamped, so the questions offered this run will be asked again.
+   **Overlay order and validation.** The overlay order is `merge-sandbox-config.sh` stdout, then the question 13/14/15 overlays (`cenci:configure-q13-switch`, `cenci:configure-q14-remove`, `cenci:configure-q15-switch`), then the `configureOffered` ledger (`cenci:configure-offered-ledger`). Run each overlay with `jq` over the candidate config as its own Bash call (write the candidate to `${TMPDIR:-/tmp}/cenci/cenci-configure-<slug>-config.json` as the scratch input and remove it afterwards under the existing `rm -f` grant — that `rm -f` also runs when an overlay fails validation, so no scratch file is left behind). An overlay result is valid only when the `jq` call exits 0 and the result passes `jq -e 'type == "object"'`: an empty output passes `jq empty`, so `jq empty` alone never gates a write. Apply that check after each overlay and before every write — the same fail-closed discipline as the adjacent `sandbox` merge above: if an overlaid result fails it, do not write it, report the failure, and fall back to the content before that overlay (the previous step's output as-is). A fallback that drops the ledger overlay still writes, but tell the user the ledger could not be stamped, so the questions offered this run will be asked again.
 
-   **A fallen-back question 13/14 overlay was not applied.** When a question 13 or 14 overlay fails the check above, the collected answer is not in the written config. Tell the user which question's answer was not applied, and either that it will be asked again on the next delta run (only when its key is absent and its ID is not already in the existing ledger) or, otherwise (an `--all` change, an ID already in the existing ledger, or a present key), to re-run `/cenci:configure --all` to apply it; remove that question's ID (`planning` for question 13, `automerge` for question 14) from the offered set before the ledger overlay runs, so the ledger never records an offer whose answer was dropped; and key step 7 to the overlay actually applied — a fallen-back "Remove the block(s)" never emits the `## Review required — automerge policy removed` section and is never reported as removed, and a fallen-back scaffold never emits `## Review required — automerge policy`.
+   **A fallen-back question 13/14/15 overlay was not applied.** When a question 13, 14 or 15 overlay fails the check above, the collected answer is not in the written config. Tell the user which question's answer was not applied, and either that it will be asked again on the next delta run (only when its key is absent and its ID is not already in the existing ledger) or, otherwise (an `--all` change, an ID already in the existing ledger, or a present key), to re-run `/cenci:configure --all` to apply it; remove that question's ID (`planning` for question 13, `automerge` for question 14, `refinement` for question 15) from the offered set before the ledger overlay runs, so the ledger never records an offer whose answer was dropped; and key step 7 to the overlay actually applied — a fallen-back "Remove the block(s)" never emits the `## Review required — automerge policy removed` section and is never reported as removed, and a fallen-back scaffold never emits `## Review required — automerge policy`.
 
    **Sandbox flags are derived per question ID.** For an ID in `delta.carried`, the Q9/Q9b/Q9c flag is derived from the existing `sandbox.*` value, never passed as a bare `false`: pass `true` for each of `--dockerfile`, `--dind` and `--azure` whose existing `sandbox.enabled`/`dind`/`azure` is `true`, and `false` only for a key that is absent (a recorded decline) — so a carried opt-in is never deleted by the merge script's required flags. For an ID in `delta.ask` (a key that was absent and never offered, e.g. `sandbox.dind` and `sandbox.azure` on a config that predates questions 9b/9c), and for every question on an `--all` or `full` run, the flag is the answer collected this run. Generate or refresh the `.cenci/Dockerfile` (step 5e) whenever the effective `sandbox.enabled` is `true`, carried or just answered; a just-answered Yes for `--dind` or `--azure` selects its fragment in that same generation.
 
@@ -1991,6 +2018,7 @@ Always stamp `configureOffered` on every write as the sorted, de-duplicated unio
     "gateOutputLines": 120
   },
   "planning": { "autonomy": "interactive" },
+  "refinement": { "autonomy": "interactive" },
   "cicd": {
     "enabled": true,
     "platform": "github-actions"
@@ -2008,8 +2036,8 @@ Always stamp `configureOffered` on every write as the sorted, de-duplicated unio
 }
 ```
 
-(The `planning` value shown above is illustrative of the schema, not something this skill
-writes by default: question 13 (`### Autonomy Settings`) writes `planning.autonomy` only when you explicitly choose `lean` (or switch under `--all`); a `planning` key already present in `existingConfig` is left verbatim
+(The `planning` and `refinement` values shown above are illustrative of the schema, not something this skill
+writes by default: question 13 (`### Autonomy Settings`) writes `planning.autonomy` only when you explicitly choose `lean` (or switch under `--all`), and question 15 (`### Autonomy Settings`) writes `refinement.autonomy` only when you explicitly choose `lean` (or switch under `--all`); a `planning` or `refinement` key already present in `existingConfig` is left verbatim
 on a delta run; `--all` re-offers it. Declining — keeping `interactive` — writes nothing, since a missing key already resolves to `interactive`.)
 
 `configVersion` records the flow plugin version that last wrote this config (managed by this skill — always overwritten with the current plugin version in step 6, never a question). Consumers:
@@ -2135,6 +2163,20 @@ Because the config write below uses merge semantics, a hand-added `planning` blo
 **preserved untouched** across re-configuration, exactly like `security`. Do **not** add
 `planning` to the migration-removal list below — it is a supported optional field, not a
 legacy one.
+
+The `refinement` field is optional. `### Autonomy Settings` question 15 above asks for it only when absent
+(recommending `lean`, while an absent key still resolves to `interactive`). A key already present is reported verbatim and is never re-prompted, narrowed, or removed
+on a delta run; `--all` re-offers it with the committed value pre-selected. Merge semantics (step 6) preserve a
+hand-added or previously-written value untouched across reconfiguration unless you choose a switch under `--all`.
+`refinement.autonomy` is consumed by `skills/refine/SKILL.md`. Schema:
+- `refinement.autonomy` — `"lean"` or `"interactive"`, default `"interactive"`. Only the exact
+  string `"lean"` changes behavior — a missing `refinement` block, a missing `autonomy` key, or
+  any other value all resolve to `"interactive"` (the full question interview, then the Confirmation Gate). In `"lean"`,
+  `/cenci:refine` asks one round of at most 3 questions plus the cap-exempt confirm/overrule question, decides the rest itself and lists
+  those decisions as A1…An at the Confirmation Gate for one overrule.
+
+Unlike `planning.autonomy`, it is read from the local `.cenci/config.json` through `project-core`, never from `origin/main`, and no fleet switch exists for it, so there is no dispatch-side consumer. Lean refinement never grants `automerge:ok` and does not remove the Confirmation Gate. Because the config write below uses merge semantics, a hand-added `refinement` block is
+**preserved untouched** across re-configuration. Do **not** add `refinement` to the migration-removal list below — it is a supported optional field, not a legacy one.
 
 **Monorepo config** — when `isMonorepo` is true, add `isMonorepo` and `projects` fields:
 
@@ -2365,7 +2407,7 @@ When migrating from an older config that has `ticketSystem`, `prSystem`, `ticket
    Confirm this is intended — see
    `docs/autonomous-loop.md#3-declare-what-a-merge-is-allowed-to-touch`.
    ```
-   On a delta run, also append a `## Carried through (delta run)` section that lists the carried question IDs and config key names only — never config values — and says `/cenci:configure --all` would re-open them. The PR may be public and config values can be sensitive, so the verbatim `planning`/`automerge` report stays in the terminal:
+   On a delta run, also append a `## Carried through (delta run)` section that lists the carried question IDs and config key names only — never config values — and says `/cenci:configure --all` would re-open them. The PR may be public and config values can be sensitive, so the verbatim `planning`/`automerge`/`refinement` report stays in the terminal:
    ```markdown
    ## Carried through (delta run)
    Question IDs carried from the existing configuration: <comma-separated `delta.carried` IDs>.
@@ -2381,7 +2423,7 @@ When migrating from an older config that has `ticketSystem`, `prSystem`, `ticket
 
 Report what was created and suggest next steps (e.g., "Try `/cenci:refine <ticket-id>` on a ticket"), including the PR URL from step 7. If question 14 (`### Autonomy Settings`) scaffolded an `automerge` block this run, say so explicitly and flag it for review, then point at the fleet-side next steps: `cenci dispatch plan-refined on` (once `planning.autonomy` is `lean` on `origin/main`) and `cenci automerge on` (once the scaffolded block has been reviewed) — the same verbs named in `### Autonomy Settings`'s own "Next step" block. If `sandbox.enabled` is `true`, mention the generated `.cenci/Dockerfile` and that `cenci sandbox build` (run from inside the repo, after the PR merges) builds the repo's own tailored image on top of the shared base. If `lazyboards.enabled` is `true`, list the generated `.lazyboards.yml` In Review actions with their keys, serve, and test commands (e.g., "`W` opens web-client's PR worktree, `S w` serves it with `ng serve`, `T w` runs its tests with `ng test --watch=false`") and point at `docs/orchestration.md` for the board recipe. Repeat the trust caveat here too, since this run's file ships as a PR: the generated shell actions and `cleanup` stay inert until `lazyboards trust` is run against the file's exact content, so trust must be re-granted after the PR merges if review changed a byte — and every teammate runs it once on their own clone. When the suggest-or-skip branch ran instead, report what happened (added actions, migrated to `keymaps:`, or "already complete — no changes"); on a delta run it only reports, so list the missing actions and say `/cenci:configure --all` offers to add them.
 
-On a delta run, the final report also covers what was carried and what was refreshed. The final report repeats the carried-through summary, the Dockerfile report, and the lazyboards report. The carried-through summary names the carried question IDs and config keys and says `/cenci:configure --all` would re-open them; for a carried `planning` or `automerge` value it also states the existing value verbatim (terminal only, never the PR body). The Dockerfile report is the block diff (`git -C <worktree-path> diff -- .cenci/Dockerfile`) for a refreshed managed block, or "left untouched — no markers or malformed markers" with the `--all` pointer. The lazyboards report is the missing-actions list, "already covers all recommended actions", or the carried-but-missing-file notice from question 10. If the resolver failed and the run fell back to `full`, say so and why. If question 14 removed the `automerge` block(s) this run (the removal overlay was applied), say so explicitly and flag the PR's `## Review required — automerge policy removed` section. Report what was actually applied, never what was collected: when a question 13/14 overlay fell back, say its answer was not applied, and either that it will be asked again on the next delta run (only when its key is absent and its ID is not already in the existing ledger) or, otherwise (an `--all` change, an ID already in the existing ledger, or a present key), to re-run `/cenci:configure --all` to apply it; when the ledger overlay fell back, say the ledger was not stamped so this run's questions will be asked again; when question 11's enroll failed, report the failure and that question 11 will be asked again only when `dispatchEnroll` is not already in the existing ledger, else to re-run `/cenci:configure --all`.
+On a delta run, the final report also covers what was carried and what was refreshed. The final report repeats the carried-through summary, the Dockerfile report, and the lazyboards report. The carried-through summary names the carried question IDs and config keys and says `/cenci:configure --all` would re-open them; for a carried `planning`, `automerge` or `refinement` value it also states the existing value verbatim (terminal only, never the PR body). The Dockerfile report is the block diff (`git -C <worktree-path> diff -- .cenci/Dockerfile`) for a refreshed managed block, or "left untouched — no markers or malformed markers" with the `--all` pointer. The lazyboards report is the missing-actions list, "already covers all recommended actions", or the carried-but-missing-file notice from question 10. If the resolver failed and the run fell back to `full`, say so and why. If question 14 removed the `automerge` block(s) this run (the removal overlay was applied), say so explicitly and flag the PR's `## Review required — automerge policy removed` section. Report what was actually applied, never what was collected: when a question 13/14/15 overlay fell back, say its answer was not applied, and either that it will be asked again on the next delta run (only when its key is absent and its ID is not already in the existing ledger) or, otherwise (an `--all` change, an ID already in the existing ledger, or a present key), to re-run `/cenci:configure --all` to apply it; when the ledger overlay fell back, say the ledger was not stamped so this run's questions will be asked again; when question 11's enroll failed, report the failure and that question 11 will be asked again only when `dispatchEnroll` is not already in the existing ledger, else to re-run `/cenci:configure --all`.
 
 ### Board lifecycle labels
 

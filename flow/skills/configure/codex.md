@@ -100,12 +100,12 @@ fails. A legacy-only run (only `.claude/config.json`, no `.cenci/config.json`) i
 and never calls the resolver. Delta mode asks only the question IDs the resolver lists in `ask` and carries the rest,
 so a carried answer skips only the prompt and its value still drives every generation
 step. A leading `--all` in the user's request replays every question and ignores the ledger
-(it never removes ledger entries); under `--all`, question 13 re-offers "Keep current (Recommended)" or a switch, and question 14 re-offers "Keep current block(s) (Recommended)" or "Remove the block(s)".
+(it never removes ledger entries); under `--all`, question 13 re-offers "Keep current (Recommended)" or a switch, question 14 re-offers "Keep current block(s) (Recommended)" or "Remove the block(s)", and question 15 re-offers "Keep current (Recommended)" or a switch.
 If the resolver fails, it falls back to a full replay and says why. A resolver result whose
 `ask` or `carried` is not a JSON array fails the same check
 (`jq -e '(.ask | type) == "array" and (.carried | type) == "array"'`) and falls back the same way.
-A fallback full replay is not an `--all` run: it does not re-offer a present `planning` or
-`automerge` value, so a fallback never puts the destructive "Remove the block(s)" option in front of the user.
+A fallback full replay is not an `--all` run: it does not re-offer a present `planning`,
+`automerge` or `refinement` value, so a fallback never puts the destructive "Remove the block(s)" option in front of the user.
 
 Sandbox flags for `merge-sandbox-config.sh` are derived per question ID on a delta run. Questions
 9, 9b and 9c (`sandbox.enabled`, `sandbox.dind`, `sandbox.azure`) listed in the resolver's `carried`
@@ -117,12 +117,12 @@ Generate or refresh the managed `.cenci/Dockerfile` whenever the effective `sand
 `true`, carried or just answered.
 
 Every write stamps `configureOffered`: Codex stamps `configureOffered` with the same sorted, de-duplicated union as the Claude procedure,
-recording only the questions actually put to the user and applied or explicitly declined. The question 13/14 overlays and
+recording only the questions actually put to the user and applied or explicitly declined. The question 13/14/15 overlays and
 the ledger stamp use the exact programs the Claude procedure keeps between its
-`cenci:configure-q13-switch`, `cenci:configure-q14-remove` and
+`cenci:configure-q13-switch`, `cenci:configure-q14-remove`, `cenci:configure-q15-switch` and
 `cenci:configure-offered-ledger` markers: Codex uses the same marker-bounded jq programs as `SKILL.md`,
 and validates each overlay before the write: the `jq` call must exit 0 and the result must pass
-`jq -e 'type == "object"'` (an empty output passes `jq empty`, so that alone is not a gate). When a question 13/14 overlay
+`jq -e 'type == "object"'` (an empty output passes `jq empty`, so that alone is not a gate). When a question 13/14/15 overlay
 falls back, its answer was not applied: the apply step tells the user (that the question will be asked
 again on the next delta run only when its key is absent and its ID is not already in the existing ledger,
 otherwise to re-run `/cenci:configure --all` to apply it), removes that question's ID
@@ -134,7 +134,7 @@ On a delta run, Codex refreshes a valid marker-managed `.cenci/Dockerfile` witho
 `--all` restores the Overwrite/Skip/Show prompt. The Q12 dispatch session repair is still asked on a delta run. Board Config's
 suggest-or-skip analyzer only reports on a delta run. Plan mode and the apply step split the work: the resolver runs read-only during `/plan`; the ledger, overlay and Dockerfile writes happen only in the apply step
 (`cenci run configure apply <checkpoint-id> --agent codex`). The offered IDs and the collected
-answers (the resolver's `ask` and `carried`, the effective sandbox flags, and the question 11/13/14 answers)
+answers (the resolver's `ask` and `carried`, the effective sandbox flags, and the question 11/13/14/15 answers)
 travel in the plan/apply checkpoint; the apply step reads them from there and never re-derives
 them from the resolver, whose result may differ by then.
 
@@ -144,16 +144,16 @@ carried-through summary (question IDs and config key names, never values in the 
 for no or malformed markers), the lazyboards report including the notice when question 10 is carried but
 `.lazyboards.yml` is missing (it is not regenerated; `--all` re-offers it), and a ledger-not-stamped
 notice when the ledger overlay fell back, so this run's questions will be asked again. A fallen-back
-question 13/14 overlay or a failed `cenci dispatch enroll` is reported the same conditional way: asked
+question 13/14/15 overlay or a failed `cenci dispatch enroll` is reported the same conditional way: asked
 again on the next delta run only when the key is absent and the ID is not already in the existing ledger,
 otherwise re-run `/cenci:configure --all`.
 
 Autonomy Settings mirrors the Claude procedure's `### Autonomy Settings` section: the procedure on a delta run asks
-about `planning` and `automerge` only when absent and not already offered — an already-present value (top-level or,
+about `planning`, `automerge` and `refinement` only when absent and not already offered — an already-present value (top-level or,
 for `automerge`, any `projects[]` entry) is reported verbatim and never re-prompted, narrowed,
-or removed on a delta run, and `--all` re-offers both with keep-or-change options. It defaults both offers to the conservative answer — `interactive` for planning,
-no automerge block — and the automerge offer stays binary (skip vs. scaffold a starter block
-for hand review), never a field-by-field sub-wizard. Because both keys land in the apply
+or removed on a delta run, and `--all` re-offers all three with keep-or-change options. It defaults the planning and automerge offers to the conservative answer — `interactive` for planning,
+no automerge block — while question 15 recommends `lean` and an absent `refinement` key still resolves to `interactive`. The automerge offer stays binary (skip vs. scaffold a starter block
+for hand review), never a field-by-field sub-wizard. Question 15 (`refinement`) mirrors question 13 with the options "Switch to `lean` (Recommended)" and "Keep `interactive`"; under `--all` with `refinement` present it offers "Keep current (Recommended)" or the switch to the other value, and any value other than the exact string `lean` is treated as `interactive`. Declining question 15 writes no `refinement` key, and lean refinement never grants `automerge:ok` and does not remove the Confirmation Gate. Because all three keys land in the apply
 step's config write, never during `/plan`, Plan mode only gathers the answers and previews the
 scaffold; the actual `.cenci/config.json` write happens in
 `cenci run configure apply <checkpoint-id> --agent codex`, same as every other field.
