@@ -19,6 +19,14 @@ func TestDefaultWindowCleanupInterval(t *testing.T) {
 	}
 }
 
+// TestDefaultWorktreeCleanupInterval pins the finished/stale worktree-cleanup
+// pass's zero-config period (#1267): every 10 minutes, enabled by default.
+func TestDefaultWorktreeCleanupInterval(t *testing.T) {
+	if got := Default().WorktreeCleanupInterval; got != 10*time.Minute {
+		t.Fatalf("WorktreeCleanupInterval = %s, want 10m", got)
+	}
+}
+
 // TestDefaultSymbolEscalated_DistinctFromNeedInputAndFailed (#826) pins the
 // escalated-status default glyph and, more importantly, that it is a
 // distinct rune from both SymbolNeedInput ("!") and SymbolFailed ("✗") --

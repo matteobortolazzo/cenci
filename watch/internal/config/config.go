@@ -22,17 +22,21 @@ type Config struct {
 	// window-cleanup pass (#1251), which closes the windows of tickets whose work
 	// is over. Non-positive disables the pass.
 	WindowCleanupInterval time.Duration
-	StyleIdle             string
-	StyleRunning          string
-	StyleDone             string
-	StyleNeedInput        string
-	StyleStopped          string
-	SymbolIdle            string
-	SymbolRunning         string
-	SymbolDone            string
-	SymbolNeedInput       string
-	SymbolStopped         string
-	SymbolFailed          string
+	// WorktreeCleanupInterval is the period of the daemon's finished/stale
+	// worktree-cleanup pass (#1267), which reclaims the worktrees of every
+	// registered repo. Non-positive disables the pass.
+	WorktreeCleanupInterval time.Duration
+	StyleIdle               string
+	StyleRunning            string
+	StyleDone               string
+	StyleNeedInput          string
+	StyleStopped            string
+	SymbolIdle              string
+	SymbolRunning           string
+	SymbolDone              string
+	SymbolNeedInput         string
+	SymbolStopped           string
+	SymbolFailed            string
 	// SymbolEscalated (#826) is the glyph for a ticket the unattended
 	// planner escalated (Input Needed), deliberately distinct from
 	// SymbolNeedInput ("!", a live session waiting mid-turn) and
@@ -60,6 +64,7 @@ func Default() Config {
 		SymbolFailed:    "✗",
 		SymbolEscalated: "?",
 
-		WindowCleanupInterval: 2 * time.Minute,
+		WindowCleanupInterval:   2 * time.Minute,
+		WorktreeCleanupInterval: 10 * time.Minute,
 	}
 }

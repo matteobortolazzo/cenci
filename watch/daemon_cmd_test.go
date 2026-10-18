@@ -291,3 +291,51 @@ func TestDaemonStart_WithoutJSONFlagOrEnv_PlainTextUnchanged(t *testing.T) {
 		t.Errorf("expected the unchanged plain startup line, got: %s", line)
 	}
 }
+
+// flagHelpLines runs `cenci daemon start -h` and returns the flag.PrintDefaults
+// output as a map from flag name to its usage text (the flag line plus its
+// description line). -h exits before the daemon starts, so no socket or PID file
+// is touched; the socket dir is still isolated by the caller.
+func flagHelpLines(t *testing.T) map[string]string {
+	t.Helper()
+	setTempSocketDir(t)
+	out, _ := exec.Command(binaryPath, "daemon", "start", "-h").CombinedOutput()
+	lines := strings.Split(string(out), "\n")
+	flags := make(map[string]string)
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "-") {
+			continue
+		}
+		name, _, _ := strings.Cut(strings.TrimPrefix(trimmed, "-"), " ")
+		usage := trimmed
+		if i+1 < len(lines) {
+			usage += " " + strings.TrimSpace(lines[i+1])
+		}
+		flags[name] = usage
+	}
+	return flags
+}
+
+// TestDaemonStart_HelpListsTheWorktreeCleanupIntervalFlag (#1267) pins the new
+// flag's name and its 10m default through the real binary. The window-cleanup
+// flag is read the same way as a control, so a change in how -h prints defaults
+// cannot make the assertion pass or fail for the wrong reason.
+func TestDaemonStart_HelpListsTheWorktreeCleanupIntervalFlag(t *testing.T) {
+	flags := flagHelpLines(t)
+
+	control, ok := flags["window-cleanup-interval"]
+	if !ok || !strings.Contains(control, "(default 2m0s)") {
+		t.Fatalf("control flag -window-cleanup-interval = %q (found %v), want its (default 2m0s) usage", control, ok)
+	}
+	got, ok := flags["worktree-cleanup-interval"]
+	if !ok {
+		t.Fatalf("daemon start -h does not list -worktree-cleanup-interval; flags: %v", flags)
+	}
+	if !strings.Contains(got, "(default 10m0s)") {
+		t.Errorf("-worktree-cleanup-interval usage = %q, want it to show (default 10m0s)", got)
+	}
+	if !strings.Contains(got, "0 disables it") {
+		t.Errorf("-worktree-cleanup-interval usage = %q, want it to say that 0 disables the pass", got)
+	}
+}

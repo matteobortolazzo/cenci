@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
 	"time"
 
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/babysit"
@@ -16,6 +17,7 @@ import (
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/ticketstate"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/tmux"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/windowproc"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/worktreeclean"
 	"github.com/matteobortolazzo/cenci/watch/v2/pkg/watch"
 )
 
@@ -120,6 +122,22 @@ type Daemon struct {
 	cleanupInFlight    bool
 	cleanupResults     chan windowCleanupResult
 
+	// Worktree-cleanup pass seams and state (#1267); see worktreecleanup.go.
+	// worktreeReader is nil (newDaemon's default) so the pass does nothing and
+	// newDaemon-based tests never shell out to gh, git or tmux; installHostSeams
+	// installs the real reader, resolver factory, tmux pane lister, sandbox gate
+	// and default paths. worktreeInFlight is loop-owned; the two workers report
+	// through channels of capacity 1.
+	worktreeReader         outcomeReader
+	newWorktreeResolver    func() repoResolver
+	worktreeListPanes      func() ([]tmux.LivePane, error)
+	worktreeInSandbox      func() bool
+	worktreeRegistryPath   string
+	worktreeUserConfigPath string
+	worktreeInFlight       bool
+	worktreeEvalResults    chan worktreeEvalResult
+	worktreeRemoveDone     chan struct{}
+
 	// armLimiter is hostArmSpawn's mutex-guarded token bucket (armspawn.go),
 	// gating the whole arm path -- before pane/repo resolution, not just the
 	// fork (#1095 Decisions). Its zero value is a full bucket on first use.
@@ -149,6 +167,9 @@ func newDaemon(cfg config.Config, fe frontend.Frontend, events <-chan ipc.HookEv
 		// cleanupReader stays nil here: installHostSeams installs the real one.
 		cleanupEnabled: ticketstate.CleanupEnabled,
 		cleanupResults: make(chan windowCleanupResult, 1),
+		// worktreeReader stays nil here: installHostSeams installs the real one.
+		worktreeEvalResults: make(chan worktreeEvalResult, 1),
+		worktreeRemoveDone:  make(chan struct{}, 1),
 	}
 }
 
@@ -156,18 +177,27 @@ func newDaemon(cfg config.Config, fe frontend.Frontend, events <-chan ipc.HookEv
 // shell out or signal processes: the babysit-arm resolver/spawn (#1095), its
 // capability predicate (#1215), and the window-process killer (#1253, its
 // diagnostics going to the daemon log), and the window-cleanup pass's ticket
-// reader and resolver factory (#1251). newDaemon leaves them inert -- the arm
-// seam nacks, procKiller and cleanupReader are nil -- so newDaemon-based tests
+// reader and resolver factory (#1251), and the worktree-cleanup pass's outcome
+// reader, resolver factory, tmux pane lister, sandbox gate and registry and
+// user-config paths (#1267). newDaemon leaves them inert -- the arm seam nacks,
+// procKiller, cleanupReader and worktreeReader are nil -- so newDaemon-based tests
 // never shell out or signal real processes. Run is the only production caller,
-// and TestInstallHostSeams_InstallsTheRealProcessKiller and
-// TestInstallHostSeams_InstallsTheRealTicketReader pin that it wires the real
-// ones, so dropping either cannot go unnoticed.
+// and TestInstallHostSeams_InstallsTheRealProcessKiller,
+// TestInstallHostSeams_InstallsTheRealTicketReader and
+// TestInstallHostSeams_InstallsTheRealWorktreeCleanupSeams pin that it wires the
+// real ones, so dropping any cannot go unnoticed.
 func (d *Daemon) installHostSeams(armCapable func(agent, workflow string) bool) {
 	d.armSpawn = d.hostArmSpawn
 	d.armCapable = armCapable
 	d.procKiller = windowproc.New(log.Writer())
 	d.cleanupReader = &ticketstate.Reader{}
 	d.newCleanupResolver = func() repoResolver { return &ticketstate.Resolver{} }
+	d.worktreeReader = &ticketstate.Reader{}
+	d.newWorktreeResolver = func() repoResolver { return &ticketstate.Resolver{} }
+	d.worktreeListPanes = tmux.ListLivePanes
+	d.worktreeInSandbox = func() bool { return os.Getenv("CENCI_SANDBOX") == "1" }
+	d.worktreeRegistryPath = worktreeclean.DefaultRegistryPath()
+	d.worktreeUserConfigPath = worktreeclean.DefaultUserConfigPath()
 }
 
 // runInGoroutine is the production Daemon.runOffLoop: fn runs on its own
@@ -292,6 +322,16 @@ func (d *Daemon) loop(ctx context.Context, attention <-chan ipc.AttentionUpdate)
 		cleanupC = cleanupTick.C
 	}
 
+	// Finished/stale worktree-cleanup pass (#1267), on its own interval and never
+	// on the sweep tick, and with no startup pass: the first one runs at the first
+	// tick. A non-positive interval leaves worktreeC nil, as for reapC.
+	var worktreeC <-chan time.Time
+	if d.cfg.WorktreeCleanupInterval > 0 {
+		worktreeTick := time.NewTicker(d.cfg.WorktreeCleanupInterval)
+		defer worktreeTick.Stop()
+		worktreeC = worktreeTick.C
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -309,6 +349,12 @@ func (d *Daemon) loop(ctx context.Context, attention <-chan ipc.AttentionUpdate)
 			d.startWindowCleanup()
 		case res := <-d.cleanupResults:
 			d.applyWindowCleanup(res)
+		case <-worktreeC:
+			d.startWorktreeCleanup()
+		case res := <-d.worktreeEvalResults:
+			d.applyWorktreeGuards(res)
+		case <-d.worktreeRemoveDone:
+			d.finishWorktreeCleanup()
 		case u := <-attention:
 			d.attention = u.Windows
 			d.headroom = u.Headroom
