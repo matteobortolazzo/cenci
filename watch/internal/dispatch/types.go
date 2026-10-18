@@ -511,6 +511,34 @@ const (
 	ContainerSessionProbeFailed ContainerSessionProbe = "failed"
 )
 
+// MemoryProbe classifies the once-per-pass cgroup memory read of one repo's
+// running workload containers (#1290, containers.go's resolveMemoryHeadroom)
+// that feeds the capacity gate. MemoryProbeOK is the zero value ("") so every
+// existing Inputs construction site keeps today's ungated behavior without
+// being touched -- mirrors ContainerSessionProbeOK above. Every other value is
+// a broken-input class that default-denies at the gate.
+type MemoryProbe string
+
+const (
+	// MemoryProbeOK is the zero value: the reading is trustworthy (including
+	// "no running container", which is not a failure).
+	MemoryProbeOK MemoryProbe = ""
+	// MemoryProbeFailed means a read of one of the repo's containers (or the
+	// runtime listing) failed: the repo's memory is unknown, so every
+	// candidate of that repo is held.
+	MemoryProbeFailed MemoryProbe = "failed"
+)
+
+// RepoMemory is one repo's most-loaded limited container reading for the pass.
+// Limited is false for a repo with no running limited container (none running,
+// or every one unlimited). Current and Max are bytes.
+type RepoMemory struct {
+	Probe   MemoryProbe
+	Limited bool
+	Current int64
+	Max     int64
+}
+
 // OpenPRProbe classifies the collector's bounded, cursor-paginated `gh api
 // graphql` open-PR inventory read (#881, openpr.go's openPRInventory) into a
 // closed set, rather than collapsing distinct failure classes

@@ -460,7 +460,9 @@ immediately after enabling). Interval edits recalculate that deadline from the p
 pass completion without creating an extra pass. The loop publishes live state so that
 `cenci dispatch status --json`'s `"loop"` object (`enabled`, `pass_running`,
 `last_run_at`, `last_dispatched`, `last_skipped`, `last_error`) now reflects the live
-daemon end-to-end, not just a config fallback. `last_dispatched` counts successful
+daemon end-to-end, not just a config fallback. The same JSON carries a top-level
+`memoryHeadroom` (the configured `dispatch.memoryHeadroom`), and the human output
+adds a `Memory headroom: <N>%` line (`disabled` when `0`). `last_dispatched` counts successful
 spawns (not merely dispatch decisions), and `last_error` is intentionally redacted to
 `dispatch_pass_failed`, `reconcile_pass_failed`, `reconcile_state_unreadable`
 (ticket #883, a persistent reconciliation-state corruption hold — see "Corrupt
@@ -592,7 +594,21 @@ failing gate is the logged skip reason):
 7. the daemon is reachable (else `daemon unreachable` — never dispatch on unknown
    state);
 8. fewer than `needInputThreshold` windows are awaiting input;
-9. `running + orphaned container sessions + dispatched-this-pass` is below
+9. **memory headroom** — the ticket's repo has at least `dispatch.memoryHeadroom`
+   percent (integer 0–100, default `25`; `0` disables the gate) of its container
+   memory limit free, else `memory headroom below <N>% (<owner/name> container at
+   <U>%)`. The gate reads `memory.current`/`memory.max` once per pass for every
+   running `<agent>-cenci-<slug>` container of the repo and judges the most-loaded
+   *limited* one. An unlimited container (`memory.max` of `max`) never causes a skip
+   and logs one `dispatch:` line per pass; a repo with no running container passes
+   without any exec. The probe is fail-closed: a failed, timed-out, over-long or
+   malformed read skips that repo's candidates with `memory probe failed` (cgroup
+   v2 only — a cgroup v1 host fails this way), and a runtime `ps` failure fails
+   every repo with candidates; a `container session probe failed` skip takes
+   precedence over it. This gate does not stop two pickups in one pass: the reading
+   does not change until the new session allocates memory, and bounding that is
+   `concurrencyCap`'s job;
+10. `running + orphaned container sessions + dispatched-this-pass` is below
    `concurrencyCap`. Orphaned container sessions are the distinct (tmux socket,
    launch ID) pairs — (tmux socket, pane) for processes that carry no launch
    ID — that `cenci sandbox reap-orphans` would classify as dead reap targets,
@@ -604,9 +620,9 @@ failing gate is the logged skip reason):
    query error, or timeout) every candidate is skipped with `container session
    probe failed` (fail-closed); with no docker or podman on PATH the count is 0
    and dispatch proceeds;
-10. the daily quota is not yet spent;
-11. the current local time is outside `quietHours`;
-12. the resolved agent still has budget (see [Usage budgets](#usage-budgets) — when
+11. the daily quota is not yet spent;
+12. the current local time is outside `quietHours`;
+13. the resolved agent still has budget (see [Usage budgets](#usage-budgets) — when
     `agentLimits` is set this is computed from real token usage, otherwise from the
     static `agentBudgetFloors`).
 
@@ -1099,6 +1115,7 @@ Dispatch reads the same `config.json` as `run`, under a top-level `"dispatch"` b
     ],
     "concurrencyCap": 3,
     "needInputThreshold": 1,
+    "memoryHeadroom": 25,
     "dailyQuota": 20,
     "quietHours": { "startHour": 22, "endHour": 7 },
     "planStalenessTolerance": 5,
@@ -1124,6 +1141,7 @@ Dispatch reads the same `config.json` as `run`, under a top-level `"dispatch"` b
 | `repos` | — | Repos to scan; each entry requires `repo`, `dir` (holds that repo's `.plans/` and git tree), and `session` (the tmux session that repo's dispatched windows target — never an ambient/current session). Normally managed via `cenci dispatch enroll`/`unenroll` (see [Enrollment](#enrollment-cenci-dispatch-enrollunenrollstatus)) rather than hand-edited, though hand-editing remains supported. A repo whose `session` is empty or names a tmux session that doesn't exist is skipped entirely for that pass (`dispatch: no target tmux session for <repo>; set repos[].session in <config path>`, or the equivalent "not found in tmux" line naming the remedy `tmux new-session -d -s <name>`) — every other enrolled repo still dispatches normally in the same pass. |
 | `concurrencyCap` | `3` | Max concurrent running sessions (counts in-flight windows, orphaned container sessions still alive after their pane closed, and this pass's dispatches) |
 | `needInputThreshold` | `1` | Pause dispatch when at least this many windows await input |
+| `memoryHeadroom` | `25` | Minimum percent of a repo's container memory limit that must be free before dispatch picks up into it (integer 0–100; `0` disables the gate; see [Pickup rules and gates](#pickup-rules-and-gates)); a non-integer, `null`, negative or >100 value is a config error |
 | `dailyQuota` | `20` | Max dispatches per process run (resets on restart) |
 | `quietHours` | none | Local-clock window to suppress dispatch; `startHour > endHour` wraps midnight, `start == end` disables |
 | `planStalenessTolerance` | `5` | Max commits a plan may fall behind before it is skipped as stale (see [Path-aware staleness](#path-aware-staleness) for scoping the count via `stalenessPaths`) |

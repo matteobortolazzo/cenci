@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/errcode"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/sandbox"
 )
 
 // memoryMode is how the workload container's memory limit is chosen.
@@ -92,25 +93,6 @@ func runtimeOutput(timeout time.Duration, runtime string, args ...string) ([]byt
 		return out, fmt.Errorf("timed out after %s (%w): %w", timeout, context.DeadlineExceeded, err)
 	}
 	return out, err
-}
-
-// cappedBuffer accumulates at most limit bytes and discards the rest, noting
-// that it did, so a runaway writer costs bounded memory and the caller can
-// refuse the over-long output instead of parsing a truncated prefix.
-type cappedBuffer struct {
-	buf      bytes.Buffer
-	limit    int
-	overflow bool
-}
-
-func (c *cappedBuffer) Write(p []byte) (int, error) {
-	n := len(p)
-	if room := c.limit - c.buf.Len(); n > room {
-		c.overflow = true
-		p = p[:room]
-	}
-	c.buf.Write(p)
-	return n, nil
 }
 
 // memoryLimitPattern is the accepted sandbox.memoryLimit size form: a positive
@@ -511,16 +493,11 @@ func (e *Engine) warnLimitsDrift(ctx launchCtx) {
 // output, no oom_kill line (cgroup v1, or a host cgroup namespace), or a
 // non-numeric value — so the caller reports "unknown" rather than a silent 0.
 func (e *Engine) oomKillCount(name string) (count int64, ok bool) {
-	ctx, cancel := context.WithTimeout(context.Background(), limitProbeTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, e.Runtime, "exec", name, "/bin/cat", "/sys/fs/cgroup/memory.events")
-	cmd.WaitDelay = limitProbeTimeout
-	out := &cappedBuffer{limit: maxMemoryEventsBytes}
-	cmd.Stdout = out
-	if err := cmd.Run(); err != nil || out.overflow {
+	out, err := sandbox.ReadContainerFiles(context.Background(), e.Runtime, name, limitProbeTimeout, maxMemoryEventsBytes, "/sys/fs/cgroup/memory.events")
+	if err != nil {
 		return 0, false
 	}
-	return parseMemoryEvents(out.buf.String())
+	return parseMemoryEvents(string(out))
 }
 
 // parseMemoryEvents extracts the oom_kill counter from a cgroup v2

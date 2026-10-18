@@ -410,6 +410,8 @@ fails closed to the interactive path.
 
 Planning also auto-adopts a settled posture: a posture already settled verbatim in a `Refined`, trusted-author ticket's `### Decisions`/`### Assumptions (auto-adopted)` is auto-adopted rather than re-asked — the decision already reached at `/cenci:refine`'s Confirmation Gate is not confirmed a second time. This narrows only the confirm/overrule trigger, never its cap priority, and only when the delegation's forwarded provenance is positively verified (a `Refined` label plus a trusted author association, and a quotable bullet the codebase doesn't contradict); unverifiable provenance falls back to asking: missing provenance, a missing `Refined` label, an untrusted or unrecognized author association, ticketless mode, or a failed resume-time provenance read all ask exactly as before.
 
+**Dispatch won't pick up into a starved container.** A repo whose most-loaded running container has less than `dispatch.memoryHeadroom` (default 25%) of its memory limit free is skipped until it recovers; an unreadable reading skips it too.
+
 **The merge chain is fail-closed at every link.** "Green" requires at least one check
 to be `pass`; every other check may be `pass` or `skipping` — a paths-filtered
 monorepo's unaffected-project checks (routinely `skipping`) no longer hold automerge

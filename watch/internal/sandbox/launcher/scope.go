@@ -5,6 +5,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/sandbox"
 )
 
 // Scope is the per-launch namespacing cenci-sand derives before any container
@@ -43,22 +45,11 @@ func AgentCLIVolumeName(agent string) string {
 // workspaceContainer is the container-side workspace mount point.
 const workspaceContainer = "/workspace"
 
-// Slugify lowercases the input and replaces each rune outside [a-z0-9_.-]
-// with a dash, turning a repo directory name into a container/volume/image
-// safe suffix. It iterates runes (not bytes) so a multi-byte character maps
-// to exactly one dash, matching the bash implementation's LC_ALL=C.UTF-8
-// character-at-a-time behavior.
+// Slugify turns a repo directory name into a container/volume/image safe
+// suffix. The implementation lives in sandbox.Slugify so the dispatch memory
+// probe, which cannot import this package, derives the same names (#1290).
 func Slugify(input string) string {
-	var b strings.Builder
-	for _, r := range strings.ToLower(input) {
-		switch {
-		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '_', r == '.', r == '-':
-			b.WriteRune(r)
-		default:
-			b.WriteByte('-')
-		}
-	}
-	return b.String()
+	return sandbox.Slugify(input)
 }
 
 // ResolveRepoRoot returns the absolute root of the git repo containing cwd,

@@ -3,6 +3,7 @@ package dispatch
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -48,6 +49,7 @@ type RepoConfig struct {
 type Config struct {
 	Repos                  []RepoConfig
 	ConcurrencyCap         int
+	MemoryHeadroom         int // percent of a container's memory limit that must be free to pick up (#1290); 0 disables
 	NeedInputThreshold     int
 	DailyQuota             int
 	QuietHours             *QuietHours
@@ -143,11 +145,16 @@ type Config struct {
 	PlanningAttendedUnparseable bool
 }
 
+// defaultMemoryHeadroom is the percent of a sandbox container's memory limit
+// that must be free for a pickup into its repo (#1290).
+const defaultMemoryHeadroom = 25
+
 // DefaultConfig returns the built-in policy used when no config file (or no
 // "dispatch" block) is present.
 func DefaultConfig() Config {
 	return Config{
 		ConcurrencyCap:         3,
+		MemoryHeadroom:         defaultMemoryHeadroom,
 		NeedInputThreshold:     1,
 		DailyQuota:             20,
 		PlanStalenessTolerance: 5,
@@ -162,8 +169,15 @@ func DefaultConfig() Config {
 // dispatchFile is the on-disk "dispatch" block. Numeric fields are pointers so
 // an explicit 0 (e.g. concurrencyCap: 0 to pause) is distinguishable from unset.
 type dispatchFile struct {
-	Repos                  []RepoConfig          `json:"repos"`
-	ConcurrencyCap         *int                  `json:"concurrencyCap"`
+	Repos          []RepoConfig `json:"repos"`
+	ConcurrencyCap *int         `json:"concurrencyCap"`
+	// MemoryHeadroom is a non-pointer RawMessage so a JSON null reaches
+	// parseMemoryHeadroom as "null" (a *json.RawMessage would decode null to a
+	// nil pointer, indistinguishable from an absent key) and is rejected there.
+	// omitempty keeps an unset value out of a marshaled dispatchFile (the chain
+	// harness writes its config that way); an empty RawMessage would otherwise
+	// marshal as a null the loader rejects.
+	MemoryHeadroom         json.RawMessage       `json:"memoryHeadroom,omitempty"`
 	NeedInputThreshold     *int                  `json:"needInputThreshold"`
 	DailyQuota             *int                  `json:"dailyQuota"`
 	QuietHours             *QuietHours           `json:"quietHours"`
@@ -219,11 +233,42 @@ func LoadConfig(path string) (Config, error) {
 		return cfg, fmt.Errorf("parsing config %s: %w", path, err)
 	}
 	if f.Dispatch != nil {
+		headroom, err := parseMemoryHeadroom(f.Dispatch.MemoryHeadroom)
+		if err != nil {
+			return cfg, fmt.Errorf("config %s: dispatch.memoryHeadroom %w", path, err)
+		}
 		cfg = mergeConfig(cfg, *f.Dispatch)
+		if headroom != nil {
+			cfg.MemoryHeadroom = *headroom
+		}
 		cfg.LegacyTopLevelSession = legacyTopLevelSessionSet(f.Dispatch.LegacySession)
 	}
 	cfg.PlanningAttended, cfg.PlanningAttendedUnparseable = resolvePlanningAttended(f.Planning)
 	return cfg, nil
+}
+
+// parseMemoryHeadroom validates dispatch.memoryHeadroom (#1290): nil when the
+// key is absent (the default applies), else an integer percent from 0 to 100.
+// A null, non-integer, string, negative or too-large value is an error rather
+// than a silent default, so a typo can never quietly disable or loosen the
+// gate. The error starts mid-sentence so the caller can prefix it with the
+// config path and key.
+func parseMemoryHeadroom(raw json.RawMessage) (*int, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	const form = "must be an integer percent from 0 to 100"
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return nil, errors.New(form + ", got null")
+	}
+	var v int
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return nil, fmt.Errorf("%s: %w", form, err)
+	}
+	if v < 0 || v > 100 {
+		return nil, fmt.Errorf("%s, got %d", form, v)
+	}
+	return &v, nil
 }
 
 // resolvePlanningAttended decodes the fleet config's top-level "planning"

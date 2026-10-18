@@ -87,6 +87,11 @@ type dispatchDeps struct {
 	// threaded straight through to the same-named Inputs fields.
 	OrphanedContainerSessions int
 	ContainerSessionProbe     ContainerSessionProbe
+
+	// RepoMemory (#1290) is the once-per-pass per-repo memory reading resolved
+	// by resolveMemoryHeadroom before applyDispatch/Decide ever run --
+	// threaded straight through to Inputs.RepoMemory.
+	RepoMemory map[string]RepoMemory
 }
 
 // RunOnce gathers inputs (tickets, plans, snapshot, clock), runs the pure
@@ -160,6 +165,12 @@ func RunOnce(cfg Config, ctrl run.Controller, mut TicketMutator, dryRun bool, ou
 	// the answers probe below.
 	orphanedSessions, sessionProbe := resolveContainerSessions(tickets, out)
 
+	// Per-repo container memory (#1290) feeds the memory-headroom gate right
+	// after the container-session gate. Same shape: probed at most once per
+	// pass, only for repos that collected a ticket, a failure is logged and
+	// fails that repo closed, and it never feeds collectErr.
+	repoMemory := resolveMemoryHeadroom(cfg.Repos, tickets, out)
+
 	// Probe every `Input Needed` ticket for a human answer to its escalation
 	// (#827/#849), keyed by planKey so Decide's Inputs.Answers can look it
 	// up -- mirrors RunReconcileOnce's countAttempts loop, a label-scoped
@@ -190,6 +201,7 @@ func RunOnce(cfg Config, ctrl run.Controller, mut TicketMutator, dryRun bool, ou
 		PlanInventories:           planInventories,
 		OrphanedContainerSessions: orphanedSessions,
 		ContainerSessionProbe:     sessionProbe,
+		RepoMemory:                repoMemory,
 	}, ctrl, mut, dryRun, out, prior)
 
 	// #927: the per-repo session gate's sentinel(s) must outrank a same-pass
@@ -341,6 +353,7 @@ func applyDispatch(cfg Config, deps dispatchDeps, ctrl run.Controller, mut Ticke
 		PlanInventories:           deps.PlanInventories,
 		OrphanedContainerSessions: deps.OrphanedContainerSessions,
 		ContainerSessionProbe:     deps.ContainerSessionProbe,
+		RepoMemory:                deps.RepoMemory,
 	})
 
 	// Surface the pinned model in the same log stream as the decision table so

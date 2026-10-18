@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -513,4 +514,36 @@ func StopContainers(runtime string, names []string, stdout, stderr io.Writer) er
 		}
 	}
 	return nil
+}
+
+// Slugify lowercases the input and replaces each rune outside [a-z0-9_.-]
+// with a dash, turning a repo directory name into a container/volume/image
+// safe suffix. It iterates runes (not bytes) so a multi-byte character maps
+// to exactly one dash, matching the bash implementation's LC_ALL=C.UTF-8
+// character-at-a-time behavior. launcher.Slugify delegates here: dispatch
+// cannot import launcher, so the naming lives in this shared package (#1290).
+func Slugify(input string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(input) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '_', r == '.', r == '-':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('-')
+		}
+	}
+	return b.String()
+}
+
+// RepoWorkloadContainerNames returns the workload container name every
+// supported agent's session in repoRoot runs in:
+// <agent>-cenci-<Slugify(filepath.Base(repoRoot))>. It matches the name
+// launcher.ComputeScope builds for a session started with no --name.
+func RepoWorkloadContainerNames(repoRoot string) []string {
+	slug := Slugify(filepath.Base(repoRoot))
+	names := make([]string, 0, len(SupportedAgents))
+	for _, agent := range SupportedAgents {
+		names = append(names, agent+"-cenci-"+slug)
+	}
+	return names
 }

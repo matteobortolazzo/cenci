@@ -2729,3 +2729,333 @@ func TestDecideContainerSessionGate_AppliesToEveryPickupType(t *testing.T) {
 		})
 	}
 }
+
+// -- #1290: memory-headroom gate in the capacity block ------------------------
+//
+// Decide is the pure contract for the gate: its exact reason strings, ordering
+// and boundary/default-deny matrices are pinned here (a RunOnce integration
+// test cannot enumerate them cheaply); the RunOnce wiring against fake
+// container runtimes is covered in memprobe_test.go. Reasons are spelled out
+// literally so the tests encode the ticket's requirements, not the constants.
+
+// memoryInputs is the happy-path Inputs with the memory gate configured at
+// headroom and repo "o/r" carrying mem.
+func memoryInputs(headroom int, mem RepoMemory) Inputs {
+	in := baseInputs()
+	in.Config.MemoryHeadroom = headroom
+	in.RepoMemory = map[string]RepoMemory{"o/r": mem}
+	return in
+}
+
+// limitedMemory is a healthy reading of a container capped at max bytes.
+func limitedMemory(current, max int64) RepoMemory {
+	return RepoMemory{Limited: true, Current: current, Max: max}
+}
+
+// AC1: with the key unset (DefaultConfig's value), 24% free skips with the
+// exact reason, 26% free is not skipped, and exactly 25% free (the boundary)
+// is not skipped either: the check is strictly "less than".
+func TestDecideMemoryHeadroom_DefaultThresholdBoundary(t *testing.T) {
+	headroom := DefaultConfig().MemoryHeadroom
+
+	t.Run("24 percent free is skipped with the exact reason", func(t *testing.T) {
+		in := memoryInputs(headroom, limitedMemory(76, 100))
+		assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, "memory headroom below 25% (o/r container at 76%)", ""}})
+	})
+	t.Run("exactly 25 percent free is not skipped", func(t *testing.T) {
+		in := memoryInputs(headroom, limitedMemory(75, 100))
+		assertDecisions(t, Decide(in), []wantDecision{{42, ActionDispatch, "dispatch", "claude"}})
+	})
+	t.Run("26 percent free is not skipped", func(t *testing.T) {
+		in := memoryInputs(headroom, limitedMemory(74, 100))
+		assertDecisions(t, Decide(in), []wantDecision{{42, ActionDispatch, "dispatch", "claude"}})
+	})
+}
+
+// The used percent in the reason is integer division (current*100/max), and
+// byte-scale values (tens of GiB) are compared exactly at the boundary.
+func TestDecideMemoryHeadroom_ByteScaleBoundaryIsExact(t *testing.T) {
+	const max = int64(64) << 30 // a 64 GiB container
+	freeQuarter := max / 4
+
+	t.Run("exactly 25 percent free passes", func(t *testing.T) {
+		in := memoryInputs(25, limitedMemory(max-freeQuarter, max))
+		assertDecisions(t, Decide(in), []wantDecision{{42, ActionDispatch, "dispatch", "claude"}})
+	})
+	t.Run("one byte under 25 percent free is skipped, used percent truncated", func(t *testing.T) {
+		in := memoryInputs(25, limitedMemory(max-freeQuarter+1, max))
+		assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, "memory headroom below 25% (o/r container at 75%)", ""}})
+	})
+}
+
+// AC2: a configured threshold replaces the default.
+func TestDecideMemoryHeadroom_Threshold40(t *testing.T) {
+	t.Run("41 percent free passes", func(t *testing.T) {
+		assertDecisions(t, Decide(memoryInputs(40, limitedMemory(59, 100))), []wantDecision{{42, ActionDispatch, "dispatch", "claude"}})
+	})
+	t.Run("exactly 40 percent free passes", func(t *testing.T) {
+		assertDecisions(t, Decide(memoryInputs(40, limitedMemory(60, 100))), []wantDecision{{42, ActionDispatch, "dispatch", "claude"}})
+	})
+	t.Run("39 percent free is skipped and the reason names 40", func(t *testing.T) {
+		assertDecisions(t, Decide(memoryInputs(40, limitedMemory(61, 100))), []wantDecision{{42, ActionSkip, "memory headroom below 40% (o/r container at 61%)", ""}})
+	})
+	t.Run("a reading that fails the default 25 but meets 10 passes", func(t *testing.T) {
+		assertDecisions(t, Decide(memoryInputs(10, limitedMemory(76, 100))), []wantDecision{{42, ActionDispatch, "dispatch", "claude"}})
+	})
+}
+
+// AC2: 0 disables the gate -- nothing is skipped by it, including a full
+// container and a failed probe.
+func TestDecideMemoryHeadroom_ZeroDisablesEvenOnProbeFailure(t *testing.T) {
+	t.Run("probe failure", func(t *testing.T) {
+		in := memoryInputs(0, RepoMemory{Probe: MemoryProbeFailed})
+		assertDecisions(t, Decide(in), []wantDecision{{42, ActionDispatch, "dispatch", "claude"}})
+	})
+	t.Run("container at 99 percent", func(t *testing.T) {
+		in := memoryInputs(0, limitedMemory(99, 100))
+		assertDecisions(t, Decide(in), []wantDecision{{42, ActionDispatch, "dispatch", "claude"}})
+	})
+	t.Run("container over its limit", func(t *testing.T) {
+		in := memoryInputs(0, limitedMemory(120, 100))
+		assertDecisions(t, Decide(in), []wantDecision{{42, ActionDispatch, "dispatch", "claude"}})
+	})
+}
+
+// AC3: the gate sits after the container-session probe skip and before the
+// concurrency cap check, and after the earlier capacity gates.
+func TestDecideMemoryHeadroom_GateOrderInCapacityBlock(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(in *Inputs)
+		want   wantDecision
+	}{
+		{
+			name: "over cap and below headroom reports the memory reason",
+			mutate: func(in *Inputs) {
+				in.Config.ConcurrencyCap = 1
+				in.Snapshot = snapshot(1, 0)
+				in.RepoMemory = map[string]RepoMemory{"o/r": limitedMemory(90, 100)}
+			},
+			want: wantDecision{42, ActionSkip, "memory headroom below 25% (o/r container at 90%)", ""},
+		},
+		{
+			name: "over cap and memory probe failed reports the probe failure",
+			mutate: func(in *Inputs) {
+				in.Config.ConcurrencyCap = 1
+				in.Snapshot = snapshot(1, 0)
+				in.RepoMemory = map[string]RepoMemory{"o/r": {Probe: MemoryProbeFailed}}
+			},
+			want: wantDecision{42, ActionSkip, "memory probe failed", ""},
+		},
+		{
+			name: "container session probe failure outranks low memory",
+			mutate: func(in *Inputs) {
+				in.ContainerSessionProbe = ContainerSessionProbeFailed
+				in.RepoMemory = map[string]RepoMemory{"o/r": limitedMemory(90, 100)}
+			},
+			want: wantDecision{42, ActionSkip, "container session probe failed", ""},
+		},
+		{
+			name: "container session probe failure outranks a memory probe failure",
+			mutate: func(in *Inputs) {
+				in.ContainerSessionProbe = ContainerSessionProbeFailed
+				in.RepoMemory = map[string]RepoMemory{"o/r": {Probe: MemoryProbeFailed}}
+			},
+			want: wantDecision{42, ActionSkip, "container session probe failed", ""},
+		},
+		{
+			name: "daemon unreachable is reported before low memory",
+			mutate: func(in *Inputs) {
+				in.Snapshot = nil
+				in.RepoMemory = map[string]RepoMemory{"o/r": limitedMemory(90, 100)}
+			},
+			want: wantDecision{42, ActionSkip, "daemon unreachable", ""},
+		},
+		{
+			name: "need-input pause is reported before low memory",
+			mutate: func(in *Inputs) {
+				in.Config.NeedInputThreshold = 1
+				in.Snapshot = snapshot(0, 1)
+				in.RepoMemory = map[string]RepoMemory{"o/r": limitedMemory(90, 100)}
+			},
+			want: wantDecision{42, ActionSkip, "need-input pause", ""},
+		},
+		{
+			name: "low memory is reported before the daily quota",
+			mutate: func(in *Inputs) {
+				in.Config.DailyQuota = 1
+				in.Prior = 1
+				in.RepoMemory = map[string]RepoMemory{"o/r": limitedMemory(90, 100)}
+			},
+			want: wantDecision{42, ActionSkip, "memory headroom below 25% (o/r container at 90%)", ""},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			in := baseInputs()
+			in.Config.MemoryHeadroom = 25
+			tc.mutate(&in)
+			assertDecisions(t, Decide(in), []wantDecision{tc.want})
+		})
+	}
+}
+
+// AC6: a failed probe in one repo holds only that repo; another repo with a
+// healthy reading is decided normally.
+func TestDecideMemoryHeadroom_PerRepoFailureIsolated(t *testing.T) {
+	in := baseInputs()
+	in.Config.MemoryHeadroom = 25
+	in.Tickets = []Ticket{
+		{Repo: "o/a", Number: 1, Labels: []string{"Planned"}, Assignees: []string{"octocat"}},
+		{Repo: "o/b", Number: 2, Labels: []string{"Planned"}, Assignees: []string{"octocat"}},
+		{Repo: "o/c", Number: 3, Labels: []string{"Planned"}, Assignees: []string{"octocat"}},
+	}
+	in.Plans = []Plan{
+		{Repo: "o/a", Path: ".plans/1.md", TicketID: 1, Status: "planned"},
+		{Repo: "o/b", Path: ".plans/2.md", TicketID: 2, Status: "planned"},
+		{Repo: "o/c", Path: ".plans/3.md", TicketID: 3, Status: "planned"},
+	}
+	in.RepoMemory = map[string]RepoMemory{
+		"o/a": {Probe: MemoryProbeFailed},
+		"o/b": limitedMemory(10, 100),
+		// o/c has no entry: the permissive zero value.
+	}
+
+	assertDecisions(t, Decide(in), []wantDecision{
+		{1, ActionSkip, "memory probe failed", ""},
+		{2, ActionDispatch, "dispatch", "claude"},
+		{3, ActionDispatch, "dispatch", "claude"},
+	})
+}
+
+// The reading is per repo, not global: a full container in one repo does not
+// hold another repo's candidates, and every candidate of the full repo is held.
+func TestDecideMemoryHeadroom_ReadingIsPerRepo(t *testing.T) {
+	in := baseInputs()
+	in.Config.MemoryHeadroom = 25
+	in.Tickets = []Ticket{
+		{Repo: "o/a", Number: 1, Labels: []string{"Planned"}, Assignees: []string{"octocat"}},
+		{Repo: "o/a", Number: 2, Labels: []string{"Planned"}, Assignees: []string{"octocat"}},
+		{Repo: "o/b", Number: 3, Labels: []string{"Planned"}, Assignees: []string{"octocat"}},
+	}
+	in.Plans = []Plan{
+		{Repo: "o/a", Path: ".plans/1.md", TicketID: 1, Status: "planned"},
+		{Repo: "o/a", Path: ".plans/2.md", TicketID: 2, Status: "planned"},
+		{Repo: "o/b", Path: ".plans/3.md", TicketID: 3, Status: "planned"},
+	}
+	in.RepoMemory = map[string]RepoMemory{
+		"o/a": limitedMemory(80, 100),
+		"o/b": limitedMemory(20, 100),
+	}
+
+	assertDecisions(t, Decide(in), []wantDecision{
+		{1, ActionSkip, "memory headroom below 25% (o/a container at 80%)", ""},
+		{2, ActionSkip, "memory headroom below 25% (o/a container at 80%)", ""},
+		{3, ActionDispatch, "dispatch", "claude"},
+	})
+}
+
+// Edge: a transient overshoot (current above max) skips when headroom > 0 and
+// reports the computed percent, not a value clamped to 100.
+func TestDecideMemoryHeadroom_OvershootNotClamped(t *testing.T) {
+	in := memoryInputs(25, limitedMemory(102, 100))
+	assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, "memory headroom below 25% (o/r container at 102%)", ""}})
+}
+
+// Edge: headroom 100 skips whenever the container holds any memory at all, and
+// passes only a completely idle one.
+func TestDecideMemoryHeadroom_Headroom100(t *testing.T) {
+	t.Run("current above zero is skipped", func(t *testing.T) {
+		in := memoryInputs(100, limitedMemory(1, 100))
+		assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, "memory headroom below 100% (o/r container at 1%)", ""}})
+	})
+	t.Run("current of zero passes", func(t *testing.T) {
+		in := memoryInputs(100, limitedMemory(0, 100))
+		assertDecisions(t, Decide(in), []wantDecision{{42, ActionDispatch, "dispatch", "claude"}})
+	})
+}
+
+// Edge: an unrecognized probe status, and a "limited" reading that could make
+// the gate divide by zero, default-deny with their own distinct reason (not the
+// failed-probe reason), per #446/#598.
+func TestDecideMemoryHeadroom_UnrecognizedProbeDefaultDenies(t *testing.T) {
+	t.Run("unrecognized probe status", func(t *testing.T) {
+		in := memoryInputs(25, RepoMemory{Probe: MemoryProbe("bogus")})
+		assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, "memory probe unrecognized", ""}})
+	})
+	t.Run("unrecognized status outranks an otherwise healthy reading", func(t *testing.T) {
+		in := memoryInputs(25, RepoMemory{Probe: MemoryProbe("bogus"), Limited: true, Current: 1, Max: 100})
+		assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, "memory probe unrecognized", ""}})
+	})
+	t.Run("limited reading with a zero max never divides by zero", func(t *testing.T) {
+		in := memoryInputs(25, RepoMemory{Limited: true, Current: 10, Max: 0})
+		assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, "memory probe unrecognized", ""}})
+	})
+	t.Run("limited reading with a negative max", func(t *testing.T) {
+		in := memoryInputs(25, RepoMemory{Limited: true, Current: 10, Max: -5})
+		assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, "memory probe unrecognized", ""}})
+	})
+	t.Run("the failed and unrecognized reasons are distinct", func(t *testing.T) {
+		failed := Decide(memoryInputs(25, RepoMemory{Probe: MemoryProbeFailed}))
+		unknown := Decide(memoryInputs(25, RepoMemory{Probe: MemoryProbe("bogus")}))
+		if len(failed) != 1 || len(unknown) != 1 || failed[0].Reason == unknown[0].Reason {
+			t.Errorf("failed = %+v, unknown = %+v, want two different skip reasons", failed, unknown)
+		}
+	})
+}
+
+// Edge: the zero value is permissive, so every pre-#1290 Inputs construction
+// site (a nil map, a missing repo entry, an empty reading) keeps today's
+// ungated behavior even with the gate on. An unlimited or absent container
+// (Limited=false) never gates.
+func TestDecideMemoryHeadroom_ZeroValueIsPermissive(t *testing.T) {
+	if MemoryProbeOK != "" {
+		t.Errorf("MemoryProbeOK = %q, want the empty string (the zero value)", string(MemoryProbeOK))
+	}
+	if MemoryProbeFailed == MemoryProbeOK {
+		t.Error("MemoryProbeFailed must be distinct from MemoryProbeOK")
+	}
+
+	t.Run("nil RepoMemory map", func(t *testing.T) {
+		in := baseInputs()
+		in.Config.MemoryHeadroom = 25
+		in.RepoMemory = nil
+		assertDecisions(t, Decide(in), []wantDecision{{42, ActionDispatch, "dispatch", "claude"}})
+	})
+	t.Run("no entry for the ticket's repo", func(t *testing.T) {
+		in := baseInputs()
+		in.Config.MemoryHeadroom = 25
+		in.RepoMemory = map[string]RepoMemory{"o/other": limitedMemory(99, 100)}
+		assertDecisions(t, Decide(in), []wantDecision{{42, ActionDispatch, "dispatch", "claude"}})
+	})
+	t.Run("zero-value reading (no limited container)", func(t *testing.T) {
+		assertDecisions(t, Decide(memoryInputs(25, RepoMemory{})), []wantDecision{{42, ActionDispatch, "dispatch", "claude"}})
+	})
+}
+
+// The gate applies to every pickup type through the shared capacity block: a
+// resume and a fresh planning pickup are held by low memory and by a failed
+// probe exactly like an ordinary Planned dispatch.
+func TestDecideMemoryHeadroom_AppliesToEveryPickupType(t *testing.T) {
+	pickups := []struct {
+		name   string
+		inputs func() Inputs
+	}{
+		{"resume", resumeInputs},
+		{"fresh Refined planning candidate", planningCandidateInputs},
+	}
+	for _, p := range pickups {
+		t.Run(p.name+" held by low memory", func(t *testing.T) {
+			in := p.inputs()
+			in.Config.MemoryHeadroom = 25
+			in.RepoMemory = map[string]RepoMemory{"o/r": limitedMemory(90, 100)}
+			assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, "memory headroom below 25% (o/r container at 90%)", ""}})
+		})
+		t.Run(p.name+" held by a probe failure", func(t *testing.T) {
+			in := p.inputs()
+			in.Config.MemoryHeadroom = 25
+			in.RepoMemory = map[string]RepoMemory{"o/r": {Probe: MemoryProbeFailed}}
+			assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, "memory probe failed", ""}})
+		})
+	}
+}

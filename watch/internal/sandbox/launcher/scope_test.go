@@ -4,7 +4,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"testing"
+
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/sandbox"
 )
 
 func TestSlugify(t *testing.T) {
@@ -276,5 +279,38 @@ func TestComputeScope_DindVolumeName_RepoNamedAndLegacyEmpty(t *testing.T) {
 	}
 	if legacy.DindVolumeName != "" {
 		t.Errorf("legacy-scope DindVolumeName = %q, want empty (dind is only ever available in repo scope, #585)", legacy.DindVolumeName)
+	}
+}
+
+// TestComputeScope_ContainerNameIsAmongRepoWorkloadContainerNames (#1290)
+// pins the naming contract the dispatch memory probe depends on: dispatch
+// cannot import this package, so it rebuilds each repo's workload container
+// names via sandbox.RepoWorkloadContainerNames. A session started in the repo
+// root must land in one of exactly those containers, for every agent, or the
+// probe would silently read the wrong (or no) container.
+func TestComputeScope_ContainerNameIsAmongRepoWorkloadContainerNames(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+
+	repo := filepath.Join(t.TempDir(), "My Repo.v2")
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if out, err := exec.Command("git", "-C", repo, "init", "-q").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+	resolved, err := filepath.EvalSymlinks(repo)
+	if err != nil {
+		t.Fatalf("eval symlinks: %v", err)
+	}
+	home := t.TempDir()
+
+	workloads := sandbox.RepoWorkloadContainerNames(resolved)
+	for _, agent := range sandbox.SupportedAgents {
+		got := ComputeScope(agent, "", resolved, home).ContainerName
+		if !slices.Contains(workloads, got) {
+			t.Errorf("ComputeScope(%q).ContainerName = %q, want it among RepoWorkloadContainerNames(%q) = %v", agent, got, resolved, workloads)
+		}
 	}
 }

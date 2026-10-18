@@ -297,18 +297,29 @@ func classifyExecTimeout(ctx context.Context, runErr error) error {
 // RunningContainers lists the running sandbox containers (claude-cenci-/
 // codex-cenci-/opencode-cenci- names only) on rt via `<rt> ps --format
 // {{.Names}}`, bounded by containerCmdTimeout. Foreign containers are never
-// returned.
+// returned. It delegates to RunningContainerNames.
 func (s *OrphanScanner) RunningContainers(ctx context.Context, rt string) ([]string, error) {
+	return RunningContainerNames(ctx, rt)
+}
+
+// RunningContainerNames lists the running sandbox containers (claude-cenci-/
+// codex-cenci-/opencode-cenci- names only) on rt via `<rt> ps --format
+// {{.Names}}`, bounded by containerCmdTimeout, containerCmdWaitDelay and the
+// caller's ctx, with the runtime's stderr captured under a cap and quoted into
+// the error. Foreign containers are never returned. Shared by the orphan scan
+// and the dispatch memory probe (#1290), which both need a bounded listing.
+func RunningContainerNames(ctx context.Context, rt string) ([]string, error) {
 	cctx, cancel := context.WithTimeout(ctx, containerCmdTimeout)
 	defer cancel()
 
-	var out, errBuf bytes.Buffer
+	var out bytes.Buffer
+	errBuf := &cappedBuffer{limit: maxStderrCaptureBytes}
 	cmd := exec.CommandContext(cctx, rt, "ps", "--format", "{{.Names}}")
 	cmd.Stdout = &out
-	cmd.Stderr = &errBuf
+	cmd.Stderr = errBuf
 	cmd.WaitDelay = containerCmdWaitDelay
 	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("%s ps: %w%s", rt, classifyExecTimeout(cctx, err), stderrSuffix(&errBuf))
+		return nil, fmt.Errorf("%s ps: %w%s", rt, classifyExecTimeout(cctx, err), stderrSuffix(&errBuf.buf))
 	}
 
 	return parseNames(out.String(), ""), nil
