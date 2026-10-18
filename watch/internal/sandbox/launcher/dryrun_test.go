@@ -946,9 +946,19 @@ func TestDryRun_InTmux_AttachArgvCarriesTheLaunchIDPlaceholderExactlyOnce(t *tes
 			if got := launchIDEnvTokens(plan.AttachArgv); !slices.Equal(got, []string{launchIDPlaceholder}) {
 				t.Errorf("AttachArgv CENCI_LAUNCH_ID tokens = %v, want exactly [%s]; argv: %v", got, launchIDPlaceholder, plan.AttachArgv)
 			}
+			// #1292: the container and runtime ride next to the placeholder, with
+			// the real (deterministic) values, exactly once in the attach argv.
+			if got := envTokens(plan.AttachArgv, containerEnvName); !slices.Equal(got, []string{containerEnvName + "=" + plan.ContainerName}) {
+				t.Errorf("AttachArgv %s tokens = %v, want exactly [%s=%s]", containerEnvName, got, containerEnvName, plan.ContainerName)
+			}
+			if got := envTokens(plan.AttachArgv, runtimeEnvName); !slices.Equal(got, []string{runtimeEnvName + "=docker"}) {
+				t.Errorf("AttachArgv %s tokens = %v, want exactly [%s=docker]", runtimeEnvName, got, runtimeEnvName)
+			}
 			for _, tok := range plan.CreateArgv {
-				if strings.Contains(tok, "CENCI_LAUNCH_ID") {
-					t.Errorf("CreateArgv carries %q; the launch ID must never be create-time env", tok)
+				for _, name := range launchTripleEnvNames {
+					if strings.Contains(tok, name) {
+						t.Errorf("CreateArgv carries %q; %s must never be create-time env", tok, name)
+					}
 				}
 			}
 			if n := strings.Count(text, launchIDPlaceholder); n != 1 {
@@ -1005,10 +1015,18 @@ func TestDryRun_WhereARealLaunchWouldNotTagThePane_ShowsNoLaunchID(t *testing.T)
 	for _, agent := range launchTestAgents {
 		for _, tc := range unusableTmuxContexts {
 			t.Run(agent+"/"+tc.name, func(t *testing.T) {
-				_, text, rec := dryRunIn(t, agent, tc.tmux, tc.pane)
+				plan, text, rec := dryRunIn(t, agent, tc.tmux, tc.pane)
 
 				if strings.Contains(text, "CENCI_LAUNCH_ID") {
 					t.Errorf("dry-run output mentions CENCI_LAUNCH_ID where a real launch injects none:\n%s", text)
+				}
+				// #1292: the two companion variables appear only alongside the
+				// placeholder, so a launch that would not tag shows neither.
+				requireNoLaunchTriple(t, plan.AttachArgv, "dry-run where a real launch would not tag")
+				for _, name := range []string{containerEnvName, runtimeEnvName} {
+					if strings.Contains(text, name) {
+						t.Errorf("dry-run output mentions %s where a real launch injects none:\n%s", name, text)
+					}
 				}
 				if len(rec.Calls) != 0 {
 					t.Errorf("dry-run set pane options (%+v); it must make no tmux call", rec.Calls)

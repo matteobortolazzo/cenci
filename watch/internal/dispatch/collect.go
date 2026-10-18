@@ -157,7 +157,7 @@ func collectRepoTickets(rc RepoConfig, sync MainSync, resolveDeps bool, out io.W
 		for i, a := range is.Assignees {
 			assignees[i] = a.Login
 		}
-		stage, probe := probeStage(rc.Dir, is.Number)
+		stage, probe, launch := probeStageState(rc.Dir, is.Number)
 
 		// resolveDeps==false (the reconciler's call, #825 review fix #1) skips
 		// the whole dependency gate input -- native blocked-by conversion and
@@ -200,6 +200,8 @@ func collectRepoTickets(rc RepoConfig, sync MainSync, resolveDeps bool, out io.W
 			NativeDependencyAnomalies: nativeAnomalies,
 
 			OpenPRProbe: openPRProbe,
+
+			Launch: launch,
 		})
 	}
 	return tickets, nil
@@ -211,20 +213,38 @@ func collectRepoTickets(rc RepoConfig, sync MainSync, resolveDeps bool, out io.W
 // back to resolving a repo root from the daemon's own working directory,
 // which would read an unrelated repo's state.
 func probeStage(dir string, number int) (string, StageProbe) {
+	stage, probe, _ := probeStageState(dir, number)
+	return stage, probe
+}
+
+// probeStageState is probeStage plus the launch recorded in the same state-file
+// read (#1292): the raw session triple (`launchId`/`container`/`runtime`),
+// verbatim and unvalidated -- resolveLaunchVerdicts re-validates it before use.
+// A read that fails (StageProbeError) or finds no state returns no launch, so
+// the collector never costs a second read per ticket.
+func probeStageState(dir string, number int) (string, StageProbe, RecordedLaunch) {
 	if dir == "" {
-		return "", StageProbeAbsent
+		return "", StageProbeAbsent, RecordedLaunch{}
 	}
 	s, err := pipeline.GetArtifacts(pipeline.ArtifactOpts{ID: strconv.Itoa(number), RepoRoot: dir})
 	if err != nil {
-		return "", StageProbeError // unreadable/undecodable → default-deny
+		return "", StageProbeError, RecordedLaunch{} // unreadable/undecodable → default-deny
+	}
+	launch := RecordedLaunch{
+		ID:        s.Session[pipeline.SessionKeyLaunchID],
+		Container: s.Session[pipeline.SessionKeyContainer],
+		Runtime:   s.Session[pipeline.SessionKeyRuntime],
 	}
 	switch {
 	case s.Stage == pipeline.StageNew:
-		return string(s.Stage), StageProbeAbsent // missing file AND a literal "new" both land here
+		return string(s.Stage), StageProbeAbsent, launch // missing file AND a literal "new" both land here
 	case !pipeline.IsKnownStage(s.Stage):
-		return string(s.Stage), StageProbeError // e.g. "bogus", or a file with an empty/absent stage field
+		// e.g. "bogus", or a file with an empty/absent stage field. A
+		// StageProbeError ticket is always judged by the window-name rule, so
+		// it carries no launch.
+		return string(s.Stage), StageProbeError, RecordedLaunch{}
 	default:
-		return string(s.Stage), StageProbePresent
+		return string(s.Stage), StageProbePresent, launch
 	}
 }
 

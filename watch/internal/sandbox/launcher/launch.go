@@ -96,7 +96,7 @@ const dryRunLaunchIDValue = "<generated-per-launch>"
 // tagRuntimeSupported reports whether runtime is one @cenci-runtime may name:
 // the closed set docker/podman, validated when the option is written.
 func tagRuntimeSupported(runtime string) bool {
-	return runtime == "docker" || runtime == "podman"
+	return sandbox.ValidLaunchRuntime(runtime)
 }
 
 // launchTagContext is the one predicate deciding whether a launch tags its
@@ -116,20 +116,28 @@ func (e *Engine) launchTagContext() (socket, pane string, ok bool) {
 	return socket, pane, true
 }
 
-// withLaunchIDEnv returns execEnvArgs plus the "-e CENCI_LAUNCH_ID=<value>"
-// pair, without modifying execEnvArgs.
-func withLaunchIDEnv(execEnvArgs []string, value string) []string {
-	return append(slices.Clone(execEnvArgs), "-e", sandbox.LaunchIDEnvName+"="+value)
+// withLaunchEnv returns execEnvArgs plus the three launch-triple "-e" pairs —
+// CENCI_LAUNCH_ID, CENCI_SANDBOX_CONTAINER and CENCI_SANDBOX_RUNTIME (#1292) —
+// without modifying execEnvArgs. They are only ever added together: the ID is
+// the identity the reaper and `cenci pipeline label` act on, and the container
+// and runtime are what a later probe needs to find that launch's processes.
+func withLaunchEnv(execEnvArgs []string, id, container, runtime string) []string {
+	return append(slices.Clone(execEnvArgs),
+		"-e", sandbox.LaunchIDEnvName+"="+id,
+		"-e", sandbox.SandboxContainerEnvName+"="+container,
+		"-e", sandbox.SandboxRuntimeEnvName+"="+runtime,
+	)
 }
 
 // tagLaunchPane records a fresh launch ID, the container and the runtime as
 // pane options on $TMUX_PANE through the pane's own socket (#1252), and returns
-// the per-exec env args that carry the same ID into the agent session. It
-// returns nil — no ID injected, so the reaper falls back to (socket, pane)
-// liveness and can never false-kill — when the runtime is not docker/podman
-// (silently: nothing to record), or when the launch is not in a usable tmux
-// pane or any step fails (with a single-line warning). All three options must
-// be set before the ID is handed out; the ID is never create-time env (#356).
+// the per-exec env args that carry the same ID, container and runtime into the
+// agent session (#1292). It returns nil — none of the three variables injected,
+// so the reaper falls back to (socket, pane) liveness and can never false-kill
+// — when the runtime is not docker/podman (silently: nothing to record), or
+// when the launch is not in a usable tmux pane or any step fails (with a
+// single-line warning). All three options must be set before the variables are
+// handed out; none of them is ever create-time env (#356).
 // @cenci-container and @cenci-runtime are written first and @cenci-launch-id
 // last, so a partial failure never overwrites the launch ID a previous live
 // launch on this pane recorded (that launch stays live by its own ID).
@@ -157,7 +165,7 @@ func (e *Engine) tagLaunchPane(container string) []string {
 			return nil
 		}
 	}
-	return withLaunchIDEnv(nil, id)
+	return withLaunchEnv(nil, id, container, e.Runtime)
 }
 
 // ValidateAgent checks the agent value the way cenci-sand does, as a usage
@@ -352,10 +360,11 @@ func (e *Engine) resolveLaunchContext(opts Options) (launchCtx, error) {
 func (e *Engine) planArgvs(ctx launchCtx, opts Options, cenciBin, socketDir string, cenciAvailable bool) (createArgv, attachArgv []string, attaching bool, err error) {
 	agentCmdArgs := buildAgentCmdArgs(ctx.Agent, ctx.Model)
 	execEnvArgs := assembleExecEnv(ctx.Agent)
-	// Show the launch ID placeholder only where a real launch would try to tag
-	// the pane (Q1); the random value is never generated here.
+	// Show the launch ID placeholder (and the container and runtime next to it,
+	// which are deterministic) only where a real launch would try to tag the
+	// pane (Q1); the random value is never generated here.
 	if _, _, ok := e.launchTagContext(); ok {
-		execEnvArgs = withLaunchIDEnv(execEnvArgs, dryRunLaunchIDValue)
+		execEnvArgs = withLaunchEnv(execEnvArgs, dryRunLaunchIDValue, ctx.Scope.ContainerName, e.Runtime)
 	}
 	attachArgv = buildAgentExecArgv(ctx.Scope.ContainerName, ctx.Agent, agentCmdArgs, execEnvArgs, opts)
 
@@ -946,7 +955,8 @@ func (e *Engine) assembleVolumeMounts(agent, cenciBin, socketDir string, cenciAv
 	// of pane-scoped identity and must never be create-time env either: it
 	// would land in /proc/1/environ, outlive its pane and name a launch that
 	// no longer exists. tagLaunchPane injects it per exec, after the pane
-	// options are recorded.
+	// options are recorded. CENCI_SANDBOX_CONTAINER and CENCI_SANDBOX_RUNTIME
+	// (#1292) travel with it and follow the same rule.
 	if cenciAvailable {
 		args = append(args,
 			"-v", cenciBin+":/usr/local/bin/cenci:ro",

@@ -55,8 +55,21 @@ func writeFakeGh(t *testing.T, dir string, notFound bool) {
 // pipelineEnv returns a subprocess environment with fakeDir prepended to
 // the inherited PATH so a fake `gh` resolves first, while everything else
 // (git, sh, coreutils) still resolves normally off the real system PATH.
+//
+// The three launch variables are stripped from the inherited environment: a
+// cenci-launched dev sandbox sets CENCI_LAUNCH_ID ambiently, and `pipeline
+// label --transition working` records whatever launch it finds (#1292), so an
+// ambient value would silently change what every working-transition test
+// writes. A test that wants a launch sets it explicitly on top of this.
 func pipelineEnv(fakeDir string) []string {
-	return append(os.Environ(), "PATH="+fakeDir+":"+os.Getenv("PATH"))
+	var env []string
+	for _, kv := range os.Environ() {
+		if strings.HasPrefix(kv, "CENCI_LAUNCH_ID=") || strings.HasPrefix(kv, "CENCI_SANDBOX_CONTAINER=") || strings.HasPrefix(kv, "CENCI_SANDBOX_RUNTIME=") {
+			continue
+		}
+		env = append(env, kv)
+	}
+	return append(env, "PATH="+fakeDir+":"+os.Getenv("PATH"))
 }
 
 func runPipelineCLI(t *testing.T, fakeDir string, args ...string) (pipelineContract, []byte, *exec.ExitError) {

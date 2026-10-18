@@ -789,6 +789,118 @@ func TestProbeStage_EmptyDir_NeverProbes_NoCwdRelativeRead(t *testing.T) {
 	}
 }
 
+// -- #1292 AC14: the collector carries the recorded launch ------------------
+
+// TestProbeStageState_CarriesRecordedLaunch covers AC14: the recorded launch
+// triple comes from the same state-file read the stage classification uses,
+// verbatim (re-validation is the probe's job, AC12), and is empty whenever that
+// read produced no usable state.
+func TestProbeStageState_CarriesRecordedLaunch(t *testing.T) {
+	tests := []struct {
+		name       string
+		content    string // "" = no state file at all
+		wantStage  string
+		wantProbe  StageProbe
+		wantLaunch RecordedLaunch
+	}{
+		{
+			name:       "full triple",
+			content:    `{"schemaVersion":2,"id":"42","stage":"plan_approved","session":{"runId":"r1","launchId":"` + testLaunchID + `","container":"` + testLaunchContainer + `","runtime":"` + testLaunchRuntime + `"}}`,
+			wantStage:  "plan_approved",
+			wantProbe:  StageProbePresent,
+			wantLaunch: testLaunch,
+		},
+		{
+			name:       "partial triple is carried raw, not judged here",
+			content:    `{"schemaVersion":2,"id":"42","stage":"plan_approved","session":{"launchId":"` + testLaunchID + `"}}`,
+			wantStage:  "plan_approved",
+			wantProbe:  StageProbePresent,
+			wantLaunch: RecordedLaunch{ID: testLaunchID},
+		},
+		{
+			name:       "malformed values are carried raw, not judged here",
+			content:    `{"schemaVersion":2,"id":"42","stage":"plan_approved","session":{"launchId":"x","container":"; rm -rf","runtime":"sh"}}`,
+			wantStage:  "plan_approved",
+			wantProbe:  StageProbePresent,
+			wantLaunch: RecordedLaunch{ID: "x", Container: "; rm -rf", Runtime: "sh"},
+		},
+		{
+			name:      "session without launch keys",
+			content:   `{"schemaVersion":2,"id":"42","stage":"plan_approved","session":{"runId":"r1"}}`,
+			wantStage: "plan_approved",
+			wantProbe: StageProbePresent,
+		},
+		{
+			name:      "no session at all",
+			content:   `{"schemaVersion":2,"id":"42","stage":"plan_approved"}`,
+			wantStage: "plan_approved",
+			wantProbe: StageProbePresent,
+		},
+		{
+			name:      "no state file",
+			wantStage: "new",
+			wantProbe: StageProbeAbsent,
+		},
+		{
+			name:      "unreadable state file yields no launch and StageProbeError",
+			content:   `{not valid json`,
+			wantStage: "",
+			wantProbe: StageProbeError,
+		},
+		{
+			name:      "bogus stage with a triple yields no launch and StageProbeError",
+			content:   `{"schemaVersion":2,"id":"42","stage":"bogus","session":{"launchId":"` + testLaunchID + `","container":"` + testLaunchContainer + `","runtime":"` + testLaunchRuntime + `"}}`,
+			wantStage: "bogus",
+			wantProbe: StageProbeError,
+		},
+		{
+			name:      "absent stage with a triple yields no launch and StageProbeError",
+			content:   `{"schemaVersion":2,"id":"42","session":{"launchId":"` + testLaunchID + `","container":"` + testLaunchContainer + `","runtime":"` + testLaunchRuntime + `"}}`,
+			wantStage: "",
+			wantProbe: StageProbeError,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if tt.content != "" {
+				writeStateFile(t, dir, 42, tt.content)
+			}
+			stage, probe, launch := probeStageState(dir, 42)
+			if stage != tt.wantStage || probe != tt.wantProbe {
+				t.Errorf("probeStageState = (%q, %q), want (%q, %q)", stage, probe, tt.wantStage, tt.wantProbe)
+			}
+			if launch != tt.wantLaunch {
+				t.Errorf("launch = %+v, want %+v", launch, tt.wantLaunch)
+			}
+		})
+	}
+}
+
+// TestCollectRepoTickets_FillsLaunchFromStateFile pins the production wiring:
+// the Ticket the collector returns carries the launch recorded in its repo
+// dir's state file, and a ticket without a state file carries none.
+func TestCollectRepoTickets_FillsLaunchFromStateFile(t *testing.T) {
+	installFakeGHOnPath(t, twoIssuesFakeGHScript)
+	dir := t.TempDir()
+	writeStateFile(t, dir, 10, `{"schemaVersion":2,"id":"10","stage":"plan_approved","session":{"launchId":"`+testLaunchID+`","container":"`+testLaunchContainer+`","runtime":"`+testLaunchRuntime+`"}}`)
+
+	tickets, err := collectRepoTickets(RepoConfig{Repo: "o/r", Dir: dir}, MainSyncSkipped, true, io.Discard)
+	if err != nil {
+		t.Fatalf("collectRepoTickets: %v", err)
+	}
+	byNumber := map[int]Ticket{}
+	for _, tk := range tickets {
+		byNumber[tk.Number] = tk
+	}
+	if got := byNumber[10].Launch; got != testLaunch {
+		t.Errorf("#10 Launch = %+v, want %+v", got, testLaunch)
+	}
+	if got := byNumber[11].Launch; got != (RecordedLaunch{}) {
+		t.Errorf("#11 Launch = %+v, want none (no state file)", got)
+	}
+}
+
 // -- #825: Depends on #N dependency gate, collector stamping -----------------
 
 // TestCollectRepoTickets_DependsOnResolvesViaOpenSet covers plan test 26:

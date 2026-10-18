@@ -252,6 +252,11 @@ type reconcileDeps struct {
 	// (dispatch.go). Threaded straight through to
 	// ReconcileInputs.PlanInventories.
 	PlanInventories map[string]PlanInventory
+
+	// LaunchVerdicts maps planKey(repo, ticketId) -> the launch-ID liveness
+	// verdict resolveLaunchVerdicts computed this pass (#1292). Threaded
+	// straight through to ReconcileInputs.LaunchVerdicts.
+	LaunchVerdicts map[string]LaunchVerdict
 }
 
 // RunReconcileOnce collects tickets, plans, the daemon snapshot, and durable
@@ -315,6 +320,18 @@ func RunReconcileOnce(cfg Config, mut TicketMutator, dryRun bool, out io.Writer,
 
 	snap, _ := ReadSnapshot(watch.DefaultSocketPath()) // nil on error ⇒ Reconcile never reconciles blind
 
+	// Launch-ID liveness (#1292): a Working ticket whose pipeline state could
+	// not be read has no usable recorded launch, so it is judged by the
+	// window-name rule -- logged once, never deferred on that alone (the stage
+	// probe error is already a hold for dispatch; the reconciler must still be
+	// able to recover a genuinely dead ticket).
+	for _, t := range tickets {
+		if t.StageProbe == StageProbeError && hasLabel(t.Labels, labelWorking) {
+			logf(out, "reconcile: #%d pipeline state unreadable, judging liveness by window name\n", t.Number)
+		}
+	}
+	launchVerdicts := resolveLaunchVerdicts(tickets, snap, out)
+
 	// Count durable attempts only for Working candidate tickets — the only ones
 	// the failure path can act on. A gh read error marks the ticket unknown so
 	// Reconcile defers rather than acting on an assumed-zero count.
@@ -345,6 +362,7 @@ func RunReconcileOnce(cfg Config, mut TicketMutator, dryRun bool, out io.Writer,
 		Now:             time.Now(),
 		PlanProbes:      planProbes,
 		PlanInventories: planInventories,
+		LaunchVerdicts:  launchVerdicts,
 	}, mut, dryRun, out, store)
 	// #883: firstNonNil would let a same-pass collectErr mask the corruption
 	// sentinel whenever collection also failed (a likely co-occurrence, e.g.
@@ -395,6 +413,7 @@ func applyReconcile(cfg Config, deps reconcileDeps, mut TicketMutator, dryRun bo
 		Config:          cfg,
 		PlanProbes:      deps.PlanProbes,
 		PlanInventories: deps.PlanInventories,
+		LaunchVerdicts:  deps.LaunchVerdicts,
 	})
 
 	for _, rec := range result.Recoveries {

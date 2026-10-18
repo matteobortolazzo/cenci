@@ -59,8 +59,12 @@ func TestSaveState_WritesAtomicallyViaTmpAndRename(t *testing.T) {
 		t.Fatalf("saveState: %v", err)
 	}
 
-	if _, err := os.Stat(path + ".tmp"); !os.IsNotExist(err) {
-		t.Errorf("expected no leftover %s.tmp after a successful save, stat err = %v", path, err)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "42.json" {
+		t.Errorf("expected only 42.json after a successful save (no leftover temp file), got %v", entries)
 	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -385,5 +389,362 @@ func TestResolveRepoRoot_FromLinkedWorktree_ReturnsMainCheckoutRoot(t *testing.T
 	}
 	if fromWorktreeReal != wantReal {
 		t.Errorf("resolveRepoRoot(worktreeDir) = %q, want the MAIN checkout root %q, not the worktree's own root %q", fromWorktree, mainRepo, worktreeDir)
+	}
+}
+
+// -- recorded launch triple (#1292) ------------------------------------------
+
+// launchTripleSession is a valid recorded triple plus two unrelated session
+// keys that a clear must leave alone.
+func launchTripleSession() map[string]string {
+	return map[string]string{
+		"launchId":   "0123456789abcdef0123456789abcdef",
+		"container":  "claude-cenci-repo",
+		"runtime":    "docker",
+		"runId":      "run-7",
+		"reviewPath": "/tmp/review.md",
+	}
+}
+
+func TestSessionKeys_AreTheDocumentedStateFileKeys(t *testing.T) {
+	for _, tc := range []struct{ got, want string }{
+		{SessionKeyLaunchID, "launchId"},
+		{SessionKeyContainer, "container"},
+		{SessionKeyRuntime, "runtime"},
+	} {
+		if tc.got != tc.want {
+			t.Errorf("session key = %q, want %q", tc.got, tc.want)
+		}
+	}
+}
+
+func TestValidLaunchTriple_AcceptsOnlyAWellFormedTriple(t *testing.T) {
+	const id = "0123456789abcdef0123456789abcdef"
+	for _, tc := range []struct {
+		name              string
+		id, container, rt string
+		want              bool
+	}{
+		{"valid docker", id, "claude-cenci-repo", "docker", true},
+		{"valid podman", id, "codex-cenci-repo-feature", "podman", true},
+		{"empty", "", "", "", false},
+		{"id uppercase", "0123456789ABCDEF0123456789abcdef", "claude-cenci-repo", "docker", false},
+		{"id 31 chars", id[:31], "claude-cenci-repo", "docker", false},
+		{"container without sandbox prefix", id, "nginx", "docker", false},
+		{"container with option injection", id, "claude-cenci-x --privileged", "docker", false},
+		{"runtime sh", id, "claude-cenci-repo", "sh", false},
+		{"runtime empty", id, "claude-cenci-repo", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ValidLaunchTriple(tc.id, tc.container, tc.rt); got != tc.want {
+				t.Errorf("ValidLaunchTriple(%q, %q, %q) = %v, want %v", tc.id, tc.container, tc.rt, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestClearLaunch_RemovesTheTripleAndKeepsEveryOtherSessionKey(t *testing.T) {
+	stateDir := t.TempDir()
+	path := filepath.Join(stateDir, "42.json")
+	if err := saveState(path, State{SchemaVersion: CurrentSchemaVersion, ID: "42", Stage: StagePrepared, UpdatedAt: time.Now().UTC(), Session: launchTripleSession()}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	if err := ClearLaunch(ArtifactOpts{ID: "42", StateDir: stateDir}); err != nil {
+		t.Fatalf("ClearLaunch: %v", err)
+	}
+
+	got, err := loadState(path)
+	if err != nil {
+		t.Fatalf("loadState: %v", err)
+	}
+	want := map[string]string{"runId": "run-7", "reviewPath": "/tmp/review.md"}
+	if len(got.Session) != len(want) || got.Session["runId"] != "run-7" || got.Session["reviewPath"] != "/tmp/review.md" {
+		t.Errorf("session after clear = %v, want %v", got.Session, want)
+	}
+	if got.Stage != StagePrepared {
+		t.Errorf("stage = %q, want it untouched (%q)", got.Stage, StagePrepared)
+	}
+}
+
+func TestClearLaunch_WhenTheTripleWasTheOnlySessionContent_DropsTheSessionObject(t *testing.T) {
+	stateDir := t.TempDir()
+	path := filepath.Join(stateDir, "42.json")
+	session := launchTripleSession()
+	delete(session, "runId")
+	delete(session, "reviewPath")
+	if err := saveState(path, State{SchemaVersion: CurrentSchemaVersion, ID: "42", Stage: StagePrepared, UpdatedAt: time.Now().UTC(), Session: session}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	if err := ClearLaunch(ArtifactOpts{ID: "42", StateDir: stateDir}); err != nil {
+		t.Fatalf("ClearLaunch: %v", err)
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if strings.Contains(string(raw), "session") || strings.Contains(string(raw), "launchId") {
+		t.Errorf("state file still mentions the session after clearing its only keys:\n%s", raw)
+	}
+}
+
+func TestClearLaunch_MissingStateFile_IsANoOpThatCreatesNothing(t *testing.T) {
+	root := t.TempDir()
+	stateDir := filepath.Join(root, "never-created")
+
+	if err := ClearLaunch(ArtifactOpts{ID: "42", StateDir: stateDir}); err != nil {
+		t.Fatalf("ClearLaunch on a missing state file: %v, want nil", err)
+	}
+
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("ClearLaunch created %d entries under %s, want none", len(entries), root)
+	}
+}
+
+func TestClearLaunch_FileWithoutTheTripleKeys_IsNotRewritten(t *testing.T) {
+	stateDir := t.TempDir()
+	path := filepath.Join(stateDir, "42.json")
+	// A hand-written file in a shape saveState would not reproduce byte for
+	// byte: any rewrite changes it.
+	body := []byte(`{"schemaVersion":2,"id":"42","stage":"prepared","updatedAt":"2024-01-01T00:00:00Z","session":{"runId":"run-7"}}`)
+	if err := os.WriteFile(path, body, 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	if err := ClearLaunch(ArtifactOpts{ID: "42", StateDir: stateDir}); err != nil {
+		t.Fatalf("ClearLaunch: %v", err)
+	}
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if string(got) != string(body) {
+		t.Errorf("state file was rewritten although it carried no launch keys:\n%s", got)
+	}
+}
+
+// seedClearTarget writes a state file carrying the launch triple at
+// <stateDir>/42.json and returns its path.
+func seedClearTarget(t *testing.T, stateDir string) string {
+	t.Helper()
+	path := filepath.Join(stateDir, "42.json")
+	if err := saveState(path, State{SchemaVersion: CurrentSchemaVersion, ID: "42", Stage: StagePrepared, UpdatedAt: time.Now().UTC(), Session: launchTripleSession()}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	return path
+}
+
+// The state dir lives in the agent-writable bind-mounted repo, so the host-side
+// ClearLaunch must never write through a planted symlink.
+func TestClearLaunch_PlantedTmpSymlink_DoesNotWriteThroughIt(t *testing.T) {
+	stateDir := t.TempDir()
+	path := seedClearTarget(t, stateDir)
+	victim := filepath.Join(t.TempDir(), "victim")
+	const original = "host file the daemon can write"
+	if err := os.WriteFile(victim, []byte(original), 0o644); err != nil {
+		t.Fatalf("victim: %v", err)
+	}
+	if err := os.Symlink(victim, path+".tmp"); err != nil {
+		t.Fatalf("plant symlink: %v", err)
+	}
+
+	if err := ClearLaunch(ArtifactOpts{ID: "42", StateDir: stateDir}); err != nil {
+		t.Fatalf("ClearLaunch: %v, want it to succeed without using the planted name", err)
+	}
+
+	got, err := os.ReadFile(victim)
+	if err != nil {
+		t.Fatalf("read victim: %v", err)
+	}
+	if string(got) != original {
+		t.Errorf("victim was written through the planted .tmp symlink: %q", got)
+	}
+	s, err := loadState(path)
+	if err != nil {
+		t.Fatalf("loadState: %v", err)
+	}
+	if _, ok := s.Session[SessionKeyLaunchID]; ok {
+		t.Errorf("launch triple still recorded after a successful clear: %v", s.Session)
+	}
+}
+
+func TestClearLaunch_PlantedLockSymlink_RefusesAndLeavesTheTargetAlone(t *testing.T) {
+	stateDir := t.TempDir()
+	path := seedClearTarget(t, stateDir)
+	victim := filepath.Join(t.TempDir(), "victim-lock")
+	if err := os.Symlink(victim, path+".lock"); err != nil {
+		t.Fatalf("plant symlink: %v", err)
+	}
+
+	if err := ClearLaunch(ArtifactOpts{ID: "42", StateDir: stateDir}); err == nil {
+		t.Fatal("ClearLaunch through a planted .lock symlink returned nil, want an error")
+	}
+
+	if _, err := os.Lstat(victim); !os.IsNotExist(err) {
+		t.Errorf("the planted .lock symlink was followed and created %s (lstat err = %v)", victim, err)
+	}
+}
+
+func TestClearLaunch_StatePathIsASymlink_RefusesAndLeavesTheTargetAlone(t *testing.T) {
+	stateDir := t.TempDir()
+	victim := seedClearTarget(t, t.TempDir())
+	before, err := os.ReadFile(victim)
+	if err != nil {
+		t.Fatalf("read victim: %v", err)
+	}
+	if err := os.Symlink(victim, filepath.Join(stateDir, "42.json")); err != nil {
+		t.Fatalf("plant symlink: %v", err)
+	}
+
+	if err := ClearLaunch(ArtifactOpts{ID: "42", StateDir: stateDir}); err == nil {
+		t.Fatal("ClearLaunch on a symlinked state path returned nil, want an error")
+	}
+
+	after, err := os.ReadFile(victim)
+	if err != nil {
+		t.Fatalf("read victim: %v", err)
+	}
+	if string(after) != string(before) {
+		t.Errorf("victim was modified through the symlinked state path:\n%s", after)
+	}
+}
+
+func TestClearLaunch_StatePathIsADirectory_Refuses(t *testing.T) {
+	stateDir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(stateDir, "42.json"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	if err := ClearLaunch(ArtifactOpts{ID: "42", StateDir: stateDir}); err == nil {
+		t.Fatal("ClearLaunch on a directory at the state path returned nil, want an error")
+	}
+}
+
+func TestClearLaunch_CorruptStateFile_ReturnsAnError(t *testing.T) {
+	stateDir := t.TempDir()
+	path := filepath.Join(stateDir, "42.json")
+	if err := os.WriteFile(path, []byte("{not json"), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	if err := ClearLaunch(ArtifactOpts{ID: "42", StateDir: stateDir}); err == nil {
+		t.Fatal("ClearLaunch on a corrupt state file returned nil, want an error")
+	}
+}
+
+// assertOutsideDirUntouched fails unless outside still holds exactly the one
+// seeded state file with its original bytes: no lock file, temp file or rewrite.
+func assertOutsideDirUntouched(t *testing.T, stateFile string, before []byte) {
+	t.Helper()
+	after, err := os.ReadFile(stateFile)
+	if err != nil {
+		t.Fatalf("read outside state file: %v", err)
+	}
+	if string(after) != string(before) {
+		t.Errorf("outside state file was modified through the symlinked directory:\n%s", after)
+	}
+	entries, err := os.ReadDir(filepath.Dir(stateFile))
+	if err != nil {
+		t.Fatalf("ReadDir outside: %v", err)
+	}
+	if len(entries) != 1 {
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Errorf("outside dir has entries %v, want only the seeded state file", names)
+	}
+}
+
+// A symlinked .cenci/pipeline directory (agent-writable via the bind mount)
+// must not redirect the host-side lock/read/temp/rename outside the repo.
+func TestClearLaunch_PipelineDirIsASymlinkOutsideTheRepo_RefusesAndLeavesTheTargetAlone(t *testing.T) {
+	repo := t.TempDir()
+	if err := os.Mkdir(filepath.Join(repo, ".cenci"), 0o755); err != nil {
+		t.Fatalf("mkdir .cenci: %v", err)
+	}
+	outside := t.TempDir()
+	victim := seedClearTarget(t, outside)
+	before, err := os.ReadFile(victim)
+	if err != nil {
+		t.Fatalf("read victim: %v", err)
+	}
+	if err := os.Symlink(outside, filepath.Join(repo, ".cenci", "pipeline")); err != nil {
+		t.Fatalf("plant symlink: %v", err)
+	}
+
+	if err := ClearLaunch(ArtifactOpts{ID: "42", RepoRoot: repo}); err == nil {
+		t.Fatal("ClearLaunch through a symlinked .cenci/pipeline returned nil, want an error")
+	}
+
+	assertOutsideDirUntouched(t, victim, before)
+}
+
+// A symlinked .cenci directory redirects the whole state tree the same way.
+func TestClearLaunch_CenciDirIsASymlinkOutsideTheRepo_RefusesAndLeavesTheTargetAlone(t *testing.T) {
+	repo := t.TempDir()
+	outsideCenci := t.TempDir()
+	if err := os.Mkdir(filepath.Join(outsideCenci, "pipeline"), 0o755); err != nil {
+		t.Fatalf("mkdir outside pipeline: %v", err)
+	}
+	victim := seedClearTarget(t, filepath.Join(outsideCenci, "pipeline"))
+	before, err := os.ReadFile(victim)
+	if err != nil {
+		t.Fatalf("read victim: %v", err)
+	}
+	if err := os.Symlink(outsideCenci, filepath.Join(repo, ".cenci")); err != nil {
+		t.Fatalf("plant symlink: %v", err)
+	}
+
+	if err := ClearLaunch(ArtifactOpts{ID: "42", RepoRoot: repo}); err == nil {
+		t.Fatal("ClearLaunch through a symlinked .cenci returned nil, want an error")
+	}
+
+	assertOutsideDirUntouched(t, victim, before)
+}
+
+func TestClearLaunch_StateDirIsASymlink_Refuses(t *testing.T) {
+	outside := t.TempDir()
+	victim := seedClearTarget(t, outside)
+	before, err := os.ReadFile(victim)
+	if err != nil {
+		t.Fatalf("read victim: %v", err)
+	}
+	link := filepath.Join(t.TempDir(), "state-link")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Fatalf("plant symlink: %v", err)
+	}
+
+	if err := ClearLaunch(ArtifactOpts{ID: "42", StateDir: link}); err == nil {
+		t.Fatal("ClearLaunch through a symlinked explicit StateDir returned nil, want an error")
+	}
+
+	assertOutsideDirUntouched(t, victim, before)
+}
+
+func TestClearLaunch_RealRepoLayout_StillClearsTheTriple(t *testing.T) {
+	repo := t.TempDir()
+	path := seedClearTarget(t, filepath.Join(repo, ".cenci", "pipeline"))
+
+	if err := ClearLaunch(ArtifactOpts{ID: "42", RepoRoot: repo}); err != nil {
+		t.Fatalf("ClearLaunch: %v", err)
+	}
+
+	s, err := loadState(path)
+	if err != nil {
+		t.Fatalf("loadState: %v", err)
+	}
+	if _, ok := s.Session[SessionKeyLaunchID]; ok {
+		t.Errorf("launch triple still recorded after a successful clear: %v", s.Session)
+	}
+	if s.Session["runId"] != "run-7" {
+		t.Errorf("runId = %q, want it kept", s.Session["runId"])
 	}
 }

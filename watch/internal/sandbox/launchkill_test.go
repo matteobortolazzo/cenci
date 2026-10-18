@@ -124,6 +124,31 @@ func TestListLaunchProcesses_InvalidIdentityFailsBeforeAnyExec(t *testing.T) {
 	}
 }
 
+// The runtime is validated inside each exported exec entry point, so no caller
+// can skip the check: an out-of-set runtime is rejected before anything is
+// executed (the fake docker/podman call log stays empty and the error names
+// the runtime, rather than a lookup failure).
+func TestRuntimeEntryPoints_InvalidRuntimeIsRejectedBeforeAnyExec(t *testing.T) {
+	for _, rt := range []string{"sh", "../x", "", "DOCKER", "docker --privileged"} {
+		t.Run("runtime "+rt, func(t *testing.T) {
+			fakes := windowproctest.Install(t, lkSpec(windowproctest.Proc{PID: "101", Start: "5001"}))
+
+			targets, listErr := ListLaunchProcesses(context.Background(), rt, lkContainer, lkLaunchID)
+			names, psErr := RunningContainerNames(context.Background(), rt)
+
+			if listErr == nil || !strings.Contains(listErr.Error(), "invalid runtime") {
+				t.Errorf("ListLaunchProcesses = (%+v, %v), want an invalid-runtime error", targets, listErr)
+			}
+			if psErr == nil || !strings.Contains(psErr.Error(), "invalid runtime") {
+				t.Errorf("RunningContainerNames = (%v, %v), want an invalid-runtime error", names, psErr)
+			}
+			if calls := fakes.Calls(t); len(calls) != 0 {
+				t.Errorf("calls = %q, want no runtime call for an invalid runtime", calls)
+			}
+		})
+	}
+}
+
 // Probe output is untrusted (it comes from inside the container): any row that
 // is not "<digits>\t<digits-or-empty>", or that names PID 1, fails the whole
 // listing closed and no signal is sent to anything.

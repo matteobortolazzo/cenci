@@ -1883,6 +1883,17 @@ func TestOpen_LaunchID_AttachCarriesTheIDRecordedOnThePane(t *testing.T) {
 			if got := attachLine(t, lines); !strings.Contains(got, " -e CENCI_LAUNCH_ID="+id+" ") {
 				t.Errorf("attach argv does not carry CENCI_LAUNCH_ID=%s (the value set on the pane):\n%s", id, got)
 			}
+			// #1292: the container and runtime recorded on the pane travel in the
+			// same per-exec env as the ID.
+			attach := attachLine(t, lines)
+			for _, want := range []string{
+				" -e CENCI_SANDBOX_CONTAINER=" + values["@cenci-container"] + " ",
+				" -e CENCI_SANDBOX_RUNTIME=" + values["@cenci-runtime"] + " ",
+			} {
+				if !strings.Contains(attach, want) {
+					t.Errorf("attach argv does not carry %q:\n%s", strings.TrimSpace(want), attach)
+				}
+			}
 			for _, line := range lines {
 				if strings.HasPrefix(line, "exec -it ") {
 					continue
@@ -1890,8 +1901,10 @@ func TestOpen_LaunchID_AttachCarriesTheIDRecordedOnThePane(t *testing.T) {
 				// The pre-attach orphan scan reads this key in its script;
 				// only an environment assignment would bake launch ownership
 				// into a non-interactive invocation or the container init.
-				if strings.Contains(line, " -e CENCI_LAUNCH_ID=") {
-					t.Errorf("a non-attach runtime call injects CENCI_LAUNCH_ID (it must never be create-time env):\n%s", line)
+				for _, name := range []string{"CENCI_LAUNCH_ID", "CENCI_SANDBOX_CONTAINER", "CENCI_SANDBOX_RUNTIME"} {
+					if strings.Contains(line, " -e "+name+"=") {
+						t.Errorf("a non-attach runtime call injects %s (it must never be create-time env):\n%s", name, line)
+					}
 				}
 			}
 		})
@@ -1922,8 +1935,11 @@ func TestOpen_LaunchID_FailedPaneTagInjectsNoIDAndWarns(t *testing.T) {
 			}
 
 			lines := callLogLines(t, callLog)
-			if got := attachLine(t, lines); strings.Contains(got, "CENCI_LAUNCH_ID") {
-				t.Errorf("attach argv carries a launch ID although tagging the pane failed:\n%s", got)
+			got := attachLine(t, lines)
+			for _, name := range []string{"CENCI_LAUNCH_ID", "CENCI_SANDBOX_CONTAINER", "CENCI_SANDBOX_RUNTIME"} {
+				if strings.Contains(got, name) {
+					t.Errorf("attach argv carries %s although tagging the pane failed:\n%s", name, got)
+				}
 			}
 			var warnings []string
 			for _, line := range strings.Split(string(output), "\n") {

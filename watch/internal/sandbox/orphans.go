@@ -307,8 +307,13 @@ func (s *OrphanScanner) RunningContainers(ctx context.Context, rt string) ([]str
 // {{.Names}}`, bounded by containerCmdTimeout, containerCmdWaitDelay and the
 // caller's ctx, with the runtime's stderr captured under a cap and quoted into
 // the error. Foreign containers are never returned. Shared by the orphan scan
-// and the dispatch memory probe (#1290), which both need a bounded listing.
+// and the dispatch memory probe (#1290), which both need a bounded listing, and
+// by the dispatch launch-ID liveness probe (#1292). rt is exec'd directly, so
+// anything outside the closed docker/podman set is rejected before any exec.
 func RunningContainerNames(ctx context.Context, rt string) ([]string, error) {
+	if !ValidLaunchRuntime(rt) {
+		return nil, fmt.Errorf("invalid runtime %s", logSafeText(rt))
+	}
 	cctx, cancel := context.WithTimeout(ctx, containerCmdTimeout)
 	defer cancel()
 

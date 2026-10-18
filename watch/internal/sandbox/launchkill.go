@@ -98,6 +98,9 @@ func ValidSandboxContainerName(name string) bool {
 // the readable matches come back alongside an error wrapping it and the caller
 // decides (KillLaunch signals the matches and reports the rest).
 func ListLaunchProcesses(ctx context.Context, rt, container, id string) ([]ProcTarget, error) {
+	if !ValidLaunchRuntime(rt) {
+		return nil, fmt.Errorf("invalid runtime %s", logSafeText(rt))
+	}
 	if !ValidLaunchID(id) {
 		return nil, fmt.Errorf("invalid launch id %q", id)
 	}

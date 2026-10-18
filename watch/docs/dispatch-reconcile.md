@@ -218,6 +218,102 @@ may still read `waiting_for_input`. `stageGateSkip` does not gate that stage, so
 `Decide` dispatches the healed ticket. How the implement pipeline then handles a
 `planned` plan at that stage belongs to the flow side and is out of scope here.
 
+## Launch-ID liveness (#1292)
+
+`hasLiveWindow` only approximates "the agent process is running": an agent OOM-killed
+inside a surviving pane keeps its window `running`/`done`, and a session started by hand
+runs in a window that is not named for the ticket. For the two `Working`-gated branches of
+`Reconcile` -- the failure path and the `Input Needed` + `Working` stray cleanup -- the
+live check is therefore two steps, in `sessionLive(t, key, in) (live, deferred)`:
+
+1. **A recorded launch has a verdict** (`in.LaunchVerdicts[planKey]`): `live` is live
+   whatever the window says, `dead` is not live whatever the window says (so a surviving
+   `42-implement` window no longer keeps the ticket alive), and anything else defers.
+2. **No verdict** (`LaunchVerdictNone`, the zero value) keeps `hasLiveWindow`, unchanged.
+
+Heal A, B and C keep `hasLiveWindow`: the launch triple is written by the `working` claim,
+so it only means something while the ticket is `Working`. An open PR still resets the
+ticket whatever the verdict; only a ticket that would otherwise be acted on defers.
+
+**The verdict is a closed set**, not a bool: `LaunchVerdictNone` (`""`, no recorded
+launch), `live`, `dead`, `unknown`. `Reconcile` stays pure; the impure runner
+(`resolveLaunchVerdicts`, `launchprobe.go`) computes the map once per pass, after
+`ReadSnapshot`, exactly like `Attempts`/`AttemptsUnknown`. Default-deny: an `unknown` or
+unrecognized value is never read as dead. It defers through `deferObservation` -- grace
+clock preserved, no `Recovery`, no label write -- the same shape as the nil-snapshot and
+non-complete-open-PR guards. Treat a new `LaunchVerdict` value like any closed-set enum:
+add it to `sessionLive`'s switch deliberately, never let it fall into `dead`.
+
+**What the runner probes.** A ticket is probed only when `needsLaunchProbe` holds: it has
+`Working`, no terminal label, a non-nil snapshot, a complete open-PR probe, no open PR, and a
+non-empty recorded launch (`Ticket.Launch`, filled by `probeStageState` from the same
+`GetArtifacts` read as the stage -- no extra state-file read). At most one probe per ticket
+per pass. The recorded values are agent-writable (`.cenci/pipeline/` is in the bind-mounted
+repo), so the triple is re-validated (`ValidLaunchID`, `ValidSandboxContainerName`, runtime
+in `docker`/`podman`) *before any call*; an invalid or incomplete triple is never probed,
+earns no verdict (window-name rule) and logs one line naming the ticket, never the value. A
+Working ticket whose state file is unreadable (`StageProbeError`) is logged once and judged by
+the window-name rule; it never defers on that alone.
+
+**Probe outcomes** (`probeLaunch`):
+
+- `sandbox.ListLaunchProcesses` returns at least one process -> `live`; none -> `dead`.
+- `sandbox.ErrUnreadableProcesses` with at least one process -> `live`; with none -> `unknown`
+  (death cannot be proven).
+- Any other probe error consults the runtime's running containers, listed **once per runtime
+  per pass** (`sandbox.RunningContainerNames`, cached whether it succeeded or
+  not): a container absent from a *successful* listing -- removed, or stopped -- is `dead`
+  ("container gone" counts as dead); a failed listing, or a container that is still running
+  while the probe keeps failing, is `unknown`. The exec error text is never classified.
+- Every subprocess runs under a timeout context with `WaitDelay` and captured stderr
+  (`runRuntime`), inside a whole-step budget (`launchProbePassTimeout`, 60s). A probe that
+  overruns it is `unknown`, and tickets reached after it is spent are `unknown` without
+  being probed.
+
+**Dead in a surviving pane.** When the verdict is `dead` and a window named for the ticket
+still exists, the retry, interrupted-resume and failed comments use a variant that names the
+window and says its "agent process was gone" (`recoveryComments`). Markers are unchanged
+(`attemptMarker` for retry and interrupted-resume, `failedMarker` for failed), so
+`countAttempts` and the answer classifier see the same comments; every other case keeps
+today's text byte for byte, and no launch ID or container name is ever written to a ticket.
+The reconciler never kills a window and never signals a process -- the finished-ticket window
+cleanup owns the window.
+
+**The dispatcher clears the record at spawn** (`clearLaunchFn`, `dispatch.go`). In the
+per-decision loop, before the resume `+Working -Input Needed` claim and before `runFn`, it
+calls `pipeline.ClearLaunch` for the ticket (repo dir set only; `session.runId`/`reviewPath`
+are kept). A failed clear (an unreadable state file) logs `dispatch: #N clearing recorded
+launch failed` and skips that ticket for the pass -- no spawn, no label edit, and no returned
+error (one broken state file must not fail the pass); a missing state file is not a failure.
+Without the clear, a launch recorded before a crash and recovery would read `dead` for the
+next dispatched session until it re-claims.
+
+**Limits, by design.** A manually opened session is protected only once its run has claimed
+the ticket with `cenci pipeline label --transition working` inside a sandbox (that call
+records the launch; outside a sandbox it removes any stale one). A process that scrubbed
+`CENCI_LAUNCH_ID` (`env -i`) is invisible to the probe and reads `dead`, the same limit the
+reaper and `cenci close` have. A hostile agent can write its own record, so it can at most
+keep its own ticket looking `live`; validation stops any argv injection.
+
+**Host-side state access is hostile input.** The dispatcher's `pipeline.ClearLaunch` is the
+first automatic host-side write to `.cenci/pipeline/<id>.json`, a file the sandboxed agent can
+write through the bind mount. Any host-side (daemon, dispatcher, babysit) read or write of a
+file under the repo must therefore assume the agent planted a symlink or FIFO at that path.
+Do not use `path + ".tmp"` or `path + ".lock"` with `os.WriteFile`/`O_CREATE`: `saveState`
+creates its temp file with `os.CreateTemp` (exclusive, randomized name), `withLock` opens the
+lock with `O_NOFOLLOW`, and `ClearLaunch` `Lstat`s the state file and its directories and
+refuses anything that is not a regular file or that resolves outside the repo. Code that is
+safe inside the container is not automatically safe once the same code runs on the host. A
+swap that races those checks, and the unbounded `os.ReadFile` in the collector's read, remain
+open until host-side state access moves onto an `os.Root`-scoped helper (followup).
+
+**Tests.** `reconcile_test.go` drives `Reconcile` with hand-built `LaunchVerdicts`;
+`reconcile_run_test.go` drives `resolveLaunchVerdicts` through `launchProbeFn` /
+`runningContainersFn`, once through `windowproctest`'s fake docker/podman (real argv, empty
+call log for an invalid triple, no `kill`), and `RunReconcileOnce` end to end over a real state
+file. Tests that run a probe set `PATH` to fakes only or stub both seams -- never a real
+runtime.
+
 ## Cenci-authored comment markers
 
 Every comment cenci itself posts to a ticket — the attempt marker on a retry

@@ -2,13 +2,20 @@ package dispatch
 
 import (
 	"bytes"
+	"context"
 	"errors"
+	"fmt"
+	"io"
+	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/sandbox"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/windowproc/windowproctest"
 	"github.com/matteobortolazzo/cenci/watch/v2/pkg/watch"
 )
 
@@ -1282,6 +1289,632 @@ func TestLabelAlreadyExistsClassifiesGHOutput(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := labelAlreadyExists(tc.output); got != tc.want {
 				t.Errorf("labelAlreadyExists(%q) = %v, want %v", tc.output, got, tc.want)
+			}
+		})
+	}
+}
+
+// -- #1292: the launch-ID probe (resolveLaunchVerdicts) -----------------------
+
+// probeCall is one launchProbeFn invocation.
+type probeCall struct{ rt, container, id string }
+
+// launchSeams records every call into the two probe seams and answers them from
+// the supplied funcs. A nil list func makes any listing call a test failure.
+type launchSeams struct {
+	probeCalls []probeCall
+	listCalls  []string // the runtime of each running-container listing
+}
+
+func stubLaunchSeams(t *testing.T, probe func(ctx context.Context, c probeCall) ([]sandbox.ProcTarget, error), list func(ctx context.Context, rt string) ([]string, error)) *launchSeams {
+	t.Helper()
+	s := &launchSeams{}
+	restoreProbe, restoreList := launchProbeFn, runningContainersFn
+	launchProbeFn = func(ctx context.Context, rt, container, id string) ([]sandbox.ProcTarget, error) {
+		c := probeCall{rt, container, id}
+		s.probeCalls = append(s.probeCalls, c)
+		return probe(ctx, c)
+	}
+	runningContainersFn = func(ctx context.Context, rt string) ([]string, error) {
+		s.listCalls = append(s.listCalls, rt)
+		if list == nil {
+			t.Errorf("unexpected running-container listing on %s", rt)
+			return nil, errors.New("unexpected listing")
+		}
+		return list(ctx, rt)
+	}
+	t.Cleanup(func() { launchProbeFn, runningContainersFn = restoreProbe, restoreList })
+	return s
+}
+
+// launchTicket is an eligible ticket: Working, recorded launch, complete
+// open-PR probe, no open PR.
+func launchTicket(number int, launch RecordedLaunch) Ticket {
+	return Ticket{Repo: "o/r", Number: number, Labels: []string{"Working", "Planned"}, Launch: launch}
+}
+
+func emptySnapshot() *watch.StateSnapshot { return &watch.StateSnapshot{} }
+
+// TestResolveLaunchVerdicts_ProbeOutcomes is the verdict matrix, including the
+// edge cases: unreadable processes with a match are live and without one defer,
+// a container missing from a successful running listing is dead (stopped
+// containers included), a failed listing defers, and a container that is still
+// running while the probe keeps failing is not proven dead.
+func TestResolveLaunchVerdicts_ProbeOutcomes(t *testing.T) {
+	procs := []sandbox.ProcTarget{{PID: "7", Start: "100"}}
+	unreadable := fmt.Errorf("1 process(es) unreadable: %w", sandbox.ErrUnreadableProcesses)
+	probeFailed := errors.New("docker exec launch probe: exit status 1")
+	tests := []struct {
+		name          string
+		probeProcs    []sandbox.ProcTarget
+		probeErr      error
+		running       []string
+		listErr       error
+		want          LaunchVerdict
+		wantListCalls int
+	}{
+		{name: "a matching process is live", probeProcs: procs, want: LaunchVerdictLive},
+		{name: "no matching process is dead", want: LaunchVerdictDead},
+		{name: "unreadable processes beside a match are live", probeProcs: procs, probeErr: unreadable, want: LaunchVerdictLive},
+		{name: "unreadable processes and no match cannot prove death", probeErr: unreadable, want: LaunchVerdictUnknown},
+		{name: "probe error, container absent from the listing is dead", probeErr: probeFailed, running: []string{"claude-cenci-other"}, want: LaunchVerdictDead, wantListCalls: 1},
+		{name: "probe error, stopped container (empty listing) is dead", probeErr: probeFailed, running: nil, want: LaunchVerdictDead, wantListCalls: 1},
+		{name: "probe error, container still running is not proven dead", probeErr: probeFailed, running: []string{testLaunchContainer}, want: LaunchVerdictUnknown, wantListCalls: 1},
+		{name: "probe error and failed listing is unknown", probeErr: probeFailed, listErr: errors.New("docker ps: exit status 1"), want: LaunchVerdictUnknown, wantListCalls: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := stubLaunchSeams(t,
+				func(context.Context, probeCall) ([]sandbox.ProcTarget, error) { return tt.probeProcs, tt.probeErr },
+				func(context.Context, string) ([]string, error) { return tt.running, tt.listErr })
+
+			got := resolveLaunchVerdicts([]Ticket{launchTicket(42, testLaunch)}, emptySnapshot(), io.Discard)
+
+			if got["o/r#42"] != tt.want {
+				t.Errorf("verdict = %q, want %q", got["o/r#42"], tt.want)
+			}
+			want := []probeCall{{testLaunchRuntime, testLaunchContainer, testLaunchID}}
+			if !reflect.DeepEqual(s.probeCalls, want) {
+				t.Errorf("probe calls = %+v, want exactly %+v (the recorded triple, once)", s.probeCalls, want)
+			}
+			if len(s.listCalls) != tt.wantListCalls {
+				t.Errorf("listing calls = %v, want %d", s.listCalls, tt.wantListCalls)
+			}
+		})
+	}
+}
+
+// TestResolveLaunchVerdicts_InferredDeadFromFailedProbeIsLogged: a dead verdict
+// inferred from a failed probe plus a container absent from a successful listing
+// is a judgement call, so it leaves exactly one log line naming the ticket and
+// the bounded error, never a recorded launch ID, container or runtime value. A
+// dead verdict from an authoritative empty probe stays silent.
+func TestResolveLaunchVerdicts_InferredDeadFromFailedProbeIsLogged(t *testing.T) {
+	probeFailed := errors.New("exec launch probe: exit status 1")
+	tests := []struct {
+		name     string
+		probeErr error
+		wantLog  string
+	}{
+		{
+			name:     "failed probe, container absent from the listing",
+			probeErr: probeFailed,
+			wantLog:  "reconcile: #42 launch probe failed (exec launch probe: exit status 1), container absent from running list, treating as dead\n",
+		},
+		{name: "authoritative empty probe is silent"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stubLaunchSeams(t,
+				func(context.Context, probeCall) ([]sandbox.ProcTarget, error) { return nil, tt.probeErr },
+				func(context.Context, string) ([]string, error) { return []string{"claude-cenci-other"}, nil })
+			var buf bytes.Buffer
+
+			got := resolveLaunchVerdicts([]Ticket{launchTicket(42, testLaunch)}, emptySnapshot(), &buf)
+
+			if got["o/r#42"] != LaunchVerdictDead {
+				t.Fatalf("verdict = %q, want dead", got["o/r#42"])
+			}
+			if buf.String() != tt.wantLog {
+				t.Errorf("log = %q, want %q", buf.String(), tt.wantLog)
+			}
+			for _, secret := range []string{testLaunchID, testLaunchContainer, testLaunchRuntime} {
+				if strings.Contains(buf.String(), secret) {
+					t.Errorf("log %q echoes the recorded value %q", buf.String(), secret)
+				}
+			}
+		})
+	}
+}
+
+// TestResolveLaunchVerdicts_Eligibility covers AC7: the probe seam is called at
+// most once per ticket, and not at all for a ticket that lacks Working, has no
+// recorded launch, has a nil snapshot, an incomplete open-PR probe or an open
+// PR, or already carries a terminal label. An ineligible ticket gets no verdict
+// and costs no log line, even when its recorded values are junk.
+func TestResolveLaunchVerdicts_Eligibility(t *testing.T) {
+	tests := []struct {
+		name      string
+		mutate    func(*Ticket)
+		nilSnap   bool
+		wantCalls int
+	}{
+		{name: "eligible", mutate: func(*Ticket) {}, wantCalls: 1},
+		{name: "no Working label", mutate: func(tk *Ticket) { tk.Labels = []string{"Planned"} }},
+		{name: "no recorded launch", mutate: func(tk *Ticket) { tk.Launch = RecordedLaunch{} }},
+		{name: "nil snapshot", mutate: func(*Ticket) {}, nilSnap: true},
+		{name: "open-PR probe truncated", mutate: func(tk *Ticket) { tk.OpenPRProbe = OpenPRProbeTruncated }},
+		{name: "open-PR probe timed out", mutate: func(tk *Ticket) { tk.OpenPRProbe = OpenPRProbeTimeout }},
+		{name: "has an open PR", mutate: func(tk *Ticket) { tk.HasOpenPR = true }},
+		{name: "dispatch-failed", mutate: func(tk *Ticket) { tk.Labels = append(tk.Labels, labelDispatchFailed) }},
+		{name: "plan-invalid", mutate: func(tk *Ticket) { tk.Labels = append(tk.Labels, labelPlanInvalid) }},
+		{name: "reconcile-stuck", mutate: func(tk *Ticket) { tk.Labels = append(tk.Labels, labelReconcileStuck) }},
+		{name: "ineligible with a junk triple stays silent", mutate: func(tk *Ticket) {
+			tk.Labels = []string{"Planned"}
+			tk.Launch = RecordedLaunch{ID: "junk", Container: "; rm -rf /", Runtime: "sh"}
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := stubLaunchSeams(t,
+				func(context.Context, probeCall) ([]sandbox.ProcTarget, error) {
+					return []sandbox.ProcTarget{{PID: "7"}}, nil
+				},
+				nil)
+			tk := launchTicket(42, testLaunch)
+			tt.mutate(&tk)
+			snap := emptySnapshot()
+			if tt.nilSnap {
+				snap = nil
+			}
+			var buf bytes.Buffer
+
+			got := resolveLaunchVerdicts([]Ticket{tk}, snap, &buf)
+
+			if len(s.probeCalls) != tt.wantCalls {
+				t.Errorf("probe calls = %d, want %d", len(s.probeCalls), tt.wantCalls)
+			}
+			if _, ok := got["o/r#42"]; ok != (tt.wantCalls == 1) {
+				t.Errorf("verdict present = %v, want %v", ok, tt.wantCalls == 1)
+			}
+			if tt.wantCalls == 0 && buf.Len() != 0 {
+				t.Errorf("an ineligible ticket must log nothing, got %q", buf.String())
+			}
+		})
+	}
+}
+
+// TestResolveLaunchVerdicts_ProbesEachTicketOncePerPass: several eligible
+// tickets, each probed exactly once, each under its own key even when two
+// repos reuse a number.
+func TestResolveLaunchVerdicts_ProbesEachTicketOncePerPass(t *testing.T) {
+	s := stubLaunchSeams(t,
+		func(context.Context, probeCall) ([]sandbox.ProcTarget, error) { return nil, nil },
+		nil)
+	other := testLaunch
+	other.ID = "fedcba9876543210fedcba9876543210"
+	a := launchTicket(42, testLaunch)
+	b := launchTicket(43, other)
+	c := launchTicket(42, other)
+	c.Repo = "o/s"
+
+	got := resolveLaunchVerdicts([]Ticket{a, b, c}, emptySnapshot(), io.Discard)
+
+	if len(s.probeCalls) != 3 {
+		t.Errorf("probe calls = %+v, want 3 (one per ticket)", s.probeCalls)
+	}
+	for _, key := range []string{"o/r#42", "o/r#43", "o/s#42"} {
+		if got[key] != LaunchVerdictDead {
+			t.Errorf("verdict[%s] = %q, want dead", key, got[key])
+		}
+	}
+}
+
+// TestResolveLaunchVerdicts_InvalidRecordedTripleNeverReachesExec covers AC12:
+// a recorded triple that fails any re-validation, or is incomplete, is never
+// handed to either seam (so never to an exec argv), earns no verdict (the ticket
+// falls back to the window-name rule) and costs exactly one log line that names
+// the ticket and echoes no recorded value.
+func TestResolveLaunchVerdicts_InvalidRecordedTripleNeverReachesExec(t *testing.T) {
+	tests := []struct {
+		name   string
+		launch RecordedLaunch
+		leak   string // a fragment of the junk that must not reach the log
+	}{
+		{"uppercase launch ID", RecordedLaunch{ID: "0123456789ABCDEF0123456789ABCDEF", Container: testLaunchContainer, Runtime: testLaunchRuntime}, "0123456789ABCDEF"},
+		{"31-character launch ID", RecordedLaunch{ID: testLaunchID[:31], Container: testLaunchContainer, Runtime: testLaunchRuntime}, testLaunchID[:31]},
+		{"hostile container name", RecordedLaunch{ID: testLaunchID, Container: "claude-cenci-x; touch /tmp/pwn", Runtime: testLaunchRuntime}, "touch /tmp/pwn"},
+		{"foreign container name", RecordedLaunch{ID: testLaunchID, Container: "nginx", Runtime: testLaunchRuntime}, "nginx"},
+		{"unsupported runtime", RecordedLaunch{ID: testLaunchID, Container: testLaunchContainer, Runtime: "sh"}, "sh"},
+		{"missing launch ID", RecordedLaunch{Container: testLaunchContainer, Runtime: testLaunchRuntime}, ""},
+		{"missing container", RecordedLaunch{ID: testLaunchID, Runtime: testLaunchRuntime}, ""},
+		{"missing runtime", RecordedLaunch{ID: testLaunchID, Container: testLaunchContainer}, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := stubLaunchSeams(t,
+				func(context.Context, probeCall) ([]sandbox.ProcTarget, error) { return nil, nil },
+				nil)
+			var buf bytes.Buffer
+
+			got := resolveLaunchVerdicts([]Ticket{launchTicket(42, tt.launch)}, emptySnapshot(), &buf)
+
+			if len(s.probeCalls) != 0 || len(s.listCalls) != 0 {
+				t.Errorf("seams called (probe %+v, listing %v), want neither", s.probeCalls, s.listCalls)
+			}
+			if v, ok := got["o/r#42"]; ok {
+				t.Errorf("verdict = %q, want none (window-name rule)", v)
+			}
+			if lines := strings.Count(buf.String(), "\n"); lines != 1 || !strings.Contains(buf.String(), "#42") {
+				t.Errorf("log = %q, want exactly one line naming #42", buf.String())
+			}
+			if tt.leak != "" && strings.Contains(buf.String(), tt.leak) {
+				t.Errorf("log %q echoes the recorded value %q", buf.String(), tt.leak)
+			}
+		})
+	}
+}
+
+// TestResolveLaunchVerdicts_ListsRunningContainersOncePerRuntime: after probe
+// errors, one listing per runtime per pass answers every ticket on that
+// runtime, success or failure alike.
+func TestResolveLaunchVerdicts_ListsRunningContainersOncePerRuntime(t *testing.T) {
+	tests := []struct {
+		name      string
+		running   []string
+		listErr   error
+		wantA     LaunchVerdict // the ticket whose container is in `running`
+		wantB     LaunchVerdict // a docker ticket whose container is not
+		wantPodm  LaunchVerdict // the podman ticket (its listing is a separate call)
+		wantCalls []string
+	}{
+		{"successful listing", []string{"claude-cenci-a"}, nil, LaunchVerdictUnknown, LaunchVerdictDead, LaunchVerdictUnknown, []string{"docker", "podman"}},
+		{"failed listing defers every ticket on that runtime", nil, errors.New("docker ps: boom"), LaunchVerdictUnknown, LaunchVerdictUnknown, LaunchVerdictUnknown, []string{"docker", "podman"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := stubLaunchSeams(t,
+				func(context.Context, probeCall) ([]sandbox.ProcTarget, error) { return nil, errors.New("probe failed") },
+				func(_ context.Context, rt string) ([]string, error) {
+					if rt == "podman" {
+						return []string{"claude-cenci-c"}, nil
+					}
+					return tt.running, tt.listErr
+				})
+			launchOn := func(container, rt string) RecordedLaunch {
+				return RecordedLaunch{ID: testLaunchID, Container: container, Runtime: rt}
+			}
+
+			got := resolveLaunchVerdicts([]Ticket{
+				launchTicket(1, launchOn("claude-cenci-a", "docker")),
+				launchTicket(2, launchOn("claude-cenci-b", "docker")),
+				launchTicket(3, launchOn("claude-cenci-c", "podman")),
+			}, emptySnapshot(), io.Discard)
+
+			if !reflect.DeepEqual(s.listCalls, tt.wantCalls) {
+				t.Errorf("listing calls = %v, want %v (one per runtime)", s.listCalls, tt.wantCalls)
+			}
+			for key, want := range map[string]LaunchVerdict{"o/r#1": tt.wantA, "o/r#2": tt.wantB, "o/r#3": tt.wantPodm} {
+				if got[key] != want {
+					t.Errorf("verdict[%s] = %q, want %q", key, got[key], want)
+				}
+			}
+		})
+	}
+}
+
+// TestResolveLaunchVerdicts_DeadlineHitDefers covers AC9 through the seam: a
+// probe that blocks past the pass budget yields the unknown verdict, the ticket
+// behind it is not probed at all once the budget is spent, and no listing is
+// consulted on an expired context.
+func TestResolveLaunchVerdicts_DeadlineHitDefers(t *testing.T) {
+	restore := launchProbePassTimeout
+	launchProbePassTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { launchProbePassTimeout = restore })
+	s := stubLaunchSeams(t,
+		func(ctx context.Context, _ probeCall) ([]sandbox.ProcTarget, error) {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+		nil)
+
+	got := resolveLaunchVerdicts([]Ticket{launchTicket(42, testLaunch), launchTicket(43, testLaunch)}, emptySnapshot(), io.Discard)
+
+	for _, key := range []string{"o/r#42", "o/r#43"} {
+		if got[key] != LaunchVerdictUnknown {
+			t.Errorf("verdict[%s] = %q, want unknown", key, got[key])
+		}
+	}
+	if len(s.probeCalls) != 1 {
+		t.Errorf("probe calls = %+v, want only the first (the budget was spent)", s.probeCalls)
+	}
+}
+
+// writeFakeRuntime installs a docker and a podman that run body, as the only
+// PATH entries.
+func writeFakeRuntime(t *testing.T, body string) {
+	t.Helper()
+	dir := t.TempDir()
+	for _, name := range []string{"docker", "podman"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("#!/bin/sh\n"+body+"\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", dir)
+}
+
+// TestResolveLaunchVerdicts_HungRuntimeBinaryIsCutOff covers AC9 end to end:
+// with the real default seams, a runtime binary that never answers is killed at
+// the pass budget and the ticket defers.
+func TestResolveLaunchVerdicts_HungRuntimeBinaryIsCutOff(t *testing.T) {
+	restore := launchProbePassTimeout
+	launchProbePassTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { launchProbePassTimeout = restore })
+	writeFakeRuntime(t, `while :; do :; done`) // a builtin loop: no grandchild keeps the pipes open
+
+	start := time.Now()
+	got := resolveLaunchVerdicts([]Ticket{launchTicket(42, testLaunch)}, emptySnapshot(), io.Discard)
+
+	if got["o/r#42"] != LaunchVerdictUnknown {
+		t.Errorf("verdict = %q, want unknown", got["o/r#42"])
+	}
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Errorf("resolve took %v, want it bounded by the pass budget", elapsed)
+	}
+}
+
+// TestResolveLaunchVerdicts_FakeRuntimeBinary drives the real default seams
+// against windowproctest's fake docker/podman: the exact argv a probe sends
+// (AC9: the existing ListLaunchProcesses, no second environ scan), the one
+// running-container listing after a failed probe, nothing at all for an invalid
+// triple, and never a kill-window or a kill/signal (AC8).
+func TestResolveLaunchVerdicts_FakeRuntimeBinary(t *testing.T) {
+	probeLine := func(f windowproctest.Flavor) string {
+		return f.Runtime + " exec -u dev " + f.Container + " sh -c " + windowproctest.LaunchProbeToken + " _ " + testLaunchID
+	}
+	tests := []struct {
+		name      string
+		spec      func(f windowproctest.Flavor) windowproctest.Spec
+		launch    func(f windowproctest.Flavor) RecordedLaunch
+		want      LaunchVerdict
+		wantCalls func(f windowproctest.Flavor) []string
+	}{
+		{
+			name: "a process carrying the ID is live",
+			spec: func(f windowproctest.Flavor) windowproctest.Spec {
+				return f.SandboxSpec(testLaunchID, "1", windowproctest.Proc{PID: "700", Start: "5"})
+			},
+			want:      LaunchVerdictLive,
+			wantCalls: func(f windowproctest.Flavor) []string { return []string{probeLine(f)} },
+		},
+		{
+			name:      "no process carrying the ID is dead",
+			spec:      func(f windowproctest.Flavor) windowproctest.Spec { return f.SandboxSpec(testLaunchID, "1") },
+			want:      LaunchVerdictDead,
+			wantCalls: func(f windowproctest.Flavor) []string { return []string{probeLine(f)} },
+		},
+		{
+			name: "unreadable processes beside a match are live",
+			spec: func(f windowproctest.Flavor) windowproctest.Spec {
+				s := f.SandboxSpec(testLaunchID, "1", windowproctest.Proc{PID: "700", Start: "5"})
+				s.Unreadable = map[string][]string{testLaunchID: {"800"}}
+				return s
+			},
+			want:      LaunchVerdictLive,
+			wantCalls: func(f windowproctest.Flavor) []string { return []string{probeLine(f)} },
+		},
+		{
+			name: "unreadable processes alone defer",
+			spec: func(f windowproctest.Flavor) windowproctest.Spec {
+				s := f.SandboxSpec(testLaunchID, "1")
+				s.Unreadable = map[string][]string{testLaunchID: {"800"}}
+				return s
+			},
+			want:      LaunchVerdictUnknown,
+			wantCalls: func(f windowproctest.Flavor) []string { return []string{probeLine(f)} },
+		},
+		{
+			name: "a failed exec and an empty running listing is a gone container, dead",
+			spec: func(f windowproctest.Flavor) windowproctest.Spec {
+				s := f.SandboxSpec(testLaunchID, "1")
+				s.ProbeFails = true
+				return s
+			},
+			want: LaunchVerdictDead,
+			wantCalls: func(f windowproctest.Flavor) []string {
+				return []string{probeLine(f), f.Runtime + " ps --format {{.Names}}"}
+			},
+		},
+		{
+			name: "an invalid recorded triple reaches no binary at all",
+			spec: func(f windowproctest.Flavor) windowproctest.Spec { return f.SandboxSpec(testLaunchID, "1") },
+			launch: func(f windowproctest.Flavor) RecordedLaunch {
+				return RecordedLaunch{ID: testLaunchID, Container: f.Container + "; reboot", Runtime: f.Runtime}
+			},
+			want:      LaunchVerdictNone,
+			wantCalls: func(windowproctest.Flavor) []string { return nil },
+		},
+	}
+	for _, tt := range tests {
+		for _, f := range windowproctest.Flavors {
+			t.Run(tt.name+"/"+f.Name, func(t *testing.T) {
+				fakes := windowproctest.Install(t, tt.spec(f))
+				launch := RecordedLaunch{ID: testLaunchID, Container: f.Container, Runtime: f.Runtime}
+				if tt.launch != nil {
+					launch = tt.launch(f)
+				}
+
+				got := resolveLaunchVerdicts([]Ticket{launchTicket(42, launch)}, emptySnapshot(), io.Discard)
+
+				if got["o/r#42"] != tt.want {
+					t.Errorf("verdict = %q, want %q", got["o/r#42"], tt.want)
+				}
+				calls := fakes.Calls(t)
+				if want := tt.wantCalls(f); !slices.Equal(calls, want) {
+					t.Errorf("call log = %q, want %q", calls, want)
+				}
+				for _, c := range calls {
+					if strings.Contains(c, "kill") {
+						t.Errorf("call %q signals or kills; the reconciler must never do either", c)
+					}
+				}
+			})
+		}
+	}
+}
+
+// -- #1292: RunReconcileOnce wiring -------------------------------------------
+
+// TestRunReconcileOnce_LaunchProbeWiring runs a whole pass over a real state
+// file: the collector reads the recorded triple, the probe judges it, and the
+// verdict decides the recovery. Through the two Working-gated branches the
+// window name stops mattering for a ticket with a recorded launch (dead beside a
+// running window recovers with the dead-in-pane comment; live with no window is
+// left alone; a failed probe defers with its grace observation intact), and an
+// unreadable state file falls back to the window-name rule with one log line
+// and never defers on its own.
+func TestRunReconcileOnce_LaunchProbeWiring(t *testing.T) {
+	stateWithLaunch := `{"schemaVersion":2,"id":"42","stage":"plan_approved","session":{"runId":"r1","launchId":"` + testLaunchID + `","container":"` + testLaunchContainer + `","runtime":"` + testLaunchRuntime + `"}}`
+	probeFailed := errors.New("docker exec launch probe: exit status 1")
+	tests := []struct {
+		name          string
+		state         string
+		windows       []watch.WindowState
+		probeProcs    []sandbox.ProcTarget
+		probeErr      error
+		wantProbes    int
+		wantRecovery  bool
+		wantComment   []string
+		wantObsKept   bool
+		wantStateLogs int // lines about an unreadable state file
+	}{
+		{name: "dead beside a running window recovers", state: stateWithLaunch, windows: []watch.WindowState{runningImplementWindow},
+			wantProbes: 1, wantRecovery: true, wantComment: []string{"`42-implement`", "agent process was gone", attemptMarker}},
+		{name: "live with no window is left alone", state: stateWithLaunch,
+			probeProcs: []sandbox.ProcTarget{{PID: "7", Start: "1"}}, wantProbes: 1},
+		{name: "failed probe and failed listing defers", state: stateWithLaunch, windows: []watch.WindowState{runningImplementWindow},
+			probeErr: probeFailed, wantProbes: 1, wantObsKept: true},
+		{name: "no state file keeps the window-name rule", state: "", windows: []watch.WindowState{runningImplementWindow}},
+		{name: "unreadable state file, live window name: left alone, logged once", state: `{not json`, windows: []watch.WindowState{runningImplementWindow},
+			wantStateLogs: 1},
+		{name: "unreadable state file, no window: still recovers, never defers on that alone", state: `{not json`,
+			wantRecovery: true, wantComment: []string{"window `42` is gone"}, wantStateLogs: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			installFakeGH(t, `
+case "$1 $2" in
+  "issue list") printf '[{"number":42,"title":"Fix thing","labels":[{"name":"Working"}],"assignees":[]}]' ;;
+  "issue view") printf '{"comments":[]}' ;;
+  "api graphql") printf '`+emptyOpenPRPageJSON+`' ;;
+  *) exit 1 ;;
+esac
+`)
+			serveChainSnapshot(t, watch.StateSnapshot{Windows: tt.windows})
+			dir := t.TempDir()
+			if tt.state != "" {
+				writeStateFile(t, dir, 42, tt.state)
+			}
+			s := stubLaunchSeams(t,
+				func(context.Context, probeCall) ([]sandbox.ProcTarget, error) { return tt.probeProcs, tt.probeErr },
+				func(context.Context, string) ([]string, error) { return nil, errors.New("docker ps: exit status 1") })
+			cfg := reconcileConfig()
+			cfg.Repos = []RepoConfig{{Repo: "o/r", Dir: dir, Session: "test-session"}}
+			seed := time.Now().Add(-10 * time.Minute)
+			store := &memStore{state: ReconcileState{Observations: map[string]time.Time{"o/r#42": seed}}}
+			mut := &fakeMutator{}
+			var buf bytes.Buffer
+
+			_, _ = RunReconcileOnce(cfg, mut, false, &buf, store)
+
+			if len(s.probeCalls) != tt.wantProbes {
+				t.Errorf("probe calls = %+v, want %d", s.probeCalls, tt.wantProbes)
+			}
+			if len(s.probeCalls) > 0 && s.probeCalls[0] != (probeCall{testLaunchRuntime, testLaunchContainer, testLaunchID}) {
+				t.Errorf("probe call = %+v, want the triple recorded in the state file", s.probeCalls[0])
+			}
+			if tt.wantRecovery {
+				if len(mut.labelEdits) != 1 || !containsStr(mut.labelEdits[0].add, labelPlanned) || !containsStr(mut.labelEdits[0].remove, labelWorking) {
+					t.Fatalf("label edits = %+v, want one Working->Planned recovery", mut.labelEdits)
+				}
+				if len(mut.comments) != 1 {
+					t.Fatalf("comments = %+v, want exactly one", mut.comments)
+				}
+				for _, want := range tt.wantComment {
+					if !strings.Contains(mut.comments[0].body, want) {
+						t.Errorf("comment %q does not contain %q", mut.comments[0].body, want)
+					}
+				}
+			} else if len(mut.labelEdits) != 0 || len(mut.comments) != 0 {
+				t.Errorf("want no mutation, got edits %+v comments %+v", mut.labelEdits, mut.comments)
+			}
+			ts, kept := store.state.Observations["o/r#42"]
+			if tt.wantObsKept && (!kept || !ts.Equal(seed)) {
+				t.Errorf("persisted observation = %v (present=%v), want the seeded %v preserved", ts, kept, seed)
+			}
+			if got := strings.Count(buf.String(), "#42 pipeline state unreadable"); got != tt.wantStateLogs {
+				t.Errorf("unreadable-state log lines = %d, want %d; log:\n%s", got, tt.wantStateLogs, buf.String())
+			}
+		})
+	}
+}
+
+// TestRunReconcileOnce_DeadVerdictBesideSurvivingWindowNeverKills covers AC8
+// end to end: a whole RunReconcileOnce pass over the real default probe seams
+// and windowproctest's fake tmux/docker/podman, where the fake runtime reports
+// no process carrying the recorded launch ID (a dead verdict) while the snapshot
+// still holds the ticket's running `42-implement` window. The reconcile apply
+// recovers the ticket with the dead-in-pane comment (window name, "agent process
+// was gone", attemptMarker), and the shared call log of every fake records the
+// single probe exec and nothing that kills a window or signals a process.
+func TestRunReconcileOnce_DeadVerdictBesideSurvivingWindowNeverKills(t *testing.T) {
+	for _, f := range windowproctest.Flavors {
+		t.Run(f.Name, func(t *testing.T) {
+			fakes := windowproctest.Install(t, f.SandboxSpec(testLaunchID, "1"))
+			// windowproctest.Install makes its directory the only PATH entry, so the
+			// fake gh lives beside the fake tmux/docker/podman.
+			ghScript := `#!/bin/sh
+case "$1 $2" in
+  "issue list") printf '[{"number":42,"title":"Fix thing","labels":[{"name":"Working"}],"assignees":[]}]' ;;
+  "issue view") printf '{"comments":[]}' ;;
+  "api graphql") printf '` + emptyOpenPRPageJSON + `' ;;
+  *) exit 1 ;;
+esac
+`
+			if err := os.WriteFile(filepath.Join(fakes.Dir, "gh"), []byte(ghScript), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			serveChainSnapshot(t, watch.StateSnapshot{Windows: []watch.WindowState{runningImplementWindow}})
+			dir := t.TempDir()
+			writeStateFile(t, dir, 42, `{"schemaVersion":2,"id":"42","stage":"plan_approved","session":{"runId":"r1","launchId":"`+testLaunchID+`","container":"`+f.Container+`","runtime":"`+f.Runtime+`"}}`)
+			cfg := reconcileConfig()
+			cfg.Repos = []RepoConfig{{Repo: "o/r", Dir: dir, Session: "test-session"}}
+			store := &memStore{state: ReconcileState{Observations: map[string]time.Time{"o/r#42": time.Now().Add(-10 * time.Minute)}}}
+			mut := &fakeMutator{}
+
+			_, _ = RunReconcileOnce(cfg, mut, false, io.Discard, store)
+
+			if len(mut.labelEdits) != 1 || !containsStr(mut.labelEdits[0].add, labelPlanned) || !containsStr(mut.labelEdits[0].remove, labelWorking) {
+				t.Fatalf("label edits = %+v, want one Working->Planned recovery", mut.labelEdits)
+			}
+			if len(mut.comments) != 1 {
+				t.Fatalf("comments = %+v, want exactly one", mut.comments)
+			}
+			for _, want := range []string{"`42-implement`", "agent process was gone", attemptMarker} {
+				if !strings.Contains(mut.comments[0].body, want) {
+					t.Errorf("comment %q does not contain %q", mut.comments[0].body, want)
+				}
+			}
+
+			calls := fakes.Calls(t)
+			wantProbe := f.Runtime + " exec -u dev " + f.Container + " sh -c " + windowproctest.LaunchProbeToken + " _ " + testLaunchID
+			if want := []string{wantProbe}; !slices.Equal(calls, want) {
+				t.Errorf("call log = %q, want only the launch probe %q", calls, want)
+			}
+			for _, c := range calls {
+				if strings.Contains(c, "kill") {
+					t.Errorf("call %q kills a window or signals a process; the reconciler must never do either", c)
+				}
 			}
 		})
 	}

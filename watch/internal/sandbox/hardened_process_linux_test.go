@@ -76,8 +76,15 @@ func TestCloseHardenedLaunchReleasesConversationLock(t *testing.T) {
 	// Only the container transport is replaced: execute the real scan,
 	// identity probes and signals against our real Linux processes. Guard
 	// every signal so even a broken scan cannot affect unrelated processes.
-	rt := filepath.Join(dir, "runtime")
-	exectest.WriteExecutable(t, rt, fmt.Sprintf(`#!/bin/sh
+	// The runtime must be a closed-set name (docker/podman), so the stub is a
+	// fake "docker" found first on PATH rather than an absolute path.
+	binDir := filepath.Join(dir, "bin")
+	if err := os.Mkdir(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	const rt = "docker"
+	exectest.WriteExecutable(t, filepath.Join(binDir, rt), fmt.Sprintf(`#!/bin/sh
 [ "$1 $2 $3 $4" = "exec -u dev codex-cenci-test" ] || [ "$1 $2 $3 $4" = "exec -u root codex-cenci-test" ] || exit 90
 shift 4
 if [ "$1" = kill ]; then

@@ -610,9 +610,10 @@ var forwardedEnvVarNames = map[string]bool{
 // identity/plumbing forwards (TMUX_PANE, CENCI_TMUX_SOCKET, CENCI_SANDBOX,
 // CENCI_SANDBOX_AGENT) stay out: they say who the session is, not what it is
 // permitted to do, and ForwardedEnv is a posture report. CENCI_LAUNCH_ID
-// (#1252) is the same kind of identity forward: Launch adds it outside
-// assembleExecEnv (only after the pane tag succeeds), so audit never sees it,
-// and the only place it surfaces is the dry-run attach argv's placeholder.
+// (#1252), CENCI_SANDBOX_CONTAINER and CENCI_SANDBOX_RUNTIME (#1292) are the
+// same kind of identity forward: Launch adds them outside assembleExecEnv (only
+// after the pane tag succeeds), so audit never sees them, and the only place
+// they surface is the dry-run attach argv.
 var postureEnvVarNames = map[string]bool{
 	attendedEnvName: true,
 }

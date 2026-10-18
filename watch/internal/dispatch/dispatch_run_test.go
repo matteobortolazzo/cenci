@@ -8,11 +8,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/exectest"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/pipeline"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/run"
 	"github.com/matteobortolazzo/cenci/watch/v2/pkg/watch"
 )
@@ -2424,5 +2426,142 @@ func TestUserDefinedImplementTemplateDoesNotMakeAgentDispatchable(t *testing.T) 
 	}
 	if len(mut.labelEdits) != 0 || prior != 0 {
 		t.Fatalf("refusal changed labels/quota: %+v, %d", mut.labelEdits, prior)
+	}
+}
+
+// -- #1292 AC13: the dispatcher clears the recorded launch before it spawns ---
+
+// launchStateJSON is a ticket-42 state file whose session carries the other
+// session keys (runId, reviewPath) next to a recorded launch triple.
+const launchStateJSON = `{"schemaVersion":2,"id":"42","stage":"plan_approved","session":{"runId":"r1","reviewPath":"/p/review.md","launchId":"` + testLaunchID + `","container":"` + testLaunchContainer + `","runtime":"` + testLaunchRuntime + `"}}`
+
+// launchDispatchConfig is dispatchTestConfig with the repo's Dir pointing at
+// dir, so applyDispatch can reach the ticket's pipeline state file.
+func launchDispatchConfig(dir string) Config {
+	cfg := dispatchTestConfig()
+	cfg.Repos[0].Dir = dir
+	return cfg
+}
+
+// recordClearLaunch swaps clearLaunchFn for a wrapper that appends "clear" to
+// the mutator's call order and then runs the real pipeline.ClearLaunch.
+func recordClearLaunch(t *testing.T, mut *orderRecordingMutator) {
+	t.Helper()
+	restore := clearLaunchFn
+	clearLaunchFn = func(o pipeline.ArtifactOpts) error {
+		mut.callOrder = append(mut.callOrder, "clear")
+		return pipeline.ClearLaunch(o)
+	}
+	t.Cleanup(func() { clearLaunchFn = restore })
+}
+
+// TestApplyDispatch_ClearsRecordedLaunchBeforeSpawn: for both the ordinary and
+// the resume dispatch, the launch triple is gone from session before the resume
+// claim and before the spawn, and the other session keys survive.
+func TestApplyDispatch_ClearsRecordedLaunchBeforeSpawn(t *testing.T) {
+	tests := []struct {
+		name      string
+		deps      func(time.Time) dispatchDeps
+		wantOrder []string
+	}{
+		{"ordinary pickup claims after the spawn", dispatchableDeps, []string{"clear", "spawn", "edit"}},
+		{"resume claims before the spawn", resumeDispatchDeps, []string{"clear", "edit", "spawn"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeStateFile(t, dir, 42, launchStateJSON)
+			mut := &orderRecordingMutator{}
+			recordClearLaunch(t, mut)
+			var sessionAtSpawn map[string]string
+			stubRunFn(t, func(run.Opts, run.Controller) error {
+				mut.callOrder = append(mut.callOrder, "spawn")
+				s, err := pipeline.GetArtifacts(pipeline.ArtifactOpts{ID: "42", RepoRoot: dir})
+				if err != nil {
+					t.Errorf("reading state at spawn: %v", err)
+				}
+				sessionAtSpawn = s.Session
+				return nil
+			})
+
+			prior := 0
+			now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+			if _, err := applyDispatch(launchDispatchConfig(dir), tt.deps(now), fakeController{}, mut, false, nil, &prior); err != nil {
+				t.Fatalf("applyDispatch: %v", err)
+			}
+
+			if !reflect.DeepEqual(mut.callOrder, tt.wantOrder) {
+				t.Errorf("call order = %v, want %v", mut.callOrder, tt.wantOrder)
+			}
+			want := map[string]string{"runId": "r1", "reviewPath": "/p/review.md"}
+			if !reflect.DeepEqual(sessionAtSpawn, want) {
+				t.Errorf("session at spawn = %v, want only %v (launch triple cleared, other keys kept)", sessionAtSpawn, want)
+			}
+			if prior != 1 {
+				t.Errorf("prior = %d, want 1 (the dispatch still happened)", prior)
+			}
+		})
+	}
+}
+
+// TestApplyDispatch_FailedClear_SkipsTheTicketEntirely: a clear that fails on a
+// readable-but-corrupt state file means no spawn, no label edit and no quota,
+// with a log line that names the ticket.
+func TestApplyDispatch_FailedClear_SkipsTheTicketEntirely(t *testing.T) {
+	tests := []struct {
+		name string
+		deps func(time.Time) dispatchDeps
+	}{
+		{"ordinary pickup", dispatchableDeps},
+		{"resume", resumeDispatchDeps},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeStateFile(t, dir, 42, `{not valid json`)
+			mut := &orderRecordingMutator{}
+			stubRunFn(t, func(run.Opts, run.Controller) error {
+				t.Error("a failed clear must never spawn")
+				return nil
+			})
+
+			prior := 0
+			var buf bytes.Buffer
+			now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+			if _, err := applyDispatch(launchDispatchConfig(dir), tt.deps(now), fakeController{}, mut, false, &buf, &prior); err != nil {
+				t.Fatalf("applyDispatch: %v (a skipped ticket must not fail the pass)", err)
+			}
+
+			if len(mut.callOrder) != 0 {
+				t.Errorf("label edits = %v, want none (no claim, no rollback)", mut.callOrder)
+			}
+			if prior != 0 {
+				t.Errorf("prior = %d, want 0", prior)
+			}
+			if !strings.Contains(buf.String(), "dispatch: #42 clearing recorded launch failed") {
+				t.Errorf("log = %q, want it to contain %q", buf.String(), "dispatch: #42 clearing recorded launch failed")
+			}
+		})
+	}
+}
+
+// TestApplyDispatch_MissingStateFile_StillSpawnsAndCreatesNothing: no state file
+// means nothing was recorded; that is not a failure and must not create one.
+func TestApplyDispatch_MissingStateFile_StillSpawnsAndCreatesNothing(t *testing.T) {
+	dir := t.TempDir()
+	spawned := 0
+	stubRunFn(t, func(run.Opts, run.Controller) error { spawned++; return nil })
+
+	prior := 0
+	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+	if _, err := applyDispatch(launchDispatchConfig(dir), dispatchableDeps(now), fakeController{}, &fakeMutator{}, false, nil, &prior); err != nil {
+		t.Fatalf("applyDispatch: %v", err)
+	}
+
+	if spawned != 1 || prior != 1 {
+		t.Errorf("spawned = %d, prior = %d, want 1 and 1", spawned, prior)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".cenci")); !os.IsNotExist(err) {
+		t.Errorf("stat .cenci = %v, want it not to exist (clearing must create nothing)", err)
 	}
 }
