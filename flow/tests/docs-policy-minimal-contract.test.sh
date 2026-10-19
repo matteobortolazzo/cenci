@@ -222,6 +222,9 @@ UNTRACKED_CMD='git -C <worktree-path> ls-files --others --exclude-standard'
 DISCOVERY_TMP='(or, when `$RUN_DIR` is unknown, a `mktemp` file under `${TMPDIR:-/tmp}/cenci/`)'
 DS_DISCOVERY_FAIL='a failure of either records `docs: error (changed-file discovery failed)`, never `none`'
 MAINT_DISCOVERY_FAIL='If the `files.txt` read or either fallback command fails'
+# #1311: Phase 6 + 7's files.txt already carries the tracked-plus-untracked union.
+P8_FILES_UNION='`$RUN_DIR/files.txt` is already the union of the tracked diff against `origin/main` and the untracked, non-ignored files, captured and exit-checked in Phase 6 + 7'"'"'s Shared Context step, so trusting it when no doc sub-step in this phase wrote a file is correct.'
+P8_TRIGGER_GUARD_ANCHOR='**Trigger guard**'
 # PR-body secrecy for a failing repository docs command.
 NOTES_EXCERPT='only the command label, its exit code and a short excerpt with secret, environment-variable, token and URL-credential values removed'
 # Resolver output handling: stdout only, and every non-clean result unresolved.
@@ -527,6 +530,15 @@ case_changed_file_discovery() {
   assert_contains "${maintenance_section}" "${DISCOVERY_TMP}" 'B: the Trigger guard names the RUN_DIR-unknown capture location'
   assert_contains "${maintenance_section}" "${MAINT_DISCOVERY_FAIL}" 'B: either fallback failing records a discovery failure'
   assert_file_contains "${CODEX_MD}" 'the union of `git -C <abs-worktree-path> diff --name-only origin/main` and `git -C <abs-worktree-path> ls-files --others --exclude-standard`' 'B: codex.md unions untracked files'
+  # #1311: the Trigger guard states that Phase 6 + 7's snapshot is already the
+  # union, bound to the one Trigger guard line, with the old rules kept.
+  local trigger_guard_line
+  require_line trigger_guard_line "${maintenance_section}" "${P8_TRIGGER_GUARD_ANCHOR}" '#1311: Phase 8 Trigger guard line' || return
+  assert_contains "${trigger_guard_line}" "${P8_FILES_UNION}" '#1311: the Trigger guard says files.txt already includes untracked files'
+  assert_contains "${trigger_guard_line}" 'obtain the changed-file list from `$RUN_DIR/files.txt`' '#1311: the Trigger guard still reads files.txt (wiring)'
+  assert_contains "${trigger_guard_line}" 'when any doc sub-step in this phase wrote a file' '#1311: the recompute-after-doc-write rule is kept'
+  assert_contains "${trigger_guard_line}" "${UNTRACKED_CMD}" '#1311: the RUN_DIR-unknown recompute still unions untracked files'
+  assert_contains "${maintenance_section}" 'write `maintenance: error (changed-file discovery failed)` to `$RUN_DIR/maintain-status.txt`' '#1311: the discovery-failure record is kept'
 }
 
 # --- C: a failing repository docs command never pastes output verbatim -------
