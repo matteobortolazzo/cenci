@@ -23,6 +23,7 @@ Pass:
 - LSP diagnostic reminder if configured.
 - The project's `buildCommand`, `testCommand`, and `lintCommand` (when set).
 - Resolved topic docs: at most 3 `docs/<topic>.md` paths matched to Files to Modify/Create.
+- The plan's `### Documentation Routing` section, verbatim.
 
 ## Rules
 
@@ -31,6 +32,8 @@ Pass:
 - Consult only the topic docs passed in the Delegation Context above.
 - Honor applicable `AGENTS.md` guidance; never read `README.md` wholesale — `Grep` it for the specific contract being touched.
 - Do not edit documentation (`README.md`, `AGENTS.md`/`CLAUDE.md`, or `docs/**`) incidentally — Phase 8 owns those, except a doc file explicitly named in the plan's Files to Modify/Create. Instead, emit the `Docs to update:` section in its report, one line per doc or the literal `None.`.
+- A doc file named in the plan's `### Files to Modify` / `### Files to Create` is written with its plan-required content in every policy, including `minimal`.
+- Name the owner from `### Documentation Routing` on each `Docs to update:` line, never `AGENTS.md` for a contract, catalog, setup detail or procedure.
 - No premature abstractions, dead code, commented-out code, or TODOs without ticket references.
 
 ## Verification

@@ -87,6 +87,7 @@ Pass:
 - Acceptance criteria, edge cases, and error scenarios.
 - Attachment paths if relevant.
 - Resolved topic docs: at most 3 `docs/<topic>.md` paths matched to Files to Modify/Create.
+- The plan's `### Documentation Routing` section, verbatim (compact implementation folds Phase 4's delegation into this one, so it must travel here too).
 - On a resume attach route, the `## Resume Brief` below.
 
 ## Resume Brief

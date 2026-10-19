@@ -65,6 +65,7 @@ When LSP servers are active, diagnostics provide high-signal findings. Apply the
 - [ ] No TODOs without tickets
 - [ ] No commented code
 - [ ] Documentation adequate
+- [ ] Documentation edits land in the owners named by the plan's `### Documentation Routing` (when forwarded): no second copy of a contract, and no `AGENTS.md` edit beyond a routing change or an explicit requirement
 
 ## Test Value
 
