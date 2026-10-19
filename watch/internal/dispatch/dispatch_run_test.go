@@ -2545,6 +2545,56 @@ func TestApplyDispatch_FailedClear_SkipsTheTicketEntirely(t *testing.T) {
 	}
 }
 
+// TestApplyDispatch_FifoStateFile_SkipsTheTicketWithoutBlockingThePass: an agent
+// can plant a FIFO at the state path. The real pipeline.ClearLaunch must fail
+// fast on it (never block in open), so the dispatcher logs the failed clear and
+// skips the ticket for the pass: no spawn, no label edit, no quota, no error.
+func TestApplyDispatch_FifoStateFile_SkipsTheTicketWithoutBlockingThePass(t *testing.T) {
+	tests := []struct {
+		name string
+		deps func(time.Time) dispatchDeps
+	}{
+		{"ordinary pickup", dispatchableDeps},
+		{"resume", resumeDispatchDeps},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			plantStateFifo(t, dir, 42)
+			mut := &orderRecordingMutator{}
+			spawned := 0
+			stubRunFn(t, func(run.Opts, run.Controller) error {
+				spawned++
+				return nil
+			})
+
+			prior := 0
+			var buf bytes.Buffer
+			var passErr error
+			now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+			returnsWithin(t, fifoDeadline, func() {
+				_, passErr = applyDispatch(launchDispatchConfig(dir), tt.deps(now), fakeController{}, mut, false, &buf, &prior)
+			})
+
+			if passErr != nil {
+				t.Fatalf("applyDispatch: %v (a skipped ticket must not fail the pass)", passErr)
+			}
+			if spawned != 0 {
+				t.Errorf("spawned = %d, want 0 (a failed clear must never spawn)", spawned)
+			}
+			if len(mut.callOrder) != 0 {
+				t.Errorf("label edits = %v, want none (no claim, no rollback)", mut.callOrder)
+			}
+			if prior != 0 {
+				t.Errorf("prior = %d, want 0", prior)
+			}
+			if !strings.Contains(buf.String(), "dispatch: #42 clearing recorded launch failed") {
+				t.Errorf("log = %q, want it to contain %q", buf.String(), "dispatch: #42 clearing recorded launch failed")
+			}
+		})
+	}
+}
+
 // TestApplyDispatch_MissingStateFile_StillSpawnsAndCreatesNothing: no state file
 // means nothing was recorded; that is not a failure and must not create one.
 func TestApplyDispatch_MissingStateFile_StillSpawnsAndCreatesNothing(t *testing.T) {

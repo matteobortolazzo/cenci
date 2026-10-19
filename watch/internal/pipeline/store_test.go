@@ -748,3 +748,165 @@ func TestClearLaunch_RealRepoLayout_StillClearsTheTriple(t *testing.T) {
 		t.Errorf("runId = %q, want it kept", s.Session["runId"])
 	}
 }
+
+// -- #1306: ClearLaunch and GetArtifacts over hostile or absent state ---------
+//
+// The cross-entry-point matrices (symlinked directories, state files and lock
+// files, the cap, FIFOs, the race seam) live in stateroot_test.go; these are the
+// ClearLaunch-specific contracts that must survive the move onto the helper.
+
+func TestClearLaunch_StateFileExactlyAtTheCap_StillClearsTheTriple(t *testing.T) {
+	const capBytes = 512
+	setMaxStateFileBytes(t, capBytes)
+	loc, dir := layouts[0].setup(t)
+	path := filepath.Join(dir, "42.json")
+	mustWriteFile(t, path, paddedJSON(t, seededState, capBytes))
+
+	if err := ClearLaunch(loc.artifactOpts()); err != nil {
+		t.Fatalf("ClearLaunch on a state file of exactly the cap: %v", err)
+	}
+
+	if _, ok := readStateFile(t, path).Session[SessionKeyLaunchID]; ok {
+		t.Error("launch triple still recorded after clearing a state file of exactly the cap")
+	}
+}
+
+// missingStateShapes are the ways a ticket can have no state file yet. root is
+// the directory whose contents a read-only call must leave untouched.
+var missingStateShapes = []struct {
+	name  string
+	setup func(t *testing.T) (loc stateLoc, root string)
+}{
+	{"repo without .cenci", func(t *testing.T) (stateLoc, string) {
+		repo := t.TempDir()
+		return stateLoc{repoRoot: repo}, repo
+	}},
+	{"repo with .cenci but no pipeline directory", func(t *testing.T) (stateLoc, string) {
+		repo := t.TempDir()
+		mustMkdirAll(t, filepath.Join(repo, ".cenci"))
+		return stateLoc{repoRoot: repo}, repo
+	}},
+	{"repo with an empty pipeline directory", func(t *testing.T) (stateLoc, string) {
+		repo := t.TempDir()
+		mustMkdirAll(t, filepath.Join(repo, ".cenci", "pipeline"))
+		return stateLoc{repoRoot: repo}, repo
+	}},
+	{"existing empty explicit state dir", func(t *testing.T) (stateLoc, string) {
+		dir := t.TempDir()
+		return stateLoc{stateDir: dir}, dir
+	}},
+	{"explicit state dir that does not exist", func(t *testing.T) (stateLoc, string) {
+		root := t.TempDir()
+		return stateLoc{stateDir: filepath.Join(root, "never-created")}, root
+	}},
+}
+
+func TestClearLaunch_MissingStateFile_IsANoOpThatCreatesNoFileDirectoryOrLock(t *testing.T) {
+	for _, shape := range missingStateShapes {
+		t.Run(shape.name, func(t *testing.T) {
+			loc, root := shape.setup(t)
+			before := snapshotTree(t, root)
+
+			if err := ClearLaunch(loc.artifactOpts()); err != nil {
+				t.Fatalf("ClearLaunch on a missing state file: %v, want nil", err)
+			}
+
+			assertTreeUnchanged(t, root, before)
+		})
+	}
+}
+
+func TestGetArtifacts_MissingStateFile_ReadsAsNewAndCreatesNothing(t *testing.T) {
+	for _, shape := range missingStateShapes {
+		t.Run(shape.name, func(t *testing.T) {
+			loc, root := shape.setup(t)
+			before := snapshotTree(t, root)
+
+			s, err := GetArtifacts(loc.artifactOpts())
+			if err != nil {
+				t.Fatalf("GetArtifacts on a missing state file: %v, want nil", err)
+			}
+
+			if s.Stage != StageNew {
+				t.Errorf("Stage = %q, want %q", s.Stage, StageNew)
+			}
+			assertTreeUnchanged(t, root, before)
+		})
+	}
+}
+
+func TestClearLaunch_RepoLayoutFileWithoutTheTripleKeys_IsNotRewritten(t *testing.T) {
+	loc, dir := layouts[0].setup(t)
+	path := filepath.Join(dir, "42.json")
+	// Hand-written in a shape a rewrite would not reproduce byte for byte, with
+	// no launch keys: any write, UpdatedAt bump included, changes it.
+	body := `{"schemaVersion":2,"id":"42","stage":"prepared","updatedAt":"2024-01-01T00:00:00Z","session":{"runId":"run-7"}}`
+	mustWriteFile(t, path, body)
+
+	if err := ClearLaunch(loc.artifactOpts()); err != nil {
+		t.Fatalf("ClearLaunch: %v", err)
+	}
+
+	if got := mustReadFile(t, path); got != body {
+		t.Errorf("state file was rewritten although it carried no launch keys:\n%s", got)
+	}
+}
+
+// A temp file left behind by an interrupted write (.<id>.json.tmp-*), or a
+// symlink planted at such a name, must not block the next save: the helper
+// creates its temp file exclusively under a fresh random name.
+func TestStaleTempFile_DoesNotBlockTheNextSave(t *testing.T) {
+	const staleName = ".42.json.tmp-deadbeef"
+	plants := []struct {
+		name string
+		// plant creates the stale entry in dir and returns a check that it is
+		// still exactly as planted.
+		plant func(t *testing.T, dir string) (assertUntouched func(t *testing.T))
+	}{
+		{"regular file", func(t *testing.T, dir string) func(*testing.T) {
+			stale := filepath.Join(dir, staleName)
+			mustWriteFile(t, stale, "stale leftover")
+			return func(t *testing.T) {
+				if got := mustReadFile(t, stale); got != "stale leftover" {
+					t.Errorf("stale temp file was modified: %q", got)
+				}
+			}
+		}},
+		{"symlink to a victim file", func(t *testing.T, dir string) func(*testing.T) {
+			victim := filepath.Join(t.TempDir(), "victim")
+			mustWriteFile(t, victim, "victim content")
+			mustSymlink(t, victim, filepath.Join(dir, staleName))
+			return func(t *testing.T) {
+				if got := mustReadFile(t, victim); got != "victim content" {
+					t.Errorf("victim was written through the planted temp symlink: %q", got)
+				}
+			}
+		}},
+	}
+	writers := []struct {
+		entry  entryPoint
+		effect func(s State) bool
+	}{
+		{entrySetArtifact, func(s State) bool { return s.Branch == recordedBranch }},
+		{entryClearLaunch, func(s State) bool { _, ok := s.Session[SessionKeyLaunchID]; return !ok }},
+	}
+	for _, p := range plants {
+		for _, w := range writers {
+			t.Run(w.entry.name+"/"+p.name, func(t *testing.T) {
+				loc, dir := layouts[0].setup(t)
+				path := filepath.Join(dir, "42.json")
+				mustWriteFile(t, path, seededState)
+				assertUntouched := p.plant(t, dir)
+
+				if err := w.entry.call(loc); err != nil {
+					t.Fatalf("%s with a stale temp entry present: %v", w.entry.name, err)
+				}
+
+				if !w.effect(readStateFile(t, path)) {
+					t.Errorf("%s did not take effect", w.entry.name)
+				}
+				assertUntouched(t)
+			})
+		}
+	}
+}

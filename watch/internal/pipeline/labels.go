@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"regexp"
 	"slices"
 	"strings"
@@ -131,14 +132,26 @@ func ApplyLabelTransition(o LabelOpts) (State, error) {
 	}
 	name := labelName[o.Transition]
 
-	path, err := resolveStatePath(Opts{ID: o.ID, RepoRoot: o.RepoRoot, StateDir: o.StateDir})
+	loc, err := resolveStateLocation(Opts{ID: o.ID, RepoRoot: o.RepoRoot, StateDir: o.StateDir})
 	if err != nil {
 		return State{}, err
 	}
 
-	current, err := loadState(path)
-	if err != nil {
+	// Opened once, without creating anything, and held across the gh calls
+	// below. A missing state directory reads as StageNew, which every label
+	// transition's minimum stage rejects before any write, so d is non-nil
+	// wherever recordLabelState uses it.
+	d, err := openStateDir(loc, false)
+	current := State{Stage: StageNew}
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+	case err != nil:
 		return State{}, err
+	default:
+		defer func() { _ = d.Close() }()
+		if current, err = d.load(); err != nil {
+			return State{}, err
+		}
 	}
 	currentRank, currentOk := stageRank(current.Stage)
 	if !currentOk {
@@ -248,7 +261,7 @@ func ApplyLabelTransition(o LabelOpts) (State, error) {
 		launch = &recorded
 	}
 
-	return recordLabelState(path, name, removeLabels, ticketUpdatedAt, launch)
+	return recordLabelState(d, name, removeLabels, ticketUpdatedAt, launch)
 }
 
 // LaunchEnv is the sandbox launch triple a `working` claim runs in: the
@@ -357,10 +370,10 @@ func checkSoleAssignee(id string, assignees []string, login string) error {
 // them, other session keys untouched. A nil launch leaves the session as it
 // is, and a session that was nil stays nil, so a state file with no launch
 // recorded round-trips unchanged.
-func recordLabelState(path, add string, remove []string, ticketUpdatedAt string, launch *LaunchEnv) (State, error) {
+func recordLabelState(d *stateDir, add string, remove []string, ticketUpdatedAt string, launch *LaunchEnv) (State, error) {
 	var result State
-	lockErr := withLock(path+".lock", defaultRetryConfig(), func() error {
-		s, lerr := loadState(path)
+	lockErr := withLock(d, defaultRetryConfig(), func() error {
+		s, lerr := d.load()
 		if lerr != nil {
 			return lerr
 		}
@@ -385,7 +398,7 @@ func recordLabelState(path, add string, remove []string, ticketUpdatedAt string,
 		s.TicketUpdatedAt = ticketUpdatedAt
 		s.SchemaVersion = CurrentSchemaVersion
 		s.UpdatedAt = time.Now().UTC()
-		if serr := saveState(path, s); serr != nil {
+		if serr := d.save(s); serr != nil {
 			return serr
 		}
 		result = s

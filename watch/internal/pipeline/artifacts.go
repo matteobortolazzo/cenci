@@ -6,9 +6,8 @@ package pipeline
 // backing the `cenci pipeline artifact <id>` mechanics verb.
 
 import (
-	"fmt"
-	"os"
-	"path/filepath"
+	"errors"
+	"io/fs"
 	"time"
 )
 
@@ -43,17 +42,19 @@ type ArtifactOpts struct {
 // o.ID, acquiring the same per-ticket flock lock pipeline.Run uses, and
 // returns the resulting State.
 func SetArtifacts(o ArtifactOpts) (State, error) {
-	path, err := resolveStatePath(Opts{ID: o.ID, RepoRoot: o.RepoRoot, StateDir: o.StateDir})
+	loc, err := resolveStateLocation(Opts{ID: o.ID, RepoRoot: o.RepoRoot, StateDir: o.StateDir})
 	if err != nil {
 		return State{}, err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return State{}, fmt.Errorf("create state dir: %w", err)
+	d, err := openStateDir(loc, true)
+	if err != nil {
+		return State{}, err
 	}
+	defer func() { _ = d.Close() }()
 
 	var result State
-	lockErr := withLock(path+".lock", defaultRetryConfig(), func() error {
-		s, lerr := loadState(path)
+	lockErr := withLock(d, defaultRetryConfig(), func() error {
+		s, lerr := d.load()
 		if lerr != nil {
 			return lerr
 		}
@@ -85,7 +86,7 @@ func SetArtifacts(o ArtifactOpts) (State, error) {
 		s.ID = o.ID
 		s.SchemaVersion = CurrentSchemaVersion
 		s.UpdatedAt = time.Now().UTC()
-		if serr := saveState(path, s); serr != nil {
+		if serr := d.save(s); serr != nil {
 			return serr
 		}
 		result = s
@@ -101,9 +102,17 @@ func SetArtifacts(o ArtifactOpts) (State, error) {
 // StateDir precedence only; the other ArtifactOpts fields are ignored). It
 // does not acquire the per-ticket lock -- a point-in-time read.
 func GetArtifacts(o ArtifactOpts) (State, error) {
-	path, err := resolveStatePath(Opts{ID: o.ID, RepoRoot: o.RepoRoot, StateDir: o.StateDir})
+	loc, err := resolveStateLocation(Opts{ID: o.ID, RepoRoot: o.RepoRoot, StateDir: o.StateDir})
 	if err != nil {
 		return State{}, err
 	}
-	return loadState(path)
+	d, err := openStateDir(loc, false)
+	if errors.Is(err, fs.ErrNotExist) {
+		return State{Stage: StageNew}, nil
+	}
+	if err != nil {
+		return State{}, err
+	}
+	defer func() { _ = d.Close() }()
+	return d.load()
 }

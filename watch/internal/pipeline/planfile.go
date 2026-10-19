@@ -364,7 +364,7 @@ func entryPaths(entries []planfile.Entry) []string {
 	return paths
 }
 
-// resolvePlanRepoRoot mirrors resolveStatePath's RepoRoot precedence (Opts'
+// resolvePlanRepoRoot mirrors resolveStateLocation's RepoRoot precedence (Opts'
 // StateDir precedence is irrelevant here -- the `.plans/` directory always
 // lives under the repo root, never under an overridden state directory).
 func resolvePlanRepoRoot(repoRoot string) (string, error) {

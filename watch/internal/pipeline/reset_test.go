@@ -471,3 +471,89 @@ func TestReset_NeverInvokesTransition(t *testing.T) {
 		}
 	}
 }
+
+// -- #1306: unusable state files are warned about and removed -----------------
+
+// TestReset_UnusableStateFile_WarnsAndRemovesTheEntryWithoutFollowingIt covers
+// the hostile-input cases of the "could not be read; resetting anyway" branch:
+// an oversized file, a FIFO and a symlink (to a file inside and outside the
+// state directory) are each reported, the entry itself is removed and the stage
+// returns to "new". A symlink is removed as a link: its target is untouched.
+func TestReset_UnusableStateFile_WarnsAndRemovesTheEntryWithoutFollowingIt(t *testing.T) {
+	const capBytes = 512
+	kinds := []struct {
+		name string
+		// plant creates the unusable entry at path and returns a check on
+		// anything it points at.
+		plant func(t *testing.T, path string) (assertTargetUntouched func(t *testing.T))
+	}{
+		{"oversized file", func(t *testing.T, path string) func(*testing.T) {
+			setMaxStateFileBytes(t, capBytes)
+			mustWriteFile(t, path, paddedJSON(t, seededState, capBytes+1))
+			return func(*testing.T) {}
+		}},
+		{"FIFO", func(t *testing.T, path string) func(*testing.T) {
+			makeFifo(t, path)
+			return func(*testing.T) {}
+		}},
+		{"symlink to a file inside the state directory", func(t *testing.T, path string) func(*testing.T) {
+			target := filepath.Join(filepath.Dir(path), "real-state.json")
+			mustWriteFile(t, target, seededState)
+			mustSymlink(t, target, path)
+			return func(t *testing.T) {
+				if got := mustReadFile(t, target); got != seededState {
+					t.Errorf("symlink target was modified or removed through the link: %q", got)
+				}
+			}
+		}},
+		{"symlink to a file outside the state directory", func(t *testing.T, path string) func(*testing.T) {
+			target := filepath.Join(t.TempDir(), "victim.json")
+			mustWriteFile(t, target, seededState)
+			mustSymlink(t, target, path)
+			return func(t *testing.T) {
+				if got := mustReadFile(t, target); got != seededState {
+					t.Errorf("symlink target was modified or removed through the link: %q", got)
+				}
+			}
+		}},
+	}
+	for _, l := range layouts {
+		for _, k := range kinds {
+			t.Run(l.name+"/"+k.name, func(t *testing.T) {
+				loc, dir := l.setup(t)
+				path := filepath.Join(dir, "42.json")
+				assertTargetUntouched := k.plant(t, path)
+
+				type result struct {
+					out Output
+					err error
+				}
+				got := completesWithin(t, fifoDeadline, func() result {
+					out, err := Reset(ResetOpts{ID: "42", RepoRoot: loc.repoRoot, StateDir: loc.stateDir})
+					return result{out, err}
+				})
+
+				if got.err != nil {
+					t.Fatalf("Reset: %v, want the unusable entry reported and removed", got.err)
+				}
+				if got.out.State != "new" {
+					t.Errorf("Output.State = %q, want %q", got.out.State, "new")
+				}
+				if len(got.out.Warnings) != 1 ||
+					!strings.Contains(got.out.Warnings[0], "could not be read") ||
+					!strings.Contains(got.out.Warnings[0], "resetting anyway") {
+					t.Errorf("Output.Warnings = %v, want one 'could not be read ... resetting anyway' warning", got.out.Warnings)
+				}
+				for _, w := range got.out.Warnings {
+					if strings.Contains(w, secretSessionValue) {
+						t.Errorf("warning %q leaks the state file content", w)
+					}
+				}
+				if _, statErr := os.Lstat(path); !os.IsNotExist(statErr) {
+					t.Errorf("the unusable entry %s still exists after Reset (lstat err = %v)", path, statErr)
+				}
+				assertTargetUntouched(t)
+			})
+		}
+	}
+}

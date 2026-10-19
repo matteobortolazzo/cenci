@@ -111,7 +111,7 @@ type WorktreeOpts struct {
 	AttachPath string
 }
 
-// resolveMainRoot mirrors resolveStatePath's own RepoRoot precedence: use
+// resolveMainRoot mirrors resolveStateLocation's own RepoRoot precedence: use
 // repoRoot verbatim when set (a test/override hook), otherwise resolve the
 // MAIN checkout root from the current working directory via
 // resolveRepoRoot.
