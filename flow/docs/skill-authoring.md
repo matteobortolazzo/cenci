@@ -190,7 +190,12 @@ safety properties, not skill authoring generally.
   desktop` flag and silently fail. Self-referential edits (modifying both the skill
   file and its own contract test in the same change) deserve extra scrutiny in review
   because a test-logic regression and a prose regression can be hard to tell apart at a
-  glance.
+  glance. Before rewording any skill or procedure sentence, also `grep -rnF` the exact
+  phrase across `flow/tests/`: a sentence can be pinned by a test unrelated to the one
+  you are editing (a Trigger-guard phrase pinned by
+  `maintain-client-config-contract.test.sh` broke the gate after an innocent reword).
+  Restore the pinned phrase word for word or update the pinning test in the same change
+  (#1301).
 - When a skill's gate or authorization logic defines multiple boolean signals or decision
   points, ensure each signal's prose description is distinct and unambiguous — e.g.,
   "per-child frontend status" (childIsFrontend) vs. "design-only child from a split"

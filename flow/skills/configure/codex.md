@@ -8,6 +8,11 @@ the approved plan remains in the prior conversation and the checkpoint records i
 write `.cenci/config.json`, AGENTS/CLAUDE adapters, `.claude/settings.json`,
 and `.codex/agents/*.toml`; preserve unknown keys and diff-gate substantive guidance.
 
+The `docs` config field mirrors the Claude procedure's `docs` schema paragraph and, like `maintenance`, has no question.
+`docs.policy` is an optional field that no configure prompt writes, and a configure re-run preserves it together with every unrelated key.
+Plan-required and correctness documentation work always runs, while incidental documentation edits and lesson capture are what `minimal` suppresses.
+Only the exact string `"minimal"` selects that policy; anything else, or no `docs` block, is the default. Do **not** add `docs` to the migration-removal list — it is a supported optional field, not a legacy one.
+
 Deterministic detection is scripted, same as the Claude procedure: run `bash
 "${PLUGIN_ROOT}/skills/configure/scripts/detect-project.sh" --plugin-root
 "${PLUGIN_ROOT}"` from the repo root and consume its JSON (platform, container,
