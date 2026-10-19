@@ -48,15 +48,15 @@ delta="$(bash "$RESOLVER" "${SCRATCH}/config.json" --all)"
 assert_json "$delta" '.ask | index("refinement.confirmBeforeApply") != null and index("refinement.automerge") != null and index("dispatch.planRefined") != null and index("automerge.enabled") != null and index("planning.attended") != null' '--all reopens every independent control'
 for doc in "$SKILL" "$CODEX"; do
   for required in 'refinement.confirmBeforeApply' 'refinement.automerge' 'dispatch.planRefined' 'automerge.enabled' 'planning.attended' 'cenci dispatch plan-refined' 'cenci automerge' 'cenci planning attended' 'confirmBeforeApplyAnswer' 'refinementAutomergeAnswer'; do
-    rg -Fq "$required" "$doc" || fail "$doc must wire $required"
+    grep -Fq "$required" "$doc" || fail "$doc must wire $required"
   done
-  rg -Fq 'never claim deferred fleet choices were applied' "$doc" || fail "$doc must report sandbox deferral honestly"
-  rg -Fq 'may already have persisted' "$doc" || fail "$doc must report potentially partial fleet changes after a CLI error"
+  grep -Fq 'never claim deferred fleet choices were applied' "$doc" || fail "$doc must report sandbox deferral honestly"
+  grep -Fq 'may already have persisted' "$doc" || fail "$doc must report potentially partial fleet changes after a CLI error"
 done
 order='then the question 13/14/15 overlays (`cenci:configure-q13-switch`, `cenci:configure-q14-remove`, `cenci:configure-q15-switch`), then the independent leaf overlays (`cenci:configure-confirm-before-apply`, `cenci:configure-refinement-automerge`), then the `configureOffered` ledger (`cenci:configure-offered-ledger`)'
-rg -Fq "$order" "$SKILL" || fail 'canonical write order must apply leaf overlays before ledger'
-rg -Fq 'when this leaf is absent and, on a delta run, its ID is in `delta.ask`' "$SKILL" || fail 'first and full runs must offer absent leaves without undefined delta'
+grep -Fq "$order" "$SKILL" || fail 'canonical write order must apply leaf overlays before ledger'
+grep -Fq 'when this leaf is absent and, on a delta run, its ID is in `delta.ask`' "$SKILL" || fail 'first and full runs must offer absent leaves without undefined delta'
 for grant in 'Bash(cenci dispatch plan-refined on)' 'Bash(cenci dispatch plan-refined off)' 'Bash(cenci dispatch plan-refined status)' 'Bash(cenci automerge on)' 'Bash(cenci automerge off)' 'Bash(cenci automerge status)' 'Bash(cenci planning attended on)' 'Bash(cenci planning attended off)' 'Bash(cenci planning attended status --json)'; do
-  rg -Fq "$grant" "$SKILL" || fail "host CLI commands need their scoped grant: $grant"
+  grep -Fq "$grant" "$SKILL" || fail "host CLI commands need their scoped grant: $grant"
 done
 echo 'configure-independent-controls.test.sh: all checks passed.'
