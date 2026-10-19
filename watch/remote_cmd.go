@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
@@ -8,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 )
 
 const remoteUsage = `Usage:
@@ -16,7 +18,8 @@ const remoteUsage = `Usage:
   cn remote ...                     same commands through the cn alias
 
 Runs the installed agent directly on this machine, without a cenci container.
-Claude --name sets the title visible on your phone. Codex does not expose an
+Claude defaults its remote name to the repository name (or directory name outside
+Git); --name overrides it. Codex does not expose an
 equivalent name option; name chats in its client. Existing agent permissions apply.
 For Codex pairing: run 'cn remote codex start', then 'cn remote codex pair'.
 The native CLI handles authentication, eligibility, and pairing output.
@@ -52,7 +55,7 @@ func runRemote(args []string) {
 		}
 	}
 	fs := flag.NewFlagSet("remote "+agent, flag.ExitOnError)
-	name := fs.String("name", "", "Claude remote session title")
+	name := fs.String("name", "", "Claude remote name (default: repository name)")
 	dir := fs.String("dir", ".", "working directory")
 	dryRun := fs.Bool("dry-run", false, "print directory and argv without launching")
 	fs.Usage = func() { _, _ = fmt.Fprint(fs.Output(), remoteUsage) }
@@ -68,14 +71,12 @@ func runRemote(args []string) {
 				fmt.Fprintln(os.Stderr, "cenci remote: --name must not be empty")
 				os.Exit(2)
 			}
-			argv = append(argv, "--name", *name)
 		}
 	})
 	if strings.TrimSpace(*dir) == "" {
 		fmt.Fprintln(os.Stderr, "cenci remote: --dir must not be empty")
 		os.Exit(2)
 	}
-	argv = append(argv, passthrough...)
 	cwd, err := filepath.Abs(*dir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "cenci remote: resolve directory: %v\n", err)
@@ -90,6 +91,13 @@ func runRemote(args []string) {
 		fmt.Fprintf(os.Stderr, "cenci remote: not a directory: %s\n", cwd)
 		os.Exit(1)
 	}
+	if agent == "claude" {
+		if *name == "" {
+			*name = remoteRepoName(cwd)
+		}
+		argv = append(argv, "--name", *name)
+	}
+	argv = append(argv, passthrough...)
 	if *dryRun {
 		fmt.Printf("directory: %q\nargv:", cwd)
 		for _, arg := range argv {
@@ -111,4 +119,25 @@ func runRemote(args []string) {
 		fmt.Fprintf(os.Stderr, "cenci remote: launch %s: %v\n", agent, err)
 		os.Exit(1)
 	}
+}
+
+// remoteRepoName uses the main checkout's name for linked worktrees and the
+// repository root's name from subdirectories. Git is optional: a plain folder
+// (or an unavailable Git probe) gets its directory name instead.
+func remoteRepoName(cwd string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "-C", cwd, "rev-parse", "--path-format=absolute", "--show-toplevel", "--git-common-dir")
+	cmd.WaitDelay = time.Second
+	out, err := cmd.Output()
+	if err == nil {
+		paths := strings.Split(strings.TrimSuffix(string(out), "\n"), "\n")
+		if len(paths) == 2 && filepath.IsAbs(paths[0]) && filepath.IsAbs(paths[1]) {
+			if filepath.Base(paths[1]) == ".git" {
+				return filepath.Base(filepath.Dir(paths[1]))
+			}
+			return filepath.Base(paths[0])
+		}
+	}
+	return filepath.Base(cwd)
 }

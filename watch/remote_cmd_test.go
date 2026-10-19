@@ -52,10 +52,10 @@ func TestRemoteLaunch(t *testing.T) {
 		alias      bool
 		args, want []string
 	}{
-		{"claude", false, []string{"claude"}, []string{"remote-control"}},
+		{"claude", false, []string{"claude"}, []string{"remote-control", "--name", "{directory}"}},
 		{"named claude alias", true, []string{"claude", "--name", "My project; $(touch injected)"}, []string{"remote-control", "--name", "My project; $(touch injected)"}},
 		{"name equals", false, []string{"claude", "--name=My project"}, []string{"remote-control", "--name", "My project"}},
-		{"claude passthrough", false, []string{"claude", "--", "--spawn", "worktree", "--capacity", "3", "--", ""}, []string{"remote-control", "--spawn", "worktree", "--capacity", "3", "--", ""}},
+		{"claude passthrough", false, []string{"claude", "--", "--spawn", "worktree", "--capacity", "3", "--", ""}, []string{"remote-control", "--name", "{directory}", "--spawn", "worktree", "--capacity", "3", "--", ""}},
 		{"codex", false, []string{"codex"}, []string{"remote-control"}},
 		{"codex start", true, []string{"codex", "start"}, []string{"remote-control", "start"}},
 		{"codex pair", true, []string{"codex", "pair", "--", "--json"}, []string{"remote-control", "pair", "--json"}},
@@ -63,6 +63,11 @@ func TestRemoteLaunch(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cmd, dir := remoteCommand(t, tc.alias, tc.args...)
+			for i, arg := range tc.want {
+				if arg == "{directory}" {
+					tc.want[i] = filepath.Base(dir)
+				}
+			}
 			out, err := cmd.CombinedOutput()
 			if err != nil {
 				t.Fatalf("%v\n%s", err, out)
@@ -81,6 +86,59 @@ func TestRemoteLaunch(t *testing.T) {
 			}
 			if string(pid) != strconv.Itoa(cmd.Process.Pid) {
 				t.Fatalf("agent did not replace CLI: pid %s != %d", pid, cmd.Process.Pid)
+			}
+		})
+	}
+}
+
+func TestRemoteClaudeDefaultsToRepositoryName(t *testing.T) {
+	git, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, location := range []string{"root", "subdirectory", "worktree", "explicit name", "outside repo"} {
+		t.Run(location, func(t *testing.T) {
+			cmd, dir := remoteCommand(t, true, "claude")
+			if err := os.Symlink(git, filepath.Join(dir, "git")); err != nil {
+				t.Fatal(err)
+			}
+			repo := filepath.Join(dir, "my-repo")
+			if err := os.Mkdir(repo, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			runGit(t, repo, "init")
+			runGit(t, repo, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "--allow-empty", "-m", "initial")
+			cwd, want := repo, "my-repo"
+			switch location {
+			case "subdirectory":
+				cwd = filepath.Join(repo, "src")
+				if err := os.Mkdir(cwd, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			case "worktree":
+				cwd = filepath.Join(dir, "feature-checkout")
+				runGit(t, repo, "worktree", "add", "--detach", cwd)
+			case "explicit name":
+				cmd.Args = append(cmd.Args, "--name", "override")
+				want = "override"
+			case "outside repo":
+				cwd = filepath.Join(dir, "plain-folder")
+				if err := os.Mkdir(cwd, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				want = "plain-folder"
+			}
+			cmd.Args = append(cmd.Args, "--dir", cwd)
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("%v: %s", err, out)
+			}
+			argv, err := os.ReadFile(filepath.Join(dir, "argv"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(argv) != "remote-control\x00--name\x00"+want+"\x00" {
+				t.Fatalf("argv=%q, want remote name %q", argv, want)
 			}
 		})
 	}

@@ -2291,11 +2291,11 @@ settings; they do not enable permission bypasses or connect to another host over
 Running them inside a container still runs the agent inside that container.
 
 ```bash
-# Claude: serve a named session that you can find on your phone
-cn remote claude --name "cenci development"
+# Claude: expose this repo under its name in the app (e.g. cenci)
+cn remote claude
 
 # Serve a project, with new remote sessions created in separate git worktrees
-cn remote claude --name "cenci development" --dir /path/to/repo -- --spawn worktree
+cn remote claude --dir /path/to/repo -- --spawn worktree
 
 # Codex: enable its background remote server, then print a pairing code
 cn remote codex start
@@ -2305,15 +2305,15 @@ cn remote codex pair
 cn remote codex stop
 
 # Inspect the launch without requiring an installed agent or starting anything
-cenci remote claude --name "cenci development" --dry-run
+cenci remote claude --dry-run
 ```
 
 | Form / flag | Behavior |
 |---|---|
-| `remote claude` | Runs `claude remote-control` in the current terminal. |
+| `remote claude` | Runs `claude remote-control --name <repo-name>` in the current terminal. |
 | `remote codex` | Runs `codex remote-control`; its native daemon/foreground behavior applies. |
 | `remote codex start\|pair\|stop` | Runs the corresponding native Codex remote-control subcommand. `pair` prints its short-lived pairing code; it does not start the daemon. |
-| `--name NAME` | Claude's visible remote session title. Explicit empty names and use with Codex are rejected. |
+| `--name NAME` | Optional override for Claude's remote name. Defaults to the repo directory name, including from subdirectories and linked worktrees. Uses the selected directory's name outside Git or if Git cannot be queried. Explicit empty names and use with Codex are rejected. |
 | `--dir PATH` | Working directory, default current directory; supports relative paths. |
 | `--dry-run` | Prints the directory and quoted argument vector without launching or requiring the agent executable. Forwarded arguments are printed verbatim, so avoid including secrets. |
 | `-- agent-args...` | Forwards subsequent arguments verbatim, e.g. `cn remote codex pair -- --json` or `cn remote codex -- --no-daemon`. |
@@ -2325,8 +2325,10 @@ output, interactive prompts, signals, and exit status pass through unchanged.
 An older CLI that lacks remote control reports its own error; cenci does not
 upgrade the agent or fall back to a different launch mode.
 
-**Connecting from your phone:** Claude prints its session URL and offers a QR
-code; open it or find the named session in the Claude app's Code section. Keep
+**Connecting from your phone:** select the repo-named Remote Control environment
+in the Claude app's Code section to start work there. Claude also prints its session
+URL and offers a QR code. `cn remote claude` from a repo named `cenci` supplies
+`--name cenci` automatically; a manual label is unnecessary. Keep
 the host and server running (use a persistent terminal such as tmux when starting
 over SSH). Claude handles first-use consent, workspace trust, and subscription
 eligibility. See the [Claude Remote Control guide](https://code.claude.com/docs/en/remote-control).
