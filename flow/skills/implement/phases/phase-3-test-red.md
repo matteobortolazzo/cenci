@@ -15,6 +15,8 @@ Delegate to the `implementer` agent to write tests first. Tests should fail.
 
 Immediately before the first implementation mutation — before any implementer is delegated, in every mode — re-read the plan file's `### Delegation Preflight` (under `## Implementation Plan`) and confirm it against the current plan: every lane has an exclusive owned-file set that overlaps no other lane and a verification command; every retained lane records a concrete ineligibility reason; **every lane is at most one M** (its owned files fit <= 30 changed files and its scope fits <= 2,000 changed lines — `docs/ticket-sizing.md`); and a plan whose `### Size Estimate` is `L` inventories **at least two delegated lanes** — an L ticket is always several lanes with exclusive file ownership, never one lane. If the section is missing, incomplete, stale against `### Files to Modify`/`### Files to Create`, ambiguous, or assigns overlapping files, remain read-only and stop at an error gate returning the ticket to planning (`/cenci:implement <id> replan`); never infer the missing decision from prior chat. A lane larger than M, or a single-lane L, is a **split signal**, not a lane to widen: stop at the same error gate recommending `/cenci:refine <id>` (or `/cenci:refine <parentId>` for a split child) — the ticket is one size larger than written.
 
+Apply the Structural re-check under `## Parallel Lanes` before choosing any execution mode, including a single lane or compact implementation; malformed dependencies never bypass that check because no fan-out is planned.
+
 ## Context Budget
 
 Every implementer delegation in this phase and the next — single implementer, compact mode, each parallel or sequential lane, and the Lane Verification Barrier — is briefed with the working budget, verbatim in its prompt:
@@ -25,30 +27,40 @@ Every implementer delegation in this phase and the next — single implementer, 
 
 ## Compact Implementation
 
-If `cenci.compactImplementation` is true and the plan is small, low-risk, and concrete, Phase 3, 4, and 5 may be combined into one implementer delegation. The implementer must still:
+Choose the execution mode after the preflight re-check: multiple delegated lanes always use `## Parallel Lanes` below (possibly sequentially); exactly one delegated lane can use compact mode when eligible, otherwise use the ordinary Phase 3 → 4 → 5 flow. Compact mode never merges several lanes or raises a size/context bound.
+
+If `cenci.compactImplementation` is exactly true (default false) and the plan is small (S under `docs/ticket-sizing.md`), low-risk, and concrete, Phase 3, 4, and 5 may be combined into one implementer delegation. The implementer must still:
 
 1. Write tests first.
 2. Run them and report failing test names and failure reasons.
 3. Implement the feature.
 4. Refactor only touched code.
 5. Run Phase 5's `## Reuse Check` — read that one section of `phases/phase-5-refactor.md` (that section only, not the whole file) and follow its steps and cost guards inside this same delegation. Folding Phase 5 away does not drop this check: it is a handful of searches over code already in hand, and it is the only step in the pipeline that sees duplication this change introduces against code outside the diff.
-6. Run full build and tests and report results.
+6. Run full build, tests and configured lint and report results. For a UI ticket, follow Phase 4’s Visual Verification and screenshot persistence before review; folding phases never drops UI evidence.
 
 Do not use compact mode for auth, payment, security-sensitive code, data migrations, broad refactors, large UI work, flaky test infrastructure, or unclear requirements.
 
 ## Parallel Lanes
 
-If the plan file's `## Implementation Plan` contains a `### Parallel Lanes` section, Phases 3 and 4 may fan out one implementer per lane. Quality gates are unchanged: per-lane red-before-green discipline, a single authoritative full-suite verification barrier (Phase 4's `## Lane Verification Barrier`), and the full Phase 5–9 flow (one refactor pass, all reviewers, one PR).
+When `### Delegation Preflight` contains multiple delegated lanes, run one implementer per lane. Read `### Parallelism Assessment`: `parallel` proposes fan-out via `### Parallel Lanes`; `sequential` records why lanes run one at a time. A legacy plan without an assessment stays sequential and reports that reason; do not infer permission to fan out. Quality gates are unchanged: per-lane red-before-green discipline, a single authoritative full-suite verification barrier (Phase 4's `## Lane Verification Barrier`), and the full Phase 5–9 flow (one refactor pass, all reviewers, one PR).
 
-**Eligibility re-check (main agent, before any fan-out).** The planner's declaration is a proposal, not authorization. Verify all of the following against the plan file; if any check fails, ignore the lanes section entirely and run the standard sequential Phase 3 → Phase 4 flow — never partially:
+**Structural re-check (before any mutation, in both concurrency modes).** The Delegation Preflight is the source of lane ownership and execution order; a Parallel Lanes section must describe the same delegated lanes, files and dependencies. Every delegated lane has `Files:`, `Tests:`, `Scope:`, a unique lane ID, `Wave:` (positive integer) and `Depends on:` (earlier-wave lane IDs or `None`). The preflight table's Owned files and Verification columns supply Files and Tests; Scope, Wave and Depends on columns supply their named fields. Root-retained actions are excluded from worker scheduling. For legacy plans, missing Wave fields mean wave 1 only when all dependencies are absent/None; absent Depends on means None in that case. Legacy parallel declarations may supply missing scope, but never invent scope for an ambiguous preflight: return to planning. A duplicate owner, unknown dependency, dependency on the same or a later wave, inconsistent declarations or missing verification command is a malformed preflight: remain read-only and return to planning. Do not repair ownership by silently serializing overlapping lanes. Over-M lanes and a single-lane L keep the split-signal stop above.
 
-- Every file across all lanes' `Files:` lists appears in exactly one lane. Any overlap → sequential.
-- `isUiTicket` is false. UI work always takes the sequential path (visual verification lives in the standard Phase 4).
+**Eligibility re-check (main agent, before any fan-out).** The planner's declaration is a proposal, not authorization. Apply these conditions to the whole plan; if any fails, execute all preflight lanes sequentially in wave order, never collapse them into one implementer:
+
+- The assessment is `parallel` and its complete `### Parallel Lanes` declaration passed the structural check.
+- `isUiTicket` is false. UI work always takes the sequential path and still runs Phase 4's Visual Verification after the barrier.
 - No lane file matches the sensitive-path pattern set from `SKILL.md`'s `## Sensitive-path backstop` (built-in defaults unioned with `security.sensitivePaths`). Any match → sequential.
-- Each lane declares `Files:`, `Tests:`, and `Scope:`. A malformed lane → sequential.
-- Every lane's `Files:` list fits one M (<= 30 files) and the lane's `Scope:` fits <= 2,000 changed lines. An over-M lane is **not** a sequential fallback — it is the split signal `## Delegation Preflight Re-check` above stops on.
+- The work is not security/auth/payment-related or a data migration, even if its filenames miss the sensitive patterns.
+- Concurrent lane tests use isolated resources: no shared mutable cache/build output, port, fixture or database. If isolation is unproven, run sequentially and report why.
 
-**Sequential lanes.** When the plan's `### Delegation Preflight` inventories two or more delegated lanes but fan-out is disqualified here (a UI ticket, a sensitive-path match, or `cenci.implementerConcurrency: "sequential"`), still run **one implementer delegation per lane, in lane order** — each with the standard Delegation Context plus its lane's owned files, tests and scope, each red→green on its lane-scoped tests, each at most one M — then Phase 4's `## Lane Verification Barrier`. Disqualification changes concurrency, never lane size: an L ticket never collapses into one implementer delegation.
+**Sequential lanes.** When fan-out is disqualified or `cenci.implementerConcurrency` is `"sequential"`, still run **one implementer delegation per lane, in lane order** within each ascending wave — each with the standard Delegation Context plus its lane's owned files, tests and scope, each red→green on its lane-scoped tests, each at most one M — then Phase 4's `## Lane Verification Barrier`. Disqualification changes concurrency, never lane size: an L ticket never collapses into one implementer delegation.
+
+**Bounded dispatch and dependency waves.** Resolve `cenci.implementerConcurrency` (absent means `"parallel"`; any other value than `"parallel"` or `"sequential"` warns and uses sequential). Read `cenci.implementerMaxConcurrency` (default 2): it must be a positive integer, otherwise warn and use 2. The resolved cap is the smaller of that value and available worker slots; a sequential decision/mode further limits it to 1. If only one slot is available, report sequential fallback. With no slot, wait only when an existing worker can finish and free capacity; when subagents are unavailable or configured capacity is zero, stop and report the capability blocker. Never bypass delegation, busy-wait indefinitely or widen a lane.
+
+Launch at most the resolved cap of lanes from the lowest unfinished wave, in plan order, using one implementer per lane. As a worker finishes, validate its red/green evidence, owned-file changes and scoped test result before releasing that slot to another lane in the same wave. Start the next wave only after every lane in the current wave is green. Pass consumers their prerequisite summaries and interface paths; those paths remain read-only unless owned by that consumer. If a consumer needs a foundation edit, stop and return to planning; never concurrently reopen its owner.
+
+On resume, re-run completed lanes' scoped tests in wave order against the current worktree before accepting them as green and releasing consumers. Apply the Resume Brief below: preserve existing changes and skip already-completed implementation; revalidate rather than fabricate prior red evidence. After all waves are green, run exactly one Lane Verification Barrier for the combined change.
 
 **Fan-out.** One implementer delegation per lane, each receiving the standard Delegation Context below (including the `## Context Budget` brief) plus its lane's `Files:`, `Tests:`, and `Scope:`. Each lane implementer must, in order:
 
@@ -58,11 +70,11 @@ If the plan file's `## Implementation Plan` contains a `### Parallel Lanes` sect
 4. Touch only files in the lane's `Files:` list. If correctness genuinely requires a file outside the lane, stop the lane and report — do not edit it.
 5. Never run the full build or full test suite — concurrent full runs race in the shared worktree (build caches, ports, lockfiles). The full suite runs exactly once, in Phase 4's `## Lane Verification Barrier`.
 
-If the resolved config has `cenci.implementerConcurrency: "sequential"`, run the same lane delegations one after another instead of concurrently; otherwise (default `"parallel"`) launch them together. The lane structure, rules, and gates are identical in both modes.
+The bounded dispatch procedure above governs both modes; never launch every declared lane at once merely because the mode is parallel. All workers share a worktree: tell each that other workers may be editing it, never revert their changes, never run git state mutations, and write only its owned files.
 
-**Error gate (restated for the parallel risk profile — see `docs/pipeline-safety.md`).** A lane implementer applies the same analyze-fix-rerun loop as Phase 4, up to 3 attempts within its lane. If any lane still fails after that (red tests that cannot be written, green that cannot be reached, or a needed out-of-lane file), let already-running lanes finish, then stop, reporting per-lane status: which lanes completed red→green, which failed, exact errors and attempts. A lane reporting `Context: low`, or needing a second resume, takes the `## Context Budget` split-signal stop instead — it is reported, never retried with a longer lane. Completed lanes' work stays in the worktree — do not revert it; the user decides whether to continue sequentially or abort. Do not proceed to the Lane Verification Barrier with a failed lane.
+**Error gate (restated for the parallel risk profile — see `docs/pipeline-safety.md`).** A lane implementer applies the same analyze-fix-rerun loop as Phase 4, up to 3 attempts within its lane. If any lane still fails after that (red tests that cannot be written, green that cannot be reached, or a needed out-of-lane file), stop launching queued lanes and later waves, let already-running lanes finish, then stop, reporting per-lane status: which lanes completed red→green, which failed, which never started, exact errors and attempts. A lane reporting `Context: low`, or needing a second resume, takes the `## Context Budget` split-signal stop instead — it is reported, never retried with a longer lane; likewise do not launch queued work. Completed lanes' work stays in the worktree — do not revert it; the user decides whether to continue sequentially or abort. Do not proceed to the Lane Verification Barrier with a failed lane.
 
-When lanes run, skip the single-implementer delegation below and Phase 4's standard delegation — Phase 4 runs only its `## Lane Verification Barrier`.
+When lanes run, skip the single-implementer delegation below and Phase 4's standard delegation — Phase 4 runs its `## Lane Verification Barrier`, followed by visual verification and screenshot persistence for UI tickets.
 
 ## Delegation Context
 

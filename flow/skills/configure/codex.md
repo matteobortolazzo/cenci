@@ -9,6 +9,13 @@ write `.cenci/config.json`, AGENTS/CLAUDE adapters, `.claude/settings.json`,
 and `.codex/agents/*.toml`; preserve unknown keys and diff-gate substantive guidance.
 
 The `docs` config field mirrors the Claude procedure's `docs` schema paragraph and, like `maintenance`, has no question.
+Preserve the Claude procedure's optional implementation controls on reconfiguration:
+`cenci.compactImplementation` defaults to false (repository opt-in only),
+`cenci.implementerConcurrency` defaults to `"parallel"`, and
+`cenci.implementerMaxConcurrency` defaults to 2 and accepts positive integers.
+The implement procedure applies that cap within dependency waves, further limited by
+available worker slots; sequential mode still delegates each lane and keeps all gates.
+Do not overwrite existing values with scaffold defaults or add a configure question.
 `docs.policy` is an optional field that no configure prompt writes, and a configure re-run preserves it together with every unrelated key.
 Plan-required and correctness documentation work always runs, while incidental documentation edits and lesson capture are what `minimal` suppresses.
 Only the exact string `"minimal"` selects that policy; anything else, or no `docs` block, is the default. Do **not** add `docs` to the migration-removal list — it is a supported optional field, not a legacy one.

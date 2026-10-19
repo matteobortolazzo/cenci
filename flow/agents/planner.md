@@ -197,22 +197,40 @@ Before finalizing the plan, explicitly identify:
     2. <step>
 
     ### Delegation Preflight
-    | Lane | Delegated to (role, model, effort) | Owned files (exclusive) | Verification | Lane size | Retention reason |
-    |---|---|---|---|---|---|
-    | 1 | implementer (sonnet, high) | <exact subset of Files to Modify/Create> | <lane-scoped test command> | S | — |
-    | root | retained by the root agent | <files, or none> | — | — | <concrete ineligibility reason: GitHub mutation, user decision, shared branch/worktree state — never "small" or "easier inline"> |
+    | Lane | Delegated to (role, model, effort) | Owned files (exclusive) | Verification | Scope | Wave | Depends on | Lane size | Retention reason |
+    |---|---|---|---|---|---|---|---|---|
+    | 1 | implementer (sonnet, high) | <exact subset of Files to Modify/Create> | <lane-scoped test command> | <implementation scope and criteria> | 1 | None | S | — |
+    | root | retained by the root agent | <files, or none> | — | <retained work> | — | — | — | <concrete ineligibility reason: GitHub mutation, user decision, shared branch/worktree state — never "small" or "easier inline"> |
+
+    Every delegated lane has Scope, Wave and Depends on, even for a sequential
+    assessment; root-retained actions are not scheduled as implementer lanes.
+    Owned files maps to `Files:`, Verification to `Tests:`. Assign wave 1 and
+    `None` to independent lanes; consumers name only earlier-wave lane IDs.
 
     Always present. Inventory every independent implementation lane, including work retained by the root agent, with an exclusive owned-file set that overlaps no other lane and the verification the worker must run; a retained lane records a concrete ineligibility reason. **A lane is at most one M** — its owned files and estimated lines fit the M bound (<= 30 changed files, <= 2,000 changed lines) and it is sized so the worker finishes inside about half of its model's advertised context window, which is the budget every implementer is briefed with (`docs/ticket-sizing.md`, "Lane size and context budget"). **An L ticket is always several lanes** with exclusive file ownership, never one lane — a single-lane L plan is malformed, and the main agent's Split Gate treats it like an `exceeds` verdict. A lane that cannot be cut below M is a split signal: write it in `### Split Recommendation` instead of widening the lane. When two or more lanes also pass the `### Parallel Lanes` eligibility conditions below, declare them there too so the pipeline can fan out; lanes that fail those conditions (UI work, sensitive paths) still run as separate, sequential implementer delegations — the preflight is the lane contract, `### Parallel Lanes` only decides concurrency.
 
-    ### Parallel Lanes (optional — omit by default)
-    Declare lanes ONLY when every condition holds; when in doubt, omit this section
-    and the pipeline implements sequentially (the safe default):
+    ### Parallelism Assessment (required)
+    Decision: parallel | sequential
+    Rationale: <eligible independent lanes, or a concrete sequential reason>
 
-    - The plan contains 2+ genuinely independent work streams, each a coherent slice.
+    Always assess concurrency; do not invent lanes for a small, cohesive change.
+    Declare `parallel` and `### Parallel Lanes` when the conditions below hold.
+    Otherwise record the concrete sequential reason (one cohesive slice, UI,
+    sensitive work, unavoidable shared writes, or unsafe test resources).
+    Sequential execution still delegates each preflight lane separately.
+
+    ### Parallel Lanes (when eligible)
+    Declare lanes ONLY when every condition holds:
+
+    - At least one wave contains 2+ genuinely independent work streams, each a coherent slice.
     - The lanes' file sets (Files to Modify + Files to Create) are fully disjoint —
-      every planned file belongs to exactly one lane. If any file is needed by two
-      lanes, do not declare lanes at all.
-    - Each lane is independently testable with a lane-scoped test command or pattern.
+      every planned file belongs to exactly one lane across all waves. Put a
+      shared foundation in an earlier wave with one owner; its files are
+      read-only in later waves. If consumers must edit the same file, keep the
+      work in one bounded lane or recommend splitting; waves never relax ownership.
+    - Each lane is testable after its prerequisites with a lane-scoped test command
+      or pattern; concurrent test commands must not race on build outputs, ports,
+      caches, fixtures or databases. Use isolated resources or record sequential.
     - The work is not security/auth/payment-related and not a data migration.
     - The work is not UI/frontend (design pre-read and visual verification require
       the sequential path).
@@ -220,9 +238,18 @@ Before finalizing the plan, explicitly identify:
     Format (repeat per lane):
 
     Lane 1: <short name>
+    - Wave: <positive integer, starting at 1; prerequisites precede consumers>
+    - Depends on: <earlier-wave lane IDs or None>
     - Files: <exact subset of Files to Modify/Create owned by this lane>
     - Tests: <lane-scoped test command or pattern>
     - Scope: <what this lane implements, including its acceptance criteria>
+
+    Mirror the preflight's `Wave:` and `Depends on:` in this declaration, so
+    sequential fallback preserves dependency order. Independent lanes use wave 1.
+    Example: lane 1 owns shared interfaces in wave 1; lanes 2 and 3 own separate
+    consumers in wave 2, each depending on lane 1. Interfaces have scoped tests;
+    consumers may start only once that foundation is green. Cross-lane integration
+    still runs at the final Lane Verification Barrier, not concurrently per lane.
 
     ### Test Strategy
     For each component/file, classify and specify test types:
