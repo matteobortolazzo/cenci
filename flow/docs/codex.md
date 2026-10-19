@@ -32,6 +32,8 @@ validates the proposal and applies it without a second confirmation by default.
 Explicit `/plan` remains read-only. Automerge grants are separately controlled by
 `refinement.automerge: "off" | "eligible"`, regardless of planning autonomy.
 
+In ticket mode, Codex implement records `cenci pipeline` stages and resumes a crashed `apply` from its recorded stage, the same table the Claude Code procedure follows. The checkpoint stays Codex's local goal and phase record and is never used for routing.
+
 The launcher exposes development entry points:
 
 ```bash
