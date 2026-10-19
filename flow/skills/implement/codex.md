@@ -1,5 +1,7 @@
 # Codex implement procedure
 
+Read `timing.md` and apply its local timing procedure from worktree setup through the final summary. Timing is advisory and never changes a gate.
+
 Apply the plugin's `docs/model-escalation.md` at each applicable boundary: before
 presenting fresh/resumed planning output, after two failed attempts at an unexplained
 implementation defect, and before accepting security/silent-failure reviews. When

@@ -15,6 +15,8 @@ allowed-tools: Read, Write, Edit, Bash, Glob, Grep, Task, AskUserQuestion, mcp__
 
 Read the `subagent-safety` reference skill before delegating work to subagents.
 
+Read `timing.md` and apply its local timing procedure from worktree setup through the final summary. Timing is advisory and never changes a gate.
+
 ## Context
 
 Read `project-core` and resolve neutral configuration before continuing.
