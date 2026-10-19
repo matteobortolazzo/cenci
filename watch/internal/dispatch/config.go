@@ -49,7 +49,9 @@ type RepoConfig struct {
 type Config struct {
 	Repos                  []RepoConfig
 	ConcurrencyCap         int
-	MemoryHeadroom         int // percent of a container's memory limit that must be free to pick up (#1290); 0 disables
+	MemoryHeadroom         int           // percent of a container's memory limit that must be free to pick up (#1290); 0 disables
+	OOMRetryBudget         int           // OOM-classified recoveries per ticket before it is marked dispatch-failed (#1291); 0 fails the first
+	OOMBackoff             time.Duration // wait after an OOM retry before the ticket is picked up again (#1291); 0 disables
 	NeedInputThreshold     int
 	DailyQuota             int
 	QuietHours             *QuietHours
@@ -149,12 +151,23 @@ type Config struct {
 // that must be free for a pickup into its repo (#1290).
 const defaultMemoryHeadroom = 25
 
+const (
+	// defaultOOMRetryBudget bounds OOM-classified recoveries per ticket (#1291),
+	// separate from RetryBudget.
+	defaultOOMRetryBudget = 3
+	// defaultOOMBackoff is how long an OOM-recovered ticket waits before
+	// re-dispatch (#1291).
+	defaultOOMBackoff = 10 * time.Minute
+)
+
 // DefaultConfig returns the built-in policy used when no config file (or no
 // "dispatch" block) is present.
 func DefaultConfig() Config {
 	return Config{
 		ConcurrencyCap:         3,
 		MemoryHeadroom:         defaultMemoryHeadroom,
+		OOMRetryBudget:         defaultOOMRetryBudget,
+		OOMBackoff:             defaultOOMBackoff,
 		NeedInputThreshold:     1,
 		DailyQuota:             20,
 		PlanStalenessTolerance: 5,
@@ -177,7 +190,12 @@ type dispatchFile struct {
 	// omitempty keeps an unset value out of a marshaled dispatchFile (the chain
 	// harness writes its config that way); an empty RawMessage would otherwise
 	// marshal as a null the loader rejects.
-	MemoryHeadroom         json.RawMessage       `json:"memoryHeadroom,omitempty"`
+	MemoryHeadroom json.RawMessage `json:"memoryHeadroom,omitempty"`
+	// OOMRetryBudget and OOMBackoff (#1291) are RawMessage for the same reason
+	// as MemoryHeadroom: a JSON null must reach the parser and be rejected, and
+	// an explicit 0 / "0" must stay distinguishable from an unset key.
+	OOMRetryBudget         json.RawMessage       `json:"oomRetryBudget,omitempty"`
+	OOMBackoff             json.RawMessage       `json:"oomBackoff,omitempty"`
 	NeedInputThreshold     *int                  `json:"needInputThreshold"`
 	DailyQuota             *int                  `json:"dailyQuota"`
 	QuietHours             *QuietHours           `json:"quietHours"`
@@ -237,9 +255,23 @@ func LoadConfig(path string) (Config, error) {
 		if err != nil {
 			return cfg, fmt.Errorf("config %s: dispatch.memoryHeadroom %w", path, err)
 		}
+		oomBudget, err := parseOOMRetryBudget(f.Dispatch.OOMRetryBudget)
+		if err != nil {
+			return cfg, fmt.Errorf("config %s: dispatch.oomRetryBudget %w", path, err)
+		}
+		oomBackoff, err := parseOOMBackoff(f.Dispatch.OOMBackoff)
+		if err != nil {
+			return cfg, fmt.Errorf("config %s: dispatch.oomBackoff %w", path, err)
+		}
 		cfg = mergeConfig(cfg, *f.Dispatch)
 		if headroom != nil {
 			cfg.MemoryHeadroom = *headroom
+		}
+		if oomBudget != nil {
+			cfg.OOMRetryBudget = *oomBudget
+		}
+		if oomBackoff != nil {
+			cfg.OOMBackoff = *oomBackoff
 		}
 		cfg.LegacyTopLevelSession = legacyTopLevelSessionSet(f.Dispatch.LegacySession)
 	}
@@ -258,7 +290,7 @@ func parseMemoryHeadroom(raw json.RawMessage) (*int, error) {
 		return nil, nil
 	}
 	const form = "must be an integer percent from 0 to 100"
-	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+	if isJSONNull(raw) {
 		return nil, errors.New(form + ", got null")
 	}
 	var v int
@@ -269,6 +301,61 @@ func parseMemoryHeadroom(raw json.RawMessage) (*int, error) {
 		return nil, fmt.Errorf("%s, got %d", form, v)
 	}
 	return &v, nil
+}
+
+// isJSONNull reports whether raw is a JSON null, ignoring surrounding space.
+func isJSONNull(raw json.RawMessage) bool {
+	return bytes.Equal(bytes.TrimSpace(raw), []byte("null"))
+}
+
+// parseOOMRetryBudget validates dispatch.oomRetryBudget (#1291): nil when the
+// key is absent (the default applies), else an integer >= 0. An explicit 0 is
+// valid and sends the first OOM recovery straight to dispatch-failed. A null,
+// non-integer, string or negative value is an error, never a silent default.
+// The error starts mid-sentence (see parseMemoryHeadroom).
+func parseOOMRetryBudget(raw json.RawMessage) (*int, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	const form = "must be an integer >= 0"
+	if isJSONNull(raw) {
+		return nil, errors.New(form + ", got null")
+	}
+	var v int
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return nil, fmt.Errorf("%s: %w", form, err)
+	}
+	if v < 0 {
+		return nil, fmt.Errorf("%s, got %d", form, v)
+	}
+	return &v, nil
+}
+
+// parseOOMBackoff validates dispatch.oomBackoff (#1291): nil when the key is
+// absent (the default applies), else a non-negative Go duration string. "0"
+// disables the backoff. A null, non-string, malformed or negative value is an
+// error, never a silent default. The error starts mid-sentence (see
+// parseMemoryHeadroom).
+func parseOOMBackoff(raw json.RawMessage) (*time.Duration, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	const form = "must be a non-negative Go duration string like \"10m\" (\"0\" disables)"
+	if isJSONNull(raw) {
+		return nil, errors.New(form + ", got null")
+	}
+	var text string
+	if err := json.Unmarshal(raw, &text); err != nil {
+		return nil, fmt.Errorf("%s: %w", form, err)
+	}
+	d, err := time.ParseDuration(text)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", form, err)
+	}
+	if d < 0 {
+		return nil, fmt.Errorf("%s, got %s", form, text)
+	}
+	return &d, nil
 }
 
 // resolvePlanningAttended decodes the fleet config's top-level "planning"
@@ -301,7 +388,7 @@ func resolvePlanningAttended(raw *json.RawMessage) (attended bool, unparseable b
 	// "planning" block at all, contradicting this function's fold-to-true
 	// contract. Detected the same way QueryPlanningAttended (fleet.go)
 	// detects it for its own strict-error path.
-	if bytes.Equal(bytes.TrimSpace(attendedRaw), []byte("null")) {
+	if isJSONNull(attendedRaw) {
 		return true, true
 	}
 	var b bool

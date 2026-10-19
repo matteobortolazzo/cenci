@@ -501,19 +501,8 @@ func (e *Engine) oomKillCount(name string) (count int64, ok bool) {
 }
 
 // parseMemoryEvents extracts the oom_kill counter from a cgroup v2
-// memory.events file. The separate "oom" line counts times the limit was hit
-// and is deliberately ignored: only oom_kill is processes actually killed.
+// memory.events file; the parser itself lives in internal/sandbox so the
+// dispatch reconciler's OOM probe shares it.
 func parseMemoryEvents(content string) (count int64, ok bool) {
-	for _, line := range splitLines(content) {
-		fields := strings.Fields(line)
-		if len(fields) != 2 || fields[0] != "oom_kill" {
-			continue
-		}
-		n, err := strconv.ParseInt(fields[1], 10, 64)
-		if err != nil || n < 0 {
-			return 0, false
-		}
-		return n, true
-	}
-	return 0, false
+	return sandbox.ParseMemoryEventsOOMKill(content)
 }

@@ -107,6 +107,149 @@ func TestParseCgroupMemory(t *testing.T) {
 	}
 }
 
+// ParseMemoryEventsOOMKill is the one oom_kill parser shared by `cenci
+// diagnose` and the reconciler's OOM probe (#1291). A unit table is justified
+// here because the malformed-input matrix is impractical to drive through a
+// fake runtime.
+func TestParseMemoryEventsOOMKill(t *testing.T) {
+	const realEvents = "low 0\nhigh 0\nmax 4\noom 2\noom_kill 3\noom_group_kill 0\n"
+
+	valid := []struct {
+		name string
+		in   string
+		want int64
+	}{
+		{"real memory.events", realEvents, 3},
+		{"zero kills", "oom 0\noom_kill 0\n", 0},
+		{"no trailing newline", "oom_kill 7", 7},
+		{"oom_kill is the first line", "oom_kill 5\noom 9\n", 5},
+		{"large counter", "oom_kill 9223372036854775807\n", 9223372036854775807},
+	}
+	for _, tc := range valid {
+		t.Run("valid/"+tc.name, func(t *testing.T) {
+			got, ok := ParseMemoryEventsOOMKill(tc.in)
+			if !ok || got != tc.want {
+				t.Errorf("ParseMemoryEventsOOMKill(%q) = (%d, %v), want (%d, true)", tc.in, got, ok, tc.want)
+			}
+		})
+	}
+
+	malformed := []struct{ name, in string }{
+		{"empty", ""},
+		{"no oom_kill line", "low 0\nhigh 0\nmax 4\n"},
+		{"oom line only", "oom 4\n"},
+		{"oom_group_kill is not oom_kill", "oom_group_kill 2\n"},
+		{"negative", "oom_kill -1\n"},
+		{"non-numeric", "oom_kill many\n"},
+		{"fractional", "oom_kill 1.5\n"},
+		{"missing value", "oom_kill\n"},
+		{"extra field", "oom_kill 1 2\n"},
+		{"over-long value overflows int64", "oom_kill 99999999999999999999\n"},
+		{"cat error text", "cat: /sys/fs/cgroup/memory.events: No such file or directory\n"},
+	}
+	for _, tc := range malformed {
+		t.Run("malformed/"+tc.name, func(t *testing.T) {
+			if got, ok := ParseMemoryEventsOOMKill(tc.in); ok {
+				t.Errorf("ParseMemoryEventsOOMKill(%q) = (%d, true), want ok=false", tc.in, got)
+			}
+		})
+	}
+}
+
+// ReadContainerOOMKills reads memory.events in one exec and returns the
+// oom_kill counter; every failure class is an error, never a silent zero.
+func TestReadContainerOOMKills(t *testing.T) {
+	const eventsPath = "/sys/fs/cgroup/memory.events"
+
+	read := func(t *testing.T, rt, body string) (callLog string, count int64, err error) {
+		t.Helper()
+		callLog = cgroupFakeRuntime(t, rt, body)
+		ctx, cancel := context.WithTimeout(context.Background(), cgroupTestTimeout)
+		defer cancel()
+		count, err = ReadContainerOOMKills(ctx, rt, cgroupTestContainer)
+		return callLog, count, err
+	}
+
+	for _, rt := range []string{"docker", "podman"} {
+		t.Run("reads the counter via one exec/"+rt, func(t *testing.T) {
+			callLog, count, err := read(t, rt, "printf 'low 0\\noom 2\\noom_kill 4\\n'")
+			if err != nil {
+				t.Fatalf("ReadContainerOOMKills: %v", err)
+			}
+			if count != 4 {
+				t.Errorf("count = %d, want 4", count)
+			}
+			wantArgv := "exec " + cgroupTestContainer + " /bin/cat " + eventsPath
+			if calls := readCgroupCallLog(t, callLog); len(calls) != 1 || calls[0] != wantArgv {
+				t.Errorf("argv = %q, want exactly one call %q", calls, wantArgv)
+			}
+		})
+	}
+
+	failures := []struct{ name, body string }{
+		{"missing oom_kill line", "printf 'low 0\\nhigh 0\\n'"},
+		{"malformed oom_kill value", "printf 'oom_kill many\\n'"},
+		{"negative oom_kill value", "printf 'oom_kill -3\\n'"},
+		{"empty output", "true"},
+		{"exec failure", "echo 'OCI runtime exec failed: container is not running' >&2\nexit 1"},
+		{"output over the byte cap", "i=0\nwhile [ $i -lt 600 ]; do printf 'oom_kill 1  \\n'; i=$((i+1)); done"},
+	}
+	for _, tc := range failures {
+		t.Run("error/"+tc.name, func(t *testing.T) {
+			if _, count, err := read(t, "docker", tc.body); err == nil {
+				t.Errorf("ReadContainerOOMKills = (%d, nil), want an error", count)
+			}
+		})
+	}
+
+	t.Run("error/exec failure carries the runtime cause", func(t *testing.T) {
+		_, _, err := read(t, "docker", "echo 'OCI runtime exec failed: container is not running' >&2\nexit 1")
+		if err == nil || !strings.Contains(err.Error(), "container is not running") {
+			t.Errorf("err = %v, want the runtime stderr cause", err)
+		}
+	})
+
+	t.Run("a hung exec is bounded by the caller context", func(t *testing.T) {
+		sleepBin, err := exec.LookPath("sleep")
+		if err != nil {
+			t.Fatalf("the hung-exec fixture needs a sleep binary: %v", err)
+		}
+		cgroupFakeRuntime(t, "docker", "exec "+exectest.ShellQuote(sleepBin)+" 30")
+		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+		defer cancel()
+		start := time.Now()
+		_, readErr := ReadContainerOOMKills(ctx, "docker", cgroupTestContainer)
+		if readErr == nil {
+			t.Fatal("a hung exec must be an error")
+		}
+		if elapsed := time.Since(start); elapsed >= 10*time.Second {
+			t.Errorf("returned after %s, want it bounded near the 300ms caller deadline", elapsed)
+		}
+	})
+
+	invalid := []struct{ name, rt, container string }{
+		{"runtime outside docker/podman", "/bin/sh", cgroupTestContainer},
+		{"empty runtime", "", cgroupTestContainer},
+		{"empty container", "docker", ""},
+		{"non-sandbox container name", "docker", "postgres"},
+		{"option-shaped container name", "docker", "--privileged"},
+		{"container name with a space", "docker", "claude-cenci-a b"},
+	}
+	for _, tc := range invalid {
+		t.Run("rejected without exec/"+tc.name, func(t *testing.T) {
+			callLog := cgroupFakeRuntime(t, "docker", "printf 'oom_kill 1\\n'")
+			ctx, cancel := context.WithTimeout(context.Background(), cgroupTestTimeout)
+			defer cancel()
+			if count, err := ReadContainerOOMKills(ctx, tc.rt, tc.container); err == nil {
+				t.Errorf("ReadContainerOOMKills(%q, %q) = (%d, nil), want a validation error", tc.rt, tc.container, count)
+			}
+			if _, err := os.Stat(callLog); err == nil {
+				t.Errorf("a rejected target must not exec the runtime, but %s exists", callLog)
+			}
+		})
+	}
+}
+
 // Docker and podman both work: the reader execs `<rt> exec <name> /bin/cat
 // <paths...>` -- the absolute /bin/cat, no -u, no shell -- and returns the
 // file bytes untouched.

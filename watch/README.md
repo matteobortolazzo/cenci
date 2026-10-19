@@ -596,10 +596,21 @@ failing gate is the logged skip reason):
    any sibling (same `parentId`) is active (`Working`, an open PR, or a running
    window) or was already dispatched this pass, so at most one child per parent runs
    at a time;
-7. the daemon is reachable (else `daemon unreachable` — never dispatch on unknown
+7. **OOM backoff** — a ticket the reconciler just recovered as an out-of-memory kill
+   (see [Failure reconciliation](#failure-reconciliation)) waits `dispatch.oomBackoff`
+   (default `10m`; `0` disables) before it is picked up again, else `oom backoff (<N>m
+   left)` (whole minutes, rounded up, minimum 1). It runs ahead of `daemon unreachable`
+   and every fleet-wide gate below, so `--dry-run` shows it first, and it applies to
+   every pickup type that reaches it. Dispatch reads the retry time the reconciler
+   persisted in `reconcile.json`, so the backoff exists only when dispatch and
+   reconcile share a host and state path (the combined loop does; a split cron setup
+   on different hosts gets none). It fails open: an unreadable state file logs one
+   `dispatch:` line and no ticket is skipped for backoff that pass. A ticket
+   recovered the ordinary way is never gated;
+8. the daemon is reachable (else `daemon unreachable` — never dispatch on unknown
    state);
-8. fewer than `needInputThreshold` windows are awaiting input;
-9. **memory headroom** — the ticket's repo has at least `dispatch.memoryHeadroom`
+9. fewer than `needInputThreshold` windows are awaiting input;
+10. **memory headroom** — the ticket's repo has at least `dispatch.memoryHeadroom`
    percent (integer 0–100, default `25`; `0` disables the gate) of its container
    memory limit free, else `memory headroom below <N>% (<owner/name> container at
    <U>%)`. The gate reads `memory.current`/`memory.max` once per pass for every
@@ -613,7 +624,7 @@ failing gate is the logged skip reason):
    precedence over it. This gate does not stop two pickups in one pass: the reading
    does not change until the new session allocates memory, and bounding that is
    `concurrencyCap`'s job;
-10. `running + orphaned container sessions + dispatched-this-pass` is below
+11. `running + orphaned container sessions + dispatched-this-pass` is below
    `concurrencyCap`. Orphaned container sessions are the distinct (tmux socket,
    launch ID) pairs — (tmux socket, pane) for processes that carry no launch
    ID — that `cenci sandbox reap-orphans` would classify as dead reap targets,
@@ -625,13 +636,13 @@ failing gate is the logged skip reason):
    query error, or timeout) every candidate is skipped with `container session
    probe failed` (fail-closed); with no docker or podman on PATH the count is 0
    and dispatch proceeds;
-11. the daily quota is not yet spent;
-12. the current local time is outside `quietHours`;
-13. the resolved agent still has budget (see [Usage budgets](#usage-budgets) — when
+12. the daily quota is not yet spent;
+13. the current local time is outside `quietHours`;
+14. the resolved agent still has budget (see [Usage budgets](#usage-budgets) — when
     `agentLimits` is set this is computed from real token usage, otherwise from the
     static `agentBudgetFloors`).
 
-Gate 8's `needInputThreshold` reads only `StatusSummary.NeedInput` — a live
+Gate 9's `needInputThreshold` reads only `StatusSummary.NeedInput` — a live
 session waiting mid-turn for a permission prompt or similar. It deliberately
 never reads `StatusSummary.Escalated` (ticket #826: a ticket the unattended
 planner escalated, `Input Needed`). The two are different concepts and must
@@ -1154,6 +1165,8 @@ Dispatch reads the same `config.json` as `run`, under a top-level `"dispatch"` b
 | `planRefined` | `false` | Enable stage-aware planning pickup of `Refined` tickets and autonomous re-plan of stale plans, in lean-planning repos only (see [Planning pickup and autonomous re-plan](#planning-pickup-and-autonomous-re-plan)); the fleet-wide kill switch, gated per-repo against that repo's own remote-confirmed `planning.autonomy` config (#877); managed via `cenci dispatch plan-refined on\|off\|status` (see [Planning-pickup toggle](#planning-pickup-toggle-cenci-dispatch-plan-refined-onoffstatus)) |
 | `gracePeriod` | `5m` | How long the failure signal must hold continuously before the reconciler recovers a stranded ticket (Go duration string) |
 | `retryBudget` | `2` | Retries (`Working` → `Planned`) a stranded ticket gets before it is marked `dispatch-failed`; an explicit `0` disables retries |
+| `oomRetryBudget` | `3` | OOM-classified recoveries (the session was killed by the out-of-memory killer; see [Failure reconciliation](#failure-reconciliation)) a ticket gets before it is marked `dispatch-failed`, counted separately from `retryBudget`; an explicit `0` sends the first OOM recovery straight to `dispatch-failed` (integer; a non-integer, `null` or negative value is a config error) |
+| `oomBackoff` | `10m` | How long an OOM-recovered ticket waits before dispatch picks it up again (Go duration string; `"0"` disables the wait; see [Pickup rules and gates](#pickup-rules-and-gates)); a malformed, `null` or negative value is a config error |
 | `daemonInterval` | none | Dispatch cadence once the embedded loop is enabled (Go duration string); setting this alone does **not** start dispatch — see `loopEnabled`. Configuration is independently polled at least every 60 seconds; nonpositive values use a 60s internal fallback but are not reported as a configured interval |
 | `loopEnabled` | `false` | Explicitly toggles the embedded fleet dispatch loop; managed via `cenci dispatch loop on\|off` (see [Loop toggle](#loop-toggle-cenci-dispatch-loop-onoffstatus)). Defaults to disabled — a bare `daemonInterval` no longer auto-enables the loop; run `dispatch loop on` (or set `loopEnabled: true` directly) to start dispatching |
 | `defaultAgent` | `claude` | Agent used when a ticket has no `agent:<name>` label. It must have a built-in `implement` workflow: a ticket whose primary agent (label or `defaultAgent`) lacks one is skipped with `agent "<name>" has no built-in "implement" workflow` and never falls through to another agent (a disabled agent such as OpenCode keeps its own disabled reason, the #1219 text, instead of the "no built-in implement workflow" reason) |
@@ -1229,6 +1242,33 @@ and that signal has held continuously for `gracePeriod`. When it strands:
   still exists, so the ticket re-enters the dispatch queue naturally;
 - **at `retryBudget`** → `Working` → `dispatch-failed`, surfaced for a human and never
   touched again.
+
+**OOM classification (ticket #1291).** Before the budget split, the reconciler asks
+whether the kernel's out-of-memory killer ended the session. Each pass it reads the
+`oom_kill` counter in `memory.events` of the container the ticket ran in (its recorded
+launch container, else the repo's running workload containers), and compares it with a
+baseline: the last value seen before the pass that first noticed the ticket dead. A
+counter that rose means an OOM death, and the recovery changes in three ways:
+
+- **Separate budget.** The retry is the ordinary `Working` → `Planned` re-queue, but its
+  comment carries the `<!-- cenci-dispatch-oom-retry -->` marker, is bounded by
+  `oomRetryBudget` (default `3`) and is never charged against `retryBudget`. When
+  `oomRetryBudget` is spent the ticket goes to `dispatch-failed` with a comment naming the
+  out-of-memory killer and the three remedies: raise `sandbox.memoryLimit`, lower
+  `dispatch.concurrencyCap`, or raise `dispatch.memoryHeadroom`. An interrupted resume
+  (a plan still at `awaiting-input`) keeps its own recovery whatever the counter says.
+- **Backoff.** The recovered ticket waits `oomBackoff` (default `10m`) before dispatch
+  picks it up again (pickup rule 7 in [Pickup rules and gates](#pickup-rules-and-gates)),
+  so tickets killed together do not relaunch together.
+- **Fail open.** An unreadable counter, a missing baseline or a recreated container never
+  blocks or defers anything: the ticket recovers on the ordinary budgeted path, and the
+  reconciler logs one `reconcile: ` line per unreadable container per pass. Losing OOM
+  state can therefore never allow unbounded retries.
+
+Ticket comments never name the container, the runtime or the launch ID. The counter is
+per container, so another session's OOM in the same container during the grace window
+can be misattributed; `oomRetryBudget` bounds that. See [`watch/docs/dispatch-reconcile.md`](docs/dispatch-reconcile.md#oom-classification-1291)
+for the baseline, recreate and backoff rules and their limits.
 
 **Launch-ID liveness (ticket #1292).** "Has no live tmux window" is the fallback rule, not
 the whole story. When a `Working` ticket has a *recorded sandbox launch*, the reconciler

@@ -180,6 +180,10 @@ const (
 	reasonMemoryProbeUnknown = "memory probe unrecognized"
 )
 
+// reasonOOMBackoffFmt (#1291) takes the minutes left of the post-OOM-retry
+// backoff, rounded up to a whole minute (minimum 1).
+const reasonOOMBackoffFmt = "oom backoff (%dm left)"
+
 // Resume-gate skip reasons (#827). reasonAnswerProbeUnknown is deliberately
 // distinct from the enumerated probe-class reasons below, for the same
 // reason reasonStageProbeUnknown is distinct from reasonPipelineUnreadable
@@ -326,6 +330,13 @@ type Inputs struct {
 	// (containers.go) before Decide is ever called. A missing entry is the
 	// permissive zero value.
 	RepoMemory map[string]RepoMemory
+
+	// OOMBackoffSince maps planKey(repo, ticketId) -> the time the reconciler
+	// last recovered that ticket as an OOM kill (#1291), loaded by RunOnce from
+	// reconcile.json before Decide is ever called (Decide does no I/O). A
+	// ticket with no entry (a nil map, an ordinary retry) is never gated; with
+	// Config.OOMBackoff <= 0 the gate is disabled.
+	OOMBackoffSince map[string]time.Time
 }
 
 // Decide is pure: identical Inputs yield an identical ordered []Decision with no
@@ -596,6 +607,18 @@ func decideTicket(t Ticket, in Inputs, planByTicket map[string]*Plan, dispatched
 	if plan != nil && plan.IsChild {
 		if m, blocked := blockingSibling(t, plan, in, dispatchedChildByParent); blocked {
 			return skip(fmt.Sprintf("waiting on sibling #%d", m))
+		}
+	}
+
+	// Pickup rule 6.5: OOM backoff (#1291). A ticket the reconciler just
+	// recovered as an OOM kill waits Config.OOMBackoff before it is picked up
+	// again, so recovered tickets spread out instead of re-launching together.
+	// It runs ahead of every fleet-wide gate below (including "daemon
+	// unreachable") and applies to every pickup type that reaches it; a ticket
+	// with no entry (an ordinary retry) is never gated.
+	if since, ok := in.OOMBackoffSince[planKey(t.Repo, t.Number)]; ok {
+		if reason, gated := oomBackoffSkip(since, in.Config.OOMBackoff, in.Now); gated {
+			return skip(reason)
 		}
 	}
 
@@ -931,6 +954,26 @@ func containerSessionProbeSkip(probe ContainerSessionProbe) (string, bool) {
 		// caught by assertion, per #446/#598.
 		return reasonContainerSessionProbeUnknown, true
 	}
+}
+
+// oomBackoffSkip evaluates the OOM backoff gate (#1291) for a ticket the
+// reconciler recovered as an OOM kill at since. backoff <= 0 disables the gate.
+// Otherwise it returns (reason, true) while less than backoff has elapsed by
+// now, with the remaining time rounded up to whole minutes (minimum 1), and
+// ("", false) once it has. A since in the future (the clock moved back) counts
+// as just recorded, so the remaining time never exceeds backoff and a skew
+// cannot hold a ticket forever.
+func oomBackoffSkip(since time.Time, backoff time.Duration, now time.Time) (string, bool) {
+	if backoff <= 0 {
+		return "", false
+	}
+	elapsed := max(now.Sub(since), 0)
+	remaining := backoff - elapsed
+	if remaining <= 0 {
+		return "", false
+	}
+	minutes := int((remaining + time.Minute - 1) / time.Minute)
+	return fmt.Sprintf(reasonOOMBackoffFmt, max(minutes, 1)), true
 }
 
 // memoryHeadroomSkip evaluates the memory-headroom gate (#1290) for repo's

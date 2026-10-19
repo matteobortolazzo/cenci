@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestLoadConfigMergesModel locks in that a "model" key in the "dispatch"
@@ -575,6 +576,150 @@ func TestLoadConfig_MemoryHeadroom_RejectsInvalid(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), "memoryHeadroom") {
 				t.Errorf("error %q must name the key memoryHeadroom", err)
+			}
+			if !strings.Contains(err.Error(), path) {
+				t.Errorf("error %q must name the config path %s", err, path)
+			}
+		})
+	}
+}
+
+// -- dispatch.oomRetryBudget / dispatch.oomBackoff (#1291) -------------------
+
+// writeOOMConfig writes a config.json whose dispatch block carries the given
+// raw JSON values under oomRetryBudget and oomBackoff (a key is left out when
+// its raw value is empty) and returns its path.
+func writeOOMConfig(t *testing.T, budgetRaw, backoffRaw string) string {
+	t.Helper()
+	body := `{"dispatch": {"concurrencyCap": 2`
+	if budgetRaw != "" {
+		body += `, "oomRetryBudget": ` + budgetRaw
+	}
+	if backoffRaw != "" {
+		body += `, "oomBackoff": ` + backoffRaw
+	}
+	body += `}}`
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("writing config: %v", err)
+	}
+	return path
+}
+
+// TestLoadConfig_OOM_DefaultsApplyWhenUnset: an unset key means oomRetryBudget
+// 3 and oomBackoff 10m -- whether the dispatch block omits them, there is no
+// dispatch block, or there is no config file -- so existing fleets get the
+// behavior on upgrade.
+func TestLoadConfig_OOM_DefaultsApplyWhenUnset(t *testing.T) {
+	const (
+		wantBudget  = 3
+		wantBackoff = 10 * time.Minute
+	)
+	def := DefaultConfig()
+	if def.OOMRetryBudget != wantBudget || def.OOMBackoff != wantBackoff {
+		t.Errorf("DefaultConfig() = (%d, %s), want (%d, %s)", def.OOMRetryBudget, def.OOMBackoff, wantBudget, wantBackoff)
+	}
+
+	noDispatchBlock := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(noDispatchBlock, []byte(`{"planning": {"attended": false}}`), 0o600); err != nil {
+		t.Fatalf("writing config: %v", err)
+	}
+	paths := map[string]string{
+		"dispatch block without the keys": writeOOMConfig(t, "", ""),
+		"no dispatch block":               noDispatchBlock,
+		"no config file":                  filepath.Join(t.TempDir(), "absent.json"),
+	}
+	for name, path := range paths {
+		t.Run(name, func(t *testing.T) {
+			cfg, err := LoadConfig(path)
+			if err != nil {
+				t.Fatalf("LoadConfig: %v", err)
+			}
+			if cfg.OOMRetryBudget != wantBudget {
+				t.Errorf("cfg.OOMRetryBudget = %d, want the default %d", cfg.OOMRetryBudget, wantBudget)
+			}
+			if cfg.OOMBackoff != wantBackoff {
+				t.Errorf("cfg.OOMBackoff = %s, want the default %s", cfg.OOMBackoff, wantBackoff)
+			}
+		})
+	}
+}
+
+// TestLoadConfig_OOM_ExplicitValues: configured values win over the defaults,
+// an explicit 0 / "0" differs from unset (0 sends the first OOM recovery
+// straight to failed; "0" disables the backoff), and setting one key leaves
+// the other at its default and the neighbouring keys untouched.
+func TestLoadConfig_OOM_ExplicitValues(t *testing.T) {
+	cases := []struct {
+		name                  string
+		budgetRaw, backoffRaw string
+		wantBudget            int
+		wantBackoff           time.Duration
+	}{
+		{"both set", `5`, `"30m"`, 5, 30 * time.Minute},
+		{"budget only", `1`, ``, 1, 10 * time.Minute},
+		{"backoff only", ``, `"90s"`, 3, 90 * time.Second},
+		{"explicit zero budget is not unset", `0`, ``, 0, 10 * time.Minute},
+		{`"0" backoff disables and is not unset`, ``, `"0"`, 3, 0},
+		{"both explicit zero", `0`, `"0"`, 0, 0},
+		{"zero with a unit", ``, `"0s"`, 3, 0},
+		{"compound duration", ``, `"1h30m"`, 3, 90 * time.Minute},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := LoadConfig(writeOOMConfig(t, tc.budgetRaw, tc.backoffRaw))
+			if err != nil {
+				t.Fatalf("LoadConfig: %v", err)
+			}
+			if cfg.OOMRetryBudget != tc.wantBudget {
+				t.Errorf("cfg.OOMRetryBudget = %d, want %d", cfg.OOMRetryBudget, tc.wantBudget)
+			}
+			if cfg.OOMBackoff != tc.wantBackoff {
+				t.Errorf("cfg.OOMBackoff = %s, want %s", cfg.OOMBackoff, tc.wantBackoff)
+			}
+			if cfg.ConcurrencyCap != 2 {
+				t.Errorf("cfg.ConcurrencyCap = %d, want 2 (neighbouring key unaffected)", cfg.ConcurrencyCap)
+			}
+		})
+	}
+}
+
+// TestLoadConfig_OOM_RejectsInvalid: AC8, a negative or non-integer
+// oomRetryBudget, or a malformed or negative oomBackoff, is a config error that
+// names the key and the config path -- never a silent default. A JSON null is
+// rejected too (it would otherwise read as unset).
+func TestLoadConfig_OOM_RejectsInvalid(t *testing.T) {
+	cases := []struct{ name, key, raw string }{
+		{"budget negative", "oomRetryBudget", `-1`},
+		{"budget fractional", "oomRetryBudget", `1.5`},
+		{"budget string", "oomRetryBudget", `"3"`},
+		{"budget null", "oomRetryBudget", `null`},
+		{"budget boolean", "oomRetryBudget", `true`},
+		{"budget array", "oomRetryBudget", `[3]`},
+		{"budget object", "oomRetryBudget", `{"n": 3}`},
+		{"backoff malformed", "oomBackoff", `"soon"`},
+		{"backoff missing unit", "oomBackoff", `"10"`},
+		{"backoff empty string", "oomBackoff", `""`},
+		{"backoff negative", "oomBackoff", `"-5m"`},
+		{"backoff null", "oomBackoff", `null`},
+		{"backoff bare number", "oomBackoff", `10`},
+		{"backoff boolean", "oomBackoff", `false`},
+		{"backoff array", "oomBackoff", `["10m"]`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var path string
+			if tc.key == "oomRetryBudget" {
+				path = writeOOMConfig(t, tc.raw, "")
+			} else {
+				path = writeOOMConfig(t, "", tc.raw)
+			}
+			_, err := LoadConfig(path)
+			if err == nil {
+				t.Fatalf("LoadConfig with %s %s returned nil error, want an error", tc.key, tc.raw)
+			}
+			if !strings.Contains(err.Error(), tc.key) {
+				t.Errorf("error %q must name the key %s", err, tc.key)
 			}
 			if !strings.Contains(err.Error(), path) {
 				t.Errorf("error %q must name the config path %s", err, path)

@@ -25,6 +25,10 @@ const (
 	cgroupMemoryCurrentPath = "/sys/fs/cgroup/memory.current"
 	cgroupMemoryMaxPath     = "/sys/fs/cgroup/memory.max"
 
+	// cgroupMemoryEventsPath is the cgroup v2 file ReadContainerOOMKills reads
+	// its oom_kill counter from.
+	cgroupMemoryEventsPath = "/sys/fs/cgroup/memory.events"
+
 	// maxStderrCaptureBytes caps the runtime stderr kept for an error cause
 	// (cgroup reads, container listing); logSafeText truncates it further when
 	// it is embedded.
@@ -116,6 +120,50 @@ func parseCgroupInt(s string) (int64, error) {
 		return 0, fmt.Errorf("want a non-negative integer, got %s: %w", logSafeText(s), err)
 	}
 	return n, nil
+}
+
+// ParseMemoryEventsOOMKill extracts the oom_kill counter from a cgroup v2
+// memory.events file. The separate "oom" line counts times the limit was hit
+// and is deliberately ignored: only oom_kill is processes actually killed. ok
+// is false when there is no oom_kill line or its value is not a non-negative
+// integer that fits int64.
+func ParseMemoryEventsOOMKill(content string) (count int64, ok bool) {
+	for _, line := range SplitLines(content) {
+		fields := strings.Fields(line)
+		if len(fields) != 2 || fields[0] != "oom_kill" {
+			continue
+		}
+		n, err := strconv.ParseInt(fields[1], 10, 64)
+		if err != nil || n < 0 {
+			return 0, false
+		}
+		return n, true
+	}
+	return 0, false
+}
+
+// ReadContainerOOMKills reads a running container's cgroup v2 oom_kill counter
+// from memory.events in one bounded exec. The runtime must be docker or podman
+// and the container a well-formed sandbox container name, so neither reaches an
+// exec argv unchecked. A failed, timed-out, over-long or malformed read, or a
+// file with no oom_kill line (cgroup v1, a host cgroup namespace), is an error
+// rather than a zero count.
+func ReadContainerOOMKills(ctx context.Context, runtime, container string) (int64, error) {
+	if !ValidLaunchRuntime(runtime) {
+		return 0, fmt.Errorf("oom_kill read: runtime %s is not docker or podman", logSafeText(runtime))
+	}
+	if !ValidSandboxContainerName(container) {
+		return 0, fmt.Errorf("oom_kill read: %s is not a sandbox container name", logSafeText(container))
+	}
+	out, err := ReadContainerFiles(ctx, runtime, container, CgroupReadTimeout, MaxCgroupFileBytes, cgroupMemoryEventsPath)
+	if err != nil {
+		return 0, err
+	}
+	count, ok := ParseMemoryEventsOOMKill(string(out))
+	if !ok {
+		return 0, fmt.Errorf("%s exec %s: %s has no readable oom_kill line", runtime, container, cgroupMemoryEventsPath)
+	}
+	return count, nil
 }
 
 // ReadContainerMemory reads and parses a running container's cgroup v2

@@ -646,6 +646,7 @@ func TestCommentHelpersEachCarryADistinctCenciMarker(t *testing.T) {
 		"planInvalidComment":    planInvalidComment(),
 		"reconcileStuckComment": reconcileStuckComment(),
 		"planHealComment":       planHealComment(),
+		"oomRetryComment":       oomRetryComment(1, 3, 1),
 	}
 
 	markers := make(map[string]string, len(bodies))
@@ -1210,7 +1211,7 @@ func installFakeGHComments(t *testing.T, bodies ...string) {
 func TestCountAttempts_CountsResumeInterruptedComment(t *testing.T) {
 	installFakeGHComments(t, resumeInterruptedComment(1, "42-x", "gone"))
 
-	n, err := countAttempts("o/r", 42)
+	n, _, err := countAttempts("o/r", 42)
 	if err != nil {
 		t.Fatalf("countAttempts returned unexpected error: %v", err)
 	}
@@ -1228,12 +1229,39 @@ func TestCountAttempts_CountsResumeInterruptedComment(t *testing.T) {
 func TestCountAttemptsRegressionAgainstTheThreeNewMarkers(t *testing.T) {
 	installFakeGHComments(t, failedComment(3, "42-x", "gone"), planInvalidComment(), reconcileStuckComment())
 
-	n, err := countAttempts("o/r", 42)
+	n, _, err := countAttempts("o/r", 42)
 	if err != nil {
 		t.Fatalf("countAttempts returned unexpected error: %v", err)
 	}
 	if n != 0 {
 		t.Errorf("countAttempts = %d, want 0 (none of the three new markers is attemptMarker)", n)
+	}
+}
+
+// AC1/AC10 (#1291): countAttempts tallies OOM-marker comments separately from
+// the same single read, so a thread holding only OOM retries charges no
+// ordinary attempt, and each marker counts only for its own budget.
+func TestCountAttempts_CountsOOMRetriesSeparately(t *testing.T) {
+	cases := []struct {
+		name                   string
+		bodies                 []string
+		wantAttempts, wantOOMs int
+	}{
+		{"only OOM-marker comments", []string{oomRetryComment(1, 3, 1), oomRetryComment(2, 3, 2)}, 0, 2},
+		{"mixed thread", []string{retryComment(1, "42", "gone"), oomRetryComment(1, 3, 1), oomFailedComment(1), planHealComment()}, 1, 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			installFakeGHComments(t, tc.bodies...)
+
+			attempts, ooms, err := countAttempts("o/r", 42)
+			if err != nil {
+				t.Fatalf("countAttempts: %v", err)
+			}
+			if attempts != tc.wantAttempts || ooms != tc.wantOOMs {
+				t.Errorf("countAttempts = (%d, %d), want (%d, %d)", attempts, ooms, tc.wantAttempts, tc.wantOOMs)
+			}
+		})
 	}
 }
 
@@ -1245,7 +1273,7 @@ func TestCountAttemptsRegressionAgainstTheThreeNewMarkers(t *testing.T) {
 func TestCountAttempts_LargeGhOutputOnFailure_ErrorBounded(t *testing.T) {
 	installFakeGHOnPath(t, "yes x | tr -d '\\n' | head -c 5000 >&2\nexit 1\n")
 
-	_, err := countAttempts("o/r", 42)
+	_, _, err := countAttempts("o/r", 42)
 	if err == nil {
 		t.Fatal("expected an error")
 	}
@@ -1990,7 +2018,7 @@ func TestReconcilePlanHeal_PlannedAwaitingInput_TerminalLabelsLeftAlone(t *testi
 func TestCountAttempts_DoesNotCountPlanHealComment(t *testing.T) {
 	installFakeGHComments(t, planHealComment())
 
-	n, err := countAttempts("o/r", 42)
+	n, _, err := countAttempts("o/r", 42)
 	if err != nil {
 		t.Fatalf("countAttempts returned unexpected error: %v", err)
 	}
@@ -2012,7 +2040,7 @@ func TestCountAttempts_DoesNotCountPlanHealAwaitingInputComment(t *testing.T) {
 	}
 	installFakeGHComments(t, body)
 
-	n, err := countAttempts("o/r", 42)
+	n, _, err := countAttempts("o/r", 42)
 	if err != nil {
 		t.Fatalf("countAttempts returned unexpected error: %v", err)
 	}
@@ -2036,6 +2064,436 @@ func TestPlanHealAwaitingInputComment_StartsWithPlanHealMarker(t *testing.T) {
 	}
 	if strings.Contains(body, attemptMarker) {
 		t.Errorf("comment must never carry %q (countAttempts would tally it as a dispatch attempt), got %q", attemptMarker, body)
+	}
+}
+
+// -- #1291: OOM classification in the failure path ---------------------------
+
+// oomInputs is workingInputs() (Working+Planned #42, window gone, grace
+// elapsed, no attempts) after an OOM kill: the ticket's single candidate
+// container read 2 when its grace observation was created (the baseline), the
+// pass that created it advanced last-seen to 3, and it still reads 3.
+func oomInputs() ReconcileInputs {
+	in := workingInputs()
+	in.Config.OOMRetryBudget = 3
+	in.OOMCandidates = map[string][]string{"o/r#42": {oomTestContainer}}
+	in.OOMLastSeen = map[string]int64{oomTestContainer: 3}
+	in.OOMBaselines = map[string]map[string]int64{"o/r#42": {oomTestContainer: 2}}
+	in.OOMCounters = map[string]int64{oomTestContainer: 3}
+	return in
+}
+
+func firstLine(s string) string {
+	line, _, _ := strings.Cut(s, "\n")
+	return line
+}
+
+var oomRemedies = []string{"sandbox.memoryLimit", "dispatch.concurrencyCap", "dispatch.memoryHeadroom"}
+
+// AC1: a counter above the ticket's baseline recovers as RecoveryRetryOOM with
+// the ordinary +Planned -Working labels and the OOM-marked comment, whether the
+// ordinary retry budget is untouched or already spent (the OOM branch runs
+// before the attempts < RetryBudget split, Q&A 3).
+func TestReconcileOOM_CounterAboveBaselineRetriesOutsideRetryBudget(t *testing.T) {
+	for _, attempts := range []int{0, reconcileConfig().RetryBudget} {
+		t.Run(fmt.Sprintf("attempts=%d", attempts), func(t *testing.T) {
+			in := oomInputs()
+			in.Attempts = map[string]int{"o/r#42": attempts}
+			in.OOMRetries = map[string]int{"o/r#42": 1}
+
+			res := Reconcile(in)
+
+			rec := onlyRecovery(t, res)
+			if rec.Kind != RecoveryRetryOOM {
+				t.Fatalf("kind = %q, want %q", rec.Kind, RecoveryRetryOOM)
+			}
+			if !slices.Equal(rec.AddLabels, []string{labelPlanned}) || !slices.Equal(rec.RemoveLabels, []string{labelWorking}) {
+				t.Errorf("labels add=%v remove=%v, want +Planned -Working", rec.AddLabels, rec.RemoveLabels)
+			}
+			if rec.Comment != oomRetryComment(2, 3, 1) {
+				t.Errorf("comment = %q, want oomRetryComment(2, 3, 1)", rec.Comment)
+			}
+			if hasFailed(res, "o/r", 42) {
+				t.Error("an OOM retry must not appear in Failed")
+			}
+			if _, ok := res.NextObservations["o/r#42"]; ok {
+				t.Error("a recovered ticket's grace observation must be dropped")
+			}
+			if _, ok := res.NextOOMBaselines["o/r#42"]; ok {
+				t.Error("a recovered ticket's baseline must be dropped with its observation")
+			}
+			if res.NextOOMLastSeen[oomTestContainer] != 3 {
+				t.Errorf("last-seen = %v, want the current reading 3", res.NextOOMLastSeen)
+			}
+		})
+	}
+}
+
+// The OOM comments name what a human needs (the delta or count and the three
+// remedies), carry the right marker as their first line, never the attempt
+// marker, and never a container, runtime or launch ID.
+func TestOOMComments_ContentAndMarkers(t *testing.T) {
+	retry := oomRetryComment(2, 3, 4)
+	failed := oomFailedComment(3)
+	for _, tc := range []struct {
+		name, body, marker, count string
+	}{
+		{"oomRetryComment", retry, oomRetryMarker, "4"},
+		{"oomFailedComment", failed, failedMarker, "3"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if firstLine(tc.body) != tc.marker {
+				t.Errorf("first line = %q, want %q", firstLine(tc.body), tc.marker)
+			}
+			for _, want := range append([]string{tc.count}, oomRemedies...) {
+				if !strings.Contains(tc.body, want) {
+					t.Errorf("comment %q does not contain %q", tc.body, want)
+				}
+			}
+			for _, banned := range []string{attemptMarker, "claude-cenci", "codex-cenci", "docker", "podman", testLaunchID} {
+				if strings.Contains(tc.body, banned) {
+					t.Errorf("comment %q must not contain %q", tc.body, banned)
+				}
+			}
+		})
+	}
+	if !strings.Contains(failed, labelDispatchFailed) {
+		t.Errorf("the OOM-exhausted comment %q must name the %s label", failed, labelDispatchFailed)
+	}
+}
+
+// AC2, AC5, AC6 and the no-baseline/sibling edges: every case without a usable
+// delta takes the ordinary RecoveryRetry with today's comment byte for byte.
+func TestReconcileOOM_NoUsableDeltaTakesOrdinaryRetry(t *testing.T) {
+	const sibling = "docker/codex-cenci-local"
+	cases := []struct {
+		name   string
+		mutate func(in *ReconcileInputs)
+	}{
+		{"counter unchanged (AC2)", func(in *ReconcileInputs) { in.OOMCounters[oomTestContainer] = 2 }},
+		{"counter unreadable this pass (AC6)", func(in *ReconcileInputs) { in.OOMCounters = map[string]int64{} }},
+		{"no baseline for the observation", func(in *ReconcileInputs) { in.OOMBaselines = nil }},
+		{"container recreated: counter below last-seen (AC5)", func(in *ReconcileInputs) {
+			in.OOMBaselines["o/r#42"][oomTestContainer] = 0
+			in.OOMCounters[oomTestContainer] = 1
+		}},
+		{"only the sibling agent's container rose", func(in *ReconcileInputs) {
+			in.OOMBaselines["o/r#42"] = map[string]int64{oomTestContainer: 2, sibling: 0}
+			in.OOMLastSeen[sibling] = 5
+			in.OOMCounters = map[string]int64{oomTestContainer: 2, sibling: 5}
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			in := oomInputs()
+			tc.mutate(&in)
+
+			rec := onlyRecovery(t, Reconcile(in))
+
+			if rec.Kind != RecoveryRetry {
+				t.Fatalf("kind = %q, want the ordinary %q", rec.Kind, RecoveryRetry)
+			}
+			if want := retryComment(1, "42", "gone"); rec.Comment != want {
+				t.Errorf("comment = %q, want today's retryComment %q", rec.Comment, want)
+			}
+			if rec.Attempt != 1 {
+				t.Errorf("attempt = %d, want 1 (retryBudget charged)", rec.Attempt)
+			}
+		})
+	}
+}
+
+// AC5: a counter below the stored last-seen value means the container was
+// recreated: last-seen takes the current reading, and the container is dropped
+// from every ticket's stored baseline, not only from this pass's verdict.
+func TestReconcileOOM_RecreatedContainerRebaselines(t *testing.T) {
+	const sibling = "docker/codex-cenci-local"
+	in := oomInputs()
+	in.OOMCounters[oomTestContainer] = 1
+	in.Tickets = append(in.Tickets, Ticket{Repo: "o/r", Number: 7, Labels: []string{labelWorking, labelPlanned}})
+	in.Plans = append(in.Plans, Plan{Repo: "o/r", Path: ".plans/7-x.md", TicketID: 7, Status: "planned"})
+	in.Observations["o/r#7"] = reconcileNow.Add(-time.Minute) // grace not elapsed: carried
+	in.OOMCandidates["o/r#7"] = []string{oomTestContainer}
+	in.OOMBaselines["o/r#7"] = map[string]int64{oomTestContainer: 0, sibling: 4}
+
+	res := Reconcile(in)
+
+	if res.NextOOMLastSeen[oomTestContainer] != 1 {
+		t.Errorf("last-seen = %d, want the recreated container's current reading 1", res.NextOOMLastSeen[oomTestContainer])
+	}
+	if b := res.NextOOMBaselines["o/r#7"]; !mapsEqual(b, map[string]int64{sibling: 4}) {
+		t.Errorf("#7 baseline = %v, want the recreated container dropped and the other kept", b)
+	}
+	if rec := onlyRecovery(t, res); rec.Kind != RecoveryRetry {
+		t.Errorf("#42 kind = %q, want the ordinary retry against a recreated container", rec.Kind)
+	}
+}
+
+// AC3: a Refined+Working ticket with a verified-absent plan file that OOM-died
+// gets the #828 stage-aware payload: no AddLabels, only -Working.
+func TestReconcileOOM_RefinedCrashedPlanningPickupIsStageAware(t *testing.T) {
+	in := oomInputs()
+	in.Tickets[0].Labels = []string{labelWorking, labelRefined}
+	in.Plans = nil
+
+	rec := onlyRecovery(t, Reconcile(in))
+
+	if rec.Kind != RecoveryRetryOOM {
+		t.Fatalf("kind = %q, want %q", rec.Kind, RecoveryRetryOOM)
+	}
+	if rec.AddLabels != nil || !slices.Equal(rec.RemoveLabels, []string{labelWorking}) {
+		t.Errorf("labels add=%v remove=%v, want add nil, remove [Working]", rec.AddLabels, rec.RemoveLabels)
+	}
+	if firstLine(rec.Comment) != oomRetryMarker {
+		t.Errorf("comment first line = %q, want %q", firstLine(rec.Comment), oomRetryMarker)
+	}
+}
+
+// AC4/AC10: at the OOM retry budget the next OOM-classified recovery is
+// RecoveryFailed with the OOM-exhausted comment, listed once in Failed, whatever
+// the ordinary attempt count; an explicit budget of 0 fails the first one.
+func TestReconcileOOM_BudgetExhaustedFails(t *testing.T) {
+	cases := []struct {
+		name               string
+		budget, ooms, atts int
+	}{
+		{"default budget reached, no attempts", 3, 3, 0},
+		{"default budget reached, attempts at RetryBudget", 3, 3, reconcileConfig().RetryBudget},
+		{"explicit zero budget", 0, 0, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			in := oomInputs()
+			in.Config.OOMRetryBudget = tc.budget
+			in.OOMRetries = map[string]int{"o/r#42": tc.ooms}
+			in.Attempts = map[string]int{"o/r#42": tc.atts}
+
+			res := Reconcile(in)
+
+			rec := onlyRecovery(t, res)
+			if rec.Kind != RecoveryFailed {
+				t.Fatalf("kind = %q, want %q", rec.Kind, RecoveryFailed)
+			}
+			if !slices.Equal(rec.AddLabels, []string{labelDispatchFailed}) || !slices.Equal(rec.RemoveLabels, []string{labelWorking}) {
+				t.Errorf("labels add=%v remove=%v, want +dispatch-failed -Working", rec.AddLabels, rec.RemoveLabels)
+			}
+			if rec.Comment != oomFailedComment(tc.ooms) {
+				t.Errorf("comment = %q, want oomFailedComment(%d)", rec.Comment, tc.ooms)
+			}
+			n := 0
+			for _, f := range res.Failed {
+				if f.Repo == "o/r" && f.Number == 42 {
+					n++
+				}
+			}
+			if n != 1 {
+				t.Errorf("ticket listed %d times in Failed, want exactly once", n)
+			}
+		})
+	}
+}
+
+// Edge: two Working tickets of one repo killed in the same incident both
+// recover as OOM retries from the one counter delta, and last-seen is advanced
+// once, after both were evaluated.
+func TestReconcileOOM_TwoTicketsOneIncident(t *testing.T) {
+	in := oomInputs()
+	in.Tickets = append(in.Tickets, Ticket{Repo: "o/r", Number: 43, Labels: []string{labelWorking, labelPlanned}})
+	in.Plans = append(in.Plans, Plan{Repo: "o/r", Path: ".plans/43-x.md", TicketID: 43, Status: "planned"})
+	in.Observations["o/r#43"] = reconcileNow.Add(-10 * time.Minute)
+	in.OOMCandidates["o/r#43"] = []string{oomTestContainer}
+	in.OOMBaselines["o/r#43"] = map[string]int64{oomTestContainer: 2}
+
+	res := Reconcile(in)
+
+	if len(res.Recoveries) != 2 {
+		t.Fatalf("recoveries = %+v, want two", res.Recoveries)
+	}
+	for _, rec := range res.Recoveries {
+		if rec.Kind != RecoveryRetryOOM {
+			t.Errorf("#%d kind = %q, want %q", rec.Ticket.Number, rec.Kind, RecoveryRetryOOM)
+		}
+	}
+	if !mapsEqual(res.NextOOMLastSeen, map[string]int64{oomTestContainer: 3}) {
+		t.Errorf("last-seen = %v, want the single current reading", res.NextOOMLastSeen)
+	}
+}
+
+// The baseline is the last-seen value loaded at the START of the pass that
+// creates the grace observation (the kill happened before that pass saw the
+// ticket dead), not that pass's own reading; with no last-seen value at all
+// (first pass ever, or wiped OOM sections) the ticket gets no baseline.
+func TestReconcileOOM_BaselineIsStartOfPassLastSeen(t *testing.T) {
+	in := oomInputs()
+	in.Observations = map[string]time.Time{}
+	in.OOMBaselines = nil
+	in.OOMLastSeen = map[string]int64{oomTestContainer: 2}
+
+	res := Reconcile(in)
+
+	if len(res.Recoveries) != 0 {
+		t.Fatalf("a first observation must defer, got %+v", res.Recoveries)
+	}
+	if b := res.NextOOMBaselines["o/r#42"]; !mapsEqual(b, map[string]int64{oomTestContainer: 2}) {
+		t.Errorf("baseline = %v, want the start-of-pass last-seen {%s: 2}", b, oomTestContainer)
+	}
+	if res.NextOOMLastSeen[oomTestContainer] != 3 {
+		t.Errorf("last-seen = %v, want advanced to 3 after the loop", res.NextOOMLastSeen)
+	}
+
+	in.OOMLastSeen = nil
+	if b, ok := Reconcile(in).NextOOMBaselines["o/r#42"]; ok {
+		t.Errorf("baseline = %v, want none without a prior last-seen value", b)
+	}
+}
+
+// The baseline follows the grace observation: carried by every deferral
+// (AttemptsUnknown included, whatever the counter reads), dropped for a healthy
+// ticket.
+func TestReconcileOOM_BaselineFollowsObservation(t *testing.T) {
+	cases := []struct {
+		name     string
+		mutate   func(in *ReconcileInputs)
+		wantKept bool
+	}{
+		{"attempts unknown defers and keeps it", func(in *ReconcileInputs) { in.AttemptsUnknown = map[string]bool{"o/r#42": true} }, true},
+		{"nil snapshot defers and keeps it", func(in *ReconcileInputs) { in.Snapshot = nil }, true},
+		{"grace not elapsed keeps it", func(in *ReconcileInputs) { in.Observations["o/r#42"] = reconcileNow.Add(-time.Minute) }, true},
+		{"live window drops it", func(in *ReconcileInputs) {
+			in.Snapshot = &watch.StateSnapshot{Windows: []watch.WindowState{runningImplementWindow}}
+		}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			in := oomInputs()
+			tc.mutate(&in)
+
+			res := Reconcile(in)
+
+			if len(res.Recoveries) != 0 {
+				t.Fatalf("want no recovery, got %+v", res.Recoveries)
+			}
+			b, ok := res.NextOOMBaselines["o/r#42"]
+			if tc.wantKept && !mapsEqual(b, map[string]int64{oomTestContainer: 2}) {
+				t.Errorf("baseline = %v (present=%v), want the stored {%s: 2} carried", b, ok, oomTestContainer)
+			}
+			if !tc.wantKept && ok {
+				t.Errorf("baseline = %v, want it dropped with the observation", b)
+			}
+		})
+	}
+}
+
+// Edge: a ticket that OOM-died, was re-dispatched, then died for an unrelated
+// reason gets a new baseline equal to the advanced last-seen value, so the
+// second death has no delta and charges retryBudget for the first time.
+func TestReconcileOOM_OOMThenUnrelatedDeathChargesRetryBudget(t *testing.T) {
+	chain := func(in ReconcileInputs, prev ReconcileResult, now time.Time) ReconcileInputs {
+		in.Now = now
+		in.Observations = prev.NextObservations
+		in.OOMLastSeen = prev.NextOOMLastSeen
+		in.OOMBaselines = prev.NextOOMBaselines
+		return in
+	}
+	died := Reconcile(oomInputs())
+	if rec := onlyRecovery(t, died); rec.Kind != RecoveryRetryOOM {
+		t.Fatalf("first death kind = %q, want %q", rec.Kind, RecoveryRetryOOM)
+	}
+
+	alive := oomInputs()
+	alive.OOMRetries = map[string]int{"o/r#42": 1}
+	alive.Snapshot = &watch.StateSnapshot{Windows: []watch.WindowState{runningImplementWindow}}
+	running := Reconcile(chain(alive, died, reconcileNow.Add(20*time.Minute)))
+
+	dead := oomInputs()
+	dead.OOMRetries = map[string]int{"o/r#42": 1}
+	observed := Reconcile(chain(dead, running, reconcileNow.Add(40*time.Minute)))
+	if b := observed.NextOOMBaselines["o/r#42"]; !mapsEqual(b, map[string]int64{oomTestContainer: 3}) {
+		t.Fatalf("new baseline = %v, want the advanced last-seen 3", b)
+	}
+
+	rec := onlyRecovery(t, Reconcile(chain(dead, observed, reconcileNow.Add(50*time.Minute))))
+	if rec.Kind != RecoveryRetry || rec.Comment != retryComment(1, "42", "gone") {
+		t.Errorf("second death = %q %q, want the ordinary retry charging attempt 1", rec.Kind, rec.Comment)
+	}
+}
+
+// Edge: an interrupted resume (awaiting-input plan) whose counter rose keeps
+// the #853 behavior: RecoveryResumeInterrupted under the budget, the ordinary
+// RecoveryFailed at it -- never the OOM branch. The label payload, the
+// charged attempt and the markers are pinned too: under the budget the interrupted
+// resume is +Input Needed -Working, carries attemptMarker (so countAttempts
+// charges retryBudget) and Attempt 1; at the budget it is the ordinary
+// +dispatch-failed -Working with the failed marker. Neither ever carries the
+// OOM marker, adds Planned, or consumes the OOM retry budget.
+func TestReconcileOOM_InterruptedResumeIsUnchanged(t *testing.T) {
+	cases := []struct {
+		attempts      int
+		wantKind      RecoveryKind
+		wantAddLabels []string
+		wantComment   string
+		wantMarker    string
+		wantAttempt   int
+		wantFailed    bool
+	}{
+		{0, RecoveryResumeInterrupted, []string{labelInputNeeded}, resumeInterruptedComment(1, "42", "gone"), attemptMarker, 1, false},
+		{reconcileConfig().RetryBudget, RecoveryFailed, []string{labelDispatchFailed}, failedComment(2, "42", "gone"), failedMarker, 2, true},
+	}
+	for _, tc := range cases {
+		t.Run(fmt.Sprintf("%s/attempts=%d", tc.wantKind, tc.attempts), func(t *testing.T) {
+			in := oomInputs()
+			in.Plans = awaitingInputPlans()
+			in.Attempts = map[string]int{"o/r#42": tc.attempts}
+
+			res := Reconcile(in)
+
+			rec := onlyRecovery(t, res)
+			if rec.Kind != tc.wantKind || rec.Comment != tc.wantComment {
+				t.Errorf("recovery = %q %q, want %q %q", rec.Kind, rec.Comment, tc.wantKind, tc.wantComment)
+			}
+			if !slices.Equal(rec.AddLabels, tc.wantAddLabels) || !slices.Equal(rec.RemoveLabels, []string{labelWorking}) {
+				t.Errorf("labels add=%v remove=%v, want add=%v remove=[%s]", rec.AddLabels, rec.RemoveLabels, tc.wantAddLabels, labelWorking)
+			}
+			if rec.Attempt != tc.wantAttempt {
+				t.Errorf("Attempt = %d, want %d (charged against retryBudget, not the OOM budget)", rec.Attempt, tc.wantAttempt)
+			}
+			if firstLine(rec.Comment) != tc.wantMarker {
+				t.Errorf("comment first line = %q, want %q", firstLine(rec.Comment), tc.wantMarker)
+			}
+			if strings.Contains(rec.Comment, oomRetryMarker) {
+				t.Errorf("comment %q must not carry the OOM marker %q", rec.Comment, oomRetryMarker)
+			}
+			if hasFailed(res, "o/r", 42) != tc.wantFailed {
+				t.Errorf("Failed contains ticket = %v, want %v", !tc.wantFailed, tc.wantFailed)
+			}
+		})
+	}
+}
+
+// Edge: a dead launch verdict (#1292) beside a surviving window with a counter
+// delta on the recorded launch container is an OOM retry, and its comment never
+// names the container, runtime or launch ID.
+func TestReconcileOOM_DeadVerdictBesideSurvivingWindow(t *testing.T) {
+	launchKey := testLaunchRuntime + "/" + testLaunchContainer
+	in := launchInputs(LaunchVerdictDead, runningImplementWindow)
+	in.Config.OOMRetryBudget = 3
+	in.OOMCandidates = map[string][]string{"o/r#42": {launchKey}}
+	in.OOMLastSeen = map[string]int64{launchKey: 1}
+	in.OOMBaselines = map[string]map[string]int64{"o/r#42": {launchKey: 0}}
+	in.OOMCounters = map[string]int64{launchKey: 1}
+
+	rec := onlyRecovery(t, Reconcile(in))
+
+	if rec.Kind != RecoveryRetryOOM {
+		t.Fatalf("kind = %q, want %q", rec.Kind, RecoveryRetryOOM)
+	}
+	if firstLine(rec.Comment) != oomRetryMarker {
+		t.Errorf("comment first line = %q, want %q", firstLine(rec.Comment), oomRetryMarker)
+	}
+	for _, banned := range []string{testLaunchContainer, testLaunchID, testLaunchRuntime} {
+		if strings.Contains(rec.Comment, banned) {
+			t.Errorf("comment %q must not name %q", rec.Comment, banned)
+		}
 	}
 }
 

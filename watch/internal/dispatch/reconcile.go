@@ -2,6 +2,7 @@ package dispatch
 
 import (
 	"fmt"
+	"maps"
 	"sort"
 	"strconv"
 	"strings"
@@ -75,6 +76,11 @@ const (
 // consume the durable RetryBudget.
 const planHealMarker = cenciMarkerPrefix + "plan-heal -->"
 
+// oomRetryMarker (#1291) is stamped on every OOM retry comment. It is distinct
+// from attemptMarker, so countAttempts never charges an OOM death against
+// RetryBudget; countAttempts tallies it separately for OOMRetryBudget.
+const oomRetryMarker = cenciMarkerPrefix + "dispatch-oom-retry -->"
+
 // RecoveryKind is the class of leak a Recovery addresses.
 type RecoveryKind string
 
@@ -98,6 +104,12 @@ const (
 	// Working (a claim or rollback that landed its first label edit but not
 	// its second) removes the stray Working with no relabeling needed.
 	RecoveryResumeInterrupted RecoveryKind = "resume-interrupted"
+	// RecoveryRetryOOM (#1291) is the ordinary retry's labels (+Planned
+	// -Working, stage-aware like #828) for a ticket whose container's oom_kill
+	// counter rose above its baseline: the session was OOM-killed, so the
+	// recovery posts oomRetryMarker instead of attemptMarker and is bounded by
+	// OOMRetryBudget, never RetryBudget.
+	RecoveryRetryOOM RecoveryKind = "oom-retry"
 )
 
 // Recovery is the reconciler's verdict for a single stranded item. AddLabels/
@@ -164,6 +176,18 @@ type ReconcileInputs struct {
 	// Working-gated branches then keep the hasLiveWindow rule. Precomputed by the
 	// impure runner like Attempts, so Reconcile stays pure.
 	LaunchVerdicts map[string]LaunchVerdict
+
+	// OOM classification (#1291). OOMCounters and OOMCandidates are this pass's
+	// probe result (oomProbeResult): the oom_kill counter of every container
+	// read this pass ("<runtime>/<container>" keys, readable ones only) and the
+	// containers each Working ticket's delta may come from. OOMLastSeen and
+	// OOMBaselines are the loaded state (ReconcileState). OOMRetries maps
+	// ticketKey to the durable OOM-marker comment count, read with Attempts.
+	OOMCounters   map[string]int64
+	OOMCandidates map[string][]string
+	OOMLastSeen   map[string]int64
+	OOMBaselines  map[string]map[string]int64
+	OOMRetries    map[string]int
 }
 
 // ReconcileResult is Reconcile's output. NextObservations is the grace map to
@@ -173,11 +197,18 @@ type ReconcileInputs struct {
 // a distinct, non-failure attention state (see watch/pkg/watch/snapshot.go's
 // reciprocal NeedInput/Escalated doc comments): it must never be appended to
 // Failed, and must never feed dispatch's fleet-wide NeedInput pause.
+//
+// NextOOMLastSeen and NextOOMBaselines (#1291) are the OOM state to persist:
+// last-seen advanced once after every ticket was evaluated, and one baseline
+// per key in NextObservations that has one (created with the observation,
+// carried with it, dropped with it).
 type ReconcileResult struct {
 	Recoveries       []Recovery
 	NextObservations map[string]time.Time
 	Failed           []Ticket
 	Escalated        []Ticket
+	NextOOMLastSeen  map[string]int64
+	NextOOMBaselines map[string]map[string]int64
 }
 
 // Reconcile is pure: identical ReconcileInputs yield an identical ordered
@@ -210,6 +241,7 @@ func Reconcile(in ReconcileInputs) ReconcileResult {
 	}
 
 	res := ReconcileResult{NextObservations: make(map[string]time.Time)}
+	recreated := oomRecreatedContainers(in)
 
 	for _, t := range tickets {
 		key := planKey(t.Repo, t.Number)
@@ -651,6 +683,82 @@ func Reconcile(in ReconcileInputs) ReconcileResult {
 			deadInPane: in.LaunchVerdicts[key] == LaunchVerdictDead && win != nil,
 		}
 
+		// Stage-aware retry labels (#828), shared by the ordinary retry and the
+		// OOM retry below: a Working ticket carrying Refined with no matched plan
+		// file is a crashed planning pickup, not a crashed implementation run --
+		// Planned may or may not also be present (the inverse-leak branch above
+		// only claims Planned tickets that are not Working, so a
+		// Planned+Refined+Working ticket with no plan file legitimately reaches
+		// here too; see
+		// TestReconcileWorkingRefinedAndPlannedNoPlan_FallsThroughToStageAwareRetry).
+		// Recovering it with today's +Planned would dead-end it at plan-invalid
+		// next pass (Planned added, still no plan file); instead, drop only
+		// Working so it returns to plain Refined and is re-picked as a planning
+		// candidate. Every other Working ticket keeps today's +Planned -Working
+		// retry verbatim. planByTicket[key] == nil is ambiguous exactly the way
+		// #852 exists to fix: nil both for a verified-absent plan and for a plan
+		// file that exists but hit a probe error (ReadPlans drops probe-errored
+		// files from `plans`, so they are indistinguishable from "no file at
+		// all" here). Only a verified-absent plan (PlanProbeAbsent, the zero
+		// value -- no PlanProbes entry at all) may nil AddLabels; a probe-errored
+		// plan must defer to the ordinary +Planned retry rather than being
+		// treated as verified absence (Phase 6+7 review finding #2) -- this is a
+		// state-mutating call site (a durable GitHub label change plus a
+		// comment), so acting on unverified input here is exactly the class of
+		// bug this ticket closes, mirroring the inverse-leak branch's
+		// planProbeSkip gate above. Additionally requires PlanInventoryVerified
+		// (#884, Q5): a repo-wide directory read failure can never prove this
+		// ticket's plan is genuinely absent either, so an unverified inventory
+		// falls through to the ordinary +Planned retry instead of nil-ing
+		// AddLabels. Defense-in-depth only (review round 2 finding #1): the
+		// top-level plan-inventory hold at the top of the loop already defers
+		// the whole ticket before this point whenever the inventory is
+		// unverified, so this comparison is always true here today -- kept as a
+		// backstop if the top-level gate is ever narrowed.
+		addLabels := []string{labelPlanned}
+		if hasLabel(t.Labels, labelRefined) && planByTicket[key] == nil && in.PlanProbes[key] == PlanProbeAbsent && in.PlanInventories[t.Repo] == PlanInventoryVerified {
+			addLabels = nil
+		}
+
+		// OOM classification (#1291): every gate above already decided to
+		// recover (grace elapsed, not live, no open PR, attempts readable). An
+		// interrupted resume (awaiting-input plan) keeps the #853 path below
+		// whatever its counter says. Otherwise a counter above the ticket's
+		// baseline makes this an OOM death: the ordinary retry's labels, but
+		// bounded by OOMRetryBudget instead of RetryBudget, so it is checked
+		// before the attempts < RetryBudget split. No usable delta -- unreadable,
+		// no baseline, a recreated container -- falls through to the ordinary
+		// path unchanged: the signal only ever adds to a decision already made.
+		if p := planByTicket[key]; p == nil || p.Status != "awaiting-input" {
+			if delta := oomDelta(key, in, recreated); delta > 0 {
+				ooms := in.OOMRetries[key]
+				if ooms < in.Config.OOMRetryBudget {
+					n := ooms + 1
+					res.Recoveries = append(res.Recoveries, Recovery{
+						Ticket:       t,
+						Kind:         RecoveryRetryOOM,
+						AddLabels:    addLabels,
+						RemoveLabels: []string{labelWorking},
+						Comment:      oomRetryComment(n, in.Config.OOMRetryBudget, delta),
+						Attempt:      n,
+						Detail:       fmt.Sprintf("window %s, last status %s (OOM retry %d of %d, oom_kill +%d)", name, lastStatus, n, in.Config.OOMRetryBudget, delta),
+					})
+					continue
+				}
+				res.Recoveries = append(res.Recoveries, Recovery{
+					Ticket:       t,
+					Kind:         RecoveryFailed,
+					AddLabels:    []string{labelDispatchFailed},
+					RemoveLabels: []string{labelWorking},
+					Comment:      oomFailedComment(ooms),
+					Attempt:      ooms,
+					Detail:       fmt.Sprintf("window %s, last status %s (OOM retry budget %d exhausted, oom_kill +%d)", name, lastStatus, in.Config.OOMRetryBudget, delta),
+				})
+				res.Failed = append(res.Failed, t)
+				continue
+			}
+		}
+
 		if attempts < in.Config.RetryBudget {
 			attempt := attempts + 1
 
@@ -706,46 +814,6 @@ func Reconcile(in ReconcileInputs) ReconcileResult {
 				continue
 			}
 
-			// Stage-aware retry (#828): a Working ticket carrying Refined
-			// with no matched plan file is a crashed planning pickup, not a
-			// crashed implementation run -- Planned may or may not also be
-			// present (the inverse-leak branch above only claims Planned
-			// tickets that are not Working, so a Planned+Refined+Working
-			// ticket with no plan file legitimately reaches here too; see
-			// TestReconcileWorkingRefinedAndPlannedNoPlan_FallsThroughToStageAwareRetry).
-			// Recovering it with today's +Planned would dead-end it at
-			// plan-invalid next pass (Planned added, still no plan file);
-			// instead, drop only Working so it returns to plain Refined and
-			// is re-picked as a planning candidate. Every other Working
-			// ticket keeps today's +Planned -Working retry verbatim.
-			// planByTicket[key] == nil is ambiguous exactly the way #852
-			// exists to fix: nil both for a verified-absent plan and for a
-			// plan file that exists but hit a probe error (ReadPlans drops
-			// probe-errored files from `plans`, so they are indistinguishable
-			// from "no file at all" here). Only a verified-absent plan
-			// (PlanProbeAbsent, the zero value -- no PlanProbes entry at all)
-			// may nil AddLabels; a probe-errored plan must defer to the
-			// ordinary +Planned retry below rather than being treated as
-			// verified absence (Phase 6+7 review finding #2) -- this is a
-			// state-mutating call site (a durable GitHub label change plus a
-			// comment), so acting on unverified input here is exactly the
-			// class of bug this ticket closes, mirroring the inverse-leak
-			// branch's planProbeSkip gate above. Additionally requires
-			// PlanInventoryVerified (#884, Q5): a repo-wide directory read
-			// failure can never prove this ticket's plan is genuinely
-			// absent either, so an unverified inventory falls through to
-			// the ordinary +Planned retry below instead of nil-ing
-			// AddLabels. Defense-in-depth only (review round 2 finding #1):
-			// the top-level plan-inventory hold at the top of the loop
-			// already defers the whole ticket before this branch is ever
-			// reached whenever the inventory is unverified, so this
-			// comparison is always true here today -- kept as a backstop
-			// if the top-level gate is ever narrowed.
-			addLabels := []string{labelPlanned}
-			if hasLabel(t.Labels, labelRefined) && planByTicket[key] == nil && in.PlanProbes[key] == PlanProbeAbsent && in.PlanInventories[t.Repo] == PlanInventoryVerified {
-				addLabels = nil
-			}
-
 			res.Recoveries = append(res.Recoveries, Recovery{
 				Ticket:       t,
 				Kind:         RecoveryRetry,
@@ -771,6 +839,8 @@ func Reconcile(in ReconcileInputs) ReconcileResult {
 		})
 		res.Failed = append(res.Failed, t)
 	}
+
+	res.NextOOMLastSeen, res.NextOOMBaselines = nextOOMState(in, res.NextObservations, recreated)
 
 	// Orphan plans: plan files whose ticket is not open. Report only — no gh
 	// mutation, no auto-delete.
@@ -812,6 +882,83 @@ func deferObservation(observations, next map[string]time.Time, key string) {
 	if ts, ok := observations[key]; ok {
 		next[key] = ts
 	}
+}
+
+// oomRecreatedContainers returns the containers whose counter read this pass is
+// below their stored last-seen value (#1291): the container was recreated, so
+// its new cgroup's counter cannot be compared with anything stored for the old
+// one. Nothing is classified against it this pass, and nextOOMState drops it
+// from every ticket's baseline.
+func oomRecreatedContainers(in ReconcileInputs) map[string]bool {
+	recreated := map[string]bool{}
+	for c, cur := range in.OOMCounters {
+		if prev, ok := in.OOMLastSeen[c]; ok && cur < prev {
+			recreated[c] = true
+		}
+	}
+	return recreated
+}
+
+// oomBaseline is the baseline key's delta is measured from: the stored one
+// when the grace observation already existed at the start of this pass, else
+// (the observation is created this pass) the start-of-pass last-seen values of
+// its candidates -- the reading from before the death was first seen.
+// Recreated containers are left out either way.
+func oomBaseline(key string, in ReconcileInputs, recreated map[string]bool) map[string]int64 {
+	var src map[string]int64
+	if _, had := in.Observations[key]; had {
+		src = in.OOMBaselines[key]
+	} else {
+		src = map[string]int64{}
+		for _, c := range in.OOMCandidates[key] {
+			if v, ok := in.OOMLastSeen[c]; ok {
+				src[c] = v
+			}
+		}
+	}
+	base := map[string]int64{}
+	for c, v := range src {
+		if !recreated[c] {
+			base[c] = v
+		}
+	}
+	return base
+}
+
+// oomDelta is how far key's candidate containers' counters rose above its
+// baseline this pass (#1291). A candidate that is unreadable this pass, has no
+// baseline, or was recreated contributes nothing, so 0 means "no OOM evidence"
+// and never defers anything.
+func oomDelta(key string, in ReconcileInputs, recreated map[string]bool) int64 {
+	base := oomBaseline(key, in, recreated)
+	var delta int64
+	for _, c := range in.OOMCandidates[key] {
+		b, hasBase := base[c]
+		cur, readable := in.OOMCounters[c]
+		if hasBase && readable && cur > b {
+			delta += cur - b
+		}
+	}
+	return delta
+}
+
+// nextOOMState builds the OOM state to persist (#1291). Last-seen is advanced
+// once, after every ticket was evaluated, to each counter read this pass; a
+// container not read keeps its old value (never pruned: the probe skips repos
+// with no Working ticket, and the recreate rule keeps stale values safe). A
+// baseline exists exactly for the keys in next (the observations to persist)
+// that have one, so it is created, carried and dropped with the observation.
+func nextOOMState(in ReconcileInputs, next map[string]time.Time, recreated map[string]bool) (map[string]int64, map[string]map[string]int64) {
+	lastSeen := make(map[string]int64, len(in.OOMLastSeen)+len(in.OOMCounters))
+	maps.Copy(lastSeen, in.OOMLastSeen)
+	maps.Copy(lastSeen, in.OOMCounters)
+	baselines := map[string]map[string]int64{}
+	for key := range next {
+		if base := oomBaseline(key, in, recreated); len(base) > 0 {
+			baselines[key] = base
+		}
+	}
+	return lastSeen, baselines
 }
 
 // hasLiveWindow reports whether the snapshot holds a window for this ticket that
@@ -961,6 +1108,30 @@ func resumeInterruptedComment(attempt int, window, status string) string {
 func failedComment(attempts int, window, status string) string {
 	return fmt.Sprintf("%s\n⛔ cenci dispatch failed after %d attempt(s): window `%s` is gone (last status %s). "+
 		"Labeled `%s` — clear the label or re-plan to retry.", failedMarker, attempts, window, status, labelDispatchFailed)
+}
+
+// oomRemediesText names the three settings a human can change when sessions
+// keep getting OOM-killed (#1291).
+const oomRemediesText = "raise `sandbox.memoryLimit`, lower `dispatch.concurrencyCap`, or raise `dispatch.memoryHeadroom`"
+
+// oomRetryComment (#1291) is posted by an OOM retry: retry n of budget, with
+// the counter delta that classified it. It carries oomRetryMarker -- never
+// attemptMarker -- and, like every ticket comment, names no container,
+// runtime or launch ID.
+func oomRetryComment(n, budget int, delta int64) string {
+	return fmt.Sprintf("%s\n🧠 cenci OOM retry %d of %d: the out-of-memory killer ended this session "+
+		"(its container's `oom_kill` counter rose by %d). This retry is not charged against `dispatch.retryBudget`; "+
+		"the ticket is re-queued for pickup after `dispatch.oomBackoff`. If this keeps happening, %s.",
+		oomRetryMarker, n, budget, delta, oomRemediesText)
+}
+
+// oomFailedComment (#1291) is posted when an OOM-classified recovery finds
+// dispatch.oomRetryBudget spent. It carries failedMarker, so it is the same
+// terminal dispatch-failed state as failedComment for every consumer.
+func oomFailedComment(oomRetries int) string {
+	return fmt.Sprintf("%s\n⛔ cenci dispatch failed: the out-of-memory killer ended this session again after %d OOM "+
+		"retr(ies) (`dispatch.oomRetryBudget`). Labeled `%s` — %s, then clear the label or re-plan to retry.",
+		failedMarker, oomRetries, labelDispatchFailed, oomRemediesText)
 }
 
 // planHealComment (#926) is posted by heals A and B (Refined without Planned,

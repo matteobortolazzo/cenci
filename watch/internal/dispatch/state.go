@@ -30,19 +30,136 @@ type stateStore struct {
 // format, which has no "schemaVersion" key at all and unmarshals it to the
 // int zero value -- migrateReconcileState treats that the same as an
 // explicit 0 (both are "legacy v0"), so existing on-disk files load cleanly.
+//
+// The three OOM sections (#1291) are additive optional keys under the same
+// schema version. They stay raw here so a wrong-typed section never fails the
+// whole decode (which would be a StateProbeDecodeError hold): decodeOOMSections
+// decodes and validates them separately, and omitempty keeps a pass with no OOM
+// data writing exactly the pre-#1291 bytes.
 type reconcileState struct {
 	SchemaVersion int                  `json:"schemaVersion"`
 	Observations  map[string]time.Time `json:"observations"`
 	ApplyFailures map[string]int       `json:"applyFailures"`
+	OOMLastSeen   json.RawMessage      `json:"oomLastSeen,omitempty"`
+	OOMBaselines  json.RawMessage      `json:"oomBaselines,omitempty"`
+	OOMRetryAt    json.RawMessage      `json:"oomRetryAt,omitempty"`
 }
 
 // toPublic converts the on-disk DTO to the in-memory ReconcileState the rest
 // of the package uses. A named conversion function (rather than a bare type
 // conversion) is required because reconcileState carries the extra
-// SchemaVersion field, so the two struct types no longer share an identical
-// field set.
+// SchemaVersion field and the raw OOM sections, so the two struct types no
+// longer share an identical field set.
 func (s reconcileState) toPublic() ReconcileState {
-	return ReconcileState{Observations: s.Observations, ApplyFailures: s.ApplyFailures}
+	st := ReconcileState{Observations: s.Observations, ApplyFailures: s.ApplyFailures}
+	st.OOMLastSeen, st.OOMBaselines, st.OOMRetryAt, st.OOMDropped = decodeOOMSections(s)
+	return st
+}
+
+// decodeOOMSections decodes and validates the OOM sections (#1291). Any section
+// of the wrong JSON type or holding an invalid entry (an empty key, a negative
+// counter, a zero timestamp) drops all three -- they describe one shared
+// baseline model, so keeping some would let them disagree -- and returns why in
+// dropped. Never an error to Load: losing this state only means the next
+// recovery takes the ordinary budgeted path, unlike the grace and apply-retry
+// state, whose loss is unsafe (#883).
+func decodeOOMSections(s reconcileState) (lastSeen map[string]int64, baselines map[string]map[string]int64, retryAt map[string]time.Time, dropped error) {
+	lastSeen, baselines, retryAt = map[string]int64{}, map[string]map[string]int64{}, map[string]time.Time{}
+	err := func() error {
+		if err := decodeOOMSection(s.OOMLastSeen, &lastSeen); err != nil {
+			return fmt.Errorf("oomLastSeen: %w", err)
+		}
+		if err := decodeOOMSection(s.OOMBaselines, &baselines); err != nil {
+			return fmt.Errorf("oomBaselines: %w", err)
+		}
+		if err := decodeOOMSection(s.OOMRetryAt, &retryAt); err != nil {
+			return fmt.Errorf("oomRetryAt: %w", err)
+		}
+		return validateOOMSections(lastSeen, baselines, retryAt)
+	}()
+	if err != nil {
+		return map[string]int64{}, map[string]map[string]int64{}, map[string]time.Time{}, err
+	}
+	return lastSeen, baselines, retryAt, nil
+}
+
+// decodeOOMSection unmarshals one raw section into dst; an absent section (or a
+// JSON null) leaves dst as the empty map it was given.
+func decodeOOMSection[M ~map[K]V, K comparable, V any](raw json.RawMessage, dst *M) error {
+	if len(raw) == 0 {
+		return nil
+	}
+	if err := json.Unmarshal(raw, dst); err != nil {
+		return err
+	}
+	if *dst == nil {
+		*dst = M{}
+	}
+	return nil
+}
+
+// validateOOMSections checks the integrity invariants of the decoded OOM
+// sections, mirroring validateReconcileState's rules for the safety state.
+func validateOOMSections(lastSeen map[string]int64, baselines map[string]map[string]int64, retryAt map[string]time.Time) error {
+	for k, v := range lastSeen {
+		if k == "" {
+			return errors.New("empty container key in oomLastSeen")
+		}
+		if v < 0 {
+			return fmt.Errorf("negative oomLastSeen counter for %q: %d", k, v)
+		}
+	}
+	for ticket, containers := range baselines {
+		if ticket == "" {
+			return errors.New("empty ticket key in oomBaselines")
+		}
+		for k, v := range containers {
+			if k == "" {
+				return fmt.Errorf("empty container key in oomBaselines for %q", ticket)
+			}
+			if v < 0 {
+				return fmt.Errorf("negative oomBaselines counter for %q/%q: %d", ticket, k, v)
+			}
+		}
+	}
+	for k, v := range retryAt {
+		if k == "" {
+			return errors.New("empty ticket key in oomRetryAt")
+		}
+		if v.IsZero() {
+			return fmt.Errorf("zero-value oomRetryAt timestamp for %q", k)
+		}
+	}
+	return nil
+}
+
+// marshalOOMSection renders one OOM section for Save; an empty map stays nil so
+// omitempty leaves its key out of the file.
+func marshalOOMSection[M ~map[K]V, K comparable, V any](m M) (json.RawMessage, error) {
+	if len(m) == 0 {
+		return nil, nil
+	}
+	return json.Marshal(m)
+}
+
+// oomBackoffLoadFn is the dispatch-side seam (#1291) that reads the OOM retry
+// times the reconciler persisted, keyed by planKey(repo, number) like every
+// other ticket-keyed map in this package. It is read-only: dispatch never
+// writes reconcile.json. An unreadable file, or OOM sections Load had to drop,
+// is an error for the caller to log; the map is then nil. Tests stub it in
+// TestMain so no test reads a developer's real state file.
+var oomBackoffLoadFn = defaultOOMBackoffLoad
+
+// defaultOOMBackoffLoad reads the OOM retry times from the default state path.
+func defaultOOMBackoffLoad() (map[string]time.Time, error) {
+	st, err := NewStateStore("").Load()
+	if err != nil {
+		return nil, err
+	}
+	if st.OOMDropped != nil {
+		return nil, fmt.Errorf("reconcile state OOM sections dropped: %w", st.OOMDropped)
+	}
+	return st.OOMRetryAt, nil
 }
 
 // currentReconcileSchema is the schema version this build writes. Bumped
@@ -73,10 +190,16 @@ func NewStateStore(path string) ReconcileStore {
 	return &stateStore{path: path}
 }
 
-// emptyReconcileState is the zero-value ReconcileState with both maps
+// emptyReconcileState is the zero-value ReconcileState with every map
 // initialized, so Load never hands a caller a nil map on any error path.
 func emptyReconcileState() ReconcileState {
-	return ReconcileState{Observations: map[string]time.Time{}, ApplyFailures: map[string]int{}}
+	return ReconcileState{
+		Observations:  map[string]time.Time{},
+		ApplyFailures: map[string]int{},
+		OOMLastSeen:   map[string]int64{},
+		OOMBaselines:  map[string]map[string]int64{},
+		OOMRetryAt:    map[string]time.Time{},
+	}
 }
 
 // StateProbe classifies a stateStore.Load attempt into a closed set (mirrors
@@ -265,6 +388,16 @@ func (s *stateStore) Save(state ReconcileState) error {
 		SchemaVersion: currentReconcileSchema,
 		Observations:  state.Observations,
 		ApplyFailures: state.ApplyFailures,
+	}
+	var err error
+	if dto.OOMLastSeen, err = marshalOOMSection(state.OOMLastSeen); err != nil {
+		return fmt.Errorf("marshaling reconcile state oomLastSeen: %w", err)
+	}
+	if dto.OOMBaselines, err = marshalOOMSection(state.OOMBaselines); err != nil {
+		return fmt.Errorf("marshaling reconcile state oomBaselines: %w", err)
+	}
+	if dto.OOMRetryAt, err = marshalOOMSection(state.OOMRetryAt); err != nil {
+		return fmt.Errorf("marshaling reconcile state oomRetryAt: %w", err)
 	}
 	data, err := json.MarshalIndent(dto, "", "  ")
 	if err != nil {
