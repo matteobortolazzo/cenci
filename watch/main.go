@@ -18,10 +18,14 @@ var version = "dev"
 
 func main() {
 	// argv[0] alias: a binary invoked (directly or via a symlink/copy) as
-	// "cn" behaves as `cenci open <args>` — a shorthand entry point kept
-	// alongside the canonical "cenci" binary name.
+	// "cn" defaults to `cenci open <args>`, with an explicit "remote"
+	// exception for native host remote control.
 	if filepath.Base(os.Args[0]) == "cn" {
-		runOpen(os.Args[1:])
+		if len(os.Args) > 1 && os.Args[1] == "remote" {
+			runRemote(os.Args[2:])
+		} else {
+			runOpen(os.Args[1:])
+		}
 		return
 	}
 
@@ -80,6 +84,8 @@ Details: docs/migrating-to-cenci.md in the cenci repo.
 		runWorktrees(os.Args[2:])
 	case "open":
 		runOpen(os.Args[2:])
+	case "remote":
+		runRemote(os.Args[2:])
 	case "diagnose":
 		runDiagnose(os.Args[2:])
 	case "audit":
@@ -132,6 +138,7 @@ Commands:
   worktrees ls                       list this repo's .worktrees/* worktrees with verdict, reason and size, changing nothing
   worktrees prune [--dry-run]        remove this repo's finished and stale worktrees, or with --dry-run print what would go
   open [shortcut]                    launch or attach an interactive sandbox session (aliased by the "cn" binary name)
+  remote claude|codex                native host remote control (also: cn remote); Codex start|pair|stop
   diagnose [flags]                   read-only report on a sandbox session's container/daemon/version health
   audit [flags]                      read-only report on the effective sandbox security posture the launcher would apply (mounts, env names, network, dind, credential sources, boundary weakenings)
   security explain [flags]           plain-language "why this is/isn't safe" narrative over the same posture cenci audit reports

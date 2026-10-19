@@ -2316,10 +2316,71 @@ secret passed as a forwarded flag appears in clear — review those too before
 sharing. Works with agent+model shortcuts, `--dind`, `--host-network`, and a
 trailing `--` forwarded-args section.
 
-**`cn` alias:** a copy or symlink of the `cenci` binary named `cn` behaves as
-`cenci open <args>` — `cn xs` is exactly `cenci open xs`. It is the one alias
-binary; the retired `cenci-sand` name is a tombstone that prints a migration
-map and exits 2.
+**`cn` alias:** a copy or symlink of the `cenci` binary named `cn` defaults to
+`cenci open <args>` — `cn xs` is exactly `cenci open xs`. The reserved first
+argument `remote` routes to `cenci remote` instead; `cn -- remote` still forwards
+`remote` to the sandboxed agent. It is the one alias binary; the retired
+`cenci-sand` name is a tombstone that prints a migration map and exits 2.
+
+## Native remote control (`cenci remote`, `cn remote`)
+
+Run these commands **on the development machine**, with the agent CLI installed
+and signed in. They invoke the agent directly in the selected directory, without
+launching a cenci container. They preserve the agent's permissions and sandbox
+settings; they do not enable permission bypasses or connect to another host over SSH.
+Running them inside a container still runs the agent inside that container.
+
+```bash
+# Claude: expose this repo under its name in the app (e.g. cenci)
+cn remote claude
+
+# Serve a project, with new remote sessions created in separate git worktrees
+cn remote claude --dir /path/to/repo -- --spawn worktree
+
+# Codex: enable its background remote server, then print a pairing code
+cn remote codex start
+cn remote codex pair
+
+# Stop the Codex remote server
+cn remote codex stop
+
+# Inspect the launch without requiring an installed agent or starting anything
+cenci remote claude --dry-run
+```
+
+| Form / flag | Behavior |
+|---|---|
+| `remote claude` | Runs `claude remote-control --name <repo-name>` in the current terminal. |
+| `remote codex` | Runs `codex remote-control`; its native daemon/foreground behavior applies. |
+| `remote codex start\|pair\|stop` | Runs the corresponding native Codex remote-control subcommand. `pair` prints its short-lived pairing code; it does not start the daemon. |
+| `--name NAME` | Optional override for Claude's remote name. Defaults to the repo directory name, including from subdirectories and linked worktrees. Uses the selected directory's name outside Git or if Git cannot be queried. Explicit empty names and use with Codex are rejected. |
+| `--dir PATH` | Working directory, default current directory; supports relative paths. |
+| `--dry-run` | Prints the directory and quoted argument vector without launching or requiring the agent executable. Forwarded arguments are printed verbatim, so avoid including secrets. |
+| `-- agent-args...` | Forwards subsequent arguments verbatim, e.g. `cn remote codex pair -- --json` or `cn remote codex -- --no-daemon`. |
+
+Both `cenci remote` and `cn remote` accept the same grammar. Unknown agents,
+actions, flags, and extra positional arguments fail with exit 2 before launch;
+missing executables or unusable directories fail with exit 1. The native agent's
+output, interactive prompts, signals, and exit status pass through unchanged.
+An older CLI that lacks remote control reports its own error; cenci does not
+upgrade the agent or fall back to a different launch mode.
+
+**Connecting from your phone:** select the repo-named Remote Control environment
+in the Claude app's Code section to start work there. Claude also prints its session
+URL and offers a QR code. `cn remote claude` from a repo named `cenci` supplies
+`--name cenci` automatically; a manual label is unnecessary. Keep
+the host and server running (use a persistent terminal such as tmux when starting
+over SSH). Claude handles first-use consent, workspace trust, and subscription
+eligibility. See the [Claude Remote Control guide](https://code.claude.com/docs/en/remote-control).
+
+For Codex, `start` followed by `pair` exposes the native CLI pairing flow for a
+compatible remote client. The feature is experimental and requires a supporting
+Codex version and account. The mobile setup guide currently directs users to
+enable Remote Control in the desktop app; a CLI pairing code alone is not a
+guarantee that a given mobile client can connect. Follow the client's connection
+flow. Codex's documented remote CLI has no equivalent session-name flag, so name
+chats in the client. See the [Codex CLI reference](https://learn.chatgpt.com/docs/cli/reference#codex-remote-control)
+and [remote connection setup](https://learn.chatgpt.com/docs/remote-connections).
 
 ## Diagnosing a sandbox session (`cenci diagnose`)
 

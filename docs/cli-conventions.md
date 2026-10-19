@@ -29,9 +29,11 @@ cenci <verb> [subverb] [args] [flags]
 
 ## Aliases and shortcuts
 
-- Exactly **one** alias binary exists: `cn`, an argv[0] alias for
-  `cenci open`. `cn <args>` behaves exactly as `cenci open <args>`. No other
-  alias binaries, symlinked spellings, or wrapper scripts.
+- Exactly **one** alias binary exists: `cn`, an argv[0] alias defaulting to
+  `cenci open`. The reserved first argument `remote` routes to `cenci remote`;
+  all other `cn <args>` behave exactly as `cenci open <args>`. A `remote` token
+  after `--` remains an agent argument. No other alias binaries, symlinked
+  spellings, or wrapper scripts.
 - One-token agent+model shortcuts (`ch`/`cs`/`co`/`cf` for Claude,
   `xl`/`xt`/`xa`/`xs` for Codex) are accepted only as the first argument of
   `cenci open`/`cn`, so they can never shadow a later flag or prompt string.
