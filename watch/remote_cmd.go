@@ -26,7 +26,7 @@ The native CLI handles authentication, eligibility, and pairing output.
 // handling, and exit status. It does not start a shell or change agent permissions.
 func runRemote(args []string) {
 	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h") {
-		fmt.Fprint(os.Stdout, remoteUsage)
+		_, _ = fmt.Fprint(os.Stdout, remoteUsage)
 		return
 	}
 	if len(args) == 0 || (args[0] != "claude" && args[0] != "codex") {
@@ -55,7 +55,7 @@ func runRemote(args []string) {
 	name := fs.String("name", "", "Claude remote session title")
 	dir := fs.String("dir", ".", "working directory")
 	dryRun := fs.Bool("dry-run", false, "print directory and argv without launching")
-	fs.Usage = func() { fmt.Fprint(fs.Output(), remoteUsage) }
+	fs.Usage = func() { _, _ = fmt.Fprint(fs.Output(), remoteUsage) }
 	_ = fs.Parse(args)
 	rejectExtra("cenci remote", fs.Args())
 	fs.Visit(func(f *flag.Flag) {
