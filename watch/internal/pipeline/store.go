@@ -6,14 +6,14 @@ package pipeline
 // from internal/sandbox/launcher/scope.go's ResolveRepoRoot — see
 // resolveRepoRoot's own doc comment below for why), the canonical
 // <repo>/.cenci/pipeline/<id>.json path (with <id> validated against ^\d+$
-// before it ever reaches a path), and atomic load/save (mirrors
-// internal/babysit's State/load/save: .tmp + os.Rename, MarshalIndent,
-// MkdirAll).
+// before it ever reaches a path), and the State format. The atomic load/save
+// of that format (temp file, rename, MarshalIndent) lives in stateroot.go,
+// which scopes every file operation to an os.Root on the state directory.
 
 import (
-	"encoding/json"
+	"errors"
 	"fmt"
-	"os"
+	"io/fs"
 	"os/exec"
 	"path/filepath"
 	"regexp"
@@ -130,65 +130,6 @@ func resolveRepoRoot(cwd string) (string, error) {
 	return filepath.Dir(commonDir), nil
 }
 
-// saveState writes s to path atomically: marshal, write to a fresh sibling
-// temp file (exclusive create, random name), then os.Rename over the target so
-// a reader never observes a partially-written file.
-func saveState(path string, s State) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return fmt.Errorf("create state dir: %w", err)
-	}
-	b, err := json.MarshalIndent(s, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal state: %w", err)
-	}
-	// The state dir lives in the agent-writable bind-mounted repo, so the temp
-	// file must be a fresh O_EXCL create under an unpredictable name: a fixed
-	// "<path>.tmp" could be a planted symlink that os.WriteFile would follow.
-	f, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
-	if err != nil {
-		return fmt.Errorf("create temp state file: %w", err)
-	}
-	tmp := f.Name()
-	if _, err := f.Write(b); err != nil {
-		_ = f.Close()
-		_ = os.Remove(tmp)
-		return fmt.Errorf("write temp state file: %w", err)
-	}
-	if err := f.Chmod(0o644); err != nil {
-		_ = f.Close()
-		_ = os.Remove(tmp)
-		return fmt.Errorf("chmod temp state file: %w", err)
-	}
-	if err := f.Close(); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("close temp state file: %w", err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("rename temp state file: %w", err)
-	}
-	return nil
-}
-
-// loadState reads the state at path. A missing file is tolerated (mirrors
-// babysit's load): it is the normal "no pipeline run yet" case, returned as
-// StageNew with no error, since the very first `cenci pipeline prepare <id>`
-// run for a ticket must not fail just because no state file exists yet.
-func loadState(path string) (State, error) {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return State{Stage: StageNew}, nil
-		}
-		return State{}, fmt.Errorf("read state file: %w", err)
-	}
-	var s State
-	if err := json.Unmarshal(b, &s); err != nil {
-		return State{}, fmt.Errorf("decode state file: %w", err)
-	}
-	return s, nil
-}
-
 // ClearLaunch removes the recorded launch triple (SessionKeyLaunchID,
 // SessionKeyContainer, SessionKeyRuntime) from the ticket's persisted
 // session, keeping every other session key, under the same per-ticket flock the
@@ -202,36 +143,34 @@ func loadState(path string) (State, error) {
 // write). An unreadable or corrupt file is an error, so a caller never
 // proceeds believing a stale launch was cleared.
 //
-// Because .cenci/ lives in the agent-writable bind-mounted repo, a symlinked
-// .cenci or .cenci/pipeline directory would redirect the host-side lock, read,
-// temp file and rename outside the repo. checkStateDirContained refuses both
-// (and any state directory that resolves outside the repo root) before the
-// lock is taken. This closes the static symlink case only: a swap that races
-// the check (TOCTOU) is a known residual, tracked as a followup together with
-// a repo-wide os.Root migration of the other state writers.
+// Because .cenci/ lives in the agent-writable bind-mounted repo, the state is
+// reached only through a stateDir (stateroot.go): a symlinked .cenci,
+// .cenci/pipeline or --state-dir, a symlinked, FIFO or oversized state file and
+// a symlinked lock file are all refused, and a directory swapped after the walk
+// cannot redirect the lock, read, temp file or rename outside the repo.
 func ClearLaunch(o ArtifactOpts) error {
-	path, err := resolveStatePath(Opts{ID: o.ID, RepoRoot: o.RepoRoot, StateDir: o.StateDir})
+	loc, err := resolveStateLocation(Opts{ID: o.ID, RepoRoot: o.RepoRoot, StateDir: o.StateDir})
 	if err != nil {
 		return err
 	}
-	// Lstat, not Stat: the state file is agent-writable, so a planted symlink
-	// (or directory, device) at the path is refused rather than read or
-	// rewritten through by this host-side writer.
-	info, statErr := os.Lstat(path)
-	if os.IsNotExist(statErr) {
+	d, err := openStateDir(loc, false)
+	if errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
-	if statErr != nil {
-		return fmt.Errorf("stat state file %s: %w", path, statErr)
-	}
-	if !info.Mode().IsRegular() {
-		return fmt.Errorf("state file %s is not a regular file (mode %s), refusing to clear its launch", path, info.Mode().Type())
-	}
-	if err := checkStateDirContained(path, o.StateDir == ""); err != nil {
+	if err != nil {
 		return err
 	}
-	return withLock(path+".lock", defaultRetryConfig(), func() error {
-		s, lerr := loadState(path)
+	defer func() { _ = d.Close() }()
+	// Checked before the lock so a missing file creates no lock file, and a
+	// planted symlink (or directory, device, FIFO) is refused rather than read
+	// or rewritten through by this host-side writer.
+	if _, err := d.lstatState(); errors.Is(err, fs.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("%w, refusing to clear its launch", err)
+	}
+	return withLock(d, defaultRetryConfig(), func() error {
+		s, lerr := d.load()
 		if lerr != nil {
 			return lerr
 		}
@@ -239,53 +178,8 @@ func ClearLaunch(o ArtifactOpts) error {
 			return nil
 		}
 		s.UpdatedAt = time.Now().UTC()
-		return saveState(path, s)
+		return d.save(s)
 	})
-}
-
-// checkStateDirContained refuses a state directory that an agent-planted
-// symlink could redirect outside the repo. It Lstat-checks the directory that
-// holds the state file and, when the path is the canonical
-// <repoRoot>/.cenci/pipeline/<id>.json (repoLayout), the .cenci directory too:
-// each must be a real directory, not a symlink. It then compares the fully
-// resolved state directory against the resolved repo root and refuses unless it
-// is inside. An explicit StateDir override has no repo root, so only the
-// state directory's own Lstat check applies. The errors name paths only, never
-// recorded values.
-func checkStateDirContained(stateFile string, repoLayout bool) error {
-	stateDir := filepath.Dir(stateFile)
-	dirs := []string{stateDir}
-	repoRoot := ""
-	if repoLayout {
-		cenciDir := filepath.Dir(stateDir)
-		repoRoot = filepath.Dir(cenciDir)
-		dirs = []string{cenciDir, stateDir}
-	}
-	for _, d := range dirs {
-		info, err := os.Lstat(d)
-		if err != nil {
-			return fmt.Errorf("stat state directory %s: %w", d, err)
-		}
-		if !info.IsDir() {
-			return fmt.Errorf("state directory %s is not a plain directory (mode %s), refusing to clear its launch", d, info.Mode().Type())
-		}
-	}
-	if repoRoot == "" {
-		return nil
-	}
-	resolvedRoot, err := filepath.EvalSymlinks(repoRoot)
-	if err != nil {
-		return fmt.Errorf("resolve repo root %s: %w", repoRoot, err)
-	}
-	resolvedState, err := filepath.EvalSymlinks(stateDir)
-	if err != nil {
-		return fmt.Errorf("resolve state directory %s: %w", stateDir, err)
-	}
-	rel, err := filepath.Rel(resolvedRoot, resolvedState)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return fmt.Errorf("state directory %s resolves outside the repo root %s, refusing to clear its launch", stateDir, repoRoot)
-	}
-	return nil
 }
 
 // deleteLaunchKeys removes the three launch keys from s.Session and reports

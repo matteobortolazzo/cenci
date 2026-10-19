@@ -10,7 +10,9 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/planfile"
 )
@@ -681,6 +683,45 @@ func writeStateFile(t *testing.T, dir string, number int, content string) {
 	}
 }
 
+// fifoDeadline is how long a state-file read may take on a FIFO before the test
+// calls it blocked: the open must be non-blocking.
+const fifoDeadline = 5 * time.Second
+
+// plantStateFifo creates a FIFO with no writer where ticket number's state file
+// belongs. Its cleanup opens (and closes) a writer, so a read that wrongly
+// blocked in open(2) is released instead of leaking a stuck goroutine.
+func plantStateFifo(t *testing.T, dir string, number int) {
+	t.Helper()
+	pipelineDir := filepath.Join(dir, ".cenci", "pipeline")
+	if err := os.MkdirAll(pipelineDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(pipelineDir, strconv.Itoa(number)+".json")
+	if err := syscall.Mkfifo(path, 0o600); err != nil {
+		t.Fatalf("mkfifo %s: %v", path, err)
+	}
+	t.Cleanup(func() {
+		if w, err := os.OpenFile(path, os.O_WRONLY|syscall.O_NONBLOCK, 0); err == nil {
+			_ = w.Close()
+		}
+	})
+}
+
+// returnsWithin runs fn and fails the test when it has not returned within d.
+func returnsWithin(t *testing.T, d time.Duration, fn func()) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		fn()
+	}()
+	select {
+	case <-done:
+	case <-time.After(d):
+		t.Fatalf("call did not return within %v: it is blocked on the state file", d)
+	}
+}
+
 // TestProbeStage_PresentKnownStage covers the AC's "readable, known stage"
 // case: the persisted stage is recorded verbatim and classified Present.
 func TestProbeStage_PresentKnownStage(t *testing.T) {
@@ -797,8 +838,11 @@ func TestProbeStage_EmptyDir_NeverProbes_NoCwdRelativeRead(t *testing.T) {
 // read produced no usable state.
 func TestProbeStageState_CarriesRecordedLaunch(t *testing.T) {
 	tests := []struct {
-		name       string
-		content    string // "" = no state file at all
+		name    string
+		content string // "" = no state file at all
+		// setup, when set, plants the state file itself (content is then unused),
+		// for hostile files a plain write cannot make.
+		setup      func(t *testing.T, dir string)
 		wantStage  string
 		wantProbe  StageProbe
 		wantLaunch RecordedLaunch
@@ -859,14 +903,39 @@ func TestProbeStageState_CarriesRecordedLaunch(t *testing.T) {
 			wantStage: "",
 			wantProbe: StageProbeError,
 		},
+		{
+			// Valid JSON with a valid triple, padded one byte past the 1 MiB read
+			// cap: without the cap this would read as a present stage with a launch.
+			name: "state file one byte over the read cap yields no launch and StageProbeError",
+			setup: func(t *testing.T, dir string) {
+				body := `{"schemaVersion":2,"id":"42","stage":"plan_approved","session":{"launchId":"` + testLaunchID + `","container":"` + testLaunchContainer + `","runtime":"` + testLaunchRuntime + `"}}`
+				writeStateFile(t, dir, 42, body+strings.Repeat(" ", 1<<20+1-len(body)))
+			},
+			wantStage: "",
+			wantProbe: StageProbeError,
+		},
+		{
+			name:      "FIFO state file yields no launch and StageProbeError without blocking",
+			setup:     func(t *testing.T, dir string) { plantStateFifo(t, dir, 42) },
+			wantStage: "",
+			wantProbe: StageProbeError,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			dir := t.TempDir()
-			if tt.content != "" {
+			switch {
+			case tt.setup != nil:
+				tt.setup(t, dir)
+			case tt.content != "":
 				writeStateFile(t, dir, 42, tt.content)
 			}
-			stage, probe, launch := probeStageState(dir, 42)
+			var (
+				stage  string
+				probe  StageProbe
+				launch RecordedLaunch
+			)
+			returnsWithin(t, fifoDeadline, func() { stage, probe, launch = probeStageState(dir, 42) })
 			if stage != tt.wantStage || probe != tt.wantProbe {
 				t.Errorf("probeStageState = (%q, %q), want (%q, %q)", stage, probe, tt.wantStage, tt.wantProbe)
 			}

@@ -10,7 +10,6 @@ package pipeline
 import (
 	"errors"
 	"fmt"
-	"os"
 	"syscall"
 )
 
@@ -24,20 +23,20 @@ var ErrLockContention = errors.New("lock contention")
 // can be exercised without depending on real kernel lock behavior.
 var flockFn = syscall.Flock
 
-// withLock acquires an exclusive flock on lockPath (creating it if needed),
-// retried via cfg on EWOULDBLOCK, then calls fn while holding the lock. The
-// lock is released before withLock returns, regardless of fn's outcome. fn's
+// withLock acquires an exclusive flock on d's lock file (creating it if needed,
+// through d, which refuses a symlink or other non-regular file planted in its
+// place), retried via cfg on EWOULDBLOCK, then calls fn while holding the lock.
+// The lock is released before withLock returns, regardless of fn's outcome. fn's
 // own error is returned unwrapped — never masqueraded as ErrLockContention
 // (rule #446) — so callers can distinguish "we never got the lock" from "we
 // got the lock but the operation itself failed".
-func withLock(lockPath string, cfg retryConfig, fn func() error) error {
-	// O_NOFOLLOW: the lock file sits beside an agent-writable state file, so a
-	// planted symlink must fail the open (ELOOP) instead of being followed.
-	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0o600)
+func withLock(d *stateDir, cfg retryConfig, fn func() error) error {
+	f, err := d.openLock()
 	if err != nil {
-		return fmt.Errorf("open lock file %s: %w", lockPath, err)
+		return err
 	}
 	defer func() { _ = f.Close() }()
+	lockPath := d.displayPath() + ".lock"
 
 	acquireErr := retryDo(func() error {
 		if flockErr := flockFn(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); flockErr != nil {

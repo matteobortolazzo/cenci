@@ -297,15 +297,29 @@ keep its own ticket looking `live`; validation stops any argv injection.
 
 **Host-side state access is hostile input.** The dispatcher's `pipeline.ClearLaunch` is the
 first automatic host-side write to `.cenci/pipeline/<id>.json`, a file the sandboxed agent can
-write through the bind mount. Any host-side (daemon, dispatcher, babysit) read or write of a
-file under the repo must therefore assume the agent planted a symlink or FIFO at that path.
-Do not use `path + ".tmp"` or `path + ".lock"` with `os.WriteFile`/`O_CREATE`: `saveState`
-creates its temp file with `os.CreateTemp` (exclusive, randomized name), `withLock` opens the
-lock with `O_NOFOLLOW`, and `ClearLaunch` `Lstat`s the state file and its directories and
-refuses anything that is not a regular file or that resolves outside the repo. Code that is
-safe inside the container is not automatically safe once the same code runs on the host. A
-swap that races those checks, and the unbounded `os.ReadFile` in the collector's read, remain
-open until host-side state access moves onto an `os.Root`-scoped helper (followup).
+write through the bind mount, and the collector's `pipeline.GetArtifacts` reads it every pass.
+Any host-side (daemon, dispatcher, babysit) read or write of a file under the repo must
+therefore assume the agent planted a symlink, FIFO or oversized file at that path, or swaps a
+directory for a symlink between two path-based operations. Do not use `path + ".tmp"` or
+`path + ".lock"` with `os.WriteFile`/`O_CREATE`, and do not open the state by path.
+
+All state access in `internal/pipeline` (the host-side callers and the in-container
+`cenci pipeline` verbs alike, since the same code runs on both sides of the mount) goes through
+one `os.Root`-scoped helper, `stateDir` in `stateroot.go`. It walks `.cenci` and then `pipeline`
+one component at a time from an `os.Root` on the repo root (`Lstat` must show a plain
+directory, then `OpenRoot`, then `os.SameFile` between the two), keeps only the innermost root,
+and does every read, temp-file create, chmod, rename, remove and lock open through it, so a
+directory swapped after the walk cannot redirect anything outside the repo. An explicit
+`--state-dir` is entered the same way from its parent, so a symlink as its final component is
+refused; symlinks in its parent path components are the operator's responsibility (it is an
+operator-supplied CLI/test hook, and host-side automation always uses the repo layout). A state file is read with a non-blocking `O_NOFOLLOW` open, an
+`Lstat`/`Fstat` regular-file and same-file check, and a 1 MiB cap (`maxStateFileBytes`): a
+symlink, FIFO or oversized file fails fast with an error naming the path, never blocks and never
+echoes content, which `probeStageState` maps to `StageProbeError` and the spawn path to a
+logged "clearing recorded launch failed" skip. `os.Root.OpenFile` follows a final in-root
+symlink despite `O_NOFOLLOW`, so the lock file and temp files are created `O_EXCL` and an
+existing lock file must pass the same `Lstat`/`Fstat` check. Code that is safe inside the
+container is not automatically safe once the same code runs on the host.
 
 **Tests.** `reconcile_test.go` drives `Reconcile` with hand-built `LaunchVerdicts`;
 `reconcile_run_test.go` drives `resolveLaunchVerdicts` through `launchProbeFn` /

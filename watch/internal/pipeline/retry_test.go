@@ -270,7 +270,7 @@ func TestRetryExhaustion_LockContentionVsGhTransient_AreContentDistinguishable(t
 	}
 
 	lockCfg := retryConfig{Attempts: 2, Base: time.Millisecond, Max: 2 * time.Millisecond, Sleep: func(time.Duration) {}}
-	lockErr := withLock(lockPath, lockCfg, func() error { return nil })
+	lockErr := withLock(openTestStateDir(t, dir, "42.json"), lockCfg, func() error { return nil })
 	if lockErr == nil {
 		t.Fatal("withLock: want a lock-contention error while the lock is externally held, got nil")
 	}

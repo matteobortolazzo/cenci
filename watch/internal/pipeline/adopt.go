@@ -97,7 +97,7 @@ func adoptPlanFileStage(o Opts, s State) (planPath string, ok bool) {
 		return "", false
 	}
 
-	// o.ID is already validated against ^\d+$ by resolveStatePath before
+	// o.ID is already validated against ^\d+$ by resolveStateLocation before
 	// Run's locked closure runs, so strconv.Atoi never fails here in
 	// practice; a conversion failure is treated the same as any other
 	// precondition failure -- no adoption.

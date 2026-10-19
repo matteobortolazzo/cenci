@@ -45,7 +45,7 @@ func noSleepConfig(sleptCount *int64) retryConfig {
 func TestWithLock_ConcurrentWriters_NoCorruptionAndContentionRetried(t *testing.T) {
 	dir := t.TempDir()
 	statePath := filepath.Join(dir, "42.json")
-	lockPath := statePath + ".lock"
+	d := openTestStateDir(t, dir, "42.json")
 
 	if err := saveState(statePath, State{SchemaVersion: CurrentSchemaVersion, ID: "42", Stage: StageNew}); err != nil {
 		t.Fatalf("seed saveState: %v", err)
@@ -72,7 +72,7 @@ func TestWithLock_ConcurrentWriters_NoCorruptionAndContentionRetried(t *testing.
 		go func() {
 			defer wg.Done()
 			<-start // maximize overlap so genuine flock contention is likely
-			err := withLock(lockPath, cfg, func() error {
+			err := withLock(d, cfg, func() error {
 				counter++
 				s, err := loadState(statePath)
 				if err != nil {
@@ -133,7 +133,7 @@ func TestWithLock_ExhaustsAttempts_ReturnsErrLockContention(t *testing.T) {
 
 	fnCalls := 0
 	cfg := retryConfig{Attempts: 3, Base: time.Microsecond, Max: time.Microsecond, Sleep: func(time.Duration) {}}
-	err = withLock(lockPath, cfg, func() error {
+	err = withLock(openTestStateDir(t, dir, "42.json"), cfg, func() error {
 		fnCalls++
 		return nil
 	})
@@ -158,8 +158,7 @@ func TestWithLock_ExhaustsAttempts_ReturnsErrLockContention(t *testing.T) {
 // contention. Uses the flockFn seam to script a deterministic non-EWOULDBLOCK
 // errno rather than depending on real kernel lock behavior.
 func TestWithLock_NonEWouldBlockFlockFailure_NotReportedAsLockContention(t *testing.T) {
-	dir := t.TempDir()
-	lockPath := filepath.Join(dir, "42.json.lock")
+	d := openTestStateDir(t, t.TempDir(), "42.json")
 	cfg := retryConfig{Attempts: 3, Base: time.Microsecond, Max: time.Microsecond, Sleep: func(time.Duration) {}}
 
 	original := flockFn
@@ -167,7 +166,7 @@ func TestWithLock_NonEWouldBlockFlockFailure_NotReportedAsLockContention(t *test
 	flockFn = func(int, int) error { return syscall.EBADF }
 
 	fnCalls := 0
-	err := withLock(lockPath, cfg, func() error {
+	err := withLock(d, cfg, func() error {
 		fnCalls++
 		return nil
 	})
@@ -186,27 +185,31 @@ func TestWithLock_NonEWouldBlockFlockFailure_NotReportedAsLockContention(t *test
 	}
 }
 
-// TestWithLock_OpenFileFailure_NotReportedAsLockContention covers the other
+// TestWithLock_OpenLockFailure_NotReportedAsLockContention covers the other
 // "not actually contention" acquisition failure named in the #558 review: a
-// bad/unreadable lock path that fails at os.OpenFile, before the flock retry
-// loop is ever entered.
-func TestWithLock_OpenFileFailure_NotReportedAsLockContention(t *testing.T) {
-	// A lock path under a nonexistent parent directory makes os.OpenFile
-	// fail deterministically (ENOENT), independent of the flock/retry loop.
-	lockPath := filepath.Join(t.TempDir(), "does-not-exist", "42.json.lock")
+// lock file that cannot be opened, before the flock retry loop is ever entered.
+// The state directory is removed after it was opened, so creating the lock file
+// through the directory handle fails deterministically, independent of the
+// flock/retry loop.
+func TestWithLock_OpenLockFailure_NotReportedAsLockContention(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "state")
+	d := openTestStateDir(t, dir, "42.json")
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatalf("remove %s: %v", dir, err)
+	}
 	cfg := retryConfig{Attempts: 3, Base: time.Microsecond, Max: time.Microsecond, Sleep: func(time.Duration) {}}
 
 	fnCalls := 0
-	err := withLock(lockPath, cfg, func() error {
+	err := withLock(d, cfg, func() error {
 		fnCalls++
 		return nil
 	})
 
 	if err == nil {
-		t.Fatal("withLock: want an error for a bad lock path, got nil")
+		t.Fatal("withLock: want an error for a lock file that cannot be opened, got nil")
 	}
 	if errors.Is(err, ErrLockContention) {
-		t.Errorf("withLock error = %v, must NOT satisfy errors.Is(_, ErrLockContention) for an open-file failure", err)
+		t.Errorf("withLock error = %v, must NOT satisfy errors.Is(_, ErrLockContention) for an open failure", err)
 	}
 	if fnCalls != 0 {
 		t.Errorf("fn was called %d times, want 0 (the lock was never actually acquired)", fnCalls)
@@ -217,17 +220,16 @@ func TestWithLock_OpenFileFailure_NotReportedAsLockContention(t *testing.T) {
 // lock is actually released after fn returns (auto-release, not leaked),
 // so a second, independent withLock call on the same path never contends.
 func TestWithLock_ReleasesOnSuccess_AllowsImmediateSubsequentAcquire(t *testing.T) {
-	dir := t.TempDir()
-	lockPath := filepath.Join(dir, "42.json.lock")
+	d := openTestStateDir(t, t.TempDir(), "42.json")
 	cfg := retryConfig{Attempts: 3, Base: time.Microsecond, Max: time.Microsecond, Sleep: func(time.Duration) {}}
 
-	if err := withLock(lockPath, cfg, func() error { return nil }); err != nil {
+	if err := withLock(d, cfg, func() error { return nil }); err != nil {
 		t.Fatalf("first withLock: %v", err)
 	}
 
 	var slept int
 	cfg2 := retryConfig{Attempts: 3, Base: time.Microsecond, Max: time.Microsecond, Sleep: func(time.Duration) { slept++ }}
-	if err := withLock(lockPath, cfg2, func() error { return nil }); err != nil {
+	if err := withLock(d, cfg2, func() error { return nil }); err != nil {
 		t.Fatalf("second withLock: %v", err)
 	}
 	if slept != 0 {
@@ -240,12 +242,11 @@ func TestWithLock_ReleasesOnSuccess_AllowsImmediateSubsequentAcquire(t *testing.
 // acquire the lock" — content-specific per rule #446: a saveState failure
 // inside fn must propagate as-is, never masquerade as ErrLockContention.
 func TestWithLock_FnErrorIsNotWrappedAsLockContention(t *testing.T) {
-	dir := t.TempDir()
-	lockPath := filepath.Join(dir, "42.json.lock")
+	d := openTestStateDir(t, t.TempDir(), "42.json")
 	cfg := retryConfig{Attempts: 3, Base: time.Microsecond, Max: time.Microsecond, Sleep: func(time.Duration) {}}
 
 	sentinel := errors.New("simulated fn failure, unrelated to locking")
-	err := withLock(lockPath, cfg, func() error { return sentinel })
+	err := withLock(d, cfg, func() error { return sentinel })
 
 	if !errors.Is(err, sentinel) {
 		t.Fatalf("withLock error = %v, want errors.Is(_, sentinel) (fn's own error, unwrapped)", err)

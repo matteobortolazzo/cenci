@@ -6,12 +6,7 @@
 // owns everything below that boundary.
 package pipeline
 
-import (
-	"fmt"
-	"os"
-	"path/filepath"
-	"time"
-)
+import "time"
 
 // Opts are the resolved inputs to one `cenci pipeline <stage> <id>`
 // invocation. RepoRoot and StateDir are test/override hooks mirroring the
@@ -75,19 +70,20 @@ type PipelineInfo struct {
 // (state, next_actions, and errors[] all set) so callers can render the
 // contract regardless of success or domain-level failure.
 func Run(o Opts) (Output, error) {
-	path, err := resolveStatePath(o)
+	loc, err := resolveStateLocation(o)
 	if err != nil {
 		return errOutput(StageNew, "", err), err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		mkErr := fmt.Errorf("create state dir: %w", err)
-		return errOutput(StageNew, path, mkErr), mkErr
+	d, err := openStateDir(loc, true)
+	if err != nil {
+		return errOutput(StageNew, loc.display, err), err
 	}
-	lockPath := path + ".lock"
+	defer func() { _ = d.Close() }()
+	path := d.displayPath()
 
 	var out Output
-	lockErr := withLock(lockPath, defaultRetryConfig(), func() error {
-		s, lerr := loadState(path)
+	lockErr := withLock(d, defaultRetryConfig(), func() error {
+		s, lerr := d.load()
 		if lerr != nil {
 			out = errOutput(StageNew, path, lerr)
 			return lerr
@@ -132,7 +128,7 @@ func Run(o Opts) (Output, error) {
 		s.ID = o.ID
 		s.SchemaVersion = CurrentSchemaVersion
 		s.UpdatedAt = time.Now().UTC()
-		if serr := saveState(path, s); serr != nil {
+		if serr := d.save(s); serr != nil {
 			out = errOutput(next, path, serr)
 			return serr
 		}
@@ -147,35 +143,11 @@ func Run(o Opts) (Output, error) {
 			// so out was never populated. Best-effort peek at the current
 			// on-disk stage (outside the lock, for reporting purposes only)
 			// so the contract's state field isn't empty.
-			cur, _ := loadState(path)
-			out = errOutput(cur.Stage, path, lockErr)
+			out = errOutput(d.peekStage(), path, lockErr)
 		}
 		return out, lockErr
 	}
 	return out, nil
-}
-
-// resolveStatePath validates o.ID and computes the state file path for this
-// invocation, per Opts' StateDir/RepoRoot precedence.
-func resolveStatePath(o Opts) (string, error) {
-	if !idPattern.MatchString(o.ID) {
-		return "", fmt.Errorf("invalid ticket id %q: must match ^\\d+$", o.ID)
-	}
-	if o.StateDir != "" {
-		return filepath.Join(o.StateDir, o.ID+".json"), nil
-	}
-	repoRoot := o.RepoRoot
-	if repoRoot == "" {
-		cwd, err := os.Getwd()
-		if err != nil {
-			return "", fmt.Errorf("resolve working directory: %w", err)
-		}
-		repoRoot, err = resolveRepoRoot(cwd)
-		if err != nil {
-			return "", fmt.Errorf("resolve repo root: %w", err)
-		}
-	}
-	return statePath(repoRoot, o.ID)
 }
 
 func successOutput(stage Stage, path string, warnings []string) Output {

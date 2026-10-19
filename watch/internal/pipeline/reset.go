@@ -7,8 +7,8 @@ package pipeline
 // every other mutating verb -- never checks the current stage. There is no
 // stage check anywhere in Reset: `finalized` resets exactly like `prepared`.
 //
-// Structure mirrors Run (pipeline.go): resolveStatePath -> MkdirAll ->
-// withLock(path+".lock", defaultRetryConfig(), fn). Unlike Run's
+// Structure mirrors Run (pipeline.go): resolveStateLocation -> openStateDir
+// (creating) -> withLock(d, defaultRetryConfig(), fn). Unlike Run's
 // lock-contention fallback, which detects "fn never ran" via the
 // out.State == "" sentinel, Reset uses an explicit ran bool: "" is a
 // legitimate out.State on Reset's own corrupt-file + delete-failure
@@ -16,9 +16,9 @@ package pipeline
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
+	"io/fs"
 )
 
 // ResetOpts are the resolved inputs to one `cenci pipeline reset <id>`
@@ -38,21 +38,23 @@ type ResetOpts struct {
 // "new" -- that would falsely claim a rewind occurred) with errors[]
 // populated and a non-nil error.
 func Reset(o ResetOpts) (Output, error) {
-	path, err := resolveStatePath(Opts{ID: o.ID, RepoRoot: o.RepoRoot, StateDir: o.StateDir})
+	loc, err := resolveStateLocation(Opts{ID: o.ID, RepoRoot: o.RepoRoot, StateDir: o.StateDir})
 	if err != nil {
 		return errOutput(StageNew, "", err), err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		mkErr := fmt.Errorf("create state dir: %w", err)
-		return errOutput(StageNew, path, mkErr), mkErr
+	d, err := openStateDir(loc, true)
+	if err != nil {
+		return errOutput(StageNew, loc.display, err), err
 	}
+	defer func() { _ = d.Close() }()
+	path := d.displayPath()
 
 	var out Output
 	ran := false
-	lockErr := withLock(path+".lock", defaultRetryConfig(), func() error {
+	lockErr := withLock(d, defaultRetryConfig(), func() error {
 		ran = true
 		var rerr error
-		out, rerr = resetLocked(o.ID, path)
+		out, rerr = resetLocked(o.ID, d)
 		return rerr
 	})
 
@@ -63,8 +65,7 @@ func Reset(o ResetOpts) (Output, error) {
 			// peek at the current on-disk stage (outside the lock, for
 			// reporting purposes only) so the contract's state field isn't
 			// empty, mirroring Run's own fallback.
-			cur, _ := loadState(path)
-			out = errOutput(cur.Stage, path, lockErr)
+			out = errOutput(d.peekStage(), path, lockErr)
 		}
 		return out, lockErr
 	}
@@ -74,10 +75,10 @@ func Reset(o ResetOpts) (Output, error) {
 // resetLocked runs while holding the per-ticket flock: read (or note the
 // absence of) the current state file, delete it, and build the resulting
 // Output. The returned error is nil except on a genuine delete failure.
-func resetLocked(id, path string) (Output, error) {
-	b, readErr := os.ReadFile(path)
+func resetLocked(id string, d *stateDir) (Output, error) {
+	b, readErr := d.readRaw()
 
-	if readErr != nil && os.IsNotExist(readErr) {
+	if errors.Is(readErr, fs.ErrNotExist) {
 		// Nothing to reset: the idempotent no-op case. No delete attempted.
 		warning := fmt.Sprintf("no pipeline state for %s; nothing to reset", id)
 		return Output{
@@ -108,11 +109,11 @@ func resetLocked(id, path string) (Output, error) {
 		}
 	}
 
-	if removeErr := os.Remove(path); removeErr != nil {
+	if removeErr := d.remove(); removeErr != nil {
 		return Output{
 			State:       string(knownStage),
 			NextActions: nextActionsFor(knownStage),
-			Artifacts:   []string{path},
+			Artifacts:   []string{d.displayPath()},
 			Warnings:    warnings,
 			Errors:      []string{removeErr.Error()},
 		}, removeErr
