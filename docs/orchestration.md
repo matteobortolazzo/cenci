@@ -322,6 +322,21 @@ idempotent alongside `cleanup`. A repo opts out with `windowCleanup.enabled: fal
 has not seen a hook event from since its last restart, are skipped. See
 [Automatic cleanup of finished tickets](../watch/README.md#automatic-cleanup-of-finished-tickets).
 
+The daemon reclaims disk the same way for worktrees: every `-worktree-cleanup-interval`
+(default `10m`, `0` disables it) it removes the `.worktrees/*` checkouts of finished
+tickets (idle at least 1h, clean, nothing unpushed) and of stale ones (idle longer than
+`staleAfter`, default `7d`, with no unsaved work) across a persisted repo registry
+(`$XDG_STATE_HOME/cenci/worktree-repos.json`, built from `dispatch.repos[].dir` and each
+window's `@cenci-repo-dir`). A repo tunes or opts out with `worktreeCleanup.enabled` /
+`worktreeCleanup.staleAfter` in `.cenci/config.json`. Every removal is logged with its
+reason and bytes freed. It fails closed: inside the sandbox, or when the tmux window list
+cannot be read (anything but "no server running"), it removes nothing. `cenci worktrees
+ls|prune [--dry-run]` is the manual front end and `/cenci:sync` the manual fallback. Known
+limitations: an agent in a non-ticket window is protected only by the 1h grace and the
+pane-directory check; worktrees with a submodule or a repo-configured clean/process
+filter are never reclaimed (#1264); repos without a parseable `origin` are skipped. See
+[Automatic worktree cleanup](../watch/README.md#automatic-worktree-cleanup).
+
 `cenci close` also refuses to kill a window whose ticket is still owned by a live
 `cenci babysit` supervisor unless the supervisor's PR reads fully CI-green —
 including through the deferred pending-close path above, where the daemon re-checks

@@ -8,6 +8,8 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -317,4 +319,135 @@ func TestReadSnapshotWithin(t *testing.T) {
 			t.Errorf("err = %v, want errors.Is(err, watch.ErrDaemonUnreachable)", err)
 		}
 	})
+}
+
+// Unit test (#1267): the daemon builds its guards from its own snapshot on the
+// event loop, without a tmux or socket read. The closed set of synthetic statuses
+// (failed, escalated: an attention overlay for tickets with no live window) is an
+// edge an integration test would only reach indirectly, so it is pinned here
+// against the exact maps the guards consult.
+func TestSnapshotLiveState_HoldsTheWindowAndBusyTicketsOfASnapshot(t *testing.T) {
+	tests := []struct {
+		name        string
+		windows     []watch.WindowState
+		wantWindows []int
+		wantBusy    []int
+	}{
+		{name: "running session is a window and busy", windows: []watch.WindowState{busy(42, "running")}, wantWindows: []int{42}, wantBusy: []int{42}},
+		{name: "need-input session is a window and busy", windows: []watch.WindowState{busy(42, "need-input")}, wantWindows: []int{42}, wantBusy: []int{42}},
+		{name: "done, idle and stopped windows are windows but not busy", windows: []watch.WindowState{busy(11, "done"), busy(12, "idle"), busy(13, "stopped")}, wantWindows: []int{11, 12, 13}},
+		{name: "synthetic failed entry says nothing about a worktree", windows: []watch.WindowState{busy(42, "failed")}},
+		{name: "synthetic escalated entry says nothing about a worktree", windows: []watch.WindowState{busy(42, "escalated")}},
+		{name: "a failed overlay does not hide the live window of another ticket", windows: []watch.WindowState{busy(42, "failed"), busy(43, "running")}, wantWindows: []int{43}, wantBusy: []int{43}},
+		{name: "windows without a ticket prefix are ignored", windows: []watch.WindowState{{WindowName: "add-dark-mode", Status: "running"}, {WindowName: "", Status: "running"}}},
+		{name: "leading-zero prefix reads as the number, as classify does", windows: []watch.WindowState{busy(42, "idle"), {WindowName: "043-implement", Status: "running"}}, wantWindows: []int{42, 43}, wantBusy: []int{43}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ls := SnapshotLiveState(&watch.StateSnapshot{Windows: tt.windows})
+
+			if got := trueKeys(ls.WindowTickets); !reflect.DeepEqual(got, orEmpty(tt.wantWindows)) {
+				t.Errorf("WindowTickets = %v, want %v", got, tt.wantWindows)
+			}
+			if got := trueKeys(ls.BusyTickets); !reflect.DeepEqual(got, orEmpty(tt.wantBusy)) {
+				t.Errorf("BusyTickets = %v, want %v", got, tt.wantBusy)
+			}
+			if ls.SnapshotErr != nil || ls.WindowsErr != nil {
+				t.Errorf("SnapshotErr = %v, WindowsErr = %v, want neither: a snapshot is readable and tmux is not consulted", ls.SnapshotErr, ls.WindowsErr)
+			}
+			if len(ls.PaneCwds) != 0 {
+				t.Errorf("PaneCwds = %v, want none: a snapshot knows no pane directories", ls.PaneCwds)
+			}
+		})
+	}
+}
+
+// A nil snapshot is "could not read": SnapshotErr is set rather than an empty,
+// confident answer.
+func TestSnapshotLiveState_NilSnapshotIsAnError(t *testing.T) {
+	if ls := SnapshotLiveState(nil); ls.SnapshotErr == nil {
+		t.Error("SnapshotLiveState(nil).SnapshotErr = nil, want an error")
+	}
+}
+
+// The refactor behind SnapshotLiveState must leave ReadLiveState's snapshot half
+// unchanged: for the same snapshot both yield the same ticket sets.
+func TestSnapshotLiveState_AgreesWithReadLiveState(t *testing.T) {
+	noSandbox(t)
+	snap := &watch.StateSnapshot{Windows: []watch.WindowState{
+		busy(42, "running"), busy(43, "done"), busy(44, "failed"), busy(45, "escalated"), {WindowName: "scratch", Status: "idle"},
+	}}
+
+	got := SnapshotLiveState(snap)
+	want := ReadLiveState(context.Background(), LiveSources{
+		ListPanes:    (&tmuxtest.LivePaneLister{}).ListLivePanes,
+		ReadSnapshot: func() (*watch.StateSnapshot, error) { return snap, nil },
+	})
+
+	if !reflect.DeepEqual(got.WindowTickets, want.WindowTickets) || !reflect.DeepEqual(got.BusyTickets, want.BusyTickets) {
+		t.Errorf("SnapshotLiveState = windows %v busy %v, ReadLiveState = windows %v busy %v; want identical sets",
+			got.WindowTickets, got.BusyTickets, want.WindowTickets, want.BusyTickets)
+	}
+	if len(got.WindowTickets) == 0 {
+		t.Fatal("fixture premise broken: the snapshot yields no window tickets, so the comparison above is vacuous")
+	}
+}
+
+// A guard built from SnapshotLiveState blocks the worktree TargetOf names, with
+// no git involved: this is the check the daemon runs on its event loop.
+func TestSnapshotLiveState_GuardBlocksTheWorktreeOfALiveWindow(t *testing.T) {
+	ls := SnapshotLiveState(&watch.StateSnapshot{Windows: []watch.WindowState{busy(42, "idle")}})
+	guard := InUseGuard(ls, false)
+	live := Entry{Name: "42-feature", LocalPath: "/r/.worktrees/42-feature"}
+	other := Entry{Name: "43-feature", LocalPath: "/r/.worktrees/43-feature"}
+
+	if blocked, err := guard(context.Background(), TargetOf(live)); err != nil || !blocked {
+		t.Errorf("guard(live window's worktree) = %v, %v; want blocked", blocked, err)
+	}
+	if blocked, err := guard(context.Background(), TargetOf(other)); err != nil || blocked {
+		t.Errorf("guard(other ticket's worktree) = %v, %v; want not blocked", blocked, err)
+	}
+}
+
+// Unit test: TargetOf must read the ticket exactly as classify.go does, because a
+// guard is asked about the Target that Classify would build for the same entry.
+func TestTargetOf(t *testing.T) {
+	tests := []struct {
+		name  string
+		entry Entry
+		want  Target
+	}{
+		{"ticket worktree", Entry{Name: "42-feature", LocalPath: "/r/.worktrees/42-feature"}, Target{Ticket: 42, Name: "42-feature", LocalPath: "/r/.worktrees/42-feature"}},
+		{"leading zeros read as the number", Entry{Name: "042-x", LocalPath: "/r/.worktrees/042-x"}, Target{Ticket: 42, Name: "042-x", LocalPath: "/r/.worktrees/042-x"}},
+		{"ticketless worktree", Entry{Name: "scratch", LocalPath: "/r/.worktrees/scratch"}, Target{Name: "scratch", LocalPath: "/r/.worktrees/scratch"}},
+		{"bare number is no ticket prefix", Entry{Name: "42", LocalPath: "/r/.worktrees/42"}, Target{Name: "42", LocalPath: "/r/.worktrees/42"}},
+		{"number beyond int32 is no ticket", Entry{Name: "99999999999-x", LocalPath: "/r/.worktrees/99999999999-x"}, Target{Name: "99999999999-x", LocalPath: "/r/.worktrees/99999999999-x"}},
+		{"entry names are used as given, not the admin name", Entry{AdminName: "other", Name: "7-seven", LocalPath: "/r/.worktrees/7-seven"}, Target{Ticket: 7, Name: "7-seven", LocalPath: "/r/.worktrees/7-seven"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := TargetOf(tt.entry); got != tt.want {
+				t.Errorf("TargetOf(%+v) = %+v, want %+v", tt.entry, got, tt.want)
+			}
+		})
+	}
+}
+
+// trueKeys lists the keys of m that are true, ascending.
+func trueKeys(m map[int]bool) []int {
+	keys := []int{}
+	for k, v := range m {
+		if v {
+			keys = append(keys, k)
+		}
+	}
+	slices.Sort(keys)
+	return keys
+}
+
+func orEmpty(s []int) []int {
+	if s == nil {
+		return []int{}
+	}
+	return s
 }

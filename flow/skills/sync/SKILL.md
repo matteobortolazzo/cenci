@@ -17,6 +17,8 @@ allowed-tools: Read, AskUserQuestion, Bash(git status:*), Bash(git stash:*), Bas
 
 Sync the local repository: pull latest main, rebase active worktrees onto updated main, prune stale remote references, and clean up local branches and worktrees left over from merged PRs.
 
+> **Note**: The cenci-watch daemon also reclaims finished and stale worktrees automatically (`-worktree-cleanup-interval`, default 10m), and `cenci worktrees ls|prune` does the same on demand. This skill remains the manual fallback for repos where that pass is disabled or not running.
+
 ### Parse `$ARGUMENTS`
 
 All of `$ARGUMENTS` is optional **user context** (additional instructions or focus areas).

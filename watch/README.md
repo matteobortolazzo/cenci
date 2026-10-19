@@ -1528,6 +1528,123 @@ Limitations:
 - The repo is identified from the checkout's `origin` remote. A fork checkout looks the
   ticket number up in the fork, not the upstream.
 
+### Automatic worktree cleanup
+
+The daemon also reclaims the disk of finished and stale `.worktrees/*` checkouts, so they
+do not pile up when nobody runs `/cenci:sync` or `cenci worktrees prune`. The pass runs on
+its own timer, `-worktree-cleanup-interval` (default `10m`; `0` or any non-positive value
+disables it), never on the 1-second sweep, because it reads GitHub and runs git. At most
+one pass is in flight, and the git and GitHub work runs off the daemon's event loop. Each
+step of a pass is bounded at 5 minutes; on expiry the rest of the step is skipped and
+logged.
+
+A worktree is removed when it is either:
+- *finished*: its ticket's issue is closed, or its closing PR was merged (or closed
+  unmerged), and the worktree has been idle for at least 1 hour, has a clean tree and
+  holds no unpushed work (the verdict comes from `internal/worktreeclean`, which is also
+  behind [`cenci worktrees`](#manual-worktree-cleanup-cenci-worktrees)); or
+- *stale*: it has been idle for longer than `staleAfter` (default `7d`) and holds no
+  uncommitted, untracked or unpushed work.
+
+Every doubt keeps the worktree. A worktree is kept while a tmux window runs in it (by
+ticket name or by pane directory), while the daemon reports its ticket `running` or
+`need-input`, while a `cenci babysit` supervisor owns its ticket, while its pipeline
+state is mid-stage, and while it is locked. The daemon state and the babysit check are
+re-run on the loop right before the removal step starts; immediately before each
+removal the tmux windows and pane directories are read again and the worktree is
+re-judged with strict guards.
+
+To opt a repo out, or to change the stale threshold, set this in its `.cenci/config.json`:
+
+```json
+{ "worktreeCleanup": { "enabled": false, "staleAfter": "14d" } }
+```
+
+`enabled: false` means no GitHub reads and no removals for that repo in the automatic
+pass (the manual `cenci worktrees` commands still work there). `staleAfter` is a positive
+Go duration (`"36h"`) or whole days (`"7d"`). A malformed block, including a
+non-positive `staleAfter`, skips that repo for the pass and is logged; other repos still
+run. It is never swapped for the default.
+
+#### Which repos are covered
+
+The daemon keeps a registry of repos at `$XDG_STATE_HOME/cenci/worktree-repos.json`
+(falling back to `~/.local/state/cenci/worktree-repos.json`, also when `$XDG_STATE_HOME` is
+relative), so a repo stays covered after its windows close and across daemon restarts. Each pass adds:
+- every `dispatch.repos[].dir` from the user config (`$XDG_CONFIG_HOME/cenci/config.json`);
+- the checkout of every tracked window, from its `@cenci-repo-dir` window option.
+
+A candidate is registered, as its main-checkout root, only after it passes the same
+`origin`-based resolution the window-cleanup pass uses. Entries are validated again each
+time they are read back from disk, and an entry is dropped only when its directory no
+longer exists.
+
+#### Logging
+
+Every removal is logged, regardless of `-v`, with its reason and the bytes freed:
+
+```
+worktree-cleanup: removed "/path/to/repo/.worktrees/42-add-thing": finished, freed 183402496 bytes
+```
+
+The reason is `finished` or `stale`. A worktree kept by policy (dirty, recently active,
+open ticket) is logged only with `-v`; one kept because a read failed (git inspection,
+in-use check, pipeline state), and every skipped repo and malformed config, is always
+logged. Every line starts with
+`worktree-cleanup:`, and none includes a remote URL.
+
+#### Fail-closed behavior
+
+The "is anything using this worktree" check reads the live tmux window list. The pass
+removes nothing, and logs `worktree-cleanup: in-use status unknown, keeping every
+worktree this pass`, when:
+- the daemon runs inside the sandbox (`CENCI_SANDBOX=1`), where the host's tmux windows
+  cannot be read; or
+- tmux cannot be read for any reason other than `no server running` (a missing binary
+  and a timeout included), or a pane reports an empty, relative or unclean directory.
+  Only `no server running` is benign: with no tmux server there are no windows to
+  protect.
+
+#### Limitations
+
+- An agent running in a window that is not named for a ticket is covered only by the
+  1-hour grace and the pane-directory check. A long-idle agent working in a worktree of
+  an already finished ticket, from a window with no recognizable name or a different
+  working directory, is not protected beyond that.
+- A worktree with a submodule, or in a repo that configures a clean or process filter,
+  is never reclaimed (#1264).
+- A repo whose checkout has no parseable `origin` remote is skipped and logged.
+- A daemon killed in the middle of a removal can leave a leftover git admin entry for
+  the half-removed worktree; later passes keep it rather than guess.
+
+### Manual worktree cleanup (`cenci worktrees`)
+
+`cenci worktrees` is the manual front end of the same classification, for the repo that
+contains the current directory. `/cenci:sync` remains the manual fallback inside an agent
+session; the daemon pass above normally makes both unnecessary.
+
+```bash
+cenci worktrees ls                # every worktree with its verdict, reason and size
+cenci worktrees prune             # remove the finished and stale worktrees
+cenci worktrees prune --dry-run   # print what prune would remove, change nothing
+```
+
+- `ls` prints `NAME`, `VERDICT` (`finished`, `stale` or `keep`), `REASON` (the keep
+  reason, such as `dirty`, `unpushed`, `recently active`, `in use`, `babysit armed`) and
+  `SIZE`, judged exactly as `prune` would judge it, and changes nothing.
+- `prune` classifies every worktree, then, right before each removal, reads the live state
+  again and re-judges it with the in-use and babysit guards. It prints
+  `removed <name>: <finished|stale>, freed <size> (<n> bytes)` or `kept <name>: <reason>`.
+- `--dry-run` prints `would remove <name>: ...` or `keep <name>: ...` lines and removes
+  nothing.
+- Unlike the daemon pass, the manual commands run even when `worktreeCleanup.enabled` is
+  `false` (they print a note), but a malformed `worktreeCleanup` block is an error.
+- When tmux cannot be read (including inside the sandbox), `prune` keeps every worktree
+  as `in-use status unknown`; `ls` and `--dry-run` still show the real verdict, marked
+  `(in-use status unknown: prune will keep it here)`.
+- Exit code: `0` on success, `1` on a runtime failure, a removal error, a half-done
+  removal or an interrupt, and `2` on a usage error.
+
 ### Automerge (`cenci babysit`)
 
 > Turning this on, and what it combines with: [The autonomous
@@ -2569,6 +2686,7 @@ file is always removed once it's known stale.
 | `-session-ttl` | `2h` | Idle TTL for paneless sessions (Go duration); sessions without a pane are expired after this duration if no `SessionEnd` fires |
 | `-reap-interval` | `5m` | Period of the sandbox orphan-reap backstop (Go duration); `0` disables it, leaving only the startup and pane-gone triggers |
 | `-window-cleanup-interval` | `2m` | Period of the finished-ticket window-cleanup pass (Go duration; see [Automatic cleanup of finished tickets](#automatic-cleanup-of-finished-tickets)); `0` (or any non-positive value) disables it |
+| `-worktree-cleanup-interval` | `10m` | Period of the finished/stale worktree-cleanup pass (Go duration; see [Automatic worktree cleanup](#automatic-worktree-cleanup)); `0` (or any non-positive value) disables it |
 | `-style-running` | `fg=blue,dim` | tmux style for running state (inactive windows) |
 | `-style-done` | `fg=green,dim` | tmux style for done state (inactive windows) |
 | `-style-input` | `fg=red,dim` | tmux style for need-input state (inactive windows) |

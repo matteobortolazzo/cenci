@@ -115,6 +115,12 @@ func (ls *LiveState) readSnapshot(read func() (*watch.StateSnapshot, error)) {
 		ls.SnapshotErr = fmt.Errorf("read daemon snapshot: %w", err)
 		return
 	}
+	ls.applySnapshot(snap)
+}
+
+// applySnapshot records the window and busy tickets of snap; a nil snap sets
+// SnapshotErr.
+func (ls *LiveState) applySnapshot(snap *watch.StateSnapshot) {
 	if snap == nil {
 		ls.SnapshotErr = errors.New("read daemon snapshot: no snapshot")
 		return
@@ -129,6 +135,24 @@ func (ls *LiveState) readSnapshot(read func() (*watch.StateSnapshot, error)) {
 			ls.BusyTickets[n] = true
 		}
 	}
+}
+
+// SnapshotLiveState is the LiveState a daemon snapshot alone yields: no tmux read,
+// no sandbox gate. It holds the same window and busy tickets ReadLiveState takes
+// from a snapshot (synthetic failed/escalated entries excluded), so the daemon can
+// build guards from its own in-memory state without a git, tmux or socket call.
+// A nil snapshot sets SnapshotErr.
+func SnapshotLiveState(snap *watch.StateSnapshot) LiveState {
+	ls := LiveState{WindowTickets: map[int]bool{}, BusyTickets: map[int]bool{}}
+	ls.applySnapshot(snap)
+	return ls
+}
+
+// TargetOf is the Target a guard is asked about for e: the ticket its dir name
+// carries (0 when none), the name and the local path.
+func TargetOf(e Entry) Target {
+	ticket, _ := ticketOf(e.Name)
+	return Target{Ticket: ticket, Name: e.Name, LocalPath: e.LocalPath}
 }
 
 // windowTicket is the ticket a window name carries, or 0. It reads the number
