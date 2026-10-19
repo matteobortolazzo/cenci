@@ -102,7 +102,7 @@ done
 readme=""
 require_doc readme "README.md" || true
 if [[ -n "${readme}" ]]; then
-  assert_contains "${readme}" "thoroughness is guaranteed regardless of the session setting." "README.md effort paragraph anchor"
+  assert_contains "${readme}" 'Core pipeline agents pin `effort: high` for refinement, planning, implementation, reviews, duplication/security analysis, and specialist escalation.' "README.md effort paragraph anchor"
   assert_contains "${readme}" "Anthropic's Opus 5.5 guidance reports low-effort Opus 5.5 reviewing at least as well as prior high-effort Opus, so lowering reviewer effort is a reasonable experiment once you trust the baseline" "README.md #1175 effort-experiment sentence"
   assert_contains "${readme}" "the pins stay so a low-effort session never silently degrades the unattended pipeline" "README.md #1175 pins-stay clause"
   # The README must not itself recommend the removed directive.
