@@ -447,6 +447,8 @@ Planning also auto-adopts a settled posture: a posture already settled verbatim 
 
 **Dispatch won't pick up into a starved container.** A repo whose most-loaded running container has less than `dispatch.memoryHeadroom` (default 25%) of its memory limit free is skipped until it recovers; an unreadable reading skips it too.
 
+**An OOM-recovered ticket waits before it re-launches.** A session the kernel's out-of-memory killer ended is re-queued on its own `dispatch.oomRetryBudget` (default 3), and the ticket waits `dispatch.oomBackoff` (default 10m) before dispatch picks it up again.
+
 **The merge chain is fail-closed at every link.** "Green" requires at least one check
 to be `pass`; every other check may be `pass` or `skipping` — a paths-filtered
 monorepo's unaffected-project checks (routinely `skipping`) no longer hold automerge

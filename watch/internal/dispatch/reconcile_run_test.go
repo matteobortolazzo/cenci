@@ -98,12 +98,21 @@ type memStore struct {
 }
 
 func (s *memStore) Load() (ReconcileState, error) {
-	out := ReconcileState{Observations: map[string]time.Time{}, ApplyFailures: map[string]int{}}
+	out := emptyReconcileState()
 	for k, v := range s.state.Observations {
 		out.Observations[k] = v
 	}
 	for k, v := range s.state.ApplyFailures {
 		out.ApplyFailures[k] = v
+	}
+	for k, v := range s.state.OOMLastSeen {
+		out.OOMLastSeen[k] = v
+	}
+	for k, v := range s.state.OOMBaselines {
+		out.OOMBaselines[k] = v
+	}
+	for k, v := range s.state.OOMRetryAt {
+		out.OOMRetryAt[k] = v
 	}
 	return out, nil
 }
@@ -1917,5 +1926,336 @@ esac
 				}
 			}
 		})
+	}
+}
+
+// -- #1291: OOM classification through the runner ----------------------------
+
+// oomStub is a stubbed oomProbeFn: every call returns result and is counted.
+type oomStub struct {
+	result oomProbeResult
+	calls  int
+}
+
+func stubOOMProbe(t *testing.T) *oomStub {
+	t.Helper()
+	s := &oomStub{}
+	restore := oomProbeFn
+	oomProbeFn = func([]Ticket, []RepoConfig, io.Writer) oomProbeResult {
+		s.calls++
+		return s.result
+	}
+	t.Cleanup(func() { oomProbeFn = restore })
+	return s
+}
+
+// useRealOOMProbe restores the production probe over main_test.go's hermetic
+// stub; callers must also restrict PATH to fakes first.
+func useRealOOMProbe(t *testing.T) {
+	t.Helper()
+	restore := oomProbeFn
+	oomProbeFn = defaultOOMProbe
+	t.Cleanup(func() { oomProbeFn = restore })
+}
+
+// oomReading is a probe result in which #42's single candidate reads n.
+func oomReading(n int64) oomProbeResult {
+	return oomProbeResult{
+		Counters:   map[string]int64{oomTestContainer: n},
+		Candidates: map[string][]string{"o/r#42": {oomTestContainer}},
+	}
+}
+
+// oomRunnerConfig is reconcileConfig() with the default OOM budget and backoff.
+func oomRunnerConfig() Config {
+	cfg := reconcileConfig()
+	cfg.OOMRetryBudget = 3
+	cfg.OOMBackoff = 10 * time.Minute
+	return cfg
+}
+
+// installWorkingTicketGH installs a fake gh serving one Working ticket #42
+// with no comments and no open PR.
+func installWorkingTicketGH(t *testing.T, onPath bool) {
+	t.Helper()
+	script := `
+case "$1 $2" in
+  "issue list") printf '[{"number":42,"title":"Fix thing","labels":[{"name":"Working"}],"assignees":[]}]' ;;
+  "issue view") printf '{"comments":[]}' ;;
+  "api graphql") printf '` + emptyOpenPRPageJSON + `' ;;
+  *) exit 1 ;;
+esac
+`
+	if onPath {
+		installFakeGHOnPath(t, script)
+		return
+	}
+	installFakeGH(t, script)
+}
+
+// AC1 and AC9 end to end over a real state file: a pass sees the session
+// alive (last-seen 2), the next sees it dead after the kill raised the counter
+// to 3 (observation plus baseline 2), and once grace elapses the third
+// recovers it as an OOM retry: +Planned -Working, one OOM-marked comment, the
+// backoff time recorded, the baseline dropped with the observation, and
+// countAttempts over the posted comment still 0.
+func TestRunReconcileOnce_OOMRetryAcrossPassesOverRealStateFile(t *testing.T) {
+	installWorkingTicketGH(t, true) // the closing countAttempts fixture needs the real cat
+	probe := stubOOMProbe(t)
+	cfg := oomRunnerConfig()
+	cfg.GracePeriod = time.Nanosecond // the observing pass defers, the next one acts
+	cfg.Repos = []RepoConfig{{Repo: "o/r", Dir: t.TempDir(), Session: "test-session"}}
+	statePath := filepath.Join(t.TempDir(), "reconcile.json")
+	store := NewStateStore(statePath)
+
+	pass := func(windows []watch.WindowState, counter int64) (*fakeMutator, string, ReconcileState) {
+		t.Helper()
+		serveChainSnapshot(t, watch.StateSnapshot{Windows: windows})
+		probe.result = oomReading(counter)
+		mut := &fakeMutator{}
+		var buf bytes.Buffer
+		if _, err := RunReconcileOnce(cfg, mut, false, &buf, store); err != nil {
+			t.Fatalf("RunReconcileOnce: %v\n%s", err, buf.String())
+		}
+		st, err := NewStateStore(statePath).Load()
+		if err != nil {
+			t.Fatalf("reloading state: %v", err)
+		}
+		return mut, buf.String(), st
+	}
+
+	mut, _, st := pass([]watch.WindowState{runningImplementWindow}, 2)
+	if len(mut.labelEdits) != 0 || st.OOMLastSeen[oomTestContainer] != 2 || len(st.Observations) != 0 {
+		t.Fatalf("alive pass: edits %+v, state %+v; want no edit, last-seen 2, no observation", mut.labelEdits, st)
+	}
+
+	mut, _, st = pass(nil, 3)
+	if len(mut.labelEdits) != 0 {
+		t.Fatalf("observing pass must defer, got %+v", mut.labelEdits)
+	}
+	if _, ok := st.Observations["o/r#42"]; !ok {
+		t.Fatalf("observing pass must persist the observation, state %+v", st)
+	}
+	if b := st.OOMBaselines["o/r#42"]; !mapsEqual(b, map[string]int64{oomTestContainer: 2}) || st.OOMLastSeen[oomTestContainer] != 3 {
+		t.Fatalf("observing pass state: baseline %v last-seen %v, want baseline 2 and last-seen 3", b, st.OOMLastSeen)
+	}
+
+	before := time.Now()
+	mut, log, st := pass(nil, 3)
+	after := time.Now()
+	if len(mut.labelEdits) != 1 || !slices.Equal(mut.labelEdits[0].add, []string{labelPlanned}) || !slices.Equal(mut.labelEdits[0].remove, []string{labelWorking}) {
+		t.Fatalf("label edits = %+v, want one +Planned -Working", mut.labelEdits)
+	}
+	if len(mut.comments) != 1 || firstLine(mut.comments[0].body) != oomRetryMarker {
+		t.Fatalf("comments = %+v, want one whose first line is %q", mut.comments, oomRetryMarker)
+	}
+	if !strings.Contains(log, "#42 oom-retry: ") {
+		t.Errorf("log has no \"#42 oom-retry: \" recovery line:\n%s", log)
+	}
+	if at := st.OOMRetryAt["o/r#42"]; at.Before(before.Truncate(time.Second)) || at.After(after) {
+		t.Errorf("OOM retry time = %v, want within [%v, %v]", at, before, after)
+	}
+	if _, ok := st.OOMBaselines["o/r#42"]; ok {
+		t.Errorf("baseline %v survived the recovery", st.OOMBaselines)
+	}
+	if _, ok := st.Observations["o/r#42"]; ok {
+		t.Error("observation survived the recovery")
+	}
+
+	installFakeGHComments(t, mut.comments[0].body)
+	attempts, ooms, err := countAttempts("o/r", 42)
+	if err != nil || attempts != 0 || ooms != 1 {
+		t.Errorf("countAttempts = (%d, %d, %v), want (0, 1, nil): an OOM retry is never a dispatch attempt", attempts, ooms, err)
+	}
+}
+
+// AC9: invalid OOM sections never hold the pass: one "reconcile: " line, the
+// observation still drives its recovery, and the next save writes clean state.
+func TestRunReconcileOnce_InvalidOOMSectionsLogOnceAndStillReconcile(t *testing.T) {
+	installWorkingTicketGH(t, false)
+	serveChainSnapshot(t, watch.StateSnapshot{})
+	stubOOMProbe(t)
+	cfg := oomRunnerConfig()
+	cfg.Repos = []RepoConfig{{Repo: "o/r", Dir: t.TempDir(), Session: "test-session"}}
+	statePath := filepath.Join(t.TempDir(), "reconcile.json")
+	seen := time.Now().Add(-10 * time.Minute).UTC().Format(time.RFC3339)
+	body := `{"schemaVersion":1,"observations":{"o/r#42":"` + seen + `"},"applyFailures":{},"oomLastSeen":{"":1}}`
+	if err := os.WriteFile(statePath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mut := &fakeMutator{}
+	var buf bytes.Buffer
+
+	if _, err := RunReconcileOnce(cfg, mut, false, &buf, NewStateStore(statePath)); err != nil {
+		t.Fatalf("RunReconcileOnce = %v, want no error: invalid OOM sections are not a hold", err)
+	}
+
+	if lines := logLinesWith(buf.String(), "reconcile: ", "OOM state"); len(lines) != 1 || !strings.HasPrefix(lines[0], "reconcile: ") {
+		t.Errorf("OOM state log lines = %q, want exactly one starting \"reconcile: \"", lines)
+	}
+	if len(mut.labelEdits) != 1 {
+		t.Errorf("label edits = %+v, want the observation's recovery", mut.labelEdits)
+	}
+	st, err := NewStateStore(statePath).Load()
+	if err != nil || st.OOMDropped != nil {
+		t.Errorf("reloaded state err=%v dropped=%v, want clean state saved", err, st.OOMDropped)
+	}
+}
+
+// AC6 end to end through the real probe over a fake docker: an unreadable
+// counter never defers -- today's ordinary retry fires with today's comment --
+// and the pass logs exactly one unavailable line for the container.
+func TestRunReconcileOnce_UnreadableCounterTakesOrdinaryRetry(t *testing.T) {
+	installWorkingTicketGH(t, true)
+	installMemFakes(t, map[string]memRuntime{"docker": {
+		ps: []string{memClaudeLocal}, containers: map[string]memContainer{memClaudeLocal: {stdout: "oom 1\n"}},
+	}})
+	useRealOOMProbe(t)
+	serveChainSnapshot(t, watch.StateSnapshot{})
+	cfg := oomRunnerConfig()
+	repo := oomRepo(t)
+	repo.Session = "test-session"
+	cfg.Repos = []RepoConfig{repo}
+	store := &memStore{state: ReconcileState{
+		Observations: map[string]time.Time{"o/r#42": time.Now().Add(-10 * time.Minute)},
+		OOMLastSeen:  map[string]int64{oomClaudeLocal: 0},
+		OOMBaselines: map[string]map[string]int64{"o/r#42": {oomClaudeLocal: 0}},
+	}}
+	mut := &fakeMutator{}
+	var buf bytes.Buffer
+
+	if _, err := RunReconcileOnce(cfg, mut, false, &buf, store); err != nil {
+		t.Fatalf("RunReconcileOnce: %v", err)
+	}
+
+	if len(mut.labelEdits) != 1 || len(mut.comments) != 1 || mut.comments[0].body != retryComment(1, "42", "gone") {
+		t.Fatalf("edits %+v comments %+v, want today's ordinary retry", mut.labelEdits, mut.comments)
+	}
+	if lines := unavailableLines(t, buf.String()); len(lines) != 1 {
+		t.Errorf("unavailable lines = %q, want exactly one for the container", lines)
+	}
+}
+
+// oomRetryApplyFixture is an applyReconcile fixture in which #42 died of an
+// OOM kill (baseline 2, counter 3) with grace elapsed.
+func oomRetryApplyFixture(now time.Time) (reconcileDeps, *memStore) {
+	deps := deadWorkingDeps(now)
+	deps.OOMProbe = oomReading(3)
+	store := &memStore{state: ReconcileState{
+		Observations: map[string]time.Time{"o/r#42": now.Add(-10 * time.Minute)},
+		OOMLastSeen:  map[string]int64{oomTestContainer: 3},
+		OOMBaselines: map[string]map[string]int64{"o/r#42": {oomTestContainer: 2}},
+	}}
+	return deps, store
+}
+
+// The backoff time is recorded only when the OOM retry's label edit landed
+// (a failed comment after it still records it); a failed label edit records
+// nothing and re-injects both the observation and the baseline, so the next
+// pass still sees the delta.
+func TestApplyReconcile_OOMRetryBackoffRecording(t *testing.T) {
+	now := time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name         string
+		mut          TicketMutator
+		wantRecorded bool
+	}{
+		{"label edit lands", &fakeMutator{}, true},
+		{"comment fails after the label edit landed", commentFailingMutator{}, true},
+		{"label edit fails", &escalatingMutator{}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			deps, store := oomRetryApplyFixture(now)
+
+			res, _ := applyReconcile(oomRunnerConfig(), deps, tc.mut, false, io.Discard, store)
+
+			if rec := onlyRecovery(t, res); rec.Kind != RecoveryRetryOOM {
+				t.Fatalf("kind = %q, want %q", rec.Kind, RecoveryRetryOOM)
+			}
+			at, recorded := store.state.OOMRetryAt["o/r#42"]
+			if recorded != tc.wantRecorded || (recorded && !at.Equal(now)) {
+				t.Errorf("OOM retry time = %v (recorded=%v), want recorded=%v at %v", at, recorded, tc.wantRecorded, now)
+			}
+			_, obsKept := store.state.Observations["o/r#42"]
+			baseline, baseKept := store.state.OOMBaselines["o/r#42"]
+			if tc.wantRecorded && (obsKept || baseKept) {
+				t.Errorf("a landed recovery must drop observation and baseline, got obs=%v baseline=%v", obsKept, baseline)
+			}
+			if !tc.wantRecorded && (!obsKept || !mapsEqual(baseline, map[string]int64{oomTestContainer: 2})) {
+				t.Errorf("a failed label edit must re-inject observation and baseline, got obs=%v baseline=%v", obsKept, baseline)
+			}
+		})
+	}
+}
+
+// OOM retry times older than oomBackoff are pruned on save; younger ones are
+// kept, and a landed ordinary retry clears the ticket's entry (AC7: its latest
+// landed recovery was not an OOM retry).
+func TestApplyReconcile_OOMRetryTimesPrunedAndClearedByOrdinaryRetry(t *testing.T) {
+	now := time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)
+	store := &memStore{state: ReconcileState{
+		Observations: map[string]time.Time{"o/r#42": now.Add(-10 * time.Minute)},
+		OOMRetryAt: map[string]time.Time{
+			"o/r#7":  now.Add(-11 * time.Minute),
+			"o/r#8":  now.Add(-9 * time.Minute),
+			"o/r#42": now.Add(-time.Minute),
+		},
+	}}
+
+	if _, err := applyReconcile(oomRunnerConfig(), deadWorkingDeps(now), &fakeMutator{}, false, io.Discard, store); err != nil {
+		t.Fatalf("applyReconcile: %v", err)
+	}
+
+	want := map[string]time.Time{"o/r#8": now.Add(-9 * time.Minute)}
+	if !mapsEqual(store.state.OOMRetryAt, want) {
+		t.Errorf("OOM retry times = %v, want only the young #8 entry %v", store.state.OOMRetryAt, want)
+	}
+}
+
+// A landed plan heal on the now-Planned ticket is not an ordinary retry: it
+// must leave the OOM backoff entry intact (the episode is not over), while the
+// ordinary retry in the sibling test above still clears it.
+func TestApplyReconcile_OOMRetryTimeSurvivesLandedHeal(t *testing.T) {
+	now := time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)
+	retryAt := now.Add(-time.Minute)
+	deps := deadWorkingDeps(now)
+	deps.Tickets = []Ticket{{Repo: "o/r", Number: 42, Title: "Fix thing", Labels: []string{"bug", "Refined", "Planned"}}}
+	deps.Plans = awaitingInputPlans()
+	store := &memStore{state: ReconcileState{
+		Observations: map[string]time.Time{"o/r#42": now.Add(-10 * time.Minute)},
+		OOMRetryAt:   map[string]time.Time{"o/r#42": retryAt},
+	}}
+	mut := &fakeMutator{}
+
+	res, err := applyReconcile(oomRunnerConfig(), deps, mut, false, io.Discard, store)
+	if err != nil {
+		t.Fatalf("applyReconcile: %v", err)
+	}
+
+	if rec := onlyRecovery(t, res); !strings.HasPrefix(rec.Detail, "plan heal (Planned):") || len(mut.labelEdits) != 1 {
+		t.Fatalf("recovery %+v edits %+v, want the landed Planned plan heal", rec, mut.labelEdits)
+	}
+	want := map[string]time.Time{"o/r#42": retryAt}
+	if !mapsEqual(store.state.OOMRetryAt, want) {
+		t.Errorf("OOM retry times = %v, want the backoff entry kept %v", store.state.OOMRetryAt, want)
+	}
+}
+
+// A dry run classifies and logs the OOM retry but persists nothing.
+func TestApplyReconcile_OOMRetryDryRunRecordsNothing(t *testing.T) {
+	now := time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)
+	deps, store := oomRetryApplyFixture(now)
+	var buf bytes.Buffer
+
+	if _, err := applyReconcile(oomRunnerConfig(), deps, &fakeMutator{}, true, &buf, store); err != nil {
+		t.Fatalf("applyReconcile: %v", err)
+	}
+
+	if !strings.Contains(buf.String(), "#42 oom-retry: ") {
+		t.Errorf("dry run log has no OOM retry line:\n%s", buf.String())
+	}
+	if len(store.state.OOMRetryAt) != 0 {
+		t.Errorf("dry run recorded %v", store.state.OOMRetryAt)
 	}
 }

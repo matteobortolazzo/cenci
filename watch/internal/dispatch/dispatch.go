@@ -97,6 +97,11 @@ type dispatchDeps struct {
 	// by resolveMemoryHeadroom before applyDispatch/Decide ever run --
 	// threaded straight through to Inputs.RepoMemory.
 	RepoMemory map[string]RepoMemory
+
+	// OOMBackoffSince (#1291) is the persisted OOM-retry time per ticket,
+	// keyed by planKey and loaded once per pass by RunOnce through
+	// oomBackoffLoadFn -- threaded straight through to Inputs.OOMBackoffSince.
+	OOMBackoffSince map[string]time.Time
 }
 
 // RunOnce gathers inputs (tickets, plans, snapshot, clock), runs the pure
@@ -176,6 +181,21 @@ func RunOnce(cfg Config, ctrl run.Controller, mut TicketMutator, dryRun bool, ou
 	// fails that repo closed, and it never feeds collectErr.
 	repoMemory := resolveMemoryHeadroom(cfg.Repos, tickets, out)
 
+	// OOM backoff (#1291): the reconciler's persisted OOM-retry times feed
+	// Decide's rule 6.5. Read-only, loaded at most once per pass, and only when
+	// the gate can fire (a ticket exists and dispatch.oomBackoff > 0). An
+	// unreadable state file is logged once and leaves the map nil, so no ticket
+	// is skipped by this gate that pass; it never feeds collectErr.
+	var oomBackoffSince map[string]time.Time
+	if len(tickets) > 0 && cfg.OOMBackoff > 0 {
+		var loadErr error
+		oomBackoffSince, loadErr = oomBackoffLoadFn()
+		if loadErr != nil {
+			logf(out, "dispatch: loading OOM backoff state: %v\n", loadErr)
+			oomBackoffSince = nil
+		}
+	}
+
 	// Probe every `Input Needed` ticket for a human answer to its escalation
 	// (#827/#849), keyed by planKey so Decide's Inputs.Answers can look it
 	// up -- mirrors RunReconcileOnce's countAttempts loop, a label-scoped
@@ -207,6 +227,7 @@ func RunOnce(cfg Config, ctrl run.Controller, mut TicketMutator, dryRun bool, ou
 		OrphanedContainerSessions: orphanedSessions,
 		ContainerSessionProbe:     sessionProbe,
 		RepoMemory:                repoMemory,
+		OOMBackoffSince:           oomBackoffSince,
 	}, ctrl, mut, dryRun, out, prior)
 
 	// #927: the per-repo session gate's sentinel(s) must outrank a same-pass
@@ -359,6 +380,7 @@ func applyDispatch(cfg Config, deps dispatchDeps, ctrl run.Controller, mut Ticke
 		OrphanedContainerSessions: deps.OrphanedContainerSessions,
 		ContainerSessionProbe:     deps.ContainerSessionProbe,
 		RepoMemory:                deps.RepoMemory,
+		OOMBackoffSince:           deps.OOMBackoffSince,
 	})
 
 	// Surface the pinned model in the same log stream as the decision table so

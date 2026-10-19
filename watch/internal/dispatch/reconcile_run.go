@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"strconv"
 	"strings"
@@ -30,9 +31,22 @@ type TicketMutator interface {
 // (ticketKey → consecutive failed-apply-mutation count). Splitting the counter
 // out from Observations (#265) lets a failed gh mutation preserve the grace
 // clock while still bounding how many passes will keep retrying the apply.
+//
+// The OOM sections (#1291) are enhancement state: losing them only sends the
+// next recovery down the ordinary budgeted path. OOMLastSeen maps a
+// "<runtime>/<container>" key to the oom_kill counter last read from it;
+// OOMBaselines maps ticketKey to the per-container last-seen values loaded at
+// the start of the pass that created the ticket's grace observation; OOMRetryAt
+// maps ticketKey to when an OOM retry's label edit landed (the dispatch-side
+// backoff clock). OOMDropped is never persisted: Load sets it when the file's
+// OOM sections were invalid and were replaced by empty ones.
 type ReconcileState struct {
 	Observations  map[string]time.Time
 	ApplyFailures map[string]int
+	OOMLastSeen   map[string]int64
+	OOMBaselines  map[string]map[string]int64
+	OOMRetryAt    map[string]time.Time
+	OOMDropped    error
 }
 
 // ReconcileStore persists ReconcileState between passes so grace and the
@@ -198,12 +212,14 @@ func (m *GHMutator) Comment(repo string, number int, body string) error {
 	return nil
 }
 
-// countAttempts tallies durable attempt markers on a ticket's comment thread.
-// It is called only for Working candidate tickets (few at a time), so the extra
-// gh call per candidate is cheap. An error is returned rather than swallowed to
-// 0: the caller must not confuse "no attempts yet" with "could not read", since
-// the count gates the retry-vs-fail decision.
-func countAttempts(repo string, number int) (int, error) {
+// countAttempts tallies durable attempt markers on a ticket's comment thread,
+// and, from the same single read, the OOM retry markers (#1291) that
+// OOMRetryBudget bounds separately. It is called only for Working candidate
+// tickets (few at a time), so the extra gh call per candidate is cheap. An
+// error is returned rather than swallowed to 0: the caller must not confuse
+// "no attempts yet" with "could not read", since the counts gate the
+// retry-vs-fail decision.
+func countAttempts(repo string, number int) (attempts, ooms int, err error) {
 	stdout, stderr, err := execGh("issue", "view", strconv.Itoa(number),
 		"--repo", repo, "--json", "comments")
 	if err != nil {
@@ -212,7 +228,7 @@ func countAttempts(repo string, number int) (int, error) {
 		// on a public repo) comment thread, and a ghTimeout kill mid-stream
 		// can leave a large partial JSON payload in stdout -- both would
 		// otherwise flood this error string unbounded.
-		return 0, fmt.Errorf("gh issue view #%d in %s: %w: %s", number, repo, err, truncateDetail(collapseLines(stdout+stderr), maxProbeLogDetailBytes))
+		return 0, 0, fmt.Errorf("gh issue view #%d in %s: %w: %s", number, repo, err, truncateDetail(collapseLines(stdout+stderr), maxProbeLogDetailBytes))
 	}
 	var v struct {
 		Comments []struct {
@@ -220,15 +236,17 @@ func countAttempts(repo string, number int) (int, error) {
 		} `json:"comments"`
 	}
 	if err := json.Unmarshal([]byte(stdout), &v); err != nil {
-		return 0, fmt.Errorf("parsing comments for #%d in %s: %w", number, repo, err)
+		return 0, 0, fmt.Errorf("parsing comments for #%d in %s: %w", number, repo, err)
 	}
-	n := 0
 	for _, c := range v.Comments {
 		if strings.Contains(c.Body, attemptMarker) {
-			n++
+			attempts++
+		}
+		if strings.Contains(c.Body, oomRetryMarker) {
+			ooms++
 		}
 	}
-	return n, nil
+	return attempts, ooms, nil
 }
 
 // reconcileDeps are the collected, impure inputs to a reconcile pass. Separating
@@ -257,6 +275,12 @@ type reconcileDeps struct {
 	// verdict resolveLaunchVerdicts computed this pass (#1292). Threaded
 	// straight through to ReconcileInputs.LaunchVerdicts.
 	LaunchVerdicts map[string]LaunchVerdict
+
+	// OOMProbe is this pass's OOM counter reading (#1291, oomProbeFn), and
+	// OOMRetries the durable OOM-marker comment count per ticket, read by the
+	// same countAttempts call as Attempts. Threaded into ReconcileInputs.
+	OOMProbe   oomProbeResult
+	OOMRetries map[string]int
 }
 
 // RunReconcileOnce collects tickets, plans, the daemon snapshot, and durable
@@ -332,16 +356,22 @@ func RunReconcileOnce(cfg Config, mut TicketMutator, dryRun bool, out io.Writer,
 	}
 	launchVerdicts := resolveLaunchVerdicts(tickets, snap, out)
 
+	// OOM counters (#1291): read once per pass for repos with a non-terminal
+	// Working ticket. Its failures are logged inside the probe and never fail
+	// the pass -- an unreadable counter only means the ordinary retry runs.
+	oomProbe := oomProbeFn(tickets, cfg.Repos, out)
+
 	// Count durable attempts only for Working candidate tickets — the only ones
 	// the failure path can act on. A gh read error marks the ticket unknown so
 	// Reconcile defers rather than acting on an assumed-zero count.
 	attempts := make(map[string]int)
+	oomRetries := make(map[string]int)
 	attemptsUnknown := make(map[string]bool)
 	for _, t := range tickets {
 		if !hasLabel(t.Labels, labelWorking) {
 			continue
 		}
-		n, err := countAttempts(t.Repo, t.Number)
+		n, ooms, err := countAttempts(t.Repo, t.Number)
 		if err != nil {
 			logf(out, "reconcile: #%d counting attempts: %v\n", t.Number, err)
 			attemptsUnknown[planKey(t.Repo, t.Number)] = true
@@ -351,6 +381,7 @@ func RunReconcileOnce(cfg Config, mut TicketMutator, dryRun bool, out io.Writer,
 			continue
 		}
 		attempts[planKey(t.Repo, t.Number)] = n
+		oomRetries[planKey(t.Repo, t.Number)] = ooms
 	}
 
 	result, applyErr := applyReconcile(cfg, reconcileDeps{
@@ -363,6 +394,8 @@ func RunReconcileOnce(cfg Config, mut TicketMutator, dryRun bool, out io.Writer,
 		PlanProbes:      planProbes,
 		PlanInventories: planInventories,
 		LaunchVerdicts:  launchVerdicts,
+		OOMProbe:        oomProbe,
+		OOMRetries:      oomRetries,
 	}, mut, dryRun, out, store)
 	// #883: firstNonNil would let a same-pass collectErr mask the corruption
 	// sentinel whenever collection also failed (a likely co-occurrence, e.g.
@@ -402,6 +435,13 @@ func applyReconcile(cfg Config, deps reconcileDeps, mut TicketMutator, dryRun bo
 	if applyFailures == nil {
 		applyFailures = map[string]int{}
 	}
+	// Invalid OOM sections (#1291) were already replaced by empty ones in Load:
+	// enhancement state, never a hold. Say so once per pass (dry run included).
+	if state.OOMDropped != nil {
+		logf(out, "reconcile: OOM state in the state file is invalid, starting OOM classification fresh: %v\n", state.OOMDropped)
+	}
+	oomRetryAt := make(map[string]time.Time, len(state.OOMRetryAt))
+	maps.Copy(oomRetryAt, state.OOMRetryAt)
 	result := Reconcile(ReconcileInputs{
 		Tickets:         deps.Tickets,
 		Plans:           deps.Plans,
@@ -414,6 +454,11 @@ func applyReconcile(cfg Config, deps reconcileDeps, mut TicketMutator, dryRun bo
 		PlanProbes:      deps.PlanProbes,
 		PlanInventories: deps.PlanInventories,
 		LaunchVerdicts:  deps.LaunchVerdicts,
+		OOMCounters:     deps.OOMProbe.Counters,
+		OOMCandidates:   deps.OOMProbe.Candidates,
+		OOMLastSeen:     state.OOMLastSeen,
+		OOMBaselines:    state.OOMBaselines,
+		OOMRetries:      deps.OOMRetries,
 	})
 
 	for _, rec := range result.Recoveries {
@@ -477,6 +522,20 @@ func applyReconcile(cfg Config, deps reconcileDeps, mut TicketMutator, dryRun bo
 			// must not bump the counter or re-inject the grace clock, since
 			// nothing about GitHub's label state actually failed.
 			delete(applyFailures, key)
+			// The dispatch-side backoff clock (#1291) starts when an OOM
+			// retry's label edit lands, even if its comment then failed. A
+			// landed ordinary retry, failure or stuck escalation ends the
+			// ticket's OOM episode, so no backoff applies. The plan heals
+			// (#926, #1241) share RecoveryRetry but remove no Working label
+			// (heal B aside, which needs Input Needed): one landing on the
+			// now-Planned ticket during the backoff window is unrelated and
+			// must not erase the clock.
+			switch {
+			case rec.Kind == RecoveryRetryOOM:
+				oomRetryAt[key] = deps.Now
+			case endsOOMEpisode(rec):
+				delete(oomRetryAt, key)
+			}
 			if err != nil {
 				firstErr = firstNonNil(firstErr, err)
 			}
@@ -491,6 +550,11 @@ func applyReconcile(cfg Config, deps reconcileDeps, mut TicketMutator, dryRun bo
 		// separately from the dispatch-attempt RetryBudget.
 		if ts, ok := obs[key]; ok {
 			result.NextObservations[key] = ts
+		}
+		// The OOM baseline (#1291) follows the observation back in, so the next
+		// pass still measures the same delta; no backoff time is recorded.
+		if base, ok := state.OOMBaselines[key]; ok {
+			result.NextOOMBaselines[key] = base
 		}
 		applyFailures[key]++
 		if applyFailures[key] < cfg.ApplyRetryBudget {
@@ -541,6 +605,8 @@ func applyReconcile(cfg Config, deps reconcileDeps, mut TicketMutator, dryRun bo
 		}
 		delete(applyFailures, key)
 		delete(result.NextObservations, key)
+		delete(result.NextOOMBaselines, key)
+		delete(oomRetryAt, key)
 		if !failedKeys[key] {
 			result.Failed = append(result.Failed, rec.Ticket)
 			failedKeys[key] = true
@@ -561,11 +627,40 @@ func applyReconcile(cfg Config, deps reconcileDeps, mut TicketMutator, dryRun bo
 		delete(applyFailures, key)
 	}
 
-	if err := store.Save(ReconcileState{Observations: result.NextObservations, ApplyFailures: applyFailures}); err != nil {
-		logf(out, "reconcile: saving state: %v\n", err)
+	// A backoff time older than oomBackoff no longer gates anything; prune it
+	// so the file does not grow with every OOM retry ever made.
+	for key, at := range oomRetryAt {
+		if deps.Now.Sub(at) > cfg.OOMBackoff {
+			delete(oomRetryAt, key)
+		}
+	}
+
+	if err := store.Save(ReconcileState{
+		Observations:  result.NextObservations,
+		ApplyFailures: applyFailures,
+		OOMLastSeen:   result.NextOOMLastSeen,
+		OOMBaselines:  result.NextOOMBaselines,
+		OOMRetryAt:    oomRetryAt,
+	}); err != nil {
+		lost := ""
+		if len(result.NextOOMLastSeen)+len(result.NextOOMBaselines)+len(oomRetryAt) > 0 {
+			lost = " (OOM backoff times and baselines for this pass were not persisted)"
+		}
+		logf(out, "reconcile: saving state: %v%s\n", err, lost)
 		firstErr = firstNonNil(firstErr, err)
 	}
 	return result, firstErr
+}
+
+// endsOOMEpisode reports whether a landed non-OOM recovery ends the ticket's
+// OOM episode: an ordinary retry, a failure or a stuck escalation that took
+// the ticket off Working. Heals and report-only kinds do not.
+func endsOOMEpisode(rec Recovery) bool {
+	switch rec.Kind {
+	case RecoveryRetry, RecoveryFailed, RecoveryReconcileStuck:
+		return containsStr(rec.RemoveLabels, labelWorking)
+	}
+	return false
 }
 
 // applyRecovery applies one recovery's gh side effects. Report-only kinds
@@ -627,6 +722,8 @@ func formatRecovery(rec Recovery) string {
 		return fmt.Sprintf("#%d reconcile-stuck: %s", rec.Ticket.Number, rec.Detail)
 	case RecoveryResumeInterrupted:
 		return fmt.Sprintf("#%d resume-interrupted: %s", rec.Ticket.Number, rec.Detail)
+	case RecoveryRetryOOM:
+		return fmt.Sprintf("#%d oom-retry: %s", rec.Ticket.Number, rec.Detail)
 	default:
 		return fmt.Sprintf("#%d %s: %s", rec.Ticket.Number, rec.Kind, rec.Detail)
 	}

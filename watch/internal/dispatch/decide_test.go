@@ -3059,3 +3059,139 @@ func TestDecideMemoryHeadroom_AppliesToEveryPickupType(t *testing.T) {
 		})
 	}
 }
+
+// -- #1291: OOM backoff gate (pickup rule 6.5) --------------------------------
+//
+// Decide is the pure contract for the gate: the reason string, the ceil-to-
+// whole-minutes rounding, the future-dated cap and the ordering are pinned
+// here; the RunOnce wiring of the persisted map is covered in
+// dispatch_run_test.go. Reasons are spelled out literally so the tests encode
+// the ticket's requirements, not the constant.
+
+const oomBackoffTestWindow = 10 * time.Minute
+
+// oomBackoffInputs is the happy-path Inputs with the backoff configured at
+// backoff and ticket o/r#42 recorded as OOM-retried elapsed ago (negative
+// elapsed is a future-dated entry).
+func oomBackoffInputs(backoff, elapsed time.Duration) Inputs {
+	in := baseInputs()
+	in.Config.OOMBackoff = backoff
+	in.OOMBackoffSince = map[string]time.Time{"o/r#42": in.Now.Add(-elapsed)}
+	return in
+}
+
+// AC7: the reason carries the remaining time rounded UP to whole minutes
+// (minimum 1), and once the backoff has elapsed the ticket dispatches with the
+// ordinary reason.
+func TestDecideOOMBackoff_RemainingMinutesAndExpiry(t *testing.T) {
+	tests := []struct {
+		name    string
+		elapsed time.Duration
+		want    wantDecision
+	}{
+		{"3m elapsed of 10m has 7m left", 3 * time.Minute, wantDecision{42, ActionSkip, "oom backoff (7m left)", ""}},
+		{"just recorded has the whole backoff left", 0, wantDecision{42, ActionSkip, "oom backoff (10m left)", ""}},
+		{"3m30s elapsed rounds 6m30s up to 7m", 3*time.Minute + 30*time.Second, wantDecision{42, ActionSkip, "oom backoff (7m left)", ""}},
+		{"9m30s elapsed rounds 30s up to 1m", 9*time.Minute + 30*time.Second, wantDecision{42, ActionSkip, "oom backoff (1m left)", ""}},
+		{"one nanosecond left is still 1m", oomBackoffTestWindow - time.Nanosecond, wantDecision{42, ActionSkip, "oom backoff (1m left)", ""}},
+		{"exactly the backoff elapsed dispatches", oomBackoffTestWindow, wantDecision{42, ActionDispatch, "dispatch", "claude"}},
+		{"long past the backoff dispatches", time.Hour, wantDecision{42, ActionDispatch, "dispatch", "claude"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assertDecisions(t, Decide(oomBackoffInputs(oomBackoffTestWindow, tc.elapsed)), []wantDecision{tc.want})
+		})
+	}
+}
+
+// AC7: the clock moved back (an entry dated in the future) is capped, so the
+// remaining time never exceeds the configured backoff.
+func TestDecideOOMBackoff_FutureDatedEntryIsCappedAtBackoff(t *testing.T) {
+	for _, ahead := range []time.Duration{time.Minute, time.Hour, 365 * 24 * time.Hour} {
+		t.Run(ahead.String()+" ahead", func(t *testing.T) {
+			assertDecisions(t, Decide(oomBackoffInputs(oomBackoffTestWindow, -ahead)),
+				[]wantDecision{{42, ActionSkip, "oom backoff (10m left)", ""}})
+		})
+	}
+}
+
+// AC7: a ticket without an entry (an ordinary retry, or a nil/empty map) is
+// never gated, and an entry for another ticket or another repo's same number
+// does not leak.
+func TestDecideOOMBackoff_NoEntryNoGate(t *testing.T) {
+	tests := []struct {
+		name  string
+		since map[string]time.Time
+	}{
+		{"nil map", nil},
+		{"empty map", map[string]time.Time{}},
+		{"another ticket in the repo", map[string]time.Time{"o/r#43": time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)}},
+		{"the same number in another repo", map[string]time.Time{"x/y#42": time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			in := baseInputs()
+			in.Config.OOMBackoff = oomBackoffTestWindow
+			in.OOMBackoffSince = tc.since
+			assertDecisions(t, Decide(in), []wantDecision{{42, ActionDispatch, "dispatch", "claude"}})
+		})
+	}
+}
+
+// AC8 edge: oomBackoff 0 (and any non-positive value) never skips, even for a
+// fresh entry.
+func TestDecideOOMBackoff_NonPositiveBackoffNeverSkips(t *testing.T) {
+	for _, backoff := range []time.Duration{0, -time.Minute} {
+		t.Run(backoff.String(), func(t *testing.T) {
+			assertDecisions(t, Decide(oomBackoffInputs(backoff, 0)), []wantDecision{{42, ActionDispatch, "dispatch", "claude"}})
+		})
+	}
+}
+
+// The gate applies to the fresh Refined planning pickup too, and a lapsed
+// backoff lets it through as a planning dispatch.
+func TestDecideOOMBackoff_AppliesToPlanningPickup(t *testing.T) {
+	t.Run("held while the backoff runs", func(t *testing.T) {
+		in := planningCandidateInputs()
+		in.Config.OOMBackoff = oomBackoffTestWindow
+		in.OOMBackoffSince = map[string]time.Time{"o/r#42": in.Now.Add(-3 * time.Minute)}
+		assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, "oom backoff (7m left)", ""}})
+	})
+	t.Run("dispatched once it lapses", func(t *testing.T) {
+		in := planningCandidateInputs()
+		in.Config.OOMBackoff = oomBackoffTestWindow
+		in.OOMBackoffSince = map[string]time.Time{"o/r#42": in.Now.Add(-oomBackoffTestWindow)}
+		got := Decide(in)
+		if len(got) != 1 || got[0].Action != ActionDispatch || !got[0].Planning || got[0].Reason != "plan — Refined, no plan file" {
+			t.Errorf("decisions = %+v, want one planning dispatch", got)
+		}
+	})
+}
+
+// Ordering: the gate runs ahead of every fleet-wide capacity gate (including
+// "daemon unreachable"), but behind the board-state gates before it.
+func TestDecideOOMBackoff_Ordering(t *testing.T) {
+	t.Run("ahead of daemon unreachable", func(t *testing.T) {
+		in := oomBackoffInputs(oomBackoffTestWindow, 3*time.Minute)
+		in.Snapshot = nil
+		assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, "oom backoff (7m left)", ""}})
+	})
+	t.Run("a ticket without an entry still reports daemon unreachable", func(t *testing.T) {
+		in := baseInputs()
+		in.Config.OOMBackoff = oomBackoffTestWindow
+		in.Snapshot = nil
+		assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, "daemon unreachable", ""}})
+	})
+	t.Run("ahead of the memory headroom gate", func(t *testing.T) {
+		in := oomBackoffInputs(oomBackoffTestWindow, 3*time.Minute)
+		in.Config.MemoryHeadroom = 25
+		in.RepoMemory = map[string]RepoMemory{"o/r": limitedMemory(90, 100)}
+		assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, "oom backoff (7m left)", ""}})
+	})
+	t.Run("behind the board-state gate", func(t *testing.T) {
+		in := oomBackoffInputs(oomBackoffTestWindow, 3*time.Minute)
+		in.Tickets[0].Labels = []string{"Refined"}
+		in.Plans = nil
+		assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, "not Planned", ""}})
+	})
+}

@@ -328,10 +328,145 @@ call log for an invalid triple, no `kill`), and `RunReconcileOnce` end to end ov
 file. Tests that run a probe set `PATH` to fakes only or stub both seams -- never a real
 runtime.
 
+## OOM classification (#1291)
+
+A `Working` ticket whose session the kernel's out-of-memory killer ended used to read as any
+other death: it burned `retryBudget` and re-launched at once into the same memory pressure.
+The reconciler now classifies it from the container's `oom_kill` counter (the `memory.events`
+line, read by `sandbox.ReadContainerOOMKills`) and recovers it on a separate budget with a
+backoff. The signal only ever adds to a recovery the reconciler had already decided to make
+(grace elapsed, not live, no open PR, attempts readable); no counter value can defer or
+suppress one.
+
+**What is read.** `defaultOOMProbe` (`oomprobe.go`) runs once per pass and only when the
+pass has a non-terminal `Working` ticket, even a live one or one behind a nil snapshot: the
+last-seen value must stay fresh while the session runs. A ticket with a valid recorded
+launch (`pipeline.ValidLaunchTriple`) has exactly that `<runtime>/<container>` as its
+candidate; any other ticket has every running workload container of its repo
+(`sandbox.RepoWorkloadContainerNames`) on every installed runtime. Each runtime is listed
+once and each container read at most once per pass, all under `oomProbePassTimeout` (60s).
+The counters and candidates reach the pure `Reconcile` as `OOMCounters`/`OOMCandidates`.
+
+**The baseline rule.** A ticket's baseline is the per-container last-seen value *as loaded
+at the start of the pass that created its grace observation*, not the counter read in that
+pass. The kill happens before the first pass that sees the ticket dead, so the counter has
+already risen by then; a same-pass baseline would never show a delta. The baseline follows
+the grace observation's lifecycle exactly: created with it, carried whenever
+`NextObservations` carries the key (deferrals included, and re-injected next to the
+observation when a label edit fails), dropped when the observation is dropped. A ticket
+whose candidates had no last-seen value when its observation was created (first pass ever,
+wiped OOM sections) has no baseline and takes the ordinary path. Last-seen is advanced once,
+after every ticket of the pass was evaluated, so two tickets killed in one incident both
+see the same delta. Last-seen entries are never pruned because a container went unprobed.
+
+**The recreate rule.** A container whose counter reads *lower* than its stored last-seen
+was recreated, and a new cgroup's counter cannot be compared with one taken on the old
+one. Nothing is classified against it that pass (the lower value becomes the new last-seen),
+and the container is dropped from every ticket's stored baseline, not only this pass's
+classification.
+
+**The unreadable-counter rule.** An unreadable counter fails open to the ordinary budgeted
+retry: safe, because `retryBudget` still bounds that path. Unreadable means a recorded
+launch container that is not running, a failed `ps` on its runtime, a failed, timed-out,
+over-long or malformed read, or a container not reached before the pass deadline. Each logs
+one `reconcile: OOM classification unavailable for container <name> on <runtime>: <cause>`
+line per container per pass, at probe time; no runtime on `PATH` logs one `reconcile: OOM
+classification unavailable: no docker or podman on PATH` line and makes no exec. A fallback
+container that is simply not running is not a candidate and logs nothing. Probe failures
+are never returned from `RunReconcileOnce`.
+
+**The separate budget.** An OOM delta (candidates' counters above the baseline, summed)
+selects `RecoveryRetryOOM`: the ordinary retry's labels (stage-aware like #828, shared with
+`RecoveryRetry`), a comment with `oomRetryMarker` instead of `attemptMarker`, bounded by
+`oomRetryBudget` (default `3`; an explicit `0` sends the first OOM recovery straight to
+failed). `countAttempts` tallies the two markers separately from the same `gh issue view`
+read, so an OOM retry is never counted by `retryBudget` and an ordinary retry never by
+`oomRetryBudget`; both share `AttemptsUnknown`, so a failed comment read defers the ticket
+with its baseline kept.
+When the budget is spent the recovery is `RecoveryFailed` with `failedMarker`, so the badge,
+the `Failed` aggregation and the terminal short-circuit treat it like any `dispatch-failed`
+ticket. The #853 interrupted-resume branch (a plan at `awaiting-input`) takes precedence
+over the OOM branch and keeps `attemptMarker` and `retryBudget`; restoring `Input Needed`
+is what that state needs. A ticket that OOM-died, was re-dispatched, then died for an
+unrelated reason has no delta (its baseline already equals the advanced last-seen) and
+takes the ordinary path, charging `retryBudget` for the first time.
+
+**The backoff.** `applyReconcile` records `OOMRetryAt[key] = Now` in `reconcile.json` when an
+OOM retry's *label edit lands* (even if its comment then fails); a failed label edit records
+nothing. A landed recovery of any other kind deletes the ticket's entry, since its latest
+recovery is no longer an OOM retry. Entries older than `oomBackoff` are pruned on the next
+`Save`. Dispatch reads the map through `oomBackoffLoadFn` (once per pass, only when tickets
+exist and `oomBackoff > 0`) into `Inputs.OOMBackoffSince`, and `Decide`'s pickup rule 6.5
+(`oomBackoffSkip`, between sibling serialization and the capacity block) skips with `oom
+backoff (<N>m left)`, whole minutes rounded up. An entry dated in the future (the clock moved
+back) is capped at `oomBackoff` remaining, so skew cannot hold a ticket forever. Dispatch
+only sees the entries when it shares the reconciler's host and state path, which
+`runCombinedPass` does. An unreadable state file, or OOM sections that were dropped, logs one
+`dispatch: ` line and applies no backoff: the memory-headroom gate (#1290) stays the
+fail-closed safety, and a reconciler-owned enhancement file must not become a dispatch-wide
+single point of failure.
+
+**Invalid OOM sections.** `reconcile.json` gains three additive optional keys under
+`schemaVersion: 1`: `oomLastSeen` (container key to counter), `oomBaselines` (ticket key to
+container key to counter) and `oomRetryAt` (ticket key to time), all `omitempty`, so a pass
+with no OOM data writes the same bytes as before. `decodeOOMSections` decodes and validates
+them separately from `validateReconcileState`: a wrong-typed section, an empty key, a
+negative counter or a zero timestamp in any one makes all three load empty and sets the
+unpersisted `ReconcileState.OOMDropped`, which `applyReconcile` logs once
+(`reconcile: OOM state in the state file is invalid, starting OOM classification fresh`).
+This is deliberately **not** a `StateLoadError` hold: this state's loss degrades to today's
+budgeted path, while #883's hold exists for grace and apply-retry state, whose loss is unsafe.
+An older binary ignores the keys on read and drops them on save; a newer one reading an old
+file starts with empty sections, i.e. the ordinary path on that first pass.
+
+**Limits, by design.**
+
+- *An init-killed container loses the signal.* If the OOM killer kills the container's init
+  process the container stops, `docker exec` fails and the counter is unreadable. The ticket
+  fails open to the ordinary budgeted retry: safe, but it is not classified.
+- *A shared cgroup over-attributes.* The counter is per container, so another session's OOM
+  in the same container during a ticket's grace window classifies an unrelated death as OOM.
+  `oomRetryBudget` bounds the cost; a recorded launch container narrows the candidates to the
+  right agent's cgroup, but not to the right session.
+- *A stale last-seen can mislabel.* After a long idle (no `Working` pass saw a live session),
+  a ticket that dies before any pass refreshes the value can show a false delta from an old
+  OOM. Rare: the combined pass normally dispatches and reconciles in the same pass.
+- *Split-host cron setups get no backoff.* The retry times live in the reconciler's state
+  file; a dispatch on another host or state path never sees them. Classification and the
+  separate budget still work.
+- *A deferral without a grace observation still advances last-seen.* A pass that defers a
+  `Working` ticket (nil snapshot, incomplete PR probe, unknown launch verdict) records no
+  baseline but still advances last-seen, so a death first seen on a later pass has a baseline
+  equal to the advanced value and takes the ordinary budgeted path.
+- *`gracePeriod: 0` keeps no baseline on a failed label edit.* The ticket is created and
+  recovered in one pass, so an OOM retry whose label edit fails has no baseline to re-inject.
+- *Some ordinary-retry fallbacks are silent.* A recreated container, a ticket with no
+  baseline and a ticket with no running candidate container take the ordinary retry without a
+  log line (only unreadable counters log), because `Reconcile` is pure and has no writer.
+- *A landed heal does not clear the backoff entry.* Only a landed retry, failure or stuck
+  escalation that takes the ticket off `Working` ends the OOM episode; a plan heal (#926,
+  #1241) on the now-`Planned` ticket leaves `oomRetryAt` for that ticket intact.
+
+**Ticket comments never name the container, runtime or launch ID**, the same rule as #1292
+above; log lines may.
+
+**Tests and seams.** `reconcile_test.go` drives the pure `Reconcile` with hand-built
+`OOMCounters`/`OOMCandidates`/`OOMLastSeen`/`OOMBaselines`; `reconcile_run_test.go` runs
+`RunReconcileOnce` over a real state file with a stub probe; `oomprobe_test.go` drives the
+real `defaultOOMProbe` over the fake-runtime harness of `memprobe_test.go`. The seams are
+`oomProbeFn` (the whole probe), `oomRuntimesFn` and `oomKillReadFn` (its inner reads),
+`oomProbePassTimeout` (a var so a test can shorten the 60s deadline) and `oomBackoffLoadFn`
+(dispatch's state read). `TestMain` (`main_test.go`) stubs `oomProbeFn` to read nothing and
+`oomBackoffLoadFn` to return `(nil, nil)`; without those stubs every `RunReconcileOnce` test
+would exec the developer's real docker and read the real `reconcile.json`
+(`watch/docs/test-isolation.md`). A test that exercises the wiring installs its own stub; one
+that exercises the real probe sets `PATH` to fakes only.
+
 ## Cenci-authored comment markers
 
 Every comment cenci itself posts to a ticket — the attempt marker on a retry
-comment, the terminal-state comments (`dispatch-failed`, `plan-invalid`,
+comment, the OOM retry marker `<!-- cenci-dispatch-oom-retry -->` (`oomRetryMarker`, #1291),
+the terminal-state comments (`dispatch-failed`, `plan-invalid`,
 `reconcile-stuck`), and the unattended planner's escalation comment — carries
 a hidden HTML comment of the form `<!-- cenci-<kind> -->` as the first line of
 its body (`cenciMarkerPrefix`, `reconcile.go`).

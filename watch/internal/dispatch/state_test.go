@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -485,5 +486,226 @@ func TestStateStoreSaveSweepsAgedTempsButKeepsFreshOnes(t *testing.T) {
 	}
 	if _, err := os.Stat(fresh); err != nil {
 		t.Errorf("expected the fresh temp file to be retained (concurrent-writer safety), stat err = %v", err)
+	}
+}
+
+// -- #1291: OOM sections (last-seen counters, per-ticket baselines, retry times)
+
+const oomTestContainer = "docker/claude-cenci-local"
+
+// writeStateBody writes body as reconcile.json in a fresh dir and returns a
+// store over it.
+func writeStateBody(t *testing.T, body string) *stateStore {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "reconcile.json")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("writing fixture: %v", err)
+	}
+	return &stateStore{path: path}
+}
+
+// AC9: the three OOM sections survive a Save/Load cycle through the
+// crash-safe store, under schemaVersion 1.
+func TestStateStore_OOMSectionsRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "reconcile.json")
+	store := &stateStore{path: path}
+	retryAt := time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)
+	want := ReconcileState{
+		Observations:  map[string]time.Time{"o/r#42": retryAt.Add(-time.Minute)},
+		ApplyFailures: map[string]int{},
+		OOMLastSeen:   map[string]int64{oomTestContainer: 4},
+		OOMBaselines:  map[string]map[string]int64{"o/r#42": {oomTestContainer: 3}},
+		OOMRetryAt:    map[string]time.Time{"o/r#7": retryAt},
+	}
+	if err := store.Save(want); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	got, err := store.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.OOMDropped != nil {
+		t.Errorf("OOMDropped = %v, want nil for valid sections", got.OOMDropped)
+	}
+	if got.OOMLastSeen[oomTestContainer] != 4 || len(got.OOMLastSeen) != 1 {
+		t.Errorf("OOMLastSeen = %v, want {%s: 4}", got.OOMLastSeen, oomTestContainer)
+	}
+	if got.OOMBaselines["o/r#42"][oomTestContainer] != 3 || len(got.OOMBaselines) != 1 {
+		t.Errorf("OOMBaselines = %v, want {o/r#42: {%s: 3}}", got.OOMBaselines, oomTestContainer)
+	}
+	if !got.OOMRetryAt["o/r#7"].Equal(retryAt) || len(got.OOMRetryAt) != 1 {
+		t.Errorf("OOMRetryAt = %v, want {o/r#7: %v}", got.OOMRetryAt, retryAt)
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading saved file: %v", err)
+	}
+	var onDisk map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &onDisk); err != nil {
+		t.Fatalf("parsing saved file: %v", err)
+	}
+	if string(onDisk["schemaVersion"]) != "1" {
+		t.Errorf("schemaVersion = %s, want 1", onDisk["schemaVersion"])
+	}
+	for _, key := range []string{"oomLastSeen", "oomBaselines", "oomRetryAt"} {
+		if _, ok := onDisk[key]; !ok {
+			t.Errorf("saved file has no %q key:\n%s", key, raw)
+		}
+	}
+}
+
+// A pass with no OOM data writes exactly the bytes a pre-#1291 build wrote.
+func TestStateStore_NoOOMDataWritesTodaysBytes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "reconcile.json")
+	store := &stateStore{path: path}
+	obs := map[string]time.Time{"o/r#42": time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)}
+	failures := map[string]int{"o/r#42": 1}
+	if err := store.Save(ReconcileState{Observations: obs, ApplyFailures: failures, OOMLastSeen: map[string]int64{}}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading saved file: %v", err)
+	}
+	legacy, err := json.MarshalIndent(struct {
+		SchemaVersion int                  `json:"schemaVersion"`
+		Observations  map[string]time.Time `json:"observations"`
+		ApplyFailures map[string]int       `json:"applyFailures"`
+	}{1, obs, failures}, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw) != string(legacy) {
+		t.Errorf("saved bytes:\n%s\nwant today's bytes:\n%s", raw, legacy)
+	}
+}
+
+// AC9: a file written before #1291 (no OOM keys) loads with empty OOM sections
+// and nothing dropped.
+func TestStateStore_MissingOOMSectionsLoadEmpty(t *testing.T) {
+	store := writeStateBody(t, `{"schemaVersion":1,"observations":{"o/r#42":"2026-10-19T12:00:00Z"},"applyFailures":{"o/r#42":1}}`)
+	got, err := store.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.OOMDropped != nil {
+		t.Errorf("OOMDropped = %v, want nil: missing sections are not invalid", got.OOMDropped)
+	}
+	if got.OOMLastSeen == nil || got.OOMBaselines == nil || got.OOMRetryAt == nil {
+		t.Errorf("OOM sections must load as empty, non-nil maps, got %+v", got)
+	}
+	if len(got.OOMLastSeen)+len(got.OOMBaselines)+len(got.OOMRetryAt) != 0 {
+		t.Errorf("OOM sections = %v %v %v, want empty", got.OOMLastSeen, got.OOMBaselines, got.OOMRetryAt)
+	}
+}
+
+// AC9: an OOM section of the wrong JSON type or holding an invalid entry never
+// holds the pass: Load succeeds, Observations and ApplyFailures load unchanged,
+// every OOM section is empty, and OOMDropped carries the reason for the one log
+// line applyReconcile writes. A valid section beside the invalid one is dropped
+// too, so the three sections never disagree.
+func TestStateStore_InvalidOOMSectionsLoadEmptyWithoutHold(t *testing.T) {
+	const valid = `"oomRetryAt":{"o/r#7":"2026-10-19T11:00:00Z"}`
+	cases := []struct {
+		name    string
+		section string
+	}{
+		{"last-seen of the wrong type", `"oomLastSeen":"docker/claude-cenci-local"`},
+		{"baselines of the wrong type", `"oomBaselines":[1,2]`},
+		{"baseline container map of the wrong type", `"oomBaselines":{"o/r#42":5}`},
+		{"retry time of the wrong type", `"oomRetryAt":{"o/r#42":5}`},
+		{"empty container key in last-seen", `"oomLastSeen":{"":3}`},
+		{"negative last-seen counter", `"oomLastSeen":{"docker/claude-cenci-local":-1}`},
+		{"empty ticket key in baselines", `"oomBaselines":{"":{"docker/claude-cenci-local":1}}`},
+		{"empty container key in a baseline", `"oomBaselines":{"o/r#42":{"":1}}`},
+		{"negative baseline", `"oomBaselines":{"o/r#42":{"docker/claude-cenci-local":-2}}`},
+		{"empty ticket key in retry times", `"oomRetryAt":{"":"2026-10-19T11:00:00Z"}`},
+		{"zero retry timestamp", `"oomRetryAt":{"o/r#42":"0001-01-01T00:00:00Z"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := `{"schemaVersion":1,"observations":{"o/r#42":"2026-10-19T12:00:00Z"},"applyFailures":{"o/r#42":2},` + tc.section
+			if !strings.HasPrefix(tc.section, `"oomRetryAt"`) {
+				body += "," + valid
+			}
+			store := writeStateBody(t, body+"}")
+
+			got, err := store.Load()
+			if err != nil {
+				t.Fatalf("Load = %v, want no error: an invalid OOM section must never become a StateLoadError hold", err)
+			}
+			if got.OOMDropped == nil {
+				t.Error("OOMDropped = nil, want the reason the OOM sections were dropped")
+			}
+			if len(got.OOMLastSeen)+len(got.OOMBaselines)+len(got.OOMRetryAt) != 0 {
+				t.Errorf("OOM sections = %v %v %v, want all empty", got.OOMLastSeen, got.OOMBaselines, got.OOMRetryAt)
+			}
+			if got.OOMLastSeen == nil || got.OOMBaselines == nil || got.OOMRetryAt == nil {
+				t.Error("dropped OOM sections must still be non-nil maps")
+			}
+			if !got.Observations["o/r#42"].Equal(time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)) || len(got.Observations) != 1 {
+				t.Errorf("Observations = %v, want the file's single observation unchanged", got.Observations)
+			}
+			if got.ApplyFailures["o/r#42"] != 2 || len(got.ApplyFailures) != 1 {
+				t.Errorf("ApplyFailures = %v, want {o/r#42: 2} unchanged", got.ApplyFailures)
+			}
+		})
+	}
+}
+
+// The dispatch-side backoff load reads the reconciler's OOM retry times
+// read-only from the default state path; an absent file is no backoff, and an
+// unreadable file or dropped OOM sections are an error the dispatcher logs.
+func TestDefaultOOMBackoffLoad(t *testing.T) {
+	retryAt := time.Date(2026, 10, 19, 11, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name    string
+		body    string // "" leaves no file
+		want    map[string]time.Time
+		wantErr bool
+	}{
+		{name: "absent file", want: map[string]time.Time{}},
+		{name: "retry times", body: `{"schemaVersion":1,"observations":{},"applyFailures":{},"oomRetryAt":{"o/r#42":"2026-10-19T11:00:00Z"}}`,
+			want: map[string]time.Time{"o/r#42": retryAt}},
+		{name: "corrupt file", body: `{"observations":{`, wantErr: true},
+		{name: "invalid OOM section", body: `{"schemaVersion":1,"oomRetryAt":{"o/r#42":"0001-01-01T00:00:00Z"}}`, wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			stateHome := t.TempDir()
+			t.Setenv("XDG_STATE_HOME", stateHome)
+			if tc.body != "" {
+				if err := os.MkdirAll(filepath.Join(stateHome, "cenci"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(stateHome, "cenci", "reconcile.json"), []byte(tc.body), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			got, err := defaultOOMBackoffLoad()
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("defaultOOMBackoffLoad = %v, nil; want an error", got)
+				}
+				if got != nil {
+					t.Errorf("map = %v, want nil beside an error", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("defaultOOMBackoffLoad: %v", err)
+			}
+			if len(got) != len(tc.want) {
+				t.Fatalf("map = %v, want %v", got, tc.want)
+			}
+			for k, v := range tc.want {
+				if !got[k].Equal(v) {
+					t.Errorf("map[%s] = %v, want %v", k, got[k], v)
+				}
+			}
+		})
 	}
 }

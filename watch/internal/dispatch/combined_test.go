@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -49,6 +50,39 @@ func TestEscalatedWindowsMapping(t *testing.T) {
 	}
 	if got[1].WindowName != "7-implement" || got[1].Status != "escalated" {
 		t.Errorf("window[1] = %+v, want 7-implement/escalated", got[1])
+	}
+}
+
+// AC10 (#1291): an OOM-exhausted ticket is an ordinary dispatch-failed ticket
+// to the daemon: it appears in ReconcileResult.Failed exactly once and becomes
+// exactly one synthetic failed window -- also when its failed label edit kept
+// failing until the apply-retry escalation landed.
+func TestOOMExhaustedTicketCountsOnceAsFailedWindow(t *testing.T) {
+	now := time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name          string
+		mut           TicketMutator
+		applyFailures int
+	}{
+		{"failed label edit lands", &fakeMutator{}, 0},
+		{"failed label edit escalates to reconcile-stuck", &escalatingMutator{}, reconcileConfig().ApplyRetryBudget - 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			deps, store := oomRetryApplyFixture(now)
+			deps.OOMRetries = map[string]int{"o/r#42": 3}
+			store.state.ApplyFailures = map[string]int{"o/r#42": tc.applyFailures}
+
+			res, _ := applyReconcile(oomRunnerConfig(), deps, tc.mut, false, io.Discard, store)
+
+			if rec := res.Recoveries[0]; rec.Kind != RecoveryFailed || firstLine(rec.Comment) != failedMarker {
+				t.Fatalf("recovery = %q %q, want RecoveryFailed with failedMarker", rec.Kind, firstLine(rec.Comment))
+			}
+			want := []watch.WindowState{{WindowName: "42-implement", Status: "failed"}}
+			if got := failedWindows(res.Failed); !reflect.DeepEqual(got, want) {
+				t.Errorf("failed windows = %+v, want exactly %+v", got, want)
+			}
+		})
 	}
 }
 

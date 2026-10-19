@@ -2615,3 +2615,141 @@ func TestApplyDispatch_MissingStateFile_StillSpawnsAndCreatesNothing(t *testing.
 		t.Errorf("stat .cenci = %v, want it not to exist (clearing must create nothing)", err)
 	}
 }
+
+// -- #1291: OOM backoff wiring ------------------------------------------------
+//
+// Decide's gate matrix is pinned in decide_test.go; these tests cover only the
+// RunOnce wiring of the persisted map. main_test.go stubs oomBackoffLoadFn to
+// (nil, nil), so no test here can read a developer's real reconcile.json.
+
+// stubOOMBackoffLoad swaps the dispatch-side loader for one returning (since,
+// err) and returns its call counter.
+func stubOOMBackoffLoad(t *testing.T, since map[string]time.Time, err error) *int {
+	t.Helper()
+	calls := 0
+	restore := oomBackoffLoadFn
+	oomBackoffLoadFn = func() (map[string]time.Time, error) {
+		calls++
+		return since, err
+	}
+	t.Cleanup(func() { oomBackoffLoadFn = restore })
+	return &calls
+}
+
+// AC7: the loaded map reaches Decide, keyed by planKey(repo, number): only the
+// recorded ticket is held, with the remaining time in the reason, and the other
+// ticket of the pass is untouched. The loader runs exactly once per pass.
+func TestRunOnce_OOMBackoff_LoadedMapHoldsOnlyTheRecordedTicket(t *testing.T) {
+	cfg := setupGatePass(t, watch.StateSnapshot{}, gatePassRepo{repo: "o/a", tickets: []int{42, 43}})
+	cfg.OOMBackoff = 10 * time.Minute
+	calls := stubOOMBackoffLoad(t, map[string]time.Time{"o/a#42": time.Now().Add(-3 * time.Minute)}, nil)
+	spawned := recordSpawns(t)
+
+	var buf bytes.Buffer
+	decisions, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, &buf, nil)
+	if err != nil {
+		t.Fatalf("RunOnce returned unexpected error: %v", err)
+	}
+
+	assertDecisions(t, decisions, []wantDecision{
+		{42, ActionSkip, "oom backoff (7m left)", ""},
+		{43, ActionDispatch, "dispatch", ""},
+	})
+	if len(*spawned) != 1 || (*spawned)[0] != "43" {
+		t.Errorf("spawned %v, want only ticket 43", *spawned)
+	}
+	if *calls != 1 {
+		t.Errorf("loader ran %d times in one pass, want exactly 1", *calls)
+	}
+}
+
+// AC7: once the backoff has elapsed the ticket dispatches, and the backoff gate
+// adds no label edit or comment of its own (only the Working claim lands).
+func TestRunOnce_OOMBackoff_ElapsedEntryDispatchesWithoutExtraMutations(t *testing.T) {
+	cfg := setupGatePass(t, watch.StateSnapshot{}, gatePassRepo{repo: "o/a", tickets: []int{42}})
+	cfg.OOMBackoff = 10 * time.Minute
+	stubOOMBackoffLoad(t, map[string]time.Time{"o/a#42": time.Now().Add(-11 * time.Minute)}, nil)
+	spawned := recordSpawns(t)
+	mut := &fakeMutator{}
+
+	decisions, err := RunOnce(cfg, fakeController{}, mut, false, io.Discard, nil)
+	if err != nil {
+		t.Fatalf("RunOnce returned unexpected error: %v", err)
+	}
+
+	assertDecisions(t, decisions, []wantDecision{{42, ActionDispatch, "dispatch", ""}})
+	if len(*spawned) != 1 {
+		t.Errorf("spawned %v, want ticket 42", *spawned)
+	}
+	if len(mut.labelEdits) != 1 || !containsStr(mut.labelEdits[0].add, labelWorking) || len(mut.comments) != 0 {
+		t.Errorf("label edits %+v, comments %+v, want only the Working claim", mut.labelEdits, mut.comments)
+	}
+}
+
+// A pass that collected no ticket never loads, and neither does a pass with the
+// backoff disabled (oomBackoff 0): nothing is read, and a recorded entry holds
+// nothing.
+func TestRunOnce_OOMBackoff_NotLoadedWhenNoTicketsOrBackoffDisabled(t *testing.T) {
+	t.Run("no tickets collected", func(t *testing.T) {
+		cfg := setupGatePass(t, watch.StateSnapshot{}, gatePassRepo{repo: "o/a"})
+		cfg.OOMBackoff = 10 * time.Minute
+		calls := stubOOMBackoffLoad(t, map[string]time.Time{}, nil)
+		failOnSpawn(t)
+
+		if _, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, io.Discard, nil); err != nil {
+			t.Fatalf("RunOnce returned unexpected error: %v", err)
+		}
+		if *calls != 0 {
+			t.Errorf("loader ran %d times in a pass with no tickets, want 0", *calls)
+		}
+	})
+
+	t.Run("oomBackoff 0", func(t *testing.T) {
+		cfg := setupGatePass(t, watch.StateSnapshot{}, gatePassRepo{repo: "o/a", tickets: []int{42}})
+		cfg.OOMBackoff = 0
+		calls := stubOOMBackoffLoad(t, map[string]time.Time{"o/a#42": time.Now()}, nil)
+		recordSpawns(t)
+
+		decisions, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, io.Discard, nil)
+		if err != nil {
+			t.Fatalf("RunOnce returned unexpected error: %v", err)
+		}
+		assertDecisions(t, decisions, []wantDecision{{42, ActionDispatch, "dispatch", ""}})
+		if *calls != 0 {
+			t.Errorf("loader ran %d times with oomBackoff 0, want 0", *calls)
+		}
+	})
+}
+
+// An unreadable state file gives exactly one "dispatch: " log line and no
+// oom-backoff skip, while every other gate is unchanged: the concurrency cap
+// still holds the second ticket. The pass is not failed.
+func TestRunOnce_OOMBackoff_UnreadableStateLogsOnceAndSkipsNothing(t *testing.T) {
+	cfg := setupGatePass(t, watch.StateSnapshot{}, gatePassRepo{repo: "o/a", tickets: []int{42, 43}})
+	cfg.OOMBackoff = 10 * time.Minute
+	cfg.ConcurrencyCap = 1
+	stubOOMBackoffLoad(t, nil, errors.New("reconcile state unreadable: boom-1291"))
+	spawned := recordSpawns(t)
+
+	var buf bytes.Buffer
+	decisions, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, &buf, nil)
+	if err != nil {
+		t.Fatalf("RunOnce returned %v; an unreadable backoff state must not fail the pass", err)
+	}
+
+	assertDecisions(t, decisions, []wantDecision{
+		{42, ActionDispatch, "dispatch", ""},
+		{43, ActionSkip, "concurrency cap reached", ""},
+	})
+	if len(*spawned) != 1 || (*spawned)[0] != "42" {
+		t.Errorf("spawned %v, want only ticket 42", *spawned)
+	}
+	lines := logLinesWith(buf.String(), "boom-1291")
+	if len(lines) != 1 {
+		t.Fatalf("got %d log lines naming the load error, want exactly 1: %q", len(lines), lines)
+	}
+	assertProbeLogLine(t, lines[0])
+	if strings.Contains(buf.String(), "oom backoff (") {
+		t.Errorf("no ticket may be skipped for oom backoff when the state is unreadable, got:\n%s", buf.String())
+	}
+}
