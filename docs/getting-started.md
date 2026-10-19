@@ -152,6 +152,8 @@ including CI-blocking `fail` results, which disables the Phase 9 push gate,
 `generatedDocs: false` skips marker-bounded generated-section maintenance, and
 `maintenance.enabled` controls only scheduled/reminder UX.
 
+To limit implement runs to required documentation work, see [flow/README.md's documentation policy](../flow/README.md#documentation-policy).
+
 For a full, on-demand audit of the whole project — workflow structure, docs, client
 adapters (Claude Code, Codex, OpenCode), and accumulated rules — run:
 

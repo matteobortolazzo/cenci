@@ -188,7 +188,7 @@ companion) for every skill, including the internal ones not listed above.
 | `codex-runtime` | — | — | — | — |
 | `configure` | codex.md | babysit, codex-runtime, project-core, shell-rules, testing, verify-ui | detect-project.sh, merge-sandbox-config.sh, resolve-delta.sh | code-reviewer |
 | `frontend-classification` | — | implement, refine | — | — |
-| `implement` | codex.md, phases/phase-1-plan.md, phases/phase-2-worktree.md, phases/phase-3-test-red.md, phases/phase-4-implement-green.md, phases/phase-5-refactor.md, phases/phase-6-7-review.md, phases/phase-8-docs.md, phases/phase-9-pr.md | address-review, attachments, babysit, ci-repair, close, codex-runtime, frontend-classification, project-core, review, shell-rules, subagent-safety, testing, ticket-ownership, verify-ui | pr-size.sh, run-artifact-dir.sh | acceptance-reviewer, code-reviewer, context-gatherer, domain-specialist, implementer, lessons-collector, planner, security-reviewer, silent-failure-hunter |
+| `implement` | codex.md, phases/phase-1-plan.md, phases/phase-2-worktree.md, phases/phase-3-test-red.md, phases/phase-4-implement-green.md, phases/phase-5-refactor.md, phases/phase-6-7-review.md, phases/phase-8-docs.md, phases/phase-9-pr.md | address-review, attachments, babysit, ci-repair, close, codex-runtime, frontend-classification, project-core, review, shell-rules, subagent-safety, testing, ticket-ownership, verify-ui | docs-policy.sh, pr-size.sh, run-artifact-dir.sh | acceptance-reviewer, code-reviewer, context-gatherer, domain-specialist, implementer, lessons-collector, planner, security-reviewer, silent-failure-hunter |
 | `maintain` | base-freshness.md, codex.md, modes/backlog.md, modes/clients.md, modes/docs.md, modes/rules.md, modes/structure.md | codex-runtime, project-core, shell-rules, subagent-safety, worktrees | check.sh | backlog-maintainer, docs-maintainer, domain-specialist, portability-maintainer, rules-maintainer, structure-maintainer |
 | `merge-repair` | — | project-core, shell-rules, worktrees | — | — |
 | `pr-comment-filter` | — | address-review, babysit | — | — |
@@ -527,6 +527,53 @@ including CI-blocking `fail` results, which disables the Phase 9 push gate;
 sets reminder cadence; and `maintenance.enabled` gates only optional scheduled-maintenance
 and reminder UX. See [`flow/skills/configure/SKILL.md`](skills/configure/SKILL.md) for the
 schema and defaults.
+
+### Documentation policy
+
+`docs.policy` in `.cenci/config.json` sets how much documentation work `/cenci:implement`'s
+Phase 8 does. It is optional and `/cenci:configure` never asks about it — add it by hand as
+`{"docs": {"policy": "minimal"}}`; a configure re-run preserves it.
+
+- `"minimal"` (the exact, case-sensitive string) — the minimal policy below.
+- absent, or any other value — the default policy: Phase 8 behaves as it always has. An
+  unknown value prints one warning naming `docs.policy`; an unreadable or malformed config
+  falls back to the default and reports `docs: error (policy unresolved)`.
+
+Plan-required and correctness documentation work always runs, while incidental documentation edits and lesson capture are what `minimal` suppresses.
+In `minimal` mode, Phase 8 edits documentation only for a doc file the plan names, a
+`Docs to update:` item the implementer reported, a changed reading trigger (an
+`AGENTS.md`/`CLAUDE.md` read-when pointer whose target this run added, renamed, removed or
+made inaccurate), or an admitted lesson (a non-obvious failure or rework a written lesson
+could prevent). A run with none of these makes no documentation edits and does not launch the lessons collector.
+Phase 8 never looks for new documentation opportunities, but a doc this change made
+inaccurate is still recorded and repaired. Maintenance `warn` and `skip` results are reported
+without a question; a `fail` still asks Fix now / Stop / Push anyway, and
+`maintenance.checkDuringImplement: false` still makes it report-only.
+
+In `minimal` mode, the PR checklist carries one docs status line instead of
+`Documentation updated`:
+
+- `docs: none (minimal policy)` — the PR changes no documentation
+- `docs: updated <paths>` — the documentation paths the PR changes (`README.md`,
+  `AGENTS.md`/`CLAUDE.md`, `docs/**`, and plan-named doc files), comma-separated, including
+  docs the run newly created; if the changed files cannot be listed, the line is
+  `docs: error (changed-file discovery failed)`, never `none`
+- `docs: error (<reason>)` — unchecked; for example an unreadable `Docs to update:` handoff
+  (`docs: error (docs-to-update.txt unreadable)`), never reported as `none`
+
+Maintenance failures and coverage gaps still appear in the PR's `## Checklist` and
+`## Notes`.
+
+In the default policy, the checklist keeps `- [ ] Documentation updated`, and when Phase 8 records a documentation error the PR's `## Notes` also carries one `Documentation status: docs: error (<reason>)` line naming every recorded reason.
+
+**Checker status, in every mode.** Phase 8 records each documentation validation — the
+maintenance checker and any repository docs check the plan names — as `pass`, `fail`,
+`skipped (<reason>)` or `unavailable`. A repository docs command runs through your client's
+normal permission prompt; cenci adds no allow-list entry for it. A repository without
+`flow/skills/maintain/scripts/check.sh` (every repository except cenci's own — the checker
+ships inside the plugin) now shows `- [ ] Maintenance check: unavailable …` in the PR
+checklist where it previously got a silent skip; only `skipped (no doc-affecting changes)`
+still renders as a checked `not applicable`.
 
 ### UI tickets
 

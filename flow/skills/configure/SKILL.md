@@ -2350,6 +2350,14 @@ optional scheduled/reminder UX, whether Phase 8 may repair versus report finding
 whether generated documentation sections participate. Omitting it keeps all optional UX
 and repair/generated-section behavior enabled by default.
 
+The `docs` field is optional and, like `maintenance` above, has no configure question.
+`docs.policy` is an optional field that no configure prompt writes, and a configure re-run preserves it together with every unrelated key.
+Merge semantics (step 6) keep a hand-added value untouched; it adds no `configVersion` bump and no `question-keys.json` entry. Do **not** add `docs` to the migration-removal list below — it is a supported optional field, not a legacy one.
+
+Schema: `docs.policy` — the exact, case-sensitive string `"minimal"` selects the minimal documentation policy for `/cenci:implement`'s Phase 8; an absent `docs` block, an absent `docs.policy`, or any other value means the default policy (an unknown value warns once, naming `docs.policy`). Example: `{"docs": {"policy": "minimal"}}`.
+Plan-required and correctness documentation work always runs, while incidental documentation edits and lesson capture are what `minimal` suppresses.
+`flow/README.md`'s `### Documentation policy` subsection is the user-facing reference for the resulting Phase 8 and PR-body behavior.
+
 Only include servers in `mcpServers` that were presented as options (i.e., detected or always-available). Value is `true` if enabled, `false` if declined.
 
 Only include servers in `lspServers` that were detected and presented in question 6. Value is `true` if enabled, `false` if declined. Omit `lspServers` entirely if no LSP servers were detected.

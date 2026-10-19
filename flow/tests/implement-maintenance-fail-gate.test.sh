@@ -50,6 +50,9 @@
 #   - flow/skills/implement/codex.md (portable equivalent)
 #   - flow/README.md, docs/getting-started.md (checkDuringImplement now also
 #     disables a blocking gate -- users must be told)
+#   - #1301 extension: the `unavailable` checker status and its unchecked
+#     rendering, the `validation:`-line halted gate, and a repository docs
+#     check joining the unchanged fail question / checkDuringImplement opt-out
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || { echo "implement-maintenance-fail-gate.test.sh: failed to resolve script directory." >&2; exit 2; }
@@ -215,6 +218,32 @@ assert_file_contains "${PHASE9_PR}" 'summary line shows `— overridden`' \
   'Phase 9 has a rendering rule keyed on the overridden tag'
 assert_file_contains "${PHASE9_PR}" 'never render this as a pass' \
   'Phase 9 forbids rendering a non-pass maintenance status as a pass'
+
+# --- #1301: unavailable status and the validation-line halted gate -----------
+# An absent checker (every consumer repo) is `unavailable` and renders
+# unchecked, never a silent skip or `- [x] ... not applicable`. A repository
+# docs check the plan names records its own `validation:` line; a "Stop" on
+# its `fail` tags that line `halted`, and the Phase 9 gate must stop on it
+# exactly like a `halted` first-line tag. The Fix now / Stop / Push anyway and
+# checkDuringImplement contracts above stay pinned unchanged and extend to the
+# repository check.
+
+assert_contains "${gate_section}" 'If any `validation:` line ends with `— halted`, stop before Commit exactly as for a `halted` tag: do not commit, do not push, and do not create the PR.' \
+  'Phase 9 gate stops on a halted validation line'
+assert_contains "${gate_section}" 'a `maintenance: unavailable …` line' \
+  'Phase 9 gate lets an unavailable checker proceed'
+assert_file_contains "${PHASE9_PR}" '- [ ] Maintenance check: unavailable (no documentation checker in this repository — verify documentation manually before merge)' \
+  'Phase 9 renders an unavailable checker as an unchecked line'
+assert_file_contains "${PHASE9_PR}" '`fail — halted` → `- [ ] Docs check halted: <label> (unresolved failure — do not merge)`' \
+  'Phase 9 renders a halted repository check honestly'
+assert_file_contains "${PHASE9_PR}" '`fail — overridden` → `- [ ] Docs check FAILING: <label> (user-approved red pipeline — see Notes)`' \
+  'Phase 9 renders an overridden repository check as FAILING'
+assert_contains "${maintenance_section}" 'A non-zero exit records `fail` and enters the Fix now / Stop / Push anyway question above' \
+  'Phase 8 routes a repository-check fail through the unchanged fail question'
+assert_contains "${maintenance_section}" 'unless `maintenance.checkDuringImplement` is explicitly `false`, which records it `reported`' \
+  'Phase 8 keeps checkDuringImplement:false report-only for repository checks'
+assert_contains "${maintenance_section}" 'write `maintenance: unavailable (no documentation checker in this repository)` as the first line of `$RUN_DIR/maintain-status.txt`' \
+  'Phase 8 records an absent checker as unavailable'
 
 # --- codex.md: portable equivalent -------------------------------------------
 
