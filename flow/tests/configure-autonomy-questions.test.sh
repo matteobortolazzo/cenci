@@ -369,7 +369,7 @@ OLD_CODEX_AUTONOMY_CONSERVATIVE_DEFAULT_MARKER='defaults both offers to the cons
 CODEX_AUTONOMY_PLAN_MODE_MARKER='all three keys land in the apply step'"'"'s config write, never during `/plan`'
 OLD_CODEX_AUTONOMY_PLAN_MODE_MARKER='both keys land in the apply step'"'"'s config write, never during `/plan`'
 CODEX_Q15_OPTIONS_MARKER='Question 15 (`refinement`) mirrors question 13 with the options "Switch to `lean` (Recommended)" and "Keep `interactive`"'
-CODEX_Q15_DECLINE_AND_GATE_MARKER='Declining question 15 writes no `refinement` key, and lean refinement never grants `automerge:ok` and does not remove the Confirmation Gate.'
+CODEX_Q15_DECLINE_AND_GATE_MARKER='Declining question 15 writes no `refinement` key. Refinement autonomy controls question selection only; confirmation and automerge grants use questions 16 and 17 independently.'
 
 # docs/autonomous-loop.md — old claim (§3) removed, new sentence (§3) added,
 # plus a one-line §1 pointer.
@@ -405,7 +405,7 @@ Q15_ALL_KEEP_OPTION='"Keep current (Recommended)"'
 Q15_ALL_OTHER_VALUE_MARKER='a value other than the exact string `lean` is treated as `interactive`'
 Q15_ALL_KEEP_WRITES_NOTHING='Keeping the current value writes nothing.'
 Q15_ALL_SWITCH_EXPLICIT='Switching to `interactive` writes `refinement.autonomy: "interactive"` explicitly, preserving sibling keys.'
-Q15_GATE_MARKER='never grants `automerge:ok` and does not remove the Confirmation Gate'
+Q15_GATE_MARKER='Refinement autonomy controls question selection only; confirmation and automerge grants use questions 16 and 17 independently.'
 Q15_SWITCH_BEGIN_MARKER='<!-- cenci:configure-q15-switch:begin -->'
 Q15_SWITCH_END_MARKER='<!-- cenci:configure-q15-switch:end -->'
 Q15_PROGRAM='.refinement = ((.refinement | if type == "object" then . else {} end) + {autonomy: $autonomy})'
@@ -417,7 +417,7 @@ OLD_AUTONOMY_INTRO_KEYS_MARKER='`planning` and `automerge` are repo-committed ke
 AUTONOMY_INTRO_QUESTIONS_MARKER='The questions below only collect an answer; none writes anything itself'
 OLD_AUTONOMY_INTRO_QUESTIONS_MARKER='Both questions below only collect an answer; neither writes anything itself'
 Q15_ALL_REOFFER_SENTENCE='Under `--all`, question 15 is re-offered even when `refinement` is present, with "Keep current (Recommended)" pre-selected.'
-NEXT_STEP_ALL_SIX_MARKER='for the full walkthrough of all six switches'
+NEXT_STEP_ALL_SIX_MARKER='for the full walkthrough of the switches'
 OLD_NEXT_STEP_ALL_FOUR_MARKER='for the full walkthrough of all four switches'
 NEXT_STEP_NO_FLEET_VERB_MARKER='Switch 6 (`refinement.autonomy`) has no fleet verb: it is read from the local checkout, so there is nothing to flip fleet-wide.'
 
@@ -434,33 +434,33 @@ REFINEMENT_FIELD_INTRO='The `refinement` field is optional. `### Autonomy Settin
 REFINEMENT_FIELD_SEMANTICS='- `refinement.autonomy` — `"lean"` or `"interactive"`, default `"interactive"`. Only the exact string `"lean"` changes behavior'
 REFINEMENT_FIELD_CONSUMER='`refinement.autonomy` is consumed by `skills/refine/SKILL.md`'
 REFINEMENT_FIELD_LOCAL_READ='is read from the local `.cenci/config.json` through `project-core`, never from `origin/main`, and no fleet switch exists for it'
-REFINEMENT_FIELD_GATE='never grants `automerge:ok` and does not remove the Confirmation Gate'
+REFINEMENT_FIELD_GATE='Refinement autonomy controls question selection only; confirmation and automerge grants use questions 16 and 17 independently.'
 
 # Step 7 final-report: a carried `refinement` value is stated verbatim too
 # (pinned in configure-delta-rerun.test.sh as STEP7_CARRIED_VALUES).
 
 # docs/autonomous-loop.md — the sixth switch.
-LOOP_LEAD_SIX='Six opt-in switches remove those gates one at a time'
+LOOP_LEAD_SIX='Planning and merging remain separate choices:'
 OLD_LOOP_LEAD_FIVE='Five opt-in switches'
-LOOP_HEADING_SIX_LINE='## The six switches'
+LOOP_HEADING_SIX_LINE='## Independent controls'
 OLD_LOOP_HEADING_FIVE_LINE='## The five switches'
 OLD_LOOP_FIVE_SWITCHES='five switches'
-LOOP_ROW6='| 6 | `refinement.autonomy: "lean"` | repo `.cenci/config.json` (committed) | `"interactive"` | The **refinement interview**. `/cenci:refine` asks one round of at most 3 questions plus the cap-exempt confirm/overrule question, decides the rest itself and lists those decisions as A1…An at the Confirmation Gate for one overrule.'
-LOOP_PER_REPO_SENTENCE='Switches 1, 3 and 6 are per-repo and committed, so the repo decides its own autonomy.'
+LOOP_ROW6='| 6 | `refinement.autonomy: "lean"` | repo `.cenci/config.json` (committed) | `"interactive"` | Reduces refinement questions using grounded decisions. Unresolved consequential questions still block applying the proposal.'
+LOOP_PER_REPO_SENTENCE='Switches 1, 3, 6, 7 and 8 are per-repo and committed, so the repo decides its own autonomy.'
 OLD_LOOP_PER_REPO_SENTENCE='Switches 1 and 3 are per-repo and committed'
-LOOP_NO_FLEET_COUNTERPART='Switch 6 has no fleet counterpart'
+LOOP_NO_FLEET_COUNTERPART='Refinement settings are read from the local checkout and have no fleet counterpart.'
 LOOP_SECTION5_HEADING='### 5. Start the loop'
 LOOP_SECTION6_HEADING='### 6. Ask fewer questions at refinement'
 LOOP_WHAT_STOPS_HEADING='## What still stops the machine'
-LOOP_SECTION6_WHAT='one round of at most 3 questions plus the cap-exempt confirm/overrule question'
-LOOP_SECTION6_GATE='This switch reduces questions; it never grants `automerge:ok` and does not remove the Confirmation Gate.'
+LOOP_SECTION6_WHAT='Lean mode keeps a short interview and records grounded decisions.'
+LOOP_SECTION6_GATE='`refinement.autonomy` never grants `automerge:ok` and never controls final review.'
 LOOP_SECTION6_LOCAL='`refinement.autonomy` is read from the local `.cenci/config.json` through `project-core`, never from `origin/main`, and no fleet switch exists for it.'
 LOOP_SECTION6_OFFER='`/cenci:configure` offers `refinement.autonomy` on a delta run when the key is absent and has not been offered before, recommending `lean` while an absent key still resolves to `interactive`; `/cenci:configure --all` re-offers it with the committed value pre-selected.'
 LOOP_TURN_OFF_ROW='| Lean refinement for one repo | Set `refinement.autonomy` to anything other than `"lean"` | Next `/cenci:refine` |'
 LOOP_DETAILS_ROW='| Lean refinement as the refine skill executes it | [Refine skill](../flow/skills/refine/SKILL.md) |'
 
 # Root AGENTS.md doc index.
-ROOT_AGENTS_SIX_SWITCHES='the user-facing guide to the six opt-in autonomy switches (lean planning, `dispatch.planRefined`, the `automerge` policy block, `automerge.enabled`, `planning.attended`, `refinement.autonomy`)'
+ROOT_AGENTS_SIX_SWITCHES='the user-facing guide to independent autonomy controls (lean planning, `dispatch.planRefined`, the `automerge` policy block, `automerge.enabled`, `planning.attended`, `refinement.autonomy`, `refinement.confirmBeforeApply`, `refinement.automerge`)'
 OLD_ROOT_AGENTS_FIVE_SWITCHES='the user-facing guide to the five opt-in autonomy switches'
 
 # jq_apply <program> <config-json> [jq args...] — run a program over a config;

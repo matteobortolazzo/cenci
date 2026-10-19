@@ -10,6 +10,12 @@ user-invocable: false
   there and produce an approved plan without mutating GitHub or project files.
 - Continue mutations in a second normal-mode invocation of the same skill, passing the
   approved plan or `.plans/<file>` explicitly.
+- Refinement is an exception to that two-invocation procedure: an ordinary normal-mode
+  refine invocation asks its material questions, validates the proposal and applies it
+  in the same invocation. `refinement.confirmBeforeApply: true` adds final review in
+  that invocation; false or absent does not ask again. An explicit `/plan` refinement
+  remains read-only and returns the proposal for a later normal-mode invocation.
+  `skills/refine/codex.md` owns the pre-write checks and independent automerge policy.
 - Persist phase state at `.cenci/checkpoints/<workflow>-<target>.json` with `node "${PLUGIN_ROOT}/codex/checkpoint.mjs" <init|advance|block|complete|clear> <path> <workflow> <target> <phase>`. The helper validates schema version 1 and uses atomic rename.
   Store workflow, target, phase, plan path, worktree, last completed gate, and status.
 - On execution ambiguity, persist the checkpoint, clear the active goal, ask exactly one

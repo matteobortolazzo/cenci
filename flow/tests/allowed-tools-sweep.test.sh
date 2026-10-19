@@ -454,7 +454,16 @@ Bash(git -C:*)
 Bash(git diff --no-index:*)
 Bash(rm -f ${TMPDIR:-/tmp}/cenci/cenci-configure-:*)
 Bash(cenci dispatch status:*)
-Bash(cenci dispatch enroll:*)'
+Bash(cenci dispatch enroll:*)
+Bash(cenci dispatch plan-refined on)
+Bash(cenci dispatch plan-refined off)
+Bash(cenci dispatch plan-refined status)
+Bash(cenci automerge on)
+Bash(cenci automerge off)
+Bash(cenci automerge status)
+Bash(cenci planning attended on)
+Bash(cenci planning attended off)
+Bash(cenci planning attended status --json)'
   check_bash_grant_set "${configure_path}" "${CONFIGURE_EXPECTED_GRANTS}" "skills/configure/SKILL.md"
   # Test-bug fix (#773, narrow): unlike the other five swept skills,
   # assert_dropped_blanket_grants is NOT called for configure here. Per the

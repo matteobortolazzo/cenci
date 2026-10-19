@@ -18,6 +18,11 @@
     { "id": "dispatchEnroll", "keys": [], "conditional": true },
     { "id": "planning", "keys": ["planning"], "conditional": false },
     { "id": "automerge", "keys": ["automerge"], "conditional": false, "projectsAware": true },
-    { "id": "refinement", "keys": ["refinement"], "conditional": false }
+    { "id": "refinement", "keys": ["refinement"], "conditional": false },
+    { "id": "refinement.confirmBeforeApply", "keys": ["refinement.confirmBeforeApply"], "conditional": false },
+    { "id": "refinement.automerge", "keys": ["refinement.automerge"], "conditional": false },
+    { "id": "dispatch.planRefined", "keys": [], "conditional": true },
+    { "id": "automerge.enabled", "keys": [], "conditional": true },
+    { "id": "planning.attended", "keys": [], "conditional": true }
   ]
 }

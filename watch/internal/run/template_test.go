@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -143,30 +144,55 @@ func TestUnknownAgentAndWorkflowError(t *testing.T) {
 
 func TestCodexNativeWorkflowTemplates(t *testing.T) {
 	cfg := builtinConfig()
-	for _, workflow := range []string{"configure", "refine", "implement", "review", "address-review", "refactor", "sync", "maintain"} {
-		argv, err := cfg.BuildCommand("codex", workflow, "42", "", false)
-		if err != nil {
-			t.Fatalf("%s: %v", workflow, err)
-		}
-		got := argv[len(argv)-1]
-		want := "$cenci:" + workflow + " 42"
-		if codexPlanningWorkflow(workflow) {
-			want = "/plan\n" + want
-		}
-		if got != want {
-			t.Errorf("%s = %q, want %q", workflow, got, want)
+	workflows := []struct{ workflow, prompt string }{
+		{"configure", "/plan\n$cenci:configure 42"},
+		{"refine", "$cenci:refine 42"},
+		{"implement", "/plan\n$cenci:implement 42"},
+		{"review", "$cenci:review 42"},
+		{"address-review", "/plan\n$cenci:address-review 42"},
+		{"refactor", "/plan\n$cenci:refactor 42"},
+		{"sync", "$cenci:sync 42"},
+		{"maintain", "/plan\n$cenci:maintain 42"},
+	}
+	for _, launch := range []struct {
+		name    string
+		sandbox bool
+		command []string
+	}{
+		{"host", false, []string{"codex"}},
+		{"sandbox", true, []string{"cenci", "open"}},
+	} {
+		for _, workflow := range workflows {
+			t.Run(launch.name+"/"+workflow.workflow, func(t *testing.T) {
+				argv, err := cfg.BuildCommand("codex", workflow.workflow, "42", "", launch.sandbox)
+				if err != nil {
+					t.Fatal(err)
+				}
+				want := append(append([]string{}, launch.command...), workflow.prompt)
+				if !equalArgs(argv, want) {
+					t.Errorf("argv = %q, want %q", argv, want)
+				}
+			})
 		}
 	}
 }
 
 func TestCodexApplyStageLeavesPlanMode(t *testing.T) {
 	cfg := builtinConfig()
-	argv, err := cfg.BuildCommand("codex", "implement", "apply .plans/42.md", "", false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(argv[len(argv)-1], "/plan") {
-		t.Fatalf("apply entered plan mode: %q", argv[len(argv)-1])
+	for _, workflow := range []string{"configure", "implement", "address-review", "refactor", "maintain"} {
+		for _, target := range []string{"apply .plans/42.md", "resume .plans/42.md", ".plans/42.md"} {
+			for _, sandbox := range []bool{false, true} {
+				t.Run(workflow+"/"+target+"/sandbox="+strconv.FormatBool(sandbox), func(t *testing.T) {
+					argv, err := cfg.BuildCommand("codex", workflow, target, "", sandbox)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if got, want := argv[len(argv)-1], "$cenci:"+workflow+" "+target; got != want {
+						t.Fatalf("prompt = %q, want %q", got, want)
+					}
+				})
+			}
+		}
 	}
 }
 

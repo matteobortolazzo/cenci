@@ -29,11 +29,10 @@ Use the selector's actual output as the inherited blocker set in every child's
 manifest; omit closed parent blockers from both body lines and native writes.
 The response includes state, so no per-blocker state lookup is needed.
 
-After confirmation, repeat the fetch and selector before the first write,
+After the policy-ready or configured Confirm branch, repeat the fetch and selector before the first write,
 alongside manifest revalidation. Compare the selected open set with the gate's
-snapshot. If it changed, STOP with zero writes and request a fresh refinement
-confirmation through the client's available user-input mechanism; report the
-changed blockers. Do not silently apply a dependency graph the user did not see.
+snapshot. If it changed, STOP with zero writes and require a fresh refinement run; report the changed blockers. Ask final
+confirmation only when configured on that fresh run. Do not silently apply a dependency graph the user did not see.
 Reuse the validated set for every child in this pass, including the first child;
 do not fetch the parent again for each child. This is a split-time snapshot, not
 ongoing synchronization of future parent changes.

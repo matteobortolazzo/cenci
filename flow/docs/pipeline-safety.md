@@ -151,13 +151,14 @@ fail mid-run or get reused in a new context.
   existing `status: awaiting-input` draft on disk and that step 1's "no valid draft exists at
   all" case has a different backstop (reconciler's stage-aware retry per #828).
 
-- A skill's confirmation gate — not its preceding Q&A/back-and-forth loop — is the true first
-  mutation boundary: no write of any kind (ownership claim, status label, or any other mutation)
-  may occur before that gate's single confirmation, and every write step downstream must consume
-  the gate's already-computed verdict rather than recomputing or re-asking. Concrete instance:
-  `/cenci:refine`'s `## Confirmation Gate` (`skills/refine/SKILL.md`, #878, 3/12 of #661) — its
-  Q&A relay loop only shapes the proposal's content, and `## Update Ticket` explicitly restates
-  that no GitHub write occurs before that gate's Confirm branch.
+- A skill's pre-write gate is the first mutation boundary: no ownership claim, status
+  label or other write may precede resolved questions, proposal validation and current
+  ownership/metadata checks. Downstream writes consume the gate's computed verdicts.
+  `/cenci:refine` applies automatically by default; `refinement.confirmBeforeApply: true`
+  adds a final review at that boundary. Declining that review still performs zero writes.
+  Removing final review must never convert an unanswered consequential question into
+  authorization. Automerge grants require their own `refinement.automerge: "eligible"`
+  policy and per-ticket eligibility; neither the Q&A mode nor confirmation grants them.
 
 - When a pipeline ingests externally-sourced data (especially ticket body, comments, or other user-authored text in a public repo), any value that flows into command generation, script heredocs, or expression evaluation requires **both** (1) author/trust-gating via available API signals (e.g., GitHub's `authorAssociation: OWNER/MEMBER/COLLABORATOR`) to filter untrusted commenters, AND (2) format/charset validation against a strict whitelist (e.g., `^[A-Za-z0-9_-]{1,64}$` for IDs) before interpolation. Structural anchoring alone (e.g., "only bare-backticked tokens, never inline code") prevents accidental false positives but not adversarial crafting; neither gate is sufficient alone. Concrete instance: ticket #960 — an identifier sourced from public ticket comments needed both `authorAssociation` checks per comment and a charset whitelist to prevent injection into a downstream executable heredoc/expression. (The specific call site — context-gatherer.md's now-removed design-tool node-ID sourcing — no longer exists, but the general rule still applies to any comparably-sourced identifier.)
 

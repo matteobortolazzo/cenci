@@ -47,7 +47,16 @@ New → Refined → Planned → Working → In Review → Implemented
 | Working → In Review | `/cenci:implement` phase 9 | `+In Review` `−Working` when the PR opens |
 | In Review → Implemented | `/cenci:babysit` (on PR merge, including merge-time split-parent reconciliation); `/cenci:close` (a split parent, after its coverage review) | `+Implemented` `−In Review` |
 
-`automerge:ok` is a per-ticket grant confirmed at refine's Confirmation Gate, never inherited — a split child and a followup ticket each earn it (or not) on their own merit, never from the parent.
+`automerge:ok` is a per-ticket grant governed by `refinement.automerge: "eligible"`
+and each ticket's eligibility, never inherited. The default `"off"` withholds it.
+Planning autonomy and attended mode do not participate in this decision. A split
+child and a followup ticket never inherit the parent's grant.
+
+Refinement applies once its questions and checks are complete, without a redundant
+confirmation. `refinement.confirmBeforeApply: true` restores final review. Both
+paths validate the proposal and recheck ownership, labels and dependencies before
+the first mutation; the write order remains claim, `Working`, body/children,
+final labels. Configure offers these controls independently.
 
 `In Review` is applied when the PR **opens**, not when it merges — so a PR still
 looping through review is visibly distinct from a merged one. `/cenci:babysit` owns

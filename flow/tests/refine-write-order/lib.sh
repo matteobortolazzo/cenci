@@ -138,7 +138,7 @@ _extract_inline_gh_git_mentions_from_text() {
 # BOTH fenced lines (defensively, in case a future edit adds one) and
 # inline single-backtick `gh ...`/`git ...` mentions, bounded by codex.md's
 # own Confirmation Gate marker: the literal bold-text phrase
-# "**Confirmation Gate (apply mode, before any GitHub write)**:" — codex.md
+# "**Confirmation Gate (normal mode, before any GitHub write)**:" — codex.md
 # has no markdown heading structure at all, so there is no "## Confirmation
 # Gate" line to anchor on there, unlike SKILL.md. Matched via a literal
 # substring check (awk's index()), never a fuzzy/regex phrase match, so the
@@ -148,7 +148,7 @@ _extract_inline_gh_git_mentions_from_text() {
 # Returns 1 (no output) if the file is unreadable — fail-closed, never a
 # vacuous empty-prefix pass on a dangling path.
 # ---------------------------------------------------------------------------
-_CODEX_CONFIRMATION_GATE_MARKER='**Confirmation Gate (apply mode, before any GitHub write)**:'
+_CODEX_CONFIRMATION_GATE_MARKER='**Confirmation Gate (normal mode, before any GitHub write)**:'
 extract_codex_pre_gate_gh_calls_raw() {
   local file="$1" content prefix fenced inline
   content="$(cat "${file}" 2>/dev/null)" || return 1

@@ -361,7 +361,7 @@ STEP7_END='### Board lifecycle labels'
 STEP6_ALWAYS_STAMP='Always stamp `configVersion`'
 STEP6_LEDGER_UNION='Always stamp `configureOffered` on every write as the sorted, de-duplicated union of the existing ledger and the question IDs offered this run; `--all` never removes ledger entries.'
 STEP6_EMPTY_LEDGER='An empty result is still written as `[]`.'
-STEP6_OVERLAY_ORDER='The overlay order is `merge-sandbox-config.sh` stdout, then the question 13/14/15 overlays (`cenci:configure-q13-switch`, `cenci:configure-q14-remove`, `cenci:configure-q15-switch`), then the `configureOffered` ledger (`cenci:configure-offered-ledger`).'
+STEP6_OVERLAY_ORDER='The overlay order is `merge-sandbox-config.sh` stdout, then the question 13/14/15 overlays (`cenci:configure-q13-switch`, `cenci:configure-q14-remove`, `cenci:configure-q15-switch`), then the independent leaf overlays (`cenci:configure-confirm-before-apply`, `cenci:configure-refinement-automerge`), then the `configureOffered` ledger (`cenci:configure-offered-ledger`).'
 OLD_STEP6_OVERLAY_ORDER='then the question 13/14 overlays (`cenci:configure-q13-switch`, `cenci:configure-q14-remove`), then the `configureOffered` ledger'
 OBJECT_GATE_EXPR='type == "object"'
 STEP6_OBJECT_GATE="An overlay result is valid only when the \`jq\` call exits 0 and the result passes \`jq -e '${OBJECT_GATE_EXPR}'\`: an empty output passes \`jq empty\`, so \`jq empty\` alone never gates a write."
@@ -444,7 +444,7 @@ OLD_CODEX_OVERLAY_UNCONDITIONAL='the apply step tells the user, removes that que
 OLD_CODEX_OVERLAY_FELL_BACK_Q13_Q14='When a question 13/14 overlay falls back, its answer'
 CODEX_OVERLAY_PROGRAMS='The question 13/14/15 overlays and the ledger stamp use the exact programs the Claude procedure keeps between its `cenci:configure-q13-switch`, `cenci:configure-q14-remove`, `cenci:configure-q15-switch` and `cenci:configure-offered-ledger` markers'
 OLD_CODEX_OVERLAY_PROGRAMS='The question 13/14 overlays and the ledger stamp use the exact programs the Claude procedure keeps between its `cenci:configure-q13-switch`, `cenci:configure-q14-remove` and `cenci:configure-offered-ledger` markers'
-CODEX_CHECKPOINT_ANSWERS='the effective sandbox flags, and the question 11/13/14/15 answers)'
+CODEX_CHECKPOINT_ANSWERS='the effective sandbox flags, and the question 11/13/14/15/16/17 answers and the independent fleet 18–20 choices)'
 OLD_CODEX_CHECKPOINT_ANSWERS='the effective sandbox flags, and the question 11/13/14 answers)'
 CODEX_REPORT_FELL_BACK='A fallen-back question 13/14/15 overlay or a failed `cenci dispatch enroll` is reported the same conditional way'
 OLD_CODEX_REPORT_FELL_BACK='A fallen-back question 13/14 overlay or a failed `cenci dispatch enroll` is reported the same conditional way'
@@ -558,7 +558,7 @@ COMPLETE_CFG='{
   "planning": {"autonomy": "interactive", "note": "keep-me"},
   "automerge": {"maxChangedFiles": 5},
   "refinement": {"autonomy": "interactive", "note": "keep-me"},
-  "configureOffered": ["dispatchEnroll", "uiConventions"],
+  "configureOffered": ["automerge.enabled", "dispatch.planRefined", "dispatchEnroll", "planning.attended", "refinement.automerge", "refinement.confirmBeforeApply", "uiConventions"],
   "cenci": {"gateOutputLines": 80},
   "security": {"sensitivePaths": ["*vault*"]}
 }'

@@ -74,17 +74,31 @@ be noise, not signal.
 | 6 | Dry-run and real pass use the same fetched object and produce the same authorization/staleness decision. | `TestProbeRepoAutonomies_DryRunAndRealPassAgreeUsingSameFreshRef` |
 | 7 | Mixed-fleet tests cover remote/local combinations, fetch outage, forced stale refs, malformed config, branch changes, and timeout. | `TestRunOnce_MixedFleet_RemoteLocalCombinationsAndFailureModes` |
 
-### #878 — proposal confirmation is the first mutation
+### #878 — refinement's pre-write boundary (confirmation when enabled)
 
 | AC | Claim | Test |
 |---|---|---|
-| 1 | No GitHub write occurs before the complete proposal and manifest are explicitly confirmed. | `flow/tests/refine-write-order.test.sh::Any prefix of the pre-gate command inventory: zero` |
+| 1 | No GitHub write occurs before proposal validation and manifest rendering; final confirmation is additionally required when enabled. | `flow/tests/refine-write-order.test.sh::Any prefix of the pre-gate command inventory: zero` |
 | 2 | Declining leaves title, body, labels, assignees, milestone, and native subissues state-for-state unchanged. | `flow/tests/refine-write-order.test.sh::Decline: zero gh/git calls at all in the declined branch` |
-| 3 | Confirming performs ownership claim and `Working` transition only after confirmation and before subsequent writes. | `flow/tests/refine-write-order.test.sh::canonical section -- both docs carry it` |
-| 4 | A post-confirmation ownership conflict stops without editing the proposal/body or creating children. | `flow/tests/refine-write-order.test.sh::re-verify exclusive ownership` |
-| 5 | Parent metadata drift affecting automation/browser/visual authorization stops for reconfirmation; cosmetic inherited-label drift is handled explicitly and tested. | `flow/tests/refine-write-order.test.sh::stop and ask for a fresh confirmation` |
+| 3 | Passing the pre-write gate performs ownership claim and `Working` transition before subsequent writes. | `flow/tests/refine-write-order.test.sh::canonical section -- both docs carry it` |
+| 4 | An ownership conflict at pre-write revalidation stops without editing the proposal/body or creating children. | `flow/tests/refine-write-order.test.sh::re-verify exclusive ownership` |
+| 5 | Parent metadata drift affecting automation/browser/visual authorization stops for a fresh refinement run; cosmetic inherited-label drift is handled explicitly and tested. | `flow/tests/refine-write-order.test.sh::require a fresh refinement run` |
 | 6 | Claude and Codex procedures describe one non-contradictory mutation boundary. | `flow/tests/refine-write-order.test.sh::refine/codex.md Write order parity block` |
-| 7 | Behavioral tests assert the exact write order and prove zero writes for decline and pre-confirmation interruption. | `flow/tests/refine-write-order.test.sh::Non-vacuity self-test: a deliberately broken COPY of the declined-branch` |
+| 7 | Behavioral tests assert the exact write order and prove zero writes for optional-review decline and pre-gate interruption. | `flow/tests/refine-write-order.test.sh::Non-vacuity self-test: a deliberately broken COPY of the declined-branch` |
+
+### Independent refinement controls
+
+These suites execute the policy resolver, configure delta resolver and configuration
+overlays. Markdown assertions pin the instructions for both clients; they do not
+claim to execute a live agent's questionnaire or GitHub mutations.
+
+| Claim | Test |
+|---|---|
+| Missing controls skip final review and withhold automerge; explicit controls are independent of planning and question autonomy. | `flow/tests/refine-independent-policy.test.sh::All combinations are independent` |
+| Invalid control values and unreadable/malformed configuration are handled explicitly. | `flow/tests/refine-independent-policy.test.sh::for invalid in` |
+| Existing refinement objects and old ledger entries cannot hide the new configure questions. | `flow/tests/configure-independent-controls.test.sh::legacy parent keys/ledger must not suppress new leaf questions` |
+| Selected false/off values persist while preserving sibling settings and the merge risk policy. | `flow/tests/configure-independent-controls.test.sh::independent leaves preserve siblings and explicit false` |
+| Delta carries answered controls and `--all` reopens the independent choices. | `flow/tests/configure-independent-controls.test.sh::--all reopens every independent control` |
 
 ### #879 — parent-audit close/hold retry idempotency
 
@@ -185,7 +199,7 @@ be noise, not signal.
 |---|---|---|
 | 1 | A committed golden fixture encodes the post-refinement issue graph, and the flow driver and the watch chain suite each assert against it independently. | `TestGoldenGraph_SchemaInvariants` |
 | 2 | `flow/tests/adversarial-chain/lib.sh` orchestrates the existing extractors/oracles as stage drivers, producing one ordered recorded `gh`/`git` stream across refine to escalation/resume to parent-close. | `flow/tests/adversarial-chain.test.sh::AC2: one ordered recorded gh/git stream spans refine ->` |
-| 3 | Declined refinement and every pre-confirmation interruption produce zero write-classified commands in the recorded stream. | `flow/tests/adversarial-chain.test.sh::AC3: declined refinement and every pre-confirmation` |
+| 3 | Declined refinement with final review enabled and every pre-gate interruption produce zero write-classified commands in the recorded stream. | `flow/tests/adversarial-chain.test.sh::AC3: declined refinement and every pre-confirmation` |
 | 4 | Parent-audit `close -> hold` and `hold -> close` retries reconcile commit message, PR body, and GitHub closing references, and an open sibling forces hold. | `flow/tests/adversarial-chain.test.sh::AC4: parent-audit close<->hold retries reconcile commit` |
 
 ### #913 — `ensure-issue.sh` real-process crash injection (2/5 of the split)
@@ -270,7 +284,7 @@ below).
 |---|---|---|
 | Remote-confirmed lean config is authoritative over local-only lean. | `watch/README.md`, `docs/orchestration.md`, `flow/skills/configure/SKILL.md` | `TestProbeRepoAutonomy_RemoteRevokedToInteractive_LocalMainStillLean_DeniesAtRemoteRef` |
 | Current write permission (not the commenter's permission at plan time) authorizes resume answers. | `watch/README.md`, `docs/orchestration.md` | `TestResolveAnswerProbes_PermissionCacheDoesNotPersistAcrossPasses` |
-| Refinement's proposal confirmation is the true first mutation boundary (pre-mutation confirmation). | `flow/docs/pipeline-safety.md`, `docs/orchestration.md` | `flow/tests/refine-write-order.test.sh::re-verify exclusive ownership` |
+| Refinement's validated pre-write gate, with final confirmation only when enabled, precedes the first mutation. | `flow/docs/pipeline-safety.md`, `docs/orchestration.md` | `flow/tests/refine-write-order.test.sh::re-verify exclusive ownership` |
 | Merges are squash-only, and the merge evaluation always uses current (immediately-before-merge) feedback state, not a stale first-pass verdict. | `docs/orchestration.md` | `TestTickAutomergeSquashOnlyHoldsOnNonSquashPolicy`, `TestTickPreMergeRecheckRevalidatesFeedbackReopenedSinceFirstPass` |
 
 ## Adversarial suite bounds
