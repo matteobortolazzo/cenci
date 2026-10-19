@@ -140,7 +140,9 @@
     "generatedDocs": true
   },
   "cenci": {
-    "diffContextMode": "file"
+    "diffContextMode": "file",
+    "compactImplementation": true,
+    "implementerMaxConcurrency": 2
   },
   "refinement": {
     "autonomy": "lean"

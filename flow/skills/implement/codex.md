@@ -8,7 +8,10 @@ feeds validated advice back to the original worker. Preserve all existing approv
 autonomy, retry, stop, and review-evidence rules; routine phases keep their models.
 
 Read `project-core` and `codex-runtime`. In `/plan`, gather context with the read-heavy
-agent. Apply `agents/planner.md`'s shared question selection in interactive mode: resolve entailed and repo-grounded choices, record them as `auto-adopted:` with rationale (and the main alternative for judgment calls), and ask only unresolved or consequential questions through the client's available user-input mechanism. Allow zero questions; never fill a quota or reopen settled answers. Preserve the planner's security, irreversibility, scope, and acceptance-criterion stop rules. These resolutions do not post GitHub decision comments or change `approval: human`.
+agent. Before delegating the planner, use `frontend-classification` on the ticket/task
+title and requirements to resolve `isUiTicket` and pass that flag to the planner; an
+unreadable classification input stops planning for repair rather than defaulting false.
+Apply `agents/planner.md`'s shared question selection in interactive mode: resolve entailed and repo-grounded choices, record them as `auto-adopted:` with rationale (and the main alternative for judgment calls), and ask only unresolved or consequential questions through the client's available user-input mechanism. Allow zero questions; never fill a quota or reopen settled answers. Preserve the planner's security, irreversibility, scope, and acceptance-criterion stop rules. These resolutions do not post GitHub decision comments or change `approval: human`.
 An open native blocking dependency is a hard stop before any mutation: check the ticket's `blockedBy` (`gh issue view <ticket> --json blockedBy`) and, if any entry is `OPEN` or otherwise unresolvable, stop immediately, naming every blocking ref and its state (a `gh` that rejects the field is a capability gap — that case warns once and proceeds instead) — no plan persisted, no ticket claim, no worktree; re-run once the blockers close. `apply` runs the identical check again as its own first step, before it persists the plan file, initializes the checkpoint, creates the worktree, or writes any label: a blocker linked after `/plan` returned would otherwise sail straight into every mutation this gate exists to prevent, and an approved plan is not evidence the dependency is still clear. On that path report whatever assignee and labels an earlier run already left on the ticket rather than claiming the run stopped before the ticket was claimed, and say that nothing later in the run will reconcile them.
 Split-child provenance for this gate is derived the same way `skills/refine/codex.md`'s
 Split-depth guard derives it: `gh issue view <ticket> --repo <owner>/<repo> --json parent --jq '.parent.number // empty'` (a returned number means this ticket is a split child of
@@ -36,7 +39,12 @@ The plan also carries a `### Size Check` — the plan's files and estimated chan
 compared against the ticket's `### Size Estimate: <letter>` bound from `docs/ticket-sizing.md`
 — the confirmed `### Size Estimate: <letter>` (bound line verbatim, rationale), and a
 `### Delegation Preflight` in which every lane is at most one M and an L ticket is always
-several lanes with exclusive file ownership. A `### Size Check` verdict of `exceeds` (growth
+several lanes with exclusive file ownership. During `/plan`, use `agents/planner.md`'s
+complete Delegation Preflight schema (owned files, verification, Scope, Wave and Depends on
+for every delegated lane), required `### Parallelism Assessment` (parallel or a concrete
+sequential reason), and eligible `### Parallel Lanes` declaration. Explicitly consider a
+shared foundation wave before independent consumers; never omit the assessment on a fresh
+plan. A `### Size Check` verdict of `exceeds` (growth
 during planning), or a single-lane L, is a hard stop with no proceed option in any mode:
 return the planner's split proposal, persist nothing, and point at `/cenci:refine` (the parent
 for a split child) — model capability never raises the verdict. Every implementer delegation
@@ -78,7 +86,50 @@ the gate command's combined stdout+stderr; a red gate's output also carries a `G
 path>` line where the full untruncated output is retrievable — locate the failing detail there
 with the client's search tool rather than assuming the truncated tail already contains everything.
 Arm
-the native goal and implement test-first. Then, before the reviews, run the reuse check: for each
+the native goal and implement test-first using the execution procedure below.
+
+**Implementation dispatch (apply only).** Resolve `isUiTicket` using the `frontend-classification`
+reference skill against the ticket/task title and requirements in the persisted plan;
+set it explicitly true or false, as during planning. Recompute it on every apply, including
+resumed and legacy plans; an unreadable or incomplete classification input stops dispatch
+for repair, never defaults to false. Use this resolved flag for both fan-out eligibility
+and the visual/screenshot checks below.
+Re-read the persisted `### Delegation Preflight`
+before any implementation mutation and enforce Phase 3's `## Delegation Preflight Re-check`
+and `## Context Budget`, including malformed ownership, lane size and split-signal stops.
+Read `### Parallelism Assessment`; a missing legacy assessment means sequential execution
+with that reason reported, never inferred fan-out. Use native `implementer` subagents,
+passing the worktree, plan sections, owned files, scoped test command, acceptance criteria
+and context-budget brief to each. Workers are not alone in the worktree and must preserve
+other workers' changes; the root alone owns shared git state and external writes.
+
+With exactly one delegated lane, `cenci.compactImplementation` exactly true (default false)
+permits a small S, low-risk, concrete plan to combine red/green/refactor in one worker.
+Follow Phase 3's `## Compact Implementation`, including its exclusions, observed red-before-green
+evidence, bounded Reuse Check and full build/test/lint results. Otherwise use the ordinary
+separate test, implementation and refactor delegations. Compact mode never merges lanes.
+
+With multiple lanes, Read Phase 3’s `## Parallel Lanes` and execute its structural re-check,
+eligibility re-check, bounded dispatch, dependency waves, worker rules, error gate and resume
+procedure using native subagents. Consume `Wave:` and `Depends on:` from the preflight; a
+shared foundation finishes first and its files stay read-only for later consumers. Apply
+`isUiTicket`, sensitive-path, auth/payment/migration and test-resource restrictions before
+fan-out. Disqualification runs one worker per lane sequentially in wave order, never one
+worker for the entire plan. Resolve `cenci.implementerConcurrency` (default parallel) and
+`cenci.implementerMaxConcurrency` (positive integer, default 2); use Phase 3's invalid-value
+fallbacks and cap launches to available worker slots. Its scheduler consumes that cap;
+never launch all lanes together merely because the mode is parallel. Every lane must
+report scoped red-before-green evidence, stay within ownership and avoid full-suite runs.
+Failed prerequisites stop queued lanes and later waves, preserve completed edits and take
+the shared error gate; no barrier or reviews while any lane is failed or incomplete.
+After all waves finish, delegate one worker for Phase 4's `## Lane Verification Barrier`:
+full build, test and configured lint, integration fixes, exact results, the same three-attempt
+limit and context/diagnosis stops. Then use one refactor pass with the reuse check below.
+In every mode run Phase 4’s `## Visual Verification` and screenshot persistence for UI
+tickets before acceptance review; sequential UI lanes and compact work keep that evidence.
+All existing acceptance/code reviews, approval rules and one-PR delivery still apply.
+
+Then, before the reviews, run the reuse check (inside the compact delegation when selected): for each
 named unit this change *adds* (helper, constant, fixture — additions only, capped at the 10
 largest, searched by name fragment and by a distinctive body line — two searches per unit, at most
 20 for the whole check — within the affected project's directory only, derived from this change's

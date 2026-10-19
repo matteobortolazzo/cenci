@@ -1766,6 +1766,7 @@ CONFIG_SCHEMA=(
   'autoCompactDisabled|boolean' 'pinSubagents200K|boolean'
   'cenci|object' 'cenci.compactImplementation|boolean'
   'cenci.reviewConcurrency|string' 'cenci.implementerConcurrency|string'
+  'cenci.implementerMaxConcurrency|number'
   'cenci.diffContextMode|string' 'cenci.liteReviewEnabled|boolean'
   'cenci.planComment|boolean' 'cenci.gateOutputLines|number'
   'cicd|object' 'cicd.enabled|boolean' 'cicd.platform|string'

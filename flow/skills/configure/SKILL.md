@@ -2012,6 +2012,7 @@ Always stamp `configureOffered` on every write as the sorted, de-duplicated unio
     "compactImplementation": false,
     "reviewConcurrency": "parallel",
     "implementerConcurrency": "parallel",
+    "implementerMaxConcurrency": 2,
     "diffContextMode": "inline",
     "liteReviewEnabled": true,
     "planComment": false,
@@ -2049,9 +2050,10 @@ Both consumers name the unconditional questions a re-run would ask, computed by 
 Patch-only drift is deliberately silent: configure features that warrant a re-run land in minor (`feat`) or major bumps per the plugin-version-bump workflow. Do **not** add `configVersion` to the migration-removal list below — it is a managed field, not a legacy one.
 
 The `cenci` field is optional. If present, preserve existing user values during reconfiguration. Schema:
-- `compactImplementation` — `true` allows small, low-risk tickets to combine red/green/refactor into one implementer subagent turn while preserving all TDD/reporting gates. Default: `false`.
+- `compactImplementation` — exactly `true` allows small S, low-risk tickets with one delegated lane to combine red/green/refactor into one implementer subagent turn while preserving all TDD/reporting gates, lint, reuse checks and UI evidence. Default: `false`; keep an existing repository opt-in on reconfiguration.
 - `reviewConcurrency` — `"parallel"` runs security, code, and silent-failure reviews together; `"sequential"` runs the same reviews one after another to smooth usage limits. Default: `"parallel"`.
-- `implementerConcurrency` — `"parallel"` (default) runs planner-declared `### Parallel Lanes` implementers concurrently during implement Phase 3; `"sequential"` runs the same lanes one after another to smooth usage limits. Quality gates identical either way; the setting never creates lanes on its own — plans without a lanes section always run the standard sequential flow.
+- `implementerConcurrency` — `"parallel"` (default) runs eligible planner-declared `### Parallel Lanes` within each dependency wave; `"sequential"` runs one worker per preflight lane in wave order. The planner always records a `### Parallelism Assessment`; missing/unsafe declarations stay sequential. Quality gates are identical, including UI/sensitive restrictions and one combined verification barrier after all waves. The setting never creates lanes on its own.
+- `implementerMaxConcurrency` — positive integer, default `2`, limiting simultaneous implementers further to available worker slots. Invalid values warn and use `2`; sequential mode always uses one. Preserve a configured value on reconfiguration. Shared foundations can precede independent consumers, but every file has one owner across all waves and consumers only read foundation files.
 - `diffContextMode` — `"inline"` passes small diffs directly to reviewers; `"file"` writes the diff to this implement run's artifact directory (`$RUN_DIR/diff.patch` — see implement Phase 6 + 7) and passes paths so reviewers read targeted hunks. Default: `"inline"`.
 - `liteReviewEnabled` — `true` (default) lets Phase 6 + 7 classify each diff into `full` (all three reviewers), `lite-docs` (no reviewers, docs-only), or `lite-small` (`code-reviewer` only, small config/data-only diffs); `false` forces the full trio on every run regardless of diff size or content. See Phase 6 + 7 for the precedence-ordered classification rules.
 - `planComment` — `true` makes implement Phase 1 also post the saved plan as a ticket comment (ticket mode only) right before marking the ticket `Planned` (the label call stays the last ticket edit — it records the plan-freshness baseline), for audit / off-host visibility; `.plans/` stays the executable source of truth. Default: `false` (no comment).

@@ -1,6 +1,6 @@
 # Phase 4: Implement (Green)
 
-Read this file only when Phase 4 starts. Skip this separate phase if Phase 3 is running approved compact implementation mode. If Phase 3 ran Parallel Lanes, skip everything except the `## Lane Verification Barrier` section at the end — the lanes already reached green on their scoped tests, and lanes never run for UI tickets, so the Visual Verification section does not apply.
+Read this file only when Phase 4 starts. Compact implementation folds the standard delegation into Phase 3 but retains this phase's visual verification and screenshot persistence for UI tickets. If Phase 3 ran parallel or sequential lanes, including dependency waves, skip the standard implementation delegation: run `## Lane Verification Barrier`, then run `## Visual Verification` for a UI ticket (including screenshot persistence). Only concurrency is restricted for UI work, never its required evidence.
 
 Delegate to the `implementer` agent to make failing tests pass.
 
@@ -59,7 +59,7 @@ If `isUiTicket` is true, save a final screenshot of every affected screen/state 
 
 ## Lane Verification Barrier
 
-Runs only when Phase 3 ran Parallel Lanes, after every lane has reported red→green. This is the single authoritative verification for the whole change — lane implementers deliberately never run the full suite (see Phase 3's `## Parallel Lanes`), so nothing before this point has proven the lanes work together.
+Runs when Phase 3 ran parallel or sequential lanes, including dependency waves, after every lane has reported red→green and all workers have finished. This is the single authoritative verification for the whole change — lane implementers deliberately never run the full suite (see Phase 3's `## Parallel Lanes`), so nothing before this point has proven the lanes work together. Run the barrier once after all waves, not once per wave; required re-verification after a fix or later refactor still applies.
 
 Include the return-after-two-failed-attempts instruction in this fresh implementer's
 prompt. Before its next permitted attempt, the orchestrator applies the diagnosis
