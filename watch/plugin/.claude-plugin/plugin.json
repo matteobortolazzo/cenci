@@ -1,6 +1,6 @@
 {
   "name": "cenci-watch",
-  "version": "2.28.0",
+  "version": "2.29.0",
   "description": "cenci attention layer for Claude Code and Codex: live status, dispatch, and optional display integrations",
   "author": {
     "name": "Matteo Bortolazzo"
