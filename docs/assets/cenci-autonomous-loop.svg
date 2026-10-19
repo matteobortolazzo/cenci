@@ -30,6 +30,6 @@
     <text x="205" y="418" font-size="13" fill="#a8b3cf">unknown CI · review feedback · policy mismatch · conflict · missing capacity · authorization drift</text>
     <line x1="76" y1="438" x2="1124" y2="438" stroke="#243454"/>
     <text x="76" y="458" font-size="12" font-weight="700" fill="#fbbf24">EXPLICIT MERGE GRANT</text>
-    <text x="232" y="458" font-size="12" fill="#d8e2ff">The per-ticket automerge authorization is always a human decision, even when every other switch is armed.</text>
+    <text x="232" y="458" font-size="12" fill="#d8e2ff">Refinement grants eligible tickets only when configured; planning and merge controls are independent.</text>
   </g>
 </svg>

@@ -88,7 +88,7 @@ RESOLVE_NO_PLANNING_KEYS_MARKER='`planning.autonomy` and `planning.attended` are
 RESOLVE_ONCE_MARKER='Steps 4 and 6 and the `## Confirmation Gate` read that one value and never re-read the config'
 BUNDLE_FLAG_MARKER='refinementAutonomy: lean | interactive'
 REFINER_INPUT_FLAG_MARKER='`refinementAutonomy` (`lean` or `interactive`)'
-CODEX_RESOLVE_MARKER='Resolve `refinementAutonomy` on every invocation, both `/plan` and `apply`, from the config `project-core` returns'
+CODEX_RESOLVE_MARKER='Resolve `refinementAutonomy` on every invocation, during preparation and apply, from the config `project-core` returns'
 
 assert_file_contains "${REFINE_SKILL}" "${RESOLVE_LABEL_MARKER}" \
   "## Context must add the single-point refinement-autonomy resolution paragraph (AC1)"
@@ -290,7 +290,7 @@ CODEX_OVERRULE_RECORD_MARKER='Q: Confirmation Gate overrule'
 CODEX_OVERRULE_ONCE_MARKER='re-runs the analysis inline exactly once, read-only'
 CODEX_OVERRULE_RERENDER_MARKER='The re-rendered gate offers only Confirm and Decline'
 CODEX_OVERRULE_NO_WRITE_MARKER='the overrule itself performs no GitHub write'
-CODEX_OVERRULE_NARROW_EXCEPTION_MARKER='a narrow exception to gathering every choice in `/plan`'
+CODEX_OVERRULE_NARROW_EXCEPTION_MARKER='preserves the same normal-mode preparation boundary'
 
 assert_file_contains "${REFINE_CODEX}" "${CODEX_OVERRULE_RECORD_MARKER}" \
   "Codex case 4 (Confirmation Gate overrule): the overrule is recorded as Q: Confirmation Gate overrule (AC9)"

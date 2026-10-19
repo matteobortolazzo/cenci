@@ -146,7 +146,7 @@ On a delta run, Codex refreshes a valid marker-managed `.cenci/Dockerfile` witho
 `--all` restores the Overwrite/Skip/Show prompt. The Q12 dispatch session repair is still asked on a delta run. Board Config's
 suggest-or-skip analyzer only reports on a delta run. Plan mode and the apply step split the work: the resolver runs read-only during `/plan`; the ledger, overlay and Dockerfile writes happen only in the apply step
 (`cenci run configure apply <checkpoint-id> --agent codex`). The offered IDs and the collected
-answers (the resolver's `ask` and `carried`, the effective sandbox flags, and the question 11/13/14/15 answers)
+answers (the resolver's `ask` and `carried`, the effective sandbox flags, and the question 11/13/14/15/16/17 answers and the independent fleet 18–20 choices)
 travel in the plan/apply checkpoint; the apply step reads them from there and never re-derives
 them from the resolver, whose result may differ by then.
 
@@ -165,7 +165,50 @@ about `planning`, `automerge` and `refinement` only when absent and not already 
 for `automerge`, any `projects[]` entry) is reported verbatim and never re-prompted, narrowed,
 or removed on a delta run, and `--all` re-offers all three with keep-or-change options. It defaults the planning and automerge offers to the conservative answer — `interactive` for planning,
 no automerge block — while question 15 recommends `lean` and an absent `refinement` key still resolves to `interactive`. The automerge offer stays binary (skip vs. scaffold a starter block
-for hand review), never a field-by-field sub-wizard. Question 15 (`refinement`) mirrors question 13 with the options "Switch to `lean` (Recommended)" and "Keep `interactive`"; under `--all` with `refinement` present it offers "Keep current (Recommended)" or the switch to the other value, and any value other than the exact string `lean` is treated as `interactive`. Declining question 15 writes no `refinement` key, and lean refinement never grants `automerge:ok` and does not remove the Confirmation Gate. Because all three keys land in the apply
+for hand review), never a field-by-field sub-wizard. Question 15 (`refinement`) mirrors question 13 with the options "Switch to `lean` (Recommended)" and "Keep `interactive`"; under `--all` with `refinement` present it offers "Keep current (Recommended)" or the switch to the other value, and any value other than the exact string `lean` is treated as `interactive`. Declining question 15 writes no `refinement` key. Refinement autonomy controls question selection only; confirmation and automerge grants use questions 16 and 17 independently. Because all three keys land in the apply
 step's config write, never during `/plan`, Plan mode only gathers the answers and previews the
 scaffold; the actual `.cenci/config.json` write happens in
 `cenci run configure apply <checkpoint-id> --agent codex`, same as every other field.
+
+Independent controls mirror questions 16–20 in `SKILL.md` using the client's
+available Plan-mode question mechanism. `refinement.confirmBeforeApply` defaults to
+false: offer apply immediately (Recommended) or require confirmation. Record the
+boolean in `confirmBeforeApplyAnswer`, preserving an explicit false. Invalid values
+resolve to true with a notice. `refinement.automerge` defaults to off: offer off
+(Recommended) or eligible. Record `refinementAutomergeAnswer`; malformed values
+resolve to off with a notice. `eligible` grants only tickets passing refine's
+eligibility checks, independently of `planning.autonomy` and `refinement.autonomy`.
+Question selection never itself grants merging or changes confirmation.
+
+Both leaves have independent stable question IDs in `question-keys.json`: an existing
+`refinement` object or old `refinement` ledger entry never suppresses either leaf.
+Delta runs offer absent/unoffered leaves; carried leaves are preserved, and `--all`
+re-offers each with its current value first. Resolver-failure full runs carry present
+leaves. Carry both collected answers and offered IDs in the plan/apply checkpoint.
+After the Q13/14/15 overlays and before the ledger overlay, apply the exact
+`cenci:configure-confirm-before-apply` and `cenci:configure-refinement-automerge`
+marker-bounded jq programs from `SKILL.md`, with `--argjson confirmBeforeApply
+<true|false>` and `--arg automerge <off|eligible>` respectively. Validate answer types
+and allowed values first, then check exit 0 and the object gate after each overlay.
+Apply based on answer presence, never truthiness or a jq `//` fallback that loses
+false. Failed leaf overlays keep the previous candidate and remove only that leaf's
+ID from the offered set; report the answer as not applied. The programs preserve
+all siblings; off never removes the separate top-level/per-project risk policy.
+
+Independently offer the keyless fleet question IDs `dispatch.planRefined`,
+`automerge.enabled`, and `planning.attended` (keep current/On/Off). They never derive
+answers from another control or write fleet fields into repo config. Use the existing
+Fleet Dispatch Enrollment container guard. On the host, probe their states separately
+with `cenci dispatch plan-refined status`, `cenci automerge status`, and
+`cenci planning attended status --json`. Probe failure leaves state unknown and still
+allows an explicit choice. Apply each on/off answer through its matching CLI command
+only in the apply step: `cenci dispatch plan-refined on|off`, `cenci automerge on|off`,
+`cenci planning attended on|off`. Never read/write the host config file directly.
+Only successful CLI calls or explicit keep choices stamp their own ledger IDs;
+on failure the setting may already have persisted before a later status query failed.
+Report an unknown or potentially partially applied outcome, never unchanged, and add
+no ID. Re-probe through the matching status command when possible and report only
+what it verifies. In a sandbox, collect the desired
+answers but run no fleet status or mutation calls; print concrete host on/off commands
+for explicit choices and never claim deferred fleet choices were applied. Deferred
+choices are not stamped. Report all independent choices' actual outcomes after apply.

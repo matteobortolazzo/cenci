@@ -1173,6 +1173,7 @@ Example `.cenci/config.json`:
 {
   "isMonorepo": true,
   "guidanceLocation": "AGENTS.md",
+  "refinement": { "autonomy": "lean", "confirmBeforeApply": false, "automerge": "eligible" },
   "projects": [
     { "slug": "flow", "path": "flow", "gateCommand": "true" }
   ]
@@ -1245,6 +1246,29 @@ is_eq0 "${n_ce_fail}" || fail "case26f: valid playwrightCli boolean must not fai
 sed -i 's/"playwrightCli": true/"playwrightCli": "true"/' "${ROOT}/docs/playwright.md"
 run_check "${ROOT}"
 assert_has_result "config-examples" "fail" "case26f wrong playwrightCli type fails"
+rm -rf "${ROOT}"
+
+# 26g. Optional-only refinement examples are recognized without any other
+# config signal key, and the new independent controls retain their JSON types.
+ROOT="$(mktemp -d)" || exit 1
+setup_base "${ROOT}"
+mkdir -p "${ROOT}/docs"
+cat > "${ROOT}/docs/refinement.md" <<'EOF'
+# Refinement config
+
+```json
+{ "refinement": { "autonomy": "interactive", "confirmBeforeApply": true, "automerge": "off" } }
+```
+EOF
+run_check "${ROOT}"
+n_ce_fail="$(count_results "config-examples" "fail")"
+is_eq0 "${n_ce_fail}" || fail "case26g: optional-only refinement config must not fail (got ${n_ce_fail})"
+sed -i 's/"confirmBeforeApply": true/"confirmBeforeApply": "true"/' "${ROOT}/docs/refinement.md"
+run_check "${ROOT}"
+assert_has_result "config-examples" "fail" "case26g wrong refinement confirmation boolean type fails"
+sed -i 's/"confirmBeforeApply": "true"/"confirmBeforeApply": true/; s/"automerge": "off"/"automerge": true/' "${ROOT}/docs/refinement.md"
+run_check "${ROOT}"
+assert_has_result "config-examples" "fail" "case26g wrong refinement automerge enum type fails"
 rm -rf "${ROOT}"
 
 # =====================================================================

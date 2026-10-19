@@ -373,7 +373,7 @@ if [[ -n "${CODEX_SELFTEST_DIR}" ]]; then
   CODEX_INJECTED_COPY="${CODEX_SELFTEST_DIR}/codex-injected.md"
   awk '
     { print }
-    index($0, "runs before the gate below confirms.") > 0 && !injected {
+    index($0, "runs before the gate below reaches its policy-ready or configured Confirm branch.") > 0 && !injected {
       print ""
       print "Synthetic self-test injection: `gh issue edit 100 --repo acme/widgets --add-label \"Working\"`."
       injected = 1
@@ -533,7 +533,7 @@ OWNERSHIP_RECHECK_MARKER='re-verify exclusive ownership'
 assert_file_contains "${REFINE_SKILL}" "${OWNERSHIP_RECHECK_MARKER}" \
   "must re-verify exclusive ownership as the first action after the gate's Confirm, so a concurrent claim is caught before any write (#878)"
 
-AUTH_DRIFT_STOP_MARKER='stop and ask for a fresh confirmation'
+AUTH_DRIFT_STOP_MARKER='require a fresh refinement run'
 assert_file_contains "${REFINE_SKILL}" "${AUTH_DRIFT_STOP_MARKER}" \
   "must document that authorization-sensitive parent-label drift detected after Confirm stops the run and asks for a fresh confirmation before any write (#878)"
 

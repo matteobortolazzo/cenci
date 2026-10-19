@@ -1781,6 +1781,8 @@ CONFIG_SCHEMA=(
   'lazyboards.serveCommand|string' 'lazyboards.boardKey|string'
   'lazyboards.testCommand|string' 'lazyboards.testKey|string'
   'planning|object' 'planning.autonomy|string'
+  'refinement|object' 'refinement.autonomy|string'
+  'refinement.confirmBeforeApply|boolean' 'refinement.automerge|string'
   'security|object' 'security.sensitivePaths|array' 'security.sensitivePaths[]|string'
   'maintenance|object' 'maintenance.enabled|boolean'
   'maintenance.checkDuringImplement|boolean' 'maintenance.remindAfterDays|number'

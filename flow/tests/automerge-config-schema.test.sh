@@ -65,7 +65,7 @@ if require_doc CONTENT "${FILE}"; then
   assert_contains "${CONTENT}" "automerge.maxDiffLines" "${FILE} (maxDiffLines documented)"
   assert_contains "${CONTENT}" "automerge.mergeMethod" "${FILE} (mergeMethod documented)"
   assert_contains "${CONTENT}" "automerge:ok" "${FILE} (per-ticket grant cross-referenced)"
-  assert_contains "${CONTENT}" "no repo-level default" "${FILE} (no-repo-level-default statement cross-referenced)"
+  assert_contains "${CONTENT}" "refinement.automerge" "${FILE} (independent per-ticket grant policy cross-referenced)"
 fi
 
 # =====================================================================

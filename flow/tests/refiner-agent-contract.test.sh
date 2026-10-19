@@ -247,7 +247,7 @@ if [[ -n "${skill}" ]]; then
   assert_contains "${skill}" 'Withheld questions are never relayed to the user' "skills/refine/SKILL.md #1273 withheld questions never relayed"
   assert_contains "${skill}" 'Not asked — over the lean question cap; decide it under the overflow rule.' "skills/refine/SKILL.md #1273 sentinel fed back to the refiner"
   assert_contains "${skill}" 'STOP with zero GitHub writes and report a lean-contract violation' "skills/refine/SKILL.md #1273 loop-guard STOP"
-  assert_contains "${skill}" 'it never removes a confirmation, a STOP, or a fail-closed default' "skills/refine/SKILL.md #1273 precedence: lean never removes a safety gate"
+  assert_contains "${skill}" 'it never removes a required safety question, a configured confirmation, a STOP, or a fail-closed default' "skills/refine/SKILL.md #1273 precedence: lean never removes a safety gate"
   # Retention: the interactive batched-round sentences survive verbatim.
   assert_contains "${skill}" "Present the round's questions in a single \`AskUserQuestion\` call" "skills/refine/SKILL.md #1273 retention of the interactive batched call"
   assert_contains "${skill}" 'The refiner asks at most 4 questions per round and rounds continue until it returns `None.`.' "skills/refine/SKILL.md #1273 retention of the interactive round cap sentence"

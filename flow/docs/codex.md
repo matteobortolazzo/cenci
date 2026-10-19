@@ -26,6 +26,12 @@ executes. Implementation uses `.cenci/checkpoints/`, generated `.codex/agents/*.
 and a native goal armed only after plan approval. Missing custom agents fall back to
 built-in workers with the same bounded role prompt.
 
+Refinement can complete in one normal-mode invocation: it asks material questions,
+validates the proposal and applies it without a second confirmation by default.
+`refinement.confirmBeforeApply: true` restores final review in that invocation.
+Explicit `/plan` remains read-only. Automerge grants are separately controlled by
+`refinement.automerge: "off" | "eligible"`, regardless of planning autonomy.
+
 The launcher exposes development entry points:
 
 ```bash

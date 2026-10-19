@@ -156,15 +156,17 @@ approved `Planned` ticket by policy. No board or LLM is required for the pickup 
 
 ![The guarded autonomy chain requires explicit planning, dispatch, repository policy, fleet, and per-ticket grants before conditional automerge](docs/assets/cenci-autonomous-loop.svg)
 
-Four opt-in switches remove the human gates one at a time — plans that approve
+Independent controls enable plans that approve
 themselves, dispatch that starts its own planning sessions, and `cenci babysit`
 merging the PR once CI is green and review feedback is clear. Fully armed, the chain
 runs refine → plan → implement → PR → merge → next ticket with no human touch between
 refinement and merge.
 
-Every switch is off by default and independently reversible, the per-ticket merge
-grant is always a human decision, and each link fails closed. Nothing here changes
-until you turn it on. The [3.0 Trusted autonomy
+Automatic planning and merging are off by default and independently reversible.
+Refinement applies after its questions are settled; optional final review and
+eligible per-ticket merge grants are separate configure choices. Merge grants are
+off by default and still subject to the repository policy and supervisor checks.
+The [3.0 Trusted autonomy
 milestone](https://github.com/matteobortolazzo/cenci/milestone/9) tracks the remaining
 correctness and authorization hardening before this becomes the recommended default
 for unattended work.

@@ -180,7 +180,7 @@ ANSWERED='{
   "sandbox": {"enabled": false, "dind": false, "azure": false},
   "planning": {"autonomy": "interactive"},
   "automerge": {"enabled": false},
-  "refinement": {"autonomy": "interactive"}
+  "refinement": {"autonomy": "interactive", "confirmBeforeApply": false, "automerge": "off"}
 }'
 
 # write_config <jq-filter> [version] — writes ROOT/.cenci/config.json as
@@ -233,13 +233,24 @@ cleanup_fixture
 
 # --- Case 12b (#1274): a missing refinement key is named like any other ----
 make_fixture_with_resolver "${PLUG_NEW}"
-write_config 'del(.refinement)'
+write_config 'del(.refinement) | .configureOffered = ["refinement.confirmBeforeApply", "refinement.automerge"]'
 run_hook --plain
 assert_eq "${OUT}" "stale ${CFG_OLD} ${PLUG_NEW} refinement" "case12b plain line names the missing refinement key"
 run_hook
 CTX="$(hook_context)"
 assert_contains "${CTX}" "refinement" "case12b advisory names refinement"
 assert_not_contains "${CTX}" "planning" "case12b advisory must not name a present key"
+cleanup_fixture
+
+# --- Independent refinement leaves remain visible despite old parent ledger ---
+make_fixture_with_resolver "${PLUG_NEW}"
+write_config 'del(.refinement.confirmBeforeApply, .refinement.automerge) | .configureOffered = ["refinement"]'
+run_hook --plain
+assert_eq "${OUT}" "stale ${CFG_OLD} ${PLUG_NEW} refinement.confirmBeforeApply,refinement.automerge" "new leaves advisory plain line names both independent questions"
+run_hook
+CTX="$(hook_context)"
+assert_contains "${CTX}" "2 new questions" "new leaves advisory counts both questions"
+assert_contains "${CTX}" "refinement.confirmBeforeApply, refinement.automerge" "new leaves advisory names both leaves in order"
 cleanup_fixture
 
 # --- Case 13: unstamped, keys missing -> named alongside the stamp nudge ----

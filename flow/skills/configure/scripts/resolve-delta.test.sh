@@ -36,11 +36,11 @@ SCRATCH="$(mktemp -d)" || { echo "mktemp failed" >&2; exit 1; }
 [[ -n "${SCRATCH}" && -d "${SCRATCH}" ]] || { echo "mktemp returned an unusable path" >&2; exit 1; }
 trap 'rm -rf "${SCRATCH}"' EXIT
 
-# The 18 question IDs, in configure-question order. They are persisted in
+# The 23 question IDs, in configure-question order. They are persisted in
 # users' configureOffered ledgers, so this list is a stable contract.
-ALL_IDS='["stack","isMonorepo","branchPattern","mcpServers","uiConventions","playwrightCli","lspServers","autoCompactDisabled","pinSubagents200K","cicd","sandbox.enabled","sandbox.dind","sandbox.azure","lazyboards","dispatchEnroll","planning","automerge","refinement"]'
-CONDITIONAL_IDS='["uiConventions","playwrightCli","lspServers","lazyboards","dispatchEnroll"]'
-KEYLESS_IDS='["uiConventions","dispatchEnroll"]'
+ALL_IDS='["stack","isMonorepo","branchPattern","mcpServers","uiConventions","playwrightCli","lspServers","autoCompactDisabled","pinSubagents200K","cicd","sandbox.enabled","sandbox.dind","sandbox.azure","lazyboards","dispatchEnroll","planning","automerge","refinement","refinement.confirmBeforeApply","refinement.automerge","dispatch.planRefined","automerge.enabled","planning.attended"]'
+CONDITIONAL_IDS='["uiConventions","playwrightCli","lspServers","lazyboards","dispatchEnroll","dispatch.planRefined","automerge.enabled","planning.attended"]'
+KEYLESS_IDS='["uiConventions","dispatchEnroll","dispatch.planRefined","automerge.enabled","planning.attended"]'
 
 # A fully answered config: every unconditional key present (several with
 # falsy values on purpose: false, {} and "" must count as present), and every
@@ -57,8 +57,8 @@ COMPLETE='{
   "sandbox": {"enabled": false, "dind": false, "azure": false},
   "planning": {"autonomy": "interactive"},
   "automerge": {"enabled": false},
-  "refinement": {"autonomy": "interactive"},
-  "configureOffered": ["uiConventions","playwrightCli","lspServers","lazyboards","dispatchEnroll"]
+  "refinement": {"autonomy": "interactive", "confirmBeforeApply": false, "automerge": "off"},
+  "configureOffered": ["uiConventions","playwrightCli","lspServers","lazyboards","dispatchEnroll","refinement.confirmBeforeApply","refinement.automerge","dispatch.planRefined","automerge.enabled","planning.attended"]
 }'
 
 # write_cfg <name> <json> — writes SCRATCH/<name>.json, prints its path.
@@ -117,7 +117,7 @@ make_copy() {
 # =====================================================================
 tj() { jq -c "$1" "${TABLE}" 2>/dev/null; }
 
-assert_eq "$(tj '[.questions[].id]')" "${ALL_IDS}" "table: the 18 IDs in configure-question order"
+assert_eq "$(tj '[.questions[].id]')" "${ALL_IDS}" "table: the 23 IDs in configure-question order"
 assert_eq "$(tj 'type')" '"object"' "table: top level is an object"
 assert_eq "$(tj '(.description | type)')" '"string"' "table: carries a description string"
 assert_eq "$(tj '[.questions[] | (.conditional | type)] | unique')" '["boolean"]' "table: every conditional flag is a boolean"
@@ -155,7 +155,7 @@ assert_eq "${CODE}" "0" "10b exit"
 assert_eq "$(jv '.ask')" '["planning"]' "10b exactly the missing key's question"
 assert_eq "$(jv '.missingKeys')" '["planning"]' "10b the missing key is named"
 assert_eq "$(jv '.conditional')" '[]' "10b planning is not conditional"
-assert_eq "$(jv '.carried | length')" "17" "10b the other 17 rows are carried"
+assert_eq "$(jv '.carried | length')" "22" "10b the other 22 rows are carried"
 assert_eq "$(jv '.carried | index("planning")')" 'null' "10b planning is not carried"
 
 # --- 10c: missing key whose ID is in the ledger -> zero questions -----
@@ -189,7 +189,7 @@ assert_eq "${CODE}" "0" "10f exit"
 assert_eq "$(jv '.ask')" '["refinement"]' "10f an absent refinement key asks exactly the refinement question"
 assert_eq "$(jv '.missingKeys')" '["refinement"]' "10f the missing refinement key is named"
 assert_eq "$(jv '.conditional')" '[]' "10f refinement is not conditional"
-assert_eq "$(jv '.carried | length')" "17" "10f the other 17 rows are carried"
+assert_eq "$(jv '.carried | length')" "22" "10f the other 22 rows are carried"
 assert_eq "$(jv '.carried | index("refinement")')" 'null' "10f refinement is not carried"
 
 # ledgered (declined) -> carried, never asked again
@@ -218,7 +218,7 @@ assert_eq "$(jv '.missingKeys | index("refinement")')" 'null' "10f --all does no
 # refinement sits after automerge in the table (stable question order)
 assert_eq "$(tj '[.questions[] | select(.id == "refinement")] | map(.keys == ["refinement"] and .conditional == false and (has("projectsAware") | not))')" '[true]' \
   "10f table: one refinement row, keys == [refinement], unconditional, not projectsAware"
-assert_eq "$(tj '.questions[-1].id')" '"refinement"' "10f table: refinement is the last row, after automerge"
+assert_eq "$(tj '.questions[17].id')" '"refinement"' "10f table: refinement retains its stable row after automerge"
 
 # --- 10e: automerge only under projects[] counts as present -----------
 CFG="$(write_cfg automerge-in-projects "$(printf '%s' "${COMPLETE}" | jq 'del(.automerge) | .projects = [{"slug":"a","automerge":{"enabled":true}}]')")"
@@ -273,7 +273,7 @@ assert_eq "${CODE}" "0" "AC11 exit"
 assert_eq "$(jv '.carried')" '["stack","branchPattern","autoCompactDisabled","cicd","sandbox.dind","planning"]' \
   "AC11 every present key (falsy ones included) is carried, in table order"
 assert_eq "$(jv '.ask | (unique | length) == length')" 'true' "AC11 no duplicate question IDs"
-assert_eq "$(jv '.ask | length')" "12" "AC11 the other 12 rows are asked"
+assert_eq "$(jv '.ask | length')" "17" "AC11 the other 17 rows are asked"
 assert_eq "$(jv '[.ask[], .carried[]] | sort')" "$(printf '%s' "${ALL_IDS}" | jq -c 'sort')" \
   "AC11 ask and carried partition the table"
 assert_eq "$(jv '.ask | index("sandbox.enabled") != null and index("sandbox.azure") != null')" 'true' \
@@ -301,9 +301,9 @@ assert_eq "$(jv '.conditional')" "${CONDITIONAL_IDS}" "empty config: conditional
 
 CFG="$(write_cfg partly-ledgered '{"configureOffered":["uiConventions","dispatchEnroll"]}')"
 run_resolver "${CFG}"
-assert_eq "$(jv '.conditional')" '["playwrightCli","lspServers","lazyboards"]' \
+assert_eq "$(jv '.conditional')" '["playwrightCli","lspServers","lazyboards","dispatch.planRefined","automerge.enabled","planning.attended"]' \
   "conditional lists only ask IDs (ledgered conditional rows drop out)"
-assert_eq "$(jv '.ask | length')" "16" "partly ledgered: 16 questions remain"
+assert_eq "$(jv '.ask | length')" "21" "partly ledgered: 21 questions remain"
 
 # --- ledger robustness -------------------------------------------------
 CFG="$(write_cfg unknown-ledger-ids "$(printf '%s' "${COMPLETE}" | jq 'del(.planning) | .configureOffered += ["notAQuestion","planning"]')")"

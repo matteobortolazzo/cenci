@@ -70,7 +70,7 @@ INVERTED_POLICY_MARKER='Ask ONLY about consequential or unresolved choices in it
 AUTOMERGE_ADD_LABEL_MARKER='--add-label "automerge:ok"'
 AUTOMERGE_REMOVE_LABEL_MARKER='--remove-label "automerge:ok"'
 AUTOMERGE_COLOR_MARKER='--color "006B75"'
-AUTOMERGE_DESCRIPTION_MARKER='Human granted hands-off merge at refinement — babysit may merge this PR without review'
+AUTOMERGE_DESCRIPTION_MARKER='Repository policy granted hands-off merge at refinement — babysit may merge this PR without review'
 
 # Withhold-override formula (step 11): each identifier below is asserted as
 # an exact "NOT <identifier>"/hyphenated substring, not the bare identifier,

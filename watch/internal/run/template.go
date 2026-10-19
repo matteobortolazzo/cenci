@@ -412,8 +412,10 @@ func (fc FileConfig) BuildCommand(agent, workflow, ticket, model string, sandbox
 }
 
 func codexPlanningWorkflow(workflow string) bool {
+	// Refine completes its questionnaire and applies the resolved proposal in
+	// one invocation; entering Plan mode here would force a separate apply step.
 	switch workflow {
-	case "configure", "refine", "implement", "address-review", "refactor", "maintain":
+	case "configure", "implement", "address-review", "refactor", "maintain":
 		return true
 	}
 	return false

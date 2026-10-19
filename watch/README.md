@@ -228,6 +228,11 @@ spawn into a grouped session (non-zero exit, no window created). Pass an ungroup
 
 ### Configuration
 
+`cenci run refine <ticket> --agent codex` starts in normal mode on both the host
+and in the sandbox, so the questionnaire and validated update can complete in one
+invocation. Set `refinement.confirmBeforeApply: true` in the repository config to
+request final review. Explicit Codex Plan mode remains read-only.
+
 Built-in Go templates cover the Claude and Codex workflows below with zero config. An
 optional `config.json` (respecting `$XDG_CONFIG_HOME`, or `--config`) overrides the
 defaults and adds agents or workflows — the tokens `{ticket}` and `{model}` are
@@ -1707,8 +1712,11 @@ distinguishable reason and is safe to retry once the rate has settled.
   per-scope summary of the current repo's `.cenci/config.json` policy blocks
   (working tree; enforcement below always reads the PR's base branch), plus
   `--json` for scripting.
-- Every issue the PR closes carries the `automerge:ok` label — a human grant made
-  at refinement time, per-ticket, with no repo-level default.
+- Every issue the PR closes carries the `automerge:ok` label. Refinement grants it
+  per ticket only when `refinement.automerge: "eligible"` is configured and that
+  ticket passes its eligibility checks; the default is `"off"`. Planning autonomy,
+  planning pickup and attended mode do not gate automerge. Configure offers these
+  choices independently; the merge policy and the checks below still apply.
 - CI is green, no CI repair is in flight, and no review feedback is pending —
   resolution is GitHub-authoritative, not push-based: a pushed commit no longer
   clears feedback by itself. An inline comment thread clears only when GitHub

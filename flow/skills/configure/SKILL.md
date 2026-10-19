@@ -5,7 +5,7 @@ compatibility: Requires Claude Code settings, plugin environment variables, and 
 argument-hint: [--all] [additional context]
 user-invocable: true
 disable-model-invocation: true
-allowed-tools: Read, Write, Edit, Glob, Grep, AskUserQuestion, Bash(bash "${CLAUDE_PLUGIN_ROOT}/skills/configure/scripts/detect-project.sh"), Bash(bash "${CLAUDE_PLUGIN_ROOT}/skills/configure/scripts/merge-sandbox-config.sh":*), Bash(bash "${CLAUDE_PLUGIN_ROOT}/skills/configure/scripts/resolve-delta.sh":*), Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/migrate-project-core.sh":*), Bash(pen interactive --help:*), Bash(test:*), Bash(which:*), Bash(jq:*), Bash(mv ~/.claude/settings.json.tmp ~/.claude/settings.json), Bash(mkdir -p:*), Bash(rm -f .claude/hooks/check-pending-plans.sh), Bash(rmdir .claude/hooks:*), Bash(gh auth status:*), Bash(gh label list:*), Bash(gh label create:*), Bash(gh pr create:*), Bash(gh pr view:*), Bash(git rev-parse:*), Bash(git add:*), Bash(git commit:*), Bash(git worktree add:*), Bash(git -C:*), Bash(git diff --no-index:*), Bash(rm -f ${TMPDIR:-/tmp}/cenci/cenci-configure-:*), Bash(cenci dispatch status:*), Bash(cenci dispatch enroll:*)
+allowed-tools: Read, Write, Edit, Glob, Grep, AskUserQuestion, Bash(bash "${CLAUDE_PLUGIN_ROOT}/skills/configure/scripts/detect-project.sh"), Bash(bash "${CLAUDE_PLUGIN_ROOT}/skills/configure/scripts/merge-sandbox-config.sh":*), Bash(bash "${CLAUDE_PLUGIN_ROOT}/skills/configure/scripts/resolve-delta.sh":*), Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/migrate-project-core.sh":*), Bash(pen interactive --help:*), Bash(test:*), Bash(which:*), Bash(jq:*), Bash(mv ~/.claude/settings.json.tmp ~/.claude/settings.json), Bash(mkdir -p:*), Bash(rm -f .claude/hooks/check-pending-plans.sh), Bash(rmdir .claude/hooks:*), Bash(gh auth status:*), Bash(gh label list:*), Bash(gh label create:*), Bash(gh pr create:*), Bash(gh pr view:*), Bash(git rev-parse:*), Bash(git add:*), Bash(git commit:*), Bash(git worktree add:*), Bash(git -C:*), Bash(git diff --no-index:*), Bash(rm -f ${TMPDIR:-/tmp}/cenci/cenci-configure-:*), Bash(cenci dispatch status:*), Bash(cenci dispatch enroll:*), Bash(cenci dispatch plan-refined on), Bash(cenci dispatch plan-refined off), Bash(cenci dispatch plan-refined status), Bash(cenci automerge on), Bash(cenci automerge off), Bash(cenci automerge status), Bash(cenci planning attended on), Bash(cenci planning attended off), Bash(cenci planning attended status --json)
 ---
 
 > **Client dispatch**: In Codex, read `codex-runtime` and `configure/codex.md`, execute that native procedure, and do not continue into the Claude procedure below.
@@ -175,6 +175,9 @@ The `ID` column is the question's identifier in `question-keys.json` — the val
 | 13. Plan approval autonomy | `planning` | `planning` | Delta run: asked only when the key is absent and not already offered; `--all` re-offers it with the committed value pre-selected (see *Autonomy Settings*) |
 | 14. Automerge policy block | `automerge` | `automerge` (top-level or any `projects[]` entry) | Delta run: asked only when absent and not already offered; `--all` re-offers it with "Keep current block(s) (Recommended)" pre-selected (see *Autonomy Settings*) |
 | 15. Refinement autonomy | `refinement` | `refinement` | Delta run: asked only when the key is absent and not already offered; `--all` re-offers it with "Keep current (Recommended)" pre-selected (see *Autonomy Settings*) |
+| 16. Refinement confirmation | `refinement.confirmBeforeApply` | `refinement.confirmBeforeApply` | Independent leaf; default false; `--all` re-offers |
+| 17. Refinement merge grants | `refinement.automerge` | `refinement.automerge` | Independent leaf; default off; `--all` re-offers |
+| 18–20. Fleet autonomy controls | `dispatch.planRefined`, `automerge.enabled`, `planning.attended` | ledger only | Independent host CLI choices; sandbox defers host execution |
 
 Ask these questions one at a time using the `AskUserQuestion` tool (on a `delta` run, only those whose ID is in `delta.ask` — skip the rest and carry their recorded values):
 
@@ -805,7 +808,7 @@ about the dispatch loop's enable flag or interval setting itself.
 
 ### Autonomy Settings
 
-**This section runs on every configure invocation** — there is no container guard: unlike
+**Repo questions 13–17 run on every configure invocation** — there is no container guard: unlike
 Fleet Dispatch Enrollment above, `planning`, `automerge` and `refinement` are repo-committed keys that
 land inside this run's PR, so an in-container run is fine. The questions below only
 collect an answer; none writes anything itself — step 6 below performs the actual
@@ -948,8 +951,8 @@ del(.automerge) | if (.projects | type) == "array" then .projects |= map(if type
 <!-- cenci:configure-q14-remove:end -->
 
 15. **Refinement autonomy** (asked via `AskUserQuestion` when `refinement` is absent and, on a delta run, `refinement` is in `delta.ask`; under `--all` it is also asked when `refinement` is present, in the keep-or-change form below): "Should `/cenci:refine` keep its full question interview, or switch to lean refinement?
-    `interactive` runs the full question interview and stops for the Confirmation Gate. `lean` runs one question round of at most 3 questions plus the cap-exempt confirm/overrule question, decides the rest itself and lists those decisions as A1…An at the Confirmation Gate for one overrule (see
-    `docs/autonomous-loop.md`'s \"Ask fewer questions at refinement\"). Lean refinement never grants `automerge:ok` and does not remove the Confirmation Gate."
+    `interactive` asks only consequential or unresolved questions. `lean` asks one round of at most 3 questions and records grounded decisions as A1…An in the refinement summary (see
+    `docs/autonomous-loop.md`'s \"Ask fewer questions at refinement\"). Refinement autonomy controls question selection only; confirmation and automerge grants use questions 16 and 17 independently."
     - Options: "Switch to `lean` (Recommended)", "Keep `interactive`"
     - Question 15 deliberately departs from question 13's recommend-interactive pattern: the owner wants lean refinement as the normal mode, so the offer recommends `lean`. "Switch to `lean` (Recommended)" applies only to the ordinary form, when `refinement` is absent; the runtime default is unchanged, because an absent `refinement` key still resolves to `interactive`.
     - Declining omits the `refinement` key entirely — no `refinement` key is written.
@@ -970,14 +973,84 @@ del(.automerge) | if (.projects | type) == "array" then .projects |= map(if type
 ```
 <!-- cenci:configure-q15-switch:end -->
 
-**Next step.** Point the user at the fleet-side verbs from #964/#968 as the explicit next
-steps — neither is flipped by this skill:
+16. **Refinement confirmation** (independent ID `refinement.confirmBeforeApply`): ask via
+    `AskUserQuestion` when this leaf is absent and, on a delta run, its ID is in `delta.ask`; `--all`
+    re-offers it with the current value first. An existing `refinement` object or
+    `refinement` ledger entry never suppresses this question. "After the questions are
+    resolved, should refinement apply immediately or require a final confirmation?"
+    Options: "Apply immediately (Recommended)" (`false`), "Require confirmation" (`true`).
+    Store the boolean as `confirmBeforeApplyAnswer`, including explicit `false`.
+    Missing resolves to `false`; malformed values resolve to `true` with a notice.
+    A carried leaf is preserved verbatim, including false; on resolver-failure `full`
+    runs, present leaves are carried and only `--all` re-offers them.
+
+<!-- cenci:configure-confirm-before-apply:begin -->
+```jq
+.refinement = ((.refinement | if type == "object" then . else {} end) + {confirmBeforeApply: $confirmBeforeApply})
+```
+<!-- cenci:configure-confirm-before-apply:end -->
+
+17. **Refinement merge grants** (independent ID `refinement.automerge`): ask via
+    `AskUserQuestion` under the same leaf-level delta/`--all` rules as question 16.
+    "May refinement grant hands-off merge to tickets that pass its eligibility checks?"
+    Options: "Off (Recommended)" (`off`), "Grant for eligible tickets" (`eligible`).
+    Store the enum as `refinementAutomergeAnswer`. Missing or malformed values resolve
+    to `off` (malformed values produce a notice). This choice is independent of
+    `planning.autonomy`, `refinement.autonomy`, and confirmation. It never changes the
+    existing top-level or per-project `automerge` risk policy. Choosing off writes
+    `refinement.automerge: "off"` explicitly and never removes that unrelated policy.
+    `eligible` grants only when `refinementAutomerge` is `eligible`, the ticket's
+    Automation verdict is `grant`, `browserRequired` is false, and no visual-check
+    pattern matches. Evaluate each ticket independently, including split parents and
+    every split child; a parent's grant never transfers to a child.
+    Babysit still requires the fleet switch, repository risk policy, CI, and its other gates.
+
+<!-- cenci:configure-refinement-automerge:begin -->
+```jq
+.refinement = ((.refinement | if type == "object" then . else {} end) + {automerge: $automerge})
+```
+<!-- cenci:configure-refinement-automerge:end -->
+
+18–20. **Fleet autonomy controls**: independently offer `dispatch.planRefined`,
+    `automerge.enabled`, and `planning.attended` via `AskUserQuestion`, only for IDs in
+    `delta.ask` on a delta run (all three on `--all`, first run, or fallback full run). These keyless IDs track offers in
+    `configureOffered`; existing repo `planning`, `automerge`, or `refinement` keys
+    and ledger entries never suppress them. Each question offers "Keep current
+    (Recommended)", "On", and "Off"; a first run with no known state defaults to keep.
+    Explain each scope: automatic dispatch planning, hands-off fleet merging, and the
+    machine's interactive planning override. Never infer one answer from another.
+    On the host, probe each current value separately through `cenci dispatch plan-refined
+    status`, `cenci automerge status`, and `cenci planning attended status --json`;
+    report probe failures without inventing a current value. Collect keep/on/off
+    answers separately; explicit on/off is still available if a probe fails.
+
+    **Container guard and apply timing.** Use Scripted Detection's existing container
+    guard from Fleet Dispatch Enrollment. In a sandbox, collect the desired choices
+    alongside the repo choices, but run no fleet status or mutation commands and never
+    read or write `~/.config/cenci/config.json`. Print each concrete host command for
+    an explicit on/off answer: `cenci dispatch plan-refined on` or `off`,
+    `cenci automerge on` or `off`, `cenci planning attended on` or `off`. Tell the user
+    to run them on the host; never claim deferred fleet choices were applied. Deferred
+    choices are not stamped in the ledger, so they remain available on a later run.
+    On the host, apply explicit answers only after configuration choices are gathered,
+    one standalone CLI call per selected setting; never edit the host config directly.
+    Record a fleet ID only after its CLI call succeeds or an explicit keep choice;
+    a failed CLI call is reported and not recorded, and never blocks the repo config
+    write. Its setting may already have persisted before a later status query failed:
+    report the outcome as unknown or potentially partially applied, never unchanged.
+    Re-probe through the matching status command when possible, report only what it
+    verifies, and leave the failed call's ledger ID unstamped.
+    Fleet controls never land as repo config fields. No host mutations run in Codex
+    Plan mode; carry answers through the checkpoint and execute during apply only.
+
+**Next step.** Report the actual results of the fleet choices above and any deferred
+host commands. The independent fleet-side verbs are:
 - `cenci dispatch plan-refined on|off|status` to let dispatch pick up unattended planning
   once `planning.autonomy` is `lean` on `origin/main`.
 - `cenci automerge on|off|status` to arm the fleet-wide automerge kill switch once a
   policy block exists.
 - Switch 6 (`refinement.autonomy`) has no fleet verb: it is read from the local checkout, so there is nothing to flip fleet-wide.
-- See `docs/autonomous-loop.md` for the full walkthrough of all six switches.
+- See `docs/autonomous-loop.md` for the full walkthrough of the switches.
 
 ### Auth Verification
 
@@ -1075,7 +1148,7 @@ After gathering answers:
    | `Followup` | `C5DEF5` | Deferred/out-of-scope item captured from a session — triage before working |
    | `Browser` | `BFD4F2` | Implementation needs interactive browser access (Playwright CLI) |
    | `ui:visual-check` | `FEF2C0` | Visual/layout change — verify in a browser before merge |
-   | `automerge:ok` | `006B75` | Human granted hands-off merge at refinement — babysit may merge this PR without review |
+   | `automerge:ok` | `006B75` | Repository policy granted hands-off merge at refinement — babysit may merge this PR without review |
    | `dispatch-failed` | `b60205` | cenci: dispatched work failed after exhausting its retry budget |
    | `plan-invalid` | `d93f0b` | cenci: ticket is Planned but has no parseable plan file |
    | `reconcile-stuck` | `5319e7` | cenci: reconciliation itself is stuck (apply-retry budget exhausted) |
@@ -1967,7 +2040,24 @@ For each MCP selected in question 5:
    the `cenci:configure-q14-remove` program (`### Autonomy Settings`); "Keep current"
    answers contribute nothing.
 
-   **Overlay order and validation.** The overlay order is `merge-sandbox-config.sh` stdout, then the question 13/14/15 overlays (`cenci:configure-q13-switch`, `cenci:configure-q14-remove`, `cenci:configure-q15-switch`), then the `configureOffered` ledger (`cenci:configure-offered-ledger`). Run each overlay with `jq` over the candidate config as its own Bash call (write the candidate to `${TMPDIR:-/tmp}/cenci/cenci-configure-<slug>-config.json` as the scratch input and remove it afterwards under the existing `rm -f` grant — that `rm -f` also runs when an overlay fails validation, so no scratch file is left behind). An overlay result is valid only when the `jq` call exits 0 and the result passes `jq -e 'type == "object"'`: an empty output passes `jq empty`, so `jq empty` alone never gates a write. Apply that check after each overlay and before every write — the same fail-closed discipline as the adjacent `sandbox` merge above: if an overlaid result fails it, do not write it, report the failure, and fall back to the content before that overlay (the previous step's output as-is). A fallback that drops the ledger overlay still writes, but tell the user the ledger could not be stamped, so the questions offered this run will be asked again.
+   **Independent refinement leaves wiring.** After the question 13/14/15 overlays,
+   apply `confirmBeforeApplyAnswer` with `cenci:configure-confirm-before-apply`
+   using `--argjson confirmBeforeApply <true|false>`, and apply
+   `refinementAutomergeAnswer` with `cenci:configure-refinement-automerge` using
+   `--arg automerge <off|eligible>`. Validate the answer types and allowed values
+   before invoking jq. Presence of a collected answer, including `false`, controls
+   whether its overlay runs; never use truthiness or `//` to discard false. A skipped
+   leaf has no overlay and survives unchanged. Both overlays preserve siblings, so
+   the Q15 autonomy overlay and these leaves can run in one write. Apply the same
+   object validation and fallback as question 13/14/15 below; a failed leaf overlay
+   removes only its own ID from this run's offered set before the ledger stamp and
+   is reported as not applied. Fleet answers affect only CLI calls and their ledger
+   IDs; never insert `dispatch.planRefined`, `automerge.enabled`, or `planning.attended`
+   values into this repo's configuration. A deferred or failed fleet call contributes
+   no ledger ID. Each actually applied or explicitly kept repo leaf is recorded
+   under its independent question ID, even when its explicit value is false or off.
+
+   **Overlay order and validation.** The overlay order is `merge-sandbox-config.sh` stdout, then the question 13/14/15 overlays (`cenci:configure-q13-switch`, `cenci:configure-q14-remove`, `cenci:configure-q15-switch`), then the independent leaf overlays (`cenci:configure-confirm-before-apply`, `cenci:configure-refinement-automerge`), then the `configureOffered` ledger (`cenci:configure-offered-ledger`). Run each overlay with `jq` over the candidate config as its own Bash call (write the candidate to `${TMPDIR:-/tmp}/cenci/cenci-configure-<slug>-config.json` as the scratch input and remove it afterwards under the existing `rm -f` grant — that `rm -f` also runs when an overlay fails validation, so no scratch file is left behind). An overlay result is valid only when the `jq` call exits 0 and the result passes `jq -e 'type == "object"'`: an empty output passes `jq empty`, so `jq empty` alone never gates a write. Apply that check after each overlay and before every write — the same fail-closed discipline as the adjacent `sandbox` merge above: if an overlaid result fails it, do not write it, report the failure, and fall back to the content before that overlay (the previous step's output as-is). A fallback that drops the ledger overlay still writes, but tell the user the ledger could not be stamped, so the questions offered this run will be asked again.
 
    **A fallen-back question 13/14/15 overlay was not applied.** When a question 13, 14 or 15 overlay fails the check above, the collected answer is not in the written config. Tell the user which question's answer was not applied, and either that it will be asked again on the next delta run (only when its key is absent and its ID is not already in the existing ledger) or, otherwise (an `--all` change, an ID already in the existing ledger, or a present key), to re-run `/cenci:configure --all` to apply it; remove that question's ID (`planning` for question 13, `automerge` for question 14, `refinement` for question 15) from the offered set before the ledger overlay runs, so the ledger never records an offer whose answer was dropped; and key step 7 to the overlay actually applied — a fallen-back "Remove the block(s)" never emits the `## Review required — automerge policy removed` section and is never reported as removed, and a fallen-back scaffold never emits `## Review required — automerge policy`.
 
@@ -2169,16 +2259,27 @@ legacy one.
 The `refinement` field is optional. `### Autonomy Settings` question 15 above asks for it only when absent
 (recommending `lean`, while an absent key still resolves to `interactive`). A key already present is reported verbatim and is never re-prompted, narrowed, or removed
 on a delta run; `--all` re-offers it with the committed value pre-selected. Merge semantics (step 6) preserve a
-hand-added or previously-written value untouched across reconfiguration unless you choose a switch under `--all`.
+hand-added or previously-written autonomy untouched across reconfiguration unless you choose a switch under `--all`; independent leaf answers preserve its siblings.
 `refinement.autonomy` is consumed by `skills/refine/SKILL.md`. Schema:
 - `refinement.autonomy` — `"lean"` or `"interactive"`, default `"interactive"`. Only the exact
   string `"lean"` changes behavior — a missing `refinement` block, a missing `autonomy` key, or
-  any other value all resolve to `"interactive"` (the full question interview, then the Confirmation Gate). In `"lean"`,
-  `/cenci:refine` asks one round of at most 3 questions plus the cap-exempt confirm/overrule question, decides the rest itself and lists
-  those decisions as A1…An at the Confirmation Gate for one overrule.
+  any other value all resolve to `"interactive"` (questions only when consequential or unresolved). In `"lean"`,
+  `/cenci:refine` asks one round of at most 3 questions and records grounded decisions
+  as A1…An in the refinement summary. Resolved questionnaires apply immediately unless
+  `refinement.confirmBeforeApply` explicitly requires confirmation.
 
-Unlike `planning.autonomy`, it is read from the local `.cenci/config.json` through `project-core`, never from `origin/main`, and no fleet switch exists for it, so there is no dispatch-side consumer. Lean refinement never grants `automerge:ok` and does not remove the Confirmation Gate. Because the config write below uses merge semantics, a hand-added `refinement` block is
-**preserved untouched** across re-configuration. Do **not** add `refinement` to the migration-removal list below — it is a supported optional field, not a legacy one.
+Unlike `planning.autonomy`, it is read from the local `.cenci/config.json` through `project-core`, never from `origin/main`, and no fleet switch exists for it, so there is no dispatch-side consumer. Refinement autonomy controls question selection only; confirmation and automerge grants use questions 16 and 17 independently. Because the config write below uses merge semantics, a hand-added `refinement` block is
+**preserved with carried siblings untouched** across re-configuration; questions 16 and 17 update only their answered leaves. Do **not** add `refinement` to the migration-removal list below — it is a supported optional field, not a legacy one.
+
+Two independent optional leaves share that local `refinement` object:
+
+- `refinement.confirmBeforeApply` — boolean, default `false`. False applies once the
+  questionnaire is resolved; true retains the final confirmation. Invalid values
+  resolve to true with a notice. Question 16 can write either boolean explicitly.
+- `refinement.automerge` — `"off"` or `"eligible"`, default `"off"`. Invalid values
+  resolve to off with a notice. Question 17 controls grants for eligible tickets,
+  independently of both planning and refinement question modes. This is separate
+  from the top-level `automerge` risk policy and the host's `automerge.enabled` flag.
 
 **Monorepo config** — when `isMonorepo` is true, add `isMonorepo` and `projects` fields:
 
@@ -2305,9 +2406,10 @@ feature exists to close.
 
 See the `automerge:ok` label (label table above) for the complementary per-ticket grant —
 `.cenci/config.json`'s `automerge` block is the repo-wide risk *policy* (paths, size caps,
-merge method); `automerge:ok` is the per-ticket *grant* a human adds at refinement, with no
-repo-level default (there is no `automerge.defaultRisk` setting) — see the "no repo-level
-default" note further below. Both must hold, alongside green CI and a mergeable PR, before
+merge method); `automerge:ok` is the per-ticket *grant* refinement adds under
+`refinement.automerge: "eligible"` when eligibility checks pass. `refinement.autonomy`
+and `planning.autonomy` never imply that grant; there is no `automerge.defaultRisk`
+setting. Both policy and grant must hold, alongside green CI and a mergeable PR, before
 `cenci babysit` will merge.
 
 The `maintenance` field is optional and is **never written by a configure prompt** —
@@ -2446,7 +2548,7 @@ in the completion summary so the user can mirror it as columns on their board:
 
 | Label | Applied by | Meaning |
 |---|---|---|
-| `Working` | refine (after the confirmation gate) / implement (at start) | Actively being refined or implemented |
+| `Working` | refine (after questions are resolved) / implement (at start) | Actively being refined or implemented |
 | `Refined` | refine | Ready for implementation |
 | `Planned` | implement Phase 1 (plan persisted) | Plan on disk, ready to pick up |
 | `In Review` | implement Phase 9 (at PR-open) | PR is open, under review / CI running |
@@ -2455,7 +2557,7 @@ in the completion summary so the user can mirror it as columns on their board:
 
 `Followup` is orthogonal to the linear lifecycle above — it is never part of the `New → … → Implemented` chain and applies to a separate followup ticket (not the original). It is a capture-queue marker, never release-blocking; it is removed when the item is triaged out of the queue — promoted to real work via `/cenci:refine`, or grouped/superseded via `/cenci:maintain backlog` (see `docs/followup-triage.md`).
 
-`Browser`, `ui:visual-check`, and `automerge:ok` are likewise refine-applied orthogonal markers, not columns in the `New → … → Implemented` chain — like `Followup`, they are not rows in the "Applied by / Meaning" table above, which enumerates board columns only; `automerge:ok` in particular is a per-ticket grant made by `/cenci:refine` at refinement time, with no repo-level default (there is no `automerge.defaultRisk` setting) — granted per ticket at refine's confirmation gate; never inherited by split children or followups.
+`Browser`, `ui:visual-check`, and `automerge:ok` are likewise refine-applied orthogonal markers, not columns in the `New → … → Implemented` chain — like `Followup`, they are not rows in the "Applied by / Meaning" table above, which enumerates board columns only; `automerge:ok` in particular is a per-ticket grant made by `/cenci:refine` under `refinement.automerge: "eligible"` after eligibility checks; never inherited by split children or followups.
 
 A ticket judged trivial by implement's Trivial-Ticket Triage still transits through `Planned` — same labels, same board columns as any other ticket — just collapsed into one session instead of a stop-and-relaunch between `Planned` and `Working`. No new label state is introduced by the trivial-ticket fast path.
 
