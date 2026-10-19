@@ -129,6 +129,7 @@ type Daemon struct {
 	// and default paths. worktreeInFlight is loop-owned; the two workers report
 	// through channels of capacity 1.
 	worktreeReader         outcomeReader
+	worktreeBabysit        func(ticket string) (blocked bool, reason string, err error)
 	newWorktreeResolver    func() repoResolver
 	worktreeListPanes      func() ([]tmux.LivePane, error)
 	worktreeInSandbox      func() bool
@@ -168,6 +169,8 @@ func newDaemon(cfg config.Config, fe frontend.Frontend, events <-chan ipc.HookEv
 		cleanupEnabled: ticketstate.CleanupEnabled,
 		cleanupResults: make(chan windowCleanupResult, 1),
 		// worktreeReader stays nil here: installHostSeams installs the real one.
+		// The pass reads babysit state fail-closed, unlike closeGuard (#1300).
+		worktreeBabysit:     strictBabysit,
 		worktreeEvalResults: make(chan worktreeEvalResult, 1),
 		worktreeRemoveDone:  make(chan struct{}, 1),
 	}

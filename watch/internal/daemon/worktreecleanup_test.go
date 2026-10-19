@@ -1224,11 +1224,11 @@ func TestWorktreeCleanup_BabysitSupervisorKeepsTheWorktreeWhenArmedBeforeOrAfter
 			var armed atomic.Bool
 			var mu sync.Mutex
 			var asked []string
-			fx.d.closeGuard = func(ticket string) (bool, string) {
+			fx.d.worktreeBabysit = func(ticket string) (bool, string, error) {
 				mu.Lock()
 				asked = append(asked, ticket)
 				mu.Unlock()
-				return ticket == "782" && armed.Load(), "babysit supervising PR #790, CI not green"
+				return ticket == "782" && armed.Load(), "babysit supervising PR #790, CI not green", nil
 			}
 			armed.Store(armedBeforeEvaluation)
 			res := fx.evaluate()
@@ -1245,6 +1245,119 @@ func TestWorktreeCleanup_BabysitSupervisorKeepsTheWorktreeWhenArmedBeforeOrAfter
 			}
 		})
 	}
+}
+
+// scratchWorktree is an old worktree with no ticket: stale, removable on its own
+// facts, and never asked about babysit. It is the control of the babysit-unknown
+// cases below, where every ticketed worktree must be kept.
+func (fx *wtFixture) scratchWorktree(r *wtRepo) *wtTree {
+	fx.t.Helper()
+	w := r.addWorktree("scratch", "scratch-branch")
+	w.age(30 * 24 * time.Hour)
+	return w
+}
+
+// #1300: the pass reads babysit through the strict variant. A corrupt state file
+// means no ticketed worktree can be tied to a supervisor, so it is kept, and the
+// cause is logged without -verbose (a persistent corrupt file would otherwise
+// silently disable the cleanup). The control is the ticketless worktree, which is
+// never asked and goes. This runs through the daemon's default babysit seam over
+// the fixture's private XDG state directory.
+func TestWorktreeCleanup_CorruptBabysitStateKeepsTheTicketedWorktreeAndLogsTheCause(t *testing.T) {
+	fx := newWTFixture(t)
+	r := fx.addRepo("alpha", "")
+	target := fx.mergedWorktree(r, 782)
+	control := fx.scratchWorktree(r)
+	fx.registerViaDispatch(r)
+	corrupt := filepath.Join(fx.stateDir, "cenci", "babysit", "corrupt.json")
+	wtWriteFile(t, corrupt, "{not json")
+	if fx.d.cfg.Verbose {
+		t.Fatal("fixture premise broken: the cause must be logged without -verbose")
+	}
+	logs := captureLog(t)
+
+	fx.runPass()
+
+	fx.requireKept(target)
+	fx.requireRemoved(control)
+	if !hasLine(logs.String(), "worktree-cleanup:", "kept", strconv.Quote(target.Path), string(worktreeclean.KeepBabysitUnknown), corrupt) {
+		t.Errorf("no log line says the worktree was kept as babysit-unknown and names %s; log:\n%s", corrupt, logs)
+	}
+}
+
+// #1300: the loop's re-check holds a worktree whose babysit lookup fails after the
+// evaluation (the state turned unreadable in between), and logs the cause without
+// -verbose. The ticketless control goes.
+func TestWorktreeCleanup_BabysitLookupFailingInTheLoopRecheckKeepsTheWorktree(t *testing.T) {
+	fx := newWTFixture(t)
+	r := fx.addRepo("alpha", "")
+	target := fx.mergedWorktree(r, 782)
+	control := fx.scratchWorktree(r)
+	fx.registerViaDispatch(r)
+	fx.d.worktreeBabysit = func(string) (bool, string, error) { return false, "", nil }
+	res := fx.evaluate()
+	if len(res.removable) != 2 {
+		t.Fatalf("fixture premise broken: the evaluate step judged %d worktrees removable, want 2", len(res.removable))
+	}
+	fx.d.worktreeBabysit = func(string) (bool, string, error) {
+		return false, "", errors.New("read babysit state: permission denied")
+	}
+	logs := captureLog(t)
+
+	fx.finish(res)
+
+	fx.requireKept(target)
+	fx.requireRemoved(control)
+	if !hasLine(logs.String(), "worktree-cleanup:", strconv.Quote(target.Path), "permission denied") {
+		t.Errorf("no log line names %s with the cause of the failed lookup; log:\n%s", target.Path, logs)
+	}
+}
+
+// #1300: any unknown in-use source short-circuits the pass, not only an unreadable
+// window list. A daemon snapshot that is missing (not the benign "daemon not
+// running") is such a source: the evaluate step reads nothing from GitHub, removes
+// nothing and says once that every worktree is kept; the remove step does the same
+// without judging each survivor on its own.
+func TestWorktreeCleanup_AnUnknownDaemonSnapshotShortCircuitsBothWorkerSteps(t *testing.T) {
+	const shortCircuit = "keeping every worktree this pass"
+	t.Run("evaluate step", func(t *testing.T) {
+		fx := newWTFixture(t)
+		r := fx.addRepo("alpha", "")
+		first, second := fx.mergedWorktree(r, 782), fx.mergedWorktree(r, 783)
+		fx.registerViaDispatch(r)
+		logs := captureLog(t)
+
+		res := evaluateWorktreeCleanup(context.Background(), fx.d.worktreeSeams(nil))
+
+		if len(res.removable) != 0 {
+			t.Errorf("removable = %d worktrees, want none", len(res.removable))
+		}
+		fx.requireKept(first, second)
+		if n := fx.reader.readsFor(r.Repo); n != 0 {
+			t.Errorf("the pass made %d GitHub reads, want none once the in-use status is unknown", n)
+		}
+		if n := strings.Count(logs.String(), shortCircuit); n != 1 {
+			t.Errorf("the short-circuit is logged %d times, want once; log:\n%s", n, logs)
+		}
+	})
+	t.Run("remove step", func(t *testing.T) {
+		fx := newWTFixture(t)
+		r := fx.addRepo("alpha", "")
+		first, second := fx.mergedWorktree(r, 782), fx.mergedWorktree(r, 783)
+		fx.registerViaDispatch(r)
+		res := fx.evaluate()
+		if len(res.removable) != 2 {
+			t.Fatalf("fixture premise broken: the evaluate step judged %d worktrees removable, want 2", len(res.removable))
+		}
+		logs := captureLog(t)
+
+		removeWorktrees(context.Background(), fx.d.worktreeSeams(nil), res.removable)
+
+		fx.requireKept(first, second)
+		if n := strings.Count(logs.String(), shortCircuit); n != 1 {
+			t.Errorf("the short-circuit is logged %d times, want once; log:\n%s", n, logs)
+		}
+	})
 }
 
 // The git checks are re-run in the remove step: a worktree that gained unsaved

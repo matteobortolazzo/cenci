@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -15,6 +16,7 @@ import (
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/babysit"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/ticketstate"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/worktreeclean"
+	"github.com/matteobortolazzo/cenci/watch/v2/pkg/watch"
 )
 
 // This file implements the `cenci worktrees <verb>` group (ls, prune): the manual
@@ -23,7 +25,8 @@ import (
 // and babysit guards right before each removal (worktreeclean.Remove does not).
 
 // worktreesUnknownNote marks a row that is removable but whose in-use status could
-// not be read: ls and --dry-run show the real verdict, prune keeps it.
+// not be read (tmux windows, or a daemon snapshot that failed while the daemon was
+// running): ls and --dry-run show the real verdict, prune keeps it.
 const worktreesUnknownNote = "(in-use status unknown: prune will keep it here)"
 
 // runWorktrees implements `cenci worktrees <verb> [flags]`.
@@ -98,8 +101,12 @@ func loadWorktreesPass(ctx context.Context, out io.Writer) (worktreesPass, error
 	p.outcomes = readWorktreeOutcomes(ctx, out, repo, entries)
 
 	p.live = worktreeclean.ReadLiveState(ctx, worktreeclean.LiveSources{})
-	if p.live.SnapshotErr != nil {
-		say(out, "note: daemon snapshot unavailable (%s); only tmux windows and pane directories are checked\n", oneLine(p.live.SnapshotErr.Error()))
+	switch err := p.live.SnapshotErr; {
+	case err == nil:
+	case errors.Is(err, watch.ErrDaemonUnreachable):
+		say(out, "note: daemon snapshot unavailable (%s); only tmux windows and pane directories are checked\n", oneLine(err.Error()))
+	default:
+		say(out, "note: in-use status unknown: %s\n", oneLine(err.Error()))
 	}
 	if p.live.WindowsErr != nil {
 		say(out, "note: in-use status unknown: %s\n", oneLine(p.live.WindowsErr.Error()))
@@ -132,14 +139,16 @@ func readWorktreeOutcomes(ctx context.Context, out io.Writer, repo worktreeclean
 }
 
 // babysitBlocks is the production babysit check: the ticket alone, not scoped to
-// a repo root.
-func babysitBlocks(ticket string) (bool, string) {
-	return babysit.BlocksClose(ticket, "", "")
+// a repo root. It is the fail-closed variant, so an unreadable babysit state
+// keeps the worktree as babysit-unknown instead of reading as "not armed".
+func babysitBlocks(ticket string) (bool, string, error) {
+	return babysit.BlocksCloseStrict(ticket, "", "")
 }
 
 // options builds the classification options over live. With strict an unreadable
-// window list keeps a worktree as in-use-unknown; without it the verdict is the
-// real one.
+// window list or a daemon snapshot that failed while the daemon was running
+// (live.StrictErr) keeps a worktree as in-use-unknown; without it the verdict is
+// the real one.
 func (p worktreesPass) options(live worktreeclean.LiveState, strict bool) worktreeclean.Options {
 	return worktreeclean.Options{
 		StaleAfter: p.cfg.StaleAfter,
@@ -280,9 +289,10 @@ func removable(c worktreeclean.Classification) bool {
 }
 
 // unknownSuffix is the row note for a removable worktree judged without a
-// readable window list.
+// readable window list or daemon snapshot -- exactly when strict InUseGuard
+// would keep it, so the row and prune's keep cannot disagree.
 func (p worktreesPass) unknownSuffix(c worktreeclean.Classification) string {
-	if removable(c) && p.live.WindowsErr != nil {
+	if removable(c) && p.live.StrictErr() != nil {
 		return "  " + worktreesUnknownNote
 	}
 	return ""

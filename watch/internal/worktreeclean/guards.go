@@ -169,12 +169,16 @@ func windowTicket(name string) int {
 // InUseGuard blocks a worktree whose ticket has a live window, whose directory
 // holds a pane's working directory, or whose ticket has a running or need-input
 // session. A worktree without a ticket is matched by directory only. With strict,
-// an unreadable window list is an error (the worktree is kept as unknown); without
-// it the checks run on what was readable.
+// anything in ls.StrictErr (an unreadable window list, or a daemon snapshot that
+// failed for a reason other than the daemon not running) is an error and the
+// worktree is kept as unknown, ahead of any block; without strict the checks run
+// on what was readable.
 func InUseGuard(ls LiveState, strict bool) Guard {
 	return func(_ context.Context, t Target) (bool, error) {
-		if strict && ls.WindowsErr != nil {
-			return false, ls.WindowsErr
+		if strict {
+			if err := ls.StrictErr(); err != nil {
+				return false, err
+			}
 		}
 		if t.Ticket > 0 && (ls.WindowTickets[t.Ticket] || ls.BusyTickets[t.Ticket]) {
 			return true, nil
@@ -189,16 +193,34 @@ func InUseGuard(ls LiveState, strict bool) Guard {
 }
 
 // BabysitGuard blocks a worktree whose ticket has an armed babysit supervisor,
-// as answered by blocks (babysit.BlocksClose in production). A ticketless
-// worktree is never asked.
-func BabysitGuard(blocks func(ticket string) (bool, string)) Guard {
+// as answered by blocks (babysit.BlocksCloseStrict in production). An error from
+// blocks is returned, so the worktree is kept as unknown rather than read as
+// "not armed". A ticketless worktree is never asked.
+func BabysitGuard(blocks func(ticket string) (bool, string, error)) Guard {
 	return func(_ context.Context, t Target) (bool, error) {
 		if t.Ticket == 0 {
 			return false, nil
 		}
-		blocked, _ := blocks(strconv.Itoa(t.Ticket))
-		return blocked, nil
+		blocked, _, err := blocks(strconv.Itoa(t.Ticket))
+		return blocked, err
 	}
+}
+
+// StrictErr is why the in-use status is unknown under strict mode, or nil: the
+// tmux windows could not be fully read, or the daemon snapshot failed for any
+// reason other than the daemon not running. A daemon that is not running (an
+// error wrapping watch.ErrDaemonUnreachable) is benign: there is no snapshot
+// to miss, and only tmux is checked. Everything else -- a timeout, a malformed
+// or closed reply, permission denied, no snapshot at all -- hides renamed
+// tracked windows and busy sessions, so it is an unknown.
+func (ls LiveState) StrictErr() error {
+	if ls.WindowsErr != nil {
+		return ls.WindowsErr
+	}
+	if ls.SnapshotErr != nil && !errors.Is(ls.SnapshotErr, watch.ErrDaemonUnreachable) {
+		return ls.SnapshotErr
+	}
+	return nil
 }
 
 // ReadSnapshotWithin reads one daemon snapshot from the socket at path, giving

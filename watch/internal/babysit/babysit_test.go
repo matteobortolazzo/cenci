@@ -3242,6 +3242,252 @@ func TestBlocksCloseIgnoresSupervisorLogFiles(t *testing.T) {
 	}
 }
 
+// -- #1300: BlocksCloseStrict, the fail-closed variant for worktree reclaim --
+
+// blockingGuardState is a live, failing-CI supervisor of PR 790 that closes
+// ticket 782 -- it blocks under stubProcessOwned(t, true).
+func blockingGuardState() State {
+	return State{PR: "790", RepoRoot: "/repo/root", ClosingIssues: []int{782}, CIStatus: "failing", PID: 4242, Status: "running"}
+}
+
+// skipAsRoot skips a test that relies on file mode 000 stopping a read: root
+// ignores permission bits.
+func skipAsRoot(t *testing.T) {
+	t.Helper()
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores file permissions, so mode 000 does not make anything unreadable")
+	}
+}
+
+// writeStrictFile writes name in dir with the given content and mode, and
+// restores a readable mode on cleanup so t.TempDir can remove it.
+func writeStrictFile(t *testing.T, dir, name, content string, mode os.FileMode) string {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, mode); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(path, 0600) })
+	return path
+}
+
+// stateFailure is one way the babysit state cannot be read; setup builds it and
+// returns the state-dir override to pass ("" = the standard location) plus the
+// text an error naming the cause must contain.
+type stateFailure struct {
+	name   string
+	root   bool // runs as root too; false relies on mode 000 and is skipped as root
+	setup  func(t *testing.T) (override, wantInErr string)
+	wantAC string
+}
+
+func stateFailures() []stateFailure {
+	return []stateFailure{
+		{name: "the state directory cannot be resolved", root: true, wantAC: "a", setup: func(t *testing.T) (string, string) {
+			t.Setenv("HOME", "")
+			t.Setenv("XDG_STATE_HOME", "")
+			return "", ""
+		}},
+		{name: "the state directory cannot be listed", root: false, wantAC: "b", setup: func(t *testing.T) (string, string) {
+			dir := filepath.Join(t.TempDir(), "state")
+			if err := os.Mkdir(dir, 0700); err != nil {
+				t.Fatal(err)
+			}
+			writeGuardState(t, dir, blockingGuardState())
+			if err := os.Chmod(dir, 0); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Chmod(dir, 0700) })
+			return dir, dir
+		}},
+		{name: "a state file cannot be read", root: false, wantAC: "c", setup: func(t *testing.T) (string, string) {
+			dir := t.TempDir()
+			return dir, writeStrictFile(t, dir, "locked.json", "{}", 0)
+		}},
+		{name: "a state entry is a directory", root: true, wantAC: "c", setup: func(t *testing.T) (string, string) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "x.json")
+			if err := os.Mkdir(path, 0700); err != nil {
+				t.Fatal(err)
+			}
+			return dir, path
+		}},
+		{name: "a state file is corrupt JSON", root: true, wantAC: "d", setup: func(t *testing.T) (string, string) {
+			dir := t.TempDir()
+			return dir, writeStrictFile(t, dir, "corrupt.json", "{not json", 0600)
+		}},
+	}
+}
+
+// Each way the state cannot be read is an error with nothing blocked -- the
+// caller must keep the worktree rather than read "not armed".
+func TestBlocksCloseStrict_ReportsEveryStateReadFailure(t *testing.T) {
+	for _, f := range stateFailures() {
+		t.Run(f.name, func(t *testing.T) {
+			if !f.root {
+				skipAsRoot(t)
+			}
+			stubProcessOwned(t, true)
+			override, wantInErr := f.setup(t)
+
+			blocked, reason, err := BlocksCloseStrict("782", "/repo/root", override)
+
+			if err == nil {
+				t.Fatalf("BlocksCloseStrict = %v, %q, nil; want an error (AC %s)", blocked, reason, f.wantAC)
+			}
+			if blocked || reason != "" {
+				t.Errorf("BlocksCloseStrict = %v, %q; want nothing blocked when the state cannot be read", blocked, reason)
+			}
+			if wantInErr != "" && !strings.Contains(err.Error(), wantInErr) {
+				t.Errorf("error %q does not name %q, so the user cannot find what to fix", err, wantInErr)
+			}
+		})
+	}
+}
+
+// BlocksClose keeps its fail-open contract for every one of those failures: it
+// is what `cenci close` and the daemon rely on never to block on an error.
+func TestBlocksClose_StaysFailOpenOnEveryStateReadFailure(t *testing.T) {
+	for _, f := range stateFailures() {
+		t.Run(f.name, func(t *testing.T) {
+			if !f.root {
+				skipAsRoot(t)
+			}
+			stubProcessOwned(t, true)
+			override, _ := f.setup(t)
+
+			blocked, reason := BlocksClose("782", "/repo/root", override)
+
+			if blocked || reason != "" {
+				t.Errorf("BlocksClose = %v, %q; want (false, \"\") on a state read failure", blocked, reason)
+			}
+		})
+	}
+}
+
+func TestBlocksCloseStrict_MissingStateDirectoryMeansNothingIsArmed(t *testing.T) {
+	stubProcessOwned(t, true)
+
+	blocked, reason, err := BlocksCloseStrict("782", "/repo/root", filepath.Join(t.TempDir(), "never-created"))
+
+	if blocked || reason != "" || err != nil {
+		t.Errorf("BlocksCloseStrict = %v, %q, %v; want (false, \"\", nil)", blocked, reason, err)
+	}
+}
+
+func TestBlocksCloseStrict_NonNumericTicketIsAnError(t *testing.T) {
+	stubProcessOwned(t, true)
+	dir := t.TempDir()
+	writeGuardState(t, dir, blockingGuardState())
+
+	blocked, _, err := BlocksCloseStrict("add-dark-mode", "/repo/root", dir)
+
+	if err == nil || blocked {
+		t.Errorf("BlocksCloseStrict = %v, %v; want an error and nothing blocked", blocked, err)
+	}
+}
+
+// With every entry readable it answers exactly as BlocksClose does.
+func TestBlocksCloseStrict_HealthyStateAnswersWithoutAnError(t *testing.T) {
+	stubProcessOwned(t, true)
+	dir := t.TempDir()
+	writeGuardState(t, dir, blockingGuardState())
+
+	blocked, reason, err := BlocksCloseStrict("782", "/repo/root", dir)
+	if err != nil || !blocked || !strings.Contains(reason, "#790") {
+		t.Errorf("BlocksCloseStrict(782) = %v, %q, %v; want (true, a reason naming #790, nil)", blocked, reason, err)
+	}
+	blocked, reason, err = BlocksCloseStrict("999", "/repo/root", dir)
+	if err != nil || blocked || reason != "" {
+		t.Errorf("BlocksCloseStrict(999) = %v, %q, %v; want (false, \"\", nil)", blocked, reason, err)
+	}
+}
+
+// A supervisor that blocks the ticket wins over an unreadable or corrupt entry
+// beside it, wherever in the sorted listing the bad entry falls.
+func TestBlocksCloseStrict_ABlockingMatchOutranksReadErrors(t *testing.T) {
+	tests := []struct {
+		name  string
+		root  bool
+		plant func(t *testing.T, dir string)
+	}{
+		{name: "corrupt entries on both sides", root: true, plant: func(t *testing.T, dir string) {
+			writeStrictFile(t, dir, "aaa-corrupt.json", "{not json", 0600)
+			writeStrictFile(t, dir, "zzz-corrupt.json", "{not json", 0600)
+		}},
+		{name: "directory entries on both sides", root: true, plant: func(t *testing.T, dir string) {
+			for _, name := range []string{"aaa.json", "zzz.json"} {
+				if err := os.Mkdir(filepath.Join(dir, name), 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}},
+		{name: "unreadable entries on both sides", root: false, plant: func(t *testing.T, dir string) {
+			writeStrictFile(t, dir, "aaa-locked.json", "{}", 0)
+			writeStrictFile(t, dir, "zzz-locked.json", "{}", 0)
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if !tt.root {
+				skipAsRoot(t)
+			}
+			stubProcessOwned(t, true)
+			dir := t.TempDir()
+			tt.plant(t, dir)
+			writeGuardState(t, dir, blockingGuardState())
+
+			blocked, reason, err := BlocksCloseStrict("782", "/repo/root", dir)
+
+			if err != nil || !blocked || !strings.Contains(reason, "#790") {
+				t.Errorf("BlocksCloseStrict = %v, %q, %v; want (true, a reason naming #790, nil)", blocked, reason, err)
+			}
+		})
+	}
+}
+
+// Files that are not state, or that vanished mid-pass, are not read errors.
+func TestBlocksCloseStrict_IgnoresEntriesThatAreNotState(t *testing.T) {
+	tests := []struct {
+		name  string
+		plant func(t *testing.T, dir string)
+	}{
+		{name: "supervisor log and temp siblings", plant: func(t *testing.T, dir string) {
+			writeStrictFile(t, dir, "aabbcc-790.log", "supervisor output\n", 0600)
+			writeStrictFile(t, dir, "state-790.json.tmp", "{half written", 0600)
+			writeStrictFile(t, dir, "state-790.json.lock", "4242\n", 0600)
+		}},
+		// A supervisor Stop removes its state file between the listing and the
+		// read; a dangling symlink is that moment held still.
+		{name: "a state file deleted between listing and read", plant: func(t *testing.T, dir string) {
+			if err := os.Symlink(filepath.Join(dir, "removed-by-stop"), filepath.Join(dir, "gone.json")); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stubProcessOwned(t, true)
+			dir := t.TempDir()
+			tt.plant(t, dir)
+
+			blocked, reason, err := BlocksCloseStrict("782", "/repo/root", dir)
+			if blocked || reason != "" || err != nil {
+				t.Errorf("alone: BlocksCloseStrict = %v, %q, %v; want (false, \"\", nil)", blocked, reason, err)
+			}
+
+			writeGuardState(t, dir, blockingGuardState())
+			blocked, reason, err = BlocksCloseStrict("782", "/repo/root", dir)
+			if err != nil || !blocked || !strings.Contains(reason, "#790") {
+				t.Errorf("beside a blocking state: BlocksCloseStrict = %v, %q, %v; want (true, a reason naming #790, nil)", blocked, reason, err)
+			}
+		})
+	}
+}
+
 // Distinguish a new merge-repair dispatch from a repeated observation.
 const (
 	conflictWindowOpenedMarker = "opened merge-repair"

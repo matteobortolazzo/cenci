@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1037,22 +1038,44 @@ func load(path string) State {
 	if e == nil {
 		_ = json.Unmarshal(b, &s)
 	}
-	// Schema migration (#885): a state persisted below stateSchemaVersion
-	// predates LaunchedKeys -- its PendingKeys already represents in-flight
-	// feedback dispatched under the old AddressedKeys-as-dedup scheme, so
-	// seed LaunchedKeys from it here, before Run() (or any other caller)
-	// ever overwrites s.SchemaVersion, so an upgraded supervisor with
-	// in-flight feedback does not fire one spurious address-review relaunch
-	// for work already dispatched. Both the standalone `load()` callers
-	// (BlocksClose, `cenci babysit status`) and Run()'s own startup load see
-	// the migrated value.
+	migrateState(&s)
+	return s
+}
+
+// readStateStrict is load for callers that must not mistake an unreadable
+// state for an empty one (#1300). It returns the migrated State it managed to
+// decode -- zero when the file could not be read, possibly partly filled when
+// decoding failed midway, exactly what load returns -- plus the read or decode
+// error, which names path.
+func readStateStrict(path string) (State, error) {
+	var s State
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return s, fmt.Errorf("read babysit state %s: %w", path, err)
+	}
+	err = json.Unmarshal(b, &s)
+	migrateState(&s)
+	if err != nil {
+		return s, fmt.Errorf("decode babysit state %s: %w", path, err)
+	}
+	return s, nil
+}
+
+// migrateState applies the schema migration (#885): a state persisted below
+// stateSchemaVersion predates LaunchedKeys -- its PendingKeys already
+// represents in-flight feedback dispatched under the old AddressedKeys-as-dedup
+// scheme, so seed LaunchedKeys from it here, before Run() (or any other
+// caller) ever overwrites s.SchemaVersion, so an upgraded supervisor with
+// in-flight feedback does not fire one spurious address-review relaunch for
+// work already dispatched. Both the standalone `load()` callers (BlocksClose,
+// `cenci babysit status`) and Run()'s own startup load see the migrated value.
+func migrateState(s *State) {
 	if s.SchemaVersion < stateSchemaVersion {
 		if len(s.PendingKeys) > 0 {
 			s.LaunchedKeys = append(append([]string{}, s.LaunchedKeys...), s.PendingKeys...)
 		}
 		s.SchemaVersion = stateSchemaVersion
 	}
-	return s
 }
 func save(path string, s State) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
@@ -1271,51 +1294,90 @@ func ciStatus(checks []check) string {
 // procfs — fails *open* (returns false), and nothing is ever written to
 // stdout: this runs on every lazyboards board refresh, and a guard that
 // errored into "never close anything" would be worse than the bug it fixes.
-// It makes no network calls for the same reason.
+// It makes no network calls for the same reason. It is a thin wrapper over
+// BlocksCloseStrict that drops the error; the worktree-reclaim path, where a
+// wrong "not armed" deletes work, calls BlocksCloseStrict and fails closed.
 func BlocksClose(ticket, repoRoot, stateDirOverride string) (bool, string) {
+	blocked, reason, _ := BlocksCloseStrict(ticket, repoRoot, stateDirOverride)
+	return blocked, reason
+}
+
+// BlocksCloseStrict is the fail-closed variant of BlocksClose for the worktree
+// reclaim path (#1300), where a wrong "not armed" deletes a worktree a
+// supervisor is still working in. It makes the same join and shares the
+// matching, but reports every way the state could not be read instead of
+// swallowing it: an unparsable ticket, an unresolvable state directory, a
+// directory that cannot be listed, and a *.json entry that cannot be read or
+// decoded. A state directory that does not exist means nothing is armed
+// (false, "", nil), and an entry that vanished between the listing and the read
+// (a supervisor Stop racing the pass) is skipped.
+//
+// A state that blocks the ticket outranks the errors: the first blocking match
+// returns (true, reason, nil) even when another entry is corrupt or
+// unreadable, because both outcomes keep the worktree and the specific reason
+// is the more useful one. With no match the read errors come back joined, each
+// naming its path. A state that decoded only partly is still evaluated, as
+// load does, so BlocksClose answers exactly as it always has.
+func BlocksCloseStrict(ticket, repoRoot, stateDirOverride string) (bool, string, error) {
 	number, err := strconv.Atoi(strings.TrimPrefix(ticket, "#"))
 	if err != nil {
-		return false, ""
+		return false, "", fmt.Errorf("parse ticket %q: %w", ticket, err)
 	}
 	dir, err := stateDir(stateDirOverride)
 	if err != nil {
-		return false, ""
+		return false, "", fmt.Errorf("resolve babysit state directory: %w", err)
 	}
-	paths, err := filepath.Glob(filepath.Join(dir, "*.json"))
-	if err != nil {
-		return false, ""
+	entries, listErr := os.ReadDir(dir)
+	if errors.Is(listErr, fs.ErrNotExist) {
+		return false, "", nil
 	}
-	for _, p := range paths {
-		s := load(p) // corrupt/unreadable decodes to the zero State: no match
-		if !closesIssue(s, number) {
-			continue
-		}
-		if repoRoot != "" && s.RepoRoot != "" && repoRoot != s.RepoRoot {
-			continue
-		}
-		// Default-deny (#924 D1): only an explicit ciStatusGreen verdict
-		// allows the close unconditionally. ciStatusFailing/ciStatusPending
-		// block unconditionally too (unchanged from #787/#923). Every other
-		// value -- ciStatusUnknown, "", or anything unrecognized -- blocks
-		// only subject to the settle-grace escape below (Q&A 15; never a
-		// silent catch-all allow, watch/AGENTS.md's Critical Rule).
-		switch s.CIStatus {
-		case ciStatusGreen:
-			continue
-		case ciStatusFailing, ciStatusPending:
-			// falls through to the liveness check below: blocks
-			// unconditionally.
-		default:
-			if settleGraceElapsed(s) {
-				continue
-			}
-		}
-		if !supervisorLive(s) {
-			continue
-		}
-		return true, fmt.Sprintf("babysit supervising PR #%s, CI not green", s.PR)
+	var errs []error
+	if listErr != nil {
+		errs = append(errs, fmt.Errorf("list babysit state directory %s: %w", dir, listErr))
 	}
-	return false, ""
+	for _, e := range entries {
+		if !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		s, err := readStateStrict(filepath.Join(dir, e.Name()))
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
+			errs = append(errs, err)
+		}
+		if stateBlocks(s, number, repoRoot) {
+			return true, fmt.Sprintf("babysit supervising PR #%s, CI not green", s.PR), nil
+		}
+	}
+	return false, "", errors.Join(errs...)
+}
+
+// stateBlocks reports whether the supervisor described by s holds the close of
+// issue number: it supervises a PR that closes it, in this checkout, with CI
+// not yet green, and is still on the hook for the PR.
+func stateBlocks(s State, number int, repoRoot string) bool {
+	if !closesIssue(s, number) {
+		return false
+	}
+	if repoRoot != "" && s.RepoRoot != "" && repoRoot != s.RepoRoot {
+		return false
+	}
+	// Default-deny (#924 D1): only an explicit ciStatusGreen verdict
+	// allows the close unconditionally. ciStatusFailing/ciStatusPending
+	// block unconditionally too (unchanged from #787/#923). Every other
+	// value -- ciStatusUnknown, "", or anything unrecognized -- blocks
+	// only subject to the settle-grace escape below (Q&A 15; never a
+	// silent catch-all allow, watch/AGENTS.md's Critical Rule).
+	switch s.CIStatus {
+	case ciStatusGreen:
+		return false
+	case ciStatusFailing, ciStatusPending:
+		// falls through to the liveness check below: blocks
+		// unconditionally.
+	default:
+		if settleGraceElapsed(s) {
+			return false
+		}
+	}
+	return supervisorLive(s)
 }
 
 // closesIssue reports whether s's supervised PR closes issue number.
