@@ -9,6 +9,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/babysit"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/ticketstate"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/tmux"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/worktreeclean"
@@ -28,8 +29,10 @@ const worktreeCleanupPassTimeout = 5 * time.Minute
 // guards against fresh in-memory state on the loop; removeWorktrees reads the live
 // state again before each survivor, re-judges it with strict guards and removes it
 // off the loop. worktreeInFlight stays set from the first step to the last, so at most one
-// pass is in flight. Every doubt keeps the worktree: if the tmux window list
-// cannot be read, nothing is removed. Every log line starts with
+// pass is in flight. Every doubt keeps the worktree: if any in-use source cannot
+// be read (the tmux window list, or the daemon snapshot for any reason other than
+// the daemon not running), nothing is removed, and a babysit state that cannot be
+// read keeps its ticket's worktree (#1300; the close paths stay fail-open). Every log line starts with
 // "worktree-cleanup:", and none includes a remote URL.
 
 // outcomeReader reads the detailed outcome of tickets for a repo; production is
@@ -61,7 +64,7 @@ type worktreeDeps struct {
 	inSandbox      func() bool
 	registryPath   string
 	userConfigPath string
-	babysit        func(ticket string) (blocked bool, reason string)
+	babysit        func(ticket string) (blocked bool, reason string, err error)
 	verbose        bool
 	snapshot       *watch.StateSnapshot
 	windowDirs     []string
@@ -69,9 +72,9 @@ type worktreeDeps struct {
 
 // worktreeSeams copies the daemon's seams for a worker. It runs on the loop.
 func (d *Daemon) worktreeSeams(snap *watch.StateSnapshot) worktreeDeps {
-	babysit := d.closeGuard
-	if babysit == nil {
-		babysit = func(string) (bool, string) { return false, "" }
+	blocks := d.worktreeBabysit
+	if blocks == nil {
+		blocks = strictBabysit
 	}
 	return worktreeDeps{
 		reader:         d.worktreeReader,
@@ -80,10 +83,17 @@ func (d *Daemon) worktreeSeams(snap *watch.StateSnapshot) worktreeDeps {
 		inSandbox:      d.worktreeInSandbox,
 		registryPath:   d.worktreeRegistryPath,
 		userConfigPath: d.worktreeUserConfigPath,
-		babysit:        babysit,
+		babysit:        blocks,
 		verbose:        d.cfg.Verbose,
 		snapshot:       snap,
 	}
+}
+
+// strictBabysit is the pass's default babysit lookup. Unlike d.closeGuard, which
+// the close paths keep fail-open, it reports a state that cannot be read, so the
+// worktree is kept as unknown instead of read as "not armed" (#1300).
+func strictBabysit(ticket string) (bool, string, error) {
+	return babysit.BlocksCloseStrict(ticket, "", "")
 }
 
 // liveSources reads tmux and the sandbox gate through the injected seams and the
@@ -97,7 +107,8 @@ func (deps worktreeDeps) liveSources() worktreeclean.LiveSources {
 }
 
 // options are the classification options for one candidate over live, with strict
-// guards: an unreadable window list keeps the worktree.
+// guards: an unknown in-use status (an unreadable window list or a non-benign
+// snapshot error) or an unreadable babysit state keeps the worktree.
 func (deps worktreeDeps) options(c worktreeCandidate, live worktreeclean.LiveState) worktreeclean.Options {
 	return worktreeclean.Options{
 		StaleAfter: c.staleAfter,
@@ -148,8 +159,8 @@ func evaluateWorktreeCleanup(ctx context.Context, deps worktreeDeps) worktreeEva
 	repoDirs := updateWorktreeRegistry(ctx, deps)
 
 	live := worktreeclean.ReadLiveState(ctx, deps.liveSources())
-	if live.WindowsErr != nil {
-		logWorktreeInUseUnknown(live.WindowsErr)
+	if err := live.StrictErr(); err != nil {
+		logWorktreeInUseUnknown(err)
 		return res
 	}
 
@@ -285,18 +296,30 @@ func (d *Daemon) applyWorktreeGuards(res worktreeEvalResult) {
 	snap := d.buildSnapshot()
 	deps := d.worktreeSeams(&snap)
 	inUse := worktreeclean.InUseGuard(worktreeclean.SnapshotLiveState(&snap), false)
-	babysit := worktreeclean.BabysitGuard(deps.babysit)
+	babysitGuard := worktreeclean.BabysitGuard(deps.babysit)
 
 	var survivors []worktreeCandidate
 	for _, c := range res.removable {
 		target := worktreeclean.TargetOf(c.class.Entry)
-		// Neither guard returns an error here: the snapshot is in memory and the
-		// babysit check is a plain predicate.
-		if blocked, _ := inUse(context.Background(), target); blocked {
+		// An error from either guard is a doubt, and every doubt keeps the worktree.
+		// The in-memory snapshot read cannot fail, but the babysit state read can, so
+		// the cause is always logged: a persistent failure would otherwise silently
+		// disable the cleanup of that worktree.
+		blocked, err := inUse(context.Background(), target)
+		if err != nil {
+			logHeldWorktreeUnknown(c, "in-use status unknown", err)
+			continue
+		}
+		if blocked {
 			logHeldWorktree(deps.verbose, c, "in use now")
 			continue
 		}
-		if blocked, _ := babysit(context.Background(), target); blocked {
+		blocked, err = babysitGuard(context.Background(), target)
+		if err != nil {
+			logHeldWorktreeUnknown(c, "babysit status unknown", err)
+			continue
+		}
+		if blocked {
 			logHeldWorktree(deps.verbose, c, "under a babysit supervisor now")
 			continue
 		}
@@ -333,8 +356,8 @@ func removeWorktrees(ctx context.Context, deps worktreeDeps, survivors []worktre
 			return
 		}
 		live := worktreeclean.ReadLiveState(ctx, deps.liveSources())
-		if live.WindowsErr != nil {
-			logWorktreeInUseUnknown(live.WindowsErr)
+		if err := live.StrictErr(); err != nil {
+			logWorktreeInUseUnknown(err)
 			return
 		}
 		o := deps.options(c, live)
@@ -406,6 +429,12 @@ func logHeldWorktree(verbose bool, c worktreeCandidate, why string) {
 	if verbose {
 		log.Printf("worktree-cleanup: kept %q: %s", worktreeLabel(c.class.Entry), why)
 	}
+}
+
+// logHeldWorktreeUnknown logs a worktree the loop's re-check held back because a
+// guard could not answer. It is always logged, whatever -verbose says.
+func logHeldWorktreeUnknown(c worktreeCandidate, why string, err error) {
+	log.Printf("worktree-cleanup: kept %q: %s: %s", worktreeLabel(c.class.Entry), why, logText(err.Error()))
 }
 
 // logWorktreeInUseUnknown logs why the pass keeps every worktree. It is always

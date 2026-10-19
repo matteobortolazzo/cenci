@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io/fs"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -685,6 +686,114 @@ func TestWorktreesLs_AppliesTheDaemonSnapshot(t *testing.T) {
 	}
 }
 
+// serveMalformedSnapshot listens on the socket the CLI will dial and answers
+// every connection with a line that is not a snapshot. The socket lives in
+// w.sockDir, which is short enough for a unix socket path.
+func serveMalformedSnapshot(t *testing.T, w *wtWorld) {
+	t.Helper()
+	l, err := net.Listen("unix", filepath.Join(w.sockDir, "cenci.sock"))
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	go func() {
+		for {
+			conn, err := l.Accept()
+			if err != nil {
+				return
+			}
+			_, _ = conn.Write([]byte("not json\n"))
+			_ = conn.Close()
+		}
+	}()
+}
+
+// A daemon that answers but cannot be read is not a daemon that is not running:
+// the snapshot is the only source for renamed tracked windows and busy sessions,
+// so prune keeps what it cannot rule out (#1300) while ls and --dry-run still
+// show the real verdict and say why prune will not act on it.
+func TestWorktreesPrune_MalformedDaemonSnapshotFailsClosed(t *testing.T) {
+	w := newWTWorld(t)
+	w.addWT("stale-clean")
+	w.age("stale-clean")
+	serveMalformedSnapshot(t, w)
+	before := w.fingerprint()
+
+	ls, code := w.run("worktrees", "ls")
+	wantExit(t, code, 0, ls)
+	dry, code := w.run("worktrees", "prune", "--dry-run")
+	wantExit(t, code, 0, dry)
+
+	if row := wantLine(t, ls, `stale-clean\s+stale\s+.*`); !strings.Contains(row, wtNoteUnk) {
+		t.Errorf("ls row %q lacks %q", row, wtNoteUnk)
+	}
+	if plan := wantLine(t, dry, `would remove stale-clean: stale, .*`); !strings.Contains(plan, wtNoteUnk) {
+		t.Errorf("dry-run line %q lacks %q", plan, wtNoteUnk)
+	}
+	for name, out := range map[string]string{"ls": ls, "--dry-run": dry} {
+		wantLine(t, out, `note: in-use status unknown: read daemon snapshot: .*`)
+		if strings.Contains(out, "daemon snapshot unavailable") {
+			t.Errorf("%s: a malformed reply is not an absent daemon, so the benign note must not appear:\n%s", name, out)
+		}
+	}
+	w.wantUnchanged(before)
+
+	out, code := w.run("worktrees", "prune")
+
+	wantExit(t, code, 0, out)
+	wantLine(t, out, `kept stale-clean: in-use status unknown\b.*`)
+	if strings.Contains(out, "removed ") {
+		t.Errorf("prune must remove nothing when the daemon snapshot cannot be read:\n%s", out)
+	}
+	if !w.exists(".worktrees", "stale-clean") {
+		t.Error("stale-clean must stay on disk")
+	}
+}
+
+// A live tmux window that names the ticket is a definite "in use" even when the
+// daemon's reply cannot be read: the row is a keep for its real reason, not a
+// removable one carrying the unknown note (#1300).
+func TestWorktreesLs_MalformedDaemonSnapshotStillShowsAWindowedTicketInUse(t *testing.T) {
+	w := newWTWorld(t)
+	w.addWT("31-in-use")
+	w.age("31-in-use")
+	w.ghIssues([]int{31}, nil)
+	w.tmuxWindows("31-implement")
+	serveMalformedSnapshot(t, w)
+
+	out, code := w.run("worktrees", "ls")
+
+	wantExit(t, code, 0, out)
+	row := wantLine(t, out, `31-in-use\s+keep\s+in use\b.*`)
+	if strings.Contains(row, wtNoteUnk) || strings.Contains(out, wtNoteUnk) {
+		t.Errorf("a windowed ticket is in use, not unknown, so no row may carry %q:\n%s", wtNoteUnk, out)
+	}
+	if w.tmuxCalls() == 0 {
+		t.Error("tmux was never read: the in-use verdict above proves nothing")
+	}
+}
+
+// With no daemon running prune still runs, notes that only tmux windows and pane
+// directories were checked, and removes a stale clean worktree: an absent daemon
+// is benign, unlike a daemon whose reply cannot be read.
+func TestWorktreesPrune_NoDaemonNotesTheLimitedCheckAndStillRemoves(t *testing.T) {
+	w := newWTWorld(t)
+	w.addWT("stale-clean")
+	w.age("stale-clean")
+
+	out, code := w.run("worktrees", "prune")
+
+	wantExit(t, code, 0, out)
+	if !strings.Contains(out, "daemon snapshot unavailable") ||
+		!strings.Contains(out, "only tmux windows and pane directories are checked") {
+		t.Errorf("prune output lacks the daemon-unavailable note:\n%s", out)
+	}
+	wantLine(t, out, `removed stale-clean: stale, freed `+wtSize+` \(\d+ bytes\)`)
+	if w.exists(".worktrees", "stale-clean") {
+		t.Error("stale-clean should have been removed: a daemon that is not running is benign")
+	}
+}
+
 func TestWorktrees_NoteWhatCouldNotBeReadAndHonorConfig(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -796,7 +905,7 @@ func newTicketedWorld(t *testing.T) *wtWorld {
 }
 
 // An armed babysit supervisor for the ticket keeps its worktree, through the
-// production babysit.BlocksClose, on ls, --dry-run and prune alike.
+// production babysit.BlocksCloseStrict, on ls, --dry-run and prune alike.
 func TestWorktrees_ArmedBabysitKeepsTheTicketsWorktree(t *testing.T) {
 	w := newTicketedWorld(t)
 	w.write(w.babysitStateFile(), babysitState(21))
@@ -820,6 +929,44 @@ func TestWorktrees_ArmedBabysitKeepsTheTicketsWorktree(t *testing.T) {
 	wantLine(t, out, `removed stale-clean: stale, .*`)
 	if !w.exists(".worktrees", "21-ticketed") {
 		t.Error("21-ticketed has an armed babysit and must survive")
+	}
+}
+
+// A babysit state file that cannot be decoded cannot be tied to any ticket, so
+// every ticketed worktree is kept as unknown (#1300) on ls, --dry-run and prune
+// alike; the ticketless one is never asked and is judged on its own facts.
+func TestWorktrees_UnreadableBabysitStateKeepsTicketedWorktrees(t *testing.T) {
+	w := newTicketedWorld(t)
+	w.write(w.babysitStateFile(), "{not json")
+	before := w.fingerprint()
+
+	ls, code := w.run("worktrees", "ls")
+	wantExit(t, code, 0, ls)
+	dry, code := w.run("worktrees", "prune", "--dry-run")
+	wantExit(t, code, 0, dry)
+
+	wantLine(t, ls, `21-ticketed\s+keep\s+babysit status unknown\b.*`)
+	wantLine(t, ls, `stale-clean\s+stale\s+.*`)
+	wantLine(t, dry, `keep 21-ticketed: babysit status unknown\b.*`)
+	wantLine(t, dry, `would remove stale-clean: stale, .*`)
+	for name, out := range map[string]string{"ls": ls, "--dry-run": dry} {
+		if note := wantLine(t, out, `note: 21-ticketed: babysit guard for 21-ticketed: .*`); !strings.Contains(note, w.babysitStateFile()) {
+			t.Errorf("%s: cause line %q does not name the state file %s", name, note, w.babysitStateFile())
+		}
+	}
+	w.wantUnchanged(before)
+
+	out, code := w.run("worktrees", "prune")
+
+	wantExit(t, code, 0, out)
+	wantLine(t, out, `kept 21-ticketed: babysit status unknown\b.*`)
+	wantLine(t, out, `note: 21-ticketed: babysit guard for 21-ticketed: .*`)
+	wantLine(t, out, `removed stale-clean: stale, .*`)
+	if !w.exists(".worktrees", "21-ticketed") {
+		t.Error("21-ticketed has an unreadable babysit state and must survive")
+	}
+	if w.exists(".worktrees", "stale-clean") {
+		t.Error("stale-clean is ticketless, never asks babysit, and should be removed")
 	}
 }
 

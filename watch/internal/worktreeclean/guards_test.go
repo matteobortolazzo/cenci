@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -51,6 +52,10 @@ func busy(ticket int, status string) watch.WindowState {
 	return watch.WindowState{WindowName: fmt.Sprintf("%d-implement", ticket), Status: status}
 }
 
+// errDaemonDown is what a daemon that is not running looks like to the snapshot
+// read: the one failure that is benign for a strict pass.
+var errDaemonDown = fmt.Errorf("%w: dial unix /run/user/1000/cenci/cenci.sock: no such file or directory", watch.ErrDaemonUnreachable)
+
 func TestInUseGuard_ClassifiesWhatIsLive(t *testing.T) {
 	noSandbox(t)
 	r, wts := idleWorktrees(t, "42-feature")
@@ -62,6 +67,7 @@ func TestInUseGuard_ClassifiesWhatIsLive(t *testing.T) {
 		tmuxErr  error
 		windows  []watch.WindowState
 		snapErr  error
+		nilSnap  bool // the read returns (nil, snapErr)
 		strict   bool
 		sandbox  bool
 		want     KeepReason // "" = stale
@@ -97,8 +103,18 @@ func TestInUseGuard_ClassifiesWhatIsLive(t *testing.T) {
 		{name: "empty pane cwd is unreadable", panes: []tmux.LivePane{{PaneID: "%1", WindowName: "sh", CurrentPath: ""}}, strict: true, want: KeepInUseUnknown, wantErr: true, wantCall: true},
 		{name: "relative pane cwd is unreadable", panes: []tmux.LivePane{{PaneID: "%1", WindowName: "sh", CurrentPath: "repo/x"}}, strict: true, want: KeepInUseUnknown, wantErr: true, wantCall: true},
 		{name: "unclean pane cwd is unreadable", panes: []tmux.LivePane{{PaneID: "%1", WindowName: "sh", CurrentPath: "/a/../b"}}, strict: true, want: KeepInUseUnknown, wantErr: true, wantCall: true},
-		{name: "snapshot unreadable and nothing live", snapErr: errors.New("daemon unreachable"), strict: true, wantCall: true},
-		{name: "snapshot unreadable but a window is live", snapErr: errors.New("daemon unreachable"), panes: []tmux.LivePane{{PaneID: "%1", WindowName: "42-implement", CurrentPath: "/home/dev"}}, strict: true, want: KeepInUse, wantCall: true},
+		{name: "daemon not running and nothing live", snapErr: errDaemonDown, strict: true, wantCall: true},
+		{name: "daemon not running but a window is live", snapErr: errDaemonDown, panes: []tmux.LivePane{{PaneID: "%1", WindowName: "42-implement", CurrentPath: "/home/dev"}}, strict: true, want: KeepInUse, wantCall: true},
+		// #1300: only a daemon that is not running is benign; any other snapshot
+		// failure leaves renamed tracked windows and busy sessions unseen.
+		{name: "strict and the snapshot times out", snapErr: errors.New("the daemon sent no snapshot within 5s"), strict: true, want: KeepInUseUnknown, wantErr: true, wantCall: true},
+		{name: "strict and the snapshot reply is malformed", snapErr: errors.New("decode snapshot: invalid character 'o' in literal null"), strict: true, want: KeepInUseUnknown, wantErr: true, wantCall: true},
+		{name: "strict and the daemon sends no snapshot at all", nilSnap: true, strict: true, want: KeepInUseUnknown, wantErr: true, wantCall: true},
+		{name: "strict and the daemon socket is permission denied", snapErr: fmt.Errorf("dial unix /run/user/1000/cenci/cenci.sock: %w", syscall.EACCES), strict: true, want: KeepInUseUnknown, wantErr: true, wantCall: true},
+		{name: "strict and a snapshot failure beats a live window", snapErr: errors.New("the daemon sent no snapshot within 5s"), panes: []tmux.LivePane{{PaneID: "%1", WindowName: "42-implement", CurrentPath: "/home/dev"}}, strict: true, want: KeepInUseUnknown, wantErr: true, wantCall: true},
+		{name: "lenient and the snapshot reply is malformed still sees a live window", snapErr: errors.New("decode snapshot: invalid character 'o' in literal null"), panes: []tmux.LivePane{{PaneID: "%1", WindowName: "42-implement", CurrentPath: "/home/dev"}}, want: KeepInUse, wantCall: true},
+		{name: "lenient and the snapshot times out judges on what it read", snapErr: errors.New("the daemon sent no snapshot within 5s"), wantCall: true},
+		{name: "strict inside the sandbox whatever the snapshot says", sandbox: true, strict: true, snapErr: errDaemonDown, want: KeepInUseUnknown, wantErr: true},
 		{name: "strict inside the sandbox", sandbox: true, strict: true, want: KeepInUseUnknown, wantErr: true},
 		{name: "sandbox beats a benign no-server answer", sandbox: true, strict: true, tmuxErr: tmux.ErrNoServer, want: KeepInUseUnknown, wantErr: true},
 		{name: "lenient inside the sandbox skips the window checks", sandbox: true},
@@ -117,8 +133,13 @@ func TestInUseGuard_ClassifiesWhatIsLive(t *testing.T) {
 			}
 			snap := &watch.StateSnapshot{Windows: tt.windows}
 			ls := ReadLiveState(context.Background(), LiveSources{
-				ListPanes:    lister.ListLivePanes,
-				ReadSnapshot: func() (*watch.StateSnapshot, error) { return snap, tt.snapErr },
+				ListPanes: lister.ListLivePanes,
+				ReadSnapshot: func() (*watch.StateSnapshot, error) {
+					if tt.nilSnap {
+						return nil, tt.snapErr
+					}
+					return snap, tt.snapErr
+				},
 			})
 			o := testOptions(nil)
 			o.InUse = InUseGuard(ls, tt.strict)
@@ -198,7 +219,7 @@ func TestInUseGuard_MatchesTicketAndPathExactly(t *testing.T) {
 
 // armBabysit writes a supervisor state the way a babysit that is still arming
 // leaves it (PID 0, no live process to check) under a temp XDG_STATE_HOME, for
-// the real babysit.BlocksClose to read.
+// the real babysit.BlocksCloseStrict to read.
 func armBabysit(t *testing.T, ciStatus string, closing ...int) {
 	t.Helper()
 	home := t.TempDir()
@@ -218,26 +239,35 @@ func armBabysit(t *testing.T, ciStatus string, closing ...int) {
 	}
 }
 
-func realBlocks(ticket string) (bool, string) { return babysit.BlocksClose(ticket, "", "") }
+func realBlocks(ticket string) (bool, string, error) {
+	return babysit.BlocksCloseStrict(ticket, "", "")
+}
 
 func TestBabysitGuard_BlocksOnAnArmedSupervisorForTheTicket(t *testing.T) {
 	noSandbox(t)
 	r, wts := idleWorktrees(t, "42-feature", "scratch")
 	feature, scratch := wts[0], wts[1]
+	injected := errors.New("babysit state unreadable")
 
 	tests := []struct {
 		name     string
 		ciStatus string
 		closing  []int
-		blocks   func(string) (bool, string)
+		blocks   func(string) (bool, string, error)
 		wt       *fixtureWT
 		want     KeepReason // "" = stale
+		wantErr  error      // c.Err must wrap it
 	}{
 		{name: "armed supervisor closes the ticket", ciStatus: "pending", closing: []int{liveTicket}, blocks: realBlocks, wt: feature, want: KeepBabysit},
 		{name: "supervisor of another ticket", ciStatus: "pending", closing: []int{43}, blocks: realBlocks, wt: feature},
 		{name: "supervisor whose CI is green", ciStatus: "green", closing: []int{liveTicket}, blocks: realBlocks, wt: feature},
 		{name: "ticketless worktree is never asked", ciStatus: "pending", closing: []int{liveTicket},
-			blocks: func(string) (bool, string) { return true, "always" }, wt: scratch},
+			blocks: func(string) (bool, string, error) { return true, "always", nil }, wt: scratch},
+		// #1300: a failed lookup is not "not armed".
+		{name: "the lookup fails for a ticketed worktree", ciStatus: "pending", closing: []int{liveTicket},
+			blocks: func(string) (bool, string, error) { return false, "", injected }, wt: feature, want: KeepBabysitUnknown, wantErr: injected},
+		{name: "ticketless worktree is not asked even when the lookup would fail", ciStatus: "pending", closing: []int{liveTicket},
+			blocks: func(string) (bool, string, error) { return false, "", injected }, wt: scratch},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -252,8 +282,40 @@ func TestBabysitGuard_BlocksOnAnArmedSupervisorForTheTicket(t *testing.T) {
 			} else {
 				wantVerdict(t, c, VerdictKeep, tt.want)
 			}
+			if tt.wantErr != nil && !errors.Is(c.Err, tt.wantErr) {
+				t.Errorf("Err = %v, want it to wrap %v", c.Err, tt.wantErr)
+			}
 		})
 	}
+}
+
+// With the real BlocksCloseStrict over a state directory holding a corrupt file,
+// a ticketed worktree cannot be tied to any supervisor and is kept as unknown; a
+// ticketless one is never asked and is judged on its own facts.
+func TestBabysitGuard_KeepsATicketedWorktreeWhenTheStateIsCorrupt(t *testing.T) {
+	noSandbox(t)
+	r, wts := idleWorktrees(t, "42-feature", "scratch")
+	feature, scratch := wts[0], wts[1]
+	home := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", home)
+	dir := filepath.Join(home, "cenci", "babysit")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	corrupt := filepath.Join(dir, "corrupt.json")
+	if err := os.WriteFile(corrupt, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	o := testOptions(nil)
+	o.Babysit = BabysitGuard(realBlocks)
+
+	c := classifyOne(t, r, feature, o)
+
+	wantVerdict(t, c, VerdictKeep, KeepBabysitUnknown)
+	if c.Err == nil || !strings.Contains(c.Err.Error(), corrupt) {
+		t.Errorf("Err = %v, want the cause to name %s", c.Err, corrupt)
+	}
+	wantVerdict(t, classifyOne(t, r, scratch, o), VerdictStale, "")
 }
 
 // serveUnix listens on a short temp socket path and, for each connection, writes
@@ -310,6 +372,21 @@ func TestReadSnapshotWithin(t *testing.T) {
 
 		if err != nil || snap == nil || len(snap.Windows) != 1 || snap.Windows[0].WindowName != "42-implement" {
 			t.Errorf("ReadSnapshotWithin = %+v, %v; want the one window", snap, err)
+		}
+	})
+	t.Run("a socket that denies the connection is not reported as unreachable", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root ignores socket permissions")
+		}
+		path := serveUnix(t, "")
+		if err := os.Chmod(path, 0); err != nil {
+			t.Fatal(err)
+		}
+
+		_, err := ReadSnapshotWithin(path, time.Second)
+
+		if err == nil || errors.Is(err, watch.ErrDaemonUnreachable) {
+			t.Errorf("err = %v, want a non-nil error that is not watch.ErrDaemonUnreachable", err)
 		}
 	})
 	t.Run("no daemon is reported as unreachable", func(t *testing.T) {
