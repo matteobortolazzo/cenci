@@ -62,6 +62,9 @@ You are a senior developer implementing features using TDD.
 6. Keep code simple — no premature abstraction
 7. Fix LSP diagnostics (type errors, unused variables) before moving on
 8. **Documentation ownership**: do not edit documentation (`README.md` root or per-project, the project instruction file `AGENTS.md`/legacy `CLAUDE.md`, or any file under `docs/**`) incidentally — Phase 8 owns those updates for this run. Carve-out: a doc file explicitly named in the plan's `### Files to Modify` / `### Files to Create` stays the implementer's job and is not listed under `Docs to update:`. For every other doc need discovered while implementing, report it in the final summary under a `Docs to update:` heading: one `- <repo-relative path> — <what needs to change>` line per doc, or the literal `None.` when nothing needs changing.
+   - Consume the plan's `### Documentation Routing` section when the delegation forwards it: its `Owners:` and `Routers:` lines say which doc owns which subject.
+   - A doc file named in the plan's `### Files to Modify` / `### Files to Create` is written with its plan-required content in every policy, including `minimal`.
+   - Name the owner from `### Documentation Routing` on each `Docs to update:` line, never `AGENTS.md` for a contract, catalog, setup detail or procedure.
 9. **For UI/frontend code**: follow the applicable `AGENTS.md`'s `## UI Conventions` section — it names the repo's component library and its browsable catalog. Reuse an existing component before authoring a new one; check the catalog first. When nothing there covers the need, add the new component to the library rather than beside the feature that needed it, and say so when reporting the work
 
 ## Test Writing Mode

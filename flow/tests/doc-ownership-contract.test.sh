@@ -32,6 +32,11 @@
 #   - skills/implement/phases/phase-8-docs.md         (ownership + sub-step triggers)
 #   - README.md                                       (phase-8 pipeline entry)
 #   - repo-wide flow/ sweep for the retired phantom heading string
+#
+# #1302 extends (does not replace) the phase-3/4 Delegation Context and the
+# phase-8 `## Update CLAUDE.md` / `## Update Topic Docs` assertions for the
+# documentation-routing phrases; the full routing contract lives in
+# flow/tests/doc-routing-contract.test.sh.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || { echo "doc-ownership-contract.test.sh: failed to resolve script directory." >&2; exit 2; }
@@ -106,6 +111,7 @@ CARVEOUT_SENTENCE="a doc file explicitly named in the plan's \`### Files to Modi
 DOCS_TO_UPDATE_LINE_FORMAT='- <repo-relative path> — <what needs to change>'
 GREP_THE_CONTRACT_SENTENCE='`Grep` it for the specific contract being touched'
 TOPIC_DOC_BULLET='Resolved topic docs: at most 3 `docs/<topic>.md` paths matched to Files to Modify/Create.'
+ROUTING_SECTION_BULLET='- The plan'"'"'s `### Documentation Routing` section, verbatim'
 
 # =====================================================================
 # agents/implementer.md -- write ban + carve-out + `Docs to update:` report
@@ -200,12 +206,21 @@ FILE="skills/implement/phases/phase-3-test-red.md"
 if require_doc CONTENT "${FILE}"; then
   DELEGATION_SECTION="$(extract_section "${CONTENT}" '## Delegation Context')"
   assert_contains "${DELEGATION_SECTION}" "${TOPIC_DOC_BULLET}" "${FILE} (## Delegation Context)"
+
+  # #1302: compact implementation folds Phase 4's delegation into this one, so
+  # the routing section travels here too.
+  assert_contains "${DELEGATION_SECTION}" "${ROUTING_SECTION_BULLET}" "${FILE} (## Delegation Context routing bullet)"
 fi
 
 FILE="skills/implement/phases/phase-4-implement-green.md"
 if require_doc CONTENT "${FILE}"; then
   DELEGATION_SECTION="$(extract_section "${CONTENT}" '## Delegation Context')"
   assert_contains "${DELEGATION_SECTION}" "${TOPIC_DOC_BULLET}" "${FILE} (## Delegation Context)"
+
+  # #1302: the capped topic-doc list is joined by the plan's routing section,
+  # forwarded verbatim (the full routing contract is pinned by
+  # doc-routing-contract.test.sh).
+  assert_contains "${DELEGATION_SECTION}" "${ROUTING_SECTION_BULLET}" "${FILE} (## Delegation Context routing bullet)"
 
   RULES_SECTION="$(extract_section "${CONTENT}" '## Rules')"
 
@@ -287,6 +302,14 @@ if require_doc CONTENT "${FILE}"; then
   CLAUDE_SECTION="$(extract_section "${CONTENT}" '## Update CLAUDE.md')"
   assert_contains "${CLAUDE_SECTION}" 'written to `AGENTS.md` when that file exists, `CLAUDE.md` only as the legacy fallback' "${FILE} (## Update CLAUDE.md)"
 
+  # #1302: the router is edited only under the routing rules, the old
+  # "append under Critical Rules" path survives solely as the
+  # `convention: none` fallback, and a `@AGENTS.md` import shim is untouched.
+  assert_contains "${CLAUDE_SECTION}" '- Edit a router (`AGENTS.md`/`CLAUDE.md`) only when a new focused owner doc is added' "${FILE} (## Update CLAUDE.md router rule)"
+  assert_contains "${CLAUDE_SECTION}" 'A `CLAUDE.md` whose only content is `@AGENTS.md` stays exactly that import' "${FILE} (## Update CLAUDE.md import shim)"
+  CRITICAL_RULES_LINE="$(extract_line "${CLAUDE_SECTION}" 'Append under `## Critical Rules`')"
+  assert_contains "${CRITICAL_RULES_LINE}" 'only when the routing reports `convention: none`' "${FILE} (## Update CLAUDE.md fallback scoped)"
+
   # ## Update Topic Docs specifically: the operative shape-guard rule (never
   # write outside docs/**) that bounds a free-text path from the
   # implementer's report -- assert the operative "accept it only if..." rule
@@ -294,6 +317,11 @@ if require_doc CONTENT "${FILE}"; then
   # (that clause is reworded independently and is not the contract).
   TOPIC_DOCS_SECTION="$(extract_section "${CONTENT}" '## Update Topic Docs')"
   assert_contains "${TOPIC_DOCS_SECTION}" 'matches `docs/*.md` or `<project-path>/docs/*.md`' "${FILE} (## Update Topic Docs)"
+
+  # #1302: nested docs/**/*.md owners that `discover`/`mentions` print are also
+  # accepted, and the shape guard's `..` rule stays.
+  assert_contains "${TOPIC_DOCS_SECTION}" 'nested `docs/**/*.md` path' "${FILE} (## Update Topic Docs nested owners)"
+  assert_contains "${TOPIC_DOCS_SECTION}" 'contains no `..` path segment' "${FILE} (## Update Topic Docs shape guard)"
 
   # ## Maintenance Check's trigger guard recomputes the changed-file list
   # (via its already-documented git -C <worktree-path> diff --name-only

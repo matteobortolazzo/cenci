@@ -188,7 +188,7 @@ companion) for every skill, including the internal ones not listed above.
 | `codex-runtime` | — | — | — | — |
 | `configure` | codex.md | babysit, codex-runtime, project-core, shell-rules, testing, verify-ui | detect-project.sh, merge-sandbox-config.sh, resolve-delta.sh | code-reviewer |
 | `frontend-classification` | — | implement, refine | — | — |
-| `implement` | codex.md, phases/phase-1-plan.md, phases/phase-2-worktree.md, phases/phase-3-test-red.md, phases/phase-4-implement-green.md, phases/phase-5-refactor.md, phases/phase-6-7-review.md, phases/phase-8-docs.md, phases/phase-9-pr.md, timing.md | address-review, attachments, babysit, ci-repair, close, codex-runtime, frontend-classification, project-core, review, shell-rules, subagent-safety, testing, ticket-ownership, verify-ui | docs-policy.sh, pr-size.sh, run-artifact-dir.sh | acceptance-reviewer, code-reviewer, context-gatherer, domain-specialist, implementer, lessons-collector, planner, security-reviewer, silent-failure-hunter |
+| `implement` | codex.md, phases/phase-1-plan.md, phases/phase-2-worktree.md, phases/phase-3-test-red.md, phases/phase-4-implement-green.md, phases/phase-5-refactor.md, phases/phase-6-7-review.md, phases/phase-8-docs.md, phases/phase-9-pr.md, timing.md | address-review, attachments, babysit, ci-repair, close, codex-runtime, frontend-classification, project-core, review, shell-rules, subagent-safety, testing, ticket-ownership, verify-ui | doc-conventions.sh, docs-policy.sh, pr-size.sh, run-artifact-dir.sh | acceptance-reviewer, code-reviewer, context-gatherer, domain-specialist, implementer, lessons-collector, planner, security-reviewer, silent-failure-hunter |
 | `maintain` | base-freshness.md, codex.md, modes/backlog.md, modes/clients.md, modes/docs.md, modes/rules.md, modes/structure.md | codex-runtime, project-core, shell-rules, subagent-safety, worktrees | check.sh | backlog-maintainer, docs-maintainer, domain-specialist, portability-maintainer, rules-maintainer, structure-maintainer |
 | `merge-repair` | — | project-core, shell-rules, worktrees | — | — |
 | `pr-comment-filter` | — | address-review, babysit | — | — |
@@ -407,7 +407,7 @@ When you run `/cenci:implement <ticket-id>`, the pipeline executes these phases:
 5. **Refactor** — Implementer agent simplifies and cleans up
 6. **Acceptance Review** — Acceptance reviewer agent (opus) reads the ticket before the code and grades every acceptance criterion, edge case, boundary and documentation item as covered (naming the proving test, screenshot or doc), partial, missing, or unrequested; a UI ticket needs the gallery and secret-gist screenshots in `en-US` and `it-IT` as evidence. Any partial or missing item returns the run to implementation before code review starts. Then **Security Review** — Security reviewer agent checks for OWASP vulnerabilities
 7. **Code Review** — Code reviewer agent does a final PR-style review
-8. **Capture Lessons** — Lessons collector routes genuine mistakes into the relevant `docs/<topic>.md` or `CLAUDE.md` (opt-in; most sessions capture nothing); this phase also owns doc ownership: `README.md`, `AGENTS.md`/`CLAUDE.md`, and `docs/**` updates for the run
+8. **Capture Lessons** — Lessons collector routes genuine mistakes into the relevant `docs/<topic>.md` or `CLAUDE.md` (opt-in; most sessions capture nothing); this phase also owns doc ownership: `README.md`, `AGENTS.md`/`CLAUDE.md`, and `docs/**` updates for the run, written to the repository's discovered owner docs (see [Documentation routing](#documentation-routing))
 9. **Create PR** — Rebases on latest main, commits, pushes, measures the final diff against the size table (`Size: <letter> (<files> files, <lines> lines) vs ticket <letter>` in the PR body, flagged when the PR is one size above its ticket — such a PR is reported to the founder and must not be merged on green checks alone), embeds the acceptance reviewer's item table, and creates a pull request; UI tickets get a `## Screenshots` section in the PR body
 
 ### Resuming a crashed run
@@ -574,6 +574,46 @@ normal permission prompt; cenci adds no allow-list entry for it. A repository wi
 ships inside the plugin) now shows `- [ ] Maintenance check: unavailable …` in the PR
 checklist where it previously got a silent skip; only `skipped (no doc-affecting changes)`
 still renders as a checked `not applicable`.
+
+### Documentation routing
+
+Documentation edits land in the repository's actual owner docs rather than in a layout the
+pipeline assumes. Phase 1 runs the read-only `scripts/doc-conventions.sh discover` against
+the repository and forwards its output to the planner as a `Documentation discovery:` block.
+The script prints paths and classification lines only, never a file's content: `agents:`
+(each `AGENTS.md`, or a legacy `CLAUDE.md` with no sibling `AGENTS.md`), `index:` (a
+`docs/index.md` or `docs/README.md`), `owner:` (every other Markdown file under a `docs/`
+directory at any depth, root or per-project), exactly one `lessons:` line
+(`structured admission=<path> records=<dir>` or `fallback`), and `skipped:` for a symlink
+that was not read (outside the repository, dangling, a loop, or resolving into a pruned
+directory such as `.git`). Classification is by path alone. A
+repository with none of these prints `convention: none` followed by a `recommend:` block of
+`evidence:`-backed suggestions: a root `AGENTS.md` router and `docs/<topic>.md` focused
+owners. A large repository prints a long `owner:` list, which costs planner context; the
+output is paths only.
+
+The planner records the result in a `### Documentation Routing` section of the plan
+(Discovery, Routers, Index, Owners, Lessons, Validations, Recommendation). A
+`convention: none` recommendation is only ever a recommendation there, never a migration
+step in `### Files to Modify`. The section is forwarded verbatim to the implementer, the
+Phase 6 + 7 reviewers and Phase 8. Discovery is advisory: when the script cannot run (any
+non-zero exit, or empty stdout), the plan records `Discovery: unavailable (<reason>)` and
+Phase 8 runs `discover` itself against the worktree. A plan written before routing existed
+gets the same Phase 8 fallback. When that second discovery is unavailable too, Phase 8
+reads the root and project `AGENTS.md` and any docs index directly, writes only to owners
+the plan names or those files route to, and creates no new file.
+
+Phase 8 then routes writes to the discovered owners. It checks which Markdown files still
+name a user-visible term the change altered (`scripts/doc-conventions.sh mentions`),
+updates those the change made inaccurate, and leaves `AGENTS.md` and any `README.md` that
+does not name the term unchanged. A router (`AGENTS.md`/`CLAUDE.md`) changes only when the
+run adds a new focused owner doc or makes an existing reading trigger inaccurate, or when
+the user or the plan explicitly requires the edit; feature contracts, component catalogs,
+setup detail and operational procedures go to their focused owner doc. A `CLAUDE.md` that is
+only `@AGENTS.md` stays exactly that import. Only when no convention is discovered do the
+old fallbacks remain (append under `## Critical Rules`, a new topic doc for clustered
+lessons). A doc file the plan names is always written, in every `docs.policy`, and explicit
+user instructions and approved plan deliverables override the `minimal` restrictions.
 
 ### UI tickets
 

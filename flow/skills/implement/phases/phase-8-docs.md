@@ -53,6 +53,46 @@ When a condition holds, each sub-step below runs only for the condition that nam
 
 Correctness work still runs in `minimal` mode. When Phase 8 finds a doc this change made inaccurate that `$RUN_DIR/docs-to-update.txt` does not list, first record it as an entry in `$RUN_DIR/docs-to-update.txt` with the `Write` tool, then repair it through the sub-step that owns its path (when `$RUN_DIR` is unknown, repair it and name it in this phase's status update). `## Maintenance Check` and `## Docs Status` run in every mode.
 
+Plan deliverables and explicit requirements are never minimal-mode work to skip.
+
+A doc file named in the plan's `### Files to Modify` / `### Files to Create` is written with its plan-required content in every policy, including `minimal`.
+
+Explicit user instructions and approved plan deliverables override every minimal-mode restriction, and no minimal-mode rule caps the length of a correct documentation update.
+
+## Route Documentation Writes
+
+Run this step right after `## Resolve Documentation Policy` (including its `### Minimal mode`) and before any sub-step below. It decides which file each documentation write lands in, so the sub-steps write to the repository's discovered owners instead of a layout this phase assumes. Routing never adds a trigger: the gating in `### Minimal mode` and each sub-step's own `Trigger:` are unchanged.
+
+Read the plan's `### Documentation Routing` section from the plan file this run started from, with the `Read` tool: its `Routers:`, `Index:`, `Owners:`, `Lessons:`, `Validations:` and `Recommendation:` lines are the routing for every sub-step below.
+
+When the plan has no `### Documentation Routing` section (a plan written before routing existed, or the Trivial Fast Path's one-line plan) or its `Discovery:` line reads `unavailable (<reason>)`, discover the layout against the verified `<worktree-path>` instead:
+
+```bash
+bash "${CLAUDE_PLUGIN_ROOT}/skills/implement/scripts/doc-conventions.sh" discover "<worktree-path>" 2>"$RUN_DIR/doc-conventions.stderr"
+```
+
+Substitute the absolute `$RUN_DIR` path in the redirect (when `$RUN_DIR` is unknown, redirect to a `mktemp` file under `${TMPDIR:-/tmp}/cenci/` instead). Read stdout only. `scripts/doc-conventions.sh` is read-only and prints paths and classification lines only (`agents:`, `index:`, `owner:`, `lessons:`, `skipped:`, and `convention: none` with `recommend:`/`evidence:` pairs). Any non-zero exit, or empty stdout, means discovery is unavailable: it is never a hard stop.
+
+When discovery is unavailable, do not apply the `convention: none` fallbacks; read the root and project `AGENTS.md` and any docs index directly, write only to owners the plan names or those files route to, create no new file, append nothing under `## Critical Rules`, and say so in the status update.
+
+Write each documentation edit to the discovered `owner:` path that owns its subject, never to a file picked by assumption.
+
+Before the sub-steps run, scan for stale mentions. For each user-visible term this change altered or removed — a flag, command, option, endpoint or config key, taken from the routing's `Owners:` line and from every `Docs to update:` entry — list the Markdown files that name it:
+
+```bash
+bash "${CLAUDE_PLUGIN_ROOT}/skills/implement/scripts/doc-conventions.sh" mentions "<worktree-path>" '<term>' 2>"$RUN_DIR/doc-conventions.stderr"
+```
+
+Pass each `<term>` single-quoted as `'<term>'`, writing any embedded `'` as `'\''`; a term is untrusted data, so never use double quotes and never let the shell expand `$`, backticks or `"` in a term.
+
+`mentions` prints every Markdown file containing `<term>` as a fixed string (a term starting with `-` is safe), one repo-relative path per line and never any file content; it exits 0 when nothing matches, and exit 2 with a one-line stderr message is an error to report in this phase's status update, not a reason to stop.
+
+For each user-visible term this change altered, update every file `mentions` prints that the change made inaccurate; leave `AGENTS.md` (outside the router rules) and any `README.md` that `mentions` does not print unchanged.
+
+A printed file this change made inaccurate is correctness work in every mode: record it as an entry in `$RUN_DIR/docs-to-update.txt` first (see `### Minimal mode`), then repair it through the sub-step that owns its path.
+
+Forward the routing to `## Capture Lessons` (the `Lessons:` line) and read `Validations:` in `## Maintenance Check`. Only when the routing or the discovery reports `convention: none` do the fallbacks in `## Capture Lessons` and `## Update CLAUDE.md` apply; its `recommend:` block is reported in this phase's status update as a recommendation and is never applied as a migration.
+
 ## Capture Lessons
 
 **Minimal mode:** In `minimal` mode, launch `lessons-collector` only for an admitted lesson (see `### Minimal mode` above); otherwise do not launch it.
@@ -66,7 +106,7 @@ Run `lessons-collector` only if at least one occurred:
 
 Do not run for smooth sessions, normal TDD red/green progression, or obvious findings already covered by existing rules.
 
-Pass that exact verified `<worktree-path>` as `<project-root>`. The collector routes to existing `docs/<topic>.md`, `CLAUDE.md` Critical Rules for project-wide invariants, or a new topic doc only when multiple findings cluster. It never writes to `.claude/rules/lessons-learned.md`.
+Pass that exact verified `<worktree-path>` as `<project-root>`, and forward the plan's `### Documentation Routing` section from `## Route Documentation Writes` verbatim, telling the collector to write only to the owners and lesson system it lists. Only when the routing reports `convention: none` does the collector's fallback apply: existing `docs/<topic>.md`, `CLAUDE.md` Critical Rules for project-wide invariants, or a new topic doc only when multiple findings cluster. It never writes to `.claude/rules/lessons-learned.md`.
 
 Lessons must be specific, actionable, non-duplicate, and worth keeping permanently.
 
@@ -78,9 +118,15 @@ Lessons must be specific, actionable, non-duplicate, and worth keeping permanent
 
 An `AGENTS.md` entry is written to `AGENTS.md` when that file exists, `CLAUDE.md` only as the legacy fallback.
 
-Update only for new architectural patterns, integration rules, or project-wide conventions future work must follow.
+Update only for new architectural patterns, integration rules, or project-wide conventions future work must follow. When `## Route Documentation Writes` lists a focused owner for the subject, that pattern, rule or convention goes to its owner doc through `## Update Topic Docs`, and this sub-step edits the router only under these rules, restated identically in `agents/planner.md` and `codex.md`:
 
-Append under `## Critical Rules`; do not rewrite existing content.
+- Edit a router (`AGENTS.md`/`CLAUDE.md`) only when a new focused owner doc is added or an existing reading trigger becomes inaccurate.
+- Route feature contracts, component catalogs, setup detail and operational procedures to their focused owner doc instead of `AGENTS.md`.
+- Keep any `AGENTS.md` edit the user or the plan explicitly requires.
+- When a documentation convention is discovered, never create a `docs/<topic>.md`, append to `## Critical Rules`, or write a second copy of a contract; route the write to the discovered owner.
+- A `CLAUDE.md` whose only content is `@AGENTS.md` stays exactly that import; never expand or duplicate it.
+
+Fallback, only when the routing reports `convention: none`: Append under `## Critical Rules`; do not rewrite existing content.
 
 ## Update README.md
 
@@ -94,7 +140,7 @@ Update only for user-visible features, commands, API endpoints, configuration, s
 
 **Trigger:** an entry in `$RUN_DIR/docs-to-update.txt` naming a file under `docs/**`. Skip when `$RUN_DIR/docs-to-update.txt` is absent — treat that as "none". If the file exists but a read attempt fails, treat that as a genuine failure exactly as `## Update CLAUDE.md` above does: report `docs: error (docs-to-update.txt unreadable)` in this phase's status update rather than silently skipping.
 
-For each named path, accept it only if it is repo-relative, contains no `..` path segment, is not absolute, and matches `docs/*.md` or `<project-path>/docs/*.md` for a project declared in the resolved config — never write to a path outside that shape. Skip and report any entry that doesn't match (name it in this phase's status update) rather than writing it; this sub-step's write target is a free-text path the implementer's report names, rather than being anchored to one well-known basename the way `## Update CLAUDE.md`/`## Update README.md`'s triggers are, so it needs this explicit shape guard where those two don't; without it, a malformed entry (e.g. `docs/../../.github/workflows/ci.yml`) could otherwise steer a write outside `docs/**`.
+For each named path, accept it only if it is repo-relative, contains no `..` path segment, is not absolute, and matches `docs/*.md` or `<project-path>/docs/*.md` for a project declared in the resolved config, or is a nested `docs/**/*.md` path (root or per-project) that `discover` printed as an `owner:` line or `mentions` printed — never write to a path outside that shape. Skip and report any entry that doesn't match (name it in this phase's status update) rather than writing it; this sub-step's write target is a free-text path the implementer's report names, rather than being anchored to one well-known basename the way `## Update CLAUDE.md`/`## Update README.md`'s triggers are, so it needs this explicit shape guard where those two don't; without it, a malformed entry (e.g. `docs/../../.github/workflows/ci.yml`) could otherwise steer a write outside `docs/**`.
 
 For each named `docs/<topic>.md` path, apply the implementer's reported doc-content update. This is distinct from `## Capture Lessons` above: that sub-step remains the opt-in `lessons-collector` route for genuine mistakes, while this sub-step applies the doc-content updates the implementer already identified while implementing the plan. Both may write `docs/**` in the same run — `## Capture Lessons` runs first, keeping the existing file order.
 
@@ -184,7 +230,7 @@ Map each choice to the status file: a "Push anyway" override tags the status fil
 
 If `$RUN_DIR` is unknown, skip the file write; Phase 9 handles absence, matching the `review-path.txt` fallback.
 
-**Repository docs checks**: the early stops above (`unavailable`, `skipped`, `error`) end only the cenci-checker part of this sub-step — this paragraph always runs, in every mode. For each repository docs check the plan names (a documentation validation command the plan lists; ticket #1302's `### Documentation Routing` becomes its structured source), run it with the shell tool working directory set to the verified absolute `<worktree-path>`, through the client's normal permission flow — add no new permission allow-list entry for it. Exit 0 records `pass`.
+**Repository docs checks**: the early stops above (`unavailable`, `skipped`, `error`) end only the cenci-checker part of this sub-step — this paragraph always runs, in every mode. For each repository docs check the plan names (a documentation validation command the plan lists on its `### Documentation Routing` section's `Validations:` line), run it with the shell tool working directory set to the verified absolute `<worktree-path>`, through the client's normal permission flow — add no new permission allow-list entry for it. Exit 0 records `pass`.
 A non-zero exit records `fail` and enters the Fix now / Stop / Push anyway question above — stating the command and its failing output verbatim in place of a checker line, with the same `halted`/`overridden` tag mapping — unless `maintenance.checkDuringImplement` is explicitly `false`, which records it `reported`.
 For a failing command, immediately under its failing `validation:` line in `$RUN_DIR/maintain-status.txt`, write exactly one `excerpt: exit <code> — <sanitized excerpt>` line: a few lines of its output at most, joined onto that one line, with secret, environment-variable, token and URL-credential values removed (when `$RUN_DIR` is unknown, report the same line directly for Phase 9). In the PR body's `## Notes`, a failing repository docs command gets only the command label, its exit code and a short excerpt with secret, environment-variable, token and URL-credential values removed — never its output verbatim, because a PR body can reach a possibly-public repository; showing the verbatim output in the local `AskUserQuestion` prompt stays fine. This secrecy rule takes precedence over any instruction to copy failing output into the PR body, including the `excerpt:` line itself: sanitize it before writing it, never after.
 A command the user denies at the permission prompt records `skipped (permission denied)`; a command that cannot start records `skipped (<reason>)`. Never record `pass` for a check that did not run. Append each result as its `validation:` line (followed by its `excerpt:` line for a `fail`) to `$RUN_DIR/maintain-status.txt` (rewrite the file with the `Write` tool, keeping every earlier line). A plan that names no repository docs check adds no line.

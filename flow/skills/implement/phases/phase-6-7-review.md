@@ -88,6 +88,8 @@ Branch on the classification result written above:
 
   Default: launch all three in one message. If `cenci.reviewConcurrency` is `"sequential"`, run the same reviewers one at a time in this order: security, code, silent-failure. Do not skip a reviewer.
 
+The plan's `### Documentation Routing` section goes verbatim into every reviewer brief — each of the three on the `full` path and the single `code-reviewer` on `lite-small` — so a reviewer can check that documentation edits landed in the routing's owners.
+
 ## Verify Before Fixing
 
 Before accepting reviews or acting on findings, apply the security and silent-failure
