@@ -142,6 +142,14 @@ type PlanCheck struct {
 	// DraftFreshness is not "unknown", or is "unknown" for a reason other
 	// than a CommitsBehind failure.
 	DraftFreshnessErr string
+
+	// Pipeline (#1293) echoes the persisted pipeline state and whether its
+	// recorded worktree is proven registered; PipelineWarnings carries the
+	// advisory failures hit while building it (an unreadable state file, a
+	// failed `git worktree list`). Both are set for every decision and never
+	// influence it.
+	Pipeline         PipelineInfo
+	PipelineWarnings []string
 }
 
 // PlanMeta is the validated front-matter metadata echoed alongside a
@@ -179,8 +187,11 @@ type PlanMeta struct {
 }
 
 // CheckPlan discovers, validates, and classifies the `.plans/<id>-*.md`
-// plan file for o.ID. See this file's package-level doc comment and
-// planfile_test.go for the full decision/error-pairing contract.
+// plan file for o.ID, and (#1293) fills PlanCheck.Pipeline /
+// PipelineWarnings from the persisted state it loads. See this file's
+// package-level doc comment and planfile_test.go for the full
+// decision/error-pairing contract: the pipeline info is purely additive and
+// never changes the decision or the returned error.
 func CheckPlan(o PlanCheckOpts) (State, PlanCheck, error) {
 	if !idPattern.MatchString(o.ID) {
 		return State{Stage: StageNew}, PlanCheck{}, fmt.Errorf("invalid ticket id %q: must match ^\\d+$", o.ID)
@@ -188,9 +199,47 @@ func CheckPlan(o PlanCheckOpts) (State, PlanCheck, error) {
 
 	// Best-effort, read-only echo of the persisted state -- CheckPlan
 	// performs no state-machine transition and must not fail the whole
-	// call just because the state file can't be loaded.
-	state, _ := GetArtifacts(ArtifactOpts{ID: o.ID, RepoRoot: o.RepoRoot, StateDir: o.StateDir})
+	// call just because the state file can't be loaded. The load error is
+	// kept so the pipeline info can report it.
+	state, stateErr := GetArtifacts(ArtifactOpts{ID: o.ID, RepoRoot: o.RepoRoot, StateDir: o.StateDir})
 
+	state, check, err := checkPlan(o, state)
+	check.Pipeline, check.PipelineWarnings = pipelineInfo(o, state, stateErr)
+	return state, check, err
+}
+
+// pipelineInfo builds PlanCheck.Pipeline from the loaded state. An unreadable
+// state yields an info with no stage and worktreeRegistered:false plus one
+// warning. `git worktree list` runs only when the state records both a
+// worktree path and a branch; a failure there is one warning and
+// worktreeRegistered:false (default-deny), never an error.
+func pipelineInfo(o PlanCheckOpts, state State, stateErr error) (PipelineInfo, []string) {
+	if stateErr != nil {
+		return PipelineInfo{}, []string{fmt.Sprintf("could not read pipeline state for %s: %v", o.ID, stateErr)}
+	}
+	info := PipelineInfo{
+		Stage:        string(state.Stage),
+		WorktreePath: state.WorktreePath,
+		Branch:       state.Branch,
+		PRURL:        state.PRURL,
+		PRNumber:     state.PRNumber,
+	}
+	if state.WorktreePath == "" || state.Branch == "" {
+		return info, nil
+	}
+	mainRoot, err := resolveMainRoot(o.RepoRoot)
+	if err == nil {
+		info.WorktreeRegistered, err = isWorktreeRegistered(mainRoot, state.WorktreePath, state.Branch)
+	}
+	if err != nil {
+		return info, []string{fmt.Sprintf("could not verify worktree registration for %s: %v", o.ID, err)}
+	}
+	return info, nil
+}
+
+// checkPlan is CheckPlan's decision body, run against the already-loaded
+// state.
+func checkPlan(o PlanCheckOpts, state State) (State, PlanCheck, error) {
 	repoRoot, err := resolvePlanRepoRoot(o.RepoRoot)
 	if err != nil {
 		return state, PlanCheck{}, err

@@ -35,6 +35,13 @@ package main
 // front matter carries no ticketId at all (Q4: no legacy exemption). All
 // four sources share the same "" decision and exit-1 framing; each is
 // detectable via errors.Is and carries a content-distinct message.
+// #1293 adds a `pipeline` object to the output of EVERY decision (including
+// ""): the persisted stage, worktreePath, branch, prUrl and prNumber (empty
+// ones omitted) plus worktreeRegistered, true only when the recorded worktree
+// is a linked, non-detached `git worktree list --porcelain` record on the
+// recorded branch. It is purely additive -- decisions, exit codes and every
+// other key are unchanged, and an unreadable state file or a failed git call
+// only adds a warnings[] entry.
 // Usage errors (missing/non-numeric <id>, unrecognized flag, trailing
 // positional) still exit 2 with a one-line stderr hint, per
 // docs/cli-conventions.md, and never reach pipeline.CheckPlan at all.
@@ -138,6 +145,7 @@ func runPipelinePlanCheck(rest []string) {
 		Decision:       check.Decision,
 		Plan:           check.Plan,
 		DraftFreshness: check.DraftFreshness,
+		Pipeline:       &check.Pipeline,
 	}
 	if err != nil {
 		out.Errors = []string{err.Error()}
@@ -162,6 +170,10 @@ func runPipelinePlanCheck(rest []string) {
 		}
 		out.Warnings = append(out.Warnings, warning)
 	}
+	// #1293: advisory failures from building the `pipeline` object (an
+	// unreadable state file, a failed `git worktree list`) -- warnings only,
+	// never a decision or exit-code change.
+	out.Warnings = append(out.Warnings, check.PipelineWarnings...)
 
 	b, marshalErr := json.Marshal(out)
 	if marshalErr != nil {

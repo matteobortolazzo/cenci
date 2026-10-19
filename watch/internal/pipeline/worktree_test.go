@@ -7,6 +7,7 @@ package pipeline
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -50,7 +51,7 @@ func TestCreateWorktree_Success_CreatesDirAndBranchAndUpdatesState(t *testing.T)
 	stateDir := t.TempDir()
 	o := WorktreeOpts{ID: "42", Slug: "add-thing", RepoRoot: repoRoot, StateDir: stateDir}
 
-	got, err := CreateWorktree(o)
+	got, _, err := CreateWorktree(o)
 	if err != nil {
 		t.Fatalf("CreateWorktree: %v", err)
 	}
@@ -89,16 +90,19 @@ func TestCreateWorktree_Success_CreatesDirAndBranchAndUpdatesState(t *testing.T)
 func TestCreateWorktree_AlreadyExists_ReturnsErrWorktreeExists(t *testing.T) {
 	repoRoot := t.TempDir()
 	initGitRepoWithCommit(t, repoRoot)
-	stateDir := t.TempDir()
-	o := WorktreeOpts{ID: "42", Slug: "add-thing", RepoRoot: repoRoot, StateDir: stateDir}
+	o := WorktreeOpts{ID: "42", Slug: "add-thing", RepoRoot: repoRoot, StateDir: t.TempDir()}
 
-	if _, err := CreateWorktree(o); err != nil {
+	if _, _, err := CreateWorktree(o); err != nil {
 		t.Fatalf("first CreateWorktree: %v", err)
 	}
 
-	_, err := CreateWorktree(o)
+	// A fresh state dir records nothing for the ticket, so the existing
+	// worktree is not the one this state created: it must be refused (#1293:
+	// only a worktree the state itself records is ever reused).
+	o.StateDir = t.TempDir()
+	_, _, err := CreateWorktree(o)
 	if err == nil {
-		t.Fatal("second CreateWorktree for the same id+slug: want an error, got nil")
+		t.Fatal("second CreateWorktree for the same id+slug with no recorded state: want an error, got nil")
 	}
 	if !errors.Is(err, ErrWorktreeExists) {
 		t.Errorf("second CreateWorktree error = %v, want errors.Is(_, ErrWorktreeExists)", err)
@@ -113,7 +117,7 @@ func TestCleanupWorktree_RemovesTreeAndBranch(t *testing.T) {
 	stateDir := t.TempDir()
 	o := WorktreeOpts{ID: "42", Slug: "add-thing", RepoRoot: repoRoot, StateDir: stateDir}
 
-	if _, err := CreateWorktree(o); err != nil {
+	if _, _, err := CreateWorktree(o); err != nil {
 		t.Fatalf("CreateWorktree: %v", err)
 	}
 
@@ -167,7 +171,7 @@ func TestCreateWorktree_SlugPathTraversal_RejectedBeforeAnyGitCommand(t *testing
 	stateDir := t.TempDir()
 	o := WorktreeOpts{ID: "42", Slug: "../99-foo", RepoRoot: t.TempDir(), StateDir: stateDir}
 
-	_, err := CreateWorktree(o)
+	_, _, err := CreateWorktree(o)
 	if err == nil {
 		t.Fatal("CreateWorktree with a path-traversal slug: want an error, got nil")
 	}
@@ -656,5 +660,400 @@ func TestErrWorktreeNotFoundAndNotAttachable_AreDistinctAndDetectableViaErrorsIs
 	}
 	if errors.Is(ErrWorktreeNotAttachable, ErrWorktreeExists) {
 		t.Error("ErrWorktreeNotAttachable must be distinct from the unrelated ErrWorktreeExists sentinel")
+	}
+}
+
+// =====================================================================
+// Stage-aware resume (ticket #1293): `isWorktreeRegistered` (the
+// worktreeRegistered rule behind plan-check's `pipeline` object) and the
+// idempotent `CreateWorktree` (`--slug` reuses the exact worktree the state
+// recorded). Real git fixtures throughout, like the attach tests above.
+// =====================================================================
+
+// recordingRealCommand wraps the real `command` seam: every invocation is
+// recorded and then actually run, so a test can both exercise real git and
+// assert which git subcommands did (not) run.
+func recordingRealCommand(t *testing.T) *[]ghCall {
+	t.Helper()
+	var calls []ghCall
+	original := command
+	command = func(name string, args ...string) ([]byte, error) {
+		calls = append(calls, ghCall{name: name, args: args})
+		return original(name, args...)
+	}
+	t.Cleanup(func() { command = original })
+	return &calls
+}
+
+// anyCallContains reports whether any recorded call's command line contains
+// fragment.
+func anyCallContains(calls []ghCall, fragment string) bool {
+	for _, c := range calls {
+		if strings.Contains(c.String(), fragment) {
+			return true
+		}
+	}
+	return false
+}
+
+// gitCurrentBranch returns the short name of repoRoot's checked-out branch.
+func gitCurrentBranch(t *testing.T, repoRoot string) string {
+	t.Helper()
+	out, err := exec.Command("git", "-C", repoRoot, "branch", "--show-current").Output()
+	if err != nil {
+		t.Fatalf("git branch --show-current: %v", err)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func TestIsWorktreeRegistered(t *testing.T) {
+	repoRoot := t.TempDir()
+	initGitRepoWithCommit(t, repoRoot)
+	mainBranch := gitCurrentBranch(t, repoRoot)
+
+	registeredDir := filepath.Join(t.TempDir(), "registered")
+	gitWorktreeAdd(t, repoRoot, registeredDir, "feature/registered")
+	detachedDir := filepath.Join(t.TempDir(), "detached")
+	gitWorktreeAddDetached(t, repoRoot, detachedDir, gitHeadSha(t, repoRoot))
+	plainDir := t.TempDir()
+	linkToRegistered := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(registeredDir, linkToRegistered); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	cases := []struct {
+		name   string
+		path   string
+		branch string
+		want   bool
+	}{
+		{"registered on the recorded branch", registeredDir, "feature/registered", true},
+		{"registered path reached through a symlink", linkToRegistered, "feature/registered", true},
+		{"not listed: plain directory", plainDir, "feature/registered", false},
+		{"not listed: path does not exist", filepath.Join(plainDir, "missing"), "feature/registered", false},
+		{"main checkout is never registered", repoRoot, mainBranch, false},
+		{"detached HEAD", detachedDir, "feature/registered", false},
+		{"registered on a different branch", registeredDir, "feature/other", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := isWorktreeRegistered(repoRoot, tc.path, tc.branch)
+			if err != nil {
+				t.Fatalf("isWorktreeRegistered: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("isWorktreeRegistered(%s, %q) = %v, want %v", tc.path, tc.branch, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestIsWorktreeRegistered_GitListFailure_ReturnsFalseAndError(t *testing.T) {
+	original := command
+	command = func(name string, args ...string) ([]byte, error) {
+		return []byte("fatal: not a git repository"), errors.New("exit status 128")
+	}
+	t.Cleanup(func() { command = original })
+
+	got, err := isWorktreeRegistered(t.TempDir(), "/some/worktree", "feature/x")
+	if err == nil {
+		t.Fatal("want the git worktree list failure surfaced as an error, got nil")
+	}
+	if !strings.Contains(err.Error(), "git worktree list --porcelain") {
+		t.Errorf("error = %q, want it to name the failing git command", err)
+	}
+	if got {
+		t.Error("registered = true on a git failure, want false (default-deny)")
+	}
+}
+
+// exitErrorWithCode returns a real *exec.ExitError carrying code, the error
+// shape the production `command` seam yields when git exits non-zero.
+func exitErrorWithCode(t *testing.T, code int) error {
+	t.Helper()
+	err := exec.Command("sh", "-c", fmt.Sprintf("exit %d", code)).Run()
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != code {
+		t.Fatalf("could not build an exit-%d error, got %v", code, err)
+	}
+	return err
+}
+
+// failShowRefWith makes the `git show-ref` call fail with err while every
+// other git call still runs for real.
+func failShowRefWith(t *testing.T, err error) {
+	t.Helper()
+	original := command
+	command = func(name string, args ...string) ([]byte, error) {
+		if name == "git" && strings.Contains(strings.Join(args, " "), "show-ref") {
+			return []byte("fatal: boom"), err
+		}
+		return original(name, args...)
+	}
+	t.Cleanup(func() { command = original })
+}
+
+func TestIsWorktreeRegistered_ShowRefFailure_OnlyExit1MeansRefAbsent(t *testing.T) {
+	cases := []struct {
+		name    string
+		err     func(t *testing.T) error
+		wantErr bool
+	}{
+		{"exit 1: ref absent", func(t *testing.T) error { return exitErrorWithCode(t, 1) }, false},
+		{"exit 128: git could not check", func(t *testing.T) error { return exitErrorWithCode(t, 128) }, true},
+		{"exec failure", func(t *testing.T) error { return errors.New("fork/exec git: resource temporarily unavailable") }, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			repoRoot := t.TempDir()
+			initGitRepoWithCommit(t, repoRoot)
+			dir := filepath.Join(t.TempDir(), "registered")
+			gitWorktreeAdd(t, repoRoot, dir, "feature/registered")
+			failShowRefWith(t, tc.err(t))
+
+			got, err := isWorktreeRegistered(repoRoot, dir, "feature/registered")
+			if got {
+				t.Error("registered = true although show-ref failed, want false (default-deny)")
+			}
+			if (err != nil) != tc.wantErr {
+				t.Errorf("err = %v, want error: %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// -- CreateWorktree reuse (AC4) ----------------------------------------------
+
+func TestCreateWorktree_RecordedAndRegistered_ReusesWithoutCreatingAnything(t *testing.T) {
+	repoRoot := t.TempDir()
+	initGitRepoWithCommit(t, repoRoot)
+	stateDir := t.TempDir()
+	o := WorktreeOpts{ID: "42", Slug: "add-thing", RepoRoot: repoRoot, StateDir: stateDir}
+	first, _, err := CreateWorktree(o)
+	if err != nil {
+		t.Fatalf("first CreateWorktree: %v", err)
+	}
+
+	calls := recordingRealCommand(t)
+	got, warnings, err := CreateWorktree(o)
+	if err != nil {
+		t.Fatalf("second CreateWorktree for the recorded, registered worktree: want reuse, got: %v", err)
+	}
+	if len(warnings) == 0 || warnings[0] != "reusing existing worktree" {
+		t.Errorf("warnings = %v, want the first entry to be %q", warnings, "reusing existing worktree")
+	}
+	if got.WorktreePath != first.WorktreePath || got.Branch != first.Branch {
+		t.Errorf("reuse result = (%s, %s), want the recorded (%s, %s)", got.WorktreePath, got.Branch, first.WorktreePath, first.Branch)
+	}
+	if anyCallContains(*calls, "worktree add") {
+		t.Errorf("git calls = %v, want no `git worktree add` on reuse", *calls)
+	}
+	if anyCallContains(*calls, " -b ") || anyCallContains(*calls, "branch -") {
+		t.Errorf("git calls = %v, want no branch creation on reuse", *calls)
+	}
+}
+
+func TestCreateWorktree_RecordedWorktreeViaSymlinkedRepoRoot_StillReuses(t *testing.T) {
+	realRoot := t.TempDir()
+	initGitRepoWithCommit(t, realRoot)
+	link := filepath.Join(t.TempDir(), "repo-link")
+	if err := os.Symlink(realRoot, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	o := WorktreeOpts{ID: "42", Slug: "add-thing", RepoRoot: link, StateDir: t.TempDir()}
+	if _, _, err := CreateWorktree(o); err != nil {
+		t.Fatalf("first CreateWorktree: %v", err)
+	}
+
+	_, warnings, err := CreateWorktree(o)
+	if err != nil {
+		t.Fatalf("second CreateWorktree through a symlinked repo root: want reuse, got: %v", err)
+	}
+	if len(warnings) == 0 || warnings[0] != "reusing existing worktree" {
+		t.Errorf("warnings = %v, want the first entry to be %q", warnings, "reusing existing worktree")
+	}
+}
+
+// -- CreateWorktree foreign / unprovable (AC5) --------------------------------
+
+func TestCreateWorktree_DirExistsButNothingRecorded_KeepsTodaysErrorText(t *testing.T) {
+	repoRoot := t.TempDir()
+	initGitRepoWithCommit(t, repoRoot)
+	dir := filepath.Join(repoRoot, ".worktrees", "42-add-thing")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	calls := recordingRealCommand(t)
+
+	_, warnings, err := CreateWorktree(WorktreeOpts{ID: "42", Slug: "add-thing", RepoRoot: repoRoot, StateDir: t.TempDir()})
+	if !errors.Is(err, ErrWorktreeExists) {
+		t.Fatalf("error = %v, want errors.Is(_, ErrWorktreeExists)", err)
+	}
+	if want := "worktree dir " + dir + " already exists: " + ErrWorktreeExists.Error(); err.Error() != want {
+		t.Errorf("error text = %q, want byte-identical %q", err.Error(), want)
+	}
+	if len(warnings) != 0 {
+		t.Errorf("warnings = %v, want none on a refusal", warnings)
+	}
+	if anyCallContains(*calls, "worktree add") {
+		t.Errorf("git calls = %v, want no `git worktree add`", *calls)
+	}
+}
+
+func TestCreateWorktree_DirExistsAndStateRecordsAnotherWorktree_KeepsTodaysErrorText(t *testing.T) {
+	repoRoot := t.TempDir()
+	initGitRepoWithCommit(t, repoRoot)
+	stateDir := t.TempDir()
+	// The state records a real, registered worktree -- but a different one
+	// than the computed .worktrees/42-add-thing, which is a foreign directory.
+	other := WorktreeOpts{ID: "42", Slug: "other-thing", RepoRoot: repoRoot, StateDir: stateDir}
+	if _, _, err := CreateWorktree(other); err != nil {
+		t.Fatalf("CreateWorktree other-thing: %v", err)
+	}
+	dir := filepath.Join(repoRoot, ".worktrees", "42-add-thing")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	_, _, err := CreateWorktree(WorktreeOpts{ID: "42", Slug: "add-thing", RepoRoot: repoRoot, StateDir: stateDir})
+	if !errors.Is(err, ErrWorktreeExists) {
+		t.Fatalf("error = %v, want errors.Is(_, ErrWorktreeExists)", err)
+	}
+	if want := "worktree dir " + dir + " already exists: " + ErrWorktreeExists.Error(); err.Error() != want {
+		t.Errorf("error text = %q, want byte-identical %q", err.Error(), want)
+	}
+}
+
+func TestCreateWorktree_RecordedWorktreeOnDifferentBranch_KeepsTodaysErrorText(t *testing.T) {
+	repoRoot := t.TempDir()
+	initGitRepoWithCommit(t, repoRoot)
+	o := WorktreeOpts{ID: "42", Slug: "add-thing", RepoRoot: repoRoot, StateDir: t.TempDir()}
+	first, _, err := CreateWorktree(o)
+	if err != nil {
+		t.Fatalf("first CreateWorktree: %v", err)
+	}
+	if out, cerr := exec.Command("git", "-C", first.WorktreePath, "checkout", "-q", "-b", "somewhere-else").CombinedOutput(); cerr != nil {
+		t.Fatalf("git checkout -b: %v\n%s", cerr, out)
+	}
+
+	_, _, err = CreateWorktree(o)
+	if !errors.Is(err, ErrWorktreeExists) {
+		t.Fatalf("error = %v, want errors.Is(_, ErrWorktreeExists) (recorded but not registered on the recorded branch)", err)
+	}
+	if want := "worktree dir " + first.WorktreePath + " already exists: " + ErrWorktreeExists.Error(); err.Error() != want {
+		t.Errorf("error text = %q, want byte-identical %q", err.Error(), want)
+	}
+}
+
+func TestCreateWorktree_RecordedDirWithPrunedRegistration_KeepsTodaysErrorText(t *testing.T) {
+	repoRoot := t.TempDir()
+	initGitRepoWithCommit(t, repoRoot)
+	o := WorktreeOpts{ID: "42", Slug: "add-thing", RepoRoot: repoRoot, StateDir: t.TempDir()}
+	first, _, err := CreateWorktree(o)
+	if err != nil {
+		t.Fatalf("first CreateWorktree: %v", err)
+	}
+	// Drop git's registration of the worktree but leave the directory and
+	// branch in place.
+	if rmErr := os.RemoveAll(filepath.Join(repoRoot, ".git", "worktrees", "42-add-thing")); rmErr != nil {
+		t.Fatalf("remove worktree registration: %v", rmErr)
+	}
+
+	_, _, err = CreateWorktree(o)
+	if !errors.Is(err, ErrWorktreeExists) {
+		t.Fatalf("error = %v, want errors.Is(_, ErrWorktreeExists) (directory present but no longer registered)", err)
+	}
+	if want := "worktree dir " + first.WorktreePath + " already exists: " + ErrWorktreeExists.Error(); err.Error() != want {
+		t.Errorf("error text = %q, want byte-identical %q", err.Error(), want)
+	}
+}
+
+func TestCreateWorktree_DirGoneButBranchExists_KeepsTodaysErrorTextWithoutProbingRegistration(t *testing.T) {
+	repoRoot := t.TempDir()
+	initGitRepoWithCommit(t, repoRoot)
+	o := WorktreeOpts{ID: "42", Slug: "add-thing", RepoRoot: repoRoot, StateDir: t.TempDir()}
+	first, _, err := CreateWorktree(o)
+	if err != nil {
+		t.Fatalf("first CreateWorktree: %v", err)
+	}
+	if out, rmErr := exec.Command("git", "-C", repoRoot, "worktree", "remove", "--force", first.WorktreePath).CombinedOutput(); rmErr != nil {
+		t.Fatalf("git worktree remove: %v\n%s", rmErr, out)
+	}
+	calls := recordingRealCommand(t)
+
+	_, _, err = CreateWorktree(o)
+	if !errors.Is(err, ErrWorktreeExists) {
+		t.Fatalf("error = %v, want errors.Is(_, ErrWorktreeExists)", err)
+	}
+	if want := "branch feature/42-add-thing already exists: " + ErrWorktreeExists.Error(); err.Error() != want {
+		t.Errorf("error text = %q, want byte-identical %q", err.Error(), want)
+	}
+	if anyCallContains(*calls, "worktree list") || anyCallContains(*calls, "worktree add") {
+		t.Errorf("git calls = %v, want only the branch probe (reuse is evaluated on the dir-exists branch only)", *calls)
+	}
+}
+
+// -- recorded branch deleted while the worktree directory stays (edge case 16) --
+
+// deleteRecordedBranchKeepingDir removes the recorded branch's ref while the
+// worktree directory stays, using real git. `git branch -D` refuses a branch
+// checked out in a worktree, so the worktree is detached first ("detach") or
+// the ref is dropped directly with `git update-ref -d` ("update-ref").
+func deleteRecordedBranchKeepingDir(t *testing.T, how, repoRoot, worktreePath, branch string) {
+	t.Helper()
+	run := func(args ...string) {
+		t.Helper()
+		if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	switch how {
+	case "detach":
+		run("-C", worktreePath, "checkout", "-q", "--detach")
+		run("-C", repoRoot, "branch", "-D", branch)
+	case "update-ref":
+		run("-C", repoRoot, "update-ref", "-d", "refs/heads/"+branch)
+	default:
+		t.Fatalf("unknown branch deletion sequence %q", how)
+	}
+	if gitBranchExists(repoRoot, branch) {
+		t.Fatalf("setup: branch %s still exists after %s", branch, how)
+	}
+}
+
+func TestCreateWorktree_RecordedBranchDeletedButDirStays_NotRegisteredAndKeepsTodaysErrorText(t *testing.T) {
+	for _, how := range []string{"detach", "update-ref"} {
+		t.Run(how, func(t *testing.T) {
+			repoRoot := t.TempDir()
+			initGitRepoWithCommit(t, repoRoot)
+			o := WorktreeOpts{ID: "42", Slug: "add-thing", RepoRoot: repoRoot, StateDir: t.TempDir()}
+			first, _, err := CreateWorktree(o)
+			if err != nil {
+				t.Fatalf("first CreateWorktree: %v", err)
+			}
+			deleteRecordedBranchKeepingDir(t, how, repoRoot, first.WorktreePath, first.Branch)
+
+			registered, err := isWorktreeRegistered(repoRoot, first.WorktreePath, first.Branch)
+			if err != nil {
+				t.Fatalf("isWorktreeRegistered: %v", err)
+			}
+			if registered {
+				t.Error("isWorktreeRegistered = true for a recorded branch that no longer exists, want false (default-deny)")
+			}
+
+			_, warnings, err := CreateWorktree(o)
+			if !errors.Is(err, ErrWorktreeExists) {
+				t.Fatalf("error = %v, want errors.Is(_, ErrWorktreeExists)", err)
+			}
+			if want := "worktree dir " + first.WorktreePath + " already exists: " + ErrWorktreeExists.Error(); err.Error() != want {
+				t.Errorf("error text = %q, want byte-identical %q", err.Error(), want)
+			}
+			if len(warnings) != 0 {
+				t.Errorf("warnings = %v, want none on a refusal", warnings)
+			}
+			if _, statErr := os.Stat(first.WorktreePath); statErr != nil {
+				t.Errorf("worktree directory %s: %v, want it left in place", first.WorktreePath, statErr)
+			}
+		})
 	}
 }

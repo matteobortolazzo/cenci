@@ -601,3 +601,180 @@ func TestPipelinePlanCheck_MalformedPlan_Exit1(t *testing.T) {
 		t.Error("errors = [], want a populated errors[] naming the front-matter failure")
 	}
 }
+
+// -- `pipeline` object (#1293): the persisted pipeline state echoed next to
+// the decision. The per-decision byte-identity of everything else is pinned
+// by pipeline_plan_cmd_golden_test.go.
+
+// planCheckPipelineContract decodes only what these tests assert on.
+type planCheckPipelineContract struct {
+	Decision string   `json:"decision"`
+	Warnings []string `json:"warnings"`
+	Pipeline *struct {
+		Stage              string `json:"stage"`
+		WorktreePath       string `json:"worktreePath"`
+		Branch             string `json:"branch"`
+		WorktreeRegistered bool   `json:"worktreeRegistered"`
+	} `json:"pipeline"`
+}
+
+// runPlanCheckReplan runs `plan-check 42 --replan-requested` (no gh needed)
+// and returns the raw stdout, the decoded contract and the exit code.
+func runPlanCheckReplan(t *testing.T, repoDir, stateDir string, env []string) (string, planCheckPipelineContract, int) {
+	t.Helper()
+	cmd := exec.Command(binaryPath, "pipeline", "plan-check", "42", "--repo", repoDir, "--state-dir", stateDir, "--replan-requested")
+	if env != nil {
+		cmd.Env = env
+	}
+	output, err := cmd.Output()
+	exit := 0
+	if err != nil {
+		exitErr, ok := err.(*exec.ExitError)
+		if !ok {
+			t.Fatalf("plan-check: unexpected non-ExitError: %v", err)
+		}
+		exit = exitErr.ExitCode()
+	}
+	var c planCheckPipelineContract
+	if jerr := json.Unmarshal(output, &c); jerr != nil {
+		t.Fatalf("stdout is not valid JSON: %v\n%s", jerr, output)
+	}
+	return string(output), c, exit
+}
+
+func TestPipelinePlanCheck_NoStateFile_PipelineObjectIsExactlyNewAndUnregistered(t *testing.T) {
+	repoDir := t.TempDir()
+	initGitRepoWithCommitForCLITest(t, repoDir)
+	gitCommitPlanFile(t, repoDir, "42", "add-thing", gitHeadShaForCLITest(t, repoDir), "2026-07-20T20:00:00Z")
+
+	raw, _, exit := runPlanCheckReplan(t, repoDir, t.TempDir(), nil)
+	if exit != 0 {
+		t.Fatalf("exit = %d, want 0", exit)
+	}
+	const want = `"pipeline":{"stage":"new","worktreeRegistered":false}}` + "\n"
+	if !strings.HasSuffix(raw, want) {
+		t.Errorf("output = %s, want it to end with the exact object %s", raw, want)
+	}
+}
+
+func TestPipelinePlanCheck_RegisteredWorktree_EchoesRecordedStateAsRegistered(t *testing.T) {
+	repoDir := t.TempDir()
+	initGitRepoWithCommitForCLITest(t, repoDir)
+	gitCommitPlanFile(t, repoDir, "42", "add-thing", gitHeadShaForCLITest(t, repoDir), "2026-07-20T20:00:00Z")
+	stateDir := t.TempDir()
+	if out, err := exec.Command(binaryPath, "pipeline", "worktree", "42", "--slug", "add-thing", "--repo", repoDir, "--state-dir", stateDir).CombinedOutput(); err != nil {
+		t.Fatalf("pipeline worktree (setup): %v\n%s", err, out)
+	}
+
+	_, c, exit := runPlanCheckReplan(t, repoDir, stateDir, nil)
+	if exit != 0 {
+		t.Fatalf("exit = %d, want 0", exit)
+	}
+	if c.Pipeline == nil {
+		t.Fatal("pipeline object missing")
+	}
+	wantDir := filepath.Join(repoDir, ".worktrees", "42-add-thing")
+	if !c.Pipeline.WorktreeRegistered || c.Pipeline.WorktreePath != wantDir || c.Pipeline.Branch != "feature/42-add-thing" || c.Pipeline.Stage != "new" {
+		t.Errorf("pipeline = %+v, want the recorded worktree %s on feature/42-add-thing, registered", *c.Pipeline, wantDir)
+	}
+}
+
+// TestPipelinePlanCheck_GitWorktreeListFails_UnregisteredWithOneWarningDecisionAndExitUnchanged
+// is AC3: a PATH shim `git` fails only `worktree list`.
+func TestPipelinePlanCheck_GitWorktreeListFails_UnregisteredWithOneWarningDecisionAndExitUnchanged(t *testing.T) {
+	repoDir := t.TempDir()
+	initGitRepoWithCommitForCLITest(t, repoDir)
+	gitCommitPlanFile(t, repoDir, "42", "add-thing", gitHeadShaForCLITest(t, repoDir), "2026-07-20T20:00:00Z")
+	stateDir := t.TempDir()
+	state := `{"schemaVersion":2,"id":"42","stage":"executed","worktreePath":"` + filepath.Join(repoDir, ".worktrees", "42-add-thing") +
+		`","branch":"feature/42-add-thing","updatedAt":"2024-01-01T00:00:00Z"}`
+	if err := os.WriteFile(filepath.Join(stateDir, "42.json"), []byte(state), 0o644); err != nil {
+		t.Fatalf("write state: %v", err)
+	}
+	shimDir := t.TempDir()
+	writeGitShim(t, shimDir, filepath.Join(t.TempDir(), "git.log"), "worktree list")
+
+	_, c, exit := runPlanCheckReplan(t, repoDir, stateDir, pipelineEnv(shimDir))
+	if exit != 0 {
+		t.Errorf("exit = %d, want 0 (a git failure never changes the exit code)", exit)
+	}
+	if c.Decision != "replan" {
+		t.Errorf("decision = %q, want replan (a git failure never changes the decision)", c.Decision)
+	}
+	if c.Pipeline == nil || c.Pipeline.WorktreeRegistered {
+		t.Errorf("pipeline = %+v, want worktreeRegistered false", c.Pipeline)
+	}
+	if len(c.Warnings) != 1 || !strings.Contains(c.Warnings[0], "git worktree list --porcelain") {
+		t.Errorf("warnings = %v, want exactly one entry naming the git failure", c.Warnings)
+	}
+}
+
+// TestPipelinePlanCheck_FinalizedState_EmitsPrUrlAndPrNumberJSONKeys pins the
+// wire key names (`prUrl`, `prNumber`) the implement skill reads, and that
+// they are omitted when the state records no PR.
+func TestPipelinePlanCheck_FinalizedState_EmitsPrUrlAndPrNumberJSONKeys(t *testing.T) {
+	pipelineObject := func(t *testing.T, stateJSON string) map[string]any {
+		t.Helper()
+		repoDir := t.TempDir()
+		initGitRepoWithCommitForCLITest(t, repoDir)
+		gitCommitPlanFile(t, repoDir, "42", "add-thing", gitHeadShaForCLITest(t, repoDir), "2026-07-20T20:00:00Z")
+		stateDir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(stateDir, "42.json"), []byte(stateJSON), 0o644); err != nil {
+			t.Fatalf("write state: %v", err)
+		}
+		raw, _, exit := runPlanCheckReplan(t, repoDir, stateDir, nil)
+		if exit != 0 {
+			t.Fatalf("exit = %d, want 0", exit)
+		}
+		var top struct {
+			Pipeline map[string]any `json:"pipeline"`
+		}
+		if err := json.Unmarshal([]byte(raw), &top); err != nil {
+			t.Fatalf("stdout is not valid JSON: %v\n%s", err, raw)
+		}
+		return top.Pipeline
+	}
+
+	t.Run("with a PR", func(t *testing.T) {
+		p := pipelineObject(t, `{"schemaVersion":2,"id":"42","stage":"finalized","prUrl":"https://github.com/o/r/pull/7","prNumber":7}`)
+		if p["stage"] != "finalized" {
+			t.Errorf("pipeline.stage = %v, want finalized", p["stage"])
+		}
+		if p["prUrl"] != "https://github.com/o/r/pull/7" {
+			t.Errorf("pipeline.prUrl = %v, want the seeded URL", p["prUrl"])
+		}
+		if p["prNumber"] != float64(7) {
+			t.Errorf("pipeline.prNumber = %v, want 7", p["prNumber"])
+		}
+	})
+
+	t.Run("without a PR the keys are omitted", func(t *testing.T) {
+		p := pipelineObject(t, `{"schemaVersion":2,"id":"42","stage":"finalized"}`)
+		for _, key := range []string{"prUrl", "prNumber"} {
+			if _, present := p[key]; present {
+				t.Errorf("pipeline carries %q = %v, want it omitted when empty/zero", key, p[key])
+			}
+		}
+	})
+}
+
+func TestPipelinePlanCheck_UnknownPersistedStage_EchoedWithDecisionUnchanged(t *testing.T) {
+	repoDir := t.TempDir()
+	initGitRepoWithCommitForCLITest(t, repoDir)
+	gitCommitPlanFile(t, repoDir, "42", "add-thing", gitHeadShaForCLITest(t, repoDir), "2026-07-20T20:00:00Z")
+	stateDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(stateDir, "42.json"), []byte(`{"schemaVersion":2,"id":"42","stage":"quantum"}`), 0o644); err != nil {
+		t.Fatalf("write state: %v", err)
+	}
+
+	_, c, exit := runPlanCheckReplan(t, repoDir, stateDir, nil)
+	if exit != 0 {
+		t.Errorf("exit = %d, want 0", exit)
+	}
+	if c.Decision != "replan" {
+		t.Errorf("decision = %q, want replan", c.Decision)
+	}
+	if c.Pipeline == nil || c.Pipeline.Stage != "quantum" {
+		t.Errorf("pipeline = %+v, want the unknown stage %q echoed", c.Pipeline, "quantum")
+	}
+}

@@ -36,16 +36,33 @@ type Opts struct {
 // `cenci pipeline plan-check`'s output -- every existing stage/mechanics
 // command leaves them absent, preserving the frozen #558 contract.
 // DraftFreshness (#853) is the same shape: omitempty, populated only
-// alongside plan-check's "awaiting-input" decision.
+// alongside plan-check's "awaiting-input" decision. Pipeline (#1293) is a
+// pointer + omitempty for the same reason and is the last field, so
+// plan-check's output without it is byte-identical to the pre-#1293 output.
 type Output struct {
-	State          string    `json:"state"`
-	NextActions    []string  `json:"next_actions"`
-	Artifacts      []string  `json:"artifacts"`
-	Warnings       []string  `json:"warnings"`
-	Errors         []string  `json:"errors"`
-	Decision       string    `json:"decision,omitempty"`
-	Plan           *PlanMeta `json:"plan,omitempty"`
-	DraftFreshness string    `json:"draft_freshness,omitempty"`
+	State          string        `json:"state"`
+	NextActions    []string      `json:"next_actions"`
+	Artifacts      []string      `json:"artifacts"`
+	Warnings       []string      `json:"warnings"`
+	Errors         []string      `json:"errors"`
+	Decision       string        `json:"decision,omitempty"`
+	Plan           *PlanMeta     `json:"plan,omitempty"`
+	DraftFreshness string        `json:"draft_freshness,omitempty"`
+	Pipeline       *PipelineInfo `json:"pipeline,omitempty"`
+}
+
+// PipelineInfo (#1293) is the persisted pipeline state `plan-check` echoes
+// next to its decision, so the implement skill can route a resumed run on
+// the stage it crashed in. Empty strings and a zero PRNumber are omitted;
+// WorktreeRegistered is always present. Stage is also omitted when the state
+// file could not be read (WorktreeRegistered is then false).
+type PipelineInfo struct {
+	Stage              string `json:"stage,omitempty"`
+	WorktreePath       string `json:"worktreePath,omitempty"`
+	Branch             string `json:"branch,omitempty"`
+	PRURL              string `json:"prUrl,omitempty"`
+	PRNumber           int    `json:"prNumber,omitempty"`
+	WorktreeRegistered bool   `json:"worktreeRegistered"`
 }
 
 // Run executes one pipeline stage command: it acquires the per-ticket state
