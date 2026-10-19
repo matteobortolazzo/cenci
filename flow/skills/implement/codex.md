@@ -57,8 +57,11 @@ context window, that automatic compaction is disabled, and that a low-context st
 as `Context: low — done: …; remaining: …`; a worker reporting that line, or a lane needing a
 second resume, is reported to the root as a split signal and stops the run — never retried
 with a longer lane.
+In ticket mode, `/plan` also runs the read-only `cenci pipeline plan-check <id>` (ticketless mode skips it); when its `pipeline.worktreePath` is non-empty, append `Leftover worktree <path> (branch <branch>) — Phase 2 fails with ErrWorktreeExists until a human removes it` to the planner's context, so the new plan records it under `### Risks`.
+If that `plan-check` fails, add `plan-check unavailable: <error>` to the planner's context under `### Risks` and continue: `/plan` is read-only and never stops on it.
+`/plan` makes no `cenci pipeline` call that writes anything.
 Then return an approved plan in the conversation without writing files or labels.
-Stop before mutations and instruct `cenci run implement apply <ticket> --agent codex`.
+Stop before mutations and tell the user to continue with `apply` in this same session (a new-plan apply); `cenci run implement apply <ticket> --agent codex` is only for resuming an already-saved plan after a crash.
 This procedure has no autonomous approval path: `/plan` always stops before
 mutations and returns the plan in the conversation for a human to approve, so
 every plan it persists is `approval: human` by construction and needs no
@@ -66,12 +69,64 @@ value branch of its own (`skills/implement/phases/phase-1-plan.md`'s
 `## Persist the Plan` documents the key and the four autonomous values the
 Claude Code paths write). If this procedure ever gains a path that persists a
 plan without that stop, it must write the matching value instead.
-In normal apply mode persist `.plans/<ticket>-<slug>.md`, then verify the
+
+**Resume routing (apply, ticket mode).**
+Ticketless (task) mode skips this block, every `cenci pipeline` call below and all resume routing.
+In ticket mode, right after the blocked-dependency check and before any plan-file write, checkpoint write, worktree call or label write, run the apply-time `plan-check`: run `cenci pipeline plan-check <id>` for a saved-plan apply (`apply <ticket>`, `resume <ticket>` or a `.plans/<file>` target), or `cenci pipeline plan-check <id> --replan-requested` for a new-plan apply (an `apply` in the same session as an approved `/plan` result).
+Read `stage`, `worktreePath`, `branch`, `prUrl` and `worktreeRegistered` only from that one result's `pipeline` object, which the CLI echoes for every decision; never read `.cenci/pipeline/` yourself and never make a second `plan-check` call. Each stage is recorded when its phase starts, so a crashed run's stage names the phase it entered.
+`plan-check`'s own `errors[]` for the `none` and `multiple` decisions is a normal branch (exit 0), not the lifecycle hard-stop below.
+
+| `pipeline.stage` | Route |
+|---|---|
+| `new`, `prepared`, `waiting_for_input`, `waiting_for_plan_approval` | no resume routing |
+| `plan_approved`, `executed` | attach, then Implementation dispatch with the resume brief |
+| `reviewed` | attach, then review entry |
+| `finalized` with no `prUrl` | attach, then review entry |
+| `finalized` with `prUrl` | stop |
+| any other value | unknown-stage stop |
+
+- `resume`: check the two stops below, then take the table's route; no question is asked.
+- `stale`: check the two stops below first, then ask Continue or Re-plan through the client's available user-input mechanism. Continue takes the table's route (a stage with no attach route takes the normal flow: `--slug` and the standard brief). Re-plan ends the run and tells the user to run `/plan` again, with no `cenci pipeline reset` at that point.
+- `multiple` on a saved-plan apply: ask which file to use, or whether to re-plan, through the client's available user-input mechanism. A picked file is handled exactly like `stale`; re-plan ends the run like the `stale` Re-plan choice.
+- `multiple` on a new-plan apply: stop before any mutation, name every file in `artifacts[]`, and ask the user to remove the outdated ones and re-run the apply. The `multiple` prompt above applies only to a saved-plan apply.
+- `awaiting-input`: stop before any mutation, print that the saved plan is an unanswered draft, and point the user to answering on the ticket and resuming with Claude `/cenci:implement <id>`, or re-running `/plan`.
+- `none` on a saved-plan apply: stop and tell the user to run `/plan`; never improvise a plan.
+- An empty or unrecognized decision (exit 1): show `errors[0]` and stop before any mutation.
+- A new-plan apply (decision `none` or `replan`) whose `pipeline.worktreePath` is non-empty: run `cenci pipeline reset <id>` then `cenci pipeline prepare <id>`, then persist the new plan. A failure of that `reset` or `prepare` (a non-empty `errors[]`, a non-zero exit, or empty or unparseable output) stops the run before the persist step and reports it. The worktree and branch on disk are left alone, and a new-plan apply never takes a resume route.
+- Attach routes apply only when `pipeline.worktreeRegistered` is true; when it is false no resume route is taken and the worktree step follows its gone/leftover handling.
+- PR stop: for `finalized` with a `prUrl`, print `#<id> already has PR <prUrl> — nothing to resume` and end the run, noting that the plan-file archive and the `cenci babysit` arm may not have run for that PR.
+- Unknown-stage stop: for any other value, print `Unknown pipeline stage <stage> for #<id> — not resuming`, then every `warnings[]` entry, and end the run; a missing or unreadable stage renders as `(missing)`.
+- Both stops run before the persist step and touch nothing: no transition, no checkpoint, no worktree call and no label write.
+- The crashed run's uncommitted changes are kept: the root agent and every worker never stash, reset, check out over or discard them.
+
+**Pipeline lifecycle (ticket mode).**
+In ticket mode apply records this `cenci pipeline` lifecycle, in this order, each call at the step that names it below:
+1. `cenci pipeline prepare <id>`
+2. `cenci pipeline plan <id>`
+3. `cenci pipeline plan <id> --approve`
+4. `cenci pipeline artifact <id> --plan <plan-path>` (the `.plans/<id>-<slug>.md` just persisted on a new-plan apply, or the saved plan file from `artifacts[0]` of the `plan-check` result (the picked file after a `multiple` choice) on a saved-plan apply)
+5. `cenci pipeline worktree <id> --slug <slug>` (`--attach <worktreePath>` on an attach route)
+6. `cenci pipeline execute <id>`
+7. `cenci pipeline review <id>` (at acceptance-review entry)
+8. `cenci pipeline finalize <id>` (before the rebase/commit step)
+9. `cenci pipeline artifact <id> --pr <pr-url> --pr-number <n>` (only after a successful `gh pr create`)
+Every one of these calls stops the run on a non-empty `errors[]` and reports the errors.
+A call that exits non-zero, or prints empty or unparseable output, stops the run the same way and reports its stderr; this covers the re-plan `cenci pipeline reset <id>` too.
+On a resume the monotonic `plan --approve` and `execute` calls run unchanged and return no-op `warnings[]`; show them in the status update and never treat them as failures.
+
+In normal apply mode persist `.plans/<ticket>-<slug>.md` (a new-plan apply only: a saved-plan apply keeps the file `plan-check` already validated and skips this persist and its heading check), then verify the
 assembled file contains all three required headings (`## Ticket Details`, `## Implementation
 Plan`, `## Architectural Context` — the `requiredPlanSections` list in
 `watch/internal/pipeline/planfile.go`): if any is missing, stop before the checkpoint/label
-mutations and report the missing heading(s). Otherwise,
-initialize the checkpoint, create the worktree, then run the baseline gate: resolve affected projects
+mutations and report the missing heading(s). Otherwise, in ticket mode run `cenci pipeline prepare <id>`, `cenci pipeline plan <id>`, `cenci pipeline plan <id> --approve` and `cenci pipeline artifact <id> --plan <plan-path>` in that order, where `<plan-path>` is the `.plans/<id>-<slug>.md` just persisted on a new-plan apply, or the saved plan file from `artifacts[0]` of the `plan-check` result (the picked file after a `multiple` choice) on a saved-plan apply.
+Then initialize the checkpoint: `checkpoint.mjs advance` when a checkpoint file already exists on an attach route, never `init` (it overwrites unconditionally and would drop the recorded `worktree` and `planPath`), and `checkpoint.mjs init` otherwise.
+Then create the worktree: in ticket mode run `cenci pipeline worktree <id> --slug <slug>` (the `.worktrees/<id>-<slug>` naming), or `cenci pipeline worktree <id> --attach <worktreePath>` instead of `--slug` on an attach route, which applies only when `pipeline.worktreeRegistered` is true; ticketless mode creates it with git directly under `.worktrees/`.
+On an attach route print exactly one line after attaching: `Resuming #<id> from stage <stage> in <worktreePath> (branch <branch>, <n> commits ahead of main, <m> uncommitted files)`, with `<n>` from `git -C <worktreePath> rev-list --count main..HEAD` and `<m>` from the line count of `git -C <worktreePath> status --short`; if either count command fails (for example there is no local `main`), stop the resume with the git error and never guess a count.
+When `pipeline.worktreePath` is non-empty but `pipeline.worktreeRegistered` is false no attach route is taken: if the directory is gone, print `Recorded worktree <worktreePath> is gone — creating a fresh one`, run `--slug` and use no resume brief; if the directory still exists, run `--slug` and, on `ErrWorktreeExists` (a leftover directory, or the recorded branch still existing locally), stop naming that directory or branch and never remove the directory or delete the branch.
+The crashed run's uncommitted changes are never stashed, reset, checked out over or discarded by the root agent or any worker.
+Then run `cenci pipeline execute <id>` (ticket mode), before the baseline gate.
+On an attach route run the baseline gate only when `git -C <worktreePath> status --short` is empty; otherwise print `Baseline gate: skipped — resumed worktree has <m> uncommitted files from the crashed run` and proceed.
+Then run the baseline gate: resolve affected projects
 by matching the plan's `## Project Context` `# Project: <name>` headers against
 `.cenci/config.json`'s `projects[].name` to get each `slug`. When the primary signal
 under-matches, fall back to the `### Technical Notes` "Affected services"/"Affected components" lines inside `## Ticket Details`, matched against each `projects[]` entry's `slug`, `name`, or `path`
@@ -107,6 +162,33 @@ passing the worktree, plan sections, owned files, scoped test command, acceptanc
 and context-budget brief to each. Workers are not alone in the worktree and must preserve
 other workers' changes; the root alone owns shared git state and external writes.
 Always forward the plan's `### Documentation Routing` section verbatim to every `implementer` and `critical-reviewer` delegation (including `lite-small`'s single reviewer) and to the lessons collector.
+
+On an attach route, first read `git -C <abs-worktree-path> status --short` and `git -C <abs-worktree-path> log --oneline main..HEAD`. With 0 commits ahead of main and 0 uncommitted files, print `Resumed worktree is clean — running implementation with the standard brief` and run this dispatch with the standard brief only, on every attach route (this replaces the review-entry route for `reviewed` and `finalized` without a `prUrl`).
+If any git read in this block (`status --short`, `log --oneline main..HEAD` or `diff --stat HEAD`) fails, stop with the git error: never treat missing output as a clean worktree and never paste git error text into the brief.
+A resumed worktree is clean only with 0 commits ahead of main and 0 uncommitted files; otherwise (any commit ahead of main or any uncommitted file) it is dirty.
+On the `reviewed` and `finalized`-without-`prUrl` routes with a dirty worktree, skip this Implementation dispatch, the lane verification barrier, the refactor pass, the reuse check and Visual Verification, and continue at the acceptance review.
+On the `plan_approved` and `executed` routes with a dirty worktree, every implementer delegation receives the resume brief: the single implementer, every parallel or sequential lane and the compact implementer. Gather `git -C <abs-worktree-path> status --short`, `git -C <abs-worktree-path> diff --stat HEAD` and `git -C <abs-worktree-path> log --oneline main..HEAD`, and copy this block into each delegation byte-for-byte, filled with those three outputs:
+
+```text
+Resume brief — an earlier run of this ticket crashed partway through implementation
+and left this worktree as it is. Nothing is committed unless it appears in the log below.
+
+git status --short:
+<output>
+
+git diff --stat HEAD:
+<output>
+
+git log --oneline main..HEAD:
+<output>
+
+Before implementing any plan task, check which plan tasks are already done in the
+worktree (the files above and the tests that already exist) and continue from what
+exists; do not redo finished work. Never stash, reset, checkout over or discard these
+changes, and do not stage or commit them.
+```
+
+A crash-resume brief is not a second resume for the context-budget split signal: that count is per session, and the crash was a memory kill, not context exhaustion. Tests that already exist and pass because the implementation is present are expected on a resume, not a red-phase violation; tasks not yet done follow the normal red-before-green order.
 
 With exactly one delegated lane, `cenci.compactImplementation` exactly true (default false)
 permits a small S, low-risk, concrete plan to combine red/green/refactor in one worker.
@@ -147,7 +229,7 @@ current callers. This is bounded to new code — never a repo-wide duplication s
 Any consolidation made here is covered by the same full-suite-and-lint run as the rest of the
 phase — re-run both before proceeding — and a reported near-duplicate is recorded for review
 visibility only, never tracked or turned into a Followup ticket.
-Then, before any code review, run the acceptance review: delegate the `acceptance-reviewer`
+Then, before any code review, run the acceptance review: at its entry, in ticket mode, run `cenci pipeline review <id>`, then delegate the `acceptance-reviewer`
 role with the ticket body, its design record (the persisted plan) and the diff — never the
 diff alone — and persist its `## Acceptance Review` table; compute the verdict with
 `"${PLUGIN_ROOT}/skills/review/scripts/acceptance-verdict.sh" <table> [--ui-local]`
@@ -209,7 +291,7 @@ A nested `docs/**/*.md` path that `discover` printed as an `owner:` line or `men
 In default mode, including an unresolved policy, a docs status second line starting with `docs: error` adds `Documentation status: <the entire second line>` to the PR body's notes, so every `; `-joined reason survives; an unresolved policy also adds its explicit policy-unresolved note.
 When the docs status file is lost, absent, unreadable or malformed (first line not exactly one of `policy: minimal`, `policy: default` or `policy: unresolved`, or `policy: minimal` with no second line starting `docs: `), re-run the resolver and read stdout only: exactly `default` keeps `Documentation updated`; `minimal` or any unresolved result renders an unchecked `docs: unknown (<why>)` line, `docs: unknown (status file malformed …)` for a malformed file, and a docs status line is never written from memory.
 
-Before rewriting commits, resolve
+Before rewriting commits, in ticket mode run `cenci pipeline finalize <id>`, then resolve
 the feature branch with `git -C <abs-worktree-path> symbolic-ref --quiet --short HEAD`
 and read its live remote head using `git -C <abs-worktree-path> ls-remote --exit-code
 origin refs/heads/<branch>`. Exit 0 must return exactly that ref and a valid commit
@@ -248,8 +330,8 @@ section carrying the acceptance table and verdict (for a UI ticket, add the gist
 lines after the upload and re-run the verdict with `--ui`). A PR one size above its ticket is
 flagged in the body, in the checklist, and to the founder in the final summary, and must not be
 merged on green checks alone. Clear the goal
-before any question/error and after PR creation. After a successful PR creation (never on a
-failed `gh pr create`), archive the consumed plan file instead of deleting it. `.plans/` lives
+before any question/error and after PR creation. If `gh pr create` fails because a pull request for the branch already exists, run `gh pr view <branch> --json url,number,state` and treat it as a successful create only when it succeeds with a non-empty url and number and state `OPEN`; otherwise stop and report the original `gh pr create` error.
+After a successful PR creation (never on a failed `gh pr create`; a recovered "already exists" counts as a success), record it in ticket mode with `cenci pipeline artifact <id> --pr <pr-url> --pr-number <n>` (if that call fails after the PR was created, the stop message prints the PR URL), then archive the consumed plan file instead of deleting it. `.plans/` lives
 only in the main checkout (repo root), not in the worktree, so anchor the command to
 `<repo-root>` (the main checkout containing `.worktrees/` — resolve via `git -C <worktree-path>
 rev-parse --path-format=absolute --git-common-dir` if needed, not the worktree itself). A single

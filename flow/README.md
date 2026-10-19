@@ -422,6 +422,8 @@ When you run `/cenci:implement <ticket-id>`, the pipeline executes these phases:
 | `finalized` with a PR | stops with `#<id> already has PR <prUrl> — nothing to resume`; the In Review label and the babysit arm may not have run |
 | anything else | stops with `Unknown pipeline stage <stage> for #<id> — not resuming` |
 
+`cenci run implement apply <ticket> --agent codex` follows the same table: the Codex procedure records the same pipeline stages and routes on them, attaching the recorded worktree and continuing at its Implementation dispatch or its acceptance review in place of Phase 3 or Phase 6.
+
 The pipeline commits only in Phase 9, so a crashed run's work is usually uncommitted in the worktree. It is kept, never stashed or discarded; the baseline health gate runs on an attached worktree only when it has no uncommitted files. A recorded worktree whose directory is gone is recreated; a leftover directory or branch stops with the `ErrWorktreeExists` error and is never removed for you.
 
 Re-planning (`replan`, or "Re-plan from scratch" at the `stale` or `multiple` prompt) over a ticket whose state records a worktree runs `cenci pipeline reset <id>` then `cenci pipeline prepare <id>` before the planner. The worktree and branch on disk are left alone, so the new plan's Phase 2 fails until you remove them, and the new plan records that in its risks.
