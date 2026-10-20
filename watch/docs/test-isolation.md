@@ -26,6 +26,17 @@ Guidance for testing code that branches on ambient process/container state (e.g.
 
 **Rule**: Any test fixture that persists state to a file and has multiple helpers (re-exec'd subprocesses, goroutines, async operations) read-modify-write that file must use explicit file-level locking during the load-mutate-save cycle. Use `syscall.Flock` on a sibling `.lock` file (see `chainfake_test.go`'s `withChainWorldLock` pattern for a reference implementation) to serialize access. Without locking, concurrent `gh` calls (e.g., `CollectTickets` querying multiple repos), dispatcher/pipeline/babysit independent invocations, or future refactors that add concurrency will silently lose updates and make assertions pass when they should fail (#855).
 
+## Automatic Git housekeeping in filesystem snapshots
+
+Real-Git fixtures that compare complete filesystem snapshots must disable both
+`maintenance.auto` and `gc.auto` before the first Git operation, including setup
+of bare origins, and carry those settings into child commands. Automatic
+maintenance can outlive a fixture's commit or push and remove
+`.git/objects/maintenance.lock` during a no-write assertion. Use the shared
+`wtGitConfigEnv` pattern in `worktrees_cmd_test.go`; keep the complete snapshot
+assertions, and use real maintenance/GC pressure plus enabled positive controls
+to verify the fixture stays stable.
+
 ## Ambient config-dir isolation via XDG_CONFIG_HOME
 
 **Context**: Test-harness operations that persist state to XDG-standard directories (e.g., `$XDG_CONFIG_HOME/cenci/config.json`, `$XDG_STATE_HOME/cenci/*`) may read these paths indirectly via ambient environment variables. If a developer's actual `XDG_CONFIG_HOME` is set to a real directory, a test fixture constructor or helper that unconditionally writes to that path will silently clobber the developer's actual config files, with no warning or isolation boundary.
