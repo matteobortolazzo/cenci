@@ -18,8 +18,8 @@ name: sandbox — Deps Bump
 #
 # See sandbox/CLAUDE.md's "Dependency version pins" section for the full tiering.
 #
-# NOTE: `gh pr merge --auto` requires the repo setting allow_auto_merge=true (#150).
-# Until that lands, the auto-merge call fails and the poll loop surfaces it.
+# PR creation requires Actions' "Allow GitHub Actions to create and approve
+# pull requests" setting. `gh pr merge --auto` also needs allow_auto_merge=true.
 
 on:
   schedule:
@@ -71,23 +71,42 @@ jobs:
             git reset --hard origin/main >/dev/null 2>&1
           }
 
-          # Create a branch carrying the already-stamped (uncommitted) change on
-          # main, commit, push, and open a PR. The working tree must already carry
-          # the stamp when this is called; `git checkout -b` carries it onto the
-          # new branch. Every internal step is checked explicitly (errexit is off)
-          # so a failure returns immediately with a specific message. Shared by
-          # `open_and_merge` (auto-merge path) and the non-auto-merge dependencies
-          # (.NET out-of-band, Node) that must stop right after PR creation.
+          # Ensure a PR exists for the stamped update. A previous run may have
+          # pushed the branch before PR creation or auto-merge failed. Reuse that
+          # branch/PR without rewriting it, and keep closed PRs for manual handling.
+          # Shared by auto-merge and manual (.NET out-of-band, Node) dependencies.
           open_pr() {
             branch="$1"; msg="$2"; title="$3"; body="$4"
 
-            git checkout -b "$branch" || { echo "could not create branch $branch" >&2; return 1; }
-            git add -A
-            git commit -m "$msg" || { echo "nothing to commit for $branch (stamp was a no-op?)" >&2; return 1; }
-            git push -u origin "$branch" || { echo "could not push $branch" >&2; return 1; }
+            # --head matches branch names across forks; only trust this repo's PRs.
+            PR_INFO=$(gh pr list --head "$branch" --base main --state all --json url,state,isCrossRepository \
+              --jq '[.[] | select(.isCrossRepository == false)][0] | if . == null then "" else "\(.state) \(.url)" end') \
+              || { echo "could not look up a PR for $branch" >&2; return 1; }
+            PR_STATE="${PR_INFO%% *}"
+            PR_URL="${PR_INFO#* }"
+            case "$PR_STATE" in
+              OPEN|MERGED) echo "Reusing $PR_STATE PR $PR_URL"; return 0 ;;
+              CLOSED) echo "PR for $branch was closed without merging (left for manual handling)" >&2; return 1 ;;
+              "") ;;
+              *) echo "unexpected PR state for $branch: $PR_STATE" >&2; return 1 ;;
+            esac
+
+            git ls-remote --exit-code --heads origin "$branch" >/dev/null
+            remote_status=$?
+            case "$remote_status" in
+              0) echo "Reusing existing branch $branch" ;;
+              2)
+                git checkout -b "$branch" || { echo "could not create branch $branch" >&2; return 1; }
+                git add -A || { echo "could not stage $branch" >&2; return 1; }
+                git commit -m "$msg" || { echo "nothing to commit for $branch (stamp was a no-op?)" >&2; return 1; }
+                git push -u origin "$branch" || { echo "could not push $branch" >&2; return 1; }
+                ;;
+              *) echo "could not look up remote branch $branch" >&2; return 1 ;;
+            esac
 
             PR_URL=$(gh pr create --title "$title" --body "$body" --head "$branch" --base main) \
               || { echo "could not open a PR for $branch" >&2; return 1; }
+            PR_STATE=OPEN
             echo "Opened $PR_URL"
           }
 
@@ -100,15 +119,18 @@ jobs:
 
             # Native auto-merge (replaces the old 2-attempt retry loop). Fails fast if
             # allow_auto_merge is disabled (see #150) instead of waiting out the poll.
-            gh pr merge "$branch" --auto --squash --delete-branch \
-              || { echo "could not enable auto-merge for $branch (is allow_auto_merge enabled? see #150)" >&2; return 1; }
+            if [ "$PR_STATE" != "MERGED" ]; then
+              gh pr merge "$PR_URL" --auto --squash --delete-branch \
+                || { echo "could not enable auto-merge for $branch (is allow_auto_merge enabled? see #150)" >&2; return 1; }
+            fi
 
             # Wait for the merge to land BEFORE dispatching — dispatching earlier
             # could rebuild against a commit that isn't on main yet.
             # ~20 min budget at a 15s interval (80 * 15s).
             merged=false
             for _ in $(seq 1 80); do
-              state=$(gh pr view "$branch" --json state --jq .state 2>/dev/null || echo "")
+              state=$(gh pr view "$PR_URL" --json state --jq .state) \
+                || { echo "could not read PR state for $branch" >&2; return 1; }
               if [ "$state" = "MERGED" ]; then merged=true; break; fi
               if [ "$state" = "CLOSED" ]; then
                 echo "PR for $branch was closed without merging (left for manual handling)" >&2
@@ -156,8 +178,6 @@ jobs:
               FAILED=1
             elif [ "$LATEST" = "$CURRENT" ]; then
               echo "Go is up to date ($CURRENT)"
-            elif git ls-remote --exit-code --heads origin "go-bump-v${LATEST}" >/dev/null 2>&1; then
-              echo "Branch go-bump-v${LATEST} already exists, skipping"
             else
               echo "Bumping Go: $CURRENT -> $LATEST"
               sed -i 's/^ARG GO_VERSION=.*/ARG GO_VERSION='"${LATEST}"'/' sandbox/Dockerfile
@@ -186,8 +206,6 @@ jobs:
               FAILED=1
             elif [ "$LATEST" = "$CURRENT" ]; then
               echo "uv is up to date ($CURRENT)"
-            elif git ls-remote --exit-code --heads origin "uv-bump-v${LATEST}" >/dev/null 2>&1; then
-              echo "Branch uv-bump-v${LATEST} already exists, skipping"
             else
               echo "Bumping uv: $CURRENT -> $LATEST"
               sed -i 's/^ARG UV_VERSION=.*/ARG UV_VERSION='"${LATEST}"'/' sandbox/Dockerfile.base
@@ -231,8 +249,6 @@ jobs:
                 echo ".NET SDK is up to date in-band ($CURRENT)"
               elif ! ver_ge "$LATEST_SDK" "$CURRENT"; then
                 echo ".NET SDK in-band candidate $LATEST_SDK is not newer than $CURRENT, skipping"
-              elif git ls-remote --exit-code --heads origin "dotnet-bump-v${LATEST_SDK}" >/dev/null 2>&1; then
-                echo "Branch dotnet-bump-v${LATEST_SDK} already exists, skipping"
               else
                 echo "Bumping .NET SDK in-band: $CURRENT -> $LATEST_SDK"
                 sed -i 's/^ARG DOTNET_SDK_VERSION=.*/ARG DOTNET_SDK_VERSION='"${LATEST_SDK}"'/' sandbox/Dockerfile
@@ -267,8 +283,6 @@ jobs:
                 elif ! echo "$TOP_SDK" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
                   echo "latest-sdk for channel $TOP_BAND in releases-index.json has an unexpected format: '$TOP_SDK'" >&2
                   FAILED=1
-                elif git ls-remote --exit-code --heads origin "dotnet-bump-v${TOP_SDK}" >/dev/null 2>&1; then
-                  echo "Branch dotnet-bump-v${TOP_SDK} already exists, skipping"
                 else
                   echo "Opening manual .NET SDK feature-band/major bump PR: $CURRENT ($CUR_BAND) -> $TOP_SDK ($TOP_BAND)"
                   sed -i 's/^ARG DOTNET_SDK_VERSION=.*/ARG DOTNET_SDK_VERSION='"${TOP_SDK}"'/' sandbox/Dockerfile
@@ -318,8 +332,6 @@ jobs:
                 FAILED=1
               elif ver_ge "$CURRENT" "$TARGET"; then
                 echo "Node is already on major $CURRENT (no newer LTS major found)"
-              elif git ls-remote --exit-code --heads origin "node-bump-v${TARGET}" >/dev/null 2>&1; then
-                echo "Branch node-bump-v${TARGET} already exists, skipping"
               else
                 echo "Opening manual Node major bump PR: $CURRENT -> $TARGET"
                 sed -i 's/^ARG NODE_MAJOR=.*/ARG NODE_MAJOR='"${TARGET}"'/' sandbox/Dockerfile
