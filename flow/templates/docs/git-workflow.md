@@ -26,5 +26,5 @@ Types: feat, fix, refactor, test, docs, chore
 Ticket ref: `#123` (GitHub) — per config.json
 
 ## PR Workflow
-No hard PR size limit. 1 ticket = 1 PR targeting `main`.
+1 ticket = 1 PR targeting `main`. A PR is measured against its ticket's S/M/L size through the `Size:` line in the PR body; a PR above its ticket's size is flagged and must not be merged on green checks alone.
 Multiple commits within a PR are fine — use them to organize logical steps.

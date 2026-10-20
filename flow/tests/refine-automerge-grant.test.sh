@@ -27,7 +27,7 @@
 # Covered files:
 #   - flow/agents/refiner.md (question-policy inversion + new proposal sections)
 #   - flow/skills/refine/SKILL.md (step 11 automerge:ok grant/withhold)
-#   - flow/skills/configure/SKILL.md (canonical label table rows)
+#   - flow/docs/board-labels.md (canonical label table rows)
 #   - flow/skills/refine/codex.md (portability parity)
 set -uo pipefail
 
@@ -35,7 +35,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || { echo "refine-aut
 FLOW_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)" || { echo "refine-automerge-grant.test.sh: failed to resolve flow directory." >&2; exit 2; }
 REFINER_AGENT="${FLOW_DIR}/agents/refiner.md"
 REFINE_SKILL="${FLOW_DIR}/skills/refine/SKILL.md"
-CONFIGURE_SKILL="${FLOW_DIR}/skills/configure/SKILL.md"
+BOARD_LABELS_DOC="${FLOW_DIR}/docs/board-labels.md"
 REFINE_CODEX="${FLOW_DIR}/skills/refine/codex.md"
 failures=0
 
@@ -135,13 +135,16 @@ assert_file_contains "${REFINE_SKILL}" "${AUTOMERGE_WITHHOLD_BROWSER_MARKER}" \
 assert_file_contains "${REFINE_SKILL}" "${AUTOMERGE_WITHHOLD_VISUALCHECK_MARKER}" \
   "must name the ui:visual-check signal match as a step-11 withhold override on the automerge:ok verdict"
 
-# --- skills/configure/SKILL.md — canonical label table ---------------------
+# --- docs/board-labels.md — canonical label table --------------------------
+# (the table moved out of configure's step 3c in #695; column order is
+# Label | Color | Description | Applied by, so the `| `name` | `color` |`
+# row prefixes below stay byte-identical.)
 
-assert_file_contains "${CONFIGURE_SKILL}" "${CONFIGURE_AUTOMERGE_ROW_MARKER}" \
+assert_file_contains "${BOARD_LABELS_DOC}" "${CONFIGURE_AUTOMERGE_ROW_MARKER}" \
   "must add the automerge:ok row (color 006B75) to the canonical label table"
-assert_file_contains "${CONFIGURE_SKILL}" "${CONFIGURE_BROWSER_ROW_MARKER}" \
+assert_file_contains "${BOARD_LABELS_DOC}" "${CONFIGURE_BROWSER_ROW_MARKER}" \
   "must add the missing Browser row (color BFD4F2) to the canonical label table"
-assert_file_contains "${CONFIGURE_SKILL}" "${CONFIGURE_VISUALCHECK_ROW_MARKER}" \
+assert_file_contains "${BOARD_LABELS_DOC}" "${CONFIGURE_VISUALCHECK_ROW_MARKER}" \
   "must add the missing ui:visual-check row (color FEF2C0) to the canonical label table"
 
 # --- skills/refine/codex.md — portability parity ---------------------------

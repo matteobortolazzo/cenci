@@ -1137,23 +1137,7 @@ After gathering answers:
    gh label create "<name>" --repo <owner>/<repo> --color "<color>" --description "<description>"
    ```
 
-   | Label | Color | Description |
-   |---|---|---|
-   | `Working` | `FBCA04` | Actively being refined or implemented |
-   | `Refined` | `0E8A16` | Ready for implementation |
-   | `Planned` | `1D76DB` | Plan on disk, ready to pick up |
-   | `In Review` | `A2EEEF` | PR open, under review / CI running |
-   | `Implemented` | `6F42C1` | PR merged — done |
-   | `Input Needed` | `D4C5F9` | Planner escalated a question — answer on the ticket to auto-resume |
-   | `Followup` | `C5DEF5` | Deferred/out-of-scope item captured from a session — triage before working |
-   | `Browser` | `BFD4F2` | Implementation needs interactive browser access (Playwright CLI) |
-   | `ui:visual-check` | `FEF2C0` | Visual/layout change — verify in a browser before merge |
-   | `automerge:ok` | `006B75` | Repository policy granted hands-off merge at refinement — babysit may merge this PR without review |
-   | `dispatch-failed` | `b60205` | cenci: dispatched work failed after exhausting its retry budget |
-   | `plan-invalid` | `d93f0b` | cenci: ticket is Planned but has no parseable plan file |
-   | `reconcile-stuck` | `5319e7` | cenci: reconciliation itself is stuck (apply-retry budget exhausted) |
-
-   This is the canonical color/description table. The lifecycle rows above are self-healed by the skills' own `gh label create … || true` fallbacks; the reconciler-owned `dispatch-failed` / `plan-invalid` / `reconcile-stuck` rows are self-healed instead by cenci's Go `GHMutator.EnsureLabels` (not a skill-level fallback) — see "Reconciler-managed labels" under Board lifecycle labels below.
+   Read the plugin's `docs/board-labels.md` before the loop: its `## Labels` table is the one source of every label's `<color>` and `<description>`, and its "How existence is ensured" section says which labels are self-healed by the skills' own `gh label create … || true` fallbacks, by the `cenci pipeline label` CLI, or by the reconciler's Go `GHMutator.EnsureLabels` (not a skill-level fallback) — see "Reconciler-managed labels" under Board lifecycle labels below. If the doc cannot be read, stop and report — never guess a color or description.
 
    `Followup` is a capture-queue marker, never release-blocking (there is no release gate that reads labels). Captured items are triaged out of the queue by grouping/consolidation via `/cenci:maintain backlog` — which merges duplicates and batches small items, supersede-closing the sources — or promoted individually via `/cenci:refine`. See `docs/followup-triage.md`.
 
@@ -2404,7 +2388,7 @@ branch or worktree — this is deliberate: reading policy from the head ref woul
 widen its own `protectedPaths`/caps and self-approve, exactly the fail-open hole this
 feature exists to close.
 
-See the `automerge:ok` label (label table above) for the complementary per-ticket grant —
+See the `automerge:ok` row of the plugin's `docs/board-labels.md` for the complementary per-ticket grant —
 `.cenci/config.json`'s `automerge` block is the repo-wide risk *policy* (paths, size caps,
 merge method); `automerge:ok` is the per-ticket *grant* refinement adds under
 `refinement.automerge: "eligible"` when eligibility checks pass. `refinement.autonomy`
@@ -2544,20 +2528,12 @@ configure creates any missing lifecycle labels during project setup (step 3c) �
 labels (e.g. `Planned`) on projects configured before a label was introduced. The skills apply
 the labels via `gh issue edit` as a ticket moves through the workflow, and self-heal with a
 `gh label create … || true` before adding a label that may be missing. Document the label set
-in the completion summary so the user can mirror it as columns on their board:
-
-| Label | Applied by | Meaning |
-|---|---|---|
-| `Working` | refine (after questions are resolved) / implement (at start) | Actively being refined or implemented |
-| `Refined` | refine | Ready for implementation |
-| `Planned` | implement Phase 1 (plan persisted) | Plan on disk, ready to pick up |
-| `In Review` | implement Phase 9 (at PR-open) | PR is open, under review / CI running |
-| `Implemented` | babysit (on PR merge) | PR merged — done |
-| `Followup` | implement Phase 9 / address-review | Deferred/out-of-scope item captured from a session — triage before working; enters backlog unrefined |
+in the completion summary so the user can mirror it as columns on their board; each label's
+color, description and applier live in the plugin's `docs/board-labels.md`.
 
 `Followup` is orthogonal to the linear lifecycle above — it is never part of the `New → … → Implemented` chain and applies to a separate followup ticket (not the original). It is a capture-queue marker, never release-blocking; it is removed when the item is triaged out of the queue — promoted to real work via `/cenci:refine`, or grouped/superseded via `/cenci:maintain backlog` (see `docs/followup-triage.md`).
 
-`Browser`, `ui:visual-check`, and `automerge:ok` are likewise refine-applied orthogonal markers, not columns in the `New → … → Implemented` chain — like `Followup`, they are not rows in the "Applied by / Meaning" table above, which enumerates board columns only; `automerge:ok` in particular is a per-ticket grant made by `/cenci:refine` under `refinement.automerge: "eligible"` after eligibility checks; never inherited by split children or followups.
+`Browser`, `ui:visual-check`, and `automerge:ok` are likewise refine-applied orthogonal markers, not columns in the `New → … → Implemented` chain — like `Followup`, they are not board columns, though the plugin's `docs/board-labels.md` lists them with the rest of the label set; `automerge:ok` in particular is a per-ticket grant made by `/cenci:refine` under `refinement.automerge: "eligible"` after eligibility checks; never inherited by split children or followups.
 
 A ticket judged trivial by implement's Trivial-Ticket Triage still transits through `Planned` — same labels, same board columns as any other ticket — just collapsed into one session instead of a stop-and-relaunch between `Planned` and `Working`. No new label state is introduced by the trivial-ticket fast path.
 

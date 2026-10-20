@@ -1,191 +1,33 @@
 # AGENTS.md — cenci workflow for Codex
 
-This is the cenci implementation workflow expressed as prose for Codex. Portable
-`cenci:*` convention skills may be available and should be applied when relevant,
-but the Claude-only pipeline skills are not invoked. Codex reads this file and owns
-the planner, implementer, and reviewer roles. Follow the steps in order.
-
-## Golden rules
-
-- **1 ticket = 1 PR.** One unit of work, one branch, one pull request.
-- **Never commit to `main`.** All work happens on a feature branch.
-- **Always work in a git worktree.** The main worktree is read-only.
-- **Tests first.** Write failing tests that assert behavior before writing code.
-- **Self-review before opening the PR.** Run the security / code-quality /
-  silent-failure checklists on your own diff and fix what they surface.
+Repository guidance for Codex. The cenci workflow is carried by the installed native `$cenci:*`
+skills; this file points at them and states the rules that always apply.
 
 ## Workflow
 
-### 1. Understand the ticket
+Use the installed native skills instead of a hand-written procedure:
 
-- Read the ticket: `gh issue view <n>`.
-- Restate the acceptance criteria in your own words.
-- List the edge cases and error scenarios the change must handle.
-- If the requirements are genuinely unclear, stop and ask before writing code —
-  do not guess at scope.
+- `$cenci:refine` — turn a ticket into an agreed, sized scope.
+- `$cenci:implement` — plan and build the change for a refined ticket.
+- `$cenci:review` — review a diff against the ticket's acceptance criteria.
+- `$cenci:babysit` — watch a pull request through CI and merge.
 
-### 2. Worktree
+The cenci plugin's `docs/codex.md` lists every native skill and what each supports today.
 
-Create an isolated worktree and branch off `main`, and do all work inside it:
+The native procedures use `.plans/` plan files, the board lifecycle labels and babysit, the same as the Claude Code pipeline.
 
-```bash
-git worktree add .worktrees/<id>-<desc> -b feature/<id>-<desc> main
-```
+The full gated ticket-to-PR flow is still under native acceptance, so do not treat one working skill as proof that the whole flow works.
 
-- Operate **inside** the worktree for the whole task.
-- The main worktree stays on `main` and is read-only.
-- `.worktrees/` must be gitignored — add it to `.gitignore` if it isn't already.
+If a native procedure is unavailable or stops, report and stop; do not rebuild the pipeline by hand.
 
-### 3. Red — tests first
+## Critical Rules
 
-Write tests that fail because the behavior doesn't exist yet.
+- Always work in a feature worktree; never implement directly in the main worktree and never commit directly to main.
+- Write tests first; assert behavior rather than implementation details.
+- Review your own diff for security, code quality and silent failures before opening a pull request.
+- Keep tickets well scoped: one ticket equals one pull request.
+- When a step does not need the user's input, keep going and put status notes in the same message as the next action. Stop and ask only when you cannot continue without the user, or before anything destructive: deleting data, force-pushing, or changing anything outside this repository.
 
-- Assert **behavior**: status codes, response shapes, state transitions, visible
-  UI states, error behavior.
-- **Never** assert call counts, internal method names, hardcoded magic values, or
-  values copied from the implementation. Tests encode requirements, not code.
-- Prefer integration tests that exercise the real flow end-to-end. Write unit
-  tests only for complex domain logic: calculations, state machines, validation
-  rules, or parsing.
-- Tests must be readable, deterministic, and independent.
-- Run the tests and confirm they fail for the expected reason. If a new test
-  passes before any implementation exists, investigate whether it actually
-  covers new behavior.
+## Reference Docs
 
-### 4. Green — simplest passing implementation
-
-- Follow the plan; write the **simplest correct** code that makes the tests pass.
-- No premature abstraction, no dead code, no commented-out code, no TODOs without
-  a ticket reference.
-- Update `README`/docs if behavior, setup, configuration, or a user-visible
-  contract changes.
-- Run the **full build** and the **full test suite**. On failure, analyze the
-  root cause, fix, and rerun. Cap this at ~3 attempts; if it still fails, stop
-  and report the exact commands, errors, and your best hypothesis.
-
-### 5. Refactor — touched code only
-
-Clean up only the code you changed; behavior must not change.
-
-- Remove dead code and unnecessary abstractions.
-- Consolidate duplicated logic **only** when it appears 3+ times or is clearly
-  established locally.
-- Clarify unclear names; simplify complex conditionals; remove overly clever code.
-- Rerun the full test suite. If a refactor breaks a test, revert that one step and
-  try a simpler cleanup or skip it.
-
-### 6. Self-review
-
-You are the reviewer too. Run all three checklists over your diff
-(`git diff origin/main...`). Fix what each requires before moving on.
-
-**Security review.** Trace data flow from input to storage/output.
-
-- Authorization is enforced at every access point.
-- Input validation exists and is correct.
-- No injection: SQL, XSS, or command injection.
-- No secrets, PII, or tokens in logs or error responses.
-- No stack traces leaked to users.
-- Cover the OWASP Top 10 items relevant to the diff.
-- **Actions**: Critical/High → fix and rerun tests. Medium/Low → **fix now** if the fix is straightforward. Otherwise, discard by default — test-coverage gaps, doc polish, "consider X" suggestions, and refactor/tech-debt observations are never tracked, only recorded as a one-line "Considered and discarded" entry in the PR's `## Notes` section below, which never becomes a followup item. **Track** it only when it is an actual defect with a concrete, realistic trigger path a user can hit in real use by noting it in the PR's `## Notes` section. Security findings take priority over code-quality findings.
-
-**Code-quality review.**
-
-- Follows the project's conventions.
-- Covers the ticket's acceptance criteria.
-- No obvious bugs; edge cases handled; error handling complete.
-- Performance is acceptable; names are clear.
-- No dead or commented-out code; no TODOs without ticket references.
-- No unused variables or type errors; documentation is adequate.
-- **Severity tiers**: Must-Fix → fix all. Should-Fix → **fix now** if the fix is straightforward. Otherwise, discard by default — test-coverage gaps, doc polish, "consider X" suggestions, and refactor/tech-debt observations are never tracked, only recorded as a one-line "Considered and discarded" entry in the PR's `## Notes` section below, which never becomes a followup item. **Track** it only when it is an actual defect with a concrete, realistic trigger path a user can hit in real use by noting it in the PR's `## Notes` section. Nitpick → ignore unless trivial.
-- **Findings**: report only problems you would block the merge for; for each, name the file and line, why it is wrong, and a failure scenario (concrete input or state → wrong output, crash, or missed requirement) showing how it fails. No praise or positive notes.
-
-**Silent-failure review.** Scan every new or modified `catch` / `except` /
-`rescue` / `.catch(` / error boundary.
-
-- **Critical**: empty catch blocks; catch-and-ignore; swallowed errors in
-  auth/payment/data paths; missing error propagation in async code; returning
-  HTTP 200 when the operation actually failed.
-- **Warning**: silent fallback to a default on error; log-only handling in
-  production; returning `false`/`null` on error instead of throwing; no-op
-  `.catch()`; an over-broad `try` that masks which operation failed.
-- **Acceptable** (no action): intentional suppression with an explanatory
-  comment; failures in optional/telemetry operations; catch blocks in tests;
-  cleanup-then-rethrow.
-- **Actions**: Critical → fix immediately and rerun tests. Warning in non-critical paths → **fix now** if the fix is straightforward. Otherwise, discard by default — test-coverage gaps, doc polish, "consider X" suggestions, and refactor/tech-debt observations are never tracked, only recorded as a one-line "Considered and discarded" entry in the PR's `## Notes` section below, which never becomes a followup item. **Track** it only when it is an actual defect with a concrete, realistic trigger path a user can hit in real use by noting it in the PR's `## Notes` section.
-
-### 7. PR
-
-1. Rebase onto the latest `main` and re-verify:
-
-   ```bash
-   git fetch origin main
-   git rebase origin/main
-   ```
-
-   Rerun the build and tests. If the rebase conflicts, `git rebase --abort`,
-   report the conflicting files, and stop.
-
-2. Commit with the conventional format — type is one of
-   `feat` / `fix` / `refactor` / `test` / `docs` / `chore`:
-
-   ```
-   <type>(<scope>): <description>
-
-   <body explaining what and why>
-
-   Fixes #<id>
-   ```
-
-   The `Fixes #<id>` trailer goes on the last line so the merge closes the ticket.
-
-3. Push the branch:
-
-   ```bash
-   git push -u origin feature/<id>-<desc>
-   ```
-
-4. Open the PR with `gh pr create`, using this body structure:
-
-   ```markdown
-   ## Summary
-   <1-2 sentences>
-
-   ## Ticket
-   Fixes #<id>
-
-   ## Changes
-   - <change>
-
-   ## Testing
-   <commands run and their results>
-
-   ## Checklist
-   - [x] Tests pass
-   - [x] Security review done
-   - [ ] Documentation updated
-
-   ## Notes
-   <Tracked deferred items — Medium/Low security findings, deferred Should-Fix
-   items, deferred non-critical silent-failure warnings — or "None">
-
-   ### Considered and discarded
-   <One line per discarded finding — what was found + why it was discarded —
-   or "None">
-   ```
-
-5. **UI work**: never commit screenshots to the repo. Host them in a **secret
-   GitHub gist** (`gh gist create` without `--public`) and link the raw image
-   URLs from a `## Screenshots` section in the PR body.
-
-6. **Never commit to `main`.**
-
-## Explicitly excluded
-
-These are Claude Code pipeline mechanics that cenci does not port to Codex. Use
-Codex's native interaction and delegation capabilities where helpful, but do not try
-to invoke the corresponding Claude workflow skills:
-
-- `.plans/` plan files.
-- Babysit label automation and the board lifecycle.
-- `.claude/settings.json`, hooks, and `CLAUDE_PLUGIN_ROOT`.
+- `docs/git-workflow.md` — branching, commits, pull requests, and versioning.

@@ -4,7 +4,7 @@ Claude Code plugin — Markdown skills, JSON config, shell hooks.
 GitHub Issues for tracking. GitHub for code and PRs.
 
 ## Critical Rules
-- ALWAYS read relevant `docs/` files when working in their topic area (e.g., `docs/git-workflow.md` before commits/PRs).
+- ALWAYS read relevant `docs/` files when working in their topic area (e.g., `<repo-root>/docs/git-workflow.md` before commits/PRs).
 - No secrets, credentials, API keys, PII, or stack traces in code or user-facing error responses.
 - Interactive (Claude-only) skills must route every user question/confirmation through `AskUserQuestion` and never say a bare "ask the user"; cross-tool-portable skills use abstract wording instead (e.g., "the client's available user-input mechanism").
 - Shared temp files written by phases or agents must be uniquely scoped by worktree path, run ID, or session UUID — never a fixed path. See `docs/pipeline-safety.md`.
@@ -22,8 +22,9 @@ GitHub Issues for tracking. GitHub for code and PRs.
 
 ## Reference Docs
 CLI grammar, alias, env-var, and naming conventions: `<repo-root>/docs/cli-conventions.md`.
+Git workflow (branching, commits, PRs, versioning, PR size): `<repo-root>/docs/git-workflow.md`.
 On-demand topic docs live at `docs/`:
-- `docs/git-workflow.md` — branching, commits, PRs, versioning
+- `docs/board-labels.md` — the board lifecycle labels (color, description, applier) in one table, and the ensure-then-add procedure every skill that creates a label follows; read before adding or changing a label or a `gh label create` literal
 - `docs/skill-authoring.md` — the three client surfaces (Claude Code `SKILL.md`, Codex `codex.md`, OpenCode `PORTABLE_SKILLS`) every skill change must reconcile before it is finished; and writing skills that generate/regenerate files, especially with external-sourced values
 - `docs/model-escalation.md` — bounded Fable/Astra specialist triggers, dispatch, evidence validation, and failure handling; read before changing model escalation or its workflow call sites
 - `docs/ticket-sizing.md` — the S/M/L ticket-size table (file/line bounds, lane size, the half-window context budget) mirrored from the Velka workflow docs, the four points where it is enforced (refine, planner Size Check, implementation lanes, PR size line), and when to split; read before touching any of those
