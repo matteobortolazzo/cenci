@@ -530,16 +530,16 @@ func TestWindowCleanup_CloseRemovesThePendingCloseEntryForThatWindow(t *testing.
 	kept := fx.addWindow(783, dir)
 	fx.reader.script(repo, 782, ticketstate.Finished)
 	fx.reader.script(repo, 783, ticketstate.NotFinished)
-	fx.d.registerPendingClose(ipc.PendingClose{Session: "main", WindowIndex: closed.index, WindowName: "782-implement"})
-	fx.d.registerPendingClose(ipc.PendingClose{Session: "main", WindowIndex: kept.index, WindowName: "783-implement"})
+	fx.d.registerPendingClose(ipc.PendingClose{PaneID: closed.pane, Session: "main", WindowIndex: closed.index, WindowName: "782-implement"})
+	fx.d.registerPendingClose(ipc.PendingClose{PaneID: kept.pane, Session: "main", WindowIndex: kept.index, WindowName: "783-implement"})
 
 	fx.runPass()
 
 	fx.requireClosed(closed)
-	if _, ok := fx.d.pending[pendingCloseKey("main", closed.index)]; ok {
+	if _, ok := fx.d.pending[closed.pane]; ok {
 		t.Error("pending-close entry of the closed window still registered, want it removed")
 	}
-	if _, ok := fx.d.pending[pendingCloseKey("main", kept.index)]; !ok {
+	if _, ok := fx.d.pending[kept.pane]; !ok {
 		t.Error("pending-close entry of the window that was not closed was removed, want it kept")
 	}
 

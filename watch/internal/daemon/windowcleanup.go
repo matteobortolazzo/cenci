@@ -93,7 +93,7 @@ func (d *Daemon) snapshotCleanupCandidates() []cleanupCandidate {
 		if err != nil || num < 1 || strconv.Itoa(num) != ticket {
 			continue
 		}
-		windowKey := pendingCloseKey(wi.Session, wi.WindowIndex)
+		windowKey := wi.Session + ":" + wi.WindowIndex
 		if seen[windowKey] {
 			continue
 		}
@@ -223,8 +223,8 @@ func (d *Daemon) applyWindowCleanup(res windowCleanupResult) {
 				continue
 			}
 		}
-		key := pendingCloseKey(c.session, c.windowIndex)
-		delete(d.pending, key)
+		key := c.session + ":" + c.windowIndex
+		delete(d.pending, c.paneID)
 		log.Printf("window-cleanup: closing %s (%s): ticket #%d is finished", key, c.windowName, c.num)
 		// The kill runs off the loop after a grace wait, so it targets the pane id
 		// (resolved to its window by tmux at kill time), not session:index: with

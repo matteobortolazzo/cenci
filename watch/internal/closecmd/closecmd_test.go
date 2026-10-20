@@ -51,9 +51,9 @@ func (f *fakeRegister) Register(w watch.WindowState) error {
 
 func TestRun_NumberMatchesExactAndPrefixNotLongerNumber(t *testing.T) {
 	snap := &watch.StateSnapshot{Windows: []watch.WindowState{
-		{Session: "s1", WindowIndex: "0", WindowName: "42", Status: "done"},
-		{Session: "s1", WindowIndex: "1", WindowName: "42-refine", Status: "done"},
-		{Session: "s1", WindowIndex: "2", WindowName: "420-x", Status: "done"},
+		{Session: "s1", WindowIndex: "0", PaneID: "%0", WindowName: "42", Status: "done"},
+		{Session: "s1", WindowIndex: "1", PaneID: "%1", WindowName: "42-refine", Status: "done"},
+		{Session: "s1", WindowIndex: "2", PaneID: "%2", WindowName: "420-x", Status: "done"},
 	}}
 	killer := &fakeKiller{}
 	decisions, err := closecmd.Run(closecmd.Opts{
@@ -79,8 +79,8 @@ func TestRun_NumberMatchesExactAndPrefixNotLongerNumber(t *testing.T) {
 
 func TestRun_ExactNameMatch(t *testing.T) {
 	snap := &watch.StateSnapshot{Windows: []watch.WindowState{
-		{Session: "s1", WindowIndex: "0", WindowName: "my-window", Status: "done"},
-		{Session: "s1", WindowIndex: "1", WindowName: "my-window-2", Status: "done"},
+		{Session: "s1", WindowIndex: "0", PaneID: "%0", WindowName: "my-window", Status: "done"},
+		{Session: "s1", WindowIndex: "1", PaneID: "%1", WindowName: "my-window-2", Status: "done"},
 	}}
 	killer := &fakeKiller{}
 	decisions, err := closecmd.Run(closecmd.Opts{
@@ -98,8 +98,8 @@ func TestRun_ExactNameMatch(t *testing.T) {
 
 func TestRun_MultiMatchAcrossSessionsClosesAllNonBusy(t *testing.T) {
 	snap := &watch.StateSnapshot{Windows: []watch.WindowState{
-		{Session: "sess-a", WindowIndex: "3", WindowName: "42-implement", Status: "done"},
-		{Session: "sess-b", WindowIndex: "1", WindowName: "42-review", Status: "idle"},
+		{Session: "sess-a", WindowIndex: "3", PaneID: "%3", WindowName: "42-implement", Status: "done"},
+		{Session: "sess-b", WindowIndex: "1", PaneID: "%1", WindowName: "42-review", Status: "idle"},
 	}}
 	killer := &fakeKiller{}
 	decisions, err := closecmd.Run(closecmd.Opts{
@@ -113,7 +113,7 @@ func TestRun_MultiMatchAcrossSessionsClosesAllNonBusy(t *testing.T) {
 	if len(decisions) != 2 {
 		t.Fatalf("decisions = %+v, want 2", decisions)
 	}
-	wantTargets := map[string]bool{"=sess-a:3": true, "=sess-b:1": true}
+	wantTargets := map[string]bool{"%3": true, "%1": true}
 	for _, target := range killer.killed {
 		if !wantTargets[target] {
 			t.Errorf("unexpected kill target %q", target)
@@ -127,8 +127,8 @@ func TestRun_MultiMatchAcrossSessionsClosesAllNonBusy(t *testing.T) {
 
 func TestRun_RunningAndNeedInputSkippedWithoutForce(t *testing.T) {
 	snap := &watch.StateSnapshot{Windows: []watch.WindowState{
-		{Session: "s1", WindowIndex: "0", WindowName: "42-a", Status: "running"},
-		{Session: "s1", WindowIndex: "1", WindowName: "42-b", Status: "need-input"},
+		{Session: "s1", WindowIndex: "0", PaneID: "%0", WindowName: "42-a", Status: "running"},
+		{Session: "s1", WindowIndex: "1", PaneID: "%1", WindowName: "42-b", Status: "need-input"},
 	}}
 	killer := &fakeKiller{}
 	decisions, err := closecmd.Run(closecmd.Opts{
@@ -151,8 +151,8 @@ func TestRun_RunningAndNeedInputSkippedWithoutForce(t *testing.T) {
 
 func TestRun_RunningAndNeedInputClosedWithForce(t *testing.T) {
 	snap := &watch.StateSnapshot{Windows: []watch.WindowState{
-		{Session: "s1", WindowIndex: "0", WindowName: "42-a", Status: "running"},
-		{Session: "s1", WindowIndex: "1", WindowName: "42-b", Status: "need-input"},
+		{Session: "s1", WindowIndex: "0", PaneID: "%0", WindowName: "42-a", Status: "running"},
+		{Session: "s1", WindowIndex: "1", PaneID: "%1", WindowName: "42-b", Status: "need-input"},
 	}}
 	killer := &fakeKiller{}
 	decisions, err := closecmd.Run(closecmd.Opts{
@@ -200,8 +200,8 @@ func TestRun_SnapshotReadErrorReturnsErrorKillerNeverCalled(t *testing.T) {
 // daemon as pending-close, one call per skipped window.
 func TestRun_BusySkipCallsRegisterForEachSkippedWindow(t *testing.T) {
 	snap := &watch.StateSnapshot{Windows: []watch.WindowState{
-		{Session: "s1", WindowIndex: "0", WindowName: "42-a", Status: "running"},
-		{Session: "s1", WindowIndex: "1", WindowName: "42-b", Status: "need-input"},
+		{Session: "s1", WindowIndex: "0", PaneID: "%0", WindowName: "42-a", Status: "running"},
+		{Session: "s1", WindowIndex: "1", PaneID: "%1", WindowName: "42-b", Status: "need-input"},
 	}}
 	killer := &fakeKiller{}
 	fr := &fakeRegister{}
@@ -233,8 +233,8 @@ func TestRun_BusySkipCallsRegisterForEachSkippedWindow(t *testing.T) {
 // would-close/skipped-busy decisions, but must call Register zero times.
 func TestRun_DryRunNeverCallsRegisterEvenForBusyWindows(t *testing.T) {
 	snap := &watch.StateSnapshot{Windows: []watch.WindowState{
-		{Session: "s1", WindowIndex: "0", WindowName: "42-a", Status: "done"},
-		{Session: "s1", WindowIndex: "1", WindowName: "42-b", Status: "running"},
+		{Session: "s1", WindowIndex: "0", PaneID: "%0", WindowName: "42-a", Status: "done"},
+		{Session: "s1", WindowIndex: "1", PaneID: "%1", WindowName: "42-b", Status: "running"},
 	}}
 	fr := &fakeRegister{}
 	decisions, err := closecmd.Run(closecmd.Opts{
@@ -269,8 +269,8 @@ func TestRun_DryRunNeverCallsRegisterEvenForBusyWindows(t *testing.T) {
 // kills busy windows immediately and never registers them.
 func TestRun_ForceClosesImmediatelyNeverRegisters(t *testing.T) {
 	snap := &watch.StateSnapshot{Windows: []watch.WindowState{
-		{Session: "s1", WindowIndex: "0", WindowName: "42-a", Status: "running"},
-		{Session: "s1", WindowIndex: "1", WindowName: "42-b", Status: "need-input"},
+		{Session: "s1", WindowIndex: "0", PaneID: "%0", WindowName: "42-a", Status: "running"},
+		{Session: "s1", WindowIndex: "1", PaneID: "%1", WindowName: "42-b", Status: "need-input"},
 	}}
 	killer := &fakeKiller{}
 	fr := &fakeRegister{}
@@ -321,7 +321,7 @@ func (f *fakeGuard) Guard(ticket string) (bool, string) {
 // lifetime.
 func TestRun_BabysitGuardSkipsWithoutKillOrRegistration(t *testing.T) {
 	snap := &watch.StateSnapshot{Windows: []watch.WindowState{
-		{Session: "s1", WindowIndex: "0", WindowName: "782-implement", Status: "done"},
+		{Session: "s1", WindowIndex: "0", PaneID: "%0", WindowName: "782-implement", Status: "done"},
 	}}
 	killer := &fakeKiller{}
 	fr := &fakeRegister{}
@@ -357,7 +357,7 @@ func TestRun_BabysitGuardSkipsWithoutKillOrRegistration(t *testing.T) {
 // fully transparent: the window closes exactly as it does today.
 func TestRun_BabysitGuardAllowsWhenNotBlocking(t *testing.T) {
 	snap := &watch.StateSnapshot{Windows: []watch.WindowState{
-		{Session: "s1", WindowIndex: "0", WindowName: "782-implement", Status: "done"},
+		{Session: "s1", WindowIndex: "0", PaneID: "%0", WindowName: "782-implement", Status: "done"},
 	}}
 	killer := &fakeKiller{}
 	fg := &fakeGuard{}
@@ -383,7 +383,7 @@ func TestRun_BabysitGuardAllowsWhenNotBlocking(t *testing.T) {
 // window closes and no guard-shaped decision is ever produced.
 func TestRun_NilGuardPreservesExistingBehavior(t *testing.T) {
 	snap := &watch.StateSnapshot{Windows: []watch.WindowState{
-		{Session: "s1", WindowIndex: "0", WindowName: "782-implement", Status: "done"},
+		{Session: "s1", WindowIndex: "0", PaneID: "%0", WindowName: "782-implement", Status: "done"},
 	}}
 	killer := &fakeKiller{}
 	decisions, err := closecmd.Run(closecmd.Opts{
@@ -407,7 +407,7 @@ func TestRun_NilGuardPreservesExistingBehavior(t *testing.T) {
 // consults the guard.
 func TestRun_ForceBypassesBabysitGuard(t *testing.T) {
 	snap := &watch.StateSnapshot{Windows: []watch.WindowState{
-		{Session: "s1", WindowIndex: "0", WindowName: "782-implement", Status: "done"},
+		{Session: "s1", WindowIndex: "0", PaneID: "%0", WindowName: "782-implement", Status: "done"},
 	}}
 	killer := &fakeKiller{}
 	fg := &fakeGuard{blocked: map[string]string{"782": "babysit supervising PR #790, CI not green"}}
@@ -436,7 +436,7 @@ func TestRun_ForceBypassesBabysitGuard(t *testing.T) {
 // run reports the guard's skip and performs no kill and no registration.
 func TestRun_DryRunReportsBabysitSkipWithoutSideEffects(t *testing.T) {
 	snap := &watch.StateSnapshot{Windows: []watch.WindowState{
-		{Session: "s1", WindowIndex: "0", WindowName: "782-implement", Status: "done"},
+		{Session: "s1", WindowIndex: "0", PaneID: "%0", WindowName: "782-implement", Status: "done"},
 	}}
 	killer := &fakeKiller{}
 	fr := &fakeRegister{}
@@ -466,7 +466,7 @@ func TestRun_DryRunReportsBabysitSkipWithoutSideEffects(t *testing.T) {
 // charge of that window.
 func TestRun_BusySkipTakesPrecedenceOverBabysitGuard(t *testing.T) {
 	snap := &watch.StateSnapshot{Windows: []watch.WindowState{
-		{Session: "s1", WindowIndex: "0", WindowName: "782-implement", Status: "running"},
+		{Session: "s1", WindowIndex: "0", PaneID: "%0", WindowName: "782-implement", Status: "running"},
 	}}
 	fr := &fakeRegister{}
 	fg := &fakeGuard{blocked: map[string]string{"782": "babysit supervising PR #790, CI not green"}}
@@ -493,7 +493,7 @@ func TestRun_BusySkipTakesPrecedenceOverBabysitGuard(t *testing.T) {
 // ticket to join a supervisor on, so it closes as before (fail open).
 func TestRun_GuardNotConsultedForSlugWindows(t *testing.T) {
 	snap := &watch.StateSnapshot{Windows: []watch.WindowState{
-		{Session: "s1", WindowIndex: "0", WindowName: "add-dark-mode", Status: "done"},
+		{Session: "s1", WindowIndex: "0", PaneID: "%0", WindowName: "add-dark-mode", Status: "done"},
 	}}
 	killer := &fakeKiller{}
 	fg := &fakeGuard{}
@@ -516,7 +516,7 @@ func TestRun_GuardNotConsultedForSlugWindows(t *testing.T) {
 
 func TestRun_NoMatchesNoKillsNoError(t *testing.T) {
 	snap := &watch.StateSnapshot{Windows: []watch.WindowState{
-		{Session: "s1", WindowIndex: "0", WindowName: "99-other", Status: "done"},
+		{Session: "s1", WindowIndex: "0", PaneID: "%0", WindowName: "99-other", Status: "done"},
 	}}
 	killer := &fakeKiller{}
 	decisions, err := closecmd.Run(closecmd.Opts{
@@ -544,7 +544,7 @@ func TestRun_NoMatchesNoKillsNoError(t *testing.T) {
 
 const (
 	ccLaunchID = "0123456789abcdef0123456789abcdef"
-	ccTarget   = "=s1:1"
+	ccTarget   = "%1"
 	ccWindow   = "42-implement"
 )
 
@@ -564,7 +564,7 @@ func realProcessKiller() func(string) error {
 
 func closeSnapshot(status string) *watch.StateSnapshot {
 	return &watch.StateSnapshot{Windows: []watch.WindowState{
-		{Session: "s1", WindowIndex: "1", WindowName: ccWindow, Status: status},
+		{Session: "s1", WindowIndex: "1", PaneID: "%1", WindowName: ccWindow, Status: status},
 	}}
 }
 

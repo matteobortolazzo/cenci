@@ -1452,6 +1452,17 @@ cenci close 42 --force
 Behavior:
 - Reads a single snapshot from the daemon; if the daemon is unreachable, it exits 1
   and kills nothing (fail-safe).
+- Carries the snapshot's stable `pane_id` (`%N`) through process shutdown and
+  window termination, including deferred closes and babysit retries. Renumbering
+  windows or reusing an index cannot redirect a close to another agent. The
+  pending-close message and daemon registry retain that same identity;
+  `session` and `window_index` remain display locations. Missing or malformed
+  identity fails closed with a diagnostic (exit 1 for `cenci close`, a logged
+  rejection for pending-close registrations). Upgrade both the daemon and
+  `cenci close` clients, restart the daemon, and retry using a fresh snapshot;
+  older direct-close clients still use indexes even with an upgraded daemon.
+  `--force` cannot bypass this
+  identity requirement; `--dry-run` never registers or kills a window.
 - A numeric target matches every window named exactly that number or prefixed
   `<number>-` (e.g. `42` matches `42` and `42-refine`, but not `420-anything`).
   A non-numeric target matches windows by exact name.

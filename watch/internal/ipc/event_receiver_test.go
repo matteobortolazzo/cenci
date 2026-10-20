@@ -289,7 +289,7 @@ func TestSendPendingClose_RoundTripsToPendingCloses(t *testing.T) {
 	// Allow listener to start.
 	time.Sleep(10 * time.Millisecond)
 
-	pc := PendingClose{Session: "main", WindowIndex: "0", WindowName: "42-implement"}
+	pc := PendingClose{PaneID: "%7", Session: "main", WindowIndex: "0", WindowName: "42-implement"}
 	if err := SendPendingClose(path, pc); err != nil {
 		t.Fatalf("SendPendingClose: %v", err)
 	}

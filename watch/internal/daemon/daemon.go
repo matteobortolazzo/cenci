@@ -72,7 +72,7 @@ type Daemon struct {
 	closeGuard func(ticket string) (bool, string)
 
 	// pending is the in-memory pending-close registry (#522), keyed by
-	// "session:index" (the same identity closecmd kills by). Dropped on
+	// stable pane ID (the same identity closecmd kills by). Dropped on
 	// daemon restart, per plan assumption; pruned when the owning session is
 	// removed (runSweep/ttlSweep) to bound growth from windows closed by
 	// other means.

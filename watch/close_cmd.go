@@ -27,6 +27,7 @@ import (
 // existing SendEvent pattern.
 func registerPendingClose(w watch.WindowState) error {
 	return ipc.SendPendingClose(ipc.DefaultEventSocketPath(), ipc.PendingClose{
+		PaneID:      w.PaneID,
 		Session:     w.Session,
 		WindowIndex: w.WindowIndex,
 		WindowName:  w.WindowName,

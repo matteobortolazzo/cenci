@@ -57,7 +57,7 @@ func TestClient_ReadsSnapshotsInOrderThenClose(t *testing.T) {
 		}
 		if werr := enc.Encode(watch.StateSnapshot{
 			Timestamp: "t2",
-			Windows:   []watch.WindowState{{WindowName: "42-fix-bug", Status: "running"}},
+			Windows:   []watch.WindowState{{WindowName: "42-fix-bug", Status: "running", PaneID: "%42"}},
 			Summary:   watch.StatusSummary{Total: 2, Running: 1},
 		}); werr != nil {
 			served <- werr
@@ -89,6 +89,9 @@ func TestClient_ReadsSnapshotsInOrderThenClose(t *testing.T) {
 	}
 	if len(got2.Windows) != 1 || got2.Windows[0].WindowName != "42-fix-bug" {
 		t.Errorf("snapshot 2 windows = %+v, want one window named 42-fix-bug", got2.Windows)
+	}
+	if len(got2.Windows) != 1 || got2.Windows[0].PaneID != "%42" {
+		t.Errorf("snapshot 2 windows = %+v, want stable pane identity %%42", got2.Windows)
 	}
 
 	if err := <-served; err != nil {

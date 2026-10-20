@@ -37,7 +37,7 @@ func trackedSessionMock() *tmuxtest.MockClient {
 // TestDaemon_PendingCloseKilledOnSessionEnd covers the core self-healing
 // path (#522 AC1/AC2): a window registered as pending-close is killed via
 // the injected killer seam once the daemon observes the owning session's
-// main-agent SessionEnd, targeting the exact "=session:index" the window
+// main-agent SessionEnd, targeting the exact stable pane identity the window
 // resolves to.
 func TestDaemon_PendingCloseKilledOnSessionEnd(t *testing.T) {
 	mc := trackedSessionMock()
@@ -47,21 +47,21 @@ func TestDaemon_PendingCloseKilledOnSessionEnd(t *testing.T) {
 	d.handleEvent(ipc.HookEvent{EventType: "SessionStart", SessionID: "sess1", TmuxPane: "%0"})
 	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "sess1", TmuxPane: "%0"})
 
-	d.registerPendingClose(ipc.PendingClose{Session: "main", WindowIndex: "0", WindowName: "bash"})
+	d.registerPendingClose(ipc.PendingClose{PaneID: "%0", Session: "main", WindowIndex: "0", WindowName: "bash"})
 
 	d.handleEvent(ipc.HookEvent{EventType: "SessionEnd", SessionID: "sess1", TmuxPane: "%0"})
 
 	if len(fk.killed) != 1 {
 		t.Fatalf("killed = %v, want exactly 1 kill on SessionEnd for a registered pending-close", fk.killed)
 	}
-	if fk.killed[0] != "=main:0" {
-		t.Errorf("killed target = %q, want %q", fk.killed[0], "=main:0")
+	if fk.killed[0] != "%0" {
+		t.Errorf("killed target = %q, want %q", fk.killed[0], "%0")
 	}
 }
 
 // TestDaemon_PendingCloseDuplicateRegistrationDedup covers #522 AC ("exactly
 // one pending-close entry and exactly one eventual kill"): registering the
-// same session:index pending-close twice (e.g. lazyboards re-firing cleanup
+// same pane pending-close twice (e.g. lazyboards re-firing cleanup
 // before the session ends) must not produce a duplicate registry entry or a
 // duplicate kill.
 func TestDaemon_PendingCloseDuplicateRegistrationDedup(t *testing.T) {
@@ -72,11 +72,11 @@ func TestDaemon_PendingCloseDuplicateRegistrationDedup(t *testing.T) {
 	d.handleEvent(ipc.HookEvent{EventType: "SessionStart", SessionID: "sess1", TmuxPane: "%0"})
 	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "sess1", TmuxPane: "%0"})
 
-	d.registerPendingClose(ipc.PendingClose{Session: "main", WindowIndex: "0", WindowName: "bash"})
-	d.registerPendingClose(ipc.PendingClose{Session: "main", WindowIndex: "0", WindowName: "bash"})
+	d.registerPendingClose(ipc.PendingClose{PaneID: "%0", Session: "main", WindowIndex: "0", WindowName: "bash"})
+	d.registerPendingClose(ipc.PendingClose{PaneID: "%0", Session: "main", WindowIndex: "0", WindowName: "bash"})
 
 	if len(d.pending) != 1 {
-		t.Fatalf("pending registry size = %d, want exactly 1 entry after registering the same session:index twice", len(d.pending))
+		t.Fatalf("pending registry size = %d, want exactly 1 entry after registering the same pane twice", len(d.pending))
 	}
 
 	d.handleEvent(ipc.HookEvent{EventType: "SessionEnd", SessionID: "sess1", TmuxPane: "%0"})
@@ -127,7 +127,7 @@ func TestDaemon_PendingClosePrunedWhenWindowGoneViaSweep(t *testing.T) {
 	d.handleEvent(ipc.HookEvent{EventType: "SessionStart", SessionID: "sess1", TmuxPane: "%0"})
 	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "sess1", TmuxPane: "%0"})
 
-	d.registerPendingClose(ipc.PendingClose{Session: "main", WindowIndex: "0", WindowName: "bash"})
+	d.registerPendingClose(ipc.PendingClose{PaneID: "%0", Session: "main", WindowIndex: "0", WindowName: "bash"})
 	if len(d.pending) != 1 {
 		t.Fatalf("pending registry size = %d, want exactly 1 entry after registration", len(d.pending))
 	}
@@ -147,7 +147,7 @@ func TestDaemon_PendingClosePrunedWhenWindowGoneViaSweep(t *testing.T) {
 // handoff interaction (#707): a SessionEnd with reason "clear"/"resume" hands
 // the window to a successor session, so a registered pending-close must NOT
 // kill the window mid-continuation. The entry stays registered — it is keyed
-// by "session:index", which survives the handoff — and fires once the
+// by pane identity, which survives the handoff — and fires once the
 // successor session's own SessionEnd arrives.
 func TestDaemon_PendingCloseSurvivesSessionHandoff(t *testing.T) {
 	mc := trackedSessionMock()
@@ -157,7 +157,7 @@ func TestDaemon_PendingCloseSurvivesSessionHandoff(t *testing.T) {
 	d.handleEvent(ipc.HookEvent{EventType: "SessionStart", SessionID: "sess1", TmuxPane: "%0"})
 	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "sess1", TmuxPane: "%0"})
 
-	d.registerPendingClose(ipc.PendingClose{Session: "main", WindowIndex: "0", WindowName: "bash"})
+	d.registerPendingClose(ipc.PendingClose{PaneID: "%0", Session: "main", WindowIndex: "0", WindowName: "bash"})
 
 	// /clear ends sess1 but the successor continues in the same pane: the
 	// window must survive and the pending-close entry must stay registered.
@@ -174,8 +174,8 @@ func TestDaemon_PendingCloseSurvivesSessionHandoff(t *testing.T) {
 	d.handleEvent(ipc.HookEvent{EventType: "SessionStart", SessionID: "sess2", TmuxPane: "%0"})
 	d.handleEvent(ipc.HookEvent{EventType: "SessionEnd", SessionID: "sess2", TmuxPane: "%0"})
 
-	if len(fk.killed) != 1 || fk.killed[0] != "=main:0" {
-		t.Errorf("killed = %v, want exactly [=main:0] once the successor session ends", fk.killed)
+	if len(fk.killed) != 1 || fk.killed[0] != "%0" {
+		t.Errorf("killed = %v, want exactly [%%0] once the successor session ends", fk.killed)
 	}
 	if len(d.pending) != 0 {
 		t.Errorf("pending registry size = %d, want 0 after the successor's SessionEnd fired the kill", len(d.pending))
@@ -215,7 +215,7 @@ func babysitTrackedMock() *tmuxtest.MockClient {
 func startTrackedSession(d *Daemon) {
 	d.handleEvent(ipc.HookEvent{EventType: "SessionStart", SessionID: "sess1", TmuxPane: "%0"})
 	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "sess1", TmuxPane: "%0"})
-	d.registerPendingClose(ipc.PendingClose{Session: "main", WindowIndex: "0", WindowName: "782-implement"})
+	d.registerPendingClose(ipc.PendingClose{PaneID: "%0", Session: "main", WindowIndex: "0", WindowName: "782-implement"})
 }
 
 // TestDaemon_PendingCloseHeldWhileBabysitBlocks covers the deferred-kill half
@@ -263,8 +263,8 @@ func TestDaemon_BlockedPendingCloseKilledOnceGuardClears(t *testing.T) {
 	now = now.Add(pendingCloseRecheckInterval + time.Second)
 	d.runSweep()
 
-	if len(fk.killed) != 1 || fk.killed[0] != "=main:0" {
-		t.Fatalf("killed = %v, want exactly [=main:0] once the guard clears", fk.killed)
+	if len(fk.killed) != 1 || fk.killed[0] != "%0" {
+		t.Fatalf("killed = %v, want exactly [%%0] once the guard clears", fk.killed)
 	}
 	if len(d.pending) != 0 {
 		t.Errorf("pending registry size = %d, want 0 after the retry fired", len(d.pending))
@@ -318,7 +318,7 @@ func TestDaemon_NonBlockingGuardKeepsSessionEndKill(t *testing.T) {
 	startTrackedSession(d)
 	d.handleEvent(ipc.HookEvent{EventType: "SessionEnd", SessionID: "sess1", TmuxPane: "%0"})
 
-	if len(fk.killed) != 1 || fk.killed[0] != "=main:0" {
+	if len(fk.killed) != 1 || fk.killed[0] != "%0" {
 		t.Errorf("killed = %v, want the pending-close to fire at SessionEnd when nothing blocks", fk.killed)
 	}
 	if len(d.pending) != 0 {
@@ -338,7 +338,7 @@ func TestDaemon_SubagentSessionEndDoesNotKillPendingClose(t *testing.T) {
 	d.handleEvent(ipc.HookEvent{EventType: "SessionStart", SessionID: "sess1", TmuxPane: "%0"})
 	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "sess1", TmuxPane: "%0"})
 
-	d.registerPendingClose(ipc.PendingClose{Session: "main", WindowIndex: "0", WindowName: "bash"})
+	d.registerPendingClose(ipc.PendingClose{PaneID: "%0", Session: "main", WindowIndex: "0", WindowName: "bash"})
 
 	// A subagent's own SessionEnd must not trigger the kill.
 	d.handleEvent(ipc.HookEvent{EventType: "SessionEnd", SessionID: "sess1", TmuxPane: "%0", AgentID: "sub1"})
@@ -399,7 +399,7 @@ func TestDaemon_PendingCloseHeldByArmingPidZeroState(t *testing.T) {
 const (
 	dcLaunchID = "0123456789abcdef0123456789abcdef"
 	// dcTarget is the exact target of babysitTrackedMock's window ("main", index 0).
-	dcTarget = "=main:0"
+	dcTarget = "%0"
 	// dcOffLoopMargin is the headroom the off-loop timeout adds on top of the
 	// SIGTERM->SIGKILL grace window (plan assumption).
 	dcOffLoopMargin = 60 * time.Second

@@ -37,6 +37,7 @@ func (d *Daemon) buildSnapshot() ipc.StateSnapshot {
 		if wi := d.frontend.WindowInfo(key); wi != nil {
 			w.Session = wi.Session
 			w.WindowIndex = wi.WindowIndex
+			w.PaneID = wi.PaneID
 			w.WindowName = wi.WindowName
 			w.ManuallyNamed = wi.ManuallyNamed
 			e.paneless = false
