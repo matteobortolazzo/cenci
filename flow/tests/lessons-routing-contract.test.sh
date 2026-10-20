@@ -406,6 +406,63 @@ case_structured_record_in_record_dir() {
   rm -rf -- "${fixture}"
 }
 
+# Apply the collector's documented search shape to fixture paths rather than
+# assuming a prose mention of per-project owners makes them discoverable. This
+# checks instruction/search-shape coverage, not autonomous admission judgment.
+case_fallback_owner_outside_plan() {
+  assert_not_contains "${LESSONS_SECTION}" 'telling the collector to write only to the owners and lesson system it lists' 'Phase 8 must allow independently found fitting owners'
+  if ! python3 - "${FLOW_DIR}" <<'PY'
+import glob
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tempfile
+
+flow = Path(sys.argv[1])
+collector = (flow / 'agents/lessons-collector.md').read_text()
+destination = collector.split('### Step 7a: Find the lesson destination\n', 1)[1].split('\n### Step 7b:', 1)[0]
+patterns = re.findall(r'`<project-root>/([^`]*\*[^`]*)`', destination)
+assert patterns, 'collector destination step has no executable Glob search shape'
+
+with tempfile.TemporaryDirectory(prefix='lessons-owner-fixture.') as tmp:
+    root = Path(tmp)
+    # A code-only plan provides no owner path. Each fitting doc must still be
+    # reachable through the actual search shape and real discovery output.
+    (root / 'plan.md').write_text('### Files to Modify\n- src/retry.go\n\n### Documentation Routing\nDiscovery: available\nOwners: none\nLessons: fallback\n')
+    owners = ('docs/retry.md', 'docs/runtime/retry.md',
+              'watch/docs/retry.md', 'packages/api/docs/runtime/retry.md')
+    lesson_paths = ('docs/lessons/README.md', 'docs/lessons/retry.md',
+                    'watch/docs/lessons/README.md', 'watch/docs/lessons/retry.md')
+    for rel in owners:
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('# Retry\n')
+    found = {str(Path(p).relative_to(root))
+             for pattern in patterns
+             for p in glob.glob(str(root / pattern), recursive=True)}
+    missing = set(owners) - found
+    assert not missing, f'Owners: none search misses fitting existing owners: {sorted(missing)}'
+    command = ['bash', str(flow / 'skills/implement/scripts/doc-conventions.sh'), 'discover', str(root)]
+    discovered = subprocess.run(command, check=True, capture_output=True, text=True).stdout
+    discovered_owners = {line.removeprefix('owner: ') for line in discovered.splitlines()
+                         if line.startswith('owner: ')}
+    assert 'lessons: fallback' in discovered.splitlines(), 'fixture must exercise no-system fallback'
+    assert set(owners) <= discovered_owners, 'fixture owners must be real discover destinations'
+    for rel in lesson_paths:
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('# Lesson\n')
+    discovered = subprocess.run(command, check=True, capture_output=True, text=True).stdout
+    discovered_owners = {line.removeprefix('owner: ') for line in discovered.splitlines()
+                         if line.startswith('owner: ')}
+    assert not (set(lesson_paths) & discovered_owners), 'lesson trees must never become fallback owners'
+PY
+  then
+    fail 'fallback owner fixture: the documented search must reach fitting owners outside a code-only plan'
+  fi
+}
+
 # =====================================================================
 # P11 case 5 and P19: with no lesson system in `minimal` mode, no new
 # `docs/<topic>.md` and no `## Critical Rules` bullet is written, and the
@@ -544,7 +601,15 @@ add_req contains collector 'line:**Size check' 'A structured record is never cou
 # Row 20: what a fitting existing owner is.
 add_req contains collector 'line:A **fitting existing owner**' 'is an existing Markdown file under a `docs/` directory (root or per-project)' 'R20-owner-is-docs-markdown'
 add_req contains collector 'line:A **fitting existing owner**' 'excluding the lesson trees (the admission doc and the record directory)' 'R20-owner-excludes-lesson-trees'
-add_req contains collector 'line:A **fitting existing owner**' "Find it from the routing's \`Owners:\` line or with your own \`Glob\` over \`<project-root>/docs/**/*.md\`" 'R20-owner-found-from-owners-or-glob'
+add_req contains collector 'line:A **fitting existing owner**' "Find it from the routing's \`Owners:\` line or with your own \`Glob\` over \`<project-root>/**/docs/**/*.md\`" 'R20-owner-found-from-owners-or-glob'
+OWNER_SEARCH="When discovery is available, \`Owners:\` names the plan's doc edits, not an exhaustive destination allowlist: the collector may find and use a fitting existing owner under root or per-project \`docs/\` even when \`Owners: none\`."
+OWNER_GUARD='When discovery is unavailable, its restriction to plan-named or router-named owners takes precedence over independent owner search.'
+for site in collector phase8 codex; do
+  add_req contains "${site}" 'line:When discovery is available, `Owners:`' "${OWNER_SEARCH}" "R20-${site}-independent-owner"
+  add_req contains "${site}" 'line:When discovery is unavailable, its restriction' "${OWNER_GUARD}" "R20-${site}-unavailable-precedence"
+done
+add_req contains collector 'section:## Inputs' 'root and project `AGENTS.md` route to' 'R20-unavailable-reads-project-router'
+add_req contains collector 'section:### Step 7a: Find the lesson destination' 'Do not descend into `.git/`, `.worktrees/`, `.plans/`, `node_modules/`, `vendor/`, ignored paths or generated build trees, and never follow symlinks outside `<project-root>`.' 'R20-owner-search-repository-boundary'
 # Row 21: a structured write is exactly one new record; nothing existing is edited.
 add_req contains collector 'line:Read the admission doc at' 'write exactly one new record file under' 'R21-collector-exactly-one-record'
 add_req contains collector 'line:Read the admission doc at' 'Never edit the admission doc or an existing record.' 'R21-collector-never-edit'
@@ -735,6 +800,7 @@ case_tdd_red_green_no_lessons
 case_admitted_rework_one_entry
 case_already_owned_dropped
 case_structured_record_in_record_dir
+case_fallback_owner_outside_plan
 case_minimal_no_system_no_write
 check_p22_lesson_validation
 check_p25_readme

@@ -106,7 +106,10 @@ Run `lessons-collector` only if at least one occurred:
 
 Do not run for smooth sessions, normal TDD red/green progression, or obvious findings already covered by existing rules.
 
-Pass that exact verified `<worktree-path>` as `<project-root>`, and forward the plan's `### Documentation Routing` section from `## Route Documentation Writes` verbatim (its `Lessons:` line included; when that step ran `discover` itself, forward its stdout instead), telling the collector to write only to the owners and lesson system it lists. Also forward the policy resolved above as the single line `Documentation policy: <minimal|default>`; an unresolved policy is forwarded as `default`. The collector has no shell, so it never resolves the policy itself.
+Pass that exact verified `<worktree-path>` as `<project-root>`, and forward the plan's `### Documentation Routing` section from `## Route Documentation Writes` verbatim (its `Lessons:` line included; when that step ran `discover` itself, forward its stdout instead). Also forward the policy resolved above as the single line `Documentation policy: <minimal|default>`; an unresolved policy is forwarded as `default`. The collector has no shell, so it never resolves the policy itself.
+
+When discovery is available, `Owners:` names the plan's doc edits, not an exhaustive destination allowlist: the collector may find and use a fitting existing owner under root or per-project `docs/` even when `Owners: none`.
+When discovery is unavailable, its restriction to plan-named or router-named owners takes precedence over independent owner search.
 
 The collector routes on the forwarded `Lessons:` line and the policy, with these rules restated identically in `agents/lessons-collector.md` and `codex.md`:
 

@@ -282,6 +282,8 @@ Keep any `AGENTS.md` edit the user or the plan explicitly requires.
 A `CLAUDE.md` whose only content is `@AGENTS.md` stays exactly that import; never expand or duplicate it.
 Only when the routing reports `convention: none` do the fallbacks apply, and in `default` mode only: the lessons collector may create a new topic doc when findings cluster, and a project-wide invariant is appended under `## Critical Rules`; its `recommend:` block is reported as a recommendation and never applied as a migration.
 Lesson capture: forward the plan's `### Documentation Routing` section (its `Lessons:` line included, or the `discover` output when the docs step ran it) and `Documentation policy: <minimal|default>` to the lessons collector, with an unresolved policy forwarded as `default`; the collector has no shell and never resolves the policy itself, and it never writes to a lesson system's admission doc or an existing record.
+When discovery is available, `Owners:` names the plan's doc edits, not an exhaustive destination allowlist: the collector may find and use a fitting existing owner under root or per-project `docs/` even when `Owners: none`.
+When discovery is unavailable, its restriction to plan-named or router-named owners takes precedence over independent owner search.
 Rework or a reviewer flag is a lesson candidate, not an automatic admission.
 An admitted lesson produces exactly one entry: one record, one flat bullet or one dropped line, never several for the same subject.
 Deduplicate each candidate against existing owner docs and lesson records before any write; a duplicate produces no write and a `Dropped (already owned)` summary line.
