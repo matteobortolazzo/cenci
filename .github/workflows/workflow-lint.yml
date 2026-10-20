@@ -46,6 +46,8 @@ jobs:
         run: bash .github/scripts/check-version-bump-concurrency.test.sh
       - name: Run plugin version-bump script tests
         run: bash .github/scripts/bump-plugin-version.test.sh
+      - name: Run dependency bump recovery tests
+        run: python3 .github/scripts/deps-bump.test.py
       - name: Check documentation links, anchors, and terminology
         run: python3 .github/scripts/check-docs.py
       - name: Run maintenance-issue unit tests
