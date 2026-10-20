@@ -99,6 +99,7 @@ You are the reviewer too. Run all three checklists over your diff
 - No unused variables or type errors; documentation is adequate.
 - **Severity tiers**: Must-Fix → fix all. Should-Fix → **fix now** if the fix is straightforward. Otherwise, discard by default — test-coverage gaps, doc polish, "consider X" suggestions, and refactor/tech-debt observations are never tracked, only recorded as a one-line "Considered and discarded" entry in the PR's `## Notes` section below, which never becomes a followup item. **Track** it only when it is an actual defect with a concrete, realistic trigger path a user can hit in real use by noting it in the PR's `## Notes` section. Nitpick → ignore unless trivial.
 - **Findings**: report only problems you would block the merge for; for each, name the file and line, why it is wrong, and a failure scenario (concrete input or state → wrong output, crash, or missed requirement) showing how it fails. No praise or positive notes.
+- **Simplification findings**: tag a finding `delete`, `stdlib`, `native`, `yagni`, or `shrink` when it applies; each names the location, the removable complexity, the sufficient replacement, and the concrete failure or unmet requirement. A preference for fewer lines or files alone is never a merge blocker. Security, accessibility, data integrity, correctness, approved-plan decisions, and behavior-first testing outrank code-size reduction.
 
 **Silent-failure review.** Scan every new or modified `catch` / `except` /
 `rescue` / `.catch(` / error boundary.

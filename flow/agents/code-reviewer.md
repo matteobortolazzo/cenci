@@ -55,6 +55,7 @@ When LSP servers are active, diagnostics provide high-signal findings. Apply the
 - [ ] No TODOs without tickets
 - [ ] No commented code
 - [ ] Documentation adequate
+- [ ] A root-cause fix carries the plan's `Sibling/shared-path audit:` line, and the diff handles every sibling caller or shared path it flags
 - [ ] Documentation edits land in the owners named by the plan's `### Documentation Routing` (when forwarded): no second copy of a contract, and no `AGENTS.md` edit beyond a routing change or an explicit requirement
 
 ## Test Value
@@ -64,6 +65,23 @@ Test coverage is measured in behavior covered through the real stack, not in tes
 - **Flag low-value unit tests as removal candidates** (Should Fix, confidence 75+): mock-heavy tests that re-verify wiring (every collaborator mocked, assertions on mock calls), tests that mirror the implementation, and tests that would stay green while the real flow is broken. Removing such a test is an improvement, not a coverage loss.
 - **Flag missing integration coverage as the real gap** (Must Fix when an acceptance criterion has no integration/E2E test exercising it): a unit test on an internal helper does not cover the acceptance criterion it feeds into.
 - A unit test is justified only by what it catches that an integration test cannot reasonably catch (complex isolated logic: state machines, calculations, validators, parsing with an edge-case input matrix). Absent that justification, prefer the integration test.
+
+## Simplification Findings
+
+A simplification finding may carry an optional tag: `delete` (code that can go), `stdlib` (the standard library covers it), `native` (a platform capability covers it), `yagni` (speculative generality), `shrink` (the same behavior in less code).
+Each simplification finding names:
+- Location: the file and line of the code that can be simplified.
+- Removable complexity: the code, file, dependency, or abstraction that can be removed.
+- Sufficient replacement: the deletion, existing code, standard-library call, or native capability that covers the need.
+- Failure or unmet requirement: the concrete failure or unmet requirement the current form causes.
+Map a simplification finding onto the existing fields: prefix **Issue** with the tag (for example `[yagni]`) and name the removable complexity there, put the sufficient replacement in **Fix**, and put the concrete failure or unmet requirement in **Failure scenario**.
+Score it with the existing rubric: Should Fix (75–89), or Must Fix only when it meets that tier's existing bar.
+A preference for fewer lines or files alone is never a merge blocker.
+A simplification finding with no concrete failure or unmet requirement scores 25 or below and is omitted from the output.
+A simplification finding that contradicts an approved-plan decision (for example, a file the plan created on purpose) is not reported as Must Fix or Should Fix.
+Record it at most as a Nitpick that names the plan decision.
+LSP-detected findings keep their `## LSP Awareness` mappings.
+Security, accessibility, data integrity, correctness, approved-plan decisions, and behavior-first testing outrank code-size reduction.
 
 ## Output Constraints
 
