@@ -35,7 +35,7 @@ The approval options offered for this mode are the shared set defined in `SKILL.
 mktemp -u ${TMPDIR:-/tmp}/cenci/cenci-maintain-XXXXXX
 ```
 
-and reuse its trailing token to scope this run's temp files, per AGENTS.md's rule against unchecked command substitution for security-critical paths. Verify the command succeeded and the token is non-empty and matches `^[A-Za-z0-9._-]+$` (rejecting `.`, `..`, or any value containing `..`) before using it in any path. If verification fails, stop and report — never fall back to an unscoped path.
+and reuse its trailing token to scope this run's temp files, per the root `AGENTS.md` Critical Rules' ban on unchecked command substitution for security-critical paths. Verify the command succeeded and the token is non-empty and matches `^[A-Za-z0-9._-]+$` (rejecting `.`, `..`, or any value containing `..`) before using it in any path. If verification fails, stop and report — never fall back to an unscoped path.
 
 **Batch** (consolidate a group into one polish ticket):
 

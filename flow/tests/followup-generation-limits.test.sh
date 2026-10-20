@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Tests the "tame the followup flood" contract (improvements 1-4):
 #   1. Track-by-default is flipped to discard-by-default in both the Claude
-#      review phase and the Codex mirror (TRACK_BAR / DISCARD_DEFAULT, x3 each).
+#      review phase (TRACK_BAR / DISCARD_DEFAULT, x3 each) and the native
+#      Codex implement procedure (skills/implement/codex.md, which states the
+#      lower-tier triage once, so x1 each).
 #   2. Phase 9 no longer solicits informal out-of-scope observations.
 #   3. Generation limit: a Followup ticket's own PR mints no new followup.
 #   4. Dedup-before-create + resume-safe append (Phase 9 and address-review).
@@ -15,7 +17,7 @@ FLOW_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 PHASE_67="${FLOW_DIR}/skills/implement/phases/phase-6-7-review.md"
 PHASE_9="${FLOW_DIR}/skills/implement/phases/phase-9-pr.md"
 ADDRESS_REVIEW_SKILL="${FLOW_DIR}/skills/address-review/SKILL.md"
-CODEX_AGENTS="${FLOW_DIR}/templates/agents-md-codex.md"
+CODEX_IMPLEMENT="${FLOW_DIR}/skills/implement/codex.md"
 failures=0
 
 fail() { echo "FAIL: $1" >&2; failures=$((failures+1)); }
@@ -38,18 +40,21 @@ assert_count() {
 
 # ---------------------------------------------------------------------
 # 1. Discard-by-default flip: both anchors appear on all three tier lines
-#    (Medium/Low, Should Fix, Warning) in the Claude phase and the Codex
-#    mirror. Byte-identical across files so a drift in either is caught.
+#    (Medium/Low, Should Fix, Warning) in the Claude phase, and exactly once
+#    in the native Codex implement procedure (its single lower-tier triage
+#    statement). Byte-identical across files so a drift in either is caught.
 # ---------------------------------------------------------------------
 TRACK_BAR='**Track** it only when it is an actual defect with a concrete, realistic trigger path a user can hit in real use'
 DISCARD_DEFAULT='discard by default — test-coverage gaps, doc polish, "consider X" suggestions, and refactor/tech-debt observations are never tracked'
 
-for FILE in "${PHASE_67}" "${CODEX_AGENTS}"; do
-  assert_count "${FILE}" "${TRACK_BAR}" 3 \
-    "must state the narrow track bar on all three review-tier lines"
-  assert_count "${FILE}" "${DISCARD_DEFAULT}" 3 \
-    "must state discard-by-default on all three review-tier lines"
-done
+assert_count "${PHASE_67}" "${TRACK_BAR}" 3 \
+  "must state the narrow track bar on all three review-tier lines"
+assert_count "${PHASE_67}" "${DISCARD_DEFAULT}" 3 \
+  "must state discard-by-default on all three review-tier lines"
+assert_count "${CODEX_IMPLEMENT}" "${TRACK_BAR}" 1 \
+  "must state the narrow track bar once in the lower-tier triage statement"
+assert_count "${CODEX_IMPLEMENT}" "${DISCARD_DEFAULT}" 1 \
+  "must state discard-by-default once in the lower-tier triage statement"
 
 # Sanity: the flip must not have clobbered the parity P8 marker.
 assert_contains "${PHASE_67}" 'quality gates are mandatory' \

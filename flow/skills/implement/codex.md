@@ -241,8 +241,10 @@ Opus 5.5 guidance for subagent fan-out, when a subagent reports back, check its 
 before delegating or applying any fix for a Must Fix, Critical, or High finding, read the cited
 file and line yourself, and accept it only once that read confirms the finding holds against the actual code.
 A finding that does not hold is not fixed but recorded as a one-line `Considered and discarded`
-entry in the PR's `## Notes` (what was claimed, why it does not hold); lower-tier findings keep
-their fix-now-or-discard handling. Fix the accepted findings,
+entry in the PR's `## Notes` (what was claimed, why it does not hold). Triage every lower-tier finding (Medium/Low, Should Fix, non-critical Warning) once, here: fix now if the fix is straightforward.
+Otherwise, discard by default — test-coverage gaps, doc polish, "consider X" suggestions, and refactor/tech-debt observations are never tracked, only recorded as a one-line `Considered and discarded` entry in the PR's `## Notes`, which never becomes a Followup ticket.
+**Track** it only when it is an actual defect with a concrete, realistic trigger path a user can hit in real use by noting it in the PR's `## Notes` for the Followup Ticket step.
+Fix the accepted findings,
 capture lessons, and run the maintenance check
 (`flow/skills/maintain/scripts/check.sh --changed`) when the change touches docs, skills,
 agents, config, or client adapters, with the shell tool working directory set to the verified absolute worktree path on the initial check, every `--write`, and every re-run.

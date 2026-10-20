@@ -122,7 +122,7 @@ that applies `Refined`/`Browser`, use the effective grant computed at the
 Confirmation Gate above (do not recompute) — ensure the label exists (`gh label create
 "automerge:ok" --repo <owner>/<repo> --color "006B75" --description "Repository policy granted
 hands-off merge at refinement — babysit may merge this PR without review" 2>/dev/null ||
-true`), then append `--add-label "automerge:ok"` when the effective grant holds, or
+true`; the color and description are the plugin's `docs/board-labels.md` row — if that doc cannot be read, stop and report, never guess a color), then append `--add-label "automerge:ok"` when the effective grant holds, or
 `--remove-label "automerge:ok"` when it does not and the issue currently carries the label
 (re-refine), or nothing otherwise. Every proposed split child gets its own independently
 computed grant/withhold from the same gate, applied when that child is created (see below) —
