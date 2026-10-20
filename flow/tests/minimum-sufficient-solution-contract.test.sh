@@ -15,9 +15,9 @@
 #     weighs deletion, reuse, inlining and a native capability in that order,
 #     the widened `**Suggestion**` values, and the cohesive-file bullet kept
 #     word for word under `## What NOT to Flag`.
-#   - templates/agents-md-codex.md and the three Codex role templates under
-#     templates/codex/agent-roles/: each states its own rule.
-#   - The precedence sentence appears exactly once in each of the 7 sources.
+#   - The three Codex role templates under templates/codex/agent-roles/: each
+#     states its own rule.
+#   - The precedence sentence appears exactly once in each of the 6 sources.
 #   - Each installed <repo>/.codex/agents/{planner,critical-reviewer,
 #     structure-analyzer}.toml is byte-identical to its template (cmp -s).
 #
@@ -194,7 +194,6 @@ PREC='Security, accessibility, data integrity, correctness, approved-plan decisi
 PLANNER='agents/planner.md'
 REVIEWER='agents/code-reviewer.md'
 ANALYZER='agents/structure-analyzer.md'
-CODEX_MD='templates/agents-md-codex.md'
 ROLE_DIR='templates/codex/agent-roles'
 TOML_PLANNER="${ROLE_DIR}/planner.toml"
 TOML_REVIEWER="${ROLE_DIR}/critical-reviewer.toml"
@@ -202,7 +201,7 @@ TOML_ANALYZER="${ROLE_DIR}/structure-analyzer.toml"
 
 # The sources whose precedence sentence is counted (installed TOML copies are
 # covered through the cmp pairs).
-PRECEDENCE_SOURCES=("${PLANNER}" "${REVIEWER}" "${ANALYZER}" "${CODEX_MD}" "${TOML_PLANNER}" "${TOML_REVIEWER}" "${TOML_ANALYZER}")
+PRECEDENCE_SOURCES=("${PLANNER}" "${REVIEWER}" "${ANALYZER}" "${TOML_PLANNER}" "${TOML_REVIEWER}" "${TOML_ANALYZER}")
 ROLES=(planner critical-reviewer structure-analyzer)
 
 # Planner -- ladder block (each line keeps the 4-space template indent).
@@ -256,10 +255,6 @@ A_SUG_MED='- **Suggestion**: Delete | Reuse <path> | Inline | Native <capability
 A_SPLIT_SUB='  - `path/to/file-a` — <responsibility A>'
 A_COHESIVE='- Files that are inherently cohesive despite being large (e.g., a single large component with its template, a comprehensive test suite for a complex module)'
 
-# Codex self-review (agents-md-codex.md, under **Code-quality review.**).
-C_LEAD='- **Simplification findings**:'
-C_FINDINGS_LEAD='- **Findings**:'
-C_REQ='the location, the removable complexity, the sufficient replacement, and the concrete failure or unmet requirement'
 
 # Codex role templates (single-line developer_instructions strings).
 TP_LADDER='Walk the minimum-sufficient ladder in order and stop at the first sufficient rung: Necessity, Repo reuse, Stdlib, Platform-native, Installed dependency, New code.'
@@ -315,11 +310,6 @@ reg "${ANALYZER}" 'Split into file sub-bullet' "${A_SPLIT_SUB}"
 reg "${ANALYZER}" 'cohesive large-file bullet' "${A_COHESIVE}"
 reg "${ANALYZER}" 'precedence sentence' "${PREC}"
 
-reg "${CODEX_MD}" 'simplification findings bullet' "${C_LEAD}"
-reg "${CODEX_MD}" 'simplification finding shape' "${C_REQ}"
-reg "${CODEX_MD}" 'fewer-lines sentence' "${R_FEWER}"
-reg "${CODEX_MD}" 'precedence sentence' "${PREC}"
-
 reg "${TOML_PLANNER}" 'ladder' "${TP_LADDER}"
 reg "${TOML_PLANNER}" 'ticket-tied justification' "${TP_JUST}"
 reg "${TOML_PLANNER}" 'precedence sentence' "${PREC}"
@@ -329,7 +319,7 @@ reg "${TOML_REVIEWER}" 'precedence sentence' "${PREC}"
 reg "${TOML_ANALYZER}" 'delete/reuse/inline/native before extraction' "${TS_ORDER}"
 reg "${TOML_ANALYZER}" 'precedence sentence' "${PREC}"
 
-COVERED_FLOW_FILES=("${PLANNER}" "${REVIEWER}" "${ANALYZER}" "${CODEX_MD}" "${TOML_PLANNER}" "${TOML_REVIEWER}" "${TOML_ANALYZER}")
+COVERED_FLOW_FILES=("${PLANNER}" "${REVIEWER}" "${ANALYZER}" "${TOML_PLANNER}" "${TOML_REVIEWER}" "${TOML_ANALYZER}")
 
 # --- per-file structural checks ---------------------------------------------------
 
@@ -508,34 +498,6 @@ check_analyzer() {
   fi
 }
 
-# check_codex_md <agents-md-codex-content>
-check_codex_md() {
-  local c="$1" lbl="${CODEX_MD}"
-  local block fnd lead leadline tag
-
-  block="$(indented_block "${c}" '**Code-quality review.**' '^[*][*]Silent-failure review[.][*][*]')"
-  if [[ -z "${block}" ]]; then
-    fail "${lbl}: the '**Code-quality review.**' block is missing or not followed by '**Silent-failure review.**'"
-    return
-  fi
-  fnd="$(prefix_line_numbers "${block}" "${C_FINDINGS_LEAD}")"
-  lead="$(prefix_line_numbers "${block}" "${C_LEAD}")"
-  if [[ "$(count_lines "${lead}")" -ne 1 ]]; then
-    fail "${lbl} code-quality block: expected exactly 1 line starting with [${C_LEAD}]"
-    return
-  fi
-  if [[ "$(count_lines "${fnd}")" -ne 1 ]] || ! [[ "${lead}" -gt "${fnd}" ]]; then
-    fail "${lbl} code-quality block: the simplification bullet must follow the single '${C_FINDINGS_LEAD}' bullet"
-  fi
-  leadline="$(line_with_prefix "${block}" "${C_LEAD}")"
-  for tag in "${R_TAGS[@]}"; do
-    assert_contains "${leadline}" "${tag}" "${lbl} simplification bullet tag"
-  done
-  assert_contains "${leadline}" "${C_REQ}" "${lbl} simplification bullet shape"
-  assert_contains "${leadline}" "${R_FEWER}" "${lbl} simplification bullet fewer-lines sentence"
-  assert_contains "${leadline}" "${PREC}" "${lbl} simplification bullet precedence"
-}
-
 # check_role <toml-content> <flow-relative-path> <marker>... -- every marker sits
 # inside the single-line developer_instructions string.
 check_role() {
@@ -580,7 +542,6 @@ check_tree() {
   [[ -z "${D[${PLANNER}]+x}" ]] || check_planner "${D[${PLANNER}]}"
   [[ -z "${D[${REVIEWER}]+x}" ]] || check_reviewer "${D[${REVIEWER}]}"
   [[ -z "${D[${ANALYZER}]+x}" ]] || check_analyzer "${D[${ANALYZER}]}"
-  [[ -z "${D[${CODEX_MD}]+x}" ]] || check_codex_md "${D[${CODEX_MD}]}"
   [[ -z "${D[${TOML_PLANNER}]+x}" ]] || check_role "${D[${TOML_PLANNER}]}" "${TOML_PLANNER}" "${TP_LADDER}" "${TP_JUST}" "${PREC}"
   [[ -z "${D[${TOML_REVIEWER}]+x}" ]] || check_role "${D[${TOML_REVIEWER}]}" "${TOML_REVIEWER}" "${TC_SHAPE}" "${R_FEWER}" "${PREC}"
   [[ -z "${D[${TOML_ANALYZER}]+x}" ]] || check_role "${D[${TOML_ANALYZER}]}" "${TOML_ANALYZER}" "${TS_ORDER}" "${PREC}"
@@ -786,7 +747,7 @@ mutation_self_test() {
     run_round "remove ${MK_FILE[$i]}: ${MK_LABEL[$i]}" "${rel}"
   done
 
-  # A stray second precedence sentence in each of the 7 sources.
+  # A stray second precedence sentence in each of the 6 sources.
   for f in "${PRECEDENCE_SOURCES[@]}"; do
     rel="flow/${f}"
     fresh_work || return
