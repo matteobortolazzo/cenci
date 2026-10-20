@@ -173,11 +173,26 @@ Before finalizing the plan, explicitly identify:
     - **Why rejected**: <concrete reasoning — more complexity, breaking change, performance cost, etc.>
     - **When it would be better**: <conditions under which this approach would be the right choice>
 
+    #### Minimum-sufficient ladder
+    Walk the rungs in order and stop at the first rung that is sufficient; write `n/a` for every rung below it.
+    Necessity: <is any change needed at all — what fails or stays unmet without it>
+    Repo reuse: <existing module, helper or pattern that covers the need; for UI work, the components chosen under `For UI/frontend work` above>
+    Stdlib: <standard-library capability that covers the need>
+    Platform-native: <native capability of the language, framework or platform>
+    Installed dependency: <already-installed dependency that covers the need>
+    New code: <the minimal new code that remains>
+    New dependencies/frameworks/abstractions: none | <item> — <ticket-tied justification>
+    Write one line per new dependency, framework or single-implementation abstraction.
+    Write `New dependencies/frameworks/abstractions: none` when the plan adds none; no justification is required then.
+    Documentation edits follow `### Documentation Routing` below; this ladder does not restate them.
+    Security, accessibility, data integrity, correctness, approved-plan decisions, and behavior-first testing outrank code-size reduction.
+
     ### Files to Modify
     - `path/to/file` — <what changes>
 
     ### Files to Create
-    - `path/to/new/file` — <purpose>
+    - `path/to/new/file` — <purpose>; justification: <ticket-tied reason>
+    Leave this section empty when the plan creates no file.
 
     ### Size Check
     Ticket size: <S|M|L|unknown> — <from the ticket body's `### Size Estimate: <letter>` (the `unknown` value only when the ticket carries none, e.g. ticketless mode or an unrefined ticket)>
@@ -295,6 +310,8 @@ Before finalizing the plan, explicitly identify:
 
     ### Risks
     - <risk>: <impact and mitigation>
+    Sibling/shared-path audit: <`<path or symbol>` — <result>, one per sibling caller or shared path checked>
+    Required when the plan fixes a defect's root cause: list every sibling caller or shared path checked and the result for each. Omit this line when the plan does not fix a defect's root cause.
 
     ### Open Questions
     - <anything unresolved — needs human input before implementation>
