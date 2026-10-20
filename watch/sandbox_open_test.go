@@ -4669,38 +4669,77 @@ func writeFleetConfigFixture(t *testing.T, home, body string) {
 	}
 }
 
-// TestOpenAttachToRunning_ForwardsCurrentAttendedFlag covers the AC that
+// TestOpenAttachToRunning_ReloadsAttendedFlagBetweenLaunches covers the AC that
 // toggling planning.attended on the host and running `cenci open` again
 // against an ALREADY-RUNNING container yields the new value with no container
 // recreation. This is the whole reason the flag rides at exec time rather
 // than container-create time: the sandbox container is long-lived and every
 // later launch only execs into it, so a create-time forward would freeze the
 // posture the container happened to be created with.
-func TestOpenAttachToRunning_ForwardsCurrentAttendedFlag(t *testing.T) {
-	fakeDir := t.TempDir()
-	callLog := writeScriptedRuntimes(t, fakeDir)
-	assets := writeAssetFixture(t)
-	env, home, socketDir := openTestEnv(t, fakeDir, assets)
-	writeFleetConfigFixture(t, home, `{"planning": {"attended": true}}`)
+func TestOpenAttachToRunning_ReloadsAttendedFlagBetweenLaunches(t *testing.T) {
+	for _, firstAttended := range []bool{true, false} {
+		t.Run(fmt.Sprintf("%t to %t", firstAttended, !firstAttended), func(t *testing.T) {
+			fakeDir := t.TempDir()
+			callLog := writeScriptedRuntimes(t, fakeDir)
+			assets := writeAssetFixture(t)
+			env, home, socketDir := openTestEnv(t, fakeDir, assets)
+			const container = "claude-cenci-default"
+			env = append(env,
+				"FAKE_PS="+container+"\n",
+				"FAKE_INSPECT_LABEL=detached",
+				"FAKE_INSPECT_MOUNTS=/workspace::/workspace\n/home/dev::/home/dev\n"+socketDir+"::/run/user/1000/cenci\n",
+			)
+			launchDir := t.TempDir()
 
-	cmd := exec.Command(binaryPath, "open", "ch")
-	cmd.Env = append(env,
-		"FAKE_PS=claude-cenci-default\n",
-		"FAKE_INSPECT_LABEL=detached",
-		"FAKE_INSPECT_MOUNTS=/workspace::/workspace\n/home/dev::/home/dev\n"+socketDir+"::/run/user/1000/cenci\n",
-	)
-	cmd.Dir = t.TempDir()
-	if output, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("open ch (running): %v\n%s", err, output)
-	}
+			for launch, attended := range []bool{firstAttended, !firstAttended} {
+				writeFleetConfigFixture(t, home, fmt.Sprintf(`{"planning": {"attended": %t}}`, attended))
+				before := len(callLogLines(t, callLog))
+				cmd := exec.Command(binaryPath, "open", "ch")
+				cmd.Env = env
+				cmd.Dir = launchDir
+				if output, err := cmd.CombinedOutput(); err != nil {
+					t.Fatalf("launch %d into running container: %v\n%s", launch+1, err, output)
+				}
 
-	lines := callLogLines(t, callLog)
-	if _, ok := findLineWithPrefix(lines, "run --name "); ok {
-		t.Fatalf("expected no container create when already running, got calls:\n%s", strings.Join(lines, "\n"))
-	}
-	line := attachLine(t, lines)
-	if !strings.Contains(line, "-e CENCI_ATTENDED=1") {
-		t.Errorf("attach into a running container must forward the CURRENT host attended flag; got:\n%s", line)
+				// Read only this launch's calls so the first exec cannot satisfy
+				// assertions about the second launch's changed configuration.
+				lines := callLogLines(t, callLog)[before:]
+				var attaches []string
+				for _, line := range lines {
+					for _, prefix := range []string{"run --name ", "create ", "rm ", "restart ", "stop ", "kill "} {
+						if strings.HasPrefix(line, prefix) {
+							t.Fatalf("launch %d must reuse the running container, got %q", launch+1, line)
+						}
+					}
+					if strings.HasPrefix(line, "exec -it ") {
+						attaches = append(attaches, line)
+					}
+				}
+				if len(attaches) != 1 {
+					t.Fatalf("launch %d: got %d interactive execs, want one; calls: %v", launch+1, len(attaches), lines)
+				}
+				args := strings.Fields(attaches[0])
+				var targets, attendedValues []string
+				for i, arg := range args {
+					if arg == container {
+						targets = append(targets, arg)
+					}
+					if i > 0 && args[i-1] == "-e" && strings.HasPrefix(arg, "CENCI_ATTENDED=") {
+						attendedValues = append(attendedValues, arg)
+					}
+				}
+				if len(targets) != 1 {
+					t.Errorf("launch %d must exec into %s exactly once; got %q", launch+1, container, attaches[0])
+				}
+				want := "CENCI_ATTENDED=0"
+				if attended {
+					want = "CENCI_ATTENDED=1"
+				}
+				if len(attendedValues) != 1 || attendedValues[0] != want {
+					t.Errorf("launch %d: attended env = %v, want exactly [%s]; exec: %s", launch+1, attendedValues, want, attaches[0])
+				}
+			}
+		})
 	}
 }
 
