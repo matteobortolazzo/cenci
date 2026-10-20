@@ -2,6 +2,7 @@ package main_test
 
 import (
 	"context"
+	"crypto/sha1"
 	"fmt"
 	"io/fs"
 	"net"
@@ -88,11 +89,11 @@ func newWTWorld(t *testing.T) *wtWorld {
 	}
 	w.gitEnv = []string{
 		"PATH=" + os.Getenv("PATH"), "HOME=" + w.home,
-		"GIT_CONFIG_GLOBAL=" + os.DevNull, "GIT_CONFIG_SYSTEM=" + os.DevNull, "GIT_CONFIG_NOSYSTEM=1",
 		"GIT_AUTHOR_NAME=Fixture", "GIT_AUTHOR_EMAIL=fixture@example.invalid",
 		"GIT_COMMITTER_NAME=Fixture", "GIT_COMMITTER_EMAIL=fixture@example.invalid",
 		"GIT_AUTHOR_DATE=" + wtOldDate, "GIT_COMMITTER_DATE=" + wtOldDate,
 	}
+	w.gitEnv = append(w.gitEnv, wtGitConfigEnv()...)
 
 	if err := os.MkdirAll(w.root, 0o755); err != nil {
 		t.Fatal(err)
@@ -118,6 +119,18 @@ func newWTWorld(t *testing.T) *wtWorld {
 	w.script("gh", "if [ -f "+q(w.ghAnswer)+" ]; then cat "+q(w.ghAnswer)+"; else echo 'gh: not logged in' >&2; exit 1; fi\n")
 	w.tmuxFails(wtNoServer)
 	return w
+}
+
+func wtGitConfigEnv() []string {
+	// Apply before even the initial init/commit/push, including the bare
+	// origin and Git subprocesses. Background housekeeping can otherwise
+	// remove maintenance.lock or change mtimes during a no-write assertion.
+	return []string{
+		"GIT_CONFIG_GLOBAL=" + os.DevNull, "GIT_CONFIG_SYSTEM=" + os.DevNull, "GIT_CONFIG_NOSYSTEM=1",
+		"GIT_CONFIG_COUNT=2",
+		"GIT_CONFIG_KEY_0=maintenance.auto", "GIT_CONFIG_VALUE_0=false",
+		"GIT_CONFIG_KEY_1=gc.auto", "GIT_CONFIG_VALUE_1=0",
+	}
 }
 
 func (w *wtWorld) write(path, content string) {
@@ -146,6 +159,61 @@ func (w *wtWorld) git(dir string, args ...string) string {
 		w.t.Fatalf("git %v in %s: %v\n%s", args, dir, err, out)
 	}
 	return strings.TrimRight(string(out), "\n")
+}
+
+func TestWTWorld_AutomaticHousekeepingLeavesFixtureUntouched(t *testing.T) {
+	t.Run("maintenance after commit", func(t *testing.T) {
+		w := newWTWorld(t)
+		// Make the next commit eligible for a visible maintenance task, and
+		// keep it synchronous so the positive control cannot race the check.
+		w.git(w.root, "config", "gc.autoDetach", "false")
+		w.git(w.root, "config", "maintenance.gc.enabled", "false")
+		w.git(w.root, "config", "maintenance.commit-graph.enabled", "true")
+		w.git(w.root, "config", "maintenance.commit-graph.auto", "1")
+		w.git(w.root, "commit", "-q", "--allow-empty", "-m", "maintenance pressure")
+		if w.exists(".git", "objects", "info", "commit-graphs") {
+			t.Error("fixture commit ran automatic maintenance")
+		}
+		before := w.fingerprint()
+		out, code := w.run("worktrees", "ls")
+		wantExit(t, code, 0, out)
+		w.wantUnchanged(before)
+
+		// Prove the same fixture really triggers maintenance when enabled.
+		w.git(w.root, "-c", "maintenance.auto=true", "commit", "-q", "--allow-empty", "-m", "positive control")
+		if !w.exists(".git", "objects", "info", "commit-graphs") {
+			t.Fatal("positive control did not write a commit graph")
+		}
+	})
+
+	t.Run("automatic garbage collection", func(t *testing.T) {
+		w := newWTWorld(t)
+		// Git estimates loose-object pressure by sampling the 17 directory.
+		// Two objects there exceed gc.auto=1, without thousands of git calls.
+		blob := filepath.Join(w.home, "loose-blob")
+		for n, written := 0, 0; written < 2; n++ {
+			content := fmt.Sprintf("housekeeping fixture %d\n", n)
+			hash := sha1.Sum([]byte(fmt.Sprintf("blob %d\x00%s", len(content), content)))
+			if hash[0] != 0x17 {
+				continue
+			}
+			w.write(blob, content)
+			w.git(w.root, "hash-object", "-w", blob)
+			written++
+		}
+		w.git(w.root, "config", "gc.auto", "1")
+		w.git(w.root, "config", "gc.autoDetach", "false")
+		before := w.fingerprint()
+		w.git(w.root, "gc", "--auto")
+		w.wantUnchanged(before)
+
+		// Explicit command options can still enable GC for the positive control.
+		w.git(w.root, "-c", "gc.auto=1", "gc", "--auto")
+		packs, err := filepath.Glob(filepath.Join(w.root, ".git", "objects", "pack", "*.pack"))
+		if err != nil || len(packs) == 0 {
+			t.Fatalf("positive control did not pack objects: %v, %v", packs, err)
+		}
+	})
 }
 
 // tmuxReset forgets the fake tmux's configured answers and its call counters.
@@ -332,8 +400,8 @@ func (w *wtWorld) env(extra ...string) []string {
 		"CENCI_SOCKET_DIR=" + w.sockDir, "CENCI_SANDBOX=", "TMUX=", "TMUX_PANE=",
 		"GH_TOKEN=", "GITHUB_TOKEN=", "GH_ENTERPRISE_TOKEN=", "GITHUB_ENTERPRISE_TOKEN=", "GH_HOST=",
 		"GH_CONFIG_DIR=" + filepath.Join(w.home, "gh"),
-		"GIT_CONFIG_GLOBAL=" + os.DevNull, "GIT_CONFIG_SYSTEM=" + os.DevNull, "GIT_CONFIG_NOSYSTEM=1",
 	}
+	env = append(env, wtGitConfigEnv()...)
 	return append(env, extra...)
 }
 
