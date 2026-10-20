@@ -180,7 +180,7 @@ git -C <worktree-path> commit --amend -F ${TMPDIR:-/tmp}/cenci/cenci-<ticket-id-
 Then re-read `git -C <worktree-path> log -1 --format=%B` and verify the correct line is present and the wrong one absent. Verification failure ⇒ stop, fail closed.
 - No parent reference anywhere in the range, on a `close` verdict ⇒ amend HEAD the same way (write the corrected message to the same file, then `commit --amend -F` it), adding `Fixes #<parentId>` to the message, and verify the same way.
 - No parent reference anywhere in the range, on a `hold` verdict ⇒ amend HEAD the same way, adding `Related to #<parentId>` to the message, and verify the same way.
-- A reference found on a **non-HEAD** commit, or on more than one commit ⇒ **stop, fail closed**: report every offending SHA and hand the user manual remediation. `docs/git-workflow.md:30` permits multiple commits per PR, so this is real, and `--amend` cannot reach it — a plain amend only ever rewrites HEAD.
+- A reference found on a **non-HEAD** commit, or on more than one commit ⇒ **stop, fail closed**: report every offending SHA and hand the user manual remediation. The git-workflow doc's `## PR Workflow` section permits multiple commits per PR, so this is real, and `--amend` cannot reach it — a plain amend only ever rewrites HEAD.
 
 Never `git -C <worktree-path> commit --allow-empty` at any point in this reconciliation — every branch above either amends an existing commit's message or is a genuine no-op; none of them fabricates an empty commit. Never `git -C <worktree-path> commit --amend -m` with the corrected message interpolated inline — always the `-F <file>` form above.
 
@@ -447,6 +447,8 @@ If ≥1 deferred item exists, ensure the label exists (its own Bash call — not
 ```bash
 gh label create "Followup" --repo <owner>/<repo> --color "C5DEF5" --description "Deferred/out-of-scope item captured from a session — triage before working" 2>/dev/null || true
 ```
+
+The color and description above are the `Followup` row of the plugin's `docs/board-labels.md`, which also records how each label's existence is ensured.
 
 Ticket mode only: before creating the follow-up issue, fetch the original ticket's milestone and labels so the follow-up can inherit them. Run this as its own Bash call so a fetch failure surfaces distinctly, before the create call below:
 

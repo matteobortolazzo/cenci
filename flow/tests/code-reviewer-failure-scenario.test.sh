@@ -19,7 +19,6 @@
 #
 # Covered files:
 #   - agents/code-reviewer.md
-#   - templates/agents-md-codex.md                        (Codex self-review mirror)
 #   - templates/codex/agent-roles/critical-reviewer.toml  (Codex role mirror)
 #   - <repo-root>/.codex/agents/critical-reviewer.toml    (installed copy of the role)
 set -uo pipefail
@@ -134,19 +133,14 @@ if [[ -n "${reviewer}" ]]; then
   done
 fi
 
-# --- templates/agents-md-codex.md — the Codex self-review mirror ---
-
-require_doc codex_agents "${FLOW_DIR}/templates/agents-md-codex.md" || true
-if [[ -n "${codex_agents}" ]]; then
-  assert_contains "${codex_agents}" "**Findings**: report only problems you would block the merge for; for each, name the file and line, why it is wrong, and a failure scenario (concrete input or state → wrong output, crash, or missed requirement) showing how it fails. No praise or positive notes." "templates/agents-md-codex.md code-quality findings rule"
-  assert_not_contains "${codex_agents}" "Positive Notes" "templates/agents-md-codex.md"
-fi
-
 # --- Codex critical-reviewer role (template + the repo's installed copy) ---
+# The Codex mirror of the findings rule lives in the role template: the slimmed
+# templates/agents-md-codex.md no longer carries a self-review checklist.
 
 require_doc role_template "${FLOW_DIR}/templates/codex/agent-roles/critical-reviewer.toml" || true
 if [[ -n "${role_template}" ]]; then
   assert_contains "${role_template}" "For each finding give the file and line, why it is wrong, and a failure scenario showing how it fails. No praise." "templates/codex/agent-roles/critical-reviewer.toml"
+  assert_not_contains "${role_template}" "Positive Notes" "templates/codex/agent-roles/critical-reviewer.toml"
   # The repo's installed copy is generated from the template and must not drift.
   require_doc installed "${FLOW_DIR}/../.codex/agents/critical-reviewer.toml" || true
   if [[ -n "${installed}" ]]; then

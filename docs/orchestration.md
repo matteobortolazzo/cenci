@@ -572,11 +572,11 @@ codex plugin add cenci-watch@cenci
 codex plugin add cenci-sandbox@cenci
 ```
 
-Codex then discovers the portable `cenci:*` convention skills directly from the
-plugin. The full implementation sequence still comes from the repository's
-`AGENTS.md`; copy or merge
-[`flow/templates/agents-md-codex.md`](../flow/templates/agents-md-codex.md)
-into the target repository.
+Codex then discovers the native `$cenci:*` skills directly from the plugin, and those
+skills carry the procedure (see [`flow/docs/codex.md`](../flow/docs/codex.md) for the
+skill list and what each supports today). The repository's `AGENTS.md` only needs short
+guidance pointing at them, such as
+[`flow/templates/agents-md-codex.md`](../flow/templates/agents-md-codex.md).
 
 Which agent runs a card is a **per-dispatch** choice — pass `--agent`:
 

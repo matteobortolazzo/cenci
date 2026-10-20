@@ -37,16 +37,17 @@ git worktree add .worktrees/<id>-<desc> -b feature/<id>-<desc>
 
 One ticket maps to one PR targeting `main`. Multiple commits within a PR are fine; use
 them to organize logical steps. Full conventions (branch naming, commit format) live in
-[`flow/docs/git-workflow.md`](./flow/docs/git-workflow.md).
+[`docs/git-workflow.md`](./docs/git-workflow.md).
 
 ## Conventional commits and release impact
 
 Commit — and PR title, since PRs are squash-merged — using
 [conventional commits](https://www.conventionalcommits.org/): `<type>(<scope>): <description>`.
 The **type of the commit that lands on `main`, in the paths it touches,** drives an
-automated version bump for the affected plugin(s). The mapping (derived from the
-version-bump workflows; see the
-[Versioning section in `AGENTS.md`](./AGENTS.md#versioning) for the per-plugin
+automated version bump for the affected plugin(s). The mapping below is a summary; the
+exact rules, derived from the version-bump workflows, live in the
+[Versioning section of `docs/git-workflow.md`](./docs/git-workflow.md#versioning-automatic)
+(see also the [Versioning section in `AGENTS.md`](./AGENTS.md#versioning) for the per-plugin
 path/tag list):
 
 | Commit prefix | Version bump | Example |

@@ -161,8 +161,8 @@ refs/remotes/origin/HEAD` prints `origin/<name>` — strip the `origin/` prefix;
 no remote HEAD is set, fall back to `main`. Carry `<base>` forward as literal text; it replaces
 every hardcoded `main` below.
 
-**Run token**: Generate a per-run token once, before creating the worktree, per AGENTS.md's rule
-against unchecked command substitution for security-critical paths:
+**Run token**: Generate a per-run token once, before creating the worktree, per the
+root `AGENTS.md` Critical Rules' ban on unchecked command substitution for security-critical paths:
 
 ```bash
 mktemp -u ${TMPDIR:-/tmp}/cenci/cenci-maintain-XXXXXX

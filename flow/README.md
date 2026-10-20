@@ -217,10 +217,10 @@ companion) for every skill, including the internal ones not listed above.
 
 **Core workflow docs**
 - `docs/adapter-contract.md`
+- `docs/board-labels.md`
 - `docs/codex-native-evidence.md`
 - `docs/comment-attribution.md`
 - `docs/followup-triage.md`
-- `docs/git-workflow.md`
 - `docs/model-escalation.md`
 - `docs/pipeline-safety.md`
 - `docs/shell-scripting-gotchas.md`
@@ -229,6 +229,9 @@ companion) for every skill, including the internal ones not listed above.
 
 **Maintainer operations**
 <!-- cenci-maintain:docs-nav:end -->
+
+**Repo-root docs** (shared by every project, not under `flow/docs/`)
+- `<repo-root>/docs/git-workflow.md`
 
 </details>
 
@@ -838,7 +841,7 @@ flow/
 ├── tests/
 │   └── maintain.test.sh       # check.sh fixture-driven regression suite
 ├── docs/
-│   ├── git-workflow.md             # On-demand reference (read by skills as needed)
+│   ├── board-labels.md             # The board lifecycle labels (color, description, applier) in one table, plus the ensure-then-add procedure
 │   ├── skill-authoring.md          # Writing skills that generate/regenerate files from external-sourced values
 │   ├── ticket-sizing.md            # The S/M/L size table (bounds, lanes, context budget), where it is enforced, and when to split
 │   ├── pipeline-safety.md          # Restart/recovery, risk-profile re-evaluation, and shared-temp-file scoping for multi-phase pipelines
@@ -847,13 +850,14 @@ flow/
 │   ├── followup-triage.md          # The Followup capture-queue invariant and the /cenci:maintain backlog consolidation mechanics
 │   ├── codex.md                    # What cenci offers OpenAI Codex, and how it wires
 │   └── opencode.md                 # What cenci offers OpenCode, and how it wires
+│                                   # (git workflow lives at <repo-root>/docs/git-workflow.md, not here)
 ├── templates/
 │   ├── claudeignore
 │   ├── claude-md-root.md
 │   ├── claude-md-root-monorepo.md
 │   ├── claude-md-project.md
 │   ├── settings.json
-│   ├── agents-md-codex.md          # AGENTS.md recipe: cenci workflow as prose for Codex
+│   ├── agents-md-codex.md          # Short AGENTS.md guidance for Codex: points at the native $cenci:* skills and states the always-on rules
 │   ├── cenci-codex-config.json     # Codex agent block for cenci's run launcher
 │   └── docs/
 │       └── git-workflow.md
