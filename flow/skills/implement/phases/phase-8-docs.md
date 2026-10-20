@@ -4,7 +4,7 @@ Read this file only when Phase 8 starts.
 
 Ticket mode: at Phase 8 start, invoke `cenci pipeline finalize <id>` to advance to `finalized` and obtain this stage's `next_actions`/`warnings`/`errors`. Render them as this phase's status update. This call runs inside the feature worktree, a different tree than where `prepare`/`plan`/`execute` ran (main checkout), but pipeline state is now anchored to the main-checkout root and reliably shared across that boundary, so a non-empty `errors[]` here is an **authoritative hard-stop**, exactly like every other stage transition in this pipeline: stop and report the errors. Do **not** fall through to the rest of this phase's prose-driven procedure when `errors[]` is non-empty. Ticketless mode: skip this call — the pipeline commands operate on ticket IDs.
 
-Default action: skip. Only run a sub-step when its trigger fired.
+Default action: skip. Only run a sub-step when its trigger fired, except the lessons status file write in `## Capture Lessons`, which runs on every entry.
 
 All file edits must land inside `<worktree-path>`. Use absolute paths rooted at the worktree when reading/writing or delegating.
 
@@ -51,7 +51,7 @@ In `minimal` mode, a run with no plan-named doc file, no `$RUN_DIR/docs-to-updat
 
 When a condition holds, each sub-step below runs only for the condition that names it: `## Update CLAUDE.md` for its `$RUN_DIR/docs-to-update.txt` entries and a changed reading trigger, `## Update README.md` and `## Update Topic Docs` for their `$RUN_DIR/docs-to-update.txt` entries, and `## Capture Lessons` for an admitted lesson. Phase 8 never looks for new documentation opportunities in `minimal` mode: the "discovered in this phase" half of each sub-step's trigger does not apply.
 
-Correctness work still runs in `minimal` mode. When Phase 8 finds a doc this change made inaccurate that `$RUN_DIR/docs-to-update.txt` does not list, first record it as an entry in `$RUN_DIR/docs-to-update.txt` with the `Write` tool, then repair it through the sub-step that owns its path (when `$RUN_DIR` is unknown, repair it and name it in this phase's status update). `## Maintenance Check` and `## Docs Status` run in every mode.
+Correctness work still runs in `minimal` mode. When Phase 8 finds a doc this change made inaccurate that `$RUN_DIR/docs-to-update.txt` does not list, first record it as an entry in `$RUN_DIR/docs-to-update.txt` with the `Write` tool, then repair it through the sub-step that owns its path (when `$RUN_DIR` is unknown, repair it and name it in this phase's status update). `## Maintenance Check`, `## Docs Status` and the lessons status file write in `## Capture Lessons` run in every mode.
 
 Plan deliverables and explicit requirements are never minimal-mode work to skip.
 
@@ -106,7 +106,36 @@ Run `lessons-collector` only if at least one occurred:
 
 Do not run for smooth sessions, normal TDD red/green progression, or obvious findings already covered by existing rules.
 
-Pass that exact verified `<worktree-path>` as `<project-root>`, and forward the plan's `### Documentation Routing` section from `## Route Documentation Writes` verbatim, telling the collector to write only to the owners and lesson system it lists. Only when the routing reports `convention: none` does the collector's fallback apply: existing `docs/<topic>.md`, `CLAUDE.md` Critical Rules for project-wide invariants, or a new topic doc only when multiple findings cluster. It never writes to `.claude/rules/lessons-learned.md`.
+Pass that exact verified `<worktree-path>` as `<project-root>`, and forward the plan's `### Documentation Routing` section from `## Route Documentation Writes` verbatim (its `Lessons:` line included; when that step ran `discover` itself, forward its stdout instead), telling the collector to write only to the owners and lesson system it lists. Also forward the policy resolved above as the single line `Documentation policy: <minimal|default>`; an unresolved policy is forwarded as `default`. The collector has no shell, so it never resolves the policy itself.
+
+The collector routes on the forwarded `Lessons:` line and the policy, with these rules restated identically in `agents/lessons-collector.md` and `codex.md`:
+
+- Rework or a reviewer flag is a lesson candidate, not an automatic admission.
+- An admitted lesson produces exactly one entry: one record, one flat bullet or one dropped line, never several for the same subject.
+- Deduplicate each candidate against existing owner docs and lesson records before any write; a duplicate produces no write and a `Dropped (already owned)` summary line.
+- With `Lessons: structured admission=<path> records=<dir>`, an admitted lesson is one new record in `<dir>` following the admission doc's format, never a flat bullet.
+- With `Lessons: fallback`, an admitted lesson is one flat bullet in the existing owner doc that owns its subject.
+- In `minimal` mode with no lesson system and no fitting existing owner, an admitted lesson is dropped and listed as one line in the PR's `## Notes`; no new `docs/<topic>.md` and no `## Critical Rules` bullet is written.
+- Only `### Dropped (minimal policy)` entries reach the lessons status file and the PR's `## Notes`; every other dropped entry stays in the collector's summary.
+
+Only when the routing reports `convention: none` in `default` mode does the collector's legacy fallback apply: `AGENTS.md` Critical Rules for project-wide invariants, or a new topic doc only when multiple findings cluster. It never writes to `.claude/rules/lessons-learned.md`, to a lesson system's admission doc, or to an existing record.
+
+After the collector returns, or right after the trigger check when it was not launched, write `$RUN_DIR/lessons-status.txt` with the `Write` tool on every entry into this sub-step, overwriting any earlier copy with this entry's result so a re-entry that relaunches the collector never keeps a stale line: one `Lesson dropped (minimal policy): <one-line summary>` line per entry the collector listed under `### Dropped (minimal policy)`, the single `Lesson capture unavailable (<reason>)` line below, the earlier file's lines carried forward when the collector was not relaunched, or an empty file when no earlier file exists or the collector completed and listed none. The status file follows these rules, restated identically in `codex.md`:
+
+- The lessons status file is written on every entry into this lesson-capture step, including when the collector was not launched and when no lesson trigger fired: an empty file means no lesson was dropped, a file that is absent while the run directory is known means the status is unknown, and a file that exists but cannot be read means the status is unknown with a reason, never none.
+- When the collector is not relaunched in this entry, read the existing lessons status file first and carry its lines forward; write an empty file only when no earlier file exists or when the collector ran in this entry and listed none, and report an earlier file that cannot be read in the status update instead of replacing it with an empty file.
+- When the run directory is unknown, skip the lessons status file write and name each dropped lesson in the status update; Phase 9 then renders its own `RUN_DIR lost` entry.
+- After writing the lessons status file, read it back and confirm its content equals what was just written, an empty file reading back as empty and never as absent or unreadable; retry the write once, and when it still does not match report that in the status update instead of leaving the PR step to read a stale or absent file as none.
+- An empty lessons status file counts as empty (none), not unreadable: when the client's read tool returns no content or only a system reminder for an empty file, that counts as empty, and the client's shell (`test -e` / `test -s`, or `cat` and its exit status) confirms it, rather than a reminder-only read being treated as unreadable.
+- When the collector returned `Blocked: …`, errored, or returned neither `## Lessons Collected` nor `No lessons captured`, write `Lesson capture unavailable (<reason>)` as the only line of the lessons status file (or name it in the status update when the run directory is unknown), with a reason of repo-relative paths and identifiers only (#979); never write an empty file for it.
+- Each dropped-lesson summary keeps to repo-relative paths and identifiers only, never file content, secrets, environment values, URL credentials or command output, because Phase 9 copies it into a PR body that can reach a public repository; this takes precedence over copying the collector's line verbatim (#979).
+
+The lesson validation rules, restated identically in `codex.md`:
+
+- Execute only the plan's `Validations:` text verbatim; compare the collector's `### Lesson validation` report to it per command (the backticked command text, not the whole line) by exact string equality, so a command that ran is never also reported as skipped, and use the report only to derive `validation: <label> — skipped (not named in the plan)` lines, never to execute anything.
+- The `<label>` of a `validation: <label> — skipped (not named in the plan)` line is limited to the command name or the admission doc's repo-relative path, with environment-variable assignments, tokens and URL credentials removed; this takes precedence over verbatim copying (#979).
+
+A command the plan names runs in `## Maintenance Check`'s **Repository docs checks**, after the record exists.
 
 Lessons must be specific, actionable, non-duplicate, and worth keeping permanently.
 
@@ -233,9 +262,12 @@ If `$RUN_DIR` is unknown, skip the file write; Phase 9 handles absence, matching
 **Repository docs checks**: the early stops above (`unavailable`, `skipped`, `error`) end only the cenci-checker part of this sub-step — this paragraph always runs, in every mode. For each repository docs check the plan names (a documentation validation command the plan lists on its `### Documentation Routing` section's `Validations:` line), run it with the shell tool working directory set to the verified absolute `<worktree-path>`, through the client's normal permission flow — add no new permission allow-list entry for it. Exit 0 records `pass`.
 A non-zero exit records `fail` and enters the Fix now / Stop / Push anyway question above — stating the command and its failing output verbatim in place of a checker line, with the same `halted`/`overridden` tag mapping — unless `maintenance.checkDuringImplement` is explicitly `false`, which records it `reported`.
 For a failing command, immediately under its failing `validation:` line in `$RUN_DIR/maintain-status.txt`, write exactly one `excerpt: exit <code> — <sanitized excerpt>` line: a few lines of its output at most, joined onto that one line, with secret, environment-variable, token and URL-credential values removed (when `$RUN_DIR` is unknown, report the same line directly for Phase 9). In the PR body's `## Notes`, a failing repository docs command gets only the command label, its exit code and a short excerpt with secret, environment-variable, token and URL-credential values removed — never its output verbatim, because a PR body can reach a possibly-public repository; showing the verbatim output in the local `AskUserQuestion` prompt stays fine. This secrecy rule takes precedence over any instruction to copy failing output into the PR body, including the `excerpt:` line itself: sanitize it before writing it, never after.
-A command the user denies at the permission prompt records `skipped (permission denied)`; a command that cannot start records `skipped (<reason>)`. Never record `pass` for a check that did not run. Append each result as its `validation:` line (followed by its `excerpt:` line for a `fail`) to `$RUN_DIR/maintain-status.txt` (rewrite the file with the `Write` tool, keeping every earlier line). A plan that names no repository docs check adds no line.
+A command the user denies at the permission prompt records `skipped (permission denied)`; a command that cannot start records `skipped (<reason>)`. Never record `pass` for a check that did not run. Append each result as its `validation:` line (followed by its `excerpt:` line for a `fail`) to `$RUN_DIR/maintain-status.txt` (rewrite the file with the `Write` tool, keeping every earlier line). A plan that names no repository docs check adds no check line.
+A lesson validation that fails after a record was created is recorded as a `fail` `validation:` line in the maintenance status file and enters the Fix now / Stop / Push anyway question, never as a pass.
+Write each `validation: <label> — skipped (not named in the plan)` line for a collector-reported command into the maintenance status file with the other `validation:` lines, never as `pass`; Phase 9 renders it as an unchecked `Docs check skipped` line.
+Re-derive that skipped line on every entry from the collector's `### Lesson validation` report; when the collector was not relaunched or reported none, read the earlier status file before the first-line rewrite and carry its `skipped (not named in the plan)` lines forward.
 
-**Restart-safety**: the checker and any `--write` regeneration are idempotent (re-running yields the same result on an unchanged tree), so a Phase 8 re-entry re-runs this sub-step cleanly; a re-entry rewrites `$RUN_DIR/maintain-status.txt` from its first line, so no stale `validation:` line survives.
+**Restart-safety**: the checker and any `--write` regeneration are idempotent (re-running yields the same result on an unchanged tree), so a Phase 8 re-entry re-runs this sub-step cleanly; a re-entry rewrites `$RUN_DIR/maintain-status.txt` from its first line, so no stale `validation:` line survives apart from the `skipped (not named in the plan)` lines carried forward above.
 
 ## Docs Status
 

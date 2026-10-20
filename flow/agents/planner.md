@@ -286,7 +286,7 @@ Before finalizing the plan, explicitly identify:
     Index: <the `index:` path, or `none`>
     Owners: <each doc the plan changes as `<path> — <what changes>`, and the user-visible terms (flags, commands, options, endpoints, config keys) the change alters, for Phase 8's `mentions` scan; a doc the plan creates or modifies is also listed under `### Files to Modify` / `### Files to Create`>
     Lessons: <the `lessons:` line, `structured admission=<path> records=<dir>` or `fallback`>
-    Validations: <documentation validation commands to run, such as a docs check named by the repository's `AGENTS.md`, or `none`>
+    Validations: <documentation validation commands to run, such as a docs check named by the repository's `AGENTS.md`; with a structured `Lessons:` line, list the validation command its admission doc names, if any; or `none`>
     Recommendation: <only when discovery reported `convention: none`: the `recommend:` block as a recommendation, never a `### Files to Modify` step; otherwise `None`>
 
     Always present, even for a code-only plan (write `Owners: none` when no doc changes). Phase 8 and the implementer, reviewers and Codex roles receive this section verbatim. A repository with nothing discovered keeps the fallback paths in `phase-8-docs.md` (and a plan-named doc is still written in every policy).
