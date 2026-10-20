@@ -44,6 +44,7 @@ func (m *MockClient) ListPanes() ([]tmux.PaneInfo, error) {
 }
 
 func (m *MockClient) RenameWindow(target string, name string) error {
+	target = m.windowTarget(target)
 	m.Renames = append(m.Renames, RenameCall{target, name})
 	if m.RenameErr == nil {
 		for i := range m.Panes {
@@ -56,6 +57,7 @@ func (m *MockClient) RenameWindow(target string, name string) error {
 }
 
 func (m *MockClient) SetWindowOption(target string, key string, value string) error {
+	target = m.windowTarget(target)
 	m.WindowOpts = append(m.WindowOpts, WindowOptCall{target, key, value})
 	if m.WindowOptValues == nil {
 		m.WindowOptValues = make(map[string]string)
@@ -65,6 +67,7 @@ func (m *MockClient) SetWindowOption(target string, key string, value string) er
 }
 
 func (m *MockClient) GetWindowOption(target string, key string) (string, error) {
+	target = m.windowTarget(target)
 	if m.GetOptErr != nil {
 		return "", m.GetOptErr
 	}
@@ -76,6 +79,18 @@ func (m *MockClient) GetWindowOption(target string, key string) (string, error) 
 		return "on", nil
 	}
 	return "", nil
+}
+
+// Like tmux, window commands accept a pane ID as the stable identity of its
+// owning window. Record the resolved window so existing behavior assertions
+// continue to describe the window that was actually changed.
+func (m *MockClient) windowTarget(target string) string {
+	for _, p := range m.Panes {
+		if p.PaneID == target {
+			return p.WindowTarget()
+		}
+	}
+	return target
 }
 
 // SetOption records a session-wide (global) tmux option set, mirroring
