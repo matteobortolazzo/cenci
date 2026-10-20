@@ -162,7 +162,7 @@ companion) for every skill, including the internal ones not listed above.
 | `domain-specialist` | Read-only second opinion for difficult architecture, security boundaries, silent failures, unresolved bugs, and conflicting audit findings. Invoke only for a bounded escalation under docs/model-escalation.md. | address-review,ci-repair implement,maintain refactor,refine review |
 | `duplication-analyzer` | Analyzes codebase for duplicated code patterns, copy-paste code, and extraction opportunities. Use when checking for repeated logic across files. | — |
 | `implementer` | Senior developer that implements features using TDD — writes tests first, then implementation. Use for writing code, tests, and making builds pass. | implement |
-| `lessons-collector` | Reviews implementation sessions and routes genuine mistakes into topic-specific docs (or CLAUDE.md) for future prevention. Use after implementation only when something actually went wrong. | implement |
+| `lessons-collector` | Reviews implementation sessions and routes genuine mistakes into the repository's own lesson system, or into the existing owner doc that owns the subject, for future prevention. Use after implementation only when something actually went wrong. | implement |
 | `planner` | Senior architect that analyzes tickets and produces implementation plans. Use when planning feature work, analyzing ticket requirements, or breaking down complex tasks. | implement |
 | `portability-maintainer` | Audits client-portability consistency (Claude Code, Codex, OpenCode) for maintenance drift, producing Client mismatch findings with proposed repairs. Use from the /cenci:maintain skill's clients and all modes. | maintain |
 | `refiner` | Senior tech lead that analyzes tickets during backlog refinement — finds ambiguity, drafts clarifying questions, and produces the refined ticket proposal (scope, acceptance criteria, sizing, splits). Use from the refine skill's Q&A relay loop. | refine |
@@ -348,7 +348,7 @@ your-project/
 
 **Where reference docs live**
 
-- `docs/<topic>.md` — on-demand reference docs read by skills/agents when their topic intersects the work. The lessons-collector also routes new topic-specific lessons here.
+- `docs/<topic>.md` — on-demand reference docs read by skills/agents when their topic intersects the work. The lessons-collector appends a flat bullet here when a lesson's subject has an existing owner doc.
 - `AGENTS.md` — canonical shared critical rules and project-wide invariants.
 - `CLAUDE.md` — generated import adapter with an optional Claude-only block.
 - `.claude/rules/` — reserved for files explicitly `@`-imported by `CLAUDE.md` (auto-loaded at session start). Configure does not create files here today.
@@ -394,7 +394,7 @@ your-project/
 └── .worktrees/
 ```
 
-Lessons are routed by topic (`docs/caching.md`, `docs/migrations.md`, …) rather than dumped into a single growing log. Project-wide invariants land in `CLAUDE.md` directly.
+Lessons go to the repository's own lesson system when it has one, and otherwise become a flat bullet in the existing doc that owns their subject (see [Documentation policy](#documentation-policy)), rather than being dumped into a single growing log. Only a repository with no documentation convention gets new topic docs (`docs/caching.md`, `docs/migrations.md`, …) or `AGENTS.md` Critical Rules created for its lessons.
 
 ## Implementation Pipeline
 
@@ -407,7 +407,7 @@ When you run `/cenci:implement <ticket-id>`, the pipeline executes these phases:
 5. **Refactor** — Implementer agent simplifies and cleans up
 6. **Acceptance Review** — Acceptance reviewer agent (opus) reads the ticket before the code and grades every acceptance criterion, edge case, boundary and documentation item as covered (naming the proving test, screenshot or doc), partial, missing, or unrequested; a UI ticket needs the gallery and secret-gist screenshots in `en-US` and `it-IT` as evidence. Any partial or missing item returns the run to implementation before code review starts. Then **Security Review** — Security reviewer agent checks for OWASP vulnerabilities
 7. **Code Review** — Code reviewer agent does a final PR-style review
-8. **Capture Lessons** — Lessons collector routes genuine mistakes into the relevant `docs/<topic>.md` or `CLAUDE.md` (opt-in; most sessions capture nothing); this phase also owns doc ownership: `README.md`, `AGENTS.md`/`CLAUDE.md`, and `docs/**` updates for the run, written to the repository's discovered owner docs (see [Documentation routing](#documentation-routing))
+8. **Capture Lessons** — Lessons collector deduplicates each candidate against the existing owner docs and lesson records, then routes a genuine mistake into the repository's own lesson system or a flat bullet in the existing owner doc (opt-in; most sessions capture nothing); this phase also owns doc ownership: `README.md`, `AGENTS.md`/`CLAUDE.md`, and `docs/**` updates for the run, written to the repository's discovered owner docs (see [Documentation routing](#documentation-routing))
 9. **Create PR** — Rebases on latest main, commits, pushes, measures the final diff against the size table (`Size: <letter> (<files> files, <lines> lines) vs ticket <letter>` in the PR body, flagged when the PR is one size above its ticket — such a PR is reported to the founder and must not be merged on green checks alone), embeds the acceptance reviewer's item table, and creates a pull request; UI tickets get a `## Screenshots` section in the PR body
 
 ### Resuming a crashed run
@@ -577,6 +577,8 @@ ships inside the plugin) now shows `- [ ] Maintenance check: unavailable …` in
 checklist where it previously got a silent skip; only `skipped (no doc-affecting changes)`
 still renders as a checked `not applicable`.
 
+**Lessons fallback.** When discovery finds no structured lesson tree (`lessons: fallback`), the lessons collector appends one flat `docs/<topic>.md` bullet to the existing owner doc that owns the lesson's subject, and a repository's own lesson system takes precedence over that: with `lessons: structured` it writes one new record in the record directory in the admission doc's format instead, never a flat bullet, and never edits the admission doc or an existing record. The collector deduplicates each candidate against owner docs and records first and reports a duplicate as `Dropped (already owned)` without writing. In `minimal` mode with no lesson system and no fitting existing owner, an admitted lesson is dropped and listed as one line under the PR's `## Notes` → `### Considered and discarded`, and no file is created; a new topic doc or a `## Critical Rules` bullet appears only in `default` mode when no convention is discovered (`convention: none`). A repository's lesson-validation command runs only when the plan's `Validations:` line names it, and a failure goes through the same Fix now / Stop / Push anyway question as any other docs check.
+
 ### Documentation routing
 
 Documentation edits land in the repository's actual owner docs rather than in a layout the
@@ -711,7 +713,7 @@ The plugin uses specialized agents with isolated contexts:
 | **structure-analyzer** | File-size and test-organization analysis for `/cenci:refactor` | haiku | n/a (haiku) | plan (read-only) |
 | **security-analyzer** | OWASP audit for `/cenci:refactor` | sonnet | high (pinned) | plan (read-only) |
 | **domain-specialist** | Bounded second opinion for difficult planning, security, diagnosis, and conflicting findings | fable | high (pinned) | plan (read-only) |
-| **lessons-collector** | Routes genuine mistakes to `docs/<topic>.md` or `CLAUDE.md` | haiku | n/a (haiku) | acceptEdits |
+| **lessons-collector** | Routes genuine mistakes to the repository's lesson system or an existing owner doc | haiku | n/a (haiku) | acceptEdits |
 | **backlog-maintainer** | Audits Followup tickets for duplicates and consolidation opportunities | sonnet | medium (pinned) | plan (read-only) |
 | **docs-maintainer** | Audits documentation accuracy and completeness | sonnet | medium (pinned) | plan (read-only) |
 | **rules-maintainer** | Audits project rules and accumulated lessons | sonnet | medium (pinned) | plan (read-only) |
