@@ -40,12 +40,17 @@ bounded prompts from `flow/agents/*-maintainer.md`:
 - Mode `all` launches all four workers in parallel.
 
 Give every worker the resolved mode, scope, additional context, applicable mode file,
-the deterministic JSON, and the exact eight-field finding schema documented by its
-maintainer prompt. Workers may read and search only; they never edit files, mutate
-GitHub, create worktrees, or ask the user questions.
+the deterministic JSON, and the absolute path of the shared finding reference. Workers may
+read and search only; they never edit files, mutate GitHub, create worktrees, or ask the
+user questions.
+
+The finding reference is `${PLUGIN_ROOT}/skills/maintain/finding-schema.md`. Resolve `${PLUGIN_ROOT}` to a literal absolute path before launch, put that absolute path in every worker prompt, and tell the worker to read it before analysis for the eight-field schema, the base redaction rule and the output template. A fresh worker does not inherit the parent's loaded skills, so never rely on the parent having loaded this file.
+
+If `${PLUGIN_ROOT}` cannot be resolved to an existing `finding-schema.md` file, mark the maintainer workers incomplete and do not launch them.
 
 Treat an errored, timed-out, or malformed worker result as an incomplete run for that
-worker's categories. Do not translate it into “no findings,” retry it as a different
+worker's categories. A worker whose result is the literal marker `INCOMPLETE AUDIT:` (finding
+reference missing or unreadable) is also an incomplete run. Do not translate it into “no findings,” retry it as a different
 category, or imply that category was verified clean.
 
 ## Phase 4 — Report

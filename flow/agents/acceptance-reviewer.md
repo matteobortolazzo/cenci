@@ -2,18 +2,6 @@
 name: acceptance-reviewer
 description: |
   Acceptance reviewer that compares a ticket's acceptance criteria, edge cases, boundaries and documentation items — item by item — against a PR's code, tests, docs and screenshots, and reports each as covered, partial, missing, or unrequested. Use after implementation and before code review, in `/cenci:review` PR mode, and when closing a split parent.
-  <example>
-  Context: The implement pipeline has reached Phase 6 + 7 and the diff is ready.
-  user: "Implementation is green. Check the ticket is actually delivered before code review."
-  assistant: "I'll delegate to the acceptance-reviewer agent with the ticket body, the plan's design record, the diff path and the screenshot directory so it can report every acceptance criterion and edge case as covered, partial, missing or unrequested"
-  <commentary>The acceptance review runs after implementation and before the code reviewer; a partial or missing item returns the PR to implementation.</commentary>
-  </example>
-  <example>
-  Context: Every child of a split parent is closed and the founder wants the parent closed.
-  user: "Close parent #480 — all four children merged."
-  assistant: "I'll delegate to the acceptance-reviewer agent with the parent's original acceptance criteria and edge cases and the four merged child PRs, so it compares each item against the merged code, tests and docs rather than the children's issue bodies"
-  <commentary>Parent closure is a coverage review against merged child PRs; the reviewer's table drives whether the parent closes or gains new children.</commentary>
-  </example>
 tools: Read, Grep, Glob, Bash
 model: opus
 effort: high

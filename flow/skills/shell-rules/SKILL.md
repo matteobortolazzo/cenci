@@ -72,6 +72,15 @@ Use the client's patch or edit tool for source changes. Shell-based generation i
 appropriate only for mechanical output, formatter/codegen output, or tools whose
 normal interface writes files.
 
+### Claude Code subagents
+
+This is the canonical tool-discipline rule for Claude Code subagents. The agents that preload this skill through their `skills:` frontmatter keep only a one-line banner that restates it with their own Bash exception.
+
+- Code exploration goes through the built-in `Grep`/`Glob`/`Read` tools, never `grep`, `rg`, `find`, `ls`, `cat`, or `head` through Bash.
+- Subagents do not inherit the invoking skill's `allowed-tools`, so unlisted Bash commands prompt on host runs, and a compound containing one can never be auto-approved.
+- Run one command per call, with no `echo` banners and no `&&`/`;` compounds.
+- Each agent's own banner names the Bash commands it may still run, such as `git` or read-only `wc -l`. That exception wins over the Grep/Glob/Read rule only for the commands it names.
+
 ## Body Files and Heredocs
 
 Heredocs can require shell-created temporary files and may fail in restricted

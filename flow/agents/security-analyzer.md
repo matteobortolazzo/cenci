@@ -1,19 +1,7 @@
 ---
 name: security-analyzer
 description: |
-  Analyzes codebase for security vulnerabilities using OWASP guidelines and official library documentation via Context7. Use for security audits of application code.
-  <example>
-  Context: User wants a security audit of their codebase.
-  user: "Check these files for security issues"
-  assistant: "I'll use the security-analyzer agent to check for OWASP vulnerabilities and stack-specific security patterns"
-  <commentary>Security analysis traces data flow from input to storage/output and checks against OWASP Top 10.</commentary>
-  </example>
-  <example>
-  Context: A refactoring analysis needs security review of API endpoints.
-  user: "Analyze the API layer for security vulnerabilities"
-  assistant: "I'll delegate to the security-analyzer agent to check for injection, auth issues, and sensitive data exposure using Context7 for stack-specific best practices"
-  <commentary>API layers are high-priority targets — the agent uses Context7 to compare against official security recommendations.</commentary>
-  </example>
+  Analyzes codebase for security vulnerabilities using OWASP guidelines and official library documentation via Context7. Use from the /cenci:refactor skill's Phase 3 parallel analysis for security audits of application code.
 tools: Read, Grep, Glob, mcp__context7__resolve-library-id, mcp__context7__query-docs
 model: sonnet
 effort: high

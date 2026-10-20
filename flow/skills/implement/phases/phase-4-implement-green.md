@@ -14,7 +14,7 @@ attempt. Feed validated advice back to the implementer; retain the three-attempt
 
 Pass:
 
-- Worktree path. Tell the agent: target the worktree explicitly on every command — via `git -C <worktree-path>` for git commands, absolute paths for file operations, or the client's working-directory option — do **not** prefix every command with `cd <path> &&` (a `cd … && git …` compound can never be auto-approved; use `git -C <path>` if git must target another directory). If a `Write`/`Edit` is blocked or stranded, re-issue the same edit to the correct `.worktrees/<id>-<desc>/` path — never hand-rescue it with `git stash`/`git checkout`/`git apply`. See the `shell-rules` skill for command patterns.
+- Worktree path. Tell the agent to follow the implementer's `## Working Directory` section on every command, including its **Never hand-rescue a blocked or stranded edit** rule: a blocked or stranded `Write`/`Edit` is re-issued to the correct `.worktrees/<id>-<desc>/` path, never rescued with `git stash`/`git checkout`/`git apply`. See the `shell-rules` skill for command patterns.
 - Plan file sections: `## Ticket Details`, `## Implementation Plan`, and `## Architectural Context`.
 - Phase 3's `## Context Budget` brief, verbatim (`phases/phase-3-test-red.md`): the working budget is about half of the model's advertised context window, automatic compaction is disabled, and a low-context state is reported as `Context: low — …`, never pushed through.
 - The failing tests and their failure output.
