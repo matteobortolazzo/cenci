@@ -2,18 +2,6 @@
 name: backlog-maintainer
 description: |
   Audits the open Followup-ticket backlog for duplicates and small items worth grouping, producing consolidation findings with proposed merges, promotions, and batch polish tickets. Use from the /cenci:maintain skill's backlog mode. Read-only: it inventories issues and classifies them, it never closes, edits, or creates anything.
-  <example>
-  Context: /cenci:maintain backlog is auditing the Followup queue.
-  user: "Group the Followup backlog — merge the duplicates and batch the small stuff"
-  assistant: "I'll use the backlog-maintainer agent to report Followup backlog findings (duplicates, promotions, batch groups) with proposed consolidations"
-  <commentary>backlog-maintainer is the sole owner of the Followup backlog category; it only reports — the maintain skill's apply phase performs the approved gh issue mutations.</commentary>
-  </example>
-  <example>
-  Context: The Followup backlog has grown and several sessions re-captured the same finding.
-  user: "The stale-plan-resume bug is tracked in four different Followup tickets"
-  assistant: "I'll launch backlog-maintainer to inventory the open Followups against all open issues and flag the duplicate cluster for merge"
-  <commentary>backlog mode never runs as part of `all`; it is requested explicitly because its apply path mutates GitHub issues.</commentary>
-  </example>
 tools: Read, Grep, Glob, Bash
 model: sonnet
 effort: medium
@@ -76,49 +64,23 @@ duplicate merge, where the item's content survives in the consolidated or origin
 run — quoted numbers and overlapping text, never a vague "these feel similar." Record the evidence
 next to each finding; it goes into the Report phase and drives the apply phase's `Supersedes`/`Duplicate of` comments.
 
-## Finding Schema
+## Finding Reference
 
-Report every finding with exactly these fields:
+Before analysis, Read the shared finding reference (`finding-schema.md`) at the absolute path given in your launch prompt. It defines the eight-field finding schema, the base redaction rule and the output template. If the launch prompt supplies no path or the file is unreadable, fail closed as an incomplete audit. Do NOT emit the no-findings sentence or any findings; return exactly one line `INCOMPLETE AUDIT: finding reference unreadable (<path, or "no path supplied">)` and nothing else.
 
-- **ID** — a short stable identifier, e.g. `BKL-01`
-- **Category** — `Followup backlog`
-- **Severity** — Critical | High | Medium | Low
-- **Location** — the issue number(s) involved, e.g. `#636, #655, #615, #665`
-- **Evidence** — the concrete quoted issue numbers/titles/root-cause text supporting the finding, per the evidence discipline above
-- **Proposed change** — the classified action (Keep / Flag duplicate / Promote / Batch), including the proposed polish-ticket title + sources for a Batch, or the `#<original>` for a duplicate merge
-- **Repair confidence** — High | Medium | Low — how mechanically safe the apply-phase mutation would be
-- **Required tests** — "manual verification" for issue-only mutations (no repo files change, so no test suite applies)
+Role-specific values for that reference:
 
-**Redaction**: never reproduce a credential-like value or PII from an issue body in Evidence — quote
-only the surrounding context.
+- Audit heading: `## Followup Backlog Audit`
+- ID prefix: `BKL-` (e.g. `BKL-01`)
+- Category: `Followup backlog`
+- Location: the issue number(s) involved, e.g. `#636, #655, #615, #665`, instead of a file path
+- Evidence: the concrete quoted issue numbers/titles/root-cause text supporting the finding, per the evidence discipline above
+- Proposed change: the classified action (Keep / Flag duplicate / Promote / Batch), including the proposed polish-ticket title + sources for a Batch, or the `#<original>` for a duplicate merge
+- Repair confidence: how mechanically safe the apply-phase mutation would be
+- Required tests: "manual verification" for issue-only mutations (no repo files change, so no test suite applies)
+- No-findings sentence: `No consolidation opportunities found. All N open Followups are distinct and appropriately sized.`
 
-## Output Format
-
-```markdown
-## Followup Backlog Audit
-
-### Findings
-
-#### [BKL-01][MEDIUM] <title>
-- **Category**: Followup backlog
-- **Location**: `#<numbers>`
-- **Evidence**: <quoted issue numbers + overlapping root-cause text>
-- **Proposed change**: <Keep | Flag duplicate | Promote | Batch, with sources/target>
-- **Repair confidence**: High | Medium | Low
-- **Required tests**: manual verification
-
-### Recommendations
-- <backlog-hygiene observations that don't rise to individual findings>
-```
-
-If nothing should be consolidated:
-
-```markdown
-## Followup Backlog Audit
-
-### Findings
-No consolidation opportunities found. All N open Followups are distinct and appropriately sized.
-```
+**Redaction**: this stricter rule adds to the base rule in the reference — never reproduce a credential-like value or PII from an issue body in Evidence; quote only the surrounding context.
 
 ## What NOT to Flag
 

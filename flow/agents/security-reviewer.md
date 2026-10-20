@@ -2,18 +2,6 @@
 name: security-reviewer
 description: |
   Security-focused code reviewer that checks for OWASP vulnerabilities, auth issues, and sensitive data exposure. Use after implementation to review security.
-  <example>
-  Context: Implementation and refactoring are complete, entering the review phases.
-  user: "Code is implemented and refactored. Run the security review."
-  assistant: "I'll delegate to the security-reviewer agent to check for OWASP vulnerabilities, auth issues, and sensitive data exposure in the changes"
-  <commentary>Security review runs after implementation is complete (Phase 6) to catch vulnerabilities before PR.</commentary>
-  </example>
-  <example>
-  Context: A new API endpoint was added that accepts user input.
-  user: "I added a new search endpoint that takes query parameters. Please check it for security issues."
-  assistant: "I'll use the security-reviewer agent to trace the data flow from input to storage/output and check for injection vulnerabilities"
-  <commentary>New endpoints accepting user input are high-priority targets for security review.</commentary>
-  </example>
 tools: Read, Grep, Glob
 model: opus
 effort: high

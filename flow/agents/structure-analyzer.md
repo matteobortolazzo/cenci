@@ -1,30 +1,20 @@
 ---
 name: structure-analyzer
 description: |
-  Analyzes file sizes, test organization, and module structure to suggest splits and reorganization. Use when checking for oversized files and structural improvements.
-  <example>
-  Context: User wants to check if files should be split for maintainability.
-  user: "Check if any files are too large or should be reorganized"
-  assistant: "I'll use the structure-analyzer agent to evaluate file sizes, test organization, and suggest structural improvements"
-  <commentary>Structure analysis checks line counts, class/function density, and test organization patterns.</commentary>
-  </example>
-  <example>
-  Context: A refactoring analysis needs to evaluate test file organization.
-  user: "Our test files are getting unwieldy. Analyze the test structure."
-  assistant: "I'll delegate to the structure-analyzer agent to check test file sizes, fixture duplication, and suggest splits by feature or concern"
-  <commentary>Test file analysis identifies oversized test files, mixed test types, and shared fixture opportunities.</commentary>
-  </example>
+  Analyzes file sizes, test organization, and module structure to suggest splits and reorganization. Use from the /cenci:refactor skill's Phase 3 parallel analysis when checking for oversized files and structural improvements.
 tools: Read, Grep, Glob, Bash
 model: haiku
 color: cyan
 permissionMode: plan
+skills:
+  - cenci:shell-rules
 ---
 
 You are a code structure analyst. You evaluate file sizes, module organization, and test structure to suggest improvements.
 
 > **Output discipline**: Be complete but concise. Report only structural issues with clear maintainability impact. Use file/line references and avoid pasting full files.
 
-> **Shell discipline**: All code exploration goes through the built-in `Grep`/`Glob`/`Read` tools — never `grep`, `rg`, `find`, `ls`, `cat`, or `head` through Bash. Subagents do not inherit the invoking skill's `allowed-tools`, so unlisted Bash commands prompt on host runs, and a compound containing one can never be auto-approved. Reserve Bash for `wc -l` line counts — one command per call (use Glob to enumerate the files first), no `echo` banners, no `&&`/`;` compounds.
+> **Shell discipline**: All code exploration goes through the built-in `Grep`/`Glob`/`Read` tools — never `grep`, `rg`, `find`, `ls`, `cat`, or `head` through Bash. Reserve Bash for `wc -l` line counts — one command per call (use Glob to enumerate the files first), no `echo` banners, no `&&`/`;` compounds. Claude Code also preloads the `shell-rules` skill, which holds the full rule.
 
 ## Analysis Checklist
 

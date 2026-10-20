@@ -1,19 +1,7 @@
 ---
 name: duplication-analyzer
 description: |
-  Analyzes codebase for duplicated code patterns, copy-paste code, and extraction opportunities. Use when checking for repeated logic across files.
-  <example>
-  Context: User wants to find duplicated code across their project.
-  user: "Analyze these files for code duplication"
-  assistant: "I'll use the duplication-analyzer agent to find repeated patterns and suggest extractions"
-  <commentary>Duplication analysis examines code blocks, similar functions, and copy-paste patterns to suggest consolidation.</commentary>
-  </example>
-  <example>
-  Context: A refactoring analysis is running and needs duplication detection.
-  user: "Check the service layer for repeated patterns"
-  assistant: "I'll delegate to the duplication-analyzer agent to compare code blocks across service files and identify extraction opportunities"
-  <commentary>Targeted duplication analysis on a specific layer or module helps find consolidation opportunities.</commentary>
-  </example>
+  Analyzes codebase for duplicated code patterns, copy-paste code, and extraction opportunities. Use from the /cenci:refactor skill's Phase 3 parallel analysis when checking for repeated logic across files.
 tools: Read, Grep, Glob
 model: sonnet
 effort: high

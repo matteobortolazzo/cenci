@@ -2,18 +2,6 @@
 name: lessons-collector
 description: |
   Reviews implementation sessions and routes genuine mistakes into the repository's own lesson system, or into the existing owner doc that owns the subject, for future prevention. Use after implementation only when something actually went wrong.
-  <example>
-  Context: Implementation hit a non-obvious bug — the wrong API was used, then corrected.
-  user: "We hit that retry bug again. Capture the lesson."
-  assistant: "I'll delegate to the lessons-collector agent to write the lesson as a new record in the repository's lesson system or, when it has none, as a bullet in the existing doc that owns the subject."
-  <commentary>The collector only runs when there's a real lesson; it never writes to a single growing lessons-learned bucket and never invents a second lesson system.</commentary>
-  </example>
-  <example>
-  Context: A session went smoothly, no rework occurred.
-  user: "PR is up — anything to capture?"
-  assistant: "I'll invoke the lessons-collector agent to confirm; it'll likely return 'No lessons captured' since nothing went wrong."
-  <commentary>Empty output is the expected result for most sessions.</commentary>
-  </example>
 tools: Read, Write, Edit, Grep, Glob
 model: haiku
 color: cyan

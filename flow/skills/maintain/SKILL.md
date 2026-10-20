@@ -89,12 +89,15 @@ together, in a single message with parallel `Task` calls:
   `portability-maintainer`, and `rules-maintainer` together.
 
 Each analyzer only reads the repository — see `subagent-safety` before delegating — and returns
-findings in the shared schema described below. No analyzer edits anything.
+findings in the shared finding format (`finding-schema.md`). No analyzer edits anything.
 
-**Agent-failure distinction**: if a launched analyzer agent errors out, times out, or does not
-return findings in the expected schema below, that is not the same thing as the agent running
-clean and finding nothing — carry it into Phase 4 as an **incomplete run** for that category, not
-as a silent "no findings".
+Put the absolute path of the shared finding reference, `${CLAUDE_PLUGIN_ROOT}/skills/maintain/finding-schema.md`, in every analyzer's launch prompt. Read before analysis: each maintainer reads that file for the eight-field schema, the base redaction rule and the output template, and its own file supplies only the role-specific values.
+
+**Agent-failure distinction**: if a launched analyzer agent errors out, times out, does not
+return findings in the expected schema, or reports the finding reference missing or unreadable
+(its whole result is the literal marker `INCOMPLETE AUDIT:`), that is not the same thing as the
+agent running clean and finding nothing — carry it into Phase 4 as an **incomplete run** for that
+category, not as a silent "no findings".
 
 ## Phase 4 — Report
 
@@ -108,7 +111,7 @@ Categories in scope for this ticket: Structure, Documentation drift, Generated i
 mismatch, Test gap, Rule hygiene, Followup backlog.
 
 Each finding carries: ID, category, severity, location, evidence, proposed change, repair
-confidence, and required tests — the schema each analyzer agent documents in its own file.
+confidence, and required tests — the shared schema in `finding-schema.md`.
 
 Report any incomplete run flagged above as its own line in the summary (e.g. "Client mismatch:
 incomplete — portability-maintainer errored/timed out, category not actually audited this

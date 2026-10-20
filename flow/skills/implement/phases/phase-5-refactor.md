@@ -8,7 +8,7 @@ Delegate to the `implementer` agent for focused cleanup of touched code only.
 
 Pass:
 
-- Worktree path. Tell the agent: target the worktree explicitly on every command — via `git -C <worktree-path>` for git commands, absolute paths for file operations, or the client's working-directory option — do **not** prefix every command with `cd <path> &&`. See the `shell-rules` skill for command patterns.
+- Worktree path. Tell the agent to follow the implementer's `## Working Directory` section on every command. See the `shell-rules` skill for command patterns.
 - Changed file list.
 - LSP diagnostic reminder if configured.
 - The project's `lintCommand` (when set).

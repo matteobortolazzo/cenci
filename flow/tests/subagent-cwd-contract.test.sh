@@ -82,7 +82,15 @@ assert_contains() {
 # whole-file marker set (e.g. bare "git -C") can match unrelated pre-existing
 # text anywhere in the file and pass vacuously even against unfixed prose;
 # asserting the literal replacement sentence gives real regression signal.
-PHASE_3_4_5_MARKER='target the worktree explicitly on every command — via `git -C <worktree-path>` for git commands, absolute paths for file operations,'
+# Ticket #693 single-sourced the worktree-targeting guidance in the implementer's
+# own `## Working Directory` section (its system prompt, always loaded), so the
+# phase Delegation Context bullets now POINT at that section instead of
+# restating it. The marker is the exact reference sentence fragment; the
+# previous full restatement must be gone.
+PHASE_3_4_5_MARKER='follow the implementer'"'"'s `## Working Directory` section on every command'
+PHASE_3_4_5_OLD_RESTATEMENT='target the worktree explicitly on every command — via `git -C <worktree-path>` for git commands, absolute paths for file operations,'
+PHASE_3_4_5_OLD_NO_CD_RESTATEMENT='do **not** prefix every command with `cd <path> &&`'
+HAND_RESCUE_RULE='Never hand-rescue a blocked or stranded edit'
 
 # =====================================================================
 # agents/implementer.md -- Working Directory section instructs a single
@@ -92,6 +100,10 @@ FILE="agents/implementer.md"
 if require_doc CONTENT "${FILE}"; then
   assert_not_contains "${CONTENT}" 'CWD persists between Bash calls' "${FILE}"
   assert_contains "${CONTENT}" 'Bash CWD does not reliably persist across calls. Use `git -C <worktree-path> ...` for git commands, absolute paths for file operations' "${FILE}"
+  # The section the phases now point at must exist, with its own hand-rescue rule.
+  assert_contains "${CONTENT}" '## Working Directory' "${FILE}"
+  assert_contains "${CONTENT}" "**${HAND_RESCUE_RULE}.**" "${FILE}"
+  assert_contains "${CONTENT}" 'target it explicitly on every command' "${FILE}"
 fi
 
 # =====================================================================
@@ -109,8 +121,31 @@ do
     assert_not_contains "${CONTENT}" 'CWD persists for later calls' "${FILE}"
     assert_not_contains "${CONTENT}" 'standalone `cd <worktree-path>` as the first Bash call' "${FILE}"
     assert_contains "${CONTENT}" "${PHASE_3_4_5_MARKER}" "${FILE}"
+    assert_not_contains "${CONTENT}" "${PHASE_3_4_5_OLD_RESTATEMENT}" "${FILE}"
+    assert_not_contains "${CONTENT}" "${PHASE_3_4_5_OLD_NO_CD_RESTATEMENT}" "${FILE}"
   fi
 done
+
+# Phase 4 keeps the never-hand-rescue rule as a precise reference to the
+# implementer section that holds it.
+FILE="skills/implement/phases/phase-4-implement-green.md"
+if require_doc CONTENT "${FILE}"; then
+  assert_contains "${CONTENT}" "${HAND_RESCUE_RULE}" "${FILE}"
+  assert_contains "${CONTENT}" 'after two failed attempts at the same unexplained defect' "${FILE}"
+fi
+
+# Each phase keeps its own constraints next to the shortened worktree bullet.
+FILE="skills/implement/phases/phase-3-test-red.md"
+if require_doc CONTENT "${FILE}"; then
+  assert_contains "${CONTENT}" 'other workers may be editing it, never revert their changes, never run git state mutations, and write only its owned files' "${FILE}"
+  assert_contains "${CONTENT}" 'up to 3 attempts within its lane' "${FILE}"
+  assert_contains "${CONTENT}" 'A worker summary opening with `Context: low`' "${FILE}"
+fi
+FILE="skills/implement/phases/phase-5-refactor.md"
+if require_doc CONTENT "${FILE}"; then
+  assert_contains "${CONTENT}" 'focused cleanup of touched code only' "${FILE}"
+  assert_contains "${CONTENT}" 'Behavior must not change.' "${FILE}"
+fi
 
 # =====================================================================
 # phase-6-7-review.md -- Shared Context step tells the main agent to run a

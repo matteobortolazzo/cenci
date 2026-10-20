@@ -2,18 +2,6 @@
 name: silent-failure-hunter
 description: |
   Detects silent failure patterns — empty catch blocks, swallowed errors, missing error propagation, and silent fallbacks. Use alongside security and code reviewers during the review phase.
-  <example>
-  Context: Implementation and refactoring are complete, entering the parallel review phase.
-  user: "Code is implemented. Run all reviewers."
-  assistant: "I'll launch the security-reviewer, code-reviewer, and silent-failure-hunter agents in parallel to review the changes"
-  <commentary>Silent failure hunting runs in parallel with other reviewers during Phase 6+7 of the implement pipeline.</commentary>
-  </example>
-  <example>
-  Context: A new error handling path was added.
-  user: "Check this service for swallowed errors"
-  assistant: "I'll use the silent-failure-hunter agent to scan for empty catch blocks, missing error propagation, and silent fallbacks"
-  <commentary>Targeted scan for error handling patterns that generic reviewers often miss.</commentary>
-  </example>
 tools: Read, Grep, Glob
 model: sonnet
 effort: high
