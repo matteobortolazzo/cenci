@@ -46,16 +46,23 @@ const symbolPrefix = "#{@cenci-symbol} "
 func (f *Frontend) trackWindow(windowTarget string, paneInfo *tmuxc.PaneInfo, sessionID string) *windowState {
 	currentName := paneInfo.WindowName
 	taskName := frontend.SanitizeName(detect.TaskName(paneInfo.PaneTitle))
+	if isGraphicsProbeTitle(paneInfo.PaneTitle) {
+		taskName = "Claude Code"
+	}
 
 	// Strip residual cenci prefix from a previous daemon run.
 	currentName = f.stripCenciPrefix(currentName)
 	currentName = frontend.SanitizeName(currentName)
+	probeName := isGraphicsProbeTitle(currentName)
+	if probeName {
+		currentName = "Claude Code"
+	}
 
 	// Check if manually named. A name still leading with an agent status
 	// symbol came from a previous cenci run, not from the user.
 	autoRename, err := f.client.GetWindowOption(windowTarget, "automatic-rename")
 	manuallyNamed := false
-	if err == nil && autoRename == "off" {
+	if err == nil && autoRename == "off" && !probeName {
 		r, _ := utf8.DecodeRuneInString(currentName)
 		manuallyNamed = currentName != taskName && !detect.IsStatusSymbol(r)
 	}
@@ -180,18 +187,21 @@ func (f *Frontend) restoreWindow(windowTarget string) {
 		return
 	}
 
+	// The pane may disappear after ListPanes and its window index may then
+	// belong to another session. A pane ID cannot retarget that survivor.
+	target := ws.PaneID
 	// Restore original window name.
-	if err := f.client.RenameWindow(windowTarget, ws.OriginalName); err != nil {
+	if err := f.client.RenameWindow(target, ws.OriginalName); err != nil {
 		if f.cfg.Verbose {
 			log.Printf("error restoring window %s: %v", windowTarget, err)
 		}
 	}
 
-	f.restoreWindowIndicators(windowTarget, ws)
+	f.restoreWindowIndicators(target, ws)
 
 	// Re-enable automatic-rename only for non-manually-named windows.
 	if !ws.ManuallyNamed {
-		f.setWindowOpt(windowTarget, "automatic-rename", "on", "error re-enabling automatic-rename")
+		f.setWindowOpt(target, "automatic-rename", "on", "error re-enabling automatic-rename")
 	}
 
 	if f.cfg.Verbose {

@@ -118,6 +118,9 @@ func (f *Frontend) OnEvent(sess *frontend.SessionState, event ipc.HookEvent) fro
 	// Resolve task name from the pane title (sanitize immediately to protect
 	// downstream consumers: IPC broadcast, status output, and rename).
 	taskName := taskNameFromPane(paneInfo)
+	if isGraphicsProbeTitle(paneInfo.PaneTitle) && ws.TaskName != "" {
+		taskName = ws.TaskName
+	}
 	if sess.PromptTaskName {
 		taskName = sess.TaskName
 	}
@@ -139,10 +142,21 @@ func (f *Frontend) OnEvent(sess *frontend.SessionState, event ipc.HookEvent) fro
 // taskNameFromPane derives the fallback display task name from the pane title.
 // Codex prompt-derived labels override this fallback once available.
 func taskNameFromPane(paneInfo *tmuxc.PaneInfo) string {
+	if isGraphicsProbeTitle(paneInfo.PaneTitle) {
+		return "Claude Code"
+	}
 	if fallback, ok := codexActionRequiredTitle(paneInfo.PaneTitle); ok {
 		return fallback
 	}
 	return frontend.CompactTaskName(detect.TaskName(paneInfo.PaneTitle))
+}
+
+// Claude's unwrapped kitty capability query is interpreted by tmux as an APC
+// title update (anthropics/claude-code#99005). It is protocol data, not a task.
+// Also recognize the compact name older cenci versions copied into the window.
+func isGraphicsProbeTitle(title string) bool {
+	const probe = "Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA"
+	return title == probe || title == frontend.CompactTaskName(probe)
 }
 
 // codexActionRequiredTitle recognizes Codex's native question title and
