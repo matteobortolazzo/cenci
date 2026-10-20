@@ -3,7 +3,6 @@ package daemon
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log"
 	"time"
 
@@ -33,19 +32,17 @@ type pendingCloseEntry struct {
 	lastChecked time.Time
 }
 
-// pendingCloseKey returns the registry key for a pending-close: the same
-// "session:index" identity closecmd already kills by (#522).
-func pendingCloseKey(session, windowIndex string) string {
-	return session + ":" + windowIndex
-}
-
 // registerPendingClose records pc in the daemon's in-memory pending-close
-// registry, keyed by "session:index". Registering the same session:index
+// registry, keyed by stable pane identity. Registering the same pane
 // twice is a no-op past the first call, so a repeated lazyboards cleanup
 // invocation before the session ends never produces more than one eventual
 // kill (#522 dedup AC).
 func (d *Daemon) registerPendingClose(pc ipc.PendingClose) {
-	key := pendingCloseKey(pc.Session, pc.WindowIndex)
+	if !sandbox.ValidPaneID(pc.PaneID) {
+		log.Printf("pending-close: refusing registration for %q:%q: missing or invalid stable pane identity %q; restart the daemon and retry with a fresh snapshot", pc.Session, pc.WindowIndex, pc.PaneID)
+		return
+	}
+	key := pc.PaneID
 	if _, exists := d.pending[key]; exists {
 		return
 	}
@@ -56,7 +53,7 @@ func (d *Daemon) registerPendingClose(pc ipc.PendingClose) {
 }
 
 // killPendingClose kills wi's window (and, first, the processes behind it, off
-// the event loop -- see killWindowByKey) if it matches a registered
+// the event loop -- see killWindowTarget) if it matches a registered
 // pending-close, and removes the entry regardless of kill success (a
 // disappeared window is nothing to retry). wi is nil for paneless sessions,
 // which never have a tracked window to match against.
@@ -71,7 +68,7 @@ func (d *Daemon) killPendingClose(wi *frontend.WindowInfo) {
 	if wi == nil {
 		return
 	}
-	key := pendingCloseKey(wi.Session, wi.WindowIndex)
+	key := wi.PaneID
 	entry, ok := d.pending[key]
 	if !ok {
 		return
@@ -85,7 +82,7 @@ func (d *Daemon) killPendingClose(wi *frontend.WindowInfo) {
 		return
 	}
 	delete(d.pending, key)
-	d.killWindowByKey(key, "pending-close")
+	d.killWindowTarget(entry.pc.PaneID, entry.pc.PaneID, "pending-close")
 }
 
 // retryBlockedPendingCloses re-evaluates every pending-close the babysit
@@ -112,7 +109,7 @@ func (d *Daemon) retryBlockedPendingCloses() {
 		if d.cfg.Verbose {
 			log.Printf("pending-close: babysit guard cleared for %s (%s), closing now", key, entry.pc.WindowName)
 		}
-		d.killWindowByKey(key, "pending-close")
+		d.killWindowTarget(entry.pc.PaneID, entry.pc.PaneID, "pending-close")
 	}
 }
 
@@ -131,27 +128,19 @@ func (d *Daemon) babysitBlocks(entry *pendingCloseEntry) (bool, string) {
 	return d.closeGuard(ticket)
 }
 
-// killWindowByKey kills the window a "session:index" registry key names:
-// first the processes behind it, then the window itself (#1253). Both run off
-// the event loop through runOffLoop, because the process kill waits out a grace
-// window and a runtime exec can hang; the caller has already removed the
-// registry entry on the loop. The off-loop function captures only locals --
-// never d.sessions, d.pending or any other loop-owned state.
-//
-// A failed process kill is logged and never stops kill-window. A window that is
-// already gone counts as closed and is logged only under Verbose.
-func (d *Daemon) killWindowByKey(key, prefix string) {
-	target := fmt.Sprintf("=%s", key)
-	d.killWindowTarget(target, target, prefix)
-}
-
-// killWindowTarget is killWindowByKey for an explicit tmux target. desc names
-// the window in log lines (it equals target for the pending-close path). A
+// killWindowTarget kills processes and then the window off the event loop.
+// A process-kill failure is logged and does not prevent closing the window;
+// an already-gone window counts as closed. The closure captures only locals.
+// desc names the window in log lines. A
 // deferred kill must pass a target that cannot drift to another window between
 // scheduling and the kill: a "=session:index" is resolved again at kill time,
 // after the grace wait, so a renumber or index reuse in between would hit the
 // wrong window; a pane id ("%N") is never reused while the tmux server runs.
 func (d *Daemon) killWindowTarget(target, desc, prefix string) {
+	if !sandbox.ValidPaneID(target) {
+		log.Printf("%s: refusing to close %q: missing or invalid stable pane identity %q", prefix, desc, target)
+		return
+	}
 	killer, procKiller, verbose := d.killer, d.procKiller, d.cfg.Verbose
 	d.runOffLoop(sandbox.GraceFromEnv()+sandbox.CloseKillMargin, func(ctx context.Context) {
 		if procKiller != nil {
@@ -188,5 +177,5 @@ func (d *Daemon) prunePendingCloseForWindow(wi *frontend.WindowInfo) {
 	if wi == nil {
 		return
 	}
-	delete(d.pending, pendingCloseKey(wi.Session, wi.WindowIndex))
+	delete(d.pending, wi.PaneID)
 }

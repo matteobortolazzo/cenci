@@ -53,7 +53,7 @@ func (d *Daemon) handleEvent(event ipc.HookEvent) {
 	// A subagent's own SessionEnd (non-empty AgentID) must not tear down the
 	// main session's window — only the main agent's own SessionEnd does.
 	if event.EventType == "SessionEnd" && event.AgentID == "" {
-		// Resolve the window's "session:index" target before teardown:
+		// Resolve the window's stable pane identity before teardown:
 		// OnSessionEnd releases the frontend's tracking state for this
 		// session key, so WindowInfo would return nil afterward (#522).
 		wi := d.frontend.WindowInfo(key)
@@ -67,7 +67,7 @@ func (d *Daemon) handleEvent(event ipc.HookEvent) {
 		if event.SessionEndReason == "clear" || event.SessionEndReason == "resume" {
 			// A pending-close means "close once the agent's work ends" — and on
 			// a handoff the work continues in this window under a successor
-			// session. Keep the registry entry (keyed by session:index, which
+			// session. Keep the registry entry (keyed by pane ID, which
 			// survives the handoff) so the kill fires on the successor's own
 			// SessionEnd instead of destroying the window mid-continuation. If
 			// the handoff fell back to teardown because the pane is already

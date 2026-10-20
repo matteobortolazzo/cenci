@@ -42,6 +42,10 @@ type WindowState struct {
 	Session string `json:"session"`
 	// WindowIndex is the window's index within its session, as a string.
 	WindowIndex string `json:"window_index"`
+	// PaneID is the tracked agent's stable tmux pane identity ("%N"). Close
+	// operations use it throughout shutdown; session indexes can be reused.
+	// Empty for paneless sessions and synthetic attention entries.
+	PaneID string `json:"pane_id,omitempty"`
 	// WindowName is the "<number>-<skill>" window name (e.g. "42-implement"),
 	// where skill is the running workflow. The leading ticket number is the
 	// stable join key external tools use to associate cenci state with

@@ -16,6 +16,15 @@
 // ignore unknown fields — encoding/json does this by default — so that decoding
 // keeps working when the daemon is upgraded ahead of the client.
 //
+// WindowState.PaneID (JSON "pane_id") identifies the tracked tmux pane for
+// shutdown. Session and WindowIndex describe its location for display and can
+// change or be reused. Close consumers must require a valid "%N" pane identity
+// and retain it throughout process and window termination. A snapshot from an
+// older daemon can omit it; upgrade close clients and restart the upgraded
+// daemon before closing those entries. Older direct-close clients still use
+// indexes even against a new daemon. Paneless and synthetic entries have no
+// pane identity.
+//
 // This package is a leaf: it imports only the standard library and nothing from
 // cenci's internal packages, so it is safe to import from external tools.
 // Versioning follows the existing watch/v* Go submodule tags.

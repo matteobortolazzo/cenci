@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/detect"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/sandbox"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/tmux"
 	"github.com/matteobortolazzo/cenci/watch/v2/pkg/watch"
 )
@@ -83,7 +84,7 @@ type Opts struct {
 	// `cenci close` on every board refresh.
 	Guard func(ticket string) (bool, string)
 	// KillProcesses, if non-nil, kills the process tree behind a resolved
-	// window target ("=session:index") before KillWindow runs (#1253).
+	// window target (the stable pane ID) before KillWindow runs (#1253).
 	// Production: a closure over windowproc.Killer. It runs only for windows
 	// about to be closed -- never for --dry-run, busy or babysit-skipped
 	// windows -- and its error is collected but never stops KillWindow: a failed
@@ -112,6 +113,10 @@ func Run(opts Opts) ([]Decision, error) {
 	var decisions []Decision
 	var errs []error
 	for _, w := range matches {
+		if !sandbox.ValidPaneID(w.PaneID) {
+			errs = append(errs, fmt.Errorf("refusing to close %s (%s:%s): missing or invalid stable pane identity %q; restart the daemon and retry with a fresh snapshot", w.WindowName, w.Session, w.WindowIndex, w.PaneID))
+			continue
+		}
 		// Status values are compared against detect.Status.String() output,
 		// never a literal copied from a doc comment: pkg/watch's WindowState
 		// doc comment still (incorrectly) says "need_input", but the daemon
@@ -150,9 +155,9 @@ func Run(opts Opts) ([]Decision, error) {
 			decisions = append(decisions, Decision{Window: w, Action: ActionWouldClose})
 			continue
 		}
-		// "=" forces an exact session-name match so a target never
-		// accidentally resolves against a same-prefixed session.
-		target := fmt.Sprintf("=%s:%s", w.Session, w.WindowIndex)
+		// Retain the selected identity across process shutdown: indexes can
+		// shift or be reused while the process killer waits for exit.
+		target := w.PaneID
 		if opts.KillProcesses != nil {
 			if perr := opts.KillProcesses(target); perr != nil {
 				errs = append(errs, fmt.Errorf("killing processes of %s (%s): %w", w.WindowName, target, perr))

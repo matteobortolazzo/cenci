@@ -29,6 +29,9 @@ const pendingCloseKind = "pending-close"
 // (running/need-input, no --force). The daemon records it and kills the
 // window itself once it observes the owning session's SessionEnd (#522).
 type PendingClose struct {
+	// PaneID identifies the original window throughout deferred shutdown.
+	// Missing or malformed identities are rejected; indexes are display only.
+	PaneID      string `json:"pane_id"`
 	Session     string `json:"session"`
 	WindowIndex string `json:"window_index"`
 	WindowName  string `json:"window_name"`

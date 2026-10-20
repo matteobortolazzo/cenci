@@ -5,11 +5,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/ipc"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/windowproc/windowproctest"
 )
 
 // -- close subcommand (ticket #314) ------------------------------------------
@@ -106,8 +108,8 @@ func TestClose_TrailingUnexpectedArg_Exits2(t *testing.T) {
 func TestClose_DryRun_PrintsCloseAndSkipDecisions(t *testing.T) {
 	socket := startCloseIPCServer(t, ipc.StateSnapshot{
 		Windows: []ipc.WindowState{
-			{Session: "sess-a", WindowIndex: "0", WindowName: "77-implement", Status: "done"},
-			{Session: "sess-a", WindowIndex: "1", WindowName: "77-review", Status: "running"},
+			{Session: "sess-a", WindowIndex: "0", WindowName: "77-implement", Status: "done", PaneID: "%77"},
+			{Session: "sess-a", WindowIndex: "1", WindowName: "77-review", Status: "running", PaneID: "%78"},
 		},
 	})
 
@@ -143,7 +145,7 @@ func TestClose_DryRun_PrintsCloseAndSkipDecisions(t *testing.T) {
 func TestClose_BabysitSupervisedWindow_SkippedAndForceable(t *testing.T) {
 	socket := startCloseIPCServer(t, ipc.StateSnapshot{
 		Windows: []ipc.WindowState{
-			{Session: "sess-a", WindowIndex: "0", WindowName: "77-implement", Status: "done"},
+			{Session: "sess-a", WindowIndex: "0", WindowName: "77-implement", Status: "done", PaneID: "%77"},
 		},
 	})
 
@@ -184,14 +186,21 @@ func TestClose_BabysitSupervisedWindow_SkippedAndForceable(t *testing.T) {
 		}
 	}
 
-	// --force bypasses the guard entirely: it reaches the killer, which is
-	// the only path here that needs a real tmux, so assert on the decision
-	// rather than on success.
+	// --force bypasses the guard and targets the selected pane throughout
+	// shutdown. Install only fake binaries so this cannot touch ambient tmux.
+	fakes := windowproctest.Install(t, windowproctest.Spec{ListGone: true})
 	cmd := exec.Command(binaryPath, "close", "77", "--force", "--socket", socket)
 	cmd.Env = append(os.Environ(), "XDG_STATE_HOME="+stateHome)
-	forced, _ := cmd.CombinedOutput()
+	forced, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("forced close: %v\n%s", err, forced)
+	}
 	if strings.Contains(string(forced), "babysit supervising") {
 		t.Errorf("--force must bypass the babysit guard, got:\n%s", forced)
+	}
+	wantCalls := []string{"tmux list-panes -t %77 -F " + windowproctest.OwnedFormatToken, "tmux kill-window -t %77"}
+	if got := fakes.Calls(t); !slices.Equal(got, wantCalls) {
+		t.Errorf("forced close calls = %v, want %v", got, wantCalls)
 	}
 }
 
@@ -212,7 +221,7 @@ func TestClose_ArmingZeroChecksWindow_GraceBounded(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			socket := startCloseIPCServer(t, ipc.StateSnapshot{
 				Windows: []ipc.WindowState{
-					{Session: "sess-a", WindowIndex: "0", WindowName: "77-implement", Status: "done"},
+					{Session: "sess-a", WindowIndex: "0", WindowName: "77-implement", Status: "done", PaneID: "%77"},
 				},
 			})
 
@@ -258,7 +267,7 @@ func TestClose_ArmingZeroChecksWindow_GraceBounded(t *testing.T) {
 func TestClose_NoMatches_EmptyStdoutExit0(t *testing.T) {
 	socket := startCloseIPCServer(t, ipc.StateSnapshot{
 		Windows: []ipc.WindowState{
-			{Session: "sess-a", WindowIndex: "0", WindowName: "99-other", Status: "done"},
+			{Session: "sess-a", WindowIndex: "0", WindowName: "99-other", Status: "done", PaneID: "%99"},
 		},
 	})
 
@@ -270,5 +279,30 @@ func TestClose_NoMatches_EmptyStdoutExit0(t *testing.T) {
 	}
 	if len(output) != 0 {
 		t.Errorf("expected empty stdout for zero matches, got:\n%s", output)
+	}
+}
+
+func TestClose_LegacySnapshotWithoutPaneIdentity_RejectsBeforeTmux(t *testing.T) {
+	socket := startCloseIPCServer(t, ipc.StateSnapshot{
+		Windows: []ipc.WindowState{{Session: "sess-a", WindowIndex: "0", WindowName: "77-implement", Status: "running"}},
+	})
+	fakes := windowproctest.Install(t, windowproctest.Spec{})
+	for _, flags := range [][]string{nil, {"--force"}, {"--dry-run"}, {"--force", "--dry-run"}} {
+		args := append([]string{"close", "77", "--socket", socket}, flags...)
+		cmd := exec.Command(binaryPath, args...)
+		cmd.Env = emptyStateHome(t)
+		output, err := cmd.CombinedOutput()
+		exitErr, ok := err.(*exec.ExitError)
+		if !ok || exitErr.ExitCode() != 1 {
+			t.Fatalf("%v: expected exit 1, got %v\n%s", flags, err, output)
+		}
+		for _, want := range []string{"missing or invalid stable pane identity", "restart the daemon", "fresh snapshot"} {
+			if !strings.Contains(string(output), want) {
+				t.Errorf("%v: missing recovery diagnostic %q: %s", flags, want, output)
+			}
+		}
+		if got := fakes.Calls(t); len(got) != 0 {
+			t.Fatalf("%v: legacy snapshot reached tmux/runtime: %v", flags, got)
+		}
 	}
 }
