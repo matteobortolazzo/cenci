@@ -10,7 +10,7 @@ allowed-tools: Read, Write, Edit, Glob, Grep, AskUserQuestion, Bash(bash "${CLAU
 
 > **Client dispatch**: In Codex, read `codex-runtime` and `configure/codex.md`, execute that native procedure, and do not continue into the Claude procedure below.
 
-> **Interaction rule**: Every question, confirmation, or approval directed at the user — anywhere in this skill, including error recovery — MUST be asked with the `AskUserQuestion` tool. Never ask in plain text. If an instruction says "ask the user" or "confirm", that means `AskUserQuestion`.
+> **Interaction rule**: Every question, confirmation, or approval directed at the user — anywhere in this skill, including error recovery — MUST be asked with the `AskUserQuestion` tool. Never ask in plain text. If an instruction says "ask the user" or "confirm", that means `AskUserQuestion`. This also governs the `phases/*.md` and `references/*.md` files this skill reads.
 
 ## Task
 
@@ -19,7 +19,7 @@ Help the user set up this project for the cenci plugin.
 ### Parse `$ARGUMENTS`
 
 `$ARGUMENTS` is optional. `--all` is a reserved leading token of `$ARGUMENTS`; everything after it is user context.
-When the first token is `--all`, the run replays every question (see the Delta Resolution subsection below); a `--all` anywhere
+When the first token is `--all`, the run replays every question (see `### Delta Resolution` in `phases/detection-and-delta.md`); a `--all` anywhere
 else is ordinary user context. The remaining text is optional **user context** (additional instructions or focus
 areas). Strip the `--all` token before deriving the slug (see Create Worktree below).
 If empty, proceed normally with defaults.
@@ -32,19 +32,9 @@ Resolve project configuration in this order:
 2. Otherwise read `.claude/config.json` as `legacyConfig`. Treat this as a migration run.
 3. If neither exists, set `existingConfig` to null.
 
-On migration, preserve every unknown key from `legacyConfig`; new writes go only to
-`.cenci/config.json`. If both files exist, recursively merge them into one
-`migrationBase` with canonical values winning, then overlay managed answers. Use
-`"${CLAUDE_PLUGIN_ROOT}/scripts/migrate-project-core.sh" <root>` to preview the exact
-config/guidance diff:
-```bash
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/migrate-project-core.sh" <root> [--apply]
-```
-Rerun it with `--apply` only after approval, with `<root>` set to `<worktree-path>` (see
-Create Worktree below — the worktree exists by the time any `--apply` can run). Never
-rewrite or delete `.claude/config.json`; it is a read-only compatibility artifact.
+When `.claude/config.json` exists (a legacy-only migration run, or alongside `.cenci/config.json`), the unknown-key preservation, the `migrationBase` merge and the preview/`--apply` step are covered by the migrations row of `### Step Map` below.
 
-When `existingConfig` (or `migrationBase`) is present, tell the user before starting questions, according to the run mode (resolved in the Delta Resolution subsection below):
+When `existingConfig` (or `migrationBase`) is present, tell the user before starting questions, according to the run mode (resolved in `### Delta Resolution` in `phases/detection-and-delta.md`):
 - **`delta` run** (the default): "Found existing configuration. Only new or never-offered questions will be asked; answers you already gave are carried through. Run `/cenci:configure --all` to re-open every question."
 - **`--all` or `full` run**: "Found existing configuration. Each question will show your current setting as the default — select it to keep it unchanged."
 
@@ -54,104 +44,45 @@ Reconfiguration runs are how a project picks up configure features added since i
 
 `/cenci:configure` writes files into the repo (`.cenci/config.json`, `AGENTS.md`/`CLAUDE.md`, `.mcp.json`, `.lsp.json`, `.gitignore`, `.claudeignore`, `.github/workflows/ci.yml`, `.cenci/Dockerfile`, `.lazyboards.yml`, `.codex/agents/`) and updates `.claude/settings.json`. Like every other change in this repo, these ship as a PR — configure never writes directly to the main worktree (see `cenci:worktrees` and `docs/git-workflow.md`).
 
-Create the worktree now, before any file is written (including a migration `--apply` above) and before the detection/question steps below, since none of them depend on it existing yet:
+Create the worktree now, before any file is written (including a migration `--apply`, see `references/migrations.md` when `.claude/config.json` exists) and before the detection/question steps in the Step Map below, since none of them depend on it existing yet:
 
 1. Verify at least one commit exists: `git rev-parse HEAD 2>/dev/null`. If the repository has no commits, create an initial commit as two standalone Bash calls (never compound `&&` — shell-rules: every segment of a compound is evaluated independently by the approval system): `git add -A`, then `git commit -m "chore: initial commit" --allow-empty`.
-2. Derive a slug: `init` when `existingConfig` is null (first-ever configure run), `update` for a plain reconfiguration, or a short kebab-case description of the user's focus when the user context (the `$ARGUMENTS` text left after the `--all` token is stripped) names one. A bare `--all` carries no focus, so it also derives `update`. User context never re-opens an already-answered question — only `--all` does (see the Delta Resolution subsection below).
+2. Derive a slug: `init` when `existingConfig` is null (first-ever configure run), `update` for a plain reconfiguration, or a short kebab-case description of the user's focus when the user context (the `$ARGUMENTS` text left after the `--all` token is stripped) names one. A bare `--all` carries no focus, so it also derives `update`. User context never re-opens an already-answered question — only `--all` does (see `### Delta Resolution` in `phases/detection-and-delta.md`).
 3. Create the worktree: `git worktree add .worktrees/configure-<slug> -b chore/configure-<slug> main`. If that branch/directory name is already taken by an unrelated prior run, append `-2`, `-3`, etc. until it's free.
 
 From this point on, `<worktree-path>` is `.worktrees/configure-<slug>`. Every file this skill reads or writes below — `.cenci/config.json`, `AGENTS.md`, `CLAUDE.md`, `.mcp.json`, `.lsp.json`, `.gitignore`, `.claudeignore`, `.claude/settings.json`, `.github/workflows/`, `.cenci/Dockerfile`, `.lazyboards.yml`, `.codex/` — and every "the repo root" / "the project root" reference in the steps below resolves against `<worktree-path>`, never the main checkout. Use absolute paths rooted at `<worktree-path>` for every Write/Edit; verify the CWD before Bash commands rather than relying on a single `cd` persisting across calls. `gh label create` / `gh issue` calls (step 3c) are GitHub API calls, not file writes, and run the same regardless of worktree.
 
-### Scripted Detection
+### Step Map
 
-The deterministic detections this skill needs (platform, container, package manager, MCP/LSP/dind/Playwright catalog triggers, plugin version) are scripted, not re-derived ad hoc. Run the bundled detector once, as its **own** Bash call (per `cenci:shell-rules`), from the repository root of the main checkout — it only reads, nothing is written:
+Read these files in this order. Every phase file is read in full on every run: the questions inside stay gated by `delta.ask`, but the inline generation steps below consume the catalogs and mapping tables they hold, and the manual detection fallbacks must stay reachable when `detect-project.sh` fails. Only the migrations row is conditional. Questions 1 to 9c come from the phase files and are asked as `### Question Defaults` describes.
 
-```bash
-bash "${CLAUDE_PLUGIN_ROOT}/skills/configure/scripts/detect-project.sh"
-```
-
-(the detector is `scripts/detect-project.sh` inside this skill; its tests live next to it). Parse its stdout as a JSON object and keep it as `detection` for the rest of this run:
-
-- `detection.pluginVersion` — installed flow plugin version; stamped into config as `configVersion` (step 6)
-- `detection.platform` — `{name, owner, repo}` parsed from the git remote, or `null`
-- `detection.inContainer` — cenci-sandbox container detection result
-- `detection.packageManager` — `pnpm` / `yarn` / `npm` from lockfiles, or `null`
-- `detection.mcpServers` — MCP catalog triggers found in the dependency scan (e.g. `angular`, `primeng`)
-- `detection.lspServers` — LSP catalog triggers found (e.g. `typescript`, `gopls`)
-- `detection.dindDetected` — Testcontainers/Docker-SDK trigger found (question 9b default)
-- `detection.playwrightTest` — `@playwright/test` in root `devDependencies`
-- `detection.warnings` — non-fatal detection notes; relay them to the user as informational messages
-
-If the script exits non-zero or its output is not valid JSON, fall back to the **manual fallback** procedure kept in each consuming section below — a detection either comes from `detection` or from its manual fallback, never silently skipped. The script only detects: every question, catalog decision, and user choice stays in this skill.
-
-### Delta Resolution
-
-A re-run of this skill is a **delta** by default: questions whose answer is already recorded, or that an earlier run already offered, are skipped, while every generation step still runs. The deterministic answer to "which questions does this run ask?" comes from `scripts/resolve-delta.sh` and the committed `question-keys.json` table (see the `ID` column of the defaults table under Container Detection).
-
-**Run mode.** The run mode is `delta` only when `existingConfig` (or `migrationBase`) exists, `--all` is absent, and the resolver succeeds; otherwise the run mode is `full` and every question is asked with `--all` semantics, except questions 13, 14 and 15 (see Fallback). That is today's behavior: each question shows the current setting as its default. A first run (`existingConfig` null), a legacy-only migration run (only `.claude/config.json` exists, so there is no `.cenci/config.json`, no `existingConfig` and no `migrationBase` to resolve against) and a `--all` run never call the resolver; all three are `full` runs by the first and second conditions, not by a resolver failure.
-
-**Resolver call.** Run the resolver as its **own** Bash call (per `cenci:shell-rules`), after Scripted Detection and before the first question — it only reads, nothing is written:
-
-```bash
-bash "${CLAUDE_PLUGIN_ROOT}/skills/configure/scripts/resolve-delta.sh" <config-path>
-```
-
-`<config-path>` is the file `existingConfig` was read from (`.cenci/config.json` in the repository root of the main checkout). On a migration run where both `.cenci/config.json` and `.claude/config.json` exist, the input is `migrationBase`: `migrationBase` is written to `${TMPDIR:-/tmp}/cenci/cenci-configure-<slug>-delta-input.json` first and removed afterwards (`mkdir -p ${TMPDIR:-/tmp}/cenci` beforehand, then `rm -f ${TMPDIR:-/tmp}/cenci/cenci-configure-<slug>-delta-input.json` as its own Bash call once the resolver has run — whether it succeeded, failed or failed the shape check below). A legacy-only run has no canonical config to resolve against, so it is a `full` run and never calls the resolver. Parse its single stdout JSON line as `delta`: `delta.ask` (question IDs to ask), `delta.carried` (IDs to skip), `delta.missingKeys` and `delta.conditional`. The output holds question IDs and config key names only, never config values.
-
-**Result shape check.** Valid JSON is not enough: before using it, require that `delta.ask` and `delta.carried` are both JSON arrays — for example `jq -e '(.ask | type) == "array" and (.carried | type) == "array"'` over the stdout line, exit 0. A result that fails the check (a bare scalar, an object without the arrays, `null`) is treated exactly like a resolver failure in the fallback below; never ask "nothing" because an unusable result was read as an empty `delta.ask`.
-
-**Fallback.** If the resolver exits non-zero, prints invalid JSON, or its JSON fails the shape check above, treat the run as `full` and tell the user why. Give one informational line naming the stderr cause (or the failed shape check); a resolver failure never blocks configuration and never silently skips a question. A `full` run caused by a resolver failure does **not** re-offer a present `planning`, `automerge` or `refinement` value — only an explicit `--all` does (see `### Autonomy Settings`): a fallback must never put the destructive "Remove the block(s)" option in front of the user.
-
-**Using the result.** Ask only the question IDs in `delta.ask` and carry every ID in `delta.carried`. When `delta.ask` is empty, ask no questions and still run every generation step. A carried answer skips only the prompt — its value still drives every generation step. That covers `.mcp.json`, `.lsp.json`, `~/.claude/settings.json`, the AGENTS/CLAUDE marker sections and `.cenci/Dockerfile`: read the value from `existingConfig` instead of asking. Question IDs map to the numbered questions through the `ID` column of the defaults table; a question whose ID is not in `delta.ask` is skipped even when its numbered section below says "ask".
-
-**Offered ledger.** Only questions actually put to the user this run are recorded as offered (step 6 stamps them into `configureOffered`). A conditional question whose detection condition fails (5c without a frontend framework, Playwright without `@playwright/test`, question 6 without detected LSP servers, question 10 when `.lazyboards.yml` exists, question 11 in a container or when the status probe fails) is not recorded, and question 12 and Steps 2a/2b have no ID and are never recorded. An ID is recorded only for an answer that was applied or explicitly declined: when the question 13/14/15 overlay falls back in step 6, that question's ID is removed from the offered set before the ledger is stamped (the next delta run asks it again only when its key is absent and its ID is not already in the existing ledger; otherwise `/cenci:configure --all` applies it), and question 11 is recorded only after a successful `cenci dispatch enroll` or an explicit "No" (see `### Fleet Dispatch Enrollment`).
-
-**Named exceptions** — the only things asked or re-opened beyond `delta.ask` on a delta run:
-- The `enrolled: true, session: ""` repair (question 12) is still asked on a delta run (see `### Fleet Dispatch Enrollment`).
-- The only re-offers a detected stack change causes are question 1 pre-filled with the detected stack, Steps 2a/2b for new monorepo projects, and questions 5/6 for servers missing from the existing maps. The keep-or-change gate still applies to the servers already recorded.
-
-**Things that are not configure questions on a delta run.**
-- Free-text user context never re-opens an answered question on a delta run; if it names one, say that `/cenci:configure --all` re-opens it. Context still steers the questions that are asked and the generation steps.
-- When question 8 is carried, `ci.yml` is neither regenerated nor prompted for. The conflict check is part of question 8, and `ci.yml` carries no managed markers.
-- A carried `uiConventions` keeps the existing `## UI Conventions` section verbatim. That answer lives only in the generated `AGENTS.md`.
-- The substantive-guidance diff-approval gate in step 1 stays a safety gate, not a configure question: it still fires whenever existing guidance would be replaced.
-- The `.lazyboards.yml` suggest-or-skip analyzer only reports on a delta run, and a managed `.cenci/Dockerfile` is refreshed without asking (see step 5e and `### Board Config (lazyboards)`).
-
-### Platform Detection
-
-Use `detection.platform`: when non-null it carries the platform name plus extracted owner/repo; when `null`, fall back to manual questions.
-
-**Manual fallback** (only if Scripted Detection failed): run `git remote get-url origin 2>/dev/null` and parse the result:
-
-| Remote URL pattern | Platform | Extracted values |
+| File | Condition | Why |
 |---|---|---|
-| `git@github.com:OWNER/REPO.git` | github | owner, repo |
-| `https://github.com/OWNER/REPO.git` | github | owner, repo |
-| Unrecognized / no remote | — | Fall back to manual questions |
+| `references/migrations.md` | Only when `.claude/config.json` exists: a legacy-only migration run, or both config files present so `migrationBase` is merged. A `.cenci/config.json`-only run never reads it. | Unknown-key preservation, the `migrationBase` merge, and the `migrate-project-core.sh` preview/`--apply` step. |
+| `phases/detection-and-delta.md` | Every run, after Create Worktree and before the first question. | `### Scripted Detection`, `### Delta Resolution` (which question IDs this run asks), and the platform and container detections with their manual fallbacks. |
+| `phases/project-questions.md` | Every run, after `phases/detection-and-delta.md`. | Questions 1 to 3: tech stack, project structure with Steps 2a and 2b, branching strategy. |
+| `phases/mcp-lsp-ui-questions.md` | Every run, after `phases/project-questions.md`. | Dependency detection and its manual fallback, the MCP and LSP catalogs, questions 5 and 6, UI conventions (5c), Playwright CLI setup, LSP detection and binary verification. |
+| `phases/runtime-ci-sandbox-questions.md` | Every run, after `phases/mcp-lsp-ui-questions.md`. | Questions 7 to 9c: auto-compact, subagent pin, the CI/CD question with its Stack-to-CI mapping table, and the sandbox, dind and Azure questions with the Stack-to-fragment mapping table. |
 
-Strip trailing `.git` suffix from repo names.
+Question 10 onward and generation steps 0 to 7 stay inline in this file.
 
-If user context was provided, use it to steer the configuration (e.g., skip certain questions, pre-select options, focus on specific areas).
+### Question Defaults
 
-### Container Detection
+**Default values from existing config**: When `existingConfig` is not null, each question below that is actually asked (every question on an `--all` or `full` run; only the IDs in `delta.ask` on a `delta` run — see `### Delta Resolution` in `phases/detection-and-delta.md`) MUST present the existing value as the pre-selected default (list it first, marked "(current)"). The user can accept with one click or change it. New fields not in `existingConfig` (e.g., `lspServers` when upgrading from a pre-LSP config) have no default and are asked normally.
 
-cenci runs inside `sandbox`'s cenci-sandbox container with `--dangerously-skip-permissions`. The **container is the security boundary** — there is no host profile. Claude Code's own host sandbox stays disabled, and `permissions.allow`/`deny` are kept only as defense-in-depth for plain `claude` runs inside the container (e.g. `cenci open --shell`).
+**`AskUserQuestion` cannot pre-check `multiSelect` options** — its options only carry `label`/`description`/`preview`, no "selected by default" field. So for the two multi-select questions (5. MCP Servers, 6. LSP Servers), "pre-select" cannot mean a pre-ticked checkbox — re-asking the full multi-select on every reconfigure would force re-clicking every already-enabled server one at a time. Instead, gate behind a single Keep/Change confirmation first (see **Keep-or-change gate** below): when `existingConfig` already has a value for that field, ask one Yes/No question summarizing the current selections; only the change option drops into the full multi-select. This is a single click to keep everything unchanged, instead of one click per server.
 
-Use `detection.inContainer` (the detector checks `CENCI_SANDBOX`, then `/.dockerenv`).
+**Keep-or-change gate** (the single home of this rule; questions 5 and 6 in `phases/mcp-lsp-ui-questions.md` point here): if `existingConfig.mcpServers` (question 5) or `existingConfig.lspServers` (question 6) is present, do not jump straight into the multi-select. Instead present the current state and ask a plain Yes/No:
 
-**Manual fallback** (only if Scripted Detection failed) — detect the container (stop at the first match; run each check as its **own** Bash call, per `cenci:shell-rules` — never compound them):
+"Current MCP servers: `<name>` ✓ enabled, `<name>` ✗ disabled, … . Keep these settings?" (question 6 asks "Current LSP servers: …" in the same form)
+Options: "Yes — keep current settings (Recommended)", "No — let me change them"
 
-1. **`CENCI_SANDBOX` env var** (works for both Docker and Podman): run `test "${CENCI_SANDBOX:-}" = "1"` as its own Bash call. Exit 0 → in container.
-2. **Docker fallback**: run `test -f /.dockerenv` as its own Bash call. Exit 0 → in container.
+- **Yes**: carry the existing field (`existingConfig.mcpServers` or `existingConfig.lspServers`) forward unchanged, skip the multi-select entirely.
+- **No**: continue to the multi-select, sorting currently-enabled servers first so they're easiest to re-tick.
 
-This detection is a **non-blocking advisory** — it never gates configuration and never uses `AskUserQuestion`:
+If the field is absent (first-ever configure run, or a newly-detected server not previously offered), skip the gate and ask the multi-select directly.
 
-- **In container**: emit an informational message: "Detected the cenci-sandbox container — the container is the security boundary. Claude Code's host sandbox stays disabled." Then continue normally.
-- **Not in container**: emit an advisory and continue anyway: "cenci is designed to run inside the cenci-sandbox container (the security boundary). You appear to be running on the host — continuing, but running outside the container is unsupported." Proceed with the same container-shaped output.
-
-**Default values from existing config**: When `existingConfig` is not null, each question below that is actually asked (every question on an `--all` or `full` run; only the IDs in `delta.ask` on a `delta` run — see `### Delta Resolution`) MUST present the existing value as the pre-selected default (list it first, marked "(current)"). The user can accept with one click or change it. New fields not in `existingConfig` (e.g., `lspServers` when upgrading from a pre-LSP config) have no default and are asked normally.
-
-**`AskUserQuestion` cannot pre-check `multiSelect` options** — its options only carry `label`/`description`/`preview`, no "selected by default" field. So for the two multi-select questions (5. MCP Servers, 6. LSP Servers), "pre-select" cannot mean a pre-ticked checkbox — re-asking the full multi-select on every reconfigure would force re-clicking every already-enabled server one at a time. Instead, gate behind a single Keep/Change confirmation first (see *Keep-or-change gate* under each question below): when `existingConfig` already has a value for that field, ask one Yes/No question summarizing the current selections; only "No — let me change them" drops into the full multi-select. This is a single click to keep everything unchanged, instead of one click per server.
+Under `--all`, every keep-or-change offer lists its Keep option first, marked "(Recommended)": "Yes — keep current settings (Recommended)" here, "Keep current (Recommended)" for questions 13 and 15, "Keep current block(s) (Recommended)" for question 14 (see `### Autonomy Settings`).
 
 The `ID` column is the question's identifier in `question-keys.json` — the value `resolve-delta.sh` returns in `delta.ask`/`delta.carried` and step 6 stores in `configureOffered`. IDs are a stable contract persisted in users' ledgers.
 
@@ -160,10 +91,10 @@ The `ID` column is the question's identifier in `question-keys.json` — the val
 | 1. Tech stack | `stack` | `stack` | Pre-fill with formatted stack |
 | 2. Project structure | `isMonorepo` | `isMonorepo` | Pre-select based on existing value |
 | 3. Branching strategy | `branchPattern` | `branchPattern` | Pre-fill with existing pattern |
-| 5. MCP Servers | `mcpServers` | `mcpServers` | Keep-or-change gate (see below); only "change" enters the multi-select, pre-sorted with enabled servers first |
+| 5. MCP Servers | `mcpServers` | `mcpServers` | Keep-or-change gate (see **Keep-or-change gate** above); only "change" enters the multi-select, pre-sorted with enabled servers first |
 | 5c. UI conventions | `uiConventions` | *(none — guidance prose only; ledger-tracked)* | Conditional on a detected frontend framework; a carried answer keeps the existing `## UI Conventions` section |
 | Playwright CLI setup | `playwrightCli` | `playwrightCli` | Conditional on a frontend framework plus `detection.playwrightTest`; pre-select Yes/No |
-| 6. LSP Servers | `lspServers` | `lspServers` | Keep-or-change gate (see below); only "change" enters the multi-select, pre-sorted with enabled servers first |
+| 6. LSP Servers | `lspServers` | `lspServers` | Keep-or-change gate (see **Keep-or-change gate** above); only "change" enters the multi-select, pre-sorted with enabled servers first |
 | 7. Auto-compact | `autoCompactDisabled` | `autoCompactDisabled` | Pre-select Yes/No |
 | 7b. Pin subagents to 200K | `pinSubagents200K` | `pinSubagents200K` | Pre-select Yes/No |
 | 8. CI/CD pipeline | `cicd` | `cicd` | Pre-select Yes/No based on `cicd.enabled` |
@@ -180,378 +111,6 @@ The `ID` column is the question's identifier in `question-keys.json` — the val
 | 18–20. Fleet autonomy controls | `dispatch.planRefined`, `automerge.enabled`, `planning.attended` | ledger only | Independent host CLI choices; sandbox defers host execution |
 
 Ask these questions one at a time using the `AskUserQuestion` tool (on a `delta` run, only those whose ID is in `delta.ask` — skip the rest and carry their recorded values):
-
-1. **Tech stack**: "What's your tech stack?" (capture for stack pack selection)
-   - Backend framework + version
-   - Frontend framework + version
-   - Test frameworks
-   - Any other key technologies
-
-2. **Project structure**: "Is this a monorepo or single project?"
-
-**If monorepo**, continue with Steps 2a and 2b below. Otherwise skip to question 3.
-
-#### Step 2a — Auto-detect projects
-
-Scan the repo for project directories using these strategies (try all, deduplicate):
-
-1. **Node workspaces**: Read `package.json` `workspaces` field and `pnpm-workspace.yaml` `packages` field
-2. **Lerna**: Read `lerna.json` `packages` field
-3. **.NET solutions**: Find `*.sln` files and parse `Project(...)` references for `.csproj` paths
-4. **Convention directories**: Scan `packages/*/`, `apps/*/`, `projects/*/`, `src/*/` for directories containing `package.json` or `*.csproj`
-
-For each discovered project, detect:
-- **Path**: relative directory (e.g., `packages/api`)
-- **Stack**: auto-detect from dependencies:
-  - `@angular/core` in `package.json` → Angular
-  - `react` in `package.json` → React
-  - `next` in `package.json` → Next.js
-  - `vue` in `package.json` → Vue
-  - `.csproj` with `Microsoft.NET.Sdk.Web` → .NET API
-  - `.csproj` with `Microsoft.NET.Sdk` → .NET library
-  - Fallback: read `package.json` `name` or directory name
-- **Build command**: auto-detect (`dotnet build` for .NET, `npm run build` for Node, etc.)
-- **Test command**: auto-detect (`dotnet test` for .NET, `npm test` for Node, etc.)
-- **Lint command**: derive from the Stack-to-CI mapping table's Lint column (see the table under question 8 below); omit `lintCommand` entirely when the detected stack has no Lint row (e.g. `markdown-shell`, `docker-shell`)
-
-Present discovered projects for confirmation using AskUserQuestion:
-"Found these projects in the monorepo:
-1. `<path>` — <detected-stack>
-2. `<path>` — <detected-stack>
-...
-Are these correct? (You can add or remove projects)"
-
-#### Step 2b — Per-project details
-
-For each confirmed project, ask for a **one-line description** using AskUserQuestion:
-"Provide a short description for each project:"
-- `<path>` (<stack>): ___
-
-Generate a slug for each project from its directory name (e.g., `packages/api` → `api`, `apps/web-client` → `web-client`).
-
-3. **Branching strategy**: "What's your branch naming convention?"
-   - Default suggestion: `feature/<id>-<description>`
-
-(There is no question 4 — sandboxing is not asked. The cenci-sandbox container is the security boundary and Claude Code's host sandbox is always disabled; numbering of the remaining questions is kept for stability.)
-
-### Dependency Detection
-
-The dependency scan is scripted: `detection.mcpServers` carries the MCP catalog triggers found, and `detection.dindDetected` is the `dindDetected` value question 9b uses below.
-
-**Manual fallback** (only if Scripted Detection failed) — scan the project for framework dependencies:
-
-1. If `package.json` exists in the repo root, read `dependencies` and `devDependencies`
-2. If `.csproj` files exist, read `PackageReference` entries
-3. Store the detected package names for matching against the MCP catalog below
-4. **Testcontainers/Docker-SDK detection** (for question 9b below — nested Docker/dind): scan for these triggers and store the result as `dindDetected` (`true` if any match, `false` otherwise):
-   - npm: `testcontainers`, `@testcontainers/*`, or `dockerode` in `dependencies`/`devDependencies`
-   - NuGet: `Testcontainers*` or `Docker.DotNet` in `.csproj` `PackageReference` entries
-   - Python: `testcontainers` in the dependency list (`requirements.txt`, `pyproject.toml`) — dep list only, no source scan
-   - Go: `github.com/testcontainers/testcontainers-go` in `go.mod`
-
-### MCP Server Catalog
-
-| Trigger Package | Server Name | Command | Args | Env Vars | Scope |
-|---|---|---|---|---|---|
-| *(always available)* | context7 | `npx` | `["-y", "@upstash/context7-mcp@3.2.5"]` | `CONTEXT7_API_KEY` | project |
-| `@angular/core` | angular | `npx` | `["-y", "@angular/cli", "mcp"]` | — | project |
-| `primeng` | primeng | `npx` | `["-y", "@primeng/mcp"]` | — | project |
-
-**Scope:**
-- **project**: Add to the project's root `.mcp.json`.
-
-### LSP Server Catalog
-
-| Trigger | Server Name | Command | Args | Extension Map | Install Command |
-|---|---|---|---|---|---|
-| `typescript` or `@angular/core` or `react` or `next` or `vue` in package.json | typescript | `typescript-language-server` | `["--stdio"]` | `{".ts": "typescript", ".tsx": "typescriptreact", ".js": "javascript", ".jsx": "javascriptreact"}` | `npm install -g typescript-language-server typescript` |
-| `*.py` files or `pyproject.toml` or `requirements.txt` | pyright | `pyright-langserver` | `["--stdio"]` | `{".py": "python"}` | `pip install pyright` or `npm install -g pyright` |
-| `Cargo.toml` present | rust-analyzer | `rust-analyzer` | `[]` | `{".rs": "rust"}` | See rust-analyzer docs |
-| `*.csproj` present | csharp-ls | `csharp-ls` | `[]` | `{".cs": "csharp"}` | `dotnet tool install --global csharp-ls` |
-| `go.mod` present | gopls | `gopls` | `["serve"]` | `{".go": "go"}` | `go install golang.org/x/tools/gopls@latest` |
-
-5. **MCP Servers**: Match detected dependencies against the MCP catalog above. Build a suggestion list:
-   - Always include **Context7** (general-purpose docs lookup)
-   - Add each MCP whose trigger package was found in the dependency scan
-
-   **Keep-or-change gate**: if `existingConfig.mcpServers` is present, do not jump straight into the multi-select — `AskUserQuestion` can't pre-check boxes, so re-asking it fresh would force re-clicking every already-enabled server. Instead present the current state and ask a plain Yes/No:
-
-   "Current MCP servers: `<name>` ✓ enabled, `<name>` ✗ disabled, … . Keep these settings?"
-   Options: "Yes — keep current settings (Recommended)", "No — let me change them"
-
-   - **Yes**: carry `existingConfig.mcpServers` forward unchanged, skip the multi-select below entirely.
-   - **No**: continue to the multi-select below.
-
-   If `existingConfig.mcpServers` is absent (first-ever configure run, or a newly-detected MCP not previously offered), skip the gate and ask the multi-select directly.
-
-   Present using AskUserQuestion with multiSelect=true (sort currently-enabled servers first when `existingConfig.mcpServers` exists, so they're easiest to re-tick):
-
-   "Based on your project dependencies, these MCP servers can enhance AI assistance.
-    Which would you like to enable?"
-
-   Options (only show those whose trigger was detected, plus Context7 always):
-   - "Context7 — Live documentation lookup for any library (requires free API key from context7.com/dashboard)"
-   - "Angular — Official Angular AI tutor, best practices, and documentation search"
-   - "PrimeNG — Component documentation, props, events, theming, and examples"
-
-   If only Context7 is available (no framework-specific MCPs detected), still present it:
-   "Do you want to enable Context7 for live documentation lookup?
-    (Requires a free API key from context7.com/dashboard)"
-
-### UI Conventions
-
-**Condition**: Only ask question 5c when a frontend framework is detected in the stack from
-question 1. Frontend frameworks include: Angular, React, Next.js, Vue, Svelte, or any UI
-framework.
-
-If no frontend framework is detected, skip this section entirely.
-
-5c. **UI conventions**: The answers here become guidance prose in the generated `AGENTS.md`
-   `## UI Conventions` section — they are **not** written to `.cenci/config.json`. There is no
-   config key for this.
-
-   Ask using AskUserQuestion:
-
-   "Your project includes `<detected-frontend-framework>`. Where does its shared component
-    library live? (Path relative to the repo root — leave blank if there isn't one yet.)"
-
-   Options: offer any directory the repository scan suggests — for example a `components/`,
-   `ui/`, or `design-system/` directory, or a workspace library under `libs/` or `packages/` —
-   plus "None yet".
-
-   Then ask:
-
-   "Is there a component catalog app — Storybook, an Angular component workshop, or a similar
-    browsable gallery — and how is it run?"
-
-   Options: offer the detected candidates — a `storybook` or `ng serve <app>` script in
-   `package.json`, an `.storybook/` directory, or a dedicated showcase project in the
-   `projects` array — plus "None".
-
-   **Writing the answers**: fill the `## UI Conventions` block in the generated `AGENTS.md`
-   (from `templates/agents-md-project.md` for a monorepo project, or
-   `templates/agents-md-root.md` / `templates/agents-md-root-monorepo.md` for the root):
-   - `<path-to-component-library>` becomes the library path; drop the bullet when "None yet".
-   - `<storybook-like-app-path>` and `<catalog-command>` become the catalog's path and its run
-     command; drop the bullet when "None".
-   - `<project-specific UI rules populated during configure>` stays as a placeholder for the
-     user to fill in later, or is removed when no conventions are known yet.
-
-   Keep the reuse-before-authoring bullet verbatim in every case — it is the rule the planner
-   and implementer look for, and it holds whether or not a library exists yet.
-
-   In a monorepo, ask per frontend project when the projects have different libraries; ask
-   once and write the shared answer into the root `AGENTS.md` when they share one.
-
-### Playwright CLI Setup
-
-**Condition**: Only ask this when a frontend framework is detected in the stack from question 1 AND `detection.playwrightTest` is `true` (manual fallback: `@playwright/test` found in root `devDependencies`).
-
-If both conditions are met, present using AskUserQuestion:
-
-   "Your project uses Playwright Test. Do you want to set up Playwright CLI (`@playwright/cli`) for interactive browser automation during development?
-    (Screenshots, snapshots, form filling, network inspection — more token-efficient than Chrome MCP for agents.)"
-
-   Options: "Yes — install and configure Playwright CLI", "No — skip"
-
-   **If Yes**:
-   1. Check if `playwright-cli` is already installed: `which playwright-cli 2>/dev/null`
-      - **Found** → "✓ `playwright-cli` found at `<path>`"
-      - **Not found** → "Run `npm i -g @playwright/cli` to install, then `playwright-cli install --skills` to set up agent skills."
-   2. Set `playwrightCli: true` in `.cenci/config.json`
-
-   **If No**: Set `playwrightCli: false` in `.cenci/config.json` (or omit the field)
-
-If the conditions are not met, skip this section entirely (do not set `playwrightCli` in config).
-
-### LSP Detection
-
-`detection.lspServers` carries the detected LSP catalog triggers directly.
-
-**Manual fallback** (only if Scripted Detection failed) — reuse the dependency detection results from earlier and add file-type detection to match against the LSP Server Catalog:
-
-- `typescript`, `@angular/core`, `react`, `next`, or `vue` in `package.json` dependencies → **typescript**
-- `*.py` files present, or `pyproject.toml`, or `requirements.txt` → **pyright**
-- `Cargo.toml` present → **rust-analyzer**
-- `*.csproj` present → **csharp-ls**
-- `go.mod` present → **gopls**
-
-If no LSP servers are detected, skip question 6 entirely.
-
-6. **LSP Servers**: If **two or more** LSP servers were detected above:
-
-   **Keep-or-change gate**: if `existingConfig.lspServers` is present, do not jump straight into the multi-select — `AskUserQuestion` can't pre-check boxes, so re-asking it fresh would force re-clicking every already-enabled server. Instead present the current state and ask a plain Yes/No:
-
-   "Current LSP servers: `<name>` ✓ enabled, `<name>` ✗ disabled, … . Keep these settings?"
-   Options: "Yes — keep current settings (Recommended)", "No — let me change them"
-
-   - **Yes**: carry `existingConfig.lspServers` forward unchanged, skip the multi-select below entirely.
-   - **No**: continue to the multi-select below.
-
-   If `existingConfig.lspServers` is absent (first-ever configure run, or a newly-detected LSP server not previously offered), skip the gate and ask the multi-select directly.
-
-   Present using AskUserQuestion with multiSelect=true (sort currently-enabled servers first when `existingConfig.lspServers` exists, so they're easiest to re-tick):
-
-   "LSP servers provide real-time diagnostics (type errors, unused variables, dead code) during implementation. Based on your project, which would you like to enable?"
-
-   Options (only show those whose trigger was detected):
-   - "typescript — TypeScript/JavaScript type checking and diagnostics"
-   - "pyright — Python type checking and diagnostics"
-   - "rust-analyzer — Rust type checking and diagnostics"
-   - "csharp-ls — C# type checking and diagnostics"
-   - "gopls — Go type checking and diagnostics"
-
-   If exactly **one** LSP server was detected, ask a plain Yes/No instead — a multi-select checkbox with a single option has no sensible "none" choice:
-
-   "Your project uses `<detected-language>`. Do you want to enable `<server-name>` for real-time diagnostics (type errors, unused variables, dead code) during implementation?"
-
-   Options: "Yes — enable `<server-name>`", "No — skip"
-
-#### Binary Verification
-
-For each LSP server the user selected, verify the binary is installed:
-
-```bash
-which <command>
-```
-
-- **Found**: Confirm with a checkmark: "✓ `<command>` found at `<path>`"
-- **Not found**: Warn with install command: "⚠ `<command>` not found. Install with: `<install-command>`. Server will activate once installed."
-
-Include the server in `.lsp.json` regardless — it activates once the binary is installed.
-
-7. **Disable auto-compact**: "Do you want to disable Claude Code's auto-compact feature?
-    Auto-compact compresses conversation history as the context window fills,
-    which can lose important context during long sessions. (Recommended: Yes — disable it)"
-   - Default: Yes
-   - If Yes: set `"autoCompactEnabled": false` in `~/.claude/settings.json` using jq (see step 5c for the exact jq/mv sequence, and its Write-then-mv variant when the file doesn't exist yet)
-   - If No: remove the `autoCompactEnabled` key from `~/.claude/settings.json` (if present)
-   - Either way, also remove any `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` key from the `env` object in `~/.claude/settings.json`. Earlier versions of this skill set it to `"1"` believing that meant manual-only compaction; Claude Code interprets it as "compact once 1% of the context window is used", so any leftover value causes constant compaction and must be purged.
-
-7b. **Pin subagents to 200K context**: "Do you want to pin cenci's subagents to a 200K-context
-    model? cenci delegates reviews to subagents, and on 1M-context sessions that delegation can be
-    gated — every subagent inherits the session's 1M flag but not its extra-usage entitlement, so
-    reviews fail with 'Usage credits required for 1M context' (Claude Code bug #51060). Pinning
-    subagents to Sonnet 200K keeps reviews working while your main session keeps its 1M context.
-    (Recommended: Yes if you run a 1M-context session; No otherwise — see the tiering caveat below)"
-   - Default: Yes when the session plausibly runs a 1M model; No otherwise
-   - If Yes: merge `{"env": {"CLAUDE_CODE_SUBAGENT_MODEL": "claude-sonnet-5"}}` into `~/.claude/settings.json` using jq (see step 5c-bis for the exact jq/mv sequence, and its Write-then-mv variant when the file doesn't exist yet). This runs all `Task` subagents on Sonnet 200K regardless of the main session model. (Pin Sonnet, not Opus — Opus is auto-upgraded to 1M on Max/Team/Enterprise plans and would re-trigger the gate.)
-   - If No: remove the `CLAUDE_CODE_SUBAGENT_MODEL` key from the `env` object in `~/.claude/settings.json` (if present)
-   - **Tiering caveat (state regardless of answer)**: the pin overrides every agent's `model:` frontmatter — cenci's model tiering (opus refiner/planner/security-reviewer, haiku context-gatherer/structure-analyzer/lessons-collector) is flattened onto the pinned model while it is set. On a standard 200K session the 1M gate never fires, so answer No there to keep the tiering active.
-   - **Caveat (state regardless of answer)**: this only affects **new** sessions — restart after configuring. If subagent reviews still fail with the 1M gate even after pinning (the pin didn't strip `[1m]`), run `/model sonnet` for the current session, which always yields 200K.
-
-8. **CI/CD pipeline**: "Do you want to generate a CI/CD pipeline?"
-   - Options: "Yes — generate a CI workflow", "No — skip"
-   - Default: No
-   - Platform: GitHub Actions
-
-   **Conflict check**: If the user selects Yes, scan for existing CI configuration:
-   - Use the `Glob` tool with patterns `.github/workflows/*.yml` and `.github/workflows/*.yaml`
-
-   If any files are found, present them and ask:
-   - **Single file**: "Found existing CI configuration at `<path>`. What would you like to do?"
-   - **Multiple files**: "Found existing CI workflows:\n  - `<path1>`\n  - `<path2>`\n  ...\nWhat would you like to do?"
-
-   Options: "Overwrite — generate `ci.yml` (existing files are not deleted)", "Skip — keep existing files", "Show existing — display the current file contents"
-   - If Skip: still record `cicd` in config.json, don't write the file
-   - If Show existing: read and display each file, then re-ask Overwrite/Skip
-
-   **Stack-to-CI mapping**: Use the detected stack from question 1 to select the appropriate lint, build, and test commands:
-
-   | Stack | Lint | Build | Test |
-   |---|---|---|---|
-   | `dotnet*` | `dotnet format --verify-no-changes` | `dotnet build --no-restore` | `dotnet test --no-build --collect:"XPlat Code Coverage"` |
-   | `go` | `golangci-lint run ./...` | `go build ./...` | `go test ./... -coverprofile=coverage.out` |
-   | `python` | `ruff check .` | *(none)* | `pytest --cov=. --cov-report=xml` |
-   | `rust` | `cargo clippy -- -D warnings` | `cargo build` | `cargo test` |
-   | `angular*` | `ng lint` | `ng build --configuration production` | `ng test --watch=false --code-coverage` |
-   | `react` / `next` | `npx eslint .` | `npm run build` | `npm test -- --coverage --watchAll=false` |
-   | `vue` | `npx eslint .` | `npm run build` | `npm run test:unit -- --coverage` |
-
-   **Package manager detection** (for Node-based stacks): use `detection.packageManager`. Manual fallback:
-   - `pnpm-lock.yaml` → pnpm
-   - `yarn.lock` → yarn
-   - `package-lock.json` → npm
-   - .NET → NuGet cache on `**/*.csproj`
-   - Go → built-in cache in `actions/setup-go@v5`
-
-   **Version pinning**:
-   - Node: `engines.node` from `package.json`, fallback `"20"`
-   - .NET: extract from stack token (`dotnet10` → `"10.x"`)
-   - Go: first line of `go.mod`
-   - Python: `python-requires` from `pyproject.toml`, fallback `"3.12"`
-   - Rust: `rust-toolchain.toml` or `"stable"`
-
-9. **Sandbox Dockerfile**: "Generate a sandbox Dockerfile for this repo? (Tailors the sandbox image to your stack; committed so your team shares it.)"
-   - Options: "Yes — generate `.cenci/Dockerfile`", "No — skip"
-   - Default: Yes
-
-   **Mandatory agent runtime**: Always include `node.dockerfile`, regardless of the detected project stack. Claude Code and Codex are npm-distributed launchers installed by the isolated shared-volume updater, so generated images need Node.js but must not bake either agent CLI.
-
-   **Stack-to-fragment mapping**: In addition to the mandatory Node runtime fragment, use the detected stack from question 1 (or, for monorepos, the union of every `projects[].stack.framework` value) to select which `sandbox/fragments/*.dockerfile` blocks to include:
-
-   | Detected stack | Fragment |
-   |---|---|
-   | `dotnet*` | .NET SDK block (version from the token) |
-   | `angular*` / `react` / `next` / `vue` / `node` | Node block |
-   | `angular*` / `react` / `next` / `vue` | Playwright block (Chromium, for `verify-ui` screenshot capture) |
-   | `go` | Go block |
-   | `python` | Python + uv block |
-   | `rust` | Rust block |
-   | *(none — config-selected)* | Docker block, when `sandbox.dind: true` (question 9b) |
-   | *(none — config-selected)* | Azure block, when `sandbox.azure: true` (question 9c) |
-
-   Playwright is scoped to the frontend-framework tokens, not plain `node` — a Node-based
-   backend/API project gets the Node block without paying Chromium's image-size cost for a
-   visual-verification step it will never run.
-
-   **Docker fragment** (config-selected, not stack-token-selected): when the config being
-   written enables nested Docker (`sandbox.dind: true`, question 9b), additionally include
-   `sandbox/fragments/docker.dockerfile` — it installs the Docker CLI, the `docker-ce`
-   engine and `containerd.io` so `entrypoint.sh` can start an inner daemon under
-   `sysbox-runc`. This block used to live in `Dockerfile.base` and so shipped in every
-   image; since #831 it is selected only for repos that actually run nested Docker.
-   **A `dind: true` repo whose `.cenci/Dockerfile` omits this fragment builds an image
-   with no `dockerd`** — the sandbox still boots and stays usable, but nested Docker is
-   unavailable and `~/.cenci-dockerd-startup-error` explains why. So when Q9 is answered
-   No (no `.cenci/Dockerfile` generated) and Q9b is answered Yes, tell the user their repo
-   will use the shared `cenci-sandbox:latest` monolith, which carries the Docker block
-   already — no action needed.
-
-   **Azure fragment** (config-selected, not stack-token-selected): when the config being
-   written enables the Azure CLI (`sandbox.azure: true`, question 9c), additionally
-   include `sandbox/fragments/azure.dockerfile` — it installs `az` from Microsoft's apt
-   repo so an agent can check real command syntax with `az <group> <cmd> --help` instead
-   of guessing it. There is no stack token for this: an Azure repo can be written in any
-   language, so the opt-in is the only signal. Unlike the Docker fragment there is **no**
-   monolith fallback — `cenci-sandbox:latest` carries no `az` either — so a repo that
-   answers Yes to Q9c but No to Q9 gets no Azure CLI at all; tell the user Q9 must also be
-   Yes for the CLI to reach their sandbox.
-
-   **Monorepo**: take the union of all `projects[].stack.framework` values, deduplicated — e.g. a repo with a Go API project and a React web client project selects both the Go and Node fragments. Node is still emitted only once because the mandatory runtime set and stack-selected set are deduplicated.
-
-   A stack token that matches no row above (e.g. `markdown-shell`, `docker-shell`) contributes no additional project fragment. This is not an error — the generated Dockerfile still contains the mandatory Node runtime fragment.
-
-   **.NET version substitution** (the only row with a version-from-token adjustment): `sandbox/fragments/dotnet.dockerfile` ships with `ARG DOTNET_SDK_VERSION=10.0.100` as its own default. When including this fragment, replace that default's version with `<major>.0.100`, where `<major>` is extracted from the stack token using the same extraction as the CI mapping's version-pinning table above (`dotnet10` → `10`) — e.g. a `dotnet8` stack writes `ARG DOTNET_SDK_VERSION=8.0.100`. **Monorepo tie-break**: when multiple projects map to the dotnet fragment with different major versions (e.g. one project on `dotnet8`, another on `dotnet10`), use the **highest** major version found across all matching projects. If no major version can be extracted from the token, leave the fragment's own default (`10.0.100`) unmodified — and add an inline comment immediately after the `ARG DOTNET_SDK_VERSION` line noting the version could not be auto-detected from the stack token and the fragment's default was used instead, e.g. `# .NET version could not be auto-detected from the stack token — using fragment default. See sandbox/README.md to pin manually.` The other fragments (node, playwright, go, python, rust, docker, azure) are included verbatim with their own `ARG` defaults unmodified — every fragment `ARG` (including `DOTNET_SDK_VERSION` and `BASE_VERSION`) remains overridable at build time via `--build-arg`, so an unmodified default is never a hard lock-in.
-
-   > **Sync obligation**: `sandbox/fragments/*.dockerfile` is the source of truth for these blocks; the mapping table above mirrors their content and existence, not their byte contents (generation reads the fragment files directly — see step 5e). If a fragment is added, removed, or renamed, this table needs a matching manual update. Low risk in practice — both live in the same monorepo and are maintained together — but currently unenforced by tooling.
-
-   > **Trust / security note**: `.cenci/Dockerfile` is committed to the repo, so it is reviewed like any other file in the PR that adds or changes it. It only runs `docker build` steps assembled from `sandbox/fragments/*.dockerfile` — no arbitrary runtime hooks execute during configure or during the build it produces.
-
-9b. **Nested Docker (dind)**: "Does this repo need Docker inside the sandbox — Testcontainers, `docker build`/`docker run` in tests, or a Docker SDK client?"
-   - Options: "Yes — enable nested Docker (`sandbox.dind`)", "No — skip"
-   - Default: Yes when `dindDetected` is `true` (a Testcontainers/Docker-SDK trigger was found above), otherwise No
-   - This question is independent of question 9 (Sandbox Dockerfile) — ask it regardless of how Q9 was answered, and record its answer separately (see the `sandbox.dind` schema note below).
-   - If Yes: inform the user that nested Docker requires the host to have Docker (not Podman) with the `sysbox-runc` container runtime registered — `cenci doctor` reports this — and point at `sandbox/README.md#nested-docker-sysbox` for host install instructions per distro.
-   - If Yes **and** question 9 generated a `.cenci/Dockerfile`: that Dockerfile must include `sandbox/fragments/docker.dockerfile` (see the mapping table's Docker rule under question 9). Because Q9b is asked after Q9, generate the Dockerfile only once this answer is known — or regenerate it here — so a `dind: true` repo never ends up with an image that has no `dockerd`. Tell the user to re-run `/cenci:configure` and then `cenci sandbox build` to pick the fragment up.
-
-9c. **Azure CLI**: "Does this repo need the Azure CLI (`az`) inside the sandbox — Azure resources, Bicep/ARM templates, or Azure DevOps?"
-   - Options: "Yes — install the Azure CLI (`sandbox.azure`)", "No — skip"
-   - Default: pre-select from `existingConfig.sandbox.azure`; when the field is absent, default to No. There is **no** dependency scan behind this one: an Azure repo can be written in any language and Azure SDK packages appear in plenty of repos that never touch `az`, so a detected dependency would be a poor proxy for wanting a ~500MB CLI in the image. Ask plainly instead.
-   - Like Q9b, this is independent of question 9 — ask it regardless of how Q9 was answered, and record its answer separately (see the `sandbox.azure` schema note below).
-   - If Yes **and** question 9 generated a `.cenci/Dockerfile`: that Dockerfile must include `sandbox/fragments/azure.dockerfile` (see the mapping table's Azure rule under question 9). Q9c is asked after Q9, so generate the Dockerfile only once this answer is known — or regenerate it here.
-   - If Yes **and** question 9 was answered No: unlike dind, the shared `cenci-sandbox:latest` monolith carries **no** `az`, so there is no fallback. Tell the user their sandbox will not have the Azure CLI until they also opt into a per-repo Dockerfile (Q9).
-   - If Yes: also tell the user that `cenci open` will stage their host login (`~/.azure`'s `azureProfile.json`, `msal_token_cache.json`, `service_principal_entries.json`) read-only into the sandbox, seeded once into its home volume — so `az account show` works on first open, and a later `az login` inside the container is never overwritten by the host copy. If they have no host login, `az login` inside the sandbox works and persists in the home volume.
 
 ### Board Config (lazyboards)
 
@@ -690,7 +249,7 @@ Bash call, per `cenci:shell-rules`) and branch:
 gate, matching Board Config (lazyboards) above. Its side effect fires immediately at
 question time; nothing here is deferred to the generation step below.
 
-**Container guard (runs first).** Use `detection.inContainer` (already resolved above).
+**Container guard (runs first).** Use `detection.inContainer` (already resolved by `### Scripted Detection` in `phases/detection-and-delta.md`).
 When it is `true`, this section asks nothing, runs no `cenci dispatch` command, and writes nothing anywhere
 — the sandbox mounts `/home/dev` as a per-repo named volume, so
 the container's `~/.config/cenci/config.json` is not the host file the dispatch daemon
@@ -1087,7 +646,7 @@ After gathering answers:
 
 1b. **Generate `.lsp.json`** (if any LSP servers were selected in question 6):
 
-   Write `.lsp.json` **in the project root** (not `${CLAUDE_PLUGIN_ROOT}`) with entries for selected servers only, using the command, args, and extension map from the LSP Server Catalog. Claude Code only reads `.lsp.json` from the project root — plugin-scoped LSP config is not supported. If `.lsp.json` already exists in the project root, merge new entries into it (preserve existing entries). Example:
+   Write `.lsp.json` **in the project root** (not `${CLAUDE_PLUGIN_ROOT}`) with entries for selected servers only, using the command, args, and extension map from the `### LSP Server Catalog` in `phases/mcp-lsp-ui-questions.md`. Claude Code only reads `.lsp.json` from the project root — plugin-scoped LSP config is not supported. If `.lsp.json` already exists in the project root, merge new entries into it (preserve existing entries). Example:
 
    ```json
    {
@@ -1644,7 +1203,7 @@ For each MCP selected in question 5:
    **Node-based stacks** (Angular, React, Next.js, Vue):
    - `actions/setup-node@v4` with `node-version` from `engines.node` or `"20"`, and `cache` set to the detected package manager (npm/yarn/pnpm)
    - Install: `npm ci` (or `yarn install --frozen-lockfile` / `pnpm install --frozen-lockfile`)
-   - Lint step, Build step, Test step from the stack-to-CI mapping table
+   - Lint step, Build step, Test step from the stack-to-CI mapping table (question 8 in `phases/runtime-ci-sandbox-questions.md`)
    - `actions/upload-artifact@v4` for coverage output
 
    **.NET stacks**:
@@ -1704,7 +1263,7 @@ For each MCP selected in question 5:
 
    **Per-fragment markers**: wrap each fragment's content in a `# cenci:fragment-begin <name>` / `# cenci:fragment-end <name>` marker pair, placed immediately before and after that fragment's own content within the managed block (see the example above). `<name>` is the fragment file's basename without `.dockerfile` (e.g. `sandbox/fragments/docker.dockerfile` → `docker`). This lets `watch/internal/sandbox/launcher`'s fragment-drift detector (#1048) identify exactly which installed fragment a block of content came from; an already-generated block with no per-fragment markers still gets detected, via that detector's legacy banner-line fallback.
 
-   **Fragment concatenation order** (when multiple fragments apply, e.g. a monorepo union): **dotnet → node → playwright → go → python → rust → docker → azure**, regardless of the order projects were discovered in. Node is mandatory; the remaining fragments are stack-selected (docker and azure are config-selected — see the mapping table's Docker and Azure rules). Concatenate the selected `sandbox/fragments/*.dockerfile` file contents in that fixed order, each wrapped in its own per-fragment marker pair, applying the **.NET version substitution** from the mapping table above to the dotnet fragment only — every other fragment is included verbatim. Deduplicate — each fragment appears at most once even when multiple monorepo projects map to the same fragment.
+   **Fragment concatenation order** (when multiple fragments apply, e.g. a monorepo union): **dotnet → node → playwright → go → python → rust → docker → azure**, regardless of the order projects were discovered in. Node is mandatory; the remaining fragments are stack-selected (docker and azure are config-selected — see the Docker and Azure rules of the Stack-to-fragment mapping table under question 9 in `phases/runtime-ci-sandbox-questions.md`). Concatenate the selected `sandbox/fragments/*.dockerfile` file contents in that fixed order, each wrapped in its own per-fragment marker pair, applying the **.NET version substitution** from that mapping table to the dotnet fragment only — every other fragment is included verbatim. Deduplicate — each fragment appears at most once even when multiple monorepo projects map to the same fragment.
 
    **Merge-safe regeneration**: the whole block above (from `# cenci:managed-begin` through `# cenci:managed-end` inclusive) is the managed block.
    - **File doesn't exist**: create `.cenci/` (`mkdir -p .cenci`) and write the managed block as the full file content.
@@ -1717,7 +1276,7 @@ For each MCP selected in question 5:
      - If Show existing: read and display the file, then re-ask Overwrite/Skip.
    - **File exists with malformed markers** (exactly one of `# cenci:managed-begin` / `# cenci:managed-end` present, markers out of order, or duplicate marker pairs): do **not** attempt a partial text replace — a malformed marker pair cannot be trusted to safely bound the managed block, and a replacement span is never guessed. On a delta run it is left untouched and reported exactly like the "no markers" case above (no prompt); on an `--all` or `full` run it takes the same Overwrite/Skip/Show prompt — same prompt text, same three options, same behavior.
 
-   **Monorepo**: fragments are the mandatory Node runtime fragment plus the deduplicated union described in the Stack-to-fragment mapping table under question 9, concatenated in the dotnet → node → playwright → go → python → rust → docker → azure order above — one `.cenci/Dockerfile` for the whole repo, not one per project.
+   **Monorepo**: fragments are the mandatory Node runtime fragment plus the deduplicated union described in the Stack-to-fragment mapping table under question 9 in `phases/runtime-ci-sandbox-questions.md`, concatenated in the dotnet → node → playwright → go → python → rust → docker → azure order above — one `.cenci/Dockerfile` for the whole repo, not one per project.
 
    **Committed, not ignored**: `.cenci/Dockerfile` is committed to the repo. Do **not** add `.cenci/` or `.cenci/Dockerfile` to `.gitignore` — the whole point is a team-shared, reviewed Dockerfile that the launcher's per-repo image selection (see `sandbox/README.md`) builds identically for every teammate.
 

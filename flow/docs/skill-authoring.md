@@ -49,6 +49,15 @@ directive fails, while merely naming another skill in prose does not — a skill
 documenting its own callers ("`refine` and `implement` apply exactly this rule") depends
 on nothing and is left alone.
 
+### A Claude skill may split into a router plus phase files
+
+A large Claude `SKILL.md` can stay a router and move its steps into `phases/*.md` and
+`references/*.md` beside it (`implement` and `configure` do). Every such file must be
+named from `SKILL.md` — the `orphan-files` check in `skills/maintain/scripts/check.sh`
+fails an unnamed one — and `allowed-tools` stays only in the `SKILL.md` frontmatter. The
+router's `### Step Map` says which files are read on every run and which only under a
+stated condition.
+
 ### The Codex companion is not a copy
 
 `codex.md` is a separate procedure for a client with different primitives, not a

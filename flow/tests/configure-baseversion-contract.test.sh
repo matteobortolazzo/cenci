@@ -32,7 +32,8 @@
 # calling `fail()` in the parent shell.
 #
 # Covered files:
-#   - flow/skills/configure/SKILL.md
+#   - flow/skills/configure/SKILL.md, plus phases/*.md and references/*.md for
+#     the absence checks (#1341)
 #   - flow/skills/configure/codex.md
 set -uo pipefail
 
@@ -149,6 +150,17 @@ BASE_VERSION_FLAG='--base-version'
 # --- skills/configure/SKILL.md ----------------------------------------------
 
 require_doc skill "skills/configure/SKILL.md" || true
+# Every markdown file of the configure skill (router, phases, references): the
+# retired-artifact absence checks must hold wherever prose ended up after the
+# router split (#1341). Step 5e's existence marker stays on SKILL.md.
+configure_all="${skill}"
+configure_part_count=0
+for _configure_part in "${FLOW_DIR}"/skills/configure/phases/*.md "${FLOW_DIR}"/skills/configure/references/*.md; do
+  [[ -f "${_configure_part}" ]] || continue
+  configure_all+=$'\n'"$(cat "${_configure_part}")"
+  configure_part_count=$((configure_part_count+1))
+done
+[[ "${configure_part_count}" -ge 5 ]] || fail "configure_all aggregation is vacuous: aggregated ${configure_part_count} phases/references files (expected at least 5)"
 if [[ -n "${skill}" ]]; then
   # Step 5e must exist at all — every check below is scoped/paired against it.
   assert_contains "${skill}" "${STEP5E_MARKER}" "SKILL.md step 5e (Generate .cenci/Dockerfile) present"
@@ -160,13 +172,13 @@ if [[ -n "${skill}" ]]; then
 
   # Retired resolution-algorithm artifacts, paired against step 5e's own
   # existence so the absence checks cannot pass vacuously.
-  assert_absent_paired_ws "${skill}" "${STEP5E_MARKER}" "${INSTALLED_PLUGINS_JSON}" "SKILL.md no longer reads installed_plugins.json"
-  assert_absent_paired_ws "${skill}" "${STEP5E_MARKER}" "${SEMVER_VALIDATION_PATTERN}" "SKILL.md no longer validates a semver baseVersion pattern"
-  assert_absent_paired_ws "${skill}" "${STEP5E_MARKER}" "${UNRESOLVED_COMMENT}" "SKILL.md no longer emits the unresolved-baseVersion inline comment"
+  assert_absent_paired_ws "${configure_all}" "${STEP5E_MARKER}" "${INSTALLED_PLUGINS_JSON}" "configure skill files no longer read installed_plugins.json"
+  assert_absent_paired_ws "${configure_all}" "${STEP5E_MARKER}" "${SEMVER_VALIDATION_PATTERN}" "configure skill files no longer validate a semver baseVersion pattern"
+  assert_absent_paired_ws "${configure_all}" "${STEP5E_MARKER}" "${UNRESOLVED_COMMENT}" "configure skill files no longer emit the unresolved-baseVersion inline comment"
 
   # Shared merge script still invoked, but without the retired flag.
   assert_contains "${skill}" "${MERGE_SCRIPT_MARKER}" "SKILL.md still invokes merge-sandbox-config.sh"
-  assert_absent_paired_ws "${skill}" "${MERGE_SCRIPT_MARKER}" "${BASE_VERSION_FLAG}" "SKILL.md merge-sandbox-config.sh invocation drops --base-version"
+  assert_absent_paired_ws "${configure_all}" "${MERGE_SCRIPT_MARKER}" "${BASE_VERSION_FLAG}" "configure skill files' merge-sandbox-config.sh invocation drops --base-version"
 else
   fail "SKILL.md: skipped step 5e assertions -- doc empty/unreadable"
 fi

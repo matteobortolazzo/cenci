@@ -2228,6 +2228,212 @@ is_eq0 "${N_LEAKED_52}" || fail "case52: symlink target content (outside-secret 
 rm -rf "${ROOT}" "${OUTSIDE}"
 
 # =====================================================================
+# Case 53 (#1341): references/*.md files are first-class skill procedure
+# files, like phases/*.md. An unnamed references file is an orphan, a named
+# one has its `scripts/` citations checked for existence, and its agent
+# citations feed the generated agents and workflow-deps README sections.
+# =====================================================================
+ROOT="$(mktemp -d)" || ROOT=""
+if [[ -z "${ROOT}" || ! -d "${ROOT}" ]]; then
+fail "case53: mktemp -d failed or produced no directory, case body skipped"
+else
+setup_base "${ROOT}"
+mkdir -p "${ROOT}/flow/skills/demo/references"
+cat >> "${ROOT}/flow/skills/demo/SKILL.md" <<'EOF'
+
+Read `references/used.md` when the legacy path applies.
+EOF
+cat > "${ROOT}/flow/skills/demo/references/orphan.md" <<'EOF'
+Nothing in SKILL.md names this file.
+EOF
+cat > "${ROOT}/flow/skills/demo/references/used.md" <<'EOF'
+Run `scripts/missing.sh` and then hand off to the `ref-agent`.
+EOF
+cat > "${ROOT}/flow/agents/ref-agent.md" <<'EOF'
+---
+name: ref-agent
+description: "Agent referenced only from a references file."
+---
+EOF
+run_check "${ROOT}" --write
+run_check "${ROOT}"
+ORPHAN_REL_53="flow/skills/demo/references/orphan.md"
+USED_REL_53="flow/skills/demo/references/used.md"
+N_ORPHAN_53="$(printf '%s' "${REPORT_JSON}" | jq --arg t "${ORPHAN_REL_53}" \
+  '[.results[]? | select(.check=="orphan-files" and .status=="fail" and .target==$t)] | length' 2>/dev/null)"
+is_ge1 "${N_ORPHAN_53}" || fail "case53: expected an orphan-files fail targeting ${ORPHAN_REL_53}, got '${N_ORPHAN_53:-N/A}' (report: ${REPORT_JSON})"
+# Paired absence: the references file SKILL.md names is not an orphan. The
+# orphan fail above proves the references/ orphan loop ran at all.
+N_USED_ORPHAN_53="$(printf '%s' "${REPORT_JSON}" | jq --arg t "${USED_REL_53}" \
+  '[.results[]? | select(.check=="orphan-files" and .target==$t)] | length' 2>/dev/null)"
+is_eq0 "${N_USED_ORPHAN_53}" || fail "case53: a references file named in SKILL.md must not be an orphan, got '${N_USED_ORPHAN_53:-N/A}' orphan-files result(s) for ${USED_REL_53}"
+N_BROKEN_53="$(printf '%s' "${REPORT_JSON}" | jq --arg t "${USED_REL_53}" \
+  '[.results[]? | select(.check=="broken-refs" and .status=="fail" and .target==$t)] | length' 2>/dev/null)"
+is_ge1 "${N_BROKEN_53}" || fail "case53: expected a broken-refs fail targeting ${USED_REL_53} for its missing scripts/missing.sh, got '${N_BROKEN_53:-N/A}' (report: ${REPORT_JSON})"
+README_53="$(cat "${ROOT}/flow/README.md")"
+assert_contains "${README_53}" 'references/used.md' "case53 workflow-deps row lists the named references file"
+assert_contains "${README_53}" '| `ref-agent` | Agent referenced only from a references file. | demo |' "case53 agents table lists ref-agent with skill demo"
+assert_contains "${README_53}" '| Skill | Procedure files |' "case53 workflow-deps table exists (existence marker for the row assertion above)"
+rm -rf "${ROOT}"
+fi
+
+# =====================================================================
+# Case 54 (#1341): a skill named only from a references/*.md file feeds both
+# skill-reference scans: other_skill_refs (README "Reference skills" column)
+# and portable_dependency_refs (adapter-drift's OpenCode self-containment
+# gate). The neighbor skill is named ONLY in references/used.md, never in
+# SKILL.md, so either scan dropping references/*.md loses the result.
+# =====================================================================
+ROOT="$(mktemp -d)" || ROOT=""
+if [[ -z "${ROOT}" || ! -d "${ROOT}" ]]; then
+fail "case54: mktemp -d failed or produced no directory, case body skipped"
+else
+setup_base "${ROOT}"
+mkdir -p "${ROOT}/flow/skills/demo/references" "${ROOT}/flow/skills/neighbor"
+cat > "${ROOT}/flow/skills/neighbor/SKILL.md" <<'EOF'
+---
+name: neighbor
+description: "Neighbor skill named only from a demo references file."
+user-invocable: false
+---
+
+Resolves shared configuration for other skills.
+EOF
+cat >> "${ROOT}/flow/skills/demo/SKILL.md" <<'EOF'
+
+Read `references/used.md` when the legacy path applies.
+EOF
+cat > "${ROOT}/flow/skills/demo/references/used.md" <<'EOF'
+Read `neighbor` before resolving configuration.
+EOF
+run_check "${ROOT}" --write
+README_54="$(cat "${ROOT}/flow/README.md")"
+# Existence markers: the table header and the demo row must be present, so the
+# column assertion below cannot pass against an empty or missing row.
+assert_contains "${README_54}" '| Skill | Procedure files | Reference skills | Scripts | Agents |' "case54 workflow-deps table exists (existence marker)"
+# The capability and agents tables also carry `demo` rows; the workflow-deps
+# row is the one whose Procedure files column names the references file.
+DEMO_ROW_54="$(printf '%s\n' "${README_54}" | grep -F '| `demo` | ' | grep -F 'references/used.md')" || fail "case54: no workflow-deps row for demo in README"
+assert_contains "${DEMO_ROW_54}" 'references/used.md' "case54 demo row lists the references file (existence marker)"
+REFSKILLS_COL_54="$(printf '%s' "${DEMO_ROW_54}" | awk -F'|' '{gsub(/^[[:space:]]+|[[:space:]]+$/, "", $4); print $4}')"
+assert_eq "${REFSKILLS_COL_54}" "neighbor" "case54 demo Reference skills column lists the skill named only in references/used.md"
+# portable_dependency_refs: demo is portable, neighbor is not, so the consult
+# directive in the references file must fail adapter-drift for demo.
+run_check "${ROOT}"
+N_DRIFT_54="$(printf '%s' "${REPORT_JSON}" | jq \
+  '[.results[]? | select(.check=="adapter-drift" and .status=="fail" and .target=="demo" and (.message|test("neighbor")))] | length' 2>/dev/null)"
+is_ge1 "${N_DRIFT_54}" || fail "case54: expected an adapter-drift fail for demo directed to consult neighbor from references/used.md, got '${N_DRIFT_54:-N/A}' (report: ${REPORT_JSON})"
+rm -rf "${ROOT}"
+fi
+
+# =====================================================================
+# Case 55 (#1341): command-flags scans references/*.md like phases/*.md and
+# SKILL.md -- a stale `cenci <verb> --flag` span there must fail, targeting
+# the references file, while a clean references file in the same skill does not.
+# =====================================================================
+ROOT="$(mktemp -d)" || ROOT=""
+if [[ -z "${ROOT}" || ! -d "${ROOT}" ]]; then
+fail "case55: mktemp -d failed or produced no directory, case body skipped"
+else
+setup_base "${ROOT}"
+mkdir -p "${ROOT}/flow/skills/demo/references"
+cat > "${ROOT}/flow/skills/demo/references/stale.md" <<'EOF'
+Run `cenci ghost-verb --ghost-flag` to do a thing that was renamed away.
+EOF
+cat > "${ROOT}/flow/skills/demo/references/clean.md" <<'EOF'
+Nothing CLI-shaped is named in this file.
+EOF
+run_check "${ROOT}"
+STALE_REL_55="flow/skills/demo/references/stale.md"
+CLEAN_REL_55="flow/skills/demo/references/clean.md"
+N_STALE_55="$(printf '%s' "${REPORT_JSON}" | jq --arg t "${STALE_REL_55}" \
+  '[.results[]? | select(.check=="command-flags" and .status=="fail" and .target==$t)] | length' 2>/dev/null)"
+is_ge1 "${N_STALE_55}" || fail "case55: expected a command-flags fail targeting ${STALE_REL_55}, got '${N_STALE_55:-N/A}' (report: ${REPORT_JSON})"
+# Paired absence: the stale fail above proves the references/ loop ran at all.
+N_CLEAN_55="$(printf '%s' "${REPORT_JSON}" | jq --arg t "${CLEAN_REL_55}" \
+  '[.results[]? | select(.check=="command-flags" and .target==$t)] | length' 2>/dev/null)"
+is_eq0 "${N_CLEAN_55}" || fail "case55: a clean references file must not produce command-flags results, got '${N_CLEAN_55:-N/A}' for ${CLEAN_REL_55}"
+rm -rf "${ROOT}"
+fi
+
+# =====================================================================
+# Case 56 (#1341): agent_refs scans references/*.md. The agent is named ONLY
+# in references/used.md (never in SKILL.md or any other procedure file), so
+# the workflow-deps row's Agents column loses it if agent_refs drops the
+# references glob. Case 53 covers the separate referencing_skills table.
+# =====================================================================
+ROOT="$(mktemp -d)" || ROOT=""
+if [[ -z "${ROOT}" || ! -d "${ROOT}" ]]; then
+fail "case56: mktemp -d failed or produced no directory, case body skipped"
+else
+setup_base "${ROOT}"
+mkdir -p "${ROOT}/flow/skills/demo/references"
+cat >> "${ROOT}/flow/skills/demo/SKILL.md" <<'EOF'
+
+Read `references/used.md` when the legacy path applies.
+EOF
+cat > "${ROOT}/flow/skills/demo/references/used.md" <<'EOF'
+Hand off to the `ref-agent` for the legacy path.
+EOF
+cat > "${ROOT}/flow/agents/ref-agent.md" <<'EOF'
+---
+name: ref-agent
+description: "Agent referenced only from a references file."
+---
+EOF
+run_check "${ROOT}" --write
+README_56="$(cat "${ROOT}/flow/README.md")"
+# Existence markers: the table header and the demo workflow-deps row (the one
+# whose Procedure files column names the references file) must be present, so
+# the Agents-column assertion cannot pass against a missing row.
+assert_contains "${README_56}" '| Skill | Procedure files | Reference skills | Scripts | Agents |' "case56 workflow-deps table exists (existence marker)"
+DEMO_ROW_56="$(printf '%s\n' "${README_56}" | grep -F '| `demo` | ' | grep -F 'references/used.md')" || fail "case56: no workflow-deps row for demo in README"
+AGENTS_COL_56="$(printf '%s' "${DEMO_ROW_56}" | awk -F'|' '{gsub(/^[[:space:]]+|[[:space:]]+$/, "", $6); print $6}')"
+assert_contains "${AGENTS_COL_56}" 'ref-agent' "case56 demo Agents column lists the agent named only in references/used.md"
+rm -rf "${ROOT}"
+fi
+
+# =====================================================================
+# Case 57 (#1341): check_orphan_files counts references/*.md as a script
+# source. scripts/refonly.sh is named ONLY from references/used.md, so it is
+# an orphan if the references glob is dropped from the source list. The
+# unreferenced scripts/unref.sh must still be reported, which proves the
+# script-orphan loop ran at all (paired existence marker).
+# =====================================================================
+ROOT="$(mktemp -d)" || ROOT=""
+if [[ -z "${ROOT}" || ! -d "${ROOT}" ]]; then
+fail "case57: mktemp -d failed or produced no directory, case body skipped"
+else
+setup_base "${ROOT}"
+mkdir -p "${ROOT}/flow/skills/demo/references"
+cat >> "${ROOT}/flow/skills/demo/SKILL.md" <<'EOF'
+
+Read `references/used.md` when the legacy path applies.
+EOF
+cat > "${ROOT}/flow/skills/demo/references/used.md" <<'EOF'
+Run `scripts/refonly.sh` for the legacy path.
+EOF
+cat > "${ROOT}/flow/skills/demo/scripts/refonly.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "named only from a references file"
+EOF
+cat > "${ROOT}/flow/skills/demo/scripts/unref.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "nobody calls me"
+EOF
+run_check "${ROOT}"
+UNREF_REL_57="flow/skills/demo/scripts/unref.sh"
+REFONLY_REL_57="flow/skills/demo/scripts/refonly.sh"
+N_UNREF_57="$(printf '%s' "${REPORT_JSON}" | jq --arg t "${UNREF_REL_57}" \
+  '[.results[]? | select(.check=="orphan-files" and .status=="fail" and .target==$t)] | length' 2>/dev/null)"
+is_ge1 "${N_UNREF_57}" || fail "case57: expected an orphan-files fail targeting ${UNREF_REL_57}, got '${N_UNREF_57:-N/A}' (report: ${REPORT_JSON})"
+N_REFONLY_57="$(printf '%s' "${REPORT_JSON}" | jq --arg t "${REFONLY_REL_57}" \
+  '[.results[]? | select(.check=="orphan-files" and .target==$t)] | length' 2>/dev/null)"
+is_eq0 "${N_REFONLY_57}" || fail "case57: a script named only from a references file must not be an orphan, got '${N_REFONLY_57:-N/A}' orphan-files result(s) for ${REFONLY_REL_57}"
+rm -rf "${ROOT}"
+fi
+
+# =====================================================================
 # Skill markdown contract cases (ticket #545) -- grep-based anchor-phrase
 # assertions against flow/skills/maintain/{SKILL.md,codex.md,modes/*.md},
 # none of which exist yet at RED-phase time (the skill/mode/agent files are

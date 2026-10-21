@@ -47,7 +47,8 @@
 #   - skills/review/SKILL.md
 #   - skills/refactor/SKILL.md
 #   - skills/address-review/SKILL.md
-#   - skills/configure/SKILL.md
+#   - skills/configure/SKILL.md, plus every skills/configure/phases/*.md and
+#     skills/configure/references/*.md for the retired-pattern negatives (#1341)
 #   - skills/implement/SKILL.md (context7 grant style)
 #   - agents/planner.md, agents/refiner.md, agents/implementer.md (context7 grant style)
 set -uo pipefail
@@ -174,6 +175,90 @@ assert_dropped_blanket_grants() {
   assert_not_contains "${content}" "Bash(gh:*)" "${label} blanket gh grant"
   assert_not_contains "${content}" "Bash(git:*)" "${label} blanket git grant"
   assert_not_contains "${content}" "Bash(echo:*)" "${label} echo grant"
+}
+
+# Retired patterns no configure markdown file may carry (#749 echo-redirection
+# hole class: the container-detection probe and the settings.json fallback
+# chains; Create Worktree step 1 as two standalone Bash calls instead of a
+# `&&` compound -- shell-rules: every segment of a compound is evaluated
+# independently by the approval system).
+CONFIGURE_RETIRED_PATTERNS=(
+  'echo "${CENCI_SANDBOX:-}"'
+  '|| echo'
+  'git add -A && git commit'
+)
+
+# configure_scan_files <skill-dir> -- prints the absolute path of every
+# markdown file the sweep covers: SKILL.md, phases/*.md, references/*.md
+# (a missing SKILL.md is not listed, so the callers' counts expose it).
+# Pure: no fail() side effect, safe inside $(...).
+configure_scan_files() {
+  local dir="$1" f
+  [[ -f "${dir}/SKILL.md" ]] && printf '%s\n' "${dir}/SKILL.md"
+  shopt -s nullglob
+  for f in "${dir}"/phases/*.md "${dir}"/references/*.md; do
+    printf '%s\n' "${f}"
+  done
+  shopt -u nullglob
+}
+
+# configure_retired_pattern_hits <skill-dir> -- prints one
+# "<relative-path>: <pattern>" line per retired pattern found in any covered
+# file. Pure.
+configure_retired_pattern_hits() {
+  local dir="$1" f pat
+  while IFS= read -r f; do
+    [[ -n "${f}" ]] || continue
+    for pat in "${CONFIGURE_RETIRED_PATTERNS[@]}"; do
+      if grep -qF -- "${pat}" "${f}" 2>/dev/null; then
+        printf '%s: %s\n' "${f#"${dir}/"}" "${pat}"
+      fi
+    done
+  done < <(configure_scan_files "${dir}")
+}
+
+# assert_configure_retired_patterns_absent <skill-dir> -- the real-tree scan,
+# with its non-vacuity guard: SKILL.md, at least one phase file and at least
+# one reference file must have been scanned, or the absence proves nothing.
+assert_configure_retired_patterns_absent() {
+  local dir="$1" files skill_n phase_n ref_n hits
+  files="$(configure_scan_files "${dir}")"
+  skill_n="$(grep -c '/SKILL\.md$' <<<"${files}")"
+  phase_n="$(grep -c '/phases/' <<<"${files}")"
+  ref_n="$(grep -c '/references/' <<<"${files}")"
+  [[ "${skill_n}" -ge 1 ]] || fail "configure sweep scanned no SKILL.md under ${dir} -- the retired-pattern scan would pass vacuously"
+  [[ "${phase_n}" -ge 1 ]] || fail "configure sweep scanned no phases/*.md under ${dir} -- the retired-pattern scan would pass vacuously"
+  [[ "${ref_n}" -ge 1 ]] || fail "configure sweep scanned no references/*.md under ${dir} -- the retired-pattern scan would pass vacuously"
+  hits="$(configure_retired_pattern_hits "${dir}")"
+  [[ -z "${hits}" ]] || fail "configure retired pattern(s) present:
+${hits}"
+}
+
+# selftest_configure_retired_patterns -- builds a throwaway skill directory
+# (SKILL.md, one phase file, one reference file, all benign), proves the scan
+# reports nothing for it, then injects each retired pattern into each file
+# kind in turn and requires a hit naming both the file and the pattern.
+selftest_configure_retired_patterns() {
+  local tmp rel pat hits
+  tmp="$(mktemp -d)" || { fail "selftest: mktemp failed"; return; }
+  [[ -n "${tmp}" && -d "${tmp}" ]] || { fail "selftest: mktemp produced no directory"; return; }
+  mkdir -p "${tmp}/phases" "${tmp}/references" || { fail "selftest: could not create fixture directories"; rm -rf "${tmp}"; return; }
+  printf 'benign router\n' > "${tmp}/SKILL.md"
+  printf 'benign phase\n' > "${tmp}/phases/selftest-phase.md"
+  printf 'benign reference\n' > "${tmp}/references/selftest-reference.md"
+
+  hits="$(configure_retired_pattern_hits "${tmp}")"
+  [[ -z "${hits}" ]] || fail "selftest: the clean fixture already reports hits: ${hits}"
+
+  for rel in SKILL.md phases/selftest-phase.md references/selftest-reference.md; do
+    for pat in "${CONFIGURE_RETIRED_PATTERNS[@]}"; do
+      printf 'benign\n%s\n' "${pat}" > "${tmp}/${rel}"
+      hits="$(configure_retired_pattern_hits "${tmp}")"
+      [[ "${hits}" == *"${rel}: ${pat}"* ]] || fail "selftest: pattern [${pat}] injected into ${rel} was not reported (got: [${hits}])"
+      printf 'benign\n' > "${tmp}/${rel}"
+    done
+  done
+  rm -rf "${tmp}"
 }
 
 # =====================================================================
@@ -480,17 +565,29 @@ Bash(cenci planning attended status --json)'
   # check), so configure's own grants can never silently re-widen to a
   # blanket form even without the generic whole-file negative scan.
 
-  # Retired-pattern negatives: the #749 echo-redirection hole class, closed
-  # here for configure's two settings.json fallback chains and its
-  # container-detection probe (Q3/#749 precedent).
-  assert_not_contains "${configure}" 'echo "${CENCI_SANDBOX:-}"' "skills/configure/SKILL.md retired echo CENCI_SANDBOX probe"
-  assert_not_contains "${configure}" '|| echo' "skills/configure/SKILL.md retired echo-fallback settings.json write"
+  # Non-Bash tool grants: the plain tools configure's body relies on (#1341).
+  # The Bash grant set above is unchanged by the router split.
+  assert_grant_field "${configure_path}" "Read" "skills/configure/SKILL.md"
+  assert_grant_field "${configure_path}" "Write" "skills/configure/SKILL.md"
+  assert_grant_field "${configure_path}" "Edit" "skills/configure/SKILL.md"
+  assert_grant_field "${configure_path}" "Glob" "skills/configure/SKILL.md"
+  assert_grant_field "${configure_path}" "Grep" "skills/configure/SKILL.md"
+  assert_grant_field "${configure_path}" "AskUserQuestion" "skills/configure/SKILL.md"
 
-  # Step 1 of Create Worktree splits into two standalone Bash calls (no
-  # `&&` compound -- shell-rules: every segment of a compound is evaluated
-  # independently by the approval system).
-  assert_not_contains "${configure}" 'git add -A && git commit' "skills/configure/SKILL.md git add/commit compound"
+  # Retired-pattern negatives (#749 echo-redirection hole class; Create
+  # Worktree's two standalone Bash calls), scanned over SKILL.md plus every
+  # phases/*.md and references/*.md so later split children are covered
+  # automatically (#1341). The scan is paired with a non-vacuity guard: it
+  # must have seen SKILL.md, at least one phase file and one reference file.
+  configure_dir="${FLOW_DIR}/skills/configure"
+  assert_configure_retired_patterns_absent "${configure_dir}"
 fi
+
+# Self-test: each retired pattern, injected into SKILL.md, a phase file and a
+# reference file of a throwaway skill directory, must be reported -- and the
+# clean directory must report nothing, so the scan can neither pass vacuously
+# nor miss a file kind.
+selftest_configure_retired_patterns
 
 # =====================================================================
 # context7 grant-style standardization: bare `mcp__context7` -> enumerated

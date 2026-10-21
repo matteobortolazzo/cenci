@@ -24,7 +24,10 @@ Deterministic detection is scripted, same as the Claude procedure: run `bash
 "${PLUGIN_ROOT}/skills/configure/scripts/detect-project.sh" --plugin-root
 "${PLUGIN_ROOT}"` from the repo root and consume its JSON (platform, container,
 package manager, MCP/LSP/dind/Playwright triggers, plugin version) instead of
-re-deriving them; fall back to the manual detection in the skill body only when the
+re-deriving them; fall back to the manual detection in the Claude procedure's phase
+files (`phases/detection-and-delta.md` for platform and container,
+`phases/mcp-lsp-ui-questions.md` for dependencies, LSP and dind,
+`phases/runtime-ci-sandbox-questions.md` for the package manager) only when the
 script cannot run. When writing `.cenci/config.json`, always stamp `configVersion`
 with the resolved plugin version — the staleness advisories (Claude's SessionStart
 hook and maintain's `config-version` check) rely on it to tell users when a
@@ -102,7 +105,8 @@ procedure. Because the fleet dispatch enroll is a mutation and therefore runs on
 gathers the enroll/session answers but never calls `cenci dispatch enroll` itself —
 never during `/plan`.
 
-Delta re-runs mirror the Claude procedure's `### Delta Resolution` section. On a re-run
+Delta re-runs mirror the Claude procedure's `### Delta Resolution` section (in
+`phases/detection-and-delta.md`). On a re-run
 (an `existingConfig` exists, or a `migrationBase` merged from both `.cenci/config.json` and
 `.claude/config.json`), run `bash
 "${PLUGIN_ROOT}/skills/configure/scripts/resolve-delta.sh" <config-path>` as its own
