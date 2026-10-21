@@ -9,13 +9,17 @@
 #
 # Ticket #739 extends this file with a three-way `permissions.deny` sync
 # contract across flow/templates/settings.json, .claude/settings.json, and
-# the marker-delimited literal copy in flow/skills/configure/SKILL.md
-# (<!-- cenci:settings-deny:start/end -->) — a divergence between any two
-# copies fails the suite. It also pins a non-vacuity floor, per-group
-# coverage, a negative guard against boundary-unsafe legacy
-# `--force`/`--hard` forms that would also block `git push
-# --force-with-lease` (flow/skills/implement/phases/phase-9-pr.md:67), and
-# exact-sentence anchors for the SKILL.md reconfigure heal clause.
+# the marker-delimited literal copy in
+# flow/skills/configure/references/settings-template.md
+# (<!-- cenci:settings-deny:start/end -->, moved there from SKILL.md by #1343)
+# — a divergence between any two copies fails the suite. It also pins a
+# non-vacuity floor, per-group coverage, a negative guard against
+# boundary-unsafe legacy `--force`/`--hard` forms that would also block
+# `git push --force-with-lease` (flow/skills/implement/phases/phase-9-pr.md:67),
+# exact-sentence anchors for the reconfigure heal clause in
+# flow/skills/configure/phases/guidance-settings.md, and (#1343) a guard that
+# the deny markers live in no other configure markdown file, so the heal step
+# cannot read a second, diverging copy.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -85,12 +89,18 @@ done
 
 # ── Three-way permissions.deny sync contract (#739) ─────────────────────
 # Compares flow/templates/settings.json, .claude/settings.json, and the
-# marker-delimited literal copy in flow/skills/configure/SKILL.md. A
-# divergence between any two copies fails the suite.
+# marker-delimited literal copy in
+# flow/skills/configure/references/settings-template.md. A divergence between
+# any two copies fails the suite.
 
 TEMPLATE_SETTINGS="${REPO_ROOT}/flow/templates/settings.json"
 CLAUDE_SETTINGS="${REPO_ROOT}/.claude/settings.json"
-SKILL_MD="${REPO_ROOT}/flow/skills/configure/SKILL.md"
+CONFIGURE_DIR="${REPO_ROOT}/flow/skills/configure"
+SKILL_MD="${CONFIGURE_DIR}/SKILL.md"
+SETTINGS_REF_REL="flow/skills/configure/references/settings-template.md"
+SETTINGS_REF_MD="${REPO_ROOT}/${SETTINGS_REF_REL}"
+GUIDANCE_REL="flow/skills/configure/phases/guidance-settings.md"
+GUIDANCE_MD="${REPO_ROOT}/${GUIDANCE_REL}"
 
 MARKER_START='<!-- cenci:settings-deny:start -->'
 MARKER_END='<!-- cenci:settings-deny:end -->'
@@ -204,55 +214,93 @@ assert_deny_sync() {
     fail "permissions.deny sync mismatch: ${label_a} vs ${label_b} — only in ${label_a}: [${only_a}]; only in ${label_b}: [${only_b}]"
 }
 
-echo "case: SKILL.md deny start marker present exactly once"
-if [[ -r "${SKILL_MD}" ]]; then
-    start_count="$(grep -Fc -- "${MARKER_START}" "${SKILL_MD}" 2>&1)"
+echo "case: settings-template.md deny start marker present exactly once"
+if [[ -r "${SETTINGS_REF_MD}" ]]; then
+    start_count="$(grep -Fc -- "${MARKER_START}" "${SETTINGS_REF_MD}" 2>&1)"
     start_status=$?
     # grep -c exits 1 on a legitimate zero-match count, so exit status alone
     # can't distinguish "no matches" from a real failure — validate the
     # captured output is a well-formed count instead.
     if [[ ${start_status} -gt 1 || ! "${start_count}" =~ ^[0-9]+$ ]]; then
-        fail "flow/skills/configure/SKILL.md: grep failed to count marker '${MARKER_START}' (exit ${start_status}): ${start_count}"
+        fail "${SETTINGS_REF_REL}: grep failed to count marker '${MARKER_START}' (exit ${start_status}): ${start_count}"
     elif [[ "${start_count}" -eq 1 ]]; then
         pass
     else
-        fail "flow/skills/configure/SKILL.md: expected marker '${MARKER_START}' exactly once, found ${start_count}"
+        fail "${SETTINGS_REF_REL}: expected marker '${MARKER_START}' exactly once, found ${start_count}"
     fi
 else
-    fail "flow/skills/configure/SKILL.md: file not readable: ${SKILL_MD}"
+    fail "${SETTINGS_REF_REL}: file not readable: ${SETTINGS_REF_MD}"
 fi
 
-echo "case: SKILL.md deny end marker present exactly once"
-if [[ -r "${SKILL_MD}" ]]; then
-    end_count="$(grep -Fc -- "${MARKER_END}" "${SKILL_MD}" 2>&1)"
+echo "case: settings-template.md deny end marker present exactly once"
+if [[ -r "${SETTINGS_REF_MD}" ]]; then
+    end_count="$(grep -Fc -- "${MARKER_END}" "${SETTINGS_REF_MD}" 2>&1)"
     end_status=$?
     # Same grep -c caveat as the start-marker case above.
     if [[ ${end_status} -gt 1 || ! "${end_count}" =~ ^[0-9]+$ ]]; then
-        fail "flow/skills/configure/SKILL.md: grep failed to count marker '${MARKER_END}' (exit ${end_status}): ${end_count}"
+        fail "${SETTINGS_REF_REL}: grep failed to count marker '${MARKER_END}' (exit ${end_status}): ${end_count}"
     elif [[ "${end_count}" -eq 1 ]]; then
         pass
     else
-        fail "flow/skills/configure/SKILL.md: expected marker '${MARKER_END}' exactly once, found ${end_count}"
+        fail "${SETTINGS_REF_REL}: expected marker '${MARKER_END}' exactly once, found ${end_count}"
     fi
 else
-    fail "flow/skills/configure/SKILL.md: file not readable: ${SKILL_MD}"
+    fail "${SETTINGS_REF_REL}: file not readable: ${SETTINGS_REF_MD}"
 fi
 
-echo "case: SKILL.md extracted deny block is non-empty"
-if extract_skill_deny_raw "${SKILL_MD}" "${WORK_DIR}/skill-deny-raw-check.txt" && [[ -s "${WORK_DIR}/skill-deny-raw-check.txt" ]]; then
-    pass
+# The deny markers must live in exactly one configure markdown file (#1343):
+# a second copy in SKILL.md or a phase file would be a fourth deny list the
+# three-way sync below never compares. Paired with the exactly-once cases
+# above (the reference file exists and holds both markers), so a zero count
+# elsewhere cannot pass vacuously against a missing or emptied reference.
+echo "case: deny markers appear in no configure markdown file other than settings-template.md"
+other_hits=""
+other_scanned=0
+other_scan_failed=0
+for other in "${SKILL_MD}" "${CONFIGURE_DIR}"/phases/*.md "${CONFIGURE_DIR}"/references/*.md; do
+    [[ "${other}" != "${SETTINGS_REF_MD}" ]] || continue
+    if [[ ! -r "${other}" ]]; then
+        # An unmatched glob stays literal (unreadable): a missing directory
+        # is a scan failure, never a silent zero.
+        other_scan_failed=1
+        continue
+    fi
+    other_scanned=$((other_scanned + 1))
+    other_marker_hits="$(grep -Fc -e "${MARKER_START}" -e "${MARKER_END}" -- "${other}" 2>&1)"
+    other_status=$?
+    if [[ ${other_status} -gt 1 || ! "${other_marker_hits}" =~ ^[0-9]+$ ]]; then
+        other_scan_failed=1
+    elif [[ "${other_marker_hits}" -gt 0 ]]; then
+        other_hits="${other_hits} ${other#"${REPO_ROOT}/"}"
+    fi
+done
+if [[ "${other_scan_failed}" -eq 1 ]]; then
+    fail "deny-marker scan of the other configure markdown files failed (unreadable file or grep error)"
+elif [[ ! -r "${SETTINGS_REF_MD}" ]]; then
+    fail "${SETTINGS_REF_REL}: cannot verify the markers appear nowhere else — the reference file is missing"
+elif [[ "${other_scanned}" -lt 12 ]]; then
+    fail "deny-marker scan is vacuous: only ${other_scanned} other configure markdown files scanned (expected SKILL.md, 9 phase files and 2 other reference files = 12)"
+elif [[ -n "${other_hits}" ]]; then
+    fail "deny markers must live only in ${SETTINGS_REF_REL}, also found in:${other_hits}"
 else
-    fail "flow/skills/configure/SKILL.md: extracted deny block between markers is empty or unreadable${EXTRACT_ERR:+ (${EXTRACT_ERR})}"
+    pass
 fi
 
-echo "case: SKILL.md extracted deny block parses via jq as a JSON array"
-SKILL_DENY="${WORK_DIR}/skill-deny.json"
-if extract_skill_deny_json_sorted "${SKILL_MD}" "${SKILL_DENY}"; then
+echo "case: settings-template.md extracted deny block is non-empty"
+if extract_skill_deny_raw "${SETTINGS_REF_MD}" "${WORK_DIR}/skill-deny-raw-check.txt" && [[ -s "${WORK_DIR}/skill-deny-raw-check.txt" ]]; then
     pass
-    SKILL_OK=1
 else
-    fail "flow/skills/configure/SKILL.md: ${EXTRACT_ERR}"
-    SKILL_OK=0
+    fail "${SETTINGS_REF_REL}: extracted deny block between markers is empty or unreadable${EXTRACT_ERR:+ (${EXTRACT_ERR})}"
+fi
+
+echo "case: settings-template.md extracted deny block parses via jq as a JSON array"
+REF_DENY="${WORK_DIR}/skill-deny.json"
+if extract_skill_deny_json_sorted "${SETTINGS_REF_MD}" "${REF_DENY}"; then
+    pass
+    REF_OK=1
+else
+    fail "${SETTINGS_REF_REL}: ${EXTRACT_ERR}"
+    REF_OK=0
 fi
 
 TEMPLATE_DENY="${WORK_DIR}/template-deny.json"
@@ -279,18 +327,18 @@ else
     fail "permissions.deny sync flow/templates/settings.json vs .claude/settings.json: skipped — extraction failed for one or both copies (see above)"
 fi
 
-echo "case: permissions.deny sync — flow/templates/settings.json vs SKILL.md marker block"
-if [[ "${TEMPLATE_OK}" -eq 1 && "${SKILL_OK}" -eq 1 ]]; then
-    assert_deny_sync "flow/templates/settings.json" "${TEMPLATE_DENY}" "flow/skills/configure/SKILL.md" "${SKILL_DENY}"
+echo "case: permissions.deny sync — flow/templates/settings.json vs settings-template.md marker block"
+if [[ "${TEMPLATE_OK}" -eq 1 && "${REF_OK}" -eq 1 ]]; then
+    assert_deny_sync "flow/templates/settings.json" "${TEMPLATE_DENY}" "${SETTINGS_REF_REL}" "${REF_DENY}"
 else
-    fail "permissions.deny sync flow/templates/settings.json vs flow/skills/configure/SKILL.md: skipped — extraction failed for one or both copies (see above)"
+    fail "permissions.deny sync flow/templates/settings.json vs ${SETTINGS_REF_REL}: skipped — extraction failed for one or both copies (see above)"
 fi
 
-echo "case: permissions.deny sync — .claude/settings.json vs SKILL.md marker block"
-if [[ "${CLAUDE_OK}" -eq 1 && "${SKILL_OK}" -eq 1 ]]; then
-    assert_deny_sync ".claude/settings.json" "${CLAUDE_DENY}" "flow/skills/configure/SKILL.md" "${SKILL_DENY}"
+echo "case: permissions.deny sync — .claude/settings.json vs settings-template.md marker block"
+if [[ "${CLAUDE_OK}" -eq 1 && "${REF_OK}" -eq 1 ]]; then
+    assert_deny_sync ".claude/settings.json" "${CLAUDE_DENY}" "${SETTINGS_REF_REL}" "${REF_DENY}"
 else
-    fail "permissions.deny sync .claude/settings.json vs flow/skills/configure/SKILL.md: skipped — extraction failed for one or both copies (see above)"
+    fail "permissions.deny sync .claude/settings.json vs ${SETTINGS_REF_REL}: skipped — extraction failed for one or both copies (see above)"
 fi
 
 # ── Non-vacuity floor + per-group coverage (#739) ────────────────────────
@@ -357,9 +405,9 @@ fi
 # semantics against the new entries).
 MIN_DENY_LEN=194
 
-DENY_LABELS=("flow/templates/settings.json" ".claude/settings.json" "flow/skills/configure/SKILL.md marker block")
-DENY_FILES=("${TEMPLATE_DENY}" "${CLAUDE_DENY}" "${SKILL_DENY}")
-DENY_OKS=("${TEMPLATE_OK}" "${CLAUDE_OK}" "${SKILL_OK}")
+DENY_LABELS=("flow/templates/settings.json" ".claude/settings.json" "${SETTINGS_REF_REL} marker block")
+DENY_FILES=("${TEMPLATE_DENY}" "${CLAUDE_DENY}" "${REF_DENY}")
+DENY_OKS=("${TEMPLATE_OK}" "${CLAUDE_OK}" "${REF_OK}")
 
 for i in 0 1 2; do
     label="${DENY_LABELS[$i]}"
@@ -545,7 +593,7 @@ extract_skill_deny_json_ordered() {
 
 TEMPLATE_DENY_ORDERED="${WORK_DIR}/template-deny-ordered.json"
 CLAUDE_DENY_ORDERED="${WORK_DIR}/claude-deny-ordered.json"
-SKILL_DENY_ORDERED="${WORK_DIR}/skill-deny-ordered.json"
+REF_DENY_ORDERED="${WORK_DIR}/skill-deny-ordered.json"
 
 if extract_deny_ordered "${TEMPLATE_SETTINGS}" "${TEMPLATE_DENY_ORDERED}"; then
     TEMPLATE_ORD_OK=1
@@ -561,11 +609,11 @@ else
     fail ".claude/settings.json: ${EXTRACT_ERR}"
 fi
 
-if extract_skill_deny_json_ordered "${SKILL_MD}" "${SKILL_DENY_ORDERED}"; then
-    SKILL_ORD_OK=1
+if extract_skill_deny_json_ordered "${SETTINGS_REF_MD}" "${REF_DENY_ORDERED}"; then
+    REF_ORD_OK=1
 else
-    SKILL_ORD_OK=0
-    fail "flow/skills/configure/SKILL.md: ${EXTRACT_ERR}"
+    REF_ORD_OK=0
+    fail "${SETTINGS_REF_REL}: ${EXTRACT_ERR}"
 fi
 
 # gh_api_slice_equal_ok <full-deny-json-file> <expected-json-file> — pure
@@ -598,8 +646,8 @@ gh_api_array_unique_ok() {
     [[ "${result}" == "true" ]]
 }
 
-DENY_ORDERED_FILES=("${TEMPLATE_DENY_ORDERED}" "${CLAUDE_DENY_ORDERED}" "${SKILL_DENY_ORDERED}")
-DENY_ORD_OKS=("${TEMPLATE_ORD_OK}" "${CLAUDE_ORD_OK}" "${SKILL_ORD_OK}")
+DENY_ORDERED_FILES=("${TEMPLATE_DENY_ORDERED}" "${CLAUDE_DENY_ORDERED}" "${REF_DENY_ORDERED}")
+DENY_ORD_OKS=("${TEMPLATE_ORD_OK}" "${CLAUDE_ORD_OK}" "${REF_ORD_OK}")
 
 for i in 0 1 2; do
     label="${DENY_LABELS[$i]}"
@@ -708,28 +756,114 @@ for i in 0 1 2; do
     done
 done
 
-# ── SKILL.md heal clause anchors (#739, Q5) ──────────────────────────────
+# ── Heal clause anchors (#739, Q5; moved to phases/guidance-settings.md by #1343)
 # Exact-sentence anchors, not generic keywords (flow/docs/shell-scripting-
 # gotchas.md rule 3) — the heal step is prose an agent executes, not code,
 # so a generic keyword match would pass vacuously against unrelated text.
-echo "case: SKILL.md base-deny heal clause (IMPORTANT paragraph) present"
-if SKILL_CONTENT="$(cat "${SKILL_MD}" 2>&1)"; then
-    HEAL_MARKER='All base deny rules from the template **MUST** be present in `permissions.deny`. Only **append** new entries — never remove or replace existing ones, including user-added entries.'
-    if [[ "${SKILL_CONTENT}" == *"${HEAL_MARKER}"* ]]; then
+# The heal paragraphs read the deny list from references/settings-template.md,
+# so the phase file must also tell the agent to read it (the pointer sentence
+# the Step Map row and "read it now" wording provide).
+HEAL_MARKER='All base deny rules from the template **MUST** be present in `permissions.deny`. Only **append** new entries — never remove or replace existing ones, including user-added entries.'
+SUPERSESSION_MARKER='(a) **remove** the legacy `Bash(git push --force:*)` and `Bash(git reset --hard:*)` entries when adding the base list — the boundary-safe forms below supersede them'
+HEAL_POINTER_SENTENCE='The boundary-safe base deny list itself, with the rationale for its word boundaries and its known residual gaps, lives in `references/settings-template.md` — read it now, before writing or healing `permissions.deny`.'
+STEP4_MARKER='4. **Create or update'
+ALLOW_APPEND_MARKER='**Append to `permissions.allow`:**'
+
+# offset_of <haystack> <needle> — pure extractor (no fail(), safe in $(...)):
+# prints the byte offset of the first occurrence of needle and returns 0, or
+# prints nothing and returns 1 when the needle is empty or absent.
+offset_of() {
+    local haystack="$1" needle="$2" prefix
+    [[ -n "${needle}" && "${haystack}" == *"${needle}"* ]] || return 1
+    prefix="${haystack%%"${needle}"*}"
+    printf '%s' "${#prefix}"
+}
+
+echo "case: guidance-settings.md base-deny heal clause (IMPORTANT paragraph) present"
+if GUIDANCE_CONTENT="$(cat "${GUIDANCE_MD}" 2>&1)"; then
+    if [[ "${GUIDANCE_CONTENT}" == *"${HEAL_MARKER}"* ]]; then
         pass
     else
-        fail "flow/skills/configure/SKILL.md: missing base-deny heal clause anchor: [${HEAL_MARKER}]"
+        fail "${GUIDANCE_REL}: missing base-deny heal clause anchor: [${HEAL_MARKER}]"
     fi
 
-    echo "case: SKILL.md legacy-supersession clause present"
-    SUPERSESSION_MARKER='(a) **remove** the legacy `Bash(git push --force:*)` and `Bash(git reset --hard:*)` entries when adding the base list — the boundary-safe forms below supersede them'
-    if [[ "${SKILL_CONTENT}" == *"${SUPERSESSION_MARKER}"* ]]; then
+    echo "case: guidance-settings.md legacy-supersession clause present"
+    if [[ "${GUIDANCE_CONTENT}" == *"${SUPERSESSION_MARKER}"* ]]; then
         pass
     else
-        fail "flow/skills/configure/SKILL.md: missing legacy-supersession clause anchor: [${SUPERSESSION_MARKER}]"
+        fail "${GUIDANCE_REL}: missing legacy-supersession clause anchor: [${SUPERSESSION_MARKER}]"
+    fi
+
+    echo "case: guidance-settings.md points the heal step at settings-template.md"
+    # One literal pin of the full pointer sentence, plus its placement inside
+    # step 4: after the step-4 marker and before the permissions.allow append
+    # marker. Each offset is existence-paired (offset_of fails when absent).
+    if [[ "${GUIDANCE_CONTENT}" != *"${HEAL_POINTER_SENTENCE}"* ]]; then
+        fail "${GUIDANCE_REL}: missing heal pointer sentence anchor: [${HEAL_POINTER_SENTENCE}]"
+    elif ! pointer_off="$(offset_of "${GUIDANCE_CONTENT}" "${HEAL_POINTER_SENTENCE}")"; then
+        fail "${GUIDANCE_REL}: cannot locate the heal pointer sentence"
+    elif ! step4_off="$(offset_of "${GUIDANCE_CONTENT}" "${STEP4_MARKER}")"; then
+        fail "${GUIDANCE_REL}: cannot verify pointer placement — step-4 marker missing: [${STEP4_MARKER}]"
+    elif ! append_off="$(offset_of "${GUIDANCE_CONTENT}" "${ALLOW_APPEND_MARKER}")"; then
+        fail "${GUIDANCE_REL}: cannot verify pointer placement — permissions.allow append marker missing: [${ALLOW_APPEND_MARKER}]"
+    elif [[ "${step4_off}" -lt "${pointer_off}" && "${pointer_off}" -lt "${append_off}" ]]; then
+        pass
+    else
+        fail "${GUIDANCE_REL}: the heal pointer sentence must sit after step 4 and before the permissions.allow append (offsets step4=${step4_off} pointer=${pointer_off} append=${append_off}), or it could heal without reading the deny list"
     fi
 else
-    fail "flow/skills/configure/SKILL.md: could not read file for heal-clause check: ${SKILL_CONTENT}"
+    fail "${GUIDANCE_REL}: could not read file for heal-clause check: ${GUIDANCE_CONTENT}"
+fi
+
+# Paired absence: the heal/supersession prose is not left behind in SKILL.md.
+# The existence markers are the anchors just asserted in the phase file, so a
+# zero count here cannot pass because SKILL.md was emptied.
+echo "case: SKILL.md no longer carries the heal/supersession prose"
+if SKILL_CONTENT="$(cat "${SKILL_MD}" 2>&1)"; then
+    if [[ "${SKILL_CONTENT}" != *"## Task"* ]]; then
+        fail "flow/skills/configure/SKILL.md: cannot verify absence — existence marker '## Task' missing"
+    elif [[ "${SKILL_CONTENT}" == *"${HEAL_MARKER}"* || "${SKILL_CONTENT}" == *"${SUPERSESSION_MARKER}"* ]]; then
+        fail "flow/skills/configure/SKILL.md: still carries the base-deny heal or legacy-supersession prose that moved to ${GUIDANCE_REL}"
+    else
+        pass
+    fi
+else
+    fail "flow/skills/configure/SKILL.md: could not read file for the heal-clause absence check: ${SKILL_CONTENT}"
+fi
+
+# ── Deny-list rationale prose anchors (#1343, Q4) ─────────────────────
+# The rationale prose (word boundaries, `-C` coverage, `gh api` coverage,
+# residual gaps) moved with the cenci:settings-deny block from SKILL.md into
+# references/settings-template.md. One distinctive sentence per topic, pinned
+# from the pre-move SKILL.md (`git show main:flow/skills/configure/SKILL.md`),
+# never read from the files under test. Each must occur in the reference file
+# and in neither SKILL.md nor phases/guidance-settings.md. The existence
+# check on the reference file pairs with the absence checks, so a zero count
+# elsewhere cannot pass because a file was emptied.
+RATIONALE_SENTENCES=(
+    'Deny always overrides allow, so a permitted form must never be caught by a deny rule.'
+    '`-C <path>` prefix coverage is now added for the highest-value groups'
+    '`gh api` destructive-method coverage denies `DELETE`/`PUT`'
+    'this residual list is illustrative of known gaps under literal prefix matching, not exhaustive.'
+)
+
+echo "case: deny-list rationale prose lives in settings-template.md, not SKILL.md or guidance-settings.md"
+if SETTINGS_REF_CONTENT="$(cat "${SETTINGS_REF_MD}" 2>&1)" \
+    && SKILL_RATIONALE_CONTENT="$(cat "${SKILL_MD}" 2>&1)" \
+    && GUIDANCE_RATIONALE_CONTENT="$(cat "${GUIDANCE_MD}" 2>&1)"; then
+    for sentence in "${RATIONALE_SENTENCES[@]}"; do
+        if [[ "${SETTINGS_REF_CONTENT}" != *"${sentence}"* ]]; then
+            fail "${SETTINGS_REF_REL}: missing deny-list rationale sentence: [${sentence}]"
+        elif [[ "${SKILL_RATIONALE_CONTENT}" == *"${sentence}"* ]]; then
+            fail "flow/skills/configure/SKILL.md: still carries deny-list rationale sentence that moved to ${SETTINGS_REF_REL}: [${sentence}]"
+        elif [[ "${GUIDANCE_RATIONALE_CONTENT}" == *"${sentence}"* ]]; then
+            fail "${GUIDANCE_REL}: carries deny-list rationale sentence that belongs only in ${SETTINGS_REF_REL}: [${sentence}]"
+        else
+            pass
+        fi
+    done
+else
+    fail "could not read settings-template.md, SKILL.md or guidance-settings.md for the rationale-prose check"
 fi
 
 # ── Summary ──────────────────────────────────────────────────────────

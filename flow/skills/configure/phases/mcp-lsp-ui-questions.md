@@ -1,6 +1,6 @@
 # MCP, LSP and UI Questions
 
-Read this file on every run, after `phases/project-questions.md` (see `SKILL.md` `### Step Map`). It holds the dependency detection and its manual fallback, the MCP and LSP server catalogs, questions 5 and 6, UI conventions (5c), Playwright CLI setup, LSP detection and binary verification. Ask each question only when its ID is in `delta.ask`, as `SKILL.md` `### Question Defaults` describes; the catalogs and fallbacks are read on every run because generation steps 1b and the MCP configuration use them.
+Read this file on every run, after `phases/project-questions.md` (see `SKILL.md` `### Step Map`). It holds the dependency detection and its manual fallback, the MCP and LSP server catalogs, questions 5 and 6, UI conventions (5c), Playwright CLI setup, LSP detection and binary verification. Ask each question only when its ID is in `delta.ask`, as `SKILL.md` `### Question Defaults` describes; the catalogs and fallbacks are read on every run because generation step 1b and the MCP configuration in `phases/guidance-settings.md` use them.
 
 ### Dependency Detection
 

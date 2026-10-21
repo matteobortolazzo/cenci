@@ -32,8 +32,10 @@
 # calling `fail()` in the parent shell.
 #
 # Covered files:
-#   - flow/skills/configure/SKILL.md, plus phases/*.md and references/*.md for
-#     the absence checks (#1341)
+#   - flow/skills/configure/phases/ci-dockerfile.md (step 5e, #1343)
+#   - flow/skills/configure/SKILL.md (the step 6 merge-sandbox-config.sh
+#     invocation), plus phases/*.md and references/*.md for the absence checks
+#     (#1341)
 #   - flow/skills/configure/codex.md
 set -uo pipefail
 
@@ -157,30 +159,46 @@ configure_all="${skill}"
 configure_part_count=0
 for _configure_part in "${FLOW_DIR}"/skills/configure/phases/*.md "${FLOW_DIR}"/skills/configure/references/*.md; do
   [[ -f "${_configure_part}" ]] || continue
-  configure_all+=$'\n'"$(cat "${_configure_part}")"
+  if ! _configure_part_content="$(cat "${_configure_part}")"; then
+    fail "skills/configure/**: ${_configure_part#"${FLOW_DIR}/"}: not found/unreadable"
+    continue
+  fi
+  configure_all+=$'\n'"${_configure_part_content}"
   configure_part_count=$((configure_part_count+1))
 done
-[[ "${configure_part_count}" -ge 5 ]] || fail "configure_all aggregation is vacuous: aggregated ${configure_part_count} phases/references files (expected at least 5)"
-if [[ -n "${skill}" ]]; then
+# Floor: 9 phase files + 3 reference files after #1343 (guidance-settings,
+# ci-dockerfile and settings-template joined the 6 + 2 that #1341/#1342 left).
+[[ "${configure_part_count}" -ge 12 ]] || fail "configure_all aggregation is vacuous: aggregated ${configure_part_count} phases/references files (expected at least 12)"
+
+# Step 5e lives in phases/ci-dockerfile.md since #1343: its existence marker and
+# the generated-file-format fence are read there. SKILL.md keeps only a stub
+# and the step 6 merge-script invocation.
+require_doc ci_phase "skills/configure/phases/ci-dockerfile.md" || true
+if [[ -n "${ci_phase}" ]]; then
   # Step 5e must exist at all — every check below is scoped/paired against it.
-  assert_contains "${skill}" "${STEP5E_MARKER}" "SKILL.md step 5e (Generate .cenci/Dockerfile) present"
+  assert_contains "${ci_phase}" "${STEP5E_MARKER}" "ci-dockerfile.md step 5e (Generate .cenci/Dockerfile) present"
 
   # The fixed literal replacement for the ARG default, pinned to the
   # generated-file-format code fence via the FROM pairing (see comment on
   # BASE_VERSION_LATEST_FROM_PAIR above).
-  assert_contains_ws "${skill}" "${BASE_VERSION_LATEST_FROM_PAIR}" "SKILL.md step 5e's generated Dockerfile fence emits the literal ARG BASE_VERSION=latest"
+  assert_contains_ws "${ci_phase}" "${BASE_VERSION_LATEST_FROM_PAIR}" "ci-dockerfile.md step 5e's generated Dockerfile fence emits the literal ARG BASE_VERSION=latest"
 
   # Retired resolution-algorithm artifacts, paired against step 5e's own
-  # existence so the absence checks cannot pass vacuously.
+  # existence so the absence checks cannot pass vacuously. The scan stays on
+  # the aggregate so prose that wanders into any configure file is caught.
   assert_absent_paired_ws "${configure_all}" "${STEP5E_MARKER}" "${INSTALLED_PLUGINS_JSON}" "configure skill files no longer read installed_plugins.json"
   assert_absent_paired_ws "${configure_all}" "${STEP5E_MARKER}" "${SEMVER_VALIDATION_PATTERN}" "configure skill files no longer validate a semver baseVersion pattern"
   assert_absent_paired_ws "${configure_all}" "${STEP5E_MARKER}" "${UNRESOLVED_COMMENT}" "configure skill files no longer emit the unresolved-baseVersion inline comment"
+else
+  fail "ci-dockerfile.md: skipped step 5e assertions -- doc empty/unreadable"
+fi
 
+if [[ -n "${skill}" ]]; then
   # Shared merge script still invoked, but without the retired flag.
   assert_contains "${skill}" "${MERGE_SCRIPT_MARKER}" "SKILL.md still invokes merge-sandbox-config.sh"
   assert_absent_paired_ws "${configure_all}" "${MERGE_SCRIPT_MARKER}" "${BASE_VERSION_FLAG}" "configure skill files' merge-sandbox-config.sh invocation drops --base-version"
 else
-  fail "SKILL.md: skipped step 5e assertions -- doc empty/unreadable"
+  fail "SKILL.md: skipped merge-sandbox-config.sh assertions -- doc empty/unreadable"
 fi
 
 # --- skills/configure/codex.md ----------------------------------------------

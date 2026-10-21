@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
-# Contract test for tickets #1341 and #1342 (parent #692) --
+# Contract test for tickets #1341, #1342 and #1343 (parent #692) --
 # flow/skills/configure/SKILL.md becomes a router: the detection,
 # delta-resolution and questions 1-9c prose moves verbatim into four
 # phases/*.md files, the legacy-migration prose moves into the conditionally
-# read references/migrations.md (#1341), and the lazyboards (question 10 and
+# read references/migrations.md (#1341), the lazyboards (question 10 and
 # step 5f), fleet enrollment (questions 11, 12, 18-20) and autonomy
 # (questions 13-17) prose moves into three more conditionally read phase files
-# plus references/lazyboards-example.md (#1342). The skill must behave exactly
-# as before.
+# plus references/lazyboards-example.md (#1342), and generation steps 0 to
+# 5c-bis move into phases/guidance-settings.md, steps 5d and 5e into
+# phases/ci-dockerfile.md, and the base deny list into
+# references/settings-template.md (#1343). The skill must behave exactly as
+# before.
 #
 # Each case is named after the acceptance criterion or plan decision it proves.
 # What this suite pins (the load-bearing wording of each moved block is pinned
@@ -41,6 +44,11 @@
 #   * case_allowed_tools_only_in_skill_md  P16 companion: no allowed-tools line
 #                                 outside SKILL.md
 #   * case_readme_workflow_deps_row  README workflow-deps row lists the files
+#   * case_moved_step_markers_unique  (#1343) each moved generation step marker
+#                                 occurs once, in its new file, never in SKILL.md
+#   * case_P30_step1_verbatim    (#1343) step 1 moved byte for byte
+#   * case_P6_dockerfile_verbatim  (#1343) step 5e's Merge-safe regeneration
+#                                 bullets moved byte for byte
 #
 # Pinned constants, never derived from the doc under test. Every absence check
 # is paired with an existence marker (flow/docs/shell-scripting-gotchas.md) so
@@ -48,7 +56,7 @@
 #
 # Covered files:
 #   - flow/skills/configure/SKILL.md, phases/*.md, references/migrations.md,
-#     references/lazyboards-example.md
+#     references/lazyboards-example.md, references/settings-template.md
 #   - flow/README.md
 set -uo pipefail
 
@@ -170,6 +178,10 @@ LAZY_EXAMPLE_FILE='references/lazyboards-example.md'
 FLEET_FILE='phases/fleet-enrollment.md'
 AUTONOMY_FILE='phases/autonomy-settings.md'
 MIGRATIONS_FILE='references/migrations.md'
+# #1343 (3/4): generation steps 0-5c-bis, the base deny list, and steps 5d-5e.
+GUIDANCE_FILE='phases/guidance-settings.md'
+SETTINGS_TEMPLATE_FILE='references/settings-template.md'
+CI_FILE='phases/ci-dockerfile.md'
 
 STEP_MAP_HEADING='### Step Map'
 QUESTION_DEFAULTS_HEADING='### Question Defaults'
@@ -261,15 +273,39 @@ MOVED_HEADINGS=(
   "${FLEET_FILE}|### Fleet Dispatch Enrollment"
   "${FLEET_FILE}|### Fleet Autonomy Controls"
   "${AUTONOMY_FILE}|### Autonomy Settings"
+  "${GUIDANCE_FILE}|### MCP Server Configuration"
 )
 
-# Markers that stay inline in SKILL.md: Auth Verification (always run), step 5e,
-# and the step 5f stub that defers to phases/lazyboards.md.
+# Markers that stay inline in SKILL.md: Auth Verification (always run) and the
+# three stubs that defer to phases/guidance-settings.md (steps 0 to 5c-bis),
+# phases/ci-dockerfile.md (steps 5d and 5e) and phases/lazyboards.md (step 5f).
+# Step 5e itself moved out in #1343, so its marker is no longer inline.
 STUB_5F='run step 5f in `phases/lazyboards.md` when that file was read this run'
+STUB_GUIDANCE='run steps 0 to 5c-bis in `phases/guidance-settings.md`'
+STUB_CI='run steps 5d and 5e in `phases/ci-dockerfile.md`; each step decides internally whether it runs'
 INLINE_MARKERS=(
   '### Auth Verification'
-  '5e. **Generate `.cenci/Dockerfile`**'
+  "${STUB_GUIDANCE}"
+  "${STUB_CI}"
   "${STUB_5F}"
+)
+
+# Moved step markers (#1343): "<file>|<exact marker>". Each must occur exactly
+# once across SKILL.md, phases/*.md and references/*.md, in the named file, and
+# zero times in SKILL.md (where only the stubs above remain).
+MOVED_STEP_MARKERS=(
+  "${GUIDANCE_FILE}|0. **Generate Codex agent adapters**"
+  "${GUIDANCE_FILE}|1. **Generate canonical guidance and client adapters**"
+  "${GUIDANCE_FILE}|2. Create the \`docs/\` directory at the repo root (if it doesn't exist) and deploy on-demand reference docs"
+  "${GUIDANCE_FILE}|3a. For each project, create \`<project-path>/AGENTS.md\` using \`templates/agents-md-project.md\`"
+  "${GUIDANCE_FILE}|3c. **Ensure board lifecycle labels exist**"
+  "${GUIDANCE_FILE}|4. **Create or update \`.claude/settings.json\`**"
+  "${GUIDANCE_FILE}|5. Update \`.gitignore\`:"
+  "${GUIDANCE_FILE}|5b. **Generate \`.claudeignore\`**"
+  "${GUIDANCE_FILE}|5c. **Configure auto-compact**"
+  "${GUIDANCE_FILE}|5c-bis. **Pin subagents to 200K context**"
+  "${CI_FILE}|5d. **Generate CI/CD pipeline**"
+  "${CI_FILE}|5e. **Generate \`.cenci/Dockerfile\`**"
 )
 
 # Step Map conditions (#1342). Each new row names the condition that gates it.
@@ -280,6 +316,15 @@ FLEET_ROW_PARTS=('`dispatchEnroll`' '`dispatch.planRefined`' '`automerge.enabled
 AUTONOMY_ROW_PARTS=('`planning`' '`automerge`' '`refinement`' '`refinement.confirmBeforeApply`' '`refinement.automerge`')
 OLD_STEP_MAP_EVERY_PHASE='Every phase file is read in full on every run'
 OLD_STEP_MAP_INLINE_TAIL='Question 10 onward and generation steps 0 to 7 stay inline in this file.'
+# #1343: generation steps 0 to 5f no longer all stay inline. The intro sentence
+# that claimed so is retired, and the new one names where each step range runs
+# and that only steps 6 and 7 stay inline.
+OLD_STEP_MAP_GENERATION_INLINE='Generation steps 0 to 7 stay inline in this file'
+STEP_MAP_INTRO_PARTS=('steps 0 to 5c-bis' 'steps 5d and 5e' 'step 5f' 'steps 6 and 7' '`phases/guidance-settings.md`' '`phases/ci-dockerfile.md`' '`phases/lazyboards.md`')
+# The three generation rows are read on every run; each names its own position.
+GUIDANCE_ROW_PARTS=('Auth Verification' 'steps 0 to 5c-bis')
+SETTINGS_TEMPLATE_ROW_PARTS=('step 4' 'deny')
+CI_ROW_PARTS=('steps 5d and 5e' 'after `phases/guidance-settings.md`')
 STALE_EVERY_INVOCATION='on every configure invocation'
 
 # Fleet guard (P22), pinned from the pre-move text.
@@ -301,6 +346,79 @@ LAZY_BOARD_Q10='10. **Board config** (no existing `.lazyboards.yml`)'
 
 README_CONFIGURE_ROW_PREFIX='| `configure` | codex.md'
 
+# Cross-file pointers (#1343): a positional "above"/"below" or a bare step number
+# that now crosses files names the file ("step N in `<file>`", or "`### X` in
+# `<file>`"). Each OLD_* form is the retired positional pointer.
+STEP3C_BOARD_POINTER='`### Board lifecycle labels` in `SKILL.md`'
+OLD_STEP3C_BOARD_POINTER='under Board lifecycle labels below'
+STEP6_5E_POINTER='(see step 5e in `phases/ci-dockerfile.md`)'
+OLD_STEP6_5E_POINTER='(see step 5e above)'
+STEP6_STEP4_POINTER='Step 4 in `phases/guidance-settings.md` always writes'
+OLD_STEP6_STEP4_POINTER='Step 4 above'
+DETECT_STEP1_POINTER='step 1 in `phases/guidance-settings.md`'
+OLD_DETECT_STEP1_POINTER='diff-approval gate in step 1 stays'
+DETECT_5E_POINTER='step 5e in `phases/ci-dockerfile.md`'
+OLD_DETECT_5E_POINTER='(see step 5e and `### Board Config (lazyboards)`'
+MCP_OPEN_POINTER='`phases/guidance-settings.md`'
+OLD_MCP_OPEN_POINTER='because generation steps 1b and the MCP configuration use them'
+RUNTIME_5C_POINTER='see step 5c in `phases/guidance-settings.md` for the exact jq/mv sequence'
+OLD_RUNTIME_5C_POINTER='see step 5c for the exact jq/mv sequence'
+RUNTIME_5C_BIS_POINTER='see step 5c-bis in `phases/guidance-settings.md` for the exact jq/mv sequence'
+OLD_RUNTIME_5C_BIS_POINTER='see step 5c-bis for the exact jq/mv sequence'
+RUNTIME_5E_POINTER='see step 5e in `phases/ci-dockerfile.md`'
+OLD_RUNTIME_5E_POINTER='see step 5e).'
+RUNTIME_OPEN_POINTER='steps 5d and 5e in `phases/ci-dockerfile.md`'
+OLD_RUNTIME_OPEN_POINTER='steps 5d and 5e use them'
+MONOREPO_ANCHOR='**Monorepo**: fragments are'
+
+# P30 (#1343): step 1's AGENTS.md/CLAUDE.md generation moves verbatim --
+# whatever #1182 has shipped when the work starts (#1182 is open, so this is the
+# AGENTS.md-canonical text with CLAUDE.md import adapters). Pinned byte for byte
+# from the pre-move SKILL.md (`git show main:flow/skills/configure/SKILL.md`,
+# lines 133-150), never read from the doc under test. Mirrors the P5 pins in
+# configure-fragment-markers.test.sh.
+IFS= read -r -d '' P30_STEP1_BLOCK <<'PINNED_BLOCK'
+1. **Generate canonical guidance and client adapters**:
+   - `AGENTS.md` at the repository root is canonical shared guidance. Use
+     `templates/agents-md-root.md` or `templates/agents-md-root-monorepo.md`.
+   - For each monorepo project, generate `<project>/AGENTS.md` from
+     `templates/agents-md-project.md`.
+   - Generate root `CLAUDE.md` as `@AGENTS.md`, followed only by an optional block
+     delimited with `<!-- cenci:claude-only:start -->` and
+     `<!-- cenci:claude-only:end -->`.
+   - Generate each `<project>/CLAUDE.md` as `@AGENTS.md` with the same optional block.
+
+   Discover root `AGENTS.md`, root `CLAUDE.md`, legacy `.claude/CLAUDE.md`, and every
+   configured project's AGENTS/CLAUDE pair. A retained `.claude/CLAUDE.md` adapter imports
+   `@../AGENTS.md`. Before replacing any substantive existing guidance, render and show
+   the complete proposed diff with `git diff --no-index`, then require approval through
+   `AskUserQuestion`. Preserve existing material by merging it into the shared AGENTS
+   content or the explicitly Claude-only block. Never silently delete guidance. Stable
+   markers make reruns idempotent. Never delete a second substantive guidance file unless
+   the user explicitly approves its content having been merged into AGENTS.md.
+PINNED_BLOCK
+P30_STEP1_BLOCK="${P30_STEP1_BLOCK%$'\n'}"
+
+# P6 (#1343): step 5e's "Merge-safe regeneration" bullets (both markers, no
+# markers, malformed markers; delta versus --all/full) move verbatim. Pinned
+# byte for byte from the pre-move SKILL.md (lines 773-782). The first line is
+# the `**Merge-safe regeneration**` lead-in; the last is the malformed-markers
+# bullet whose delta-run sentence is also pinned on its own as P20 in
+# configure-delta-rerun.test.sh.
+IFS= read -r -d '' P6_MERGE_SAFE_BLOCK <<'PINNED_BLOCK'
+   **Merge-safe regeneration**: the whole block above (from `# cenci:managed-begin` through `# cenci:managed-end` inclusive) is the managed block.
+   - **File doesn't exist**: create `.cenci/` (`mkdir -p .cenci`) and write the managed block as the full file content.
+   - **Effective sandbox flags, per ID**: the fragment selection uses the effective `sandbox.enabled`, `sandbox.dind` and `sandbox.azure` values, decided per question ID. An ID in `delta.carried` reads the existing config value; an ID in `delta.ask` this run (its key was absent and it was never offered, e.g. a config with `sandbox.enabled: true` that predates questions 9b/9c asks `sandbox.dind` and `sandbox.azure`) uses the answer just collected, so a just-answered Yes is consumed by this same generation. A Dockerfile is generated or refreshed whenever the effective `sandbox.enabled` is `true`, whether it was carried or just answered. The refresh itself never asks a question.
+   - **File exists with both markers present**: replace only the text from `# cenci:managed-begin` through `# cenci:managed-end` (inclusive) with the freshly generated block. Preserve everything before the begin marker and everything after the end marker exactly as-is — this is where a team can hand-append their own `RUN` steps across re-runs. On a delta run with valid `# cenci:managed-begin` / `# cenci:managed-end` markers, refresh the managed block silently — no Q9/Q9b/Q9c prompt — and leave every byte outside the markers unchanged. Report the block diff with `git -C <worktree-path> diff -- .cenci/Dockerfile`. Only an ID that is in `delta.ask` (key absent and never offered) puts a Q9/Q9b/Q9c question to the user on a delta run; the markers never cause one.
+   - **File exists with no markers** (e.g. a hand-authored legacy `.cenci/Dockerfile`): do not silently overwrite it. On a delta run, a `.cenci/Dockerfile` with no markers or malformed markers is left untouched and reported — no prompt. On an `--all` or `full` run, a `.cenci/Dockerfile` with no markers or malformed markers gets the Overwrite/Skip/Show prompt. It reuses the conflict-check UX already used for CI/CD generation (question 8 / step 5d) — same three options, same behavior:
+     "Found existing `.cenci/Dockerfile` without cenci's managed markers. What would you like to do?"
+     Options: "Overwrite — wrap it in managed markers and replace with the generated block", "Skip — keep the existing file, still record `sandbox` in config.json", "Show existing — display the current file contents"
+     - If Skip: still record `sandbox` in config.json, don't write the file.
+     - If Show existing: read and display the file, then re-ask Overwrite/Skip.
+   - **File exists with malformed markers** (exactly one of `# cenci:managed-begin` / `# cenci:managed-end` present, markers out of order, or duplicate marker pairs): do **not** attempt a partial text replace — a malformed marker pair cannot be trusted to safely bound the managed block, and a replacement span is never guessed. On a delta run it is left untouched and reported exactly like the "no markers" case above (no prompt); on an `--all` or `full` run it takes the same Overwrite/Skip/Show prompt — same prompt text, same three options, same behavior.
+PINNED_BLOCK
+P6_MERGE_SAFE_BLOCK="${P6_MERGE_SAFE_BLOCK%$'\n'}"
+
 # --- Load the files under test ------------------------------------------------
 
 require_doc skill "skills/configure/SKILL.md" || true
@@ -313,6 +431,9 @@ require_doc lazy_example "skills/configure/${LAZY_EXAMPLE_FILE}" || true
 require_doc fleet_phase "skills/configure/${FLEET_FILE}" || true
 require_doc autonomy_phase "skills/configure/${AUTONOMY_FILE}" || true
 require_doc migrations "skills/configure/${MIGRATIONS_FILE}" || true
+require_doc guidance_phase "skills/configure/${GUIDANCE_FILE}" || true
+require_doc settings_template "skills/configure/${SETTINGS_TEMPLATE_FILE}" || true
+require_doc ci_phase "skills/configure/${CI_FILE}" || true
 require_doc readme "README.md" || true
 
 # every_configure_md -- SKILL.md plus every phases/*.md and references/*.md on
@@ -322,7 +443,11 @@ shopt -s nullglob
 configure_disk_files=("${CONFIGURE_DIR}"/phases/*.md "${CONFIGURE_DIR}"/references/*.md)
 shopt -u nullglob
 for _part in "${configure_disk_files[@]}"; do
-  configure_all+=$'\n'"$(cat "${_part}")"
+  if ! _part_content="$(cat "${_part}")"; then
+    fail "skills/configure/**: ${_part#"${FLOW_DIR}/"}: not found/unreadable"
+    continue
+  fi
+  configure_all+=$'\n'"${_part_content}"
 done
 
 # file_content <relative-file> -- the content loaded above for a named file.
@@ -337,6 +462,9 @@ file_content() {
     "${FLEET_FILE}") printf '%s' "${fleet_phase}" ;;
     "${AUTONOMY_FILE}") printf '%s' "${autonomy_phase}" ;;
     "${MIGRATIONS_FILE}") printf '%s' "${migrations}" ;;
+    "${GUIDANCE_FILE}") printf '%s' "${guidance_phase}" ;;
+    "${SETTINGS_TEMPLATE_FILE}") printf '%s' "${settings_template}" ;;
+    "${CI_FILE}") printf '%s' "${ci_phase}" ;;
     SKILL.md) printf '%s' "${skill}" ;;
   esac
 }
@@ -361,9 +489,12 @@ case_step_map() {
 
   # Ordered: migrations (conditional) first, then the four always-read phase
   # files in the original reading order, then the conditional lazyboards,
-  # example, fleet-enrollment and autonomy-settings rows (#1342).
+  # example, fleet-enrollment and autonomy-settings rows (#1342), then the three
+  # generation rows read after the questions: guidance-settings (steps 0 to
+  # 5c-bis), settings-template (the base deny list step 4 reads) and
+  # ci-dockerfile (steps 5d and 5e, after guidance-settings) (#1343).
   local prev=-1 file at
-  for file in "${MIGRATIONS_FILE}" "${DETECT_FILE}" "${PROJECT_FILE}" "${MCP_FILE}" "${RUNTIME_FILE}" "${LAZY_FILE}" "${LAZY_EXAMPLE_FILE}" "${FLEET_FILE}" "${AUTONOMY_FILE}"; do
+  for file in "${MIGRATIONS_FILE}" "${DETECT_FILE}" "${PROJECT_FILE}" "${MCP_FILE}" "${RUNTIME_FILE}" "${LAZY_FILE}" "${LAZY_EXAMPLE_FILE}" "${FLEET_FILE}" "${AUTONOMY_FILE}" "${GUIDANCE_FILE}" "${SETTINGS_TEMPLATE_FILE}" "${CI_FILE}"; do
     at="$(offset_of "${step_map_body}" "| \`${file}\` |")"
     if [[ "${at}" -lt 0 ]]; then
       fail "${STEP_MAP_HEADING}: no table row for \`${file}\`"
@@ -409,6 +540,33 @@ case_step_map() {
   assert_absent_paired_ws "${step_map_body}" '| File | Condition | Why |' "${OLD_STEP_MAP_EVERY_PHASE}" "${STEP_MAP_HEADING}: retired \"every phase file is read\" intro"
   assert_absent_paired_ws "${step_map_body}" '| File | Condition | Why |' "${OLD_STEP_MAP_INLINE_TAIL}" "${STEP_MAP_HEADING}: retired \"question 10 onward stays inline\" tail"
 
+  # #1343: the three generation rows are read on every run (steps 5d and 5e each
+  # decide internally whether to skip), each names its own position, and the
+  # intro no longer claims generation steps 0 to 7 all stay inline.
+  for file in "${GUIDANCE_FILE}" "${SETTINGS_TEMPLATE_FILE}" "${CI_FILE}"; do
+    row="$(row_for "${step_map_body}" "${file}")"
+    if [[ -z "${row}" ]]; then
+      fail "${STEP_MAP_HEADING}: no row for generation file \`${file}\`"
+    else
+      assert_contains "${row}" "${EVERY_RUN}" "${STEP_MAP_HEADING}: \`${file}\` row states it is read on every run"
+    fi
+  done
+  for part in "${GUIDANCE_ROW_PARTS[@]}"; do
+    assert_contains_ws "$(row_for "${step_map_body}" "${GUIDANCE_FILE}")" "${part}" "${STEP_MAP_HEADING}: \`${GUIDANCE_FILE}\` row names its position"
+  done
+  for part in "${SETTINGS_TEMPLATE_ROW_PARTS[@]}"; do
+    assert_contains_ws "$(row_for "${step_map_body}" "${SETTINGS_TEMPLATE_FILE}")" "${part}" "${STEP_MAP_HEADING}: \`${SETTINGS_TEMPLATE_FILE}\` row names its position"
+  done
+  for part in "${CI_ROW_PARTS[@]}"; do
+    assert_contains_ws "$(row_for "${step_map_body}" "${CI_FILE}")" "${part}" "${STEP_MAP_HEADING}: \`${CI_FILE}\` row names its position"
+  done
+  local intro table_header='| File | Condition | Why |'
+  intro="${step_map_body%%"${table_header}"*}"
+  for part in "${STEP_MAP_INTRO_PARTS[@]}"; do
+    assert_contains_ws "${intro}" "${part}" "${STEP_MAP_HEADING}: intro names where each generation step range runs"
+  done
+  assert_absent_paired_ws "${step_map_body}" '| File | Condition | Why |' "${OLD_STEP_MAP_GENERATION_INLINE}" "${STEP_MAP_HEADING}: retired \"generation steps 0 to 7 stay inline\" intro"
+
   # The interaction rule covers the phase and reference files.
   local rule_line
   rule_line="$(grep -F '> **Interaction rule**' <<<"${skill}" | head -n 1)"
@@ -421,7 +579,7 @@ case_step_map() {
     rel="${disk#"${CONFIGURE_DIR}/"}"
     assert_contains "${step_map_body}" "\`${rel}\`" "${STEP_MAP_HEADING} names ${rel}"
   done
-  [[ "${#configure_disk_files[@]}" -ge 9 ]] || fail "step map: expected at least 9 phases/references files on disk, found ${#configure_disk_files[@]}"
+  [[ "${#configure_disk_files[@]}" -ge 12 ]] || fail "step map: expected at least 12 phases/references files on disk, found ${#configure_disk_files[@]}"
 }
 
 case_P17_fallbacks_colocated() {
@@ -559,7 +717,7 @@ case_single_keep_or_change_rule() {
 # now read only under a condition.
 case_phase_read_conditions() {
   local file content head
-  for file in "${LAZY_FILE}" "${FLEET_FILE}" "${AUTONOMY_FILE}"; do
+  for file in "${LAZY_FILE}" "${FLEET_FILE}" "${AUTONOMY_FILE}" "${GUIDANCE_FILE}" "${SETTINGS_TEMPLATE_FILE}" "${CI_FILE}"; do
     content="$(file_content "${file}")"
     if [[ -z "${content}" ]]; then
       fail "${file}: missing or empty"
@@ -593,6 +751,24 @@ case_moved_headings_unique() {
   done
 }
 
+# #1343: each moved generation step's marker line occurs exactly once across the
+# configure markdown, in its new file, and no longer in SKILL.md. The zero count
+# in SKILL.md is paired with the stubs that must remain there (INLINE_MARKERS in
+# case_moved_headings_unique), so an emptied SKILL.md cannot satisfy it; here the
+# same pairing is made explicit per marker.
+case_moved_step_markers_unique() {
+  local entry file marker n in_file
+  for entry in "${MOVED_STEP_MARKERS[@]}"; do
+    file="${entry%%|*}"
+    marker="${entry#*|}"
+    n="$(count_occurrences "${configure_all}" "${marker}")"
+    [[ "${n}" -eq 1 ]] || fail "step marker [${marker}] must occur exactly once across SKILL.md, phases/*.md and references/*.md, found ${n}"
+    in_file="$(count_occurrences "$(file_content "${file}")" "${marker}")"
+    [[ "${in_file}" -eq 1 ]] || fail "step marker [${marker}] must be in ${file}, found ${in_file} there"
+    assert_absent_paired_ws "${skill}" "${STUB_GUIDANCE}" "${marker}" "SKILL.md no longer carries step marker [${marker}]"
+  done
+}
+
 case_cross_file_pointers() {
   # Delta Resolution's pointer to the defaults table now names the router.
   assert_contains_ws "${detect_phase}" 'the `ID` column of the defaults table in `SKILL.md`'"'"'s `### Question Defaults`' "${DETECT_FILE}: the defaults-table pointer names SKILL.md ${QUESTION_DEFAULTS_HEADING}"
@@ -605,14 +781,48 @@ case_cross_file_pointers() {
   # The dind detection fallback and its detection pointer name Q9b's file.
   assert_contains_ws "${mcp_phase}" 'question 9b in `phases/runtime-ci-sandbox-questions.md`' "${MCP_FILE}: the dind pointers name ${RUNTIME_FILE}"
 
-  # Inline steps that consume moved tables name the file holding them.
-  assert_contains_ws "${skill}" 'LSP Server Catalog` in `phases/mcp-lsp-ui-questions.md`' "SKILL.md step 1b names the file holding the LSP Server Catalog"
-  assert_contains_ws "${skill}" '**Monorepo**: fragments are' "SKILL.md step 5e Monorepo sentence keeps its anchor prefix"
+  # Generation steps that consume moved tables name the file holding them. Steps
+  # 1b and 5e moved to their own phase files in #1343, so the pointers are read
+  # there; SKILL.md keeps only the stubs.
+  assert_contains_ws "${guidance_phase}" 'LSP Server Catalog` in `phases/mcp-lsp-ui-questions.md`' "${GUIDANCE_FILE} step 1b names the file holding the LSP Server Catalog"
+  assert_contains_ws "${ci_phase}" "${MONOREPO_ANCHOR}" "${CI_FILE} step 5e Monorepo sentence keeps its anchor prefix"
   local monorepo
-  monorepo="$(grep -F '**Monorepo**: fragments are' <<<"${skill}" | head -n 1)"
-  assert_contains_ws "${monorepo}" '`phases/runtime-ci-sandbox-questions.md`' "SKILL.md step 5e Monorepo sentence names the file holding the Stack-to-fragment mapping table"
-  assert_absent_paired_ws "${skill}" '**Monorepo**: fragments are' 'mapping table above' "SKILL.md step 5e retired positional mapping-table pointer"
-  assert_absent_paired_ws "${skill}" '**Monorepo**: fragments are' 'mapping table under question 9,' "SKILL.md step 5e retired positional question 9 pointer"
+  monorepo="$(grep -F "${MONOREPO_ANCHOR}" <<<"${ci_phase}" | head -n 1)"
+  assert_contains_ws "${monorepo}" '`phases/runtime-ci-sandbox-questions.md`' "${CI_FILE} step 5e Monorepo sentence names the file holding the Stack-to-fragment mapping table"
+  assert_absent_paired_ws "${ci_phase}" "${MONOREPO_ANCHOR}" 'mapping table above' "${CI_FILE} step 5e retired positional mapping-table pointer"
+  assert_absent_paired_ws "${ci_phase}" "${MONOREPO_ANCHOR}" 'mapping table under question 9,' "${CI_FILE} step 5e retired positional question 9 pointer"
+  assert_absent_paired_ws "${skill}" "${STUB_CI}" "${MONOREPO_ANCHOR}" "SKILL.md no longer carries the step 5e Monorepo sentence"
+  assert_absent_paired_ws "${skill}" "${STUB_GUIDANCE}" 'LSP Server Catalog` in `phases/mcp-lsp-ui-questions.md`' "SKILL.md no longer carries the step 1b LSP Server Catalog pointer"
+
+  # --- #1343: pointers that crossed files when steps 0 to 5e moved --------------
+  # Step 3c's reconciler pointer now lives in a phase file, so it names SKILL.md
+  # (where `### Board lifecycle labels` stays).
+  assert_contains_ws "${guidance_phase}" "${STEP3C_BOARD_POINTER}" "${GUIDANCE_FILE} step 3c names SKILL.md for Board lifecycle labels"
+  assert_absent_paired_ws "${guidance_phase}" "${STEP3C_BOARD_POINTER}" "${OLD_STEP3C_BOARD_POINTER}" "${GUIDANCE_FILE} step 3c retired positional Board lifecycle labels pointer"
+  # Step 6 stays in SKILL.md and points at the steps that left it.
+  assert_contains_ws "${skill}" "${STEP6_5E_POINTER}" "SKILL.md step 6 names the file holding step 5e"
+  assert_absent_paired_ws "${skill}" "${STEP6_5E_POINTER}" "${OLD_STEP6_5E_POINTER}" "SKILL.md step 6 retired positional step 5e pointer"
+  assert_contains_ws "${skill}" "${STEP6_STEP4_POINTER}" "SKILL.md step 6 names the file holding step 4"
+  assert_absent_paired_ws "${skill}" "${STEP6_STEP4_POINTER}" "${OLD_STEP6_STEP4_POINTER}" "SKILL.md step 6 retired positional Step 4 pointer"
+  # The phase files that cite generation steps name where those steps now run.
+  assert_contains_ws "${detect_phase}" "${DETECT_STEP1_POINTER}" "${DETECT_FILE}: the diff-approval gate pointer names ${GUIDANCE_FILE}"
+  assert_absent_paired_ws "${detect_phase}" "${DETECT_STEP1_POINTER}" "${OLD_DETECT_STEP1_POINTER}" "${DETECT_FILE}: retired bare step 1 pointer"
+  assert_contains_ws "${detect_phase}" "${DETECT_5E_POINTER}" "${DETECT_FILE}: the Dockerfile refresh pointer names ${CI_FILE}"
+  assert_absent_paired_ws "${detect_phase}" "${DETECT_5E_POINTER}" "${OLD_DETECT_5E_POINTER}" "${DETECT_FILE}: retired bare step 5e pointer"
+  local mcp_head
+  mcp_head="$(head -n 4 <<<"${mcp_phase}")"
+  assert_contains_ws "${mcp_head}" "${MCP_OPEN_POINTER}" "${MCP_FILE}: the opening line names ${GUIDANCE_FILE} for step 1b and the MCP configuration"
+  assert_absent_paired_ws "${mcp_head}" "${MCP_OPEN_POINTER}" "${OLD_MCP_OPEN_POINTER}" "${MCP_FILE}: retired unnamed generation-steps pointer"
+  assert_contains_ws "${runtime_phase}" "${RUNTIME_5C_POINTER}" "${RUNTIME_FILE}: the question 7 pointer names ${GUIDANCE_FILE} for step 5c"
+  assert_absent_paired_ws "${runtime_phase}" "${RUNTIME_5C_POINTER}" "${OLD_RUNTIME_5C_POINTER}" "${RUNTIME_FILE}: retired bare step 5c pointer"
+  assert_contains_ws "${runtime_phase}" "${RUNTIME_5C_BIS_POINTER}" "${RUNTIME_FILE}: the question 7b pointer names ${GUIDANCE_FILE} for step 5c-bis"
+  assert_absent_paired_ws "${runtime_phase}" "${RUNTIME_5C_BIS_POINTER}" "${OLD_RUNTIME_5C_BIS_POINTER}" "${RUNTIME_FILE}: retired bare step 5c-bis pointer"
+  assert_contains_ws "${runtime_phase}" "${RUNTIME_5E_POINTER}" "${RUNTIME_FILE}: the sync obligation pointer names ${CI_FILE} for step 5e"
+  assert_absent_paired_ws "${runtime_phase}" "${RUNTIME_5E_POINTER}" "${OLD_RUNTIME_5E_POINTER}" "${RUNTIME_FILE}: retired bare step 5e pointer"
+  local runtime_head
+  runtime_head="$(head -n 4 <<<"${runtime_phase}")"
+  assert_contains_ws "${runtime_head}" "${RUNTIME_OPEN_POINTER}" "${RUNTIME_FILE}: the opening line names ${CI_FILE} for steps 5d and 5e"
+  assert_absent_paired_ws "${runtime_head}" "${RUNTIME_OPEN_POINTER}" "${OLD_RUNTIME_OPEN_POINTER}" "${RUNTIME_FILE}: retired unnamed steps 5d and 5e pointer"
 
   # The router's early prose points at the Delta Resolution file, not "below".
   assert_contains_ws "${skill}" '`### Delta Resolution` in `phases/detection-and-delta.md`' "SKILL.md names the file holding Delta Resolution"
@@ -739,7 +949,7 @@ case_allowed_tools_only_in_skill_md() {
   local line_count disk
   line_count="$(grep -c '^allowed-tools:' <<<"${skill}" | tr -d '[:space:]')"
   [[ "${line_count}" -eq 1 ]] || fail "SKILL.md must carry exactly one allowed-tools: frontmatter line, found ${line_count}"
-  [[ "${#configure_disk_files[@]}" -ge 9 ]] || fail "allowed-tools guard is vacuous: found ${#configure_disk_files[@]} phases/references files (expected at least 9)"
+  [[ "${#configure_disk_files[@]}" -ge 12 ]] || fail "allowed-tools guard is vacuous: found ${#configure_disk_files[@]} phases/references files (expected at least 12)"
   for disk in "${configure_disk_files[@]}"; do
     if grep -q '^allowed-tools:' "${disk}"; then
       fail "${disk#"${FLOW_DIR}/"}: allowed-tools: belongs only in SKILL.md frontmatter"
@@ -754,9 +964,71 @@ case_readme_workflow_deps_row() {
   local row file
   row="$(grep -F -- "${README_CONFIGURE_ROW_PREFIX}" <<<"${readme}" | head -n 1)"
   [[ -n "${row}" ]] || { fail "README.md: workflow-deps row for configure not found"; return; }
-  for file in "${DETECT_FILE}" "${PROJECT_FILE}" "${MCP_FILE}" "${RUNTIME_FILE}" "${LAZY_FILE}" "${LAZY_EXAMPLE_FILE}" "${FLEET_FILE}" "${AUTONOMY_FILE}" "${MIGRATIONS_FILE}"; do
+  for file in "${DETECT_FILE}" "${PROJECT_FILE}" "${MCP_FILE}" "${RUNTIME_FILE}" "${LAZY_FILE}" "${LAZY_EXAMPLE_FILE}" "${FLEET_FILE}" "${AUTONOMY_FILE}" "${MIGRATIONS_FILE}" "${GUIDANCE_FILE}" "${SETTINGS_TEMPLATE_FILE}" "${CI_FILE}"; do
     assert_contains "${row}" "${file}" "README.md workflow-deps row for configure lists ${file}"
   done
+}
+
+# count_block_occurrences <content> <block> -- occurrences of a multi-line
+# <block> in <content>, via literal pattern removal (a quoted pattern is a
+# literal in bash). Pure; prints 0 for an empty <block> (guarded by the caller).
+count_block_occurrences() {
+  local content="$1" block="$2" stripped
+  [[ -n "${block}" ]] || { printf '%s' 0; return; }
+  stripped="${content//"${block}"/}"
+  printf '%s' $(( (${#content} - ${#stripped}) / ${#block} ))
+}
+
+# check_verbatim_block <label> <pinned-block> <new-file> <stub> -- the pinned
+# block occurs exactly once across the configure markdown, exactly once in its
+# new file, and zero times in SKILL.md. The SKILL.md absence is paired with the
+# stub that must remain there, so an emptied SKILL.md cannot satisfy it.
+check_verbatim_block() {
+  local label="$1" pinned="$2" new_file="$3" stub="$4" n_all n_file n_skill
+  if [[ -z "$(file_content "${new_file}")" ]]; then
+    fail "${label}: ${new_file} missing or empty, cannot verify the moved block"
+    return
+  fi
+  n_all="$(count_block_occurrences "${configure_all}" "${pinned}")"
+  [[ "${n_all}" -eq 1 ]] || fail "${label}: the pinned block must occur exactly once across SKILL.md, phases/*.md and references/*.md, found ${n_all}"
+  n_file="$(count_block_occurrences "$(file_content "${new_file}")" "${pinned}")"
+  [[ "${n_file}" -eq 1 ]] || fail "${label}: the pinned block must be byte-identical to the pre-move SKILL.md text in ${new_file}, found ${n_file} occurrence(s) there"
+  assert_contains "${skill}" "${stub}" "${label}: SKILL.md keeps the stub that replaces the block"
+  n_skill="$(count_block_occurrences "${skill}" "${pinned}")"
+  [[ "${n_skill}" -eq 0 ]] || fail "${label}: the pinned block must no longer be in SKILL.md, found ${n_skill}"
+}
+
+# Non-vacuity self-test for the block counter the two byte pins rely on: it must
+# count two copies as 2, one as 1, and a one-byte-different copy as 0 (so a
+# single changed byte in a moved block is caught, not counted).
+case_block_counter_self_test() {
+  local block=$'first line\n   second line' got
+  got="$(count_block_occurrences "head
+${block}
+mid
+${block}
+tail" "${block}")"
+  [[ "${got}" -eq 2 ]] || fail "block counter self-test: expected 2 copies, got ${got}"
+  got="$(count_block_occurrences "head
+${block}
+tail" "${block}")"
+  [[ "${got}" -eq 1 ]] || fail "block counter self-test: expected 1 copy, got ${got}"
+  got="$(count_block_occurrences "head
+${block/second/secnd}
+tail" "${block}")"
+  [[ "${got}" -eq 0 ]] || fail "block counter self-test: a one-byte-changed copy was counted (got ${got})"
+}
+
+# P30 (#1343): step 1's AGENTS.md/CLAUDE.md generation and its substantive-
+# guidance diff-approval gate move word for word into phases/guidance-settings.md.
+case_P30_step1_verbatim() {
+  check_verbatim_block "P30 step 1" "${P30_STEP1_BLOCK}" "${GUIDANCE_FILE}" "${STUB_GUIDANCE}"
+}
+
+# P6 (#1343): step 5e's managed-block rules (both markers, no markers, malformed
+# markers; delta versus --all/full) move word for word into phases/ci-dockerfile.md.
+case_P6_dockerfile_verbatim() {
+  check_verbatim_block "P6 step 5e" "${P6_MERGE_SAFE_BLOCK}" "${CI_FILE}" "${STUB_CI}"
 }
 
 # --- Run every case ----------------------------------------------------------
@@ -769,9 +1041,13 @@ case_phase_read_conditions
 case_P21_lazyboards_condition
 case_P22_fleet_guard
 case_moved_headings_unique
+case_moved_step_markers_unique
 case_cross_file_pointers
 case_allowed_tools_only_in_skill_md
 case_readme_workflow_deps_row
+case_block_counter_self_test
+case_P30_step1_verbatim
+case_P6_dockerfile_verbatim
 
 if [[ "${failures}" -gt 0 ]]; then
   echo "configure-router-contract.test.sh: ${failures} failure(s)." >&2

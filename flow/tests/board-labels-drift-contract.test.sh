@@ -20,12 +20,15 @@
 #     must not silently escape the check);
 #   - every skill file holding a `gh label create "..."` literal points at the
 #     plugin's docs/board-labels.md;
-#   - configure no longer carries the color table or the "Applied by / Meaning"
-#     table (nor a "label table above" pointer), and refine no longer cites
-#     the stale configure/SKILL.md:715;
-#   - configure step 3c, refine/SKILL.md and refine/codex.md, which read
-#     colors/descriptions from the doc, say to stop rather than guess a color
-#     when the doc cannot be read;
+#   - configure (SKILL.md plus phases/ and references/) no longer carries the
+#     color table or the "Applied by / Meaning" table (nor a "label table
+#     above" pointer), and refine no longer cites the stale
+#     configure/SKILL.md:715;
+#   - configure step 3c (phases/guidance-settings.md since #1343), refine/SKILL.md
+#     and refine/codex.md, which read colors/descriptions from the doc, say to
+#     stop rather than guess a color when the doc cannot be read; step 3c also
+#     keeps its exact `gh label create "<name>" ...` literal and its pointer to
+#     the plugin's docs/board-labels.md;
 #   - flow/README.md keeps its generated-repo git-workflow.md tree entries and
 #     flow/docs/git-workflow.md stays deleted;
 #   - the doc itself carries the ensure-then-add procedure and the "How
@@ -420,13 +423,47 @@ if [[ -n "${PROBLEMS}" ]]; then
 fi
 
 # --- Single-source guards for the label sites that must stop owning a copy ---
+# Step 3c (the create loop) moved to phases/guidance-settings.md in #1343, so the
+# table guards scan the whole configure aggregate (SKILL.md + phases/ +
+# references/): a color table or a stale pointer in any of them is a violation.
+# The aggregate is built with every read checked, and the scan is non-vacuous:
+# SKILL.md plus at least the 9 phase and 3 reference files must be present.
+GUIDANCE_PHASE_REL="phases/guidance-settings.md"
+GUIDANCE_PHASE="${SKILLS_DIR}/configure/${GUIDANCE_PHASE_REL}"
+STEP3C_LITERAL='gh label create "<name>" --repo <owner>/<repo> --color "<color>" --description "<description>"'
+CONFIGURE_CONTENT=""
+CONFIGURE_PART_COUNT=0
 if CONFIGURE_CONTENT="$(cat "${CONFIGURE_SKILL}")"; then
-  grep -qE '^[[:space:]]*\| `[^`]+` \| `[0-9A-Fa-f]{6}` \|' <<<"${CONFIGURE_CONTENT}" && fail "skills/configure/SKILL.md: still carries a label color table row (the table lives only in docs/${DOC_REF})"
-  grep -qE '^[[:space:]]*\| Label \| (Color|Applied by) \|' <<<"${CONFIGURE_CONTENT}" && fail "skills/configure/SKILL.md: still carries a label table header (the 'Applied by / Meaning' and color tables live only in docs/${DOC_REF})"
-  grep -qF -- "${DOC_REF}" <<<"${CONFIGURE_CONTENT}" || fail "skills/configure/SKILL.md: must point at the plugin's docs/${DOC_REF}"
-  grep -qF 'label table above' <<<"${CONFIGURE_CONTENT}" && fail "skills/configure/SKILL.md: still points at a 'label table above' that no longer exists (point at the automerge:ok row of the plugin's docs/${DOC_REF})"
+  for configure_part in "${SKILLS_DIR}"/configure/phases/*.md "${SKILLS_DIR}"/configure/references/*.md; do
+    [[ -f "${configure_part}" ]] || continue
+    if ! configure_part_content="$(cat "${configure_part}")"; then
+      fail "skills/configure/${configure_part#"${SKILLS_DIR}/configure/"}: not found/unreadable"
+      continue
+    fi
+    CONFIGURE_CONTENT+=$'\n'"${configure_part_content}"
+    CONFIGURE_PART_COUNT=$((CONFIGURE_PART_COUNT + 1))
+  done
+  [[ "${CONFIGURE_PART_COUNT}" -ge 12 ]] || fail "skills/configure/**: aggregate is vacuous, scanned ${CONFIGURE_PART_COUNT} phases/references files (expected at least 12 after #1343)"
+  grep -qE '^[[:space:]]*\| `[^`]+` \| `[0-9A-Fa-f]{6}` \|' <<<"${CONFIGURE_CONTENT}" && fail "skills/configure/**: still carries a label color table row (the table lives only in docs/${DOC_REF})"
+  grep -qE '^[[:space:]]*\| Label \| (Color|Applied by) \|' <<<"${CONFIGURE_CONTENT}" && fail "skills/configure/**: still carries a label table header (the 'Applied by / Meaning' and color tables live only in docs/${DOC_REF})"
+  grep -qF -- "${DOC_REF}" <<<"${CONFIGURE_CONTENT}" || fail "skills/configure/**: must point at the plugin's docs/${DOC_REF}"
+  grep -qF 'label table above' <<<"${CONFIGURE_CONTENT}" && fail "skills/configure/**: still points at a 'label table above' that no longer exists (point at the automerge:ok row of the plugin's docs/${DOC_REF})"
 else
   fail "skills/configure/SKILL.md: not found/unreadable"
+fi
+
+# Step 3c keeps its exact `gh label create` literal and its pointer to the
+# plugin's docs/board-labels.md, now in phases/guidance-settings.md (#1343). The
+# literal is a `<...>` placeholder template, so the drift scan above skips it;
+# these cases pin it explicitly, and require it nowhere else in the configure
+# markdown (paired with the guidance-settings.md existence check).
+if GUIDANCE_CONTENT="$(cat "${GUIDANCE_PHASE}")"; then
+  grep -qF -- "${STEP3C_LITERAL}" <<<"${GUIDANCE_CONTENT}" || fail "skills/configure/${GUIDANCE_PHASE_REL}: step 3c must keep its exact create literal [${STEP3C_LITERAL}]"
+  grep -qF -- "plugin's \`docs/${DOC_REF}\`" <<<"${GUIDANCE_CONTENT}" || fail "skills/configure/${GUIDANCE_PHASE_REL}: step 3c must point at the plugin's docs/${DOC_REF}"
+  STEP3C_LITERAL_COUNT="$(grep -oF -- "${STEP3C_LITERAL}" <<<"${CONFIGURE_CONTENT}" | wc -l | tr -d '[:space:]')"
+  [[ "${STEP3C_LITERAL_COUNT}" -eq 1 ]] || fail "skills/configure/**: the step 3c create literal must occur exactly once across the configure markdown (in ${GUIDANCE_PHASE_REL}), found ${STEP3C_LITERAL_COUNT}"
+else
+  fail "skills/configure/${GUIDANCE_PHASE_REL}: not found/unreadable (step 3c moved there in #1343)"
 fi
 if REFINE_CONTENT="$(cat "${REFINE_SKILL}")"; then
   grep -qF 'configure/SKILL.md:715' <<<"${REFINE_CONTENT}" && fail "skills/refine/SKILL.md: still cites the stale 'configure/SKILL.md:715' line"
@@ -437,7 +474,7 @@ fi
 # The three sites that read colors/descriptions FROM the doc (no inline literal
 # carrying full values) must fail closed when the doc cannot be read.
 FAIL_CLOSED_PHRASE='never guess a color'
-for readsite in "configure/SKILL.md" "refine/SKILL.md" "${REFINE_CODEX_REL}"; do
+for readsite in "configure/${GUIDANCE_PHASE_REL}" "refine/SKILL.md" "${REFINE_CODEX_REL}"; do
   if READSITE_CONTENT="$(cat "${SKILLS_DIR}/${readsite}")"; then
     grep -qF -- "${FAIL_CLOSED_PHRASE}" <<<"${READSITE_CONTENT}" || fail "skills/${readsite}: reads label colors/descriptions from docs/${DOC_REF} but lacks the fail-closed wording '${FAIL_CLOSED_PHRASE}' (an unreadable doc must stop and report, not fall back to a guessed color)"
   else
