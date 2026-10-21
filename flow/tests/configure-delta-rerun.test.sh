@@ -13,7 +13,9 @@
 # AC14, AC15, AC16, AC17, AC18, AC19):
 #
 #   * BEHAVIOR cases extract marker-bounded jq programs out of
-#     flow/skills/configure/SKILL.md and RUN them with jq against fixture
+#     flow/skills/configure/SKILL.md (the ledger) and
+#     flow/skills/configure/phases/autonomy-settings.md (the question 13/14/15
+#     programs, #1342) and RUN them with jq against fixture
 #     configs, then chain them with the REAL
 #     flow/skills/configure/scripts/resolve-delta.sh (the shipped resolver).
 #     They assert what the programs/resolver actually produce, never prose.
@@ -37,8 +39,8 @@
 #       Located anywhere in SKILL.md after "Always stamp `configVersion`"
 #       (step 6).
 #   <!-- cenci:configure-q13-switch:begin --> ... :end -->
-#       Inside `### Autonomy Settings`. Takes `--arg autonomy <interactive|lean>`.
-#       Sets .planning.autonomy to $autonomy, preserving every sibling key.
+#       Inside `### Autonomy Settings` (phases/autonomy-settings.md). Takes
+#       `--arg autonomy <interactive|lean>`. Sets .planning.autonomy to $autonomy, preserving every sibling key.
 #   <!-- cenci:configure-q14-remove:begin --> ... :end -->
 #       Inside `### Autonomy Settings`. No arguments. Deletes the top-level
 #       `automerge` key and the `automerge` key of every projects[] entry;
@@ -61,8 +63,9 @@
 #
 # Covered files:
 #   - flow/skills/configure/SKILL.md, phases/detection-and-delta.md (the
-#     `### Delta Resolution` pins, #1341), codex.md, scripts/resolve-delta.sh,
-#     question-keys.json
+#     `### Delta Resolution` pins, #1341), phases/lazyboards.md,
+#     phases/fleet-enrollment.md, phases/autonomy-settings.md (#1342), codex.md,
+#     scripts/resolve-delta.sh, question-keys.json
 #   - docs/autonomous-loop.md (cross-project), flow/README.md,
 #     flow/docs/skill-authoring.md
 set -uo pipefail
@@ -308,7 +311,11 @@ DR_UI_CARRIED='A carried `uiConventions` keeps the existing `## UI Conventions` 
 DR_OFFERED_ONLY_ASKED='Only questions actually put to the user this run are recorded as offered'
 OLD_SLUG_EXAMPLE='(e.g. "refresh MCP servers" → `mcp-refresh`)'
 
-# Board Config / Q10.
+# Board Config / Q10. The carried-but-missing report is the router's: when
+# question 10 is carried and `.lazyboards.yml` is missing, phases/lazyboards.md
+# is not read at all, so the sentence lives in SKILL.md's Step Map row (#1342).
+LAZY_FILE='phases/lazyboards.md'
+STEP_MAP_HEADING='### Step Map'
 BOARD_HEADING='### Board Config (lazyboards)'
 Q10_DECLINE_RECORDED='A declined question 10 is recorded in `configureOffered` and is not re-asked on a delta run.'
 Q10_CARRIED_MISSING_FILE='If question 10 is carried but `.lazyboards.yml` is missing, do not regenerate it — report it and say `/cenci:configure --all` re-offers it.'
@@ -327,13 +334,19 @@ OLD_NEVER_REPROMPTS='Re-running `/cenci:configure` on an already-configured repo
 AUTONOMY_HEADING='### Autonomy Settings'
 Q13_Q14_DELTA_RULE='On a delta run, questions 13, 14 and 15 are asked only when the key is absent and the ID is not in `configureOffered`; nothing is written on a skip.'
 OLD_Q13_Q14_DELTA_RULE='On a delta run, questions 13 and 14 are asked only when the key is absent and the ID is not in `configureOffered`; nothing is written on a skip.'
-Q13_ALL_REOFFER='Under `--all`, question 13 is re-offered even when `planning` is present, with the committed value pre-selected.'
+# P10 (#1342): the three per-question --all re-offer sentences collapse into one
+# that points at SKILL.md's single keep-or-change rule; the old sentences are
+# paired-absence checks. Identical constants are pinned in
+# configure-router-contract.test.sh and configure-autonomy-questions.test.sh.
+KEEP_RULE_POINTER='per the keep-or-change rule in `SKILL.md`'"'"'s `### Question Defaults`'
+ALL_REOFFER_COLLAPSED='Under `--all`, questions 13, 14 and 15 are each re-offered even when `planning`, `automerge` or `refinement` is present, with the Keep option listed first and pre-selected '"${KEEP_RULE_POINTER}"'.'
+OLD_Q13_ALL_REOFFER='Under `--all`, question 13 is re-offered even when `planning` is present, with the committed value pre-selected.'
+OLD_Q14_ALL_REOFFER='Under `--all`, question 14 is re-offered even when `automerge` is present, with "Keep current block(s) (Recommended)" pre-selected.'
 Q13_ALL_OPTION_KEEP='"Keep current (Recommended)"'
 Q13_ALL_OPTION_SWITCH_INTERACTIVE='"Switch to `interactive`"'
 Q13_ALL_OPTION_SWITCH_LEAN='"Switch to `lean`"'
 Q13_ALL_KEEP_WRITES_NOTHING='Keeping the current value writes nothing.'
 Q13_ALL_SWITCH_EXPLICIT='Switching to `interactive` writes `planning.autonomy: "interactive"` explicitly, preserving sibling keys.'
-Q14_ALL_REOFFER='Under `--all`, question 14 is re-offered even when `automerge` is present, with "Keep current block(s) (Recommended)" pre-selected.'
 Q14_ALL_OPTION_KEEP='"Keep current block(s) (Recommended)"'
 Q14_ALL_OPTION_REMOVE='"Remove the block(s)"'
 Q14_ALL_KEEP_BYTE_IDENTICAL='Keeping leaves every `automerge` block byte-identical — never removed and never narrowed.'
@@ -398,7 +411,7 @@ OLD_DR_OFFERED_UNCONDITIONAL='(so the next delta run asks it again)'
 DR_OFFERED_CONDITIONAL_REASK='the next delta run asks it again only when its key is absent and its ID is not already in the existing ledger; otherwise `/cenci:configure --all` applies it'
 Q11_ENROLL_REASK_CONDITIONAL='asks question 11 again only when `dispatchEnroll` is not already in the existing ledger'
 Q11_ENROLL_FAILURE='`dispatchEnroll` is recorded only after a successful `cenci dispatch enroll` or an explicit "No — skip"'
-Q13_Q14_FULL_NO_REOFFER='A `full` run caused by a resolver failure (see `### Delta Resolution`) is not an `--all` run: for a present `planning`, `automerge` or `refinement` key it behaves like a delta run — report the existing value verbatim and do NOT re-offer it'
+Q13_Q14_FULL_NO_REOFFER='A `full` run caused by a resolver failure (see `### Delta Resolution` in `phases/detection-and-delta.md`) is not an `--all` run: for a present `planning`, `automerge` or `refinement` key it behaves like a delta run — report the existing value verbatim and do NOT re-offer it'
 OLD_Q13_Q14_FULL_NO_REOFFER='for a present `planning` or `automerge` key it behaves like a delta run'
 STEP7_CARRIED_HEADING='## Carried through (delta run)'
 STEP7_CARRIED_SUMMARY='lists the carried question IDs and config key names only — never config values — and says `/cenci:configure --all` would re-open them.'
@@ -421,7 +434,9 @@ CODEX_ALL_TOKEN='A leading `--all` in the user'"'"'s request replays every quest
 CODEX_Q13_Q14_ALL='under `--all`, question 13 re-offers "Keep current (Recommended)" or a switch, question 14 re-offers "Keep current block(s) (Recommended)" or "Remove the block(s)", and question 15 re-offers "Keep current (Recommended)" or a switch'
 OLD_CODEX_Q13_Q14_ALL='and question 14 re-offers "Keep current block(s) (Recommended)" or "Remove the block(s)"'
 CODEX_LEDGER='stamps `configureOffered` with the same sorted, de-duplicated union as the Claude procedure'
-CODEX_SHARED_PROGRAMS='uses the same marker-bounded jq programs as `SKILL.md`'
+CODEX_SHARED_PROGRAMS='uses the same marker-bounded jq programs as `phases/autonomy-settings.md`'
+OLD_CODEX_SHARED_PROGRAMS='uses the same marker-bounded jq programs as `SKILL.md`'
+CODEX_LEDGER_SOURCE='`cenci:configure-offered-ledger` program from `SKILL.md` step 6'
 CODEX_DOCKERFILE='refreshes a valid marker-managed `.cenci/Dockerfile` without asking, and leaves a `.cenci/Dockerfile` with no markers or malformed markers untouched and reported'
 CODEX_Q12='The Q12 dispatch session repair is still asked on a delta run'
 CODEX_FALLBACK='If the resolver fails, it falls back to a full replay and says why'
@@ -429,7 +444,7 @@ CODEX_PLAN_MODE='the resolver runs read-only during `/plan`; the ledger, overlay
 CODEX_AUTONOMY_ABSENT_ONLY_DELTA='on a delta run asks about `planning`, `automerge` and `refinement` only when absent and not already offered'
 OLD_CODEX_AUTONOMY_ABSENT_ONLY_DELTA='on a delta run asks about `planning` and `automerge` only when absent and not already offered'
 OLD_CODEX_AUTONOMY_UNCONDITIONAL='asks about `planning` and `automerge` only when absent — an already-present value'
-CODEX_AUTONOMY_MIRROR='Autonomy Settings mirrors the Claude procedure'"'"'s `### Autonomy Settings` section'
+CODEX_AUTONOMY_MIRROR='Autonomy Settings mirrors the Claude procedure'"'"'s `### Autonomy Settings` section in `phases/autonomy-settings.md`'
 CODEX_SANDBOX_CARRIED='the flag for a carried ID is derived from the existing `sandbox.*` value (`true` when it is `true`, `false` only for an absent key), never a bare `false`'
 CODEX_SANDBOX_ASKED='an ID listed in `ask` (for example `sandbox.dind` and `sandbox.azure` on a config that predates them) uses the answer collected this run, so a just-answered Yes is written and consumed'
 CODEX_SANDBOX_EFFECTIVE='Generate or refresh the managed `.cenci/Dockerfile` whenever the effective `sandbox.enabled` is `true`, carried or just answered.'
@@ -479,6 +494,11 @@ require_doc skill "skills/configure/SKILL.md" || true
 # `### Delta Resolution` lives in the detection-and-delta phase file since the
 # router split (#1341); its wording is pinned there, not in SKILL.md.
 require_doc delta_phase "skills/configure/phases/detection-and-delta.md" || true
+# Board Config, Fleet Dispatch Enrollment and Autonomy Settings live in their own
+# conditionally read phase files since #1342; their wording is pinned there.
+require_doc lazy_phase "skills/configure/phases/lazyboards.md" || true
+require_doc fleet_phase "skills/configure/phases/fleet-enrollment.md" || true
+require_doc autonomy_phase "skills/configure/phases/autonomy-settings.md" || true
 require_doc codex "skills/configure/codex.md" || true
 require_repo_doc loop_doc "docs/autonomous-loop.md" || true
 require_doc readme "README.md" || true
@@ -486,6 +506,8 @@ require_doc skill_authoring "docs/skill-authoring.md" || true
 
 parse_body=""
 delta_body=""
+step_map_body=""
+lazy_row=""
 board_body=""
 fleet_body=""
 autonomy_body=""
@@ -499,9 +521,11 @@ Q15_PROG=""
 if [[ -n "${skill}" ]]; then
   parse_body="$(extract_section_body_raw "${skill}" "${PARSE_HEADING}")"
   delta_body="$(extract_section_body_raw "${delta_phase}" "${DELTA_HEADING}")"
-  board_body="$(extract_section_body_raw "${skill}" "${BOARD_HEADING}")"
-  fleet_body="$(extract_section_body_raw "${skill}" "${FLEET_HEADING}")"
-  autonomy_body="$(extract_section_body_raw "${skill}" "${AUTONOMY_HEADING}")"
+  step_map_body="$(extract_section_body_raw "${skill}" "${STEP_MAP_HEADING}")"
+  lazy_row="$(grep -F -- "| \`${LAZY_FILE}\` |" <<<"${step_map_body}" | head -n 1)"
+  board_body="$(extract_section_body_raw "${lazy_phase}" "${BOARD_HEADING}")"
+  fleet_body="$(extract_section_body_raw "${fleet_phase}" "${FLEET_HEADING}")"
+  autonomy_body="$(extract_section_body_raw "${autonomy_phase}" "${AUTONOMY_HEADING}")"
   dockerfile_block="$(extract_between_raw "${skill}" "${DOCKERFILE_BLOCK_BEGIN}" "${DOCKERFILE_BLOCK_END}")"
   step6_region="$(extract_between_raw "${skill}" "${STEP6_BEGIN}" "${STEP7_BEGIN}")"
   step7_region="$(extract_between_raw "${skill}" "${STEP7_BEGIN}" "${STEP7_END}")"
@@ -517,7 +541,7 @@ fi
 need_prog() {
   local program="$1" label="$2"
   if [[ -z "${program}" ]]; then
-    fail "${label}: marker-bounded jq program not found in SKILL.md (see the marker contract in this file's header)"
+    fail "${label}: marker-bounded jq program not found in its configure file (see the marker contract in this file's header)"
     return 1
   fi
   if ! printf '%s' "${EMPTY_OBJ}" | jq -c --argjson offered '[]' --arg autonomy interactive "${program}" >/dev/null 2>&1; then
@@ -972,8 +996,9 @@ case_AC4_contract_all_token() {
   [[ -n "${skill}" ]] || { fail "contract: SKILL.md missing"; return; }
   assert_contains_ws "${delta_body}" "${DR_MODE_RULE}" "AC4 Delta Resolution: --all selects the full run mode"
   assert_contains_ws "${parse_body}" "${ARGS_ALL_RULE}" "AC4 Parse \$ARGUMENTS: --all is a reserved leading token"
-  assert_contains_ws "${autonomy_body}" "${Q13_ALL_REOFFER}" "AC4 Autonomy Settings: --all ignores the ledger/presence for Q13"
-  assert_contains_ws "${autonomy_body}" "${Q14_ALL_REOFFER}" "AC4 Autonomy Settings: --all ignores the ledger/presence for Q14"
+  assert_contains_ws "${autonomy_body}" "${ALL_REOFFER_COLLAPSED}" "AC4 Autonomy Settings: --all ignores the ledger/presence for Q13, Q14 and Q15 (one sentence pointing at the keep-or-change rule)"
+  assert_absent_paired_ws "${autonomy_body}" "${ALL_REOFFER_COLLAPSED}" "${OLD_Q13_ALL_REOFFER}" "AC4 Autonomy Settings retired per-question Q13 --all sentence (#1342)"
+  assert_absent_paired_ws "${autonomy_body}" "${ALL_REOFFER_COLLAPSED}" "${OLD_Q14_ALL_REOFFER}" "AC4 Autonomy Settings retired per-question Q14 --all sentence (#1342)"
   assert_contains_ws "${autonomy_body}" "${Q13_Q14_FULL_NO_REOFFER}" "Autonomy Settings: a resolver-failure full run never re-offers a present planning/automerge/refinement value"
   assert_absent_paired_ws "${autonomy_body}" "${Q13_Q14_FULL_NO_REOFFER}" "${OLD_Q13_Q14_FULL_NO_REOFFER}" "Autonomy Settings retired resolver-failure sentence naming only planning/automerge (#1274)"
 }
@@ -994,7 +1019,7 @@ case_AC7_contract_q13_all_offer() {
   fi
   assert_contains_ws "${autonomy_body}" "${Q13_Q14_DELTA_RULE}" "AC7 Autonomy Settings: delta runs ask Q13/Q14/Q15 only when absent and not offered"
   assert_absent_paired_ws "${autonomy_body}" "${Q13_Q14_DELTA_RULE}" "${OLD_Q13_Q14_DELTA_RULE}" "AC7 Autonomy Settings retired delta rule naming only questions 13 and 14 (#1274)"
-  assert_contains_ws "${autonomy_body}" "${Q13_ALL_REOFFER}" "AC7 Autonomy Settings: --all re-offers Q13 with the committed value pre-selected"
+  assert_contains_ws "${autonomy_body}" "${ALL_REOFFER_COLLAPSED}" "AC7 Autonomy Settings: --all re-offers Q13 with the Keep option first (collapsed sentence)"
   assert_contains "${autonomy_body}" "${Q13_ALL_OPTION_KEEP}" "AC7 Q13 --all Keep option"
   assert_contains "${autonomy_body}" "${Q13_ALL_OPTION_SWITCH_INTERACTIVE}" "AC7 Q13 --all switch-to-interactive option"
   assert_contains "${autonomy_body}" "${Q13_ALL_OPTION_SWITCH_LEAN}" "AC7 Q13 switch-to-lean option"
@@ -1009,7 +1034,7 @@ case_AC8_AC9_contract_q14_all_offer() {
     fail "AC8/AC9: ${AUTONOMY_HEADING} section body not found"
     return
   fi
-  assert_contains_ws "${autonomy_body}" "${Q14_ALL_REOFFER}" "AC8 Autonomy Settings: --all re-offers Q14 with Keep pre-selected"
+  assert_contains_ws "${autonomy_body}" "${ALL_REOFFER_COLLAPSED}" "AC8 Autonomy Settings: --all re-offers Q14 with Keep pre-selected (collapsed sentence)"
   assert_contains "${autonomy_body}" "${Q14_ALL_OPTION_KEEP}" "AC8 Q14 --all Keep option"
   assert_contains "${autonomy_body}" "${Q14_ALL_OPTION_REMOVE}" "AC9 Q14 --all Remove option"
   assert_contains_ws "${autonomy_body}" "${Q14_ALL_KEEP_BYTE_IDENTICAL}" "AC8 Q14 Keep leaves every block byte-identical"
@@ -1028,9 +1053,9 @@ case_AC8_AC9_contract_q14_all_offer() {
 
 case_marker_programs_sit_where_the_plan_puts_them() {
   [[ -n "${skill}" ]] || { fail "contract: SKILL.md missing"; return; }
-  [[ -n "${Q13_PROG}" ]] || fail "SKILL.md: Q13-switch program not found between [${Q13_SWITCH_BEGIN}] / [${Q13_SWITCH_END}] inside ${AUTONOMY_HEADING}"
-  [[ -n "${Q14_PROG}" ]] || fail "SKILL.md: Q14-remove program not found between [${Q14_REMOVE_BEGIN}] / [${Q14_REMOVE_END}] inside ${AUTONOMY_HEADING}"
-  [[ -n "${Q15_PROG}" ]] || fail "SKILL.md: Q15-switch program not found between [${Q15_SWITCH_BEGIN}] / [${Q15_SWITCH_END}] inside ${AUTONOMY_HEADING}"
+  [[ -n "${Q13_PROG}" ]] || fail "phases/autonomy-settings.md: Q13-switch program not found between [${Q13_SWITCH_BEGIN}] / [${Q13_SWITCH_END}] inside ${AUTONOMY_HEADING}"
+  [[ -n "${Q14_PROG}" ]] || fail "phases/autonomy-settings.md: Q14-remove program not found between [${Q14_REMOVE_BEGIN}] / [${Q14_REMOVE_END}] inside ${AUTONOMY_HEADING}"
+  [[ -n "${Q15_PROG}" ]] || fail "phases/autonomy-settings.md: Q15-switch program not found between [${Q15_SWITCH_BEGIN}] / [${Q15_SWITCH_END}] inside ${AUTONOMY_HEADING}"
   [[ -n "${LEDGER_PROG}" ]] || fail "SKILL.md: ledger program not found between [${LEDGER_BEGIN}] / [${LEDGER_END}]"
   local stamp_at ledger_at
   stamp_at="$(offset_of "${skill}" "${STEP6_ALWAYS_STAMP}")"
@@ -1075,7 +1100,9 @@ case_AC14_contract_step6_ledger_and_overlay_order() {
 case_contract_q10_q11_board_and_fleet() {
   [[ -n "${skill}" ]] || { fail "contract: SKILL.md missing"; return; }
   assert_contains_ws "${board_body}" "${Q10_DECLINE_RECORDED}" "Board Config: a declined Q10 is recorded and not re-asked on a delta run"
-  assert_contains_ws "${board_body}" "${Q10_CARRIED_MISSING_FILE}" "Board Config: a carried Q10 with a missing file is reported, not regenerated"
+  # The one state in which phases/lazyboards.md is not read is a carried
+  # question 10 with the file missing, so the router (not the phase) reports it.
+  assert_contains_ws "${lazy_row}" "${Q10_CARRIED_MISSING_FILE}" "Step Map: a carried Q10 with a missing file is reported by the router, not regenerated"
   assert_contains_ws "${board_body}" "${Q10_ANALYZER_REPORTS_ONLY}" "Board Config: the suggest-or-skip analyzer only reports on a delta run"
   assert_absent_paired_ws "${board_body}" "${Q10_DECLINE_RECORDED}" "${OLD_Q10_REASK_CLAIM}" "Board Config retired 'ask again this session' claim"
 
@@ -1114,7 +1141,9 @@ case_AC17_codex_parity() {
   assert_contains_ws "${codex}" "${CODEX_Q13_Q14_ALL}" "AC17 codex.md names the Q13/Q14/Q15 --all options"
   assert_absent_paired_ws "${codex}" "${CODEX_Q13_Q14_ALL}" "${OLD_CODEX_Q13_Q14_ALL}" "AC17 codex.md retired --all sentence omitting question 15 (#1274)"
   assert_contains_ws "${codex}" "${CODEX_LEDGER}" "AC17 codex.md stamps the same configureOffered ledger"
-  assert_contains_ws "${codex}" "${CODEX_SHARED_PROGRAMS}" "AC17 codex.md uses the same marker-bounded jq programs"
+  assert_contains_ws "${codex}" "${CODEX_SHARED_PROGRAMS}" "AC17 codex.md uses the same marker-bounded jq programs from phases/autonomy-settings.md"
+  assert_absent_paired_ws "${codex}" "${CODEX_SHARED_PROGRAMS}" "${OLD_CODEX_SHARED_PROGRAMS}" "AC17 codex.md retired marker-bounded jq programs pointer at SKILL.md (#1342)"
+  assert_contains_ws "${codex}" "${CODEX_LEDGER_SOURCE}" "AC17 codex.md takes the offered-ledger program from SKILL.md step 6 (it stays inline)"
   assert_contains_ws "${codex}" "${CODEX_DOCKERFILE}" "AC17 codex.md describes the Dockerfile delta rule"
   assert_contains_ws "${codex}" "${CODEX_FALLBACK}" "AC17 codex.md describes the resolver-failure fallback"
   assert_contains_ws "${codex}" "${CODEX_PLAN_MODE}" "AC17 codex.md keeps the resolver read-only in /plan and writes in apply"

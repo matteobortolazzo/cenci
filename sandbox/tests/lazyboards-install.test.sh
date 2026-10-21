@@ -2,8 +2,10 @@
 # End-to-end regressions for the installer's optional lazyboards step: the
 # release-binary download (checksum-verified, opt-in only), the update-mode
 # refresh of an existing install, the doctor report, and drift between the
-# board-level actions flow/skills/configure/SKILL.md's 5f template emits and
-# the excerpt documented in docs/orchestration.md. The installer itself no
+# board-level actions step 5f's template emits and the excerpt documented in
+# docs/orchestration.md. Step 5f lives in
+# flow/skills/configure/phases/lazyboards.md and its full generated-file
+# example in flow/skills/configure/references/lazyboards-example.md (#1342). The installer itself no
 # longer seeds any board config — .lazyboards.yml is fully self-contained and
 # generated per repo by /cenci:configure (#716).
 set -euo pipefail
@@ -551,18 +553,38 @@ assert_contains "${CASE_OUTPUT}" "update to gh pr checkout {pr_number}"
 # region only, since "Designed" and "Implemented" legitimately appear
 # elsewhere in SKILL.md's label/lifecycle tables.
 SKILL_MD="${ROOT}/flow/skills/configure/SKILL.md"
-EXTRACTED_5F="${WORK}/skill-5f-template.md"
-awk '/^5f\. \*\*Generate `\.lazyboards\.yml`\*\*/{f=1} f && /^6\. \*\*Write `\.cenci\/config\.json`\*\*/{exit} f{print}' \
-    "${SKILL_MD}" >"${EXTRACTED_5F}"
+LAZYBOARDS_PHASE="${ROOT}/flow/skills/configure/phases/lazyboards.md"
+LAZYBOARDS_EXAMPLE="${ROOT}/flow/skills/configure/references/lazyboards-example.md"
 
-# DEDENTED_5F holds the fenced ```yaml block from the 5f region, dedented from
-# its 3-space list indent so top-level placement (e.g. the `keymaps:` and
-# `cleanup:` keys) is provable rather than inferred from a substring. Exits at
-# the first closing fence, so it captures the main template and not the
-# zero-runnable-projects snippet further down.
+# require_nonempty <file> <what> -- the extractions below are awk filters, so a
+# wrong anchor or a missing file would otherwise yield an empty file that every
+# grep -q guard and assert_not_contains passes against vacuously.
+require_nonempty() {
+    if [[ ! -s "$1" ]]; then
+        echo "FAIL: $2 is missing or empty: $1" >&2
+        exit 1
+    fi
+}
+require_nonempty "${SKILL_MD}" "configure SKILL.md"
+require_nonempty "${LAZYBOARDS_PHASE}" "configure phases/lazyboards.md (question 10 and step 5f)"
+require_nonempty "${LAZYBOARDS_EXAMPLE}" "configure references/lazyboards-example.md (the generated-file example)"
+
+# Step 5f is the last item in phases/lazyboards.md, so its region runs from the
+# list item to the end of the file.
+EXTRACTED_5F="${WORK}/skill-5f-template.md"
+awk '/^5f\. \*\*Generate `\.lazyboards\.yml`\*\*/{f=1} f{print}' \
+    "${LAZYBOARDS_PHASE}" >"${EXTRACTED_5F}"
+require_nonempty "${EXTRACTED_5F}" "the 5f region of phases/lazyboards.md"
+
+# DEDENTED_5F holds the fenced ```yaml block of the generated-file example. The
+# example file fences it at column 0 (no list indent to remove), so top-level
+# placement (e.g. the `keymaps:` and `cleanup:` keys) is provable rather than
+# inferred from a substring. Exits at the first closing fence, so it captures
+# the whole example.
 DEDENTED_5F="${WORK}/skill-5f-dedented.md"
-awk '/^   ```yaml$/{f=1;next} f && /^   ```$/{exit} f{sub(/^   /,""); print}' \
-    "${EXTRACTED_5F}" >"${DEDENTED_5F}"
+awk '/^```yaml$/{f=1;next} f && /^```$/{exit} f{print}' \
+    "${LAZYBOARDS_EXAMPLE}" >"${DEDENTED_5F}"
+require_nonempty "${DEDENTED_5F}" "the column-0 yaml fence of references/lazyboards-example.md"
 
 echo "case: docs/orchestration.md's board config block matches the C/X and cleanup lines the 5f template emits"
 ORCH_BLOCK="${WORK}/orchestration-board-config.yml"
@@ -594,9 +616,12 @@ fi
 # The monorepo project path is a plain `cwd:` segment now -- no nested POSIX
 # quoting, because cwd: is escaped as one token after expansion.
 assert_contains "${DEDENTED_5F}" 'cwd: "{pr_worktree}/apps/web-client"'
-assert_not_contains "${ROOT}/flow/skills/configure/SKILL.md" \
-    "-c {pr_worktree}/'apps/web-client'"
-assert_not_contains "${ROOT}/flow/skills/configure/SKILL.md" '"cd {pr_worktree}'
+# The forbidden spellings must be absent from every file that can hold the
+# generation text (the router, the phase and the example).
+for configure_file in "${SKILL_MD}" "${LAZYBOARDS_PHASE}" "${LAZYBOARDS_EXAMPLE}"; do
+    assert_not_contains "${configure_file}" "-c {pr_worktree}/'apps/web-client'"
+    assert_not_contains "${configure_file}" '"cd {pr_worktree}'
+done
 
 echo "case: 5f template binds everything under \`keymaps:\`, never an actions block"
 grep -q '^keymaps:$' "${DEDENTED_5F}"
@@ -727,10 +752,16 @@ assert_not_contains "${TEST_BLOCK}" "window:"
 # The zero-runnable-projects fallback keeps W and adds no Checkout PR action.
 assert_not_contains "${EXTRACTED_5F}" \
     'tmux new-window -d -n pr-{pr_number} "gh pr checkout {pr_number}"'
+assert_not_contains "${DEDENTED_5F}" \
+    'tmux new-window -d -n pr-{pr_number} "gh pr checkout {pr_number}"'
 
 echo "case: 5f template never re-emits Designed or Implemented as generated columns"
 assert_not_contains "${EXTRACTED_5F}" "- name: Designed"
 assert_not_contains "${EXTRACTED_5F}" "- name: Implemented"
+# The yaml template lives in references/lazyboards-example.md, not the phase
+# prose, so the same absence is pinned against the example's fenced block.
+assert_not_contains "${DEDENTED_5F}" "- name: Designed"
+assert_not_contains "${DEDENTED_5F}" "- name: Implemented"
 
 echo "case: 5f template emits the C/X launch actions under BOTH keymaps.normal and keymaps.detail"
 NORMAL_TABLE="${WORK}/skill-5f-keymaps-normal.md"
@@ -791,8 +822,11 @@ assert_contains "${EXTRACTED_5F}" \
 
 echo "case: 5f only runs on an in-session Yes answer to question 10, not a stale lazyboards.enabled flag"
 Q10_REGION="${WORK}/skill-q10-region.md"
-awk '/^### Board Config \(lazyboards\)$/{f=1} f && /^### Auth Verification$/{exit} f{print}' \
-    "${SKILL_MD}" >"${Q10_REGION}"
+# Question 10 runs from its heading to the next `### ` heading (step 5f's own
+# heading follows it in phases/lazyboards.md).
+awk '/^### Board Config \(lazyboards\)$/{f=1; next} f && /^### /{exit} f{print}' \
+    "${LAZYBOARDS_PHASE}" >"${Q10_REGION}"
+require_nonempty "${Q10_REGION}" "the question 10 region of phases/lazyboards.md"
 assert_contains "${Q10_REGION}" "recorded from a prior run"
 assert_contains "${Q10_REGION}" "never authorizes silently regenerating"
 assert_contains "${EXTRACTED_5F}" "question 10 was asked and answered Yes"

@@ -42,7 +42,8 @@
 # accepted coupling risk, not a bug in this test.
 #
 # Covered files:
-#   - flow/skills/configure/SKILL.md
+#   - flow/skills/configure/phases/fleet-enrollment.md (the section, #1342)
+#   - flow/skills/configure/SKILL.md (frontmatter grants)
 #   - flow/skills/configure/codex.md
 #   - docs/orchestration.md (cross-project)
 set -uo pipefail
@@ -164,6 +165,7 @@ assert_absent_paired() {
 # reason and the green phase has an unambiguous authoring target.
 
 SECTION_HEADING='### Fleet Dispatch Enrollment'
+FLEET_PHASE_FILE='phases/fleet-enrollment.md'
 Q11_MARKER='11. **Enroll in fleet dispatch**'
 Q12_MARKER='12. **Fleet dispatch session name**'
 
@@ -173,7 +175,9 @@ HOST_FIX_COMMAND='cenci dispatch enroll --session <name>` from the repo root on 
 
 # Container guard's exit wording must be unambiguous about stopping (not
 # "fall through", which elsewhere in this section means "continue the run").
-CONTAINER_GUARD_EXIT='Skip the remainder of this section (main-checkout resolution, status probe, questions 11/12) and continue directly to the next section (`### Autonomy Settings`)'
+# The next section now lives in another file (#1342), so the pointer names it.
+CONTAINER_GUARD_EXIT='Skip the remainder of this section (main-checkout resolution, status probe, questions 11/12) and continue directly to the next section (`### Autonomy Settings` in `phases/autonomy-settings.md`)'
+OLD_CONTAINER_GUARD_EXIT='continue directly to the next section (`### Autonomy Settings`)'
 
 # Main-checkout resolution.
 GIT_COMMON_DIR_RESOLUTION='git rev-parse --path-format=absolute --git-common-dir'
@@ -208,6 +212,8 @@ BLANKET_CENCI='Bash(cenci:*)'
 BLANKET_DISPATCH='Bash(cenci dispatch:*)'
 
 # codex.md parity paragraph.
+CODEX_FLEET_MIRROR='Fleet dispatch enrollment mirrors the Claude procedure'"'"'s `### Fleet Dispatch Enrollment` section in `phases/fleet-enrollment.md`'
+OLD_CODEX_FLEET_MIRROR='`### Fleet Dispatch Enrollment` section exactly.'
 CODEX_CONTAINER_GUARD='In-container, the section asks nothing, runs nothing, and writes nothing'
 CODEX_PLAN_MODE_NOTE='the fleet dispatch enroll is a mutation and therefore runs only in the apply step'
 CODEX_NEVER_DURING_PLAN='never during `/plan`'
@@ -215,65 +221,86 @@ CODEX_NEVER_DURING_PLAN='never during `/plan`'
 # docs/orchestration.md pointer.
 ORCHESTRATION_POINTER='`/cenci:configure` is also a fleet dispatch enrollment entry point'
 
+# --- skills/configure/phases/fleet-enrollment.md ---------------------------
+# The Fleet Dispatch Enrollment section (questions 11/12) moved out of
+# SKILL.md into this conditionally read phase file (#1342); the frontmatter
+# grants stay in SKILL.md and are checked below.
+
+require_doc fleet "skills/configure/phases/fleet-enrollment.md" || true
+if [[ -n "${fleet}" ]]; then
+  fleet_path="${FLOW_DIR}/skills/configure/phases/fleet-enrollment.md"
+
+  # Section heading and question numbering (paired: a missing heading means
+  # the section-scoped absence checks below fail for the right reason too).
+  assert_contains "${fleet}" "${SECTION_HEADING}" "fleet-enrollment.md Fleet Dispatch Enrollment heading"
+  assert_contains "${fleet}" "${Q11_MARKER}" "fleet-enrollment.md question 11 (enroll)"
+  assert_contains "${fleet}" "${Q12_MARKER}" "fleet-enrollment.md question 12 (session name)"
+
+  # Container guard: no ask, no run, no write; falls through.
+  assert_contains "${fleet}" "${CONTAINER_GUARD_EFFECT}" "fleet-enrollment.md container guard ask/run/write nothing"
+  assert_contains "${fleet}" "${HOST_FIX_COMMAND}" "fleet-enrollment.md container guard host-side fix command"
+  assert_contains_ws "${fleet}" "${CONTAINER_GUARD_EXIT}" "fleet-enrollment.md container guard exit wording is unambiguous and names the file holding the next section"
+  assert_absent_paired "${fleet}" "${SECTION_HEADING}" "${OLD_CONTAINER_GUARD_EXIT}" "fleet-enrollment.md retired positional container guard exit pointer"
+
+  # The advisory's host-side fix line must never fabricate a --dir value —
+  # checked on the specific line the fix command appears on, not the whole
+  # file (the file legitimately uses --dir elsewhere in this same section).
+  host_fix_line="$(grep -n 'cenci dispatch enroll --session <name>' "${fleet_path}" 2>/dev/null | head -1)"
+  if [[ -z "${host_fix_line}" ]]; then
+    fail "fleet-enrollment.md container guard host-side fix command: line not found"
+  elif [[ "${host_fix_line}" == *"--dir"* ]]; then
+    fail "fleet-enrollment.md container guard host-side fix command: must not include --dir: [${host_fix_line}]"
+  fi
+
+  # Main-checkout resolution, as its own Bash call.
+  assert_contains "${fleet}" "${GIT_COMMON_DIR_RESOLUTION}" "fleet-enrollment.md main-checkout git rev-parse resolution"
+
+  # Status probe with explicit --dir on the main checkout.
+  assert_contains "${fleet}" "${STATUS_INVOCATION}" "fleet-enrollment.md status probe explicit --dir '<main-checkout>'"
+
+  # Three-way branch, all three states.
+  assert_contains "${fleet}" "${STATE_NOT_ENROLLED}" "fleet-enrollment.md three-way branch: enrolled:false"
+  assert_contains "${fleet}" "${STATE_ENROLLED_NO_SESSION}" "fleet-enrollment.md three-way branch: enrolled:true session:\"\""
+  assert_contains "${fleet}" "${STATE_ENROLLED_WITH_SESSION}" "fleet-enrollment.md three-way branch: enrolled:true session:<set>"
+
+  # Single combined enroll call — both values in one CLI call.
+  assert_contains "${fleet}" "${ENROLL_INVOCATION}" "fleet-enrollment.md single combined enroll call"
+
+  # Missing-session-key version-skew rung.
+  assert_contains "${fleet}" "${MISSING_SESSION_KEY}" "fleet-enrollment.md missing session key rung"
+  assert_contains "${fleet}" "${UPDATE_CENCI_ADVISORY}" "fleet-enrollment.md update-cenci advisory"
+
+  # No-guessing rule.
+  assert_contains "${fleet}" "${NO_GUESS_AMBIENT}" "fleet-enrollment.md no-guessing rule names \$TMUX_PANE"
+  assert_contains "${fleet}" "${NO_GUESS_RULE}" "fleet-enrollment.md no-guessing rule statement"
+
+  # Delegation-only rule.
+  assert_contains "${fleet}" "${DELEGATION_ONLY_RULE}" "fleet-enrollment.md delegation-only rule"
+
+  # Absence of loopEnabled/daemonInterval questions, paired with the section
+  # existence marker per Assumption 7 (see assert_absent_paired above).
+  assert_absent_paired "${fleet}" "${SECTION_HEADING}" "loopEnabled" "fleet-enrollment.md no loopEnabled question"
+  assert_absent_paired "${fleet}" "${SECTION_HEADING}" "daemonInterval" "fleet-enrollment.md no daemonInterval question"
+
+  # No bare `--dir .` / bare-default enroll call anywhere.
+  assert_not_contains "${fleet}" "--dir ." "fleet-enrollment.md no bare --dir . default"
+else
+  fail "fleet-enrollment.md: empty or missing, section assertions skipped"
+fi
+
 # --- skills/configure/SKILL.md ----------------------------------------------
+# Only the frontmatter grants (they never move out of SKILL.md) and the
+# router's absence of the moved enroll invocations are pinned here.
 
 require_doc skill "skills/configure/SKILL.md" || true
 if [[ -n "${skill}" ]]; then
   skill_path="${FLOW_DIR}/skills/configure/SKILL.md"
 
-  # Section heading and question numbering (paired: a missing heading means
-  # the section-scoped absence checks below fail for the right reason too).
-  assert_contains "${skill}" "${SECTION_HEADING}" "SKILL.md Fleet Dispatch Enrollment heading"
-  assert_contains "${skill}" "${Q11_MARKER}" "SKILL.md question 11 (enroll)"
-  assert_contains "${skill}" "${Q12_MARKER}" "SKILL.md question 12 (session name)"
-
-  # Container guard: no ask, no run, no write; falls through.
-  assert_contains "${skill}" "${CONTAINER_GUARD_EFFECT}" "SKILL.md container guard ask/run/write nothing"
-  assert_contains "${skill}" "${HOST_FIX_COMMAND}" "SKILL.md container guard host-side fix command"
-  assert_contains_ws "${skill}" "${CONTAINER_GUARD_EXIT}" "SKILL.md container guard exit wording is unambiguous"
-
-  # The advisory's host-side fix line must never fabricate a --dir value —
-  # checked on the specific line the fix command appears on, not the whole
-  # file (the file legitimately uses --dir elsewhere in this same section).
-  host_fix_line="$(grep -n 'cenci dispatch enroll --session <name>' "${skill_path}" 2>/dev/null | head -1)"
-  if [[ -z "${host_fix_line}" ]]; then
-    fail "SKILL.md container guard host-side fix command: line not found"
-  elif [[ "${host_fix_line}" == *"--dir"* ]]; then
-    fail "SKILL.md container guard host-side fix command: must not include --dir: [${host_fix_line}]"
-  fi
-
-  # Main-checkout resolution, as its own Bash call.
-  assert_contains "${skill}" "${GIT_COMMON_DIR_RESOLUTION}" "SKILL.md main-checkout git rev-parse resolution"
-
-  # Status probe with explicit --dir on the main checkout.
-  assert_contains "${skill}" "${STATUS_INVOCATION}" "SKILL.md status probe explicit --dir '<main-checkout>'"
-
-  # Three-way branch, all three states.
-  assert_contains "${skill}" "${STATE_NOT_ENROLLED}" "SKILL.md three-way branch: enrolled:false"
-  assert_contains "${skill}" "${STATE_ENROLLED_NO_SESSION}" "SKILL.md three-way branch: enrolled:true session:\"\""
-  assert_contains "${skill}" "${STATE_ENROLLED_WITH_SESSION}" "SKILL.md three-way branch: enrolled:true session:<set>"
-
-  # Single combined enroll call — both values in one CLI call.
-  assert_contains "${skill}" "${ENROLL_INVOCATION}" "SKILL.md single combined enroll call"
-
-  # Missing-session-key version-skew rung.
-  assert_contains "${skill}" "${MISSING_SESSION_KEY}" "SKILL.md missing session key rung"
-  assert_contains "${skill}" "${UPDATE_CENCI_ADVISORY}" "SKILL.md update-cenci advisory"
-
-  # No-guessing rule.
-  assert_contains "${skill}" "${NO_GUESS_AMBIENT}" "SKILL.md no-guessing rule names \$TMUX_PANE"
-  assert_contains "${skill}" "${NO_GUESS_RULE}" "SKILL.md no-guessing rule statement"
-
-  # Delegation-only rule.
-  assert_contains "${skill}" "${DELEGATION_ONLY_RULE}" "SKILL.md delegation-only rule"
-
-  # Absence of loopEnabled/daemonInterval questions, paired with the section
-  # existence marker per Assumption 7 (see assert_absent_paired above).
-  assert_absent_paired "${skill}" "${SECTION_HEADING}" "loopEnabled" "SKILL.md no loopEnabled question"
-  assert_absent_paired "${skill}" "${SECTION_HEADING}" "daemonInterval" "SKILL.md no daemonInterval question"
-
-  # No bare `--dir .` / bare-default enroll call anywhere.
-  assert_not_contains "${skill}" "--dir ." "SKILL.md no bare --dir . default"
+  # The enroll mutation lives only in the conditionally read phase file;
+  # paired with the router still naming that file, so the absence cannot pass
+  # vacuously on an emptied SKILL.md.
+  assert_absent_paired "${skill}" "${FLEET_PHASE_FILE}" "${ENROLL_INVOCATION}" "SKILL.md no longer carries the enroll invocation (it lives in ${FLEET_PHASE_FILE})"
+  assert_absent_paired "${skill}" "${FLEET_PHASE_FILE}" "${STATUS_INVOCATION}" "SKILL.md no longer carries the status probe (it lives in ${FLEET_PHASE_FILE})"
 
   # Frontmatter grants: the two new narrow per-verb grants present, the two
   # blanket forms absent.
@@ -288,6 +315,11 @@ fi
 
 require_doc codex "skills/configure/codex.md" || true
 if [[ -n "${codex}" ]]; then
+  # The mirror paragraph names the phase file holding the section it mirrors
+  # (#1342); the old sentence without the file is retired.
+  assert_contains_ws "${codex}" "${CODEX_FLEET_MIRROR}" "codex.md fleet enrollment paragraph mirrors the Claude section and names phases/fleet-enrollment.md"
+  assert_absent_paired "$(normalize_ws "${codex}")" "${CODEX_FLEET_MIRROR}" "${OLD_CODEX_FLEET_MIRROR}" "codex.md retired fleet mirror sentence that does not name its file"
+
   # Three-way branch mirrored (same enrolled/session states named).
   assert_contains "${codex}" "${STATE_ENROLLED_NO_SESSION}" "codex.md three-way branch mirror"
 

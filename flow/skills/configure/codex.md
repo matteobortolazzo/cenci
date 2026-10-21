@@ -87,7 +87,7 @@ agent-role schema with `bash "${PLUGIN_ROOT}/codex/validate-agent-roles.sh"
 check.
 
 Fleet dispatch enrollment mirrors the Claude procedure's `### Fleet Dispatch Enrollment`
-section exactly. Container guard: In-container, the section asks nothing, runs nothing, and writes nothing
+section in `phases/fleet-enrollment.md` exactly. Container guard: In-container, the section asks nothing, runs nothing, and writes nothing
 — the sandbox's `~/.config/cenci/config.json` is a
 container-local volume, not the host file the dispatch daemon reads — Plan mode prints
 the host-side `cenci dispatch enroll --session <name>` fix instead. Main-checkout
@@ -136,7 +136,8 @@ Every write stamps `configureOffered`: Codex stamps `configureOffered` with the 
 recording only the questions actually put to the user and applied or explicitly declined. The question 13/14/15 overlays and
 the ledger stamp use the exact programs the Claude procedure keeps between its
 `cenci:configure-q13-switch`, `cenci:configure-q14-remove`, `cenci:configure-q15-switch` and
-`cenci:configure-offered-ledger` markers: Codex uses the same marker-bounded jq programs as `SKILL.md`,
+`cenci:configure-offered-ledger` markers: Codex uses the same marker-bounded jq programs as `phases/autonomy-settings.md`
+(the `cenci:configure-offered-ledger` program from `SKILL.md` step 6, which stays inline),
 and validates each overlay before the write: the `jq` call must exit 0 and the result must pass
 `jq -e 'type == "object"'` (an empty output passes `jq empty`, so that alone is not a gate). When a question 13/14/15 overlay
 falls back, its answer was not applied: the apply step tells the user (that the question will be asked
@@ -164,7 +165,7 @@ question 13/14/15 overlay or a failed `cenci dispatch enroll` is reported the sa
 again on the next delta run only when the key is absent and the ID is not already in the existing ledger,
 otherwise re-run `/cenci:configure --all`.
 
-Autonomy Settings mirrors the Claude procedure's `### Autonomy Settings` section: the procedure on a delta run asks
+Autonomy Settings mirrors the Claude procedure's `### Autonomy Settings` section in `phases/autonomy-settings.md`: the procedure on a delta run asks
 about `planning`, `automerge` and `refinement` only when absent and not already offered — an already-present value (top-level or,
 for `automerge`, any `projects[]` entry) is reported verbatim and never re-prompted, narrowed,
 or removed on a delta run, and `--all` re-offers all three with keep-or-change options. It defaults the planning and automerge offers to the conservative answer — `interactive` for planning,
@@ -174,7 +175,7 @@ step's config write, never during `/plan`, Plan mode only gathers the answers an
 scaffold; the actual `.cenci/config.json` write happens in
 `cenci run configure apply <checkpoint-id> --agent codex`, same as every other field.
 
-Independent controls mirror questions 16–20 in `SKILL.md` using the client's
+Independent controls mirror questions 16–17 in `phases/autonomy-settings.md` and 18–20 in `phases/fleet-enrollment.md` using the client's
 available Plan-mode question mechanism. `refinement.confirmBeforeApply` defaults to
 false: offer apply immediately (Recommended) or require confirmation. Record the
 boolean in `confirmBeforeApplyAnswer`, preserving an explicit false. Invalid values
@@ -191,7 +192,7 @@ re-offers each with its current value first. Resolver-failure full runs carry pr
 leaves. Carry both collected answers and offered IDs in the plan/apply checkpoint.
 After the Q13/14/15 overlays and before the ledger overlay, apply the exact
 `cenci:configure-confirm-before-apply` and `cenci:configure-refinement-automerge`
-marker-bounded jq programs from `SKILL.md`, with `--argjson confirmBeforeApply
+marker-bounded jq programs from `phases/autonomy-settings.md`, with `--argjson confirmBeforeApply
 <true|false>` and `--arg automerge <off|eligible>` respectively. Validate answer types
 and allowed values first, then check exit 0 and the object gate after each overlay.
 Apply based on answer presence, never truthiness or a jq `//` fallback that loses
