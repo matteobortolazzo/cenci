@@ -6,8 +6,9 @@
 # and every proposed child) before any proposal-related GitHub mutation.
 # Each child gets an independently computed verdict and can earn
 # Browser/ui:visual-check on its own merit; automerge:ok, Browser, and
-# ui:visual-check are removed from the inheritable label set at all four
-# ticket-creation sites in the repo.
+# ui:visual-check are removed from the inheritable label set at every
+# ticket-creation site in the repo (the followup site, now the
+# `cenci pipeline followup` operation, since #1340).
 #
 # Follows the fixture-free, grep-based idiom of
 # flow/tests/refine-automerge-grant.test.sh and
@@ -47,11 +48,12 @@
 #     10-entry lifecycle exclusion set including the legacy-compat
 #     "Design","Designed" markers, step 13's declined branch)
 #   - flow/skills/refine/codex.md (portability parity)
-#   - flow/skills/implement/phases/phase-9-pr.md (followup exclusion, the
-#     same 10-entry legacy-compat set -- see the note at EXCLUSION_10_MARKER
-#     below)
-#   - flow/skills/address-review/SKILL.md (followup exclusion, same
-#     10-entry legacy-compat set)
+#
+# The followup creation path (flow/skills/implement/phases/phase-9-pr.md and
+# flow/skills/address-review/SKILL.md) is no longer covered here: since #1340
+# both skills call `cenci pipeline followup`, and the lifecycle/grant label
+# exclusion lives in watch/internal/pipeline/followup.go (covered by
+# watch/internal/pipeline/followup_test.go).
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || { echo "refine-confirmation-gate.test.sh: failed to resolve script directory." >&2; exit 2; }
@@ -59,8 +61,6 @@ FLOW_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)" || { echo "refine-confirmation-gate.t
 REFINER_AGENT="${FLOW_DIR}/agents/refiner.md"
 REFINE_SKILL="${FLOW_DIR}/skills/refine/SKILL.md"
 REFINE_CODEX="${FLOW_DIR}/skills/refine/codex.md"
-PHASE_9="${FLOW_DIR}/skills/implement/phases/phase-9-pr.md"
-ADDRESS_REVIEW_SKILL="${FLOW_DIR}/skills/address-review/SKILL.md"
 failures=0
 
 fail() { echo "FAIL: $1" >&2; failures=$((failures+1)); }
@@ -132,23 +132,22 @@ BROWSER_QUESTION_TEXT_MARKER='need interactive browser access during implementat
 PARENT_ANSWER_NOT_PROPAGATED_MARKER='is never propagated to any child'
 
 # --- Block 6: Stale parent labels -------------------------------------------
-# EXCLUSION_10_MARKER: every ticket-creation site -- refine/SKILL.md's own
-# ensure-issue.sh-based child-creation path AND phase-9-pr.md/address-review/
-# SKILL.md's legacy jq-based followup-creation sites -- intentionally still
-# excludes "Design","Designed" as a defensive legacy-compat measure: a
-# parent ticket refined before the design-stage removal may still carry one
-# of those labels, and it must never be inherited onto a new child or
-# followup ticket. See the note at refine/SKILL.md's own call site.
+# EXCLUSION_10_MARKER: refine/SKILL.md's own ensure-issue.sh-based
+# child-creation path intentionally still excludes "Design","Designed" as a
+# defensive legacy-compat measure: a parent ticket refined before the
+# design-stage removal may still carry one of those labels, and it must never
+# be inherited onto a new child ticket. See the note at refine/SKILL.md's own
+# call site. The followup creation path applies the same exclusion inside
+# `cenci pipeline followup` (watch/internal/pipeline/followup.go), not in a
+# skill.
 EXCLUSION_10_MARKER='"Refined","Working","Planned","In Review","Implemented","Design","Designed","automerge:ok","Browser","ui:visual-check"'
 REREFINE_DEFERRAL_TEXT_MARKER='deferred to a later ticket'
 GATE_LABELS_APPLIED_EXPLICITLY_MARKER='applied explicitly from the gate'
 
 # --- Block 7: Followup inheritance ------------------------------------------
-# EXCLUSION_10_MARKER (above) is reused here too: it is a literal substring
-# of the 11-entry followup-site array (10 entries + "Followup" appended),
-# the same technique flow/tests/followup-ticket-inheritance.test.sh already
-# uses for its 7-entry LIFECYCLE_EXCLUSION_MARKER against the 8-entry
-# (7 + "Followup") followup arrays.
+# The followup path's own exclusion set lives in
+# watch/internal/pipeline/followup.go since #1340 (skills no longer build the
+# create payload), so only refine's creation site is asserted here.
 
 # --- Codex parity (Test Strategy: "Same suite's parity block") -------------
 CODEX_GATE_MARKER='Confirmation Gate'
@@ -256,20 +255,17 @@ assert_file_contains "${REFINE_SKILL}" "${GATE_LABELS_APPLIED_EXPLICITLY_MARKER}
   "the rewritten limitation paragraph must state each child's verdict and labels are applied explicitly from the gate"
 
 # =====================================================================
-# Block 7: Followup inheritance — the extended exclusion set asserted
-# across all three ticket-creation sites in one place (refine child,
-# phase-9-pr.md, address-review/SKILL.md), pinning the repo-wide invariant
-# that a grant is never inherited anywhere one ticket creates another (see
+# Block 7: Followup inheritance — the extended exclusion set asserted at
+# refine's child-creation site, pinning the repo-wide invariant that a grant
+# is never inherited anywhere one ticket creates another (see
 # watch/internal/babysit/automerge_test.go:190 for AC 6's already-covered
 # half, and flow/docs/followup-triage.md for the untriaged-capture-queue
-# rationale). All three use the same legacy-compat 10-entry set
-# (EXCLUSION_10_MARKER) that still names "Design","Designed".
+# rationale). The followup site's exclusion lives in
+# watch/internal/pipeline/followup.go (#1340).
 # =====================================================================
 
-for FILE in "${REFINE_SKILL}" "${PHASE_9}" "${ADDRESS_REVIEW_SKILL}"; do
-  assert_file_contains "${FILE}" "${EXCLUSION_10_MARKER}" \
-    "must exclude automerge:ok, Browser, and ui:visual-check from inheritance so no ticket-creation site ever leaks a refinement-granted marker"
-done
+assert_file_contains "${REFINE_SKILL}" "${EXCLUSION_10_MARKER}" \
+  "must exclude automerge:ok, Browser, and ui:visual-check from inheritance so no ticket-creation site ever leaks a refinement-granted marker"
 
 # =====================================================================
 # Codex parity — codex.md mirrors the gate, the decline contract, and the

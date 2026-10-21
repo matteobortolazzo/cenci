@@ -64,7 +64,7 @@ description from the table above; route 2 does not.
 
 1. **Skill-level fallback** — `gh label create … || true` in the skill, just before adding the
    label, with the table's color and description. refine ensures `Working`, `Refined`, `Browser`,
-   `ui:visual-check` and `automerge:ok`; implement Phase 9 and address-review ensure `Followup`.
+   `ui:visual-check` and `automerge:ok`.
 2. **CLI self-heal** — `cenci pipeline label` creates the label through the Go `ghLabelCreate`
    when it applies a transition. This covers implement's `Working`, `Planned` and `In Review`,
    plus `Input Needed`. It is not a skill-level `|| true` fallback, and it runs
@@ -72,7 +72,10 @@ description from the table above; route 2 does not.
    defaults (default color, empty description).
 3. **Reconciler self-heal** — the dispatch reconciler's `GHMutator.EnsureLabels` creates
    `dispatch-failed`, `plan-invalid` and `reconcile-stuck` with the table's values
-   (`managedLabelSpecs`). Babysit's Go code self-heals `Implemented` with its own spec.
+   (`managedLabelSpecs`). Babysit's Go code self-heals `Implemented` with its own spec, and
+   `cenci pipeline followup` self-heals `Followup` with the table's color and description before
+   it creates a ticket (so implement Phase 9 and address-review carry no `Followup`
+   `gh label create` of their own).
 
 `/cenci:configure` step 3c additionally creates every missing label up front with the table's
 color and description, so a board that skips it is not blocked: the routes above heal the label

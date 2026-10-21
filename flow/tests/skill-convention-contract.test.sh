@@ -241,20 +241,17 @@ fi
 
 require_doc address_review "skills/address-review/SKILL.md" || true
 if [[ -n "${address_review}" ]]; then
-  assert_contains "${address_review}" "--limit 200" \
-    "772 flow/skills/address-review/SKILL.md Locate step --limit 200 pagination guard"
+  # #1340: the Locate step's `--limit 200` pagination guard and the whole-line
+  # (`grep -qxF`) dedup match moved into `cenci pipeline followup`
+  # (watch/internal/pipeline/followup.go); the skill no longer carries that
+  # search, so only the back-link wording and the two retired-recipe absences
+  # remain pinned here. The Go tests cover the `Related to #<id>` whole-line
+  # match (`Related to #70` does not match `#7`); the `PR: <url>` whole-line
+  # near-miss guard (`.../pull/7` vs `.../pull/70`) is not currently pinned there.
   assert_contains "${address_review}" "Related to #<original-ticket>" \
     "772 flow/skills/address-review/SKILL.md Related to #<original-ticket> back-link"
   assert_not_contains "${address_review}" "the PR's \`#<number>\`" \
     "772 flow/skills/address-review/SKILL.md stale bare #<pr-number> fallback wording"
-  # Both dedup keys must be whole-line matches: plain `grep -qF` is a
-  # within-line substring match, so `.../pull/7` would still match a body
-  # containing `.../pull/70` — only `grep -qxF` delivers the collision-safety
-  # the predicate claims.
-  assert_contains "${address_review}" "matched as an exact whole line" \
-    "772 flow/skills/address-review/SKILL.md whole-line dedup match wording"
-  assert_contains "${address_review}" "grep -qxF" \
-    "772 flow/skills/address-review/SKILL.md grep -qxF whole-line dedup primitive"
   assert_not_contains "${address_review}" "trailing newline included" \
     "772 flow/skills/address-review/SKILL.md unachievable trailing-newline grep recipe"
 fi
@@ -343,15 +340,12 @@ fi
 
 require_doc phase9 "skills/implement/phases/phase-9-pr.md" || true
 if [[ -n "${phase9}" ]]; then
-  assert_contains "${phase9}" "(ticketless mode only" \
-    "772 flow/skills/implement/phases/phase-9-pr.md ticketless-mode-only framing"
+  # #1340: the ticketless-only no-meta framing and the `grep -qxF` whole-line
+  # back-link match moved into `cenci pipeline followup`
+  # (watch/internal/pipeline/followup.go, covered by its Go tests), so only the
+  # retired-wording absences remain pinned here.
   assert_not_contains "${phase9}" "degraded fetch" \
     "772 flow/skills/implement/phases/phase-9-pr.md stale 'degraded fetch' wording"
-  # phase-9 is the canonical source of the whole-line dedup rule that
-  # address-review mirrors (case 2) — pin the same grep -qxF semantics here
-  # so the two files cannot drift apart on the collision-safety primitive.
-  assert_contains "${phase9}" "grep -qxF 'Related to #<original-ticket>'" \
-    "772 flow/skills/implement/phases/phase-9-pr.md grep -qxF whole-line back-link match"
   assert_not_contains "${phase9}" "trailing newline included" \
     "772 flow/skills/implement/phases/phase-9-pr.md unachievable trailing-newline grep recipe"
 fi

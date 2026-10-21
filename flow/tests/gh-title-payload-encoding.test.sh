@@ -28,10 +28,9 @@
 #   - skills/refine/SKILL.md (3 sites: retitle PATCH, Pass 1 child create,
 #     companion design create)
 #   - skills/maintain/modes/backlog.md (1 site: batch polish-ticket create)
-#   - skills/implement/phases/phase-9-pr.md (1 site, 2 jq forms: with-meta,
-#     no-meta)
-#   - skills/address-review/SKILL.md (2 sites: followup-ticket create with 2
-#     jq forms (with-meta, no-meta), plus #773's new inline-reply payload)
+#   - skills/address-review/SKILL.md (1 site: #773's inline-reply payload; the
+#     followup-ticket create moved to `cenci pipeline followup` in #1340, and
+#     skills/implement/phases/phase-9-pr.md's followup create with it)
 #   - skills/refactor/SKILL.md (1 site, #773: ticket-creation payload,
 #     replacing the last live `gh issue create --title` in flow)
 set -uo pipefail
@@ -72,7 +71,6 @@ SHELL_RULES="${FLOW_DIR}/skills/shell-rules/SKILL.md"
 REFINE_SKILL="${FLOW_DIR}/skills/refine/SKILL.md"
 REFINE_ENSURE_ISSUE_SCRIPT="${FLOW_DIR}/skills/refine/scripts/ensure-issue.sh"
 MAINTAIN_BACKLOG="${FLOW_DIR}/skills/maintain/modes/backlog.md"
-PHASE_9="${FLOW_DIR}/skills/implement/phases/phase-9-pr.md"
 ADDRESS_REVIEW_SKILL="${FLOW_DIR}/skills/address-review/SKILL.md"
 REFACTOR_SKILL="${FLOW_DIR}/skills/refactor/SKILL.md"
 SHELL_GOTCHAS_DOC="${FLOW_DIR}/docs/shell-scripting-gotchas.md"
@@ -164,15 +162,21 @@ assert_min_occurrences "${MAINTAIN_BACKLOG}" "jq -n" 1 \
 assert_min_occurrences "${MAINTAIN_BACKLOG}" "--rawfile" 2 \
   "must pass the raw title/body via --rawfile"
 
-assert_min_occurrences "${PHASE_9}" "jq -n" 2 \
-  "must document both the with-meta and no-meta jq forms"
-assert_min_occurrences "${PHASE_9}" "--rawfile" 4 \
-  "must pass raw title/body via --rawfile in both jq forms"
+# #1340 addendum: phase-9-pr.md no longer builds any jq payload -- its followup
+# ticket is created by `cenci pipeline followup` (which owns the encoding in
+# watch/internal/pipeline/followup.go), so it has no floor here. address-review
+# keeps only #773's inline-reply payload; its two followup jq forms are gone.
+assert_min_occurrences "${ADDRESS_REVIEW_SKILL}" "jq -n" 1 \
+  "must build the inline-reply payload via jq -n (#773; the followup create moved to cenci pipeline followup in #1340)"
+assert_min_occurrences "${ADDRESS_REVIEW_SKILL}" "--rawfile" 1 \
+  "must pass the raw inline-reply body via --rawfile (#773)"
 
-assert_min_occurrences "${ADDRESS_REVIEW_SKILL}" "jq -n" 2 \
-  "must document both the with-meta and no-meta jq forms"
-assert_min_occurrences "${ADDRESS_REVIEW_SKILL}" "--rawfile" 5 \
-  "must pass raw title/body via --rawfile in both followup jq forms plus the new inline-reply payload (#773)"
+# The whole-file floors above are also satisfied by frontmatter and prose
+# mentions, so pin the real inline-reply payload command line itself (one source
+# line, the exact command in address-review's Posting Replies step).
+INLINE_REPLY_PAYLOAD_CMD='jq -n --rawfile body ${TMPDIR:-/tmp}/cenci/pr-reply-<comment-id>.md '"'"'{body: $body}'"'"' > ${TMPDIR:-/tmp}/cenci/pr-reply-<comment-id>-payload.json'
+assert_file_contains "${ADDRESS_REVIEW_SKILL}" "${INLINE_REPLY_PAYLOAD_CMD}" \
+  "must carry the inline-reply payload command built with jq -n --rawfile body (#773)"
 
 assert_min_occurrences "${REFACTOR_SKILL}" "jq -n" 1 \
   "must build the ticket-creation payload via jq -n (#773, replaces gh issue create --title)"
