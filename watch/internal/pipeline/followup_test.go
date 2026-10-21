@@ -762,6 +762,32 @@ func TestFollowup_AddressReview_PRLinePreferred(t *testing.T) {
 	})
 }
 
+func TestFollowup_AddressReview_PRLineNearMissesDoNotMatch(t *testing.T) {
+	for _, line := range []string{
+		"PR: https://github.com/o/r/pull/90",
+		"PR: " + fuPR + " ",
+		" PR: " + fuPR,
+		"See PR: " + fuPR,
+		"PR: " + fuPR + "/files",
+	} {
+		t.Run(line, func(t *testing.T) {
+			w := newFuWorld(t)
+			w.add(fuLineage(20, "## Deferred Items\n- [ ] x — `watch`\n\n"+line))
+			out, err := fuRun(t, fuAddressReview, fuTicketless)
+			if err != nil {
+				t.Fatalf("Followup: %v", err)
+			}
+			fuExpect(t, out, FollowupActionCreated, FollowupReasonNoLineageMatch, 100)
+			if len(w.edits) != 0 {
+				t.Errorf("edits = %v, a near miss must not be treated as lineage", w.edits)
+			}
+			if len(out.Followup.AlsoMatched) != 0 {
+				t.Errorf("also_matched = %v, want none", out.Followup.AlsoMatched)
+			}
+		})
+	}
+}
+
 func TestFollowup_AddressReview_Ticketless_NoRelatedToFallback(t *testing.T) {
 	relBody := "## Deferred Items\n- [ ] x — `watch`\n\nRelated to #7\n\nPR: https://github.com/o/r/pull/1"
 	t.Run("ticketless address-review matches the PR line", func(t *testing.T) {
