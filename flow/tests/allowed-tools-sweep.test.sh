@@ -460,9 +460,7 @@ Bash(gh pr comment:*)
 Bash(gh pr edit:*)
 Bash(gh api repos/:*)
 Bash(gh issue view:*)
-Bash(gh issue edit:*)
-Bash(gh issue list:*)
-Bash(gh label create:*)
+Bash(cenci pipeline followup:*)
 Bash(git remote get-url:*)
 Bash(git worktree list:*)
 Bash(git pull --rebase:*)
@@ -498,7 +496,7 @@ Bash(rm -f ${TMPDIR:-/tmp}/cenci/:*)'
   while IFS= read -r cmd; do
     [[ -n "${cmd}" ]] || continue
     case "${cmd}" in
-      "gh pr view"*|"gh pr checkout"*|"gh pr comment"*|"gh pr edit"*|"gh api repos"*|"gh issue view"*|"gh issue edit"*|"gh issue list"*|"gh label create"*) ;;
+      "gh pr view"*|"gh pr checkout"*|"gh pr comment"*|"gh pr edit"*|"gh api repos"*|"gh issue view"*) ;;
       *) fail "skills/address-review/SKILL.md: ungranted gh invocation: [${cmd}]" ;;
     esac
   done < <(extract_bash_fences "${address_review_path}" | grep -oE '\bgh [a-z]+( [a-z]+)?' | LC_ALL=C sort -u)

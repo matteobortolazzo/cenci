@@ -10,6 +10,10 @@ How the `Followup` label is meant to behave, and how the `/cenci:maintain backlo
 - **Never release-blocking.** "Release" in this repo is a per-plugin semver tag auto-applied on push to `main` (paths `flow/**`, `watch/**`, `sandbox/**`). There is **no release gate** anywhere that reads issue labels, so a `Followup` ticket can never hold a release. A shipped release with open `Followup` tickets is the normal, expected state.
 - **Removed on triage, not preserved forever.** The label comes off when a human decides the item's fate — promoted to real work, grouped into a polish ticket, or superseded as a duplicate. It is not a permanent mark on the ticket.
 
+## Capture mechanics
+
+Capture runs through `cenci pipeline followup` (reference: `watch/README.md`), called by `implement` Phase 9 and `address-review`: it owns the generation limit, lineage dedup, the guarded append, milestone and label inheritance and the create. The similarity judgment stays in the skill: when the operation returns `needs-judgment`, the skill decides whether any candidate qualifies and makes the one second call, under the conservative bar (same component or file area; when in doubt, do not merge).
+
 ## Duplicate-detection scope
 
 When looking for duplicates, compare each open `Followup` against **all open issues**, not just other `Followup` tickets. The same finding is frequently re-captured across several sessions, and an already-refined, non-`Followup` ticket may already own the work. A `Followup` whose root cause is already tracked elsewhere is a duplicate regardless of the other ticket's labels.

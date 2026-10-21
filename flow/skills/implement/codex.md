@@ -243,7 +243,7 @@ file and line yourself, and accept it only once that read confirms the finding h
 A finding that does not hold is not fixed but recorded as a one-line `Considered and discarded`
 entry in the PR's `## Notes` (what was claimed, why it does not hold). Triage every lower-tier finding (Medium/Low, Should Fix, non-critical Warning) once, here: fix now if the fix is straightforward.
 Otherwise, discard by default — test-coverage gaps, doc polish, "consider X" suggestions, and refactor/tech-debt observations are never tracked, only recorded as a one-line `Considered and discarded` entry in the PR's `## Notes`, which never becomes a Followup ticket.
-**Track** it only when it is an actual defect with a concrete, realistic trigger path a user can hit in real use by noting it in the PR's `## Notes` for the Followup Ticket step.
+**Track** it only when it is an actual defect with a concrete, realistic trigger path a user can hit in real use by noting it in the PR's `## Notes` for the Followup Ticket step, which records the tracked items through `cenci pipeline followup --source implement`.
 Fix the accepted findings,
 capture lessons, and run the maintenance check
 (`flow/skills/maintain/scripts/check.sh --changed`) when the change touches docs, skills,
