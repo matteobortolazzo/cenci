@@ -46,7 +46,9 @@
 #
 # Covered files:
 #   - flow/.mcp.json (asserted absent)
-#   - flow/skills/configure/SKILL.md
+#   - flow/skills/configure/SKILL.md (router; asserted free of the moved text)
+#   - flow/skills/configure/phases/guidance-settings.md (Known tools, the
+#     Context7 legacy cleanup and ### MCP Server Configuration; #1343)
 #   - flow/skills/configure/phases/mcp-lsp-ui-questions.md (MCP catalog rows
 #     and scope legend; #1341)
 #   - .mcp.json (repo root; #813)
@@ -154,19 +156,26 @@ fi
 
 require_doc configure_skill "skills/configure/SKILL.md" || true
 # The MCP catalog and its scope legend live in the mcp-lsp-ui phase file since
-# the router split (#1341); the catalog pins are asserted there, the
-# permission/heal/merge-section pins below stay on SKILL.md.
+# the router split (#1341); the catalog pins are asserted there. The
+# permission/heal/merge-section pins (Known tools, the Context7 legacy cleanup
+# and ### MCP Server Configuration) live in phases/guidance-settings.md since
+# #1343 and are asserted there.
 require_doc configure_mcp_phase "skills/configure/phases/mcp-lsp-ui-questions.md" || true
+require_doc configure_guidance_phase "skills/configure/phases/guidance-settings.md" || true
 # Every markdown file of the configure skill (router, phases, references), for
 # negatives that must hold wherever the prose ended up.
 configure_all="${configure_skill}"
 configure_part_count=0
 for _configure_part in "${FLOW_DIR}"/skills/configure/phases/*.md "${FLOW_DIR}"/skills/configure/references/*.md; do
   [[ -f "${_configure_part}" ]] || continue
-  configure_all+=$'\n'"$(cat "${_configure_part}")"
+  if ! _configure_part_content="$(cat "${_configure_part}")"; then
+    fail "796 skills/configure/**: ${_configure_part#"${FLOW_DIR}/"}: not found/unreadable"
+    continue
+  fi
+  configure_all+=$'\n'"${_configure_part_content}"
   configure_part_count=$((configure_part_count+1))
 done
-[[ "${configure_part_count}" -ge 5 ]] || fail "796 skills/configure/**: configure_all aggregation is vacuous: aggregated ${configure_part_count} phases/references files (expected at least 5)"
+[[ "${configure_part_count}" -ge 12 ]] || fail "796 skills/configure/**: configure_all aggregation is vacuous: aggregated ${configure_part_count} phases/references files (expected at least 12)"
 if [[ -n "${configure_mcp_phase}" ]]; then
   assert_contains "${configure_mcp_phase}" \
     '| *(always available)* | context7 | `npx` | `["-y", "@upstash/context7-mcp@3.2.5"]` | `CONTEXT7_API_KEY` | project |' \
@@ -193,45 +202,69 @@ if [[ -n "${configure_mcp_phase}" ]]; then
 else
   fail "796 phases/mcp-lsp-ui-questions.md: empty, assertions skipped"
 fi
-if [[ -n "${configure_skill}" ]]; then
-  assert_contains "${configure_skill}" \
+if [[ -n "${configure_guidance_phase}" ]]; then
+  assert_contains "${configure_guidance_phase}" \
     "- **Context7**: \`mcp__context7__resolve-library-id\`, \`mcp__context7__query-docs\`" \
-    "813 skills/configure/SKILL.md: Known tools Context7 permission-pair entry missing both mcp__context7__resolve-library-id and mcp__context7__query-docs"
-  assert_not_contains "${configure_skill}" \
-    "mcp__plugin_cenci_context7__resolve-library-id" \
-    "796 skills/configure/SKILL.md: stale plugin-scoped context7 tool permission still present"
-  assert_contains "${configure_skill}" \
+    "813 phases/guidance-settings.md: Known tools Context7 permission-pair entry missing both mcp__context7__resolve-library-id and mcp__context7__query-docs"
+  # The stale-permission negative reads the whole configure aggregate (the
+  # prose may live in any configure file), paired with the positive cleanup
+  # anchor below: the wildcard cleanup text exists in phases/guidance-settings.md,
+  # so a zero count here cannot come from an emptied or missing file.
+  assert_contains "${configure_guidance_phase}" \
     "mcp__plugin_cenci_context7__*" \
-    "796 skills/configure/SKILL.md: legacy plugin-scoped context7 permission cleanup wildcard missing"
+    "796 phases/guidance-settings.md: legacy plugin-scoped context7 permission cleanup wildcard missing"
+  assert_not_contains "${configure_all}" \
+    "mcp__plugin_cenci_context7__resolve-library-id" \
+    "796 skills/configure/**: stale plugin-scoped context7 tool permission still present"
 
   # --- #813: full Context7 migration contract ------------------------------
   # Legacy cleanup (Context7 scope migration) section.
-  assert_contains "${configure_skill}" \
+  assert_contains "${configure_guidance_phase}" \
     "**Legacy cleanup (Context7 scope migration)**" \
-    "813 skills/configure/SKILL.md: Legacy cleanup (Context7 scope migration) heading missing"
-  assert_contains_ws "${configure_skill}" \
+    "813 phases/guidance-settings.md: Legacy cleanup (Context7 scope migration) heading missing"
+  assert_contains_ws "${configure_guidance_phase}" \
     "2. If Context7 is enabled this run, ensure the project-scoped \`mcp__context7__resolve-library-id\` and \`mcp__context7__query-docs\` pair is present in \`permissions.allow\` — add whichever is missing, and deduplicate rather than appending a duplicate entry." \
-    "813 skills/configure/SKILL.md: Context7 enabled add/deduplicate step missing"
-  assert_contains "${configure_skill}" \
+    "813 phases/guidance-settings.md: Context7 enabled add/deduplicate step missing"
+  assert_contains "${configure_guidance_phase}" \
     "3. If Context7 is declined this run, remove the pair without adding a replacement." \
-    "813 skills/configure/SKILL.md: Context7 declined removal step missing"
-  assert_contains_ws "${configure_skill}" \
+    "813 phases/guidance-settings.md: Context7 declined removal step missing"
+  assert_contains_ws "${configure_guidance_phase}" \
     "4. **Verify**: after healing, confirm \`permissions.allow\` contains no remaining entry with the \`mcp__plugin_cenci_context7__*\` prefix, and that every non-Context7 entry present before this step is still present unchanged. If either check fails, the heal step above was incomplete or over-broad — fix before continuing." \
-    "813 skills/configure/SKILL.md: Context7 cleanup verify + unrelated-entry preservation step missing"
+    "813 phases/guidance-settings.md: Context7 cleanup verify + unrelated-entry preservation step missing"
 
   # MCP Server Configuration section.
-  assert_contains "${configure_skill}" \
+  assert_contains "${configure_guidance_phase}" \
     "### MCP Server Configuration" \
-    "813 skills/configure/SKILL.md: MCP Server Configuration heading missing"
-  assert_contains "${configure_skill}" \
+    "813 phases/guidance-settings.md: MCP Server Configuration heading missing"
+  assert_contains "${configure_guidance_phase}" \
     "- If the file already exists, merge into the existing \`mcpServers\` object — never overwrite existing entries, with two field-scoped exceptions:" \
-    "813 skills/configure/SKILL.md: .mcp.json merge/never-overwrite sentence missing"
-  assert_contains "${configure_skill}" \
+    "813 phases/guidance-settings.md: .mcp.json merge/never-overwrite sentence missing"
+  assert_contains "${configure_guidance_phase}" \
     "  - **Version-pin refresh**: for a catalog server whose catalog \`Args\` are version-pinned (e.g. Context7), if an existing entry's \`args\` differ from the catalog value, overwrite **\`args\` only** — every other key (including \`env\` and any user-added keys) is preserved. This is the single explicit, documented exception to \"never overwrite existing entries.\"" \
-    "813 skills/configure/SKILL.md: args-only version-pin-refresh sentence missing"
-  assert_contains "${configure_skill}" \
+    "813 phases/guidance-settings.md: args-only version-pin-refresh sentence missing"
+  assert_contains "${configure_guidance_phase}" \
     "  - **Declined servers**: for each catalog server recorded \`false\` in \`mcpServers\` (question 5's answer), delete that entry from an existing \`.mcp.json\` if present. If \`mcpServers\` becomes empty as a result, leave the file in place with an empty \`mcpServers\` object — never delete the file. (The \"never create an empty \`.mcp.json\`\" rule above applies to *creating* a new file only, not to editing an existing one down to empty.)" \
-    "813 skills/configure/SKILL.md: declined-server entry-removal sentence missing"
+    "813 phases/guidance-settings.md: declined-server entry-removal sentence missing"
+else
+  fail "813 phases/guidance-settings.md: empty or missing, Context7 cleanup and MCP Server Configuration assertions skipped"
+fi
+
+# The moved text must be gone from the router: paired with the Step Map that
+# names the phase file (the existence marker), so an emptied SKILL.md cannot
+# satisfy it.
+if [[ -n "${configure_skill}" ]]; then
+  if [[ "${configure_skill}" != *"phases/guidance-settings.md"* ]]; then
+    fail "813 skills/configure/SKILL.md: cannot verify the Context7 cleanup left the router -- it never names phases/guidance-settings.md"
+  else
+    assert_not_contains "${configure_skill}" \
+      "**Legacy cleanup (Context7 scope migration)**" \
+      "813 skills/configure/SKILL.md: Context7 cleanup must have moved to phases/guidance-settings.md"
+    assert_not_contains "${configure_skill}" \
+      "### MCP Server Configuration" \
+      "813 skills/configure/SKILL.md: MCP Server Configuration must have moved to phases/guidance-settings.md"
+  fi
+else
+  fail "813 skills/configure/SKILL.md: empty or missing, router absence assertions skipped"
 fi
 
 # =====================================================================

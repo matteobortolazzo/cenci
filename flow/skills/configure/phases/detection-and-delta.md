@@ -54,8 +54,8 @@ bash "${CLAUDE_PLUGIN_ROOT}/skills/configure/scripts/resolve-delta.sh" <config-p
 - Free-text user context never re-opens an answered question on a delta run; if it names one, say that `/cenci:configure --all` re-opens it. Context still steers the questions that are asked and the generation steps.
 - When question 8 is carried, `ci.yml` is neither regenerated nor prompted for. The conflict check is part of question 8, and `ci.yml` carries no managed markers.
 - A carried `uiConventions` keeps the existing `## UI Conventions` section verbatim. That answer lives only in the generated `AGENTS.md`.
-- The substantive-guidance diff-approval gate in step 1 stays a safety gate, not a configure question: it still fires whenever existing guidance would be replaced.
-- The `.lazyboards.yml` suggest-or-skip analyzer only reports on a delta run, and a managed `.cenci/Dockerfile` is refreshed without asking (see step 5e and `### Board Config (lazyboards)` in `phases/lazyboards.md`).
+- The substantive-guidance diff-approval gate in step 1 in `phases/guidance-settings.md` stays a safety gate, not a configure question: it still fires whenever existing guidance would be replaced.
+- The `.lazyboards.yml` suggest-or-skip analyzer only reports on a delta run, and a managed `.cenci/Dockerfile` is refreshed without asking (see step 5e in `phases/ci-dockerfile.md` and `### Board Config (lazyboards)` in `phases/lazyboards.md`).
 
 ### Platform Detection
 

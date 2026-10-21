@@ -64,8 +64,9 @@
 # Covered files:
 #   - flow/skills/configure/SKILL.md, phases/detection-and-delta.md (the
 #     `### Delta Resolution` pins, #1341), phases/lazyboards.md,
-#     phases/fleet-enrollment.md, phases/autonomy-settings.md (#1342), codex.md,
-#     scripts/resolve-delta.sh, question-keys.json
+#     phases/fleet-enrollment.md, phases/autonomy-settings.md (#1342),
+#     phases/ci-dockerfile.md (the step 5e managed-block pins, P6/P15/P16/P20,
+#     #1343), codex.md, scripts/resolve-delta.sh, question-keys.json
 #   - docs/autonomous-loop.md (cross-project), flow/README.md,
 #     flow/docs/skill-authoring.md
 set -uo pipefail
@@ -353,7 +354,9 @@ Q14_ALL_KEEP_BYTE_IDENTICAL='Keeping leaves every `automerge` block byte-identic
 Q14_ALL_REMOVE_SCOPE='"Remove the block(s)" deletes the top-level `automerge` key and the `automerge` key of every `projects[]` entry.'
 OLD_UNCONDITIONAL_ABSENT_ONLY_RULE='When `planning` or `automerge` is already present, report the existing value verbatim, never re-prompt, never narrow, and never remove it.'
 
-# 5e Dockerfile (scoped to the "Merge-safe regeneration" block).
+# 5e Dockerfile (scoped to the "Merge-safe regeneration" block). Step 5e lives
+# in phases/ci-dockerfile.md since #1343; SKILL.md keeps only a stub.
+CI_DOCKERFILE_FILE='phases/ci-dockerfile.md'
 DOCKERFILE_BLOCK_BEGIN='**Merge-safe regeneration**'
 DOCKERFILE_BLOCK_END='**Monorepo**: fragments are'
 DOCKERFILE_DELTA_VALID='On a delta run with valid `# cenci:managed-begin` / `# cenci:managed-end` markers, refresh the managed block silently — no Q9/Q9b/Q9c prompt — and leave every byte outside the markers unchanged.'
@@ -363,6 +366,13 @@ DOCKERFILE_ALL_PROMPT='On an `--all` or `full` run, a `.cenci/Dockerfile` with n
 DOCKERFILE_OVERWRITE_OPTION='Overwrite — wrap it in managed markers and replace with the generated block'
 OLD_DOCKERFILE_NO_MARKERS_CLAIM='(e.g. a hand-authored legacy `.cenci/Dockerfile`): do not silently overwrite it. Reuse the exact Overwrite/Skip/Show conflict-check UX'
 OLD_DOCKERFILE_MALFORMED_CLAIM='Route this through the exact same Overwrite/Skip/Show conflict-check UX as the "no markers" case above'
+# P20 (#1343): the malformed-markers bullet's delta-run sentence, pinned as the
+# acceptance criterion words it: left untouched and reported like "no markers",
+# no prompt. It must occur exactly once across the configure markdown, in
+# phases/ci-dockerfile.md, and never in SKILL.md.
+DOCKERFILE_MALFORMED_DELTA='On a delta run it is left untouched and reported exactly like the "no markers" case above (no prompt)'
+DOCKERFILE_MALFORMED_DEFINITION='(exactly one of `# cenci:managed-begin` / `# cenci:managed-end` present, markers out of order, or duplicate marker pairs)'
+DOCKERFILE_MALFORMED_ALL='on an `--all` or `full` run it takes the same Overwrite/Skip/Show prompt'
 
 # Step 6 / step 7 / restatement sites.
 # Step regions: step 6 runs from its numbered heading up to step 7's; step 7
@@ -499,6 +509,8 @@ require_doc delta_phase "skills/configure/phases/detection-and-delta.md" || true
 require_doc lazy_phase "skills/configure/phases/lazyboards.md" || true
 require_doc fleet_phase "skills/configure/phases/fleet-enrollment.md" || true
 require_doc autonomy_phase "skills/configure/phases/autonomy-settings.md" || true
+# Step 5e (the managed-block rules) lives in phases/ci-dockerfile.md since #1343.
+require_doc ci_phase "skills/configure/${CI_DOCKERFILE_FILE}" || true
 require_doc codex "skills/configure/codex.md" || true
 require_repo_doc loop_doc "docs/autonomous-loop.md" || true
 require_doc readme "README.md" || true
@@ -526,7 +538,6 @@ if [[ -n "${skill}" ]]; then
   board_body="$(extract_section_body_raw "${lazy_phase}" "${BOARD_HEADING}")"
   fleet_body="$(extract_section_body_raw "${fleet_phase}" "${FLEET_HEADING}")"
   autonomy_body="$(extract_section_body_raw "${autonomy_phase}" "${AUTONOMY_HEADING}")"
-  dockerfile_block="$(extract_between_raw "${skill}" "${DOCKERFILE_BLOCK_BEGIN}" "${DOCKERFILE_BLOCK_END}")"
   step6_region="$(extract_between_raw "${skill}" "${STEP6_BEGIN}" "${STEP7_BEGIN}")"
   step7_region="$(extract_between_raw "${skill}" "${STEP7_BEGIN}" "${STEP7_END}")"
   LEDGER_PROG="$(extract_marked_block_raw "${skill}" "${LEDGER_BEGIN}" "${LEDGER_END}")"
@@ -534,6 +545,23 @@ if [[ -n "${skill}" ]]; then
   Q14_PROG="$(extract_marked_block_raw "${autonomy_body}" "${Q14_REMOVE_BEGIN}" "${Q14_REMOVE_END}")"
   Q15_PROG="$(extract_marked_block_raw "${autonomy_body}" "${Q15_SWITCH_BEGIN}" "${Q15_SWITCH_END}")"
 fi
+# The managed-block rules are read from the phase file that now holds step 5e.
+if [[ -n "${ci_phase}" ]]; then
+  dockerfile_block="$(extract_between_raw "${ci_phase}" "${DOCKERFILE_BLOCK_BEGIN}" "${DOCKERFILE_BLOCK_END}")"
+fi
+
+# configure_corpus -- SKILL.md plus every phases/*.md and references/*.md on
+# disk, so the P20 exactly-once count sees a stray copy in any configure file.
+configure_corpus="${skill}"
+shopt -s nullglob
+for _part in "${FLOW_DIR}"/skills/configure/phases/*.md "${FLOW_DIR}"/skills/configure/references/*.md; do
+  if ! _part_content="$(cat "${_part}")"; then
+    fail "skills/configure/**: ${_part#"${FLOW_DIR}/"}: not found/unreadable"
+    continue
+  fi
+  configure_corpus+=$'\n'"${_part_content}"
+done
+shopt -u nullglob
 
 # need_prog <program-text> <label> -- fails (in the parent shell) when an
 # extracted program is missing, so every behavior case fails for the right
@@ -956,9 +984,9 @@ case_AC1_contract_no_questions_and_stamp_only_pr() {
 }
 
 case_AC3_contract_dockerfile_delta_refresh() {
-  [[ -n "${skill}" ]] || { fail "contract: SKILL.md missing"; return; }
+  [[ -n "${ci_phase}" ]] || { fail "contract: ${CI_DOCKERFILE_FILE} missing"; return; }
   if [[ -z "${dockerfile_block}" ]]; then
-    fail "AC3: 5e 'Merge-safe regeneration' block not found in SKILL.md"
+    fail "AC3: 5e 'Merge-safe regeneration' block not found in ${CI_DOCKERFILE_FILE}"
     return
   fi
   assert_contains_ws "${dockerfile_block}" "${DOCKERFILE_DELTA_VALID}" "AC3 5e: valid markers on a delta run are refreshed silently, bytes outside the markers untouched"
@@ -966,7 +994,7 @@ case_AC3_contract_dockerfile_delta_refresh() {
 }
 
 case_AC15_contract_no_q9_prompt_on_valid_markers() {
-  [[ -n "${skill}" ]] || { fail "contract: SKILL.md missing"; return; }
+  [[ -n "${ci_phase}" ]] || { fail "contract: ${CI_DOCKERFILE_FILE} missing"; return; }
   assert_contains_ws "${dockerfile_block}" 'no Q9/Q9b/Q9c prompt' "AC15 5e: the delta refresh asks no Q9/Q9b/Q9c question"
   assert_contains_ws "${dockerfile_block}" "${DOCKERFILE_DELTA_VALID}" "AC15 5e: the full no-prompt refresh sentence"
   # Only carried answers are prompt-free: an ID in delta.ask is still asked,
@@ -976,13 +1004,13 @@ case_AC15_contract_no_q9_prompt_on_valid_markers() {
   assert_contains_ws "${dockerfile_block}" "${DOCKERFILE_EFFECTIVE_CONSUMED}" "5e: a just-answered Yes is consumed by the same generation"
   assert_contains_ws "${dockerfile_block}" "${DOCKERFILE_EFFECTIVE_ENABLED}" "5e: generate/refresh whenever the effective sandbox.enabled is true"
   assert_absent_paired_ws "${dockerfile_block}" "${DOCKERFILE_EFFECTIVE_PER_ID}" "${OLD_DOCKERFILE_ALL_CARRIED}" "5e retired blanket 'Q9/Q9b/Q9c are carried' claim"
-  assert_absent_paired_ws "${skill}" "${DOCKERFILE_EFFECTIVE_ENABLED}" "${OLD_5E_HEADER_CARRIED}" "5e header retired 'carried sandbox.enabled' gate"
+  assert_absent_paired_ws "${ci_phase}" "${DOCKERFILE_EFFECTIVE_ENABLED}" "${OLD_5E_HEADER_CARRIED}" "5e header retired 'carried sandbox.enabled' gate"
 }
 
 case_AC16_contract_dockerfile_untouched_on_delta() {
-  [[ -n "${skill}" ]] || { fail "contract: SKILL.md missing"; return; }
+  [[ -n "${ci_phase}" ]] || { fail "contract: ${CI_DOCKERFILE_FILE} missing"; return; }
   if [[ -z "${dockerfile_block}" ]]; then
-    fail "AC16: 5e 'Merge-safe regeneration' block not found in SKILL.md"
+    fail "AC16: 5e 'Merge-safe regeneration' block not found in ${CI_DOCKERFILE_FILE}"
     return
   fi
   assert_contains_ws "${dockerfile_block}" "${DOCKERFILE_DELTA_UNTOUCHED}" "AC16 5e: no/malformed markers on a delta run -> untouched and reported, no prompt"
@@ -990,6 +1018,30 @@ case_AC16_contract_dockerfile_untouched_on_delta() {
   assert_contains_ws "${dockerfile_block}" "${DOCKERFILE_OVERWRITE_OPTION}" "AC16 5e: the Overwrite option text survives for --all"
   assert_absent_paired_ws "${dockerfile_block}" "${DOCKERFILE_DELTA_UNTOUCHED}" "${OLD_DOCKERFILE_NO_MARKERS_CLAIM}" "AC16 5e retired unconditional no-markers prompt"
   assert_absent_paired_ws "${dockerfile_block}" "${DOCKERFILE_DELTA_UNTOUCHED}" "${OLD_DOCKERFILE_MALFORMED_CLAIM}" "AC16 5e retired unconditional malformed-markers prompt"
+}
+
+# P20 (#1343): a delta run with malformed `# cenci:managed-begin` /
+# `# cenci:managed-end` markers leaves `.cenci/Dockerfile` untouched and reports
+# it without a prompt. The sentence moved with step 5e, so it must be in
+# phases/ci-dockerfile.md exactly once across the configure markdown and not in
+# SKILL.md. The SKILL.md absence is paired with the step 6 anchor that stays
+# inline, so an emptied SKILL.md cannot satisfy it.
+case_P20_malformed_markers_untouched_on_delta() {
+  [[ -n "${ci_phase}" ]] || { fail "P20: ${CI_DOCKERFILE_FILE} missing or empty"; return; }
+  [[ -n "${skill}" ]] || { fail "P20: SKILL.md missing or empty"; return; }
+  if [[ -z "${dockerfile_block}" ]]; then
+    fail "P20: 5e 'Merge-safe regeneration' block not found in ${CI_DOCKERFILE_FILE}"
+    return
+  fi
+  assert_contains_ws "${dockerfile_block}" "${DOCKERFILE_MALFORMED_DEFINITION}" "P20 5e: the malformed-markers bullet defines malformed (one marker, out of order, duplicate pairs)"
+  assert_contains_ws "${dockerfile_block}" "${DOCKERFILE_MALFORMED_DELTA}" "P20 5e: a delta run leaves malformed markers untouched, reported like the no-markers case, no prompt"
+  assert_contains_ws "${dockerfile_block}" "${DOCKERFILE_MALFORMED_ALL}" "P20 5e: an --all or full run gives malformed markers the Overwrite/Skip/Show prompt"
+
+  local n
+  n="$(count_occurrences "$(normalize_ws "${configure_corpus}")" "${DOCKERFILE_MALFORMED_DELTA}")"
+  [[ "${n}" -eq 1 ]] || fail "P20: the malformed-markers delta sentence must occur exactly once across the configure markdown, found ${n}"
+  assert_absent_paired_ws "${skill}" "${STEP6_BEGIN}" "${DOCKERFILE_MALFORMED_DELTA}" "P20: SKILL.md no longer carries the malformed-markers delta sentence"
+  assert_absent_paired_ws "${skill}" "${STEP6_BEGIN}" "${DOCKERFILE_MALFORMED_DEFINITION}" "P20: SKILL.md no longer carries the malformed-markers definition"
 }
 
 case_AC4_contract_all_token() {
@@ -1246,6 +1298,7 @@ case_AC1_contract_no_questions_and_stamp_only_pr
 case_AC3_contract_dockerfile_delta_refresh
 case_AC15_contract_no_q9_prompt_on_valid_markers
 case_AC16_contract_dockerfile_untouched_on_delta
+case_P20_malformed_markers_untouched_on_delta
 case_AC4_contract_all_token
 case_AC5_contract_carried_summary
 case_AC7_contract_q13_all_offer

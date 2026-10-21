@@ -9,8 +9,9 @@
 # writes into a repo's `.cenci/Dockerfile` in a per-fragment
 # `# cenci:fragment-begin <name>` / `# cenci:fragment-end <name>` marker pair
 # so identification becomes exact. This suite pins that step 5e instruction
-# in flow/skills/configure/SKILL.md, plus the corrected remedy wording at
-# SKILL.md's Q9b (`:510`), which used to tell the user that a bare
+# in flow/skills/configure/phases/ci-dockerfile.md (moved there from SKILL.md
+# by #1343), plus the corrected remedy wording at Q9b in
+# phases/runtime-ci-sandbox-questions.md, which used to tell the user that a bare
 # `cenci sandbox build` would pick up a fragment fix — false for a per-repo
 # image, since BuildRepoImage never reads sandbox/fragments/*.dockerfile at
 # all. The remedy must name `/cenci:configure` first, then
@@ -30,7 +31,9 @@
 # checking the result and calling `fail()` in the parent shell.
 #
 # Covered files:
-#   - flow/skills/configure/SKILL.md (step 5e)
+#   - flow/skills/configure/phases/ci-dockerfile.md (step 5e, #1343)
+#   - flow/skills/configure/SKILL.md (the step 5d/5e stub must no longer carry
+#     the per-fragment marker instruction)
 #   - flow/skills/configure/phases/runtime-ci-sandbox-questions.md (Q9b, #1341)
 #   - flow/skills/configure/phases/autonomy-settings.md (the five jq marker
 #     blocks and the automerge scaffold, byte for byte, #1342 P5)
@@ -151,16 +154,27 @@ NEW_REMEDY='Tell the user to re-run `/cenci:configure` and then `cenci sandbox b
 # --- skills/configure/SKILL.md ----------------------------------------------
 
 require_doc skill "skills/configure/SKILL.md" || true
-if [[ -n "${skill}" ]]; then
+require_doc ci_phase "skills/configure/phases/ci-dockerfile.md" || true
+if [[ -n "${ci_phase}" ]]; then
   # Step 5e must exist at all — every check below is scoped/paired against it.
-  assert_contains "${skill}" "${STEP5E_MARKER}" "SKILL.md step 5e (Generate .cenci/Dockerfile) present"
+  assert_contains "${ci_phase}" "${STEP5E_MARKER}" "ci-dockerfile.md step 5e (Generate .cenci/Dockerfile) present"
 
   # Per-fragment marker emission instruction.
-  assert_contains "${skill}" "${FRAGMENT_MARKER_BEGIN}" "SKILL.md step 5e emits # cenci:fragment-begin <name>"
-  assert_contains "${skill}" "${FRAGMENT_MARKER_END}" "SKILL.md step 5e emits # cenci:fragment-end <name>"
-  assert_contains_ws "${skill}" "${FRAGMENT_MARKER_NAME_RULE}" "SKILL.md step 5e states <name> is the fragment's basename without .dockerfile"
-  assert_contains_ws "${skill}" "${FRAGMENT_MARKER_WRAP_INSTRUCTION}" "SKILL.md step 5e instructs wrapping each fragment's content in the markers"
+  assert_contains "${ci_phase}" "${FRAGMENT_MARKER_BEGIN}" "ci-dockerfile.md step 5e emits # cenci:fragment-begin <name>"
+  assert_contains "${ci_phase}" "${FRAGMENT_MARKER_END}" "ci-dockerfile.md step 5e emits # cenci:fragment-end <name>"
+  assert_contains_ws "${ci_phase}" "${FRAGMENT_MARKER_NAME_RULE}" "ci-dockerfile.md step 5e states <name> is the fragment's basename without .dockerfile"
+  assert_contains_ws "${ci_phase}" "${FRAGMENT_MARKER_WRAP_INSTRUCTION}" "ci-dockerfile.md step 5e instructs wrapping each fragment's content in the markers"
+else
+  fail "ci-dockerfile.md: missing or empty, step 5e assertions skipped"
+fi
 
+# The instruction moved with step 5e: SKILL.md keeps only a stub. The absence
+# is paired with the step 6 anchor that stays inline in SKILL.md.
+if [[ -n "${skill}" ]]; then
+  assert_absent_paired_ws "${skill}" '6. **Write `.cenci/config.json`**' "${FRAGMENT_MARKER_BEGIN}" "SKILL.md no longer carries the per-fragment begin marker instruction"
+  assert_absent_paired_ws "${skill}" '6. **Write `.cenci/config.json`**' "${FRAGMENT_MARKER_NAME_RULE}" "SKILL.md no longer carries the per-fragment marker name rule"
+else
+  fail "SKILL.md: missing or empty, step 5e absence checks skipped"
 fi
 
 # --- skills/configure/phases/runtime-ci-sandbox-questions.md ----------------
