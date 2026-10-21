@@ -5,7 +5,7 @@
 # (see docs/demo-repo-seed.sh).
 # The recording machine is expected to carry a per-repo .lazyboards.yml — the
 # canonical setup this GIF advertises (see docs/orchestration.md and
-# flow/skills/configure/SKILL.md step 5f); the hidden .lazyboards.yml below
+# flow/skills/configure/phases/lazyboards.md); the hidden .lazyboards.yml below
 # only pins columns and the column actions so the recording is deterministic.
 # Regenerate with: vhs demo.tape   (from the repo root)
 

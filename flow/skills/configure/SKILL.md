@@ -54,7 +54,7 @@ From this point on, `<worktree-path>` is `.worktrees/configure-<slug>`. Every fi
 
 ### Step Map
 
-Read these files in this order. Every phase file is read in full on every run: the questions inside stay gated by `delta.ask`, but the inline generation steps below consume the catalogs and mapping tables they hold, and the manual detection fallbacks must stay reachable when `detect-project.sh` fails. Only the migrations row is conditional. Questions 1 to 9c come from the phase files and are asked as `### Question Defaults` describes.
+Read these files in this order. The first four phase files are read in full on every run: the questions inside stay gated by `delta.ask`, but the inline generation steps below consume the catalogs and mapping tables they hold, and the manual detection fallbacks must stay reachable when `detect-project.sh` fails. The migrations row and the four rows after the Dockerfile questions are conditional; a skipped file mutates nothing. Questions 1 to 9c, 10 to 17 and 18 to 20 come from the phase files and are asked as `### Question Defaults` describes, in the order 10, 11/12, 13 to 17, 18 to 20.
 
 | File | Condition | Why |
 |---|---|---|
@@ -63,8 +63,12 @@ Read these files in this order. Every phase file is read in full on every run: t
 | `phases/project-questions.md` | Every run, after `phases/detection-and-delta.md`. | Questions 1 to 3: tech stack, project structure with Steps 2a and 2b, branching strategy. |
 | `phases/mcp-lsp-ui-questions.md` | Every run, after `phases/project-questions.md`. | Dependency detection and its manual fallback, the MCP and LSP catalogs, questions 5 and 6, UI conventions (5c), Playwright CLI setup, LSP detection and binary verification. |
 | `phases/runtime-ci-sandbox-questions.md` | Every run, after `phases/mcp-lsp-ui-questions.md`. | Questions 7 to 9c: auto-compact, subagent pin, the CI/CD question with its Stack-to-CI mapping table, and the sandbox, dind and Azure questions with the Stack-to-fragment mapping table. |
+| `phases/lazyboards.md` | Only when `lazyboards` is asked this run, or `.lazyboards.yml` exists at the repo root. Check existence with `test -f .lazyboards.yml` as its **own** Bash call, after `phases/runtime-ci-sandbox-questions.md`. If question 10 is carried but `.lazyboards.yml` is missing, do not regenerate it — report it and say `/cenci:configure --all` re-offers it. | Question 10 with its derivation tables and key assignment, the suggest-or-skip analyzer for an existing file, and step 5f, which generates it. |
+| `references/lazyboards-example.md` | Only when step 5f writes `.lazyboards.yml`, or the analyzer rewrites it, and only after `phases/lazyboards.md`. | The full generated `.lazyboards.yml` worked example. |
+| `phases/fleet-enrollment.md` | Only when `dispatchEnroll`, `dispatch.planRefined`, `automerge.enabled` or `planning.attended` is asked this run, and on every host run (`detection.inContainer` is not `true`): the half-enrolled question 12 repair has no ID and needs the status probe. Read it after `phases/lazyboards.md`; its `### Fleet Autonomy Controls` is asked after `phases/autonomy-settings.md`. | `### Fleet Dispatch Enrollment` (questions 11 and 12, with the container guard) and `### Fleet Autonomy Controls` (questions 18 to 20 and their Next step block). |
+| `phases/autonomy-settings.md` | Only when `planning`, `automerge`, `refinement`, `refinement.confirmBeforeApply` or `refinement.automerge` is asked this run, and after `phases/fleet-enrollment.md`'s `### Fleet Dispatch Enrollment`. | Questions 13 to 17 and the marker-bounded `jq` programs step 6 applies. |
 
-Question 10 onward and generation steps 0 to 7 stay inline in this file.
+Generation steps 0 to 7 stay inline in this file, except step 5f, which runs from `phases/lazyboards.md`; a carried answer from a skipped phase file is reported verbatim by the step 7 final report.
 
 ### Question Defaults
 
@@ -82,7 +86,7 @@ Options: "Yes — keep current settings (Recommended)", "No — let me change th
 
 If the field is absent (first-ever configure run, or a newly-detected server not previously offered), skip the gate and ask the multi-select directly.
 
-Under `--all`, every keep-or-change offer lists its Keep option first, marked "(Recommended)": "Yes — keep current settings (Recommended)" here, "Keep current (Recommended)" for questions 13 and 15, "Keep current block(s) (Recommended)" for question 14 (see `### Autonomy Settings`).
+Under `--all`, every keep-or-change offer lists its Keep option first, marked "(Recommended)" and pre-selected: "Yes — keep current settings (Recommended)" here, "Keep current (Recommended)" for questions 13 and 15, "Keep current block(s) (Recommended)" for question 14 (see `### Autonomy Settings` in `phases/autonomy-settings.md`).
 
 The `ID` column is the question's identifier in `question-keys.json` — the value `resolve-delta.sh` returns in `delta.ask`/`delta.carried` and step 6 stores in `configureOffered`. IDs are a stable contract persisted in users' ledgers.
 
@@ -101,515 +105,16 @@ The `ID` column is the question's identifier in `question-keys.json` — the val
 | 9. Sandbox Dockerfile | `sandbox.enabled` | `sandbox` | Pre-select Yes/No based on `sandbox.enabled` |
 | 9b. Nested Docker (dind) | `sandbox.dind` | `sandbox` | Pre-select Yes/No based on `existingConfig.sandbox.dind` (else Yes when a Testcontainers/Docker-SDK trigger was detected, No otherwise) |
 | 9c. Azure CLI | `sandbox.azure` | `sandbox` | Pre-select Yes/No based on `existingConfig.sandbox.azure`; if field absent, ask normally |
-| 10. Board config (lazyboards) | `lazyboards` | `lazyboards` | Only asked when no `.lazyboards.yml` exists; if one exists, the suggest-or-skip analyzer reports (and prompts only under `--all`/`full`) — see *Board Config* |
-| 11. Fleet dispatch enrollment | `dispatchEnroll` | *(none — user-level `~/.config/cenci/config.json`; ledger-tracked)* | Asked only when `cenci dispatch status --json` reports `enrolled: false` (see *Fleet Dispatch Enrollment*) |
-| 13. Plan approval autonomy | `planning` | `planning` | Delta run: asked only when the key is absent and not already offered; `--all` re-offers it with the committed value pre-selected (see *Autonomy Settings*) |
-| 14. Automerge policy block | `automerge` | `automerge` (top-level or any `projects[]` entry) | Delta run: asked only when absent and not already offered; `--all` re-offers it with "Keep current block(s) (Recommended)" pre-selected (see *Autonomy Settings*) |
-| 15. Refinement autonomy | `refinement` | `refinement` | Delta run: asked only when the key is absent and not already offered; `--all` re-offers it with "Keep current (Recommended)" pre-selected (see *Autonomy Settings*) |
+| 10. Board config (lazyboards) | `lazyboards` | `lazyboards` | Only asked when no `.lazyboards.yml` exists; if one exists, the suggest-or-skip analyzer reports (and prompts only under `--all`/`full`) — see `### Board Config (lazyboards)` in `phases/lazyboards.md` |
+| 11. Fleet dispatch enrollment | `dispatchEnroll` | *(none — user-level `~/.config/cenci/config.json`; ledger-tracked)* | Asked only when `cenci dispatch status --json` reports `enrolled: false` (see `### Fleet Dispatch Enrollment` in `phases/fleet-enrollment.md`) |
+| 13. Plan approval autonomy | `planning` | `planning` | Delta run: asked only when the key is absent and not already offered; `--all` re-offers it with the committed value pre-selected (see `### Autonomy Settings` in `phases/autonomy-settings.md`) |
+| 14. Automerge policy block | `automerge` | `automerge` (top-level or any `projects[]` entry) | Delta run: asked only when absent and not already offered; `--all` re-offers it with "Keep current block(s) (Recommended)" pre-selected (see `### Autonomy Settings` in `phases/autonomy-settings.md`) |
+| 15. Refinement autonomy | `refinement` | `refinement` | Delta run: asked only when the key is absent and not already offered; `--all` re-offers it with "Keep current (Recommended)" pre-selected (see `### Autonomy Settings` in `phases/autonomy-settings.md`) |
 | 16. Refinement confirmation | `refinement.confirmBeforeApply` | `refinement.confirmBeforeApply` | Independent leaf; default false; `--all` re-offers |
 | 17. Refinement merge grants | `refinement.automerge` | `refinement.automerge` | Independent leaf; default off; `--all` re-offers |
 | 18–20. Fleet autonomy controls | `dispatch.planRefined`, `automerge.enabled`, `planning.attended` | ledger only | Independent host CLI choices; sandbox defers host execution |
 
 Ask these questions one at a time using the `AskUserQuestion` tool (on a `delta` run, only those whose ID is in `delta.ask` — skip the rest and carry their recorded values):
-
-### Board Config (lazyboards)
-
-**This section runs on every configure invocation** — there is no install/opt-in
-gate. Check whether a board config already exists (run the check as its **own**
-Bash call, per `cenci:shell-rules`) and branch:
-
-- **No `.lazyboards.yml` at the repo root** → ask **question 10** below (offer to
-  generate one) when its ID `lazyboards` is in `delta.ask` (always on an `--all` or
-  `full` run). On "No", omit `lazyboards` from config.json (same pattern as
-  `cicd`/`sandbox`). A declined question 10 is recorded in `configureOffered` and is not re-asked on a delta run.
-  If question 10 is carried but `.lazyboards.yml` is missing, do not regenerate it — report it and say `/cenci:configure --all` re-offers it.
-- **`.lazyboards.yml` already exists** → **skip question 10** and jump to
-  **Existing config: suggest or skip** below (analyze the file against the
-  recommended action set and suggest what's missing, or skip quietly with a small log).
-  On a delta run with an existing `.lazyboards.yml`, the suggest-or-skip analyzer reports new board actions in the end-of-run summary and never prompts; `--all` restores the Apply/Overwrite/Keep/Show prompt.
-
-10. **Board config** (no existing `.lazyboards.yml`): present this Yes/No
-    confirmation via `AskUserQuestion` — a pre-existing
-    `lazyboards.enabled: true` recorded from a prior run, or user context requesting a
-    narrower focus or a skip, never authorizes silently regenerating
-    `.lazyboards.yml` without a question: "Generate a per-repo
-    `.lazyboards.yml` for the lazyboards board? (Wires Refine/Implement keybindings onto
-    the New/Refined/Planned columns, Edit-plan and View-plan keybindings on Planned that open
-    the ticket's saved plan in `$EDITOR` / a pager, plus In Review actions that open a
-    PR's registered worktree in a tmux window (`W`) and, per project, serve or test it
-    with a mnemonic key sequence — reviewing a PR becomes a couple of keypresses on
-    the card.)"
-   - Options: "Yes — generate `.lazyboards.yml`", "No — skip"
-
-   **If Yes — detect runnable projects and their serve commands.** For the single
-   project (or each monorepo project confirmed in Step 2a), derive a serve command
-   from the first matching rule:
-
-   | Rule (first match wins) | Serve command |
-   |---|---|
-   | `package.json` has a `dev` script | `npm run dev` |
-   | `package.json` has a `start` script | `npm run start` |
-   | Angular project (`@angular/core`) without either script | `ng serve` |
-   | `.csproj` with `Microsoft.NET.Sdk.Web` | `dotnet run` |
-   | Go module containing a `main` package | `go run .` |
-   | Anything else (libraries, tooling, markdown/shell) | *not runnable — no action generated* |
-
-   Only the **runner invocation** above is ever embedded in the generated file
-   (`npm run dev`, `ng serve`, …) — never the script *contents* from `package.json`,
-   which are semi-trusted external values (see `docs/skill-authoring.md`).
-
-   **Also derive a test command** for each project (first match wins), so the In
-   Review column can offer a one-keypress "run the PR's tests in its worktree"
-   action alongside serve. Reuse the project's stored `testCommand` from
-   `existingConfig.projects[]` when present before falling back to this table:
-
-   | Rule (first match wins) | Test command |
-   |---|---|
-   | `package.json` has a `test` script | `npm test` |
-   | Angular project (`@angular/core`) | `ng test --watch=false` |
-   | `.csproj` or `.sln` present | `dotnet test` |
-   | Go module | `go test ./...` |
-   | Anything else (no detectable tests) | *not testable — no test action generated* |
-
-   As with serve, only the **runner invocation** is embedded — never the raw `test`
-   script *contents* from `package.json`.
-
-   **Key assignment**: any key, of any case, can carry a binding — there is no
-   reserved namespace — and lazyboards supports multi-key sequences, not just
-   single keys, so per-project serve/test actions never have to compete for a
-   scarce pool. A sequence is written in
-   **canonical space-separated form and quoted** — `"S b"`, not `Sb`, which would
-   parse as a single two-character key rather than a two-key sequence.
-
-   **`W` is reserved board-wide for Open worktree** — a single action, always emitted
-   on `In Review`, that opens the PR's registered worktree in a tmux window with a
-   plain shell and runs no command (see the generated example below). `W` is never
-   assigned to serve, test, or any other action.
-
-   **Keys lazyboards claims by default.** A user binding wins over a built-in
-   default, so binding one of these silently replaces the built-in command rather
-   than erroring. Never assign any of them:
-   `?` `q` `n` `e` `c` `o` `r` `p` `x` `d` `P` `m` `A` `G` `D` `s` `f` `a` `/`
-   `j` `k` `l` `h` `tab` `shift+tab` `1`–`9` `ctrl+c`, plus the `g` prefix (`g a`,
-   `g r`). Of the keys cenci generates, none collides with lazyboards' own bindings —
-   `R I E V W C X S T` are all free.
-
-   **Never bind or unbind `ctrl+c`.** It always force-quits, ahead of any table
-   lookup; a `ctrl+c` token anywhere in any key or sequence — even as an explicit
-   `~` unbind — is a load-time config error that stops the whole config from
-   loading.
-
-   **Prefix constraint**: a bound key that is a strict, whitespace-boundary prefix
-   of another bound key in the same effective table is a **load-time config error**
-   — lazyboards refuses to load the file at all, rather than the shorter key merely
-   losing at dispatch time. The effective table is the fully resolved namespace:
-   built-in defaults **plus** the user's `keymaps.<mode>` table **plus** that
-   column's `keymaps.columns.<name>` overlay. So the built-in defaults are a prefix
-   source too — a `d`-prefixed sequence (`"d x"`) is invalid because the default
-   `d` (`card.delete`) is already bound, and the `g` prefix is unavailable in the
-   other direction because `g a`/`g r` already exist. Before assigning the `S`/`T`
-   mnemonic prefixes below, check the whole resolved namespace — the default keys
-   above, `keymaps.normal`/`keymaps.detail`, and the target column's own overlay,
-   including any user-added binding such as a manually bound `S: Sync` — for a
-   standalone key sharing the leading letter. If one is claimed, pick a different
-   leading letter for that project's serve/test group instead (e.g. `R` for "Run")
-   and call out the substitution explicitly in the AskUserQuestion mapping prompt
-   below so the user can approve or rename it.
-
-   Assign **serve** keys as `S` followed by a project-specific mnemonic letter:
-   pick whichever second letter best identifies the project for its type — e.g.
-   `"S b"` for a backend/API project, `"S f"` for a frontend project, or the first
-   letter of the project slug when neither fits (e.g. `"S w"` for `web-client`,
-   `"S a"` for `admin`). For a single-project repo, plain `S` is enough — there's
-   nothing to disambiguate. On a mnemonic collision between two projects, fall back
-   to the next letter of that project's slug.
-
-   Assign **test** keys the same way: plain `T` for a single testable project, or
-   `T` + mnemonic (`"T b"`, `"T f"`, …) for multiple, following the same mnemonic
-   rule as serve.
-
-   Never use `C` or `X` (the generated file's own `keymaps.normal`/`keymaps.detail`
-   tables claim them for the Claude/Codex board-level launch actions), never use `E`
-   or `V` (the Planned column's Edit-plan and View-plan actions claim them), never
-   reuse a key or key sequence already assigned
-   to a serve action, never repurpose `W` for anything but Open worktree, and never
-   assign a leading letter already bound as a standalone key anywhere in the
-   resolved namespace per the prefix constraint above.
-
-   Present the proposed mapping with AskUserQuestion before generating, e.g.:
-   "Proposed In Review actions: `W` → open PR worktree, `S b` → api serve
-   (`dotnet run`), `S f` → web-client serve (`ng serve`), `T f` → web-client tests
-   (`ng test --watch=false`). Generate these?" Options: "Yes — use this mapping
-   (Recommended)", "Change keys or drop projects" (then re-ask with the user's
-   adjustments; enforce the reserved-key exclusions above).
-
-### Fleet Dispatch Enrollment
-
-**This section runs on every configure invocation** — there is no install/opt-in
-gate, matching Board Config (lazyboards) above. Its side effect fires immediately at
-question time; nothing here is deferred to the generation step below.
-
-**Container guard (runs first).** Use `detection.inContainer` (already resolved by `### Scripted Detection` in `phases/detection-and-delta.md`).
-When it is `true`, this section asks nothing, runs no `cenci dispatch` command, and writes nothing anywhere
-— the sandbox mounts `/home/dev` as a per-repo named volume, so
-the container's `~/.config/cenci/config.json` is not the host file the dispatch daemon
-reads, and an in-container enroll would be a silently dead fleet config. Emit an
-informational message naming that reason and the host-side fix: "Fleet dispatch
-enrollment can't run inside the sandbox — its `~/.config/cenci/config.json` lives in
-the container's `/home/dev` volume, not the file the host dispatch daemon reads. To
-enroll, run `cenci dispatch enroll --session <name>` from the repo root on the host."
-Never claim the repo was enrolled, and never fabricate a host path for `--dir` — the
-workspace is bind-mounted at a container-local path that has no reliable host
-equivalent, so the advisory omits `--dir` entirely and lets the host-side command
-resolve its own working directory. Skip the remainder of this section
-(main-checkout resolution, status probe, questions 11/12) and continue directly to
-the next section (`### Autonomy Settings`).
-
-**Main-checkout resolution (host runs only).** Run
-`git rev-parse --path-format=absolute --git-common-dir` as its own Bash call (already
-covered by the existing `Bash(git rev-parse:*)` grant) and strip the trailing `/.git` from its output to get
-`<main-checkout>`. If that call fails, log one informational line noting the
-fallback, then use the repository root the Scripted Detection step ran from.
-`<main-checkout>` must always be used below — never
-`<worktree-path>` (see Create Worktree above) and never a bare default: `cenci dispatch
-enroll` defaults its directory to the current directory, which inside a configure run is
-the transient `.worktrees/configure-<slug>` checkout, not the repo.
-
-**Main-checkout path validation (shell safety only).** If the resolved
-`<main-checkout>` value contains a single quote or a newline, log one informational
-line and skip the rest of this section — same skip-to-`### Autonomy Settings`
-behavior as the container guard above — rather than emit a broken command. This
-mirrors the session-name rule in question 12 below; it is shell-safety only, not
-semantic path validation.
-
-**Status probe.** Run `cenci dispatch status --json --dir '<main-checkout>'` as its own
-Bash call (per `cenci:shell-rules`, never compounded with the resolution call above) and
-parse its stdout as JSON.
-
-- If the command exits non-zero, or its stdout is not parseable JSON, log one
-  informational line and fall through — this never blocks or aborts the configure run.
-- If the parsed object has no `session` key, the installed `cenci` binary predates
-  #933's `status --json` support. Ask nothing, run no `enroll`, and
-  advise the user to update cenci before enrolling (flow and watch version independently — see root
-  `AGENTS.md`).
-
-**Three-way branch** on the parsed object's `enrolled`/`session` fields:
-
-- `enrolled: false` → ask question 11 below when `dispatchEnroll` is in `delta.ask`
-  (always on an `--all` or `full` run); when it is carried, ask nothing and log one
-  informational line.
-- `enrolled: true, session: ""` → the repo is already enrolled but has no session yet —
-  the state lazyboards' board-driven enrollment leaves behind (see the "Fleet dispatch
-  from the board" section of `docs/orchestration.md`), so this is the common repair
-  path, not an edge case. Skip question 11 and ask only question 12. The `enrolled: true, session: ""` repair (question 12) is still asked on a delta run, whatever the ledger says: it repairs a half-enrolled state rather than re-offering a declined question, and it has no ID and is never recorded.
-- `enrolled: true, session: "<set>"` → skip both questions, log the resolved session
-  quietly, and fall through.
-
-In the session-set branch, re-running `/cenci:configure` on an already-enrolled repo never
-re-prompts and never rewrites the config. If the enrolled `dir` reported by `status --json`
-differs from the resolved `<main-checkout>`, log the mismatch as an informational line
-only — never re-enroll to correct it; the no-rewrite rule wins.
-
-Question 11 is recorded as offered (`dispatchEnroll` in `configureOffered`) only when the
-`enrolled: false` branch actually put it to the user; the container guard, the
-path-validation skip, a failed status probe, and the other two branches record nothing.
-Even then, `dispatchEnroll` is recorded only after a successful `cenci dispatch enroll`
-or an explicit "No — skip": when the answer was "Yes" and the enroll call fails, do not
-record it, report the failure (the exact error, plus that the next delta run asks question
-11 again only when `dispatchEnroll` is not already in the existing ledger — otherwise
-`/cenci:configure --all` re-offers it), and leave the rest of the run unchanged.
-
-11. **Enroll in fleet dispatch**: ask via `AskUserQuestion`: "Enroll this repo in fleet
-    dispatch? This lets `cenci dispatch` and the fleet dispatch loop pick up approved
-    plans for this repo automatically. `dispatch.*` is a user-level, fleet-wide setting
-    stored in `~/.config/cenci/config.json` — distinct from this repo's
-    `.cenci/config.json` — and the effect is immediate, not part of this PR."
-    - Options: "Yes — enroll this repo", "No — skip"
-    - On "No", write nothing to `~/.config/cenci/config.json` and leave any existing
-      block untouched. A decline of question 11 is recorded in `configureOffered`; a delta run does not re-ask it, and `--all` does. The ledger lives in this repo's `.cenci/config.json`, so the decline lands in this run's PR. There is no
-      unenroll offer here.
-
-12. **Fleet dispatch session name** (asked via `AskUserQuestion` when question 11 was
-    answered "Yes", or directly when the branch above found `enrolled: true, session:
-    ""`): "What tmux session should fleet dispatch use for this repo? Without one, this
-    repo is skipped on every dispatch pass and the daemon reports
-    `dispatch_session_unconfigured` (#927) — this is not optional." Collect the answer
-    in a single `AskUserQuestion` free-text field only: no pre-filled value and no picker
-    of running sessions. This section never guesses the session name from `$TMUX_PANE`,
-    an attached client, the current pane, running tmux sessions, or the repo/directory
-    name — guessing ambient state is the bug #927 exists to close. Reject the answer and
-    re-ask when it is empty, whitespace-only, or contains a single quote or a newline
-    (shell safety only; semantic validation of the name stays in `cenci dispatch
-    enroll`).
-
-    Once a valid session name is collected, issue a single combined write — both
-    enrollment and session in one call, never two separate writes — as its own Bash
-    call: `cenci dispatch enroll --dir '<main-checkout>' --session '<name>'`, with both
-    `<main-checkout>` and `<name>` single-quoted. A non-zero exit means nothing was
-    enrolled: do not add `dispatchEnroll` to the offered set, and report the failure.
-
-**Scope.** `dispatch.*` lives in `~/.config/cenci/config.json` (or
-`$XDG_CONFIG_HOME/cenci/config.json`) — user-level and fleet-wide, the same file
-`automerge.enabled` above reads from — but `repos[].session` and each repo's enrollment
-are nonetheless per-repo entries inside that fleet-wide file. This section
-never reads, modifies, or writes ~/.config/cenci/config.json itself: every mutation goes through
-`cenci dispatch enroll`, which already owns the atomic, key-preserving write path
-(`EnrollRepo`, `watch/internal/dispatch/enroll.go`), including creating the file and its
-parent directory. The effect is immediate and user-level, so nothing lands in
-`<worktree-path>` and no dispatch key is added to this repo's `.cenci/config.json` — the only
-thing this section can contribute to the configure PR diff is the `dispatchEnroll` entry
-in the `configureOffered` ledger (step 6).
-
-**Next step.** After a successful enroll, point the user at `cenci dispatch loop on` as
-the explicit next step to start the recurring dispatch loop — that command already
-defaults its interval to `5m` when the user doesn't set one, so this section never asks
-about the dispatch loop's enable flag or interval setting itself.
-
-### Autonomy Settings
-
-**Repo questions 13–17 run on every configure invocation** — there is no container guard: unlike
-Fleet Dispatch Enrollment above, `planning`, `automerge` and `refinement` are repo-committed keys that
-land inside this run's PR, so an in-container run is fine. The questions below only
-collect an answer; none writes anything itself — step 6 below performs the actual
-write, overlaying whatever was collected here onto the merged config.
-
-**Absent-only rule (delta runs).** On a delta run, questions 13, 14 and 15 are asked only when the key is absent and the ID is not in `configureOffered`; nothing is written on a skip. On a delta run, when `planning`, `automerge` or `refinement` is already present, report the
-existing value verbatim, never re-prompt, never narrow, and never remove it.
-
-**`--all` re-offers.** `--all` is the one way to change or remove a present value, and it
-always shows the current value first. Under `--all`, question 13 is re-offered even when `planning` is present, with the committed value pre-selected. Under `--all`, question 14 is re-offered even when `automerge` is present, with "Keep current block(s) (Recommended)" pre-selected. Under `--all`, question 15 is re-offered even when `refinement` is present, with "Keep current (Recommended)" pre-selected. When the key is absent, `--all` asks the ordinary question below. Declining or keeping never writes anything but the `configureOffered` ledger stamp (step 6).
-
-**Resolver-failure `full` runs do not re-offer.** A `full` run caused by a resolver failure (see `### Delta Resolution`) is not an `--all` run: for a present `planning`, `automerge` or `refinement` key it behaves like a delta run — report the existing value verbatim and do NOT re-offer it, so a fallback can never reach the destructive "Remove the block(s)" option. Only a leading `--all` token re-offers a present value. An absent key is asked as the ordinary question.
-
-**Presence detection**, read from `existingConfig` (already in hand from Existing Config
-Detection above):
-- `planning` is present iff `existingConfig.planning` exists.
-- `automerge` is present iff a top-level `automerge` key exists or any `projects[]` entry
-  carries its own `automerge` key — monorepo automerge can be per-project only, so a
-  top-level-only check would wrongly re-offer the question on a repo whose policy lives
-  entirely in `projects[]`.
-- `refinement` is present iff `existingConfig.refinement` exists.
-
-13. **Plan approval autonomy** (asked via `AskUserQuestion` when `planning` is
-    absent and, on a delta run, `planning` is in `delta.ask`; under `--all` it is also
-    asked when `planning` is present, in the keep-or-change form below): "Should plan approval stay interactive, or switch to lean self-approval?
-    `interactive` resolves repo-grounded choices, asks only consequential or unresolved
-    questions through the question tool (up to 6, never a quota), and stops for plan review. `lean` lets a plan with no escalations continue straight into
-    implementation in the same session, and also authorizes `cenci dispatch`'s unattended
-    planning pickup and autonomous re-plan once pushed to `main` (see
-    `docs/autonomous-loop.md`'s \"Let plans approve themselves\")."
-    - Options: "Keep `interactive` (Recommended)", "Switch to `lean`"
-    - Declining omits the `planning` key entirely — no `planning` key is written.
-    - **`--all` with `planning` present**: ask "`planning.autonomy` is currently
-      `<current>`. Keep it or switch?" with the options "Keep current (Recommended)" and
-      one switch option for the other value — "Switch to `interactive`" when the committed
-      value is the exact string `lean`, "Switch to `lean`" otherwise (a value other than
-      the exact string `lean` is treated as `interactive`, so it pre-selects Keep and
-      offers the switch to `lean`). Keeping the current value writes nothing. Switching to `interactive` writes `planning.autonomy: "interactive"` explicitly, preserving sibling keys.
-    - **Overlay program.** Every Q13 write — the switch above, and the ordinary
-      "Switch to `lean`" answer when `planning` is absent — is this fixed program, applied
-      to the candidate config with `--arg autonomy interactive|lean` and validated in
-      step 6 (exit 0 and `jq -e 'type == "object"'`); it keeps every sibling key of `planning`:
-
-<!-- cenci:configure-q13-switch:begin -->
-```jq
-.planning = ((.planning | if type == "object" then . else {} end) + {autonomy: $autonomy})
-```
-<!-- cenci:configure-q13-switch:end -->
-
-14. **Automerge policy block** (asked via `AskUserQuestion` when `automerge` is
-    absent and, on a delta run, `automerge` is in `delta.ask`; under `--all` it is also
-    asked when `automerge` is present, in the keep-or-remove form below): "Scaffold a starter `automerge` policy block for this repo? This does not
-    enable automerge by itself — it only seeds a deny-by-default policy that a human must
-    still review, and the fleet-wide `automerge.enabled` switch (see
-    `docs/autonomous-loop.md`) stays off until you flip it separately. This section never
-    invents a risk policy field-by-field — it's a binary choice between no block and a
-    conservative starter block."
-    - Options: "Skip — no block (deny-by-default) (Recommended)", "Scaffold a starter
-      block for hand review"
-    - Declining omits the `automerge` key entirely — no `automerge` key is written.
-    - On "Scaffold a starter block for hand review", seed `protectedPaths` from the union
-      of three sources, deduplicated, additive only, never narrowing any of them: (a) the
-      **full** mandatory baseline of category globs — the complete implement Sensitive-path
-      backstop default pattern list (`flow/skills/implement/SKILL.md`'s built-in defaults,
-      all 36 patterns, verbatim), plus the release/CI path; (b) any confirmed repo-shape
-      paths (e.g. `.cenci/`); and (c) `existingConfig.security.sensitivePaths` when that key
-      is present — the repo owner's own hand-declared sensitive-path patterns (see
-      `security.sensitivePaths` elsewhere in this file), the one signal the built-in
-      defaults can't cover by design. Set tight caps. The template below is the value
-      written to the top-level `automerge` key, verbatim (with `protectedPaths` extended
-      per repo shape and `existingConfig.security.sensitivePaths` when applicable):
-
-<!-- cenci:automerge-scaffold:begin -->
-```json
-{
-  "protectedPaths": [
-    "*auth*",
-    "*login*",
-    "*logout*",
-    "*session*",
-    "*password*",
-    "*passwd*",
-    "*credential*",
-    "*secret*",
-    "*secrets*",
-    "*token*",
-    "*jwt*",
-    "*apikey*",
-    "*api_key*",
-    "*.pem",
-    "*.key",
-    "*.env*",
-    "*oauth*",
-    "*sso*",
-    "*saml*",
-    "*openid*",
-    "*permission*",
-    "*acl*",
-    "*rbac*",
-    "*role*",
-    "*crypto*",
-    "*encrypt*",
-    "*decrypt*",
-    "*sign*",
-    "*hash*",
-    "*payment*",
-    "*billing*",
-    "*invoice*",
-    "*checkout*",
-    "*stripe*",
-    "*migrat*",
-    "*schema*",
-    ".github/",
-    ".cenci/"
-  ],
-  "maxChangedFiles": 10,
-  "maxDiffLines": 400,
-  "mergeMethod": "squash"
-}
-```
-<!-- cenci:automerge-scaffold:end -->
-
-      In a monorepo, this scaffold is always written as a single top-level block (never
-      per-`projects[]` blocks) — a complete, valid, most-restrictive policy on its own
-      that needs no per-project path derivation; the PR-body review flag (below) tells the
-      human to consider splitting it into per-project blocks if that fits the repo better.
-
-    - **`--all` with `automerge` present** (top-level or in any `projects[]` entry): never
-      offer the scaffold. Ask "An `automerge` policy block is already present. Keep it or
-      remove it?" with the options "Keep current block(s) (Recommended)" and "Remove the block(s)".
-      Keeping leaves every `automerge` block byte-identical — never removed and never narrowed. "Remove the block(s)" deletes the top-level `automerge` key and the `automerge` key of every `projects[]` entry. Nothing else changes. Removal is the one
-      path that deletes a policy, so it always adds the `## Review required — automerge
-      policy removed` section to the PR body (step 7). The removal is this fixed program,
-      applied to the candidate config and validated in step 6 (exit 0 and `jq -e 'type == "object"'`):
-
-<!-- cenci:configure-q14-remove:begin -->
-```jq
-del(.automerge) | if (.projects | type) == "array" then .projects |= map(if type == "object" then del(.automerge) else . end) else . end
-```
-<!-- cenci:configure-q14-remove:end -->
-
-15. **Refinement autonomy** (asked via `AskUserQuestion` when `refinement` is absent and, on a delta run, `refinement` is in `delta.ask`; under `--all` it is also asked when `refinement` is present, in the keep-or-change form below): "Should `/cenci:refine` keep its full question interview, or switch to lean refinement?
-    `interactive` asks only consequential or unresolved questions. `lean` asks one round of at most 3 questions and records grounded decisions as A1…An in the refinement summary (see
-    `docs/autonomous-loop.md`'s \"Ask fewer questions at refinement\"). Refinement autonomy controls question selection only; confirmation and automerge grants use questions 16 and 17 independently."
-    - Options: "Switch to `lean` (Recommended)", "Keep `interactive`"
-    - Question 15 deliberately departs from question 13's recommend-interactive pattern: the owner wants lean refinement as the normal mode, so the offer recommends `lean`. "Switch to `lean` (Recommended)" applies only to the ordinary form, when `refinement` is absent; the runtime default is unchanged, because an absent `refinement` key still resolves to `interactive`.
-    - Declining omits the `refinement` key entirely — no `refinement` key is written.
-    - **`--all` with `refinement` present**: ask "`refinement.autonomy` is currently
-      `<current>`. Keep it or switch?" with the options "Keep current (Recommended)" and
-      one switch option for the other value — "Switch to `interactive`" when the committed
-      value is the exact string `lean`, "Switch to `lean`" otherwise (a value other than
-      the exact string `lean` is treated as `interactive`, so it pre-selects Keep and
-      offers the switch to `lean`). Keeping the current value writes nothing. Switching to `interactive` writes `refinement.autonomy: "interactive"` explicitly, preserving sibling keys.
-    - **Overlay program.** Every Q15 write — the switch above, and the ordinary
-      "Switch to `lean` (Recommended)" answer when `refinement` is absent — is this fixed program, applied
-      to the candidate config with `--arg autonomy interactive|lean` and validated in
-      step 6 (exit 0 and `jq -e 'type == "object"'`); it keeps every sibling key of `refinement`:
-
-<!-- cenci:configure-q15-switch:begin -->
-```jq
-.refinement = ((.refinement | if type == "object" then . else {} end) + {autonomy: $autonomy})
-```
-<!-- cenci:configure-q15-switch:end -->
-
-16. **Refinement confirmation** (independent ID `refinement.confirmBeforeApply`): ask via
-    `AskUserQuestion` when this leaf is absent and, on a delta run, its ID is in `delta.ask`; `--all`
-    re-offers it with the current value first. An existing `refinement` object or
-    `refinement` ledger entry never suppresses this question. "After the questions are
-    resolved, should refinement apply immediately or require a final confirmation?"
-    Options: "Apply immediately (Recommended)" (`false`), "Require confirmation" (`true`).
-    Store the boolean as `confirmBeforeApplyAnswer`, including explicit `false`.
-    Missing resolves to `false`; malformed values resolve to `true` with a notice.
-    A carried leaf is preserved verbatim, including false; on resolver-failure `full`
-    runs, present leaves are carried and only `--all` re-offers them.
-
-<!-- cenci:configure-confirm-before-apply:begin -->
-```jq
-.refinement = ((.refinement | if type == "object" then . else {} end) + {confirmBeforeApply: $confirmBeforeApply})
-```
-<!-- cenci:configure-confirm-before-apply:end -->
-
-17. **Refinement merge grants** (independent ID `refinement.automerge`): ask via
-    `AskUserQuestion` under the same leaf-level delta/`--all` rules as question 16.
-    "May refinement grant hands-off merge to tickets that pass its eligibility checks?"
-    Options: "Off (Recommended)" (`off`), "Grant for eligible tickets" (`eligible`).
-    Store the enum as `refinementAutomergeAnswer`. Missing or malformed values resolve
-    to `off` (malformed values produce a notice). This choice is independent of
-    `planning.autonomy`, `refinement.autonomy`, and confirmation. It never changes the
-    existing top-level or per-project `automerge` risk policy. Choosing off writes
-    `refinement.automerge: "off"` explicitly and never removes that unrelated policy.
-    `eligible` grants only when `refinementAutomerge` is `eligible`, the ticket's
-    Automation verdict is `grant`, `browserRequired` is false, and no visual-check
-    pattern matches. Evaluate each ticket independently, including split parents and
-    every split child; a parent's grant never transfers to a child.
-    Babysit still requires the fleet switch, repository risk policy, CI, and its other gates.
-
-<!-- cenci:configure-refinement-automerge:begin -->
-```jq
-.refinement = ((.refinement | if type == "object" then . else {} end) + {automerge: $automerge})
-```
-<!-- cenci:configure-refinement-automerge:end -->
-
-18–20. **Fleet autonomy controls**: independently offer `dispatch.planRefined`,
-    `automerge.enabled`, and `planning.attended` via `AskUserQuestion`, only for IDs in
-    `delta.ask` on a delta run (all three on `--all`, first run, or fallback full run). These keyless IDs track offers in
-    `configureOffered`; existing repo `planning`, `automerge`, or `refinement` keys
-    and ledger entries never suppress them. Each question offers "Keep current
-    (Recommended)", "On", and "Off"; a first run with no known state defaults to keep.
-    Explain each scope: automatic dispatch planning, hands-off fleet merging, and the
-    machine's interactive planning override. Never infer one answer from another.
-    On the host, probe each current value separately through `cenci dispatch plan-refined
-    status`, `cenci automerge status`, and `cenci planning attended status --json`;
-    report probe failures without inventing a current value. Collect keep/on/off
-    answers separately; explicit on/off is still available if a probe fails.
-
-    **Container guard and apply timing.** Use Scripted Detection's existing container
-    guard from Fleet Dispatch Enrollment. In a sandbox, collect the desired choices
-    alongside the repo choices, but run no fleet status or mutation commands and never
-    read or write `~/.config/cenci/config.json`. Print each concrete host command for
-    an explicit on/off answer: `cenci dispatch plan-refined on` or `off`,
-    `cenci automerge on` or `off`, `cenci planning attended on` or `off`. Tell the user
-    to run them on the host; never claim deferred fleet choices were applied. Deferred
-    choices are not stamped in the ledger, so they remain available on a later run.
-    On the host, apply explicit answers only after configuration choices are gathered,
-    one standalone CLI call per selected setting; never edit the host config directly.
-    Record a fleet ID only after its CLI call succeeds or an explicit keep choice;
-    a failed CLI call is reported and not recorded, and never blocks the repo config
-    write. Its setting may already have persisted before a later status query failed:
-    report the outcome as unknown or potentially partially applied, never unchanged.
-    Re-probe through the matching status command when possible, report only what it
-    verifies, and leave the failed call's ledger ID unstamped.
-    Fleet controls never land as repo config fields. No host mutations run in Codex
-    Plan mode; carry answers through the checkpoint and execute during apply only.
-
-**Next step.** Report the actual results of the fleet choices above and any deferred
-host commands. The independent fleet-side verbs are:
-- `cenci dispatch plan-refined on|off|status` to let dispatch pick up unattended planning
-  once `planning.autonomy` is `lean` on `origin/main`.
-- `cenci automerge on|off|status` to arm the fleet-wide automerge kill switch once a
-  policy block exists.
-- Switch 6 (`refinement.autonomy`) has no fleet verb: it is read from the local checkout, so there is nothing to flip fleet-wide.
-- See `docs/autonomous-loop.md` for the full walkthrough of the switches.
 
 ### Auth Verification
 
@@ -1280,288 +785,7 @@ For each MCP selected in question 5:
 
    **Committed, not ignored**: `.cenci/Dockerfile` is committed to the repo. Do **not** add `.cenci/` or `.cenci/Dockerfile` to `.gitignore` — the whole point is a team-shared, reviewed Dockerfile that the launcher's per-repo image selection (see `sandbox/README.md`) builds identically for every teammate.
 
-5f. **Generate `.lazyboards.yml`** (when question 10 was asked and answered Yes
-   in this session — the no-existing-file path). When a file already existed, the *Board
-   Config* branch instead runs the **Existing config: suggest or skip** sub-step at
-   the end of this section; the generation format below is what both paths write:
-
-   Write `.lazyboards.yml` at the repo root with the confirmed key mapping. Two
-   lazyboards behaviors to honor:
-
-   - A local `columns:` list **replaces** the global column list entirely — it
-     **never merges**. Because the generated file must stand alone, it never relies
-     on inheritance from a global config cenci no longer creates: every column the
-     board should show is declared here. `Implemented` is dropped from the generated
-     file entirely — it is a label in the ticket lifecycle, not a board column.
-   - **Every key binding goes in the `keymaps:` namespace.** Per-column bindings
-     live under `keymaps.columns.<name>` (matched case-insensitively); board-level
-     bindings go in **both** `keymaps.normal` and `keymaps.detail`, since
-     `keymaps.normal` alone would silently kill them while the detail panel is
-     focused. `columns:` itself is the board layout — a bare name list.
-
-   ```yaml
-   # Generated by /cenci:configure — per-repo lazyboards board config. This file
-   # is self-contained and needs no other config: a local `columns:` list REPLACES
-   # the global column list entirely — it never merges — and every key binding
-   # below lives in the `keymaps:` namespace.
-   columns:
-     - name: New
-     - name: Refined
-     - name: Planned
-     - name: In Review
-
-   keymaps:
-     # Board-level agent launchers. Emitted in BOTH tables so they fire whether the
-     # card list or the detail panel is focused. `window:` opens a tmux window and
-     # `focus: true` switches to it; lazyboards builds and escapes the tmux call.
-     normal:
-       C: { name: Claude, type: shell, window: "claude", focus: true, command: "cenci open --agent claude" }
-       X: { name: Codex, type: shell, window: "codex", focus: true, command: "cenci open --agent codex" }
-     detail:
-       C: { name: Claude, type: shell, window: "claude", focus: true, command: "cenci open --agent claude" }
-       X: { name: Codex, type: shell, window: "codex", focus: true, command: "cenci open --agent codex" }
-
-     # Per-column overlays — these apply to normal + detail only, matched
-     # case-insensitively against the column names declared above.
-     columns:
-       New:
-         R:
-           name: Refine
-           type: shell
-           command: "cenci run refine {number}"
-
-       Refined:
-         I:
-           name: Implement
-           type: shell
-           command: "cenci run implement {number}"
-
-       Planned:
-         I:
-           name: Implement
-           type: shell
-           command: "cenci run implement {number}"
-         E:
-           name: Edit plan
-           type: shell
-           terminal: true
-           command: 'f=$(ls .plans/{number}-*.md 2>/dev/null | head -1); [ -n "$f" ] && ${EDITOR:-vi} "$f"'
-         V:
-           name: View plan
-           type: shell
-           terminal: true
-           command: 'f=$(ls .plans/{number}-*.md 2>/dev/null | head -1); [ -n "$f" ] && ${PAGER:-less} "$f"'
-
-       "In Review":
-         W:
-           name: Open worktree
-           type: shell
-           scope: pr
-           window: "pr-{pr_number}"
-           cwd: "{pr_worktree}"
-         "S w":
-           name: Serve web-client worktree
-           type: shell
-           scope: pr
-           window: "pr-{pr_number}"
-           cwd: "{pr_worktree}/apps/web-client"
-           command: "ng serve"
-         "T w":
-           name: Test web-client worktree
-           type: shell
-           scope: pr
-           terminal: true
-           cwd: "{pr_worktree}/apps/web-client"
-           command: "ng test --watch=false"
-
-   # Auto-close a card's agent window when its ticket closes. `cleanup` stays a
-   # top-level scalar — it is not a key binding and has no place in `keymaps:`.
-   cleanup: "cenci close {number}"
-   ```
-
-   - **`W` (Open worktree) is always emitted on `In Review`, for every repo, whether
-     or not any project is runnable or testable.** It opens the PR's registered
-     worktree in a tmux window with a plain shell and runs no command — it never
-     carries a project path or a serve/test command, even in a monorepo. `W` is
-     never reused for serve, test, or any other action. `command:` is omitted
-     deliberately: on an action that sets `window:`, lazyboards treats "open a
-     window on this directory" as complete and runs the default shell there.
-   - `Planned` gets a local `I` (Implement) action too, so a ticket that already
-     passed planning can still be manually re-dispatched straight from the board, plus
-     local `E` (Edit plan, opens in `${EDITOR:-vi}`) and `V` (View plan, opens in
-     `${PAGER:-less}`) actions on the ticket's persisted plan file. Both carry
-     `terminal: true`, so the editor/pager gets lazyboards' own terminal and the
-     board returns when it exits — the same shape lazyboards' built-in `e` (edit
-     card) uses, and one that needs no multiplexer. Plan files are
-     `.plans/<number>-<slug>.md`; the slug isn't derivable from the number, so both
-     actions glob `.plans/{number}-*.md` (the same resolution the implement skill
-     uses) and no-op when no plan file is present (e.g. already consumed in Phase 9).
-     `{number}` is a validated integer, safe to interpolate.
-   - `Implemented` is **never** re-emitted as a generated column in
-     `.lazyboards.yml` — only `New`, `Refined`, `Planned`, and `In Review` appear.
-   - `C` and `X` are board-level Claude/Codex launch actions, emitted under
-     **`keymaps.normal` and `keymaps.detail`** — never under
-     `keymaps.columns.<name>` (they are board-level, not per-column). lazyboards
-     merges `keymaps:` tables and scalar fields across a global and a local config
-     file, with **local keys winning** (and the merged user config always winning
-     over the built-in defaults), so the generated file is self-contained and a
-     stray `~/.config/lazyboards/config.yml` cannot conflict with it. `cleanup` is
-     a top-level scalar for the same reason: it is always emitted here, outside
-     `keymaps:`; delete the line to opt out.
-   - One `In Review` **serve** action per runnable project, using the confirmed key
-     (`S` alone for a single runnable project, or the `S` + mnemonic sequence —
-     `"S b"`, `"S f"`, … — for multiple, per the Key assignment rules above) and
-     serve command; action name `Serve <slug> worktree`. One `In Review` **test**
-     action per testable project, using the confirmed test key (`T` alone, or the
-     `T` + mnemonic sequence for multiple) and test command; action name
-     `Test <slug> worktree`. Sequence keys are written in canonical
-     **space-separated** form and quoted (`"S w"`), never concatenated (`Sw`).
-   - **Never hand-write a `tmux new-window` invocation.** lazyboards assembles it
-     from four `type: shell` fields and escapes the window name, the working
-     directory, and the command as single shell tokens, so a worktree path or
-     project subpath containing a space, a quote, `;`, or `$(…)` cannot break out
-     of the command line:
-
-     | Field | Meaning |
-     |-------|---------|
-     | `window:` | Window name. Its presence is what makes the action open a window. Template-expanded. |
-     | `cwd:` | Working directory. Template-expanded. Applies to **every** shell action — windowed, `terminal: true`, and plain buffered alike. |
-     | `focus:` | `true` switches to the new window; omitted leaves it detached (what the old `-d` flag did). |
-     | `terminal: true` | Hands the command lazyboards' own terminal: full output and input, board restored on exit. |
-
-     All four are modifiers on `type: shell` and are a **load-time config error**
-     on a `type: url` action, as are the two contradictory combinations:
-     `window:` together with `terminal:`, and `focus:` without a `window:`.
-   - **Pick the run mode by what the command is**, never by how fast it is:
-     a **serve** action keeps running alongside the board, so it takes
-     `window: "pr-{pr_number}"` (detached, no `focus:`); a **test** action is
-     watched to completion and then hands the board back, so it takes
-     `terminal: true`. `W` takes `window:` with no `command:`. All three set
-     `cwd:` — only the key, the run mode, and the command differ.
-   - **The project path is a plain `cwd:` segment, in a monorepo too.**
-     **Single project**: `cwd: "{pr_worktree}"`. **Monorepo**: append the project
-     path directly — `cwd: "{pr_worktree}/apps/web-client"`. No nested POSIX
-     quoting, no `'\''` escaping, and never a `cd <path> && ` prefix in the
-     command: `cwd:` is expanded and then escaped as one token, so quoting it by
-     hand would double-escape it.
-   - `{pr_worktree}` resolves the PR branch's registered Git worktree at action
-     time, so the file stays machine-independent — never embed absolute paths.
-     `{number}` (used in `command: "cenci run refine {number}"` /
-     `implement {number}`) is a validated GitHub issue/PR
-     integer, not free text, so it is safe to interpolate without additional
-     escaping. `window:` and `cwd:` are template-expanded like `url:`/`command:`,
-     so they count for scope inference and the scope variable restrictions too — a
-     `{pr_*}` placeholder in either one requires `scope: pr` on that action, and a
-     board-scope action may not reference one at all.
-   - A `window:` action needs a tmux session: outside tmux lazyboards reports
-     `Not inside tmux` in the status bar instead of running anything. A
-     `terminal: true` action has no such dependency and works over a plain SSH
-     session — which is why the `E`/`V` plan actions above use it.
-   - **Zero runnable projects**: `W` (Open worktree) is emitted regardless — it
-     doesn't depend on any project being runnable or testable. If no project in the
-     repo has a detected serve or test command, `In Review` still carries just `W`:
-     ```yaml
-     keymaps:
-       columns:
-         "In Review":
-           W:
-             name: Open worktree
-             type: shell
-             scope: pr
-             window: "pr-{pr_number}"
-             cwd: "{pr_worktree}"
-     ```
-   - **Trust (run after writing the file).** A repo-local `.lazyboards.yml` is
-     attacker-controlled, so lazyboards silently strips every `type: shell` binding
-     **and** the `cleanup:` line until the file's exact content is trusted — and the
-     generated file is entirely shell actions plus `cleanup`, so it is completely
-     inert until then. After the write, ask via `AskUserQuestion`: "Run `lazyboards
-     trust` now so the generated shell actions are honored?" Options: "Yes — run
-     `lazyboards trust` (Recommended)", "No — I'll run it myself". On Yes, run it as
-     its **own** Bash call from the repo root:
-     ```bash
-     lazyboards trust
-     ```
-     **Either way, always print the caveat**: trust is keyed to the file's exact
-     content, not its path, so it must be re-granted after the configure PR merges
-     if review changed a single byte, and again after any later regeneration of the
-     file. A teammate cloning the repo has to run `lazyboards trust` once themselves.
-     (Running `lazyboards trust` inside the worktree trusts the worktree copy's
-     content; the same content at the repo root is trusted too, since the trust store
-     is keyed by content hash, not path.)
-   - **Existing config: suggest or skip** (the branch taken from *Board Config*
-     above when `.lazyboards.yml` already exists — question 10 is **not** asked and
-     the file is **not** blindly overwritten). This file-exists conflict check fires
-     **unconditionally** whenever `.lazyboards.yml` already exists at the repo root,
-     regardless of any prior `lazyboards.enabled` state recorded in
-     `.cenci/config.json` — a stale or missing flag never causes this branch to be
-     skipped, since the check is driven by the file's presence on disk, not the
-     recorded flag:
-     1. Read the existing file and derive the **recommended action set** this repo
-        would generate above: Refine/Implement on `New`/`Refined`/`Planned`,
-        Edit-plan (`E`) and View-plan (`V`) actions on `Planned`, an unconditional `W` (Open worktree) on `In Review`, and
-        per runnable/testable project a serve (`S`/`"S b"`/`"S f"`/…) and test
-        (`T`/`"T b"`/`"T f"`/…) In Review action. Outside the per-column tables it also includes the board-level `C`/`X` launch actions and `cleanup: "cenci close {number}"`.
-     2. Compute the **delta** = recommended actions absent from the existing file,
-        read from its `keymaps.normal`/`keymaps.detail`/`keymaps.columns.<name>`
-        tables. A concatenated sequence key (`Sw`) and its canonical form (`"S w"`)
-        are the same key, not two.
-        Match by column + action intent (name/command) — or, for the column-less
-        board-level `C`/`X`/`cleanup` actions, by intent alone — **not** by raw key,
-        so a user's custom key binding is respected rather than flagged as
-        "missing". Before assigning a key to any delta action, apply the
-        prefix constraint from the key-assignment step above: if the resolved
-        namespace already binds a standalone key (built-in default, or user-added
-        such as a custom `S: Sync` board-level action) that would prefix-collide
-        with the proposed `S`/`T` key, pick a different leading letter for that
-        action instead.
-        - **Hand-written tmux (any action, add or carry-over)**: an existing
-          action whose `command:` starts with `tmux new-window` matches by intent
-          — it is not "missing" — but counts toward the delta as an **update** to
-          the `window:`/`cwd:`/`focus:` form, since the hand-written invocation
-          puts the escaping of the worktree path and window name on the config
-          file. Translate it: `-n <name>` → `window:`, `-c <dir>` → `cwd:`
-          (dropping any nested `'…'` quoting and any `cd <dir> && ` prefix in the
-          command), absence of `-d` → `focus: true`, and the remaining shell
-          command → `command:`. Anything the four fields cannot express (a split,
-          an existing window, `send-keys`, shell logic wrapped around the command)
-          stays a plain `command:` and is **not** flagged. These two bullets are
-          the only command-content comparisons in the delta; every other action is
-          matched by intent alone, never diff-compared.
-     3. **Delta non-empty** → on a `delta` run, do **not** prompt: leave the file
-        untouched and list the missing actions (with the key each would use) in the
-        end-of-run lazyboards report, saying `/cenci:configure --all` offers to add
-        them. On an `--all` or `full` run, present the concrete additions via `AskUserQuestion`,
-        e.g. "`.lazyboards.yml` is missing a PR-worktree test action: `T` → run tests
-        (`dotnet test`) in the PR worktree. Add it?" — or, when a leading letter had
-        to be substituted for the reason above, surface it explicitly, e.g.
-        "`.lazyboards.yml`'s custom `S` (Sync) action would block `"S w"` (serve
-        watch) — proposing `"R w"` instead. Add it?" Options: "Apply suggested
-        additions (Recommended)", "Overwrite fully — regenerate from scratch", "Keep
-        as-is — no changes", "Show existing — display the current file". **Apply** and
-        **Overwrite** both rewrite the whole file — a local `columns:` list *replaces*
-        the global list (it never merges, so a partial in-place patch is impossible):
-        merge the user's existing custom actions with the missing recommended ones,
-        including the board-level `C`/`X` bindings and the `cleanup:` scalar, and
-        carry the existing top-level `provider:`, `repo:`, and `project:` identity
-        lines (if present) through unchanged — they are project-identity keys
-        lazyboards only reads from the local file. **Keep as-is** leaves the file
-        untouched. **Both rewrite paths always emit `keymaps:` form** — including
-        for the user's own custom actions carried over, whose concatenated sequence
-        keys (`Rw`) are rewritten space-separated (`"R w"`) and whose translatable
-        hand-written `tmux new-window` commands are rewritten into
-        `window:`/`cwd:`/`focus:` per the delta rule above.
-     4. **Delta empty** → do **not** prompt. Emit a small log line
-        (`.lazyboards.yml already covers all recommended actions — no changes.`) and
-        move on.
-
-     In every case above, record `lazyboards.enabled: true` in config.json, since a
-     working board config exists. Whenever this branch **rewrote** the file (case 3),
-     run the trust sub-step above as well — a rewrite changes the file's bytes, so
-     any trust previously granted for it is void.
-   - **Committed, not ignored**: `.lazyboards.yml` is committed (same reasoning as
-     `.cenci/Dockerfile` — team-shared and reviewed; `{pr_worktree}` keeps it
-     portable). Do **not** add it to `.gitignore`.
+5f. **Generate `.lazyboards.yml`**: run step 5f in `phases/lazyboards.md` when that file was read this run.
 
 6. **Write `.cenci/config.json`** with their choices using **merge semantics**:
 
@@ -1570,17 +794,17 @@ For each MCP selected in question 5:
 
    **Autonomy Settings wiring.** `planningAnswer`/`automergeAnswer`/`refinementAnswer` are overlaid onto
    `merge-sandbox-config.sh`'s stdout before the write: `planningAnswer` contributes a
-   `planning: { "autonomy": "lean" }` key only when question 13 above was asked and
+   `planning: { "autonomy": "lean" }` key only when question 13 in `phases/autonomy-settings.md` was asked and
    answered `lean`, `automergeAnswer` contributes the scaffolded `automerge` key only
-   when question 14 above was asked and answered "Scaffold a starter block for hand
+   when question 14 in `phases/autonomy-settings.md` was asked and answered "Scaffold a starter block for hand
    review", and `refinementAnswer` contributes a `refinement: { "autonomy": "lean" }` key
-   only when question 15 above was asked and answered `lean` — a declined answer contributes no key. When any of the three questions was skipped
+   only when question 15 in `phases/autonomy-settings.md` was asked and answered `lean` — a declined answer contributes no key. When any of the three questions was skipped
    because its key was already present in `existingConfig` (or carried on a delta run),
    there is no collected answer to overlay — the existing value simply survives the merge
    semantics above untouched. Under `--all`, a collected "Switch to …" answer for question
    13 is applied with the `cenci:configure-q13-switch` program (`--arg autonomy
    interactive|lean`), a collected "Switch to …" answer for question 15 is applied with the `cenci:configure-q15-switch` program (`--arg autonomy interactive|lean`), and a collected "Remove the block(s)" answer for question 14 with
-   the `cenci:configure-q14-remove` program (`### Autonomy Settings`); "Keep current"
+   the `cenci:configure-q14-remove` program (`### Autonomy Settings` in `phases/autonomy-settings.md`); "Keep current"
    answers contribute nothing.
 
    **Independent refinement leaves wiring.** After the question 13/14/15 overlays,
@@ -1592,7 +816,7 @@ For each MCP selected in question 5:
    whether its overlay runs; never use truthiness or `//` to discard false. A skipped
    leaf has no overlay and survives unchanged. Both overlays preserve siblings, so
    the Q15 autonomy overlay and these leaves can run in one write. Apply the same
-   object validation and fallback as question 13/14/15 below; a failed leaf overlay
+   object validation and fallback as question 13/14/15 in `phases/autonomy-settings.md`; a failed leaf overlay
    removes only its own ID from this run's offered set before the ledger stamp and
    is reported as not applied. Fleet answers affect only CLI calls and their ledger
    IDs; never insert `dispatch.planRefined`, `automerge.enabled`, or `planning.attended`
@@ -1671,7 +895,7 @@ Always stamp `configureOffered` on every write as the sorted, de-duplicated unio
 ```
 
 (The `planning` and `refinement` values shown above are illustrative of the schema, not something this skill
-writes by default: question 13 (`### Autonomy Settings`) writes `planning.autonomy` only when you explicitly choose `lean` (or switch under `--all`), and question 15 (`### Autonomy Settings`) writes `refinement.autonomy` only when you explicitly choose `lean` (or switch under `--all`); a `planning` or `refinement` key already present in `existingConfig` is left verbatim
+writes by default: question 13 (`### Autonomy Settings` in `phases/autonomy-settings.md`) writes `planning.autonomy` only when you explicitly choose `lean` (or switch under `--all`), and question 15 (`### Autonomy Settings` in `phases/autonomy-settings.md`) writes `refinement.autonomy` only when you explicitly choose `lean` (or switch under `--all`); a `planning` or `refinement` key already present in `existingConfig` is left verbatim
 on a delta run; `--all` re-offers it. Declining — keeping `interactive` — writes nothing, since a missing key already resolves to `interactive`.)
 
 `configVersion` records the flow plugin version that last wrote this config (managed by this skill — always overwritten with the current plugin version in step 6, never a question). Consumers:
@@ -1736,7 +960,7 @@ The `lazyboards` field is present when question 10 was answered Yes **or** a
 - **Single project**: `lazyboards.serveCommand` + `lazyboards.boardKey` record the generated serve action, and `lazyboards.testCommand` + `lazyboards.testKey` record the generated test action (command and its key — a single letter, or a multi-key mnemonic sequence like `"S b"`/`"T f"` in a monorepo). Omit the test pair when the project is not testable. `W` (Open worktree) is never recorded here — it carries no command and isn't project-specific.
 - `boardKey`/`testKey` are written in lazyboards' **canonical space-separated** sequence form (`"S b"`, `"T f"`) — the same spelling the generated `.lazyboards.yml` uses. A concatenated value read from `existingConfig` (`"Sb"`, `"Tf"`) is the **same key**, not a different one: normalize it to the space-separated form on write rather than treating it as a distinct binding or as a key collision. A single-letter key (`"S"`, `"T"`) is already canonical and is written unchanged.
 - **Monorepo**: `serveCommand`/`boardKey` and `testCommand`/`testKey` live on each project entry in the `projects` array instead (a project gets the serve pair only when runnable and the test pair only when testable), and the top-level `lazyboards` field carries only `enabled`
-- These recorded values are advisory: the suggest-or-skip analyzer re-derives serve/test commands from the derivation tables above, so a config missing them still works.
+- These recorded values are advisory: the suggest-or-skip analyzer re-derives serve/test commands from the derivation tables in `### Board Config (lazyboards)` in `phases/lazyboards.md`, so a config missing them still works.
 
 Omit `lazyboards` entirely when the user says No (same pattern as `cicd`/`sandbox`).
 
@@ -1760,7 +984,7 @@ overwrite only the fields the skill manages), a hand-added `security` block is *
 untouched** across re-configuration. Do **not** add `security` to the migration-removal list
 below — it is a supported optional field, not a legacy one.
 
-The `planning` field is optional. `### Autonomy Settings` question 13 above asks for it only
+The `planning` field is optional. `### Autonomy Settings` question 13 in `phases/autonomy-settings.md` asks for it only
 when absent, defaulting to `interactive`. A key already present is reported verbatim and is never re-prompted, narrowed, or removed
 on a delta run; `--all` re-offers it with the committed value pre-selected. Merge semantics (step 6) preserve a
 hand-added or previously-written value untouched across reconfiguration unless you choose a switch under `--all`. It is a
@@ -1799,7 +1023,7 @@ Because the config write below uses merge semantics, a hand-added `planning` blo
 `planning` to the migration-removal list below — it is a supported optional field, not a
 legacy one.
 
-The `refinement` field is optional. `### Autonomy Settings` question 15 above asks for it only when absent
+The `refinement` field is optional. `### Autonomy Settings` question 15 in `phases/autonomy-settings.md` asks for it only when absent
 (recommending `lean`, while an absent key still resolves to `interactive`). A key already present is reported verbatim and is never re-prompted, narrowed, or removed
 on a delta run; `--all` re-offers it with the committed value pre-selected. Merge semantics (step 6) preserve a
 hand-added or previously-written autonomy untouched across reconfiguration unless you choose a switch under `--all`; independent leaf answers preserve its siblings.
@@ -1891,7 +1115,7 @@ Each project entry's `gateCommand` is optional — unlike `lintCommand`, its pre
 
 Existing single-project configs (no `isMonorepo` field) work unchanged.
 
-The `automerge` field is optional. `### Autonomy Settings` question 14 above offers to
+The `automerge` field is optional. `### Autonomy Settings` question 14 in `phases/autonomy-settings.md` offers to
 scaffold a conservative starter block only when absent (top-level or per-`projects[]`).
 A block already present is reported verbatim and is never re-prompted, narrowed, or removed
 on a delta run; `--all` re-offers it ("Keep current block(s) (Recommended)" or "Remove the block(s)"). Merge semantics (step 6) preserve a hand-added or
@@ -2046,7 +1270,7 @@ When migrating from an older config that has `ticketSystem`, `prSystem`, `ticket
    N/A — configuration/tooling only, no application code changed.
    ```
    Append a `## Review required — automerge policy` section — emitted only when question
-   14 scaffolded a block this run (`### Autonomy Settings`) and that block was actually written (a scaffold whose overlay fell back in step 6 emits nothing here), never on a re-config that
+   14 scaffolded a block this run (`### Autonomy Settings` in `phases/autonomy-settings.md`) and that block was actually written (a scaffold whose overlay fell back in step 6 emits nothing here), never on a re-config that
    reported an existing block verbatim:
    ```markdown
    ## Review required — automerge policy
@@ -2076,7 +1300,7 @@ When migrating from an older config that has `ticketSystem`, `prSystem`, `ticket
    rm -f ${TMPDIR:-/tmp}/cenci/cenci-configure-<slug>-pr-body.md
    ```
 
-Report what was created and suggest next steps (e.g., "Try `/cenci:refine <ticket-id>` on a ticket"), including the PR URL from step 7. If question 14 (`### Autonomy Settings`) scaffolded an `automerge` block this run, say so explicitly and flag it for review, then point at the fleet-side next steps: `cenci dispatch plan-refined on` (once `planning.autonomy` is `lean` on `origin/main`) and `cenci automerge on` (once the scaffolded block has been reviewed) — the same verbs named in `### Autonomy Settings`'s own "Next step" block. If `sandbox.enabled` is `true`, mention the generated `.cenci/Dockerfile` and that `cenci sandbox build` (run from inside the repo, after the PR merges) builds the repo's own tailored image on top of the shared base. If `lazyboards.enabled` is `true`, list the generated `.lazyboards.yml` In Review actions with their keys, serve, and test commands (e.g., "`W` opens web-client's PR worktree, `S w` serves it with `ng serve`, `T w` runs its tests with `ng test --watch=false`") and point at `docs/orchestration.md` for the board recipe. Repeat the trust caveat here too, since this run's file ships as a PR: the generated shell actions and `cleanup` stay inert until `lazyboards trust` is run against the file's exact content, so trust must be re-granted after the PR merges if review changed a byte — and every teammate runs it once on their own clone. When the suggest-or-skip branch ran instead, report what happened (added actions, migrated to `keymaps:`, or "already complete — no changes"); on a delta run it only reports, so list the missing actions and say `/cenci:configure --all` offers to add them.
+Report what was created and suggest next steps (e.g., "Try `/cenci:refine <ticket-id>` on a ticket"), including the PR URL from step 7. If question 14 (`### Autonomy Settings` in `phases/autonomy-settings.md`) scaffolded an `automerge` block this run, say so explicitly and flag it for review, then point at the fleet-side next steps: `cenci dispatch plan-refined on` (once `planning.autonomy` is `lean` on `origin/main`) and `cenci automerge on` (once the scaffolded block has been reviewed) — the same verbs named in the "Next step" block of `### Fleet Autonomy Controls` in `phases/fleet-enrollment.md`. If `sandbox.enabled` is `true`, mention the generated `.cenci/Dockerfile` and that `cenci sandbox build` (run from inside the repo, after the PR merges) builds the repo's own tailored image on top of the shared base. If `lazyboards.enabled` is `true`, list the generated `.lazyboards.yml` In Review actions with their keys, serve, and test commands (e.g., "`W` opens web-client's PR worktree, `S w` serves it with `ng serve`, `T w` runs its tests with `ng test --watch=false`") and point at `docs/orchestration.md` for the board recipe. Repeat the trust caveat here too, since this run's file ships as a PR: the generated shell actions and `cleanup` stay inert until `lazyboards trust` is run against the file's exact content, so trust must be re-granted after the PR merges if review changed a byte — and every teammate runs it once on their own clone. When the suggest-or-skip branch ran instead, report what happened (added actions, migrated to `keymaps:`, or "already complete — no changes"); on a delta run it only reports, so list the missing actions and say `/cenci:configure --all` offers to add them.
 
 On a delta run, the final report also covers what was carried and what was refreshed. The final report repeats the carried-through summary, the Dockerfile report, and the lazyboards report. The carried-through summary names the carried question IDs and config keys and says `/cenci:configure --all` would re-open them; for a carried `planning`, `automerge` or `refinement` value it also states the existing value verbatim (terminal only, never the PR body). The Dockerfile report is the block diff (`git -C <worktree-path> diff -- .cenci/Dockerfile`) for a refreshed managed block, or "left untouched — no markers or malformed markers" with the `--all` pointer. The lazyboards report is the missing-actions list, "already covers all recommended actions", or the carried-but-missing-file notice from question 10. If the resolver failed and the run fell back to `full`, say so and why. If question 14 removed the `automerge` block(s) this run (the removal overlay was applied), say so explicitly and flag the PR's `## Review required — automerge policy removed` section. Report what was actually applied, never what was collected: when a question 13/14/15 overlay fell back, say its answer was not applied, and either that it will be asked again on the next delta run (only when its key is absent and its ID is not already in the existing ledger) or, otherwise (an `--all` change, an ID already in the existing ledger, or a present key), to re-run `/cenci:configure --all` to apply it; when the ledger overlay fell back, say the ledger was not stamped so this run's questions will be asked again; when question 11's enroll failed, report the failure and that question 11 will be asked again only when `dispatchEnroll` is not already in the existing ledger, else to re-run `/cenci:configure --all`.
 

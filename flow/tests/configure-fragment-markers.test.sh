@@ -32,6 +32,8 @@
 # Covered files:
 #   - flow/skills/configure/SKILL.md (step 5e)
 #   - flow/skills/configure/phases/runtime-ci-sandbox-questions.md (Q9b, #1341)
+#   - flow/skills/configure/phases/autonomy-settings.md (the five jq marker
+#     blocks and the automerge scaffold, byte for byte, #1342 P5)
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || { echo "configure-fragment-markers.test.sh: failed to resolve script directory." >&2; exit 2; }
@@ -174,6 +176,227 @@ if [[ -n "${runtime_phase}" ]]; then
   assert_contains_ws "${runtime_phase}" "${NEW_REMEDY}" "runtime-ci-sandbox-questions.md corrected remedy names /cenci:configure before cenci sandbox build"
 else
   fail "runtime-ci-sandbox-questions.md: empty, assertions skipped"
+fi
+
+# --- (P5) The five jq marker blocks and the scaffold, byte for byte ----------
+#
+# #1342 moves question 13-17's marker-bounded programs (and the
+# `cenci:automerge-scaffold` block that moves with question 14) out of
+# SKILL.md into phases/autonomy-settings.md. Step 6 and codex.md consume them
+# by marker name, so a single changed byte silently changes what every future
+# configure run writes. Each block below is pinned from the pre-move SKILL.md
+# INCLUDING its fence lines and both marker comments. Each must occur exactly
+# once across every configure markdown file, live in phases/autonomy-settings.md
+# and nowhere in SKILL.md, and each program is extracted and RUN with jq.
+
+IFS= read -r -d '' P5_Q13_BLOCK <<'PINNED_BLOCK'
+<!-- cenci:configure-q13-switch:begin -->
+```jq
+.planning = ((.planning | if type == "object" then . else {} end) + {autonomy: $autonomy})
+```
+<!-- cenci:configure-q13-switch:end -->
+PINNED_BLOCK
+P5_Q13_BLOCK="${P5_Q13_BLOCK%$'\n'}"
+
+IFS= read -r -d '' P5_Q14_BLOCK <<'PINNED_BLOCK'
+<!-- cenci:configure-q14-remove:begin -->
+```jq
+del(.automerge) | if (.projects | type) == "array" then .projects |= map(if type == "object" then del(.automerge) else . end) else . end
+```
+<!-- cenci:configure-q14-remove:end -->
+PINNED_BLOCK
+P5_Q14_BLOCK="${P5_Q14_BLOCK%$'\n'}"
+
+IFS= read -r -d '' P5_Q15_BLOCK <<'PINNED_BLOCK'
+<!-- cenci:configure-q15-switch:begin -->
+```jq
+.refinement = ((.refinement | if type == "object" then . else {} end) + {autonomy: $autonomy})
+```
+<!-- cenci:configure-q15-switch:end -->
+PINNED_BLOCK
+P5_Q15_BLOCK="${P5_Q15_BLOCK%$'\n'}"
+
+IFS= read -r -d '' P5_CONFIRM_BLOCK <<'PINNED_BLOCK'
+<!-- cenci:configure-confirm-before-apply:begin -->
+```jq
+.refinement = ((.refinement | if type == "object" then . else {} end) + {confirmBeforeApply: $confirmBeforeApply})
+```
+<!-- cenci:configure-confirm-before-apply:end -->
+PINNED_BLOCK
+P5_CONFIRM_BLOCK="${P5_CONFIRM_BLOCK%$'\n'}"
+
+IFS= read -r -d '' P5_GRANT_BLOCK <<'PINNED_BLOCK'
+<!-- cenci:configure-refinement-automerge:begin -->
+```jq
+.refinement = ((.refinement | if type == "object" then . else {} end) + {automerge: $automerge})
+```
+<!-- cenci:configure-refinement-automerge:end -->
+PINNED_BLOCK
+P5_GRANT_BLOCK="${P5_GRANT_BLOCK%$'\n'}"
+
+IFS= read -r -d '' P5_SCAFFOLD_BLOCK <<'PINNED_BLOCK'
+<!-- cenci:automerge-scaffold:begin -->
+```json
+{
+  "protectedPaths": [
+    "*auth*",
+    "*login*",
+    "*logout*",
+    "*session*",
+    "*password*",
+    "*passwd*",
+    "*credential*",
+    "*secret*",
+    "*secrets*",
+    "*token*",
+    "*jwt*",
+    "*apikey*",
+    "*api_key*",
+    "*.pem",
+    "*.key",
+    "*.env*",
+    "*oauth*",
+    "*sso*",
+    "*saml*",
+    "*openid*",
+    "*permission*",
+    "*acl*",
+    "*rbac*",
+    "*role*",
+    "*crypto*",
+    "*encrypt*",
+    "*decrypt*",
+    "*sign*",
+    "*hash*",
+    "*payment*",
+    "*billing*",
+    "*invoice*",
+    "*checkout*",
+    "*stripe*",
+    "*migrat*",
+    "*schema*",
+    ".github/",
+    ".cenci/"
+  ],
+  "maxChangedFiles": 10,
+  "maxDiffLines": 400,
+  "mergeMethod": "squash"
+}
+```
+<!-- cenci:automerge-scaffold:end -->
+PINNED_BLOCK
+P5_SCAFFOLD_BLOCK="${P5_SCAFFOLD_BLOCK%$'\n'}"
+
+AUTONOMY_PHASE_FILE='phases/autonomy-settings.md'
+CONFIGURE_DIR="${FLOW_DIR}/skills/configure"
+
+# marker_block_raw <content> <begin-line> <end-line> -- lines from the exact
+# begin marker line through the exact end marker line, inclusive (fences
+# included). Pure (no fail()), safe inside $(...).
+marker_block_raw() {
+  local content="$1" begin="$2" end="$3"
+  awk -v b="${begin}" -v e="${end}" '
+    $0 == b { on=1 }
+    on { print }
+    on && $0 == e { exit }
+  ' <<<"${content}"
+}
+
+# count_exact_lines <content> <line> -- lines equal to <line>. Pure.
+count_exact_lines() {
+  local content="$1" line="$2"
+  grep -cxF -- "${line}" <<<"${content}" | tr -d '[:space:]'
+}
+
+# P5 corpus: SKILL.md plus every phases/*.md and references/*.md on disk, so a
+# stray duplicate in any configure markdown file is counted.
+require_doc autonomy_phase "skills/configure/${AUTONOMY_PHASE_FILE}" || true
+p5_all="${skill}"
+shopt -s nullglob
+for _part in "${CONFIGURE_DIR}"/phases/*.md "${CONFIGURE_DIR}"/references/*.md; do
+  p5_all+=$'\n'"$(cat "${_part}")"
+done
+shopt -u nullglob
+
+p5_check_block() { # <marker-name> <pinned-block> <begin> <end>
+  local name="$1" pinned="$2" begin="$3" end="$4" n_begin n_end in_skill actual
+  n_begin="$(count_exact_lines "${p5_all}" "${begin}")"
+  n_end="$(count_exact_lines "${p5_all}" "${end}")"
+  [[ "${n_begin}" -eq 1 ]] || fail "P5 ${name}: begin marker must occur exactly once across the configure markdown, found ${n_begin}"
+  [[ "${n_end}" -eq 1 ]] || fail "P5 ${name}: end marker must occur exactly once across the configure markdown, found ${n_end}"
+  in_skill="$(count_exact_lines "${skill}" "${begin}")"
+  [[ "${in_skill}" -eq 0 ]] || fail "P5 ${name}: block must no longer be in SKILL.md, found ${in_skill} begin marker(s) there"
+  if [[ -z "${autonomy_phase}" ]]; then
+    fail "P5 ${name}: ${AUTONOMY_PHASE_FILE} missing or empty"
+    return
+  fi
+  actual="$(marker_block_raw "${autonomy_phase}" "${begin}" "${end}")"
+  if [[ -z "${actual}" ]]; then
+    fail "P5 ${name}: block not found in ${AUTONOMY_PHASE_FILE}"
+  elif [[ "${actual}" != "${pinned}" ]]; then
+    fail "P5 ${name}: block in ${AUTONOMY_PHASE_FILE} is not byte-identical to the pre-move SKILL.md block (fences and marker lines included)"
+  fi
+}
+
+p5_check_block q13-switch "${P5_Q13_BLOCK}" '<!-- cenci:configure-q13-switch:begin -->' '<!-- cenci:configure-q13-switch:end -->'
+p5_check_block q14-remove "${P5_Q14_BLOCK}" '<!-- cenci:configure-q14-remove:begin -->' '<!-- cenci:configure-q14-remove:end -->'
+p5_check_block q15-switch "${P5_Q15_BLOCK}" '<!-- cenci:configure-q15-switch:begin -->' '<!-- cenci:configure-q15-switch:end -->'
+p5_check_block confirm-before-apply "${P5_CONFIRM_BLOCK}" '<!-- cenci:configure-confirm-before-apply:begin -->' '<!-- cenci:configure-confirm-before-apply:end -->'
+p5_check_block refinement-automerge "${P5_GRANT_BLOCK}" '<!-- cenci:configure-refinement-automerge:begin -->' '<!-- cenci:configure-refinement-automerge:end -->'
+p5_check_block automerge-scaffold "${P5_SCAFFOLD_BLOCK}" '<!-- cenci:automerge-scaffold:begin -->' '<!-- cenci:automerge-scaffold:end -->'
+
+# The block text is pinned; now prove the extracted programs actually run.
+# Each is extracted from phases/autonomy-settings.md (fence lines stripped) and
+# applied with jq to a fixture, the way step 6 applies them.
+p5_extract() { # <marker-name> -- the program text between the marker lines
+  awk -v b="<!-- cenci:configure-$1:begin -->" -v e="<!-- cenci:configure-$1:end -->" '
+    $0 == e { on=0 }
+    on && index($0, "```") != 1 { print }
+    $0 == b { on=1 }
+  ' <<<"${autonomy_phase}"
+}
+
+p5_json_eq() { # <label> <actual> <expected-json>
+  local label="$1" actual="$2" expected="$3"
+  if [[ -z "${actual}" ]]; then
+    fail "P5 ${label}: program produced no output (missing block or jq error)"
+    return
+  fi
+  jq -ne --argjson a "${actual}" --argjson b "${expected}" '$a == $b' >/dev/null 2>&1 \
+    || fail "P5 ${label}: expected ${expected}, got ${actual}"
+}
+
+if ! command -v jq >/dev/null 2>&1; then
+  fail "P5: jq not available to run the extracted programs"
+else
+  p5_prog="$(p5_extract q13-switch)"
+  [[ -n "${p5_prog}" ]] || fail "P5 q13-switch: no program extracted from ${AUTONOMY_PHASE_FILE}"
+  p5_out="$(printf '%s' '{"planning":{"autonomy":"interactive","note":"keep"},"stack":{"backend":"go"}}' | jq -c --arg autonomy lean "${p5_prog:-.}" 2>/dev/null)"
+  p5_json_eq "q13-switch switches autonomy and keeps siblings" "${p5_prog:+${p5_out}}" '{"planning":{"autonomy":"lean","note":"keep"},"stack":{"backend":"go"}}'
+
+  p5_prog="$(p5_extract q14-remove)"
+  [[ -n "${p5_prog}" ]] || fail "P5 q14-remove: no program extracted from ${AUTONOMY_PHASE_FILE}"
+  p5_out="$(printf '%s' '{"automerge":{"maxDiffLines":1},"projects":[{"path":"api","automerge":{"maxDiffLines":2}},{"path":"web"}],"stack":{"backend":"go"}}' | jq -c "${p5_prog:-.}" 2>/dev/null)"
+  p5_json_eq "q14-remove deletes the top-level and every projects[] automerge key" "${p5_prog:+${p5_out}}" '{"projects":[{"path":"api"},{"path":"web"}],"stack":{"backend":"go"}}'
+
+  p5_prog="$(p5_extract q15-switch)"
+  [[ -n "${p5_prog}" ]] || fail "P5 q15-switch: no program extracted from ${AUTONOMY_PHASE_FILE}"
+  p5_out="$(printf '%s' '{"refinement":{"autonomy":"interactive","note":"keep"}}' | jq -c --arg autonomy lean "${p5_prog:-.}" 2>/dev/null)"
+  p5_json_eq "q15-switch switches autonomy and keeps siblings" "${p5_prog:+${p5_out}}" '{"refinement":{"autonomy":"lean","note":"keep"}}'
+
+  p5_prog="$(p5_extract confirm-before-apply)"
+  [[ -n "${p5_prog}" ]] || fail "P5 confirm-before-apply: no program extracted from ${AUTONOMY_PHASE_FILE}"
+  p5_out="$(printf '%s' '{"refinement":{"autonomy":"lean"}}' | jq -c --argjson confirmBeforeApply false "${p5_prog:-.}" 2>/dev/null)"
+  p5_json_eq "confirm-before-apply records an explicit false and keeps siblings" "${p5_prog:+${p5_out}}" '{"refinement":{"autonomy":"lean","confirmBeforeApply":false}}'
+
+  p5_prog="$(p5_extract refinement-automerge)"
+  [[ -n "${p5_prog}" ]] || fail "P5 refinement-automerge: no program extracted from ${AUTONOMY_PHASE_FILE}"
+  p5_out="$(printf '%s' '{"refinement":{"autonomy":"lean"},"automerge":{"maxDiffLines":1}}' | jq -c --arg automerge eligible "${p5_prog:-.}" 2>/dev/null)"
+  p5_json_eq "refinement-automerge grants without touching the risk policy" "${p5_prog:+${p5_out}}" '{"refinement":{"autonomy":"lean","automerge":"eligible"},"automerge":{"maxDiffLines":1}}'
+
+  p5_scaffold="$(marker_block_raw "${autonomy_phase}" '<!-- cenci:automerge-scaffold:begin -->' '<!-- cenci:automerge-scaffold:end -->' | awk 'index($0, "<!--") != 1 && index($0, "```") != 1')"
+  printf '%s\n' "${p5_scaffold}" | jq -e 'type == "object" and (.protectedPaths | length) > 0' >/dev/null 2>&1 \
+    || fail "P5 automerge-scaffold: the block in ${AUTONOMY_PHASE_FILE} is not a JSON object with protectedPaths"
 fi
 
 if [[ "${failures}" -gt 0 ]]; then

@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
-# Contract test for ticket #1341 (parent #692) -- flow/skills/configure/SKILL.md
-# becomes a router: the detection, delta-resolution and questions 1-9c prose
-# moves verbatim into four phases/*.md files, the legacy-migration prose moves
-# into the conditionally read references/migrations.md, and the skill must
-# behave exactly as before.
+# Contract test for tickets #1341 and #1342 (parent #692) --
+# flow/skills/configure/SKILL.md becomes a router: the detection,
+# delta-resolution and questions 1-9c prose moves verbatim into four
+# phases/*.md files, the legacy-migration prose moves into the conditionally
+# read references/migrations.md (#1341), and the lazyboards (question 10 and
+# step 5f), fleet enrollment (questions 11, 12, 18-20) and autonomy
+# (questions 13-17) prose moves into three more conditionally read phase files
+# plus references/lazyboards-example.md (#1342). The skill must behave exactly
+# as before.
 #
 # Each case is named after the acceptance criterion or plan decision it proves.
 # What this suite pins (the load-bearing wording of each moved block is pinned
@@ -21,7 +25,15 @@
 #                                 references/migrations.md, read only when
 #                                 `.claude/config.json` exists
 #   * case_single_keep_or_change_rule  one home for the Keep/Change gate:
-#                                 SKILL.md `### Question Defaults`
+#                                 SKILL.md `### Question Defaults`; the
+#                                 autonomy sites (P10) point at it and keep
+#                                 their option labels
+#   * case_phase_read_conditions  the new phase files open with a read-condition
+#                                 line and drop "runs on every invocation"
+#   * case_P21_lazyboards_condition  phases/lazyboards.md read only when
+#                                 question 10 is asked or .lazyboards.yml exists
+#   * case_P22_fleet_guard       the fleet container guard and failed-probe rule
+#                                 moved verbatim and stay reachable on host runs
 #   * case_moved_headings_unique     each moved heading exists exactly once, in
 #                                 its new file
 #   * case_cross_file_pointers       positional words that now cross files name
@@ -35,7 +47,8 @@
 # it cannot pass vacuously; extractors are pure (no fail() inside $(...)).
 #
 # Covered files:
-#   - flow/skills/configure/SKILL.md, phases/*.md, references/migrations.md
+#   - flow/skills/configure/SKILL.md, phases/*.md, references/migrations.md,
+#     references/lazyboards-example.md
 #   - flow/README.md
 set -uo pipefail
 
@@ -152,6 +165,10 @@ DETECT_FILE='phases/detection-and-delta.md'
 PROJECT_FILE='phases/project-questions.md'
 MCP_FILE='phases/mcp-lsp-ui-questions.md'
 RUNTIME_FILE='phases/runtime-ci-sandbox-questions.md'
+LAZY_FILE='phases/lazyboards.md'
+LAZY_EXAMPLE_FILE='references/lazyboards-example.md'
+FLEET_FILE='phases/fleet-enrollment.md'
+AUTONOMY_FILE='phases/autonomy-settings.md'
 MIGRATIONS_FILE='references/migrations.md'
 
 STEP_MAP_HEADING='### Step Map'
@@ -177,6 +194,48 @@ MIGRATION_NEVER_REWRITE='Never rewrite or delete `.claude/config.json`; it is a 
 KEEP_OR_CHANGE_OPTION='"No — let me change them"'
 KEEP_FIRST_RULE='lists its Keep option first'
 KEEP_RECOMMENDED='Keep current (Recommended)'
+# P10 (#1342): the autonomy sites point at the single rule instead of restating
+# it. The three per-question "Under `--all`, question N is re-offered ..."
+# sentences collapse into one, and each of the Q13/Q14/Q15 `--all` bullets
+# carries the same pointer while keeping its exact option labels.
+KEEP_RULE_POINTER='per the keep-or-change rule in `SKILL.md`'"'"'s `### Question Defaults`'
+ALL_REOFFER_COLLAPSED='Under `--all`, questions 13, 14 and 15 are each re-offered even when `planning`, `automerge` or `refinement` is present, with the Keep option listed first and pre-selected '"${KEEP_RULE_POINTER}"'.'
+OLD_Q13_ALL_REOFFER='Under `--all`, question 13 is re-offered even when `planning` is present, with the committed value pre-selected.'
+OLD_Q14_ALL_REOFFER='Under `--all`, question 14 is re-offered even when `automerge` is present, with "Keep current block(s) (Recommended)" pre-selected.'
+OLD_Q15_ALL_REOFFER='Under `--all`, question 15 is re-offered even when `refinement` is present, with "Keep current (Recommended)" pre-selected.'
+Q13_MARKER='13. **Plan approval autonomy**'
+Q14_MARKER='14. **Automerge policy block**'
+Q15_MARKER='15. **Refinement autonomy**'
+Q16_MARKER='16. **Refinement confirmation**'
+Q13_LABELS=('"Keep current (Recommended)"' '"Switch to `interactive`"' '"Switch to `lean`"')
+Q14_LABELS=('"Keep current block(s) (Recommended)"' '"Remove the block(s)"')
+Q15_LABELS=('"Keep current (Recommended)"' '"Switch to `interactive`"' '"Switch to `lean`"')
+
+# Cross-file pointers (#1342): a positional "above"/"below" that now crosses
+# files names the file. The phrase form is "`### <heading>` in `<file>`".
+AUTONOMY_POINTER='`### Autonomy Settings` in `phases/autonomy-settings.md`'
+LAZY_POINTER='`### Board Config (lazyboards)` in `phases/lazyboards.md`'
+FLEET_POINTER='`### Fleet Dispatch Enrollment` in `phases/fleet-enrollment.md`'
+FLEET_AUTONOMY_POINTER='`### Fleet Autonomy Controls` in `phases/fleet-enrollment.md`'
+OLD_SKILL_AUTONOMY_POINTERS=(
+  '(see `### Autonomy Settings`)'
+  '`cenci:configure-q14-remove` program (`### Autonomy Settings`)'
+  'question 13 (`### Autonomy Settings`) writes'
+  'question 15 (`### Autonomy Settings`) writes'
+  '(`### Autonomy Settings`) and that block was actually written'
+  'If question 14 (`### Autonomy Settings`) scaffolded'
+  '`### Autonomy Settings`'"'"'s own "Next step" block'
+  '`### Autonomy Settings` question 13 above'
+  '`### Autonomy Settings` question 14 above'
+  '`### Autonomy Settings` question 15 above'
+  'question 13 above was asked'
+  'question 14 above was asked'
+  'question 15 above was asked'
+  'see *Board Config*'
+  'see *Fleet Dispatch Enrollment*'
+  'see *Autonomy Settings*'
+  'derivation tables above'
+)
 ID_COLUMN_SENTENCE='The `ID` column is the question'"'"'s identifier in `question-keys.json`'
 DEFAULTS_TABLE_HEADER='| Question | ID | `existingConfig` field | Default when field exists |'
 ASK_ONE_AT_A_TIME='Ask these questions one at a time using the `AskUserQuestion` tool'
@@ -197,15 +256,48 @@ MOVED_HEADINGS=(
   "${MCP_FILE}|### Playwright CLI Setup"
   "${MCP_FILE}|### LSP Detection"
   "${MCP_FILE}|#### Binary Verification"
+  "${LAZY_FILE}|### Board Config (lazyboards)"
+  "${LAZY_FILE}|### Step 5f — Generate .lazyboards.yml"
+  "${FLEET_FILE}|### Fleet Dispatch Enrollment"
+  "${FLEET_FILE}|### Fleet Autonomy Controls"
+  "${AUTONOMY_FILE}|### Autonomy Settings"
 )
 
-# Headings that stay inline in SKILL.md (Question 10 onward and step 5e).
+# Markers that stay inline in SKILL.md: Auth Verification (always run), step 5e,
+# and the step 5f stub that defers to phases/lazyboards.md.
+STUB_5F='run step 5f in `phases/lazyboards.md` when that file was read this run'
 INLINE_MARKERS=(
-  '### Board Config (lazyboards)'
-  '### Fleet Dispatch Enrollment'
-  '### Autonomy Settings'
+  '### Auth Verification'
   '5e. **Generate `.cenci/Dockerfile`**'
+  "${STUB_5F}"
 )
+
+# Step Map conditions (#1342). Each new row names the condition that gates it.
+Q10_CARRIED_MISSING_FILE='If question 10 is carried but `.lazyboards.yml` is missing, do not regenerate it — report it and say `/cenci:configure --all` re-offers it.'
+LAZY_ROW_PARTS=('`lazyboards` is asked' '`.lazyboards.yml` exists' 'test -f' "${Q10_CARRIED_MISSING_FILE}")
+EXAMPLE_ROW_PARTS=('step 5f' 'analyzer')
+FLEET_ROW_PARTS=('`dispatchEnroll`' '`dispatch.planRefined`' '`automerge.enabled`' '`planning.attended`' 'host run' '`detection.inContainer`' '`### Fleet Autonomy Controls`' 'after `phases/autonomy-settings.md`')
+AUTONOMY_ROW_PARTS=('`planning`' '`automerge`' '`refinement`' '`refinement.confirmBeforeApply`' '`refinement.automerge`')
+OLD_STEP_MAP_EVERY_PHASE='Every phase file is read in full on every run'
+OLD_STEP_MAP_INLINE_TAIL='Question 10 onward and generation steps 0 to 7 stay inline in this file.'
+STALE_EVERY_INVOCATION='on every configure invocation'
+
+# Fleet guard (P22), pinned from the pre-move text.
+FLEET_GUARD_HEAD='**Container guard (runs first).** Use `detection.inContainer`'
+FLEET_GUARD_EFFECT='When it is `true`, this section asks nothing, runs no `cenci dispatch` command, and writes nothing anywhere'
+FLEET_PROBE_FAILS='If the command exits non-zero, or its stdout is not parseable JSON, log one informational line and fall through'
+FLEET_Q11_GATE='`enrolled: false` → ask question 11 below when `dispatchEnroll` is in `delta.ask`'
+FLEET_NOT_RECORDED='the container guard, the path-validation skip, a failed status probe, and the other two branches record nothing'
+FLEET_LEDGER_DETECT='question 11 in a container or when the status probe fails) is not recorded'
+
+# Board Config (P21), pinned from the pre-move text.
+LAZY_NO_FILE_ASKS='**No `.lazyboards.yml` at the repo root** → ask **question 10**'
+LAZY_EXISTS_SKIPS='**`.lazyboards.yml` already exists** → **skip question 10**'
+LAZY_ANALYZER_LABEL='**Existing config: suggest or skip**'
+LAZY_ANALYZER_REPORTS_ONLY='On a delta run with an existing `.lazyboards.yml`, the suggest-or-skip analyzer reports new board actions in the end-of-run summary and never prompts; `--all` restores the Apply/Overwrite/Keep/Show prompt.'
+LAZY_TEMPLATE_ONLY_IN_EXAMPLE='Board-level agent launchers. Emitted in BOTH tables'
+LAZY_GENERATE_RULE='Write `.lazyboards.yml` at the repo root with the confirmed key mapping'
+LAZY_BOARD_Q10='10. **Board config** (no existing `.lazyboards.yml`)'
 
 README_CONFIGURE_ROW_PREFIX='| `configure` | codex.md'
 
@@ -216,6 +308,10 @@ require_doc detect_phase "skills/configure/${DETECT_FILE}" || true
 require_doc project_phase "skills/configure/${PROJECT_FILE}" || true
 require_doc mcp_phase "skills/configure/${MCP_FILE}" || true
 require_doc runtime_phase "skills/configure/${RUNTIME_FILE}" || true
+require_doc lazy_phase "skills/configure/${LAZY_FILE}" || true
+require_doc lazy_example "skills/configure/${LAZY_EXAMPLE_FILE}" || true
+require_doc fleet_phase "skills/configure/${FLEET_FILE}" || true
+require_doc autonomy_phase "skills/configure/${AUTONOMY_FILE}" || true
 require_doc migrations "skills/configure/${MIGRATIONS_FILE}" || true
 require_doc readme "README.md" || true
 
@@ -236,6 +332,10 @@ file_content() {
     "${PROJECT_FILE}") printf '%s' "${project_phase}" ;;
     "${MCP_FILE}") printf '%s' "${mcp_phase}" ;;
     "${RUNTIME_FILE}") printf '%s' "${runtime_phase}" ;;
+    "${LAZY_FILE}") printf '%s' "${lazy_phase}" ;;
+    "${LAZY_EXAMPLE_FILE}") printf '%s' "${lazy_example}" ;;
+    "${FLEET_FILE}") printf '%s' "${fleet_phase}" ;;
+    "${AUTONOMY_FILE}") printf '%s' "${autonomy_phase}" ;;
     "${MIGRATIONS_FILE}") printf '%s' "${migrations}" ;;
     SKILL.md) printf '%s' "${skill}" ;;
   esac
@@ -259,10 +359,11 @@ case_step_map() {
     return
   fi
 
-  # Ordered: migrations (conditional) first, then the four phase files in the
-  # original reading order.
+  # Ordered: migrations (conditional) first, then the four always-read phase
+  # files in the original reading order, then the conditional lazyboards,
+  # example, fleet-enrollment and autonomy-settings rows (#1342).
   local prev=-1 file at
-  for file in "${MIGRATIONS_FILE}" "${DETECT_FILE}" "${PROJECT_FILE}" "${MCP_FILE}" "${RUNTIME_FILE}"; do
+  for file in "${MIGRATIONS_FILE}" "${DETECT_FILE}" "${PROJECT_FILE}" "${MCP_FILE}" "${RUNTIME_FILE}" "${LAZY_FILE}" "${LAZY_EXAMPLE_FILE}" "${FLEET_FILE}" "${AUTONOMY_FILE}"; do
     at="$(offset_of "${step_map_body}" "| \`${file}\` |")"
     if [[ "${at}" -lt 0 ]]; then
       fail "${STEP_MAP_HEADING}: no table row for \`${file}\`"
@@ -272,13 +373,41 @@ case_step_map() {
     prev="${at}"
   done
 
-  # Every phase file is read on every run; each row carries file, condition, why.
+  # The first four phase files are read on every run; each row carries file,
+  # condition, why.
   local row
   for file in "${DETECT_FILE}" "${PROJECT_FILE}" "${MCP_FILE}" "${RUNTIME_FILE}"; do
     row="$(row_for "${step_map_body}" "${file}")"
     assert_contains "${row}" "${EVERY_RUN}" "${STEP_MAP_HEADING}: \`${file}\` row states it is read on every run"
   done
   assert_contains_ws "${step_map_body}" '| File | Condition | Why |' "${STEP_MAP_HEADING}: table header names file, condition and why"
+
+  # The new rows are conditional: none may claim to be read on every run, and
+  # each names its own condition. The router intro no longer says every phase
+  # file is read, nor that question 10 onward stays inline.
+  for file in "${LAZY_FILE}" "${LAZY_EXAMPLE_FILE}" "${FLEET_FILE}" "${AUTONOMY_FILE}" "${MIGRATIONS_FILE}"; do
+    row="$(row_for "${step_map_body}" "${file}")"
+    if [[ -z "${row}" ]]; then
+      fail "${STEP_MAP_HEADING}: no row for conditional \`${file}\`"
+    elif [[ "${row}" == *"${EVERY_RUN}"* ]]; then
+      fail "${STEP_MAP_HEADING}: conditional \`${file}\` row must not say \"${EVERY_RUN}\""
+    fi
+  done
+  local part
+  for part in "${LAZY_ROW_PARTS[@]}"; do
+    assert_contains_ws "$(row_for "${step_map_body}" "${LAZY_FILE}")" "${part}" "${STEP_MAP_HEADING}: \`${LAZY_FILE}\` row names its condition"
+  done
+  for part in "${EXAMPLE_ROW_PARTS[@]}"; do
+    assert_contains_ws "$(row_for "${step_map_body}" "${LAZY_EXAMPLE_FILE}")" "${part}" "${STEP_MAP_HEADING}: \`${LAZY_EXAMPLE_FILE}\` row names its condition"
+  done
+  for part in "${FLEET_ROW_PARTS[@]}"; do
+    assert_contains_ws "$(row_for "${step_map_body}" "${FLEET_FILE}")" "${part}" "${STEP_MAP_HEADING}: \`${FLEET_FILE}\` row names its condition"
+  done
+  for part in "${AUTONOMY_ROW_PARTS[@]}"; do
+    assert_contains_ws "$(row_for "${step_map_body}" "${AUTONOMY_FILE}")" "${part}" "${STEP_MAP_HEADING}: \`${AUTONOMY_FILE}\` row names its condition"
+  done
+  assert_absent_paired_ws "${step_map_body}" '| File | Condition | Why |' "${OLD_STEP_MAP_EVERY_PHASE}" "${STEP_MAP_HEADING}: retired \"every phase file is read\" intro"
+  assert_absent_paired_ws "${step_map_body}" '| File | Condition | Why |' "${OLD_STEP_MAP_INLINE_TAIL}" "${STEP_MAP_HEADING}: retired \"question 10 onward stays inline\" tail"
 
   # The interaction rule covers the phase and reference files.
   local rule_line
@@ -292,7 +421,7 @@ case_step_map() {
     rel="${disk#"${CONFIGURE_DIR}/"}"
     assert_contains "${step_map_body}" "\`${rel}\`" "${STEP_MAP_HEADING} names ${rel}"
   done
-  [[ "${#configure_disk_files[@]}" -ge 5 ]] || fail "step map: expected at least 5 phases/references files on disk, found ${#configure_disk_files[@]}"
+  [[ "${#configure_disk_files[@]}" -ge 9 ]] || fail "step map: expected at least 9 phases/references files on disk, found ${#configure_disk_files[@]}"
 }
 
 case_P17_fallbacks_colocated() {
@@ -363,6 +492,7 @@ case_single_keep_or_change_rule() {
   assert_contains_ws "${question_defaults_body}" "${KEEP_OR_CHANGE_OPTION}" "${QUESTION_DEFAULTS_HEADING} holds the multi-select Keep/Change gate options"
   assert_contains_ws "${question_defaults_body}" '**Keep-or-change gate**' "${QUESTION_DEFAULTS_HEADING} names the gate"
   assert_contains_ws "${question_defaults_body}" "${KEEP_FIRST_RULE}" "${QUESTION_DEFAULTS_HEADING} states the --all Keep-first rule"
+  assert_contains_ws "${question_defaults_body}" "${KEEP_FIRST_RULE}, marked \"(Recommended)\" and pre-selected" "${QUESTION_DEFAULTS_HEADING} states the Keep option is pre-selected"
   assert_contains_ws "${question_defaults_body}" "${KEEP_RECOMMENDED}" "${QUESTION_DEFAULTS_HEADING} names the \"Keep current (Recommended)\" option"
   assert_contains_ws "${question_defaults_body}" "${ID_COLUMN_SENTENCE}" "${QUESTION_DEFAULTS_HEADING} keeps the ID-column contract sentence"
   assert_contains_ws "${question_defaults_body}" "${DEFAULTS_TABLE_HEADER}" "${QUESTION_DEFAULTS_HEADING} keeps the ID table"
@@ -378,6 +508,68 @@ case_single_keep_or_change_rule() {
   assert_contains_ws "${q6}" "${QUESTION_DEFAULTS_HEADING}" "question 6 points at ${QUESTION_DEFAULTS_HEADING}"
   assert_absent_paired_ws "${q5}" "${QUESTION_DEFAULTS_HEADING}" "${KEEP_OR_CHANGE_OPTION}" "question 5 does not restate the gate options"
   assert_absent_paired_ws "${q6}" "${QUESTION_DEFAULTS_HEADING}" "${KEEP_OR_CHANGE_OPTION}" "question 6 does not restate the gate options"
+
+  # P10 (#1342): "lists its Keep option first" is stated once, in the router's
+  # single home, and nowhere else across the configure markdown.
+  local keep_first_total
+  keep_first_total="$(count_occurrences "$(normalize_ws "${configure_all}")" "${KEEP_FIRST_RULE}")"
+  [[ "${keep_first_total}" -eq 1 ]] || fail "the phrase [${KEEP_FIRST_RULE}] must occur exactly once across SKILL.md, phases/*.md and references/*.md, found ${keep_first_total}"
+
+  # The autonomy sites reference the rule instead of restating it: the three
+  # per-question "Under `--all`, question N is re-offered ..." sentences are
+  # one sentence that points at `### Question Defaults`, and each of the
+  # Q13/Q14/Q15 `--all` bullets carries the same pointer while keeping its
+  # exact option labels.
+  if [[ -z "${autonomy_phase}" ]]; then
+    fail "${AUTONOMY_FILE}: missing or empty, cannot verify the autonomy sites point at ${QUESTION_DEFAULTS_HEADING}"
+    return
+  fi
+  local autonomy_body before_q13 q13 q14 q15 label
+  autonomy_body="$(extract_section_body_raw "${autonomy_phase}" '### Autonomy Settings')"
+  before_q13="${autonomy_body%%"${Q13_MARKER}"*}"
+  assert_contains_ws "${before_q13}" "${ALL_REOFFER_COLLAPSED}" "${AUTONOMY_FILE}: one collapsed --all re-offer sentence that points at ${QUESTION_DEFAULTS_HEADING}"
+  assert_absent_paired_ws "${autonomy_body}" "${ALL_REOFFER_COLLAPSED}" "${OLD_Q13_ALL_REOFFER}" "${AUTONOMY_FILE}: retired per-question Q13 re-offer sentence"
+  assert_absent_paired_ws "${autonomy_body}" "${ALL_REOFFER_COLLAPSED}" "${OLD_Q14_ALL_REOFFER}" "${AUTONOMY_FILE}: retired per-question Q14 re-offer sentence"
+  assert_absent_paired_ws "${autonomy_body}" "${ALL_REOFFER_COLLAPSED}" "${OLD_Q15_ALL_REOFFER}" "${AUTONOMY_FILE}: retired per-question Q15 re-offer sentence"
+
+  q13="$(extract_between_raw "${autonomy_body}" "${Q13_MARKER}" "${Q14_MARKER}")"
+  q14="$(extract_between_raw "${autonomy_body}" "${Q14_MARKER}" "${Q15_MARKER}")"
+  q15="$(extract_between_raw "${autonomy_body}" "${Q15_MARKER}" "${Q16_MARKER}")"
+  [[ -n "${q13}" && -n "${q14}" && -n "${q15}" ]] || fail "${AUTONOMY_FILE}: question 13/14/15 blocks not found"
+  assert_contains_ws "${q13}" "${KEEP_RULE_POINTER}" "question 13 --all bullet points at ${QUESTION_DEFAULTS_HEADING}"
+  assert_contains_ws "${q14}" "${KEEP_RULE_POINTER}" "question 14 --all bullet points at ${QUESTION_DEFAULTS_HEADING}"
+  assert_contains_ws "${q15}" "${KEEP_RULE_POINTER}" "question 15 --all bullet points at ${QUESTION_DEFAULTS_HEADING}"
+  for label in "${Q13_LABELS[@]}"; do
+    assert_contains_ws "${q13}" "${label}" "question 13 keeps its option label ${label}"
+  done
+  for label in "${Q14_LABELS[@]}"; do
+    assert_contains_ws "${q14}" "${label}" "question 14 keeps its option label ${label}"
+  done
+  for label in "${Q15_LABELS[@]}"; do
+    assert_contains_ws "${q15}" "${label}" "question 15 keeps its option label ${label}"
+  done
+  assert_absent_paired_ws "${q13}" "${KEEP_RULE_POINTER}" "${KEEP_FIRST_RULE}" "question 13 does not restate the Keep-first rule"
+  assert_absent_paired_ws "${q14}" "${KEEP_RULE_POINTER}" "${KEEP_FIRST_RULE}" "question 14 does not restate the Keep-first rule"
+  assert_absent_paired_ws "${q15}" "${KEEP_RULE_POINTER}" "${KEEP_FIRST_RULE}" "question 15 does not restate the Keep-first rule"
+}
+
+# Each new phase file opens with a read-condition line that names the Step Map
+# (the same shape detection-and-delta.md and the child 1 phases use), and none
+# keeps the stale "runs on every configure invocation" claim: these files are
+# now read only under a condition.
+case_phase_read_conditions() {
+  local file content head
+  for file in "${LAZY_FILE}" "${FLEET_FILE}" "${AUTONOMY_FILE}"; do
+    content="$(file_content "${file}")"
+    if [[ -z "${content}" ]]; then
+      fail "${file}: missing or empty"
+      continue
+    fi
+    head="$(head -n 6 <<<"${content}")"
+    assert_contains_ws "${head}" 'Read this file' "${file} opens with a read-condition line"
+    assert_contains_ws "${head}" '`### Step Map`' "${file} read-condition line names the Step Map"
+    assert_absent_paired_ws "${content}" 'Read this file' "${STALE_EVERY_INVOCATION}" "${file} retired \"runs on every configure invocation\" claim"
+  done
 }
 
 case_moved_headings_unique() {
@@ -425,13 +617,129 @@ case_cross_file_pointers() {
   # The router's early prose points at the Delta Resolution file, not "below".
   assert_contains_ws "${skill}" '`### Delta Resolution` in `phases/detection-and-delta.md`' "SKILL.md names the file holding Delta Resolution"
   assert_absent_paired_ws "${skill}" '`### Delta Resolution` in `phases/detection-and-delta.md`' 'Delta Resolution subsection below' "SKILL.md retired positional Delta Resolution pointer"
+
+  # --- #1342: pointers to the lazyboards, fleet and autonomy sections ---------
+  local defaults_ws site count
+  defaults_ws="$(normalize_ws "${question_defaults_body}")"
+  assert_contains_ws "${question_defaults_body}" "see ${LAZY_POINTER}" "${QUESTION_DEFAULTS_HEADING} question 10 row names ${LAZY_FILE}"
+  assert_contains_ws "${question_defaults_body}" "see ${FLEET_POINTER}" "${QUESTION_DEFAULTS_HEADING} question 11 row names ${FLEET_FILE}"
+  count="$(count_occurrences "${defaults_ws}" "see ${AUTONOMY_POINTER}")"
+  [[ "${count}" -ge 4 ]] || fail "${QUESTION_DEFAULTS_HEADING}: expected the Keep-first sentence and the question 13/14/15 rows to name ${AUTONOMY_FILE} (4 sites), found ${count}"
+  assert_contains_ws "${skill}" "${FLEET_AUTONOMY_POINTER}" "SKILL.md step 7 names the file holding the fleet Next step block"
+  assert_contains_ws "${skill}" "question 13 in \`${AUTONOMY_FILE}\` was asked" "SKILL.md step 6 wiring names ${AUTONOMY_FILE} for question 13"
+  assert_contains_ws "${skill}" "question 14 in \`${AUTONOMY_FILE}\` was asked" "SKILL.md step 6 wiring names ${AUTONOMY_FILE} for question 14"
+  assert_contains_ws "${skill}" "question 15 in \`${AUTONOMY_FILE}\` was asked" "SKILL.md step 6 wiring names ${AUTONOMY_FILE} for question 15"
+  assert_contains_ws "${skill}" "\`### Autonomy Settings\` question 13 in \`${AUTONOMY_FILE}\`" "SKILL.md planning field note names ${AUTONOMY_FILE}"
+  assert_contains_ws "${skill}" "\`### Autonomy Settings\` question 14 in \`${AUTONOMY_FILE}\`" "SKILL.md automerge field note names ${AUTONOMY_FILE}"
+  assert_contains_ws "${skill}" "\`### Autonomy Settings\` question 15 in \`${AUTONOMY_FILE}\`" "SKILL.md refinement field note names ${AUTONOMY_FILE}"
+  assert_contains_ws "${skill}" 'derivation tables in `### Board Config (lazyboards)` in `phases/lazyboards.md`' "SKILL.md names the file holding the lazyboards derivation tables"
+  assert_contains_ws "${skill}" 'fallback as question 13/14/15 in `phases/autonomy-settings.md`' "SKILL.md step 6 fleet-leaf overlay names ${AUTONOMY_FILE} for the question 13/14/15 validation"
+  assert_absent_paired_ws "${skill}" 'fallback as question 13/14/15 in `phases/autonomy-settings.md`' 'fallback as question 13/14/15 below' "SKILL.md retired positional question 13/14/15 validation pointer"
+  for site in "${OLD_SKILL_AUTONOMY_POINTERS[@]}"; do
+    assert_absent_paired_ws "${skill}" "${AUTONOMY_POINTER}" "${site}" "SKILL.md retired positional pointer [${site}]"
+  done
+
+  # Detection and Delta Resolution name the files holding the sections they cite.
+  assert_contains_ws "${detect_phase}" "(see ${AUTONOMY_POINTER})" "${DETECT_FILE}: the fallback pointer names ${AUTONOMY_FILE}"
+  assert_contains_ws "${detect_phase}" "(see ${FLEET_POINTER})" "${DETECT_FILE}: the fleet pointers name ${FLEET_FILE}"
+  assert_contains_ws "${detect_phase}" "${LAZY_POINTER}" "${DETECT_FILE}: the analyzer pointer names ${LAZY_FILE}"
+  assert_absent_paired_ws "${detect_phase}" '### Delta Resolution' '(see `### Autonomy Settings`)' "${DETECT_FILE}: retired positional Autonomy Settings pointer"
+  assert_absent_paired_ws "${detect_phase}" '### Delta Resolution' '(see `### Fleet Dispatch Enrollment`)' "${DETECT_FILE}: retired positional Fleet Dispatch Enrollment pointer"
+  assert_absent_paired_ws "${detect_phase}" '### Delta Resolution' '`### Board Config (lazyboards)`)' "${DETECT_FILE}: retired positional Board Config pointer"
+
+  # The moved sections point at what they left behind by file name.
+  assert_contains_ws "${autonomy_phase}" 'unlike `### Fleet Dispatch Enrollment` in `phases/fleet-enrollment.md`' "${AUTONOMY_FILE}: the intro names ${FLEET_FILE}"
+  assert_contains_ws "${autonomy_phase}" 'step 6 in `SKILL.md`' "${AUTONOMY_FILE}: the intro names SKILL.md for the step 6 write"
+  assert_contains_ws "${autonomy_phase}" '(see `### Delta Resolution` in `phases/detection-and-delta.md`)' "${AUTONOMY_FILE}: the resolver-failure rule names ${DETECT_FILE}"
+  assert_absent_paired_ws "${autonomy_phase}" '### Autonomy Settings' '(see `### Delta Resolution`)' "${AUTONOMY_FILE}: retired positional Delta Resolution pointer"
+  assert_absent_paired_ws "${autonomy_phase}" '### Autonomy Settings' 'step 6 below' "${AUTONOMY_FILE}: retired positional step 6 pointer"
+  assert_contains_ws "${fleet_phase}" '`### Create Worktree` in `SKILL.md`' "${FLEET_FILE}: the main-checkout rule names SKILL.md for Create Worktree"
+}
+
+# P21 (#1342): the lazyboards phase is read only when question 10 is asked or
+# `.lazyboards.yml` exists; with the file present question 10 is not asked and
+# the suggest-or-skip analyzer runs (reporting only on a delta run). The
+# carried-but-missing report is the router's, because that is the one state in
+# which the phase file is not read.
+case_P21_lazyboards_condition() {
+  [[ -n "${lazy_phase}" ]] || { fail "P21: ${LAZY_FILE} missing or empty"; return; }
+  local row board example_row
+  row="$(row_for "${step_map_body}" "${LAZY_FILE}")"
+  [[ -n "${row}" ]] || { fail "P21: no ${STEP_MAP_HEADING} row for ${LAZY_FILE}"; return; }
+  assert_contains_ws "${row}" "${Q10_CARRIED_MISSING_FILE}" "P21: the router row reports a carried question 10 whose .lazyboards.yml is missing"
+  # The existence check is the router's own call, and a read of the phase file
+  # is what the check gates; both are wired in the Step Map, not just stated.
+  assert_contains_ws "${step_map_body}" '**own** Bash call' "P21: ${STEP_MAP_HEADING} runs the .lazyboards.yml existence check as its own Bash call"
+
+  board="$(extract_section_body_raw "${lazy_phase}" '### Board Config (lazyboards)')"
+  [[ -n "${board}" ]] || { fail "P21: ${LAZY_FILE} Board Config section body empty"; return; }
+  assert_contains_ws "${board}" "${LAZY_NO_FILE_ASKS}" "P21: question 10 is asked only when no .lazyboards.yml exists"
+  assert_contains_ws "${board}" "${LAZY_EXISTS_SKIPS}" "P21: an existing .lazyboards.yml skips question 10"
+  assert_contains_ws "${board}" "${LAZY_ANALYZER_LABEL}" "P21: the existing-file branch runs the suggest-or-skip analyzer"
+  assert_contains_ws "${board}" "${LAZY_ANALYZER_REPORTS_ONLY}" "P21: on a delta run the analyzer only reports"
+  assert_contains_ws "${board}" "${LAZY_BOARD_Q10}" "P21: ${LAZY_FILE} holds question 10"
+
+  # The analyzer and the generation rules travel with the question.
+  assert_contains_ws "${lazy_phase}" '5f. **Generate `.lazyboards.yml`**' "P21: ${LAZY_FILE} holds step 5f"
+  assert_contains_ws "$(extract_between_raw "${lazy_phase}" '5f. **Generate' '__never_matches__')" "${LAZY_ANALYZER_LABEL}" "P21: the analyzer sub-step lives in step 5f"
+
+  # The router keeps none of it (paired with the stub that points at the file).
+  assert_absent_paired_ws "${skill}" "${STUB_5F}" "${LAZY_BOARD_Q10}" "P21: SKILL.md no longer carries question 10"
+  assert_absent_paired_ws "${skill}" "${STUB_5F}" "${LAZY_ANALYZER_LABEL}" "P21: SKILL.md no longer carries the analyzer sub-step"
+  assert_absent_paired_ws "${skill}" "${STUB_5F}" "${LAZY_GENERATE_RULE}" "P21: SKILL.md no longer carries the 5f generation rules"
+  assert_absent_paired_ws "${skill}" "${STUB_5F}" "${LAZY_TEMPLATE_ONLY_IN_EXAMPLE}" "P21: SKILL.md no longer carries the generated-file example"
+
+  # The full worked example lives only in the reference file, fenced at column 0.
+  example_row="$(row_for "${step_map_body}" "${LAZY_EXAMPLE_FILE}")"
+  [[ -n "${example_row}" ]] || fail "P21: no ${STEP_MAP_HEADING} row for ${LAZY_EXAMPLE_FILE}"
+  [[ -n "${lazy_example}" ]] || { fail "P21: ${LAZY_EXAMPLE_FILE} missing or empty"; return; }
+  assert_contains_ws "${lazy_example}" "${LAZY_TEMPLATE_ONLY_IN_EXAMPLE}" "P21: ${LAZY_EXAMPLE_FILE} holds the generated-file example"
+  [[ "$(count_exact_lines "${lazy_example}" '```yaml')" -eq 1 ]] || fail "P21: ${LAZY_EXAMPLE_FILE} must hold exactly one column-0 \`\`\`yaml fence"
+  assert_absent_paired_ws "${lazy_phase}" '5f. **Generate' "${LAZY_TEMPLATE_ONLY_IN_EXAMPLE}" "P21: ${LAZY_FILE} does not duplicate the full example"
+  assert_contains_ws "${lazy_phase}" "\`${LAZY_EXAMPLE_FILE}\`" "P21: ${LAZY_FILE} points at ${LAZY_EXAMPLE_FILE}"
+}
+
+# P22 (#1342): in a container, or when `cenci dispatch status --json` fails,
+# question 11 is not asked and `dispatchEnroll` is not recorded. The guard moved
+# verbatim into the fleet phase, so the router must still read that file on
+# every host run (the half-enrolled question 12 repair has no ID) and must not
+# keep a copy of the guard.
+case_P22_fleet_guard() {
+  [[ -n "${fleet_phase}" ]] || { fail "P22: ${FLEET_FILE} missing or empty"; return; }
+  local row dispatch
+  row="$(row_for "${step_map_body}" "${FLEET_FILE}")"
+  [[ -n "${row}" ]] || { fail "P22: no ${STEP_MAP_HEADING} row for ${FLEET_FILE}"; return; }
+  assert_contains_ws "${row}" 'host run' "P22: the router reads ${FLEET_FILE} on every host run so the question 12 repair stays reachable"
+
+  dispatch="$(extract_section_body_raw "${fleet_phase}" '### Fleet Dispatch Enrollment')"
+  [[ -n "${dispatch}" ]] || { fail "P22: ${FLEET_FILE} Fleet Dispatch Enrollment section body empty"; return; }
+  assert_contains_ws "${dispatch}" "${FLEET_GUARD_HEAD}" "P22: the container guard runs first"
+  assert_contains_ws "${dispatch}" "${FLEET_GUARD_EFFECT}" "P22: in a container the section asks nothing, runs nothing and writes nothing"
+  assert_contains_ws "${dispatch}" "${FLEET_PROBE_FAILS}" "P22: a failed status probe never blocks the run and asks nothing further"
+  assert_contains_ws "${dispatch}" "${FLEET_Q11_GATE}" "P22: question 11 is asked only on the enrolled:false branch"
+  assert_contains_ws "${dispatch}" "${FLEET_NOT_RECORDED}" "P22: the container guard and a failed probe record nothing"
+  assert_contains_ws "${detect_phase}" "${FLEET_LEDGER_DETECT}" "P22: ${DETECT_FILE} keeps the ledger rule for a container or failed probe"
+
+  # The guard is not duplicated in the router (paired with the fleet row).
+  assert_absent_paired_ws "${skill}" "\`${FLEET_FILE}\`" "${FLEET_GUARD_HEAD}" "P22: SKILL.md does not copy the container guard"
+  assert_absent_paired_ws "${skill}" "\`${FLEET_FILE}\`" 'cenci dispatch status --json --dir' "P22: SKILL.md does not copy the status probe"
+
+  # Fleet Autonomy Controls is asked after autonomy-settings and keeps its own
+  # container guard and apply timing.
+  local controls
+  controls="$(extract_section_body_raw "${fleet_phase}" '### Fleet Autonomy Controls')"
+  [[ -n "${controls}" ]] || { fail "P22: ${FLEET_FILE} Fleet Autonomy Controls section body empty"; return; }
+  assert_contains_ws "${controls}" 'after `phases/autonomy-settings.md`' "P22: Fleet Autonomy Controls says it is asked after ${AUTONOMY_FILE}"
+  assert_contains_ws "${controls}" '**Container guard and apply timing.**' "P22: Fleet Autonomy Controls keeps its container guard and apply timing"
+  assert_contains_ws "${controls}" 'never claim deferred fleet choices were applied' "P22: a sandbox run never claims a deferred fleet choice was applied"
+  assert_contains_ws "${controls}" '**Next step.**' "P22: the fleet Next step block moved with Fleet Autonomy Controls"
 }
 
 case_allowed_tools_only_in_skill_md() {
   local line_count disk
   line_count="$(grep -c '^allowed-tools:' <<<"${skill}" | tr -d '[:space:]')"
   [[ "${line_count}" -eq 1 ]] || fail "SKILL.md must carry exactly one allowed-tools: frontmatter line, found ${line_count}"
-  [[ "${#configure_disk_files[@]}" -ge 5 ]] || fail "allowed-tools guard is vacuous: found ${#configure_disk_files[@]} phases/references files (expected at least 5)"
+  [[ "${#configure_disk_files[@]}" -ge 9 ]] || fail "allowed-tools guard is vacuous: found ${#configure_disk_files[@]} phases/references files (expected at least 9)"
   for disk in "${configure_disk_files[@]}"; do
     if grep -q '^allowed-tools:' "${disk}"; then
       fail "${disk#"${FLOW_DIR}/"}: allowed-tools: belongs only in SKILL.md frontmatter"
@@ -446,7 +754,7 @@ case_readme_workflow_deps_row() {
   local row file
   row="$(grep -F -- "${README_CONFIGURE_ROW_PREFIX}" <<<"${readme}" | head -n 1)"
   [[ -n "${row}" ]] || { fail "README.md: workflow-deps row for configure not found"; return; }
-  for file in "${DETECT_FILE}" "${PROJECT_FILE}" "${MCP_FILE}" "${RUNTIME_FILE}" "${MIGRATIONS_FILE}"; do
+  for file in "${DETECT_FILE}" "${PROJECT_FILE}" "${MCP_FILE}" "${RUNTIME_FILE}" "${LAZY_FILE}" "${LAZY_EXAMPLE_FILE}" "${FLEET_FILE}" "${AUTONOMY_FILE}" "${MIGRATIONS_FILE}"; do
     assert_contains "${row}" "${file}" "README.md workflow-deps row for configure lists ${file}"
   done
 }
@@ -457,6 +765,9 @@ case_step_map
 case_P17_fallbacks_colocated
 case_P19_migrations_conditional
 case_single_keep_or_change_rule
+case_phase_read_conditions
+case_P21_lazyboards_condition
+case_P22_fleet_guard
 case_moved_headings_unique
 case_cross_file_pointers
 case_allowed_tools_only_in_skill_md

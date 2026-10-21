@@ -271,7 +271,7 @@ which skill is running.
 
 `/cenci:configure` generates the whole per-repo `.lazyboards.yml`, including its
 `columns:`, when you answer its board-config question (step 5f — see
-`flow/skills/configure/SKILL.md`). The file is self-contained and needs no other
+`flow/skills/configure/phases/lazyboards.md`). The file is self-contained and needs no other
 config: lazyboards merges scalar fields and the `keymaps:` tables across a global
 and a local config file, with local keys winning, so a stray machine-global
 `~/.config/lazyboards/config.yml` is harmless — nothing in it can override what's

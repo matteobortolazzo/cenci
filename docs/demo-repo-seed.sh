@@ -28,7 +28,7 @@ create_label() {
 }
 
 # Column labels — match the per-repo lazyboards board cenci generates
-# (flow/skills/configure/SKILL.md step 5f / docs/orchestration.md), minus the
+# (flow/skills/configure/phases/lazyboards.md step 5f / docs/orchestration.md), minus the
 # optional Designed and Implemented columns the demo board doesn't pin.
 create_label "New"       "c5def5" "Incoming, not yet triaged"
 create_label "Refined"   "bfd4f2" "Requirements clarified, ready to plan"

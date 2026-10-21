@@ -54,7 +54,19 @@
 # "six opt-in autonomy switches" index line. Every wording that moved to cover
 # question 15 keeps its previous form as a paired-absence check.
 #
+# Ticket #1342 (parent #692) moves `### Autonomy Settings` (questions 13-17)
+# into the conditionally read flow/skills/configure/phases/autonomy-settings.md
+# and the questions 18-20 `### Fleet Autonomy Controls` Next step block into
+# phases/fleet-enrollment.md. The section, option, scaffold, Q15 body and q15
+# program assertions therefore read the phase files; step 6, the schema, the
+# defaults table and the PR body stay on SKILL.md with pointers that name the
+# phase file. The three "Under `--all`, question N is re-offered ..." sentences
+# collapse into one sentence pointing at SKILL.md's `### Question Defaults`
+# (P10); the old per-question sentences are paired-absence checks.
+#
 # Covered files:
+#   - flow/skills/configure/phases/autonomy-settings.md
+#   - flow/skills/configure/phases/fleet-enrollment.md (Next step block)
 #   - flow/skills/configure/SKILL.md
 #   - flow/skills/configure/codex.md
 #   - docs/autonomous-loop.md (cross-project)
@@ -263,6 +275,10 @@ offset_of() {
 # reason and the green phase has an unambiguous authoring target.
 
 SECTION_HEADING='### Autonomy Settings'
+FLEET_CONTROLS_HEADING='### Fleet Autonomy Controls'
+# How SKILL.md (step 6, step 7, the schema, the defaults table) points at the
+# moved section: it names the file (#1342).
+AUTONOMY_FILE_POINTER='`### Autonomy Settings` in `phases/autonomy-settings.md`'
 Q13_MARKER='13. **Plan approval autonomy**'
 Q14_MARKER='14. **Automerge policy block**'
 
@@ -329,7 +345,9 @@ Q14_SENSITIVE_PATHS_UNION_MARKER='`existingConfig.security.sensitivePaths` when 
 # overlay order relative to merge-sandbox-config.sh's stdout.
 STEP6_WIRING_MARKER='`planningAnswer`/`automergeAnswer`/`refinementAnswer` are overlaid onto `merge-sandbox-config.sh`'"'"'s stdout before the write'
 OLD_STEP6_WIRING_MARKER='`planningAnswer`/`automergeAnswer` are overlaid onto `merge-sandbox-config.sh`'"'"'s stdout before the write'
-STEP6_REFINEMENT_WIRING='`refinementAnswer` contributes a `refinement: { "autonomy": "lean" }` key only when question 15 above was asked and answered `lean`'
+STEP6_REFINEMENT_WIRING='`refinementAnswer` contributes a `refinement: { "autonomy": "lean" }` key only when question 15 in `phases/autonomy-settings.md` was asked and answered `lean`'
+OLD_STEP6_REFINEMENT_WIRING='only when question 15 above was asked and answered `lean`'
+STEP6_Q14_PROGRAM_POINTER='`cenci:configure-q14-remove` program (`### Autonomy Settings` in `phases/autonomy-settings.md`)'
 STEP6_Q15_SWITCH_WIRING='a collected "Switch to …" answer for question 15 is applied with the `cenci:configure-q15-switch` program (`--arg autonomy interactive|lean`)'
 STEP6_DECLINE_CONTRIBUTES_NO_KEY_MARKER='a declined answer contributes no key'
 
@@ -355,7 +373,12 @@ MAINTENANCE_NEVER_WRITTEN_CLAIM='The `maintenance` field is optional and is **ne
 BABYSIT_NO_QUESTION_CLAIM='`babysitInterval` is an optional field — there is **no configure question for it**'
 
 # codex.md parity paragraph.
-CODEX_AUTONOMY_HEADING_MIRROR_MARKER='Autonomy Settings mirrors the Claude procedure'"'"'s `### Autonomy Settings` section'
+CODEX_AUTONOMY_HEADING_MIRROR_MARKER='Autonomy Settings mirrors the Claude procedure'"'"'s `### Autonomy Settings` section in `phases/autonomy-settings.md`'
+OLD_CODEX_AUTONOMY_HEADING_MIRROR_MARKER='`### Autonomy Settings` section: the procedure on a delta run'
+CODEX_INDEPENDENT_MIRROR_MARKER='Independent controls mirror questions 16–17 in `phases/autonomy-settings.md` and 18–20 in `phases/fleet-enrollment.md`'
+OLD_CODEX_INDEPENDENT_MIRROR_MARKER='Independent controls mirror questions 16–20 in `SKILL.md`'
+CODEX_LEAF_PROGRAMS_MARKER='`cenci:configure-confirm-before-apply` and `cenci:configure-refinement-automerge` marker-bounded jq programs from `phases/autonomy-settings.md`'
+OLD_CODEX_LEAF_PROGRAMS_MARKER='marker-bounded jq programs from `SKILL.md`, with `--argjson confirmBeforeApply'
 CODEX_AUTONOMY_ABSENT_ONLY_MARKER='on a delta run asks about `planning`, `automerge` and `refinement` only when absent and not already offered'
 OLD_CODEX_AUTONOMY_TWO_KEY_MARKER='on a delta run asks about `planning` and `automerge` only when absent and not already offered'
 CODEX_AUTONOMY_ALL_REOFFER_MARKER='`--all` re-offers all three with keep-or-change options'
@@ -416,7 +439,16 @@ AUTONOMY_INTRO_KEYS_MARKER='`planning`, `automerge` and `refinement` are repo-co
 OLD_AUTONOMY_INTRO_KEYS_MARKER='`planning` and `automerge` are repo-committed keys that land inside this run'"'"'s PR'
 AUTONOMY_INTRO_QUESTIONS_MARKER='The questions below only collect an answer; none writes anything itself'
 OLD_AUTONOMY_INTRO_QUESTIONS_MARKER='Both questions below only collect an answer; neither writes anything itself'
-Q15_ALL_REOFFER_SENTENCE='Under `--all`, question 15 is re-offered even when `refinement` is present, with "Keep current (Recommended)" pre-selected.'
+# P10 (#1342): one sentence replaces the three per-question --all re-offer
+# sentences and points at the single keep-or-change rule in SKILL.md's
+# `### Question Defaults`; the old sentences are paired-absence checks. The same
+# pointer is carried by each question's `--all` bullet. Identical constants are
+# pinned in configure-router-contract.test.sh and configure-delta-rerun.test.sh.
+KEEP_RULE_POINTER='per the keep-or-change rule in `SKILL.md`'"'"'s `### Question Defaults`'
+ALL_REOFFER_COLLAPSED='Under `--all`, questions 13, 14 and 15 are each re-offered even when `planning`, `automerge` or `refinement` is present, with the Keep option listed first and pre-selected '"${KEEP_RULE_POINTER}"'.'
+OLD_Q13_ALL_REOFFER='Under `--all`, question 13 is re-offered even when `planning` is present, with the committed value pre-selected.'
+OLD_Q14_ALL_REOFFER='Under `--all`, question 14 is re-offered even when `automerge` is present, with "Keep current block(s) (Recommended)" pre-selected.'
+OLD_Q15_ALL_REOFFER='Under `--all`, question 15 is re-offered even when `refinement` is present, with "Keep current (Recommended)" pre-selected.'
 NEXT_STEP_ALL_SIX_MARKER='for the full walkthrough of the switches'
 OLD_NEXT_STEP_ALL_FOUR_MARKER='for the full walkthrough of all four switches'
 NEXT_STEP_NO_FLEET_VERB_MARKER='Switch 6 (`refinement.autonomy`) has no fleet verb: it is read from the local checkout, so there is nothing to flip fleet-wide.'
@@ -429,8 +461,10 @@ Q15_TABLE_ROW='| 15. Refinement autonomy | `refinement` | `refinement` |'
 SCHEMA_REFINEMENT_LINE='"refinement": { "autonomy": "interactive" },'
 SCHEMA_NOTE_MARKER='(The `planning` and `refinement` values shown above are illustrative of the schema'
 OLD_SCHEMA_NOTE_MARKER='(The `planning` value shown above is illustrative of the schema'
-SCHEMA_NOTE_Q15_MARKER='question 15 (`### Autonomy Settings`) writes `refinement.autonomy` only when you explicitly choose `lean` (or switch under `--all`)'
-REFINEMENT_FIELD_INTRO='The `refinement` field is optional. `### Autonomy Settings` question 15 above asks for it only when absent'
+SCHEMA_NOTE_Q15_MARKER='question 15 (`### Autonomy Settings` in `phases/autonomy-settings.md`) writes `refinement.autonomy` only when you explicitly choose `lean` (or switch under `--all`)'
+OLD_SCHEMA_NOTE_Q15_MARKER='question 15 (`### Autonomy Settings`) writes `refinement.autonomy`'
+REFINEMENT_FIELD_INTRO='The `refinement` field is optional. `### Autonomy Settings` question 15 in `phases/autonomy-settings.md` asks for it only when absent'
+OLD_REFINEMENT_FIELD_INTRO='`### Autonomy Settings` question 15 above asks for it only when absent'
 REFINEMENT_FIELD_SEMANTICS='- `refinement.autonomy` — `"lean"` or `"interactive"`, default `"interactive"`. Only the exact string `"lean"` changes behavior'
 REFINEMENT_FIELD_CONSUMER='`refinement.autonomy` is consumed by `skills/refine/SKILL.md`'
 REFINEMENT_FIELD_LOCAL_READ='is read from the local `.cenci/config.json` through `project-core`, never from `origin/main`, and no fleet switch exists for it'
@@ -485,51 +519,59 @@ assert_json_eq() {
 
 # --- skills/configure/SKILL.md ----------------------------------------------
 
-require_doc skill "skills/configure/SKILL.md" || true
-if [[ -n "${skill}" ]]; then
+require_doc autonomy_phase "skills/configure/phases/autonomy-settings.md" || true
+require_doc fleet_phase "skills/configure/phases/fleet-enrollment.md" || true
+
+# --- skills/configure/phases/autonomy-settings.md ---------------------------
+# `### Autonomy Settings` (questions 13-17) lives here since #1342.
+
+section_body=""
+if [[ -z "${autonomy_phase}" ]]; then
+  fail "phases/autonomy-settings.md: empty or missing, section assertions skipped"
+else
   # Section heading and question numbering (paired: a missing heading means
   # the section-scoped checks below fail for the right reason too).
-  assert_contains "${skill}" "${SECTION_HEADING}" "SKILL.md Autonomy Settings heading"
-  assert_contains "${skill}" "${Q13_MARKER}" "SKILL.md question 13 (plan approval autonomy)"
-  assert_contains "${skill}" "${Q14_MARKER}" "SKILL.md question 14 (automerge policy block)"
+  assert_contains "${autonomy_phase}" "${SECTION_HEADING}" "autonomy-settings.md Autonomy Settings heading"
+  assert_contains "${autonomy_phase}" "${Q13_MARKER}" "autonomy-settings.md question 13 (plan approval autonomy)"
+  assert_contains "${autonomy_phase}" "${Q14_MARKER}" "autonomy-settings.md question 14 (automerge policy block)"
 
   # Absent-only rule + projects[]-aware presence detection.
-  assert_contains_ws "${skill}" "${ABSENT_ONLY_RULE}" "SKILL.md absent-only rule (never re-prompt/narrow/remove)"
-  assert_absent_paired_ws "${skill}" "${ABSENT_ONLY_RULE}" "${OLD_UNCONDITIONAL_ABSENT_ONLY_RULE}" "SKILL.md retired unconditional absent-only rule (now delta-scoped, #1246)"
-  assert_absent_paired_ws "${skill}" "${ABSENT_ONLY_RULE}" "${OLD_TWO_KEY_ABSENT_ONLY_RULE}" "SKILL.md retired two-key absent-only rule (now covers refinement, #1274)"
-  assert_contains_ws "${skill}" "${PLANNING_PRESENCE_MARKER}" "SKILL.md planning presence detection"
-  assert_contains_ws "${skill}" "${AUTOMERGE_PRESENCE_MARKER}" "SKILL.md automerge presence detection covers projects[]"
+  assert_contains_ws "${autonomy_phase}" "${ABSENT_ONLY_RULE}" "autonomy-settings.md absent-only rule (never re-prompt/narrow/remove)"
+  assert_absent_paired_ws "${autonomy_phase}" "${ABSENT_ONLY_RULE}" "${OLD_UNCONDITIONAL_ABSENT_ONLY_RULE}" "autonomy-settings.md retired unconditional absent-only rule (now delta-scoped, #1246)"
+  assert_absent_paired_ws "${autonomy_phase}" "${ABSENT_ONLY_RULE}" "${OLD_TWO_KEY_ABSENT_ONLY_RULE}" "autonomy-settings.md retired two-key absent-only rule (now covers refinement, #1274)"
+  assert_contains_ws "${autonomy_phase}" "${PLANNING_PRESENCE_MARKER}" "autonomy-settings.md planning presence detection"
+  assert_contains_ws "${autonomy_phase}" "${AUTOMERGE_PRESENCE_MARKER}" "autonomy-settings.md automerge presence detection covers projects[]"
 
   # Question 13 — conservative-first, Recommended, and the decline sentence.
-  assert_contains "${skill}" "${Q13_OPTION_INTERACTIVE}" "SKILL.md question 13 interactive option (Recommended)"
-  assert_contains "${skill}" "${Q13_OPTION_LEAN}" "SKILL.md question 13 lean option"
-  assert_contains_ws "${skill}" "${Q13_DECLINE_MARKER}" "SKILL.md question 13 decline omits planning key entirely"
+  assert_contains "${autonomy_phase}" "${Q13_OPTION_INTERACTIVE}" "autonomy-settings.md question 13 interactive option (Recommended)"
+  assert_contains "${autonomy_phase}" "${Q13_OPTION_LEAN}" "autonomy-settings.md question 13 lean option"
+  assert_contains_ws "${autonomy_phase}" "${Q13_DECLINE_MARKER}" "autonomy-settings.md question 13 decline omits planning key entirely"
 
   # Question 14 — skip-is-Recommended vs scaffold, and the decline sentence.
-  assert_contains "${skill}" "${Q14_OPTION_SKIP}" "SKILL.md question 14 skip option (Recommended)"
-  assert_contains "${skill}" "${Q14_OPTION_SCAFFOLD}" "SKILL.md question 14 scaffold option"
-  assert_contains_ws "${skill}" "${Q14_DECLINE_MARKER}" "SKILL.md question 14 decline omits automerge key entirely"
+  assert_contains "${autonomy_phase}" "${Q14_OPTION_SKIP}" "autonomy-settings.md question 14 skip option (Recommended)"
+  assert_contains "${autonomy_phase}" "${Q14_OPTION_SCAFFOLD}" "autonomy-settings.md question 14 scaffold option"
+  assert_contains_ws "${autonomy_phase}" "${Q14_DECLINE_MARKER}" "autonomy-settings.md question 14 decline omits automerge key entirely"
 
   # Section-scoped negative check: no babysitInterval/security question
   # smuggled into the new section (scoped to the section body, not the
   # whole file, where those field names legitimately appear elsewhere).
-  section_body="$(extract_section_body_raw "${skill}" "${SECTION_HEADING}")"
+  section_body="$(extract_section_body_raw "${autonomy_phase}" "${SECTION_HEADING}")"
   if [[ -z "${section_body}" ]]; then
-    fail "SKILL.md Autonomy Settings section body: not found/empty (section heading missing) -- cannot verify no babysitInterval/security question was smuggled in"
+    fail "autonomy-settings.md Autonomy Settings section body: not found/empty (section heading missing) -- cannot verify no babysitInterval/security question was smuggled in"
   else
-    assert_not_contains "${section_body}" "babysitInterval" "SKILL.md Autonomy Settings section must not ask about babysitInterval"
-    assert_not_contains "${section_body}" "\"security\"" "SKILL.md Autonomy Settings section must not ask about security"
+    assert_not_contains "${section_body}" "babysitInterval" "autonomy-settings.md Autonomy Settings section must not ask about babysitInterval"
+    assert_not_contains "${section_body}" "\"security\"" "autonomy-settings.md Autonomy Settings section must not ask about security"
   fi
 
   # Scaffold JSON template — extract between stable markers and validate
   # structurally with jq, not substrings (AC3).
-  scaffold_json="$(extract_marked_block_raw "${skill}" "${SCAFFOLD_BEGIN_MARKER}" "${SCAFFOLD_END_MARKER}")"
+  scaffold_json="$(extract_marked_block_raw "${autonomy_phase}" "${SCAFFOLD_BEGIN_MARKER}" "${SCAFFOLD_END_MARKER}")"
   if [[ -z "${scaffold_json}" ]]; then
-    fail "SKILL.md automerge scaffold JSON: not found between markers [${SCAFFOLD_BEGIN_MARKER}] / [${SCAFFOLD_END_MARKER}]"
+    fail "autonomy-settings.md automerge scaffold JSON: not found between markers [${SCAFFOLD_BEGIN_MARKER}] / [${SCAFFOLD_END_MARKER}]"
   elif ! command -v jq >/dev/null 2>&1; then
-    fail "SKILL.md automerge scaffold JSON: jq not available to validate structurally"
+    fail "autonomy-settings.md automerge scaffold JSON: jq not available to validate structurally"
   elif ! printf '%s\n' "${scaffold_json}" | jq empty >/dev/null 2>&1; then
-    fail "SKILL.md automerge scaffold JSON: extracted block is not valid JSON"
+    fail "autonomy-settings.md automerge scaffold JSON: extracted block is not valid JSON"
   else
     max_changed_files="$(printf '%s\n' "${scaffold_json}" | jq -r '.maxChangedFiles // 0')"
     max_diff_lines="$(printf '%s\n' "${scaffold_json}" | jq -r '.maxDiffLines // 0')"
@@ -537,105 +579,86 @@ if [[ -n "${skill}" ]]; then
     protected_paths_is_nonempty_string_array="$(printf '%s\n' "${scaffold_json}" | jq -r '(.protectedPaths | type == "array") and ((.protectedPaths | length) > 0) and (all(.protectedPaths[]; type == "string"))')"
 
     [[ "${max_changed_files}" =~ ^[0-9]+$ ]] && [[ "${max_changed_files}" -gt 0 ]] \
-      || fail "SKILL.md automerge scaffold JSON: maxChangedFiles must be > 0, got [${max_changed_files}]"
+      || fail "autonomy-settings.md automerge scaffold JSON: maxChangedFiles must be > 0, got [${max_changed_files}]"
     [[ "${max_diff_lines}" =~ ^[0-9]+$ ]] && [[ "${max_diff_lines}" -gt 0 ]] \
-      || fail "SKILL.md automerge scaffold JSON: maxDiffLines must be > 0, got [${max_diff_lines}]"
+      || fail "autonomy-settings.md automerge scaffold JSON: maxDiffLines must be > 0, got [${max_diff_lines}]"
     [[ "${merge_method}" == "squash" ]] \
-      || fail "SKILL.md automerge scaffold JSON: mergeMethod must be \"squash\", got [${merge_method}]"
+      || fail "autonomy-settings.md automerge scaffold JSON: mergeMethod must be \"squash\", got [${merge_method}]"
     [[ "${protected_paths_is_nonempty_string_array}" == "true" ]] \
-      || fail "SKILL.md automerge scaffold JSON: protectedPaths must be a non-empty array of strings"
+      || fail "autonomy-settings.md automerge scaffold JSON: protectedPaths must be a non-empty array of strings"
 
     for glob in "${SCAFFOLD_BASELINE_GLOBS[@]}"; do
       protected_paths_has_glob="$(printf '%s\n' "${scaffold_json}" | jq -r --arg g "${glob}" '(.protectedPaths // []) | index($g) != null')"
       [[ "${protected_paths_has_glob}" == "true" ]] \
-        || fail "SKILL.md automerge scaffold JSON: protectedPaths must seed the mandatory baseline glob [${glob}]"
+        || fail "autonomy-settings.md automerge scaffold JSON: protectedPaths must seed the mandatory baseline glob [${glob}]"
     done
     protected_paths_has_ci_path="$(printf '%s\n' "${scaffold_json}" | jq -r --arg p "${SCAFFOLD_BASELINE_CI_PATH}" '(.protectedPaths // []) | index($p) != null')"
     [[ "${protected_paths_has_ci_path}" == "true" ]] \
-      || fail "SKILL.md automerge scaffold JSON: protectedPaths must seed the mandatory release/CI path [${SCAFFOLD_BASELINE_CI_PATH}]"
+      || fail "autonomy-settings.md automerge scaffold JSON: protectedPaths must seed the mandatory release/CI path [${SCAFFOLD_BASELINE_CI_PATH}]"
   fi
 
   # Scaffold prose must document unioning in existingConfig.security.sensitivePaths
   # (the repo owner's own hand-declared signal) alongside the built-in baseline
   # and confirmed repo-shape paths -- a live wizard run can't be exercised here,
   # so this pins the documented union instead.
-  assert_contains_ws "${skill}" "${Q14_SENSITIVE_PATHS_UNION_MARKER}" "SKILL.md question 14 scaffold prose unions in existingConfig.security.sensitivePaths"
-
-  # Step 6 wiring — AGENTS.md #824: validated-but-consumed.
-  assert_contains_ws "${skill}" "${STEP6_WIRING_MARKER}" "SKILL.md step 6 overlays planningAnswer/automergeAnswer/refinementAnswer onto merge-sandbox-config.sh stdout"
-  assert_absent_paired_ws "${skill}" "${STEP6_WIRING_MARKER}" "${OLD_STEP6_WIRING_MARKER}" "SKILL.md retired two-answer step 6 wiring sentence (#1274)"
-  assert_contains_ws "${skill}" "${STEP6_REFINEMENT_WIRING}" "SKILL.md step 6 refinementAnswer contributes refinement.autonomy lean only when question 15 was asked and answered lean"
-  assert_contains_ws "${skill}" "${STEP6_Q15_SWITCH_WIRING}" "SKILL.md step 6 applies a collected question 15 switch with the q15 program"
-  assert_contains_ws "${skill}" "${STEP6_DECLINE_CONTRIBUTES_NO_KEY_MARKER}" "SKILL.md step 6 states a declined answer contributes no key"
-
-  # PR-body "Review required" section.
-  assert_contains "${skill}" "${PR_BODY_REVIEW_HEADING}" "SKILL.md PR body Review required — automerge policy heading"
-  assert_contains "${skill}" "${PR_BODY_REVIEW_LINK}" "SKILL.md PR body links docs/autonomous-loop.md#3-declare-what-a-merge-is-allowed-to-touch"
-  assert_contains_ws "${skill}" "${PR_BODY_REVIEW_CONDITIONAL}" "SKILL.md PR body Review required section is conditional on a scaffold this run"
-
-  # Next-step pointer — real fleet verbs.
-  assert_contains "${skill}" "${NEXT_STEP_DISPATCH_VERB}" "SKILL.md Autonomy Settings next-step names cenci dispatch plan-refined on"
-  assert_contains "${skill}" "${NEXT_STEP_AUTOMERGE_VERB}" "SKILL.md Autonomy Settings next-step names cenci automerge on"
+  assert_contains_ws "${autonomy_phase}" "${Q14_SENSITIVE_PATHS_UNION_MARKER}" "autonomy-settings.md question 14 scaffold prose unions in existingConfig.security.sensitivePaths"
 
   # --- Question 15 (#1274): refinement autonomy, the sixth switch ---------
-  assert_contains "${skill}" "${Q15_MARKER}" "SKILL.md question 15 (refinement autonomy)"
-  assert_contains_ws "${skill}" "${Q15_TABLE_ROW}" "SKILL.md defaults table row for question 15 (ID refinement, key refinement)"
-  assert_contains_ws "${skill}" "${SCHEMA_REFINEMENT_LINE}" "SKILL.md illustrative config schema shows the refinement block"
-  assert_contains_ws "${skill}" "${SCHEMA_NOTE_MARKER}" "SKILL.md illustrative-schema note covers planning and refinement"
-  assert_absent_paired_ws "${skill}" "${SCHEMA_NOTE_MARKER}" "${OLD_SCHEMA_NOTE_MARKER}" "SKILL.md retired planning-only illustrative-schema note (#1274)"
-  assert_contains_ws "${skill}" "${SCHEMA_NOTE_Q15_MARKER}" "SKILL.md illustrative-schema note says question 15 writes refinement.autonomy only on an explicit lean choice"
-  assert_contains_ws "${skill}" "${REFINEMENT_FIELD_INTRO}" "SKILL.md refinement config-field paragraph (optional, asked only when absent)"
-  assert_contains_ws "${skill}" "${REFINEMENT_FIELD_SEMANTICS}" "SKILL.md refinement.autonomy schema bullet: only the exact string lean changes behavior"
-  assert_contains_ws "${skill}" "${REFINEMENT_FIELD_CONSUMER}" "SKILL.md refinement field names its consumer skills/refine/SKILL.md"
-  assert_contains_ws "${skill}" "${REFINEMENT_FIELD_LOCAL_READ}" "SKILL.md refinement field states the local read via project-core and no fleet switch"
-  assert_contains_ws "${skill}" "${REFINEMENT_FIELD_GATE}" "SKILL.md refinement field states lean never grants automerge:ok and keeps the Confirmation Gate"
+  assert_contains "${autonomy_phase}" "${Q15_MARKER}" "autonomy-settings.md question 15 (refinement autonomy)"
 
-  q15_body="$(extract_from_to_raw "${skill}" "${Q15_MARKER}" "${Q15_SWITCH_END_MARKER}")"
+  q15_body="$(extract_from_to_raw "${autonomy_phase}" "${Q15_MARKER}" "${Q15_SWITCH_END_MARKER}")"
   if [[ -z "${q15_body}" ]]; then
-    fail "SKILL.md question 15 body: not found between [${Q15_MARKER}] and [${Q15_SWITCH_END_MARKER}]"
+    fail "autonomy-settings.md question 15 body: not found between [${Q15_MARKER}] and [${Q15_SWITCH_END_MARKER}]"
   else
+    # P10 (#1342): the --all bullet points at the single keep-or-change rule.
+    assert_contains_ws "${q15_body}" "${KEEP_RULE_POINTER}" "autonomy-settings.md question 15 --all bullet points at SKILL.md ### Question Defaults"
     # Every check below is scoped to question 15's own body, so a sentence
     # that question 13 already carries (e.g. the exact-string rule) cannot
     # satisfy it vacuously.
-    assert_contains_ws "${q15_body}" "${Q15_ASKED_WHEN}" "SKILL.md question 15 asked-when clause (absent or in delta.ask; --all keep-or-change)"
-    assert_contains_ws "${q15_body}" "${Q15_OPTIONS}" "SKILL.md question 15 options: lean first and Recommended, then Keep interactive"
-    assert_absent_paired_ws "${q15_body}" "${Q15_OPTION_LEAN}" "${Q15_OPTION_INTERACTIVE_RECOMMENDED}" "SKILL.md question 15 must not recommend Keep interactive (the Recommended label belongs to lean)"
-    assert_contains_ws "${q15_body}" "${Q15_DECLINE_MARKER}" "SKILL.md question 15 decline omits the refinement key entirely"
-    assert_contains_ws "${q15_body}" "${Q15_ABSENT_DEFAULT_MARKER}" "SKILL.md question 15 states an absent key still resolves to interactive"
-    assert_contains_ws "${q15_body}" "${Q15_RECOMMEND_SCOPE_MARKER}" "SKILL.md question 15 scopes the lean recommendation to the ordinary (key absent) form"
-    assert_contains_ws "${q15_body}" "${Q15_ALL_HEADING_MARKER}" "SKILL.md question 15 --all form heading"
-    assert_contains_ws "${q15_body}" "${Q15_ALL_PROMPT_MARKER}" "SKILL.md question 15 --all keep-or-switch prompt"
-    assert_contains_ws "${q15_body}" "${Q15_ALL_KEEP_OPTION}" "SKILL.md question 15 --all pre-selects Keep current (Recommended)"
-    assert_contains_ws "${q15_body}" "${Q15_ALL_OTHER_VALUE_MARKER}" "SKILL.md question 15 --all treats any value other than the exact string lean as interactive"
-    assert_contains_ws "${q15_body}" "${Q15_ALL_KEEP_WRITES_NOTHING}" "SKILL.md question 15 --all Keep writes nothing"
-    assert_contains_ws "${q15_body}" "${Q15_ALL_SWITCH_EXPLICIT}" "SKILL.md question 15 --all switch to interactive is written explicitly, preserving siblings"
-    assert_contains_ws "${q15_body}" "${Q15_GATE_MARKER}" "SKILL.md question 15 states lean refinement never grants automerge:ok and does not remove the Confirmation Gate"
-    assert_contains "${q15_body}" "${Q15_SWITCH_BEGIN_MARKER}" "SKILL.md question 15 body carries the q15 switch begin marker"
+    assert_contains_ws "${q15_body}" "${Q15_ASKED_WHEN}" "autonomy-settings.md question 15 asked-when clause (absent or in delta.ask; --all keep-or-change)"
+    assert_contains_ws "${q15_body}" "${Q15_OPTIONS}" "autonomy-settings.md question 15 options: lean first and Recommended, then Keep interactive"
+    assert_absent_paired_ws "${q15_body}" "${Q15_OPTION_LEAN}" "${Q15_OPTION_INTERACTIVE_RECOMMENDED}" "autonomy-settings.md question 15 must not recommend Keep interactive (the Recommended label belongs to lean)"
+    assert_contains_ws "${q15_body}" "${Q15_DECLINE_MARKER}" "autonomy-settings.md question 15 decline omits the refinement key entirely"
+    assert_contains_ws "${q15_body}" "${Q15_ABSENT_DEFAULT_MARKER}" "autonomy-settings.md question 15 states an absent key still resolves to interactive"
+    assert_contains_ws "${q15_body}" "${Q15_RECOMMEND_SCOPE_MARKER}" "autonomy-settings.md question 15 scopes the lean recommendation to the ordinary (key absent) form"
+    assert_contains_ws "${q15_body}" "${Q15_ALL_HEADING_MARKER}" "autonomy-settings.md question 15 --all form heading"
+    assert_contains_ws "${q15_body}" "${Q15_ALL_PROMPT_MARKER}" "autonomy-settings.md question 15 --all keep-or-switch prompt"
+    assert_contains_ws "${q15_body}" "${Q15_ALL_KEEP_OPTION}" "autonomy-settings.md question 15 --all pre-selects Keep current (Recommended)"
+    assert_contains_ws "${q15_body}" "${Q15_ALL_OTHER_VALUE_MARKER}" "autonomy-settings.md question 15 --all treats any value other than the exact string lean as interactive"
+    assert_contains_ws "${q15_body}" "${Q15_ALL_KEEP_WRITES_NOTHING}" "autonomy-settings.md question 15 --all Keep writes nothing"
+    assert_contains_ws "${q15_body}" "${Q15_ALL_SWITCH_EXPLICIT}" "autonomy-settings.md question 15 --all switch to interactive is written explicitly, preserving siblings"
+    assert_contains_ws "${q15_body}" "${Q15_GATE_MARKER}" "autonomy-settings.md question 15 states lean refinement never grants automerge:ok and does not remove the Confirmation Gate"
+    assert_contains "${q15_body}" "${Q15_SWITCH_BEGIN_MARKER}" "autonomy-settings.md question 15 body carries the q15 switch begin marker"
   fi
 
   # Section-level restatements inside `### Autonomy Settings`.
   if [[ -n "${section_body}" ]]; then
-    assert_contains_ws "${section_body}" "${AUTONOMY_INTRO_KEYS_MARKER}" "SKILL.md Autonomy Settings intro names the three repo-committed keys"
-    assert_absent_paired_ws "${section_body}" "${AUTONOMY_INTRO_KEYS_MARKER}" "${OLD_AUTONOMY_INTRO_KEYS_MARKER}" "SKILL.md retired two-key Autonomy Settings intro (#1274)"
-    assert_contains_ws "${section_body}" "${AUTONOMY_INTRO_QUESTIONS_MARKER}" "SKILL.md Autonomy Settings intro covers all the questions below"
-    assert_absent_paired_ws "${section_body}" "${AUTONOMY_INTRO_QUESTIONS_MARKER}" "${OLD_AUTONOMY_INTRO_QUESTIONS_MARKER}" "SKILL.md retired 'Both questions below' intro (#1274)"
-    assert_contains_ws "${section_body}" "${REFINEMENT_PRESENCE_MARKER}" "SKILL.md refinement presence detection"
-    before_q15="${section_body%%"${Q15_MARKER}"*}"
-    assert_contains_ws "${before_q15}" "${Q15_ALL_REOFFER_SENTENCE}" "SKILL.md --all re-offers paragraph covers question 15 (Keep current pre-selected)"
-    assert_contains_ws "${section_body}" "${NEXT_STEP_ALL_SIX_MARKER}" "SKILL.md Autonomy Settings next-step points at the walkthrough of all six switches"
-    assert_absent_paired_ws "${section_body}" "${NEXT_STEP_ALL_SIX_MARKER}" "${OLD_NEXT_STEP_ALL_FOUR_MARKER}" "SKILL.md retired 'all four switches' next-step wording (#1274)"
-    assert_contains_ws "${section_body}" "${NEXT_STEP_NO_FLEET_VERB_MARKER}" "SKILL.md Autonomy Settings next-step notes switch 6 has no fleet verb"
+    assert_contains_ws "${section_body}" "${AUTONOMY_INTRO_KEYS_MARKER}" "autonomy-settings.md Autonomy Settings intro names the three repo-committed keys"
+    assert_absent_paired_ws "${section_body}" "${AUTONOMY_INTRO_KEYS_MARKER}" "${OLD_AUTONOMY_INTRO_KEYS_MARKER}" "autonomy-settings.md retired two-key Autonomy Settings intro (#1274)"
+    assert_contains_ws "${section_body}" "${AUTONOMY_INTRO_QUESTIONS_MARKER}" "autonomy-settings.md Autonomy Settings intro covers all the questions below"
+    assert_absent_paired_ws "${section_body}" "${AUTONOMY_INTRO_QUESTIONS_MARKER}" "${OLD_AUTONOMY_INTRO_QUESTIONS_MARKER}" "autonomy-settings.md retired 'Both questions below' intro (#1274)"
+    assert_contains_ws "${section_body}" "${REFINEMENT_PRESENCE_MARKER}" "autonomy-settings.md refinement presence detection"
+    # P10 (#1342): the three per-question --all re-offer sentences collapse
+    # into one that points at the router's single keep-or-change rule.
+    before_q13="${section_body%%"${Q13_MARKER}"*}"
+    assert_contains_ws "${before_q13}" "${ALL_REOFFER_COLLAPSED}" "autonomy-settings.md --all re-offers paragraph is one sentence covering questions 13, 14 and 15"
+    assert_absent_paired_ws "${section_body}" "${ALL_REOFFER_COLLAPSED}" "${OLD_Q13_ALL_REOFFER}" "autonomy-settings.md retired per-question Q13 --all re-offer sentence (#1342)"
+    assert_absent_paired_ws "${section_body}" "${ALL_REOFFER_COLLAPSED}" "${OLD_Q14_ALL_REOFFER}" "autonomy-settings.md retired per-question Q14 --all re-offer sentence (#1342)"
+    assert_absent_paired_ws "${section_body}" "${ALL_REOFFER_COLLAPSED}" "${OLD_Q15_ALL_REOFFER}" "autonomy-settings.md retired per-question Q15 --all re-offer sentence (#1342)"
+    # Cross-file pointers name their file.
+    assert_contains_ws "${section_body}" 'unlike `### Fleet Dispatch Enrollment` in `phases/fleet-enrollment.md`' "autonomy-settings.md intro names the file holding Fleet Dispatch Enrollment"
+    assert_contains_ws "${section_body}" 'step 6 in `SKILL.md`' "autonomy-settings.md intro names SKILL.md as the home of the step 6 write"
   fi
 
   # The q15 jq program: extracted from its markers and RUN with jq.
-  q15_prog="$(extract_marked_block_raw "${skill}" "${Q15_SWITCH_BEGIN_MARKER}" "${Q15_SWITCH_END_MARKER}")"
+  q15_prog="$(extract_marked_block_raw "${autonomy_phase}" "${Q15_SWITCH_BEGIN_MARKER}" "${Q15_SWITCH_END_MARKER}")"
   if [[ -z "${q15_prog}" ]]; then
-    fail "SKILL.md q15 switch program: not found between [${Q15_SWITCH_BEGIN_MARKER}] / [${Q15_SWITCH_END_MARKER}]"
+    fail "autonomy-settings.md q15 switch program: not found between [${Q15_SWITCH_BEGIN_MARKER}] / [${Q15_SWITCH_END_MARKER}]"
   elif ! command -v jq >/dev/null 2>&1; then
-    fail "SKILL.md q15 switch program: jq not available to run it"
+    fail "autonomy-settings.md q15 switch program: jq not available to run it"
   else
     [[ "${q15_prog}" == "${Q15_PROGRAM}" ]] \
-      || fail "SKILL.md q15 switch program: expected the fixed program [${Q15_PROGRAM}], got [${q15_prog}]"
+      || fail "autonomy-settings.md q15 switch program: expected the fixed program [${Q15_PROGRAM}], got [${q15_prog}]"
     out="$(jq_apply "${q15_prog}" '{}' --arg autonomy lean)"
     assert_json_eq "q15 program: an absent refinement block becomes {autonomy:lean}" \
       "$(jq -c '.refinement' <<<"${out:-null}" 2>/dev/null)" '{"autonomy":"lean"}'
@@ -661,10 +684,72 @@ if [[ -n "${skill}" ]]; then
       || fail "q15 program: output must pass the step 6 object gate (jq -e 'type == \"object\"')"
   fi
 
-  # Stale-claim removal, paired with the section existing (so this can't
-  # pass vacuously before the section is authored).
-  assert_absent_paired "${skill}" "${SECTION_HEADING}" "${OLD_PLANNING_NEVER_WRITTEN_CLAIM}" "SKILL.md stale planning never-written-by-a-configure-prompt claim removed"
-  assert_absent_paired "${skill}" "${SECTION_HEADING}" "${OLD_AUTOMERGE_NEVER_WRITTEN_CLAIM}" "SKILL.md stale automerge never-written-by-a-configure-prompt claim removed"
+fi
+
+# --- skills/configure/phases/fleet-enrollment.md (Fleet Autonomy Controls) ---
+# The questions 18-20 Next step block moved with `### Fleet Autonomy Controls`.
+
+fleet_controls_body=""
+if [[ -n "${fleet_phase}" ]]; then
+  fleet_controls_body="$(extract_section_body_raw "${fleet_phase}" "${FLEET_CONTROLS_HEADING}")"
+fi
+if [[ -z "${fleet_controls_body}" ]]; then
+  fail "fleet-enrollment.md ${FLEET_CONTROLS_HEADING} body: not found/empty -- cannot verify the Next step block"
+else
+  # Next-step pointer — real fleet verbs.
+  assert_contains "${fleet_controls_body}" "${NEXT_STEP_DISPATCH_VERB}" "fleet-enrollment.md Fleet Autonomy Controls next-step names cenci dispatch plan-refined on"
+  assert_contains "${fleet_controls_body}" "${NEXT_STEP_AUTOMERGE_VERB}" "fleet-enrollment.md Fleet Autonomy Controls next-step names cenci automerge on"
+  assert_contains_ws "${fleet_controls_body}" "${NEXT_STEP_ALL_SIX_MARKER}" "fleet-enrollment.md next-step points at the walkthrough of all six switches"
+  assert_absent_paired_ws "${fleet_controls_body}" "${NEXT_STEP_ALL_SIX_MARKER}" "${OLD_NEXT_STEP_ALL_FOUR_MARKER}" "fleet-enrollment.md retired 'all four switches' next-step wording (#1274)"
+  assert_contains_ws "${fleet_controls_body}" "${NEXT_STEP_NO_FLEET_VERB_MARKER}" "fleet-enrollment.md next-step notes switch 6 has no fleet verb"
+  assert_contains_ws "${fleet_controls_body}" 'after `phases/autonomy-settings.md`' "fleet-enrollment.md Fleet Autonomy Controls says it is asked after autonomy-settings.md"
+fi
+
+# --- skills/configure/SKILL.md ----------------------------------------------
+# Step 6, step 7, the defaults table and the config schema stay inline in the
+# router; their pointers at the moved section name the phase file (#1342).
+
+require_doc skill "skills/configure/SKILL.md" || true
+if [[ -n "${skill}" ]]; then
+  # The moved questions are gone from the router (paired with a pointer that
+  # proves the router still names the section's new home).
+  assert_absent_paired_ws "${skill}" "${AUTONOMY_FILE_POINTER}" "${Q13_MARKER}" "SKILL.md no longer carries question 13 (moved to phases/autonomy-settings.md)"
+  assert_absent_paired_ws "${skill}" "${AUTONOMY_FILE_POINTER}" "${Q14_MARKER}" "SKILL.md no longer carries question 14 (moved to phases/autonomy-settings.md)"
+  assert_absent_paired_ws "${skill}" "${AUTONOMY_FILE_POINTER}" "${Q15_MARKER}" "SKILL.md no longer carries question 15 (moved to phases/autonomy-settings.md)"
+  assert_absent_paired_ws "${skill}" "${AUTONOMY_FILE_POINTER}" "${SCAFFOLD_BEGIN_MARKER}" "SKILL.md no longer carries the automerge scaffold block"
+
+  # Step 6 wiring — AGENTS.md #824: validated-but-consumed.
+  assert_contains_ws "${skill}" "${STEP6_WIRING_MARKER}" "SKILL.md step 6 overlays planningAnswer/automergeAnswer/refinementAnswer onto merge-sandbox-config.sh stdout"
+  assert_absent_paired_ws "${skill}" "${STEP6_WIRING_MARKER}" "${OLD_STEP6_WIRING_MARKER}" "SKILL.md retired two-answer step 6 wiring sentence (#1274)"
+  assert_contains_ws "${skill}" "${STEP6_REFINEMENT_WIRING}" "SKILL.md step 6 refinementAnswer contributes refinement.autonomy lean only when question 15 (in phases/autonomy-settings.md) was asked and answered lean"
+  assert_absent_paired_ws "${skill}" "${STEP6_REFINEMENT_WIRING}" "${OLD_STEP6_REFINEMENT_WIRING}" "SKILL.md retired positional 'question 15 above' step 6 pointer (#1342)"
+  assert_contains_ws "${skill}" "${STEP6_Q14_PROGRAM_POINTER}" "SKILL.md step 6 names phases/autonomy-settings.md for the q14 removal program"
+  assert_contains_ws "${skill}" "${STEP6_Q15_SWITCH_WIRING}" "SKILL.md step 6 applies a collected question 15 switch with the q15 program"
+  assert_contains_ws "${skill}" "${STEP6_DECLINE_CONTRIBUTES_NO_KEY_MARKER}" "SKILL.md step 6 states a declined answer contributes no key"
+
+  # PR-body "Review required" section.
+  assert_contains "${skill}" "${PR_BODY_REVIEW_HEADING}" "SKILL.md PR body Review required — automerge policy heading"
+  assert_contains "${skill}" "${PR_BODY_REVIEW_LINK}" "SKILL.md PR body links docs/autonomous-loop.md#3-declare-what-a-merge-is-allowed-to-touch"
+  assert_contains_ws "${skill}" "${PR_BODY_REVIEW_CONDITIONAL}" "SKILL.md PR body Review required section is conditional on a scaffold this run"
+
+  # Defaults table and config schema.
+  assert_contains_ws "${skill}" "${Q15_TABLE_ROW}" "SKILL.md defaults table row for question 15 (ID refinement, key refinement)"
+  assert_contains_ws "${skill}" "${SCHEMA_REFINEMENT_LINE}" "SKILL.md illustrative config schema shows the refinement block"
+  assert_contains_ws "${skill}" "${SCHEMA_NOTE_MARKER}" "SKILL.md illustrative-schema note covers planning and refinement"
+  assert_absent_paired_ws "${skill}" "${SCHEMA_NOTE_MARKER}" "${OLD_SCHEMA_NOTE_MARKER}" "SKILL.md retired planning-only illustrative-schema note (#1274)"
+  assert_contains_ws "${skill}" "${SCHEMA_NOTE_Q15_MARKER}" "SKILL.md illustrative-schema note says question 15 (in phases/autonomy-settings.md) writes refinement.autonomy only on an explicit lean choice"
+  assert_absent_paired_ws "${skill}" "${SCHEMA_NOTE_Q15_MARKER}" "${OLD_SCHEMA_NOTE_Q15_MARKER}" "SKILL.md retired positional illustrative-schema pointer (#1342)"
+  assert_contains_ws "${skill}" "${REFINEMENT_FIELD_INTRO}" "SKILL.md refinement config-field paragraph (optional, asked only when absent)"
+  assert_absent_paired_ws "${skill}" "${REFINEMENT_FIELD_INTRO}" "${OLD_REFINEMENT_FIELD_INTRO}" "SKILL.md retired positional refinement field pointer (#1342)"
+  assert_contains_ws "${skill}" "${REFINEMENT_FIELD_SEMANTICS}" "SKILL.md refinement.autonomy schema bullet: only the exact string lean changes behavior"
+  assert_contains_ws "${skill}" "${REFINEMENT_FIELD_CONSUMER}" "SKILL.md refinement field names its consumer skills/refine/SKILL.md"
+  assert_contains_ws "${skill}" "${REFINEMENT_FIELD_LOCAL_READ}" "SKILL.md refinement field states the local read via project-core and no fleet switch"
+  assert_contains_ws "${skill}" "${REFINEMENT_FIELD_GATE}" "SKILL.md refinement field states lean never grants automerge:ok and keeps the Confirmation Gate"
+
+  # Stale-claim removal, paired with the router still naming the section's file
+  # (so this can't pass vacuously on an emptied SKILL.md).
+  assert_absent_paired "${skill}" "${AUTONOMY_FILE_POINTER}" "${OLD_PLANNING_NEVER_WRITTEN_CLAIM}" "SKILL.md stale planning never-written-by-a-configure-prompt claim removed"
+  assert_absent_paired "${skill}" "${AUTONOMY_FILE_POINTER}" "${OLD_AUTOMERGE_NEVER_WRITTEN_CLAIM}" "SKILL.md stale automerge never-written-by-a-configure-prompt claim removed"
 
   # security/babysitInterval/maintenance stay question-less and unedited.
   assert_contains "${skill}" "${SECURITY_NEVER_WRITTEN_CLAIM}" "SKILL.md security never-written-by-a-configure-prompt claim untouched"
@@ -676,7 +761,12 @@ fi
 
 require_doc codex "skills/configure/codex.md" || true
 if [[ -n "${codex}" ]]; then
-  assert_contains_ws "${codex}" "${CODEX_AUTONOMY_HEADING_MIRROR_MARKER}" "codex.md Autonomy Settings parity paragraph mirrors the Claude section"
+  assert_contains_ws "${codex}" "${CODEX_AUTONOMY_HEADING_MIRROR_MARKER}" "codex.md Autonomy Settings parity paragraph mirrors the Claude section and names phases/autonomy-settings.md"
+  assert_absent_paired_ws "${codex}" "${CODEX_AUTONOMY_HEADING_MIRROR_MARKER}" "${OLD_CODEX_AUTONOMY_HEADING_MIRROR_MARKER}" "codex.md retired Autonomy Settings mirror sentence that does not name its file (#1342)"
+  assert_contains_ws "${codex}" "${CODEX_INDEPENDENT_MIRROR_MARKER}" "codex.md independent controls paragraph names the files holding questions 16-17 and 18-20"
+  assert_absent_paired_ws "${codex}" "${CODEX_INDEPENDENT_MIRROR_MARKER}" "${OLD_CODEX_INDEPENDENT_MIRROR_MARKER}" "codex.md retired 'questions 16–20 in SKILL.md' pointer (#1342)"
+  assert_contains_ws "${codex}" "${CODEX_LEAF_PROGRAMS_MARKER}" "codex.md applies the leaf overlays from phases/autonomy-settings.md"
+  assert_absent_paired_ws "${codex}" "${CODEX_LEAF_PROGRAMS_MARKER}" "${OLD_CODEX_LEAF_PROGRAMS_MARKER}" "codex.md retired leaf-program pointer at SKILL.md (#1342)"
   assert_contains_ws "${codex}" "${CODEX_AUTONOMY_ABSENT_ONLY_MARKER}" "codex.md Autonomy Settings parity paragraph states the delta-scoped absent-only rule"
   assert_absent_paired_ws "${codex}" "${CODEX_AUTONOMY_ABSENT_ONLY_MARKER}" "${OLD_CODEX_AUTONOMY_UNCONDITIONAL_MARKER}" "codex.md retired unconditional absent-only claim (now delta-scoped, #1246)"
   assert_absent_paired_ws "${codex}" "${CODEX_AUTONOMY_ABSENT_ONLY_MARKER}" "${OLD_CODEX_AUTONOMY_TWO_KEY_MARKER}" "codex.md retired two-key absent-only claim (now covers refinement, #1274)"

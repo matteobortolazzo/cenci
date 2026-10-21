@@ -268,7 +268,11 @@ assert_file_contains "${PHASE2_WORKTREE}" "${GATE_CHECK_LEAN_ENTRANCE_MARKER}" \
 
 CONFIGURE_PLANNING_SCHEMA_MARKER='planning.autonomy'
 CONFIGURE_PLANNING_DEFAULT_MARKER='default `"interactive"`'
-CONFIGURE_PLANNING_OFFERED_WHEN_ABSENT_MARKER='The `planning` field is optional. `### Autonomy Settings` question 13 above asks for it only'
+# The pointer names the file that now holds question 13 (#1342); the old
+# positional "question 13 above" pointer crosses files, so it is retired. This
+# suite greps line by line, so the marker must stay on one source line.
+CONFIGURE_PLANNING_OFFERED_WHEN_ABSENT_MARKER='The `planning` field is optional. `### Autonomy Settings` question 13 in `phases/autonomy-settings.md` asks for it only'
+CONFIGURE_PLANNING_OLD_POSITIONAL_MARKER='`### Autonomy Settings` question 13 above'
 CONFIGURE_PLANNING_EXAMPLE_JSON_MARKER='"planning": { "autonomy": "interactive" }'
 
 assert_file_contains "${CONFIGURE_SKILL}" "${CONFIGURE_PLANNING_SCHEMA_MARKER}" \
@@ -276,7 +280,9 @@ assert_file_contains "${CONFIGURE_SKILL}" "${CONFIGURE_PLANNING_SCHEMA_MARKER}" 
 assert_file_contains "${CONFIGURE_SKILL}" "${CONFIGURE_PLANNING_DEFAULT_MARKER}" \
   "must state the \"interactive\" default"
 assert_file_contains "${CONFIGURE_SKILL}" "${CONFIGURE_PLANNING_OFFERED_WHEN_ABSENT_MARKER}" \
-  "must state planning.autonomy (question 13, ### Autonomy Settings) is offered only when absent (#965)"
+  "must state planning.autonomy (question 13, ### Autonomy Settings in phases/autonomy-settings.md) is offered only when absent (#965)"
+assert_file_lacks "${CONFIGURE_SKILL}" "${CONFIGURE_PLANNING_OLD_POSITIONAL_MARKER}" \
+  "must not keep the positional \"question 13 above\" pointer now that question 13 lives in another file (#1342)"
 assert_file_contains "${CONFIGURE_SKILL}" "${CONFIGURE_PLANNING_EXAMPLE_JSON_MARKER}" \
   "must add planning.autonomy to the example config JSON"
 
