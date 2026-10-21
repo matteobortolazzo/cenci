@@ -549,12 +549,14 @@ func ghClaimAssignee(id, login, repoSlug string, cfg retryConfig) error {
 
 // ghLabelCreate self-healingly creates label name: "already exists" is
 // treated as success (rule: content-specific classification, #446), any
-// other failure propagates as a genuine error.
-func ghLabelCreate(name, repoSlug string, cfg retryConfig) error {
+// other failure propagates as a genuine error. extra is appended verbatim
+// after the repo flag (e.g. "--color", "C5DEF5", "--description", "...").
+func ghLabelCreate(name, repoSlug string, cfg retryConfig, extra ...string) error {
 	args := []string{"label", "create", name}
 	if repoSlug != "" {
 		args = append(args, "--repo", repoSlug)
 	}
+	args = append(args, extra...)
 	err := retryDo(func() error {
 		out, cmdErr := command("gh", args...)
 		if cmdErr == nil {

@@ -36,8 +36,10 @@ var pipelineIDPattern = regexp.MustCompile(`^\d+$`)
 // runPipeline implements `cenci pipeline <stage|verb> <id> [flags]`: the
 // first token is either one of the six stage transitions (five unchanged
 // from ticket #558, plus "await-input" added by ticket #826), one of ticket
-// #559's mechanics verbs (label/worktree/worktree-cleanup/artifact), or
-// ticket #560's plan-check verb, each with its own usage hint and flag set.
+// #559's mechanics verbs (label/worktree/worktree-cleanup/artifact), ticket
+// #560's plan-check verb, or ticket #1339's followup verb (deferred-item
+// bookkeeping, its own {followup, warnings, errors} result), each with its
+// own usage hint and flag set.
 // It parses and validates the CLI surface (usage errors exit 2 with a
 // one-line stderr hint, per docs/cli-conventions.md), dispatches into
 // internal/pipeline's engine, and renders the returned {state, next_actions,
@@ -67,6 +69,9 @@ func runPipeline(args []string) {
 		return
 	case "reset":
 		runPipelineReset(args[1:])
+		return
+	case "followup":
+		runPipelineFollowup(args[1:])
 		return
 	}
 

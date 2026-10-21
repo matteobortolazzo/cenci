@@ -735,7 +735,7 @@ flips back to `Planned` to be re-dispatched. Three read outcomes:
 
 The two operator-visible skip reasons are `pipeline finalized (reset to
 re-dispatch)` and `pipeline state unreadable`. `cenci pipeline reset <id>` (see
-[Mechanics verbs](#mechanics-verbs-label-worktree-worktree-cleanup-artifact-plan-check-reset))
+[Mechanics verbs](#mechanics-verbs-label-worktree-worktree-cleanup-artifact-plan-check-reset-followup))
 is the remedy for both — it deletes the ticket's state file, so a `finalized` ticket
 with no PR (or a corrupted state file) becomes dispatchable again. Set
 `dispatch.pipelineStageGate` to `false` to disable the gate entirely (see
@@ -1989,13 +1989,15 @@ Behavior:
   unexpected argument) prints a one-line hint to stderr and exits `2` —
   no JSON is printed for these.
 
-### Mechanics verbs (`label`, `worktree`, `worktree-cleanup`, `artifact`, `plan-check`, `reset`)
+### Mechanics verbs (`label`, `worktree`, `worktree-cleanup`, `artifact`, `plan-check`, `reset`, `followup`)
 
 Alongside the six stage transitions, `cenci pipeline` also exposes the
 deterministic side-effect mechanics that used to live in flow's skill prose:
-label lifecycle, worktree create/cleanup, artifact tracking, and read-only
-plan-file discovery/validation/freshness. Each verb renders the same JSON
-contract as the stage commands.
+label lifecycle, worktree create/cleanup, artifact tracking, read-only
+plan-file discovery/validation/freshness, and deferred-item (`Followup`)
+bookkeeping. Each verb renders the same JSON contract as the stage commands,
+except `followup`, which has its own `{followup, warnings, errors}` result
+(see below).
 
 ```bash
 cenci pipeline label 42 --transition working                     # verifies/claims exclusive gh assignee ownership, applies "Working"
@@ -2010,6 +2012,9 @@ cenci pipeline artifact 42 --get                                  # read-only fe
 cenci pipeline plan-check 42 [--replan-requested] [--repo-slug OWNER/REPO]
                                                                    # discovers/validates .plans/42-*.md and classifies it
 cenci pipeline reset 42   # deletes .cenci/pipeline/42.json: stage returns to "new", all recorded artifacts dropped from tracking
+cenci pipeline followup 42|--ticketless --source implement|address-review --items-file PATH --pr-url URL \
+    [--title-file PATH] [--area TOKEN] [--append-to N | --create] [--possibly-related N,...] [--repo-slug OWNER/REPO]
+                                                                   # records deferred items on an open Followup issue: lineage dedup, guarded append, or create
 ```
 
 Behavior:
@@ -2144,6 +2149,165 @@ Behavior:
   permissions) reports the full `{state, next_actions, artifacts, warnings,
   errors}` contract with `errors[]` populated and `state` set to whatever
   stage is genuinely still on disk, and exits `1`.
+- `followup` (ticket #1339) is the deterministic bookkeeping behind implement
+  Phase 9 and address-review for deferred (out-of-scope) items. It is
+  stateless — it never reads or writes `.cenci/pipeline/<id>.json`, so it has
+  no `--state-dir`/`--repo` hooks — and it never removes a label, adds
+  `Refined` or `automerge:ok`, closes an issue, or merges two issues. Items
+  and the title arrive by file only, never as command-line text:
+  `--items-file` is a JSON array of `{"context": "...", "area": "..."}`
+  (both non-empty, no `\n`/`\r`; an empty file or `[]` is the domain error
+  `no deferred items`), and `--title-file` holds one non-empty line.
+  - **Modes.** Exactly one of `<id>` (ticket mode: the origin issue number, a
+    positive integer) or `--ticketless` is required; both together, or
+    neither, exits `2`. Ticket mode reads the origin's milestone and labels
+    (one `gh issue view <id> --json milestone,labels`), matches lineage by the
+    whole body line `Related to #<id>`, and writes that line into a created
+    body. `--ticketless` makes no origin read, creates with labels exactly
+    `["Followup"]`, no milestone and no `Related to #` line, and matches
+    lineage by the `PR:` line only (`address-review` only).
+  - **Sources.** `--source` is required and each caller keeps its own
+    semantics. `implement` (Phase 9) is fail-closed: an origin that already
+    carries `Followup` is `skipped`/`origin-is-followup` (exit `0`, no
+    mutation, so a Followup never spawns a Followup), and an unreadable origin
+    is `skipped`/`origin-unreadable` (exit `1`, items echoed). `address-review`
+    appends to a `Followup` origin through the guarded append, and degrades on
+    an unreadable origin: it continues to lookup and create with labels exactly
+    `["Followup"]` plus the warning `milestone/label inheritance skipped:
+    origin metadata unreadable`.
+  - **Lookup and lineage.** One `gh issue list --label Followup --state open
+    --limit 200 --json number,title,body,labels,assignees` call (the same
+    response also supplies cross-ticket eligibility, so no further `gh` call
+    is made for it). A body line matches only when it equals `Related to
+    #<id>` (or `PR: <pr-url>` for `address-review`, preferred over the
+    `Related to` fallback) after removing one trailing `\r`; substrings,
+    surrounding whitespace and near-misses (`Related to #70`) never match.
+    With several matches the lowest number is the target and the rest are
+    listed in `followup.also_matched`. A lineage (or `address-review`
+    Followup-origin) match is appended to without any eligibility gate; an
+    explicit `--append-to`/`--create` is then ignored with a warning, so a
+    retry can never silently duplicate.
+  - **Guarded append.** The target body is re-read, only items whose line is
+    not already present are added (a whole line equal to `- [ ] X`,
+    `- [x] X` or `- [X] X` counts as present), inserted after the last
+    checklist line of `## Deferred Items` (a missing section is appended at
+    the end of the body), every pre-existing line is left unchanged, and the
+    edit passes `--body-file` only — never a label or milestone flag. Nothing
+    missing is `noop` with zero `gh issue edit` calls.
+  - **Cross-ticket gates and the two-step interface.** With no lineage match
+    and `--area TOKEN`, an open `Followup` issue is an eligible candidate when
+    it has no assignee, none of `Refined`, `Planned`, `Working`, `In Review`,
+    `Implemented`, `Input Needed`, `Design`, `Designed`, and either its title's
+    leading token before the first `:` or `(` equals `TOKEN`
+    case-insensitively or one of its labels equals `TOKEN` exactly. A
+    candidate with no readable area is ineligible; the origin issue and the
+    lineage match are never candidates. Without `--area` no candidate is
+    evaluated and the warning `cross-ticket candidates skipped: no --area` is
+    emitted. If at least one candidate is eligible, the first call returns
+    `needs-judgment` with the `candidates` and mutates nothing (exit `0`);
+    similarity judgment stays with the caller. The caller then re-invokes
+    with `--append-to N` (N must be an eligible candidate: it is re-read and
+    every gate re-applied on the fresh read, and a failure is exit `1`,
+    `append-target-ineligible`, zero edits) or `--create` (creates a new
+    issue; never appends to a candidate). With no eligible candidate the first
+    call creates directly. `--append-to` requires `--area` and cannot be
+    combined with `--create`; `--possibly-related 12,15` requires `--create`
+    and adds a `Possibly related: #12, #15` line to the created body.
+  - **Create.** Reached only with a `--title-file` (otherwise
+    `skipped`/`missing-title`, exit `1`, zero POSTs). It self-heals the label
+    first (`gh label create Followup --color C5DEF5` with the
+    `flow/docs/board-labels.md` description; "already exists" is success, any
+    other failure is `label-create-failed` with zero creates), then POSTs
+    `repos/{owner}/{repo}/issues` (or `repos/<--repo-slug>/issues`) with a
+    payload of the title, the body, the inherited labels and the origin's
+    milestone number (key omitted when the origin has none). Labels are
+    `Followup` plus every origin label except the lifecycle, grant and
+    transient labels `Refined`, `Working`, `Planned`, `In Review`,
+    `Implemented`, `Input Needed`, `Design`, `Designed`, `automerge:ok`,
+    `Browser`, `ui:visual-check`, `dispatch-failed`, `plan-invalid`,
+    `reconcile-stuck`; when nothing is inherited the warning `milestone/label
+    inheritance empty` is emitted. The body is exactly `## Deferred Items`,
+    one `- [ ] <context> — `<area>`` line per item, a blank line, an optional
+    `Possibly related:` line, `Related to #<id>` (ticket mode only), a blank
+    line and `PR: <pr-url>` (with no `Possibly related:` or `Related to #`
+    line the middle block and its blank line are omitted). After the create
+    the new issue's title is re-fetched; a mismatch with the title file is
+    `skipped`/`title-mismatch`, exit `1`, with the issue number in `errors`
+    and no `number` reported.
+  - **Retry recovery.** The create POST is a single call, never a blind retry.
+    When it fails the lookup runs again (`Related to #<id>` in ticket mode,
+    `PR: <pr-url>` otherwise): an issue found there is returned as `created`
+    with the warning `recovered: create had already succeeded` (items it
+    lacks are added through the guarded append) and no second POST; no match
+    allows exactly one retry; if the recovery lookup itself fails there is no
+    retry and the run fails closed (`create-failed`, exit `1`).
+  - **Exit codes.** `0` for every success, including `needs-judgment` and
+    `skipped`/`origin-is-followup`; `1` whenever `errors` is non-empty (any
+    `gh` read or write failure, an invalid or empty items/title file, an
+    unreadable `implement` origin, an ineligible `--append-to`, a title
+    mismatch), with the full result still printed on stdout; `2` with a
+    one-line `cenci pipeline followup: usage: ...` stderr hint and no JSON
+    for malformed CLI input: a missing `<id>` without `--ticketless`, `<id>`
+    together with `--ticketless`, a missing or unknown `--source`, a missing
+    `--items-file`/`--pr-url`, `--append-to` together with `--create` or
+    without `--area`, `--create` without `--title-file`, `--possibly-related`
+    without `--create`, a malformed `--pr-url` (`https://…/pull/<n>`, no
+    whitespace), `--repo-slug` (`OWNER/REPO`), `--possibly-related`
+    (comma-separated numbers) or non-positive-integer `<id>`/`--append-to`,
+    an empty `--area`, an unknown flag, or a trailing positional.
+  - **Result object.** Every run prints one JSON object; `warnings` and
+    `errors` are always arrays (never `null`):
+
+    ```json
+    {"followup":{"action":"created","number":99,"reason":"no-lineage-match",
+                 "items":[{"context":"extract the retry helper","area":"watch"}],
+                 "candidates":[],"also_matched":[]},
+     "warnings":[],"errors":[]}
+    ```
+
+    `followup.action` is one of `created`, `appended`, `noop`, `skipped` or
+    `needs-judgment`. `number` is present only for `created`, `appended` and
+    `noop` (never for a mutation that did not succeed). `items` echoes the
+    deduplicated deferred items (`[]` when the items file could not be
+    read), `candidates` is the `needs-judgment` list of `{"number","title"}`
+    (otherwise `[]`), and `also_matched` lists the extra lineage matches
+    (otherwise `[]`). `reason` is a closed set:
+
+    | `action` | `reason` | Meaning |
+    |---|---|---|
+    | `created` | `no-lineage-match` | no lineage match, no eligible candidate (or `--area` unset): new issue |
+    | `created` | `create-flag` | `--create` after `needs-judgment` |
+    | `created` | `recovered` | the POST failed but a lookup found the issue it had already created |
+    | `appended` / `noop` | `lineage-match` | appended to (or already complete on) the lineage match |
+    | `appended` / `noop` | `origin-followup` | `address-review` origin is itself a Followup |
+    | `appended` / `noop` | `append-to` | `--append-to N` passed the gates on a fresh read |
+    | `needs-judgment` | `eligible-candidates` | at least one eligible candidate; nothing was mutated |
+    | `skipped` | `origin-is-followup` | `implement` origin is a Followup (exit `0`) |
+    | `skipped` | `origin-unreadable` | `implement` could not read the origin (exit `1`) |
+    | `skipped` | `no-deferred-items` | empty or `[]` items file (exit `1`) |
+    | `skipped` | `invalid-input` | malformed options, unreadable or malformed items/title file, line break in an item or title (exit `1`) |
+    | `skipped` | `missing-title` | a create was needed but no `--title-file` was given (exit `1`) |
+    | `skipped` | `lookup-failed` | the open-Followup search failed (exit `1`) |
+    | `skipped` | `append-target-ineligible` | `--append-to` target absent from the eligible set or failing a gate (exit `1`) |
+    | `skipped` | `append-failed` | reading or editing the append target failed (exit `1`) |
+    | `skipped` | `label-create-failed` | the `Followup` label self-heal failed; zero creates (exit `1`) |
+    | `skipped` | `create-failed` | the POST (after its single recovery-gated retry) or the title re-fetch failed (exit `1`) |
+    | `skipped` | `title-mismatch` | the created issue's title differs from the title file (exit `1`) |
+
+    Warnings: `cross-ticket candidates skipped: no --area`, `followup search
+    may be truncated at 200 results`, `milestone/label inheritance skipped:
+    origin metadata unreadable`, `milestone/label inheritance empty`,
+    `recovered: create had already succeeded`, and `--append-to ignored: <why>`
+    / `--create ignored: <why>` when a lineage or origin route overrides the
+    flag.
+  - **Limits.** Dedup is best-effort beyond 200 open `Followup` issues: the
+    search is capped at 200 results and a result that hits the cap only adds
+    the truncation warning (it does not fail closed), so a match past the cap
+    can be missed. An ambiguous POST failure (the create succeeded server-side
+    but the request errored) combined with an eventually-consistent issue list
+    can miss the recovery lookup, leaving a residual duplicate window that the
+    single retry may turn into a duplicate; duplicates are cheap to
+    consolidate later (`flow/docs/followup-triage.md`).
 
 ## Sandbox management and session launching (`cenci sandbox`, `cenci open`)
 
