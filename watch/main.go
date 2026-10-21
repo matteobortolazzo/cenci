@@ -133,7 +133,7 @@ Commands:
   automerge on|off|status            toggle or inspect the fleet-wide automerge kill switch (automerge.enabled)
   planning attended on|off|status    toggle or inspect the fleet-wide planning.attended narrowing switch (suppresses unattended lean-planning pickups on this machine)
   close                              close a finished/idle agent window
-  pipeline                           drive the implement pipeline's stage state machine (prepare|plan|await-input|execute|review|finalize) plus mechanics verbs (label|worktree|worktree-cleanup|artifact|plan-check)
+  pipeline                           drive the implement pipeline's stage state machine (prepare|plan|await-input|execute|review|finalize) plus mechanics verbs (label|worktree|worktree-cleanup|artifact|plan-check|followup)
   sandbox                            manage the sandbox container (build|build-base|prune|update-agent|update-plugins|reseed-creds|reap-orphans|ls|stop)
   worktrees ls                       list this repo's .worktrees/* worktrees with verdict, reason and size, changing nothing
   worktrees prune [--dry-run]        remove this repo's finished and stale worktrees, or with --dry-run print what would go
