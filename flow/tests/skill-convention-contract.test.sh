@@ -47,6 +47,8 @@
 # Covered files:
 #   - flow/.mcp.json (asserted absent)
 #   - flow/skills/configure/SKILL.md
+#   - flow/skills/configure/phases/mcp-lsp-ui-questions.md (MCP catalog rows
+#     and scope legend; #1341)
 #   - .mcp.json (repo root; #813)
 #   - .claude/settings.json (repo root; #813)
 #   - flow/skills/address-review/SKILL.md
@@ -151,13 +153,27 @@ else
 fi
 
 require_doc configure_skill "skills/configure/SKILL.md" || true
-if [[ -n "${configure_skill}" ]]; then
-  assert_contains "${configure_skill}" \
+# The MCP catalog and its scope legend live in the mcp-lsp-ui phase file since
+# the router split (#1341); the catalog pins are asserted there, the
+# permission/heal/merge-section pins below stay on SKILL.md.
+require_doc configure_mcp_phase "skills/configure/phases/mcp-lsp-ui-questions.md" || true
+# Every markdown file of the configure skill (router, phases, references), for
+# negatives that must hold wherever the prose ended up.
+configure_all="${configure_skill}"
+configure_part_count=0
+for _configure_part in "${FLOW_DIR}"/skills/configure/phases/*.md "${FLOW_DIR}"/skills/configure/references/*.md; do
+  [[ -f "${_configure_part}" ]] || continue
+  configure_all+=$'\n'"$(cat "${_configure_part}")"
+  configure_part_count=$((configure_part_count+1))
+done
+[[ "${configure_part_count}" -ge 5 ]] || fail "796 skills/configure/**: configure_all aggregation is vacuous: aggregated ${configure_part_count} phases/references files (expected at least 5)"
+if [[ -n "${configure_mcp_phase}" ]]; then
+  assert_contains "${configure_mcp_phase}" \
     '| *(always available)* | context7 | `npx` | `["-y", "@upstash/context7-mcp@3.2.5"]` | `CONTEXT7_API_KEY` | project |' \
-    "796 skills/configure/SKILL.md: pinned project-scoped context7 catalog row missing"
-  assert_not_contains "${configure_skill}" \
+    "796 phases/mcp-lsp-ui-questions.md: pinned project-scoped context7 catalog row missing"
+  assert_not_contains "${configure_mcp_phase}" \
     '@upstash/context7-mcp"]' \
-    "796 skills/configure/SKILL.md: stale unpinned context7 args marker still present"
+    "796 phases/mcp-lsp-ui-questions.md: stale unpinned context7 args marker still present"
   # Vacuity gating (#813, root AGENTS.md): each negative below is preceded
   # by the positive anchor that proves its host section still exists, so a
   # section deletion/rename cannot make the negative pass vacuously.
@@ -165,15 +181,19 @@ if [[ -n "${configure_skill}" ]]; then
   # ("Provided by the design editor over its own connection") and was
   # removed along with the rest of the design-stage removal; no MCP catalog
   # row uses "editor" scope any more, so that positive assertion is gone too.
-  assert_not_contains "${configure_skill}" \
-    "- **plugin**: Already defined in cenci's" \
-    "796 skills/configure/SKILL.md: stale plugin-scope legend bullet still present"
-  assert_contains "${configure_skill}" \
+  assert_contains "${configure_mcp_phase}" \
     "- **project**: Add to the project's root \`.mcp.json\`." \
-    "813 skills/configure/SKILL.md: project-scoped .mcp.json legend bullet missing"
-  assert_not_contains "${configure_skill}" \
+    "813 phases/mcp-lsp-ui-questions.md: project-scoped .mcp.json legend bullet missing"
+  assert_not_contains "${configure_mcp_phase}" \
+    "- **plugin**: Already defined in cenci's" \
+    "796 phases/mcp-lsp-ui-questions.md: stale plugin-scope legend bullet still present"
+  assert_not_contains "${configure_all}" \
     '${CLAUDE_PLUGIN_ROOT}/.mcp.json' \
-    "796 skills/configure/SKILL.md: stale plugin-scoped .mcp.json reference still present"
+    "796 skills/configure/**: stale plugin-scoped .mcp.json reference still present"
+else
+  fail "796 phases/mcp-lsp-ui-questions.md: empty, assertions skipped"
+fi
+if [[ -n "${configure_skill}" ]]; then
   assert_contains "${configure_skill}" \
     "- **Context7**: \`mcp__context7__resolve-library-id\`, \`mcp__context7__query-docs\`" \
     "813 skills/configure/SKILL.md: Known tools Context7 permission-pair entry missing both mcp__context7__resolve-library-id and mcp__context7__query-docs"

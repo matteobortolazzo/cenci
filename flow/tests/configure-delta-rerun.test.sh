@@ -60,7 +60,8 @@
 # enforces that over every file this ticket touches.
 #
 # Covered files:
-#   - flow/skills/configure/SKILL.md, codex.md, scripts/resolve-delta.sh,
+#   - flow/skills/configure/SKILL.md, phases/detection-and-delta.md (the
+#     `### Delta Resolution` pins, #1341), codex.md, scripts/resolve-delta.sh,
 #     question-keys.json
 #   - docs/autonomous-loop.md (cross-project), flow/README.md,
 #     flow/docs/skill-authoring.md
@@ -475,6 +476,9 @@ OLD_SKILL_AUTHORING_ALWAYS_PROMPT='route them through the same manual Overwrite/
 # --- Load the docs under test -----------------------------------------------
 
 require_doc skill "skills/configure/SKILL.md" || true
+# `### Delta Resolution` lives in the detection-and-delta phase file since the
+# router split (#1341); its wording is pinned there, not in SKILL.md.
+require_doc delta_phase "skills/configure/phases/detection-and-delta.md" || true
 require_doc codex "skills/configure/codex.md" || true
 require_repo_doc loop_doc "docs/autonomous-loop.md" || true
 require_doc readme "README.md" || true
@@ -494,7 +498,7 @@ Q14_PROG=""
 Q15_PROG=""
 if [[ -n "${skill}" ]]; then
   parse_body="$(extract_section_body_raw "${skill}" "${PARSE_HEADING}")"
-  delta_body="$(extract_section_body_raw "${skill}" "${DELTA_HEADING}")"
+  delta_body="$(extract_section_body_raw "${delta_phase}" "${DELTA_HEADING}")"
   board_body="$(extract_section_body_raw "${skill}" "${BOARD_HEADING}")"
   fleet_body="$(extract_section_body_raw "${skill}" "${FLEET_HEADING}")"
   autonomy_body="$(extract_section_body_raw "${skill}" "${AUTONOMY_HEADING}")"
@@ -873,16 +877,17 @@ case_contract_rerun_message_modes() {
 
 case_contract_delta_resolution_section() {
   [[ -n "${skill}" ]] || { fail "contract: SKILL.md missing"; return; }
+  [[ -n "${delta_phase}" ]] || { fail "contract: phases/detection-and-delta.md missing"; return; }
   local scripted platform delta
-  scripted="$(offset_of "${skill}" '### Scripted Detection')"
-  platform="$(offset_of "${skill}" '### Platform Detection')"
-  delta="$(offset_of "${skill}" "${DELTA_HEADING}")"
+  scripted="$(offset_of "${delta_phase}" '### Scripted Detection')"
+  platform="$(offset_of "${delta_phase}" '### Platform Detection')"
+  delta="$(offset_of "${delta_phase}" "${DELTA_HEADING}")"
   if [[ "${delta}" -lt 0 ]]; then
-    fail "SKILL.md: ${DELTA_HEADING} subsection missing"
+    fail "phases/detection-and-delta.md: ${DELTA_HEADING} subsection missing"
     return
   fi
   if ! [[ "${scripted}" -ge 0 && "${scripted}" -lt "${delta}" && "${delta}" -lt "${platform}" ]]; then
-    fail "SKILL.md: ${DELTA_HEADING} must sit after Scripted Detection and before Platform Detection"
+    fail "phases/detection-and-delta.md: ${DELTA_HEADING} must sit after Scripted Detection and before Platform Detection"
   fi
   assert_contains_ws "${delta_body}" "${DR_MODE_RULE}" "Delta Resolution run-mode rule"
   assert_absent_paired_ws "${delta_body}" "${DR_MODE_RULE}" "${OLD_DR_MODE_RULE_Q13_Q14}" "Delta Resolution retired run-mode exception naming only questions 13 and 14 (#1274)"
@@ -914,7 +919,7 @@ case_contract_delta_resolution_section() {
   assert_contains_ws "${delta_body}" "${DR_STACK_REOFFERS}" "Delta Resolution limits stack-change re-offers"
   assert_contains_ws "${delta_body}" "${DR_CI_CARRIED}" "Delta Resolution: a carried question 8 leaves ci.yml alone"
   assert_contains_ws "${delta_body}" "${DR_UI_CARRIED}" "Delta Resolution: a carried uiConventions keeps the UI Conventions section"
-  assert_absent_paired_ws "${skill}" "${DELTA_HEADING}" "${OLD_SLUG_EXAMPLE}" "SKILL.md retired 'refresh MCP servers' slug example (now a --all pointer)"
+  assert_absent_paired_ws "${skill}" "${ARGS_SLUG_RULE}" "${OLD_SLUG_EXAMPLE}" "SKILL.md retired 'refresh MCP servers' slug example (now a --all pointer)"
   assert_absent_paired_ws "${skill}" "${NEW_RESOLVER_WIRED}" "${OLD_RESOLVER_NOT_WIRED}" "SKILL.md retired 'resolver not wired yet' sentence"
 }
 
@@ -1150,9 +1155,10 @@ case_AC17_no_cenci_cli_span_carries_all() {
   # appear as `/cenci:configure --all` or in prose. Paired with --all being
   # documented at all, so a file that never mentions it cannot pass vacuously.
   local label content hits required
-  for label in "SKILL.md" "codex.md" "docs/autonomous-loop.md" "README.md"; do
+  for label in "SKILL.md" "phases/detection-and-delta.md" "codex.md" "docs/autonomous-loop.md" "README.md"; do
     case "${label}" in
       SKILL.md) content="${skill}"; required='/cenci:configure --all' ;;
+      phases/detection-and-delta.md) content="${delta_phase}"; required='/cenci:configure --all' ;;
       codex.md) content="${codex}"; required='`--all`' ;;
       docs/autonomous-loop.md) content="${loop_doc}"; required='/cenci:configure --all' ;;
       README.md) content="${readme}"; required='/cenci:configure --all' ;;

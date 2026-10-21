@@ -582,7 +582,7 @@ generate_skills_section() {
 referencing_skills() {
   local agent="$1"
   grep -lE "\`${agent}\`" "$FLOW_DIR"/skills/*/SKILL.md "$FLOW_DIR"/skills/*/codex.md \
-    "$FLOW_DIR"/skills/*/phases/*.md "$FLOW_DIR"/skills/*/modes/*.md 2>/dev/null \
+    "$FLOW_DIR"/skills/*/phases/*.md "$FLOW_DIR"/skills/*/modes/*.md "$FLOW_DIR"/skills/*/references/*.md 2>/dev/null \
     | sed -E "s#.*/skills/([^/]+)/.*#\\1#" | sort -u | paste -sd ', ' -
 }
 
@@ -605,7 +605,7 @@ other_skill_refs() {
   local skilldir="$1" self="$2" all_names tok
   all_names="$(for d in "$FLOW_DIR"/skills/*/; do basename "$d"; done | sort -u)"
   grep -hoE '`[a-zA-Z0-9_-]+`' "$skilldir/SKILL.md" "$skilldir/codex.md" \
-    "$skilldir"/phases/*.md "$skilldir"/modes/*.md 2>/dev/null | tr -d '`' | sort -u | while read -r tok; do
+    "$skilldir"/phases/*.md "$skilldir"/modes/*.md "$skilldir"/references/*.md 2>/dev/null | tr -d '`' | sort -u | while read -r tok; do
     [[ -z "$tok" || "$tok" == "$self" ]] && continue
     grep -qxF -- "$tok" <<< "$all_names" && printf '%s\n' "$tok"
   done
@@ -630,7 +630,7 @@ portable_dependency_refs() {
   all_names="$(for d in "$FLOW_DIR"/skills/*/; do basename "$d"; done | sort -u)"
   grep -hoiE '(read|use|follow|apply|consult|load|per|via)[[:space:]]+(the[[:space:]]+)?`[a-zA-Z0-9_-]+`' \
     "$skilldir/SKILL.md" "$skilldir/codex.md" \
-    "$skilldir"/phases/*.md "$skilldir"/modes/*.md 2>/dev/null \
+    "$skilldir"/phases/*.md "$skilldir"/modes/*.md "$skilldir"/references/*.md 2>/dev/null \
     | grep -oE '`[a-zA-Z0-9_-]+`' | tr -d '`' | sort -u | while read -r tok; do
     [[ -z "$tok" || "$tok" == "$self" ]] && continue
     grep -qxF -- "$tok" <<< "$all_names" && printf '%s\n' "$tok"
@@ -641,7 +641,7 @@ agent_refs() {
   local skilldir="$1" all_agents tok
   all_agents="$(for f in "$FLOW_DIR"/agents/*.md; do [[ -f "$f" ]] && fm_field "$f" name; done | sort -u)"
   grep -hoE '`[a-zA-Z0-9_-]+`' "$skilldir/SKILL.md" "$skilldir/codex.md" \
-    "$skilldir"/phases/*.md "$skilldir"/modes/*.md 2>/dev/null | tr -d '`' | sort -u | while read -r tok; do
+    "$skilldir"/phases/*.md "$skilldir"/modes/*.md "$skilldir"/references/*.md 2>/dev/null | tr -d '`' | sort -u | while read -r tok; do
     [[ -z "$tok" ]] && continue
     grep -qxF -- "$tok" <<< "$all_agents" && printf '%s\n' "$tok"
   done
@@ -663,6 +663,7 @@ generate_workflow_deps_section() {
         find "${d}" -maxdepth 1 -name '*.md' ! -name 'SKILL.md' ! -name 'codex.md' -printf '%f\n' 2>/dev/null
         find "${d}modes" -maxdepth 1 -name '*.md' -printf 'modes/%f\n' 2>/dev/null
         find "${d}phases" -maxdepth 1 -name '*.md' -printf 'phases/%f\n' 2>/dev/null
+        find "${d}references" -maxdepth 1 -name '*.md' -printf 'references/%f\n' 2>/dev/null
       } | sort
     )")"
     scripts="$(list_join "$(find "${d}scripts" -maxdepth 1 -name '*.sh' ! -name '*.test.sh' 2>/dev/null | sort | xargs -n1 basename 2>/dev/null)")"
@@ -801,7 +802,7 @@ check_broken_refs() {
   local d f refs r any_fail=0
   for d in "$FLOW_DIR"/skills/*/; do
     [[ -f "${d}SKILL.md" ]] || continue
-    for f in "${d}SKILL.md" "${d}codex.md" "${d}"phases/*.md "${d}"modes/*.md; do
+    for f in "${d}SKILL.md" "${d}codex.md" "${d}"phases/*.md "${d}"modes/*.md "${d}"references/*.md; do
       [[ -f "$f" ]] || continue
       refs="$(grep -oE '`scripts/[A-Za-z0-9_.-]+\.sh`' "$f" 2>/dev/null | tr -d '`' | sort -u)"
       [[ -z "$refs" ]] && continue
@@ -827,7 +828,8 @@ check_orphan_files() {
     owner="$(basename "$skilldir")"
     referenced=0
     for source in "$FLOW_DIR"/skills/*/SKILL.md "$FLOW_DIR"/skills/*/codex.md \
-      "$FLOW_DIR"/skills/*/phases/*.md "$FLOW_DIR"/skills/*/modes/*.md; do
+      "$FLOW_DIR"/skills/*/phases/*.md "$FLOW_DIR"/skills/*/modes/*.md \
+      "$FLOW_DIR"/skills/*/references/*.md; do
       [[ -f "$source" ]] || continue
       grep -qE "\`scripts/${name}\`" "$source" 2>/dev/null || continue
       if [[ "$source" == "$skilldir/"* ]] || grep -qE "\`${owner}\`" "$source" 2>/dev/null; then
@@ -857,7 +859,18 @@ check_orphan_files() {
     fi
   done < <(find "$FLOW_DIR"/skills -path '*/phases/*.md' -print0 2>/dev/null)
 
-  [[ "$any_orphan" -eq 0 ]] && add_result orphan-files "(repo)" pass "no orphan scripts or phase files" ""
+  while IFS= read -r -d '' f; do
+    name="$(basename "$f")"
+    skilldir="$(dirname "$(dirname "$f")")"
+    if ! grep -qE "\`references/${name}\`" "$skilldir/SKILL.md" 2>/dev/null; then
+      add_result orphan-files "$(relpath "$f")" fail \
+        "reference file $(relpath "$f") is not referenced by its skill's SKILL.md" \
+        "reference it from $(relpath "$skilldir/SKILL.md") (e.g. \`references/${name}\`) or delete it if unused"
+      any_orphan=1
+    fi
+  done < <(find "$FLOW_DIR"/skills -path '*/references/*.md' -print0 2>/dev/null)
+
+  [[ "$any_orphan" -eq 0 ]] && add_result orphan-files "(repo)" pass "no orphan scripts, phase files or reference files" ""
 }
 
 check_instruction_docs() {
@@ -1670,7 +1683,8 @@ check_command_flags() {
 
   for target in "$ROOT"/docs/*.md "$FLOW_DIR"/docs/*.md "$FLOW_DIR/README.md" "$ROOT/README.md" \
                 "$FLOW_DIR"/skills/*/SKILL.md "$FLOW_DIR"/skills/*/codex.md \
-                "$FLOW_DIR"/skills/*/phases/*.md "$FLOW_DIR"/skills/*/modes/*.md; do
+                "$FLOW_DIR"/skills/*/phases/*.md "$FLOW_DIR"/skills/*/modes/*.md \
+                "$FLOW_DIR"/skills/*/references/*.md; do
     [[ -f "$target" ]] || continue
     while IFS= read -r span; do
       [[ -n "$span" ]] || continue

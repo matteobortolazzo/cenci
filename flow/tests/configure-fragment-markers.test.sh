@@ -30,7 +30,8 @@
 # checking the result and calling `fail()` in the parent shell.
 #
 # Covered files:
-#   - flow/skills/configure/SKILL.md
+#   - flow/skills/configure/SKILL.md (step 5e)
+#   - flow/skills/configure/phases/runtime-ci-sandbox-questions.md (Q9b, #1341)
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || { echo "configure-fragment-markers.test.sh: failed to resolve script directory." >&2; exit 2; }
@@ -158,11 +159,21 @@ if [[ -n "${skill}" ]]; then
   assert_contains_ws "${skill}" "${FRAGMENT_MARKER_NAME_RULE}" "SKILL.md step 5e states <name> is the fragment's basename without .dockerfile"
   assert_contains_ws "${skill}" "${FRAGMENT_MARKER_WRAP_INSTRUCTION}" "SKILL.md step 5e instructs wrapping each fragment's content in the markers"
 
+fi
+
+# --- skills/configure/phases/runtime-ci-sandbox-questions.md ----------------
+# Question 9b moved out of SKILL.md into this phase file (#1341); step 5e
+# stays inline above.
+
+require_doc runtime_phase "skills/configure/phases/runtime-ci-sandbox-questions.md" || true
+if [[ -n "${runtime_phase}" ]]; then
   # Q9b existence + corrected remedy wording, paired so the absence check
   # can't pass vacuously before the question itself exists.
-  assert_contains "${skill}" "${Q9B_MARKER}" "SKILL.md question 9b (Nested Docker / dind) present"
-  assert_absent_paired_ws "${skill}" "${Q9B_MARKER}" "${OLD_REMEDY}" "SKILL.md stale cenci-sandbox-build-alone remedy removed"
-  assert_contains_ws "${skill}" "${NEW_REMEDY}" "SKILL.md corrected remedy names /cenci:configure before cenci sandbox build"
+  assert_contains "${runtime_phase}" "${Q9B_MARKER}" "runtime-ci-sandbox-questions.md question 9b (Nested Docker / dind) present"
+  assert_absent_paired_ws "${runtime_phase}" "${Q9B_MARKER}" "${OLD_REMEDY}" "runtime-ci-sandbox-questions.md stale cenci-sandbox-build-alone remedy removed"
+  assert_contains_ws "${runtime_phase}" "${NEW_REMEDY}" "runtime-ci-sandbox-questions.md corrected remedy names /cenci:configure before cenci sandbox build"
+else
+  fail "runtime-ci-sandbox-questions.md: empty, assertions skipped"
 fi
 
 if [[ "${failures}" -gt 0 ]]; then
