@@ -1,13 +1,13 @@
 # Autonomy Settings
 
-Read this file when `planning`, `automerge`, `refinement`, `refinement.confirmBeforeApply` or `refinement.automerge` is asked this run (see `SKILL.md` `### Step Map`). It holds questions 13 to 17 with the marker-bounded `jq` programs that step 6 in `SKILL.md` applies.
+Read this file when `planning`, `automerge`, `refinement`, `refinement.confirmBeforeApply` or `refinement.automerge` is asked this run (see `SKILL.md` `### Step Map`). It holds questions 13 to 17 with the marker-bounded `jq` programs that step 6 in `phases/write-config.md` applies.
 
 ### Autonomy Settings
 
 **Repo questions 13–17 have no container guard**: unlike `### Fleet Dispatch Enrollment` in `phases/fleet-enrollment.md`,
 `planning`, `automerge` and `refinement` are repo-committed keys that
 land inside this run's PR, so an in-container run is fine. The questions below only
-collect an answer; none writes anything itself — step 6 in `SKILL.md` performs the actual
+collect an answer; none writes anything itself — step 6 in `phases/write-config.md` performs the actual
 write, overlaying whatever was collected here onto the merged config.
 
 **Absent-only rule (delta runs).** On a delta run, questions 13, 14 and 15 are asked only when the key is absent and the ID is not in `configureOffered`; nothing is written on a skip. On a delta run, when `planning`, `automerge` or `refinement` is already present, report the
@@ -72,7 +72,7 @@ Detection` in `SKILL.md`):
       all 36 patterns, verbatim), plus the release/CI path; (b) any confirmed repo-shape
       paths (e.g. `.cenci/`); and (c) `existingConfig.security.sensitivePaths` when that key
       is present — the repo owner's own hand-declared sensitive-path patterns (see
-      `security.sensitivePaths` elsewhere in `SKILL.md`), the one signal the built-in
+      `security.sensitivePaths` in `references/config-schema.md`), the one signal the built-in
       defaults can't cover by design. Set tight caps. The template below is the value
       written to the top-level `automerge` key, verbatim (with `protectedPaths` extended
       per repo shape and `existingConfig.security.sensitivePaths` when applicable):
@@ -129,7 +129,7 @@ Detection` in `SKILL.md`):
 
       In a monorepo, this scaffold is always written as a single top-level block (never
       per-`projects[]` blocks) — a complete, valid, most-restrictive policy on its own
-      that needs no per-project path derivation; the PR-body review flag (step 7 in `SKILL.md`) tells the
+      that needs no per-project path derivation; the PR-body review flag (step 7 in `phases/commit-pr.md`) tells the
       human to consider splitting it into per-project blocks if that fits the repo better.
 
     - **`--all` with `automerge` present** (top-level or in any `projects[]` entry; per the keep-or-change rule in `SKILL.md`'s `### Question Defaults`): never

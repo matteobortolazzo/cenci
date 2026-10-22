@@ -175,7 +175,7 @@ for _configure_part in "${FLOW_DIR}"/skills/configure/phases/*.md "${FLOW_DIR}"/
   configure_all+=$'\n'"${_configure_part_content}"
   configure_part_count=$((configure_part_count+1))
 done
-[[ "${configure_part_count}" -ge 12 ]] || fail "796 skills/configure/**: configure_all aggregation is vacuous: aggregated ${configure_part_count} phases/references files (expected at least 12)"
+[[ "${configure_part_count}" -ge 15 ]] || fail "796 skills/configure/**: configure_all aggregation is vacuous: aggregated ${configure_part_count} phases/references files (expected at least 15: 11 phases + 4 references)"
 if [[ -n "${configure_mcp_phase}" ]]; then
   assert_contains "${configure_mcp_phase}" \
     '| *(always available)* | context7 | `npx` | `["-y", "@upstash/context7-mcp@3.2.5"]` | `CONTEXT7_API_KEY` | project |' \

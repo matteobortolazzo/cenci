@@ -278,8 +278,8 @@ if [[ "${other_scan_failed}" -eq 1 ]]; then
     fail "deny-marker scan of the other configure markdown files failed (unreadable file or grep error)"
 elif [[ ! -r "${SETTINGS_REF_MD}" ]]; then
     fail "${SETTINGS_REF_REL}: cannot verify the markers appear nowhere else — the reference file is missing"
-elif [[ "${other_scanned}" -lt 12 ]]; then
-    fail "deny-marker scan is vacuous: only ${other_scanned} other configure markdown files scanned (expected SKILL.md, 9 phase files and 2 other reference files = 12)"
+elif [[ "${other_scanned}" -lt 15 ]]; then
+    fail "deny-marker scan is vacuous: only ${other_scanned} other configure markdown files scanned (expected SKILL.md, 11 phase files and 3 other reference files = 15)"
 elif [[ -n "${other_hits}" ]]; then
     fail "deny markers must live only in ${SETTINGS_REF_REL}, also found in:${other_hits}"
 else

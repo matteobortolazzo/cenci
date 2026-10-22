@@ -14,7 +14,7 @@
 # re-implementing matchesProtected), that:
 #   1. docs/autonomous-loop.md's protectedPaths bullet documents the
 #      trailing-slash / directory-prefix rule.
-#   2. flow/skills/configure/SKILL.md's automerge.protectedPaths field
+#   2. flow/skills/configure/references/config-schema.md's automerge.protectedPaths field
 #      description states or links that same rule.
 #
 # Follows the fixture-driven idiom of automerge-config-schema.test.sh: a
@@ -85,17 +85,18 @@ if require_file CONTENT "${FILE}"; then
 fi
 
 # =====================================================================
-# flow/skills/configure/SKILL.md — the automerge.protectedPaths field
-# description must state or link the same trailing-slash rule.
+# flow/skills/configure/references/config-schema.md — the
+# automerge.protectedPaths field description (moved out of SKILL.md in #1344)
+# must state or link the same trailing-slash rule.
 # =====================================================================
-FILE="${FLOW_DIR}/skills/configure/SKILL.md"
+FILE="${FLOW_DIR}/skills/configure/references/config-schema.md"
 if require_file CONTENT "${FILE}"; then
   FIELD_BLOCK="$(printf '%s\n' "${CONTENT}" | grep -A 4 -F '`automerge.protectedPaths`')"
   if [[ -z "${FIELD_BLOCK}" ]]; then
-    fail "flow/skills/configure/SKILL.md: automerge.protectedPaths field description not found"
+    fail "flow/skills/configure/references/config-schema.md: automerge.protectedPaths field description not found"
   else
     assert_contains_any "${FIELD_BLOCK}" \
-      "flow/skills/configure/SKILL.md (automerge.protectedPaths field description states or links the trailing-slash rule)" \
+      "flow/skills/configure/references/config-schema.md (automerge.protectedPaths field description states or links the trailing-slash rule)" \
       "ending in \`/\`" "ending in \"/\"" "ends in \`/\`" "everything under" "docs/autonomous-loop.md"
   fi
 fi

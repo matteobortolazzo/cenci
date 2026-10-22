@@ -62,7 +62,23 @@ require_doc codex "${FLOW_DIR}/skills/maintain/codex.md" || true
 require_doc maintain_skill "${FLOW_DIR}/skills/maintain/SKILL.md" || true
 require_doc phase8 "${FLOW_DIR}/skills/implement/phases/phase-8-docs.md" || true
 require_doc implement_codex "${FLOW_DIR}/skills/implement/codex.md" || true
-require_doc configure "${FLOW_DIR}/skills/configure/SKILL.md" || true
+# The maintenance schema lives in references/config-schema.md since #1344. The
+# stale-claim negatives scan SKILL.md plus every phases/*.md and references/*.md
+# (configure_all), so the retired wording cannot reappear in any configure file.
+require_doc configure "${FLOW_DIR}/skills/configure/references/config-schema.md" || true
+require_doc configure_skill "${FLOW_DIR}/skills/configure/SKILL.md" || true
+configure_all="${configure_skill}"
+configure_part_count=0
+for _configure_part in "${FLOW_DIR}"/skills/configure/phases/*.md "${FLOW_DIR}"/skills/configure/references/*.md; do
+  [[ -f "${_configure_part}" ]] || continue
+  if ! _configure_part_content="$(read_doc_raw "${_configure_part}")"; then
+    fail "doc not found/unreadable: ${_configure_part}"
+    continue
+  fi
+  configure_all+=$'\n'"${_configure_part_content}"
+  configure_part_count=$((configure_part_count+1))
+done
+[[ "${configure_part_count}" -ge 15 ]] || fail "configure_all aggregation is vacuous: aggregated ${configure_part_count} phases/references files (expected at least 15)"
 require_doc readme "${FLOW_DIR}/README.md" || true
 require_doc getting_started "${REPO_ROOT}/docs/getting-started.md" || true
 require_doc gotchas "${FLOW_DIR}/docs/shell-scripting-gotchas.md" || true
@@ -139,8 +155,11 @@ assert_contains "${configure}" '`maintenance.enabled` — gates optional schedul
 assert_contains "${configure}" '`maintenance.checkDuringImplement` — whether Phase 8 may repair findings' "Configure checkDuringImplement semantics"
 assert_contains "${configure}" '`maintenance.generatedDocs` — whether marker-bounded generated documentation sections are checked and regenerated' "Configure generatedDocs semantics"
 assert_contains "${configure}" 'Core correctness checks always run' "Configure core checks unconditional"
-assert_not_contains "${configure}" 'master switch for maintenance checks' "Configure removes stale master-switch claim"
-assert_not_contains "${configure}" 'advisory/reserved this release' "Configure removes stale reserved claim"
+# Paired with the live-semantics pins above (the schema file holds them), so the
+# absence scans over the aggregate cannot pass against an emptied configure skill.
+assert_contains "${configure_all}" 'Core correctness checks always run' "Configure aggregate carries the live semantics the stale-claim scans are paired with"
+assert_not_contains "${configure_all}" 'master switch for maintenance checks' "Configure removes stale master-switch claim"
+assert_not_contains "${configure_all}" 'advisory/reserved this release' "Configure removes stale reserved claim"
 
 assert_contains "${readme}" '| `maintain` | Yes | Yes | No |' "README marks Codex maintain supported"
 assert_contains "${readme}" '`checkDuringImplement: false` keeps the Phase 8 check but makes every repair report-only' "README report-only semantics"

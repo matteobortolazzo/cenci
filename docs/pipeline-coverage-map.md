@@ -282,7 +282,7 @@ below).
 
 | Claim | Doc surface(s) | Test |
 |---|---|---|
-| Remote-confirmed lean config is authoritative over local-only lean. | `watch/README.md`, `docs/orchestration.md`, `flow/skills/configure/SKILL.md` | `TestProbeRepoAutonomy_RemoteRevokedToInteractive_LocalMainStillLean_DeniesAtRemoteRef` |
+| Remote-confirmed lean config is authoritative over local-only lean. | `watch/README.md`, `docs/orchestration.md`, `flow/skills/configure/references/config-schema.md` | `TestProbeRepoAutonomy_RemoteRevokedToInteractive_LocalMainStillLean_DeniesAtRemoteRef` |
 | Current write permission (not the commenter's permission at plan time) authorizes resume answers. | `watch/README.md`, `docs/orchestration.md` | `TestResolveAnswerProbes_PermissionCacheDoesNotPersistAcrossPasses` |
 | Refinement's validated pre-write gate, with final confirmation only when enabled, precedes the first mutation. | `flow/docs/pipeline-safety.md`, `docs/orchestration.md` | `flow/tests/refine-write-order.test.sh::re-verify exclusive ownership` |
 | Merges are squash-only, and the merge evaluation always uses current (immediately-before-merge) feedback state, not a stale first-pass verdict. | `docs/orchestration.md` | `TestTickAutomergeSquashOnlyHoldsOnNonSquashPolicy`, `TestTickPreMergeRecheckRevalidatesFeedbackReopenedSinceFirstPass` |

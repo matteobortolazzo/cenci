@@ -77,7 +77,8 @@ done
 contains_between "$CODEX" 'Read `project-core`' 'An open native blocking dependency' 'Before delegating the planner, use `frontend-classification`'
 contains_between "$CODEX" 'Read `project-core`' 'An open native blocking dependency' 'resolve `isUiTicket` and pass that flag to the planner'
 
-for file in "${FLOW_DIR}/skills/implement/SKILL.md" "${FLOW_DIR}/skills/configure/SKILL.md" "${FLOW_DIR}/skills/configure/codex.md" "${FLOW_DIR}/README.md"; do
+# configure's `cenci` schema lives in references/config-schema.md since #1344.
+for file in "${FLOW_DIR}/skills/implement/SKILL.md" "${FLOW_DIR}/skills/configure/references/config-schema.md" "${FLOW_DIR}/skills/configure/codex.md" "${FLOW_DIR}/README.md"; do
   contains "$file" 'implementerMaxConcurrency'
 done
 contains "${FLOW_DIR}/skills/maintain/scripts/check.sh" 'cenci.implementerMaxConcurrency|number'

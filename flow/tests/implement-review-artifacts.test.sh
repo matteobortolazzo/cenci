@@ -17,6 +17,14 @@ PHASE_6_7="${FLOW_DIR}/skills/implement/phases/phase-6-7-review.md"
 PHASE_9="${FLOW_DIR}/skills/implement/phases/phase-9-pr.md"
 IMPLEMENT_SKILL="${FLOW_DIR}/skills/implement/SKILL.md"
 CONFIGURE_SKILL="${FLOW_DIR}/skills/configure/SKILL.md"
+# Every configure markdown file: SKILL.md plus phases/*.md and references/*.md.
+# The PR-body temp path moved from SKILL.md into phases/commit-pr.md (#1344), so
+# the ticket-scoped-path negative below scans all of them.
+CONFIGURE_MD_FILES=("${CONFIGURE_SKILL}")
+shopt -s nullglob
+CONFIGURE_MD_FILES+=("${FLOW_DIR}"/skills/configure/phases/*.md "${FLOW_DIR}"/skills/configure/references/*.md)
+shopt -u nullglob
+CONFIGURE_COMMIT_PR="${FLOW_DIR}/skills/configure/phases/commit-pr.md"
 failures=0
 
 fail() { echo "FAIL: $1" >&2; failures=$((failures+1)); }
@@ -92,12 +100,23 @@ for pattern in \
   "cenci-<ticket-id-or-slug>-files.txt" \
   "cenci-<ticket-id-or-slug>-stat.txt" \
   "cenci-<ticket-id-or-slug>-review-path.txt"; do
-  for f in "${PHASE_6_7}" "${PHASE_9}" "${IMPLEMENT_SKILL}" "${CONFIGURE_SKILL}"; do
+  for f in "${PHASE_6_7}" "${PHASE_9}" "${IMPLEMENT_SKILL}" "${CONFIGURE_MD_FILES[@]}"; do
+    [[ -f "${f}" ]] || { fail "case3 contract: file not found, cannot verify absence: ${f}"; continue; }
     if grep -qF -- "${pattern}" "${f}"; then
       fail "case3 contract: $(basename "${f}") still contains ticket-scoped path: ${pattern}"
     fi
   done
 done
+# Pairing for the configure scan: SKILL.md plus at least 15 phases/references
+# files were scanned, and the file that now holds the PR-body temp path (a
+# per-slug, non-ticket-scoped path) really carries it, so the absence above
+# cannot pass against an emptied or renamed configure skill.
+[[ "${#CONFIGURE_MD_FILES[@]}" -ge 16 ]] || fail "case3 contract: configure scan is vacuous: found ${#CONFIGURE_MD_FILES[@]} files (expected SKILL.md plus at least 15 phases/references files)"
+if [[ -f "${CONFIGURE_COMMIT_PR}" ]]; then
+  assert_contains "$(cat "${CONFIGURE_COMMIT_PR}")" 'cenci-configure-<slug>-pr-body.md' "case3 contract: phases/commit-pr.md carries the slug-scoped PR-body temp path the configure scan is paired with"
+else
+  fail "case3 contract: phases/commit-pr.md not found"
+fi
 
 # =====================================================================
 # Run-scoping present (drift) — phase-6-7-review.md must call the helper,

@@ -204,7 +204,11 @@ safety properties, not skill authoring generally.
   you are editing (a Trigger-guard phrase pinned by
   `maintain-client-config-contract.test.sh` broke the gate after an innocent reword).
   Restore the pinned phrase word for word or update the pinning test in the same change
-  (#1301).
+  (#1301). Likewise, when a skill split adds `phases/*.md` or `references/*.md` files,
+  bump every hard-coded aggregate file-count floor in the suites that scan that skill
+  (`skill-convention-contract.test.sh`, `board-labels-drift-contract.test.sh`,
+  `settings-permissions.test.sh`) in the same change: a stale floor lets the new files
+  drop out of retired-pattern scans without any failure (#1344).
 - When a skill's gate or authorization logic defines multiple boolean signals or decision
   points, ensure each signal's prose description is distinct and unambiguous — e.g.,
   "per-child frontend status" (childIsFrontend) vs. "design-only child from a split"

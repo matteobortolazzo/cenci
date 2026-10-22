@@ -8,8 +8,8 @@ the approved plan remains in the prior conversation and the checkpoint records i
 write `.cenci/config.json`, AGENTS/CLAUDE adapters, `.claude/settings.json`,
 and `.codex/agents/*.toml`; preserve unknown keys and diff-gate substantive guidance.
 
-The `docs` config field mirrors the Claude procedure's `docs` schema paragraph and, like `maintenance`, has no question.
-Preserve the Claude procedure's optional implementation controls on reconfiguration:
+The `docs` config field mirrors the `docs` schema paragraph in `references/config-schema.md` and, like `maintenance`, has no question.
+Preserve the optional implementation controls of the `cenci` schema in `references/config-schema.md` on reconfiguration:
 `cenci.compactImplementation` defaults to false (repository opt-in only),
 `cenci.implementerConcurrency` defaults to `"parallel"`, and
 `cenci.implementerMaxConcurrency` defaults to 2 and accepts positive integers.
@@ -51,7 +51,7 @@ no `az` at all, which the user should be told. When Yes, also tell the user
 that `cenci open` stages their host `~/.azure` login read-only and seeds it
 once into the sandbox's home volume.
 
-Produce the `sandbox` field the same way Claude's SKILL.md does — by invoking
+Produce the `sandbox` field the same way step 6 in `phases/write-config.md` does — by invoking
 the shared, deterministic merge script rather than hand-merging the object,
 so equivalent Dockerfile/dind/azure answers produce byte-equivalent `sandbox`
 JSON for both clients:
@@ -73,7 +73,7 @@ missing/invalid `--dockerfile`/`--dind`/`--azure` value, or an
 unknown argument. Every boolean flag is required — omitting one would default
 it to false and silently delete an existing opt-in. If `jq` is genuinely
 unavailable, fall back to the merge
-outcomes documented in Claude's `SKILL.md` (same section, "sandbox" field)
+outcomes documented in `phases/write-config.md` (its `sandbox` merge section)
 and hand-construct the object from that table; for any other validation
 failure, fix the inputs and retry the script rather than falling back. Never
 construct the `sandbox` object by hand outside of that jq-unavailable
@@ -137,7 +137,7 @@ recording only the questions actually put to the user and applied or explicitly 
 the ledger stamp use the exact programs the Claude procedure keeps between its
 `cenci:configure-q13-switch`, `cenci:configure-q14-remove`, `cenci:configure-q15-switch` and
 `cenci:configure-offered-ledger` markers: Codex uses the same marker-bounded jq programs as `phases/autonomy-settings.md`
-(the `cenci:configure-offered-ledger` program from `SKILL.md` step 6, which stays inline),
+(the `cenci:configure-offered-ledger` program from step 6 in `phases/write-config.md`),
 and validates each overlay before the write: the `jq` call must exit 0 and the result must pass
 `jq -e 'type == "object"'` (an empty output passes `jq empty`, so that alone is not a gate). When a question 13/14/15 overlay
 falls back, its answer was not applied: the apply step tells the user (that the question will be asked
@@ -155,7 +155,7 @@ answers (the resolver's `ask` and `carried`, the effective sandbox flags, and th
 travel in the plan/apply checkpoint; the apply step reads them from there and never re-derives
 them from the resolver, whose result may differ by then.
 
-The apply step's report carries the same obligations as the Claude procedure's final report: the
+The apply step's report carries the same obligations as the final report in `phases/commit-pr.md`: the
 carried-through summary (question IDs and config key names, never values in the PR body, and saying
 `--all` would re-open them), the Dockerfile report (the block diff for a refreshed block, or "left untouched"
 for no or malformed markers), the lazyboards report including the notice when question 10 is carried but

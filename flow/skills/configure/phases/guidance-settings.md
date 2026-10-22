@@ -79,7 +79,7 @@ Read this file on every run, after the questions and `### Auth Verification` in 
    gh label create "<name>" --repo <owner>/<repo> --color "<color>" --description "<description>"
    ```
 
-   Read the plugin's `docs/board-labels.md` before the loop: its `## Labels` table is the one source of every label's `<color>` and `<description>`, and its "How existence is ensured" section says which labels are self-healed by the skills' own `gh label create … || true` fallbacks, by the `cenci pipeline label` CLI, or by the reconciler's Go `GHMutator.EnsureLabels` (not a skill-level fallback) — see "Reconciler-managed labels" under `### Board lifecycle labels` in `SKILL.md`. If the doc cannot be read, stop and report — never guess a color or description.
+   Read the plugin's `docs/board-labels.md` before the loop: its `## Labels` table is the one source of every label's `<color>` and `<description>`, and its "How existence is ensured" section says which labels are self-healed by the skills' own `gh label create … || true` fallbacks, by the `cenci pipeline label` CLI, or by the reconciler's Go `GHMutator.EnsureLabels` (not a skill-level fallback) — see the reconciler bullet in the plugin's `docs/board-labels.md`. If the doc cannot be read, stop and report — never guess a color or description.
 
    `Followup` is a capture-queue marker, never release-blocking (there is no release gate that reads labels). Captured items are triaged out of the queue by grouping/consolidation via `/cenci:maintain backlog` — which merges duplicates and batches small items, supersede-closing the sources — or promoted individually via `/cenci:refine`. See `docs/followup-triage.md`.
 

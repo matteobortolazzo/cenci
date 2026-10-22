@@ -39,7 +39,8 @@ RESOLVER="${FLOW_DIR}/skills/implement/scripts/docs-policy.sh"
 PHASE8_DOCS="${FLOW_DIR}/skills/implement/phases/phase-8-docs.md"
 PHASE9_PR="${FLOW_DIR}/skills/implement/phases/phase-9-pr.md"
 CODEX_MD="${FLOW_DIR}/skills/implement/codex.md"
-CONFIGURE_SKILL="${FLOW_DIR}/skills/configure/SKILL.md"
+# The docs.policy schema entry lives in references/config-schema.md since #1344.
+CONFIGURE_SCHEMA="${FLOW_DIR}/skills/configure/references/config-schema.md"
 CONFIGURE_CODEX="${FLOW_DIR}/skills/configure/codex.md"
 FLOW_README="${FLOW_DIR}/README.md"
 GETTING_STARTED="${REPO_ROOT}/docs/getting-started.md"
@@ -345,7 +346,7 @@ case_checker_unavailable() {
 
 case_configure_schema() {
   local f
-  for f in "${CONFIGURE_SKILL}" "${CONFIGURE_CODEX}"; do
+  for f in "${CONFIGURE_SCHEMA}" "${CONFIGURE_CODEX}"; do
     assert_file_contains "${f}" "${CONFIGURE_OPTIONAL_SENTENCE}" 'P2: docs.policy optional, never prompted, preserved on re-run'
     assert_file_contains "${f}" "${CONFIGURE_SCOPE_SENTENCE}" 'P2: plan-required/correctness vs incidental/lesson-capture'
     assert_file_contains "${f}" 'Do **not** add `docs` to the migration-removal list' 'P2: docs is not a migration-removal key'
