@@ -112,7 +112,8 @@ script CI's `flow-test` job invokes, so the two never drift apart.
 
 ## See also
 
-`flow/skills/configure/SKILL.md` — step 6, "Write `.cenci/config.json`",
-documents the full config schema, including the per-project `gateCommand`
-field (optional, unlike `lintCommand`, and not tied to the Stack-to-CI
-mapping table).
+`flow/skills/configure/references/config-schema.md` documents the full config
+schema, including the per-project `gateCommand` field (optional, unlike
+`lintCommand`, and not tied to the Stack-to-CI mapping table). Step 6,
+"Write `.cenci/config.json`", in `flow/skills/configure/phases/write-config.md`
+writes it.

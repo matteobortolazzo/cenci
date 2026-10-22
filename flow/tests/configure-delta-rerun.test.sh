@@ -36,8 +36,8 @@
 #       .configureOffered = sorted, de-duplicated union of (the string
 #       entries of any existing .configureOffered array -- non-strings are
 #       dropped) and $offered. An empty result is still written as [].
-#       Located anywhere in SKILL.md after "Always stamp `configVersion`"
-#       (step 6).
+#       Located anywhere in phases/write-config.md (#1344) after "Always stamp
+#       `configVersion`" (step 6).
 #   <!-- cenci:configure-q13-switch:begin --> ... :end -->
 #       Inside `### Autonomy Settings` (phases/autonomy-settings.md). Takes
 #       `--arg autonomy <interactive|lean>`. Sets .planning.autonomy to $autonomy, preserving every sibling key.
@@ -66,7 +66,10 @@
 #     `### Delta Resolution` pins, #1341), phases/lazyboards.md,
 #     phases/fleet-enrollment.md, phases/autonomy-settings.md (#1342),
 #     phases/ci-dockerfile.md (the step 5e managed-block pins, P6/P15/P16/P20,
-#     #1343), codex.md, scripts/resolve-delta.sh, question-keys.json
+#     #1343), phases/write-config.md (step 6: overlay order, validation, the
+#     ledger program), phases/commit-pr.md (step 7 and the final report) and
+#     references/config-schema.md (the restatement sites and the resolver
+#     pointer) (#1344), codex.md, scripts/resolve-delta.sh, question-keys.json
 #   - docs/autonomous-loop.md (cross-project), flow/README.md,
 #     flow/docs/skill-authoring.md
 set -uo pipefail
@@ -375,13 +378,21 @@ DOCKERFILE_MALFORMED_DEFINITION='(exactly one of `# cenci:managed-begin` / `# ce
 DOCKERFILE_MALFORMED_ALL='on an `--all` or `full` run it takes the same Overwrite/Skip/Show prompt'
 
 # Step 6 / step 7 / restatement sites.
-# Step regions: step 6 runs from its numbered heading up to step 7's; step 7
-# (PR body + final report) runs up to the next `###` section. Pins that belong
-# to a step are asserted against that region only, so they cannot pass from an
-# unrelated section that happens to repeat the sentence.
+# Step regions (#1344): step 6 lives in phases/write-config.md and runs from its
+# numbered heading to the end of that file (the sandbox merge section follows
+# it); step 7 (PR body + final report) lives in phases/commit-pr.md and runs
+# from its numbered heading to the end of that file. SKILL.md keeps a stub for
+# each that carries the same bold marker. Pins that belong to a step are
+# asserted against that region only, so they cannot pass from an unrelated
+# section that happens to repeat the sentence.
+WRITE_CONFIG_FILE='phases/write-config.md'
+COMMIT_PR_FILE='phases/commit-pr.md'
+CONFIG_SCHEMA_FILE='references/config-schema.md'
 STEP6_BEGIN='6. **Write `.cenci/config.json`**'
 STEP7_BEGIN='7. **Commit, Push, and Open PR**'
-STEP7_END='### Board lifecycle labels'
+# Neither region has a closing heading any more; the sentinel never matches, so
+# extract_between_raw runs to the end of the file.
+END_OF_FILE_SENTINEL='__end_of_file_never_matches__'
 STEP6_ALWAYS_STAMP='Always stamp `configVersion`'
 STEP6_LEDGER_UNION='Always stamp `configureOffered` on every write as the sorted, de-duplicated union of the existing ledger and the question IDs offered this run; `--all` never removes ledger entries.'
 STEP6_EMPTY_LEDGER='An empty result is still written as `[]`.'
@@ -436,7 +447,9 @@ OLD_PLANNING_RESTATE_A='writes the `planning` key only when you explicitly choos
 OLD_PLANNING_RESTATE_B='when the key is already present, this skill reports it verbatim and never re-prompts, narrows, or removes it'
 OLD_AUTOMERGE_RESTATE='when a block is already present, this skill reports it verbatim and never re-prompts, narrows, or removes it'
 OLD_RESOLVER_NOT_WIRED='The configure flow itself does not call the resolver yet; that wiring is tracked in #1246.'
-NEW_RESOLVER_WIRED='The configure flow calls this resolver itself — see `### Delta Resolution`.'
+# The sentence lives in references/config-schema.md (#1344), so the pointer to
+# `### Delta Resolution` crosses files and names the file that holds it.
+NEW_RESOLVER_WIRED='The configure flow calls this resolver itself — see `### Delta Resolution` in `phases/detection-and-delta.md`.'
 
 # codex.md parity paragraph.
 CODEX_DELTA_MODE='Delta mode asks only the question IDs the resolver lists in `ask` and carries the rest'
@@ -446,7 +459,9 @@ OLD_CODEX_Q13_Q14_ALL='and question 14 re-offers "Keep current block(s) (Recomme
 CODEX_LEDGER='stamps `configureOffered` with the same sorted, de-duplicated union as the Claude procedure'
 CODEX_SHARED_PROGRAMS='uses the same marker-bounded jq programs as `phases/autonomy-settings.md`'
 OLD_CODEX_SHARED_PROGRAMS='uses the same marker-bounded jq programs as `SKILL.md`'
-CODEX_LEDGER_SOURCE='`cenci:configure-offered-ledger` program from `SKILL.md` step 6'
+CODEX_LEDGER_SOURCE='`cenci:configure-offered-ledger` program from step 6 in `phases/write-config.md`'
+OLD_CODEX_LEDGER_SOURCE='`cenci:configure-offered-ledger` program from `SKILL.md` step 6'
+OLD_CODEX_LEDGER_STAYS_INLINE='which stays inline'
 CODEX_DOCKERFILE='refreshes a valid marker-managed `.cenci/Dockerfile` without asking, and leaves a `.cenci/Dockerfile` with no markers or malformed markers untouched and reported'
 CODEX_Q12='The Q12 dispatch session repair is still asked on a delta run'
 CODEX_FALLBACK='If the resolver fails, it falls back to a full replay and says why'
@@ -511,6 +526,12 @@ require_doc fleet_phase "skills/configure/phases/fleet-enrollment.md" || true
 require_doc autonomy_phase "skills/configure/phases/autonomy-settings.md" || true
 # Step 5e (the managed-block rules) lives in phases/ci-dockerfile.md since #1343.
 require_doc ci_phase "skills/configure/${CI_DOCKERFILE_FILE}" || true
+# Step 6 (merge semantics, overlay order, the ledger program), step 7 (commit,
+# push, PR, final report) and the config schema live in their own files since
+# #1344; their wording is pinned there, not in SKILL.md.
+require_doc write_config_phase "skills/configure/${WRITE_CONFIG_FILE}" || true
+require_doc commit_pr_phase "skills/configure/${COMMIT_PR_FILE}" || true
+require_doc config_schema "skills/configure/${CONFIG_SCHEMA_FILE}" || true
 require_doc codex "skills/configure/codex.md" || true
 require_repo_doc loop_doc "docs/autonomous-loop.md" || true
 require_doc readme "README.md" || true
@@ -538,9 +559,9 @@ if [[ -n "${skill}" ]]; then
   board_body="$(extract_section_body_raw "${lazy_phase}" "${BOARD_HEADING}")"
   fleet_body="$(extract_section_body_raw "${fleet_phase}" "${FLEET_HEADING}")"
   autonomy_body="$(extract_section_body_raw "${autonomy_phase}" "${AUTONOMY_HEADING}")"
-  step6_region="$(extract_between_raw "${skill}" "${STEP6_BEGIN}" "${STEP7_BEGIN}")"
-  step7_region="$(extract_between_raw "${skill}" "${STEP7_BEGIN}" "${STEP7_END}")"
-  LEDGER_PROG="$(extract_marked_block_raw "${skill}" "${LEDGER_BEGIN}" "${LEDGER_END}")"
+  step6_region="$(extract_between_raw "${write_config_phase}" "${STEP6_BEGIN}" "${END_OF_FILE_SENTINEL}")"
+  step7_region="$(extract_between_raw "${commit_pr_phase}" "${STEP7_BEGIN}" "${END_OF_FILE_SENTINEL}")"
+  LEDGER_PROG="$(extract_marked_block_raw "${write_config_phase}" "${LEDGER_BEGIN}" "${LEDGER_END}")"
   Q13_PROG="$(extract_marked_block_raw "${autonomy_body}" "${Q13_SWITCH_BEGIN}" "${Q13_SWITCH_END}")"
   Q14_PROG="$(extract_marked_block_raw "${autonomy_body}" "${Q14_REMOVE_BEGIN}" "${Q14_REMOVE_END}")"
   Q15_PROG="$(extract_marked_block_raw "${autonomy_body}" "${Q15_SWITCH_BEGIN}" "${Q15_SWITCH_END}")"
@@ -553,6 +574,7 @@ fi
 # configure_corpus -- SKILL.md plus every phases/*.md and references/*.md on
 # disk, so the P20 exactly-once count sees a stray copy in any configure file.
 configure_corpus="${skill}"
+configure_corpus_part_count=0
 shopt -s nullglob
 for _part in "${FLOW_DIR}"/skills/configure/phases/*.md "${FLOW_DIR}"/skills/configure/references/*.md; do
   if ! _part_content="$(cat "${_part}")"; then
@@ -560,8 +582,12 @@ for _part in "${FLOW_DIR}"/skills/configure/phases/*.md "${FLOW_DIR}"/skills/con
     continue
   fi
   configure_corpus+=$'\n'"${_part_content}"
+  configure_corpus_part_count=$((configure_corpus_part_count+1))
 done
 shopt -u nullglob
+# Floor (#1344): 11 phase files + 4 reference files. Every retired-pattern
+# absence below scans this corpus, so a vacuous (partial) corpus must fail.
+[[ "${configure_corpus_part_count}" -ge 15 ]] || fail "configure corpus is vacuous: aggregated ${configure_corpus_part_count} phases/references files (expected at least 15)"
 
 # need_prog <program-text> <label> -- fails (in the parent shell) when an
 # extracted program is missing, so every behavior case fails for the right
@@ -584,7 +610,7 @@ need_prog() {
 # turn into a vacuous scoped pass.
 require_region() {
   if [[ -z "$1" ]]; then
-    fail "$2: section extraction is empty (anchor missing from SKILL.md)"
+    fail "$2: section extraction is empty (anchor missing from its configure file)"
     return 1
   fi
   return 0
@@ -972,11 +998,15 @@ case_contract_delta_resolution_section() {
   assert_contains_ws "${delta_body}" "${DR_CI_CARRIED}" "Delta Resolution: a carried question 8 leaves ci.yml alone"
   assert_contains_ws "${delta_body}" "${DR_UI_CARRIED}" "Delta Resolution: a carried uiConventions keeps the UI Conventions section"
   assert_absent_paired_ws "${skill}" "${ARGS_SLUG_RULE}" "${OLD_SLUG_EXAMPLE}" "SKILL.md retired 'refresh MCP servers' slug example (now a --all pointer)"
-  assert_absent_paired_ws "${skill}" "${NEW_RESOLVER_WIRED}" "${OLD_RESOLVER_NOT_WIRED}" "SKILL.md retired 'resolver not wired yet' sentence"
+  # The "resolver is wired" sentence moved with the schema prose (#1344): it must
+  # exist in references/config-schema.md, and the retired "not wired yet" claim
+  # must be gone from every configure file (paired with that existence marker).
+  assert_contains_ws "${config_schema}" "${NEW_RESOLVER_WIRED}" "${CONFIG_SCHEMA_FILE}: the resolver is wired, with a pointer that names phases/detection-and-delta.md"
+  assert_absent_paired_ws "${configure_corpus}" "${NEW_RESOLVER_WIRED}" "${OLD_RESOLVER_NOT_WIRED}" "configure markdown retired 'resolver not wired yet' sentence"
 }
 
 case_AC1_contract_no_questions_and_stamp_only_pr() {
-  [[ -n "${skill}" ]] || { fail "contract: SKILL.md missing"; return; }
+  [[ -n "${commit_pr_phase}" ]] || { fail "contract: ${COMMIT_PR_FILE} missing"; return; }
   require_region "${step7_region}" "AC1 step 7 region" || return
   assert_contains_ws "${delta_body}" "${DR_ZERO_ASK}" "AC1 Delta Resolution: an empty delta.ask asks zero questions and still runs generation"
   assert_contains_ws "${step7_region}" "${STEP7_NOTHING_TO_COMMIT}" "AC1 step 7 still reports 'No configuration changes — nothing to commit'"
@@ -1040,6 +1070,8 @@ case_P20_malformed_markers_untouched_on_delta() {
   local n
   n="$(count_occurrences "$(normalize_ws "${configure_corpus}")" "${DOCKERFILE_MALFORMED_DELTA}")"
   [[ "${n}" -eq 1 ]] || fail "P20: the malformed-markers delta sentence must occur exactly once across the configure markdown, found ${n}"
+  # The step 6 stub keeps the bold marker in SKILL.md (#1344), so it is still the
+  # existence anchor that proves SKILL.md is not an emptied file.
   assert_absent_paired_ws "${skill}" "${STEP6_BEGIN}" "${DOCKERFILE_MALFORMED_DELTA}" "P20: SKILL.md no longer carries the malformed-markers delta sentence"
   assert_absent_paired_ws "${skill}" "${STEP6_BEGIN}" "${DOCKERFILE_MALFORMED_DEFINITION}" "P20: SKILL.md no longer carries the malformed-markers definition"
 }
@@ -1056,7 +1088,7 @@ case_AC4_contract_all_token() {
 }
 
 case_AC5_contract_carried_summary() {
-  [[ -n "${skill}" ]] || { fail "contract: SKILL.md missing"; return; }
+  [[ -n "${commit_pr_phase}" ]] || { fail "contract: ${COMMIT_PR_FILE} missing"; return; }
   require_region "${step7_region}" "AC5 step 7 region" || return
   assert_contains "${step7_region}" "${STEP7_CARRIED_HEADING}" "AC5 step 7 PR body carried-through section heading"
   assert_contains_ws "${step7_region}" "${STEP7_CARRIED_SUMMARY}" "AC5 step 7 carried-through summary lists IDs and keys only and names --all"
@@ -1104,25 +1136,31 @@ case_AC8_AC9_contract_q14_all_offer() {
 }
 
 case_marker_programs_sit_where_the_plan_puts_them() {
-  [[ -n "${skill}" ]] || { fail "contract: SKILL.md missing"; return; }
+  [[ -n "${write_config_phase}" ]] || { fail "contract: ${WRITE_CONFIG_FILE} missing"; return; }
   [[ -n "${Q13_PROG}" ]] || fail "phases/autonomy-settings.md: Q13-switch program not found between [${Q13_SWITCH_BEGIN}] / [${Q13_SWITCH_END}] inside ${AUTONOMY_HEADING}"
   [[ -n "${Q14_PROG}" ]] || fail "phases/autonomy-settings.md: Q14-remove program not found between [${Q14_REMOVE_BEGIN}] / [${Q14_REMOVE_END}] inside ${AUTONOMY_HEADING}"
   [[ -n "${Q15_PROG}" ]] || fail "phases/autonomy-settings.md: Q15-switch program not found between [${Q15_SWITCH_BEGIN}] / [${Q15_SWITCH_END}] inside ${AUTONOMY_HEADING}"
-  [[ -n "${LEDGER_PROG}" ]] || fail "SKILL.md: ledger program not found between [${LEDGER_BEGIN}] / [${LEDGER_END}]"
+  [[ -n "${LEDGER_PROG}" ]] || fail "${WRITE_CONFIG_FILE}: ledger program not found between [${LEDGER_BEGIN}] / [${LEDGER_END}]"
   local stamp_at ledger_at
-  stamp_at="$(offset_of "${skill}" "${STEP6_ALWAYS_STAMP}")"
-  ledger_at="$(offset_of "${skill}" "${LEDGER_BEGIN}")"
+  stamp_at="$(offset_of "${write_config_phase}" "${STEP6_ALWAYS_STAMP}")"
+  ledger_at="$(offset_of "${write_config_phase}" "${LEDGER_BEGIN}")"
   if [[ "${stamp_at}" -lt 0 ]]; then
-    fail "SKILL.md: step 6 '${STEP6_ALWAYS_STAMP}' anchor missing"
+    fail "${WRITE_CONFIG_FILE}: step 6 '${STEP6_ALWAYS_STAMP}' anchor missing"
   elif [[ "${ledger_at}" -lt 0 ]]; then
-    fail "SKILL.md: ledger begin marker missing, cannot check it sits after the configVersion stamp"
+    fail "${WRITE_CONFIG_FILE}: ledger begin marker missing, cannot check it sits after the configVersion stamp"
   elif [[ "${ledger_at}" -lt "${stamp_at}" ]]; then
-    fail "SKILL.md: the ledger marker block must sit next to (after) the configVersion stamp in step 6"
+    fail "${WRITE_CONFIG_FILE}: the ledger marker block must sit next to (after) the configVersion stamp in step 6"
   fi
+  # The ledger program lives only in write-config.md: the marker pair occurs once
+  # across the configure markdown (paired with the marker existing there).
+  local ledger_marker_count
+  ledger_marker_count="$(count_occurrences "${configure_corpus}" "${LEDGER_BEGIN}")"
+  [[ "${ledger_marker_count}" -eq 1 ]] || fail "the ${LEDGER_BEGIN} marker must occur exactly once across the configure markdown (in ${WRITE_CONFIG_FILE}), found ${ledger_marker_count}"
+  assert_absent_paired_ws "${skill}" "${STEP6_BEGIN}" "${LEDGER_BEGIN}" "SKILL.md no longer carries the offered-ledger program (its step 6 stub keeps the marker)"
 }
 
 case_AC14_contract_step6_ledger_and_overlay_order() {
-  [[ -n "${skill}" ]] || { fail "contract: SKILL.md missing"; return; }
+  [[ -n "${write_config_phase}" ]] || { fail "contract: ${WRITE_CONFIG_FILE} missing"; return; }
   require_region "${step6_region}" "AC14 step 6 region" || return
   assert_contains_ws "${step6_region}" "${STEP6_LEDGER_UNION}" "AC14 step 6: every write stamps the merged configureOffered ledger; --all never removes entries"
   assert_contains_ws "${step6_region}" "${STEP6_EMPTY_LEDGER}" "AC14 step 6: an empty ledger is still written as []"
@@ -1150,7 +1188,7 @@ case_AC14_contract_step6_ledger_and_overlay_order() {
 }
 
 case_contract_q10_q11_board_and_fleet() {
-  [[ -n "${skill}" ]] || { fail "contract: SKILL.md missing"; return; }
+  [[ -n "${lazy_phase}" ]] || { fail "contract: phases/lazyboards.md missing"; return; }
   assert_contains_ws "${board_body}" "${Q10_DECLINE_RECORDED}" "Board Config: a declined Q10 is recorded and not re-asked on a delta run"
   # The one state in which phases/lazyboards.md is not read is a carried
   # question 10 with the file missing, so the router (not the phase) reports it.
@@ -1164,22 +1202,49 @@ case_contract_q10_q11_board_and_fleet() {
 }
 
 case_AC19_q12_repair_still_asked_on_delta() {
-  [[ -n "${skill}" ]] || { fail "contract: SKILL.md missing"; return; }
+  [[ -n "${fleet_phase}" ]] || { fail "contract: phases/fleet-enrollment.md missing"; return; }
   assert_contains_ws "${fleet_body}" "${Q12_REPAIR_STILL_ASKED}" "AC19 Fleet Dispatch: enrolled + empty session repair is still asked on a delta run"
   assert_contains_ws "${delta_body}" "${Q12_REPAIR_STILL_ASKED}" "AC19 Delta Resolution: Q12 repair listed as a named exception"
   assert_contains_ws "${codex}" "${CODEX_Q12}" "AC19 codex.md: Q12 repair still asked on a delta run"
 }
 
 case_restatement_sites_all_updated() {
-  [[ -n "${skill}" ]] || { fail "contract: SKILL.md missing"; return; }
+  [[ -n "${config_schema}" ]] || { fail "contract: ${CONFIG_SCHEMA_FILE} missing"; return; }
   local n
+  # The three restatement sites (the example note, the planning field note and
+  # the automerge field note) live in references/config-schema.md since #1344.
   # Count over whitespace-normalized text: a restatement hard-wrapped across a
   # line break must still count (assert_absent_paired_ws below is normalized too).
-  n="$(count_occurrences "$(normalize_ws "${skill}")" "${RESTATE_MARKER}")"
-  [[ "${n}" -ge "${RESTATE_MIN_COUNT}" ]] || fail "SKILL.md: expected the delta-scoped restatement [${RESTATE_MARKER}] at ${RESTATE_MIN_COUNT} sites (step 6 template note, planning field note, automerge field note), found ${n}"
-  assert_absent_paired_ws "${skill}" "${RESTATE_MARKER}" "${OLD_PLANNING_RESTATE_A}" "SKILL.md retired planning restatement (step 6 template note)"
-  assert_absent_paired_ws "${skill}" "${RESTATE_MARKER}" "${OLD_PLANNING_RESTATE_B}" "SKILL.md retired planning field restatement"
-  assert_absent_paired_ws "${skill}" "${RESTATE_MARKER}" "${OLD_AUTOMERGE_RESTATE}" "SKILL.md retired automerge field restatement"
+  n="$(count_occurrences "$(normalize_ws "${config_schema}")" "${RESTATE_MARKER}")"
+  [[ "${n}" -ge "${RESTATE_MIN_COUNT}" ]] || fail "${CONFIG_SCHEMA_FILE}: expected the delta-scoped restatement [${RESTATE_MARKER}] at ${RESTATE_MIN_COUNT} sites (example note, planning field note, automerge field note), found ${n}"
+  # The retired restatements must be gone from every configure file.
+  assert_absent_paired_ws "${configure_corpus}" "${RESTATE_MARKER}" "${OLD_PLANNING_RESTATE_A}" "configure markdown retired planning restatement (example note)"
+  assert_absent_paired_ws "${configure_corpus}" "${RESTATE_MARKER}" "${OLD_PLANNING_RESTATE_B}" "configure markdown retired planning field restatement"
+  assert_absent_paired_ws "${configure_corpus}" "${RESTATE_MARKER}" "${OLD_AUTOMERGE_RESTATE}" "configure markdown retired automerge field restatement"
+}
+
+# P15 (#1344): every retired step 6 / step 7 claim stays retired in every
+# configure file, not only inside the region that used to hold it -- the moved
+# prose could otherwise resurface in another phase or reference file. Each
+# absence is paired with the current wording existing in the configure corpus.
+case_P15_retired_step_claims_absent_everywhere() {
+  [[ -n "${configure_corpus}" ]] || { fail "P15: configure corpus empty"; return; }
+  local old
+  for old in \
+    "${OLD_STEP6_OVERLAY_ORDER}" \
+    "${OLD_STEP6_JQ_EMPTY}" \
+    "${OLD_STEP6_FALLBACK_IDS_Q13_Q14}" \
+    "${OLD_STEP6_FALLBACK_UNCONDITIONAL}" \
+    "${OLD_STEP6_CARRIED_FLAGS}"; do
+    assert_absent_paired_ws "${configure_corpus}" "${STEP6_OVERLAY_ORDER}" "${old}" "P15: configure markdown retired step 6 claim [${old}]"
+  done
+  for old in \
+    "${OLD_STEP7_FELL_BACK_Q13_Q14}" \
+    "${OLD_STEP7_CARRIED_VALUES}" \
+    "${OLD_STEP7_FALLBACK_UNCONDITIONAL}" \
+    "${OLD_STEP7_Q11_UNCONDITIONAL}"; do
+    assert_absent_paired_ws "${configure_corpus}" "${STEP7_FINAL_REPORT_FELL_BACK}" "${old}" "P15: configure markdown retired step 7 claim [${old}]"
+  done
 }
 
 case_AC17_codex_parity() {
@@ -1195,7 +1260,9 @@ case_AC17_codex_parity() {
   assert_contains_ws "${codex}" "${CODEX_LEDGER}" "AC17 codex.md stamps the same configureOffered ledger"
   assert_contains_ws "${codex}" "${CODEX_SHARED_PROGRAMS}" "AC17 codex.md uses the same marker-bounded jq programs from phases/autonomy-settings.md"
   assert_absent_paired_ws "${codex}" "${CODEX_SHARED_PROGRAMS}" "${OLD_CODEX_SHARED_PROGRAMS}" "AC17 codex.md retired marker-bounded jq programs pointer at SKILL.md (#1342)"
-  assert_contains_ws "${codex}" "${CODEX_LEDGER_SOURCE}" "AC17 codex.md takes the offered-ledger program from SKILL.md step 6 (it stays inline)"
+  assert_contains_ws "${codex}" "${CODEX_LEDGER_SOURCE}" "AC17 codex.md takes the offered-ledger program from step 6 in ${WRITE_CONFIG_FILE}"
+  assert_absent_paired_ws "${codex}" "${CODEX_LEDGER_SOURCE}" "${OLD_CODEX_LEDGER_SOURCE}" "AC17 codex.md retired pointer at SKILL.md step 6 for the offered-ledger program (#1344)"
+  assert_absent_paired_ws "${codex}" "${CODEX_LEDGER_SOURCE}" "${OLD_CODEX_LEDGER_STAYS_INLINE}" "AC17 codex.md retired 'which stays inline' claim for the offered-ledger program (#1344)"
   assert_contains_ws "${codex}" "${CODEX_DOCKERFILE}" "AC17 codex.md describes the Dockerfile delta rule"
   assert_contains_ws "${codex}" "${CODEX_FALLBACK}" "AC17 codex.md describes the resolver-failure fallback"
   assert_contains_ws "${codex}" "${CODEX_PLAN_MODE}" "AC17 codex.md keeps the resolver read-only in /plan and writes in apply"
@@ -1236,10 +1303,12 @@ case_AC17_no_cenci_cli_span_carries_all() {
   # appear as `/cenci:configure --all` or in prose. Paired with --all being
   # documented at all, so a file that never mentions it cannot pass vacuously.
   local label content hits required
-  for label in "SKILL.md" "phases/detection-and-delta.md" "codex.md" "docs/autonomous-loop.md" "README.md"; do
+  for label in "SKILL.md" "phases/detection-and-delta.md" "${WRITE_CONFIG_FILE}" "${COMMIT_PR_FILE}" "codex.md" "docs/autonomous-loop.md" "README.md"; do
     case "${label}" in
       SKILL.md) content="${skill}"; required='/cenci:configure --all' ;;
       phases/detection-and-delta.md) content="${delta_phase}"; required='/cenci:configure --all' ;;
+      "${WRITE_CONFIG_FILE}") content="${write_config_phase}"; required='/cenci:configure --all' ;;
+      "${COMMIT_PR_FILE}") content="${commit_pr_phase}"; required='/cenci:configure --all' ;;
       codex.md) content="${codex}"; required='`--all`' ;;
       docs/autonomous-loop.md) content="${loop_doc}"; required='/cenci:configure --all' ;;
       README.md) content="${readme}"; required='/cenci:configure --all' ;;
@@ -1308,6 +1377,7 @@ case_AC14_contract_step6_ledger_and_overlay_order
 case_contract_q10_q11_board_and_fleet
 case_AC19_q12_repair_still_asked_on_delta
 case_restatement_sites_all_updated
+case_P15_retired_step_claims_absent_everywhere
 case_AC17_codex_parity
 case_AC17_no_cenci_cli_span_carries_all
 case_AC18_autonomous_loop_doc

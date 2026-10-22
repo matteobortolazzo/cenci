@@ -21,7 +21,8 @@
 #   - skills/implement/phases/phase-5-refactor.md
 #   - skills/implement/phases/phase-6-7-review.md
 #   - skills/implement/phases/phase-9-pr.md
-#   - skills/configure/SKILL.md
+#   - skills/configure/phases/commit-pr.md (step 7, #1344), plus SKILL.md and
+#     every phases/*.md and references/*.md for the stale-text negative
 #
 # Deliberately NOT scanned: flow/AGENTS.md and flow/skills/shell-rules/SKILL.md.
 # Both already state the correct rule ("CWD does not reliably persist across
@@ -170,15 +171,34 @@ if require_doc CONTENT "${FILE}"; then
 fi
 
 # =====================================================================
-# skills/configure/SKILL.md -- the commit step (git-workflow.md read +
-# commit/branch/PR conventions) tells the agent to run a standalone `cd
-# <worktree-path>` first so the commands below resolve against the worktree.
+# skills/configure/phases/commit-pr.md -- the commit step (git-workflow.md read
+# + commit/branch/PR conventions; step 7 moved out of SKILL.md in #1344) tells
+# the agent to run a standalone `cd <worktree-path>` first so the commands
+# below resolve against the worktree. The positive pin is read from the file
+# that holds step 7; the retired-pattern negative scans SKILL.md plus every
+# phases/*.md and references/*.md (paired with that positive pin and a file
+# count floor, so it cannot pass against an emptied or renamed skill).
 # =====================================================================
-FILE="skills/configure/SKILL.md"
+FILE="skills/configure/phases/commit-pr.md"
 if require_doc CONTENT "${FILE}"; then
-  assert_not_contains "${CONTENT}" 'Run a standalone `cd <worktree-path>` first so the commands below resolve against the worktree' "${FILE}"
   assert_contains "${CONTENT}" 'Target the worktree explicitly with `git -C <worktree-path>` on every command below so they resolve against the worktree and stay auto-approved' "${FILE}"
 fi
+CONFIGURE_ALL=""
+CONFIGURE_PART_COUNT=0
+if require_doc CONTENT "skills/configure/SKILL.md"; then
+  CONFIGURE_ALL="${CONTENT}"
+fi
+shopt -s nullglob
+for _configure_part in "${FLOW_DIR}"/skills/configure/phases/*.md "${FLOW_DIR}"/skills/configure/references/*.md; do
+  if require_doc CONTENT "${_configure_part#"${FLOW_DIR}/"}"; then
+    CONFIGURE_ALL+=$'\n'"${CONTENT}"
+    CONFIGURE_PART_COUNT=$((CONFIGURE_PART_COUNT+1))
+  fi
+done
+shopt -u nullglob
+[[ "${CONFIGURE_PART_COUNT}" -ge 15 ]] || fail "configure aggregate is vacuous: found ${CONFIGURE_PART_COUNT} phases/references files (expected at least 15)"
+assert_contains "${CONFIGURE_ALL}" 'Target the worktree explicitly with `git -C <worktree-path>`' "skills/configure/** (aggregate carries the corrected sentence the stale-text scan is paired with)"
+assert_not_contains "${CONFIGURE_ALL}" 'Run a standalone `cd <worktree-path>` first so the commands below resolve against the worktree' "skills/configure/** (SKILL.md, phases/*.md, references/*.md)"
 
 echo "subagent-cwd-contract.test.sh: failures=${failures}"
 [[ "${failures}" -eq 0 ]]

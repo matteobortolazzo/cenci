@@ -443,7 +443,7 @@ if CONFIGURE_CONTENT="$(cat "${CONFIGURE_SKILL}")"; then
     CONFIGURE_CONTENT+=$'\n'"${configure_part_content}"
     CONFIGURE_PART_COUNT=$((CONFIGURE_PART_COUNT + 1))
   done
-  [[ "${CONFIGURE_PART_COUNT}" -ge 12 ]] || fail "skills/configure/**: aggregate is vacuous, scanned ${CONFIGURE_PART_COUNT} phases/references files (expected at least 12 after #1343)"
+  [[ "${CONFIGURE_PART_COUNT}" -ge 15 ]] || fail "skills/configure/**: aggregate is vacuous, scanned ${CONFIGURE_PART_COUNT} phases/references files (expected at least 15 after #1344: 11 phases + 4 references)"
   grep -qE '^[[:space:]]*\| `[^`]+` \| `[0-9A-Fa-f]{6}` \|' <<<"${CONFIGURE_CONTENT}" && fail "skills/configure/**: still carries a label color table row (the table lives only in docs/${DOC_REF})"
   grep -qE '^[[:space:]]*\| Label \| (Color|Applied by) \|' <<<"${CONFIGURE_CONTENT}" && fail "skills/configure/**: still carries a label table header (the 'Applied by / Meaning' and color tables live only in docs/${DOC_REF})"
   grep -qF -- "${DOC_REF}" <<<"${CONFIGURE_CONTENT}" || fail "skills/configure/**: must point at the plugin's docs/${DOC_REF}"

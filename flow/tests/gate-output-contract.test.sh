@@ -6,8 +6,8 @@
 #   - maintain/scripts/check.sh's CONFIG_SCHEMA (the config-examples doc-drift
 #     scanner's field allowlist) -- an undocumented-but-used field would make
 #     check_config_examples reject a legitimate ```json example using it.
-#   - configure/SKILL.md's `cenci` JSON example and schema prose -- the
-#     authoritative config emitter.
+#   - configure/references/config-schema.md's `cenci` JSON example and schema
+#     prose -- the authoritative config emitter.
 #   - implement/SKILL.md's `### Cost Controls` bullet list.
 #   - shell-rules/SKILL.md's new `## Command Output Discipline` section (the
 #     prose half of the ticket: bounding the implementer's own repeated
@@ -93,11 +93,12 @@ if require_doc CONTENT "${FLOW_DIR}/${FILE}" "${FILE}"; then
 fi
 
 # =====================================================================
-# skills/configure/SKILL.md -- the authoritative config emitter must show
+# skills/configure/references/config-schema.md -- the authoritative config
+# emitter (the schema moved out of SKILL.md in #1344) must show
 # gateOutputLines in the `cenci` JSON example AND document it in the `cenci`
 # schema prose (both directions matter, same as automerge-config-schema.test.sh).
 # =====================================================================
-FILE="skills/configure/SKILL.md"
+FILE="skills/configure/references/config-schema.md"
 if require_doc CONTENT "${FLOW_DIR}/${FILE}" "${FILE}"; then
   assert_contains "${CONTENT}" '"gateOutputLines": 120' "${FILE} (cenci JSON example shows gateOutputLines: 120)"
   assert_contains "${CONTENT}" "\`gateOutputLines\` —" "${FILE} (cenci schema prose documents gateOutputLines)"

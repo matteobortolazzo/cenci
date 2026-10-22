@@ -1866,7 +1866,7 @@ head commit, holds under its own distinct reason instead of being read as
 confirmed success — another actor could have merged a different commit in
 the narrow race between babysit's own validation and this refetch. A
 zero-exit result that isn't `MERGED` at all on that single refetch is treated
-as indeterminate, never as success. See `flow/skills/configure/SKILL.md`'s
+as indeterminate, never as success. See `flow/skills/configure/references/config-schema.md`'s
 `automerge` schema section for the full field reference.
 
 Once that refetch confirms `MERGED`, babysit posts one comment to the PR

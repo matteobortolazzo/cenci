@@ -14,7 +14,7 @@ path that adds a label follows the same ensure-then-add rule:
    --description "<description>"`. Never modify or recolor a label that already exists.
 2. Add the label with `gh issue edit`.
 
-`/cenci:configure` step 3c runs step 1 for the whole set up front (`gh label list` once, then one
+`/cenci:configure` step 3c (in `skills/configure/phases/guidance-settings.md`) runs step 1 for the whole set up front (`gh label list` once, then one
 `gh label create` per missing label). The skills that add a label later repeat step 1 for that one
 label just before adding it, so a repository configured before a label was introduced still
 works.
@@ -44,8 +44,10 @@ points at every literal that must follow.
 | `reconcile-stuck` | `5319e7` | cenci: reconciliation itself is stuck (apply-retry budget exhausted) | cenci dispatch reconciler |
 
 `Refined`, `Planned`, `Working`, `In Review` and `Implemented` are the board columns of the
-`New → Refined → Planned → Working → In Review → Implemented` lifecycle. The other rows are
-orthogonal markers, never part of that chain:
+`New → Refined → Planned → Working → In Review → Implemented` lifecycle. A ticket judged
+trivial by implement's Trivial-Ticket Triage still transits through `Planned`: same labels, no
+new label state, just collapsed into one session instead of a stop-and-relaunch between
+`Planned` and `Working`. The other rows are orthogonal markers, never part of that chain:
 
 - `Followup` is a capture-queue marker, never release-blocking; it is removed when the item is
   triaged out of the queue (see `docs/followup-triage.md`).
@@ -77,7 +79,7 @@ description from the table above; route 2 does not.
    it creates a ticket (so implement Phase 9 and address-review carry no `Followup`
    `gh label create` of their own).
 
-`/cenci:configure` step 3c additionally creates every missing label up front with the table's
+`/cenci:configure` step 3c (in `skills/configure/phases/guidance-settings.md`) additionally creates every missing label up front with the table's
 color and description, so a board that skips it is not blocked: the routes above heal the label
 when it is first needed. The trade-off is route 2: a repository that never ran
 `/cenci:configure` can carry gh's default color and an empty description for `Working`,

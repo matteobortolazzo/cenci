@@ -6,7 +6,7 @@
 # branch with fully restated (not referenced) checkpoint-free error handling
 # (skills/implement/phases/phase-1-plan.md), the Gate Check's third entrance
 # (skills/implement/phases/phase-2-worktree.md), the document-only config
-# schema entry (skills/configure/SKILL.md), and the "two checkpoint-free
+# schema entry (skills/configure/references/config-schema.md), and the "two checkpoint-free
 # exceptions" wording at the hard-stop rule
 # (skills/implement/SKILL.md).
 #
@@ -57,7 +57,7 @@
 #     `do **not** set `hasPlanFile = true``), and this file's negative
 #     assertions confirm the count of each of those four owned markers stays
 #     at exactly one.
-#   - The configure/SKILL.md assertion below pins the opening line of the
+#   - The configure/references/config-schema.md assertion below pins the opening line of the
 #     `planning`-scoped rationale paragraph (`### Autonomy Settings` question
 #     13 offers `planning.autonomy` only when absent), not a bare identifier
 #     like `planning.autonomy` itself — that already recurs several times
@@ -79,7 +79,9 @@
 #     ## Unattended Escalation Path option/recommendation clause)
 #   - flow/skills/implement/phases/phase-2-worktree.md (Gate Check third
 #     entrance)
-#   - flow/skills/configure/SKILL.md (document-only planning schema block)
+#   - flow/skills/configure/references/config-schema.md (document-only planning
+#     schema block, #1344), plus SKILL.md and every phases/*.md and
+#     references/*.md for the retired-pointer negative
 #   - flow/skills/implement/SKILL.md (both checkpoint-free exceptions named)
 #   - flow/agents/refiner.md — #979 only, read-only consistency reference:
 #     several markers below assert the identical literal string against
@@ -263,8 +265,19 @@ assert_file_contains "${PHASE2_WORKTREE}" "${GATE_CHECK_LEAN_ENTRANCE_MARKER}" \
   "Gate Check must name the Lean Approval Path as a third entrance alongside (a)/(b)"
 
 # =====================================================================
-# skills/configure/SKILL.md — document-only planning schema block.
+# skills/configure/references/config-schema.md — document-only planning
+# schema block (the schema moved out of SKILL.md in #1344). The retired
+# positional pointer is scanned across SKILL.md plus every phases/*.md and
+# references/*.md, so it cannot reappear in any configure file.
 # =====================================================================
+
+CONFIGURE_SCHEMA="${FLOW_DIR}/skills/configure/references/config-schema.md"
+configure_markdown_files=("${CONFIGURE_SKILL}")
+shopt -s nullglob
+configure_markdown_files+=("${FLOW_DIR}"/skills/configure/phases/*.md "${FLOW_DIR}"/skills/configure/references/*.md)
+shopt -u nullglob
+[[ "${#configure_markdown_files[@]}" -ge 16 ]] \
+  || fail "configure markdown scan is vacuous: found ${#configure_markdown_files[@]} files (expected SKILL.md plus at least 15 phases/references files)"
 
 CONFIGURE_PLANNING_SCHEMA_MARKER='planning.autonomy'
 CONFIGURE_PLANNING_DEFAULT_MARKER='default `"interactive"`'
@@ -275,15 +288,17 @@ CONFIGURE_PLANNING_OFFERED_WHEN_ABSENT_MARKER='The `planning` field is optional.
 CONFIGURE_PLANNING_OLD_POSITIONAL_MARKER='`### Autonomy Settings` question 13 above'
 CONFIGURE_PLANNING_EXAMPLE_JSON_MARKER='"planning": { "autonomy": "interactive" }'
 
-assert_file_contains "${CONFIGURE_SKILL}" "${CONFIGURE_PLANNING_SCHEMA_MARKER}" \
+assert_file_contains "${CONFIGURE_SCHEMA}" "${CONFIGURE_PLANNING_SCHEMA_MARKER}" \
   "must document the planning.autonomy schema line"
-assert_file_contains "${CONFIGURE_SKILL}" "${CONFIGURE_PLANNING_DEFAULT_MARKER}" \
+assert_file_contains "${CONFIGURE_SCHEMA}" "${CONFIGURE_PLANNING_DEFAULT_MARKER}" \
   "must state the \"interactive\" default"
-assert_file_contains "${CONFIGURE_SKILL}" "${CONFIGURE_PLANNING_OFFERED_WHEN_ABSENT_MARKER}" \
+assert_file_contains "${CONFIGURE_SCHEMA}" "${CONFIGURE_PLANNING_OFFERED_WHEN_ABSENT_MARKER}" \
   "must state planning.autonomy (question 13, ### Autonomy Settings in phases/autonomy-settings.md) is offered only when absent (#965)"
-assert_file_lacks "${CONFIGURE_SKILL}" "${CONFIGURE_PLANNING_OLD_POSITIONAL_MARKER}" \
-  "must not keep the positional \"question 13 above\" pointer now that question 13 lives in another file (#1342)"
-assert_file_contains "${CONFIGURE_SKILL}" "${CONFIGURE_PLANNING_EXAMPLE_JSON_MARKER}" \
+for configure_file in "${configure_markdown_files[@]}"; do
+  assert_file_lacks "${configure_file}" "${CONFIGURE_PLANNING_OLD_POSITIONAL_MARKER}" \
+    "must not keep the positional \"question 13 above\" pointer now that question 13 lives in another file (#1342)"
+done
+assert_file_contains "${CONFIGURE_SCHEMA}" "${CONFIGURE_PLANNING_EXAMPLE_JSON_MARKER}" \
   "must add planning.autonomy to the example config JSON"
 
 # =====================================================================

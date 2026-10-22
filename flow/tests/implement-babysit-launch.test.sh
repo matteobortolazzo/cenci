@@ -128,10 +128,11 @@ if require_doc CONTENT "${FILE}"; then
 fi
 
 # =====================================================================
-# skills/configure/SKILL.md — the authoritative config emitter must document the
+# skills/configure/references/config-schema.md — the authoritative config
+# emitter (the schema moved out of SKILL.md in #1344) must document the
 # optional babysitInterval field so a project can set the watch cadence.
 # =====================================================================
-FILE="skills/configure/SKILL.md"
+FILE="skills/configure/references/config-schema.md"
 if require_doc CONTENT "${FILE}"; then
   assert_contains "${CONTENT}" "babysitInterval" "${FILE} (config field documented)"
 fi

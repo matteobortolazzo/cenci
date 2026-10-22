@@ -64,10 +64,18 @@
 # collapse into one sentence pointing at SKILL.md's `### Question Defaults`
 # (P10); the old per-question sentences are paired-absence checks.
 #
+# Ticket #1344 (parent #692) moves step 6 into phases/write-config.md, step 7
+# into phases/commit-pr.md and the config schema into
+# references/config-schema.md: the step 6 wiring, PR-body and schema assertions
+# are retargeted to those files (the defaults table row for question 15 stays on
+# SKILL.md), and every retired-claim negative scans SKILL.md plus every
+# phases/*.md and references/*.md.
+#
 # Covered files:
 #   - flow/skills/configure/phases/autonomy-settings.md
 #   - flow/skills/configure/phases/fleet-enrollment.md (Next step block)
-#   - flow/skills/configure/SKILL.md
+#   - flow/skills/configure/SKILL.md (defaults table), phases/write-config.md,
+#     phases/commit-pr.md and references/config-schema.md (#1344)
 #   - flow/skills/configure/codex.md
 #   - docs/autonomous-loop.md (cross-project)
 #   - AGENTS.md (repo root, cross-project)
@@ -647,7 +655,8 @@ else
     assert_absent_paired_ws "${section_body}" "${ALL_REOFFER_COLLAPSED}" "${OLD_Q15_ALL_REOFFER}" "autonomy-settings.md retired per-question Q15 --all re-offer sentence (#1342)"
     # Cross-file pointers name their file.
     assert_contains_ws "${section_body}" 'unlike `### Fleet Dispatch Enrollment` in `phases/fleet-enrollment.md`' "autonomy-settings.md intro names the file holding Fleet Dispatch Enrollment"
-    assert_contains_ws "${section_body}" 'step 6 in `SKILL.md`' "autonomy-settings.md intro names SKILL.md as the home of the step 6 write"
+    assert_contains_ws "${section_body}" 'step 6 in `phases/write-config.md`' "autonomy-settings.md intro names phases/write-config.md as the home of the step 6 write (#1344)"
+    assert_absent_paired_ws "${section_body}" 'step 6 in `phases/write-config.md`' 'step 6 in `SKILL.md`' "autonomy-settings.md retired pointer at SKILL.md for the step 6 write (#1344)"
   fi
 
   # The q15 jq program: extracted from its markers and RUN with jq.
@@ -705,56 +714,108 @@ else
   assert_contains_ws "${fleet_controls_body}" 'after `phases/autonomy-settings.md`' "fleet-enrollment.md Fleet Autonomy Controls says it is asked after autonomy-settings.md"
 fi
 
-# --- skills/configure/SKILL.md ----------------------------------------------
-# Step 6, step 7, the defaults table and the config schema stay inline in the
-# router; their pointers at the moved section name the phase file (#1342).
+# --- skills/configure/SKILL.md, phases/write-config.md, phases/commit-pr.md and
+# --- references/config-schema.md --------------------------------------------
+# Since #1344 the router keeps only the defaults table (question 15's row) and
+# stubs for steps 6 and 7. Step 6 (the overlay wiring) lives in
+# phases/write-config.md, step 7 (the PR body) in phases/commit-pr.md, and the
+# config schema (the illustrative example and every field note) in
+# references/config-schema.md. Their pointers at the moved section still name
+# the phase file (#1342). Every retired-claim negative scans the aggregate of
+# SKILL.md plus every phases/*.md and references/*.md, so a retired sentence
+# cannot reappear in any configure file.
 
 require_doc skill "skills/configure/SKILL.md" || true
+require_doc write_config_phase "skills/configure/phases/write-config.md" || true
+require_doc commit_pr_phase "skills/configure/phases/commit-pr.md" || true
+require_doc config_schema "skills/configure/references/config-schema.md" || true
+
+configure_all="${skill}"
+configure_part_count=0
+shopt -s nullglob
+for _configure_part in "${FLOW_DIR}"/skills/configure/phases/*.md "${FLOW_DIR}"/skills/configure/references/*.md; do
+  if ! _configure_part_content="$(cat "${_configure_part}")"; then
+    fail "skills/configure/**: ${_configure_part#"${FLOW_DIR}/"}: not found/unreadable"
+    continue
+  fi
+  configure_all+=$'\n'"${_configure_part_content}"
+  configure_part_count=$((configure_part_count+1))
+done
+shopt -u nullglob
+[[ "${configure_part_count}" -ge 15 ]] || fail "configure aggregate is vacuous: aggregated ${configure_part_count} phases/references files (expected at least 15)"
+
 if [[ -n "${skill}" ]]; then
-  # The moved questions are gone from the router (paired with a pointer that
-  # proves the router still names the section's new home).
+  # The moved questions are gone from the router and from every other configure
+  # file except their one home (paired with a pointer that proves the router
+  # still names the section's new home).
   assert_absent_paired_ws "${skill}" "${AUTONOMY_FILE_POINTER}" "${Q13_MARKER}" "SKILL.md no longer carries question 13 (moved to phases/autonomy-settings.md)"
   assert_absent_paired_ws "${skill}" "${AUTONOMY_FILE_POINTER}" "${Q14_MARKER}" "SKILL.md no longer carries question 14 (moved to phases/autonomy-settings.md)"
   assert_absent_paired_ws "${skill}" "${AUTONOMY_FILE_POINTER}" "${Q15_MARKER}" "SKILL.md no longer carries question 15 (moved to phases/autonomy-settings.md)"
   assert_absent_paired_ws "${skill}" "${AUTONOMY_FILE_POINTER}" "${SCAFFOLD_BEGIN_MARKER}" "SKILL.md no longer carries the automerge scaffold block"
-
-  # Step 6 wiring — AGENTS.md #824: validated-but-consumed.
-  assert_contains_ws "${skill}" "${STEP6_WIRING_MARKER}" "SKILL.md step 6 overlays planningAnswer/automergeAnswer/refinementAnswer onto merge-sandbox-config.sh stdout"
-  assert_absent_paired_ws "${skill}" "${STEP6_WIRING_MARKER}" "${OLD_STEP6_WIRING_MARKER}" "SKILL.md retired two-answer step 6 wiring sentence (#1274)"
-  assert_contains_ws "${skill}" "${STEP6_REFINEMENT_WIRING}" "SKILL.md step 6 refinementAnswer contributes refinement.autonomy lean only when question 15 (in phases/autonomy-settings.md) was asked and answered lean"
-  assert_absent_paired_ws "${skill}" "${STEP6_REFINEMENT_WIRING}" "${OLD_STEP6_REFINEMENT_WIRING}" "SKILL.md retired positional 'question 15 above' step 6 pointer (#1342)"
-  assert_contains_ws "${skill}" "${STEP6_Q14_PROGRAM_POINTER}" "SKILL.md step 6 names phases/autonomy-settings.md for the q14 removal program"
-  assert_contains_ws "${skill}" "${STEP6_Q15_SWITCH_WIRING}" "SKILL.md step 6 applies a collected question 15 switch with the q15 program"
-  assert_contains_ws "${skill}" "${STEP6_DECLINE_CONTRIBUTES_NO_KEY_MARKER}" "SKILL.md step 6 states a declined answer contributes no key"
-
-  # PR-body "Review required" section.
-  assert_contains "${skill}" "${PR_BODY_REVIEW_HEADING}" "SKILL.md PR body Review required — automerge policy heading"
-  assert_contains "${skill}" "${PR_BODY_REVIEW_LINK}" "SKILL.md PR body links docs/autonomous-loop.md#3-declare-what-a-merge-is-allowed-to-touch"
-  assert_contains_ws "${skill}" "${PR_BODY_REVIEW_CONDITIONAL}" "SKILL.md PR body Review required section is conditional on a scaffold this run"
-
-  # Defaults table and config schema.
+  # The router keeps the defaults table row for question 15.
   assert_contains_ws "${skill}" "${Q15_TABLE_ROW}" "SKILL.md defaults table row for question 15 (ID refinement, key refinement)"
-  assert_contains_ws "${skill}" "${SCHEMA_REFINEMENT_LINE}" "SKILL.md illustrative config schema shows the refinement block"
-  assert_contains_ws "${skill}" "${SCHEMA_NOTE_MARKER}" "SKILL.md illustrative-schema note covers planning and refinement"
-  assert_absent_paired_ws "${skill}" "${SCHEMA_NOTE_MARKER}" "${OLD_SCHEMA_NOTE_MARKER}" "SKILL.md retired planning-only illustrative-schema note (#1274)"
-  assert_contains_ws "${skill}" "${SCHEMA_NOTE_Q15_MARKER}" "SKILL.md illustrative-schema note says question 15 (in phases/autonomy-settings.md) writes refinement.autonomy only on an explicit lean choice"
-  assert_absent_paired_ws "${skill}" "${SCHEMA_NOTE_Q15_MARKER}" "${OLD_SCHEMA_NOTE_Q15_MARKER}" "SKILL.md retired positional illustrative-schema pointer (#1342)"
-  assert_contains_ws "${skill}" "${REFINEMENT_FIELD_INTRO}" "SKILL.md refinement config-field paragraph (optional, asked only when absent)"
-  assert_absent_paired_ws "${skill}" "${REFINEMENT_FIELD_INTRO}" "${OLD_REFINEMENT_FIELD_INTRO}" "SKILL.md retired positional refinement field pointer (#1342)"
-  assert_contains_ws "${skill}" "${REFINEMENT_FIELD_SEMANTICS}" "SKILL.md refinement.autonomy schema bullet: only the exact string lean changes behavior"
-  assert_contains_ws "${skill}" "${REFINEMENT_FIELD_CONSUMER}" "SKILL.md refinement field names its consumer skills/refine/SKILL.md"
-  assert_contains_ws "${skill}" "${REFINEMENT_FIELD_LOCAL_READ}" "SKILL.md refinement field states the local read via project-core and no fleet switch"
-  assert_contains_ws "${skill}" "${REFINEMENT_FIELD_GATE}" "SKILL.md refinement field states lean never grants automerge:ok and keeps the Confirmation Gate"
+fi
 
-  # Stale-claim removal, paired with the router still naming the section's file
-  # (so this can't pass vacuously on an emptied SKILL.md).
-  assert_absent_paired "${skill}" "${AUTONOMY_FILE_POINTER}" "${OLD_PLANNING_NEVER_WRITTEN_CLAIM}" "SKILL.md stale planning never-written-by-a-configure-prompt claim removed"
-  assert_absent_paired "${skill}" "${AUTONOMY_FILE_POINTER}" "${OLD_AUTOMERGE_NEVER_WRITTEN_CLAIM}" "SKILL.md stale automerge never-written-by-a-configure-prompt claim removed"
+# Step 6 wiring (phases/write-config.md) — AGENTS.md #824: validated-but-consumed.
+if [[ -n "${write_config_phase}" ]]; then
+  assert_contains_ws "${write_config_phase}" "${STEP6_WIRING_MARKER}" "write-config.md step 6 overlays planningAnswer/automergeAnswer/refinementAnswer onto merge-sandbox-config.sh stdout"
+  assert_absent_paired_ws "${configure_all}" "${STEP6_WIRING_MARKER}" "${OLD_STEP6_WIRING_MARKER}" "configure markdown retired two-answer step 6 wiring sentence (#1274)"
+  assert_contains_ws "${write_config_phase}" "${STEP6_REFINEMENT_WIRING}" "write-config.md step 6 refinementAnswer contributes refinement.autonomy lean only when question 15 (in phases/autonomy-settings.md) was asked and answered lean"
+  assert_absent_paired_ws "${configure_all}" "${STEP6_REFINEMENT_WIRING}" "${OLD_STEP6_REFINEMENT_WIRING}" "configure markdown retired positional 'question 15 above' step 6 pointer (#1342)"
+  assert_contains_ws "${write_config_phase}" "${STEP6_Q14_PROGRAM_POINTER}" "write-config.md step 6 names phases/autonomy-settings.md for the q14 removal program"
+  assert_contains_ws "${write_config_phase}" "${STEP6_Q15_SWITCH_WIRING}" "write-config.md step 6 applies a collected question 15 switch with the q15 program"
+  assert_contains_ws "${write_config_phase}" "${STEP6_DECLINE_CONTRIBUTES_NO_KEY_MARKER}" "write-config.md step 6 states a declined answer contributes no key"
+else
+  fail "phases/write-config.md: empty or missing, step 6 wiring assertions skipped"
+fi
+
+# PR-body "Review required" section (phases/commit-pr.md).
+if [[ -n "${commit_pr_phase}" ]]; then
+  assert_contains "${commit_pr_phase}" "${PR_BODY_REVIEW_HEADING}" "commit-pr.md PR body Review required — automerge policy heading"
+  assert_contains "${commit_pr_phase}" "${PR_BODY_REVIEW_LINK}" "commit-pr.md PR body links docs/autonomous-loop.md#3-declare-what-a-merge-is-allowed-to-touch"
+  assert_contains_ws "${commit_pr_phase}" "${PR_BODY_REVIEW_CONDITIONAL}" "commit-pr.md PR body Review required section is conditional on a scaffold this run"
+else
+  fail "phases/commit-pr.md: empty or missing, PR body assertions skipped"
+fi
+
+# Config schema (references/config-schema.md): the illustrative example and the
+# planning/refinement field notes.
+if [[ -n "${config_schema}" ]]; then
+  assert_contains_ws "${config_schema}" "${SCHEMA_REFINEMENT_LINE}" "config-schema.md illustrative config schema shows the refinement block"
+  assert_contains_ws "${config_schema}" "${SCHEMA_NOTE_MARKER}" "config-schema.md illustrative-schema note covers planning and refinement"
+  assert_absent_paired_ws "${configure_all}" "${SCHEMA_NOTE_MARKER}" "${OLD_SCHEMA_NOTE_MARKER}" "configure markdown retired planning-only illustrative-schema note (#1274)"
+  assert_contains_ws "${config_schema}" "${SCHEMA_NOTE_Q15_MARKER}" "config-schema.md illustrative-schema note says question 15 (in phases/autonomy-settings.md) writes refinement.autonomy only on an explicit lean choice"
+  assert_absent_paired_ws "${configure_all}" "${SCHEMA_NOTE_Q15_MARKER}" "${OLD_SCHEMA_NOTE_Q15_MARKER}" "configure markdown retired positional illustrative-schema pointer (#1342)"
+  assert_contains_ws "${config_schema}" "${REFINEMENT_FIELD_INTRO}" "config-schema.md refinement config-field paragraph (optional, asked only when absent)"
+  assert_absent_paired_ws "${configure_all}" "${REFINEMENT_FIELD_INTRO}" "${OLD_REFINEMENT_FIELD_INTRO}" "configure markdown retired positional refinement field pointer (#1342)"
+  assert_contains_ws "${config_schema}" "${REFINEMENT_FIELD_SEMANTICS}" "config-schema.md refinement.autonomy schema bullet: only the exact string lean changes behavior"
+  assert_contains_ws "${config_schema}" "${REFINEMENT_FIELD_CONSUMER}" "config-schema.md refinement field names its consumer skills/refine/SKILL.md"
+  assert_contains_ws "${config_schema}" "${REFINEMENT_FIELD_LOCAL_READ}" "config-schema.md refinement field states the local read via project-core and no fleet switch"
+  assert_contains_ws "${config_schema}" "${REFINEMENT_FIELD_GATE}" "config-schema.md refinement field states lean never grants automerge:ok and keeps the Confirmation Gate"
+
+  # Stale-claim removal, paired with the schema file existing and the router
+  # still naming the section's file (so this can't pass vacuously on an
+  # emptied configure skill).
+  assert_absent_paired "${configure_all}" "${AUTONOMY_FILE_POINTER}" "${OLD_PLANNING_NEVER_WRITTEN_CLAIM}" "configure markdown stale planning never-written-by-a-configure-prompt claim removed"
+  assert_absent_paired "${configure_all}" "${AUTONOMY_FILE_POINTER}" "${OLD_AUTOMERGE_NEVER_WRITTEN_CLAIM}" "configure markdown stale automerge never-written-by-a-configure-prompt claim removed"
 
   # security/babysitInterval/maintenance stay question-less and unedited.
-  assert_contains "${skill}" "${SECURITY_NEVER_WRITTEN_CLAIM}" "SKILL.md security never-written-by-a-configure-prompt claim untouched"
-  assert_contains "${skill}" "${MAINTENANCE_NEVER_WRITTEN_CLAIM}" "SKILL.md maintenance never-written-by-a-configure-prompt claim untouched"
-  assert_contains "${skill}" "${BABYSIT_NO_QUESTION_CLAIM}" "SKILL.md babysitInterval no-configure-question claim untouched"
+  assert_contains "${config_schema}" "${SECURITY_NEVER_WRITTEN_CLAIM}" "config-schema.md security never-written-by-a-configure-prompt claim untouched"
+  assert_contains "${config_schema}" "${MAINTENANCE_NEVER_WRITTEN_CLAIM}" "config-schema.md maintenance never-written-by-a-configure-prompt claim untouched"
+  assert_contains "${config_schema}" "${BABYSIT_NO_QUESTION_CLAIM}" "config-schema.md babysitInterval no-configure-question claim untouched"
+else
+  fail "references/config-schema.md: empty or missing, schema assertions skipped"
+fi
+
+# Pointers in autonomy-settings.md that crossed files when steps 6 and 7 and the
+# schema moved (#1344): they name the file that now holds each one.
+if [[ -n "${autonomy_phase}" ]]; then
+  assert_contains_ws "${autonomy_phase}" 'that step 6 in `phases/write-config.md` applies' "autonomy-settings.md opening line names phases/write-config.md for the step 6 programs"
+  assert_contains_ws "${autonomy_phase}" '(step 7 in `phases/commit-pr.md`)' "autonomy-settings.md scaffold review flag names phases/commit-pr.md for step 7"
+  assert_contains_ws "${autonomy_phase}" 'see `security.sensitivePaths` in `references/config-schema.md`' "autonomy-settings.md scaffold sensitivePaths pointer names references/config-schema.md"
+  assert_absent_paired_ws "${autonomy_phase}" '(step 7 in `phases/commit-pr.md`)' 'step 7 in `SKILL.md`' "autonomy-settings.md retired pointer at SKILL.md for step 7 (#1344)"
+  assert_absent_paired_ws "${autonomy_phase}" '(step 7 in `phases/commit-pr.md`)' 'step 6 in `SKILL.md`' "autonomy-settings.md retired pointer at SKILL.md for step 6 (#1344)"
+  assert_absent_paired_ws "${autonomy_phase}" '(step 7 in `phases/commit-pr.md`)' '`security.sensitivePaths` elsewhere in `SKILL.md`' "autonomy-settings.md retired 'elsewhere in SKILL.md' sensitivePaths pointer (#1344)"
 fi
 
 # --- skills/configure/codex.md ----------------------------------------------

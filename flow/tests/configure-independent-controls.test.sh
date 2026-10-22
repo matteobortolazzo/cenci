@@ -6,6 +6,9 @@ FLOW="$(cd "${HERE}/.." && pwd)" || exit 2
 SKILL="${FLOW}/skills/configure/SKILL.md"
 FLEET_PHASE="${FLOW}/skills/configure/phases/fleet-enrollment.md"
 AUTONOMY_PHASE="${FLOW}/skills/configure/phases/autonomy-settings.md"
+# Step 6 (the overlay wiring, the overlay order and the ledger program) lives in
+# phases/write-config.md since #1344; SKILL.md keeps a stub and the allowed-tools grants.
+WRITE_CONFIG_PHASE="${FLOW}/skills/configure/phases/write-config.md"
 CODEX="${FLOW}/skills/configure/codex.md"
 RESOLVER="${FLOW}/skills/configure/scripts/resolve-delta.sh"
 SCRATCH="$(mktemp -d)" || exit 2
@@ -22,12 +25,12 @@ extract() {
 # The controls are wired across the router and the two conditionally read
 # phase files (#1342); every file must exist and be non-empty so a missing one
 # cannot satisfy a grep vacuously.
-for file in "$SKILL" "$FLEET_PHASE" "$AUTONOMY_PHASE"; do
+for file in "$SKILL" "$FLEET_PHASE" "$AUTONOMY_PHASE" "$WRITE_CONFIG_PHASE"; do
   [[ -s "$file" ]] || fail "$file is missing or empty"
 done
-# step6_region <file> -- the router's "Independent refinement leaves wiring"
-# paragraph, bounded by the next bold lead-in; it is the only router text that
-# wires the leaf answers into the step 6 write.
+# step6_region <file> -- step 6's "Independent refinement leaves wiring"
+# paragraph, bounded by the next bold lead-in; it is the only text that wires
+# the leaf answers into the step 6 write.
 step6_region() {
   awk '
     index($0, "**Independent refinement leaves wiring.**") { inside=1 }
@@ -37,8 +40,8 @@ step6_region() {
   ' "$1"
 }
 STEP6="${SCRATCH}/step6.md"
-step6_region "$SKILL" > "$STEP6" || fail 'SKILL.md step 6 "Independent refinement leaves wiring" paragraph is missing'
-[[ -s "$STEP6" ]] || fail 'SKILL.md step 6 "Independent refinement leaves wiring" paragraph is empty'
+step6_region "$WRITE_CONFIG_PHASE" > "$STEP6" || fail 'write-config.md step 6 "Independent refinement leaves wiring" paragraph is missing'
+[[ -s "$STEP6" ]] || fail 'write-config.md step 6 "Independent refinement leaves wiring" paragraph is empty'
 assert_json() { jq -e "$2" <<<"$1" >/dev/null || fail "$3"; }
 legacy='{"refinement":{"autonomy":"lean","note":"keep"},"planning":{"autonomy":"interactive"},"automerge":{"maxChangedFiles":10,"maxDiffLines":400},"projects":[{"path":"api","automerge":{"maxChangedFiles":5,"maxDiffLines":200}}],"configureOffered":["refinement","planning","automerge"]}'
 printf '%s\n' "$legacy" > "${SCRATCH}/config.json"
@@ -62,7 +65,7 @@ out="$(jq -c --arg automerge off "$grant" <<<"$out")"
 assert_json "$out" '.refinement.automerge == "off" and .refinement.confirmBeforeApply == false and .automerge.maxDiffLines == 400 and .projects[0].automerge == {maxChangedFiles:5,maxDiffLines:200}' 'disabling grants preserves confirmation and unrelated top-level/per-project risk policies'
 out="$(jq -c --argjson confirmBeforeApply true "$confirm" <<<"$out")"
 assert_json "$out" '.refinement.confirmBeforeApply == true and .refinement.automerge == "off"' 'opt-in confirmation writes true independently'
-ledger="$(extract "$SKILL" offered-ledger)" || fail 'missing ledger overlay'
+ledger="$(extract "$WRITE_CONFIG_PHASE" offered-ledger)" || fail 'missing ledger overlay'
 out="$(jq -c --argjson offered '["refinement.confirmBeforeApply","refinement.automerge","dispatch.planRefined","automerge.enabled","planning.attended"]' "$ledger" <<<"$out")"
 printf '%s\n' "$out" > "${SCRATCH}/config.json"
 delta="$(bash "$RESOLVER" "${SCRATCH}/config.json")"
@@ -70,7 +73,7 @@ assert_json "$delta" '.ask | all(. != "dispatch.planRefined" and . != "automerge
 delta="$(bash "$RESOLVER" "${SCRATCH}/config.json" --all)"
 assert_json "$delta" '.ask | index("refinement.confirmBeforeApply") != null and index("refinement.automerge") != null and index("dispatch.planRefined") != null and index("automerge.enabled") != null and index("planning.attended") != null' '--all reopens every independent control'
 for required in 'confirmBeforeApplyAnswer' 'refinementAutomergeAnswer' 'cenci:configure-confirm-before-apply' 'cenci:configure-refinement-automerge' '--argjson confirmBeforeApply' '--arg automerge' 'dispatch.planRefined' 'automerge.enabled' 'planning.attended'; do
-  grep -Fq -- "$required" "$STEP6" || fail "SKILL.md step 6 'Independent refinement leaves wiring' must wire $required"
+  grep -Fq -- "$required" "$STEP6" || fail "write-config.md step 6 'Independent refinement leaves wiring' must wire $required"
 done
 for required in 'confirmBeforeApplyAnswer' 'refinementAutomergeAnswer'; do
   grep -Fq -- "$required" "$AUTONOMY_PHASE" || fail "$AUTONOMY_PHASE must store $required"
@@ -89,7 +92,7 @@ for required in 'refinement.confirmBeforeApply' 'refinement.automerge'; do
   grep -Fq -- "$required" "$AUTONOMY_PHASE" || fail "$AUTONOMY_PHASE must name $required"
 done
 order='then the question 13/14/15 overlays (`cenci:configure-q13-switch`, `cenci:configure-q14-remove`, `cenci:configure-q15-switch`), then the independent leaf overlays (`cenci:configure-confirm-before-apply`, `cenci:configure-refinement-automerge`), then the `configureOffered` ledger (`cenci:configure-offered-ledger`)'
-grep -Fq "$order" "$SKILL" || fail 'canonical write order must apply leaf overlays before ledger'
+grep -Fq "$order" "$WRITE_CONFIG_PHASE" || fail 'canonical write order must apply leaf overlays before ledger'
 grep -Fq 'when this leaf is absent and, on a delta run, its ID is in `delta.ask`' "$AUTONOMY_PHASE" || fail 'first and full runs must offer absent leaves without undefined delta'
 for grant in 'Bash(cenci dispatch plan-refined on)' 'Bash(cenci dispatch plan-refined off)' 'Bash(cenci dispatch plan-refined status)' 'Bash(cenci automerge on)' 'Bash(cenci automerge off)' 'Bash(cenci automerge status)' 'Bash(cenci planning attended on)' 'Bash(cenci planning attended off)' 'Bash(cenci planning attended status --json)'; do
   grep -Fq "$grant" "$SKILL" || fail "host CLI commands need their scoped grant: $grant"

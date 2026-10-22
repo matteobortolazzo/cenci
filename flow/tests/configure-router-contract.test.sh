@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Contract test for tickets #1341, #1342 and #1343 (parent #692) --
+# Contract test for tickets #1341, #1342, #1343 and #1344 (parent #692) --
 # flow/skills/configure/SKILL.md becomes a router: the detection,
 # delta-resolution and questions 1-9c prose moves verbatim into four
 # phases/*.md files, the legacy-migration prose moves into the conditionally
@@ -9,8 +9,13 @@
 # plus references/lazyboards-example.md (#1342), and generation steps 0 to
 # 5c-bis move into phases/guidance-settings.md, steps 5d and 5e into
 # phases/ci-dockerfile.md, and the base deny list into
-# references/settings-template.md (#1343). The skill must behave exactly as
-# before.
+# references/settings-template.md (#1343), and finally step 6 into
+# phases/write-config.md (with the `sandbox` merge section), the config example
+# and field schema into references/config-schema.md, step 7 and the final
+# report into phases/commit-pr.md, and the three board migration notes into
+# references/migrations.md; `### Board lifecycle labels` shrinks to a pointer at
+# the plugin's docs/board-labels.md and the router gains `### Run Order`
+# (#1344). The skill must behave exactly as before.
 #
 # Each case is named after the acceptance criterion or plan decision it proves.
 # What this suite pins (the load-bearing wording of each moved block is pinned
@@ -49,15 +54,50 @@
 #   * case_P30_step1_verbatim    (#1343) step 1 moved byte for byte
 #   * case_P6_dockerfile_verbatim  (#1343) step 5e's Merge-safe regeneration
 #                                 bullets moved byte for byte
+#   * case_P1_router_size         (#1344) SKILL.md is at most 300 lines and keeps
+#                                 no step 6 or step 7 body inline
+#   * case_P2_every_file_named_with_condition  (#1344) every phases/*.md and
+#                                 references/*.md file on disk has a Step Map row
+#                                 whose Condition cell is non-empty
+#   * case_P3_run_order           (#1344) `### Run Order`: questions 1 to 20 in
+#                                 order, then generation steps 0 to 7; a first run
+#                                 and --all select every question section, a delta
+#                                 run asks only delta.ask; resolver runs show it
+#   * case_P23_empty_delta_runs_generation  (#1344) an empty delta.ask asks nothing
+#                                 and every generation step is still selected
+#   * case_P7_step6_verbatim      (#1344) step 6's overlay order and validation,
+#                                 the ledger program and the fallen-back paragraph
+#                                 moved byte for byte into phases/write-config.md
+#   * case_step6_step7_markers    (#1344) the step 6 and step 7 stubs keep the
+#                                 moved bold markers
+#   * case_sandbox_merge_in_write_config  (#1344) the sandbox merge section moved
+#                                 into phases/write-config.md
+#   * case_P8_step7_recovery_verbatim  (#1344) step 7's recovery branches moved
+#                                 byte for byte into phases/commit-pr.md
+#   * case_P9_board_labels_pointer  (#1344) `### Board lifecycle labels` is a
+#                                 pointer; the orthogonal-marker restatements are
+#                                 gone from every configure file
+#   * case_P11_schema_only_in_reference  (#1344) no fenced JSON or YAML in
+#                                 SKILL.md; the example and field schema occur once,
+#                                 in references/config-schema.md
+#   * case_P24_board_migration_notes  (#1344) the three board migration notes live
+#                                 in references/migrations.md `## Board migration
+#                                 notes`, read when re-configuring an existing
+#                                 project
 #
 # Pinned constants, never derived from the doc under test. Every absence check
 # is paired with an existence marker (flow/docs/shell-scripting-gotchas.md) so
-# it cannot pass vacuously; extractors are pure (no fail() inside $(...)).
+# it cannot pass vacuously; extractors are pure (no fail() inside $(...)). The
+# byte pins of #1344 (P7, P8, P24) were taken from the pre-move SKILL.md
+# (`git show main:flow/skills/configure/SKILL.md`), never from the file under
+# test. Negative (retired-pattern) scans cover SKILL.md plus every phases/*.md
+# and references/*.md (configure_all) with a minimum file count.
 #
 # Covered files:
 #   - flow/skills/configure/SKILL.md, phases/*.md, references/migrations.md,
-#     references/lazyboards-example.md, references/settings-template.md
-#   - flow/README.md
+#     references/lazyboards-example.md, references/settings-template.md,
+#     phases/write-config.md, phases/commit-pr.md, references/config-schema.md
+#   - flow/README.md, flow/docs/board-labels.md (the trivial-ticket sentence)
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || { echo "configure-router-contract.test.sh: failed to resolve script directory." >&2; exit 2; }
@@ -99,14 +139,35 @@ assert_contains() {
 assert_contains_ws() {
   local content="$1" pattern="$2" label="$3" norm
   [[ -n "${pattern}" ]] || { fail "${label}: empty required pattern (test bug)"; return; }
-  norm="$(normalize_ws "${content}")"
+  set_norm "${content}"
+  norm="${NORM}"
   [[ "${norm}" == *"${pattern}"* ]] || fail "${label}: required text missing (whitespace-normalized): [${pattern}]"
+}
+
+# set_norm <content> -- sets NORM to the whitespace-normalized <content>. The two
+# large contents the #1344 negatives scan over and over (the router and the
+# aggregate of every configure markdown file) are normalized once, after loading,
+# and reused; anything else is normalized on demand. Not for use inside $(...)
+# (NORM would be lost), so only the assert_* helpers call it.
+NORM=""
+SKILL_WS=""
+CONFIGURE_ALL_WS=""
+set_norm() {
+  local c="$1"
+  if [[ -n "${CONFIGURE_ALL_WS}" && "${c}" == "${configure_all}" ]]; then
+    NORM="${CONFIGURE_ALL_WS}"
+  elif [[ -n "${SKILL_WS}" && "${c}" == "${skill}" ]]; then
+    NORM="${SKILL_WS}"
+  else
+    NORM="$(normalize_ws "${c}")"
+  fi
 }
 
 # assert_absent_paired_ws <content> <existence-marker> <forbidden> <label>
 assert_absent_paired_ws() {
   local content="$1" marker="$2" forbidden="$3" label="$4" norm
-  norm="$(normalize_ws "${content}")"
+  set_norm "${content}"
+  norm="${NORM}"
   if [[ "${norm}" != *"${marker}"* ]]; then
     fail "${label}: cannot verify absence -- existence marker missing (whitespace-normalized): [${marker}]"
     return
@@ -182,14 +243,30 @@ MIGRATIONS_FILE='references/migrations.md'
 GUIDANCE_FILE='phases/guidance-settings.md'
 SETTINGS_TEMPLATE_FILE='references/settings-template.md'
 CI_FILE='phases/ci-dockerfile.md'
+# #1344 (4/4): step 6 with the sandbox merge section, the config example and
+# field schema, and step 7 with the final report.
+WRITE_CONFIG_FILE='phases/write-config.md'
+SCHEMA_FILE='references/config-schema.md'
+COMMIT_PR_FILE='phases/commit-pr.md'
 
 STEP_MAP_HEADING='### Step Map'
+RUN_ORDER_HEADING='### Run Order'
 QUESTION_DEFAULTS_HEADING='### Question Defaults'
+BOARD_LABELS_HEADING='### Board lifecycle labels'
 
 INTERACTION_RULE_EXTENSION='This also governs the `phases/*.md` and `references/*.md` files this skill reads.'
 EVERY_RUN='Every run'
-MIGRATIONS_NEVER_READ='A `.cenci/config.json`-only run never reads it'
 LEGACY_CONDITION='`.claude/config.json` exists'
+# #1344: references/migrations.md holds two sections, each with its own read
+# condition. The Step Map row names both; the file-level "never reads it"
+# sentence became the section-level pin below (tightens, never loosens).
+MIGRATIONS_LEGACY_HEADING='## Legacy config migration'
+MIGRATIONS_BOARD_HEADING='## Board migration notes'
+MIGRATIONS_ROW_PARTS=("${LEGACY_CONDITION}" '`## Legacy config migration`' '`## Board migration notes`' 're-configuring an existing project')
+MIGRATIONS_ROW_NEVER_READ='never reads `## Legacy config migration`'
+MIGRATIONS_LEGACY_NEVER_READ='A `.cenci/config.json`-only run never reads this section.'
+MIGRATIONS_BOARD_CONDITION='Read this section only when re-configuring an existing project (`existingConfig` or `migrationBase` is present)'
+FAIL_CLOSED_READ_RULE='If a file marked `Every run` cannot be read, stop and report — never reconstruct step 6 (`phases/write-config.md`) or step 7 (`phases/commit-pr.md`) from memory.'
 
 MANUAL_FALLBACK='**Manual fallback** (only if Scripted Detection failed)'
 SCRIPTED_FALLBACK_SENTENCE='the **manual fallback** procedure kept in each consuming section'
@@ -277,17 +354,26 @@ MOVED_HEADINGS=(
 )
 
 # Markers that stay inline in SKILL.md: Auth Verification (always run) and the
-# three stubs that defer to phases/guidance-settings.md (steps 0 to 5c-bis),
-# phases/ci-dockerfile.md (steps 5d and 5e) and phases/lazyboards.md (step 5f).
+# five stubs that defer to phases/guidance-settings.md (steps 0 to 5c-bis),
+# phases/ci-dockerfile.md (steps 5d and 5e), phases/lazyboards.md (step 5f),
+# phases/write-config.md (step 6) and phases/commit-pr.md (step 7, #1344).
 # Step 5e itself moved out in #1343, so its marker is no longer inline.
 STUB_5F='run step 5f in `phases/lazyboards.md` when that file was read this run'
 STUB_GUIDANCE='run steps 0 to 5c-bis in `phases/guidance-settings.md`'
 STUB_CI='run steps 5d and 5e in `phases/ci-dockerfile.md`; each step decides internally whether it runs'
+# #1344: steps 6 and 7 are stubs too. Each keeps the moved bold marker (as the 5f
+# stub does) so the existence anchor in configure-fragment-markers.test.sh holds.
+STUB_6='6. **Write `.cenci/config.json`**: run step 6 in `phases/write-config.md`'
+STUB_7='7. **Commit, Push, and Open PR**: run step 7 in `phases/commit-pr.md`'
+STEP6_MARKER='6. **Write `.cenci/config.json`**'
+STEP7_MARKER='7. **Commit, Push, and Open PR**'
 INLINE_MARKERS=(
   '### Auth Verification'
   "${STUB_GUIDANCE}"
   "${STUB_CI}"
   "${STUB_5F}"
+  "${STUB_6}"
+  "${STUB_7}"
 )
 
 # Moved step markers (#1343): "<file>|<exact marker>". Each must occur exactly
@@ -317,14 +403,22 @@ AUTONOMY_ROW_PARTS=('`planning`' '`automerge`' '`refinement`' '`refinement.confi
 OLD_STEP_MAP_EVERY_PHASE='Every phase file is read in full on every run'
 OLD_STEP_MAP_INLINE_TAIL='Question 10 onward and generation steps 0 to 7 stay inline in this file.'
 # #1343: generation steps 0 to 5f no longer all stay inline. The intro sentence
-# that claimed so is retired, and the new one names where each step range runs
-# and that only steps 6 and 7 stay inline.
+# that claimed so is retired, and the new one names where each step range runs.
+# #1344: steps 6 and 7 moved too, so "only steps 6 and 7 stay inline" is retired
+# and the intro names the file each of them runs from.
 OLD_STEP_MAP_GENERATION_INLINE='Generation steps 0 to 7 stay inline in this file'
-STEP_MAP_INTRO_PARTS=('steps 0 to 5c-bis' 'steps 5d and 5e' 'step 5f' 'steps 6 and 7' '`phases/guidance-settings.md`' '`phases/ci-dockerfile.md`' '`phases/lazyboards.md`')
+OLD_STEP_MAP_STEPS_6_7_INLINE='only steps 6 and 7 stay inline in this file'
+STEP_MAP_INTRO_PARTS=('steps 0 to 5c-bis' 'steps 5d and 5e' 'step 5f' 'step 6' 'step 7' '`phases/guidance-settings.md`' '`phases/ci-dockerfile.md`' '`phases/lazyboards.md`' '`phases/write-config.md`' '`phases/commit-pr.md`')
 # The three generation rows are read on every run; each names its own position.
 GUIDANCE_ROW_PARTS=('Auth Verification' 'steps 0 to 5c-bis')
 SETTINGS_TEMPLATE_ROW_PARTS=('step 4' 'deny')
 CI_ROW_PARTS=('steps 5d and 5e' 'after `phases/guidance-settings.md`')
+# #1344: the last three rows are read on every run too. Step 6 follows the Dockerfile
+# step, the schema is read from step 6 (as the settings template is read from step 4),
+# and step 7 follows step 6.
+WRITE_CONFIG_ROW_PARTS=('step 6' 'after `phases/ci-dockerfile.md`')
+SCHEMA_ROW_PARTS=('step 6' '`phases/write-config.md`')
+COMMIT_PR_ROW_PARTS=('step 7' 'final report' 'after `phases/write-config.md`')
 STALE_EVERY_INVOCATION='on every configure invocation'
 
 # Fleet guard (P22), pinned from the pre-move text.
@@ -349,12 +443,27 @@ README_CONFIGURE_ROW_PREFIX='| `configure` | codex.md'
 # Cross-file pointers (#1343): a positional "above"/"below" or a bare step number
 # that now crosses files names the file ("step N in `<file>`", or "`### X` in
 # `<file>`"). Each OLD_* form is the retired positional pointer.
-STEP3C_BOARD_POINTER='`### Board lifecycle labels` in `SKILL.md`'
+# #1344: `### Board lifecycle labels` shrank to a pointer, so step 3c's reconciler
+# pointer now names the reconciler bullet in the plugin's docs/board-labels.md.
+STEP3C_BOARD_POINTER='see the reconciler bullet in the plugin'"'"'s `docs/board-labels.md`'
 OLD_STEP3C_BOARD_POINTER='under Board lifecycle labels below'
+OLD_STEP3C_SKILL_POINTER='`### Board lifecycle labels` in `SKILL.md`'
+# Step 6's sandbox merge section (now in phases/write-config.md) still names the
+# file that holds each step it cites.
 STEP6_5E_POINTER='(see step 5e in `phases/ci-dockerfile.md`)'
 OLD_STEP6_5E_POINTER='(see step 5e above)'
 STEP6_STEP4_POINTER='Step 4 in `phases/guidance-settings.md` always writes'
 OLD_STEP6_STEP4_POINTER='Step 4 above'
+# #1344: pointers at step 6, step 7 and the schema that now cross files name the
+# file. The moved phase/reference text and the router's own early prose both
+# carry them.
+AUTONOMY_STEP6_POINTER='step 6 in `phases/write-config.md`'
+OLD_AUTONOMY_STEP6_POINTER='step 6 in `SKILL.md`'
+RUNTIME_DIND_POINTER='see the `sandbox.dind` schema note in `phases/write-config.md`'
+OLD_RUNTIME_DIND_POINTER='see the `sandbox.dind` schema note in `SKILL.md`'
+RUNTIME_AZURE_POINTER='see the `sandbox.azure` schema note in `phases/write-config.md`'
+OLD_RUNTIME_AZURE_POINTER='see the `sandbox.azure` schema note in `SKILL.md`'
+SCHEMA_RESOLVER_POINTER='The configure flow calls this resolver itself — see `### Delta Resolution` in `phases/detection-and-delta.md`.'
 DETECT_STEP1_POINTER='step 1 in `phases/guidance-settings.md`'
 OLD_DETECT_STEP1_POINTER='diff-approval gate in step 1 stays'
 DETECT_5E_POINTER='step 5e in `phases/ci-dockerfile.md`'
@@ -419,6 +528,183 @@ IFS= read -r -d '' P6_MERGE_SAFE_BLOCK <<'PINNED_BLOCK'
 PINNED_BLOCK
 P6_MERGE_SAFE_BLOCK="${P6_MERGE_SAFE_BLOCK%$'\n'}"
 
+# --- #1344 byte pins ----------------------------------------------------------
+# Each block below is pinned byte for byte from the pre-move SKILL.md
+# (`git show main:flow/skills/configure/SKILL.md`), never from the file under
+# test, so a changed byte in a moved block fails the suite. Mirrors the P30 and
+# P6 pins above.
+
+# P7 (#1344): step 6's overlay order and validation (old line 173). The leading
+# three spaces are part of the pin: the block moved with its list indentation.
+IFS= read -r -d '' P7_OVERLAY_ORDER_BLOCK <<'PINNED_BLOCK'
+   **Overlay order and validation.** The overlay order is `merge-sandbox-config.sh` stdout, then the question 13/14/15 overlays (`cenci:configure-q13-switch`, `cenci:configure-q14-remove`, `cenci:configure-q15-switch`), then the independent leaf overlays (`cenci:configure-confirm-before-apply`, `cenci:configure-refinement-automerge`), then the `configureOffered` ledger (`cenci:configure-offered-ledger`). Run each overlay with `jq` over the candidate config as its own Bash call (write the candidate to `${TMPDIR:-/tmp}/cenci/cenci-configure-<slug>-config.json` as the scratch input and remove it afterwards under the existing `rm -f` grant — that `rm -f` also runs when an overlay fails validation, so no scratch file is left behind). An overlay result is valid only when the `jq` call exits 0 and the result passes `jq -e 'type == "object"'`: an empty output passes `jq empty`, so `jq empty` alone never gates a write. Apply that check after each overlay and before every write — the same fail-closed discipline as the adjacent `sandbox` merge above: if an overlaid result fails it, do not write it, report the failure, and fall back to the content before that overlay (the previous step's output as-is). A fallback that drops the ledger overlay still writes, but tell the user the ledger could not be stamped, so the questions offered this run will be asked again.
+PINNED_BLOCK
+P7_OVERLAY_ORDER_BLOCK="${P7_OVERLAY_ORDER_BLOCK%$'\n'}"
+
+# P7 (#1344): the fallen-back question 13/14/15 paragraph (old line 175), which
+# removes the fallen-back ID from the offered set before the ledger overlay runs.
+IFS= read -r -d '' P7_FALLEN_BACK_BLOCK <<'PINNED_BLOCK'
+   **A fallen-back question 13/14/15 overlay was not applied.** When a question 13, 14 or 15 overlay fails the check above, the collected answer is not in the written config. Tell the user which question's answer was not applied, and either that it will be asked again on the next delta run (only when its key is absent and its ID is not already in the existing ledger) or, otherwise (an `--all` change, an ID already in the existing ledger, or a present key), to re-run `/cenci:configure --all` to apply it; remove that question's ID (`planning` for question 13, `automerge` for question 14, `refinement` for question 15) from the offered set before the ledger overlay runs, so the ledger never records an offer whose answer was dropped; and key step 7 to the overlay actually applied — a fallen-back "Remove the block(s)" never emits the `## Review required — automerge policy removed` section and is never reported as removed, and a fallen-back scaffold never emits `## Review required — automerge policy`.
+PINNED_BLOCK
+P7_FALLEN_BACK_BLOCK="${P7_FALLEN_BACK_BLOCK%$'\n'}"
+
+# P7 (#1344): the ledger stamp paragraph and its marker-bounded program (old
+# lines 181-191), which consumers extract between the markers.
+IFS= read -r -d '' P7_LEDGER_BLOCK <<'PINNED_BLOCK'
+Always stamp `configureOffered` on every write as the sorted, de-duplicated union of the existing ledger and the question IDs offered this run; `--all` never removes ledger entries. Only questions actually put to the user this run are recorded as offered (the IDs from the `ID` column of the defaults table): a carried question, a conditional question whose detection condition failed, and question 12 are never recorded, and entries are never pruned. String entries of an existing `configureOffered` array are kept and non-strings are dropped. An empty result is still written as `[]`. Apply this fixed program last in the overlay order, with `--argjson offered '[<ids>]'` (the JSON array of offered IDs, `[]` when no question was asked — minus any ID removed above because its overlay fell back, or because question 11's enroll failed), then validate it like every other overlay (exit 0 and `jq -e 'type == "object"'`):
+
+<!-- cenci:configure-offered-ledger:begin -->
+```jq
+.configureOffered = (
+  ((.configureOffered // []) | if type == "array" then map(select(type == "string")) else [] end)
+  + ($offered | map(select(type == "string")))
+  | unique
+)
+```
+<!-- cenci:configure-offered-ledger:end -->
+PINNED_BLOCK
+P7_LEDGER_BLOCK="${P7_LEDGER_BLOCK%$'\n'}"
+
+# P8 (#1344): step 7's recovery branches, each pinned from the pre-move text
+# (old lines 595, 601, 642 and 644-647).
+IFS= read -r -d '' P8_NOTHING_STAGED_BLOCK <<'PINNED_BLOCK'
+   If nothing is staged (a re-run that changed nothing), skip Commit/Push/PR entirely and report "No configuration changes — nothing to commit" instead of opening an empty PR. A stamp-only diff still opens a PR; "No configuration changes — nothing to commit" applies only when nothing is staged. For example, a run that offered a new question and recorded the decline in `configureOffered` changes `.cenci/config.json` and so is not empty.
+PINNED_BLOCK
+P8_NOTHING_STAGED_BLOCK="${P8_NOTHING_STAGED_BLOCK%$'\n'}"
+
+IFS= read -r -d '' P8_PUSH_FAILURE_BLOCK <<'PINNED_BLOCK'
+   If push fails due to sandbox/network/auth, show the exact command and use `AskUserQuestion` ("Pushed, continue" / "Abort") to wait for the user to push manually before continuing.
+PINNED_BLOCK
+P8_PUSH_FAILURE_BLOCK="${P8_PUSH_FAILURE_BLOCK%$'\n'}"
+
+IFS= read -r -d '' P8_PR_RECOVERY_BLOCK <<'PINNED_BLOCK'
+   If `gh pr create` fails because a PR for this branch already exists (re-entry after a prior turn already created it), recover the URL with `gh pr view chore/configure-<slug> --json url -q .url` and continue. For any other failure (auth, network, validation), show the exact error and use `AskUserQuestion` ("Created, continue" / "Abort") to let the user resolve it before continuing.
+PINNED_BLOCK
+P8_PR_RECOVERY_BLOCK="${P8_PR_RECOVERY_BLOCK%$'\n'}"
+
+IFS= read -r -d '' P8_TEMP_REMOVAL_BLOCK <<'PINNED_BLOCK'
+   Delete the PR-body temp file after a successful `gh pr create` (or a successful recovery via `gh pr view`):
+   ```bash
+   rm -f ${TMPDIR:-/tmp}/cenci/cenci-configure-<slug>-pr-body.md
+   ```
+PINNED_BLOCK
+P8_TEMP_REMOVAL_BLOCK="${P8_TEMP_REMOVAL_BLOCK%$'\n'}"
+
+# P24 (#1344): the board migration notes for a project that predates `In Review`,
+# `Planned` or the reconciler-managed labels (old lines 677-682, 684-690 and
+# 692-698). The first two move byte for byte. The third cites step 3c, which lives
+# in another file now, so its pointer may name the file: it is pinned as the
+# two segments around that pointer and the file name is pinned separately.
+IFS= read -r -d '' P24_IN_REVIEW_NOTE <<'PINNED_BLOCK'
+**Migration note for existing boards** (state this when re-configuring a project that predates
+`In Review`): add an **`In Review`** column/label. Previously, tickets dropped straight into
+`Implemented` the moment the PR was opened; now PR-open lands them in `In Review`, and
+`/cenci:babysit` promotes them to `Implemented` when the PR actually merges. Existing tickets
+that carry `Implemented` from before this change but whose PRs are still open can be relabeled to
+`In Review` by hand; new work follows the split automatically.
+PINNED_BLOCK
+P24_IN_REVIEW_NOTE="${P24_IN_REVIEW_NOTE%$'\n'}"
+
+IFS= read -r -d '' P24_PLANNED_NOTE <<'PINNED_BLOCK'
+**Migration note for existing boards** (state this when re-configuring a project that predates
+`Planned`): add a **`Planned`** column/label between `Refined` and `Working`. Previously, a
+planning session applied `Working` at pipeline start and then stopped once the plan was saved —
+so the board showed `Working` on a ticket nobody was actively working. Now a planning session
+lands the ticket on `Planned` ("a plan exists on disk, ready to pick up"); the swap to
+`Working` happens when the plan-file implementation run begins. New work follows this
+automatically.
+PINNED_BLOCK
+P24_PLANNED_NOTE="${P24_PLANNED_NOTE%$'\n'}"
+
+P24_RECONCILER_NOTE_HEAD='**Migration note for existing boards** (state this when re-configuring a project that predates the reconciler-managed labels): re-running `/cenci:configure` on an existing project creates the `dispatch-failed`, `plan-invalid`, and `reconcile-stuck` labels retroactively via'
+P24_RECONCILER_NOTE_TAIL='missing-only `gh label create` loop. No other action is needed — the reconciler already self-heals these labels itself via `EnsureLabels`, so a board that skips this step is not blocked; re-running configure just creates them proactively instead of waiting for the reconciler to hit the corresponding error state first.'
+P24_RECONCILER_NOTE_FILE='`phases/guidance-settings.md`'
+STUB_BOARD_NOTES='on a re-configuration run state the matching board migration note (see the migrations row of `### Step Map`)'
+BOARD_NOTE_LEAD='**Migration note for existing boards**'
+
+# P9 (#1344): `### Board lifecycle labels` is a pointer. docs/board-labels.md is
+# the only lifecycle-label table; the orthogonal-marker restatements are gone from
+# every configure file, and the trivial-ticket fact moved into that doc.
+BOARD_LABELS_POINTER='`docs/board-labels.md`'
+BOARD_LABELS_SUMMARY='Document the label set in the completion summary so the user can mirror it as columns on their board'
+BOARD_LABELS_RETIRED=(
+  '`Followup` is orthogonal to the linear lifecycle above'
+  '`Browser`, `ui:visual-check`, and `automerge:ok` are likewise refine-applied orthogonal markers'
+  '**Reconciler-managed labels**: `dispatch-failed`, `plan-invalid`, and `reconcile-stuck` are not applied by refine or implement'
+  '`Input Needed` is likewise orthogonal'
+  'Lifecycle: `New → Refined → Planned → Working → In Review → Implemented`.'
+  'A ticket judged trivial by implement'"'"'s Trivial-Ticket Triage still transits through `Planned`'
+  'UI conventions — the component library, its browsable catalog'
+)
+BOARD_LABELS_TRIVIAL_FACT='same labels, no new label state'
+BOARD_LABELS_BODY_MAX_LINES=8
+
+# P11 (#1344): the complete `.cenci/config.json` examples and the field-by-field
+# schema exist only in references/config-schema.md. Each anchor is a distinctive
+# line of one example or one field entry, so it must occur exactly once across the
+# configure markdown and be in the schema file.
+SCHEMA_ANCHORS=(
+  '"guidanceLocation": "AGENTS.md",'
+  '"slug": "web-client",'
+  '"gateOutputLines": 120'
+  '"babysitInterval": "20m"'
+  '"remindAfterDays": 30,'
+  '`compactImplementation` — exactly `true` allows'
+  '`cicd.platform` — `"github-actions"`'
+  '`security.sensitivePaths` — an array of glob-pattern strings'
+  '`automerge.maxChangedFiles` — required whenever an `automerge` block is present'
+  '`docs.policy` — the exact, case-sensitive string `"minimal"`'
+)
+# The migration-removal list and the MCP/LSP inclusion rules close the schema, so
+# every "migration-removal list below" pointer stays inside that one file.
+SCHEMA_MIGRATION_REMOVAL_LIST='When migrating from an older config that has `ticketSystem`, `prSystem`, `ticketPrefix`, `adoOrg`, `adoProject`, `adoRepo`, `profile`, or `sandboxEnabled` fields, remove them during the merge.'
+SCHEMA_MCP_INCLUSION='Only include servers in `mcpServers` that were presented as options (i.e., detected or always-available).'
+SCHEMA_LSP_INCLUSION='Only include servers in `lspServers` that were detected and presented in question 6.'
+SCHEMA_REMOVAL_POINTER='migration-removal list'
+SCHEMA_REMOVAL_POINTER_MIN=7
+SCHEMA_SANDBOX_POINTER='`phases/write-config.md`'
+
+# The sandbox merge section moved from the schema prose into step 6's file
+# (Decision: codex.md's "sandbox" field pointer goes to phases/write-config.md).
+SANDBOX_MERGE_PINS=(
+  'bash "${CLAUDE_PLUGIN_ROOT}/skills/configure/scripts/merge-sandbox-config.sh" <path to existingConfig, or "-" for stdin>'
+  'The script fails closed (exit 2) for several distinct reasons'
+  'Every boolean flag is **required**'
+  'Q9=No, 9b=Yes, 9c=No → `"sandbox": { "dind": true }` (no `enabled`/`azure` keys)'
+  '> **Not the same as `.claude/settings.json`'"'"'s `sandbox.enabled`.**'
+)
+
+# P3 (#1344): `### Run Order` table. A row's first cell is "Question <token>" or
+# "Step <token>", where <token> is the question's label in `### Question Defaults`
+# (the text before its first "."; the whole label when it has no number). The third
+# cell, "Selected", states which run modes select the row. The sequence is pinned
+# here, never read back from the doc. Question 12 (the half-enrolled repair, which
+# has no ID) may appear between 11 and 13 but is not required.
+RUN_ORDER_QUESTION_TOKENS=('1' '2' '3' '5' '5c' 'Playwright CLI setup' '6' '7' '7b' '8' '9' '9b' '9c' '10' '11' '13' '14' '15' '16' '17' '18–20')
+RUN_ORDER_STEP_TOKENS=('0 to 5c-bis' '5d and 5e' '5f' '6' '7')
+# Question rows name the file that holds them; generation rows name the phase file
+# they run from (steps 0 to 5c-bis reach three files; the first one is pinned).
+RUN_ORDER_QUESTION_FILES=(
+  "1|${PROJECT_FILE}" "2|${PROJECT_FILE}" "3|${PROJECT_FILE}"
+  "5|${MCP_FILE}" "5c|${MCP_FILE}" "Playwright CLI setup|${MCP_FILE}" "6|${MCP_FILE}"
+  "7|${RUNTIME_FILE}" "7b|${RUNTIME_FILE}" "8|${RUNTIME_FILE}" "9|${RUNTIME_FILE}" "9b|${RUNTIME_FILE}" "9c|${RUNTIME_FILE}"
+  "10|${LAZY_FILE}" "11|${FLEET_FILE}"
+  "13|${AUTONOMY_FILE}" "14|${AUTONOMY_FILE}" "15|${AUTONOMY_FILE}" "16|${AUTONOMY_FILE}" "17|${AUTONOMY_FILE}"
+  "18–20|${FLEET_FILE}"
+)
+RUN_ORDER_STEP_FILES=(
+  "0 to 5c-bis|${GUIDANCE_FILE}" "5d and 5e|${CI_FILE}" "5f|${LAZY_FILE}"
+  "6|${WRITE_CONFIG_FILE}" "7|${COMMIT_PR_FILE}"
+)
+# A question row says when it is asked; a generation row says Every run and never
+# mentions delta.ask (a delta run still selects it).
+RUN_ORDER_QUESTION_PARTS=('first run' '`--all`' '`full`' '`delta.ask`')
+RUN_ORDER_STEP_PART='Every run'
+RUN_ORDER_FORBIDDEN_IN_STEP='delta.ask'
+DR_ZERO_ASK='When `delta.ask` is empty, ask no questions and still run every generation step.'
+ID_FLOOR=20
+ROUTER_MAX_LINES=300
+
 # --- Load the files under test ------------------------------------------------
 
 require_doc skill "skills/configure/SKILL.md" || true
@@ -434,6 +720,10 @@ require_doc migrations "skills/configure/${MIGRATIONS_FILE}" || true
 require_doc guidance_phase "skills/configure/${GUIDANCE_FILE}" || true
 require_doc settings_template "skills/configure/${SETTINGS_TEMPLATE_FILE}" || true
 require_doc ci_phase "skills/configure/${CI_FILE}" || true
+require_doc write_config_phase "skills/configure/${WRITE_CONFIG_FILE}" || true
+require_doc schema_ref "skills/configure/${SCHEMA_FILE}" || true
+require_doc commit_pr_phase "skills/configure/${COMMIT_PR_FILE}" || true
+require_doc board_labels_doc "docs/board-labels.md" || true
 require_doc readme "README.md" || true
 
 # every_configure_md -- SKILL.md plus every phases/*.md and references/*.md on
@@ -450,6 +740,9 @@ for _part in "${configure_disk_files[@]}"; do
   configure_all+=$'\n'"${_part_content}"
 done
 
+SKILL_WS="$(normalize_ws "${skill}")"
+CONFIGURE_ALL_WS="$(normalize_ws "${configure_all}")"
+
 # file_content <relative-file> -- the content loaded above for a named file.
 file_content() {
   case "$1" in
@@ -465,15 +758,87 @@ file_content() {
     "${GUIDANCE_FILE}") printf '%s' "${guidance_phase}" ;;
     "${SETTINGS_TEMPLATE_FILE}") printf '%s' "${settings_template}" ;;
     "${CI_FILE}") printf '%s' "${ci_phase}" ;;
+    "${WRITE_CONFIG_FILE}") printf '%s' "${write_config_phase}" ;;
+    "${SCHEMA_FILE}") printf '%s' "${schema_ref}" ;;
+    "${COMMIT_PR_FILE}") printf '%s' "${commit_pr_phase}" ;;
     SKILL.md) printf '%s' "${skill}" ;;
   esac
 }
 
+# extract_h2_section_raw <content> <exact-heading-line> -- lines strictly between a
+# `## ` heading and the next `## ` heading (or the end of the content). A heading-
+# shaped line inside a fenced code block is never a boundary. Pure.
+extract_h2_section_raw() {
+  local content="$1" heading="$2"
+  awk -v heading="${heading}" '
+    /^```/ { infence = !infence }
+    !infence && $0 == heading { found=1; next }
+    found && !infence && index($0, "## ") == 1 { exit }
+    found { print }
+  ' <<<"${content}"
+}
+
+# table_cell <row> <n> -- cell n (1-based, first cell = 1) of a Markdown table row,
+# trimmed. Cells are split on "|", so no cell of the tables read here may contain a
+# pipe character. Pure.
+table_cell() {
+  local row="$1" n="$2"
+  awk -F'|' -v n="${n}" '{ c = $(n + 1); gsub(/^[[:space:]]+|[[:space:]]+$/, "", c); print c }' <<<"${row}"
+}
+
+# condition_cell <step-map-row> -- the Condition cell (second cell). Pure.
+condition_cell() {
+  table_cell "$1" 2
+}
+
+# run_order_row <run-order-body> <first-cell> -- the Run Order table row whose
+# first cell is exactly <first-cell> (e.g. "Question 5c" or "Step 6"). Pure.
+run_order_row() {
+  local body="$1" first="$2"
+  grep -F -- "| ${first} |" <<<"${body}" | head -n 1
+}
+
+# defaults_label_for_id <question-defaults-body> <id> -- the first cell of the
+# `### Question Defaults` row whose ID cell lists `<id>` (backtick-delimited, so
+# `automerge` never matches `automerge.enabled`). Pure.
+defaults_label_for_id() {
+  local body="$1" id="$2"
+  awk -F'|' -v id="\`${id}\`" '
+    index($0, "|") == 1 && index($3, id) > 0 { c = $2; gsub(/^[[:space:]]+|[[:space:]]+$/, "", c); print c; exit }
+  ' <<<"${body}"
+}
+
+# label_token <label> -- the Run Order token for a Question Defaults label: the text
+# before the first "." when the label starts with a digit, else the whole label.
+label_token() {
+  local label="$1"
+  if [[ "${label}" =~ ^[0-9] ]]; then
+    printf '%s' "${label%%.*}"
+  else
+    printf '%s' "${label}"
+  fi
+}
+
+# pinned_file_for <token> <entry>... -- the file pinned for <token> in a
+# "<token>|<file>" list. Pure.
+pinned_file_for() {
+  local token="$1" entry
+  shift
+  for entry in "$@"; do
+    if [[ "${entry%%|*}" == "${token}" ]]; then
+      printf '%s' "${entry#*|}"
+      return
+    fi
+  done
+}
+
 step_map_body=""
 question_defaults_body=""
+run_order_body=""
 if [[ -n "${skill}" ]]; then
   step_map_body="$(extract_section_body_raw "${skill}" "${STEP_MAP_HEADING}")"
   question_defaults_body="$(extract_section_body_raw "${skill}" "${QUESTION_DEFAULTS_HEADING}")"
+  run_order_body="$(extract_section_body_raw "${skill}" "${RUN_ORDER_HEADING}")"
 fi
 
 # ============================================================================
@@ -492,9 +857,10 @@ case_step_map() {
   # example, fleet-enrollment and autonomy-settings rows (#1342), then the three
   # generation rows read after the questions: guidance-settings (steps 0 to
   # 5c-bis), settings-template (the base deny list step 4 reads) and
-  # ci-dockerfile (steps 5d and 5e, after guidance-settings) (#1343).
+  # ci-dockerfile (steps 5d and 5e, after guidance-settings) (#1343), then
+  # write-config (step 6), the schema it reads, and commit-pr (step 7) (#1344).
   local prev=-1 file at
-  for file in "${MIGRATIONS_FILE}" "${DETECT_FILE}" "${PROJECT_FILE}" "${MCP_FILE}" "${RUNTIME_FILE}" "${LAZY_FILE}" "${LAZY_EXAMPLE_FILE}" "${FLEET_FILE}" "${AUTONOMY_FILE}" "${GUIDANCE_FILE}" "${SETTINGS_TEMPLATE_FILE}" "${CI_FILE}"; do
+  for file in "${MIGRATIONS_FILE}" "${DETECT_FILE}" "${PROJECT_FILE}" "${MCP_FILE}" "${RUNTIME_FILE}" "${LAZY_FILE}" "${LAZY_EXAMPLE_FILE}" "${FLEET_FILE}" "${AUTONOMY_FILE}" "${GUIDANCE_FILE}" "${SETTINGS_TEMPLATE_FILE}" "${CI_FILE}" "${WRITE_CONFIG_FILE}" "${SCHEMA_FILE}" "${COMMIT_PR_FILE}"; do
     at="$(offset_of "${step_map_body}" "| \`${file}\` |")"
     if [[ "${at}" -lt 0 ]]; then
       fail "${STEP_MAP_HEADING}: no table row for \`${file}\`"
@@ -537,19 +903,39 @@ case_step_map() {
   for part in "${AUTONOMY_ROW_PARTS[@]}"; do
     assert_contains_ws "$(row_for "${step_map_body}" "${AUTONOMY_FILE}")" "${part}" "${STEP_MAP_HEADING}: \`${AUTONOMY_FILE}\` row names its condition"
   done
+  # #1344: the migrations row names both section conditions (the legacy migration
+  # and the board migration notes) instead of one file-level condition.
+  for part in "${MIGRATIONS_ROW_PARTS[@]}"; do
+    assert_contains_ws "$(row_for "${step_map_body}" "${MIGRATIONS_FILE}")" "${part}" "${STEP_MAP_HEADING}: \`${MIGRATIONS_FILE}\` row names both section conditions"
+  done
   assert_absent_paired_ws "${step_map_body}" '| File | Condition | Why |' "${OLD_STEP_MAP_EVERY_PHASE}" "${STEP_MAP_HEADING}: retired \"every phase file is read\" intro"
   assert_absent_paired_ws "${step_map_body}" '| File | Condition | Why |' "${OLD_STEP_MAP_INLINE_TAIL}" "${STEP_MAP_HEADING}: retired \"question 10 onward stays inline\" tail"
 
   # #1343: the three generation rows are read on every run (steps 5d and 5e each
   # decide internally whether to skip), each names its own position, and the
   # intro no longer claims generation steps 0 to 7 all stay inline.
-  for file in "${GUIDANCE_FILE}" "${SETTINGS_TEMPLATE_FILE}" "${CI_FILE}"; do
+  for file in "${GUIDANCE_FILE}" "${SETTINGS_TEMPLATE_FILE}" "${CI_FILE}" "${WRITE_CONFIG_FILE}" "${SCHEMA_FILE}" "${COMMIT_PR_FILE}"; do
     row="$(row_for "${step_map_body}" "${file}")"
     if [[ -z "${row}" ]]; then
       fail "${STEP_MAP_HEADING}: no row for generation file \`${file}\`"
     else
       assert_contains "${row}" "${EVERY_RUN}" "${STEP_MAP_HEADING}: \`${file}\` row states it is read on every run"
     fi
+  done
+  # Case-insensitive: a Why cell may open with "Step 6:" and a Condition cell with
+  # "after ...", so the row and the part are both lower-cased before the match.
+  local row_lc
+  row_lc="$(row_for "${step_map_body}" "${WRITE_CONFIG_FILE}")"
+  for part in "${WRITE_CONFIG_ROW_PARTS[@]}"; do
+    assert_contains_ws "${row_lc,,}" "${part,,}" "${STEP_MAP_HEADING}: \`${WRITE_CONFIG_FILE}\` row names its position"
+  done
+  row_lc="$(row_for "${step_map_body}" "${SCHEMA_FILE}")"
+  for part in "${SCHEMA_ROW_PARTS[@]}"; do
+    assert_contains_ws "${row_lc,,}" "${part,,}" "${STEP_MAP_HEADING}: \`${SCHEMA_FILE}\` row names its position"
+  done
+  row_lc="$(row_for "${step_map_body}" "${COMMIT_PR_FILE}")"
+  for part in "${COMMIT_PR_ROW_PARTS[@]}"; do
+    assert_contains_ws "${row_lc,,}" "${part,,}" "${STEP_MAP_HEADING}: \`${COMMIT_PR_FILE}\` row names its position"
   done
   for part in "${GUIDANCE_ROW_PARTS[@]}"; do
     assert_contains_ws "$(row_for "${step_map_body}" "${GUIDANCE_FILE}")" "${part}" "${STEP_MAP_HEADING}: \`${GUIDANCE_FILE}\` row names its position"
@@ -563,9 +949,10 @@ case_step_map() {
   local intro table_header='| File | Condition | Why |'
   intro="${step_map_body%%"${table_header}"*}"
   for part in "${STEP_MAP_INTRO_PARTS[@]}"; do
-    assert_contains_ws "${intro}" "${part}" "${STEP_MAP_HEADING}: intro names where each generation step range runs"
+    assert_contains_ws "${intro,,}" "${part,,}" "${STEP_MAP_HEADING}: intro names where each generation step range runs"
   done
   assert_absent_paired_ws "${step_map_body}" '| File | Condition | Why |' "${OLD_STEP_MAP_GENERATION_INLINE}" "${STEP_MAP_HEADING}: retired \"generation steps 0 to 7 stay inline\" intro"
+  assert_absent_paired_ws "${step_map_body}" '| File | Condition | Why |' "${OLD_STEP_MAP_STEPS_6_7_INLINE}" "${STEP_MAP_HEADING}: retired \"only steps 6 and 7 stay inline\" intro (#1344)"
 
   # The interaction rule covers the phase and reference files.
   local rule_line
@@ -579,7 +966,7 @@ case_step_map() {
     rel="${disk#"${CONFIGURE_DIR}/"}"
     assert_contains "${step_map_body}" "\`${rel}\`" "${STEP_MAP_HEADING} names ${rel}"
   done
-  [[ "${#configure_disk_files[@]}" -ge 12 ]] || fail "step map: expected at least 12 phases/references files on disk, found ${#configure_disk_files[@]}"
+  [[ "${#configure_disk_files[@]}" -ge 15 ]] || fail "step map: expected at least 15 phases/references files on disk, found ${#configure_disk_files[@]}"
 }
 
 case_P17_fallbacks_colocated() {
@@ -611,21 +998,32 @@ case_P17_fallbacks_colocated() {
 
 case_P19_migrations_conditional() {
   [[ -n "${migrations}" ]] || { fail "P19: ${MIGRATIONS_FILE} missing or empty"; return; }
-  assert_contains_ws "${migrations}" "${MIGRATION_PRESERVE}" "${MIGRATIONS_FILE}: unknown-key preservation"
-  assert_contains_ws "${migrations}" "${MIGRATION_MERGE}" "${MIGRATIONS_FILE}: the migrationBase merge"
-  assert_contains_ws "${migrations}" "${MIGRATION_FENCE_LINE}" "${MIGRATIONS_FILE}: the migrate-project-core.sh preview/--apply fence"
-  assert_contains_ws "${migrations}" "${MIGRATION_NEVER_REWRITE}" "${MIGRATIONS_FILE}: never rewrite .claude/config.json"
+
+  # #1344: the file holds two sections, each read under its own condition. The
+  # legacy-migration prose and its "never read on a .cenci/config.json-only run"
+  # condition are pinned inside `## Legacy config migration` (a section-level pin,
+  # tighter than the former file-level sentence); the board notes are pinned in P24.
+  local legacy_section
+  legacy_section="$(extract_h2_section_raw "${migrations}" "${MIGRATIONS_LEGACY_HEADING}")"
+  [[ "$(count_exact_lines "${migrations}" "${MIGRATIONS_LEGACY_HEADING}")" -eq 1 ]] || fail "P19: ${MIGRATIONS_FILE} must hold exactly one [${MIGRATIONS_LEGACY_HEADING}] heading"
+  [[ -n "${legacy_section}" ]] || fail "P19: ${MIGRATIONS_FILE} [${MIGRATIONS_LEGACY_HEADING}] section missing or empty"
+  assert_contains_ws "${legacy_section}" "${LEGACY_CONDITION}" "${MIGRATIONS_FILE}: the legacy section is conditioned on .claude/config.json existing"
+  assert_contains_ws "${legacy_section}" "${MIGRATIONS_LEGACY_NEVER_READ}" "${MIGRATIONS_FILE}: the legacy section states a .cenci/config.json-only run never reads it"
+  assert_contains_ws "${legacy_section}" "${MIGRATION_PRESERVE}" "${MIGRATIONS_FILE}: unknown-key preservation"
+  assert_contains_ws "${legacy_section}" "${MIGRATION_MERGE}" "${MIGRATIONS_FILE}: the migrationBase merge"
+  assert_contains_ws "${legacy_section}" "${MIGRATION_FENCE_LINE}" "${MIGRATIONS_FILE}: the migrate-project-core.sh preview/--apply fence"
+  assert_contains_ws "${legacy_section}" "${MIGRATION_NEVER_REWRITE}" "${MIGRATIONS_FILE}: never rewrite .claude/config.json"
 
   # The migration prose is gone from the router (paired with the step-map row
   # that now points at it, so the absence cannot pass vacuously).
   local migrations_row
   migrations_row="$(row_for "${step_map_body}" "${MIGRATIONS_FILE}")"
   assert_contains "${migrations_row}" "${LEGACY_CONDITION}" "step map: the migrations row is conditioned on .claude/config.json existing"
-  assert_contains_ws "${migrations_row}" "${MIGRATIONS_NEVER_READ}" "step map: the migrations row states a .cenci/config.json-only run never reads it"
-  assert_absent_paired_ws "${skill}" "${MIGRATIONS_NEVER_READ}" "${MIGRATION_PRESERVE}" "SKILL.md no longer carries the unknown-key preservation prose"
-  assert_absent_paired_ws "${skill}" "${MIGRATIONS_NEVER_READ}" "${MIGRATION_MERGE}" "SKILL.md no longer carries the migrationBase merge prose"
-  assert_absent_paired_ws "${skill}" "${MIGRATIONS_NEVER_READ}" "${MIGRATION_FENCE_LINE}" "SKILL.md no longer carries the migrate-project-core.sh fence"
-  assert_absent_paired_ws "${skill}" "${MIGRATIONS_NEVER_READ}" "${MIGRATION_NEVER_REWRITE}" "SKILL.md no longer carries the never-rewrite rule"
+  assert_contains_ws "${migrations_row}" "${MIGRATIONS_ROW_NEVER_READ}" "step map: the migrations row states a .cenci/config.json-only run never reads the legacy section"
+  assert_absent_paired_ws "${skill}" "${MIGRATIONS_ROW_NEVER_READ}" "${MIGRATION_PRESERVE}" "SKILL.md no longer carries the unknown-key preservation prose"
+  assert_absent_paired_ws "${skill}" "${MIGRATIONS_ROW_NEVER_READ}" "${MIGRATION_MERGE}" "SKILL.md no longer carries the migrationBase merge prose"
+  assert_absent_paired_ws "${skill}" "${MIGRATIONS_ROW_NEVER_READ}" "${MIGRATION_FENCE_LINE}" "SKILL.md no longer carries the migrate-project-core.sh fence"
+  assert_absent_paired_ws "${skill}" "${MIGRATIONS_ROW_NEVER_READ}" "${MIGRATION_NEVER_REWRITE}" "SKILL.md no longer carries the never-rewrite rule"
 
   # No phase file restates migration prose either.
   local file
@@ -717,7 +1115,7 @@ case_single_keep_or_change_rule() {
 # now read only under a condition.
 case_phase_read_conditions() {
   local file content head
-  for file in "${LAZY_FILE}" "${FLEET_FILE}" "${AUTONOMY_FILE}" "${GUIDANCE_FILE}" "${SETTINGS_TEMPLATE_FILE}" "${CI_FILE}"; do
+  for file in "${LAZY_FILE}" "${FLEET_FILE}" "${AUTONOMY_FILE}" "${GUIDANCE_FILE}" "${SETTINGS_TEMPLATE_FILE}" "${CI_FILE}" "${WRITE_CONFIG_FILE}" "${SCHEMA_FILE}" "${COMMIT_PR_FILE}"; do
     content="$(file_content "${file}")"
     if [[ -z "${content}" ]]; then
       fail "${file}: missing or empty"
@@ -795,15 +1193,46 @@ case_cross_file_pointers() {
   assert_absent_paired_ws "${skill}" "${STUB_GUIDANCE}" 'LSP Server Catalog` in `phases/mcp-lsp-ui-questions.md`' "SKILL.md no longer carries the step 1b LSP Server Catalog pointer"
 
   # --- #1343: pointers that crossed files when steps 0 to 5e moved --------------
-  # Step 3c's reconciler pointer now lives in a phase file, so it names SKILL.md
-  # (where `### Board lifecycle labels` stays).
-  assert_contains_ws "${guidance_phase}" "${STEP3C_BOARD_POINTER}" "${GUIDANCE_FILE} step 3c names SKILL.md for Board lifecycle labels"
-  assert_absent_paired_ws "${guidance_phase}" "${STEP3C_BOARD_POINTER}" "${OLD_STEP3C_BOARD_POINTER}" "${GUIDANCE_FILE} step 3c retired positional Board lifecycle labels pointer"
-  # Step 6 stays in SKILL.md and points at the steps that left it.
-  assert_contains_ws "${skill}" "${STEP6_5E_POINTER}" "SKILL.md step 6 names the file holding step 5e"
-  assert_absent_paired_ws "${skill}" "${STEP6_5E_POINTER}" "${OLD_STEP6_5E_POINTER}" "SKILL.md step 6 retired positional step 5e pointer"
-  assert_contains_ws "${skill}" "${STEP6_STEP4_POINTER}" "SKILL.md step 6 names the file holding step 4"
-  assert_absent_paired_ws "${skill}" "${STEP6_STEP4_POINTER}" "${OLD_STEP6_STEP4_POINTER}" "SKILL.md step 6 retired positional Step 4 pointer"
+  # Step 3c's reconciler pointer lives in a phase file. `### Board lifecycle
+  # labels` shrank to a pointer in #1344, so step 3c now names the reconciler
+  # bullet in the plugin's docs/board-labels.md instead of SKILL.md.
+  assert_contains_ws "${guidance_phase}" "${STEP3C_BOARD_POINTER}" "${GUIDANCE_FILE} step 3c names the reconciler bullet in docs/board-labels.md"
+  assert_absent_paired_ws "${configure_all}" "${STEP3C_BOARD_POINTER}" "${OLD_STEP3C_BOARD_POINTER}" "configure markdown retired positional Board lifecycle labels pointer"
+  assert_absent_paired_ws "${configure_all}" "${STEP3C_BOARD_POINTER}" "${OLD_STEP3C_SKILL_POINTER}" "configure markdown retired pointer at SKILL.md for Board lifecycle labels (#1344)"
+  # Step 6 moved to phases/write-config.md (#1344) and points at the steps that
+  # left it; the sandbox merge section's pointers travel with it.
+  assert_contains_ws "${write_config_phase}" "${STEP6_5E_POINTER}" "${WRITE_CONFIG_FILE} names the file holding step 5e"
+  assert_absent_paired_ws "${configure_all}" "${STEP6_5E_POINTER}" "${OLD_STEP6_5E_POINTER}" "configure markdown retired positional step 5e pointer"
+  assert_contains_ws "${write_config_phase}" "${STEP6_STEP4_POINTER}" "${WRITE_CONFIG_FILE} names the file holding step 4"
+  assert_absent_paired_ws "${configure_all}" "${STEP6_STEP4_POINTER}" "${OLD_STEP6_STEP4_POINTER}" "configure markdown retired positional Step 4 pointer"
+  # Pointers at step 6, step 7 and the schema that crossed files name the file.
+  assert_contains_ws "${runtime_phase}" "${RUNTIME_DIND_POINTER}" "${RUNTIME_FILE}: the sandbox.dind schema note pointer names ${WRITE_CONFIG_FILE}"
+  assert_contains_ws "${runtime_phase}" "${RUNTIME_AZURE_POINTER}" "${RUNTIME_FILE}: the sandbox.azure schema note pointer names ${WRITE_CONFIG_FILE}"
+  assert_absent_paired_ws "${configure_all}" "${RUNTIME_DIND_POINTER}" "${OLD_RUNTIME_DIND_POINTER}" "configure markdown retired sandbox.dind schema note pointer at SKILL.md"
+  assert_absent_paired_ws "${configure_all}" "${RUNTIME_AZURE_POINTER}" "${OLD_RUNTIME_AZURE_POINTER}" "configure markdown retired sandbox.azure schema note pointer at SKILL.md"
+  assert_absent_paired_ws "${configure_all}" "${AUTONOMY_STEP6_POINTER}" "${OLD_AUTONOMY_STEP6_POINTER}" "configure markdown retired step 6 pointer at SKILL.md"
+  assert_contains_ws "${autonomy_phase}" 'step 7 in `phases/commit-pr.md`' "${AUTONOMY_FILE}: the step 7 pointer names ${COMMIT_PR_FILE}"
+  assert_absent_paired_ws "${configure_all}" 'step 7 in `phases/commit-pr.md`' 'step 7 in `SKILL.md`' "configure markdown retired step 7 pointer at SKILL.md"
+  assert_contains_ws "${schema_ref}" "${SCHEMA_RESOLVER_POINTER}" "${SCHEMA_FILE}: the resolver pointer names ${DETECT_FILE}"
+  # The router's own early prose names the file for every step 6 / step 7 mention:
+  # a line that cites step 6 or step 7 by number names the file holding it (the
+  # stubs, the Run Order rows and the Step Map rows do). At least three such lines
+  # must exist so the scan cannot pass vacuously.
+  local step_lines step_line step_hits=0
+  step_lines="$(grep -E '(^|[^0-9A-Za-z])[Ss]teps? [67]($|[^0-9A-Za-z])' <<<"${skill}")"
+  if [[ -n "${step_lines}" ]]; then
+    while IFS= read -r step_line; do
+      [[ -n "${step_line}" ]] || continue
+      step_hits=$((step_hits+1))
+      if [[ "${step_line}" =~ (^|[^0-9A-Za-z])[Ss]teps?\ 6($|[^0-9A-Za-z]) && "${step_line}" != *'`phases/write-config.md`'* ]]; then
+        fail "SKILL.md: a line cites step 6 without naming ${WRITE_CONFIG_FILE}: ${step_line:0:160}"
+      fi
+      if [[ "${step_line}" =~ (^|[^0-9A-Za-z])[Ss]teps?\ 7($|[^0-9A-Za-z]) && "${step_line}" != *'`phases/commit-pr.md`'* ]]; then
+        fail "SKILL.md: a line cites step 7 without naming ${COMMIT_PR_FILE}: ${step_line:0:160}"
+      fi
+    done <<<"${step_lines}"
+  fi
+  [[ "${step_hits}" -ge 3 ]] || fail "SKILL.md: expected at least 3 lines citing step 6 or step 7 (the stubs and the pointers), found ${step_hits}"
   # The phase files that cite generation steps name where those steps now run.
   assert_contains_ws "${detect_phase}" "${DETECT_STEP1_POINTER}" "${DETECT_FILE}: the diff-approval gate pointer names ${GUIDANCE_FILE}"
   assert_absent_paired_ws "${detect_phase}" "${DETECT_STEP1_POINTER}" "${OLD_DETECT_STEP1_POINTER}" "${DETECT_FILE}: retired bare step 1 pointer"
@@ -835,18 +1264,22 @@ case_cross_file_pointers() {
   assert_contains_ws "${question_defaults_body}" "see ${FLEET_POINTER}" "${QUESTION_DEFAULTS_HEADING} question 11 row names ${FLEET_FILE}"
   count="$(count_occurrences "${defaults_ws}" "see ${AUTONOMY_POINTER}")"
   [[ "${count}" -ge 4 ]] || fail "${QUESTION_DEFAULTS_HEADING}: expected the Keep-first sentence and the question 13/14/15 rows to name ${AUTONOMY_FILE} (4 sites), found ${count}"
-  assert_contains_ws "${skill}" "${FLEET_AUTONOMY_POINTER}" "SKILL.md step 7 names the file holding the fleet Next step block"
-  assert_contains_ws "${skill}" "question 13 in \`${AUTONOMY_FILE}\` was asked" "SKILL.md step 6 wiring names ${AUTONOMY_FILE} for question 13"
-  assert_contains_ws "${skill}" "question 14 in \`${AUTONOMY_FILE}\` was asked" "SKILL.md step 6 wiring names ${AUTONOMY_FILE} for question 14"
-  assert_contains_ws "${skill}" "question 15 in \`${AUTONOMY_FILE}\` was asked" "SKILL.md step 6 wiring names ${AUTONOMY_FILE} for question 15"
-  assert_contains_ws "${skill}" "\`### Autonomy Settings\` question 13 in \`${AUTONOMY_FILE}\`" "SKILL.md planning field note names ${AUTONOMY_FILE}"
-  assert_contains_ws "${skill}" "\`### Autonomy Settings\` question 14 in \`${AUTONOMY_FILE}\`" "SKILL.md automerge field note names ${AUTONOMY_FILE}"
-  assert_contains_ws "${skill}" "\`### Autonomy Settings\` question 15 in \`${AUTONOMY_FILE}\`" "SKILL.md refinement field note names ${AUTONOMY_FILE}"
-  assert_contains_ws "${skill}" 'derivation tables in `### Board Config (lazyboards)` in `phases/lazyboards.md`' "SKILL.md names the file holding the lazyboards derivation tables"
-  assert_contains_ws "${skill}" 'fallback as question 13/14/15 in `phases/autonomy-settings.md`' "SKILL.md step 6 fleet-leaf overlay names ${AUTONOMY_FILE} for the question 13/14/15 validation"
-  assert_absent_paired_ws "${skill}" 'fallback as question 13/14/15 in `phases/autonomy-settings.md`' 'fallback as question 13/14/15 below' "SKILL.md retired positional question 13/14/15 validation pointer"
+  # Step 7 (the final report) moved to phases/commit-pr.md, step 6 (the wiring)
+  # to phases/write-config.md and the field notes to references/config-schema.md
+  # (#1344): the pointers are read there, and every retired positional form is
+  # scanned across SKILL.md plus every phases/*.md and references/*.md.
+  assert_contains_ws "${commit_pr_phase}" "${FLEET_AUTONOMY_POINTER}" "${COMMIT_PR_FILE} step 7 names the file holding the fleet Next step block"
+  assert_contains_ws "${write_config_phase}" "question 13 in \`${AUTONOMY_FILE}\` was asked" "${WRITE_CONFIG_FILE} step 6 wiring names ${AUTONOMY_FILE} for question 13"
+  assert_contains_ws "${write_config_phase}" "question 14 in \`${AUTONOMY_FILE}\` was asked" "${WRITE_CONFIG_FILE} step 6 wiring names ${AUTONOMY_FILE} for question 14"
+  assert_contains_ws "${write_config_phase}" "question 15 in \`${AUTONOMY_FILE}\` was asked" "${WRITE_CONFIG_FILE} step 6 wiring names ${AUTONOMY_FILE} for question 15"
+  assert_contains_ws "${schema_ref}" "\`### Autonomy Settings\` question 13 in \`${AUTONOMY_FILE}\`" "${SCHEMA_FILE} planning field note names ${AUTONOMY_FILE}"
+  assert_contains_ws "${schema_ref}" "\`### Autonomy Settings\` question 14 in \`${AUTONOMY_FILE}\`" "${SCHEMA_FILE} automerge field note names ${AUTONOMY_FILE}"
+  assert_contains_ws "${schema_ref}" "\`### Autonomy Settings\` question 15 in \`${AUTONOMY_FILE}\`" "${SCHEMA_FILE} refinement field note names ${AUTONOMY_FILE}"
+  assert_contains_ws "${schema_ref}" 'derivation tables in `### Board Config (lazyboards)` in `phases/lazyboards.md`' "${SCHEMA_FILE} names the file holding the lazyboards derivation tables"
+  assert_contains_ws "${write_config_phase}" 'fallback as question 13/14/15 in `phases/autonomy-settings.md`' "${WRITE_CONFIG_FILE} step 6 fleet-leaf overlay names ${AUTONOMY_FILE} for the question 13/14/15 validation"
+  assert_absent_paired_ws "${configure_all}" 'fallback as question 13/14/15 in `phases/autonomy-settings.md`' 'fallback as question 13/14/15 below' "configure markdown retired positional question 13/14/15 validation pointer"
   for site in "${OLD_SKILL_AUTONOMY_POINTERS[@]}"; do
-    assert_absent_paired_ws "${skill}" "${AUTONOMY_POINTER}" "${site}" "SKILL.md retired positional pointer [${site}]"
+    assert_absent_paired_ws "${configure_all}" "${AUTONOMY_POINTER}" "${site}" "configure markdown retired positional pointer [${site}]"
   done
 
   # Detection and Delta Resolution name the files holding the sections they cite.
@@ -859,7 +1292,7 @@ case_cross_file_pointers() {
 
   # The moved sections point at what they left behind by file name.
   assert_contains_ws "${autonomy_phase}" 'unlike `### Fleet Dispatch Enrollment` in `phases/fleet-enrollment.md`' "${AUTONOMY_FILE}: the intro names ${FLEET_FILE}"
-  assert_contains_ws "${autonomy_phase}" 'step 6 in `SKILL.md`' "${AUTONOMY_FILE}: the intro names SKILL.md for the step 6 write"
+  assert_contains_ws "${autonomy_phase}" "${AUTONOMY_STEP6_POINTER}" "${AUTONOMY_FILE}: the intro names ${WRITE_CONFIG_FILE} for the step 6 write (#1344)"
   assert_contains_ws "${autonomy_phase}" '(see `### Delta Resolution` in `phases/detection-and-delta.md`)' "${AUTONOMY_FILE}: the resolver-failure rule names ${DETECT_FILE}"
   assert_absent_paired_ws "${autonomy_phase}" '### Autonomy Settings' '(see `### Delta Resolution`)' "${AUTONOMY_FILE}: retired positional Delta Resolution pointer"
   assert_absent_paired_ws "${autonomy_phase}" '### Autonomy Settings' 'step 6 below' "${AUTONOMY_FILE}: retired positional step 6 pointer"
@@ -949,7 +1382,7 @@ case_allowed_tools_only_in_skill_md() {
   local line_count disk
   line_count="$(grep -c '^allowed-tools:' <<<"${skill}" | tr -d '[:space:]')"
   [[ "${line_count}" -eq 1 ]] || fail "SKILL.md must carry exactly one allowed-tools: frontmatter line, found ${line_count}"
-  [[ "${#configure_disk_files[@]}" -ge 12 ]] || fail "allowed-tools guard is vacuous: found ${#configure_disk_files[@]} phases/references files (expected at least 12)"
+  [[ "${#configure_disk_files[@]}" -ge 15 ]] || fail "allowed-tools guard is vacuous: found ${#configure_disk_files[@]} phases/references files (expected at least 15)"
   for disk in "${configure_disk_files[@]}"; do
     if grep -q '^allowed-tools:' "${disk}"; then
       fail "${disk#"${FLOW_DIR}/"}: allowed-tools: belongs only in SKILL.md frontmatter"
@@ -964,7 +1397,7 @@ case_readme_workflow_deps_row() {
   local row file
   row="$(grep -F -- "${README_CONFIGURE_ROW_PREFIX}" <<<"${readme}" | head -n 1)"
   [[ -n "${row}" ]] || { fail "README.md: workflow-deps row for configure not found"; return; }
-  for file in "${DETECT_FILE}" "${PROJECT_FILE}" "${MCP_FILE}" "${RUNTIME_FILE}" "${LAZY_FILE}" "${LAZY_EXAMPLE_FILE}" "${FLEET_FILE}" "${AUTONOMY_FILE}" "${MIGRATIONS_FILE}" "${GUIDANCE_FILE}" "${SETTINGS_TEMPLATE_FILE}" "${CI_FILE}"; do
+  for file in "${DETECT_FILE}" "${PROJECT_FILE}" "${MCP_FILE}" "${RUNTIME_FILE}" "${LAZY_FILE}" "${LAZY_EXAMPLE_FILE}" "${FLEET_FILE}" "${AUTONOMY_FILE}" "${MIGRATIONS_FILE}" "${GUIDANCE_FILE}" "${SETTINGS_TEMPLATE_FILE}" "${CI_FILE}" "${WRITE_CONFIG_FILE}" "${SCHEMA_FILE}" "${COMMIT_PR_FILE}"; do
     assert_contains "${row}" "${file}" "README.md workflow-deps row for configure lists ${file}"
   done
 }
@@ -1031,6 +1464,444 @@ case_P6_dockerfile_verbatim() {
   check_verbatim_block "P6 step 5e" "${P6_MERGE_SAFE_BLOCK}" "${CI_FILE}" "${STUB_CI}"
 }
 
+# =============================================================================
+# #1344 (4/4): step 6, the config schema, step 7 and the board notes move out;
+# the router gains `### Run Order`.
+# =============================================================================
+
+# P1 (#1344): the router stays at 300 lines or fewer and keeps no step 6 or step 7
+# body inline. The absences are paired with the two stubs that must remain.
+case_P1_router_size() {
+  [[ -n "${skill}" ]] || { fail "P1: SKILL.md missing or empty"; return; }
+  local lines marker
+  lines="$(wc -l < "${CONFIGURE_DIR}/SKILL.md" | tr -d '[:space:]')"
+  [[ "${lines}" -le "${ROUTER_MAX_LINES}" ]] || fail "P1: SKILL.md is ${lines} lines; the router must stay at ${ROUTER_MAX_LINES} lines or fewer"
+  assert_contains "${skill}" "${STUB_6}" "P1: SKILL.md keeps the step 6 stub"
+  assert_contains "${skill}" "${STUB_7}" "P1: SKILL.md keeps the step 7 stub"
+  for marker in \
+    '**Autonomy Settings wiring.**' \
+    '**Independent refinement leaves wiring.**' \
+    '**Overlay order and validation.**' \
+    '**Sandbox flags are derived per question ID.**' \
+    '**Always stamp `configVersion`**' \
+    'Read `<worktree-path>/docs/git-workflow.md`' \
+    '## Carried through (delta run)'; do
+    assert_absent_paired_ws "${skill}" "${STUB_7}" "${marker}" "P1: SKILL.md carries no step 6 or step 7 body [${marker}]"
+  done
+}
+
+# condition_cell and table_cell are pure extractors; this self-test proves the
+# P2 check below sees an empty Condition cell (non-vacuity, gotchas rule 29).
+case_P2_condition_extractor_self_test() {
+  local ok_row empty_row blank_row
+  ok_row='| `phases/a.md` | Every run, after the questions. | Why a. |'
+  empty_row='| `phases/b.md` |  | Why b. |'
+  blank_row='| `phases/c.md` | | Why c. |'
+  [[ "$(condition_cell "${ok_row}")" == "Every run, after the questions." ]] || fail "P2 self-test: the extractor lost a populated Condition cell"
+  [[ -z "$(condition_cell "${empty_row}")" ]] || fail "P2 self-test: the extractor invented a Condition cell for an empty one"
+  [[ -z "$(condition_cell "${blank_row}")" ]] || fail "P2 self-test: the extractor invented a Condition cell for a blank one"
+  [[ "$(table_cell "${ok_row}" 3)" == "Why a." ]] || fail "P2 self-test: the extractor lost the third cell"
+}
+
+# P2 (#1344): SKILL.md names every phases/*.md and references/*.md file of the
+# skill together with the condition under which it is read. The file list comes
+# from the disk, not from a constant, so a new file with no row (or an empty
+# Condition cell) fails here.
+case_P2_every_file_named_with_condition() {
+  [[ -n "${step_map_body}" ]] || { fail "P2: SKILL.md ${STEP_MAP_HEADING} section missing or empty"; return; }
+  [[ "${#configure_disk_files[@]}" -ge 15 ]] || fail "P2: expected at least 15 phases/references files on disk, found ${#configure_disk_files[@]}"
+  local disk rel row cond
+  for disk in "${configure_disk_files[@]}"; do
+    rel="${disk#"${CONFIGURE_DIR}/"}"
+    row="$(row_for "${step_map_body}" "${rel}")"
+    if [[ -z "${row}" ]]; then
+      fail "P2: \`${rel}\` is not named in a ${STEP_MAP_HEADING} table row"
+      continue
+    fi
+    cond="$(condition_cell "${row}")"
+    if [[ -z "${cond}" ]]; then
+      fail "P2: the ${STEP_MAP_HEADING} row for \`${rel}\` has an empty Condition cell"
+      continue
+    fi
+    [[ "${cond}" == *"${EVERY_RUN}"* || "${cond}" == *"when"* ]] || fail "P2: the Condition cell for \`${rel}\` states neither \"${EVERY_RUN}\" nor a \"when\" condition: ${cond:0:120}"
+  done
+}
+
+# run_resolver <config-json> [--all] -- the shipped resolver's single JSON line for
+# a config passed on stdin. Pure.
+run_resolver() {
+  local cfg="$1"
+  shift
+  printf '%s' "${cfg}" | bash "${CONFIGURE_DIR}/scripts/resolve-delta.sh" - "$@" 2>/dev/null
+}
+
+# check_generation_rows <label> -- every generation row of `### Run Order` is
+# selected on every run and never conditioned on delta.ask. Calls fail(), so it is
+# never used inside $(...).
+check_generation_rows() {
+  local label="$1" token row selected
+  for token in "${RUN_ORDER_STEP_TOKENS[@]}"; do
+    row="$(run_order_row "${run_order_body}" "Step ${token}")"
+    if [[ -z "${row}" ]]; then
+      fail "${label}: ${RUN_ORDER_HEADING} has no row for Step ${token}"
+      continue
+    fi
+    selected="$(table_cell "${row}" 3)"
+    assert_contains "${selected}" "${RUN_ORDER_STEP_PART}" "${label}: ${RUN_ORDER_HEADING} Step ${token} is selected on every run"
+    [[ "${selected}" != *"${RUN_ORDER_FORBIDDEN_IN_STEP}"* ]] || fail "${label}: ${RUN_ORDER_HEADING} Step ${token} must not be conditioned on ${RUN_ORDER_FORBIDDEN_IN_STEP}: ${selected:0:120}"
+  done
+}
+
+# P3 (#1344): the router pins the ordered step map -- question rows 1 to 20, then
+# generation steps 0 to 7 -- and states which run modes select each row. A first
+# run and an `--all` run select every question section; a delta run asks only the
+# IDs in `delta.ask` and still selects every generation step. The resolver runs
+# below prove the first-run, --all and delta claims against the shipped script.
+case_P3_run_order() {
+  [[ -n "${skill}" ]] || { fail "P3: SKILL.md missing or empty"; return; }
+  if [[ -z "${run_order_body}" ]]; then
+    fail "P3: SKILL.md ${RUN_ORDER_HEADING} section missing or empty"
+    return
+  fi
+  local header token row selected part want_file prev=-1 at n
+  header="$(grep -m1 -E '^\| ' <<<"${run_order_body}")"
+  [[ "$(table_cell "${header}" 3)" == "Selected" ]] || fail "P3: ${RUN_ORDER_HEADING} table must have a third column named Selected, got header [${header}]"
+
+  # Question rows 1 to 20: every pinned row exists exactly once, in order, names
+  # its file, and says when it is asked.
+  for token in "${RUN_ORDER_QUESTION_TOKENS[@]}"; do
+    n="$(grep -cF -- "| Question ${token} |" <<<"${run_order_body}")"
+    if [[ "${n}" -ne 1 ]]; then
+      fail "P3: ${RUN_ORDER_HEADING} must hold exactly one \"Question ${token}\" row, found ${n}"
+      continue
+    fi
+    at="$(offset_of "${run_order_body}" "| Question ${token} |")"
+    [[ "${at}" -gt "${prev}" ]] || fail "P3: ${RUN_ORDER_HEADING} row \"Question ${token}\" is out of order"
+    prev="${at}"
+    row="$(run_order_row "${run_order_body}" "Question ${token}")"
+    selected="$(table_cell "${row}" 3)"
+    for part in "${RUN_ORDER_QUESTION_PARTS[@]}"; do
+      assert_contains_ws "${selected}" "${part}" "P3: ${RUN_ORDER_HEADING} \"Question ${token}\" Selected cell names [${part}]"
+    done
+    want_file="$(pinned_file_for "${token}" "${RUN_ORDER_QUESTION_FILES[@]}")"
+    [[ -n "${want_file}" ]] || { fail "P3: test bug: no pinned file for Question ${token}"; continue; }
+    assert_contains "${row}" "\`${want_file}\`" "P3: ${RUN_ORDER_HEADING} \"Question ${token}\" row names \`${want_file}\`"
+  done
+
+  # Any "Question <number>" row (including an optional question 12) keeps the
+  # numbers non-decreasing, from 1 up to the 18-20 row.
+  local nums num last=0 first_num="" last_num=""
+  nums="$(grep -oE '^\| Question [0-9]+' <<<"${run_order_body}" | grep -oE '[0-9]+$')"
+  while IFS= read -r num; do
+    [[ -n "${num}" ]] || continue
+    [[ -n "${first_num}" ]] || first_num="${num}"
+    [[ "${num}" -ge "${last}" ]] || fail "P3: ${RUN_ORDER_HEADING} question rows are not monotone: ${num} follows ${last}"
+    last="${num}"
+    last_num="${num}"
+  done <<<"${nums}"
+  [[ "${first_num}" == "1" && "${last_num}" == "18" ]] || fail "P3: ${RUN_ORDER_HEADING} question rows must run from 1 to the 18-20 row, got first=[${first_num}] last=[${last_num}]"
+
+  # Generation steps 0 to 7 follow the last question row, in order, each naming the
+  # file it runs from and selected on every run.
+  for token in "${RUN_ORDER_STEP_TOKENS[@]}"; do
+    n="$(grep -cF -- "| Step ${token} |" <<<"${run_order_body}")"
+    if [[ "${n}" -ne 1 ]]; then
+      fail "P3: ${RUN_ORDER_HEADING} must hold exactly one \"Step ${token}\" row, found ${n}"
+      continue
+    fi
+    at="$(offset_of "${run_order_body}" "| Step ${token} |")"
+    [[ "${at}" -gt "${prev}" ]] || fail "P3: ${RUN_ORDER_HEADING} row \"Step ${token}\" is out of order"
+    prev="${at}"
+    row="$(run_order_row "${run_order_body}" "Step ${token}")"
+    want_file="$(pinned_file_for "${token}" "${RUN_ORDER_STEP_FILES[@]}")"
+    [[ -n "${want_file}" ]] || { fail "P3: test bug: no pinned file for Step ${token}"; continue; }
+    assert_contains "${row}" "\`${want_file}\`" "P3: ${RUN_ORDER_HEADING} \"Step ${token}\" row names \`${want_file}\`"
+  done
+  check_generation_rows "P3"
+
+  # Resolver runs: a first run ({}) and an --all run ask every question-keys.json
+  # ID; each ID maps through `### Question Defaults` to a Run Order question row.
+  if ! command -v jq >/dev/null 2>&1; then
+    fail "P3: jq is required to run the resolver"
+    return
+  fi
+  local ids_json id_count first_run all_run delta_run last_id
+  ids_json="$(jq -c '[.questions[].id]' "${CONFIGURE_DIR}/question-keys.json")" || { fail "P3: cannot read question-keys.json"; return; }
+  id_count="$(jq -r 'length' <<<"${ids_json}")"
+  [[ "${id_count}" -ge "${ID_FLOOR}" ]] || fail "P3: expected at least ${ID_FLOOR} question IDs in question-keys.json, found ${id_count}"
+  first_run="$(run_resolver '{}')"
+  jq -e --argjson ids "${ids_json}" '.ask == $ids and .carried == []' <<<"${first_run}" >/dev/null 2>&1 \
+    || fail "P3: a first run ({}) must ask every question-keys.json ID and carry none, got [${first_run}]"
+  all_run="$(run_resolver "$(jq -cn --argjson ids "${ids_json}" '{configureOffered: $ids, stack: {}}')" --all)"
+  jq -e --argjson ids "${ids_json}" '.ask == $ids and .carried == []' <<<"${all_run}" >/dev/null 2>&1 \
+    || fail "P3: an --all run must ask every question-keys.json ID even with a full ledger, got [${all_run}]"
+  last_id="$(jq -r '.[-1]' <<<"${ids_json}")"
+  delta_run="$(run_resolver "$(jq -cn --argjson ids "${ids_json}" '{configureOffered: $ids[:-1]}')")"
+  jq -e --arg last "${last_id}" '.ask == [$last]' <<<"${delta_run}" >/dev/null 2>&1 \
+    || fail "P3: a delta run must ask only the IDs in delta.ask ([${last_id}]), got [${delta_run}]"
+
+  local id label ids_list
+  ids_list="$(jq -r '.[]' <<<"${ids_json}")" || { fail "P3: cannot list the question IDs"; return; }
+  while IFS= read -r id; do
+    [[ -n "${id}" ]] || continue
+    label="$(defaults_label_for_id "${question_defaults_body}" "${id}")"
+    if [[ -z "${label}" ]]; then
+      fail "P3: question ID \`${id}\` has no row in ${QUESTION_DEFAULTS_HEADING}"
+      continue
+    fi
+    token="$(label_token "${label}")"
+    row="$(run_order_row "${run_order_body}" "Question ${token}")"
+    [[ -n "${row}" ]] || fail "P3: question ID \`${id}\` maps to \"${label}\" in ${QUESTION_DEFAULTS_HEADING}, but ${RUN_ORDER_HEADING} has no \"Question ${token}\" row"
+  done <<<"${ids_list}"
+}
+
+# P23 (#1344): a delta run with an empty `delta.ask` asks no question and still
+# reads and runs every generation phase. The empty-ask result is produced by the
+# shipped resolver on a full-ledger fixture; the router selects every generation
+# step on every run; the Delta Resolution sentence is pinned; and the generation
+# files' Step Map rows say they are read on every run (the wiring that makes the
+# sentence true, not just stated).
+case_P23_empty_delta_runs_generation() {
+  [[ -n "${skill}" ]] || { fail "P23: SKILL.md missing or empty"; return; }
+  if ! command -v jq >/dev/null 2>&1; then
+    fail "P23: jq is required to run the resolver"
+    return
+  fi
+  local ids_json id_count full_ledger result
+  ids_json="$(jq -c '[.questions[].id]' "${CONFIGURE_DIR}/question-keys.json")" || { fail "P23: cannot read question-keys.json"; return; }
+  id_count="$(jq -r 'length' <<<"${ids_json}")"
+  [[ "${id_count}" -ge "${ID_FLOOR}" ]] || fail "P23: expected at least ${ID_FLOOR} question IDs in question-keys.json, found ${id_count}"
+  full_ledger="$(jq -cn --argjson ids "${ids_json}" '{configureOffered: $ids}')"
+  result="$(run_resolver "${full_ledger}")"
+  jq -e --argjson ids "${ids_json}" '.ask == [] and .carried == $ids' <<<"${result}" >/dev/null 2>&1 \
+    || fail "P23: a full-ledger delta run must have an empty delta.ask and carry every ID, got [${result}]"
+
+  assert_contains_ws "${detect_phase}" "${DR_ZERO_ASK}" "P23: ${DETECT_FILE} states an empty delta.ask asks nothing and still runs every generation step"
+  if [[ -z "${run_order_body}" ]]; then
+    fail "P23: SKILL.md ${RUN_ORDER_HEADING} section missing or empty, cannot verify the generation steps are still selected"
+  else
+    check_generation_rows "P23"
+  fi
+  local file row
+  for file in "${GUIDANCE_FILE}" "${SETTINGS_TEMPLATE_FILE}" "${CI_FILE}" "${WRITE_CONFIG_FILE}" "${SCHEMA_FILE}" "${COMMIT_PR_FILE}"; do
+    row="$(row_for "${step_map_body}" "${file}")"
+    assert_contains "${row}" "${EVERY_RUN}" "P23: the ${STEP_MAP_HEADING} row for ${file} is read on every run, including a run with an empty delta.ask"
+  done
+}
+
+# case_step6_step7_markers -- the moved bold markers occur once in the new file and
+# once in the SKILL.md stub (never as a body), so the existence anchor in
+# configure-fragment-markers.test.sh still holds.
+case_step6_step7_markers() {
+  local entry marker file n_file n_skill n_all
+  for entry in "${STEP6_MARKER}|${WRITE_CONFIG_FILE}" "${STEP7_MARKER}|${COMMIT_PR_FILE}"; do
+    marker="${entry%%|*}"
+    file="${entry#*|}"
+    if [[ -z "$(file_content "${file}")" ]]; then
+      fail "step marker [${marker}]: ${file} missing or empty"
+      continue
+    fi
+    n_file="$(count_occurrences "$(file_content "${file}")" "${marker}")"
+    n_skill="$(count_occurrences "${skill}" "${marker}")"
+    n_all="$(count_occurrences "${configure_all}" "${marker}")"
+    [[ "${n_file}" -eq 1 ]] || fail "step marker [${marker}] must occur once in ${file}, found ${n_file}"
+    [[ "${n_skill}" -eq 1 ]] || fail "step marker [${marker}] must occur once in SKILL.md (the stub), found ${n_skill}"
+    [[ "${n_all}" -eq 2 ]] || fail "step marker [${marker}] must occur exactly twice across the configure markdown (stub and file), found ${n_all}"
+  done
+}
+
+# P7 (#1344): step 6's overlay order and validation, the offered-ledger program and
+# the removal of a fallen-back question 13/14/15 ID before the ledger stamp keep
+# their wording in phases/write-config.md, byte for byte, in reading order.
+case_P7_step6_verbatim() {
+  check_verbatim_block "P7 overlay order and validation" "${P7_OVERLAY_ORDER_BLOCK}" "${WRITE_CONFIG_FILE}" "${STUB_6}"
+  check_verbatim_block "P7 fallen-back overlay paragraph" "${P7_FALLEN_BACK_BLOCK}" "${WRITE_CONFIG_FILE}" "${STUB_6}"
+  check_verbatim_block "P7 offered-ledger program" "${P7_LEDGER_BLOCK}" "${WRITE_CONFIG_FILE}" "${STUB_6}"
+  # Reading order inside the file: the overlay order, then the fallen-back
+  # paragraph, then the configVersion stamp, then the ledger stamp and program.
+  local content prev=-1 at anchor
+  content="$(file_content "${WRITE_CONFIG_FILE}")"
+  for anchor in \
+    "${STEP6_MARKER}" \
+    '**Overlay order and validation.**' \
+    '**A fallen-back question 13/14/15 overlay was not applied.**' \
+    'Always stamp `configVersion`' \
+    'Always stamp `configureOffered`' \
+    '<!-- cenci:configure-offered-ledger:begin -->'; do
+    at="$(offset_of "${content}" "${anchor}")"
+    if [[ "${at}" -lt 0 ]]; then
+      fail "P7: ${WRITE_CONFIG_FILE} is missing [${anchor}]"
+    elif [[ "${at}" -le "${prev}" ]]; then
+      fail "P7: ${WRITE_CONFIG_FILE} has [${anchor}] out of reading order"
+    fi
+    prev="${at}"
+  done
+}
+
+# The `sandbox` merge section moved from the schema prose into step 6's file
+# (Decision: codex.md's "sandbox" field pointer goes to phases/write-config.md);
+# the schema keeps a one-line `sandbox` field entry that points there.
+case_sandbox_merge_in_write_config() {
+  local pin n_all
+  [[ -n "${write_config_phase}" ]] || { fail "sandbox merge: ${WRITE_CONFIG_FILE} missing or empty"; return; }
+  for pin in "${SANDBOX_MERGE_PINS[@]}"; do
+    assert_contains_ws "${write_config_phase}" "${pin}" "sandbox merge: ${WRITE_CONFIG_FILE} holds [${pin:0:70}]"
+    n_all="$(count_occurrences "${configure_all}" "${pin}")"
+    [[ "${n_all}" -eq 1 ]] || fail "sandbox merge: [${pin:0:70}] must occur exactly once across the configure markdown, found ${n_all}"
+    assert_absent_paired_ws "${skill}" "${STUB_6}" "${pin}" "sandbox merge: SKILL.md no longer carries [${pin:0:70}]"
+  done
+  local sandbox_entry
+  sandbox_entry="$(grep -F -- '`sandbox`' <<<"${schema_ref}" | grep -F -- "${SCHEMA_SANDBOX_POINTER}" | head -n 1)"
+  [[ -n "${sandbox_entry}" ]] || fail "sandbox merge: ${SCHEMA_FILE} must keep a \`sandbox\` field entry that points at ${SCHEMA_SANDBOX_POINTER}"
+}
+
+# P8 (#1344): step 7's recovery branches -- nothing staged, push failure, an
+# existing PR recovered with `gh pr view`, any other `gh pr create` failure, and
+# removal of the PR-body temp file -- keep their wording in phases/commit-pr.md,
+# byte for byte, in reading order.
+case_P8_step7_recovery_verbatim() {
+  check_verbatim_block "P8 nothing staged" "${P8_NOTHING_STAGED_BLOCK}" "${COMMIT_PR_FILE}" "${STUB_7}"
+  check_verbatim_block "P8 push failure" "${P8_PUSH_FAILURE_BLOCK}" "${COMMIT_PR_FILE}" "${STUB_7}"
+  check_verbatim_block "P8 PR create failure and recovery" "${P8_PR_RECOVERY_BLOCK}" "${COMMIT_PR_FILE}" "${STUB_7}"
+  check_verbatim_block "P8 PR-body temp file removal" "${P8_TEMP_REMOVAL_BLOCK}" "${COMMIT_PR_FILE}" "${STUB_7}"
+  local content prev=-1 at anchor
+  content="$(file_content "${COMMIT_PR_FILE}")"
+  for anchor in \
+    "${STEP7_MARKER}" \
+    'No configuration changes — nothing to commit' \
+    '"Pushed, continue" / "Abort"' \
+    'gh pr view chore/configure-<slug> --json url -q .url' \
+    '"Created, continue" / "Abort"' \
+    'Delete the PR-body temp file'; do
+    at="$(offset_of "${content}" "${anchor}")"
+    if [[ "${at}" -lt 0 ]]; then
+      fail "P8: ${COMMIT_PR_FILE} is missing [${anchor}]"
+    elif [[ "${at}" -le "${prev}" ]]; then
+      fail "P8: ${COMMIT_PR_FILE} has [${anchor}] out of reading order"
+    fi
+    prev="${at}"
+  done
+}
+
+# P9 (#1344): docs/board-labels.md is the only lifecycle-label table. `### Board
+# lifecycle labels` is a pointer at it plus the completion-summary instruction and
+# the board migration pointer, and the orthogonal-marker restatements are gone from
+# every configure file (paired with the pointer that must remain).
+case_P9_board_labels_pointer() {
+  [[ -n "${skill}" ]] || { fail "P9: SKILL.md missing or empty"; return; }
+  local body body_lines retired
+  body="$(extract_section_body_raw "${skill}" "${BOARD_LABELS_HEADING}")"
+  if [[ -z "${body}" ]]; then
+    fail "P9: SKILL.md ${BOARD_LABELS_HEADING} section missing or empty"
+    return
+  fi
+  assert_contains_ws "${body}" "${BOARD_LABELS_POINTER}" "P9: ${BOARD_LABELS_HEADING} points at the plugin's docs/board-labels.md"
+  assert_contains_ws "${body}" "${BOARD_LABELS_SUMMARY}" "P9: ${BOARD_LABELS_HEADING} keeps the completion-summary instruction"
+  assert_contains_ws "${body}" "${STUB_BOARD_NOTES}" "P9: ${BOARD_LABELS_HEADING} points at the migrations row for the board migration notes"
+  [[ "${body}" != *"${MIGRATIONS_FILE}"* ]] || fail "P9: ${BOARD_LABELS_HEADING} must not name ${MIGRATIONS_FILE} (P19's line rule: a line naming it names .claude/config.json too)"
+  body_lines="$(grep -c . <<<"${body}")"
+  [[ "${body_lines}" -le "${BOARD_LABELS_BODY_MAX_LINES}" ]] || fail "P9: ${BOARD_LABELS_HEADING} must be a pointer of at most ${BOARD_LABELS_BODY_MAX_LINES} lines, found ${body_lines}"
+  for retired in "${BOARD_LABELS_RETIRED[@]}"; do
+    assert_absent_paired_ws "${configure_all}" "${BOARD_LABELS_SUMMARY}" "${retired}" "P9: configure markdown no longer restates [${retired:0:70}]"
+  done
+  # The one fact that was not a label restatement moved into the doc's lifecycle
+  # paragraph.
+  assert_contains_ws "${board_labels_doc}" "${BOARD_LABELS_TRIVIAL_FACT}" "P9: docs/board-labels.md carries the trivial-ticket fact"
+}
+
+# P11 (#1344): the complete `.cenci/config.json` examples and the field-by-field
+# schema exist only in references/config-schema.md. SKILL.md carries no fenced JSON
+# or YAML block, and the moved text (the examples, the field entries, the migration-
+# removal list and the MCP/LSP inclusion rules at the end) occurs exactly once.
+case_P11_schema_only_in_reference() {
+  [[ -n "${skill}" ]] || { fail "P11: SKILL.md missing or empty"; return; }
+  [[ -n "${schema_ref}" ]] || { fail "P11: ${SCHEMA_FILE} missing or empty"; return; }
+  local fences schema_fences anchor n_all n_schema removal_all removal_schema
+  fences="$(grep -cE '^[[:space:]]*```[[:space:]]*(json|jsonc|yaml|yml)[[:space:]]*$' <<<"${skill}")"
+  [[ "${fences}" -eq 0 ]] || fail "P11: SKILL.md must contain no fenced JSON or YAML block, found ${fences}"
+  assert_contains "${skill}" "${STUB_6}" "P11: SKILL.md fence absence is paired with the step 6 stub that remains"
+  schema_fences="$(grep -cE '^```json$' <<<"${schema_ref}")"
+  [[ "${schema_fences}" -ge 5 ]] || fail "P11: ${SCHEMA_FILE} must hold the five fenced json examples that moved, found ${schema_fences}"
+  for anchor in "${SCHEMA_ANCHORS[@]}"; do
+    n_all="$(count_occurrences "${configure_all}" "${anchor}")"
+    n_schema="$(count_occurrences "${schema_ref}" "${anchor}")"
+    [[ "${n_schema}" -eq 1 ]] || fail "P11: [${anchor}] must occur once in ${SCHEMA_FILE}, found ${n_schema}"
+    [[ "${n_all}" -eq 1 ]] || fail "P11: [${anchor}] must occur exactly once across the configure markdown (in ${SCHEMA_FILE}), found ${n_all}"
+  done
+  # The migration-removal list and the inclusion rules close the schema, so every
+  # "migration-removal list below" pointer stays inside the one file.
+  local docs_at pin_at pin
+  docs_at="$(offset_of "${schema_ref}" '`docs.policy` — the exact, case-sensitive string')"
+  for pin in "${SCHEMA_MIGRATION_REMOVAL_LIST}" "${SCHEMA_MCP_INCLUSION}" "${SCHEMA_LSP_INCLUSION}"; do
+    assert_contains_ws "${schema_ref}" "${pin}" "P11: ${SCHEMA_FILE} ends with [${pin:0:60}]"
+    assert_absent_paired_ws "${skill}" "${STUB_6}" "${pin}" "P11: SKILL.md no longer carries [${pin:0:60}]"
+    pin_at="$(offset_of "${schema_ref}" "${pin:0:60}")"
+    if [[ "${docs_at}" -ge 0 && "${pin_at}" -ge 0 && "${pin_at}" -le "${docs_at}" ]]; then
+      fail "P11: [${pin:0:60}] must come after the last field entry in ${SCHEMA_FILE}"
+    fi
+  done
+  removal_schema="$(count_occurrences "${schema_ref}" "${SCHEMA_REMOVAL_POINTER}")"
+  removal_all="$(count_occurrences "${configure_all}" "${SCHEMA_REMOVAL_POINTER}")"
+  [[ "${removal_schema}" -ge "${SCHEMA_REMOVAL_POINTER_MIN}" ]] || fail "P11: ${SCHEMA_FILE} must keep at least ${SCHEMA_REMOVAL_POINTER_MIN} \"${SCHEMA_REMOVAL_POINTER}\" pointers, found ${removal_schema}"
+  [[ "${removal_all}" -eq "${removal_schema}" ]] || fail "P11: every \"${SCHEMA_REMOVAL_POINTER}\" pointer must stay inside ${SCHEMA_FILE}; ${removal_all} occur across the configure markdown, ${removal_schema} in the schema file"
+  # Pointers that crossed files name the file; the watch link gained one level.
+  n_all="$(count_occurrences "${schema_ref}" '`phases/write-config.md`')"
+  [[ "${n_all}" -ge 4 ]] || fail "P11: ${SCHEMA_FILE} must name \`phases/write-config.md\` at the sandbox entry and each \"config write\" pointer (at least 4 sites), found ${n_all}"
+  assert_absent_paired_ws "${configure_all}" "${SCHEMA_SANDBOX_POINTER}" 'the config write below' "P11: configure markdown retired positional \"the config write below\" pointer"
+  assert_contains "${schema_ref}" '](../../../../watch/README.md#planning-pickup-and-autonomous-re-plan)' "P11: ${SCHEMA_FILE} links watch/README.md with the corrected relative path"
+  assert_absent_paired_ws "${schema_ref}" '](../../../../watch/README.md#planning-pickup-and-autonomous-re-plan)' '](../../../watch/README.md' "P11: ${SCHEMA_FILE} retired the pre-move relative watch link"
+}
+
+# P24 (#1344): re-configuring a project that predates `In Review`, `Planned` or the
+# reconciler-managed labels states the matching migration note, read from a
+# reference file. The three notes live in references/migrations.md under `## Board
+# migration notes` (read when re-configuring an existing project); SKILL.md keeps
+# only the pointer at the migrations row.
+case_P24_board_migration_notes() {
+  [[ -n "${migrations}" ]] || { fail "P24: ${MIGRATIONS_FILE} missing or empty"; return; }
+  [[ "$(count_exact_lines "${migrations}" "${MIGRATIONS_BOARD_HEADING}")" -eq 1 ]] || fail "P24: ${MIGRATIONS_FILE} must hold exactly one [${MIGRATIONS_BOARD_HEADING}] heading"
+  local board_section legacy_section n
+  board_section="$(extract_h2_section_raw "${migrations}" "${MIGRATIONS_BOARD_HEADING}")"
+  legacy_section="$(extract_h2_section_raw "${migrations}" "${MIGRATIONS_LEGACY_HEADING}")"
+  if [[ -z "${board_section}" ]]; then
+    fail "P24: ${MIGRATIONS_FILE} [${MIGRATIONS_BOARD_HEADING}] section missing or empty"
+    return
+  fi
+  assert_contains_ws "${board_section}" "${MIGRATIONS_BOARD_CONDITION}" "P24: the board section states it is read only when re-configuring an existing project"
+  # The two byte-pinned notes, checked across the configure markdown, in the file,
+  # and (a second time) inside the board section, so neither can sit in the legacy
+  # section or in another file.
+  check_verbatim_block "P24 In Review note" "${P24_IN_REVIEW_NOTE}" "${MIGRATIONS_FILE}" "${STUB_BOARD_NOTES}"
+  check_verbatim_block "P24 Planned note" "${P24_PLANNED_NOTE}" "${MIGRATIONS_FILE}" "${STUB_BOARD_NOTES}"
+  n="$(count_block_occurrences "${board_section}" "${P24_IN_REVIEW_NOTE}")"
+  [[ "${n}" -eq 1 ]] || fail "P24: the In Review note must sit inside [${MIGRATIONS_BOARD_HEADING}], found ${n} there"
+  n="$(count_block_occurrences "${board_section}" "${P24_PLANNED_NOTE}")"
+  [[ "${n}" -eq 1 ]] || fail "P24: the Planned note must sit inside [${MIGRATIONS_BOARD_HEADING}], found ${n} there"
+  # The reconciler note cites step 3c, which lives in another file, so it may name
+  # that file: the text around the pointer is pinned and the file name pinned apart.
+  assert_contains_ws "${board_section}" "${P24_RECONCILER_NOTE_HEAD}" "P24: the reconciler-managed labels note keeps its opening"
+  assert_contains_ws "${board_section}" "${P24_RECONCILER_NOTE_TAIL}" "P24: the reconciler-managed labels note keeps its closing"
+  assert_contains_ws "${board_section}" "${P24_RECONCILER_NOTE_FILE}" "P24: the reconciler-managed labels note names the file holding step 3c"
+  assert_absent_paired_ws "${skill}" "${STUB_BOARD_NOTES}" "${P24_RECONCILER_NOTE_HEAD}" "P24: SKILL.md no longer carries the reconciler-managed labels note"
+  assert_absent_paired_ws "${skill}" "${STUB_BOARD_NOTES}" "${P24_RECONCILER_NOTE_TAIL}" "P24: SKILL.md no longer carries the reconciler-managed labels note body"
+  # Exactly three notes across the configure markdown, none in the router or in
+  # the legacy section.
+  n="$(count_occurrences "${configure_all}" "${BOARD_NOTE_LEAD}")"
+  [[ "${n}" -eq 3 ]] || fail "P24: the three board migration notes must occur exactly 3 times across the configure markdown, found ${n}"
+  n="$(count_occurrences "${board_section}" "${BOARD_NOTE_LEAD}")"
+  [[ "${n}" -eq 3 ]] || fail "P24: all three board migration notes must sit inside [${MIGRATIONS_BOARD_HEADING}], found ${n}"
+  assert_absent_paired_ws "${skill}" "${STUB_BOARD_NOTES}" "${BOARD_NOTE_LEAD}" "P24: SKILL.md carries no board migration note body"
+  assert_absent_paired_ws "${legacy_section}" "${MIGRATIONS_LEGACY_NEVER_READ}" "${BOARD_NOTE_LEAD}" "P24: the legacy section carries no board migration note"
+  # The router row that gates the file names the board section's condition too.
+  assert_contains_ws "$(row_for "${step_map_body}" "${MIGRATIONS_FILE}")" 're-configuring an existing project' "P24: the migrations row is read when re-configuring an existing project"
+}
+
+# Steps 6 and 7 no longer live inline, so an unreadable `Every run` file must stop
+# the run instead of letting the model rebuild them from memory (#1344).
+case_fail_closed_read_rule() {
+  assert_contains_ws "${step_map_body}" "${FAIL_CLOSED_READ_RULE}" "${STEP_MAP_HEADING}: states the fail-closed read rule for unreadable Every run files"
+}
+
 # --- Run every case ----------------------------------------------------------
 
 case_step_map
@@ -1048,6 +1919,19 @@ case_readme_workflow_deps_row
 case_block_counter_self_test
 case_P30_step1_verbatim
 case_P6_dockerfile_verbatim
+case_P1_router_size
+case_P2_condition_extractor_self_test
+case_P2_every_file_named_with_condition
+case_P3_run_order
+case_P23_empty_delta_runs_generation
+case_step6_step7_markers
+case_P7_step6_verbatim
+case_sandbox_merge_in_write_config
+case_P8_step7_recovery_verbatim
+case_P9_board_labels_pointer
+case_P11_schema_only_in_reference
+case_P24_board_migration_notes
+case_fail_closed_read_rule
 
 if [[ "${failures}" -gt 0 ]]; then
   echo "configure-router-contract.test.sh: ${failures} failure(s)." >&2

@@ -2,7 +2,7 @@
 # automerge-config-schema.test.sh — doc-contract test for ticket #824: the
 # automerge policy engine's `.cenci/config.json` schema (`automerge.*`, plus
 # the per-`projects[]` equivalents) must be BOTH documented in
-# skills/configure/SKILL.md AND registered in maintain/scripts/check.sh's
+# skills/configure/references/config-schema.md AND registered in maintain/scripts/check.sh's
 # CONFIG_SCHEMA -- a config field that is documented but not registered would
 # make check_config_examples (check.sh's Q3 doc/config-drift scan) reject any
 # fenced ```json example that legitimately uses it; a field registered but
@@ -53,11 +53,12 @@ assert_contains() {
 }
 
 # =====================================================================
-# skills/configure/SKILL.md — the authoritative config emitter must document
-# every automerge.* field: the fleet-wide enabled kill switch and each field
-# of the per-repo policy block.
+# skills/configure/references/config-schema.md — the authoritative config
+# emitter (the schema moved out of SKILL.md in #1344) must document every
+# automerge.* field: the fleet-wide enabled kill switch and each field of the
+# per-repo policy block.
 # =====================================================================
-FILE="skills/configure/SKILL.md"
+FILE="skills/configure/references/config-schema.md"
 if require_doc CONTENT "${FILE}"; then
   assert_contains "${CONTENT}" "automerge.enabled" "${FILE} (fleet kill switch documented)"
   assert_contains "${CONTENT}" "automerge.protectedPaths" "${FILE} (protectedPaths documented)"

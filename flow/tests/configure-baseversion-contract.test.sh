@@ -33,9 +33,9 @@
 #
 # Covered files:
 #   - flow/skills/configure/phases/ci-dockerfile.md (step 5e, #1343)
-#   - flow/skills/configure/SKILL.md (the step 6 merge-sandbox-config.sh
-#     invocation), plus phases/*.md and references/*.md for the absence checks
-#     (#1341)
+#   - flow/skills/configure/phases/write-config.md (the step 6
+#     merge-sandbox-config.sh invocation, #1344), plus SKILL.md, phases/*.md
+#     and references/*.md for the absence checks (#1341)
 #   - flow/skills/configure/codex.md
 set -uo pipefail
 
@@ -147,6 +147,7 @@ UNRESOLVED_COMMENT='No cenci-sandbox plugin version detected'
 # The shared client-neutral merge script — both adapters must still invoke
 # it (#632), but neither may still pass the retired flag.
 MERGE_SCRIPT_MARKER='merge-sandbox-config.sh'
+MERGE_SCRIPT_INVOCATION='bash "${CLAUDE_PLUGIN_ROOT}/skills/configure/scripts/merge-sandbox-config.sh" <path to existingConfig, or "-" for stdin>'
 BASE_VERSION_FLAG='--base-version'
 
 # --- skills/configure/SKILL.md ----------------------------------------------
@@ -166,9 +167,10 @@ for _configure_part in "${FLOW_DIR}"/skills/configure/phases/*.md "${FLOW_DIR}"/
   configure_all+=$'\n'"${_configure_part_content}"
   configure_part_count=$((configure_part_count+1))
 done
-# Floor: 9 phase files + 3 reference files after #1343 (guidance-settings,
-# ci-dockerfile and settings-template joined the 6 + 2 that #1341/#1342 left).
-[[ "${configure_part_count}" -ge 12 ]] || fail "configure_all aggregation is vacuous: aggregated ${configure_part_count} phases/references files (expected at least 12)"
+# Floor: 11 phase files + 4 reference files after #1344 (write-config and
+# commit-pr phases and the config-schema reference joined the 9 + 3 that
+# #1341-#1343 left).
+[[ "${configure_part_count}" -ge 15 ]] || fail "configure_all aggregation is vacuous: aggregated ${configure_part_count} phases/references files (expected at least 15)"
 
 # Step 5e lives in phases/ci-dockerfile.md since #1343: its existence marker and
 # the generated-file-format fence are read there. SKILL.md keeps only a stub
@@ -193,12 +195,18 @@ else
   fail "ci-dockerfile.md: skipped step 5e assertions -- doc empty/unreadable"
 fi
 
-if [[ -n "${skill}" ]]; then
+# The step 6 merge-script invocation lives in phases/write-config.md since #1344.
+# SKILL.md's allowed-tools frontmatter also names the script, so a bare
+# SKILL.md check would pass vacuously: the positive pin is read from the phase
+# file that holds the invocation, and the absence stays on the aggregate.
+require_doc write_config_phase "skills/configure/phases/write-config.md" || true
+if [[ -n "${write_config_phase}" ]]; then
   # Shared merge script still invoked, but without the retired flag.
-  assert_contains "${skill}" "${MERGE_SCRIPT_MARKER}" "SKILL.md still invokes merge-sandbox-config.sh"
+  assert_contains "${write_config_phase}" "${MERGE_SCRIPT_MARKER}" "write-config.md still invokes merge-sandbox-config.sh"
+  assert_contains "${write_config_phase}" "${MERGE_SCRIPT_INVOCATION}" "write-config.md carries the merge-sandbox-config.sh invocation line, not just a mention"
   assert_absent_paired_ws "${configure_all}" "${MERGE_SCRIPT_MARKER}" "${BASE_VERSION_FLAG}" "configure skill files' merge-sandbox-config.sh invocation drops --base-version"
 else
-  fail "SKILL.md: skipped merge-sandbox-config.sh assertions -- doc empty/unreadable"
+  fail "write-config.md: skipped merge-sandbox-config.sh assertions -- doc empty/unreadable"
 fi
 
 # --- skills/configure/codex.md ----------------------------------------------

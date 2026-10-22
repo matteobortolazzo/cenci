@@ -617,7 +617,7 @@ Accepted and documented, not bugs:
 | The full board lifecycle, labels, and every transition | [Orchestration recipe](orchestration.md) |
 | Dispatch gates, pickup rules, reconciliation, config reference | [cenci-watch README — Auto-dispatch](../watch/README.md#auto-dispatch-cenci-dispatch) |
 | Every automerge condition, in full | [cenci-watch README — Automerge](../watch/README.md#automerge-cenci-babysit) |
-| The `automerge` config schema, field by field | [configure skill](../flow/skills/configure/SKILL.md) |
+| The `automerge` config schema, field by field | [configure skill](../flow/skills/configure/references/config-schema.md) |
 | Lean refinement as the refine skill executes it | [Refine skill](../flow/skills/refine/SKILL.md) |
 | Lean planning as the planner actually executes it | [Phase 1 — Plan](../flow/skills/implement/phases/phase-1-plan.md) |
 | How a session resolves attended vs. the repo's autonomy | [Phase 1 — Plan, `## Resolve Planning Autonomy`](../flow/skills/implement/phases/phase-1-plan.md) |

@@ -186,7 +186,7 @@ companion) for every skill, including the internal ones not listed above.
 | `ci-repair` | — | project-core, shell-rules, subagent-safety, testing | — | domain-specialist |
 | `close` | codex.md | babysit, codex-runtime, project-core, shell-rules, subagent-safety | close-parent.sh | acceptance-reviewer |
 | `codex-runtime` | — | — | — | — |
-| `configure` | codex.md, phases/autonomy-settings.md, phases/ci-dockerfile.md, phases/detection-and-delta.md, phases/fleet-enrollment.md, phases/guidance-settings.md, phases/lazyboards.md, phases/mcp-lsp-ui-questions.md, phases/project-questions.md, phases/runtime-ci-sandbox-questions.md, references/lazyboards-example.md, references/migrations.md, references/settings-template.md | babysit, codex-runtime, project-core, shell-rules, testing, verify-ui | detect-project.sh, merge-sandbox-config.sh, resolve-delta.sh | code-reviewer |
+| `configure` | codex.md, phases/autonomy-settings.md, phases/ci-dockerfile.md, phases/commit-pr.md, phases/detection-and-delta.md, phases/fleet-enrollment.md, phases/guidance-settings.md, phases/lazyboards.md, phases/mcp-lsp-ui-questions.md, phases/project-questions.md, phases/runtime-ci-sandbox-questions.md, phases/write-config.md, references/config-schema.md, references/lazyboards-example.md, references/migrations.md, references/settings-template.md | babysit, codex-runtime, project-core, shell-rules, testing, verify-ui | detect-project.sh, merge-sandbox-config.sh, resolve-delta.sh | code-reviewer |
 | `frontend-classification` | — | implement, refine | — | — |
 | `implement` | codex.md, phases/phase-1-plan.md, phases/phase-2-worktree.md, phases/phase-3-test-red.md, phases/phase-4-implement-green.md, phases/phase-5-refactor.md, phases/phase-6-7-review.md, phases/phase-8-docs.md, phases/phase-9-pr.md, timing.md | address-review, attachments, babysit, ci-repair, close, codex-runtime, frontend-classification, project-core, review, shell-rules, subagent-safety, testing, ticket-ownership, verify-ui | doc-conventions.sh, docs-policy.sh, pr-size.sh, run-artifact-dir.sh | acceptance-reviewer, code-reviewer, context-gatherer, domain-specialist, implementer, lessons-collector, planner, security-reviewer, silent-failure-hunter |
 | `maintain` | base-freshness.md, codex.md, finding-schema.md, modes/backlog.md, modes/clients.md, modes/docs.md, modes/rules.md, modes/structure.md | codex-runtime, project-core, shell-rules, subagent-safety, worktrees | check.sh | backlog-maintainer, docs-maintainer, domain-specialist, portability-maintainer, rules-maintainer, structure-maintainer |
@@ -530,7 +530,7 @@ core correctness behavior: it still runs when `maintenance.enabled` is false. Th
 including CI-blocking `fail` results, which disables the Phase 9 push gate;
 `generatedDocs` controls marker-bounded generated-section maintenance; `remindAfterDays`
 sets reminder cadence; and `maintenance.enabled` gates only optional scheduled-maintenance
-and reminder UX. See [`flow/skills/configure/SKILL.md`](skills/configure/SKILL.md) for the
+and reminder UX. See [`flow/skills/configure/references/config-schema.md`](skills/configure/references/config-schema.md) for the
 schema and defaults.
 
 ### Documentation policy
