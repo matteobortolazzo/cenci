@@ -1,5 +1,5 @@
 {
-  "configVersion": "1.15.0",
+  "configVersion": "1.27.5",
   "branchPattern": "feature/<id>-<description>",
   "isMonorepo": true,
   "stack": {
@@ -145,10 +145,16 @@
     "implementerMaxConcurrency": 2
   },
   "refinement": {
-    "autonomy": "lean"
+    "autonomy": "lean",
+    "confirmBeforeApply": false,
+    "automerge": "off"
   },
   "configureOffered": [
+    "automerge.enabled",
     "cicd",
+    "planning.attended",
+    "refinement.automerge",
+    "refinement.confirmBeforeApply",
     "sandbox.azure",
     "sandbox.dind"
   ]
