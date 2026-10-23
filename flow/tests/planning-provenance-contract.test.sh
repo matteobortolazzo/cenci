@@ -226,16 +226,16 @@ assert_occurs_exactly "${PLANNER_AGENT}" '**genuine product ambiguity the ticket
 assert_occurs_exactly "${PLANNER_AGENT}" '**scope blowup**' 1 \
   "scope-blowup escalation class occurrence count must be unchanged (AC3 regression)"
 
-# refiner.md and skills/refine/codex.md: the refinement-time restatement
-# sites are deliberately unchanged (restatement-site audit, AC5). Neither
-# marker below is asserted by lean-planning-contract.test.sh today.
+# refiner.md and skills/refine/codex.md: refinement no longer asks a
+# confirm/overrule question for an entailed decision (it records it with its
+# derivation instead), so neither planning-era restatement may reappear there.
 REFINER_EXEMPT_MARKER='This confirm/overrule question is exempt from the round'"'"'s question cap and must be asked before the round can return `None.`'
 CODEX_REFINE_RESTATEMENT_MARKER="ask via the client's available user-input mechanism a confirm/overrule question that states the decision and its derivation without re-opening the full option space"
 
-assert_file_contains "${REFINER_AGENT}" "${REFINER_EXEMPT_MARKER}" \
-  "refiner.md's confirm/overrule-exempt-from-cap restatement must be unchanged (restatement-site audit, AC5)"
-assert_file_contains "${REFINE_CODEX}" "${CODEX_REFINE_RESTATEMENT_MARKER}" \
-  "flow/skills/refine/codex.md's refinement-time restatement must be unchanged (restatement-site audit, AC5)"
+assert_file_lacks "${REFINER_AGENT}" "${REFINER_EXEMPT_MARKER}" \
+  "refiner.md must not restore the entailed confirm/overrule cap exemption"
+assert_file_lacks "${REFINE_CODEX}" "${CODEX_REFINE_RESTATEMENT_MARKER}" \
+  "flow/skills/refine/codex.md must not restore the entailed confirm/overrule question"
 
 # phase-1-plan.md: the sensitive-path backstop bullet is explicitly out of
 # scope and byte-unchanged (AC7). Occurrence-count check, not a duplicate of

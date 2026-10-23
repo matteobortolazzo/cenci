@@ -366,8 +366,12 @@ assert_file_contains "${REFINER_AGENT}" "${ENTAILMENT_ANSWER_ALREADY_FIXED_MARKE
   "refiner.md must still carry the entailment-ban sentence verbatim (AC4 consistency reference)"
 assert_file_contains "${PLANNER_AGENT}" "${CONFIRM_OVERRULE_MARKER}" \
   "must require a confirm/overrule question, never one that re-opens the full option space, on a security-sensitive/irreversible entailed decision (AC3)"
-assert_file_contains "${REFINER_AGENT}" "${CONFIRM_OVERRULE_MARKER}" \
-  "refiner.md must still carry the confirm/overrule sentence verbatim (AC4 consistency reference)"
+# Refinement deliberately diverges here: it never asks the user to confirm an
+# entailed decision, security-sensitive or not, and records it instead.
+assert_file_lacks "${REFINER_AGENT}" "${CONFIRM_OVERRULE_MARKER}" \
+  "refiner.md must not ask a confirm/overrule question for an entailed decision"
+assert_file_contains "${REFINER_AGENT}" 'never ask the user to confirm or overrule an entailed decision.' \
+  "refiner.md must record entailed security/irreversible decisions instead of confirming them"
 
 # --- AC3 (entailment), planner-specific ------------------------------------
 

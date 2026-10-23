@@ -393,6 +393,12 @@ only material questions. Once those answers are settled, refinement validates an
 renders the proposal and applies it without another confirmation by default.
 Lean mode keeps a short interview and records grounded decisions. A question cap
 cannot authorize an unanswered consequential decision on the automatic path.
+Refinement asks only open choices: a decision the repo or your earlier answers
+already settle, including a security or irreversible one, is recorded in
+`### Decisions` with its derivation and is never put to you as a confirm-or-overrule
+question. Browser verification is never asked either; the `Browser` label is
+derived from the ticket's classification. Once nothing is left to ask, refinement
+runs its checks and writes the ticket.
 
 ```json
 {

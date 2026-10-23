@@ -25,6 +25,7 @@ shared = between(agent, "## Shared Question Policy", "## Lean Question Policy")
 codex_shared = between(codex, "**Shared question policy.**", "**Lean refinement**")
 for name, policy in (("refiner", shared), ("Codex", codex_shared)):
     require(policy, "The `Browser` requirement is never a question in either mode", f"{name}: browser policy applies outside lean-only section")
+    require(policy, "never a question in either mode, whatever the classification", f"{name}: browser question is never asked, even for non-frontend work")
     require(policy, "For frontend/UI work, assume interactive browser verification", f"{name}: UI work defaults to browser verification")
     require(policy, "explicit user restriction", f"{name}: explicit browser restriction survives the default")
     require(policy, "security-sensitive, destructive, or unresolved product decisions", f"{name}: real consequential questions survive the default")
@@ -34,6 +35,10 @@ guard = between(relay, "**Browser default before relay (both modes).**", "**Inte
 require(guard, "before either relay or lean-cap enforcement", "Claude: guard runs before asking or rejecting over-cap questions")
 require(guard, "resolved `isFrontend`", "Claude: guard consumes classification rather than assuming every task is UI")
 require(guard, "Auto-adopted from classification", "Claude: derived answer is distinguished from a user answer")
+require(guard, "do not relay it, whatever the classification", "Claude: browser-only question is filtered even when the ticket is not frontend")
+require(guard, "<required|not required>", "Claude: derived answer carries the step-8 outcome, including not required")
+if "already entail it, do not relay it" in guard:
+    failures.append("Claude: guard must not filter browser questions only when classification entails them")
 require(guard, "complete accumulated history", "Claude: derived answer reaches the next analysis")
 require(guard, "Retain every other question", "Claude: guard cannot drop real unanswered questions")
 require(guard, "any remaining questions actually relayed still count", "Claude: mixed rounds cannot bypass the question cap")
@@ -42,6 +47,7 @@ require(guard, "STOP with zero GitHub writes", "Claude: repeated policy violatio
 require(guard, "explicit user restriction", "Claude: guard respects an explicit browser restriction")
 require(codex_shared, "Before presenting any question", "Codex: default is checked at the user-input boundary")
 require(codex_shared, "do not consume a question slot", "Codex: settled browser choice does not consume caps")
+require(codex_shared, "browser-based verification, whatever the classification", "Codex: browser-only question is filtered even when the ticket is not frontend")
 
 # A mutation restoring the old lean-only placement must fail the same assertion
 # even though the required sentence is still present elsewhere in the real agent.

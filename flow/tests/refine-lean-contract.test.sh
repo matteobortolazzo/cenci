@@ -3,8 +3,8 @@
 # lean refinement policy. `refinement.autonomy: "lean"` makes the refiner ask
 # only in four classes (security-sensitive, destructive or irreversible, scope
 # blowup / split, product ambiguity with no recommendable option), in one round
-# of at most 3 questions plus the always-asked cap-exempt confirm/overrule
-# question; the refine skill enforces that cap itself; the Confirmation Gate
+# of at most 3 questions plus any always-asked required cap-exempt question
+# (never a confirm/overrule of an already-settled decision); the refine skill enforces that cap itself; the Confirmation Gate
 # lists every auto-adopted item and `decided:` entry as A1...An and accepts one
 # freeform overrule; Codex mirrors all of it. Interactive refine shares question selection,
 # but keeps its own relay and confirmation rather than lean overflow/overrule.
@@ -122,9 +122,11 @@ assert_file_contains "${REFINER_AGENT}" "${REFINER_INPUT_FLAG_MARKER}" \
 # =====================================================================
 
 CAP_PHRASE_MARKER='one question round and at most 3 questions'
-EXEMPT_TAG_MARKER='(confirm/overrule — cap-exempt)'
+EXEMPT_TAG_MARKER='(required — cap-exempt)'
+LEGACY_EXEMPT_TAG_MARKER='(confirm/overrule — cap-exempt)'
+LEGACY_RANK_MARKER='confirm/overrule, security'
 EXEMPT_NEVER_DROPPED_MARKER='is always asked and never dropped, even when the 3-question cap is already full'
-RANK_MARKER='confirm/overrule, security, destructive, split, product ambiguity'
+RANK_MARKER='security, destructive, split, product ambiguity'
 SENTINEL_MARKER='Not asked — over the lean question cap; decide it under the overflow rule.'
 DECIDED_FORMAT_MARKER='decided: <answer> — <rationale> (alternative: <option label>)'
 OVER_CAP_SUFFIX_MARKER='(over the cap: <class>)'
@@ -135,6 +137,10 @@ for FILE in "${REFINER_AGENT}" "${REFINE_SKILL}" "${REFINE_CODEX}"; do
     "must pin the lean cap phrase identically (AC4, AC13)"
   assert_file_contains "${FILE}" "${EXEMPT_TAG_MARKER}" \
     "must pin the cap-exempt tag identically (AC4, AC13)"
+  assert_file_lacks "${FILE}" "${LEGACY_EXEMPT_TAG_MARKER}" \
+    "must not ask a confirm/overrule question for a settled decision"
+  assert_file_lacks "${FILE}" "${LEGACY_RANK_MARKER}" \
+    "must not rank a confirm/overrule class ahead of the four question classes"
   assert_file_contains "${FILE}" "${EXEMPT_NEVER_DROPPED_MARKER}" \
     "must pin the exempt question's always-asked-never-dropped clause identically (AC4, anti-starvation #979)"
   assert_file_contains "${FILE}" "${RANK_MARKER}" \
@@ -273,16 +279,18 @@ assert_file_contains "${REFINE_CODEX}" "${CAP_PHRASE_MARKER}" \
 assert_file_contains "${REFINE_CODEX}" "${CODEX_ROUND_CAP_MARKER}" \
   "Codex case 2 (round/question cap): after round 1 only cap-exempt questions are asked (AC4)"
 
-# --- Codex case 3: cap-exempt security confirmation -------------------------
+# --- Codex case 3: required cap-exempt question ----------------------------
 
-CODEX_SECURITY_CONFIRM_MARKER='A security-sensitive or irreversible entailed decision still gets its cap-exempt confirm/overrule question, even when the cap is already full.'
+REQUIRED_OPEN_CHOICE_MARKER='A required question asks an open choice; it never asks the user to confirm a decision that is already settled.'
 
-assert_file_contains "${REFINE_CODEX}" "${CODEX_SECURITY_CONFIRM_MARKER}" \
-  "Codex case 3 (cap-exempt security confirmation): the entailed security/irreversible confirmation is never squeezed out by the cap (AC4, AC13, anti-starvation #979)"
+for FILE in "${REFINER_AGENT}" "${REFINE_CODEX}"; do
+  assert_file_contains "${FILE}" "${REQUIRED_OPEN_CHOICE_MARKER}" \
+    "Codex case 3 (required question): a required question asks an open choice, never a confirmation of a settled one"
+done
 assert_file_contains "${REFINE_CODEX}" "${EXEMPT_NEVER_DROPPED_MARKER}" \
-  "Codex case 3 (cap-exempt security confirmation): the exempt question is always asked and never dropped (AC4)"
+  "Codex case 3 (required question): the exempt question is always asked and never dropped (AC4, anti-starvation #979)"
 assert_file_contains "${REFINE_CODEX}" "${EXEMPT_TAG_MARKER}" \
-  "Codex case 3 (cap-exempt security confirmation): the exempt question carries the exempt tag (AC4)"
+  "Codex case 3 (required question): the exempt question carries the exempt tag (AC4)"
 
 # --- Codex case 4: Confirmation Gate overrule -------------------------------
 

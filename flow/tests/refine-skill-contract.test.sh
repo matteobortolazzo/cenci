@@ -358,9 +358,9 @@ if [[ -n "${codex}" ]]; then
   # AC5: codex.md restates the recommendation requirement in behavioral
   # parity.
   assert_contains "${codex}" "every question with options marks one recommended option first with a one-line rationale, and every open-ended question leads with the refiner's proposed answer" "978 skills/refine/codex.md recommendation requirement restated"
-  # AC5: codex.md restates the entailment category, using the abstract
-  # "client's available user-input mechanism" wording.
-  assert_contains "${codex}" "entailed questions — those already fixed by a recorded answer — are forbidden; auto-adopt them into \`### Decisions\` with a \`follows from Q<n> (round <m>)\` citation, and when the entailed decision fixes a security posture or is otherwise irreversible, ask via the client's available user-input mechanism a confirm/overrule question that states the decision and its derivation without re-opening the full option space" "978 skills/refine/codex.md entailment category restated"
+  # AC5: codex.md restates the entailment category; like the refiner, it
+  # records an entailed security/irreversible decision instead of confirming it.
+  assert_contains "${codex}" "entailed questions — those already fixed by a recorded answer — are forbidden; auto-adopt them into \`### Decisions\` with a \`follows from Q<n> (round <m>)\` citation. This holds for security-sensitive and irreversible decisions too: never ask the user to confirm or overrule an entailed decision" "978 skills/refine/codex.md entailment category restated"
 fi
 
 # =====================================================================
