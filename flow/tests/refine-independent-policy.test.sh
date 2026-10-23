@@ -80,7 +80,7 @@ for name in ("SKILL.md", "codex.md"):
         assert stale_boundary not in flat, (name, stale_boundary)
     for rule in ("resolve-policy.sh", "confirmBeforeApply", "refinement.automerge",
                  "refinementAutomerge is exactly", "AND NOT", "policy-ready branch",
-                 "never silently decide security-sensitive, destructive, or unresolved questions",
+                 "never silently decide a security-sensitive, destructive, or unresolved question that the repo and the recorded answers cannot settle",
                  "every withheld question has a matching safe recorded decision",
                  "STOP with zero GitHub writes", "fresh refinement run"):
         assert rule in flat, (name, rule)
@@ -103,7 +103,7 @@ assert "Explicit Plan mode remains read-only" in codex
 assert "Only a Confirm proceeds" not in codex
 agent = (root.parent.parent / "agents/refiner.md").read_text()
 assert "refinementConfirmBeforeApply" in agent
-assert "never silently decide security-sensitive, destructive, or unresolved questions" in agent
+assert "never silently decide a security-sensitive, destructive, or unresolved question that the repo and the recorded answers cannot settle" in agent
 blockers = (root / "parent-blockers.md").read_text()
 assert "fresh refinement run" in blockers
 assert "request a fresh refinement\nconfirmation" not in blockers

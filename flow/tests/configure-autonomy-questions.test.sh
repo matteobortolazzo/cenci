@@ -895,7 +895,7 @@ if [[ -n "${loop_doc}" ]]; then
   if [[ -z "${loop_section6}" ]]; then
     fail "docs/autonomous-loop.md section 6 body: not found/empty -- cannot verify its claims"
   else
-    assert_contains_ws "${loop_section6}" "${LOOP_SECTION6_WHAT}" "docs/autonomous-loop.md section 6 describes what lean refinement does (one round, at most 3 questions plus the confirm/overrule question)"
+    assert_contains_ws "${loop_section6}" "${LOOP_SECTION6_WHAT}" "docs/autonomous-loop.md section 6 describes what lean refinement does (one round, at most 3 questions plus any required question)"
     assert_contains_ws "${loop_section6}" "${LOOP_SECTION6_GATE}" "docs/autonomous-loop.md section 6 states the switch never grants automerge:ok and keeps the Confirmation Gate"
     assert_contains_ws "${loop_section6}" "${LOOP_SECTION6_LOCAL}" "docs/autonomous-loop.md section 6 states the local read via project-core and that no fleet switch exists"
     assert_contains_ws "${loop_section6}" "${LOOP_SECTION6_OFFER}" "docs/autonomous-loop.md section 6 states the configure offer (delta-run absent-only, --all re-offer)"

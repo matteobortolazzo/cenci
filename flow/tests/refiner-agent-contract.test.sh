@@ -96,9 +96,9 @@ fi
 # label. This pins both requirements down: a recommended-first option (or a
 # proposed answer for open-ended questions) on every question, and a new
 # "entailed" forbidden-question category that auto-adopts into
-# `### Decisions` with a `follows from Q<n> (round <m>)` citation, with a
-# required confirm/overrule question only when the entailed decision is
-# irreversible or fixes a security posture. None of these production edits
+# `### Decisions` with a `follows from Q<n> (round <m>)` citation. Refinement
+# never asks a confirm/overrule question for an entailed decision, even one
+# that is irreversible or fixes a security posture; it records the derivation. None of these production edits
 # exist yet at RED-phase time — every assertion below is expected to fail
 # until Phase 4 lands agents/refiner.md.
 
@@ -120,12 +120,13 @@ if [[ -n "${refiner}" ]]; then
 
   # AC4: entailment joins the forbidden-question list; entailed decisions
   # auto-adopt into `### Decisions` (never `### Assumptions (auto-adopted)`)
-  # with a follows-from citation, and a confirm/overrule question is
-  # required only when the entailed decision is irreversible or fixes a
-  # security posture, and forbidden from re-opening the full option space.
+  # with a follows-from citation; an irreversible or security-posture
+  # entailed decision is recorded with its derivation, never confirmed.
   assert_contains "${refiner}" "**Forbidden as entailed** — a question whose answer is already fixed by a previously recorded answer; asking it again only re-opens an already-settled decision." "agents/refiner.md #978 entailment forbidden category"
   assert_contains "${refiner}" "Auto-adopt an entailed decision into \`### Decisions\` with a \`follows from Q<n> (round <m>)\` citation — never into \`### Assumptions (auto-adopted)\`." "agents/refiner.md #978 entailed decision citation"
-  assert_contains "${refiner}" "When an entailed decision fixes a security posture or is otherwise irreversible, ask a confirm/overrule question that states the entailed decision and its derivation — but never one that re-opens the full option space." "agents/refiner.md #978 entailed confirm/overrule requirement"
+  assert_contains "${refiner}" "This holds for security-sensitive and irreversible decisions too: never ask the user to confirm or overrule an entailed decision." "agents/refiner.md entailed security decision never confirmed"
+  assert_contains "${refiner}" "When it fixes a security posture or is otherwise irreversible, the entry also states its derivation so the decision stays reviewable on the ticket." "agents/refiner.md entailed security decision records its derivation"
+  assert_not_contains "${refiner}" "ask a confirm/overrule question that states the entailed decision" "agents/refiner.md no entailed confirm/overrule question"
 fi
 
 # --- evidence-grounded sizing (refine evidence/sizing fix, PR 2 of 3) -------
@@ -188,7 +189,7 @@ fi
 #
 # Why this exists: every refiner question used to cost the human a decision
 # the planner would not have escalated. Lean mode narrows questions to four
-# classes, one round, at most 3 questions plus the cap-exempt confirm/overrule
+# classes, one round, at most 3 questions plus any required cap-exempt
 # question, and makes the SKILL (not the refiner) enforce that cap. Interactive
 # refine must stay exactly as above. Marker wording is shared with
 # refine-lean-contract.test.sh (cross-file literals) — each phrase sits on a
@@ -219,14 +220,14 @@ if [[ -n "${refiner}" ]]; then
   # Zero-question path (AC2).
   assert_contains "${refiner}" 'a ticket with only conventional decisions reaches the Confirmation Gate with zero questions asked' "agents/refiner.md #1273 zero-question path"
 
-  # One round, at most 3 questions, exempt confirm/overrule (AC4).
+  # One round, at most 3 questions, exempt required questions (AC4).
   assert_contains "${refiner}" 'one question round and at most 3 questions' "agents/refiner.md #1273 one round and 3-question cap"
-  assert_contains "${refiner}" '(confirm/overrule — cap-exempt)' "agents/refiner.md #1273 exempt tag"
+  assert_contains "${refiner}" '(required — cap-exempt)' "agents/refiner.md #1273 exempt tag"
   assert_contains "${refiner}" 'is always asked and never dropped, even when the 3-question cap is already full' "agents/refiner.md #1273 exempt question never dropped (anti-starvation)"
 
   # Class tags the skill sorts by (Q1 answer) and the overflow rank (AC6).
   assert_contains "${refiner}" 'Tag every non-exempt question with exactly one class tag: `(security)`, `(destructive)`, `(split)`, or `(product)`.' "agents/refiner.md #1273 class tags"
-  assert_contains "${refiner}" 'confirm/overrule, security, destructive, split, product ambiguity' "agents/refiner.md #1273 overflow rank"
+  assert_contains "${refiner}" 'ranks them security, destructive, split, product ambiguity' "agents/refiner.md #1273 overflow rank"
   assert_contains "${refiner}" '(over the cap: <class>)' "agents/refiner.md #1273 over-cap suffix on the decided entry"
   assert_contains "${refiner}" 'Not asked — over the lean question cap; decide it under the overflow rule.' "agents/refiner.md #1273 overflow sentinel answer"
   assert_contains "${refiner}" 'treat that question as withheld and decide it under the overflow rule' "agents/refiner.md #1273 sentinel handling"
@@ -242,7 +243,7 @@ if [[ -n "${skill}" ]]; then
   assert_contains "${skill}" 'This skill enforces the lean cap itself and does not rely on the refiner to obey it.' "skills/refine/SKILL.md #1273 skill-side cap enforcement"
   assert_contains "${skill}" 'at most 3 non-exempt questions in round 1' "skills/refine/SKILL.md #1273 round 1 relays at most 3 non-exempt questions"
   assert_contains "${skill}" 'after round 1 only cap-exempt questions are relayed' "skills/refine/SKILL.md #1273 after round 1 only exempt questions"
-  assert_contains "${skill}" 'stable-sort the non-exempt questions by class tag in this rank order: confirm/overrule, security, destructive, split, product ambiguity' "skills/refine/SKILL.md #1273 tag sort in rank order"
+  assert_contains "${skill}" 'stable-sort the non-exempt questions by class tag in this rank order: security, destructive, split, product ambiguity' "skills/refine/SKILL.md #1273 tag sort in rank order"
   assert_contains "${skill}" 'An untagged question ranks last and counts against the cap' "skills/refine/SKILL.md #1273 untagged ranks last"
   assert_contains "${skill}" 'Withheld questions are never relayed to the user' "skills/refine/SKILL.md #1273 withheld questions never relayed"
   assert_contains "${skill}" 'Not asked — over the lean question cap; decide it under the overflow rule.' "skills/refine/SKILL.md #1273 sentinel fed back to the refiner"
