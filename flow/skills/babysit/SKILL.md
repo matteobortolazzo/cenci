@@ -42,6 +42,16 @@ use it as `<interval>`; empty output (field unset, or no config file) → omit `
 entirely and let `cenci babysit` apply its built-in `15m` default. An explicit second argument
 always wins over the config.
 
+**Codex-only guard canary (run before arming under Codex; skip it under Claude and OpenCode).**
+Codex skips pending or untrusted plugin hooks, so first run
+`bash "${PLUGIN_ROOT}/codex/guard-canary.sh" plan`, make exactly the tool calls its `PROBE` lines
+list, judge each from its own tool result (denied only when the guard's message shows), then run the
+`check` command it prints (`bash "${PLUGIN_ROOT}/codex/guard-canary.sh" check <run-dir> <n>=denied|not-denied…`).
+Arm only on `CANARY_STATUS=active`. On `CANARY_STATUS=refused` (or when `plan` cannot run), do not arm:
+report the helper's text, which names pending or untrusted hooks as the likely cause and points to
+`/hooks`, plus any `LEFTOVER:` path to remove by hand. In a sandbox session the output labels trust
+"hook trust bypassed by launcher (explicit flag)"; cenci never changes hook trust.
+
 Detect the current client and run exactly one of the three (dropping `--interval <interval>`
 when the interval was neither passed as an argument nor resolved from config):
 

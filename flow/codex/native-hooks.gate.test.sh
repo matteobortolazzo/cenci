@@ -18,6 +18,12 @@
 #       (CENCI_SANDBOX=1 AND a marker file) does
 #   G4  helper tables: version parse/compare, sanitizer, verdict classifier,
 #       host-vs-sandbox detection
+#   G6  the guard canary preflight scenario (#1213), against the emulating
+#       stub: hooks active -> the canary passes; hooks inactive -> it refuses,
+#       names pending trust and /hooks and removes what was written; a result
+#       that contradicts the trust state is a FAIL; the sandbox also runs a
+#       trust-withheld variant that leaves out ONLY the trust flag; the host
+#       never runs it
 #
 # A stub `codex` first on PATH records its argv and answers `--version` and
 # `login status` from the environment; nothing here touches a real Codex.
@@ -120,29 +126,56 @@ case "$1" in
         exit 0
         ;;
     exec)
-        [ "${STUB_EMULATE:-0}" = 1 ] || exit 0
         shift
+        all="$*"
         dir=""
         prompt=""
+        trust_flag=0
         while [ $# -gt 0 ]; do
             if [ "$1" = "-C" ]; then
                 dir="$2"
                 shift 2
                 continue
             fi
+            if [ "$1" = "--dangerously-bypass-hook-trust" ]; then
+                trust_flag=1
+            fi
             prompt="$1"
             shift
         done
-        cmd=$(printf '%s\n' "$prompt" | sed -n 's/^.*exactly this command: \(.*\)$/\1/p' | sed -n 1p)
+        # One record per `codex exec`: the flags (everything but the prompt) and
+        # whether the prompt is a guard-canary probe, so a test can tell the
+        # trust-withheld canary calls apart from every other call.
+        tag=other
+        case "$prompt" in
+            *cenci-guard-canary-*) tag=canary ;;
+        esac
+        printf '%s\t%s\n' "$tag" "${all%"$prompt"}" >> "${STUB_ARGV_LOG}.exec"
+        [ "${STUB_EMULATE:-0}" = 1 ] || exit 0
+        tool_name=Bash
+        match=Bash
+        cmd=""
+        if [ "${STUB_EMULATE_PATCH:-0}" = 1 ]; then
+            case "$prompt" in
+                *"call the apply_patch tool"*)
+                    cmd=$(printf '%s\n' "$prompt" | sed -n '/^\*\*\* Begin Patch$/,/^\*\*\* End Patch$/p')
+                    tool_name=apply_patch
+                    match='Write|Edit'
+                    ;;
+            esac
+        fi
+        if [ -z "$cmd" ]; then
+            cmd=$(printf '%s\n' "$prompt" | sed -n 's/^.*exactly this command: \(.*\)$/\1/p' | sed -n 1p)
+        fi
         [ -n "$cmd" ] || exit 0
         work=$(mktemp -d) || exit 1
         : > "$work/block"
-        payload=$(jq -n --arg cwd "$dir" --arg c "$cmd" \
-            '{hook_event_name: "PreToolUse", tool_name: "Bash", cwd: $cwd, tool_input: {command: $c}}')
+        payload=$(jq -n --arg cwd "$dir" --arg c "$cmd" --arg tn "$tool_name" \
+            '{hook_event_name: "PreToolUse", tool_name: $tn, cwd: $cwd, tool_input: {command: $c}}')
         run_hooks() { # <manifest> <plugin-root-or-empty> <limit-or-empty>
             [ -f "$1" ] || return 0
             n=0
-            jq -r '.hooks.PreToolUse[]? | select((.matcher // "") | test("Bash")) | .hooks[].command' "$1" > "$work/cmds" || return 0
+            jq -r --arg m "$match" '.hooks.PreToolUse[]? | select((.matcher // "") | test($m)) | .hooks[].command' "$1" > "$work/cmds" || return 0
             while IFS= read -r hc; do
                 n=$((n + 1))
                 if [ -n "$3" ] && [ "$n" -gt "$3" ]; then
@@ -159,13 +192,28 @@ case "$1" in
                 fi
             done < "$work/cmds"
         }
-        if [ -n "${STUB_PLUGIN_HOOKS:-}" ]; then
+        # Plugin hooks run unless the stub is told they are pending: with
+        # STUB_TRUST_REQUIRED=1 they run only when the call carries
+        # --dangerously-bypass-hook-trust. STUB_PATCH_HOOKS_OFF=1 leaves the
+        # apply_patch tool unwatched (a Write|Edit alias that does not fire).
+        if [ -n "${STUB_PLUGIN_HOOKS:-}" ] \
+            && { [ "${STUB_TRUST_REQUIRED:-0}" != 1 ] || [ "$trust_flag" = 1 ]; } \
+            && { [ "$tool_name" != apply_patch ] || [ "${STUB_PATCH_HOOKS_OFF:-0}" != 1 ]; }; then
             run_hooks "$STUB_PLUGIN_HOOKS" "$STUB_PLUGIN_ROOT" ""
         fi
         run_hooks "$dir/.codex/hooks.json" "" "${STUB_CONFIG_HOOK_LIMIT:-}"
         if [ -s "$work/block" ]; then
             status=declined
             output=$(cat "$work/block")
+        elif [ "$tool_name" = apply_patch ]; then
+            status=completed
+            printf '%s\n' "$cmd" | sed -n 's/^\*\*\* Add File: //p' > "$work/targets"
+            while IFS= read -r tgt; do
+                [ -n "$tgt" ] || continue
+                case "$tgt" in /*) ;; *) tgt="$dir/$tgt" ;; esac
+                printf 'x\n' > "$tgt" 2>/dev/null
+            done < "$work/targets"
+            output="Done!"
         else
             status=completed
             output=$( (cd "$dir" && sh -c "$cmd") 2>&1 )
@@ -247,6 +295,7 @@ run_runner() {
     OUT="${RUNS_DIR}/${RUN_N}"
     mkdir -p "${OUT}" || return 1
     : > "${OUT}/argv"
+    : > "${OUT}/argv.exec"
     (
         cd "${RUN_CWD}" || exit 97
         exec env -i HOME="${FAKE_HOME}" PATH="${path}" STUB_ARGV_LOG="${OUT}/argv" "$@" \
@@ -269,12 +318,33 @@ make_runner_copy() {
     cp "${RUNNER}" "${dir}/native-hooks.test.sh" || return 1
     sed "s|^CNH_DEFAULT_CONTAINER_MARKERS=.*|CNH_DEFAULT_CONTAINER_MARKERS=\"${markers}\"|" "${LIB}" > "${dir}/native-hooks-lib.sh" || return 1
     grep -qxF "CNH_DEFAULT_CONTAINER_MARKERS=\"${markers}\"" "${dir}/native-hooks-lib.sh" || return 1
+    # The runner's guard canary preflight runs guard-canary.sh from its own
+    # directory (it finds the manifest and the guard scripts relative to it and
+    # reads the container markers from the library copy beside it).
+    cp "${SCRIPT_DIR}/guard-canary.sh" "${dir}/guard-canary.sh" || return 1
+    cp "${SCRIPT_DIR}/hooks.json" "${dir}/hooks.json" || return 1
+    [[ -e "${dir}/../hooks" ]] || ln -s "${SCRIPT_DIR}/../hooks" "${dir}/../hooks" || return 1
     printf '%s\n' "${dir}/native-hooks.test.sh"
 }
 
 # exec_recorded <argv-file> -- did the stub see a `codex exec ...` call?
 exec_recorded() {
     grep -Eq '(^|[[:space:]])exec([[:space:]]|$)' "$1"
+}
+
+# count_calls <argv.exec-file> <tag: canary|other|any> <mode: with|without|any|missing-approvals>
+# -- how many recorded `codex exec` calls (see the stub's .exec log: one
+# tag<TAB>flags record per call) match the tag and carry/lack the trust flag, or
+# lack the approvals/sandbox bypass.
+count_calls() {
+    awk -F'\t' -v tag="$2" -v mode="$3" -v tf="${BYPASS_FLAG}" -v af="--dangerously-bypass-approvals-and-sandbox" '
+        tag != "any" && $1 != tag { next }
+        {
+            has = index($2, tf) > 0
+            if (mode == "any" || (mode == "with" && has) || (mode == "without" && !has) \
+                || (mode == "missing-approvals" && index($2, af) == 0)) c++
+        }
+        END { print c + 0 }' "$1"
 }
 
 # bypass_on_exec <argv-file> -- did any `codex exec` call carry the flag?
@@ -445,7 +515,7 @@ else
     fail "CENCI_SANDBOX=0 with a marker file must reach codex exec without ${BYPASS_FLAG}"
 fi
 
-echo "case: sandbox mode (CENCI_SANDBOX=1 AND a marker file) passes both bypass flags on codex exec (G3, Q4)"
+echo "case: sandbox mode (CENCI_SANDBOX=1 AND a marker file) passes both bypass flags on codex exec, except the labelled trust-withheld canary calls (G3, Q4)"
 RUNNER_OVERRIDE="${SANDBOX_RUNNER}"
 run_runner "${STUB_PATH}" CENCI_CODEX_NATIVE=1 CENCI_SANDBOX=1
 RUNNER_OVERRIDE=""
@@ -453,6 +523,19 @@ if bypass_on_exec "${OUT}/argv" && grep -E '(^|[[:space:]])exec([[:space:]]|$)' 
     pass
 else
     fail "sandbox mode must pass ${BYPASS_FLAG} on codex exec (argv: $(head -c 400 "${OUT}/argv"))"
+fi
+# The only exec calls without the trust flag are the guard canary's labelled
+# trust-withheld probes (the prompt names a cenci-guard-canary- target); every
+# call, withheld or not, still carries the approvals/sandbox bypass.
+if [[ "$(count_calls "${OUT}/argv.exec" other without)" -eq 0 ]]; then
+    pass
+else
+    fail "sandbox mode: every codex exec outside the labelled trust-withheld canary variant must carry ${BYPASS_FLAG} ($(count_calls "${OUT}/argv.exec" other without) did not)"
+fi
+if [[ "$(count_calls "${OUT}/argv.exec" any missing-approvals)" -eq 0 && "$(count_calls "${OUT}/argv.exec" any any)" -gt 0 ]]; then
+    pass
+else
+    fail "sandbox mode: every codex exec, trust-withheld or not, must carry ${APPROVAL_BYPASS_FLAG}"
 fi
 
 # ── S1: only the cenci flow plugin's handlers are re-run ────────────────
@@ -607,6 +690,11 @@ FLOW_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)" || {
     exit 1
 }
 EMU_ENV=(CENCI_CODEX_NATIVE=1 STUB_EMULATE=1 "STUB_PLUGIN_HOOKS=${FLOW_ROOT}/codex/hooks.json" "STUB_PLUGIN_ROOT=${FLOW_ROOT}")
+# The same, with the stub also emulating the dedicated apply_patch tool. The
+# guard canary preflight probes apply_patch, so a run that expects it to pass
+# needs this; without it every apply_patch probe is "no guard message" and the
+# preflight (correctly) refuses.
+EMU_PATCH_ENV=("${EMU_ENV[@]}" STUB_EMULATE_PATCH=1)
 
 # row_status <stdout-file> <label-fragment> -- the result cell of the first
 # table row whose label contains the fragment ("" when there is no such row).
@@ -626,12 +714,12 @@ assert_row() {
 }
 
 echo "case: hooks active -> deny rows denied, allow row allowed with a tap line, launch finding needs the broken hook invoked (G5, F2, F3, F6)"
-run_runner "${STUB_PATH}" "${EMU_ENV[@]}"
+run_runner "${STUB_PATH}" "${EMU_PATCH_ENV[@]}"
 assert_row "active" "${OUT}/stdout" "canary: bash write to the main worktree" ok
 assert_row "active" "${OUT}/stdout" "bash -> main worktree file (deny, guard-main-worktree)" ok
 assert_row "active" "${OUT}/stdout" "bash -> sensitive .env in a worktree" ok
 assert_row "active" "${OUT}/stdout" "bash -> worktree file (positive control, allow)" ok
-assert_row "active" "${OUT}/stdout" "apply_patch -> main worktree file (deny" inconclusive
+assert_row "active" "${OUT}/stdout" "apply_patch -> main worktree file (deny" ok
 assert_row "active" "${OUT}/stdout" "launch failure: missing-script" ok
 assert_row "active" "${OUT}/stdout" "launch failure: not-executable" ok
 if grep -F 'FINDING: the tool CONTINUED after the hook failed to launch' "${OUT}/stdout" | grep -F 'broken hook was invoked' >/dev/null; then
@@ -693,6 +781,134 @@ assert_row "limit 1" "${OUT}/stdout" "launch failure: missing-script" inconclusi
 assert_row "limit 1" "${OUT}/stdout" "launch failure: not-executable" inconclusive
 if grep -F 'tool CONTINUED' "${OUT}/stdout" >/dev/null; then
     fail "limit 1: no CONTINUED finding may be reported when the broken hook never ran"
+else
+    pass
+fi
+
+# ── G6: the guard canary preflight scenario (#1213) ─────────────────────
+# The runner's "### Guard canary preflight" section runs guard-canary.sh plan,
+# one `codex exec` per probe, then check. The stub emulates apply_patch too
+# (STUB_EMULATE_PATCH=1), and can model pending hook trust (STUB_TRUST_REQUIRED=1:
+# plugin hooks run only when the call carries the trust-bypass flag).
+CANARY_AL="guard canary preflight (as launched)"
+CANARY_WH="guard canary preflight (trust withheld)"
+
+# row_line <stdout-file> <label-fragment> -- the first table row containing it.
+row_line() {
+    grep -F -- "$2" "$1" | sed -n 1p
+}
+
+# assert_row_has <label> <stdout-file> <fragment> <needle>
+assert_row_has() {
+    if row_line "$2" "$3" | grep -qF -- "$4"; then
+        pass
+    else
+        fail "$1: row '$3' must contain '$4', got: $(row_line "$2" "$3")"
+    fi
+}
+
+# last_line_of <stdout-file> -- the final non-blank line.
+last_line_of() {
+    grep -v '^[[:space:]]*$' "$1" | tail -n 1
+}
+
+echo "case: host, hooks active -> the as-launched canary passes; the withheld variant is not run and records the persisted state (G6)"
+RUNNER_OVERRIDE="${HOST_RUNNER}"
+run_runner "${STUB_PATH}" "${EMU_PATCH_ENV[@]}"
+RUNNER_OVERRIDE=""
+if grep -qxF '### Guard canary preflight' "${OUT}/stdout"; then
+    pass
+else
+    fail "the report must carry a '### Guard canary preflight' section"
+fi
+assert_row "host active" "${OUT}/stdout" "${CANARY_AL}" ok
+assert_row_has "host active" "${OUT}/stdout" "${CANARY_AL}" "CANARY_STATUS=active"
+assert_row "host active" "${OUT}/stdout" "${CANARY_WH}" "not run"
+assert_row_has "host active" "${OUT}/stdout" "${CANARY_WH}" "sandbox"
+assert_row_has "host active" "${OUT}/stdout" "${CANARY_WH}" "persisted"
+if [[ "$(count_calls "${OUT}/argv.exec" canary any)" -eq 4 && "$(count_calls "${OUT}/argv.exec" canary with)" -eq 0 ]]; then
+    pass
+else
+    fail "host: the canary is one codex exec per probe (4), only the as-launched variant, never with ${BYPASS_FLAG} (got $(count_calls "${OUT}/argv.exec" canary any) calls, $(count_calls "${OUT}/argv.exec" canary with) with the flag)"
+fi
+DENY_AT="$(grep -nF '### Deny matrix' "${OUT}/stdout" | sed -n 1p | cut -d: -f1)"
+CANARY_AT="$(grep -nxF '### Guard canary preflight' "${OUT}/stdout" | sed -n 1p | cut -d: -f1)"
+if [[ -n "${DENY_AT}" && -n "${CANARY_AT}" && "${CANARY_AT}" -gt "${DENY_AT}" ]]; then
+    pass
+else
+    fail "the canary section must come after the deny matrix (deny at '${DENY_AT}', canary at '${CANARY_AT}')"
+fi
+
+echo "case: hooks inactive -> the canary refuses, names pending trust and /hooks, removes what was written, and agrees with the INACTIVE trust state (G6)"
+RUNNER_OVERRIDE="${HOST_RUNNER}"
+run_runner "${STUB_PATH}" CENCI_CODEX_NATIVE=1 STUB_EMULATE=1 STUB_EMULATE_PATCH=1
+RUNNER_OVERRIDE=""
+assert_row "inactive" "${OUT}/stdout" "${CANARY_AL}" ok
+assert_row_has "inactive" "${OUT}/stdout" "${CANARY_AL}" "CANARY_STATUS=refused"
+assert_row_has "inactive" "${OUT}/stdout" "${CANARY_AL}" "pending"
+assert_row_has "inactive" "${OUT}/stdout" "${CANARY_AL}" "/hooks"
+assert_row_has "inactive" "${OUT}/stdout" "${CANARY_AL}" "removed 4 written target(s)"
+assert_row_has "inactive" "${OUT}/stdout" "${CANARY_AL}" "0 leftover(s)"
+read -r EMU_RC < "${OUT}/rc"
+if [[ "${EMU_RC}" == 3 && "$(last_line_of "${OUT}/stdout")" == "RESULT: INCONCLUSIVE"* ]]; then
+    pass
+else
+    fail "inactive: a refusing canary under inactive hooks is consistent but proves nothing about the guards: expected rc 3 and RESULT: INCONCLUSIVE, got rc=${EMU_RC}"
+fi
+
+echo "case: a canary result that contradicts the trust state is a FAIL (G6)"
+# Bash hooks fire (the deny-matrix canary shows ACTIVE) but apply_patch is not
+# watched, so two probes are written and the preflight refuses.
+RUNNER_OVERRIDE="${HOST_RUNNER}"
+run_runner "${STUB_PATH}" "${EMU_PATCH_ENV[@]}" STUB_PATCH_HOOKS_OFF=1
+RUNNER_OVERRIDE=""
+assert_row "contradiction" "${OUT}/stdout" "canary: bash write to the main worktree" ok
+assert_row "contradiction" "${OUT}/stdout" "${CANARY_AL}" FAIL
+assert_row_has "contradiction" "${OUT}/stdout" "${CANARY_AL}" "removed 2 written target(s)"
+read -r EMU_RC < "${OUT}/rc"
+if [[ "${EMU_RC}" == 1 && "$(last_line_of "${OUT}/stdout")" == "RESULT: FAIL"* ]]; then
+    pass
+else
+    fail "contradiction: expected rc 1 and RESULT: FAIL, got rc=${EMU_RC}, last line '$(last_line_of "${OUT}/stdout")'"
+fi
+
+echo "case: an unproven trust state never turns the canary row into an ok (G6)"
+RUNNER_OVERRIDE="${HOST_RUNNER}"
+run_runner "${STUB_PATH}" "${EMU_PATCH_ENV[@]}" STUB_REDACT_BLOCK=1
+RUNNER_OVERRIDE=""
+assert_row "unknown state" "${OUT}/stdout" "${CANARY_AL}" inconclusive
+
+echo "case: sandbox runs the withheld variant, leaving out ONLY the trust flag, and labels the trust (G6)"
+RUNNER_OVERRIDE="${SANDBOX_RUNNER}"
+run_runner "${STUB_PATH}" "${EMU_PATCH_ENV[@]}" CENCI_SANDBOX=1 STUB_TRUST_REQUIRED=1
+RUNNER_OVERRIDE=""
+assert_row "sandbox" "${OUT}/stdout" "${CANARY_AL}" ok
+assert_row_has "sandbox" "${OUT}/stdout" "${CANARY_AL}" "CANARY_STATUS=active"
+assert_row_has "sandbox" "${OUT}/stdout" "${CANARY_AL}" "hook trust bypassed by launcher (explicit flag)"
+assert_row "sandbox" "${OUT}/stdout" "${CANARY_WH}" ok
+assert_row_has "sandbox" "${OUT}/stdout" "${CANARY_WH}" "CANARY_STATUS=refused"
+assert_row_has "sandbox" "${OUT}/stdout" "${CANARY_WH}" "pending"
+assert_row_has "sandbox" "${OUT}/stdout" "${CANARY_WH}" "/hooks"
+if [[ "$(count_calls "${OUT}/argv.exec" canary with)" -eq 4 && "$(count_calls "${OUT}/argv.exec" canary without)" -eq 4 ]]; then
+    pass
+else
+    fail "sandbox: expected 4 as-launched and 4 trust-withheld canary calls, got $(count_calls "${OUT}/argv.exec" canary with) with and $(count_calls "${OUT}/argv.exec" canary without) without ${BYPASS_FLAG}"
+fi
+if [[ "$(count_calls "${OUT}/argv.exec" other without)" -eq 0 && "$(count_calls "${OUT}/argv.exec" any missing-approvals)" -eq 0 ]]; then
+    pass
+else
+    fail "sandbox: only canary calls may lack ${BYPASS_FLAG}, and every call must carry ${APPROVAL_BYPASS_FLAG}"
+fi
+WITH_FLAGS="$(awk -F'\t' -v f="${BYPASS_FLAG}" '$1 == "canary" && index($2, f) { print $2; exit }' "${OUT}/argv.exec")"
+WITHOUT_FLAGS="$(awk -F'\t' -v f="${BYPASS_FLAG}" '$1 == "canary" && !index($2, f) { print $2; exit }' "${OUT}/argv.exec")"
+norm_flags() { printf '%s' "$1" | sed "s/${BYPASS_FLAG}//" | tr -s ' ' | sed -e 's/^ //' -e 's/ $//'; }
+if [[ -n "${WITH_FLAGS}" && -n "${WITHOUT_FLAGS}" && "$(norm_flags "${WITH_FLAGS}")" == "$(norm_flags "${WITHOUT_FLAGS}")" ]]; then
+    pass
+else
+    fail "sandbox: the withheld variant must differ from the as-launched one ONLY by ${BYPASS_FLAG} (with: '${WITH_FLAGS}', without: '${WITHOUT_FLAGS}')"
+fi
+if grep -qiE '(^|[^n])trusted' "${OUT}/stdout"; then
+    fail "sandbox: no line of the report may call anything 'trusted': $(grep -iE '(^|[^n])trusted' "${OUT}/stdout" | head -n 2)"
 else
     pass
 fi

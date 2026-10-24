@@ -13,8 +13,11 @@ actionability against `pr-comment-filter`'s Include/Exclude lists — in scope: 
 and resolved threads with new activity since resolution; excluded: bot comments, cenci's own
 review replies (banner-prefix match), and resolved threads with no new activity — then
 propose the fixes. Obtain approval in Plan mode, which writes no checkpoint; the persist step records
-the approved fixes in the artifact and the checkpoint. In `apply`, after `verify`, apply
-approved fixes, test, commit, push without force, reply, and re-request review. Every
+the approved fixes in the artifact and the checkpoint. In `apply`, after `verify`, first run the
+guard canary preflight, `bash "${PLUGIN_ROOT}/codex/guard-canary.sh" plan`, as `codex-runtime`
+describes, and on any refusal stop with nothing changed, reporting the helper's text and any
+`LEFTOVER:` path. Only after `CANARY_STATUS=active`,
+apply approved fixes, test, commit, push without force, reply, and re-request review. Every
 reply — inline thread reply or general PR comment — opens with the blockquoted cenci
 attribution banner and carries no `<!-- cenci-<kind> -->` marker, matching the Claude Code
 procedure's "Posting Replies" template. Never resolve disputed feedback silently.
