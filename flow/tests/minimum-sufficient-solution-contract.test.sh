@@ -107,6 +107,11 @@ assert_count() {
 
 # --- pure extractors (no fail() side effects; safe inside $(...)) --------------
 # Values travel through ENVIRON, never `awk -v`, which would interpret backslashes.
+# An awk that can `exit` before end of input reads its document from a here-string,
+# never `printf | awk`: with SIGPIPE ignored (GitHub runner jobs start that way) the
+# printf would otherwise print `write error: Broken pipe`, which run_round reports
+# as a bash runtime error (#1360). The other printf producers feed readers that
+# always drain stdin (grep without -q/-m, wc, awk with no exit).
 
 # exact_line_numbers <content> <line> -- 1-based numbers of lines equal to <line>.
 exact_line_numbers() {
@@ -125,14 +130,14 @@ contains_line_numbers() {
 
 # line_with_prefix <content> <prefix> -- the first line starting with <prefix>.
 line_with_prefix() {
-  printf '%s\n' "$1" | P="$2" awk 'index($0, ENVIRON["P"]) == 1 { print; exit }'
+  P="$2" awk 'index($0, ENVIRON["P"]) == 1 { print; exit }' <<<"$1"
 }
 
 # section_of <content> <heading-line> -- the heading's section up to the next
 # heading of the same or a shallower level. Fence-aware: a heading-shaped line
 # inside a fenced block never ends the section.
 section_of() {
-  printf '%s\n' "$1" | H="$2" awk '
+  H="$2" awk '
     BEGIN { h = ENVIRON["H"]; match(h, /^#+/); lvl = RLENGTH }
     /^```/ { infence = !infence }
     !infence && /^#+ / {
@@ -141,7 +146,7 @@ section_of() {
       if (!on && $0 == h) on = 1
     }
     on { print }
-  '
+  ' <<<"$1"
 }
 
 # indented_block <content> <start-line-exact> <end-line-ere> -- the lines after
@@ -150,14 +155,20 @@ section_of() {
 # headings are `    ### ...`) and fence-aware (an end match inside a fence is
 # ignored). Prints nothing when the start is absent or the end never follows.
 indented_block() {
-  printf '%s\n' "$1" | S="$2" E="$3" awk '
+  S="$2" E="$3" awk '
     BEGIN { s = ENVIRON["S"]; e = ENVIRON["E"] }
     /^[ ]*```/ { infence = !infence }
     !on { if ($0 == s) on = 1; next }
     on && !infence && $0 ~ e { found = 1; exit }
     on { buf = buf $0 "\n" }
     END { if (found) printf "%s", buf }
-  '
+  ' <<<"$1"
+}
+
+# ui_paragraph_of <content> -- the `**For UI/frontend work**` paragraph: from its
+# opening line up to (excluding) the next blank line.
+ui_paragraph_of() {
+  awk '/^\*\*For UI\/frontend work\*\*/ { f = 1 } f && /^$/ { exit } f' <<<"$1"
 }
 
 # count_lines <text> -- number of non-empty lines.
@@ -367,7 +378,7 @@ check_planner() {
   fi
 
   # The For UI/frontend work paragraph is unchanged.
-  fc="$(printf '%s\n' "${c}" | awk '/^\*\*For UI\/frontend work\*\*/ { f = 1 } f && /^$/ { exit } f')"
+  fc="$(ui_paragraph_of "${c}")"
   if [[ -z "${fc}" ]]; then
     fail "${lbl}: the 'For UI/frontend work' paragraph is missing"
   else
@@ -597,6 +608,58 @@ selftest_extractors() {
   [[ "$(count_in $'aa aa\naa' 'aa')" == '3' ]] || fail "self-test count_in: occurrences, not lines, must be counted"
   [[ "$(pos_of 'one two three' 'two')" == '4' ]] || fail "self-test pos_of: expected offset 4"
   [[ "$(pos_of 'one two' 'zzz')" == '-1' ]] || fail "self-test pos_of: an absent needle must be -1"
+
+  # The paragraph extractor stops at the first blank line and ignores the rest.
+  out="$(ui_paragraph_of $'intro\n**For UI/frontend work**: a\nb\n\nafter')"
+  [[ "${out}" == $'**For UI/frontend work**: a\nb' ]] || fail "self-test ui_paragraph_of: expected the two paragraph lines, got [${out}]"
+  out="$(ui_paragraph_of $'intro\nafter')"
+  [[ -z "${out}" ]] || fail "self-test ui_paragraph_of: an absent paragraph must yield nothing"
+}
+
+# probe_quiet_without_sigpipe <label> <function> <arg>... -- runs <function> in a
+# subshell that ignores SIGPIPE (the GitHub runner starts jobs that way) and fails
+# unless nothing reached stderr. With SIGPIPE ignored, a producer writing into a
+# pipe whose reader already exited prints `printf: write error: Broken pipe`
+# instead of dying silently, and run_round would report that as a bash runtime
+# error. Runs in the parent shell so fail() keeps its counter.
+probe_quiet_without_sigpipe() {
+  local label="$1" errfile="${SIGPIPE_DIR}/${1// /_}.stderr"
+  shift
+  ( trap '' PIPE; "$@" >/dev/null ) 2>"${errfile}"
+  if [[ -s "${errfile}" ]]; then
+    fail "self-test [${label}]: wrote to stderr with SIGPIPE ignored: $(cat "${errfile}")"
+  fi
+}
+
+# selftest_early_exit_extractors -- every extractor whose awk exits before end of
+# input must stay silent on stderr when fed more than the 64 KiB pipe buffer and
+# SIGPIPE is ignored. Each document puts the match at the top so the reader exits
+# while the producer still has most of the input left to write.
+selftest_early_exit_extractors() {
+  local pad filler="" i big
+  SIGPIPE_DIR="$(mktemp -d)" || { fail "self-test sigpipe: could not create a scratch directory"; return; }
+  [[ -d "${SIGPIPE_DIR}" ]] || { fail "self-test sigpipe: mktemp returned a non-directory [${SIGPIPE_DIR}]"; return; }
+  TMP_DIRS+=("${SIGPIPE_DIR}")
+
+  # 4 MiB, well past the 64 KiB pipe buffer: mawk reads far more than one pipe
+  # buffer per block, and with a smaller filler the whole input fits inside what
+  # it has already read, so the producer never meets a closed pipe.
+  pad="$(printf '%1023s' '')"
+  filler="${pad}"$'\n'
+  for ((i = 0; i < 12; i++)); do filler+="${filler}"; done
+  [[ "${#filler}" -gt 4000000 ]] || { fail "self-test sigpipe: the filler (${#filler} bytes) is too small to outlast an awk read-ahead"; return; }
+
+  big=$'first line\n'"${filler}"
+  probe_quiet_without_sigpipe 'line_with_prefix large input' line_with_prefix "${big}" 'first'
+
+  big=$'## A\nalpha\n## B\n'"${filler}"
+  probe_quiet_without_sigpipe 'section_of large input' section_of "${big}" '## A'
+
+  big=$'    ### S\n    one\n    ### E\n'"${filler}"
+  probe_quiet_without_sigpipe 'indented_block large input' indented_block "${big}" '    ### S' '^    ###+ '
+
+  big=$'**For UI/frontend work**: x\n\n'"${filler}"
+  probe_quiet_without_sigpipe 'ui_paragraph_of large input' ui_paragraph_of "${big}"
 }
 
 # --- mutation self-test ------------------------------------------------------------------
@@ -799,6 +862,7 @@ mutation_self_test() {
 # --- run ------------------------------------------------------------------------------------
 
 selftest_extractors
+selftest_early_exit_extractors
 
 before_real="${failures}"
 check_tree "${FLOW_DIR}" "${REPO_DIR}"
