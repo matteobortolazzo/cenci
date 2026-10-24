@@ -84,15 +84,18 @@ When lanes run, skip the single-implementer delegation below and Phase 4's stand
 Pass:
 
 - Worktree path. Tell the agent to follow the implementer's `## Working Directory` section on every command. See the `shell-rules` skill for command patterns.
-- Plan file sections: `## Ticket Details`, `## Implementation Plan`, and `## Architectural Context`.
+- The plan by path: the absolute main-checkout plan file path `"<repo-root>/.plans/<filename>"` (never a relative `.plans/` path; the file is gitignored and absent inside the worktree) plus the headings to read: `## Ticket Details`, `## Implementation Plan`, and `## Architectural Context`. The plan travels by path, never pasted plan content.
 - The `## Context Budget` brief above, verbatim, plus this delegation's lane (its owned files and scope from `### Delegation Preflight`; the whole plan when the preflight has one delegated lane).
-- Files to modify/create and planner notes.
+- The files to change: point the implementer at `## Implementation Plan`'s `### Files to Modify` and `### Files to Create` and its planner notes instead of listing them.
 - The resolved Verification command: the lane's Verification cell (the lane's `Tests:` value; the single lane's cell in ordinary work), split at `; lint: ` into the scoped test command and the optional scoped lint command, or its `full:` fallback with the reason. Tell the implementer to run it, never the full suite, and to report `Verification (scoped): <command> — <pass|fail> — not covered: <scope outside the command>` (or `Verification (full fallback): <command> — <pass|fail> — reason: <reason>`). A scoped pass is never reported as full suite, all tests or CI green.
-- Acceptance criteria, edge cases, and error scenarios.
+- The requirements: point the implementer at `## Ticket Details`'s `### Acceptance Criteria` and `### Edge Cases` (error scenarios included) instead of listing them.
 - Attachment paths if relevant.
 - Resolved topic docs: at most 3 `docs/<topic>.md` paths matched to Files to Modify/Create.
 - The plan's `### Documentation Routing` section, verbatim (compact implementation folds Phase 4's delegation into this one, so it must travel here too).
 - On a resume attach route, the `## Resume Brief` below.
+- The red run: tell the implementer to redirect its failing test run to an absolute log under the `shell-rules` skill's `## Command Output Discipline` naming and to report that log path with the failing test names, so Phase 4 can forward it; in lane mode the log name is suffixed with the lane ID so concurrent lanes never share one log.
+
+**Missing context stop.** A `Missing context:` report stops the run and is reported to the user, never re-delegated with a pasted digest or summary. It applies to single, compact and lane delegations: the worker's first summary line `Missing context: <absolute path> [<section heading>] — <reason>` takes the error gate `Missing context in Phase <n>: <path> [<heading>] — <reason>`, whose fix is to repair the plan or run `/cenci:implement <id> replan`. In lane mode it stops queued launches like the lane error gate above. A missing failing-test log is the one exception and never triggers it.
 
 ## Resume Brief
 

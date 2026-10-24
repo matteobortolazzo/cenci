@@ -24,7 +24,8 @@
 #
 # Covered files:
 #   - agents/implementer.md                          (write ban + read scoping)
-#   - skills/implement/SKILL.md                       (:33 planner/implementer split)
+#   - skills/implement/SKILL.md                       (`### Context Handoff` planner/implementer split;
+#                                                      moved out of `### Monorepo Context Loading` by #1105)
 #   - skills/implement/phases/phase-3-test-red.md     (topic-doc bullet)
 #   - skills/implement/phases/phase-4-implement-green.md (topic-doc bullet, Rules rewrite)
 #   - skills/implement/phases/phase-5-refactor.md     (topic-doc bullet)
@@ -97,6 +98,20 @@ extract_section() {
   ' <<<"${content}"
 }
 
+# extract_between <content> <start-line-prefix> <end-line-prefix> -- prints the lines from
+# the first line beginning with <start-line-prefix> up to, excluding, the next line
+# beginning with <end-line-prefix>. Pure, safe inside $(...). Unlike extract_section it
+# stops at a literal line rather than only at the next `## ` heading, so it can bound a
+# `###` subsection or a block that has no heading of its own (#1105).
+extract_between() {
+  local content="$1" start="$2" end="$3"
+  awk -v s="${start}" -v e="${end}" '
+    !inside && index($0, s) == 1 { inside = 1; print; next }
+    inside && index($0, e) == 1 { exit }
+    inside { print }
+  ' <<<"${content}"
+}
+
 # extract_line <content> <literal-substring> -- prints the first line containing
 # the substring, for assertions that must bind to one specific bullet/line.
 extract_line() {
@@ -164,22 +179,33 @@ if require_doc CONTENT "${FILE}"; then
 fi
 
 # =====================================================================
-# skills/implement/SKILL.md -- :33's "Point subagents at context, don't
-# paste it" bullet is split into a planner half (unchanged: still names
+# skills/implement/SKILL.md -- the "Point subagents at context, don't
+# paste it" bullet (moved by #1105 from `### Monorepo Context Loading` into
+# the new `### Context Handoff` subsection, so it applies when `isMonorepo`
+# is false) is split into a planner half (unchanged: still names
 # `docs/<topic>.md` and both legacy lessons-learned filenames) and an
 # implementer half (points at the Delegation Context's capped list, no
 # legacy probe). Both halves live in the same bullet, so a whole-line
 # assert_not_contains for "lessons-learned" would be vacuous -- it must
 # still be true of the planner half. Split the line on the anchor phrase
 # marking where the implementer-specific instruction begins, and assert
-# each half separately.
+# each half separately. The bullet is read from the `### Context Handoff`
+# slice only, so a match left behind in the monorepo block cannot satisfy it,
+# and the monorepo slice must no longer carry the rule.
 # =====================================================================
 FILE="skills/implement/SKILL.md"
 IMPLEMENTER_HALF_ANCHOR='When delegating to the implementer,'
 if require_doc CONTENT "${FILE}"; then
-  BULLET_LINE="$(extract_line "${CONTENT}" "Point subagents at context, don't paste it")"
+  HANDOFF_SLICE="$(extract_between "${CONTENT}" '### Context Handoff' '### Monorepo Context Loading')"
+  MONOREPO_SLICE="$(extract_between "${CONTENT}" '### Monorepo Context Loading' '**Shell rules**')"
+  BULLET_LINE="$(extract_line "${HANDOFF_SLICE}" "Point subagents at context, don't paste it")"
 
-  assert_contains "${BULLET_LINE}" "${IMPLEMENTER_HALF_ANCHOR}" "${FILE} (:33 planner/implementer split)"
+  # The monorepo slice must be non-empty (its own bullets present) before its
+  # absence assertion below can mean anything.
+  assert_contains "${MONOREPO_SLICE}" '1. **Do not read per-project AGENTS.md' "${FILE} (monorepo slice non-empty)"
+  assert_not_contains "${MONOREPO_SLICE}" "don't paste it" "${FILE} (monorepo slice no longer carries the rule)"
+
+  assert_contains "${BULLET_LINE}" "${IMPLEMENTER_HALF_ANCHOR}" "${FILE} (Context Handoff planner/implementer split)"
 
   PLANNER_HALF="${BULLET_LINE%%"${IMPLEMENTER_HALF_ANCHOR}"*}"
   IMPLEMENTER_HALF="${BULLET_LINE#*"${IMPLEMENTER_HALF_ANCHOR}"}"
@@ -187,13 +213,13 @@ if require_doc CONTENT "${FILE}"; then
   # Planner half: unchanged -- still names docs/<topic>.md and the legacy
   # lessons-learned files (the planner keeps reading broadly; out of scope
   # for this ticket).
-  assert_contains "${PLANNER_HALF}" 'docs/<topic>.md' "${FILE} (:33 planner half)"
-  assert_contains "${PLANNER_HALF}" '.claude/rules/lessons-learned' "${FILE} (:33 planner half)"
+  assert_contains "${PLANNER_HALF}" 'docs/<topic>.md' "${FILE} (Context Handoff planner half)"
+  assert_contains "${PLANNER_HALF}" '.claude/rules/lessons-learned' "${FILE} (Context Handoff planner half)"
 
   # Implementer half: points at the Delegation Context's capped list, no
   # legacy probe.
-  assert_contains "${IMPLEMENTER_HALF}" 'at most 3' "${FILE} (:33 implementer half)"
-  assert_not_contains "${IMPLEMENTER_HALF}" 'lessons-learned' "${FILE} (:33 implementer half)"
+  assert_contains "${IMPLEMENTER_HALF}" 'at most 3' "${FILE} (Context Handoff implementer half)"
+  assert_not_contains "${IMPLEMENTER_HALF}" 'lessons-learned' "${FILE} (Context Handoff implementer half)"
 fi
 
 # =====================================================================

@@ -160,13 +160,23 @@ Stop at the same return-to-planning gate (`replan`) when a delegated lane's Veri
 or is a `full:` fallback with no reason; a legacy plain command is treated as a scoped command.
 Read `### Parallelism Assessment`; a missing legacy assessment means sequential execution
 with that reason reported, never inferred fan-out. Use native `implementer` subagents,
-passing the worktree, plan sections, owned files, the lane's resolved scoped Verification command (its
+passing the worktree, the plan path (below), owned files, the lane's resolved scoped Verification command (its
 Verification cell, which is the only source of `Tests:`), acceptance criteria and context-budget brief
 to each. Workers run that scoped Verification command during red/green work and never the full suite,
 and report with these literal formats: `Verification (scoped): <command> — <pass|fail> — not covered: <scope outside the command>`,
 `Verification (full fallback): <command> — <pass|fail> — reason: <reason>` for a `full:` fallback lane, and
 `Verification (full): <command> — <pass|fail>` for the Completed-Change Verification run.
 A scoped pass is never reported as full suite, all tests or CI green.
+Pass the plan by path, never pasted plan content: the absolute main-checkout plan file path "<repo-root>/.plans/<filename>" (never a relative `.plans/` path; the file is gitignored and absent inside the worktree) plus the headings to read.
+The headings are `## Ticket Details`, `## Implementation Plan`, and `## Architectural Context` (the refactor delegation reads `## Implementation Plan`).
+Workers read the named sections from that path and work from them, never from a summary or digest.
+If the path is unreadable or a named section is missing, a worker makes no file edits and its first summary line is
+`Missing context: <absolute path> [<section heading>] — <reason>`.
+A `Missing context:` report stops the run and is reported to the user, never re-delegated with a pasted digest or summary.
+The report takes the shared error gate `Missing context in Phase <n>: <path> [<heading>] — <reason>`, whose fix is to repair the plan or run `/cenci:implement <id> replan`; in parallel lane mode it also stops queued launches like the lane error gate.
+Tell the Codex test-writing worker to redirect its failing test run to an absolute log under the `shell-rules` skill's `## Command Output Discipline` naming and to report that log path with the failing test names.
+For the separate test-to-implementation handoff, pass the failing-test evidence as the absolute path of the red-run log plus at most 5 lines: the failing test names and the first assertion message, never the full failure output.
+If that log is missing or unreadable, the worker reruns the named failing tests with the resolved scoped command and says so; that is not missing context.
 Workers are not alone in the worktree and must preserve
 other workers' changes; the root alone owns shared git state and external writes.
 Always forward the plan's `### Documentation Routing` section verbatim to every `implementer` and `critical-reviewer` delegation (including `lite-small`'s single reviewer) and to the lessons collector.
@@ -227,7 +237,7 @@ After all waves finish, use one refactor pass with the reuse check below. The La
 runs at Completed-Change Verification, after the refactor pass: delegate one fresh worker for Phase 5's
 `## Completed-Change Verification` (full build, test and configured lint, integration fixes, exact results,
 the same three-attempt limit and context/diagnosis stops).
-A delegation report without a `Verification (full): <command> — pass` line means Completed-Change Verification did not run: rerun it, counting an attempt toward the three only when it ran and failed.
+A delegation report without a `Verification (full): <command> — pass` line means Completed-Change Verification did not run: rerun it, counting an attempt toward the three only when it ran and failed. A `Missing context:` first line is not a missing Verification line: it takes the Missing context stop above, never a rerun.
 In every mode run Phase 4’s `## Visual Verification` and screenshot persistence for UI
 tickets before acceptance review; sequential UI lanes and compact work keep that evidence.
 All existing acceptance/code reviews, approval rules and one-PR delivery still apply.
