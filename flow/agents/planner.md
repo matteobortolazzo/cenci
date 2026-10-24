@@ -208,13 +208,20 @@ Before finalizing the plan, explicitly identify:
     ### Delegation Preflight
     | Lane | Delegated to (role, model, effort) | Owned files (exclusive) | Verification | Scope | Wave | Depends on | Lane size | Retention reason |
     |---|---|---|---|---|---|---|---|---|
-    | 1 | implementer (sonnet, high) | <exact subset of Files to Modify/Create> | <lane-scoped test command> | <implementation scope and criteria> | 1 | None | S | — |
+    | 1 | implementer (sonnet, high) | <exact subset of Files to Modify/Create> | <lane-scoped test command>; lint: <scoped lint command> | <implementation scope and criteria> | 1 | None | S | — |
     | root | retained by the root agent | <files, or none> | — | <retained work> | — | — | — | <concrete ineligibility reason: GitHub mutation, user decision, shared branch/worktree state — never "small" or "easier inline"> |
 
     Every delegated lane has Scope, Wave and Depends on, even for a sequential
     assessment; root-retained actions are not scheduled as implementer lanes.
     Owned files maps to `Files:`, Verification to `Tests:`. Assign wave 1 and
     `None` to independent lanes; consumers name only earlier-wave lane IDs.
+
+    Every delegated lane's Verification cell, including the single lane of ordinary work, holds
+    a scoped command that exercises only that lane (the `; lint: <scoped lint command>` suffix is optional),
+    or the explicit fallback `full: <command> — <reason a narrower safe command is unavailable>`.
+    A `full:` fallback without a reason is malformed. The cell is the only source of `Tests:`:
+    red/green work and every fix delegation run it, and the one full build, test suite and lint
+    run later as Completed-Change Verification (Phase 5), never from this cell.
 
     Always present. Inventory every independent implementation lane, including work retained by the root agent, with an exclusive owned-file set that overlaps no other lane and the verification the worker must run; a retained lane records a concrete ineligibility reason. **A lane is at most one M** — its owned files and estimated lines fit the M bound (<= 30 changed files, <= 2,000 changed lines) and it is sized so the worker finishes inside about half of its model's advertised context window, which is the budget every implementer is briefed with (`docs/ticket-sizing.md`, "Lane size and context budget"). **An L ticket is always several lanes** with exclusive file ownership, never one lane — a single-lane L plan is malformed, and the main agent's Split Gate treats it like an `exceeds` verdict. A lane that cannot be cut below M is a split signal: write it in `### Split Recommendation` instead of widening the lane. When two or more lanes also pass the `### Parallel Lanes` eligibility conditions below, declare them there too so the pipeline can fan out; lanes that fail those conditions (UI work, sensitive paths) still run as separate, sequential implementer delegations — the preflight is the lane contract, `### Parallel Lanes` only decides concurrency.
 
@@ -258,7 +265,7 @@ Before finalizing the plan, explicitly identify:
     Example: lane 1 owns shared interfaces in wave 1; lanes 2 and 3 own separate
     consumers in wave 2, each depending on lane 1. Interfaces have scoped tests;
     consumers may start only once that foundation is green. Cross-lane integration
-    still runs at the final Lane Verification Barrier, not concurrently per lane.
+    still runs at the final Completed-Change Verification (Lane Verification Barrier), not concurrently per lane.
 
     ### Test Strategy
     For each component/file, classify and specify test types:

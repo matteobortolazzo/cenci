@@ -186,7 +186,7 @@ if require_doc CONTENT "${FILE}"; then
   # The full-suite/lint verification must cover consolidations made by the
   # Reuse Check, which reads AFTER that paragraph in the file -- so the
   # ordering has to be stated, not left to reading order.
-  assert_contains "${CONTENT}" 'Run the full test suite once all cleanup is done — including the `## Reuse Check` below' "${FILE}"
+  assert_contains "${CONTENT}" 'runs once all cleanup is done — including the `## Reuse Check` below' "${FILE}"
 fi
 
 # =====================================================================
@@ -265,7 +265,7 @@ if require_doc CONTENT "${FILE}"; then
   # same way Phase 5 does, and must apply the same never-tracked policy to
   # the report. Omitting either lets Codex consolidate and walk straight
   # into review with no re-run, or mint a Followup per unreusable helper.
-  assert_contains "${CONTENT}" 'same full-suite-and-lint run' "${FILE}"
+  assert_contains "${CONTENT}" 'same Completed-Change Verification run' "${FILE}"
   assert_contains "${CONTENT}" 'never tracked or turned into a Followup ticket' "${FILE}"
 fi
 

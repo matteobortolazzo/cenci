@@ -156,10 +156,18 @@ and the visual/screenshot checks below.
 Re-read the persisted `### Delegation Preflight`
 before any implementation mutation and enforce Phase 3's `## Delegation Preflight Re-check`
 and `## Context Budget`, including malformed ownership, lane size and split-signal stops.
+Stop at the same return-to-planning gate (`replan`) when a delegated lane's Verification cell is empty
+or is a `full:` fallback with no reason; a legacy plain command is treated as a scoped command.
 Read `### Parallelism Assessment`; a missing legacy assessment means sequential execution
 with that reason reported, never inferred fan-out. Use native `implementer` subagents,
-passing the worktree, plan sections, owned files, scoped test command, acceptance criteria
-and context-budget brief to each. Workers are not alone in the worktree and must preserve
+passing the worktree, plan sections, owned files, the lane's resolved scoped Verification command (its
+Verification cell, which is the only source of `Tests:`), acceptance criteria and context-budget brief
+to each. Workers run that scoped Verification command during red/green work and never the full suite,
+and report with these literal formats: `Verification (scoped): <command> — <pass|fail> — not covered: <scope outside the command>`,
+`Verification (full fallback): <command> — <pass|fail> — reason: <reason>` for a `full:` fallback lane, and
+`Verification (full): <command> — <pass|fail>` for the Completed-Change Verification run.
+A scoped pass is never reported as full suite, all tests or CI green.
+Workers are not alone in the worktree and must preserve
 other workers' changes; the root alone owns shared git state and external writes.
 Always forward the plan's `### Documentation Routing` section verbatim to every `implementer` and `critical-reviewer` delegation (including `lite-small`'s single reviewer) and to the lessons collector.
 
@@ -167,6 +175,7 @@ On an attach route, first read `git -C <abs-worktree-path> status --short` and `
 If any git read in this block (`status --short`, `log --oneline main..HEAD` or `diff --stat HEAD`) fails, stop with the git error: never treat missing output as a clean worktree and never paste git error text into the brief.
 A resumed worktree is clean only with 0 commits ahead of main and 0 uncommitted files; otherwise (any commit ahead of main or any uncommitted file) it is dirty.
 On the `reviewed` and `finalized`-without-`prUrl` routes with a dirty worktree, skip this Implementation dispatch, the lane verification barrier, the refactor pass, the reuse check and Visual Verification, and continue at the acceptance review.
+That resume runs Completed-Change Verification only when a fix delegation in that session changes the worktree; otherwise Phase 9's post-rebase full run is the full check.
 On the `plan_approved` and `executed` routes with a dirty worktree, every implementer delegation receives the resume brief: the single implementer, every parallel or sequential lane and the compact implementer. Gather `git -C <abs-worktree-path> status --short`, `git -C <abs-worktree-path> diff --stat HEAD` and `git -C <abs-worktree-path> log --oneline main..HEAD`, and copy this block into each delegation byte-for-byte, filled with those three outputs:
 
 ```text
@@ -188,13 +197,18 @@ exists; do not redo finished work. Never stash, reset, checkout over or discard 
 changes, and do not stage or commit them.
 ```
 
+On the `plan_approved` and `executed` routes, after re-running completed lanes' scoped tests, the run then always runs Completed-Change Verification once Phase 5's cleanup is done; evidence is never persisted across sessions, so a resume never reuses an earlier full run.
+
 A crash-resume brief is not a second resume for the context-budget split signal: that count is per session, and the crash was a memory kill, not context exhaustion. Tests that already exist and pass because the implementation is present are expected on a resume, not a red-phase violation; tasks not yet done follow the normal red-before-green order.
 
 With exactly one delegated lane, `cenci.compactImplementation` exactly true (default false)
 permits a small S, low-risk, concrete plan to combine red/green/refactor in one worker.
 Follow Phase 3's `## Compact Implementation`, including its exclusions, observed red-before-green
-evidence, bounded Reuse Check and full build/test/lint results. Otherwise use the ordinary
-separate test, implementation and refactor delegations. Compact mode never merges lanes.
+evidence and bounded Reuse Check. Its full build, test and lint run is its Completed-Change Verification,
+with no other full group before acceptance review. Otherwise use the ordinary
+separate test, implementation and refactor delegations.
+In ordinary mode the refactor delegation ends with Phase 5's `## Completed-Change Verification` (`phases/phase-5-refactor.md`), before the acceptance review.
+Compact mode never merges lanes.
 
 With multiple lanes, Read Phase 3’s `## Parallel Lanes` and execute its structural re-check,
 eligibility re-check, bounded dispatch, dependency waves, worker rules, error gate and resume
@@ -209,9 +223,11 @@ never launch all lanes together merely because the mode is parallel. Every lane 
 report scoped red-before-green evidence, stay within ownership and avoid full-suite runs.
 Failed prerequisites stop queued lanes and later waves, preserve completed edits and take
 the shared error gate; no barrier or reviews while any lane is failed or incomplete.
-After all waves finish, delegate one worker for Phase 4's `## Lane Verification Barrier`:
-full build, test and configured lint, integration fixes, exact results, the same three-attempt
-limit and context/diagnosis stops. Then use one refactor pass with the reuse check below.
+After all waves finish, use one refactor pass with the reuse check below. The Lane Verification Barrier
+runs at Completed-Change Verification, after the refactor pass: delegate one fresh worker for Phase 5's
+`## Completed-Change Verification` (full build, test and configured lint, integration fixes, exact results,
+the same three-attempt limit and context/diagnosis stops).
+A delegation report without a `Verification (full): <command> — pass` line means Completed-Change Verification did not run: rerun it, counting an attempt toward the three only when it ran and failed.
 In every mode run Phase 4’s `## Visual Verification` and screenshot persistence for UI
 tickets before acceptance review; sequential UI lanes and compact work keep that evidence.
 All existing acceptance/code reviews, approval rules and one-PR delivery still apply.
@@ -226,8 +242,8 @@ consolidating even at two occurrences since one of them is being written
 right now; keep the new code and report the
 near-duplicate when the existing unit cannot be reused without changing behavior for its
 current callers. This is bounded to new code — never a repo-wide duplication sweep.
-Any consolidation made here is covered by the same full-suite-and-lint run as the rest of the
-phase — re-run both before proceeding — and a reported near-duplicate is recorded for review
+Any consolidation made here is covered by the same Completed-Change Verification run as the rest of the
+phase — it runs once, after this check, never before it — and a reported near-duplicate is recorded for review
 visibility only, never tracked or turned into a Followup ticket.
 Then, before any code review, run the acceptance review: at its entry, in ticket mode, run `cenci pipeline review <id>`, then delegate the `acceptance-reviewer`
 role with the ticket body, its design record (the persisted plan) and the diff — never the
@@ -244,6 +260,11 @@ A finding that does not hold is not fixed but recorded as a one-line `Considered
 entry in the PR's `## Notes` (what was claimed, why it does not hold). Triage every lower-tier finding (Medium/Low, Should Fix, non-critical Warning) once, here: fix now if the fix is straightforward.
 Otherwise, discard by default — test-coverage gaps, doc polish, "consider X" suggestions, and refactor/tech-debt observations are never tracked, only recorded as a one-line `Considered and discarded` entry in the PR's `## Notes`, which never becomes a Followup ticket.
 **Track** it only when it is an actual defect with a concrete, realistic trigger path a user can hit in real use by noting it in the PR's `## Notes` for the Followup Ticket step, which records the tracked items through `cenci pipeline followup --source implement`.
+Each acceptance-fix and review-fix delegation runs its fix's scoped Verification command, and a fix report that lists a changed file marks the Completed-Change Verification evidence stale;
+a report that lists none leaves it valid, and an ambiguous or missing report counts as stale.
+Every fix-delegation report must carry a literal `Changed files:` line (a file list, or `Changed files: none`); a report without that line, and any edit the root agent applies itself, counts as stale.
+When the evidence is stale, run Completed-Change Verification once, after the last fix round
+(never once per round), before any documentation edit; a `reviewed` resume without mutation runs none, because Phase 9's post-rebase full run covers it.
 Fix the accepted findings,
 capture lessons, and run the maintenance check
 (`flow/skills/maintain/scripts/check.sh --changed`) when the change touches docs, skills,
