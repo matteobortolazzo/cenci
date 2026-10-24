@@ -2,9 +2,10 @@
 # Contract test for ticket #695 -- the board lifecycle labels have ONE home,
 # flow/docs/board-labels.md (its `## Labels` table: Label | Color |
 # Description | Applied by). Every `gh label create "<name>" ... --color "<c>"
-# --description "<d>"` literal copied into a skill (flow/skills/**/*.md) must
-# stay identical to that table's row, so the inline allow-listed commands can
-# never drift from the canonical colors/descriptions.
+# --description "<d>"` literal copied into a skill (flow/skills/**/*.md and
+# flow/skills/**/*.sh) must stay identical to that table's row, so the inline
+# allow-listed commands and the shell appliers can never drift from the
+# canonical colors/descriptions.
 #
 # What it enforces:
 #   - the canonical table parses (non-vacuity: zero rows fails), covers all 13
@@ -52,6 +53,7 @@ SKILLS_DIR="${FLOW_DIR}/skills"
 CONFIGURE_SKILL="${SKILLS_DIR}/configure/SKILL.md"
 REFINE_SKILL="${SKILLS_DIR}/refine/SKILL.md"
 REFINE_CODEX_REL="refine/codex.md"
+CLOSE_PARENT_REL="close/scripts/close-parent.sh"
 FLOW_AGENTS="${FLOW_DIR}/AGENTS.md"
 DOC_REF='board-labels.md'
 TABLE_HEADING='## Labels'
@@ -206,7 +208,7 @@ check_literals() {
 SCAN_LITERAL_FILES=""
 SCAN_LITERAL_COUNT=0
 
-# scan_skills <table-rows> <skills-dir> -- lists every *.md under <skills-dir>
+# scan_skills <table-rows> <skills-dir> -- lists every *.md and *.sh under <skills-dir>
 # (find status checked, stderr not suppressed), extracts each file's literals
 # and records problems. Not for use inside $(...) (it sets globals).
 scan_skills() {
@@ -215,7 +217,7 @@ scan_skills() {
   SCAN_LITERAL_COUNT=0
   raw="$(mktemp "${WORK}/scan-raw.XXXXXX")" || { add_problem "scan: mktemp failed"; return 0; }
   list="$(mktemp "${WORK}/scan-list.XXXXXX")" || { add_problem "scan: mktemp failed"; return 0; }
-  if ! find "${dir}" -type f -name '*.md' -print0 > "${raw}"; then
+  if ! find "${dir}" -type f \( -name '*.md' -o -name '*.sh' \) -print0 > "${raw}"; then
     add_problem "scan: find failed under ${dir}"
     return 0
   fi
@@ -308,15 +310,17 @@ grep -qF $'Bare\037\037\0370\0370' <<<"${FIXTURE_LITERALS}" || fail "literal ext
 FIXTURE_TABLE_DOC_FULL="$(printf '%s\n' \
   "${TABLE_HEADING}" "${TABLE_HEADER_ROW}" '|---|---|---|---|' \
   '| `Working` | `FBCA04` | Actively being refined or implemented | refine |' \
+  '| `Implemented` | `6F42C1` | PR merged — done | babysit |' \
   '| `automerge:ok` | `006B75` | Repository policy granted hands-off merge | refine |')"
 FIXTURE_TABLE="$(extract_table_rows_raw "${FIXTURE_TABLE_DOC_FULL}")"
 
-# run_scan_case <case-name> <file-content> -- builds <WORK>/<case>/skills/x/SKILL.md
-# holding <file-content>, scans it, leaves the problems in PROBLEMS.
+# run_scan_case <case-name> <file-content> [<skills-relative-path>] -- builds
+# <WORK>/<case>/skills/<path> (default x/SKILL.md) holding <file-content>, scans
+# it, leaves the problems in PROBLEMS.
 run_scan_case() {
-  local case_dir="${WORK}/$1"
-  mkdir -p "${case_dir}/skills/x" || { add_problem "self-test: mkdir failed for $1"; return 0; }
-  printf '%s\n' "$2" > "${case_dir}/skills/x/SKILL.md" || { add_problem "self-test: write failed for $1"; return 0; }
+  local case_dir="${WORK}/$1" rel="${3:-x/SKILL.md}"
+  mkdir -p "$(dirname "${case_dir}/skills/${rel}")" || { add_problem "self-test: mkdir failed for $1"; return 0; }
+  printf '%s\n' "$2" > "${case_dir}/skills/${rel}" || { add_problem "self-test: write failed for $1"; return 0; }
   PROBLEMS=""
   scan_skills "${FIXTURE_TABLE}" "${case_dir}/skills"
 }
@@ -382,6 +386,30 @@ grep -qF "color mismatch for 'automerge:ok'" <<<"${PROBLEMS}" || fail "scan self
 run_scan_case wrapped-description "${WRAPPED/hands-off merge\"/hands-off merger\"}"
 grep -qF "description mismatch for 'automerge:ok'" <<<"${PROBLEMS}" || fail "scan self-test: a wrapped literal with an injected description mismatch escaped the check: [${PROBLEMS}]"
 
+# Shell appliers (#1337): a *.sh under the skills tree is scanned like a *.md.
+SH_MATCHING='# Colors and descriptions: the plugin docs/board-labels.md.
+gh label create "Implemented" --repo "${REPO}" --color "6F42C1" --description "PR merged — done" >/dev/null 2>&1 || true'
+run_scan_case sh-matching "${SH_MATCHING}" close/scripts/apply.sh
+[[ -z "${PROBLEMS}" ]] || fail "scan self-test: a matching .sh fixture was flagged: [${PROBLEMS}]"
+[[ "${SCAN_LITERAL_COUNT}" -eq 1 ]] || fail "scan self-test: a matching .sh fixture expected 1 counted literal (the .sh scan is missing or the em dash did not match), got ${SCAN_LITERAL_COUNT}"
+grep -qxF -- "close/scripts/apply.sh" <<<"${SCAN_LITERAL_FILES}" || fail "scan self-test: the .sh fixture was not listed in the scanned literal files: [${SCAN_LITERAL_FILES}]"
+
+run_scan_case sh-color-mismatch "${SH_MATCHING/6F42C1/0E8A16}" close/scripts/apply.sh
+grep -qF "color mismatch for 'Implemented'" <<<"${PROBLEMS}" || fail "scan self-test: a .sh literal carrying a wrong color escaped the check: [${PROBLEMS}]"
+
+run_scan_case sh-description-mismatch "${SH_MATCHING/PR merged — done/PR merged}" close/scripts/apply.sh
+grep -qF "description mismatch for 'Implemented'" <<<"${PROBLEMS}" || fail "scan self-test: a .sh literal carrying a truncated description escaped the check: [${PROBLEMS}]"
+
+run_scan_case sh-no-doc-reference 'gh label create "Implemented" --repo "${REPO}" --color "6F42C1" --description "PR merged — done" >/dev/null 2>&1 || true' close/scripts/apply.sh
+grep -qF "does not reference the plugin's docs/${DOC_REF}" <<<"${PROBLEMS}" || fail "scan self-test: a .sh literal with no pointer to the label doc was not caught: [${PROBLEMS}]"
+
+# maintain/scripts/check.sh prints an escaped hint (`create \"$l\" ... --color <hex>`);
+# it is not a literal, so it must record no lacks-flags / unknown-label problem.
+run_scan_case sh-escaped-hint 'echo "  fix: gh label create \"$l\" --repo \"$REPO\" --color <hex>"' maintain/scripts/check.sh
+grep -qF "lacks --color" <<<"${PROBLEMS}" && fail "scan self-test: an escaped check.sh-style hint was counted as a literal lacking flags: [${PROBLEMS}]"
+grep -qF "unknown label" <<<"${PROBLEMS}" && fail "scan self-test: an escaped check.sh-style hint was counted as an unknown-label literal: [${PROBLEMS}]"
+[[ "${SCAN_LITERAL_COUNT}" -eq 0 ]] || fail "scan self-test: an escaped check.sh-style hint was counted as a literal (got ${SCAN_LITERAL_COUNT})"
+
 run_scan_case no-literals 'No label commands in this skill at all.'
 grep -qF "zero 'gh label create" <<<"${PROBLEMS}" || fail "scan self-test: a scan with zero literals did not fail (vacuous pass): [${PROBLEMS}]"
 
@@ -415,6 +443,7 @@ check_table "${REAL_TABLE}"
 scan_skills "${REAL_TABLE}" "${SKILLS_DIR}"
 if [[ "${SCAN_LITERAL_COUNT}" -gt 0 ]]; then
   grep -qxF -- "${REFINE_CODEX_REL}" <<<"${SCAN_LITERAL_FILES}" || add_problem "scan: no literal found in skills/${REFINE_CODEX_REL} -- its hard-wrapped automerge:ok literal must be seen by the drift check"
+  grep -qxF -- "${CLOSE_PARENT_REL}" <<<"${SCAN_LITERAL_FILES}" || add_problem "scan: no literal found in skills/${CLOSE_PARENT_REL} -- its Implemented self-heal must be seen by the drift check (the scan must cover *.sh)"
 fi
 if [[ -n "${PROBLEMS}" ]]; then
   while IFS= read -r problem; do

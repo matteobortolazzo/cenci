@@ -202,7 +202,10 @@ if [[ "${PARENT_STATE}" == "CLOSED" ]]; then
 else
   gh issue close "${PARENT}" --repo "${REPO}" --reason completed >/dev/null 2>"${WORK}/close.err" || die "closing #${PARENT} failed: $(cat "${WORK}/close.err" 2>/dev/null)"
 fi
-gh label create "Implemented" --repo "${REPO}" --color "0E8A16" --description "PR merged" >/dev/null 2>&1 || true
+# Create-only self-heal: color and description come from the plugin's
+# docs/board-labels.md (`## Labels` table); the drift contract test keeps this
+# literal identical to the `Implemented` row. Failure is suppressed.
+gh label create "Implemented" --repo "${REPO}" --color "6F42C1" --description "PR merged — done" >/dev/null 2>&1 || true
 if ! gh issue edit "${PARENT}" --repo "${REPO}" --add-label "Implemented" --remove-label "In Review" >/dev/null 2>"${WORK}/label.err"; then
   gh issue edit "${PARENT}" --repo "${REPO}" --add-label "Implemented" >/dev/null 2>"${WORK}/label.err" || die "relabeling #${PARENT} failed: $(cat "${WORK}/label.err" 2>/dev/null)"
 fi

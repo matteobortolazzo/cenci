@@ -250,7 +250,7 @@ func reconcileOneParent(repo string, parent, originatingChild int) (*parentOutco
 	// "Implemented" self-heal above): a repo that never had this label at
 	// all must not fail the label swap below just because
 	// --remove-label references a label that doesn't exist yet.
-	_, _, _ = execGh("label", "create", "In Review", "--repo", repo, "--color", "FBCA04", "--description", "Reviewing")
+	_, _, _ = execGh("label", "create", "In Review", "--repo", repo, "--color", "A2EEEF", "--description", "PR open, under review / CI running")
 	if _, stderr, err := execGh("issue", "edit", strconv.Itoa(parent), "--repo", repo, "--remove-label", "In Review", "--add-label", "Implemented"); err != nil {
 		// Write ordering is label-edit-then-close (#811 Assumption): a failed
 		// label edit must skip the close entirely, never proceeding to

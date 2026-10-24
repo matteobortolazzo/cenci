@@ -13,10 +13,12 @@
 #     the same parent with the parent's milestone, non-lifecycle labels and
 #     the item verbatim, linked and verified; parent NOT closed
 #   4 full coverage -> exit 0: review posted, parent closed as completed,
-#     Implemented swapped in, state re-read; no child created
+#     Implemented created with the board-labels.md color/description and
+#     swapped in, state re-read; no child created
 #   5 --dry-run -> zero writes
 #   6 malformed table -> exit 2, zero writes; a failed link -> exit 2 with
 #     the partial state reported, parent left open
+#   7 a failing `gh label create` is suppressed -> relabel + close continue
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || { echo "close-parent.test.sh: failed to resolve script directory." >&2; exit 2; }
@@ -95,6 +97,7 @@ assert_contains "${OUT}" "closed: #480" "case4 closed line"
 LOG="$(cat "${T}/full.log")"
 assert_contains "${LOG}" "issue close 480 --repo acme/widgets --reason completed" "case4 closed as completed"
 assert_contains "${LOG}" "issue edit 480 --repo acme/widgets --add-label Implemented --remove-label In Review" "case4 Implemented swapped in"
+assert_contains "${LOG}" "label create Implemented --repo acme/widgets --color 6F42C1 --description PR merged — done" "case4 Implemented created with the board-labels.md table's color and description (em dash byte-for-byte)"
 assert_contains "${LOG}" "issue view 480 --repo acme/widgets --json state --jq .state" "case4 state re-read after closing"
 assert_not_contains "${LOG}" "issues -X POST" "case4 no child created"
 assert_contains "$(cat "${T}/full.state/comment-777.md")" "Closing the parent." "case4 review comment says closing"
@@ -120,6 +123,17 @@ assert_eq "${rc}" "2" "case6b failed link exits 2"
 assert_contains "$(cat "${T}/linkfail.err")" "linking #900 as a sub-issue of #480 failed" "case6b names the failed link"
 assert_contains "$(cat "${T}/linkfail.err")" "gh issue edit 900 --repo acme/widgets --parent 480" "case6b hands the user the manual link command"
 assert_not_contains "$(cat "${T}/linkfail.log")" "issue close" "case6b parent left open"
+
+# --- 7. a failed Implemented label create is suppressed; relabel and close continue ---
+export GH_STUB_FAIL_PATTERN="label create"
+rc="$(run_case labelfail "${FIX}/parent-all-closed.json" "${FIX}/review-full.md")"
+unset GH_STUB_FAIL_PATTERN
+assert_eq "${rc}" "0" "case7 a failed label create does not fail the close"
+assert_contains "$(cat "${T}/labelfail.out")" "closed: #480" "case7 closed line"
+LOG="$(cat "${T}/labelfail.log")"
+assert_contains "${LOG}" "label create Implemented --repo acme/widgets" "case7 the label create was attempted"
+assert_contains "${LOG}" "issue edit 480 --repo acme/widgets --add-label Implemented --remove-label In Review" "case7 relabel still runs after the failed create"
+assert_contains "${LOG}" "issue close 480 --repo acme/widgets --reason completed" "case7 parent still closed"
 
 echo "close-parent.test.sh: failures=${failures}"
 [[ "${failures}" -eq 0 ]]

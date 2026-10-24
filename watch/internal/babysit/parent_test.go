@@ -81,6 +81,18 @@ func countCalls(calls [][]string, parts ...string) int {
 	return n
 }
 
+// countExactCalls reports how many entries in calls, space-joined, equal want
+// exactly (no substring matching).
+func countExactCalls(calls [][]string, want string) int {
+	n := 0
+	for _, c := range calls {
+		if strings.Join(c, " ") == want {
+			n++
+		}
+	}
+	return n
+}
+
 // indexOfCall returns the first index in calls whose joined args contain
 // every one of parts, or -1.
 func indexOfCall(calls [][]string, parts ...string) int {
@@ -130,7 +142,9 @@ const (
 	selfHealKey = "label create Implemented --repo o/r --color 6F42C1 --description PR merged — done"
 	// inReviewSelfHealKey is the "In Review" label-create self-heal call's
 	// exact args key (#811 Fix 3), mirroring selfHealKey's shape.
-	inReviewSelfHealKey = "label create In Review --repo o/r --color FBCA04 --description Reviewing"
+	// The color and description are the "In Review" row of
+	// flow/docs/board-labels.md, hard-coded here on purpose.
+	inReviewSelfHealKey = "label create In Review --repo o/r --color A2EEEF --description PR open, under review / CI running"
 	// editKey20/closeKey20/verifyKey20 are parent 20's label-swap, close, and
 	// post-close verification call keys.
 	editKey20   = "issue edit 20 --repo o/r --remove-label In Review --add-label Implemented"
@@ -321,6 +335,14 @@ func TestReconcileParentsNoMarkerSelfHealsInReviewLabelBeforeEdit(t *testing.T) 
 	editIdx := indexOfCall(calls, "gh issue edit 20")
 	if selfHealIdx < 0 {
 		t.Fatalf("no In Review label-create self-heal call in %#v", calls)
+	}
+	// ghStub answers any unscripted call with an error that reconcileParents
+	// discards, so a create with wrong arguments would otherwise pass: pin
+	// the exact calls.
+	for _, key := range []string{inReviewSelfHealKey, selfHealKey} {
+		if got := countExactCalls(calls, "gh "+key); got != 1 {
+			t.Errorf("calls matching exactly %q = %d, want 1: %#v", "gh "+key, got, calls)
+		}
 	}
 	if editIdx < 0 || editIdx < selfHealIdx {
 		t.Fatalf("want the In Review self-heal (index %d) strictly before the label edit (index %d): %#v", selfHealIdx, editIdx, calls)
