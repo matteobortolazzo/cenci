@@ -10,6 +10,10 @@
 #     rerun the way Codex launches it (`$SHELL -lc`, PLUGIN_ROOT exported)
 #   - deny matrix: sensitive and main-worktree targets through Bash and through
 #     apply_patch, each paired with a positive control whose write must land
+#   - guard canary preflight (#1213): the guard-canary.sh helper end to end --
+#     plan, one `codex exec` per probe, check -- "as launched" and, in the
+#     sandbox only, with --dangerously-bypass-hook-trust withheld; FAIL when the
+#     preflight's result contradicts the trust state the deny-matrix canary shows
 #   - cwd capture: payload cwd, hook process cwd and effective tool cwd for a
 #     direct apply_patch, an exec_command with a per-call workdir, and (when the
 #     installed Codex has the feature) nested code mode
@@ -825,6 +829,165 @@ deny_row "apply_patch -> main worktree file (deny, guard-main-worktree)" deny ap
 deny_row "apply_patch -> worktree file (positive control, allow)" allow apply_patch "${WT}/control-patch.txt" "${REPO}" "" \
     "$(prompt_patch "$(make_patch file-add "${WT}/control-patch.txt")")"
 
+# ── Guard canary preflight (#1213) ──────────────────────────────────────
+# What the mutating Codex workflows run before their first mutation:
+# guard-canary.sh plan -> one `codex exec` per probe from a feature-worktree
+# session -> guard-canary.sh check. Each probe is judged here exactly like a
+# deny-matrix row (same-item block evidence + the guard's own message + the
+# filesystem), and the helper prints active or refused. The result is compared
+# with the trust state the deny-matrix canary established (CANARY_STATE):
+#   active   -> the preflight must pass; a refusal is a FAIL
+#   inactive -> the preflight must refuse; a pass is a FAIL
+#   unknown  -> nothing to compare against: inconclusive
+# Variants: "as launched" (host: persisted /hooks trust; sandbox: with the
+# launcher's trust-bypass flag) and "trust withheld" (sandbox only: the same
+# calls without --dangerously-bypass-hook-trust, inside the disposable
+# container). The host never withholds trust (cenci never changes it): the
+# variant is recorded as not run, with the trust state observed above.
+SECTION="canary"
+rpt ""
+rpt "### Guard canary preflight"
+table_head "variant"
+
+CANARY_SH="${SCRIPT_DIR}/guard-canary.sh"
+CANARY_AL_RESULT="not run"
+CANARY_WH_RESULT="not run"
+CANARY_RESULT=""   # result of the last canary_variant: ok | FAIL | inconclusive
+
+# canary_guard_message <guard> -- the text that guard's own refusal carries.
+canary_guard_message() {
+    case "$1" in
+        check-sensitive-files) printf '%s' 'Refusing to write' ;;
+        guard-main-worktree) printf '%s' 'targets the main worktree' ;;
+    esac
+}
+
+# canary_variant <label> <with|without> <expected: active|refused|refused-soft|unknown>
+# -- one full preflight. "without" leaves out only --dangerously-bypass-hook-trust
+# (the approvals/sandbox bypass stays). Records one row and sets CANARY_RESULT.
+canary_variant() {
+    local label="$1" trust="$2" expected="$3"
+    local plan_out plan_rc run_dir kind pn ptool pguard pgroup ptarget needle tool_name
+    local attempted landed blocked seen verdict check_out check_rc got status detail
+    local likely n_removed n_left first_line line probes=""
+    local -a saved_mode=("${CODEX_MODE_ARGS[@]}") results=()
+    CANARY_RESULT="inconclusive"
+
+    if [[ "${trust}" == without ]]; then
+        CODEX_MODE_ARGS=(--dangerously-bypass-approvals-and-sandbox)
+    fi
+
+    plan_out="$(cd "${WT}" && bash "${CANARY_SH}" plan 2>&1)"
+    plan_rc=$?
+    run_dir=""
+    if [[ "${plan_rc}" -eq 0 ]]; then
+        while IFS= read -r line; do
+            case "${line}" in
+                CANARY_RUN_DIR=*) run_dir="${line#CANARY_RUN_DIR=}" ;;
+            esac
+        done <<< "${plan_out}"
+    fi
+
+    if [[ "${plan_rc}" -eq 0 && -n "${run_dir}" ]]; then
+        while IFS=$'\t' read -r kind pn ptool pguard pgroup ptarget; do
+            [[ "${kind}" == PROBE ]] || continue
+            needle="${ptarget##*/}"
+            if [[ "${ptool}" == shell ]]; then
+                tool_name="Bash"
+                S_PROMPT="$(prompt_bash "printf x > ${ptarget}")"
+            else
+                tool_name="apply_patch"
+                S_PROMPT="$(prompt_patch "$(make_patch file-add "${ptarget}")")"
+            fi
+            extra_for_worktree
+            run_codex "${WT}" "${S_PROMPT}" ${S_EXTRA[@]+"${S_EXTRA[@]}"} || {
+                results+=("${pn}=not-denied")
+                probes="${probes:+${probes}, }${pn}=not-denied (could not start codex exec)"
+                continue
+            }
+            attempted="$(attempted_yes_no "${needle}" "${tool_name}")"
+            landed="$(effect_landed file "${ptarget}")"
+            blocked="$(blocked_yes_no "${needle}")"
+            seen="$(message_seen_yes_no "${needle}" "$(canary_guard_message "${pguard}")")"
+            verdict="$(cnh_classify_verdict deny "${attempted}" "${landed}" "${blocked}")"
+            if [[ "${verdict}" == denied && "${seen}" == yes ]]; then
+                results+=("${pn}=denied")
+                probes="${probes:+${probes}, }${pn}=denied (${ptool}, ${pguard})"
+            else
+                results+=("${pn}=not-denied")
+                probes="${probes:+${probes}, }${pn}=not-denied (${ptool}, ${pguard}; attempted=${attempted}, effect=${landed}, hook-block=${blocked}, guard-message=${seen})"
+            fi
+        done <<< "${plan_out}"
+        check_out="$(cd "${WT}" && bash "${CANARY_SH}" check "${run_dir}" ${results[@]+"${results[@]}"} 2>&1)"
+        check_rc=$?
+    else
+        # A plan that cannot be made is itself the canary's refusal.
+        check_out="${plan_out}"
+        check_rc=1
+        probes="no probe was run: the plan was refused"
+    fi
+    CODEX_MODE_ARGS=("${saved_mode[@]}")
+
+    got="unknown"
+    while IFS= read -r line; do
+        case "${line}" in
+            CANARY_STATUS=active) got="active" ;;
+            CANARY_STATUS=refused) got="refused" ;;
+        esac
+    done <<< "${check_out}"
+    n_removed="$(grep -c '^REMOVED: ' <<< "${check_out}")"
+    n_left="$(grep -c '^LEFTOVER: ' <<< "${check_out}")"
+    likely="$(grep -m 1 '^Likely cause:' <<< "${check_out}")" || likely=""
+    first_line="$(grep -m 1 -E '^(Guard canary refused|GUARD CANARY REFUSED)' <<< "${check_out}")" || first_line=""
+
+    status="inconclusive"
+    case "${expected}:${got}" in
+        active:active | refused:refused | refused-soft:refused) status="ok" ;;
+        active:refused | refused:active) status="FAIL" ;;
+    esac
+    detail="CANARY_STATUS=${got} (helper rc ${check_rc}, expected ${expected}); probes: ${probes}; cleanup: removed ${n_removed} written target(s), ${n_left} leftover(s)"
+    if [[ -n "${first_line}" ]]; then detail="${detail}; ${first_line}"; fi
+    if [[ -n "${likely}" ]]; then detail="${detail}; ${likely}"; fi
+    if [[ "${RUN_MODE}" == sandbox ]]; then detail="${detail}; hook trust bypassed by launcher (explicit flag)"; fi
+    case "${status}" in
+        FAIL) detail="the result contradicts the trust state the deny-matrix canary established (${detail})" ;;
+        inconclusive)
+            if [[ "${expected}" == refused-soft ]]; then
+                detail="the hooks were active even with the trust flag left out (trust is already persisted in this container), so the refusal path was not exercised (${detail})"
+            else
+                detail="no comparison is possible against trust state ${CANARY_STATE} (${detail})"
+            fi
+            ;;
+    esac
+    CANARY_RESULT="${status}"
+    record "${label}" "${status}" "${detail}"
+    rpt ""
+    rpt "- ${label}: helper output"
+    rpt '```text'
+    rpt "${check_out}"
+    rpt '```'
+    return 0
+}
+
+case "${CANARY_STATE}" in
+    active) EXPECT_AL="active" ;;
+    inactive) EXPECT_AL="refused" ;;
+    *) EXPECT_AL="unknown" ;;
+esac
+canary_variant "guard canary preflight (as launched)" with "${EXPECT_AL}"
+CANARY_AL_RESULT="${CANARY_RESULT}"
+if [[ "${RUN_MODE}" == sandbox ]]; then
+    # Trust withheld inside the container: with the flag left out the plugin
+    # hooks are pending, so the preflight must refuse. An active result here
+    # means the container already had the hooks trusted persistently, which
+    # leaves the refusal path unexercised.
+    canary_variant "guard canary preflight (trust withheld)" without refused-soft
+    CANARY_WH_RESULT="${CANARY_RESULT}"
+else
+    record "guard canary preflight (trust withheld)" "not run" "sandbox-only: the host variant would have to change persisted hook trust, which cenci never does; persisted trust state as observed by the as-launched run above: ${CANARY_STATE}"
+fi
+SECTION="scenario"
+
 # ── cwd capture ─────────────────────────────────────────────────────────
 rpt ""
 rpt "### cwd capture (payload cwd / hook pwd / effective cwd)"
@@ -1054,6 +1217,7 @@ case "${CANARY_STATE}" in
     unknown) rpt "- Trust state: UNKNOWN (the canary was inconclusive: ${CANARY_DETAIL}). No allow or deny row was run, because neither outcome proves anything while it is unknown whether a hook is watching." ;;
     *) rpt "- Trust state: UNKNOWN (the canary did not run)." ;;
 esac
+rpt "- Guard canary preflight: as launched ${CANARY_AL_RESULT}, trust withheld ${CANARY_WH_RESULT} (see the Guard canary preflight section for the status, refusal text and cleanup outcome)."
 rpt "- ok=${N_OK} (scenario rows: ${N_SCEN_OK}) failed=${N_FAIL} inconclusive=${N_INCONCLUSIVE} not-run=${N_NOTRUN}"
 rpt "- An inconclusive row is never a success: the call was not proven to have been attempted. Preflight rows prove only that a handler launches, not what Codex does."
 

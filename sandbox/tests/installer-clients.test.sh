@@ -1403,6 +1403,16 @@ assert_contains "${DOCTOR_OUTPUT}" "Codex: cenci"
 assert_contains "${DOCTOR_OUTPUT}" "cenci-installer utility"
 assert_contains "${DOCTOR_OUTPUT}" "cenci daemon"
 assert_not_contains "${DOCTOR_OUTPUT}" "binary not found yet"
+# #1213: doctor reports Codex hook protection as unverified and never as active.
+assert_contains "${DOCTOR_OUTPUT}" "hook protection is not verified by doctor"
+assert_contains "${DOCTOR_OUTPUT}" "inactive protection"
+assert_contains "${DOCTOR_OUTPUT}" "/hooks"
+assert_contains "${DOCTOR_OUTPUT}" "guard canary"
+assert_contains "${DOCTOR_OUTPUT}" "hook trust bypassed by launcher (explicit flag)"
+assert_contains "${DOCTOR_OUTPUT}" "cenci never changes trust"
+assert_not_contains "${DOCTOR_OUTPUT}" "supports cenci hooks"
+assert_not_contains "${DOCTOR_OUTPUT}" "trusted"
+assert_not_contains "${DOCTOR_OUTPUT}" "protection active"
 
 echo "case: doctor's Codex notification hint reflects the user-level config.toml, never a differing project-level override Codex itself ignores (#416)"
 name=doctor-codex-config-precedence
