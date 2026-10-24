@@ -12,7 +12,11 @@ codex plugin marketplace add matteobortolazzo/cenci
 codex plugin add cenci@cenci
 ```
 
-Review changed plugin hooks with `/hooks`. cenci never changes hook trust automatically.
+Codex skips plugin hooks that are pending or not yet trusted, so a freshly installed or
+updated plugin gives no hook protection until you review its hooks with `/hooks`. Pending
+hooks are inactive protection: the mutating Codex workflows detect that with a
+[guard canary](#guard-canary-preflight) and refuse to start. cenci never changes hook trust
+automatically, and `cenci doctor` does not verify hook protection.
 
 ## Native workflow foundation
 
@@ -89,9 +93,12 @@ failure below and fails if this table lacks a row for any exit code the fixtures
 
 "What Codex does" is derived from the codex-rs source (exit 2 with non-empty stderr is
 reported as Blocked; any other non-zero exit is reported as Failed and the tool call is not
-blocked). It has not been confirmed against a native Codex binary; that confirmation belongs
-to #1212. The login-shell raw-form code for fish is recorded by the suite when fish is
-installed; no fish row is listed because it has not been observed.
+blocked). The fixtures verify the guards' exit codes and messages deterministically; what a
+native Codex binary does with them is the job of the opt-in runner (#1212), whose results
+the maintainer records in [`codex-native-evidence.md`](codex-native-evidence.md). Until that
+record is filled in from real runs, the "What Codex does" column stays derived from the
+codex-rs source, not observed. The login-shell raw-form code for fish is recorded by the
+suite when fish is installed; no fish row is listed because it has not been observed.
 
 | Exit code | Stderr signature | Cause | Classification | What Codex does | Fix |
 |---|---|---|---|---|---|
@@ -110,6 +117,49 @@ changing `codex/hooks.json` or any script it names.
 
 The opt-in runner `codex/native-hooks.test.sh` (`CENCI_CODEX_NATIVE=1`) runs a real `codex exec`
 against these hooks. Its sanitized results are recorded in
+[`codex-native-evidence.md`](codex-native-evidence.md).
+
+## Guard canary preflight
+
+Codex does not expose hook trust state non-interactively, and it skips pending hooks, so an
+installed flow plugin is not proof that `check-sensitive-files.sh` and
+`guard-main-worktree.sh` are watching a session. The mutating Codex workflows therefore run
+`bash "${PLUGIN_ROOT}/codex/guard-canary.sh"` first: the normal-mode `apply` of `implement`,
+`address-review`, `refactor`, and `babysit`'s Codex step. `/plan` stays mutation-free and does not
+run it, and the check is unconditional, so it runs in every session, sandbox included.
+`skills/codex-runtime/SKILL.md` owns the procedure; Claude Code sessions are excluded because
+Claude Code has no pending-trust state for plugin hooks.
+
+- **Probes.** `plan` reads `codex/hooks.json` and gives every (matcher group, guard) pair its
+  own probe (four with today's manifest: `Write|Edit` and `Bash`, each with both guards). Each
+  target is absolute and unique per run, and is chosen so exactly one guard denies it: a `.env`
+  file in a fresh 0700 run directory outside the repository for `check-sensitive-files.sh`, and a
+  `.txt` file in the main worktree for `guard-main-worktree.sh`. Before it prints anything,
+  `plan` runs both real guard scripts on each probe and refuses if the probe is not
+  single-guard. An unknown matcher or guard, an unreadable manifest, or a missing `jq` also
+  refuses.
+- **Verdict.** The session makes one tool call per probe, reports whether the guard's own
+  message appeared in the result, and runs `check`. `CANARY_STATUS=active` needs every probe
+  denied by its own guard and nothing written. A written file always means inactive protection,
+  whatever the session reported.
+- **Refusal.** Any not-denied or inconclusive probe refuses before any mutation. The refusal
+  names pending or untrusted hooks as the likely cause and points to `/hooks`; rerun the
+  workflow after reviewing them.
+- **Cleanup.** Whatever got written is removed. A removal that fails is reported as
+  `LEFTOVER: <exact path>` for you to delete by hand, and the workflow still refuses.
+- **Sandbox label.** In a `cn xt` session the launcher passes the trust-bypass flag, and the
+  output says "hook trust bypassed by launcher (explicit flag)", never "trusted". cenci reports
+  trust state and never changes it.
+- **Repositories under `/tmp`.** `guard-main-worktree.sh` allows `/tmp/*` targets outright, so a
+  repository that lives under `/tmp` cannot show a denial there: the probe self-check fails and
+  the canary refuses (fail closed). Keep repositories elsewhere (for example under `/var/tmp`
+  or your home directory).
+
+Verified so far: `codex/guard-canary.test.sh` exercises the helper against the real guard
+scripts, `codex/native-hooks.gate.test.sh` covers the native runner's canary scenario with a
+Codex stub, and `codex/workflows.test.sh` asserts where each surface runs the step. The result
+against a real Codex (host and `cn xt`, hooks trusted and withheld, and whether `apply_patch`
+reaches the `Write|Edit` matcher) is awaiting the maintainer's native runs and is recorded in
 [`codex-native-evidence.md`](codex-native-evidence.md).
 
 ## Attention behavior

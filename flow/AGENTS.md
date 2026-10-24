@@ -31,7 +31,7 @@ On-demand topic docs live at `docs/`:
 - `docs/pipeline-safety.md` — restart/recovery, risk-profile re-evaluation, and shared-temp-file scoping rules for multi-phase pipelines
 - `docs/shell-scripting-gotchas.md` — narrow shell/jq/grep pitfalls (CWD persistence, jq fallback semantics, contract-test markers)
 - `docs/adapter-contract.md` — the 8-property behavioral-parity contract client adapters (Claude Code, Codex) must satisfy, and its enforcement points
-- `docs/codex-native-evidence.md` — the sanitized record of opt-in native Codex runs (`flow/codex/native-hooks.test.sh`): hook launch/127 investigation, deny matrix, payload/hook/effective cwd table, and the launch-failure finding; read before changing the relative-`apply_patch` resolution in the guards or `docs/codex.md`'s native-behavior claims
+- `docs/codex-native-evidence.md` — the sanitized record of opt-in native Codex runs (`flow/codex/native-hooks.test.sh`): hook launch/127 investigation, deny matrix, payload/hook/effective cwd table, the launch-failure finding, and the guard canary result (`flow/codex/guard-canary.sh`, host and `cn xt`); read before changing the relative-`apply_patch` resolution in the guards, the guard canary, or `docs/codex.md`'s native-behavior claims
 - `docs/followup-triage.md` — the `Followup` capture-queue invariant and the `/cenci:maintain backlog` consolidation (merge/batch/supersede) mechanics
 - `docs/comment-attribution.md` — the cenci attribution banner and `<!-- cenci-<kind> -->` marker convention every flow-posted comment follows, its `<kind>` registry, and why the marker must never be blockquoted
 

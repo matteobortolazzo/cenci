@@ -27,4 +27,25 @@ user-invocable: false
   otherwise checkpoint and return control so the client clears/pauses the active goal.
 - Prefer generated `.codex/agents/*.toml` roles. If unavailable, delegate to a built-in
   worker with the same bounded role prompt and report that fallback in the checkpoint.
+- Guard canary preflight: Codex skips pending or untrusted plugin hooks, so an installed
+  flow plugin does not prove the write guards are watching the session. Every mutating Codex
+  workflow (`implement` apply, `address-review`, `refactor`, and `babysit`'s Codex arm) runs
+  `bash "${PLUGIN_ROOT}/codex/guard-canary.sh" plan` at the start of its normal-mode
+  (mutating) invocation, after `project-core`'s configured-repo check and before its first
+  mutation; `/plan` stays mutation-free and never runs it. The helper prints one `PROBE` line
+  per (matcher group, guard) pair of `codex/hooks.json` (four today) plus `INSTRUCTION:` lines.
+  Make exactly the listed tool calls, judge each from its own tool result (denied only when the
+  guard's message shows, otherwise not-denied), then run the printed `check <run-dir> <n>=denied|not-denied…`
+  command. Proceed only on `CANARY_STATUS=active`; on `CANARY_STATUS=refused`, or when `plan`
+  cannot be made, a probe came back not-denied or inconclusive, or the helper cannot run, stop
+  before any mutation, persist nothing, arm no goal, and report the helper's text verbatim: it
+  names pending or untrusted hooks as the likely cause and points to `/hooks` to review them.
+  The helper removes any canary that got written and reports it as `REMOVED: <path>`; a canary it
+  cannot remove is reported as `LEFTOVER: <exact path>` for the user to delete by hand, and the
+  workflow still refuses. In a sandbox session the output labels trust
+  "hook trust bypassed by launcher (explicit flag)", never "trusted"; cenci only reports hook
+  trust and never changes it. Claude Code `SKILL.md` files are excluded from this rule on purpose:
+  Claude Code has no pending-trust state for plugin hooks, so there is nothing for a canary to
+  detect there; that is the exclusion reason `docs/skill-authoring.md`'s client-surface rule asks
+  to be recorded next to the declaration.
 - Keep authenticated mutations, pushes, PR creation, and user questions in the root agent.

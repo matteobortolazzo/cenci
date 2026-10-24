@@ -32,6 +32,16 @@ CENCI_CODEX_NATIVE=1 CENCI_CODEX_NATIVE_OUT=./native-host.md bash flow/codex/nat
   inactive, or the canary could not tell); `RESULT: FAIL` (exit 1) means a row failed. While
   the canary has not shown the hooks active, no allow or deny row is run, because an allowed
   write proves nothing when no hook is watching.
+- **Guard canary preflight (#1213):** the same run also executes `codex/guard-canary.sh`
+  end to end under a `### Guard canary preflight` report section: `plan`, one `codex exec` per
+  probe from a feature-worktree session, then `check`. The "as launched" variant runs on the
+  host (persisted `/hooks` trust) and in the sandbox (with the trust-bypass flag); the "trust
+  withheld" variant runs in the sandbox only, with just `--dangerously-bypass-hook-trust` left
+  out inside the disposable container, and the host records it as `not run` because cenci never
+  changes persisted trust. A run FAILs when the preflight result contradicts the trust state
+  the deny-matrix canary established. Copy the sanitized `### Guard canary preflight` section,
+  including each variant's `CANARY_STATUS`, refusal text and `REMOVED:`/`LEFTOVER:` lines,
+  into the "Guard canary preflight" section below.
 - Pass or fail is judged from the filesystem after each call, the `codex exec --json`
   tool-call events and the guards' capture tap (`CENCI_CODEX_HOOK_CAPTURE_DIR`). A row whose
   call was not proven to have been attempted is `inconclusive`, never a success.
@@ -77,6 +87,26 @@ Each deny row is paired with a positive control whose allowed write must land.
 | apply_patch to a sensitive `.env` (check-sensitive-files) | pending native run | pending native run |
 | apply_patch to a main-worktree file (guard-main-worktree) | pending native run | pending native run |
 | apply_patch to a worktree file (positive control) | pending native run | pending native run |
+
+## Guard canary preflight
+
+What `codex/guard-canary.sh` does against a real Codex (#1213): the mutating Codex workflows
+refuse to start unless every (matcher group, guard) pair denies its own probe. Each cell below
+is `pending maintainer run` until the maintainer commits sanitized runner output; the
+deterministic suite `codex/guard-canary.test.sh` and the stub cases in
+`codex/native-hooks.gate.test.sh` prove the helper and the runner scenario, not the native binary.
+
+| Variant | Host run | Sandbox run (`cn xt`) |
+|---|---|---|
+| As launched: trust state | pending maintainer run | pending maintainer run (hook trust bypassed by launcher (explicit flag)) |
+| As launched: `CANARY_STATUS` and per-probe results (4 probes) | pending maintainer run | pending maintainer run |
+| As launched: refusal text when hooks are pending (names pending trust and `/hooks`) | pending maintainer run | pending maintainer run |
+| Trust withheld (flag left out, hooks pending): `CANARY_STATUS` and refusal text | not run on the host (cenci never changes persisted trust) | pending maintainer run |
+| Cleanup: `REMOVED:` targets and any `LEFTOVER:` path | pending maintainer run | pending maintainer run |
+
+Open question this section settles: whether Codex sends `apply_patch` through the `Write|Edit`
+matcher, since the `apply_patch` probes depend on it. Pending maintainer run; if it does not,
+every Codex mutating workflow refuses (fail closed) and the refusal names the failing pair.
 
 ## Payload cwd, hook pwd and effective cwd
 

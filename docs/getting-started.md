@@ -122,7 +122,12 @@ client session provisions it and starts the shared host daemon.
 Codex reads the repository's canonical `AGENTS.md` guidance directly. Generated
 `CLAUDE.md` files are client adapters, not the shared source of truth.
 
-If Codex reports updated plugin hooks as pending, inspect and trust them with `/hooks`.
+If Codex reports updated plugin hooks as pending, review them with `/hooks`: pending hooks are
+inactive protection, and the mutating Codex workflows (implement, address-review, refactor, and
+babysit's Codex step) run a guard canary first and refuse to start until it passes. `cn xt`
+sessions pass the trust-bypass flag, so they are labelled
+"hook trust bypassed by launcher (explicit flag)"; cenci never changes hook trust, and
+`cenci doctor` does not verify it.
 
 ## 5. Configure a project
 
