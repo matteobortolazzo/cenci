@@ -15,15 +15,17 @@ attempt. Feed validated advice back to the implementer; retain the three-attempt
 Pass:
 
 - Worktree path. Tell the agent to follow the implementer's `## Working Directory` section on every command, including its **Never hand-rescue a blocked or stranded edit** rule: a blocked or stranded `Write`/`Edit` is re-issued to the correct `.worktrees/<id>-<desc>/` path, never rescued with `git stash`/`git checkout`/`git apply`. See the `shell-rules` skill for command patterns.
-- Plan file sections: `## Ticket Details`, `## Implementation Plan`, and `## Architectural Context`.
+- The plan by path: the absolute main-checkout plan file path `"<repo-root>/.plans/<filename>"` (never a relative `.plans/` path; the file is gitignored and absent inside the worktree) plus the headings to read: `## Ticket Details`, `## Implementation Plan`, and `## Architectural Context`. The plan travels by path, never pasted plan content.
 - Phase 3's `## Context Budget` brief, verbatim (`phases/phase-3-test-red.md`): the working budget is about half of the model's advertised context window, automatic compaction is disabled, and a low-context state is reported as `Context: low — …`, never pushed through.
-- The failing tests and their failure output.
+- The failing-test evidence: the absolute path of the red-run log that Phase 3's implementer reported, plus a summary of at most 5 lines (the failing test names and the first assertion message), never the full failure output. If the log is missing or unreadable, the implementer reruns the named failing tests with the resolved scoped command and reports that it did; this is not missing context.
 - Return evidence to the orchestrator after two failed attempts at the same unexplained defect, before spending the next attempt; do not delegate diagnosis yourself.
 - Attachment paths if relevant.
 - LSP diagnostic reminder if configured.
 - The resolved Verification command: the single lane's Verification cell (its `Tests:` value), split at `; lint: ` into the scoped test command and the optional scoped lint command, or its `full:` fallback with the reason. Tell the implementer to report with the `Verification (scoped)` or `Verification (full fallback)` format from `## Verification` below; the project's full build, test suite and lint are not passed here, they belong to Phase 5's Completed-Change Verification.
 - Resolved topic docs: at most 3 `docs/<topic>.md` paths matched to Files to Modify/Create.
 - The plan's `### Documentation Routing` section, verbatim.
+
+**Missing context stop.** A `Missing context:` report stops the run and is reported to the user, never re-delegated with a pasted digest or summary. The worker's first summary line `Missing context: <absolute path> [<section heading>] — <reason>` takes the error gate `Missing context in Phase 4: <path> [<heading>] — <reason>`, whose fix is to repair the plan or run `/cenci:implement <id> replan`. A missing failing-test log is the one exception and never triggers it.
 
 ## Rules
 
@@ -48,7 +50,7 @@ After implementation:
 
 A scoped pass is never reported as full suite, all tests or CI green. The single full build, test suite and lint run later, once, as Completed-Change Verification (`phases/phase-5-refactor.md`).
 
-A report without a `Verification (scoped)` or `Verification (full fallback)` result line that carries a pass or fail verdict (absent, truncated, in another format, or a `Context: low` stop with no verdict) means the verification did not run: rerun it, and count an attempt toward the 3 only when it ran and failed. A `Context: low` stop still takes the context-budget signal below instead of a rerun.
+A report without a `Verification (scoped)` or `Verification (full fallback)` result line that carries a pass or fail verdict (absent, truncated, in another format, or a `Context: low` stop with no verdict) means the verification did not run: rerun it, and count an attempt toward the 3 only when it ran and failed. A `Context: low` stop still takes the context-budget signal below instead of a rerun. A `Missing context:` first line is not a missing Verification line: it takes the Missing context stop above, never a rerun.
 
 If the command or lint fails, analyze root cause, fix, and rerun. Retry up to 3 times, then stop, reporting exact errors, attempts, and best hypothesis. Lint failures are held to the same hard gate as test failures — no silent pass-through.
 

@@ -9,11 +9,14 @@ Delegate to the `implementer` agent for focused cleanup of touched code only.
 Pass:
 
 - Worktree path. Tell the agent to follow the implementer's `## Working Directory` section on every command. See the `shell-rules` skill for command patterns.
+- The plan by path: the absolute main-checkout plan file path `"<repo-root>/.plans/<filename>"` (never a relative `.plans/` path; the file is gitignored and absent inside the worktree) plus the heading to read, `## Implementation Plan`: refactors must not override plan decisions (`docs/plan-fidelity.md`). The plan travels by path, never pasted plan content. A `Missing context:` report stops the run and is reported to the user, never re-delegated with a pasted digest or summary.
 - Changed file list.
 - LSP diagnostic reminder if configured.
 - The scoped Verification command of the lane (every lane's cell in lane mode), with its optional scoped lint command, as resolved in Phase 3's Delegation Context.
 - The project's `buildCommand`, `testCommand` and `lintCommand` (when set), for `## Completed-Change Verification` below: the refactor worker receives them only in ordinary mode, where Completed-Change Verification is its last step; in lane mode they go only to the barrier worker.
 - Resolved topic docs: at most 3 `docs/<topic>.md` paths matched to Files to Modify/Create.
+
+**Missing context stop.** The worker's first summary line `Missing context: <absolute path> [<section heading>] — <reason>` takes the error gate `Missing context in Phase 5: <path> [<heading>] — <reason>`, whose fix is to repair the plan or run `/cenci:implement <id> replan`. It covers the refactor worker, the Lane Verification Barrier worker and compact mode. It is never absorbed as an ordinary failure by a hard-gate retry.
 
 Review changed code for:
 
@@ -56,7 +59,7 @@ The one authoritative full check of the whole change, defined only here. It runs
 
 **Reporting and timing.** Report `Verification (full): <command> — <pass|fail>`. Record the run under the existing `full-checks-<slug>` timing label (`skills/implement/timing.md`) so repeat counts stay meaningful.
 
-A report without a `Verification (full): <command> — pass` line (absent, truncated, in another format, or a `Context: low` stop with no verdict) means the check did not run: rerun it, and count an attempt toward the 3 attempts only when it ran and failed. A `Context: low` stop still takes the split-signal stop above instead of a rerun.
+A report without a `Verification (full): <command> — pass` line (absent, truncated, in another format, or a `Context: low` stop with no verdict) means the check did not run: rerun it, and count an attempt toward the 3 attempts only when it ran and failed. A `Context: low` stop still takes the split-signal stop above instead of a rerun. A `Missing context:` first line is not a missing Verification line: it takes the Missing context stop above, never a rerun.
 
 **Evidence.** A green Completed-Change Verification is session-local evidence, never persisted across sessions: a resumed run always runs it again. The evidence is stale after any later fix delegation whose report lists a changed file; a report that lists no changed file leaves it valid; a report that is ambiguous or missing counts as stale (fail closed). Every fix-delegation report must carry a literal `Changed files:` line (a file list, or `Changed files: none`); a report without that line, and any edit the root agent applies itself, counts as stale. Phase 6 + 7's `## Completed-Change Verification Re-run` owns the stale-evidence rerun. Phase 8 documentation edits made after a green run are covered by Phase 9's post-rebase full run; no extra full run is added for them.
 
@@ -64,7 +67,7 @@ A report without a `Verification (full): <command> — pass` line (absent, trunc
 
 Applies when Phase 3 ran parallel or sequential lanes, including dependency waves. Lane implementers deliberately never run the full suite (see Phase 3's `## Parallel Lanes`), so nothing before this point has proven the lanes work together. Run the barrier once, after all waves and after the refactor delegation returns — not once per wave.
 
-Delegate one fresh implementer with the standard Delegation Context (worktree path, plan sections, the project's build/test/lint commands, the `## Context Budget` brief) plus each lane's `Scope:` summary, instructed to:
+Delegate one fresh implementer with the standard Delegation Context (worktree path, the absolute plan path with `## Implementation Plan`, the project's build/test/lint commands, the `## Context Budget` brief) plus each lane's `Scope:` summary, instructed to:
 
 1. Run the full build.
 2. Run the full test suite.
@@ -72,7 +75,7 @@ Delegate one fresh implementer with the standard Delegation Context (worktree pa
 4. Fix any cross-lane integration failure — this delegation may touch any file, the per-lane file restriction no longer applies.
 5. Report the exact commands and results in the `Verification (full)` format, including which failures were cross-lane integration issues.
 
-The hard gate above applies unchanged: analyze root cause, fix, rerun; after 3 attempts, stop and report exact errors, attempts, and best hypothesis. Include the instruction to return evidence after two failed attempts in this implementer's prompt; before its next permitted attempt the orchestrator applies the diagnosis trigger and delegates to `domain-specialist`, then returns the validated advice. Do not proceed to Phase 6 + 7 until build, full test suite and lint all pass here.
+The hard gate above applies unchanged: analyze root cause, fix, rerun; after 3 attempts, stop and report exact errors, attempts, and best hypothesis. Include the instruction to return evidence after two failed attempts in this implementer's prompt; before its next permitted attempt the orchestrator applies the diagnosis trigger and delegates to `domain-specialist`, then returns the validated advice. Do not proceed to Phase 6 + 7 until build, full test suite and lint all pass here. A `Missing context:` first line from this worker takes the Missing context stop above, never the hard gate retry.
 
 ## Error Recovery
 

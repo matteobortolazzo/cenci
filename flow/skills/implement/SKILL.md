@@ -26,13 +26,19 @@ Use the config returned by `project-core`. Shared guidance is `AGENTS.md`; read 
 
 > **Progressive disclosure**: Do NOT eagerly read reference docs in this Context section. The planner subagent reads relevant `docs/<topic>.md` files (and any legacy `.claude/rules/lessons-learned.md` if present) as part of its analysis. `docs/git-workflow.md` is only consulted in Phase 9 (commits/PRs). `.claude/rules/` is reserved for files explicitly `@`-imported by `CLAUDE.md`; do not assume anything lives there.
 
+### Context Handoff
+
+Applies to every run, whether or not `isMonorepo` is true.
+
+1. **Point subagents at context, don't paste it**: When delegating to the planner, pass the bundle path for project context and tell it to read relevant `docs/<topic>.md` files (and the legacy `.claude/rules/lessons-learned.md` or `.claude/rules/lessons-learned-<slug>.md` if those legacy files exist); do not pre-read those in the main agent. When delegating to the implementer, pass only the Delegation Context's resolved topic-doc list instead — at most 3 `docs/<topic>.md` paths matched to the plan's Files to Modify/Create.
+2. **Worker delegations carry the plan by path**: Pass the absolute main-checkout plan path `"<repo-root>/.plans/<filename>"` plus the exact section headings the worker must read — never a relative `.plans/` path (the directory is gitignored and absent inside `.worktrees/`), and never the bundle path (absent on plan-file resume). The small briefs stay inline: the `## Context Budget` brief, the lane's `Files:`/`Tests:`/`Scope:`, the plan's `### Documentation Routing` section verbatim, the `## Resume Brief`, attachment paths, resolved topic-doc paths and the project build/test/lint commands. Failing-test evidence travels as a log path plus a short summary, never the full output. A worker that cannot read a required input stops and reports `Missing context:`. A `Missing context:` report stops the run and is reported to the user, never re-delegated with a pasted digest or summary.
+
 ### Monorepo Context Loading
 
 If `isMonorepo` is `true` in the resolved config:
 
 1. **Do not read per-project AGENTS.md files in the main agent.** The context-gatherer determines affected projects and bundles their AGENTS.md content; pass it the `projects` array.
 2. **Use project-specific commands**: When delegating to subagents, use the affected project's `buildCommand`, `testCommand`, and `lintCommand` (when set) from config instead of inferring them globally (the digest names the affected projects).
-3. **Point subagents at context, don't paste it**: When delegating to planner/implementer, pass the bundle path (or plan file path) for project context. Tell the planner to read relevant `docs/<topic>.md` files (and the legacy `.claude/rules/lessons-learned.md` or `.claude/rules/lessons-learned-<slug>.md` if those legacy files exist); do not pre-read those in the main agent. When delegating to the implementer, pass only the Delegation Context's resolved topic-doc list instead — at most 3 `docs/<topic>.md` paths matched to the plan's Files to Modify/Create.
 
 **Shell rules**: Read the `shell-rules` skill before generating any shell in this pipeline — it covers the heredoc temp-file pattern, zsh-safe portability (no bash associative arrays), and the rule against `cd <dir> && …` compounds and hand-rescuing stranded worktree edits.
 

@@ -51,6 +51,17 @@ You are a senior developer implementing features using TDD.
    - Name the owner from `### Documentation Routing` on each `Docs to update:` line, never `AGENTS.md` for a contract, catalog, setup detail or procedure.
 9. **For UI/frontend code**: follow the applicable `AGENTS.md`'s `## UI Conventions` section — it names the repo's component library and its browsable catalog. Reuse an existing component before authoring a new one; check the catalog first. When nothing there covers the need, add the new component to the library rather than beside the feature that needed it, and say so when reporting the work
 
+## Plan Inputs
+Only review fix-round delegations (acceptance-fix `blocking:` rows and code, security or silent-failure review findings) and the Completed-Change Verification re-run are exempt from this section; they carry no plan path. Any other delegation (Phases 3, 4, 5 or the Codex dispatch) must name an absolute plan path: one that arrives without it makes no file edits and its first summary line is `Missing context: <plan path> — not supplied`, then it stops.
+
+Every other delegation passes an absolute plan path plus the exact section headings to read. `Read` that absolute plan path, check that every named heading is present before the first edit, and work from each named section, never from a summary or digest.
+
+If the path is unreadable, or a named section is missing, make no file edits and make the first summary line `Missing context: <absolute path> [<section heading>] — <reason>` (for example `section not found`), then stop. Do not guess the content.
+
+Exception: a failing-test log path that is missing or unreadable is not missing context. Rerun the named failing tests with the resolved scoped command and report that you did.
+
+Precedence: `Missing context:` is reported before any work starts, so it takes the first summary line over a `Context: low` report.
+
 ## Test Writing Mode
 When asked to write tests:
 - For frontend code: classify each component using the `testing` skill's UI Component Classification
