@@ -60,7 +60,7 @@ Runs after Shared Context and **before** Review Path Classification, on every pa
    bash "${CLAUDE_PLUGIN_ROOT}/skills/review/scripts/acceptance-verdict.sh" "$RUN_DIR/acceptance.md"
    ```
    append `--ui-local` when `isUiTicket` is true (requires `Evidence: gallery en-US`, `gallery it-IT`, `capture en-US`, `capture it-IT` lines — a UI ticket reviewed from the diff alone fails here by construction). Record the first output line (`covered=… partial=… missing=… unrequested=… verdict=…`) to `$RUN_DIR/acceptance-verdict.txt`. Exit 2 (malformed table, zero rows) is treated as a fail: re-delegate the reviewer once with the script's message; a second malformed output is an error gate — stop and ask the user.
-4. **Fail → back to implementation, before any code review.** On exit 1, delegate the `implementer` (Phase 3 → Phase 4 discipline: failing test first, then green, lane-scoped, with the `## Context Budget` brief) with exactly the `blocking:` rows the script printed (each partial/missing item, verbatim, and for a UI ticket each `ui-evidence-missing:` capture) — never the whole table re-read as a to-do list. After it reports green, re-run Phase 4's verification, regenerate the Shared Context artifacts into the same `$RUN_DIR`, and re-run steps 1-3. At most **two** such rounds; if the verdict is still `fail`, stop at an error gate via `AskUserQuestion` listing the blocking rows (the ticket may be mis-sized or mis-specified — `/cenci:refine <id>` is the usual answer). `unrequested` rows never block: they are carried into the PR body's `## Acceptance` table for the human and are visible to `code-reviewer` as scope context.
+4. **Fail → back to implementation, before any code review.** On exit 1, delegate the `implementer` (Phase 3 → Phase 4 discipline: failing test first, then green, lane-scoped, with the `## Context Budget` brief) with exactly the `blocking:` rows the script printed (each partial/missing item, verbatim, and for a UI ticket each `ui-evidence-missing:` capture) — never the whole table re-read as a to-do list. After it reports green on the fix's scoped Verification command (the cell of each lane that owns a changed file; reported as `Verification (scoped): …`), do not run the full suite per round: a report that lists a changed file marks the Completed-Change Verification evidence stale (see `## Completed-Change Verification Re-run` below). Then regenerate the Shared Context artifacts into the same `$RUN_DIR`, and re-run steps 1-3. At most **two** such rounds; if the verdict is still `fail`, stop at an error gate via `AskUserQuestion` listing the blocking rows (the ticket may be mis-sized or mis-specified — `/cenci:refine <id>` is the usual answer). `unrequested` rows never block: they are carried into the PR body's `## Acceptance` table for the human and are visible to `code-reviewer` as scope context.
 5. **Pass → continue** to Review Path Classification. Only a `verdict=pass` ever reaches the code reviewers.
 
 ## Review Path Classification
@@ -115,7 +115,7 @@ A reviewer's finding is a claim, not evidence — per Anthropic's Opus 5.5 guida
 
 The security reviewer checks OWASP, auth/authz, validation, injection, sensitive data, logging, and error exposure.
 
-- Critical/High: confirm the finding first (see Verify Before Fixing), then fix immediately, rerun tests, rerun security review.
+- Critical/High: confirm the finding first (see Verify Before Fixing), then fix immediately, run the fix's scoped Verification command (a fix report that lists a changed file marks the Completed-Change Verification evidence stale), rerun security review.
 - Medium/Low: **Fix now** if the fix is straightforward. Otherwise, discard by default — test-coverage gaps, doc polish, "consider X" suggestions, and refactor/tech-debt observations are never tracked, only recorded as a one-line "Considered and discarded" entry in the PR's `## Notes` (see `phase-9-pr.md`), which never becomes a Followup ticket. **Track** it only when it is an actual defect with a concrete, realistic trigger path a user can hit in real use by noting it in the PR's `## Notes` for the Followup Ticket step.
 - Unclear fix: ask the user via `AskUserQuestion`.
 
@@ -125,12 +125,12 @@ Security-critical findings take priority over code quality findings.
 
 The code reviewer uses confidence scoring and reports only findings >= 50.
 
-- Must Fix >= 90: confirm each finding first (see Verify Before Fixing), then fix all that hold, rerun tests.
+- Must Fix >= 90: confirm each finding first (see Verify Before Fixing), then fix all that hold, run the fix's scoped Verification command (a fix report that lists a changed file marks the Completed-Change Verification evidence stale).
 - Should Fix 75-89: **Fix now** if the fix is straightforward. Otherwise, discard by default — test-coverage gaps, doc polish, "consider X" suggestions, and refactor/tech-debt observations are never tracked, only recorded as a one-line "Considered and discarded" entry in the PR's `## Notes` (see `phase-9-pr.md`), which never becomes a Followup ticket. **Track** it only when it is an actual defect with a concrete, realistic trigger path a user can hit in real use by noting it in the PR's `## Notes` for the Followup Ticket step.
 - Nitpicks 50-74: ignore unless trivial.
 - Human decision: stop and ask the user via `AskUserQuestion`.
 
-If `REQUEST_CHANGES`, delegate fixes to implementer, rerun tests, and rerun code review. If the same issue persists after 2 fix attempts, escalate to the user.
+If `REQUEST_CHANGES`, delegate fixes to implementer, run the fix's scoped Verification command, and rerun code review. If the same issue persists after 2 fix attempts, escalate to the user.
 
 After any fix-and-rerun cycle that changes the diff, re-run the Shared Context capture sequence (the `rm -f` reset, both exit-checked captures and the combine step) — writing into the same `$RUN_DIR` established at first entry, never calling `run-artifact-dir.sh` again — and re-evaluate the Review Path Classification against the *current* diff before re-invoking any reviewer. If the recomputed path is now **full** (e.g. the fix touched a force-full path, added a source file, or pushed changed lines over threshold) but the original run only launched `code-reviewer` (`lite-small`) or no reviewers (`lite-docs`), launch `security-reviewer` and `silent-failure-hunter` for the first time before proceeding — never leave a widened diff under-reviewed just because the original classification was narrower.
 
@@ -138,6 +138,14 @@ After any fix-and-rerun cycle that changes the diff, re-run the Shared Context c
 
 The silent-failure hunter checks for swallowed errors, empty catch blocks, silent fallbacks, and missing error propagation.
 
-- Critical in auth/payment/data-loss paths: confirm the finding first (see Verify Before Fixing), then fix immediately.
+- Critical in auth/payment/data-loss paths: confirm the finding first (see Verify Before Fixing), then fix immediately, run the fix's scoped Verification command (a fix report that lists a changed file marks the Completed-Change Verification evidence stale).
 - Warning in non-critical paths: **Fix now** if the fix is straightforward. Otherwise, discard by default — test-coverage gaps, doc polish, "consider X" suggestions, and refactor/tech-debt observations are never tracked, only recorded as a one-line "Considered and discarded" entry in the PR's `## Notes` (see `phase-9-pr.md`), which never becomes a Followup ticket. **Track** it only when it is an actual defect with a concrete, realistic trigger path a user can hit in real use by noting it in the PR's `## Notes` for the Followup Ticket step.
 - Info with intentional suppression and comments: no action.
+
+## Completed-Change Verification Re-run
+
+Phase 5's `## Completed-Change Verification` (`phases/phase-5-refactor.md`) is the one authoritative full check, and its evidence is session-local. Every fix round above (acceptance, security, code, silent-failure) runs only its fix's scoped Verification command and never the full suite. A fix round is a fresh delegation; when its report lists a changed file, it marks the evidence stale. A round whose report lists no changed file leaves the evidence valid and triggers no run. A report that is ambiguous or missing counts as stale (fail closed). Every fix-delegation report must carry a literal `Changed files:` line (a file list, or `Changed files: none`); a report without that line, and any edit the root agent applies itself, counts as stale.
+
+When the evidence is stale, run Completed-Change Verification once, after the last fix round — never once per round — as a fresh delegation (in lane mode with the barrier's authority to touch any file, per Phase 5's `### Lane mode: Lane Verification Barrier`). Do not enter Phase 8 until it passes; its 3-attempt hard gate and diagnosis trigger apply unchanged. If this run changed any file, re-capture the Shared Context artifacts and apply the re-review rule above (re-classify the review path and re-review the new diff), bounded by the existing limit of 2 fix attempts before escalation. The final green run covers its own fixes.
+
+A resumed run that reaches this phase without any fix delegation in the session runs none: the `reviewed`/`finalized` resume reaches Phase 9's post-rebase full run, which is the full check. Phase 8 documentation edits are likewise covered by Phase 9, with no extra run.

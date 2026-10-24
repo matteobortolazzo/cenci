@@ -60,6 +60,8 @@ contains "$PHASE4" 'then run `## Visual Verification` for a UI ticket'
 for phrase in 'default false' 'small (S under' 'Run full build, tests and configured lint' 'Phase 5' 'Visual Verification'; do
   contains_between "$PHASE3" '## Compact Implementation' '## Parallel Lanes' "$phrase"
 done
+# Compact step 6 is the single Completed-Change Verification (#1103), not an extra full group.
+contains_between "$PHASE3" '## Compact Implementation' '## Parallel Lanes' 'This step is its Completed-Change Verification'
 for phrase in 'a malformed preflight: remain read-only and return to planning' 'Root-retained actions are excluded' 'dependency on the same or a later wave' 'sequential decision/mode further limits it to 1' 'stop and report the capability blocker' 'Launch at most the resolved cap' 'only after every lane in the current wave is green' 'stop launching queued lanes and later waves' 'On resume, re-run completed lanes'; do
   contains_between "$PHASE3" '## Parallel Lanes' '## Delegation Context' "$phrase"
 done

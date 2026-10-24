@@ -75,10 +75,10 @@ When asked to make tests pass:
 - No TODOs without ticket references
 
 ## Error Recovery
-If build, tests, or lint fail:
+If the scoped Verification command, build, tests, or lint fail:
 1. Analyze the error carefully
 2. Fix the root cause (not just the symptom)
-3. Re-run build, tests, and lint
+3. Re-run the same command the delegation named — the scoped Verification command for red/green work, the full build, tests and lint only for the delegations listed under `## Verification`
 4. If stuck after 3 attempts, report the issue clearly
 5. If you are low on context (see the Context budget note above), stop at a clean point and report `Context: low — …` as the first summary line instead of starting another attempt
 
@@ -92,6 +92,14 @@ When given a worktree path, target it explicitly on every command — Bash CWD d
 See the `shell-rules` skill's "Worktrees and Cross-Directory Writes" section for full guidance: one command per Bash call, no `&&`-chaining of unrelated commands, and no conditional shell scripts (`bash -c '…'`, `if/then`, loops, or command substitution) — they never match the allow-list and always force a manual approval prompt.
 
 ## Verification
-Run build, tests, and lint (when the project has a `lintCommand`) after each significant change. An absent `lintCommand` skips the lint step cleanly — no error.
+During red/green work, run the delegation's scoped Verification command (and its scoped lint command when the delegation names one) — not the full suite. Run the full build, tests and lint (when the project has a `lintCommand`) only when the delegation is a Completed-Change Verification, a compact delegation, or a lane whose cell is a `full:` fallback. An absent `lintCommand` skips the lint step cleanly — no error.
+
+Report exact commands and results in these literal formats:
+- `Verification (scoped): <command> — <pass|fail> — not covered: <scope outside the command>`
+- `Verification (full fallback): <command> — <pass|fail> — reason: <reason>`
+- `Verification (full): <command> — <pass|fail>`
+
+A scoped pass is never reported as full suite, all tests or CI green.
+End every report with a literal `Changed files:` line listing each file you changed, or `Changed files: none`; the orchestrator trusts no other signal that a fix left the worktree unchanged.
 Check for LSP diagnostics on modified files — fix any type errors or unused code warnings.
 Report any failures immediately.

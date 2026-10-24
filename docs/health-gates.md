@@ -95,6 +95,10 @@ When dynamically discovering a file set (via `find`, glob, etc.) to loop over an
 - **Type filtering with `find`**: Always use `find -type f` (not bare glob patterns or symlink-following globs) when discovering executable scripts or data files—a symlink named `*.sh` or `*.test.sh` pointing at arbitrary code should never be discovered and executed. Bare patterns like `*.test.sh` will follow symlinks; `-type f` restricts to regular files only (ticket #720).
 - **Pre-execution file validation**: When discovering files to execute (especially via `find`), validate each file before invocation. Check that it is readable and non-empty (e.g., `[[ -r "$f" && -s "$f" ]]`) rather than relying solely on post-invocation error handling. This prevents false-greens from unreadable or zero-byte files, which would silently exit 0 when invoked as `bash <empty-file>` (mirroring the pattern used by `flow/skills/maintain/scripts/check.sh`'s `check_structural_tests`, ticket #720).
 
+When reporting verification from anything narrower than the gate, name the gap rather than implying coverage:
+
+- **Scoped runs**: A scoped verification run (one lane's tests, one package, one file set) must report what it did not cover, using the `Verification (scoped): <command> — <pass|fail> — not covered: <scope outside the command>` line. Scoped green is never full-suite green, and a scoped pass is never reported as "full suite", "all tests" or "CI green" (#994). The one full check is the implement pipeline's Completed-Change Verification (plus Phase 9's post-rebase run).
+
 ## This repo's gates (dogfooding)
 
 This repo configures a `gateCommand` for each of its three projects in

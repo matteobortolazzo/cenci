@@ -39,7 +39,7 @@ node "<plugin-root>/skills/implement/scripts/timing.mjs" start "<timing-dir>" im
 | --- | --- | --- |
 | Test/implement/refactor delegation (Phases 3–5), compact delegation, each parallel lane or fix delegation | `implementation` | Orchestrator: `test-red`, `implement-green`, `refactor`, `compact`, `lane-1`, `acceptance-fix`, or `review-fix` |
 | Acceptance reviewer, each configured code/security/silent-failure reviewer (Phases 6–7), including another review round | `review` | Orchestrator: `acceptance`, `code-review`, `security-review`, or `silent-failure-review` |
-| Baseline gate, scoped lane check group, build/test/lint group, lane verification barrier, and required post-fix/post-rebase reruns | `verification` | The agent actually running that group: stable labels such as `flow-health-gate`, `lane-1-checks`, or `full-checks-flow` |
+| Baseline gate, scoped lane check group, Completed-Change Verification (the single full build/test/lint group, including its lane-mode barrier; it reuses the `full-checks-<slug>` label), and required post-fix/post-rebase reruns | `verification` | The agent actually running that group: stable labels such as `flow-health-gate`, `lane-1-checks`, or `full-checks-flow` |
 
 Immediately after the activity finishes, close its own span, using `completed`,
 `failed`, or `stopped` according to the actual result:
@@ -63,7 +63,7 @@ to implementers; they own their nested verification spans, while the orchestrato
 owns delegation spans. Include the absolute installed helper path in those briefs;
 the implementer's narrow timing exception permits only its `start`/`end` calls.
 Concurrent lanes use independent IDs and files; never share
-one span ID between workers. Do not count the barrier twice as both an orchestrator
+one span ID between workers. Do not count Completed-Change Verification twice as both an orchestrator
 verification span and the worker's identical verification span. Existing child
 command results remain authoritative: inspect their exit status independently of
 timing calls, then follow the existing gate/retry/stop rule even if timing fails.

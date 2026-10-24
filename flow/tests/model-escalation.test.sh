@@ -61,11 +61,19 @@ class ModelEscalation(unittest.TestCase):
     def test_parallel_lane_barrier_cannot_skip_diagnosis(self):
         text = (FLOW / "skills/implement/phases/phase-4-implement-green.md").read_text()
         context = text.split("## Delegation Context", 1)[1].split("## Rules", 1)[0]
-        barrier = text.split("\n## Lane Verification Barrier\n", 1)[1]
+        # The barrier now lives in phase-5's Completed-Change Verification (#1103); a lane-mode
+        # run enters Phase 5 without Phase 4's preamble, so its subsection must carry the rule.
+        phase5 = (FLOW / "skills/implement/phases/phase-5-refactor.md").read_text()
+        ccv = phase5.split("\n## Completed-Change Verification\n", 1)[1].split("\n## Error Recovery\n", 1)[0]
+        barrier = ccv.split("\n### Lane mode: Lane Verification Barrier\n", 1)[1]
         with self.subTest(section="delegation context"):
             self.assertTrue("two failed attempts" in context, "new implementers must receive the return condition")
+        with self.subTest(section="completed-change verification"):
+            ccv_parent = ccv.split("\n### Lane mode: Lane Verification Barrier\n", 1)[0]
+            self.assertTrue("domain-specialist" in ccv_parent, "the single full check itself, not only its lane subsection, must keep the diagnosis trigger")
         with self.subTest(section="lane barrier"):
             self.assertTrue("domain-specialist" in barrier, "lane-only entry skips the phase preamble")
+            self.assertTrue("two failed attempts" in barrier, "the barrier implementer must receive the return condition")
 
     def test_routine_claude_pins_stay_unchanged(self):
         expected = {"agents/refiner.md": "opus", "agents/planner.md": "opus",
@@ -86,6 +94,7 @@ class ModelEscalation(unittest.TestCase):
             "skills/implement/phases/phase-1-plan.md", "skills/implement/codex.md",
             "skills/implement/phases/phase-3-test-red.md",
             "skills/implement/phases/phase-4-implement-green.md",
+            "skills/implement/phases/phase-5-refactor.md",
             "skills/implement/phases/phase-6-7-review.md",
             "skills/review/SKILL.md", "skills/review/codex.md",
             "skills/refactor/SKILL.md", "skills/refactor/codex.md",
