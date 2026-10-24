@@ -1024,6 +1024,109 @@ func TestApplyLabelTransition_LabelAlreadyExists_TreatedAsSuccess(t *testing.T) 
 	if _, err := ApplyLabelTransition(LabelOpts{ID: "42", StateDir: stateDir, RepoSlug: "o/r", Transition: "working"}); err != nil {
 		t.Fatalf("ApplyLabelTransition with a pre-existing label: want success (already-exists treated as success), got: %v", err)
 	}
+
+	// Create-only: an existing label keeps its current color, so nothing may
+	// edit the label itself, and the label is still applied to the ticket.
+	if edits := gh.callsMatching("label", "edit"); len(edits) != 0 {
+		t.Errorf("gh label edit calls = %v, want none (an existing label is never recolored)", edits)
+	}
+	applied := false
+	for _, c := range gh.callsMatching("issue", "edit") {
+		if c.hasFlag("--add-label", "Working") {
+			applied = true
+		}
+	}
+	if !applied {
+		t.Error("expected the `gh issue edit --add-label Working` call after an already-exists label create")
+	}
+}
+
+// TestApplyLabelTransition_LabelCreate_CarriesBoardLabelsColorAndDescription
+// pins the exact `gh label create` arguments each transition issues to the
+// "## Labels" table in flow/docs/board-labels.md. The expected values are
+// hard-coded on purpose: reading them from labelSpec (or the doc) would make
+// the test tautological. The em dash in the input-needed description must
+// reach gh byte-for-byte.
+func TestApplyLabelTransition_LabelCreate_CarriesBoardLabelsColorAndDescription(t *testing.T) {
+	for _, tc := range []struct {
+		transition  string
+		stage       Stage
+		name        string
+		color       string
+		description string
+	}{
+		{"working", StagePrepared, "Working", "FBCA04", "Actively being refined or implemented"},
+		{"planned", StageWaitingForPlanApproval, "Planned", "1D76DB", "Plan on disk, ready to pick up"},
+		{"in-review", StageFinalized, "In Review", "A2EEEF", "PR open, under review / CI running"},
+		{"input-needed", StageWaitingForInput, "Input Needed", "D4C5F9", "Planner escalated a question — answer on the ticket to auto-resume"},
+	} {
+		t.Run(tc.transition, func(t *testing.T) {
+			stateDir := t.TempDir()
+			mustSeedState(t, stateDir, "42", tc.stage)
+			gh := newFakeGh(t, "octocat", []string{"octocat"})
+			gh.install()
+
+			if _, err := ApplyLabelTransition(LabelOpts{ID: "42", StateDir: stateDir, RepoSlug: "o/r", Transition: tc.transition}); err != nil {
+				t.Fatalf("ApplyLabelTransition(%s): %v", tc.transition, err)
+			}
+
+			creates := gh.callsMatching("label", "create")
+			if len(creates) != 1 {
+				t.Fatalf("gh label create calls = %v, want exactly one", creates)
+			}
+			want := []string{"label", "create", tc.name, "--repo", "o/r", "--color", tc.color, "--description", tc.description}
+			if !slices.Equal(creates[0].args, want) {
+				t.Errorf("gh label create args = %q, want %q", creates[0].args, want)
+			}
+		})
+	}
+}
+
+// TestLabelTransitionTables_EveryTransitionHasNameAndSpec guards the invariant
+// ApplyLabelTransition's missing-labelSpec check relies on: a transition added
+// to labelStagePrecondition must also be registered in labelName and labelSpec
+// with a non-empty color and description, or it would only fail at runtime.
+func TestLabelTransitionTables_EveryTransitionHasNameAndSpec(t *testing.T) {
+	for transition := range labelStagePrecondition {
+		t.Run(transition, func(t *testing.T) {
+			if labelName[transition] == "" {
+				t.Errorf("labelName has no label for transition %q", transition)
+			}
+			spec, ok := labelSpec[transition]
+			if !ok {
+				t.Fatalf("labelSpec has no entry for transition %q", transition)
+			}
+			if spec.color == "" {
+				t.Errorf("labelSpec[%q].color is empty", transition)
+			}
+			if spec.description == "" {
+				t.Errorf("labelSpec[%q].description is empty", transition)
+			}
+		})
+	}
+}
+
+// TestApplyLabelTransition_LabelCreate_EmptyRepoSlug_OmitsRepoKeepsColorAndDescription
+// covers ghLabelCreate's extra contract: with no RepoSlug the --repo flag is
+// omitted, but the color and description still follow the label name.
+func TestApplyLabelTransition_LabelCreate_EmptyRepoSlug_OmitsRepoKeepsColorAndDescription(t *testing.T) {
+	stateDir := t.TempDir()
+	mustSeedState(t, stateDir, "42", StageFinalized)
+	gh := newFakeGh(t, "octocat", nil)
+	gh.install()
+
+	if _, err := ApplyLabelTransition(LabelOpts{ID: "42", StateDir: stateDir, Transition: "in-review"}); err != nil {
+		t.Fatalf("ApplyLabelTransition(in-review) without a repo slug: %v", err)
+	}
+
+	creates := gh.callsMatching("label", "create")
+	if len(creates) != 1 {
+		t.Fatalf("gh label create calls = %v, want exactly one", creates)
+	}
+	want := []string{"label", "create", "In Review", "--color", "A2EEEF", "--description", "PR open, under review / CI running"}
+	if !slices.Equal(creates[0].args, want) {
+		t.Errorf("gh label create args = %q, want %q", creates[0].args, want)
+	}
 }
 
 func TestApplyLabelTransition_LabelCreateGenuineFailure_ReturnsError(t *testing.T) {

@@ -20,10 +20,10 @@ label just before adding it, so a repository configured before a label was intro
 works.
 
 The inline `gh label create "<name>" … --color "<color>" --description "<description>"` commands
-in the skills stay where they are: they are exact, allow-listed commands that run without an
-extra read. `flow/tests/board-labels-drift-contract.test.sh` keeps every such literal identical to
-its row here, so a change to a color or description is made in this table first and the test then
-points at every literal that must follow.
+in the skills (markdown and shell) stay where they are: they are exact, allow-listed commands that
+run without an extra read. `flow/tests/board-labels-drift-contract.test.sh` keeps every such
+literal identical to its row here, so a change to a color or description is made in this table
+first and the test then points at every literal that must follow.
 
 ## Labels
 
@@ -61,31 +61,33 @@ new label state, just collapsed into one session instead of a stop-and-relaunch 
 
 ## How existence is ensured
 
-The labels reach the repository by one of three routes. Routes 1 and 3 write the color and
-description from the table above; route 2 does not.
+The labels reach the repository by one of three routes. All three write the color and
+description from the table above.
 
 1. **Skill-level fallback** — `gh label create … || true` in the skill, just before adding the
    label, with the table's color and description. refine ensures `Working`, `Refined`, `Browser`,
-   `ui:visual-check` and `automerge:ok`.
+   `ui:visual-check` and `automerge:ok`. The close skill's `close-parent.sh` does the same for
+   `Implemented` when it closes a split parent.
 2. **CLI self-heal** — `cenci pipeline label` creates the label through the Go `ghLabelCreate`
-   when it applies a transition. This covers implement's `Working`, `Planned` and `In Review`,
-   plus `Input Needed`. It is not a skill-level `|| true` fallback, and it runs
-   `gh label create <name> [--repo <slug>]` with no color or description, so the label gets gh's
-   defaults (default color, empty description).
+   when it applies a transition, passing the table's `--color` and `--description` through
+   `ghLabelCreate`'s extra arguments. This covers implement's `Working`, `Planned` and
+   `In Review`, plus `Input Needed`. It is not a skill-level `|| true` fallback: a create
+   failure other than "already exists" is returned as an error.
 3. **Reconciler self-heal** — the dispatch reconciler's `GHMutator.EnsureLabels` creates
    `dispatch-failed`, `plan-invalid` and `reconcile-stuck` with the table's values
-   (`managedLabelSpecs`). Babysit's Go code self-heals `Implemented` with its own spec, and
-   `cenci pipeline followup` self-heals `Followup` with the table's color and description before
-   it creates a ticket (so implement Phase 9 and address-review carry no `Followup`
-   `gh label create` of their own).
+   (`managedLabelSpecs`). Babysit's Go code self-heals `Implemented` and `In Review` with the
+   table's values, and `cenci pipeline followup` self-heals `Followup` with the table's color
+   and description before it creates a ticket (so implement Phase 9 and address-review carry no
+   `Followup` `gh label create` of their own).
 
+Every route is create-only: a label that already exists is never edited or recolored.
 `/cenci:configure` step 3c (in `skills/configure/phases/guidance-settings.md`) additionally creates every missing label up front with the table's
 color and description, so a board that skips it is not blocked: the routes above heal the label
-when it is first needed. The trade-off is route 2: a repository that never ran
-`/cenci:configure` can carry gh's default color and an empty description for `Working`,
-`Planned`, `In Review` and `Input Needed` until configure runs (configure only creates missing
-labels and never recolors an existing one, so it does not repair a label route 2 already created).
+when it is first needed, with the same color and description.
 
-The drift test scans markdown skills only. Shell and Go appliers — for example
-`flow/skills/close/scripts/close-parent.sh` and `watch/internal/babysit/parent.go` — are outside
-it, so a color or description there is not checked against the table.
+`flow/tests/board-labels-drift-contract.test.sh` covers the markdown skills and the shell
+appliers under `flow/skills/` (for example `close/scripts/close-parent.sh`): any `gh label create
+"<name>"` literal in a `*.md` or `*.sh` there is checked against the table. The Go appliers
+(`watch/internal/babysit`, `watch/internal/pipeline` and `watch/internal/dispatch`) are outside
+that scan; their own exact-argument Go tests pin each color and description, so a change to a
+table row must be made in those Go sites and tests as well.

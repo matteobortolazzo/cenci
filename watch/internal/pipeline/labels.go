@@ -12,8 +12,10 @@ package pipeline
 // transition contract). "input-needed" (#826) is the unattended-escalation
 // label swap (Working -> Input Needed, keeping Refined) and carries no
 // ownership check.
-// Label application self-heals via `gh label create` (treating "already
-// exists" as success) before `gh issue edit --add-label`/`--remove-label`.
+// Label application self-heals via `gh label create` with the label's
+// board-labels.md color and description (labelSpec; treating "already
+// exists" as success, so an existing label is never recolored) before
+// `gh issue edit --add-label`/`--remove-label`.
 // All gh calls are retry-wrapped through retry.go's existing
 // retryDo/command machinery (ghIssueView's sibling helpers) -- never
 // reinvented. Backs the `cenci pipeline label <id> --transition ...`
@@ -82,6 +84,19 @@ var labelName = map[string]string{
 	"in-review":    "In Review",
 }
 
+// labelSpec is the color and description `gh label create` gets for each
+// transition's label. The values are the rows of the "## Labels" table in
+// flow/docs/board-labels.md, the only source of a board label's color and
+// description. Creation is create-only: a label that already exists in the
+// repository is never edited or recolored, so these values only reach a repo
+// that is missing the label.
+var labelSpec = map[string]struct{ color, description string }{
+	"working":      {"FBCA04", "Actively being refined or implemented"},
+	"input-needed": {"D4C5F9", "Planner escalated a question — answer on the ticket to auto-resume"},
+	"planned":      {"1D76DB", "Plan on disk, ready to pick up"},
+	"in-review":    {"A2EEEF", "PR open, under review / CI running"},
+}
+
 // LabelOpts are the resolved inputs to one label-transition invocation.
 // RepoRoot/StateDir mirror pipeline.Opts' own precedence for locating the
 // persisted state file. RepoSlug is the "<owner>/<repo>" gh --repo target
@@ -129,6 +144,14 @@ func ApplyLabelTransition(o LabelOpts) (State, error) {
 	minimum, ok := labelStagePrecondition[o.Transition]
 	if !ok {
 		return State{}, fmt.Errorf("unknown label transition %q", o.Transition)
+	}
+	// Defensive invariant, like minimumOk below: every transition in
+	// labelStagePrecondition has a labelSpec entry, so this is unreachable
+	// today. A transition added without one hard-fails before any gh call
+	// instead of sending an empty --color/--description.
+	spec, specOk := labelSpec[o.Transition]
+	if !specOk {
+		return State{}, fmt.Errorf("label transition %q has no label color/description spec", o.Transition)
 	}
 	name := labelName[o.Transition]
 
@@ -219,7 +242,7 @@ func ApplyLabelTransition(o LabelOpts) (State, error) {
 		removeLabels = []string{labelName["working"], labelName["planned"]}
 	}
 
-	if err := ghLabelCreate(name, o.RepoSlug, cfg); err != nil {
+	if err := ghLabelCreate(name, o.RepoSlug, cfg, "--color", spec.color, "--description", spec.description); err != nil {
 		return State{}, err
 	}
 	if err := ghApplyLabel(o.ID, name, removeLabels, o.RepoSlug, cfg); err != nil {
