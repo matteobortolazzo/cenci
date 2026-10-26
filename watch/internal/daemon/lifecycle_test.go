@@ -138,8 +138,9 @@ func TestDaemon_CodexLifecycleWithoutSessionEndRestoresAfterExit(t *testing.T) {
 		t.Errorf("after Stop: expected retained native pane title, got %q", name)
 	}
 
-	// Codex does not currently document a SessionEnd hook. When the process
-	// exits back to the user's shell, sweep should restore the original window.
+	// Backstop for an older client or an abrupt exit: no SessionEnd arrives, so
+	// when the process exits back to the user's shell, the sweep must still
+	// restore the original window.
 	mc.Panes[0].PaneCurrentCmd = "zsh"
 	mc.Renames = nil
 	mc.WindowOpts = nil
@@ -157,9 +158,161 @@ func TestDaemon_CodexLifecycleWithoutSessionEndRestoresAfterExit(t *testing.T) {
 	}
 }
 
-// Regression for #432: Claude Code fires a SessionEnd hook, so the Codex-only
-// "agent exited without SessionEnd" sweep restore must not touch a finished
-// Claude session while its pane is still alive. #418 started tagging Claude
+// codexTrackedMock returns a mock tmux client with one Codex pane whose window
+// is named "zsh", the shape the Codex lifecycle tests share.
+func codexTrackedMock() *tmuxtest.MockClient {
+	return &tmuxtest.MockClient{
+		Panes: []tmux.PaneInfo{
+			{SessionName: "main", WindowIndex: "0", WindowName: "zsh", PaneIndex: "0",
+				PaneCurrentCmd: "codex", PaneTitle: "cenci", PaneID: "%0"},
+		},
+	}
+}
+
+// TestDaemon_CodexInterruptStopsRunningSession covers #1238 AC2: a native Codex
+// Interrupt moves a running session to stopped immediately (no sweep), and the
+// next main-agent event returns it to running.
+func TestDaemon_CodexInterruptStopsRunningSession(t *testing.T) {
+	resume := []ipc.HookEvent{
+		{EventType: "UserPromptSubmit"},
+		{EventType: "PreToolUse", ToolName: "Bash"},
+		{EventType: "PostToolUse", ToolName: "Bash"},
+	}
+	for _, next := range resume {
+		t.Run(next.EventType, func(t *testing.T) {
+			mc := codexTrackedMock()
+			d := newTestDaemon(mc)
+
+			d.handleEvent(ipc.HookEvent{EventType: "SessionStart", SessionID: "codex-sess", Agent: "codex", TmuxPane: "%0"})
+			d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "codex-sess", Agent: "codex", TmuxPane: "%0"})
+			if got := d.sessions["codex-sess"].Status; got != detect.StatusRunning {
+				t.Fatalf("precondition: expected running, got %v", got)
+			}
+
+			d.handleEvent(ipc.HookEvent{EventType: "Interrupt", SessionID: "codex-sess", Agent: "codex", TmuxPane: "%0"})
+			if got := d.sessions["codex-sess"].Status; got != detect.StatusStopped {
+				t.Fatalf("after Interrupt: expected stopped without a sweep, got %v", got)
+			}
+
+			next.SessionID, next.Agent, next.TmuxPane = "codex-sess", "codex", "%0"
+			d.handleEvent(next)
+			if got := d.sessions["codex-sess"].Status; got != detect.StatusRunning {
+				t.Errorf("after main-agent %s: expected running, got %v", next.EventType, got)
+			}
+		})
+	}
+}
+
+// TestDaemon_CodexSessionEndOtherTearsDown covers #1238 AC3 for a pane-bound
+// session: Codex's constant reason "other" takes the full teardown, restoring
+// the window, releasing tracking and firing the pending-close kill.
+func TestDaemon_CodexSessionEndOtherTearsDown(t *testing.T) {
+	mc := codexTrackedMock()
+	d := newTestDaemon(mc)
+	fk := d.killer.(*fakeKiller)
+
+	d.handleEvent(ipc.HookEvent{EventType: "SessionStart", SessionID: "codex-sess", Agent: "codex", TmuxPane: "%0"})
+	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "codex-sess", Agent: "codex", TmuxPane: "%0"})
+	d.registerPendingClose(ipc.PendingClose{PaneID: "%0", Session: "main", WindowIndex: "0", WindowName: "zsh"})
+
+	mc.Renames = nil
+	d.handleEvent(ipc.HookEvent{EventType: "SessionEnd", SessionID: "codex-sess", Agent: "codex", TmuxPane: "%0", SessionEndReason: "other"})
+
+	if name, ok := lastRename(mc.Renames, "main:0"); !ok || name != "zsh" {
+		t.Errorf("expected restore to original name 'zsh', got %q (found=%v)", name, ok)
+	}
+	if _, ok := d.sessions["codex-sess"]; ok {
+		t.Error("expected session removed after SessionEnd(other)")
+	}
+	if d.frontend.WindowInfo("codex-sess") != nil {
+		t.Error("expected window no longer tracked after SessionEnd(other)")
+	}
+	if len(fk.killed) != 1 || fk.killed[0] != "%0" {
+		t.Errorf("killed = %v, want exactly [%%0] from the pending-close", fk.killed)
+	}
+}
+
+// TestDaemon_CodexSessionEndOtherRemovesPanelessSession is the paneless
+// variant of the teardown: the session state is removed.
+func TestDaemon_CodexSessionEndOtherRemovesPanelessSession(t *testing.T) {
+	d := newTestDaemon(&tmuxtest.MockClient{})
+
+	d.handleEvent(ipc.HookEvent{EventType: "SessionStart", SessionID: "codex-sess", Agent: "codex"})
+	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "codex-sess", Agent: "codex"})
+	if _, ok := d.sessions["codex-sess"]; !ok {
+		t.Fatal("precondition: expected the paneless session to be tracked")
+	}
+
+	d.handleEvent(ipc.HookEvent{EventType: "SessionEnd", SessionID: "codex-sess", Agent: "codex", SessionEndReason: "other"})
+
+	if len(d.sessions) != 0 {
+		t.Errorf("expected paneless session removed after SessionEnd(other), got %d entries", len(d.sessions))
+	}
+}
+
+// TestDaemon_CodexChildEventsNeverFinishOrRemoveParent covers #1238 AC4: child
+// completion or termination never finishes or removes the parent. A parent
+// that is running must stay running, and one that is done must stay done.
+func TestDaemon_CodexChildEventsNeverFinishOrRemoveParent(t *testing.T) {
+	childEvents := []ipc.HookEvent{
+		{EventType: "SubagentStop"},
+		{EventType: "SubagentStop", AgentID: "child-1"},
+		{EventType: "Stop", AgentID: "child-1"},
+		{EventType: "Interrupt", AgentID: "child-1"},
+		{EventType: "SessionEnd", AgentID: "child-1", SessionEndReason: "other"},
+	}
+	parents := []struct {
+		name   string
+		events []string
+		want   detect.Status
+	}{
+		{"running", []string{"SessionStart", "UserPromptSubmit"}, detect.StatusRunning},
+		{"done", []string{"SessionStart", "UserPromptSubmit", "Stop"}, detect.StatusDone},
+	}
+	for _, parent := range parents {
+		for _, child := range childEvents {
+			name := parent.name + "/" + child.EventType
+			if child.AgentID != "" {
+				name += "+agent_id"
+			}
+			t.Run(name, func(t *testing.T) {
+				mc := codexTrackedMock()
+				d := newTestDaemon(mc)
+				fk := d.killer.(*fakeKiller)
+
+				for _, et := range parent.events {
+					d.handleEvent(ipc.HookEvent{EventType: et, SessionID: "codex-sess", Agent: "codex", TmuxPane: "%0"})
+				}
+				d.registerPendingClose(ipc.PendingClose{PaneID: "%0", Session: "main", WindowIndex: "0", WindowName: "zsh"})
+				if got := d.sessions["codex-sess"].Status; got != parent.want {
+					t.Fatalf("precondition: parent status = %v, want %v", got, parent.want)
+				}
+
+				child.SessionID, child.Agent, child.TmuxPane = "codex-sess", "codex", "%0"
+				d.handleEvent(child)
+
+				sess, ok := d.sessions["codex-sess"]
+				if !ok {
+					t.Fatalf("parent session removed by child %s", child.EventType)
+				}
+				if sess.Status != parent.want {
+					t.Errorf("parent status = %v after child %s, want unchanged %v", sess.Status, child.EventType, parent.want)
+				}
+				if d.frontend.WindowInfo("codex-sess") == nil {
+					t.Errorf("parent window no longer tracked after child %s", child.EventType)
+				}
+				if len(fk.killed) != 0 {
+					t.Errorf("killed = %v after child %s, want no kill", fk.killed, child.EventType)
+				}
+			})
+		}
+	}
+}
+
+// Regression for #432: Claude Code fires a SessionEnd hook, so the
+// agent-exit sweep restore (the backstop for a Codex client older than its
+// SessionEnd support, or an abrupt exit) must not touch a finished Claude
+// session while its pane is still alive. #418 started tagging Claude
 // events with -agent claude, which set ws.Agent="claude" and (before the fix)
 // activated that Codex-intended restore whenever pane_current_command wasn't
 // literally "claude" (e.g. an npm/node shim reports "node"), silently wiping the
