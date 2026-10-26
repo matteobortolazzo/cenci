@@ -50,6 +50,39 @@ a skill change must reconcile, and [`adapter-contract.md`](adapter-contract.md) 
 narrower eight-property behavioral-parity contract the implement pipeline's Claude Code
 and Codex adapters both have to satisfy.
 
+## Workflow runtime
+
+Installing the cenci plugin and being able to run its workflows are two separate facts.
+`codex plugin add cenci@cenci` installs skills, hooks, and agent templates, but the
+workflows also run Node helpers (`codex/checkpoint.mjs`), so **Node.js 18 or newer must
+be on `PATH`** in the environment where Codex runs. A plugin can be installed while its
+workflows cannot run.
+
+- **First normal-mode step.** Every normal-mode workflow invocation begins with
+  `sh "${PLUGIN_ROOT}/codex/require-runtime.sh"`, before any checkpoint, workflow, or
+  GitHub mutation. When Node is missing, older than 18, or reports an unparseable
+  version, it prints one `cenci: Codex workflow runtime unavailable — Node.js 18+ not found on PATH (found: …)`
+  line on stderr and exits 2. The run stops there and reports that line. Nothing has
+  been written: no checkpoint, no workflow state, no GitHub change. With Node 18 or
+  newer it is silent and exits 0.
+- **`cenci doctor` reports the runtime on its own line**, next to the Codex version line.
+  `✓ Codex workflow runtime: Node <version> on PATH` means the workflows can run;
+  `! Codex workflow runtime not executable: Node.js 18+ not found on PATH (found: <none|unparseable|version>)`
+  means the plugin may be installed while the workflows cannot run. Doctor parses
+  `node --version` with the same grammar as `require-runtime.sh`, so the two cannot
+  disagree. It is a warning, not
+  a doctor failure, because Codex is an optional client. The 18 threshold appears in both
+  `require-runtime.sh` and `install.sh`, and `flow/codex/require-runtime.test.sh` keeps
+  them equal.
+- **Sandbox images ship Node.** The monolith `sandbox/Dockerfile` installs Node
+  (`NODE_MAJOR`), and generated per-repo images always include the Node fragment (see
+  `sandbox/AGENTS.md`), so inside `cn` / `cenci open` the prerequisite is already met.
+  Only host runs need a separate install.
+- **Checkpoint contract.** The schema-v2 checkpoint (fields, phase tables, transitions,
+  `init` retry-safety, legacy v1 handling, `get` and `clear`, exit codes 0/1/2/3, and the
+  `.cenci/checkpoints` containment rules) is specified in
+  [`skills/codex-runtime/SKILL.md`](../skills/codex-runtime/SKILL.md).
+
 ## Agent role templates
 
 `domain-specialist` is the escalation role for qualifying tasks, pinned to `gpt-6-astra`

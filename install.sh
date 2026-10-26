@@ -453,6 +453,28 @@ doctor_codex_support() {
 	else
 		warn "Codex ${version:-unknown} is unsupported — cenci requires 0.144.1 or newer"
 	fi
+	# Executable workflow runtime, reported apart from plugin installation (#1233):
+	# the Codex workflows run flow/codex/*.mjs helpers, so they need Node on PATH.
+	# Warn only (Codex is an optional client). The threshold repeats MIN_NODE_MAJOR in
+	# flow/codex/require-runtime.sh; flow/codex/require-runtime.test.sh checks they match.
+	local node_min_major=18
+	local node_raw="" node_version="" node_found="none"
+	if command -v node >/dev/null 2>&1; then
+		node_raw="$(node --version 2>/dev/null || true)"
+		# Same grammar as require-runtime.sh, matched against the whole output: v<1-6 digits>.<1-6>.<1-6>
+		# then nothing, or a -pre-release / +build tail. Anything else is unparseable, so doctor
+		# and the gate cannot disagree about a given `node --version`.
+		local node_re='^v([0-9]{1,6})\.([0-9]{1,6})\.([0-9]{1,6})([-+].*)?$'
+		if [[ "$node_raw" =~ $node_re ]]; then
+			node_version="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.${BASH_REMATCH[3]}"
+		fi
+		node_found="${node_version:-unparseable}"
+	fi
+	if [ -n "$node_version" ] && [ "${node_version%%.*}" -ge "$node_min_major" ] 2>/dev/null; then
+		ok "Codex workflow runtime: Node ${node_version} on PATH"
+	else
+		warn "Codex workflow runtime not executable: Node.js ${node_min_major}+ not found on PATH (found: ${node_found}) — the cenci plugin can be installed while its workflows cannot run; install Node ${node_min_major}+"
+	fi
 	config="${CODEX_HOME:-$HOME/.codex}/config.toml"
 	project_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
 	method="$(grep -E '^[[:space:]]*notification_method[[:space:]]*=' "$config" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d ' "')"

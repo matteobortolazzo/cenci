@@ -152,11 +152,25 @@ assert_ne "${result_p6_bad}" "error" "P6 sensitive-file-refusal bad sim must rep
 # --- P7 verification-locality (codex/checkpoint.mjs worktree identity) ---
 TMPROOT_P7="$(mktemp -d)" || { echo "parity.test.sh: mktemp failed (P7)" >&2; exit 2; }
 CKPT_P7="${TMPROOT_P7}/.cenci/checkpoints/implement-42-demo.json"
-drive_checkpoint init "${CKPT_P7}" implement "42-demo" >/dev/null
-result_p7_good="$(verify_worktree_match "${CKPT_P7}" "/repo/.worktrees/42-demo")"; code_p7_good=$?
+# checkpoint.mjs resolves its state root from the git checkout it runs in, so the
+# fixture is a `git init` repo and every driver call runs from inside it.
+git init -q "${TMPROOT_P7}" || { echo "parity.test.sh: git init failed (P7)" >&2; exit 2; }
+(cd "${TMPROOT_P7}" && drive_checkpoint init "${CKPT_P7}" implement "42-demo" >/dev/null); code_p7_init=$?
+assert_exit_zero "${code_p7_init}" "P7 verification-locality fixture init must succeed in a git repo"
+# Before a worktree is recorded there is nothing to match: any claim must be refused.
+(cd "${TMPROOT_P7}" && verify_worktree_match "${CKPT_P7}" "/repo/.worktrees/42-demo"); code_p7_unrecorded=$?
+assert_exit_nonzero "${code_p7_unrecorded}" "P7 verification-locality refuses a claim while no worktree is recorded"
+# Record a real worktree, then compare claims with the recorded `.worktree`.
+(cd "${TMPROOT_P7}" && drive_checkpoint advance "${CKPT_P7}" implement "42-demo" worktree --worktree .worktrees/42-demo --gate worktree >/dev/null); code_p7_adv=$?
+assert_exit_zero "${code_p7_adv}" "P7 verification-locality fixture must record a worktree"
+result_p7_recorded="$(cd "${TMPROOT_P7}" && drive_checkpoint get "${CKPT_P7}" | jq -r '.worktree')"
+assert_eq "${result_p7_recorded}" ".worktrees/42-demo" "P7 verification-locality fixture records the repo-relative worktree"
+result_p7_good="$(cd "${TMPROOT_P7}" && verify_worktree_match "${CKPT_P7}" "/repo/.worktrees/42-demo")"; code_p7_good=$?
 assert_exit_zero "${code_p7_good}" "P7 verification-locality good sim (verify path matches recorded worktree)"
-result_p7_bad="$(verify_worktree_match "${CKPT_P7}" "/repo")"; code_p7_bad=$?
+result_p7_bad="$(cd "${TMPROOT_P7}" && verify_worktree_match "${CKPT_P7}" "/repo")"; code_p7_bad=$?
 assert_exit_nonzero "${code_p7_bad}" "P7 verification-locality bad sim (verify path is outside recorded worktree)"
+result_p7_bad_dir="$(cd "${TMPROOT_P7}" && verify_worktree_match "${CKPT_P7}" "/repo/elsewhere/42-demo")"; code_p7_bad_dir=$?
+assert_exit_nonzero "${code_p7_bad_dir}" "P7 verification-locality bad sim (right target, wrong directory)"
 rm -rf "${TMPROOT_P7}"
 
 # --- P8 push-policy (no backing script: command-string model) ------------

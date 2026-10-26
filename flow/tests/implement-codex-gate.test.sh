@@ -11,9 +11,10 @@
 #   2. failure  — a red gateCommand reports GATE_STATUS=red with a non-zero
 #      exit; an unset gateCommand config reports GATE_STATUS=unset (no-op).
 #   3. recovery — codex/checkpoint.mjs's `block` command sets
-#      status: "needs-input", preserves the `worktree`/`planPath` fields
-#      already recorded on the checkpoint, and leaves `lastCompletedGate`
-#      untouched.
+#      status: "needs-input", preserves the `worktree`/`planPath`/`planDigest`
+#      fields already recorded on the checkpoint (set through the helper's
+#      real metadata flags, inside a `git init` temp repo), and leaves
+#      `lastCompletedGate` untouched.
 #   4. procedure-text — flow/skills/implement/codex.md documents the
 #      run-gate.sh invocation, GATE_STATUS interpretation, the stop
 #      procedure (checkpoint.mjs block + goal-clear), and worktree/branch
@@ -79,31 +80,45 @@ rm -rf "${ROOT_UNSET}"
 #    worktree/planPath, and leaves lastCompletedGate untouched.
 # ===========================================================================
 ROOT_CKPT="$(mktemp -d)" || { echo "implement-codex-gate.test.sh: mktemp failed (recovery)" >&2; exit 2; }
-CKPT="${ROOT_CKPT}/.cenci/checkpoints/implement-555-demo.json"
-node "${CHECKPOINT_MJS}" init "${CKPT}" implement 555-demo planned >/dev/null
+git init -q "${ROOT_CKPT}" || { echo "implement-codex-gate.test.sh: git init failed (recovery)" >&2; exit 2; }
+CKPT_REL=".cenci/checkpoints/implement-555-demo.json"
+CKPT="${ROOT_CKPT}/${CKPT_REL}"
+PLAN_DIGEST_555="9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
 
-# Simulate a checkpoint that has already progressed past worktree creation
-# (worktree/planPath/lastCompletedGate populated) -- checkpoint.mjs itself
-# has no command that sets these fields directly, so this fixture writes
-# them onto the checkpoint file the same way a real advance would have left
-# them, purely to observe whether `block` preserves them.
-tmp_ckpt="$(mktemp)" || { echo "implement-codex-gate.test.sh: mktemp failed (recovery fixture)" >&2; exit 2; }
-jq '.worktree = "/repo/.worktrees/555-demo" | .planPath = ".plans/555-demo.md" | .lastCompletedGate = "flow"' \
-  "${CKPT}" > "${tmp_ckpt}" && mv "${tmp_ckpt}" "${CKPT}"
+# checkpoint.mjs resolves its state root from the git checkout it runs in, so every
+# call runs from inside the temp repo.
+ckpt() { ( cd "${ROOT_CKPT}" && node "${CHECKPOINT_MJS}" "$@" ); }
 
-node "${CHECKPOINT_MJS}" block "${CKPT}" implement 555-demo review >/dev/null
+ckpt init "${CKPT_REL}" implement 555-demo planned >/dev/null \
+  || fail "recovery: checkpoint.mjs init must succeed in a fresh git repo"
+
+# Bring the checkpoint past worktree creation with the real metadata flags
+# (relative worktree, plan path + sha256 digest, last completed gate), exactly as
+# the apply procedure records them, purely to observe whether `block` preserves them.
+ckpt advance "${CKPT_REL}" implement 555-demo baseline \
+  --worktree .worktrees/555-demo --plan-path .plans/555-demo.md --plan-digest "${PLAN_DIGEST_555}" --gate worktree >/dev/null \
+  || fail "recovery: checkpoint.mjs advance with metadata flags must succeed"
+
+ckpt block "${CKPT_REL}" implement 555-demo baseline >/dev/null \
+  || fail "recovery: checkpoint.mjs block must succeed"
 
 status_after="$(jq -r '.status' "${CKPT}")"
 assert_eq "${status_after}" "needs-input" "recovery: checkpoint.mjs block must set status to needs-input"
 
 worktree_after="$(jq -r '.worktree' "${CKPT}")"
-assert_eq "${worktree_after}" "/repo/.worktrees/555-demo" "recovery: checkpoint.mjs block must preserve the worktree field"
+assert_eq "${worktree_after}" ".worktrees/555-demo" "recovery: checkpoint.mjs block must preserve the worktree field"
 
 planpath_after="$(jq -r '.planPath' "${CKPT}")"
 assert_eq "${planpath_after}" ".plans/555-demo.md" "recovery: checkpoint.mjs block must preserve the planPath field"
 
+plandigest_after="$(jq -r '.planDigest' "${CKPT}")"
+assert_eq "${plandigest_after}" "${PLAN_DIGEST_555}" "recovery: checkpoint.mjs block must preserve the planDigest field"
+
 lastgate_after="$(jq -r '.lastCompletedGate' "${CKPT}")"
-assert_eq "${lastgate_after}" "flow" "recovery: checkpoint.mjs block must leave lastCompletedGate untouched"
+assert_eq "${lastgate_after}" "worktree" "recovery: checkpoint.mjs block must leave lastCompletedGate untouched"
+
+phase_after="$(jq -r '.phase' "${CKPT}")"
+assert_eq "${phase_after}" "baseline" "recovery: checkpoint.mjs block must record the phase it stopped in"
 rm -rf "${ROOT_CKPT}"
 
 # ===========================================================================
