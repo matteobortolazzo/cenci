@@ -93,8 +93,8 @@ Codex and OpenCode so neither mistakes a pipeline command for a supported workfl
 | `worktrees` | Yes | Yes | Yes | Git worktree conventions |
 | `address-review` | Yes | In development | No | Native approval/checkpoint foundation |
 | `babysit` | Yes | Yes | Yes | Thin wrapper over the client-neutral `cenci babysit` supervisor |
-| `babysit-attention` | Yes | No | No | Launcher-dispatched by `cenci babysit` when a decision needs a human; no Codex/OpenCode companion yet |
-| `ci-repair` | Yes | No | No | Launcher-dispatched by `cenci babysit` on failing CI; no Codex/OpenCode companion yet |
+| `babysit-attention` | Yes | Yes | No | Launcher-dispatched by `cenci babysit` when a decision needs a human; offers only "leave paused for manual repair" and "stop babysitting"; Codex companion is `codex.md`, no OpenCode companion yet |
+| `ci-repair` | Yes | Yes | No | Launcher-dispatched by `cenci babysit` on failing CI; Codex companion is `codex.md` (never enters `/plan`), no OpenCode companion yet |
 | `close` | Yes | In development | No | Split-parent coverage review before closing; the writes run through `scripts/close-parent.sh` on both clients |
 | `merge-repair` | Yes | No | No | Babysit always dispatches conflict resolution to Claude Opus, including for Codex/OpenCode supervisors |
 | `configure` | Yes | In development | No | Neutral/adapters foundation present |
@@ -122,9 +122,9 @@ companion) for every skill, including the internal ones not listed above.
 |---|---|---|---|---|---|
 | `address-review` | Address PR review comments by fetching, evaluating, fixing, replying, pushing, and re-requesting review. | No | Yes | Yes | Yes |
 | `attachments` | Discover, select, download, and inspect GitHub ticket attachments. Use when an issue or pull request contains screenshots, mockups, documents, or uploaded files needed as task context. | Yes | No | Yes | Yes |
-| `babysit-attention` | Resolve a paused PR supervisor decision with explicit human input. | No | Yes | Yes | No |
+| `babysit-attention` | Resolve a paused PR supervisor decision with explicit human input. | No | Yes | Yes | Yes |
 | `babysit` | Follow an open PR with the client-neutral cenci supervisor until it merges or closes. | Yes | Yes | Yes | Yes |
-| `ci-repair` | Diagnose and repair failing CI for an existing pull request without reopening the implementation pipeline. | No | Yes | Yes | No |
+| `ci-repair` | Diagnose and repair failing CI for an existing pull request without reopening the implementation pipeline. | No | Yes | Yes | Yes |
 | `close` | Close a split parent ticket only after an item-by-item coverage review of its merged child PRs. | No | Yes | Yes | Yes |
 | `codex-runtime` | Shared native Codex stage, checkpoint, goal, and agent-adapter contract. | No | No | Yes | No |
 | `configure` | Configure cenci's neutral project core and generate Claude/Codex adapters. | No | Yes | Yes | Yes |
@@ -181,9 +181,9 @@ companion) for every skill, including the internal ones not listed above.
 |---|---|---|---|---|
 | `address-review` | codex.md | babysit, codex-runtime, implement, pr-comment-filter, project-core, shell-rules, subagent-safety, verify-ui | — | domain-specialist |
 | `attachments` | — | shell-rules | — | context-gatherer |
-| `babysit-attention` | — | merge-repair | — | — |
+| `babysit-attention` | codex.md | codex-runtime, merge-repair, project-core, shell-rules, subagent-safety | — | — |
 | `babysit` | — | merge-repair, project-core, shell-rules | — | — |
-| `ci-repair` | — | project-core, shell-rules, subagent-safety, testing | — | domain-specialist |
+| `ci-repair` | codex.md | codex-runtime, project-core, shell-rules, subagent-safety, testing | — | domain-specialist |
 | `close` | codex.md | babysit, codex-runtime, project-core, shell-rules, subagent-safety | close-parent.sh | acceptance-reviewer |
 | `codex-runtime` | — | — | — | — |
 | `configure` | codex.md, phases/autonomy-settings.md, phases/ci-dockerfile.md, phases/commit-pr.md, phases/detection-and-delta.md, phases/fleet-enrollment.md, phases/guidance-settings.md, phases/lazyboards.md, phases/mcp-lsp-ui-questions.md, phases/project-questions.md, phases/runtime-ci-sandbox-questions.md, phases/write-config.md, references/config-schema.md, references/lazyboards-example.md, references/migrations.md, references/settings-template.md | babysit, codex-runtime, project-core, shell-rules, testing, verify-ui | detect-project.sh, merge-sandbox-config.sh, resolve-delta.sh | code-reviewer |

@@ -6,6 +6,8 @@ user-invocable: true
 disable-model-invocation: true
 ---
 
+> **Client dispatch**: In Codex, read `codex-runtime` and `ci-repair/codex.md`, execute that native procedure, and do not continue into the Claude procedure below.
+
 For Claude and Codex, apply the diagnosis trigger in the plugin's
 `docs/model-escalation.md`: after two failed attempts at the same unexplained
 defect, delegate a bounded second opinion to `domain-specialist` with logs,
