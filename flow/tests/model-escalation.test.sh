@@ -99,7 +99,8 @@ class ModelEscalation(unittest.TestCase):
             "skills/review/SKILL.md", "skills/review/codex.md",
             "skills/refactor/SKILL.md", "skills/refactor/codex.md",
             "skills/maintain/SKILL.md", "skills/maintain/codex.md",
-            "skills/ci-repair/SKILL.md", "skills/address-review/SKILL.md",
+            "skills/ci-repair/SKILL.md", "skills/ci-repair/codex.md",
+            "skills/address-review/SKILL.md",
             "skills/address-review/codex.md",
         )
         for path in paths:

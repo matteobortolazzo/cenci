@@ -34,6 +34,34 @@ Explicit `/plan` remains read-only. Automerge grants are separately controlled b
 
 In ticket mode, Codex implement records `cenci pipeline` stages and resumes a crashed `apply` from its recorded stage, the same table the Claude Code procedure follows. The checkpoint stays Codex's local goal and phase record and is never used for routing.
 
+The babysit supervisor also dispatches two native procedures that are not meant to be
+invoked by hand: `$cenci:ci-repair` (repair one PR's failing CI) and
+`$cenci:babysit-attention` (summarize a paused PR and ask a human what to do). Both have a
+`codex.md` companion, and neither ever enters `/plan`.
+
+- `$cenci:ci-repair` works only in the PR branch worktree. It reproduces the failure
+  locally, makes the smallest test-backed fix, passes the project's local gate
+  (`docs/health-gates.md` at the repo root), commits explicit paths and pushes
+  without force. It never runs `cenci pipeline`, changes a lifecycle label or opens a PR.
+  Its checkpoint lives at `.cenci/checkpoints/ci-repair-<pr>.json` and a restart reads it
+  rather than repeating a commit or push. A gate failure, or a repair that is ambiguous,
+  infrastructure, flaky or external, pushes nothing and returns control to the supervisor.
+- `$cenci:babysit-attention` prints the PR, head SHA, failing checks (or the merge-repair
+  reason) and attempt count, then asks one blocking question with exactly two options:
+  "leave paused for manual repair" and "stop babysitting". There is no retry option.
+  A headless `codex exec` run prints the summary and the question and exits without
+  choosing, mutating, pushing or stopping.
+- The "stop babysitting" choice runs `cenci babysit stop <pr>`. When that exits non-zero, or
+  the sandbox cannot reach the host supervisor's state, the procedure says the supervisor
+  was **not stopped** and prints the exact `cenci babysit stop <pr>` command to run on the
+  host. It never reports a failed stop as success.
+
+The opt-in runner `codex/native-workflows.test.sh` (`CENCI_CODEX_NATIVE=1`) runs both
+procedures through a real `codex exec` against a disposable fixture. Its sanitized results
+are recorded in
+[`codex-native-evidence.md`](codex-native-evidence.md#native-workflows-ci-repair-and-babysit-attention);
+that section stays "pending native run" until a maintainer commits one.
+
 The launcher exposes development entry points:
 
 ```bash
