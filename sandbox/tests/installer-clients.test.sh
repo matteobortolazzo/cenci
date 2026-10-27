@@ -1035,6 +1035,32 @@ run_doctor_case_with_cosign() {
     DOCTOR_OUTPUT="${output}"
 }
 
+# run_doctor_case_with_node <name> <clients> <node-version|absent> — like
+# run_doctor_case, but plants a fake `node` printing <node-version> for
+# `node --version` on the doctor-run PATH (or none for "absent"), exercising
+# doctor_codex_support's Codex workflow runtime line (#1233). The fake is
+# planted after run_case's setup so make_common_tools cannot interfere.
+run_doctor_case_with_node() {
+    local name="$1" clients="$2" node_version="$3"
+    run_case "${name}" "${clients}"
+    local bin="${WORK}/${name}/bin" output="${WORK}/${name}/doctor-output"
+    rm -f "${bin}/node"
+    if [ "${node_version}" != absent ]; then
+        printf '#!/bin/sh\nprintf '"'"'%%s\\n'"'"' "%s"\n' "${node_version}" >"${bin}/node"
+        chmod +x "${bin}/node"
+    fi
+    set +e
+    env -i HOME="${CASE_HOME}" PATH="${bin}" CALLS_FILE="${CASE_CALLS}" \
+        CLAUDE_MARKETPLACE_FILE="${WORK}/${name}/claude-marketplace" \
+        CLAUDE_INSTALLED_FILE="${WORK}/${name}/claude-installed" \
+        CODEX_MARKETPLACE_FILE="${WORK}/${name}/codex-marketplace" \
+        CODEX_INSTALLED_FILE="${WORK}/${name}/codex-installed" \
+        bash "${ROOT}/install.sh" doctor >"${output}" 2>&1
+    DOCTOR_EXIT=$?
+    set -e
+    DOCTOR_OUTPUT="${output}"
+}
+
 # run_doctor_case_with_stale_pin_checkout <name> <clients> <checkout-tag>
 # <release-env> — like run_doctor_case, but pre-tags the managed marketplace
 # checkout at <checkout-tag> (prepare_git_tagged_checkout) before the doctor
@@ -1403,6 +1429,51 @@ assert_contains "${DOCTOR_OUTPUT}" "Codex: cenci"
 assert_contains "${DOCTOR_OUTPUT}" "cenci-installer utility"
 assert_contains "${DOCTOR_OUTPUT}" "cenci daemon"
 assert_not_contains "${DOCTOR_OUTPUT}" "binary not found yet"
+
+echo "case: doctor reports the Codex workflow runtime separately from plugin installation, ok with Node 18+ on PATH (#1233)"
+run_doctor_case_with_node doctor-codex-node-ok codex v20.11.0
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "Codex workflow runtime: Node 20.11.0 on PATH"
+assert_contains "${DOCTOR_OUTPUT}" "Codex: cenci"
+assert_not_contains "${DOCTOR_OUTPUT}" "Codex workflow runtime not executable"
+
+echo "case: doctor warns, without failing, when Node is absent from PATH (plugin installed, runtime not executable) (#1233)"
+run_doctor_case_with_node doctor-codex-node-absent codex absent
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "Codex workflow runtime not executable: Node.js 18+ not found on PATH (found: none)"
+assert_contains "${DOCTOR_OUTPUT}" "install Node 18+"
+assert_contains "${DOCTOR_OUTPUT}" "Codex: cenci"
+assert_not_contains "${DOCTOR_OUTPUT}" "Codex workflow runtime: Node"
+
+echo "case: doctor warns, without failing, when Node on PATH is older than 18 and names the version found (#1233)"
+run_doctor_case_with_node doctor-codex-node-old codex v16.20.0
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "Codex workflow runtime not executable: Node.js 18+ not found on PATH (found: 16.20.0)"
+assert_not_contains "${DOCTOR_OUTPUT}" "Codex workflow runtime: Node"
+
+echo "case: doctor applies require-runtime.sh's version grammar: unparseable output warns, the 18 boundary is exact (#1233)"
+for bad in banana v20.1.2garbage v20.1 v20.1.2.3 v1234567.0.0; do
+    run_doctor_case_with_node "doctor-codex-node-bad-${bad}" codex "${bad}"
+    [[ "${DOCTOR_EXIT}" -eq 0 ]]
+    assert_contains "${DOCTOR_OUTPUT}" "Codex workflow runtime not executable: Node.js 18+ not found on PATH (found: unparseable)"
+    assert_not_contains "${DOCTOR_OUTPUT}" "Codex workflow runtime: Node"
+done
+run_doctor_case_with_node doctor-codex-node-min codex v18.0.0
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "Codex workflow runtime: Node 18.0.0 on PATH"
+assert_not_contains "${DOCTOR_OUTPUT}" "Codex workflow runtime not executable"
+run_doctor_case_with_node doctor-codex-node-below-min codex v17.9.1
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "Codex workflow runtime not executable: Node.js 18+ not found on PATH (found: 17.9.1)"
+assert_not_contains "${DOCTOR_OUTPUT}" "Codex workflow runtime: Node"
+run_doctor_case_with_node doctor-codex-node-prerelease codex v20.0.0-rc.1
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "Codex workflow runtime: Node 20.0.0 on PATH"
+
+echo "case: doctor skips the Codex workflow runtime line when Codex is not detected (#1233)"
+run_doctor_case_with_node doctor-claude-node-skip claude absent
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_not_contains "${DOCTOR_OUTPUT}" "Codex workflow runtime"
 
 echo "case: doctor's Codex notification hint reflects the user-level config.toml, never a differing project-level override Codex itself ignores (#416)"
 name=doctor-codex-config-precedence

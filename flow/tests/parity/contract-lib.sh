@@ -677,18 +677,19 @@ drive_checkpoint() {
 # ---------------------------------------------------------------------------
 # verify_worktree_match <checkpoint-path> <claimed-verification-path>
 #
-# Reads the worktree/target recorded in the checkpoint at <checkpoint-path>
-# (via `drive_checkpoint get`) and compares it against
-# <claimed-verification-path>. Returns 0 if they match (verification ran
-# where the checkpoint says the worktree is), non-zero otherwise
-# (verification ran elsewhere).
+# Reads the repo-relative `.worktree` recorded in the checkpoint at
+# <checkpoint-path> (via `drive_checkpoint get`) and compares it against
+# <claimed-verification-path> (the recorded path itself, or an absolute path
+# ending in "/<recorded>"). Returns 0 if they match (verification ran where
+# the checkpoint says the worktree is), non-zero otherwise (verification ran
+# elsewhere, or no worktree was recorded).
 verify_worktree_match() {
-  local ckpt="$1" claimed="$2" state target
+  local ckpt="$1" claimed="$2" state recorded
   state="$(drive_checkpoint get "${ckpt}" 2>/dev/null)" || return 1
-  target="$(printf '%s' "${state}" | jq -r '.target // empty' 2>/dev/null)"
-  [[ -n "${target}" ]] || return 1
+  recorded="$(printf '%s' "${state}" | jq -r '.worktree // empty' 2>/dev/null)"
+  [[ -n "${recorded}" ]] || return 1
   case "${claimed}" in
-    *"/.worktrees/${target}") return 0 ;;
+    "${recorded}" | */"${recorded}") return 0 ;;
     *) return 1 ;;
   esac
 }
