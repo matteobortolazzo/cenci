@@ -3,7 +3,7 @@ FROM cenci-sandbox-base:${BASE_VERSION}
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
-ARG DOTNET_SDK_VERSION=10.0.402
+ARG DOTNET_SDK_VERSION=10.0.403
 
 USER root
 
