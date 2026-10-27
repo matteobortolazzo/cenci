@@ -6,8 +6,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/exectest"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/run"
 )
 
 // writeRunConfig writes a `cenci run --config` file and returns its path.
@@ -21,10 +25,15 @@ func writeRunConfig(t *testing.T, body string) string {
 }
 
 // runDryRun runs `cenci run <args> --dry-run` and returns stdout, stderr and
-// the process exit code (0 on success).
+// the process exit code (0 on success). --dry-run lands before a `--`
+// terminator in args, since everything after it is a positional.
 func runDryRun(t *testing.T, args ...string) (stdout, stderr string, exitCode int) {
 	t.Helper()
-	cmd := exec.Command(binaryPath, append([]string{"run"}, append(args, "--dry-run")...)...)
+	at := slices.Index(args, "--")
+	if at < 0 {
+		at = len(args)
+	}
+	cmd := exec.Command(binaryPath, append([]string{"run"}, slices.Insert(slices.Clone(args), at, "--dry-run")...)...)
 	var outBuf, errBuf bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &outBuf, &errBuf
 	err := cmd.Run()
@@ -287,6 +296,98 @@ func TestRunDryRunDisabledOpenCodeFails(t *testing.T) {
 				if strings.Contains(stderr, banned) {
 					t.Errorf("stderr must not suggest a config override (%q):\n%s", banned, stderr)
 				}
+			}
+		})
+	}
+}
+
+// dryRunArgv resolves `cenci run <workflow> <flags> [target]` to the argv the
+// shell would hand the launcher program: the dry-run `command:` line run
+// through /bin/sh against a recording fake, so element boundaries are exact. A
+// target with a leading hyphen rides behind the `--` terminator.
+func dryRunArgv(t *testing.T, workflow, target string, flags ...string) []string {
+	t.Helper()
+	args := []string{workflow}
+	var tail []string
+	if strings.HasPrefix(target, "-") {
+		tail = []string{"--", target}
+	} else {
+		args = append(args, target)
+	}
+	args = append(append(args, "--session", "demo"), flags...)
+	stdout, stderr, code := runDryRun(t, append(args, tail...)...)
+	if code != 0 {
+		t.Fatalf("dry-run exited %d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	line := exectest.DryRunCommand(t, stdout)
+	program, _, _ := strings.Cut(line, " ")
+	return exectest.ShellArgv(t, line, program)
+}
+
+// #1232 A1/A2: every built-in Codex workflow launched in the sandbox reaches
+// `cenci open [--model m] --agent codex -- <prompt>`, the prompt exactly one
+// verbatim argv element whatever the target holds.
+func TestRunDryRunCodexSandboxRoutesPromptAfterAgentFlag(t *testing.T) {
+	noCfg := filepath.Join(t.TempDir(), "none.json")
+	planning := map[string]bool{"configure": true, "implement": true, "address-review": true, "refactor": true, "maintain": true}
+	targets := []string{"42", "two words\tand a tab", `it's`, `say "hi"`, "$HOME", "42 --force", "-x"}
+	codexWorkflows := 0
+	for _, c := range run.BuiltinCapabilities() {
+		if c.Agent != "codex" {
+			continue
+		}
+		codexWorkflows++
+		for _, target := range targets {
+			prompt := "$cenci:" + c.Workflow + " " + target
+			if planning[c.Workflow] {
+				prompt = "/plan\n" + prompt
+			}
+			for _, model := range []string{"", "m"} {
+				flags := []string{"--agent", "codex", "--sandbox", "--config", noCfg}
+				want := []string{"cenci", "open"}
+				if model != "" {
+					flags = append(flags, "--model", model)
+					want = append(want, "--model", model)
+				}
+				want = append(want, "--agent", "codex", "--", prompt)
+				t.Run(c.Workflow+"/"+target+"/model="+model, func(t *testing.T) {
+					if got := dryRunArgv(t, c.Workflow, target, flags...); !slices.Equal(got, want) {
+						t.Errorf("argv = %q, want %q", got, want)
+					}
+				})
+			}
+		}
+	}
+	if codexWorkflows == 0 {
+		t.Fatal("no built-in Codex workflows: the table would pass vacuously")
+	}
+}
+
+// #1232 A5: user-owned Codex templates keep their documented behavior. A
+// file-defined workflow without sandboxArgs gets no injected agent routing,
+// and a partial override changes only the field it names (per-field merge).
+func TestRunDryRunCodexUserTemplatesKeepDocumentedBehavior(t *testing.T) {
+	const builtinPrompt = "/plan\n$cenci:implement 42"
+	builtinSandbox := []string{"cenci", "open", "--agent", "codex", "--", builtinPrompt}
+	for _, tc := range []struct {
+		name, config, workflow, mode string
+		want                         []string
+	}{
+		{"file workflow without sandboxArgs", `{"args":["exec","do {ticket}"]}`, "custom", "--sandbox",
+			[]string{"cenci", "open", "exec", "do 42"}},
+		{"args-only override, host", `{"args":["exec","x {ticket}"]}`, "implement", "--no-sandbox",
+			[]string{"codex", "exec", "x 42"}},
+		{"args-only override, sandbox keeps built-in sandboxArgs", `{"args":["exec","x {ticket}"]}`, "implement", "--sandbox",
+			builtinSandbox},
+		{"sandboxArgs-only override, sandbox", `{"sandboxArgs":["--agent","codex","--","mine {ticket}"]}`, "implement", "--sandbox",
+			[]string{"cenci", "open", "--agent", "codex", "--", "mine 42"}},
+		{"sandboxArgs-only override, host keeps built-in args", `{"sandboxArgs":["--agent","codex","--","mine {ticket}"]}`, "implement", "--no-sandbox",
+			[]string{"codex", builtinPrompt}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := writeRunConfig(t, `{"agents":{"codex":{"workflows":{"`+tc.workflow+`":`+tc.config+`}}}}`)
+			if got := dryRunArgv(t, tc.workflow, "42", "--agent", "codex", tc.mode, "--config", cfg); !slices.Equal(got, tc.want) {
+				t.Errorf("argv = %q, want %q", got, tc.want)
 			}
 		})
 	}

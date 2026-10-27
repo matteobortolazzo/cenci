@@ -276,10 +276,7 @@ TestReadmeCapabilityTableInSync -update-readme` regenerates it):
     },
     "codex": {
       "command": "codex",
-      "model": "gpt-6.1-sol",
-      "workflows": {
-        "implement": { "args": ["exec", "/cenci:implement {ticket}"] }
-      }
+      "model": "gpt-6.1-sol"
     }
   }
 }
@@ -316,6 +313,16 @@ independently; an empty array keeps the built-in value. For example, one-shot
 Claude uses host `args: ["--print", "--", "<prompt>"]`, but needs
 `sandboxArgs: ["--", "--print", "<prompt>"]` to forward print mode through
 `cenci open` rather than treating it as a launcher flag.
+
+The built-in Codex workflows use the same mechanism so the sandbox launch names its
+agent: host `args` are `["<prompt>"]`, and `sandboxArgs` are `["--agent", "codex",
+"--", "<prompt>"]`, i.e. `cenci open [--model <m>] --agent codex -- <prompt>` with the
+prompt one verbatim argument after `--` (without `--agent codex`, `cenci open`
+would default to Claude). Because `args` and `sandboxArgs` merge independently,
+overriding only a built-in Codex workflow's `args` in `config.json` changes host
+launches (`--no-sandbox`) only; sandbox launches keep the built-in `sandboxArgs`. To
+change a sandbox launch, set `sandboxArgs` too. A workflow you define yourself with no
+`sandboxArgs` runs as `cenci open <its args>`, with no injected `--agent`.
 
 **OpenCode (paused):** the retained adapter targets OpenCode 1.18.3 or newer. Doctor
 reports the pause and inspects legacy integration state (see

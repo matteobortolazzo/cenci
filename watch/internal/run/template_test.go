@@ -143,7 +143,10 @@ func TestUnknownAgentAndWorkflowError(t *testing.T) {
 }
 
 func TestCodexNativeWorkflowTemplates(t *testing.T) {
-	cfg := builtinConfig()
+	// Every built-in Codex workflow (#1232): the host launch passes the prompt
+	// to codex directly; the sandbox launch routes it through `cenci open
+	// --agent codex --` as one verbatim element, with an explicit model (flag
+	// or agents.codex.model) injected before the agent flag.
 	workflows := []struct{ workflow, prompt string }{
 		{"configure", "/plan\n$cenci:configure 42"},
 		{"refine", "$cenci:refine 42"},
@@ -153,18 +156,33 @@ func TestCodexNativeWorkflowTemplates(t *testing.T) {
 		{"refactor", "/plan\n$cenci:refactor 42"},
 		{"sync", "$cenci:sync 42"},
 		{"maintain", "/plan\n$cenci:maintain 42"},
+		{"babysit", "$cenci:babysit 42"},
+		{"babysit-attention", "$cenci:babysit-attention 42"},
+		{"ci-repair", "$cenci:ci-repair 42"},
 	}
+	if len(workflows) != len(wantCodexWorkflows) {
+		t.Fatalf("table covers %d workflows, want all %d built-in Codex workflows", len(workflows), len(wantCodexWorkflows))
+	}
+	sandboxCommand := []string{"cenci", "open", "--agent", "codex", "--"}
+	modelCommand := []string{"cenci", "open", "--model", "m", "--agent", "codex", "--"}
 	for _, launch := range []struct {
-		name    string
-		sandbox bool
-		command []string
+		name                string
+		sandbox             bool
+		flagModel, cfgModel string
+		command             []string
 	}{
-		{"host", false, []string{"codex"}},
-		{"sandbox", true, []string{"cenci", "open"}},
+		{"host", false, "", "", []string{"codex"}},
+		{"sandbox", true, "", "", sandboxCommand},
+		{"sandbox/flag-model", true, "m", "", modelCommand},
+		{"sandbox/config-model", true, "", "m", modelCommand},
 	} {
+		cfg := builtinConfig()
+		ac := cfg.Agents["codex"]
+		ac.Model = launch.cfgModel
+		cfg.Agents["codex"] = ac
 		for _, workflow := range workflows {
 			t.Run(launch.name+"/"+workflow.workflow, func(t *testing.T) {
-				argv, err := cfg.BuildCommand("codex", workflow.workflow, "42", "", launch.sandbox)
+				argv, err := cfg.BuildCommand("codex", workflow.workflow, "42", launch.flagModel, launch.sandbox)
 				if err != nil {
 					t.Fatal(err)
 				}

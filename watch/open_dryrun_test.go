@@ -133,6 +133,52 @@ func TestOpenDryRun_ClaudeHaikuShortcutAndTrailingForwardedArgs(t *testing.T) {
 	assertOnlyReadOnlyContainerProbeCalls(t, callLogLines(t, callLog))
 }
 
+// TestOpenDryRun_CodexPassthroughIsNeverReadAsShortcut pins #1232 A4: the
+// built-in Codex sandbox launch is `cenci open [--model m] --agent codex --
+// <prompt>`, and everything after `--` is forwarded to the agent verbatim, so a
+// prompt identical to a shortcut token (xs, ch) neither selects that shortcut's
+// agent or model nor conflicts with --agent codex, and the full built-in prompt
+// shape renders as one quoted token.
+func TestOpenDryRun_CodexPassthroughIsNeverReadAsShortcut(t *testing.T) {
+	const codexAttach = "/opt/cenci-agent/current/node_modules/.bin/codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust"
+	for _, tc := range []struct {
+		name    string
+		args    []string
+		wantEnd string
+	}{
+		{"prompt xs", []string{"--agent", "codex", "--dry-run", "--", "xs"}, " --model gpt-5.6-terra xs"},
+		{"prompt ch", []string{"--agent", "codex", "--dry-run", "--", "ch"}, " --model gpt-5.6-terra ch"},
+		{"model then prompt xs", []string{"--model", "m", "--agent", "codex", "--dry-run", "--", "xs"}, " --model m xs"},
+		{"full prompt", []string{"--agent", "codex", "--dry-run", "--", "$cenci:implement 42 -- xs"}, " --model gpt-5.6-terra '$cenci:implement 42 -- xs'"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fakeDir := t.TempDir()
+			callLog := writeScriptedRuntimes(t, fakeDir)
+			env, home, _ := openTestEnv(t, fakeDir, writeAssetFixture(t))
+			stageCodexAuth(t, home)
+
+			cmd := exec.Command(binaryPath, append([]string{"open"}, tc.args...)...)
+			cmd.Env = env
+			cmd.Dir = t.TempDir()
+			output, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("open %v: %v\n%s", tc.args, err, output)
+			}
+
+			found := false
+			for _, line := range strings.Split(string(output), "\n") {
+				if strings.Contains(line, "exec -it ") && strings.HasSuffix(line, codexAttach+tc.wantEnd) {
+					found = true
+				}
+			}
+			if !found {
+				t.Errorf("expected an attach argv ending %q, got:\n%s", codexAttach+tc.wantEnd, output)
+			}
+			assertOnlyReadOnlyContainerProbeCalls(t, callLogLines(t, callLog))
+		})
+	}
+}
+
 func TestOpenDryRun_DindAndNoDind_Exits2(t *testing.T) {
 	fakeDir := t.TempDir()
 	callLog := writeScriptedRuntimes(t, fakeDir)

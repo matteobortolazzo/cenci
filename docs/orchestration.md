@@ -593,11 +593,7 @@ shared: each directory's `CLAUDE.md` (canonical) is read by Claude Code natively
 Codex via `project_doc_fallback_filenames = ["CLAUDE.md"]` in `~/.codex/config.toml` (a
 one-time, user-level line — a committed repo-level `.codex/config.toml` is ignored), so a
 dispatched Codex card sees the same project context as a Claude Code card. `cenci run`
-ships built-in Claude templates; merge
-[`flow/templates/cenci-codex-config.json`](../flow/templates/cenci-codex-config.json)
-into `~/.config/cenci/config.json` to add the Codex `implement` template, while
-interactive `refine` remains Claude Code-only. Codex support across the
-package is tracked in
-[#33](https://github.com/matteobortolazzo/cenci/issues/33); see
+ships built-in templates for both agents, Codex `refine` included, so no config file is
+needed: a sandbox launch goes through `cenci open --agent codex -- <prompt>`. See
 [cenci-watch's README](../watch/README.md#dispatching-workflows-cenci-run)
 for config precedence and launcher flags.
