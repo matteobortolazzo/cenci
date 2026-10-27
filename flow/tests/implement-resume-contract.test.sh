@@ -306,7 +306,7 @@ if [[ -n "${BLOCK:-}" ]]; then
     "must state the multiple-disambiguated route is treated like stale"
 
   # --- AC10: stale gate ordering ---
-  assert_block '`stale` still reaches Phase 1'"'"'s `## Existing Plan` human-confirmation gate before any attach route' \
+  assert_block '`stale` still reaches Phase 1'"'"'s `## Existing Plan` premise gate before any attach route' \
     "the stale-gate ordering sentence must be pinned"
 
   # --- AC9/AC12: purity of the block ---

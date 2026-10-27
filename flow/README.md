@@ -415,7 +415,7 @@ When you run `/cenci:implement <ticket-id>`, the pipeline executes these phases:
 
 ### Resuming a crashed run
 
-`cenci pipeline plan-check <id>` echoes the ticket's persisted pipeline state (`stage`, `worktreePath`, `branch`, `prUrl`, `prNumber`, and whether the recorded worktree is still registered). When `/cenci:implement <id>` finds a saved plan (`resume`, or `stale` once you confirm), it routes on that stage instead of starting over. A stage is recorded when its phase starts, so the route follows the phase the crashed run entered:
+`cenci pipeline plan-check <id>` echoes the ticket's persisted pipeline state (`stage`, `worktreePath`, `branch`, `prUrl`, `prNumber`, and whether the recorded worktree is still registered). When `/cenci:implement <id>` finds a saved plan (`resume`, or `stale` when the plan's starting premises still hold or you choose to continue), it routes on that stage instead of starting over. A stage is recorded when its phase starts, so the route follows the phase the crashed run entered:
 
 | Recorded stage | What happens |
 |---|---|

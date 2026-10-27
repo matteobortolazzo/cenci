@@ -99,6 +99,18 @@ if require_doc CONTENT "${FILE}"; then
   else
     assert_contains "${EXISTING_PLAN_SECTION}" "git log --stat" "${FILE} (AC2 stale analysis)"
     assert_contains "${EXISTING_PLAN_SECTION}" "(Recommended)" "${FILE} (AC2 recommended default)"
+    # Premise gate: no question when the plan's starting premises still hold;
+    # file overlap alone never counts as a conflict.
+    assert_contains "${EXISTING_PLAN_SECTION}" "ask the human **only when a premise is broken**" \
+      "${FILE} (premise gate asks only on a broken premise)"
+    assert_contains "${EXISTING_PLAN_SECTION}" "**Premises hold** → do **not** ask." \
+      "${FILE} (premise gate continues silently when premises hold)"
+    assert_contains "${EXISTING_PLAN_SECTION}" "Saved plan is stale by plan-check but its premises still hold:" \
+      "${FILE} (premise gate continue notice)"
+    assert_contains "${EXISTING_PLAN_SECTION}" "A file overlap is not a conflict" \
+      "${FILE} (premise gate ignores bare file overlap)"
+    assert_not_contains "${EXISTING_PLAN_SECTION}" "the human still decides" \
+      "${FILE} (premise gate must not always ask)"
     # The multiple-disambiguation sub-case must NOT run the commit analysis.
     assert_contains "${EXISTING_PLAN_SECTION}" "there is no commits-behind signal to analyze" \
       "${FILE} (AC2 multiple-disambiguation carve-out)"
