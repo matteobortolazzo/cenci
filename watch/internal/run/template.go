@@ -200,14 +200,23 @@ func CapabilityTableMarkdown() string {
 
 // builtinConfig returns the zero-config defaults and the only source of the
 // supported (agent, workflow) pairs: the claude and codex workflows calling the
-// matching cenci skill, with `cenci open` as their sandbox command.
+// matching cenci skill, with `cenci open` as their sandbox command. Claude's
+// sandbox launch is `cenci open -- <prompt>`; Codex's is `cenci open --agent
+// codex -- <prompt>` (its SandboxArgs), since `cenci open` defaults to Claude.
 // Fresh maps are constructed on each call so callers may mutate the result freely.
 func builtinConfig() FileConfig {
 	claudeWF := func(wf string) WorkflowTemplate {
 		return WorkflowTemplate{Args: []string{"--", "/cenci:" + wf + " {ticket}"}}
 	}
+	// A Codex sandbox launch must name its agent: `cenci open` reads a leading
+	// non-flag word as a shortcut and otherwise defaults to Claude, so the
+	// prompt rides behind `--agent codex --` as one verbatim passthrough element.
 	codexWF := func(wf string) WorkflowTemplate {
-		return WorkflowTemplate{Args: []string{"{codex_stage}$cenci:" + wf + " {ticket}"}}
+		prompt := "{codex_stage}$cenci:" + wf + " {ticket}"
+		return WorkflowTemplate{
+			Args:        []string{prompt},
+			SandboxArgs: []string{"--agent", "codex", "--", prompt},
+		}
 	}
 	return FileConfig{
 		DefaultAgent: "claude",
