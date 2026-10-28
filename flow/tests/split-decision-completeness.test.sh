@@ -59,7 +59,7 @@ assert_file_contains() {
 # the AC-partition check, within the same Coverage gate
 SKILL_SIX_SECTIONS_MARKER='verify all six subsections are present: `### Goal`, `### Size`, `### Decisions`, `### Assumptions (auto-adopted)`, `### Acceptance criteria`, and `### Dependencies`'
 SKILL_GOAL_EMPTINESS_MARKER='`### Goal` must contain non-empty prose'
-SKILL_SIZE_EMPTINESS_MARKER='`### Size` must contain a real `<S/M> — <reasoning>` value — never empty, and never the "None." sentinel'
+SKILL_SIZE_EMPTINESS_MARKER='`### Size` must contain a real `<S|M|L>` bound and rationale — never empty, and never the "None." sentinel (L requires the recorded inseparability reason and evidence within L)'
 SKILL_DEPENDENCIES_EMPTINESS_MARKER='`### Dependencies` must be non-empty'
 SKILL_DEPENDENCIES_NONE_VALID_MARKER='"None." is a valid value'
 SKILL_DECISIONS_ASSUMPTIONS_EMPTINESS_MARKER='`### Decisions` and `### Assumptions (auto-adopted)` must each be non-empty or exactly "None."'
@@ -80,7 +80,7 @@ REFINER_SIZE_NEVER_L_MARKER='a child'"'"'s `### Size` is always S or M unless it
 CODEX_STRUCTURE_MARKER='first verify each child block is structurally complete'
 CODEX_STRUCTURE_SIX_SECTIONS_MARKER='all six subsections present (`### Goal`, `### Size`, `### Decisions`, `### Assumptions (auto-adopted)`, `### Acceptance criteria`, `### Dependencies`)'
 CODEX_STRUCTURE_ORDER_MARKER='before the acceptance-criteria partition check'
-CODEX_STRUCTURE_SIZE_EMPTINESS_MARKER='`### Size` a real `<S/M> — <reasoning>` value, never empty and never the "None." sentinel'
+CODEX_STRUCTURE_SIZE_EMPTINESS_MARKER='`### Size` a real `<S|M|L>` bound and rationale (L requires the recorded inseparability reason and evidence within L), never empty and never the "None." sentinel'
 CODEX_PASS1_SIZE_PERSIST_MARKER='own `### Size`, `### Decisions` and `### Assumptions (auto-adopted)` persisted from its'
 
 # --- skills/refine/SKILL.md -------------------------------------------------

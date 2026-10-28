@@ -206,6 +206,10 @@ Only when questions are `None.`, output the complete proposal. The skill persist
 
     Ground the reasoning in the specific files/components found via Glob/Grep during exploration (`## Before Analyzing` step 3) — cite them by name — rather than a generic guess from the ticket text alone. This grounds the qualitative estimate in evidence; it stays an estimate, not a measured diff (`docs/ticket-sizing.md`'s "estimated, not measured" framing) — the PR step measures the final diff against the same bounds. Changed lines are insertions plus deletions, generated files and lockfiles included. A scope that exceeds the L bound is **never written as one ticket**: write `### Size Estimate: L` with the honest rationale that the scope exceeds L, and propose the split below.
 
+    ### Sizing Evidence
+
+    Follow `docs/ticket-sizing.md`'s **Sizing evidence and reconciliation** contract: enumerate the complete changed-file and changed-line budget, including tests/docs and uncertainty, and choose the size from the supported upper estimate and shape. Write this section for the ticket and for every proposed child immediately after its `### Size`; the short rationale is not a substitute. On a sizing-recovery invocation, compare the supplied planner evidence with the existing scope, retain settled answers, and correct the estimate or partition in this pass. Do not simply repeat the original size letter or expand the requirements to justify the planner's estimate.
+
     ### Suggested Split (only if the scope exceeds L AND (NOT `isSplitChild` OR `resplitAuthorized`) — anything beyond the L bound in `docs/ticket-sizing.md` is split, never written as one ticket)
 
     Splitting is a **coverage exercise**, not a work-division exercise. Open the section with the parent's complete numbered item list, then the children:
@@ -227,7 +231,7 @@ Only when questions are `None.`, output the complete proposal. The skill persist
 
     **Series position and siblings.** Every child of a stacked series carries a `Series:` line right under its title — `Series: (K/N) — previous: Ticket K-1 "<title>" | next: Ticket K+1 "<title>"` (`none` at either end) — so a reader of one child knows what a sibling already shipped and what is deferred to the next. Independent (non-stacked) children write `Series: (K/N) — independent`. The refine skill persists the line into the child body.
 
-    **"None." sentinel rule**: `### Decisions`, `### Assumptions (auto-adopted)`, and `### Dependencies` are always present in every child block, even when genuinely empty — when a child has no scoped decision, assumption, or dependency, write exactly "None." rather than omitting the subsection or leaving it blank, so the coverage gate's structural completeness check (`skills/refine/SKILL.md`) is deterministic. `### Size` joins this "always present, never omitted" list too, but it is never itself the "None." sentinel: a child is always part of a split of an L-sized parent, so it always has a real size — write its actual `<S/M> — <reasoning>` value, never "None."
+    **"None." sentinel rule**: `### Decisions`, `### Assumptions (auto-adopted)`, and `### Dependencies` are always present in every child block, even when genuinely empty — when a child has no scoped decision, assumption, or dependency, write exactly "None." rather than omitting the subsection or leaving it blank, so the coverage gate's structural completeness check (`skills/refine/SKILL.md`) is deterministic. `### Size` joins this "always present, never omitted" list too, but it is never itself the "None." sentinel: write its actual `<S|M|L>` bound and rationale, applying the recorded-reason exception for L above, never "None.". Each child's `### Sizing Evidence` is also mandatory and non-empty.
 
     **Ticket 1 (1/N): <title>**
     Series: (1/N) — previous: none | next: Ticket 2 "<title>"
@@ -235,6 +239,8 @@ Only when questions are `None.`, output the complete proposal. The skill persist
     <what this child delivers, standalone>
     ### Size
     <S|M|L> — Bound: <that letter's bound line, verbatim>. Rationale: <one line citing the enumerated files/components>
+    ### Sizing Evidence
+    <complete child evidence table, totals, shape and uncertainty per docs/ticket-sizing.md>
     ### Decisions
     - <settled decision this child needs, scoped from the parent's ### Decisions above>
     ### Assumptions (auto-adopted)
@@ -251,6 +257,8 @@ Only when questions are `None.`, output the complete proposal. The skill persist
     <what this child delivers, standalone>
     ### Size
     <S|M|L> — Bound: <that letter's bound line, verbatim>. Rationale: <one line citing the enumerated files/components>
+    ### Sizing Evidence
+    <complete child evidence table, totals, shape and uncertainty per docs/ticket-sizing.md>
     ### Decisions
     - <settled decision this child needs, scoped from the parent's ### Decisions above>
     ### Assumptions (auto-adopted)
@@ -267,6 +275,8 @@ Only when questions are `None.`, output the complete proposal. The skill persist
     <what this child delivers, standalone>
     ### Size
     <S|M|L> — Bound: <that letter's bound line, verbatim>. Rationale: <one line citing the enumerated files/components>
+    ### Sizing Evidence
+    <complete child evidence table, totals, shape and uncertainty per docs/ticket-sizing.md>
     ### Decisions
     - <settled decision this child needs, scoped from the parent's ### Decisions above>
     ### Assumptions (auto-adopted)

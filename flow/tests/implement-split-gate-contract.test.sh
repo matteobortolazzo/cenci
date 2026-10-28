@@ -207,7 +207,7 @@ fi
 # --- ## Route Planner Output -- new ### Split Gate subsection -------------
 
 TRIGGER_MARKER='fires when the planner output contains a non-empty, non-"None" `### Split Recommendation` **or** a `### Size Estimate` of `L`'
-STOP_OPTION_LABEL='**"Stop — split via /cenci:refine (Recommended)"**'
+STOP_OPTION_LABEL='**"Refine now — /cenci:refine `<id>` in this session (Recommended)"**'
 PROCEED_OPTION_LABEL='**"Proceed as a single PR anyway"**'
 STOP_PERSIST_NOTHING_MARKER='persist nothing, no `cenci pipeline` call of any kind'
 STOP_RETAIN_MARKER='leaves `Working` and the assignee claim in place'
@@ -216,7 +216,7 @@ PIN_AWAIT_INPUT_CMD='cenci pipeline await-input <id>'
 
 # --- #1093 (PR 3/3) -- split-child-aware Stop option, parent-comment
 #     feedback write, and the new cenci-oversize-child marker -------------
-CHILD_STOP_OPTION_LABEL='**"Stop — re-partition parent #`<parentId>` via /cenci:refine `<parentId>` (Recommended)"**'
+CHILD_STOP_OPTION_LABEL='**"Refine now — parent #`<parentId>` via /cenci:refine `<parentId>` in this session (Recommended)"**'
 NEVER_CHILD_REFINE_MARKER='Never tell the user to run `/cenci:refine <id>` against the child here'
 FEEDBACK_HEADING_MARKER='#### Feedback to the parent (split-child Stop branch and lean-ticket-mode escalation branch, new write)'
 FEEDBACK_TWO_CALL_SITES_MARKER='**Two call sites**: the interactive/ticketless split-child Stop branch above, and the lean-ticket-mode branch below'
@@ -250,7 +250,7 @@ if require_section ROUTE_SECTION "${PHASE1_CONTENT}" "## Route Planner Output" "
   assert_section_contains "${ROUTE_SECTION}" "${TRIGGER_MARKER}" \
     "phase-1-plan.md (### Split Gate) trigger wording must name both conditions (non-empty/non-\"None\" Split Recommendation OR Size Estimate of L)"
   assert_section_contains "${ROUTE_SECTION}" "${STOP_OPTION_LABEL}" \
-    "phase-1-plan.md (### Split Gate) must offer the Stop — split via /cenci:refine (Recommended) option"
+    "phase-1-plan.md (### Split Gate) must offer refinement in the current session as the recommended option"
   assert_section_contains "${ROUTE_SECTION}" "${PROCEED_OPTION_LABEL}" \
     "phase-1-plan.md (### Split Gate) must offer the Proceed as a single PR anyway option"
   assert_section_contains "${ROUTE_SECTION}" "${STOP_PERSIST_NOTHING_MARKER}" \

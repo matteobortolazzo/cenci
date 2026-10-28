@@ -22,11 +22,13 @@ Split-depth guard derives it: `gh issue view <ticket> --repo <owner>/<repo> --js
 that parent, giving `isChild`/`parentId`), falling back to a `Related to #<number>` first
 non-empty body line for older convention-linked tickets or a non-zero primary command —
 run once during context gathering, before the Split Gate is ever evaluated.
+Before routing a sizing disagreement, apply `docs/ticket-sizing.md`'s **Sizing evidence and reconciliation**: compare the ticket's evidence with the planner's `### Sizing Evidence` and `### Sizing Delta`, reconstructing legacy evidence inline. Check named required work, old/new budgets and the exact constraint crossed. Return missing or unsupported evidence to the planner for at most one correction pass with the existing bundle, candidate plan and all Q&A; preserve unanswered non-sizing questions. Never re-run context gathering or the interview merely to seek a smaller number. Unsupported evidence after that pass takes the recovery route below as uncertainty, never an implementation approval. An honest over-bound estimate correction still stops. The existing saved-plan resume routing is unchanged.
+
 When the planner's output carries a non-empty, non-`None`
 `### Split Recommendation` (`None` here means exactly `None`/`None.` or a single-line
 well-formed `None — <rationale>`, never a prefix match) or a `### Size Estimate` of `L`, the Split Gate asks, via
-the client's available user-input mechanism, whether to stop — split via
-`/cenci:refine`, persisting nothing — or proceed as a single PR; only Proceed
+the client's available user-input mechanism, whether to use **Same-session sizing recovery**
+(Refine now or Stop with its packet, persisting no implementation plan) or proceed as a single PR; only Proceed
 continues planning. When the ticket is itself a split child (`isChild` true), the stop
 option instead points at the **parent** — `/cenci:refine <parentId>`, never the child's
 own `/cenci:refine <id>`, which is a dead end under the refine skill's split-depth guard.
@@ -39,6 +41,8 @@ never blocks either outcome, and this write never happens for a non-child ticket
 (`skills/implement/phases/phase-1-plan.md`'s `### Split Gate` is authoritative for the
 exact procedure). One run persists at most one plan file and opens at most one PR:
 never persist a second plan file or open a second or stacked PR for one ticket.
+**Same-session sizing recovery.** On a ticket-mode sizing stop, prepare the **Sizing recovery packet** from `docs/ticket-sizing.md` with both estimates, their evidence/delta, unresolved constraints, partition proposal and settled answers. Name `<parentId>` as target for a split child, otherwise the ticket ID. Present **Refine now** / **Stop — keep the recovery packet** through the client's available user-input mechanism; combine these with Proceed in one question only where Proceed was already allowed. An over-bound or single-lane L plan still offers no Proceed. Selecting Refine now does not authorize splitting a child. End the implementation procedure and read and execute `refine/codex.md` in the same session with the packet and actual user choice as context, re-fetching scope and preserving all ownership, state, explicit Plan mode, confirmation and split-depth gates. This handoff takes precedence over stop-and-restart wording above and below; it never approves an implementation plan or automatically restarts implementation. In explicit Plan mode refinement remains read-only. Run the existing split-child parent-feedback write on either recovery choice only where writes are already allowed (never in explicit Plan mode); report failures without claiming success. If the user stops or the handoff fails, return the packet and exact refine invocation without requiring the user to request a prompt. Refinement failures use its normal partial-write/checkpoint recovery; never retry a create blindly or loop back into implementation. Ticketless mode returns the packet without inventing an issue or calling refine.
+
 The plan also carries a `### Size Check` — the plan's files and estimated changed lines
 compared against the ticket's `### Size Estimate: <letter>` bound from `docs/ticket-sizing.md`
 — the confirmed `### Size Estimate: <letter>` (bound line verbatim, rationale), and a

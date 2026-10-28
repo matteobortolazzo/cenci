@@ -59,6 +59,15 @@ a planning session that does run treats the repo as `"interactive"`; see
 
 ## What the loop looks like
 
+A sizing disagreement is reconciled against refinement's file/line evidence before it
+becomes a split escalation. Missing legacy evidence is reconstructed during planning;
+unrequested plan expansion is removed, while genuine over-bound work still stops. Lean
+planning retains the evidence and settled answers in its awaiting-input draft and question;
+it does not automatically re-refine or create more children. In interactive ticket runs,
+**Refine now** can hand the same evidence to refinement in the current session, with its
+normal ownership, confirmation and split-depth checks. The choice authorizes re-refining
+the named target only, and does not start implementation automatically.
+
 ```
   ┌─ you: /cenci:refine 42 ──────────────────────────────────────┐
   │   ticket scoped, acceptance criteria written                 │
