@@ -376,8 +376,19 @@ with autostash and fails if either the rebase or autostash restoration conflicts
 Only exit 0 with `REBASE_STATUS=ready` allows continuing. On conflicts, resolve
 in the feature worktree, preserving both branches' intent and any recovery stash;
 delegate to an Opus-capable worker when available, otherwise perform the local
-resolution in this session. Stop only for an unresolved product decision or an
-actual fetch/config/verification failure. After resolution restart this helper.
+resolution in this session. Overlapping docs prose, dated entries, appended
+lists, renames, and scope overlap with the upstream change are mechanical: keep
+both sides and note any scope overlap in the PR body's `## Notes`. A product
+decision exists only when both sides cannot hold and the choice changes
+user-visible behavior or an acceptance criterion's outcome; then abort the
+rebase and route one question with 2–4 options and a recommendation exactly as
+`phases/phase-9-pr.md`'s `## Rebase Conflicts` step 3 does: interactive
+autonomy or ticketless mode asks through the client's available user-input
+mechanism and continues; lean ticket mode posts the
+`<!-- cenci-rebase-conflict -->` question comment, runs
+`cenci pipeline label <id> --transition input-needed`, and stops. Stop
+otherwise only for an actual fetch/config/verification failure. After
+resolution restart this helper.
 After every successful rebase, repeat full build, tests, lint when configured,
 and the maintenance check on the resulting tree before commit/push/PR. Every
 re-entry restarts at this fetch/rebase step. Push normally; if a previous push

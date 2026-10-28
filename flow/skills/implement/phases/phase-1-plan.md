@@ -529,6 +529,7 @@ This section performs no mutation, makes no `cenci pipeline` call, and has no ha
 - `## Lean Approval Path`'s entry conditions above.
 - `## Unattended Escalation Path`'s Entry above.
 - `### Split Gate`'s **Lean ticket mode** branch below.
+- `phases/phase-9-pr.md`'s `## Rebase Conflicts` step 3, which routes a rebase conflict's product-decision question by this same value (and runs Steps A–C itself when a resumed session never reached this section).
 
 Three paths are deliberately **not** consumers, and the attended override changes none of them:
 

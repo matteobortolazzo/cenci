@@ -64,13 +64,14 @@ different quoting — the banner blockquoted, the marker/anchor bare.
 
 Every marker-bearing flow comment uses one of the `<kind>` values below;
 `<kind>` is unique per call site so a consumer can tell which flow code path
-produced a given comment. flow's seven kinds:
+produced a given comment. flow's eight kinds:
 
 | Kind | File / call site | Marker | Consumers |
 |---|---|---|---|
 | `plan-comment` | `skills/implement/phases/phase-1-plan.md` — `## Persist the Plan`'s `planComment` step | `<!-- cenci-plan-comment -->` | `isCenciAuthored` (`watch/internal/dispatch/resume.go`) |
 | `parent-gap-report` | `skills/implement/phases/phase-9-pr.md` — the parent acceptance-criteria gap report | `<!-- cenci-parent-gap-report -->` | `isCenciAuthored` (`watch/internal/dispatch/resume.go`); `watch/internal/babysit` (merge-time parent-close gate) |
 | `followup-tracked` | `skills/implement/phases/phase-9-pr.md` — the followups-tracked comment | `<!-- cenci-followup-tracked -->` | `isCenciAuthored` (`watch/internal/dispatch/resume.go`) |
+| `rebase-conflict` | `skills/implement/phases/phase-9-pr.md` — `## Rebase Conflicts`' lean-ticket product-decision question | `<!-- cenci-rebase-conflict -->` | `isCenciAuthored` (`watch/internal/dispatch/resume.go`); Phase 9 re-entry, which reads the latest human reply after it |
 | `planner-escalation` | `skills/implement/phases/phase-1-plan.md` — `## Escalation Anchor` and its four call sites | `<!-- cenci-planner-escalation:<nonce> -->` | `isCenciAuthored` (`watch/internal/dispatch/resume.go`) |
 | `oversize-child` | `skills/implement/phases/phase-1-plan.md` — the Split Gate's split-child Stop branch and its lean-ticket-mode escalation branch (two call sites) | `<!-- cenci-oversize-child -->` | `isCenciAuthored` (`watch/internal/dispatch/resume.go`) |
 | `decision` | `skills/implement/phases/phase-1-plan.md` — `## Decision Comment` and its three call sites (Lean Approval Path step 4, `## Persist the Plan`'s Mark-Planned prose, `## Resume From Draft` step 7) | `<!-- cenci-decision -->` | `isCenciAuthored` (`watch/internal/dispatch/resume.go`) |

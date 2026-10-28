@@ -1395,8 +1395,8 @@ fi
 ATTRIBUTION_DOC_PATH="${FLOW_DIR}/docs/comment-attribution.md"
 ATTR_DECISION_ROW_MARKER='| `decision` | `skills/implement/phases/phase-1-plan.md` — `## Decision Comment`'
 ATTR_DECISION_MARKER_MARKER='`<!-- cenci-decision -->`'
-ATTR_SIX_KINDS_MARKER="flow's seven kinds:"
-ATTR_FIVE_KINDS_MARKER="flow's six kinds:"
+ATTR_SIX_KINDS_MARKER="flow's eight kinds:"
+ATTR_FIVE_KINDS_MARKER="flow's seven kinds:"
 
 if require_content ATTR_CONTENT "${ATTRIBUTION_DOC_PATH}" "comment-attribution.md"; then
   assert_contains_ws "${ATTR_CONTENT}" "${ATTR_DECISION_ROW_MARKER}" \

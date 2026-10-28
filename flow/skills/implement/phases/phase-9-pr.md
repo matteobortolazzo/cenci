@@ -2,7 +2,7 @@
 
 Read this file only when Phase 9 starts.
 
-This phase is pre-approved — commit, push, and create the PR without asking for confirmation. The only exceptions are the error cases defined below (rebase conflicts, build/test/lint failures after rebase, an unresolved maintenance `fail`, push auth/network failures).
+This phase is pre-approved — commit, push, and create the PR without asking for confirmation. The only exceptions are the error cases defined below (a rebase conflict that needs a product decision, build/test/lint failures after rebase, an unresolved maintenance `fail`, push auth/network failures). A rebase conflict by itself is never a stop: `## Rebase Conflicts` below resolves it inside the run.
 
 **Atomicity rule — always restart at Rebase.** Any (re)entry into this phase — a fresh run, or a re-run after an earlier attempt stopped mid-phase — MUST restart at the Rebase step below and run the steps in order: Rebase → build → test → lint → Maintenance Gate → Commit → Push → PR. Never resume directly at Commit, Push, or PR creation, even if a prior turn already reached one of those steps. This guarantees push/PR creation is always immediately preceded, in the same turn, by a passing rebase + build + test + lint on the current tree — main may have moved between turns, and a stale rebase/verify from an earlier turn cannot be trusted. This is a stateless, markdown-level rule (no marker file, no new state): rebase and re-verify are cheap and idempotent, so restarting from the top on every entry is always safe. The Commit step below handles the case where a prior turn already committed (nothing left to stage) so the restart cannot double-commit or error out. On last-child runs, this restart must also reconcile every externally effective parent-closing reference — the commit trailer, the PR body, and GitHub's `closingIssuesReferences` — to the fresh verdict this entry's Parent Close Gate produces; the phase never reuses a commit or PR whose parent reference disagrees with the current verdict.
 
@@ -47,18 +47,71 @@ restored; never drop or blindly re-apply it.
 
 If rebase succeeds, rerun full build and tests, then lint (when `lintCommand` is set). An absent `lintCommand` skips the lint step cleanly — no error. If build, tests, or lint fail, stop and report the rebase-induced failure. Lint is an unconditional hard gate here, exactly like build/test: no PR is created if it fails.
 
-If the helper fails because of conflicts, delegate local conflict resolution
-to an Opus subagent in this same feature worktree. Read `subagent-safety`
-first. Pass the conflicting paths and both branches' intent; the delegate
-may edit and complete the rebase but must not push, post, or change labels.
-Resolve by preserving both changes' intended behavior, never by blanket
-ours/theirs selection. The root agent verifies the resulting diff and
-restarts at Rebase before any commit or push. A fetch/config error is
-reported as such, never treated as a conflict. If Opus cannot resolve the
-conflict without a product decision, report that concrete ambiguity and stop.
+A fetch/config error is reported as such, never treated as a conflict. If the
+helper fails because of conflicts, go to `## Rebase Conflicts` below.
 
 Per the atomicity rule, every recovery restarts at Rebase and repeats
 build/test/lint on the resolved tree before Commit runs.
+
+## Rebase Conflicts
+
+A conflict is never by itself a reason to stop and hand the run back.
+Overlapping edits to the same file — documentation prose, two dated entries
+or amendments in one section, lists both sides appended to, renames, moves,
+formatting — are mechanical: keep both. Scope overlap with the change that
+landed on main is not a stop either; record it as one `## Notes` line in the
+PR body for the reviewer.
+
+1. **Delegate.** Read `subagent-safety` first, then delegate the resolution
+   to the `cenci:implementer` agent with `model: "opus"` in this same
+   feature worktree. Pass the conflicting paths, this ticket's intent (the
+   plan's goal and acceptance criteria), and the upstream commits that
+   touched those paths (`git -C <worktree-path> log ORIG_HEAD..origin/main
+   -- <paths>`). The delegate may edit, `git add`, and run
+   `git rebase --continue` until the rebase completes, but must not push,
+   post, or change labels. It resolves by preserving both changes' intended
+   behavior, never by blanket ours/theirs selection, and keeps any recovery
+   stash. Its report ends with exactly one line:
+   `Conflict verdict: resolved` or `Conflict verdict: product-decision`.
+2. **`resolved`.** Read the resulting diff of every conflicted path against
+   `origin/main`, confirm both sides' changes survive, then restart at
+   Rebase. A report without a verdict line, or a diff that drops one side's
+   change, is re-delegated once with the gap named; a second failure is
+   handled as `product-decision` with that gap as the question.
+3. **`product-decision`.** Valid only when the two sides cannot both hold
+   and the choice changes user-visible behavior or the outcome of an
+   acceptance criterion. The delegate runs `git rebase --abort`, confirms
+   the branch is back at its pre-rebase HEAD with uncommitted edits
+   restored, and reports one question with 2–4 concrete options and a
+   recommended one, naming files by repo-relative path only. Route the
+   question by `resolvedAutonomy` (`phases/phase-1-plan.md`'s
+   `## Resolve Planning Autonomy`; if this session has not resolved it,
+   run that section's Steps A–C once here):
+   - **`interactive`, or ticketless mode** — ask via `AskUserQuestion`,
+     recommended option first with `(Recommended)` appended, then restart
+     at Rebase; when the conflict recurs, step 1 passes the answer to the
+     delegate as the decision. The run continues.
+   - **`lean`, ticket mode** — post the question on the ticket and stop.
+     Write the body to
+     `${TMPDIR:-/tmp}/cenci/cenci-rebase-conflict-<id>-<session-uuid>.md`
+     (run `mkdir -p "${TMPDIR:-/tmp}/cenci"` first and confirm it
+     succeeded): the blockquoted banner
+
+     > 🤖 **cenci** — rebase-conflict question posted by `/cenci:implement` (Phase 9).
+     > Reply on this ticket, then re-run `/cenci:implement <id>`; dispatch does not resume this stop automatically.
+
+     then a blank line, the question and its options verbatim, a blank
+     line, and `<!-- cenci-rebase-conflict -->` on its own non-blockquoted
+     line. The body holds the question only — never file contents,
+     configuration values, credentials, or raw command output; this rule
+     takes precedence over posting the options verbatim. Post with
+     `gh issue comment <id> --repo <owner>/<repo> --body-file <file>` and
+     verify it succeeded, then run
+     `cenci pipeline label <id> --transition input-needed` and surface any
+     `errors[]`. Report the comment link and stop. On re-entry, step 1
+     passes the delegate the latest human comment after the newest
+     `<!-- cenci-rebase-conflict -->` comment as the answer; if there is
+     none and the conflict reproduces, post nothing new and stop again.
 
 ## Parent Close Gate (last child only)
 
