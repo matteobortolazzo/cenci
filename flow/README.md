@@ -684,6 +684,16 @@ After restarting Claude Code, Bash commands are rewritten through RTK automatica
 
 ## Ticket sizes
 
+Refinement records shared sizing evidence for the whole change and for every proposed
+child: affected files, estimated changed lines, tests/docs, shape and uncertainty.
+Planning compares against that evidence before escalating a size disagreement, separating
+omitted required work from estimate corrections and unrequested expansion. Legacy tickets
+get their missing evidence reconstructed during planning. A genuine over-bound plan still
+stops, but **Refine now** carries the evidence and settled answers into refinement in the
+same session; stopping instead returns the prepared recovery packet. No prompt extraction,
+session clearing, or repeated already-refined confirmation is required for that handoff.
+See [Sizing evidence and reconciliation](docs/ticket-sizing.md#sizing-evidence-and-reconciliation).
+
 Every refined ticket carries `### Size Estimate: <letter>` with the letter's bound line and a rationale — the contract in [`docs/ticket-sizing.md`](docs/ticket-sizing.md), mirrored from the Velka workflow docs:
 
 | Size | Bound | Review |

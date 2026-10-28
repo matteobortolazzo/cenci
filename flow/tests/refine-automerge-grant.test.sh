@@ -107,7 +107,7 @@ CODEX_AUTOMERGE_GRANT_MARKER='automerge:ok'
 # within that span breaks the exact-substring match, so this is both the
 # positive "### Size Estimate is in the right place" pin and the
 # negative "### Automation is nowhere in the list" pin at once.
-FULL_BODY_SECTION_LIST_MARKER='`### Updated Description`, `### Acceptance Criteria`, `### Edge Cases`, `### Assumptions (auto-adopted)`, `### Decisions`, `### Technical Notes`, `### Size Estimate: <letter>` (with its `Bound:` and `Rationale:` lines), plus `### Design Direction` when present'
+FULL_BODY_SECTION_LIST_MARKER='`### Updated Description`, `### Acceptance Criteria`, `### Edge Cases`, `### Assumptions (auto-adopted)`, `### Decisions`, `### Technical Notes`, `### Size Estimate: <letter>` (with its `Bound:` and `Rationale:` lines), `### Sizing Evidence`, plus `### Design Direction` when present'
 
 # --- agents/refiner.md — question-policy inversion + new sections ----------
 
@@ -157,7 +157,7 @@ assert_file_contains "${REFINE_CODEX}" "${CODEX_AUTOMERGE_GRANT_MARKER}" \
 # --- skills/refine/SKILL.md — step 10 must never persist ### Automation ----
 
 assert_file_contains "${REFINE_SKILL}" "${FULL_BODY_SECTION_LIST_MARKER}" \
-  "step-10 body-file section list must be exactly this ordered list (### Size Estimate persisted right after ### Technical Notes, ### Automation nowhere in it)"
+  "step-10 body-file section list must preserve Size Estimate and Sizing Evidence after Technical Notes, with Automation nowhere in it"
 
 echo "refine-automerge-grant.test.sh: failures=${failures}"
 [[ "${failures}" -eq 0 ]]

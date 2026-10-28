@@ -194,6 +194,10 @@ Before finalizing the plan, explicitly identify:
     - `path/to/new/file` — <purpose>; justification: <ticket-tied reason>
     Leave this section empty when the plan creates no file.
 
+    ### Sizing Evidence
+
+    Use `docs/ticket-sizing.md`'s **Sizing evidence and reconciliation** contract for the complete plan budget, including required tests/docs and uncertainty. Read the ticket's own evidence from the bundle, not a digest's size letter. Reconstruct a legacy baseline inline when evidence is absent. Before returning `exceeds`, recommending a split, or asking a scope-blowup question, compare required work against that baseline and remove unrequested expansion. Emit `### Sizing Delta` with the classification, old/new budgets, cited requirement/path evidence and exact constraint crossed. More detailed prose or an unexplained higher number is not new scope. A real split proposal includes each proposed child's evidence and budget; do not invent an arbitrary count of children. An honest over-bound estimate correction still stops under the existing Size Check; never force the numbers down to inherit the prior.
+
     ### Size Check
     Ticket size: <S|M|L|unknown> — <from the ticket body's `### Size Estimate: <letter>` (the `unknown` value only when the ticket carries none, e.g. ticketless mode or an unrefined ticket)>
     Plan: <n> files to modify/create, ~<n> changed lines estimated
