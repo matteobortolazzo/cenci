@@ -331,6 +331,195 @@ func TestCodexStopHookEmitsJSON(t *testing.T) {
 	}
 }
 
+// codexManifestHook is one hook command registered in plugin/codex/hooks.json
+// for an event, together with the group-level fields the tests pin.
+type codexManifestHook struct {
+	Command    string
+	Timeout    int
+	HasMatcher bool
+}
+
+// codexManifestHooks returns every hook command the Codex manifest registers
+// for event (nil when the event is not registered).
+func codexManifestHooks(t *testing.T, event string) []codexManifestHook {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("plugin", "codex", "hooks.json"))
+	if err != nil {
+		t.Fatalf("read codex hooks.json: %v", err)
+	}
+	var root struct {
+		Hooks map[string][]struct {
+			Matcher *string `json:"matcher"`
+			Hooks   []struct {
+				Command string `json:"command"`
+				Timeout int    `json:"timeout"`
+			} `json:"hooks"`
+		} `json:"hooks"`
+	}
+	if err := json.Unmarshal(data, &root); err != nil {
+		t.Fatalf("parse codex hooks.json: %v", err)
+	}
+	var out []codexManifestHook
+	for _, group := range root.Hooks[event] {
+		for _, hook := range group.Hooks {
+			out = append(out, codexManifestHook{Command: hook.Command, Timeout: hook.Timeout, HasMatcher: group.Matcher != nil})
+		}
+	}
+	return out
+}
+
+// runCodexManifestHook runs the single command the Codex manifest registers for
+// event, exactly as Codex would (sh -c with PLUGIN_ROOT set), and returns its
+// stdout, its exit error and the ipc.HookEvent that reached a temp event socket.
+//
+// The temp PLUGIN_ROOT holds a copy of the real codex/notify.sh plus a
+// bin/cenci shim that execs the test-built binary with -event-socket pointing
+// at the temp socket, so the default daemon socket is never touched and no
+// daemon is autostarted. The hook command swallows failures (`|| true`), so
+// receiving the event on the temp socket is also the proof that the shim — and
+// therefore the wrapper — actually ran.
+func runCodexManifestHook(t *testing.T, event, payload string) (stdout string, runErr error, got ipc.HookEvent) {
+	t.Helper()
+	hooks := codexManifestHooks(t, event)
+	if len(hooks) != 1 {
+		t.Fatalf("expected exactly one Codex %s hook in hooks.json, got %d", event, len(hooks))
+	}
+
+	sockDir, err := os.MkdirTemp("", "cenci")
+	if err != nil {
+		t.Fatalf("create socket dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(sockDir) })
+	socket := filepath.Join(sockDir, "events.sock")
+	receiver, err := ipc.NewEventReceiver(socket)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = receiver.Close() })
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go receiver.Accept(ctx)
+
+	pluginRoot := t.TempDir()
+	wrapper, err := os.ReadFile(filepath.Join("plugin", "codex", "notify.sh"))
+	if err != nil {
+		t.Fatalf("read codex/notify.sh: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(pluginRoot, "codex"), 0o755); err != nil {
+		t.Fatalf("create plugin codex dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(pluginRoot, "codex", "notify.sh"), wrapper, 0o755); err != nil {
+		t.Fatalf("write notify.sh copy: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(pluginRoot, "bin"), 0o755); err != nil {
+		t.Fatalf("create plugin bin dir: %v", err)
+	}
+	shim := "#!/bin/sh\nexec \"$CENCI_TEST_BIN\" \"$@\" -event-socket \"$CENCI_TEST_SOCKET\"\n"
+	if err := os.WriteFile(filepath.Join(pluginRoot, "bin", "cenci"), []byte(shim), 0o755); err != nil {
+		t.Fatalf("write cenci shim: %v", err)
+	}
+
+	cmd := exec.Command("sh", "-c", hooks[0].Command)
+	cmd.Env = append(os.Environ(),
+		"PLUGIN_ROOT="+pluginRoot,
+		"CENCI_TEST_BIN="+binaryPath,
+		"CENCI_TEST_SOCKET="+socket,
+		"CENCI_SANDBOX=",
+	)
+	cmd.Stdin = strings.NewReader(payload)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	runErr = cmd.Run()
+
+	select {
+	case got = <-receiver.Events():
+	case <-time.After(2 * time.Second):
+		t.Fatalf("codex %s hook delivered no event to the temp socket (shim not run?)", event)
+	}
+	return out.String(), runErr, got
+}
+
+// TestCodexInterruptAndSessionEndHooks covers #1238 AC1: the manifest registers
+// Codex Interrupt and SessionEnd through the notify wrapper with a short
+// timeout, no matcher and no stdout, and the real command delivers the exact
+// event to the daemon socket.
+func TestCodexInterruptAndSessionEndHooks(t *testing.T) {
+	cases := []struct {
+		event      string
+		payload    string
+		wantReason string
+	}{
+		{"Interrupt", `{"hook_event_name":"Interrupt","session_id":"codex-sess"}`, ""},
+		{"SessionEnd", `{"hook_event_name":"SessionEnd","session_id":"codex-sess","reason":"other"}`, "other"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.event, func(t *testing.T) {
+			hooks := codexManifestHooks(t, tc.event)
+			if len(hooks) != 1 {
+				t.Fatalf("expected exactly one Codex %s hook, got %d", tc.event, len(hooks))
+			}
+			if hooks[0].Timeout <= 0 || hooks[0].Timeout > 3 {
+				t.Errorf("%s timeout = %d, want 1..3", tc.event, hooks[0].Timeout)
+			}
+			if hooks[0].HasMatcher {
+				t.Errorf("%s must not declare a matcher", tc.event)
+			}
+			if !strings.Contains(hooks[0].Command, `"${PLUGIN_ROOT}/codex/notify.sh"`) {
+				t.Errorf("%s does not use the notify wrapper: %q", tc.event, hooks[0].Command)
+			}
+
+			stdout, runErr, got := runCodexManifestHook(t, tc.event, tc.payload)
+			if runErr != nil {
+				t.Fatalf("run %s hook: %v", tc.event, runErr)
+			}
+			if stdout != "" {
+				t.Errorf("%s hook must write nothing to stdout, got %q", tc.event, stdout)
+			}
+			if got.EventType != tc.event {
+				t.Errorf("event_type = %q, want %q", got.EventType, tc.event)
+			}
+			if got.Agent != "codex" {
+				t.Errorf("agent = %q, want codex", got.Agent)
+			}
+			if got.SessionID != "codex-sess" {
+				t.Errorf("session_id = %q, want codex-sess", got.SessionID)
+			}
+			if got.AgentID != "" {
+				t.Errorf("agent_id = %q, want empty for a main-session event", got.AgentID)
+			}
+			if got.SessionEndReason != tc.wantReason {
+				t.Errorf("session_end_reason = %q, want %q", got.SessionEndReason, tc.wantReason)
+			}
+		})
+	}
+}
+
+// TestCodexManifestChildPayloadKeepsAgentID pins that an agent_id-tagged
+// Interrupt keeps its AgentID end to end, since that field is what the
+// daemon's subagent guards key on.
+func TestCodexManifestChildPayloadKeepsAgentID(t *testing.T) {
+	_, runErr, got := runCodexManifestHook(t, "Interrupt", `{"hook_event_name":"Interrupt","session_id":"codex-sess","agent_id":"child-1"}`)
+	if runErr != nil {
+		t.Fatalf("run Interrupt hook: %v", runErr)
+	}
+	if got.AgentID != "child-1" {
+		t.Errorf("agent_id = %q, want child-1", got.AgentID)
+	}
+	if got.EventType != "Interrupt" || got.Agent != "codex" {
+		t.Errorf("event = %+v, want a codex Interrupt", got)
+	}
+}
+
+// TestCodexManifestRegistersNoSubagentHooks pins #1238 AC8: no subagent hook is
+// registered, so child lifecycle events never reach the daemon.
+func TestCodexManifestRegistersNoSubagentHooks(t *testing.T) {
+	for _, event := range []string{"SubagentStart", "SubagentStop"} {
+		if hooks := codexManifestHooks(t, event); len(hooks) != 0 {
+			t.Errorf("%s must not be registered in the Codex manifest, got %+v", event, hooks)
+		}
+	}
+}
+
 // TestNotifyStopForwardsInFlightBackgroundWork covers ticket #698: Claude
 // Code's Stop hook carries a background_tasks array describing in-flight
 // background work ("running/pending + backgrounded"). notify must parse it and
