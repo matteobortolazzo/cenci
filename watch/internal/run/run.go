@@ -98,6 +98,15 @@ type Opts struct {
 	// before the daemon is up never gets status wired in for its whole
 	// lifetime.
 	EnsureDaemon func()
+
+	// ProbeAdapter verifies, for a host (sandbox off) Codex launch of a built-in
+	// workflow, that the installed cenci@cenci Codex plugin is enabled and
+	// carries the workflow's declared adapter (#1237). command is the first
+	// token of the resolved host command; adapter is the flow-plugin path from
+	// BuiltinAdapter. It returns an ErrAdapterUnavailable-wrapping error to
+	// refuse. nil uses the real probe (probeCodexAdapter). Never called on
+	// dry-run, sandbox, Claude or user-defined launches.
+	ProbeAdapter func(command, workflow, adapter string) error
 }
 
 // Run resolves the (agent, workflow) command and spawns a detached tmux window
@@ -106,7 +115,11 @@ type Opts struct {
 // detected task name. It then records the absolute launch directory as the
 // frontend.RepoDirOption window option (#1250); failing to do so prints a
 // warning to Opts.Warn and still returns nil. With DryRun it prints the
-// resolution and spawns nothing.
+// resolution and spawns nothing. Before anything is spawned it refuses, without
+// wrapping ErrWindowSpawned, a disabled agent (ErrAgentDisabled), a missing
+// template (ErrMissingTemplate), an unsatisfied sandbox request
+// (ErrSandboxUnavailable) and a host Codex launch whose installed plugin lacks
+// the workflow's adapter (ErrAdapterUnavailable).
 func Run(opts Opts, ctrl Controller) error {
 	out := opts.Out
 	if out == nil {
@@ -156,6 +169,24 @@ func Run(opts Opts, ctrl Controller) error {
 		return err
 	}
 	shellCommand := shellJoin(argv)
+
+	// A host Codex launch of a built-in workflow needs the installed cenci@cenci
+	// plugin to carry that workflow's adapter, or the window would start a
+	// session that cannot run the skill (#1237). Refuse before session
+	// resolution, daemon start and window creation; the refusal never wraps
+	// ErrWindowSpawned. Dry-run never probes, sandbox launches rely on boot-time
+	// provisioning, and user-defined workflows declare no adapter.
+	if !opts.DryRun && !sandbox && agent == "codex" {
+		if adapter, ok := BuiltinAdapter(agent, opts.Workflow); ok {
+			probe := opts.ProbeAdapter
+			if probe == nil {
+				probe = probeCodexAdapter
+			}
+			if err := probe(argv[0], opts.Workflow, adapter); err != nil {
+				return err
+			}
+		}
+	}
 
 	// Pin the attended flag off for an unattended (dispatch) spawn, as a
 	// shell env assignment scoped to the agent command alone (#1087). It rides

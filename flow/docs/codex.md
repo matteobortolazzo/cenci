@@ -106,6 +106,23 @@ workflows cannot run.
   (`NODE_MAJOR`), and generated per-repo images always include the Node fragment (see
   `sandbox/AGENTS.md`), so inside `cn` / `cenci open` the prerequisite is already met.
   Only host runs need a separate install.
+- **Host launches check the installed plugin before spawning.** `cenci run … --agent codex`
+  (and `cenci babysit <pr> --agent codex`, which launches through it) on the host runs
+  `codex plugin list --json` first and refuses, before any tmux window is created, unless
+  `cenci@cenci` is installed, enabled, and its installed plugin root under `CODEX_HOME`
+  (default `~/.codex`) holds the workflow's declared adapter (`skills/<workflow>/codex.md`,
+  or `skills/babysit/SKILL.md` for the portable `babysit`). The check fails closed: if it
+  cannot tell, the launch is refused. The error names the plugin, the workflow and the
+  remedy: `codex plugin add cenci@cenci`, set `plugins."cenci@cenci".enabled = true` in
+  the Codex config, or launch in the sandbox. A babysit launch refused this way does not
+  advance ci-repair attempts or mark feedback as launched, and never switches agents.
+  `--dry-run` does not run the check. Sandbox launches skip it and rely on boot-time
+  provisioning (`provision_codex_plugins` in `sandbox/lib/migrate-settings.sh`). Known
+  limitation: the probe asks the Codex binary named by the first token of the configured
+  host command, from the `cenci` process's working directory and environment; it does not
+  apply `--profile`/`-c` flags, a project-scoped `.codex/config.toml`, or a different
+  `CODEX_HOME`/`PATH` set only in the tmux server environment, so it can pass where the
+  session's own Codex configuration would not.
 - **Checkpoint contract.** The schema-v2 checkpoint (fields, phase tables, transitions,
   `init` retry-safety, legacy v1 handling, `get` and `clear`, exit codes 0/1/2/3, and the
   `.cenci/checkpoints` containment rules) is specified in
