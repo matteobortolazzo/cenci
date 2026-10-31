@@ -98,8 +98,13 @@ assert "each child's own earned `automerge:ok`/`Browser`/`ui:visual-check`" in s
 codex = (root / "codex.md").read_text()
 assert '`refinementAutomerge is exactly "eligible"` AND `### Automation` verdict is' in codex
 assert "Require `/plan`" not in codex
-assert "normal invocation continues through preparation and apply in the same run" in codex
-assert "Explicit Plan mode remains read-only" in codex
+codex_flat = " ".join(codex.split())
+assert "normal invocation continues through preparation and apply in the same run" not in codex_flat
+assert "do not require a separate `/plan`" not in codex_flat
+assert "`codex-runtime`'s **Approved-plan handoff**" in codex_flat
+assert "`apply` re-fetches the ticket" in codex_flat
+assert "Explicit Plan mode remains read-only" in codex_flat
+assert "`refinementConfirmBeforeApply`" in codex_flat
 assert "Only a Confirm proceeds" not in codex
 agent = (root.parent.parent / "agents/refiner.md").read_text()
 assert "refinementConfirmBeforeApply" in agent

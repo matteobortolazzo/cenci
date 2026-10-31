@@ -663,6 +663,327 @@ new_repo
 run "$REPO" init "$REL" implement 42; run "$REPO" advance "$REL" implement 42 review --gate review; expect_rc "B8 setup for complete-before-gate" 0
 reject "B8 complete with a phase before the gate" "$CK" "must not come before the last completed gate" complete "$REL" implement 42 baseline
 
+# ===========================================================================
+# #1234 -- read-only `digest <plan-path>` and `verify <path> <workflow> <target>`:
+# the approved-plan handoff (C3 persist write-set, C4, C5a-e, C6, C8). Every case that
+# must not write uses the zero-write snapshot: sorted file listing + content checksums of
+# the repo (excluding .git), symlink targets, `git for-each-ref`, `git worktree list`, and a
+# PATH shim for `gh`/`cenci` whose log must stay empty.
+# ===========================================================================
+SHIM="$T/shim"
+SHIM_LOG="$T/shim.log"
+mkdir -p "$SHIM" || { echo "runtime.test.sh: mkdir shim failed." >&2; exit 2; }
+for tool in gh cenci; do
+  printf '#!/bin/sh\necho "%s $*" >> "%s"\nexit 99\n' "$tool" "$SHIM_LOG" > "$SHIM/$tool" || { echo "runtime.test.sh: shim write failed." >&2; exit 2; }
+  chmod +x "$SHIM/$tool" || { echo "runtime.test.sh: shim chmod failed." >&2; exit 2; }
+done
+
+# run_shim <cwd> <args...> -- like run, with the gh/cenci shims first on PATH and a hang guard.
+run_shim() {
+  local dir="$1"; shift
+  ( cd "$dir" && PATH="$SHIM:$PATH" timeout 10 node "$CKPT" "$@" ) >"$T/stdout" 2>"$T/stderr"
+  RC=$?
+}
+
+# snapshot <repo> <out> -- everything a write could change, except .git internals.
+snapshot() {
+  local repo="$1" out="$2"
+  {
+    ( cd "$repo" && find . -path ./.git -prune -o -print | LC_ALL=C sort ) || return 1
+    ( cd "$repo" && find . -path ./.git -prune -o -type f -exec cksum {} + | LC_ALL=C sort ) || return 1
+    ( cd "$repo" && find . -path ./.git -prune -o -type l -exec sh -c 'printf "%s -> %s\n" "$1" "$(readlink "$1")"' _ {} \; | LC_ALL=C sort ) || return 1
+    git -C "$repo" for-each-ref || return 1
+    git -C "$repo" worktree list || return 1
+  } > "$out"
+}
+
+zw_before() {
+  : > "$SHIM_LOG" || fail "$1: could not reset the shim log"
+  snapshot "$REPO" "$T/zw.before" || fail "$1: could not snapshot before"
+}
+zw_after() {
+  snapshot "$REPO" "$T/zw.after" || fail "$1: could not snapshot after"
+  cmp -s "$T/zw.before" "$T/zw.after" || fail "$1: the repo changed (diff: $(diff "$T/zw.before" "$T/zw.after" | head -5))"
+  [[ ! -s "$SHIM_LOG" ]] || fail "$1: gh/cenci was invoked ($(cat "$SHIM_LOG"))"
+}
+# zero_write_reject <label> <cwd> <exit> <stderr-literal> <args...> -- rejected, one remedy line, zero writes.
+zero_write_reject() {
+  local label="$1" dir="$2" want="$3" literal="$4"; shift 4
+  zw_before "$label"
+  run_shim "$dir" "$@"
+  expect_rc "$label" "$want"
+  expect_no_stdout "$label"
+  expect_stderr "$label" "$literal"
+  expect_single_remedy_line "$label"
+  zw_after "$label"
+}
+# zero_write_ok <label> <cwd> <args...> -- exit 0, one stdout line, empty stderr, zero writes.
+zero_write_ok() {
+  local label="$1" dir="$2"; shift 2
+  zw_before "$label"
+  run_shim "$dir" "$@"
+  expect_rc "$label" 0
+  [[ "$(wc -l < "$T/stdout" | tr -d '[:space:]')" == "1" ]] || fail "$label: stdout must be exactly one line (got: $(cat "$T/stdout"))"
+  [[ ! -s "$T/stderr" ]] || fail "$label: stderr must be empty (got: $(cat "$T/stderr"))"
+  zw_after "$label"
+}
+
+real_of() { ( cd "$1" && pwd -P ); }
+
+PLAN_REL=".plans/42-demo.md"
+PLAN_BODY=$'# Plan\n\n## Target\nimplement 42\n\n## Approved Plan\n1. do the thing\n\n## Choices\n- Q: database? A: sqlite\n'
+
+# persist <workflow> <target> <artifact-rel> [<body>] -- stands in for the persist step: writes the
+# artifact, then `digest` and `init ... planned --plan-path --plan-digest` in separate processes.
+persist() {
+  local wf="$1" target="$2" rel="$3" body="${4:-$PLAN_BODY}" digest
+  mkdir -p "$REPO/$(dirname "$rel")" || { fail "persist: mkdir failed"; return 1; }
+  printf '%s' "$body" > "$REPO/$rel" || { fail "persist: artifact write failed"; return 1; }
+  run_shim "$REPO" digest "$rel"; expect_rc "persist digest ($wf $target)" 0
+  digest="$(tr -d '\n' < "$T/stdout")"
+  run_shim "$REPO" init ".cenci/checkpoints/$wf-$target.json" "$wf" "$target" planned --plan-path "$rel" --plan-digest "$digest"
+  expect_rc "persist init ($wf $target)" 0
+  PERSISTED_DIGEST="$digest"
+}
+fresh_persisted() { new_repo; persist implement 42 "$PLAN_REL"; }
+
+# --- Z0: the snapshot and the shim are not vacuous --------------------------
+new_repo
+snapshot "$REPO" "$T/z0.before" || fail "Z0: snapshot failed"
+mkdir -p "$REPO/.plans" && printf 'x' > "$REPO/.plans/x.md" || fail "Z0: fixture write failed"
+snapshot "$REPO" "$T/z0.after" || fail "Z0: snapshot failed"
+cmp -s "$T/z0.before" "$T/z0.after" && fail "Z0: the snapshot must detect a new file"
+: > "$SHIM_LOG"
+( PATH="$SHIM:$PATH" gh pr list >/dev/null 2>&1 )
+[[ -s "$SHIM_LOG" ]] || fail "Z0: the gh shim must log an invocation"
+: > "$SHIM_LOG"
+
+# --- D1: digest prints the sha256 of the artifact ---------------------------
+new_repo
+mkdir -p "$REPO/.plans" "$REPO/sub" || fail "D1: mkdir failed"
+printf 'abc' > "$REPO/.plans/abc.md" || fail "D1: fixture write failed"
+zero_write_ok "D1 digest of the sha256 test vector" "$REPO" digest .plans/abc.md
+[[ "$(cat "$T/stdout")" == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad" ]] || fail "D1: wrong digest (got: $(cat "$T/stdout"))"
+zero_write_ok "D1 digest from a subdirectory resolves against the main checkout" "$REPO/sub" digest .plans/abc.md
+[[ "$(cat "$T/stdout")" == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad" ]] || fail "D1: wrong digest from a subdirectory (got: $(cat "$T/stdout"))"
+{ [[ ! -e "$REPO/.cenci" ]]; } || fail "D1: digest must never create the state directory"
+
+# --- D2: digest rejections (each its own literal) ---------------------------
+new_repo
+mkdir -p "$REPO/.plans/adir" "$T/outside-plans" "$REPO/sub" || fail "D2: mkdir failed"
+printf 'abc' > "$REPO/.plans/abc.md" || fail "D2: fixture write failed"
+printf 'abc' > "$T/outside-plans/abc.md" || fail "D2: fixture write failed"
+ln -s abc.md "$REPO/.plans/link.md" || fail "D2: ln failed"
+ln -s missing.md "$REPO/.plans/dangling.md" || fail "D2: ln failed"
+ln -s "$T/outside-plans" "$REPO/.plans/codex" || fail "D2: ln failed"
+mkfifo "$REPO/.plans/fifo.md" || fail "D2: mkfifo failed"
+head -c 1048577 /dev/zero | tr '\0' 'a' > "$REPO/.plans/big.md" || fail "D2: could not build the oversized fixture"
+printf 'readme' > "$REPO/README.md" || fail "D2: fixture write failed"
+zero_write_reject "D2 missing artifact" "$REPO" 2 "plan artifact missing" digest .plans/nope.md
+zero_write_reject "D2 missing artifact directory" "$REPO" 2 "plan artifact missing" digest .plans/nodir/nope.md
+zero_write_reject "D2 path outside .plans" "$REPO" 2 "plan artifact path is not under .plans/" digest README.md
+zero_write_reject "D2 absolute path" "$REPO" 2 "plan artifact path is not under .plans/" digest "$REPO/.plans/abc.md"
+zero_write_reject "D2 .. segment" "$REPO" 2 "plan artifact path is not under .plans/" digest .plans/../README.md
+zero_write_reject "D2 .git path" "$REPO" 2 "plan artifact path is not under .plans/" digest .git/config
+zero_write_reject "D2 .plans itself" "$REPO" 2 "plan artifact path is not under .plans/" digest .plans
+zero_write_reject "D2 symlinked artifact" "$REPO" 2 "plan artifact unreadable" digest .plans/link.md
+zero_write_reject "D2 dangling symlinked artifact" "$REPO" 2 "plan artifact unreadable" digest .plans/dangling.md
+zero_write_reject "D2 symlinked directory component" "$REPO" 2 "plan artifact unreadable" digest .plans/codex/abc.md
+zero_write_reject "D2 directory at the artifact path" "$REPO" 2 "plan artifact unreadable" digest .plans/adir
+zero_write_reject "D2 FIFO at the artifact path (124 means it hung)" "$REPO" 2 "plan artifact unreadable" digest .plans/fifo.md
+zero_write_reject "D2 oversized artifact" "$REPO" 2 "plan artifact unreadable" digest .plans/big.md
+zero_write_reject "D2 no path" "$REPO" 2 "digest requires <plan-path>" digest
+zero_write_reject "D2 extra argument" "$REPO" 2 "too many arguments" digest .plans/abc.md extra
+zero_write_reject "D2 flag" "$REPO" 2 "--goal is not valid for digest" digest .plans/abc.md --goal created
+zero_write_reject "D2 unknown flag" "$REPO" 2 "unknown flag --nonsense" digest .plans/abc.md --nonsense x
+# a symlinked .plans directory
+new_repo
+mkdir -p "$T/outside-plans2" || fail "D2: mkdir failed"
+printf 'abc' > "$T/outside-plans2/abc.md" || fail "D2: fixture write failed"
+ln -s "$T/outside-plans2" "$REPO/.plans" || fail "D2: ln failed"
+zero_write_reject "D2 symlinked .plans directory" "$REPO" 2 "plan artifact unreadable" digest .plans/abc.md
+
+# --- C3: persist writes only the artifact and the checkpoint ----------------
+new_repo
+: > "$SHIM_LOG"
+persist implement 42 "$PLAN_REL"
+C3_FILES="$(cd "$REPO" && find . -path ./.git -prune -o -type f -print | LC_ALL=C sort)" || fail "C3: file listing failed"
+[[ "$C3_FILES" == $'./.cenci/checkpoints/.gitignore\n./.cenci/checkpoints/implement-42.json\n./.plans/42-demo.md' ]] || fail "C3: the write set must be exactly the artifact, the checkpoint and .gitignore (got: $C3_FILES)"
+[[ -z "$(git -C "$REPO" for-each-ref)" ]] || fail "C3: persist must create no ref"
+{ [[ ! -e "$REPO/.worktrees" ]]; } || fail "C3: persist must create no worktree directory"
+[[ -z "$(git -C "$REPO" worktree list | sed -n '2,$p')" ]] || fail "C3: persist must register no worktree"
+[[ ! -s "$SHIM_LOG" ]] || fail "C3: persist invoked gh/cenci ($(cat "$SHIM_LOG"))"
+expect_jq "C3: checkpoint records the plan path and digest at phase planned" '.phase == "planned" and .status == "planned" and .planPath == ".plans/42-demo.md" and .planDigest == "'"$PERSISTED_DIGEST"'" and .worktree == null and .lastCompletedGate == null and .goal == null' "$CK"
+[[ "$(cat "$CKDIR/.gitignore")" == "*" ]] || fail "C3: .gitignore must be exactly '*'"
+
+# --- C4: a fresh process sees the exact approved plan and choices -----------
+new_repo
+persist implement 42 "$PLAN_REL"
+printf '%s' "$PLAN_BODY" > "$T/c4.expected" || fail "C4: fixture write failed"
+run_shim "$REPO" digest "$PLAN_REL"; expect_rc "C4 digest in a later process" 0
+C4_DIGEST="$(tr -d '\n' < "$T/stdout")"
+zero_write_ok "C4 verify in a fresh process" "$REPO" verify "$REL" implement 42
+C4_PLAN="$(jq -r '.resolved.planPath' "$T/stdout")" || fail "C4: resolved.planPath missing"
+cmp -s "$C4_PLAN" "$T/c4.expected" || fail "C4: resolved.planPath must be byte-identical to the approved artifact ($C4_PLAN)"
+grep -qF -- '- Q: database? A: sqlite' "$C4_PLAN" || fail "C4: the choices block must travel in the artifact"
+expect_stdout_jq "C4: state passthrough and resolved paths" '.planDigest == "'"$C4_DIGEST"'" and .workflow == "implement" and .target == "42" and .phase == "planned" and .status == "planned" and .resolved.mainCheckout == "'"$(real_of "$REPO")"'" and .resolved.planPath == "'"$(real_of "$REPO")"'/.plans/42-demo.md" and .resolved.worktree == null and (.resolved | keys | length) == 3'
+
+# --- C5a: missing plan artifact ---------------------------------------------
+fresh_persisted
+rm -f "$REPO/$PLAN_REL" || fail "C5a: could not remove the artifact"
+zero_write_reject "C5a missing artifact" "$REPO" 2 "plan artifact missing" verify "$REL" implement 42
+
+# --- C5b: missing checkpoint (no approval) ----------------------------------
+new_repo
+zero_write_reject "C5b missing checkpoint, no state root" "$REPO" 3 "no checkpoint found; no approved plan was persisted — plan in Plan mode, then persist" verify "$REL" implement 42
+{ [[ ! -e "$REPO/.cenci" ]]; } || fail "C5b: verify must never create the state directory"
+new_repo
+mkdir -p "$CKDIR" || fail "C5b: mkdir failed"
+zero_write_reject "C5b missing checkpoint, empty state root" "$REPO" 3 "no checkpoint found; no approved plan was persisted — plan in Plan mode, then persist" verify "$REL" implement 42
+
+# --- C5c: wrong target ------------------------------------------------------
+fresh_persisted
+zero_write_reject "C5c verify for 43 against implement-42.json" "$REPO" 2 "path does not match workflow and target" verify "$REL" implement 43
+zero_write_reject "C5c verify for another workflow against implement-42.json" "$REPO" 2 "path does not match workflow and target" verify "$REL" maintain 42
+fresh_persisted
+mutate "$CK" '.target = "43"'
+zero_write_reject "C5c file records another target" "$REPO" 2 "checkpoint records a different workflow or target than requested" verify "$REL" implement 42
+fresh_persisted
+mutate "$CK" '.workflow = "maintain" | .phase = "planned"'
+zero_write_reject "C5c file records another workflow" "$REPO" 2 "checkpoint records a different workflow or target than requested" verify "$REL" implement 42
+
+# --- C5d: digest mismatch ---------------------------------------------------
+fresh_persisted
+printf 'tampered\n' >> "$REPO/$PLAN_REL" || fail "C5d: could not change the artifact"
+zero_write_reject "C5d changed artifact" "$REPO" 2 "plan artifact changed since approval (digest mismatch)" verify "$REL" implement 42
+
+# --- C5e: unreadable state (each its own literal) ---------------------------
+fresh_persisted
+printf '{"schemaVersion": 2, "phase": ' > "$CK" || fail "C5e: fixture write failed"
+zero_write_reject "C5e malformed JSON" "$REPO" 2 "malformed JSON" verify "$REL" implement 42
+fresh_persisted
+mutate "$CK" '.schemaVersion = 3'
+zero_write_reject "C5e unknown schema" "$REPO" 2 "unknown schemaVersion" verify "$REL" implement 42
+fresh_persisted
+mutate "$CK" '.status = "bogus"'
+zero_write_reject "C5e invalid field" "$REPO" 2 "invalid field status" verify "$REL" implement 42
+fresh_persisted
+write_v1
+zero_write_reject "C5e legacy v1 checkpoint" "$REPO" 2 "legacy v1 checkpoint records no approved plan" verify "$REL" implement 42
+new_repo
+run_shim "$REPO" init "$REL" implement 42; expect_rc "C5e no-plan setup init" 0
+zero_write_reject "C5e checkpoint without a plan" "$REPO" 2 "checkpoint records no approved plan" verify "$REL" implement 42
+fresh_persisted
+run_shim "$REPO" complete "$REL" implement 42; expect_rc "C5e complete setup" 0
+zero_write_reject "C5e complete checkpoint is terminal" "$REPO" 2 "checkpoint is complete (terminal)" verify "$REL" implement 42
+fresh_persisted
+mv "$REPO/$PLAN_REL" "$REPO/.plans/real.md" || fail "C5e: mv failed"
+ln -s real.md "$REPO/$PLAN_REL" || fail "C5e: ln failed"
+zero_write_reject "C5e symlinked artifact" "$REPO" 2 "plan artifact unreadable" verify "$REL" implement 42
+fresh_persisted
+mkdir -p "$T/outside-plans3" || fail "C5e: mkdir failed"
+mv "$REPO/.plans/42-demo.md" "$T/outside-plans3/42-demo.md" || fail "C5e: mv failed"
+rmdir "$REPO/.plans" || fail "C5e: rmdir failed"
+ln -s "$T/outside-plans3" "$REPO/.plans" || fail "C5e: ln failed"
+zero_write_reject "C5e symlinked .plans directory" "$REPO" 2 "plan artifact unreadable" verify "$REL" implement 42
+fresh_persisted
+rm -f "$REPO/$PLAN_REL" || fail "C5e: rm failed"
+mkfifo "$REPO/$PLAN_REL" || fail "C5e: mkfifo failed"
+zero_write_reject "C5e FIFO artifact (124 means it hung)" "$REPO" 2 "plan artifact unreadable" verify "$REL" implement 42
+fresh_persisted
+head -c 1048577 /dev/zero | tr '\0' 'a' > "$REPO/$PLAN_REL" || fail "C5e: could not build the oversized fixture"
+zero_write_reject "C5e oversized artifact" "$REPO" 2 "plan artifact unreadable" verify "$REL" implement 42
+fresh_persisted
+mutate "$CK" '.planPath = "README.md"'
+zero_write_reject "C5e recorded plan path outside .plans" "$REPO" 2 "plan artifact path is not under .plans/" verify "$REL" implement 42
+fresh_persisted
+zero_write_reject "C5e verify without identity" "$REPO" 2 "verify requires <workflow> <target>" verify "$REL"
+zero_write_reject "C5e verify with a phase" "$REPO" 2 "verify takes no <phase>" verify "$REL" implement 42 planned
+zero_write_reject "C5e verify with --force" "$REPO" 2 "--force is not valid for verify" verify "$REL" implement 42 --force
+zero_write_reject "C5e verify with a metadata flag" "$REPO" 2 "--goal is not valid for verify" verify "$REL" implement 42 --goal created
+zero_write_reject "C5e verify path outside the checkpoint root" "$REPO" 2 "path is outside the checkpoint root" verify "$PLAN_REL" implement 42
+
+# --- C6: a resumed apply reads the recorded gate ----------------------------
+fresh_persisted
+C6_REAL="$(real_of "$REPO")"
+zero_write_ok "C6c fresh persisted checkpoint" "$REPO" verify "$REL" implement 42
+expect_stdout_jq "C6c nextPhase after persist is the first mutation phase" '.phase == "planned" and .lastCompletedGate == null and .nextPhase == "worktree" and .resolved.worktree == null'
+run_shim "$REPO" advance "$REL" implement 42 baseline --gate worktree --worktree .worktrees/42-demo; expect_rc "C6a advance" 0
+zero_write_ok "C6a gate worktree recorded" "$REPO" verify "$REL" implement 42
+expect_stdout_jq "C6a nextPhase follows lastCompletedGate worktree and the worktree resolves" '.lastCompletedGate == "worktree" and .nextPhase == "baseline" and .resolved.worktree == "'"$C6_REAL"'/.worktrees/42-demo" and .worktree == ".worktrees/42-demo"'
+{ [[ ! -e "$REPO/.worktrees" ]]; } || fail "C6a: verify must not create the worktree"
+run_shim "$REPO" advance "$REL" implement 42 tests --gate baseline; expect_rc "C6b advance" 0
+zero_write_ok "C6b gate baseline recorded" "$REPO" verify "$REL" implement 42
+expect_stdout_jq "C6b nextPhase follows lastCompletedGate baseline" '.lastCompletedGate == "baseline" and .nextPhase == "tests" and .resolved.worktree == "'"$C6_REAL"'/.worktrees/42-demo"'
+run_shim "$REPO" advance "$REL" implement 42 pr --gate pr; expect_rc "C6d advance to the last gate" 0
+zero_write_ok "C6d last gate recorded" "$REPO" verify "$REL" implement 42
+expect_stdout_jq "C6d nothing follows the last phase" '.lastCompletedGate == "pr" and .nextPhase == null'
+new_repo
+persist configure repo .plans/codex/configure-repo.md "$PLAN_BODY"
+zero_write_ok "C6e configure artifact under .plans/codex" "$REPO" verify .cenci/checkpoints/configure-repo.json configure repo
+expect_stdout_jq "C6e configure resumes at apply" '.workflow == "configure" and .target == "repo" and .nextPhase == "apply" and .planPath == ".plans/codex/configure-repo.md" and .resolved.planPath == "'"$(real_of "$REPO")"'/.plans/codex/configure-repo.md"'
+
+# --- C8 host: the same absolute paths from the main checkout and a linked worktree
+new_repo
+git -C "$REPO" -c user.name=t -c user.email=t@example.invalid -c commit.gpgsign=false commit -q --allow-empty -m init || fail "C8: seed commit failed"
+git -C "$REPO" worktree add -q "$REPO/.worktrees/42-demo" -b feature-42 || fail "C8: worktree add failed"
+persist implement 42 "$PLAN_REL"
+run_shim "$REPO" advance "$REL" implement 42 baseline --gate worktree --worktree .worktrees/42-demo; expect_rc "C8 host advance" 0
+A_REAL="$(real_of "$REPO")"
+zero_write_ok "C8 host verify from the main checkout" "$REPO" verify "$REL" implement 42
+cp "$T/stdout" "$T/c8-main.out" || fail "C8 host: cp failed"
+zero_write_ok "C8 host verify from a linked worktree" "$REPO/.worktrees/42-demo" verify "$REL" implement 42
+cmp -s "$T/stdout" "$T/c8-main.out" || fail "C8 host: the worktree and the main checkout must print identical output"
+expect_stdout_jq "C8 host: absolute paths under root A" '.resolved.mainCheckout == "'"$A_REAL"'" and .resolved.planPath == "'"$A_REAL"'/.plans/42-demo.md" and .resolved.worktree == "'"$A_REAL"'/.worktrees/42-demo"'
+expect_jq "C8 host: stored fields stay repo-relative" '.planPath == ".plans/42-demo.md" and .worktree == ".worktrees/42-demo"' "$CK"
+grep -qF -- "$A_REAL" "$CK" && fail "C8 host: the checkpoint must hold no absolute path"
+
+# --- C8 sandbox: a copy at another absolute root resolves under that root ---
+new_repo
+persist implement 42 "$PLAN_REL"
+run_shim "$REPO" advance "$REL" implement 42 baseline --gate worktree --worktree .worktrees/42-demo; expect_rc "C8 sandbox advance" 0
+REPO_A="$REPO"
+A_REAL="$(real_of "$REPO_A")"
+mkdir -p "$T/sandbox-b" || fail "C8 sandbox: mkdir failed"
+B="$T/sandbox-b/workspace"
+cp -a "$REPO_A" "$B" || fail "C8 sandbox: cp -a failed"
+cp "$REPO_A/$REL" "$T/c8-a.checkpoint" || fail "C8 sandbox: cp failed"
+cp "$REPO_A/$PLAN_REL" "$T/c8-a.plan" || fail "C8 sandbox: cp failed"
+rm -rf "$REPO_A" || fail "C8 sandbox: could not remove root A"
+B_REAL="$(real_of "$B")"
+REPO="$B"
+CK="$B/$REL"
+zero_write_ok "C8 sandbox verify from root B" "$B" verify "$REL" implement 42
+expect_stdout_jq "C8 sandbox: absolute paths under root B" '.resolved.mainCheckout == "'"$B_REAL"'" and .resolved.planPath == "'"$B_REAL"'/.plans/42-demo.md" and .resolved.worktree == "'"$B_REAL"'/.worktrees/42-demo" and .nextPhase == "baseline"'
+grep -qF -- "$A_REAL" "$T/stdout" && fail "C8 sandbox: no path may resolve under root A"
+cmp -s "$T/c8-a.checkpoint" "$B/$REL" || fail "C8 sandbox: the stored checkpoint must be byte-identical to the host copy"
+cmp -s "$T/c8-a.plan" "$B/$PLAN_REL" || fail "C8 sandbox: the stored artifact must be byte-identical to the host copy"
+expect_jq "C8 sandbox: stored fields stay repo-relative" '.planPath == ".plans/42-demo.md" and .worktree == ".worktrees/42-demo"' "$CK"
+grep -qF -- "$A_REAL" "$CK" && fail "C8 sandbox: the checkpoint must hold no absolute path"
+
+# --- F1: the persist re-plan rule keys on `status`, not on a `complete` phase ---
+# `complete` is a status (the command keeps the last real phase), so a finished run is
+# phase `pr` + status `complete`; a fresh init is status `planned`, an advanced run `running`.
+new_repo
+persist implement 42 "$PLAN_REL"
+run_shim "$REPO" get "$REL" implement 42; expect_rc "F1 get after init" 0
+expect_stdout_jq "F1 fresh init: status planned (re-plan: clear)" '.phase == "planned" and .status == "planned"'
+run_shim "$REPO" advance "$REL" implement 42 baseline --gate worktree --worktree .worktrees/42-demo; expect_rc "F1 advance" 0
+run_shim "$REPO" get "$REL" implement 42; expect_rc "F1 get while running" 0
+expect_stdout_jq "F1 advanced run: status running (re-plan: refuse)" '.phase == "baseline" and .status == "running"'
+run_shim "$REPO" block "$REL" implement 42 tests --gate baseline; expect_rc "F1 block" 0
+run_shim "$REPO" get "$REL" implement 42; expect_rc "F1 get while blocked" 0
+expect_stdout_jq "F1 blocked run: status needs-input (re-plan: refuse)" '.phase == "tests" and .status == "needs-input"'
+run_shim "$REPO" advance "$REL" implement 42 pr --gate pr; expect_rc "F1 advance to pr" 0
+run_shim "$REPO" complete "$REL" implement 42; expect_rc "F1 complete" 0
+run_shim "$REPO" get "$REL" implement 42; expect_rc "F1 get after complete" 0
+expect_stdout_jq "F1 finished run: phase stays pr, status complete (re-plan: clear)" '.phase == "pr" and .status == "complete" and .lastCompletedGate == "pr"'
+run_shim "$REPO" clear "$REL" implement 42; expect_rc "F1 clear a finished run" 0
+{ [[ ! -e "$CK" ]]; } || fail "F1: clear must remove the finished checkpoint"
+persist implement 42 "$PLAN_REL"
+run_shim "$REPO" get "$REL" implement 42; expect_rc "F1 get after re-plan" 0
+expect_stdout_jq "F1 re-plan after clear: status planned again" '.phase == "planned" and .status == "planned"'
+
 echo "runtime.test.sh: failures=${failures}"
 [[ "$failures" -eq 0 ]] && echo "runtime.test.sh: passed"
 [[ "$failures" -eq 0 ]]

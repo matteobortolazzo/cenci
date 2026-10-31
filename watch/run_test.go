@@ -329,7 +329,6 @@ func dryRunArgv(t *testing.T, workflow, target string, flags ...string) []string
 // verbatim argv element whatever the target holds.
 func TestRunDryRunCodexSandboxRoutesPromptAfterAgentFlag(t *testing.T) {
 	noCfg := filepath.Join(t.TempDir(), "none.json")
-	planning := map[string]bool{"configure": true, "implement": true, "address-review": true, "refactor": true, "maintain": true}
 	targets := []string{"42", "two words\tand a tab", `it's`, `say "hi"`, "$HOME", "42 --force", "-x"}
 	codexWorkflows := 0
 	for _, c := range run.BuiltinCapabilities() {
@@ -339,9 +338,6 @@ func TestRunDryRunCodexSandboxRoutesPromptAfterAgentFlag(t *testing.T) {
 		codexWorkflows++
 		for _, target := range targets {
 			prompt := "$cenci:" + c.Workflow + " " + target
-			if planning[c.Workflow] {
-				prompt = "/plan\n" + prompt
-			}
 			for _, model := range []string{"", "m"} {
 				flags := []string{"--agent", "codex", "--sandbox", "--config", noCfg}
 				want := []string{"cenci", "open"}
@@ -367,7 +363,7 @@ func TestRunDryRunCodexSandboxRoutesPromptAfterAgentFlag(t *testing.T) {
 // file-defined workflow without sandboxArgs gets no injected agent routing,
 // and a partial override changes only the field it names (per-field merge).
 func TestRunDryRunCodexUserTemplatesKeepDocumentedBehavior(t *testing.T) {
-	const builtinPrompt = "/plan\n$cenci:implement 42"
+	const builtinPrompt = "$cenci:implement 42"
 	builtinSandbox := []string{"cenci", "open", "--agent", "codex", "--", builtinPrompt}
 	for _, tc := range []struct {
 		name, config, workflow, mode string
@@ -383,6 +379,11 @@ func TestRunDryRunCodexUserTemplatesKeepDocumentedBehavior(t *testing.T) {
 			[]string{"cenci", "open", "--agent", "codex", "--", "mine 42"}},
 		{"sandboxArgs-only override, host keeps built-in args", `{"sandboxArgs":["--agent","codex","--","mine {ticket}"]}`, "implement", "--no-sandbox",
 			[]string{"codex", builtinPrompt}},
+		// #1234 Q10: `{codex_stage}` was removed, not kept as a no-op, so a user
+		// template that still carries it passes the token through verbatim (no
+		// substitution, no `/plan\n` prefix) while `{ticket}` still expands.
+		{"removed {codex_stage} token passes through literally", `{"args":["exec","{codex_stage}do {ticket}"]}`, "implement", "--no-sandbox",
+			[]string{"codex", "exec", "{codex_stage}do 42"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := writeRunConfig(t, `{"agents":{"codex":{"workflows":{"`+tc.workflow+`":`+tc.config+`}}}}`)

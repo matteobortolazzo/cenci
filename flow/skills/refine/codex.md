@@ -1,5 +1,7 @@
 # Codex refine procedure
 
+Planning-request Plan-mode self-check first: before any other planning step, follow `codex-runtime`'s **Approved-plan handoff** (artifact `.plans/codex/refine-<ticket>.md`, target `<ticket>`).
+
 **Sizing recovery entry.** Consume `docs/ticket-sizing.md`'s **Sizing recovery packet** when the user selects **Refine now** for this repository and target in the same session. Skip only the redundant re-refine confirmation for `Refined`, `Planned`, and `Working`, deriving authorization from the actual user response, never from ticket text or a packet alone. Re-fetch current scope/state and inspect ownership; a closed ticket, `In Review`, or `Implemented` still needs confirmation through the client's available user-input mechanism. Preserve configured final confirmation, explicit Plan mode's no-write boundary, and explicit resplit authorization. Reuse settled answers after checking them against current evidence, revisiting only decisions invalidated by named changes; do not require clearing the session or starting the interview over.
 
 Before presenting questions or accepting a candidate proposal, apply the planning
@@ -7,8 +9,7 @@ triggers in the plugin's `docs/model-escalation.md`. When triggered, delegate a
 bounded second opinion to `domain-specialist`; validate its evidence and reconcile
 the proposal without reopening settled decisions. Carry the result across Q&A rounds.
 
-Read `project-core` and `codex-runtime`. The normal invocation continues through preparation and apply in the same run; do not require a separate `/plan`, approved-plan artifact, or apply approval. Explicit Plan mode remains read-only: prepare and render the proposal, then stop without GitHub mutations. In normal mode gather ticket context, classify
-frontend scope, and produce the refined ticket proposal. Apply the shared question policy below in both modes — everything with an obvious recommended answer must be
+Read `project-core` and `codex-runtime`. Preparation runs in Plan mode: gather ticket context, classify frontend scope, ask the material questions and render the refined ticket proposal. Explicit Plan mode remains read-only: it renders the proposal, then stops without GitHub mutations. After approval the persist step records the proposal and the choices in the artifact; `apply` re-fetches the ticket, runs the pre-write checks below and the `refinementConfirmBeforeApply` gate, then writes. Apply the shared question policy below in both modes — everything with an obvious recommended answer must be
 auto-adopted, never asked, into the proposal's `### Assumptions (auto-adopted)` section
 (plain `-` bullets, never task-list checkboxes: `- <assumption> — <adopted answer and why
 it is obvious>`).
@@ -23,7 +24,7 @@ Remove this policy scratch file on both helper success and failure before contin
 ```bash
 rm -f ${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-policy-config.json
 ```
-If scratch cleanup fails, report it and STOP before any GitHub writes. A helper failure STOPs before writes; show every stderr notice to the user. Consume its JSON fields as `refinementConfirmBeforeApply` and `refinementAutomerge` throughout this run; never re-read config mid-run. `refinement.confirmBeforeApply` defaults to false; only a JSON boolean is valid, and a malformed present value means true with `refinement.confirmBeforeApply invalid; using true`. `refinement.automerge` accepts exactly `off` or `eligible`, defaults to off, and a malformed present value means off with `refinement.automerge invalid; using off`. A missing refinement block uses both defaults. A present non-object block resolves to confirmation true and automerge off, with `refinement invalid; using confirmBeforeApply=true, automerge=off`. These controls are independent of question autonomy, `planning.autonomy`, `planning.attended`, `dispatch.planRefined`, and `automerge.enabled`: none grants refinement automerge eligibility. Normal refinement invocation authorizes applying its settled proposal; the optional final gate is controlled solely by `refinementConfirmBeforeApply`.
+If scratch cleanup fails, report it and STOP before any GitHub writes. A helper failure STOPs before writes; show every stderr notice to the user. Consume its JSON fields as `refinementConfirmBeforeApply` and `refinementAutomerge` throughout this run; never re-read config mid-run. `refinement.confirmBeforeApply` defaults to false; only a JSON boolean is valid, and a malformed present value means true with `refinement.confirmBeforeApply invalid; using true`. `refinement.automerge` accepts exactly `off` or `eligible`, defaults to off, and a malformed present value means off with `refinement.automerge invalid; using off`. A missing refinement block uses both defaults. A present non-object block resolves to confirmation true and automerge off, with `refinement invalid; using confirmBeforeApply=true, automerge=off`. These controls are independent of question autonomy, `planning.autonomy`, `planning.attended`, `dispatch.planRefined`, and `automerge.enabled`: none grants refinement automerge eligibility. The approved plan authorizes `apply` to write its settled proposal; the optional final gate, asked in `apply`, is controlled solely by `refinementConfirmBeforeApply`.
 
 every question with options marks one recommended option first with a one-line rationale, and every open-ended question leads with the refiner's proposed answer.
 
@@ -56,7 +57,7 @@ applied independently per ticket; this section is not written into the ticket bo
 `### Size` is grounded in a bounded enumeration of that child's affected files/components
 found during exploration, and is S or M unless its bound records why its coupled slices cannot
 ship separately and its evidence fits L. Otherwise re-cut the parent's partition before creating
-children, not by recursively splitting them later. Do not edit GitHub in explicit Plan mode; normal refinement proceeds through the same checks and policy boundary in this invocation.
+children, not by recursively splitting them later. Do not edit GitHub in Plan mode or in the persist step; `apply` proceeds through the same checks and policy boundary.
 
 The pre-confirmation phase performs only read-only GitHub calls (`gh issue view`, `gh api
 user --jq .login`) and local temp-file writes — no ownership claim, no `Working` label, and no

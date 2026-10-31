@@ -157,7 +157,7 @@ Questions 18 to 20 are asked after `phases/autonomy-settings.md` (questions 13 t
     Re-probe through the matching status command when possible, report only what it
     verifies, and leave the failed call's ledger ID unstamped.
     Fleet controls never land as repo config fields. No host mutations run in Codex
-    Plan mode; carry answers through the checkpoint and execute during apply only.
+    Plan mode; carry answers through the approved-plan artifact and execute during apply only.
 
 **Next step.** Report the actual results of the fleet choices above and any deferred
 host commands. The independent fleet-side verbs are:

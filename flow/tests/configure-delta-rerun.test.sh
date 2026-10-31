@@ -490,7 +490,7 @@ OLD_CODEX_CHECKPOINT_ANSWERS='the effective sandbox flags, and the question 11/1
 CODEX_REPORT_FELL_BACK='A fallen-back question 13/14/15 overlay or a failed `cenci dispatch enroll` is reported the same conditional way'
 OLD_CODEX_REPORT_FELL_BACK='A fallen-back question 13/14 overlay or a failed `cenci dispatch enroll` is reported the same conditional way'
 CODEX_Q11_ENROLL='`dispatchEnroll` is recorded only after a successful `cenci dispatch enroll` or an explicit "No"; an enroll failure is reported and not recorded.'
-CODEX_CHECKPOINT='travel in the plan/apply checkpoint; the apply step reads them from there and never re-derives them from the resolver'
+CODEX_CHECKPOINT='travel in the approved-plan artifact; the apply step reads them from there and never re-derives them from the resolver'
 CODEX_REPORT_CARRIED_SUMMARY='the carried-through summary (question IDs and config key names, never values in the PR body, and saying `--all` would re-open them)'
 CODEX_REPORT_LAZYBOARDS_MISSING='the notice when question 10 is carried but `.lazyboards.yml` is missing (it is not regenerated; `--all` re-offers it)'
 CODEX_REPORT_LEDGER_NOT_STAMPED='a ledger-not-stamped notice when the ledger overlay fell back, so this run'"'"'s questions will be asked again'
@@ -1286,7 +1286,7 @@ case_AC17_codex_parity() {
   assert_absent_paired_ws "${codex}" "${CODEX_OVERLAY_FELL_BACK}" "${OLD_CODEX_OVERLAY_FELL_BACK_Q13_Q14}" "codex.md retired fallen-back overlay opener naming only Q13/Q14 (#1274)"
   assert_absent_paired_ws "${codex}" "${CODEX_OVERLAY_FELL_BACK}" "the apply step tells the user, removes that question's ID" "codex.md retired unconditional fallen-back overlay wording"
   assert_contains_ws "${codex}" "${CODEX_Q11_ENROLL}" "codex.md: Q11 is recorded only after a successful enroll or an explicit No"
-  assert_contains_ws "${codex}" "${CODEX_CHECKPOINT}" "codex.md: offered IDs and answers travel in the plan/apply checkpoint"
+  assert_contains_ws "${codex}" "${CODEX_CHECKPOINT}" "codex.md: offered IDs and answers travel in the approved-plan artifact"
   assert_contains_ws "${codex}" "${CODEX_CHECKPOINT_ANSWERS}" "codex.md: the checkpoint carries the question 11/13/14/15 answers"
   assert_absent_paired_ws "${codex}" "${CODEX_CHECKPOINT_ANSWERS}" "${OLD_CODEX_CHECKPOINT_ANSWERS}" "codex.md retired checkpoint answer list omitting question 15 (#1274)"
   assert_contains_ws "${codex}" "${CODEX_REPORT_FELL_BACK}" "codex.md: the apply report names a fallen-back Q13/Q14/Q15 overlay conditionally"

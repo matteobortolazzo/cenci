@@ -587,6 +587,11 @@ Which agent runs a card is a **per-dispatch** choice — pass `--agent`:
         command: "cenci run implement {number} --agent codex"
 ```
 
+A Codex card launches in Default mode: planning workflows (`implement`, `refine`, and the
+rest) stop at a one-line Plan-mode self-check until you type `/plan` and resend, then
+continue through `persist` and `apply` (see
+[Plan, persist and apply](../flow/docs/codex.md#plan-persist-and-apply)).
+
 The state-machine labels are agent-neutral, so a board can dispatch some cards to
 Claude Code and others to Codex and both drive the same columns. Instructions are
 shared: each directory's `CLAUDE.md` (canonical) is read by Claude Code natively and by

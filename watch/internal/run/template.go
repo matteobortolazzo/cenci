@@ -212,7 +212,9 @@ func builtinConfig() FileConfig {
 	// non-flag word as a shortcut and otherwise defaults to Claude, so the
 	// prompt rides behind `--agent codex --` as one verbatim passthrough element.
 	codexWF := func(wf string) WorkflowTemplate {
-		prompt := "{codex_stage}$cenci:" + wf + " {ticket}"
+		// The prompt never stages Plan mode (#1234): a planning companion checks
+		// the active collaboration mode itself and asks the user for `/plan`.
+		prompt := "$cenci:" + wf + " {ticket}"
 		return WorkflowTemplate{
 			Args:        []string{prompt},
 			SandboxArgs: []string{"--agent", "codex", "--", prompt},
@@ -394,17 +396,12 @@ func (fc FileConfig) BuildCommand(agent, workflow, ticket, model string, sandbox
 	}
 
 	usedModelPlaceholder := false
-	codexStage := ""
-	if agent == "codex" && codexPlanningWorkflow(workflow) && !codexApplyTarget(ticket) {
-		codexStage = "/plan\n"
-	}
 	rest := make([]string, 0, len(args))
 	for _, a := range args {
 		if strings.Contains(a, "{model}") {
 			usedModelPlaceholder = true
 		}
 		a = strings.ReplaceAll(a, "{ticket}", ticket)
-		a = strings.ReplaceAll(a, "{codex_stage}", codexStage)
 		a = strings.ReplaceAll(a, "{model}", model)
 		rest = append(rest, a)
 	}
@@ -418,21 +415,6 @@ func (fc FileConfig) BuildCommand(agent, workflow, ticket, model string, sandbox
 	}
 	argv = append(argv, rest...)
 	return argv, nil
-}
-
-func codexPlanningWorkflow(workflow string) bool {
-	// Refine completes its questionnaire and applies the resolved proposal in
-	// one invocation; entering Plan mode here would force a separate apply step.
-	switch workflow {
-	case "configure", "implement", "address-review", "refactor", "maintain":
-		return true
-	}
-	return false
-}
-
-func codexApplyTarget(ticket string) bool {
-	t := strings.TrimSpace(ticket)
-	return strings.HasPrefix(t, "apply ") || strings.HasPrefix(t, "resume ") || strings.HasPrefix(t, ".plans/")
 }
 
 // missingTemplateError reports an unknown agent (knownAgent false) or a known

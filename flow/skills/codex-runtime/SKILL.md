@@ -7,17 +7,8 @@ user-invocable: false
 # Native Codex workflow runtime
 
 - Every normal-mode invocation starts with `sh "${PLUGIN_ROOT}/codex/require-runtime.sh"` before any checkpoint, workflow, or GitHub mutation; if it exits non-zero (Node.js 18+ is not on PATH), stop and report its one-line stderr message. The script is silent when Node 18 or newer is present and changes no state.
-- Interactive planning workflows must begin in `/plan`. Gather every material choice
-  there and produce an approved plan without mutating GitHub or project files.
-- Continue mutations in a second normal-mode invocation of the same skill, passing the
-  approved plan or `.plans/<file>` explicitly.
-- Refinement is an exception to that two-invocation procedure: an ordinary normal-mode
-  refine invocation asks its material questions, validates the proposal and applies it
-  in the same invocation. `refinement.confirmBeforeApply: true` adds final review in
-  that invocation; false or absent does not ask again. An explicit `/plan` refinement
-  remains read-only and returns the proposal for a later normal-mode invocation.
-  `skills/refine/codex.md` owns the pre-write checks and independent automerge policy.
-- Persist phase state at `.cenci/checkpoints/<workflow>-<target>.json` with `node "${PLUGIN_ROOT}/codex/checkpoint.mjs" <init|advance|block|complete|get|clear> <path> [<workflow> <target> [<phase>]] [flags]`. The helper is a strict schema-v2 state machine and writes atomically (temp file, `fsync`, rename).
+- Planning workflows (configure, refine, implement, address-review, refactor, maintain) plan only in Plan mode and hand the approved plan to a fresh `apply` through the **Approved-plan handoff** section below; every companion's `codex.md` references that section and never restates it. `skills/refine/codex.md` owns refine's pre-write checks and independent automerge policy.
+- Persist phase state at `.cenci/checkpoints/<workflow>-<target>.json` with `node "${PLUGIN_ROOT}/codex/checkpoint.mjs" <init|advance|block|complete|get|clear> <path> [<workflow> <target> [<phase>]] [flags] | verify <path> <workflow> <target> | digest <plan-path>`. The helper is a strict schema-v2 state machine and writes atomically (temp file, `fsync`, rename).
   Store workflow, target, phase, plan path, worktree, last completed gate, and status.
   The contract below is Codex-only; Claude Code skills do not use it.
   - Schema v2 has exactly these 12 fields: `schemaVersion` (2), `workflow`, `target`, `phase`, `status`, `planPath`, `planDigest` (64 lowercase hex characters, the sha256 of the plan), `worktree`, `lastCompletedGate`, `agentFallbacks` (a list of `{role, worker}`), `goal`, and `updatedAt`. `planPath` and `worktree` are normalized repo-relative paths: never under `.git`, with no trailing slash. Unset fields are `null` (`agentFallbacks`: `[]`). `goal` is `null`, `created`, `skipped-active`, or `unavailable`.
@@ -31,6 +22,8 @@ user-invocable: false
   - Legacy v1 (`schemaVersion` 1): `get` prints it with `"legacy": true`. `init` with the same identity upgrades it in place to v2, applying any metadata flags given and turning an absolute path inside the checkout into a repo-relative one (a v1 file has no digest or goal, so those are `null` until set). A v1 file with an unknown phase, status, or gate, an absolute path outside the checkout, or malformed fallbacks cannot be upgraded: `init` exits 2 naming `clear`, and never maps the value to something else. `advance`, `block`, and `complete` reject v1 with `legacy v1 checkpoint; run init to upgrade it`.
   - `get` validates the whole file (strict fields, enums, relative paths, digest, timestamp) and prints the state as one JSON line. A missing file or missing state directory exits 3 with `no checkpoint found`. An unknown `schemaVersion`, malformed JSON, or any invalid field exits 2 without echoing the file content. `lastCompletedGate` is the resume gate: resume at the first phase after it.
   - `clear` requires the identity and checks it against the file name and the recorded identity (exit 2 on mismatch; a file that records a different identity than its name is never reset, and `clear` cannot remove it either, so remove it by hand). Missing state is success (exit 0, nothing created). It removes a valid v2 or a v1 checkpoint. A malformed or unknown-schema file exits 2 with `re-run with --force to remove it`; with `--force` it is removed and `removed unreadable checkpoint (...) because of --force` is reported on stderr.
+  - `node "${PLUGIN_ROOT}/codex/checkpoint.mjs" verify <path> <workflow> <target>` is the read-only approved-plan check: it takes no flags, never creates `.cenci`, and checks in order the identity, that a checkpoint exists, that it is a v2 file that is not `complete`, that it records a `planPath` and `planDigest`, and that the plan artifact (a repo-relative, non-symlinked regular file under `.plans/`) still hashes to `planDigest`. On success it prints one JSON line: the 12 state fields, `resolved` (`mainCheckout`, `planPath` and `worktree` as absolute paths under the current environment's main checkout; `worktree` is `null` when none is recorded) and `nextPhase`, the first phase after `lastCompletedGate` (with no gate recorded, the phase after `planned`; `null` after the last phase). A missing checkpoint exits 3 and every other rejection exits 2, each with one `checkpoint: <path>: <problem>; <remedy>` stderr line listed in `docs/codex.md`.
+  - `node "${PLUGIN_ROOT}/codex/checkpoint.mjs" digest <plan-path>` is read-only too: it reads the same kind of artifact with the same rules as `verify` and prints its sha256 as 64 lowercase hex characters and a newline.
   - Exit codes: 0 success; 1 unexpected I/O failure, such as `write failed (EIO); the previous checkpoint is unchanged` (the previous file stays readable and no temp file is left); 2 rejection or usage error; 3 missing state. Every error is one stderr line starting `checkpoint: <path>: <problem>; <remedy>`, with no stack trace, and stdout carries the state JSON only after the write succeeded.
 - On execution ambiguity, persist the checkpoint, clear the active goal, ask exactly one
   blocking question, and stop. Resume from the checkpoint after the answer.
@@ -42,3 +35,49 @@ user-invocable: false
 - Prefer generated `.codex/agents/*.toml` roles. If unavailable, delegate to a built-in
   worker with the same bounded role prompt and report that fallback in the checkpoint.
 - Keep authenticated mutations, pushes, PR creation, and user questions in the root agent.
+
+## Approved-plan handoff
+
+This handoff is Codex-only: Claude Code has no collaboration-mode switch, and `phases/phase-1-plan.md` owns its approval, so Claude Code `SKILL.md` procedures stay unchanged. A planning workflow moves a plan from Plan mode to a fresh `apply` process in three steps, each in its own turn: plan in Plan mode, `persist` in Default mode, then `apply`. The plan travels in an artifact and its sha256 digest in the checkpoint, never in the conversation or a resumed session.
+
+- **Target** (`<target>`, matching the checkpoint's `TARGET_RE`): implement uses the ticket id, or the task slug in ticketless mode; refine uses the ticket number; address-review uses the PR number; configure and refactor use `repo`; maintain uses `<mode>`, or `<mode>-<scope>` when a scope is given.
+- **Artifact**: implement writes `.plans/<ticket>-<slug>.md`; every other workflow writes `.plans/codex/<workflow>-<target>.md`. Paths are stored repo-relative and `verify` resolves them against the main checkout of the current environment, host or sandbox.
+- **Checkpoint** `<ckpt>` is `.cenci/checkpoints/<workflow>-<target>.json`.
+
+### Plan-mode self-check
+
+This check applies to the planning request only: the request that is neither `persist` nor `apply`. Before any other planning step, read the active `<collaboration_mode>` developer instruction. If it is not Plan, or it cannot be read, make no tool call at all (no read, no shell, no `require-runtime.sh`) and print exactly one line: `cenci: $cenci:<wf> plans only in Plan mode — type /plan and resend: /plan $cenci:<wf> <target>`. Then end the turn.
+
+`persist` and `apply` run in Default mode and are not refused by this check; each keeps its own rule. A `persist` or `apply` request that arrives while Plan mode is still active is refused with no tool call and the line `leave Plan mode and resend`. Otherwise, in Default mode `persist` proceeds to the Persist step, and `apply` proceeds to `require-runtime.sh`, then `verify` (see Apply).
+
+### Write boundaries
+
+Planning in Plan mode makes no project or GitHub mutation: no project file, checkpoint, `.plans` file, label, ticket, ownership claim or `cenci pipeline` write. The persist step makes no claim, label, worktree, `cenci pipeline` or GitHub write either.
+
+### Persist step
+
+Run `persist` in Default mode, in the same session as the approved plan: `$cenci:<wf> persist <target>`. The first normal-mode turn after a Plan-mode approval in that session (for example Codex's own "implement the plan" turn) runs only this step, never apply mutations.
+
+Approval check, before anything else: a Plan-mode-approved plan is a plan produced in Plan mode in this session for `<wf> <target>`, followed by the user's `persist` or implement-the-plan turn. If this session holds no Plan-mode-approved plan for `<wf> <target>` (for example a fresh Default-mode session launched with `cenci run <wf> persist <target>`), make no tool call, write nothing and print exactly `cenci: no approved plan in this session — type /plan and resend: /plan $cenci:<wf> <target>`, then end the turn.
+
+Otherwise start with `sh "${PLUGIN_ROOT}/codex/require-runtime.sh"`. Persist writes only the plan artifact and the checkpoint, in this order:
+
+1. Check for an existing checkpoint before writing anything: run `node "${PLUGIN_ROOT}/codex/checkpoint.mjs" get <ckpt> <wf> <target>`. Exit 3 (no checkpoint) continues. Exit 0 branches on the printed `status` (`complete` is a status, never a phase: a finished run keeps its last real phase, such as `pr`). A `status` `planned` or `complete` means run `clear` for the identity (see Re-plan below), then continue. A `status` `running` or `needs-input` is a run in flight: refuse before writing anything, change nothing, print the resume `apply` command (step 5) and say that if that `apply` stops on `verify`, the user can discard the run with `node "${PLUGIN_ROOT}/codex/checkpoint.mjs" clear <ckpt> <wf> <target>` and re-plan, then end the turn. Any other exit: stop and report its stderr line, writing nothing.
+2. Write the artifact with the headings `## Target`, `## Approved Plan` (the approved plan verbatim) and `## Choices` (every answer given and every option the user declined, so `apply` needs no conversation). Implement is the exception: for implement the artifact is the planner's plan file, which starts with YAML front matter (`---` as the first line) and contains `## Ticket Details`, `## Implementation Plan` and `## Architectural Context`; the choices made are carried by appending a `## Choices` heading after them (or by the plan's own `## Q&A from Planning`). The `## Target` and `## Approved Plan` wrapper applies to the other five workflows only.
+3. Run `node "${PLUGIN_ROOT}/codex/checkpoint.mjs" digest <artifact>`.
+4. Run `node "${PLUGIN_ROOT}/codex/checkpoint.mjs" init <ckpt> <wf> <target> planned --plan-path <artifact> --plan-digest <digest>`.
+5. Print `cenci run <wf> apply <target> --agent codex` and `$cenci:<wf> apply <target>` as the two ways to continue, and end the turn.
+
+A failure of any write stops persist and reports it; the artifact is then not an approved plan.
+
+### Apply
+
+Apply starts with `sh "${PLUGIN_ROOT}/codex/require-runtime.sh"`, then `node "${PLUGIN_ROOT}/codex/checkpoint.mjs" verify <ckpt> <wf> <target>`: a non-zero `verify` stops before any write and reports its one stderr line unchanged; the remedy is always to plan in Plan mode, then persist (apply never clears; to discard a leftover checkpoint first, the user runs `node "${PLUGIN_ROOT}/codex/checkpoint.mjs" clear <ckpt> <wf> <target>`, a user-run step). A Claude-persisted `.plans/<id>-<slug>.md` with no Codex checkpoint is not an approved plan, so that stop also applies to it, with zero writes. Read the plan only from `resolved.planPath` right after `verify`. Only then run the workflow's mutations, starting at `nextPhase`. `nextPhase` `null` means every phase is done: run no workflow mutation, run `complete`, and report that the run is already finished. A failure of any checkpoint write (`advance`, `block`, `complete`) stops apply before the next mutation and is reported.
+
+- A verified checkpoint whose `phase` is `planned` is a new-plan apply; any later phase is a saved-plan apply. The workflow's own resume routing (for implement, the `cenci pipeline` stage table) still picks the resume route; the checkpoint only picks first apply versus saved-plan apply.
+- Resume from the recorded gate: skip every phase through `lastCompletedGate` and never recreate a recorded worktree, re-apply a label or reopen a PR for a completed gate. A recorded `resolved.worktree` is attached, not created again.
+- Apply advances the checkpoint to a phase before that phase's first write, so a crash resumes from the recorded gate instead of repeating it.
+
+### Re-plan
+
+Persist over an existing checkpoint of the same identity follows its phase, and the check is the first persist step, before the artifact is written. A checkpoint whose `status` is `planned` or `complete` is cleared (`clear`) first; the artifact is then written and `init` records the new digest. A checkpoint whose `status` is `running` or `needs-input` is a run in flight: refuse, change nothing (the artifact included, since the in-flight run's approved plan lives there) and print the resume `apply` command. Clearing an in-flight run needs an explicit `checkpoint.mjs clear` by the user (`checkpoint.mjs clear <ckpt> <wf> <target>`, named if that `apply` stops on `verify`), in line with `init`'s never-reset rule above.
