@@ -350,8 +350,12 @@ cenci incident status --state-dir /absolute/path/incident-state
 cenci incident cancel --state-dir /absolute/path/incident-state --id INCIDENT_KEY
 ```
 
-`run` stays in the foreground for a service manager to supervise. `status` prints
-persistent JSON without Azure or agent access. `cancel` stops queued/active work;
+`run` stays in the foreground for a service manager to supervise. It requires an
+explicit `auth` worker identity in its config (a certificate, managed identity or
+workload identity; there is no ambient Azure fallback) and refuses to start
+without one; see [Worker identity](docs/incident-worker.md#worker-identity).
+`status` prints persistent JSON without Azure or agent access, and `cancel` needs
+no Azure identity either. `cancel` stops queued/active work;
 it preserves reports, branches, and existing PRs. Merge, deployment, and production
 changes require human review. See [setup, policy, limits, and recovery](docs/incident-worker.md)
 before opting in. The initial adapter uses Claude Code in an isolated container.
