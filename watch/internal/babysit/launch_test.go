@@ -18,6 +18,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -627,5 +628,136 @@ func TestArmInsideTmuxSupervisionOtherwiseUnchanged(t *testing.T) {
 	}
 	if len(captured.Env) < 2 {
 		t.Errorf("captured.Env = %v, want the inherited os.Environ() base plus CENCI_BABYSIT_SUPERVISOR=1", captured.Env)
+	}
+}
+
+// -- #1237: a refused launch leaves the repair bookkeeping untouched ---------
+
+// repairFields are the five State fields #1237 AC 2 pins: counters advance
+// only after a successful launch, so a refused `cenci run` must leave every
+// one of them exactly as it was.
+type repairFields struct {
+	FixAttempts     int
+	RepairPending   bool
+	LastRepairedSHA string
+	PendingKeys     []string
+	LaunchedKeys    []string
+}
+
+func repairFieldsOf(s State) repairFields {
+	return repairFields{
+		FixAttempts:     s.FixAttempts,
+		RepairPending:   s.RepairPending,
+		LastRepairedSHA: s.LastRepairedSHA,
+		PendingKeys:     slices.Clone(s.PendingKeys),
+		LaunchedKeys:    slices.Clone(s.LaunchedKeys),
+	}
+}
+
+// TestLaunchRefusalLeavesRepairStateUnchanged drives the ci-repair launch site
+// (the one site where all five fields are untouched until launch() returns; the
+// address-review site adds to PendingKeys before launching by design, #885)
+// with a `cenci run` that refuses with each pre-spawn refusal class. The
+// babysit package only ever sees the run subprocess's exit error and output, so
+// each class is represented by the text `cenci run` prints for its sentinel
+// (internal/run's ErrAgentDisabled, ErrMissingTemplate, ErrAdapterUnavailable;
+// the run package imports this one, so the sentinels cannot be imported here).
+// ErrMissingTemplate cannot be produced through the cenci binary, because
+// `cenci babysit` rejects unknown agents at parse and file config cannot remove
+// a built-in template, so this table is where its invariance is pinned.
+// The success row is the control: the same fields DO advance when the launch
+// succeeds, so the unchanged assertions cannot pass vacuously.
+func TestLaunchRefusalLeavesRepairStateUnchanged(t *testing.T) {
+	const staleSHA = "old-sha"
+	for _, tc := range []struct {
+		name string
+		// runOutput is the `cenci run` output; empty means the launch succeeds.
+		runOutput string
+		// wantErr is the marker the refusal text must surface in tick's error.
+		wantErr string
+	}{
+		{
+			name:      "agent disabled",
+			runOutput: "cenci run: agent disabled: OpenCode is temporarily disabled",
+			wantErr:   "agent disabled",
+		},
+		{
+			name:      "missing template",
+			runOutput: `cenci run: missing launch template: no workflow "ci-repair" for agent "codex"`,
+			wantErr:   "missing launch template",
+		},
+		{
+			name:      "adapter unavailable",
+			runOutput: `cenci run: codex adapter unavailable: cenci@cenci is disabled in Codex (workflow "ci-repair"); install or repair it with ` + "`codex plugin add cenci@cenci`",
+			wantErr:   "codex adapter unavailable",
+		},
+		{
+			name: "launch succeeds (control)",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Automerge on for the refusal rows so the failure is recorded as
+			// reasonWorkflowLaunchFailed; off for the control, so its tick does
+			// not spend extra scripted gh calls on the automerge chain.
+			withFleetAutomergeEnabled(t, tc.runOutput != "")
+			var calls [][]string
+			withCommands(t, []string{openPR(), `[{"bucket":"fail","name":"test","state":"FAILURE"}]`, `[]`, `[]`}, &calls)
+			command = func(name string, args ...string) ([]byte, error) {
+				calls = append(calls, append([]string{name}, args...))
+				if tc.runOutput != "" {
+					return []byte(tc.runOutput), errors.New("exit status 1")
+				}
+				return nil, nil
+			}
+
+			s := State{
+				PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 300, CurrentDelaySeconds: 900,
+				LaunchSession: "work", LaunchDir: "/repo/root",
+				FixAttempts: 1, RepairPending: true, LastRepairedSHA: staleSHA,
+			}
+			if tc.runOutput != "" {
+				// Feedback bookkeeping is only meaningful to preserve on the
+				// refusal rows; the control tick would otherwise reconcile it
+				// against GitHub, which this scripted gh does not serve.
+				s.PendingKeys = []string{"comment:5", "comment:6"}
+				s.LaunchedKeys = []string{"comment:5"}
+			}
+			before := repairFieldsOf(s)
+
+			_, _, err := tick(&s)
+
+			args, found := launchCallArgs(calls, "ci-repair")
+			if !found {
+				t.Fatalf("no ci-repair launch was attempted: %#v", calls)
+			}
+			assertFlagValue(t, args, "--agent", "codex")
+			after := repairFieldsOf(s)
+
+			if tc.runOutput == "" {
+				if err != nil {
+					t.Fatalf("tick: %v", err)
+				}
+				// The control tick reconciles an empty feedback set, which may
+				// turn nil key slices into empty ones; only emptiness matters.
+				if after.FixAttempts != 2 || !after.RepairPending || after.LastRepairedSHA != "abc" ||
+					len(after.PendingKeys) != 0 || len(after.LaunchedKeys) != 0 {
+					t.Fatalf("a successful launch must advance the counters to {2 true abc [] []}, got %+v", after)
+				}
+				return
+			}
+
+			if err == nil {
+				t.Fatal("tick: err = nil, want the refused launch to fail the tick")
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("tick err = %q, want it to carry the refusal %q", err.Error(), tc.wantErr)
+			}
+			if !reflect.DeepEqual(after, before) {
+				t.Fatalf("a refused launch changed repair state:\n got %+v\nwant %+v", after, before)
+			}
+			if s.AutomergeReason != reasonWorkflowLaunchFailed {
+				t.Fatalf("AutomergeReason = %q, want %q", s.AutomergeReason, reasonWorkflowLaunchFailed)
+			}
+		})
 	}
 }

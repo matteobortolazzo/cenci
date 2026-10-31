@@ -29,6 +29,23 @@ type WorkflowTemplate struct {
 	// replaces the host command. It has the same placeholder substitutions.
 	// This lets host CLI flags follow a sandbox launcher's passthrough marker.
 	SandboxArgs []string `json:"sandboxArgs,omitempty"`
+
+	// adapter is the flow-plugin file, relative to the plugin root, that makes
+	// this built-in workflow runnable in its client: skills/<wf>/SKILL.md for
+	// Claude and portable skills, skills/<wf>/codex.md for a Codex workflow
+	// with a native companion. It is set only by builtinConfig(). Unexported
+	// on purpose: encoding/json skips it, and merge() never copies it from a
+	// file, so no config can change or invent an adapter (#1237).
+	adapter string
+}
+
+// portable marks a Codex workflow whose flow skill has no codex.md companion
+// and runs from its portable SKILL.md. Used only as `codexWF("<wf>").portable()`
+// so the `codexWF("<name>")` call shape that
+// flow/tests/dispatch-target-invocable.test.sh parses stays intact.
+func (t WorkflowTemplate) portable() WorkflowTemplate {
+	t.adapter = strings.TrimSuffix(t.adapter, "codex.md") + "SKILL.md"
+	return t
 }
 
 // AgentConfig describes how to launch one agent CLI.
@@ -66,9 +83,10 @@ type FileConfig struct {
 	path string
 }
 
-// Sentinels for the pre-spawn failure classes BuildCommand reports. Callers
-// (dispatch, babysit) detect them with errors.Is; none of them ever wraps
-// ErrWindowSpawned because nothing has been spawned yet.
+// Sentinels for the pre-spawn failure classes BuildCommand and Run report
+// (the first three come from BuildCommand, ErrAdapterUnavailable from Run).
+// Callers (dispatch, babysit) detect them with errors.Is; none of them ever
+// wraps ErrWindowSpawned because nothing has been spawned yet.
 var (
 	// ErrAgentDisabled marks a launch of a built-in-disabled agent.
 	ErrAgentDisabled = errors.New("agent disabled")
@@ -78,6 +96,13 @@ var (
 	// ErrSandboxUnavailable marks a sandbox request the agent cannot satisfy
 	// because it has no usable sandboxCommand.
 	ErrSandboxUnavailable = errors.New("sandbox unavailable")
+	// ErrAdapterUnavailable marks a host (sandbox off) Codex launch of a
+	// built-in workflow refused before spawn because the installed cenci@cenci
+	// Codex plugin is missing, disabled, lacks the workflow's declared adapter,
+	// or the probe could not tell (#1237). It is raised by Run, not
+	// BuildCommand (which stays a pure resolver), and never wraps
+	// ErrWindowSpawned.
+	ErrAdapterUnavailable = errors.New("codex adapter unavailable")
 )
 
 // DisabledAgent reports whether launches of agent are refused and why. It
@@ -124,6 +149,24 @@ func BuiltinCapabilities() []Capability {
 		}
 	}
 	return caps
+}
+
+// Adapter returns the flow-plugin file this capability declares (see
+// WorkflowTemplate.adapter), or "" for a pair that is not a built-in capability.
+func (c Capability) Adapter() string {
+	adapter, _ := BuiltinAdapter(c.Agent, c.Workflow)
+	return adapter
+}
+
+// BuiltinAdapter returns the adapter declared by the built-in capability
+// (agent, workflow). ok is false for a disabled agent, an unknown pair, or a
+// user-defined workflow; file config never changes the answer.
+func BuiltinAdapter(agent, workflow string) (adapter string, ok bool) {
+	if !BuiltinCapability(agent, workflow) {
+		return "", false
+	}
+	adapter = builtinConfig().Agents[agent].Workflows[workflow].adapter
+	return adapter, adapter != ""
 }
 
 // BuiltinCapability reports whether (agent, workflow) is a built-in template of
@@ -206,7 +249,10 @@ func CapabilityTableMarkdown() string {
 // Fresh maps are constructed on each call so callers may mutate the result freely.
 func builtinConfig() FileConfig {
 	claudeWF := func(wf string) WorkflowTemplate {
-		return WorkflowTemplate{Args: []string{"--", "/cenci:" + wf + " {ticket}"}}
+		return WorkflowTemplate{
+			Args:    []string{"--", "/cenci:" + wf + " {ticket}"},
+			adapter: "skills/" + wf + "/SKILL.md",
+		}
 	}
 	// A Codex sandbox launch must name its agent: `cenci open` reads a leading
 	// non-flag word as a shortcut and otherwise defaults to Claude, so the
@@ -216,6 +262,7 @@ func builtinConfig() FileConfig {
 		return WorkflowTemplate{
 			Args:        []string{prompt},
 			SandboxArgs: []string{"--agent", "codex", "--", prompt},
+			adapter:     "skills/" + wf + "/codex.md",
 		}
 	}
 	return FileConfig{
@@ -236,6 +283,7 @@ func builtinConfig() FileConfig {
 					"merge-repair": {
 						Args:        []string{"--print", "--", "/cenci:merge-repair {ticket}"},
 						SandboxArgs: []string{"--", "--print", "/cenci:merge-repair {ticket}"},
+						adapter:     "skills/merge-repair/SKILL.md",
 					},
 				},
 			},
@@ -247,7 +295,9 @@ func builtinConfig() FileConfig {
 					"implement": codexWF("implement"),
 					"review":    codexWF("review"), "address-review": codexWF("address-review"),
 					"refactor": codexWF("refactor"), "sync": codexWF("sync"),
-					"maintain": codexWF("maintain"), "babysit": codexWF("babysit"), "babysit-attention": codexWF("babysit-attention"), "ci-repair": codexWF("ci-repair"),
+					"maintain": codexWF("maintain"),
+					// Babysit has no codex.md: it runs from its portable SKILL.md.
+					"babysit": codexWF("babysit").portable(), "babysit-attention": codexWF("babysit-attention"), "ci-repair": codexWF("ci-repair"),
 				},
 			},
 			// OpenCode is disabled (see DisabledAgent). The entry keeps its
