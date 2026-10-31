@@ -207,7 +207,12 @@ safety properties, not skill authoring generally.
   bump every hard-coded aggregate file-count floor in the suites that scan that skill
   (`skill-convention-contract.test.sh`, `board-labels-drift-contract.test.sh`,
   `settings-permissions.test.sh`) in the same change: a stale floor lets the new files
-  drop out of retired-pattern scans without any failure (#1344).
+  drop out of retired-pattern scans without any failure (#1344). Likewise, when contract
+  prose branches on a helper's state field (e.g., a checkpoint `status` vs. `phase`),
+  check the wording against the helper's actual enum and field semantics in its source
+  (`codex/checkpoint.mjs`) before writing or pinning it: a phrase-only contract test
+  locks in a wrong predicate without detecting it, so only review catches it (#1234:
+  "`complete` is a status, not a phase").
 - When a skill's gate or authorization logic defines multiple boolean signals or decision
   points, ensure each signal's prose description is distinct and unambiguous — e.g.,
   "per-child frontend status" (childIsFrontend) vs. "design-only child from a split"

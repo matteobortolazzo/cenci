@@ -45,7 +45,7 @@ func TestBabysitCodexLaunchResolvesToSandboxAgentArgv(t *testing.T) {
 		name, workflow, ticket, prompt string
 		seed                           func(h *chainHarness)
 	}{
-		{"address-review", "address-review", "103", "/plan\n$cenci:address-review 103",
+		{"address-review", "address-review", "103", "$cenci:address-review 103",
 			func(h *chainHarness) { h.seedReview(103, "reviewer", "CHANGES_REQUESTED", "2026-01-01T00:00:00Z") }},
 		{"ci-repair", "ci-repair", ciRepairPrompt, "$cenci:ci-repair " + ciRepairPrompt,
 			func(h *chainHarness) { h.seedChecks(103, ghCheck{Bucket: "fail", Name: "build", State: "FAILURE"}) }},

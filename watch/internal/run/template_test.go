@@ -148,14 +148,14 @@ func TestCodexNativeWorkflowTemplates(t *testing.T) {
 	// --agent codex --` as one verbatim element, with an explicit model (flag
 	// or agents.codex.model) injected before the agent flag.
 	workflows := []struct{ workflow, prompt string }{
-		{"configure", "/plan\n$cenci:configure 42"},
+		{"configure", "$cenci:configure 42"},
 		{"refine", "$cenci:refine 42"},
-		{"implement", "/plan\n$cenci:implement 42"},
+		{"implement", "$cenci:implement 42"},
 		{"review", "$cenci:review 42"},
-		{"address-review", "/plan\n$cenci:address-review 42"},
-		{"refactor", "/plan\n$cenci:refactor 42"},
+		{"address-review", "$cenci:address-review 42"},
+		{"refactor", "$cenci:refactor 42"},
 		{"sync", "$cenci:sync 42"},
-		{"maintain", "/plan\n$cenci:maintain 42"},
+		{"maintain", "$cenci:maintain 42"},
 		{"babysit", "$cenci:babysit 42"},
 		{"babysit-attention", "$cenci:babysit-attention 42"},
 		{"ci-repair", "$cenci:ci-repair 42"},
@@ -195,18 +195,26 @@ func TestCodexNativeWorkflowTemplates(t *testing.T) {
 	}
 }
 
-func TestCodexApplyStageLeavesPlanMode(t *testing.T) {
+// #1234: the launcher never stages Plan mode. Whatever the target says (a bare
+// ticket, a persist or apply step, a plan path), the Codex prompt is the bare
+// `$cenci:<wf> <target>`; the planning companion's own self-check asks the
+// user for `/plan`.
+func TestCodexPromptNeverStagesPlanMode(t *testing.T) {
 	cfg := builtinConfig()
-	for _, workflow := range []string{"configure", "implement", "address-review", "refactor", "maintain"} {
-		for _, target := range []string{"apply .plans/42.md", "resume .plans/42.md", ".plans/42.md"} {
+	for _, workflow := range wantCodexWorkflows {
+		for _, target := range []string{"42", "apply 42", "persist 42", ".plans/42.md"} {
 			for _, sandbox := range []bool{false, true} {
 				t.Run(workflow+"/"+target+"/sandbox="+strconv.FormatBool(sandbox), func(t *testing.T) {
 					argv, err := cfg.BuildCommand("codex", workflow, target, "", sandbox)
 					if err != nil {
 						t.Fatal(err)
 					}
-					if got, want := argv[len(argv)-1], "$cenci:"+workflow+" "+target; got != want {
+					got, want := argv[len(argv)-1], "$cenci:"+workflow+" "+target
+					if got != want {
 						t.Fatalf("prompt = %q, want %q", got, want)
+					}
+					if strings.Contains(got, "/plan") {
+						t.Fatalf("prompt %q stages Plan mode", got)
 					}
 				})
 			}

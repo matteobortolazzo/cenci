@@ -20,19 +20,21 @@ Explicitly mention `$cenci:configure`, `$cenci:refine`, `$cenci:implement`,
 `$cenci:review`, `$cenci:address-review`, `$cenci:refactor`, `$cenci:sync`,
 `$cenci:maintain`, or `$cenci:babysit`.
 
-The staged procedures are under active development. Their intended contract is: planning workflows enter `/plan`, gather material choices, and produce an approved plan
-without mutations. A second normal-mode invocation persists plans, updates GitHub, and
-executes. Implementation uses `.cenci/checkpoints/`, generated `.codex/agents/*.toml`,
-and a native goal armed only after plan approval. Missing custom agents fall back to
-built-in workers with the same bounded role prompt.
+The staged procedures are under active development. Their intended contract is: planning workflows plan only in Plan mode, gather material choices, and produce an approved plan
+without mutations. A persist step then writes the plan artifact and its checkpoint, and a
+fresh `apply` verifies both before it updates GitHub and executes; see
+[Plan, persist and apply](#plan-persist-and-apply). Implementation uses `.cenci/checkpoints/`,
+generated `.codex/agents/*.toml`, and a native goal armed only after plan approval.
+Missing custom agents fall back to built-in workers with the same bounded role prompt.
 
-Refinement can complete in one normal-mode invocation: it asks material questions,
-validates the proposal and applies it without a second confirmation by default.
-`refinement.confirmBeforeApply: true` restores final review in that invocation.
-Explicit `/plan` remains read-only. Automerge grants are separately controlled by
-`refinement.automerge: "off" | "eligible"`, regardless of planning autonomy.
+Refinement follows the same handoff. Plan mode asks the material questions, validates the
+proposal and renders it; `apply` re-fetches the ticket, runs the pre-write checks and
+writes. `refinement.confirmBeforeApply: true` restores final review in `apply`, and false
+or absent does not ask again there. Explicit `/plan` remains read-only. Automerge grants
+are separately controlled by `refinement.automerge: "off" | "eligible"`, regardless of
+planning autonomy.
 
-In ticket mode, Codex implement records `cenci pipeline` stages and resumes a crashed `apply` from its recorded stage, the same table the Claude Code procedure follows. The checkpoint stays Codex's local goal and phase record and is never used for routing.
+In ticket mode, Codex implement records `cenci pipeline` stages and resumes a crashed `apply` from its recorded stage, the same table the Claude Code procedure follows. Beyond holding Codex's local goal and phase record, the checkpoint selects first-apply vs saved-plan apply only; the pipeline stage still picks the resume route.
 
 The babysit supervisor also dispatches two native procedures that are not meant to be
 invoked by hand: `$cenci:ci-repair` (repair one PR's failing CI) and
@@ -77,6 +79,58 @@ translation of `SKILL.md`. See
 a skill change must reconcile, and [`adapter-contract.md`](adapter-contract.md) for the
 narrower eight-property behavioral-parity contract the implement pipeline's Claude Code
 and Codex adapters both have to satisfy.
+
+## Plan, persist and apply
+
+The planning workflows (`configure`, `refine`, `implement`, `address-review`, `refactor`, `maintain`) share one handoff, specified in [`skills/codex-runtime/SKILL.md`](../skills/codex-runtime/SKILL.md) under **Approved-plan handoff**. `cenci run` no longer adds `/plan` to the prompt: Codex has no config key or flag that starts a session in Plan mode, so the workflow checks the active collaboration mode itself and does nothing outside Plan mode. A plan moves from Plan mode to a new process in three turns, with `implement` and ticket 42 as the example:
+
+```
+cenci run implement 42 --agent codex
+/plan $cenci:implement 42
+$cenci:implement persist 42
+cenci run implement apply 42 --agent codex
+```
+
+1. `cenci run implement 42 --agent codex` starts Codex in Default mode. The procedure refuses (see the self-check line below) and tells you to resend with `/plan`.
+2. `/plan $cenci:implement 42` plans in Plan mode. It asks the material questions and makes no project or GitHub mutation.
+3. After you approve the plan, `$cenci:implement persist 42`, sent in Default mode in the same session, writes only the plan artifact and the checkpoint (the artifact's path and sha256 digest) and prints the `apply` command. It makes no claim, label, worktree or GitHub write. Persist first checks that this session holds a Plan-mode-approved plan for the workflow and target, and checks for an existing checkpoint before it writes anything: a run in flight (checkpoint `status` `running` or `needs-input`) is refused with its resume `apply` command, plus a note that if that `apply` stops on `verify`, you can discard the run with `node "${PLUGIN_ROOT}/codex/checkpoint.mjs" clear <ckpt> <wf> <target>` and re-plan (`<ckpt>` is `.cenci/checkpoints/<wf>-<target>.json`).
+4. `cenci run implement apply 42 --agent codex`, or `$cenci:implement apply 42` in the same session, starts a fresh process. It runs `require-runtime.sh`, then `checkpoint.mjs verify`, and only then makes the workflow's mutations, resuming from the checkpoint's recorded gate: it never recreates a recorded worktree, re-applies a label or reopens a PR.
+
+Each workflow uses its own target, artifact and `apply` command. Artifacts live under `.plans/` (gitignored, local to the checkout). Paths are stored repo-relative and resolved against the main checkout of the current environment, so host and sandbox behave the same.
+
+The Plan-mode self-check applies to the planning request only. `persist` and `apply` run in Default mode and are exempt from it; they have their own checks (sent while Plan mode is still active they are refused with `leave Plan mode and resend`, and `apply` stops when `checkpoint.mjs verify` fails).
+
+| Workflow | Target | Artifact | Apply command |
+|---|---|---|---|
+| `configure` | `repo` | `.plans/codex/configure-repo.md` | `cenci run configure apply repo --agent codex` |
+| `refine` | ticket number | `.plans/codex/refine-<ticket>.md` | `cenci run refine apply <ticket> --agent codex` |
+| `implement` | ticket id (task slug in ticketless mode) | `.plans/<ticket>-<slug>.md` | `cenci run implement apply <ticket> --agent codex` |
+| `address-review` | PR number | `.plans/codex/address-review-<pr>.md` | `cenci run address-review apply <pr> --agent codex` |
+| `refactor` | `repo` | `.plans/codex/refactor-repo.md` | `cenci run refactor apply repo --agent codex` |
+| `maintain` | `<mode>` or `<mode>-<scope>` | `.plans/codex/maintain-<mode>[-<scope>].md` | `cenci run maintain apply <mode>[-<scope>] --agent codex` |
+
+**Explicit errors.** Nothing falls back silently; each stop names its remedy.
+
+- The Plan-mode self-check prints one line and makes no tool call, so nothing is written: `cenci: $cenci:<wf> plans only in Plan mode — type /plan and resend: /plan $cenci:<wf> <target>`. A `persist` or `apply` sent while Plan mode is still active is refused with `leave Plan mode and resend`.
+- `persist` in a session with no Plan-mode-approved plan for that workflow and target (for example a fresh Default-mode session launched with `cenci run <wf> persist <target>`) makes no tool call and writes nothing: `cenci: no approved plan in this session — type /plan and resend: /plan $cenci:<wf> <target>`.
+- Codex itself can refuse `/plan`: it reports "Collaboration modes are disabled" when the feature is off and "Plan mode unavailable" when Plan mode cannot be entered right now. cenci does not plan in Default mode as a fallback; enable collaboration modes or update Codex, then resend. The native evidence for these messages is tracked in #1235.
+- `require-runtime.sh` stops the persist and apply steps before any write when Node.js 18 or newer is missing: `cenci: Codex workflow runtime unavailable — Node.js 18+ not found on PATH (found: <none|unparseable|version>). Install Node.js 18 or newer, then rerun; no checkpoint, workflow, or GitHub state was changed.`
+- `checkpoint.mjs verify <path> <workflow> <target>` is read-only and stops `apply` before any write with one stderr line of the form `checkpoint: <file>: <problem>; <remedy>`. The `<problem>; <remedy>` part is one of these (exit 3 for the first, exit 2 for the rest):
+  - `no checkpoint found; no approved plan was persisted — plan in Plan mode, then persist`
+  - `path does not match workflow and target; the file name must be <wf>-<target>.json`
+  - `checkpoint records a different workflow or target than requested; it is never reset silently; clear cannot remove it either, so remove the file by hand if it is stale`
+  - `legacy v1 checkpoint records no approved plan; plan in Plan mode, then persist`
+  - `checkpoint is complete (terminal); plan in Plan mode, then persist a new plan`
+  - `checkpoint records no approved plan; plan in Plan mode, then persist`
+  - `plan artifact path is not under .plans/; use a repo-relative path such as .plans/<name>.md`
+  - `plan artifact missing; plan in Plan mode, then persist`
+  - `plan artifact unreadable; plan in Plan mode, then persist again to rewrite it`
+  - `plan artifact changed since approval (digest mismatch); plan in Plan mode, then persist again`
+- A malformed checkpoint, an unknown `schemaVersion` or an invalid field also exits 2, and a usage mistake (`verify requires <workflow> <target>`, `verify takes no <phase>`, `digest requires <plan-path>`, `too many arguments`) exits 2.
+
+A Claude Code `.plans/<id>-<slug>.md` file with no Codex checkpoint is not an approved plan: Codex `apply` stops with zero writes and tells you to plan in Codex. Planning again over a checkpoint whose `status` is `planned` (approved, never applied) or `complete` (a finished run keeps its last real phase, such as `pr`) replaces it; a run in flight (`status` `running` or `needs-input`) is refused with its resume `apply` command, and clearing it takes an explicit, user-run `checkpoint.mjs clear` (see step 3). `apply` never clears a checkpoint: when it stops on `verify` because of a leftover or terminal checkpoint, run that `clear` yourself, then plan and persist again.
+
+**Unattended launches.** Babysit's `address-review` and dispatch's `implement` launch Codex without a human in Plan mode, so they show the self-check line and end their turn instead of planning. That is intended: approving a plan always needs a person, and before this handoff those launches did not reliably plan either. Plan and persist in an attended session, then let `cenci run <workflow> apply <target> --agent codex` resume unattended.
 
 ## Workflow runtime
 

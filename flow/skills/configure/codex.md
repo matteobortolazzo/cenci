@@ -1,10 +1,12 @@
 # Codex configure procedure
 
-Read `project-core` and `codex-runtime`. Enter `/plan`, inspect the repository, and gather
+Planning-request Plan-mode self-check first: before any other planning step, follow `codex-runtime`'s **Approved-plan handoff** (artifact `.plans/codex/configure-repo.md`, target `repo`).
+
+Read `project-core` and `codex-runtime`. In Plan mode, inspect the repository and gather
 configuration choices with Plan-mode questions. Produce a migration preview using
 `"${PLUGIN_ROOT}/scripts/migrate-project-core.sh"`; do not apply it in Plan mode. After approval,
-instruct the user to invoke `cenci run configure apply <checkpoint-id> --agent codex`;
-the approved plan remains in the prior conversation and the checkpoint records its digest. In normal mode,
+the persist step records the preview, the answers and the offered IDs in the approved-plan artifact,
+and the user continues with `cenci run configure apply repo --agent codex`. In apply,
 write `.cenci/config.json`, AGENTS/CLAUDE adapters, `.claude/settings.json`,
 and `.codex/agents/*.toml`; preserve unknown keys and diff-gate substantive guidance.
 
@@ -101,7 +103,7 @@ both. The procedure never reads, modifies, or writes ~/.config/cenci/config.json
 — every mutation goes through a single combined `cenci dispatch enroll --dir
 '<main-checkout>' --session '<name>'` call, delegation-only, matching the Claude
 procedure. Because the fleet dispatch enroll is a mutation and therefore runs only in the apply step
-(`cenci run configure apply <checkpoint-id> --agent codex`), Plan mode
+(`cenci run configure apply repo --agent codex`), Plan mode
 gathers the enroll/session answers but never calls `cenci dispatch enroll` itself —
 never during `/plan`.
 
@@ -150,9 +152,9 @@ only after a successful `cenci dispatch enroll` or an explicit "No"; an enroll f
 On a delta run, Codex refreshes a valid marker-managed `.cenci/Dockerfile` without asking, and leaves a `.cenci/Dockerfile` with no markers or malformed markers untouched and reported;
 `--all` restores the Overwrite/Skip/Show prompt. The Q12 dispatch session repair is still asked on a delta run. Board Config's
 suggest-or-skip analyzer only reports on a delta run. Plan mode and the apply step split the work: the resolver runs read-only during `/plan`; the ledger, overlay and Dockerfile writes happen only in the apply step
-(`cenci run configure apply <checkpoint-id> --agent codex`). The offered IDs and the collected
+(`cenci run configure apply repo --agent codex`). The offered IDs and the collected
 answers (the resolver's `ask` and `carried`, the effective sandbox flags, and the question 11/13/14/15/16/17 answers and the independent fleet 18–20 choices)
-travel in the plan/apply checkpoint; the apply step reads them from there and never re-derives
+travel in the approved-plan artifact; the apply step reads them from there and never re-derives
 them from the resolver, whose result may differ by then.
 
 The apply step's report carries the same obligations as the final report in `phases/commit-pr.md`: the
@@ -173,7 +175,7 @@ no automerge block — while question 15 recommends `lean` and an absent `refine
 for hand review), never a field-by-field sub-wizard. Question 15 (`refinement`) mirrors question 13 with the options "Switch to `lean` (Recommended)" and "Keep `interactive`"; under `--all` with `refinement` present it offers "Keep current (Recommended)" or the switch to the other value, and any value other than the exact string `lean` is treated as `interactive`. Declining question 15 writes no `refinement` key. Refinement autonomy controls question selection only; confirmation and automerge grants use questions 16 and 17 independently. Because all three keys land in the apply
 step's config write, never during `/plan`, Plan mode only gathers the answers and previews the
 scaffold; the actual `.cenci/config.json` write happens in
-`cenci run configure apply <checkpoint-id> --agent codex`, same as every other field.
+`cenci run configure apply repo --agent codex`, same as every other field.
 
 Independent controls mirror questions 16–17 in `phases/autonomy-settings.md` and 18–20 in `phases/fleet-enrollment.md` using the client's
 available Plan-mode question mechanism. `refinement.confirmBeforeApply` defaults to
@@ -189,7 +191,7 @@ Both leaves have independent stable question IDs in `question-keys.json`: an exi
 `refinement` object or old `refinement` ledger entry never suppresses either leaf.
 Delta runs offer absent/unoffered leaves; carried leaves are preserved, and `--all`
 re-offers each with its current value first. Resolver-failure full runs carry present
-leaves. Carry both collected answers and offered IDs in the plan/apply checkpoint.
+leaves. Carry both collected answers and offered IDs in the approved-plan artifact.
 After the Q13/14/15 overlays and before the ledger overlay, apply the exact
 `cenci:configure-confirm-before-apply` and `cenci:configure-refinement-automerge`
 marker-bounded jq programs from `phases/autonomy-settings.md`, with `--argjson confirmBeforeApply

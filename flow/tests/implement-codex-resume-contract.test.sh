@@ -10,11 +10,11 @@
 #     watch/internal/pipeline/statemachine.go (fails closed on zero matches)
 #     has a row in the stage -> route table; header and six rows are verbatim.
 #   - AC5-AC7: apply `plan-check` sits after the blockedBy gate and before the
-#     plan-file persist; both stop texts sit before the persist anchor.
+#     plan registration paragraph (#1234); both stop texts sit before its anchor.
 #   - AC8-AC12: attach, resume line, baseline skip, resume brief
 #     (byte-identical to phase-3-test-red.md), second-resume sentence and the
 #     review-entry skip list.
-#   - AC13/AC14: re-plan reset -> prepare before persist; the `/plan`
+#   - AC13/AC14: re-plan reset -> prepare before plan registration; the `/plan`
 #     read-only plan-check (no writing `cenci pipeline` verb).
 #   - AC15: no AskUserQuestion in the routing text; the stale and multiple
 #     prompts use "the client's available user-input mechanism".
@@ -292,8 +292,8 @@ assert_order() {
 
 ROUTING_LEAD='**Resume routing (apply, ticket mode).**'
 LIFECYCLE_LEAD='**Pipeline lifecycle (ticket mode).**'
-PERSIST_PREFIX='In normal apply mode persist'
-PERSIST_ANCHOR='persist `.plans/'
+PERSIST_PREFIX='In normal apply mode `verify` has already proved the persisted plan'
+PERSIST_ANCHOR='has already proved the persisted plan'
 PLAN_SENTENCE_PREFIX='In ticket mode, `/plan` also runs'
 PLAN_END_PREFIX='Then return an approved plan'
 DISPATCH_LEAD='**Implementation dispatch (apply only).**'
@@ -418,9 +418,9 @@ require_extract REPLAN_BULLET "codex.md: could not locate the re-plan reset bull
 if [[ -n "${REPLAN_BULLET:-}" ]]; then
   assert_order "codex.md re-plan reset bullet" "${REPLAN_BULLET}" 'cenci pipeline reset <id>' 'cenci pipeline prepare <id>'
   assert_contains "${REPLAN_BULLET}" '`pipeline.worktreePath` is non-empty' "the reset must be gated on a non-empty pipeline.worktreePath"
-  assert_contains "${REPLAN_BULLET}" 'then persist the new plan' "the reset and prepare must precede persisting the new plan"
-  assert_contains "${REPLAN_BULLET}" 'A failure of that `reset` or `prepare` (a non-empty `errors[]`, a non-zero exit, or empty or unparseable output) stops the run before the persist step and reports it.' \
-    "a failing re-plan reset or prepare must stop the run before the persist step"
+  assert_contains "${REPLAN_BULLET}" 'then continue with the verified plan' "the reset and prepare must precede continuing with the verified plan"
+  assert_contains "${REPLAN_BULLET}" 'A failure of that `reset` or `prepare` (a non-empty `errors[]`, a non-zero exit, or empty or unparseable output) stops the run before the plan registration step and reports it.' \
+    "a failing re-plan reset or prepare must stop the run before the plan registration step"
   assert_order "codex.md re-plan bullet before persist" "${CODEX}" "${REPLAN_BULLET_PREFIX}" "${PERSIST_ANCHOR}"
 fi
 
@@ -444,8 +444,15 @@ if [[ -n "${PLAN_SENTENCE:-}" ]]; then
   assert_lacks "${PLAN_SENTENCE}" 'Stop before mutations' "/plan text must not carry the stop anchor (parity marker order)"
 fi
 
-assert_contains "${CODEX}" 'Stop before mutations and tell the user to continue with `apply` in this same session (a new-plan apply); `cenci run implement apply <ticket> --agent codex` is only for resuming an already-saved plan after a crash.' \
-  "the /plan handoff must continue with apply in the same session and keep the launcher form for a saved-plan crash resume"
+assert_contains "${CODEX}" 'Stop before mutations: after approval the next normal-mode turn in this same session runs only `codex-runtime`'"'"'s persist step (`$cenci:implement persist <ticket>`)' \
+  "the /plan handoff must stop before mutations and leave the next normal-mode turn to the persist step only"
+assert_contains "${CODEX}" 'which writes `.plans/<ticket>-<slug>.md` only once it contains all three required headings (`## Ticket Details`, `## Implementation Plan`, `## Architectural Context` — the `requiredPlanSections` list in `watch/internal/pipeline/planfile.go`) and then the checkpoint; if any heading is missing it stops and writes neither, reporting the missing heading(s).' \
+  "the persist step must check the three required headings before writing the artifact and the checkpoint"
+assert_contains "${CODEX}" 'Then tell the user to continue with `cenci run implement apply <ticket> --agent codex` (or `$cenci:implement apply <ticket>` in the same session), which is also how a saved plan resumes after a crash.' \
+  "the persist handoff must print the launcher apply form, which also resumes a saved plan after a crash"
+assert_contains "${CODEX}" 'a checkpoint whose `phase` is `planned` is a new-plan apply' \
+  "a verified checkpoint at phase planned must define a new-plan apply"
+assert_contains "${CODEX}" 'any later phase is a saved-plan apply' "a verified checkpoint past planned must define a saved-plan apply"
 
 # =====================================================================
 # 6. AC5-AC9, AC15: the resume-routing block
@@ -521,7 +528,7 @@ if [[ -n "${ROUTING:-}" ]]; then
   assert_contains "${ROUTING}" "${UNKNOWN_STOP_TEXT}" "the unknown-stage stop line must be pinned"
   assert_contains "${ROUTING}" 'then every `warnings[]` entry' "the unknown-stage stop must print every warnings[] entry"
   assert_contains "${ROUTING}" 'a missing or unreadable stage renders as `(missing)`' "a missing stage must render as (missing)"
-  assert_contains "${ROUTING}" 'Both stops run before the persist step and touch nothing: no transition, no checkpoint, no worktree call and no label write.' \
+  assert_contains "${ROUTING}" 'Both stops run before the plan registration step and touch nothing: no transition, no checkpoint advance, no worktree call and no label write.' \
     "both stops must touch nothing"
   assert_contains "${ROUTING}" 'Attach routes apply only when `pipeline.worktreeRegistered` is true' \
     "attach routes must apply only when worktreeRegistered is true"
@@ -538,13 +545,15 @@ if [[ -n "${PERSIST_PARA:-}" ]]; then
     "${PERSIST_ANCHOR}" \
     'cenci pipeline prepare <id>' 'cenci pipeline plan <id>' 'cenci pipeline plan <id> --approve' 'cenci pipeline artifact <id> --plan' \
     '`checkpoint.mjs advance`' 'cenci pipeline worktree <id> --slug <slug>' 'cenci pipeline execute <id>' 'run-gate.sh'
-  assert_contains "${PERSIST_PARA}" 'cenci pipeline artifact <id> --plan <plan-path>` in that order, where `<plan-path>` is the `.plans/<id>-<slug>.md` just persisted on a new-plan apply, or the saved plan file from `artifacts[0]` of the `plan-check` result' \
-    "the persist step must pass the plan path to artifact --plan for both apply kinds"
-  assert_contains "${PERSIST_PARA}" 'a new-plan apply only' "the persist step must be scoped to a new-plan apply"
-  assert_contains "${PERSIST_PARA}" 'stop before the checkpoint/label' "the heading hard stop must stay before the checkpoint/label mutations"
-  assert_contains "${PERSIST_PARA}" '`checkpoint.mjs advance` when a checkpoint file already exists on an attach route, never `init`' \
-    "an existing checkpoint on an attach route must be advanced, never re-created with init"
-  assert_contains "${PERSIST_PARA}" '`checkpoint.mjs init` otherwise' "a missing checkpoint must be created with init"
+  assert_contains "${PERSIST_PARA}" 'cenci pipeline artifact <id> --plan <plan-path>` in that order, where `<plan-path>` is the `.plans/<id>-<slug>.md` the persist step wrote on a new-plan apply, or the saved plan file from `artifacts[0]` of the `plan-check` result' \
+    "the apply step must pass the plan path to artifact --plan for both apply kinds"
+  assert_contains "${PERSIST_PARA}" 'a new-plan apply uses the file the persist step wrote at `resolved.planPath` and apply never rewrites it' \
+    "a new-plan apply must use the persisted plan and never rewrite it"
+  assert_contains "${PERSIST_PARA}" 'The three-heading check ran in the persist step, so apply neither writes the plan nor repeats that check.' \
+    "the heading check belongs to the persist step, not to apply"
+  assert_contains "${PERSIST_PARA}" '`checkpoint.mjs advance` to `worktree` on a new-plan apply, or to `verify`'"'"'s `nextPhase` on an attach route, never `init`' \
+    "the checkpoint must be advanced to worktree (or nextPhase on an attach route) before the worktree call, never re-created with init"
+  assert_order "codex.md checkpoint advance before the worktree call" "${PERSIST_PARA}" 'Then advance the checkpoint before any worktree call' 'Then create the worktree'
   assert_contains "${PERSIST_PARA}" 'cenci pipeline worktree <id> --attach <worktreePath>' "an attach route must run worktree --attach <worktreePath>"
   assert_contains "${PERSIST_PARA}" 'which applies only when `pipeline.worktreeRegistered` is true' "--attach must apply only when worktreeRegistered is true"
   assert_contains "${PERSIST_PARA}" 'Resuming #<id> from stage <stage> in <worktreePath> (branch <branch>, <n> commits ahead of main, <m> uncommitted files)' \

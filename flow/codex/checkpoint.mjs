@@ -4,6 +4,8 @@
 //   checkpoint.mjs <init|advance|block|complete|get|clear> <path> [<workflow> <target> [<phase>]]
 //                  [--plan-path P --plan-digest D] [--worktree W] [--gate G]
 //                  [--fallback role:worker]... [--goal created|skipped-active|unavailable] [--force]
+//   checkpoint.mjs verify <path> <workflow> <target>   (read-only: approved-plan handoff check)
+//   checkpoint.mjs digest <plan-path>                  (read-only: sha256 of a .plans/ artifact)
 //
 // Exit codes: 0 success, 1 unexpected I/O failure, 2 rejection or usage error, 3 missing state.
 // Every error is one `checkpoint: <file>: <problem>; <remedy>` line on stderr: no stack traces,
@@ -11,7 +13,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 
 const WORKFLOW_PHASES = {
   implement: ["planned", "worktree", "baseline", "tests", "implement", "refactor", "review", "docs", "pr"],
@@ -25,7 +27,7 @@ const WORKFLOW_PHASES = {
 };
 const STATUSES = ["planned", "running", "needs-input", "complete"];
 const GOALS = ["created", "skipped-active", "unavailable"];
-const COMMANDS = ["init", "advance", "block", "complete", "get", "clear"];
+const COMMANDS = ["init", "advance", "block", "complete", "get", "clear", "verify", "digest"];
 const V2_KEYS = [
   "schemaVersion", "workflow", "target", "phase", "status", "planPath", "planDigest",
   "worktree", "lastCompletedGate", "agentFallbacks", "goal", "updatedAt",
@@ -35,6 +37,7 @@ const FLAG_NAMES = Object.fromEntries(Object.entries(VALUE_FLAGS).map(([name, ke
 const META_FLAGS = ["planPath", "planDigest", "worktree", "gate", "fallback", "goal"];
 const FLAGS_BY_COMMAND = {
   init: META_FLAGS, advance: META_FLAGS, block: META_FLAGS, complete: META_FLAGS, get: [], clear: ["force"],
+  verify: [], digest: [],
 };
 
 const TARGET_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
@@ -42,7 +45,7 @@ const NAME_RE = /^[a-z][a-z0-9-]*$/;
 const DIGEST_RE = /^[0-9a-f]{64}$/;
 const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const MAX_FILE_BYTES = 1 << 20;
-const USAGE = "checkpoint.mjs <init|advance|block|complete|get|clear> <path> [<workflow> <target> [<phase>]] [flags]";
+const USAGE = "checkpoint.mjs <init|advance|block|complete|get|clear> <path> [<workflow> <target> [<phase>]] [flags] | verify <path> <workflow> <target> | digest <plan-path>";
 
 class Failure extends Error {
   constructor(exitCode, message) {
@@ -175,7 +178,7 @@ function identityFrom(positionals, command) {
   }
   const phases = WORKFLOW_PHASES[workflow];
   if (phase !== undefined) {
-    if (command === "get" || command === "clear") throw usageError(`${command} takes no <phase>`);
+    if (command === "get" || command === "clear" || command === "verify") throw usageError(`${command} takes no <phase>`);
     if (!phases.includes(phase)) {
       throw usageError(`"${printable(phase)}" is not a phase of workflow ${workflow} (expected one of ${phases.join(", ")})`);
     }
@@ -327,16 +330,58 @@ function readExisting(loc) {
   try {
     const opened = fs.fstatSync(fd);
     if (!opened.isFile()) throw fail(2, loc.label, "checkpoint is not a regular file", "remove it by hand if it is stale");
-    // Read at most one byte past the cap, so a file that grows after fstat is still bounded.
-    const buffer = Buffer.alloc(MAX_FILE_BYTES + 1);
-    let total = 0;
-    while (total < buffer.length) {
-      const count = fs.readSync(fd, buffer, total, buffer.length - total, null);
-      if (count === 0) break;
-      total += count;
-    }
-    if (total > MAX_FILE_BYTES) return { text: null };
-    return { text: buffer.toString("utf8", 0, total) };
+    const content = readCapped(fd);
+    return { text: content === null ? null : content.toString("utf8") };
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+// Reads at most one byte past the cap, so a file that grows after fstat is still bounded.
+// -> the content, or null when it exceeds MAX_FILE_BYTES.
+function readCapped(fd) {
+  const buffer = Buffer.alloc(MAX_FILE_BYTES + 1);
+  let total = 0;
+  while (total < buffer.length) {
+    const count = fs.readSync(fd, buffer, total, buffer.length - total, null);
+    if (count === 0) break;
+    total += count;
+  }
+  return total > MAX_FILE_BYTES ? null : buffer.subarray(0, total);
+}
+
+// The approved-plan artifact reader shared by `verify` and `digest`: a repo-relative regular file
+// under .plans/ of the main checkout, no symlinked component, read within the size cap.
+// -> { digest: <64 hex>, absolute }
+function readArtifact(main, rel, label) {
+  if (!validRelativePath(rel) || !rel.startsWith(".plans/")) {
+    throw fail(2, label, "plan artifact path is not under .plans/", "use a repo-relative path such as .plans/<name>.md");
+  }
+  const missing = () => fail(2, label, "plan artifact missing", "plan in Plan mode, then persist");
+  const unreadable = () => fail(2, label, "plan artifact unreadable", "plan in Plan mode, then persist again to rewrite it");
+  const absolute = path.join(main, rel);
+  let realDir;
+  try {
+    realDir = fs.realpathSync(path.dirname(absolute));
+  } catch (err) {
+    throw err.code === "ENOENT" || err.code === "ENOTDIR" ? missing() : unreadable();
+  }
+  // main is already a realpath, so any difference means a symlinked directory component.
+  if (realDir !== path.dirname(absolute)) throw unreadable();
+  let fd;
+  try {
+    // O_NOFOLLOW refuses a symlinked leaf (ELOOP); O_NONBLOCK keeps a FIFO from blocking the open.
+    fd = fs.openSync(absolute, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+  } catch (err) {
+    throw err.code === "ENOENT" ? missing() : unreadable();
+  }
+  try {
+    if (!fs.fstatSync(fd).isFile()) throw unreadable();
+    const content = readCapped(fd);
+    if (content === null) throw unreadable();
+    return { digest: createHash("sha256").update(content).digest("hex"), absolute };
+  } catch (err) {
+    throw err instanceof Failure ? err : unreadable();
   } finally {
     fs.closeSync(fd);
   }
@@ -575,10 +620,46 @@ function run(argv) {
   const { positionals, flags } = parseArgs(argv);
   const [command, rawPath, ...rest] = positionals;
   if (command === undefined || !COMMANDS.includes(command)) throw usageError(`unknown command${command === undefined ? "" : ` "${printable(command)}"`}`);
-  if (rawPath === undefined) throw usageError(`${command} requires <path>`);
+  if (rawPath === undefined) throw usageError(`${command} requires ${command === "digest" ? "<plan-path>" : "<path>"}`);
+
+  if (command === "digest") {
+    if (rest.length > 0) throw usageError("too many arguments");
+    validateMetadata(command, flags, undefined); // digest takes no flags
+    const result = readArtifact(resolveMainCheckout(rawPath), rawPath, rawPath);
+    process.stdout.write(`${result.digest}\n`);
+    return;
+  }
+
   const identity = identityFrom(rest, command);
   const meta = validateMetadata(command, flags, identity.workflow);
   const loc = locate(rawPath, rawPath, identity);
+
+  if (command === "verify") {
+    const info = load(loc, identity);
+    if (info === null) throw fail(3, loc.label, "no checkpoint found", "no approved plan was persisted — plan in Plan mode, then persist");
+    if (info.kind === "v1") throw fail(2, loc.label, "legacy v1 checkpoint records no approved plan", "plan in Plan mode, then persist");
+    const { state } = info;
+    if (state.status === "complete") throw fail(2, loc.label, "checkpoint is complete (terminal)", "plan in Plan mode, then persist a new plan");
+    if (state.planPath === null || state.planDigest === null) {
+      throw fail(2, loc.label, "checkpoint records no approved plan", "plan in Plan mode, then persist");
+    }
+    const artifact = readArtifact(loc.main, state.planPath, loc.label);
+    if (artifact.digest !== state.planDigest) {
+      throw fail(2, loc.label, "plan artifact changed since approval (digest mismatch)", "plan in Plan mode, then persist again");
+    }
+    // A null gate means only the persist step (phase planned) is done, so work starts after it.
+    const nextPhase = WORKFLOW_PHASES[state.workflow][Math.max(phaseIndex(state.workflow, state.lastCompletedGate), 0) + 1] ?? null;
+    out({
+      ...state,
+      resolved: {
+        mainCheckout: loc.main,
+        planPath: artifact.absolute,
+        worktree: state.worktree === null ? null : path.join(loc.main, state.worktree),
+      },
+      nextPhase,
+    });
+    return;
+  }
 
   if (command === "get") {
     const info = load(loc, identity);

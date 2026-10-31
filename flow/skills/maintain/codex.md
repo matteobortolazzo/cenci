@@ -1,11 +1,13 @@
 # Codex maintain procedure
 
+Planning-request Plan-mode self-check first: before any other planning step, follow `codex-runtime`'s **Approved-plan handoff** (artifact `.plans/codex/maintain-<mode>[-<scope>].md`, target `<mode>` or `<mode>-<scope>`).
+
 Read `project-core`, `codex-runtime`, `shell-rules`, `subagent-safety`, and `worktrees`.
-The planning invocation begins in `/plan`; Phases 1–5 are repository-read-only and make
+The planning turn runs in Plan mode; Phases 1–5 are repository-read-only and make
 no file, worktree, checkpoint, ticket, label, commit, push, or pull-request mutation.
 When the user approves an applying choice, return the approved finding IDs and repairs
-as the apply plan and instruct a second normal-mode invocation that passes that plan
-explicitly. Keep authenticated mutations and every user question in the root agent.
+as the apply plan; the persist step records it in the artifact and `apply` reads it from there.
+Keep authenticated mutations and every user question in the root agent.
 
 ## Phase 1 — Scope
 
@@ -84,7 +86,7 @@ Offer only choices supported by the mode and findings that actually ran:
 
 Report only is terminal: do not create a worktree, mutate files or GitHub, commit, push, or open a PR. For an applying choice, emit an explicit apply plan containing the mode,
 scope, completed/incomplete categories, selected finding IDs, and exact proposed repairs.
-The normal-mode invocation must receive this approved plan explicitly; it must not expand
+`apply` receives this approved plan only from the verified artifact; it must not expand
 the selection or silently substitute a new audit.
 
 ## Phase 6 — Apply
@@ -103,8 +105,8 @@ Resolve `<base>` first, before generating the run token: `git -C <repo-root> sym
 it errors because no remote HEAD is set, fall back to `main`. Carry `<base>` forward as
 literal text; the dedicated worktree branches from `<base>`, never a hardcoded `main`.
 
-Verify the normal-mode invocation includes the approved apply plan. Persist a maintain
-checkpoint, then generate and validate one run token following the shared worktree
+Verify `apply` read the approved apply plan from the artifact `verify` proved. Advance the maintain
+checkpoint to `worktree`, then generate and validate one run token following the shared worktree
 procedure; reject an empty, dot-only, traversal-containing, or non-portable token. Create
 the dedicated worktree from `<base>` and the verified repository root and record its
 resolved absolute path as `<worktree-path>`. Arm the native goal only after both the

@@ -228,10 +228,17 @@ spawn into a grouped session (non-zero exit, no window created). Pass an ungroup
 
 ### Configuration
 
-`cenci run refine <ticket> --agent codex` starts in normal mode on both the host
-and in the sandbox, so the questionnaire and validated update can complete in one
-invocation. Set `refinement.confirmBeforeApply: true` in the repository config to
-request final review. Explicit Codex Plan mode remains read-only.
+Every Codex workflow launches in Default mode, on both the host and in the
+sandbox: `cenci run <workflow> <target> --agent codex` sends the bare prompt
+`$cenci:<workflow> <target>` and never stages Plan mode. The planning workflows
+(`configure`, `refine`, `implement`, `address-review`, `refactor`, `maintain`)
+check the active collaboration mode themselves and, outside Plan mode, make no
+changes and ask you to type `/plan` and resend. Refine follows the same
+plan, persist and apply handoff as the others, and
+`refinement.confirmBeforeApply: true` still requests final review before it
+writes. Explicit Codex Plan mode remains read-only. An unattended Codex launch
+of a planning workflow (for example babysit's `address-review`) therefore stops
+at that message instead of planning.
 
 Built-in Go templates cover the Claude and Codex workflows below with zero config. An
 optional `config.json` (respecting `$XDG_CONFIG_HOME`, or `--config`) overrides the
