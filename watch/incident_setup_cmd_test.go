@@ -202,8 +202,8 @@ func (w *setupWorld) execSetup(t *testing.T, env []string, args ...string) setup
 	if perr != nil {
 		t.Fatal(perr)
 	}
-	defer stdinR.Close()
-	defer stdinW.Close()
+	defer func() { _ = stdinR.Close() }()
+	defer func() { _ = stdinW.Close() }()
 	cmd.Stdin = stdinR
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
@@ -1343,8 +1343,8 @@ exec '` + fakeAz + `' "$@"
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer pr.Close()
-	defer pw.Close()
+	defer func() { _ = pr.Close() }()
+	defer func() { _ = pw.Close() }()
 	ctl := exec.Command(filepath.Join(w.bin, "az"), "account", "show")
 	ctl.Env = []string{"PATH=" + os.Getenv("PATH"), "AZURE_CONFIG_DIR=control-dir"}
 	ctl.Stdin = pr
@@ -1395,7 +1395,7 @@ func TestIncidentSetupUnwritablePreviewExitsOne(t *testing.T) {
 	if err != nil {
 		t.Skipf("no /dev/full on this platform: %v", err)
 	}
-	defer full.Close()
+	defer func() { _ = full.Close() }()
 	w := newSetupWorld(t)
 	w.discoverAll()
 	cfg := w.writeConfig(t, nil)
