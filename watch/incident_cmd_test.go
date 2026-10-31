@@ -232,6 +232,77 @@ func TestIncidentStatusAndCancelNeedNoAzureIdentity(t *testing.T) {
 	}
 }
 
+// Every case exits before any config is read or any endpoint is reached, so no
+// verify test here touches the network.
+func TestIncidentVerifyUsageErrorsExitTwo(t *testing.T) {
+	w := newCLIWorld(t)
+	cfg := filepath.Join(t.TempDir(), "missing-config.json")
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{"no-config", []string{"incident", "verify"}},
+		{"state-dir", []string{"incident", "verify", "--config", cfg, "--state-dir", w.stateDir}},
+		{"id", []string{"incident", "verify", "--config", cfg, "--id", "k"}},
+		{"extra-argument", []string{"incident", "verify", "--config", cfg, "extra"}},
+		{"wait-below-range", []string{"incident", "verify", "--config", cfg, "--propagation-wait", "29s"}},
+		{"wait-above-range", []string{"incident", "verify", "--config", cfg, "--propagation-wait", "15m1s"}},
+		{"wait-zero", []string{"incident", "verify", "--config", cfg, "--propagation-wait", "0s"}},
+		{"wait-garbage", []string{"incident", "verify", "--config", cfg, "--propagation-wait", "soon"}},
+		{"wait-on-run", []string{"incident", "run", "--config", cfg, "--propagation-wait", "1m"}},
+		{"wait-on-status", []string{"incident", "status", "--state-dir", w.stateDir, "--propagation-wait", "1m"}},
+		{"wait-on-cancel", []string{"incident", "cancel", "--state-dir", w.stateDir, "--id", "k", "--propagation-wait", "1m"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if code, stderr := w.run(t, tc.args...); code != 2 {
+				t.Fatalf("exit %d, want 2; stderr: %s", code, stderr)
+			}
+		})
+	}
+	if got := readCLITrace(t, w.azTrace); got != "" {
+		t.Fatalf("az was invoked: %s", got)
+	}
+}
+
+// The bounds are inclusive: 30s and 15m pass the usage gate, so the run reaches
+// the config load and fails there (exit 1, not 2).
+func TestIncidentVerifyAcceptsTheInclusivePropagationWaitBounds(t *testing.T) {
+	w := newCLIWorld(t)
+	cfg := filepath.Join(t.TempDir(), "missing-config.json")
+	for _, wait := range []string{"30s", "15m"} {
+		code, stderr := w.run(t, "incident", "verify", "--config", cfg, "--propagation-wait", wait)
+		if code != 1 || !strings.HasPrefix(stderr, "cenci incident: ") {
+			t.Fatalf("--propagation-wait %s: exit %d, want 1 from the config load; stderr: %s", wait, code, stderr)
+		}
+	}
+}
+
+func TestIncidentVerifyWithoutAuthIsRefusedLikeRun(t *testing.T) {
+	w := newCLIWorld(t)
+	config := w.config(t, "")
+	runCode, runStderr := w.run(t, "incident", "run", "--config", config)
+	verifyCode, verifyStderr := w.run(t, "incident", "verify", "--config", config)
+	w.requireRefusedBeforeStartup(t, verifyCode, verifyStderr, "no explicit worker identity is configured", "Worker identity")
+	if runCode != verifyCode || runStderr != verifyStderr {
+		t.Fatalf("verify and run disagree about a missing identity:\nrun (%d): %s\nverify (%d): %s", runCode, runStderr, verifyCode, verifyStderr)
+	}
+}
+
+func TestIncidentHelpDocumentsVerify(t *testing.T) {
+	out, err := exec.Command(binaryPath, "help").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "incident verify --config PATH [--propagation-wait D]") {
+		t.Fatalf("help does not document incident verify and its flags:\n%s", out)
+	}
+	_, stderr := newCLIWorld(t).run(t, "incident", "unknown")
+	if !strings.Contains(stderr, "use run, verify, status, or cancel") {
+		t.Fatalf("the unknown-verb hint must list verify: %q", stderr)
+	}
+}
+
 func TestIncidentCLIOptInAndUsage(t *testing.T) {
 	for _, args := range [][]string{{"incident"}, {"incident", "unknown"}, {"incident", "run"}, {"incident", "status"}, {"incident", "cancel", "--state-dir", "/tmp", "--id", "x", "extra"}} {
 		out, err := exec.Command(binaryPath, args...).CombinedOutput()
@@ -247,6 +318,28 @@ func TestIncidentCLIOptInAndUsage(t *testing.T) {
 	out, err := exec.Command(binaryPath, "incident", "run", "--config", config).CombinedOutput()
 	if err == nil || !strings.Contains(string(out), "disabled") {
 		t.Fatalf("opt-in: %v %s", err, out)
+	}
+}
+
+func TestIncidentVerifyOnDisabledConfigIsRefusedLikeRun(t *testing.T) {
+	config := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(config, []byte(`{"enabled":false}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	w := newCLIWorld(t)
+	runCode, runStderr := w.run(t, "incident", "run", "--config", config)
+	verifyCode, verifyStderr := w.run(t, "incident", "verify", "--config", config)
+	if verifyCode != 1 {
+		t.Fatalf("verify exit %d, want 1; stderr: %s", verifyCode, verifyStderr)
+	}
+	if !strings.Contains(verifyStderr, "disabled") {
+		t.Fatalf("verify stderr must name the disabled config: %s", verifyStderr)
+	}
+	if runCode != verifyCode || runStderr != verifyStderr {
+		t.Fatalf("verify and run disagree about a disabled config:\nrun (%d): %s\nverify (%d): %s", runCode, runStderr, verifyCode, verifyStderr)
+	}
+	if got := readCLITrace(t, w.azTrace); got != "" {
+		t.Fatalf("az was invoked: %s", got)
 	}
 }
 

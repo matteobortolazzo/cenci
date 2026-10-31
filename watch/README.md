@@ -378,6 +378,7 @@ separately from the attention daemon and is disabled until explicitly configured
 
 ```bash
 cenci incident run --config /absolute/path/incidents.json
+cenci incident verify --config /absolute/path/incidents.json [--propagation-wait 5m]
 cenci incident status --state-dir /absolute/path/incident-state
 cenci incident cancel --state-dir /absolute/path/incident-state --id INCIDENT_KEY
 ```
@@ -386,6 +387,18 @@ cenci incident cancel --state-dir /absolute/path/incident-state --id INCIDENT_KE
 explicit `auth` worker identity in its config (a certificate, managed identity or
 workload identity; there is no ambient Azure fallback) and refuses to start
 without one; see [Worker identity](docs/incident-worker.md#worker-identity).
+`verify` authenticates as that same identity without starting the worker, prints
+the tenant, application and principal IDs from the token claims, and runs bounded
+read-only probes: each resource's configured `query` over a 5-minute timespan and
+a one-message broker peek. It prints one line per probe (`ok`, or one of
+`authentication-failed`, `identity-mismatch`, `authorization-denied`,
+`rbac-propagation-timeout`, `resource-not-found`, `unreachable`), never the token,
+certificate, rows or message bodies, and writes no files. It exits 0 when every
+probe is `ok`, 1 when any fails, and 2 on a usage error. With
+`--propagation-wait D` (30s to 15m, `verify` only) it retries only
+`authorization-denied` probes every 30 seconds until the window ends, for RBAC
+that has just been granted; see
+[Verifying the identity](docs/incident-worker.md#verifying-the-identity).
 `status` prints persistent JSON without Azure or agent access, and `cancel` needs
 no Azure identity either. `cancel` stops queued/active work;
 it preserves reports, branches, and existing PRs. Merge, deployment, and production

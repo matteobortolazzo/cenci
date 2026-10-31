@@ -302,6 +302,48 @@ func Preflight(ctx context.Context, cred azcore.TokenCredential, auth AuthConfig
 }
 
 func preflightScope(ctx context.Context, cred azcore.TokenCredential, auth AuthConfig, name, scope string) error {
+	_, err := CheckIdentity(ctx, cred, auth, name, scope)
+	return err
+}
+
+// IdentityClaims are the non-secret identity claims of an access token, decoded
+// for display and comparison only. A claim the token does not carry is empty.
+type IdentityClaims struct {
+	TenantID string
+	AppID    string
+	ObjectID string
+}
+
+// IdentityErrorKind says which part of the identity check failed.
+type IdentityErrorKind int
+
+const (
+	// IdentityTokenFailed: no token was acquired.
+	IdentityTokenFailed IdentityErrorKind = iota + 1
+	// IdentityMismatch: a token was acquired but its claims are unreadable or do
+	// not match the configured tenant or application, so the identity cannot be
+	// confirmed.
+	IdentityMismatch
+)
+
+// IdentityError is the typed failure of CheckIdentity. Its text is the
+// preflight message, which never carries token text.
+type IdentityError struct {
+	Kind IdentityErrorKind
+	err  error
+}
+
+func (e *IdentityError) Error() string { return e.err.Error() }
+func (e *IdentityError) Unwrap() error { return e.err }
+
+// CheckIdentity acquires one token for scope, bounded to 30 seconds, and checks
+// that it was issued for the configured tenant and, when a client is
+// configured, application. It is the one check both the worker's Preflight and
+// `cenci incident verify` apply, so they cannot disagree about identity. The
+// claims come back whenever the token could be decoded, even on a mismatch; the
+// object ID is decoded only to be shown, never checked. A failure is always an
+// *IdentityError.
+func CheckIdentity(ctx context.Context, cred azcore.TokenCredential, auth AuthConfig, name, scope string) (IdentityClaims, error) {
 	ctx, cancel := context.WithTimeout(ctx, preflightRequestTimeout)
 	defer cancel()
 	token, err := cred.GetToken(ctx, policy.TokenRequestOptions{Scopes: []string{scope}})
@@ -310,19 +352,19 @@ func preflightScope(ctx context.Context, cred azcore.TokenCredential, auth AuthC
 		if auth.Mode == AuthModeManagedIdentity {
 			hint = "; managed identity works only on supported Azure hosts"
 		}
-		return fmt.Errorf("worker identity preflight: token request failed for %s: %w%s", name, err, hint)
+		return IdentityClaims{}, &IdentityError{Kind: IdentityTokenFailed, err: fmt.Errorf("worker identity preflight: token request failed for %s: %w%s", name, err, hint)}
 	}
-	tid, appid, err := tokenClaims(token.Token)
+	claims, err := tokenClaims(token.Token)
 	if err != nil {
-		return fmt.Errorf("worker identity preflight: unreadable token claims for %s", name)
+		return IdentityClaims{}, &IdentityError{Kind: IdentityMismatch, err: fmt.Errorf("worker identity preflight: unreadable token claims for %s", name)}
 	}
-	if !sameUUID(tid, auth.TenantID) {
-		return fmt.Errorf("worker identity preflight: token tenant mismatch for %s: tid claim does not match auth.tenantId%s", name, missingClaimNote(tid, "tid"))
+	if !sameUUID(claims.TenantID, auth.TenantID) {
+		return claims, &IdentityError{Kind: IdentityMismatch, err: fmt.Errorf("worker identity preflight: token tenant mismatch for %s: tid claim does not match auth.tenantId%s", name, missingClaimNote(claims.TenantID, "tid"))}
 	}
-	if auth.ClientID != "" && !sameUUID(appid, auth.ClientID) {
-		return fmt.Errorf("worker identity preflight: token application mismatch for %s: appid claim does not match auth.clientId%s", name, missingClaimNote(appid, "appid"))
+	if auth.ClientID != "" && !sameUUID(claims.AppID, auth.ClientID) {
+		return claims, &IdentityError{Kind: IdentityMismatch, err: fmt.Errorf("worker identity preflight: token application mismatch for %s: appid claim does not match auth.clientId%s", name, missingClaimNote(claims.AppID, "appid"))}
 	}
-	return nil
+	return claims, nil
 }
 
 // missingClaimNote tells a missing claim apart from a mismatching one.
@@ -337,25 +379,27 @@ func sameUUID(claim, want string) bool {
 	return uuidPattern.MatchString(claim) && strings.EqualFold(claim, want)
 }
 
-// tokenClaims reads the tid and appid claims without verifying the signature:
-// the token came from the credential over TLS, so this is an identity sanity
-// check, not authentication.
-func tokenClaims(token string) (tid, appid string, err error) {
+// tokenClaims reads the tid, appid and oid claims without verifying the
+// signature: the token came from the credential over TLS, so this is an
+// identity sanity check, not authentication.
+func tokenClaims(token string) (IdentityClaims, error) {
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {
-		return "", "", errors.New("not a JWT")
+		return IdentityClaims{}, errors.New("not a JWT")
 	}
 	payload, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(parts[1], "="))
 	if err != nil {
-		return "", "", err
+		return IdentityClaims{}, err
 	}
 	var claims map[string]any
 	if err := json.Unmarshal(payload, &claims); err != nil {
-		return "", "", err
+		return IdentityClaims{}, err
 	}
-	tid, _ = claims["tid"].(string)
-	appid, _ = claims["appid"].(string)
-	return tid, appid, nil
+	var out IdentityClaims
+	out.TenantID, _ = claims["tid"].(string)
+	out.AppID, _ = claims["appid"].(string)
+	out.ObjectID, _ = claims["oid"].(string)
+	return out, nil
 }
 
 // IgnoredAzureEnv returns the sorted, de-duplicated names (never values) of the
