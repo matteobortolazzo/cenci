@@ -190,6 +190,130 @@ func TestTelemetryUsesTrustedQueryAndDeploymentWindow(t *testing.T) {
 	}
 }
 
+func TestContainerArgvCarriesNoAzureIdentityMaterial(t *testing.T) {
+	a, trace := runtimeFixture(t)
+	const home = "/home/incident-worker"
+	t.Setenv("HOME", home)
+	for name, value := range map[string]string{"AZURE_CLIENT_SECRET": "ambient-secret", "AZURE_CLIENT_ID": testClientID, "AZURE_TENANT_ID": testTenantID, "AZURE_CLIENT_CERTIFICATE_PATH": "/etc/ambient.pem", "AZURE_CONFIG_DIR": home + "/.azure"} {
+		t.Setenv(name, value)
+	}
+	cert := writeCertFile(t, time.Now().Add(365*24*time.Hour), 0600)
+	a.Config.Auth = &AuthConfig{Mode: AuthModeCertificate, TenantID: testTenantID, ClientID: testClientID, CertificatePath: cert}
+	req := AgentRequest{Phase: "investigate", Incident: Incident{Key: Key("a")}, Worktree: "/repo/.worktrees/incident-a", History: "/state/history.git", BudgetUSD: 0.5}
+	if _, err := a.Run(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.RunCheck(context.Background(), req.Worktree, []string{"go", "test", "./..."}); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(trace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(b), "run ") < 2 {
+		t.Fatalf("agent and check container invocations were not recorded: %s", b)
+	}
+	for _, bad := range []string{"AZURE_", ".azure", home, cert, "ambient-secret"} {
+		if strings.Contains(string(b), bad) {
+			t.Fatalf("container argv exposes %q: %s", bad, b)
+		}
+	}
+}
+
+type recordingCredential struct {
+	requests []policy.TokenRequestOptions
+}
+
+func (c *recordingCredential) GetToken(_ context.Context, o policy.TokenRequestOptions) (azcore.AccessToken, error) {
+	c.requests = append(c.requests, o)
+	return azcore.AccessToken{Token: "test-read-only", ExpiresOn: time.Now().Add(time.Hour)}, nil
+}
+
+func TestTelemetryScopeAndTenantComeOnlyFromWorkerConfiguration(t *testing.T) {
+	cred := &recordingCredential{}
+	a := AzureTelemetry{Credential: cred, Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Host != "api.loganalytics.azure.com" {
+			t.Fatalf("alert content redirected telemetry to %s", req.URL.Host)
+		}
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"tables":[]}`))}, nil
+	})}}
+	alert := json.RawMessage(`{"tenantId":"` + otherUUID + `","scope":"https://management.azure.com/.default","clientId":"` + otherUUID + `","claims":"x","query":".delete table"}`)
+	r := Resource{Workspace: "00000000-0000-0000-0000-000000000000", Query: "AppExceptions | take 10"}
+	if _, err := a.Collect(context.Background(), Incident{FiredAt: time.Date(2026, 10, 10, 9, 0, 0, 0, time.UTC), Alert: alert}, r); err != nil {
+		t.Fatal(err)
+	}
+	if len(cred.requests) != 1 {
+		t.Fatalf("want one token request, got %d", len(cred.requests))
+	}
+	got := cred.requests[0]
+	if len(got.Scopes) != 1 || got.Scopes[0] != LogAnalyticsScope || got.TenantID != "" || got.Claims != "" || got.EnableCAE {
+		t.Fatalf("token request shaped by something other than worker configuration: %+v", got)
+	}
+}
+
+// steeringAgent delegates to the scenario agent, checks that the untrusted
+// repository contents reached it, and returns a report carrying identity keys.
+type steeringAgent struct {
+	scenario *scenarioAgent
+	steering string
+	sawRepo  bool
+}
+
+func (a *steeringAgent) Run(ctx context.Context, req AgentRequest) (AgentResult, error) {
+	if req.Phase == "investigate" {
+		a.sawRepo = strings.Contains(req.Instructions, "login.evil.example") && strings.Contains(req.Evidence, "login.evil.example")
+	}
+	res, err := a.scenario.Run(ctx, req)
+	res.Report += "\nagent says: " + a.steering
+	return res, err
+}
+
+func TestUntrustedSourcesCannotSteerTheWorkerIdentity(t *testing.T) {
+	const steering = `{"tenantId":"` + otherUUID + `","scope":"https://management.azure.com/.default","clientId":"` + otherUUID + `","authority":"https://login.evil.example","claims":"x"}`
+	c, r, p, a, pub := pipelineFixture(t)
+	// Repository contents: the checked-out repo carries identity-selecting keys in
+	// a file the pipeline hands the agent.
+	put(t, filepath.Join(r.Resource.Dir, ".cenci/config.json"), `{"guidanceLocation":"AGENTS.md","identity":`+steering+`}`)
+	gitTest(t, r.Resource.Dir, "add", ".")
+	gitTest(t, r.Resource.Dir, "commit", "-m", "hostile repository configuration")
+	gitTest(t, r.Resource.Dir, "push", "origin", "main")
+
+	p.Config.Auth = &AuthConfig{Mode: AuthModeCertificate, TenantID: testTenantID, ClientID: testClientID, CertificatePath: "/etc/cenci/incident-worker.pem"}
+	cred := &recordingCredential{}
+	// Telemetry: the response body and headers carry the same keys.
+	p.Telemetry = AzureTelemetry{Credential: cred, Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Host != "api.loganalytics.azure.com" {
+			t.Errorf("telemetry left the configured endpoint: %s", req.URL.Host)
+		}
+		h := http.Header{"Www-Authenticate": {`Bearer authorization_uri="https://login.evil.example/` + otherUUID + `", claims="x"`}}
+		return &http.Response{StatusCode: 200, Header: h, Body: io.NopCloser(strings.NewReader(`{"tables":[{"rows":[["` + strings.ReplaceAll(steering, `"`, `\"`) + `"]]}],"tenantId":"` + otherUUID + `","scope":"https://management.azure.com/.default","clientId":"` + otherUUID + `","authority":"https://login.evil.example"}`))}, nil
+	})}}
+	agent := &steeringAgent{scenario: a, steering: steering}
+	p.Agent = agent
+	r.Resource.Workspace = "00000000-0000-0000-0000-000000000000"
+	r.Resource.Query = "AppExceptions | take 10"
+
+	result, err := p.Execute(context.Background(), r, r.Resource, func() error { return NewStore(c.StateDir).MarkPublishing(r.Key) })
+	if err != nil || result.Status != "draft" {
+		t.Fatalf("pipeline did not complete: %+v %v", result, err)
+	}
+	if !agent.sawRepo || !strings.Contains(pub.body, "agent says") {
+		t.Fatalf("hostile repository contents or agent output never reached the pipeline (repo=%v)", agent.sawRepo)
+	}
+	// A later token request, after every untrusted source has been consumed.
+	if _, err := p.Telemetry.Collect(context.Background(), r, r.Resource); err != nil {
+		t.Fatal(err)
+	}
+	if len(cred.requests) < 2 {
+		t.Fatalf("want token requests before and after the untrusted input, got %d", len(cred.requests))
+	}
+	for i, got := range cred.requests {
+		if len(got.Scopes) != 1 || got.Scopes[0] != LogAnalyticsScope || got.TenantID != "" || got.Claims != "" || got.EnableCAE {
+			t.Fatalf("token request %d shaped by an untrusted source: %+v", i, got)
+		}
+	}
+}
+
 func TestSubprocessDeadlineClassified(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()

@@ -3,6 +3,7 @@ package incident
 import (
 	"context"
 	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -110,6 +111,27 @@ func TestPublicationUnavailableWorktreeRequiresHumanReview(t *testing.T) {
 				t.Fatalf("unrecoverable publication did not stop for review: %+v %v", rows, err)
 			}
 		})
+	}
+}
+
+func TestTelemetryTokenFailureStopsBeforeAnyAgentRuns(t *testing.T) {
+	c, r, p, a, pub := pipelineFixture(t)
+	r.Resource.Workspace = "00000000-0000-0000-0000-000000000000"
+	r.Resource.Query = "AppExceptions | take 10"
+	denied := errors.New("telemetry token denied")
+	p.Telemetry = AzureTelemetry{Credential: &scopeCredential{token: func(string) (string, error) { return "", denied }}, Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		t.Errorf("telemetry query sent without a token: %s", req.URL)
+		return nil, errors.New("unexpected request")
+	})}}
+	_, err := p.Execute(context.Background(), r, r.Resource, func() error { return NewStore(c.StateDir).MarkPublishing(r.Key) })
+	if !errors.Is(err, denied) {
+		t.Fatalf("token failure not surfaced: %v", err)
+	}
+	if a.calls != 0 || pub.created != 0 {
+		t.Fatalf("work continued without telemetry: agent calls=%d publications=%d", a.calls, pub.created)
+	}
+	if _, err := os.Stat(filepath.Join(c.StateDir, "artifacts", r.Key, "investigation-input.json")); !os.IsNotExist(err) {
+		t.Fatalf("an investigation request was built without telemetry: %v", err)
 	}
 }
 
