@@ -133,7 +133,7 @@ func startIncident(ctx context.Context, c incident.Config, deps incidentDeps) (*
 		return nil, err
 	}
 	if warning != "" {
-		fmt.Fprintf(stderr, "cenci incident: warning: %s\n", warning)
+		_, _ = fmt.Fprintf(stderr, "cenci incident: warning: %s\n", warning)
 	}
 	store := incident.NewStore(c.StateDir)
 	lock, err := store.WorkerLock()
@@ -183,7 +183,7 @@ func removeAmbientAzureEnv(stderr io.Writer) error {
 	if len(names) == 0 {
 		return nil
 	}
-	fmt.Fprintf(stderr, "cenci incident: ignored and removed ambient Azure environment variables (the worker authenticates only as the identity in its auth section): %s\n", strings.Join(names, ", "))
+	_, _ = fmt.Fprintf(stderr, "cenci incident: ignored and removed ambient Azure environment variables (the worker authenticates only as the identity in its auth section): %s\n", strings.Join(names, ", "))
 	for _, name := range names {
 		if name == sdkLoggingEnv {
 			// The SDK read this in a package init, before main: unsetting it
@@ -214,7 +214,7 @@ func (r *incidentRun) close() {
 	closeCtx, closeCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer closeCancel()
 	if err := r.receiver.Close(closeCtx); err != nil {
-		fmt.Fprintf(r.stderr, "cenci incident: close receiver: %v\n", err)
+		_, _ = fmt.Fprintf(r.stderr, "cenci incident: close receiver: %v\n", err)
 	}
 	_ = r.lock.Close()
 }
