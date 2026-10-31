@@ -21,7 +21,139 @@ func validConfig(t *testing.T) Config {
 	c.Resources[0].Workspace = "00000000-0000-0000-0000-000000000000"
 	c.Resources[0].Query = "AppExceptions | take 10"
 	c.Resources[0].Workflow = "Use cenci stages and configured project gates."
+	c.Auth = &AuthConfig{Mode: AuthModeCertificate, TenantID: testTenantID, ClientID: testClientID, CertificatePath: "/etc/cenci/incident-worker.pem"}
 	return c
+}
+
+// writeAuthConfig writes validConfig with its auth member replaced by the raw
+// JSON given (or removed when raw is empty) and returns the file path.
+func writeAuthConfig(t *testing.T, raw string) string {
+	t.Helper()
+	b, err := json.Marshal(validConfig(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(b, &doc); err != nil {
+		t.Fatal(err)
+	}
+	if raw == "" {
+		delete(doc, "auth")
+	} else {
+		doc["auth"] = json.RawMessage(raw)
+	}
+	b, err = json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "config.json")
+	put(t, path, string(b))
+	return path
+}
+
+func TestAuthConfigAcceptsOnlyExplicitModesWithTheirOwnFields(t *testing.T) {
+	const secret = "s3cr3t-never-echoed"
+	cases := []struct {
+		name string
+		auth string
+		want string // error marker naming the offending auth field; empty means accepted
+	}{
+		{"certificate", `{"mode":"servicePrincipalCertificate","tenantId":"` + testTenantID + `","clientId":"` + testClientID + `","certificatePath":"/etc/cenci/w.pem"}`, ""},
+		{"workload", `{"mode":"workloadIdentity","tenantId":"` + testTenantID + `","clientId":"` + testClientID + `","tokenFilePath":"/var/run/token"}`, ""},
+		{"managed-system-assigned", `{"mode":"managedIdentity","tenantId":"` + testTenantID + `"}`, ""},
+		{"managed-user-assigned", `{"mode":"managedIdentity","tenantId":"` + testTenantID + `","clientId":"` + testClientID + `"}`, ""},
+		{"secret-mode", `{"mode":"servicePrincipalSecret","tenantId":"` + testTenantID + `","clientId":"` + testClientID + `"}`, "auth.mode"},
+		{"missing-mode", `{"tenantId":"` + testTenantID + `"}`, "auth.mode"},
+		{"client-secret-field", `{"mode":"servicePrincipalCertificate","tenantId":"` + testTenantID + `","clientId":"` + testClientID + `","certificatePath":"/etc/w.pem","clientSecret":"` + secret + `"}`, "auth.clientSecret"},
+		{"wrong-case-field", `{"mode":"managedIdentity","tenantId":"` + testTenantID + `","ClientId":"` + testClientID + `"}`, "auth.ClientId"},
+		{"missing-tenant", `{"mode":"managedIdentity"}`, "auth.tenantId"},
+		{"non-uuid-tenant", `{"mode":"managedIdentity","tenantId":"contoso.onmicrosoft.com"}`, "auth.tenantId"},
+		{"non-uuid-client", `{"mode":"managedIdentity","tenantId":"` + testTenantID + `","clientId":"not-a-uuid"}`, "auth.clientId"},
+		{"certificate-missing-client", `{"mode":"servicePrincipalCertificate","tenantId":"` + testTenantID + `","certificatePath":"/etc/w.pem"}`, "auth.clientId"},
+		{"certificate-missing-path", `{"mode":"servicePrincipalCertificate","tenantId":"` + testTenantID + `","clientId":"` + testClientID + `"}`, "auth.certificatePath"},
+		{"certificate-relative-path", `{"mode":"servicePrincipalCertificate","tenantId":"` + testTenantID + `","clientId":"` + testClientID + `","certificatePath":"w.pem"}`, "auth.certificatePath"},
+		{"certificate-with-token-file", `{"mode":"servicePrincipalCertificate","tenantId":"` + testTenantID + `","clientId":"` + testClientID + `","certificatePath":"/etc/w.pem","tokenFilePath":"/var/run/token"}`, "auth.tokenFilePath"},
+		{"workload-missing-client", `{"mode":"workloadIdentity","tenantId":"` + testTenantID + `","tokenFilePath":"/var/run/token"}`, "auth.clientId"},
+		{"workload-missing-token-file", `{"mode":"workloadIdentity","tenantId":"` + testTenantID + `","clientId":"` + testClientID + `"}`, "auth.tokenFilePath"},
+		{"workload-relative-token-file", `{"mode":"workloadIdentity","tenantId":"` + testTenantID + `","clientId":"` + testClientID + `","tokenFilePath":"token"}`, "auth.tokenFilePath"},
+		{"workload-with-certificate", `{"mode":"workloadIdentity","tenantId":"` + testTenantID + `","clientId":"` + testClientID + `","tokenFilePath":"/var/run/token","certificatePath":"/etc/w.pem"}`, "auth.certificatePath"},
+		{"managed-with-certificate", `{"mode":"managedIdentity","tenantId":"` + testTenantID + `","certificatePath":"/etc/w.pem"}`, "auth.certificatePath"},
+		{"managed-with-token-file", `{"mode":"managedIdentity","tenantId":"` + testTenantID + `","tokenFilePath":"/var/run/token"}`, "auth.tokenFilePath"},
+		{"not-an-object", `"servicePrincipalCertificate"`, "auth must be an object"},
+		{"mistyped-field", `{"mode":"managedIdentity","tenantId":7}`, "auth.tenantId"},
+		{"workload-missing-tenant", `{"mode":"workloadIdentity","clientId":"` + testClientID + `","tokenFilePath":"/var/run/token"}`, "auth.tenantId is required"},
+		{"certificate-missing-tenant", `{"mode":"servicePrincipalCertificate","clientId":"` + testClientID + `","certificatePath":"/etc/w.pem"}`, "auth.tenantId is required"},
+		// Keys outside the safe pattern are still named, in escaped and bounded form.
+		{"unknown-field-with-space", `{"mode":"managedIdentity","tenantId":"` + testTenantID + `","client secret":"` + secret + `"}`, `unknown field auth."client secret"`},
+		{"unknown-field-over-64-chars", `{"mode":"managedIdentity","tenantId":"` + testTenantID + `","` + strings.Repeat("k", 70) + `":"` + secret + `"}`, `unknown field auth."` + strings.Repeat("k", 64) + `"...`},
+		{"unknown-field-with-control-character", `{"mode":"managedIdentity","tenantId":"` + testTenantID + `","bad\u0001key":"` + secret + `"}`, `unknown field auth."bad\x01key"`},
+		{"unknown-field-with-newline", `{"mode":"managedIdentity","tenantId":"` + testTenantID + `","forged\nline":"` + secret + `"}`, `unknown field auth."forged\nline"`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c, err := LoadConfig(writeAuthConfig(t, tc.auth))
+			if tc.want == "" {
+				if err != nil {
+					t.Fatalf("valid auth rejected: %v", err)
+				}
+				if c.Auth == nil {
+					t.Fatal("accepted config lost its auth section")
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("want an error naming %s, got %v", tc.want, err)
+			}
+			if strings.Contains(err.Error(), secret) {
+				t.Fatalf("error echoed a configured value: %v", err)
+			}
+			if strings.Contains(err.Error(), strings.Repeat("k", 65)) {
+				t.Fatalf("error echoed an over-long field name untruncated: %v", err)
+			}
+			for _, r := range err.Error() {
+				if r < 0x20 || r == 0x7f {
+					t.Fatalf("error carries the raw control character %U: %q", r, err.Error())
+				}
+			}
+		})
+	}
+}
+
+func TestAuthConfigDecodesIntoTheSelectedFields(t *testing.T) {
+	c, err := LoadConfig(writeAuthConfig(t, `{"mode":"workloadIdentity","tenantId":"`+testTenantID+`","clientId":"`+testClientID+`","tokenFilePath":"/var/run/token"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := AuthConfig{Mode: AuthModeWorkloadIdentity, TenantID: testTenantID, ClientID: testClientID, TokenFilePath: "/var/run/token"}
+	if c.Auth == nil || *c.Auth != want {
+		t.Fatalf("auth decoded as %+v, want %+v", c.Auth, want)
+	}
+}
+
+func TestConfigWithoutAuthIsRefusedWithMigrationMessage(t *testing.T) {
+	for name, raw := range map[string]string{"absent": "", "null": "null"} {
+		t.Run(name, func(t *testing.T) {
+			_, err := LoadConfig(writeAuthConfig(t, raw))
+			if err == nil {
+				t.Fatal("config without an explicit worker identity accepted")
+			}
+			for _, want := range []string{"no explicit worker identity is configured", "Worker identity", "watch/docs/incident-worker.md"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("missing %q in %v", want, err)
+				}
+			}
+		})
+	}
+}
+
+func TestDisabledConfigReportsDisabledBeforeMissingAuth(t *testing.T) {
+	c := validConfig(t)
+	c.Enabled = false
+	c.Auth = nil
+	err := c.Validate()
+	if err == nil || !strings.Contains(err.Error(), "disabled") || strings.Contains(err.Error(), "worker identity") {
+		t.Fatalf("disabled check must come first: %v", err)
+	}
 }
 
 func TestConfigRequiresExplicitOptInAndCompleteTrustedPolicy(t *testing.T) {

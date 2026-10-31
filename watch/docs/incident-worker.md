@@ -51,10 +51,12 @@ offline periods. Configure broker `MaxDeliveryCount` and monitor its DLQ.
 
 Run the worker under a dedicated local account. Give its Azure identity Service
 Bus Data Receiver on this queue/subscription and read-only Log Analytics query
-access on the mapped workspaces. Authentication uses Azure's
-`DefaultAzureCredential` (environment, managed identity, or local Azure CLI).
-Use a dedicated least-privilege identity, rather than a production contributor's
-CLI login. The telemetry client sends only the trusted configured KQL query to
+access on the mapped workspaces. The worker authenticates only as the identity
+named in the `auth` section of its config (see [Worker identity](#worker-identity)):
+a service principal certificate, a managed identity, or a workload identity. It
+never falls back to ambient environment variables, a local Azure CLI login, or
+any other credential chain, so use a dedicated least-privilege identity rather
+than a production contributor's login. The telemetry client sends only the trusted configured KQL query to
 the Log Analytics query endpoint, with a 30-minute window around the alert.
 Alert descriptions, URLs, queries, and logs never select credentials, commands,
 resources, repositories, deployment commits, or network destinations.
@@ -62,7 +64,8 @@ resources, repositories, deployment commits, or network destinations.
 The bridge identity needs **Azure Service Bus Data Sender** on the queue; the
 worker needs **Azure Service Bus Data Receiver** on that queue and **Log Analytics
 Reader** on each configured workspace (or narrower table query permissions).
-An Azure administrator assigns these roles; the worker does not create resources
+An Azure administrator assigns these roles (the commands are in
+[Worker identity](#worker-identity)); the worker does not create resources
 or role assignments. See the [Service Bus role scopes](https://learn.microsoft.com/en-us/azure/service-bus-messaging/service-bus-managed-service-identity)
 and [workspace query permissions](https://learn.microsoft.com/en-us/azure/azure-monitor/logs/manage-access).
 Configure the Logic App's Service Bus send action to use the incoming request
@@ -102,8 +105,8 @@ and the operator's image/proxy are trusted boundaries.
 ### 1. Prepare the account and repository
 
 Install `cenci`, Docker Engine, Git, and `gh` on the worker host. The account must
-be able to run Docker and reach Azure identity, Service Bus, Log Analytics, and
-GitHub endpoints from the host. Authenticate Git and `gh` as the dedicated bot
+be able to run Docker and reach Microsoft Entra ID (`login.microsoftonline.com`; managed identity uses
+its host's local endpoint instead), Service Bus, Log Analytics, and GitHub endpoints from the host. Authenticate Git and `gh` as the dedicated bot
 using your organization's approved credential method. These credentials remain
 on the host. For HTTPS clones, `gh auth setup-git` configures Git to use the
 existing `gh` login; `gh auth status` verifies it without printing the token.
@@ -236,6 +239,179 @@ names visible in that account's image store. The worker adds `--userns=keep-id`;
 verify bind mounts with your SELinux policy. Complete the same probes and smoke
 test with your chosen runtime; do not mix Docker and Podman networks/images.
 
+## Worker identity
+
+`cenci incident run` authenticates only as the identity in the `auth` section of
+its config. One credential is built from that section and shared by the Service
+Bus receiver and the Log Analytics telemetry client. Nothing untrusted selects the
+identity: a local Azure CLI login, alert payloads, telemetry, repository
+contents, and agent output cannot, and no `AZURE_*` variable can (they are
+removed at startup). The one environment the credential still follows is the
+host's own managed-identity endpoint for `managedIdentity` mode
+(`IDENTITY_ENDPOINT`, `IDENTITY_HEADER`, `IDENTITY_SERVER_THUMBPRINT`,
+`MSI_ENDPOINT`, `MSI_SECRET`, `IMDS_ENDPOINT`). Those variables name the host's
+identity endpoint, and only the operator controls them, so for managed identity
+the operator-controlled host environment is the trust boundary. Set `clientId`
+for managed identity so the preflight `appid` check applies. A config without
+`auth` does not start; `status` and `cancel` read no config and need no Azure
+identity.
+
+| Mode | Fields | Use when |
+| --- | --- | --- |
+| `servicePrincipalCertificate` | `mode`, `tenantId`, `clientId`, `certificatePath` | The worker host is outside Azure, or has no managed identity. |
+| `managedIdentity` | `mode`, `tenantId`, optional `clientId` | The worker runs on a supported Azure host. `clientId` set selects a user-assigned identity; omitted selects the system-assigned one. |
+| `workloadIdentity` | `mode`, `tenantId`, `clientId`, `tokenFilePath` | The host projects a federated token file (for example a Kubernetes service-account token). |
+
+`mode` and `tenantId` are always required. `tenantId` and `clientId` must be
+UUIDs; `certificatePath` and `tokenFilePath` must be absolute. A field that the
+selected mode does not use is rejected, as is any other `mode` and any unknown
+field. There is no client-secret mode. Each error names the offending field, for
+example `auth.clientSecret`, and never prints its value.
+
+`certificatePath` must name one unencrypted PEM file holding both the certificate
+and its private key. The worker checks the file before parsing it: it must be an
+absolute path to a regular file (symbolic links are refused), owned by the user
+the worker runs as, with mode `0600` or `0400`. Otherwise startup fails with, for
+example, `certificate <path> has mode 0644; required: mode 0600 or 0400, regular
+file owned by the worker`. A setuid, setgid or sticky bit is shown in the mode
+(`has mode 04600`). An unreadable, oversized, or unparseable file and an
+encrypted key fail startup too, as does a file in which no certificate matches
+the private key (`certificate <path> has no certificate matching its private
+key`). When the file lists several certificates, the expiry check and warning
+judge the one matching the private key, not the first listed.
+
+The worker does not check the token file of `workloadIdentity` mode: a projected
+token is commonly root-owned and world-readable, so it is trusted as-is. Its
+directory must be writable only by root.
+
+The Azure public cloud is pinned. `AZURE_AUTHORITY_HOST` has no effect, and
+sovereign clouds are not supported.
+
+### Startup checks
+
+Startup runs in a fixed order, and a failure at any step exits 1 before the next:
+
+1. Load and validate the config, then remove ambient `AZURE_*` variables (below).
+2. Build the credential. For a certificate this applies the file checks above;
+   a certificate past its `NotAfter` fails with `certificate expired: <path>
+   NotAfter <RFC3339>`.
+3. Take the worker lock.
+4. **Token preflight.** The worker requests one token for each scope, Service Bus
+   (`https://servicebus.azure.net/.default`) then Log Analytics
+   (`https://api.loganalytics.io/.default`), each bounded to 30 seconds, and stops
+   at the first failure.
+5. Only then remove stale containers, recover the ledger, and start receiving.
+
+The preflight fails closed, with errors prefixed `worker identity preflight: `
+and one class per failure:
+
+| Message | Meaning |
+| --- | --- |
+| `token request failed for <target>` | The credential could not obtain a token (denied, unreachable, or timed out). `<target>` is `Service Bus` or `Log Analytics`. Managed identity adds `managed identity works only on supported Azure hosts`. |
+| `token tenant mismatch for <target>` | The token's `tid` claim differs from `auth.tenantId`. |
+| `token application mismatch for <target>` | `auth.clientId` is set and the token's `appid` claim differs from it, or the claim is absent. |
+| `unreadable token claims for <target>` | The token is not a JWT with readable claims. |
+
+The `appid` check applies whenever `clientId` is set, so the tokens for both
+scopes must carry the `appid` claim (v1 tokens do; a token with only `azp` fails
+closed). A system-assigned managed identity has no `clientId`, so only the tenant
+is checked. Claims are read without verifying the signature: the token arrived
+over TLS from the credential, so this is an identity sanity check. Token text is
+never printed.
+
+A certificate that expires within 30 days still starts, and prints
+`cenci incident: warning: certificate <path> expires within 30 days (NotAfter <RFC3339>)`.
+Rotate it before that date.
+
+If any `AZURE_`-prefixed variable is set in the worker's environment (for example
+`AZURE_CLIENT_SECRET`, `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, or
+`AZURE_AUTHORITY_HOST`), the worker ignores it, prints one notice naming the
+variables (never their values), and removes them from its own process
+environment so nothing it starts inherits them. The Azure SDK reads
+`AZURE_SDK_GO_LOGGING` once, before the worker starts, so removing that variable
+alone would not stop the SDK's console logger; when it is present the worker also
+turns the SDK logger off:
+
+```text
+cenci incident: ignored and removed ambient Azure environment variables (the worker authenticates only as the identity in its auth section): AZURE_A, AZURE_B
+```
+
+A config with no `auth` section exits 1 before any Azure call, container
+cleanup, or ledger recovery, with:
+
+```text
+cenci incident: no explicit worker identity is configured: add an auth section (see the "Worker identity" section of watch/docs/incident-worker.md)
+```
+
+### Migrating an existing install
+
+Earlier versions authenticated with `DefaultAzureCredential`, typically a client
+secret in `incidents.env` (`AZURE_TENANT_ID`, `AZURE_CLIENT_ID`,
+`AZURE_CLIENT_SECRET`), a managed identity, or a local `az login`. Those configs
+have no `auth` section and now stop starting with the message above. There is no
+client-secret mode, so a secret-based install moves to a certificate:
+
+1. Register a certificate for the existing application (below) and install the
+   PEM for the worker.
+2. Add the `auth` section to the config, with the existing application's
+   `clientId` and the tenant's `tenantId`.
+3. Remove the `AZURE_*` lines from `incidents.env`; they would be ignored and
+   removed anyway.
+4. Start the worker, then delete the old client secret from the app registration.
+
+Installs on a managed identity only need `auth` with `mode` `managedIdentity`
+and, for a user-assigned identity, its `clientId`.
+
+### Provisioning the identity
+
+An Azure administrator runs these commands, never the worker. Replace the
+placeholder names and IDs, and sign in with an account that may create app
+registrations and role assignments.
+
+```bash
+az account show --query tenantId -o tsv
+QUEUE_ID=$(az servicebus queue show --resource-group app --namespace-name contoso --name monitor-alerts --query id -o tsv) || exit 1
+WORKSPACE_ID=$(az monitor log-analytics workspace show --resource-group app --workspace-name orders-logs --query id -o tsv) || exit 1
+```
+
+Service principal with a certificate:
+
+```bash
+umask 077
+openssl req -x509 -newkey rsa:2048 -sha256 -days 365 -nodes -subj '/CN=cenci-incident-worker' -keyout worker.key -out worker.crt
+cat worker.crt worker.key > worker.pem
+APP_ID=$(az ad app create --display-name cenci-incident-worker --query appId -o tsv) || exit 1
+az ad sp create --id "$APP_ID"
+az ad app credential reset --id "$APP_ID" --cert @worker.crt --append
+install -m 600 -o incident -g incident worker.pem /home/incident/.config/cenci/worker.pem
+shred -u worker.key worker.pem
+az role assignment create --assignee "$APP_ID" --role "Azure Service Bus Data Receiver" --scope "$QUEUE_ID"
+az role assignment create --assignee "$APP_ID" --role "Log Analytics Reader" --scope "$WORKSPACE_ID"
+```
+
+User-assigned managed identity. For a system-assigned identity, run
+`az vm identity assign --resource-group app --name worker-vm` instead and use the
+`principalId` it prints in the role assignments:
+
+```bash
+az identity create --resource-group app --name cenci-incident-worker
+az vm identity assign --resource-group app --name worker-vm --identities cenci-incident-worker
+PRINCIPAL_ID=$(az identity show --resource-group app --name cenci-incident-worker --query principalId -o tsv) || exit 1
+az role assignment create --assignee-object-id "$PRINCIPAL_ID" --assignee-principal-type ServicePrincipal --role "Azure Service Bus Data Receiver" --scope "$QUEUE_ID"
+az role assignment create --assignee-object-id "$PRINCIPAL_ID" --assignee-principal-type ServicePrincipal --role "Log Analytics Reader" --scope "$WORKSPACE_ID"
+```
+
+For the user-assigned identity, set `auth.clientId` to its `clientId`
+(`az identity show ... --query clientId -o tsv`); omit it for a system-assigned
+identity. Managed identity works only on supported Azure hosts; elsewhere
+the preflight fails with the `managed identity works only on supported Azure
+hosts` hint.
+
+Workload identity: create the app registration and role assignments as for the
+certificate, then add a federated credential for your token issuer
+(`az ad app federated-credential create --id "$APP_ID" --parameters credential.json`)
+and set `auth.tokenFilePath` to the projected token file on the worker host.
+
 ## Configuration
 
 Paths below are illustrative; use canonical absolute checkout paths. Keep this
@@ -257,6 +433,12 @@ config outside the repository so alert-driven changes cannot rewrite policy.
     "apiKeyEnv": "ANTHROPIC_API_KEY",
     "network": "cenci-incident-model",
     "proxyUrl": "http://model-proxy:3128"
+  },
+  "auth": {
+    "mode": "servicePrincipalCertificate",
+    "tenantId": "11111111-1111-1111-1111-111111111111",
+    "clientId": "22222222-2222-2222-2222-222222222222",
+    "certificatePath": "/home/incident/.config/cenci/worker.pem"
   },
   "resources": [{
     "id": "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/app/providers/Microsoft.Web/sites/orders",
@@ -280,7 +462,9 @@ config outside the repository so alert-driven changes cannot rewrite policy.
 }
 ```
 
-For a topic, omit `queue` and set `topic` and `subscription`. Defaults never enable
+The `auth` section is required; the example uses a certificate. See [Worker
+identity](#worker-identity) for the other modes and their fields. For a topic,
+omit `queue` and set `topic` and `subscription`. Defaults never enable
 the worker. Invalid limits, overlapping deployment intervals, and incomplete
 policy fail startup. Concurrency is 1–16, timeout is 1–86400 seconds, attempts are
 1–10, and reserved budget is $0.03–$10000 per attempt. Deployment intervals are
@@ -303,23 +487,21 @@ agent must return `review` rather than claim that stage ran.
 
 Save the adapted JSON as `/home/incident/.config/cenci/incidents.json` (mode
 0600). Create `/home/incident/.config/cenci/incidents.env` with mode 0600 **before**
-entering secrets. For a service principal, use the following environment-file
-shape; obtain values from the credential owner rather than putting them in shell
-history. Managed identity installations omit the tenant/client-secret entries
-and configure the intended identity instead.
+entering secrets. It holds only the model key; obtain the value from the
+credential owner rather than putting it in shell history. The Azure identity
+lives in the config's `auth` section (and, for a certificate, the 0600 PEM it
+names), never in this file. `AZURE_*` entries here would be ignored and removed.
 
 ```text
-AZURE_TENANT_ID=your-tenant-id
-AZURE_CLIENT_ID=your-worker-client-id
-AZURE_CLIENT_SECRET=your-worker-client-secret
 ANTHROPIC_API_KEY=your-model-key
 ```
 
 The example service below loads this file. For a foreground staging run, load
-these same variables through your approved secret manager into the worker's
+this variable through your approved secret manager into the worker's
 environment, then run `cenci incident run --config
 /home/incident/.config/cenci/incidents.json`. Do not place GitHub or Azure secrets
-in the image or the JSON configuration.
+in the image or the JSON configuration; the configuration holds only the
+certificate's path.
 
 ## Lifecycle and recovery
 
@@ -481,7 +663,10 @@ with DefaultAzureCredential() as credential:
                 message_id=str(uuid.uuid4())))
 ```
 
-Replace the namespace and queue in the sender with the **staging** values.
+The sender's `DefaultAzureCredential` is the sender's identity (the staging
+bridge/test identity with Service Bus Data Sender), not the worker's: the worker
+never uses it or any credential chain. Replace the namespace and queue in the
+sender with the **staging** values.
 Save `/home/incident/incident-setup/fired.json` using the mapped staging resource,
 a unique alert identity for this smoke run, and a fired time covered by the
 deployment interval and staging telemetry:
@@ -534,6 +719,10 @@ test suite below does not execute it or provision its infrastructure.
 The `internal/incident` integration suites exercise durable intake/scheduling and
 real Git worktrees with executable Go regression tests. Azure, model execution,
 and GitHub are injected at their boundaries; no test uses production credentials.
+The worker-identity tests run the real azidentity credentials against a fake
+Entra ID transport. The command-level ones live in the `watch` package:
+`watch/incident_run_test.go` drives the startup sequence with an injected token
+boundary, and `watch/incident_cmd_test.go` runs the built `cenci` binary.
 
 | Requirement | Named test |
 | --- | --- |
@@ -558,6 +747,17 @@ and GitHub are injected at their boundaries; no test uses production credentials
 | Persistent cleanup identity across restart and directory rename | `TestOwnerIdentityPersistsAcrossRestartAndDirectoryRename` |
 | Concurrent startup uses one durable identity | `TestOwnerConcurrentInitializationUsesOneIdentity` |
 | Valid ownership permits orphan cleanup before corrupt-ledger recovery fails | `TestOwnerCleanupSurvivesCorruptLedger` |
+| `auth` accepts only the three modes with their own fields; a missing `auth` is refused with the migration message; a disabled config reports disabled first | `TestAuthConfigAcceptsOnlyExplicitModesWithTheirOwnFields`, `TestAuthConfigDecodesIntoTheSelectedFields`, `TestConfigWithoutAuthIsRefusedWithMigrationMessage`, `TestDisabledConfigReportsDisabledBeforeMissingAuth` |
+| Certificate must be an owned regular file with mode 0600 or 0400; expiry fails and near-expiry warns | `TestCertificateFileMustBeAnOwnedRegularFileWithRestrictedMode`, `TestCertificateExpiryFailsAndNearExpiryWarns`; expiry and warning judge the certificate matching the private key, and a key with no matching certificate is refused: `TestCertificateExpiryJudgesTheLeafMatchingThePrivateKeyNotTheFirstCertificate`, `TestCertificateWithoutAMatchingPrivateKeyIsRejected` |
+| Preflight failure classes, both scopes, 30-second bound per request, stop at the first failing scope | `TestPreflightNamesEachFailureClass`, `TestPreflightRequestsBothScopesWithinThirtySecondsEach`, `TestPreflightStopsAtTheFirstFailingScope` |
+| Credentials talk only to the public authority as the configured client; workload identity reads the configured token file; managed identity selection and unsupported hosts | `TestCertificateCredentialTalksOnlyToThePublicAuthorityAsTheConfiguredClient`, `TestWorkloadIdentityUsesConfiguredTokenFileNotTheEnvironment`, `TestManagedIdentitySelectsUserAssignedOnlyWhenClientIDIsConfigured`, `TestManagedIdentityOnAnUnsupportedHostNamesTheHostRequirement` |
+| Ignored `AZURE_*` names are listed sorted and never with values | `TestIgnoredAzureEnvListsSortedNamesAndNeverValues` |
+| Container argv carries no Azure identity material; telemetry scope and tenant come only from the config | `TestContainerArgvCarriesNoAzureIdentityMaterial`, `TestTelemetryScopeAndTenantComeOnlyFromWorkerConfiguration` |
+| Telemetry token failure stops before any agent runs | `TestTelemetryTokenFailureStopsBeforeAnyAgentRuns` |
+| Hostile repository contents, telemetry responses and agent output cannot change the worker's identity, scope or tenant | `TestUntrustedSourcesCannotSteerTheWorkerIdentity` |
+| Startup authenticates both boundaries as the configured identity with zero `az` calls; preflight failure starts nothing; ambient `AZURE_*` is reported and removed; no output without them; near-expiry warning | `TestIncidentStartupAuthenticatesBothBoundariesAsTheConfiguredIdentityWithoutAz`, `TestIncidentPreflightFailureStartsNothing`, `TestIncidentStartupReportsAndRemovesAmbientAzureVariables`, `TestIncidentStartupDisablesTheAmbientSDKLogger`, `TestIncidentStartupIsSilentWithoutAmbientAzureVariablesOrNearExpiry`, `TestIncidentStartupWarnsWhenTheCertificateExpiresSoon` |
+| The worker lock is taken before any token request, so a second worker spends none; the credential and its certificate checks come before the lock, so a loose certificate reports the certificate failure, not "already running"; a failed credential build still finds ambient `AZURE_*` reported and removed and starts nothing | `TestIncidentStartupTakesTheWorkerLockBeforeAnyTokenRequest`, `TestIncidentStartupBuildsTheCredentialBeforeTakingTheWorkerLock`, `TestIncidentCredentialBuildFailureStillFindsAmbientVariablesRemoved` |
+| `run` refuses a missing or invalid `auth` and a loose certificate mode before any startup work; `status` and `cancel` need no Azure identity | `TestIncidentRunWithoutAuthIsRefusedBeforeAnyStartupWork`, `TestIncidentRunRefusesInvalidAuthNamingTheField`, `TestIncidentRunRefusesACertificateWithLooseModeBeforeAnyStartupWork`, `TestIncidentStatusAndCancelNeedNoAzureIdentity` |
 
 Live Azure delivery, production RBAC, the operator's container image and proxy,
 and actual model/GitHub calls require a staging smoke test before enabling this

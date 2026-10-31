@@ -26,6 +26,7 @@ type Config struct {
 	MaxAttempts    int             `json:"maxAttempts"`
 	BudgetUSD      float64         `json:"budgetUsd"` // reserved per attempt; never refunded after a crash
 	Agent          ContainerConfig `json:"agent"`
+	Auth           *AuthConfig     `json:"auth"` // explicit worker identity; no ambient Azure fallback
 	Resources      []Resource      `json:"resources"`
 }
 
@@ -89,6 +90,12 @@ func LoadConfig(path string) (Config, error) {
 func (c Config) Validate() error {
 	if !c.Enabled {
 		return fmt.Errorf("incident worker is disabled; set enabled explicitly")
+	}
+	if c.Auth == nil {
+		return fmt.Errorf("no explicit worker identity is configured: add an auth section (see the \"Worker identity\" section of watch/docs/incident-worker.md)")
+	}
+	if err := c.Auth.Validate(); err != nil {
+		return err
 	}
 	if !filepath.IsAbs(c.StateDir) || c.Concurrency < 1 || c.Concurrency > 16 || c.TimeoutSeconds < 1 || c.TimeoutSeconds > 86400 || c.MaxAttempts < 1 || c.MaxAttempts > 10 || c.BudgetUSD < 0.03 || c.BudgetUSD > 10000 || math.IsInf(c.BudgetUSD, 0) || math.IsNaN(c.BudgetUSD) {
 		return fmt.Errorf("invalid state directory or execution limits")

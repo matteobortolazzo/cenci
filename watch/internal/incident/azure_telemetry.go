@@ -22,7 +22,7 @@ func (a AzureTelemetry) Collect(ctx context.Context, s Incident, r Resource) (st
 	if !uuidPattern.MatchString(r.Workspace) || r.Query == "" {
 		return "", fmt.Errorf("missing allowlisted telemetry workspace/query")
 	}
-	token, err := a.Credential.GetToken(ctx, policy.TokenRequestOptions{Scopes: []string{"https://api.loganalytics.io/.default"}})
+	token, err := a.Credential.GetToken(ctx, policy.TokenRequestOptions{Scopes: []string{LogAnalyticsScope}})
 	if err != nil {
 		return "", err
 	}
