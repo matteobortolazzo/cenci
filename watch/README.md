@@ -377,6 +377,7 @@ telemetry, and produces a draft fix PR or a report for human review. It runs
 separately from the attention daemon and is disabled until explicitly configured.
 
 ```bash
+cenci incident setup --config /absolute/path/incidents.json
 cenci incident run --config /absolute/path/incidents.json
 cenci incident verify --config /absolute/path/incidents.json [--propagation-wait 5m]
 cenci incident status --state-dir /absolute/path/incident-state
@@ -399,6 +400,39 @@ probe is `ok`, 1 when any fails, and 2 on a usage error. With
 `authorization-denied` probes every 30 seconds until the window ends, for RBAC
 that has just been granted; see
 [Verifying the identity](docs/incident-worker.md#verifying-the-identity).
+
+`setup` is a read-only preview that explains the worker identity and prints the
+commands to create it. It writes no file, changes nothing in Azure, and needs
+neither `enabled: true` nor an `auth` section in the config. It discovers values
+with read-only `az` calls when `az` is usable, and otherwise still renders every
+step with `<placeholder>` tokens. Example with a certificate identity:
+
+```bash
+cenci incident setup --config /absolute/path/incidents.json \
+  --tenant TENANT_UUID --subscription SUBSCRIPTION_UUID \
+  --certificate-path /home/incident/.config/cenci/worker.pem
+```
+
+Flags (`--config` is required; every other flag is optional):
+
+- `--config PATH` — the incident worker JSON config to preview against.
+- `--tenant UUID` — Entra tenant the worker authenticates in (default: the `az` login tenant).
+- `--subscription UUID` — subscription searched for the namespace and workspaces (default: the `az` default, shown only as a discovered candidate).
+- `--identity new|existing|managed` — which worker identity to plan for (default `new`).
+- `--client-id UUID` — client ID of the identity (required for `existing`; optional for `managed`; not allowed with `new`).
+- `--principal-object-id UUID` — object ID of a managed identity's principal (`managed` only; a placeholder is shown when absent).
+- `--display-name NAME` — display name for a `new` identity (default `cenci-incident-worker`).
+- `--certificate-path PATH` — absolute path of the worker's certificate and key PEM (not allowed with `managed`).
+- `--service-bus-namespace-id ID` — Service Bus namespace resource ID, when it cannot be discovered.
+- `--workspace-resource-id UUID=ID` — resource ID for a configured workspace UUID that cannot be discovered (repeatable; each UUID once, a repeated UUID is refused with exit 2).
+
+Exit codes: `0` a preview was rendered (including a guidance-only one when `az` is
+missing or not signed in); `1` the config is unusable or a discovery step failed
+(malformed, oversized or timed-out `az` output, or a value that contradicts your
+input); `2` a usage error such as a bad flag value or conflicting identity flags.
+See [Setup preview](docs/incident-worker.md#setup-preview) for what it runs and
+prints.
+
 `status` prints persistent JSON without Azure or agent access, and `cancel` needs
 no Azure identity either. `cancel` stops queued/active work;
 it preserves reports, branches, and existing PRs. Merge, deployment, and production

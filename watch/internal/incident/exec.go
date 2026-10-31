@@ -12,13 +12,25 @@ import (
 	"time"
 )
 
-type boundedBuffer struct{ bytes.Buffer }
+var errOutputLimit = errors.New("command output exceeds 4 MiB")
+
+type boundedBuffer struct {
+	bytes.Buffer
+	overflowed bool
+}
 
 func (b *boundedBuffer) Write(p []byte) (int, error) {
 	if b.Len()+len(p) > 4*1024*1024 {
-		return 0, fmt.Errorf("command output exceeds 4 MiB")
+		b.overflowed = true
+		return 0, errOutputLimit
 	}
 	return b.Buffer.Write(p)
+}
+
+// ReadFrom shadows bytes.Buffer's, which io.Copy would otherwise pick and which
+// would grow the buffer past the bound without ever calling Write.
+func (b *boundedBuffer) ReadFrom(r io.Reader) (int64, error) {
+	return io.Copy(struct{ io.Writer }{b}, r)
 }
 
 // Every command has a per-call bound within its incident deadline. Killing the
@@ -45,6 +57,11 @@ func commandDeadline(ctx context.Context, dir string, env []string, input io.Rea
 	cmd.Stdout = &out
 	cmd.Stderr = &stderr
 	err := cmd.Run()
+	if (out.overflowed || stderr.overflowed) && !errors.Is(err, errOutputLimit) {
+		// A child killed by the closed pipe reports a signal exit, which Wait
+		// returns ahead of the copy error: keep the overflow visible.
+		err = errors.Join(err, errOutputLimit)
+	}
 	ctxErr := ctx.Err()
 	if ctxErr != nil {
 		err = errors.Join(err, ctxErr)

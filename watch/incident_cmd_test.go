@@ -178,7 +178,7 @@ func (w *cliWorld) requireRefusedBeforeStartup(t *testing.T, code int, stderr st
 func TestIncidentRunWithoutAuthIsRefusedBeforeAnyStartupWork(t *testing.T) {
 	w := newCLIWorld(t)
 	code, stderr := w.run(t, "incident", "run", "--config", w.config(t, ""))
-	w.requireRefusedBeforeStartup(t, code, stderr, "no explicit worker identity is configured", "Worker identity")
+	w.requireRefusedBeforeStartup(t, code, stderr, "no explicit worker identity is configured", "Worker identity", "cenci incident setup --config")
 }
 
 func TestIncidentRunRefusesInvalidAuthNamingTheField(t *testing.T) {
@@ -298,18 +298,29 @@ func TestIncidentHelpDocumentsVerify(t *testing.T) {
 		t.Fatalf("help does not document incident verify and its flags:\n%s", out)
 	}
 	_, stderr := newCLIWorld(t).run(t, "incident", "unknown")
-	if !strings.Contains(stderr, "use run, verify, status, or cancel") {
+	if !strings.Contains(stderr, "use run, verify, status, cancel, or setup") {
 		t.Fatalf("the unknown-verb hint must list verify: %q", stderr)
 	}
 }
 
 func TestIncidentCLIOptInAndUsage(t *testing.T) {
-	for _, args := range [][]string{{"incident"}, {"incident", "unknown"}, {"incident", "run"}, {"incident", "status"}, {"incident", "cancel", "--state-dir", "/tmp", "--id", "x", "extra"}} {
+	for _, args := range [][]string{{"incident"}, {"incident", "unknown"}, {"incident", "run"}, {"incident", "status"}, {"incident", "setup"}, {"incident", "cancel", "--state-dir", "/tmp", "--id", "x", "extra"}} {
 		out, err := exec.Command(binaryPath, args...).CombinedOutput()
 		exit, ok := err.(*exec.ExitError)
 		if !ok || exit.ExitCode() != 2 {
 			t.Fatalf("%v: %v %s", args, err, out)
 		}
+	}
+	// The unknown-verb hint lists every verb, setup included.
+	for _, args := range [][]string{{"incident"}, {"incident", "unknown"}} {
+		if out, _ := exec.Command(binaryPath, args...).CombinedOutput(); !strings.Contains(string(out), "use run, verify, status, cancel, or setup") {
+			t.Fatalf("%v: usage hint lacks the setup verb: %s", args, out)
+		}
+	}
+	// A missing --config for setup is a usage error that names the flag, not the
+	// unknown-verb hint.
+	if out, _ := exec.Command(binaryPath, "incident", "setup").CombinedOutput(); !strings.Contains(string(out), "--config") {
+		t.Fatalf("incident setup without --config must name the missing flag: %s", out)
 	}
 	config := filepath.Join(t.TempDir(), "config.json")
 	if err := os.WriteFile(config, []byte(`{"enabled":false}`), 0600); err != nil {

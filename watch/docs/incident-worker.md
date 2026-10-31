@@ -340,8 +340,11 @@ A config with no `auth` section exits 1 before any Azure call, container
 cleanup, or ledger recovery, with:
 
 ```text
-cenci incident: no explicit worker identity is configured: add an auth section (see the "Worker identity" section of watch/docs/incident-worker.md)
+cenci incident: no explicit worker identity is configured: add an auth section (see the "Worker identity" section of watch/docs/incident-worker.md), or run cenci incident setup --config <path> to preview it
 ```
+
+`cenci incident run` prints this literally, with `<path>` unreplaced; it names the
+read-only [setup preview](#setup-preview).
 
 ### Migrating an existing install
 
@@ -361,6 +364,109 @@ client-secret mode, so a secret-based install moves to a certificate:
 
 Installs on a managed identity only need `auth` with `mode` `managedIdentity`
 and, for a user-assigned identity, its `clientId`.
+
+### Setup preview
+
+`cenci incident setup --config <path>` explains what a worker identity needs and
+prints the commands for it. It is a preview: it never writes a file, never changes
+Azure, and never starts the worker. It reads the config strictly and applies the
+same policy checks as `run`, but it does not require `enabled: true` or an `auth`
+section, so it works before either exists. A present `auth` section is decoded
+strictly (unknown fields are refused) but not otherwise validated, and the
+preview says whether it matches or differs from the proposal.
+
+```bash
+cenci incident setup --config /absolute/path/incidents.json \
+  --tenant 11111111-1111-4111-8111-111111111111 \
+  --subscription 44444444-4444-4444-8444-444444444444 \
+  --certificate-path /home/incident/.config/cenci/worker.pem
+```
+
+The output is a numbered list of steps, each with a plain-language explanation and
+copyable commands: prerequisites, the worker identity, the Service Bus receive
+role, the Log Analytics read role, the certificate credential (not for
+`--identity managed`), the proposed `auth` section, and the local files a later
+apply would create or change. Commands carry only validated values, each
+single-quoted (see Placeholders below for the unquoted `<token>` stand-ins), and role commands use built-in role definition IDs
+(`4f6d3b9b-027b-4f4c-9142-0e5a2a2247e0` for Azure Service Bus Data Receiver,
+`73c42c96-874c-492b-b04d-ab87d138a893` for Log Analytics Reader) at the exact
+queue or topic-subscription scope and at each exact workspace scope. Resources that
+share a workspace need one Log Analytics Reader command. A workspace in another
+subscription than `--subscription` keeps its own subscription in the scope and is
+flagged as cross-subscription. Identities are selected only by client ID or object
+ID, never by display name, and no command uses `az ad sp create-for-rbac`.
+
+**What it discovers.** When `az` is usable, the preview runs only these nine
+read-only subcommands, each with `-o json`, and refuses any other before running
+it: `account show`, `servicebus namespace list`, `servicebus namespace show`,
+`servicebus queue show`, `servicebus topic subscription show`,
+`monitor log-analytics workspace list`, `monitor log-analytics workspace show`,
+`ad sp show` and `role assignment list`. The calls inherit your environment, so
+your own Azure CLI login and `AZURE_CONFIG_DIR` are used, read stdin from the null
+device, and are bounded to 60 seconds and 4 MiB of output each. The preview never
+runs `az login` or installs anything, and never prints `az` output: it reports the
+step, the exit code and the failure class, and prints only validated IDs and
+sanitized role and scope strings. The `az` default subscription may be shown as a
+discovered candidate, but generated commands always carry an explicit
+`--subscription` or a full resource ID scope.
+
+For `--identity existing` (and `managed` when an object ID or client ID is given)
+it resolves the principal with `az ad sp show --id <client-or-object-id>`, lists
+its other role assignments with `az role assignment list --assignee-object-id
+<object-id> --all` (or says they could not be read), and warns that Azure RBAC is
+additive: every role the principal already holds stays in effect. When the
+principal itself cannot be looked up, the preview says it was not confirmed and
+does not list its assignments or claim it holds none.
+
+**Prerequisites.** The preview separates two kinds of rights, which different
+people often hold. Microsoft Entra rights to create an app registration and its
+service principal are needed only for a new identity or a new certificate
+credential. `User Access Administrator` or `Role Based Access Control
+Administrator` is needed on each scope that receives a role assignment. Your Azure
+CLI login is used for setup only and is never written to the worker configuration;
+the worker authenticates only as the identity in its `auth` section.
+
+**Flags.** `--config` is required. `--identity` is `new` (the default), `existing`
+or `managed`. `new` forbids `--client-id` and `--principal-object-id`, and
+`--display-name` (default `cenci-incident-worker`) names the app registration it
+creates. `existing` requires `--client-id` and forbids `--principal-object-id` and
+`--display-name`. `managed` forbids `--display-name` and `--certificate-path`;
+`--principal-object-id` is optional, and an optional `--client-id` must equal the
+`appId` that `az ad sp show` reports. `--tenant`, `--subscription`, `--client-id`
+and `--principal-object-id` must be UUIDs; `--certificate-path` must be absolute.
+`--service-bus-namespace-id` names the namespace by resource ID when it cannot be
+discovered and must name the configured `namespace`.
+`--workspace-resource-id <workspace-uuid>=<resource-id>` is repeatable, and the
+UUID must match a configured `resources[].workspace`, and each UUID may be given
+once (a repeated UUID is a usage error, exit 2). Workspace resource IDs are
+never persisted into `resources[]`. `workloadIdentity` stays a manual path, so
+there is no flag for it.
+
+**Placeholders.** When `az` is not on `PATH`, `az account show` fails, a value
+cannot be read or is ambiguous, or `--tenant` differs from the tenant you are
+signed in to (discovery is then skipped, since it would read the wrong tenant),
+the preview still renders and exits 0. It uses your flag values and
+`<placeholder>` tokens such as `<object-id>`, `<principal-object-id>`,
+`<service-bus-namespace-id>` and `<workspace-resource-id>` for what it could not
+discover, names the flag that supplies each one, and puts a `# fill placeholders
+before running` line above every command that still holds one. The renderer's own
+placeholders are left unquoted, so an unquoted `<x>` is a shell redirection error
+and an unfilled command fails rather than running with a wrong value. Every real
+value stays single-quoted, even one that merely looks like a placeholder, such as a
+`--display-name '<object-id>'`. When `--certificate-path` is absent, the
+certificate step, the proposed `auth` section and the local-files list all show
+`<certificate-path>`; no default location is invented.
+
+**Exit codes.**
+
+| Code | Meaning |
+| --- | --- |
+| 0 | A preview was rendered, including a guidance-only one with placeholders. |
+| 1 | The config is unusable, or a discovery step failed: `az` exited 0 with output that is not one JSON value (empty, truncated, trailing data, wrong shape), the output exceeded its bound, a call timed out, was interrupted or was killed by a signal, or a discovered value contradicts your input (a workspace whose `customerId` is not the configured one, or a `--client-id` that is not the principal's `appId`). Nothing is printed to stdout. |
+| 2 | A usage error, reported as one line before any `az` call: a missing `--config`, a malformed or non-UUID value, a malformed resource ID, a workspace UUID matching no configured workspace, conflicting identity flags, or an unknown flag. |
+
+The `--apply`, `--yes` and `--replace-auth` flags are not registered here and are
+rejected as unknown flags.
 
 ### Provisioning the identity
 
@@ -809,9 +915,11 @@ and GitHub are injected at their boundaries; no test uses production credentials
 The worker-identity tests run the real azidentity credentials against a fake
 Entra ID transport. The command-level ones live in the `watch` package:
 `watch/incident_run_test.go` drives the startup sequence with an injected token
-boundary, `watch/incident_verify_test.go` drives `verify` the same way, and
+boundary, `watch/incident_verify_test.go` drives `verify` the same way,
 `watch/incident_cmd_test.go` runs the built `cenci` binary (before any network
-call). The `TestVerify*` names live in `internal/incident/verify_test.go`.
+call), and `watch/incident_setup_cmd_test.go` drives `cenci incident setup`
+through the built binary against a scripted fake `az`. The `TestVerify*` names
+live in `internal/incident/verify_test.go`.
 
 | Requirement | Named test |
 | --- | --- |
@@ -855,6 +963,18 @@ call). The `TestVerify*` names live in `internal/incident/verify_test.go`.
 | The production broker opener (no Azure call) builds the `verify` client with a negative `MaxRetries` so one attempt holds at the SDK level, while `run` keeps the SDK defaults; the receiver opens on the configured queue or topic subscription | `TestVerifyProductionBrokerOpenerAttemptsOnceAtTheSDKLevel`, `TestRunBrokerOpenerKeepsTheSDKRetryDefaults`, `TestBrokerReceiverIsOpenedOnTheConfiguredQueueOrTopicSubscription` |
 | `verify` authenticates through the real credential as the configured identity with no `az` call and no file written; it runs beside a live worker; it exits 1 when any probe fails, reports a credential build failure as `run` does, and warns on a near-expiry certificate | `TestIncidentVerifyAuthenticatesAsTheConfiguredIdentityWithoutAzOrFiles`, `TestIncidentVerifyRunsNextToALiveWorker`, `TestIncidentVerifyExitsOneWhenAnyProbeFails`, `TestIncidentVerifyReportsACredentialBuildFailureLikeRun`, `TestIncidentVerifyWarnsWhenTheCertificateExpiresSoon` |
 | `verify` usage errors exit 2 (`--propagation-wait` outside 30s-15m, or on another verb); the bounds are inclusive; a missing `auth` and a disabled config are refused like `run`; help documents `verify` | `TestIncidentVerifyUsageErrorsExitTwo`, `TestIncidentVerifyAcceptsTheInclusivePropagationWaitBounds`, `TestIncidentVerifyWithoutAuthIsRefusedLikeRun`, `TestIncidentVerifyOnDisabledConfigIsRefusedLikeRun`, `TestIncidentHelpDocumentsVerify` |
+| The missing-`auth` diagnostic also names `cenci incident setup --config`; setup loads a config without `enabled` or `auth` but still enforces policy and a strict present `auth`; the usage hint lists `setup`, and `setup` without `--config` is a usage error | `TestConfigWithoutAuthIsRefusedWithMigrationMessage`, `TestSetupConfigLoadsWithoutAuthButEnforcesPolicy`, `TestIncidentRunWithoutAuthIsRefusedBeforeAnyStartupWork`, `TestIncidentCLIOptInAndUsage` |
+| Setup preview runs only the nine read-only `az` subcommands and changes no file (with a positive control), lists an existing or absent certificate destination correctly, and every `az` call inherits `AZURE_CONFIG_DIR`, reads the null device as stdin and is bounded (4 MiB output, deadline) | `TestIncidentSetupPreviewInvokesOnlyReadOnlyAzAndChangesNoFile`, `TestIncidentSetupAzCallsInheritTheOperatorEnvironmentAndReadNullStdin`, `TestIncidentSetupAzOutputOverTheBoundFailsTheStep`, `TestAzCallPastItsDeadlineIsAFailedStepNotAnUnavailableValue` (the 60-second value itself is not waited out) |
+| Setup `az` failure classes: a non-zero exit is an unavailable value even when its stderr mentions the output limit; a cancelled call and a signal death are failed steps; stderr past 4 MiB reports the output limit; a mutating subcommand is refused without executing anything (with a control); an unwritable preview exits 1 | `TestAzCallWhoseStderrMentionsTheOutputLimitIsStillAnUnavailableValue`, `TestAzCallCancelledMidFlightIsAFailedStepNotAnUnavailableValue`, `TestAzCallKilledBySignalIsAFailedStepNotAnUnavailableValue`, `TestAzCommandOverflowingStderrReportsTheOutputLimit`, `TestAzRunReadOnlyRefusesMutatingSubcommandsWithoutExecutingAnything`, `TestIncidentSetupUnwritablePreviewExitsOne` |
+| Setup preview renders numbered, explained steps with exact role commands, the proposed `auth` JSON and local files; `--identity` defaults to `new`; the `az` default subscription is only a discovered candidate | `TestIncidentSetupPreviewRendersNumberedExplainedStepsAuthJSONAndLocalFiles`, `TestIncidentSetupDefaultSubscriptionIsOnlyADiscoveredCandidate`, `TestIncidentSetupReportsWhetherConfiguredAuthDiffers`, `TestIncidentSetupReportsAnAbsentAuthSection` |
+| Setup placeholders: renderer-made `<token>`s are unquoted and labeled `fill placeholders before running`, so an unfilled command fails at the shell (checked by running it, with a filled control); real values, even ones shaped like a placeholder, stay quoted; an absent `--certificate-path` shows `<certificate-path>` in the certificate step, the `auth` JSON and the files list without inventing a default | `TestIncidentSetupPlaceholderCommandsAreUnquotedAndLabeledWhileRealValuesStayQuoted`, `TestIncidentSetupWithoutCertificatePathShowsThePlaceholderAndInventsNoDefault`, `TestSetupRenderLeavesRendererPlaceholdersUnquotedAndLabeled`, `TestSetupRenderQuotesRealValuesThatLookLikePlaceholders`, `TestSetupUnfilledPlaceholderCommandFailsAtTheShell` |
+| Setup preview without `az` or login exits 0 with placeholders; a tenant mismatch skips discovery; zero or several matches name the flag to supply | `TestIncidentSetupPreviewWithoutAzOrLoginExitsZeroWithPlaceholders`, `TestIncidentSetupTenantMismatchWarnsAndSkipsDiscovery`, `TestIncidentSetupZeroOrAmbiguousDiscoveryNamesTheFlagToSupply` |
+| Setup rejects invalid input with exit 2 before any `az` call and an unusable config with exit 1 | `TestIncidentSetupRejectsInvalidInputBeforeAnyAzCall`, `TestIncidentSetupInvalidConfigExitsOneBeforeAnyAzCall` |
+| Setup lists an existing or managed identity's other role assignments and warns that RBAC is additive; a managed identity without an object ID gets a placeholder, and a `--client-id` that is not the principal's `appId` fails the step; an unreadable principal is reported as unconfirmed and never as holding no assignments (`TestIncidentSetupManagedIdentityPreview`, subtest `unreadable-principal-is-not-claimed-to-hold-no-other-assignments`) | `TestIncidentSetupExistingIdentityListsOtherAssignmentsAndWarns`, `TestIncidentSetupManagedIdentityPreview` |
+| Setup output carries no key or token from the `az` boundary | `TestIncidentSetupOutputCarriesNoKeyOrTokenFromTheFakeBoundary` |
+| Setup scopes: a shared workspace gets one reader command, a topic config gets the exact subscription scope, and a cross-subscription workspace keeps its own scope and is flagged | `TestIncidentSetupSharedWorkspaceProducesOneReaderCommand`, `TestIncidentSetupTopicSubscriptionScopeIsExact`, `TestIncidentSetupCrossSubscriptionWorkspaceKeepsItsScope` |
+| Malformed, truncated or contradicting `az` output is a failed step with exit 1, never an empty result | `TestIncidentSetupMalformedDiscoveryOutputFailsTheStep`, `TestIncidentSetupMismatchedDiscoveryFailsTheStep` |
+| Resource ID parsing, exact scope building, workspace de-duplication and shell quoting | `TestSetupParseNamespaceIDAcceptsOnlyServiceBusNamespaces`, `TestSetupParseWorkspaceIDAcceptsOnlyLogAnalyticsWorkspaces`, `TestSetupEntityScopeIsTheExactQueueOrTopicSubscription`, `TestSetupDedupeWorkspacesComparesIDsWithoutCase`, `TestSetupInSubscriptionIgnoresCase`, `TestSetupShellQuoteExpandsToExactlyTheValue` |
 
 Live Azure delivery, production RBAC, the operator's container image and proxy,
 and actual model/GitHub calls require a staging smoke test before enabling this

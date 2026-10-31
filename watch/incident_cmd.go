@@ -21,7 +21,7 @@ import (
 )
 
 const (
-	incidentVerbHint = "cenci incident: use run, verify, status, or cancel"
+	incidentVerbHint = "cenci incident: use run, verify, status, cancel, or setup"
 	// The inclusive bounds of verify's --propagation-wait.
 	minPropagationWait = 30 * time.Second
 	maxPropagationWait = 15 * time.Minute
@@ -33,6 +33,10 @@ func runIncident(args []string) {
 		os.Exit(2)
 	}
 	verb := args[0]
+	if verb == "setup" {
+		runIncidentSetup(args[1:])
+		return
+	}
 	if verb != "run" && verb != "verify" && verb != "status" && verb != "cancel" {
 		fmt.Fprintln(os.Stderr, incidentVerbHint)
 		os.Exit(2)
