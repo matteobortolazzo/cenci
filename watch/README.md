@@ -205,7 +205,7 @@ descriptive slug: `--slug` if given, else the whole description slugified.
 | `--dir <path>` | Working directory the window starts in (default: current); prepended as a `cd '<dir>' &&` prefix on the launched command, visible in `--dry-run` output too |
 | `--slug <slug>` | Window-name slug for free-text runs; ignored for numeric tickets (named `<number>-<skill>`) |
 | `--config <path>` | Config file (default: `$XDG_CONFIG_HOME/cenci/config.json`) |
-| `--dry-run` | Print the resolved session, window name, command, and template provenance without spawning; refusals (missing template, unsatisfied sandbox, disabled agent) still fail |
+| `--dry-run` | Print the resolved session, window name, command, and template provenance without spawning; refusals (missing template, unsatisfied sandbox, disabled agent) still fail, but the host Codex adapter check does not run (the installed plugin is not inspected) |
 
 A board column action shrinks to a single line:
 
@@ -282,8 +282,9 @@ TestReadmeCapabilityTableInSync -update-readme` regenerates it):
 }
 ```
 
-A launch that cannot succeed is refused **before** any tmux window is created, in
-`--dry-run` too (exit 1, no resolved command):
+A launch that cannot succeed is refused **before** any tmux window is created (exit 1,
+no resolved command). The first three refusals below also apply in `--dry-run`; the
+Codex adapter check does not (see its entry):
 
 - **Missing template:** an unknown agent, or an agent without the requested workflow,
   fails naming the agent, the workflow, and the remedy (`define
@@ -297,6 +298,30 @@ A launch that cannot succeed is refused **before** any tmux window is created, i
   define `sandboxCommand`, so only custom agents are affected.
 - **Disabled agent:** OpenCode is temporarily disabled; adding a `config.json` entry
   does not bypass the pause (see the OpenCode note below).
+- **Codex adapter unavailable (host only):** a real host launch (`--no-sandbox` or
+  `"sandbox": false`) of a built-in Codex workflow asks the Codex it would run
+  (`agents.codex.command`, `codex` by default) `plugin list --json` and refuses
+  unless `cenci@cenci` is installed, explicitly enabled, and its installed plugin root
+  (`${CODEX_HOME:-$HOME/.codex}/plugins/cache/cenci/cenci/<version>`) holds the
+  workflow's declared adapter (`skills/<workflow>/codex.md`, or the portable
+  `skills/<workflow>/SKILL.md` for Codex `babysit`) as a non-empty file. The refusal
+  names the plugin, the workflow and the remedy. Cases: `cenci@cenci` is not
+  installed; it is disabled; the installed plugin lacks the declared adapter; or the
+  probe cannot resolve these facts (Codex missing, failing or timing out, unparseable
+  or ambiguous output, an unsafe version, a relative `CODEX_HOME`) — it fails closed.
+  Remedy: `codex plugin add cenci@cenci`, set `plugins."cenci@cenci".enabled = true`
+  in the Codex config, or launch in the sandbox. The same refusal reaches `cenci
+  dispatch` and `cenci babysit` launches before any window is spawned, so a babysit
+  launch refused this way does not advance ci-repair attempts or mark feedback as
+  launched, and never switches agents. Sandbox launches skip the probe and rely on
+  boot-time provisioning (`provision_codex_plugins` in `sandbox/lib/migrate-settings.sh`).
+  Claude launches and user-defined (config-only) workflows are not probed, and
+  `--dry-run` does not check the installed plugin. Known limitation: the probe asks the
+  Codex binary named by the first token of the configured host command, from the `cenci`
+  process's working directory and environment; it does not apply `--profile`/`-c` flags,
+  a project-scoped `.codex/config.toml`, or a different `CODEX_HOME`/`PATH` set only in
+  the tmux server environment, so it can pass where the session's own Codex configuration
+  would not.
 
 Unattended paths — `cenci dispatch` and `cenci babysit` arming — are stricter than
 `run`: they accept only built-in (agent, workflow) pairs from the table above, and a

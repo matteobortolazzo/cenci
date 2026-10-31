@@ -1336,3 +1336,172 @@ func TestRunAutomaticRenameFailureNeverRecordsRepoDir(t *testing.T) {
 		t.Errorf("repo-dir writes = %+v, want none after an automatic-rename failure", calls)
 	}
 }
+
+// --- Host-Codex adapter probe (#1237 AC 2) ---
+
+// probeCall is one ProbeAdapter invocation.
+type probeCall struct{ command, workflow, adapter string }
+
+// recordingProbe returns a ProbeAdapter seam that records its calls and
+// returns result.
+func recordingProbe(result error, calls *[]probeCall) func(command, workflow, adapter string) error {
+	return func(command, workflow, adapter string) error {
+		*calls = append(*calls, probeCall{command, workflow, adapter})
+		return result
+	}
+}
+
+func TestRunRefusesHostCodexWhenAdapterUnavailableBeforeSpawn(t *testing.T) {
+	var calls []probeCall
+	probeErr := errors.Join(ErrAdapterUnavailable, errors.New("probe says no"))
+	o := runCase(t, "", false, func(o *Opts) {
+		o.Agent, o.Workflow, o.Ticket = "codex", "ci-repair", "42"
+		o.SandboxSet, o.Sandbox = true, false
+		o.ProbeAdapter = recordingProbe(probeErr, &calls)
+	})
+	if !errors.Is(o.err, ErrAdapterUnavailable) {
+		t.Fatalf("err = %v, want errors.Is(_, ErrAdapterUnavailable)", o.err)
+	}
+	if errors.Is(o.err, ErrWindowSpawned) {
+		t.Errorf("err = %v, must not wrap ErrWindowSpawned: nothing was spawned", o.err)
+	}
+	assertNothingSpawned(t, o)
+	want := probeCall{"codex", "ci-repair", "skills/ci-repair/codex.md"}
+	if len(calls) != 1 || calls[0] != want {
+		t.Errorf("probe calls = %+v, want [%+v]", calls, want)
+	}
+}
+
+func TestRunSpawnsHostCodexWhenProbePasses(t *testing.T) {
+	var calls []probeCall
+	o := runCase(t, "", false, func(o *Opts) {
+		o.Agent, o.Workflow, o.Ticket = "codex", "ci-repair", "42"
+		o.SandboxSet, o.Sandbox = true, false
+		o.ProbeAdapter = recordingProbe(nil, &calls)
+	})
+	if o.err != nil {
+		t.Fatalf("Run: %v", o.err)
+	}
+	if len(calls) != 1 {
+		t.Errorf("probe calls = %+v, want exactly one", calls)
+	}
+	if len(o.ctrl.windows) != 1 || !o.daemonCalled {
+		t.Errorf("windows = %+v, daemonCalled = %v, want one window after a passing probe", o.ctrl.windows, o.daemonCalled)
+	}
+}
+
+// TestRunProbesTheConfiguredCodexCommandAndPortableAdapter: the probe gets the
+// FIRST TOKEN of the resolved host command (a multi-token command keeps its
+// flags out), and a built-in whose args the file overrides is still probed.
+func TestRunProbesTheConfiguredCodexCommandAndPortableAdapter(t *testing.T) {
+	var calls []probeCall
+	config := `{"agents":{"codex":{"command":"/opt/bin/codex --profile x","workflows":{"babysit":{"args":["exec","{ticket}"]}}}}}`
+	o := runCase(t, config, false, func(o *Opts) {
+		o.Agent, o.Workflow, o.Ticket = "codex", "babysit", "42"
+		o.SandboxSet, o.Sandbox = true, false
+		o.ProbeAdapter = recordingProbe(nil, &calls)
+	})
+	if o.err != nil {
+		t.Fatalf("Run: %v", o.err)
+	}
+	want := probeCall{"/opt/bin/codex", "babysit", "skills/babysit/SKILL.md"}
+	if len(calls) != 1 || calls[0] != want {
+		t.Errorf("probe calls = %+v, want [%+v]", calls, want)
+	}
+}
+
+// TestRunSkipsAdapterProbeOutsideHostCodex: sandbox Codex (explicit and by the
+// sandbox-on default), host Claude, dry-run, and user-defined workflows or
+// agents never consult the probe. A positive control proves the seam is wired.
+func TestRunSkipsAdapterProbeOutsideHostCodex(t *testing.T) {
+	custom := `{"agents":{"codex":{"workflows":{"custom":{"args":["x {ticket}"]}}},"acme":{"command":"acme","workflows":{"refine":{"args":["--task","{ticket}"]}}}}}`
+	for _, tc := range []struct {
+		name   string
+		config string
+		dryRun bool
+		set    func(*Opts)
+	}{
+		{"sandbox codex (explicit)", "", false, func(o *Opts) {
+			o.Agent, o.Workflow, o.SandboxSet, o.Sandbox = "codex", "ci-repair", true, true
+		}},
+		{"sandbox codex (default on)", "", false, func(o *Opts) { o.Agent, o.Workflow = "codex", "ci-repair" }},
+		{"sandbox codex (config on)", `{"sandbox":true}`, false, func(o *Opts) { o.Agent, o.Workflow = "codex", "ci-repair" }},
+		{"host claude", "", false, func(o *Opts) {
+			o.Agent, o.Workflow, o.SandboxSet, o.Sandbox = "claude", "ci-repair", true, false
+		}},
+		{"dry-run host codex", "", true, func(o *Opts) {
+			o.Agent, o.Workflow, o.SandboxSet, o.Sandbox = "codex", "ci-repair", true, false
+		}},
+		{"user-defined codex workflow", custom, false, func(o *Opts) {
+			o.Agent, o.Workflow, o.SandboxSet, o.Sandbox = "codex", "custom", true, false
+		}},
+		{"user-defined agent", custom, false, func(o *Opts) {
+			o.Agent, o.Workflow, o.SandboxSet, o.Sandbox = "acme", "refine", true, false
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls []probeCall
+			o := runCase(t, tc.config, tc.dryRun, func(o *Opts) {
+				o.Ticket = "42"
+				tc.set(o)
+				o.ProbeAdapter = recordingProbe(ErrAdapterUnavailable, &calls)
+			})
+			if o.err != nil {
+				t.Fatalf("Run: %v (a refusing probe must not be consulted here)", o.err)
+			}
+			if len(calls) != 0 {
+				t.Errorf("probe was called: %+v", calls)
+			}
+		})
+	}
+}
+
+// TestRunDefaultProbeRunsTheConfiguredCodexBinary: with no seam, Run runs the
+// real probe against agents.codex.command. A fake codex that lists no plugins
+// refuses the launch before any window or daemon.
+func TestRunDefaultProbeRunsTheConfiguredCodexBinary(t *testing.T) {
+	t.Setenv("CODEX_HOME", t.TempDir())
+	f := newFakeCodex(t, pluginList(), "", 0)
+	o := runCase(t, `{"agents":{"codex":{"command":"`+f.command+`"}}}`, false, func(o *Opts) {
+		o.Agent, o.Workflow, o.Ticket = "codex", "ci-repair", "42"
+		o.SandboxSet, o.Sandbox = true, false
+	})
+	if !errors.Is(o.err, ErrAdapterUnavailable) {
+		t.Fatalf("err = %v, want errors.Is(_, ErrAdapterUnavailable)", o.err)
+	}
+	if !strings.Contains(o.err.Error(), "not installed") {
+		t.Errorf("err = %q, want the not-installed class marker", o.err)
+	}
+	assertNothingSpawned(t, o)
+	if calls := f.calls(t); len(calls) != 1 || calls[0] != "plugin list --json" {
+		t.Errorf("fake codex calls = %q, want exactly [plugin list --json]", calls)
+	}
+}
+
+// TestRunAdapterRefusalDoesNotMaskEarlierRefusals: a disabled agent and a
+// missing template still refuse with their own sentinels, never the adapter one.
+func TestRunAdapterRefusalDoesNotMaskEarlierRefusals(t *testing.T) {
+	var calls []probeCall
+	for _, tc := range []struct {
+		name string
+		set  func(*Opts)
+		want error
+	}{
+		{"disabled agent", func(o *Opts) { o.Agent = "opencode" }, ErrAgentDisabled},
+		{"missing template", func(o *Opts) { o.Agent, o.Workflow = "codex", "frobnicate" }, ErrMissingTemplate},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			o := runCase(t, "", false, func(o *Opts) {
+				o.SandboxSet, o.Sandbox = true, false
+				tc.set(o)
+				o.ProbeAdapter = recordingProbe(ErrAdapterUnavailable, &calls)
+			})
+			if !errors.Is(o.err, tc.want) || errors.Is(o.err, ErrAdapterUnavailable) {
+				t.Errorf("err = %v, want only %v", o.err, tc.want)
+			}
+		})
+	}
+	if len(calls) != 0 {
+		t.Errorf("probe was called for an earlier refusal: %+v", calls)
+	}
+}

@@ -626,3 +626,139 @@ func TestReadmeCapabilityTableInSync(t *testing.T) {
 			"--- README block ---\n%s\n--- generated ---\n%s", got, want)
 	}
 }
+
+// --- Capability adapters (#1237 AC 1) ---
+
+// flowDir resolves <repo-root>/flow via runtime.Caller. A missing flow tree is
+// a hard failure, never a skip: the adapter invariant must not pass vacuously.
+func flowDir(t *testing.T) string {
+	t.Helper()
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller(0) failed to resolve this test file's own path")
+	}
+	// file: <repo-root>/watch/internal/run/template_test.go
+	dir := filepath.Join(filepath.Dir(file), "..", "..", "..", "flow")
+	if info, err := os.Stat(filepath.Join(dir, "skills")); err != nil || !info.IsDir() {
+		t.Fatalf("%s/skills is not readable (%v): the adapter invariant needs the flow tree and must not be skipped", dir, err)
+	}
+	return dir
+}
+
+// TestBuiltinCapabilityAdaptersExistInFlow: every built-in capability declares
+// an adapter, the declared file exists and is non-empty under flow/, and every
+// codex.md-adapted capability's SKILL.md carries the Codex dispatch line that
+// flow/tests/dispatch-target-invocable.test.sh also requires.
+func TestBuiltinCapabilityAdaptersExistInFlow(t *testing.T) {
+	caps := BuiltinCapabilities()
+	if len(caps) == 0 {
+		t.Fatal("BuiltinCapabilities() is empty; the adapter invariant would pass vacuously")
+	}
+	flow := flowDir(t)
+	checkedCompanions := 0
+	for _, c := range caps {
+		t.Run(c.Agent+"/"+c.Workflow, func(t *testing.T) {
+			adapter := c.Adapter()
+			if adapter == "" {
+				t.Fatalf("capability %+v declares no adapter", c)
+			}
+			if got, ok := BuiltinAdapter(c.Agent, c.Workflow); !ok || got != adapter {
+				t.Errorf("BuiltinAdapter(%q, %q) = (%q, %v), want (%q, true)", c.Agent, c.Workflow, got, ok, adapter)
+			}
+			data, err := os.ReadFile(filepath.Join(flow, adapter))
+			if err != nil {
+				t.Fatalf("declared adapter %s is not readable under flow/: %v", adapter, err)
+			}
+			if strings.TrimSpace(string(data)) == "" {
+				t.Fatalf("declared adapter %s is empty", adapter)
+			}
+			if filepath.Base(adapter) != "codex.md" {
+				return
+			}
+			checkedCompanions++
+			skill, err := os.ReadFile(filepath.Join(flow, "skills", c.Workflow, "SKILL.md"))
+			if err != nil {
+				t.Fatalf("skills/%s/SKILL.md: %v", c.Workflow, err)
+			}
+			needle := "> **Client dispatch**: In Codex, read `codex-runtime` and `" + c.Workflow + "/codex.md`"
+			found := false
+			for _, line := range strings.Split(string(skill), "\n") {
+				if strings.HasPrefix(line, needle) {
+					found = true
+				}
+			}
+			if !found {
+				t.Errorf("skills/%s/SKILL.md has no line starting %q: Codex would not be routed to codex.md", c.Workflow, needle)
+			}
+		})
+	}
+	if checkedCompanions == 0 {
+		t.Fatal("no codex.md-adapted capability was checked; the Client dispatch assertion would pass vacuously")
+	}
+}
+
+// TestBuiltinAdapterExactValues pins the declared adapters literally, so a
+// regression in claudeWF/codexWF/portable() (e.g. Codex babysit losing its
+// portable adapter) fails by name.
+func TestBuiltinAdapterExactValues(t *testing.T) {
+	for _, tc := range []struct{ agent, workflow, want string }{
+		{"claude", "implement", "skills/implement/SKILL.md"},
+		{"claude", "babysit", "skills/babysit/SKILL.md"},
+		{"claude", "merge-repair", "skills/merge-repair/SKILL.md"},
+		{"codex", "ci-repair", "skills/ci-repair/codex.md"},
+		{"codex", "implement", "skills/implement/codex.md"},
+		{"codex", "babysit-attention", "skills/babysit-attention/codex.md"},
+		{"codex", "babysit", "skills/babysit/SKILL.md"}, // portable: no codex.md
+	} {
+		got, ok := BuiltinAdapter(tc.agent, tc.workflow)
+		if !ok || got != tc.want {
+			t.Errorf("BuiltinAdapter(%q, %q) = (%q, %v), want (%q, true)", tc.agent, tc.workflow, got, ok, tc.want)
+		}
+		if got := (Capability{Agent: tc.agent, Workflow: tc.workflow}).Adapter(); got != tc.want {
+			t.Errorf("Capability{%s,%s}.Adapter() = %q, want %q", tc.agent, tc.workflow, got, tc.want)
+		}
+	}
+}
+
+func TestBuiltinAdapterRejectsNonCapabilities(t *testing.T) {
+	for _, tc := range []struct{ agent, workflow string }{
+		{"opencode", "implement"}, // disabled agent
+		{"claude", "frobnicate"},
+		{"ghost", "implement"},
+		{"codex", "merge-repair"}, // Claude-only workflow
+		{"codex", ""},
+	} {
+		if got, ok := BuiltinAdapter(tc.agent, tc.workflow); ok || got != "" {
+			t.Errorf("BuiltinAdapter(%q, %q) = (%q, %v), want (\"\", false)", tc.agent, tc.workflow, got, ok)
+		}
+		if got := (Capability{Agent: tc.agent, Workflow: tc.workflow}).Adapter(); got != "" {
+			t.Errorf("Capability{%s,%s}.Adapter() = %q, want empty", tc.agent, tc.workflow, got)
+		}
+	}
+}
+
+// TestFileConfigCannotChangeAdapter: neither a file that overrides a built-in
+// template's args nor one that adds a user-defined workflow can change the
+// declared adapter of a built-in pair, and a user-defined workflow declares none.
+func TestFileConfigCannotChangeAdapter(t *testing.T) {
+	body := `{"agents":{"codex":{"workflows":{
+	  "implement":{"args":["exec","/x {ticket}"],"adapter":"skills/evil/codex.md","Adapter":"skills/evil/codex.md"},
+	  "custom":{"args":["x"]}}}}}`
+	cfg, err := Load(writeConfigFile(t, body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = "skills/implement/codex.md"
+	if got, ok := BuiltinAdapter("codex", "implement"); !ok || got != want {
+		t.Errorf("BuiltinAdapter after file override = (%q, %v), want (%q, true)", got, ok, want)
+	}
+	if got := cfg.Agents["codex"].Workflows["implement"].adapter; got != want {
+		t.Errorf("merged codex implement adapter = %q, want %q (merge must preserve the built-in adapter)", got, want)
+	}
+	if got := cfg.Agents["codex"].Workflows["custom"].adapter; got != "" {
+		t.Errorf("user-defined workflow adapter = %q, want empty", got)
+	}
+	if _, ok := BuiltinAdapter("codex", "custom"); ok {
+		t.Error("BuiltinAdapter(codex, custom) = true for a file-only workflow")
+	}
+}
