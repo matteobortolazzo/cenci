@@ -163,7 +163,7 @@ assert_contains "${skill}" 'Never push, and never open a PR, from a tree the pro
 # 5. A conflicting PR is not reported as successfully completed --
 #    gh pr view ... --json mergeable is present; UNKNOWN is handled as a
 #    distinct branch from CONFLICTING; the bounded CONFLICTING repair loop;
-#    the "never report success" sentence; and codex.md's goal-clear
+#    the "never report success" sentence; and codex.md's goal complete-step
 #    precondition now names non-CONFLICTING mergeability.
 # =====================================================================
 
@@ -189,8 +189,10 @@ assert_contains "${codex}" 'Bound the repair to two attempts.' \
   "5 codex.md: bounded CONFLICTING repair loop"
 assert_contains "${codex}" 'Never report the run as successfully completed on a `CONFLICTING` PR.' \
   "5 codex.md: never-report-success sentence"
-assert_contains "${codex}" 'Clear the goal only after the PR exists and its mergeability is confirmed not' \
-  "5 codex.md: goal-clear precondition now names non-CONFLICTING mergeability"
+assert_contains "${codex}" 'Run the **Goal lifecycle** complete step only after the PR exists and its mergeability is confirmed not' \
+  "5 codex.md: goal complete-step precondition now names non-CONFLICTING mergeability"
+assert_contains "${codex}" 'An `UNKNOWN` mergeability that stays unresolved after the re-queries is not confirmed: run no complete step, leave the goal as it is,' \
+  "5 codex.md: an unresolved UNKNOWN mergeability runs no goal complete step"
 
 # =====================================================================
 # 6. Claude/Codex contracts do not drift -- both docs reference

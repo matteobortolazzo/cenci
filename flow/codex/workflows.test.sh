@@ -202,8 +202,7 @@ done
 
 runtime="${ROOT}/skills/codex-runtime/SKILL.md"
 grep -q '.cenci/checkpoints' "$runtime" || fail "checkpoint contract"
-grep -q 'Arm a native Codex goal only after' "$runtime" || fail "goal arm contract"
-grep -q 'Clear it before human input' "$runtime" || fail "goal clear contract"
+grep -qx '## Goal lifecycle' "$runtime" || fail "goal lifecycle contract"
 grep -q 'built-in' "$runtime" && grep -q 'same bounded role prompt' "$runtime" || fail "agent fallback contract"
 
 # --- Approved-plan handoff (#1234): C2, C3, C5, C6, C7 and C9 contract text ---
@@ -462,6 +461,263 @@ for phrase in '`nextPhase` `null` means every phase is done' 'run no workflow mu
   'A failure of any checkpoint write (`advance`, `block`, `complete`) stops apply before the next mutation and is reported'; do
   require_in "R5/R6 apply nextPhase and checkpoint-write failures" "$handoff_apply" "$phrase"
 done
+
+# --- Native goal lifecycle (#1235): D1-D6 ---
+# One shared lifecycle in codex-runtime; implement and maintain only reference its steps (#979: no restated rule).
+# goal_row <file> <case> -> the `### Goal cases` table row whose first cell is exactly <case>
+goal_row(){ awk -v c="| $2 |" '$0=="### Goal cases" {on=1; next} on && /^#+ / {exit} on && index($0, c)==1 {print; exit}' "$1" | tr -s ' '; }
+
+[[ "$(grep -cx '## Goal lifecycle' "$runtime")" -eq 1 ]] || fail "D5 codex-runtime must carry exactly one '## Goal lifecycle' section"
+goal_create="$(section "$runtime" '### Create step')"
+goal_stop="$(section "$runtime" '### Stop step')"
+goal_complete="$(section "$runtime" '### Complete step')"
+goal_cases_text="$(section "$runtime" '### Goal cases')"
+
+# D1: authorization and the fixed objective.
+for phrase in 'Only a human-issued `apply` may create a goal' \
+  'Planning, `persist`, `ci-repair` and `babysit-attention` never create a goal' \
+  'Complete approved plan <path> through an open PR' 'repo-relative `planPath` that `verify` returns' \
+  'Never set a `token_budget`' 'Babysit through merge is never part of the objective' 'Claude Code `SKILL.md` procedures stay unchanged'; do
+  require_in "D1 goal authorization and objective" "$(section "$runtime" '## Goal lifecycle')" "$phrase"
+done
+order_in "D1 create step: runs after verify and right before the first advance" "$goal_create" \
+  'after `verify` passes' 'right before the first checkpoint `advance`'
+order_in "D1/D2 create step: the existing-goal check precedes the create call" "$goal_create" 'get_goal({})' 'create_goal({objective: "Complete approved plan <path> through an open PR"})'
+# D2: an unfinished goal is left alone; absent tools take the checkpoint-only path; the outcome is recorded.
+for phrase in 'status other than `complete`' 'left unchanged' '`skipped-active`' '`unavailable`' '`created`' 'checkpoint-only recovery' \
+  '--goal <created|skipped-active|unavailable>' 'checkpoint state alone'; do
+  require_in "D2 create step" "$goal_create" "$phrase"
+done
+# Review fix: `unavailable` only for tools absent before any call; an error from an invoked goal tool is a stop.
+for phrase in 'absent from the client'"'"'s tool list before any goal call is made' \
+  'any error from an invoked goal tool (`get_goal`, `create_goal` or `update_goal`) is a stop' 'never downgraded to `unavailable`'; do
+  require_in "D2 create step unavailable means absent tools only" "$goal_create" "$phrase"
+done
+require_in "D2 goal cases tool-error row: an invoked goal tool's error is a stop" "$(goal_row "$runtime" 'tool error')" 'an error from an invoked goal tool'
+# Review fix: a resume adopts this run's own goal as `created` when the checkpoint recorded none (crash between create_goal and the first advance).
+for phrase in 'the checkpoint records `created`, or records no goal' 'unfinished goal whose objective equals this run'"'"'s objective' \
+  'a goal with a different objective is `skipped-active`'; do
+  require_in "D2 create step resume adopts this run's goal" "$goal_create" "$phrase"
+done
+# D3: every stop leaves the goal as it is and keeps the unfinished state in the checkpoint.
+for phrase in 'checkpoint.mjs block' 'question' 'red or unrunnable baseline' 'native-tool error' 'budget or usage limit' '`Context: low`' \
+  'left exactly as it is' 'never marks the objective complete' 'never invents a clear or pause operation' \
+  'exposes' 'conditions of that client'; do
+  require_in "D3 stop step" "$goal_stop" "$phrase"
+done
+# D4: complete only for a created goal, only after the PR exists, before babysit.
+for phrase in 'only when the checkpoint'"'"'s `goal` is `created`' 'a successful `gh pr create`' 'before `cenci babysit` is armed' \
+  'A failed `gh pr create` is a stop' 'update_goal({status:"complete"})'; do
+  require_in "D4 complete step" "$goal_complete" "$phrase"
+done
+# D5: the retired arm/clear wording is gone from the contract and every restatement site (case-insensitive).
+for phrase in 'Arm a native Codex goal only after' 'Clear it before human input' 'persist the checkpoint, clear the active goal'; do
+  forbid_in "D5 codex-runtime retired goal wording" "$runtime_all" "$phrase"
+done
+for swept in "$runtime" "${ROOT}"/skills/*/codex.md "${ROOT}/docs/codex.md" "${ROOT}/docs/adapter-contract.md"; do
+  swept_text="$(normalize "$swept" | tr '[:upper:]' '[:lower:]')"
+  for phrase in 'clear the goal' 'clear the active goal' 'clear it before' 'goal-clear' 'clears/pauses' 'arm the native goal'; do
+    forbid_in "D5 clear-the-goal sweep ${swept#"${ROOT}/"}" "$swept_text" "$phrase"
+  done
+done
+# D5: implement and maintain reference each step and never restate the lifecycle.
+maintain_all="$(normalize "${ROOT}/skills/maintain/codex.md")"
+for pair in "implement:${implement_all}" "maintain:${maintain_all}"; do
+  wf="${pair%%:*}"
+  text="${pair#*:}"
+  for phrase in '**Goal lifecycle** create step' '**Goal lifecycle** stop step' '**Goal lifecycle** complete step'; do
+    require_in "D5 ${wf}/codex.md references the shared lifecycle" "$text" "$phrase"
+  done
+  for phrase in 'get_goal' 'create_goal' 'update_goal' 'Complete approved plan' 'token_budget'; do
+    forbid_in "D5 ${wf}/codex.md restates the lifecycle (#979)" "$text" "$phrase"
+  done
+done
+order_in "D1/D3/D4 implement goal steps" "$implement_all" 'once `verify` has passed' '**Goal lifecycle** create step' 'run-gate.sh' \
+  '**Goal lifecycle** stop step' 'gh pr create' '**Goal lifecycle** complete step' 'cenci pipeline artifact <id> --pr' 'cenci babysit <pr> --agent codex --interval'
+order_in "D1/D4 maintain goal steps" "$maintain_all" 'Verify `apply` read the approved apply plan' '**Goal lifecycle** create step' 'to `worktree`' \
+  'open one PR' '**Goal lifecycle** stop step' '**Goal lifecycle** complete step'
+require_in "D4 implement babysit is outside the objective" "$implement_all" 'outside the goal objective'
+require_in "D4 maintain completes after Gate C" "$maintain_all" 'Run the **Goal lifecycle** complete step only after the PR exists and its mergeability is confirmed not `CONFLICTING`'
+# Review fix: an UNKNOWN mergeability that stays unresolved is not "confirmed not CONFLICTING": no complete step.
+require_in "D4 maintain unresolved UNKNOWN runs no complete step" "$maintain_all" 'An `UNKNOWN` mergeability that stays unresolved after the re-queries is not confirmed: run no complete step, leave the goal as it is, and report the PR as open with the mergeability-unverified note'
+# Review fix: implement's `Context: low` split signal names the block command and the shared stop step (referenced, not restated).
+require_in "D3 implement Context: low split signal stops through the shared stop step" "$implement_all" 'stops the run: run `checkpoint.mjs block` per the **Goal lifecycle** stop step'
+
+# D6: nine goal cases. Each case has two halves: the checkpoint.mjs command sequence the case runs in a scratch repo
+# (real helper, real state), and the case's row in the Goal cases table naming the goal call it makes. The goal tools
+# themselves exist only in native Codex, so their calls are proven by the native runner, not here.
+for goal_case in 'existing goal' 'no goal' 'no tools' 'ambiguity' 'red baseline' 'tool error' 'budget exhaustion' 'PR success' 'PR failure'; do
+  [[ -n "$(goal_row "$runtime" "$goal_case")" ]] || fail "D6 Goal cases table has no row for '${goal_case}'"
+done
+goal_root="$(mktemp -d /var/tmp/cenci-goal-fixtures.XXXXXX)" || { echo "workflows.test.sh: mktemp failed (goal fixtures)." >&2; exit 2; }
+trap 'rm -rf "$goal_root"' EXIT
+GOAL_CKPT_JS="${ROOT}/codex/checkpoint.mjs"
+GOAL_REL=".cenci/checkpoints/implement-42-demo.json"
+GOAL_REPO=""
+goal_ckpt(){ ( cd "$GOAL_REPO" && node "$GOAL_CKPT_JS" "$@" ) 2>"${goal_root}/stderr"; }
+# goal_repo <case>: a scratch repo whose checkpoint is an approved, planned implement run; sets GOAL_REPO
+goal_repo(){
+  local digest
+  GOAL_REPO="${goal_root}/$1"
+  mkdir -p "${GOAL_REPO}/.plans" && git init -q "$GOAL_REPO" || { fail "D6 fixture '$1': repo setup failed"; return 1; }
+  printf '%s\n' '## Ticket Details' 'goal fixture' > "${GOAL_REPO}/.plans/42-demo.md"
+  digest="$(goal_ckpt digest .plans/42-demo.md)" || { fail "D6 fixture '$1': digest failed: $(cat "${goal_root}/stderr")"; return 1; }
+  goal_ckpt init "$GOAL_REL" implement 42-demo planned --plan-path .plans/42-demo.md --plan-digest "$digest" >/dev/null \
+    || { fail "D6 fixture '$1': init failed: $(cat "${goal_root}/stderr")"; return 1; }
+}
+# goal_step <label> <args...>: one checkpoint.mjs call that must succeed
+goal_step(){
+  local label="$1"; shift
+  goal_ckpt "$@" >/dev/null || fail "D6 ${label}: 'checkpoint.mjs $1' failed: $(cat "${goal_root}/stderr")"
+}
+# goal_expect <label> <goal> <status> <phase> <gate>: the whole recorded state, so a drifted goal or a silent complete fails
+goal_expect(){
+  local actual
+  actual="$(jq -r '[(.goal // "none"), .status, .phase, (.lastCompletedGate // "none")] | join(" ")' "${GOAL_REPO}/${GOAL_REL}" 2>/dev/null)"
+  [[ "$actual" == "$2 $3 $4 $5" ]] || fail "D6 $1: expected state [$2 $3 $4 $5], got [${actual}]"
+}
+# goal_resume <label> <nextPhase>: an unfinished run must still pass verify and resume at <nextPhase>
+goal_resume(){
+  local out next
+  out="$(goal_ckpt verify "$GOAL_REL" implement 42-demo)" || { fail "D6 $1: verify rejected the unfinished run: $(cat "${goal_root}/stderr")"; return; }
+  next="$(printf '%s' "$out" | jq -r '.nextPhase' 2>/dev/null)"
+  [[ "$next" == "$2" ]] || fail "D6 $1: verify nextPhase expected [$2], got [${next}]"
+}
+# goal_row_has <case> <phrase...>: the table row names the expected goal call and recorded outcome
+goal_row_has(){
+  local row phrase goal_case="$1"; shift
+  row="$(goal_row "$runtime" "$goal_case")"
+  for phrase in "$@"; do require_in "D6 Goal cases row '${goal_case}'" "$row" "$phrase"; done
+}
+goal_row_lacks_complete(){ forbid_in "D6 Goal cases row '$1' must make no completing call" "$(goal_row "$runtime" "$1")" 'update_goal'; }
+
+# Shared run prefix: the create step's outcome rides on the first advance; the worktree/baseline advances then keep it.
+goal_start(){ goal_repo "$1" && goal_step "$1 first advance" advance "$GOAL_REL" implement 42-demo worktree --goal "$2" \
+  && goal_step "$1 baseline advance" advance "$GOAL_REL" implement 42-demo baseline --worktree .worktrees/42-demo --gate worktree; }
+
+# existing goal: left unchanged, skipped-active recorded, the run continues and ends without any goal outcome change.
+if goal_start existing-goal skipped-active; then
+  goal_expect "existing goal after baseline" skipped-active running baseline worktree
+  goal_step "existing goal pr advance" advance "$GOAL_REL" implement 42-demo pr --gate docs
+  goal_step "existing goal complete" complete "$GOAL_REL" implement 42-demo pr --gate pr
+  goal_expect "existing goal finished on checkpoint state alone" skipped-active complete pr pr
+fi
+goal_row_has 'existing goal' 'no goal call' '`skipped-active`' 'left unchanged'
+goal_row_lacks_complete 'existing goal'
+# no goal: created and recorded; the run is still running.
+if goal_start no-goal created; then
+  goal_expect "no goal after baseline" created running baseline worktree
+fi
+goal_row_has 'no goal' '`create_goal`' '`created`' 'Complete approved plan <path> through an open PR'
+# no tools: the checkpoint-only path records unavailable and the run still finishes.
+if goal_start no-tools unavailable; then
+  goal_expect "no tools after baseline" unavailable running baseline worktree
+  goal_step "no tools pr advance" advance "$GOAL_REL" implement 42-demo pr --gate docs
+  goal_step "no tools complete" complete "$GOAL_REL" implement 42-demo pr --gate pr
+  goal_expect "no tools finished on checkpoint state alone" unavailable complete pr pr
+fi
+goal_row_has 'no tools' 'no goal call' '`unavailable`' 'checkpoint-only recovery'
+goal_row_lacks_complete 'no tools'
+# ambiguity: blocked mid-run, goal as recorded, resumable, never complete.
+if goal_start ambiguity created; then
+  goal_step "ambiguity tests advance" advance "$GOAL_REL" implement 42-demo tests --gate baseline
+  goal_step "ambiguity block" block "$GOAL_REL" implement 42-demo tests
+  goal_expect "ambiguity" created needs-input tests baseline
+  goal_resume "ambiguity" tests
+fi
+goal_row_has 'ambiguity' 'no goal call' '`needs-input`' 'left unchanged'
+goal_row_lacks_complete 'ambiguity'
+# red baseline: the goal already exists (created before the gate), the block keeps the worktree gate.
+if goal_start red-baseline created; then
+  goal_step "red baseline block" block "$GOAL_REL" implement 42-demo baseline
+  goal_expect "red baseline" created needs-input baseline worktree
+  goal_resume "red baseline" baseline
+fi
+goal_row_has 'red baseline' 'no goal call' '`needs-input`' 'left unchanged'
+goal_row_lacks_complete 'red baseline'
+# tool error: at create time no outcome is recorded (goal stays null); at complete time the created goal is kept.
+if goal_repo tool-error-create; then
+  goal_step "tool error at create block" block "$GOAL_REL" implement 42-demo worktree
+  goal_expect "tool error at create" none needs-input worktree none
+  goal_resume "tool error at create" worktree
+fi
+if goal_start tool-error-complete created; then
+  goal_step "tool error at complete pr advance" advance "$GOAL_REL" implement 42-demo pr --gate docs
+  goal_step "tool error at complete block" block "$GOAL_REL" implement 42-demo pr
+  goal_expect "tool error at complete" created needs-input pr docs
+  goal_resume "tool error at complete" pr
+fi
+goal_row_has 'tool error' 'no goal call' '`needs-input`' 'never downgraded to `unavailable`'
+goal_row_lacks_complete 'tool error'
+# budget exhaustion: blocked in implement, the unfinished state resumes at implement.
+if goal_start budget-exhaustion created; then
+  goal_step "budget exhaustion implement advance" advance "$GOAL_REL" implement 42-demo implement --gate tests
+  goal_step "budget exhaustion block" block "$GOAL_REL" implement 42-demo implement
+  goal_expect "budget exhaustion" created needs-input implement tests
+  goal_resume "budget exhaustion" implement
+fi
+goal_row_has 'budget exhaustion' 'no goal call' '`needs-input`' 'left unchanged' '`Context: low`'
+goal_row_lacks_complete 'budget exhaustion'
+# PR success: the created goal completes only once the PR exists; the checkpoint is terminal and verify refuses to re-apply it.
+if goal_start pr-success created; then
+  goal_step "PR success pr advance" advance "$GOAL_REL" implement 42-demo pr --gate docs
+  goal_step "PR success complete" complete "$GOAL_REL" implement 42-demo pr --gate pr
+  goal_expect "PR success" created complete pr pr
+  if goal_ckpt verify "$GOAL_REL" implement 42-demo >/dev/null; then
+    fail "D6 PR success: verify must refuse a finished run"
+  else
+    [[ "$(cat "${goal_root}/stderr")" == *'checkpoint is complete (terminal)'* ]] || fail "D6 PR success: verify refusal must say the checkpoint is complete (terminal)"
+  fi
+fi
+goal_row_has 'PR success' '`update_goal({status:"complete"})`' '`created`' 'only when' '`complete`'
+# PR failure: a failed gh pr create blocks at pr, never completes, and resumes at pr.
+if goal_start pr-failure created; then
+  goal_step "PR failure pr advance" advance "$GOAL_REL" implement 42-demo pr --gate docs
+  goal_step "PR failure block" block "$GOAL_REL" implement 42-demo pr
+  goal_expect "PR failure" created needs-input pr docs
+  goal_resume "PR failure" pr
+fi
+goal_row_has 'PR failure' 'no goal call' '`needs-input`' 'left unchanged'
+goal_row_lacks_complete 'PR failure'
+
+# D8: the docs describe the lifecycle and link the native evidence.
+goal_evidence_link='codex-native-evidence.md#native-workflows-plan-mode-handoff-and-goal-lifecycle'
+for phrase in '**Goal lifecycle**' "$goal_evidence_link" 'leaves it unchanged' \
+  'no cenci automation (dispatch, babysit, ci-repair, babysit-attention) issues `apply`, so only a human-started `apply`, attended or not, creates a goal'; do
+  require_in "D8 docs/codex.md goal lifecycle" "$codex_docs_all" "$phrase"
+done
+forbid_in "D8 docs/codex.md retired unattended-launch goal wording" "$codex_docs_all" 'An unattended launch never creates a goal'
+require_in "D1 codex-runtime only a human-started apply creates a goal" "$(section "$runtime" '## Goal lifecycle')" \
+  'No cenci automation (dispatch, babysit, `ci-repair`, `babysit-attention`) issues `apply`, so only a human-started `apply`, attended or not, creates a goal'
+forbid_in "D1 codex-runtime retired unattended-launch goal wording" "$(section "$runtime" '## Goal lifecycle')" 'neither does any unattended launch'
+forbid_in "D8 docs/codex.md retired goal wording" "$codex_docs_all" 'a native goal armed only after plan approval'
+forbid_in "D8 docs/codex.md evidence pointer" "$codex_docs_all" 'tracked in #1235'
+# The evidence section stays "pending native run" until a maintainer commits one, so no sentence may claim it is recorded there.
+forbid_in "D8 docs/codex.md evidence not yet recorded" "$codex_docs_all" "recorded in [\`codex-native-evidence.md\`](${goal_evidence_link})"
+require_in "D8 docs/codex.md evidence pending wording" "$codex_docs_all" "tracked in [\`codex-native-evidence.md\`](${goal_evidence_link}), pending the maintainer's native run"
+require_in "D8 adapter-contract baseline-gate" "$(normalize "${ROOT}/docs/adapter-contract.md")" 'goal left unchanged (`codex-runtime` Goal lifecycle stop step)'
+
+# Final review fixes: every restatement of the existing-goal rule carries the resumed-apply exception (#979).
+goal_resume_exception='except this run'\''s own goal on a resumed `apply` (Create step 2)'
+require_in "D2 codex-runtime existing goal row carries the resumed-apply exception" "$(goal_row "$runtime" 'existing goal')" "$goal_resume_exception"
+require_in "D2 docs/codex.md existing goal bullet carries the resumed-apply exception" "$codex_docs_all" "$goal_resume_exception"
+# docs/codex.md Complete bullet matches maintain: an unresolved UNKNOWN runs no complete step.
+require_in "D4 docs/codex.md complete needs a confirmed mergeability" "$codex_docs_all" 'a mergeability check confirmed not `CONFLICTING` (an unresolved `UNKNOWN` runs no complete step)'
+forbid_in "D4 docs/codex.md retired complete mergeability wording" "$codex_docs_all" 'a mergeability check that is not `CONFLICTING`'
+# maintain: the unresolved-UNKNOWN checkpoint disposition (reference to the Goal lifecycle, not a restatement).
+require_in "D4 maintain unresolved UNKNOWN checkpoint disposition" "$maintain_all" \
+  'the checkpoint is left at `pr` with status `running` and the goal unchanged, so a later `apply` re-queries mergeability and runs the complete step if it is then not `CONFLICTING`'
+# Native evidence judging rules for the create-then-complete row.
+evidence_all="$(normalize "${ROOT}/docs/codex-native-evidence.md")"
+for phrase in 'the objective must equal `Complete approved plan <path> through an open PR` exactly' \
+  'any `token_budget` is a `FAIL`' \
+  'only `update_goal` with `status: "complete"` counts as completion' \
+  'an unreadable tool-call list (a jq or extraction failure, or a zero-call result with no rollout and no parsed event) is `inconclusive`, never ok'; do
+  require_in "D7 evidence goal create-then-complete judging rule" "$evidence_all" "$phrase"
+done
+# docs/codex.md Create bullet: automation-launch wording, not the "unattended ... attended or not" contradiction.
+require_in "D1 docs/codex.md create bullet names cenci automation" "$codex_docs_all" 'A launch started by cenci automation cannot create one: no cenci automation'
+forbid_in "D1 docs/codex.md retired unattended-launch create wording" "$codex_docs_all" 'An unattended launch cannot create one'
 
 count="$(find "${ROOT}/templates/codex/agent-roles" -name '*.toml' | wc -l)"
 test "$count" -ge 5 || fail "Codex agent templates"

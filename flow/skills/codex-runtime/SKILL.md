@@ -25,13 +25,7 @@ user-invocable: false
   - `node "${PLUGIN_ROOT}/codex/checkpoint.mjs" verify <path> <workflow> <target>` is the read-only approved-plan check: it takes no flags, never creates `.cenci`, and checks in order the identity, that a checkpoint exists, that it is a v2 file that is not `complete`, that it records a `planPath` and `planDigest`, and that the plan artifact (a repo-relative, non-symlinked regular file under `.plans/`) still hashes to `planDigest`. On success it prints one JSON line: the 12 state fields, `resolved` (`mainCheckout`, `planPath` and `worktree` as absolute paths under the current environment's main checkout; `worktree` is `null` when none is recorded) and `nextPhase`, the first phase after `lastCompletedGate` (with no gate recorded, the phase after `planned`; `null` after the last phase). A missing checkpoint exits 3 and every other rejection exits 2, each with one `checkpoint: <path>: <problem>; <remedy>` stderr line listed in `docs/codex.md`.
   - `node "${PLUGIN_ROOT}/codex/checkpoint.mjs" digest <plan-path>` is read-only too: it reads the same kind of artifact with the same rules as `verify` and prints its sha256 as 64 lowercase hex characters and a newline.
   - Exit codes: 0 success; 1 unexpected I/O failure, such as `write failed (EIO); the previous checkpoint is unchanged` (the previous file stays readable and no temp file is left); 2 rejection or usage error; 3 missing state. Every error is one stderr line starting `checkpoint: <path>: <problem>; <remedy>`, with no stack trace, and stdout carries the state JSON only after the write succeeded.
-- On execution ambiguity, persist the checkpoint, clear the active goal, ask exactly one
-  blocking question, and stop. Resume from the checkpoint after the answer.
-- Arm a native Codex goal only after an approved implementation plan enters execution:
-  call `create_goal({objective: "Complete approved plan <path> through an open PR"})` after
-  verifying `get_goal({})` has no active goal. Clear it before human input/errors and after
-  PR creation with `update_goal({status:"complete"})` only when the objective is achieved;
-  otherwise checkpoint and return control so the client clears/pauses the active goal.
+- Native Codex goals follow the single **Goal lifecycle** section below; every companion's `codex.md` references its create, stop and complete steps and never restates them. On execution ambiguity, run `checkpoint.mjs block`, ask exactly one blocking question and stop (the stop step); resume from the checkpoint after the answer.
 - Prefer generated `.codex/agents/*.toml` roles. If unavailable, delegate to a built-in
   worker with the same bounded role prompt and report that fallback in the checkpoint.
 - Keep authenticated mutations, pushes, PR creation, and user questions in the root agent.
@@ -81,3 +75,41 @@ Apply starts with `sh "${PLUGIN_ROOT}/codex/require-runtime.sh"`, then `node "${
 ### Re-plan
 
 Persist over an existing checkpoint of the same identity follows its phase, and the check is the first persist step, before the artifact is written. A checkpoint whose `status` is `planned` or `complete` is cleared (`clear`) first; the artifact is then written and `init` records the new digest. A checkpoint whose `status` is `running` or `needs-input` is a run in flight: refuse, change nothing (the artifact included, since the in-flight run's approved plan lives there) and print the resume `apply` command. Clearing an in-flight run needs an explicit `checkpoint.mjs clear` by the user (`checkpoint.mjs clear <ckpt> <wf> <target>`, named if that `apply` stops on `verify`), in line with `init`'s never-reset rule above.
+
+## Goal lifecycle
+
+This lifecycle is Codex-only: Claude Code has no goal tools, so Claude Code `SKILL.md` procedures stay unchanged. Implement and maintain reference its create, stop and complete steps from their `codex.md` and never restate them. A goal never replaces the checkpoint: every case below continues on the checkpoint, which stays the source of truth.
+
+Only a human-issued `apply` may create a goal. Planning, `persist`, `ci-repair` and `babysit-attention` never create a goal. No cenci automation (dispatch, babysit, `ci-repair`, `babysit-attention`) issues `apply`, so only a human-started `apply`, attended or not, creates a goal. The objective is fixed: `Complete approved plan <path> through an open PR`, where `<path>` is the repo-relative `planPath` that `verify` returns. Never set a `token_budget`. Babysit through merge is never part of the objective.
+
+### Create step
+
+Run once per `apply`, after `verify` passes and after the workflow's own stop-only checks, right before the first checkpoint `advance` of the run (so a red baseline already runs with the goal in place). Decide in this order and record the outcome with `--goal <created|skipped-active|unavailable>` on that `advance`, or on the `block` if the run stops there:
+
+1. The client exposes no goal tools (`get_goal`, `create_goal`, `update_goal`), meaning they are absent from the client's tool list before any goal call is made: make no goal call, record `unavailable` and use checkpoint-only recovery: the run continues on `lastCompletedGate` and `nextPhase` alone.
+2. `get_goal({})` reports a goal with a status other than `complete` (active, paused, blocked, or budget- or usage-limited): create none, record `skipped-active`, and continue on checkpoint state alone; that goal is left unchanged. The one exception is this run's own goal on a resumed `apply`: when the checkpoint records `created`, or records no goal (a crash or lost response between `create_goal` and the first `advance --goal`), and `get_goal` reports an unfinished goal whose objective equals this run's objective, adopt it as `created` (pass no `--goal` when the checkpoint already records `created`, otherwise record `created`); a goal with a different objective is `skipped-active`.
+3. Otherwise (no goal, or only a `complete` one): call `create_goal({objective: "Complete approved plan <path> through an open PR"})` and record `created`.
+
+`unavailable` is only for tools absent before any call: any error from an invoked goal tool (`get_goal`, `create_goal` or `update_goal`) is a stop, never downgraded to `unavailable` (see the Stop step: `checkpoint.mjs block`, report and end the turn), and that `block` records no `--goal` value.
+
+### Stop step
+
+A question to the user, a red or unrunnable baseline gate, a native-tool error (a goal tool error included), a failed `gh pr create`, or a budget or usage limit (the client marking the goal budget-limited or usage-limited, or implement's `Context: low` split signal) all stop the same way: run `checkpoint.mjs block` for the current phase, report, and end the turn. The unfinished state stays in the checkpoint (`needs-input`, `lastCompletedGate` unchanged) so the next `apply` resumes from it. The goal is left exactly as it is, and a stop never marks the objective complete. cenci never invents a clear or pause operation. Only when the running client exposes a pause or blocked transition, and only under the conditions of that client's own contract, may a run use it, never on cenci's own initiative.
+
+### Complete step
+
+Run only when the checkpoint's `goal` is `created`: with `skipped-active` or `unavailable` make no goal call, because a goal this run did not create is never completed. Run it only after a successful `gh pr create` (a recovered already-exists PR that reads back `OPEN` with a url and number counts), plus any post-create gate the workflow defines, such as maintain's mergeability check. Then call `update_goal({status:"complete"})` once, before `cenci babysit` is armed. A failed `gh pr create` is a stop, not a completion, and an error from `update_goal` is a native-tool error: the Stop step runs and the PR stays open.
+
+### Goal cases
+
+| Case | When | Goal call | Checkpoint |
+|---|---|---|---|
+| existing goal | `get_goal` reports a goal that is not `complete` | no goal call beyond `get_goal`; that goal is left unchanged, except this run's own goal on a resumed `apply` (Create step 2) | `goal` `skipped-active`; the run continues |
+| no goal | no goal, or only a `complete` one | `create_goal` with the objective `Complete approved plan <path> through an open PR` | `goal` `created` |
+| no tools | the client exposes no goal tools | no goal call; checkpoint-only recovery | `goal` `unavailable`; the run continues |
+| ambiguity | execution needs a human answer | no goal call; the goal is left unchanged | `block`, status `needs-input` |
+| red baseline | `run-gate.sh` reports red, or cannot run | no goal call; the goal is left unchanged | `block` at `baseline`, status `needs-input` |
+| tool error | a native tool returns an error, or an error from an invoked goal tool | no goal call; never downgraded to `unavailable` (`unavailable` is only for tools absent before any call) | `block`, status `needs-input`; a failed create records no `goal` |
+| budget exhaustion | goal budget or usage limit, or `Context: low` | no goal call; the goal is left unchanged | `block`, status `needs-input` |
+| PR success | `gh pr create` succeeded (Gate C passed in maintain) | `update_goal({status:"complete"})` only when `goal` is `created` | status `complete` |
+| PR failure | `gh pr create` failed and no OPEN PR is recoverable | no goal call; the goal is left unchanged | `block` at `pr`, status `needs-input` |

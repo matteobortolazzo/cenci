@@ -105,12 +105,12 @@ Resolve `<base>` first, before generating the run token: `git -C <repo-root> sym
 it errors because no remote HEAD is set, fall back to `main`. Carry `<base>` forward as
 literal text; the dedicated worktree branches from `<base>`, never a hardcoded `main`.
 
-Verify `apply` read the approved apply plan from the artifact `verify` proved. Advance the maintain
-checkpoint to `worktree`, then generate and validate one run token following the shared worktree
+Verify `apply` read the approved apply plan from the artifact `verify` proved. Run the **Goal lifecycle**
+create step (`<path>` is `verify`'s repo-relative `planPath`), then advance the maintain
+checkpoint to `worktree`, passing the step's outcome as `--goal`, and generate and validate one run token following the shared worktree
 procedure; reject an empty, dot-only, traversal-containing, or non-portable token. Create
 the dedicated worktree from `<base>` and the verified repository root and record its
-resolved absolute path as `<worktree-path>`. Arm the native goal only after both the
-approved plan and worktree are established.
+resolved absolute path as `<worktree-path>`.
 
 Create the dedicated worktree before any repository mutation. Every edit and generated
 file must resolve beneath the absolute `<worktree-path>` and contain a `/.worktrees/`
@@ -132,7 +132,7 @@ Flow's configured health gate from the same absolute worktree according to
 `docs/health-gates.md`.
 
 If the checker crashes, any selected finding remains, the checker reports warn/fail, or
-the health gate is not green, checkpoint the run, clear the goal, retain the worktree and
+the health gate is not green, run `checkpoint.mjs block`, leave the goal as it is (**Goal lifecycle** stop step), retain the worktree and
 branch, and stop without committing, pushing, or opening a PR. Report the distinct failure
 and its captured output.
 
@@ -154,20 +154,20 @@ verification, push again — never force.
 After both verification layers are clean and Gate B confirms freshness, review the diff,
 commit, push the branch (above), and open one PR containing only the approved maintenance
 repairs, targeting `<base>`.
-Recover an already-open PR for the branch by reading its real URL; never fabricate one.
+Recover an already-open PR for the branch by reading its real URL; never fabricate one. A failed PR creation with no recoverable open PR is a stop: run `checkpoint.mjs block` at `pr` and apply the **Goal lifecycle** stop step.
 
 **Gate C** — after the PR exists or is recovered above, follow `base-freshness.md`'s Gate C
 mergeability query. A `CONFLICTING` result means the run is **not** complete: integrate the
 base, resolve conflicts, rerun the complete verification, push, and re-query.
 Bound the repair to two attempts.
-If still `CONFLICTING` after two attempts, checkpoint the run, clear the goal, retain the
-worktree and branch, report the PR URL and the conflicting state, and ask exactly one
-blocking question with Codex's available user-input mechanism.
+If still `CONFLICTING` after two attempts, run `checkpoint.mjs block`, leave the goal as it is
+(**Goal lifecycle** stop step), retain the worktree and branch, report the PR URL and the
+conflicting state, and ask exactly one blocking question with Codex's available user-input mechanism.
 Never report the run as successfully completed on a `CONFLICTING` PR.
 An `UNKNOWN` result is re-queried up to three times and, if still unresolved, reported as
 mergeability explicitly unverified — never claimed mergeable and never claimed conflicting.
 
-Clear the goal only after the PR exists and its mergeability is confirmed not
-`CONFLICTING`. Finish with deterministic and worker finding counts, incomplete categories,
+Run the **Goal lifecycle** complete step only after the PR exists and its mergeability is confirmed not
+`CONFLICTING`. An `UNKNOWN` mergeability that stays unresolved after the re-queries is not confirmed: run no complete step, leave the goal as it is, and report the PR as open with the mergeability-unverified note; the checkpoint is left at `pr` with status `running` and the goal unchanged, so a later `apply` re-queries mergeability and runs the complete step if it is then not `CONFLICTING`. Finish with deterministic and worker finding counts, incomplete categories,
 the approval choice, applied finding IDs, verification results, the PR URL, whether the
 base advanced and how it was integrated at each gate, and the final mergeability state.
