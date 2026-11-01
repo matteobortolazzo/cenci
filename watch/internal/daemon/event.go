@@ -52,6 +52,8 @@ func (d *Daemon) handleEvent(event ipc.HookEvent) {
 
 	// A subagent's own SessionEnd (non-empty AgentID) must not tear down the
 	// main session's window — only the main agent's own SessionEnd does.
+	// Codex's SessionEnd always carries the constant reason "other", so it
+	// always takes the full teardown below, never the clear/resume handoff.
 	if event.EventType == "SessionEnd" && event.AgentID == "" {
 		// Resolve the window's stable pane identity before teardown:
 		// OnSessionEnd releases the frontend's tracking state for this
@@ -267,6 +269,11 @@ func (d *Daemon) mapEventToStatusRaw(event ipc.HookEvent) detect.Status {
 			return detect.StatusRunning
 		}
 		return detect.StatusDone
+	case "Interrupt":
+		// Codex's native turn-interrupt hook (the user pressed ESC). A
+		// subagent-tagged Interrupt is suppressed by mapEventToStatus, like any
+		// other terminal event.
+		return detect.StatusStopped
 	case "StopFailure":
 		// Turn died on an API error (rate_limit, overloaded, billing). Reuse
 		// the Stopped state — there is no separate Attention status.
