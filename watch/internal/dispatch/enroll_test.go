@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/run"
@@ -746,5 +747,232 @@ func TestEmptyPath_ResolvesDefaultConfigPath(t *testing.T) {
 	}
 	if !changed {
 		t.Errorf("UnenrollRepo(\"\", ...): want changed=true")
+	}
+}
+
+// -- #1385: per-repo filters survive every config write ----------------------------
+
+// filterSeeds are the filters objects the persistence tests seed. The label with
+// `&` pins the canonical form: cenci's own writer escapes it as \u0026 on the
+// first write and keeps it stable on every later one.
+var filterSeeds = map[string]string{
+	"o/A": `{"milestones":[3,7],"labelsAll":["area:watch"],"labelsAny":["bug","enhancement"],"labelsNone":["manual-only","R&D"]}`,
+	"o/B": `{"labelsAny":["docs"]}`,
+}
+
+// seedFilteredConfig writes a config in cenci's canonical written form: the
+// repos are enrolled through EnrollRepo, then each entry's filters are added
+// through a raw-map write (the way an operator's edit lands) and the file is
+// rewritten by writeRawConfig, so the filters carry the exact bytes cenci's own
+// writer produces. It returns the path and o/A's directory.
+func seedFilteredConfig(t *testing.T) (path, dirA string) {
+	t.Helper()
+	path = filepath.Join(t.TempDir(), "config.json")
+	dirA = t.TempDir()
+	for _, id := range []RepoIdentity{{Repo: "o/A", Dir: dirA}, {Repo: "o/B", Dir: t.TempDir()}} {
+		if _, _, err := EnrollRepo(path, id, "work"); err != nil {
+			t.Fatalf("enrolling %s: %v", id.Repo, err)
+		}
+	}
+
+	top, err := readRawConfig(path)
+	if err != nil {
+		t.Fatalf("reading seed config: %v", err)
+	}
+	dispatchRaw := map[string]json.RawMessage{}
+	if err := json.Unmarshal(top["dispatch"], &dispatchRaw); err != nil {
+		t.Fatalf("decoding dispatch block: %v", err)
+	}
+	var entries []map[string]json.RawMessage
+	if err := json.Unmarshal(dispatchRaw["repos"], &entries); err != nil {
+		t.Fatalf("decoding repos: %v", err)
+	}
+	for _, entry := range entries {
+		var repo string
+		if err := json.Unmarshal(entry["repo"], &repo); err != nil {
+			t.Fatalf("decoding repo name: %v", err)
+		}
+		entry["filters"] = json.RawMessage(filterSeeds[repo])
+	}
+	if dispatchRaw["repos"], err = json.Marshal(entries); err != nil {
+		t.Fatal(err)
+	}
+	if top["dispatch"], err = json.Marshal(dispatchRaw); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeRawConfig(path, top); err != nil {
+		t.Fatalf("writing seed config: %v", err)
+	}
+	return path, dirA
+}
+
+// filterBytesByRepo re-reads path and returns each enrolled repo's raw filters
+// bytes exactly as stored in the file.
+func filterBytesByRepo(t *testing.T, path string) map[string]string {
+	t.Helper()
+	got := map[string]string{}
+	for _, r := range mustDecodeConfig(t, path).Dispatch.Repos {
+		got[r.Repo] = string(r.Filters)
+	}
+	return got
+}
+
+func TestEnrollRepoFilterBytesSurviveConfigOperations(t *testing.T) {
+	ops := []struct {
+		name    string
+		do      func(t *testing.T, path, dirA string)
+		removed string // repo the operation drops, if any
+		verify  func(t *testing.T, path string)
+	}{
+		{
+			name: "enroll a new repo",
+			do: func(t *testing.T, path, _ string) {
+				if _, _, err := EnrollRepo(path, RepoIdentity{Repo: "o/C", Dir: t.TempDir()}, ""); err != nil {
+					t.Fatalf("EnrollRepo: %v", err)
+				}
+			},
+			verify: func(t *testing.T, path string) {
+				if got, err := QueryEnrollment(path, "o/C"); err != nil || !got.Enrolled {
+					t.Errorf("o/C enrollment = %+v, %v, want enrolled", got, err)
+				}
+			},
+		},
+		{
+			name: "change dir and session of a filtered repo",
+			do: func(t *testing.T, path, _ string) {
+				if _, _, err := EnrollRepo(path, RepoIdentity{Repo: "o/A", Dir: "/moved/repo"}, "other"); err != nil {
+					t.Fatalf("EnrollRepo: %v", err)
+				}
+			},
+			verify: func(t *testing.T, path string) {
+				got, err := QueryEnrollment(path, "o/A")
+				if err != nil || got.Dir != "/moved/repo" || got.Session != "other" {
+					t.Errorf("o/A enrollment = %+v, %v, want the new dir and session", got, err)
+				}
+			},
+		},
+		{
+			name:    "unenroll another repo",
+			removed: "o/B",
+			do: func(t *testing.T, path, _ string) {
+				if changed, err := UnenrollRepo(path, "o/B"); err != nil || !changed {
+					t.Fatalf("UnenrollRepo = %v, %v, want a change", changed, err)
+				}
+			},
+		},
+		{
+			name: "loop toggle",
+			do: func(t *testing.T, path, _ string) {
+				if err := SetLoopEnabled(path, true); err != nil {
+					t.Fatalf("SetLoopEnabled: %v", err)
+				}
+			},
+			verify: func(t *testing.T, path string) { requireFileContains(t, path, `"loopEnabled": true`) },
+		},
+		{
+			name: "plan-refined toggle",
+			do: func(t *testing.T, path, _ string) {
+				if err := SetPlanRefined(path, true); err != nil {
+					t.Fatalf("SetPlanRefined: %v", err)
+				}
+			},
+			verify: func(t *testing.T, path string) { requireFileContains(t, path, `"planRefined": true`) },
+		},
+		{
+			name: "automerge toggle",
+			do: func(t *testing.T, path, _ string) {
+				if err := SetAutomergeEnabled(path, true); err != nil {
+					t.Fatalf("SetAutomergeEnabled: %v", err)
+				}
+			},
+			verify: func(t *testing.T, path string) { requireFileContains(t, path, `"enabled": true`) },
+		},
+		{
+			name: "loop toggle off",
+			do: func(t *testing.T, path, _ string) {
+				for _, enabled := range []bool{true, false} {
+					if err := SetLoopEnabled(path, enabled); err != nil {
+						t.Fatalf("SetLoopEnabled(%v): %v", enabled, err)
+					}
+				}
+			},
+			verify: func(t *testing.T, path string) { requireFileContains(t, path, `"loopEnabled": false`) },
+		},
+		{
+			name: "plan-refined toggle off",
+			do: func(t *testing.T, path, _ string) {
+				for _, enabled := range []bool{true, false} {
+					if err := SetPlanRefined(path, enabled); err != nil {
+						t.Fatalf("SetPlanRefined(%v): %v", enabled, err)
+					}
+				}
+			},
+			verify: func(t *testing.T, path string) { requireFileContains(t, path, `"planRefined": false`) },
+		},
+		{
+			name: "automerge toggle off",
+			do: func(t *testing.T, path, _ string) {
+				for _, enabled := range []bool{true, false} {
+					if err := SetAutomergeEnabled(path, enabled); err != nil {
+						t.Fatalf("SetAutomergeEnabled(%v): %v", enabled, err)
+					}
+				}
+			},
+			verify: func(t *testing.T, path string) { requireFileContains(t, path, `"enabled": false`) },
+		},
+	}
+
+	for _, op := range ops {
+		t.Run(op.name, func(t *testing.T) {
+			path, dirA := seedFilteredConfig(t)
+			before := filterBytesByRepo(t, path)
+			for repo := range filterSeeds {
+				if before[repo] == "" {
+					t.Fatalf("seed has no filters for %s: %v", repo, before)
+				}
+			}
+			delete(before, op.removed)
+
+			op.do(t, path, dirA)
+			if op.verify != nil {
+				op.verify(t, path)
+			}
+
+			after := filterBytesByRepo(t, path)
+			for repo, want := range before {
+				if after[repo] != want {
+					t.Errorf("%s filters changed:\n before %s\n after  %s", repo, want, after[repo])
+				}
+			}
+			if op.removed != "" {
+				if _, still := after[op.removed]; still {
+					t.Errorf("%s is still enrolled", op.removed)
+				}
+			}
+
+			// The documented on-disk form: `&` in a label is stored escaped.
+			requireFileContains(t, path, "R"+`\`+"u0026D")
+
+			// The preserved bytes still load as the same restriction.
+			cfg, err := LoadConfig(path)
+			if err != nil {
+				t.Fatalf("LoadConfig after %s: %v", op.name, err)
+			}
+			want := []int{3, 7}
+			if got := FilterForRepo(cfg.Repos, "o/A").Milestones; !reflect.DeepEqual(got, want) {
+				t.Errorf("o/A milestones after %s = %v, want %v", op.name, got, want)
+			}
+		})
+	}
+}
+
+func requireFileContains(t *testing.T, path, want string) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(data, []byte(want)) {
+		t.Errorf("%s lacks %q:\n%s", path, want, data)
 	}
 }

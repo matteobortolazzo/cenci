@@ -360,9 +360,15 @@ func Decide(in Inputs) []Decision {
 	dispatchedThisPass := 0
 	dispatchedChildByParent := map[string]int{}
 
+	// Machine-local pickup filters (#1385), resolved once per pass from the
+	// user config's repos (last entry wins on a duplicated repo, like
+	// buildSessionByRepo). Filters gate launch eligibility only: the full
+	// ticket inventory still feeds dependency and sibling checks below.
+	filterByRepo := buildFilterByRepo(in.Config.Repos)
+
 	decisions := make([]Decision, 0, len(tickets))
 	for _, t := range tickets {
-		d := decideTicket(t, in, planByTicket, dispatchedThisPass, dispatchedChildByParent)
+		d := decideTicket(t, in, planByTicket, filterByRepo, dispatchedThisPass, dispatchedChildByParent)
 		if d.Action == ActionDispatch {
 			dispatchedThisPass++
 			if d.Plan != nil && d.Plan.IsChild {
@@ -398,7 +404,7 @@ func indexPlans(plans []Plan) map[string]*Plan {
 	return m
 }
 
-func decideTicket(t Ticket, in Inputs, planByTicket map[string]*Plan, dispatchedThisPass int, dispatchedChildByParent map[string]int) Decision {
+func decideTicket(t Ticket, in Inputs, planByTicket map[string]*Plan, filterByRepo map[string]RepoFilter, dispatchedThisPass int, dispatchedChildByParent map[string]int) Decision {
 	skip := func(reason string) Decision {
 		return Decision{Ticket: t, Action: ActionSkip, Reason: reason}
 	}
@@ -422,6 +428,17 @@ func decideTicket(t Ticket, in Inputs, planByTicket map[string]*Plan, dispatched
 	// alike, not merely the ticket whose own plan file happened to be
 	// unreadable.
 	if reason, gated := planInventorySkip(in.PlanInventories[t.Repo]); gated {
+		return skip(reason)
+	}
+
+	// Pickup rule 0.75: machine-local filter (#1385). Evaluated right after
+	// the plan-inventory gate and before the resuming/planning flags and the
+	// plan-probe gate, so one pure gate covers every pickup path (Planned,
+	// Refined planning, stale-plan re-plan, answered Input Needed resume) and
+	// an excluded ticket never reaches a later gate -- it takes no capacity or
+	// quota and triggers no claim, comment or window. The two earlier gates keep
+	// precedence. A repo with no filter is unrestricted (the zero RepoFilter).
+	if reason, excluded := filterSkip(filterByRepo[t.Repo], t); excluded {
 		return skip(reason)
 	}
 

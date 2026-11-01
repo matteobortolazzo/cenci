@@ -437,6 +437,23 @@ missing `autonomy` key, or any other value means `"interactive"`.
 `/cenci:configure` offers `refinement.autonomy` on a delta run when the key is absent and has not been offered before, recommending `lean` while an absent key still resolves to `interactive`; `/cenci:configure --all` re-offers it with the committed value pre-selected.
 Declining writes nothing.
 
+## Dedicating a machine to a queue
+
+By default every machine running dispatch can pick up every eligible ticket in an
+enrolled repo. To give a machine its own queue, add a `filters` object to that repo's
+entry in the machine's own user config (`~/.config/cenci/config.json`) — for example
+`"filters": { "milestones": [3] }` on one machine and `[7]` on another. You can also
+filter on labels (`labelsAll`, `labelsAny`, `labelsNone`).
+
+A filter only decides which tickets this machine considers; every other gate (ownership,
+`Blocked`, dependencies, planning authorization, capacity, quota, budgets) still
+applies, and a ticket it skips shows a `filter:` reason in the decision table. Filters
+are never read from a committed `.cenci/config.json`, manual `/cenci:implement` runs and
+babysit ignore them, and dispatch still reads at most 200 open issues per repo, so a
+matching ticket beyond that window is not found.
+Schema, combination rules, validation, the milestone-listing command and the skip reasons:
+[cenci-watch README — Machine-local filters](../watch/README.md#machine-local-filters).
+
 ## What still stops the machine
 
 These are not configurable away, and they're the reason the loop is safe to leave
@@ -631,6 +648,7 @@ Accepted and documented, not bugs:
 |---|---|
 | The full board lifecycle, labels, and every transition | [Orchestration recipe](orchestration.md) |
 | Dispatch gates, pickup rules, reconciliation, config reference | [cenci-watch README — Auto-dispatch](../watch/README.md#auto-dispatch-cenci-dispatch) |
+| Giving one machine its own milestone or label queue | [cenci-watch README — Machine-local filters](../watch/README.md#machine-local-filters) |
 | Every automerge condition, in full | [cenci-watch README — Automerge](../watch/README.md#automerge-cenci-babysit) |
 | The `automerge` config schema, field by field | [configure skill](../flow/skills/configure/references/config-schema.md) |
 | Lean refinement as the refine skill executes it | [Refine skill](../flow/skills/refine/SKILL.md) |

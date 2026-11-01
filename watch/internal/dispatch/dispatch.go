@@ -529,6 +529,11 @@ func applyDispatch(cfg Config, deps dispatchDeps, ctrl run.Controller, mut Ticke
 	return decisions, errors.Join(sessionErr, firstErr)
 }
 
+// errConfigReload marks a dispatchTick whose config reload failed (#1385). The
+// failure was already logged by reloadConfig and the pass was skipped, so
+// RunLoop treats it as "try again next tick" rather than as fatal.
+var errConfigReload = errors.New("loading dispatch config")
+
 // RunLoop reloads Config from configPath and runs RunOnce immediately and then
 // on every interval tick, threading the daily-quota tally in memory (it resets
 // on process restart — acceptable for #45). modelOverride, when non-empty (the
@@ -541,30 +546,40 @@ func RunLoop(configPath string, ctrl run.Controller, mut TicketMutator, interval
 	// loop-fatal condition -- the pass that produced it already logged the
 	// affected repo(s) via gateSessions, so RunLoop just keeps ticking
 	// instead of terminating the whole fleet loop over one repo's bad
-	// config. Every other error stays fatal exactly as today.
-	if err := dispatchTick(configPath, ctrl, mut, out, &prior, modelOverride); err != nil && !isSessionSentinel(err) {
+	// config. #1385: a failed config reload (a bad hand edit of a filter, say)
+	// is the same kind of non-fatal condition -- the tick was skipped and the
+	// error logged, and the corrected file dispatches again on the next tick.
+	// The initial LoadConfig in runDispatch still exits 1, and every other
+	// error stays fatal exactly as today.
+	if err := dispatchTick(configPath, ctrl, mut, out, &prior, modelOverride); err != nil && !isLoopContinuable(err) {
 		return err
 	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for range ticker.C {
-		if err := dispatchTick(configPath, ctrl, mut, out, &prior, modelOverride); err != nil && !isSessionSentinel(err) {
+		if err := dispatchTick(configPath, ctrl, mut, out, &prior, modelOverride); err != nil && !isLoopContinuable(err) {
 			return err
 		}
 	}
 	return nil
 }
 
+// isLoopContinuable reports whether err leaves RunLoop running: a per-repo
+// session-gate sentinel (#927) or a skipped config reload (#1385).
+func isLoopContinuable(err error) bool {
+	return isSessionSentinel(err) || errors.Is(err, errConfigReload)
+}
+
 // dispatchTick is RunLoop's per-tick body: reload Config from configPath,
 // re-apply modelOverride (if set) since the reload otherwise wins, then run
 // one dispatch pass against the resulting config. On a reload error the tick
-// is skipped entirely (no dispatch, prior left untouched) so a bad edit
-// between ticks cannot crash the loop or silently dispatch against a stale
-// config.
+// is skipped entirely (no dispatch, prior left untouched) and errConfigReload
+// is returned, so a bad edit between ticks cannot crash the loop or silently
+// dispatch against a stale config (or against unrestricted defaults).
 func dispatchTick(configPath string, ctrl run.Controller, mut TicketMutator, out io.Writer, prior *int, modelOverride string) error {
 	cfg, ok := reloadConfig(configPath, out)
 	if !ok {
-		return fmt.Errorf("loading dispatch config")
+		return errConfigReload
 	}
 	if modelOverride != "" {
 		cfg.Model = modelOverride

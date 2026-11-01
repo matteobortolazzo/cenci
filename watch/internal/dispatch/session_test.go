@@ -504,9 +504,10 @@ esac
 // TestRunLoopSurvivesSessionSentinel_NonSentinelStillTerminates covers the
 // AC's loop-resilience requirement in one test: RunLoop's pre-ticker
 // immediate dispatchTick call must treat both new sentinels as non-fatal
-// (the process keeps running, blocked on the ticker), while a genuine
-// non-sentinel error (a corrupt config reload) still terminates it exactly
-// as today.
+// (the process keeps running, blocked on the ticker). A genuine non-sentinel
+// pass error still terminating the loop is pinned by
+// TestDispatchTickFilterRunLoopStaysFatalOnPassError (#1385: a bad config
+// reload is no longer such an error).
 func TestRunLoopSurvivesSessionSentinel_NonSentinelStillTerminates(t *testing.T) {
 	mainSyncGitEnv(t)
 	serveChainSnapshot(t, watch.StateSnapshot{}) // reachable, idle daemon, so o/r#42 actually reaches ActionDispatch
@@ -547,21 +548,6 @@ esac
 	// RunLoop is now blocked reading its hour-long ticker; the goroutine is
 	// intentionally left running until the test binary exits (RunLoop has no
 	// cancellation seam), mirroring this suite's other infinite-loop guards.
-}
-
-// TestRunLoopNonSentinelErrorStillTerminates is the plain regression pin for
-// "every other RunOnce error stays fatal exactly as today": a corrupt
-// config.json on RunLoop's very first (pre-ticker) reload must still return
-// a non-nil error immediately.
-func TestRunLoopNonSentinelErrorStillTerminates(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.json")
-	corruptConfig(t, path)
-
-	err := RunLoop(path, fakeController{}, &fakeMutator{}, time.Hour, io.Discard, "")
-	if err == nil {
-		t.Fatal("expected RunLoop to return a non-nil error on a non-sentinel reload failure")
-	}
 }
 
 // -- Dry-run ----------------------------------------------------------------

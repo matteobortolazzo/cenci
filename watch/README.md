@@ -504,7 +504,7 @@ cenci dispatch status   [--dir <path>] [--config <path>] [--json]
 |------|-------|----------|
 | `enroll` | `--dir` (default cwd), `--config`, `--session` | Detects `owner/name` and the absolute dir from `--dir`'s git `origin` remote, then adds/updates the `repos` entry. Idempotent: a second run prints `Already enrolled owner/name (dir)` instead of duplicating the entry. `--session <name>` is optional and sets `repos[].session` — the tmux session that repo's dispatches target (see [Configuration](#configuration)). Omitting it preserves any existing session unchanged (this is how lazyboards' `d`-panel toggle, which never passes `--session`, avoids blanking an already-configured repo). An empty or whitespace-only `--session` is a usage error (exit `2`) rather than a silent clear — there is no un-set verb; unenrolling is how a repo leaves dispatch. Whenever the resulting entry's session is empty — on a fresh enrollment or a no-flag re-enrollment of an already session-less repo — the result line names the consequence and the fix: `Enrolled owner/name (dir); no tmux session set -- dispatch will skip this repo until you run: cenci dispatch enroll --session <name> (config: /abs/path)`. When the resulting entry has a session, the line instead ends `→ session <name>`. |
 | `unenroll` | `--dir`, `--config`, `--repo owner/name` | Removes the `repos` entry. Idempotent: unenrolling a repo that isn't enrolled exits `0` with `Not enrolled: owner/name`. `--repo` unenrolls by name without touching git — use it when the repo's directory has moved or been deleted. `--repo` and an explicitly-passed `--dir` are mutually exclusive (exit `2`) since only one can identify the target. |
-| `status` | `--dir`, `--config`, `--json` | Prints the current enrollment state without mutating anything. `--json` emits a single pinned line: `{"repo":"owner/name","dir":"/abs/path","enrolled":true,"session":"a-work","loop":{...}}`; when not enrolled, `dir` is still the **detected** absolute dir (not empty) and `session` is empty, even if the config file doesn't exist yet. Human output likewise names the session: `Enrolled owner/name (dir) → session a-work`, or `Enrolled owner/name (dir); no tmux session set` when unset. |
+| `status` | `--dir`, `--config`, `--json` | Prints the current enrollment state without mutating anything. `--json` emits a single pinned line: `{"repo":"owner/name","dir":"/abs/path","enrolled":true,"session":"a-work","loop":{...}}`; when not enrolled, `dir` is still the **detected** absolute dir (not empty) and `session` is empty, even if the config file doesn't exist yet. Human output likewise names the session: `Enrolled owner/name (dir) → session a-work`, or `Enrolled owner/name (dir); no tmux session set` when unset. It then prints `Memory headroom: <N>%`, the repo's effective [machine-local filters](#machine-local-filters) and `Config: <path>`, the config file actually loaded. The filter lines are `Filters: unrestricted`, or one `Filters: <dimension> <values>` line per configured dimension in the order `milestones`, `labelsAll`, `labelsAny`, `labelsNone` (labels quoted, e.g. `Filters: labelsAny ["bug" "enhancement"]`). `--json` adds `"configPath":"/abs/config.json"` and `"filters":{"restricted":true,"milestones":[3],"labelsAll":[],"labelsAny":[],"labelsNone":[]}` — the four lists are always arrays, never `null`, and a repo with no filters, or that is not enrolled, reports `restricted:false` with empty arrays. Duplicates are already collapsed. Filters are read from the selected user config only; an invalid `filters` block makes `status` exit `1`. |
 
 Exit codes are consistent across all three verbs: `0` when the verb ran successfully
 (enrolled/not-enrolled is a result, not a failure), `1` on a detection/IO error
@@ -570,10 +570,14 @@ This daemon-embedded path (`dispatch loop on` alongside a running `cenci daemon`
 is the canonical way to run dispatch continuously. `cenci dispatch --interval
 <duration>` (see [Auto-dispatch](#auto-dispatch-cenci-dispatch)) remains a
 separate, standalone loop for running dispatch directly from the CLI without a daemon.
-It stops and exits nonzero on its first config or pass error, except a per-repo
+It stops and exits nonzero on its first pass error, except a per-repo
 session skip (`dispatch_session_unconfigured`/`dispatch_session_missing`, ticket
 #927): that is logged and the loop keeps ticking, since it names a single
-misconfigured repo rather than a fleet-wide failure. One-shot, dry-run, and
+misconfigured repo rather than a fleet-wide failure. A failed config *reload*
+(for example a bad edit to a [machine-local filter](#machine-local-filters)) behaves
+the same way: the pass is skipped, nothing is dispatched, `dispatch: loading config: …`
+is logged and the loop keeps ticking, so correcting the file restores dispatch on the
+next pass. Only the initial load at startup exits nonzero. One-shot, dry-run, and
 reconcile invocations still exit nonzero on any pass error, including a session
 skip — so the misconfiguration is loud interactively.
 
@@ -644,6 +648,126 @@ disagree about whether a repo's pickups would actually fire. `--json` emits
 A malformed `planning` block makes `status` exit 1 with the error on stderr,
 never a silent "off".
 
+### Machine-local filters
+
+An optional `filters` object on a `dispatch.repos[]` entry narrows which tickets
+*this machine* picks up, so two machines on the same GitHub account and repository can
+serve different queues. It lives only in the user config this machine's dispatcher loads
+(`--config`, else `$XDG_CONFIG_HOME/cenci/config.json`) and is edited by hand — a
+`dispatch.repos[].filters` block in a repo's committed `.cenci/config.json` is never
+read, in pickup or in `cenci dispatch status`. A match only makes a ticket a
+*candidate*: ownership, `Blocked`, dependencies, planning authorization, sibling
+serialization, capacity, quota and budgets all still apply.
+
+```json
+{
+  "dispatch": {
+    "repos": [
+      {
+        "repo": "owner/name",
+        "dir": "/path/to/repo",
+        "session": "a-work",
+        "filters": {
+          "milestones": [3, 7],
+          "labelsAll": ["area:watch"],
+          "labelsAny": ["bug", "enhancement"],
+          "labelsNone": ["manual-only"]
+        }
+      }
+    ]
+  }
+}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `milestones` | The ticket's milestone number is any listed number (OR). A nonempty list excludes tickets with no milestone. Numbers are repo-local milestone numbers, not titles or global IDs, so renaming a milestone changes nothing; a number no ticket carries matches nothing. |
+| `labelsAll` | The ticket carries every listed label. |
+| `labelsAny` | The ticket carries at least one listed label (OR). |
+| `labelsNone` | The ticket carries none of these labels. An exclusion wins over an inclusion: a label in both `labelsAll` and `labelsNone` loads, and no ticket can satisfy it. |
+
+Dimensions combine with AND. An omitted `filters`, `{}`, omitted lists and empty lists
+impose no restriction, so existing configs behave as before. Labels are literal full
+names compared case-insensitively after trimming surrounding whitespace (`"  Area:Watch "`
+matches `area:watch`; `area` does not match `area:watch`); duplicates collapse. There is
+no selector for unmilestoned tickets — omit the milestone constraint to allow them.
+
+**Strict validation.** `LoadConfig` rejects, with the config path, repo and full field
+path (e.g. `dispatch.repos[0] (owner/name).filters.milestones[1]`): `filters` or any list
+set to `null` or the wrong JSON type, an unknown key inside `filters` (a typo such as
+`milestone` is an error, never an unrestricted repo), a milestone that is not a positive
+integer (`0`, negatives, fractions including `3.0`, strings, `null`), and a label that is
+blank, whitespace-only or not a string. Validation covers the whole file: **one bad
+filter on any repo stops every repo for that pass** (the one-off `cenci dispatch`,
+`status` and `--reconcile` exit `1`; the loops skip the pass), and unrestricted defaults
+are never substituted.
+
+**Two machines, one queue each.** Machine A's config selects milestone 3 and machine B's
+selects milestone 7; each ignores the other's tickets, yet both still see them as
+blockers, active siblings and stranded `Working` tickets.
+
+```json
+{ "dispatch": { "repos": [ { "repo": "owner/name", "dir": "/a/repo", "session": "work",
+    "filters": { "milestones": [3] } } ] } }
+```
+
+```json
+{ "dispatch": { "repos": [ { "repo": "owner/name", "dir": "/b/repo", "session": "work",
+    "filters": { "milestones": [7] } } ] } }
+```
+
+List a repo's milestone numbers (open and closed) with:
+
+```bash
+gh api --paginate 'repos/<owner>/<repo>/milestones?state=all' --jq '.[] | {number, title, state}'
+```
+
+**Skip reasons.** An excluded ticket gets one logged skip whose reason starts with
+`filter:` and names the first failing dimension, checked in the order milestones,
+`labelsAll`, `labelsAny`, `labelsNone`. Only configured label names are echoed (quoted,
+one line, bounded):
+
+| Reason | Meaning |
+|--------|---------|
+| `filter: milestone 7 not in [3]` | The ticket's milestone is not listed |
+| `filter: no milestone assigned (milestones [3])` | The ticket has no milestone and `milestones` is set |
+| `filter: milestone metadata unavailable` | `milestones` is set but the milestone could not be read (missing or malformed in the `gh` payload); never counted as a match |
+| `filter: required label "area:watch" missing` | A `labelsAll` label is absent |
+| `filter: no labelsAny match among ["bug" "enhancement"]` | None of the `labelsAny` labels is present |
+| `filter: excluded label "manual-only" present` | A `labelsNone` label is present |
+
+The gate runs right after the plan-inventory gate ([rule 1.75](#pickup-rules-and-gates)),
+so a repo that failed local-main sync or plan inventory keeps that earlier reason, and a
+filtered ticket is skipped on every pickup path (Planned, Refined planning, autonomous
+re-plan, answered `Input Needed`). `--dry-run` prints exactly the decisions a real pass
+records. Excluded tickets claim no `Working` label, post no attempt comment, open no
+window and use no concurrency or quota.
+
+**What filters do not touch.**
+
+- Filters decide launch eligibility only. Collection stays unfiltered, so an excluded
+  open dependency still blocks an included ticket, an excluded active sibling still
+  serializes an included child, and the reconciler still recovers an excluded stranded
+  `Working` ticket (which then stays filtered out of pickup, retry state intact).
+- Manual `cenci run implement` / `/cenci:implement` and babysit's PR supervision and
+  repair ignore filters.
+- Tightening filters never cancels a running session, edits its ticket, resets retry
+  counters or stops babysit.
+- **Collection window.** Dispatch still reads at most 200 open issues per repo in one
+  `gh issue list` call (`--limit 200`). Filtering runs over those; a matching ticket
+  outside that window is not found. This is not a full backlog scan.
+
+**Editing and persistence.** Both loops re-read the config every pass (the daemon-embedded
+loop at least every 60 seconds), so a valid edit takes effect on the next pass without a
+restart. An invalid edit skips that pass — nothing is dispatched, `dispatch: loading config: …`
+is logged, and `cenci dispatch --interval` keeps looping instead of exiting — and the
+corrected file dispatches on the following pass. `cenci dispatch enroll`/`unenroll`,
+`dispatch loop`, `dispatch plan-refined` and `cenci automerge on|off` preserve every
+`filters` object, but like every config write they rewrite the whole file re-indented,
+and `&`, `<` and `>` inside a label come back escaped as `\u0026`, `\u003c`, `\u003e`
+(the same label to JSON readers). `cenci dispatch status` shows the current repo's
+effective filters and the config path in use (see [Enrollment](#enrollment-cenci-dispatch-enrollunenrollstatus)).
+
 ### Pickup rules and gates
 
 A ticket is dispatched only when **all** of these hold, evaluated in order (the first
@@ -656,6 +780,10 @@ failing gate is the logged skip reason):
    partially-read directory holds **every** ticket in the repo, ordinary/resume/
    planning pickup alike, since a partial enumeration can never prove no second file
    claims any given ticket;
+1.75. **machine-local filters** — the ticket passes its repo's `filters` from this
+   machine's user config (see [Machine-local filters](#machine-local-filters)); a
+   failing ticket is skipped with a `filter:` reason on every pickup path, before the
+   `Planned`/`Refined`/`Input Needed` checks below. No filters means no restriction;
 2. carries `Planned`, **or** carries `Refined` (and not yet `Planned`) in a
    lean-planning repo with `dispatch.planRefined: true` — a *planning pickup* (see
    [Planning pickup and autonomous re-plan](#planning-pickup-and-autonomous-re-plan)
@@ -1245,6 +1373,7 @@ Dispatch reads the same `config.json` as `run`, under a top-level `"dispatch"` b
 | Key | Default | Purpose |
 |-----|---------|---------|
 | `repos` | — | Repos to scan; each entry requires `repo`, `dir` (holds that repo's `.plans/` and git tree), and `session` (the tmux session that repo's dispatched windows target — never an ambient/current session). Normally managed via `cenci dispatch enroll`/`unenroll` (see [Enrollment](#enrollment-cenci-dispatch-enrollunenrollstatus)) rather than hand-edited, though hand-editing remains supported. A repo whose `session` is empty or names a tmux session that doesn't exist is skipped entirely for that pass (`dispatch: no target tmux session for <repo>; set repos[].session in <config path>`, or the equivalent "not found in tmux" line naming the remedy `tmux new-session -d -s <name>`) — every other enrolled repo still dispatches normally in the same pass. |
+| `repos[].filters` | none | Optional machine-local pickup filter on a `repos` entry: `milestones` (repo-local numbers), `labelsAll`, `labelsAny`, `labelsNone`. Dimensions AND together; omitted, `{}` and empty lists mean no restriction; an unknown key, `null`, wrong type or invalid entry is a config error that stops every repo for that pass. Read only from this user config, never a committed `.cenci/config.json`. See [Machine-local filters](#machine-local-filters) |
 | `concurrencyCap` | `3` | Max concurrent running sessions (counts in-flight windows, orphaned container sessions still alive after their pane closed, and this pass's dispatches) |
 | `needInputThreshold` | `1` | Pause dispatch when at least this many windows await input |
 | `memoryHeadroom` | `25` | Minimum percent of a repo's container memory limit that must be free before dispatch picks up into it (integer 0–100; `0` disables the gate; see [Pickup rules and gates](#pickup-rules-and-gates)); a non-integer, `null`, negative or >100 value is a config error |

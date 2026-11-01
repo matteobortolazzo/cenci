@@ -38,10 +38,21 @@ func (q QuietHours) Contains(now time.Time) bool {
 // Session (or one whose configured tmux session is absent) skips every
 // ActionDispatch decision for this repo -- see the per-repo gate in
 // session.go.
+//
+// Filters (#1385) is the raw `filters` object, kept verbatim so enroll and the
+// config toggles round-trip it unchanged; it is RawMessage (not a typed struct)
+// so an explicit null reaches the validator instead of decoding to a zero value.
+// Filter is the validated, normalized form LoadConfig fills from it; it is
+// never marshaled, so a write-back cannot replace the user's bytes with the
+// normalized form. Filters are read only from the user config, never from a
+// repo's committed .cenci/config.json.
 type RepoConfig struct {
 	Repo    string `json:"repo"`
 	Dir     string `json:"dir"`
 	Session string `json:"session"`
+
+	Filters json.RawMessage `json:"filters,omitempty"`
+	Filter  RepoFilter      `json:"-"`
 }
 
 // Config is the resolved dispatch policy: built-in defaults with a config.json
@@ -262,6 +273,17 @@ func LoadConfig(path string) (Config, error) {
 		oomBackoff, err := parseOOMBackoff(f.Dispatch.OOMBackoff)
 		if err != nil {
 			return cfg, fmt.Errorf("config %s: dispatch.oomBackoff %w", path, err)
+		}
+		// Validate every repo's filters before mergeConfig so an invalid block
+		// returns the unmerged defaults, like the errors above: the pass is
+		// skipped by the caller, never run with a widened (unrestricted) repo.
+		for i := range f.Dispatch.Repos {
+			rc := &f.Dispatch.Repos[i]
+			filter, err := parseRepoFilter(rc.Filters)
+			if err != nil {
+				return cfg, fmt.Errorf("config %s: dispatch.repos[%d] (%s).filters%w", path, i, rc.Repo, err)
+			}
+			rc.Filter = filter
 		}
 		cfg = mergeConfig(cfg, *f.Dispatch)
 		if headroom != nil {

@@ -79,10 +79,10 @@ func collectRepoTickets(rc RepoConfig, sync MainSync, resolveDeps bool, out io.W
 	repo := rc.Repo
 	stdout, stderr, err := execGh("issue", "list",
 		"--repo", repo, "--state", "open",
-		"--json", "number,title,body,labels,assignees,blockedBy", "--limit", "200")
+		"--json", "number,title,body,labels,assignees,blockedBy,milestone", "--limit", "200")
 	if err != nil {
 		// Detail is truncated to maxProbeLogDetailBytes (#852 second review
-		// round, finding B): `--json number,title,body,labels,assignees,blockedBy
+		// round, finding B): `--json number,title,body,labels,assignees,blockedBy,milestone
 		// --limit 200` can return up to 200 full issue bodies (potentially
 		// attacker-authored content on a public repo) in stdout, and a
 		// ghTimeout/WaitDelay kill mid-stream can leave that large partial
@@ -110,6 +110,10 @@ func collectRepoTickets(rc RepoConfig, sync MainSync, resolveDeps bool, out io.W
 			Login string `json:"login"`
 		} `json:"assignees"`
 		BlockedBy blockedByConnection `json:"blockedBy"`
+		// Milestone (#1385) stays raw: a malformed value must classify as
+		// unknown for this one ticket (classifyMilestone), never fail the
+		// decode of the whole inventory. A missing key leaves it nil.
+		Milestone json.RawMessage `json:"milestone"`
 	}
 	if err := json.Unmarshal([]byte(stdout), &issues); err != nil {
 		return nil, fmt.Errorf("parsing issues for %s: %w", repo, err)
@@ -158,6 +162,7 @@ func collectRepoTickets(rc RepoConfig, sync MainSync, resolveDeps bool, out io.W
 			assignees[i] = a.Login
 		}
 		stage, probe, launch := probeStageState(rc.Dir, is.Number)
+		milestone, milestoneProbe := classifyMilestone(is.Milestone)
 
 		// resolveDeps==false (the reconciler's call, #825 review fix #1) skips
 		// the whole dependency gate input -- native blocked-by conversion and
@@ -202,9 +207,35 @@ func collectRepoTickets(rc RepoConfig, sync MainSync, resolveDeps bool, out io.W
 			OpenPRProbe: openPRProbe,
 
 			Launch: launch,
+
+			Milestone:      milestone,
+			MilestoneProbe: milestoneProbe,
 		})
 	}
 	return tickets, nil
+}
+
+// classifyMilestone reads one issue's raw `milestone` JSON into the
+// MilestoneProbe closed set (#1385). A missing key (nil raw) and any value that
+// is not null or an object carrying a positive integer `number` are unknown --
+// including a string, an array, a fractional or string number, zero and
+// negatives -- so the pickup filter holds the ticket under a milestone
+// constraint instead of counting it as a match. An explicit null is a valid
+// "no milestone". Decoding `number` into an int rejects 3.5 and "3" alike.
+func classifyMilestone(raw json.RawMessage) (int, MilestoneProbe) {
+	if len(raw) == 0 {
+		return 0, MilestoneProbeUnknown
+	}
+	if isJSONNull(raw) {
+		return 0, MilestoneProbeNone
+	}
+	var m struct {
+		Number int `json:"number"`
+	}
+	if err := json.Unmarshal(raw, &m); err != nil || m.Number < 1 {
+		return 0, MilestoneProbeUnknown
+	}
+	return m.Number, MilestoneProbePresent
 }
 
 // probeStage classifies dir's persisted `cenci pipeline` stage for one

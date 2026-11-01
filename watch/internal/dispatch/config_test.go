@@ -1,8 +1,10 @@
 package dispatch
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -723,6 +725,242 @@ func TestLoadConfig_OOM_RejectsInvalid(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), path) {
 				t.Errorf("error %q must name the config path %s", err, path)
+			}
+		})
+	}
+}
+
+// -- dispatch.repos[].filters (#1385) -------------------------------------------
+
+// TestLoadConfig_Filters_OldConfigKeepsCurrentBehavior: AC1, a config written
+// before filters existed loads with no repo restricted, and a config with no
+// repos at all still has none.
+func TestLoadConfig_Filters_OldConfigKeepsCurrentBehavior(t *testing.T) {
+	old := `{"dispatch": {"concurrencyCap": 4, "repos": [
+		{"repo": "owner/a", "dir": "/a", "session": "s"},
+		{"repo": "owner/b", "dir": "/b", "session": "s"}
+	]}}`
+	cfg, err := LoadConfig(writeFilterConfig(t, old))
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if len(cfg.Repos) != 2 || cfg.ConcurrencyCap != 4 {
+		t.Fatalf("old config loaded as %+v, want 2 repos and cap 4", cfg)
+	}
+	for _, rc := range cfg.Repos {
+		if rc.Filter.Restricted() {
+			t.Errorf("repo %s without filters loaded as restricted: %+v", rc.Repo, rc.Filter)
+		}
+		if len(rc.Filters) != 0 {
+			t.Errorf("repo %s without filters carries raw filters %s", rc.Repo, rc.Filters)
+		}
+	}
+
+	noRepos, err := LoadConfig(writeFilterConfig(t, `{"dispatch": {"concurrencyCap": 4}}`))
+	if err != nil {
+		t.Fatalf("LoadConfig (no repos): %v", err)
+	}
+	if len(noRepos.Repos) != 0 {
+		t.Errorf("config without repos loaded %d repos", len(noRepos.Repos))
+	}
+}
+
+// TestLoadConfig_Filters_IndependentRepoEntries: each repo entry owns its
+// filters; one repo's restriction never leaks to its neighbours.
+func TestLoadConfig_Filters_IndependentRepoEntries(t *testing.T) {
+	body := `{"dispatch": {"repos": [
+		{"repo": "owner/a", "dir": "/a", "session": "s", "filters": {"milestones": [3]}},
+		{"repo": "owner/b", "dir": "/b", "session": "s"},
+		{"repo": "owner/c", "dir": "/c", "session": "s", "filters": {}},
+		{"repo": "owner/d", "dir": "/d", "session": "s", "filters": {"labelsNone": ["manual-only"]}}
+	]}}`
+	cfg, err := LoadConfig(writeFilterConfig(t, body))
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if got := FilterForRepo(cfg.Repos, "owner/a"); len(got.Milestones) != 1 || got.Milestones[0] != 3 || len(got.LabelsNone) != 0 {
+		t.Errorf("repo a filter = %+v, want milestones [3] only", got)
+	}
+	if FilterForRepo(cfg.Repos, "owner/b").Restricted() {
+		t.Error("repo b (no filters) must be unrestricted")
+	}
+	if FilterForRepo(cfg.Repos, "owner/c").Restricted() {
+		t.Error("repo c (empty filters object) must be unrestricted")
+	}
+	if got := FilterForRepo(cfg.Repos, "owner/d"); len(got.LabelsNone) != 1 || len(got.Milestones) != 0 {
+		t.Errorf("repo d filter = %+v, want labelsNone only", got)
+	}
+}
+
+// TestLoadConfig_Filters_TwoConfigFilesSelectDifferentMilestones: AC1, the file
+// named by the path (--config) is the one read, so two machines sharing a repo
+// and an account select different queues.
+func TestLoadConfig_Filters_TwoConfigFilesSelectDifferentMilestones(t *testing.T) {
+	machineA := writeFilterConfig(t, filterConfigBody(`{"milestones": [3]}`))
+	machineB := writeFilterConfig(t, filterConfigBody(`{"milestones": [7]}`))
+
+	cfgA, err := LoadConfig(machineA)
+	if err != nil {
+		t.Fatalf("LoadConfig(A): %v", err)
+	}
+	cfgB, err := LoadConfig(machineB)
+	if err != nil {
+		t.Fatalf("LoadConfig(B): %v", err)
+	}
+	if cfgA.Path != machineA || cfgB.Path != machineB {
+		t.Errorf("Config.Path = %q / %q, want the selected files %q / %q", cfgA.Path, cfgB.Path, machineA, machineB)
+	}
+	a := FilterForRepo(cfgA.Repos, "owner/name")
+	b := FilterForRepo(cfgB.Repos, "owner/name")
+	if len(a.Milestones) != 1 || a.Milestones[0] != 3 {
+		t.Errorf("machine A milestones = %v, want [3]", a.Milestones)
+	}
+	if len(b.Milestones) != 1 || b.Milestones[0] != 7 {
+		t.Errorf("machine B milestones = %v, want [7]", b.Milestones)
+	}
+	ticket3 := milestoneTicket("owner/name", 3)
+	ticket7 := milestoneTicket("owner/name", 7)
+	if _, skipped := filterSkip(a, ticket3); skipped {
+		t.Error("machine A must take the milestone-3 ticket")
+	}
+	if _, skipped := filterSkip(a, ticket7); !skipped {
+		t.Error("machine A must not take the milestone-7 ticket")
+	}
+	if _, skipped := filterSkip(b, ticket7); skipped {
+		t.Error("machine B must take the milestone-7 ticket")
+	}
+	if _, skipped := filterSkip(b, ticket3); !skipped {
+		t.Error("machine B must not take the milestone-3 ticket")
+	}
+}
+
+// TestLoadConfig_Filters_CommittedRepoConfigIsIgnored: filters are read only
+// from the selected user config, never from a repo's committed
+// .cenci/config.json -- not even one sitting in the enrolled directory.
+func TestLoadConfig_Filters_CommittedRepoConfigIsIgnored(t *testing.T) {
+	repoDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repoDir, ".cenci"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	committed := `{"dispatch": {"repos": [{"repo": "owner/name", "dir": "` + repoDir + `", "session": "s", "filters": {"milestones": [3], "labelsAll": ["x"]}}]}}`
+	if err := os.WriteFile(filepath.Join(repoDir, ".cenci", "config.json"), []byte(committed), 0o600); err != nil {
+		t.Fatalf("writing committed config: %v", err)
+	}
+	user := `{"dispatch": {"repos": [{"repo": "owner/name", "dir": "` + repoDir + `", "session": "s"}]}}`
+	cfg, err := LoadConfig(writeFilterConfig(t, user))
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if FilterForRepo(cfg.Repos, "owner/name").Restricted() {
+		t.Error("a committed .cenci/config.json filters block must not restrict the repo")
+	}
+
+	// An invalid committed block must not fail the user config load either.
+	bad := `{"dispatch": {"repos": [{"repo": "owner/name", "filters": null}]}}`
+	if err := os.WriteFile(filepath.Join(repoDir, ".cenci", "config.json"), []byte(bad), 0o600); err != nil {
+		t.Fatalf("writing bad committed config: %v", err)
+	}
+	if _, err := LoadConfig(writeFilterConfig(t, user)); err != nil {
+		t.Errorf("an invalid committed filters block failed the user config load: %v", err)
+	}
+}
+
+// TestLoadConfig_Filters_MissingConfigFileIsUnrestricted: no file at all is not
+// an error and restricts nothing, as before.
+func TestLoadConfig_Filters_MissingConfigFileIsUnrestricted(t *testing.T) {
+	cfg, err := LoadConfig(filepath.Join(t.TempDir(), "absent.json"))
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if FilterForRepo(cfg.Repos, "owner/name").Restricted() {
+		t.Error("a missing config must leave every repo unrestricted")
+	}
+}
+
+// TestLoadConfig_Filters_FailedLoadReturnsUnmergedDefaults: a bad
+// filters block returns the unmerged defaults (no repos), so a caller that
+// ignores the error cannot read a half-validated, possibly widened repo list.
+func TestLoadConfig_Filters_FailedLoadReturnsUnmergedDefaults(t *testing.T) {
+	body := `{"dispatch": {"concurrencyCap": 9, "dailyQuota": 99, "repos": [
+		{"repo": "owner/a", "dir": "/a", "session": "s", "filters": {"milestones": [3]}},
+		{"repo": "owner/b", "dir": "/b", "session": "s", "filters": {"milestone": [3]}}
+	]}}`
+	cfg, err := LoadConfig(writeFilterConfig(t, body))
+	if err == nil {
+		t.Fatal("LoadConfig returned nil error for an unknown filters key")
+	}
+	def := DefaultConfig()
+	if len(cfg.Repos) != 0 || cfg.ConcurrencyCap != def.ConcurrencyCap || cfg.DailyQuota != def.DailyQuota {
+		t.Errorf("failed load returned repos=%d cap=%d quota=%d, want the unmerged defaults (0, %d, %d)",
+			len(cfg.Repos), cfg.ConcurrencyCap, cfg.DailyQuota, def.ConcurrencyCap, def.DailyQuota)
+	}
+}
+
+// TestLoadConfig_Filters_RawFiltersRoundTripAndResolvedFilterNeverMarshals: the
+// raw bytes survive a Marshal (so enroll/toggle write-backs keep them), an
+// unfiltered entry gains no filters key, and the resolved form is not
+// serialized.
+func TestLoadConfig_Filters_RawFiltersRoundTripAndResolvedFilterNeverMarshals(t *testing.T) {
+	cfg, err := LoadConfig(writeFilterConfig(t, filterConfigBody(`{"milestones": [3, 3], "labelsAll": [" Area:Watch "]}`)))
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	rc := cfg.Repos[0]
+	out, err := json.Marshal(rc)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	var back map[string]json.RawMessage
+	if err := json.Unmarshal(out, &back); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	// Marshal compacts insignificant whitespace (the config writer re-indents the
+	// whole file anyway), but the values must stay the user's: the duplicate 3
+	// and the padded label are not normalized away on write-back.
+	if string(back["filters"]) != `{"milestones":[3,3],"labelsAll":[" Area:Watch "]}` {
+		t.Errorf("marshaled filters = %s, want the user's values unnormalized", back["filters"])
+	}
+	if _, ok := back["Filter"]; ok {
+		t.Errorf("the resolved Filter must not marshal, got %s", out)
+	}
+
+	plain, err := json.Marshal(RepoConfig{Repo: "owner/x", Dir: "/x", Session: "s"})
+	if err != nil {
+		t.Fatalf("Marshal plain: %v", err)
+	}
+	if strings.Contains(string(plain), "ilter") {
+		t.Errorf("an unfiltered repo entry marshaled a filters key: %s", plain)
+	}
+}
+
+// TestFilterDecideParityWithUnfilteredConfig: AC1, a config whose filters are
+// absent, {} or only empty lists makes Decide return decisions identical to the
+// unfiltered config for the same inputs.
+func TestFilterDecideParityWithUnfilteredConfig(t *testing.T) {
+	load := func(rawFilters string) Config {
+		cfg, err := LoadConfig(writeFilterConfig(t, `{"dispatch": {"repos": [{"repo": "o/r", "dir": "/r", "session": "s"`+rawFilters+`}]}}`))
+		if err != nil {
+			t.Fatalf("LoadConfig(%q): %v", rawFilters, err)
+		}
+		return cfg
+	}
+	decide := func(cfg Config) []Decision {
+		in := baseInputs()
+		in.Config = cfg
+		return Decide(in)
+	}
+
+	want := decide(load(``))
+	if len(want) != 1 || want[0].Action != ActionDispatch {
+		t.Fatalf("unfiltered baseline = %+v, want one dispatch", want)
+	}
+	for name, raw := range map[string]string{
+		"empty object": `, "filters": {}`,
+		"empty lists":  `, "filters": {"milestones": [], "labelsAll": [], "labelsAny": [], "labelsNone": []}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := decide(load(raw)); !reflect.DeepEqual(got, want) {
+				t.Errorf("decisions differ from the unfiltered config:\n got %+v\nwant %+v", got, want)
 			}
 		})
 	}

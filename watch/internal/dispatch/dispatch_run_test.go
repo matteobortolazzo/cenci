@@ -2753,3 +2753,248 @@ func TestRunOnce_OOMBackoff_UnreadableStateLogsOnceAndSkipsNothing(t *testing.T)
 		t.Errorf("no ticket may be skipped for oom backoff when the state is unreadable, got:\n%s", buf.String())
 	}
 }
+
+// -- #1385: machine-local pickup filter through the real collect -> decide -> dispatch path
+
+// filterPassIssue is one open issue of a filter-pass fixture: Planned, assigned
+// to octocat, with a fresh planned plan file, and the given milestone number
+// (0 serves an explicit JSON null).
+type filterPassIssue struct {
+	number    int
+	milestone int
+}
+
+// setupFilterPass builds a real-git, fake-gh, served-daemon-snapshot fixture
+// for repo "o/r" in which every listed issue would dispatch were it not for the
+// repo's filter, and returns the unfiltered Config. Callers set
+// cfg.Repos[0].Filter (or load it from a real config file) per case.
+func setupFilterPass(t *testing.T, snap watch.StateSnapshot, issues ...filterPassIssue) Config {
+	t.Helper()
+	mainSyncGitEnv(t)
+	serveChainSnapshot(t, snap)
+
+	local, _ := initOriginAndLocal(t)
+	planSha := gitTest(t, local, "rev-parse", "HEAD")
+	items := make([]string, 0, len(issues))
+	for _, is := range issues {
+		writePlan(t, local, fmt.Sprintf("%d-x.md", is.number),
+			fmt.Sprintf("---\nticketId: %d\nstatus: planned\nplanCommitSha: %s\n---\nbody\n", is.number, planSha))
+		milestone := `null`
+		if is.milestone > 0 {
+			milestone = fmt.Sprintf(`{"number":%d,"title":"Milestone %d"}`, is.milestone, is.milestone)
+		}
+		items = append(items, fmt.Sprintf(`{"number":%d,"title":"Ticket %d","labels":[{"name":"Planned"}],"assignees":[{"login":"octocat"}],"milestone":%s}`,
+			is.number, is.number, milestone))
+	}
+	installFakeGHOnPath(t, `
+case "$1 $2" in
+  "issue list") printf '[`+strings.Join(items, ",")+`]' ;;
+  "api graphql") printf '`+emptyOpenPRPageJSON+`' ;;
+  "api user") printf 'octocat\n' ;;
+  *) exit 1 ;;
+esac
+`)
+
+	cfg := testConfig()
+	cfg.Repos = []RepoConfig{{Repo: "o/r", Dir: local, Session: "test-session"}}
+	return cfg
+}
+
+// withMilestoneFilter returns cfg with repo o/r restricted to the milestones.
+func withMilestoneFilter(cfg Config, milestones ...int) Config {
+	repos := append([]RepoConfig(nil), cfg.Repos...)
+	repos[0].Filter = RepoFilter{Milestones: milestones}
+	cfg.Repos = repos
+	return cfg
+}
+
+// An excluded issue produces no spawn, no Working claim, no comment, no
+// ensure-labels call and no quota increment -- only the filter skip decision.
+func TestRunOnce_FilterExcludedIssue_NoSpawnNoClaimNoCommentNoQuota(t *testing.T) {
+	cfg := withMilestoneFilter(setupFilterPass(t, watch.StateSnapshot{}, filterPassIssue{number: 42, milestone: 7}), 3)
+	failOnSpawn(t)
+
+	mut := &fakeMutator{}
+	prior := 2
+	var buf bytes.Buffer
+	decisions, err := RunOnce(cfg, fakeController{}, mut, false, &buf, &prior)
+	if err != nil {
+		t.Fatalf("RunOnce returned unexpected error: %v", err)
+	}
+
+	assertDecisions(t, decisions, []wantDecision{{42, ActionSkip, "filter: milestone 7 not in [3]", ""}})
+	if len(mut.labelEdits) != 0 || len(mut.comments) != 0 || len(mut.ensureCalls) != 0 {
+		t.Errorf("an excluded issue must cause no gh mutation, got edits %+v comments %+v ensures %+v", mut.labelEdits, mut.comments, mut.ensureCalls)
+	}
+	if prior != 2 {
+		t.Errorf("prior = %d, want 2 unchanged (an excluded issue consumes no quota)", prior)
+	}
+	if want := "o/r#42 skip: filter: milestone 7 not in [3]"; !strings.Contains(buf.String(), want) {
+		t.Errorf("log lacks the decision line %q:\n%s", want, buf.String())
+	}
+}
+
+// With the concurrency cap at one, an excluded issue numbered first does not
+// take the slot: the included issue behind it is the one that spawns.
+func TestRunOnce_FilterCapOfOne_IncludedIssueTakesTheSlot(t *testing.T) {
+	cfg := setupFilterPass(t, watch.StateSnapshot{},
+		filterPassIssue{number: 41, milestone: 7}, filterPassIssue{number: 42, milestone: 3})
+	cfg = withMilestoneFilter(cfg, 3)
+	cfg.ConcurrencyCap = 1
+	spawned := recordSpawns(t)
+
+	mut := &fakeMutator{}
+	prior := 0
+	decisions, err := RunOnce(cfg, fakeController{}, mut, false, io.Discard, &prior)
+	if err != nil {
+		t.Fatalf("RunOnce returned unexpected error: %v", err)
+	}
+
+	assertDecisions(t, decisions, []wantDecision{
+		{41, ActionSkip, "filter: milestone 7 not in [3]", ""},
+		{42, ActionDispatch, "dispatch", ""},
+	})
+	if len(*spawned) != 1 || (*spawned)[0] != "42" {
+		t.Errorf("spawned %v, want only ticket 42", *spawned)
+	}
+	if len(mut.labelEdits) != 1 || mut.labelEdits[0].number != 42 || !containsStr(mut.labelEdits[0].add, labelWorking) {
+		t.Errorf("label edits = %+v, want the Working claim on #42 only", mut.labelEdits)
+	}
+	if prior != 1 {
+		t.Errorf("prior = %d, want 1 (only the included dispatch counts)", prior)
+	}
+}
+
+// --dry-run and a real pass print the same filter decision lines.
+func TestRunOnce_FilterDryRunAndRealPassPrintIdenticalFilterLines(t *testing.T) {
+	filterLines := func(dryRun bool) []string {
+		cfg := withMilestoneFilter(setupFilterPass(t, watch.StateSnapshot{},
+			filterPassIssue{number: 40}, filterPassIssue{number: 41, milestone: 7}, filterPassIssue{number: 42, milestone: 3}), 3)
+		stubRunFn(t, func(run.Opts, run.Controller) error { return nil })
+		var buf bytes.Buffer
+		if _, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, dryRun, &buf, nil); err != nil {
+			t.Fatalf("RunOnce(dryRun=%v): %v", dryRun, err)
+		}
+		return logLinesWith(buf.String(), " skip: filter:")
+	}
+
+	dry := filterLines(true)
+	realPass := filterLines(false)
+	want := []string{
+		"o/r#40 skip: filter: no milestone assigned (milestones [3])",
+		"o/r#41 skip: filter: milestone 7 not in [3]",
+	}
+	if !reflect.DeepEqual(dry, want) {
+		t.Errorf("dry-run filter lines = %q, want %q", dry, want)
+	}
+	if !reflect.DeepEqual(realPass, dry) {
+		t.Errorf("real-pass filter lines = %q, want the dry-run lines %q", realPass, dry)
+	}
+}
+
+// Two machines' real config files select disjoint sets of the same repo's
+// issues through LoadConfig -> RunOnce, and an unmilestoned issue goes to
+// neither.
+func TestRunOnce_FilterTwoConfigFilesSelectDisjointSets(t *testing.T) {
+	base := setupFilterPass(t, watch.StateSnapshot{},
+		filterPassIssue{number: 41, milestone: 3}, filterPassIssue{number: 42, milestone: 7},
+		filterPassIssue{number: 43, milestone: 3}, filterPassIssue{number: 44})
+	local := base.Repos[0].Dir
+
+	dispatchedUnder := func(milestone int) []int {
+		path := filepath.Join(t.TempDir(), "config.json")
+		body := fmt.Sprintf(`{"dispatch":{"repos":[{"repo":"o/r","dir":%q,"session":"test-session","filters":{"milestones":[%d]}}]}}`, local, milestone)
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		loaded, err := LoadConfig(path)
+		if err != nil {
+			t.Fatalf("LoadConfig(milestone %d): %v", milestone, err)
+		}
+		cfg := base
+		cfg.Repos = loaded.Repos
+
+		decisions, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, true, io.Discard, nil)
+		if err != nil {
+			t.Fatalf("RunOnce under milestone %d: %v", milestone, err)
+		}
+		var picked []int
+		for _, d := range decisions {
+			if d.Action == ActionDispatch {
+				picked = append(picked, d.Ticket.Number)
+			}
+		}
+		return picked
+	}
+
+	if got := dispatchedUnder(3); !reflect.DeepEqual(got, []int{41, 43}) {
+		t.Errorf("machine A (milestone 3) takes %v, want [41 43]", got)
+	}
+	if got := dispatchedUnder(7); !reflect.DeepEqual(got, []int{42}) {
+		t.Errorf("machine B (milestone 7) takes %v, want [42]", got)
+	}
+}
+
+// A gh read failure (no issue inventory at all) dispatches nothing and
+// mutates nothing, with a filter configured -- a filter never turns a failed
+// read into a pickup.
+func TestRunOnce_FilterGhReadFailureDispatchesNothing(t *testing.T) {
+	cfg := withMilestoneFilter(setupFilterPass(t, watch.StateSnapshot{}, filterPassIssue{number: 42, milestone: 3}), 3)
+	installFakeGHOnPath(t, `
+case "$1 $2" in
+  "issue list") printf 'HTTP 502\n' >&2; exit 1 ;;
+  "api graphql") printf '`+emptyOpenPRPageJSON+`' ;;
+  "api user") printf 'octocat\n' ;;
+  *) exit 1 ;;
+esac
+`)
+	failOnSpawn(t)
+
+	mut := &fakeMutator{}
+	prior := 0
+	var buf bytes.Buffer
+	decisions, err := RunOnce(cfg, fakeController{}, mut, false, &buf, &prior)
+	if err == nil {
+		t.Fatal("RunOnce returned no error for a failed issue read")
+	}
+	if len(decisions) != 0 {
+		t.Errorf("decisions = %+v, want none", decisions)
+	}
+	if len(mut.labelEdits) != 0 || len(mut.comments) != 0 || prior != 0 {
+		t.Errorf("a failed read must change nothing: edits %+v comments %+v prior %d", mut.labelEdits, mut.comments, prior)
+	}
+	if !strings.Contains(buf.String(), "collecting tickets") {
+		t.Errorf("log lacks the collection failure:\n%s", buf.String())
+	}
+}
+
+// Unknown milestone metadata (a gh payload without the milestone key) holds the
+// ticket through the real collector under a milestone constraint, while a
+// label-only filter dispatches it.
+func TestRunOnce_FilterMissingMilestoneKeyHoldsOnlyUnderMilestoneConstraint(t *testing.T) {
+	cfg := setupFilterPass(t, watch.StateSnapshot{}, filterPassIssue{number: 42, milestone: 3})
+	installFakeGHOnPath(t, `
+case "$1 $2" in
+  "issue list") printf '[{"number":42,"title":"T","labels":[{"name":"Planned"}],"assignees":[{"login":"octocat"}]}]' ;;
+  "api graphql") printf '`+emptyOpenPRPageJSON+`' ;;
+  "api user") printf 'octocat\n' ;;
+  *) exit 1 ;;
+esac
+`)
+	recordSpawns(t)
+
+	held, err := RunOnce(withMilestoneFilter(cfg, 3), fakeController{}, &fakeMutator{}, true, io.Discard, nil)
+	if err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	assertDecisions(t, held, []wantDecision{{42, ActionSkip, "filter: milestone metadata unavailable", ""}})
+
+	labelOnly := cfg
+	labelOnly.Repos = []RepoConfig{cfg.Repos[0]}
+	labelOnly.Repos[0].Filter = RepoFilter{LabelsAll: []string{"planned"}}
+	passed, err := RunOnce(labelOnly, fakeController{}, &fakeMutator{}, true, io.Discard, nil)
+	if err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	assertDecisions(t, passed, []wantDecision{{42, ActionDispatch, "dispatch", ""}})
+}
