@@ -984,6 +984,57 @@ persist implement 42 "$PLAN_REL"
 run_shim "$REPO" get "$REL" implement 42; expect_rc "F1 get after re-plan" 0
 expect_stdout_jq "F1 re-plan after clear: status planned again" '.phase == "planned" and .status == "planned"'
 
+# --- K1 (#1384): apply's terminal `complete` turns a re-appliable checkpoint into a refused one ---
+# complete_from_planned <workflow> <target> <artifact-rel> <last-phase> -- mirrors a finished apply for
+# a workflow that never `advance`s (or advances only some phases): persist (init ... planned), verify
+# accepts it, `complete <last-phase>` without --gate, then the run reads complete and verify refuses it.
+complete_from_planned() {
+  local wf="$1" target="$2" artifact="$3" last="$4" ck
+  ck=".cenci/checkpoints/$wf-$target.json"
+  new_repo
+  persist "$wf" "$target" "$artifact"
+  run_shim "$REPO" verify "$ck" "$wf" "$target"; expect_rc "K1 $wf verify before complete" 0
+  run_shim "$REPO" complete "$ck" "$wf" "$target" "$last"; expect_rc "K1 $wf complete $last" 0
+  run_shim "$REPO" get "$ck" "$wf" "$target"; expect_rc "K1 $wf get after complete" 0
+  expect_stdout_jq "K1 $wf finished run: status complete, phase $last" '.status == "complete" and .phase == "'"$last"'"'
+  reject "K1 $wf verify after complete" "$REPO/$ck" "checkpoint is complete (terminal)" verify "$ck" "$wf" "$target"
+}
+complete_from_planned implement 42 ".plans/42-harden.md" pr
+complete_from_planned maintain repo ".plans/codex/maintain-repo.md" pr
+complete_from_planned refactor repo ".plans/codex/refactor-repo.md" pr
+complete_from_planned address-review 7 ".plans/codex/address-review-7.md" push
+complete_from_planned configure repo ".plans/codex/configure-repo.md" pr
+complete_from_planned refine 42 ".plans/codex/refine-42.md" apply
+
+# --- K2 (#1384): `get` prints any legacy v1 status as-is, the input persist's fail-closed branch must handle ---
+new_repo
+mkdir -p "$CKDIR" || fail "K2: mkdir failed"
+write_v1; mutate "$CK" '.status = "stalled"'
+run_shim "$REPO" get "$REL" implement 42; expect_rc "K2 get v1 stalled" 0
+expect_stdout_jq "K2 v1 unrecognised status is printed as-is" '.legacy == true and .status == "stalled"'
+write_v1; mutate "$CK" 'del(.status)'
+run_shim "$REPO" get "$REL" implement 42; expect_rc "K2 get v1 without status" 0
+expect_stdout_jq "K2 v1 absent status is printed without a status field" '.legacy == true and (has("status") | not)'
+write_v1; mutate "$CK" '.status = 7'
+run_shim "$REPO" get "$REL" implement 42; expect_rc "K2 get v1 non-string status" 0
+expect_stdout_jq "K2 v1 non-string status is printed as-is" '.legacy == true and .status == 7'
+# A v1 checkpoint whose status is planned or complete is the input persist's clear-and-replace branch handles: get
+# prints it as legacy with that status, and the replacing clear removes it.
+for v1_status in planned complete; do
+  write_v1; mutate "$CK" ".status = \"${v1_status}\""
+  run_shim "$REPO" get "$REL" implement 42; expect_rc "K2 get v1 ${v1_status}" 0
+  expect_stdout_jq "K2 v1 ${v1_status} status is printed as legacy" ".legacy == true and .status == \"${v1_status}\""
+  run_shim "$REPO" clear "$REL" implement 42; expect_rc "K2 clear v1 ${v1_status}" 0
+  [[ ! -e "$CK" ]] || fail "K2 clear removes a v1 ${v1_status} checkpoint"
+done
+
+# The status guard on the replacing clear lives in persist (Re-plan), not in the helper: `clear` removes a running v2 checkpoint unconditionally.
+new_repo
+persist implement 42 "$PLAN_REL"
+run_shim "$REPO" advance "$REL" implement 42 baseline --gate worktree --worktree .worktrees/42-demo; expect_rc "K3 advance" 0
+run_shim "$REPO" clear "$REL" implement 42; expect_rc "K3 clear a running checkpoint" 0
+[[ ! -e "$CK" ]] || fail "K3 clear removes a running checkpoint without any status check"
+
 echo "runtime.test.sh: failures=${failures}"
 [[ "$failures" -eq 0 ]] && echo "runtime.test.sh: passed"
 [[ "$failures" -eq 0 ]]
