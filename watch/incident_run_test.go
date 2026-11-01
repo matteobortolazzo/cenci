@@ -31,6 +31,8 @@ const (
 	incTenantID = "11111111-1111-4111-8111-111111111111"
 	incClientID = "22222222-2222-4222-8222-222222222222"
 	incOtherID  = "33333333-3333-4333-8333-333333333333"
+	// incObjectID is the principal object ID the fake authority puts in every token.
+	incObjectID = "44444444-4444-4444-8444-444444444444"
 )
 
 // incIsolateEnv removes every ambient Azure identity variable, so a test sees
@@ -168,7 +170,7 @@ func (f *incAuthority) Do(r *http.Request) (*http.Response, error) {
 		if f.tenantClaim != "" {
 			tid = f.tenantClaim
 		}
-		token := incJWT(map[string]any{"tid": tid, "appid": req.Form.Get("client_id")})
+		token := incJWT(map[string]any{"tid": tid, "appid": req.Form.Get("client_id"), "oid": incObjectID})
 		return reply(200, map[string]any{"token_type": "Bearer", "expires_in": 3600, "ext_expires_in": 3600, "access_token": token})
 	}
 	return reply(404, map[string]any{"error": "not_found"})

@@ -412,6 +412,86 @@ certificate, then add a federated credential for your token issuer
 (`az ad app federated-credential create --id "$APP_ID" --parameters credential.json`)
 and set `auth.tokenFilePath` to the projected token file on the worker host.
 
+### Verifying the identity
+
+After provisioning, and before starting the worker, check the identity and its
+role assignments:
+
+```bash
+cenci incident verify --config /home/incident/incidents.json [--propagation-wait 5m]
+```
+
+`verify` loads the same config as `run` (a disabled config or one without `auth`
+is refused with the same message and exit 1) and builds the credential through
+the same constructor, so the two cannot disagree about identity. It removes
+ambient `AZURE_*` variables as `run` does, applies the same `tid`/`appid` checks
+as the startup preflight, and then runs these probes. Each probe makes one
+attempt, bounded to 30 seconds:
+
+1. **Identity.** One token per scope, Service Bus then Log Analytics, stopping at
+   the first failure. On success it prints the claims read from the Service Bus
+   token: `identity: tenant <tid>, application <appid>, principal <oid>`. A claim
+   that is not UUID-shaped prints `unknown`. The `oid` is shown only, never
+   checked.
+2. **Workspace**, one per `resources[]` entry: the entry's configured `query`
+   runs against its `workspace` over the last 5 minutes.
+3. **Broker.** `PeekMessages` with a maximum of 1 on the configured queue or
+   topic subscription. A peek takes no lock and settles nothing: `verify` never
+   receives, completes, abandons, dead-letters or renews a message.
+
+Output has one line per probe on stdout:
+
+```text
+identity: tenant <tid>, application <appid>, principal <oid>
+workspace <uuid> (<resource id>): ok (<n> rows)
+workspace <uuid> (<resource id>): <failure class>
+broker <entity>: ok (<n> messages visible)
+broker <entity>: <failure class>
+```
+
+`<entity>` is the queue name, or `<topic>/subscriptions/<subscription>`. The
+counts keep that literal plural form (`1 rows`). A queue with no messages prints
+`broker <entity>: ok (0 messages visible)` followed by `note: an empty peek proves
+receive authorization only; it does not show that alerts reach this entity`.
+Stdout and stderr never carry the token, the certificate, the private key, result
+rows or message bodies. Stderr carries only the startup notices and warnings
+(ambient variables, certificate expiry), the existing preflight message for an
+identity failure, for some failures an HTTP status or a fixed note, the
+propagation-wait note (`N probe(s) were denied; retrying every 30s for up to D
+(--propagation-wait)`) and, when the run is cancelled (Ctrl-C) during the probes
+or the wait, one `interrupted: <error>` line after the last round, with a
+failing exit and the classes as they stood. Terminal control characters (all
+C0/C1 controls except newline and tab) are stripped from every error message and
+from the resource, queue, topic and subscription names printed.
+
+An identity failure prints `identity (<target>): <class>` and runs no resource
+probe. A failed probe prints exactly one of six classes:
+
+| Class | Meaning |
+| --- | --- |
+| `authentication-failed` | The credential could not obtain a token, or the service answered HTTP 401 or an authentication error. |
+| `identity-mismatch` | The token's `tid` differs from `auth.tenantId`, the `appid` differs from `auth.clientId`, or the claims are unreadable. |
+| `authorization-denied` | HTTP 403 from Log Analytics, or Service Bus `UnauthorizedAccess`: the role assignment is missing or wrong. |
+| `rbac-propagation-timeout` | `authorization-denied` persisted through the whole `--propagation-wait` window. |
+| `resource-not-found` | HTTP 404, or the Service Bus entity does not exist. |
+| `unreachable` | The service could not be reached (dial, DNS, TLS, deadline), and every outcome outside the classes above: HTTP 400 (for example a bad configured query), 429 or 5xx, a malformed response, a response over 1 MiB (narrow the configured query), an unrecognized Service Bus error code. Stderr carries the HTTP status when there is one. |
+
+`--propagation-wait D` accepts 30 seconds to 15 minutes, both inclusive, on
+`verify` only. Without it every probe makes one attempt. With it, one window
+starts after the first round: every probe still `authorization-denied` is retried
+together at 30s, 60s, ... while that offset is within `D`. Only
+`authorization-denied` is retried, and a retry that returns anything else is
+final. A probe still denied at the end of the window is reported as
+`rbac-propagation-timeout`. Use it right after granting a role, because Azure
+role assignments can take minutes to take effect. The flag on `run`, `status` or
+`cancel`, a value outside the range, or an unparseable value exits 2.
+
+Exit codes: 0 when every probe is `ok`; 1 when any probe fails, the config cannot
+be loaded or the credential cannot be built (reported as `run` reports them, not
+as a probe line); 2 on a usage error. `verify` takes no worker lock and never
+opens the state directory, so it can run beside a live worker, and it writes no
+file, invokes no `az` or other subprocess, and never changes the identity.
+
 ## Configuration
 
 Paths below are illustrative; use canonical absolute checkout paths. Keep this
@@ -636,6 +716,13 @@ disables VCS stamping because it has no mounted Git metadata; real jobs supply
 isolated metadata and run the exact configured gates. Adapt the command for your
 stack, and ensure every gate works offline during the full smoke run.
 
+Run [`cenci incident verify`](#verifying-the-identity) with the staging config
+first, adding `--propagation-wait 5m` right after granting roles. Expect exit 0,
+the identity line to name the worker's application, and an `ok` line for the
+staging workspace and for the broker. An empty queue proves receive authorization
+only, so the smoke test below is what shows that alerts arrive. Resolve any
+failure class before starting the worker.
+
 Start the worker in a foreground terminal with its credentials loaded. In a
 **separate sender terminal**, authenticate as the staging bridge/test identity
 with Service Bus Data Sender; the worker's Receiver role cannot send. Install
@@ -722,7 +809,9 @@ and GitHub are injected at their boundaries; no test uses production credentials
 The worker-identity tests run the real azidentity credentials against a fake
 Entra ID transport. The command-level ones live in the `watch` package:
 `watch/incident_run_test.go` drives the startup sequence with an injected token
-boundary, and `watch/incident_cmd_test.go` runs the built `cenci` binary.
+boundary, `watch/incident_verify_test.go` drives `verify` the same way, and
+`watch/incident_cmd_test.go` runs the built `cenci` binary (before any network
+call). The `TestVerify*` names live in `internal/incident/verify_test.go`.
 
 | Requirement | Named test |
 | --- | --- |
@@ -758,6 +847,14 @@ boundary, and `watch/incident_cmd_test.go` runs the built `cenci` binary.
 | Startup authenticates both boundaries as the configured identity with zero `az` calls; preflight failure starts nothing; ambient `AZURE_*` is reported and removed; no output without them; near-expiry warning | `TestIncidentStartupAuthenticatesBothBoundariesAsTheConfiguredIdentityWithoutAz`, `TestIncidentPreflightFailureStartsNothing`, `TestIncidentStartupReportsAndRemovesAmbientAzureVariables`, `TestIncidentStartupDisablesTheAmbientSDKLogger`, `TestIncidentStartupIsSilentWithoutAmbientAzureVariablesOrNearExpiry`, `TestIncidentStartupWarnsWhenTheCertificateExpiresSoon` |
 | The worker lock is taken before any token request, so a second worker spends none; the credential and its certificate checks come before the lock, so a loose certificate reports the certificate failure, not "already running"; a failed credential build still finds ambient `AZURE_*` reported and removed and starts nothing | `TestIncidentStartupTakesTheWorkerLockBeforeAnyTokenRequest`, `TestIncidentStartupBuildsTheCredentialBeforeTakingTheWorkerLock`, `TestIncidentCredentialBuildFailureStillFindsAmbientVariablesRemoved` |
 | `run` refuses a missing or invalid `auth` and a loose certificate mode before any startup work; `status` and `cancel` need no Azure identity | `TestIncidentRunWithoutAuthIsRefusedBeforeAnyStartupWork`, `TestIncidentRunRefusesInvalidAuthNamingTheField`, `TestIncidentRunRefusesACertificateWithLooseModeBeforeAnyStartupWork`, `TestIncidentStatusAndCancelNeedNoAzureIdentity` |
+| `verify` prints the tenant, application and principal IDs and never the token, key or rows; non-UUID claims print `unknown` | `TestVerifyPrintsIdentityClaimsAndNeverTheTokenOrKey`, `TestVerifyPrintsUnknownForClaimsThatAreNotUUIDShaped` |
+| `verify` workspace probe runs the configured query over 5 minutes within 30 seconds; broker probe peeks one message and settles nothing; an empty peek notes receive authorization only | `TestVerifyWorkspaceProbeRunsTheConfiguredQueryOverFiveMinutesWithinThirtySeconds`, `TestVerifyBrokerProbePeeksOneAndSettlesNothing`, `TestVerifyEmptyPeekNotesReceiveAuthorizationOnly` |
+| `verify` reports each failure as exactly one of the six classes (unreadable claims, a non-JWT or non-JSON token, are `identity-mismatch`; an `azidentity` `AuthenticationFailedError` from the broker is `authentication-failed`, both pinned as `TestVerifyClassifiesEachFailure` subtests); unmapped outcomes fall back to `unreachable`; an identity failure names the preflight reason on stderr only and runs no resource probe | `TestVerifyClassifiesEachFailure`, `TestVerifyUnmappedOutcomesFallBackToUnreachable`, `TestVerifyIdentityFailureNamesThePreflightReasonOnStderrOnly`, `TestVerifyIdentityFailureRunsNoResourceProbe` |
+| `verify` strips terminal control characters from stderr error text and printed labels; a workspace that is not a UUID is never queried (`unreachable`); an empty `tables` array is `unreachable`, not `ok` (`empty-tables-array` subtest); a cancelled context prints one `interrupted:` line and fails | `TestVerifyStripsTerminalControlsFromStderrErrorText`, `TestVerifyStripsTerminalControlsFromConfigLabels`, `TestVerifyDoesNotQueryAWorkspaceThatIsNotAUUID`, `TestVerifyUnmappedOutcomesFallBackToUnreachable`, `TestVerifyReportsInterruptionWhenTheContextIsCancelled` |
+| `verify` retries only `authorization-denied`, only during `--propagation-wait` | `TestVerifyRetriesOnlyAuthorizationDeniedDuringPropagationWait` |
+| The production broker opener (no Azure call) builds the `verify` client with a negative `MaxRetries` so one attempt holds at the SDK level, while `run` keeps the SDK defaults; the receiver opens on the configured queue or topic subscription | `TestVerifyProductionBrokerOpenerAttemptsOnceAtTheSDKLevel`, `TestRunBrokerOpenerKeepsTheSDKRetryDefaults`, `TestBrokerReceiverIsOpenedOnTheConfiguredQueueOrTopicSubscription` |
+| `verify` authenticates through the real credential as the configured identity with no `az` call and no file written; it runs beside a live worker; it exits 1 when any probe fails, reports a credential build failure as `run` does, and warns on a near-expiry certificate | `TestIncidentVerifyAuthenticatesAsTheConfiguredIdentityWithoutAzOrFiles`, `TestIncidentVerifyRunsNextToALiveWorker`, `TestIncidentVerifyExitsOneWhenAnyProbeFails`, `TestIncidentVerifyReportsACredentialBuildFailureLikeRun`, `TestIncidentVerifyWarnsWhenTheCertificateExpiresSoon` |
+| `verify` usage errors exit 2 (`--propagation-wait` outside 30s-15m, or on another verb); the bounds are inclusive; a missing `auth` and a disabled config are refused like `run`; help documents `verify` | `TestIncidentVerifyUsageErrorsExitTwo`, `TestIncidentVerifyAcceptsTheInclusivePropagationWaitBounds`, `TestIncidentVerifyWithoutAuthIsRefusedLikeRun`, `TestIncidentVerifyOnDisabledConfigIsRefusedLikeRun`, `TestIncidentHelpDocumentsVerify` |
 
 Live Azure delivery, production RBAC, the operator's container image and proxy,
 and actual model/GitHub calls require a staging smoke test before enabling this

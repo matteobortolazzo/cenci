@@ -106,21 +106,61 @@ type AzureReceiver struct {
 	receiver *azservicebus.Receiver
 }
 
-func NewAzureReceiver(c Config, credential azcore.TokenCredential) (*AzureReceiver, error) {
-	client, err := azservicebus.NewClient(c.Namespace, credential, nil)
-	if err != nil {
-		return nil, err
-	}
-	var r *azservicebus.Receiver
+// ServiceBusReceiver is the full method set of *azservicebus.Receiver the
+// package touches. `cenci incident verify` sits behind it so a test can count
+// every receive and settlement call and prove a peek made none.
+type ServiceBusReceiver interface {
+	ReceiveMessages(ctx context.Context, maxMessages int, options *azservicebus.ReceiveMessagesOptions) ([]*azservicebus.ReceivedMessage, error)
+	PeekMessages(ctx context.Context, maxMessageCount int, options *azservicebus.PeekMessagesOptions) ([]*azservicebus.ReceivedMessage, error)
+	RenewMessageLock(ctx context.Context, message *azservicebus.ReceivedMessage, options *azservicebus.RenewMessageLockOptions) error
+	CompleteMessage(ctx context.Context, message *azservicebus.ReceivedMessage, options *azservicebus.CompleteMessageOptions) error
+	AbandonMessage(ctx context.Context, message *azservicebus.ReceivedMessage, options *azservicebus.AbandonMessageOptions) error
+	DeadLetterMessage(ctx context.Context, message *azservicebus.ReceivedMessage, options *azservicebus.DeadLetterOptions) error
+	Close(ctx context.Context) error
+}
+
+var _ ServiceBusReceiver = (*azservicebus.Receiver)(nil)
+
+// newServiceBusClient builds the broker client. It is a variable only so a test
+// can observe the options a production opener passes; building a client makes no
+// network call.
+var newServiceBusClient = azservicebus.NewClient
+
+// receiverFactory is the part of *azservicebus.Client that picks the entity.
+type receiverFactory interface {
+	NewReceiverForQueue(queue string, options *azservicebus.ReceiverOptions) (*azservicebus.Receiver, error)
+	NewReceiverForSubscription(topic, subscription string, options *azservicebus.ReceiverOptions) (*azservicebus.Receiver, error)
+}
+
+// receiverFor opens a receiver on the configured queue, or else on the topic
+// subscription.
+func receiverFor(f receiverFactory, c Config) (*azservicebus.Receiver, error) {
 	if c.Queue != "" {
-		r, err = client.NewReceiverForQueue(c.Queue, nil)
-	} else {
-		r, err = client.NewReceiverForSubscription(c.Topic, c.Subscription, nil)
+		return f.NewReceiverForQueue(c.Queue, nil)
 	}
+	return f.NewReceiverForSubscription(c.Topic, c.Subscription, nil)
+}
+
+// openReceiver opens a client and a receiver on the configured queue or topic
+// subscription. On failure nothing stays open.
+func openReceiver(c Config, credential azcore.TokenCredential, opts *azservicebus.ClientOptions) (*azservicebus.Client, *azservicebus.Receiver, error) {
+	client, err := newServiceBusClient(c.Namespace, credential, opts)
+	if err != nil {
+		return nil, nil, err
+	}
+	r, err := receiverFor(client, c)
 	if err != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = client.Close(ctx)
+		return nil, nil, err
+	}
+	return client, r, nil
+}
+
+func NewAzureReceiver(c Config, credential azcore.TokenCredential) (*AzureReceiver, error) {
+	client, r, err := openReceiver(c, credential, nil)
+	if err != nil {
 		return nil, err
 	}
 	return &AzureReceiver{client: client, receiver: r}, nil
