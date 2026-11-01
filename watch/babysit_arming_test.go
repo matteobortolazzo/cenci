@@ -18,6 +18,8 @@ package main_test
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"net"
 	"os"
 	"os/exec"
@@ -176,21 +178,7 @@ func TestBabysitArmWireFormat_Nack(t *testing.T) {
 // The client must report the third outcome, "arm status unknown", textually
 // distinct from a nack, and exit non-zero.
 func TestBabysitArmWireFormat_NoResponse(t *testing.T) {
-	socket := armTestSocketPath(t)
-	ln, err := net.Listen("unix", socket)
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	defer func() { _ = ln.Close() }()
-	go func() {
-		conn, err := ln.Accept()
-		if err != nil {
-			return
-		}
-		buf := make([]byte, 4096)
-		_, _ = conn.Read(buf)
-		_ = conn.Close()
-	}()
+	startSilentListener(t, armTestSocketPath(t))
 
 	ghDir := writeArmTestGhShim(t)
 	cmd := exec.Command(binaryPath, "babysit", "42", "--agent", "claude")
@@ -206,5 +194,268 @@ func TestBabysitArmWireFormat_NoResponse(t *testing.T) {
 	}
 	if !strings.Contains(string(output), "arm status unknown") {
 		t.Errorf("output = %q, want the \"arm status unknown\" outcome", output)
+	}
+}
+
+// -- #1390: forwarded `babysit stop` / `babysit status` ----------------------
+
+// runBabysitCLI runs the real binary with env and returns its separate stdout and
+// stderr plus the exit code (-1 when the process did not exit normally).
+func runBabysitCLI(t *testing.T, env []string, args ...string) (stdout, stderr string, code int) {
+	t.Helper()
+	cmd := exec.Command(binaryPath, args...)
+	cmd.Env = env
+	var outBuf, errBuf strings.Builder
+	cmd.Stdout = &outBuf
+	cmd.Stderr = &errBuf
+	err := cmd.Run()
+	switch e := err.(type) {
+	case nil:
+		code = 0
+	case *exec.ExitError:
+		code = e.ExitCode()
+	default:
+		t.Fatalf("run cenci %v: %v", args, err)
+	}
+	return outBuf.String(), errBuf.String(), code
+}
+
+// startSilentListener accepts one connection, reads the request line and
+// closes without replying -- the observable behavior of a daemon that
+// predates the kind.
+func startSilentListener(t *testing.T, socket string) {
+	t.Helper()
+	ln, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		buf := make([]byte, 4096)
+		_, _ = conn.Read(buf)
+		_ = conn.Close()
+	}()
+}
+
+func startControlReceiver(t *testing.T, socket string, stop func(ipc.BabysitStopRequest) ipc.BabysitStopResponse, status func(ipc.BabysitStatusRequest) ipc.BabysitStatusResponse) {
+	t.Helper()
+	recv, err := ipc.NewEventReceiver(socket)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = recv.Close() })
+	if stop != nil {
+		recv.SetBabysitStopHandler(stop)
+	}
+	if status != nil {
+		recv.SetBabysitStatusHandler(status)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go recv.Accept(ctx)
+	time.Sleep(20 * time.Millisecond)
+}
+
+func TestBabysitStopWireFormat(t *testing.T) {
+	t.Run("ack", func(t *testing.T) {
+		socket := armTestSocketPath(t)
+		var mu sync.Mutex
+		var got ipc.BabysitStopRequest
+		var calls int
+		startControlReceiver(t, socket, func(req ipc.BabysitStopRequest) ipc.BabysitStopResponse {
+			mu.Lock()
+			defer mu.Unlock()
+			got, calls = req, calls+1
+			return ipc.BabysitStopResponse{OK: true}
+		}, nil)
+
+		stdout, stderr, code := runBabysitCLI(t, armChildEnv(t, writeArmTestGhShim(t)), "babysit", "stop", "42")
+
+		if code != 0 {
+			t.Fatalf("exit code = %d, want 0 (stderr %q)", code, stderr)
+		}
+		if stdout != "Stopped babysitting PR #42 on the host.\n" {
+			t.Errorf("stdout = %q, want %q", stdout, "Stopped babysitting PR #42 on the host.\n")
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if calls != 1 || got.PR != "42" || got.Repo != "owner/repo" {
+			t.Errorf("handler calls=%d request=%+v, want one request for PR 42 owner/repo", calls, got)
+		}
+	})
+
+	t.Run("nack relays the reason with the host command", func(t *testing.T) {
+		socket := armTestSocketPath(t)
+		const reason = "no supervisor found for PR #42"
+		startControlReceiver(t, socket, func(ipc.BabysitStopRequest) ipc.BabysitStopResponse {
+			return ipc.BabysitStopResponse{OK: false, Reason: reason}
+		}, nil)
+
+		stdout, stderr, code := runBabysitCLI(t, armChildEnv(t, writeArmTestGhShim(t)), "babysit", "stop", "42")
+
+		if code != 1 {
+			t.Errorf("exit code = %d, want 1", code)
+		}
+		if !strings.Contains(stderr, "not stopped: "+reason) || !strings.Contains(stderr, "cenci babysit stop 42") {
+			t.Errorf("stderr = %q, want %q and the host command", stderr, "not stopped: "+reason)
+		}
+		if strings.Contains(stdout+stderr, "Stopped babysitting") {
+			t.Errorf("output %q / %q must not claim a stop", stdout, stderr)
+		}
+	})
+
+	t.Run("no reply reports stop status unknown", func(t *testing.T) {
+		socket := armTestSocketPath(t)
+		startSilentListener(t, socket)
+
+		stdout, stderr, code := runBabysitCLI(t, armChildEnv(t, writeArmTestGhShim(t)), "babysit", "stop", "42")
+
+		if code != 1 {
+			t.Errorf("exit code = %d, want 1", code)
+		}
+		if !strings.Contains(stderr, "stop status unknown") || !strings.Contains(stderr, "cenci babysit stop 42") {
+			t.Errorf("stderr = %q, want %q and the host command", stderr, "stop status unknown")
+		}
+		if strings.Contains(stdout, "Stopped babysitting") {
+			t.Errorf("stdout = %q must not claim a stop", stdout)
+		}
+	})
+}
+
+func TestBabysitStatusWireFormat(t *testing.T) {
+	t.Run("ack prints one JSON line", func(t *testing.T) {
+		socket := armTestSocketPath(t)
+		var mu sync.Mutex
+		var got ipc.BabysitStatusRequest
+		startControlReceiver(t, socket, nil, func(req ipc.BabysitStatusRequest) ipc.BabysitStatusResponse {
+			mu.Lock()
+			defer mu.Unlock()
+			got = req
+			return ipc.BabysitStatusResponse{OK: true, Status: &ipc.BabysitStatus{PR: 42, Repo: "owner/repo", Status: "needs-input", CIFixAttempts: 3, FixCap: 3}}
+		})
+
+		stdout, stderr, code := runBabysitCLI(t, armChildEnv(t, writeArmTestGhShim(t)), "babysit", "status", "42")
+
+		if code != 0 {
+			t.Fatalf("exit code = %d, want 0 (stderr %q)", code, stderr)
+		}
+		const want = `{"pr":42,"repo":"owner/repo","status":"needs-input","ciFixAttempts":3,"conflictFixAttempts":0,"fixCap":3,"supervisorLive":false}` + "\n"
+		if stdout != want {
+			t.Errorf("stdout = %q, want %q", stdout, want)
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if got.PR != "42" || got.Repo != "owner/repo" {
+			t.Errorf("handler saw %+v, want PR 42 owner/repo", got)
+		}
+	})
+
+	t.Run("nack prints the host command and exits 1", func(t *testing.T) {
+		socket := armTestSocketPath(t)
+		startControlReceiver(t, socket, nil, func(ipc.BabysitStatusRequest) ipc.BabysitStatusResponse {
+			return ipc.BabysitStatusResponse{OK: false, Reason: "no supervisor found for PR #42"}
+		})
+
+		stdout, stderr, code := runBabysitCLI(t, armChildEnv(t, writeArmTestGhShim(t)), "babysit", "status", "42")
+
+		if code != 1 {
+			t.Errorf("exit code = %d, want 1", code)
+		}
+		if !strings.Contains(stderr, "no supervisor found for PR #42") || !strings.Contains(stderr, "cenci babysit status 42") {
+			t.Errorf("stderr = %q, want the reason and the host command", stderr)
+		}
+		if stdout != "" {
+			t.Errorf("stdout = %q, want nothing", stdout)
+		}
+	})
+
+	t.Run("no reply prints the host command and exits 1", func(t *testing.T) {
+		socket := armTestSocketPath(t)
+		startSilentListener(t, socket)
+
+		_, stderr, code := runBabysitCLI(t, armChildEnv(t, writeArmTestGhShim(t)), "babysit", "status", "42")
+
+		if code != 1 {
+			t.Errorf("exit code = %d, want 1", code)
+		}
+		if !strings.Contains(stderr, "cenci babysit status 42") {
+			t.Errorf("stderr = %q, want the host command", stderr)
+		}
+	})
+}
+
+// hostChildEnv is armChildEnv without the sandbox gate: the host-mode child.
+func hostChildEnv(t *testing.T) []string {
+	t.Helper()
+	return append(armChildEnv(t, writeArmTestGhShim(t)), "CENCI_SANDBOX=")
+}
+
+// TestBabysitStatusHostMode covers P4 (state file to one JSON line, no path)
+// and P5 (no state exits 1) on the host.
+func TestBabysitStatusHostMode(t *testing.T) {
+	armTestSocketPath(t) // isolates CENCI_SOCKET_DIR and XDG_STATE_HOME
+	stateHome := os.Getenv("XDG_STATE_HOME")
+	sum := sha256.Sum256([]byte("owner/repo"))
+	stateDir := filepath.Join(stateHome, "cenci", "babysit")
+
+	t.Run("prints the state as one JSON line without a path", func(t *testing.T) {
+		if err := os.MkdirAll(stateDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(stateDir, hex.EncodeToString(sum[:6])+"-42.json")
+		body := `{"schemaVersion":2,"pr":"42","repo":"owner/repo","status":"needs-input","ciFixAttempts":2,"conflictFixAttempts":1}`
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		stdout, stderr, code := runBabysitCLI(t, hostChildEnv(t), "babysit", "status", "42")
+
+		if code != 0 {
+			t.Fatalf("exit code = %d, want 0 (stderr %q)", code, stderr)
+		}
+		const want = `{"pr":42,"repo":"owner/repo","status":"needs-input","ciFixAttempts":2,"conflictFixAttempts":1,"fixCap":3,"supervisorLive":false}` + "\n"
+		if stdout != want {
+			t.Errorf("stdout = %q, want %q", stdout, want)
+		}
+		if strings.Contains(stdout, stateHome) {
+			t.Errorf("stdout %q contains the state home path", stdout)
+		}
+	})
+
+	t.Run("no state exits 1", func(t *testing.T) {
+		_, stderr, code := runBabysitCLI(t, hostChildEnv(t), "babysit", "status", "43")
+
+		if code != 1 {
+			t.Errorf("exit code = %d, want 1", code)
+		}
+		if !strings.Contains(stderr, "no supervisor found for PR #43") {
+			t.Errorf("stderr = %q, want %q", stderr, "no supervisor found for PR #43")
+		}
+	})
+}
+
+func TestBabysitStatusUsageErrorsExitTwo(t *testing.T) {
+	armTestSocketPath(t)
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"no pr", []string{"babysit", "status"}},
+		{"extra argument", []string{"babysit", "status", "42", "extra"}},
+		{"non-numeric pr", []string{"babysit", "status", "abc"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, stderr, code := runBabysitCLI(t, hostChildEnv(t), tc.args...)
+			if code != 2 {
+				t.Errorf("exit code = %d, want 2 (stderr %q)", code, stderr)
+			}
+			if !strings.Contains(stderr, "cenci babysit status") {
+				t.Errorf("stderr = %q, want a usage line naming the command", stderr)
+			}
+		})
 	}
 }

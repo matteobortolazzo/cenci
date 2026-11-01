@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/ipc"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/sandbox"
 )
 
@@ -678,7 +679,7 @@ func tick(s *State) (bool, time.Duration, error) {
 	if !conflictHeld && len(failing) > 0 && pr.HeadRefOID != s.LastRepairedSHA {
 		if s.FixAttempts >= fixCap {
 			s.Status = "needs-input"
-			if err := launch(s, "babysit-attention", s.PR+" CI retry cap reached; decide whether to retry, pause, or stop"); err != nil {
+			if err := launch(s, "babysit-attention", s.PR+" CI retry cap reached"); err != nil {
 				// One-decision-per-tick (Decision 7, #854): without this, a
 				// failed workflow dispatch on an enabled automerge tick
 				// returned tick's error with no automerge decision recorded
@@ -742,7 +743,7 @@ func tick(s *State) (bool, time.Duration, error) {
 			fmt.Printf("PR #%s has merge conflicts at head commit %s; repair already dispatched and still active, no new window opened\n", s.PR, pr.HeadRefOID)
 		case s.ConflictFixAttempts >= fixCap:
 			if s.ConflictNotifiedSHA != pr.HeadRefOID {
-				if err := launch(s, "babysit-attention", s.PR+" merge repair retry cap reached; decide whether to retry, pause, or stop"); err != nil {
+				if err := launch(s, "babysit-attention", s.PR+" merge repair retry cap reached"); err != nil {
 					recordUpstreamReadFailure(s, reasonWorkflowLaunchFailed, err)
 					return false, 0, err
 				}
@@ -1091,15 +1092,56 @@ func save(path string, s State) error {
 	}
 	return os.Rename(tmp, path)
 }
+
+// Sentinels classifying why StopRepo/StatusRepo failed, so the daemon can map
+// each class to a fixed reason without ever relaying the error text (which
+// names paths and PIDs) to a container (#1390 P33). The error text itself is
+// the host CLI's message and stays byte-for-byte what `cenci babysit stop`
+// printed before the split (#1390 P34).
+var (
+	// ErrNoSupervisor: no state file exists for the (repo, PR).
+	ErrNoSupervisor = errors.New("no supervisor found")
+	// ErrSupervisorUnverified: the state records a PID that is not the
+	// recorded cenci babysit process, so nothing was signalled.
+	ErrSupervisorUnverified = errors.New("recorded supervisor process could not be verified")
+	// ErrStopFailed: signalling the verified supervisor or removing its state
+	// failed.
+	ErrStopFailed = errors.New("failed to stop the supervisor")
+	// ErrStateUnreadable: the state file exists but could not be read or
+	// decoded.
+	ErrStateUnreadable = errors.New("babysit state could not be read")
+)
+
+// classifiedError carries a host-facing message and the sentinel class (and,
+// when there is one, the underlying cause) that errors.Is can find.
+type classifiedError struct {
+	class error
+	cause error
+	msg   string
+}
+
+func (e *classifiedError) Error() string { return e.msg }
+
+func (e *classifiedError) Unwrap() []error {
+	if e.cause == nil {
+		return []error{e.class}
+	}
+	return []error{e.class, e.cause}
+}
+
+// Stop stops the supervisor for pr. On the host it prints the historical
+// "Stopped babysitting PR #N." line. Inside a sandbox the supervisor and its
+// state live on the host, so the request is forwarded to the host daemon
+// (#1390); explicit is ignored there, as the host uses its own state
+// directory.
 func Stop(pr, explicit string) error {
-	// The supervisor this would stop runs on the host, not inside this
-	// sandbox (#1094 AC5); `babysit stop` sends no disarm message, it only
-	// reports the host-supervision fact and exits non-zero. Checked before
-	// stateDir/repository so this never needs a state directory or a gh
-	// call.
+	cleanPR := strings.TrimPrefix(pr, "#")
 	if os.Getenv("CENCI_SANDBOX") == "1" {
-		cleanPR := strings.TrimPrefix(pr, "#")
-		return fmt.Errorf("the supervisor for PR #%s runs on the host, not inside this sandbox; run `cenci babysit stop %s` from a host tmux pane", cleanPR, cleanPR)
+		repo, err := repository()
+		if err != nil {
+			return err
+		}
+		return stopOnHost(repo, cleanPR)
 	}
 	dir, err := stateDir(explicit)
 	if err != nil {
@@ -1109,29 +1151,126 @@ func Stop(pr, explicit string) error {
 	if err != nil {
 		return err
 	}
-	cleanPR := strings.TrimPrefix(pr, "#")
-	path := statePath(dir, repo, cleanPR)
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return fmt.Errorf("no supervisor found for PR #%s", pr)
-	}
-	s := load(path)
-	if s.PID > 0 {
-		if !processOwned(s.PID, cleanPR) {
-			return fmt.Errorf("refusing to signal pid %d: it is not the recorded cenci babysit process", s.PID)
-		}
-		proc, e := os.FindProcess(s.PID)
-		if e != nil {
-			return e
-		}
-		if e = proc.Signal(syscall.SIGTERM); e != nil {
-			return fmt.Errorf("stop pid %d: %w", s.PID, e)
-		}
-	}
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+	if err := stopRepo(repo, pr, dir, false); err != nil {
 		return err
 	}
 	fmt.Printf("Stopped babysitting PR #%s.\n", cleanPR)
 	return nil
+}
+
+// StopRepo stops the supervisor recorded for (repo, pr) in the state
+// directory (explicit, or the default), skipping the gh repository lookup
+// Stop does: the host daemon calls it with a repo it already validated. It
+// signals the recorded PID only after processOwned verifies it, then removes
+// the state file. Unlike the host CLI's Stop, which keeps treating an
+// unreadable state as empty, it reads the state strictly: a container-driven
+// stop must never report success for a supervisor it could not identify.
+// Failures wrap ErrNoSupervisor, ErrStateUnreadable (state kept, message
+// path-free), ErrSupervisorUnverified or ErrStopFailed.
+func StopRepo(repo, pr, explicit string) error {
+	return stopRepo(repo, pr, explicit, true)
+}
+
+// stopRepo is StopRepo with the state read mode chosen by strict. The host
+// CLI passes false to keep its pre-#1390 handling of an unreadable state
+// byte for byte (#1390 P34).
+func stopRepo(repo, pr, explicit string, strict bool) error {
+	dir, err := stateDir(explicit)
+	if err != nil {
+		return err
+	}
+	cleanPR := strings.TrimPrefix(pr, "#")
+	path := statePath(dir, repo, cleanPR)
+	var s State
+	if strict {
+		var rerr error
+		s, rerr = readStateStrict(path)
+		if errors.Is(rerr, os.ErrNotExist) {
+			return &classifiedError{class: ErrNoSupervisor, msg: fmt.Sprintf("no supervisor found for PR #%s", pr)}
+		}
+		if rerr != nil {
+			return &classifiedError{class: ErrStateUnreadable, cause: rerr, msg: fmt.Sprintf("babysit state for PR #%s could not be read", cleanPR)}
+		}
+	} else {
+		if _, err := os.Stat(path); os.IsNotExist(err) {
+			return &classifiedError{class: ErrNoSupervisor, msg: fmt.Sprintf("no supervisor found for PR #%s", pr)}
+		}
+		s = load(path)
+	}
+	if s.PID > 0 {
+		if !processOwned(s.PID, cleanPR) {
+			return &classifiedError{class: ErrSupervisorUnverified, msg: fmt.Sprintf("refusing to signal pid %d: it is not the recorded cenci babysit process", s.PID)}
+		}
+		proc, e := os.FindProcess(s.PID)
+		if e != nil {
+			return &classifiedError{class: ErrStopFailed, cause: e, msg: e.Error()}
+		}
+		if e = proc.Signal(syscall.SIGTERM); e != nil {
+			return &classifiedError{class: ErrStopFailed, cause: e, msg: fmt.Sprintf("stop pid %d: %v", s.PID, e)}
+		}
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return &classifiedError{class: ErrStopFailed, cause: err, msg: err.Error()}
+	}
+	return nil
+}
+
+// Status prints the supervisor summary for pr as one JSON object (#1390):
+// from the host state file, or, inside a sandbox, from the host daemon over
+// the event socket (explicit is ignored there).
+func Status(pr, explicit string) error {
+	cleanPR := strings.TrimPrefix(pr, "#")
+	repo, err := repository()
+	if err != nil {
+		return err
+	}
+	if os.Getenv("CENCI_SANDBOX") == "1" {
+		return statusOnHost(repo, cleanPR)
+	}
+	st, err := StatusRepo(repo, cleanPR, explicit)
+	if err != nil {
+		return err
+	}
+	return printStatus(st)
+}
+
+// StatusRepo reads the supervisor summary for (repo, pr) from the state
+// directory (explicit, or the default). Its errors wrap ErrNoSupervisor or
+// ErrStateUnreadable and, unlike readStateStrict's, never name the state
+// path. SupervisorLive requires a recorded PID that processOwned verifies:
+// supervisorLive's broader rule (which also counts needs-input and arming as
+// live) would misreport a paused supervisor as running (#1390 P24).
+func StatusRepo(repo, pr, explicit string) (ipc.BabysitStatus, error) {
+	cleanPR := strings.TrimPrefix(pr, "#")
+	n, err := strconv.Atoi(cleanPR)
+	if err != nil || n <= 0 {
+		return ipc.BabysitStatus{}, errors.New("PR must be a positive integer")
+	}
+	dir, err := stateDir(explicit)
+	if err != nil {
+		return ipc.BabysitStatus{}, err
+	}
+	s, err := readStateStrict(statePath(dir, repo, cleanPR))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return ipc.BabysitStatus{}, &classifiedError{class: ErrNoSupervisor, cause: err, msg: fmt.Sprintf("no supervisor found for PR #%s", cleanPR)}
+		}
+		return ipc.BabysitStatus{}, &classifiedError{class: ErrStateUnreadable, cause: err, msg: fmt.Sprintf("babysit state for PR #%s could not be read", cleanPR)}
+	}
+	return ipc.BabysitStatus{
+		PR:                  n,
+		Repo:                repo,
+		Status:              s.Status,
+		CIFixAttempts:       s.FixAttempts,
+		ConflictFixAttempts: s.ConflictFixAttempts,
+		FixCap:              fixCap,
+		SupervisorLive:      s.PID > 0 && processOwned(s.PID, cleanPR),
+	}, nil
+}
+
+// printStatus writes st as exactly one JSON line on stdout.
+func printStatus(st ipc.BabysitStatus) error {
+	return json.NewEncoder(os.Stdout).Encode(st)
 }
 
 // processOwned is a test seam over defaultProcessOwned, mirroring the

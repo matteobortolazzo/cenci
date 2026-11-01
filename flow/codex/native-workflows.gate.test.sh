@@ -242,7 +242,8 @@ chmod +x "${STUB_DIR}/codex"
 #   restart-dup    a re-launch commits and pushes again
 #   attn-retry     attention offers "retry with a fresh budget"
 #   attn-missing   attention offers only one of the two options
-#   attn-stop      attention runs `cenci babysit stop`
+#   attn-stop      attention runs `cenci babysit stop` (the good mode reads the
+#                  attempt count through `cenci babysit status`, which is no stop call)
 #   attn-ghwrite   attention writes to GitHub
 #   attn-push      attention pushes to the remote
 #   ci-gatetamper  edits check.sh (the gate definition) in the fix commit; the
@@ -391,7 +392,7 @@ emulate_ci() {
 }
 
 emulate_attention() {
-    local pr view head checks name state attempts opts text
+    local pr view head checks name state count attempts opts text
     pr="$(sed -n 's/.*babysit-attention \([0-9][0-9]*\).*/\1/p' <<< "${prompt}" | sed -n 1p)"
     if [[ "${mode}" == attn-noread ]]; then
         msg "$(printf 'PR #%s, head 1111111, failing checks: native-gate. CI retry cap reached (3 attempts).\nChoose one:\n1. leave paused for manual repair\n2. stop babysitting' "${pr}")"
@@ -401,11 +402,12 @@ emulate_attention() {
     head="$(jq -r .headRefOid <<< "${view}")"
     checks="$(gh pr checks "${pr}" --json bucket,name,state)" || exit 1
     name="$(jq -r '[.[] | select(.bucket == "fail") | .name] | join(", ")' <<< "${checks}")"
+    # The attempt count comes from `cenci babysit status <pr>` (the runner's stub),
+    # with the fallback phrase when the command fails or its output is not JSON.
     attempts="exact count not readable from here"
-    for state in "${XDG_STATE_HOME:-/nonexistent}"/cenci/babysit/*-"${pr}".json; do
-        [[ -f "${state}" ]] || continue
-        attempts="$(jq -r '.ciFixAttempts' "${state}") attempts"
-    done
+    if state="$(cenci babysit status "${pr}")" && count="$(jq -er '.ciFixAttempts' <<< "${state}")"; then
+        attempts="${count} attempts"
+    fi
     opts=$'1. leave paused for manual repair\n2. stop babysitting'
     case "${mode}" in
         attn-missing) opts=$'1. leave paused for manual repair' ;;

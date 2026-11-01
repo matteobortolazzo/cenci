@@ -1821,7 +1821,7 @@ stdout/stderr are written to a `0600` append-mode log file under the state
 directory (one per repo/PR, printed on arming), so a failed repair launch is
 readable there instead of being silently discarded.
 
-Running `cenci babysit`/`cenci babysit stop` from inside a `cenci sandbox`-launched
+Running `cenci babysit` from inside a `cenci sandbox`-launched
 container (`CENCI_SANDBOX=1`) never supervises locally — the container has no host
 tmux to arm against. Instead it forwards the request to the host daemon over the
 event socket and reports one of three outcomes: **armed**, **not armed** (the host
@@ -1829,6 +1829,41 @@ rejected the request; the reason is relayed verbatim), or **arm status unknown**
 (the host didn't respond within 5s — verify or repair by running
 `cenci babysit <pr> --agent <agent>` from a host tmux pane, which safely no-ops if a
 supervisor is already running).
+
+`cenci babysit stop <pr>` and `cenci babysit status <pr>` forward the same way from
+inside a sandbox, so an agent there can stop a supervisor and read its attempt
+counts without access to the host state directory. A forwarded stop reports one of
+three outcomes:
+
+- **stopped** — prints `Stopped babysitting PR #<pr> on the host.` and exits 0; the
+  host state file is gone.
+- **not stopped** — the host rejected the request, or no daemon is reachable on the
+  host event socket. Exit 1 with `not stopped: <reason>` (the reason is relayed
+  verbatim, e.g. `no supervisor found for PR #<pr>`, or the recorded supervisor
+  process could not be verified, so nothing was signalled) and the host command to
+  run, `cenci babysit stop <pr>`.
+- **stop status unknown** — the daemon sent no reply within 5s, or closed the
+  connection without one (which is what a host daemon that predates the request
+  does). Exit 1, with the same host command; the supervisor may or may not have been
+  stopped, and re-running the stop is safe.
+
+`cenci babysit status <pr>` prints exactly one JSON object and exits 0:
+
+```json
+{"pr":42,"repo":"owner/repo","status":"needs-input","ciFixAttempts":3,"conflictFixAttempts":0,"fixCap":3,"supervisorLive":false}
+```
+
+`status` is the persisted supervisor status; `ciFixAttempts` and
+`conflictFixAttempts` count CI-repair and merge-repair launches against `fixCap`.
+`supervisorLive` is `true` only when the state records a PID that is verified to be
+this PR's babysit process (by its command line on Linux, by liveness elsewhere), so a
+supervisor paused as `needs-input` (no process) reports `false`. The output contains no filesystem path. On the host it is read from
+the state file; in a sandbox it comes from the host daemon. With no state for the PR
+it exits 1 with `no supervisor found for PR #<pr>`; in a sandbox a rejection or a
+missing reply exits 1 and prints the host command `cenci babysit status <pr>`. A
+malformed invocation (no PR, a PR that is not a positive integer, extra arguments)
+exits 2. `--state-dir` is honored on the host and accepted but ignored in a sandbox,
+where the host uses its own state directory.
 
 On a forwarded arm request, the host daemon resolves the target checkout itself by
 inspecting running sandbox containers' `/workspace` bind sources under both docker
@@ -1844,6 +1879,21 @@ past its time budget, are relayed to the container as their own distinguishable
 reason, the same way an ordinary "not armed" reason is. The host also bounds the
 rate of forwarded arm requests — a burst past that bound nacks with its own
 distinguishable reason and is safe to retry once the rate has settled.
+
+Forwarded stop and status requests are validated like arm requests (a positive
+integer PR, an `owner/repo`-shaped repo) and then need the repo to match a running
+sandbox, but they differ from arm in two ways. A repo matching two or more running
+sandboxes is **accepted**, not nacked, because the host state file depends only on
+the repo and the PR, not on which checkout is meant; zero matches and a failed
+container inspect still nack. And they share their own rate bound (a burst of 5, one
+more request every 30s), separate from the arm one. The match is against any running
+sandbox, not specifically the caller's, so a container can stop or inspect the
+supervisor of any repo that has a running sandbox — the same exposure forwarded arm
+has. Before signalling, the host re-checks the recorded PID (on Linux by inspecting the
+process command line for this PR's babysit process; elsewhere it is a liveness check
+only), and every reply carries only a fixed reason: never a host path, a PID or
+command output. A state file that cannot be read or decoded is never treated as an
+empty state: the stop is refused with a fixed reason and the file is kept.
 
 - The fleet-wide kill switch `automerge.enabled` is `true` in
   `~/.config/cenci/config.json` (default `false` — off everywhere until set).

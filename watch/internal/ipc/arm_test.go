@@ -18,6 +18,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -270,5 +271,334 @@ func TestSendArmRequest_DialFailureClassifiesAsUndelivered(t *testing.T) {
 	_, err := SendArmRequest(path, validArmRequest())
 	if !errors.Is(err, ErrArmUndelivered) {
 		t.Fatalf("SendArmRequest err = %v, want errors.Is(err, ErrArmUndelivered)", err)
+	}
+}
+
+// -- #1390: babysit-stop / babysit-status control requests -------------------
+//
+// The two kinds reuse the babysit-arm envelope: one request line, exactly one
+// reply line, then the daemon closes. Each case below runs for both kinds so a
+// divergence between the stop and status paths cannot hide.
+
+// controlCase adapts one control kind to a common shape for the table tests.
+type controlCase struct {
+	name string
+	kind string
+	// install registers a handler counting its invocations; the handler acks.
+	install func(r *EventReceiver, calls *atomic.Int32)
+	// send issues the typed client call and returns ok/reason/err.
+	send func(path string) (ok bool, reason string, err error)
+}
+
+func controlCases() []controlCase {
+	return []controlCase{
+		{
+			name: "stop",
+			kind: "babysit-stop",
+			install: func(r *EventReceiver, calls *atomic.Int32) {
+				r.SetBabysitStopHandler(func(BabysitStopRequest) BabysitStopResponse {
+					calls.Add(1)
+					return BabysitStopResponse{OK: true}
+				})
+			},
+			send: func(path string) (bool, string, error) {
+				resp, err := SendBabysitStop(path, BabysitStopRequest{PR: "42", Repo: "o/r"})
+				return resp.OK, resp.Reason, err
+			},
+		},
+		{
+			name: "status",
+			kind: "babysit-status",
+			install: func(r *EventReceiver, calls *atomic.Int32) {
+				r.SetBabysitStatusHandler(func(BabysitStatusRequest) BabysitStatusResponse {
+					calls.Add(1)
+					return BabysitStatusResponse{OK: true, Status: &BabysitStatus{PR: 42, Repo: "o/r"}}
+				})
+			},
+			send: func(path string) (bool, string, error) {
+				resp, err := SendBabysitStatus(path, BabysitStatusRequest{PR: "42", Repo: "o/r"})
+				return resp.OK, resp.Reason, err
+			},
+		},
+	}
+}
+
+func startControlReceiver(t *testing.T) (string, *EventReceiver) {
+	t.Helper()
+	path := tempSocket(t)
+	recv, err := NewEventReceiver(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = recv.Close() })
+	return path, recv
+}
+
+func acceptControl(t *testing.T, recv *EventReceiver) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go recv.Accept(ctx)
+	time.Sleep(10 * time.Millisecond)
+}
+
+func TestEventReceiver_ControlRequestRoutesToHandlerNotEvents(t *testing.T) {
+	for _, tc := range controlCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			path, recv := startControlReceiver(t)
+			var calls atomic.Int32
+			tc.install(recv, &calls)
+			acceptControl(t, recv)
+
+			ok, _, err := tc.send(path)
+			if err != nil {
+				t.Fatalf("send: %v", err)
+			}
+			if !ok {
+				t.Fatal("ok = false, want the handler's ack")
+			}
+			if got := calls.Load(); got != 1 {
+				t.Fatalf("handler invocations = %d, want exactly 1", got)
+			}
+			select {
+			case evt := <-recv.Events():
+				t.Fatalf("a %s request must never reach Events(), got %+v", tc.kind, evt)
+			case <-time.After(150 * time.Millisecond):
+			}
+		})
+	}
+}
+
+func TestEventReceiver_StatusResponseCarriesTheStatusObject(t *testing.T) {
+	path, recv := startControlReceiver(t)
+	want := BabysitStatus{PR: 42, Repo: "o/r", Status: "needs-input", CIFixAttempts: 2, ConflictFixAttempts: 1, FixCap: 3, SupervisorLive: false}
+	var got BabysitStatusRequest
+	recv.SetBabysitStatusHandler(func(req BabysitStatusRequest) BabysitStatusResponse {
+		got = req
+		return BabysitStatusResponse{OK: true, Status: &want}
+	})
+	acceptControl(t, recv)
+
+	resp, err := SendBabysitStatus(path, BabysitStatusRequest{PR: "42", Repo: "o/r"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Status == nil || *resp.Status != want {
+		t.Fatalf("status = %+v, want %+v", resp.Status, want)
+	}
+	if got.PR != "42" || got.Repo != "o/r" {
+		t.Fatalf("handler saw %+v, want pr=42 repo=o/r", got)
+	}
+}
+
+func TestEventReceiver_ControlResponseExactlyOneLineThenConnCloses(t *testing.T) {
+	for _, tc := range controlCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			path, recv := startControlReceiver(t)
+			var calls atomic.Int32
+			tc.install(recv, &calls)
+			acceptControl(t, recv)
+
+			conn, err := net.Dial("unix", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = conn.Close() }()
+			line := `{"kind":"` + tc.kind + `","pr":"42","repo":"o/r"}` + "\n"
+			if _, err := conn.Write([]byte(line)); err != nil {
+				t.Fatal(err)
+			}
+			first, err := bufio.NewReader(conn).ReadString('\n')
+			if err != nil {
+				t.Fatalf("read response line: %v", err)
+			}
+			var resp struct {
+				OK bool `json:"ok"`
+			}
+			if err := json.Unmarshal([]byte(strings.TrimSpace(first)), &resp); err != nil || !resp.OK {
+				t.Fatalf("response line %q: ok=%v err=%v, want an ack", first, resp.OK, err)
+			}
+			_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+			if n, err := conn.Read(make([]byte, 16)); err != io.EOF {
+				t.Fatalf("read after the response: n=%d err=%v, want io.EOF", n, err)
+			}
+		})
+	}
+}
+
+func TestEventReceiver_NilControlHandlerNacks(t *testing.T) {
+	for _, tc := range controlCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			path, recv := startControlReceiver(t)
+			acceptControl(t, recv)
+
+			ok, reason, err := tc.send(path)
+			if err != nil {
+				t.Fatalf("send: %v", err)
+			}
+			if ok {
+				t.Fatal("ok = true, want a nack when no handler was installed (fail closed)")
+			}
+			if reason == "" {
+				t.Error("reason is empty, want a stable non-empty nack reason")
+			}
+			select {
+			case evt := <-recv.Events():
+				t.Fatalf("a %s request must never reach Events(), got %+v", tc.kind, evt)
+			case <-time.After(100 * time.Millisecond):
+			}
+		})
+	}
+}
+
+func TestEventReceiver_MalformedControlBodyNacksWithoutCallingHandler(t *testing.T) {
+	for _, tc := range controlCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			path, recv := startControlReceiver(t)
+			var calls atomic.Int32
+			tc.install(recv, &calls)
+			acceptControl(t, recv)
+
+			conn, err := net.Dial("unix", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = conn.Close() }()
+			// "pr" is a number where the request field is a string.
+			line := `{"kind":"` + tc.kind + `","pr":12345,"repo":"o/r"}` + "\n"
+			if _, err := conn.Write([]byte(line)); err != nil {
+				t.Fatal(err)
+			}
+			first, err := bufio.NewReader(conn).ReadString('\n')
+			if err != nil {
+				t.Fatalf("read response line: %v", err)
+			}
+			var resp struct {
+				OK     bool   `json:"ok"`
+				Reason string `json:"reason"`
+			}
+			if err := json.Unmarshal([]byte(strings.TrimSpace(first)), &resp); err != nil {
+				t.Fatalf("unmarshal %q: %v", first, err)
+			}
+			if resp.OK || resp.Reason == "" {
+				t.Errorf("response = %+v, want a nack with a reason", resp)
+			}
+			if got := calls.Load(); got != 0 {
+				t.Errorf("handler invoked %d times for a malformed body, want 0", got)
+			}
+		})
+	}
+}
+
+func TestEventReceiver_UnknownKindStillRoutesToEvents(t *testing.T) {
+	path, recv := startControlReceiver(t)
+	acceptControl(t, recv)
+
+	line := `{"kind":"babysit-restart","event_type":"Stop","session_id":"s1","tmux_pane":"%1"}` + "\n"
+	conn, err := net.Dial("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.Write([]byte(line)); err != nil {
+		t.Fatal(err)
+	}
+	_ = conn.Close()
+
+	select {
+	case evt := <-recv.Events():
+		if evt.EventType != "Stop" || evt.SessionID != "s1" {
+			t.Fatalf("event = %+v, want the Stop event for s1", evt)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("an unknown kind must still route to Events()")
+	}
+}
+
+func TestSendControl_DialFailureClassifiesAsUndelivered(t *testing.T) {
+	path := tempSocket(t) // nothing is listening
+	for _, tc := range controlCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, _, err := tc.send(path); !errors.Is(err, ErrArmUndelivered) {
+				t.Fatalf("err = %v, want errors.Is(err, ErrArmUndelivered)", err)
+			}
+		})
+	}
+}
+
+// TestSendControl_HeldOpenConnectionClassifiesAsNoResponseAtTheDeadline pins
+// the P25 deadline half: a daemon that reads the request but neither replies
+// nor closes is reported as ErrArmNoResponse once controlResponseDeadline
+// passes. The deadline is shortened through its package var so the test does
+// not wait the production 5s.
+func TestSendControl_HeldOpenConnectionClassifiesAsNoResponseAtTheDeadline(t *testing.T) {
+	original := controlResponseDeadline
+	controlResponseDeadline = 150 * time.Millisecond
+	t.Cleanup(func() { controlResponseDeadline = original })
+
+	for _, tc := range controlCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			path := tempSocket(t)
+			ln, err := net.Listen("unix", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = ln.Close() })
+			release := make(chan struct{})
+			t.Cleanup(func() { close(release) })
+			go func() {
+				conn, err := ln.Accept()
+				if err != nil {
+					return
+				}
+				defer func() { _ = conn.Close() }()
+				_, _ = bufio.NewReader(conn).ReadString('\n')
+				<-release // hold the connection open, never reply
+			}()
+
+			start := time.Now()
+			_, _, err = tc.send(path)
+			if !errors.Is(err, ErrArmNoResponse) {
+				t.Fatalf("err = %v, want errors.Is(err, ErrArmNoResponse)", err)
+			}
+			if elapsed := time.Since(start); elapsed > 2*time.Second {
+				t.Errorf("took %v, want the shortened deadline to bound the wait", elapsed)
+			}
+		})
+	}
+}
+
+// TestControlResponseDeadline_ProductionValueIsFiveSeconds pins the P25
+// deadline itself: the shortening seam above must not hide a changed
+// production value, and stop/status wait exactly as long as arm does.
+func TestControlResponseDeadline_ProductionValueIsFiveSeconds(t *testing.T) {
+	if controlResponseDeadline != 5*time.Second {
+		t.Errorf("controlResponseDeadline = %v, want 5s", controlResponseDeadline)
+	}
+	if controlResponseDeadline != armResponseDeadline {
+		t.Errorf("controlResponseDeadline = %v, want it equal to armResponseDeadline %v", controlResponseDeadline, armResponseDeadline)
+	}
+}
+
+func TestSendControl_EOFWithoutReplyClassifiesAsNoResponse(t *testing.T) {
+	for _, tc := range controlCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			path := tempSocket(t)
+			ln, err := net.Listen("unix", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = ln.Close() })
+			go func() {
+				conn, err := ln.Accept()
+				if err != nil {
+					return
+				}
+				_, _ = bufio.NewReader(conn).ReadString('\n')
+				_ = conn.Close()
+			}()
+			if _, _, err := tc.send(path); !errors.Is(err, ErrArmNoResponse) {
+				t.Fatalf("err = %v, want errors.Is(err, ErrArmNoResponse)", err)
+			}
+		})
 	}
 }

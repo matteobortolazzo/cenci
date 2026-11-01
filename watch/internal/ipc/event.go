@@ -65,3 +65,61 @@ type ArmResponse struct {
 	OK     bool   `json:"ok"`
 	Reason string `json:"reason,omitempty"`
 }
+
+// babysitStopKind and babysitStatusKind are the "kind" discriminator values
+// for the in-container `cenci babysit stop` / `cenci babysit status` requests
+// to the host daemon (#1390). They reuse the babysit-arm envelope: one request
+// line, exactly one reply line, then the daemon closes. An absent/unknown
+// "kind" still routes to Events() unchanged -- see event_receiver.go.
+const (
+	babysitStopKind   = "babysit-stop"
+	babysitStatusKind = "babysit-status"
+)
+
+// BabysitStopRequest asks the host daemon to stop the supervisor for PR in
+// Repo (#1390). PR and Repo cross the container->host trust boundary and are
+// validated daemon-side before any host state is read or any process is
+// signalled.
+type BabysitStopRequest struct {
+	PR   string `json:"pr"`
+	Repo string `json:"repo"`
+}
+
+// BabysitStopResponse is the daemon's single ack-or-nack reply to a
+// BabysitStopRequest. Reason is only meaningful when OK is false; it carries
+// no host path, PID or captured command output, and the client relays it
+// verbatim.
+type BabysitStopResponse struct {
+	OK     bool   `json:"ok"`
+	Reason string `json:"reason,omitempty"`
+}
+
+// BabysitStatusRequest asks the host daemon for the supervisor state of PR in
+// Repo (#1390); the same trust-boundary rules as BabysitStopRequest apply.
+type BabysitStatusRequest struct {
+	PR   string `json:"pr"`
+	Repo string `json:"repo"`
+}
+
+// BabysitStatus is the machine-readable supervisor summary `cenci babysit
+// status <pr>` prints as one JSON object (#1390). It deliberately carries no
+// filesystem path. SupervisorLive is true only for a recorded, verified
+// supervisor process (PID > 0 and owned) -- a needs-input or arming state
+// with no process is not live.
+type BabysitStatus struct {
+	PR                  int    `json:"pr"`
+	Repo                string `json:"repo"`
+	Status              string `json:"status"`
+	CIFixAttempts       int    `json:"ciFixAttempts"`
+	ConflictFixAttempts int    `json:"conflictFixAttempts"`
+	FixCap              int    `json:"fixCap"`
+	SupervisorLive      bool   `json:"supervisorLive"`
+}
+
+// BabysitStatusResponse is the daemon's single reply to a
+// BabysitStatusRequest: Status is set on an ack and nil on a nack.
+type BabysitStatusResponse struct {
+	OK     bool           `json:"ok"`
+	Reason string         `json:"reason,omitempty"`
+	Status *BabysitStatus `json:"status,omitempty"`
+}

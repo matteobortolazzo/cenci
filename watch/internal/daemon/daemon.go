@@ -146,6 +146,22 @@ type Daemon struct {
 	// hostArmSpawn); it must never touch d.sessions/d.pending/d.attention or
 	// any d.loop-owned field.
 	armLimiter armTokenBucket
+
+	// ctlLimiter is the babysit-stop / babysit-status token bucket (#1390),
+	// separate from armLimiter so a looping container cannot exhaust one
+	// through the other. Same tunables (armBucketBurst, armBucketRefill) and
+	// the same rules: mutex-guarded, reached only from the connection
+	// goroutine, never touching a d.loop-owned field.
+	ctlLimiter armTokenBucket
+
+	// babysitStop and babysitStatus are the injectable seams a validated,
+	// host-matched stop/status request delegates to (#1390). They run on the
+	// connection goroutine. newDaemon leaves them inert (they report
+	// "babysit control unavailable"); installHostSeams wires the real
+	// babysit.StopRepo/StatusRepo, which read and remove host state and signal
+	// host processes.
+	babysitStop   func(repo string, pr int) error
+	babysitStatus func(repo string, pr int) (ipc.BabysitStatus, error)
 }
 
 // newDaemon creates a Daemon with the given dependencies.
@@ -164,7 +180,9 @@ func newDaemon(cfg config.Config, fe frontend.Frontend, events <-chan ipc.HookEv
 		closeGuard: func(ticket string) (bool, string) {
 			return babysit.BlocksClose(ticket, "", "")
 		},
-		armSpawn: defaultArmSpawn,
+		armSpawn:      defaultArmSpawn,
+		babysitStop:   defaultBabysitStop,
+		babysitStatus: defaultBabysitStatus,
 		// cleanupReader stays nil here: installHostSeams installs the real one.
 		cleanupEnabled: ticketstate.CleanupEnabled,
 		cleanupResults: make(chan windowCleanupResult, 1),
@@ -178,13 +196,15 @@ func newDaemon(cfg config.Config, fe frontend.Frontend, events <-chan ipc.HookEv
 
 // installHostSeams installs the daemon's real host-side seams, the ones that
 // shell out or signal processes: the babysit-arm resolver/spawn (#1095), its
-// capability predicate (#1215), and the window-process killer (#1253, its
-// diagnostics going to the daemon log), and the window-cleanup pass's ticket
-// reader and resolver factory (#1251), and the worktree-cleanup pass's outcome
-// reader, resolver factory, tmux pane lister, sandbox gate and registry and
-// user-config paths (#1267). newDaemon leaves them inert -- the arm seam nacks,
-// procKiller, cleanupReader and worktreeReader are nil -- so newDaemon-based tests
-// never shell out or signal real processes. Run is the only production caller,
+// capability predicate (#1215), the babysit-stop / babysit-status seams
+// (#1390, TestInstallHostSeams_InstallsTheRealBabysitControlSeams pins them),
+// and the window-process killer (#1253, its diagnostics going to the daemon
+// log), and the window-cleanup pass's ticket reader and resolver factory
+// (#1251), and the worktree-cleanup pass's outcome reader, resolver factory,
+// tmux pane lister, sandbox gate and registry and user-config paths (#1267).
+// newDaemon leaves them inert -- the arm and stop/status seams nack,
+// procKiller, cleanupReader and worktreeReader are nil -- so newDaemon-based
+// tests never shell out or signal real processes. Run is the only production caller,
 // and TestInstallHostSeams_InstallsTheRealProcessKiller,
 // TestInstallHostSeams_InstallsTheRealTicketReader and
 // TestInstallHostSeams_InstallsTheRealWorktreeCleanupSeams pin that it wires the
@@ -192,6 +212,8 @@ func newDaemon(cfg config.Config, fe frontend.Frontend, events <-chan ipc.HookEv
 func (d *Daemon) installHostSeams(armCapable func(agent, workflow string) bool) {
 	d.armSpawn = d.hostArmSpawn
 	d.armCapable = armCapable
+	d.babysitStop = hostBabysitStop
+	d.babysitStatus = hostBabysitStatus
 	d.procKiller = windowproc.New(log.Writer())
 	d.cleanupReader = &ticketstate.Reader{}
 	d.newCleanupResolver = func() repoResolver { return &ticketstate.Resolver{} }
@@ -254,12 +276,14 @@ func Run(ctx context.Context, cfg config.Config, fe frontend.Frontend, attention
 	// keeps its inert defaults so newDaemon-based tests never shell out or
 	// signal real processes, and only a live Run installs the real ones.
 	d.installHostSeams(armCapable)
-	// Install the arm handler before Accept starts serving connections
-	// (#1094): nothing between NewEventReceiver and Accept depends on
-	// accepting, and a nil handler still nacks, but installing it first
-	// keeps the window where an arm request could race an unset handler at
-	// zero rather than merely small.
+	// Install the arm and babysit stop/status handlers before Accept starts
+	// serving connections (#1094, #1390): nothing between NewEventReceiver
+	// and Accept depends on accepting, and a nil handler still nacks, but
+	// installing them first keeps the window where a request could race an
+	// unset handler at zero rather than merely small.
 	recv.SetArmHandler(d.handleArmRequest)
+	recv.SetBabysitStopHandler(d.handleBabysitStop)
+	recv.SetBabysitStatusHandler(d.handleBabysitStatus)
 	go recv.Accept(ctx)
 
 	if cfg.SocketPath != "" {

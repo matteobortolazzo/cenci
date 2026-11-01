@@ -67,40 +67,93 @@ var ErrArmNoResponse = errors.New("arm request sent but no response received")
 // ErrArmNoResponse (every other failure mode), per the ticket's auto-adopted
 // answer #8.
 func SendArmRequest(socketPath string, req ArmRequest) (ArmResponse, error) {
+	var resp ArmResponse
+	if err := roundTrip(socketPath, armResponseDeadline, armRequestWire{Kind: armRequestKind, ArmRequest: req}, &resp); err != nil {
+		return ArmResponse{}, err
+	}
+	return resp, nil
+}
+
+// controlResponseDeadline bounds how long SendBabysitStop/SendBabysitStatus
+// wait for the daemon's reply line (#1390). It matches armResponseDeadline in
+// production; it is a var only so a test can shorten it to exercise the
+// held-open, never-replying connection without a 5s wait.
+var controlResponseDeadline = armResponseDeadline
+
+// babysitStopWire and babysitStatusWire are the on-wire envelopes for the
+// control requests: the "kind" discriminator plus the promoted request fields.
+type babysitStopWire struct {
+	Kind string `json:"kind"`
+	BabysitStopRequest
+}
+
+type babysitStatusWire struct {
+	Kind string `json:"kind"`
+	BabysitStatusRequest
+}
+
+// SendBabysitStop sends a babysit-stop request and reads the daemon's single
+// ack-or-nack line (#1390). Failures classify exactly like SendArmRequest's:
+// ErrArmUndelivered for a dial failure (nothing was written, so nothing can
+// have been stopped), ErrArmNoResponse for every other failure -- including a
+// clean EOF, which is what a daemon that predates the kind produces, since it
+// routes the line down its hook-event path and closes.
+func SendBabysitStop(socketPath string, req BabysitStopRequest) (BabysitStopResponse, error) {
+	var resp BabysitStopResponse
+	if err := roundTrip(socketPath, controlResponseDeadline, babysitStopWire{Kind: babysitStopKind, BabysitStopRequest: req}, &resp); err != nil {
+		return BabysitStopResponse{}, err
+	}
+	return resp, nil
+}
+
+// SendBabysitStatus sends a babysit-status request and reads the daemon's
+// single reply line (#1390); errors classify as in SendBabysitStop.
+func SendBabysitStatus(socketPath string, req BabysitStatusRequest) (BabysitStatusResponse, error) {
+	var resp BabysitStatusResponse
+	if err := roundTrip(socketPath, controlResponseDeadline, babysitStatusWire{Kind: babysitStatusKind, BabysitStatusRequest: req}, &resp); err != nil {
+		return BabysitStatusResponse{}, err
+	}
+	return resp, nil
+}
+
+// roundTrip is the shared request/response transport behind SendArmRequest
+// and the control senders: dial, write wire as one JSON line, read one reply
+// line under deadline, decode it into resp. A dial or marshal failure is
+// ErrArmUndelivered; every later failure is ErrArmNoResponse.
+func roundTrip(socketPath string, deadline time.Duration, wire, resp any) error {
 	conn, err := net.Dial("unix", socketPath)
 	if err != nil {
-		return ArmResponse{}, fmt.Errorf("%w: %v", ErrArmUndelivered, err)
+		return fmt.Errorf("%w: %v", ErrArmUndelivered, err)
 	}
 	defer func() { _ = conn.Close() }()
 
-	data, err := json.Marshal(armRequestWire{Kind: armRequestKind, ArmRequest: req})
+	data, err := json.Marshal(wire)
 	if err != nil {
 		// A marshal failure happens strictly before any write to the wire, so
 		// per ErrArmUndelivered's documented contract ("the request itself
 		// was never written to the wire") this classifies as undelivered, not
-		// as ErrArmNoResponse. Currently unreachable -- no ArmRequest field
-		// can fail to marshal today -- but classified correctly for when one
+		// as ErrArmNoResponse. Currently unreachable -- no request field can
+		// fail to marshal today -- but classified correctly for when one
 		// might.
-		return ArmResponse{}, fmt.Errorf("%w: marshal request: %v", ErrArmUndelivered, err)
+		return fmt.Errorf("%w: marshal request: %v", ErrArmUndelivered, err)
 	}
 	data = append(data, '\n')
 	if _, err := conn.Write(data); err != nil {
-		return ArmResponse{}, fmt.Errorf("%w: write request: %v", ErrArmNoResponse, err)
+		return fmt.Errorf("%w: write request: %v", ErrArmNoResponse, err)
 	}
 
-	if err := conn.SetReadDeadline(time.Now().Add(armResponseDeadline)); err != nil {
-		return ArmResponse{}, fmt.Errorf("%w: set read deadline: %v", ErrArmNoResponse, err)
+	if err := conn.SetReadDeadline(time.Now().Add(deadline)); err != nil {
+		return fmt.Errorf("%w: set read deadline: %v", ErrArmNoResponse, err)
 	}
 	line, err := bufio.NewReader(conn).ReadString('\n')
 	if err != nil {
-		return ArmResponse{}, fmt.Errorf("%w: read response: %v", ErrArmNoResponse, err)
+		return fmt.Errorf("%w: read response: %v", ErrArmNoResponse, err)
 	}
 
-	var resp ArmResponse
-	if err := json.Unmarshal([]byte(strings.TrimSpace(line)), &resp); err != nil {
-		return ArmResponse{}, fmt.Errorf("%w: unmarshal response: %v", ErrArmNoResponse, err)
+	if err := json.Unmarshal([]byte(strings.TrimSpace(line)), resp); err != nil {
+		return fmt.Errorf("%w: unmarshal response: %v", ErrArmNoResponse, err)
 	}
-	return resp, nil
+	return nil
 }
 
 func sendLine(socketPath string, v any) error {

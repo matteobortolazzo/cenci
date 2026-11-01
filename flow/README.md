@@ -485,7 +485,9 @@ pacing back to the base interval.
   supervisor in the container, so the state dir above is always the host's own — never the
   sandbox's.
 - **CLI control.** Use `cenci babysit <pr> --agent <claude|codex> --interval 15m`, add
-  `--once` for one foreground tick, or run `cenci babysit stop <pr>` to stop it.
+  `--once` for one foreground tick, or run `cenci babysit stop <pr>` to stop it. Inside a
+  sandbox `stop` is forwarded to the host daemon; `cenci babysit status <pr>` prints the
+  supervisor's state (status, repair attempt counts, whether it is live) as one JSON line.
 - **Human gates preserved.** The `address-review` approval, the CI-escalation question, and
   the never-force-push rule all hold — babysit automates the checking and the safe fixes,
   not the decisions.

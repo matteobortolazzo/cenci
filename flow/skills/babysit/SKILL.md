@@ -75,12 +75,20 @@ and reports one of three outcomes: **armed** (the supervisor now runs on the hos
 armed** (the host daemon rejected the request — its reason is relayed verbatim, never
 re-derived or re-worded), or **arm status unknown** (the host daemon did not respond before
 the deadline; verify or re-arm from a host tmux pane: `cenci babysit <pr> --agent <agent>`,
-which safely no-ops if a supervisor is already running). `cenci babysit stop` behaves the
-same way from inside a sandbox: it sends no disarm message, it only reports that the
-supervisor runs on the host and exits non-zero, naming the host command to run instead.
+which safely no-ops if a supervisor is already running). `cenci babysit stop <pr>` is
+forwarded the same way from inside a sandbox and reports one of three outcomes: **stopped**
+(`Stopped babysitting PR #<pr> on the host.`, exit 0), **not stopped** (`not stopped: <reason>`,
+the host daemon rejected the request and its reason is relayed verbatim, exit 1), or **stop
+status unknown** (the host daemon did not respond before the deadline, exit 1). Both failures
+name the host command to run instead: `cenci babysit stop <pr>` from a host tmux pane.
 
-**Verify from the host.** From a host tmux pane (not from inside a sandbox), check the
-supervisor's own state directory:
+**Verify with `status`.** `cenci babysit status <pr>` works on the host and inside a sandbox
+(where it is forwarded to the host daemon). It prints one JSON line with `pr`, `repo`, `status`,
+`ciFixAttempts`, `conflictFixAttempts`, `fixCap` and `supervisorLive`, and exits 1 with
+`no supervisor found for PR #<pr>` when no state exists. Inside a sandbox, a rejected or
+unanswered status request exits 1 and names `cenci babysit status <pr>` as the host command.
+
+**On the host**, the supervisor's own state directory holds the same data:
 
 ```text
 $XDG_STATE_HOME/cenci/babysit   (fallback: ~/.local/state/cenci/babysit)
@@ -89,8 +97,7 @@ $XDG_STATE_HOME/cenci/babysit   (fallback: ~/.local/state/cenci/babysit)
 ```
 
 A `<pr>.json`/`<pr>.log` pair present for the PR means a supervisor is (or was) running for
-it; there is no `cenci babysit status` subcommand, so this state-dir read is the only
-verification available.
+it; `supervisorLive` in the `status` output is the authoritative liveness check.
 
 ## Safety guarantees
 
