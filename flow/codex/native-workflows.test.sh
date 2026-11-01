@@ -17,6 +17,33 @@
 #                retry option, no `cenci babysit stop` call, no GitHub write, the
 #                remote untouched
 #
+# and, for the Plan-mode, handoff and goal rows (#1235), on a ticketless implement
+# fixture of its own per scenario (a bare remote, a clone, a runner-persisted plan
+# artifact and `planned` checkpoint; the gate is green or red):
+#
+#   probe        `codex --help`, `codex exec --help` and `codex features list`
+#                scanned for a Plan/collaboration-mode option; the result is recorded
+#                (a version-verified control is a Followup, not part of the ticket)
+#   plan mode    the planning request in Default mode (`codex exec` has no Plan
+#                mode): the exact refusal line, zero tool calls, nothing written
+#   persist      `persist` in a fresh process: the exact refusal line, zero tool
+#                calls, nothing written
+#   apply        a new process on the runner-persisted artifact and checkpoint:
+#                `verify` passes and the checkpoint advances past `planned`; with
+#                the artifact edited after approval, the digest-mismatch line and
+#                zero writes
+#   goal create  green gate, a stubbed `gh pr create` that succeeds: one
+#                create_goal with the approved-plan objective, checkpoint goal
+#                `created`, update_goal complete after `gh pr create` and before
+#                the stubbed `cenci babysit`
+#   goal skip    a goal seeded in turn 1, then `apply` resumed (`codex exec resume`)
+#                against a red gate: no create_goal, no update_goal, checkpoint goal
+#                `skipped-active` and status `needs-input`
+#
+# The goal rows are judged from the tool calls in the session rollout
+# ($CODEX_HOME/sessions) or the event stream, never from what the model says; a
+# scenario in which no goal call is visible is inconclusive.
+#
 # The fixture lives under /var/tmp (never /tmp: the guards allowlist /tmp/*): a
 # local bare remote with a PR branch whose gate (`sh check.sh`) fails, a clone of it
 # as the launch directory, a stubbed `gh` and a stubbed `cenci` first on codex's
@@ -51,13 +78,22 @@
 # head runs only when check.sh and .cenci/config.json are byte-identical to the
 # seeded ones, and then under `env -i` with HOME inside the fixture.
 #
+# Timeouts: CNW_RUN_TIMEOUT (default 900 s) bounds each run; CNW_APPLY_TIMEOUT
+# (default CNW_RUN_TIMEOUT when set, else 2400 s) bounds the long `apply` runs. A
+# timeout is reported as an inconclusive row with its return code (124).
+#
 # Output: a sanitized markdown fragment on stdout, and also in the file named by
 # $CENCI_CODEX_NATIVE_OUT when set. The fragment ends with one RESULT line:
-#   RESULT: OK            exit 0  the five positive rows are ok (fast-forward
-#                                 advance, gate green on the pushed head, checkpoint
-#                                 complete with the pushed SHA, restart adds no
-#                                 commit, both attention options printed) and no
-#                                 row failed
+#   RESULT: OK            exit 0  the five positive ci-repair/attention rows and
+#                                 every Plan-mode, handoff and goal row are ok
+#                                 (fast-forward advance, gate green on the pushed
+#                                 head, checkpoint complete with the pushed SHA,
+#                                 restart adds no commit, both attention options
+#                                 printed; the probe recorded, both refusal lines
+#                                 with zero tool calls and writes, apply verifies,
+#                                 the tampered artifact refused with zero writes,
+#                                 the goal created then completed in order, the
+#                                 goal skipped when one exists) and no row failed
 #   RESULT: INCONCLUSIVE  exit 3  nothing failed, but a positive row is not ok
 #   RESULT: FAIL          exit 1  at least one row failed
 # A run whose gate is not met prints `not run: ...` and exits 0 instead.
@@ -131,7 +167,8 @@ REPORT="${FIXTURE_ROOT}/report.md"
 GH_CONFIG="${FIXTURE_ROOT}/gh-config"
 GATE_HOME="${FIXTURE_ROOT}/gate-home"
 GATE_TMP="${FIXTURE_ROOT}/gate-tmp"
-mkdir -p "${REMOTE}" "${BIN}" "${LOGS}" "${RUNS}" "${STATE_HOME}/cenci/babysit" "${GH_CONFIG}" "${GATE_HOME}" "${GATE_TMP}" || {
+HO="${FIXTURE_ROOT}/handoff"
+mkdir -p "${REMOTE}" "${BIN}" "${LOGS}" "${RUNS}" "${STATE_HOME}/cenci/babysit" "${GH_CONFIG}" "${GATE_HOME}" "${GATE_TMP}" "${HO}" || {
     echo "FAIL: could not create the fixture directories" >&2
     exit 1
 }
@@ -208,7 +245,27 @@ LBL_CI_GATE="ci-repair: gate green on the pushed head"
 LBL_CI_CKPT="ci-repair: checkpoint complete with pushed SHA"
 LBL_RESTART="restart: re-run adds no commit and no push"
 LBL_A_OPTS="attention (headless): both options printed"
-REQUIRED_ROWS=("${LBL_CI_FF}" "${LBL_CI_GATE}" "${LBL_CI_CKPT}" "${LBL_RESTART}" "${LBL_A_OPTS}")
+# The Plan-mode, handoff and goal rows (#1235) are required too.
+LBL_PROBE="startup-control probe: Plan/collaboration-mode option recorded"
+LBL_PM_LINE="plan-mode self-check: exact refusal line printed"
+LBL_PM_CALLS="plan-mode self-check: zero tool calls"
+LBL_PM_WRITE="plan-mode self-check: nothing written"
+LBL_PS_LINE="persist (fresh process): exact refusal line printed"
+LBL_PS_CALLS="persist (fresh process): zero tool calls"
+LBL_PS_WRITE="persist (fresh process): nothing written"
+LBL_TP_LINE="apply (tampered artifact): digest-mismatch line printed"
+LBL_TP_WRITE="apply (tampered artifact): zero writes"
+LBL_AV="apply (new process): verify passes and the checkpoint advances past planned"
+LBL_GC="goal create: create_goal once, with the approved-plan objective"
+LBL_GK="goal create: checkpoint records goal=created"
+LBL_GP="goal complete: update_goal complete only after a successful gh pr create"
+LBL_GB="goal complete: update_goal complete before cenci babysit"
+LBL_SC="goal skip: no create_goal while a goal exists"
+LBL_SU="goal skip: no update_goal"
+LBL_SK="goal skip: checkpoint records skipped-active and needs-input"
+REQUIRED_ROWS=("${LBL_CI_FF}" "${LBL_CI_GATE}" "${LBL_CI_CKPT}" "${LBL_RESTART}" "${LBL_A_OPTS}"
+    "${LBL_PROBE}" "${LBL_PM_LINE}" "${LBL_PM_CALLS}" "${LBL_PM_WRITE}" "${LBL_PS_LINE}" "${LBL_PS_CALLS}" "${LBL_PS_WRITE}"
+    "${LBL_TP_LINE}" "${LBL_TP_WRITE}" "${LBL_AV}" "${LBL_GC}" "${LBL_GK}" "${LBL_GP}" "${LBL_GB}" "${LBL_SC}" "${LBL_SU}" "${LBL_SK}")
 
 # row_is_ok <label> -- was that row recorded ok?
 row_is_ok() {
@@ -358,6 +415,24 @@ case "$1 $2" in
     "pr checks")
         emit '[{"bucket":"fail","name":"native-gate","state":"FAILURE"}]'
         ;;
+    "pr create")
+        # A help request creates nothing: it is answered with usage text and is
+        # neither a write (refused) nor a successful creation (logged).
+        for a in "$@"; do
+            case "${a}" in
+                --help | -h)
+                    echo "Usage: gh pr create [flags] (fixture stub: help only, no pull request was created)"
+                    exit 0
+                    ;;
+            esac
+        done
+        # The one write the goal scenarios allow, and only while the runner has
+        # switched the ok mode on (the sentinel file): every other scenario keeps
+        # refusing it. The ok mode logs the call and answers with a PR URL.
+        [ -f "${NW_LOGS}/pr-create-ok" ] || refuse "$@"
+        printf '%s\n' "$*" >> "${NW_LOGS}/gh-pr-create.log"
+        printf 'https://github.com/%s/pull/8\n' "${NW_SLUG}"
+        ;;
     "pr list") printf '[]\n' ;;
     "run view") echo "native-gate: FAILED: value.txt is not 'fixed'" ;;
     "run list") printf '[]\n' ;;
@@ -389,6 +464,9 @@ case "$1 $2" in
         echo "cenci: cannot reach the host supervisor from inside the sandbox" >&2
         exit 1
         ;;
+    "babysit "[0-9]*)
+        echo "cenci: babysit armed for PR $2 (fixture stub: no supervisor was started)"
+        ;;
 esac
 exit 0
 SCRIPT
@@ -412,6 +490,19 @@ agent_texts() {
         | (.item.text // "")' "$1" 2>/dev/null
 }
 
+# thread_id_of <events-file> -- the thread id the run reported in its first
+# `thread.started` event. Non-zero, nothing on stdout, when there is none or it is
+# not a plain identifier (it is later passed to `codex exec resume` as an argument).
+thread_id_of() {
+    local id
+    id="$(jq -R -r 'fromjson?
+        | select(type == "object" and .type == "thread.started" and ((.thread_id // null) | type) == "string")
+        | .thread_id' "$1" 2>/dev/null)" || return 1
+    id="${id%%$'\n'*}"
+    [[ "${id}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || return 1
+    printf '%s' "${id}"
+}
+
 # run_codex <session-cwd> <prompt> -- one `codex exec --json` run with the
 # fixture's stubs first on PATH and the supervisor-state directory exported. The
 # GitHub credentials are removed and gh is pointed at an unreachable host with an
@@ -419,8 +510,18 @@ agent_texts() {
 # Sets CODEX_RC and CODEX_NOTE. Returns 1 when the run could not be set up or codex
 # could not be started (rc 126/127); any other rc still gets judged from the
 # fixture's state, with CODEX_NOTE as the reason a row is inconclusive.
+RUN_KIND="exec"   # exec | resume (`codex exec resume <thread-id>`, run from inside the directory)
+RESUME_THREAD=""  # the thread id a resume run continues (the seed turn's thread.started id)
+RUN_LIMIT=""      # seconds; empty means CNW_RUN_TIMEOUT, else 900
+declare -a CODEX_RESUME_ARGS=()
+if [[ -n "${TRUST_FLAG}" ]]; then
+    CODEX_RESUME_ARGS=("${TRUST_FLAG}" --dangerously-bypass-approvals-and-sandbox)
+else
+    CODEX_RESUME_ARGS=(-c 'sandbox_mode="workspace-write"' -c "sandbox_workspace_write.writable_roots=[\"${FIXTURE_ROOT}\"]")
+fi
+
 run_codex() {
-    local cwd="$1" prompt="$2" first=""
+    local cwd="$1" prompt="$2" first="" limit="${RUN_LIMIT:-${CNW_RUN_TIMEOUT:-900}}"
     local -a timeout_cmd=()
     SCEN_N=$((SCEN_N + 1))
     SCEN_DIR="${RUNS}/${SCEN_N}"
@@ -429,21 +530,41 @@ run_codex() {
     CODEX_RC=0
     CODEX_NOTE="codex did not run"
     mkdir -p "${SCEN_DIR}" || return 1
+    : > "${SCEN_DIR}/start.marker" || return 1
     if command -v timeout >/dev/null 2>&1; then
-        timeout_cmd=(timeout "${CNW_RUN_TIMEOUT:-900}")
+        timeout_cmd=(timeout "${limit}")
     fi
-    env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN \
-        GH_HOST=fixture.invalid GH_CONFIG_DIR="${GH_CONFIG}" \
-        PATH="${BIN}:${PATH}" GH_REPO="${FIXTURE_SLUG}" XDG_STATE_HOME="${STATE_HOME}" \
-        ${timeout_cmd[@]+"${timeout_cmd[@]}"} \
-        codex exec --json --skip-git-repo-check -C "${cwd}" \
-        "${CODEX_MODE_ARGS[@]}" "${prompt}" \
-        > "${EVENTS}" 2> "${SCEN_DIR}/stderr" < /dev/null
+    if [[ "${RUN_KIND}" == resume ]]; then
+        if [[ ! "${RESUME_THREAD}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+            CODEX_NOTE="no valid thread id to resume (seed thread id not captured)"
+            return 1
+        fi
+        # `codex exec resume` takes no -C: it is started from inside the directory and
+        # continues the thread it is given by id (never `--last`, which could pick up
+        # another thread), whose id the caller read from the seed turn.
+        (
+            cd "${cwd}" || exit 126
+            exec env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN \
+                GH_HOST=fixture.invalid GH_CONFIG_DIR="${GH_CONFIG}" \
+                PATH="${BIN}:${PATH}" GH_REPO="${FIXTURE_SLUG}" XDG_STATE_HOME="${STATE_HOME}" \
+                ${timeout_cmd[@]+"${timeout_cmd[@]}"} \
+                codex exec resume "${RESUME_THREAD}" --json --skip-git-repo-check \
+                "${CODEX_RESUME_ARGS[@]}" "${prompt}"
+        ) > "${EVENTS}" 2> "${SCEN_DIR}/stderr" < /dev/null
+    else
+        env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN \
+            GH_HOST=fixture.invalid GH_CONFIG_DIR="${GH_CONFIG}" \
+            PATH="${BIN}:${PATH}" GH_REPO="${FIXTURE_SLUG}" XDG_STATE_HOME="${STATE_HOME}" \
+            ${timeout_cmd[@]+"${timeout_cmd[@]}"} \
+            codex exec --json --skip-git-repo-check -C "${cwd}" \
+            "${CODEX_MODE_ARGS[@]}" "${prompt}" \
+            > "${EVENTS}" 2> "${SCEN_DIR}/stderr" < /dev/null
+    fi
     CODEX_RC=$?
     AGENT_TEXT="$(agent_texts "${EVENTS}")" || AGENT_TEXT=""
     case "${CODEX_RC}" in
         0) CODEX_NOTE="codex rc=0" ;;
-        124) CODEX_NOTE="codex timed out after ${CNW_RUN_TIMEOUT:-900}s (rc=124)" ;;
+        124) CODEX_NOTE="codex timed out after ${limit}s (rc=124)" ;;
         *) CODEX_NOTE="codex rc=${CODEX_RC}" ;;
     esac
     if [[ "${CODEX_RC}" -ne 0 ]]; then
@@ -495,6 +616,7 @@ reset_call_logs() {
     : > "${LOGS}/gh.log" || return 1
     : > "${LOGS}/gh-refused.log" || return 1
     : > "${LOGS}/cenci.log" || return 1
+    : > "${LOGS}/gh-pr-create.log" || return 1
 }
 
 # gh_read_seen <pattern> -- did the stubbed gh answer a read matching <pattern>
@@ -891,6 +1013,820 @@ scenario_attention() {
     fi
 }
 
+# ── Plan mode, handoff and goal lifecycle (#1235) ───────────────────────
+# Each scenario below has a ticketless implement fixture of its own (a bare remote,
+# a clone, and for the apply scenarios a runner-persisted plan artifact and a
+# `planned` checkpoint), so none of them can change what another one judges.
+HO_SLUG="native-note"
+HO_PLAN=".plans/${HO_SLUG}.md"
+HO_CKPT=".cenci/checkpoints/implement-${HO_SLUG}.json"
+HO_REPO=""
+HO_REMOTE=""
+SEED_OBJECTIVE="cenci-native seeded goal (unrelated to any plan)"
+PLAN_MODE_LINE="cenci: \$cenci:implement plans only in Plan mode — type /plan and resend: /plan \$cenci:implement ${HO_SLUG}"
+PERSIST_LINE="cenci: no approved plan in this session — type /plan and resend: /plan \$cenci:implement ${HO_SLUG}"
+DIGEST_TEXT="plan artifact changed since approval (digest mismatch)"
+PROBE_RE='collaboration|plan[ _-]?mode|(^|[^[:alnum:]])--plan([^[:alnum:]]|$)'
+
+# The goal tools as the call list names them. A line of the call list is
+# "tool<TAB>arguments". A completion is not matched by text: finish_calls parses
+# the arguments of each update_goal and marks only `status == "complete"`.
+T_GET=$'^get_goal\t'
+T_CREATE=$'^create_goal\t'
+T_UPDATE=$'^update_goal\t'
+# The commands the order rows look for. They are matched only at the START of a
+# command of a shell tool call (first_command_call), never as a mention.
+CMD_PR='gh pr create'
+CMD_BABYSIT='cenci babysit'
+CMD_VERIFY='node +[^;&|]*checkpoint\.mjs[^;&| ]* +verify'
+# The note of every row that rests on a call list that could not be extracted.
+CALLS_UNREADABLE_NOTE="the tool-call lists could not be read (an extraction failed), so no row that rests on them can be judged"
+
+prompt_plan() { printf '$cenci:implement %s' "${HO_SLUG}"; }
+prompt_persist() { printf '$cenci:implement persist %s' "${HO_SLUG}"; }
+prompt_apply() { printf '$cenci:implement apply %s' "${HO_SLUG}"; }
+prompt_seed() {
+    printf 'Call the create_goal tool once with the objective "%s" and then stop. Make no other tool call and edit nothing.' "${SEED_OBJECTIVE}"
+}
+
+# rows_inconclusive <reason> <label>... -- one inconclusive row per label.
+rows_inconclusive() {
+    local reason="$1" lbl
+    shift
+    for lbl in "$@"; do
+        record "${lbl}" "inconclusive" "${reason}"
+    done
+}
+
+# run_apply <cwd> <prompt> [exec|resume [thread-id]] -- a long `apply` run with its
+# own timeout. A resume run continues the thread <thread-id>.
+run_apply() {
+    local rc
+    RUN_KIND="${3:-exec}"
+    RESUME_THREAD="${4:-}"
+    RUN_LIMIT="${CNW_APPLY_TIMEOUT:-${CNW_RUN_TIMEOUT:-2400}}"
+    run_codex "$1" "$2"
+    rc=$?
+    RUN_KIND="exec"
+    RESUME_THREAD=""
+    RUN_LIMIT=""
+    return "${rc}"
+}
+
+# ho_persist -- the artifact and the `planned` checkpoint the Persist step would
+# write, written by the runner with the plugin's own checkpoint helper, so the
+# apply under test starts in a new process on exactly what persist leaves.
+ho_persist() {
+    local digest
+    mkdir -p "${HO_REPO}/.plans" || return 1
+    {
+        printf '%s\n' '---' 'version: 1' 'mode: ticketless' "slug: ${HO_SLUG}" 'status: planned' 'approval: human' '---' ''
+        printf '%s\n' '## Ticket Details' 'Ticketless task: append the line `native` to NOTES.md.' ''
+        printf '%s\n' '## Implementation Plan' '### Summary' 'Append one line, `native`, to NOTES.md.' ''
+        printf '%s\n' '### Files to Modify' '- `NOTES.md`: append the line `native`.' ''
+        printf '%s\n' '### Test Strategy' 'The project gate (`sh check.sh`) must stay green.' ''
+        printf '%s\n' '## Architectural Context' 'A one-file fixture; no conventions apply.' ''
+        printf '%s\n' '## Choices' 'No question was asked; every default was accepted.'
+    } > "${HO_REPO}/${HO_PLAN}" || return 1
+    digest="$(cd "${HO_REPO}" && node "${FLOW_DIR}/codex/checkpoint.mjs" digest "${HO_PLAN}")" || return 1
+    [[ "${digest}" =~ ^[0-9a-f]{64}$ ]] || return 1
+    (cd "${HO_REPO}" && node "${FLOW_DIR}/codex/checkpoint.mjs" init "${HO_CKPT}" implement "${HO_SLUG}" planned \
+        --plan-path "${HO_PLAN}" --plan-digest "${digest}" > /dev/null) || return 1
+}
+
+# ho_fixture <name> <green|red> [persist] -- a bare remote (origin path ends in
+# cenci-native/fixture.git, like the ci-repair fixture's) and a clone of it as
+# HO_REPO. The gate is `sh check.sh`; with `persist` the artifact and checkpoint
+# are written too.
+ho_fixture() {
+    local name="$1" gate="$2" persist="${3:-}" root seed
+    root="${HO}/${name}"
+    seed="${root}/seed"
+    HO_REMOTE="${root}/remotes/${FIXTURE_SLUG}.git"
+    HO_REPO="${root}/repo"
+    local seedgit=(git -C "${seed}" -c user.name=cenci-native -c user.email=cenci-native@localhost -c commit.gpgsign=false)
+    mkdir -p "${root}/remotes/cenci-native" "${seed}/.cenci" || return 1
+    git init -q "${seed}" || return 1
+    git -C "${seed}" symbolic-ref HEAD refs/heads/main || return 1
+    printf '{"gateCommand":"sh check.sh"}\n' > "${seed}/.cenci/config.json" || return 1
+    printf '# fixture\n' > "${seed}/AGENTS.md" || return 1
+    printf '.worktrees/\n.cenci/checkpoints/\n' > "${seed}/.gitignore" || return 1
+    printf 'notes\n' > "${seed}/NOTES.md" || return 1
+    if [[ "${gate}" == green ]]; then
+        printf '%s\n' "echo '${CHECK_NAME}: ok'" > "${seed}/check.sh" || return 1
+    else
+        printf '%s\n' "echo '${CHECK_NAME}: FAILED: the baseline is red'" 'exit 1' > "${seed}/check.sh" || return 1
+    fi
+    "${seedgit[@]}" add -A || return 1
+    "${seedgit[@]}" commit -q -m "seed" || return 1
+    git clone -q --bare "${seed}" "${HO_REMOTE}" || return 1
+    git clone -q "${HO_REMOTE}" "${HO_REPO}" || return 1
+    git -C "${HO_REPO}" config user.name cenci-native || return 1
+    git -C "${HO_REPO}" config user.email cenci-native@localhost || return 1
+    git -C "${HO_REPO}" config commit.gpgsign false || return 1
+    if [[ -n "${persist}" ]]; then
+        ho_persist || return 1
+    fi
+}
+
+# repo_snapshot <repo> -- refs and `git status --porcelain --ignored`: a clean
+# repository still yields a non-empty reading (the refs), so two failed reads can
+# never compare equal.
+repo_snapshot() {
+    local refs st
+    refs="$(git -C "$1" for-each-ref --format='%(refname) %(objectname)' 2>/dev/null)" || return 1
+    [[ -n "${refs}" ]] || return 1
+    st="$(git -C "$1" status --porcelain --ignored 2>/dev/null)" || return 1
+    printf 'refs:\n%s\nstatus:\n%s\n' "${refs}" "${st}"
+}
+
+# ho_state -- everything a run that must write nothing is judged against: the
+# launch repository, the artifact and checkpoint contents and the remote's refs.
+ho_state() {
+    local snap art ck rrefs
+    snap="$(repo_snapshot "${HO_REPO}")" || return 1
+    art="$(git hash-object "${HO_REPO}/${HO_PLAN}" 2>/dev/null)" || return 1
+    ck="$(git hash-object "${HO_REPO}/${HO_CKPT}" 2>/dev/null)" || return 1
+    rrefs="$(git -C "${HO_REMOTE}" for-each-ref --format='%(refname) %(objectname)' 2>/dev/null)" || return 1
+    printf '%s\nartifact:%s\ncheckpoint:%s\nremote:\n%s\n' "${snap}" "${art}" "${ck}" "${rrefs}"
+}
+
+# state_changes <before> <after> -- the first changed lines, for a row's detail.
+state_changes() {
+    local f1="${SCEN_DIR}/state.before" f2="${SCEN_DIR}/state.after"
+    if ! printf '%s\n' "$1" > "${f1}" || ! printf '%s\n' "$2" > "${f2}"; then
+        printf 'unreadable'
+        return 0
+    fi
+    diff "${f1}" "${f2}" | grep -E '^[<>]' | sed -n '1,4p' | tr '\n' ';'
+}
+
+# ho_ckpt_state -- "status|phase|goal" of the persisted checkpoint; non-zero when
+# it cannot be read.
+ho_ckpt_state() {
+    local f="${HO_REPO}/${HO_CKPT}"
+    [[ -f "${f}" ]] || return 1
+    jq -r '[(.status // ""), (.phase // ""), (.goal // "")] | join("|")' "${f}" 2>/dev/null
+}
+
+# ── Tool calls: the session rollout, or the event stream ─────────────────
+# Goal calls are judged from what the tools were asked, never from what the model
+# says. Two sources are read, whichever shows the call: the session rollout
+# ($CODEX_HOME/sessions/**/rollout-*.jsonl, the files of THIS run's directory
+# written since the run started) and the `codex exec --json` event stream. Both
+# are reduced to one list, one line per tool call in order, each call once (an
+# item reported as started and completed counts once): "id<TAB>tool<TAB>arguments".
+# The tool is get_goal, create_goal or update_goal for a goal call (whatever the
+# namespace in front of it) and the call's own name otherwise ("shell" for a command).
+# The arguments of a shell call are reduced to the plain command text: the JSON
+# wrapper ({"cmd": ...} or {"command": [...]}) and a `bash -lc '<script>'` wrapper
+# are removed and a line break becomes " ; ", so a command start can be recognised
+# whatever the client's spelling. An extraction failure is the caller's to see:
+# the jq exits non-zero (a tool call it cannot read is never skipped silently).
+# A line that cannot be parsed is never skipped silently. objs($mode) parses the
+# lines of a stream: in "rollout" mode every non-empty line must be a JSON object;
+# in "events" mode a non-empty line that starts with `{` must parse (any other line
+# is client noise, not an event, and is ignored). The jq exits non-zero on a line
+# that breaks the rule, so the caller sets CALLS_EXTRACT_FAILED.
+PARSE_JQ='
+  def objs($mode):
+    split("\n") | map(select(test("\\S")))
+    | map(. as $l
+          | (try {v: ($l | fromjson)} catch {bad: true}) as $r
+          | if $r.bad then (if $mode == "rollout" or ($l | test("^\\s*\\{")) then error("unparseable line") else empty end)
+            elif ($r.v | type) != "object" then (if $mode == "rollout" then error("line is not a JSON object") else empty end)
+            else $r.v end);
+'
+CALLS_JQ="${PARSE_JQ}"'
+  def isshell: . as $n | ["shell", "exec_command", "shell_command", "local_shell", "container.exec"] | index($n) != null;
+  def shelltext:
+    (if type == "string" and test("^\\s*[\\[{]") then (. as $orig | try fromjson catch $orig) else . end) as $a
+    | (if ($a | type) == "object" then ($a.cmd // $a.command // $a.input // "") else $a end) as $c
+    | (if ($c | type) == "array"
+         then (if ($c | length) >= 3 and ($c[1] | tostring | test("^-[a-z]*c$")) then ($c[-1] | tostring) else ($c | map(tostring) | join(" ")) end)
+         else ($c | if type == "string" then . else tojson end) end)
+    | sub("^(?:/[^ ]*/)?(?:ba|z)?sh +-[a-z]*c +\\x27(?<s>[\\s\\S]*)\\x27\\s*$"; .s)
+    | sub("^(?:/[^ ]*/)?(?:ba|z)?sh +-[a-z]*c +\"(?<s>[\\s\\S]*)\"\\s*$"; .s)
+    | gsub("\\s*\\n\\s*"; " ; ");
+  objs($mode)
+  | map((.payload // .item // .) as $p
+        | select(($p | type) == "object"
+                 and (["function_call", "custom_tool_call", "mcp_tool_call", "command_execution", "local_shell_call", "tool_call", "web_search"]
+                      | index($p.type // "")))
+        | ($p.name // $p.tool // "shell") as $n
+        | (([$n | capture("(?<g>(get|create|update)_goal)$").g][0]) // $n) as $t
+        | (($p.arguments // $p.input // $p.command // $p.action // "")) as $raw
+        | {id: ($p.id // $p.call_id // ""),
+           tool: $t,
+           args: (if ((($p.type // "") | IN("command_execution", "local_shell_call")) or ($t | isshell))
+                  then ($raw | shelltext)
+                  else ($raw | if type == "string" then . else tojson end) end)})
+  | reduce .[] as $r ([]; if $r.id != "" and (map(.id) | index($r.id)) != null then . else . + [$r] end)
+  | .[] | [.id, .tool, (.args | gsub("[\t\r\n]"; " "))] | join("\t")
+'
+
+#
+# extract_calls <rollout|events> <file>... -- the call list of the files, in order.
+# Non-zero when a file cannot be read, a rollout file does not end in a newline (its
+# last line may be cut short, and read together with the next file it would fuse
+# with that file's first line), or a line breaks the objs() rule above.
+extract_calls() {
+    local mode="$1" f last
+    shift
+    for f in "$@"; do
+        if [[ "${mode}" == rollout ]]; then
+            last="$(tail -c 1 -- "${f}")" || return 1
+            [[ -z "${last}" ]] || return 1
+        fi
+    done
+    jq -R -s -r --arg mode "${mode}" "${CALLS_JQ}" "$@"
+}
+
+# count_events <file> -- how many lines of the event stream are typed JSON events
+# (every `codex exec --json` event carries a string `type`). Non-zero when the
+# stream cannot be read or a line that starts with `{` is not JSON.
+count_events() {
+    jq -R -s -r --arg mode events "${PARSE_JQ}"'
+        objs($mode) | map(select(((.type? // null) | type) == "string")) | length' "$1"
+}
+
+codex_home() {
+    printf '%s' "${CODEX_HOME:-${HOME:-}/.codex}"
+}
+
+CALLS_SRC=""      # rollout | events: where the goal calls were read
+CALLS_ROLL_N=0    # rollout files read for this run
+CALLS_FILE=""     # id/tool/arguments of the chosen source
+CALLS_ANY=""      # tool/arguments of both sources together (for "zero tool calls")
+CALLS_TSV=""      # tool/arguments of the chosen source without an earlier turn's calls
+CALLS_CMP=""      # one line per CALLS_TSV line: 1 for an update_goal whose status is exactly "complete"
+CALLS_EXTRACT_FAILED=0  # 1 when reading either source failed: the lists are then unreadable, not empty
+CALLS_EVENTS_N=0        # typed events in the event stream
+
+# collect_calls <cwd> [rollout|events] -- read the current run's tool calls. The
+# source is the rollout when it shows a goal call, else the event stream, unless
+# one is forced. Returns non-zero when the lists could not be written. An
+# extraction (jq) failure does not return non-zero: it sets CALLS_EXTRACT_FAILED,
+# and every row that rests on the lists must then be inconclusive.
+collect_calls() {
+    local real f first root out="${SCEN_DIR}" forced="${2:-}"
+    local -a rolls=()
+    real="$(cd "$1" && pwd -P)" || real="$1"
+    CALLS_SRC="events"
+    CALLS_ROLL_N=0
+    CALLS_EXTRACT_FAILED=0
+    CALLS_EVENTS_N=0
+    : > "${out}/calls.roll" || return 1
+    root="$(codex_home)/sessions"
+    : > "${out}/rollouts.list" || return 1
+    if [[ -d "${root}" ]]; then
+        find "${root}" -type f -name 'rollout-*.jsonl' -newer "${out}/start.marker" -print 2> /dev/null | sort > "${out}/rollouts.list"
+        # A rollout belongs to this run when its FIRST line (the session_meta) names
+        # this directory; a later unparseable line must not make the file look like
+        # another run's. Such a file is then read in full below and, when it cannot
+        # be parsed, sets CALLS_EXTRACT_FAILED.
+        while IFS= read -r f; do
+            [[ -n "${f}" ]] || continue
+            first="$(head -n 1 -- "${f}")" || first=""
+            if [[ -n "${first}" ]] && jq -e --arg c "${real}" --arg d "$1" \
+                'select(.type == "session_meta") | select(.payload.cwd == $c or .payload.cwd == $d)' <<< "${first}" > /dev/null 2>&1; then
+                rolls+=("${f}")
+            fi
+        done < "${out}/rollouts.list"
+    fi
+    CALLS_ROLL_N="${#rolls[@]}"
+    if [[ "${CALLS_ROLL_N}" -gt 0 ]]; then
+        if ! extract_calls rollout "${rolls[@]}" > "${out}/calls.roll" 2> /dev/null; then
+            : > "${out}/calls.roll" || return 1
+            CALLS_EXTRACT_FAILED=1
+        fi
+    fi
+    if ! extract_calls events "${EVENTS}" > "${out}/calls.events" 2> /dev/null; then
+        : > "${out}/calls.events" || return 1
+        CALLS_EXTRACT_FAILED=1
+    fi
+    if ! CALLS_EVENTS_N="$(count_events "${EVENTS}" 2> /dev/null)" || [[ ! "${CALLS_EVENTS_N}" =~ ^[0-9]+$ ]]; then
+        CALLS_EVENTS_N=0
+        CALLS_EXTRACT_FAILED=1
+    fi
+    CALLS_FILE="${out}/calls.events"
+    if [[ "${forced}" == rollout ]] || { [[ -z "${forced}" ]] && grep -qE $'\t(get|create|update)_goal\t' "${out}/calls.roll"; }; then
+        CALLS_SRC="rollout"
+        CALLS_FILE="${out}/calls.roll"
+    fi
+    cat "${out}/calls.roll" "${out}/calls.events" | cut -f2- > "${out}/calls.any" || return 1
+    CALLS_ANY="${out}/calls.any"
+}
+
+# finish_calls <ids-file> -- CALLS_TSV: the chosen source's calls minus those whose
+# id is in <ids-file> (an earlier turn of the same thread), as "tool<TAB>arguments".
+finish_calls() {
+    local ids="$1"
+    if [[ -z "${ids}" ]]; then
+        ids="${SCEN_DIR}/none.ids"
+        : > "${ids}" || return 1
+    fi
+    CALLS_TSV="${SCEN_DIR}/calls.tsv"
+    awk -F'\t' -v ids="${ids}" \
+        'FILENAME == ids { if ($1 != "") skip[$1] = 1; next } !($1 != "" && ($1 in skip)) { print $2 "\t" $3 }' \
+        "${ids}" "${CALLS_FILE}" > "${CALLS_TSV}" || return 1
+    # A completion is an update_goal whose arguments parse to status == "complete"
+    # exactly: "incomplete", "completed" or a paused status that mentions the word
+    # in a note are not one.
+    CALLS_CMP="${SCEN_DIR}/calls.cmp"
+    jq -R -r 'split("\t") as $f
+        | if $f[0] == "update_goal"
+          then (try (($f[1:] | join("\t")) | fromjson | (type == "object" and .status == "complete")) catch false) | if . then "1" else "0" end
+          else "0" end' "${CALLS_TSV}" > "${CALLS_CMP}" || return 1
+}
+
+n_complete_calls() { # how many calls of CALLS_TSV complete the goal
+    local n rc
+    n="$(grep -c '^1$' "${CALLS_CMP}")"
+    rc=$?
+    [[ "${rc}" -le 1 ]] || return 1
+    printf '%s' "${n}"
+}
+
+first_complete_call() { # position of the first completing call, empty when none
+    local out rc
+    out="$(grep -n -m1 '^1$' "${CALLS_CMP}")"
+    rc=$?
+    [[ "${rc}" -le 1 ]] || return 1
+    printf '%s' "${out%%:*}"
+}
+
+# first_command_call <ERE> -- position of the first call of a SHELL tool whose
+# command STARTS with <ERE> (at the start of the command text or after ; & | or
+# an opening parenthesis or brace, past any VAR=value prefix) and does not ask for help
+# (--help, -h). A call that only mentions the command (`rg 'gh pr create'`, `echo`,
+# `cat`, a comment) is not that command. Empty when none; non-zero on a failure.
+first_command_call() {
+    local out
+    out="$(CMD_RE="$1" awk -F'\t' '
+        BEGIN { re = "[;&|({][ ]*([A-Za-z_][A-Za-z0-9_]*=[^ ]*[ ]+)*" ENVIRON["CMD_RE"] "([[:space:]]|$)" }
+        $1 !~ /^(shell|exec_command|shell_command|local_shell|container\.exec)$/ { next }
+        {
+            s = ";" $2
+            while (match(s, re)) {
+                rest = substr(s, RSTART + RLENGTH)
+                cut = rest
+                if (match(cut, /[;&|]/)) { cut = substr(cut, 1, RSTART - 1) }
+                if ((" " cut " ") !~ / (--help|-h) /) { print NR; exit }
+                s = ";" rest
+            }
+        }' "${CALLS_TSV}")" || return 1
+    printf '%s' "${out}"
+}
+
+n_calls_matching() { # <ERE> -- how many calls of CALLS_TSV match "tool<TAB>arguments"
+    local n rc
+    n="$(grep -cE -e "$1" "${CALLS_TSV}")"
+    rc=$?
+    [[ "${rc}" -le 1 ]] || return 1
+    printf '%s' "${n}"
+}
+
+first_call_matching() { # <ERE> -- position of the first match, empty when none
+    local out rc
+    out="$(grep -nE -e "$1" "${CALLS_TSV}")"
+    rc=$?
+    [[ "${rc}" -le 1 ]] || return 1
+    printf '%s' "${out%%:*}"
+}
+
+# calls_preview <file> -- the first calls, one short line each, for a row's detail.
+calls_preview() {
+    sed -n '1,3p' "$1" | cut -c1-90 | tr '\t' ' ' | tr '\n' ';'
+}
+
+# calls_sequence <file> -- the call list as "n. tool arguments", capped.
+calls_sequence() {
+    sed -n '1,60p' "$1" | cut -c1-140 | tr '\t' ' ' | awk '{ printf "%d. %s\n", NR, $0 }'
+}
+
+# ── Scenario: startup-control probe ─────────────────────────────────────
+PROBE_DIR="${RUNS}/probe"
+
+probe_one() { # <name> <codex-args>...
+    local name="$1"
+    local -a tcmd=()
+    shift
+    if command -v timeout > /dev/null 2>&1; then
+        tcmd=(timeout 60)
+    fi
+    env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN ${tcmd[@]+"${tcmd[@]}"} \
+        codex "$@" > "${PROBE_DIR}/${name}.out" 2>&1 < /dev/null
+    printf '%s\n' "$?" > "${PROBE_DIR}/${name}.rc"
+}
+
+scenario_probe() {
+    local name text hits="" line frc goalfeat="" note="" nonempty=0
+    mkdir -p "${PROBE_DIR}" || {
+        record "${LBL_PROBE}" "inconclusive" "could not create the probe directory"
+        return 0
+    }
+    probe_one help --help
+    probe_one exec-help exec --help
+    probe_one features features list
+    for name in help exec-help; do
+        text="$(tr -d '[:space:]' < "${PROBE_DIR}/${name}.out" 2> /dev/null)" || text=""
+        [[ -z "${text}" ]] || nonempty=$((nonempty + 1))
+    done
+    if [[ "${nonempty}" -ne 2 ]]; then
+        record "${LBL_PROBE}" "inconclusive" "codex --help or codex exec --help printed nothing (rc $(cat "${PROBE_DIR}/help.rc" 2> /dev/null)/$(cat "${PROBE_DIR}/exec-help.rc" 2> /dev/null)), so no option could be scanned"
+        return 0
+    fi
+    for name in help exec-help features; do
+        line="$(grep -iE -e "${PROBE_RE}" "${PROBE_DIR}/${name}.out" 2> /dev/null | sed -n '1,2p' | tr -s '[:space:]' ' ')" || line=""
+        if [[ -n "${line// /}" ]]; then
+            case "${name}" in
+                help) note="codex --help" ;;
+                exec-help) note="codex exec --help" ;;
+                *) note="codex features list" ;;
+            esac
+            hits="${hits}${hits:+; }${note}: ${line:0:160}"
+        fi
+    done
+    frc="$(cat "${PROBE_DIR}/features.rc" 2> /dev/null)" || frc="?"
+    goalfeat="$(grep -iE -e 'goal' "${PROBE_DIR}/features.out" 2> /dev/null | sed -n '1,2p' | tr -s '[:space:]' ' ')" || goalfeat=""
+    [[ -z "${goalfeat// /}" ]] || goalfeat=" Goal-related features listed: ${goalfeat:0:160}."
+    if [[ -n "${hits}" ]]; then
+        record "${LBL_PROBE}" "ok" "found a candidate Plan/collaboration-mode option: ${hits}. A version-verified startup control is filed as a Followup, not added to this ticket.${goalfeat}"
+    else
+        record "${LBL_PROBE}" "ok" "none found in codex --help, codex exec --help or codex features list (features list rc=${frc}).${goalfeat}"
+    fi
+}
+
+# ── Scenarios: the refusals (Plan mode and a fresh-process persist) ──────
+# scenario_refusal <fixture-name> <prompt> <expected-line> <line-label> <calls-label> <write-label>
+# The run must print exactly the refusal line, make no tool call at all and leave
+# the launch repository exactly as it was.
+scenario_refusal() {
+    local name="$1" prompt="$2" want="$3" l_line="$4" l_calls="$5" l_write="$6"
+    local before="" after="" text="" n="" changes=""
+    if ! ho_fixture "${name}" green; then
+        rows_inconclusive "could not build the ${name} fixture" "${l_line}" "${l_calls}" "${l_write}"
+        return 0
+    fi
+    if ! reset_call_logs; then
+        rows_inconclusive "could not reset the stub call logs, so this scenario cannot be judged" "${l_line}" "${l_calls}" "${l_write}"
+        return 0
+    fi
+    before="$(repo_snapshot "${HO_REPO}")" || before=""
+    if [[ -z "${before}" ]]; then
+        rows_inconclusive "could not read the fixture repository before the run" "${l_line}" "${l_calls}" "${l_write}"
+        return 0
+    fi
+    if ! run_codex "${HO_REPO}" "${prompt}"; then
+        rows_inconclusive "${CODEX_NOTE}" "${l_line}" "${l_calls}" "${l_write}"
+        return 0
+    fi
+    after="$(repo_snapshot "${HO_REPO}")" || after=""
+    if ! collect_calls "${HO_REPO}"; then
+        rows_inconclusive "the tool-call lists could not be written" "${l_line}" "${l_calls}" "${l_write}"
+        return 0
+    fi
+    text="$(sed -E 's/[[:space:]]+$//' <<< "${AGENT_TEXT}" | grep -v '^$')"
+    if [[ -z "${text}" ]]; then
+        rows_inconclusive "no agent message was captured, so the run is not shown to have refused (is the cenci plugin installed? ${CODEX_NOTE})" "${l_line}" "${l_calls}"
+    else
+        if [[ "${text}" == "${want}" ]]; then
+            record "${l_line}" "ok" "the one printed line is the contract's refusal line (${CODEX_NOTE})"
+        elif grep -qxF -- "${want}" <<< "${text}"; then
+            record "${l_line}" "FAIL" "the refusal line was printed with other output after or before it: '${text:0:200}'"
+        else
+            record "${l_line}" "FAIL" "the printed text is not the refusal line: '${text:0:200}'"
+        fi
+        n="$(count_lines "${CALLS_ANY}")" || n=""
+        if [[ "${CALLS_EXTRACT_FAILED}" -eq 1 ]]; then
+            record "${l_calls}" "inconclusive" "${CALLS_UNREADABLE_NOTE}"
+        elif [[ -z "${n}" ]]; then
+            record "${l_calls}" "inconclusive" "the tool-call lists could not be counted"
+        elif [[ "${n}" -gt 0 ]]; then
+            record "${l_calls}" "FAIL" "the run made ${n} tool call(s) before refusing: $(calls_preview "${CALLS_ANY}")"
+        elif [[ "${CALLS_ROLL_N}" -eq 0 && "${CALLS_EVENTS_N}" -eq 0 ]]; then
+            # An empty list proves nothing unless a list was actually read.
+            record "${l_calls}" "inconclusive" "rollout not read, event stream empty: zero tool calls is not shown (${CODEX_NOTE})"
+        else
+            record "${l_calls}" "ok" "no tool call in the event stream or in the ${CALLS_ROLL_N} rollout file(s) read"
+        fi
+    fi
+    if [[ -z "${after}" ]]; then
+        record "${l_write}" "inconclusive" "could not read the fixture repository after the run"
+    elif [[ "${after}" != "${before}" ]]; then
+        changes="$(state_changes "${before}" "${after}")"
+        record "${l_write}" "FAIL" "the run changed the launch repository (refs or git status --ignored): ${changes}"
+    elif [[ -z "${text}" ]]; then
+        record "${l_write}" "inconclusive" "nothing changed, but no agent message shows the run refused"
+    else
+        record "${l_write}" "ok" "git status --ignored and the refs are unchanged: no .cenci, .plans or worktree was written"
+    fi
+}
+
+# ── Scenario: apply on a tampered artifact ──────────────────────────────
+scenario_tamper() {
+    local before="" after="" changes="" pr_writes="" refused="" babysat="" text
+    if ! ho_fixture tamper green persist; then
+        rows_inconclusive "could not build the tampered-artifact fixture (it needs node to persist the plan)" "${LBL_TP_LINE}" "${LBL_TP_WRITE}"
+        return 0
+    fi
+    # The artifact changes after approval: its sha256 no longer matches the digest
+    # the checkpoint recorded.
+    if ! printf '\nAppended after approval.\n' >> "${HO_REPO}/${HO_PLAN}"; then
+        rows_inconclusive "could not edit the persisted artifact" "${LBL_TP_LINE}" "${LBL_TP_WRITE}"
+        return 0
+    fi
+    if ! reset_call_logs; then
+        rows_inconclusive "could not reset the stub call logs, so this scenario cannot be judged" "${LBL_TP_LINE}" "${LBL_TP_WRITE}"
+        return 0
+    fi
+    before="$(ho_state)" || before=""
+    if [[ -z "${before}" ]]; then
+        rows_inconclusive "could not read the fixture before the run" "${LBL_TP_LINE}" "${LBL_TP_WRITE}"
+        return 0
+    fi
+    if ! run_apply "${HO_REPO}" "$(prompt_apply)"; then
+        rows_inconclusive "${CODEX_NOTE}" "${LBL_TP_LINE}" "${LBL_TP_WRITE}"
+        return 0
+    fi
+    after="$(ho_state)" || after=""
+    pr_writes="$(cat "${LOGS}/gh-pr-create.log" 2> /dev/null)" || pr_writes="unreadable"
+    refused="$(cat "${LOGS}/gh-refused.log" 2> /dev/null)" || refused="unreadable"
+    babysat="$(grep -E '^babysit' "${LOGS}/cenci.log" 2> /dev/null)"
+    text="$(sed -E 's/[[:space:]]+$//' <<< "${AGENT_TEXT}" | grep -v '^$')"
+
+    if [[ -z "${text}" ]]; then
+        record "${LBL_TP_LINE}" "inconclusive" "no agent message was captured, so the apply is not shown to have refused (is the cenci plugin installed? ${CODEX_NOTE})"
+    elif grep -qF -- "${DIGEST_TEXT}" <<< "${text}"; then
+        record "${LBL_TP_LINE}" "ok" "the printed stop carries '${DIGEST_TEXT}' (${CODEX_NOTE})"
+    else
+        record "${LBL_TP_LINE}" "FAIL" "the apply on a tampered artifact did not report the digest mismatch: '${text:0:200}'"
+    fi
+    if [[ -z "${after}" ]]; then
+        record "${LBL_TP_WRITE}" "inconclusive" "could not read the fixture after the run"
+    elif [[ "${after}" != "${before}" ]]; then
+        changes="$(state_changes "${before}" "${after}")"
+        record "${LBL_TP_WRITE}" "FAIL" "the apply wrote although verify must stop before any write: ${changes}"
+    elif [[ -n "${pr_writes}" || -n "${refused}" || -n "${babysat}" ]]; then
+        record "${LBL_TP_WRITE}" "FAIL" "the apply reached a GitHub write or babysit: ${pr_writes}${refused}${babysat}"
+    elif ! grep -qF -- "${DIGEST_TEXT}" <<< "${text}"; then
+        record "${LBL_TP_WRITE}" "inconclusive" "nothing changed, but nothing shows the apply refused"
+    else
+        record "${LBL_TP_WRITE}" "ok" "artifact, checkpoint, launch repository and remote refs are unchanged; no PR, babysit or worktree"
+    fi
+}
+
+# ── Scenario: goal create, then complete ────────────────────────────────
+GOAL_SEQ_CREATE=""
+GOAL_SEQ_SKIP=""
+
+scenario_goal_create() {
+    local state="" status="" rest="" phase="" goal="" n_get n_create n_upd n_cmp n_pr cenci_log babysat="no"
+    local idx_pr idx_cmp idx_bab idx_ver idx_create args no_goal advanced="no" detail want_obj obj_problem
+    local -a all=("${LBL_AV}" "${LBL_GC}" "${LBL_GK}" "${LBL_GP}" "${LBL_GB}")
+    if ! ho_fixture create green persist; then
+        rows_inconclusive "could not build the goal-create fixture (it needs node to persist the plan)" "${all[@]}"
+        return 0
+    fi
+    if ! reset_call_logs || ! : > "${LOGS}/pr-create-ok"; then
+        rows_inconclusive "could not prepare the stub call logs, so this scenario cannot be judged" "${all[@]}"
+        return 0
+    fi
+    run_apply "${HO_REPO}" "$(prompt_apply)"
+    local started=$?
+    rm -f "${LOGS}/pr-create-ok"
+    if [[ "${started}" -ne 0 ]]; then
+        rows_inconclusive "${CODEX_NOTE}" "${all[@]}"
+        return 0
+    fi
+    if ! collect_calls "${HO_REPO}" || ! finish_calls ""; then
+        rows_inconclusive "the tool-call lists could not be written" "${all[@]}"
+        return 0
+    fi
+    GOAL_SEQ_CREATE="$(calls_sequence "${CALLS_TSV}")"
+    state="$(ho_ckpt_state)" || state=""
+    status="${state%%|*}"
+    rest="${state#*|}"
+    phase="${rest%%|*}"
+    goal="${rest#*|}"
+    [[ -n "${state}" && "${phase}" != planned ]] && advanced="yes"
+
+    # Row: the apply verified and started.
+    if [[ -z "${state}" ]]; then
+        record "${LBL_AV}" "inconclusive" "the checkpoint could not be read after the apply (${CODEX_NOTE})"
+    elif [[ "${advanced}" == no ]]; then
+        record "${LBL_AV}" "inconclusive" "the checkpoint is still planned after the apply: verify did not pass, or the installed plugin's apply did not run (is the cenci plugin installed? ${CODEX_NOTE})"
+    else
+        record "${LBL_AV}" "ok" "new-process apply advanced the runner-persisted checkpoint: status=${status}, phase=${phase}, goal=${goal:-none} (${CODEX_NOTE})"
+    fi
+    if [[ "${advanced}" == no ]]; then
+        rows_inconclusive "the apply did not advance the checkpoint, so no goal step is shown to have run (${CODEX_NOTE})" "${LBL_GC}" "${LBL_GK}" "${LBL_GP}" "${LBL_GB}"
+        return 0
+    fi
+
+    if [[ "${CALLS_EXTRACT_FAILED}" -eq 1 ]]; then
+        rows_inconclusive "${CALLS_UNREADABLE_NOTE}" "${LBL_GC}" "${LBL_GK}" "${LBL_GP}" "${LBL_GB}"
+        return 0
+    fi
+
+    if ! n_get="$(n_calls_matching "${T_GET}")" || ! n_create="$(n_calls_matching "${T_CREATE}")" \
+        || ! n_upd="$(n_calls_matching "${T_UPDATE}")" || ! n_cmp="$(n_complete_calls)" \
+        || ! idx_pr="$(first_command_call "${CMD_PR}")" || ! idx_cmp="$(first_complete_call)" \
+        || ! idx_bab="$(first_command_call "${CMD_BABYSIT}")" || ! idx_ver="$(first_command_call "${CMD_VERIFY}")" \
+        || ! idx_create="$(first_call_matching "${T_CREATE}")"; then
+        rows_inconclusive "the tool-call list could not be searched" "${LBL_GC}" "${LBL_GK}" "${LBL_GP}" "${LBL_GB}"
+        return 0
+    fi
+    if ! n_pr="$(count_lines "${LOGS}/gh-pr-create.log")"; then
+        rows_inconclusive "the stubbed gh's pr create log could not be read" "${LBL_GC}" "${LBL_GK}" "${LBL_GP}" "${LBL_GB}"
+        return 0
+    fi
+    if ! cenci_log="$(cat "${LOGS}/cenci.log")"; then
+        rows_inconclusive "the stubbed cenci's call log could not be read" "${LBL_GC}" "${LBL_GK}" "${LBL_GP}" "${LBL_GB}"
+        return 0
+    fi
+    grep -qE '^babysit [0-9]' <<< "${cenci_log}" && babysat="yes"
+    no_goal="no goal events (no get_goal, create_goal or update_goal call in the ${CALLS_ROLL_N} rollout file(s) or the event stream): the goal tools may not be exposed by codex exec at this version, or the rollout could not be read"
+
+    # Row: one create_goal with the approved-plan objective, after verify.
+    if [[ $((n_get + n_create + n_upd)) -eq 0 ]]; then
+        record "${LBL_GC}" "inconclusive" "${no_goal}"
+    elif [[ "${n_create}" -eq 0 ]]; then
+        record "${LBL_GC}" "FAIL" "get_goal ran but create_goal was never called, although no goal existed in the new thread"
+    elif [[ "${n_create}" -gt 1 ]]; then
+        record "${LBL_GC}" "FAIL" "create_goal was called ${n_create} times"
+    else
+        args="$(grep -E -e "${T_CREATE}" "${CALLS_TSV}" | sed -n '1p' | cut -f2-)"
+        # The arguments are parsed: the objective must be exactly the contract's
+        # string and no token_budget may be set. A substring match would accept
+        # `{"objective": "...", "token_budget": 5000}` and any longer objective.
+        want_obj="Complete approved plan ${HO_PLAN} through an open PR"
+        if [[ -z "${args}" ]]; then
+            record "${LBL_GC}" "FAIL" "create_goal was called without arguments, so it has no objective"
+        elif ! obj_problem="$(jq -r --arg o "${want_obj}" '
+            if type != "object" then "the arguments are not a JSON object"
+            elif .objective != $o then "the objective is not exactly \"" + $o + "\""
+            elif has("token_budget") then "a token_budget is set (" + (.token_budget | tojson) + "); the goal never sets one"
+            else "" end' <<< "${args}" 2> /dev/null)"; then
+            record "${LBL_GC}" "inconclusive" "the create_goal arguments are not JSON, so the objective cannot be checked: ${args:0:200}"
+        elif [[ -n "${obj_problem}" ]]; then
+            record "${LBL_GC}" "FAIL" "${obj_problem}: ${args:0:200}"
+        elif [[ -n "${idx_ver}" && "${idx_create}" -lt "${idx_ver}" ]]; then
+            record "${LBL_GC}" "FAIL" "create_goal (call ${idx_create}) came before the checkpoint verify (call ${idx_ver})"
+        else
+            detail="one create_goal with ${args:0:160}"
+            [[ -n "${idx_ver}" ]] || detail="${detail} (the verify call is not visible, so its order is not shown)"
+            record "${LBL_GC}" "ok" "${detail}"
+        fi
+    fi
+
+    # Row: the checkpoint records the outcome.
+    if [[ $((n_get + n_create + n_upd)) -eq 0 ]]; then
+        record "${LBL_GK}" "inconclusive" "${no_goal} (the checkpoint records goal=${goal:-none})"
+    elif [[ "${n_create}" -eq 0 ]]; then
+        record "${LBL_GK}" "inconclusive" "no create_goal call, so a created goal is not shown (the checkpoint records goal=${goal:-none})"
+    elif [[ "${goal}" == created ]]; then
+        record "${LBL_GK}" "ok" "create_goal ran and the checkpoint records goal=created"
+    else
+        record "${LBL_GK}" "FAIL" "create_goal ran but the checkpoint records goal='${goal:-none}', expected created"
+    fi
+
+    # Row: complete only after a successful gh pr create.
+    if [[ $((n_get + n_create + n_upd)) -eq 0 ]]; then
+        record "${LBL_GP}" "inconclusive" "${no_goal}"
+    elif [[ "${n_cmp}" -eq 0 ]]; then
+        if [[ "${n_pr}" -gt 0 ]]; then
+            record "${LBL_GP}" "FAIL" "gh pr create succeeded (${n_pr}) but update_goal complete was never called"
+        else
+            record "${LBL_GP}" "inconclusive" "the run did not reach a successful gh pr create, so no completion is due (${CODEX_NOTE}; checkpoint status=${status}, phase=${phase})"
+        fi
+    elif [[ "${n_pr}" -eq 0 ]]; then
+        record "${LBL_GP}" "FAIL" "update_goal complete was called without a successful gh pr create"
+    elif [[ -z "${idx_pr}" ]]; then
+        record "${LBL_GP}" "inconclusive" "gh pr create succeeded but is not visible in the call list, so the order is not shown"
+    elif [[ "${idx_cmp}" -lt "${idx_pr}" ]]; then
+        record "${LBL_GP}" "FAIL" "update_goal complete (call ${idx_cmp}) came before gh pr create (call ${idx_pr})"
+    else
+        record "${LBL_GP}" "ok" "gh pr create (call ${idx_pr}) succeeded before update_goal complete (call ${idx_cmp})"
+    fi
+
+    # Row: complete before babysit is armed.
+    if [[ $((n_get + n_create + n_upd)) -eq 0 ]]; then
+        record "${LBL_GB}" "inconclusive" "${no_goal}"
+    elif [[ "${babysat}" == no ]]; then
+        record "${LBL_GB}" "inconclusive" "cenci babysit was never run, so the order against update_goal complete is not shown (${CODEX_NOTE})"
+    elif [[ "${n_cmp}" -eq 0 ]]; then
+        record "${LBL_GB}" "FAIL" "cenci babysit was armed but update_goal complete was never called"
+    elif [[ -z "${idx_bab}" ]]; then
+        record "${LBL_GB}" "inconclusive" "cenci babysit ran but is not visible in the call list, so the order is not shown"
+    elif [[ "${idx_cmp}" -gt "${idx_bab}" ]]; then
+        record "${LBL_GB}" "FAIL" "cenci babysit (call ${idx_bab}) was run before update_goal complete (call ${idx_cmp})"
+    else
+        record "${LBL_GB}" "ok" "update_goal complete (call ${idx_cmp}) came before cenci babysit (call ${idx_bab})"
+    fi
+}
+
+# ── Scenario: goal skip ─────────────────────────────────────────────────
+# Turn 1 seeds a goal in a thread; turn 2 resumes that thread with `apply` against
+# a RED gate. The apply must find the goal, create nothing, complete nothing and
+# stop at the baseline with the checkpoint needs-input and goal skipped-active.
+scenario_goal_skip() {
+    local state="" status="" rest="" phase="" goal="" n_get="" n_create="" n_upd="" seed_src="" seed_n seed_dir seed_thread="" resumed_thread=""
+    local -a all=("${LBL_SC}" "${LBL_SU}" "${LBL_SK}")
+    if ! ho_fixture skip red persist; then
+        rows_inconclusive "could not build the goal-skip fixture (it needs node to persist the plan)" "${all[@]}"
+        return 0
+    fi
+    seed_dir="${HO}/skip"
+    if ! reset_call_logs; then
+        rows_inconclusive "could not reset the stub call logs, so this scenario cannot be judged" "${all[@]}"
+        return 0
+    fi
+    # Turn 1: seed the goal.
+    if ! run_codex "${HO_REPO}" "$(prompt_seed)"; then
+        rows_inconclusive "the seeding turn could not run: ${CODEX_NOTE}" "${all[@]}"
+        return 0
+    fi
+    if ! collect_calls "${HO_REPO}" || ! finish_calls ""; then
+        rows_inconclusive "the tool-call lists of the seeding turn could not be written" "${all[@]}"
+        return 0
+    fi
+    if [[ "${CALLS_EXTRACT_FAILED}" -eq 1 ]]; then
+        rows_inconclusive "the seeding turn: ${CALLS_UNREADABLE_NOTE}" "${all[@]}"
+        return 0
+    fi
+    seed_src="${CALLS_SRC}"
+    seed_thread="$(thread_id_of "${EVENTS}")" || seed_thread=""
+    seed_n="$(n_calls_matching "${T_CREATE}")" || seed_n=""
+    if [[ -z "${seed_n}" ]] || [[ "${seed_n}" -eq 0 ]]; then
+        rows_inconclusive "no goal events: no create_goal call was seen in the seeding turn (${CODEX_NOTE}), so no goal exists to skip; the goal tools may not be exposed by codex exec at this version" "${all[@]}"
+        return 0
+    fi
+    if [[ -z "${seed_thread}" ]]; then
+        rows_inconclusive "seed thread id not captured: the seeding turn's event stream has no thread.started event with a thread id, so the resumed apply cannot be shown to continue the seeded thread (${CODEX_NOTE})" "${all[@]}"
+        return 0
+    fi
+    cut -f1 "${CALLS_FILE}" > "${seed_dir}.ids" || {
+        rows_inconclusive "could not record the seeding turn's calls" "${all[@]}"
+        return 0
+    }
+    # Turn 2: the resumed apply, in a new process on the same thread.
+    if ! run_apply "${HO_REPO}" "$(prompt_apply)" resume "${seed_thread}"; then
+        rows_inconclusive "the resumed apply could not run: ${CODEX_NOTE}" "${all[@]}"
+        return 0
+    fi
+    resumed_thread="$(thread_id_of "${EVENTS}")" || resumed_thread=""
+    if [[ "${resumed_thread}" != "${seed_thread}" ]]; then
+        rows_inconclusive "resumed a different thread: the seed turn's thread is '${seed_thread}' but the resumed apply reports '${resumed_thread:-no thread id}', so a goal seeded there is not shown to be the one the apply saw (${CODEX_NOTE})" "${all[@]}"
+        return 0
+    fi
+    if ! collect_calls "${HO_REPO}" "${seed_src}" || ! finish_calls "${seed_dir}.ids"; then
+        rows_inconclusive "the tool-call lists of the resumed apply could not be written" "${all[@]}"
+        return 0
+    fi
+    GOAL_SEQ_SKIP="$(calls_sequence "${CALLS_TSV}")"
+    if [[ "${CALLS_EXTRACT_FAILED}" -eq 0 ]] && { ! n_get="$(n_calls_matching "${T_GET}")" || ! n_create="$(n_calls_matching "${T_CREATE}")" \
+        || ! n_upd="$(n_calls_matching "${T_UPDATE}")"; }; then
+        rows_inconclusive "the tool-call list could not be searched" "${all[@]}"
+        return 0
+    fi
+    state="$(ho_ckpt_state)" || state=""
+    status="${state%%|*}"
+    rest="${state#*|}"
+    phase="${rest%%|*}"
+    goal="${rest#*|}"
+
+    if [[ "${CALLS_EXTRACT_FAILED}" -eq 1 ]]; then
+        # The checkpoint row below does not rest on the call lists and is still judged.
+        rows_inconclusive "${CALLS_UNREADABLE_NOTE}" "${LBL_SC}" "${LBL_SU}"
+    else
+        if [[ "${n_create}" -gt 0 ]]; then
+            record "${LBL_SC}" "FAIL" "create_goal was called ${n_create} time(s) in the resumed apply although the seeded goal was active"
+        elif [[ "${n_get}" -eq 0 ]]; then
+            record "${LBL_SC}" "inconclusive" "no get_goal call in the resumed apply, so it is not shown to have checked for a goal (${CODEX_NOTE})"
+        else
+            record "${LBL_SC}" "ok" "get_goal ran and no create_goal followed: the seeded objective was left as it was (${CODEX_NOTE})"
+        fi
+        if [[ "${n_upd}" -gt 0 ]]; then
+            record "${LBL_SU}" "FAIL" "update_goal was called ${n_upd} time(s) on a goal this run did not create"
+        elif [[ "${n_get}" -eq 0 ]]; then
+            record "${LBL_SU}" "inconclusive" "no get_goal call in the resumed apply, so it is not shown to have reached the goal step (${CODEX_NOTE})"
+        else
+            record "${LBL_SU}" "ok" "no update_goal call on the skipped goal"
+        fi
+    fi
+    if [[ -z "${state}" ]]; then
+        record "${LBL_SK}" "inconclusive" "the checkpoint could not be read after the resumed apply (${CODEX_NOTE})"
+    elif [[ "${phase}" == planned ]]; then
+        record "${LBL_SK}" "inconclusive" "the checkpoint is still planned after the resumed apply: verify did not pass, or the apply did not run (${CODEX_NOTE})"
+    elif [[ "${goal}" == skipped-active && "${status}" == needs-input ]]; then
+        record "${LBL_SK}" "ok" "red baseline: status=needs-input, phase=${phase}, goal=skipped-active"
+    else
+        record "${LBL_SK}" "FAIL" "expected status=needs-input and goal=skipped-active after a red baseline on an active goal, got status='${status}', phase='${phase}', goal='${goal:-none}'"
+    fi
+}
+
 # ── Header ──────────────────────────────────────────────────────────────
 PLUGIN_COMMIT="$(git -C "${FLOW_DIR}" rev-parse HEAD 2>/dev/null)" || PLUGIN_COMMIT="unknown"
 PLUGIN_VERSION="$(jq -r '.version // "unknown"' "${FLOW_DIR}/.codex-plugin/plugin.json" 2>/dev/null)" || PLUGIN_VERSION="unknown"
@@ -939,12 +1875,36 @@ scenario_ci
 scenario_restart
 scenario_attention
 
+rpt ""
+rpt "### Plan mode, handoff and goal lifecycle"
+table_head "scenario"
+scenario_probe
+scenario_refusal plan-mode "$(prompt_plan)" "${PLAN_MODE_LINE}" "${LBL_PM_LINE}" "${LBL_PM_CALLS}" "${LBL_PM_WRITE}"
+scenario_refusal persist "$(prompt_persist)" "${PERSIST_LINE}" "${LBL_PS_LINE}" "${LBL_PS_CALLS}" "${LBL_PS_WRITE}"
+scenario_tamper
+scenario_goal_create
+scenario_goal_skip
+if [[ -n "${GOAL_SEQ_CREATE}" ]]; then
+    rpt ""
+    rpt "Tool calls of the goal create-then-complete apply, in order (tool and the start of its arguments):"
+    rpt '```text'
+    rpt "${GOAL_SEQ_CREATE}"
+    rpt '```'
+fi
+if [[ -n "${GOAL_SEQ_SKIP}" ]]; then
+    rpt ""
+    rpt "Tool calls of the resumed goal-skip apply, in order (the seeding turn's calls removed):"
+    rpt '```text'
+    rpt "${GOAL_SEQ_SKIP}"
+    rpt '```'
+fi
+
 # ── Summary and output ──────────────────────────────────────────────────
 rpt ""
 rpt "### Summary"
 rpt ""
 rpt "- ok=${N_OK} failed=${N_FAIL} inconclusive=${N_INCONCLUSIVE} not-run=${N_NOTRUN}"
-rpt "- An inconclusive row is never a success: the procedure was not shown to have run, or nothing observable resulted. A row is judged from the fixture's state, not from the model's narration (the attention rows judge the printed decision itself)."
+rpt "- An inconclusive row is never a success: the procedure was not shown to have run, or nothing observable resulted. A row is judged from the fixture's state, not from the model's narration (the attention rows and the two refusal-line rows judge the printed text itself; the goal rows judge the tool calls in the rollout or event stream)."
 rpt "- The acceptance run needs every row above ok, on the installed plugin named in the table at the top."
 
 MISSING_REQUIRED=""

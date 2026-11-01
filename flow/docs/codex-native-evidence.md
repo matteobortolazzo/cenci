@@ -9,9 +9,10 @@ binary is written down.
 `## Resolution conclusion`).** Nothing in those sections has been observed yet. Each is a
 placeholder that the maintainer's native runs replace with sanitized runner output. A
 placeholder is never evidence, and no conclusion in `codex.md` or `adapter-contract.md` may
-cite this file until its section is filled in. The last section, "Native workflows:
-`ci-repair` and `babysit-attention`", records a different runner
-(`codex/native-workflows.test.sh`, #1236) and carries its own status line.
+cite this file until its section is filled in. The last two sections, "Native workflows:
+`ci-repair` and `babysit-attention`" and "Native workflows: Plan mode, handoff and goal
+lifecycle", record a different runner (`codex/native-workflows.test.sh`, #1236 and #1235)
+and carry their own status lines.
 
 ## How to produce a run
 
@@ -188,3 +189,126 @@ CENCI_CODEX_NATIVE=1 CENCI_CODEX_NATIVE_OUT=./native-workflows.md bash flow/code
 | Headless `babysit-attention`: both options printed, no retry option | pending native run |
 | Headless `babysit-attention`: summary names the PR, head SHA, failing check and attempt count | pending native run |
 | Headless `babysit-attention`: no `babysit stop` call, no `gh` writes, remote unchanged | pending native run |
+
+## Native workflows: Plan mode, handoff and goal lifecycle
+
+**Status: pending native run.** The same runner (`codex/native-workflows.test.sh`) now also
+covers the Plan-mode self-check, the new-process plan to apply handoff and the goal lifecycle
+(#1235). Its not-run gates, its judge and every misbehaviour it must catch are pinned in CI
+against a stub `codex` (`codex/native-workflows.gate.test.sh`), but no run against a real Codex
+binary has been recorded. Every cell below is a placeholder, not evidence, until the maintainer
+commits a sanitized run, and the interactive Plan-mode record, to the same PR as the runner.
+The acceptance criterion for this section (D7) stays unchecked until then, and the PR is not
+merged before it. Nothing in `codex.md` or `adapter-contract.md` may cite this section as
+verified before then.
+
+The goal rows need a Codex whose `codex exec` exposes the goal tools (`get_goal`, `create_goal`,
+`update_goal`). When it does not, those rows are `inconclusive` (and the run is `RESULT:
+INCONCLUSIVE`): nothing is worked around and no goal behavior is claimed.
+
+### How to produce a run
+
+```bash
+CENCI_CODEX_NATIVE=1 CENCI_CODEX_NATIVE_OUT=./native-workflows.md bash flow/codex/native-workflows.test.sh
+```
+
+- Everything in "How to produce a run" for the `ci-repair` runner above applies unchanged: install
+  the plugin from the branch under test through a local marketplace (the installed plugin's
+  procedures are the ones under test, and `codex plugin list` is printed so the two can be told
+  apart), the `not run:` gates, the `RESULT:` line and the sanitization. Record the installed
+  flow plugin's version and commit in the table below, not the runner checkout's.
+- Also needed: `node` on `PATH` (the runner persists each apply fixture's plan artifact and
+  `planned` checkpoint with the plugin's own `checkpoint.mjs`, so the apply starts in a new
+  process on exactly what the Persist step leaves; without `node` those rows are `inconclusive`).
+- `CNW_APPLY_TIMEOUT` (default `CNW_RUN_TIMEOUT` when set, else 2400 s) bounds the long `apply`
+  runs; a timeout is an `inconclusive` row naming its return code (124).
+- Each scenario gets its own ticketless implement fixture under `/var/tmp`: a bare remote whose
+  path ends in `cenci-native/fixture.git`, a clone as the launch directory, and (for the apply
+  scenarios) the persisted artifact `.plans/native-note.md` and the checkpoint
+  `.cenci/checkpoints/implement-native-note.json`. The stubbed `gh` refuses every write except
+  `gh pr create`, which succeeds (printing a PR URL) only during the goal create scenario; the
+  stubbed `cenci` logs every call, and `cenci babysit <pr>` succeeds without starting a
+  supervisor.
+- `codex exec` runs in Default mode, so the Plan-mode self-check is exercised by its refusal only.
+  Whether Plan mode itself plans without writing is recorded interactively (below).
+
+### Judging rules
+
+- `RESULT: OK` needs the five `ci-repair`/`babysit-attention` positive rows and every row of
+  this section to be `ok`, and no row failed. A run that fails nothing but leaves one unproven
+  is `RESULT: INCONCLUSIVE`.
+- **Startup-control probe**: `codex --help`, `codex exec --help` and `codex features list` are
+  scanned for a Plan or collaboration-mode option. The row is `ok` when the probe ran, whether it
+  found one or not (what it found is in the detail); it is `inconclusive` when either help text is
+  empty. A startup control that is version-verified becomes a `Followup` issue. It is not added
+  to #1235, and it does not change any procedure.
+- **Plan-mode self-check** (planning request in Default mode) and **fresh-process `persist`**:
+  the one printed line must be exactly the contract's refusal line (below, with `<target>` the
+  fixture's task slug); the run made zero tool calls (read from the session rollout and the event
+  stream); and the launch repository is byte-for-byte what it was (`git status --porcelain
+  --ignored` and the refs), so no `.cenci`, `.plans` or worktree was written. Any other text, a
+  tool call or a write is a `FAIL`; no agent message is `inconclusive`.
+
+  ```text
+  cenci: $cenci:implement plans only in Plan mode — type /plan and resend: /plan $cenci:implement <target>
+  cenci: no approved plan in this session — type /plan and resend: /plan $cenci:implement <target>
+  ```
+- **New-process `apply`**: on the runner-persisted artifact and checkpoint, `verify` passes and
+  the checkpoint advances past `planned`. With the artifact edited after approval, the apply
+  reports `plan artifact changed since approval (digest mismatch)` and writes nothing: artifact,
+  checkpoint, launch repository and remote refs unchanged, no `gh pr create`, no `cenci babysit`.
+- **Goal create then complete** (green gate, `gh pr create` succeeds): exactly one `create_goal`
+  whose objective is `Complete approved plan <path> through an open PR` for the persisted
+  artifact, after the checkpoint `verify`; the checkpoint records `goal=created`;
+  `update_goal` with status `complete` comes after `gh pr create` succeeded and before
+  `cenci babysit`. A complete without a successful `gh pr create`, before it, or after babysit
+  is a `FAIL`. Also judged here: the objective must equal
+  `Complete approved plan <path> through an open PR` exactly; any `token_budget` is a `FAIL`;
+  only `update_goal` with `status: "complete"` counts as completion; and an unreadable
+  tool-call list (a jq or extraction failure, or a zero-call result with no rollout and no
+  parsed event) is `inconclusive`, never ok.
+- **Goal skip** (a goal seeded in turn 1 of a thread, then `codex exec resume --last` with `apply`
+  against a red gate): `get_goal` ran, no `create_goal` and no `update_goal` was called, and the
+  checkpoint records `goal=skipped-active` with status `needs-input`. If the seeding turn made no
+  `create_goal` call, or the resume was rejected by the installed Codex (its rc and first stderr
+  line are in the detail), the rows are `inconclusive`.
+- **The goal rows are judged from the tool calls**, read from the session rollout
+  (`$CODEX_HOME/sessions`, only the files of the run's own directory written since it started) or
+  from the `codex exec --json` event stream, never from what the model says. A scenario in which
+  no goal call is visible in either is `inconclusive`, never a pass.
+
+### Results
+
+| Field | Value |
+|---|---|
+| Codex version | pending native run |
+| Flow plugin version / commit (installed) | pending native run |
+| Host or sandbox | pending native run |
+| Hook trust | pending native run |
+
+| Scenario | Result |
+|---|---|
+| Startup-control probe: Plan or collaboration-mode option found or not found | pending native run |
+| Plan-mode self-check in Default mode: exact refusal line, zero tool calls, nothing written | pending native run |
+| Fresh-process `persist`: exact refusal line, zero tool calls, nothing written | pending native run |
+| New-process `apply` on a runner-persisted artifact and checkpoint: `verify` passes, checkpoint advances | pending native run |
+| New-process `apply` on a tampered artifact: digest-mismatch line, zero writes | pending native run |
+| Goal create then complete: one `create_goal`, `goal=created`, `update_goal complete` after `gh pr create` and before `cenci babysit` | pending native run |
+| Goal skip: no `create_goal`, no `update_goal`, `goal=skipped-active` with status `needs-input` | pending native run |
+
+### Interactive Plan-mode record
+
+The runner cannot enter Plan mode (`codex exec` has no such switch), so the maintainer records the
+positive path in the TUI, on the same installed plugin and Codex version as the table above, and
+commits it with the run. Record what happened, including a message that differs from the
+expected one.
+
+| Step | Expected | Observed |
+|---|---|---|
+| `/plan $cenci:implement <target>` in the TUI | plans; no project file, checkpoint, `.plans` file, label, ticket or `cenci pipeline` write | pending native run |
+| `$cenci:implement persist <target>` in the same session after approving the plan | writes only the plan artifact and the checkpoint; no worktree, claim, label or GitHub write | pending native run |
+| Message when collaboration modes are disabled ("Collaboration modes are disabled") | observed text, or not observed | pending native run |
+| Message when Plan mode cannot be entered ("Plan mode unavailable right now") | observed text, or not observed | pending native run |
+
+A startup control found by the probe (or by this record) that is version-verified is filed as a
+`Followup` against the Plan-mode handoff, not added to the ticket that produced the record.

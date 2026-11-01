@@ -24,7 +24,7 @@ The staged procedures are under active development. Their intended contract is: 
 without mutations. A persist step then writes the plan artifact and its checkpoint, and a
 fresh `apply` verifies both before it updates GitHub and executes; see
 [Plan, persist and apply](#plan-persist-and-apply). Implementation uses `.cenci/checkpoints/`,
-generated `.codex/agents/*.toml`, and a native goal armed only after plan approval.
+generated `.codex/agents/*.toml`, and a native goal created only by a human-issued `apply` (see [Native goals](#native-goals)).
 Missing custom agents fall back to built-in workers with the same bounded role prompt.
 
 Refinement follows the same handoff. Plan mode asks the material questions, validates the
@@ -59,10 +59,13 @@ invoked by hand: `$cenci:ci-repair` (repair one PR's failing CI) and
   host. It never reports a failed stop as success.
 
 The opt-in runner `codex/native-workflows.test.sh` (`CENCI_CODEX_NATIVE=1`) runs both
-procedures through a real `codex exec` against a disposable fixture. Its sanitized results
-are recorded in
-[`codex-native-evidence.md`](codex-native-evidence.md#native-workflows-ci-repair-and-babysit-attention);
-that section stays "pending native run" until a maintainer commits one.
+procedures through a real `codex exec` against a disposable fixture. It also covers the
+Plan-mode self-check, the new-process plan to apply handoff and the goal lifecycle (create,
+skip when a goal exists, complete on PR). Its sanitized results are recorded in
+[`codex-native-evidence.md`](codex-native-evidence.md#native-workflows-ci-repair-and-babysit-attention)
+and
+[`codex-native-evidence.md`](codex-native-evidence.md#native-workflows-plan-mode-handoff-and-goal-lifecycle);
+each section stays "pending native run" until a maintainer commits one.
 
 The launcher exposes development entry points:
 
@@ -113,7 +116,7 @@ The Plan-mode self-check applies to the planning request only. `persist` and `ap
 
 - The Plan-mode self-check prints one line and makes no tool call, so nothing is written: `cenci: $cenci:<wf> plans only in Plan mode — type /plan and resend: /plan $cenci:<wf> <target>`. A `persist` or `apply` sent while Plan mode is still active is refused with `leave Plan mode and resend`.
 - `persist` in a session with no Plan-mode-approved plan for that workflow and target (for example a fresh Default-mode session launched with `cenci run <wf> persist <target>`) makes no tool call and writes nothing: `cenci: no approved plan in this session — type /plan and resend: /plan $cenci:<wf> <target>`.
-- Codex itself can refuse `/plan`: it reports "Collaboration modes are disabled" when the feature is off and "Plan mode unavailable" when Plan mode cannot be entered right now. cenci does not plan in Default mode as a fallback; enable collaboration modes or update Codex, then resend. The native evidence for these messages is tracked in #1235.
+- Codex itself can refuse `/plan`: it reports "Collaboration modes are disabled" when the feature is off and "Plan mode unavailable" when Plan mode cannot be entered right now. cenci does not plan in Default mode as a fallback; enable collaboration modes or update Codex, then resend. The native evidence for these messages is tracked in [`codex-native-evidence.md`](codex-native-evidence.md#native-workflows-plan-mode-handoff-and-goal-lifecycle), pending the maintainer's native run.
 - `require-runtime.sh` stops the persist and apply steps before any write when Node.js 18 or newer is missing: `cenci: Codex workflow runtime unavailable — Node.js 18+ not found on PATH (found: <none|unparseable|version>). Install Node.js 18 or newer, then rerun; no checkpoint, workflow, or GitHub state was changed.`
 - `checkpoint.mjs verify <path> <workflow> <target>` is read-only and stops `apply` before any write with one stderr line of the form `checkpoint: <file>: <problem>; <remedy>`. The `<problem>; <remedy>` part is one of these (exit 3 for the first, exit 2 for the rest):
   - `no checkpoint found; no approved plan was persisted — plan in Plan mode, then persist`
@@ -131,6 +134,17 @@ The Plan-mode self-check applies to the planning request only. `persist` and `ap
 A Claude Code `.plans/<id>-<slug>.md` file with no Codex checkpoint is not an approved plan: Codex `apply` stops with zero writes and tells you to plan in Codex. Planning again over a checkpoint whose `status` is `planned` (approved, never applied) or `complete` (a finished run keeps its last real phase, such as `pr`) replaces it; a run in flight (`status` `running` or `needs-input`) is refused with its resume `apply` command, and clearing it takes an explicit, user-run `checkpoint.mjs clear` (see step 3). `apply` never clears a checkpoint: when it stops on `verify` because of a leftover or terminal checkpoint, run that `clear` yourself, then plan and persist again.
 
 **Unattended launches.** Babysit's `address-review` and dispatch's `implement` launch Codex without a human in Plan mode, so they show the self-check line and end their turn instead of planning. That is intended: approving a plan always needs a person, and before this handoff those launches did not reliably plan either. Plan and persist in an attended session, then let `cenci run <workflow> apply <target> --agent codex` resume unattended.
+
+## Native goals
+
+Implement and maintain use Codex's `get_goal`, `create_goal` and `update_goal` through one **Goal lifecycle** contract in [`skills/codex-runtime/SKILL.md`](../skills/codex-runtime/SKILL.md); their `codex.md` companions reference its create, stop and complete steps and never restate them.
+
+- **Create.** Only a human-issued `apply` creates a goal, after `verify` passes, with the objective `Complete approved plan <path> through an open PR` (`<path>` is the checkpoint's repo-relative `planPath`; no `token_budget` is set). A launch started by cenci automation cannot create one: no cenci automation (dispatch, babysit, ci-repair, babysit-attention) issues `apply`, so only a human-started `apply`, attended or not, creates a goal. A `cenci run <workflow> apply <target> --agent codex` that you start yourself counts as human-started even though it then runs unattended (see Unattended launches above).
+- **Existing goal or no tools.** If `get_goal` reports a goal that is not `complete`, the run leaves it unchanged, creates none and continues on checkpoint state alone, except this run's own goal on a resumed `apply` (Create step 2). Without goal tools it uses checkpoint-only recovery. The outcome is recorded in the checkpoint's `goal` field: `created`, `skipped-active` or `unavailable`.
+- **Stop.** A question, a red baseline, a native-tool error (a goal tool error included) or a budget or usage limit runs `checkpoint.mjs block` and leaves the goal as it is. The unfinished state stays in the checkpoint. cenci never invents a clear or pause operation; a pause or blocked status is used only through a transition the running client exposes, under that client's own conditions.
+- **Complete.** A goal this run created is completed with `update_goal` only after a successful `gh pr create` (and, in maintain, a mergeability check confirmed not `CONFLICTING` (an unresolved `UNKNOWN` runs no complete step)), before babysit is armed. A failed `gh pr create` never completes it, and babysit through merge is never part of the objective.
+
+The nine behavior cases are pinned by `codex/workflows.test.sh`. The goal tool calls themselves exist only in native Codex, so they are judged in the opt-in native run, whose record is tracked in [`codex-native-evidence.md`](codex-native-evidence.md#native-workflows-plan-mode-handoff-and-goal-lifecycle), pending the maintainer's native run.
 
 ## Workflow runtime
 

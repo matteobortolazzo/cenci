@@ -17,7 +17,7 @@
 #      `lastCompletedGate` untouched.
 #   4. procedure-text — flow/skills/implement/codex.md documents the
 #      run-gate.sh invocation, GATE_STATUS interpretation, the stop
-#      procedure (checkpoint.mjs block + goal-clear), and worktree/branch
+#      procedure (checkpoint.mjs block + goal left unchanged), and worktree/branch
 #      retention on failure (see docs/plan-fidelity.md and #555's Files to
 #      Modify).
 #
@@ -139,8 +139,8 @@ assert_contains "${codex_content}" '`GATE_STATUS=red` → stop as **gate failed*
 assert_contains "${codex_content}" 'non-zero exit with no `GATE_STATUS=` line → stop as **gate could not' \
   "procedure-text: codex.md must document a non-zero exit with no GATE_STATUS= line as the distinct 'gate could not run' stop condition"
 
-assert_contains "${codex_content}" 'run `checkpoint.mjs block`, clear the goal, retain the worktree and branch' \
-  "procedure-text: codex.md must document the stop procedure -- checkpoint.mjs block, clearing the goal, and retaining the worktree/branch for recovery"
+assert_contains "${codex_content}" 'run `checkpoint.mjs block`, leave the goal as it is (**Goal lifecycle** stop step), retain the worktree and branch' \
+  "procedure-text: codex.md must document the stop procedure -- checkpoint.mjs block, the goal left unchanged per the Goal lifecycle stop step, and retaining the worktree/branch for recovery"
 
 assert_contains "${codex_content}" 're-run `cenci run implement apply`' \
   "procedure-text: codex.md must tell the user to fix the baseline gate and re-run cenci run implement apply"

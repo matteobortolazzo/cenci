@@ -60,7 +60,7 @@ for a split child) — model capability never raises the verdict. Every implemen
 in `apply` is briefed verbatim that its working budget is about half of its model's advertised
 context window, that automatic compaction is disabled, and that a low-context state is reported
 as `Context: low — done: …; remaining: …`; a worker reporting that line, or a lane needing a
-second resume, is reported to the root as a split signal and stops the run — never retried
+second resume, is reported to the root as a split signal and stops the run: run `checkpoint.mjs block` per the **Goal lifecycle** stop step — never retried
 with a longer lane.
 In ticket mode, `/plan` also runs the read-only `cenci pipeline plan-check <id>` (ticketless mode skips it); when its `pipeline.worktreePath` is non-empty, append `Leftover worktree <path> (branch <branch>) — Phase 2 fails with ErrWorktreeExists until a human removes it` to the planner's context, so the new plan records it under `### Risks`.
 If that `plan-check` fails, add `plan-check unavailable: <error>` to the planner's context under `### Risks` and continue: `/plan` is read-only and never stops on it.
@@ -121,7 +121,7 @@ A call that exits non-zero, or prints empty or unparseable output, stops the run
 On a resume the monotonic `plan --approve` and `execute` calls run unchanged and return no-op `warnings[]`; show them in the status update and never treat them as failures.
 
 In normal apply mode `verify` has already proved the persisted plan: a new-plan apply uses the file the persist step wrote at `resolved.planPath` and apply never rewrites it, while a saved-plan apply registers `plan-check`'s file only when it equals `resolved.planPath` (the identity rule in the resume routing block). The three-heading check ran in the persist step, so apply neither writes the plan nor repeats that check. In ticket mode run `cenci pipeline prepare <id>`, `cenci pipeline plan <id>`, `cenci pipeline plan <id> --approve` and `cenci pipeline artifact <id> --plan <plan-path>` in that order, where `<plan-path>` is the `.plans/<id>-<slug>.md` the persist step wrote on a new-plan apply, or the saved plan file from `artifacts[0]` of the `plan-check` result (the picked file after a `multiple` choice) on a saved-plan apply.
-Then advance the checkpoint before any worktree call: `checkpoint.mjs advance` to `worktree` on a new-plan apply, or to `verify`'s `nextPhase` on an attach route, never `init` (the persist step already initialized it, and a compatible `init` returns the existing state unchanged), so a crash after this point resumes through the attach route.
+Then advance the checkpoint before any worktree call, after running the **Goal lifecycle** create step (`<path>` is `verify`'s repo-relative `planPath`) and passing its outcome as `--goal`: `checkpoint.mjs advance` to `worktree` on a new-plan apply, or to `verify`'s `nextPhase` on an attach route, never `init` (the persist step already initialized it, and a compatible `init` returns the existing state unchanged), so a crash after this point resumes through the attach route.
 Then create the worktree: in ticket mode run `cenci pipeline worktree <id> --slug <slug>` (the `.worktrees/<id>-<slug>` naming), or `cenci pipeline worktree <id> --attach <worktreePath>` instead of `--slug` on an attach route, which applies only when `pipeline.worktreeRegistered` is true; ticketless mode creates it with git directly under `.worktrees/`.
 On an attach route print exactly one line after attaching: `Resuming #<id> from stage <stage> in <worktreePath> (branch <branch>, <n> commits ahead of main, <m> uncommitted files)`, with `<n>` from `git -C <worktreePath> rev-list --count main..HEAD` and `<m>` from the line count of `git -C <worktreePath> status --short`; if either count command fails (for example there is no local `main`), stop the resume with the git error and never guess a count.
 When `pipeline.worktreePath` is non-empty but `pipeline.worktreeRegistered` is false no attach route is taken: if the directory is gone, print `Recorded worktree <worktreePath> is gone — creating a fresh one`, run `--slug` and use no resume brief; if the directory still exists, run `--slug` and, on `ErrWorktreeExists` (a leftover directory, or the recorded branch still existing locally), stop naming that directory or branch and never remove the directory or delete the branch.
@@ -139,15 +139,14 @@ resolved target run `( cd "<abs-worktree-path>" && sh "${PLUGIN_ROOT}/hooks/scri
 `GATE_STATUS=red` → stop as **gate failed**, capturing the resolved slug (or "top-level") and
 the command's output; a non-zero exit with no `GATE_STATUS=` line → stop as **gate could not
 run** (a script/config error, e.g. missing `jq`, malformed config, bad project path), capturing
-the same slug and output. Either stop: run `checkpoint.mjs block`, clear the goal, retain the worktree and branch, report
+the same slug and output. Either stop: run `checkpoint.mjs block`, leave the goal as it is (**Goal lifecycle** stop step), retain the worktree and branch, report
 the distinct diagnostic plus its captured output, and tell the user to fix the baseline gate
 and re-run `cenci run implement apply`.
 The captured output above shows at most `cenci.gateOutputLines` trailing lines (default 120) of
 the gate command's combined stdout+stderr; a red gate's output also carries a `GATE_LOG=<absolute
 path>` line where the full untruncated output is retrievable — locate the failing detail there
 with the client's search tool rather than assuming the truncated tail already contains everything.
-Arm
-the native goal and implement test-first using the execution procedure below.
+Then implement test-first using the execution procedure below.
 
 **Implementation dispatch (apply only).** Resolve `isUiTicket` using the `frontend-classification`
 reference skill against the ticket/task title and requirements in the persisted plan;
@@ -404,9 +403,8 @@ Then commit, push, measure the final diff with
 section carrying the acceptance table and verdict (for a UI ticket, add the gist evidence
 lines after the upload and re-run the verdict with `--ui`). A PR one size above its ticket is
 flagged in the body, in the checklist, and to the founder in the final summary, and must not be
-merged on green checks alone. Clear the goal
-before any question/error and after PR creation. If `gh pr create` fails because a pull request for the branch already exists, run `gh pr view <branch> --json url,number,state` and treat it as a successful create only when it succeeds with a non-empty url and number and state `OPEN`; otherwise stop and report the original `gh pr create` error.
-After a successful PR creation (never on a failed `gh pr create`; a recovered "already exists" counts as a success), record it in ticket mode with `cenci pipeline artifact <id> --pr <pr-url> --pr-number <n>` (if that call fails after the PR was created, the stop message prints the PR URL), then archive the consumed plan file instead of deleting it. `.plans/` lives
+merged on green checks alone. If `gh pr create` fails because a pull request for the branch already exists, run `gh pr view <branch> --json url,number,state` and treat it as a successful create only when it succeeds with a non-empty url and number and state `OPEN`; otherwise stop and report the original `gh pr create` error. That stop runs `checkpoint.mjs block` at `pr` and the **Goal lifecycle** stop step.
+After a successful PR creation (never on a failed `gh pr create`; a recovered "already exists" counts as a success), run the **Goal lifecycle** complete step, then record it in ticket mode with `cenci pipeline artifact <id> --pr <pr-url> --pr-number <n>` (if that call fails after the PR was created, the stop message prints the PR URL), then archive the consumed plan file instead of deleting it. `.plans/` lives
 only in the main checkout (repo root), not in the worktree, so anchor the command to
 `<repo-root>` (the main checkout containing `.worktrees/` — resolve via `git -C <worktree-path>
 rev-parse --path-format=absolute --git-common-dir` if needed, not the worktree itself). A single
@@ -427,8 +425,7 @@ stop every background shell this run started that is still running
 in-flight shells at turn end it keeps cenci-watch holding the session at `running`
 instead of `done` (#698/#699), which nothing later clears. The babysit launch below is
 exempt: it detaches its own supervisor, so its launching shell exits normally. Then,
-as the final step once the goal is
-cleared, hand the open PR to the persistent supervisor so it carries the PR to merge and does
+as the final step once the complete step has run (babysit is outside the goal objective), hand the open PR to the persistent supervisor so it carries the PR to merge and does
 the final `In Review` → `Implemented` relabel: resolve the watch interval from
 `.cenci/config.json`'s optional `babysitInterval` via
 `${PLUGIN_ROOT}/hooks/scripts/resolve-babysit-interval.sh` (top-level, or the affected
