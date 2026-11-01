@@ -67,6 +67,26 @@ var basePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9/_-]*$`)
 var containerID = regexp.MustCompile(`^[a-f0-9]{12,64}$`)
 
 func LoadConfig(path string) (Config, error) {
+	c, err := decodeConfig(path)
+	if err != nil {
+		return c, err
+	}
+	return c, c.Validate()
+}
+
+// LoadSetupConfig reads a config for `cenci incident setup`: the same strict
+// decode and the same worker policy as LoadConfig, but without the enabled and
+// auth gates, because setup runs before the worker is enabled and exists to
+// propose the auth section. A present auth section is still decoded strictly.
+func LoadSetupConfig(path string) (Config, error) {
+	c, err := decodeConfig(path)
+	if err != nil {
+		return c, err
+	}
+	return c, c.validatePolicy()
+}
+
+func decodeConfig(path string) (Config, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return Config{}, err
@@ -84,7 +104,7 @@ func LoadConfig(path string) (Config, error) {
 	} else if err != io.EOF {
 		return c, err
 	}
-	return c, c.Validate()
+	return c, nil
 }
 
 func (c Config) Validate() error {
@@ -92,11 +112,17 @@ func (c Config) Validate() error {
 		return fmt.Errorf("incident worker is disabled; set enabled explicitly")
 	}
 	if c.Auth == nil {
-		return fmt.Errorf("no explicit worker identity is configured: add an auth section (see the \"Worker identity\" section of watch/docs/incident-worker.md)")
+		return fmt.Errorf("no explicit worker identity is configured: add an auth section (see the \"Worker identity\" section of watch/docs/incident-worker.md), or run cenci incident setup --config <path> to preview it")
 	}
 	if err := c.Auth.Validate(); err != nil {
 		return err
 	}
+	return c.validatePolicy()
+}
+
+// validatePolicy holds every check that does not concern the enabled flag or
+// the auth section.
+func (c Config) validatePolicy() error {
 	if !filepath.IsAbs(c.StateDir) || c.Concurrency < 1 || c.Concurrency > 16 || c.TimeoutSeconds < 1 || c.TimeoutSeconds > 86400 || c.MaxAttempts < 1 || c.MaxAttempts > 10 || c.BudgetUSD < 0.03 || c.BudgetUSD > 10000 || math.IsInf(c.BudgetUSD, 0) || math.IsNaN(c.BudgetUSD) {
 		return fmt.Errorf("invalid state directory or execution limits")
 	}

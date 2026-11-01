@@ -137,13 +137,119 @@ func TestConfigWithoutAuthIsRefusedWithMigrationMessage(t *testing.T) {
 			if err == nil {
 				t.Fatal("config without an explicit worker identity accepted")
 			}
-			for _, want := range []string{"no explicit worker identity is configured", "Worker identity", "watch/docs/incident-worker.md"} {
+			for _, want := range []string{"no explicit worker identity is configured", "Worker identity", "watch/docs/incident-worker.md", "cenci incident setup --config"} {
 				if !strings.Contains(err.Error(), want) {
 					t.Fatalf("missing %q in %v", want, err)
 				}
 			}
 		})
 	}
+}
+
+// writeSetupConfig writes validConfig, as an operator has it before running
+// setup (not yet enabled, no auth section), with the given edits applied.
+func writeSetupConfig(t *testing.T, edit func(*Config), rawAuth string) string {
+	t.Helper()
+	c := validConfig(t)
+	c.Enabled = false
+	c.Auth = nil
+	if edit != nil {
+		edit(&c)
+	}
+	b, err := json.Marshal(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(b, &doc); err != nil {
+		t.Fatal(err)
+	}
+	delete(doc, "auth")
+	if rawAuth != "" {
+		doc["auth"] = json.RawMessage(rawAuth)
+	}
+	if b, err = json.Marshal(doc); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "config.json")
+	put(t, path, string(b))
+	return path
+}
+
+func TestSetupConfigLoadsWithoutAuthButEnforcesPolicy(t *testing.T) {
+	const secret = "s3cr3t-never-echoed"
+	t.Run("disabled-config-without-auth-loads", func(t *testing.T) {
+		path := writeSetupConfig(t, nil, "")
+		if _, err := LoadConfig(path); err == nil {
+			t.Fatal("control: the run loader must still refuse a disabled config without auth")
+		}
+		c, err := LoadSetupConfig(path)
+		if err != nil {
+			t.Fatalf("setup refused a config that only lacks enabled and auth: %v", err)
+		}
+		if c.Auth != nil || c.Namespace != "contoso.servicebus.windows.net" || c.Queue != "alerts" || len(c.Resources) != 1 {
+			t.Fatalf("setup config decoded as %+v", c)
+		}
+	})
+	t.Run("null-auth-loads", func(t *testing.T) {
+		c, err := LoadSetupConfig(writeSetupConfig(t, nil, "null"))
+		if err != nil || c.Auth != nil {
+			t.Fatalf("null auth: %+v %v", c.Auth, err)
+		}
+	})
+	t.Run("present-auth-is-kept", func(t *testing.T) {
+		c, err := LoadSetupConfig(writeSetupConfig(t, nil, `{"mode":"servicePrincipalCertificate","tenantId":"`+testTenantID+`","clientId":"`+testClientID+`","certificatePath":"/etc/cenci/w.pem"}`))
+		want := AuthConfig{Mode: AuthModeCertificate, TenantID: testTenantID, ClientID: testClientID, CertificatePath: "/etc/cenci/w.pem"}
+		if err != nil || c.Auth == nil || *c.Auth != want {
+			t.Fatalf("auth decoded as %+v (%v), want %+v", c.Auth, err, want)
+		}
+	})
+	t.Run("present-auth-still-decodes-strictly", func(t *testing.T) {
+		_, err := LoadSetupConfig(writeSetupConfig(t, nil, `{"mode":"servicePrincipalCertificate","tenantId":"`+testTenantID+`","clientId":"`+testClientID+`","certificatePath":"/etc/w.pem","clientSecret":"`+secret+`"}`))
+		if err == nil || !strings.Contains(err.Error(), "auth.clientSecret") || strings.Contains(err.Error(), secret) {
+			t.Fatalf("want an error naming auth.clientSecret without its value, got %v", err)
+		}
+	})
+	for name, edit := range map[string]func(*Config){
+		"zero-concurrency":   func(c *Config) { c.Concurrency = 0 },
+		"ambiguous-broker":   func(c *Config) { c.Topic = "topic" },
+		"unsafe-namespace":   func(c *Config) { c.Namespace = "evil.test/path.servicebus.windows.net" },
+		"missing-workflow":   func(c *Config) { c.Resources[0].Workflow = "" },
+		"no-resources":       func(c *Config) { c.Resources = nil },
+		"relative-state":     func(c *Config) { c.StateDir = "state" },
+		"bad-workspace":      func(c *Config) { c.Resources[0].Workspace = "not-a-uuid" },
+		"wrong-runtime":      func(c *Config) { c.Agent.Runtime = "sh" },
+		"path-traversal":     func(c *Config) { c.Resources[0].Runbooks = []string{"../secret"} },
+		"duplicate-resource": func(c *Config) { c.Resources = append(c.Resources, c.Resources[0]) },
+	} {
+		t.Run("policy-"+name, func(t *testing.T) {
+			if _, err := LoadSetupConfig(writeSetupConfig(t, edit, "")); err == nil {
+				t.Fatal("a config that breaks the worker policy was accepted for setup")
+			}
+		})
+	}
+	t.Run("unknown-top-level-field", func(t *testing.T) {
+		path := writeSetupConfig(t, nil, "")
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		put(t, path, strings.Replace(string(b), `{`, `{"surprise":1,`, 1))
+		if _, err := LoadSetupConfig(path); err == nil {
+			t.Fatal("unknown config field accepted")
+		}
+	})
+	t.Run("trailing-value", func(t *testing.T) {
+		path := writeSetupConfig(t, nil, "")
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		put(t, path, string(b)+`{}`)
+		if _, err := LoadSetupConfig(path); err == nil {
+			t.Fatal("trailing JSON value accepted")
+		}
+	})
 }
 
 func TestDisabledConfigReportsDisabledBeforeMissingAuth(t *testing.T) {
