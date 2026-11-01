@@ -594,6 +594,29 @@ const (
 	OpenPRProbeUnreadable OpenPRProbe = "unreadable"
 )
 
+// MilestoneProbe classifies the collector's read of one issue's `milestone` JSON
+// field (#1385) into a closed set, so a missing or malformed value is never
+// folded into "no milestone" (watch/docs/go-gotchas.md #598,
+// watch/docs/error-handling.md #628). MilestoneProbeUnknown is the zero value
+// ("") so every Ticket literal that never set the field is read as unknown: it
+// is ignored when the repo has no milestone filter and holds the ticket (fails
+// closed) when it has one. collectRepoTickets always stamps the field
+// explicitly.
+type MilestoneProbe string
+
+const (
+	// MilestoneProbeUnknown is the zero value: the milestone key was missing or
+	// its value was not a JSON null or an object with a positive integer
+	// `number`. The milestone is not known, which is neither "none" nor a match.
+	MilestoneProbeUnknown MilestoneProbe = ""
+	// MilestoneProbeNone means gh reported an explicit JSON null: the issue
+	// verifiably has no milestone.
+	MilestoneProbeNone MilestoneProbe = "none"
+	// MilestoneProbePresent means gh reported a milestone object with a positive
+	// integer `number`; Ticket.Milestone carries it.
+	MilestoneProbePresent MilestoneProbe = "present"
+)
+
 // RecordedLaunch is the sandbox launch a ticket's `working` claim recorded in
 // its pipeline state (`session.launchId`/`container`/`runtime`, #1292),
 // collector-filled from the same state-file read as Stage. It holds the raw
@@ -643,6 +666,15 @@ type Ticket struct {
 	Assignees []string // GitHub logins; dispatch requires exactly CurrentUser
 	HasOpenPR bool     // an open linked PR exists
 	Agent     string   // resolved from an `agent:<name>` label, else ""
+
+	// Milestone is the repo-local milestone number (never the title or global
+	// ID), meaningful only when MilestoneProbe is MilestoneProbePresent
+	// (collector-filled, #1385). The machine-local dispatch filter keys on this
+	// number alone.
+	Milestone int
+	// MilestoneProbe classifies how Milestone was obtained (collector-filled,
+	// #1385; mirrors StageProbe above). The zero value is unknown.
+	MilestoneProbe MilestoneProbe
 
 	// Stage is the ticket's persisted `cenci pipeline` stage, verbatim
 	// (collector-filled, #732; mirrors Plan.CommitsBehind above). Set

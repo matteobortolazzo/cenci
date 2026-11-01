@@ -3,10 +3,13 @@ package dispatch
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -441,3 +444,392 @@ func TestCombinedTickLastErrorNotSticky(t *testing.T) {
 // runControllerCompileCheck pins fakeController to the real run.Controller
 // interface at compile time.
 var _ run.Controller = fakeController{}
+
+// -- #1385: machine-local pickup filters reload every pass ---------------------
+
+// filterLoop is a real-git, fake-gh fixture (setupFilterPass) driven through a
+// real config file, so each pass reloads the filters from disk like production.
+type filterLoop struct {
+	path string
+	dir  string
+}
+
+func newFilterLoop(t *testing.T, snap watch.StateSnapshot, issues ...filterPassIssue) filterLoop {
+	t.Helper()
+	cfg := setupFilterPass(t, snap, issues...)
+	return filterLoop{path: filepath.Join(t.TempDir(), "config.json"), dir: cfg.Repos[0].Dir}
+}
+
+// write replaces the config file; filters is the raw JSON value of the repo's
+// "filters" key, or "" for an entry without one.
+func (f filterLoop) write(t *testing.T, filters string) {
+	t.Helper()
+	field := ""
+	if filters != "" {
+		field = `,"filters":` + filters
+	}
+	body := fmt.Sprintf(`{"dispatch":{"loopEnabled":true,"repos":[{"repo":"o/r","dir":%q,"session":"test-session"%s}]}}`, f.dir, field)
+	writeFile(t, f.path, body)
+}
+
+const (
+	filterMilestone3 = `{"milestones":[3]}`
+	filterMilestone7 = `{"milestones":[7]}`
+	// filterTypo is a misspelled key: it must fail the load, never read as
+	// "unrestricted".
+	filterTypo = `{"milestone":[3]}`
+)
+
+func assertFilterDispatched(t *testing.T, log string, number int) {
+	t.Helper()
+	if want := fmt.Sprintf("o/r#%d dispatch (", number); !strings.Contains(log, want) {
+		t.Errorf("log lacks a dispatch line %q:\n%s", want, log)
+	}
+}
+
+func assertFilterSkipped(t *testing.T, log, reason string) {
+	t.Helper()
+	if want := "o/r#42 skip: " + reason; !strings.Contains(log, want) {
+		t.Errorf("log lacks the skip line %q:\n%s", want, log)
+	}
+}
+
+func TestDispatchTickFilterEditChangesDecisionsOnNextPass(t *testing.T) {
+	loop := newFilterLoop(t, watch.StateSnapshot{}, filterPassIssue{number: 42, milestone: 3})
+	spawned := recordSpawns(t)
+	prior := 0
+	var buf bytes.Buffer
+
+	loop.write(t, filterMilestone3)
+	if err := dispatchTick(loop.path, fakeController{}, &fakeMutator{}, &buf, &prior, ""); err != nil {
+		t.Fatalf("dispatchTick under milestone 3: %v\n%s", err, buf.String())
+	}
+	assertFilterDispatched(t, buf.String(), 42)
+	if !reflect.DeepEqual(*spawned, []string{"42"}) || prior != 1 {
+		t.Fatalf("spawned %v prior %d, want ticket 42 spawned once", *spawned, prior)
+	}
+
+	// The operator re-points this machine at milestone 7; no restart.
+	loop.write(t, filterMilestone7)
+	buf.Reset()
+	if err := dispatchTick(loop.path, fakeController{}, &fakeMutator{}, &buf, &prior, ""); err != nil {
+		t.Fatalf("dispatchTick under milestone 7: %v\n%s", err, buf.String())
+	}
+	assertFilterSkipped(t, buf.String(), "filter: milestone 3 not in [7]")
+	if len(*spawned) != 1 || prior != 1 {
+		t.Errorf("spawned %v prior %d after the edit, want no further dispatch", *spawned, prior)
+	}
+}
+
+func TestDispatchTickFilterBadEditSkipsPassAndCorrectedFileDispatchesAgain(t *testing.T) {
+	loop := newFilterLoop(t, watch.StateSnapshot{}, filterPassIssue{number: 42, milestone: 3})
+	spawned := recordSpawns(t)
+	mut := &fakeMutator{}
+	prior := 0
+	var buf bytes.Buffer
+
+	loop.write(t, filterMilestone3)
+	if err := dispatchTick(loop.path, fakeController{}, mut, &buf, &prior, ""); err != nil {
+		t.Fatalf("baseline dispatchTick: %v\n%s", err, buf.String())
+	}
+	edits := len(mut.labelEdits)
+
+	loop.write(t, filterTypo)
+	buf.Reset()
+	err := dispatchTick(loop.path, fakeController{}, mut, &buf, &prior, "")
+	if !errors.Is(err, errConfigReload) {
+		t.Fatalf("bad filter edit returned %v, want errConfigReload", err)
+	}
+	for _, want := range []string{"dispatch: loading config:", "filters.milestone"} {
+		if !strings.Contains(buf.String(), want) {
+			t.Errorf("log lacks %q:\n%s", want, buf.String())
+		}
+	}
+	if strings.Contains(buf.String(), "o/r#42") {
+		t.Errorf("a skipped pass must record no decisions:\n%s", buf.String())
+	}
+	if len(*spawned) != 1 || prior != 1 || len(mut.labelEdits) != edits {
+		t.Errorf("skipped pass changed state: spawned %v prior %d edits %d (was %d)", *spawned, prior, len(mut.labelEdits), edits)
+	}
+
+	loop.write(t, filterMilestone3)
+	buf.Reset()
+	if err := dispatchTick(loop.path, fakeController{}, mut, &buf, &prior, ""); err != nil {
+		t.Fatalf("dispatchTick after the correction: %v\n%s", err, buf.String())
+	}
+	assertFilterDispatched(t, buf.String(), 42)
+	if len(*spawned) != 2 || prior != 2 {
+		t.Errorf("spawned %v prior %d after the correction, want dispatch restored", *spawned, prior)
+	}
+}
+
+// syncBuffer is an io.Writer a test can poll while RunLoop writes to it from
+// its own goroutine.
+type syncBuffer struct {
+	mu   sync.Mutex
+	buf  bytes.Buffer
+	wake chan struct{}
+}
+
+func newSyncBuffer() *syncBuffer { return &syncBuffer{wake: make(chan struct{}, 1)} }
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	n, err := b.buf.Write(p)
+	b.mu.Unlock()
+	select {
+	case b.wake <- struct{}{}:
+	default:
+	}
+	return n, err
+}
+
+func (b *syncBuffer) count(sub string) int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return strings.Count(b.buf.String(), sub)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// waitCount blocks until sub appears at least n times in the log.
+func (b *syncBuffer) waitCount(t *testing.T, sub string, n int) {
+	t.Helper()
+	timeout := time.NewTimer(10 * time.Second)
+	defer timeout.Stop()
+	for b.count(sub) < n {
+		select {
+		case <-b.wake:
+		case <-timeout.C:
+			t.Fatalf("timed out waiting for %d x %q in the log:\n%s", n, sub, b.String())
+		}
+	}
+}
+
+// A bad reload skips the pass but does not end `cenci dispatch --interval`:
+// RunLoop keeps ticking, and the corrected file dispatches on the next pass.
+func TestDispatchTickFilterRunLoopKeepsTickingOnReloadError(t *testing.T) {
+	loop := newFilterLoop(t, watch.StateSnapshot{}, filterPassIssue{number: 42, milestone: 3})
+	stubRunFn(t, func(run.Opts, run.Controller) error { return nil })
+	loop.write(t, filterTypo)
+
+	out := newSyncBuffer()
+	done := make(chan error, 1)
+	go func() {
+		done <- RunLoop(loop.path, fakeController{}, &fakeMutator{}, 5*time.Millisecond, out, "")
+	}()
+
+	// The initial tick and at least two interval ticks all hit the bad file.
+	out.waitCount(t, "dispatch: loading config:", 3)
+	select {
+	case err := <-done:
+		t.Fatalf("RunLoop returned %v on a bad reload, want it to keep looping", err)
+	default:
+	}
+	if strings.Contains(out.String(), "o/r#42") {
+		t.Errorf("a skipped pass must record no decisions:\n%s", out.String())
+	}
+
+	loop.write(t, filterMilestone3)
+	out.waitCount(t, "o/r#42 dispatch (", 1)
+
+	// End the loop deterministically before the fixtures are torn down: a gh
+	// outage fails the next collection, which is fatal to RunLoop (only the
+	// reload sentinel is tolerated), so the goroutine returns instead of
+	// outliving the test.
+	installFakeGHOnPath(t, "exit 1\n")
+	select {
+	case err := <-done:
+		if err == nil || errors.Is(err, errConfigReload) {
+			t.Errorf("RunLoop ended with %v, want the collection failure", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("RunLoop kept running after a failed collection, want it to stop")
+	}
+}
+
+// Every other pass error stays fatal: only the reload sentinel is tolerated.
+func TestDispatchTickFilterRunLoopStaysFatalOnPassError(t *testing.T) {
+	path := seedDispatchConfig(t, t.TempDir(), "o/A")
+	installFakeGH(t, "exit 1\n")
+
+	err := RunLoop(path, fakeController{}, &fakeMutator{}, time.Hour, &bytes.Buffer{}, "")
+	if err == nil {
+		t.Fatal("RunLoop returned nil for a failed collection, want the error")
+	}
+	if errors.Is(err, errConfigReload) {
+		t.Errorf("a collection failure must not read as a config reload error: %v", err)
+	}
+}
+
+func TestCombinedTickFilterEditChangesDecisionsOnNextPass(t *testing.T) {
+	loop := newFilterLoop(t, watch.StateSnapshot{}, filterPassIssue{number: 42, milestone: 3})
+	spawned := recordSpawns(t)
+	mut := &fakeMutator{}
+	store := &memStore{}
+	attention := make(chan watch.AttentionUpdate, 2)
+	state := watch.DispatchState{DaemonRunning: true}
+	var windows []watch.WindowState
+	var headroom map[string]float64
+	prior := 0
+	var buf bytes.Buffer
+	tick := func() time.Duration {
+		defer drainAttention(attention)
+		return combinedTick(context.Background(), loop.path, fakeController{}, mut, &buf, &prior, store, attention, &state, &windows, &headroom)
+	}
+
+	loop.write(t, filterMilestone3)
+	tick()
+	assertFilterDispatched(t, buf.String(), 42)
+	if !reflect.DeepEqual(*spawned, []string{"42"}) || prior != 1 {
+		t.Fatalf("spawned %v prior %d, want ticket 42 spawned once", *spawned, prior)
+	}
+
+	loop.write(t, filterMilestone7)
+	buf.Reset()
+	tick()
+	assertFilterSkipped(t, buf.String(), "filter: milestone 3 not in [7]")
+	if len(*spawned) != 1 || prior != 1 {
+		t.Errorf("spawned %v prior %d after the edit, want no further dispatch", *spawned, prior)
+	}
+}
+
+func TestCombinedTickFilterBadEditSkipsPassAndCorrectedFileDispatchesAgain(t *testing.T) {
+	loop := newFilterLoop(t, watch.StateSnapshot{}, filterPassIssue{number: 42, milestone: 3})
+	spawned := recordSpawns(t)
+	mut := &fakeMutator{}
+	store := &memStore{}
+	attention := make(chan watch.AttentionUpdate, 2)
+	state := watch.DispatchState{DaemonRunning: true}
+	var windows []watch.WindowState
+	var headroom map[string]float64
+	prior := 0
+	var buf bytes.Buffer
+	tick := func() time.Duration {
+		return combinedTick(context.Background(), loop.path, fakeController{}, mut, &buf, &prior, store, attention, &state, &windows, &headroom)
+	}
+
+	loop.write(t, filterMilestone3)
+	tick()
+	drainAttention(attention)
+	edits := len(mut.labelEdits)
+
+	loop.write(t, filterTypo)
+	buf.Reset()
+	if got := tick(); got != loopCheckInterval {
+		t.Errorf("combinedTick returned %v on a bad filter edit, want loopCheckInterval (%v)", got, loopCheckInterval)
+	}
+	for _, want := range []string{"dispatch: loading config:", "filters.milestone"} {
+		if !strings.Contains(buf.String(), want) {
+			t.Errorf("log lacks %q:\n%s", want, buf.String())
+		}
+	}
+	if strings.Contains(buf.String(), "o/r#42") {
+		t.Errorf("a skipped pass must record no decisions:\n%s", buf.String())
+	}
+	select {
+	case got := <-attention:
+		t.Errorf("a skipped pass must push no attention update, got %+v", got)
+	default:
+	}
+	if len(*spawned) != 1 || prior != 1 || len(mut.labelEdits) != edits || len(mut.comments) != 0 {
+		t.Errorf("skipped pass changed state: spawned %v prior %d edits %d (was %d) comments %v",
+			*spawned, prior, len(mut.labelEdits), edits, mut.comments)
+	}
+
+	loop.write(t, filterMilestone3)
+	buf.Reset()
+	tick()
+	drainAttention(attention)
+	assertFilterDispatched(t, buf.String(), 42)
+	if len(*spawned) != 2 || prior != 2 {
+		t.Errorf("spawned %v prior %d after the correction, want dispatch restored", *spawned, prior)
+	}
+}
+
+// windowCallRecorder records every window mutation a pass issues through the
+// run.Controller seam (NewWindow and SetWindowOption), so a test can prove a
+// pass left the windows alone. run.Controller exposes no kill/close method, so a
+// kill is unreachable from dispatch by construction; creating or re-styling a
+// window is the only window effect dispatch has.
+type windowCallRecorder struct {
+	fakeController
+	calls []string
+}
+
+func (r *windowCallRecorder) NewWindow(session, name, shellCommand string) error {
+	r.calls = append(r.calls, "NewWindow "+session+" "+name)
+	return nil
+}
+
+func (r *windowCallRecorder) SetWindowOption(target, key, value string) error {
+	r.calls = append(r.calls, "SetWindowOption "+target+" "+key)
+	return nil
+}
+
+// Tightening the filters while a session runs leaves the session alone: the
+// window is not touched, the ticket's labels and comments are not edited, and
+// the persisted retry state is exactly what it was before the edit. The ticket
+// only stops being a candidate for new pickup. Babysit supervision is armed only
+// from a spawned run, never from dispatch, so failOnSpawn is the observable proof
+// that nothing was armed or re-armed.
+func TestCombinedTickFilterTighteningLeavesRunningSessionUntouched(t *testing.T) {
+	running := watch.StateSnapshot{Windows: []watch.WindowState{{WindowName: "42-implement", Status: "running"}}}
+	loop := newFilterLoop(t, running)
+	installFakeGHOnPath(t, `
+case "$1 $2" in
+  "issue list") printf '[{"number":42,"title":"Ticket 42","labels":[{"name":"Working"}],"assignees":[{"login":"octocat"}],"milestone":{"number":7,"title":"v7"}}]' ;;
+  "issue view") printf '{"comments":[]}' ;;
+  "api graphql") printf '`+emptyOpenPRPageJSON+`' ;;
+  "api user") printf 'octocat\n' ;;
+  *) exit 1 ;;
+esac
+`)
+	stubOOMProbe(t)
+	failOnSpawn(t)
+
+	mut := &fakeMutator{}
+	ctl := &windowCallRecorder{}
+	store := &memStore{state: ReconcileState{
+		Observations: map[string]time.Time{"o/r#42": time.Now().Add(-2 * time.Minute)},
+	}}
+	attention := make(chan watch.AttentionUpdate, 2)
+	state := watch.DispatchState{DaemonRunning: true}
+	var windows []watch.WindowState
+	var headroom map[string]float64
+	prior := 0
+	var buf bytes.Buffer
+	tick := func() {
+		combinedTick(context.Background(), loop.path, ctl, mut, &buf, &prior, store, attention, &state, &windows, &headroom)
+		drainAttention(attention)
+	}
+
+	loop.write(t, filterMilestone7)
+	tick()
+	before := store.state
+
+	loop.write(t, filterMilestone3)
+	buf.Reset()
+	tick()
+
+	assertFilterSkipped(t, buf.String(), "filter: milestone 7 not in [3]")
+	if len(mut.labelEdits) != 0 || len(mut.comments) != 0 || len(mut.ensureCalls) != 0 {
+		t.Errorf("tightening must not touch the running ticket: edits %+v comments %+v ensures %+v", mut.labelEdits, mut.comments, mut.ensureCalls)
+	}
+	if prior != 0 {
+		t.Errorf("prior = %d, want 0", prior)
+	}
+	if !reflect.DeepEqual(store.state, before) {
+		t.Errorf("retry state changed by the edit:\n before %+v\n after  %+v", before, store.state)
+	}
+	if len(windows) != 0 {
+		t.Errorf("failed-window overlay = %+v, want none for a live session", windows)
+	}
+	if len(ctl.calls) != 0 {
+		t.Errorf("tightening must not create, re-style or touch any window: %q", ctl.calls)
+	}
+}

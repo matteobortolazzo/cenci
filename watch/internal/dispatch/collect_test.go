@@ -120,6 +120,245 @@ esac
 	}
 }
 
+// -- #1385: milestone collection for the machine-local pickup filter --------
+
+// installMilestoneFakeGH installs a fake gh that serves issuesJSON for every
+// `issue list` and an empty open-PR page, and appends each invocation's argv
+// (one line per call) to the returned log file, so a test can prove how many
+// gh calls the collector made and with which flags. Any other gh subcommand
+// exits 1, so a stray per-ticket milestone read would also surface as an error.
+func installMilestoneFakeGH(t *testing.T, issuesJSON string) (callLog string) {
+	t.Helper()
+	callLog = filepath.Join(t.TempDir(), "gh-calls.log")
+	installFakeGH(t, fmt.Sprintf(`
+printf '%%s\n' "$*" >> %q
+case "$1 $2" in
+  "issue list") printf '%%s' '%s' ;;
+  "api graphql") printf '%%s' '%s' ;;
+  *) exit 1 ;;
+esac
+`, callLog, issuesJSON, emptyOpenPRPageJSON))
+	return callLog
+}
+
+func readGHCalls(t *testing.T, callLog string) []string {
+	t.Helper()
+	data, err := os.ReadFile(callLog)
+	if err != nil {
+		t.Fatalf("reading gh call log: %v", err)
+	}
+	return strings.Split(strings.TrimSpace(string(data)), "\n")
+}
+
+// TestCollectRepoTickets_MilestoneShapes covers every shape of the `milestone`
+// JSON key (#1385): a real gh object fills the number, an explicit null is "no
+// milestone", and a missing key or any malformed value is "unknown" -- without
+// failing the repo's collection. The whole repo is served by one `issue list`.
+func TestCollectRepoTickets_MilestoneShapes(t *testing.T) {
+	issue := func(number int, milestone string) string {
+		extra := ""
+		if milestone != "" {
+			extra = `,"milestone":` + milestone
+		}
+		return fmt.Sprintf(`{"number":%d,"title":"T%d","body":"","labels":[{"name":"Planned"}],"assignees":[{"login":"octocat"}]%s}`, number, number, extra)
+	}
+	cases := []struct {
+		number    int
+		milestone string // "" omits the key
+		probe     MilestoneProbe
+		want      int
+		name      string
+	}{
+		{1, `{"number":3,"title":"v3 release","description":"","dueOn":null,"id":99001}`, MilestoneProbePresent, 3, "real-shaped gh object"},
+		{2, `null`, MilestoneProbeNone, 0, "explicit null"},
+		{3, "", MilestoneProbeUnknown, 0, "missing key"},
+		{4, `"v3"`, MilestoneProbeUnknown, 0, "string value"},
+		{5, `{"title":"v3"}`, MilestoneProbeUnknown, 0, "object without number"},
+		{6, `{"number":0,"title":"v0"}`, MilestoneProbeUnknown, 0, "zero number"},
+		{7, `{"number":-4}`, MilestoneProbeUnknown, 0, "negative number"},
+		{8, `{"number":"3"}`, MilestoneProbeUnknown, 0, "string number"},
+		{9, `{"number":3.5}`, MilestoneProbeUnknown, 0, "fractional number"},
+		{10, `{"number":null}`, MilestoneProbeUnknown, 0, "null number"},
+		{11, `[3]`, MilestoneProbeUnknown, 0, "array value"},
+		{12, `7`, MilestoneProbeUnknown, 0, "bare number value"},
+		{13, `true`, MilestoneProbeUnknown, 0, "boolean value"},
+	}
+	var issues []string
+	for _, c := range cases {
+		issues = append(issues, issue(c.number, c.milestone))
+	}
+	callLog := installMilestoneFakeGH(t, "["+strings.Join(issues, ",")+"]")
+
+	tickets, err := collectRepoTickets(RepoConfig{Repo: "o/r"}, MainSyncSkipped, true, io.Discard)
+	if err != nil {
+		t.Fatalf("collectRepoTickets returned %v; a malformed milestone must never fail the repo's collection", err)
+	}
+	if len(tickets) != len(cases) {
+		t.Fatalf("got %d tickets, want %d (a malformed milestone must not drop its ticket): %+v", len(tickets), len(cases), tickets)
+	}
+	byNumber := map[int]Ticket{}
+	for _, tk := range tickets {
+		byNumber[tk.Number] = tk
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			tk, ok := byNumber[c.number]
+			if !ok {
+				t.Fatalf("ticket #%d missing", c.number)
+			}
+			if tk.MilestoneProbe != c.probe {
+				t.Errorf("MilestoneProbe = %q, want %q", tk.MilestoneProbe, c.probe)
+			}
+			if tk.Milestone != c.want {
+				t.Errorf("Milestone = %d, want %d", tk.Milestone, c.want)
+			}
+			if !equalStrings(tk.Labels, []string{"Planned"}) || !equalStrings(tk.Assignees, []string{"octocat"}) {
+				t.Errorf("a milestone shape must not disturb the other fields: %+v", tk)
+			}
+		})
+	}
+
+	calls := readGHCalls(t, callLog)
+	var issueLists int
+	for _, call := range calls {
+		switch {
+		case strings.HasPrefix(call, "issue list "):
+			issueLists++
+			if !strings.Contains(call, " --json number,title,body,labels,assignees,blockedBy,milestone ") {
+				t.Errorf("issue list argv = %q, want the --json field list ending in milestone", call)
+			}
+			if strings.Contains(call, "--milestone") || strings.Contains(call, "--label") || strings.Contains(call, "--search") {
+				t.Errorf("issue list argv = %q, must stay unfiltered (no --milestone/--label/--search)", call)
+			}
+		case strings.HasPrefix(call, "api graphql"):
+			// the open-PR inventory probe, unrelated to milestones
+		default:
+			t.Errorf("unexpected gh call %q: no per-ticket milestone lookup may be issued", call)
+		}
+	}
+	if issueLists != 1 {
+		t.Errorf("issue list ran %d times, want exactly one per repo; calls: %q", issueLists, calls)
+	}
+}
+
+// TestCollectTickets_MalformedMilestoneInOneRepoDoesNotFailTheOthers: the
+// error contract is per repo, and a malformed milestone is not an error at all.
+func TestCollectTickets_MalformedMilestoneInOneRepoDoesNotFailTheOthers(t *testing.T) {
+	installFakeGH(t, `
+case "$1 $2" in
+  "issue list")
+    case "$*" in
+      *o/bad*) printf '[{"number":1,"title":"A","milestone":"oops"}]' ;;
+      *) printf '[{"number":2,"title":"B","milestone":{"number":4}}]' ;;
+    esac ;;
+  "api graphql") printf '`+emptyOpenPRPageJSON+`' ;;
+  *) exit 1 ;;
+esac
+`)
+	tickets, err := CollectTickets([]RepoConfig{{Repo: "o/bad"}, {Repo: "o/good"}}, nil, true, io.Discard)
+	if err != nil {
+		t.Fatalf("CollectTickets returned %v, want no error", err)
+	}
+	if len(tickets) != 2 {
+		t.Fatalf("got %d tickets, want 2: %+v", len(tickets), tickets)
+	}
+	for _, tk := range tickets {
+		switch tk.Repo {
+		case "o/bad":
+			if tk.MilestoneProbe != MilestoneProbeUnknown {
+				t.Errorf("o/bad probe = %q, want unknown", tk.MilestoneProbe)
+			}
+		case "o/good":
+			if tk.MilestoneProbe != MilestoneProbePresent || tk.Milestone != 4 {
+				t.Errorf("o/good probe = %q milestone %d, want present 4", tk.MilestoneProbe, tk.Milestone)
+			}
+		}
+	}
+}
+
+// TestCollectRepoTickets_FilterExcludedIssueStillBlocksIncludedDependents:
+// collection is unfiltered, so an excluded open issue resolves from the
+// collected open set (no `gh issue view`) as a legacy `Depends on #N` target
+// and as a native blockedBy node, and the included dependents then skip on the
+// dependency gate while the excluded issue itself skips on the filter.
+func TestCollectRepoTickets_FilterExcludedIssueStillBlocksIncludedDependents(t *testing.T) {
+	const nativeBlocker = `{"nodes":[{"number":11,"state":"OPEN","url":"https://github.com/o/r/issues/11"}],"totalCount":1}`
+	issue := func(number, milestone int, body, blockedBy string) string {
+		return fmt.Sprintf(`{"number":%d,"title":"T%d","body":%q,"labels":[{"name":"Planned"}],"assignees":[{"login":"octocat"}],"milestone":{"number":%d},"blockedBy":%s}`,
+			number, number, body, milestone, blockedBy)
+	}
+	callLog := installMilestoneFakeGH(t, "["+strings.Join([]string{
+		issue(10, 3, "Depends on #11", `{"nodes":[],"totalCount":0}`),
+		issue(11, 7, "", `{"nodes":[],"totalCount":0}`),
+		issue(12, 3, "", nativeBlocker),
+	}, ",")+"]")
+
+	tickets, err := collectRepoTickets(RepoConfig{Repo: "o/r"}, MainSyncSkipped, true, io.Discard)
+	if err != nil {
+		t.Fatalf("collectRepoTickets: %v", err)
+	}
+	for _, call := range readGHCalls(t, callLog) {
+		if strings.HasPrefix(call, "issue view") {
+			t.Errorf("gh issue view ran (%q): the excluded issue must resolve from the collected set", call)
+		}
+	}
+
+	in := baseInputs()
+	in.Tickets = tickets
+	in.Config.Repos = []RepoConfig{{Repo: "o/r", Filter: RepoFilter{Milestones: []int{3}}}}
+	in.Plans = []Plan{
+		{Repo: "o/r", Path: ".plans/10.md", TicketID: 10, Status: "planned"},
+		{Repo: "o/r", Path: ".plans/11.md", TicketID: 11, Status: "planned"},
+		{Repo: "o/r", Path: ".plans/12.md", TicketID: 12, Status: "planned"},
+	}
+	assertDecisions(t, Decide(in), []wantDecision{
+		{10, ActionSkip, "waiting on dependency #11", ""},
+		{11, ActionSkip, "filter: milestone 7 not in [3]", ""},
+		{12, ActionSkip, "waiting on dependency #11", ""},
+	})
+}
+
+// TestCollectRepoTickets_MilestoneFilterKeysOnNumberNotMilestoneTitle: the same
+// issue is collected twice through the real gh path, once under milestone
+// {"number":3,"title":"v1"} and once after the milestone was renamed to
+// "v1-renamed". The decision is identical (dispatch under milestones:[3], the
+// same number-only skip reason under milestones:[4]), so the gate never reads
+// the milestone title.
+func TestCollectRepoTickets_MilestoneFilterKeysOnNumberNotMilestoneTitle(t *testing.T) {
+	decide := func(t *testing.T, milestoneTitle string, filterMilestones []int) [2]string {
+		t.Helper()
+		installMilestoneFakeGH(t, fmt.Sprintf(`[{"number":10,"title":"T10","body":"","labels":[{"name":"Planned"}],"assignees":[{"login":"octocat"}],"milestone":{"number":3,"title":%q}}]`, milestoneTitle))
+		tickets, err := collectRepoTickets(RepoConfig{Repo: "o/r"}, MainSyncSkipped, true, io.Discard)
+		if err != nil {
+			t.Fatalf("collectRepoTickets: %v", err)
+		}
+		if len(tickets) != 1 || tickets[0].MilestoneProbe != MilestoneProbePresent || tickets[0].Milestone != 3 {
+			t.Fatalf("tickets = %+v, want one ticket carrying milestone number 3", tickets)
+		}
+		in := baseInputs()
+		in.Tickets = tickets
+		in.Config.Repos = []RepoConfig{{Repo: "o/r", Filter: RepoFilter{Milestones: filterMilestones}}}
+		in.Plans = []Plan{{Repo: "o/r", Path: ".plans/10.md", TicketID: 10, Status: "planned"}}
+		decisions := Decide(in)
+		if len(decisions) != 1 {
+			t.Fatalf("decisions = %+v, want one", decisions)
+		}
+		return [2]string{string(decisions[0].Action), decisions[0].Reason}
+	}
+
+	for _, filter := range [][]int{{3}, {4}} {
+		original := decide(t, "v1", filter)
+		renamed := decide(t, "v1-renamed", filter)
+		if original != renamed {
+			t.Errorf("milestones %v: decision changed with the milestone title: %v vs %v", filter, original, renamed)
+		}
+		wantSkip := filter[0] != 3
+		if (renamed[0] == string(ActionSkip)) != wantSkip {
+			t.Errorf("milestones %v: decision = %v, want skip=%v", filter, renamed, wantSkip)
+		}
+	}
+}
+
 // TestOpenPRInventory_LargeGhOutputOnFailure_LogsBoundedAndClassifiesUnreadable
 // retargets the pre-#881 TestOpenPRIssues_LargeGhOutputOnFailure_ErrorBounded
 // (#852 review finding #3) at the new probe: `gh api graphql` stdout/stderr
@@ -167,7 +406,7 @@ esac
 // TestCollectRepoTickets_IssueListLargeGhOutputOnFailure_ErrorBounded pins
 // #852 second review round, finding B: the `gh issue list` error path was
 // newly introduced by this ticket's execGh migration and left unbounded --
-// `--json number,title,body,labels,assignees --limit 200` can return up to
+// `--json number,title,body,labels,assignees,blockedBy,milestone --limit 200` can return up to
 // 200 full issue bodies (potentially attacker-authored content on a public
 // repo), and a ghTimeout/WaitDelay kill mid-stream can leave a large partial
 // payload spliced into the propagated error verbatim. Uses

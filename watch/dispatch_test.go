@@ -1136,3 +1136,280 @@ func TestDispatchTrailingUnexpectedArg_Exits2(t *testing.T) {
 		t.Errorf("stderr = %q, want to contain %q", output, `unexpected argument "extra"`)
 	}
 }
+
+// -- machine-local pickup filters in `dispatch status` and the one-off pass (#1385) --
+
+// writeFilteredStatusConfig seeds a config.json enrolling owner/name at dir with
+// the given raw JSON "filters" value ("" omits the key).
+func writeFilteredStatusConfig(t *testing.T, dir, filters string) string {
+	t.Helper()
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	field := ""
+	if filters != "" {
+		field = `, "filters": ` + filters
+	}
+	cfgJSON := fmt.Sprintf(`{"dispatch": {"repos": [{"repo": "owner/name", "dir": %q, "session": "a-work"%s}]}}`, dir, field)
+	if err := os.WriteFile(configPath, []byte(cfgJSON), 0o600); err != nil {
+		t.Fatalf("seeding config: %v", err)
+	}
+	return configPath
+}
+
+// filterStatusJSON is the filter-related part of `dispatch status --json`, with
+// each `filters` member kept as raw JSON so a `null` can never pass for `[]`.
+type filterStatusJSON struct {
+	ConfigPath string                     `json:"configPath"`
+	Filters    map[string]json.RawMessage `json:"filters"`
+}
+
+func statusFilterJSON(t *testing.T, dir, configPath string) (filterStatusJSON, map[string]string) {
+	t.Helper()
+	useTempSocketDir(t)
+	output, err := exec.Command(binaryPath, "dispatch", "status", "--dir", dir, "--config", configPath, "--json").CombinedOutput()
+	if err != nil {
+		t.Fatalf("dispatch status --json: %v\n%s", err, output)
+	}
+	var got filterStatusJSON
+	if uerr := json.Unmarshal(output, &got); uerr != nil {
+		t.Fatalf("unmarshal status --json output %q: %v", output, uerr)
+	}
+	lists := map[string]string{}
+	for key, raw := range got.Filters {
+		lists[key] = string(raw)
+	}
+	return got, lists
+}
+
+func TestDispatchStatusFilters_JSONRestrictedCollapsesDuplicates(t *testing.T) {
+	dir := initGitRemote(t, "git@github.com:owner/name.git")
+	configPath := writeFilteredStatusConfig(t, dir,
+		`{"milestones": [3, 7, 3], "labelsAll": ["Area:Watch", "  area:watch "], "labelsAny": ["bug", "enhancement", "BUG"], "labelsNone": ["manual-only"]}`)
+
+	got, lists := statusFilterJSON(t, dir, configPath)
+
+	if got.ConfigPath != configPath {
+		t.Errorf("configPath = %q, want the selected --config %q", got.ConfigPath, configPath)
+	}
+	want := map[string]string{
+		"restricted": `true`,
+		"milestones": `[3,7]`,
+		"labelsAll":  `["Area:Watch"]`,
+		"labelsAny":  `["bug","enhancement"]`,
+		"labelsNone": `["manual-only"]`,
+	}
+	for key, w := range want {
+		if lists[key] != w {
+			t.Errorf("filters.%s = %s, want %s", key, lists[key], w)
+		}
+	}
+}
+
+func TestDispatchStatusFilters_JSONUnrestrictedShapesReportEmptyArrays(t *testing.T) {
+	cases := []struct{ name, filters string }{
+		{"omitted", ""},
+		{"empty object", `{}`},
+		{"empty lists", `{"milestones": [], "labelsAll": [], "labelsAny": [], "labelsNone": []}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := initGitRemote(t, "git@github.com:owner/name.git")
+			configPath := writeFilteredStatusConfig(t, dir, tc.filters)
+
+			got, lists := statusFilterJSON(t, dir, configPath)
+
+			if got.ConfigPath != configPath {
+				t.Errorf("configPath = %q, want %q", got.ConfigPath, configPath)
+			}
+			for key, w := range map[string]string{"restricted": `false`, "milestones": `[]`, "labelsAll": `[]`, "labelsAny": `[]`, "labelsNone": `[]`} {
+				if lists[key] != w {
+					t.Errorf("filters.%s = %s, want %s", key, lists[key], w)
+				}
+			}
+		})
+	}
+
+	t.Run("repo that is not enrolled", func(t *testing.T) {
+		dir := initGitRemote(t, "git@github.com:owner/name.git")
+		configPath := filepath.Join(t.TempDir(), "config.json")
+		other := `{"dispatch": {"repos": [{"repo": "other/repo", "dir": "/x", "filters": {"milestones": [3]}}]}}`
+		if err := os.WriteFile(configPath, []byte(other), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		got, lists := statusFilterJSON(t, dir, configPath)
+
+		if got.ConfigPath != configPath {
+			t.Errorf("configPath = %q, want %q", got.ConfigPath, configPath)
+		}
+		for key, w := range map[string]string{"restricted": `false`, "milestones": `[]`, "labelsAll": `[]`, "labelsAny": `[]`, "labelsNone": `[]`} {
+			if lists[key] != w {
+				t.Errorf("filters.%s = %s, want %s (another repo's filters must not leak)", key, lists[key], w)
+			}
+		}
+	})
+}
+
+func TestDispatchStatusFilters_HumanOutput(t *testing.T) {
+	statusOutput := func(t *testing.T, dir, configPath string) string {
+		t.Helper()
+		output, err := exec.Command(binaryPath, "dispatch", "status", "--dir", dir, "--config", configPath).CombinedOutput()
+		if err != nil {
+			t.Fatalf("dispatch status: %v\n%s", err, output)
+		}
+		return string(output)
+	}
+
+	t.Run("restricted lists each configured dimension in fixed order, then the config path", func(t *testing.T) {
+		dir := initGitRemote(t, "git@github.com:owner/name.git")
+		configPath := writeFilteredStatusConfig(t, dir,
+			`{"labelsNone": ["manual-only"], "milestones": [3, 7, 7], "labelsAny": ["bug", "enhancement"], "labelsAll": ["Area:Watch"]}`)
+
+		out := statusOutput(t, dir, configPath)
+
+		wantLines := []string{
+			"Memory headroom: 25%",
+			"Filters: milestones [3 7]",
+			`Filters: labelsAll ["Area:Watch"]`,
+			`Filters: labelsAny ["bug" "enhancement"]`,
+			`Filters: labelsNone ["manual-only"]`,
+			"Config: " + configPath,
+		}
+		last := -1
+		for _, line := range wantLines {
+			idx := strings.Index(out, line+"\n")
+			if idx < 0 {
+				t.Fatalf("status output lacks the line %q:\n%s", line, out)
+			}
+			if idx < last {
+				t.Errorf("line %q is out of order in:\n%s", line, out)
+			}
+			last = idx
+		}
+		if strings.Contains(out, "Filters: unrestricted") {
+			t.Errorf("a restricted repo must not print the unrestricted line:\n%s", out)
+		}
+	})
+
+	t.Run("only configured dimensions print", func(t *testing.T) {
+		dir := initGitRemote(t, "git@github.com:owner/name.git")
+		configPath := writeFilteredStatusConfig(t, dir, `{"milestones": [3], "labelsAll": []}`)
+
+		out := statusOutput(t, dir, configPath)
+
+		if got := strings.Count(out, "Filters: "); got != 1 || !strings.Contains(out, "Filters: milestones [3]\n") {
+			t.Errorf("want exactly the milestones line, got:\n%s", out)
+		}
+	})
+
+	t.Run("unrestricted enrolled repo", func(t *testing.T) {
+		dir := initGitRemote(t, "git@github.com:owner/name.git")
+		configPath := writeFilteredStatusConfig(t, dir, `{}`)
+
+		out := statusOutput(t, dir, configPath)
+
+		for _, want := range []string{"Filters: unrestricted\n", "Config: " + configPath + "\n"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("status output lacks %q:\n%s", want, out)
+			}
+		}
+	})
+
+	t.Run("repo that is not enrolled", func(t *testing.T) {
+		dir := initGitRemote(t, "git@github.com:owner/name.git")
+		configPath := filepath.Join(t.TempDir(), "config.json")
+		if err := os.WriteFile(configPath, []byte(`{"dispatch": {}}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		out := statusOutput(t, dir, configPath)
+
+		for _, want := range []string{"Not enrolled: owner/name\n", "Filters: unrestricted\n", "Config: " + configPath + "\n"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("status output lacks %q:\n%s", want, out)
+			}
+		}
+	})
+}
+
+// Filters come only from the selected user config: a committed
+// .cenci/config.json filter block has no effect on status.
+func TestDispatchStatusFilters_CommittedRepoConfigIsIgnored(t *testing.T) {
+	dir := initGitRemote(t, "git@github.com:owner/name.git")
+	committed := filepath.Join(dir, ".cenci", "config.json")
+	if err := os.MkdirAll(filepath.Dir(committed), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"dispatch": {"repos": [{"repo": "owner/name", "filters": {"milestones": [9], "labelsNone": ["x"]}}]}}`
+	if err := os.WriteFile(committed, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	configPath := writeFilteredStatusConfig(t, dir, "")
+
+	_, lists := statusFilterJSON(t, dir, configPath)
+	if lists["restricted"] != "false" || lists["milestones"] != "[]" || lists["labelsNone"] != "[]" {
+		t.Errorf("committed filters leaked into status: %v", lists)
+	}
+
+	output, err := exec.Command(binaryPath, "dispatch", "status", "--dir", dir, "--config", configPath).CombinedOutput()
+	if err != nil {
+		t.Fatalf("dispatch status: %v\n%s", err, output)
+	}
+	if !strings.Contains(string(output), "Filters: unrestricted\n") {
+		t.Errorf("status output = %q, want Filters: unrestricted", output)
+	}
+}
+
+// An invalid filters block makes status and the one-off pass exit 1 naming the
+// config path, repo and field path, and the pass never reaches gh: nothing
+// dispatches and no unrestricted default is used.
+func TestDispatchStatusFilters_InvalidFiltersExit1WithoutDispatching(t *testing.T) {
+	ghDir := t.TempDir()
+	marker := filepath.Join(ghDir, "gh-was-called")
+	script := "#!/bin/sh\ntouch " + marker + "\nexit 1\n"
+	if err := os.WriteFile(filepath.Join(ghDir, "gh"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	env := append(os.Environ(), "PATH="+ghDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	dir := initGitRemote(t, "git@github.com:owner/name.git")
+	configPath := writeFilteredStatusConfig(t, dir, `{"milestones": [3, 0]}`)
+	wantField := "dispatch.repos[0] (owner/name).filters.milestones[1]"
+
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{"status", []string{"dispatch", "status", "--dir", dir, "--config", configPath}},
+		{"status --json", []string{"dispatch", "status", "--dir", dir, "--config", configPath, "--json"}},
+		{"one-off pass", []string{"dispatch", "--once", "--config", configPath}},
+		{"dry run", []string{"dispatch", "--dry-run", "--config", configPath}},
+		{"interval loop", []string{"dispatch", "--interval", "1s", "--config", configPath}},
+		{"reconcile", []string{"dispatch", "--reconcile", "--config", configPath}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			useTempSocketDir(t)
+			cmd := exec.Command(binaryPath, tc.args...)
+			cmd.Env = env
+			output, err := cmd.CombinedOutput()
+
+			exitErr, ok := err.(*exec.ExitError)
+			if !ok || exitErr.ExitCode() != 1 {
+				t.Fatalf("exit = %v, want code 1\n%s", err, output)
+			}
+			for _, want := range []string{configPath, wantField} {
+				if !strings.Contains(string(output), want) {
+					t.Errorf("output lacks %q:\n%s", want, output)
+				}
+			}
+			for _, bad := range []string{"skip:", "dispatch (", "Filters:", `"filters"`} {
+				if strings.Contains(string(output), bad) {
+					t.Errorf("output must not render a decision or status (%q):\n%s", bad, output)
+				}
+			}
+			if _, err := os.Stat(marker); err == nil {
+				t.Errorf("gh was invoked: a failed filter load must stop the pass before any collection")
+			}
+		})
+	}
+}

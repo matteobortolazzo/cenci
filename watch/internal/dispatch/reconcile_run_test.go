@@ -2259,3 +2259,84 @@ func TestApplyReconcile_OOMRetryDryRunRecordsNothing(t *testing.T) {
 		t.Errorf("dry run recorded %v", store.state.OOMRetryAt)
 	}
 }
+
+// -- #1385: the machine-local pickup filter never touches reconciliation -------
+
+// A Working ticket outside this machine's filter whose session died is
+// recovered by RunReconcileOnce exactly as an unfiltered one (same label edit,
+// same attempt comment, same persisted retry state); the next dispatch pass
+// then skips the recovered ticket on the filter.
+func TestRunReconcileOnce_FilterExcludedStrandedWorkingTicketIsRecoveredThenStaysFiltered(t *testing.T) {
+	installFakeGH(t, `
+case "$1 $2" in
+  "issue list") printf '[{"number":42,"title":"Fix thing","labels":[{"name":"Working"}],"assignees":[{"login":"octocat"}],"milestone":{"number":7,"title":"v7"}}]' ;;
+  "issue view") printf '{"comments":[]}' ;;
+  "api graphql") printf '`+emptyOpenPRPageJSON+`' ;;
+  *) exit 1 ;;
+esac
+`)
+	serveChainSnapshot(t, watch.StateSnapshot{})
+	stubOOMProbe(t)
+
+	recoverWith := func(filter RepoFilter) (*fakeMutator, ReconcileState, string) {
+		t.Helper()
+		cfg := reconcileConfig()
+		cfg.Repos = []RepoConfig{{Repo: "o/r", Dir: t.TempDir(), Session: "test-session", Filter: filter}}
+		store := &memStore{state: ReconcileState{
+			Observations: map[string]time.Time{"o/r#42": time.Now().Add(-10 * time.Minute)},
+		}}
+		mut := &fakeMutator{}
+		var buf bytes.Buffer
+		if _, err := RunReconcileOnce(cfg, mut, false, &buf, store); err != nil {
+			t.Fatalf("RunReconcileOnce under filter %+v: %v\n%s", filter, err, buf.String())
+		}
+		return mut, store.state, buf.String()
+	}
+
+	filter := RepoFilter{Milestones: []int{3}}
+	filteredMut, filteredState, filteredLog := recoverWith(filter)
+	plainMut, plainState, plainLog := recoverWith(RepoFilter{})
+
+	if len(filteredMut.labelEdits) != 1 ||
+		!slices.Equal(filteredMut.labelEdits[0].add, []string{labelPlanned}) ||
+		!slices.Equal(filteredMut.labelEdits[0].remove, []string{labelWorking}) {
+		t.Fatalf("label edits = %+v, want one +Planned -Working recovery of the excluded ticket", filteredMut.labelEdits)
+	}
+	if len(filteredMut.comments) != 1 || filteredMut.comments[0].body != retryComment(1, "42", "gone") {
+		t.Fatalf("comments = %+v, want the first-attempt retry comment", filteredMut.comments)
+	}
+	if !reflect.DeepEqual(filteredMut.labelEdits, plainMut.labelEdits) || !reflect.DeepEqual(filteredMut.comments, plainMut.comments) {
+		t.Errorf("recovery under a filter differs from the unfiltered one:\n filtered %+v %+v\n plain    %+v %+v",
+			filteredMut.labelEdits, filteredMut.comments, plainMut.labelEdits, plainMut.comments)
+	}
+	if !reflect.DeepEqual(filteredState, plainState) {
+		t.Errorf("persisted retry state under a filter = %+v, want it identical to the unfiltered %+v", filteredState, plainState)
+	}
+	if strings.Contains(filteredLog, "filter:") || strings.Contains(plainLog, "filter:") {
+		t.Errorf("the reconciler must never mention the pickup filter:\n%s", filteredLog)
+	}
+
+	// The recovered ticket (labels after applying the recorded edit) is not
+	// picked up again by this machine.
+	recovered := Ticket{Repo: "o/r", Number: 42, Title: "Fix thing", Labels: []string{labelPlanned},
+		Assignees: []string{"octocat"}, Milestone: 7, MilestoneProbe: MilestoneProbePresent}
+	cfg := dispatchTestConfig()
+	cfg.Repos = []RepoConfig{{Repo: "o/r", Session: "test-session", Filter: filter}}
+	failOnSpawn(t)
+	mut := &fakeMutator{}
+	prior := 0
+	decisions, err := applyDispatch(cfg, dispatchDeps{
+		Tickets:     []Ticket{recovered},
+		Plans:       []Plan{{Repo: "o/r", Path: ".plans/42-x.md", TicketID: 42, Status: "planned"}},
+		Snapshot:    &watch.StateSnapshot{},
+		Now:         reconcileNow,
+		CurrentUser: "octocat",
+	}, fakeController{}, mut, false, io.Discard, &prior)
+	if err != nil {
+		t.Fatalf("applyDispatch: %v", err)
+	}
+	assertDecisions(t, decisions, []wantDecision{{42, ActionSkip, "filter: milestone 7 not in [3]", ""}})
+	if len(mut.labelEdits) != 0 || prior != 0 {
+		t.Errorf("the recovered ticket must not be claimed: edits %+v prior %d", mut.labelEdits, prior)
+	}
+}

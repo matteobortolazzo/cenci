@@ -67,12 +67,16 @@ type ghIssue struct {
 	// issueListJSON and drives the dependency gate.
 	BlockedBy []int
 
-	// Milestone and SubIssues (#914) are world-model fidelity only: no
-	// production code in this repo consumes either field (Q3), so there is
-	// no new `gh` route or `--json` field-switch entry for them -- they
-	// exist solely so the golden-fixture-seeded positive scenario can assert
-	// both are byte-identical after every real `gh issue edit` mutation
-	// (assertGoldenFidelityUnchanged, chain_e2e_test.go).
+	// Milestone and SubIssues (#914) are world-model fidelity only for this
+	// fake: they exist so the golden-fixture-seeded positive scenario can
+	// assert both are byte-identical after every real `gh issue edit`
+	// mutation (assertGoldenFidelityUnchanged, chain_e2e_test.go). Production
+	// does consume the milestone (#1385: collectRepoTickets requests it for the
+	// machine-local pickup filter), but this fake's `gh issue list` payload
+	// (issueListJSON) deliberately omits the key, which the collector decodes
+	// as "unknown" milestone metadata -- harmless here because the chain
+	// scenarios configure no milestone filter. SubIssues is still consumed by
+	// no production code (Q3).
 	Milestone *ghMilestone `json:"milestone,omitempty"`
 	SubIssues []ghSubIssue `json:"subIssues,omitempty"`
 }

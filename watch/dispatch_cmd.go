@@ -224,6 +224,11 @@ func runDispatchStatus(args []string) {
 		os.Exit(1)
 	}
 
+	// Machine-local pickup filters (#1385): read from the selected user config
+	// only (LoadConfig never consults a committed .cenci/config.json). A repo
+	// that is not enrolled, or has no filters, is unrestricted.
+	filter := dispatch.FilterForRepo(cfg.Repos, enrollment.Repo)
+
 	if *jsonOut {
 		out := struct {
 			Repo           string              `json:"repo"`
@@ -232,6 +237,8 @@ func runDispatchStatus(args []string) {
 			Session        string              `json:"session"`
 			Loop           watch.DispatchState `json:"loop"`
 			MemoryHeadroom int                 `json:"memoryHeadroom"`
+			ConfigPath     string              `json:"configPath"`
+			Filters        statusFilters       `json:"filters"`
 		}{
 			Repo:           enrollment.Repo,
 			Dir:            enrollment.Dir,
@@ -239,6 +246,8 @@ func runDispatchStatus(args []string) {
 			Session:        enrollment.Session,
 			Loop:           dispatch.ResolveDispatchState(*configPath, watch.DefaultSocketPath(), os.Stderr),
 			MemoryHeadroom: cfg.MemoryHeadroom,
+			ConfigPath:     cfg.Path,
+			Filters:        newStatusFilters(filter),
 		}
 		data, err := json.Marshal(out)
 		if err != nil {
@@ -262,6 +271,56 @@ func runDispatchStatus(args []string) {
 	} else {
 		fmt.Printf("Memory headroom: %d%%\n", cfg.MemoryHeadroom)
 	}
+	fmt.Print(renderFilterLines(filter))
+	fmt.Printf("Config: %s\n", cfg.Path)
+}
+
+// statusFilters is the `filters` object of `dispatch status --json` (#1385):
+// restricted plus the four lists, always arrays and never null.
+type statusFilters struct {
+	Restricted bool     `json:"restricted"`
+	Milestones []int    `json:"milestones"`
+	LabelsAll  []string `json:"labelsAll"`
+	LabelsAny  []string `json:"labelsAny"`
+	LabelsNone []string `json:"labelsNone"`
+}
+
+func newStatusFilters(f dispatch.RepoFilter) statusFilters {
+	s := statusFilters{
+		Restricted: f.Restricted(),
+		Milestones: make([]int, 0, len(f.Milestones)),
+		LabelsAll:  make([]string, 0, len(f.LabelsAll)),
+		LabelsAny:  make([]string, 0, len(f.LabelsAny)),
+		LabelsNone: make([]string, 0, len(f.LabelsNone)),
+	}
+	s.Milestones = append(s.Milestones, f.Milestones...)
+	s.LabelsAll = append(s.LabelsAll, f.LabelsAll...)
+	s.LabelsAny = append(s.LabelsAny, f.LabelsAny...)
+	s.LabelsNone = append(s.LabelsNone, f.LabelsNone...)
+	return s
+}
+
+// renderFilterLines renders the human `Filters:` lines: `Filters: unrestricted`,
+// or one line per configured dimension in the fixed order milestones, labelsAll,
+// labelsAny, labelsNone (milestones as numbers, labels quoted).
+func renderFilterLines(f dispatch.RepoFilter) string {
+	if !f.Restricted() {
+		return "Filters: unrestricted\n"
+	}
+	var b strings.Builder
+	if len(f.Milestones) > 0 {
+		fmt.Fprintf(&b, "Filters: milestones %v\n", f.Milestones)
+	}
+	if len(f.LabelsAll) > 0 {
+		fmt.Fprintf(&b, "Filters: labelsAll %q\n", f.LabelsAll)
+	}
+	if len(f.LabelsAny) > 0 {
+		fmt.Fprintf(&b, "Filters: labelsAny %q\n", f.LabelsAny)
+	}
+	if len(f.LabelsNone) > 0 {
+		fmt.Fprintf(&b, "Filters: labelsNone %q\n", f.LabelsNone)
+	}
+	return b.String()
 }
 
 // runDispatchLoop implements `cenci dispatch loop on|off|status`. All

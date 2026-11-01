@@ -2,6 +2,7 @@ package dispatch
 
 import (
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -3194,4 +3195,467 @@ func TestDecideOOMBackoff_Ordering(t *testing.T) {
 		in.Plans = nil
 		assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, "not Planned", ""}})
 	})
+}
+
+// -- #1385: machine-local pickup filter gate ---------------------------------
+
+// withFilter returns in with every ticket stamped as carrying the given
+// repo-local milestone number (MilestoneProbePresent), and the single repo
+// "o/r" enrolled with the given filter -- Decide reads the filter from
+// Inputs.Config.Repos, never from a per-ticket field.
+func withFilter(in Inputs, filter RepoFilter, milestone int) Inputs {
+	for i := range in.Tickets {
+		in.Tickets[i].Milestone = milestone
+		in.Tickets[i].MilestoneProbe = MilestoneProbePresent
+	}
+	in.Config.Repos = []RepoConfig{{Repo: "o/r", Filter: filter}}
+	return in
+}
+
+func decideSingle(t *testing.T, in Inputs) Decision {
+	t.Helper()
+	got := Decide(in)
+	if len(got) != 1 {
+		t.Fatalf("got %d decisions, want 1: %+v", len(got), got)
+	}
+	return got[0]
+}
+
+// staleReplanInputs is the autonomous stale-plan re-plan happy path: a stale
+// plan with dispatch.planRefined on and a lean repo.
+func staleReplanInputs() Inputs {
+	in := baseInputs()
+	in.Config.PlanRefined = true
+	in.RepoAutonomy = leanAutonomy("o/r")
+	in.Plans[0].CommitsBehind = 10
+	return in
+}
+
+// TestDecideFilter_EveryPickupPath pins the filtered and the matching case on
+// each of the four pickup paths (#1385 AC "pickup paths"): one gate covers the
+// ordinary Planned dispatch, a Refined planning pickup, an autonomous
+// stale-plan re-plan and an answered Input Needed resume.
+func TestDecideFilter_EveryPickupPath(t *testing.T) {
+	paths := []struct {
+		name       string
+		inputs     func() Inputs
+		wantReason string
+		check      func(t *testing.T, d Decision)
+	}{
+		{"Planned implementation", baseInputs, "dispatch", func(t *testing.T, d Decision) {
+			if d.Planning || d.Resume || d.Plan == nil {
+				t.Errorf("want an ordinary dispatch with a plan, got %+v", d)
+			}
+		}},
+		{"Refined planning pickup", planningCandidateInputs, "plan — Refined, no plan file", func(t *testing.T, d Decision) {
+			if !d.Planning || d.Replan || d.Plan != nil {
+				t.Errorf("want a fresh planning pickup, got %+v", d)
+			}
+		}},
+		{"stale-plan re-plan", staleReplanInputs, "re-plan — plan stale", func(t *testing.T, d Decision) {
+			if !d.Planning || !d.Replan {
+				t.Errorf("want a re-plan, got %+v", d)
+			}
+		}},
+		{"answered Input Needed resume", resumeInputs, "resume — human answered", func(t *testing.T, d Decision) {
+			if !d.Resume {
+				t.Errorf("want a resume, got %+v", d)
+			}
+		}},
+	}
+
+	for _, p := range paths {
+		t.Run(p.name+" filtered out", func(t *testing.T) {
+			d := decideSingle(t, withFilter(p.inputs(), RepoFilter{Milestones: []int{3}}, 7))
+			if d.Action != ActionSkip || d.Reason != "filter: milestone 7 not in [3]" {
+				t.Fatalf("action %q reason %q, want skip %q", d.Action, d.Reason, "filter: milestone 7 not in [3]")
+			}
+		})
+		t.Run(p.name+" matching", func(t *testing.T) {
+			d := decideSingle(t, withFilter(p.inputs(), RepoFilter{Milestones: []int{3, 7}}, 7))
+			if d.Action != ActionDispatch || d.Reason != p.wantReason {
+				t.Fatalf("action %q reason %q, want dispatch %q", d.Action, d.Reason, p.wantReason)
+			}
+			p.check(t, d)
+		})
+	}
+}
+
+// TestDecideFilter_LabelDimensionsAndReasons pins each dimension's reason
+// through Decide, including the fixed check order (milestones first).
+func TestDecideFilter_LabelDimensionsAndReasons(t *testing.T) {
+	tests := []struct {
+		name       string
+		filter     RepoFilter
+		labels     []string
+		milestone  int
+		probe      MilestoneProbe
+		wantAction Action
+		wantReason string
+	}{
+		{"no milestone under a milestone constraint", RepoFilter{Milestones: []int{3}}, []string{"Planned"}, 0, MilestoneProbeNone,
+			ActionSkip, "filter: no milestone assigned (milestones [3])"},
+		{"labelsAll missing", RepoFilter{LabelsAll: []string{"area:watch"}}, []string{"Planned"}, 0, MilestoneProbeNone,
+			ActionSkip, `filter: required label "area:watch" missing`},
+		{"labelsAny none matched", RepoFilter{LabelsAny: []string{"bug", "enhancement"}}, []string{"Planned", "docs"}, 0, MilestoneProbeNone,
+			ActionSkip, `filter: no labelsAny match among ["bug" "enhancement"]`},
+		{"labelsNone present", RepoFilter{LabelsNone: []string{"manual-only"}}, []string{"Planned", "manual-only"}, 0, MilestoneProbeNone,
+			ActionSkip, `filter: excluded label "manual-only" present`},
+		{"milestone failure outranks label failure", RepoFilter{Milestones: []int{3}, LabelsAll: []string{"area:watch"}}, []string{"Planned"}, 7, MilestoneProbePresent,
+			ActionSkip, "filter: milestone 7 not in [3]"},
+		{"label match is case and whitespace insensitive", RepoFilter{LabelsAll: []string{"Area:Watch"}}, []string{"Planned", "area:watch"}, 0, MilestoneProbeNone,
+			ActionDispatch, "dispatch"},
+		{"dimensions combine with AND", RepoFilter{Milestones: []int{3}, LabelsAll: []string{"area:watch"}, LabelsAny: []string{"bug"}, LabelsNone: []string{"manual-only"}},
+			[]string{"Planned", "area:watch", "bug"}, 3, MilestoneProbePresent, ActionDispatch, "dispatch"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			in := baseInputs()
+			in.Tickets[0].Labels = tc.labels
+			in.Tickets[0].Milestone = tc.milestone
+			in.Tickets[0].MilestoneProbe = tc.probe
+			in.Config.Repos = []RepoConfig{{Repo: "o/r", Filter: tc.filter}}
+			d := decideSingle(t, in)
+			if d.Action != tc.wantAction || d.Reason != tc.wantReason {
+				t.Fatalf("action %q reason %q, want %q %q", d.Action, d.Reason, tc.wantAction, tc.wantReason)
+			}
+		})
+	}
+}
+
+// TestDecideFilter_EmptyFilterDecidesLikeNoFilter: a repo enrolled with an
+// unrestricted filter (omitted, {} or empty lists all resolve to the zero
+// RepoFilter) yields decisions identical to a config with no filter at all.
+func TestDecideFilter_EmptyFilterDecidesLikeNoFilter(t *testing.T) {
+	build := func() Inputs {
+		in := baseInputs()
+		in.Tickets = append(in.Tickets,
+			Ticket{Repo: "o/r", Number: 43, Labels: []string{"Refined"}, Assignees: []string{"octocat"}},
+			Ticket{Repo: "o/r", Number: 44, Labels: []string{"Planned", "Blocked"}, Assignees: []string{"octocat"}})
+		for i := range in.Tickets {
+			in.Tickets[i].Milestone = 5
+			in.Tickets[i].MilestoneProbe = MilestoneProbePresent
+		}
+		return in
+	}
+
+	unfiltered := build()
+	unfiltered.Config.Repos = []RepoConfig{{Repo: "o/r"}}
+	want := Decide(unfiltered)
+
+	for name, f := range map[string]RepoFilter{
+		"zero value":  {},
+		"empty lists": {Milestones: []int{}, LabelsAll: []string{}, LabelsAny: []string{}, LabelsNone: []string{}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			in := build()
+			in.Config.Repos = []RepoConfig{{Repo: "o/r", Filter: f}}
+			if got := Decide(in); !reflect.DeepEqual(got, want) {
+				t.Fatalf("decisions differ from the unfiltered config:\n got %+v\nwant %+v", got, want)
+			}
+		})
+	}
+}
+
+// TestDecideFilter_RunsAfterMainSyncAndPlanInventory: the earlier gates keep
+// precedence over the filter, and the filter outranks every later gate.
+func TestDecideFilter_RunsAfterMainSyncAndPlanInventory(t *testing.T) {
+	excluded := RepoFilter{Milestones: []int{3}}
+
+	t.Run("main sync keeps its reason on an excluded ticket", func(t *testing.T) {
+		in := withFilter(baseInputs(), excluded, 7)
+		in.Tickets[0].MainSync = MainSyncDiverged
+		assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, reasonMainDiverged, ""}})
+	})
+	t.Run("plan inventory keeps its reason on an excluded ticket", func(t *testing.T) {
+		in := withFilter(baseInputs(), excluded, 7)
+		in.PlanInventories = map[string]PlanInventory{"o/r": PlanInventoryUnreadable}
+		assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, reasonPlanInventoryUnreadable, ""}})
+	})
+	t.Run("filter outranks the plan-probe gate", func(t *testing.T) {
+		in := withFilter(baseInputs(), excluded, 7)
+		in.PlanProbes = map[string]PlanProbe{"o/r#42": PlanProbeParseError}
+		assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, "filter: milestone 7 not in [3]", ""}})
+	})
+	t.Run("filter outranks the board-state gates", func(t *testing.T) {
+		for name, labels := range map[string][]string{
+			"not Planned":     nil,
+			"already Working": {"Planned", "Working"},
+			"Blocked":         {"Planned", "Blocked"},
+			"Refined only":    {"Refined"},
+		} {
+			t.Run(name, func(t *testing.T) {
+				in := withFilter(baseInputs(), excluded, 7)
+				in.Tickets[0].Labels = labels
+				assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, "filter: milestone 7 not in [3]", ""}})
+			})
+		}
+	})
+	t.Run("a passing filter leaves the later gate reasons untouched", func(t *testing.T) {
+		in := withFilter(baseInputs(), RepoFilter{Milestones: []int{7}}, 7)
+		in.Tickets[0].Labels = nil
+		assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, "not Planned", ""}})
+	})
+}
+
+// TestDecideFilter_MatchingTicketStillMeetsEverySafetyGate: a filter match only
+// makes a ticket a candidate -- each existing gate keeps its own reason.
+func TestDecideFilter_MatchingTicketStillMeetsEverySafetyGate(t *testing.T) {
+	matching := RepoFilter{Milestones: []int{7}, LabelsAll: []string{"area:watch"}}
+	tests := []struct {
+		name   string
+		mutate func(in *Inputs)
+		want   string
+	}{
+		{"Blocked", func(in *Inputs) { in.Tickets[0].Labels = []string{"Planned", "area:watch", "Blocked"} }, "blocked"},
+		{"open native dependency", func(in *Inputs) {
+			in.Tickets[0].DependsOn = []int{9}
+			in.Tickets[0].DependencyStates = map[int]DependencyState{9: DependencyStateOpen}
+		}, "waiting on dependency #9"},
+		{"open legacy dependency", func(in *Inputs) {
+			in.Tickets[0].DependsOn = []int{11}
+			in.Tickets[0].DependencyStates = map[int]DependencyState{11: DependencyStateOpen}
+		}, "waiting on dependency #11"},
+		{"unresolved dependency", func(in *Inputs) {
+			in.Tickets[0].DependsOn = []int{9}
+			in.Tickets[0].DependencyStates = map[int]DependencyState{9: DependencyStateUnresolved}
+		}, "dependency #9 unresolved"},
+		{"unassigned", func(in *Inputs) { in.Tickets[0].Assignees = nil }, "unassigned"},
+		{"another login", func(in *Inputs) { in.Tickets[0].Assignees = []string{"hubot"} }, "assigned to @hubot"},
+		{"multiple assignees", func(in *Inputs) { in.Tickets[0].Assignees = []string{"octocat", "hubot"} }, "multiple assignees"},
+		{"denied lean authorization", func(in *Inputs) {
+			in.Config.PlanRefined = true
+			in.RepoAutonomy = map[string]RepoAutonomy{"o/r": RepoAutonomyInteractive}
+			in.Tickets[0].Labels = []string{"Refined", "area:watch"}
+			in.Plans = nil
+		}, reasonAutonomyInteractive},
+		{"concurrency cap", func(in *Inputs) {
+			in.Config.ConcurrencyCap = 1
+			in.Snapshot = snapshot(1, 0)
+		}, reasonConcurrencyCap},
+		{"daily quota", func(in *Inputs) {
+			in.Config.DailyQuota = 1
+			in.Prior = 1
+		}, "daily quota reached"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			in := withFilter(baseInputs(), matching, 7)
+			in.Tickets[0].Labels = []string{"Planned", "area:watch"}
+			tc.mutate(&in)
+			assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, tc.want, ""}})
+		})
+	}
+}
+
+// TestDecideFilter_ExcludedTicketsKeepInventoryIntegrity: filters decide launch
+// eligibility only. An excluded ticket still blocks an included dependent and
+// still serializes an included sibling child.
+func TestDecideFilter_ExcludedTicketsKeepInventoryIntegrity(t *testing.T) {
+	only3 := RepoFilter{Milestones: []int{3}}
+	milestoned := func(number, milestone int, labels ...string) Ticket {
+		return Ticket{Repo: "o/r", Number: number, Labels: labels, Assignees: []string{"octocat"},
+			Milestone: milestone, MilestoneProbe: MilestoneProbePresent}
+	}
+
+	t.Run("included ticket waits on an excluded open native blocker", func(t *testing.T) {
+		in := baseInputs()
+		in.Config.Repos = []RepoConfig{{Repo: "o/r", Filter: only3}}
+		included := milestoned(42, 3, "Planned")
+		included.DependsOn = []int{41}
+		included.DependencyStates = map[int]DependencyState{41: DependencyStateOpen}
+		in.Tickets = []Ticket{milestoned(41, 7, "Planned"), included}
+		in.Plans = []Plan{
+			{Repo: "o/r", Path: ".plans/41.md", TicketID: 41, Status: "planned"},
+			{Repo: "o/r", Path: ".plans/42.md", TicketID: 42, Status: "planned"},
+		}
+		assertDecisions(t, Decide(in), []wantDecision{
+			{41, ActionSkip, "filter: milestone 7 not in [3]", ""},
+			{42, ActionSkip, "waiting on dependency #41", ""},
+		})
+	})
+
+	t.Run("included ticket waits on an excluded legacy Depends on dependency", func(t *testing.T) {
+		in := baseInputs()
+		in.Config.Repos = []RepoConfig{{Repo: "o/r", Filter: only3}}
+		included := milestoned(42, 3, "Planned")
+		included.DependsOn = []int{41}
+		included.DependencyStates = map[int]DependencyState{41: DependencyStateOpen}
+		excluded := milestoned(41, 0, "Planned")
+		excluded.MilestoneProbe = MilestoneProbeNone
+		in.Tickets = []Ticket{excluded, included}
+		in.Plans = []Plan{
+			{Repo: "o/r", Path: ".plans/41.md", TicketID: 41, Status: "planned"},
+			{Repo: "o/r", Path: ".plans/42.md", TicketID: 42, Status: "planned"},
+		}
+		assertDecisions(t, Decide(in), []wantDecision{
+			{41, ActionSkip, "filter: no milestone assigned (milestones [3])", ""},
+			{42, ActionSkip, "waiting on dependency #41", ""},
+		})
+	})
+
+	t.Run("excluded Working sibling still serializes an included child", func(t *testing.T) {
+		in := baseInputs()
+		in.Config.Repos = []RepoConfig{{Repo: "o/r", Filter: only3}}
+		in.Tickets = []Ticket{milestoned(41, 7, "Working"), milestoned(42, 3, "Planned")}
+		in.Plans = []Plan{
+			{Repo: "o/r", Path: ".plans/41.md", TicketID: 41, Status: "planned", IsChild: true, ParentID: 40},
+			{Repo: "o/r", Path: ".plans/42.md", TicketID: 42, Status: "planned", IsChild: true, ParentID: 40},
+		}
+		assertDecisions(t, Decide(in), []wantDecision{
+			{41, ActionSkip, "filter: milestone 7 not in [3]", ""},
+			{42, ActionSkip, "waiting on sibling #41", ""},
+		})
+	})
+
+	t.Run("excluded sibling with a running window still serializes an included child", func(t *testing.T) {
+		in := baseInputs()
+		in.Config.Repos = []RepoConfig{{Repo: "o/r", Filter: only3}}
+		in.Tickets = []Ticket{milestoned(41, 7, "Planned"), milestoned(42, 3, "Planned")}
+		in.Plans = []Plan{
+			{Repo: "o/r", Path: ".plans/41.md", TicketID: 41, Status: "planned", IsChild: true, ParentID: 40},
+			{Repo: "o/r", Path: ".plans/42.md", TicketID: 42, Status: "planned", IsChild: true, ParentID: 40},
+		}
+		in.Snapshot = snapshot(1, 0, watch.WindowState{WindowName: "41-foo", Status: "running"})
+		assertDecisions(t, Decide(in), []wantDecision{
+			{41, ActionSkip, "filter: milestone 7 not in [3]", ""},
+			{42, ActionSkip, "waiting on sibling #41", ""},
+		})
+	})
+
+	t.Run("an excluded sibling that is idle does not block an included child", func(t *testing.T) {
+		in := baseInputs()
+		in.Config.Repos = []RepoConfig{{Repo: "o/r", Filter: only3}}
+		in.Tickets = []Ticket{milestoned(41, 7, "Planned"), milestoned(42, 3, "Planned")}
+		in.Plans = []Plan{
+			{Repo: "o/r", Path: ".plans/41.md", TicketID: 41, Status: "planned", IsChild: true, ParentID: 40},
+			{Repo: "o/r", Path: ".plans/42.md", TicketID: 42, Status: "planned", IsChild: true, ParentID: 40},
+		}
+		assertDecisions(t, Decide(in), []wantDecision{
+			{41, ActionSkip, "filter: milestone 7 not in [3]", ""},
+			{42, ActionDispatch, "dispatch", ""},
+		})
+	})
+}
+
+// TestDecideFilter_UnknownMilestoneMetadata: under a milestone constraint,
+// missing or malformed milestone metadata holds the ticket; without one it is
+// never consulted.
+func TestDecideFilter_UnknownMilestoneMetadata(t *testing.T) {
+	t.Run("held under a milestone constraint", func(t *testing.T) {
+		in := baseInputs()
+		in.Config.Repos = []RepoConfig{{Repo: "o/r", Filter: RepoFilter{Milestones: []int{3}}}}
+		in.Tickets[0].MilestoneProbe = MilestoneProbeUnknown
+		assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, "filter: milestone metadata unavailable", ""}})
+	})
+	t.Run("an unstamped ticket is unknown too", func(t *testing.T) {
+		in := baseInputs()
+		in.Config.Repos = []RepoConfig{{Repo: "o/r", Filter: RepoFilter{Milestones: []int{3}}}}
+		assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, "filter: milestone metadata unavailable", ""}})
+	})
+	t.Run("an unrecognized probe value is held, never a match", func(t *testing.T) {
+		in := baseInputs()
+		in.Config.Repos = []RepoConfig{{Repo: "o/r", Filter: RepoFilter{Milestones: []int{3}}}}
+		in.Tickets[0].MilestoneProbe = MilestoneProbe("wat")
+		in.Tickets[0].Milestone = 3
+		assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, "filter: milestone metadata unavailable", ""}})
+	})
+	t.Run("ignored without a milestone constraint", func(t *testing.T) {
+		in := baseInputs()
+		in.Config.Repos = []RepoConfig{{Repo: "o/r", Filter: RepoFilter{LabelsAll: []string{"Planned"}}}}
+		in.Tickets[0].MilestoneProbe = MilestoneProbeUnknown
+		assertDecisions(t, Decide(in), []wantDecision{{42, ActionDispatch, "dispatch", ""}})
+	})
+	t.Run("ignored with no filter at all", func(t *testing.T) {
+		in := baseInputs()
+		in.Tickets[0].MilestoneProbe = MilestoneProbeUnknown
+		assertDecisions(t, Decide(in), []wantDecision{{42, ActionDispatch, "dispatch", ""}})
+	})
+}
+
+// TestDecideFilter_ExcludedTicketsConsumeNoSlotOrQuota: with the cap or the
+// daily quota at one, an excluded ticket numbered first does not take the slot
+// from the included one behind it.
+func TestDecideFilter_ExcludedTicketsConsumeNoSlotOrQuota(t *testing.T) {
+	build := func() Inputs {
+		in := baseInputs()
+		in.Config.Repos = []RepoConfig{{Repo: "o/r", Filter: RepoFilter{Milestones: []int{3}}}}
+		in.Tickets = []Ticket{
+			{Repo: "o/r", Number: 41, Labels: []string{"Planned"}, Assignees: []string{"octocat"}, Milestone: 7, MilestoneProbe: MilestoneProbePresent},
+			{Repo: "o/r", Number: 42, Labels: []string{"Planned"}, Assignees: []string{"octocat"}, Milestone: 3, MilestoneProbe: MilestoneProbePresent},
+		}
+		in.Plans = []Plan{
+			{Repo: "o/r", Path: ".plans/41.md", TicketID: 41, Status: "planned"},
+			{Repo: "o/r", Path: ".plans/42.md", TicketID: 42, Status: "planned"},
+		}
+		return in
+	}
+	want := []wantDecision{
+		{41, ActionSkip, "filter: milestone 7 not in [3]", ""},
+		{42, ActionDispatch, "dispatch", ""},
+	}
+
+	t.Run("concurrency cap of one", func(t *testing.T) {
+		in := build()
+		in.Config.ConcurrencyCap = 1
+		assertDecisions(t, Decide(in), want)
+	})
+	t.Run("daily quota of one", func(t *testing.T) {
+		in := build()
+		in.Config.DailyQuota = 1
+		assertDecisions(t, Decide(in), want)
+	})
+}
+
+// TestDecideFilter_FiltersAreScopedPerRepo: the same milestone number is
+// matched within each repo's own filter only, and a repo with no filter is
+// unaffected by another repo's.
+func TestDecideFilter_FiltersAreScopedPerRepo(t *testing.T) {
+	in := baseInputs()
+	in.Config.Repos = []RepoConfig{
+		{Repo: "o/a", Filter: RepoFilter{Milestones: []int{3}}},
+		{Repo: "o/b", Filter: RepoFilter{Milestones: []int{7}}},
+		{Repo: "o/c"},
+	}
+	ticket := func(repo string) Ticket {
+		return Ticket{Repo: repo, Number: 42, Labels: []string{"Planned"}, Assignees: []string{"octocat"}, Milestone: 3, MilestoneProbe: MilestoneProbePresent}
+	}
+	in.Tickets = []Ticket{ticket("o/a"), ticket("o/b"), ticket("o/c")}
+	in.Plans = []Plan{
+		{Repo: "o/a", Path: ".plans/42.md", TicketID: 42, Status: "planned"},
+		{Repo: "o/b", Path: ".plans/42.md", TicketID: 42, Status: "planned"},
+		{Repo: "o/c", Path: ".plans/42.md", TicketID: 42, Status: "planned"},
+	}
+
+	byRepo := map[string]Decision{}
+	for _, d := range Decide(in) {
+		byRepo[d.Ticket.Repo] = d
+	}
+	if d := byRepo["o/a"]; d.Action != ActionDispatch {
+		t.Errorf("o/a (milestones [3]) = %q %q, want dispatch", d.Action, d.Reason)
+	}
+	if d := byRepo["o/b"]; d.Action != ActionSkip || d.Reason != "filter: milestone 3 not in [7]" {
+		t.Errorf("o/b (milestones [7]) = %q %q, want the filter skip", d.Action, d.Reason)
+	}
+	if d := byRepo["o/c"]; d.Action != ActionDispatch {
+		t.Errorf("o/c (no filter) = %q %q, want dispatch", d.Action, d.Reason)
+	}
+}
+
+// TestDecideFilter_HostileLabelsAreQuotedAndBounded: configured names appear in
+// a skip reason only in quoted, single-line, bounded form.
+func TestDecideFilter_HostileLabelsAreQuotedAndBounded(t *testing.T) {
+	in := baseInputs()
+	hostile := "$(rm -rf)\nline2 " + strings.Repeat("x", 600)
+	in.Config.Repos = []RepoConfig{{Repo: "o/r", Filter: RepoFilter{LabelsAll: []string{hostile}}}}
+	d := decideSingle(t, in)
+	if d.Action != ActionSkip || !strings.HasPrefix(d.Reason, `filter: required label "$(rm -rf)`) {
+		t.Fatalf("reason = %q, want a quoted filter: required-label skip", d.Reason)
+	}
+	if strings.ContainsAny(d.Reason, "\n\r") {
+		t.Errorf("reason spans lines: %q", d.Reason)
+	}
+	if len(d.Reason) > maxProbeLogDetailBytes+64 {
+		t.Errorf("reason is %d bytes, want it bounded near %d", len(d.Reason), maxProbeLogDetailBytes)
+	}
 }
