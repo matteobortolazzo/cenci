@@ -405,7 +405,7 @@ require_in "C9 docs checkpoint routing" "$codex_docs_all" 'the checkpoint select
 # Review fixes (#1234): the in-flight checkpoint check precedes every persist write, and persist requires a Plan-mode approval in this session.
 no_approved_plan='cenci: no approved plan in this session — type /plan and resend: /plan $cenci:<wf> <target>'
 order_in "R1 persist checks for a checkpoint before writing" "$handoff_persist" 'checkpoint.mjs" get <ckpt> <wf> <target>' 'Write the artifact' \
-  'checkpoint.mjs" digest' 'init <ckpt> <wf> <target> planned --plan-path'
+  'checkpoint.mjs" digest' 'checkpoint.mjs" clear <ckpt> <wf> <target>' 'init <ckpt> <wf> <target> planned --plan-path'
 for phrase in 'before writing anything' 'a run in flight' 'resume `apply` command' 'run `clear`' 'stop and report its stderr line'; do
   require_in "R1 persist in-flight refusal" "$handoff_persist" "$phrase"
 done
@@ -460,6 +460,87 @@ order_in "R3 equality check precedes every pipeline write" "$implement_all" 'Res
 for phrase in '`nextPhase` `null` means every phase is done' 'run no workflow mutation' 'report that the run is already finished' \
   'A failure of any checkpoint write (`advance`, `block`, `complete`) stops apply before the next mutation and is reported'; do
   require_in "R5/R6 apply nextPhase and checkpoint-write failures" "$handoff_apply" "$phrase"
+done
+
+# --- Persist lifecycle hardening (#1384) ---
+# Completion rule: one shared sentence and table in Apply, the last phase named explicitly and no --gate.
+require_in "#1384 apply completion command" "$handoff_apply" 'node "${PLUGIN_ROOT}/codex/checkpoint.mjs" complete <ckpt> <wf> <target> <last-phase>'
+require_in "#1384 apply completion rule" "$handoff_apply" "reaches its successful end"
+forbid_in "#1384 apply completion without gate" "$handoff_apply" '<last-phase> --gate'
+# The completion paragraph itself says `complete` runs without --gate; with that one sanctioned mention removed, no `--gate` may remain in it.
+completion_para="${handoff_apply#*"When a workflow's apply reaches"}"
+completion_para="${completion_para%%"The last phase and the success point"*}"
+require_in "#1384 apply completion paragraph" "$completion_para" '(without `--gate`)'
+forbid_in "#1384 apply completion paragraph passes no --gate" "${completion_para//'(without `--gate`)'/}" '--gate'
+require_in "#1384 apply completion table header" "$handoff_apply" '| Workflow | Last phase | Success point |'
+# Each success point is tied to its own row (workflow, last phase and success point in one cell run).
+for row in \
+  '| `implement` | `pr` | after `gh pr create` succeeds and the babysit hand-off has been attempted |' \
+  '| `maintain` | `pr` | after the PR is open and its mergeability is confirmed not CONFLICTING (an unresolved UNKNOWN runs no `complete`) |' \
+  '| `refactor` | `pr` | after the approved tickets are created |' \
+  '| `address-review` | `push` | after the push, the replies and the review re-request |' \
+  '| `configure` | `pr` | after the PR is opened |' \
+  '| `refine` | `apply` | after the GitHub writes are verified as persisted |'; do
+  require_in "#1384 apply completion table row" "$handoff_apply" "$row"
+done
+require_in "#1384 apply maintain completes only on a confirmed mergeability" "$handoff_apply" 'confirmed not CONFLICTING'
+# A stopped run never completes.
+for phrase in 'a stopped, blocked, declined or failed apply never runs `complete`' 'a `verify` failure' 'a `block`' \
+  'Decline' 'pre-write STOP' 'lean-contract STOP' 'PR stop' 'unknown-stage stop' "maintain's unresolved UNKNOWN mergeability"; do
+  require_in "#1384 apply never completes on stop" "$handoff_apply" "$phrase"
+done
+# A failed `complete` after the final mutation: reported with the deliverable, never undone, user-run clear remedy.
+for phrase in 'PR URL, ticket numbers or pushed SHA' 'together with the `complete` failure' 'never as a clean success' 'never undone'; do
+  require_in "#1384 apply failed complete reporting" "$handoff_apply" "$phrase"
+done
+require_in "#1384 apply failed complete names clear" "$handoff_apply" 'checkpoint.mjs" clear <ckpt> <wf> <target>'
+
+# Persist: step 1 decides only, the artifact check precedes the write, and the replacing clear follows the digest.
+require_in "#1384 persist step 1 decides only" "$handoff_persist" 'decides only and writes nothing'
+forbid_in "#1384 persist step 1 no early clear" "$handoff_persist" 'run `clear` for the identity (see Re-plan below), then continue'
+require_in "#1384 persist artifact check" "$handoff_persist" 'workflow-specific artifact check'
+require_in "#1384 persist artifact check leaves checkpoint" "$handoff_persist" 'byte-identical'
+order_in "#1384 persist artifact check precedes the artifact write" "$handoff_persist" 'workflow-specific artifact check' 'Write the artifact'
+# Any status other than planned/complete is a run in flight, in Persist step 1 and in Re-plan.
+other_status='an unrecognised value, an absent field, or a non-string value on a legacy v1 checkpoint'
+require_in "#1384 persist other status is in flight" "$handoff_persist" "$other_status"
+require_in "#1384 persist other status gets the same refusal" "$handoff_persist" 'is a run in flight too, with the same refusal'
+require_in "#1384 re-plan other status is in flight" "$handoff_replan" "$other_status"
+require_in "#1384 re-plan other status is tied to a status check" "$handoff_replan" "or any other \`status\` (${other_status})"
+# The second get guards the conditional clear against a concurrent apply.
+require_in "#1384 persist second get before clear" "$handoff_persist" 'runs `get` again'
+require_in "#1384 persist second get stop" "$handoff_persist" 'stops without `clear` or `init`'
+require_in "#1384 persist second get fails on any non-zero exit" "$handoff_persist" 'any non-zero exit, exit 3 included'
+require_in "#1384 persist second get stop reports the rewritten artifact" "$handoff_persist" 'the artifact was already rewritten but the checkpoint was not changed'
+order_in "#1384 persist second get sits between the digest and init" "$handoff_persist" 'checkpoint.mjs" digest' 'runs `get` again' \
+  'checkpoint.mjs" clear <ckpt> <wf> <target>' 'init <ckpt> <wf> <target> planned --plan-path'
+# The in-flight guard covers a run step 1 sees; a run starting apply later is caught by the second get, and the status guard is persist's.
+require_in "#1384 re-plan in-flight guard scope" "$handoff_replan" 'the status guard on `clear` lives in persist, not in `checkpoint.mjs clear`'
+# Re-plan wording: keyed on status, check before the write, clear just before init.
+forbid_in "#1384 re-plan wording" "$handoff_replan" 'is cleared (`clear`) first'
+forbid_in "#1384 re-plan keys on status" "$handoff_replan" 'follows its phase'
+require_in "#1384 re-plan wording" "$handoff_replan" 'follows its `status`'
+require_in "#1384 re-plan wording" "$handoff_replan" 'the `clear` runs just before `init`'
+# A legacy v1 checkpoint with status planned or complete takes the same clear-and-replace path as a v2 one.
+legacy_replace='a legacy v1 checkpoint whose `status` is `planned` or `complete` is cleared and replaced like a v2 one'
+require_in "#1384 persist legacy v1 planned/complete is replaced" "$handoff_persist" "$legacy_replace"
+require_in "#1384 re-plan legacy v1 planned/complete is replaced" "$handoff_replan" "$legacy_replace"
+# implement's line 69 and the user doc mirror the same ordering.
+require_in "#1384 implement missing heading wording" "$implement_all" 'stops the persist step with no artifact write and leaves any existing checkpoint unchanged'
+forbid_in "#1384 implement missing heading wording" "$implement_all" 'stops and writes neither'
+for phrase in 'marks a finished run `complete`' 'only after the new artifact is written and digested' \
+  'unrecognised legacy v1 status' 'refused as in flight'; do
+  require_in "#1384 docs persist lifecycle" "$docs_handoff" "$phrase"
+done
+# The "Planning again over a checkpoint" paragraph states all three facts itself, not just step 3.
+docs_replan="${docs_handoff#*"Planning again over a checkpoint"}"
+docs_replan="${docs_replan%%"**Unattended launches.**"*}"
+for phrase in 'marks a finished run `complete`' 'the replacing `clear` comes only after the new artifact is written and digested' \
+  'unrecognised legacy v1 status' 'refused as in flight'; do
+  require_in "#1384 docs re-plan paragraph" "$docs_replan" "$phrase"
+done
+for phrase in 'cleared first' 'is cleared (`clear`) first' 'follows its phase'; do
+  forbid_in "#1384 docs re-plan paragraph retired wording" "$docs_replan" "$phrase"
 done
 
 # --- Native goal lifecycle (#1235): D1-D6 ---

@@ -446,7 +446,7 @@ fi
 
 assert_contains "${CODEX}" 'Stop before mutations: after approval the next normal-mode turn in this same session runs only `codex-runtime`'"'"'s persist step (`$cenci:implement persist <ticket>`)' \
   "the /plan handoff must stop before mutations and leave the next normal-mode turn to the persist step only"
-assert_contains "${CODEX}" 'which writes `.plans/<ticket>-<slug>.md` only once it contains all three required headings (`## Ticket Details`, `## Implementation Plan`, `## Architectural Context` — the `requiredPlanSections` list in `watch/internal/pipeline/planfile.go`) and then the checkpoint; if any heading is missing it stops and writes neither, reporting the missing heading(s).' \
+assert_contains "${CODEX}" 'which writes `.plans/<ticket>-<slug>.md` only once it contains all three required headings (`## Ticket Details`, `## Implementation Plan`, `## Architectural Context` — the `requiredPlanSections` list in `watch/internal/pipeline/planfile.go`) and then the checkpoint; if any heading is missing it stops the persist step with no artifact write and leaves any existing checkpoint unchanged, reporting the missing heading(s).' \
   "the persist step must check the three required headings before writing the artifact and the checkpoint"
 assert_contains "${CODEX}" 'Then tell the user to continue with `cenci run implement apply <ticket> --agent codex` (or `$cenci:implement apply <ticket>` in the same session), which is also how a saved plan resumes after a crash.' \
   "the persist handoff must print the launcher apply form, which also resumes a saved plan after a crash"
