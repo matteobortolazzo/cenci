@@ -51,3 +51,52 @@ func armOnHost(o Options, repo string) error {
 	fmt.Printf("Babysitting PR #%s: request forwarded, the supervisor now runs on the host.\n", o.PR)
 	return nil
 }
+
+// stopOnHost forwards a stop for (repo, pr) to the host daemon and maps the
+// transport outcome onto three user-visible outcomes (#1390), mirroring
+// armOnHost:
+//
+//   - stopped: nil error and the host-stop line on stdout.
+//   - not stopped: a dial failure (nothing was written) or a daemon nack --
+//     the reason is relayed verbatim -- with the host command to run.
+//   - stop status unknown: every other transport failure, including a clean
+//     EOF with no reply (a daemon that predates the kind) and the response
+//     deadline; the supervisor may or may not have been stopped, so the host
+//     command is printed. Re-running it is safe.
+func stopOnHost(repo, pr string) error {
+	hostCmd := "cenci babysit stop " + pr
+	resp, err := ipc.SendBabysitStop(armSocketPath(), ipc.BabysitStopRequest{PR: pr, Repo: repo})
+	if err != nil {
+		if errors.Is(err, ipc.ErrArmUndelivered) {
+			return fmt.Errorf("not stopped: no cenci daemon reachable on the host event socket; run `%s` from a host tmux pane: %w", hostCmd, err)
+		}
+		return fmt.Errorf("stop status unknown: no response from the host daemon before the deadline; verify or stop from a host tmux pane: %s: %w", hostCmd, err)
+	}
+	if !resp.OK {
+		return fmt.Errorf("not stopped: %s; run `%s` from a host tmux pane", resp.Reason, hostCmd)
+	}
+	fmt.Printf("Stopped babysitting PR #%s on the host.\n", pr)
+	return nil
+}
+
+// statusOnHost forwards a status read for (repo, pr) to the host daemon and
+// prints the reply as the same one JSON line the host command prints (#1390).
+// Every failure -- an unreachable daemon, a nack, no reply, an ack without a
+// status object -- is an error naming the host command.
+func statusOnHost(repo, pr string) error {
+	hostCmd := "cenci babysit status " + pr
+	resp, err := ipc.SendBabysitStatus(armSocketPath(), ipc.BabysitStatusRequest{PR: pr, Repo: repo})
+	if err != nil {
+		if errors.Is(err, ipc.ErrArmUndelivered) {
+			return fmt.Errorf("status unavailable: no cenci daemon reachable on the host event socket; run `%s` from a host tmux pane: %w", hostCmd, err)
+		}
+		return fmt.Errorf("status unavailable: no response from the host daemon before the deadline; run `%s` from a host tmux pane: %w", hostCmd, err)
+	}
+	if !resp.OK {
+		return fmt.Errorf("status unavailable: %s; run `%s` from a host tmux pane", resp.Reason, hostCmd)
+	}
+	if resp.Status == nil {
+		return fmt.Errorf("status unavailable: the host daemon returned no status; run `%s` from a host tmux pane", hostCmd)
+	}
+	return printStatus(*resp.Status)
+}

@@ -162,11 +162,24 @@ for pair in "SKILL.md:${attention_skill_all}" "codex.md:${attention_codex_all}";
   require_in "babysit-attention/${name}" "$text" 'non-zero exit'
   require_in "babysit-attention/${name}" "$text" 'never report success'
   require_in "babysit-attention/${name}" "$text" 'retry cap reached (exact count not readable from here)'
-  require_in "babysit-attention/${name}" "$text" 'XDG_STATE_HOME'
+  # The attempt count comes from `cenci babysit status <pr>`, never from a state-directory read.
+  require_in "babysit-attention/${name}" "$text" 'cenci babysit status <pr>'
+  require_in "babysit-attention/${name}" "$text" 'ciFixAttempts'
+  require_in "babysit-attention/${name}" "$text" 'conflictFixAttempts'
+  require_in "babysit-attention/${name}" "$text" 'does not decode as JSON'
+  require_in "babysit-attention/${name}" "$text" 'stop status unknown'
+  forbid_in "babysit-attention/${name}" "$text" 'cenci/babysit/'
   # The removed retry option: a non-empty file is required so the absence is not vacuous.
   forbid_in "babysit-attention/${name}" "$text" 'fresh budget'
 done
 require_in "babysit-attention/SKILL.md" "$attention_skill_all" '`AskUserQuestion`'
+
+# The babysit skill reports the forwarded stop's three outcomes and verifies through `status`.
+babysit_all="$(normalize "${ROOT}/skills/babysit/SKILL.md")"
+for phrase in 'cenci babysit status <pr>' 'Stopped babysitting PR #<pr> on the host.' 'not stopped: <reason>' 'stop status unknown'; do
+  require_in "babysit/SKILL.md" "$babysit_all" "$phrase"
+done
+forbid_in "babysit/SKILL.md" "$babysit_all" 'there is no `cenci babysit status` subcommand'
 
 attention_summary="$(section "$attention_codex" '## Summary')"
 for phrase in 'headRefOid' 'The summary carries the PR, the head SHA, the failing checks (or the merge-repair reason) and the attempt count' \
@@ -179,9 +192,15 @@ for phrase in 'strip one trailing `.git`' 'https://github.com/<owner>/<repo>' 'g
   'exits 8 while checks are pending'; do
   require_in "babysit-attention/codex.md Summary" "$attention_summary" "$phrase"
 done
+# The attempt count: read from `cenci babysit status <pr>`, by reason, with the fallback phrase.
+for phrase in 'cenci babysit status <pr>' '`ciFixAttempts`' '`conflictFixAttempts`' 'exits non-zero' 'does not decode as JSON' \
+  'retry cap reached (exact count not readable from here)'; do
+  require_in "babysit-attention/codex.md Summary" "$attention_summary" "$phrase"
+done
+forbid_in "babysit-attention/codex.md Summary" "$attention_summary" 'cenci/babysit/'
 
 attention_stop="$(section "$attention_codex" '## Stop choice')"
-for phrase in 'cenci babysit stop <pr>' 'sandbox' 'not stopped' 'run on the host' 'never report success'; do
+for phrase in 'cenci babysit stop <pr>' 'sandbox' 'not stopped' 'stop status unknown' 'run on the host' 'never report success'; do
   require_in "babysit-attention/codex.md Stop choice" "$attention_stop" "$phrase"
 done
 
@@ -196,7 +215,7 @@ forbid_in "babysit-attention/codex.md Question" "$attention_question" 'retry'
 attention_never="$(section "$attention_codex" '## Never')"
 for phrase in 'Never mutate GitHub, push, restart the supervisor or run a repair on this window'"'"'s own initiative' \
   'before or after the choice' \
-  'no comment, no label, no commit and no `cenci babysit` call other than the stop above'; do
+  'no comment, no label, no commit and no `cenci babysit` call other than the stop above and `cenci babysit status <pr>`'; do
   require_in "babysit-attention/codex.md Never" "$attention_never" "$phrase"
 done
 

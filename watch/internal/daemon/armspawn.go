@@ -93,6 +93,23 @@ func (b *armTokenBucket) take() bool {
 // shells out to a real container runtime or git.
 var armResolveHostRepo = hostrepo.Resolve
 
+// armHostRepoFailureReason maps an armResolveHostRepo error to its nack
+// reason: a timeout ahead of the step-specific classes, and the probe-failed
+// reason for everything unrecognized. Shared by the arm spawn and the
+// babysit stop/status requests (#1390).
+func armHostRepoFailureReason(err error) string {
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return ReasonArmResolutionTimedOut
+	case errors.Is(err, hostrepo.ErrNoMatch):
+		return ReasonArmHostRepoNotFound
+	case errors.Is(err, hostrepo.ErrAmbiguous):
+		return ReasonArmHostRepoAmbiguous
+	default:
+		return ReasonArmHostRepoProbeFailed
+	}
+}
+
 // armSessionForPane is the injectable seam over the bounded
 // `tmux display-message -t <pane> -p '#{session_name}'` pane->session
 // resolution (watch/docs/tmux.md: empty output on an invalid/gone pane is
@@ -228,15 +245,7 @@ func (d *Daemon) hostArmSpawn(req ipc.ArmRequest) ipc.ArmResponse {
 
 	dir, err := armResolveHostRepo(ctx, req.Repo)
 	if err != nil {
-		reason := ReasonArmHostRepoProbeFailed
-		switch {
-		case errors.Is(err, context.DeadlineExceeded):
-			reason = ReasonArmResolutionTimedOut
-		case errors.Is(err, hostrepo.ErrNoMatch):
-			reason = ReasonArmHostRepoNotFound
-		case errors.Is(err, hostrepo.ErrAmbiguous):
-			reason = ReasonArmHostRepoAmbiguous
-		}
+		reason := armHostRepoFailureReason(err)
 		d.logArmSpawnReject(req, reason, err)
 		return ipc.ArmResponse{OK: false, Reason: reason}
 	}

@@ -124,8 +124,8 @@ is not automerged before it.
 `$cenci:babysit-attention` through a real `codex exec` against a disposable fixture under
 `/var/tmp`: a local bare remote with a PR branch whose gate (`sh check.sh`) fails, a clone of it
 as the launch directory, a stubbed `gh` that answers reads and refuses and logs every write,
-and a stubbed `cenci` that logs every call (`babysit stop` fails, as it does from inside a
-sandbox). The remote's `pre-receive` hook logs every ref update, so a force push or a stray
+and a stubbed `cenci` that logs every call (`babysit status` answers with the attempt count as
+one JSON line, and `babysit stop` fails like a host nack, `not stopped: <reason>`). The remote's `pre-receive` hook logs every ref update, so a force push or a stray
 branch shows up even when the remote rejects it.
 
 ### How to produce a run
@@ -188,7 +188,7 @@ CENCI_CODEX_NATIVE=1 CENCI_CODEX_NATIVE_OUT=./native-workflows.md bash flow/code
 | Restart re-run: no new commit, no push, checkpoint unchanged | pending native run |
 | Headless `babysit-attention`: both options printed, no retry option | pending native run |
 | Headless `babysit-attention`: summary names the PR, head SHA, failing check and attempt count | pending native run |
-| Headless `babysit-attention`: no `babysit stop` call, no `gh` writes, remote unchanged | pending native run |
+| Headless `babysit-attention`: no `babysit stop` call (a `babysit status` read is allowed), no `gh` writes, remote unchanged | pending native run |
 
 ## Native workflows: Plan mode, handoff and goal lifecycle
 

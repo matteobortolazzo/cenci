@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -58,6 +59,34 @@ func babysitAgentRefusal(agent string, has func(agent, workflow string) bool) st
 	return babysit.CapabilityRefusal(agent, has)
 }
 
+// babysitStatusUsage is the usage line for `cenci babysit status <pr>`,
+// printed to stderr on a malformed invocation (exit 2).
+const babysitStatusUsage = "cenci babysit status: usage: cenci babysit status <pr> [--state-dir <dir>]"
+
+// runBabysitStatus implements `cenci babysit status <pr>` (#1390): one JSON
+// object describing the supervisor for the PR, read from the host state file
+// or, inside a sandbox, from the host daemon. Usage errors exit 2, runtime
+// failures (no supervisor, unreadable state, an unreachable daemon) exit 1.
+func runBabysitStatus(args []string) {
+	fs := flag.NewFlagSet("babysit status", flag.ExitOnError)
+	stateDir := fs.String("state-dir", "", "state directory (default: $XDG_STATE_HOME/cenci/babysit)")
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, babysitStatusUsage)
+		os.Exit(2)
+	}
+	pr := args[0]
+	_ = fs.Parse(args[1:])
+	rejectExtra("cenci babysit status", fs.Args())
+	if n, err := strconv.Atoi(strings.TrimPrefix(pr, "#")); err != nil || n <= 0 {
+		fmt.Fprintf(os.Stderr, "cenci babysit status: PR must be a positive integer, got %q\n%s\n", pr, babysitStatusUsage)
+		os.Exit(2)
+	}
+	if err := babysit.Status(pr, *stateDir); err != nil {
+		fmt.Fprintf(os.Stderr, "cenci babysit status: %v\n", err)
+		os.Exit(1)
+	}
+}
+
 func runBabysit(args []string) {
 	if len(args) > 0 && args[0] == "stop" {
 		fs := flag.NewFlagSet("babysit stop", flag.ExitOnError)
@@ -74,6 +103,10 @@ func runBabysit(args []string) {
 			fmt.Fprintf(os.Stderr, "cenci babysit stop: %v\n", err)
 			os.Exit(1)
 		}
+		return
+	}
+	if len(args) > 0 && args[0] == "status" {
+		runBabysitStatus(args[1:])
 		return
 	}
 

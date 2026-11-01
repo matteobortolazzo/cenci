@@ -14,7 +14,8 @@
 #                command was run
 #   restart      the same launch again: no new commit, no push
 #   attention    a headless `$cenci:babysit-attention`: both options printed, no
-#                retry option, no `cenci babysit stop` call, no GitHub write, the
+#                retry option, the attempt count read through the stubbed
+#                `cenci babysit status`, no `cenci babysit stop` call, no GitHub write, the
 #                remote untouched
 #
 # and, for the Plan-mode, handoff and goal rows (#1235), on a ticketless implement
@@ -48,7 +49,8 @@
 # local bare remote with a PR branch whose gate (`sh check.sh`) fails, a clone of it
 # as the launch directory, a stubbed `gh` and a stubbed `cenci` first on codex's
 # PATH. The stubbed `gh` answers reads and REFUSES and logs every write; the stubbed
-# `cenci` logs every call (`babysit stop` fails, as it does from inside a sandbox).
+# `cenci` logs every call (`babysit status` answers with the attempt count, `babysit stop`
+# fails like a host nack, as a forwarded stop does when the host daemon rejects it).
 # The remote's pre-receive hook logs every ref update, so a force push or a stray
 # branch is visible even when the remote rejects it.
 #
@@ -106,7 +108,7 @@ MIN_VERSION="0.144.1"
 PR_NUMBER=7
 PR_BRANCH="fix/native-ci"
 CHECK_NAME="native-gate"
-FIXTURE_ATTEMPTS=3   # ciFixAttempts in the supervisor state the attention rows expect to see
+FIXTURE_ATTEMPTS=3   # ciFixAttempts the stubbed `cenci babysit status` reports and the attention rows expect to see
 FIXTURE_SLUG="cenci-native/fixture"
 ZERO_SHA="0000000000000000000000000000000000000000"
 
@@ -168,7 +170,7 @@ GH_CONFIG="${FIXTURE_ROOT}/gh-config"
 GATE_HOME="${FIXTURE_ROOT}/gate-home"
 GATE_TMP="${FIXTURE_ROOT}/gate-tmp"
 HO="${FIXTURE_ROOT}/handoff"
-mkdir -p "${REMOTE}" "${BIN}" "${LOGS}" "${RUNS}" "${STATE_HOME}/cenci/babysit" "${GH_CONFIG}" "${GATE_HOME}" "${GATE_TMP}" "${HO}" || {
+mkdir -p "${REMOTE}" "${BIN}" "${LOGS}" "${RUNS}" "${STATE_HOME}" "${GH_CONFIG}" "${GATE_HOME}" "${GATE_TMP}" "${HO}" || {
     echo "FAIL: could not create the fixture directories" >&2
     exit 1
 }
@@ -355,19 +357,14 @@ fixture_init() {
     # switch the logger off (the repository's own setting wins over both).
     git -C "${REMOTE}" config core.hooksPath "${REMOTE}/hooks" || return 1
 
-    # The supervisor state attention reads its attempt count from.
-    jq -n --arg repo "${FIXTURE_SLUG}" --arg pr "${PR_NUMBER}" --argjson n "${FIXTURE_ATTEMPTS}" \
-        '{repo: $repo, pr: $pr, ciFixAttempts: $n}' \
-        > "${STATE_HOME}/cenci/babysit/0123456789ab-${PR_NUMBER}.json" || return 1
-
     write_stubs || return 1
 }
 
 # write_stubs -- `gh` and `cenci` for codex's PATH, configured through a sidecar
 # env file so the scripts themselves are fixed text.
 write_stubs() {
-    printf 'NW_REMOTE=%q\nNW_LOGS=%q\nNW_BRANCH=%q\nNW_SLUG=%q\n' \
-        "${REMOTE}" "${LOGS}" "${PR_BRANCH}" "${FIXTURE_SLUG}" > "${BIN}/fixture.env" || return 1
+    printf 'NW_REMOTE=%q\nNW_LOGS=%q\nNW_BRANCH=%q\nNW_SLUG=%q\nNW_ATTEMPTS=%q\n' \
+        "${REMOTE}" "${LOGS}" "${PR_BRANCH}" "${FIXTURE_SLUG}" "${FIXTURE_ATTEMPTS}" > "${BIN}/fixture.env" || return 1
     cat > "${BIN}/gh" <<'SCRIPT'
 #!/bin/sh
 # Fixture gh: reads are answered and logged; everything else is refused and logged.
@@ -455,13 +452,17 @@ esac
 SCRIPT
     cat > "${BIN}/cenci" <<'SCRIPT'
 #!/bin/sh
-# Fixture cenci: every call is logged; `babysit stop` fails like it does from
-# inside a sandbox that cannot reach the host supervisor.
+# Fixture cenci: every call is logged; `babysit status` answers the way a forwarded
+# status does (one JSON line, no path); `babysit stop` fails like a host nack.
 . "${0%/*}/fixture.env"
 printf '%s\n' "$*" >> "${NW_LOGS}/cenci.log"
 case "$1 $2" in
+    "babysit status")
+        printf '{"pr":%s,"repo":"%s","status":"running","ciFixAttempts":%s,"conflictFixAttempts":0,"fixCap":3,"supervisorLive":true}\n' \
+            "${3:-0}" "${NW_SLUG}" "${NW_ATTEMPTS}"
+        ;;
     "babysit stop")
-        echo "cenci: cannot reach the host supervisor from inside the sandbox" >&2
+        echo "not stopped: the host supervisor could not be stopped (fixture stub)" >&2
         exit 1
         ;;
     "babysit "[0-9]*)
@@ -894,7 +895,7 @@ scenario_restart() {
 
 # ── Scenario: headless attention ────────────────────────────────────────
 prompt_attention() {
-    printf '$cenci:babysit-attention %s CI retry cap reached; decide whether to retry, pause, or stop' "${PR_NUMBER}"
+    printf '$cenci:babysit-attention %s CI retry cap reached' "${PR_NUMBER}"
 }
 
 # retry_option_offered -- does the printed text offer a retry as an option? A
@@ -969,23 +970,23 @@ scenario_attention() {
         else
             record "${prefix}: summary names PR, head SHA and failing check" "FAIL" "missing from the summary:${missing}"
         fi
-        # The fixture exports a readable supervisor state, so the count must be
+        # The stubbed `cenci babysit status` answers with the count, so it must be
         # stated: "not readable" is a failure here, not an alternative.
         if grep -qiE "(^|[^0-9])(${FIXTURE_ATTEMPTS}[[:space:]]+(attempt|fix|retr)|attempts?[^0-9]{0,20}${FIXTURE_ATTEMPTS}([^0-9]|\$))" <<< "${text_nohex}"; then
-            record "${prefix}: attempt count" "ok" "the summary states the attempt count from the supervisor state (${FIXTURE_ATTEMPTS})"
+            record "${prefix}: attempt count" "ok" "the summary states the attempt count from cenci babysit status (${FIXTURE_ATTEMPTS})"
         else
-            record "${prefix}: attempt count" "FAIL" "the summary does not state the attempt count (${FIXTURE_ATTEMPTS}) the fixture's readable supervisor state holds"
+            record "${prefix}: attempt count" "FAIL" "the summary does not state the attempt count (${FIXTURE_ATTEMPTS}) the stubbed cenci babysit status reports"
         fi
     fi
 
     if ! cenci_calls="$(cat "${LOGS}/cenci.log" 2>/dev/null)"; then
         record "${prefix}: no babysit stop call" "FAIL" "the stubbed cenci's call log is unreadable, so a babysit stop call cannot be ruled out"
     else
-        stop_calls="$(grep -E '^babysit' <<< "${cenci_calls}")"
+        stop_calls="$(grep -E '^babysit stop' <<< "${cenci_calls}")"
         if [[ -n "${stop_calls}" ]]; then
-            record "${prefix}: no babysit stop call" "FAIL" "cenci babysit was called: ${stop_calls//$'\n'/; }"
+            record "${prefix}: no babysit stop call" "FAIL" "cenci babysit stop was called: ${stop_calls//$'\n'/; }"
         elif [[ "${attempted}" == yes ]]; then
-            record "${prefix}: no babysit stop call" "ok" "no cenci babysit call"
+            record "${prefix}: no babysit stop call" "ok" "no cenci babysit stop call"
         else
             record "${prefix}: no babysit stop call" "inconclusive" "${no_run}"
         fi

@@ -23,11 +23,10 @@ every `pending` one; never derive CI status from check conclusions. When the rea
 summary names the merge-repair reason instead of failing checks.
 
 The summary carries the PR, the head SHA, the failing checks (or the merge-repair reason) and the attempt count.
-Read the attempt count from the supervisor state file at `$XDG_STATE_HOME/cenci/babysit/<12-hex>-<pr>.json`
-(fallback `~/.local/state/cenci/babysit/`), using `ciFixAttempts` or `conflictFixAttempts` as the reason
-requires, and only when exactly one file matches `*-<pr>.json` and its `repo` and `pr` fields equal this PR.
-Otherwise, or when the directory is unreachable from inside the sandbox, the summary says "retry cap reached
-(exact count not readable from here)" and never guesses a number.
+Read the attempt count by running `cenci babysit status <pr>` once; it prints one JSON line and works on the
+host and inside a sandbox. Use `ciFixAttempts` when the reason is a CI retry cap and `conflictFixAttempts`
+when it is a merge repair retry cap. When the command exits non-zero, or its output does not decode as JSON,
+the summary says "retry cap reached (exact count not readable from here)" and never guesses a number.
 
 ## Question
 
@@ -42,12 +41,13 @@ polling, and that merge conflicts are repaired by a human in a normal session. "
 
 ## Stop choice
 
-Run `cenci babysit stop <pr>` once. Exit 0 means the supervisor was stopped: report that. A non-zero exit, or a
-refusal because the sandbox cannot reach the host supervisor's state, means the supervisor was not stopped: say
-"not stopped" plainly, print `cenci babysit stop <pr>` as the exact command to run on the host, and never report
-success. Do not retry the command and do not kill any process by other means.
+Run `cenci babysit stop <pr>` once; inside a sandbox it is forwarded to the host supervisor. Exit 0 with
+`Stopped babysitting PR #<pr> on the host.` means the supervisor was stopped: report that. A non-zero exit means
+the supervisor was not stopped, whether the host refused (`not stopped: <reason>`) or did not answer in time
+(`stop status unknown`): say "not stopped" plainly, print `cenci babysit stop <pr>` as the exact command to
+run on the host, and never report success. Do not retry the command and do not kill any process by other means.
 
 ## Never
 
 Never mutate GitHub, push, restart the supervisor or run a repair on this window's own initiative, before or after
-the choice: no comment, no label, no commit and no `cenci babysit` call other than the stop above.
+the choice: no comment, no label, no commit and no `cenci babysit` call other than the stop above and `cenci babysit status <pr>`.

@@ -13,6 +13,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/ipc"
 )
 
 // TestMain pins the fleetConfigPath seam to "" (disabled) for every test in
@@ -3832,5 +3834,348 @@ func TestTickConflictLaunchFailureRecordsWorkflowLaunchFailedAndRetries(t *testi
 	}
 	if s.ConflictRepairSHA != "abc" || s.ConflictFixAttempts != 1 {
 		t.Fatalf("successful retry repair bookkeeping: %+v", s)
+	}
+}
+
+// -- #1390: host `Stop` output pin (P34) ------------------------------------
+
+// hostStopFixture isolates a host-side `Stop`/`Status` call: CENCI_SANDBOX
+// cleared (watch/docs/test-isolation.md -- the dev sandbox sets it ambiently),
+// the gh repo lookup answered with repo, and a temp state directory. It
+// returns the directory and the state file path for (repo, pr).
+func hostStopFixture(t *testing.T, repo, pr string) (dir, path string) {
+	t.Helper()
+	t.Setenv("CENCI_SANDBOX", "")
+	original := execGh
+	execGh = func(args ...string) (string, string, error) {
+		if len(args) > 0 && args[0] == "repo" {
+			return repo + "\n", "", nil
+		}
+		return "", "", fmt.Errorf("unexpected gh call: %v", args)
+	}
+	t.Cleanup(func() { execGh = original })
+	dir = t.TempDir()
+	return dir, statePath(dir, repo, pr)
+}
+
+func writeStateFile(t *testing.T, path string, s State) {
+	t.Helper()
+	b, err := json.Marshal(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestStop_HostOutputAndErrorsUnchanged pins `cenci babysit stop <pr>` run on
+// the host byte for byte (#1390 P34) before Stop is split into a repo-keyed
+// StopRepo plus a wrapper: the success line, the no-supervisor error, and the
+// refusal to signal an unverified pid.
+func TestStop_HostOutputAndErrorsUnchanged(t *testing.T) {
+	t.Run("stopped prints the host message and removes the state", func(t *testing.T) {
+		dir, path := hostStopFixture(t, "o/r", "42")
+		writeStateFile(t, path, State{PR: "42", Repo: "o/r", Status: "running"})
+
+		done := captureStdout(t)
+		err := Stop("42", dir)
+		out := done()
+		if err != nil {
+			t.Fatalf("Stop: %v", err)
+		}
+		if out != "Stopped babysitting PR #42.\n" {
+			t.Errorf("stdout = %q, want %q", out, "Stopped babysitting PR #42.\n")
+		}
+		if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+			t.Errorf("state file still exists after Stop (stat err = %v)", statErr)
+		}
+	})
+
+	t.Run("missing state keeps the no supervisor text", func(t *testing.T) {
+		dir, _ := hostStopFixture(t, "o/r", "42")
+		err := Stop("42", dir)
+		if err == nil || err.Error() != "no supervisor found for PR #42" {
+			t.Fatalf("Stop err = %v, want exactly %q", err, "no supervisor found for PR #42")
+		}
+	})
+
+	t.Run("a corrupt state is still treated as empty: removed and reported stopped", func(t *testing.T) {
+		dir, path := hostStopFixture(t, "o/r", "42")
+		if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		done := captureStdout(t)
+		err := Stop("42", dir)
+		out := done()
+		if err != nil {
+			t.Fatalf("Stop: %v", err)
+		}
+		if out != "Stopped babysitting PR #42.\n" {
+			t.Errorf("stdout = %q, want %q", out, "Stopped babysitting PR #42.\n")
+		}
+		if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+			t.Errorf("corrupt state file still exists after host Stop (stat err = %v)", statErr)
+		}
+	})
+
+	t.Run("an unverified pid keeps the refusal text and the state", func(t *testing.T) {
+		dir, path := hostStopFixture(t, "o/r", "42")
+		stubProcessOwned(t, false)
+		writeStateFile(t, path, State{PR: "42", Repo: "o/r", PID: 4242, Status: "running"})
+
+		err := Stop("42", dir)
+		const want = "refusing to signal pid 4242: it is not the recorded cenci babysit process"
+		if err == nil || err.Error() != want {
+			t.Fatalf("Stop err = %v, want exactly %q", err, want)
+		}
+		if _, statErr := os.Stat(path); statErr != nil {
+			t.Errorf("state file must survive a refused stop, stat err = %v", statErr)
+		}
+	})
+}
+
+// -- #1390: repo-keyed StopRepo / StatusRepo ---------------------------------
+
+// TestStopRepo_ClassifiesFailuresBySentinel pins the sentinels the daemon
+// maps to fixed reasons (watch/docs/error-handling.md: a new sentinel gets a
+// direct errors.Is test at the package boundary) and that the host text of
+// each class is unchanged.
+func TestStopRepo_ClassifiesFailuresBySentinel(t *testing.T) {
+	t.Run("missing state is ErrNoSupervisor", func(t *testing.T) {
+		dir := t.TempDir()
+		err := StopRepo("o/r", "42", dir)
+		if !errors.Is(err, ErrNoSupervisor) {
+			t.Fatalf("err = %v, want errors.Is(err, ErrNoSupervisor)", err)
+		}
+		if err.Error() != "no supervisor found for PR #42" {
+			t.Errorf("err text = %q", err.Error())
+		}
+	})
+
+	t.Run("an unverified pid is ErrSupervisorUnverified and is never signalled", func(t *testing.T) {
+		dir := t.TempDir()
+		stubProcessOwned(t, false)
+		writeStateFile(t, statePath(dir, "o/r", "42"), State{PR: "42", Repo: "o/r", PID: 4242})
+		err := StopRepo("o/r", "42", dir)
+		if !errors.Is(err, ErrSupervisorUnverified) {
+			t.Fatalf("err = %v, want errors.Is(err, ErrSupervisorUnverified)", err)
+		}
+		if errors.Is(err, ErrStopFailed) {
+			t.Error("an unverified pid must not also classify as ErrStopFailed")
+		}
+	})
+
+	t.Run("a failed signal is ErrStopFailed and keeps the state", func(t *testing.T) {
+		dir := t.TempDir()
+		stubProcessOwned(t, true)
+		const gonePID = 2147483000 // above any real pid_max: signalling it must fail
+		path := statePath(dir, "o/r", "42")
+		writeStateFile(t, path, State{PR: "42", Repo: "o/r", PID: gonePID})
+		err := StopRepo("o/r", "42", dir)
+		if !errors.Is(err, ErrStopFailed) {
+			t.Fatalf("err = %v, want errors.Is(err, ErrStopFailed)", err)
+		}
+		if _, statErr := os.Stat(path); statErr != nil {
+			t.Errorf("state file must survive a failed signal, stat err = %v", statErr)
+		}
+	})
+
+	t.Run("a failed state removal is ErrStopFailed", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("a read-only directory does not stop root from removing the state")
+		}
+		dir := t.TempDir()
+		path := statePath(dir, "o/r", "42")
+		writeStateFile(t, path, State{PR: "42", Repo: "o/r", Status: "running"})
+		if err := os.Chmod(dir, 0o500); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+		err := StopRepo("o/r", "42", dir)
+		if !errors.Is(err, ErrStopFailed) {
+			t.Fatalf("err = %v, want errors.Is(err, ErrStopFailed)", err)
+		}
+	})
+
+	t.Run("a corrupt state is ErrStateUnreadable, is kept and names no path", func(t *testing.T) {
+		dir := t.TempDir()
+		path := statePath(dir, "o/r", "42")
+		if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		err := StopRepo("o/r", "42", dir)
+		if !errors.Is(err, ErrStateUnreadable) {
+			t.Fatalf("err = %v, want errors.Is(err, ErrStateUnreadable)", err)
+		}
+		if errors.Is(err, ErrNoSupervisor) {
+			t.Error("a corrupt state must not classify as ErrNoSupervisor")
+		}
+		if strings.Contains(err.Error(), dir) || strings.Contains(err.Error(), ".json") {
+			t.Errorf("err text %q names the state path", err.Error())
+		}
+		if _, statErr := os.Stat(path); statErr != nil {
+			t.Errorf("state file must survive an unreadable-state stop, stat err = %v", statErr)
+		}
+	})
+
+	t.Run("an unreadable state file is ErrStateUnreadable, not ErrNoSupervisor", func(t *testing.T) {
+		dir := t.TempDir()
+		path := statePath(dir, "o/r", "42")
+		if err := os.MkdirAll(path, 0o700); err != nil { // a directory where the file belongs
+			t.Fatal(err)
+		}
+		err := StopRepo("o/r", "42", dir)
+		if !errors.Is(err, ErrStateUnreadable) {
+			t.Fatalf("err = %v, want errors.Is(err, ErrStateUnreadable)", err)
+		}
+		if _, statErr := os.Stat(path); statErr != nil {
+			t.Errorf("state must survive, stat err = %v", statErr)
+		}
+	})
+
+	t.Run("a stopped supervisor removes the state and returns nil", func(t *testing.T) {
+		dir := t.TempDir()
+		path := statePath(dir, "o/r", "42")
+		writeStateFile(t, path, State{PR: "42", Repo: "o/r", Status: "running"})
+		if err := StopRepo("o/r", "#42", dir); err != nil {
+			t.Fatalf("StopRepo: %v", err)
+		}
+		if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+			t.Errorf("state file still exists (stat err = %v)", statErr)
+		}
+	})
+}
+
+// TestStatusRepo_ReportsPersistedStateAndLiveness covers P24: liveness is
+// "has a verified pid", not supervisorLive's broader needs-input/arming rule.
+func TestStatusRepo_ReportsPersistedStateAndLiveness(t *testing.T) {
+	const repo = "o/r"
+	for _, tc := range []struct {
+		name      string
+		state     State
+		owned     bool
+		wantLive  bool
+		wantState string
+	}{
+		{"pid 0 needs-input is not live", State{PR: "42", Status: "needs-input"}, true, false, "needs-input"},
+		{"pid 0 arming is not live", State{PR: "42", Status: "arming"}, true, false, "arming"},
+		{"owned pid is live", State{PR: "42", PID: 4242, Status: "running"}, true, true, "running"},
+		{"unowned pid is not live", State{PR: "42", PID: 4242, Status: "running"}, false, false, "running"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			stubProcessOwned(t, tc.owned)
+			tc.state.FixAttempts = 2
+			tc.state.ConflictFixAttempts = 1
+			writeStateFile(t, statePath(dir, repo, "42"), tc.state)
+
+			got, err := StatusRepo(repo, "42", dir)
+			if err != nil {
+				t.Fatalf("StatusRepo: %v", err)
+			}
+			want := ipc.BabysitStatus{PR: 42, Repo: repo, Status: tc.wantState, CIFixAttempts: 2, ConflictFixAttempts: 1, FixCap: fixCap, SupervisorLive: tc.wantLive}
+			if got != want {
+				t.Fatalf("StatusRepo = %+v, want %+v", got, want)
+			}
+		})
+	}
+}
+
+func TestStatusRepo_MissingStateIsErrNoSupervisor(t *testing.T) {
+	_, err := StatusRepo("o/r", "42", t.TempDir())
+	if !errors.Is(err, ErrNoSupervisor) {
+		t.Fatalf("err = %v, want errors.Is(err, ErrNoSupervisor)", err)
+	}
+	if err.Error() != "no supervisor found for PR #42" {
+		t.Errorf("err text = %q", err.Error())
+	}
+}
+
+// TestStatusRepo_CorruptStateIsPathFree covers P4/P33: a corrupt or
+// unreadable state yields a fixed message that never names the state path.
+func TestStatusRepo_CorruptStateIsPathFree(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(statePath(dir, "o/r", "42"), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := StatusRepo("o/r", "42", dir)
+	if !errors.Is(err, ErrStateUnreadable) {
+		t.Fatalf("err = %v, want errors.Is(err, ErrStateUnreadable)", err)
+	}
+	const want = "babysit state for PR #42 could not be read"
+	if err.Error() != want {
+		t.Fatalf("err text = %q, want exactly %q", err.Error(), want)
+	}
+	if strings.Contains(err.Error(), dir) {
+		t.Errorf("err text %q leaks the state directory", err.Error())
+	}
+}
+
+// -- #1390 P9: attention launch reasons are plain labels ---------------------
+
+func launchArg(calls [][]string, workflow string) (string, bool) {
+	for _, c := range calls {
+		if len(c) > 3 && c[1] == "run" && c[2] == workflow {
+			return c[3], true
+		}
+	}
+	return "", false
+}
+
+func TestTick_CIRetryCapLaunchReasonIsAPlainLabel(t *testing.T) {
+	var calls [][]string
+	withCommands(t, []string{cleanOpenPR("sha-x"), `[{"bucket":"fail","name":"test","state":"FAILURE"}]`}, &calls)
+	s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 60, LaunchSession: "work", FixAttempts: fixCap}
+	if _, _, err := tick(&s); !errors.Is(err, errNeedsInput) {
+		t.Fatalf("tick err = %v, want errNeedsInput", err)
+	}
+	arg, ok := launchArg(calls, "babysit-attention")
+	if !ok {
+		t.Fatalf("no babysit-attention launch: %#v", calls)
+	}
+	if arg != "42 CI retry cap reached" {
+		t.Errorf("launch arg = %q, want %q", arg, "42 CI retry cap reached")
+	}
+}
+
+func TestTick_MergeRepairCapLaunchReasonIsAPlainLabel(t *testing.T) {
+	var calls [][]string
+	withCommands(t, []string{conflictingOpenPR("def"), `[{"bucket":"pass","name":"test","state":"SUCCESS"}]`, `[]`, `[]`}, &calls)
+	s := State{
+		PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 300, CurrentDelaySeconds: 900,
+		LastHeadSHA: "abc", LaunchSession: "work", Status: "running", ConflictRepairSHA: "abc", ConflictFixAttempts: fixCap,
+	}
+	if _, _, err := tick(&s); err != nil {
+		t.Fatal(err)
+	}
+	arg, ok := launchArg(calls, "babysit-attention")
+	if !ok {
+		t.Fatalf("no babysit-attention launch: %#v", calls)
+	}
+	if arg != "42 merge repair retry cap reached" {
+		t.Errorf("launch arg = %q, want %q", arg, "42 merge repair retry cap reached")
+	}
+}
+
+// TestPackageHasNoDecideWhetherToRetryWording scans every Go file in the
+// package (tests included) so the old launch-reason tail cannot survive in a
+// comment, a constant or a fixture. The needle is assembled so this file does
+// not match itself.
+func TestPackageHasNoDecideWhetherToRetryWording(t *testing.T) {
+	needle := "decide whether " + "to retry"
+	files, err := filepath.Glob("*.go")
+	if err != nil || len(files) == 0 {
+		t.Fatalf("glob *.go: %v (%d files)", err, len(files))
+	}
+	for _, f := range files {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(b), needle) {
+			t.Errorf("%s still contains %q", f, needle)
+		}
 	}
 }

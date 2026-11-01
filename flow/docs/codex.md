@@ -52,11 +52,16 @@ invoked by hand: `$cenci:ci-repair` (repair one PR's failing CI) and
   reason) and attempt count, then asks one blocking question with exactly two options:
   "leave paused for manual repair" and "stop babysitting". There is no retry option.
   A headless `codex exec` run prints the summary and the question and exits without
-  choosing, mutating, pushing or stopping.
-- The "stop babysitting" choice runs `cenci babysit stop <pr>`. When that exits non-zero, or
-  the sandbox cannot reach the host supervisor's state, the procedure says the supervisor
+  choosing, mutating, pushing or stopping. The attempt count comes from
+  `cenci babysit status <pr>` (`ciFixAttempts` or `conflictFixAttempts`, by launch reason),
+  which works on the host and inside a sandbox; when that exits non-zero or its output is not
+  JSON, the summary says "retry cap reached (exact count not readable from here)".
+- The "stop babysitting" choice runs `cenci babysit stop <pr>`, which a sandbox forwards to
+  the host daemon. When that exits non-zero (`not stopped: <reason>` from a host refusal, or
+  `stop status unknown` when the host does not answer), the procedure says the supervisor
   was **not stopped** and prints the exact `cenci babysit stop <pr>` command to run on the
-  host. It never reports a failed stop as success.
+  host. It never reports a failed stop as success. The procedure's only other `cenci babysit`
+  call is that `status` read.
 
 The opt-in runner `codex/native-workflows.test.sh` (`CENCI_CODEX_NATIVE=1`) runs both
 procedures through a real `codex exec` against a disposable fixture. It also covers the
