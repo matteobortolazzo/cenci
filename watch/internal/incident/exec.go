@@ -33,10 +33,13 @@ func (b *boundedBuffer) ReadFrom(r io.Reader) (int64, error) {
 	return io.Copy(struct{ io.Writer }{b}, r)
 }
 
+// callTimeout is the per-call bound; a variable only so a test can shorten it.
+var callTimeout = 60 * time.Second
+
 // Every command has a per-call bound within its incident deadline. Killing the
 // process group prevents a timed-out CLI from leaving credential helpers behind.
 func command(ctx context.Context, dir string, env []string, input io.Reader, name string, args ...string) (string, error) {
-	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, callTimeout)
 	defer cancel()
 	return commandDeadline(ctx, dir, env, input, name, args...)
 }

@@ -1,8 +1,6 @@
 package incident
 
 import (
-	"bytes"
-	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"regexp"
@@ -277,8 +275,9 @@ func (p SetupPlan) objectRef() word {
 	return valOrPh(p.ObjectID, objectPlaceholder)
 }
 
-// proposedAuth is the auth section the worker would be configured with.
-func (p SetupPlan) proposedAuth() AuthConfig {
+// ProposedAuth is the auth section the worker would be configured with. It is
+// the single source of what the preview shows and what apply writes.
+func (p SetupPlan) ProposedAuth() AuthConfig {
 	a := AuthConfig{Mode: AuthModeCertificate, TenantID: orPlaceholder(p.Tenant, tenantPlaceholder), ClientID: p.ClientID, CertificatePath: orPlaceholder(p.CertificatePath, certPlaceholder)}
 	switch p.Identity {
 	case SetupIdentityNew:
@@ -297,15 +296,12 @@ func (p SetupPlan) Render() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	auth := p.proposedAuth()
-	var authJSON bytes.Buffer
-	enc := json.NewEncoder(&authJSON)
-	enc.SetEscapeHTML(false)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(auth); err != nil {
+	auth := p.ProposedAuth()
+	authJSON, err := encodeJSON(auth)
+	if err != nil {
 		return "", err
 	}
-	if !placeholderToken.MatchString(authJSON.String()) {
+	if !placeholderToken.MatchString(authJSON) {
 		if err := auth.Validate(); err != nil {
 			return "", fmt.Errorf("proposed auth section: %w", err)
 		}
@@ -315,7 +311,7 @@ func (p SetupPlan) Render() (string, error) {
 	if p.Identity != SetupIdentityManaged {
 		steps = append(steps, p.certificateStep())
 	}
-	steps = append(steps, p.authStep(authJSON.String()), p.filesStep())
+	steps = append(steps, p.authStep(authJSON), p.filesStep())
 
 	var body strings.Builder
 	for i, s := range steps {
@@ -501,7 +497,7 @@ func (p SetupPlan) certificateStep() setupStep {
 func (p SetupPlan) authStep(authJSON string) setupStep {
 	s := setupStep{title: "Proposed auth section", lines: []string{"Add this to the incident worker config. The worker authenticates only as this identity and never falls back to ambient Azure credentials:"}}
 	s.lines = append(s.lines, strings.Split(strings.TrimRight(authJSON, "\n"), "\n")...)
-	proposed := p.proposedAuth()
+	proposed := p.ProposedAuth()
 	switch {
 	case p.Config.Auth == nil:
 		s.lines = append(s.lines, "The config has no auth section yet.")
@@ -529,4 +525,149 @@ func (p SetupPlan) filesStep() setupStep {
 	}
 	s.lines = append(s.lines, "- "+safeText(filepath.Join(p.Config.StateDir, "setup-journal.json"))+": apply would create it to resume after an interruption.")
 	return s
+}
+
+const (
+	roleNameServiceBusDataReceiver = "Azure Service Bus Data Receiver"
+	roleNameLogAnalyticsReader     = "Log Analytics Reader"
+)
+
+// RoleTarget is one role assignment the worker principal needs: a built-in role
+// definition GUID and its name at one exact scope.
+type RoleTarget struct{ RoleGUID, RoleName, Scope string }
+
+// RoleTargets lists what apply grants and what RenderApply shows: Service Bus
+// Data Receiver on the exact entity, then Log Analytics Reader on each distinct
+// workspace. It fails while the namespace or any workspace is unresolved.
+func (p SetupPlan) RoleTargets() ([]RoleTarget, error) {
+	if p.Namespace == nil {
+		return nil, fmt.Errorf("the Service Bus namespace is not resolved")
+	}
+	scope, err := EntityScope(*p.Namespace, p.Config)
+	if err != nil {
+		return nil, err
+	}
+	targets := []RoleTarget{{RoleServiceBusDataReceiver, roleNameServiceBusDataReceiver, scope}}
+	var found []ARMID
+	for _, t := range p.Workspaces {
+		if t.ID == nil {
+			return nil, fmt.Errorf("workspace %s is not resolved", t.UUID)
+		}
+		found = append(found, *t.ID)
+	}
+	for _, id := range DedupeWorkspaces(found) {
+		targets = append(targets, RoleTarget{RoleLogAnalyticsReader, roleNameLogAnalyticsReader, id.String()})
+	}
+	return targets, nil
+}
+
+// ApplyBlockers lists everything that stops apply before its prompt: an
+// unusable Azure CLI, and every value that is a placeholder or was not
+// confirmed. Each entry names the flag (or command) that fixes it.
+func (p SetupPlan) ApplyBlockers() []string {
+	var b []string
+	add := func(format string, a ...any) { b = append(b, fmt.Sprintf(format, a...)) }
+	switch {
+	case p.AzMissing:
+		add("the Azure CLI (az) was not found on PATH: install it, then sign in with az login")
+	case p.LoginFailed:
+		add("az account show failed, so nothing could be confirmed: sign in with az login --tenant %s", orPlaceholder(p.Tenant, tenantPlaceholder))
+	case p.TenantMismatch:
+		add("--tenant %s differs from the tenant the Azure CLI is signed in to (%s): fix --tenant or sign in with az login --tenant", p.Tenant, p.AccountTenant)
+	}
+	switch p.Identity {
+	case SetupIdentityExisting, SetupIdentityManaged:
+	case SetupIdentityNew:
+		add("--identity new is not available yet (cenci issue #1389): create the identity with the preview's commands, then use --identity existing")
+	default:
+		add("--identity must be existing or managed")
+	}
+	if p.Tenant == "" {
+		add("--tenant is not set")
+	}
+	if p.Subscription == "" {
+		add("--subscription is not set")
+	}
+	if p.Namespace == nil {
+		add("--service-bus-namespace-id: the Service Bus namespace was not resolved (%s)", orPlaceholder(p.NamespaceNote, "az was unavailable"))
+	} else if p.NamespaceNote != "" {
+		add("--service-bus-namespace-id: %s", p.NamespaceNote)
+	}
+	if p.EntityNote != "" {
+		add("--service-bus-namespace-id: %s", p.EntityNote)
+	}
+	for _, t := range p.Workspaces {
+		if t.ID == nil {
+			add("--workspace-resource-id %s=RESOURCE_ID: workspace %s was not resolved (%s)", t.UUID, t.UUID, orPlaceholder(t.Note, "az was unavailable"))
+		} else if t.Note != "" {
+			add("--workspace-resource-id %s=RESOURCE_ID: %s", t.UUID, t.Note)
+		}
+	}
+	if p.ObjectID == "" || p.PrincipalNote != "" {
+		flag := "--client-id"
+		if p.Identity == SetupIdentityManaged {
+			flag = "--principal-object-id"
+		}
+		add("%s: the principal was not confirmed (%s)", flag, orPlaceholder(p.PrincipalNote, "no object ID"))
+	}
+	if p.Identity != SetupIdentityManaged {
+		switch {
+		case p.CertificatePath == "":
+			add("--certificate-path is not set: name the existing certificate file")
+		case !p.CertificateExists:
+			add("--certificate-path: %s does not exist; apply only reads it", safeText(p.CertificatePath))
+		}
+	}
+	return b
+}
+
+// RenderApply is the plan apply shows before its prompt: everything it will
+// create or write, in the same terms the engine executes. The preview's
+// copy-and-run commands are not repeated because apply runs the steps itself.
+func (p SetupPlan) RenderApply(replaceAuth bool) (string, error) {
+	targets, err := p.RoleTargets()
+	if err != nil {
+		return "", err
+	}
+	auth := p.ProposedAuth()
+	authJSON, err := encodeJSON(auth)
+	if err != nil {
+		return "", err
+	}
+	var out strings.Builder
+	out.WriteString("cenci incident setup --apply: this run assigns the roles and writes the local files below. It deletes nothing and does not start the worker.\n\n")
+	fmt.Fprintf(&out, "Tenant:       %s\n", p.Tenant)
+	fmt.Fprintf(&out, "Subscription: %s\n", p.Subscription)
+	fmt.Fprintf(&out, "Identity:     %s\n", p.Identity)
+	fmt.Fprintf(&out, "Principal:    %s (object ID)\n", p.ObjectID)
+	if p.ClientID != "" {
+		fmt.Fprintf(&out, "Client ID:    %s\n", p.ClientID)
+	}
+	out.WriteString("\nRole assignments, each created only when this principal does not already hold exactly that role at exactly that scope:\n")
+	for i, t := range targets {
+		fmt.Fprintf(&out, "  %d. %s (%s) at %s\n", i+1, t.RoleName, t.RoleGUID, t.Scope)
+	}
+	out.WriteString("\nLocal files:\n")
+	var authNote string
+	switch {
+	case p.Config.Auth == nil:
+		authNote = "adds the auth section; nothing else changes"
+	case *p.Config.Auth == auth:
+		authNote = "already holds this auth section, so it is not rewritten"
+	case replaceAuth:
+		authNote = "replaces the existing, different auth section (--replace-auth); nothing else changes"
+	default:
+		authNote = "holds a different auth section, so apply stops unless --replace-auth is given"
+	}
+	fmt.Fprintf(&out, "  - %s: %s\n", safeText(p.ConfigPath), authNote)
+	fmt.Fprintf(&out, "  - %s: created or updated so an interrupted apply can resume (no secrets)\n", safeText(SetupJournalPath(p.Config.StateDir)))
+	if p.Identity != SetupIdentityManaged {
+		fmt.Fprintf(&out, "  - %s: read only; the certificate and private key are never created or changed\n", safeText(p.CertificatePath))
+	}
+	out.WriteString("\nProposed auth section:\n")
+	for _, l := range strings.Split(strings.TrimRight(authJSON, "\n"), "\n") {
+		out.WriteString("  " + l + "\n")
+	}
+	out.WriteString("\nAfterwards setup runs the checks of cenci incident verify; when it created role assignments it waits up to 10 minutes for them to propagate.\n")
+	return out.String(), nil
 }

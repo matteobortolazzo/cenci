@@ -377,7 +377,7 @@ telemetry, and produces a draft fix PR or a report for human review. It runs
 separately from the attention daemon and is disabled until explicitly configured.
 
 ```bash
-cenci incident setup --config /absolute/path/incidents.json
+cenci incident setup --config /absolute/path/incidents.json [--apply [--yes]] [--replace-auth]
 cenci incident run --config /absolute/path/incidents.json
 cenci incident verify --config /absolute/path/incidents.json [--propagation-wait 5m]
 cenci incident status --state-dir /absolute/path/incident-state
@@ -401,7 +401,7 @@ probe is `ok`, 1 when any fails, and 2 on a usage error. With
 that has just been granted; see
 [Verifying the identity](docs/incident-worker.md#verifying-the-identity).
 
-`setup` is a read-only preview that explains the worker identity and prints the
+Without `--apply`, `setup` is a read-only preview that explains the worker identity and prints the
 commands to create it. It writes no file, changes nothing in Azure, and needs
 neither `enabled: true` nor an `auth` section in the config. It discovers values
 with read-only `az` calls when `az` is usable, and otherwise still renders every
@@ -425,13 +425,40 @@ Flags (`--config` is required; every other flag is optional):
 - `--certificate-path PATH` — absolute path of the worker's certificate and key PEM (not allowed with `managed`).
 - `--service-bus-namespace-id ID` — Service Bus namespace resource ID, when it cannot be discovered.
 - `--workspace-resource-id UUID=ID` — resource ID for a configured workspace UUID that cannot be discovered (repeatable; each UUID once, a repeated UUID is refused with exit 2).
+- `--apply` — carry the plan out instead of previewing it (`--identity existing` or `managed` only; see below).
+- `--yes` — with `--apply`, confirm without the prompt; required when stdin is not a terminal.
+- `--replace-auth` — with `--apply`, replace a config `auth` section that differs from the plan.
 
-Exit codes: `0` a preview was rendered (including a guidance-only one when `az` is
+Exit codes of the preview: `0` a preview was rendered (including a guidance-only one when `az` is
 missing or not signed in); `1` the config is unusable or a discovery step failed
 (malformed, oversized or timed-out `az` output, or a value that contradicts your
 input); `2` a usage error such as a bad flag value or conflicting identity flags.
 See [Setup preview](docs/incident-worker.md#setup-preview) for what it runs and
 prints.
+
+`cenci incident setup --apply` carries the plan out after you confirm it. It
+prints the full plan (tenant, subscription, identity, every role and scope, every
+local file) and asks `Apply this plan? [y/N]`; only `y` or `Y` continues. Without a
+terminal on stdin you must pass `--yes` and supply every input as a flag
+(`--tenant`, `--subscription`, `--identity`, `--service-bus-namespace-id`, a
+`--workspace-resource-id` for each configured workspace, `--certificate-path` for
+`existing`, `--principal-object-id` for `managed`), or it exits 2 naming the
+missing flag. It creates only the missing role assignments, writes only the
+config's `auth` section, runs the checks of `verify` (waiting up to 10 minutes
+for propagation when it created assignments) and records progress in
+`setup-journal.json` in the config's state directory, so a rerun creates nothing
+twice and resumes where a failure stopped. It never deletes anything and never
+starts the worker. `--identity new` is refused with exit 2 until a later ticket
+(cenci issue #1389) adds it: create the identity with the preview's commands, then
+use `--identity existing`. Apply exits `0` when complete, `1` on a runtime
+failure, a declined prompt or a failed verify probe, and `2` on a usage error
+(`--yes` or `--replace-auth` without `--apply`, an omitted `--identity`, a missing
+input with `--yes`, a non-terminal stdin without `--yes`, `--identity new`). On a
+terminal without `--yes` any other missing input is not a usage error: setup
+discovers what it can and shows it in the plan, and only a value discovery cannot
+resolve or confirm (for example `--certificate-path`) exits `1` naming the flag
+before the prompt. See
+[Setup apply](docs/incident-worker.md#setup-apply).
 
 `status` prints persistent JSON without Azure or agent access, and `cancel` needs
 no Azure identity either. `cancel` stops queued/active work;

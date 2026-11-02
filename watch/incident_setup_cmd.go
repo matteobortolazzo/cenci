@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"flag"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/incident"
 )
@@ -26,6 +28,7 @@ type setupFlags struct {
 	config, tenant, subscription, identity, clientID, principalObjectID string
 	displayName, certificatePath, namespaceID                           string
 	workspaces                                                          []string
+	apply, yes, replaceAuth                                             bool
 	set                                                                 map[string]bool
 }
 
@@ -36,11 +39,14 @@ type setupRequest struct {
 	workspaces map[string]incident.ARMID // by lower-case configured workspace UUID
 }
 
-// runIncidentSetup is the read-only `cenci incident setup` preview: it
-// validates its input, discovers values with read-only az calls when az is
-// usable, and prints the steps. It never writes a file or changes Azure.
-// Exit 2 is a usage error, 1 a failed step or unusable config, 0 a rendered
-// preview, including a guidance-only one.
+// runIncidentSetup is `cenci incident setup`. Without --apply it is the
+// read-only preview: it validates its input, discovers values with read-only az
+// calls when az is usable, and prints the steps, never writing a file or
+// changing Azure. With --apply it shows the plan, asks for confirmation (or
+// takes --yes) and hands the plan to incident.Apply. Exit 2 is a usage error
+// raised before any az call, 1 a failed step, unusable config, declined prompt
+// or failed verification, 0 a rendered preview (including a guidance-only one)
+// or a completed apply.
 func runIncidentSetup(args []string) {
 	fs := flag.NewFlagSet("incident setup", flag.ExitOnError)
 	var f setupFlags
@@ -57,6 +63,9 @@ func runIncidentSetup(args []string) {
 		f.workspaces = append(f.workspaces, v)
 		return nil
 	})
+	fs.BoolVar(&f.apply, "apply", false, "carry the plan out after confirmation: create the missing role assignments, write the config's auth section and verify")
+	fs.BoolVar(&f.yes, "yes", false, "with --apply, confirm without a prompt (required when stdin is not a terminal)")
+	fs.BoolVar(&f.replaceAuth, "replace-auth", false, "with --apply, replace an existing config auth section that differs from the plan")
 	_ = fs.Parse(args)
 	rejectExtra("cenci incident setup", fs.Args())
 	f.set = map[string]bool{}
@@ -74,6 +83,9 @@ func runIncidentSetup(args []string) {
 	if err != nil {
 		usage(err)
 	}
+	if req.apply && !req.yes && !stdinIsTerminal() {
+		usage(fmt.Errorf("--apply needs a terminal on stdin to confirm the plan; pass --yes to confirm without one"))
+	}
 	cfg, err := incident.LoadSetupConfig(req.config)
 	if err != nil {
 		fail(err)
@@ -81,15 +93,36 @@ func runIncidentSetup(args []string) {
 	if err := req.crossCheck(cfg); err != nil {
 		usage(err)
 	}
+	// Only a headless run needs every input up front; on a terminal, discovery
+	// fills what it can and Apply's blockers name the rest before the prompt.
+	if req.apply && req.yes {
+		if err := req.missingApplyInputs(cfg); err != nil {
+			usage(err)
+		}
+	}
 	plan, err := req.basePlan(cfg)
 	if err != nil {
 		fail(err)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	err = discoverSetup(ctx, cfg, &plan)
-	stop()
+	defer stop()
+	var az *incident.Az // nil when az is not on PATH
+	if req.apply {
+		az, err = incident.NewApplyAz()
+	} else {
+		az, err = incident.NewAz()
+	}
 	if err != nil {
+		az = nil
+	}
+	if err = discoverSetup(ctx, cfg, &plan, az); err != nil {
 		fail(fmt.Errorf("discovery failed: %w", err))
+	}
+	if req.apply {
+		if err := applySetup(ctx, req, plan, az); err != nil {
+			fail(err)
+		}
+		return
 	}
 	out, err := plan.Render()
 	if err != nil {
@@ -100,6 +133,60 @@ func runIncidentSetup(args []string) {
 	}
 }
 
+// applySetup runs incident.Apply for a discovered plan. Apply re-confirms the
+// tenant and principal, shows the plan on stdout and calls the prompt before it
+// writes anything; every error it returns, a declined prompt included, is a
+// runtime failure. A nil az means the Azure CLI is not installed, which Apply
+// reports as a blocker.
+func applySetup(ctx context.Context, req setupRequest, plan incident.SetupPlan, az *incident.Az) error {
+	confirm := func() bool { return true }
+	if !req.yes {
+		confirm = func() bool { return confirmApply(os.Stdin, os.Stderr) }
+	}
+	return incident.Apply(ctx, plan, incident.ApplyOptions{
+		Az: az, ReplaceAuth: req.replaceAuth, Confirm: confirm,
+		// The same checks `cenci incident verify` runs, ambient AZURE_* removal included.
+		Verify: func(ctx context.Context, cfg incident.Config, wait time.Duration) bool {
+			return verifyIncident(ctx, cfg, verifyDeps{}, wait) == 0
+		},
+		Stdout: os.Stdout, Stderr: os.Stderr,
+	})
+}
+
+// confirmApply asks once and reads one line: only "y" or "Y" confirms, so any
+// other answer, an empty line and end of input all decline.
+func confirmApply(in io.Reader, out io.Writer) bool {
+	_, _ = fmt.Fprint(out, "Apply this plan? [y/N] ")
+	line, err := bufio.NewReader(in).ReadString('\n')
+	if err != nil {
+		return false
+	}
+	line = strings.TrimRight(line, "\n")
+	return line == "y" || line == "Y"
+}
+
+// missingApplyInputs names the first flag that --apply needs and the request
+// lacks, so a headless run never falls back to a guessed or discovered value.
+func (r setupRequest) missingApplyInputs(cfg incident.Config) error {
+	for _, name := range []string{"tenant", "subscription", "service-bus-namespace-id"} {
+		if !r.set[name] {
+			return fmt.Errorf("--apply requires --%s", name)
+		}
+	}
+	for _, res := range cfg.Resources {
+		if _, ok := r.workspaces[strings.ToLower(res.Workspace)]; !ok {
+			return fmt.Errorf("--apply requires --workspace-resource-id %s=WORKSPACE_RESOURCE_ID", res.Workspace)
+		}
+	}
+	if r.identity == incident.SetupIdentityExisting && !r.set["certificate-path"] {
+		return fmt.Errorf("--apply requires --certificate-path with --identity existing")
+	}
+	if r.identity == incident.SetupIdentityManaged && !r.set["principal-object-id"] {
+		return fmt.Errorf("--apply requires --principal-object-id with --identity managed")
+	}
+	return nil
+}
+
 func (f setupFlags) validate() (setupRequest, error) {
 	req := setupRequest{setupFlags: f, workspaces: map[string]incident.ARMID{}}
 	if f.config == "" {
@@ -107,6 +194,18 @@ func (f setupFlags) validate() (setupRequest, error) {
 	}
 	if !incident.PrintableBounded(f.config, maxPathRunes) {
 		return req, fmt.Errorf("--config must be a printable path")
+	}
+	if !f.apply && f.yes {
+		return req, fmt.Errorf("--yes requires --apply")
+	}
+	if !f.apply && f.replaceAuth {
+		return req, fmt.Errorf("--replace-auth requires --apply")
+	}
+	switch {
+	case f.apply && !f.set["identity"]:
+		return req, fmt.Errorf("--apply requires --identity existing or managed")
+	case f.apply && f.identity == incident.SetupIdentityNew:
+		return req, fmt.Errorf("--apply --identity new is not available yet (cenci issue #1389): create the identity with the preview's commands, then use --identity existing")
 	}
 	switch f.identity {
 	case incident.SetupIdentityNew, incident.SetupIdentityExisting, incident.SetupIdentityManaged:
@@ -230,13 +329,13 @@ func (r setupRequest) basePlan(cfg incident.Config) (incident.SetupPlan, error) 
 	return p, nil
 }
 
-// discoverSetup fills the plan from read-only az calls. A missing az, a failed
-// login probe, a tenant mismatch and any call that exits non-zero leave the
-// plan with placeholders and no error; a call that succeeds with unusable
-// output, or a value that contradicts the request, is returned as an error.
-func discoverSetup(ctx context.Context, cfg incident.Config, p *incident.SetupPlan) error {
-	az, err := incident.NewAz()
-	if err != nil {
+// discoverSetup fills the plan from read-only az calls through az, which is nil
+// when az is not installed. A missing az, a failed login probe, a tenant
+// mismatch and any call that exits non-zero leave the plan with placeholders
+// and no error; a call that succeeds with unusable output, or a value that
+// contradicts the request, is returned as an error.
+func discoverSetup(ctx context.Context, cfg incident.Config, p *incident.SetupPlan, az *incident.Az) error {
+	if az == nil {
 		p.AzMissing = true
 		return nil
 	}

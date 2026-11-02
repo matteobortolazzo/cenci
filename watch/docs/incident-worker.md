@@ -465,8 +465,80 @@ certificate step, the proposed `auth` section and the local-files list all show
 | 1 | The config is unusable, or a discovery step failed: `az` exited 0 with output that is not one JSON value (empty, truncated, trailing data, wrong shape), the output exceeded its bound, a call timed out, was interrupted or was killed by a signal, or a discovered value contradicts your input (a workspace whose `customerId` is not the configured one, or a `--client-id` that is not the principal's `appId`). Nothing is printed to stdout. |
 | 2 | A usage error, reported as one line before any `az` call: a missing `--config`, a malformed or non-UUID value, a malformed resource ID, a workspace UUID matching no configured workspace, conflicting identity flags, or an unknown flag. |
 
-The `--apply`, `--yes` and `--replace-auth` flags are not registered here and are
-rejected as unknown flags.
+`--apply`, `--yes` and `--replace-auth` switch the command from this preview to
+[Setup apply](#setup-apply); without `--apply` the command stays read-only, and
+`--yes` or `--replace-auth` alone is a usage error.
+
+### Setup apply
+
+`cenci incident setup --apply` carries out the preview's plan for an `existing` or
+`managed` identity: it creates the missing role assignments, writes the config's
+`auth` section and runs `verify`. `--identity new` is refused with exit 2 and a
+pointer to cenci issue #1389 (application creation and certificate generation);
+create the identity with the preview's commands, then use `--identity existing`.
+`--apply` also requires an explicit `--identity`.
+
+**Authorization.** Apply shows the plan on stdout (tenant, subscription, identity,
+principal, every role and exact scope, the config, the journal, the read-only
+certificate path, the proposed `auth` JSON and the verify step) and prints
+`Apply this plan? [y/N] ` on stderr. One line is read: only `y` or `Y` continues;
+anything else, including end of input, exits 1 with nothing created or written,
+not even the journal. Without a terminal on stdin (detected with a termios ioctl,
+so `/dev/null` is not mistaken for one) the run exits 2 unless `--yes` is given,
+which skips the prompt. `--yes` needs every input as a flag, checked after the
+config is loaded and before any `az` call: `--tenant`, `--subscription`,
+`--identity`, `--service-bus-namespace-id`, one `--workspace-resource-id
+<uuid>=ID` per configured workspace, `--certificate-path` for `existing` and
+`--principal-object-id` for `managed`. A missing one exits 2 and names the flag.
+
+**Checks before the prompt.** Apply refuses (exit 1, nothing changed) while the
+plan has a placeholder or an unconfirmed value, and names the flag that supplies
+it. It re-reads the signed-in tenant (`az account show`) and the principal
+(`az ad sp show --id`), builds the credential from the proposed `auth` (which only
+reads the certificate file), refuses a config whose `auth` differs from the plan
+unless `--replace-auth` is given, and checks that the config is a regular file
+owned by you and not a symbolic link.
+
+**Allowlist.** Apply may run the preview's nine read-only subcommands and exactly
+one mutating one, `az role assignment create` (one per missing role and scope,
+with `--assignee-principal-type ServicePrincipal`). The preview's allowlist is
+unchanged and still refuses it. Every call keeps the preview's bounds (null stdin,
+60 seconds, 4 MiB), and `az` output is never printed.
+
+**Matching and rerun.** For each role scope, apply lists the principal's
+assignments at that scope (`az role assignment list --assignee-object-id <id>
+--scope <scope>`) and creates a role only when no assignment matches the exact
+triple: the principal ID, the role definition's trailing GUID and the full scope
+string, all compared without case. A parent or prefix scope never matches. A rerun
+therefore lists the assignments at every scope instead of trusting the journal, and
+a completed apply makes no mutating call.
+
+**Journal and resume.** Progress is recorded in `setup-journal.json` in the
+config's `stateDir` (mode 0600, non-secret IDs, step status, timestamps and a
+`complete` flag). The journal is bound to the tenant, identity mode and absolute
+config path; a rerun with a different request exits 1 and leaves it untouched, and
+so does a journal that is corrupt, oversized, a symbolic link or owned by another
+user. When a step fails, apply prints the completed and remaining steps, leaves
+`complete: false` and exits 1; the next run resumes without creating a duplicate.
+The journal is not locked: run one apply at a time.
+
+**Config write.** Apply replaces only the `auth` section: it decodes the config
+strictly, re-encodes it with two-space indentation (the operator's key order and
+formatting are not kept), writes a 0600 temporary file in the same directory and
+renames it over the config. A config that already equals the plan is not rewritten.
+
+**Verify.** After its writes, apply runs the checks of `cenci incident verify`
+against the written config, waiting up to 10 minutes for propagation when it
+created assignments in this run (none otherwise), and sets `complete: true` only
+when every probe is `ok`. It never deletes identities, credentials, role
+assignments, the ledger or Azure resources, and it never enables or starts the
+worker.
+
+| Code | Meaning |
+| --- | --- |
+| 0 | Every step is done and every probe is `ok`. |
+| 1 | A runtime failure: an unresolved value, a failed check or `az` step, a declined prompt, a journal or config refusal, or a probe that did not pass. |
+| 2 | A usage error, before any `az` call: `--yes` or `--replace-auth` without `--apply`, a missing `--identity`, with `--yes` any other missing required input, `--identity new`, or a non-terminal stdin without `--yes`. |
 
 ### Provisioning the identity
 
@@ -975,6 +1047,9 @@ live in `internal/incident/verify_test.go`.
 | Setup scopes: a shared workspace gets one reader command, a topic config gets the exact subscription scope, and a cross-subscription workspace keeps its own scope and is flagged | `TestIncidentSetupSharedWorkspaceProducesOneReaderCommand`, `TestIncidentSetupTopicSubscriptionScopeIsExact`, `TestIncidentSetupCrossSubscriptionWorkspaceKeepsItsScope` |
 | Malformed, truncated or contradicting `az` output is a failed step with exit 1, never an empty result | `TestIncidentSetupMalformedDiscoveryOutputFailsTheStep`, `TestIncidentSetupMismatchedDiscoveryFailsTheStep` |
 | Resource ID parsing, exact scope building, workspace de-duplication and shell quoting | `TestSetupParseNamespaceIDAcceptsOnlyServiceBusNamespaces`, `TestSetupParseWorkspaceIDAcceptsOnlyLogAnalyticsWorkspaces`, `TestSetupEntityScopeIsTheExactQueueOrTopicSubscription`, `TestSetupDedupeWorkspacesComparesIDsWithoutCase`, `TestSetupInSubscriptionIgnoresCase`, `TestSetupShellQuoteExpandsToExactlyTheValue` |
+| Setup apply gates exit 2 before any `az` call and change nothing: a non-terminal stdin (pipe or `/dev/null`) without `--yes`, `--yes` or `--replace-auth` without `--apply`, `--identity new` (#1389), a missing `--identity` or, with `--yes`, any missing required input; a complete `--apply --yes` passes them (control). On a terminal without `--yes` a missing input is not a usage error: discovery runs and fills what it can into the plan, and a value it cannot resolve or confirm (tested with `--certificate-path`) exits 1 naming the flag before the prompt. The terminal check is false for `/dev/null` and a pipe and true for a pty; the prompt accepts only `y` or `Y` | `TestIncidentSetupApplyGatesExitTwoBeforeAnyAzCall`, `TestIncidentSetupApplyOnATerminalWithoutYesExitsOneNamingTheUnconfirmedFlag`, `TestIncidentSetupApplyIdentityGatesExitTwoOnATerminalWithoutYes`, `TestStdinIsTerminalRejectsNullDeviceAndPipeAndAcceptsAPty`, `TestConfirmApplyAcceptsOnlyYOrUpperY` |
+| Setup apply allowlist is the preview's nine plus `role assignment create`, the preview still refuses it, and the role wrappers validate their output; the config `auth` write changes only `auth`, atomically with mode 0600, and refuses a symlink or foreign owner | `TestAzApplyAllowlistIsThePreviewSetPlusRoleAssignmentCreate`, `TestAzApplyAzRefusesEverythingOutsideItsAllowlistWithoutExecuting`, `TestAzPreviewStillRefusesRoleAssignmentCreate`, `TestAzRoleAssignmentWrappersValidateTheirOutput`, `TestWriteAuthChangesOnlyTheAuthSectionAtomicallyWithMode0600`, `TestWriteAuthRefusesASymlinkOrAConfigOwnedByAnotherUser` |
+| Setup apply engine (`internal/incident`, fake `az`, `Verify` seam): a declined prompt, a plan that cannot be written, a tenant mismatch or a failed `az` call makes no mutating call; a cancelled context is reported as interrupted and never reaches the config write; it creates exactly the missing assignments, matches only the exact triple, makes no mutating call on a rerun and resumes after a failed step; a differing `auth` needs `--replace-auth`; verify waits 10m only when something was created and `complete` follows it; managed mode creates no credential; the journal binds tenant, identity and config path and is never overwritten when corrupt or foreign; a symlinked or foreign config is refused; nothing is deleted and no worker is started | `TestSetupApplyDeclinedConfirmationMakesNoMutatingCall`, `TestSetupApplyUnwritablePlanStopsBeforeTheConfirmation`, `TestSetupApplyCancellationIsReportedAsInterrupted`, `TestSetupApplyTenantMismatchMakesNoMutatingCall`, `TestSetupApplyFailedOrTimedOutAzCallFailsItsStep`, `TestSetupApplyCreatesExactlyTheMissingRoleAssignments`, `TestSetupApplyExistingAssignmentMatchesOnlyTheExactTriple`, `TestSetupApplyRerunAfterSuccessMakesNoMutatingCall`, `TestSetupApplyRerunRecreatesAnAssignmentDeletedOutOfBandDespiteADoneJournalStep`, `TestSetupApplyResumesAfterAFailedRoleAssignment`, `TestSetupApplyRefusesADifferingAuthWithoutReplaceAuth`, `TestSetupApplyVerifiesAndCompletesOnlyWhenEveryProbeIsOK`, `TestSetupApplyManagedIdentityConfirmsThePrincipalAndCreatesNoCredential`, `TestSetupApplyJournalBindsTenantIdentityAndConfigPath`, `TestSetupApplyNeverOverwritesACorruptOrForeignJournal`, `TestSetupApplyRefusesASymlinkedOrForeignConfig`, `TestSetupApplyNeverDeletesOrStartsTheWorker`, `TestSetupApplyBlockersNameTheFlagThatFixesEach` |
 
 Live Azure delivery, production RBAC, the operator's container image and proxy,
 and actual model/GitHub calls require a staging smoke test before enabling this

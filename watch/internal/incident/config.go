@@ -3,7 +3,9 @@
 package incident
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -11,6 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -86,14 +89,87 @@ func LoadSetupConfig(path string) (Config, error) {
 	return c, c.validatePolicy()
 }
 
+// WriteAuth replaces only the auth section of the config at path and writes the
+// result atomically with mode 0600. It refuses a path that is a symbolic link,
+// is not a regular file or is not owned by the invoking user. The rest of the
+// file is a struct round trip: Config disallows unknown fields, so every value
+// survives, but key order and formatting are normalised.
+func WriteAuth(path string, auth AuthConfig) error {
+	return writeAuth(path, auth, os.Getuid())
+}
+
+// writeAuth is WriteAuth with the owning uid as a parameter, so tests can
+// present a file as owned by another user.
+func writeAuth(path string, auth AuthConfig, uid int) error {
+	if err := auth.Validate(); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		if errors.Is(err, syscall.ELOOP) {
+			return fmt.Errorf("config %s is a symbolic link; refusing to write it", path)
+		}
+		return err
+	}
+	defer func() { _ = f.Close() }()
+	fi, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if why := notOwnedRegular(fi, uid); why != "" {
+		return fmt.Errorf("config %s %s; refusing to write it", path, why)
+	}
+	c, err := decodeConfigFrom(f)
+	if err != nil {
+		return err
+	}
+	c.Auth = &auth
+	b, err := encodeJSON(c)
+	if err != nil {
+		return err
+	}
+	return durableFile(path, []byte(b))
+}
+
+// notOwnedRegular says why fi is not a regular file owned by uid, or returns ""
+// when it is one.
+func notOwnedRegular(fi os.FileInfo, uid int) string {
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	switch {
+	case !fi.Mode().IsRegular():
+		return "is not a regular file"
+	case !ok:
+		return "has an owner that cannot be determined"
+	case int(st.Uid) != uid:
+		return fmt.Sprintf("is owned by uid %d, not uid %d", st.Uid, uid)
+	}
+	return ""
+}
+
+// encodeJSON renders v as the indented, unescaped JSON the config files hold.
+func encodeJSON(v any) (string, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(v); err != nil {
+		return "", err
+	}
+	return buf.String(), nil
+}
+
 func decodeConfig(path string) (Config, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return Config{}, err
 	}
 	defer func() { _ = f.Close() }()
+	return decodeConfigFrom(f)
+}
+
+func decodeConfigFrom(r io.Reader) (Config, error) {
 	var c Config
-	d := json.NewDecoder(f)
+	d := json.NewDecoder(r)
 	d.DisallowUnknownFields()
 	if err := d.Decode(&c); err != nil {
 		return c, err
