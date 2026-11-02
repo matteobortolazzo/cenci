@@ -1422,7 +1422,7 @@ func TestIncidentSetupManagedIdentityPreview(t *testing.T) {
 		requireEqualLists(t, "role commands", roleCommands(res.stdout), sorted(
 			roleCmd(placeholder, roleServiceBusReceiver, setupNamespaceARM+"/queues/alerts"),
 			roleCmd(placeholder, roleLogAnalyticsReader, setupWorkspaceARM)))
-		requireContains(t, "stdout", res.stdout, "--principal-object-id", `"mode": "`+incident.AuthModeManagedIdentity+`"`)
+		requireContains(t, "stdout", res.stdout, "--principal-object-id", `"mode": "`+incident.AuthModeManagedIdentity+`"`, `"principalObjectId": "`+placeholder+`"`)
 		requireContains(t, "stdout", strings.ToLower(res.stdout), "additive")
 		requireLacks(t, "stdout", res.stdout, "create-for-rbac", "az ad app create", "az ad app credential reset")
 		lines := w.traceLines(t)
@@ -1438,7 +1438,7 @@ func TestIncidentSetupManagedIdentityPreview(t *testing.T) {
 		requireEqualLists(t, "role commands", roleCommands(res.stdout), sorted(
 			roleCmd(setupObjectID, roleServiceBusReceiver, setupNamespaceARM+"/queues/alerts"),
 			roleCmd(setupObjectID, roleLogAnalyticsReader, setupWorkspaceARM)))
-		requireContains(t, "stdout", res.stdout, "Contributor", "/subscriptions/"+setupSubscription+"/resourceGroups/rg-app")
+		requireContains(t, "stdout", res.stdout, "Contributor", "/subscriptions/"+setupSubscription+"/resourceGroups/rg-app", `"principalObjectId": "`+setupObjectID+`"`)
 		requireContains(t, "stdout", strings.ToLower(res.stdout), "additive")
 		lines := w.traceLines(t)
 		if !hasTrace(lines, "ad sp show --id "+setupObjectID) || !hasTrace(lines, "role assignment list --assignee-object-id "+setupObjectID) {

@@ -450,6 +450,10 @@ func TestVerifyClassifiesEachFailure(t *testing.T) {
 		{"identity-mismatch/tid", "identity-mismatch", 0, func(r *verifyRig) {
 			r.cred.token = func(string) (string, error) { return identityToken(otherUUID, testClientID, testObjectID, nil), nil }
 		}, "identity (Service Bus): identity-mismatch", ""},
+		{"identity-mismatch/oid", "identity-mismatch", 0, func(r *verifyRig) {
+			r.cfg.Auth = pinnedManagedAuth()
+			r.cred.token = func(string) (string, error) { return identityToken(testTenantID, testClientID, otherUUID, nil), nil }
+		}, "identity (Service Bus): identity-mismatch", ""},
 		{"identity-mismatch/appid-on-log-analytics", "identity-mismatch", 0, func(r *verifyRig) {
 			r.cred.token = func(scope string) (string, error) {
 				if scope == LogAnalyticsScope {
@@ -793,21 +797,28 @@ func TestVerifyRetriesOnlyAuthorizationDeniedDuringPropagationWait(t *testing.T)
 func TestVerifyIdentityFailureRunsNoResourceProbe(t *testing.T) {
 	cases := []struct {
 		name   string
+		auth   *AuthConfig // replaces the rig's auth when set
 		token  func(string) (string, error)
 		line   string
 		scopes []string
 	}{
-		{"service-bus-token-fails", func(string) (string, error) { return "", errors.New("denied") }, "identity (Service Bus): authentication-failed", []string{ServiceBusScope}},
-		{"log-analytics-claims-mismatch", func(scope string) (string, error) {
+		{"service-bus-token-fails", nil, func(string) (string, error) { return "", errors.New("denied") }, "identity (Service Bus): authentication-failed", []string{ServiceBusScope}},
+		{"log-analytics-claims-mismatch", nil, func(scope string) (string, error) {
 			if scope == LogAnalyticsScope {
 				return identityToken(otherUUID, testClientID, testObjectID, nil), nil
 			}
 			return identityToken(testTenantID, testClientID, testObjectID, nil), nil
 		}, "identity (Log Analytics): identity-mismatch", []string{ServiceBusScope, LogAnalyticsScope}},
+		{"principal-mismatch", pinnedManagedAuth(), func(string) (string, error) {
+			return identityToken(testTenantID, testClientID, otherUUID, nil), nil
+		}, "identity (Service Bus): identity-mismatch", []string{ServiceBusScope}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			r := newVerifyRig(t)
+			if tc.auth != nil {
+				r.cfg.Auth = tc.auth
+			}
 			r.cred.token = tc.token
 			ok, stdout, _ := r.run(time.Minute)
 			if ok {
