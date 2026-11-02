@@ -18,14 +18,20 @@ is a CI retry cap and `conflictFixAttempts` when it is a merge repair retry cap.
 `cenci babysit status <pr>` exits non-zero, or its output does not decode as JSON, say
 "retry cap reached (exact count not readable from here)" rather than a number.
 
-Then ask one `AskUserQuestion` with exactly two options: "leave paused for manual repair" and
-"stop babysitting". Never mutate GitHub, push, or restart automatically before that choice.
+Then ask one `AskUserQuestion` with exactly three options: "leave paused for manual repair",
+"retry with a fresh budget" and "stop babysitting". Never mutate GitHub, push, or restart
+automatically before that choice.
 
 - "leave paused for manual repair" changes nothing. Conflicts ordinarily go straight to Claude
   Opus through `merge-repair`; this window is the exhausted-budget fallback, so a human may run
   `/cenci:merge-repair <pr>` to inspect and repair that PR. The supervisor keeps polling and
   clears its conflict hold once GitHub confirms a conflict-free mergeability state; no separate
   re-arm step is needed.
+- "retry with a fresh budget" runs `cenci babysit reset <pr>` once. The reset is host-only: inside a
+  sandbox the command refuses without sending anything to the host. Exit 0 means the budget was reset
+  and the supervisor re-armed: report that. On a non-zero exit, say the budget was **not reset**,
+  print `cenci babysit reset <pr>` as the exact command to run on the host, and never report
+  success. Do not retry the command.
 - "stop babysitting" runs `cenci babysit stop <pr>`, which inside a sandbox is forwarded to the host
   supervisor. Exit 0 with `Stopped babysitting PR #<pr> on the host.` means it was stopped. On a
   non-zero exit, including `not stopped: <reason>` (the host refused) and `stop status unknown` (no

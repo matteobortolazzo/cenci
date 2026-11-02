@@ -63,6 +63,12 @@ Use `--once` only when the user explicitly requests one tick. To stop a supervis
 cenci babysit stop <pr>
 ```
 
+To give a paused PR a fresh retry budget (host only, see "Where the supervisor runs"):
+
+```bash
+cenci babysit reset <pr>
+```
+
 Report the command's result. Do not reproduce the polling pipeline in the agent session,
 arm Claude `/loop`, create a Codex goal, or maintain `${TMPDIR:-/tmp}/cenci` state.
 
@@ -81,6 +87,12 @@ forwarded the same way from inside a sandbox and reports one of three outcomes: 
 the host daemon rejected the request and its reason is relayed verbatim, exit 1), or **stop
 status unknown** (the host daemon did not respond before the deadline, exit 1). Both failures
 name the host command to run instead: `cenci babysit stop <pr>` from a host tmux pane.
+
+`cenci babysit reset <pr>` is host-only and is never forwarded: a reset lifts the cap on automated
+repair launches, so inside a sandbox it exits 1 without sending any event-socket message and says the
+supervisor runs on the host and the budget can only be reset there. On the host it stops a live
+supervisor, zeroes the CI and merge repair budgets (feedback bookkeeping is kept) and re-arms with
+the recorded agent, interval, launch session and launch dir. Run it from a host tmux pane.
 
 **Verify with `status`.** `cenci babysit status <pr>` works on the host and inside a sandbox
 (where it is forwarded to the host daemon). It prints one JSON line with `pr`, `repo`, `status`,

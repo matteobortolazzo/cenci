@@ -169,8 +169,14 @@ for pair in "SKILL.md:${attention_skill_all}" "codex.md:${attention_codex_all}";
   require_in "babysit-attention/${name}" "$text" 'does not decode as JSON'
   require_in "babysit-attention/${name}" "$text" 'stop status unknown'
   forbid_in "babysit-attention/${name}" "$text" 'cenci/babysit/'
-  # The removed retry option: a non-empty file is required so the absence is not vacuous.
-  forbid_in "babysit-attention/${name}" "$text" 'fresh budget'
+  # The third option (#1391): exactly three options, and a reset that is host-only and never reported as success on failure.
+  require_in "babysit-attention/${name}" "$text" 'exactly three options'
+  require_in "babysit-attention/${name}" "$text" '"retry with a fresh budget"'
+  require_in "babysit-attention/${name}" "$text" 'cenci babysit reset <pr>'
+  require_in "babysit-attention/${name}" "$text" 'budget was reset and the supervisor re-armed'
+  require_in "babysit-attention/${name}" "$text" 'not reset'
+  require_in "babysit-attention/${name}" "$text" 'run on the host'
+  forbid_in "babysit-attention/${name}" "$text" 'exactly two options'
 done
 require_in "babysit-attention/SKILL.md" "$attention_skill_all" '`AskUserQuestion`'
 
@@ -180,6 +186,20 @@ for phrase in 'cenci babysit status <pr>' 'Stopped babysitting PR #<pr> on the h
   require_in "babysit/SKILL.md" "$babysit_all" "$phrase"
 done
 forbid_in "babysit/SKILL.md" "$babysit_all" 'there is no `cenci babysit status` subcommand'
+# The budget reset is host-only (#1391): documented next to stop, and the retired "no disarm message" wording stays gone.
+for phrase in 'cenci babysit reset <pr>' 'host-only' 'runs on the host'; do
+  require_in "babysit/SKILL.md" "$babysit_all" "$phrase"
+done
+forbid_in "babysit/SKILL.md" "$babysit_all" 'sends no disarm message'
+
+# The Claude skill's reset bullet, scoped from its opening line to the next bullet, so the shared stop
+# bullet's "non-zero exit" / "never report success" cannot satisfy these reset-specific assertions.
+attention_skill_reset="$(awk '/^- "retry with a fresh budget"/ {on=1; print; next} on && /^- / {exit} on {print}' "$attention_skill" | tr '\n' ' ' | tr -s ' ')"
+for phrase in 'runs `cenci babysit reset <pr>` once' 'budget was reset and the supervisor re-armed' 'non-zero exit' '**not reset**' \
+  'run on the host' 'never report success' 'Do not retry the command'; do
+  require_in "babysit-attention/SKILL.md reset bullet" "$attention_skill_reset" "$phrase"
+done
+forbid_in "babysit-attention/SKILL.md reset bullet" "$attention_skill_reset" 'cenci babysit stop'
 
 attention_summary="$(section "$attention_codex" '## Summary')"
 for phrase in 'headRefOid' 'The summary carries the PR, the head SHA, the failing checks (or the merge-repair reason) and the attempt count' \
@@ -204,20 +224,38 @@ for phrase in 'cenci babysit stop <pr>' 'sandbox' 'not stopped' 'stop status unk
   require_in "babysit-attention/codex.md Stop choice" "$attention_stop" "$phrase"
 done
 
+attention_reset="$(section "$attention_codex" '## Reset choice')"
+for phrase in 'cenci babysit reset <pr>' 'once' 'sandbox' 'budget was reset and the supervisor re-armed' 'not reset' \
+  'run on the host' 'never report success' 'Do not retry the command'; do
+  require_in "babysit-attention/codex.md Reset choice" "$attention_reset" "$phrase"
+done
+
 attention_question="$(section "$attention_codex" '## Question')"
-for phrase in 'exactly one' '"leave paused for manual repair"' '"stop babysitting"' 'headless `codex exec` run' \
+for phrase in 'exactly one' 'exactly three options' '"leave paused for manual repair"' '"retry with a fresh budget"' '"stop babysitting"' \
+  'headless `codex exec` run' \
   'prints the summary and the question and exits without choosing, mutating, pushing or stopping' \
-  'Only a later user turn that names one option acts on it'; do
+  'Only a later user turn that names one option acts on it' '`## Reset choice`'; do
   require_in "babysit-attention/codex.md Question" "$attention_question" "$phrase"
 done
-forbid_in "babysit-attention/codex.md Question" "$attention_question" 'retry'
 
 attention_never="$(section "$attention_codex" '## Never')"
 for phrase in 'Never mutate GitHub, push, restart the supervisor or run a repair on this window'"'"'s own initiative' \
   'before or after the choice' \
-  'no comment, no label, no commit and no `cenci babysit` call other than the stop above and `cenci babysit status <pr>`'; do
+  'no comment, no label, no commit and no `cenci babysit` call other than the chosen stop or reset above and `cenci babysit status <pr>`'; do
   require_in "babysit-attention/codex.md Never" "$attention_never" "$phrase"
 done
+
+# docs/codex.md and docs/codex-native-evidence.md describe the three options and the renamed native rows (#1391).
+attention_docs="$(normalize "${ROOT}/docs/codex.md")"
+for phrase in 'exactly three options' '"retry with a fresh budget"' '`cenci babysit reset <pr>`' '**not reset**' 'run on the host'; do
+  require_in "docs/codex.md attention" "$attention_docs" "$phrase"
+done
+forbid_in "docs/codex.md attention" "$attention_docs" 'There is no retry option'
+evidence_all="$(normalize "${ROOT}/docs/codex-native-evidence.md")"
+for phrase in 'three options printed, retry option offered' 'no `babysit stop` or `reset` call' 'all three attention options'; do
+  require_in "docs/codex-native-evidence.md attention rows" "$evidence_all" "$phrase"
+done
+forbid_in "docs/codex-native-evidence.md attention rows" "$evidence_all" 'no retry option'
 
 runtime="${ROOT}/skills/codex-runtime/SKILL.md"
 grep -q '.cenci/checkpoints' "$runtime" || fail "checkpoint contract"

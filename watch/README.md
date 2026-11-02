@@ -2021,6 +2021,30 @@ malformed invocation (no PR, a PR that is not a positive integer, extra argument
 exits 2. `--state-dir` is honored on the host and accepted but ignored in a sandbox,
 where the host uses its own state directory.
 
+`cenci babysit reset <pr> [--state-dir <dir>]` gives a paused PR a fresh retry budget
+and is **host-only**: a reset lifts `fixCap`, the bound on automated repair launches,
+so inside a sandbox it exits 1 (`not reset: the babysit supervisor runs on the host…`,
+naming the exact host command) and sends nothing over the event socket; no socket kind
+or daemon handler carries it. On the host it zeroes `ciFixAttempts`, `ciRepairPending`,
+`lastRepairedCiHeadSha`, `conflictFixAttempts` and `conflictNotifiedHeadSha` (for both
+budgets, whatever the launch reason) and keeps the feedback bookkeeping
+(`addressedCommentKeys`, `pendingCommentKeys`, `launchedFeedbackKeys`,
+`lastCommentTimestamp`) and `conflictRepairHeadSha`. A live supervisor is sent SIGTERM,
+awaited for up to 10s and its lock removed first; the reset then re-arms through the
+normal arming path with the recorded agent, interval (15m when none was recorded),
+launch session and launch directory, and prints `Reset the retry budget for PR #<pr>.`.
+It refuses, changing nothing and exiting 1, when no supervisor exists
+(`no supervisor found for PR #<pr>`), the state cannot be read or decoded, the recorded
+PID is not this PR's babysit process (`refusing to signal pid <n>`), the supervisor did
+not exit in time (`supervisor for PR #<pr> did not exit`), a lock exists with no
+recorded PID (`supervisor already running for PR #<pr>`), or the command runs inside a
+supervisor (`CENCI_BABYSIT_SUPERVISOR` set). A recorded agent that arming would refuse
+(for example OpenCode, or an agent missing an arm-time workflow) exits 2 before any
+write or signal; a malformed invocation (no PR, a PR that is not a positive integer,
+extra arguments) also exits 2. If the budget was zeroed but re-arming failed, it exits
+1 with `budget reset for PR #<pr> but not re-armed: …` and the `cenci babysit <pr>
+--agent <agent>` command to re-arm with.
+
 On a forwarded arm request, the host daemon resolves the target checkout itself by
 inspecting running sandbox containers' `/workspace` bind sources under both docker
 and podman and matching each source's `origin` remote against the request's

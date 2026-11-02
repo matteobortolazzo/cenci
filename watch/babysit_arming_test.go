@@ -20,6 +20,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"net"
 	"os"
 	"os/exec"
@@ -30,6 +32,7 @@ import (
 	"time"
 
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/ipc"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/sandbox"
 )
 
 // writeArmTestGhShim writes a `gh` PATH shim that unconditionally answers
@@ -454,6 +457,228 @@ func TestBabysitStatusUsageErrorsExitTwo(t *testing.T) {
 				t.Errorf("exit code = %d, want 2 (stderr %q)", code, stderr)
 			}
 			if !strings.Contains(stderr, "cenci babysit status") {
+				t.Errorf("stderr = %q, want a usage line naming the command", stderr)
+			}
+		})
+	}
+}
+
+// -- #1391: host-only `babysit reset` ---------------------------------------
+
+// TestBabysitResetRefusesInSandboxWithoutSocketTraffic covers P8: inside a
+// sandbox the reset exits 1, says the supervisor runs on the host, names the
+// host command, and never touches the event socket (a reset lifts the repair
+// cap, so no socket kind carries it). A positive control proves the listener
+// would have seen a connection.
+func TestBabysitResetRefusesInSandboxWithoutSocketTraffic(t *testing.T) {
+	socket := armTestSocketPath(t)
+	ln, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	unixLn := ln.(*net.UnixListener)
+
+	stdout, stderr, code := runBabysitCLI(t, armChildEnv(t, writeArmTestGhShim(t)), "babysit", "reset", "42")
+
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1 (stderr %q)", code, stderr)
+	}
+	if !strings.Contains(stderr, "runs on the host") || !strings.Contains(stderr, "cenci babysit reset 42") {
+		t.Errorf("stderr = %q, want it to say the supervisor runs on the host and name `cenci babysit reset 42`", stderr)
+	}
+	if stdout != "" {
+		t.Errorf("stdout = %q, want nothing", stdout)
+	}
+
+	_ = unixLn.SetDeadline(time.Now().Add(300 * time.Millisecond))
+	conn, err := unixLn.Accept()
+	if err == nil {
+		_ = conn.Close()
+		t.Fatal("the reset opened a connection to the event socket")
+	}
+	var netErr net.Error
+	if !errors.As(err, &netErr) || !netErr.Timeout() {
+		t.Fatalf("Accept err = %v, want a timeout (no connection)", err)
+	}
+
+	go func() {
+		if c, dialErr := net.Dial("unix", socket); dialErr == nil {
+			_ = c.Close()
+		}
+	}()
+	_ = unixLn.SetDeadline(time.Now().Add(5 * time.Second))
+	control, err := unixLn.Accept()
+	if err != nil {
+		t.Fatalf("control: a dial was not observed by the listener: %v", err)
+	}
+	_ = control.Close()
+}
+
+// hostResetStatePath returns the host state-file path for owner/repo PR pr
+// under the isolated XDG_STATE_HOME that armTestSocketPath set.
+func hostResetStatePath(t *testing.T, pr string) string {
+	t.Helper()
+	dir := filepath.Join(os.Getenv("XDG_STATE_HOME"), "cenci", "babysit")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256([]byte("owner/repo"))
+	return filepath.Join(dir, hex.EncodeToString(sum[:6])+"-"+pr+".json")
+}
+
+// TestBabysitResetHostModeExitCodes covers the host-side refusals through the
+// real binary: P13 (no state), P14 (undecodable state), P17 (lock without a
+// pid) and P19 (refused agent, exit 2). Every refusal leaves the files alone.
+func TestBabysitResetHostModeExitCodes(t *testing.T) {
+	armTestSocketPath(t) // isolates CENCI_SOCKET_DIR and XDG_STATE_HOME
+
+	t.Run("no state", func(t *testing.T) {
+		_, stderr, code := runBabysitCLI(t, hostChildEnv(t), "babysit", "reset", "43")
+
+		if code != 1 {
+			t.Errorf("exit code = %d, want 1", code)
+		}
+		if !strings.Contains(stderr, "no supervisor found for PR #43") {
+			t.Errorf("stderr = %q, want %q", stderr, "no supervisor found for PR #43")
+		}
+	})
+
+	t.Run("undecodable state", func(t *testing.T) {
+		path := hostResetStatePath(t, "44")
+		const garbage = "{not json"
+		if err := os.WriteFile(path, []byte(garbage), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		_, stderr, code := runBabysitCLI(t, hostChildEnv(t), "babysit", "reset", "44")
+
+		if code != 1 {
+			t.Errorf("exit code = %d, want 1", code)
+		}
+		if !strings.Contains(stderr, "decode babysit state") {
+			t.Errorf("stderr = %q, want the strict decode error", stderr)
+		}
+		if got, _ := os.ReadFile(path); string(got) != garbage {
+			t.Errorf("state file = %q, want it unchanged", got)
+		}
+	})
+
+	t.Run("lock without a pid", func(t *testing.T) {
+		path := hostResetStatePath(t, "45")
+		body := `{"schemaVersion":2,"pr":"45","repo":"owner/repo","agent":"claude","status":"needs-input","ciFixAttempts":3}`
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path+".lock", []byte("99999\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		_, stderr, code := runBabysitCLI(t, hostChildEnv(t), "babysit", "reset", "45")
+
+		if code != 1 {
+			t.Errorf("exit code = %d, want 1", code)
+		}
+		if !strings.Contains(stderr, "supervisor already running for PR #45") {
+			t.Errorf("stderr = %q, want the already-running refusal", stderr)
+		}
+		if got, _ := os.ReadFile(path); string(got) != body {
+			t.Errorf("state file = %q, want it unchanged", got)
+		}
+		if _, err := os.Stat(path + ".lock"); err != nil {
+			t.Errorf("lock was removed: %v", err)
+		}
+	})
+
+	t.Run("refused agent exits 2 before any change", func(t *testing.T) {
+		path := hostResetStatePath(t, "46")
+		body := `{"schemaVersion":2,"pr":"46","repo":"owner/repo","agent":"opencode","status":"needs-input","ciFixAttempts":3}`
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		_, stderr, code := runBabysitCLI(t, hostChildEnv(t), "babysit", "reset", "46")
+
+		if code != 2 {
+			t.Errorf("exit code = %d, want 2 (stderr %q)", code, stderr)
+		}
+		if reason := sandbox.AgentDisabledReason("opencode"); !strings.Contains(stderr, reason) {
+			t.Errorf("stderr = %q, want the refusal %q", stderr, reason)
+		}
+		if got, _ := os.ReadFile(path); string(got) != body {
+			t.Errorf("state file = %q, want it unchanged", got)
+		}
+	})
+}
+
+// TestBabysitResetReArmFailureExitsOne covers Q7 through the real binary: the
+// budget is zeroed and saved, then the re-arm fails (the supervisor log path
+// is a directory, so it cannot be opened and no supervisor is spawned). The
+// command exits 1 with the "budget reset ... but not re-armed" message naming
+// the manual re-arm, and the zeroed budget stays on disk.
+func TestBabysitResetReArmFailureExitsOne(t *testing.T) {
+	armTestSocketPath(t) // isolates CENCI_SOCKET_DIR and XDG_STATE_HOME
+	path := hostResetStatePath(t, "47")
+	body := `{"schemaVersion":2,"pr":"47","repo":"owner/repo","agent":"claude","intervalSeconds":300,"status":"needs-input","ciFixAttempts":3,"conflictFixAttempts":3}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	logPath := strings.TrimSuffix(path, ".json") + ".log"
+	if err := os.Mkdir(logPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, stderr, code := runBabysitCLI(t, hostChildEnv(t), "babysit", "reset", "47")
+
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1 (stderr %q)", code, stderr)
+	}
+	for _, want := range []string{"budget reset for PR #47 but not re-armed:", "re-arm with cenci babysit 47 --agent claude"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("stderr = %q, want it to contain %q", stderr, want)
+		}
+	}
+	if !strings.Contains(stdout, "Reset the retry budget for PR #47.") {
+		t.Errorf("stdout = %q, want the reset line (the budget was reset before the re-arm failed)", stdout)
+	}
+	saved, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		PR                  string `json:"pr"`
+		Repo                string `json:"repo"`
+		CIFixAttempts       int    `json:"ciFixAttempts"`
+		ConflictFixAttempts int    `json:"conflictFixAttempts"`
+	}
+	if err := json.Unmarshal(saved, &got); err != nil {
+		t.Fatalf("state = %s, want valid JSON: %v", saved, err)
+	}
+	if got.PR != "47" || got.Repo != "owner/repo" {
+		t.Errorf("state identity = pr %q repo %q, want pr \"47\" repo \"owner/repo\" (state %s)", got.PR, got.Repo, saved)
+	}
+	if got.CIFixAttempts != 0 || got.ConflictFixAttempts != 0 {
+		t.Errorf("state budget = ci %d conflict %d, want both left zeroed (state %s)", got.CIFixAttempts, got.ConflictFixAttempts, saved)
+	}
+}
+
+func TestBabysitResetUsageErrorsExitTwo(t *testing.T) {
+	armTestSocketPath(t)
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"no pr", []string{"babysit", "reset"}},
+		{"extra argument", []string{"babysit", "reset", "42", "extra"}},
+		{"non-numeric pr", []string{"babysit", "reset", "abc"}},
+		{"non-positive pr", []string{"babysit", "reset", "0"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, stderr, code := runBabysitCLI(t, hostChildEnv(t), tc.args...)
+			if code != 2 {
+				t.Errorf("exit code = %d, want 2 (stderr %q)", code, stderr)
+			}
+			if !strings.Contains(stderr, "cenci babysit reset") {
 				t.Errorf("stderr = %q, want a usage line naming the command", stderr)
 			}
 		})

@@ -49,8 +49,8 @@ invoked by hand: `$cenci:ci-repair` (repair one PR's failing CI) and
   rather than repeating a commit or push. A gate failure, or a repair that is ambiguous,
   infrastructure, flaky or external, pushes nothing and returns control to the supervisor.
 - `$cenci:babysit-attention` prints the PR, head SHA, failing checks (or the merge-repair
-  reason) and attempt count, then asks one blocking question with exactly two options:
-  "leave paused for manual repair" and "stop babysitting". There is no retry option.
+  reason) and attempt count, then asks one blocking question with exactly three options:
+  "leave paused for manual repair", "retry with a fresh budget" and "stop babysitting".
   A headless `codex exec` run prints the summary and the question and exits without
   choosing, mutating, pushing or stopping. The attempt count comes from
   `cenci babysit status <pr>` (`ciFixAttempts` or `conflictFixAttempts`, by launch reason),
@@ -60,8 +60,14 @@ invoked by hand: `$cenci:ci-repair` (repair one PR's failing CI) and
   the host daemon. When that exits non-zero (`not stopped: <reason>` from a host refusal, or
   `stop status unknown` when the host does not answer), the procedure says the supervisor
   was **not stopped** and prints the exact `cenci babysit stop <pr>` command to run on the
-  host. It never reports a failed stop as success. The procedure's only other `cenci babysit`
-  call is that `status` read.
+  host. It never reports a failed stop as success.
+- The "retry with a fresh budget" choice runs `cenci babysit reset <pr>` once. The reset is
+  host-only (it lifts the cap on automated repair launches), so it never travels through the
+  event socket: exit 0 means the budget was reset and the supervisor re-armed. When it exits
+  non-zero, including the refusal a sandbox gets because the supervisor runs on the host, the
+  procedure says the budget was **not reset**, prints the exact `cenci babysit reset <pr>`
+  command to run on the host and never reports success. It does not retry the command. The
+  procedure's only other `cenci babysit` calls are the chosen stop and that `status` read.
 
 The opt-in runner `codex/native-workflows.test.sh` (`CENCI_CODEX_NATIVE=1`) runs both
 procedures through a real `codex exec` against a disposable fixture. It also covers the

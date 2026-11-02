@@ -13,10 +13,10 @@
 #                write was attempted, no other branch was created, no `cenci`
 #                command was run
 #   restart      the same launch again: no new commit, no push
-#   attention    a headless `$cenci:babysit-attention`: both options printed, no
-#                retry option, the attempt count read through the stubbed
-#                `cenci babysit status`, no `cenci babysit stop` call, no GitHub write, the
-#                remote untouched
+#   attention    a headless `$cenci:babysit-attention`: all three options printed
+#                (including "retry with a fresh budget"), the attempt count read
+#                through the stubbed `cenci babysit status`, no `cenci babysit stop` or
+#                `reset` call, no GitHub write, the remote untouched
 #
 # and, for the Plan-mode, handoff and goal rows (#1235), on a ticketless implement
 # fixture of its own per scenario (a bare remote, a clone, a runner-persisted plan
@@ -50,7 +50,8 @@
 # as the launch directory, a stubbed `gh` and a stubbed `cenci` first on codex's
 # PATH. The stubbed `gh` answers reads and REFUSES and logs every write; the stubbed
 # `cenci` logs every call (`babysit status` answers with the attempt count, `babysit stop`
-# fails like a host nack, as a forwarded stop does when the host daemon rejects it).
+# fails like a host nack, as a forwarded stop does when the host daemon rejects it, and
+# `babysit reset` fails like the host-only refusal a sandbox gets).
 # The remote's pre-receive hook logs every ref update, so a force push or a stray
 # branch is visible even when the remote rejects it.
 #
@@ -90,7 +91,7 @@
 #                                 every Plan-mode, handoff and goal row are ok
 #                                 (fast-forward advance, gate green on the pushed
 #                                 head, checkpoint complete with the pushed SHA,
-#                                 restart adds no commit, both attention options
+#                                 restart adds no commit, all three attention options
 #                                 printed; the probe recorded, both refusal lines
 #                                 with zero tool calls and writes, apply verifies,
 #                                 the tampered artifact refused with zero writes,
@@ -246,7 +247,7 @@ LBL_CI_FF="ci-repair: remote branch advanced fast-forward only"
 LBL_CI_GATE="ci-repair: gate green on the pushed head"
 LBL_CI_CKPT="ci-repair: checkpoint complete with pushed SHA"
 LBL_RESTART="restart: re-run adds no commit and no push"
-LBL_A_OPTS="attention (headless): both options printed"
+LBL_A_OPTS="attention (headless): three options printed"
 # The Plan-mode, handoff and goal rows (#1235) are required too.
 LBL_PROBE="startup-control probe: Plan/collaboration-mode option recorded"
 LBL_PM_LINE="plan-mode self-check: exact refusal line printed"
@@ -453,7 +454,8 @@ SCRIPT
     cat > "${BIN}/cenci" <<'SCRIPT'
 #!/bin/sh
 # Fixture cenci: every call is logged; `babysit status` answers the way a forwarded
-# status does (one JSON line, no path); `babysit stop` fails like a host nack.
+# status does (one JSON line, no path); `babysit stop` fails like a host nack and
+# `babysit reset` like the host-only refusal a sandbox gets.
 . "${0%/*}/fixture.env"
 printf '%s\n' "$*" >> "${NW_LOGS}/cenci.log"
 case "$1 $2" in
@@ -463,6 +465,10 @@ case "$1 $2" in
         ;;
     "babysit stop")
         echo "not stopped: the host supervisor could not be stopped (fixture stub)" >&2
+        exit 1
+        ;;
+    "babysit reset")
+        echo "not reset: the babysit supervisor runs on the host and its retry budget can only be reset there (fixture stub)" >&2
         exit 1
         ;;
     "babysit "[0-9]*)
@@ -898,17 +904,11 @@ prompt_attention() {
     printf '$cenci:babysit-attention %s CI retry cap reached' "${PR_NUMBER}"
 }
 
-# retry_option_offered -- does the printed text offer a retry as an option? A
-# list item naming a retry (other than the cap that was reached) or the removed
-# "fresh budget" wording counts.
+# retry_option_offered -- does the printed text offer the third option? Only the
+# literal "retry with a fresh budget" counts: the "retry cap" the summary reports is
+# not an option.
 retry_option_offered() {
-    local text="$1" items
-    if grep -qiF 'fresh budget' <<< "${text}"; then
-        return 0
-    fi
-    items="$(grep -iE '^[[:space:]]*([-*]|[0-9]+[.)])[[:space:]].*retry' <<< "${text}")"
-    items="$(grep -viE 'retry cap' <<< "${items}")"
-    [[ -n "${items}" ]]
+    grep -qiF 'retry with a fresh budget' <<< "$1"
 }
 
 scenario_attention() {
@@ -939,24 +939,25 @@ scenario_attention() {
 
     if [[ "${attempted}" == no ]]; then
         record "${LBL_A_OPTS}" "inconclusive" "no stubbed gh read of the PR was seen, so the procedure is not shown to have run (is the cenci plugin installed? ${CODEX_NOTE})"
-        record "${prefix}: no retry option" "inconclusive" "${no_run}"
+        record "${prefix}: retry option offered" "inconclusive" "${no_run}"
         record "${prefix}: summary names PR, head SHA and failing check" "inconclusive" "${no_run}"
         record "${prefix}: attempt count" "inconclusive" "${no_run}"
     elif [[ -z "${AGENT_TEXT}" ]]; then
         record "${LBL_A_OPTS}" "inconclusive" "the procedure read the PR but no agent message was captured (${CODEX_NOTE})"
-        record "${prefix}: no retry option" "inconclusive" "no agent message was captured"
+        record "${prefix}: retry option offered" "inconclusive" "no agent message was captured"
         record "${prefix}: summary names PR, head SHA and failing check" "inconclusive" "no agent message was captured"
         record "${prefix}: attempt count" "inconclusive" "no agent message was captured"
     else
-        if grep -qiF 'leave paused for manual repair' <<< "${AGENT_TEXT}" && grep -qiF 'stop babysitting' <<< "${AGENT_TEXT}"; then
-            record "${LBL_A_OPTS}" "ok" "'leave paused for manual repair' and 'stop babysitting' are both in the printed decision"
+        if grep -qiF 'leave paused for manual repair' <<< "${AGENT_TEXT}" && retry_option_offered "${AGENT_TEXT}" \
+            && grep -qiF 'stop babysitting' <<< "${AGENT_TEXT}"; then
+            record "${LBL_A_OPTS}" "ok" "'leave paused for manual repair', 'retry with a fresh budget' and 'stop babysitting' are all in the printed decision"
         else
-            record "${LBL_A_OPTS}" "FAIL" "the printed decision is missing one of the two options"
+            record "${LBL_A_OPTS}" "FAIL" "the printed decision is missing one of the three options"
         fi
         if retry_option_offered "${AGENT_TEXT}"; then
-            record "${prefix}: no retry option" "FAIL" "the printed decision offers a retry"
+            record "${prefix}: retry option offered" "ok" "'retry with a fresh budget' is in the printed decision"
         else
-            record "${prefix}: no retry option" "ok" "no retry option and no 'fresh budget' wording"
+            record "${prefix}: retry option offered" "FAIL" "the printed decision does not offer 'retry with a fresh budget'"
         fi
         # The PR number and the attempt count are single digits: a digit inside the
         # head SHA (or any other long hex run) must never satisfy them, so those
@@ -980,15 +981,15 @@ scenario_attention() {
     fi
 
     if ! cenci_calls="$(cat "${LOGS}/cenci.log" 2>/dev/null)"; then
-        record "${prefix}: no babysit stop call" "FAIL" "the stubbed cenci's call log is unreadable, so a babysit stop call cannot be ruled out"
+        record "${prefix}: no babysit stop or reset call" "FAIL" "the stubbed cenci's call log is unreadable, so a babysit stop or reset call cannot be ruled out"
     else
-        stop_calls="$(grep -E '^babysit stop' <<< "${cenci_calls}")"
+        stop_calls="$(grep -E '^babysit (stop|reset)' <<< "${cenci_calls}")"
         if [[ -n "${stop_calls}" ]]; then
-            record "${prefix}: no babysit stop call" "FAIL" "cenci babysit stop was called: ${stop_calls//$'\n'/; }"
+            record "${prefix}: no babysit stop or reset call" "FAIL" "cenci babysit stop or reset was called: ${stop_calls//$'\n'/; }"
         elif [[ "${attempted}" == yes ]]; then
-            record "${prefix}: no babysit stop call" "ok" "no cenci babysit stop call"
+            record "${prefix}: no babysit stop or reset call" "ok" "no cenci babysit stop or reset call"
         else
-            record "${prefix}: no babysit stop call" "inconclusive" "${no_run}"
+            record "${prefix}: no babysit stop or reset call" "inconclusive" "${no_run}"
         fi
     fi
 
