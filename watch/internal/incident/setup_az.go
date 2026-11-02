@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"regexp"
 	"strings"
 )
 
@@ -53,7 +54,18 @@ func malformed(step string) error {
 // Az runs the read-only discovery calls. Calls inherit the operator's
 // environment, so their own Azure CLI login and AZURE_CONFIG_DIR are used, and
 // read stdin from the null device.
-type Az struct{ bin string }
+//
+// allow is the closed set of subcommands the Az may run; nil means azReadOnly,
+// so NewAz and every preview caller stay read-only.
+type Az struct {
+	bin   string
+	allow [][]string
+}
+
+// azApply is the closed set `cenci incident setup --apply` may run: exactly the
+// preview's read-only subcommands plus the one mutating subcommand it needs.
+// Nothing here logs in, deletes, removes or resets anything.
+var azApply = append(append([][]string(nil), azReadOnly...), []string{"role", "assignment", "create"})
 
 // NewAz locates az on PATH.
 func NewAz() (*Az, error) {
@@ -64,9 +76,23 @@ func NewAz() (*Az, error) {
 	return &Az{bin: bin}, nil
 }
 
-// azStep returns the allowlisted subcommand that args starts with.
-func azStep(args []string) (string, bool) {
-	for _, prefix := range azReadOnly {
+// NewApplyAz locates az on PATH and allows the apply set: the preview's
+// read-only subcommands and role assignment create. Only the apply path uses it.
+func NewApplyAz() (*Az, error) {
+	a, err := NewAz()
+	if err != nil {
+		return nil, err
+	}
+	a.allow = azApply
+	return a, nil
+}
+
+// azStep returns the read-only subcommand that args starts with.
+func azStep(args []string) (string, bool) { return stepIn(azReadOnly, args) }
+
+// stepIn returns the subcommand of set that args starts with.
+func stepIn(set [][]string, args []string) (string, bool) {
+	for _, prefix := range set {
 		if len(args) >= len(prefix) && strings.Join(args[:len(prefix)], " ") == strings.Join(prefix, " ") {
 			return strings.Join(prefix, " "), true
 		}
@@ -74,12 +100,27 @@ func azStep(args []string) (string, bool) {
 	return "", false
 }
 
-// runReadOnly runs an allowlisted az subcommand with JSON output. Callers pass
-// only validated values (UUIDs, parsed resource IDs).
+// runReadOnly runs a read-only az subcommand with JSON output. It refuses
+// everything outside azReadOnly whatever this Az allows, so a read wrapper can
+// never reach role assignment create. Callers pass only validated values
+// (UUIDs, parsed resource IDs).
 func (a *Az) runReadOnly(ctx context.Context, args ...string) (string, error) {
-	step, ok := azStep(args)
-	if !ok {
+	if _, ok := azStep(args); !ok {
 		return "", &AzError{Step: "(refused)", Reason: "not a read-only setup subcommand"}
+	}
+	return a.run(ctx, args...)
+}
+
+// run runs a subcommand of this Az's allowlist with JSON output, refusing every
+// other argv before anything is executed.
+func (a *Az) run(ctx context.Context, args ...string) (string, error) {
+	allow := a.allow
+	if allow == nil {
+		allow = azReadOnly
+	}
+	step, ok := stepIn(allow, args)
+	if !ok {
+		return "", &AzError{Step: "(refused)", Reason: "not an allowed setup subcommand"}
 	}
 	out, err := command(ctx, "", nil, nil, a.bin, append(append([]string(nil), args...), "-o", "json")...)
 	if err == nil {
@@ -316,4 +357,86 @@ func (a *Az) RoleAssignmentList(ctx context.Context, objectID string) ([]RoleAss
 		list = append(list, RoleAssignment{Role: d.Role, Scope: d.Scope})
 	}
 	return list, nil
+}
+
+// ScopedAssignment is one role assignment as az reports it for a scope: the
+// principal, the trailing GUID of the role definition ID and the scope string.
+type ScopedAssignment struct{ PrincipalID, RoleGUID, Scope string }
+
+// Matches reports whether the assignment is exactly this principal, role and
+// scope. Every part compares without case and the scope compares as a whole
+// string, never as a prefix, so a parent scope or another principal never match.
+func (s ScopedAssignment) Matches(principalID, roleGUID, scope string) bool {
+	return strings.EqualFold(s.PrincipalID, principalID) && strings.EqualFold(s.RoleGUID, roleGUID) && strings.EqualFold(s.Scope, scope)
+}
+
+var scopePattern = regexp.MustCompile(`^/subscriptions/[a-fA-F0-9-]{36}/[A-Za-z0-9_./()-]+$`)
+
+type assignmentDoc struct {
+	PrincipalID      string `json:"principalId"`
+	RoleDefinitionID string `json:"roleDefinitionId"`
+	Scope            string `json:"scope"`
+}
+
+// validate checks every field and reduces the role definition ID to its
+// trailing GUID.
+func (d assignmentDoc) validate(step string) (ScopedAssignment, error) {
+	parts := strings.Split(d.RoleDefinitionID, "/")
+	if !uuidPattern.MatchString(d.PrincipalID) || len(parts) < 2 || !strings.EqualFold(parts[len(parts)-2], "roleDefinitions") ||
+		!uuidPattern.MatchString(parts[len(parts)-1]) || !PrintableBounded(d.Scope, maxSetupTextRunes) {
+		return ScopedAssignment{}, malformed(step)
+	}
+	return ScopedAssignment{PrincipalID: d.PrincipalID, RoleGUID: parts[len(parts)-1], Scope: d.Scope}, nil
+}
+
+// RoleAssignmentsAt lists the assignments of one principal at one scope. az
+// also reports inherited assignments, so callers must compare every record with
+// Matches instead of trusting the list.
+func (a *Az) RoleAssignmentsAt(ctx context.Context, objectID, scope string) ([]ScopedAssignment, error) {
+	const step = "role assignment list"
+	if !uuidPattern.MatchString(objectID) || !scopePattern.MatchString(scope) {
+		return nil, malformed(step)
+	}
+	out, err := a.runReadOnly(ctx, "role", "assignment", "list", "--assignee-object-id", objectID, "--scope", scope)
+	if err != nil {
+		return nil, err
+	}
+	var docs []assignmentDoc
+	if err := decodeOne(step, out, &docs); err != nil || docs == nil {
+		return nil, malformed(step)
+	}
+	list := make([]ScopedAssignment, 0, len(docs))
+	for _, d := range docs {
+		rec, err := d.validate(step)
+		if err != nil {
+			return nil, err
+		}
+		list = append(list, rec)
+	}
+	return list, nil
+}
+
+// RoleAssignmentCreate creates one assignment of a built-in role to a service
+// principal at an exact scope and checks that az echoes exactly that
+// assignment. It is the only mutating call setup makes and is refused unless
+// the Az was built by NewApplyAz.
+func (a *Az) RoleAssignmentCreate(ctx context.Context, objectID, roleGUID, scope string) error {
+	const step = "role assignment create"
+	if !uuidPattern.MatchString(objectID) || !uuidPattern.MatchString(roleGUID) || !scopePattern.MatchString(scope) {
+		return malformed(step)
+	}
+	out, err := a.run(ctx, "role", "assignment", "create", "--assignee-object-id", objectID,
+		"--assignee-principal-type", "ServicePrincipal", "--role", roleGUID, "--scope", scope)
+	if err != nil {
+		return err
+	}
+	var doc assignmentDoc
+	if err := decodeOne(step, out, &doc); err != nil {
+		return err
+	}
+	got, err := doc.validate(step)
+	if err != nil || !got.Matches(objectID, roleGUID, scope) {
+		return malformed(step)
+	}
+	return nil
 }

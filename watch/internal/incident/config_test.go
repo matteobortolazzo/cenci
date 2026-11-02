@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -345,4 +346,171 @@ func TestWorkerOwnershipAndCorruptLedgerFailClosed(t *testing.T) {
 	if _, err := s.List(); err == nil || !strings.Contains(err.Error(), "unsupported") {
 		t.Fatalf("corrupt schema: %v", err)
 	}
+}
+
+func inodeOf(t *testing.T, path string) uint64 {
+	t.Helper()
+	fi, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fi.Sys().(*syscall.Stat_t).Ino
+}
+
+// withoutAuth re-marshals c with its auth section removed. Decoded configs are
+// compared through JSON because reflect.DeepEqual trips on time.Time locations.
+func withoutAuth(t *testing.T, c Config) string {
+	t.Helper()
+	c.Auth = nil
+	b, err := json.Marshal(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+func replacementAuth() AuthConfig {
+	return AuthConfig{Mode: AuthModeCertificate, TenantID: testTenantID, ClientID: testClientID, CertificatePath: "/etc/cenci/new-worker.pem"}
+}
+
+func dirEntries(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	return names
+}
+
+func TestWriteAuthChangesOnlyTheAuthSectionAtomicallyWithMode0600(t *testing.T) {
+	for name, existing := range map[string]string{
+		"no-auth-yet":    "",
+		"replacing-auth": `{"mode":"managedIdentity","tenantId":"` + testTenantID + `"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := writeAuthConfig(t, existing)
+			if err := os.Chmod(path, 0644); err != nil {
+				t.Fatal(err)
+			}
+			before, err := decodeConfig(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			inode := inodeOf(t, path)
+
+			want := replacementAuth()
+			if err := WriteAuth(path, want); err != nil {
+				t.Fatal(err)
+			}
+
+			after, err := decodeConfig(path)
+			if err != nil {
+				t.Fatalf("the written config no longer decodes strictly: %v", err)
+			}
+			if after.Auth == nil || *after.Auth != want {
+				t.Fatalf("auth %+v, want %+v", after.Auth, want)
+			}
+			if got, base := withoutAuth(t, after), withoutAuth(t, before); got != base {
+				t.Fatalf("a field other than auth changed:\n before %s\n after  %s", base, got)
+			}
+			// Control: the comparison does see a change to another field.
+			changed := before
+			changed.Concurrency++
+			if withoutAuth(t, changed) == withoutAuth(t, after) {
+				t.Fatal("control failed, the comparison cannot see a changed non-auth field")
+			}
+			fi, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if fi.Mode().Perm() != 0600 {
+				t.Fatalf("mode %v, want 0600", fi.Mode().Perm())
+			}
+			if inodeOf(t, path) == inode {
+				t.Fatal("the config was rewritten in place instead of replaced atomically")
+			}
+			if names := dirEntries(t, filepath.Dir(path)); len(names) != 1 || names[0] != "config.json" {
+				t.Fatalf("temporary files were left behind: %v", names)
+			}
+		})
+	}
+}
+
+func TestWriteAuthRefusesASymlinkOrAConfigOwnedByAnotherUser(t *testing.T) {
+	uid := os.Getuid()
+	read := func(t *testing.T, path string) string {
+		t.Helper()
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+
+	t.Run("symlink", func(t *testing.T) {
+		real := writeAuthConfig(t, "")
+		link := filepath.Join(t.TempDir(), "config.json")
+		if err := os.Symlink(real, link); err != nil {
+			t.Fatal(err)
+		}
+		original := read(t, real)
+		if err := WriteAuth(link, replacementAuth()); err == nil {
+			t.Fatal("WriteAuth wrote through a symbolic link")
+		}
+		if read(t, real) != original {
+			t.Fatal("the symlink target was changed")
+		}
+		if fi, err := os.Lstat(link); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+			t.Fatalf("the symlink was replaced: %v, %v", fi, err)
+		}
+		if names := dirEntries(t, filepath.Dir(link)); len(names) != 1 {
+			t.Fatalf("temporary files were left behind: %v", names)
+		}
+		// Control: the same content written to the real path succeeds.
+		if err := WriteAuth(real, replacementAuth()); err != nil {
+			t.Fatalf("control failed, WriteAuth refused a plain config: %v", err)
+		}
+	})
+	t.Run("not-a-regular-file", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := WriteAuth(dir, replacementAuth()); err == nil {
+			t.Fatal("WriteAuth accepted a directory")
+		}
+	})
+	t.Run("another-owner", func(t *testing.T) {
+		path := writeAuthConfig(t, "")
+		original := read(t, path)
+		if err := writeAuth(path, replacementAuth(), uid+1); err == nil {
+			t.Fatal("writeAuth accepted a config owned by another user")
+		}
+		if read(t, path) != original {
+			t.Fatal("a foreign-owned config was changed")
+		}
+		// Control: the invoking uid is accepted for the same file.
+		if err := writeAuth(path, replacementAuth(), uid); err != nil {
+			t.Fatalf("control failed, writeAuth refused the owner's config: %v", err)
+		}
+	})
+	t.Run("invalid-auth-and-unknown-fields-leave-the-file-alone", func(t *testing.T) {
+		path := writeAuthConfig(t, "")
+		original := read(t, path)
+		if err := WriteAuth(path, AuthConfig{}); err == nil {
+			t.Fatal("WriteAuth accepted an invalid auth section")
+		}
+		if read(t, path) != original {
+			t.Fatal("an invalid auth section changed the file")
+		}
+		bad := filepath.Join(t.TempDir(), "config.json")
+		put(t, bad, `{"enabled":true,"unknownField":1}`)
+		if err := WriteAuth(bad, replacementAuth()); err == nil {
+			t.Fatal("WriteAuth accepted a config with an unknown field")
+		}
+		if read(t, bad) != `{"enabled":true,"unknownField":1}` {
+			t.Fatal("an undecodable config was changed")
+		}
+	})
 }

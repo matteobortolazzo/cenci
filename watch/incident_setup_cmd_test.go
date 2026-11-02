@@ -2,6 +2,7 @@ package main_test
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -12,11 +13,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/incident"
 )
@@ -192,10 +196,6 @@ type setupResult struct {
 
 func (w *setupWorld) execSetup(t *testing.T, env []string, args ...string) setupResult {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, binaryPath, args...)
-	cmd.Env = env
 	// A stdin that is an open pipe and never written or closed: a child that
 	// inherited it would block on a read or see a pipe, not the null device.
 	stdinR, stdinW, perr := os.Pipe()
@@ -204,7 +204,16 @@ func (w *setupWorld) execSetup(t *testing.T, env []string, args ...string) setup
 	}
 	defer func() { _ = stdinR.Close() }()
 	defer func() { _ = stdinW.Close() }()
-	cmd.Stdin = stdinR
+	return w.execSetupStdin(t, env, stdinR, args...)
+}
+
+func (w *setupWorld) execSetupStdin(t *testing.T, env []string, stdin *os.File, args ...string) setupResult {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, binaryPath, args...)
+	cmd.Env = env
+	cmd.Stdin = stdin
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	err := cmd.Run()
@@ -766,14 +775,220 @@ func TestIncidentSetupRejectsInvalidInputBeforeAnyAzCall(t *testing.T) {
 			}
 		})
 	}
-	for _, flag := range []string{"--apply", "--yes", "--replace-auth"} {
-		t.Run("unregistered-"+flag, func(t *testing.T) {
+}
+
+// applyArgs is a complete headless --apply invocation for an existing (or
+// managed) identity; drop removes one flag and its value.
+func (w *setupWorld) applyArgs(cfg, identity string, drop string, extra ...string) []string {
+	flags := [][2]string{{"--tenant", cliTenantID}, {"--subscription", setupSubscription}, {"--service-bus-namespace-id", setupNamespaceARM},
+		{"--workspace-resource-id", setupConfigWorkspace + "=" + setupWorkspaceARM}}
+	if identity == "managed" {
+		flags = append(flags, [2]string{"--identity", "managed"}, [2]string{"--principal-object-id", setupObjectID})
+	} else {
+		flags = append(flags, [2]string{"--identity", identity}, [2]string{"--certificate-path", w.cert})
+		if identity == "existing" {
+			flags = append(flags, [2]string{"--client-id", cliClientID})
+		}
+	}
+	args := []string{"incident", "setup", "--config", cfg, "--apply"}
+	for _, f := range flags {
+		if f[0] != drop {
+			args = append(args, f[0], f[1])
+		}
+	}
+	return append(args, extra...)
+}
+
+func TestIncidentSetupApplyGatesExitTwoBeforeAnyAzCall(t *testing.T) {
+	// A gate is an --apply --yes invocation of an existing identity (identity
+	// overrides it) without the flag named by drop or, with noYes, without
+	// --yes. A bare gate is a preview invocation that adds only that flag.
+	type gate struct {
+		name, named    string // named: text the one-line hint must contain
+		also           string // also: a second text it must contain
+		identity, drop string
+		bare           string
+		noYes          bool
+		second         bool // the config also queries a second workspace
+		null           bool // run with /dev/null as stdin
+	}
+	yes := []string{"--yes"}
+	gates := []gate{
+		{name: "pipe-stdin-without-yes", named: "--yes", noYes: true},
+		{name: "null-stdin-without-yes", named: "--yes", noYes: true, null: true},
+		{name: "yes-without-apply", named: "--yes", bare: "--yes"},
+		{name: "replace-auth-without-apply", named: "--replace-auth", bare: "--replace-auth"},
+		{name: "identity-new", named: "#1389", also: "create the identity with the preview's commands, then use --identity existing", identity: "new"},
+		{name: "identity-omitted", named: "--identity", drop: "--identity"},
+		{name: "tenant-missing", named: "--tenant", drop: "--tenant"},
+		{name: "subscription-missing", named: "--subscription", drop: "--subscription"},
+		{name: "namespace-id-missing", named: "--service-bus-namespace-id", drop: "--service-bus-namespace-id"},
+		{name: "workspace-id-missing", named: "--workspace-resource-id " + setupConfigWorkspace, drop: "--workspace-resource-id"},
+		{name: "second-workspace-id-missing", named: "--workspace-resource-id " + setupSecondWorkspace, second: true},
+		{name: "certificate-path-missing", named: "--certificate-path", drop: "--certificate-path"},
+		{name: "principal-object-id-missing", named: "--principal-object-id", identity: "managed", drop: "--principal-object-id"},
+	}
+	for _, g := range gates {
+		t.Run(g.name, func(t *testing.T) {
 			w := newSetupWorld(t)
 			w.discoverAll()
-			res := w.runSetup(t, "incident", "setup", "--config", w.writeConfig(t, nil), flag)
+			var edit func(*incident.Config)
+			if g.second {
+				edit = func(c *incident.Config) {
+					c.Resources = append(c.Resources, w.resource(t, "api", "owner/api", setupSecondWorkspace))
+				}
+			}
+			cfg := w.writeConfig(t, edit)
+			before := snapshotPaths(t, cfg, w.stateDir)
+			var args []string
+			switch {
+			case g.bare != "":
+				args = w.args(cfg, append(existingIdentity(), g.bare)...)
+			case g.noYes:
+				args = w.applyArgs(cfg, "existing", "")
+			default:
+				args = w.applyArgs(cfg, cmp.Or(g.identity, "existing"), g.drop, yes...)
+			}
+			var res setupResult
+			if g.null {
+				w.installAz(t)
+				null, err := os.Open(os.DevNull)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer func() { _ = null.Close() }()
+				res = w.execSetupStdin(t, w.setupEnv(t), null, args...)
+			} else {
+				res = w.runSetup(t, args...)
+			}
 			res.requireExit(t, 2)
+			hint := strings.TrimRight(res.stderr, "\n")
+			if strings.Contains(hint, "\n") || !strings.HasPrefix(hint, "cenci incident setup:") {
+				t.Fatalf("want a one-line cenci incident setup hint on stderr, got %q", res.stderr)
+			}
+			requireContains(t, "hint", hint, g.named, g.also)
+			if res.stdout != "" {
+				t.Fatalf("a rejected invocation printed a plan:\n%s", res.stdout)
+			}
 			if got := readCLITrace(t, w.azTrace); got != "" {
-				t.Fatalf("az was invoked: %s", got)
+				t.Fatalf("az was invoked before the gate rejected the input: %s", got)
+			}
+			if after := snapshotPaths(t, cfg, w.stateDir); after != before {
+				t.Fatalf("a rejected invocation changed the config or state directory:\nbefore:\n%s\nafter:\n%s", before, after)
+			}
+		})
+	}
+
+	t.Run("complete-apply-yes-passes-every-gate", func(t *testing.T) {
+		// Control for every case above: the same complete input reaches az and
+		// stops at the credential check (the certificate file holds no valid
+		// certificate), before any mutation, so it exits 1, never 2.
+		w := newSetupWorld(t)
+		w.discoverAll()
+		if err := os.WriteFile(w.cert, []byte(fakePrivateKeyPEM), 0600); err != nil {
+			t.Fatal(err)
+		}
+		cfg := w.writeConfig(t, nil)
+		before := snapshotPaths(t, cfg, w.stateDir)
+		res := w.runSetup(t, w.applyArgs(cfg, "existing", "", yes...)...)
+		res.requireExit(t, 1)
+		requireContains(t, "stderr", res.stderr, "cenci incident setup:", "credential")
+		lines := w.traceLines(t)
+		if !hasTrace(lines, "account show") {
+			t.Fatalf("a complete invocation never reached az: %q", lines)
+		}
+		for _, l := range lines {
+			if strings.HasPrefix(l, "role assignment create") {
+				t.Fatalf("a mutating call ran although the credential could not be built: %q", lines)
+			}
+		}
+		if after := snapshotPaths(t, cfg, w.stateDir); after != before {
+			t.Fatalf("a refused apply changed the config or state directory:\nbefore:\n%s\nafter:\n%s", before, after)
+		}
+	})
+}
+
+// ptySlave is the slave end of a fresh pseudo-terminal (linux only; the package
+// main tty test keeps its own copy because that file cannot share this package).
+func ptySlave(t *testing.T) *os.File {
+	t.Helper()
+	if runtime.GOOS != "linux" {
+		t.Skip("the pty subprocess test is implemented for linux only")
+	}
+	master, err := os.OpenFile("/dev/ptmx", os.O_RDWR|syscall.O_NOCTTY, 0)
+	if err != nil {
+		t.Skipf("no /dev/ptmx: %v", err)
+	}
+	t.Cleanup(func() { _ = master.Close() })
+	var unlock, n int32
+	for _, c := range []struct {
+		req uintptr
+		arg *int32
+	}{{0x40045431, &unlock}, {0x80045430, &n}} { // TIOCSPTLCK, TIOCGPTN
+		if _, _, errno := syscall.Syscall(syscall.SYS_IOCTL, master.Fd(), c.req, uintptr(unsafe.Pointer(c.arg))); errno != 0 {
+			t.Fatalf("ioctl %#x: %v", c.req, errno)
+		}
+	}
+	slave, err := os.OpenFile("/dev/pts/"+strconv.Itoa(int(n)), os.O_RDWR|syscall.O_NOCTTY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = slave.Close() })
+	return slave
+}
+
+// On a terminal without --yes the missing-input gate (exit 2) does not apply:
+// discovery runs and the plan's blockers exit 1, naming the flag, before the
+// prompt and with no mutating az call.
+func TestIncidentSetupApplyOnATerminalWithoutYesExitsOneNamingTheUnconfirmedFlag(t *testing.T) {
+	w := newSetupWorld(t)
+	w.discoverAll()
+	cfg := w.writeConfig(t, nil)
+	before := snapshotPaths(t, cfg, w.stateDir)
+	w.installAz(t)
+	res := w.execSetupStdin(t, w.setupEnv(t), ptySlave(t), w.applyArgs(cfg, "existing", "--certificate-path")...)
+	res.requireExit(t, 1)
+	requireContains(t, "stderr", res.stderr, "cenci incident setup:", "--certificate-path")
+	requireLacks(t, "output", res.stdout+res.stderr, "Apply this plan?")
+	lines := w.traceLines(t)
+	if !hasTrace(lines, "account show") {
+		t.Fatalf("discovery did not run: %q", lines)
+	}
+	for _, l := range lines {
+		if strings.HasPrefix(l, "role assignment create") {
+			t.Fatalf("a mutating call ran: %q", l)
+		}
+	}
+	if after := snapshotPaths(t, cfg, w.stateDir); after != before {
+		t.Fatalf("a refused apply changed the config or state directory:\nbefore:\n%s\nafter:\n%s", before, after)
+	}
+}
+
+// The --identity gates (omitted, or an explicit new) are usage errors on a
+// terminal exactly as headless: exit 2 before any az call, with no --yes.
+func TestIncidentSetupApplyIdentityGatesExitTwoOnATerminalWithoutYes(t *testing.T) {
+	for _, g := range []struct{ name, identity, drop, named, also string }{
+		{name: "identity-omitted", identity: "existing", drop: "--identity", named: "--identity", also: "--identity existing or managed"},
+		{name: "identity-new", identity: "new", named: "#1389", also: "create the identity with the preview's commands, then use --identity existing"},
+	} {
+		t.Run(g.name, func(t *testing.T) {
+			w := newSetupWorld(t)
+			w.discoverAll()
+			cfg := w.writeConfig(t, nil)
+			before := snapshotPaths(t, cfg, w.stateDir)
+			w.installAz(t)
+			res := w.execSetupStdin(t, w.setupEnv(t), ptySlave(t), w.applyArgs(cfg, g.identity, g.drop)...)
+			res.requireExit(t, 2)
+			hint := strings.TrimRight(res.stderr, "\n")
+			if strings.Contains(hint, "\n") || !strings.HasPrefix(hint, "cenci incident setup:") {
+				t.Fatalf("want a one-line cenci incident setup hint on stderr, got %q", res.stderr)
+			}
+			requireContains(t, "hint", hint, g.named, g.also)
+			if got := readCLITrace(t, w.azTrace); got != "" {
+				t.Fatalf("az was invoked before the gate rejected the input: %s", got)
+			}
+			if after := snapshotPaths(t, cfg, w.stateDir); after != before {
+				t.Fatalf("a rejected invocation changed the config or state directory:\nbefore:\n%s\nafter:\n%s", before, after)
 			}
 		})
 	}
