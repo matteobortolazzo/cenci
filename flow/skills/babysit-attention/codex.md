@@ -30,14 +30,22 @@ the summary says "retry cap reached (exact count not readable from here)" and ne
 
 ## Question
 
-Ask exactly one blocking question through the client's available user-input mechanism, with exactly two
-options: "leave paused for manual repair" and "stop babysitting". Then stop. This procedure never detects whether
-the session is interactive: a headless `codex exec` run prints the summary and the question and exits without
-choosing, mutating, pushing or stopping. Only a later user turn that names one option acts on it.
+Ask exactly one blocking question through the client's available user-input mechanism, with exactly three
+options: "leave paused for manual repair", "retry with a fresh budget" and "stop babysitting". Then stop. This
+procedure never detects whether the session is interactive: a headless `codex exec` run prints the summary and the
+question and exits without choosing, mutating, pushing or stopping. Only a later user turn that names
+one option acts on it.
 
 "leave paused for manual repair" changes nothing: report that the PR stays paused and the supervisor keeps
-polling, and that merge conflicts are repaired by a human in a normal session. "stop babysitting" continues at
-`## Stop choice`.
+polling, and that merge conflicts are repaired by a human in a normal session. "retry with a fresh budget"
+continues at `## Reset choice`. "stop babysitting" continues at `## Stop choice`.
+
+## Reset choice
+
+Run `cenci babysit reset <pr>` once. The reset is host-only: inside a sandbox it refuses without sending anything to
+the host. Exit 0 means the budget was reset and the supervisor re-armed: report that. A non-zero exit means the
+budget was not reset: say "not reset" plainly, print `cenci babysit reset <pr>` as the exact command to run on the
+host, and never report success. Do not retry the command and do not edit the supervisor's state by other means.
 
 ## Stop choice
 
@@ -50,4 +58,4 @@ run on the host, and never report success. Do not retry the command and do not k
 ## Never
 
 Never mutate GitHub, push, restart the supervisor or run a repair on this window's own initiative, before or after
-the choice: no comment, no label, no commit and no `cenci babysit` call other than the stop above and `cenci babysit status <pr>`.
+the choice: no comment, no label, no commit and no `cenci babysit` call other than the chosen stop or reset above and `cenci babysit status <pr>`.

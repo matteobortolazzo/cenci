@@ -125,7 +125,8 @@ is not automerged before it.
 `/var/tmp`: a local bare remote with a PR branch whose gate (`sh check.sh`) fails, a clone of it
 as the launch directory, a stubbed `gh` that answers reads and refuses and logs every write,
 and a stubbed `cenci` that logs every call (`babysit status` answers with the attempt count as
-one JSON line, and `babysit stop` fails like a host nack, `not stopped: <reason>`). The remote's `pre-receive` hook logs every ref update, so a force push or a stray
+one JSON line, `babysit stop` fails like a host nack, `not stopped: <reason>`, and `babysit reset`
+fails like the host-only refusal a sandbox gets, `not reset: ...`). The remote's `pre-receive` hook logs every ref update, so a force push or a stray
 branch shows up even when the remote rejects it.
 
 ### How to produce a run
@@ -145,7 +146,7 @@ CENCI_CODEX_NATIVE=1 CENCI_CODEX_NATIVE_OUT=./native-workflows.md bash flow/code
   commit SHAs kept) are the same as for the hook runner above. The runner refuses to print a
   report in which a home path, user name or host name survived sanitization.
 - `RESULT: OK` needs the five positive rows to be `ok` (fast-forward advance, gate green on the
-  pushed head, checkpoint `complete` with the pushed SHA, restart adds no commit, both attention
+  pushed head, checkpoint `complete` with the pushed SHA, restart adds no commit, all three attention
   options printed) and no failed row. A run that fails nothing but leaves one of them
   unproven (for example a `codex` that reads the PR and gives up) is `RESULT: INCONCLUSIVE`.
 - A row is judged from the fixture's own state (remote refs and ancestry, the remote's ref-update
@@ -186,9 +187,9 @@ CENCI_CODEX_NATIVE=1 CENCI_CODEX_NATIVE_OUT=./native-workflows.md bash flow/code
 | `ci-repair`: checkpoint `complete` with `pushed:<sha>` | pending native run |
 | `ci-repair`: no `gh` writes, no new remote branches, no `cenci` calls | pending native run |
 | Restart re-run: no new commit, no push, checkpoint unchanged | pending native run |
-| Headless `babysit-attention`: both options printed, no retry option | pending native run |
+| Headless `babysit-attention`: three options printed, retry option offered | pending native run |
 | Headless `babysit-attention`: summary names the PR, head SHA, failing check and attempt count | pending native run |
-| Headless `babysit-attention`: no `babysit stop` call (a `babysit status` read is allowed), no `gh` writes, remote unchanged | pending native run |
+| Headless `babysit-attention`: no `babysit stop` or `reset` call (a `babysit status` read is allowed), no `gh` writes, remote unchanged | pending native run |
 
 ## Native workflows: Plan mode, handoff and goal lifecycle
 

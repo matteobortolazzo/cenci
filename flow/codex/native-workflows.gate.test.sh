@@ -240,10 +240,12 @@ chmod +x "${STUB_DIR}/codex"
 #   ci-ckpt        pushes, but leaves the checkpoint `running`
 #   ci-cenci       calls `cenci pipeline ...`
 #   restart-dup    a re-launch commits and pushes again
-#   attn-retry     attention offers "retry with a fresh budget"
-#   attn-missing   attention offers only one of the two options
+#   attn-noretry   attention offers the other two options but not "retry with a
+#                  fresh budget"
+#   attn-missing   attention offers only one of the three options
 #   attn-stop      attention runs `cenci babysit stop` (the good mode reads the
 #                  attempt count through `cenci babysit status`, which is no stop call)
+#   attn-reset     attention runs `cenci babysit reset` on its own initiative
 #   attn-ghwrite   attention writes to GitHub
 #   attn-push      attention pushes to the remote
 #   ci-gatetamper  edits check.sh (the gate definition) in the fix commit; the
@@ -395,7 +397,7 @@ emulate_attention() {
     local pr view head checks name state count attempts opts text
     pr="$(sed -n 's/.*babysit-attention \([0-9][0-9]*\).*/\1/p' <<< "${prompt}" | sed -n 1p)"
     if [[ "${mode}" == attn-noread ]]; then
-        msg "$(printf 'PR #%s, head 1111111, failing checks: native-gate. CI retry cap reached (3 attempts).\nChoose one:\n1. leave paused for manual repair\n2. stop babysitting' "${pr}")"
+        msg "$(printf 'PR #%s, head 1111111, failing checks: native-gate. CI retry cap reached (3 attempts).\nChoose one:\n1. leave paused for manual repair\n2. retry with a fresh budget\n3. stop babysitting' "${pr}")"
         return 0
     fi
     view="$(gh pr view "${pr}" --json headRefName,headRefOid)" || exit 1
@@ -408,13 +410,14 @@ emulate_attention() {
     if state="$(cenci babysit status "${pr}")" && count="$(jq -er '.ciFixAttempts' <<< "${state}")"; then
         attempts="${count} attempts"
     fi
-    opts=$'1. leave paused for manual repair\n2. stop babysitting'
+    opts=$'1. leave paused for manual repair\n2. retry with a fresh budget\n3. stop babysitting'
     case "${mode}" in
         attn-missing) opts=$'1. leave paused for manual repair' ;;
-        attn-retry) opts="${opts}"$'\n3. retry with a fresh budget' ;;
+        attn-noretry) opts=$'1. leave paused for manual repair\n2. stop babysitting' ;;
     esac
     case "${mode}" in
         attn-stop) cenci babysit stop "${pr}" 2> /dev/null || true ;;
+        attn-reset) cenci babysit reset "${pr}" 2> /dev/null || true ;;
         attn-ghwrite) gh pr comment "${pr}" --body "paused" 2> /dev/null || true ;;
         attn-ghwrite-api) gh api --method=PATCH "repos/cenci-native/fixture/issues/${pr}" --field=state=closed 2> /dev/null || true ;;
         attn-push)
@@ -997,11 +1000,11 @@ ROW_CI_GH="ci-repair: no gh writes"
 ROW_CI_BRANCH="ci-repair: no new remote branches"
 ROW_CI_CENCI="ci-repair: no cenci calls"
 ROW_RESTART="restart: re-run adds no commit and no push"
-ROW_A_OPTS="attention (headless): both options printed"
-ROW_A_RETRY="attention (headless): no retry option"
+ROW_A_OPTS="attention (headless): three options printed"
+ROW_A_RETRY="attention (headless): retry option offered"
 ROW_A_SUMMARY="attention (headless): summary names PR, head SHA and failing check"
 ROW_A_COUNT="attention (headless): attempt count"
-ROW_A_STOP="attention (headless): no babysit stop call"
+ROW_A_STOP="attention (headless): no babysit stop or reset call"
 ROW_A_GH="attention (headless): no gh writes"
 ROW_A_REMOTE="attention (headless): remote unchanged"
 # The Plan-mode, handoff and goal rows (#1235). The probe row records what
@@ -1115,9 +1118,10 @@ misbehaviour ci-red "${ROW_CI_GATE}"
 misbehaviour ci-ckpt "${ROW_CI_CKPT}"
 misbehaviour ci-cenci "${ROW_CI_CENCI}"
 misbehaviour restart-dup "${ROW_RESTART}"
-misbehaviour attn-retry "${ROW_A_RETRY}"
+misbehaviour attn-noretry "${ROW_A_RETRY}"
 misbehaviour attn-missing "${ROW_A_OPTS}"
 misbehaviour attn-stop "${ROW_A_STOP}"
+misbehaviour attn-reset "${ROW_A_STOP}"
 misbehaviour attn-ghwrite "${ROW_A_GH}"
 misbehaviour attn-push "${ROW_A_REMOTE}"
 # Writes spelled with attached flags, a read against a foreign repository, an

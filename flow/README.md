@@ -93,7 +93,7 @@ Codex and OpenCode so neither mistakes a pipeline command for a supported workfl
 | `worktrees` | Yes | Yes | Yes | Git worktree conventions |
 | `address-review` | Yes | In development | No | Native approval/checkpoint foundation |
 | `babysit` | Yes | Yes | Yes | Thin wrapper over the client-neutral `cenci babysit` supervisor |
-| `babysit-attention` | Yes | Yes | No | Launcher-dispatched by `cenci babysit` when a decision needs a human; offers only "leave paused for manual repair" and "stop babysitting"; Codex companion is `codex.md`, no OpenCode companion yet |
+| `babysit-attention` | Yes | Yes | No | Launcher-dispatched by `cenci babysit` when a decision needs a human; offers "leave paused for manual repair", "retry with a fresh budget" (`cenci babysit reset <pr>`, host-only) and "stop babysitting"; Codex companion is `codex.md`, no OpenCode companion yet |
 | `ci-repair` | Yes | Yes | No | Launcher-dispatched by `cenci babysit` on failing CI; Codex companion is `codex.md` (never enters `/plan`), no OpenCode companion yet |
 | `close` | Yes | In development | No | Split-parent coverage review before closing; the writes run through `scripts/close-parent.sh` on both clients |
 | `merge-repair` | Yes | No | No | Babysit always dispatches conflict resolution to Claude Opus, including for Codex/OpenCode supervisors |
@@ -487,7 +487,9 @@ pacing back to the base interval.
 - **CLI control.** Use `cenci babysit <pr> --agent <claude|codex> --interval 15m`, add
   `--once` for one foreground tick, or run `cenci babysit stop <pr>` to stop it. Inside a
   sandbox `stop` is forwarded to the host daemon; `cenci babysit status <pr>` prints the
-  supervisor's state (status, repair attempt counts, whether it is live) as one JSON line.
+  supervisor's state (status, repair attempt counts, whether it is live) as one JSON line;
+  `cenci babysit reset <pr>` gives a paused PR a fresh repair budget and re-arms it, and is
+  host-only (it refuses inside a sandbox and is never forwarded).
 - **Human gates preserved.** The `address-review` approval, the CI-escalation question, and
   the never-force-push rule all hold — babysit automates the checking and the safe fixes,
   not the decisions.

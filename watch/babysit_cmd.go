@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -87,6 +88,39 @@ func runBabysitStatus(args []string) {
 	}
 }
 
+// babysitResetUsage is the usage line for `cenci babysit reset <pr>`, printed
+// to stderr on a malformed invocation (exit 2).
+const babysitResetUsage = "cenci babysit reset: usage: cenci babysit reset <pr> [--state-dir <dir>]"
+
+// runBabysitReset implements the host-only `cenci babysit reset <pr>` (#1391):
+// zero the PR's retry budget and re-arm with the recorded settings. A malformed
+// invocation or a refused agent exits 2; every runtime refusal or failure
+// (inside a sandbox, no supervisor, unreadable state, a supervisor that will
+// not stop, a failed re-arm) exits 1.
+func runBabysitReset(args []string) {
+	fs := flag.NewFlagSet("babysit reset", flag.ExitOnError)
+	stateDir := fs.String("state-dir", "", "state directory (default: $XDG_STATE_HOME/cenci/babysit)")
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, babysitResetUsage)
+		os.Exit(2)
+	}
+	pr := args[0]
+	_ = fs.Parse(args[1:])
+	rejectExtraWithUsage("cenci babysit reset", fs.Args(), babysitResetUsage)
+	if n, err := strconv.Atoi(strings.TrimPrefix(pr, "#")); err != nil || n <= 0 {
+		fmt.Fprintf(os.Stderr, "cenci babysit reset: PR must be a positive integer, got %q\n%s\n", pr, babysitResetUsage)
+		os.Exit(2)
+	}
+	refusal := func(agent string) string { return babysitAgentRefusal(agent, run.BuiltinCapability) }
+	if err := babysit.Reset(pr, *stateDir, refusal); err != nil {
+		fmt.Fprintf(os.Stderr, "cenci babysit reset: %v\n", err)
+		if errors.Is(err, babysit.ErrAgentRefused) {
+			os.Exit(2)
+		}
+		os.Exit(1)
+	}
+}
+
 func runBabysit(args []string) {
 	if len(args) > 0 && args[0] == "stop" {
 		fs := flag.NewFlagSet("babysit stop", flag.ExitOnError)
@@ -107,6 +141,10 @@ func runBabysit(args []string) {
 	}
 	if len(args) > 0 && args[0] == "status" {
 		runBabysitStatus(args[1:])
+		return
+	}
+	if len(args) > 0 && args[0] == "reset" {
+		runBabysitReset(args[1:])
 		return
 	}
 

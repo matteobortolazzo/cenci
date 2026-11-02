@@ -25,6 +25,9 @@ non-conflicting GitHub observation clears the episode; unknown mergeability
 preserves its retry budget.
 The older `conflictNotifiedHeadSha` state field remains readable, but an old
 attention notification does not suppress the first automatic repair after upgrade.
+Apart from those automatic clears (green CI at a new head, a conflict episode ending),
+`cenci babysit reset <pr>` (host-only; refuses inside a sandbox) is the supported way
+to zero a paused PR's budget while keeping its feedback bookkeeping.
 
 While conflicting, or while mergeability is unknown during a conflict episode,
 CI repair and review dispatch wait for merge repair. Deferred CI work consumes
