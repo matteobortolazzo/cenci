@@ -694,6 +694,11 @@ selects `fragments/azure.dockerfile`. Without it an agent has no way to check a
 command's real syntax — `az <group> <cmd> --help` is what turns a guessed command into
 a verified one.
 
+`sandbox.azure` is unrelated to the incident worker's identity. The worker
+(`cenci incident run`) authenticates only from the `auth` section of its own config,
+on the worker host, and incident agent containers get no Azure credentials. The
+staging below is for an interactive agent session's own `az` use.
+
 Two things to know:
 
 - **There is no monolith fallback.** Unlike dind, the shared `cenci-sandbox:latest`

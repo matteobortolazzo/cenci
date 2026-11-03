@@ -34,9 +34,760 @@ flowchart TD
     Proxy --> API[Anthropic API only]
 ```
 
-Follow the setup sections in order, then complete the staging smoke test before
-enabling the service. Examples use a dedicated Linux account named `incident`,
-Docker, a Go repository, and a queue; replace the example resource/repository IDs.
+Follow the [tutorial](#tutorial-a-worker-identity-on-a-local-host) in order: seven
+steps from an empty host to a verified worker identity and a passing staging smoke
+test, which must pass before you enable the service. The sections after it are the
+reference the steps link to; a worker on an Azure host uses
+[Azure-hosted worker identity](#azure-hosted-worker-identity) instead of Steps 2
+and 3. Examples use a dedicated Linux account named `incident`, Docker, a Go
+repository, and a queue; replace the example resource/repository IDs.
+
+## Tutorial: a worker identity on a local host
+
+This tutorial gives a worker running outside Azure its own least-privilege identity
+and proves it end to end. Run every command as the `incident` account unless a step
+says otherwise. Each step links to the reference section that holds the detail, so
+this text shows the path and not every rule.
+
+Steps 1 to 5 and the smoke test in Step 6 run against the **staging** queue and
+workspace. The example names (`contoso`, `monitor-alerts`, `orders-logs`) stand for
+the staging resources: never run the tutorial against production, and map production
+resources only after the smoke test passes.
+
+Two command shapes keep a failure from closing your terminal or leaving secrets
+behind. A block that signs you in is a chain of `&&` commands, so it stops at the first
+failure and still leaves your shell open. A block that creates things runs in a
+subshell, `( set -euo pipefail ... )`, so any failing command stops the block, and
+its `trap` removes temporary key material when the subshell exits. Paste a whole
+block at once. Values a subshell computes are printed, because a subshell cannot
+hand variables back.
+
+### Step 1: Prerequisites and who is who
+
+Five identities appear below. They stay separate on purpose: none can do another's
+job, and the worker never holds a send or administration right.
+
+| Identity | Used for | Rights | Credential |
+| --- | --- | --- | --- |
+| Bridge | The Logic App delivers alerts to the queue. | Azure Service Bus Data Sender on the queue. | An Azure-side connection, never on the worker host. |
+| Worker | `cenci incident run` and `verify`. | Azure Service Bus Data Receiver on the queue; Log Analytics Reader on each mapped workspace. | The config's `auth` section: here a certificate PEM owned by `incident`. |
+| Agent containers | Claude calls and the check runs. | None in Azure or GitHub. | The model key only, through the proxy; checks get nothing. |
+| Setup operator | You, running `cenci incident setup` and the `az` commands. | Entra rights to create an app registration; an RBAC administrator role on each scope. | Your own `az login`, for setup only. It is never written to the config. |
+| Staging sender | Step 6's script that sends test alerts. | Azure Service Bus Data Sender on the staging queue only. | Its own service principal, in a separate terminal. |
+
+The bridge's Data Sender identity is separate from the worker identity: the worker
+can receive but never send, and the bridge can send but never receive. The staging
+sender is a third identity, so no step lends the worker a send right.
+
+Before Step 2:
+
+1. A human has configured the action group and Logic App bridge ([Provisioning
+   and permissions](#provisioning-and-permissions)), and the staging queue and
+   workspace exist.
+2. The host is prepared: [account and repository](#prepare-the-account-and-repository),
+   [job image](#build-and-review-the-job-image) and
+   [proxy route](#give-the-proxy-an-outbound-route).
+3. You hold the two kinds of rights setup needs, which different people often
+   hold: Microsoft Entra rights to create an app registration and its service
+   principal, and User Access Administrator or Role Based Access Control
+   Administrator on the queue and each workspace. Without the first, an
+   administrator creates the identity and you grant roles; without the second,
+   you can preview but not assign.
+4. The config exists. Save the adapted JSON from [Configuration](#configuration),
+   without an `auth` section, as `/home/incident/.config/cenci/incidents.json`
+   with mode 0600. Setup needs neither `enabled: true` nor `auth`.
+
+Sign in for setup in a temporary Azure CLI directory, so your login never lands in
+the account's own profile. Check that it was created before using it:
+
+```bash
+SETUP_AZ_DIR=$(mktemp -d /tmp/cenci-setup-az.XXXXXX) && chmod 0700 "$SETUP_AZ_DIR" && export AZURE_CONFIG_DIR="$SETUP_AZ_DIR" && az login --tenant 11111111-1111-4111-8111-111111111111
+```
+
+If that chain stops early, nothing is signed in, but once `export` has run (even
+when `az login` itself fails) `AZURE_CONFIG_DIR` stays set to that directory: run the
+`SETUP_AZ_DIR` teardown at the end of Step 5. Every later operator sign-in ends with
+its own teardown.
+
+### Step 2: Preview what setup will do
+
+The preview changes nothing: it writes no file, calls no mutating `az` command and
+never starts the worker. Run it with every input for a new identity:
+
+```bash
+cenci incident setup --config /home/incident/.config/cenci/incidents.json \
+  --identity new --display-name cenci-incident-worker \
+  --tenant 11111111-1111-4111-8111-111111111111 \
+  --subscription 44444444-4444-4444-8444-444444444444 \
+  --certificate-path /home/incident/.config/cenci/worker.pem \
+  --service-bus-namespace-id /subscriptions/44444444-4444-4444-8444-444444444444/resourceGroups/app/providers/Microsoft.ServiceBus/namespaces/contoso \
+  --workspace-resource-id 00000000-0000-0000-0000-000000000000=/subscriptions/44444444-4444-4444-8444-444444444444/resourceGroups/app/providers/Microsoft.OperationalInsights/workspaces/orders-logs
+```
+
+Sample output, captured from the built binary with no `az` on `PATH` (a guidance-only
+preview, exit 0), with only `...` shortening and the config and state paths shown as
+the example account's. With `az` signed in, the preview also reads the Azure values it
+can and shows them, so yours differs where `az` was missing here:
+
+```text
+cenci incident setup: preview only. This run created, changed and wrote nothing; the commands below are for you to review and run yourself.
+
+Config:       /home/incident/.config/cenci/incidents.json
+Tenant:       11111111-1111-4111-8111-111111111111
+Subscription: 44444444-4444-4444-8444-444444444444
+Identity:     new
+
+Values in angle brackets, such as <app-id>, could not be discovered. Replace each one before running the command that contains it.
+
+1. Prerequisites
+   Two different kinds of rights are needed, and different people often hold them:
+   - Microsoft Entra: rights to create an app registration and its service principal ...
+   - Azure RBAC: User Access Administrator or Role Based Access Control Administrator on each scope that receives a role assignment below ...
+   The Azure CLI login is used for setup only and is never written to the worker configuration. The worker authenticates only as the identity in its auth section.
+   Azure CLI: not found on PATH, so nothing could be discovered. Install it, sign in, and run this preview again to fill in the values below.
+
+2. Worker identity
+   Create a dedicated app registration and service principal for the worker. ...
+     az ad app create --display-name 'cenci-incident-worker' --query appId -o tsv
+     # fill placeholders before running
+     az ad sp create --id <app-id>
+     # fill placeholders before running
+     az ad sp show --id <app-id> --query id -o tsv
+   Replace <app-id> with the appId the first command prints, and <object-id> in the role commands with the id the last command prints.
+
+3. Service Bus receive role
+   Grant Azure Service Bus Data Receiver on exactly the queue or topic subscription the worker reads, never on the namespace or the topic:
+     # fill placeholders before running
+     az role assignment create --assignee-object-id <object-id> --assignee-principal-type ServicePrincipal --role 4f6d3b9b-027b-4f4c-9142-0e5a2a2247e0 --scope '/subscriptions/44444444-4444-4444-8444-444444444444/resourceGroups/app/providers/Microsoft.ServiceBus/namespaces/contoso/queues/monitor-alerts'
+
+4. Log Analytics read role
+   Grant Log Analytics Reader on each workspace the configured resources query. ...
+     # fill placeholders before running
+     az role assignment create --assignee-object-id <object-id> --assignee-principal-type ServicePrincipal --role 73c42c96-874c-492b-b04d-ab87d138a893 --scope '/subscriptions/44444444-4444-4444-8444-444444444444/resourceGroups/app/providers/Microsoft.OperationalInsights/workspaces/orders-logs'
+
+5. Certificate credential
+   The worker reads one unencrypted PEM file holding its certificate and private key, mode 0600. ...
+     umask 077
+     # fill placeholders before running
+     openssl req -x509 -newkey rsa:2048 -nodes -days 365 -subj '/CN=cenci-incident-worker' -keyout <private-key-file> -out <public-certificate-file>
+     # fill placeholders before running
+     cat <private-key-file> <public-certificate-file> > '/home/incident/.config/cenci/worker.pem'
+   Register only the public certificate on the app registration; --append keeps its other credentials:
+     # fill placeholders before running
+     az ad app credential reset --id <app-id> --cert @<public-certificate-file> --append
+
+6. Proposed auth section
+   Add this to the incident worker config. The worker authenticates only as this identity and never falls back to ambient Azure credentials:
+   {
+     "mode": "servicePrincipalCertificate",
+     "tenantId": "11111111-1111-4111-8111-111111111111",
+     "clientId": "<app-id>",
+     "certificatePath": "/home/incident/.config/cenci/worker.pem"
+   }
+   The config has no auth section yet.
+
+7. Local files that apply would touch
+   This preview touched none of them. A later apply would create or change:
+   - /home/incident/.config/cenci/incidents.json: add the auth section.
+   - /home/incident/.config/cenci/worker.pem: apply would create it (certificate and private key, mode 0600).
+   - /home/incident/.local/state/cenci/incidents/setup-journal.json: apply would create it to resume after an interruption.
+```
+
+Read every command before running anything. The placeholders stay unquoted on
+purpose, so an unfilled command fails at the shell instead of running with a wrong
+value. Setup rejects bad input with exit 2 and an unusable config with exit 1; see
+[Setup preview](#setup-preview) for what it discovers, its flags and its exit codes.
+
+### Step 3: Create the identity, certificate and role assignments
+
+Pick one route. Both end with the same three things: an application with a
+service principal and a registered certificate, the two role assignments from the
+preview, and an `auth` section in the config.
+
+#### Guided apply (recommended)
+
+Apply carries out the preview's plan after you confirm it. Use the same inputs plus
+`--apply` and an explicit `--identity`, as the `incident` account, so the PEM it
+generates belongs to the user the worker runs as:
+
+```bash
+cenci incident setup --config /home/incident/.config/cenci/incidents.json --apply \
+  --identity new --display-name cenci-incident-worker \
+  --tenant 11111111-1111-4111-8111-111111111111 \
+  --subscription 44444444-4444-4444-8444-444444444444 \
+  --certificate-path /home/incident/.config/cenci/worker.pem \
+  --service-bus-namespace-id /subscriptions/44444444-4444-4444-8444-444444444444/resourceGroups/app/providers/Microsoft.ServiceBus/namespaces/contoso \
+  --workspace-resource-id 00000000-0000-0000-0000-000000000000=/subscriptions/44444444-4444-4444-8444-444444444444/resourceGroups/app/providers/Microsoft.OperationalInsights/workspaces/orders-logs
+```
+
+It prints the full plan and then `Apply this plan? [y/N] `; only `y` or `Y`
+continues, and anything else exits 1 with nothing created. Without a terminal on
+stdin, add `--yes`, which skips the prompt and needs every input as a flag. Apply
+creates the missing pieces, writes only the config's `auth` section, and runs
+[`verify`](#verifying-the-identity), waiting up to 10 minutes for RBAC to propagate.
+Success ends with:
+
+```text
+cenci incident setup: apply complete (2 role assignment(s) created).
+```
+
+A failed step prints `apply stopped; run the same command again to resume.` with
+`completed:`, `failed:` and `remaining:` lines and exits 1. Run the same command
+again: the journal in the state directory records progress, so a rerun creates
+nothing twice, and a rerun right after a create still waits for propagation. A step
+that fails just after the application is created can be Microsoft Graph
+replication lag. See [Setup apply](#setup-apply) for the allowlist, journal and
+recovery rules.
+
+| Flag | Use |
+| --- | --- |
+| `--config` | The worker config; required. Apply rewrites only its `auth` section. |
+| `--tenant`, `--subscription` | The Entra tenant and the subscription to search; both default from your CLI login, but pass them for an unattended run. |
+| `--identity` | `new` here; `existing` reuses an application (see Step 7); `managed` is for [Azure hosts](#managed-identity). Required with `--apply`. |
+| `--client-id` | With `existing`, the application to use. With `new`, only with `--apply`, and it adopts only the application this setup's own journal recorded. |
+| `--principal-object-id` | `managed` only; see [the hosted identity section](#azure-hosted-worker-identity). |
+| `--display-name` | The label of a new application; apply appends a nonce to find it again after an interruption. |
+| `--certificate-path` | The absolute PEM path: generated there when absent (never overwritten), used read-only when present. |
+| `--service-bus-namespace-id`, `--workspace-resource-id` | Resource IDs `az` could not discover; the second is `<workspace-uuid>=<id>` and repeatable. |
+| `--apply`, `--yes` | Carry the plan out; `--yes` confirms without the prompt and is required without a terminal. |
+| `--replace-auth` | Replace an existing `auth` section that differs from the plan. |
+
+#### Manual `az` commands
+
+Without apply, an administrator runs the preview's commands. Run them under the
+same temporary `AZURE_CONFIG_DIR`, with real IDs and roles by definition ID, exactly
+as the preview generates them:
+
+```bash
+az account show --query tenantId -o tsv
+(
+  set -euo pipefail
+  umask 077
+  PEM=/home/incident/.config/cenci/worker.pem
+  # Refuse to overwrite a PEM, and stop before any Azure change if it cannot be installed.
+  [ -d "$(dirname "$PEM")" ] && [ ! -e "$PEM" ] || { echo "refusing: the config directory is missing or $PEM already exists" >&2; exit 1; }
+  QUEUE_ID=$(az servicebus queue show --resource-group app --namespace-name contoso --name monitor-alerts --query id -o tsv)
+  WORKSPACE_ID=$(az monitor log-analytics workspace show --resource-group app --workspace-name orders-logs --query id -o tsv)
+  WORK_DIR=$(mktemp -d)
+  trap 'shred -u "$WORK_DIR/worker.key" "$WORK_DIR/worker.pem" || true; rm -r -- "$WORK_DIR"' EXIT
+  openssl req -x509 -newkey rsa:2048 -sha256 -days 365 -nodes -subj '/CN=cenci-incident-worker' -keyout "$WORK_DIR/worker.key" -out "$WORK_DIR/worker.crt"
+  cat "$WORK_DIR/worker.crt" "$WORK_DIR/worker.key" > "$WORK_DIR/worker.pem"
+  [ -s "$WORK_DIR/worker.pem" ] || { echo "refusing: the generated PEM is empty" >&2; exit 1; }
+  install -m 600 "$WORK_DIR/worker.pem" "$PEM"
+  APP_ID=$(az ad app create --display-name cenci-incident-worker --query appId -o tsv)
+  az ad sp create --id "$APP_ID"
+  az ad app credential reset --id "$APP_ID" --cert @"$WORK_DIR/worker.crt" --append
+  PRINCIPAL_ID=$(az ad sp show --id "$APP_ID" --query id -o tsv)
+  az role assignment create --assignee-object-id "$PRINCIPAL_ID" --assignee-principal-type ServicePrincipal --role 4f6d3b9b-027b-4f4c-9142-0e5a2a2247e0 --scope "$QUEUE_ID"
+  az role assignment create --assignee-object-id "$PRINCIPAL_ID" --assignee-principal-type ServicePrincipal --role 73c42c96-874c-492b-b04d-ab87d138a893 --scope "$WORKSPACE_ID"
+  echo "APP_ID=$APP_ID"
+  echo "manual identity block complete"
+)
+```
+
+Any failing command stops the block, and the last two lines print only on success:
+copy the `APP_ID` for Step 4. The PEM is installed before the first Azure change, so
+once anything exists in Azure the key also exists at its destination, and the `trap`
+removes the temporary copy however the block ends (shredding is best effort). The
+block refuses to run when `worker.pem` already exists, so it never overwrites a key;
+move the old one aside deliberately first.
+
+**If the block stops**, the manual route has no setup journal, so [Undo a setup
+apply](#undo-a-setup-apply) does not apply to it. If it stopped before the
+application was created, remove the unregistered PEM and rerun. If it stopped after,
+find the application with `az ad app list --display-name cenci-incident-worker`,
+delete it with `az ad app delete --id <app-id>` and its role assignments
+(`az role assignment list` then `az role assignment delete --ids`), and then remove
+the PEM; otherwise a rerun creates a second application. The renewal and hosted
+blocks recover the same way. Only the public certificate goes to `az`; `--append`
+keeps the application's other credentials. Managed identity and workload identity
+federation are in [the hosted identity section](#azure-hosted-worker-identity).
+
+### Step 4: Configure the service account and environment
+
+Apply wrote the `auth` section already; on the manual route add it yourself, with
+the `APP_ID` from Step 3 as `clientId`. The config then holds only non-secret
+values: the certificate's path, never its contents.
+
+```json
+{
+  "auth": {
+    "mode": "servicePrincipalCertificate",
+    "tenantId": "11111111-1111-4111-8111-111111111111",
+    "clientId": "22222222-2222-4222-8222-222222222222",
+    "certificatePath": "/home/incident/.config/cenci/worker.pem"
+  }
+}
+```
+
+Create the environment file with mode 0600 **before** entering any secret. It holds
+only the model key; obtain the value from the credential owner rather than putting
+it in shell history. The Azure identity lives in the config's `auth` section and
+the PEM it names, never in this file, and `AZURE_*` entries here would be ignored
+and removed.
+
+```bash
+if [ -e /home/incident/.config/cenci/incidents.env ]; then echo "incidents.env exists: edit it, do not recreate it" >&2; else install -m 600 /dev/null /home/incident/.config/cenci/incidents.env; fi
+```
+
+An existing file keeps its contents and its mode: never truncate it.
+
+```text
+ANTHROPIC_API_KEY=your-model-key
+```
+
+Check that the worker's account owns all three files and that the modes are
+restrictive. The worker refuses a certificate that is not an owned regular file
+with mode `0600` or `0400`:
+
+```bash
+stat -c '%U:%G %a %n' /home/incident/.config/cenci/worker.pem /home/incident/.config/cenci/incidents.json /home/incident/.config/cenci/incidents.env
+```
+
+Expect `incident:incident 600` for each. The user service that loads
+`incidents.env` is in [Lifecycle and recovery](#lifecycle-and-recovery); enable it
+only after Step 6. For a foreground run, load the key through your approved secret
+manager into the worker's environment, then run `cenci incident run --config
+/home/incident/.config/cenci/incidents.json`. Do not place GitHub or Azure secrets
+in the image or the JSON configuration.
+
+### Step 5: Verify the identity and its limits
+
+Check the identity and its role assignments before starting the worker. Right
+after granting roles, wait for propagation:
+
+```bash
+cenci incident verify --config /home/incident/.config/cenci/incidents.json --propagation-wait 5m
+```
+
+Expect exit 0 and one line per probe (sanitized):
+
+```text
+identity: tenant 11111111-1111-4111-8111-111111111111, application 22222222-2222-4222-8222-222222222222, principal 33333333-3333-4333-8333-333333333333
+workspace 00000000-0000-0000-0000-000000000000 (/subscriptions/.../sites/orders): ok (1 rows)
+broker monitor-alerts: ok (0 messages visible)
+note: an empty peek proves receive authorization only; it does not show that alerts reach this entity
+```
+
+Each check proves something narrow:
+
+| Check | Proves | Does not prove |
+| --- | --- | --- |
+| Identity | The credential loads, tokens arrive for both scopes, and the claims match the configured tenant, application and principal. | That any role exists; claims are read without checking the signature. |
+| Workspace | The role lets the identity run the resource's configured query over the last 5 minutes. | That the query finds an incident's evidence. Result rows are never printed. |
+| Broker | The role lets the identity peek one message from the queue or subscription. | That alerts reach the entity (the bridge), that sending works, or that a lock, settle or renew works. |
+
+A failed probe prints one of six classes; [Verifying the identity](#verifying-the-identity)
+explains each, and Step 7's table says what to do. `verify` takes no worker lock and
+changes nothing, so it can run beside a live worker.
+
+Once verify passes, drop the setup login. The setup directory holds your tokens.
+This is the teardown every operator sign-in ends with: it signs out of that
+directory only, removes it when it exists, and clears the variables:
+
+```bash
+if [ -n "${SETUP_AZ_DIR:-}" ] && [ -d "$SETUP_AZ_DIR" ]; then AZURE_CONFIG_DIR="$SETUP_AZ_DIR" az logout; rm -r -- "$SETUP_AZ_DIR" && unset AZURE_CONFIG_DIR SETUP_AZ_DIR; else echo "nothing to tear down: SETUP_AZ_DIR is unset (run this in the terminal that signed in)" >&2; fi
+```
+
+### Step 6: Run the staging smoke test
+
+Use a staging-only queue, resource, workspace, and GitHub repository with a known
+small application defect, a passing existing test suite, committed guidance and
+a deployed runbook describing the symptom. Set deployment history to include the
+payload's fired time. Use `concurrency: 1`, `maxAttempts: 1` and an affordable
+`budgetUsd` for the first run. Model outcomes are nondeterministic: a `review`
+result is safe, but does not prove the draft-PR path works. Resolve setup failures
+and repeat with a **new** alert identity until the complete path is exercised.
+This live run, not the mocked suites, is the evidence for real Azure permissions,
+broker intake and telemetry.
+
+First check offline dependencies under the same read-only image, host UID and
+writable `/tmp` constraints. For the Go example:
+
+```bash
+(
+  set -euo pipefail
+  PREFLIGHT=/home/incident/incident-setup/preflight
+  # A leftover path would make the test below run a stale tree: refuse it.
+  [ ! -e "$PREFLIGHT" ] || { echo "refusing: $PREFLIGHT already exists" >&2; exit 1; }
+  git -C /home/incident/repos/orders worktree add --detach "$PREFLIGHT" origin/main
+  trap 'git -C /home/incident/repos/orders worktree remove --force "$PREFLIGHT"' EXIT
+  INCIDENT_UID=$(id -u)
+  INCIDENT_GID=$(id -g)
+  docker run --rm --network none --read-only --cap-drop=ALL --security-opt=no-new-privileges --pids-limit=128 --memory=2g --cpus=2 --user "$INCIDENT_UID:$INCIDENT_GID" --tmpfs /tmp:rw,nosuid,size=512m,mode=1777 --env HOME=/tmp --volume "$PREFLIGHT":/workspace:rw --workdir /workspace --entrypoint go incident-tools:reviewed test -buildvcs=false ./...
+  echo "preflight complete"
+)
+```
+
+Expect `preflight complete` and exit 0 without package downloads or permission
+failures. The block stops if `preflight` already exists, and removes the worktree
+when it ends. The preflight
+disables VCS stamping because it has no mounted Git metadata; real jobs supply
+isolated metadata and run the exact configured gates. Adapt the command for your
+stack, and ensure every gate works offline during the full smoke run.
+
+Run [`cenci incident verify`](#verifying-the-identity) with the staging config
+as in Step 5. An empty queue proves receive authorization only, so the smoke test
+below is what shows that alerts arrive. Resolve any failure class before starting
+the worker.
+
+#### Create the staging sender identity
+
+The worker's Receiver role cannot send, and the worker must not gain a send right.
+Alerts come from a separate staging sender: its own service principal with Azure
+Service Bus Data Sender (`69a216fc-b8fb-44d8-bc22-1f3c2cd27a39`) at the staging
+queue scope only; never grant it on a production queue or the namespace. Creating
+it is setup-operator work, not the worker's: an operator may run it from their own
+account instead of `incident`, with `SENDER_DIR` set to a 0700 directory that
+account owns, and then hand `sender.pem` to the sender terminal's account with mode
+0600. Sign in first, in a terminal with its own temporary `AZURE_CONFIG_DIR`, then
+create the identity (replace the resource names with the **staging** values):
+
+```bash
+OPERATOR_AZ_DIR=$(mktemp -d /tmp/cenci-operator-az.XXXXXX) && chmod 0700 "$OPERATOR_AZ_DIR" && export AZURE_CONFIG_DIR="$OPERATOR_AZ_DIR" && az login --tenant 11111111-1111-4111-8111-111111111111
+```
+
+```bash
+(
+  set -euo pipefail
+  umask 077
+  SENDER_DIR=/home/incident/incident-setup/sender
+  install -d -m 700 "$SENDER_DIR"
+  [ ! -e "$SENDER_DIR/sender.pem" ] || { echo "refusing: $SENDER_DIR/sender.pem already exists" >&2; exit 1; }
+  STAGING_QUEUE_ID=$(az servicebus queue show --resource-group app --namespace-name contoso --name monitor-alerts --query id -o tsv)
+  openssl req -x509 -newkey rsa:2048 -sha256 -days 30 -nodes -subj '/CN=cenci-staging-sender' -keyout "$SENDER_DIR/sender.key" -out "$SENDER_DIR/sender.crt"
+  cat "$SENDER_DIR/sender.crt" "$SENDER_DIR/sender.key" > "$SENDER_DIR/sender.pem"
+  [ -s "$SENDER_DIR/sender.pem" ] || { echo "refusing: the generated sender PEM is empty" >&2; exit 1; }
+  SENDER_APP_ID=$(az ad app create --display-name cenci-staging-sender --query appId -o tsv)
+  az ad sp create --id "$SENDER_APP_ID"
+  az ad app credential reset --id "$SENDER_APP_ID" --cert @"$SENDER_DIR/sender.crt" --append
+  SENDER_PRINCIPAL_ID=$(az ad sp show --id "$SENDER_APP_ID" --query id -o tsv)
+  az role assignment create --assignee-object-id "$SENDER_PRINCIPAL_ID" --assignee-principal-type ServicePrincipal --role 69a216fc-b8fb-44d8-bc22-1f3c2cd27a39 --scope "$STAGING_QUEUE_ID"
+  echo "SENDER_APP_ID=$SENDER_APP_ID SENDER_PRINCIPAL_ID=$SENDER_PRINCIPAL_ID"
+  echo "sender creation complete"
+)
+```
+
+Any failing command stops the block, and the last two lines print only on success:
+copy `SENDER_APP_ID` and `SENDER_PRINCIPAL_ID` for the sender sign-in and the cleanup
+below. The key files stay in `SENDER_DIR` for the test and are removed in the
+cleanup. If the block stops, recover as in Step 3: delete a created application and
+its assignment, and remove the key files. Then end the operator sign-in:
+
+```bash
+if [ -n "${OPERATOR_AZ_DIR:-}" ] && [ -d "$OPERATOR_AZ_DIR" ]; then AZURE_CONFIG_DIR="$OPERATOR_AZ_DIR" az logout; rm -r -- "$OPERATOR_AZ_DIR" && unset AZURE_CONFIG_DIR OPERATOR_AZ_DIR; else echo "nothing to tear down: OPERATOR_AZ_DIR is unset (run this in the terminal that signed in)" >&2; fi
+```
+
+#### Send alerts from a separate terminal
+
+Start the worker in a foreground terminal with its credentials loaded. In a
+**separate sender terminal**, sign in as the staging sender with its own
+`AZURE_CONFIG_DIR`, so neither login can leak into the other:
+
+```bash
+SENDER_AZ_DIR=$(mktemp -d /tmp/cenci-sender-az.XXXXXX) && chmod 0700 "$SENDER_AZ_DIR" && export AZURE_CONFIG_DIR="$SENDER_AZ_DIR" && az login --service-principal --username <sender-app-id> --certificate /home/incident/incident-setup/sender/sender.pem --tenant 11111111-1111-4111-8111-111111111111
+```
+
+Install Python `azure-identity` and `azure-servicebus` in a dedicated virtual
+environment, as in the [Azure Python queue quickstart](https://learn.microsoft.com/en-us/azure/service-bus-messaging/service-bus-python-how-to-use-queues).
+For example, create `/home/incident/incident-setup/sender-venv` with
+`python3 -m venv`, activate it, then run `python -m pip install azure-identity
+azure-servicebus` in that sender terminal.
+Save this small sender as `/home/incident/incident-setup/send-alert.py`:
+
+```python
+# Sender-only: this credential chain belongs to the staging sender, never the worker.
+import json
+import sys
+import uuid
+from pathlib import Path
+from azure.identity import DefaultAzureCredential
+from azure.servicebus import ServiceBusClient, ServiceBusMessage
+
+payload = json.loads(Path(sys.argv[1]).read_text())
+with DefaultAzureCredential() as credential:
+    with ServiceBusClient("contoso.servicebus.windows.net", credential) as client:
+        with client.get_queue_sender("monitor-alerts") as sender:
+            sender.send_messages(ServiceBusMessage(
+                json.dumps(payload), content_type="application/json",
+                message_id=str(uuid.uuid4())))
+```
+
+The sender's `DefaultAzureCredential` finds the staging sender's CLI login in the
+sender terminal. It is the sender's identity, not the worker's: the worker never
+uses it or any credential chain. Replace the namespace and queue in the sender
+with the **staging** values.
+Save `/home/incident/incident-setup/fired.json` using the mapped staging resource,
+a unique alert identity for this smoke run, and a fired time covered by the
+deployment interval and staging telemetry:
+
+```json
+{
+  "schemaId": "azureMonitorCommonAlertSchema",
+  "data": {
+    "essentials": {
+      "alertId": "cenci-staging-smoke-2026-10-10-001",
+      "monitorCondition": "Fired",
+      "alertTargetIDs": ["/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/app/providers/Microsoft.Web/sites/orders"],
+      "firedDateTime": "2026-10-10T09:00:00Z",
+      "description": "Staging fixture: describe the known application defect and observable symptom."
+    }
+  }
+}
+```
+
+```bash
+python /home/incident/incident-setup/send-alert.py /home/incident/incident-setup/fired.json
+cenci incident status --state-dir /home/incident/.local/state/cenci/incidents
+```
+
+#### Acceptance checks
+
+Use repeated `status` calls and the following acceptance checks. Retain the
+incident key, reports, and PR URL as the staging record; do not delete the ledger
+between steps.
+
+| Step | Action | Expected result |
+| --- | --- | --- |
+| Intake | Send the fired payload above. | One ledger row, the mapped deployed SHA, then `queued`/`running` (these may be brief); Service Bus active message count falls after durable intake. |
+| Coding and publication | Wait for completion; inspect `artifacts/<key>/investigation-input.json`, `investigation-result.json`, and `publication.json`, plus the draft PR. | Authenticated Claude calls succeed through the proxy; baseline passes, added regression fails before the fix and passes after it; every configured gate passes offline; `draft` has one PR URL with evidence and verification. A `review` report explains any stopped stage. |
+| Duplicate delivery | Run the same sender command again; it creates a new broker message ID with the same `alertId`. | Same ledger key, attempts/reserved cost and PR; no second coding job or PR. |
+| Restart | Stop the foreground worker with Ctrl-C, restart with the same config/state, then resend `fired.json`. | Completed incident stays terminal with the same PR and cost; no duplicate job. For interrupted-job recovery, use a separate identity and stop during a running job: partial edits may correctly produce `review`. |
+| Resolution | Copy the payload to `resolved.json`, change only `monitorCondition` to `Resolved`, then send it with the same script. | Row becomes `resolved`; queued/active execution stops, existing PR stays available. Sending the original fired payload again cannot restart it. |
+| Out-of-order resolution | Use a new `alertId`; send its resolved payload before its fired payload. | One `resolved` tombstone with zero attempts and no PR. |
+| Bridge delivery | Trigger and resolve the real staging Azure Monitor alert through the configured action group/Logic App. | The bridge preserves the schema/resource/identity; the same intake and resolution behavior occurs. Direct queue sends alone do not verify the bridge. |
+
+If intake never appears, inspect the bridge run, Service Bus DLQ, resource
+allowlist, and the worker's Azure permissions. If a row retries or ends in
+`review`, inspect its `report` first, then image tools/caches, proxy logs, Git
+authentication/author, deployment SHA and runbook availability. Confirm real
+telemetry was returned rather than accepting an empty-query result as proof of
+the fixture. Only after these checks should you enable the user service and map
+production resources. This procedure is an operator acceptance test; the local
+test suite below does not execute it or provision its infrastructure.
+
+#### Clean up the staging sender
+
+When the test is done, remove the staging sender and everything it left behind. In
+the sender terminal, sign out, then remove the key material, the virtual
+environment and the sign-in directory. `shred` is best effort, so the last command
+must print nothing, which shows no key file remains. If an operator created the
+sender from their own account, they remove their own `sender.key` and `sender.pem`
+copies in that directory too:
+
+```bash
+if [ -n "${SENDER_AZ_DIR:-}" ] && [ -d "$SENDER_AZ_DIR" ]; then AZURE_CONFIG_DIR="$SENDER_AZ_DIR" az logout; rm -r -- "$SENDER_AZ_DIR" && unset AZURE_CONFIG_DIR SENDER_AZ_DIR; else echo "nothing to tear down: SENDER_AZ_DIR is unset (run this in the terminal that signed in)" >&2; fi
+SENDER_DIR=/home/incident/incident-setup/sender
+shred -u -- "$SENDER_DIR/sender.key" "$SENDER_DIR/sender.pem" 2>/dev/null; rm -r -- "$SENDER_DIR" /home/incident/incident-setup/sender-venv
+find "$SENDER_DIR" -name 'sender.*' 2>/dev/null
+```
+
+As the setup operator, sign in as above (the `OPERATOR_AZ_DIR` chain), remove the
+sender's Data Sender assignment and then its application, and end with the
+`OPERATOR_AZ_DIR` teardown. The role filter keeps the worker's Receiver assignment
+on the same queue safe, and deleting the application alone would leave an orphaned
+assignment:
+
+```bash
+(
+  set -euo pipefail
+  SENDER_PRINCIPAL_ID=<sender-principal-id>
+  SENDER_APP_ID=<sender-app-id>
+  STAGING_QUEUE_ID=$(az servicebus queue show --resource-group app --namespace-name contoso --name monitor-alerts --query id -o tsv)
+  ASSIGNMENT_IDS=$(az role assignment list --assignee-object-id "$SENDER_PRINCIPAL_ID" --scope "$STAGING_QUEUE_ID" --role 69a216fc-b8fb-44d8-bc22-1f3c2cd27a39 --query '[].id' -o tsv)
+  [ -n "$ASSIGNMENT_IDS" ] || { echo "refusing: no Data Sender assignment found for the sender" >&2; exit 1; }
+  echo "$ASSIGNMENT_IDS"
+  read -r -p "Delete exactly the assignment IDs listed above, then the application? [y/N] " answer
+  [ "$answer" = y ] || { echo "refusing: not confirmed" >&2; exit 1; }
+  az role assignment delete --ids $ASSIGNMENT_IDS
+  az ad app delete --id "$SENDER_APP_ID"
+  echo "sender removal complete"
+)
+```
+
+The sender's `send-alert.py` and `fired.json` hold no secret and can stay.
+
+### Step 7: Migrate, troubleshoot, renew, revoke and undo
+
+#### Migrate an existing install
+
+Earlier versions authenticated through an ambient Azure credential chain, typically
+a client secret in `incidents.env` (`AZURE_TENANT_ID`, `AZURE_CLIENT_ID`,
+`AZURE_CLIENT_SECRET`), a managed identity, or a developer's CLI session. Those
+configs have no `auth` section and now stop starting with the message under
+[Worker identity](#worker-identity). There is no client-secret mode, so a
+secret-based install moves to a certificate:
+
+1. Register a certificate for the existing application. Migration skips Step 3's
+   application, service principal and role-assignment commands, because the
+   application and its roles already exist. Instead run the snippet under
+   [Renew a certificate](#renew-a-certificate), signed in as the setup operator as in
+   Step 1, filling its two assignments after `set`: `APP_ID` is the application's
+   `clientId` and `NEW_PEM` is `/home/incident/.config/cenci/worker.pem`, since no PEM
+   exists yet. Then run the `SETUP_AZ_DIR` teardown at the end of Step 5.
+2. Add the `auth` section to the config, with the existing application's
+   `clientId` and the tenant's `tenantId`. Alternatively run `cenci incident
+   setup --apply --identity existing --client-id <app-id>` with
+   `--certificate-path` pointing at that PEM: it adds any missing role
+   assignments, writes `auth` and verifies, and needs `--replace-auth` if an
+   `auth` section already differs.
+3. Remove the `AZURE_*` lines from `incidents.env`; they would be ignored and
+   removed anyway.
+4. Start the worker and run `cenci incident verify`; it must exit 0 with `ok` lines
+   for the identity, workspace and broker. Only then delete the old client secret
+   from the app registration; if verify fails, keep the secret.
+
+Installs on a managed identity only need `auth` with `mode` `managedIdentity`
+and, for a user-assigned identity, its `clientId`. Add the identity's
+`principalObjectId` to pin it. An `auth` section written by an earlier
+`cenci incident setup --apply` has no pin; rerun apply with `--replace-auth` to add it.
+
+#### Troubleshoot
+
+| Symptom | Likely cause | What to do |
+| --- | --- | --- |
+| `run` exits 1: `no explicit worker identity is configured` | The config has no `auth` section. | Finish Step 3 and 4, or follow the migration above. |
+| `certificate <path> has mode 0644` | The PEM is not mode `0600` or `0400`, or not owned by the worker. | Fix the mode and owner as in Step 4. |
+| `certificate expired`, or the 30-day expiry warning | The certificate is at or near its `NotAfter`. | Renew it (below). |
+| `worker identity preflight: ...` (five classes) | A token request failed, or its tenant, application or principal claim differs from `auth`. | [Startup checks](#startup-checks) names each class. |
+| `verify`: `authorization-denied` | The role assignment is missing, wrong or not yet effective. | Check the scope and role; after a grant, rerun with `--propagation-wait 5m`. |
+| `verify`: `rbac-propagation-timeout` | The denial outlasted the whole wait. | Confirm the assignment, then rerun with a longer wait, up to 15 minutes. |
+| `verify`: `identity-mismatch` | The token's tenant, application or principal differs from `auth`. | Correct `tenantId`, `clientId` or `principalObjectId`, or the identity that holds the certificate. |
+| `verify`: `authentication-failed`, `resource-not-found`, `unreachable` | No token, a missing workspace or queue, or no route to the service. | Check the credential and names; [Verifying the identity](#verifying-the-identity) explains each. |
+| `setup` exits 1 or 2 | A runtime failure or a usage error, before or after any change. | Read the message, which names the flag; [Setup apply](#setup-apply) lists the exit codes. A failed apply resumes by rerunning it. |
+| An incident is stuck or unwanted | A queued or running job you no longer want. | Cancel it, as below; reports, branches and PRs are kept. |
+
+```bash
+cenci incident cancel --state-dir /home/incident/.local/state/cenci/incidents --id INCIDENT_KEY
+```
+
+#### Renew a certificate
+
+Renewal is a manual procedure, and setup has no rotation flag. Start well before
+the 30-day warning:
+
+1. Sign in as the setup operator as in Step 1, then create the new certificate at a
+   new path and append its public certificate to the application, which keeps the
+   old one. The snippet does not touch the application's identity, the role
+   assignments or the live PEM, and uses the same safety rules as Step 3: any
+   failing command stops it, it refuses to overwrite an existing PEM, checks the
+   PEM is non-empty before installing, and its `trap` removes the temporary key
+   however it ends. Fill the two assignments after `set`: an unfilled `<placeholder>`
+   stops the block before anything is written. If it stops, recover as after Step 3's
+   block. It prints `certificate append complete` on success:
+
+```bash
+(
+  set -euo pipefail
+  APP_ID=<app-id>
+  NEW_PEM=<new-pem-path>
+  umask 077
+  [ -d "$(dirname "$NEW_PEM")" ] && [ ! -e "$NEW_PEM" ] || { echo "refusing: the directory is missing or $NEW_PEM already exists" >&2; exit 1; }
+  WORK_DIR=$(mktemp -d)
+  trap 'shred -u "$WORK_DIR/new.key" "$WORK_DIR/new.pem" || true; rm -r -- "$WORK_DIR"' EXIT
+  openssl req -x509 -newkey rsa:2048 -sha256 -days 365 -nodes -subj '/CN=cenci-incident-worker' -keyout "$WORK_DIR/new.key" -out "$WORK_DIR/new.crt"
+  cat "$WORK_DIR/new.crt" "$WORK_DIR/new.key" > "$WORK_DIR/new.pem"
+  [ -s "$WORK_DIR/new.pem" ] || { echo "refusing: the generated PEM is empty" >&2; exit 1; }
+  install -m 600 "$WORK_DIR/new.pem" "$NEW_PEM"
+  az ad app credential reset --id "$APP_ID" --cert @"$WORK_DIR/new.crt" --append
+  echo "certificate append complete"
+)
+```
+
+2. Run the `SETUP_AZ_DIR` teardown at the end of Step 5. Set `certificatePath` in the
+   config to the new file, restart the worker and run `cenci incident verify`.
+3. After review, remove the old credential by its key ID. Sign in again, then list the
+   credentials and check which `keyId` belongs to the old certificate:
+
+```bash
+az ad app credential list --id <app-id>
+```
+
+   Only then delete that one key:
+
+```bash
+az ad app credential delete --id <app-id> --key-id <old-key-id>
+```
+
+Then run the `SETUP_AZ_DIR` teardown again and securely remove the old PEM file
+with `shred -u <old-pem-path>`.
+
+#### Revoke the worker's access
+
+Stop the worker first (SIGTERM, or `systemctl --user stop cenci-incident`), then cut
+the access: delete its credential with `az ad app credential delete --id <app-id>
+--key-id <key-id>`, and remove the two role assignments (see the undo below). Do not
+expect the cut to be instant. Role-assignment removal takes minutes to propagate, and
+an established Service Bus link stays authorized until its token expires, as do
+tokens that were already issued. Removing the role assignments is what ends access to
+the queue and workspace; deleting the credential only stops new tokens. For a
+managed identity, remove the identity from the VM as well (`az vm identity remove`),
+since it has no credential to delete.
+
+Confirm the cut in two parts. `cenci incident verify --config
+/home/incident/.config/cenci/incidents.json` proves only that the credential is
+dead: once it is deleted and its tokens have expired, verify reports
+`authentication-failed` and runs no resource probe. Prove the role removal with `az
+role assignment list --assignee-object-id <principalId> --all --subscription
+<subscription-id> -o json` (it covers one subscription only), which must return `[]`;
+anything else may still be live, so recheck. Cancel queued incidents you do not want.
+
+#### Undo a setup apply
+
+Setup never deletes anything and there is no cleanup command. Undo is a manual
+procedure derived from the setup journal, and every step starts with a review:
+nothing below is safe to run on trust. Stop the worker, sign in as the setup
+operator as in Step 1, and read the journal:
+
+```bash
+jq '{identity, displayName, clientId, principalId, steps: [.steps[] | {name, status}]}' /home/incident/.local/state/cenci/incidents/setup-journal.json
+```
+
+It names the identity mode, the application's `clientId`, the principal's
+`principalId` and one `role assignment: <role> at <scope>` step per assignment.
+Treat the statuses with care. Each run rewrites them, and `unchanged` means the
+assignment already existed at the latest run, so it may predate setup and belong
+to something else. The journal alone cannot show who created an assignment.
+
+For each such step, review the exact assignment: read it with the principal, scope
+and role from the step, and confirm it is the one you mean to remove.
+
+```bash
+az role assignment list --assignee-object-id <principalId> --scope <scope> --role <role> -o json
+```
+
+Only after that review, delete it by its exact ID, one assignment per command:
+
+```bash
+az role assignment delete --ids <assignment-id>
+```
+
+Then read the same assignment again; the answer must be an empty list, `[]`:
+
+```bash
+az role assignment list --assignee-object-id <principalId> --scope <scope> --role <role> -o json
+```
+
+Delete the identity only when the journal's `identity` is `new`. An `existing` or
+`managed` identity was not created by setup, so leave it. First read the
+application's display name:
+
+```bash
+az ad app show --id <clientId> --query displayName -o tsv
+```
+
+Compare the printed name with the journal's `displayName`. Only when they are equal
+and you have reviewed the application, run the second command:
+
+```bash
+az ad app delete --id <clientId>
+```
+
+Deleting an application also removes its service principal and credentials, and it
+is a soft delete that Entra keeps for 30 days. These commands are the whole undo:
+no command deletes the incident ledger or unrelated Azure resources, and the
+certificate PEM, the config and the state directory stay for you to remove by hand.
+Run the `SETUP_AZ_DIR` teardown at the end of Step 5.
 
 ## Provisioning and permissions
 
@@ -65,8 +816,8 @@ The bridge identity needs **Azure Service Bus Data Sender** on the queue; the
 worker needs **Azure Service Bus Data Receiver** on that queue and **Log Analytics
 Reader** on each configured workspace (or narrower table query permissions).
 An Azure administrator assigns these roles (the commands are in
-[Worker identity](#worker-identity)); the worker does not create resources
-or role assignments. See the [Service Bus role scopes](https://learn.microsoft.com/en-us/azure/service-bus-messaging/service-bus-managed-service-identity)
+[tutorial Step 3](#step-3-create-the-identity-certificate-and-role-assignments));
+the worker does not create resources or role assignments. See the [Service Bus role scopes](https://learn.microsoft.com/en-us/azure/service-bus-messaging/service-bus-managed-service-identity)
 and [workspace query permissions](https://learn.microsoft.com/en-us/azure/azure-monitor/logs/manage-access).
 Configure the Logic App's Service Bus send action to use the incoming request
 body as the message body, without stringifying/wrapping it in another JSON object.
@@ -102,7 +853,7 @@ roots are read-only, capabilities are dropped, privilege escalation is disabled,
 and CPU, memory, and process counts are bounded. Local container administration
 and the operator's image/proxy are trusted boundaries.
 
-### 1. Prepare the account and repository
+### Prepare the account and repository
 
 Install `cenci`, Docker Engine, Git, and `gh` on the worker host. The account must
 be able to run Docker and reach Microsoft Entra ID (`login.microsoftonline.com`; managed identity uses
@@ -137,7 +888,7 @@ exactly as `https://github.com/OWNER/REPO[.git]` or
 the origin check. Populate deployment timestamps from your release records,
 including old releases needed for delayed alerts.
 
-### 2. Build and review the job image
+### Build and review the job image
 
 Save this example as `/home/incident/incident-setup/Dockerfile.jobs`. Adapt the
 Go version to the repository and add every tool its configured gates need.
@@ -172,7 +923,7 @@ mounts the image root read-only with only `/tmp` and the worktree writable. Tool
 installed solely in `/root`, dependencies needing downloads, and caches under a
 read-only image path will fail. The image must have no embedded credentials.
 
-### 3. Give the proxy an outbound route
+### Give the proxy an outbound route
 
 An [internal Docker network](https://docs.docker.com/reference/cli/docker/network/create/#network-internal-mode---internal)
 has no external route. Attach **only the proxy** to both the internal job network
@@ -229,8 +980,8 @@ Expect `true` from network inspection, an HTTP response from Anthropic (a 4xx
 without credentials is acceptable), proxy `403` denials for both forbidden URLs,
 and a failed direct connection. Investigate any other result before proceeding.
 Inspect proxy denials with `docker exec model-proxy tail -n 50 /tmp/access.log`.
-These probes verify routing/ACLs; the staging job below verifies authenticated
-Claude execution. This proxy enforces destinations, not a spending cap: configure
+These probes verify routing/ACLs; the [staging smoke test](#step-6-run-the-staging-smoke-test)
+verifies authenticated Claude execution. This proxy enforces destinations, not a spending cap: configure
 provider limits or a billing-aware proxy separately if a hard ceiling is needed.
 
 Podman is also supported: provision equivalent internal/outbound networks and
@@ -349,27 +1100,6 @@ cenci incident: no explicit worker identity is configured: add an auth section (
 
 `cenci incident run` prints this literally, with `<path>` unreplaced; it names the
 read-only [setup preview](#setup-preview).
-
-### Migrating an existing install
-
-Earlier versions authenticated with `DefaultAzureCredential`, typically a client
-secret in `incidents.env` (`AZURE_TENANT_ID`, `AZURE_CLIENT_ID`,
-`AZURE_CLIENT_SECRET`), a managed identity, or a local `az login`. Those configs
-have no `auth` section and now stop starting with the message above. There is no
-client-secret mode, so a secret-based install moves to a certificate:
-
-1. Register a certificate for the existing application (below) and install the
-   PEM for the worker.
-2. Add the `auth` section to the config, with the existing application's
-   `clientId` and the tenant's `tenantId`.
-3. Remove the `AZURE_*` lines from `incidents.env`; they would be ignored and
-   removed anyway.
-4. Start the worker, then delete the old client secret from the app registration.
-
-Installs on a managed identity only need `auth` with `mode` `managedIdentity`
-and, for a user-assigned identity, its `clientId`. Add the identity's
-`principalObjectId` to pin it. An `auth` section written by an earlier
-`cenci incident setup --apply` has no pin; rerun apply with `--replace-auth` to add it.
 
 ### Setup preview
 
@@ -631,57 +1361,6 @@ worker.
 | 1 | A runtime failure: an unresolved value, a failed check or `az` step, a declined prompt, a journal or config refusal, or a probe that did not pass. |
 | 2 | A usage error, before any `az` call: `--yes` or `--replace-auth` without `--apply`, a missing `--identity`, with `--yes` any other missing required input (`--certificate-path` included, also for `new`), or a non-terminal stdin without `--yes`; the preview's flag conflicts also stay usage errors. |
 
-### Provisioning the identity
-
-An Azure administrator runs these commands, never the worker. Replace the
-placeholder names and IDs, and sign in with an account that may create app
-registrations and role assignments.
-
-```bash
-az account show --query tenantId -o tsv
-QUEUE_ID=$(az servicebus queue show --resource-group app --namespace-name contoso --name monitor-alerts --query id -o tsv) || exit 1
-WORKSPACE_ID=$(az monitor log-analytics workspace show --resource-group app --workspace-name orders-logs --query id -o tsv) || exit 1
-```
-
-Service principal with a certificate:
-
-```bash
-umask 077
-openssl req -x509 -newkey rsa:2048 -sha256 -days 365 -nodes -subj '/CN=cenci-incident-worker' -keyout worker.key -out worker.crt
-cat worker.crt worker.key > worker.pem
-APP_ID=$(az ad app create --display-name cenci-incident-worker --query appId -o tsv) || exit 1
-az ad sp create --id "$APP_ID"
-az ad app credential reset --id "$APP_ID" --cert @worker.crt --append
-install -m 600 -o incident -g incident worker.pem /home/incident/.config/cenci/worker.pem
-shred -u worker.key worker.pem
-az role assignment create --assignee "$APP_ID" --role "Azure Service Bus Data Receiver" --scope "$QUEUE_ID"
-az role assignment create --assignee "$APP_ID" --role "Log Analytics Reader" --scope "$WORKSPACE_ID"
-```
-
-User-assigned managed identity. For a system-assigned identity, run
-`az vm identity assign --resource-group app --name worker-vm` instead and use the
-`principalId` it prints in the role assignments:
-
-```bash
-az identity create --resource-group app --name cenci-incident-worker
-az vm identity assign --resource-group app --name worker-vm --identities cenci-incident-worker
-PRINCIPAL_ID=$(az identity show --resource-group app --name cenci-incident-worker --query principalId -o tsv) || exit 1
-az role assignment create --assignee-object-id "$PRINCIPAL_ID" --assignee-principal-type ServicePrincipal --role "Azure Service Bus Data Receiver" --scope "$QUEUE_ID"
-az role assignment create --assignee-object-id "$PRINCIPAL_ID" --assignee-principal-type ServicePrincipal --role "Log Analytics Reader" --scope "$WORKSPACE_ID"
-```
-
-For the user-assigned identity, set `auth.clientId` to its `clientId`
-(`az identity show ... --query clientId -o tsv`); omit it for a system-assigned
-identity. Set `auth.principalObjectId` to the `principalId` used in the role
-assignments to pin either kind. Managed identity works only on supported Azure hosts; elsewhere
-the preflight fails with the `managed identity works only on supported Azure
-hosts` hint.
-
-Workload identity: create the app registration and role assignments as for the
-certificate, then add a federated credential for your token issuer
-(`az ad app federated-credential create --id "$APP_ID" --parameters credential.json`)
-and set `auth.tokenFilePath` to the projected token file on the worker host.
-
 ### Verifying the identity
 
 After provisioning, and before starting the worker, check the identity and its
@@ -762,6 +1441,125 @@ as a probe line); 2 on a usage error. `verify` takes no worker lock and never
 opens the state directory, so it can run beside a live worker, and it writes no
 file, invokes no `az` or other subprocess, and never changes the identity.
 
+## Azure-hosted worker identity
+
+This section is for a worker that runs on an Azure host, or on a platform that
+projects a federated token. It is separate from the
+[local-host tutorial](#tutorial-a-worker-identity-on-a-local-host), which uses a
+service principal certificate. Both options use the same `auth` section and the
+same [startup checks](#startup-checks); only how the credential is obtained differs.
+
+### Managed identity
+
+A managed identity has no secret to store or rotate, but it exists only where the
+platform provides it. The worker reads the host's own identity endpoint, so
+managed identity works only on supported Azure hosts, such as an Azure VM that has
+the identity assigned. It does not work on an arbitrary local Docker host: a
+workstation, an on-premises server or any machine outside Azure has no endpoint,
+and the preflight fails with the `managed identity works only on supported Azure
+hosts` hint. Agent containers never reach the endpoint. Use the certificate
+tutorial anywhere else.
+
+An Azure administrator creates the identity and assigns the roles, using the
+**staging** queue and workspace until the smoke test has passed. The block defines
+the scopes it needs and stops at the first failing command, so a scope can never be
+empty. It runs in a subshell, so it prints the `PRINCIPAL_ID` for you to copy. For a
+system-assigned identity, run `az vm identity assign --resource-group app --name
+worker-vm` instead and use the `principalId` it prints:
+
+```bash
+(
+  set -euo pipefail
+  QUEUE_ID=$(az servicebus queue show --resource-group app --namespace-name contoso --name monitor-alerts --query id -o tsv)
+  WORKSPACE_ID=$(az monitor log-analytics workspace show --resource-group app --workspace-name orders-logs --query id -o tsv)
+  [ -n "$QUEUE_ID" ] && [ -n "$WORKSPACE_ID" ] || { echo "refusing: a scope is empty" >&2; exit 1; }
+  az identity create --resource-group app --name cenci-incident-worker
+  az vm identity assign --resource-group app --name worker-vm --identities cenci-incident-worker
+  PRINCIPAL_ID=$(az identity show --resource-group app --name cenci-incident-worker --query principalId -o tsv)
+  [ -n "$PRINCIPAL_ID" ] || { echo "refusing: no principalId returned" >&2; exit 1; }
+  az role assignment create --assignee-object-id "$PRINCIPAL_ID" --assignee-principal-type ServicePrincipal --role 4f6d3b9b-027b-4f4c-9142-0e5a2a2247e0 --scope "$QUEUE_ID"
+  az role assignment create --assignee-object-id "$PRINCIPAL_ID" --assignee-principal-type ServicePrincipal --role 73c42c96-874c-492b-b04d-ab87d138a893 --scope "$WORKSPACE_ID"
+  echo "PRINCIPAL_ID=$PRINCIPAL_ID"
+  echo "managed identity block complete"
+)
+```
+
+If it stops, recover as after Step 3's block: delete what it created by hand.
+
+Or let setup do the role assignments and write the config. Run it on the worker's
+Azure host, because its closing `verify` authenticates through the host's identity
+endpoint. Set `PRINCIPAL_ID` to the printed value first; the `:?` form stops the
+command when it is unset. Preview first, then add `--apply` (and `--yes` without a
+terminal):
+
+```bash
+cenci incident setup --config /home/incident/.config/cenci/incidents.json \
+  --identity managed --principal-object-id "${PRINCIPAL_ID:?set PRINCIPAL_ID to the printed principalId}" \
+  --tenant 11111111-1111-4111-8111-111111111111 \
+  --subscription 44444444-4444-4444-8444-444444444444
+```
+
+For a user-assigned identity add `--client-id` (`az identity show ... --query
+clientId -o tsv`); omit it for a system-assigned one. Setup writes the
+`principalObjectId` pin, so the token's `oid` claim must equal it. By hand, the
+section is:
+
+```json
+"auth": {
+  "mode": "managedIdentity",
+  "tenantId": "11111111-1111-4111-8111-111111111111",
+  "clientId": "22222222-2222-4222-8222-222222222222",
+  "principalObjectId": "33333333-3333-4333-8333-333333333333"
+}
+```
+
+### Workload identity federation
+
+Use workload identity federation when the host projects a federated token file,
+for example a Kubernetes service-account token. Setup does not automate it,
+because the federated credential depends on your token issuer. Create the
+application, its service principal and the role assignments on the **staging**
+resources, then add a federated credential for your issuer. There is no certificate
+to create, so Step 3's manual block does not apply. The block defines every value it
+uses, stops at the first failing command and prints the `APP_ID` last, for you to copy.
+Save the `credential.json` shown after it in the working directory first; the block
+stops when the file is missing or empty:
+
+```bash
+(
+  set -euo pipefail
+  QUEUE_ID=$(az servicebus queue show --resource-group app --namespace-name contoso --name monitor-alerts --query id -o tsv)
+  WORKSPACE_ID=$(az monitor log-analytics workspace show --resource-group app --workspace-name orders-logs --query id -o tsv)
+  [ -n "$QUEUE_ID" ] && [ -n "$WORKSPACE_ID" ] && [ -s credential.json ] || { echo "refusing: an empty scope or a missing credential.json" >&2; exit 1; }
+  APP_ID=$(az ad app create --display-name cenci-incident-worker --query appId -o tsv)
+  [ -n "$APP_ID" ] || { echo "refusing: no appId returned" >&2; exit 1; }
+  az ad sp create --id "$APP_ID"
+  PRINCIPAL_ID=$(az ad sp show --id "$APP_ID" --query id -o tsv)
+  [ -n "$PRINCIPAL_ID" ] || { echo "refusing: no principalId returned" >&2; exit 1; }
+  az role assignment create --assignee-object-id "$PRINCIPAL_ID" --assignee-principal-type ServicePrincipal --role 4f6d3b9b-027b-4f4c-9142-0e5a2a2247e0 --scope "$QUEUE_ID"
+  az role assignment create --assignee-object-id "$PRINCIPAL_ID" --assignee-principal-type ServicePrincipal --role 73c42c96-874c-492b-b04d-ab87d138a893 --scope "$WORKSPACE_ID"
+  az ad app federated-credential create --id "$APP_ID" --parameters credential.json
+  echo "APP_ID=$APP_ID"
+  echo "workload identity block complete"
+)
+```
+
+If it stops, recover as after Step 3's block.
+
+```json
+{
+  "name": "cenci-incident-worker",
+  "issuer": "https://oidc.example.com",
+  "subject": "system:serviceaccount:incident:worker",
+  "audiences": ["api://AzureADTokenExchange"]
+}
+```
+
+Then set `auth.mode` to `workloadIdentity` with `tenantId`, `clientId` and
+`tokenFilePath` (the absolute path of the projected token on the worker host; see
+[Worker identity](#worker-identity) for the checks on it), and run
+[`cenci incident verify`](#verifying-the-identity).
+
 ## Configuration
 
 Paths below are illustrative; use canonical absolute checkout paths. Keep this
@@ -835,23 +1633,8 @@ config, deployed runbooks, and instructions to read relevant nested AGENTS.md.
 If a repository workflow needs unavailable services or interactive approval, the
 agent must return `review` rather than claim that stage ran.
 
-Save the adapted JSON as `/home/incident/.config/cenci/incidents.json` (mode
-0600). Create `/home/incident/.config/cenci/incidents.env` with mode 0600 **before**
-entering secrets. It holds only the model key; obtain the value from the
-credential owner rather than putting it in shell history. The Azure identity
-lives in the config's `auth` section (and, for a certificate, the 0600 PEM it
-names), never in this file. `AZURE_*` entries here would be ignored and removed.
-
-```text
-ANTHROPIC_API_KEY=your-model-key
-```
-
-The example service below loads this file. For a foreground staging run, load
-this variable through your approved secret manager into the worker's
-environment, then run `cenci incident run --config
-/home/incident/.config/cenci/incidents.json`. Do not place GitHub or Azure secrets
-in the image or the JSON configuration; the configuration holds only the
-certificate's path.
+[Tutorial Step 4](#step-4-configure-the-service-account-and-environment) saves
+this JSON as the worker's config and creates the model-key environment file.
 
 ## Lifecycle and recovery
 
@@ -961,116 +1744,6 @@ requires the operator to configure user lingering. Podman jobs use `keep-id` so
 the worker's UID can edit its worktree; ensure host SELinux/bind-mount policy and
 the reviewed image permit that access.
 
-## Staging smoke test
-
-Use a staging-only queue, resource, workspace, and GitHub repository with a known
-small application defect, a passing existing test suite, committed guidance and
-a deployed runbook describing the symptom. Set deployment history to include the
-payload's fired time. Use `concurrency: 1`, `maxAttempts: 1` and an affordable
-`budgetUsd` for the first run. Model outcomes are nondeterministic: a `review`
-result is safe, but does not prove the draft-PR path works. Resolve setup failures
-and repeat with a **new** alert identity until the complete path is exercised.
-
-First check offline dependencies under the same read-only image, host UID and
-writable `/tmp` constraints. For the Go example:
-
-```bash
-git -C /home/incident/repos/orders worktree add --detach /home/incident/incident-setup/preflight origin/main
-INCIDENT_UID=$(id -u) || exit 1
-INCIDENT_GID=$(id -g) || exit 1
-docker run --rm --network none --read-only --cap-drop=ALL --security-opt=no-new-privileges --pids-limit=128 --memory=2g --cpus=2 --user "$INCIDENT_UID:$INCIDENT_GID" --tmpfs /tmp:rw,nosuid,size=512m,mode=1777 --env HOME=/tmp --volume /home/incident/incident-setup/preflight:/workspace:rw --workdir /workspace --entrypoint go incident-tools:reviewed test -buildvcs=false ./...
-```
-
-Expect exit 0 without package downloads or permission failures. The preflight
-disables VCS stamping because it has no mounted Git metadata; real jobs supply
-isolated metadata and run the exact configured gates. Adapt the command for your
-stack, and ensure every gate works offline during the full smoke run.
-
-Run [`cenci incident verify`](#verifying-the-identity) with the staging config
-first, adding `--propagation-wait 5m` right after granting roles. Expect exit 0,
-the identity line to name the worker's application, and an `ok` line for the
-staging workspace and for the broker. An empty queue proves receive authorization
-only, so the smoke test below is what shows that alerts arrive. Resolve any
-failure class before starting the worker.
-
-Start the worker in a foreground terminal with its credentials loaded. In a
-**separate sender terminal**, authenticate as the staging bridge/test identity
-with Service Bus Data Sender; the worker's Receiver role cannot send. Install
-Python `azure-identity` and `azure-servicebus` in a dedicated virtual environment,
-as in the [Azure Python queue quickstart](https://learn.microsoft.com/en-us/azure/service-bus-messaging/service-bus-python-how-to-use-queues).
-For example, create `/home/incident/incident-setup/sender-venv` with
-`python3 -m venv`, activate it, then run `python -m pip install azure-identity
-azure-servicebus` in that sender terminal.
-Save this small sender as `/home/incident/incident-setup/send-alert.py`:
-
-```python
-import json
-import sys
-import uuid
-from pathlib import Path
-from azure.identity import DefaultAzureCredential
-from azure.servicebus import ServiceBusClient, ServiceBusMessage
-
-payload = json.loads(Path(sys.argv[1]).read_text())
-with DefaultAzureCredential() as credential:
-    with ServiceBusClient("contoso.servicebus.windows.net", credential) as client:
-        with client.get_queue_sender("monitor-alerts") as sender:
-            sender.send_messages(ServiceBusMessage(
-                json.dumps(payload), content_type="application/json",
-                message_id=str(uuid.uuid4())))
-```
-
-The sender's `DefaultAzureCredential` is the sender's identity (the staging
-bridge/test identity with Service Bus Data Sender), not the worker's: the worker
-never uses it or any credential chain. Replace the namespace and queue in the
-sender with the **staging** values.
-Save `/home/incident/incident-setup/fired.json` using the mapped staging resource,
-a unique alert identity for this smoke run, and a fired time covered by the
-deployment interval and staging telemetry:
-
-```json
-{
-  "schemaId": "azureMonitorCommonAlertSchema",
-  "data": {
-    "essentials": {
-      "alertId": "cenci-staging-smoke-2026-10-10-001",
-      "monitorCondition": "Fired",
-      "alertTargetIDs": ["/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/app/providers/Microsoft.Web/sites/orders"],
-      "firedDateTime": "2026-10-10T09:00:00Z",
-      "description": "Staging fixture: describe the known application defect and observable symptom."
-    }
-  }
-}
-```
-
-```bash
-python /home/incident/incident-setup/send-alert.py /home/incident/incident-setup/fired.json
-cenci incident status --state-dir /home/incident/.local/state/cenci/incidents
-```
-
-Use repeated `status` calls and the following acceptance checks. Retain the
-incident key, reports, and PR URL as the staging record; do not delete the ledger
-between steps.
-
-| Step | Action | Expected result |
-| --- | --- | --- |
-| Intake | Send the fired payload above. | One ledger row, the mapped deployed SHA, then `queued`/`running` (these may be brief); Service Bus active message count falls after durable intake. |
-| Coding and publication | Wait for completion; inspect `artifacts/<key>/investigation-input.json`, `investigation-result.json`, and `publication.json`, plus the draft PR. | Authenticated Claude calls succeed through the proxy; baseline passes, added regression fails before the fix and passes after it; every configured gate passes offline; `draft` has one PR URL with evidence and verification. A `review` report explains any stopped stage. |
-| Duplicate delivery | Run the same sender command again; it creates a new broker message ID with the same `alertId`. | Same ledger key, attempts/reserved cost and PR; no second coding job or PR. |
-| Restart | Stop the foreground worker with Ctrl-C, restart with the same config/state, then resend `fired.json`. | Completed incident stays terminal with the same PR and cost; no duplicate job. For interrupted-job recovery, use a separate identity and stop during a running job: partial edits may correctly produce `review`. |
-| Resolution | Copy the payload to `resolved.json`, change only `monitorCondition` to `Resolved`, then send it with the same script. | Row becomes `resolved`; queued/active execution stops, existing PR stays available. Sending the original fired payload again cannot restart it. |
-| Out-of-order resolution | Use a new `alertId`; send its resolved payload before its fired payload. | One `resolved` tombstone with zero attempts and no PR. |
-| Bridge delivery | Trigger and resolve the real staging Azure Monitor alert through the configured action group/Logic App. | The bridge preserves the schema/resource/identity; the same intake and resolution behavior occurs. Direct queue sends alone do not verify the bridge. |
-
-If intake never appears, inspect the bridge run, Service Bus DLQ, resource
-allowlist, and the worker's Azure permissions. If a row retries or ends in
-`review`, inspect its `report` first, then image tools/caches, proxy logs, Git
-authentication/author, deployment SHA and runbook availability. Confirm real
-telemetry was returned rather than accepting an empty-query result as proof of
-the fixture. Only after these checks should you enable the user service and map
-production resources. This procedure is an operator acceptance test; the local
-test suite below does not execute it or provision its infrastructure.
-
 ## Automated verification
 
 The `internal/incident` integration suites exercise durable intake/scheduling and
@@ -1083,7 +1756,87 @@ boundary, `watch/incident_verify_test.go` drives `verify` the same way,
 `watch/incident_cmd_test.go` runs the built `cenci` binary (before any network
 call), and `watch/incident_setup_cmd_test.go` drives `cenci incident setup`
 through the built binary against a scripted fake `az`. The `TestVerify*` names
-live in `internal/incident/verify_test.go`.
+live in `internal/incident/verify_test.go`. The docs tests in
+`watch/incident_docs_test.go` check this document and `watch/README.md` against
+the built binary's own flags and usage text.
+
+### Parent criterion coverage (#1210)
+
+Every criterion of the parent ticket (#1210, its "Coverage map" rows 1 to 63)
+maps to the named tests that exercise it. Rows P52, P53 and P55 are verification
+steps whose evidence is a gate run, a live staging record and a plan-fidelity
+cross-check, not a test. P53 in particular is not proved by any mocked test:
+fakes cannot show what live Azure permits, so only the live staging run does.
+`TestIncidentAutomatedVerificationMapsEveryParentCriterionToADefinedTest` checks
+that this table has each row once and that every test it names is defined.
+
+| # | Parent criterion | Named tests |
+| --- | --- | --- |
+| P1 | `auth` accepts only the three modes with their own fields; anything else exits 1 naming the field | `TestAuthConfigAcceptsOnlyExplicitModesWithTheirOwnFields`, `TestIncidentRunRefusesInvalidAuthNamingTheField` |
+| P2 | One credential from `auth` feeds both boundaries, with zero `az` calls | `TestIncidentStartupAuthenticatesBothBoundariesAsTheConfiguredIdentityWithoutAz` |
+| P3 | Preflight acquires a token per scope before cleanup, recovery or receive | `TestPreflightNamesEachFailureClass`, `TestIncidentPreflightFailureStartsNothing`, `TestPreflightRequestsBothScopesWithinThirtySecondsEach` |
+| P4 | A certificate that is not an owned regular file with mode 0600 or 0400 exits 1 | `TestCertificateFileMustBeAnOwnedRegularFileWithRestrictedMode`, `TestIncidentRunRefusesACertificateWithLooseModeBeforeAnyStartupWork` |
+| P5 | A telemetry token failure stops before any agent runs | `TestTelemetryTokenFailureStopsBeforeAnyAgentRuns` |
+| P6 | Agent and check container argv carry no Azure identity material | `TestContainerArgvCarriesNoAzureIdentityMaterial` |
+| P7 | The existing `internal/incident` suites pass unchanged | `TestDurableDeliveryAndRestart`, `TestLockRenewalExpiryAndRedelivery`, `TestDeadLettersAndSettlementFailure`, `TestCancellationStopsActiveJob` |
+| P8 | `status` and `cancel` need no `auth`, no `AZURE_*` and no `az` | `TestIncidentStatusAndCancelNeedNoAzureIdentity` |
+| P9 | `run` without `auth` exits 1 before any Azure call, naming the "Worker identity" section | `TestIncidentRunWithoutAuthIsRefusedBeforeAnyStartupWork`, `TestConfigWithoutAuthIsRefusedWithMigrationMessage` |
+| P10 | `verify` prints tenant, application and principal IDs and never the token, certificate or key | `TestVerifyPrintsIdentityClaimsAndNeverTheTokenOrKey`, `TestIncidentVerifyAuthenticatesAsTheConfiguredIdentityWithoutAzOrFiles` |
+| P11 | The workspace probe runs each resource's query over 5 minutes within 30 seconds and prints no rows | `TestVerifyWorkspaceProbeRunsTheConfiguredQueryOverFiveMinutesWithinThirtySeconds` |
+| P12 | The broker probe peeks one message and settles nothing | `TestVerifyBrokerProbePeeksOneAndSettlesNothing` |
+| P13 | Each failed probe is exactly one of the six classes | `TestVerifyClassifiesEachFailure`, `TestVerifyUnmappedOutcomesFallBackToUnreachable` |
+| P14 | One attempt per probe; `--propagation-wait` retries only `authorization-denied`; no files, no `az` | `TestVerifyRetriesOnlyAuthorizationDeniedDuringPropagationWait`, `TestIncidentVerifyUsageErrorsExitTwo`, `TestIncidentVerifyAcceptsTheInclusivePropagationWaitBounds` |
+| P15 | `verify` exits 0, 1 or 2 | `TestIncidentVerifyExitsOneWhenAnyProbeFails`, `TestIncidentVerifyUsageErrorsExitTwo` |
+| P16 | Preview runs only the nine read-only subcommands and changes no file | `TestIncidentSetupPreviewInvokesOnlyReadOnlyAzAndChangesNoFile` |
+| P17 | Preview prints numbered explained steps, the proposed `auth` JSON and the local files | `TestIncidentSetupPreviewRendersNumberedExplainedStepsAuthJSONAndLocalFiles` |
+| P18 | Without `az` the preview exits 0 with placeholders and no login or installer | `TestIncidentSetupPreviewWithoutAzOrLoginExitsZeroWithPlaceholders` |
+| P19 | Invalid input exits 2 before any `az` call | `TestIncidentSetupRejectsInvalidInputBeforeAnyAzCall` |
+| P20 | `--identity existing` lists other role assignments and warns that RBAC is additive | `TestIncidentSetupExistingIdentityListsOtherAssignmentsAndWarns` |
+| P21 | Prerequisites separate Entra rights from RBAC-administrator rights; the login is setup-only | `TestIncidentSetupPreviewRendersNumberedExplainedStepsAuthJSONAndLocalFiles` |
+| P22 | Generated commands never use `create-for-rbac`; role commands are exact and least-privilege | `TestIncidentSetupPreviewRendersNumberedExplainedStepsAuthJSONAndLocalFiles`, `TestIncidentSetupManagedIdentityPreview` |
+| P23 | Preview output carries no private key or token | `TestIncidentSetupOutputCarriesNoKeyOrTokenFromTheFakeBoundary` |
+| P24 | The missing-`auth` diagnostic also names `cenci incident setup --config` | `TestConfigWithoutAuthIsRefusedWithMigrationMessage`, `TestIncidentVerifyWithoutAuthIsRefusedLikeRun` |
+| P25 | Apply prints the plan and a y/N prompt; anything but `y` or `Y` makes no change | `TestSetupApplyDeclinedConfirmationMakesNoMutatingCall`, `TestConfirmApplyAcceptsOnlyYOrUpperY` |
+| P26 | A non-terminal stdin without `--yes`, or `--yes` with a missing input, exits 2 | `TestIncidentSetupApplyGatesExitTwoBeforeAnyAzCall`, `TestIncidentSetupApplyIdentityGatesExitTwoOnATerminalWithoutYes` |
+| P27 | A tenant mismatch makes no mutating call; every `az` call is bounded and a failure fails its step | `TestSetupApplyTenantMismatchMakesNoMutatingCall`, `TestSetupApplyFailedOrTimedOutAzCallFailsItsStep`, `TestIncidentSetupAzCallsInheritTheOperatorEnvironmentAndReadNullStdin` |
+| P28 | Apply's only mutating calls are the identity, credential and missing role creates | `TestSetupApplyNewIdentityMakesExactlyTheIdentityCertificateAndRoleCreates`, `TestSetupApplyCreatesExactlyTheMissingRoleAssignments`, `TestAzNewIdentityAllowlistIsTheApplySetPlusThreeReadsAndThreeCreates` |
+| P29 | The private key stays local and never reaches `az`, output, the journal or the ledger | `TestSetupApplyNewIdentityKeepsThePrivateKeyLocal` |
+| P30 | A rerun after success makes zero mutating calls | `TestSetupApplyRerunAfterSuccessMakesNoMutatingCall`, `TestSetupApplyNewIdentityRerunAfterSuccessMakesNoMutatingCall` |
+| P31 | A failed step leaves `complete: false` and the next apply resumes without duplicates | `TestSetupApplyResumesAfterAFailedRoleAssignment`, `TestSetupApplyNewIdentityResumesAtTheFailedStep` |
+| P32 | An existing certificate file is never overwritten; a differing `auth` needs `--replace-auth` | `TestSetupApplyNewIdentityNeverOverwritesAnExistingCertificateFile`, `TestSetupApplyRefusesADifferingAuthWithoutReplaceAuth` |
+| P33 | The config write changes only `auth`, atomically with mode 0600 | `TestWriteAuthChangesOnlyTheAuthSectionAtomicallyWithMode0600` |
+| P34 | Apply verifies after its writes and completes only when every probe is `ok` | `TestSetupApplyVerifiesAndCompletesOnlyWhenEveryProbeIsOK`, `TestSetupApplyWaitsAfterARecentRoleCreateAttempt` |
+| P35 | `--identity managed` creates no application or certificate and confirms the principal | `TestSetupApplyManagedIdentityConfirmsThePrincipalAndCreatesNoCredential` |
+| P36 | The tutorial has seven headed steps | `TestIncidentTutorialHasTheSevenHeadedSteps` |
+| P37 | An ambient Azure credential chain is mentioned only in the staging-sender or setup-operator context | `TestIncidentDocsMentionCredentialChainsOnlyForTheSenderOrSetupOperator` |
+| P38 | The hosted identity section is separate from the tutorial; `sandbox.azure` is unrelated | `TestIncidentDocsSeparateHostedIdentityFromTheLocalTutorial` |
+| P39 | Every registered setup and verify flag is documented; usage lists all five verbs | `TestIncidentDocsListEveryRegisteredSetupAndVerifyFlag`, `TestIncidentUsageTextListsEveryVerb` |
+| P40 | Undo removes only journal-recorded roles and identity after a review | `TestIncidentTutorialUndoRemovesOnlyJournalRecordedRolesAndIdentityAfterReview` |
+| P41 | Ambient `AZURE_*` variables are ignored and reported by name only | `TestIgnoredAzureEnvListsSortedNamesAndNeverValues`, `TestIncidentStartupReportsAndRemovesAmbientAzureVariables` |
+| P42 | A certificate expiring within 30 days still starts and warns | `TestCertificateExpiryFailsAndNearExpiryWarns`, `TestIncidentStartupWarnsWhenTheCertificateExpiresSoon` |
+| P43 | Managed identity on an unsupported host names the host requirement | `TestManagedIdentityOnAnUnsupportedHostNamesTheHostRequirement` |
+| P44 | `AZURE_AUTHORITY_HOST` cannot change the pinned public authority | `TestCertificateCredentialTalksOnlyToThePublicAuthorityAsTheConfiguredClient`, `TestIncidentStartupReportsAndRemovesAmbientAzureVariables` |
+| P45 | An empty queue prints `ok (0 messages visible)` and the receive-only note | `TestVerifyEmptyPeekNotesReceiveAuthorizationOnly` |
+| P46 | Two resources sharing a workspace produce one Log Analytics Reader command | `TestIncidentSetupSharedWorkspaceProducesOneReaderCommand` |
+| P47 | A topic configuration scopes the role to the exact subscription | `TestIncidentSetupTopicSubscriptionScopeIsExact` |
+| P48 | Malformed or truncated `az` output fails the discovery step | `TestIncidentSetupMalformedDiscoveryOutputFailsTheStep` |
+| P49 | A workspace in another subscription keeps its own scope and is flagged | `TestIncidentSetupCrossSubscriptionWorkspaceKeepsItsScope` |
+| P50 | An interrupted creation is recovered only by the unique nonce name | `TestSetupApplyNewIdentityAdoptsOnlyTheUniqueNonceMatch`, `TestSetupApplyNewIdentityJournalsTheNonceOnlyRightBeforeCreatingTheApp` |
+| P51 | Apply refuses a symlinked or foreign config | `TestSetupApplyRefusesASymlinkedOrForeignConfig` |
+| P52 | The full suite, lint and the watch gate pass on the final branch | verification step: the PR's gate run, not a test |
+| P53 | A live staging run covers identity, RBAC, broker intake and telemetry | verification step: the sanitized live staging record in the PR, user-run (tutorial Step 6), not a test and not proved by any mock |
+| P54 | Every parent criterion maps to a named test | `TestIncidentAutomatedVerificationMapsEveryParentCriterionToADefinedTest` |
+| P55 | The final implementation is cross-checked against the full ticket intent | verification step: the plan-fidelity cross-check recorded in the PR, not a test |
+| P56 | The docs describe `auth` and manual `az` commands, not an ambient credential chain, as the worker's authentication | `TestIncidentDocsMentionCredentialChainsOnlyForTheSenderOrSetupOperator`, `TestConfigWithoutAuthIsRefusedWithMigrationMessage` |
+| P57 | The README and `cenci help` document `verify` and its flags | `TestIncidentDocsListEveryRegisteredSetupAndVerifyFlag`, `TestIncidentHelpDocumentsVerify` |
+| P58 | The README and `cenci help` document the setup preview flags | `TestIncidentDocsListEveryRegisteredSetupAndVerifyFlag`, `TestIncidentCLIOptInAndUsage` |
+| P59 | The README documents `--apply`, `--yes` and `--replace-auth` | `TestIncidentDocsListEveryRegisteredSetupAndVerifyFlag` |
+| P60 | Only the operator's config and flags select the tenant, identity and scope | `TestUntrustedSourcesCannotSteerTheWorkerIdentity`, `TestTelemetryScopeAndTenantComeOnlyFromWorkerConfiguration` |
+| P61 | No added command deletes identities, credentials, assignments, the ledger or resources | `TestSetupApplyNeverDeletesOrStartsTheWorker`, `TestAzApplyAzRefusesEverythingOutsideItsAllowlistWithoutExecuting` |
+| P62 | Setup never enables or starts the worker | `TestSetupApplyNeverDeletesOrStartsTheWorker` |
+| P63 | `sandbox.azure` staging and Azure DevOps stay out of scope; the bridge's Data Sender identity stays separate from the worker | `TestIncidentDocsSeparateHostedIdentityFromTheLocalTutorial` |
+
+### Per-suite detail
 
 | Requirement | Named test |
 | --- | --- |
@@ -1148,5 +1901,6 @@ live in `internal/incident/verify_test.go`.
 | Setup apply `--identity new` engine (fake `az`, real filesystem): the mutating log is exactly the app, service principal and appending credential creates plus the role creates, and the journal already holds the nonce name at `ad app create` but not after a failed certificate-file step or lookup; a certificate replaced after the prompt, or an adopted app that now has a different ID or is gone, fails its step with nothing changed in Azure; the private key stays local; a rerun makes no mutating call; a failed step resumes without a second app or credential; an existing certificate file is validated before the prompt (symlink, mode, parse, key mismatch, expiry, foreign owner when run as root) and never overwritten, and a file that appears later fails the step; a failed write removes only the file this run created; only a unique nonce match, or `--client-id` for the recorded nonce app, is adopted; the journal refuses a changed display name; verify waits 10m when the run created a service principal, credential or role alone, and a rerun that creates nothing waits 0 after the role-attempt window but 10m within it | `TestSetupApplyNewIdentityMakesExactlyTheIdentityCertificateAndRoleCreates`, `TestSetupApplyNewIdentityDeclinedConfirmationCreatesNothing`, `TestSetupApplyNewIdentityKeepsThePrivateKeyLocal`, `TestSetupApplyNewIdentityRerunAfterSuccessMakesNoMutatingCall`, `TestSetupApplyNewIdentityVerifyWaitsWhenThisRunCreatedAnything`, `TestSetupApplyNewIdentityResumesAtTheFailedStep`, `TestSetupApplyNewIdentityNeverOverwritesAnExistingCertificateFile`, `TestSetupApplyNewIdentityMissingCertificateDirectoryFailsTheStepBeforeAnythingExistsInAzure`, `TestSetupApplyNewIdentityRefusesADifferentAppThanTheOneThePlanAdopted`, `TestSetupApplyNewIdentityRefusesToCreateWhenTheAdoptedAppIsGoneAfterThePrompt`, `TestSetupApplyNewIdentityRefusesAnExistingCertificateReplacedAfterThePrompt`, `TestSetupApplyNewIdentityJournalsTheNonceOnlyRightBeforeCreatingTheApp`, `TestCreateCertificateFileRemovesOnlyTheFileThisCallCreatedWhenTheWriteFails`, `TestSetupApplyNewIdentityAdoptsOnlyTheUniqueNonceMatch`, `TestSetupApplyNewIdentityClientIDAdoptsOnlyTheRecordedNonceApp`, `TestSetupApplyNewIdentityRecordedAppGoneStopsBeforeThePrompt`, `TestSetupApplyNewIdentityJournalRefusesAChangedDisplayName` |
 
 Live Azure delivery, production RBAC, the operator's container image and proxy,
-and actual model/GitHub calls require a staging smoke test before enabling this
+and actual model/GitHub calls require the staging smoke test in
+[tutorial Step 6](#step-6-run-the-staging-smoke-test) before enabling this
 worker on production alert sources.
