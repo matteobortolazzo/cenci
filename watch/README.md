@@ -146,7 +146,7 @@ Codex will ask you to review/trust new hooks. Use `/hooks` in Codex if the hooks
 
 **Trust model:** Codex hash-pins `hooks.json`, so every plugin update that changes
 the file changes its hash and requires re-trusting the hooks via `/hooks` in Codex.
-This release changes the Codex manifest (it adds `Interrupt` and `SessionEnd`), so
+Adding the `Interrupt` and `SessionEnd` hooks changed the Codex manifest, so
 re-trust it via `/hooks`. cenci never bypasses hook trust.
 
 The marketplace plugin includes a native Codex manifest at
@@ -3624,7 +3624,7 @@ window straight back to `running`.
 | `Interrupt` | Stopped | The turn was interrupted (for example with ESC) |
 | `SessionEnd` | Remove | Restore window, clean up |
 
-Codex now sends `Interrupt` and `SessionEnd`. Codex 0.166.0 or newer emits them; older clients skip the new manifest entries. The stale sweep that restores tracked Codex windows once the pane returns to a non-Codex command after a completed/idle turn remains the backstop for older clients and abrupt exits.
+Codex 0.166.0 or newer sends `Interrupt` and `SessionEnd`; older clients skip those manifest entries. The stale sweep that restores tracked Codex windows once the pane returns to a non-Codex command after a completed/idle turn remains the backstop for older clients and abrupt exits.
 
 For Codex, the first non-empty line of the first submitted prompt becomes the
 session's task label. Control characters are removed, whitespace is collapsed,

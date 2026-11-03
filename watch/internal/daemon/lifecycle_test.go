@@ -193,11 +193,17 @@ func TestDaemon_CodexInterruptStopsRunningSession(t *testing.T) {
 			if got := d.sessions["codex-sess"].Status; got != detect.StatusStopped {
 				t.Fatalf("after Interrupt: expected stopped without a sweep, got %v", got)
 			}
+			if sym, ok := findWindowOpt(mc.WindowOpts, "main:0", "@cenci-symbol"); !ok || sym != d.cfg.SymbolStopped {
+				t.Errorf("after Interrupt: expected stopped symbol %q on the window, got %q (set=%v)", d.cfg.SymbolStopped, sym, ok)
+			}
 
 			next.SessionID, next.Agent, next.TmuxPane = "codex-sess", "codex", "%0"
 			d.handleEvent(next)
 			if got := d.sessions["codex-sess"].Status; got != detect.StatusRunning {
 				t.Errorf("after main-agent %s: expected running, got %v", next.EventType, got)
+			}
+			if sym, ok := findWindowOpt(mc.WindowOpts, "main:0", "@cenci-symbol"); !ok || sym != d.cfg.SymbolRunning {
+				t.Errorf("after main-agent %s: expected running symbol %q on the window, got %q (set=%v)", next.EventType, d.cfg.SymbolRunning, sym, ok)
 			}
 		})
 	}

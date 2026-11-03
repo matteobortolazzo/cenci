@@ -425,6 +425,8 @@ func runCodexManifestHook(t *testing.T, event, payload string) (stdout string, r
 		"CENCI_TEST_BIN="+binaryPath,
 		"CENCI_TEST_SOCKET="+socket,
 		"CENCI_SANDBOX=",
+		// A wrapper fallback to an installed cenci must never reach the real daemon.
+		"CENCI_SOCKET_DIR="+t.TempDir(),
 	)
 	cmd.Stdin = strings.NewReader(payload)
 	var out bytes.Buffer
