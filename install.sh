@@ -448,10 +448,10 @@ doctor_codex_support() {
 	local raw version config method notifications project_root
 	raw="$(codex --version 2>/dev/null || true)"
 	version="$(printf '%s' "$raw" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
-	if [ -n "$version" ] && printf '%s\n%s\n' "0.144.1" "$version" | sort -V -C 2>/dev/null; then
+	if [ -n "$version" ] && printf '%s\n%s\n' "0.166.0" "$version" | sort -V -C 2>/dev/null; then
 		ok "Codex ${version} supports cenci hooks"
 	else
-		warn "Codex ${version:-unknown} is unsupported — cenci requires 0.144.1 or newer"
+		warn "Codex ${version:-unknown} is unsupported — cenci requires 0.166.0 or newer"
 	fi
 	# Executable workflow runtime, reported apart from plugin installation (#1233):
 	# the Codex workflows run flow/codex/*.mjs helpers, so they need Node on PATH.

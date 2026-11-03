@@ -1,7 +1,7 @@
 # Codex support
 
 cenci installs native plugin skills, hooks, agent adapters, launch templates, and PR
-babysitting for Codex CLI 0.144.1 or newer. The full gated ticket-to-PR workflow remains
+babysitting for Codex CLI 0.166.0 or newer. The full gated ticket-to-PR workflow remains
 in development until behavioral end-to-end acceptance passes. Shared configuration lives in
 `.cenci/config.json`; shared guidance lives in `AGENTS.md`.
 

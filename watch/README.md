@@ -146,6 +146,8 @@ Codex will ask you to review/trust new hooks. Use `/hooks` in Codex if the hooks
 
 **Trust model:** Codex hash-pins `hooks.json`, so every plugin update that changes
 the file changes its hash and requires re-trusting the hooks via `/hooks` in Codex.
+This release changes the Codex manifest (it adds `Interrupt` and `SessionEnd`), so
+re-trust it via `/hooks`. cenci never bypasses hook trust.
 
 The marketplace plugin includes a native Codex manifest at
 `plugin/.codex-plugin/plugin.json`, which loads the Codex-specific hooks from
@@ -3619,8 +3621,10 @@ window straight back to `running`.
 | `PreToolUse` | Running | Codex is about to run a tool |
 | `PostToolUse` | Running | Codex completed a tool call and is still working |
 | `Stop` | Done | Codex finished responding |
+| `Interrupt` | Stopped | The turn was interrupted (for example with ESC) |
+| `SessionEnd` | Remove | Restore window, clean up |
 
-Codex does not currently document a `SessionEnd` hook. cenci restores tracked Codex windows during the stale sweep once the pane returns to a non-Codex command after a completed/idle turn.
+Codex now sends `Interrupt` and `SessionEnd`. Codex 0.166.0 or newer emits them; older clients skip the new manifest entries. The stale sweep that restores tracked Codex windows once the pane returns to a non-Codex command after a completed/idle turn remains the backstop for older clients and abrupt exits.
 
 For Codex, the first non-empty line of the first submitted prompt becomes the
 session's task label. Control characters are removed, whitespace is collapsed,
@@ -3656,7 +3660,7 @@ The daemon has two sweep mechanisms:
 
 **Pane-based sweep (tmux-backed sessions)**: Every 1s (configurable with `-sweep`), the tmux frontend reconciles native agent titles and checks if tracked pane IDs still exist in tmux. If a pane is gone (e.g. an agent crashed without firing a cleanup hook), the window is restored. For Codex, the sweep also detects native input prompts and restores the window after a completed session exits back to the user's shell.
 
-**Paneless TTL sweep**: Sessions without a tmux pane (plain terminals, cenci-sandbox without a pane) are tracked by session id only. They are removed on `SessionEnd`; if no `SessionEnd` fires (e.g. a crash or a Codex session), the daemon expires them after the idle TTL (default `2h`, configurable with `-session-ttl`).
+**Paneless TTL sweep**: Sessions without a tmux pane (plain terminals, cenci-sandbox without a pane) are tracked by session id only. They are removed on `SessionEnd`; if no `SessionEnd` fires (e.g. a crash, a Codex client that predates native `SessionEnd`, or an abrupt exit), the daemon expires them after the idle TTL (default `2h`, configurable with `-session-ttl`).
 
 **Sandbox orphan reap**: When the pane-based sweep detects one or more tmux-backed sessions whose pane no longer exists, the daemon triggers a single `cenci sandbox reap-orphans` pass (coalesced — not one per stale window, self-exec'd via the daemon's own binary) to kill any orphaned container-side agent processes for those sessions. The daemon also runs one reap pass at startup, covering panes that closed while it was down or restarting, and one on a periodic backstop tick (default `5m`, configurable with `-reap-interval`, `0` to disable). The backstop exists because the pane-gone trigger only fires while the daemon still holds a pane binding at the moment the pane dies: every path that drops that binding earlier — a `SessionEnd` teardown, a `clear`/`resume` handoff whose successor never reports, tracking that never succeeded — leaves that pane's death unobservable, stranding a live container process until the next daemon restart. A `SessionEnd` teardown of a pane-bound session triggers a pass for the same reason, covering the process left behind when cenci's own pending-close kill destroys the window. The reap is fire-and-forget, non-blocking for the event loop, and self-no-ops when there's nothing to reap. Liveness is launch-ID keyed: every sandbox launch gets a unique `CENCI_LAUNCH_ID`, also recorded as a pane option on its tmux pane, and a process carrying one is live only while that ID is recorded on a live pane of its own tmux server — so an orphan on a pane id reused after a tmux restart is still reaped. Processes without a launch ID (started before this change, or outside tmux) fall back to the `(socket, pane)` pair — each container process carries the host tmux socket it belongs to (`CENCI_TMUX_SOCKET`) alongside its pane id (`TMUX_PANE`), so a process is only ever classified live against its own tmux server's pane set, not a bare pane-id union across servers.
 

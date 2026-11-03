@@ -394,7 +394,7 @@ func (f *Frontend) Sweep(sessions map[string]*frontend.SessionState) []frontend.
 	// exit).
 	//
 	// The exit restore is Codex/OpenCode-only (#432, #488): a current Codex
-	// sends SessionEnd, but an older client or an abrupt exit does not (and
+	// sends SessionEnd (0.166.0 or newer), but an older client or an abrupt exit does not (and
 	// OpenCode's exit is not relied on to), so a pane whose current command no
 	// longer reads as that agent is our backstop exit signal. Claude Code *does* fire
 	// SessionEnd (handled in daemon/event.go) and pane disappearance is covered

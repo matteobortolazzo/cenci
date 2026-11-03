@@ -30,7 +30,7 @@ CENCI_CODEX_NATIVE=1 CENCI_CODEX_NATIVE_OUT=./native-host.md bash flow/codex/nat
   `/run/.containerenv`) exists; no environment variable can substitute the markers. It records
   the trust state as "hook trust bypassed by launcher (explicit flag)".
 - The runner prints `not run: <reason>` and exits 0 when `CENCI_CODEX_NATIVE` is unset, Codex
-  is absent or older than 0.144.1, or `codex login status` fails.
+  is absent or older than 0.166.0, or `codex login status` fails.
 - A run that gets past the gates ends with one `RESULT:` line. `RESULT: OK` (exit 0) means at
   least one scenario row proved something and the canary showed the hooks active;
   `RESULT: INCONCLUSIVE` (exit 3) means nothing was proven (no `ok` scenario row, hooks
