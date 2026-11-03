@@ -433,9 +433,10 @@ CLI login is used for setup only and is never written to the worker configuratio
 the worker authenticates only as the identity in its `auth` section.
 
 **Flags.** `--config` is required. `--identity` is `new` (the default), `existing`
-or `managed`. `new` forbids `--client-id` and `--principal-object-id`, and
+or `managed`. `new` forbids `--principal-object-id`, and forbids `--client-id`
+unless `--apply` is given (see [Setup apply](#setup-apply) for what it adopts);
 `--display-name` (default `cenci-incident-worker`) names the app registration it
-creates. `existing` requires `--client-id` and forbids `--principal-object-id` and
+creates (apply appends a nonce to it). `existing` requires `--client-id` and forbids `--principal-object-id` and
 `--display-name`. `managed` forbids `--display-name` and `--certificate-path`;
 `--principal-object-id` is optional, and an optional `--client-id` must equal the
 `appId` that `az ad sp show` reports. `--tenant`, `--subscription`, `--client-id`
@@ -477,12 +478,11 @@ certificate step, the proposed `auth` section and the local-files list all show
 
 ### Setup apply
 
-`cenci incident setup --apply` carries out the preview's plan for an `existing` or
-`managed` identity: it creates the missing role assignments, writes the config's
-`auth` section and runs `verify`. `--identity new` is refused with exit 2 and a
-pointer to cenci issue #1389 (application creation and certificate generation);
-create the identity with the preview's commands, then use `--identity existing`.
-`--apply` also requires an explicit `--identity`.
+`cenci incident setup --apply` carries out the preview's plan: for an `existing`
+or `managed` identity it creates the missing role assignments, and for `--identity
+new` it first creates the identity (see **New identity** below).
+It then writes the config's `auth` section and runs `verify`. `--apply` requires an
+explicit `--identity`.
 
 **Authorization.** Apply shows the plan on stdout (tenant, subscription, identity,
 principal, every role and exact scope, the config, the journal, the read-only
@@ -494,22 +494,43 @@ so `/dev/null` is not mistaken for one) the run exits 2 unless `--yes` is given,
 which skips the prompt. `--yes` needs every input as a flag, checked after the
 config is loaded and before any `az` call: `--tenant`, `--subscription`,
 `--identity`, `--service-bus-namespace-id`, one `--workspace-resource-id
-<uuid>=ID` per configured workspace, `--certificate-path` for `existing` and
-`--principal-object-id` for `managed`. A missing one exits 2 and names the flag.
+<uuid>=ID` per configured workspace, `--certificate-path` for `new` and `existing`
+and `--principal-object-id` for `managed`. A missing one exits 2 and names the
+flag. The plan for `new` also shows the application (created under the nonce name,
+or adopted), its service principal, the certificate credential and whether the
+certificate file is created or already exists and is never overwritten.
 
 **Checks before the prompt.** Apply refuses (exit 1, nothing changed) while the
 plan has a placeholder or an unconfirmed value, and names the flag that supplies
-it. It re-reads the signed-in tenant (`az account show`) and the principal
-(`az ad sp show --id`), builds the credential from the proposed `auth` (which only
-reads the certificate file), refuses a config whose `auth` differs from the plan
-unless `--replace-auth` is given, and checks that the config is a regular file
-owned by you and not a symbolic link.
+it. For `existing` and `managed` it re-reads the signed-in tenant (`az account
+show`) and the principal (`az ad sp show --id`) and builds the credential from the
+proposed `auth` (which only reads the certificate file). It refuses a config whose
+`auth` differs from the plan unless `--replace-auth` is given, and checks that the
+config is a regular file owned by you and not a symbolic link. For `--identity new`
+there is no principal to re-read yet and no client ID to build the credential
+from: apply re-reads only the tenant, reads the journal, resolves the application
+(see **New identity**) and, when a file already exists at `--certificate-path`,
+checks it as the worker will read it (no symbolic link, owned by you, mode 0600 or
+0400, an unencrypted PEM certificate with its private key, a certificate that
+matches that key, not expired). The credential is built at the `config auth` step,
+once the client ID is known. A file that fails a check exits 1 before the prompt and
+is left untouched. The prompt is not a snapshot: at their steps apply checks again
+that the existing certificate file still holds the certificate the plan showed and
+that an adopted application is still the one the plan named, and fails the step,
+changing nothing in Azure, when either differs.
 
 **Allowlist.** Apply may run the preview's nine read-only subcommands and exactly
 one mutating one, `az role assignment create` (one per missing role and scope,
 with `--assignee-principal-type ServicePrincipal`). The preview's allowlist is
 unchanged and still refuses it. Every call keeps the preview's bounds (null stdin,
-60 seconds, 4 MiB), and `az` output is never printed.
+60 seconds, 4 MiB), and `az` output is never printed. `--apply --identity new`
+uses a third allowlist: the apply set plus three reads (`az ad app list`, `az ad sp
+list`, `az ad app credential list`) and three mutating calls, `az ad app create`,
+`az ad sp create --id <app-id>` and `az ad app credential reset --id <app-id>
+--cert @<public-cert-file> --append`. A reset is refused unless it has exactly that
+shape, so `--create-cert`, `--keyvault`, `--password` or a missing `--append`
+(which would drop the app's other credentials) never reach `az`, and `az ad sp
+create-for-rbac` is refused. `existing` and `managed` never get the new calls.
 
 **Matching and rerun.** For each role scope, apply lists the principal's
 assignments at that scope (`az role assignment list --assignee-object-id <id>
@@ -519,13 +540,68 @@ string, all compared without case. A parent or prefix scope never matches. A rer
 therefore lists the assignments at every scope instead of trusting the journal, and
 a completed apply makes no mutating call.
 
+**New identity.** `--apply --identity new` runs four steps before the role steps,
+each re-reading Azure at step time and creating only what is missing:
+
+1. `certificate file`: when nothing exists at `--certificate-path`, generate an RSA
+   2048 key and a self-signed SHA-256 certificate (`CN=cenci-incident-worker`, valid
+   365 days) and write one PEM file (a PKCS#8 `PRIVATE KEY` block, then the
+   `CERTIFICATE` block) created exclusively, without following a symbolic link, with
+   mode 0600. The file is never overwritten or rotated, the parent directory is not
+   created, and a write that fails after the create removes only the file this run
+   created (or says if it could not remove it). An existing file is used read-only.
+   This step runs first, so a disk or permission failure stops the run before
+   anything exists in Azure and before the nonce name is journaled.
+2. `application`: create the app registration with `az ad app create
+   --display-name <name>`, where `<name>` is `--display-name` plus `-` and 16 random
+   hex digits. The nonce name is shown in the plan and recorded as `displayName` in
+   `setup-journal.json` immediately before `az ad app create`, after you confirm,
+   after the local `certificate file` step and after the Azure lookup by name found
+   no application, so an interrupted creation can be found again. A rerun whose
+   `--display-name` base differs from the recorded name exits 1 as a different
+   request.
+3. `service principal`: `az ad sp create --id <app-id>` unless one already exists.
+4. `certificate credential`: list the app's certificate credentials and append the
+   public certificate with `az ad app credential reset --append` unless a credential
+   with its SHA-1 thumbprint (hex in either case, or base64 of 20 bytes) is already
+   registered. A credential identifier in any other shape fails the step instead of
+   appending a second credential. Only a `CERTIFICATE` block is passed to `az`, as a
+   file in a fresh 0700 temporary directory that is removed afterwards; the private
+   key is never in an `az` argument, the journal or the ledger.
+
+The role steps then use the service principal's object ID. The worker's `auth`
+section is written with the new client ID and `--certificate-path`.
+
+**Recovery of a new identity.** A `certificate file` failure (for example a missing
+directory) or a failed Azure lookup before the create leaves no nonce in the
+journal, so after fixing the cause the plain rerun creates normally. Otherwise the application is found again by exactly one of
+three routes. If the journal holds a client ID, apply re-reads that application by ID
+and exits 1 before the prompt, changing nothing, when it is gone (it never silently
+creates a second identity). If the journal holds only a nonce name, apply lists
+applications by that name (compared exactly, never as a prefix) and adopts the one
+match; zero or several matches exit 1 before the prompt, changing nothing, and say
+to pass `--client-id`. Zero matches can also mean Graph has not replicated a new
+application yet: wait and rerun. `--client-id <app-id>` is accepted only with
+`--apply --identity new` (the preview still exits 2) and adopts only this journal's
+application: the journal must hold the nonce name and either no client ID or the
+same one, and `az ad app list` must return exactly one application with that ID
+whose display name is exactly the recorded nonce name; anything else exits 1 with
+nothing changed. A `service principal` or `certificate credential` step can fail
+right after the application is created for the same replication reason; it is an
+ordinary failed step, so rerun to resume. There is no supported "start over":
+when no application was ever created and the journal's nonce can no longer match,
+move `setup-journal.json` aside by hand. Nothing is ever deleted, so an unwanted
+application, service principal or credential is removed by an administrator.
+
 **Journal and resume.** Progress is recorded in `setup-journal.json` in the
 config's `stateDir` (mode 0600, non-secret IDs, step status, timestamps and a
-`complete` flag). It also holds `lastRoleCreateAt`, the time of the most recent
+`complete` flag, and for `--identity new` the application's nonce `displayName`).
+It also holds `lastRoleCreateAt`, the time of the most recent
 `az role assignment create` attempt: apply writes it before each create, so a
 failed or interrupted create still leaves it, and keeps it across runs (the
 journal stays at version 1; a journal without the key still loads). The journal
-is bound to the tenant, identity mode and absolute config path; a rerun with a different request exits 1 and leaves it untouched, and
+is bound to the tenant, identity mode and absolute config path (and, for `new`,
+the `--display-name` base); a rerun with a different request exits 1 and leaves it untouched, and
 so does a journal that is corrupt, oversized, a symbolic link or owned by another
 user. When a step fails, apply prints the completed and remaining steps, leaves
 `complete: false` and exits 1; the next run resumes without creating a duplicate.
@@ -538,7 +614,8 @@ renames it over the config. A config that already equals the plan is not rewritt
 
 **Verify.** After its writes, apply runs the checks of `cenci incident verify`
 against the written config. It waits up to 10 minutes for propagation when this
-run created an assignment, or when the journal's `lastRoleCreateAt` is less than
+run created anything (an application, service principal, certificate credential
+or role assignment), or when the journal's `lastRoleCreateAt` is less than
 10 minutes old or lies in the future (clock skew); otherwise it does not wait.
 Because a previous run stamps `lastRoleCreateAt` before its create, a rerun soon
 after a failed or interrupted create still waits even though every assignment is
@@ -552,7 +629,7 @@ worker.
 | --- | --- |
 | 0 | Every step is done and every probe is `ok`. |
 | 1 | A runtime failure: an unresolved value, a failed check or `az` step, a declined prompt, a journal or config refusal, or a probe that did not pass. |
-| 2 | A usage error, before any `az` call: `--yes` or `--replace-auth` without `--apply`, a missing `--identity`, with `--yes` any other missing required input, `--identity new`, or a non-terminal stdin without `--yes`. |
+| 2 | A usage error, before any `az` call: `--yes` or `--replace-auth` without `--apply`, a missing `--identity`, with `--yes` any other missing required input (`--certificate-path` included, also for `new`), or a non-terminal stdin without `--yes`; the preview's flag conflicts also stay usage errors. |
 
 ### Provisioning the identity
 
@@ -1063,9 +1140,12 @@ live in `internal/incident/verify_test.go`.
 | Setup scopes: a shared workspace gets one reader command, a topic config gets the exact subscription scope, and a cross-subscription workspace keeps its own scope and is flagged | `TestIncidentSetupSharedWorkspaceProducesOneReaderCommand`, `TestIncidentSetupTopicSubscriptionScopeIsExact`, `TestIncidentSetupCrossSubscriptionWorkspaceKeepsItsScope` |
 | Malformed, truncated or contradicting `az` output is a failed step with exit 1, never an empty result | `TestIncidentSetupMalformedDiscoveryOutputFailsTheStep`, `TestIncidentSetupMismatchedDiscoveryFailsTheStep` |
 | Resource ID parsing, exact scope building, workspace de-duplication and shell quoting | `TestSetupParseNamespaceIDAcceptsOnlyServiceBusNamespaces`, `TestSetupParseWorkspaceIDAcceptsOnlyLogAnalyticsWorkspaces`, `TestSetupEntityScopeIsTheExactQueueOrTopicSubscription`, `TestSetupDedupeWorkspacesComparesIDsWithoutCase`, `TestSetupInSubscriptionIgnoresCase`, `TestSetupShellQuoteExpandsToExactlyTheValue` |
-| Setup apply gates exit 2 before any `az` call and change nothing: a non-terminal stdin (pipe or `/dev/null`) without `--yes`, `--yes` or `--replace-auth` without `--apply`, `--identity new` (#1389), a missing `--identity` or, with `--yes`, any missing required input; a complete `--apply --yes` passes them (control). On a terminal without `--yes` a missing input is not a usage error: discovery runs and fills what it can into the plan, and a value it cannot resolve or confirm (tested with `--certificate-path`) exits 1 naming the flag before the prompt. The terminal check is false for `/dev/null` and a pipe and true for a pty; the prompt accepts only `y` or `Y` | `TestIncidentSetupApplyGatesExitTwoBeforeAnyAzCall`, `TestIncidentSetupApplyOnATerminalWithoutYesExitsOneNamingTheUnconfirmedFlag`, `TestIncidentSetupApplyIdentityGatesExitTwoOnATerminalWithoutYes`, `TestStdinIsTerminalRejectsNullDeviceAndPipeAndAcceptsAPty`, `TestConfirmApplyAcceptsOnlyYOrUpperY` |
+| Setup apply gates exit 2 before any `az` call and change nothing: a non-terminal stdin (pipe or `/dev/null`) without `--yes`, `--yes` or `--replace-auth` without `--apply`, a missing `--identity` or, with `--yes`, any missing required input (`--certificate-path` included for `--identity new`); a complete `--apply --yes` passes them (control), `--apply --identity new` passes the usage gate and `--client-id` with `new` is accepted only with `--apply` (the preview form stays exit 2). On a terminal without `--yes` a missing input is not a usage error: discovery runs and fills what it can into the plan, and a value it cannot resolve or confirm (tested with `--certificate-path`) exits 1 naming the flag before the prompt. The terminal check is false for `/dev/null` and a pipe and true for a pty; the prompt accepts only `y` or `Y` | `TestIncidentSetupApplyGatesExitTwoBeforeAnyAzCall`, `TestIncidentSetupApplyOnATerminalWithoutYesExitsOneNamingTheUnconfirmedFlag`, `TestIncidentSetupApplyIdentityGatesExitTwoOnATerminalWithoutYes`, `TestIncidentSetupApplyNewIdentityOnATerminalWithoutCertificatePathExitsOneBeforeThePrompt`, `TestStdinIsTerminalRejectsNullDeviceAndPipeAndAcceptsAPty`, `TestConfirmApplyAcceptsOnlyYOrUpperY` |
 | Setup apply allowlist is the preview's nine plus `role assignment create`, the preview still refuses it, and the role wrappers validate their output; the config `auth` write changes only `auth`, atomically with mode 0600, and refuses a symlink or foreign owner | `TestAzApplyAllowlistIsThePreviewSetPlusRoleAssignmentCreate`, `TestAzApplyAzRefusesEverythingOutsideItsAllowlistWithoutExecuting`, `TestAzPreviewStillRefusesRoleAssignmentCreate`, `TestAzRoleAssignmentWrappersValidateTheirOutput`, `TestWriteAuthChangesOnlyTheAuthSectionAtomicallyWithMode0600`, `TestWriteAuthRefusesASymlinkOrAConfigOwnedByAnotherUser` |
 | Setup apply engine (`internal/incident`, fake `az`, `Verify` seam): a declined prompt, a plan that cannot be written, a tenant mismatch or a failed `az` call makes no mutating call; a cancelled context is reported as interrupted and never reaches the config write; it creates exactly the missing assignments, matches only the exact triple, makes no mutating call on a rerun and resumes after a failed step; a differing `auth` needs `--replace-auth`, and so does an unpinned managed `auth` written by an earlier apply; managed apply writes `principalObjectId` equal to every create's `--assignee-object-id`, and a verify that reports a principal mismatch fails the step; the role-create attempt time is recorded before each create (a failed journal write makes no create); verify waits 10m when this run created something or the last attempt is under 10m old or in the future, otherwise 0, and `complete` follows it; managed mode creates no credential; the journal binds tenant, identity and config path and is never overwritten when corrupt or foreign; a symlinked or foreign config is refused; nothing is deleted and no worker is started | `TestSetupApplyDeclinedConfirmationMakesNoMutatingCall`, `TestSetupApplyUnwritablePlanStopsBeforeTheConfirmation`, `TestSetupApplyCancellationIsReportedAsInterrupted`, `TestSetupApplyTenantMismatchMakesNoMutatingCall`, `TestSetupApplyFailedOrTimedOutAzCallFailsItsStep`, `TestSetupApplyCreatesExactlyTheMissingRoleAssignments`, `TestSetupApplyExistingAssignmentMatchesOnlyTheExactTriple`, `TestSetupApplyRerunAfterSuccessMakesNoMutatingCall`, `TestSetupApplyRerunRecreatesAnAssignmentDeletedOutOfBandDespiteADoneJournalStep`, `TestSetupApplyResumesAfterAFailedRoleAssignment`, `TestSetupApplyRefusesADifferingAuthWithoutReplaceAuth`, `TestSetupApplyRefusesAnUnpinnedManagedAuthWithoutReplaceAuth`, `TestSetupApplyFailsWhenVerifyReportsAPrincipalMismatch`, `TestSetupApplyRecordsTheRoleCreateAttemptBeforeEachCreate`, `TestSetupApplyWaitsAfterARecentRoleCreateAttempt`, `TestSetupApplyVerifiesAndCompletesOnlyWhenEveryProbeIsOK`, `TestSetupApplyManagedIdentityConfirmsThePrincipalAndCreatesNoCredential`, `TestSetupApplyJournalBindsTenantIdentityAndConfigPath`, `TestSetupApplyNeverOverwritesACorruptOrForeignJournal`, `TestSetupApplyRefusesASymlinkedOrForeignConfig`, `TestSetupApplyNeverDeletesOrStartsTheWorker`, `TestSetupApplyBlockersNameTheFlagThatFixesEach` |
+| Setup apply `--identity new` allowlist is the apply set plus `ad app list`, `ad sp list`, `ad app credential list`, `ad app create`, `ad sp create` and `ad app credential reset`; everything else (deletes, `create-for-rbac`) is refused without executing; a reset must be exactly `--id <uuid> --cert @<absolute path> --append`; the new wrappers validate their output (UUIDs, exact name echo, zero or one service principal) | `TestAzNewIdentityAllowlistIsTheApplySetPlusThreeReadsAndThreeCreates`, `TestAzNewIdentityAzRefusesEverythingOutsideItsAllowlistWithoutExecuting`, `TestAzCredentialResetRequiresAppendAndACertFile`, `TestAzNewIdentityWrappersValidateTheirOutput` |
+| Setup apply `--identity new` plan: `ApplyBlockers` has no unsupported-identity blocker and needs `--certificate-path` (which may be absent), `ProposedAuth` uses the known client ID, and `RenderApply` shows the create/adopt application, service principal, credential and certificate-file lines and a wait rule naming both the identity creates and a recent role attempt | `TestSetupApplyBlockersForANewIdentity`, `TestSetupProposedAuthOfANewIdentityUsesItsKnownClientID`, `TestSetupRenderApplyForANewIdentity` |
+| Setup apply `--identity new` engine (fake `az`, real filesystem): the mutating log is exactly the app, service principal and appending credential creates plus the role creates, and the journal already holds the nonce name at `ad app create` but not after a failed certificate-file step or lookup; a certificate replaced after the prompt, or an adopted app that now has a different ID or is gone, fails its step with nothing changed in Azure; the private key stays local; a rerun makes no mutating call; a failed step resumes without a second app or credential; an existing certificate file is validated before the prompt (symlink, mode, parse, key mismatch, expiry, foreign owner when run as root) and never overwritten, and a file that appears later fails the step; a failed write removes only the file this run created; only a unique nonce match, or `--client-id` for the recorded nonce app, is adopted; the journal refuses a changed display name; verify waits 10m when the run created a service principal, credential or role alone, and a rerun that creates nothing waits 0 after the role-attempt window but 10m within it | `TestSetupApplyNewIdentityMakesExactlyTheIdentityCertificateAndRoleCreates`, `TestSetupApplyNewIdentityDeclinedConfirmationCreatesNothing`, `TestSetupApplyNewIdentityKeepsThePrivateKeyLocal`, `TestSetupApplyNewIdentityRerunAfterSuccessMakesNoMutatingCall`, `TestSetupApplyNewIdentityVerifyWaitsWhenThisRunCreatedAnything`, `TestSetupApplyNewIdentityResumesAtTheFailedStep`, `TestSetupApplyNewIdentityNeverOverwritesAnExistingCertificateFile`, `TestSetupApplyNewIdentityMissingCertificateDirectoryFailsTheStepBeforeAnythingExistsInAzure`, `TestSetupApplyNewIdentityRefusesADifferentAppThanTheOneThePlanAdopted`, `TestSetupApplyNewIdentityRefusesToCreateWhenTheAdoptedAppIsGoneAfterThePrompt`, `TestSetupApplyNewIdentityRefusesAnExistingCertificateReplacedAfterThePrompt`, `TestSetupApplyNewIdentityJournalsTheNonceOnlyRightBeforeCreatingTheApp`, `TestCreateCertificateFileRemovesOnlyTheFileThisCallCreatedWhenTheWriteFails`, `TestSetupApplyNewIdentityAdoptsOnlyTheUniqueNonceMatch`, `TestSetupApplyNewIdentityClientIDAdoptsOnlyTheRecordedNonceApp`, `TestSetupApplyNewIdentityRecordedAppGoneStopsBeforeThePrompt`, `TestSetupApplyNewIdentityJournalRefusesAChangedDisplayName` |
 
 Live Azure delivery, production RBAC, the operator's container image and proxy,
 and actual model/GitHub calls require a staging smoke test before enabling this

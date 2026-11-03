@@ -3,6 +3,7 @@ package incident
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -372,6 +373,462 @@ func TestAzRoleAssignmentWrappersValidateTheirOutput(t *testing.T) {
 		var azErr *AzError
 		if !errors.As(err, &azErr) || azErr.Step != "role assignment create" || !IsAzUnavailable(err) {
 			t.Fatalf("want an unavailable role assignment create step, got %v", err)
+		}
+	})
+}
+
+// ---- the new-identity allowlist (#1389) -------------------------------------
+
+// fakeIdentityAz is an Az with the new-identity allowlist over a fake az script.
+func fakeIdentityAz(t *testing.T, script string) *Az {
+	t.Helper()
+	return &Az{bin: writeFakeAz(t, script), allow: azApplyNewIdentity}
+}
+
+// answeringIdentityAz is answeringApplyAz for the new-identity allowlist.
+func answeringIdentityAz(t *testing.T, output string, exit int) (*Az, string) {
+	t.Helper()
+	dir := t.TempDir()
+	args, out := filepath.Join(dir, "args"), filepath.Join(dir, "out")
+	put(t, out, output)
+	return fakeIdentityAz(t, "printf '%s\\n' \"$@\" > '"+args+"'\ncat '"+out+"'\nexit "+strconv.Itoa(exit)), args
+}
+
+func requireNotRun(t *testing.T, what, args string) {
+	t.Helper()
+	if _, err := os.Stat(args); !os.IsNotExist(err) {
+		t.Fatalf("%s reached az", what)
+	}
+}
+
+func TestAzNewIdentityAllowlistIsTheApplySetPlusThreeReadsAndThreeCreates(t *testing.T) {
+	want := append(stepKeys(azApply), "ad app list", "ad sp list", "ad app credential list", "ad app create", "ad sp create", "ad app credential reset")
+	sort.Strings(want)
+	if got := stepKeys(azApplyNewIdentity); !reflect.DeepEqual(got, want) {
+		t.Fatalf("new-identity allowlist:\n got  %v\n want %v", got, want)
+	}
+
+	// The apply and preview sets do not grow: existing and managed identities
+	// keep their mutating surface, and the preview stays read-only.
+	for _, prefix := range append(append([][]string(nil), azReadOnly...), azApply...) {
+		switch key := strings.Join(prefix, " "); key {
+		case "ad app list", "ad sp list", "ad app credential list", "ad app create", "ad sp create", "ad app credential reset":
+			t.Errorf("the apply or preview allowlist holds %q", key)
+		}
+	}
+
+	// NewIdentityApplyAz is the constructor of that set.
+	bin := filepath.Dir(writeFakeAz(t, "exit 0"))
+	t.Setenv("PATH", bin)
+	az, err := NewIdentityApplyAz()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := stepKeys(az.allow); !reflect.DeepEqual(got, want) {
+		t.Fatalf("NewIdentityApplyAz allows:\n got  %v\n want %v", got, want)
+	}
+}
+
+func TestAzNewIdentityAzRefusesEverythingOutsideItsAllowlistWithoutExecuting(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "ran")
+	az := fakeIdentityAz(t, "touch '"+marker+"'")
+	ctx := context.Background()
+	for _, args := range [][]string{
+		{"ad", "sp", "create-for-rbac", "--name", "x", "--create-cert"},
+		{"ad", "sp", "create-for-rbac"},
+		{"ad", "app", "delete", "--id", "x"},
+		{"ad", "sp", "delete", "--id", "x"},
+		{"ad", "app", "credential", "delete", "--id", "x", "--key-id", "y"},
+		{"ad", "app", "update", "--id", "x"},
+		{"ad", "app", "owner", "add"},
+		{"role", "assignment", "delete", "--ids", "x"},
+		{"login"},
+	} {
+		_, err := az.run(ctx, args...)
+		var azErr *AzError
+		if !errors.As(err, &azErr) || azErr.Step != "(refused)" {
+			t.Fatalf("%v: want a (refused) AzError, got %v", args, err)
+		}
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("a refused argv executed az (marker stat: %v)", err)
+	}
+	// The read-only entry point keeps refusing every new-identity create.
+	for _, args := range [][]string{{"ad", "app", "create", "--display-name", "x"}, {"ad", "sp", "create", "--id", "x"}, {"ad", "app", "credential", "reset", "--id", "x"}} {
+		if _, err := az.runReadOnly(ctx, args...); err == nil {
+			t.Fatalf("runReadOnly must refuse %v on a new-identity Az", args)
+		}
+	}
+	// The apply and preview Azs refuse the new calls too.
+	for _, other := range []*Az{fakeAz(t, "touch '"+marker+"'"), fakeApplyAz(t, "touch '"+marker+"'")} {
+		for _, args := range [][]string{{"ad", "app", "create", "--display-name", "x"}, {"ad", "app", "list"}, {"ad", "sp", "list"}, {"ad", "app", "credential", "list"}} {
+			if _, err := other.run(ctx, args...); err == nil {
+				t.Fatalf("an Az without the new-identity set ran %v", args)
+			}
+		}
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("a refused argv executed az (marker stat: %v)", err)
+	}
+	// Control: the allowlisted creates and reads do execute the fake.
+	for _, args := range [][]string{
+		{"ad", "app", "create", "--display-name", "x"}, {"ad", "sp", "create", "--id", "x"}, {"ad", "app", "list"}, {"ad", "sp", "list"}, {"ad", "app", "credential", "list"},
+		{"role", "assignment", "create"}, {"account", "show"},
+	} {
+		_ = os.Remove(marker)
+		_, _ = az.run(ctx, args...)
+		if _, err := os.Stat(marker); err != nil {
+			t.Fatalf("control failed for %v, the fake az did not run: %v", args, err)
+		}
+	}
+}
+
+func TestAzCredentialResetRequiresAppendAndACertFile(t *testing.T) {
+	const cert = "@/tmp/cenci-public-cert/worker.pem"
+	ctx := context.Background()
+	reset := func(extra ...string) []string {
+		return append([]string{"ad", "app", "credential", "reset"}, extra...)
+	}
+
+	t.Run("the-exact-shape-executes", func(t *testing.T) {
+		marker := filepath.Join(t.TempDir(), "ran")
+		az := fakeIdentityAz(t, "touch '"+marker+"'")
+		if _, err := az.run(ctx, reset("--id", newAppClientID, "--cert", cert, "--append")...); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(marker); err != nil {
+			t.Fatalf("the exact --id <uuid> --cert @<path> --append argv did not execute: %v", err)
+		}
+	})
+
+	refused := map[string][]string{
+		"no-append":                  reset("--id", newAppClientID, "--cert", cert),
+		"append-with-create-cert":    reset("--id", newAppClientID, "--cert", cert, "--append", "--create-cert"),
+		"create-cert-instead":        reset("--id", newAppClientID, "--create-cert", "--append"),
+		"keyvault":                   reset("--id", newAppClientID, "--cert", cert, "--append", "--keyvault", "vault"),
+		"password":                   reset("--id", newAppClientID, "--cert", cert, "--append", "--password", "x"),
+		"years":                      reset("--id", newAppClientID, "--cert", cert, "--append", "--years", "10"),
+		"no-cert":                    reset("--id", newAppClientID, "--append"),
+		"cert-without-at":            reset("--id", newAppClientID, "--cert", "/tmp/worker.pem", "--append"),
+		"cert-relative":              reset("--id", newAppClientID, "--cert", "@worker.pem", "--append"),
+		"cert-value-instead-of-file": reset("--id", newAppClientID, "--cert", "MIIC", "--append"),
+		"id-not-a-uuid":              reset("--id", "worker", "--cert", cert, "--append"),
+		"no-id":                      reset("--cert", cert, "--append"),
+		"bare":                       reset(),
+	}
+	for name, args := range refused {
+		t.Run("refused/"+name, func(t *testing.T) {
+			marker := filepath.Join(t.TempDir(), "ran")
+			az := fakeIdentityAz(t, "touch '"+marker+"'")
+			_, err := az.run(ctx, args...)
+			var azErr *AzError
+			if !errors.As(err, &azErr) || azErr.Step != "(refused)" || IsAzUnavailable(err) {
+				t.Fatalf("%v: want a (refused) AzError, got %v", args, err)
+			}
+			if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
+				t.Fatalf("%v: a refused credential reset executed az", args)
+			}
+		})
+	}
+}
+
+func TestAzNewIdentityWrappersValidateTheirOutput(t *testing.T) {
+	ctx := context.Background()
+	const (
+		nonce   = "cenci-incident-worker-0123456789abcdef"
+		appStep = "ad app create"
+		listApp = "ad app list"
+		listSP  = "ad sp list"
+		mkSP    = "ad sp create"
+		listCrd = "ad app credential list"
+		resetCr = "ad app credential reset"
+	)
+
+	t.Run("app-create", func(t *testing.T) {
+		good := appDoc(newAppClientID, nonce)
+		az, args := answeringIdentityAz(t, good, 0)
+		got, err := az.AppCreate(ctx, nonce)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := (Application{AppID: newAppClientID, ObjectID: newAppObjectID, DisplayName: nonce}); got != want {
+			t.Fatalf("got %+v want %+v", got, want)
+		}
+		wantArgs := []string{"ad", "app", "create", "--display-name", nonce, "-o", "json"}
+		if !reflect.DeepEqual(argvOf(t, args), wantArgs) {
+			t.Fatalf("argv %v want %v", argvOf(t, args), wantArgs)
+		}
+		for name, out := range map[string]string{
+			"other-name":     appDoc(newAppClientID, nonce+"-x"),
+			"prefix-of-name": appDoc(newAppClientID, "cenci-incident-worker"),
+			"no-name":        fmt.Sprintf(`{"appId":%q,"id":%q}`, newAppClientID, newAppObjectID),
+			"bad-app-id":     strings.Replace(good, newAppClientID, "not-a-uuid", 1),
+			"bad-object-id":  strings.Replace(good, newAppObjectID, "not-a-uuid", 1),
+			"array":          "[" + good + "]",
+			"empty":          "",
+			"no-fields":      "{}",
+			"trailing-value": good + " {}",
+		} {
+			az, _ := answeringIdentityAz(t, out, 0)
+			_, err := az.AppCreate(ctx, nonce)
+			requireMalformed(t, "app-create/"+name, appStep, err)
+		}
+		for name, bad := range map[string]string{"empty": "", "newline": "worker\nname", "too-long": strings.Repeat("n", 138)} {
+			az, args := answeringIdentityAz(t, good, 0)
+			_, err := az.AppCreate(ctx, bad)
+			requireMalformed(t, "app-create-name/"+name, appStep, err)
+			requireNotRun(t, "an invalid display name", args)
+		}
+		az, _ = answeringIdentityAz(t, "", 1)
+		_, err = az.AppCreate(ctx, nonce)
+		var azErr *AzError
+		if !errors.As(err, &azErr) || azErr.Step != appStep || !IsAzUnavailable(err) {
+			t.Fatalf("want an unavailable %s step, got %v", appStep, err)
+		}
+	})
+
+	t.Run("app-list-by-name", func(t *testing.T) {
+		exact, prefix, shorter := appDoc(newAppClientID, nonce), appDoc(otherAppClientID, nonce+"-extra"), appDoc(otherAppClientID, "cenci-incident-worker")
+		az, args := answeringIdentityAz(t, "["+exact+","+prefix+","+shorter+"]", 0)
+		got, err := az.AppListByName(ctx, nonce)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := []Application{{AppID: newAppClientID, ObjectID: newAppObjectID, DisplayName: nonce}}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("only the exact name counts; got %+v want %+v", got, want)
+		}
+		wantArgs := []string{"ad", "app", "list", "--filter", "displayName eq '" + nonce + "'", "-o", "json"}
+		if !reflect.DeepEqual(argvOf(t, args), wantArgs) {
+			t.Fatalf("argv %v want %v", argvOf(t, args), wantArgs)
+		}
+
+		// Two apps with exactly the name are both returned, so the caller sees the ambiguity.
+		az, _ = answeringIdentityAz(t, "["+exact+","+appDoc(otherAppClientID, nonce)+"]", 0)
+		if got, err := az.AppListByName(ctx, nonce); err != nil || len(got) != 2 {
+			t.Fatalf("want both exact matches, got %+v, %v", got, err)
+		}
+
+		// A quote in the name is doubled for OData, in one argv element.
+		quoted := "O'Brien-0123456789abcdef"
+		az, args = answeringIdentityAz(t, "["+appDoc(newAppClientID, quoted)+"]", 0)
+		got, err = az.AppListByName(ctx, quoted)
+		if err != nil || len(got) != 1 || got[0].DisplayName != quoted {
+			t.Fatalf("got %+v, %v", got, err)
+		}
+		if want := "displayName eq 'O''Brien-0123456789abcdef'"; argvOf(t, args)[4] != want {
+			t.Fatalf("filter %q want %q", argvOf(t, args)[4], want)
+		}
+
+		az, _ = answeringIdentityAz(t, "[]", 0)
+		if got, err := az.AppListByName(ctx, nonce); err != nil || got == nil || len(got) != 0 {
+			t.Fatalf("want an empty non-nil list, got %v, %v", got, err)
+		}
+		for name, out := range map[string]string{
+			"null":          "null",
+			"object":        exact,
+			"empty":         "",
+			"bad-app-id":    "[" + strings.Replace(exact, newAppClientID, "not-a-uuid", 1) + "]",
+			"bad-object-id": "[" + strings.Replace(exact, newAppObjectID, "not-a-uuid", 1) + "]",
+			"trailing":      "[] []",
+		} {
+			az, _ := answeringIdentityAz(t, out, 0)
+			_, err := az.AppListByName(ctx, nonce)
+			requireMalformed(t, "app-list-by-name/"+name, listApp, err)
+		}
+		for name, bad := range map[string]string{"empty": "", "newline": "worker\nname", "too-long": strings.Repeat("n", 138)} {
+			az, args := answeringIdentityAz(t, "[]", 0)
+			_, err := az.AppListByName(ctx, bad)
+			requireMalformed(t, "app-list-by-name-input/"+name, listApp, err)
+			requireNotRun(t, "an invalid display name", args)
+		}
+	})
+
+	t.Run("app-list-by-id", func(t *testing.T) {
+		doc := appDoc(newAppClientID, nonce)
+		az, args := answeringIdentityAz(t, "["+doc+"]", 0)
+		got, err := az.AppListByID(ctx, strings.ToUpper(newAppClientID))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := []Application{{AppID: newAppClientID, ObjectID: newAppObjectID, DisplayName: nonce}}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("got %+v want %+v", got, want)
+		}
+		wantArgs := []string{"ad", "app", "list", "--filter", "appId eq '" + strings.ToUpper(newAppClientID) + "'", "-o", "json"}
+		if !reflect.DeepEqual(argvOf(t, args), wantArgs) {
+			t.Fatalf("argv %v want %v", argvOf(t, args), wantArgs)
+		}
+		az, _ = answeringIdentityAz(t, "[]", 0)
+		if got, err := az.AppListByID(ctx, newAppClientID); err != nil || got == nil || len(got) != 0 {
+			t.Fatalf("want an empty non-nil list, got %v, %v", got, err)
+		}
+		for name, out := range map[string]string{
+			"another-app": "[" + appDoc(otherAppClientID, nonce) + "]",
+			"null":        "null",
+			"object":      doc,
+			"bad-app-id":  "[" + strings.Replace(doc, newAppClientID, "not-a-uuid", 1) + "]",
+			"trailing":    "[] []",
+		} {
+			az, _ := answeringIdentityAz(t, out, 0)
+			_, err := az.AppListByID(ctx, newAppClientID)
+			requireMalformed(t, "app-list-by-id/"+name, listApp, err)
+		}
+		for name, bad := range map[string]string{"name": "worker", "empty": "", "odata-injection": newAppClientID + "' or displayName ne '"} {
+			az, args := answeringIdentityAz(t, "[]", 0)
+			_, err := az.AppListByID(ctx, bad)
+			requireMalformed(t, "app-list-by-id-input/"+name, listApp, err)
+			requireNotRun(t, "a non-UUID app ID", args)
+		}
+	})
+
+	t.Run("sp-list-by-app", func(t *testing.T) {
+		sp := identitySPDoc
+		az, args := answeringIdentityAz(t, "["+sp+"]", 0)
+		got, err := az.SPListByApp(ctx, newAppClientID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := []ServicePrincipal{{AppID: newAppClientID, ObjectID: applyObjectID}}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("got %+v want %+v", got, want)
+		}
+		wantArgs := []string{"ad", "sp", "list", "--filter", "appId eq '" + newAppClientID + "'", "-o", "json"}
+		if !reflect.DeepEqual(argvOf(t, args), wantArgs) {
+			t.Fatalf("argv %v want %v", argvOf(t, args), wantArgs)
+		}
+		az, _ = answeringIdentityAz(t, "[]", 0)
+		if got, err := az.SPListByApp(ctx, newAppClientID); err != nil || got == nil || len(got) != 0 {
+			t.Fatalf("zero service principals is an empty non-nil list, got %v, %v", got, err)
+		}
+		for name, out := range map[string]string{
+			"two-service-principals": "[" + sp + "," + strings.Replace(sp, applyObjectID, newAppObjectID, 1) + "]",
+			"another-app":            "[" + strings.Replace(sp, newAppClientID, otherAppClientID, 1) + "]",
+			"bad-object-id":          "[" + strings.Replace(sp, applyObjectID, "not-a-uuid", 1) + "]",
+			"null":                   "null",
+			"object":                 sp,
+			"empty":                  "",
+		} {
+			az, _ := answeringIdentityAz(t, out, 0)
+			_, err := az.SPListByApp(ctx, newAppClientID)
+			requireMalformed(t, "sp-list/"+name, listSP, err)
+		}
+		az, args = answeringIdentityAz(t, "[]", 0)
+		_, err = az.SPListByApp(ctx, "worker")
+		requireMalformed(t, "sp-list-input", listSP, err)
+		requireNotRun(t, "a non-UUID app ID", args)
+	})
+
+	t.Run("sp-create", func(t *testing.T) {
+		az, args := answeringIdentityAz(t, identitySPDoc, 0)
+		got, err := az.SPCreate(ctx, newAppClientID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := (ServicePrincipal{AppID: newAppClientID, ObjectID: applyObjectID}); got != want {
+			t.Fatalf("got %+v want %+v", got, want)
+		}
+		wantArgs := []string{"ad", "sp", "create", "--id", newAppClientID, "-o", "json"}
+		if !reflect.DeepEqual(argvOf(t, args), wantArgs) {
+			t.Fatalf("argv %v want %v", argvOf(t, args), wantArgs)
+		}
+		for name, out := range map[string]string{
+			"another-app":   strings.Replace(identitySPDoc, newAppClientID, otherAppClientID, 1),
+			"bad-object-id": strings.Replace(identitySPDoc, applyObjectID, "not-a-uuid", 1),
+			"no-app-id":     fmt.Sprintf(`{"id":%q}`, applyObjectID),
+			"array":         "[" + identitySPDoc + "]",
+			"empty":         "",
+			"trailing":      identitySPDoc + " {}",
+		} {
+			az, _ := answeringIdentityAz(t, out, 0)
+			_, err := az.SPCreate(ctx, newAppClientID)
+			requireMalformed(t, "sp-create/"+name, mkSP, err)
+		}
+		az, args = answeringIdentityAz(t, identitySPDoc, 0)
+		_, err = az.SPCreate(ctx, "--all")
+		requireMalformed(t, "sp-create-input", mkSP, err)
+		requireNotRun(t, "a non-UUID app ID", args)
+		az, _ = answeringIdentityAz(t, "", 1)
+		_, err = az.SPCreate(ctx, newAppClientID)
+		var azErr *AzError
+		if !errors.As(err, &azErr) || azErr.Step != mkSP || !IsAzUnavailable(err) {
+			t.Fatalf("want an unavailable %s step, got %v", mkSP, err)
+		}
+	})
+
+	t.Run("cert-credentials", func(t *testing.T) {
+		az, args := answeringIdentityAz(t, `[{"customKeyIdentifier":"AB12","keyId":"k1"},{"customKeyIdentifier":"q83vAA==","keyId":"k2"}]`, 0)
+		got, err := az.CertCredentials(ctx, newAppClientID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := []string{"AB12", "q83vAA=="}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("got %v want %v", got, want)
+		}
+		wantArgs := []string{"ad", "app", "credential", "list", "--id", newAppClientID, "--cert", "-o", "json"}
+		if !reflect.DeepEqual(argvOf(t, args), wantArgs) {
+			t.Fatalf("argv %v want %v", argvOf(t, args), wantArgs)
+		}
+		az, _ = answeringIdentityAz(t, "[]", 0)
+		if got, err := az.CertCredentials(ctx, newAppClientID); err != nil || got == nil || len(got) != 0 {
+			t.Fatalf("no credentials is an empty non-nil list, got %v, %v", got, err)
+		}
+		for name, out := range map[string]string{
+			"missing-identifier": `[{"keyId":"k"}]`,
+			"null-identifier":    `[{"customKeyIdentifier":null}]`,
+			"empty-identifier":   `[{"customKeyIdentifier":""}]`,
+			"number-identifier":  `[{"customKeyIdentifier":7}]`,
+			"newline":            `[{"customKeyIdentifier":"AB\n12"}]`,
+			"null":               "null",
+			"object":             `{"customKeyIdentifier":"AB12"}`,
+			"empty":              "",
+			"trailing":           "[] []",
+		} {
+			az, _ := answeringIdentityAz(t, out, 0)
+			_, err := az.CertCredentials(ctx, newAppClientID)
+			requireMalformed(t, "cert-credentials/"+name, listCrd, err)
+		}
+		az, args = answeringIdentityAz(t, "[]", 0)
+		_, err = az.CertCredentials(ctx, "worker")
+		requireMalformed(t, "cert-credentials-input", listCrd, err)
+		requireNotRun(t, "a non-UUID app ID", args)
+	})
+
+	t.Run("cert-credential-append", func(t *testing.T) {
+		const file = "/tmp/cenci-public-cert/worker.pem"
+		ok := fmt.Sprintf(`{"appId":%q,"password":null,"tenant":%q}`, strings.ToUpper(newAppClientID), testTenantID)
+		az, args := answeringIdentityAz(t, ok, 0)
+		if err := az.CertCredentialAppend(ctx, newAppClientID, file); err != nil {
+			t.Fatal(err)
+		}
+		wantArgs := []string{"ad", "app", "credential", "reset", "--id", newAppClientID, "--cert", "@" + file, "--append", "-o", "json"}
+		if !reflect.DeepEqual(argvOf(t, args), wantArgs) {
+			t.Fatalf("argv %v want %v", argvOf(t, args), wantArgs)
+		}
+		for name, out := range map[string]string{
+			"another-app": fmt.Sprintf(`{"appId":%q}`, otherAppClientID),
+			"no-app-id":   `{"password":null}`,
+			"bad-app-id":  `{"appId":"not-a-uuid"}`,
+			"array":       "[" + ok + "]",
+			"empty":       "",
+			"trailing":    ok + " {}",
+		} {
+			az, _ := answeringIdentityAz(t, out, 0)
+			requireMalformed(t, "cert-credential-append/"+name, resetCr, az.CertCredentialAppend(ctx, newAppClientID, file))
+		}
+		for name, in := range map[string][2]string{
+			"relative-path": {newAppClientID, "worker.pem"},
+			"empty-path":    {newAppClientID, ""},
+			"newline-path":  {newAppClientID, "/tmp/a\nb.pem"},
+			"flag-id":       {"--all", file},
+			"name-id":       {"worker", file},
+		} {
+			az, args := answeringIdentityAz(t, ok, 0)
+			requireMalformed(t, "cert-credential-append-input/"+name, resetCr, az.CertCredentialAppend(ctx, in[0], in[1]))
+			requireNotRun(t, name, args)
+		}
+		az, _ = answeringIdentityAz(t, "", 1)
+		err := az.CertCredentialAppend(ctx, newAppClientID, file)
+		var azErr *AzError
+		if !errors.As(err, &azErr) || azErr.Step != resetCr || !IsAzUnavailable(err) {
+			t.Fatalf("want an unavailable %s step, got %v", resetCr, err)
 		}
 	})
 }

@@ -818,7 +818,7 @@ func TestIncidentSetupApplyGatesExitTwoBeforeAnyAzCall(t *testing.T) {
 		{name: "null-stdin-without-yes", named: "--yes", noYes: true, null: true},
 		{name: "yes-without-apply", named: "--yes", bare: "--yes"},
 		{name: "replace-auth-without-apply", named: "--replace-auth", bare: "--replace-auth"},
-		{name: "identity-new", named: "#1389", also: "create the identity with the preview's commands, then use --identity existing", identity: "new"},
+		{name: "identity-new-certificate-path-missing", named: "--certificate-path", also: "--identity new", identity: "new", drop: "--certificate-path"},
 		{name: "identity-omitted", named: "--identity", drop: "--identity"},
 		{name: "tenant-missing", named: "--tenant", drop: "--tenant"},
 		{name: "subscription-missing", named: "--subscription", drop: "--subscription"},
@@ -906,6 +906,66 @@ func TestIncidentSetupApplyGatesExitTwoBeforeAnyAzCall(t *testing.T) {
 			t.Fatalf("a refused apply changed the config or state directory:\nbefore:\n%s\nafter:\n%s", before, after)
 		}
 	})
+
+	t.Run("complete-new-identity-apply-yes-passes-every-gate", func(t *testing.T) {
+		// Control for the new-identity gates: the same complete input reaches az
+		// with the new-identity allowlist and stops at the first mutating call
+		// (scripted to fail, so verify never runs), so it exits 1, never 2.
+		w := newSetupWorld(t)
+		w.discoverAll()
+		w.ok("ad app list", "", "[]")
+		w.on("ad app create", "", 1, "", "")
+		cfg := w.writeConfig(t, nil)
+		res := w.runSetup(t, w.applyArgs(cfg, "new", "", yes...)...)
+		res.requireExit(t, 1)
+		requireContains(t, "stderr", res.stderr, "cenci incident setup:", "failed: application")
+		requireLacks(t, "stderr", res.stderr, "not an allowed setup subcommand", "cannot apply yet")
+		lines := w.traceLines(t)
+		if !hasTrace(lines, "ad app list") || !hasTrace(lines, "ad app create --display-name "+"cenci-incident-worker-") {
+			t.Fatalf("the new-identity apply did not reach the application lookup and create: %q", lines)
+		}
+		for _, l := range lines {
+			for _, later := range []string{"ad sp create", "ad app credential reset", "role assignment create"} {
+				if strings.HasPrefix(l, later) {
+					t.Fatalf("a call ran after the failed application step: %q", lines)
+				}
+			}
+		}
+		fi, err := os.Lstat(w.cert)
+		if err != nil || !fi.Mode().IsRegular() || fi.Mode().Perm() != 0600 {
+			t.Fatalf("the certificate file apply creates before the application: %v %v", fi, err)
+		}
+		requireContains(t, "setup journal", mustRead(t, filepath.Join(w.stateDir, incident.SetupJournalFile)), `"displayName": "cenci-incident-worker-`)
+	})
+
+	t.Run("apply-form-with-client-id-passes-the-usage-gate", func(t *testing.T) {
+		// --client-id with --identity new is an apply-only input (it adopts the
+		// journal's nonce app). With no journal there is nothing to adopt, so apply
+		// refuses at runtime (exit 1) and changes nothing; the preview form stays exit 2.
+		w := newSetupWorld(t)
+		w.discoverAll()
+		w.ok("ad app list", "", "[]")
+		cfg := w.writeConfig(t, nil)
+		before := snapshotPaths(t, cfg, w.stateDir, w.cert)
+		res := w.runSetup(t, w.applyArgs(cfg, "new", "", append([]string{"--client-id", cliClientID}, yes...)...)...)
+		res.requireExit(t, 1)
+		requireContains(t, "stderr", res.stderr, "cenci incident setup:")
+		requireLacks(t, "stderr", res.stderr, "cannot be used with", "not an allowed setup subcommand", "cannot apply yet")
+		lines := w.traceLines(t)
+		if !hasTrace(lines, "account show") {
+			t.Fatalf("the invocation never reached az: %q", lines)
+		}
+		for _, l := range lines {
+			for _, mutating := range []string{"ad app create", "ad sp create", "ad app credential reset", "role assignment create"} {
+				if strings.HasPrefix(l, mutating) {
+					t.Fatalf("a mutating call ran: %q", lines)
+				}
+			}
+		}
+		if after := snapshotPaths(t, cfg, w.stateDir, w.cert); after != before {
+			t.Fatalf("a refused apply changed the config, state directory or certificate file:\nbefore:\n%s\nafter:\n%s", before, after)
+		}
+	})
 }
 
 // ptySlave is the slave end of a fresh pseudo-terminal (linux only; the package
@@ -964,12 +1024,11 @@ func TestIncidentSetupApplyOnATerminalWithoutYesExitsOneNamingTheUnconfirmedFlag
 	}
 }
 
-// The --identity gates (omitted, or an explicit new) are usage errors on a
-// terminal exactly as headless: exit 2 before any az call, with no --yes.
+// With --apply an omitted --identity is a usage error on a terminal exactly as
+// headless: exit 2 before any az call, with no --yes.
 func TestIncidentSetupApplyIdentityGatesExitTwoOnATerminalWithoutYes(t *testing.T) {
 	for _, g := range []struct{ name, identity, drop, named, also string }{
-		{name: "identity-omitted", identity: "existing", drop: "--identity", named: "--identity", also: "--identity existing or managed"},
-		{name: "identity-new", identity: "new", named: "#1389", also: "create the identity with the preview's commands, then use --identity existing"},
+		{name: "identity-omitted", identity: "existing", drop: "--identity", named: "--identity", also: "--identity new, existing or managed"},
 	} {
 		t.Run(g.name, func(t *testing.T) {
 			w := newSetupWorld(t)
@@ -991,6 +1050,36 @@ func TestIncidentSetupApplyIdentityGatesExitTwoOnATerminalWithoutYes(t *testing.
 				t.Fatalf("a rejected invocation changed the config or state directory:\nbefore:\n%s\nafter:\n%s", before, after)
 			}
 		})
+	}
+}
+
+// --identity new is accepted by the apply usage gate. On a terminal without
+// --yes a missing --certificate-path is a plan blocker (exit 1, before the
+// prompt, no mutating az call), exactly like the existing identity.
+func TestIncidentSetupApplyNewIdentityOnATerminalWithoutCertificatePathExitsOneBeforeThePrompt(t *testing.T) {
+	w := newSetupWorld(t)
+	w.discoverAll()
+	w.ok("ad app list", "", "[]")
+	cfg := w.writeConfig(t, nil)
+	before := snapshotPaths(t, cfg, w.stateDir)
+	w.installAz(t)
+	res := w.execSetupStdin(t, w.setupEnv(t), ptySlave(t), w.applyArgs(cfg, "new", "--certificate-path")...)
+	res.requireExit(t, 1)
+	requireContains(t, "stderr", res.stderr, "cenci incident setup:", "--certificate-path")
+	requireLacks(t, "output", res.stdout+res.stderr, "Apply this plan?", "not available yet", "#1389")
+	lines := w.traceLines(t)
+	if !hasTrace(lines, "account show") {
+		t.Fatalf("discovery did not run: %q", lines)
+	}
+	for _, l := range lines {
+		for _, mutating := range []string{"ad app create", "ad sp create", "ad app credential reset", "role assignment create"} {
+			if strings.HasPrefix(l, mutating) {
+				t.Fatalf("a mutating call ran: %q", l)
+			}
+		}
+	}
+	if after := snapshotPaths(t, cfg, w.stateDir); after != before {
+		t.Fatalf("a refused apply changed the config or state directory:\nbefore:\n%s\nafter:\n%s", before, after)
 	}
 }
 

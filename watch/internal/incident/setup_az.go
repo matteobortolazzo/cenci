@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 )
@@ -67,6 +68,33 @@ type Az struct {
 // Nothing here logs in, deletes, removes or resets anything.
 var azApply = append(append([][]string(nil), azReadOnly...), []string{"role", "assignment", "create"})
 
+// azIdentityLookups are the three reads only the new-identity apply adds: they
+// find the application, its service principal and its certificate credentials.
+var azIdentityLookups = [][]string{
+	{"ad", "app", "list"},
+	{"ad", "sp", "list"},
+	{"ad", "app", "credential", "list"},
+}
+
+// azApplyNewIdentity is the closed set `cenci incident setup --apply
+// --identity new` may run: azApply, the three identity lookups and the three
+// creates that make the identity. Nothing here deletes anything; `ad app
+// credential reset` is further limited to the appending shape (see
+// credentialResetShape) and `ad sp create-for-rbac` is not a prefix of any entry.
+var azApplyNewIdentity = append(append(append([][]string(nil), azApply...), azIdentityLookups...),
+	[]string{"ad", "app", "create"}, []string{"ad", "sp", "create"}, []string{"ad", "app", "credential", "reset"})
+
+// NewIdentityApplyAz locates az on PATH and allows the new-identity apply set.
+// Only `--apply --identity new` uses it.
+func NewIdentityApplyAz() (*Az, error) {
+	a, err := NewAz()
+	if err != nil {
+		return nil, err
+	}
+	a.allow = azApplyNewIdentity
+	return a, nil
+}
+
 // NewAz locates az on PATH.
 func NewAz() (*Az, error) {
 	bin, err := exec.LookPath("az")
@@ -111,6 +139,28 @@ func (a *Az) runReadOnly(ctx context.Context, args ...string) (string, error) {
 	return a.run(ctx, args...)
 }
 
+// runLookup runs one of the identity lookups, refusing every argv outside them
+// and the read-only set whatever this Az allows.
+func (a *Az) runLookup(ctx context.Context, args ...string) (string, error) {
+	if _, ok := stepIn(azIdentityLookups, args); !ok {
+		return "", &AzError{Step: "(refused)", Reason: "not an identity lookup subcommand"}
+	}
+	return a.run(ctx, args...)
+}
+
+// credentialResetShape reports whether args is exactly `ad app credential reset
+// --id <uuid> --cert @<absolute path> --append`. Without --append a reset would
+// drop the app's other credentials; --create-cert, --keyvault, --password and
+// every other flag would put key material in az's hands, so any other shape is
+// refused.
+func credentialResetShape(args []string) bool {
+	if len(args) != 9 || args[4] != "--id" || !uuidPattern.MatchString(args[5]) || args[6] != "--cert" || args[8] != "--append" {
+		return false
+	}
+	file, ok := strings.CutPrefix(args[7], "@")
+	return ok && filepath.IsAbs(file) && !strings.ContainsAny(file, "\x00\r\n")
+}
+
 // run runs a subcommand of this Az's allowlist with JSON output, refusing every
 // other argv before anything is executed.
 func (a *Az) run(ctx context.Context, args ...string) (string, error) {
@@ -121,6 +171,9 @@ func (a *Az) run(ctx context.Context, args ...string) (string, error) {
 	step, ok := stepIn(allow, args)
 	if !ok {
 		return "", &AzError{Step: "(refused)", Reason: "not an allowed setup subcommand"}
+	}
+	if step == "ad app credential reset" && !credentialResetShape(args) {
+		return "", &AzError{Step: "(refused)", Reason: "a credential reset must append a certificate file"}
 	}
 	out, err := command(ctx, "", nil, nil, a.bin, append(append([]string(nil), args...), "-o", "json")...)
 	if err == nil {
@@ -308,6 +361,18 @@ func (a *Az) WorkspaceShow(ctx context.Context, id ARMID) (Workspace, error) {
 // ServicePrincipal is the identity az reports for a client or object ID.
 type ServicePrincipal struct{ AppID, ObjectID string }
 
+type servicePrincipalDoc struct {
+	AppID string `json:"appId"`
+	ID    string `json:"id"`
+}
+
+func (d servicePrincipalDoc) validate(step string) (ServicePrincipal, error) {
+	if !uuidPattern.MatchString(d.AppID) || !uuidPattern.MatchString(d.ID) {
+		return ServicePrincipal{}, malformed(step)
+	}
+	return ServicePrincipal{AppID: d.AppID, ObjectID: d.ID}, nil
+}
+
 // SPShow resolves a service principal by client ID or object ID, never by name.
 func (a *Az) SPShow(ctx context.Context, id string) (ServicePrincipal, error) {
 	const step = "ad sp show"
@@ -318,17 +383,11 @@ func (a *Az) SPShow(ctx context.Context, id string) (ServicePrincipal, error) {
 	if err != nil {
 		return ServicePrincipal{}, err
 	}
-	var doc struct {
-		AppID string `json:"appId"`
-		ID    string `json:"id"`
-	}
+	var doc servicePrincipalDoc
 	if err := decodeOne(step, out, &doc); err != nil {
 		return ServicePrincipal{}, err
 	}
-	if !uuidPattern.MatchString(doc.AppID) || !uuidPattern.MatchString(doc.ID) {
-		return ServicePrincipal{}, malformed(step)
-	}
-	return ServicePrincipal{AppID: doc.AppID, ObjectID: doc.ID}, nil
+	return doc.validate(step)
 }
 
 // RoleAssignmentList lists every assignment the principal holds, in all
@@ -414,6 +473,207 @@ func (a *Az) RoleAssignmentsAt(ctx context.Context, objectID, scope string) ([]S
 		list = append(list, rec)
 	}
 	return list, nil
+}
+
+const (
+	// maxApplicationNameRunes bounds an application display name: a base of at most
+	// 120 characters, a hyphen and a 16-character nonce.
+	maxApplicationNameRunes = 137
+	maxCertificatePathRunes = 4096
+)
+
+// Application is the app registration az reports for a client ID or display name.
+type Application struct{ AppID, ObjectID, DisplayName string }
+
+type applicationDoc struct {
+	AppID       string `json:"appId"`
+	ID          string `json:"id"`
+	DisplayName string `json:"displayName"`
+}
+
+func (d applicationDoc) validate(step string) (Application, error) {
+	if !uuidPattern.MatchString(d.AppID) || !uuidPattern.MatchString(d.ID) || !PrintableBounded(d.DisplayName, maxApplicationNameRunes) {
+		return Application{}, malformed(step)
+	}
+	return Application{AppID: d.AppID, ObjectID: d.ID, DisplayName: d.DisplayName}, nil
+}
+
+// AppCreate creates an application with exactly this display name and checks
+// that az echoes that name. The name is the journaled nonce name.
+func (a *Az) AppCreate(ctx context.Context, name string) (Application, error) {
+	const step = "ad app create"
+	if !PrintableBounded(name, maxApplicationNameRunes) {
+		return Application{}, malformed(step)
+	}
+	out, err := a.run(ctx, "ad", "app", "create", "--display-name", name)
+	if err != nil {
+		return Application{}, err
+	}
+	var doc applicationDoc
+	if err := decodeOne(step, out, &doc); err != nil {
+		return Application{}, err
+	}
+	app, err := doc.validate(step)
+	if err != nil || app.DisplayName != name {
+		return Application{}, malformed(step)
+	}
+	return app, nil
+}
+
+// AppListByName lists the applications whose display name is exactly name. The
+// server-side filter is a name match az evaluates, so the answer is compared
+// again here and a longer or shorter name is never counted. A quote in the name
+// is doubled for OData; the filter stays one argv element.
+func (a *Az) AppListByName(ctx context.Context, name string) ([]Application, error) {
+	const step = "ad app list"
+	if !PrintableBounded(name, maxApplicationNameRunes) {
+		return nil, malformed(step)
+	}
+	out, err := a.runLookup(ctx, "ad", "app", "list", "--filter", "displayName eq '"+strings.ReplaceAll(name, "'", "''")+"'")
+	if err != nil {
+		return nil, err
+	}
+	var docs []applicationDoc
+	if err := decodeOne(step, out, &docs); err != nil || docs == nil {
+		return nil, malformed(step)
+	}
+	apps := make([]Application, 0, len(docs))
+	for _, d := range docs {
+		if d.DisplayName != name {
+			continue
+		}
+		app, err := d.validate(step)
+		if err != nil {
+			return nil, err
+		}
+		apps = append(apps, app)
+	}
+	return apps, nil
+}
+
+// AppListByID lists the applications with this client ID. Every item must carry
+// that client ID, so a filter az ignored is a malformed answer, not a match.
+func (a *Az) AppListByID(ctx context.Context, clientID string) ([]Application, error) {
+	const step = "ad app list"
+	if !uuidPattern.MatchString(clientID) {
+		return nil, malformed(step)
+	}
+	out, err := a.runLookup(ctx, "ad", "app", "list", "--filter", "appId eq '"+clientID+"'")
+	if err != nil {
+		return nil, err
+	}
+	var docs []applicationDoc
+	if err := decodeOne(step, out, &docs); err != nil || docs == nil {
+		return nil, malformed(step)
+	}
+	apps := make([]Application, 0, len(docs))
+	for _, d := range docs {
+		app, err := d.validate(step)
+		if err != nil || !strings.EqualFold(app.AppID, clientID) {
+			return nil, malformed(step)
+		}
+		apps = append(apps, app)
+	}
+	return apps, nil
+}
+
+// SPListByApp lists the service principals of an application: none or one.
+func (a *Az) SPListByApp(ctx context.Context, clientID string) ([]ServicePrincipal, error) {
+	const step = "ad sp list"
+	if !uuidPattern.MatchString(clientID) {
+		return nil, malformed(step)
+	}
+	out, err := a.runLookup(ctx, "ad", "sp", "list", "--filter", "appId eq '"+clientID+"'")
+	if err != nil {
+		return nil, err
+	}
+	var docs []servicePrincipalDoc
+	if err := decodeOne(step, out, &docs); err != nil || docs == nil || len(docs) > 1 {
+		return nil, malformed(step)
+	}
+	sps := make([]ServicePrincipal, 0, len(docs))
+	for _, d := range docs {
+		sp, err := d.validate(step)
+		if err != nil || !strings.EqualFold(sp.AppID, clientID) {
+			return nil, malformed(step)
+		}
+		sps = append(sps, sp)
+	}
+	return sps, nil
+}
+
+// SPCreate creates the service principal of an application and checks that az
+// echoes that application.
+func (a *Az) SPCreate(ctx context.Context, clientID string) (ServicePrincipal, error) {
+	const step = "ad sp create"
+	if !uuidPattern.MatchString(clientID) {
+		return ServicePrincipal{}, malformed(step)
+	}
+	out, err := a.run(ctx, "ad", "sp", "create", "--id", clientID)
+	if err != nil {
+		return ServicePrincipal{}, err
+	}
+	var doc servicePrincipalDoc
+	if err := decodeOne(step, out, &doc); err != nil {
+		return ServicePrincipal{}, err
+	}
+	sp, err := doc.validate(step)
+	if err != nil || !strings.EqualFold(sp.AppID, clientID) {
+		return ServicePrincipal{}, malformed(step)
+	}
+	return sp, nil
+}
+
+// CertCredentials lists the certificate credentials of an application as the raw
+// customKeyIdentifier strings; the caller decides whether it recognizes them.
+func (a *Az) CertCredentials(ctx context.Context, clientID string) ([]string, error) {
+	const step = "ad app credential list"
+	if !uuidPattern.MatchString(clientID) {
+		return nil, malformed(step)
+	}
+	out, err := a.runLookup(ctx, "ad", "app", "credential", "list", "--id", clientID, "--cert")
+	if err != nil {
+		return nil, err
+	}
+	var docs []struct {
+		Identifier string `json:"customKeyIdentifier"`
+	}
+	if err := decodeOne(step, out, &docs); err != nil || docs == nil {
+		return nil, malformed(step)
+	}
+	identifiers := make([]string, 0, len(docs))
+	for _, d := range docs {
+		if !PrintableBounded(d.Identifier, maxSetupTextRunes) {
+			return nil, malformed(step)
+		}
+		identifiers = append(identifiers, d.Identifier)
+	}
+	return identifiers, nil
+}
+
+// CertCredentialAppend registers the public certificate in the file at path on
+// the application, keeping its other credentials (--append). Only the file path
+// is passed to az, never certificate or key text, and az's answer is reduced to
+// the check that it names this application.
+func (a *Az) CertCredentialAppend(ctx context.Context, clientID, path string) error {
+	const step = "ad app credential reset"
+	if !uuidPattern.MatchString(clientID) || !filepath.IsAbs(path) || !PrintableBounded(path, maxCertificatePathRunes) {
+		return malformed(step)
+	}
+	out, err := a.run(ctx, "ad", "app", "credential", "reset", "--id", clientID, "--cert", "@"+path, "--append")
+	if err != nil {
+		return err
+	}
+	var doc struct {
+		AppID string `json:"appId"`
+	}
+	if err := decodeOne(step, out, &doc); err != nil {
+		return err
+	}
+	if !uuidPattern.MatchString(doc.AppID) || !strings.EqualFold(doc.AppID, clientID) {
+		return malformed(step)
+	}
+	return nil
 }
 
 // RoleAssignmentCreate creates one assignment of a built-in role to a service

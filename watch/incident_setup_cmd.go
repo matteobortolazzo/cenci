@@ -54,7 +54,7 @@ func runIncidentSetup(args []string) {
 	fs.StringVar(&f.tenant, "tenant", "", "Entra tenant UUID the worker authenticates in (default: the az login tenant)")
 	fs.StringVar(&f.subscription, "subscription", "", "subscription UUID to search for the namespace and workspaces (default: the az default)")
 	fs.StringVar(&f.identity, "identity", incident.SetupIdentityNew, "worker identity: new, existing or managed")
-	fs.StringVar(&f.clientID, "client-id", "", "client ID of the existing identity (required for --identity existing; optional for managed)")
+	fs.StringVar(&f.clientID, "client-id", "", "client ID of the existing identity (required for --identity existing; optional for managed; with --apply --identity new it adopts only the application this setup journal recorded)")
 	fs.StringVar(&f.principalObjectID, "principal-object-id", "", "object ID of the managed identity's principal")
 	fs.StringVar(&f.displayName, "display-name", "", "display name for a new identity (default "+defaultWorkerDisplayName+")")
 	fs.StringVar(&f.certificatePath, "certificate-path", "", "absolute path of the worker certificate and key PEM file")
@@ -63,8 +63,8 @@ func runIncidentSetup(args []string) {
 		f.workspaces = append(f.workspaces, v)
 		return nil
 	})
-	fs.BoolVar(&f.apply, "apply", false, "carry the plan out after confirmation: create the missing role assignments, write the config's auth section and verify")
-	fs.BoolVar(&f.yes, "yes", false, "with --apply, confirm without a prompt (required when stdin is not a terminal)")
+	fs.BoolVar(&f.apply, "apply", false, "carry the plan out after confirmation: with --identity new create the application, its service principal and a certificate credential, then create the missing role assignments, write the config's auth section and verify")
+	fs.BoolVar(&f.yes, "yes", false, "with --apply, confirm without a prompt (required when stdin is not a terminal; needs --certificate-path unless the identity is managed)")
 	fs.BoolVar(&f.replaceAuth, "replace-auth", false, "with --apply, replace an existing config auth section that differs from the plan")
 	_ = fs.Parse(args)
 	rejectExtra("cenci incident setup", fs.Args())
@@ -107,9 +107,14 @@ func runIncidentSetup(args []string) {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	var az *incident.Az // nil when az is not on PATH
-	if req.apply {
+	switch {
+	case req.apply && req.identity == incident.SetupIdentityNew:
+		// Only a new identity may create the application, its service principal and
+		// the certificate credential.
+		az, err = incident.NewIdentityApplyAz()
+	case req.apply:
 		az, err = incident.NewApplyAz()
-	} else {
+	default:
 		az, err = incident.NewAz()
 	}
 	if err != nil {
@@ -178,8 +183,8 @@ func (r setupRequest) missingApplyInputs(cfg incident.Config) error {
 			return fmt.Errorf("--apply requires --workspace-resource-id %s=WORKSPACE_RESOURCE_ID", res.Workspace)
 		}
 	}
-	if r.identity == incident.SetupIdentityExisting && !r.set["certificate-path"] {
-		return fmt.Errorf("--apply requires --certificate-path with --identity existing")
+	if r.identity != incident.SetupIdentityManaged && !r.set["certificate-path"] {
+		return fmt.Errorf("--apply requires --certificate-path with --identity %s", r.identity)
 	}
 	if r.identity == incident.SetupIdentityManaged && !r.set["principal-object-id"] {
 		return fmt.Errorf("--apply requires --principal-object-id with --identity managed")
@@ -201,11 +206,8 @@ func (f setupFlags) validate() (setupRequest, error) {
 	if !f.apply && f.replaceAuth {
 		return req, fmt.Errorf("--replace-auth requires --apply")
 	}
-	switch {
-	case f.apply && !f.set["identity"]:
-		return req, fmt.Errorf("--apply requires --identity existing or managed")
-	case f.apply && f.identity == incident.SetupIdentityNew:
-		return req, fmt.Errorf("--apply --identity new is not available yet (cenci issue #1389): create the identity with the preview's commands, then use --identity existing")
+	if f.apply && !f.set["identity"] {
+		return req, fmt.Errorf("--apply requires --identity new, existing or managed")
 	}
 	switch f.identity {
 	case incident.SetupIdentityNew, incident.SetupIdentityExisting, incident.SetupIdentityManaged:
@@ -219,11 +221,17 @@ func (f setupFlags) validate() (setupRequest, error) {
 			return req, fmt.Errorf("--%s must be a UUID", u.name)
 		}
 	}
+	// --client-id with a new identity adopts the application a previous apply
+	// recorded in its journal, so only --apply takes it.
+	newFlags := []string{"principal-object-id"}
+	if !f.apply {
+		newFlags = append(newFlags, "client-id")
+	}
 	for _, c := range []struct {
 		identity string
 		flags    []string
 	}{
-		{incident.SetupIdentityNew, []string{"client-id", "principal-object-id"}},
+		{incident.SetupIdentityNew, newFlags},
 		{incident.SetupIdentityExisting, []string{"principal-object-id", "display-name"}},
 		{incident.SetupIdentityManaged, []string{"display-name", "certificate-path"}},
 	} {

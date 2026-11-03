@@ -2,6 +2,7 @@ package incident
 
 import (
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -379,4 +380,167 @@ func TestSetupShellQuoteExpandsToExactlyTheValue(t *testing.T) {
 			}
 		})
 	}
+}
+
+// ---- apply for a new identity (#1389) ---------------------------------------
+
+const newIdentityCertPath = "/etc/cenci/worker.pem"
+
+// discoveredNewIdentityPlan is a fully discovered --identity new plan: the app
+// does not exist yet, so there is no client or object ID.
+func discoveredNewIdentityPlan(t *testing.T, certExists bool) SetupPlan {
+	t.Helper()
+	cfg := writeSetupConfig(t, func(c *Config) { c.StateDir = filepath.Join(t.TempDir(), "state") }, "")
+	return asNewIdentity(newApplyPlan(t, cfg, ""), newIdentityCertPath, certExists)
+}
+
+func TestSetupApplyBlockersForANewIdentity(t *testing.T) {
+	for _, exists := range []bool{false, true} {
+		blockers := discoveredNewIdentityPlan(t, exists).ApplyBlockers()
+		if len(blockers) != 0 {
+			t.Fatalf("a discovered new-identity plan (certificate file present=%v) has blockers: %q", exists, blockers)
+		}
+	}
+
+	cases := []struct {
+		name, flag string
+		edit       func(p *SetupPlan)
+	}{
+		{"certificate-path-missing", "--certificate-path", func(p *SetupPlan) { p.CertificatePath = "" }},
+		{"tenant-unknown", "--tenant", func(p *SetupPlan) { p.Tenant = "" }},
+		{"subscription-unknown", "--subscription", func(p *SetupPlan) { p.Subscription = "" }},
+		{"identity-unknown", "--identity", func(p *SetupPlan) { p.Identity = "service-principal" }},
+		{"namespace-unresolved", "--service-bus-namespace-id", func(p *SetupPlan) { p.Namespace, p.NamespaceNote = nil, "not found" }},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			p := discoveredNewIdentityPlan(t, false)
+			c.edit(&p)
+			if got := strings.Join(p.ApplyBlockers(), "\n"); !strings.Contains(got, c.flag) {
+				t.Fatalf("blockers %q do not name %q", got, c.flag)
+			}
+		})
+	}
+
+	t.Run("a-client-id-for-the-recorded-app-is-not-a-blocker", func(t *testing.T) {
+		p := discoveredNewIdentityPlan(t, false)
+		p.ClientID = newAppClientID
+		if got := p.ApplyBlockers(); len(got) != 0 {
+			t.Fatalf("blockers %q", got)
+		}
+	})
+	t.Run("no-blocker-mentions-the-retired-restriction", func(t *testing.T) {
+		p := discoveredNewIdentityPlan(t, false)
+		p.CertificatePath = ""
+		if got := strings.Join(p.ApplyBlockers(), "\n"); strings.Contains(got, "1389") || strings.Contains(got, "not available yet") {
+			t.Fatalf("blockers still carry the #1389 restriction: %q", got)
+		}
+	})
+	t.Run("existing-identity-still-needs-its-principal", func(t *testing.T) {
+		p := newApplyPlan(t, writeSetupConfig(t, nil, ""), newIdentityCertPath)
+		p.ObjectID = ""
+		if got := strings.Join(p.ApplyBlockers(), "\n"); !strings.Contains(got, "--client-id") {
+			t.Fatalf("blockers %q do not name --client-id", got)
+		}
+	})
+}
+
+func TestSetupProposedAuthOfANewIdentityUsesItsKnownClientID(t *testing.T) {
+	p := discoveredNewIdentityPlan(t, false)
+	if got := p.ProposedAuth(); got.ClientID != appIDPlaceholder || got.CertificatePath != newIdentityCertPath {
+		t.Fatalf("an app that does not exist yet keeps the %s placeholder, got %+v", appIDPlaceholder, got)
+	}
+	p.ClientID = newAppClientID
+	want := AuthConfig{Mode: AuthModeCertificate, TenantID: testTenantID, ClientID: newAppClientID, CertificatePath: newIdentityCertPath}
+	if got := p.ProposedAuth(); got != want {
+		t.Fatalf("proposed auth %+v, want %+v", got, want)
+	}
+}
+
+func lineWith(out, needle string) string {
+	for _, l := range strings.Split(out, "\n") {
+		if strings.Contains(l, needle) {
+			return l
+		}
+	}
+	return ""
+}
+
+func TestSetupRenderApplyForANewIdentity(t *testing.T) {
+	const nonce = "cenci-incident-worker-0123456789abcdef"
+	render := func(t *testing.T, p SetupPlan) string {
+		t.Helper()
+		p.DisplayName = nonce
+		out, err := p.RenderApply(false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+
+	t.Run("create", func(t *testing.T) {
+		out := render(t, discoveredNewIdentityPlan(t, false))
+		for _, want := range []string{"Identity:     new", `application: create "` + nonce + `"`, "service principal: create", "certificate credential:", "--append"} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("the apply plan lacks %q:\n%s", want, out)
+			}
+		}
+		file := lineWith(out, newIdentityCertPath+":")
+		for _, want := range []string{"created", "0600", "never overwritten"} {
+			if !strings.Contains(file, want) {
+				t.Fatalf("the certificate file line %q lacks %q:\n%s", file, want, out)
+			}
+		}
+		if strings.Contains(file, "read only") {
+			t.Fatalf("a file apply creates is not read only: %q", file)
+		}
+		if strings.Contains(out, "Principal:    (object ID)") {
+			t.Fatalf("the plan prints an empty principal for an identity that does not exist yet:\n%s", out)
+		}
+	})
+	t.Run("adopt", func(t *testing.T) {
+		p := discoveredNewIdentityPlan(t, false)
+		p.ClientID = newAppClientID
+		out := render(t, p)
+		for _, want := range []string{`application: adopt ` + newAppClientID + ` ("` + nonce + `")`, "Client ID:    " + newAppClientID, `"clientId": "` + newAppClientID + `"`} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("the apply plan lacks %q:\n%s", want, out)
+			}
+		}
+		if strings.Contains(out, "application: create") || strings.Contains(out, appIDPlaceholder) {
+			t.Fatalf("an adopted application is not created, and its ID is known:\n%s", out)
+		}
+	})
+	t.Run("existing-certificate-file", func(t *testing.T) {
+		out := render(t, discoveredNewIdentityPlan(t, true))
+		file := lineWith(out, newIdentityCertPath+":")
+		if !strings.Contains(file, "exists") || !strings.Contains(file, "never overwritten") || strings.Contains(file, "created") {
+			t.Fatalf("the certificate file line %q must say the file exists and is never overwritten:\n%s", file, out)
+		}
+		if !strings.Contains(out, "certificate credential:") {
+			t.Fatalf("an existing file's public certificate is still registered:\n%s", out)
+		}
+	})
+	// Q11 and #1402 together: a new identity's verify waits when this run created
+	// any part of the identity or a role, or a role assignment was attempted recently.
+	t.Run("wait-rule-names-identity-creates-and-recent-attempts", func(t *testing.T) {
+		out := render(t, discoveredNewIdentityPlan(t, false))
+		wait := lineWith(out, "Afterwards setup runs")
+		for _, want := range []string{"waits up to 10 minutes", "the identity and role assignments", "this run created any of them", "this run or a run in the last 10 minutes", "attempted a role assignment"} {
+			if !strings.Contains(wait, want) {
+				t.Fatalf("the wait line %q lacks %q:\n%s", wait, want, out)
+			}
+		}
+	})
+	t.Run("existing-identity-is-unchanged", func(t *testing.T) {
+		p := newApplyPlan(t, writeSetupConfig(t, nil, ""), newIdentityCertPath)
+		out, err := p.RenderApply(false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(out, "read only; the certificate and private key are never created or changed") ||
+			strings.Contains(out, "application:") || strings.Contains(out, "service principal:") {
+			t.Fatalf("an existing identity's plan must not describe identity creation:\n%s", out)
+		}
+	})
 }

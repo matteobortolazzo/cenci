@@ -3,13 +3,22 @@ package incident
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha1"
+	"crypto/x509"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"slices"
 	"strconv"
@@ -17,6 +26,7 @@ import (
 	"syscall"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 )
@@ -42,6 +52,12 @@ type applyRule struct {
 	prefix, needle, out, errOut string
 	code                        int
 	hang                        bool
+	// echoName replaces %NAME% in out with the --display-name the call carried,
+	// so a fake app create can echo the nonce name the engine chose.
+	echoName bool
+	// snapshot is a file the setup journal is copied to when the rule answers,
+	// to show what the journal held at that moment.
+	snapshot string
 }
 
 // applyWorld is a plan over a real config file, a rule-based fake az (re-reads
@@ -77,6 +93,11 @@ type applyWorld struct {
 	// verify, when set, decides the Verify seam's verdict instead of verifyOK; the
 	// call is still logged and its wait and config recorded.
 	verify func(ctx context.Context, cfg Config, wait time.Duration) bool
+	// identityAz runs the world with NewIdentityApplyAz, as --identity new does.
+	identityAz bool
+	// onConfirm runs inside Confirm, after the plan was shown and before the
+	// answer is returned: the last moment before the first write.
+	onConfirm func()
 }
 
 type failingWriter struct{}
@@ -190,6 +211,12 @@ func (w *applyWorld) install() {
 		if r.hang {
 			files["hang"] = ""
 		}
+		if r.echoName {
+			files["echo"] = ""
+		}
+		if r.snapshot != "" {
+			files["snap"] = r.snapshot
+		}
 		for ext, body := range files {
 			if err := os.WriteFile(filepath.Join(fix, key+"."+ext), []byte(body), 0600); err != nil {
 				w.t.Fatal(err)
@@ -203,6 +230,17 @@ func (w *applyWorld) install() {
 FIX='` + fix + `'
 printf '%s\n' "$*" >> '` + w.path("az.log") + `'
 (readlink /proc/self/fd/0 2>/dev/null || echo unknown) >> '` + w.path("az.stdin") + `'
+prev=
+name=
+for a in "$@"; do
+  case "$a" in
+    @/*)
+      cp "${a#@}" '` + w.path("uploaded.pem") + `' 2>/dev/null
+      stat -c %a "$(dirname "${a#@}")" > '` + w.path("uploaded.dirmode") + `' 2>/dev/null;;
+  esac
+  [ "$prev" = "--display-name" ] && name=$a
+  prev=$a
+done
 key=unmatched
 while IFS='|' read -r prefix needle k; do
   case "$*" in
@@ -212,8 +250,13 @@ while IFS='|' read -r prefix needle k; do
       esac;;
   esac
 done < "$FIX/rules"
+[ -f "$FIX/$key.snap" ] && cp '` + w.journalPath() + `' "$(cat "$FIX/$key.snap")" 2>/dev/null
 [ -f "$FIX/$key.hang" ] && exec sleep 30
-[ -f "$FIX/$key.out" ] && cat "$FIX/$key.out"
+if [ -f "$FIX/$key.echo" ]; then
+  sed "s|%NAME%|$name|g" "$FIX/$key.out"
+else
+  [ -f "$FIX/$key.out" ] && cat "$FIX/$key.out"
+fi
 [ -f "$FIX/$key.err" ] && cat "$FIX/$key.err" >&2
 code=99
 [ -f "$FIX/$key.code" ] && code=$(cat "$FIX/$key.code")
@@ -229,7 +272,11 @@ func (w *applyWorld) run() error { return w.runCtx(context.Background()) }
 func (w *applyWorld) runCtx(ctx context.Context) error {
 	w.t.Helper()
 	w.install()
-	az, err := NewApplyAz()
+	newAz := NewApplyAz
+	if w.identityAz {
+		newAz = NewIdentityApplyAz
+	}
+	az, err := newAz()
 	if err != nil {
 		w.t.Fatal(err)
 	}
@@ -255,6 +302,9 @@ func (w *applyWorld) runCtx(ctx context.Context) error {
 		Confirm: func() bool {
 			w.confirms++
 			w.planSeen = w.stdout.String()
+			if w.onConfirm != nil {
+				w.onConfirm()
+			}
 			return w.confirm
 		},
 		Verify: func(ctx context.Context, cfg Config, wait time.Duration) bool {
@@ -295,11 +345,24 @@ func (w *applyWorld) lines(name string) []string {
 	return strings.Split(strings.TrimSuffix(string(b), "\n"), "\n")
 }
 
-// mutating is every logged az call outside the preview's read-only set.
-func (w *applyWorld) mutating() []string {
+// identityReads are the reads only the new-identity allowlist adds to the
+// preview's set. They change nothing, so they are not mutating calls.
+var identityReads = [][]string{{"ad", "app", "list"}, {"ad", "sp", "list"}, {"ad", "app", "credential", "list"}}
+
+// mutating is every logged az call outside the read-only sets.
+func (w *applyWorld) mutating() []string { return w.mutatingSince(0) }
+
+// mutatingSince is mutating over the az calls logged after the first n.
+func (w *applyWorld) mutatingSince(n int) []string {
 	var out []string
-	for _, l := range w.lines("az.log") {
-		if _, ok := stepIn(azReadOnly, strings.Fields(l)); !ok && l != "VERIFY" {
+	lines := w.lines("az.log")
+	if n > len(lines) {
+		n = len(lines)
+	}
+	for _, l := range lines[n:] {
+		_, readOnly := stepIn(azReadOnly, strings.Fields(l))
+		_, identityRead := stepIn(identityReads, strings.Fields(l))
+		if !readOnly && !identityRead && l != "VERIFY" {
 			out = append(out, l)
 		}
 	}
@@ -1434,7 +1497,10 @@ func TestSetupApplyBlockersNameTheFlagThatFixesEach(t *testing.T) {
 		}},
 		{"certificate-path-missing", "--certificate-path", func(p *SetupPlan) { p.CertificatePath, p.CertificateExists = "", false }},
 		{"certificate-file-missing", "--certificate-path", func(p *SetupPlan) { p.CertificateExists = false }},
-		{"identity-new", "--identity", func(p *SetupPlan) { p.Identity = SetupIdentityNew }},
+		{"identity-unknown", "--identity", func(p *SetupPlan) { p.Identity = "service-principal" }},
+		{"new-certificate-path-missing", "--certificate-path", func(p *SetupPlan) {
+			p.Identity, p.ClientID, p.ObjectID, p.CertificatePath, p.CertificateExists = SetupIdentityNew, "", "", "", false
+		}},
 	}
 	if got := newApplyWorld(t).plan.ApplyBlockers(); len(got) != 0 {
 		t.Fatalf("control: a fully discovered plan has blockers: %q", got)
@@ -1456,4 +1522,1119 @@ func TestSetupApplyBlockersNameTheFlagThatFixesEach(t *testing.T) {
 			}
 		})
 	}
+}
+
+// ---- --identity new (#1389) -------------------------------------------------
+
+const (
+	newAppClientID   = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+	newAppObjectID   = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+	otherAppClientID = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+
+	identityBaseName = "cenci-incident-worker"
+	seededNonceHex   = "0123456789abcdef"
+
+	// The identity steps, in run order, as the journal and the failure report name them.
+	stepCertFile   = "certificate file"
+	stepApp        = "application"
+	stepSP         = "service principal"
+	stepCredential = "certificate credential"
+
+	garbagePEM = "-----BEGIN PRIVATE KEY-----\nc2VudGluZWwta2V5LW1hdGVyaWFs\n-----END PRIVATE KEY-----\n"
+)
+
+var (
+	identitySPDoc    = fmt.Sprintf(`{"appId":%q,"id":%q}`, newAppClientID, applyObjectID)
+	identityResetDoc = fmt.Sprintf(`{"appId":%q,"password":null,"tenant":%q}`, newAppClientID, testTenantID)
+)
+
+func nonceNamePattern(base string) *regexp.Regexp {
+	return regexp.MustCompile("^" + regexp.QuoteMeta(base) + "-[0-9a-f]{16}$")
+}
+
+func appDoc(clientID, name string) string {
+	return fmt.Sprintf(`{"appId":%q,"id":%q,"displayName":%q}`, clientID, newAppObjectID, name)
+}
+
+// asNewIdentity turns a plan into what the CLI hands Apply for --identity new:
+// no client or object ID yet, a display name and a certificate path.
+func asNewIdentity(p SetupPlan, cert string, exists bool) SetupPlan {
+	p.Identity, p.ClientID, p.ObjectID, p.DisplayName = SetupIdentityNew, "", "", identityBaseName
+	p.CertificatePath, p.CertificateExists = cert, exists
+	return p
+}
+
+// rule sets a full rule, replacing the one with the same prefix and needle.
+func (w *applyWorld) rule(r applyRule) {
+	for i, old := range w.rules {
+		if old.prefix == r.prefix && old.needle == r.needle {
+			w.rules[i] = r
+			return
+		}
+	}
+	w.rules = append(w.rules, r)
+}
+
+// identityAzure scripts Azure for a first --identity new run: nothing exists
+// yet and every create succeeds and echoes its request.
+func (w *applyWorld) identityAzure() {
+	w.ok("ad app list", "displayName eq", "[]")
+	w.ok("ad app list", "appId eq", "[]")
+	w.rule(applyRule{prefix: "ad app create", out: fmt.Sprintf(`{"appId":%q,"id":%q,"displayName":"%%NAME%%"}`, newAppClientID, newAppObjectID),
+		echoName: true, snapshot: w.path("journal-at-create.json")})
+	w.ok("ad sp list", "", "[]")
+	w.ok("ad sp create", "", identitySPDoc)
+	w.ok("ad app credential list", "", "[]")
+	w.ok("ad app credential reset", "", identityResetDoc)
+}
+
+// holdApp makes Azure hold the application under name, found by name and by ID.
+func (w *applyWorld) holdApp(name string) {
+	w.ok("ad app list", "displayName eq", "["+appDoc(newAppClientID, name)+"]")
+	w.ok("ad app list", "appId eq", "["+appDoc(newAppClientID, name)+"]")
+}
+
+func (w *applyWorld) holdSP() { w.ok("ad sp list", "", "["+identitySPDoc+"]") }
+
+// holdCert makes Azure hold one certificate credential with this identifier.
+func (w *applyWorld) holdCert(ident string) {
+	w.ok("ad app credential list", "", fmt.Sprintf(`[{"customKeyIdentifier":%q,"keyId":"dddddddd-dddd-4ddd-8ddd-dddddddddddd","type":"AsymmetricX509Cert"}]`, ident))
+}
+
+// failing makes a call exit 1 with the given stdout.
+func (w *applyWorld) failing(prefix, out string) {
+	w.rule(applyRule{prefix: prefix, out: out, code: 1})
+}
+
+func newIdentityWorld(t *testing.T) *applyWorld {
+	t.Helper()
+	w := newApplyWorld(t)
+	w.identityAz = true
+	w.plan = asNewIdentity(w.plan, filepath.Join(t.TempDir(), "worker.pem"), false)
+	w.identityAzure()
+	return w
+}
+
+// seedJournal writes the journal an interrupted --identity new apply leaves and
+// returns its bytes.
+func (w *applyWorld) seedJournal(clientID, nonce string) []byte {
+	w.t.Helper()
+	j := NewSetupJournal(w.plan.Tenant, w.plan.Identity, w.plan.ConfigPath, applyNow)
+	j.ClientID, j.DisplayName = clientID, nonce
+	if err := j.Write(w.plan.Config.StateDir); err != nil {
+		w.t.Fatal(err)
+	}
+	return readBytes(w.t, w.journalPath())
+}
+
+// normalizedMutating is the mutating log with the uploaded public certificate's
+// path replaced by <public-cert>; it returns that path as well.
+func (w *applyWorld) normalizedMutating() (lines []string, uploaded string) {
+	const flag = " --cert @"
+	for _, l := range w.mutating() {
+		if i := strings.Index(l, flag); i >= 0 {
+			path, tail, _ := strings.Cut(l[i+len(flag):], " ")
+			uploaded = path
+			l = l[:i] + flag + "<public-cert> " + tail
+		}
+		lines = append(lines, l)
+	}
+	return lines, uploaded
+}
+
+func countPrefix(lines []string, prefix string) int {
+	n := 0
+	for _, l := range lines {
+		if strings.HasPrefix(l, prefix) {
+			n++
+		}
+	}
+	return n
+}
+
+func indexFrom(lines []string, prefix string, from int) int {
+	for i := from; i < len(lines); i++ {
+		if strings.HasPrefix(lines[i], prefix) {
+			return i
+		}
+	}
+	return -1
+}
+
+func pemBlocks(data []byte) []*pem.Block {
+	var blocks []*pem.Block
+	for {
+		var b *pem.Block
+		if b, data = pem.Decode(data); b == nil {
+			return blocks
+		}
+		blocks = append(blocks, b)
+	}
+}
+
+// leafDER is the DER of the first CERTIFICATE block of a PEM file.
+func leafDER(t *testing.T, data []byte) []byte {
+	t.Helper()
+	for _, b := range pemBlocks(data) {
+		if b.Type == "CERTIFICATE" {
+			return b.Bytes
+		}
+	}
+	t.Fatal("no CERTIFICATE block")
+	return nil
+}
+
+func requireRefusedBeforePrompt(t *testing.T, w *applyWorld, err error, journal []byte, wants ...string) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("the apply must be refused")
+	}
+	if strings.Contains(err.Error(), "cannot apply yet") {
+		t.Fatalf("stopped by a plan blocker, not by the rule under test: %v", err)
+	}
+	for _, want := range wants {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("the refusal lacks %q: %v", want, err)
+		}
+	}
+	if w.confirms != 0 {
+		t.Fatal("the prompt was reached")
+	}
+	requireNoMutation(t, w, "refused")
+	if journal == nil {
+		w.noJournal()
+	} else if !bytes.Equal(journal, readBytes(t, w.journalPath())) {
+		t.Fatal("the journal changed")
+	}
+}
+
+func requireNoCertificateFile(t *testing.T, w *applyWorld) {
+	t.Helper()
+	if _, err := os.Lstat(w.plan.CertificatePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a refused apply must not create the certificate file: %v", err)
+	}
+}
+
+func mustStat(t *testing.T, path string) os.FileInfo {
+	t.Helper()
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fi
+}
+
+// mismatchedKeyCertFile writes a 0600 PEM whose certificate belongs to a
+// different key than the PRIVATE KEY block it carries.
+func mismatchedKeyCertFile(t *testing.T) string {
+	t.Helper()
+	other, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyDER, err := x509.MarshalPKCS8PrivateKey(other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	data := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leafDER(t, certPEM(t, now.Add(-48*time.Hour), now.Add(400*24*time.Hour)))})
+	data = append(data, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})...)
+	return writeFileMode(t, data, 0600)
+}
+
+func sha1Hex(der []byte) string {
+	sum := sha1.Sum(der)
+	return strings.ToUpper(hex.EncodeToString(sum[:]))
+}
+
+// P28b
+func TestSetupApplyNewIdentityMakesExactlyTheIdentityCertificateAndRoleCreates(t *testing.T) {
+	w := newIdentityWorld(t)
+	if err := w.run(); err != nil {
+		t.Fatal(err)
+	}
+	j := w.journal()
+	if !nonceNamePattern(identityBaseName).MatchString(j.DisplayName) {
+		t.Fatalf("journal display name %q is not <display-name>-<16 hex>", j.DisplayName)
+	}
+	got, uploaded := w.normalizedMutating()
+	want := []string{
+		"ad app create --display-name " + j.DisplayName + " -o json",
+		"ad sp create --id " + newAppClientID + " -o json",
+		"ad app credential reset --id " + newAppClientID + " --cert @<public-cert> --append -o json",
+		createLine(applyObjectID, RoleServiceBusDataReceiver, applyEntityScope),
+		createLine(applyObjectID, RoleLogAnalyticsReader, applyMainWorkspace),
+		createLine(applyObjectID, RoleLogAnalyticsReader, applyAuxScope),
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("mutating calls:\n%q\nwant:\n%q", got, want)
+	}
+	if !filepath.IsAbs(uploaded) || uploaded == w.plan.CertificatePath || filepath.Dir(uploaded) == filepath.Dir(w.plan.CertificatePath) {
+		t.Fatalf("the public certificate must be uploaded from its own temporary directory, not from beside the key file: %q", uploaded)
+	}
+
+	// Each Azure step re-reads Azure at step time, in run order.
+	log := w.lines("az.log")
+	at := -1
+	for _, prefix := range []string{"ad app create", "ad sp list", "ad sp create", "ad app credential list", "ad app credential reset", "role assignment create"} {
+		if at = indexFrom(log, prefix, at+1); at < 0 {
+			t.Fatalf("no %q call in run order:\n%s", prefix, strings.Join(log, "\n"))
+		}
+	}
+
+	// The nonce name was journaled before az ad app create ran.
+	snap, err := decodeSetupJournal(readBytes(t, w.path("journal-at-create.json")))
+	if err != nil {
+		t.Fatalf("the journal did not exist when az ad app create ran: %v", err)
+	}
+	if snap.DisplayName != j.DisplayName || snap.Complete {
+		t.Fatalf("journal at az ad app create: displayName %q complete=%v, want %q and incomplete", snap.DisplayName, snap.Complete, j.DisplayName)
+	}
+
+	if j.ClientID != newAppClientID || j.PrincipalID != applyObjectID || !j.Complete {
+		t.Fatalf("journal client %q principal %q complete=%v", j.ClientID, j.PrincipalID, j.Complete)
+	}
+	var names []string
+	for i, s := range j.Steps {
+		names = append(names, s.Name)
+		if i < 4 && s.Status != StepDone {
+			t.Errorf("identity step %q is %s, want done", s.Name, s.Status)
+		}
+	}
+	if len(names) < 4 || strings.Join(names[:4], "|") != strings.Join([]string{stepCertFile, stepApp, stepSP, stepCredential}, "|") {
+		t.Fatalf("journal steps %q do not start with the identity steps in order", names)
+	}
+	w.reloadConfig()
+	wantAuth := AuthConfig{Mode: AuthModeCertificate, TenantID: testTenantID, ClientID: newAppClientID, CertificatePath: w.plan.CertificatePath}
+	if a := w.plan.Config.Auth; a == nil || *a != wantAuth {
+		t.Fatalf("written auth %+v, want %+v", a, wantAuth)
+	}
+	if len(w.waits) != 1 || w.waits[0] != 10*time.Minute {
+		t.Fatalf("verify waits %v, want [10m] because this run created an application", w.waits)
+	}
+	if !strings.Contains(w.planSeen, `application: create "`+j.DisplayName+`"`) {
+		t.Fatalf("the plan shown before the prompt does not name the nonce application:\n%s", w.planSeen)
+	}
+
+	t.Run("longest-display-name-gives-a-nonce-of-at-most-137-runes", func(t *testing.T) {
+		w := newIdentityWorld(t)
+		w.plan.DisplayName = strings.Repeat("wé", 60)
+		if err := w.run(); err != nil {
+			t.Fatal(err)
+		}
+		name := w.journal().DisplayName
+		if n := utf8.RuneCountInString(name); n != 137 || !nonceNamePattern(w.plan.DisplayName).MatchString(name) {
+			t.Fatalf("nonce name %q has %d runes, want 137 and <display-name>-<16 hex>", name, n)
+		}
+		if lines, _ := w.normalizedMutating(); len(lines) == 0 || lines[0] != "ad app create --display-name "+name+" -o json" {
+			t.Fatalf("mutating calls %q", lines)
+		}
+	})
+	t.Run("two-requests-get-different-nonces", func(t *testing.T) {
+		a, b := newIdentityWorld(t), newIdentityWorld(t)
+		for _, w := range []*applyWorld{a, b} {
+			if err := w.run(); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if a.journal().DisplayName == b.journal().DisplayName {
+			t.Fatalf("both requests drew the nonce name %q", a.journal().DisplayName)
+		}
+	})
+}
+
+func TestSetupApplyNewIdentityDeclinedConfirmationCreatesNothing(t *testing.T) {
+	w := newIdentityWorld(t)
+	w.confirm = false
+	if err := w.run(); !errors.Is(err, ErrApplyDeclined) {
+		t.Fatalf("want ErrApplyDeclined, got %v", err)
+	}
+	if !strings.Contains(w.planSeen, `application: create "`+identityBaseName+"-") || !strings.Contains(w.planSeen, w.plan.CertificatePath) {
+		t.Fatalf("the plan shown before the prompt lacks the nonce application or the certificate path:\n%s", w.planSeen)
+	}
+	requireNoMutation(t, w, "declined")
+	w.noJournal()
+	requireNoCertificateFile(t, w)
+}
+
+// P29
+func TestSetupApplyNewIdentityKeepsThePrivateKeyLocal(t *testing.T) {
+	w := newIdentityWorld(t)
+	ledger := []byte(`{"incidents":[]}`)
+	if err := os.MkdirAll(w.plan.Config.StateDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	ledgerPath := filepath.Join(w.plan.Config.StateDir, "incidents.json")
+	if err := os.WriteFile(ledgerPath, ledger, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.run(); err != nil {
+		t.Fatal(err)
+	}
+	cert := w.plan.CertificatePath
+	info, err := os.Lstat(cert)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm() != 0600 {
+		t.Fatalf("certificate file mode %v, want a regular 0600 file", info.Mode())
+	}
+	if st, ok := info.Sys().(*syscall.Stat_t); !ok || int(st.Uid) != os.Getuid() {
+		t.Fatalf("certificate file is not owned by uid %d", os.Getuid())
+	}
+
+	// One unencrypted PEM: a PKCS#8 PRIVATE KEY block, then the CERTIFICATE.
+	data := readBytes(t, cert)
+	blocks := pemBlocks(data)
+	if len(blocks) != 2 || blocks[0].Type != "PRIVATE KEY" || blocks[1].Type != "CERTIFICATE" {
+		t.Fatalf("certificate file holds %d blocks, want a PRIVATE KEY block then a CERTIFICATE block", len(blocks))
+	}
+
+	// The key's PEM body lines are the needles; the file holding them is the positive control.
+	var keyLines []string
+	for _, l := range strings.Split(string(pem.EncodeToMemory(blocks[0])), "\n") {
+		if l != "" && !strings.HasPrefix(l, "-----") {
+			keyLines = append(keyLines, l)
+		}
+	}
+	if len(keyLines) == 0 {
+		t.Fatal("control: no key body lines to search for")
+	}
+	for _, l := range keyLines {
+		if !strings.Contains(string(data), l) {
+			t.Fatal("control: the certificate file does not hold its own key lines")
+		}
+	}
+	surfaces := map[string]string{
+		"az argv":       strings.Join(w.lines("az.log"), "\n"),
+		"uploaded copy": string(readBytes(t, w.path("uploaded.pem"))),
+		"stdout":        w.stdout.String(),
+		"stderr":        w.stderr.String(),
+		"journal":       string(readBytes(t, w.journalPath())),
+		"config":        string(readBytes(t, w.plan.ConfigPath)),
+	}
+	err = filepath.WalkDir(w.plan.Config.StateDir, func(path string, d fs.DirEntry, err error) error {
+		if err == nil && d.Type().IsRegular() {
+			surfaces["state file "+filepath.Base(path)] = string(readBytes(t, path))
+		}
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, text := range surfaces {
+		if strings.Contains(text, "PRIVATE KEY") {
+			t.Errorf("%s mentions a private key block", name)
+		}
+		for _, l := range keyLines {
+			if strings.Contains(text, l) {
+				t.Errorf("the private key body reached the %s", name)
+				break
+			}
+		}
+	}
+	if !bytes.Equal(ledger, readBytes(t, ledgerPath)) {
+		t.Fatal("the incident ledger changed")
+	}
+
+	// The uploaded copy is the public certificate only, from a directory that is gone.
+	uploaded := pemBlocks(readBytes(t, w.path("uploaded.pem")))
+	if len(uploaded) != 1 || uploaded[0].Type != "CERTIFICATE" || !bytes.Equal(uploaded[0].Bytes, blocks[1].Bytes) {
+		t.Fatalf("the uploaded file must hold exactly the certificate block of the PEM file, got %d blocks", len(uploaded))
+	}
+	_, uploadedPath := w.normalizedMutating()
+	if _, err := os.Stat(filepath.Dir(uploadedPath)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the temporary directory of the public certificate still exists: %v", err)
+	}
+	if runtime.GOOS == "linux" {
+		if mode := strings.TrimSpace(string(readBytes(t, w.path("uploaded.dirmode")))); mode != "700" {
+			t.Errorf("the public certificate's directory had mode %s while az ran, want 700", mode)
+		}
+		stdin := w.lines("az.stdin")
+		azCalls := 0
+		for _, l := range w.lines("az.log") {
+			if l != "VERIFY" { // the Verify seam's marker is not an az call
+				azCalls++
+			}
+		}
+		if len(stdin) != azCalls {
+			t.Fatalf("stdin was recorded for %d of %d calls", len(stdin), azCalls)
+		}
+		for _, target := range stdin {
+			if target != "/dev/null" {
+				t.Fatalf("an az call read stdin from %q, want /dev/null", target)
+			}
+		}
+	}
+
+	// The worker's own credential loader accepts the PKCS#8 file, and the
+	// certificate has the documented parameters.
+	if _, _, err := NewCredential(AuthConfig{Mode: AuthModeCertificate, TenantID: testTenantID, ClientID: newAppClientID, CertificatePath: cert},
+		CredentialOptions{Now: func() time.Time { return applyNow }}); err != nil {
+		t.Fatalf("NewCredential rejects the generated file: %v", err)
+	}
+	leaf, err := x509.ParseCertificate(blocks[1].Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub, ok := leaf.PublicKey.(*rsa.PublicKey)
+	if leaf.Subject.CommonName != "cenci-incident-worker" || leaf.SignatureAlgorithm != x509.SHA256WithRSA || !ok || pub.N.BitLen() != 2048 {
+		t.Fatalf("certificate CN %q algorithm %v key %T, want CN=cenci-incident-worker, SHA256WithRSA, RSA 2048", leaf.Subject.CommonName, leaf.SignatureAlgorithm, leaf.PublicKey)
+	}
+	if validity := leaf.NotAfter.Sub(leaf.NotBefore); validity < 365*24*time.Hour || validity > 366*24*time.Hour {
+		t.Fatalf("certificate validity %v, want 365 days", validity)
+	}
+	if leaf.SerialNumber.Sign() <= 0 || leaf.SerialNumber.BitLen() <= 64 {
+		t.Fatalf("certificate serial %v is not a random 128-bit number", leaf.SerialNumber)
+	}
+}
+
+// firstIdentityRun applies a new identity once and leaves Azure as that run
+// left it, ready for a rerun.
+func firstIdentityRun(t *testing.T) (*applyWorld, string) {
+	t.Helper()
+	w := newIdentityWorld(t)
+	if err := w.run(); err != nil {
+		t.Fatal(err)
+	}
+	name := w.journal().DisplayName
+	w.holdApp(name)
+	w.holdSP()
+	w.existAll()
+	w.reloadConfig()
+	w.plan.CertificateExists = true
+	return w, name
+}
+
+// P30b
+func TestSetupApplyNewIdentityRerunAfterSuccessMakesNoMutatingCall(t *testing.T) {
+	registered := map[string]func(der []byte) string{
+		"hex-upper": sha1Hex,
+		"hex-lower": func(der []byte) string { return strings.ToLower(sha1Hex(der)) },
+		"base64": func(der []byte) string {
+			sum := sha1.Sum(der)
+			return base64.StdEncoding.EncodeToString(sum[:])
+		},
+	}
+	for name, ident := range registered {
+		t.Run(name, func(t *testing.T) {
+			w, _ := firstIdentityRun(t)
+			certBefore := readBytes(t, w.plan.CertificatePath)
+			w.holdCert(ident(leafDER(t, certBefore)))
+			logged := len(w.lines("az.log"))
+			// The first run attempted its role creates at applyNow; the rerun comes
+			// after the propagation window, so it has nothing to wait for.
+			w.clock = applyNow.Add(11 * time.Minute)
+			if err := w.run(); err != nil {
+				t.Fatal(err)
+			}
+			if got := w.mutatingSince(logged); len(got) != 0 {
+				t.Fatalf("the rerun made mutating calls: %q", got)
+			}
+			rerun := w.lines("az.log")[logged:]
+			byID := false
+			for _, l := range rerun {
+				byID = byID || (strings.HasPrefix(l, "ad app list ") && strings.Contains(l, "appId eq '"+newAppClientID+"'"))
+				if strings.Contains(l, "displayName eq") {
+					t.Errorf("the application must be matched by the journal's client ID, not by name: %s", l)
+				}
+			}
+			if !byID {
+				t.Fatalf("the rerun never matched the application by its recorded client ID:\n%s", strings.Join(rerun, "\n"))
+			}
+			if !bytes.Equal(certBefore, readBytes(t, w.plan.CertificatePath)) {
+				t.Fatal("the rerun changed the certificate file")
+			}
+			j := w.journal()
+			for _, s := range j.Steps {
+				switch s.Name {
+				case stepCertFile, stepApp, stepSP, stepCredential:
+					if s.Status != StepUnchanged {
+						t.Errorf("step %q is %s on a rerun, want unchanged", s.Name, s.Status)
+					}
+				}
+			}
+			if !j.Complete || len(w.waits) != 2 || w.waits[1] != 0 {
+				t.Fatalf("want complete with a second verify wait of 0, got complete=%v waits=%v", j.Complete, w.waits)
+			}
+		})
+	}
+
+	t.Run("unrecognized-shape-fails-the-step-and-appends-nothing", func(t *testing.T) {
+		w, _ := firstIdentityRun(t)
+		w.holdCert("not-a-thumbprint!")
+		logged := len(w.lines("az.log"))
+		err := w.run()
+		if err == nil {
+			t.Fatal("an identifier that is neither hex nor base64 of 20 bytes must fail the step")
+		}
+		if got := w.mutatingSince(logged); len(got) != 0 {
+			t.Fatalf("the failed step made mutating calls: %q", got)
+		}
+		if !strings.Contains(w.stderr.String(), "failed: "+stepCredential+" (") || w.journal().Complete {
+			t.Fatalf("want the %q step failed and complete=false:\n%s", stepCredential, w.stderr.String())
+		}
+	})
+	t.Run("another-certificate-is-appended-to-never-replaced", func(t *testing.T) {
+		w, _ := firstIdentityRun(t)
+		w.holdCert(base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{1}, sha1.Size)))
+		logged := len(w.lines("az.log"))
+		if err := w.run(); err != nil {
+			t.Fatal(err)
+		}
+		got := w.mutatingSince(logged)
+		if len(got) != 1 || !strings.HasPrefix(got[0], "ad app credential reset ") || !strings.Contains(got[0], " --append ") {
+			t.Fatalf("want exactly one appending reset because this certificate was not registered, got %q", got)
+		}
+	})
+}
+
+// Q11: the verify wait applies when this run created anything (app, service
+// principal, credential or role) and not otherwise. The first run in each case
+// created everything (wait 10m); the rerun finds Azure missing one thing. The
+// rerun comes after the first run's role-attempt window unless rerunAt says
+// otherwise, so its wait comes from what it created; within the window the
+// recent role attempt alone still waits (#1402).
+func TestSetupApplyNewIdentityVerifyWaitsWhenThisRunCreatedAnything(t *testing.T) {
+	afterWindow := 11 * time.Minute
+	cases := []struct {
+		name    string
+		arrange func(w *applyWorld, ident string)
+		creates string        // the one mutating call the rerun must make, or "" for none
+		rerunAt time.Duration // the rerun's clock, relative to the first run's applyNow
+		wait    time.Duration
+	}{
+		{"service-principal-only", func(w *applyWorld, ident string) {
+			w.ok("ad sp list", "", "[]")
+			w.holdCert(ident)
+		}, "ad sp create --id " + newAppClientID, afterWindow, 10 * time.Minute},
+		{"credential-only", func(w *applyWorld, _ string) {}, "ad app credential reset --id " + newAppClientID, afterWindow, 10 * time.Minute},
+		{"role-only", func(w *applyWorld, ident string) {
+			w.holdCert(ident)
+			w.listed(applyEntityScope)
+			w.listed(applyMainWorkspace)
+			w.listed(applyAuxScope)
+		}, "role assignment create", afterWindow, 10 * time.Minute},
+		{"nothing-created", func(w *applyWorld, ident string) { w.holdCert(ident) }, "", afterWindow, 0},
+		{"nothing-created-within-the-role-attempt-window", func(w *applyWorld, ident string) { w.holdCert(ident) }, "", 2 * time.Minute, 10 * time.Minute},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			w, _ := firstIdentityRun(t)
+			c.arrange(w, sha1Hex(leafDER(t, readBytes(t, w.plan.CertificatePath))))
+			logged := len(w.lines("az.log"))
+			w.clock = applyNow.Add(c.rerunAt)
+			if err := w.run(); err != nil {
+				t.Fatal(err)
+			}
+			got := w.mutatingSince(logged)
+			switch {
+			case c.creates == "" && len(got) != 0:
+				t.Fatalf("nothing was missing, yet the rerun made mutating calls: %q", got)
+			case c.creates != "" && (len(got) == 0 || !strings.HasPrefix(got[0], c.creates)):
+				t.Fatalf("want the rerun to create %q, got %q", c.creates, got)
+			case c.creates != "" && c.name != "role-only" && len(got) != 1:
+				t.Fatalf("want exactly one create, got %q", got)
+			}
+			if want := []time.Duration{10 * time.Minute, c.wait}; len(w.waits) != 2 || w.waits[0] != want[0] || w.waits[1] != want[1] {
+				t.Fatalf("verify waits %v, want %v", w.waits, want)
+			}
+		})
+	}
+}
+
+// P31b
+func TestSetupApplyNewIdentityResumesAtTheFailedStep(t *testing.T) {
+	cases := []struct {
+		name, step        string
+		arrange           func(w *applyWorld)
+		azure             func(w *applyWorld, nonce, ident string)
+		apps, sps, resets int // create calls across both runs
+	}{
+		{"application-created-but-az-exited-1", stepApp,
+			func(w *applyWorld) { w.failing("ad app create", "") },
+			func(w *applyWorld, nonce, _ string) { w.holdApp(nonce) }, 1, 1, 1},
+		{"service-principal-create-exited-1", stepSP,
+			func(w *applyWorld) { w.failing("ad sp create", "") },
+			func(w *applyWorld, nonce, _ string) { w.holdApp(nonce) }, 1, 2, 1},
+		{"service-principal-created-but-az-exited-1", stepSP,
+			func(w *applyWorld) { w.failing("ad sp create", identitySPDoc) },
+			func(w *applyWorld, nonce, _ string) { w.holdApp(nonce); w.holdSP() }, 1, 1, 1},
+		{"certificate-credential-reset-exited-1", stepCredential,
+			func(w *applyWorld) { w.failing("ad app credential reset", "") },
+			func(w *applyWorld, nonce, _ string) { w.holdApp(nonce); w.holdSP() }, 1, 1, 2},
+		{"certificate-credential-reset-succeeded-but-az-exited-1", stepCredential,
+			func(w *applyWorld) { w.failing("ad app credential reset", identityResetDoc) },
+			func(w *applyWorld, nonce, ident string) { w.holdApp(nonce); w.holdSP(); w.holdCert(ident) }, 1, 1, 1},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			w := newIdentityWorld(t)
+			c.arrange(w)
+			if err := w.run(); err == nil {
+				t.Fatal("the failing az call must fail the apply")
+			}
+			j := w.journal()
+			var failed []SetupStep
+			for _, s := range j.Steps {
+				if s.Status == StepFailed {
+					failed = append(failed, s)
+				}
+			}
+			if j.Complete || len(failed) != 1 || failed[0].Name != c.step || failed[0].Result != "exited with code 1" {
+				t.Fatalf("want one failed %q step classed %q and complete=false, got %+v complete=%v", c.step, "exited with code 1", failed, j.Complete)
+			}
+			report := w.stderr.String()
+			for _, want := range []string{"completed: " + stepCertFile, "failed: " + c.step + " (exited with code 1)", "remaining:"} {
+				if !strings.Contains(report, want) {
+					t.Errorf("the report lacks %q:\n%s", want, report)
+				}
+			}
+			if len(w.waits) != 0 {
+				t.Fatal("verify must not run after a failed step")
+			}
+			cert := readBytes(t, w.plan.CertificatePath)
+
+			// Azure now holds what the failed run left; the failing call is fixed.
+			w.identityAzure()
+			c.azure(w, j.DisplayName, sha1Hex(leafDER(t, cert)))
+			w.plan.CertificateExists = true
+			if err := w.run(); err != nil {
+				t.Fatal(err)
+			}
+			all := w.lines("az.log")
+			for prefix, want := range map[string]int{"ad app create": c.apps, "ad sp create": c.sps, "ad app credential reset": c.resets} {
+				if got := countPrefix(all, prefix); got != want {
+					t.Errorf("%d %q calls across both runs, want %d", got, prefix, want)
+				}
+			}
+			if !bytes.Equal(cert, readBytes(t, w.plan.CertificatePath)) {
+				t.Fatal("the resumed run changed the certificate file")
+			}
+			if after := w.journal(); !after.Complete || after.DisplayName != j.DisplayName || after.ClientID != newAppClientID {
+				t.Fatalf("resumed journal complete=%v name %q client %q", after.Complete, after.DisplayName, after.ClientID)
+			}
+		})
+	}
+}
+
+// P32b
+func TestSetupApplyNewIdentityNeverOverwritesAnExistingCertificateFile(t *testing.T) {
+	validFile := func(t *testing.T, mode os.FileMode) string {
+		return writeCertFile(t, time.Now().Add(400*24*time.Hour), mode)
+	}
+
+	t.Run("a-valid-existing-file-is-uploaded-and-left-unchanged", func(t *testing.T) {
+		w := newIdentityWorld(t)
+		w.plan.CertificatePath, w.plan.CertificateExists = validFile(t, 0600), true
+		before := readBytes(t, w.plan.CertificatePath)
+		infoBefore := mustStat(t, w.plan.CertificatePath)
+		if err := w.run(); err != nil {
+			t.Fatal(err)
+		}
+		infoAfter := mustStat(t, w.plan.CertificatePath)
+		if !os.SameFile(infoBefore, infoAfter) || !bytes.Equal(before, readBytes(t, w.plan.CertificatePath)) || infoAfter.Mode().Perm() != 0600 {
+			t.Fatal("the existing certificate file was rewritten or re-moded")
+		}
+		uploaded := pemBlocks(readBytes(t, w.path("uploaded.pem")))
+		if len(uploaded) != 1 || uploaded[0].Type != "CERTIFICATE" || !bytes.Equal(uploaded[0].Bytes, leafDER(t, before)) {
+			t.Fatalf("the public certificate of the existing file was not uploaded: %d blocks", len(uploaded))
+		}
+		if got := w.mutating(); len(got) != 6 {
+			t.Fatalf("want the app, SP, credential and 3 role creates, got %q", got)
+		}
+		for _, s := range w.journal().Steps {
+			if s.Name == stepCertFile && s.Status != StepUnchanged {
+				t.Errorf("the certificate file step is %s, want unchanged", s.Status)
+			}
+		}
+		w.reloadConfig()
+		if a := w.plan.Config.Auth; a == nil || a.CertificatePath != w.plan.CertificatePath || a.ClientID != newAppClientID {
+			t.Fatalf("written auth %+v", a)
+		}
+	})
+
+	refusals := []struct {
+		name, want string
+		arrange    func(t *testing.T, w *applyWorld) (path string)
+	}{
+		{"symlink", "symbolic link", func(t *testing.T, w *applyWorld) string {
+			target := validFile(t, 0600)
+			link := filepath.Join(t.TempDir(), "worker.pem")
+			if err := os.Symlink(target, link); err != nil {
+				t.Fatal(err)
+			}
+			w.plan.CertificatePath = link
+			return target
+		}},
+		{"mode-0644", "0644", func(t *testing.T, w *applyWorld) string {
+			w.plan.CertificatePath = validFile(t, 0644)
+			return w.plan.CertificatePath
+		}},
+		{"unparsable", "could not be parsed", func(t *testing.T, w *applyWorld) string {
+			w.plan.CertificatePath = writeFileMode(t, []byte(garbagePEM), 0600)
+			return w.plan.CertificatePath
+		}},
+		{"key-mismatch", "no certificate matching its private key", func(t *testing.T, w *applyWorld) string {
+			w.plan.CertificatePath = mismatchedKeyCertFile(t)
+			return w.plan.CertificatePath
+		}},
+		{"expired", "expired", func(t *testing.T, w *applyWorld) string {
+			w.plan.CertificatePath = writeCertFile(t, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), 0600)
+			return w.plan.CertificatePath
+		}},
+		{"foreign-owner", "owned by", func(t *testing.T, w *applyWorld) string {
+			path := validFile(t, 0600)
+			if err := os.Chown(path, os.Getuid()+1, -1); err != nil {
+				t.Skipf("handing a file to another uid needs root: %v", err)
+			}
+			w.plan.CertificatePath = path
+			return path
+		}},
+	}
+	for _, c := range refusals {
+		t.Run(c.name+"-exits-before-the-prompt-and-is-left-untouched", func(t *testing.T) {
+			w := newIdentityWorld(t)
+			w.plan.CertificateExists = true
+			target := c.arrange(t, w)
+			before, modeBefore := readBytes(t, target), mustStat(t, target).Mode()
+			requireRefusedBeforePrompt(t, w, w.run(), nil, c.want)
+			if !bytes.Equal(before, readBytes(t, target)) || mustStat(t, target).Mode() != modeBefore {
+				t.Fatal("the refused certificate file was changed")
+			}
+			if c.name == "symlink" {
+				if fi, err := os.Lstat(w.plan.CertificatePath); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+					t.Fatalf("the symbolic link was replaced: %v", err)
+				}
+			}
+		})
+	}
+
+	t.Run("a-file-that-appears-after-the-check-fails-the-step-with-its-bytes-unchanged", func(t *testing.T) {
+		w := newIdentityWorld(t)
+		late := readBytes(t, validFile(t, 0600))
+		w.onConfirm = func() {
+			if err := os.WriteFile(w.plan.CertificatePath, late, 0600); err != nil {
+				t.Error(err)
+			}
+		}
+		if err := w.run(); err == nil {
+			t.Fatal("a certificate file created after the check must fail the apply")
+		}
+		if !bytes.Equal(late, readBytes(t, w.plan.CertificatePath)) {
+			t.Fatal("the file that appeared was overwritten")
+		}
+		requireNoMutation(t, w, "late-file")
+		if j := w.journal(); j.Complete || w.confirms != 1 || !strings.Contains(w.stderr.String(), "failed: "+stepCertFile+" (") {
+			t.Fatalf("want the %q step failed after the prompt and complete=false:\n%s", stepCertFile, w.stderr.String())
+		}
+	})
+	t.Run("a-symbolic-link-planted-after-the-check-is-not-followed", func(t *testing.T) {
+		w := newIdentityWorld(t)
+		target := filepath.Join(t.TempDir(), "elsewhere.pem")
+		w.onConfirm = func() {
+			if err := os.Symlink(target, w.plan.CertificatePath); err != nil {
+				t.Error(err)
+			}
+		}
+		if err := w.run(); err == nil {
+			t.Fatal("a symbolic link planted after the check must fail the apply")
+		}
+		if _, err := os.Lstat(target); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("the key was written through the planted symbolic link: %v", err)
+		}
+		requireNoMutation(t, w, "planted-link")
+		if fi, err := os.Lstat(w.plan.CertificatePath); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+			t.Fatalf("the planted symbolic link was replaced: %v", err)
+		}
+		if w.confirms != 1 || !strings.Contains(w.stderr.String(), "failed: "+stepCertFile+" (") {
+			t.Fatalf("want the %q step failed after the prompt:\n%s", stepCertFile, w.stderr.String())
+		}
+	})
+}
+
+func TestSetupApplyNewIdentityMissingCertificateDirectoryFailsTheStepBeforeAnythingExistsInAzure(t *testing.T) {
+	w := newIdentityWorld(t)
+	dir := filepath.Join(t.TempDir(), "missing")
+	w.plan.CertificatePath = filepath.Join(dir, "worker.pem")
+	if err := w.run(); err == nil {
+		t.Fatal("a certificate path in a missing directory must fail the apply")
+	}
+	requireNoMutation(t, w, "missing-directory")
+	if _, err := os.Lstat(dir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the parent directory was created: %v", err)
+	}
+	if j := w.journal(); j.Complete || w.confirms != 1 || !strings.Contains(w.stderr.String(), "failed: "+stepCertFile+" (") {
+		t.Fatalf("want the %q step failed after the prompt and complete=false:\n%s", stepCertFile, w.stderr.String())
+	}
+	if name := w.journal().DisplayName; name != "" {
+		t.Fatalf("the nonce name %q was journaled although nothing exists in Azure: a rerun would look for an application that was never created", name)
+	}
+
+	// The operator fixes the path; the plain rerun creates normally, with no --client-id.
+	if err := os.Mkdir(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.run(); err != nil {
+		t.Fatalf("the rerun after fixing the certificate directory must succeed: %v", err)
+	}
+	log := w.lines("az.log")
+	if countPrefix(log, "ad app create") != 1 {
+		t.Fatalf("the rerun must create the application once:\n%s", strings.Join(log, "\n"))
+	}
+	if j := w.journal(); !nonceNamePattern(identityBaseName).MatchString(j.DisplayName) || !j.Complete {
+		t.Fatalf("journal name %q complete=%v after the rerun", j.DisplayName, j.Complete)
+	}
+}
+
+// The application is re-read after the prompt: a different application that now
+// carries the name must not be taken for the one the plan showed.
+func TestSetupApplyNewIdentityRefusesADifferentAppThanTheOneThePlanAdopted(t *testing.T) {
+	nonce := identityBaseName + "-" + seededNonceHex
+	w := newIdentityWorld(t)
+	w.seedJournal("", nonce)
+	w.holdApp(nonce)
+	w.onConfirm = func() {
+		w.ok("ad app list", "displayName eq", "["+appDoc(otherAppClientID, nonce)+"]")
+		w.install()
+	}
+	err := w.run()
+	if err == nil {
+		t.Fatal("an application other than the adopted one must fail the apply")
+	}
+	for _, want := range []string{newAppClientID, otherAppClientID} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("the error does not name %s: %v", want, err)
+		}
+	}
+	requireNoMutation(t, w, "different-app")
+	if w.confirms != 1 || !strings.Contains(w.stderr.String(), "failed: "+stepApp+" (") {
+		t.Fatalf("want the %q step failed after the prompt:\n%s", stepApp, w.stderr.String())
+	}
+	if j := w.journal(); j.Complete || j.DisplayName != nonce {
+		t.Fatalf("journal complete=%v name %q, want incomplete and still bound to the recorded nonce", j.Complete, j.DisplayName)
+	}
+}
+
+// The adopted application disappearing after the prompt must not turn into a
+// create: that would make a different application than the one the plan showed.
+func TestSetupApplyNewIdentityRefusesToCreateWhenTheAdoptedAppIsGoneAfterThePrompt(t *testing.T) {
+	nonce := identityBaseName + "-" + seededNonceHex
+	w := newIdentityWorld(t)
+	w.seedJournal("", nonce)
+	w.holdApp(nonce)
+	w.onConfirm = func() {
+		w.ok("ad app list", "displayName eq", "[]")
+		w.install()
+	}
+	err := w.run()
+	if err == nil {
+		t.Fatal("an adopted application that is gone must fail the apply")
+	}
+	for _, want := range []string{newAppClientID, nonce} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("the error does not name %s: %v", want, err)
+		}
+	}
+	requireNoMutation(t, w, "adopted-app-gone")
+	if w.confirms != 1 || !strings.Contains(w.stderr.String(), "failed: "+stepApp+" (") {
+		t.Fatalf("want the %q step failed after the prompt:\n%s", stepApp, w.stderr.String())
+	}
+}
+
+// The nonce is journaled only when az ad app create is about to run: a failed
+// lookup before it leaves no nonce for a rerun to search for.
+func TestSetupApplyNewIdentityJournalsTheNonceOnlyRightBeforeCreatingTheApp(t *testing.T) {
+	w := newIdentityWorld(t)
+	w.rule(applyRule{prefix: "ad app list", needle: "displayName eq", code: 1})
+	if err := w.run(); err == nil {
+		t.Fatal("a failed application lookup must fail the apply")
+	}
+	requireNoMutation(t, w, "failed-lookup")
+	if j := w.journal(); j.Complete || j.DisplayName != "" || j.ClientID != "" ||
+		w.confirms != 1 || !strings.Contains(w.stderr.String(), "failed: "+stepApp+" (") {
+		t.Fatalf("want the %q step failed with no nonce journaled (name %q, client %q, complete=%v):\n%s", stepApp, j.DisplayName, j.ClientID, j.Complete, w.stderr.String())
+	}
+
+	// The lookup works again; the plain rerun creates once, with no --client-id.
+	w.ok("ad app list", "displayName eq", "[]")
+	if err := w.run(); err != nil {
+		t.Fatalf("the rerun after the lookup recovered must succeed: %v", err)
+	}
+	if n := countPrefix(w.lines("az.log"), "ad app create"); n != 1 {
+		t.Fatalf("the rerun must create the application once, got %d", n)
+	}
+	if j := w.journal(); !nonceNamePattern(identityBaseName).MatchString(j.DisplayName) || !j.Complete {
+		t.Fatalf("journal name %q complete=%v after the rerun", j.DisplayName, j.Complete)
+	}
+}
+
+// The existing certificate file is re-read at its step: replacing it while the
+// prompt is open must not upload the old leaf's thumbprint.
+func TestSetupApplyNewIdentityRefusesAnExistingCertificateReplacedAfterThePrompt(t *testing.T) {
+	w := newIdentityWorld(t)
+	w.plan.CertificatePath, w.plan.CertificateExists = writeCertFile(t, time.Now().Add(400*24*time.Hour), 0600), true
+	replacement := readBytes(t, writeCertFile(t, time.Now().Add(500*24*time.Hour), 0600))
+	if bytes.Equal(replacement, readBytes(t, w.plan.CertificatePath)) {
+		t.Fatal("the replacement must be a different certificate")
+	}
+	w.onConfirm = func() {
+		if err := os.WriteFile(w.plan.CertificatePath, replacement, 0600); err != nil {
+			t.Error(err)
+		}
+	}
+	if err := w.run(); err == nil {
+		t.Fatal("a certificate file replaced after the prompt must fail the apply")
+	}
+	if !bytes.Equal(replacement, readBytes(t, w.plan.CertificatePath)) {
+		t.Fatal("the replaced file was changed")
+	}
+	requireNoMutation(t, w, "replaced-cert")
+	if j := w.journal(); j.Complete || w.confirms != 1 || !strings.Contains(w.stderr.String(), "failed: "+stepCertFile+" (") {
+		t.Fatalf("want the %q step failed after the prompt and complete=false:\n%s", stepCertFile, w.stderr.String())
+	}
+}
+
+// P50
+func TestSetupApplyNewIdentityAdoptsOnlyTheUniqueNonceMatch(t *testing.T) {
+	nonce := identityBaseName + "-" + seededNonceHex
+
+	t.Run("one-match-is-adopted-and-shown-in-the-confirmation", func(t *testing.T) {
+		w := newIdentityWorld(t)
+		w.seedJournal("", nonce)
+		w.holdApp(nonce)
+		w.ok("ad app list", "appId eq", "[]")
+		if err := w.run(); err != nil {
+			t.Fatal(err)
+		}
+		log := w.lines("az.log")
+		if countPrefix(log, "ad app create") != 0 || indexFrom(log, "ad sp create --id "+newAppClientID, 0) < 0 {
+			t.Fatalf("the unique match must be adopted, not created again:\n%s", strings.Join(log, "\n"))
+		}
+		if !strings.Contains(w.planSeen, newAppClientID) || !strings.Contains(w.planSeen, "adopt") {
+			t.Fatalf("the adopted application is not shown in the confirmation:\n%s", w.planSeen)
+		}
+		if j := w.journal(); j.DisplayName != nonce || j.ClientID != newAppClientID || !j.Complete {
+			t.Fatalf("journal name %q client %q complete=%v, want the recorded nonce and the adopted app", j.DisplayName, j.ClientID, j.Complete)
+		}
+	})
+
+	refusals := []struct {
+		name string
+		list string // what the name search returns
+	}{
+		{"zero-matches", "[]"},
+		{"two-matches", "[" + appDoc(newAppClientID, nonce) + "," + appDoc(otherAppClientID, nonce) + "]"},
+		{"only-a-longer-name", "[" + appDoc(newAppClientID, nonce+"-extra") + "]"},
+		{"only-a-prefix-of-the-name", "[" + appDoc(newAppClientID, identityBaseName) + "]"},
+	}
+	for _, c := range refusals {
+		t.Run(c.name+"-exits-1-asking-for-client-id", func(t *testing.T) {
+			w := newIdentityWorld(t)
+			journal := w.seedJournal("", nonce)
+			w.ok("ad app list", "displayName eq", c.list)
+			requireRefusedBeforePrompt(t, w, w.run(), journal, "--client-id", nonce)
+			requireNoCertificateFile(t, w)
+		})
+	}
+}
+
+// Q1
+func TestSetupApplyNewIdentityClientIDAdoptsOnlyTheRecordedNonceApp(t *testing.T) {
+	nonce := identityBaseName + "-" + seededNonceHex
+	// world gives --client-id its app: the ID search finds it, the name search does not.
+	world := func(t *testing.T, recordedID string) (*applyWorld, []byte) {
+		w := newIdentityWorld(t)
+		w.plan.ClientID = newAppClientID
+		journal := w.seedJournal(recordedID, nonce)
+		w.ok("ad app list", "appId eq", "["+appDoc(newAppClientID, nonce)+"]")
+		return w, journal
+	}
+
+	for name, recorded := range map[string]string{"nonce-recorded-without-an-app-id": "", "recorded-id-equals-client-id": newAppClientID} {
+		t.Run(name, func(t *testing.T) {
+			w, _ := world(t, recorded)
+			if err := w.run(); err != nil {
+				t.Fatal(err)
+			}
+			if countPrefix(w.lines("az.log"), "ad app create") != 0 || w.journal().ClientID != newAppClientID {
+				t.Fatalf("--client-id must adopt the recorded nonce app without creating one:\n%s", strings.Join(w.lines("az.log"), "\n"))
+			}
+		})
+	}
+
+	t.Run("no-journal", func(t *testing.T) {
+		w := newIdentityWorld(t)
+		w.plan.ClientID = newAppClientID
+		w.ok("ad app list", "appId eq", "["+appDoc(newAppClientID, nonce)+"]")
+		requireRefusedBeforePrompt(t, w, w.run(), nil)
+		requireNoCertificateFile(t, w)
+	})
+	t.Run("journal-without-a-nonce", func(t *testing.T) {
+		w, _ := world(t, "")
+		journal := w.seedJournal("", "")
+		requireRefusedBeforePrompt(t, w, w.run(), journal)
+	})
+	t.Run("another-client-id-is-recorded", func(t *testing.T) {
+		w, _ := world(t, "")
+		journal := w.seedJournal(otherAppClientID, nonce)
+		requireRefusedBeforePrompt(t, w, w.run(), journal)
+	})
+	t.Run("the-app-has-another-name", func(t *testing.T) {
+		w, journal := world(t, "")
+		w.ok("ad app list", "appId eq", "["+appDoc(newAppClientID, "someone-elses-app")+"]")
+		requireRefusedBeforePrompt(t, w, w.run(), journal)
+	})
+	t.Run("the-app-is-gone", func(t *testing.T) {
+		w, journal := world(t, "")
+		w.ok("ad app list", "appId eq", "[]")
+		requireRefusedBeforePrompt(t, w, w.run(), journal)
+	})
+}
+
+// Q10: a silent re-create would make a second identity.
+func TestSetupApplyNewIdentityRecordedAppGoneStopsBeforeThePrompt(t *testing.T) {
+	nonce := identityBaseName + "-" + seededNonceHex
+	t.Run("control-the-recorded-app-exists", func(t *testing.T) {
+		w := newIdentityWorld(t)
+		w.seedJournal(newAppClientID, nonce)
+		w.holdApp(nonce)
+		if err := w.run(); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("recorded-app-is-gone-even-when-another-app-carries-the-name", func(t *testing.T) {
+		w := newIdentityWorld(t)
+		journal := w.seedJournal(newAppClientID, nonce)
+		w.ok("ad app list", "appId eq", "[]")
+		w.ok("ad app list", "displayName eq", "["+appDoc(otherAppClientID, nonce)+"]")
+		requireRefusedBeforePrompt(t, w, w.run(), journal)
+		requireNoCertificateFile(t, w)
+	})
+}
+
+// binding: the display-name base joins tenant, identity and config path.
+func TestSetupApplyNewIdentityJournalRefusesAChangedDisplayName(t *testing.T) {
+	nonce := "team-worker-" + seededNonceHex
+	world := func(t *testing.T, base string) (*applyWorld, []byte) {
+		w := newIdentityWorld(t)
+		w.plan.DisplayName = base
+		journal := w.seedJournal("", nonce)
+		w.holdApp(nonce)
+		return w, journal
+	}
+	t.Run("control-the-same-base-resumes", func(t *testing.T) {
+		w, _ := world(t, "team-worker")
+		if err := w.run(); err != nil {
+			t.Fatal(err)
+		}
+		if countPrefix(w.lines("az.log"), "ad app create") != 0 || w.journal().DisplayName != nonce {
+			t.Fatal("the same display-name base must resume the recorded nonce application")
+		}
+	})
+	t.Run("another-base-is-a-different-request", func(t *testing.T) {
+		w, journal := world(t, "other-worker")
+		requireRefusedBeforePrompt(t, w, w.run(), journal, "belongs to a different request", "display name")
+		requireNoCertificateFile(t, w)
+	})
 }
