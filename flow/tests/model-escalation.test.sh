@@ -33,11 +33,22 @@ class ModelEscalation(unittest.TestCase):
                 for name in ("implementer", "critical-reviewer", "context-gatherer", "structure-analyzer"):
                     actual = (roles / f"{name}.toml").read_bytes()
                     self.assertEqual(actual, (FLOW / f"templates/codex/agent-roles/{name}.toml").read_bytes())
-                    self.assertNotEqual(tomllib.loads(actual.decode())["model"], "gpt-6-astra")
+                    self.assertIsNone(tomllib.loads(actual.decode()).get("model"), f"{name} must inherit its model")
             customized = (roles / "domain-specialist.toml").read_text().replace("gpt-6-astra", "custom-specialist")
             (roles / "domain-specialist.toml").write_text(customized)
             subprocess.run(["sh", str(FLOW / "codex/install-agents.sh"), tmp], env=env, check=True)
             self.assertEqual((roles / "domain-specialist.toml").read_text(), customized)
+
+    def test_only_the_specialist_template_pins_a_model(self):
+        roles = FLOW / "templates/codex/agent-roles"
+        for name in ("planner", "implementer", "critical-reviewer", "acceptance-reviewer",
+                     "context-gatherer", "structure-analyzer"):
+            with self.subTest(role=name):
+                role = tomllib.loads((roles / f"{name}.toml").read_text())
+                self.assertIsNone(role.get("model"), f"{name} must inherit its model")
+                self.assertIsNone(role.get("model_reasoning_effort"), f"{name} must inherit its effort")
+        specialist = tomllib.loads((roles / "domain-specialist.toml").read_text())
+        self.assertEqual(specialist.get("model"), "gpt-6-astra")
 
     def test_shipped_specialists_are_read_only_and_mirrored(self):
         claude = (FLOW / "agents/domain-specialist.md").read_text()

@@ -1844,6 +1844,82 @@ assert_exit_zero "case41c checker does not depend on GNU realpath -m"
 [[ "${REPORT_TEXT}" != *"fixture realpath"* ]] || fail "case41c checker invoked realpath"
 rm -rf "${ROOT}"
 
+# Case 41d (#1191): the agent-roles check reaches the validator only through
+# check-agent-role-drift.sh --plain. Clean (with unverified notes) passes, drift
+# warns, and a missing Python 3.11+ is a distinct warn — never skip, never
+# "invalid".
+agent_roles_field() {  # agent_roles_field <status> <jq-field> — field of the agent-roles result
+  printf '%s' "${REPORT_JSON}" | jq -r --arg s "$1" --arg f "$2" \
+    '[.results[]? | select(.check=="agent-roles" and .status==$s)][0][$f] // ""' 2>/dev/null
+}
+
+write_agent_role() {  # write_agent_role <root> <stem> [extra toml lines...]
+  local root="$1" stem="$2"; shift 2
+  mkdir -p "${root}/.codex/agents"
+  {
+    printf 'name = "%s"\n' "${stem}"
+    printf 'description = "A test role."\n'
+    printf 'developer_instructions = "Do the thing."\n'
+    local line
+    for line in "$@"; do printf '%s\n' "${line}"; done
+  } > "${root}/.codex/agents/${stem}.toml"
+}
+
+# Clean role files pass with no notes.
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+bootstrap_markers "${ROOT}"
+write_agent_role "${ROOT}" planner
+run_check "${ROOT}"
+assert_has_result "agent-roles" "pass" "case41d clean role files pass"
+assert_no_result_status "agent-roles" "warn" "case41d clean role files do not warn"
+assert_no_result_status "agent-roles" "skip" "case41d clean role files are not skipped"
+rm -rf "${ROOT}"
+
+# Unverified key: pass, and the unverified key is listed.
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+bootstrap_markers "${ROOT}"
+write_agent_role "${ROOT}" planner 'retirement_plan = "none"'
+run_check "${ROOT}"
+assert_has_result "agent-roles" "pass" "case41d unverified-only role files pass"
+assert_no_result_status "agent-roles" "warn" "case41d unverified-only role files do not warn"
+assert_contains "$(agent_roles_field pass message)" "retirement_plan" "case41d pass lists the unverified key"
+rm -rf "${ROOT}"
+
+# Drift: warn with the failing finding and a non-empty fix.
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+bootstrap_markers "${ROOT}"
+write_agent_role "${ROOT}" planner 'retirement_plan = "none"'
+printf 'name = "implementer"\ndeveloper_instructions = "Do the thing."\n' > "${ROOT}/.codex/agents/implementer.toml"
+run_check "${ROOT}"
+assert_has_result "agent-roles" "warn" "case41d drift warns"
+assert_no_result_status "agent-roles" "pass" "case41d drift is not a pass"
+assert_contains "$(agent_roles_field warn message)" "missing-field" "case41d drift message names the failing finding"
+[[ "$(agent_roles_field warn message)" != *"retirement_plan"* ]] || fail "case41d drift message must not list the unverified note"
+[[ -n "$(agent_roles_field warn fix)" ]] || fail "case41d drift warn carries a fix"
+rm -rf "${ROOT}"
+
+# Unavailable (stub python3 cannot import tomllib): a distinct warn naming
+# Python 3.11+ with an install fix.
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+bootstrap_markers "${ROOT}"
+write_agent_role "${ROOT}" planner
+mkdir -p "${ROOT}/bin"
+printf '#!/bin/sh\nexit 1\n' > "${ROOT}/bin/python3"
+chmod +x "${ROOT}/bin/python3"
+PATH="${ROOT}/bin:${PATH}" run_check "${ROOT}"
+assert_has_result "agent-roles" "warn" "case41d unavailable is a warn"
+assert_no_result_status "agent-roles" "skip" "case41d unavailable is never a skip"
+assert_no_result_status "agent-roles" "pass" "case41d unavailable is not a pass"
+assert_contains "$(agent_roles_field warn message)" "Python 3.11+" "case41d unavailable message names the prerequisite"
+assert_contains "$(agent_roles_field warn fix)" "Install Python 3.11" "case41d unavailable fix says how to install"
+UNAVAILABLE_LOWER="$(printf '%s %s' "$(agent_roles_field warn message)" "$(agent_roles_field warn fix)" | tr '[:upper:]' '[:lower:]')"
+[[ "${UNAVAILABLE_LOWER}" != *invalid* ]] || fail "case41d unavailable must never say 'invalid' (got: ${UNAVAILABLE_LOWER})"
+rm -rf "${ROOT}"
+
 # Case 42: advisory mode is repository-read-only, emits pure JSON on stdout,
 # and explicitly skips executable/network checks.
 ROOT="$(mktemp -d)"

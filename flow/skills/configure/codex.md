@@ -82,11 +82,44 @@ construct the `sandbox` object by hand outside of that jq-unavailable
 fallback.
 
 Install missing native agents with `PLUGIN_ROOT=<plugin-root> sh
-"${PLUGIN_ROOT}/codex/install-agents.sh" .`. Never overwrite an existing agent file;
-show a diff and ask before updating one. Validate each installed TOML against the
-agent-role schema with `bash "${PLUGIN_ROOT}/codex/validate-agent-roles.sh"
-.codex/agents`, in addition to the existing read-only `--strict-config` Codex smoke
-check.
+"${PLUGIN_ROOT}/codex/install-agents.sh" .`, only in the apply step. Generated roles inherit the
+parent session's model and effort by default: the six normal role templates carry no `model` or
+`model_reasoning_effort`, and `domain-specialist` keeps its pinned escalation model. Never overwrite
+an existing agent file; the script skips it.
+
+- **Override question (Plan mode).** For each role the install will newly create (its file does not
+  exist yet), ask one Plan-mode question: inherit (the default) or a `<model>[:<effort>]` of the user's
+  choosing. Roles that already have a file are never asked. This question has no ID in
+  `question-keys.json`. The answers travel in the approved-plan artifact and its checkpoint like
+  every other answer, and apply passes each non-inherit answer as a repeatable
+  `--role-override <role>=<model>[:<effort>]`, in one install run. Before building the command,
+  check that each user-typed `<model>[:<effort>]` matches `^[A-Za-z0-9._-]+(:[a-z]+)?$` (model
+  `[A-Za-z0-9._-]+`, optional `:effort` `[a-z]+`). A value that does not match, in particular one
+  containing `'`, `$`, backticks, spaces, quotes or newlines, is re-asked and nothing is run. Only a
+  checked value is passed, as one single-quoted argument (`--role-override
+  'implementer=<model>:<effort>'`); never build the command from an unchecked answer, because the
+  agent's own shell would expand `$()` or backticks before the script sees it. The script validates
+  the value again, refuses a malformed one with exit 2 before writing anything, and an override is
+  applied to a newly created file only. If `install-agents.sh` exits 2 (a refusal; nothing was
+  written), stop, report its refusal message, and re-ask the override question instead of continuing.
+- **Migration of old pins.** In Plan mode, run `sh "${PLUGIN_ROOT}/codex/install-agents.sh" .
+  --migrate-preview` (read-only) and show its `diff -u` output; it lists a role file only when
+  its `model` and `model_reasoning_effort` exactly match a default that role's template once
+  shipped, so a user-chosen pin or a file with no pin is never offered. Ask for approval per file
+  (also ID-less) and carry the approved role names in the plan artifact. In apply, run
+  `sh "${PLUGIN_ROOT}/codex/install-agents.sh" . --migrate-apply <role>...` for the approved
+  roles only; it removes exactly those two lines and refuses (exit 2, nothing written) a role that
+  is no longer eligible. A declined file stays byte-identical.
+- **Validate.** Then run `bash "${PLUGIN_ROOT}/codex/validate-agent-roles.sh" .codex/agents`, in
+  addition to the existing read-only `--strict-config` Codex smoke check. Exit 3 means Python 3.11+
+  with `tomllib` is missing or unusable (the validator printed `found: unusable`): report that
+  prerequisite, not an invalid role. Exit 1 means at least one failing finding: report those findings
+  (they are drift in the role files) and do not claim success.
+- **Truthful diagnostics.** An override stays unverified until a native Codex spawn confirms it,
+  and the validator never checks model names. Nothing is substituted. If a spawn later fails because
+  the configured model or effort is unavailable, the run stops and reports the role, the configured
+  value and Codex's error. The built-in-worker fallback in `codex-runtime` applies only to a missing
+  role file.
 
 Fleet dispatch enrollment mirrors the Claude procedure's `### Fleet Dispatch Enrollment`
 section in `phases/fleet-enrollment.md` exactly. Container guard: In-container, the section asks nothing, runs nothing, and writes nothing

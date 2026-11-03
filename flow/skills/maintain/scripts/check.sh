@@ -1042,8 +1042,9 @@ check_config_version() {
 # still satisfy the Codex agent-role schema? (#1040) Delegated to
 # hooks/scripts/check-agent-role-drift.sh --plain (the same script the
 # SessionStart hook runs), so this check and the session-start advisory can
-# never disagree. Drift is advisory: a warn, never a fail; every unreadable
-# input degrades to skip.
+# never disagree. Drift is advisory: a warn, never a fail. clean passes (any
+# unverified/advisory notes are listed); a missing Python 3.11+ prerequisite is
+# its own warn, never a skip; every other unreadable input degrades to skip.
 check_agent_roles() {
   local agents_dir="$ROOT/.codex/agents"
   if [[ ! -d "$agents_dir" ]]; then
@@ -1063,7 +1064,16 @@ check_agent_roles() {
   read -r state rest <<< "$out"
   case "$state" in
     clean)
-      add_result agent-roles "(repo)" pass "installed .codex/agents/*.toml satisfy the agent-role schema" ""
+      if [[ -n "$rest" ]]; then
+        add_result agent-roles "(repo)" pass "installed .codex/agents/*.toml satisfy the agent-role schema; unverified or advisory notes: ${rest}" ""
+      else
+        add_result agent-roles "(repo)" pass "installed .codex/agents/*.toml satisfy the agent-role schema" ""
+      fi
+      ;;
+    unavailable)
+      add_result agent-roles "(repo)" warn \
+        "Codex agent-role validation is unavailable — Python 3.11+ with tomllib was not found on PATH, so installed .codex/agents/*.toml were not checked" \
+        "Install Python 3.11 or newer so python3 provides tomllib (for example from your package manager or python.org), then rerun maintain"
       ;;
     drift)
       add_result agent-roles "(repo)" warn \
