@@ -8,6 +8,8 @@ Forwards Codex lifecycle hooks to `cenci notify` so the cenci daemon can update 
 
 - plugin-local `cenci` binary (provisioned automatically on first session)
 - Codex hooks enabled (default in current Codex releases)
+- Codex 0.166.0 or newer to receive `Interrupt` and `SessionEnd` (older clients skip
+  those manifest entries and still recover through the stale and TTL sweeps)
 
 ## Binary and daemon (self-bootstrapping)
 
@@ -62,4 +64,5 @@ feature flag is required.
 Codex hash-pins `hooks.json`: it records a hash of the file it trusted. Every
 plugin update that changes `hooks.json` changes that hash, so Codex marks the
 hooks as pending review and you must re-trust them via `/hooks` in Codex before
-they run again.
+they run again. The manifest change that adds `Interrupt` and `SessionEnd` needs
+this re-trust via `/hooks`; cenci never bypasses hook trust.

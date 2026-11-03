@@ -66,6 +66,28 @@
           }
         ]
       }
+    ],
+    "Interrupt": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${PLUGIN_ROOT}/codex/notify.sh\" 2>/dev/null || true",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${PLUGIN_ROOT}/codex/notify.sh\" 2>/dev/null || true",
+            "timeout": 3
+          }
+        ]
+      }
     ]
   }
 }

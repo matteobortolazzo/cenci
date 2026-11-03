@@ -10,8 +10,8 @@
 #
 #   G1  every "not run" path prints `not run: <reason>`, exits 0, never says
 #       "passed", and never launches `codex exec`
-#         (env gate unset, codex absent, version below 0.144.1, login failing)
-#   G2  version edge cases (0.144.0 rejected; 0.144.1 and 0.150.0 accepted;
+#         (env gate unset, codex absent, version below 0.166.0, login failing)
+#   G2  version edge cases (0.165.9 rejected; 0.166.0 and 0.170.0 accepted;
 #       `codex-cli X.Y.Z` and bare X.Y.Z output formats)
 #   G3  host mode NEVER passes --dangerously-bypass-hook-trust, not even with a
 #       spoofed CENCI_SANDBOX=1 and no container marker file; sandbox mode
@@ -27,7 +27,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUNNER="${SCRIPT_DIR}/native-hooks.test.sh"
 LIB="${SCRIPT_DIR}/native-hooks-lib.sh"
 BYPASS_FLAG="--dangerously-bypass-hook-trust"
-MIN_VERSION="0.144.1"
+MIN_VERSION="0.166.0"
 
 FAILURES=0
 PASSES=0
@@ -106,7 +106,7 @@ cat > "${STUB_DIR}/codex" <<'SCRIPT'
 printf '%s\n' "$*" >> "${STUB_ARGV_LOG:?STUB_ARGV_LOG must be set}"
 case "$1" in
     --version | -V)
-        printf '%s\n' "${STUB_VERSION_OUTPUT-codex-cli 0.150.0}"
+        printf '%s\n' "${STUB_VERSION_OUTPUT-codex-cli 0.170.0}"
         exit 0
         ;;
     login)
@@ -344,7 +344,7 @@ run_runner "${FARM_DIR}" CENCI_CODEX_NATIVE=1
 assert_not_run "codex absent" "${OUT}" 'codex'
 
 echo "case: codex older than ${MIN_VERSION} -> not run, in every output format (G1, G2)"
-for v in "codex-cli 0.144.0" "codex-cli 0.143.9" "codex-cli 0.9.0" "0.144.0"; do
+for v in "codex-cli 0.165.9" "codex-cli 0.165.0" "codex-cli 0.9.0" "0.165.9"; do
     run_runner "${STUB_PATH}" CENCI_CODEX_NATIVE=1 "STUB_VERSION_OUTPUT=${v}"
     assert_not_run "version '${v}'" "${OUT}" "version|${MIN_VERSION//./\\.}"
 done
@@ -364,7 +364,7 @@ fi
 
 # ── G2: accepted versions reach `codex exec` ─────────────────────────────
 echo "case: ${MIN_VERSION} and newer are accepted, in both output formats (G2)"
-for v in "codex-cli 0.144.1" "codex-cli 0.150.0" "codex-cli 0.144.10" "0.144.1" "0.150.0"; do
+for v in "codex-cli 0.166.0" "codex-cli 0.170.0" "codex-cli 0.166.10" "0.166.0" "0.170.0"; do
     run_runner "${STUB_PATH}" CENCI_CODEX_NATIVE=1 "STUB_VERSION_OUTPUT=${v}"
     if exec_recorded "${OUT}/argv"; then
         pass
@@ -714,9 +714,9 @@ done
 echo "case: cnh_parse_version extracts X.Y.Z from codex --version output (G4)"
 # input|expected ("" = must fail with empty stdout)
 parse_cases=(
-    "codex-cli 0.144.1|0.144.1"
-    "codex-cli 0.150.0|0.150.0"
-    "0.144.1|0.144.1"
+    "codex-cli 0.166.0|0.166.0"
+    "codex-cli 0.170.0|0.170.0"
+    "0.166.0|0.166.0"
     "codex-cli 1.20.300|1.20.300"
     "no version here|"
     "|"
@@ -742,15 +742,15 @@ done
 echo "case: cnh_version_ge compares numerically per component and fails closed on garbage (G4)"
 # version|min|expected (yes = rc 0, no = rc != 0)
 ge_cases=(
-    "0.144.1|${MIN_VERSION}|yes"
-    "0.144.0|${MIN_VERSION}|no"
-    "0.150.0|${MIN_VERSION}|yes"
-    "0.143.99|${MIN_VERSION}|no"
+    "0.166.0|${MIN_VERSION}|yes"
+    "0.165.9|${MIN_VERSION}|no"
+    "0.170.0|${MIN_VERSION}|yes"
+    "0.165.99|${MIN_VERSION}|no"
     "0.9.0|${MIN_VERSION}|no"
-    "0.144.10|${MIN_VERSION}|yes"
-    "0.145.0|${MIN_VERSION}|yes"
+    "0.166.10|${MIN_VERSION}|yes"
+    "0.167.0|${MIN_VERSION}|yes"
     "1.0.0|${MIN_VERSION}|yes"
-    "0.144|${MIN_VERSION}|no"
+    "0.166|${MIN_VERSION}|no"
     "abc|${MIN_VERSION}|no"
     "|${MIN_VERSION}|no"
 )
@@ -807,7 +807,7 @@ check_sanitize "bearer header" "Authorization: Bearer abc123DEF456ghi789" "Autho
 
 echo "case: cnh_sanitize leaves evidence-bearing text alone (G4)"
 check_sanitize "git commit sha is kept" "plugin commit f8643bd3a89990802fc42024c1f6ab4a1a655418" "plugin commit f8643bd3a89990802fc42024c1f6ab4a1a655418"
-check_sanitize "plain evidence text is kept" "hook exited with code 127 on codex-cli 0.144.1" "hook exited with code 127 on codex-cli 0.144.1"
+check_sanitize "plain evidence text is kept" "hook exited with code 127 on codex-cli 0.166.0" "hook exited with code 127 on codex-cli 0.166.0"
 check_sanitize "all-empty sources redact nothing" "/etc/passwd /home/alice devbox-01" "/etc/passwd /home/alice devbox-01" "" "" "" ""
 check_sanitize "an empty home never redacts the stream" "/etc/passwd and /home/alice" "/etc/passwd and /home/<USER>" ""
 check_sanitize "sources are literal, not regex" "/home/aXb/x /home/a.b/x" "/home/aXb/x <HOME>/x" "/home/a.b" "nobody" "nohost" "/nowhere"

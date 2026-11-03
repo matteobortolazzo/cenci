@@ -22,7 +22,7 @@
 # `inconclusive`; the runner never infers a value.
 #
 # Opt-in: prints `not run: <reason>` and exits 0 -- never "passed" -- when
-# CENCI_CODEX_NATIVE is not 1, codex is absent or older than 0.144.1, jq or git is
+# CENCI_CODEX_NATIVE is not 1, codex is absent or older than 0.166.0, jq or git is
 # absent, or `codex login status` fails, so run-checks.sh can run it in CI unchanged.
 #
 # Inputs (all optional):
@@ -44,7 +44,7 @@ SCRIPT_DIR="${BASH_SOURCE[0]%/*}"
 [[ "${BASH_SOURCE[0]}" == */* ]] || SCRIPT_DIR="."
 SCRIPT_DIR="$(cd "${SCRIPT_DIR}" && pwd)" || exit 1
 FLOW_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)" || exit 1
-MIN_VERSION="0.144.1"
+MIN_VERSION="0.166.0"
 
 INHERIT_ROLE="planner"
 OVERRIDE_ROLE="implementer"

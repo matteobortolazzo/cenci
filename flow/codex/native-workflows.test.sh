@@ -56,7 +56,7 @@
 # branch is visible even when the remote rejects it.
 #
 # Opt-in: prints `not run: <reason>` and exits 0 -- never "passed" -- when
-# CENCI_CODEX_NATIVE is not 1, codex is absent or older than 0.144.1, or `codex
+# CENCI_CODEX_NATIVE is not 1, codex is absent or older than 0.166.0, or `codex
 # login status` fails, so run-checks.sh can run it in CI unchanged.
 #
 # Verdicts are judged from the fixture's own state (remote refs and ancestry, the
@@ -104,7 +104,7 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || exit 1
 FLOW_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)" || exit 1
-MIN_VERSION="0.144.1"
+MIN_VERSION="0.166.0"
 
 PR_NUMBER=7
 PR_BRANCH="fix/native-ci"

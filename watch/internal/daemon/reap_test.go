@@ -109,7 +109,7 @@ func TestDaemon_SweepPhase3AgentExitedDoesNotTriggerReap(t *testing.T) {
 	d.handleEvent(ipc.HookEvent{EventType: "Stop", SessionID: "codex-sess", Agent: "codex", TmuxPane: "%0"})
 
 	// The codex process exits back to the shell, but the pane itself is
-	// still alive (no SessionEnd hook for codex).
+	// still alive (an older client or an abrupt exit that sent no SessionEnd).
 	mc.Panes[0].PaneCurrentCmd = "zsh"
 
 	d.runSweep()
@@ -257,6 +257,29 @@ func TestDaemon_SessionEndTeardownTriggersReap(t *testing.T) {
 
 	if got := mr.calls.Load(); got != 1 {
 		t.Errorf("expected exactly 1 Reap() call for a pane-bound SessionEnd teardown, got %d", got)
+	}
+}
+
+// TestDaemon_CodexSessionEndTeardownTriggersReap covers #1238 AC3's reap
+// trigger: a native Codex SessionEnd (reason "other") on a pane-bound session
+// takes the same full teardown and triggers exactly one Reap() call.
+func TestDaemon_CodexSessionEndTeardownTriggersReap(t *testing.T) {
+	mc := &tmuxtest.MockClient{
+		Panes: []tmux.PaneInfo{
+			{SessionName: "main", WindowIndex: "0", WindowName: "zsh", PaneIndex: "0",
+				PaneCurrentCmd: "codex", PaneTitle: "cenci", PaneID: "%0"},
+		},
+	}
+
+	d := newTestDaemon(mc)
+	mr := d.reaper.(*mockReaper)
+	d.handleEvent(ipc.HookEvent{EventType: "SessionStart", SessionID: "codex-sess", Agent: "codex", TmuxPane: "%0"})
+	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "codex-sess", Agent: "codex", TmuxPane: "%0"})
+
+	d.handleEvent(ipc.HookEvent{EventType: "SessionEnd", SessionID: "codex-sess", Agent: "codex", TmuxPane: "%0", SessionEndReason: "other"})
+
+	if got := mr.calls.Load(); got != 1 {
+		t.Errorf("expected exactly 1 Reap() call for a Codex SessionEnd(other) teardown, got %d", got)
 	}
 }
 
