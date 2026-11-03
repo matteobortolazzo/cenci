@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"syscall"
@@ -50,6 +51,7 @@ type SetupJournal struct {
 	ConfigPath  string      `json:"configPath"` // absolute
 	PrincipalID string      `json:"principalId,omitempty"`
 	ClientID    string      `json:"clientId,omitempty"`
+	DisplayName string      `json:"displayName,omitempty"` // new identity: the nonce-suffixed application name
 	Steps       []SetupStep `json:"steps"`
 	Complete    bool        `json:"complete"`
 	CreatedAt   time.Time   `json:"createdAt"`
@@ -87,6 +89,20 @@ func (j *SetupJournal) CheckBinding(tenant, identity, configPath string) error {
 		return nil
 	}
 	return fmt.Errorf("the setup journal %s belongs to a different request (%s differs); it was left untouched", SetupJournalFile, field)
+}
+
+// nonceSuffix is the 16 lower-case hex digits apply appends to a display name.
+var nonceSuffix = regexp.MustCompile(`-[0-9a-f]{16}$`)
+
+// CheckDisplayName fails when the journal recorded a nonce application name
+// whose display-name base is not base: a rerun with another --display-name is a
+// different request. A journal that holds no name matches any base. It belongs
+// to CheckBinding's rules and is called next to it.
+func (j *SetupJournal) CheckDisplayName(base string) error {
+	if j.DisplayName == "" || nonceSuffix.ReplaceAllString(j.DisplayName, "") == base {
+		return nil
+	}
+	return fmt.Errorf("the setup journal %s belongs to a different request (display name differs); it was left untouched", SetupJournalFile)
 }
 
 // SetStep records the status of a step, adding it at the end when new.

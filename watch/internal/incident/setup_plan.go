@@ -281,7 +281,7 @@ func (p SetupPlan) ProposedAuth() AuthConfig {
 	a := AuthConfig{Mode: AuthModeCertificate, TenantID: orPlaceholder(p.Tenant, tenantPlaceholder), ClientID: p.ClientID, CertificatePath: orPlaceholder(p.CertificatePath, certPlaceholder)}
 	switch p.Identity {
 	case SetupIdentityNew:
-		a.ClientID = appIDPlaceholder
+		a.ClientID = orPlaceholder(p.ClientID, appIDPlaceholder)
 	case SetupIdentityManaged:
 		a.Mode, a.CertificatePath = AuthModeManagedIdentity, ""
 		a.PrincipalObjectID = orPlaceholder(p.ObjectID, principalPlaceholder)
@@ -577,11 +577,9 @@ func (p SetupPlan) ApplyBlockers() []string {
 		add("--tenant %s differs from the tenant the Azure CLI is signed in to (%s): fix --tenant or sign in with az login --tenant", p.Tenant, p.AccountTenant)
 	}
 	switch p.Identity {
-	case SetupIdentityExisting, SetupIdentityManaged:
-	case SetupIdentityNew:
-		add("--identity new is not available yet (cenci issue #1389): create the identity with the preview's commands, then use --identity existing")
+	case SetupIdentityNew, SetupIdentityExisting, SetupIdentityManaged:
 	default:
-		add("--identity must be existing or managed")
+		add("--identity must be new, existing or managed")
 	}
 	if p.Tenant == "" {
 		add("--tenant is not set")
@@ -604,20 +602,21 @@ func (p SetupPlan) ApplyBlockers() []string {
 			add("--workspace-resource-id %s=RESOURCE_ID: %s", t.UUID, t.Note)
 		}
 	}
-	if p.ObjectID == "" || p.PrincipalNote != "" {
+	if p.Identity != SetupIdentityNew && (p.ObjectID == "" || p.PrincipalNote != "") {
 		flag := "--client-id"
 		if p.Identity == SetupIdentityManaged {
 			flag = "--principal-object-id"
 		}
 		add("%s: the principal was not confirmed (%s)", flag, orPlaceholder(p.PrincipalNote, "no object ID"))
 	}
-	if p.Identity != SetupIdentityManaged {
-		switch {
-		case p.CertificatePath == "":
-			add("--certificate-path is not set: name the existing certificate file")
-		case !p.CertificateExists:
-			add("--certificate-path: %s does not exist; apply only reads it", safeText(p.CertificatePath))
-		}
+	switch {
+	case p.Identity == SetupIdentityManaged:
+	case p.CertificatePath == "" && p.Identity == SetupIdentityNew:
+		add("--certificate-path is not set: name the file apply creates, or an existing certificate file")
+	case p.CertificatePath == "":
+		add("--certificate-path is not set: name the existing certificate file")
+	case p.Identity != SetupIdentityNew && !p.CertificateExists:
+		add("--certificate-path: %s does not exist; apply only reads it", safeText(p.CertificatePath))
 	}
 	return b
 }
@@ -635,14 +634,33 @@ func (p SetupPlan) RenderApply(replaceAuth bool) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	creating := p.Identity == SetupIdentityNew
 	var out strings.Builder
-	out.WriteString("cenci incident setup --apply: this run assigns the roles and writes the local files below. It deletes nothing and does not start the worker.\n\n")
+	if creating {
+		out.WriteString("cenci incident setup --apply: this run creates the worker's application, service principal and certificate credential, assigns the roles and writes the local files below. It deletes nothing and does not start the worker.\n\n")
+	} else {
+		out.WriteString("cenci incident setup --apply: this run assigns the roles and writes the local files below. It deletes nothing and does not start the worker.\n\n")
+	}
 	fmt.Fprintf(&out, "Tenant:       %s\n", p.Tenant)
 	fmt.Fprintf(&out, "Subscription: %s\n", p.Subscription)
 	fmt.Fprintf(&out, "Identity:     %s\n", p.Identity)
-	fmt.Fprintf(&out, "Principal:    %s (object ID)\n", p.ObjectID)
+	if p.ObjectID != "" || !creating {
+		fmt.Fprintf(&out, "Principal:    %s (object ID)\n", p.ObjectID)
+	} else {
+		out.WriteString("Principal:    the application's service principal, read from Azure when it exists\n")
+	}
 	if p.ClientID != "" {
 		fmt.Fprintf(&out, "Client ID:    %s\n", p.ClientID)
+	}
+	if creating {
+		out.WriteString("\nIdentity, each step reading Azure first and creating only what is missing:\n")
+		if p.ClientID != "" {
+			fmt.Fprintf(&out, "  - application: adopt %s (%q), found by the display name this setup recorded before creating it\n", p.ClientID, p.DisplayName)
+		} else {
+			fmt.Fprintf(&out, "  - application: create %q\n", p.DisplayName)
+		}
+		out.WriteString("  - service principal: create, unless the application already has one\n")
+		out.WriteString("  - certificate credential: register only the public certificate (az ad app credential reset --append, which keeps the other credentials), unless its thumbprint is already registered\n")
 	}
 	out.WriteString("\nRole assignments, each created only when this principal does not already hold exactly that role at exactly that scope:\n")
 	for i, t := range targets {
@@ -662,13 +680,23 @@ func (p SetupPlan) RenderApply(replaceAuth bool) (string, error) {
 	}
 	fmt.Fprintf(&out, "  - %s: %s\n", safeText(p.ConfigPath), authNote)
 	fmt.Fprintf(&out, "  - %s: created or updated so an interrupted apply can resume (no secrets)\n", safeText(SetupJournalPath(p.Config.StateDir)))
-	if p.Identity != SetupIdentityManaged {
+	switch {
+	case p.Identity == SetupIdentityManaged:
+	case creating && p.CertificateExists:
+		fmt.Fprintf(&out, "  - %s: exists, so it is read only and never overwritten; only its public certificate is registered\n", safeText(p.CertificatePath))
+	case creating:
+		fmt.Fprintf(&out, "  - %s: created with the generated certificate and private key (mode 0600, never overwritten); the private key stays in this file\n", safeText(p.CertificatePath))
+	default:
 		fmt.Fprintf(&out, "  - %s: read only; the certificate and private key are never created or changed\n", safeText(p.CertificatePath))
 	}
 	out.WriteString("\nProposed auth section:\n")
 	for _, l := range strings.Split(strings.TrimRight(authJSON, "\n"), "\n") {
 		out.WriteString("  " + l + "\n")
 	}
-	out.WriteString("\nAfterwards setup runs the checks of cenci incident verify; it waits up to 10 minutes for role assignments to propagate when this run or a run in the last 10 minutes attempted a role assignment.\n")
+	if creating {
+		out.WriteString("\nAfterwards setup runs the checks of cenci incident verify; it waits up to 10 minutes for the identity and role assignments to propagate when this run created any of them or this run or a run in the last 10 minutes attempted a role assignment.\n")
+	} else {
+		out.WriteString("\nAfterwards setup runs the checks of cenci incident verify; it waits up to 10 minutes for role assignments to propagate when this run or a run in the last 10 minutes attempted a role assignment.\n")
+	}
 	return out.String(), nil
 }

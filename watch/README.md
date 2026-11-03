@@ -419,13 +419,13 @@ Flags (`--config` is required; every other flag is optional):
 - `--tenant UUID` — Entra tenant the worker authenticates in (default: the `az` login tenant).
 - `--subscription UUID` — subscription searched for the namespace and workspaces (default: the `az` default, shown only as a discovered candidate).
 - `--identity new|existing|managed` — which worker identity to plan for (default `new`).
-- `--client-id UUID` — client ID of the identity (required for `existing`; optional for `managed`; not allowed with `new`).
+- `--client-id UUID` — client ID of the identity (required for `existing`; optional for `managed`; with `new` only together with `--apply`, where it adopts nothing but the application this setup's own journal recorded, otherwise exit 2).
 - `--principal-object-id UUID` — object ID of a managed identity's principal (`managed` only; a placeholder is shown when absent).
 - `--display-name NAME` — display name for a `new` identity (default `cenci-incident-worker`).
-- `--certificate-path PATH` — absolute path of the worker's certificate and key PEM (not allowed with `managed`).
+- `--certificate-path PATH` — absolute path of the worker's certificate and key PEM (not allowed with `managed`). With `--apply --identity new` a missing file is generated there (created exclusively, mode 0600, never overwritten) and an existing file is used read-only.
 - `--service-bus-namespace-id ID` — Service Bus namespace resource ID, when it cannot be discovered.
 - `--workspace-resource-id UUID=ID` — resource ID for a configured workspace UUID that cannot be discovered (repeatable; each UUID once, a repeated UUID is refused with exit 2).
-- `--apply` — carry the plan out instead of previewing it (`--identity existing` or `managed` only; see below).
+- `--apply` — carry the plan out instead of previewing it (`--identity new`, `existing` or `managed`; see below).
 - `--yes` — with `--apply`, confirm without the prompt; required when stdin is not a terminal.
 - `--replace-auth` — with `--apply`, replace a config `auth` section that differs from the plan.
 
@@ -442,20 +442,26 @@ local file) and asks `Apply this plan? [y/N]`; only `y` or `Y` continues. Withou
 terminal on stdin you must pass `--yes` and supply every input as a flag
 (`--tenant`, `--subscription`, `--identity`, `--service-bus-namespace-id`, a
 `--workspace-resource-id` for each configured workspace, `--certificate-path` for
-`existing`, `--principal-object-id` for `managed`), or it exits 2 naming the
-missing flag. It creates only the missing role assignments, writes only the
-config's `auth` section (for `managed`, pinned to the principal with
-`principalObjectId`), runs the checks of `verify` (waiting up to 10 minutes for
-propagation when this run, or a run in the last 10 minutes, attempted a role
-assignment) and records progress in
+`new` and `existing`, `--principal-object-id` for `managed`), or it exits 2 naming
+the missing flag. With `--identity existing` or `managed` it creates only the
+missing role assignments. With `--identity new` it also creates the identity: it
+generates the certificate and private key into `--certificate-path` (only when the
+file is absent; an existing file is validated and used, never overwritten), creates
+the app registration under a nonce-suffixed display name
+(`<display-name>-<16 hex>`, journaled before the app is created), creates its
+service principal and uploads only the public certificate with `az ad app
+credential reset --append`, so the private key never reaches `az` and no existing
+credential is replaced. It writes only the config's `auth` section (for `managed`,
+pinned to the principal with `principalObjectId`), runs the checks of `verify`
+(waiting up to 10 minutes for propagation when this run created an application,
+service principal, credential or role assignment, or when this run or a run in the
+last 10 minutes attempted a role assignment) and records progress in
 `setup-journal.json` in the config's state directory, so a rerun creates nothing
-twice and resumes where a failure stopped. It never deletes anything and never
-starts the worker. `--identity new` is refused with exit 2 until a later ticket
-(cenci issue #1389) adds it: create the identity with the preview's commands, then
-use `--identity existing`. Apply exits `0` when complete, `1` on a runtime
-failure, a declined prompt or a failed verify probe, and `2` on a usage error
-(`--yes` or `--replace-auth` without `--apply`, an omitted `--identity`, a missing
-input with `--yes`, a non-terminal stdin without `--yes`, `--identity new`). On a
+twice, adopts what already exists and resumes where a failure stopped. It never
+deletes anything and never starts the worker. Apply exits `0` when complete, `1` on
+a runtime failure, a declined prompt or a failed verify probe, and `2` on a usage
+error (`--yes` or `--replace-auth` without `--apply`, an omitted `--identity`, a
+missing input with `--yes`, a non-terminal stdin without `--yes`). On a
 terminal without `--yes` any other missing input is not a usage error: setup
 discovers what it can and shows it in the plan, and only a value discovery cannot
 resolve or confirm (for example `--certificate-path`) exits `1` naming the flag
