@@ -141,7 +141,7 @@ CENCI_CODEX_NATIVE=1 CENCI_CODEX_NATIVE_OUT=./native-workflows.md bash flow/code
   The procedures under test are the installed plugin's, not the runner checkout's: the report
   prints `codex plugin list` so the two can be told apart. Record the installed flow plugin's
   version and commit in the table below, not the runner checkout's.
-- Trust, the `not run:` gates (`CENCI_CODEX_NATIVE` unset, Codex absent or older than 0.144.1,
+- Trust, the `not run:` gates (`CENCI_CODEX_NATIVE` unset, Codex absent or older than 0.166.0,
   `codex login status` failing), the `RESULT:` line (`OK` exit 0, `INCONCLUSIVE` exit 3, `FAIL`
   exit 1) and the sanitization (`<HOME>`, `<USER>`, `<HOST>`, `<FIXTURE>`, `<UUID>`, `<TOKEN>`,
   commit SHAs kept) are the same as for the hook runner above. The runner refuses to print a
@@ -337,7 +337,7 @@ CENCI_CODEX_NATIVE=1 CENCI_CODEX_NATIVE_OVERRIDE_MODEL=<model your account can u
 ```
 
 - `CENCI_CODEX_NATIVE=1` opts in. The runner prints `not run: <reason>` and exits 0 when it is
-  unset, `codex`, `jq` or `git` is absent, Codex is older than 0.144.1, or `codex login status`
+  unset, `codex`, `jq` or `git` is absent, Codex is older than 0.166.0, or `codex login status`
   fails.
 - `CENCI_CODEX_NATIVE_OVERRIDE_MODEL` (`[A-Za-z0-9._-]+`) is the model for the override role; when it
   is unset the override row is `not run`. `CENCI_CODEX_NATIVE_OVERRIDE_EFFORT` (`[a-z]+`) is
