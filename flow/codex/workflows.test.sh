@@ -901,7 +901,8 @@ assert_before "$impl" "implement canary before the pipeline lifecycle" "$CANARY_
 assert_before "$impl" "implement canary before checkpoint advance" "$CANARY_REF" 'Then advance the checkpoint before any worktree call'
 # Persist is its own normal-mode turn that writes the plan artifact and the checkpoint, so
 # codex-runtime's Persist step runs the canary after require-runtime.sh and before its first write.
-grep -qF -- 'require-runtime.sh"`, then run the Guard canary preflight before the first write' "$runtime" || fail "persist must run require-runtime.sh, then the guard canary, before its first write"
+grep -qF -- 'require-runtime.sh"`, then, for `implement`, `address-review` and `refactor` only, run the Guard canary preflight before the first write' "$runtime" || fail "persist must run require-runtime.sh, then the guard canary for implement/address-review/refactor only, before its first write"
+grep -qF -- "The other workflows' persist turns run no canary." "$runtime" || fail "persist canary must state that the other workflows' persist turns run none (Q&A 4 scope)"
 assert_before "$runtime" "persist canary before the artifact write" 'run the Guard canary preflight before the first write' '2. Run the workflow-specific artifact check before the artifact write'
 grep -q 'refus' <(sed -n "$(line_of "$impl" "$CANARY_REF")p" "$impl") || fail "implement canary step must state the refusal outcome"
 
