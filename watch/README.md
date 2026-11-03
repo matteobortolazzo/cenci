@@ -375,6 +375,11 @@ The optional incident worker consumes Azure Monitor common-schema alerts from
 Service Bus, persists/deduplicates incident jobs, investigates with read-only
 telemetry, and produces a draft fix PR or a report for human review. It runs
 separately from the attention daemon and is disabled until explicitly configured.
+For an end-to-end walk-through (preview, identity and roles, service account,
+verification, staging smoke test, migration, renewal and undo) follow the
+[seven-step tutorial](docs/incident-worker.md#tutorial-a-worker-identity-on-a-local-host);
+a worker on an Azure host with a managed or workload identity uses
+[Azure-hosted worker identity](docs/incident-worker.md#azure-hosted-worker-identity).
 
 ```bash
 cenci incident setup --config /absolute/path/incidents.json [--apply [--yes]] [--replace-auth]

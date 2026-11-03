@@ -129,7 +129,8 @@ Commands:
   run                                dispatch a workflow into a new tmux window
   babysit                            supervise an open PR until it merges or closes
   dispatch                           fleet auto-dispatch (enroll/unenroll/status/loop/plan-refined)
-  incident run|status|cancel|setup   opt-in local Azure incident worker, durable status and cancellation, identity setup (read-only preview, or --apply to create role assignments and write the config's auth)
+  incident run|verify|status|cancel|setup
+                                     opt-in local Azure incident worker, identity verification, durable status and cancellation, identity setup (read-only preview, or --apply to create role assignments and write the config's auth)
   incident verify --config PATH [--propagation-wait D]
                                      authenticate as the configured worker identity and run read-only probes (telemetry query, broker peek); D is 30s-15m, retries only authorization-denied
   incident setup --config PATH [--identity new|existing|managed] [--tenant UUID] [--subscription UUID] [--client-id UUID] [--principal-object-id UUID] [--display-name NAME] [--certificate-path PATH] [--service-bus-namespace-id ID] [--workspace-resource-id UUID=ID]... [--apply [--yes]] [--replace-auth]

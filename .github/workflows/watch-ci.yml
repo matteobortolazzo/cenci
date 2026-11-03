@@ -41,6 +41,8 @@ jobs:
               - 'sandbox/tests/lib/**'
               - 'flow/tests/adversarial-chain/fixtures/**'
               - '.github/workflows/watch-ci.yml'
+              - 'watch/README.md' # Run TestIncidentDocs* (incident_docs_test.go), which reads the README's incident CLI reference.
+              - 'sandbox/README.md' # Run TestIncidentDocsSeparateHostedIdentityFromTheLocalTutorial, which reads the Azure CLI section.
       - name: Report paths-filter decision
         env:
           CODE_WATCH: ${{ steps.code.outputs.watch }}
