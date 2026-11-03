@@ -216,9 +216,12 @@ assert_file_contains "${README}" '| **acceptance-reviewer** |' "README architect
 assert_file_contains "${REPO_DIR}/docs/orchestration.md" '`/cenci:close <parent>`' "orchestration doc documents the close step"
 [[ -f "${ROLE_TEMPLATE}" ]] || fail "Codex acceptance-reviewer role template must exist"
 if [[ -f "${ROLE_TEMPLATE}" && -f "${PLANNER_TEMPLATE}" ]]; then
-  role_model="$(grep -m1 '^model = ' "${ROLE_TEMPLATE}")"; planner_model="$(grep -m1 '^model = ' "${PLANNER_TEMPLATE}")"
-  [[ "${role_model}" == "${planner_model}" ]] || fail "acceptance-reviewer Codex role must pin the same model as the planner role (got ${role_model} vs ${planner_model})"
-  assert_file_contains "${ROLE_TEMPLATE}" 'model_reasoning_effort = "high"' "Codex acceptance-reviewer role pins high effort"
+  # Same configuration as the planner role: neither pins a model or an effort, so both inherit (#1191).
+  for tpl in "${ROLE_TEMPLATE}" "${PLANNER_TEMPLATE}"; do
+    if grep -qE '^model(_reasoning_effort)?[[:space:]]*=' "${tpl}"; then
+      fail "${tpl##*/} Codex role template must omit model and model_reasoning_effort (inherit by default)"
+    fi
+  done
 fi
 if [[ -f "${INSTALLED_ROLE}" && -f "${ROLE_TEMPLATE}" ]]; then
   cmp -s "${INSTALLED_ROLE}" "${ROLE_TEMPLATE}" || fail ".codex/agents/acceptance-reviewer.toml drifted from its template"

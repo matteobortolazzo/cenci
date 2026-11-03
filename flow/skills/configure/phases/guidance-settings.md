@@ -3,10 +3,52 @@
 Read this file on every run, after the questions and `### Auth Verification` in `SKILL.md` (see `SKILL.md` `### Step Map`). It holds steps 0 to 5c-bis: Codex agent adapters, guidance and client adapters, `.lsp.json`, board lifecycle labels, `.claude/settings.json`, MCP server configuration, `.claudeignore`, auto-compact and the subagent pin.
 
 0. **Generate Codex agent adapters**: copy the reviewed TOML role templates from
-   `templates/codex/agent-roles/` into `.codex/agents/`. Preserve unknown user-authored agent
-   files. Planning, implementation, and critical review use GPT-5.6/high; gathering and
-   read-heavy analysis use GPT-5.6-terra/medium. Native procedures must fall back to built-in
-   workers with the same role prompt when an adapter is unavailable.
+   `templates/codex/agent-roles/` into `.codex/agents/` with `install-agents.sh`, but only after
+   the questions below are answered, so one install run carries every answer. Preserve unknown
+   user-authored agent files: the script never rewrites an existing role file. These steps use no
+   question ID and write nothing to `question-keys.json`; every question below goes through
+   `AskUserQuestion`. Order: override question, then `--migrate-preview` and per-file approval,
+   then one `install-agents.sh .` run with the collected `--role-override` flags, then
+   `--migrate-apply` for approved files, then the validator.
+   - **Inherit by default.** The six normal roles (`planner`, `implementer`,
+     `critical-reviewer`, `acceptance-reviewer`, `context-gatherer`, `structure-analyzer`)
+     carry no `model` or `model_reasoning_effort`, so a spawned role follows the parent session's
+     model and effort. `domain-specialist` keeps its pinned escalation model (see
+     `docs/model-escalation.md`).
+   - **Override question.** Before installing anything, for each role `install-agents.sh` will
+     newly create (its file does not exist yet), ask one `AskUserQuestion` question whose default is
+     "Inherit (Recommended)" and whose other choice is a user-supplied `<model>[:<effort>]`. Roles
+     that already have a file are never asked. Then run `PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT}" sh
+     "${CLAUDE_PLUGIN_ROOT}/codex/install-agents.sh" .` once, passing each non-inherit answer as
+     `--role-override <role>=<model>[:<effort>]` (repeatable). Before building the command, check that
+     each user-typed `<model>[:<effort>]` matches `^[A-Za-z0-9._-]+(:[a-z]+)?$` (model
+     `[A-Za-z0-9._-]+`, optional `:effort` `[a-z]+`). A value that does not match, in particular one
+     containing `'`, `$`, backticks, spaces, quotes or newlines, is re-asked and nothing is run. Only
+     a checked value is passed, as one single-quoted argument (`--role-override
+     'implementer=<model>:<effort>'`); never build the command from an unchecked answer, because
+     your own shell would expand `$()` or backticks before the script sees it. The script validates
+     the value again, refuses a malformed one with exit 2 before writing anything, and writes an
+     override into a newly created file only. If `install-agents.sh` exits 2 (a refusal; nothing
+     was written), stop, report its refusal message, and re-ask the override question instead of
+     continuing.
+   - **Migration of existing pins.** Run `sh "${CLAUDE_PLUGIN_ROOT}/codex/install-agents.sh" .
+     --migrate-preview` (read-only, so it may run before the install). It prints a `diff -u` only
+     for a role file whose `model` and `model_reasoning_effort` exactly match a default that role's
+     template once shipped; a user-chosen pin or a file with no pin is never listed. When it lists
+     a file, show the diff and ask per file through `AskUserQuestion` whether to apply it; after the
+     install run, for each approved file run `--migrate-apply <role>...`, which removes exactly
+     those two lines and refuses (exit 2, nothing written) a role that is not eligible. A declined
+     file stays byte-identical.
+   - **Validate.** Then run `bash "${CLAUDE_PLUGIN_ROOT}/codex/validate-agent-roles.sh" .codex/agents`.
+     Exit 3 means Python 3.11+ with `tomllib` is missing or unusable (the validator printed
+     `found: unusable`): report that prerequisite, not an invalid role. Exit 1 means at least one
+     failing finding: report those findings (they are drift in the role files) and do not claim
+     success.
+   - **Truthful diagnostics.** An override stays unverified until a native Codex spawn confirms
+     it; the validator never checks model names. Nothing is substituted. If a spawn later fails
+     because its configured model or effort is unavailable, the native procedure stops and reports
+     the role, the configured value and Codex's error; the built-in-worker fallback applies only
+     when a role file is missing, never to an unavailable model.
 
 1. **Generate canonical guidance and client adapters**:
    - `AGENTS.md` at the repository root is canonical shared guidance. Use

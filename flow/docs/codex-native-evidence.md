@@ -12,7 +12,8 @@ placeholder is never evidence, and no conclusion in `codex.md` or `adapter-contr
 cite this file until its section is filled in. The last two sections, "Native workflows:
 `ci-repair` and `babysit-attention`" and "Native workflows: Plan mode, handoff and goal
 lifecycle", record a different runner (`codex/native-workflows.test.sh`, #1236 and #1235)
-and carry their own status lines.
+and carry their own status lines, as does the last section, "Native agent roles: inherit,
+override, unavailable model" (`codex/native-agent-roles.test.sh`, #1191).
 
 ## How to produce a run
 
@@ -313,3 +314,63 @@ expected one.
 
 A startup control found by the probe (or by this record) that is version-verified is filed as a
 `Followup` against the Plan-mode handoff, not added to the ticket that produced the record.
+
+## Native agent roles: inherit, override, unavailable model
+
+**Status: pending native run.** The runner `codex/native-agent-roles.test.sh` (#1191) exists, but
+no run against a real Codex binary has been recorded. Every result cell below is a placeholder, not
+evidence, until the maintainer commits a sanitized run to the same PR as the runner. The #1191
+acceptance criterion for this section stays unchecked, and the PR is not merged, until then.
+Nothing in `codex.md` may cite this section as verified before then.
+
+The runner builds a fixture under `/var/tmp` with `codex/install-agents.sh` itself, then runs
+`codex exec --json` read-only and spawns one role per row. Resolved model and effort are read from
+the session records (the `turn_context` of the parent thread and of the spawned role's own thread)
+and failures from the event stream, never from the model's narration. A row whose evidence is not
+visible is `inconclusive`; the runner never infers a value.
+
+### How to produce a run
+
+```bash
+CENCI_CODEX_NATIVE=1 CENCI_CODEX_NATIVE_OVERRIDE_MODEL=<model your account can use> \
+  CENCI_CODEX_NATIVE_OUT=./native-agent-roles.md bash flow/codex/native-agent-roles.test.sh
+```
+
+- `CENCI_CODEX_NATIVE=1` opts in. The runner prints `not run: <reason>` and exits 0 when it is
+  unset, `codex`, `jq` or `git` is absent, Codex is older than 0.144.1, or `codex login status`
+  fails.
+- `CENCI_CODEX_NATIVE_OVERRIDE_MODEL` (`[A-Za-z0-9._-]+`) is the model for the override role; when it
+  is unset the override row is `not run`. `CENCI_CODEX_NATIVE_OVERRIDE_EFFORT` (`[a-z]+`) is
+  optional and needs the model.
+- `CNAR_RUN_TIMEOUT` bounds each `codex` run in seconds (default 600).
+- `CENCI_CODEX_NATIVE_OUT` also writes the sanitized report to that file.
+- The run ends with one `RESULT:` line: `RESULT: OK` (exit 0) needs all three rows `ok`;
+  `RESULT: INCONCLUSIVE` (exit 3) means nothing failed but a required row is not `ok`;
+  `RESULT: FAIL` (exit 1) means a row failed. Home paths, user and host names, fixture roots,
+  session IDs and token-shaped strings are replaced before anything is committed; git commit SHAs
+  are kept.
+
+### Judging rules
+
+- **inherit**: the planner role is installed with no override and resolves the parent session's
+  model and effort. A difference is a `FAIL`.
+- **override**: the implementer role is installed with `--role-override` from the environment
+  values and resolves exactly that model (and effort when given). A difference is a `FAIL`.
+- **unavailable model**: the critical-reviewer role is installed with a deliberately unavailable
+  model. `ok` needs an error Codex reports that names the model. No error with the role running on
+  another model is a `FAIL` (silent substitution); an error that does not name the model, or no
+  evidence, is `inconclusive`.
+
+### Results
+
+| Field | Value |
+|---|---|
+| Codex version | pending native run |
+| Flow plugin commit | pending native run |
+| Host or sandbox | pending native run |
+
+| Scenario | Result |
+|---|---|
+| `inherit (planner)`: spawned role resolves the parent's model and effort | pending native run |
+| `override (implementer)`: spawned role resolves the overridden model and effort | pending native run |
+| `unavailable model (critical-reviewer)`: Codex reports it and nothing is substituted | pending native run |

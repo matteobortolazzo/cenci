@@ -1,38 +1,45 @@
 #!/usr/bin/env bash
-# validate-agent-roles.sh — schema validation for Codex agent-role TOML files
-# (#1040). Earlier tests only grepped for the two fields that previously broke
-# (description added by #409, name added by #422) — a regression pin, not
-# real schema validation. It caught neither a duplicate `name` across files
-# nor an unknown top-level key, and would not catch the next required field
-# Codex adds either.
+# validate-agent-roles.sh — classifier for Codex agent-role TOML files (#1040,
+# reworked by #1191). Earlier versions checked a closed five-key list, so a valid
+# role with `sandbox_mode`, `mcp_servers` or `skills.config` failed, a `name`
+# differing from the filename failed, and identical names in different
+# configuration layers failed. This version fails only on a proven type or
+# required-field error and on a same-layer duplicate `name`.
 #
 # Usage:
 #   validate-agent-roles.sh [--plain] <dir> [<dir> ...]
 #
-# Every *.toml file directly under each given directory is parsed and
-# checked. Pass every directory that must share one Codex "config layer" (the
-# same call: this repo runs it against both .codex/agents/ and
-# templates/codex/agent-roles/ together) so a duplicate `name` across
-# directories is caught directly, not just guarded against by keeping the
-# directories differently named.
+# Every *.toml file directly under each given directory is parsed and checked.
+# Each directory argument is one configuration layer (Codex treats
+# ~/.codex/agents/ and .codex/agents/ as separate layers), so a `name` repeated
+# across directories is NOT a duplicate; a `name` repeated inside one directory is.
 #
-# Checks enforced per file:
-#   - valid TOML syntax
-#   - required non-empty string keys: name, description, developer_instructions
-#   - no unknown top-level keys (known set below)
-#   - name equals the filename stem
-#   - name unique across every file passed in, across all directories
+# Documented key subset, version-stamped: Codex docs 2026-10, Codex CLI 0.144.1+.
+# This is a documented subset, not a claim to be the full schema. Anything else is
+# reported as unverified, never invalid.
+#   - name, description, developer_instructions: required non-empty strings
+#   - model, model_reasoning_effort: strings (model names are never checked
+#     offline; an effort outside minimal/low/medium/high/xhigh is unverified
+#     because supported efforts vary by model and version)
+#   - sandbox_mode: string, one of read-only / workspace-write / danger-full-access
+#   - mcp_servers, skills (and skills.config): tables
+#
+# Finding kinds, one per output line, "<kind> <subject>: <detail>":
+#   failing:      invalid-toml unreadable missing-field invalid-type invalid-value
+#                 duplicate-name
+#   not failing:  unverified-key unverified-value name-convention
 #
 # Modes:
-#   (default)  human-readable: one "FAIL: <message>" line per finding to
-#              stderr; "<n> agent role file(s) OK" to stdout when clean.
-#   --plain    one finding per line on stdout, nothing when clean — for
-#              scripted consumers (this script's own tests and the
-#              check-agent-role-drift.sh hook/maintain check).
+#   (default)  human-readable: "FAIL: <finding>" to stderr per failing finding,
+#              "NOTE: <finding>" to stdout per note, and "<n> agent role file(s)
+#              OK" to stdout when nothing fails.
+#   --plain    one finding per line on stdout, nothing when clean — for scripted
+#              consumers (this script's tests and check-agent-role-drift.sh).
 #
-# Exit codes: 0 when every file is clean, 1 when any finding exists, 2 for
-# usage errors or a missing/broken python3 tomllib (fails closed rather than
-# silently skipping validation).
+# Exit codes: 0 no failing finding (clean or notes only), 1 at least one failing
+# finding, 2 usage error (no directory, not a directory, no *.toml), 3 validation
+# unavailable (python3 missing or without tomllib; one `cenci: …` line on stderr
+# naming Python 3.11+, mirroring flow/codex/require-runtime.sh).
 set -uo pipefail
 
 MODE="human"
@@ -49,20 +56,47 @@ if [[ "${#DIRS[@]}" -eq 0 ]]; then
   exit 2
 fi
 
-command -v python3 >/dev/null 2>&1 || {
-  echo "validate-agent-roles.sh: python3 not found on PATH" >&2
-  exit 2
-}
-python3 -c 'import tomllib' >/dev/null 2>&1 || {
-  echo "validate-agent-roles.sh: python3's tomllib module is unavailable (needs Python 3.11+)" >&2
-  exit 2
+unavailable() {  # unavailable <found> — exit 3 with the one-line prerequisite message
+  printf 'cenci: Codex agent-role validation unavailable — Python 3.11+ with tomllib not found on PATH (found: %s). Install Python 3.11 or newer, then rerun; no agent-role file was changed.\n' "$1" >&2
+  exit 3
 }
 
+# Report only a validated X.Y.Z, rebuilt from digits, so version text from a broken
+# python3 is never echoed or evaluated.
+python_version_or_marker() {
+  local raw major minor patch
+  raw="$(python3 -I -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])' 2>/dev/null)" || raw=""
+  major="${raw%%.*}"
+  minor="${raw#*.}"; minor="${minor%%.*}"
+  patch="${raw#*.*.}"
+  case "$raw" in
+    *.*.*) ;;
+    *) printf '%s' "no tomllib"; return ;;
+  esac
+  case "$major$minor$patch" in
+    '' | *[!0-9]*) printf '%s' "no tomllib"; return ;;
+  esac
+  if [[ -z "$major" || -z "$minor" || -z "$patch" || "${#major}" -gt 6 || "${#minor}" -gt 6 || "${#patch}" -gt 6 ]]; then
+    printf '%s' "no tomllib"; return
+  fi
+  printf '%s.%s.%s' "$major" "$minor" "$patch"
+}
+
+if ! command -v python3 >/dev/null 2>&1; then
+  unavailable "none"
+fi
+# python3 runs in isolated mode (-I) everywhere: hooks and maintain run from the repo
+# root, and without -I the cwd leads sys.path so a repo-planted tomllib.py would run.
+if ! python3 -I -c 'import tomllib' >/dev/null 2>&1; then
+  unavailable "$(python_version_or_marker)"
+fi
+
 FILES=()
-for dir in "${DIRS[@]}"; do
+for i in "${!DIRS[@]}"; do
+  dir="${DIRS[$i]}"
   [[ -d "$dir" ]] || { echo "validate-agent-roles.sh: not a directory: $dir" >&2; exit 2; }
   while IFS= read -r -d '' f; do
-    FILES+=("$f")
+    FILES+=("${i}:${f}")
   done < <(find "$dir" -maxdepth 1 -name '*.toml' -print0 | sort -z)
 done
 
@@ -71,66 +105,148 @@ if [[ "${#FILES[@]}" -eq 0 ]]; then
   exit 2
 fi
 
-FINDINGS="$(python3 - "${FILES[@]}" <<'PYEOF'
+FINDINGS="$(python3 -I - "${FILES[@]}" 2>/dev/null <<'PYEOF'
 import sys
 import tomllib
 
-KNOWN_KEYS = {"name", "description", "model", "model_reasoning_effort", "developer_instructions"}
+sys.stdout.reconfigure(errors="backslashreplace")
+
 REQUIRED_STRING_KEYS = ["name", "description", "developer_instructions"]
+SANDBOX_MODES = ("read-only", "workspace-write", "danger-full-access")
+EFFORTS = ("minimal", "low", "medium", "high", "xhigh")
+KNOWN_KEYS = {
+    "name", "description", "developer_instructions", "model",
+    "model_reasoning_effort", "sandbox_mode", "mcp_servers", "skills",
+}
 
-files = sys.argv[1:]
+
+def q(value):
+    """Escape control characters so one finding is always exactly one line."""
+    return "".join(
+        c if not (ord(c) < 32 or 0x7F <= ord(c) <= 0x9F) else "\\x%02x" % ord(c)
+        for c in str(value)
+    )
+
+
 findings = []
-names = {}  # name -> list of files declaring it
+layers = {}  # layer index -> {name -> [paths]}
 
-for path in files:
+for arg in sys.argv[1:]:
+    layer, path = arg.split(":", 1)
+    shown = q(path)
     stem = path.rsplit("/", 1)[-1].removesuffix(".toml")
     try:
         with open(path, "rb") as fh:
             data = tomllib.load(fh)
-    except tomllib.TOMLDecodeError as exc:
-        findings.append(f"invalid-toml {path}: {exc}")
-        continue
     except OSError as exc:
-        findings.append(f"unreadable {path}: {exc}")
+        findings.append(f"unreadable {shown}: {q(exc)}")
         continue
+    except ValueError as exc:  # TOMLDecodeError and UnicodeDecodeError
+        findings.append(f"invalid-toml {shown}: {q(exc)}")
+        continue
+    except (RecursionError, MemoryError):  # pathological file: fail this file only
+        findings.append(f"invalid-toml {shown}: file is nested too deeply or could not be parsed within limits")
+        continue
+    # Any other exception propagates: python exits non-zero and the caller reports
+    # exit 3 (found: unusable) — a broken tomllib is an environment fault.
 
     for key in REQUIRED_STRING_KEYS:
         value = data.get(key)
         if not isinstance(value, str) or value.strip() == "":
-            findings.append(f"missing-field {path}: '{key}' must be a non-empty string")
+            findings.append(f"missing-field {shown}: '{key}' must be a non-empty string")
 
-    unknown = sorted(set(data.keys()) - KNOWN_KEYS)
-    for key in unknown:
-        findings.append(f"unknown-key {path}: '{key}' is not a recognized agent-role field")
+    if "model" in data and not isinstance(data["model"], str):
+        findings.append(f"invalid-type {shown}: 'model' must be a string")
+
+    if "model_reasoning_effort" in data:
+        effort = data["model_reasoning_effort"]
+        if not isinstance(effort, str):
+            findings.append(f"invalid-type {shown}: 'model_reasoning_effort' must be a string")
+        elif effort not in EFFORTS:
+            findings.append(
+                f"unverified-value {shown}: 'model_reasoning_effort' value '{q(effort)}' "
+                f"is not one of {'/'.join(EFFORTS)}"
+            )
+
+    if "sandbox_mode" in data:
+        mode = data["sandbox_mode"]
+        if not isinstance(mode, str):
+            findings.append(f"invalid-type {shown}: 'sandbox_mode' must be a string")
+        elif mode not in SANDBOX_MODES:
+            findings.append(
+                f"invalid-value {shown}: 'sandbox_mode' value '{q(mode)}' "
+                f"must be one of {'/'.join(SANDBOX_MODES)}"
+            )
+
+    if "mcp_servers" in data and not isinstance(data["mcp_servers"], dict):
+        findings.append(f"invalid-type {shown}: 'mcp_servers' must be a table")
+
+    if "skills" in data:
+        skills = data["skills"]
+        if not isinstance(skills, dict):
+            findings.append(
+                f"invalid-type {shown}: 'skills' must be a table (skills.config cannot exist under it)"
+            )
+        else:
+            for sub in sorted(skills):
+                if sub == "config":
+                    if not isinstance(skills[sub], dict):
+                        findings.append(f"invalid-type {shown}: 'skills.config' must be a table")
+                else:
+                    findings.append(
+                        f"unverified-key {shown}: 'skills.{q(sub)}' is not in the documented key subset"
+                    )
+
+    for key in sorted(set(data) - KNOWN_KEYS):
+        findings.append(f"unverified-key {shown}: '{q(key)}' is not in the documented key subset")
 
     name = data.get("name")
-    if isinstance(name, str) and name.strip() != "" and name != stem:
-        findings.append(f"name-mismatch {path}: name '{name}' does not match filename stem '{stem}'")
-
     if isinstance(name, str) and name.strip() != "":
-        names.setdefault(name, []).append(path)
+        if name != stem:
+            findings.append(
+                f"name-convention {shown}: name '{q(name)}' differs from filename stem '{q(stem)}' (advisory)"
+            )
+        layers.setdefault(layer, {}).setdefault(name, []).append(shown)
 
-for name, paths in names.items():
-    if len(paths) > 1:
-        findings.append(f"duplicate-name {name}: declared in {', '.join(paths)}")
+for layer in layers:
+    for name, paths in layers[layer].items():
+        if len(paths) > 1:
+            findings.append(f"duplicate-name {q(name)}: declared in {', '.join(sorted(paths))}")
 
 for finding in findings:
     print(finding)
 PYEOF
 )"
+PY_RC=$?
+if [[ "$PY_RC" -ne 0 ]]; then
+  unavailable "unusable"
+fi
 
-if [[ -z "$FINDINGS" ]]; then
-  if [[ "$MODE" == "human" ]]; then
-    echo "${#FILES[@]} agent role file(s) OK"
-  fi
-  exit 0
+FAILING=0
+NOTES=()
+FAILS=()
+if [[ -n "$FINDINGS" ]]; then
+  while IFS= read -r line; do
+    kind="${line%% *}"
+    case "$kind" in
+      unverified-key | unverified-value | name-convention) NOTES+=("$line") ;;
+      *) FAILS+=("$line"); FAILING=1 ;;
+    esac
+  done <<< "$FINDINGS"
 fi
 
 if [[ "$MODE" == "plain" ]]; then
-  printf '%s\n' "$FINDINGS"
+  [[ -z "$FINDINGS" ]] || printf '%s\n' "$FINDINGS"
 else
-  while IFS= read -r line; do
+  for line in "${FAILS[@]+"${FAILS[@]}"}"; do
     echo "FAIL: $line" >&2
-  done <<< "$FINDINGS"
+  done
+  for line in "${NOTES[@]+"${NOTES[@]}"}"; do
+    echo "NOTE: $line"
+  done
+  if [[ "$FAILING" -eq 0 ]]; then
+    echo "${#FILES[@]} agent role file(s) OK"
+  fi
 fi
-exit 1
+
+exit "$FAILING"

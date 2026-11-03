@@ -239,8 +239,10 @@ merge (the `--slurpfile`-based label exclusion and the numeric-milestone-only ru
 inside `ensure-issue.sh init`'s own `--parent-meta` handling rather than being computed inline
 here (#876).
 
-Divergence: the refiner agent split is Claude-only — Codex has no subagent model tiering, so
-this native procedure performs the refinement analysis inline as described above.
+Divergence: the refiner agent split is Claude-only. Codex roles can carry a model and effort, but
+this native procedure still performs the refinement analysis, the Q&A and every GitHub write in the
+root agent, as described above (`subagent-safety`: questions, authenticated mutations and shared-state
+writes are never delegated). Only read-only exploration may go to the `context-gatherer` role.
 
 **Command surface (least privilege)**: this workflow's own procedure performs no remote
 fetches of its own — neither a `curl` grant nor a web-fetch capability, and the procedure

@@ -25,7 +25,7 @@ without mutations. A persist step then writes the plan artifact and its checkpoi
 fresh `apply` verifies both before it updates GitHub and executes; see
 [Plan, persist and apply](#plan-persist-and-apply). Implementation uses `.cenci/checkpoints/`,
 generated `.codex/agents/*.toml`, and a native goal created only by a human-issued `apply` (see [Native goals](#native-goals)).
-Missing custom agents fall back to built-in workers with the same bounded role prompt.
+A missing role file falls back to a built-in worker with the same bounded role prompt; an unavailable model or effort at spawn does not (see [Agent role templates](#agent-role-templates)).
 
 Refinement follows the same handoff. Plan mode asks the material questions, validates the
 proposal and renders it; `apply` re-fetches the ticket, runs the pre-write checks and
@@ -172,6 +172,14 @@ workflows cannot run.
   line on stderr and exits 2. The run stops there and reports that line. Nothing has
   been written: no checkpoint, no workflow state, no GitHub change. With Node 18 or
   newer it is silent and exits 0.
+- **Agent-role validation needs Python 3.11+.** `codex/validate-agent-roles.sh` parses role
+  files with Python's `tomllib`, so **Python 3.11 or newer must be on `PATH`** where it runs
+  (configure, `check-agent-role-drift.sh` and maintain's `agent-roles` check all reach it).
+  When `python3` is missing, older than 3.11, or has no `tomllib`, it prints one
+  `cenci: Codex agent-role validation unavailable — Python 3.11+ with tomllib not found on PATH (found: …)`
+  line on stderr and exits 3, separate from an invalid role (exit 1). `found:` is `none`, a
+  validated `X.Y.Z` without `tomllib`, `no tomllib`, or `unusable` when `python3` cannot run the
+  check. Nothing is written. See [Validating role files](#validating-role-files).
 - **`cenci doctor` reports the runtime on its own line**, next to the Codex version line.
   `✓ Codex workflow runtime: Node <version> on PATH` means the workflows can run;
   `! Codex workflow runtime not executable: Node.js 18+ not found on PATH (found: <none|unparseable|version>)`
@@ -209,15 +217,48 @@ workflows cannot run.
 
 ## Agent role templates
 
-`domain-specialist` is the escalation role for qualifying tasks, pinned to `gpt-6-astra`
-with high reasoning effort. The [shared policy](model-escalation.md) defines the
-triggers, bounded read-only dispatch, evidence validation, and unavailable-model
-fallback. Normal planner, implementer, reviewer, and context roles keep their
-existing pins. `acceptance-reviewer` — the item-by-item ticket-coverage review that runs
-after implementation and before `critical-reviewer`, in `$cenci:review` PR mode, and for
-`$cenci:close` — ships on the same pin as `planner`. Re-running configure installs the new missing role; existing role
-customizations are preserved. The repository's installed specialist mirrors its
-template. These pins are configuration, not a guarantee of account-level access.
+**Inherit by default.** The six normal roles (`planner`, `implementer`, `critical-reviewer`,
+`acceptance-reviewer`, `context-gatherer`, `structure-analyzer`) ship with no `model` and no
+`model_reasoning_effort`, so a spawned role follows the parent session. A role file's own
+settings beat the parent's, which is why the old hard-coded pins are gone. `acceptance-reviewer` —
+the item-by-item ticket-coverage review that runs after implementation and before
+`critical-reviewer`, in `$cenci:review` PR mode, and for `$cenci:close` — inherits like `planner`.
+Re-running configure installs a new missing role; existing role customizations are preserved.
+
+`domain-specialist` is the exception: it is the escalation role for qualifying tasks and keeps its
+pin to `gpt-6-astra` with high reasoning effort. The [shared policy](model-escalation.md) defines
+the triggers, bounded read-only dispatch, evidence validation, and unavailable-model fallback. The
+repository's installed roles mirror their templates byte for byte. A pin is configuration, not a
+guarantee of account-level access.
+
+**Overrides.** `install-agents.sh --role-override <role>=<model>[:<effort>]` (repeatable) writes
+`model`, and `model_reasoning_effort` when given, into a newly created role file only, right after
+`description`. The role must be a known role name, the model must match `[A-Za-z0-9._-]+` and the
+effort `[a-z]+`; anything else, a role given twice, or a mix with a migration mode is refused with
+exit 2 before any directory or file is written. An override for a role whose file already exists is
+skipped with a one-line stderr notice and exit 0. Configure asks one question per to-be-created role
+(default: inherit) and passes the answers through this flag. Overrides live in the role TOML, not in
+`.cenci/config.json`.
+
+**Migration of old pins.** Earlier templates pinned a model and effort. An existing role file stays
+byte-identical unless the user approves a per-file migration during a configure re-run.
+`install-agents.sh --migrate-preview` is read-only and prints a `diff -u` for each file whose
+`model` and `model_reasoning_effort` exactly match a pair that role's template once shipped:
+`planner`, `implementer` and `critical-reviewer` `gpt-5.6` or `gpt-6.1-sol` with `high`;
+`acceptance-reviewer` `gpt-6.1-sol` with `high`; `context-gatherer` and `structure-analyzer`
+`gpt-5.6-terra` with `medium`. A user-chosen pin, a file with no pin, and `domain-specialist` are
+never offered. `install-agents.sh --migrate-apply <role>...` deletes exactly those two lines. It is
+all-or-nothing: it re-checks eligibility for every named role first and refuses (exit 2, nothing
+written) an ineligible, unknown, duplicated or `domain-specialist` role. Maintain and SessionStart
+never flag pins.
+
+**Unavailable model or effort.** An override is unverified until a native spawn confirms it; the
+validator never checks model names offline. Nothing is substituted. The built-in-worker fallback
+applies only to a missing role file. When a spawn fails because the role's configured model or
+effort is unavailable, the workflow stops and reports the role, the configured value and Codex's
+error. The native evidence is tracked in
+[`codex-native-evidence.md`](codex-native-evidence.md#native-agent-roles-inherit-override-unavailable-model),
+pending the maintainer's native run.
 
 Role TOMLs live at `templates/codex/agent-roles/`, not `templates/codex/agents/`
 (#1040). An unscoped directory literally named `agents` sitting inside this Codex
@@ -236,6 +277,41 @@ SessionStart advisory (mirroring `check-config-staleness.sh`) that flags this: i
 runs `codex/validate-agent-roles.sh --plain` against the installed
 `.codex/agents/`, and surfaces a report-only nudge when validation fails. It never
 rewrites files. The same validator backs `/cenci:maintain`'s `agent-roles` check.
+
+### Validating role files
+
+`codex/validate-agent-roles.sh [--plain] <dir> [<dir> ...]` parses every `*.toml` directly under
+each directory and classifies what it finds. It checks a documented, version-stamped subset of the
+role schema (Codex docs 2026-10, Codex CLI 0.144.1+), not the full schema: `name`, `description` and
+`developer_instructions` are required non-empty strings; `model` and `model_reasoning_effort` are
+strings; `sandbox_mode` is one of `read-only`, `workspace-write` or `danger-full-access`;
+`mcp_servers` and `skills` (with `skills.config`) are tables. Model names are never checked offline.
+
+| Class | Kinds | Effect |
+|---|---|---|
+| invalid | `invalid-toml`, `unreadable`, `missing-field`, `invalid-type`, `invalid-value`, `duplicate-name` | exit 1; the SessionStart hook advises and maintain warns (drift) |
+| unverified | `unverified-key` (a key outside the subset, such as `retirement_plan`), `unverified-value` (an effort outside `minimal`/`low`/`medium`/`high`/`xhigh`, since supported efforts vary by model and version) | exit 0; listed as notes, never drift |
+| advisory | `name-convention` (a valid `name` that differs from its filename stem; Codex treats `name` as authoritative) | exit 0; listed as a note |
+| unavailable | Python 3.11+ with `tomllib` missing | exit 3 with the stderr line in [Workflow runtime](#workflow-runtime) |
+
+Exit codes are 0 (clean or notes only), 1 (at least one invalid finding), 2 (usage error: no
+directory, not a directory, or no `*.toml`) and 3 (validation unavailable). **Each directory argument
+is one configuration layer**, the way Codex treats `~/.codex/agents/` and `.codex/agents/` as separate
+layers, so a `name` repeated in two directories is not a `duplicate-name`; a `name` repeated inside
+one directory is. Only the top level of a directory is read: Codex also discovers `.codex/agents/**`
+recursively, and the validator does not check nested files.
+
+`check-agent-role-drift.sh --plain` wraps the validator and prints one state, read as
+`read -r state rest`: `clean`, `clean <note>[; <note>]`, `drift <failing findings>`, `absent` (no
+`.codex/agents/`), `unavailable python3.11+-with-tomllib-required`, or `unknown <reason>` for a
+resolver or validator failure (a validator exit 0 whose output is not a known note kind is
+`unknown validator-output`, never `clean`). As a SessionStart hook it is silent for `clean`, notes
+and `unknown`, gives the drift advisory for `drift`, and gives a separate Python 3.11+ prerequisite
+advisory for `unavailable`. Maintain's `agent-roles` check reports `pass` for `clean` (listing any
+notes), `warn` for `drift`, and a distinct `warn` naming the Python 3.11+ prerequisite with an
+install fix for `unavailable`; a missing prerequisite is never a `skip` and never called "invalid".
+The drift check is wired only into Claude Code's SessionStart (`hooks/hooks.json`), not
+`codex/hooks.json`. `cenci doctor` and the launcher's model shortcuts are out of scope here.
 
 ## Hook launch failures
 

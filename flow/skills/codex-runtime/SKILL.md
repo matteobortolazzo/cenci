@@ -26,8 +26,11 @@ user-invocable: false
   - `node "${PLUGIN_ROOT}/codex/checkpoint.mjs" digest <plan-path>` is read-only too: it reads the same kind of artifact with the same rules as `verify` and prints its sha256 as 64 lowercase hex characters and a newline.
   - Exit codes: 0 success; 1 unexpected I/O failure, such as `write failed (EIO); the previous checkpoint is unchanged` (the previous file stays readable and no temp file is left); 2 rejection or usage error; 3 missing state. Every error is one stderr line starting `checkpoint: <path>: <problem>; <remedy>`, with no stack trace, and stdout carries the state JSON only after the write succeeded.
 - Native Codex goals follow the single **Goal lifecycle** section below; every companion's `codex.md` references its create, stop and complete steps and never restates them. On execution ambiguity, run `checkpoint.mjs block`, ask exactly one blocking question and stop (the stop step); resume from the checkpoint after the answer.
-- Prefer generated `.codex/agents/*.toml` roles. If unavailable, delegate to a built-in
-  worker with the same bounded role prompt and report that fallback in the checkpoint.
+- Prefer generated `.codex/agents/*.toml` roles. If the role file is missing, delegate to a built-in
+  worker with the same bounded role prompt and report that fallback in the checkpoint. This fallback
+  is limited to a missing role file: when a spawn fails because the role's configured model or effort
+  is unavailable, stop the run and report the role, the configured value and Codex's error. Never
+  substitute another model or a built-in worker for it.
 - Keep authenticated mutations, pushes, PR creation, and user questions in the root agent.
 
 ## Approved-plan handoff
