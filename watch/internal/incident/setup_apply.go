@@ -33,8 +33,11 @@ type ApplyOptions struct {
 	// continues; it is the only gate before the first write.
 	Confirm func() bool
 	// Verify runs the checks of `cenci incident verify` against the reloaded
-	// config, waiting up to wait for authorization to propagate, and reports
-	// whether every probe passed. Production binds it to verifyIncident, which
+	// config, waiting up to wait for authorization to propagate (the full
+	// window when this run or a run in the last 10 minutes attempted a role
+	// assignment, else 0), and reports whether every probe passed. The reloaded
+	// config carries the pinned principal, so a token whose oid differs fails
+	// it as an identity mismatch. Production binds it to verifyIncident, which
 	// removes the ambient AZURE_* variables from the process: no az call may
 	// follow it, so Apply invokes it as its last step.
 	Verify         func(ctx context.Context, cfg Config, wait time.Duration) bool
@@ -47,8 +50,10 @@ type ApplyOptions struct {
 // the config's auth section and verifies. Every check and the prompt come before
 // the first write. Azure is the source of truth on a rerun: each role step lists
 // the assignments at its scope and creates one only when that exact principal,
-// role and scope is missing. It never deletes anything and never starts the
-// worker.
+// role and scope is missing. Before each create it records the attempt time in
+// the journal, and the verify step waits for propagation when this run or a run
+// in the last 10 minutes attempted one. It never deletes anything and never
+// starts the worker.
 func Apply(ctx context.Context, p SetupPlan, opts ApplyOptions) error {
 	return apply(ctx, p, opts, os.Getuid())
 }
@@ -144,6 +149,13 @@ func apply(ctx context.Context, p SetupPlan, opts ApplyOptions, uid int) error {
 			}
 			continue
 		}
+		// Stamp the attempt before the call: a create that fails or is cut off
+		// still leaves its time, so a rerun knows propagation may be pending.
+		at := opts.Now()
+		journal.LastRoleCreateAt, journal.UpdatedAt = &at, at
+		if err := journal.Write(r.stateDir); err != nil {
+			return r.fail(name, fmt.Errorf("write the setup journal: %w", err))
+		}
 		if err := opts.Az.RoleAssignmentCreate(ctx, p.ObjectID, t.RoleGUID, t.Scope); err != nil {
 			return r.fail(name, err)
 		}
@@ -174,10 +186,7 @@ func apply(ctx context.Context, p SetupPlan, opts ApplyOptions, uid int) error {
 		return r.fail(stepConfig, err)
 	}
 
-	wait := time.Duration(0)
-	if created > 0 {
-		wait = verifyPropagationWait
-	}
+	wait := propagationWait(created, journal.LastRoleCreateAt, opts.Now())
 	// Verify is the last step: it unsets the ambient AZURE_* variables in this
 	// process, so no az call may follow it.
 	if !opts.Verify(ctx, cfg, wait) {
@@ -192,6 +201,17 @@ func apply(ctx context.Context, p SetupPlan, opts ApplyOptions, uid int) error {
 	}
 	_, _ = fmt.Fprintf(opts.Stdout, "cenci incident setup: apply complete (%d role assignment(s) created).\n", created)
 	return nil
+}
+
+// propagationWait is how long Verify may wait for authorization to propagate:
+// the full window when this run created an assignment, or when the last create
+// attempt (this or an earlier run) is under a window old or lies in the future
+// (clock skew fails toward waiting); otherwise none.
+func propagationWait(created int, lastCreate *time.Time, now time.Time) time.Duration {
+	if created > 0 || (lastCreate != nil && now.Sub(*lastCreate) < verifyPropagationWait) {
+		return verifyPropagationWait
+	}
+	return 0
 }
 
 func roleStepName(t RoleTarget) string { return "role assignment: " + t.RoleName + " at " + t.Scope }

@@ -284,6 +284,7 @@ func (p SetupPlan) ProposedAuth() AuthConfig {
 		a.ClientID = appIDPlaceholder
 	case SetupIdentityManaged:
 		a.Mode, a.CertificatePath = AuthModeManagedIdentity, ""
+		a.PrincipalObjectID = orPlaceholder(p.ObjectID, principalPlaceholder)
 	}
 	return a
 }
@@ -668,6 +669,6 @@ func (p SetupPlan) RenderApply(replaceAuth bool) (string, error) {
 	for _, l := range strings.Split(strings.TrimRight(authJSON, "\n"), "\n") {
 		out.WriteString("  " + l + "\n")
 	}
-	out.WriteString("\nAfterwards setup runs the checks of cenci incident verify; when it created role assignments it waits up to 10 minutes for them to propagate.\n")
+	out.WriteString("\nAfterwards setup runs the checks of cenci incident verify; it waits up to 10 minutes for role assignments to propagate when this run or a run in the last 10 minutes attempted a role assignment.\n")
 	return out.String(), nil
 }

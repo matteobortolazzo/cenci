@@ -251,19 +251,20 @@ host's own managed-identity endpoint for `managedIdentity` mode
 (`IDENTITY_ENDPOINT`, `IDENTITY_HEADER`, `IDENTITY_SERVER_THUMBPRINT`,
 `MSI_ENDPOINT`, `MSI_SECRET`, `IMDS_ENDPOINT`). Those variables name the host's
 identity endpoint, and only the operator controls them, so for managed identity
-the operator-controlled host environment is the trust boundary. Set `clientId`
-for managed identity so the preflight `appid` check applies. A config without
+the operator-controlled host environment is the trust boundary. Pin the managed
+identity with `clientId` (user-assigned) and `principalObjectId` (also for the
+system-assigned one) so the preflight `appid` and `oid` checks apply. A config without
 `auth` does not start; `status` and `cancel` read no config and need no Azure
 identity.
 
 | Mode | Fields | Use when |
 | --- | --- | --- |
 | `servicePrincipalCertificate` | `mode`, `tenantId`, `clientId`, `certificatePath` | The worker host is outside Azure, or has no managed identity. |
-| `managedIdentity` | `mode`, `tenantId`, optional `clientId` | The worker runs on a supported Azure host. `clientId` set selects a user-assigned identity; omitted selects the system-assigned one. |
+| `managedIdentity` | `mode`, `tenantId`, optional `clientId`, optional `principalObjectId` | The worker runs on a supported Azure host. `clientId` set selects a user-assigned identity; omitted selects the system-assigned one. `principalObjectId` pins the identity's principal (object ID) for either kind: the token's `oid` claim must equal it. |
 | `workloadIdentity` | `mode`, `tenantId`, `clientId`, `tokenFilePath` | The host projects a federated token file (for example a Kubernetes service-account token). |
 
-`mode` and `tenantId` are always required. `tenantId` and `clientId` must be
-UUIDs; `certificatePath` and `tokenFilePath` must be absolute. A field that the
+`mode` and `tenantId` are always required. `tenantId`, `clientId` and
+`principalObjectId` must be UUIDs; `certificatePath` and `tokenFilePath` must be absolute. A field that the
 selected mode does not use is rejected, as is any other `mode` and any unknown
 field. There is no client-secret mode. Each error names the offending field, for
 example `auth.clientSecret`, and never prints its value.
@@ -310,12 +311,15 @@ and one class per failure:
 | `token request failed for <target>` | The credential could not obtain a token (denied, unreachable, or timed out). `<target>` is `Service Bus` or `Log Analytics`. Managed identity adds `managed identity works only on supported Azure hosts`. |
 | `token tenant mismatch for <target>` | The token's `tid` claim differs from `auth.tenantId`. |
 | `token application mismatch for <target>` | `auth.clientId` is set and the token's `appid` claim differs from it, or the claim is absent. |
+| `token principal mismatch for <target>` | `auth.principalObjectId` is set and the token's `oid` claim differs from it (compared without case), or the claim is absent (the message then ends with ` (no oid claim)`). |
 | `unreadable token claims for <target>` | The token is not a JWT with readable claims. |
 
 The `appid` check applies whenever `clientId` is set, so the tokens for both
 scopes must carry the `appid` claim (v1 tokens do; a token with only `azp` fails
-closed). A system-assigned managed identity has no `clientId`, so only the tenant
-is checked. Claims are read without verifying the signature: the token arrived
+closed). The `oid` check applies whenever `principalObjectId` is set; it runs
+after the tenant and `appid` checks and is the same check `cenci incident verify`
+makes, so the two cannot disagree. A system-assigned managed identity has no
+`clientId`, so without `principalObjectId` only the tenant is checked. Claims are read without verifying the signature: the token arrived
 over TLS from the credential, so this is an identity sanity check. Token text is
 never printed.
 
@@ -363,7 +367,9 @@ client-secret mode, so a secret-based install moves to a certificate:
 4. Start the worker, then delete the old client secret from the app registration.
 
 Installs on a managed identity only need `auth` with `mode` `managedIdentity`
-and, for a user-assigned identity, its `clientId`.
+and, for a user-assigned identity, its `clientId`. Add the identity's
+`principalObjectId` to pin it. An `auth` section written by an earlier
+`cenci incident setup --apply` has no pin; rerun apply with `--replace-auth` to add it.
 
 ### Setup preview
 
@@ -515,8 +521,11 @@ a completed apply makes no mutating call.
 
 **Journal and resume.** Progress is recorded in `setup-journal.json` in the
 config's `stateDir` (mode 0600, non-secret IDs, step status, timestamps and a
-`complete` flag). The journal is bound to the tenant, identity mode and absolute
-config path; a rerun with a different request exits 1 and leaves it untouched, and
+`complete` flag). It also holds `lastRoleCreateAt`, the time of the most recent
+`az role assignment create` attempt: apply writes it before each create, so a
+failed or interrupted create still leaves it, and keeps it across runs (the
+journal stays at version 1; a journal without the key still loads). The journal
+is bound to the tenant, identity mode and absolute config path; a rerun with a different request exits 1 and leaves it untouched, and
 so does a journal that is corrupt, oversized, a symbolic link or owned by another
 user. When a step fails, apply prints the completed and remaining steps, leaves
 `complete: false` and exits 1; the next run resumes without creating a duplicate.
@@ -528,9 +537,14 @@ formatting are not kept), writes a 0600 temporary file in the same directory and
 renames it over the config. A config that already equals the plan is not rewritten.
 
 **Verify.** After its writes, apply runs the checks of `cenci incident verify`
-against the written config, waiting up to 10 minutes for propagation when it
-created assignments in this run (none otherwise), and sets `complete: true` only
-when every probe is `ok`. It never deletes identities, credentials, role
+against the written config. It waits up to 10 minutes for propagation when this
+run created an assignment, or when the journal's `lastRoleCreateAt` is less than
+10 minutes old or lies in the future (clock skew); otherwise it does not wait.
+Because a previous run stamps `lastRoleCreateAt` before its create, a rerun soon
+after a failed or interrupted create still waits even though every assignment is
+now present. The wait is the full window, but it costs time only while a probe
+is still denied. A principal mismatch (`identity-mismatch`) fails the verify
+step. Apply sets `complete: true` only when every probe is `ok`. It never deletes identities, credentials, role
 assignments, the ledger or Azure resources, and it never enables or starts the
 worker.
 
@@ -581,7 +595,8 @@ az role assignment create --assignee-object-id "$PRINCIPAL_ID" --assignee-princi
 
 For the user-assigned identity, set `auth.clientId` to its `clientId`
 (`az identity show ... --query clientId -o tsv`); omit it for a system-assigned
-identity. Managed identity works only on supported Azure hosts; elsewhere
+identity. Set `auth.principalObjectId` to the `principalId` used in the role
+assignments to pin either kind. Managed identity works only on supported Azure hosts; elsewhere
 the preflight fails with the `managed identity works only on supported Azure
 hosts` hint.
 
@@ -602,15 +617,15 @@ cenci incident verify --config /home/incident/incidents.json [--propagation-wait
 `verify` loads the same config as `run` (a disabled config or one without `auth`
 is refused with the same message and exit 1) and builds the credential through
 the same constructor, so the two cannot disagree about identity. It removes
-ambient `AZURE_*` variables as `run` does, applies the same `tid`/`appid` checks
+ambient `AZURE_*` variables as `run` does, applies the same `tid`/`appid`/`oid` checks
 as the startup preflight, and then runs these probes. Each probe makes one
 attempt, bounded to 30 seconds:
 
 1. **Identity.** One token per scope, Service Bus then Log Analytics, stopping at
    the first failure. On success it prints the claims read from the Service Bus
    token: `identity: tenant <tid>, application <appid>, principal <oid>`. A claim
-   that is not UUID-shaped prints `unknown`. The `oid` is shown only, never
-   checked.
+   that is not UUID-shaped prints `unknown`. The `oid` is checked only against
+   `auth.principalObjectId`, when set.
 2. **Workspace**, one per `resources[]` entry: the entry's configured `query`
    runs against its `workspace` over the last 5 minutes.
 3. **Broker.** `PeekMessages` with a maximum of 1 on the configured queue or
@@ -648,7 +663,7 @@ probe. A failed probe prints exactly one of six classes:
 | Class | Meaning |
 | --- | --- |
 | `authentication-failed` | The credential could not obtain a token, or the service answered HTTP 401 or an authentication error. |
-| `identity-mismatch` | The token's `tid` differs from `auth.tenantId`, the `appid` differs from `auth.clientId`, or the claims are unreadable. |
+| `identity-mismatch` | The token's `tid` differs from `auth.tenantId`, the `appid` differs from `auth.clientId`, the `oid` differs from `auth.principalObjectId` (or is absent), or the claims are unreadable. |
 | `authorization-denied` | HTTP 403 from Log Analytics, or Service Bus `UnauthorizedAccess`: the role assignment is missing or wrong. |
 | `rbac-propagation-timeout` | `authorization-denied` persisted through the whole `--propagation-wait` window. |
 | `resource-not-found` | HTTP 404, or the Service Bus entity does not exist. |
@@ -1016,9 +1031,9 @@ live in `internal/incident/verify_test.go`.
 | Persistent cleanup identity across restart and directory rename | `TestOwnerIdentityPersistsAcrossRestartAndDirectoryRename` |
 | Concurrent startup uses one durable identity | `TestOwnerConcurrentInitializationUsesOneIdentity` |
 | Valid ownership permits orphan cleanup before corrupt-ledger recovery fails | `TestOwnerCleanupSurvivesCorruptLedger` |
-| `auth` accepts only the three modes with their own fields; a missing `auth` is refused with the migration message; a disabled config reports disabled first | `TestAuthConfigAcceptsOnlyExplicitModesWithTheirOwnFields`, `TestAuthConfigDecodesIntoTheSelectedFields`, `TestConfigWithoutAuthIsRefusedWithMigrationMessage`, `TestDisabledConfigReportsDisabledBeforeMissingAuth` |
+| `auth` accepts only the three modes with their own fields (`principalObjectId` only for `managedIdentity`, as a UUID); a missing `auth` is refused with the migration message; a disabled config reports disabled first | `TestAuthConfigAcceptsOnlyExplicitModesWithTheirOwnFields`, `TestAuthConfigDecodesIntoTheSelectedFields`, `TestConfigWithoutAuthIsRefusedWithMigrationMessage`, `TestDisabledConfigReportsDisabledBeforeMissingAuth` |
 | Certificate must be an owned regular file with mode 0600 or 0400; expiry fails and near-expiry warns | `TestCertificateFileMustBeAnOwnedRegularFileWithRestrictedMode`, `TestCertificateExpiryFailsAndNearExpiryWarns`; expiry and warning judge the certificate matching the private key, and a key with no matching certificate is refused: `TestCertificateExpiryJudgesTheLeafMatchingThePrivateKeyNotTheFirstCertificate`, `TestCertificateWithoutAMatchingPrivateKeyIsRejected` |
-| Preflight failure classes, both scopes, 30-second bound per request, stop at the first failing scope | `TestPreflightNamesEachFailureClass`, `TestPreflightRequestsBothScopesWithinThirtySecondsEach`, `TestPreflightStopsAtTheFirstFailingScope` |
+| Preflight failure classes (including the pinned `oid` match, case-insensitive match, mismatch and missing claim), both scopes, 30-second bound per request, stop at the first failing scope; the shared identity check enforces the pinned `principalObjectId` with the exact message, kind and no token text | `TestPreflightNamesEachFailureClass`, `TestCheckIdentityEnforcesThePinnedPrincipalObjectID`, `TestPreflightRequestsBothScopesWithinThirtySecondsEach`, `TestPreflightStopsAtTheFirstFailingScope` |
 | Credentials talk only to the public authority as the configured client; workload identity reads the configured token file; managed identity selection and unsupported hosts | `TestCertificateCredentialTalksOnlyToThePublicAuthorityAsTheConfiguredClient`, `TestWorkloadIdentityUsesConfiguredTokenFileNotTheEnvironment`, `TestManagedIdentitySelectsUserAssignedOnlyWhenClientIDIsConfigured`, `TestManagedIdentityOnAnUnsupportedHostNamesTheHostRequirement` |
 | Ignored `AZURE_*` names are listed sorted and never with values | `TestIgnoredAzureEnvListsSortedNamesAndNeverValues` |
 | Container argv carries no Azure identity material; telemetry scope and tenant come only from the config | `TestContainerArgvCarriesNoAzureIdentityMaterial`, `TestTelemetryScopeAndTenantComeOnlyFromWorkerConfiguration` |
@@ -1029,7 +1044,7 @@ live in `internal/incident/verify_test.go`.
 | `run` refuses a missing or invalid `auth` and a loose certificate mode before any startup work; `status` and `cancel` need no Azure identity | `TestIncidentRunWithoutAuthIsRefusedBeforeAnyStartupWork`, `TestIncidentRunRefusesInvalidAuthNamingTheField`, `TestIncidentRunRefusesACertificateWithLooseModeBeforeAnyStartupWork`, `TestIncidentStatusAndCancelNeedNoAzureIdentity` |
 | `verify` prints the tenant, application and principal IDs and never the token, key or rows; non-UUID claims print `unknown` | `TestVerifyPrintsIdentityClaimsAndNeverTheTokenOrKey`, `TestVerifyPrintsUnknownForClaimsThatAreNotUUIDShaped` |
 | `verify` workspace probe runs the configured query over 5 minutes within 30 seconds; broker probe peeks one message and settles nothing; an empty peek notes receive authorization only | `TestVerifyWorkspaceProbeRunsTheConfiguredQueryOverFiveMinutesWithinThirtySeconds`, `TestVerifyBrokerProbePeeksOneAndSettlesNothing`, `TestVerifyEmptyPeekNotesReceiveAuthorizationOnly` |
-| `verify` reports each failure as exactly one of the six classes (unreadable claims, a non-JWT or non-JSON token, are `identity-mismatch`; an `azidentity` `AuthenticationFailedError` from the broker is `authentication-failed`, both pinned as `TestVerifyClassifiesEachFailure` subtests); unmapped outcomes fall back to `unreachable`; an identity failure names the preflight reason on stderr only and runs no resource probe | `TestVerifyClassifiesEachFailure`, `TestVerifyUnmappedOutcomesFallBackToUnreachable`, `TestVerifyIdentityFailureNamesThePreflightReasonOnStderrOnly`, `TestVerifyIdentityFailureRunsNoResourceProbe` |
+| `verify` reports each failure as exactly one of the six classes (unreadable claims, a non-JWT or non-JSON token, and an `oid` that differs from the pinned `principalObjectId` are `identity-mismatch`; an `azidentity` `AuthenticationFailedError` from the broker is `authentication-failed`, both pinned as `TestVerifyClassifiesEachFailure` subtests); unmapped outcomes fall back to `unreachable`; an identity failure, a principal (`oid`) mismatch included, names the preflight reason on stderr only and runs no resource probe | `TestVerifyClassifiesEachFailure`, `TestVerifyUnmappedOutcomesFallBackToUnreachable`, `TestVerifyIdentityFailureNamesThePreflightReasonOnStderrOnly`, `TestVerifyIdentityFailureRunsNoResourceProbe` |
 | `verify` strips terminal control characters from stderr error text and printed labels; a workspace that is not a UUID is never queried (`unreachable`); an empty `tables` array is `unreachable`, not `ok` (`empty-tables-array` subtest); a cancelled context prints one `interrupted:` line and fails | `TestVerifyStripsTerminalControlsFromStderrErrorText`, `TestVerifyStripsTerminalControlsFromConfigLabels`, `TestVerifyDoesNotQueryAWorkspaceThatIsNotAUUID`, `TestVerifyUnmappedOutcomesFallBackToUnreachable`, `TestVerifyReportsInterruptionWhenTheContextIsCancelled` |
 | `verify` retries only `authorization-denied`, only during `--propagation-wait` | `TestVerifyRetriesOnlyAuthorizationDeniedDuringPropagationWait` |
 | The production broker opener (no Azure call) builds the `verify` client with a negative `MaxRetries` so one attempt holds at the SDK level, while `run` keeps the SDK defaults; the receiver opens on the configured queue or topic subscription | `TestVerifyProductionBrokerOpenerAttemptsOnceAtTheSDKLevel`, `TestRunBrokerOpenerKeepsTheSDKRetryDefaults`, `TestBrokerReceiverIsOpenedOnTheConfiguredQueueOrTopicSubscription` |
@@ -1042,14 +1057,15 @@ live in `internal/incident/verify_test.go`.
 | Setup placeholders: renderer-made `<token>`s are unquoted and labeled `fill placeholders before running`, so an unfilled command fails at the shell (checked by running it, with a filled control); real values, even ones shaped like a placeholder, stay quoted; an absent `--certificate-path` shows `<certificate-path>` in the certificate step, the `auth` JSON and the files list without inventing a default | `TestIncidentSetupPlaceholderCommandsAreUnquotedAndLabeledWhileRealValuesStayQuoted`, `TestIncidentSetupWithoutCertificatePathShowsThePlaceholderAndInventsNoDefault`, `TestSetupRenderLeavesRendererPlaceholdersUnquotedAndLabeled`, `TestSetupRenderQuotesRealValuesThatLookLikePlaceholders`, `TestSetupUnfilledPlaceholderCommandFailsAtTheShell` |
 | Setup preview without `az` or login exits 0 with placeholders; a tenant mismatch skips discovery; zero or several matches name the flag to supply | `TestIncidentSetupPreviewWithoutAzOrLoginExitsZeroWithPlaceholders`, `TestIncidentSetupTenantMismatchWarnsAndSkipsDiscovery`, `TestIncidentSetupZeroOrAmbiguousDiscoveryNamesTheFlagToSupply` |
 | Setup rejects invalid input with exit 2 before any `az` call and an unusable config with exit 1 | `TestIncidentSetupRejectsInvalidInputBeforeAnyAzCall`, `TestIncidentSetupInvalidConfigExitsOneBeforeAnyAzCall` |
-| Setup lists an existing or managed identity's other role assignments and warns that RBAC is additive; a managed identity without an object ID gets a placeholder, and a `--client-id` that is not the principal's `appId` fails the step; an unreadable principal is reported as unconfirmed and never as holding no assignments (`TestIncidentSetupManagedIdentityPreview`, subtest `unreadable-principal-is-not-claimed-to-hold-no-other-assignments`) | `TestIncidentSetupExistingIdentityListsOtherAssignmentsAndWarns`, `TestIncidentSetupManagedIdentityPreview` |
+| Setup lists an existing or managed identity's other role assignments and warns that RBAC is additive; a managed identity without an object ID gets a placeholder (shown as the proposed `auth`'s `principalObjectId` pin; the pin is the object ID when given), and a `--client-id` that is not the principal's `appId` fails the step; an unreadable principal is reported as unconfirmed and never as holding no assignments (`TestIncidentSetupManagedIdentityPreview`, subtest `unreadable-principal-is-not-claimed-to-hold-no-other-assignments`) | `TestIncidentSetupExistingIdentityListsOtherAssignmentsAndWarns`, `TestIncidentSetupManagedIdentityPreview` |
+| The proposed `auth` pins `principalObjectId` only for a managed identity (the object ID, or the `<principal-object-id>` placeholder; empty for `existing` and `new`); `RenderApply` states that the up-to-10-minute wait applies when this run or a run in the last 10 minutes attempted a role assignment | `TestSetupProposedAuthPinsOnlyTheManagedPrincipal`, `TestSetupRenderApplyStatesTheRecentAttemptWaitRule` |
 | Setup output carries no key or token from the `az` boundary | `TestIncidentSetupOutputCarriesNoKeyOrTokenFromTheFakeBoundary` |
 | Setup scopes: a shared workspace gets one reader command, a topic config gets the exact subscription scope, and a cross-subscription workspace keeps its own scope and is flagged | `TestIncidentSetupSharedWorkspaceProducesOneReaderCommand`, `TestIncidentSetupTopicSubscriptionScopeIsExact`, `TestIncidentSetupCrossSubscriptionWorkspaceKeepsItsScope` |
 | Malformed, truncated or contradicting `az` output is a failed step with exit 1, never an empty result | `TestIncidentSetupMalformedDiscoveryOutputFailsTheStep`, `TestIncidentSetupMismatchedDiscoveryFailsTheStep` |
 | Resource ID parsing, exact scope building, workspace de-duplication and shell quoting | `TestSetupParseNamespaceIDAcceptsOnlyServiceBusNamespaces`, `TestSetupParseWorkspaceIDAcceptsOnlyLogAnalyticsWorkspaces`, `TestSetupEntityScopeIsTheExactQueueOrTopicSubscription`, `TestSetupDedupeWorkspacesComparesIDsWithoutCase`, `TestSetupInSubscriptionIgnoresCase`, `TestSetupShellQuoteExpandsToExactlyTheValue` |
 | Setup apply gates exit 2 before any `az` call and change nothing: a non-terminal stdin (pipe or `/dev/null`) without `--yes`, `--yes` or `--replace-auth` without `--apply`, `--identity new` (#1389), a missing `--identity` or, with `--yes`, any missing required input; a complete `--apply --yes` passes them (control). On a terminal without `--yes` a missing input is not a usage error: discovery runs and fills what it can into the plan, and a value it cannot resolve or confirm (tested with `--certificate-path`) exits 1 naming the flag before the prompt. The terminal check is false for `/dev/null` and a pipe and true for a pty; the prompt accepts only `y` or `Y` | `TestIncidentSetupApplyGatesExitTwoBeforeAnyAzCall`, `TestIncidentSetupApplyOnATerminalWithoutYesExitsOneNamingTheUnconfirmedFlag`, `TestIncidentSetupApplyIdentityGatesExitTwoOnATerminalWithoutYes`, `TestStdinIsTerminalRejectsNullDeviceAndPipeAndAcceptsAPty`, `TestConfirmApplyAcceptsOnlyYOrUpperY` |
 | Setup apply allowlist is the preview's nine plus `role assignment create`, the preview still refuses it, and the role wrappers validate their output; the config `auth` write changes only `auth`, atomically with mode 0600, and refuses a symlink or foreign owner | `TestAzApplyAllowlistIsThePreviewSetPlusRoleAssignmentCreate`, `TestAzApplyAzRefusesEverythingOutsideItsAllowlistWithoutExecuting`, `TestAzPreviewStillRefusesRoleAssignmentCreate`, `TestAzRoleAssignmentWrappersValidateTheirOutput`, `TestWriteAuthChangesOnlyTheAuthSectionAtomicallyWithMode0600`, `TestWriteAuthRefusesASymlinkOrAConfigOwnedByAnotherUser` |
-| Setup apply engine (`internal/incident`, fake `az`, `Verify` seam): a declined prompt, a plan that cannot be written, a tenant mismatch or a failed `az` call makes no mutating call; a cancelled context is reported as interrupted and never reaches the config write; it creates exactly the missing assignments, matches only the exact triple, makes no mutating call on a rerun and resumes after a failed step; a differing `auth` needs `--replace-auth`; verify waits 10m only when something was created and `complete` follows it; managed mode creates no credential; the journal binds tenant, identity and config path and is never overwritten when corrupt or foreign; a symlinked or foreign config is refused; nothing is deleted and no worker is started | `TestSetupApplyDeclinedConfirmationMakesNoMutatingCall`, `TestSetupApplyUnwritablePlanStopsBeforeTheConfirmation`, `TestSetupApplyCancellationIsReportedAsInterrupted`, `TestSetupApplyTenantMismatchMakesNoMutatingCall`, `TestSetupApplyFailedOrTimedOutAzCallFailsItsStep`, `TestSetupApplyCreatesExactlyTheMissingRoleAssignments`, `TestSetupApplyExistingAssignmentMatchesOnlyTheExactTriple`, `TestSetupApplyRerunAfterSuccessMakesNoMutatingCall`, `TestSetupApplyRerunRecreatesAnAssignmentDeletedOutOfBandDespiteADoneJournalStep`, `TestSetupApplyResumesAfterAFailedRoleAssignment`, `TestSetupApplyRefusesADifferingAuthWithoutReplaceAuth`, `TestSetupApplyVerifiesAndCompletesOnlyWhenEveryProbeIsOK`, `TestSetupApplyManagedIdentityConfirmsThePrincipalAndCreatesNoCredential`, `TestSetupApplyJournalBindsTenantIdentityAndConfigPath`, `TestSetupApplyNeverOverwritesACorruptOrForeignJournal`, `TestSetupApplyRefusesASymlinkedOrForeignConfig`, `TestSetupApplyNeverDeletesOrStartsTheWorker`, `TestSetupApplyBlockersNameTheFlagThatFixesEach` |
+| Setup apply engine (`internal/incident`, fake `az`, `Verify` seam): a declined prompt, a plan that cannot be written, a tenant mismatch or a failed `az` call makes no mutating call; a cancelled context is reported as interrupted and never reaches the config write; it creates exactly the missing assignments, matches only the exact triple, makes no mutating call on a rerun and resumes after a failed step; a differing `auth` needs `--replace-auth`, and so does an unpinned managed `auth` written by an earlier apply; managed apply writes `principalObjectId` equal to every create's `--assignee-object-id`, and a verify that reports a principal mismatch fails the step; the role-create attempt time is recorded before each create (a failed journal write makes no create); verify waits 10m when this run created something or the last attempt is under 10m old or in the future, otherwise 0, and `complete` follows it; managed mode creates no credential; the journal binds tenant, identity and config path and is never overwritten when corrupt or foreign; a symlinked or foreign config is refused; nothing is deleted and no worker is started | `TestSetupApplyDeclinedConfirmationMakesNoMutatingCall`, `TestSetupApplyUnwritablePlanStopsBeforeTheConfirmation`, `TestSetupApplyCancellationIsReportedAsInterrupted`, `TestSetupApplyTenantMismatchMakesNoMutatingCall`, `TestSetupApplyFailedOrTimedOutAzCallFailsItsStep`, `TestSetupApplyCreatesExactlyTheMissingRoleAssignments`, `TestSetupApplyExistingAssignmentMatchesOnlyTheExactTriple`, `TestSetupApplyRerunAfterSuccessMakesNoMutatingCall`, `TestSetupApplyRerunRecreatesAnAssignmentDeletedOutOfBandDespiteADoneJournalStep`, `TestSetupApplyResumesAfterAFailedRoleAssignment`, `TestSetupApplyRefusesADifferingAuthWithoutReplaceAuth`, `TestSetupApplyRefusesAnUnpinnedManagedAuthWithoutReplaceAuth`, `TestSetupApplyFailsWhenVerifyReportsAPrincipalMismatch`, `TestSetupApplyRecordsTheRoleCreateAttemptBeforeEachCreate`, `TestSetupApplyWaitsAfterARecentRoleCreateAttempt`, `TestSetupApplyVerifiesAndCompletesOnlyWhenEveryProbeIsOK`, `TestSetupApplyManagedIdentityConfirmsThePrincipalAndCreatesNoCredential`, `TestSetupApplyJournalBindsTenantIdentityAndConfigPath`, `TestSetupApplyNeverOverwritesACorruptOrForeignJournal`, `TestSetupApplyRefusesASymlinkedOrForeignConfig`, `TestSetupApplyNeverDeletesOrStartsTheWorker`, `TestSetupApplyBlockersNameTheFlagThatFixesEach` |
 
 Live Azure delivery, production RBAC, the operator's container image and proxy,
 and actual model/GitHub calls require a staging smoke test before enabling this

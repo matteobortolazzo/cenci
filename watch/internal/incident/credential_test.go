@@ -43,6 +43,8 @@ const (
 	markClaims         = "unreadable token claims"
 	markManagedHosts   = "managed identity works only on supported Azure hosts"
 
+	markPrincipalMismatch = "token principal mismatch"
+
 	markUnreadable = "certificate unreadable"
 	markNotRegular = "not a regular file"
 	markOwner      = "owned by uid"
@@ -416,16 +418,18 @@ func (c *scopeCredential) GetToken(ctx context.Context, o policy.TokenRequestOpt
 }
 
 func claimsToken(tid, appid string) func(string) (string, error) {
-	return func(string) (string, error) {
-		claims := map[string]any{}
-		if tid != "" {
-			claims["tid"] = tid
-		}
-		if appid != "" {
-			claims["appid"] = appid
-		}
-		return testJWT(claims), nil
-	}
+	return claimsTokenWithOID(tid, appid, "")
+}
+
+// claimsTokenWithOID is claimsToken for a token that also carries an oid claim;
+// an empty claim reads back as one the token does not carry.
+func claimsTokenWithOID(tid, appid, oid string) func(string) (string, error) {
+	return func(string) (string, error) { return identityToken(tid, appid, oid, nil), nil }
+}
+
+// pinnedManagedAuth is a system-assigned managed identity pinned to testObjectID.
+func pinnedManagedAuth() *AuthConfig {
+	return &AuthConfig{Mode: AuthModeManagedIdentity, TenantID: testTenantID, PrincipalObjectID: testObjectID}
 }
 
 func TestPreflightNamesEachFailureClass(t *testing.T) {
@@ -433,7 +437,9 @@ func TestPreflightNamesEachFailureClass(t *testing.T) {
 	managed := AuthConfig{Mode: AuthModeManagedIdentity, TenantID: testTenantID}
 	managedWithClient := AuthConfig{Mode: AuthModeManagedIdentity, TenantID: testTenantID, ClientID: testClientID}
 	cert := certAuth("/unused.pem")
-	allMarkers := []string{markRequestFailed, markTenantMismatch, markAppMismatch, markClaims}
+	pinned := *pinnedManagedAuth()
+	pinnedWithClient := AuthConfig{Mode: AuthModeManagedIdentity, TenantID: testTenantID, ClientID: testClientID, PrincipalObjectID: testObjectID}
+	allMarkers := []string{markRequestFailed, markTenantMismatch, markAppMismatch, markClaims, markPrincipalMismatch}
 	cases := []struct {
 		name   string
 		auth   AuthConfig
@@ -459,6 +465,22 @@ func TestPreflightNamesEachFailureClass(t *testing.T) {
 		{"app-mismatch", cert, claimsToken(testTenantID, otherUUID), markAppMismatch, nil, nil},
 		{"missing-appid", cert, claimsToken(testTenantID, ""), markAppMismatch, []string{"no appid claim"}, nil},
 		{"managed-with-client-app-mismatch", managedWithClient, claimsToken(testTenantID, otherUUID), markAppMismatch, nil, nil},
+		{"pinned-and-matching-oid", pinned, claimsTokenWithOID(testTenantID, "", testObjectID), "", nil, nil},
+		{"pinned-oid-differing-only-in-case-matches", pinned, claimsTokenWithOID(testTenantID, "", strings.ToUpper(testObjectID)), "", nil, nil},
+		{"pinned-oid-mismatch", pinned, claimsTokenWithOID(testTenantID, "", otherUUID), markPrincipalMismatch, []string{"Service Bus", "auth.principalObjectId"}, nil},
+		{"pinned-without-oid-claim", pinned, claimsToken(testTenantID, ""), markPrincipalMismatch, []string{"no oid claim"}, nil},
+		{"pinned-oid-mismatch-on-log-analytics", pinned, func(scope string) (string, error) {
+			if scope == LogAnalyticsScope {
+				return claimsTokenWithOID(testTenantID, "", otherUUID)(scope)
+			}
+			return claimsTokenWithOID(testTenantID, "", testObjectID)(scope)
+		}, markPrincipalMismatch, []string{"Log Analytics"}, nil},
+		{"unpinned-managed-accepts-another-oid", managed, claimsTokenWithOID(testTenantID, "", otherUUID), "", nil, nil},
+		{"pinned-user-assigned-and-matching", pinnedWithClient, claimsTokenWithOID(testTenantID, testClientID, testObjectID), "", nil, nil},
+		{"pinned-user-assigned-oid-mismatch", pinnedWithClient, claimsTokenWithOID(testTenantID, testClientID, otherUUID), markPrincipalMismatch, nil, nil},
+		// The tenant and application are judged first, so the oid never hides them.
+		{"pinned-tenant-mismatch-is-reported-first", pinned, claimsTokenWithOID(otherUUID, "", otherUUID), markTenantMismatch, nil, nil},
+		{"pinned-user-assigned-app-mismatch-is-reported-first", pinnedWithClient, claimsTokenWithOID(testTenantID, otherUUID, otherUUID), markAppMismatch, nil, nil},
 		{"not-a-jwt", cert, func(string) (string, error) { return tokenText, nil }, markClaims, nil, []string{tokenText}},
 		{"payload-not-json", cert, func(string) (string, error) {
 			return "e30." + base64.RawURLEncoding.EncodeToString([]byte(tokenText)) + ".c2ln", nil
@@ -488,6 +510,55 @@ func TestPreflightNamesEachFailureClass(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The pin is part of the identity check the worker's Preflight and `cenci incident
+// verify` share, so the message is fixed and carries neither the configured
+// object ID nor the token's claim values.
+func TestCheckIdentityEnforcesThePinnedPrincipalObjectID(t *testing.T) {
+	const displayName = "SECRET-DISPLAY-NAME-CLAIM"
+	auth := *pinnedManagedAuth()
+	cases := []struct {
+		name  string
+		claim string // the token's oid; empty leaves the claim out
+		want  string
+	}{
+		{"differing-oid", otherUUID, "worker identity preflight: token principal mismatch for Service Bus: oid claim does not match auth.principalObjectId"},
+		{"missing-oid", "", "worker identity preflight: token principal mismatch for Service Bus: oid claim does not match auth.principalObjectId (no oid claim)"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			token := testJWT(map[string]any{"tid": testTenantID, "name": displayName})
+			if tc.claim != "" {
+				token = testJWT(map[string]any{"tid": testTenantID, "oid": tc.claim, "name": displayName})
+			}
+			cred := &scopeCredential{token: func(string) (string, error) { return token, nil }}
+			claims, err := CheckIdentity(context.Background(), cred, auth, "Service Bus", ServiceBusScope)
+			if err == nil || err.Error() != tc.want {
+				t.Fatalf("want %q, got %v", tc.want, err)
+			}
+			var identity *IdentityError
+			if !errors.As(err, &identity) || identity.Kind != IdentityMismatch {
+				t.Fatalf("want an *IdentityError of kind IdentityMismatch, got %#v", err)
+			}
+			if claims.ObjectID != tc.claim {
+				t.Fatalf("the decoded claims must come back on a mismatch: oid %q, want %q", claims.ObjectID, tc.claim)
+			}
+			for _, leaked := range []string{token, strings.Split(token, ".")[1], displayName, otherUUID, auth.PrincipalObjectID} {
+				if strings.Contains(err.Error(), leaked) {
+					t.Fatalf("the message echoed %q: %v", leaked, err)
+				}
+			}
+		})
+	}
+
+	t.Run("matching-oid-returns-the-claims", func(t *testing.T) {
+		cred := &scopeCredential{token: claimsTokenWithOID(testTenantID, "", strings.ToUpper(testObjectID))}
+		claims, err := CheckIdentity(context.Background(), cred, auth, "Service Bus", ServiceBusScope)
+		if err != nil || !strings.EqualFold(claims.ObjectID, testObjectID) {
+			t.Fatalf("matching pin rejected or claims lost: %+v, %v", claims, err)
+		}
+	})
 }
 
 func TestPreflightRequestsBothScopesWithinThirtySecondsEach(t *testing.T) {

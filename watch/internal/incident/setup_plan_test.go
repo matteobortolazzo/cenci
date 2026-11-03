@@ -305,6 +305,50 @@ func TestSetupUnfilledPlaceholderCommandFailsAtTheShell(t *testing.T) {
 	}
 }
 
+// Only a managed identity is pinned to the principal the roles go to; the other
+// identity modes are already named by their clientId.
+func TestSetupProposedAuthPinsOnlyTheManagedPrincipal(t *testing.T) {
+	cases := []struct {
+		name string
+		plan SetupPlan
+		want AuthConfig
+	}{
+		{"managed-with-an-object-id", SetupPlan{Identity: SetupIdentityManaged, Tenant: testTenantID, ObjectID: applyObjectID},
+			AuthConfig{Mode: AuthModeManagedIdentity, TenantID: testTenantID, PrincipalObjectID: applyObjectID}},
+		{"managed-without-an-object-id-uses-the-placeholder", SetupPlan{Identity: SetupIdentityManaged, Tenant: testTenantID},
+			AuthConfig{Mode: AuthModeManagedIdentity, TenantID: testTenantID, PrincipalObjectID: principalPlaceholder}},
+		{"existing-leaves-it-empty", SetupPlan{Identity: SetupIdentityExisting, Tenant: testTenantID, ClientID: testClientID, ObjectID: applyObjectID, CertificatePath: "/etc/cenci/w.pem"},
+			AuthConfig{Mode: AuthModeCertificate, TenantID: testTenantID, ClientID: testClientID, CertificatePath: "/etc/cenci/w.pem"}},
+		{"new-leaves-it-empty", SetupPlan{Identity: SetupIdentityNew, Tenant: testTenantID, ObjectID: applyObjectID, CertificatePath: "/etc/cenci/w.pem"},
+			AuthConfig{Mode: AuthModeCertificate, TenantID: testTenantID, ClientID: appIDPlaceholder, CertificatePath: "/etc/cenci/w.pem"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.plan.ProposedAuth(); got != tc.want {
+				t.Fatalf("proposed auth %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+// The wait rule the plan shows is the one apply follows: it depends on an attempt
+// in this run or in the last 10 minutes, not only on what this run created.
+func TestSetupRenderApplyStatesTheRecentAttemptWaitRule(t *testing.T) {
+	out, err := newApplyWorld(t).plan.RenderApply(false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const old = "when it created role assignments it waits up to 10 minutes for them to propagate"
+	if strings.Contains(out, old) {
+		t.Fatalf("the plan still states the created-only wait rule:\n%s", out)
+	}
+	for _, want := range []string{"waits up to 10 minutes", "this run or a run in the last 10 minutes", "attempted a role assignment"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("the plan lacks %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestSetupShellQuoteExpandsToExactlyTheValue(t *testing.T) {
 	for name, value := range map[string]string{
 		"plain":         "alerts",

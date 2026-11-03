@@ -444,8 +444,10 @@ terminal on stdin you must pass `--yes` and supply every input as a flag
 `--workspace-resource-id` for each configured workspace, `--certificate-path` for
 `existing`, `--principal-object-id` for `managed`), or it exits 2 naming the
 missing flag. It creates only the missing role assignments, writes only the
-config's `auth` section, runs the checks of `verify` (waiting up to 10 minutes
-for propagation when it created assignments) and records progress in
+config's `auth` section (for `managed`, pinned to the principal with
+`principalObjectId`), runs the checks of `verify` (waiting up to 10 minutes for
+propagation when this run, or a run in the last 10 minutes, attempted a role
+assignment) and records progress in
 `setup-journal.json` in the config's state directory, so a rerun creates nothing
 twice and resumes where a failure stopped. It never deletes anything and never
 starts the worker. `--identity new` is refused with exit 2 until a later ticket

@@ -63,6 +63,13 @@ func TestAuthConfigAcceptsOnlyExplicitModesWithTheirOwnFields(t *testing.T) {
 		{"workload", `{"mode":"workloadIdentity","tenantId":"` + testTenantID + `","clientId":"` + testClientID + `","tokenFilePath":"/var/run/token"}`, ""},
 		{"managed-system-assigned", `{"mode":"managedIdentity","tenantId":"` + testTenantID + `"}`, ""},
 		{"managed-user-assigned", `{"mode":"managedIdentity","tenantId":"` + testTenantID + `","clientId":"` + testClientID + `"}`, ""},
+		{"managed-pinned", `{"mode":"managedIdentity","tenantId":"` + testTenantID + `","principalObjectId":"` + testObjectID + `"}`, ""},
+		{"managed-user-assigned-pinned", `{"mode":"managedIdentity","tenantId":"` + testTenantID + `","clientId":"` + testClientID + `","principalObjectId":"` + testObjectID + `"}`, ""},
+		{"managed-pinned-non-uuid", `{"mode":"managedIdentity","tenantId":"` + testTenantID + `","principalObjectId":"` + secret + `"}`, "auth.principalObjectId must be a UUID"},
+		{"certificate-with-principal-object-id", `{"mode":"servicePrincipalCertificate","tenantId":"` + testTenantID + `","clientId":"` + testClientID + `","certificatePath":"/etc/w.pem","principalObjectId":"` + secret + `"}`, "auth.principalObjectId is not used by mode servicePrincipalCertificate"},
+		{"workload-with-principal-object-id", `{"mode":"workloadIdentity","tenantId":"` + testTenantID + `","clientId":"` + testClientID + `","tokenFilePath":"/var/run/token","principalObjectId":"` + secret + `"}`, "auth.principalObjectId is not used by mode workloadIdentity"},
+		{"wrong-case-principal-object-id", `{"mode":"managedIdentity","tenantId":"` + testTenantID + `","PrincipalObjectId":"` + testObjectID + `"}`, "auth.PrincipalObjectId"},
+		{"mistyped-principal-object-id", `{"mode":"managedIdentity","tenantId":"` + testTenantID + `","principalObjectId":7}`, "auth.principalObjectId must be a string"},
 		{"secret-mode", `{"mode":"servicePrincipalSecret","tenantId":"` + testTenantID + `","clientId":"` + testClientID + `"}`, "auth.mode"},
 		{"missing-mode", `{"tenantId":"` + testTenantID + `"}`, "auth.mode"},
 		{"client-secret-field", `{"mode":"servicePrincipalCertificate","tenantId":"` + testTenantID + `","clientId":"` + testClientID + `","certificatePath":"/etc/w.pem","clientSecret":"` + secret + `"}`, "auth.clientSecret"},
@@ -128,6 +135,15 @@ func TestAuthConfigDecodesIntoTheSelectedFields(t *testing.T) {
 	want := AuthConfig{Mode: AuthModeWorkloadIdentity, TenantID: testTenantID, ClientID: testClientID, TokenFilePath: "/var/run/token"}
 	if c.Auth == nil || *c.Auth != want {
 		t.Fatalf("auth decoded as %+v, want %+v", c.Auth, want)
+	}
+
+	c, err = LoadConfig(writeAuthConfig(t, `{"mode":"managedIdentity","tenantId":"`+testTenantID+`","principalObjectId":"`+testObjectID+`"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want = AuthConfig{Mode: AuthModeManagedIdentity, TenantID: testTenantID, PrincipalObjectID: testObjectID}
+	if c.Auth == nil || *c.Auth != want {
+		t.Fatalf("pinned managed auth decoded as %+v, want %+v", c.Auth, want)
 	}
 }
 

@@ -54,6 +54,14 @@ type SetupJournal struct {
 	Complete    bool        `json:"complete"`
 	CreatedAt   time.Time   `json:"createdAt"`
 	UpdatedAt   time.Time   `json:"updatedAt"`
+
+	// LastRoleCreateAt is when the most recent role-assignment create was
+	// attempted. It is written before each attempt, so a create that failed or
+	// was interrupted still leaves it, and it is kept across runs: a rerun finds
+	// every assignment present yet cannot tell whether they have propagated.
+	// Nil when no create was ever attempted (and in journals written before it
+	// existed).
+	LastRoleCreateAt *time.Time `json:"lastRoleCreateAt,omitempty"`
 }
 
 // NewSetupJournal starts a journal bound to the request, with no steps.

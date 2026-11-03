@@ -6,15 +6,19 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 )
 
 const (
@@ -64,6 +68,15 @@ type applyWorld struct {
 	cancel         context.CancelFunc
 	cancelAfter    string
 	cancelInVerify bool
+	// clock is what the injected clock returns; a test moves it to age the journal.
+	clock time.Time
+	// onNow runs on every clock read, before the time is returned, so a test can
+	// react to what az.log holds at that moment (the clock is read right before
+	// each step is recorded, and right before each create).
+	onNow func()
+	// verify, when set, decides the Verify seam's verdict instead of verifyOK; the
+	// call is still logged and its wait and config recorded.
+	verify func(ctx context.Context, cfg Config, wait time.Duration) bool
 }
 
 type failingWriter struct{}
@@ -81,7 +94,7 @@ func newApplyWorld(t *testing.T) *applyWorld {
 	}
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	path := writeSetupConfig(t, func(c *Config) { c.StateDir = filepath.Join(t.TempDir(), "state") }, "")
-	w := &applyWorld{t: t, bin: bin, confirm: true, verifyOK: true, uid: os.Getuid()}
+	w := &applyWorld{t: t, bin: bin, confirm: true, verifyOK: true, uid: os.Getuid(), clock: applyNow}
 	w.plan = newApplyPlan(t, path, writeCertFile(t, time.Now().Add(400*24*time.Hour), 0600))
 	w.healthy()
 	return w
@@ -233,7 +246,10 @@ func (w *applyWorld) runCtx(ctx context.Context) error {
 		if w.cancel != nil && w.cancelAfter != "" && strings.Contains(strings.Join(w.lines("az.log"), "\n"), w.cancelAfter) {
 			w.cancel()
 		}
-		return applyNow
+		if w.onNow != nil {
+			w.onNow()
+		}
+		return w.clock
 	}
 	opts := ApplyOptions{Az: az, ReplaceAuth: w.replaceAuth, Now: now, Stdout: stdout, Stderr: &w.stderr,
 		Confirm: func() bool {
@@ -241,13 +257,16 @@ func (w *applyWorld) runCtx(ctx context.Context) error {
 			w.planSeen = w.stdout.String()
 			return w.confirm
 		},
-		Verify: func(_ context.Context, cfg Config, wait time.Duration) bool {
+		Verify: func(ctx context.Context, cfg Config, wait time.Duration) bool {
 			appendFile(w.t, w.path("az.log"), "VERIFY\n")
 			if w.cancelInVerify {
 				w.cancel()
 			}
 			w.waits = append(w.waits, wait)
 			w.verified = append(w.verified, cfg)
+			if w.verify != nil {
+				return w.verify(ctx, cfg, wait)
+			}
 			return w.verifyOK
 		}}
 	if w.uid == os.Getuid() {
@@ -281,6 +300,17 @@ func (w *applyWorld) mutating() []string {
 	var out []string
 	for _, l := range w.lines("az.log") {
 		if _, ok := stepIn(azReadOnly, strings.Fields(l)); !ok && l != "VERIFY" {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
+// creates is every logged role assignment create call.
+func (w *applyWorld) creates() []string {
+	var out []string
+	for _, l := range w.lines("az.log") {
+		if strings.HasPrefix(l, "role assignment create") {
 			out = append(out, l)
 		}
 	}
@@ -666,6 +696,9 @@ func TestSetupApplyRerunAfterSuccessMakesNoMutatingCall(t *testing.T) {
 	}
 	bytesBefore := readBytes(t, w.plan.ConfigPath)
 	logged := len(w.lines("az.log"))
+	// The first run attempted its creates at applyNow; the rerun comes after the
+	// propagation window, so it has nothing to wait for.
+	w.clock = applyNow.Add(11 * time.Minute)
 	if err := w.run(); err != nil {
 		t.Fatal(err)
 	}
@@ -834,14 +867,18 @@ func TestSetupApplyVerifiesAndCompletesOnlyWhenEveryProbeIsOK(t *testing.T) {
 	}
 }
 
+// newManagedApplyWorld is a world whose plan is for a managed identity: no client
+// ID, no certificate, and a principal az reports under another application.
+func newManagedApplyWorld(t *testing.T) *applyWorld {
+	t.Helper()
+	w := newApplyWorld(t)
+	w.plan.Identity, w.plan.ClientID, w.plan.CertificatePath, w.plan.CertificateExists = SetupIdentityManaged, "", "", false
+	w.ok("ad sp show", "", fmt.Sprintf(`{"appId":%q,"id":%q}`, applyThirdUUID, applyObjectID))
+	return w
+}
+
 func TestSetupApplyManagedIdentityConfirmsThePrincipalAndCreatesNoCredential(t *testing.T) {
-	managed := func(t *testing.T) *applyWorld {
-		w := newApplyWorld(t)
-		w.plan.Identity, w.plan.ClientID, w.plan.CertificatePath, w.plan.CertificateExists = SetupIdentityManaged, "", "", false
-		w.ok("ad sp show", "", fmt.Sprintf(`{"appId":%q,"id":%q}`, applyThirdUUID, applyObjectID))
-		return w
-	}
-	w := managed(t)
+	w := newManagedApplyWorld(t)
 	if err := w.run(); err != nil {
 		t.Fatal(err)
 	}
@@ -863,8 +900,16 @@ func TestSetupApplyManagedIdentityConfirmsThePrincipalAndCreatesNoCredential(t *
 		}
 	}
 	w.reloadConfig()
-	if a := w.plan.Config.Auth; a == nil || *a != (AuthConfig{Mode: AuthModeManagedIdentity, TenantID: testTenantID}) {
+	a := w.plan.Config.Auth
+	if a == nil || *a != (AuthConfig{Mode: AuthModeManagedIdentity, TenantID: testTenantID, PrincipalObjectID: applyObjectID}) {
 		t.Fatalf("written auth %+v", a)
+	}
+	// The pin names the principal every role went to, as the az log shows it.
+	for _, l := range got {
+		fields := strings.Fields(l)
+		if i := slices.Index(fields, "--assignee-object-id"); i < 0 || i+1 == len(fields) || fields[i+1] != a.PrincipalObjectID {
+			t.Errorf("auth.principalObjectId %q is not the assignee of %q", a.PrincipalObjectID, l)
+		}
 	}
 	if entries := dirEntries(t, w.plan.Config.StateDir); len(entries) != 1 || entries[0] != SetupJournalFile {
 		t.Fatalf("state directory holds %v, want only the journal", entries)
@@ -874,7 +919,7 @@ func TestSetupApplyManagedIdentityConfirmsThePrincipalAndCreatesNoCredential(t *
 	}
 
 	t.Run("another-principal-than-asked", func(t *testing.T) {
-		w := managed(t)
+		w := newManagedApplyWorld(t)
 		w.ok("ad sp show", "", fmt.Sprintf(`{"appId":%q,"id":%q}`, applyThirdUUID, applyOtherObjectID))
 		if err := w.run(); err == nil {
 			t.Fatal("a principal that is not the requested one must be refused")
@@ -882,6 +927,247 @@ func TestSetupApplyManagedIdentityConfirmsThePrincipalAndCreatesNoCredential(t *
 		requireNoMutation(t, w, "managed-mismatch")
 		w.noJournal()
 	})
+}
+
+// An auth section PR #1399 wrote for a managed identity has no pin, so it differs
+// from the plan like any other differing section.
+func TestSetupApplyRefusesAnUnpinnedManagedAuthWithoutReplaceAuth(t *testing.T) {
+	unpinned := fmt.Sprintf(`{"mode":"managedIdentity","tenantId":%q}`, testTenantID)
+	newWorld := func(t *testing.T) *applyWorld {
+		w := newManagedApplyWorld(t)
+		w.plan = newApplyPlan(t, writeSetupConfig(t, func(c *Config) { c.StateDir = w.plan.Config.StateDir }, unpinned), "")
+		w.plan.Identity, w.plan.ClientID, w.plan.CertificatePath, w.plan.CertificateExists = SetupIdentityManaged, "", "", false
+		if a := w.plan.Config.Auth; a == nil || *a != (AuthConfig{Mode: AuthModeManagedIdentity, TenantID: testTenantID}) {
+			t.Fatalf("control: the config must start with the unpinned managed auth, got %+v", a)
+		}
+		return w
+	}
+	w := newWorld(t)
+	before := readBytes(t, w.plan.ConfigPath)
+	err := w.run()
+	if err == nil || !strings.Contains(err.Error(), "--replace-auth") {
+		t.Fatalf("want an error naming --replace-auth, got %v", err)
+	}
+	requireNoMutation(t, w, "unpinned-managed-auth")
+	w.noJournal()
+	if w.confirms != 0 || !bytes.Equal(before, readBytes(t, w.plan.ConfigPath)) {
+		t.Fatal("the refusal must come before the prompt and leave the config untouched")
+	}
+
+	control := newWorld(t)
+	control.replaceAuth = true
+	if err := control.run(); err != nil {
+		t.Fatalf("control: --replace-auth must allow the rewrite: %v", err)
+	}
+	control.reloadConfig()
+	if a := control.plan.Config.Auth; a == nil || *a != (AuthConfig{Mode: AuthModeManagedIdentity, TenantID: testTenantID, PrincipalObjectID: applyObjectID}) {
+		t.Fatalf("the rewritten auth is %+v, want the managed auth pinned to %s", a, applyObjectID)
+	}
+	// Once pinned, the section matches the plan and needs no flag.
+	control.replaceAuth = false
+	control.existAll()
+	if err := control.run(); err != nil {
+		t.Fatalf("a pinned auth section must not need --replace-auth on a rerun: %v", err)
+	}
+}
+
+// The pin travels through the reloaded config into the Verify seam, so a host whose
+// credential returns another identity cannot complete the apply.
+func TestSetupApplyFailsWhenVerifyReportsAPrincipalMismatch(t *testing.T) {
+	w := newManagedApplyWorld(t)
+	cred := &scopeCredential{token: func(string) (string, error) {
+		return identityToken(testTenantID, applyThirdUUID, applyOtherObjectID, nil), nil
+	}}
+	var verifyOut, verifyErr bytes.Buffer
+	w.verify = func(ctx context.Context, cfg Config, wait time.Duration) bool {
+		return Verify(ctx, cfg, cred, VerifyOptions{
+			PropagationWait: wait,
+			HTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				t.Error("a workspace probe ran after an identity mismatch")
+				return nil, errors.New("no network in this test")
+			})},
+			OpenBroker: func(Config, azcore.TokenCredential) (ServiceBusReceiver, error) {
+				t.Error("a broker was opened after an identity mismatch")
+				return nil, errors.New("no broker in this test")
+			},
+			Sleep: func(context.Context, time.Duration) error {
+				t.Error("verify waited for propagation after an identity mismatch")
+				return errors.New("no waiting in this test")
+			},
+			Stdout: &verifyOut,
+			Stderr: &verifyErr,
+		})
+	}
+	err := w.run()
+	if err == nil {
+		t.Fatal("an identity mismatch must fail the apply")
+	}
+	if !hasLine(verifyOut.String(), "identity (Service Bus): identity-mismatch") {
+		t.Fatalf("verify did not report the identity mismatch:\n%s", verifyOut.String())
+	}
+	if !strings.Contains(verifyErr.String(), markPrincipalMismatch) {
+		t.Fatalf("verify's reason lacks %q:\n%s", markPrincipalMismatch, verifyErr.String())
+	}
+	if len(w.verified) != 1 || w.verified[0].Auth == nil || w.verified[0].Auth.PrincipalObjectID != applyObjectID {
+		t.Fatalf("verify must run against the reloaded config carrying the pin, got %+v", w.verified)
+	}
+	if strings.Join(cred.scopes, ",") != ServiceBusScope {
+		t.Fatalf("token scopes requested %v, want only the Service Bus scope (stop at the first failure)", cred.scopes)
+	}
+	j := w.journal()
+	var verifyStep *SetupStep
+	for i, s := range j.Steps {
+		if s.Name == stepVerify {
+			verifyStep = &j.Steps[i]
+		}
+	}
+	if j.Complete || verifyStep == nil || verifyStep.Status != StepFailed || verifyStep.Result != "a probe did not pass" {
+		t.Fatalf("want complete=false and a failed %q step, got complete=%v step=%+v", stepVerify, j.Complete, verifyStep)
+	}
+	if !strings.Contains(w.stderr.String(), "failed: "+stepVerify) {
+		t.Errorf("the report lacks the failed verify step:\n%s", w.stderr.String())
+	}
+	if !strings.Contains(err.Error(), stepVerify) {
+		t.Errorf("the error does not name the verify step: %v", err)
+	}
+}
+
+// The attempt time is written before the create call, so even a crash right after
+// the call (or a failed create) leaves a rerun a reason to wait.
+func TestSetupApplyRecordsTheRoleCreateAttemptBeforeEachCreate(t *testing.T) {
+	t.Run("a-failed-journal-write-leaves-no-create", func(t *testing.T) {
+		w := newApplyWorld(t)
+		fired := false
+		// Once the entity scope was listed, only the pre-create journal write is
+		// left before its create: block that write by putting a non-empty directory
+		// where the journal file is, so the atomic rename fails.
+		w.onNow = func() {
+			if fired {
+				return
+			}
+			for _, l := range w.lines("az.log") {
+				if strings.HasPrefix(l, "role assignment list") && strings.Contains(l, applyEntityScope) {
+					fired = true
+					if err := os.Remove(w.journalPath()); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.MkdirAll(filepath.Join(w.journalPath(), "blocker"), 0700); err != nil {
+						t.Fatal(err)
+					}
+					return
+				}
+			}
+		}
+		err := w.run()
+		if err == nil || !strings.Contains(err.Error(), "write the setup journal") {
+			t.Fatalf("a failed journal write before a create must fail its step, got %v", err)
+		}
+		if !fired {
+			t.Fatal("the entity scope was never listed, so the journal was never blocked")
+		}
+		if got := w.creates(); len(got) != 0 {
+			t.Fatalf("a create ran although its attempt could not be recorded: %q", got)
+		}
+		if !strings.Contains(w.stderr.String(), "failed:") || !strings.Contains(w.stderr.String(), applyEntityScope) {
+			t.Errorf("the report must name the failed role step:\n%s", w.stderr.String())
+		}
+	})
+
+	t.Run("a-failed-create-leaves-the-time-of-that-attempt", func(t *testing.T) {
+		w := newApplyWorld(t)
+		base := applyNow.Add(90 * time.Minute)
+		// The clock moves one minute with every create that was logged, so the
+		// stamp tells which create it was written for.
+		w.onNow = func() { w.clock = base.Add(time.Duration(len(w.creates())) * time.Minute) }
+		w.on("role assignment create", applyMainWorkspace, "", 1)
+		if err := w.run(); err == nil {
+			t.Fatal("the failing create must fail the apply")
+		}
+		if got := w.creates(); len(got) != 2 {
+			t.Fatalf("want the entity create and the failing workspace create, got %q", got)
+		}
+		j := w.journal()
+		if want := base.Add(time.Minute); j.LastRoleCreateAt == nil || !j.LastRoleCreateAt.Equal(want) {
+			t.Fatalf("lastRoleCreateAt %v, want %v (when the failing create was attempted)", j.LastRoleCreateAt, want)
+		}
+		if j.Complete {
+			t.Fatal("a failed apply must not be complete")
+		}
+	})
+}
+
+// Every assignment already exists and nothing is created, so the wait comes only
+// from when a role assignment was last attempted.
+func TestSetupApplyWaitsAfterARecentRoleCreateAttempt(t *testing.T) {
+	offset := func(d time.Duration) *time.Duration { return &d }
+	cases := []struct {
+		name      string
+		attempted *time.Duration // lastRoleCreateAt relative to Now; nil leaves the key out
+		failFirst bool           // a first run attempted a create that failed, 3 minutes earlier
+		wait      time.Duration
+	}{
+		{"attempt-2-minutes-before", offset(-2 * time.Minute), false, 10 * time.Minute},
+		{"attempt-just-under-10-minutes-before", offset(-(verifyPropagationWait - time.Second)), false, 10 * time.Minute},
+		{"attempt-exactly-10-minutes-before", offset(-verifyPropagationWait), false, 0},
+		{"attempt-11-minutes-before", offset(-11 * time.Minute), false, 0},
+		{"attempt-in-the-future-clock-skew", offset(5 * time.Minute), false, 10 * time.Minute},
+		{"legacy-journal-without-the-key", nil, false, 0},
+		{"rerun-within-10-minutes-after-a-failed-create", nil, true, 10 * time.Minute},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			w := newApplyWorld(t)
+			var prior *time.Time // what the journal holds before the rerun
+			if c.failFirst {
+				w.on("role assignment create", applyMainWorkspace, "", 1)
+				if err := w.run(); err == nil {
+					t.Fatal("control: the first run's create must fail")
+				}
+				prior = w.journal().LastRoleCreateAt
+				if prior == nil {
+					t.Fatal("control: the failed create left no lastRoleCreateAt")
+				}
+				w.clock = applyNow.Add(3 * time.Minute)
+			} else {
+				j := NewSetupJournal(w.plan.Tenant, w.plan.Identity, w.plan.ConfigPath, applyNow)
+				if c.attempted != nil {
+					at := applyNow.Add(*c.attempted)
+					j.LastRoleCreateAt, prior = &at, &at
+				}
+				if err := j.Write(w.plan.Config.StateDir); err != nil {
+					t.Fatal(err)
+				}
+				if hasKey := bytes.Contains(readBytes(t, w.journalPath()), []byte("lastRoleCreateAt")); hasKey != (c.attempted != nil) {
+					t.Fatalf("control: the written journal has the lastRoleCreateAt key = %v, want %v", hasKey, c.attempted != nil)
+				}
+			}
+			w.existAll()
+			createdBefore := len(w.creates())
+			if err := w.run(); err != nil {
+				t.Fatal(err)
+			}
+			if got := w.creates(); len(got) != createdBefore {
+				t.Fatalf("the rerun created an assignment: %q", got[createdBefore:])
+			}
+			if len(w.waits) != 1 || w.waits[0] != c.wait {
+				t.Fatalf("verify waits %v, want [%v]", w.waits, c.wait)
+			}
+			after := w.journal()
+			if !after.Complete {
+				t.Fatal("the rerun must end complete")
+			}
+			// The reset at the start of a run leaves the attempt time alone, and a
+			// run that attempts nothing writes none.
+			switch {
+			case prior == nil:
+				if after.LastRoleCreateAt != nil || bytes.Contains(readBytes(t, w.journalPath()), []byte("lastRoleCreateAt")) {
+					t.Fatalf("a rerun with no attempt wrote lastRoleCreateAt %v", after.LastRoleCreateAt)
+				}
+			case after.LastRoleCreateAt == nil || !after.LastRoleCreateAt.Equal(*prior):
+				t.Fatalf("lastRoleCreateAt %v after the rerun, want the earlier attempt %v kept", after.LastRoleCreateAt, prior)
+			}
+		})
+	}
 }
 
 func TestSetupApplyJournalBindsTenantIdentityAndConfigPath(t *testing.T) {

@@ -53,6 +53,11 @@ type AuthConfig struct {
 	ClientID        string `json:"clientId,omitempty"`
 	CertificatePath string `json:"certificatePath,omitempty"`
 	TokenFilePath   string `json:"tokenFilePath,omitempty"`
+
+	// PrincipalObjectID pins the managed identity's object ID (the token's oid
+	// claim). It is optional and valid only for managedIdentity, whose
+	// system-assigned form has no clientId to name it.
+	PrincipalObjectID string `json:"principalObjectId,omitempty"`
 }
 
 // CredentialOptions are Go-level seams only; nothing here is read from the
@@ -90,7 +95,7 @@ func (a *AuthConfig) UnmarshalJSON(data []byte) error {
 		return fmt.Errorf("auth must be an object")
 	}
 	var out AuthConfig
-	targets := map[string]*string{"mode": &out.Mode, "tenantId": &out.TenantID, "clientId": &out.ClientID, "certificatePath": &out.CertificatePath, "tokenFilePath": &out.TokenFilePath}
+	targets := map[string]*string{"mode": &out.Mode, "tenantId": &out.TenantID, "clientId": &out.ClientID, "certificatePath": &out.CertificatePath, "tokenFilePath": &out.TokenFilePath, "principalObjectId": &out.PrincipalObjectID}
 	keys := make([]string, 0, len(fields))
 	for k := range fields {
 		keys = append(keys, k)
@@ -128,6 +133,12 @@ func (a AuthConfig) Validate() error {
 		return fmt.Errorf("auth.clientId is required for mode %s", a.Mode)
 	case a.ClientID != "" && !uuidPattern.MatchString(a.ClientID):
 		return fmt.Errorf("auth.clientId must be a UUID")
+	}
+	switch {
+	case a.PrincipalObjectID != "" && a.Mode != AuthModeManagedIdentity:
+		return fmt.Errorf("auth.principalObjectId is not used by mode %s", a.Mode)
+	case a.PrincipalObjectID != "" && !uuidPattern.MatchString(a.PrincipalObjectID):
+		return fmt.Errorf("auth.principalObjectId must be a UUID")
 	}
 	if err := checkAuthPath("certificatePath", a.CertificatePath, a.Mode, a.Mode == AuthModeCertificate); err != nil {
 		return err
@@ -289,9 +300,9 @@ func readCertificateFile(path string) ([]byte, error) {
 }
 
 // Preflight acquires one token per scope, each request bounded to 30 seconds,
-// and checks that the token was issued for the configured tenant and, when a
-// client is configured, application. Any failure is final: the caller must not
-// start work. Token text is never part of an error.
+// and checks that the token was issued for the configured tenant and, when
+// configured, application and managed-identity principal. Any failure is final:
+// the caller must not start work. Token text is never part of an error.
 func Preflight(ctx context.Context, cred azcore.TokenCredential, auth AuthConfig) error {
 	for _, target := range []struct{ name, scope string }{{"Service Bus", ServiceBusScope}, {"Log Analytics", LogAnalyticsScope}} {
 		if err := preflightScope(ctx, cred, auth, target.name, target.scope); err != nil {
@@ -321,8 +332,8 @@ const (
 	// IdentityTokenFailed: no token was acquired.
 	IdentityTokenFailed IdentityErrorKind = iota + 1
 	// IdentityMismatch: a token was acquired but its claims are unreadable or do
-	// not match the configured tenant or application, so the identity cannot be
-	// confirmed.
+	// not match the configured tenant, application or principal object ID, so
+	// the identity cannot be confirmed.
 	IdentityMismatch
 )
 
@@ -337,11 +348,11 @@ func (e *IdentityError) Error() string { return e.err.Error() }
 func (e *IdentityError) Unwrap() error { return e.err }
 
 // CheckIdentity acquires one token for scope, bounded to 30 seconds, and checks
-// that it was issued for the configured tenant and, when a client is
-// configured, application. It is the one check both the worker's Preflight and
-// `cenci incident verify` apply, so they cannot disagree about identity. The
-// claims come back whenever the token could be decoded, even on a mismatch; the
-// object ID is decoded only to be shown, never checked. A failure is always an
+// that it was issued for the configured tenant and, when configured, application
+// (clientId) and principal (principalObjectId, compared with the oid claim). It
+// is the one check both the worker's Preflight and `cenci incident verify`
+// apply, so they cannot disagree about identity. The claims come back whenever
+// the token could be decoded, even on a mismatch. A failure is always an
 // *IdentityError.
 func CheckIdentity(ctx context.Context, cred azcore.TokenCredential, auth AuthConfig, name, scope string) (IdentityClaims, error) {
 	ctx, cancel := context.WithTimeout(ctx, preflightRequestTimeout)
@@ -363,6 +374,9 @@ func CheckIdentity(ctx context.Context, cred azcore.TokenCredential, auth AuthCo
 	}
 	if auth.ClientID != "" && !sameUUID(claims.AppID, auth.ClientID) {
 		return claims, &IdentityError{Kind: IdentityMismatch, err: fmt.Errorf("worker identity preflight: token application mismatch for %s: appid claim does not match auth.clientId%s", name, missingClaimNote(claims.AppID, "appid"))}
+	}
+	if auth.PrincipalObjectID != "" && !sameUUID(claims.ObjectID, auth.PrincipalObjectID) {
+		return claims, &IdentityError{Kind: IdentityMismatch, err: fmt.Errorf("worker identity preflight: token principal mismatch for %s: oid claim does not match auth.principalObjectId%s", name, missingClaimNote(claims.ObjectID, "oid"))}
 	}
 	return claims, nil
 }
