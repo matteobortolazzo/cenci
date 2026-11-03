@@ -17,7 +17,9 @@
 #         CANARY_MAIN_ROOT=<dir>
 #         PROBE<TAB><n><TAB><shell|apply_patch><TAB><guard><TAB><group><TAB><target>
 #         INSTRUCTION: ...
-#       A plan that cannot be made prints CANARY_STATUS=refused and exits 1.
+#       A plan that cannot be made prints CANARY_STATUS=refused and exits 1; if
+#       its already-created run dir cannot be removed it also prints
+#       `LEFTOVER: <run dir>`.
 #
 #   The session then makes one tool call per PROBE line and judges each result
 #   from the tool output: "denied" only when the result shows the guard's own
@@ -30,6 +32,8 @@
 #       CANARY_STATUS=active (exit 0) or CANARY_STATUS=refused (exit 1) with the
 #       refusal text. active needs every probe denied, nothing written, nothing
 #       left over. The run dir is removed unless a leftover sits inside it.
+#       A refusal before the cleanup loop (bad run dir argument, untrusted
+#       record) removes nothing and names the glob to delete by hand.
 #
 # Exit codes: 0 active/planned, 1 refused, 2 usage error. Fail closed: an
 # unknown matcher or guard, an unreadable manifest, a missing jq, a self-check
@@ -79,12 +83,21 @@ remove_run_dir() {
 # refuse_plan <reason> -- the plan could not be made: print the refusal, remove
 # any run dir already created, and exit 1.
 refuse_plan() {
+    local leftover=0
     if [[ -n "${CREATED_RUN_DIR}" ]]; then
-        remove_run_dir "${CREATED_RUN_DIR}" || true
+        # A failed removal is never hidden: it is reported with its exact path,
+        # the same LEFTOVER line `check` prints.
+        if ! remove_run_dir "${CREATED_RUN_DIR}" && [[ -e "${CREATED_RUN_DIR}" || -L "${CREATED_RUN_DIR}" ]]; then
+            printf 'LEFTOVER: %s\n' "${CREATED_RUN_DIR}"
+            leftover=1
+        fi
     fi
     printf 'CANARY_STATUS=refused\n'
     printf 'Guard canary refused: %s\n' "$1"
     printf 'The cenci write guards are not confirmed active, so do not start any mutation.\n'
+    if [[ "${leftover}" -eq 1 ]]; then
+        printf 'Remove each LEFTOVER path above by hand; the canary could not.\n'
+    fi
     printf 'If the hooks are pending or untrusted in Codex, review them with /hooks and rerun.\n'
     exit 1
 }
@@ -181,7 +194,7 @@ self_check_probe() {
 }
 
 do_plan() {
-    local pairs group matcher cmd guard slug tool n=0 main_root base cand canon hex run_dir target msg i
+    local pairs group matcher cmd guard slug tool n=0 main_root base cand canon hex run_dir run_canon target msg i
     local -a p_n=() p_tool=() p_guard=() p_group=() p_target=() skipped=()
 
     command -v jq >/dev/null 2>&1 || refuse_plan "jq is required to read the hook manifest and was not found on PATH"
@@ -245,7 +258,11 @@ do_plan() {
     if [[ -L "${run_dir}" || ! -d "${run_dir}" || ! -O "${run_dir}" ]]; then
         refuse_plan "the run dir ${run_dir} is not a directory owned by the current user"
     fi
-    if inside_or_equal "$(canon_dir "${run_dir}")" "${main_root}"; then
+    # Checked substitution: an empty canonical path would make inside_or_equal
+    # false and let a run dir inside the main worktree through.
+    run_canon="$(canon_dir "${run_dir}")" || refuse_plan "the run dir ${run_dir} cannot be resolved"
+    [[ -n "${run_canon}" ]] || refuse_plan "the run dir ${run_dir} cannot be resolved"
+    if inside_or_equal "${run_canon}" "${main_root}"; then
         refuse_plan "the run dir resolves inside the main worktree"
     fi
 
@@ -302,6 +319,7 @@ do_check() {
     local -a p_n=() p_tool=() p_guard=() p_group=() p_target=() bad=() lines=()
     local -a keys=()
     local verdicts=$'\n' arg key found reported i n t written status active=1 keep_run_dir=0 leftover_any=0
+    local hint_hex hint_root hint_trimmed
 
     shift
     # Argument tokens: n=denied|not-denied (bash 3.2 has no associative arrays,
@@ -322,10 +340,39 @@ do_check() {
         fi
     done
 
+    # An early refusal happens before the cleanup loop and the record is not
+    # trusted there, so nothing is removed -- yet canary files may already sit in
+    # the main worktree. The refusal therefore says how to remove them by hand:
+    # the exact glob when the hex id (from the run dir NAME the session passed)
+    # and the main root (from the session's own cwd, never from the record) are
+    # both known, else a pointer to look for cenci-guard-canary-* files.
+    hint_hex=""
+    hint_root=""
+    hint_trimmed="${run_dir}"
+    while [[ "${#hint_trimmed}" -gt 1 && "${hint_trimmed}" == */ ]]; do
+        hint_trimmed="${hint_trimmed%/}"
+    done
+    if [[ "${hint_trimmed##*/}" =~ ^${RUN_PREFIX}([0-9a-f]{16})$ ]]; then
+        hint_hex="${BASH_REMATCH[1]}"
+        if hint_root="$(main_worktree_root)" && [[ "${hint_root}" == /* ]] && ! has_control "${hint_root}"; then
+            :
+        else
+            hint_hex=""
+            hint_root=""
+        fi
+    fi
+
     refuse_check() {
         printf 'CANARY_STATUS=refused\n'
         printf 'Guard canary refused: %s\n' "$1"
         printf 'The cenci write guards are not confirmed active; do not start any mutation. Nothing was removed.\n'
+        if [[ -n "${hint_hex}" ]]; then
+            printf 'Canary files may still sit in the main worktree: delete any file matching %s/%s%s-*.txt by hand. The .env probe lives in the run dir %s; remove that directory by hand too.\n' \
+                "${hint_root}" "${RUN_PREFIX}" "${hint_hex}" "${run_dir//[[:cntrl:]]/?}"
+        else
+            printf 'Canary files may still sit in the main worktree: look for files named %s* there (and for a %s* run dir in the temp directory) and delete them by hand.\n' \
+                "${RUN_PREFIX}" "${RUN_PREFIX}"
+        fi
         exit 1
     }
 

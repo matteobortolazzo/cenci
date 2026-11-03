@@ -23,7 +23,9 @@
 #       names pending trust and /hooks and removes what was written; a result
 #       that contradicts the trust state is a FAIL; the sandbox also runs a
 #       trust-withheld variant that leaves out ONLY the trust flag; the host
-#       never runs it
+#       never runs it; a refusal only counts as ok when the plan was made and
+#       every probe was attempted (a failed codex exec start is inconclusive),
+#       and a leftover is a FAIL in every variant
 #
 # A stub `codex` first on PATH records its argv and answers `--version` and
 # `login status` from the environment; nothing here touches a real Codex.
@@ -151,6 +153,11 @@ case "$1" in
             *cenci-guard-canary-*) tag=canary ;;
         esac
         printf '%s\t%s\n' "$tag" "${all%"$prompt"}" >> "${STUB_ARGV_LOG}.exec"
+        # STUB_CANARY_EXEC_FAIL=1: `codex exec` dies at start for every guard
+        # canary probe (no events, no tap line, non-zero exit).
+        if [ "$tag" = canary ] && [ "${STUB_CANARY_EXEC_FAIL:-0}" = 1 ]; then
+            exit 1
+        fi
         [ "${STUB_EMULATE:-0}" = 1 ] || exit 0
         tool_name=Bash
         match=Bash
@@ -168,6 +175,12 @@ case "$1" in
             cmd=$(printf '%s\n' "$prompt" | sed -n 's/^.*exactly this command: \(.*\)$/\1/p' | sed -n 1p)
         fi
         [ -n "$cmd" ] || exit 0
+        # STUB_CANARY_LEFTOVER=1: a DIRECTORY already sits at a guard canary's
+        # main-worktree target, which the canary's `rm -f` cannot remove.
+        if [ "$tag" = canary ] && [ "${STUB_CANARY_LEFTOVER:-0}" = 1 ]; then
+            lo=$(printf '%s\n' "$prompt" | grep -o '/[^ ]*cenci-guard-canary-[0-9a-f]*-[0-9]*\.txt' | sed -n 1p)
+            [ -z "$lo" ] || mkdir -p "$lo" 2>/dev/null
+        fi
         work=$(mktemp -d) || exit 1
         : > "$work/block"
         payload=$(jq -n --arg cwd "$dir" --arg c "$cmd" --arg tn "$tool_name" \
@@ -912,6 +925,88 @@ if grep -qiE '(^|[^n])trusted' "${OUT}/stdout"; then
 else
     pass
 fi
+
+echo "case: a canary whose codex exec never started proves nothing: inconclusive, never ok (G6)"
+# Hooks are inactive (no plugin hooks in the stub) so a refusal is the expected
+# helper outcome -- but every probe's `codex exec` died at start, so the refusal
+# is not evidence of anything.
+RUNNER_OVERRIDE="${HOST_RUNNER}"
+run_runner "${STUB_PATH}" CENCI_CODEX_NATIVE=1 STUB_EMULATE=1 STUB_EMULATE_PATCH=1 STUB_CANARY_EXEC_FAIL=1
+RUNNER_OVERRIDE=""
+if [[ "$(count_calls "${OUT}/argv.exec" canary any)" -eq 4 ]]; then
+    pass
+else
+    fail "exec-fail non-vacuity: the runner must have launched the 4 canary probes (got $(count_calls "${OUT}/argv.exec" canary any))"
+fi
+assert_row "exec start fails" "${OUT}/stdout" "canary: bash write to the main worktree" "not run"
+assert_row "exec start fails" "${OUT}/stdout" "${CANARY_AL}" inconclusive
+assert_row_has "exec start fails" "${OUT}/stdout" "${CANARY_AL}" "only 0 of 4 probes were attempted"
+if row_line "${OUT}/stdout" "${CANARY_AL}" | grep -qF '| ok |'; then
+    fail "exec start fails: the canary row must never be ok"
+else
+    pass
+fi
+
+echo "case: a canary where only some probes were attempted is inconclusive, never ok (G6)"
+# Without STUB_EMULATE_PATCH the two apply_patch probes produce no event at all.
+RUNNER_OVERRIDE="${HOST_RUNNER}"
+run_runner "${STUB_PATH}" CENCI_CODEX_NATIVE=1 STUB_EMULATE=1
+RUNNER_OVERRIDE=""
+assert_row "partial attempts" "${OUT}/stdout" "canary: bash write to the main worktree" "not run"
+assert_row "partial attempts" "${OUT}/stdout" "${CANARY_AL}" inconclusive
+assert_row_has "partial attempts" "${OUT}/stdout" "${CANARY_AL}" "only 2 of 4 probes were attempted"
+
+echo "case: a canary whose plan was refused proves nothing about a refusal expectation: inconclusive (G6)"
+NOPLAN_RUNNER="$(make_runner_copy host-noplan "${MISSING_MARKER}")" || {
+    echo "FAIL: test setup: runner copy without a manifest" >&2
+    exit 1
+}
+rm -f "${NOPLAN_RUNNER%/*}/hooks.json" || exit 1
+RUNNER_OVERRIDE="${NOPLAN_RUNNER}"
+run_runner "${STUB_PATH}" CENCI_CODEX_NATIVE=1 STUB_EMULATE=1 STUB_EMULATE_PATCH=1
+RUNNER_OVERRIDE=""
+if [[ "$(count_calls "${OUT}/argv.exec" canary any)" -eq 0 ]] && grep -qF 'the hook manifest' "${OUT}/stdout"; then
+    pass
+else
+    fail "plan-refused non-vacuity: the helper must refuse to plan (no canary call, manifest reason in the report): $(grep -F 'canary preflight' "${OUT}/stdout" | head -n 2)"
+fi
+assert_row "plan refused" "${OUT}/stdout" "canary: bash write to the main worktree" "not run"
+assert_row "plan refused" "${OUT}/stdout" "${CANARY_AL}" inconclusive
+assert_row_has "plan refused" "${OUT}/stdout" "${CANARY_AL}" "the plan was refused"
+
+echo "case: a leftover makes the canary row FAIL in every variant (G6)"
+RUNNER_OVERRIDE="${HOST_RUNNER}"
+run_runner "${STUB_PATH}" CENCI_CODEX_NATIVE=1 STUB_EMULATE=1 STUB_EMULATE_PATCH=1 STUB_CANARY_LEFTOVER=1
+RUNNER_OVERRIDE=""
+assert_row "host leftover" "${OUT}/stdout" "${CANARY_AL}" FAIL
+assert_row_has "host leftover" "${OUT}/stdout" "${CANARY_AL}" "CANARY_STATUS=refused"
+assert_row_has "host leftover" "${OUT}/stdout" "${CANARY_AL}" "2 leftover(s)"
+assert_row_has "host leftover" "${OUT}/stdout" "${CANARY_AL}" "could not be removed"
+read -r EMU_RC < "${OUT}/rc"
+if [[ "${EMU_RC}" == 1 && "$(last_line_of "${OUT}/stdout")" == "RESULT: FAIL"* ]]; then
+    pass
+else
+    fail "host leftover: expected rc 1 and RESULT: FAIL, got rc=${EMU_RC}, last line '$(last_line_of "${OUT}/stdout")'"
+fi
+RUNNER_OVERRIDE="${SANDBOX_RUNNER}"
+run_runner "${STUB_PATH}" "${EMU_PATCH_ENV[@]}" CENCI_SANDBOX=1 STUB_TRUST_REQUIRED=1 STUB_CANARY_LEFTOVER=1
+RUNNER_OVERRIDE=""
+assert_row "sandbox leftover" "${OUT}/stdout" "${CANARY_AL}" FAIL
+assert_row "sandbox leftover" "${OUT}/stdout" "${CANARY_WH}" FAIL
+assert_row_has "sandbox leftover" "${OUT}/stdout" "${CANARY_WH}" "2 leftover(s)"
+read -r EMU_RC < "${OUT}/rc"
+if [[ "${EMU_RC}" == 1 && "$(last_line_of "${OUT}/stdout")" == "RESULT: FAIL"* ]]; then
+    pass
+else
+    fail "sandbox leftover: expected rc 1 and RESULT: FAIL, got rc=${EMU_RC}, last line '$(last_line_of "${OUT}/stdout")'"
+fi
+
+echo "case: in the sandbox a withheld variant whose exec never started is inconclusive, never ok (G6)"
+RUNNER_OVERRIDE="${SANDBOX_RUNNER}"
+run_runner "${STUB_PATH}" "${EMU_PATCH_ENV[@]}" CENCI_SANDBOX=1 STUB_TRUST_REQUIRED=1 STUB_CANARY_EXEC_FAIL=1
+RUNNER_OVERRIDE=""
+assert_row "sandbox exec fails" "${OUT}/stdout" "${CANARY_WH}" inconclusive
+assert_row_has "sandbox exec fails" "${OUT}/stdout" "${CANARY_WH}" "only 0 of 4 probes were attempted"
 
 # ── G4: helper tables ───────────────────────────────────────────────────
 # shellcheck source=native-hooks-lib.sh

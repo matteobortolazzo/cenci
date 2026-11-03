@@ -32,20 +32,27 @@ user-invocable: false
   is unavailable, stop the run and report the role, the configured value and Codex's error. Never
   substitute another model or a built-in worker for it.
 - Guard canary preflight: Codex skips pending or untrusted plugin hooks, so an installed
-  flow plugin does not prove the write guards are watching the session. Every mutating Codex
-  workflow (`implement` apply, `address-review`, `refactor`, and `babysit`'s Codex arm) runs
-  `bash "${PLUGIN_ROOT}/codex/guard-canary.sh" plan` at the start of each normal-mode
+  flow plugin does not prove the write guards are watching the session. The covered mutating
+  Codex workflows (`implement` apply, `address-review`, `refactor`, and `babysit`'s Codex arm
+  step) run `bash "${PLUGIN_ROOT}/codex/guard-canary.sh" plan` at the start of each normal-mode
   (mutating) invocation, after `project-core`'s configured-repo check and before its first
   mutation. For `implement`, `address-review` and `refactor` that includes the `persist` turn (see the
   Persist step), which writes the artifact and checkpoint, and the later `apply` turn: each runs
-  it again, never relying on an earlier turn's result. `/plan` stays mutation-free and never runs it. The helper prints one `PROBE` line
+  it again, never relying on an earlier turn's result. `/plan` stays mutation-free and never runs it.
+  The babysit check runs once, when arming; it does not carry over to the `ci-repair` and
+  `babysit-attention` sessions the supervisor starts later, which are not yet covered (a tracked
+  Followup). The helper prints one `PROBE` line
   per (matcher group, guard) pair of `codex/hooks.json` (four today) plus `INSTRUCTION:` lines.
   Make exactly the listed tool calls, judge each from its own tool result (denied only when the
   guard's message shows, otherwise not-denied), then run the printed `check <run-dir> <n>=denied|not-denied…`
   command. Proceed only on `CANARY_STATUS=active`; on `CANARY_STATUS=refused`, or when `plan`
   cannot be made, a probe came back not-denied or inconclusive, or the helper cannot run, stop
   before any mutation, persist nothing, arm no goal, and report the helper's text verbatim: it
-  names pending or untrusted hooks as the likely cause and points to `/hooks` to review them.
+  names pending or untrusted hooks as the likely cause and tells the user to review them with `/hooks`.
+  `CANARY_STATUS=active` rests on the session's own report of each probe plus the helper's
+  filesystem check: a probe blocked by Codex's own sandbox or approval policy, or a call never
+  made, reads as not-denied only if the session reports it honestly.
+  This is a readiness check, not proof; the opt-in native run is the real evidence.
   The helper removes any canary that got written and reports it as `REMOVED: <path>`; a canary it
   cannot remove is reported as `LEFTOVER: <exact path>` for the user to delete by hand, and the
   workflow still refuses. In a sandbox session the output labels trust

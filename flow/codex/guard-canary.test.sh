@@ -416,10 +416,20 @@ for session in "${REPO}" "${WT}"; do
 done
 
 # ── P3: fail closed ─────────────────────────────────────────────────────
-# assert_plan_refused <label> -- the last run_helper call refused to plan: rc 1,
-# CANARY_STATUS=refused, no PROBE lines, no run dir left in the temp base.
+# assert_plan_refused <label> <reason-fragment> -- the last run_helper call
+# refused to plan: rc 1, CANARY_STATUS=refused, a "Guard canary refused:" line
+# carrying the expected reason (so a broken fixture cannot pass the case by
+# refusing for some other reason), no PROBE lines, no run dir left in the temp
+# base.
 assert_plan_refused() {
-    local label="$1"
+    local label="$1" reason="${2:-}"
+    if [[ -z "${reason}" ]]; then
+        fail "${label}: test bug: assert_plan_refused needs a reason fragment"
+    elif grep -F 'Guard canary refused:' "${OUT}" | grep -qF -- "${reason}"; then
+        pass
+    else
+        fail "${label}: the refusal must give the reason '${reason}' (stdout: $(head -c 400 "${OUT}"))"
+    fi
     if [[ "${R_RC}" -eq 1 ]]; then
         pass
     else
@@ -440,6 +450,11 @@ assert_plan_refused() {
     else
         fail "${label}: a refused plan must not leave its run dir behind"
     fi
+    if grep -q '^LEFTOVER' "${OUT}"; then
+        fail "${label}: a refused plan whose run dir was removed must not report a LEFTOVER"
+    else
+        pass
+    fi
 }
 
 # Two successful plans above left their run dirs (never checked) in TMP_BASE.
@@ -456,35 +471,35 @@ echo "case: an unknown guard in the manifest fails closed (P3)"
 write_manifest "${TEST_ROOT}/m-unknown-guard.json" "Bash" '"${PLUGIN_ROOT}/hooks/scripts/some-new-guard.sh"'
 H="$(make_plugin unknown-guard "" "${TEST_ROOT}/m-unknown-guard.json")" || { echo "FAIL: test setup: plugin copy" >&2; exit 1; }
 run_helper "${H}" "${REPO}" "${PATH}" "TMPDIR=${TMP_BASE}" -- plan
-assert_plan_refused "unknown guard"
+assert_plan_refused "unknown guard" "unrecognized guard command in the manifest"
 
 echo "case: an unknown matcher in the manifest fails closed (P3)"
 write_manifest "${TEST_ROOT}/m-unknown-matcher.json" "Read" "${SENS_CMD}"
 H="$(make_plugin unknown-matcher "" "${TEST_ROOT}/m-unknown-matcher.json")" || { echo "FAIL: test setup: plugin copy" >&2; exit 1; }
 run_helper "${H}" "${REPO}" "${PATH}" "TMPDIR=${TMP_BASE}" -- plan
-assert_plan_refused "unknown matcher"
+assert_plan_refused "unknown matcher" "unrecognized matcher 'Read'"
 
 echo "case: a guard command that is not the exact PLUGIN_ROOT-anchored script fails closed (P3)"
 write_manifest "${TEST_ROOT}/m-odd-command.json" "Bash" '"${PLUGIN_ROOT}/hooks/scripts/check-sensitive-files.sh" ; touch /x'
 H="$(make_plugin odd-command "" "${TEST_ROOT}/m-odd-command.json")" || { echo "FAIL: test setup: plugin copy" >&2; exit 1; }
 run_helper "${H}" "${REPO}" "${PATH}" "TMPDIR=${TMP_BASE}" -- plan
-assert_plan_refused "odd guard command"
+assert_plan_refused "odd guard command" "unrecognized guard command in the manifest"
 
 echo "case: a manifest with no PreToolUse guard fails closed (P3)"
 printf '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"x"}]}]}}\n' > "${TEST_ROOT}/m-no-pretool.json"
 H="$(make_plugin no-pretool "" "${TEST_ROOT}/m-no-pretool.json")" || { echo "FAIL: test setup: plugin copy" >&2; exit 1; }
 run_helper "${H}" "${REPO}" "${PATH}" "TMPDIR=${TMP_BASE}" -- plan
-assert_plan_refused "no PreToolUse guard"
+assert_plan_refused "no PreToolUse guard" "lists no PreToolUse guard"
 
 echo "case: an unreadable manifest fails closed (P3)"
 printf 'not json at all\n' > "${TEST_ROOT}/m-garbage.json"
 H="$(make_plugin garbage "" "${TEST_ROOT}/m-garbage.json")" || { echo "FAIL: test setup: plugin copy" >&2; exit 1; }
 run_helper "${H}" "${REPO}" "${PATH}" "TMPDIR=${TMP_BASE}" -- plan
-assert_plan_refused "garbage manifest"
+assert_plan_refused "garbage manifest" "unreadable or not the expected shape"
 H="$(make_plugin missing-manifest "")" || { echo "FAIL: test setup: plugin copy" >&2; exit 1; }
 rm -f "${H%/*}/hooks.json"
 run_helper "${H}" "${REPO}" "${PATH}" "TMPDIR=${TMP_BASE}" -- plan
-assert_plan_refused "missing manifest"
+assert_plan_refused "missing manifest" "is missing or unreadable"
 
 echo "case: a missing jq fails closed (P3)"
 FARM="${TEST_ROOT}/farm-no-jq"
@@ -497,7 +512,7 @@ if PATH="${FARM}" "${BASH_BIN}" -c 'command -v jq >/dev/null 2>&1'; then
     exit 1
 fi
 run_helper "${CANARY}" "${REPO}" "${FARM}" "TMPDIR=${TMP_BASE}" -- plan
-assert_plan_refused "missing jq"
+assert_plan_refused "missing jq" "jq is required"
 
 echo "case: a guard that does not deny its probe makes the self-check fail closed (P3)"
 H="$(make_plugin lax-guards "")" || { echo "FAIL: test setup: plugin copy" >&2; exit 1; }
@@ -509,7 +524,12 @@ for g in check-sensitive-files guard-main-worktree; do
     chmod +x "${LAX_ROOT}/hooks/scripts/${g}.sh"
 done
 run_helper "${H}" "${REPO}" "${PATH}" "TMPDIR=${TMP_BASE}" -- plan
-assert_plan_refused "guards that allow everything"
+assert_plan_refused "guards that allow everything" "the probe self-check failed against the real guard scripts"
+if grep -F 'Guard canary refused:' "${OUT}" | grep -qF 'should deny its own probe'; then
+    pass
+else
+    fail "guards that allow everything: the self-check reason must say the guard should deny its own probe (stdout: $(head -c 400 "${OUT}"))"
+fi
 H="$(make_plugin swapped-guards "")" || { echo "FAIL: test setup: plugin copy" >&2; exit 1; }
 SW_ROOT="${H%/codex/guard-canary.sh}"
 rm -f "${SW_ROOT}/hooks"
@@ -519,18 +539,72 @@ cp -R "${FLOW_DIR}/hooks/scripts/." "${SW_ROOT}/hooks/scripts/" || exit 1
 # the "exactly one guard" design.
 cp "${FLOW_DIR}/hooks/scripts/check-sensitive-files.sh" "${SW_ROOT}/hooks/scripts/guard-main-worktree.sh" || exit 1
 run_helper "${H}" "${REPO}" "${PATH}" "TMPDIR=${TMP_BASE}" -- plan
-assert_plan_refused "a probe denied by both guards"
+assert_plan_refused "a probe denied by both guards" "so the probe is not single-guard"
+
+echo "case: a refused plan whose run dir cannot be removed reports LEFTOVER: <run dir> (P3)"
+# The run dir is swapped for a symlink by a fake check-sensitive-files guard that
+# runs during the self-check (a stand-in for a tamper or race between mkdir and
+# cleanup). remove_run_dir refuses to delete a symlink, so the removal cannot
+# happen; no permission lever is involved, so this holds for root too.
+H="$(make_plugin leftover-plan "")" || { echo "FAIL: test setup: plugin copy" >&2; exit 1; }
+LO_ROOT="${H%/codex/guard-canary.sh}"
+rm -f "${LO_ROOT}/hooks"
+mkdir_checked "${LO_ROOT}/hooks/scripts"
+cp -R "${FLOW_DIR}/hooks/scripts/." "${LO_ROOT}/hooks/scripts/" || exit 1
+cat > "${LO_ROOT}/hooks/scripts/check-sensitive-files.sh" <<'SWAP_GUARD'
+#!/bin/sh
+t=$(cat | jq -r '.tool_input.command' | sed -n 's|^\*\*\* Add File: ||p' | sed -n 1p)
+p=$(dirname "$t")
+case "${p##*/}" in
+    cenci-guard-canary-????????????????) ;;
+    *) exit 0 ;;
+esac
+[ -d "$p" ] && [ ! -L "$p" ] || exit 0
+mv "$p" "$p.real" && ln -s "$p.real" "$p"
+exit 0
+SWAP_GUARD
+chmod +x "${LO_ROOT}/hooks/scripts/check-sensitive-files.sh" || exit 1
+TMP_BASE_CANON="$(cd "${TMP_BASE}" && pwd -P)" || { echo "FAIL: test setup: canonical TMP_BASE" >&2; exit 1; }
+run_helper "${H}" "${REPO}" "${PATH}" "TMPDIR=${TMP_BASE}" -- plan
+LO_LINK=""
+for e in "${TMP_BASE_CANON}"/cenci-guard-canary-*; do
+    [[ -L "${e}" ]] && LO_LINK="${e}"
+done
+if [[ -n "${LO_LINK}" ]]; then
+    pass
+else
+    fail "leftover plan non-vacuity: the fake guard must have swapped the run dir for a symlink in ${TMP_BASE_CANON} (stdout: $(head -c 300 "${OUT}"))"
+fi
+if [[ "${R_RC}" -eq 1 ]] && grep -qxF 'CANARY_STATUS=refused' "${OUT}" && [[ "$(probe_count "${OUT}")" -eq 0 ]]; then
+    pass
+else
+    fail "a plan refused after the run dir was swapped must still refuse with no PROBE line (rc=${R_RC}): $(head -c 400 "${OUT}")"
+fi
+if [[ -n "${LO_LINK}" ]] && grep -qxF "LEFTOVER: ${LO_LINK}" "${OUT}"; then
+    pass
+else
+    fail "a refused plan that cannot remove its run dir must print 'LEFTOVER: <run dir>' with the exact path ${LO_LINK:-<none found>} (stdout: $(head -c 500 "${OUT}"))"
+fi
+if [[ -n "${LO_LINK}" ]]; then
+    rm -rf "${LO_LINK}.real"
+    rm -f "${LO_LINK}"
+fi
+if [[ "$(count_run_dirs_in "${TMP_BASE}")" -eq "${BASELINE_RUN_DIRS}" ]]; then
+    pass
+else
+    fail "leftover plan: test cleanup left entries in ${TMP_BASE}"
+fi
 
 echo "case: an unconfigured repo (guards are a no-op there) refuses to plan (P3)"
 UNCONF="${TEST_ROOT}/unconfigured"
 mkdir_checked "${UNCONF}"
 git -C "${UNCONF}" init -q || exit 1
 run_helper "${CANARY}" "${UNCONF}" "${PATH}" "TMPDIR=${TMP_BASE}" -- plan
-assert_plan_refused "unconfigured repo"
+assert_plan_refused "unconfigured repo" "the probe self-check failed against the real guard scripts"
 
 echo "case: outside any git repository refuses to plan (P3)"
 run_helper "${CANARY}" "${TEST_ROOT}" "${PATH}" "TMPDIR=${TMP_BASE}" -- plan
-assert_plan_refused "no git repository"
+assert_plan_refused "no git repository" "not inside a git repository"
 
 # ── P4: TMPDIR inside the main worktree ─────────────────────────────────
 echo "case: a TMPDIR inside the main worktree is never used for the run dir (P4)"
@@ -538,15 +612,18 @@ mkdir_checked "${REPO}/inside-tmp"
 plan_in "${REPO}" "TMPDIR=${REPO}/inside-tmp"
 INSIDE="${OUT}"
 RUN_DIR_IN="$(kv "${INSIDE}" CANARY_RUN_DIR)"
-if [[ "${R_RC}" -eq 1 ]] && grep -qxF 'CANARY_STATUS=refused' "${INSIDE}"; then
+SYS_TMP="$(cd /tmp && pwd -P)" || { echo "FAIL: test setup: cannot resolve /tmp" >&2; exit 1; }
+# /tmp is available and outside the main worktree here, so the helper must fall
+# back to it and say so; the run dir may land nowhere else.
+if [[ "${R_RC}" -eq 0 && -n "${RUN_DIR_IN}" && "${RUN_DIR_IN%/*}" == "${SYS_TMP}" ]]; then
     pass
-elif [[ "${R_RC}" -eq 0 && -n "${RUN_DIR_IN}" ]]; then
-    case "${RUN_DIR_IN}" in
-        "${REPO}" | "${REPO}"/*) fail "a TMPDIR inside the repo produced a run dir inside the repo: ${RUN_DIR_IN}" ;;
-        *) pass ;;
-    esac
 else
-    fail "a TMPDIR inside the repo must be rejected or fall back (rc=${R_RC}): $(head -c 300 "${INSIDE}")"
+    fail "a TMPDIR inside the repo must fall back to ${SYS_TMP} (rc=${R_RC}, run dir '${RUN_DIR_IN}'): $(head -c 300 "${INSIDE}")"
+fi
+if grep -qxF "NOTE: TMPDIR (${REPO}/inside-tmp) is unusable for the run dir (relative, missing, or inside the main worktree); using ${SYS_TMP}." "${INSIDE}"; then
+    pass
+else
+    fail "the fallback must be announced with the NOTE line naming the skipped TMPDIR and ${SYS_TMP}: $(head -c 400 "${INSIDE}")"
 fi
 if [[ "$(count_run_dirs_in "${REPO}/inside-tmp")" -eq 0 && "$(count_run_dirs_in "${REPO}")" -eq 0 ]]; then
     pass
@@ -728,6 +805,269 @@ else
     fail "a canary-named directory inside the main worktree must be refused (rc=${R_RC})"
 fi
 rm -rf "${REPO}/cenci-guard-canary-0123456789abcdef" "${REPO}/not-a-run-dir"
+
+# ── C1: early refusals (untrusted record) ───────────────────────────────
+# `check` refuses BEFORE its cleanup loop when the run dir argument or the probe
+# record cannot be trusted. Nothing is removed on that path (the record is
+# untrusted, so it must never steer a delete), which means canary files may
+# still sit in the main worktree: the refusal has to say how to remove them by
+# hand.
+
+# rewrite_probe_target <run-dir> <n> <new-target> -- tamper with the record.
+rewrite_probe_target() {
+    awk -F'\t' -v OFS='\t' -v n="$2" -v t="$3" '$1 == "PROBE" && $2 == n { $6 = t } { print }' "$1/probes.tsv" > "$1/probes.new" \
+        && mv "$1/probes.new" "$1/probes.tsv" \
+        || { echo "FAIL: test setup: cannot rewrite the probe record in $1" >&2; exit 1; }
+}
+
+# assert_hint_glob <label> <hex> -- the refusal names the exact glob to delete by
+# hand and says the .env probe lives in the run dir, and does not claim the
+# canary cleaned up.
+assert_hint_glob() {
+    local label="$1" hex="$2"
+    if grep -qF -- "${REPO}/cenci-guard-canary-${hex}-*.txt" "${OUT}"; then
+        pass
+    else
+        fail "${label}: the refusal must name '${REPO}/cenci-guard-canary-${hex}-*.txt' for manual removal (stdout: $(head -c 500 "${OUT}"))"
+    fi
+    if grep -F '.env' "${OUT}" | grep -qF 'run dir'; then
+        pass
+    else
+        fail "${label}: the refusal must say the .env probe lives in the run dir (stdout: $(head -c 500 "${OUT}"))"
+    fi
+    if grep -qxF 'CANARY_STATUS=refused' "${OUT}" && ! grep -qxF 'CANARY_STATUS=active' "${OUT}" && [[ "${R_RC}" -eq 1 ]]; then
+        pass
+    else
+        fail "${label}: an early refusal must exit 1 with CANARY_STATUS=refused (rc=${R_RC})"
+    fi
+}
+
+# assert_hint_generic <label> -- hex or main root undeterminable: look for
+# cenci-guard-canary-* files in the main worktree, no invented glob.
+assert_hint_generic() {
+    local label="$1"
+    if grep -qF 'cenci-guard-canary-*' "${OUT}" && grep -qiF 'main worktree' "${OUT}"; then
+        pass
+    else
+        fail "${label}: the refusal must say to look for cenci-guard-canary-* files in the main worktree (stdout: $(head -c 500 "${OUT}"))"
+    fi
+    if grep -qF -- '-*.txt' "${OUT}"; then
+        fail "${label}: with the hex id or main root undetermined the refusal must not invent a specific glob (stdout: $(head -c 500 "${OUT}"))"
+    else
+        pass
+    fi
+    if grep -qxF 'CANARY_STATUS=refused' "${OUT}" && ! grep -qxF 'CANARY_STATUS=active' "${OUT}" && [[ "${R_RC}" -eq 1 ]]; then
+        pass
+    else
+        fail "${label}: an early refusal must exit 1 with CANARY_STATUS=refused (rc=${R_RC})"
+    fi
+}
+
+VICTIM_BODY="victim-must-survive"
+
+# tamper_case <label> <probe n> <victim-path> -- a record whose probe <n> target
+# is <victim-path> (@RUN@ = the run dir, @HEX@ = its hex id). The victim must
+# survive, so must an honest written probe (nothing is removed on this path),
+# and the status is never active.
+tamper_case() {
+    local label="$1" n="$2" victim="$3" hex bystander
+    fresh_plan
+    hex="${CUR_DIR##*cenci-guard-canary-}"
+    victim="${victim//@RUN@/${CUR_DIR}}"
+    victim="${victim//@HEX@/${hex}}"
+    bystander="$(probe_field "${CUR_PLAN}" 4 6)"
+    mkdir_checked "${victim%/*}"
+    printf '%s\n' "${VICTIM_BODY}" > "${victim}" || exit 1
+    printf 'x\n' > "${bystander}" || exit 1
+    rewrite_probe_target "${CUR_DIR}" "${n}" "${victim}"
+    check_run "${CUR_DIR}" "${ALL_DENIED[@]}"
+    if [[ "$(< "${victim}")" == "${VICTIM_BODY}" ]]; then
+        pass
+    else
+        fail "${label}: the victim file ${victim} must survive a tampered record"
+    fi
+    if [[ -f "${bystander}" ]]; then
+        pass
+    else
+        fail "${label}: an early refusal must remove nothing, but the written probe ${bystander} is gone"
+    fi
+    if grep -qxF 'CANARY_STATUS=active' "${OUT}"; then
+        fail "${label}: a tampered record must never produce an active canary"
+    else
+        pass
+    fi
+    if grep -F 'Guard canary refused:' "${OUT}" | grep -qF "probe ${n} has an unexpected target path"; then
+        pass
+    else
+        fail "${label}: the refusal must say probe ${n} has an unexpected target path (stdout: $(head -c 400 "${OUT}"))"
+    fi
+    assert_hint_glob "${label}" "${hex}"
+    rm -rf "${CUR_DIR}"
+    rm -f "${victim}" "${bystander}"
+}
+
+echo "case: a tampered probes.tsv whose target is a victim outside the allowed shapes deletes nothing (C1)"
+tamper_case "main-worktree probe -> unrelated file in the main worktree" 2 "${REPO}/victim-main.txt"
+tamper_case "main-worktree probe -> right shape, wrong hex" 2 "${REPO}/cenci-guard-canary-ffffffffffffffff-2.txt"
+tamper_case "main-worktree probe -> right hex, wrong probe number" 2 "${REPO}/cenci-guard-canary-@HEX@-3.txt"
+tamper_case "main-worktree probe -> file outside the repo" 2 "${TEST_ROOT}/victim-outside.txt"
+tamper_case "sensitive probe -> .env outside the run dir" 1 "${TEST_ROOT}/victim-outside.env"
+tamper_case "sensitive probe -> .env in a subdirectory of the run dir" 1 "@RUN@/nested/victim.env"
+tamper_case "sensitive probe -> .env reached through .." 1 "@RUN@/../victim-dotdot.env"
+tamper_case "sensitive probe -> non-.env file in the run dir" 1 "@RUN@/victim.txt"
+
+echo "case: a probe record that belongs to a different run refuses and deletes nothing (C1)"
+fresh_plan
+HEX_A="${CUR_DIR##*cenci-guard-canary-}"
+BYSTANDER="$(probe_field "${CUR_PLAN}" 4 6)"
+printf 'x\n' > "${BYSTANDER}" || exit 1
+sed "s/^HEX${TAB}${HEX_A}\$/HEX${TAB}ffffffffffffffff/" "${CUR_DIR}/probes.tsv" > "${CUR_DIR}/probes.new" \
+    && mv "${CUR_DIR}/probes.new" "${CUR_DIR}/probes.tsv" || exit 1
+if grep -qxF "HEX${TAB}ffffffffffffffff" "${CUR_DIR}/probes.tsv"; then
+    pass
+else
+    fail "hex mismatch non-vacuity: the record's HEX line must have been replaced"
+fi
+check_run "${CUR_DIR}" "${ALL_DENIED[@]}"
+if grep -F 'Guard canary refused:' "${OUT}" | grep -qF 'belongs to a different run' && ! grep -qxF 'CANARY_STATUS=active' "${OUT}"; then
+    pass
+else
+    fail "a record whose hex differs from the run dir name must refuse as 'a different run' (rc=${R_RC}): $(head -c 400 "${OUT}")"
+fi
+if [[ -f "${BYSTANDER}" ]]; then
+    pass
+else
+    fail "a record from a different run must not trigger any removal (${BYSTANDER} is gone)"
+fi
+assert_hint_glob "different-run record" "${HEX_A}"
+rm -rf "${CUR_DIR}"
+rm -f "${BYSTANDER}"
+
+echo "case: a corrupt probe record, a non-canonical path and a trailing slash all name the manual cleanup glob and delete nothing (C1)"
+fresh_plan
+HEX_A="${CUR_DIR##*cenci-guard-canary-}"
+BYSTANDER="$(probe_field "${CUR_PLAN}" 4 6)"
+printf 'x\n' > "${BYSTANDER}" || exit 1
+printf 'garbage\n' > "${CUR_DIR}/probes.tsv" || exit 1
+check_run "${CUR_DIR}" "${ALL_DENIED[@]}"
+if grep -F 'Guard canary refused:' "${OUT}" | grep -qF 'probe record'; then
+    pass
+else
+    fail "a corrupt record must refuse naming the probe record: $(head -c 400 "${OUT}")"
+fi
+assert_hint_glob "corrupt record" "${HEX_A}"
+rm -rf "${CUR_DIR}"
+rm -f "${BYSTANDER}"
+fresh_plan
+HEX_A="${CUR_DIR##*cenci-guard-canary-}"
+BYSTANDER="$(probe_field "${CUR_PLAN}" 4 6)"
+printf 'x\n' > "${BYSTANDER}" || exit 1
+check_run "${TMP_BASE}/../tmp/${CUR_DIR##*/}" "${ALL_DENIED[@]}"
+if grep -F 'Guard canary refused:' "${OUT}" | grep -qF 'not in canonical form'; then
+    pass
+else
+    fail "a non-canonical run dir must refuse as 'not in canonical form': $(head -c 400 "${OUT}")"
+fi
+assert_hint_glob "non-canonical path" "${HEX_A}"
+check_run "${CUR_DIR}/" "${ALL_DENIED[@]}"
+assert_hint_glob "trailing slash" "${HEX_A}"
+if [[ -f "${BYSTANDER}" && -d "${CUR_DIR}" ]]; then
+    pass
+else
+    fail "early refusals must remove neither the probe ${BYSTANDER} nor the run dir ${CUR_DIR}"
+fi
+check_run "${TMP_BASE}/cenci-guard-canary-0123456789abcdef" "${ALL_DENIED[@]}"
+assert_hint_glob "typo'd run dir that does not exist" "0123456789abcdef"
+rm -rf "${CUR_DIR}"
+rm -f "${BYSTANDER}"
+
+echo "case: when the hex id or the main root cannot be determined the refusal says to look for cenci-guard-canary-* in the main worktree (C1)"
+mkdir_checked "${REPO}/not-a-run-dir"
+check_run "${REPO}/not-a-run-dir" "${ALL_DENIED[@]}"
+assert_hint_generic "run dir without a hex id"
+rm -rf "${REPO}/not-a-run-dir"
+check_run "relative-run-dir" "${ALL_DENIED[@]}"
+assert_hint_generic "relative run dir"
+# A valid-looking name, but the session is not in a git repository, so the main
+# root cannot be determined (the record is untrusted, so it is never asked).
+run_helper "${CANARY}" "${TEST_ROOT}" "${PATH}" "TMPDIR=${TMP_BASE}" -- check "${TMP_BASE}/cenci-guard-canary-0123456789abcdef" "${ALL_DENIED[@]}"
+assert_hint_generic "main root undeterminable"
+
+echo "case: a repeated probe number and an unknown probe number refuse, but the cleanup still runs (C1)"
+fresh_plan
+T2="$(probe_field "${CUR_PLAN}" 2 6)"
+printf 'x\n' > "${T2}" || exit 1
+check_run "${CUR_DIR}" 1=denied 1=denied 2=denied 3=denied 4=denied
+if [[ "${R_RC}" -eq 1 ]] && ! grep -qxF 'CANARY_STATUS=active' "${OUT}" && grep -qF 'BAD_RESULT: unrecognized result token 1=denied (repeated probe number)' "${OUT}"; then
+    pass
+else
+    fail "a repeated probe number must refuse and be reported as BAD_RESULT (rc=${R_RC}): $(head -c 500 "${OUT}")"
+fi
+if [[ ! -e "${T2}" ]] && grep -qxF "REMOVED: ${T2}" "${OUT}"; then
+    pass
+else
+    fail "the cleanup must still remove the written probe on a repeated-token refusal"
+fi
+fresh_plan
+T2="$(probe_field "${CUR_PLAN}" 2 6)"
+printf 'x\n' > "${T2}" || exit 1
+check_run "${CUR_DIR}" 1=denied 2=denied 3=denied 4=denied 5=denied
+if [[ "${R_RC}" -eq 1 ]] && ! grep -qxF 'CANARY_STATUS=active' "${OUT}" && grep -qF 'BAD_RESULT: unrecognized result token 5 (no such probe)' "${OUT}"; then
+    pass
+else
+    fail "an unknown probe number must refuse and be reported as BAD_RESULT (rc=${R_RC}): $(head -c 500 "${OUT}")"
+fi
+if [[ ! -e "${T2}" ]] && grep -qxF "REMOVED: ${T2}" "${OUT}"; then
+    pass
+else
+    fail "the cleanup must still remove the written probe on an unknown-token refusal"
+fi
+# The first verdict for a probe number wins: a later denied cannot overwrite it.
+fresh_plan
+check_run "${CUR_DIR}" 1=not-denied 1=denied 2=denied 3=denied 4=denied
+if [[ "${R_RC}" -eq 1 ]] && grep -qxF 'CANARY_STATUS=refused' "${OUT}"; then
+    pass
+else
+    fail "a repeated number must refuse (rc=${R_RC}): $(head -c 400 "${OUT}")"
+fi
+rm -rf "${CUR_DIR}"
+
+echo "case: a symlink at a probe target is removed as a symlink and never followed (C1)"
+fresh_plan
+T2="$(probe_field "${CUR_PLAN}" 2 6)"
+DANGLING_DEST="${TEST_ROOT}/dangling-dest.txt"
+rm -f "${DANGLING_DEST}"
+ln -s "${DANGLING_DEST}" "${T2}" || exit 1
+check_run "${CUR_DIR}" "${ALL_DENIED[@]}"
+if [[ "${R_RC}" -eq 1 ]] && grep -qxF 'CANARY_STATUS=refused' "${OUT}" && grep -qxF "REMOVED: ${T2}" "${OUT}" && [[ ! -L "${T2}" ]]; then
+    pass
+else
+    fail "a dangling symlink at a probe target counts as written, is removed and refuses (rc=${R_RC}): $(head -c 500 "${OUT}")"
+fi
+if [[ ! -e "${DANGLING_DEST}" && ! -L "${DANGLING_DEST}" ]]; then
+    pass
+else
+    fail "check must not create or touch what a dangling symlink points at"
+fi
+if grep -qE 'WRITTEN' "${OUT}" && ! grep -q '^LEFTOVER' "${OUT}"; then
+    pass
+else
+    fail "a removable symlink is reported WRITTEN, not as a leftover: $(head -c 500 "${OUT}")"
+fi
+rm -rf "${CUR_DIR}"
+fresh_plan
+T2="$(probe_field "${CUR_PLAN}" 2 6)"
+LINK_VICTIM="${TEST_ROOT}/link-victim.txt"
+printf '%s\n' "${VICTIM_BODY}" > "${LINK_VICTIM}" || exit 1
+ln -s "${LINK_VICTIM}" "${T2}" || exit 1
+check_run "${CUR_DIR}" "${ALL_DENIED[@]}"
+if [[ ! -L "${T2}" && "$(< "${LINK_VICTIM}")" == "${VICTIM_BODY}" ]]; then
+    pass
+else
+    fail "a symlink at a probe target must be removed without touching its destination (${LINK_VICTIM})"
+fi
+rm -rf "${CUR_DIR}"
+rm -f "${LINK_VICTIM}"
 
 # ── C2: refusal text ────────────────────────────────────────────────────
 echo "case: the refusal names pending/untrusted hooks and points to /hooks (C2)"

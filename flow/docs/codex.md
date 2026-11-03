@@ -14,8 +14,9 @@ codex plugin add cenci@cenci
 
 Codex skips plugin hooks that are pending or not yet trusted, so a freshly installed or
 updated plugin gives no hook protection until you review its hooks with `/hooks`. Pending
-hooks are inactive protection: the mutating Codex workflows detect that with a
-[guard canary](#guard-canary-preflight) and refuse to start. cenci never changes hook trust
+hooks are inactive protection: `implement`, `address-review`, `refactor` and `babysit`'s arm
+step detect that with a [guard canary](#guard-canary-preflight) and refuse to start (other
+mutating Codex workflows are not yet covered). cenci never changes hook trust
 automatically, and `cenci doctor` does not verify hook protection.
 
 ## Native workflow foundation
@@ -356,13 +357,17 @@ against these hooks. Its sanitized results are recorded in
 
 Codex does not expose hook trust state non-interactively, and it skips pending hooks, so an
 installed flow plugin is not proof that `check-sensitive-files.sh` and
-`guard-main-worktree.sh` are watching a session. The mutating Codex workflows therefore run
-`bash "${PLUGIN_ROOT}/codex/guard-canary.sh"` first: the `persist` turn (it writes the plan
+`guard-main-worktree.sh` are watching a session. The covered mutating Codex workflows therefore
+run `bash "${PLUGIN_ROOT}/codex/guard-canary.sh"` first: the `persist` turn (it writes the plan
 artifact and the checkpoint) and the normal-mode `apply` of `implement`, `address-review` and
-`refactor` (other workflows' persist turns run none), and `babysit`'s Codex step. `/plan` stays mutation-free and does not run it, and the
+`refactor` (other workflows' persist turns run none), and `babysit`'s Codex arm step. `/plan` stays mutation-free and does not run it, and the
 check is unconditional, so it runs in every session, sandbox included, and again in each turn.
 `skills/codex-runtime/SKILL.md` owns the procedure; Claude Code sessions are excluded because
 Claude Code has no pending-trust state for plugin hooks.
+
+Not every mutating Codex workflow is covered yet. The babysit check runs once, when arming; it
+does not carry over to the `ci-repair` and `babysit-attention` sessions the supervisor starts
+later, and those sessions are not yet covered (a tracked Followup).
 
 - **Probes.** `plan` reads `codex/hooks.json` and gives every (matcher group, guard) pair its
   own probe (four with today's manifest: `Write|Edit` and `Bash`, each with both guards). Each
@@ -376,11 +381,20 @@ Claude Code has no pending-trust state for plugin hooks.
   message appeared in the result, and runs `check`. `CANARY_STATUS=active` needs every probe
   denied by its own guard and nothing written. A written file always means inactive protection,
   whatever the session reported.
+- **What `active` proves.** `CANARY_STATUS=active` rests on the session's own report of each
+  probe plus the filesystem check. A probe blocked by Codex's own sandbox or approval policy, or
+  a call never made, reads as not-denied only if the session reports it honestly.
+  This is a readiness check, not proof; the opt-in native run is the real evidence.
 - **Refusal.** Any not-denied or inconclusive probe refuses before any mutation. The refusal
   names pending or untrusted hooks as the likely cause and points to `/hooks`; rerun the
   workflow after reviewing them.
 - **Cleanup.** Whatever got written is removed. A removal that fails is reported as
   `LEFTOVER: <exact path>` for you to delete by hand, and the workflow still refuses.
+- **Interrupted runs.** If a session dies between `plan` and `check` while hooks were inactive,
+  `<main-root>/cenci-guard-canary-<hex>-<n>.txt` files can stay in the main worktree, and a
+  `.env` probe stays in the run directory under the temp area. A later run uses a new id and
+  does not sweep them; delete them by hand (`cenci-guard-canary-*` in the main worktree, and the
+  stale run directory).
 - **Sandbox label.** In a `cn xt` session the launcher passes the trust-bypass flag, and the
   output says "hook trust bypassed by launcher (explicit flag)", never "trusted". cenci reports
   trust state and never changes it.

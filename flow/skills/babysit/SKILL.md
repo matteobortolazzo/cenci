@@ -50,7 +50,9 @@ list, judge each from its own tool result (denied only when the guard's message 
 Arm only on `CANARY_STATUS=active`. On `CANARY_STATUS=refused` (or when `plan` cannot run), do not arm:
 report the helper's text, which names pending or untrusted hooks as the likely cause and points to
 `/hooks`, plus any `LEFTOVER:` path to remove by hand. In a sandbox session the output labels trust
-"hook trust bypassed by launcher (explicit flag)"; cenci never changes hook trust.
+"hook trust bypassed by launcher (explicit flag)"; cenci never changes hook trust. This check covers
+only the session that arms; it does not carry over to the `ci-repair` and `babysit-attention` sessions
+the supervisor starts later, which are not yet covered.
 
 Detect the current client and run exactly one of the three (dropping `--interval <interval>`
 when the interval was neither passed as an argument nor resolved from config):

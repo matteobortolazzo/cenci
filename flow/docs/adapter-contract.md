@@ -91,10 +91,13 @@ pair, by the pairwise offset assertion described here.
 `worktree-isolation`, `planning-immutability` and `sensitive-file-refusal` are enforced by hooks,
 and Codex skips plugin hooks that are pending or untrusted. Wiring a guard into `codex/hooks.json`
 therefore does not prove it is watching a Codex session. On Codex those properties hold only once
-the guard canary preflight (`codex/guard-canary.sh`, run by the mutating Codex surfaces: implement
-`apply`, address-review, refactor and babysit's Codex step) has shown every (matcher group, guard)
+the guard canary preflight (`codex/guard-canary.sh`, run by `implement`, `address-review` and
+`refactor` in both their `persist` and `apply` turns (other workflows' persist turns run none), and
+by babysit's arm step) has shown every (matcher group, guard)
 pair denying its own probe; otherwise the workflow refuses before any mutation and reports pending
-or untrusted hooks as the likely cause, pointing to `/hooks`. The canary is deterministic-tested by
+or untrusted hooks as the likely cause, pointing to `/hooks`. Coverage is not complete: babysit's
+check runs once, when arming, and the `ci-repair` and `babysit-attention` sessions the supervisor
+starts later are not yet covered (a tracked Followup). The canary is deterministic-tested by
 `codex/guard-canary.test.sh` and the contract placement is asserted by `codex/workflows.test.sh`
 (`MUTATING_CODEX`); what a native Codex does with it is awaiting the maintainer's native runs
 and is recorded in [`codex-native-evidence.md`](codex-native-evidence.md) once they exist.

@@ -13,7 +13,9 @@ actionability against `pr-comment-filter`'s Include/Exclude lists — in scope: 
 and resolved threads with new activity since resolution; excluded: bot comments, cenci's own
 review replies (banner-prefix match), and resolved threads with no new activity — then
 propose the fixes. Obtain approval in Plan mode, which writes no checkpoint; the persist step records
-the approved fixes in the artifact and the checkpoint. In `apply`, after `verify`, first run the
+the approved fixes in the artifact and the checkpoint.
+The persist turn runs the same guard canary before it writes either (only the `implement`, `address-review` and `refactor` persist turns do; other workflows' persist turns run none).
+In `apply`, after `verify`, first run the
 guard canary preflight, `bash "${PLUGIN_ROOT}/codex/guard-canary.sh" plan`, as `codex-runtime`
 describes, and on any refusal stop with nothing changed, reporting the helper's text and any
 `LEFTOVER:` path. Only after `CANARY_STATUS=active`,

@@ -869,7 +869,7 @@ canary_variant() {
     local label="$1" trust="$2" expected="$3"
     local plan_out plan_rc run_dir kind pn ptool pguard pgroup ptarget needle tool_name
     local attempted landed blocked seen verdict check_out check_rc got status detail
-    local likely n_removed n_left first_line line probes=""
+    local likely n_removed n_left first_line line probes="" incomplete="" n_probes=0 n_attempted=0
     local -a saved_mode=("${CODEX_MODE_ARGS[@]}") results=()
     CANARY_RESULT="inconclusive"
 
@@ -891,6 +891,7 @@ canary_variant() {
     if [[ "${plan_rc}" -eq 0 && -n "${run_dir}" ]]; then
         while IFS=$'\t' read -r kind pn ptool pguard pgroup ptarget; do
             [[ "${kind}" == PROBE ]] || continue
+            n_probes=$((n_probes + 1))
             needle="${ptarget##*/}"
             if [[ "${ptool}" == shell ]]; then
                 tool_name="Bash"
@@ -906,6 +907,7 @@ canary_variant() {
                 continue
             }
             attempted="$(attempted_yes_no "${needle}" "${tool_name}")"
+            if [[ "${attempted}" == yes ]]; then n_attempted=$((n_attempted + 1)); fi
             landed="$(effect_landed file "${ptarget}")"
             blocked="$(blocked_yes_no "${needle}")"
             seen="$(message_seen_yes_no "${needle}" "$(canary_guard_message "${pguard}")")"
@@ -942,17 +944,40 @@ canary_variant() {
 
     status="inconclusive"
     case "${expected}:${got}" in
-        active:active | refused:refused | refused-soft:refused) status="ok" ;;
+        active:active) status="ok" ;;
+        refused:refused | refused-soft:refused)
+            # A refusal only shows the hooks are inactive when the plan was made
+            # and every probe really ran: a plan the helper refused for its own
+            # reasons, a codex exec that died at start, or a model that skipped a
+            # call all refuse too, and prove nothing about trust.
+            if [[ "${plan_rc}" -ne 0 ]]; then
+                incomplete="the plan was refused, so no probe ran and the refusal says nothing about hook trust"
+            elif [[ "${n_probes}" -eq 0 || "${n_attempted}" -ne "${n_probes}" ]]; then
+                incomplete="only ${n_attempted} of ${n_probes} probes were attempted, so the refusal says nothing about hook trust"
+            else
+                status="ok"
+            fi
+            ;;
         active:refused | refused:active) status="FAIL" ;;
     esac
+    # A canary that could not be cleaned up is a failure in every variant.
+    if [[ "${n_left}" -gt 0 ]]; then status="FAIL"; fi
     detail="CANARY_STATUS=${got} (helper rc ${check_rc}, expected ${expected}); probes: ${probes}; cleanup: removed ${n_removed} written target(s), ${n_left} leftover(s)"
     if [[ -n "${first_line}" ]]; then detail="${detail}; ${first_line}"; fi
     if [[ -n "${likely}" ]]; then detail="${detail}; ${likely}"; fi
     if [[ "${RUN_MODE}" == sandbox ]]; then detail="${detail}; hook trust bypassed by launcher (explicit flag)"; fi
     case "${status}" in
-        FAIL) detail="the result contradicts the trust state the deny-matrix canary established (${detail})" ;;
+        FAIL)
+            if [[ "${n_left}" -gt 0 ]]; then
+                detail="${n_left} canary path(s) could not be removed -- remove each LEFTOVER path in the helper output by hand (${detail})"
+            else
+                detail="the result contradicts the trust state the deny-matrix canary established (${detail})"
+            fi
+            ;;
         inconclusive)
-            if [[ "${expected}" == refused-soft ]]; then
+            if [[ -n "${incomplete}" ]]; then
+                detail="${incomplete} (${detail})"
+            elif [[ "${expected}" == refused-soft ]]; then
                 detail="the hooks were active even with the trust flag left out (trust is already persisted in this container), so the refusal path was not exercised (${detail})"
             else
                 detail="no comparison is possible against trust state ${CANARY_STATE} (${detail})"
