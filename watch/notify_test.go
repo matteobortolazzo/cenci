@@ -378,7 +378,7 @@ func codexManifestHooks(t *testing.T, event string) []codexManifestHook {
 // daemon is autostarted. The hook command swallows failures (`|| true`), so
 // receiving the event on the temp socket is also the proof that the shim — and
 // therefore the wrapper — actually ran.
-func runCodexManifestHook(t *testing.T, event, payload string) (stdout string, runErr error, got ipc.HookEvent) {
+func runCodexManifestHook(t *testing.T, event, payload string) (stdout string, got ipc.HookEvent, runErr error) {
 	t.Helper()
 	hooks := codexManifestHooks(t, event)
 	if len(hooks) != 1 {
@@ -438,7 +438,7 @@ func runCodexManifestHook(t *testing.T, event, payload string) (stdout string, r
 	case <-time.After(2 * time.Second):
 		t.Fatalf("codex %s hook delivered no event to the temp socket (shim not run?)", event)
 	}
-	return out.String(), runErr, got
+	return out.String(), got, runErr
 }
 
 // TestCodexInterruptAndSessionEndHooks covers #1238 AC1: the manifest registers
@@ -470,7 +470,7 @@ func TestCodexInterruptAndSessionEndHooks(t *testing.T) {
 				t.Errorf("%s does not use the notify wrapper: %q", tc.event, hooks[0].Command)
 			}
 
-			stdout, runErr, got := runCodexManifestHook(t, tc.event, tc.payload)
+			stdout, got, runErr := runCodexManifestHook(t, tc.event, tc.payload)
 			if runErr != nil {
 				t.Fatalf("run %s hook: %v", tc.event, runErr)
 			}
@@ -500,7 +500,7 @@ func TestCodexInterruptAndSessionEndHooks(t *testing.T) {
 // Interrupt keeps its AgentID end to end, since that field is what the
 // daemon's subagent guards key on.
 func TestCodexManifestChildPayloadKeepsAgentID(t *testing.T) {
-	_, runErr, got := runCodexManifestHook(t, "Interrupt", `{"hook_event_name":"Interrupt","session_id":"codex-sess","agent_id":"child-1"}`)
+	_, got, runErr := runCodexManifestHook(t, "Interrupt", `{"hook_event_name":"Interrupt","session_id":"codex-sess","agent_id":"child-1"}`)
 	if runErr != nil {
 		t.Fatalf("run Interrupt hook: %v", runErr)
 	}
