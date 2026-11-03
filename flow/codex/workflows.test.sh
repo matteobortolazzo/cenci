@@ -897,9 +897,12 @@ impl="${ROOT}/skills/implement/codex.md"
 assert_before "$impl" "implement canary after blocked-dependency re-check" '`apply` runs the identical check again' "$CANARY_REF"
 assert_before "$impl" "implement canary after apply-time plan-check read" 'never make a second `plan-check` call' "$CANARY_REF"
 assert_before "$impl" "implement canary before new-plan reset/prepare" "$CANARY_REF" 'A new-plan apply (decision `none` or `replan`)'
-assert_before "$impl" "implement canary before plan persist" "$CANARY_REF" 'In normal apply mode persist'
 assert_before "$impl" "implement canary before the pipeline lifecycle" "$CANARY_REF" '**Pipeline lifecycle (ticket mode).**'
-assert_before "$impl" "implement canary before checkpoint init" "$CANARY_REF" 'checkpoint.mjs init'
+assert_before "$impl" "implement canary before checkpoint advance" "$CANARY_REF" 'Then advance the checkpoint before any worktree call'
+# Persist is its own normal-mode turn that writes the plan artifact and the checkpoint, so
+# codex-runtime's Persist step runs the canary after require-runtime.sh and before its first write.
+grep -qF -- 'require-runtime.sh"`, then run the Guard canary preflight before the first write' "$runtime" || fail "persist must run require-runtime.sh, then the guard canary, before its first write"
+assert_before "$runtime" "persist canary before the artifact write" 'run the Guard canary preflight before the first write' '2. Run the workflow-specific artifact check before the artifact write'
 grep -q 'refus' <(sed -n "$(line_of "$impl" "$CANARY_REF")p" "$impl") || fail "implement canary step must state the refusal outcome"
 
 # address-review: first thing in the second (normal-mode) invocation.

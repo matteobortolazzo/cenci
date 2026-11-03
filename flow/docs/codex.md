@@ -357,9 +357,10 @@ against these hooks. Its sanitized results are recorded in
 Codex does not expose hook trust state non-interactively, and it skips pending hooks, so an
 installed flow plugin is not proof that `check-sensitive-files.sh` and
 `guard-main-worktree.sh` are watching a session. The mutating Codex workflows therefore run
-`bash "${PLUGIN_ROOT}/codex/guard-canary.sh"` first: the normal-mode `apply` of `implement`,
-`address-review`, `refactor`, and `babysit`'s Codex step. `/plan` stays mutation-free and does not
-run it, and the check is unconditional, so it runs in every session, sandbox included.
+`bash "${PLUGIN_ROOT}/codex/guard-canary.sh"` first: the `persist` turn (it writes the plan
+artifact and the checkpoint) and the normal-mode `apply` of `implement`, `address-review`,
+`refactor`, and `babysit`'s Codex step. `/plan` stays mutation-free and does not run it, and the
+check is unconditional, so it runs in every session, sandbox included, and again in each turn.
 `skills/codex-runtime/SKILL.md` owns the procedure; Claude Code sessions are excluded because
 Claude Code has no pending-trust state for plugin hooks.
 
