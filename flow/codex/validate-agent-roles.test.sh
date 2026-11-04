@@ -5,7 +5,10 @@
 # four supported shapes the old five-key list rejected (#1191 positive fixtures),
 # every proven type or required-field error, the unverified/advisory notes that
 # must never fail, the per-layer duplicate rule, and exit 3 (validation
-# unavailable) with python3 absent or unusable.
+# unavailable) with python3 absent or unusable. #1406 adds the recursive scan
+# of each directory argument (nested role files, sorted full-path order,
+# symlinked subdirectories not followed) and the array-of-tables form of
+# skills.config ([[skills.config]]); the table form is an invalid-type.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -152,7 +155,7 @@ newdir DIR
 { valid_toml "planner"; printf '[skills]\nconfig = "x"\n'; } > "${DIR}/planner.toml"
 run_plain "${DIR}"
 assert_eq "${CODE}" "1" "case13 exit code"
-assert_contains "${OUT}" "invalid-type ${DIR}/planner.toml: 'skills.config'" "case13 finding"
+assert_contains "${OUT}" "invalid-type ${DIR}/planner.toml: 'skills.config' must be an array of tables" "case13 finding"
 
 # --- Case 14: non-table skills (skills.config cannot exist under it) -------
 newdir DIR
@@ -187,12 +190,12 @@ run_plain "${DIR}"
 assert_eq "${CODE}" "0" "case17 exit code"
 assert_eq "${OUT}" "" "case17 no findings"
 
-# --- Case 18: positive — [skills.config] table → passes --------------------
+# --- Case 18: the [skills.config] table form → fails (Codex needs an array) --
 newdir DIR
 { valid_toml "planner"; printf '\n[skills.config]\nenabled = true\n'; } > "${DIR}/planner.toml"
 run_plain "${DIR}"
-assert_eq "${CODE}" "0" "case18 exit code"
-assert_eq "${OUT}" "" "case18 no findings"
+assert_eq "${CODE}" "1" "case18 exit code"
+assert_contains "${OUT}" "invalid-type ${DIR}/planner.toml: 'skills.config' must be an array of tables" "case18 finding"
 
 # --- Case 19: positive — valid name differing from filename → advisory only
 newdir DIR
@@ -420,6 +423,137 @@ run_unavailable "${STUB_BROKEN}:${PATH}" "${DIR}"
 assert_eq "${CODE}" "3" "case36 exit code"
 assert_eq "${OUT}" "" "case36 stdout empty (no invalid-toml finding)"
 assert_eq "${ERR}" "cenci: Codex agent-role validation unavailable — Python 3.11+ with tomllib not found on PATH (found: unusable). ${EXPECT_TAIL}" "case36 single stderr line, no traceback or invalid-toml finding"
+
+no_description_toml() {  # no_description_toml <name> — a role missing the required description
+  printf 'name = "%s"\ndeveloper_instructions = "Do the thing."\n' "$1"
+}
+
+# --- Case 37 (#1406): a nested role file is validated ------------------------
+newdir DIR
+valid_toml "planner" > "${DIR}/planner.toml"
+mkdir -p "${DIR}/team"
+no_description_toml "broken" > "${DIR}/team/broken.toml"
+run_plain "${DIR}"
+assert_eq "${CODE}" "1" "case37 exit code"
+assert_contains "${OUT}" "missing-field ${DIR}/team/broken.toml: 'description' must be a non-empty string" "case37 nested finding"
+assert_not_contains "${OUT}" "planner.toml" "case37 valid top-level neighbor unaffected"
+
+# --- Case 38 (#1406): a directory whose only role file is nested is not empty -
+newdir DIR
+mkdir -p "${DIR}/team"
+valid_toml "reviewer" > "${DIR}/team/reviewer.toml"
+run_plain "${DIR}"
+assert_eq "${CODE}" "0" "case38 plain exit code"
+assert_eq "${OUT}" "" "case38 plain silent on clean nested set"
+OUT="$(bash "${VALIDATOR}" "${DIR}" 2>&1)"; CODE=$?
+assert_eq "${CODE}" "0" "case38 human exit code"
+assert_contains "${OUT}" "1 agent role file(s) OK" "case38 human summary counts the nested file"
+assert_not_contains "${OUT}" "no *.toml files found" "case38 not reported as empty"
+
+# --- Case 39 (#1406): same name at top level and nested, one argument → duplicate
+newdir DIR
+mkdir -p "${DIR}/sub"
+valid_toml "dup" > "${DIR}/dup.toml"
+valid_toml "dup" > "${DIR}/sub/dup.toml"
+run_plain "${DIR}"
+assert_eq "${CODE}" "1" "case39 exit code"
+assert_contains "${OUT}" "duplicate-name dup:" "case39 finding"
+assert_contains "${OUT}" "${DIR}/dup.toml" "case39 names the top-level file"
+assert_contains "${OUT}" "${DIR}/sub/dup.toml" "case39 names the nested file"
+
+# --- Case 40 (#1406): nested file in one argument, top-level in another → no duplicate
+newdir DIR_A
+newdir DIR_B
+mkdir -p "${DIR_A}/sub"
+valid_toml "dup" > "${DIR_A}/sub/dup.toml"
+valid_toml "dup" > "${DIR_B}/dup.toml"
+run_plain "${DIR_A}" "${DIR_B}"
+assert_eq "${CODE}" "0" "case40 exit code"
+assert_not_contains "${OUT}" "duplicate-name" "case40 each argument is its own layer"
+
+# --- Case 41 (#1406): two levels deep, findings name the full path -----------
+newdir DIR
+mkdir -p "${DIR}/a/b"
+no_description_toml "deep" > "${DIR}/a/b/deep.toml"
+run_plain "${DIR}"
+assert_eq "${CODE}" "1" "case41 exit code"
+assert_contains "${OUT}" "missing-field ${DIR}/a/b/deep.toml: 'description' must be a non-empty string" "case41 full-path finding"
+
+# --- Case 42 (#1406): deterministic byte-wise sorted full-path order ---------
+# '-' (0x2d) sorts before '/' (0x2f), so a-b.toml precedes a/b.toml.
+newdir DIR
+mkdir -p "${DIR}/a" "${DIR}/m/n"
+no_description_toml "z" > "${DIR}/z.toml"
+no_description_toml "b" > "${DIR}/a/b.toml"
+no_description_toml "a-b" > "${DIR}/a-b.toml"
+no_description_toml "o" > "${DIR}/m/n/o.toml"
+run_plain "${DIR}"
+FIRST_OUT="${OUT}"
+run_plain "${DIR}"
+assert_eq "${OUT}" "${FIRST_OUT}" "case42 two runs are byte-identical"
+EXPECTED_ORDER="missing-field ${DIR}/a-b.toml: 'description' must be a non-empty string
+missing-field ${DIR}/a/b.toml: 'description' must be a non-empty string
+missing-field ${DIR}/m/n/o.toml: 'description' must be a non-empty string
+missing-field ${DIR}/z.toml: 'description' must be a non-empty string"
+assert_eq "${OUT}" "${EXPECTED_ORDER}" "case42 findings in sorted full-path order"
+
+# --- Case 43 (#1406): symlinked subdirectories are not traversed -------------
+newdir DIR
+newdir OUTSIDE
+valid_toml "planner" > "${DIR}/planner.toml"
+no_description_toml "broken" > "${OUTSIDE}/broken.toml"
+ln -s "${OUTSIDE}" "${DIR}/linked"
+ln -s "${DIR}" "${DIR}/loop"
+run_plain "${DIR}"
+assert_eq "${CODE}" "0" "case43 exit code"
+assert_eq "${OUT}" "" "case43 symlinked subdirectories neither followed nor looped"
+
+# --- Case 44 (#1406): only empty subdirectories still exits 2 ----------------
+newdir DIR
+mkdir -p "${DIR}/a/b" "${DIR}/c"
+run_plain "${DIR}"
+assert_eq "${CODE}" "2" "case44 exit code"
+assert_contains "${OUT}" "validate-agent-roles.sh: no *.toml files found in:" "case44 message"
+
+# --- Case 45 (#1406): name-convention uses the file's own stem, not its subdirectory
+newdir DIR
+mkdir -p "${DIR}/team"
+valid_toml "team" > "${DIR}/team/planner.toml"
+run_plain "${DIR}"
+assert_eq "${CODE}" "0" "case45 exit code"
+assert_contains "${OUT}" "name-convention ${DIR}/team/planner.toml: name 'team' differs from filename stem 'planner'" "case45 note against the file's own stem"
+
+# --- Case 46 (#1406): positive — [[skills.config]] array of tables → passes --
+newdir DIR
+{
+  valid_toml "planner"
+  printf '\n[[skills.config]]\nname = "docs"\nenabled = false\n'
+  printf '\n[[skills.config]]\npath = "/abs/skill"\nenabled = false\n'
+} > "${DIR}/planner.toml"
+run_plain "${DIR}"
+assert_eq "${CODE}" "0" "case46 exit code"
+assert_eq "${OUT}" "" "case46 no findings"
+
+# --- Case 47 (#1406): positive — an empty skills.config array → passes -------
+newdir DIR
+{ valid_toml "planner"; printf '[skills]\nconfig = []\n'; } > "${DIR}/planner.toml"
+run_plain "${DIR}"
+assert_eq "${CODE}" "0" "case47 exit code"
+assert_eq "${OUT}" "" "case47 no findings"
+
+# --- Case 48 (#1406): skills.config array with a non-table element → fails ---
+newdir DIR
+{ valid_toml "planner"; printf '[skills]\nconfig = ["x"]\n'; } > "${DIR}/planner.toml"
+run_plain "${DIR}"
+assert_eq "${CODE}" "1" "case48 exit code"
+assert_contains "${OUT}" "invalid-type ${DIR}/planner.toml: 'skills.config[0]' must be a table" "case48 finding"
+
+# --- Case 49 (#1406): an empty [skills] table still passes silently ----------
+newdir DIR
+{ valid_toml "planner"; printf '[skills]\n'; } > "${DIR}/planner.toml"
+run_plain "${DIR}"
+assert_eq "${CODE}" "0" "case49 exit code"
+assert_eq "${OUT}" "" "case49 no findings"
 
 echo "validate-agent-roles.test.sh: failures=${failures}"
 [[ "${failures}" -eq 0 ]]
