@@ -490,7 +490,7 @@ doctor_codex_support() {
 	raw="$(codex --version 2>/dev/null || true)"
 	version="$(printf '%s' "$raw" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
 	if [ -n "$version" ] && printf '%s\n%s\n' "0.166.0" "$version" | sort -V -C 2>/dev/null; then
-		ok "Codex ${version} supports cenci hooks"
+		ok "Codex ${version} meets cenci's minimum version 0.166.0"
 	else
 		warn "Codex ${version:-unknown} is unsupported — cenci requires 0.166.0 or newer"
 	fi
@@ -529,7 +529,7 @@ doctor_codex_support() {
 	elif [ -n "$project_root" ] && [ -f "$project_root/.claude/config.json" ]; then warn "Legacy-only project config: run cenci:configure to migrate to .cenci/config.json"
 	elif [ -n "$project_root" ]; then warn "No .cenci/config.json in this project"
 	fi
-	warn "Codex hook trust state is not exposed non-interactively; inspect /hooks after plugin updates (cenci never changes trust)"
+	warn "Codex hook protection is not verified by doctor: pending or unapproved hooks are inactive protection, so review them with /hooks after plugin updates; implement, address-review, refactor and babysit's arm step run a guard canary and refuse until it passes (other mutating Codex workflows, such as the ci-repair and babysit-attention sessions the babysit supervisor starts, are not yet covered); cn xt sessions are 'hook trust bypassed by launcher (explicit flag)'; cenci never changes trust"
 }
 
 # sysbox_runc_version <path> — resolves the sysbox-runc version string per

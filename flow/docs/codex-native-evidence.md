@@ -5,11 +5,14 @@ opt-in runner `codex/native-hooks.test.sh` (#1212). Every other suite in `flow/c
 the guards from a shell script; this record is the only place the behavior of the native
 binary is written down.
 
-**Status: skeleton (the hook sections, from `## How to produce a run` through
-`## Resolution conclusion`).** Nothing in those sections has been observed yet. Each is a
-placeholder that the maintainer's native runs replace with sanitized runner output. A
-placeholder is never evidence, and no conclusion in `codex.md` or `adapter-contract.md` may
-cite this file until its section is filled in. The last two sections, "Native workflows:
+**Status: native hook runs recorded on 2026-11-04.** Host and sandbox runs used Codex
+0.166.0 and runner commit `3d7a9be2f38df46577ee70e9bac7dbd12a32cc51`. Both returned
+`RESULT: OK`; the four guard-canary probes passed in both environments, and the sandbox
+trust-withheld variant refused and cleaned up all four written probes. The initial full
+runs each retained one inconclusive relative-MOVE classification, subsequently resolved
+by focused native reruns of the repaired classifier in both environments, described below; the
+host's disposable project-local launch-failure hooks were not approved and were not run.
+These limits do not turn skipped or inconclusive rows into passes. The sections "Native workflows:
 `ci-repair` and `babysit-attention`" and "Native workflows: Plan mode, handoff and goal
 lifecycle", record a different runner (`codex/native-workflows.test.sh`, #1236 and #1235)
 and carry their own status lines, as does the last section, "Native agent roles: inherit,
@@ -37,9 +40,23 @@ CENCI_CODEX_NATIVE=1 CENCI_CODEX_NATIVE_OUT=./native-host.md bash flow/codex/nat
   inactive, or the canary could not tell); `RESULT: FAIL` (exit 1) means a row failed. While
   the canary has not shown the hooks active, no allow or deny row is run, because an allowed
   write proves nothing when no hook is watching.
+- **Guard canary preflight (#1213):** the same run also executes `codex/guard-canary.sh`
+  end to end under a `### Guard canary preflight` report section: `plan`, one `codex exec` per
+  probe from a feature-worktree session, then `check`. The "as launched" variant runs on the
+  host (persisted `/hooks` trust) and in the sandbox (with the trust-bypass flag); the "trust
+  withheld" variant runs in the sandbox only, with just `--dangerously-bypass-hook-trust` left
+  out inside the disposable container, and the host records it as `not run` because cenci never
+  changes persisted trust. A run FAILs when the preflight result contradicts the trust state
+  the deny-matrix canary established. Copy the sanitized `### Guard canary preflight` section,
+  including each variant's `CANARY_STATUS`, refusal text and `REMOVED:`/`LEFTOVER:` lines,
+  into the "Guard canary preflight" section below.
 - Pass or fail is judged from the filesystem after each call, the `codex exec --json`
-  tool-call events and the guards' capture tap (`CENCI_CODEX_HOOK_CAPTURE_DIR`). A row whose
-  call was not proven to have been attempted is `inconclusive`, never a success.
+  tool-call events and the guards' capture tap (`CENCI_CODEX_HOOK_CAPTURE_DIR`). Codex
+  0.166.0 can omit a blocked call from those events; the runner also accepts its native
+  router denial on stderr when the command or patch matches the probe exactly, the expected
+  tool has a capture tap, and Codex exits successfully. The guard's own denial message must
+  appear in the diagnostic body. Unrelated stderr and model narration are not evidence.
+  A row whose call was not proven to have been attempted is `inconclusive`, never a success.
 - Home paths, user and host names, fixture roots, session IDs and token-shaped strings are
   replaced by `<HOME>`, `<USER>`, `<HOST>`, `<FIXTURE>`, `<UUID>` and `<TOKEN>` before
   anything is committed. Git commit SHAs are kept.
@@ -48,11 +65,21 @@ CENCI_CODEX_NATIVE=1 CENCI_CODEX_NATIVE_OUT=./native-host.md bash flow/codex/nat
 
 | Field | Host run | Sandbox run (`cn xt`) |
 |---|---|---|
-| Codex version | pending native run | pending native run |
-| Plugin version / commit | pending native run | pending native run |
+| Codex version | 0.166.0 | 0.166.0 |
+| Plugin version / commit | 1.31.0 / `3d7a9be2f38df46577ee70e9bac7dbd12a32cc51` | 1.31.0 / `3d7a9be2f38df46577ee70e9bac7dbd12a32cc51` |
 | Host or sandbox | host | sandbox |
-| Trust state | pending native run | hook trust bypassed by launcher (explicit flag) (flag passed by the runner's `codex exec` inside the sandbox) |
-| `$SHELL` | pending native run | pending native run |
+| Trust state | active; persisted `/hooks` approval, no bypass flag | hook trust bypassed by launcher (explicit flag) (flag passed by the runner's `codex exec` inside the sandbox) |
+| `$SHELL` | `/bin/zsh` | `/bin/bash` |
+| Full-run result | OK: 21 scenario rows passed, 1 inconclusive, 2 not run | OK: 24 scenario rows passed, 1 inconclusive, 0 not run |
+
+The host plugin was initially installed from the PR checkout through a local marketplace;
+its full-run plugin listing subsequently showed the Git marketplace registration. Installed
+`codex/hooks.json` and both guard scripts were hash-checked against the tested checkout and
+matched. The runner and canary helper were executed from the PR checkout. The sandbox
+plugin was installed from its local clone of that commit. The sandbox was
+created through `cenci open --agent codex --shell --name native-1362` with a fresh home volume,
+the same Codex sandbox environment used by `cn xt`; the runner used a clone of the tested
+commit inside the container so its Git paths were valid there.
 
 ## Exit 127
 
@@ -62,13 +89,15 @@ missing from the login-shell PATH, and fish parsing `${PLUGIN_ROOT}`.
 
 | Item | Host run | Sandbox run |
 |---|---|---|
-| Resolved plugin root | pending native run | pending native run |
-| Script present and executable (every `hooks.json` handler) | pending native run | pending native run |
-| `$SHELL -lc 'command -v bash jq awk'` | pending native run | pending native run |
-| Each guard rerun the way Codex launches it | pending native run | pending native run |
+| Resolved plugin root | `<HOME>/.codex/plugins/cache/cenci/cenci/1.31.0` | `<HOME>/.codex/plugins/cache/cenci/cenci/1.31.0` |
+| Script present and executable (every `hooks.json` handler) | yes, checkout and installed copy | yes, checkout and installed copy |
+| `$SHELL -lc 'command -v bash jq awk'` | `/usr/bin/bash`, `/usr/bin/jq`, `/usr/bin/awk` | `/usr/bin/bash`, `/usr/bin/jq`, `/usr/bin/awk` |
+| Each guard rerun the way Codex launches it | allow exits 0; denial exits 2 with guard message | allow exits 0; denial exits 2 with guard message |
 
-Result: pending native run. The 127 is recorded as fixed only if it is demonstrated;
-otherwise it is recorded as unreproduced together with the hypotheses tested.
+Result: exit 127 was not reproduced in either preflight (27 host handler executions across
+three discovered roots, and 18 sandbox executions across two roots).
+This does not establish that the original launch failure is fixed. The separate intentional
+launch-failure experiment below records what happens when a hook cannot start.
 
 ## Deny matrix
 
@@ -76,41 +105,104 @@ Each deny row is paired with a positive control whose allowed write must land.
 
 | Scenario | Host run | Sandbox run |
 |---|---|---|
-| Bash to a sensitive `.env` (check-sensitive-files) | pending native run | pending native run |
-| Bash to a main-worktree file (guard-main-worktree) | pending native run | pending native run |
-| Bash to a worktree file (positive control) | pending native run | pending native run |
-| apply_patch to a sensitive `.env` (check-sensitive-files) | pending native run | pending native run |
-| apply_patch to a main-worktree file (guard-main-worktree) | pending native run | pending native run |
-| apply_patch to a worktree file (positive control) | pending native run | pending native run |
+| Bash to a sensitive `.env` (check-sensitive-files) | denied | denied |
+| Bash to a main-worktree file (guard-main-worktree) | denied | denied |
+| Bash to a worktree file (positive control) | written, hook tap present | written, hook tap present |
+| apply_patch to a sensitive `.env` (check-sensitive-files) | denied | denied |
+| apply_patch to a main-worktree file (guard-main-worktree) | denied | denied |
+| apply_patch to a worktree file (positive control) | written, hook tap present | written, hook tap present |
+
+## Guard canary preflight
+
+What `codex/guard-canary.sh` does against a real Codex (#1213): the mutating Codex workflows
+refuse to start unless every (matcher group, guard) pair denies its own probe. These results
+come from the authenticated native runs above, separately from the deterministic suite
+`codex/guard-canary.test.sh` and the stub cases in `codex/native-hooks.gate.test.sh`.
+
+| Variant | Host run | Sandbox run (`cn xt`) |
+|---|---|---|
+| As launched: trust state | active, persisted `/hooks` approval | active, hook trust bypassed by launcher (explicit flag) |
+| As launched: `CANARY_STATUS` and per-probe results (4 probes) | `active`; probes 1–4 denied by their own guards | `active`; probes 1–4 denied by their own guards |
+| As launched: refusal text when hooks are pending (names pending trust and `/hooks`) | not applicable: approved hooks were active | not applicable: launcher supplied trust bypass |
+| Trust withheld (flag left out, hooks pending): `CANARY_STATUS` and refusal text | not run on the host (cenci never changes persisted trust) | `refused`, helper exit 1; all four probes attempted and written; refusal names pending/untrusted hooks and `/hooks` |
+| Cleanup: `REMOVED:` targets and any `LEFTOVER:` path | 0 written, 0 removed, no leftovers | as launched: 0 written, 0 removed; withheld: 4 removed; no leftovers in either variant |
+
+The two `apply_patch` probes reached the `Write|Edit` matcher and were denied. Both native
+as-launched runs produced these helper results:
+
+```text
+PROBE_RESULT: 1 (apply_patch, check-sensitive-files, group Write|Edit): denied by check-sensitive-files
+PROBE_RESULT: 2 (apply_patch, guard-main-worktree, group Write|Edit): denied by guard-main-worktree
+PROBE_RESULT: 3 (shell, check-sensitive-files, group Bash): denied by check-sensitive-files
+PROBE_RESULT: 4 (shell, guard-main-worktree, group Bash): denied by guard-main-worktree
+CANARY_STATUS=active
+```
+
+The sandbox trust-withheld run recorded the following cleanup and refusal. There were no
+`LEFTOVER:` lines. Host trust was never changed by the runner.
+
+```text
+REMOVED: /tmp/cenci-guard-canary-47ab22f4f1ff7937/write-edit-1.env
+REMOVED: <FIXTURE>/repo/cenci-guard-canary-47ab22f4f1ff7937-2.txt
+REMOVED: /tmp/cenci-guard-canary-47ab22f4f1ff7937/bash-3.env
+REMOVED: <FIXTURE>/repo/cenci-guard-canary-47ab22f4f1ff7937-4.txt
+CANARY_STATUS=refused
+GUARD CANARY REFUSED: the cenci write guards are not confirmed active, so protection is inactive and no mutation may start.
+Likely cause: the cenci hooks are pending or untrusted in Codex, and Codex skips pending hooks. Review and enable them with /hooks, then rerun this workflow.
+```
 
 ## Payload cwd, hook pwd and effective cwd
 
 | Way | Payload cwd | Hook pwd | Effective cwd | `workdir` in `tool_input` |
 |---|---|---|---|---|
-| Direct apply_patch | pending native run | pending native run | pending native run | pending native run |
-| exec_command with a per-call `workdir` | pending native run | pending native run | pending native run | pending native run |
-| Nested code mode | pending native run (or "unsupported in vX") | pending native run | pending native run | pending native run |
+| Direct apply_patch | `<FIXTURE>/repo/.worktrees/1-native` | `<FIXTURE>/repo/.worktrees/1-native` | `<FIXTURE>/repo/.worktrees/1-native` | false |
+| exec_command with a per-call `workdir` | `<FIXTURE>/repo` | `<FIXTURE>/repo/.worktrees/1-native` | `<FIXTURE>/repo` | false |
+| Nested code mode | `<FIXTURE>/repo` | `<FIXTURE>/repo/.worktrees/1-native` | `<FIXTURE>/repo` | false |
 
-Can the effective workdir differ from the hook cwd? Pending native run.
+Both environments produced these values. The effective workdir can differ from the hook
+process cwd; in these probes the payload cwd followed the effective workdir. The nested row
+requested `features.code_mode=true` and observed a capture tap and the expected file.
 
 ## Relative apply_patch (Add, Update, Delete, Move)
 
 | Scenario | Host run | Sandbox run |
 |---|---|---|
-| Root session, relative target resolving to the main worktree (denied) | pending native run | pending native run |
-| Worktree session, relative target inside the worktree (allowed) | pending native run | pending native run |
-| Root session, relative target under `.worktrees/` (allowed) | pending native run | pending native run |
-| Bypass shape: worktree session, root `workdir`, relative `AGENTS.md` | pending native run | pending native run |
+| Root session, relative target resolving to the main worktree (denied) | Add/Update/Delete denied; MOVE denied in focused rerun | Add/Update/Delete denied; MOVE denied in focused rerun |
+| Worktree session, relative target inside the worktree (allowed) | Add/Update/Delete/Move written | Add/Update/Delete/Move written |
+| Root session, relative target under `.worktrees/` (allowed) | written | written |
+| Bypass shape: worktree session, root `workdir`, relative `AGENTS.md` | denied | denied |
+
+The initial MOVE row was a runner classification gap: the native router reported a denial
+at `rel-move-a.txt`, while the runner searched the error body for destination `rel-move-b.txt`.
+The source remained and no destination was written. The full-run counts above retain that
+inconclusive classification rather than retroactively reporting a pass.
+
+After the classifier was changed to correlate the destination with the exact denied patch
+and the guard message only with the error body, focused native MOVE reruns passed on both
+host and sandbox. Each used the production `cnh_router_block` parser with SHA-256
+`7dbac353eafca53c323afeaa5fe7c83af68f74d67d65669dd80034b58a0e1078`, a fresh private
+`/var/tmp` fixture, and the same relative source/destination patch. Both Codex and the
+parser exited 0; an `apply_patch` capture tap was present; the error named only the source;
+the complete patch matched exactly; source bytes were unchanged and the destination was
+absent. The regression suite separately reproduced this gap (269 passed / 1 failed) and
+passed after the fix (270 passed / 0 failed).
 
 ## Hook launch failure
 
-Does the tool continue when a hook cannot start (exit 126 or 127, not exit 0 and not exit 2)?
-Pending native run.
+In the sandbox, the marker control ran and its write landed. With an intentionally missing
+script (exit 127), and with an intentionally non-executable script (exit 126), the broken hook
+was invoked and the tool **continued**, writing its target. Hook launch failure therefore
+does not itself enforce a denial. On the host, the disposable project-local hooks were not
+approved; that experiment was not run and supplies no host conclusion.
 
 ## Resolution conclusion
 
-Pending native run: either the relative-apply_patch predicate in `guard-main-worktree.sh` is
-confirmed by the evidence above, or the exception is tightened in the same change.
+The canary confirmed each configured guard/matcher pair on host and sandbox, and refused
+when sandbox hook trust was withheld. Relative Add/Update/Delete isolation and the explicit
+workdir bypass check passed; allowed worktree operations landed. Focused host and sandbox
+reruns resolved the MOVE reporting gap. The guard scripts were unchanged. Intentional exit 126/127 hook failures
+continued in the sandbox, reinforcing why the preflight must test actual denials instead of
+assuming that a configured hook is active.
 
 ## Native workflows: `ci-repair` and `babysit-attention`
 

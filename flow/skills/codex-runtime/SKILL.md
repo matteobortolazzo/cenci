@@ -31,6 +31,36 @@ user-invocable: false
   is limited to a missing role file: when a spawn fails because the role's configured model or effort
   is unavailable, stop the run and report the role, the configured value and Codex's error. Never
   substitute another model or a built-in worker for it.
+- Guard canary preflight: Codex skips pending or untrusted plugin hooks, so an installed
+  flow plugin does not prove the write guards are watching the session. The covered mutating
+  Codex workflows (`implement` apply, `address-review`, `refactor`, and `babysit`'s Codex arm
+  step) run `bash "${PLUGIN_ROOT}/codex/guard-canary.sh" plan` at the start of each normal-mode
+  (mutating) invocation, after `project-core`'s configured-repo check and before its first
+  mutation. For `implement`, `address-review` and `refactor` that includes the `persist` turn (see the
+  Persist step), which writes the artifact and checkpoint, and the later `apply` turn: each runs
+  it again, never relying on an earlier turn's result. `/plan` stays mutation-free and never runs it.
+  The babysit check runs once, when arming; it does not carry over to the `ci-repair` and
+  `babysit-attention` sessions the supervisor starts later, which are not yet covered (a tracked
+  Followup). The helper prints one `PROBE` line
+  per (matcher group, guard) pair of `codex/hooks.json` (four today) plus `INSTRUCTION:` lines.
+  Make exactly the listed tool calls, judge each from its own tool result (denied only when the
+  guard's message shows, otherwise not-denied), then run the printed `check <run-dir> <n>=denied|not-denied…`
+  command. Proceed only on `CANARY_STATUS=active`; on `CANARY_STATUS=refused`, or when `plan`
+  cannot be made, a probe came back not-denied or inconclusive, or the helper cannot run, stop
+  before any mutation, persist nothing, arm no goal, and report the helper's text verbatim: it
+  names pending or untrusted hooks as the likely cause and tells the user to review them with `/hooks`.
+  `CANARY_STATUS=active` rests on the session's own report of each probe plus the helper's
+  filesystem check: a probe blocked by Codex's own sandbox or approval policy, or a call never
+  made, reads as not-denied only if the session reports it honestly.
+  This is a readiness check, not proof; the opt-in native run is the real evidence.
+  The helper removes any canary that got written and reports it as `REMOVED: <path>`; a canary it
+  cannot remove is reported as `LEFTOVER: <exact path>` for the user to delete by hand, and the
+  workflow still refuses. In a sandbox session the output labels trust
+  "hook trust bypassed by launcher (explicit flag)", never "trusted"; cenci only reports hook
+  trust and never changes it. Claude Code `SKILL.md` files are excluded from this rule on purpose:
+  Claude Code has no pending-trust state for plugin hooks, so there is nothing for a canary to
+  detect there; that is the exclusion reason `docs/skill-authoring.md`'s client-surface rule asks
+  to be recorded next to the declaration.
 - Keep authenticated mutations, pushes, PR creation, and user questions in the root agent.
 
 ## Approved-plan handoff
@@ -57,7 +87,7 @@ Run `persist` in Default mode, in the same session as the approved plan: `$cenci
 
 Approval check, before anything else: a Plan-mode-approved plan is a plan produced in Plan mode in this session for `<wf> <target>`, followed by the user's `persist` or implement-the-plan turn. If this session holds no Plan-mode-approved plan for `<wf> <target>` (for example a fresh Default-mode session launched with `cenci run <wf> persist <target>`), make no tool call, write nothing and print exactly `cenci: no approved plan in this session — type /plan and resend: /plan $cenci:<wf> <target>`, then end the turn.
 
-Otherwise start with `sh "${PLUGIN_ROOT}/codex/require-runtime.sh"`. Persist writes only the plan artifact and the checkpoint, in this order:
+Otherwise start with `sh "${PLUGIN_ROOT}/codex/require-runtime.sh"`, then, for `implement`, `address-review` and `refactor` only, run the Guard canary preflight before the first write: persist is a normal-mode turn that writes the artifact and the checkpoint, so a refusal stops it with no artifact write and any existing checkpoint left byte-identical. The other workflows' persist turns run no canary. Persist writes only the plan artifact and the checkpoint, in this order:
 
 1. Check for an existing checkpoint before writing anything. This step decides only and writes nothing: run `node "${PLUGIN_ROOT}/codex/checkpoint.mjs" get <ckpt> <wf> <target>`. Exit 3 (no checkpoint) continues. Exit 0 branches on the printed `status` (`complete` is a status, never a phase: a finished run keeps its last real phase, such as `pr`). A `status` `planned` or `complete` means run `clear` later, in step 4, just before `init` (see Re-plan below), then continue; a legacy v1 checkpoint whose `status` is `planned` or `complete` is cleared and replaced like a v2 one. A `status` `running` or `needs-input` is a run in flight: refuse before writing anything, change nothing, print the resume `apply` command (step 6) and say that if that `apply` stops on `verify`, the user can discard the run with `node "${PLUGIN_ROOT}/codex/checkpoint.mjs" clear <ckpt> <wf> <target>` and re-plan, then end the turn. Any other `status` (an unrecognised value, an absent field, or a non-string value on a legacy v1 checkpoint) is a run in flight too, with the same refusal. Any other exit: stop and report its stderr line, writing nothing.
 2. Run the workflow-specific artifact check before the artifact write: implement's three-heading check is that check. A failure stops persist with no artifact write and leaves any existing checkpoint byte-identical. Write the artifact with the headings `## Target`, `## Approved Plan` (the approved plan verbatim) and `## Choices` (every answer given and every option the user declined, so `apply` needs no conversation). Implement is the exception: for implement the artifact is the planner's plan file, which starts with YAML front matter (`---` as the first line) and contains `## Ticket Details`, `## Implementation Plan` and `## Architectural Context`; the choices made are carried by appending a `## Choices` heading after them (or by the plan's own `## Q&A from Planning`). The `## Target` and `## Approved Plan` wrapper applies to the other five workflows only.

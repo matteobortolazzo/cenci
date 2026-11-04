@@ -859,5 +859,120 @@ forbid_in "D1 docs/codex.md retired unattended-launch create wording" "$codex_do
 
 count="$(find "${ROOT}/templates/codex/agent-roles" -name '*.toml' | wc -l)"
 test "$count" -ge 5 || fail "Codex agent templates"
+
+# --- Guard canary preflight contract (#1213) -----------------------------------
+# Codex skips pending or untrusted plugin hooks, so every MUTATING Codex surface
+# runs codex/guard-canary.sh after project-core's configured-repo check and
+# before its first mutation. #1156 and later mutating companions extend this list.
+MUTATING_CODEX=(implement address-review refactor)
+CANARY_REF='codex/guard-canary.sh'
+REPO_ROOT="$(cd "${ROOT}/.." && pwd)"
+
+# line_of <file> <fixed string> -- first matching line number, empty when absent.
+line_of(){ grep -nF -- "$2" "$1" | head -1 | cut -d: -f1; }
+
+# assert_before <file> <label> <earlier-needle> <later-needle> -- both present, earlier first.
+assert_before(){
+  local file="$1" label="$2" a b
+  a="$(line_of "$file" "$3")"; b="$(line_of "$file" "$4")"
+  if [[ -z "$a" ]]; then fail "$label: missing anchor '$3'"; return; fi
+  if [[ -z "$b" ]]; then fail "$label: missing anchor '$4'"; return; fi
+  [[ "$a" -lt "$b" ]] || fail "$label: '$3' (line $a) must precede '$4' (line $b)"
+}
+
+for workflow in "${MUTATING_CODEX[@]}"; do
+  procedure="${ROOT}/skills/${workflow}/codex.md"
+  grep -qF -- "$CANARY_REF" "$procedure" || fail "$workflow codex.md must run the guard canary preflight ($CANARY_REF)"
+  assert_before "$procedure" "$workflow canary after configured-repo check" 'Read `project-core`' "$CANARY_REF"
+  # The Claude Code SKILL.md is excluded: Claude Code has no pending-trust state for plugin hooks.
+  if grep -qF -- 'guard-canary' "${ROOT}/skills/${workflow}/SKILL.md"; then
+    fail "$workflow Claude SKILL.md must not reference the guard canary (no pending-trust state on Claude Code)"
+  fi
+done
+
+# implement: after the blocked-dependency re-check and the apply-time plan-check read,
+# before the first mutation (new-plan reset/prepare, plan persist, any transition,
+# checkpoint, worktree or label write).
+impl="${ROOT}/skills/implement/codex.md"
+assert_before "$impl" "implement canary after blocked-dependency re-check" '`apply` runs the identical check again' "$CANARY_REF"
+assert_before "$impl" "implement canary after apply-time plan-check read" 'never make a second `plan-check` call' "$CANARY_REF"
+assert_before "$impl" "implement canary before new-plan reset/prepare" "$CANARY_REF" 'A new-plan apply (decision `none` or `replan`)'
+assert_before "$impl" "implement canary before the pipeline lifecycle" "$CANARY_REF" '**Pipeline lifecycle (ticket mode).**'
+assert_before "$impl" "implement canary before checkpoint advance" "$CANARY_REF" 'Then advance the checkpoint before any worktree call'
+# Persist is its own normal-mode turn that writes the plan artifact and the checkpoint, so
+# codex-runtime's Persist step runs the canary after require-runtime.sh and before its first write.
+grep -qF -- 'require-runtime.sh"`, then, for `implement`, `address-review` and `refactor` only, run the Guard canary preflight before the first write' "$runtime" || fail "persist must run require-runtime.sh, then the guard canary for implement/address-review/refactor only, before its first write"
+grep -qF -- "The other workflows' persist turns run no canary." "$runtime" || fail "persist canary must state that the other workflows' persist turns run none (Q&A 4 scope)"
+assert_before "$runtime" "persist canary before the artifact write" 'run the Guard canary preflight before the first write' '2. Run the workflow-specific artifact check before the artifact write'
+grep -q 'refus' <(sed -n "$(line_of "$impl" "$CANARY_REF")p" "$impl") || fail "implement canary step must state the refusal outcome"
+
+# address-review: first thing in the second (normal-mode) invocation.
+assert_before "${ROOT}/skills/address-review/codex.md" "address-review canary before fixes" "$CANARY_REF" 'apply approved fixes'
+# refactor: normal mode, before any ticket is created.
+assert_before "${ROOT}/skills/refactor/codex.md" "refactor canary before ticket creation" "$CANARY_REF" 'create GitHub tickets'
+
+# Every surface states the refusal outcome and the leftover report beside its canary step
+# (a three-line window from the line that runs the helper), not just implement.
+for workflow in "${MUTATING_CODEX[@]}"; do
+  procedure="${ROOT}/skills/${workflow}/codex.md"
+  n="$(line_of "$procedure" "$CANARY_REF")"
+  if [[ -z "$n" ]]; then fail "$workflow canary step missing, cannot check its refusal wording"; continue; fi
+  window="$(sed -n "${n},$((n+2))p" "$procedure")" || { fail "$workflow canary window unreadable"; continue; }
+  grep -qF -- 'on any refusal stop' <<<"$window" || fail "$workflow canary step must say to stop on any refusal"
+  grep -qF -- 'LEFTOVER:' <<<"$window" || fail "$workflow canary step must report a LEFTOVER: path"
+done
+
+# #979 restate: the persist turn runs the canary for these three workflows, so every site that
+# lists where the canary runs says so (codex-runtime's Persist step is asserted above).
+grep -qF -- "The persist turn runs the same guard canary before it writes either" "${ROOT}/skills/address-review/codex.md" || fail "address-review codex.md must state that its persist turn runs the guard canary"
+grep -qF -- "other workflows' persist turns run none" "${ROOT}/skills/address-review/codex.md" || fail "address-review codex.md must scope the persist canary to implement, address-review and refactor"
+assert_before "${ROOT}/skills/address-review/codex.md" "address-review persist canary clause before apply" 'The persist turn runs the same guard canary' 'apply approved fixes'
+grep -qF -- 'in both their `persist` and `apply` turns' "${ROOT}/docs/adapter-contract.md" || fail "adapter-contract hook-activation precondition must say the canary runs in the persist and apply turns"
+grep -qF -- "other workflows' persist turns run none" "${ROOT}/docs/adapter-contract.md" || fail "adapter-contract must scope the persist canary to implement, address-review and refactor"
+
+# babysit: portable skill, so the Codex-only step is self-contained (no codex-runtime
+# consult: adapter-drift) and sits before the --agent codex arm.
+babysit="${ROOT}/skills/babysit/SKILL.md"
+# The checks below read only the canary paragraph (from its bold label to the next blank
+# line), so a stray 'pending', 'Codex-only' or 'do not arm' elsewhere in the file cannot satisfy them.
+babysit_canary="$(sed -n '/^\*\*Codex-only guard canary/,/^$/p' "$babysit")" || fail "babysit canary paragraph unreadable"
+[[ -n "$babysit_canary" ]] || fail "babysit must carry a '**Codex-only guard canary' paragraph"
+grep -qF -- 'codex/guard-canary.sh" plan' <<<"$babysit_canary" || fail "babysit Codex-only step must run guard-canary.sh plan"
+grep -qF -- 'codex/guard-canary.sh" check' <<<"$babysit_canary" || fail "babysit Codex-only step must run guard-canary.sh check"
+assert_before "$babysit" "babysit canary before arming" "$CANARY_REF" 'cenci babysit <pr> --agent codex'
+grep -qi 'codex-only' <<<"$babysit_canary" || fail "babysit canary step must be labelled Codex-only"
+grep -qi 'pending' <<<"$babysit_canary" || fail "babysit canary step must name pending trust as a cause"
+grep -qF -- '/hooks' <<<"$babysit_canary" || fail "babysit canary step must point at /hooks"
+grep -qi 'do not arm' <<<"$babysit_canary" || fail "babysit canary step must not arm on refusal"
+grep -q 'codex-runtime' "$babysit" && fail "babysit must not consult codex-runtime (portable skill, adapter-drift)"
+
+# codex-runtime: the canonical rule.
+grep -qF -- 'Guard canary preflight' "$runtime" || fail "codex-runtime guard canary bullet"
+grep -qF -- 'guard-canary.sh' "$runtime" || fail "codex-runtime must name the helper"
+grep -qF -- 'review them with `/hooks`' "$runtime" || fail "codex-runtime must tell the user to review pending hooks with /hooks"
+grep -qF -- "babysit check runs once, when arming" "$runtime" || fail "codex-runtime must say the babysit arm check does not cover the later ci-repair/babysit-attention sessions"
+grep -qF -- 'not yet covered' "$runtime" || fail "codex-runtime must name the ci-repair/babysit-attention sessions as not yet covered"
+grep -qF -- 'is a readiness check, not proof' "$runtime" || fail "codex-runtime must say CANARY_STATUS=active is a readiness check, not proof"
+grep -qi 'pending' "$runtime" || fail "codex-runtime must name pending trust as a cause"
+grep -qi 'leftover' "$runtime" || fail "codex-runtime must carry the leftover rule"
+grep -qF -- 'hook trust bypassed by launcher (explicit flag)' "$runtime" || fail "codex-runtime sandbox label"
+grep -qi 'no pending-trust state' "$runtime" || fail "codex-runtime must record why Claude Code is excluded"
+grep -qi 'never changes' "$runtime" || fail "codex-runtime must say cenci never changes trust"
+
+# Docs describe the verified behavior.
+codex_doc="${ROOT}/docs/codex.md"
+grep -qF -- 'Guard canary preflight' "$codex_doc" || fail "docs/codex.md Guard canary preflight section"
+grep -qF -- 'guard-canary.sh' "$codex_doc" || fail "docs/codex.md must name the helper"
+grep -qF -- 'hook trust bypassed by launcher (explicit flag)' "$codex_doc" || fail "docs/codex.md sandbox label"
+grep -qF -- 'is a readiness check, not proof' "$codex_doc" || fail "docs/codex.md must say CANARY_STATUS=active is a readiness check, not proof"
+grep -qF -- 'cenci-guard-canary-*' "$codex_doc" || fail "docs/codex.md must document manual cleanup of cenci-guard-canary-* files"
+grep -qF -- 'delete them by hand' "$codex_doc" || fail "docs/codex.md must tell the user to delete leftover canary files by hand"
+grep -qF -- 'not yet covered' "$codex_doc" || fail "docs/codex.md must name the ci-repair/babysit-attention sessions as not yet covered"
+grep -qF -- 'not yet covered' "${ROOT}/docs/adapter-contract.md" || fail "adapter-contract must name the ci-repair/babysit-attention sessions as not yet covered"
+grep -qF -- 'Codex hook-activation precondition' "${ROOT}/docs/adapter-contract.md" || fail "adapter-contract hook-activation precondition"
+grep -qF -- 'Guard canary preflight' "${ROOT}/docs/codex-native-evidence.md" || fail "codex-native-evidence guard canary section"
+grep -qF -- 'hook trust bypassed by launcher (explicit flag)' "${REPO_ROOT}/docs/getting-started.md" || fail "getting-started sandbox label"
+grep -qF -- 'guard canary' "${ROOT}/AGENTS.md" || fail "flow/AGENTS.md evidence reference mentions the guard canary"
+
 echo "workflows.test.sh: failures=${failures}"
 [[ "$failures" -eq 0 ]]
