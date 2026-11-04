@@ -22,7 +22,7 @@
 #   - launch failure: does the tool continue when a hook exits 127 or 126?
 #
 # It is opt-in. It prints `not run: <reason>` and exits 0 -- never "passed" --
-# when CENCI_CODEX_NATIVE is not 1, codex is absent or older than 0.144.1, or
+# when CENCI_CODEX_NATIVE is not 1, codex is absent or older than 0.166.0, or
 # `codex login status` fails, so run-checks.sh can run it in CI unchanged.
 #
 # Verdicts are judged from filesystem state after each call, the `codex exec
@@ -62,7 +62,7 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || exit 1
 FLOW_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)" || exit 1
-MIN_VERSION="0.144.1"
+MIN_VERSION="0.166.0"
 FLOW_PLUGIN_NAME="cenci"
 
 # shellcheck source=native-hooks-lib.sh

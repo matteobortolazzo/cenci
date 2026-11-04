@@ -299,6 +299,19 @@ printf 'claude %s\n' "$*" >>"${CALLS_FILE}"
 case "$*" in
   "plugin marketplace list") [ -f "${CLAUDE_MARKETPLACE_FILE}" ] && echo cenci; exit 0 ;;
   "plugin marketplace add "*)
+    # Mirror the real CLI: when user settings declare an extraKnownMarketplaces
+    # "cenci" entry, any add whose ref differs from the entry's is refused.
+    settings="${HOME}/.claude/settings.json"
+    if [ -f "${settings}" ] && jq -e '.extraKnownMarketplaces.cenci' "${settings}" >/dev/null 2>&1; then
+      declared="$(jq -r '.extraKnownMarketplaces.cenci.source.ref // ""' "${settings}")"
+      case "$4" in *@*) requested="${4#*@}" ;; *) requested="" ;; esac
+      if [ "${requested}" != "${declared}" ]; then
+        printf 'Failed to add marketplace: Cannot add marketplace "cenci": its source does not match its extraKnownMarketplaces entry in user or managed settings\n' >&2
+        exit 1
+      fi
+      printf '%s' "${requested:-default-branch}" >"${CLAUDE_MARKETPLACE_FILE}"
+      exit 0
+    fi
     case "$4" in
       *@*)
         printf '%s' "${4#*@}" >"${CLAUDE_MARKETPLACE_FILE}"
@@ -310,6 +323,7 @@ case "$*" in
         ;;
     esac
     ;;
+  "plugin marketplace update cenci") exit 0 ;;
   "plugin marketplace remove "*)
     # CLAUDE_REFRESH_FAIL_FILE (optional), when present, fails the remove
     # step of the Q4 remove+re-add contract — modeling a client that can't
@@ -1348,6 +1362,55 @@ assert_before "${calls}" "claude plugin marketplace remove cenci" "claude plugin
 assert_before "${calls}" "codex plugin marketplace remove cenci" "codex plugin marketplace add matteobortolazzo/cenci --ref watch/v9.9.9"
 assert_contains "${case_dir}/claude-marketplace" "watch/v9.9.9"
 assert_contains "${case_dir}/codex-marketplace" "watch/v9.9.9"
+
+# extraKnownMarketplaces: Claude refuses `marketplace add` from any source
+# other than the one a settings entry declares (the cenci sandbox seeds a
+# ref-less entry), so remove+re-add at RESOLVED_REF would delete the
+# registration and then fail to restore it.
+run_declared_case() {
+    local name="$1" registered="$2" entry="$3"
+    case_dir="${WORK}/${name}" home="${WORK}/${name}/home"
+    bin="${WORK}/${name}/bin" output="${WORK}/${name}/output" calls="${WORK}/${name}/calls"
+    mkdir -p "${home}/.claude" "${bin}"
+    : >"${calls}"
+    make_common_tools "${bin}"
+    make_claude "${bin}"
+    prepare_checkout "${home}" claude
+    prepare_bootstrap_cenci "${home}" claude
+    printf '{"extraKnownMarketplaces":{"cenci":{"source":%s}}}\n' "${entry}" >"${home}/.claude/settings.json"
+    if [ "${registered}" = yes ]; then printf 'default-branch' >"${case_dir}/claude-marketplace"; fi
+    set +e
+    env -i HOME="${home}" PATH="${bin}" CALLS_FILE="${calls}" \
+        CLAUDE_MARKETPLACE_FILE="${case_dir}/claude-marketplace" \
+        CLAUDE_INSTALLED_FILE="${case_dir}/claude-installed" \
+        CENCI_CLAUDE_MANAGED_SETTINGS="${case_dir}/no-managed-settings.json" \
+        bash "${ROOT}/install.sh" --yes --no-build --ref watch/v9.9.9 >"${output}" 2>&1
+    declared_exit=$?
+    set -e
+}
+
+echo "case: a registered marketplace declared ref-less in extraKnownMarketplaces is refreshed in place, never removed or re-pinned"
+run_declared_case declared-registered yes '{"source":"github","repo":"matteobortolazzo/cenci"}'
+[[ "${declared_exit}" -eq 0 ]]
+assert_contains "${calls}" "claude plugin marketplace update cenci"
+assert_not_contains "${calls}" "claude plugin marketplace remove"
+assert_not_contains "${calls}" "claude plugin marketplace add"
+assert_contains "${output}" "extraKnownMarketplaces"
+assert_contains "${case_dir}/claude-marketplace" "default-branch"
+
+echo "case: an unregistered marketplace declared ref-less in extraKnownMarketplaces is added from the declared (ref-less) source"
+run_declared_case declared-unregistered no '{"source":"github","repo":"matteobortolazzo/cenci"}'
+[[ "${declared_exit}" -eq 0 ]]
+assert_contains "${calls}" "claude plugin marketplace add matteobortolazzo/cenci"
+assert_not_contains "${calls}" "claude plugin marketplace add matteobortolazzo/cenci@"
+assert_contains "${case_dir}/claude-marketplace" "default-branch"
+
+echo "case: an unregistered marketplace declared with a ref in extraKnownMarketplaces is added at the declared ref, not the resolved one"
+run_declared_case declared-ref no '{"source":"github","repo":"matteobortolazzo/cenci","ref":"watch/v1.0.0"}'
+[[ "${declared_exit}" -eq 0 ]]
+assert_contains "${calls}" "claude plugin marketplace add matteobortolazzo/cenci@watch/v1.0.0"
+assert_not_contains "${calls}" "claude plugin marketplace add matteobortolazzo/cenci@watch/v9.9.9"
+assert_contains "${output}" "watch/v9.9.9"
 
 echo "case: install repairs a missing core plugin without substring false positives"
 name=repair-missing-core

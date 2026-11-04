@@ -11,7 +11,7 @@
 #
 #   G1  every "not run" path prints `not run: <reason>`, exits 0, never says
 #       "passed", and never launches `codex exec`
-#         (env gate unset or 0, codex absent, version below 0.144.1, an
+#         (env gate unset or 0, codex absent, version below 0.166.0, an
 #          unparseable version, login failing)
 #   G2  accepted versions reach `codex exec`
 #   G3  the trust-bypass flag is the library's, unchanged: host mode never passes
@@ -63,7 +63,7 @@ RUNNER="${SCRIPT_DIR}/native-workflows.test.sh"
 LIB="${SCRIPT_DIR}/native-hooks-lib.sh"
 BYPASS_FLAG="--dangerously-bypass-hook-trust"
 APPROVAL_BYPASS_FLAG="--dangerously-bypass-approvals-and-sandbox"
-MIN_VERSION="0.144.1"
+MIN_VERSION="0.166.0"
 
 FAILURES=0
 PASSES=0
@@ -148,7 +148,7 @@ cat > "${STUB_DIR}/codex" <<'SCRIPT'
 printf '%s\n' "$*" >> "${STUB_ARGV_LOG:?STUB_ARGV_LOG must be set}"
 case "$1" in
     --version | -V)
-        printf '%s\n' "${STUB_VERSION_OUTPUT-codex-cli 0.150.0}"
+        printf '%s\n' "${STUB_VERSION_OUTPUT-codex-cli 0.170.0}"
         exit 0
         ;;
     --help | -h)
@@ -839,7 +839,7 @@ run_runner "${FARM_DIR}" CENCI_CODEX_NATIVE=1
 assert_not_run "codex absent" "${OUT}" 'codex'
 
 echo "case: codex older than ${MIN_VERSION} -> not run, in every output format (G1)"
-for v in "codex-cli 0.144.0" "codex-cli 0.143.9" "codex-cli 0.9.0" "0.144.0"; do
+for v in "codex-cli 0.165.9" "codex-cli 0.165.0" "codex-cli 0.9.0" "0.165.9"; do
     run_runner "${STUB_PATH}" CENCI_CODEX_NATIVE=1 "STUB_VERSION_OUTPUT=${v}"
     assert_not_run "version '${v}'" "${OUT}" "version|${MIN_VERSION//./\\.}"
 done
@@ -859,7 +859,7 @@ fi
 
 # ── G2: accepted versions reach `codex exec` ────────────────────────────
 echo "case: ${MIN_VERSION} and newer are accepted, in both output formats (G2)"
-for v in "codex-cli 0.144.1" "codex-cli 0.150.0" "codex-cli 0.144.10" "0.144.1" "0.150.0"; do
+for v in "codex-cli 0.166.0" "codex-cli 0.170.0" "codex-cli 0.166.10" "0.166.0" "0.170.0"; do
     run_runner "${STUB_PATH}" CENCI_CODEX_NATIVE=1 "STUB_VERSION_OUTPUT=${v}"
     if exec_recorded "${OUT}/argv"; then
         pass

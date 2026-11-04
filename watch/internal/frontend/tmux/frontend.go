@@ -390,13 +390,16 @@ func (f *Frontend) Sweep(sessions map[string]*frontend.SessionState) []frontend.
 	// When the user presses ESC during pure text generation (no tool running),
 	// there's no hook event. The pane title reverts to an idle marker (✶ ✻ ✳)
 	// while we still think it's Running. Also restore Codex windows whose agent
-	// process exited without a SessionEnd hook.
+	// process exited without sending SessionEnd (an older client or an abrupt
+	// exit).
 	//
-	// The exit restore is Codex/OpenCode-only (#432, #488): neither documents a
-	// SessionEnd hook, so a pane whose current command no longer reads as that
-	// agent is our only exit signal. Claude Code *does* fire SessionEnd (handled
-	// in daemon/event.go) and pane disappearance is covered by Phase 2 above, so
-	// a finished Claude session must not be swept here — its pane_current_command
+	// The exit restore is Codex/OpenCode-only (#432, #488): Codex sends
+	// SessionEnd from 0.166.0, but an older client or an abrupt exit does not,
+	// and OpenCode's exit is not relied on to either, so a pane whose current
+	// command no longer reads as that agent is our backstop exit signal. Claude
+	// Code *does* fire SessionEnd (handled in daemon/event.go) and pane
+	// disappearance is covered by Phase 2 above, so a finished Claude session
+	// must not be swept here — its pane_current_command
 	// legitimately differs from "claude" (npm/node shim reports "node"; sandbox
 	// lookups fail), which would otherwise silently untrack a just-done session
 	// (regression from #418 tagging Claude events with -agent claude).

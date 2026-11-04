@@ -5,7 +5,7 @@
 #
 #   cnh_parse_version <text>
 #       stdout: X.Y.Z extracted from `codex --version` output ("codex-cli
-#       0.144.1" or a bare "0.144.1"). Non-zero and empty stdout when no
+#       0.166.0" or a bare "0.166.0"). Non-zero and empty stdout when no
 #       X.Y.Z is present.
 #   cnh_version_ge <X.Y.Z> <min X.Y.Z>
 #       exit 0 when the first is >= the second (numeric per component, not

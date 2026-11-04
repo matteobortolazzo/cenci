@@ -207,6 +207,42 @@ marketplace_registered() {
 		grep -Eq "(^|[[:space:]])${MARKETPLACE_NAME}([[:space:]]|$)"
 }
 
+# Claude refuses `plugin marketplace add` for a marketplace that user or
+# managed settings declare under extraKnownMarketplaces unless the add uses
+# exactly the declared source — the cenci sandbox seeds a ref-less entry, so a
+# ref-pinned add fails there. claude_declared_marketplace returns 0 when such an
+# entry exists for MARKETPLACE_NAME, setting CLAUDE_DECLARED_FILE and
+# CLAUDE_DECLARED_REF (empty = the repo's default branch); managed settings are
+# checked first because they take precedence. Returns 1 when none is declared
+# (or jq is unavailable to read one).
+CLAUDE_DECLARED_FILE=""
+CLAUDE_DECLARED_REF=""
+claude_managed_settings_file() {
+	if [ -n "${CENCI_CLAUDE_MANAGED_SETTINGS:-}" ]; then
+		printf '%s\n' "$CENCI_CLAUDE_MANAGED_SETTINGS"
+	elif [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+		printf '%s\n' "/Library/Application Support/ClaudeCode/managed-settings.json"
+	else
+		printf '%s\n' "/etc/claude-code/managed-settings.json"
+	fi
+}
+
+claude_declared_marketplace() {
+	local f ref managed
+	have jq || return 1
+	managed="$(claude_managed_settings_file)"
+	for f in "$managed" "$HOME/.claude/settings.json"; do
+		[ -f "$f" ] || continue
+		ref="$(jq -er --arg n "$MARKETPLACE_NAME" \
+			'.extraKnownMarketplaces[$n].source | select(type == "object") | (.ref // "")' \
+			"$f" 2>/dev/null)" || continue
+		CLAUDE_DECLARED_FILE="$f"
+		CLAUDE_DECLARED_REF="$ref"
+		return 0
+	done
+	return 1
+}
+
 codex_plugin_installed() {
 	local list
 	list="$(codex plugin list 2>/dev/null)" || return 2
@@ -421,6 +457,11 @@ check_stale_marketplace_pin() {
 	local client="$1" dir latest current add_cmd
 	dir="${HOME}/.${client}/plugins/marketplaces/cenci"
 	[ -d "$dir" ] || return 0
+	# A settings-declared marketplace tracks its declared source on purpose,
+	# and the remove+re-add recovery below would be refused for it.
+	if [ "$client" = claude ] && claude_declared_marketplace; then
+		return 0
+	fi
 	# Resolve the checkout's own currently-pinned ref first, before ever
 	# probing the network: a directory that merely looks like a checkout
 	# (not actually git-tracked, or not checked out at an exact tag) has no
@@ -448,10 +489,10 @@ doctor_codex_support() {
 	local raw version config method notifications project_root
 	raw="$(codex --version 2>/dev/null || true)"
 	version="$(printf '%s' "$raw" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
-	if [ -n "$version" ] && printf '%s\n%s\n' "0.144.1" "$version" | sort -V -C 2>/dev/null; then
-		ok "Codex ${version} meets cenci's minimum version 0.144.1"
+	if [ -n "$version" ] && printf '%s\n%s\n' "0.166.0" "$version" | sort -V -C 2>/dev/null; then
+		ok "Codex ${version} meets cenci's minimum version 0.166.0"
 	else
-		warn "Codex ${version:-unknown} is unsupported — cenci requires 0.144.1 or newer"
+		warn "Codex ${version:-unknown} is unsupported — cenci requires 0.166.0 or newer"
 	fi
 	# Executable workflow runtime, reported apart from plugin installation (#1233):
 	# the Codex workflows run flow/codex/*.mjs helpers, so they need Node on PATH.
@@ -857,11 +898,49 @@ selected() { case " $SELECTED " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 
 # ------------------------------------------------------------ install steps ----
 
+# step_claude_declared_marketplace — reconcile a marketplace that Claude's
+# settings declare under extraKnownMarketplaces. The remove+re-add at
+# RESOLVED_REF would delete the registration and then be refused (the add's
+# source can't differ from the declared one), so honor the declared source:
+# refresh an existing registration in place, or add exactly the declared one.
+step_claude_declared_marketplace() {
+	local source="${MARKETPLACE_REPO}${CLAUDE_DECLARED_REF:+@${CLAUDE_DECLARED_REF}}"
+	local label="${CLAUDE_DECLARED_REF:-the default branch}" state
+	if marketplace_registered; then
+		if claude plugin marketplace update "$MARKETPLACE_NAME" >/dev/null 2>&1; then
+			ok "Claude: marketplace '$MARKETPLACE_NAME' refreshed at its extraKnownMarketplaces source (${label})"
+			CLAUDE_MARKETPLACE_READY=1
+		else
+			fail "Claude: could not refresh marketplace '$MARKETPLACE_NAME'. Run manually:
+  claude plugin marketplace update $MARKETPLACE_NAME"
+			INSTALL_FAILED=1
+		fi
+	else
+		state=$?
+		if [ "$state" -eq 2 ]; then
+			fail "Claude: could not query registered marketplaces"
+			INSTALL_FAILED=1
+		elif claude plugin marketplace add "$source" >/dev/null 2>&1; then
+			ok "Claude: registered ${source} (from its extraKnownMarketplaces entry)"
+			CLAUDE_MARKETPLACE_READY=1
+		else
+			fail "Claude: could not register the marketplace from its extraKnownMarketplaces entry in ${CLAUDE_DECLARED_FILE}. Run manually:
+  claude plugin marketplace add ${source}"
+			INSTALL_FAILED=1
+		fi
+	fi
+	if [ "$CLAUDE_DECLARED_REF" != "$RESOLVED_REF" ]; then
+		warn "Claude: ${CLAUDE_DECLARED_FILE} declares the '$MARKETPLACE_NAME' marketplace under extraKnownMarketplaces (${label}), so it tracks that source instead of ${RESOLVED_REF}; edit that entry to pin a different ref"
+	fi
+}
+
 step_marketplace() {
 	local state
 	step "Reconciling the cenci marketplace"
 	if [ "$HAS_CLAUDE" -eq 0 ]; then
 		:
+	elif claude_declared_marketplace; then
+		step_claude_declared_marketplace
 	elif marketplace_registered; then
 		# Registered, possibly at a different (or unpinned) ref. Neither
 		# client's in-place add/update semantics for repointing an existing
