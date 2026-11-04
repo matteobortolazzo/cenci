@@ -48,8 +48,12 @@ CENCI_CODEX_NATIVE=1 CENCI_CODEX_NATIVE_OUT=./native-host.md bash flow/codex/nat
   including each variant's `CANARY_STATUS`, refusal text and `REMOVED:`/`LEFTOVER:` lines,
   into the "Guard canary preflight" section below.
 - Pass or fail is judged from the filesystem after each call, the `codex exec --json`
-  tool-call events and the guards' capture tap (`CENCI_CODEX_HOOK_CAPTURE_DIR`). A row whose
-  call was not proven to have been attempted is `inconclusive`, never a success.
+  tool-call events and the guards' capture tap (`CENCI_CODEX_HOOK_CAPTURE_DIR`). Codex
+  0.166.0 can omit a blocked call from those events; the runner also accepts its native
+  router denial on stderr when the command or patch matches the probe exactly, the expected
+  tool has a capture tap, and Codex exits successfully. The guard's own denial message must
+  appear in the diagnostic body. Unrelated stderr and model narration are not evidence.
+  A row whose call was not proven to have been attempted is `inconclusive`, never a success.
 - Home paths, user and host names, fixture roots, session IDs and token-shaped strings are
   replaced by `<HOME>`, `<USER>`, `<HOST>`, `<FIXTURE>`, `<UUID>` and `<TOKEN>` before
   anything is committed. Git commit SHAs are kept.

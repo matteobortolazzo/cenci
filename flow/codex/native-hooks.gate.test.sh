@@ -232,6 +232,34 @@ case "$1" in
             output=$( (cd "$dir" && sh -c "$cmd") 2>&1 )
         fi
         rm -rf "$work"
+        # Codex 0.166.0 reports a blocked call on its router stderr, without a
+        # command_execution/file_change item. Keep this fixture independent of
+        # the runner's parser, including the multiline apply_patch command.
+        if [ "$status" = declined ] && [ -n "${STUB_ROUTER_BLOCK:-}" ]; then
+            router_cmd="$cmd"
+            router_output="$output"
+            router_prefix='2026-11-04T10:41:31.581402Z ERROR codex_core::tools::router: error=Command blocked by PreToolUse hook: '
+            case "$STUB_ROUTER_BLOCK" in
+                unrelated) router_cmd='printf x > /unrelated/target.txt' ;;
+                suffix) router_cmd="${cmd}.different" ;;
+                wrong-guard) router_output='BLOCKED: another policy denied this operation' ;;
+                generic) router_prefix='' ;;
+                prefixed) router_prefix="echo ${router_prefix}" ;;
+                missing-tap)
+                    rm -f "${CENCI_CODEX_HOOK_CAPTURE_DIR}/guard-main-worktree."* \
+                        "${CENCI_CODEX_HOOK_CAPTURE_DIR}/check-sensitive-files."*
+                    ;;
+            esac
+            if [ "$STUB_ROUTER_BLOCK" = narrative ]; then
+                jq -nc --arg text "${router_prefix}${router_output}. Command: ${router_cmd}" \
+                    '{type:"item.completed",item:{id:"item_0",type:"agent_message",text:$text}}'
+            else
+                printf '%s%s. Command: %s\n' "$router_prefix" "$router_output" "$router_cmd" >&2
+                printf '%s\n' '{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":""}}'
+            fi
+            [ "$STUB_ROUTER_BLOCK" != failed-exec ] || exit 1
+            exit 0
+        fi
         jq -n -c --arg c "$cmd" --arg o "$output" --arg s "$status" \
             '{type: "item.completed", item: {id: "item_0", type: "command_execution", command: $c, aggregated_output: $o, status: $s}}'
         exit 0
@@ -890,6 +918,30 @@ RUNNER_OVERRIDE="${HOST_RUNNER}"
 run_runner "${STUB_PATH}" "${EMU_PATCH_ENV[@]}" STUB_REDACT_BLOCK=1
 RUNNER_OVERRIDE=""
 assert_row "unknown state" "${OUT}/stdout" "${CANARY_AL}" inconclusive
+
+echo "case: native router stderr proves shell and multiline patch denials without completed tool items (G6)"
+RUNNER_OVERRIDE="${HOST_RUNNER}"
+run_runner "${STUB_PATH}" "${EMU_PATCH_ENV[@]}" STUB_ROUTER_BLOCK=native
+RUNNER_OVERRIDE=""
+assert_row "native router" "${OUT}/stdout" "canary: bash write to the main worktree" ok
+assert_row "native router" "${OUT}/stdout" "bash -> sensitive .env in a worktree" ok
+assert_row "native router" "${OUT}/stdout" "apply_patch -> main worktree file (deny" ok
+assert_row "native router" "${OUT}/stdout" "apply_patch -> sensitive .env in a worktree" ok
+assert_row "native router" "${OUT}/stdout" "${CANARY_AL}" ok
+assert_row_has "native router" "${OUT}/stdout" "${CANARY_AL}" "CANARY_STATUS=active"
+for probe_n in 1 2 3 4; do
+    assert_row_has "native router" "${OUT}/stdout" "${CANARY_AL}" "${probe_n}=denied"
+done
+
+for router_case in unrelated suffix wrong-guard generic prefixed narrative missing-tap failed-exec; do
+    echo "case: native router fallback rejects ${router_case} evidence (G6)"
+    RUNNER_OVERRIDE="${HOST_RUNNER}"
+    run_runner "${STUB_PATH}" "${EMU_PATCH_ENV[@]}" "STUB_ROUTER_BLOCK=${router_case}"
+    RUNNER_OVERRIDE=""
+    assert_row "router ${router_case}" "${OUT}/stdout" "canary: bash write to the main worktree" inconclusive
+    assert_row "router ${router_case}" "${OUT}/stdout" "${CANARY_AL}" inconclusive
+    if [[ "${R_RC}" == 3 ]]; then pass; else fail "router ${router_case}: expected inconclusive exit 3, got ${R_RC}"; fi
+done
 
 echo "case: sandbox runs the withheld variant, leaving out ONLY the trust flag, and labels the trust (G6)"
 RUNNER_OVERRIDE="${SANDBOX_RUNNER}"

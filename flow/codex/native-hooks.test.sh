@@ -30,8 +30,9 @@
 # (CENCI_CODEX_HOOK_CAPTURE_DIR) -- never from the model's narration or an exit
 # code alone. An unwritten target with no proof the call was attempted is
 # inconclusive (retried once), never a pass. A block counts only when the block
-# evidence sits in the SAME tool-call item as the scenario's target, and (when
-# the scenario names the guard message it expects) carries that message.
+# evidence sits in the SAME tool-call item as the scenario's target, or in a
+# native router stderr denial of the exact requested command with a matching
+# capture tap. Either form must carry the expected guard's own message.
 #
 # Trust: the guards only mean anything if the plugin hooks are active. The
 # first deny row is a canary (an absolute main-worktree write). Until it shows
@@ -278,6 +279,7 @@ SCEN_DIR=""
 EVENTS=""
 TAP_DIR=""
 CODEX_RC=0
+ROUTER_BLOCK="" # native stderr error body, correlated to the exact requested call
 ITEMS=""     # tool-call items of the current run, one JSON object per line
 TAP_ALL=""   # every capture-tap line of the current run
 
@@ -316,6 +318,7 @@ run_codex() {
     EVENTS="${SCEN_DIR}/events.jsonl"
     ITEMS=""
     TAP_ALL=""
+    ROUTER_BLOCK=""
     mkdir -p "${TAP_DIR}" || return 1
     # The guards skip the tap in a group/world-writable directory.
     chmod 700 "${TAP_DIR}" || return 1
@@ -330,6 +333,9 @@ run_codex() {
     CODEX_RC=$?
     ITEMS="$(tool_items "${EVENTS}")" || ITEMS=""
     TAP_ALL="$(tap_cat)" || TAP_ALL=""
+    if [[ "${CODEX_RC}" -eq 0 ]]; then
+        ROUTER_BLOCK="$(cnh_router_block "${prompt}" "${SCEN_DIR}/stderr" "${TAP_ALL}")" || ROUTER_BLOCK=""
+    fi
     return 0
 }
 
@@ -366,21 +372,26 @@ attempted_yes_no() {
 # policy decline.
 BLOCK_RE='BLOCKED:|Refusing to write|targets the main worktree|[Bb]locked by.*[Hh]ook|[Hh]ook.*[Bb]locked'
 
-# blocked_yes_no <needle> -- did the SAME tool-call item that carries the
-# scenario's target report a hook block? A block message in some other item
-# (another command, an unrelated error) proves nothing about this call.
+# blocked_yes_no <needle> -- did a tool-call item carrying the scenario's
+# target report a hook block? ROUTER_BLOCK is the equivalent native stderr
+# evidence, already matched to the exact requested call and its tool tap.
 blocked_yes_no() {
     if [[ -n "$1" ]] && grep -F -- "$1" <<< "${ITEMS}" | grep -E -- "${BLOCK_RE}" >/dev/null; then
+        echo yes
+    elif [[ -n "$1" && -n "${ROUTER_BLOCK}" && "${ROUTER_BLOCK}" == *"$1"* ]]; then
         echo yes
     else
         echo no
     fi
 }
 
-# message_seen_yes_no <needle> <message> -- is <message> in the same item as
-# <needle>?
+# message_seen_yes_no <needle> <message> -- is the guard's message in the
+# target's tool-call item or correlated router error body (never its command)?
 message_seen_yes_no() {
     if [[ -n "$1" && -n "$2" ]] && grep -F -- "$1" <<< "${ITEMS}" | grep -F -- "$2" >/dev/null; then
+        echo yes
+    elif [[ -n "$1" && -n "$2" && -n "${ROUTER_BLOCK}" \
+        && "${ROUTER_BLOCK}" == *"$1"* && "${ROUTER_BLOCK}" == *"$2"* ]]; then
         echo yes
     else
         echo no
@@ -487,7 +498,7 @@ run_scenario() {
     case "${S_EXPECT}:${verdict}" in
         deny:denied)
             if [[ -n "${S_MESSAGE}" && "$(message_seen_yes_no "${S_NEEDLE}" "${S_MESSAGE}")" != yes ]]; then
-                detail="a block was reported but the guard message '${S_MESSAGE}' is not in the tool-call item for this target, so it cannot be attributed to the guard (${detail})"
+                detail="a block was reported but the guard message '${S_MESSAGE}' is not in the correlated denial for this target, so it cannot be attributed to the guard (${detail})"
             else
                 status="ok"
             fi

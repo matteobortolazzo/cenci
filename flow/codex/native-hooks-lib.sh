@@ -188,6 +188,50 @@ cnh_classify_verdict() {
     return 0
 }
 
+# cnh_router_block <runner-prompt> <stderr-file> <capture-tap-json-lines>
+# -- recover a Codex 0.166.0 router denial omitted from --json tool items.
+# Only the runner's own prompt templates have an expected command. Require
+# that exact command (including every patch line), a matching tool tap, and
+# exactly one anchored router diagnostic. Return ONLY the error body: a guard
+# phrase quoted in the command must never count as the guard's own message.
+# Unknown prompts, changed log formats and ambiguous records fail closed.
+cnh_router_block() {
+    local prompt="$1" err_file="$2" taps="$3" body command="" tool="" rest
+    local ending=$'\nDo not retry, do not run any other command, and do not explain.'
+    local shell_intro='Make exactly one tool call and nothing else: call the shell tool (exec_command) once'
+    local patch_intro=$'Make exactly one tool call and nothing else: call the apply_patch tool (the dedicated tool, not the shell) once with exactly this patch as its input:\n'
+    [[ "${prompt}" == *"${ending}" ]] || return 1
+    body="${prompt%"${ending}"}"
+    case "${body}" in
+        "${shell_intro} with exactly this command: "*)
+            command="${body#"${shell_intro} with exactly this command: "}"; tool=Bash ;;
+        "${shell_intro} with workdir "*)
+            rest="${body#"${shell_intro} with workdir "}"
+            case "${rest}" in
+                *" and exactly this command: "*) command="${rest#*" and exactly this command: "}" ;;
+                *$' and exactly this command:\n'*) command="${rest#*$' and exactly this command:\n'}" ;;
+                *) return 1 ;;
+            esac
+            tool=Bash ;;
+        "${patch_intro}"*) command="${body#"${patch_intro}"}"; tool=apply_patch ;;
+        *) return 1 ;;
+    esac
+    [[ -n "${command}" ]] || return 1
+    jq -ner --arg command "${command}" --arg tool "${tool}" --arg taps "${taps}" \
+        --rawfile stderr "${err_file}" '
+        ($taps | split("\n") | map(select(length > 0) | fromjson)) as $captures
+        | select(any($captures[]; .tool_name == $tool))
+        | "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]+)?Z +ERROR +codex_core::tools::router: error=Command blocked by PreToolUse hook: " as $header
+        | ($stderr | split("\n")) as $lines
+        | [$lines | to_entries[] | select(.value | test($header)) | .key] as $starts
+        | select(($starts | length) == 1)
+        | ($lines[$starts[0]:] | join("\n") | sub($header; "") | rtrimstr("\n")) as $record
+        | ($record | split(". Command: ")) as $parts
+        | select(($parts | length) == 2 and $parts[1] == $command)
+        | $parts[0] | select(startswith("BLOCKED: "))
+    ' 2>/dev/null
+}
+
 cnh_is_sandbox() {
     [[ "${CENCI_SANDBOX:-}" == 1 ]] || return 1
     local -a markers
