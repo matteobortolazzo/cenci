@@ -10,7 +10,8 @@
 # one machine-readable line for check.sh's agent-roles check. A missing
 # .codex/agents/ directory, a clean set, and a notes-only (unverified) set all
 # stay silent; drift and a missing Python 3.11+ prerequisite (#1191) each get
-# their own advisory. Every state is covered in both modes (cases 1-13).
+# their own advisory. A broken role nested under .codex/agents/ is drift too
+# (#1406). Every state is covered in both modes (cases 1-14).
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -279,6 +280,21 @@ assert_eq "${OUT}" "unknown validator-error" "case13 plain unknown for validator
 run_hook_with "${PATH}" "${FAKE_HOOK}"
 assert_eq "${OUT}" "" "case13 hook silent for unknown"
 remove_fake_tree "${FAKE_HOOK}"
+cleanup_fixture
+
+# --- Case 14 (#1406): a broken role nested under .codex/agents/ is drift -----
+make_fixture
+write_role planner
+mkdir -p "${ROOT}/.codex/agents/nested"
+printf 'name = "broken"\ndeveloper_instructions = "Do the thing."\n' > "${ROOT}/.codex/agents/nested/broken.toml"
+run_hook --plain
+assert_eq "${OUT}" "drift missing-field .codex/agents/nested/broken.toml: 'description' must be a non-empty string" "case14 plain drift names the nested file"
+assert_eq "${CODE}" "0" "case14 plain exit stays 0"
+run_hook
+assert_eq "${CODE}" "0" "case14 hook exit stays 0"
+CTX="$(hook_context)" || fail "case14 hook output must be SessionStart JSON (got: ${OUT})"
+assert_contains "${CTX}" "${HOOK_DRIFT_MARKER}" "case14 hook gives the drift advisory"
+assert_contains "${CTX}" ".codex/agents/nested/broken.toml" "case14 hook advisory names the nested path"
 cleanup_fixture
 
 echo "check-agent-role-drift.test.sh: failures=${failures}"

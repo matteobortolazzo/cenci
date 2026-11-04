@@ -9,12 +9,15 @@
 # Usage:
 #   validate-agent-roles.sh [--plain] <dir> [<dir> ...]
 #
-# Every *.toml file directly under each given directory is parsed and checked.
+# Every *.toml file under each given directory is parsed and checked, recursively
+# and in sorted full-path order; symlinked subdirectories are not followed.
 # Each directory argument is one configuration layer (Codex treats
-# ~/.codex/agents/ and .codex/agents/ as separate layers), so a `name` repeated
-# across directories is NOT a duplicate; a `name` repeated inside one directory is.
+# ~/.codex/agents/ and .codex/agents/ as separate layers), and nested files belong
+# to the layer of the directory argument they sit under, so a `name` repeated
+# across directories is NOT a duplicate; a `name` repeated inside one directory
+# (including its subdirectories) is.
 #
-# Documented key subset, version-stamped: Codex docs 2026-10, Codex CLI 0.144.1+.
+# Documented key subset, version-stamped: Codex docs 2026-11, Codex CLI 0.144.1+.
 # This is a documented subset, not a claim to be the full schema. Anything else is
 # reported as unverified, never invalid.
 #   - name, description, developer_instructions: required non-empty strings
@@ -22,7 +25,8 @@
 #     offline; an effort outside minimal/low/medium/high/xhigh is unverified
 #     because supported efforts vary by model and version)
 #   - sandbox_mode: string, one of read-only / workspace-write / danger-full-access
-#   - mcp_servers, skills (and skills.config): tables
+#   - mcp_servers, skills: tables; skills.config: an array of tables
+#     ([[skills.config]]), entries checked only for being tables
 #
 # Finding kinds, one per output line, "<kind> <subject>: <detail>":
 #   failing:      invalid-toml unreadable missing-field invalid-type invalid-value
@@ -97,7 +101,7 @@ for i in "${!DIRS[@]}"; do
   [[ -d "$dir" ]] || { echo "validate-agent-roles.sh: not a directory: $dir" >&2; exit 2; }
   while IFS= read -r -d '' f; do
     FILES+=("${i}:${f}")
-  done < <(find "$dir" -maxdepth 1 -name '*.toml' -print0 | sort -z)
+  done < <(find "$dir" -name '*.toml' -print0 | LC_ALL=C sort -z)
 done
 
 if [[ "${#FILES[@]}" -eq 0 ]]; then
@@ -190,8 +194,13 @@ for arg in sys.argv[1:]:
         else:
             for sub in sorted(skills):
                 if sub == "config":
-                    if not isinstance(skills[sub], dict):
-                        findings.append(f"invalid-type {shown}: 'skills.config' must be a table")
+                    config = skills[sub]
+                    if not isinstance(config, list):
+                        findings.append(f"invalid-type {shown}: 'skills.config' must be an array of tables")
+                    else:
+                        for idx, entry in enumerate(config):
+                            if not isinstance(entry, dict):
+                                findings.append(f"invalid-type {shown}: 'skills.config[{idx}]' must be a table")
                 else:
                     findings.append(
                         f"unverified-key {shown}: 'skills.{q(sub)}' is not in the documented key subset"
