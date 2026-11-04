@@ -407,9 +407,11 @@ later, and those sessions are not yet covered (a tracked Followup).
 
 Verified so far: `codex/guard-canary.test.sh` exercises the helper against the real guard
 scripts, `codex/native-hooks.gate.test.sh` covers the native runner's canary scenario with a
-Codex stub, and `codex/workflows.test.sh` asserts where each surface runs the step. The result
-against a real Codex (host and `cn xt`, hooks trusted and withheld, and whether `apply_patch`
-reaches the `Write|Edit` matcher) is awaiting the maintainer's native runs and is recorded in
+Codex stub, and `codex/workflows.test.sh` asserts where each surface runs the step. Native
+Codex 0.166.0 runs on 2026-11-04 confirmed all four probes on the host with persisted hook
+approval and in a Codex sandbox with launcher trust bypass. The sandbox trust-withheld
+variant refused and removed all four written probes, with no leftovers. `apply_patch`
+reached the `Write|Edit` matcher. Run details and remaining experiment limits are recorded in
 [`codex-native-evidence.md`](codex-native-evidence.md).
 
 ## Attention behavior

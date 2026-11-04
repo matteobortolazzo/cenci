@@ -192,8 +192,9 @@ cnh_classify_verdict() {
 # -- recover a Codex 0.166.0 router denial omitted from --json tool items.
 # Only the runner's own prompt templates have an expected command. Require
 # that exact command (including every patch line), a matching tool tap, and
-# exactly one anchored router diagnostic. Return ONLY the error body: a guard
-# phrase quoted in the command must never count as the guard's own message.
+# exactly one anchored router diagnostic. Return command and error separately:
+# MOVE can be denied on its source while the effect probe names its destination,
+# but a guard phrase in the command must never count as the guard's own message.
 # Unknown prompts, changed log formats and ambiguous records fail closed.
 cnh_router_block() {
     local prompt="$1" err_file="$2" taps="$3" body command="" tool="" rest
@@ -217,7 +218,7 @@ cnh_router_block() {
         *) return 1 ;;
     esac
     [[ -n "${command}" ]] || return 1
-    jq -ner --arg command "${command}" --arg tool "${tool}" --arg taps "${taps}" \
+    jq -nec --arg command "${command}" --arg tool "${tool}" --arg taps "${taps}" \
         --rawfile stderr "${err_file}" '
         ($taps | split("\n") | map(select(length > 0) | fromjson)) as $captures
         | select(any($captures[]; .tool_name == $tool))
@@ -228,7 +229,8 @@ cnh_router_block() {
         | ($lines[$starts[0]:] | join("\n") | sub($header; "") | rtrimstr("\n")) as $record
         | ($record | split(". Command: ")) as $parts
         | select(($parts | length) == 2 and $parts[1] == $command)
-        | $parts[0] | select(startswith("BLOCKED: "))
+        | select($parts[0] | startswith("BLOCKED: "))
+        | {command: $command, error: $parts[0]}
     ' 2>/dev/null
 }
 

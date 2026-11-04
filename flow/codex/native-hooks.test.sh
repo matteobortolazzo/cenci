@@ -280,6 +280,7 @@ EVENTS=""
 TAP_DIR=""
 CODEX_RC=0
 ROUTER_BLOCK="" # native stderr error body, correlated to the exact requested call
+ROUTER_COMMAND="" # exact denied operation (may name both MOVE source and destination)
 ITEMS=""     # tool-call items of the current run, one JSON object per line
 TAP_ALL=""   # every capture-tap line of the current run
 
@@ -309,7 +310,7 @@ tap_cat() {
 # captured once, here, so that no later check pipes into `grep -q` (under
 # pipefail an early-exiting grep SIGPIPEs the producer and flips the status).
 run_codex() {
-    local cwd="$1" prompt="$2"
+    local cwd="$1" prompt="$2" router_evidence=""
     shift 2
     local -a timeout_cmd=()
     SCEN_N=$((SCEN_N + 1))
@@ -319,6 +320,7 @@ run_codex() {
     ITEMS=""
     TAP_ALL=""
     ROUTER_BLOCK=""
+    ROUTER_COMMAND=""
     mkdir -p "${TAP_DIR}" || return 1
     # The guards skip the tap in a group/world-writable directory.
     chmod 700 "${TAP_DIR}" || return 1
@@ -334,7 +336,14 @@ run_codex() {
     ITEMS="$(tool_items "${EVENTS}")" || ITEMS=""
     TAP_ALL="$(tap_cat)" || TAP_ALL=""
     if [[ "${CODEX_RC}" -eq 0 ]]; then
-        ROUTER_BLOCK="$(cnh_router_block "${prompt}" "${SCEN_DIR}/stderr" "${TAP_ALL}")" || ROUTER_BLOCK=""
+        if router_evidence="$(cnh_router_block "${prompt}" "${SCEN_DIR}/stderr" "${TAP_ALL}")" \
+            && ROUTER_COMMAND="$(jq -er '.command | strings | select(length > 0)' <<< "${router_evidence}")" \
+            && ROUTER_BLOCK="$(jq -er '.error | strings | select(length > 0)' <<< "${router_evidence}")"; then
+            :
+        else
+            ROUTER_COMMAND=""
+            ROUTER_BLOCK=""
+        fi
     fi
     return 0
 }
@@ -378,7 +387,7 @@ BLOCK_RE='BLOCKED:|Refusing to write|targets the main worktree|[Bb]locked by.*[H
 blocked_yes_no() {
     if [[ -n "$1" ]] && grep -F -- "$1" <<< "${ITEMS}" | grep -E -- "${BLOCK_RE}" >/dev/null; then
         echo yes
-    elif [[ -n "$1" && -n "${ROUTER_BLOCK}" && "${ROUTER_BLOCK}" == *"$1"* ]]; then
+    elif [[ -n "$1" && -n "${ROUTER_BLOCK}" && "${ROUTER_COMMAND}" == *"$1"* ]]; then
         echo yes
     else
         echo no
@@ -391,7 +400,7 @@ message_seen_yes_no() {
     if [[ -n "$1" && -n "$2" ]] && grep -F -- "$1" <<< "${ITEMS}" | grep -F -- "$2" >/dev/null; then
         echo yes
     elif [[ -n "$1" && -n "$2" && -n "${ROUTER_BLOCK}" \
-        && "${ROUTER_BLOCK}" == *"$1"* && "${ROUTER_BLOCK}" == *"$2"* ]]; then
+        && "${ROUTER_COMMAND}" == *"$1"* && "${ROUTER_BLOCK}" == *"$2"* ]]; then
         echo yes
     else
         echo no

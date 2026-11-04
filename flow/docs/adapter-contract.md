@@ -99,8 +99,11 @@ or untrusted hooks as the likely cause, pointing to `/hooks`. Coverage is not co
 check runs once, when arming, and the `ci-repair` and `babysit-attention` sessions the supervisor
 starts later are not yet covered (a tracked Followup). The canary is deterministic-tested by
 `codex/guard-canary.test.sh` and the contract placement is asserted by `codex/workflows.test.sh`
-(`MUTATING_CODEX`); what a native Codex does with it is awaiting the maintainer's native runs
-and is recorded in [`codex-native-evidence.md`](codex-native-evidence.md) once they exist.
+(`MUTATING_CODEX`). Native Codex 0.166.0 runs on 2026-11-04 confirmed all four pairs,
+including `apply_patch` through `Write|Edit`, on the host and in a Codex sandbox. With the
+sandbox trust-bypass flag withheld, the canary refused and removed all four written probes
+with no leftovers. The run record and experiment limits are in
+[`codex-native-evidence.md`](codex-native-evidence.md).
 
 Claude Code is excluded: it has no pending-trust state for plugin hooks, so the Claude Code
 `SKILL.md` files for these workflows carry no canary (reason recorded per

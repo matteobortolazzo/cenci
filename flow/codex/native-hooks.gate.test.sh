@@ -927,6 +927,9 @@ assert_row "native router" "${OUT}/stdout" "canary: bash write to the main workt
 assert_row "native router" "${OUT}/stdout" "bash -> sensitive .env in a worktree" ok
 assert_row "native router" "${OUT}/stdout" "apply_patch -> main worktree file (deny" ok
 assert_row "native router" "${OUT}/stdout" "apply_patch -> sensitive .env in a worktree" ok
+# MOVE's denial names the source, while the effect probe watches the
+# destination. The whole exact patch is the denied operation in either case.
+assert_row "native router" "${OUT}/stdout" "root session, relative move resolving to the main worktree (deny)" ok
 assert_row "native router" "${OUT}/stdout" "${CANARY_AL}" ok
 assert_row_has "native router" "${OUT}/stdout" "${CANARY_AL}" "CANARY_STATUS=active"
 for probe_n in 1 2 3 4; do
