@@ -285,12 +285,14 @@ rewrites files. The same validator backs `/cenci:maintain`'s `agent-roles` check
 
 ### Validating role files
 
-`codex/validate-agent-roles.sh [--plain] <dir> [<dir> ...]` parses every `*.toml` directly under
-each directory and classifies what it finds. It checks a documented, version-stamped subset of the
-role schema (Codex docs 2026-10, Codex CLI 0.144.1+), not the full schema: `name`, `description` and
+`codex/validate-agent-roles.sh [--plain] <dir> [<dir> ...]` parses every `*.toml` under
+each directory, recursively (sorted path order; symlinked subdirectories are not followed), and
+classifies what it finds. It checks a documented, version-stamped subset of the
+role schema (Codex docs 2026-11, Codex CLI 0.144.1+), not the full schema: `name`, `description` and
 `developer_instructions` are required non-empty strings; `model` and `model_reasoning_effort` are
 strings; `sandbox_mode` is one of `read-only`, `workspace-write` or `danger-full-access`;
-`mcp_servers` and `skills` (with `skills.config`) are tables. Model names are never checked offline.
+`mcp_servers` and `skills` are tables, and `skills.config` is an array of tables (`[[skills.config]]`
+entries; entry fields are not checked). Model names are never checked offline.
 
 | Class | Kinds | Effect |
 |---|---|---|
@@ -303,8 +305,8 @@ Exit codes are 0 (clean or notes only), 1 (at least one invalid finding), 2 (usa
 directory, not a directory, or no `*.toml`) and 3 (validation unavailable). **Each directory argument
 is one configuration layer**, the way Codex treats `~/.codex/agents/` and `.codex/agents/` as separate
 layers, so a `name` repeated in two directories is not a `duplicate-name`; a `name` repeated inside
-one directory is. Only the top level of a directory is read: Codex also discovers `.codex/agents/**`
-recursively, and the validator does not check nested files.
+one directory (including its subdirectories) is. Nested files belong to the layer of the directory
+argument they sit under, matching Codex's recursive discovery of `.codex/agents/**`.
 
 `check-agent-role-drift.sh --plain` wraps the validator and prints one state, read as
 `read -r state rest`: `clean`, `clean <note>[; <note>]`, `drift <failing findings>`, `absent` (no
