@@ -33,8 +33,11 @@ plugin, through `.github/workflows/plugin-version-bump.yml` (the shared logic in
 | Plugin id | Path filter | Tag | Caller workflow |
 |---|---|---|---|
 | `cenci` (flow) | `flow/**` | `flow/v<new>` | `flow-version-bump.yml` |
-| `cenci-watch` | `watch/**` | `watch/v<new>` | `watch-version-bump.yml` (then dispatches `watch-release.yml`) |
+| `cenci-watch` | `watch/**`, `install.sh` | `watch/v<new>` | `watch-version-bump.yml` (also runnable manually; then dispatches `watch-release.yml`) |
 | `cenci-sandbox` | `sandbox/**` | `sandbox/v<new>` | `sandbox-version-bump.yml` (also runnable manually) |
+
+`install.sh` rides on the watch release because `watch-release.yml` is the only workflow that
+publishes it as a signed asset, and the piped installer re-execs that asset rather than main's copy.
 
 The bump type is classified from the triggering commit only (its subject and body, which is the PR
 title and body under squash-merge), so choose the type carefully. Matching is case-insensitive:

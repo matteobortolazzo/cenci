@@ -3,7 +3,14 @@ name: watch — Version Bump
 on:
   push:
     branches: [main]
-    paths: ['watch/**']
+    # install.sh is a root file, but the watch release is the only one that
+    # publishes it (signed) as a release asset, and the piped installer
+    # re-execs that asset — so an installer fix must cut a watch release or
+    # it never reaches a default install (#1410 sat unshipped this way).
+    paths: ['watch/**', 'install.sh']
+  # Manual trigger so a release can be cut without a watch/install.sh change
+  # (e.g. to ship a fix that landed before this trigger existed).
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -15,7 +22,7 @@ permissions:
 
 jobs:
   bump:
-    if: github.actor != 'github-actions[bot]'
+    if: github.actor != 'github-actions[bot]' || github.event_name == 'workflow_dispatch'
     uses: ./.github/workflows/plugin-version-bump.yml
     with:
       plugin-name: cenci-watch

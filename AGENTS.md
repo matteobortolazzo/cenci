@@ -37,7 +37,7 @@ Root-level only, not covered by any project: `bash -n install.sh`
 
 Each plugin versions independently:
 - flow: auto-bumped on push to main (paths: `flow/**`), tags: `flow/v*`
-- watch: auto-bumped on push to main (paths: `watch/**`), tags: `watch/v*`
+- watch: auto-bumped on push to main (paths: `watch/**`, `install.sh` — the watch release ships the signed installer), tags: `watch/v*`
 - sandbox: auto-bumped on push to main (paths: `sandbox/**`), tags: `sandbox/v*`
 
 ## Sandbox Image
