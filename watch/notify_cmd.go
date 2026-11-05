@@ -11,6 +11,7 @@ import (
 
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/daemon"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/frontend"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/hookhealth"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/ipc"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/run"
 )
@@ -97,9 +98,15 @@ func runNotify(args []string) {
 	agent := fs.String("agent", "", "agent name (claude, codex, or opencode)")
 	_ = fs.Parse(args)
 
+	// Hooks stay silent and exit 0, so a failure is left as a bounded
+	// hook-health record (#1239). Only claude and codex ever record; any other
+	// agent value (OpenCode stays disabled, #1219) is ignored by the store.
+	agentName := strings.ToLower(strings.TrimSpace(*agent))
+
 	// Read hook JSON from stdin.
 	data, err := io.ReadAll(os.Stdin)
 	if err != nil {
+		hookhealth.RecordFailure(hookhealth.MalformedInput, agentName)
 		os.Exit(0) // fail silently
 	}
 
@@ -138,6 +145,7 @@ func runNotify(args []string) {
 		SessionCrons []json.RawMessage `json:"session_crons"`
 	}
 	if err := json.Unmarshal(data, &hookInput); err != nil {
+		hookhealth.RecordFailure(hookhealth.MalformedInput, agentName)
 		os.Exit(0) // fail silently
 	}
 
@@ -148,7 +156,7 @@ func runNotify(args []string) {
 	event := ipc.HookEvent{
 		EventType:        hookInput.HookEventName,
 		SessionID:        hookInput.SessionID,
-		Agent:            strings.ToLower(strings.TrimSpace(*agent)),
+		Agent:            agentName,
 		TmuxPane:         tmuxPane,
 		NotificationType: hookInput.Notification.Type,
 		ToolName:         hookInput.ToolName,

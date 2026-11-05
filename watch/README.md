@@ -3243,7 +3243,7 @@ make plugin-bin
 claude --plugin-dir /path/to/watch/plugin
 ```
 
-### Daemon lifecycle (`cenci daemon start|stop|restart|status`)
+### Daemon lifecycle (`cenci daemon start|stop|restart|status|hook-health`)
 
 When you install the binary by hand, start the daemon once (the marketplace plugin
 does this for you via `EnsureRunning`, which spawns `cenci daemon start` detached
@@ -3287,6 +3287,7 @@ that same symlink still hard-errors.
 cenci daemon stop      # SIGTERM, then SIGKILL if still alive after a few seconds; exits 0 whether or not anything was running
 cenci daemon restart   # stop (if running), then spawn a fresh detached daemon and wait for it to come up
 cenci daemon status    # running/not-running + PID; exits 1 when not running
+cenci daemon hook-health  # read-only hook-delivery diagnostics; exits 0 whenever it renders
 ```
 
 `daemon stop` determines liveness via the same event-socket dial `EnsureRunning`
@@ -3315,8 +3316,9 @@ file is always removed once it's known stale.
 | `-symbol-input` | `!` | Symbol shown in status bar indicator |
 | `-symbol-idle` | `~` | Symbol shown in status bar indicator |
 
-(Flags above apply to `daemon start`; `stop`/`restart`/`status` take no flags — they
-always resolve the default socket/PID paths.)
+(Flags above apply to `daemon start`; `stop`/`restart`/`status`/`hook-health` take no
+flags — they always resolve the default socket/PID/state paths. An extra argument or
+flag is a usage error, exit 2.)
 
 `CENCI_LOG_JSON=1` sets `-json`'s default without passing the flag; an
 explicit `-json`/`-json=false` on the command line always overrides the
@@ -3325,6 +3327,47 @@ environment variable. Only `daemon_cmd.go`'s own
 and the PID-file warning) go through the JSON seam — the daemon's own
 internal event/sweep/attention `-v` logging is unaffected and stays plain
 text.
+
+#### Hook health (`cenci daemon hook-health`)
+
+Hooks always exit 0 and print nothing, so a wrapper that cannot find the binary, a
+bootstrap that cannot install it, an unparseable hook payload or an unreachable
+event socket would otherwise leave no trace. Each such failure leaves one tiny
+record, and `cenci daemon hook-health` reads them back. The first line is always
+`hook health: <state>`, one of four states:
+
+| State | Meaning |
+|-------|---------|
+| `current-failure` | A failure is not yet superseded by a later successful delivery. Each detail line names the category, the client, the time (UTC) and a recovery hint. |
+| `recovered` | A successful delivery happened after the last failure. The superseded failure is still listed. |
+| `healthy` | A successful delivery was recorded and no failure is on record. |
+| `no-evidence` | No record newer than 24 hours exists, or the store is absent. This is **not proof of health**: hooks may simply not have run. |
+
+The categories are a closed set: `missing-binary` (no `cenci` binary resolved by the
+`notify.sh` wrapper), `bootstrap-failure` (installing the binary failed),
+`malformed-input` (`cenci notify` could not read or parse the hook JSON),
+`socket-unavailable` (nothing is listening on the event socket, after the default
+socket's one on-demand retry) and `delivery-failure` (the socket exists but the
+send failed, for example a permission error). Only the Claude and Codex wrappers
+record; OpenCode stays disabled.
+
+Records live in `$XDG_STATE_HOME/cenci/hook-health/` (default
+`~/.local/state/cenci/hook-health/`; a relative `$XDG_STATE_HOME` falls back to the default), a
+`0700` directory of `0600` files named after the category, plus `last-ok`. Each
+file holds one line, `<unix-epoch> <client>`, and nothing else: never a prompt,
+transcript, tool argument, secret or environment value. The store is bounded to one
+file per category: a failure is not rewritten while its record is younger than 60
+seconds, and `last-ok` is only rewritten when it is older than 10 minutes or a
+failure is newer than it. A record older than 24 hours is ignored. A directory that
+is a symlink, foreign-owned or group/other-writable is never trusted, and the
+reporter never creates, repairs or removes anything. Because of the 60-second rule,
+a failure right after a recovery keeps its old timestamp and can still read
+`recovered` for up to a minute.
+
+Records are also written inside a sandbox. `cenci doctor` runs this reporter and
+shows `healthy` and `recovered` as ok, `current-failure` and `no-evidence` as a
+warning; hook health never fails `cenci doctor`. With no binary at all, doctor reads
+the `missing-binary` record directly.
 
 ### Human status overview (`cenci status`)
 
@@ -3769,7 +3812,7 @@ call maps the `$TMUX_PANE` to the correct window — and status consumers such a
 see it on their next poll. Custom `-event-socket` instances are never started
 automatically. To restart deliberately (e.g. after a config change), use `cenci
 daemon restart` instead of waiting for the next hook — see
-[Daemon lifecycle](#daemon-lifecycle-cenci-daemon-startstoprestartstatus) above.
+[Daemon lifecycle](#daemon-lifecycle-cenci-daemon-startstoprestartstatushook-health) above.
 Until a window's next hook event the daemon does not track it, so the
 [finished-ticket window cleanup](#automatic-cleanup-of-finished-tickets) skips it.
 
@@ -3844,7 +3887,7 @@ findings), see the [failure atlas](../docs/failure-atlas.md). After running a
 suggested recovery command, `cenci diagnose --name <session> --verify` re-runs the
 same read-only probe and reports `[pass]`/`[fail]` to confirm it worked.
 
-**No status updates**: Ensure the hook/plugin is loaded (`claude plugin list`, `claude --plugin-dir ./plugin`, or Codex `/hooks`). Check `cenci daemon status` (running/not-running + PID) and that `cenci notify` can reach the event socket (`cenci daemon start -v` shows the socket path).
+**No status updates**: Ensure the hook/plugin is loaded (`claude plugin list`, `claude --plugin-dir ./plugin`, or Codex `/hooks`). Check `cenci daemon status` (running/not-running + PID) and that `cenci notify` can reach the event socket (`cenci daemon start -v` shows the socket path). Hooks fail silently, so run `cenci daemon hook-health` to see which category (missing binary, bootstrap, malformed input, unavailable socket, delivery failure) was recorded and its recovery hint — see [Hook health](#hook-health-cenci-daemon-hook-health). `no-evidence` there is not proof that hooks work.
 
 **Binary/daemon didn't bootstrap**: The SessionStart bootstrap fails silently so it
 never blocks the agent. Check the bootstrap log at
@@ -3856,7 +3899,8 @@ download failed, naming the source path; or no binary could be resolved anywhere
 naming that too. Either line still means the download itself failed — the log
 records it as the reason regardless of whether a fallback was found. If bootstrap
 can't run, install the binary manually and start the daemon (see
-[Advanced / development](#advanced--development)).
+[Advanced / development](#advanced--development)). A failed install also leaves a
+`bootstrap-failure` record that `cenci daemon hook-health` reports.
 
 **Names not restoring**: cenci restores names on clean exit (Ctrl+C / SIGTERM) and via the stale sweep. If it was killed with SIGKILL, manually rename windows or restart tmux.
 

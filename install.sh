@@ -419,6 +419,102 @@ doctor_daemon_status() {
 	fi
 }
 
+# hook_health_dir_ok <dir> — the reader-side store check, kept in sync with the
+# writers (internal/hookhealth, plugin/lib/hook-health.sh) and hardenDir in
+# watch/pkg/watch/socket.go: a real directory (not a symlink), owned by the
+# current user, with no group/other-writable bits. Creates nothing.
+hook_health_dir_ok() {
+	local dir="$1"
+	[ -d "$dir" ] && [ ! -L "$dir" ] && [ -O "$dir" ] || return 1
+	# Positive form: a missing or failing `find` prints nothing, so this fails
+	# closed instead of treating the directory as safe.
+	[ -n "$(find "$dir" -prune ! -perm -020 ! -perm -002 -print 2>/dev/null)" ]
+}
+
+# hook_health_missing_binary_record prints "<age-seconds> <client>" for a valid,
+# fresh (<= 24 h) missing-binary record and returns 0; any other state (no
+# state root, unsafe dir, absent/symlinked/oversized/malformed/future-dated/
+# stale record) returns 1 — invalid records count as absent, never as a
+# failure or as health. The record is the plain-text `<epoch> <claude|codex>`
+# line the watch wrappers write when no cenci binary resolves.
+hook_health_missing_binary_record() {
+	local state root dir rec line client ts now age
+	case "${XDG_STATE_HOME:-}" in
+		/*) state="$XDG_STATE_HOME" ;;
+		*)
+			# Like the writers, never resolve the store from a relative HOME.
+			case "${HOME:-}" in
+				/*) state="$HOME/.local/state" ;;
+				*) return 1 ;;
+			esac
+			;;
+	esac
+	root="$state/cenci"
+	dir="$root/hook-health"
+	rec="$dir/missing-binary"
+	hook_health_dir_ok "$root" && hook_health_dir_ok "$dir" || return 1
+	[ -f "$rec" ] && [ ! -L "$rec" ] && [ -O "$rec" ] || return 1
+	[ -n "$(find "$rec" -prune -size -33c -print 2>/dev/null)" ] || return 1
+	IFS= read -r line <"$rec" || return 1
+	{ IFS= read -r line && IFS= read -r _; } <"$rec" && return 1
+	[[ "$line" =~ ^([0-9]{1,12})\ (claude|codex)$ ]] || return 1
+	ts="${BASH_REMATCH[1]}"
+	client="${BASH_REMATCH[2]}"
+	now="$(date +%s 2>/dev/null)" || return 1
+	[[ "$now" =~ ^[0-9]+$ ]] || return 1
+	ts=$((10#$ts))
+	# A timestamp more than 5 s ahead of the clock is not trustworthy.
+	[ "$ts" -le $((now + 5)) ] || return 1
+	age=$((now - ts))
+	[ "$age" -ge 0 ] || age=0
+	[ "$age" -le 86400 ] || return 1
+	printf '%s %s\n' "$age" "$client"
+}
+
+# doctor_hook_health reports whether suppressed hook failures were recorded
+# (watch hook-health store, #1239) as ok or warn — never a hard doctor failure
+# and never DOCTOR_FAILED. With a binary it matches the stable first line of
+# `cenci daemon hook-health` (`hook health: <healthy|recovered|no-evidence|
+# current-failure>`); a non-zero exit (an older binary without the subverb
+# exits 2 with "unknown subcommand") or an unrecognized first line warns to
+# update. With no binary it reads the missing-binary record directly.
+doctor_hook_health() {
+	local bin out first detail rec age client
+	if bin="$(cenci_binary_for_doctor)"; then
+		if ! out="$("$bin" daemon hook-health 2>/dev/null)"; then
+			warn "hook health: reporter unavailable — this cenci binary may predate it; run: cenci update"
+			return 0
+		fi
+		first="${out%%$'\n'*}"
+		case "$first" in
+			"hook health: healthy")
+				ok "hook health: healthy (hook events are reaching the daemon)"
+				;;
+			"hook health: recovered")
+				ok "hook health: recovered (an earlier hook failure was superseded by a successful delivery)"
+				;;
+			"hook health: no-evidence")
+				warn "hook health: no evidence yet (absent or stale records are not proof hooks work) — details: cenci daemon hook-health"
+				;;
+			"hook health: current-failure")
+				detail="$(printf '%s\n' "$out" | sed -n '2{s/^[[:space:]]*//;p;}' | tr -cd '[:print:]')"
+				warn "hook health: current failure${detail:+ — $detail} — details: cenci daemon hook-health"
+				;;
+			*)
+				warn "hook health: reporter unavailable — unrecognized output; run: cenci update"
+				;;
+		esac
+		return 0
+	fi
+	if rec="$(hook_health_missing_binary_record)"; then
+		age="${rec%% *}"
+		client="${rec#* }"
+		warn "hook health: cenci binary was missing when a ${client} hook last ran ($((age / 60))m ago) — it bootstraps on your next agent session; if it persists, run: cenci update"
+	else
+		warn "hook health: no evidence yet — cenci binary not found and no recent missing-binary record found (not proof hooks work)"
+	fi
+}
+
 # check_stale_tmux_vars greps the user's own tmux config(s) — never touched by
 # this installer — for the pre-rename @agentwatch-* tmux user variables. tmux
 # format lookups against a variable that no longer exists silently fall back
@@ -787,6 +883,7 @@ run_doctor() {
 		fi
 	fi
 	doctor_daemon_status
+	doctor_hook_health
 
 	say ""
 	say "  ${BOLD}Installed stack components${RESET}"

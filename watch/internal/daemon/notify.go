@@ -1,8 +1,11 @@
 package daemon
 
 import (
+	"errors"
 	"os"
+	"syscall"
 
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/hookhealth"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/ipc"
 )
 
@@ -21,25 +24,47 @@ func deliverEvent(socketPath string, event ipc.HookEvent, send func(string, ipc.
 	// can surface it host-side (#1122).
 	sandboxDefaultSocket := os.Getenv("CENCI_SANDBOX") == "1" && socketPath == ipc.DefaultEventSocketPath()
 
-	if err := send(socketPath, event); err == nil {
+	err := send(socketPath, event)
+	if err == nil {
+		hookhealth.RecordOK(event.Agent)
 		if sandboxDefaultSocket {
 			clearUndeliveredMarker()
 		}
 		return
 	}
 	if socketPath != ipc.DefaultEventSocketPath() {
+		hookhealth.RecordFailure(classifyHookHealth(socketPath, err), event.Agent)
 		return
 	}
 	ensure()
-	if err := send(socketPath, event); err == nil {
+	err = send(socketPath, event)
+	if err == nil {
+		hookhealth.RecordOK(event.Agent)
 		if sandboxDefaultSocket {
 			clearUndeliveredMarker()
 		}
 		return
 	}
+	hookhealth.RecordFailure(classifyHookHealth(socketPath, err), event.Agent)
 	if sandboxDefaultSocket {
 		mountinfo, readErr := os.ReadFile(mountInfoPath)
 		code, message := classifyDeliveryFailure(string(mountinfo), readErr == nil, socketPath)
 		writeUndeliveredMarker(event.SessionID, code, message)
 	}
+}
+
+// classifyHookHealth maps a terminal delivery error to its hook-health
+// category (#1239): an empty socket path, or a dial error that says nothing is
+// there (ENOENT) or nothing is listening (ECONNREFUSED), is an unavailable
+// socket; every other error (a denied dial, a write error) is a delivery
+// failure. Hook-health records only the client name, never the error text.
+func classifyHookHealth(socketPath string, err error) hookhealth.Category {
+	if socketPath == "" {
+		return hookhealth.SocketUnavailable
+	}
+	var errno syscall.Errno
+	if errors.As(err, &errno) && (errno == syscall.ENOENT || errno == syscall.ECONNREFUSED) {
+		return hookhealth.SocketUnavailable
+	}
+	return hookhealth.DeliveryFailure
 }

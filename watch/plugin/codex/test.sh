@@ -13,6 +13,10 @@ BOOTSTRAP="$DIR/bootstrap.sh"
 PLUGIN_JSON="$DIR/../.codex-plugin/plugin.json"
 MANIFEST_DIR=".codex-plugin"
 ROOT_VAR_NAME="PLUGIN_ROOT"
+# Hook-health cases (#1239) run this client's real hooks.json commands.
+HOOKS_JSON="$DIR/hooks.json"
+NOTIFY_REL="codex/notify.sh"
+CLIENT="codex"
 
 # shellcheck source=../lib/test-common.sh
 source "$DIR/../lib/test-common.sh"
