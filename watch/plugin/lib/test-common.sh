@@ -51,7 +51,9 @@ wait_for_file() {
 # every invocation to <calls-file> and exits 0. The stub version marker is
 # pre-stamped so install_binary short-circuits without touching the network.
 # TMPDIR and HOME are redirected into temp dirs so the run neither writes the
-# real bootstrap log nor touches the developer's ~/.local/bin. $ROOT_VAR_NAME
+# real bootstrap log nor touches the developer's ~/.local/bin, and
+# XDG_STATE_HOME is pinned under the temp HOME so a bootstrap failure record
+# (#1239) never reaches the ambient hook-health store. $ROOT_VAR_NAME
 # is the root-resolution env var bootstrap.sh itself reads (PLUGIN_ROOT for
 # Codex, CLAUDE_PLUGIN_ROOT for Claude Code).
 run_bootstrap() {
@@ -72,13 +74,13 @@ STUB
   home="$(mktemp -d)"
 
   if [ -n "$cenci_sandbox" ]; then
-    env "${ROOT_VAR_NAME}=${root}" TMPDIR="$logdir" HOME="$home" CENCI_SANDBOX="$cenci_sandbox" \
-      bash "$BOOTSTRAP"
+    env "${ROOT_VAR_NAME}=${root}" TMPDIR="$logdir" HOME="$home" XDG_STATE_HOME="$home/state" \
+      CENCI_SANDBOX="$cenci_sandbox" bash "$BOOTSTRAP"
   else
     (
       unset CENCI_SANDBOX
       # shellcheck disable=SC2030,SC2031 # intentionally subshell-scoped
-      export TMPDIR="$logdir" HOME="$home"
+      export TMPDIR="$logdir" HOME="$home" XDG_STATE_HOME="$home/state"
       export "${ROOT_VAR_NAME}=${root}"
       bash "$BOOTSTRAP"
     )
@@ -188,7 +190,7 @@ STUB
   (
     unset CENCI_SANDBOX
     # shellcheck disable=SC2030,SC2031 # intentionally subshell-scoped
-    export TMPDIR="$logdir" HOME="$home" PATH="$stubdir:/usr/bin:/bin"
+    export TMPDIR="$logdir" HOME="$home" XDG_STATE_HOME="$home/state" PATH="$stubdir:/usr/bin:/bin"
     export "${ROOT_VAR_NAME}=${root}"
     export CENCI_SANDBOX=1
     export CENCI_RESOLVE_USR_LOCAL_BIN="$TMP/no-such-usr-local-cenci"
@@ -327,6 +329,32 @@ STUB
     pass=$((pass + 1))
   else
     echo "FAIL - [$HOOK_SHELL] log did not name the no-candidate-found reason"
+    fail=$((fail + 1))
+  fi
+
+  # --- Isolation: a terminal bootstrap failure never reaches the ambient store -
+  #
+  # run_bootstrap_nobin must pin XDG_STATE_HOME itself (#1239): with no binary
+  # anywhere the run writes a bootstrap-failure hook-health record, which would
+  # otherwise land in whatever store the developer's environment points at
+  # (watch/docs/test-isolation.md).
+  ambient_state="$shell_tmp/ambient-state"
+  mkdir -p "$ambient_state"
+  root_iso="$shell_tmp/root-iso"
+  log_iso="$shell_tmp/log-iso"
+  mkdir -p "$log_iso"
+  (
+    # shellcheck disable=SC2031 # intentionally subshell-scoped
+    export XDG_STATE_HOME="$ambient_state"
+    run_bootstrap_nobin "$HOOK_SHELL" "$root_iso" "$shell_tmp/calls-iso" "$log_iso" ""
+  )
+  if grep -q "no cenci binary available" "$log_iso/cenci-bootstrap.log" 2>/dev/null &&
+    [ -z "$(ls -A "$ambient_state")" ]; then
+    echo "ok   - [$HOOK_SHELL] a terminal bootstrap failure leaves an ambient XDG_STATE_HOME untouched"
+    pass=$((pass + 1))
+  else
+    echo "FAIL - [$HOOK_SHELL] a terminal bootstrap failure wrote into the ambient XDG_STATE_HOME (or never ran)"
+    find "$ambient_state" -mindepth 1 2>/dev/null | sed 's/^/           /'
     fail=$((fail + 1))
   fi
 
@@ -472,6 +500,431 @@ STUB
     echo "FAIL - [$HOOK_SHELL] liveness probe did not reject the dead candidate (got: $result_liveness)"
     fail=$((fail + 1))
   fi
+done
+
+# --- Hook-health records (#1239) -----------------------------------------------
+#
+# The shell-side writers (missing binary in notify.sh, bootstrap failure in
+# bootstrap-common.sh) must leave a bounded, closed-set record in
+# $XDG_STATE_HOME/cenci/hook-health/ that survives the hook's outer
+# `2>/dev/null || true`, without ever changing the hook's exit code or output.
+#
+# Callers supply HOOKS_JSON (this client's real hooks.json), NOTIFY_REL
+# (notify.sh relative to the plugin root) and CLIENT (claude|codex). Each case
+# runs the REAL hooks.json command through `<shell> -c` against a temp plugin
+# ROOT holding copies of hooks/ codex/ lib/ whose shebangs point at <shell>
+# (so the #!/bin/sh scripts are really run under bash and dash), with offline
+# curl/wget stubs, CENCI_RESOLVE_* pointed at nonexistent paths, and an
+# isolated HOME/XDG_STATE_HOME/TMPDIR (watch/docs/test-isolation.md).
+
+HH_NAMES="missing-binary bootstrap-failure malformed-input socket-unavailable delivery-failure last-ok"
+HH_SENT_PROMPT="SENTINEL_PROMPT_7c1e"
+HH_SENT_TOOL="SENTINEL_TOOL_INPUT_7c1e"
+HH_SENT_TRANSCRIPT="SENTINEL_TRANSCRIPT_PATH_7c1e"
+HH_SENT_API="SENTINEL_ANTHROPIC_API_KEY_7c1e"
+HH_SENT_GH="SENTINEL_GH_TOKEN_7c1e"
+HH_CASE=0
+
+# hh_assert <description> <command...> -- passes when the command succeeds.
+hh_assert() {
+  local desc="$1"
+  shift
+  if "$@"; then
+    echo "ok   - $desc"
+    pass=$((pass + 1))
+  else
+    echo "FAIL - $desc"
+    fail=$((fail + 1))
+  fi
+}
+
+# hh_record_valid <file> <client> -- a regular, non-symlink file of at most 32
+# bytes holding exactly one "<epoch> <client>" line with its newline.
+hh_record_valid() {
+  [ -f "$1" ] && [ ! -L "$1" ] || return 1
+  [ "$(wc -c <"$1" | tr -d ' ')" -le 32 ] || return 1
+  [ "$(wc -l <"$1" | tr -d ' ')" -eq 1 ] || return 1
+  grep -Eq "^[0-9]+ $2\$" "$1"
+}
+
+# hh_record_ts <file> -- prints the record's epoch field.
+hh_record_ts() {
+  cut -d' ' -f1 "$1"
+}
+
+# hh_setup <shell> <label> -- builds an isolated plugin ROOT/HOME/state/TMPDIR
+# for one case and exports its locations through HH_* globals.
+hh_setup() {
+  HH_SHELL_PATH="$(command -v "$1")"
+  HH_CASE=$((HH_CASE + 1))
+  local base="$TMP/hh/$1-$HH_CASE-$2"
+  HH_ROOT="$base/root"
+  HH_HOME="$base/home"
+  HH_STATE="$base/state"
+  HH_TMPD="$base/tmp"
+  HH_STUBS="$base/stubs"
+  HH_STORE="$HH_STATE/cenci/hook-health"
+  HH_OUT="$base/out"
+  HH_ERR="$base/err"
+  mkdir -p "$HH_ROOT/hooks" "$HH_ROOT/codex" "$HH_ROOT/lib" "$HH_ROOT/$MANIFEST_DIR" \
+    "$HH_HOME" "$HH_STATE" "$HH_TMPD" "$HH_STUBS"
+  cp "$PLUGIN_JSON" "$HH_ROOT/$MANIFEST_DIR/plugin.json"
+
+  local d f
+  for d in hooks codex lib; do
+    for f in "$DIR/../$d/"*.sh; do
+      sed "1s|^#!.*|#!$HH_SHELL_PATH|" "$f" >"$HH_ROOT/$d/$(basename "$f")"
+      chmod +x "$HH_ROOT/$d/$(basename "$f")"
+    done
+  done
+
+  local tool
+  for tool in curl wget; do
+    printf '#!/bin/sh\nexit 1\n' >"$HH_STUBS/$tool"
+    chmod +x "$HH_STUBS/$tool"
+  done
+}
+
+# hh_env [NAME=VALUE...] <command...> -- runs the command with the isolated
+# environment. CENCI_BIN/CENCI_SANDBOX are scrubbed unless the caller sets them.
+hh_env() {
+  env -u CENCI_BIN -u CENCI_SANDBOX \
+    HOME="$HH_HOME" XDG_STATE_HOME="$HH_STATE" TMPDIR="$HH_TMPD" \
+    PATH="$HH_STUBS:/usr/bin:/bin" \
+    CENCI_RESOLVE_USR_LOCAL_BIN="$TMP/hh-no-such-usr-local-cenci" \
+    CENCI_RESOLVE_HOMEBREW_BIN="$TMP/hh-no-such-homebrew-cenci" \
+    "${ROOT_VAR_NAME}=$HH_ROOT" "$@"
+}
+
+# hh_run <event> <stdin-file> [NAME=VALUE...] -- runs the real hooks.json
+# command for <event>; sets HH_RC, HH_ELAPSED (whole seconds), HH_OUT, HH_ERR.
+hh_run() {
+  local ev="$1" stdin_file="$2" cmd t0 t1
+  shift 2
+  cmd="$(jq -r --arg ev "$ev" '.hooks[$ev][0].hooks[0].command' "$HOOKS_JSON")"
+  t0="$(date +%s)"
+  hh_env "$@" "$HH_SHELL_PATH" -c "$cmd" <"$stdin_file" >"$HH_OUT" 2>"$HH_ERR"
+  HH_RC=$?
+  t1="$(date +%s)"
+  HH_ELAPSED=$((t1 - t0))
+}
+
+# hh_hook_timeout <event> -- the manifest timeout (seconds) of the event's hook.
+hh_hook_timeout() {
+  jq -r --arg ev "$1" '.hooks[$ev][0].hooks[0].timeout' "$HOOKS_JSON"
+}
+
+# hh_silent -- stdout and stderr of the last run were both empty.
+hh_silent() {
+  [ ! -s "$HH_OUT" ] && [ ! -s "$HH_ERR" ]
+}
+
+# hh_store_names_allowed -- every entry of the store (dotfiles included) is one
+# of the closed-set file names, and nothing else (no leftover temp files).
+hh_store_names_allowed() {
+  local path entry name allowed
+  for path in "$HH_STORE"/* "$HH_STORE"/.[!.]*; do
+    [ -e "$path" ] || [ -L "$path" ] || continue
+    entry="${path##*/}"
+    allowed=0
+    for name in $HH_NAMES; do
+      [ "$entry" = "$name" ] && allowed=1
+    done
+    [ "$allowed" -eq 1 ] || return 1
+  done
+  return 0
+}
+
+# hh_modes_ok -- state root and store are exactly 0700, the missing-binary
+# record exactly 0600.
+hh_modes_ok() {
+  [ -n "$(find "$HH_STATE/cenci" -prune -type d -perm 700 -print)" ] &&
+    [ -n "$(find "$HH_STORE" -prune -type d -perm 700 -print)" ] &&
+    [ -n "$(find "$HH_STORE/missing-binary" -prune -type f -perm 600 -print)" ]
+}
+
+# hh_store_count -- number of entries (dotfiles included) in the store.
+hh_store_count() {
+  find "$HH_STORE" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' '
+}
+
+# hh_writer <category> <client> -- calls the sh writer directly under the
+# case's shell, capturing its stdout/stderr in HH_OUT/HH_ERR.
+hh_writer() {
+  # shellcheck disable=SC2016 # single-quoted: $0/$1/$2 expand in the invoked shell, not here
+  hh_env "$HH_SHELL_PATH" -c '. "$0"; cenci_hook_health_record "$1" "$2"' \
+    "$HH_ROOT/lib/hook-health.sh" "$1" "$2" >"$HH_OUT" 2>"$HH_ERR"
+  HH_RC=$?
+}
+
+# hh_seed_store -- creates a 0700 store the way the writer would.
+hh_seed_store() {
+  mkdir -p "$HH_STORE"
+  chmod 700 "$HH_STATE/cenci" "$HH_STORE"
+}
+
+HH_EMPTY="$TMP/hh-empty-stdin"
+: >"$HH_EMPTY"
+HH_PAYLOAD="$TMP/hh-payload.json"
+printf '{"hook_event_name":"UserPromptSubmit","session_id":"s1","prompt":"%s","tool_input":{"command":"%s"},"transcript_path":"/%s/t.jsonl"}\n' \
+  "$HH_SENT_PROMPT" "$HH_SENT_TOOL" "$HH_SENT_TRANSCRIPT" >"$HH_PAYLOAD"
+
+for HOOK_SHELL in bash dash; do
+  if ! command -v "$HOOK_SHELL" >/dev/null 2>&1; then
+    echo "SKIP - $HOOK_SHELL not found; skipping its hook-health cases"
+    continue
+  fi
+  tag="[$HOOK_SHELL][$CLIENT]"
+
+  # --- SessionStart, no binary anywhere: missing-binary + bootstrap-failure --
+  hh_setup "$HOOK_SHELL" session-start
+  st_timeout="$(hh_hook_timeout SessionStart)"
+  hh_run SessionStart "$HH_EMPTY"
+  hh_assert "$tag SessionStart hook exits 0 with no binary" test "$HH_RC" -eq 0
+  hh_assert "$tag SessionStart hook prints nothing on stdout or stderr" hh_silent
+  hh_assert "$tag SessionStart hook returns within the manifest timeout (${st_timeout}s)" \
+    test "$HH_ELAPSED" -lt "$st_timeout"
+  hh_assert "$tag missing-binary record written with client $CLIENT" \
+    hh_record_valid "$HH_STORE/missing-binary" "$CLIENT"
+  wait_for_file "$HH_STORE/bootstrap-failure" 100
+  hh_assert "$tag bootstrap-failure record written (terminal install failure) with client $CLIENT" \
+    hh_record_valid "$HH_STORE/bootstrap-failure" "$CLIENT"
+  hh_assert "$tag store holds the 0700 dirs and 0600 records" hh_modes_ok
+
+  # --- UserPromptSubmit, no binary: missing-binary --------------------------
+  hh_setup "$HOOK_SHELL" prompt
+  hh_run UserPromptSubmit "$HH_PAYLOAD"
+  hh_assert "$tag UserPromptSubmit exits 0 with no binary, silent" \
+    test "$HH_RC" -eq 0 -a ! -s "$HH_OUT" -a ! -s "$HH_ERR"
+  hh_assert "$tag UserPromptSubmit with no binary records missing-binary ($CLIENT)" \
+    hh_record_valid "$HH_STORE/missing-binary" "$CLIENT"
+
+  # --- The wrapper itself is silent (the outer 2>/dev/null hides nothing) ----
+  hh_setup "$HOOK_SHELL" direct
+  hh_env "$HH_ROOT/$NOTIFY_REL" <"$HH_PAYLOAD" >"$HH_OUT" 2>"$HH_ERR"
+  HH_RC=$?
+  hh_assert "$tag notify.sh exits 0 and is silent on stdout and stderr with no binary" \
+    test "$HH_RC" -eq 0 -a ! -s "$HH_OUT" -a ! -s "$HH_ERR"
+  hh_assert "$tag notify.sh itself records missing-binary" \
+    hh_record_valid "$HH_STORE/missing-binary" "$CLIENT"
+
+  # --- Fail open: a missing hook-health.sh must not break the wrapper --------
+  # (a partial plugin update). dash exits on a failed `.`, so the wrapper has
+  # to test readability before sourcing; the outcome is simply "no record".
+  hh_setup "$HOOK_SHELL" no-lib
+  rm -f "$HH_ROOT/lib/hook-health.sh"
+  hh_env "$HH_ROOT/$NOTIFY_REL" <"$HH_PAYLOAD" >"$HH_OUT" 2>"$HH_ERR"
+  HH_RC=$?
+  hh_assert "$tag notify.sh exits 0 and is silent when hook-health.sh is missing" \
+    test "$HH_RC" -eq 0 -a ! -s "$HH_OUT" -a ! -s "$HH_ERR"
+  hh_assert "$tag notify.sh without hook-health.sh writes no record" \
+    test ! -e "$HH_STATE/cenci"
+
+  # --- Records are also written inside a sandbox (no env gate) --------------
+  hh_setup "$HOOK_SHELL" sandbox
+  hh_run UserPromptSubmit "$HH_PAYLOAD" CENCI_SANDBOX=1
+  hh_assert "$tag missing-binary is recorded with CENCI_SANDBOX=1 as well" \
+    hh_record_valid "$HH_STORE/missing-binary" "$CLIENT"
+
+  # --- Happy path unchanged: a working binary leaves no record --------------
+  hh_setup "$HOOK_SHELL" happy
+  mkdir -p "$HH_ROOT/bin"
+  printf '#!/bin/sh\nexit 0\n' >"$HH_ROOT/bin/cenci"
+  chmod +x "$HH_ROOT/bin/cenci"
+  hh_run UserPromptSubmit "$HH_PAYLOAD"
+  hh_assert "$tag a resolvable binary writes no hook-health record" \
+    test "$HH_RC" -eq 0 -a ! -e "$HH_STATE/cenci"
+
+  # --- Bootstrap: only a terminal install failure records -------------------
+  hh_setup "$HOOK_SHELL" bootstrap-adopt
+  hh_fixture="$HH_STUBS/fixture-cenci"
+  printf '#!/bin/sh\nexit 0\n' >"$hh_fixture"
+  chmod +x "$hh_fixture"
+  hh_env CENCI_BIN="$hh_fixture" CENCI_SANDBOX=1 "$HH_ROOT/${NOTIFY_REL%/*}/bootstrap.sh" \
+    </dev/null >"$HH_OUT" 2>"$HH_ERR"
+  HH_RC=$?
+  hh_assert "$tag a fallback adoption after a failed download records nothing" \
+    test "$HH_RC" -eq 0 -a -x "$HH_ROOT/bin/cenci" -a ! -e "$HH_STORE/bootstrap-failure"
+
+  hh_setup "$HOOK_SHELL" bootstrap-link
+  mkdir -p "$HH_ROOT/bin" "$HH_HOME/.local/bin"
+  printf '#!/bin/sh\nexit 0\n' >"$HH_ROOT/bin/cenci"
+  chmod +x "$HH_ROOT/bin/cenci"
+  printf '%s\n' "$VERSION" >"$HH_ROOT/bin/.cenci-version"
+  printf 'not a symlink\n' >"$HH_HOME/.local/bin/cenci"
+  hh_env CENCI_SANDBOX=1 "$HH_ROOT/${NOTIFY_REL%/*}/bootstrap.sh" \
+    </dev/null >"$HH_OUT" 2>"$HH_ERR"
+  HH_RC=$?
+  hh_assert "$tag a PATH-link failure after a good install records nothing" \
+    test "$HH_RC" -eq 0 -a ! -e "$HH_STORE/bootstrap-failure"
+
+  hh_setup "$HOOK_SHELL" bootstrap-fail
+  hh_env CENCI_SANDBOX=1 "$HH_ROOT/${NOTIFY_REL%/*}/bootstrap.sh" \
+    </dev/null >"$HH_OUT" 2>"$HH_ERR"
+  HH_RC=$?
+  hh_assert "$tag bootstrap exits 0 and records bootstrap-failure ($CLIENT) when install_binary fails" \
+    test "$HH_RC" -eq 0 -a -s "$HH_STORE/bootstrap-failure"
+  hh_assert "$tag bootstrap-failure record is a valid $CLIENT record" \
+    hh_record_valid "$HH_STORE/bootstrap-failure" "$CLIENT"
+
+  # A missing hook-health.sh (partial plugin update) must not abort bootstrap:
+  # diagnostics are best-effort and the hook contract is exit 0 (dash exits on
+  # a failed `.`, so the source has to be guarded).
+  hh_setup "$HOOK_SHELL" bootstrap-no-lib
+  rm -f "$HH_ROOT/lib/hook-health.sh"
+  hh_fixture="$HH_STUBS/fixture-cenci"
+  printf '#!/bin/sh\nexit 0\n' >"$hh_fixture"
+  chmod +x "$hh_fixture"
+  hh_env CENCI_BIN="$hh_fixture" CENCI_SANDBOX=1 "$HH_ROOT/${NOTIFY_REL%/*}/bootstrap.sh" \
+    </dev/null >"$HH_OUT" 2>"$HH_ERR"
+  HH_RC=$?
+  hh_assert "$tag bootstrap still exits 0 and installs when hook-health.sh is missing" \
+    test "$HH_RC" -eq 0 -a -x "$HH_ROOT/bin/cenci"
+  hh_assert "$tag bootstrap logs that hook-health.sh is missing and diagnostics are disabled" \
+    grep -q "hook-health.sh missing; diagnostics disabled" "$HH_TMPD/cenci-bootstrap.log"
+
+  # --- AC3: nothing but category/client/timestamp reaches the store ---------
+  hh_setup "$HOOK_SHELL" sentinels
+  hh_run SessionStart "$HH_PAYLOAD" \
+    ANTHROPIC_API_KEY="$HH_SENT_API" GH_TOKEN="$HH_SENT_GH"
+  wait_for_file "$HH_STORE/bootstrap-failure" 100
+  hh_assert "$tag sentinel run produced both shell-side records" \
+    test -s "$HH_STORE/missing-binary" -a -s "$HH_STORE/bootstrap-failure"
+  hh_assert "$tag no prompt/tool/transcript/secret sentinel appears anywhere in the store" \
+    test -z "$(grep -rlF -e "$HH_SENT_PROMPT" -e "$HH_SENT_TOOL" -e "$HH_SENT_TRANSCRIPT" \
+      -e "$HH_SENT_API" -e "$HH_SENT_GH" "$HH_STATE" 2>/dev/null)"
+  hh_assert "$tag every record matches ^[0-9]+ $CLIENT\\n and names are closed-set" \
+    test "$(hh_record_valid "$HH_STORE/missing-binary" "$CLIENT" && hh_record_valid "$HH_STORE/bootstrap-failure" "$CLIENT" && hh_store_names_allowed && echo yes)" = yes
+
+  # --- AC4: bounded store, rate limit rules, parallel writers ----------------
+  hh_setup "$HOOK_SHELL" loop
+  hh_env "$HH_ROOT/$NOTIFY_REL" </dev/null >/dev/null 2>&1
+  first_size="$(wc -c <"$HH_STORE/missing-binary" | tr -d ' ')"
+  first_ts="$(hh_record_ts "$HH_STORE/missing-binary")"
+  i=0
+  while [ "$i" -lt 50 ]; do
+    hh_env "$HH_ROOT/$NOTIFY_REL" </dev/null >/dev/null 2>&1
+    i=$((i + 1))
+  done
+  hh_assert "$tag 50 repeated failures leave only closed-set file names (no temp leftovers)" \
+    hh_store_names_allowed
+  hh_assert "$tag 50 repeated failures keep exactly one missing-binary record of constant size" \
+    test "$(hh_store_count)" -eq 1 -a \
+    "$(wc -c <"$HH_STORE/missing-binary" | tr -d ' ')" -eq "$first_size"
+  hh_assert "$tag a failure record younger than 60s is not rewritten" \
+    test "$(hh_record_ts "$HH_STORE/missing-binary")" = "$first_ts"
+
+  hh_setup "$HOOK_SHELL" ratelimit
+  hh_seed_store
+  now="$(date +%s)"
+  recent=$((now - 30))
+  printf '%s %s\n' "$recent" "$CLIENT" >"$HH_STORE/missing-binary"
+  hh_env "$HH_ROOT/$NOTIFY_REL" </dev/null >/dev/null 2>&1
+  hh_assert "$tag a 30s-old record is left untouched" \
+    test "$(hh_record_ts "$HH_STORE/missing-binary")" = "$recent"
+  stale=$((now - 120))
+  printf '%s %s\n' "$stale" "$CLIENT" >"$HH_STORE/missing-binary"
+  hh_env "$HH_ROOT/$NOTIFY_REL" </dev/null >/dev/null 2>&1
+  hh_assert "$tag a 120s-old record is rewritten" \
+    test "$(hh_record_ts "$HH_STORE/missing-binary")" -ge "$now"
+  printf 'garbage that is not a record\n' >"$HH_STORE/missing-binary"
+  hh_env "$HH_ROOT/$NOTIFY_REL" </dev/null >/dev/null 2>&1
+  hh_assert "$tag a malformed record is replaced by a valid one" \
+    hh_record_valid "$HH_STORE/missing-binary" "$CLIENT"
+  printf '%s %s\n' "$((now + 3600))" "$CLIENT" >"$HH_STORE/missing-binary"
+  hh_env "$HH_ROOT/$NOTIFY_REL" </dev/null >/dev/null 2>&1
+  hh_assert "$tag a future-dated record is replaced by a current one" \
+    test "$(hh_record_ts "$HH_STORE/missing-binary")" -le "$((now + 5))" -a \
+    "$(hh_record_ts "$HH_STORE/missing-binary")" -ge "$now"
+
+  hh_setup "$HOOK_SHELL" concurrent
+  hh_seed_store
+  printf '%s %s\n' "$(($(date +%s) - 300))" "$CLIENT" >"$HH_STORE/missing-binary"
+  pids=""
+  i=0
+  while [ "$i" -lt 20 ]; do
+    hh_env "$HH_ROOT/$NOTIFY_REL" </dev/null >/dev/null 2>&1 &
+    pids="$pids $!"
+    i=$((i + 1))
+  done
+  for pid in $pids; do
+    wait "$pid"
+  done
+  hh_assert "$tag 20 concurrent wrappers leave a parseable record and no temp files" \
+    test "$(hh_record_valid "$HH_STORE/missing-binary" "$CLIENT" && hh_store_names_allowed && echo yes)" = yes
+
+  # --- Path resolution and closed sets ---------------------------------------
+  hh_setup "$HOOK_SHELL" relative-xdg
+  hh_env XDG_STATE_HOME="relative/state" "$HH_ROOT/$NOTIFY_REL" </dev/null >/dev/null 2>&1
+  hh_assert "$tag a relative XDG_STATE_HOME falls back to \$HOME/.local/state" \
+    hh_record_valid "$HH_HOME/.local/state/cenci/hook-health/missing-binary" "$CLIENT"
+  hh_assert "$tag a relative XDG_STATE_HOME is never written relative to the cwd" \
+    test ! -e "relative/state" -a ! -e "$HH_STATE/cenci"
+
+  hh_setup "$HOOK_SHELL" closed-set
+  hh_writer last-ok "$CLIENT"
+  hh_writer ../escape "$CLIENT"
+  hh_writer missing-binary opencode
+  hh_writer missing-binary ""
+  hh_assert "$tag the sh writer refuses categories and clients outside the closed set" \
+    test ! -e "$HH_STATE/cenci" -a ! -e "$HH_STATE/escape" -a "$HH_RC" -eq 0 -a ! -s "$HH_OUT" -a ! -s "$HH_ERR"
+
+  # --- Hardening: the sh writer refuses unsafe store directories -------------
+  hh_setup "$HOOK_SHELL" fresh-modes
+  hh_writer missing-binary "$CLIENT"
+  hh_assert "$tag a fresh store is created 0700/0700 with a 0600 record, silently" \
+    test "$HH_RC" -eq 0 -a ! -s "$HH_OUT" -a ! -s "$HH_ERR" -a "$(hh_modes_ok && echo yes)" = yes
+
+  hh_setup "$HOOK_SHELL" harden-control
+  hh_seed_store
+  hh_writer missing-binary "$CLIENT"
+  hh_assert "$tag control: a pre-existing 0700 store accepts a record" \
+    hh_record_valid "$HH_STORE/missing-binary" "$CLIENT"
+
+  hh_setup "$HOOK_SHELL" harden-leaf-symlink
+  mkdir -p "$HH_STATE/cenci" "$HH_STATE/elsewhere"
+  chmod 700 "$HH_STATE/cenci" "$HH_STATE/elsewhere"
+  ln -s "$HH_STATE/elsewhere" "$HH_STORE"
+  hh_writer missing-binary "$CLIENT"
+  hh_assert "$tag a symlinked store directory is refused (nothing written through it)" \
+    test -z "$(ls -A "$HH_STATE/elsewhere")" -a "$HH_RC" -eq 0 -a ! -s "$HH_OUT" -a ! -s "$HH_ERR"
+
+  hh_setup "$HOOK_SHELL" harden-root-symlink
+  mkdir -p "$HH_STATE/elsewhere"
+  chmod 700 "$HH_STATE/elsewhere"
+  ln -s "$HH_STATE/elsewhere" "$HH_STATE/cenci"
+  hh_writer missing-binary "$CLIENT"
+  hh_assert "$tag a symlinked state root is refused (nothing created through it)" \
+    test -z "$(ls -A "$HH_STATE/elsewhere")"
+
+  hh_setup "$HOOK_SHELL" harden-leaf-0777
+  hh_seed_store
+  chmod 777 "$HH_STORE"
+  hh_writer missing-binary "$CLIENT"
+  hh_assert "$tag a 0777 store directory is refused" \
+    test -z "$(ls -A "$HH_STORE")" -a ! -s "$HH_OUT" -a ! -s "$HH_ERR"
+
+  hh_setup "$HOOK_SHELL" harden-leaf-0770
+  hh_seed_store
+  chmod 770 "$HH_STORE"
+  hh_writer missing-binary "$CLIENT"
+  hh_assert "$tag a group-writable store directory is refused" \
+    test -z "$(ls -A "$HH_STORE")"
+
+  hh_setup "$HOOK_SHELL" harden-root-0777
+  hh_seed_store
+  chmod 777 "$HH_STATE/cenci"
+  hh_writer missing-binary "$CLIENT"
+  hh_assert "$tag a 0777 state root is refused" \
+    test -z "$(ls -A "$HH_STORE")"
+
+  hh_setup "$HOOK_SHELL" harden-leaf-file
+  mkdir -p "$HH_STATE/cenci"
+  chmod 700 "$HH_STATE/cenci"
+  printf 'plain file\n' >"$HH_STORE"
+  hh_writer missing-binary "$CLIENT"
+  hh_assert "$tag a non-directory at the store path is refused and left untouched" \
+    test -f "$HH_STORE" -a "$(cat "$HH_STORE")" = "plain file"
 done
 
 echo

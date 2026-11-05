@@ -134,6 +134,7 @@ if command -v jq >/dev/null 2>&1 && command -v bash >/dev/null 2>&1; then
             cp "$BOOTSTRAP" "$layout/opencode/bootstrap.sh"
             cp "$DIR/../lib/bootstrap-common.sh" "$layout/lib/bootstrap-common.sh"
             cp "$DIR/../lib/resolve-bin.sh" "$layout/lib/resolve-bin.sh"
+            cp "$DIR/../lib/hook-health.sh" "$layout/lib/hook-health.sh"
             cp "$PACKAGE_JSON" "$layout/opencode/package.json"
 
             cat >"$layout/bin/cenci" <<STUB
@@ -151,12 +152,12 @@ STUB
             }
 
             if [ -n "$cenci_sandbox" ]; then
-                env TMPDIR="$logdir" HOME="$home" CENCI_SANDBOX="$cenci_sandbox" \
-                    bash "$layout/opencode/bootstrap.sh"
+                env TMPDIR="$logdir" HOME="$home" XDG_STATE_HOME="$home/state" \
+                    CENCI_SANDBOX="$cenci_sandbox" bash "$layout/opencode/bootstrap.sh"
             else
                 (
                     unset CENCI_SANDBOX
-                    export TMPDIR="$logdir" HOME="$home"
+                    export TMPDIR="$logdir" HOME="$home" XDG_STATE_HOME="$home/state"
                     bash "$layout/opencode/bootstrap.sh"
                 )
             fi
@@ -241,6 +242,7 @@ STUB
             cp "$BOOTSTRAP" "$layout/opencode/bootstrap.sh"
             cp "$DIR/../lib/bootstrap-common.sh" "$layout/lib/bootstrap-common.sh"
             cp "$DIR/../lib/resolve-bin.sh" "$layout/lib/resolve-bin.sh"
+            cp "$DIR/../lib/hook-health.sh" "$layout/lib/hook-health.sh"
             cp "$PACKAGE_JSON" "$layout/opencode/package.json"
 
             local stubdir
@@ -268,7 +270,7 @@ STUB
 
             (
                 unset CENCI_SANDBOX
-                export TMPDIR="$logdir" HOME="$home" PATH="$stubdir:/usr/bin:/bin"
+                export TMPDIR="$logdir" HOME="$home" XDG_STATE_HOME="$home/state" PATH="$stubdir:/usr/bin:/bin"
                 export CENCI_SANDBOX=1
                 export CENCI_RESOLVE_USR_LOCAL_BIN="$TMP/no-such-usr-local-cenci"
                 export CENCI_RESOLVE_HOMEBREW_BIN="$TMP/no-such-homebrew-cenci"

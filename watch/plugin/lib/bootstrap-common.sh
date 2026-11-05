@@ -24,11 +24,33 @@ PLUGIN_JSON="$ROOT/$PLUGIN_MANIFEST_REL"
 # shellcheck source-path=SCRIPTDIR
 # shellcheck source=./resolve-bin.sh
 . "$(dirname "$0")/../lib/resolve-bin.sh"
-
 log() {
 	printf '%s cenci-bootstrap: %s\n' \
 		"$(date '+%Y-%m-%dT%H:%M:%S' 2>/dev/null || echo '-')" "$1" >>"$LOG" 2>/dev/null || true
 }
+
+# Fail open (#1239): diagnostics are best-effort, so a missing hook-health.sh
+# (a partial plugin update) must never abort bootstrap. dash exits on a failed
+# `.`, so test readability first and fall back to a no-op recorder that says so
+# once in the log.
+_hh_lib="$(dirname "$0")/../lib/hook-health.sh"
+if [ -r "$_hh_lib" ]; then
+	# shellcheck source-path=SCRIPTDIR
+	# shellcheck source=./hook-health.sh
+	. "$_hh_lib"
+else
+	cenci_hook_health_record() { :; }
+	log "hook-health.sh missing; diagnostics disabled"
+fi
+
+# The hook-health client is derived from the manifest dir the caller already
+# supplies (#1239): .codex-plugin/... is codex, .claude-plugin/... is claude.
+# Anything else records nothing.
+case "$PLUGIN_MANIFEST_REL" in
+.codex-plugin/*) HOOK_HEALTH_CLIENT=codex ;;
+.claude-plugin/*) HOOK_HEALTH_CLIENT=claude ;;
+*) HOOK_HEALTH_CLIENT="" ;;
+esac
 
 # start_daemon launches the daemon detached. The already-running guard in the
 # binary makes this a no-op when a daemon already owns the socket. Inside a
@@ -219,7 +241,12 @@ install_on_path() {
 	return 0
 }
 
-install_binary || true
+# Only a terminal install_binary failure (no download and no fallback) leaves
+# a hook-health record: intermediate download failures that end in a fallback
+# adoption, and a failed PATH link, still leave a working binary and only log.
+if ! install_binary; then
+	[ -z "$HOOK_HEALTH_CLIENT" ] || cenci_hook_health_record bootstrap-failure "$HOOK_HEALTH_CLIENT"
+fi
 install_on_path || true
 start_daemon
 exit 0

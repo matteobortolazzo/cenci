@@ -26,6 +26,13 @@ func TestMain(m *testing.M) {
 		panic("failed to build binary: " + err.Error())
 	}
 
+	// Hook-health diagnostics (#1239) live under $XDG_STATE_HOME/cenci; keep every
+	// binary this suite runs away from the developer's real store
+	// (watch/docs/test-isolation.md).
+	if err := os.Setenv("XDG_STATE_HOME", filepath.Join(tmp, "state")); err != nil {
+		panic("failed to set XDG_STATE_HOME: " + err.Error())
+	}
+
 	os.Exit(m.Run())
 }
 

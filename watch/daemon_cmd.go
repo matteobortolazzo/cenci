@@ -14,6 +14,7 @@ import (
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/daemon"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/dispatch"
 	tmuxfe "github.com/matteobortolazzo/cenci/watch/v2/internal/frontend/tmux"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/hookhealth"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/ipc"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/logging"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/run"
@@ -28,7 +29,7 @@ const daemonRestartReadyTimeout = 3 * time.Second
 // daemonRestartPollInterval is the polling cadence within daemonRestartReadyTimeout.
 const daemonRestartPollInterval = 50 * time.Millisecond
 
-// runDaemonGroup implements `cenci daemon [start|stop|restart|status]`.
+// runDaemonGroup implements `cenci daemon [start|stop|restart|status|hook-health]`.
 // A bare `daemon` (no args) or `daemon` followed only by flags acts as
 // `start`, so `cenci daemon -v` still works exactly as the old bare
 // `cenci -v` did.
@@ -46,6 +47,8 @@ func runDaemonGroup(args []string) {
 		runDaemonRestart(args[1:])
 	case "status":
 		runDaemonStatus(args[1:])
+	case "hook-health":
+		runDaemonHookHealth(args[1:])
 	default:
 		if strings.HasPrefix(args[0], "-") {
 			runDaemonStart(args)
@@ -215,4 +218,17 @@ func runDaemonStatus(args []string) {
 	} else {
 		fmt.Println("daemon running (pid unknown)")
 	}
+}
+
+// runDaemonHookHealth implements `cenci daemon hook-health` (#1239): a
+// read-only report over the per-user hook-delivery diagnostics store. The
+// first line is the stable token `hook health: <healthy|recovered|no-evidence|
+// current-failure>` that `cenci doctor` matches. It exits 0 whenever it renders,
+// whatever the state; it never creates or repairs anything.
+func runDaemonHookHealth(args []string) {
+	fs := flag.NewFlagSet("daemon hook-health", flag.ExitOnError)
+	_ = fs.Parse(args)
+	rejectExtra("cenci daemon hook-health", fs.Args())
+
+	fmt.Print(hookhealth.Render(hookhealth.Read(hookhealth.Dir(), time.Now())))
 }

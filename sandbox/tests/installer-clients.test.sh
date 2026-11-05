@@ -879,6 +879,15 @@ run_doctor_case() {
     local name="$1" clients="$2"
     shift 2
     run_case "${name}" "${clients}"
+    invoke_doctor "${name}" "$@"
+}
+
+# invoke_doctor <name> [NAME=value env assignments...] — runs `install.sh
+# doctor` for an already-prepared case (run_case) under `env -i`, setting
+# DOCTOR_EXIT and DOCTOR_OUTPUT.
+invoke_doctor() {
+    local name="$1"
+    shift
     local bin="${WORK}/${name}/bin" output="${WORK}/${name}/doctor-output"
     set +e
     env -i HOME="${CASE_HOME}" PATH="${bin}" CALLS_FILE="${CASE_CALLS}" \
@@ -913,6 +922,88 @@ exit 0
 EOF
     chmod +x "${bin}/cenci"
     run_doctor_case "${name}" "${clients}"
+}
+
+# seed_hook_health_record <state_root> <record_name> <content> — plants a
+# plain-text record at <state_root>/cenci/hook-health/<record_name> with the
+# store's modes (dirs 0700, file 0600). <state_root> is a per-case temp dir, so
+# the real hook-health store is never touched. Content is written verbatim
+# (printf %b, so callers control the trailing newline).
+seed_hook_health_record() {
+    local root="$1" record="$2" content="$3"
+    mkdir -p "${root}"
+    mkdir -p "${root}/cenci/hook-health"
+    chmod 700 "${root}/cenci" "${root}/cenci/hook-health"
+    printf '%b' "${content}" >"${root}/cenci/hook-health/${record}"
+    chmod 600 "${root}/cenci/hook-health/${record}"
+}
+
+# run_doctor_case_with_hook_health <name> <clients> <mode> [NAME=value env
+# assignments for the doctor run...] — drives doctor_hook_health (#1239). <mode>
+# selects the fake `cenci` on the doctor-run PATH:
+#   healthy|recovered|no-evidence|current-failure — `cenci daemon hook-health`
+#       prints that state's stable first line (`hook health: <token>`) and
+#       exits 0, as the real reporter does (plus a detail line for
+#       current-failure);
+#   unknown-subcommand — an older binary without the subverb: prints "unknown
+#       subcommand" on stderr and exits 2;
+#   garbage — exits 0 but prints a first line that is not a known token;
+#   nonzero — prints a valid healthy first line but exits 1;
+#   none — no cenci binary at all: the bootstrapped cache binary and any PATH
+#       entry are removed after the install, so doctor must read the
+#       missing-binary record directly. Seed it first with
+#       seed_hook_health_record into "${WORK}/<name>/home/.local/state" (the
+#       default state root, since the doctor env has only HOME and PATH) or
+#       into another root selected through a forwarded XDG_STATE_HOME=...
+run_doctor_case_with_hook_health() {
+    local name="$1" clients="$2" mode="$3"
+    shift 3
+    local bin="${WORK}/${name}/bin" output="${WORK}/${name}/doctor-output"
+    if [[ "${mode}" != none ]]; then
+        mkdir -p "${bin}"
+        cat > "${bin}/cenci" <<EOF
+#!/bin/sh
+if [ "\${1:-}" = daemon ] && [ "\${2:-}" = hook-health ]; then
+    case '${mode}' in
+        unknown-subcommand)
+            echo "cenci: unknown subcommand 'hook-health'" >&2
+            exit 2
+            ;;
+        garbage)
+            echo "something else entirely"
+            exit 0
+            ;;
+        nonzero)
+            echo "hook health: healthy"
+            exit 1
+            ;;
+        current-failure)
+            echo "hook health: current-failure"
+            echo "  delivery-failure (claude, 2026-01-01T00:00:00Z): daemon unreachable"
+            exit 0
+            ;;
+        *)
+            echo "hook health: ${mode}"
+            exit 0
+            ;;
+    esac
+fi
+exit 0
+EOF
+        chmod +x "${bin}/cenci"
+        run_doctor_case "${name}" "${clients}" "$@"
+        return 0
+    fi
+
+    run_case "${name}" "${clients}"
+    rm -f "${bin}/cenci" \
+        "${CASE_HOME}"/.claude/plugins/cache/cenci/cenci-watch/*/bin/cenci \
+        "${CASE_HOME}"/.codex/plugins/cache/cenci/cenci-watch/*/bin/cenci
+    # The no-binary doctor path needs the clock and find(1); the minimal case
+    # PATH carries neither.
+    ln -sf "$(command -v date)" "${bin}/date"
+    ln -sf "$(command -v find)" "${bin}/find"
+    invoke_doctor "${name}" "$@"
 }
 
 # run_doctor_case_with_docker_runtimes <name> <clients> <runtimes_json> — like
@@ -1583,6 +1674,147 @@ echo "case: doctor reports the cenci daemon as not running, without failing doct
 run_doctor_case_with_daemon_status doctor-daemon-down claude 1
 [[ "${DOCTOR_EXIT}" -eq 0 ]]
 assert_contains "${DOCTOR_OUTPUT}" "cenci daemon: not running"
+
+echo "case: doctor maps hook-health 'healthy' to ok without failing doctor (#1239)"
+run_doctor_case_with_hook_health doctor-hook-health-healthy claude healthy
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "✓ hook health: healthy"
+assert_not_contains "${DOCTOR_OUTPUT}" "! hook health"
+
+echo "case: doctor maps hook-health 'recovered' to ok (#1239)"
+run_doctor_case_with_hook_health doctor-hook-health-recovered claude recovered
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "✓ hook health: recovered"
+assert_not_contains "${DOCTOR_OUTPUT}" "! hook health"
+
+echo "case: doctor maps hook-health 'no-evidence' to warn, never a failure (#1239)"
+run_doctor_case_with_hook_health doctor-hook-health-no-evidence claude no-evidence
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "! hook health: no evidence"
+assert_not_contains "${DOCTOR_OUTPUT}" "✓ hook health"
+assert_not_contains "${DOCTOR_OUTPUT}" "✗ hook health"
+
+echo "case: doctor maps hook-health 'current-failure' to warn naming the failure, never a failure (#1239)"
+run_doctor_case_with_hook_health doctor-hook-health-current-failure claude current-failure
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "! hook health: current failure"
+assert_contains "${DOCTOR_OUTPUT}" "delivery-failure"
+assert_not_contains "${DOCTOR_OUTPUT}" "✓ hook health"
+assert_not_contains "${DOCTOR_OUTPUT}" "✗ hook health"
+
+echo "case: doctor warns to update when the binary predates the hook-health subverb (exit 2, unknown subcommand) (#1239)"
+run_doctor_case_with_hook_health doctor-hook-health-older-binary claude unknown-subcommand
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "! hook health: reporter unavailable"
+assert_contains "${DOCTOR_OUTPUT}" "cenci update"
+assert_not_contains "${DOCTOR_OUTPUT}" "✓ hook health"
+assert_not_contains "${DOCTOR_OUTPUT}" "✗ hook health"
+
+echo "case: doctor warns on an unrecognized hook-health first line (#1239)"
+run_doctor_case_with_hook_health doctor-hook-health-garbage claude garbage
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "! hook health: reporter unavailable"
+assert_not_contains "${DOCTOR_OUTPUT}" "✓ hook health"
+
+echo "case: doctor warns on a non-zero reporter exit even when its first line says healthy (#1239)"
+run_doctor_case_with_hook_health doctor-hook-health-nonzero claude nonzero
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "! hook health: reporter unavailable"
+assert_not_contains "${DOCTOR_OUTPUT}" "✓ hook health"
+
+hh_now="$(date +%s)"
+# The exact no-binary, no-usable-record warning: asserting it (not just the
+# absence of the "was missing when" text) proves which branch ran.
+hh_no_record="hook health: no evidence yet — cenci binary not found and no recent missing-binary record found (not proof hooks work)"
+
+echo "case: no binary and a fresh missing-binary record warns naming the failure, never a failure (#1239)"
+seed_hook_health_record "${WORK}/doctor-hook-health-record-fresh/home/.local/state" missing-binary "$((hh_now - 120)) claude\n"
+run_doctor_case_with_hook_health doctor-hook-health-record-fresh claude none
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "binary not found yet"
+assert_contains "${DOCTOR_OUTPUT}" "! hook health: cenci binary was missing when a claude hook last ran"
+assert_contains "${DOCTOR_OUTPUT}" "cenci update"
+assert_not_contains "${DOCTOR_OUTPUT}" "hook health: no evidence"
+assert_not_contains "${DOCTOR_OUTPUT}" "✗ hook health"
+
+echo "case: no binary reads the record from an absolute XDG_STATE_HOME (#1239)"
+seed_hook_health_record "${WORK}/doctor-hook-health-record-xdg/xdg-state" missing-binary "$((hh_now - 30)) codex\n"
+run_doctor_case_with_hook_health doctor-hook-health-record-xdg codex none "XDG_STATE_HOME=${WORK}/doctor-hook-health-record-xdg/xdg-state"
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "! hook health: cenci binary was missing when a codex hook last ran"
+
+echo "case: no binary treats a relative XDG_STATE_HOME as unset and falls back to \$HOME/.local/state (#1239)"
+seed_hook_health_record "${WORK}/doctor-hook-health-record-relxdg/home/.local/state" missing-binary "$((hh_now - 30)) claude\n"
+run_doctor_case_with_hook_health doctor-hook-health-record-relxdg claude none "XDG_STATE_HOME=relative/state"
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "! hook health: cenci binary was missing when a claude hook last ran"
+
+echo "case: no binary and no record warns no-evidence, never a failure (#1239)"
+run_doctor_case_with_hook_health doctor-hook-health-record-absent claude none
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "binary not found yet"
+assert_contains "${DOCTOR_OUTPUT}" "! ${hh_no_record}"
+assert_not_contains "${DOCTOR_OUTPUT}" "was missing when"
+assert_not_contains "${DOCTOR_OUTPUT}" "✗ hook health"
+
+echo "case: no binary treats a relative HOME as no record, even when the relative path holds one (#1239)"
+hh_rel_case="doctor-hook-health-record-relhome"
+seed_hook_health_record "${WORK}/${hh_rel_case}/rel-home/.local/state" missing-binary "$((hh_now - 30)) claude\n"
+pushd "${WORK}/${hh_rel_case}" >/dev/null
+run_doctor_case_with_hook_health "${hh_rel_case}" claude none "HOME=rel-home"
+popd >/dev/null
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "! ${hh_no_record}"
+assert_not_contains "${DOCTOR_OUTPUT}" "was missing when"
+
+echo "case: no binary counts a stale (older than 24h) missing-binary record as absent (#1239)"
+seed_hook_health_record "${WORK}/doctor-hook-health-record-stale/home/.local/state" missing-binary "$((hh_now - 90000)) claude\n"
+run_doctor_case_with_hook_health doctor-hook-health-record-stale claude none
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "! ${hh_no_record}"
+assert_not_contains "${DOCTOR_OUTPUT}" "was missing when"
+
+echo "case: no binary counts a future-dated missing-binary record as absent (#1239)"
+seed_hook_health_record "${WORK}/doctor-hook-health-record-future/home/.local/state" missing-binary "$((hh_now + 3600)) claude\n"
+run_doctor_case_with_hook_health doctor-hook-health-record-future claude none
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "! ${hh_no_record}"
+assert_not_contains "${DOCTOR_OUTPUT}" "was missing when"
+
+echo "case: no binary counts malformed missing-binary records as absent (#1239)"
+hh_malformed_n=0
+for hh_bad in \
+    "garbage\n" \
+    "${hh_now} opencode\n" \
+    "${hh_now} claude" \
+    "${hh_now} claude\nextra\n" \
+    "${hh_now} claude                          padded-beyond-32-bytes\n" \
+    "\n"; do
+    hh_malformed_n=$((hh_malformed_n + 1))
+    hh_case="doctor-hook-health-record-malformed-${hh_malformed_n}"
+    seed_hook_health_record "${WORK}/${hh_case}/home/.local/state" missing-binary "${hh_bad}"
+    run_doctor_case_with_hook_health "${hh_case}" claude none
+    [[ "${DOCTOR_EXIT}" -eq 0 ]]
+    assert_contains "${DOCTOR_OUTPUT}" "! ${hh_no_record}"
+    assert_not_contains "${DOCTOR_OUTPUT}" "was missing when"
+done
+
+echo "case: no binary counts a symlinked missing-binary record as absent (#1239)"
+hh_link_state="${WORK}/doctor-hook-health-record-symlink/home/.local/state"
+seed_hook_health_record "${hh_link_state}" decoy "${hh_now} claude\n"
+ln -s decoy "${hh_link_state}/cenci/hook-health/missing-binary"
+run_doctor_case_with_hook_health doctor-hook-health-record-symlink claude none
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "! ${hh_no_record}"
+assert_not_contains "${DOCTOR_OUTPUT}" "was missing when"
+
+echo "case: no binary ignores a record inside a group/other-writable store dir (#1239)"
+seed_hook_health_record "${WORK}/doctor-hook-health-record-wide/home/.local/state" missing-binary "$((hh_now - 30)) claude\n"
+chmod 777 "${WORK}/doctor-hook-health-record-wide/home/.local/state/cenci/hook-health"
+run_doctor_case_with_hook_health doctor-hook-health-record-wide claude none
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "! ${hh_no_record}"
+assert_not_contains "${DOCTOR_OUTPUT}" "was missing when"
 
 echo "case: doctor reports sysbox-runc registered and its resolved version when present under Docker, resolving the runtime path from docker info's Runtimes JSON (#587 presence + #630 version reporting, Q2)"
 sysbox_present_bin="${WORK}/sysbox-binaries/doctor-sysbox-present/sysbox-runc"
