@@ -3685,6 +3685,35 @@ come from container services; it does not by itself identify an orphan.
 
 **Caveat**: for paneless sessions the task name comes only from the hook payload's `task_name` field — there is no pane title to read. Codex `UserPromptSubmit` hooks provide the compact first-prompt label, but native action-required title detection is only available for tmux-backed sessions.
 
+#### Excluding headless probe sessions (`watch.excludeCwd`)
+
+Paneless work stays visible by default, including headless health probes that some tools run from a fixed directory (for example a `/tmp` probe). To hide such a probe, list its working directory under `watch.excludeCwd` in `~/.config/cenci/config.json` (`$XDG_CONFIG_HOME/cenci/config.json` when set):
+
+```json
+{
+  "watch": {
+    "excludeCwd": ["/tmp"]
+  }
+}
+```
+
+`cenci notify` compares the hook payload's `cwd` against the list and drops the event before delivery, for both Claude Code and Codex. An excluded session never gets a daemon session or a row in `cenci status` / `cenci widget-json`. The list is empty by default, so nothing is excluded unless you add an entry.
+
+Matching rules:
+
+- `cwd` and each entry are cleaned with `filepath.Clean` (a trailing slash is dropped, `..` is resolved lexically).
+- An event is excluded when its `cwd` equals an entry or sits under it at a path-segment boundary: `/tmp` excludes `/tmp` and `/tmp/probe`, but not `/tmpfoo`.
+- An entry of `/` excludes every absolute `cwd`, so only list it if you mean to hide everything.
+- Empty and relative entries are ignored; the absolute entries in the same list still apply.
+- An empty, missing or relative `cwd` is never excluded.
+- Symlinks are not resolved and case is not folded.
+
+The exclusion fails open to visibility, silently. A missing config file, malformed JSON, a `watch` value that is not an object, an `excludeCwd` that is not an array, or any non-string element excludes nothing (a list with one bad element is discarded entirely), and nothing is written to stderr.
+
+The decision is made per event, so a later event from the same session with a `cwd` that is not listed is delivered. An excluded event does not start a missing daemon. Sandbox sessions do not see the host's list, because the fleet config is not mounted into sandboxes and probes run on the host.
+
+**Limitation**: cenci performs no automatic probe detection. Codex exposes no supported discriminator for a headless probe, and cenci does not infer one from a missing pane, a missing project config, transcript contents or prompt text. The list is the only mechanism.
+
 ### Custom status-format integration
 
 cenci exposes two per-window user variables for custom `status-format` configs:

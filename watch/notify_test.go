@@ -715,3 +715,354 @@ func TestNotifyStopWithPendingSessionCronReportsBackgroundWork(t *testing.T) {
 		})
 	}
 }
+
+// -- watch.excludeCwd (#1240) ---------------------------------------------
+//
+// The opt-in exclusion list lives in the fleet config
+// ($XDG_CONFIG_HOME/cenci/config.json, key watch.excludeCwd). Every test below
+// drives the real built binary over stdin and a temp event socket, and proves
+// non-delivery the only way a fire-and-forget receiver allows: send the
+// candidate event, then a control event with no cwd, wait for the control, drain
+// a short window, and assert the candidate never arrived.
+
+const (
+	excludeControlSession = "control"
+	excludeDrainWindow    = 200 * time.Millisecond
+)
+
+// notifyFixture is a temp event socket with a running receiver, plus an
+// isolated socket dir so the -event-socket flag default never warns on stderr.
+type notifyFixture struct {
+	socket   string
+	receiver *ipc.EventReceiver
+}
+
+func newNotifyFixture(t *testing.T) *notifyFixture {
+	t.Helper()
+	setTempSocketDir(t)
+	// Short path: t.TempDir() embeds the full subtest name and can overflow sun_path.
+	dir, err := os.MkdirTemp("", "cenci")
+	if err != nil {
+		t.Fatalf("create socket dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	socket := filepath.Join(dir, "events.sock")
+	receiver, err := ipc.NewEventReceiver(socket)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = receiver.Close() })
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go receiver.Accept(ctx)
+	return &notifyFixture{socket: socket, receiver: receiver}
+}
+
+// writeFleetConfig points XDG_CONFIG_HOME at a fresh temp dir and seeds the
+// fleet config there through writeConfigJSON. An empty body writes no file (the
+// missing-file case).
+func writeFleetConfig(t *testing.T, body string) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	if body != "" {
+		writeConfigJSON(t, home, body)
+	}
+}
+
+// excludeConfig renders a fleet config whose watch.excludeCwd is entries.
+func excludeConfig(t *testing.T, entries ...string) string {
+	t.Helper()
+	b, err := json.Marshal(map[string]any{"watch": map[string]any{"excludeCwd": entries}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+// hookPayload builds a hook stdin payload; a nil cwd omits the key entirely.
+func hookPayload(t *testing.T, eventName, session string, cwd *string) string {
+	t.Helper()
+	m := map[string]any{"hook_event_name": eventName, "session_id": session}
+	if cwd != nil {
+		m["cwd"] = *cwd
+	}
+	b, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+func strPtr(s string) *string { return &s }
+
+// notifyRun runs `cenci notify` with the given payload. An empty socket omits
+// -event-socket so the default socket is used. TMUX_PANE and CENCI_SANDBOX are
+// cleared so the run is paneless and on the host regardless of the ambient
+// environment. It fails the test on a non-zero exit and returns stderr.
+func notifyRun(t *testing.T, socket, agent, payload string, extraEnv ...string) (stderr string) {
+	t.Helper()
+	args := []string{"notify", "-agent", agent}
+	if socket != "" {
+		args = append(args, "-event-socket", socket)
+	}
+	cmd := exec.Command(binaryPath, args...)
+	cmd.Stdin = strings.NewReader(payload)
+	cmd.Env = append(append(os.Environ(), "TMUX_PANE=", "CENCI_SANDBOX="), extraEnv...)
+	var errBuf bytes.Buffer
+	cmd.Stderr = &errBuf
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("notify: %v (stderr: %s)", err, errBuf.String())
+	}
+	return errBuf.String()
+}
+
+// collectEvents sends the control event, waits for it, drains for a short
+// window and returns every non-control event that arrived. Send order does not
+// guarantee receive order (the receiver handles each connection in its own
+// goroutine), so absence can only be asserted after the control has arrived.
+func collectEvents(t *testing.T, fx *notifyFixture) []ipc.HookEvent {
+	t.Helper()
+	notifyRun(t, fx.socket, "claude", hookPayload(t, "Stop", excludeControlSession, nil))
+	var got []ipc.HookEvent
+	timeout := time.After(2 * time.Second)
+	for sawControl := false; !sawControl; {
+		select {
+		case ev := <-fx.receiver.Events():
+			if ev.SessionID == excludeControlSession {
+				sawControl = true
+			} else {
+				got = append(got, ev)
+			}
+		case <-timeout:
+			t.Fatal("control event never arrived")
+		}
+	}
+	drain := time.After(excludeDrainWindow)
+	for {
+		select {
+		case ev := <-fx.receiver.Events():
+			if ev.SessionID != excludeControlSession {
+				got = append(got, ev)
+			}
+		case <-drain:
+			return got
+		}
+	}
+}
+
+// assertOnlyControlArrives fails if any event for candidateSession was delivered.
+func assertOnlyControlArrives(t *testing.T, fx *notifyFixture, candidateSession string) {
+	t.Helper()
+	for _, ev := range collectEvents(t, fx) {
+		if ev.SessionID == candidateSession {
+			t.Fatalf("event for session %q was delivered, want it dropped: %+v", candidateSession, ev)
+		}
+	}
+}
+
+// assertDelivered fails unless an event for session reaches the receiver.
+func assertDelivered(t *testing.T, fx *notifyFixture, session string) {
+	t.Helper()
+	select {
+	case ev := <-fx.receiver.Events():
+		if ev.SessionID != session {
+			t.Fatalf("session_id = %q, want %q", ev.SessionID, session)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("event for session %q was not delivered", session)
+	}
+}
+
+// TestNotifyExcludeCwdDropsListedEvents covers AC1: an event whose cwd is a
+// listed path, or sits below it at a segment boundary, never reaches the daemon
+// socket, for both Claude and Codex.
+func TestNotifyExcludeCwdDropsListedEvents(t *testing.T) {
+	for _, agent := range []string{"claude", "codex"} {
+		for _, cwd := range []string{"/tmp", "/tmp/probe/x"} {
+			t.Run(agent+" "+cwd, func(t *testing.T) {
+				fx := newNotifyFixture(t)
+				writeFleetConfig(t, excludeConfig(t, "/tmp"))
+				const session = "excluded"
+				notifyRun(t, fx.socket, agent, hookPayload(t, "UserPromptSubmit", session, strPtr(cwd)))
+				assertOnlyControlArrives(t, fx, session)
+			})
+		}
+	}
+}
+
+// TestNotifyExcludeCwdFailOpen covers AC2 and the non-array / non-string edge
+// cases: any absent, empty, missing or unusable config excludes nothing, and
+// nothing is written to stderr.
+func TestNotifyExcludeCwdFailOpen(t *testing.T) {
+	cases := []struct {
+		name string
+		body string // empty: no config file is written
+	}{
+		{"key absent", `{"watch":{}}`},
+		{"empty list", `{"watch":{"excludeCwd":[]}}`},
+		{"file missing", ""},
+		{"malformed JSON", `{"watch":{"excludeCwd":["/tmp"]`},
+		{"watch not an object", `{"watch":"/tmp"}`},
+		{"excludeCwd a string", `{"watch":{"excludeCwd":"/tmp"}}`},
+		{"mixed list, bad element last", `{"watch":{"excludeCwd":["/tmp",5]}}`},
+		{"mixed list, bad element first", `{"watch":{"excludeCwd":[5,"/tmp"]}}`},
+		{"mixed list, null element last", `{"watch":{"excludeCwd":["/tmp",null]}}`},
+		{"mixed list, null element first", `{"watch":{"excludeCwd":[null,"/tmp"]}}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fx := newNotifyFixture(t)
+			writeFleetConfig(t, tc.body)
+			const session = "failopen"
+			stderr := notifyRun(t, fx.socket, "claude", hookPayload(t, "Stop", session, strPtr("/tmp/probe")))
+			if stderr != "" {
+				t.Errorf("stderr = %q, want empty", stderr)
+			}
+			assertDelivered(t, fx, session)
+		})
+	}
+}
+
+// TestNotifyExcludeCwdRegressionsStayVisible covers AC3: the exclusion is
+// narrow. Everything that is not a listed path stays visible.
+func TestNotifyExcludeCwdRegressionsStayVisible(t *testing.T) {
+	payloadOnly := []struct {
+		name    string
+		entries []string
+		cwd     *string
+	}{
+		{"unmanaged run outside the list", []string{"/tmp"}, strPtr("/home/someone/work")},
+		{"no cwd key", []string{"/tmp"}, nil},
+		{"sibling prefix /tmpfoo", []string{"/tmp"}, strPtr("/tmpfoo")},
+		{"sibling prefix below /tmpfoo", []string{"/tmp"}, strPtr("/tmpfoo/probe")},
+		{"parent of the listed path", []string{"/tmp/probe"}, strPtr("/tmp")},
+		{"dot-dot resolves out of the listed path", []string{"/tmp"}, strPtr("/tmp/../home/x")},
+	}
+	for _, tc := range payloadOnly {
+		t.Run(tc.name, func(t *testing.T) {
+			fx := newNotifyFixture(t)
+			writeFleetConfig(t, excludeConfig(t, tc.entries...))
+			const session = "visible"
+			stderr := notifyRun(t, fx.socket, "claude", hookPayload(t, "Stop", session, tc.cwd))
+			if stderr != "" {
+				t.Errorf("stderr = %q, want empty", stderr)
+			}
+			assertDelivered(t, fx, session)
+		})
+	}
+
+	// A legitimate cenci headless run: paneless (TMUX_PANE is cleared by
+	// notifyRun) and inside a repo with .cenci/config.json. The listed probe
+	// directory is a sibling of the repo, not an ancestor, because t.TempDir()
+	// lives under os.TempDir() and a literal /tmp entry would match it.
+	t.Run("cenci headless run inside a repo", func(t *testing.T) {
+		fx := newNotifyFixture(t)
+		root := t.TempDir()
+		repo := filepath.Join(root, "repo")
+		if err := os.MkdirAll(filepath.Join(repo, ".cenci"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(repo, ".cenci", "config.json"), []byte(`{}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		writeFleetConfig(t, excludeConfig(t, filepath.Join(root, "probe")))
+		const session = "headless-repo"
+		stderr := notifyRun(t, fx.socket, "codex", hookPayload(t, "Stop", session, strPtr(repo)))
+		if stderr != "" {
+			t.Errorf("stderr = %q, want empty", stderr)
+		}
+		assertDelivered(t, fx, session)
+	})
+}
+
+// TestNotifyExcludeCwdEdgeCases pins the matcher's boundary behavior from the
+// ticket's Edge Cases through the real stdin, config and socket stack.
+func TestNotifyExcludeCwdEdgeCases(t *testing.T) {
+	cases := []struct {
+		name        string
+		entries     []string
+		cwd         string
+		wantDropped bool
+	}{
+		{"relative cwd is delivered", []string{"/tmp"}, "tmp/x", false},
+		{"empty cwd is delivered", []string{"/tmp"}, "", false},
+		{"trailing-slash entry excludes a child", []string{"/tmp/"}, "/tmp/probe", true},
+		{"trailing-slash entry excludes the directory itself", []string{"/tmp/"}, "/tmp", true},
+		{"trailing-slash entry keeps the sibling prefix", []string{"/tmp/"}, "/tmpfoo", false},
+		{"root entry excludes every absolute cwd", []string{"/"}, "/anything", true},
+		{"relative and empty entries are ignored", []string{"", "tmp"}, "/tmp/x", false},
+		{"absolute entry still applies next to ignored ones", []string{"", "tmp", "/tmp"}, "/tmp/x", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fx := newNotifyFixture(t)
+			writeFleetConfig(t, excludeConfig(t, tc.entries...))
+			const session = "edge"
+			notifyRun(t, fx.socket, "claude", hookPayload(t, "Stop", session, strPtr(tc.cwd)))
+			if tc.wantDropped {
+				assertOnlyControlArrives(t, fx, session)
+			} else {
+				assertDelivered(t, fx, session)
+			}
+		})
+	}
+}
+
+// TestNotifyExcludeCwdIsPerEvent pins that the decision is made per event: a
+// later event from the same session with a non-listed cwd is delivered even
+// though an earlier one was dropped.
+func TestNotifyExcludeCwdIsPerEvent(t *testing.T) {
+	fx := newNotifyFixture(t)
+	writeFleetConfig(t, excludeConfig(t, "/tmp"))
+	const session = "per-event"
+	notifyRun(t, fx.socket, "claude", hookPayload(t, "UserPromptSubmit", session, strPtr("/tmp/probe")))
+	notifyRun(t, fx.socket, "claude", hookPayload(t, "Stop", session, strPtr("/home/someone/work")))
+
+	got := collectEvents(t, fx)
+	if len(got) != 1 {
+		t.Fatalf("delivered %d events for the session, want exactly 1 (the Stop): %+v", len(got), got)
+	}
+	if got[0].SessionID != session || got[0].EventType != "Stop" {
+		t.Fatalf("delivered event = %+v, want the Stop for session %q", got[0], session)
+	}
+}
+
+// TestNotifyExcludedEventDoesNotAutostartDaemon pins that an excluded event
+// never reaches the default-socket delivery path, whose retry would start a
+// missing daemon. The socket dir is an isolated temp dir, so after the run
+// neither the PID file nor the event socket may exist. No positive autostart
+// control is run: it would launch a real daemon against the ambient tmux.
+func TestNotifyExcludedEventDoesNotAutostartDaemon(t *testing.T) {
+	setTempSocketDir(t)
+	writeFleetConfig(t, excludeConfig(t, "/tmp"))
+	socketDir := os.Getenv("CENCI_SOCKET_DIR")
+	pidPath := ipc.DefaultPIDPath()
+	eventSocket := ipc.DefaultEventSocketPath()
+	// An empty path would make os.Stat("") fail vacuously, and an over-long one
+	// falls back to a shared tmp dir; either would void the absence assertions.
+	for _, path := range []string{pidPath, eventSocket} {
+		if path == "" || socketDir == "" || !strings.HasPrefix(path, socketDir+string(filepath.Separator)) {
+			t.Fatalf("path %q is not inside the isolated socket dir %q", path, socketDir)
+		}
+	}
+	// A regression that spawns a daemon must not leak it past the test.
+	t.Cleanup(func() {
+		_, pidErr := os.Stat(pidPath)
+		_, sockErr := os.Stat(eventSocket)
+		if pidErr != nil && sockErr != nil {
+			return
+		}
+		if out, err := exec.Command(binaryPath, "daemon", "stop").CombinedOutput(); err != nil {
+			t.Errorf("cleanup: daemon stop failed: %v: %s", err, out)
+		}
+	})
+
+	notifyRun(t, "", "claude", hookPayload(t, "Stop", "no-autostart", strPtr("/tmp/probe")), "TMUX=")
+
+	for _, path := range []string{pidPath, eventSocket} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Errorf("%s exists after an excluded event (stat err = %v), want no daemon autostart", path, err)
+		}
+	}
+}
