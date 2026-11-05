@@ -109,6 +109,8 @@ fi
 # produce no event at all (a model that never made the call).
 #   STUB_CONFIG_HOOK_LIMIT=N   run at most N commands of the config-layer file
 #   STUB_REDACT_BLOCK=1        replace a hook's block message with a generic one
+#   STUB_CANARY_FAKE_MESSAGE=1 guard canary probes show both guard messages but
+#                              no hook runs, so no guard receipt exists (#1411)
 cat > "${STUB_DIR}/codex" <<'SCRIPT'
 #!/bin/sh
 printf '%s\n' "$*" >> "${STUB_ARGV_LOG:?STUB_ARGV_LOG must be set}"
@@ -209,7 +211,14 @@ case "$1" in
         # STUB_TRUST_REQUIRED=1 they run only when the call carries
         # --dangerously-bypass-hook-trust. STUB_PATCH_HOOKS_OFF=1 leaves the
         # apply_patch tool unwatched (a Write|Edit alias that does not fire).
-        if [ -n "${STUB_PLUGIN_HOOKS:-}" ] \
+        # STUB_CANARY_FAKE_MESSAGE=1: for a guard canary probe the plugin hooks
+        # do NOT run, but the tool result still carries both guards' messages
+        # -- a session (or sandbox) that reports a guard denial no guard made,
+        # so no receipt is ever written.
+        if [ "$tag" = canary ] && [ "${STUB_CANARY_FAKE_MESSAGE:-0}" = 1 ]; then
+            printf '%s\n' "BLOCKED: Refusing to write to environment file (stub: no hook ran)" \
+                "BLOCKED: Write targets the main worktree, not a feature worktree (stub: no hook ran)" >> "$work/block"
+        elif [ -n "${STUB_PLUGIN_HOOKS:-}" ] \
             && { [ "${STUB_TRUST_REQUIRED:-0}" != 1 ] || [ "$trust_flag" = 1 ]; } \
             && { [ "$tool_name" != apply_patch ] || [ "${STUB_PATCH_HOOKS_OFF:-0}" != 1 ]; }; then
             run_hooks "$STUB_PLUGIN_HOOKS" "$STUB_PLUGIN_ROOT" ""
@@ -864,6 +873,15 @@ else
 fi
 assert_row "host active" "${OUT}/stdout" "${CANARY_AL}" ok
 assert_row_has "host active" "${OUT}/stdout" "${CANARY_AL}" "CANARY_STATUS=active"
+# Receipt non-vacuity (#1411): the emulated hooks are the real guard scripts,
+# so every denied probe left its receipt for the runner and for check.
+for probe_n in 1 2 3 4; do
+    if row_line "${OUT}/stdout" "${CANARY_AL}" | grep -qE "${probe_n}=denied \\([^)]*receipt=yes\\)"; then
+        pass
+    else
+        fail "host active: probe ${probe_n} must be reported denied with receipt=yes: $(row_line "${OUT}/stdout" "${CANARY_AL}")"
+    fi
+done
 assert_row "host active" "${OUT}/stdout" "${CANARY_WH}" "not run"
 assert_row_has "host active" "${OUT}/stdout" "${CANARY_WH}" "sandbox"
 assert_row_has "host active" "${OUT}/stdout" "${CANARY_WH}" "persisted"
@@ -878,6 +896,26 @@ if [[ -n "${DENY_AT}" && -n "${CANARY_AT}" && "${CANARY_AT}" -gt "${DENY_AT}" ]]
     pass
 else
     fail "the canary section must come after the deny matrix (deny at '${DENY_AT}', canary at '${CANARY_AT}')"
+fi
+
+echo "case: a guard message with no hook behind it (no receipt) is never reported denied, and the canary row is never ok (G6)"
+RUNNER_OVERRIDE="${HOST_RUNNER}"
+run_runner "${STUB_PATH}" "${EMU_PATCH_ENV[@]}" STUB_CANARY_FAKE_MESSAGE=1
+RUNNER_OVERRIDE=""
+# Non-vacuity: the deny-matrix canary (not a guard-canary probe) still runs the
+# real hooks, so the trust state is ACTIVE and the canary is expected to pass.
+assert_row "fake message" "${OUT}/stdout" "canary: bash write to the main worktree" ok
+assert_row_has "fake message" "${OUT}/stdout" "${CANARY_AL}" "CANARY_STATUS=refused"
+assert_row_has "fake message" "${OUT}/stdout" "${CANARY_AL}" "guard-message=yes, receipt=no"
+if row_line "${OUT}/stdout" "${CANARY_AL}" | grep -qE '(^|[ ,(])[1-4]=denied'; then
+    fail "fake message: a probe without a receipt must never be reported denied: $(row_line "${OUT}/stdout" "${CANARY_AL}")"
+else
+    pass
+fi
+if row_line "${OUT}/stdout" "${CANARY_AL}" | grep -qF '| ok |' || row_line "${OUT}/stdout" "${CANARY_AL}" | grep -qF 'CANARY_STATUS=active'; then
+    fail "fake message: the canary row must be neither ok nor active: $(row_line "${OUT}/stdout" "${CANARY_AL}")"
+else
+    pass
 fi
 
 echo "case: hooks inactive -> the canary refuses, names pending trust and /hooks, removes what was written, and agrees with the INACTIVE trust state (G6)"

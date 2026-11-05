@@ -882,12 +882,30 @@ canary_guard_message() {
     esac
 }
 
+# canary_receipt_seen <run-dir> <guard> <n> -- "yes" when the guard left its
+# receipt for probe <n> (a regular, non-symlink receipt-<guard>-<n>.* file in the
+# run dir; guard-canary.sh check validates its content), else "no".
+canary_receipt_seen() {
+    local e
+    for e in "$1/receipt-$2-$3."*; do
+        if [[ -f "${e}" && ! -L "${e}" ]]; then
+            echo yes
+            return 0
+        fi
+    done
+    echo no
+}
+
 # canary_variant <label> <with|without> <expected: active|refused|refused-soft|unknown>
 # -- one full preflight. "without" leaves out only --dangerously-bypass-hook-trust
 # (the approvals/sandbox bypass stays). Records one row and sets CANARY_RESULT.
+# A probe is reported denied only when the call was blocked, the guard's own
+# message was seen AND the guard left its receipt (#1411); a call that was never
+# made is reported not-attempted; anything else not-denied. A shell probe runs
+# the COMMAND line plan printed for it, verbatim.
 canary_variant() {
     local label="$1" trust="$2" expected="$3"
-    local plan_out plan_rc run_dir kind pn ptool pguard pgroup ptarget needle tool_name
+    local plan_out plan_rc run_dir kind pn ptool pguard pgroup ptarget needle tool_name pcmd receipt
     local attempted landed blocked seen verdict check_out check_rc got status detail
     local likely n_removed n_left first_line line probes="" incomplete="" n_probes=0 n_attempted=0
     local -a saved_mode=("${CODEX_MODE_ARGS[@]}") results=()
@@ -915,15 +933,21 @@ canary_variant() {
             needle="${ptarget##*/}"
             if [[ "${ptool}" == shell ]]; then
                 tool_name="Bash"
-                S_PROMPT="$(prompt_bash "printf x > ${ptarget}")"
+                pcmd="$(awk -F'\t' -v n="${pn}" '$1 == "COMMAND" && $2 == n { print $3; exit }' <<< "${plan_out}")"
+                if [[ -z "${pcmd}" ]]; then
+                    results+=("${pn}=not-attempted")
+                    probes="${probes:+${probes}, }${pn}=not-attempted (plan printed no COMMAND line for this shell probe)"
+                    continue
+                fi
+                S_PROMPT="$(prompt_bash "${pcmd}")"
             else
                 tool_name="apply_patch"
                 S_PROMPT="$(prompt_patch "$(make_patch file-add "${ptarget}")")"
             fi
             extra_for_worktree
             run_codex "${WT}" "${S_PROMPT}" ${S_EXTRA[@]+"${S_EXTRA[@]}"} || {
-                results+=("${pn}=not-denied")
-                probes="${probes:+${probes}, }${pn}=not-denied (could not start codex exec)"
+                results+=("${pn}=not-attempted")
+                probes="${probes:+${probes}, }${pn}=not-attempted (could not start codex exec)"
                 continue
             }
             attempted="$(attempted_yes_no "${needle}" "${tool_name}")"
@@ -931,13 +955,17 @@ canary_variant() {
             landed="$(effect_landed file "${ptarget}")"
             blocked="$(blocked_yes_no "${needle}")"
             seen="$(message_seen_yes_no "${needle}" "$(canary_guard_message "${pguard}")")"
+            receipt="$(canary_receipt_seen "${run_dir}" "${pguard}" "${pn}")"
             verdict="$(cnh_classify_verdict deny "${attempted}" "${landed}" "${blocked}")"
-            if [[ "${verdict}" == denied && "${seen}" == yes ]]; then
+            if [[ "${verdict}" == denied && "${seen}" == yes && "${receipt}" == yes ]]; then
                 results+=("${pn}=denied")
-                probes="${probes:+${probes}, }${pn}=denied (${ptool}, ${pguard})"
+                probes="${probes:+${probes}, }${pn}=denied (${ptool}, ${pguard}; receipt=yes)"
+            elif [[ "${attempted}" != yes ]]; then
+                results+=("${pn}=not-attempted")
+                probes="${probes:+${probes}, }${pn}=not-attempted (${ptool}, ${pguard}; attempted=${attempted}, effect=${landed}, receipt=${receipt})"
             else
                 results+=("${pn}=not-denied")
-                probes="${probes:+${probes}, }${pn}=not-denied (${ptool}, ${pguard}; attempted=${attempted}, effect=${landed}, hook-block=${blocked}, guard-message=${seen})"
+                probes="${probes:+${probes}, }${pn}=not-denied (${ptool}, ${pguard}; attempted=${attempted}, effect=${landed}, hook-block=${blocked}, guard-message=${seen}, receipt=${receipt})"
             fi
         done <<< "${plan_out}"
         check_out="$(cd "${WT}" && bash "${CANARY_SH}" check "${run_dir}" ${results[@]+"${results[@]}"} 2>&1)"

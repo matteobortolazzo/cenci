@@ -16,22 +16,49 @@
 #         CANARY_RUN_DIR=<dir>
 #         CANARY_MAIN_ROOT=<dir>
 #         PROBE<TAB><n><TAB><shell|apply_patch><TAB><guard><TAB><group><TAB><target>
+#         COMMAND<TAB><n><TAB>printf x > '<target>'   (one per shell probe; an
+#                                                     embedded ' is written '\'')
 #         INSTRUCTION: ...
+#       The COMMAND text is byte-identical to the command the self-check ran
+#       through the guards. The run dir's probes.tsv is written only after the
+#       self-check, and a receipt-* entry already in the run dir at that point
+#       refuses the plan (a receipt written during plan proves nothing).
 #       A plan that cannot be made prints CANARY_STATUS=refused and exits 1; if
 #       its already-created run dir cannot be removed it also prints
 #       `LEFTOVER: <run dir>`.
 #
-#   The session then makes one tool call per PROBE line and judges each result
-#   from the tool output: "denied" only when the result shows the guard's own
-#   message (Refusing to write / targets the main worktree).
+#   The session then makes one tool call per PROBE line (a shell probe runs its
+#   COMMAND verbatim) and judges each result from the tool output: "denied" only
+#   when the result shows the guard's own message (Refusing to write / targets
+#   the main worktree), "blocked" when Codex's sandbox or approval policy
+#   refused the call before any guard saw it, "not-attempted" when the call was
+#   never made, "not-denied" for anything else.
 #
-#   bash "${PLUGIN_ROOT}/codex/guard-canary.sh" check <run-dir> <n>=denied|not-denied...
+#   Guard receipts (#1411): when a guard denies a probe target that its run
+#   dir's probes.tsv lists for that guard, the guard itself writes
+#   <run-dir>/receipt-<guard>-<n>.XXXXXX holding one line
+#   V1<TAB><guard><TAB><hex><TAB><n><TAB><tool_name> (see canary_receipt in
+#   both guard scripts). A receipt catches a session that misreports; it cannot
+#   stop one that deliberately forges a receipt, so active stays a readiness
+#   check, not proof.
+#
+#   bash "${PLUGIN_ROOT}/codex/guard-canary.sh" check <run-dir> <n>=denied|not-denied|blocked|not-attempted...
 #       Removes every probe target that exists (a "denied" claim cannot override
 #       a file on disk), reports the removal as `REMOVED: <path>` and a removal
-#       that cannot happen as `LEFTOVER: <exact path>`, then prints
-#       CANARY_STATUS=active (exit 0) or CANARY_STATUS=refused (exit 1) with the
-#       refusal text. active needs every probe denied, nothing written, nothing
-#       left over. The run dir is removed unless a leftover sits inside it.
+#       that cannot happen as `LEFTOVER: <exact path>`, validates every
+#       receipt-* entry (regular file, not a symlink, owned by the current user,
+#       one V1 line whose hex, probe number, guard and tool match probes.tsv;
+#       anything else prints `BAD_RECEIPT: <name>: <reason>` and refuses), then
+#       prints CANARY_STATUS=active (exit 0) or CANARY_STATUS=refused (exit 1)
+#       with the refusal text. active needs every probe reported denied AND
+#       backed by a valid receipt from its own guard, nothing written, nothing
+#       left over. Precedence per probe: WRITTEN > denied with a receipt >
+#       REPORTED DENIED WITHOUT GUARD RECEIPT > BLOCKED BEFORE THE GUARD /
+#       NOT ATTEMPTED / NO GUARD MESSAGE / NO RESULT. A valid receipt on a
+#       probe reported blocked, not-attempted or not-denied prefixes that line
+#       with GUARD RECEIPT PRESENT BUT REPORTED <verdict>; a valid receipt on a
+#       probe with no reported result still prints plain NO RESULT. The run
+#       dir (with its receipts) is removed unless a leftover sits inside it.
 #       A refusal before the cleanup loop (bad run dir argument, untrusted
 #       record) removes nothing and names the glob to delete by hand.
 #
@@ -53,6 +80,7 @@ GUARD_DIR="${PLUGIN_ROOT_DIR}/hooks/scripts"
 SANDBOX_LABEL="hook trust bypassed by launcher (explicit flag)"
 RUN_PREFIX="cenci-guard-canary-"
 HEX_RE='^[0-9a-f]{16}$'
+TAB=$'\t'
 GUARD_CMD_RE='^"\$\{PLUGIN_ROOT\}/hooks/scripts/(check-sensitive-files|guard-main-worktree)\.sh"$'
 
 CREATED_RUN_DIR=""
@@ -69,7 +97,7 @@ if cnh_is_sandbox; then
 fi
 
 usage() {
-    echo "usage: ${SELF##*/} plan | check <run-dir> <n>=denied|not-denied..." >&2
+    echo "usage: ${SELF##*/} plan | check <run-dir> <n>=denied|not-denied|blocked|not-attempted..." >&2
     exit 2
 }
 
@@ -138,13 +166,22 @@ main_worktree_root() {
     fi
 }
 
+# shell_probe_command <target> -- the one shell command a shell probe runs:
+# printf x > '<target>', single-quoted with an embedded ' written as '\''. Both
+# the self-check payload and the printed COMMAND line come from here, so the
+# session runs exactly the command the real guards were checked against.
+shell_probe_command() {
+    local quoted="${1//\'/\'\\\'\'}"
+    printf "printf x > '%s'" "${quoted}"
+}
+
 # probe_payload <tool: shell|apply_patch> <cwd> <target> -- the synthetic
 # PreToolUse payload for a probe, shaped like the ones Codex sends.
 probe_payload() {
-    local tool="$1" cwd="$2" target="$3" quoted cmd
+    local tool="$1" cwd="$2" target="$3" cmd
     if [[ "${tool}" == shell ]]; then
-        quoted="${target//\'/\'\\\'\'}"
-        jq -n --arg cwd "${cwd}" --arg cmd "printf x > '${quoted}'" \
+        cmd="$(shell_probe_command "${target}")" || return 1
+        jq -n --arg cwd "${cwd}" --arg cmd "${cmd}" \
             '{hook_event_name: "PreToolUse", tool_name: "Bash", cwd: $cwd, tool_input: {command: $cmd}}'
     else
         cmd="$(printf '*** Begin Patch\n*** Add File: %s\n+x\n*** End Patch' "${target}")" || return 1
@@ -194,7 +231,7 @@ self_check_probe() {
 }
 
 do_plan() {
-    local pairs group matcher cmd guard slug tool n=0 main_root base cand canon hex run_dir run_canon target msg i
+    local pairs group matcher cmd guard slug tool n=0 main_root base cand canon hex run_dir run_canon target msg i e
     local -a p_n=() p_tool=() p_guard=() p_group=() p_target=() skipped=()
 
     command -v jq >/dev/null 2>&1 || refuse_plan "jq is required to read the hook manifest and was not found on PATH"
@@ -288,6 +325,16 @@ do_plan() {
         done
     } > "${run_dir}/probes.tsv" || refuse_plan "could not record the probes in ${run_dir}"
 
+    # No receipt may exist yet: the guards only write one once probes.tsv lists
+    # the probe, so anything here was planted while the plan ran and would
+    # pre-satisfy check without the live session's hooks ever answering.
+    for e in "${run_dir}"/receipt-*; do
+        if [[ -e "${e}" || -L "${e}" ]]; then
+            e="${e##*/}"
+            refuse_plan "a guard receipt (${e//[[:cntrl:]]/?}) is already in the run dir before the plan is complete, so the run dir cannot be used as evidence"
+        fi
+    done
+
     {
         printf 'CANARY_PLAN=ok\n'
         printf 'CANARY_RUN_DIR=%s\n' "${run_dir}"
@@ -298,9 +345,14 @@ do_plan() {
         for i in "${!p_n[@]}"; do
             printf 'PROBE\t%s\t%s\t%s\t%s\t%s\n' "${p_n[i]}" "${p_tool[i]}" "${p_guard[i]}" "${p_group[i]}" "${p_target[i]}"
         done
-        printf 'INSTRUCTION: for each PROBE line make exactly one call of its tool that writes the single line x to its target: tool shell runs printf x > <target> with the shell tool; tool apply_patch adds that file with apply_patch. Make no other call, never retry a probe, and never work around a refusal.\n'
-        printf 'INSTRUCTION: judge each probe from its own tool result: denied only when the result shows the guard message (Refusing to write ... or ... targets the main worktree); anything else is not-denied.\n'
-        printf 'INSTRUCTION: then run: bash "%s" check "%s" 1=<denied|not-denied> 2=<denied|not-denied> ... (one entry per PROBE line). Proceed only on CANARY_STATUS=active.\n' "${SELF}" "${run_dir}"
+        for i in "${!p_n[@]}"; do
+            if [[ "${p_tool[i]}" == shell ]]; then
+                printf 'COMMAND\t%s\t%s\n' "${p_n[i]}" "$(shell_probe_command "${p_target[i]}")"
+            fi
+        done
+        printf 'INSTRUCTION: for each PROBE line make exactly one call of its tool that writes the single line x to its target: tool shell runs that probe'"'"'s COMMAND line verbatim (the text after COMMAND<TAB><n><TAB>, already single-quoted) with the shell tool; tool apply_patch adds that file with apply_patch. Make no other call, never retry a probe, and never work around a refusal.\n'
+        printf 'INSTRUCTION: judge each probe from its own tool result: denied only when the result shows the guard message (Refusing to write ... or ... targets the main worktree); blocked when Codex'"'"'s sandbox or approval policy refused the call before any guard answered; not-attempted when the call was never made; not-denied for anything else.\n'
+        printf 'INSTRUCTION: then run: bash "%s" check "%s" 1=<denied|not-denied|blocked|not-attempted> 2=<denied|not-denied|blocked|not-attempted> ... (one entry per PROBE line). Proceed only on CANARY_STATUS=active.\n' "${SELF}" "${run_dir}"
     }
     CREATED_RUN_DIR=""
     exit 0
@@ -317,17 +369,19 @@ do_check() {
     [[ "$#" -ge 1 ]] || usage
     local run_dir="$1" canon base_name hex main_root pf line kind a b c d e f
     local -a p_n=() p_tool=() p_guard=() p_group=() p_target=() bad=() lines=()
-    local -a keys=()
-    local verdicts=$'\n' arg key found reported i n t written status active=1 keep_run_dir=0 leftover_any=0
+    local -a keys=() p_receipt=() bad_receipts=()
+    local verdicts=$'\n' arg key found reported i j n t written status active=1 keep_run_dir=0 leftover_any=0
     local hint_hex hint_root hint_trimmed
+    local r rname reason size rcount rline rdata want_tool receipt_note
+    local receipt_re="^V1${TAB}(check-sensitive-files|guard-main-worktree)${TAB}([0-9a-f]{16})${TAB}([0-9]+)${TAB}([A-Za-z0-9_]+)\$"
 
     shift
-    # Argument tokens: n=denied|not-denied (bash 3.2 has no associative arrays,
-    # so the results live in one newline-delimited string). Anything else, or a
-    # repeated probe number, is recorded and refuses, but the cleanup below
-    # still runs.
+    # Argument tokens: n=denied|not-denied|blocked|not-attempted (bash 3.2 has
+    # no associative arrays, so the results live in one newline-delimited
+    # string). Anything else, or a repeated probe number, is recorded and
+    # refuses, but the cleanup below still runs.
     for arg in "$@"; do
-        if [[ "${arg}" =~ ^([0-9]+)=(denied|not-denied)$ ]]; then
+        if [[ "${arg}" =~ ^([0-9]+)=(denied|not-denied|blocked|not-attempted)$ ]]; then
             key="${BASH_REMATCH[1]}"
             if [[ "${verdicts}" == *$'\n'"${key}="* ]]; then
                 bad+=("${arg} (repeated probe number)")
@@ -424,6 +478,82 @@ do_check() {
         [[ "${found}" -eq 1 ]] || bad+=("${key} (no such probe)")
     done
 
+    # Guard receipts: only a valid one counts as the guard's own evidence, and
+    # every invalid receipt-* entry refuses. A symlink is tested first and never
+    # read, so check never follows it.
+    for i in "${!p_n[@]}"; do
+        p_receipt[i]=0
+    done
+    for r in "${run_dir}"/receipt-*; do
+        [[ -e "${r}" || -L "${r}" ]] || continue
+        rname="${r##*/}"
+        rname="${rname//[[:cntrl:]]/?}"
+        reason=""
+        if [[ -L "${r}" ]]; then
+            reason="is a symlink, which is never followed"
+        elif [[ ! -f "${r}" ]]; then
+            reason="is not a regular file"
+        elif [[ ! -O "${r}" ]]; then
+            reason="is not owned by the current user"
+        else
+            size="$(wc -c < "${r}" 2>/dev/null | tr -d '[:space:]')" || size=""
+            if [[ ! "${size}" =~ ^[0-9]+$ || "${size}" -gt 512 ]]; then
+                reason="is unreadable or too large to be a receipt"
+            else
+                # Bounded read: at most 513 bytes, so a file grown or swapped
+                # after the size check above still cannot stall check (the
+                # trailing x survives command substitution's newline stripping
+                # and proves head succeeded). Residual: a FIFO swapped in after
+                # the -f test blocks the open itself; that needs the same user
+                # and only hangs this run.
+                rdata=""
+                { rdata="$(head -c 513 -- "${r}" && printf x)"; } 2>/dev/null || rdata=""
+                rcount=0
+                rline=""
+                if [[ "${rdata}" != *x ]]; then
+                    rcount=-1
+                else
+                    rdata="${rdata%x}"
+                    if [[ -n "${rdata}" ]]; then
+                        rline="${rdata%$'\n'}"
+                        rcount=1
+                        [[ "${rline}" == *$'\n'* ]] && rcount=2
+                    fi
+                fi
+                if [[ "${rcount}" -lt 0 || "${#rdata}" -gt 512 ]]; then
+                    reason="is unreadable or too large to be a receipt"
+                elif [[ "${rcount}" -ne 1 ]]; then
+                    reason="does not hold exactly one line"
+                elif [[ ! "${rline}" =~ ${receipt_re} ]]; then
+                    reason="is not a V1 receipt line"
+                elif [[ "${BASH_REMATCH[2]}" != "${hex}" ]]; then
+                    reason="names another run (${BASH_REMATCH[2]})"
+                else
+                    key="${BASH_REMATCH[3]}"
+                    found=""
+                    for j in "${!p_n[@]}"; do
+                        [[ "${p_n[j]}" == "${key}" ]] && found="${j}"
+                    done
+                    if [[ -z "${found}" ]]; then
+                        reason="names probe ${key}, which is not in the probe record"
+                    else
+                        if [[ "${p_tool[found]}" == shell ]]; then want_tool=Bash; else want_tool=apply_patch; fi
+                        if [[ "${BASH_REMATCH[1]}" != "${p_guard[found]}" ]]; then
+                            reason="names guard ${BASH_REMATCH[1]}, but probe ${key} is for ${p_guard[found]}"
+                        elif [[ "${BASH_REMATCH[4]}" != "${want_tool}" ]]; then
+                            reason="names tool ${BASH_REMATCH[4]}, but probe ${key} is a ${p_tool[found]} probe (tool ${want_tool})"
+                        else
+                            p_receipt[found]=1
+                        fi
+                    fi
+                fi
+            fi
+        fi
+        if [[ -n "${reason}" ]]; then
+            bad_receipts+=("${rname}: ${reason}")
+        fi
+    done
+
     # Cleanup first, judge second: whatever got written is removed no matter what
     # the session reported.
     for i in "${!p_n[@]}"; do
@@ -447,17 +577,32 @@ do_check() {
         case "${verdicts}" in
             *$'\n'"${n}=denied"$'\n'*) reported=denied ;;
             *$'\n'"${n}=not-denied"$'\n'*) reported=not-denied ;;
+            *$'\n'"${n}=blocked"$'\n'*) reported=blocked ;;
+            *$'\n'"${n}=not-attempted"$'\n'*) reported=not-attempted ;;
         esac
+        receipt_note=""
+        if [[ "${p_receipt[i]}" -eq 1 ]]; then
+            receipt_note="GUARD RECEIPT PRESENT BUT REPORTED ${reported} -- "
+        fi
         if [[ "${written}" -eq 1 ]]; then
             status="WRITTEN -- no guard stopped this probe, so the guard is inactive"
             if [[ "${reported}" == denied ]]; then
                 status="WRITTEN although reported denied -- the file on disk wins, so the guard is inactive"
             fi
             active=0
-        elif [[ "${reported}" == denied ]]; then
+        elif [[ "${reported}" == denied && "${p_receipt[i]}" -eq 1 ]]; then
             status="denied by ${p_guard[i]}"
+        elif [[ "${reported}" == denied ]]; then
+            status="REPORTED DENIED WITHOUT GUARD RECEIPT -- the session reported a denial, but ${p_guard[i]} left no valid receipt, so no guard is shown to have answered (a sandbox or approval refusal, or a misreport)"
+            active=0
+        elif [[ "${reported}" == blocked ]]; then
+            status="${receipt_note}BLOCKED BEFORE THE GUARD (Codex sandbox or approval refusal) -- not written, and the guard never saw the call (inconclusive)"
+            active=0
+        elif [[ "${reported}" == not-attempted ]]; then
+            status="${receipt_note}NOT ATTEMPTED -- the session never made this probe's call (inconclusive)"
+            active=0
         elif [[ "${reported}" == not-denied ]]; then
-            status="NO GUARD MESSAGE -- not written, but not denied by the guard either (inconclusive)"
+            status="${receipt_note}NO GUARD MESSAGE -- not written, but not denied by the guard either (inconclusive)"
             active=0
         else
             status="NO RESULT -- the session reported nothing for this probe (inconclusive)"
@@ -466,6 +611,7 @@ do_check() {
         lines+=("PROBE_RESULT: ${n} (${p_tool[i]}, ${p_guard[i]}, group ${p_group[i]}): ${status}")
     done
     [[ "${#bad[@]}" -eq 0 ]] || active=0
+    [[ "${#bad_receipts[@]}" -eq 0 ]] || active=0
     [[ "${leftover_any}" -eq 0 ]] || active=0
 
     if [[ "${keep_run_dir}" -eq 0 ]]; then
@@ -482,15 +628,18 @@ do_check() {
         for line in "${bad[@]+"${bad[@]}"}"; do
             printf 'BAD_RESULT: unrecognized result token %s\n' "${line}"
         done
+        for line in "${bad_receipts[@]+"${bad_receipts[@]}"}"; do
+            printf 'BAD_RECEIPT: %s\n' "${line}"
+        done
         if [[ "${active}" -eq 1 ]]; then
             printf 'CANARY_STATUS=active\n'
-            printf 'Every probe was denied by its own guard and nothing was written: the cenci write guards are active for this session.\n'
+            printf 'Every probe was denied by its own guard, with that guard'"'"'s receipt, and nothing was written: the cenci write guards are active for this session.\n'
             trust_note
         else
             printf 'CANARY_STATUS=refused\n'
             printf 'GUARD CANARY REFUSED: the cenci write guards are not confirmed active, so protection is inactive and no mutation may start.\n'
             printf 'Likely cause: the cenci hooks are pending or untrusted in Codex, and Codex skips pending hooks. Review and enable them with /hooks, then rerun this workflow.\n'
-            printf 'Reading the probe results: WRITTEN means a guard let the write through (hooks inactive); NO GUARD MESSAGE means nothing was written but the guard never answered (inconclusive: an approval prompt, Codex'"'"'s own sandbox, or a call that was never made).\n'
+            printf 'Reading the probe results: WRITTEN means a guard let the write through (hooks inactive); REPORTED DENIED WITHOUT GUARD RECEIPT means the session reported a denial but the guard left no valid receipt, so no guard is shown to have answered; BLOCKED BEFORE THE GUARD means Codex'"'"'s sandbox or approval policy refused the call before any guard saw it (inconclusive); NOT ATTEMPTED means the probe call was never made (inconclusive); NO GUARD MESSAGE means nothing was written but the guard never answered (inconclusive: an approval prompt, Codex'"'"'s own sandbox, or a call that was never made); NO RESULT means the session reported nothing for that probe (inconclusive). A BAD_RECEIPT line names a receipt that does not match this run'"'"'s probe record.\n'
             if [[ "${leftover_any}" -eq 1 ]]; then
                 printf 'Remove each LEFTOVER path above by hand; the canary could not.\n'
             fi

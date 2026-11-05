@@ -123,9 +123,9 @@ Codex reads the repository's canonical `AGENTS.md` guidance directly. Generated
 `CLAUDE.md` files are client adapters, not the shared source of truth.
 
 If Codex reports updated plugin hooks as pending, review them with `/hooks`: pending hooks are
-inactive protection, and the mutating Codex workflows (implement, address-review, refactor, and
-babysit's Codex step) run a guard canary first and refuse to start until it passes; the
-`ci-repair` and `babysit-attention` sessions the supervisor starts later are not yet covered. `cn xt`
+inactive protection, and every mutating Codex workflow (implement, address-review, refactor,
+ci-repair, babysit-attention, refine, configure, maintain, sync, and babysit's Codex step) runs a
+guard canary first and refuses to start until it passes. `cn xt`
 sessions pass the trust-bypass flag, so they are labelled
 "hook trust bypassed by launcher (explicit flag)"; cenci never changes hook trust, and
 `cenci doctor` does not verify it.

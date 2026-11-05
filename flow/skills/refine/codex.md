@@ -14,6 +14,10 @@ auto-adopted, never asked, into the proposal's `### Assumptions (auto-adopted)` 
 (plain `-` bullets, never task-list checkboxes: `- <assumption> — <adopted answer and why
 it is obvious>`).
 
+In `apply`, after `verify`, first run the guard canary preflight, `bash "${PLUGIN_ROOT}/codex/guard-canary.sh" plan`,
+as `codex-runtime` describes; on any refusal stop with nothing changed, reporting the helper's text and any
+`LEFTOVER:` path, before the re-fetch, the pre-write checks and any GitHub write. The persist turn runs the same guard canary before it writes either the artifact or the checkpoint. Plan mode runs none.
+
 Resolve `refinementAutonomy` on every invocation, during preparation and apply, from the config `project-core` returns: it reads `refinement.autonomy`. Only the exact string `"lean"` means lean. An absent key, a missing or non-object `refinement` block, or any other value means `interactive`, with the shared question filter and interactive question relay. `planning.autonomy` and `planning.attended` are never consulted. When `refinement.autonomy` is present but is not exactly `"lean"` or `"interactive"`, print one notice line, `refinement.autonomy "<value>" unrecognized; running interactive`, and continue in interactive mode — the mode is still `interactive`.
 
 **Resolve independent refinement controls.** Resolve these once from the same config snapshot returned by `project-core`. First validate the ticket ID (`^[0-9]+$`) and repository identity; invalid input stops before any GitHub CLI call or temp-file write. After the initial read-only inspection, create one per-run token with the documented `mktemp -u ${TMPDIR:-/tmp}/cenci/issue-<number>-XXXXXX` primitive and carry it forward literally; stop on token-generation failure. Only then use the `Write` tool to save that resolved JSON to `${TMPDIR:-/tmp}/cenci/issue-<number>-<token>-policy-config.json`. If the write fails, retry once, then remove that exact scratch path and STOP on another failure; never invoke the helper on missing or stale content. Run:

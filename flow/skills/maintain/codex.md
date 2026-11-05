@@ -91,6 +91,11 @@ the selection or silently substitute a new audit.
 
 ## Phase 6 — Apply
 
+In `apply`, after `verify`, first run the guard canary preflight, `bash "${PLUGIN_ROOT}/codex/guard-canary.sh" plan`,
+as `codex-runtime` describes; on any refusal stop with nothing changed, reporting the helper's text and any
+`LEFTOVER:` path. This covers `backlog`'s GitHub path and the four repo-audit modes, before the goal create step and the first
+checkpoint `advance`. The persist turn runs the same guard canary before it writes either the artifact or the checkpoint; the Plan-mode phases above run none.
+
 Mode `backlog` uses a different apply path: it consolidates GitHub issues (merge duplicates,
 batch small items, promote) and mutates no repository files, so it creates no worktree,
 branch, commit, or PR, and skips the `check.sh`/health-gate re-verify — follow the
