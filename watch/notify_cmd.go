@@ -5,13 +5,73 @@ import (
 	"flag"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/daemon"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/frontend"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/ipc"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/run"
 )
+
+// fleetWatchFile is the narrow slice of the fleet config that notify reads:
+// the opt-in watch.excludeCwd list. Any decode error discards the whole list.
+// Elements decode as *string because encoding/json turns a JSON null into a
+// string as a silent no-op (""), which would let a bad element slip through.
+type fleetWatchFile struct {
+	Watch struct {
+		ExcludeCwd []*string `json:"excludeCwd"`
+	} `json:"watch"`
+}
+
+// loadExcludeCwd reads watch.excludeCwd from the fleet config at path. It
+// fails open to visibility: an empty path, an unreadable file, malformed JSON
+// or a wrongly typed key or element (a null included) yields nil, silently.
+func loadExcludeCwd(path string) []string {
+	if path == "" {
+		return nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var cfg fleetWatchFile
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return nil
+	}
+	entries := make([]string, 0, len(cfg.Watch.ExcludeCwd))
+	for _, entry := range cfg.Watch.ExcludeCwd {
+		if entry == nil {
+			return nil
+		}
+		entries = append(entries, *entry)
+	}
+	return entries
+}
+
+// cwdExcluded reports whether cwd equals a listed absolute entry or sits under
+// one at a path-segment boundary, after filepath.Clean on both sides. It is
+// deliberately narrow: an empty or relative cwd, and empty or relative
+// entries, never match, so everything else stays visible. Symlinks are not
+// resolved and case is not folded.
+func cwdExcluded(cwd string, entries []string) bool {
+	if cwd == "" || !filepath.IsAbs(cwd) {
+		return false
+	}
+	cwd = filepath.Clean(cwd)
+	sep := string(filepath.Separator)
+	for _, entry := range entries {
+		if entry == "" || !filepath.IsAbs(entry) {
+			continue
+		}
+		entry = filepath.Clean(entry)
+		if cwd == entry || entry == sep || strings.HasPrefix(cwd, entry+sep) {
+			return true
+		}
+	}
+	return false
+}
 
 // terminalBackgroundTaskStatus lists the background-task states that cannot
 // wake the session on their own. Claude Code's task status enum is
@@ -47,6 +107,9 @@ func runNotify(args []string) {
 	var hookInput struct {
 		HookEventName string `json:"hook_event_name"`
 		SessionID     string `json:"session_id"`
+		// Cwd is only compared against the opt-in watch.excludeCwd list; it
+		// never reaches IPC.
+		Cwd string `json:"cwd"`
 		// Notification fields
 		Notification struct {
 			Type string `json:"type"`
@@ -107,6 +170,15 @@ func runNotify(args []string) {
 	}
 	if (event.Agent == "codex" || event.Agent == "opencode") && event.EventType == "UserPromptSubmit" {
 		event.TaskName = frontend.PromptTaskName(hookInput.Prompt)
+	}
+
+	// Opt-in exclusion of headless probe sessions (watch.excludeCwd), decided
+	// per event. Returning before DeliverEvent also keeps an excluded event
+	// from autostarting a missing daemon. The config is read only for an
+	// absolute cwd; every failure leaves the event visible.
+	if hookInput.Cwd != "" && filepath.IsAbs(hookInput.Cwd) &&
+		cwdExcluded(hookInput.Cwd, loadExcludeCwd(run.DefaultConfigPath())) {
+		return
 	}
 
 	// Delivery is silent and non-fatal. For the default socket it starts a
