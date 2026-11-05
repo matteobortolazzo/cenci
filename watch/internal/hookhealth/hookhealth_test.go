@@ -392,36 +392,128 @@ func TestWriter_RefusesForeignOwner(t *testing.T) {
 	}
 }
 
+// requireUntrusted asserts the report of an untrusted store: no evidence, the
+// Untrusted flag set, and no failures listed even when records were seeded.
+func requireUntrusted(t *testing.T, got Report) {
+	t.Helper()
+	if got.State != StateNoEvidence {
+		t.Fatalf("state = %q, want no-evidence", got.State)
+	}
+	if !got.Untrusted {
+		t.Fatalf("Untrusted = false, want true (report %+v)", got)
+	}
+	if len(got.Failures) != 0 || got.LastOK != nil {
+		t.Fatalf("an untrusted store's records were read: %+v", got)
+	}
+}
+
 func TestReader_RefusesUnsafeStores(t *testing.T) {
 	now := time.Now()
-	t.Run("world writable leaf 0777", func(t *testing.T) {
-		dir := isolate(t)
-		seed(t, dir, "delivery-failure", "claude", now)
-		chmodDir(t, dir, 0o777)
-		if got := Read(dir, now).State; got != StateNoEvidence {
-			t.Fatalf("state = %q, want no-evidence", got)
-		}
-	})
-	t.Run("symlinked leaf", func(t *testing.T) {
-		dir := isolate(t)
-		real := t.TempDir()
-		seed(t, real, "delivery-failure", "claude", now)
-		mkRoot(t, filepath.Dir(dir))
-		if err := os.Symlink(real, dir); err != nil {
-			t.Fatal(err)
-		}
-		if got := Read(dir, now).State; got != StateNoEvidence {
-			t.Fatalf("state = %q, want no-evidence", got)
-		}
-	})
-	t.Run("foreign owner", func(t *testing.T) {
-		dir := isolate(t)
-		seed(t, dir, "delivery-failure", "claude", now)
+	foreignOwner := func(t *testing.T) {
+		t.Helper()
 		orig := ownerUID
 		ownerUID = func() int { return os.Getuid() + 1 }
 		t.Cleanup(func() { ownerUID = orig })
-		if got := Read(dir, now).State; got != StateNoEvidence {
-			t.Fatalf("state = %q, want no-evidence", got)
+	}
+	tests := []struct {
+		name  string
+		setup func(t *testing.T) (dir string)
+	}{
+		{"world writable leaf 0777 with a fresh missing-binary record", func(t *testing.T) string {
+			dir := isolate(t)
+			seed(t, dir, "missing-binary", "claude", now)
+			chmodDir(t, dir, 0o777)
+			return dir
+		}},
+		{"group writable leaf 0770", func(t *testing.T) string {
+			dir := isolate(t)
+			seed(t, dir, "delivery-failure", "claude", now)
+			chmodDir(t, dir, 0o770)
+			return dir
+		}},
+		{"symlinked leaf to a trusted dir", func(t *testing.T) string {
+			dir := isolate(t)
+			real := t.TempDir()
+			chmodDir(t, real, 0o700)
+			seed(t, real, "delivery-failure", "claude", now)
+			mkRoot(t, filepath.Dir(dir))
+			if err := os.Symlink(real, dir); err != nil {
+				t.Fatal(err)
+			}
+			return dir
+		}},
+		{"leaf is a regular file", func(t *testing.T) string {
+			dir := isolate(t)
+			mkRoot(t, filepath.Dir(dir))
+			if err := os.WriteFile(dir, []byte("x"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return dir
+		}},
+		{"foreign owner leaf", func(t *testing.T) string {
+			dir := isolate(t)
+			seed(t, dir, "delivery-failure", "claude", now)
+			foreignOwner(t)
+			return dir
+		}},
+		{"world writable root 0777 with the leaf absent", func(t *testing.T) string {
+			dir := isolate(t)
+			chmodDir(t, filepath.Dir(dir), 0o777)
+			return dir
+		}},
+		{"foreign owner root with the leaf absent", func(t *testing.T) string {
+			dir := isolate(t)
+			mkRoot(t, filepath.Dir(dir))
+			foreignOwner(t)
+			return dir
+		}},
+		{"non-ENOENT Lstat failure on the root (state home is a file)", func(t *testing.T) string {
+			state := filepath.Join(t.TempDir(), "state")
+			if err := os.WriteFile(state, []byte("x"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("XDG_STATE_HOME", state)
+			return filepath.Join(state, "cenci", "hook-health")
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := tc.setup(t)
+			requireUntrusted(t, Read(dir, now))
+		})
+	}
+}
+
+func TestRead_AbsentIsNotUntrusted(t *testing.T) {
+	now := time.Now()
+	t.Run("state root absent", func(t *testing.T) {
+		dir := isolate(t)
+		got := Read(dir, now)
+		if got.State != StateNoEvidence || got.Untrusted {
+			t.Fatalf("report = %+v, want plain no-evidence", got)
+		}
+	})
+	t.Run("trusted root with the leaf absent", func(t *testing.T) {
+		dir := isolate(t)
+		mkRoot(t, filepath.Dir(dir))
+		got := Read(dir, now)
+		if got.State != StateNoEvidence || got.Untrusted {
+			t.Fatalf("report = %+v, want plain no-evidence", got)
+		}
+	})
+	t.Run("empty dir", func(t *testing.T) {
+		got := Read("", now)
+		if got.State != StateNoEvidence || got.Untrusted {
+			t.Fatalf("report = %+v, want plain no-evidence", got)
+		}
+	})
+	t.Run("leaf mode 0750 stays trusted and classifies its records", func(t *testing.T) {
+		dir := isolate(t)
+		seed(t, dir, "delivery-failure", "claude", now.Add(-time.Minute))
+		chmodDir(t, dir, 0o750)
+		got := Read(dir, now)
+		if got.Untrusted || got.State != StateCurrentFailure || len(got.Failures) != 1 {
+			t.Fatalf("report = %+v, want a trusted current-failure", got)
 		}
 	})
 }
@@ -724,6 +816,26 @@ func TestRender(t *testing.T) {
 		}
 		if !strings.Contains(out, "not proof of health") {
 			t.Fatalf("output lacks the not-proof-of-health line: %q", out)
+		}
+	})
+	t.Run("plain no evidence output is pinned byte for byte", func(t *testing.T) {
+		const want = "hook health: no-evidence\n" +
+			"  no recent records: this is not proof of health (hooks may not have run, or records are older than 24h)\n"
+		if got := Render(Report{State: StateNoEvidence}); got != want {
+			t.Fatalf("output = %q, want %q", got, want)
+		}
+	})
+	t.Run("untrusted store prints exactly the fixed reason line", func(t *testing.T) {
+		const reason = "  untrusted store: the hook-health directory or its cenci state directory is a symlink, " +
+			"not a directory, foreign-owned or group/other-writable (for example left root-owned by a sudo run), " +
+			"so hooks cannot record; fix its owner and permissions — this reporter never repairs it"
+		out := Render(Report{State: StateNoEvidence, Untrusted: true})
+		lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
+		if len(lines) != 2 || lines[0] != "hook health: no-evidence" || lines[1] != reason {
+			t.Fatalf("lines = %q, want the token line then %q", lines, reason)
+		}
+		if strings.Contains(out, "no recent records") {
+			t.Fatalf("untrusted output still blames missing records: %q", out)
 		}
 	})
 	t.Run("every state has its token as the first line", func(t *testing.T) {

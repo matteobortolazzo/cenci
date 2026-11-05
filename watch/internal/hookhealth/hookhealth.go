@@ -10,7 +10,8 @@
 //
 // The writer side (RecordFailure, RecordOK) swallows every error: a hook must
 // never break the calling agent session. The reader side (Read) never creates
-// anything and treats anything invalid as absent.
+// anything, treats invalid records as absent, and reports a present but
+// untrusted store apart from a missing one.
 package hookhealth
 
 import (
@@ -110,11 +111,16 @@ type Record struct {
 // Report is the reporter's result. Failures holds the failures behind the
 // state: for StateCurrentFailure the ones not yet superseded by LastOK, for
 // StateRecovered the superseded ones, otherwise empty. LastOK is the valid
-// non-stale success record, if any.
+// non-stale success record, if any. Untrusted is set only with
+// StateNoEvidence, when the state root or the store directory exists but is a
+// symlink, not a directory, foreign-owned or group/other-writable: the
+// writers refuse such a store, so hooks cannot record, and none of its records
+// are read.
 type Report struct {
-	State    State
-	Failures []Record
-	LastOK   *Record
+	State     State
+	Failures  []Record
+	LastOK    *Record
+	Untrusted bool
 }
 
 // ownerUID is the uid a pre-existing store directory must belong to; a var so
@@ -138,24 +144,49 @@ func Dir() string {
 	return filepath.Join(state, "cenci", "hook-health")
 }
 
-// checkDir reports whether path is a directory the store may trust: not a
-// symlink, a directory, owned by the current uid, and not group/other
-// writable (the 0777 case is tested directly).
+// dirClass is how classifyDir sees a path: not there at all, a directory the
+// store may trust, or something present that it must not trust.
+type dirClass int
+
+const (
+	dirAbsent dirClass = iota
+	dirTrusted
+	dirUntrusted
+)
+
+// classifyDir classifies path with one Lstat. Only fs.ErrNotExist counts as
+// absent; any other Lstat failure (for example a permission-denied parent)
+// is untrusted, matching what the writers refuse. A present path is trusted
+// when it is not a symlink, is a directory, is owned by the current uid and
+// is not group/other writable (the 0777 case is tested directly).
 //
 // These checks must stay in sync with hardenDir in watch/pkg/watch/socket.go
 // (symlink, non-directory, foreign owner, group/other-writable), and with
-// _hh_dir in plugin/lib/hook-health.sh. Unlike hardenDir, loose-but-not-
-// writable modes (0750) are accepted silently: the store holds no secrets.
-func checkDir(path string) bool {
+// _hh_safe_dir (via _hh_dir) in plugin/lib/hook-health.sh. Unlike hardenDir,
+// loose-but-not-writable modes (0750) are accepted silently: the store holds
+// no secrets.
+func classifyDir(path string) dirClass {
 	info, err := os.Lstat(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return dirAbsent
+	}
 	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-		return false
+		return dirUntrusted
 	}
 	st, ok := info.Sys().(*syscall.Stat_t)
 	if !ok || int(st.Uid) != ownerUID() {
-		return false
+		return dirUntrusted
 	}
-	return info.Mode().Perm()&0o022 == 0
+	if info.Mode().Perm()&0o022 != 0 {
+		return dirUntrusted
+	}
+	return dirTrusted
+}
+
+// checkDir reports whether path is a directory the store may trust. The rules
+// live in classifyDir; the writers treat absent and untrusted alike.
+func checkDir(path string) bool {
+	return classifyDir(path) == dirTrusted
 }
 
 // ensureDir creates path at 0700 when absent, then verifies it with checkDir.
@@ -279,12 +310,32 @@ func RecordOK(client string) {
 }
 
 // Read classifies the store at dir as of now. It is read-only: it never
-// creates, repairs or removes anything. A missing store, a store that fails
-// the directory checks, and invalid, oversized, symlinked, future-dated or
-// older-than-24h records all count as absent.
+// creates, repairs or removes anything. A missing store, and invalid,
+// oversized, symlinked, future-dated or older-than-24h records, count as
+// absent. A store that exists but fails the directory checks reports
+// StateNoEvidence with Untrusted set, and none of its records are read.
+//
+// The check order is: dir == "" is absent; a missing state root is absent
+// without looking at the leaf; a present root that fails is untrusted; a
+// trusted root with a missing leaf is absent; a present leaf that fails is
+// untrusted. Only a fully trusted store is read.
 func Read(dir string, now time.Time) Report {
 	report := Report{State: StateNoEvidence, Failures: []Record{}}
-	if dir == "" || !checkDir(filepath.Dir(dir)) || !checkDir(dir) {
+	if dir == "" {
+		return report
+	}
+	switch classifyDir(filepath.Dir(dir)) {
+	case dirAbsent:
+		return report
+	case dirUntrusted:
+		report.Untrusted = true
+		return report
+	}
+	switch classifyDir(dir) {
+	case dirAbsent:
+		return report
+	case dirUntrusted:
+		report.Untrusted = true
 		return report
 	}
 
@@ -349,10 +400,21 @@ func Render(r Report) string {
 		writeDetail(&b, *r.LastOK)
 	}
 	if r.State == StateNoEvidence {
-		b.WriteString("  no recent records: this is not proof of health (hooks may not have run, or records are older than 24h)\n")
+		if r.Untrusted {
+			b.WriteString(untrustedLine)
+		} else {
+			b.WriteString("  no recent records: this is not proof of health (hooks may not have run, or records are older than 24h)\n")
+		}
 	}
 	return b.String()
 }
+
+// untrustedLine is the fixed reason line of an untrusted store. It carries no
+// path, uid or mode, and `cenci doctor` matches its `  untrusted store:`
+// prefix on line 2.
+const untrustedLine = "  untrusted store: the hook-health directory or its cenci state directory is a symlink, " +
+	"not a directory, foreign-owned or group/other-writable (for example left root-owned by a sudo run), " +
+	"so hooks cannot record; fix its owner and permissions — this reporter never repairs it\n"
 
 func writeDetail(b *strings.Builder, r Record) {
 	fmt.Fprintf(b, "  %s (%s, %s): %s\n", r.Category, r.Client, r.At.UTC().Format(time.RFC3339), r.Category.Hint())

@@ -431,28 +431,61 @@ hook_health_dir_ok() {
 	[ -n "$(find "$dir" -prune ! -perm -020 ! -perm -002 -print 2>/dev/null)" ]
 }
 
-# hook_health_missing_binary_record prints "<age-seconds> <client>" for a valid,
-# fresh (<= 24 h) missing-binary record and returns 0; any other state (no
-# state root, unsafe dir, absent/symlinked/oversized/malformed/future-dated/
-# stale record) returns 1 — invalid records count as absent, never as a
-# failure or as health. The record is the plain-text `<epoch> <claude|codex>`
-# line the watch wrappers write when no cenci binary resolves.
-hook_health_missing_binary_record() {
-	local state root dir rec line client ts now age
+# hook_health_store_dir prints the hook-health store leaf,
+# `<state>/cenci/hook-health`, and returns 0; it returns 1 (printing nothing)
+# when no store resolves. <state> is an absolute XDG_STATE_HOME, else
+# $HOME/.local/state — like the writers, never resolved from a relative HOME.
+hook_health_store_dir() {
+	local state
 	case "${XDG_STATE_HOME:-}" in
 		/*) state="$XDG_STATE_HOME" ;;
 		*)
-			# Like the writers, never resolve the store from a relative HOME.
 			case "${HOME:-}" in
 				/*) state="$HOME/.local/state" ;;
 				*) return 1 ;;
 			esac
 			;;
 	esac
-	root="$state/cenci"
-	dir="$root/hook-health"
-	rec="$dir/missing-binary"
-	hook_health_dir_ok "$root" && hook_health_dir_ok "$dir" || return 1
+	printf '%s\n' "$state/cenci/hook-health"
+}
+
+# hook_health_store_untrusted <dir> returns 0 when the store at <dir> (the leaf
+# printed by hook_health_store_dir) exists but is untrusted, so the writers
+# refuse to record: the state root is present and fails hook_health_dir_ok, or
+# the root is trusted and the leaf is present and fails it. It returns 1 for an
+# absent root, or a trusted root with an absent leaf. Presence is
+# `[ -e ] || [ -L ]`, the writers' own absence test (_hh_dir), so a dangling
+# symlink is present. Shell cannot tell a permission-denied lstat from
+# not-exist, so a parent the user cannot search reads as absent here, whereas
+# internal/hookhealth counts that as untrusted. The same holds for ENOTDIR (a
+# path component is a regular file) and ELOOP (a symlink loop): the shell reads
+# both as absent while the Go reader reports untrusted. This divergence is
+# known, documented and warn-only. Creates and repairs nothing.
+hook_health_store_untrusted() {
+	local dir="$1" root="${1%/*}"
+	[ -e "$root" ] || [ -L "$root" ] || return 1
+	hook_health_dir_ok "$root" || return 0
+	[ -e "$dir" ] || [ -L "$dir" ] || return 1
+	! hook_health_dir_ok "$dir"
+}
+
+# hook_health_record <missing-binary|bootstrap-failure> prints
+# "<age-seconds> <client>" for a valid, fresh (<= 24 h) record of that category
+# and returns 0; any other state (unknown category, no state root, unsafe dir,
+# absent/symlinked/oversized/malformed/future-dated/stale record) returns 1 —
+# invalid records count as absent, never as a failure or as health. The record
+# is the plain-text `<epoch> <claude|codex>` line the watch wrappers write when
+# no cenci binary resolves (missing-binary) or installing it fails
+# (bootstrap-failure).
+hook_health_record() {
+	local category="$1" dir rec line client ts now age
+	case "$category" in
+		missing-binary | bootstrap-failure) ;;
+		*) return 1 ;;
+	esac
+	dir="$(hook_health_store_dir)" || return 1
+	rec="$dir/$category"
+	hook_health_dir_ok "${dir%/*}" && hook_health_dir_ok "$dir" || return 1
 	[ -f "$rec" ] && [ ! -L "$rec" ] && [ -O "$rec" ] || return 1
 	[ -n "$(find "$rec" -prune -size -33c -print 2>/dev/null)" ] || return 1
 	IFS= read -r line <"$rec" || return 1
@@ -477,9 +510,16 @@ hook_health_missing_binary_record() {
 # `cenci daemon hook-health` (`hook health: <healthy|recovered|no-evidence|
 # current-failure>`); a non-zero exit (an older binary without the subverb
 # exits 2 with "unknown subcommand") or an unrecognized first line warns to
-# update. With no binary it reads the missing-binary record directly.
+# update. In the no-evidence case a line 2 starting `  untrusted store:` (the
+# reporter's fixed reason line) makes doctor print its own fixed untrusted
+# warning instead; no other state looks at line 2 for that prefix. With no
+# binary it first reports an untrusted store, else reads the missing-binary and
+# bootstrap-failure records directly (one warn per fresh record), else warns
+# that no record was found.
 doctor_hook_health() {
-	local bin out first detail rec age client
+	local bin dir out first line2 detail rec age client category printed
+	# One fixed text for both branches, so they cannot drift apart.
+	local untrusted_msg="hook health: no evidence — the hook-health store is untrusted (symlinked, foreign-owned or group/other-writable), so hooks cannot record; fix its owner and permissions"
 	if bin="$(cenci_binary_for_doctor)"; then
 		if ! out="$("$bin" daemon hook-health 2>/dev/null)"; then
 			warn "hook health: reporter unavailable — this cenci binary may predate it; run: cenci update"
@@ -494,7 +534,23 @@ doctor_hook_health() {
 				ok "hook health: recovered (an earlier hook failure was superseded by a successful delivery)"
 				;;
 			"hook health: no-evidence")
-				warn "hook health: no evidence yet (absent or stale records are not proof hooks work) — details: cenci daemon hook-health"
+				# Single-line output has no line 2 (`${out#*$'\n'}` would return
+				# the whole string), so only look when a newline is present.
+				line2=""
+				case "$out" in
+					*$'\n'*)
+						line2="${out#*$'\n'}"
+						line2="${line2%%$'\n'*}"
+						;;
+				esac
+				case "$line2" in
+					"  untrusted store:"*)
+						warn "$untrusted_msg"
+						;;
+					*)
+						warn "hook health: no evidence yet (absent or stale records are not proof hooks work) — details: cenci daemon hook-health"
+						;;
+				esac
 				;;
 			"hook health: current-failure")
 				detail="$(printf '%s\n' "$out" | sed -n '2{s/^[[:space:]]*//;p;}' | tr -cd '[:print:]')"
@@ -506,12 +562,27 @@ doctor_hook_health() {
 		esac
 		return 0
 	fi
-	if rec="$(hook_health_missing_binary_record)"; then
+	if dir="$(hook_health_store_dir)" && hook_health_store_untrusted "$dir"; then
+		warn "$untrusted_msg"
+		return 0
+	fi
+	printed=0
+	for category in missing-binary bootstrap-failure; do
+		rec="$(hook_health_record "$category")" || continue
 		age="${rec%% *}"
 		client="${rec#* }"
-		warn "hook health: cenci binary was missing when a ${client} hook last ran ($((age / 60))m ago) — it bootstraps on your next agent session; if it persists, run: cenci update"
-	else
-		warn "hook health: no evidence yet — cenci binary not found and no recent missing-binary record found (not proof hooks work)"
+		case "$category" in
+			missing-binary)
+				warn "hook health: cenci binary was missing when a ${client} hook last ran ($((age / 60))m ago) — it bootstraps on your next agent session; if it persists, run: cenci update"
+				;;
+			bootstrap-failure)
+				warn "hook health: installing the cenci binary failed when a ${client} hook last ran ($((age / 60))m ago) — check the bootstrap log and network access, then restart the session; if it persists, run: cenci update"
+				;;
+		esac
+		printed=1
+	done
+	if [ "$printed" -eq 0 ]; then
+		warn "hook health: no evidence yet — cenci binary not found and no recent missing-binary or bootstrap-failure record found (not proof hooks work)"
 	fi
 }
 

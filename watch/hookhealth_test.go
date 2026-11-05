@@ -558,21 +558,38 @@ func TestHookHealthReporterStates(t *testing.T) {
 		seed     func(t *testing.T, stateHome string)
 		wantLine string
 		contains []string
+		second   string   // required prefix of line 2 when non-empty
+		excludes []string // texts the output must not contain
 	}{
-		{"no store", func(*testing.T, string) {}, "hook health: no-evidence", []string{"not proof of health"}},
+		{"no store", func(*testing.T, string) {}, "hook health: no-evidence", []string{"not proof of health"}, "", nil},
 		{"only stale failure", func(t *testing.T, s string) {
 			seedHookHealth(t, s, hookhealth.DeliveryFailure, "codex", 25*time.Hour)
-		}, "hook health: no-evidence", []string{"not proof of health"}},
+		}, "hook health: no-evidence", []string{"not proof of health"}, "", nil},
 		{"only last-ok", func(t *testing.T, s string) {
 			seedHookHealth(t, s, hookhealth.LastOK, "claude", 30*time.Second)
-		}, "hook health: healthy", nil},
+		}, "hook health: healthy", nil, "", nil},
 		{"failure then newer last-ok", func(t *testing.T, s string) {
 			seedHookHealth(t, s, hookhealth.DeliveryFailure, "claude", 2*time.Minute)
 			seedHookHealth(t, s, hookhealth.LastOK, "claude", 30*time.Second)
-		}, "hook health: recovered", nil},
+		}, "hook health: recovered", nil, "", nil},
 		{"current failure shows category and hint", func(t *testing.T, s string) {
 			seedHookHealth(t, s, hookhealth.SocketUnavailable, "codex", 30*time.Second)
-		}, "hook health: current-failure", []string{"socket-unavailable", "codex", hint}},
+		}, "hook health: current-failure", []string{"socket-unavailable", "codex", hint}, "", nil},
+		{"untrusted leaf 0777 with a fresh record", func(t *testing.T, s string) {
+			seedHookHealth(t, s, hookhealth.MissingBinary, "claude", 30*time.Second)
+			if err := os.Chmod(filepath.Join(s, "cenci", "hook-health"), 0o777); err != nil {
+				t.Fatalf("chmod leaf: %v", err)
+			}
+		}, "hook health: no-evidence", nil, "  untrusted store:", []string{"no recent records", "missing-binary"}},
+		{"untrusted root 0777, leaf absent", func(t *testing.T, s string) {
+			root := filepath.Join(s, "cenci")
+			if err := os.MkdirAll(root, 0o700); err != nil {
+				t.Fatalf("create root: %v", err)
+			}
+			if err := os.Chmod(root, 0o777); err != nil {
+				t.Fatalf("chmod root: %v", err)
+			}
+		}, "hook health: no-evidence", nil, "  untrusted store:", []string{"no recent records"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -593,6 +610,17 @@ func TestHookHealthReporterStates(t *testing.T) {
 					t.Errorf("output %q does not contain %q", out, want)
 				}
 			}
+			for _, unwanted := range tc.excludes {
+				if strings.Contains(out, unwanted) {
+					t.Errorf("output %q must not contain %q", out, unwanted)
+				}
+			}
+			if tc.second != "" {
+				lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
+				if len(lines) != 2 || !strings.HasPrefix(lines[1], tc.second) {
+					t.Errorf("lines = %q, want exactly two with line 2 starting %q", lines, tc.second)
+				}
+			}
 			if after := dirSnapshot(t, stateHome); after != before {
 				t.Errorf("the reporter changed the store:\nbefore %s\nafter  %s", before, after)
 			}
@@ -611,7 +639,18 @@ func dirSnapshot(t *testing.T, root string) string {
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(&b, "%s %v %d %d\n", path, info.Mode(), info.Size(), info.ModTime().UnixNano())
+		uid := -1
+		if st, ok := info.Sys().(*syscall.Stat_t); ok {
+			uid = int(st.Uid)
+		}
+		fmt.Fprintf(&b, "%s %v uid=%d %d %d\n", path, info.Mode(), uid, info.Size(), info.ModTime().UnixNano())
+		if info.Mode().IsRegular() {
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(&b, "  bytes=%q\n", data)
+		}
 		return nil
 	})
 	if err != nil {
