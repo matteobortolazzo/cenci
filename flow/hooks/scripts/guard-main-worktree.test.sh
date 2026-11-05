@@ -2466,6 +2466,427 @@ else
     fail "zero-parse message must warn against inventing a redirect, got: ${GUARD_STDERR}"
 fi
 
+# ── Ticket #1411: guard canary receipts ────────────────────────────────
+# When this guard denies a canary-shaped probe target
+# <main-root>/cenci-guard-canary-<hex>-<n>.txt whose run dir
+# cenci-guard-canary-<hex> (under $TMPDIR, else /tmp) lists probe <n> for
+# guard-main-worktree with exactly that target, it leaves one receipt in the
+# run dir for guard-canary.sh check. The receipt must never change the exit
+# code, the stderr or the decision, and every other deny leaves no receipt.
+RG_REPO="${TEST_ROOT}/receipt-repo"
+make_git_repo "${RG_REPO}"
+mkdir -p "${RG_REPO}/.cenci" "${RG_REPO}/src"
+touch "${RG_REPO}/.cenci/config.json"
+RG_ROOT="$(cd "${RG_REPO}" && pwd -P)" || { echo "FAIL: test setup: resolve ${RG_REPO}" >&2; exit 1; }
+RG_TMP="${TEST_ROOT}/receipt-tmp"
+mkdir -p "${RG_TMP}"
+chmod 700 "${RG_TMP}"
+RG_SEQ=0
+RG_RUN=""
+RG_HEX=""
+RG_TAB=$'\t'
+# The /tmp fallback case needs a real run dir under /tmp; it is removed on exit.
+RG_SYS_HEX="$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
+[[ "${RG_SYS_HEX}" =~ ^[0-9a-f]{16}$ ]] || { echo "FAIL: test setup: random run id" >&2; exit 1; }
+RG_SYS_RUN="/tmp/cenci-guard-canary-${RG_SYS_HEX}"
+trap 'rm -rf "${TEST_ROOT}" "${RG_SYS_RUN}"' EXIT
+
+# rg_new_run [base] -- a fresh 0700 run dir (default base: RG_TMP) with a unique
+# hex id; sets RG_RUN and RG_HEX.
+rg_new_run() {
+    local base="${1:-${RG_TMP}}"
+    RG_SEQ=$((RG_SEQ + 1))
+    RG_HEX="$(printf '%016x' "$((0xa9e000000000 + RG_SEQ))")"
+    RG_RUN="${base}/cenci-guard-canary-${RG_HEX}"
+    mkdir -m 700 "${RG_RUN}" || { echo "FAIL: test setup: mkdir ${RG_RUN}" >&2; exit 1; }
+}
+
+# rg_write_probes <run-dir> <hex> -- the record plan writes for today's
+# manifest: 2/4 are this guard's main-worktree probes, 1/3 the .env probes; 5 is
+# a main-worktree-shaped target listed for the OTHER guard.
+rg_write_probes() {
+    local run="$1" hex="$2"
+    {
+        printf 'V1\nHEX\t%s\nMAIN\t%s\n' "${hex}" "${RG_ROOT}"
+        printf 'PROBE\t1\tapply_patch\tcheck-sensitive-files\tWrite|Edit\t%s/write-edit-1.env\n' "${run}"
+        printf 'PROBE\t2\tapply_patch\tguard-main-worktree\tWrite|Edit\t%s/cenci-guard-canary-%s-2.txt\n' "${RG_ROOT}" "${hex}"
+        printf 'PROBE\t3\tshell\tcheck-sensitive-files\tBash\t%s/bash-3.env\n' "${run}"
+        printf 'PROBE\t4\tshell\tguard-main-worktree\tBash\t%s/cenci-guard-canary-%s-4.txt\n' "${RG_ROOT}" "${hex}"
+        printf 'PROBE\t5\tshell\tcheck-sensitive-files\tBash\t%s/cenci-guard-canary-%s-5.txt\n' "${RG_ROOT}" "${hex}"
+    } > "${run}/probes.tsv" || { echo "FAIL: test setup: probes.tsv in ${run}" >&2; exit 1; }
+}
+
+rg_json() { # <shell|apply_patch|write> <target>
+    case "$1" in
+        shell)
+            jq -n --arg c "printf x > '$2'" --arg cwd "${RG_ROOT}" \
+                '{hook_event_name: "PreToolUse", tool_name: "Bash", cwd: $cwd, tool_input: {command: $c}}'
+            ;;
+        apply_patch)
+            jq -n --arg c "$(printf '*** Begin Patch\n*** Add File: %s\n+x\n*** End Patch' "$2")" --arg cwd "${RG_ROOT}" \
+                '{hook_event_name: "PreToolUse", tool_name: "apply_patch", cwd: $cwd, tool_input: {command: $c}}'
+            ;;
+        write)
+            jq -n --arg f "$2" --arg cwd "${RG_ROOT}" '{tool_name: "Write", cwd: $cwd, tool_input: {file_path: $f, content: "x"}}'
+            ;;
+    esac
+}
+
+# rg_receipts <dir> -- receipt-* entry names in <dir>, one per line.
+rg_receipts() {
+    local e
+    for e in "$1"/receipt-*; do
+        if [[ -e "${e}" || -L "${e}" ]]; then
+            printf '%s\n' "${e##*/}"
+        fi
+    done
+    return 0
+}
+
+# rg_count <dir> -- receipt-* entries in <dir> ("missing-dir" when absent).
+rg_count() {
+    local l
+    [[ -d "$1" ]] || { echo "missing-dir"; return 0; }
+    l="$(rg_receipts "$1")"
+    if [[ -z "${l}" ]]; then echo 0; else printf '%s\n' "${l}" | wc -l | tr -d '[:space:]'; fi
+}
+
+# rg_snapshot -- every cenci-guard-canary-* entry and receipt under /tmp and
+# the TMPDIR the cases pass.
+rg_snapshot() {
+    local d e
+    for d in /tmp "${RG_TMP}"; do
+        for e in "${d}"/cenci-guard-canary-* "${d}"/cenci-guard-canary-*/receipt-*; do
+            if [[ -e "${e}" || -L "${e}" ]]; then
+                printf '%s\n' "${e}"
+            fi
+        done
+    done
+    return 0
+}
+
+# rg_run <tmpdir-or-"unset"> <json> -- run the guard from the main root.
+rg_run() {
+    if [[ "$1" == unset ]]; then
+        run_guard "${RG_ROOT}" "$2"
+    else
+        run_guard_with_tmpdir "${RG_ROOT}" "$1" "$2"
+    fi
+}
+
+# rg_parity <label> <tmpdir-or-"unset"> <json> -- the last run's exit code and
+# stderr must be byte-identical to the same payload run now (the caller has
+# removed or neutralised the run dir first).
+rg_parity() {
+    local label="$1" want_exit="${GUARD_EXIT}" want_err="${GUARD_STDERR}"
+    rg_run "$2" "$3"
+    if [[ "${GUARD_EXIT}" -eq "${want_exit}" && "${GUARD_STDERR}" == "${want_err}" ]]; then
+        pass
+    else
+        fail "${label}: exit/stderr must be identical with and without the run dir (exit ${want_exit} vs ${GUARD_EXIT}; stderr '${want_err}' vs '${GUARD_STDERR}')"
+    fi
+}
+
+# rg_assert_one_receipt <label> <run-dir> <hex> <n> <tool_name> <target>
+rg_assert_one_receipt() {
+    local label="$1" run="$2" hex="$3" n="$4" tool="$5" target="$6" name body
+    if [[ "${GUARD_EXIT}" -eq 2 && "${GUARD_STDERR}" == *"targets the main worktree"* ]]; then
+        pass
+    else
+        fail "${label}: the probe must still be denied with the guard's own message (exit ${GUARD_EXIT}): ${GUARD_STDERR:0:200}"
+    fi
+    if [[ "$(rg_count "${run}")" == 1 ]]; then
+        pass
+    else
+        fail "${label}: expected exactly one receipt in ${run}, found $(rg_count "${run}")"
+    fi
+    name="$(rg_receipts "${run}" | sed -n 1p)"
+    if [[ "${name}" == "receipt-guard-main-worktree-${n}."* && -f "${run}/${name}" && ! -L "${run}/${name}" ]]; then
+        pass
+    else
+        fail "${label}: the receipt must be a regular file named receipt-guard-main-worktree-${n}.*, got '${name}'"
+    fi
+    body="$(cat "${run}/${name}" 2>/dev/null)"
+    if [[ "${body}" == "V1${RG_TAB}guard-main-worktree${RG_TAB}${hex}${RG_TAB}${n}${RG_TAB}${tool}" \
+        && "$(wc -l < "${run}/${name}" | tr -d '[:space:]')" == 1 ]]; then
+        pass
+    else
+        fail "${label}: the receipt must be the single line V1<TAB>guard-main-worktree<TAB>${hex}<TAB>${n}<TAB>${tool}, got '${body}'"
+    fi
+    if [[ "${body}" == *printf* || "${body}" == *"Begin Patch"* || "${body}" == *"${target}"* ]]; then
+        fail "${label}: the receipt must carry no probe command, patch text or target path: '${body}'"
+    else
+        pass
+    fi
+    if [[ -e "${target}" ]]; then
+        fail "${label}: the denied probe target must not exist"
+    else
+        pass
+    fi
+}
+
+for rg_case in "shell|4|Bash|${RG_TMP}" "apply_patch|2|apply_patch|${RG_TMP}" "write|2|Write|${RG_TMP}" "shell|4|Bash|${RG_TMP}/"; do
+    IFS='|' read -r rg_shape rg_n rg_tool rg_tmpdir <<< "${rg_case}"
+    echo "case: a denied ${rg_shape} canary probe (TMPDIR=${rg_tmpdir##*/receipt-}) leaves exactly one receipt with the right fields (#1411)"
+    rg_new_run
+    rg_write_probes "${RG_RUN}" "${RG_HEX}"
+    rg_target="${RG_ROOT}/cenci-guard-canary-${RG_HEX}-${rg_n}.txt"
+    rg_j="$(rg_json "${rg_shape}" "${rg_target}")"
+    rg_run "${rg_tmpdir}" "${rg_j}"
+    rg_assert_one_receipt "receipt (${rg_shape}, TMPDIR ${rg_tmpdir})" "${RG_RUN}" "${RG_HEX}" "${rg_n}" "${rg_tool}" "${rg_target}"
+    rm -rf "${RG_RUN}"
+    rg_parity "receipt (${rg_shape}, TMPDIR ${rg_tmpdir})" "${rg_tmpdir}" "${rg_j}"
+done
+
+echo "case: with no run dir under TMPDIR the receipt goes to the /tmp run dir, and TMPDIR wins when both exist (#1411)"
+mkdir -m 700 "${RG_SYS_RUN}" || { echo "FAIL: test setup: mkdir ${RG_SYS_RUN}" >&2; exit 1; }
+rg_write_probes "${RG_SYS_RUN}" "${RG_SYS_HEX}"
+rg_target="${RG_ROOT}/cenci-guard-canary-${RG_SYS_HEX}-4.txt"
+rg_j="$(rg_json shell "${rg_target}")"
+for rg_tmpdir in unset "${RG_TMP}"; do
+    rg_run "${rg_tmpdir}" "${rg_j}"
+    rg_assert_one_receipt "/tmp fallback (TMPDIR ${rg_tmpdir})" "${RG_SYS_RUN}" "${RG_SYS_HEX}" 4 Bash "${rg_target}"
+    rm -f "${RG_SYS_RUN}"/receipt-*
+done
+mkdir -m 700 "${RG_TMP}/cenci-guard-canary-${RG_SYS_HEX}" || exit 1
+rg_write_probes "${RG_TMP}/cenci-guard-canary-${RG_SYS_HEX}" "${RG_SYS_HEX}"
+rg_run "${RG_TMP}" "${rg_j}"
+rg_assert_one_receipt "TMPDIR precedence" "${RG_TMP}/cenci-guard-canary-${RG_SYS_HEX}" "${RG_SYS_HEX}" 4 Bash "${rg_target}"
+if [[ "$(rg_count "${RG_SYS_RUN}")" == 0 ]]; then
+    pass
+else
+    fail "TMPDIR precedence: the /tmp run dir must get no receipt when TMPDIR holds the run dir"
+fi
+rm -rf "${RG_TMP}/cenci-guard-canary-${RG_SYS_HEX}" "${RG_SYS_RUN}"
+rg_parity "/tmp fallback" "${RG_TMP}" "${rg_j}"
+
+echo "case: a denial unrelated to the canary leaves no receipt and no run-dir entry anywhere (#1411)"
+rg_new_run
+rg_write_probes "${RG_RUN}" "${RG_HEX}"
+mkdir -p "${RG_ROOT}/sub"
+RG_BEFORE="$(rg_snapshot)"
+# An ordinary source write, an unlisted probe number, a probe listed for the
+# other guard, and the right leaf in the wrong directory.
+for rg_spec in "shell|${RG_ROOT}/src/foo.txt" "write|${RG_ROOT}/src/foo.txt" "apply_patch|${RG_ROOT}/src/foo.txt" \
+    "shell|${RG_ROOT}/cenci-guard-canary-${RG_HEX}-9.txt" "shell|${RG_ROOT}/cenci-guard-canary-${RG_HEX}-5.txt" \
+    "shell|${RG_ROOT}/sub/cenci-guard-canary-${RG_HEX}-4.txt" "write|${RG_ROOT}/cenci-guard-canary-${RG_HEX}-9.txt"; do
+    rg_run "${RG_TMP}" "$(rg_json "${rg_spec%%|*}" "${rg_spec#*|}")"
+    assert_exit "unrelated deny ${rg_spec}" 2
+done
+if [[ "$(rg_snapshot)" == "${RG_BEFORE}" && "$(rg_count "${RG_RUN}")" == 0 ]]; then
+    pass
+else
+    fail "unrelated deny: /tmp and \$TMPDIR must gain no cenci-guard-canary-* entry or receipt (before: ${RG_BEFORE}; after: $(rg_snapshot))"
+fi
+rm -rf "${RG_RUN}"
+# A record whose HEX names another run, and a run dir with no record at all.
+rg_new_run
+rg_write_probes "${RG_RUN}" "ffffffffffffffff"
+rg_run "${RG_TMP}" "$(rg_json shell "${RG_ROOT}/cenci-guard-canary-${RG_HEX}-4.txt")"
+assert_exit "record from another run: still denied" 2
+if [[ "$(rg_count "${RG_RUN}")" == 0 ]]; then
+    pass
+else
+    fail "a probe record whose HEX differs from the run dir name must not earn a receipt"
+fi
+rm -rf "${RG_RUN}"
+rg_new_run
+rg_run "${RG_TMP}" "$(rg_json shell "${RG_ROOT}/cenci-guard-canary-${RG_HEX}-4.txt")"
+assert_exit "no probe record: still denied" 2
+if [[ "$(rg_count "${RG_RUN}")" == 0 ]]; then
+    pass
+else
+    fail "a run dir with no probes.tsv must not earn a receipt"
+fi
+rm -rf "${RG_RUN}"
+
+echo "case: a symlinked run dir gets no receipt, and exit/stderr are unchanged (#1411)"
+rg_new_run
+RG_REAL="${RG_TMP}/real-${RG_HEX}"
+mv "${RG_RUN}" "${RG_REAL}" || exit 1
+ln -s "${RG_REAL}" "${RG_RUN}" || exit 1
+rg_write_probes "${RG_REAL}" "${RG_HEX}"
+rg_j="$(rg_json shell "${RG_ROOT}/cenci-guard-canary-${RG_HEX}-4.txt")"
+rg_run "${RG_TMP}" "${rg_j}"
+assert_exit "symlinked run dir: still denied" 2
+if [[ "$(rg_count "${RG_REAL}")" == 0 ]]; then
+    pass
+else
+    fail "symlinked run dir: no receipt may be written through the symlink"
+fi
+rm -f "${RG_RUN}"
+rg_parity "symlinked run dir" "${RG_TMP}" "${rg_j}"
+rm -rf "${RG_REAL}"
+
+echo "case: a group- or world-writable run dir gets no receipt, and exit/stderr are unchanged (#1411)"
+for rg_mode in 770 707 777; do
+    rg_new_run
+    rg_write_probes "${RG_RUN}" "${RG_HEX}"
+    chmod "${rg_mode}" "${RG_RUN}"
+    rg_j="$(rg_json apply_patch "${RG_ROOT}/cenci-guard-canary-${RG_HEX}-2.txt")"
+    rg_run "${RG_TMP}" "${rg_j}"
+    assert_exit "mode-${rg_mode} run dir: still denied" 2
+    if [[ "$(rg_count "${RG_RUN}")" == 0 ]]; then
+        pass
+    else
+        fail "mode-${rg_mode} run dir: expected no receipt, found $(rg_count "${RG_RUN}")"
+    fi
+    rm -rf "${RG_RUN}"
+    rg_parity "mode-${rg_mode} run dir" "${RG_TMP}" "${rg_j}"
+done
+
+echo "case: a run dir owned by another user gets no receipt (#1411)"
+if [[ "$(id -u)" -eq 0 ]]; then
+    rg_new_run
+    rg_write_probes "${RG_RUN}" "${RG_HEX}"
+    chown 65534 "${RG_RUN}" "${RG_RUN}/probes.tsv" || exit 1
+    rg_j="$(rg_json shell "${RG_ROOT}/cenci-guard-canary-${RG_HEX}-4.txt")"
+    rg_run "${RG_TMP}" "${rg_j}"
+    assert_exit "foreign-owned run dir: still denied" 2
+    if [[ "$(rg_count "${RG_RUN}")" == 0 ]]; then
+        pass
+    else
+        fail "foreign-owned run dir: expected no receipt"
+    fi
+    rm -rf "${RG_RUN}"
+    rg_parity "foreign-owned run dir" "${RG_TMP}" "${rg_j}"
+else
+    echo "SKIP: foreign-owned run dir needs root to chown a directory to another user"
+fi
+
+echo "case: a receipt that cannot be written still leaves the guard exiting 2 with its own message (#1411)"
+rg_new_run
+rg_write_probes "${RG_RUN}" "${RG_HEX}"
+chmod 500 "${RG_RUN}"
+rg_j="$(rg_json shell "${RG_ROOT}/cenci-guard-canary-${RG_HEX}-4.txt")"
+rg_run "${RG_TMP}" "${rg_j}"
+assert_exit "read-only run dir: still denied" 2
+if [[ "$(id -u)" -eq 0 ]]; then
+    echo "SKIP: read-only run dir: root bypasses the mode bits, so only the exit code and stderr are checked"
+elif [[ "$(rg_count "${RG_RUN}")" == 0 ]]; then
+    pass
+else
+    fail "read-only run dir: no receipt can have been written"
+fi
+chmod 700 "${RG_RUN}"
+rm -rf "${RG_RUN}"
+rg_parity "read-only run dir" "${RG_TMP}" "${rg_j}"
+
+# A same-user session can plant its own canary-shaped run dir (it passes every
+# hardening check) with a huge or sparse probes.tsv. The guard must not read it
+# unbounded before its exit 2: a stalled hook times out, and a timed-out hook
+# is non-blocking under Claude Code, so the deny would turn into an allow.
+RG_TIME_LIMIT=10
+# rg_run_timed <tmpdir> <json> -- rg_run under a hard RG_TIME_LIMIT-second
+# limit when timeout(1) exists (exit 124 = stalled).
+rg_run_timed() {
+    local start
+    if command -v timeout >/dev/null 2>&1; then
+        GUARD_STDERR="$(cd "${RG_ROOT}" && echo "$2" | TMPDIR="$1" timeout "${RG_TIME_LIMIT}" "${HOOK_SHELL}" "${GUARD_SH}" 2>&1 >/dev/null)"
+        GUARD_EXIT=$?
+    else
+        start="${SECONDS}"
+        rg_run "$1" "$2"
+        if [[ $((SECONDS - start)) -gt "${RG_TIME_LIMIT}" ]]; then
+            GUARD_EXIT=124
+        fi
+    fi
+}
+# rg_valid_then_pad <run-dir> <hex> <pad-bytes> -- the real probe record, then
+# <pad-bytes> of '#' on one more line, so the record itself would earn a
+# receipt and only the size can refuse it.
+rg_valid_then_pad() {
+    rg_write_probes "$1" "$2"
+    printf '%*s\n' "$3" '' | tr ' ' '#' >> "$1/probes.tsv" || { echo "FAIL: test setup: pad probes.tsv" >&2; exit 1; }
+}
+# rg_grow_huge <run-dir> <sparse|newlines> -- append a filler to probes.tsv: a
+# 1 GiB sparse extension, or 32 MiB of newlines (one read-loop iteration per
+# byte, which stalls an unbounded loop for tens of seconds).
+rg_grow_huge() {
+    if [[ "$2" == sparse ]]; then
+        # Without conv=notrunc, dd ftruncates the output to the seek offset,
+        # which keeps the record and extends it sparsely.
+        dd if=/dev/null of="$1/probes.tsv" bs=1 seek=1073741824 count=0 2>/dev/null \
+            || { echo "FAIL: test setup: grow probes.tsv" >&2; exit 1; }
+        [[ "$(wc -c < "$1/probes.tsv" | tr -d '[:space:]')" == 1073741824 ]] \
+            || { echo "FAIL: test setup: probes.tsv did not grow to 1 GiB" >&2; exit 1; }
+    else
+        head -c 33554432 /dev/zero | tr '\0' '\n' >> "$1/probes.tsv" \
+            || { echo "FAIL: test setup: grow probes.tsv" >&2; exit 1; }
+    fi
+}
+# rg_assert_prompt_deny <label> -- the last rg_run_timed denied, in time.
+rg_assert_prompt_deny() {
+    if [[ "${GUARD_EXIT}" -eq 124 ]]; then
+        fail "$1: the guard stalled past ${RG_TIME_LIMIT}s reading the probe record"
+    else
+        assert_exit "$1: still denied" 2
+    fi
+}
+
+for rg_spec in "shell|sparse" "write|sparse" "shell|newlines" "write|newlines"; do
+    rg_shape="${rg_spec%%|*}"
+    rg_fill="${rg_spec#*|}"
+    echo "case: a huge (${rg_fill}) probes.tsv cannot stall the ${rg_shape} deny: exit 2 promptly, identical stderr, no receipt (#1411)"
+    rg_new_run
+    rg_write_probes "${RG_RUN}" "${RG_HEX}"
+    rg_grow_huge "${RG_RUN}" "${rg_fill}"
+    rg_j="$(rg_json "${rg_shape}" "${RG_ROOT}/cenci-guard-canary-${RG_HEX}-4.txt")"
+    rg_run_timed "${RG_TMP}" "${rg_j}"
+    rg_assert_prompt_deny "huge (${rg_fill}) probes.tsv (${rg_shape})"
+    if [[ "$(rg_count "${RG_RUN}")" == 0 ]]; then
+        pass
+    else
+        fail "huge (${rg_fill}) probes.tsv (${rg_shape}): an oversized probe record must earn no receipt, found $(rg_count "${RG_RUN}")"
+    fi
+    rm -rf "${RG_RUN}"
+    rg_parity "huge (${rg_fill}) probes.tsv (${rg_shape})" "${RG_TMP}" "${rg_j}"
+done
+
+echo "case: a compound command whose first target is canary-shaped (huge probes.tsv) and second a real main-worktree target still exits 2 promptly (#1411)"
+rg_new_run
+rg_write_probes "${RG_RUN}" "${RG_HEX}"
+rg_grow_huge "${RG_RUN}" newlines
+rg_target="${RG_ROOT}/cenci-guard-canary-${RG_HEX}-4.txt"
+rg_j="$(jq -n --arg c "printf x > '${rg_target}'; printf x > '${RG_ROOT}/src/real.txt'" --arg cwd "${RG_ROOT}" \
+    '{hook_event_name: "PreToolUse", tool_name: "Bash", cwd: $cwd, tool_input: {command: $c}}')"
+rg_run_timed "${RG_TMP}" "${rg_j}"
+rg_assert_prompt_deny "compound command, huge probes.tsv"
+if [[ "${GUARD_STDERR}" == *"targets the main worktree"* ]]; then
+    pass
+else
+    fail "compound command, huge probes.tsv: the guard's own message must be unchanged, got: ${GUARD_STDERR:0:200}"
+fi
+if [[ "$(rg_count "${RG_RUN}")" == 0 && ! -e "${rg_target}" && ! -e "${RG_ROOT}/src/real.txt" ]]; then
+    pass
+else
+    fail "compound command, huge probes.tsv: expected no receipt and neither target written (receipts: $(rg_count "${RG_RUN}"))"
+fi
+rm -rf "${RG_RUN}"
+rg_parity "compound command, huge probes.tsv" "${RG_TMP}" "${rg_j}"
+
+echo "case: a probes.tsv one line over the size cap earns no receipt even though it lists the probe (#1411)"
+rg_new_run
+rg_valid_then_pad "${RG_RUN}" "${RG_HEX}" 16384
+rg_j="$(rg_json shell "${RG_ROOT}/cenci-guard-canary-${RG_HEX}-4.txt")"
+rg_run_timed "${RG_TMP}" "${rg_j}"
+rg_assert_prompt_deny "over-cap probes.tsv"
+if [[ "$(rg_count "${RG_RUN}")" == 0 ]]; then
+    pass
+else
+    fail "over-cap probes.tsv: a record larger than the cap must earn no receipt, found $(rg_count "${RG_RUN}")"
+fi
+rm -rf "${RG_RUN}"
+rg_parity "over-cap probes.tsv" "${RG_TMP}" "${rg_j}"
+# Control: the same record padded well under the cap still earns its receipt,
+# so the cap, not the padding line, is what refuses above.
+rg_new_run
+rg_valid_then_pad "${RG_RUN}" "${RG_HEX}" 1024
+rg_target="${RG_ROOT}/cenci-guard-canary-${RG_HEX}-4.txt"
+rg_run_timed "${RG_TMP}" "$(rg_json shell "${rg_target}")"
+rg_assert_one_receipt "under-cap padded probes.tsv" "${RG_RUN}" "${RG_HEX}" 4 Bash "${rg_target}"
+rm -rf "${RG_RUN}"
+
 # ── Summary ──────────────────────────────────────────────────────────
 echo
 echo "passed: ${PASSES}, failed: ${FAILURES} (shell: ${HOOK_SHELL})"

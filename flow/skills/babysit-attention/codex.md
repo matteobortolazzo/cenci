@@ -33,7 +33,7 @@ the summary says "retry cap reached (exact count not readable from here)" and ne
 Ask exactly one blocking question through the client's available user-input mechanism, with exactly three
 options: "leave paused for manual repair", "retry with a fresh budget" and "stop babysitting". Then stop. This
 procedure never detects whether the session is interactive: a headless `codex exec` run prints the summary and the
-question and exits without choosing, mutating, pushing or stopping. Only a later user turn that names
+question and exits without choosing, mutating, pushing or stopping. It runs no guard canary. Only a later user turn that names
 one option acts on it.
 
 "leave paused for manual repair" changes nothing: report that the PR stays paused and the supervisor keeps
@@ -42,12 +42,20 @@ continues at `## Reset choice`. "stop babysitting" continues at `## Stop choice`
 
 ## Reset choice
 
+First run the guard canary preflight, `bash "${PLUGIN_ROOT}/codex/guard-canary.sh" plan`, as `codex-runtime`
+describes; on any refusal stop here: the command below does not run, so say "not reset" plainly, print
+`cenci babysit reset <pr>` as the exact command to run on the host, and report the helper's text and any `LEFTOVER:` path.
+
 Run `cenci babysit reset <pr>` once. The reset is host-only: inside a sandbox it refuses without sending anything to
 the host. Exit 0 means the budget was reset and the supervisor re-armed: report that. A non-zero exit means the
 budget was not reset: say "not reset" plainly, print `cenci babysit reset <pr>` as the exact command to run on the
 host, and never report success. Do not retry the command and do not edit the supervisor's state by other means.
 
 ## Stop choice
+
+First run the guard canary preflight, `bash "${PLUGIN_ROOT}/codex/guard-canary.sh" plan`, as `codex-runtime`
+describes; on any refusal stop here: the command below does not run, so say "not stopped" plainly, print
+`cenci babysit stop <pr>` as the exact command to run on the host, and report the helper's text and any `LEFTOVER:` path.
 
 Run `cenci babysit stop <pr>` once; inside a sandbox it is forwarded to the host supervisor. Exit 0 with
 `Stopped babysitting PR #<pr> on the host.` means the supervisor was stopped: report that. A non-zero exit means

@@ -14,10 +14,11 @@ codex plugin add cenci@cenci
 
 Codex skips plugin hooks that are pending or not yet trusted, so a freshly installed or
 updated plugin gives no hook protection until you review its hooks with `/hooks`. Pending
-hooks are inactive protection: `implement`, `address-review`, `refactor` and `babysit`'s arm
-step detect that with a [guard canary](#guard-canary-preflight) and refuse to start (other
-mutating Codex workflows are not yet covered). cenci never changes hook trust
-automatically, and `cenci doctor` does not verify hook protection.
+hooks are inactive protection: every mutating Codex workflow (`implement`, `address-review`,
+`refactor`, `ci-repair`, `babysit-attention`, `refine`, `configure`, `maintain` and `sync`) and
+`babysit`'s arm step detect that with a [guard canary](#guard-canary-preflight) and refuse to
+start. cenci never changes hook trust automatically, and `cenci doctor` does not verify hook
+protection.
 
 ## Native workflow foundation
 
@@ -359,17 +360,21 @@ against these hooks. Its sanitized results are recorded in
 
 Codex does not expose hook trust state non-interactively, and it skips pending hooks, so an
 installed flow plugin is not proof that `check-sensitive-files.sh` and
-`guard-main-worktree.sh` are watching a session. The covered mutating Codex workflows therefore
-run `bash "${PLUGIN_ROOT}/codex/guard-canary.sh"` first: the `persist` turn (it writes the plan
-artifact and the checkpoint) and the normal-mode `apply` of `implement`, `address-review` and
-`refactor` (other workflows' persist turns run none), and `babysit`'s Codex arm step. `/plan` stays mutation-free and does not run it, and the
+`guard-main-worktree.sh` are watching a session. Every mutating Codex workflow therefore
+runs `bash "${PLUGIN_ROOT}/codex/guard-canary.sh"` first. The `persist` turn (it writes the plan
+artifact and the checkpoint) and the normal-mode `apply` of `implement`, `address-review`,
+`refactor`, `refine`, `configure` and `maintain` run it, and so do `sync`, the supervisor-started
+`ci-repair` session, `babysit-attention` (before `cenci babysit reset` and before
+`cenci babysit stop`, never for its summary, its question or a headless `codex exec` run), and
+`babysit`'s Codex arm step. `/plan` stays mutation-free and does not run it, and the
 check is unconditional, so it runs in every session, sandbox included, and again in each turn.
 `skills/codex-runtime/SKILL.md` owns the procedure; Claude Code sessions are excluded because
 Claude Code has no pending-trust state for plugin hooks.
 
-Not every mutating Codex workflow is covered yet. The babysit check runs once, when arming; it
-does not carry over to the `ci-repair` and `babysit-attention` sessions the supervisor starts
-later, and those sessions are not yet covered (a tracked Followup).
+The babysit check runs once, when arming. It does not carry over to the `ci-repair` and
+`babysit-attention` sessions the supervisor starts later, which run their own canary. A
+`ci-repair` re-launch that finds its recorded push already current exits before the canary and
+runs none.
 
 - **Probes.** `plan` reads `codex/hooks.json` and gives every (matcher group, guard) pair its
   own probe (four with today's manifest: `Write|Edit` and `Bash`, each with both guards). Each
@@ -377,18 +382,43 @@ later, and those sessions are not yet covered (a tracked Followup).
   file in a fresh 0700 run directory outside the repository for `check-sensitive-files.sh`, and a
   `.txt` file in the main worktree for `guard-main-worktree.sh`. Before it prints anything,
   `plan` runs both real guard scripts on each probe and refuses if the probe is not
-  single-guard. An unknown matcher or guard, an unreadable manifest, or a missing `jq` also
-  refuses.
-- **Verdict.** The session makes one tool call per probe, reports whether the guard's own
-  message appeared in the result, and runs `check`. `CANARY_STATUS=active` needs every probe
-  denied by its own guard and nothing written. A written file always means inactive protection,
-  whatever the session reported.
-- **What `active` proves.** `CANARY_STATUS=active` rests on the session's own report of each
-  probe plus the filesystem check. A probe blocked by Codex's own sandbox or approval policy, or
-  a call never made, reads as not-denied only if the session reports it honestly.
+  single-guard, or if any receipt already exists. An unknown matcher or guard, an unreadable
+  manifest, or a missing `jq` also refuses. For each shell probe `plan` also prints a
+  `COMMAND<TAB><n><TAB>printf x > '<target>'` line with the target single-quoted (an embedded `'`
+  is written `'\''`), and the session runs that line verbatim, so a repository path with spaces
+  or shell metacharacters creates no stray file.
+- **Guard receipts.** When a guard blocks a canary-shaped probe target, it writes a guard
+  receipt into the run directory: `V1`, the guard, the run id, the probe number and the tool
+  name, never the command or the diff. It writes one only when the run directory's `probes.tsv`
+  lists that probe for that guard, so `plan`'s own self-check can never leave one, and a receipt
+  failure never changes the guard's exit code, message or decision. The run directory must be
+  a real directory owned by you and not group- or world-writable.
+- **Verdict.** The session makes one tool call per probe and reports one verdict token per
+  probe, then runs `check <run-dir> <n>=denied|not-denied|blocked|not-attempted…`: `denied`
+  when the guard's own message appeared in the result, `blocked` when Codex's sandbox or
+  approval policy refused the call before any guard answered, `not-attempted` when the call was
+  never made, and `not-denied` for anything else. `CANARY_STATUS=active` needs every probe
+  reported `denied`, backed by a valid guard receipt (a regular file, not a symlink, owned by you,
+  with the run id, probe number, guard and tool all matching), and nothing written. A written file
+  always means inactive protection, whatever the session reported (`WRITTEN` wins even next to a
+  receipt). Every other outcome refuses with its own `PROBE_RESULT` line:
+  `REPORTED DENIED WITHOUT GUARD RECEIPT`,
+  `BLOCKED BEFORE THE GUARD (Codex sandbox or approval refusal)`, `NOT ATTEMPTED`,
+  `NO GUARD MESSAGE` (`not-denied`) and `NO RESULT` (nothing reported). A receipt that does
+  not match the run is named on a `BAD_RECEIPT:` line, and a valid receipt next to a `blocked`,
+  `not-attempted` or `not-denied` report prints the same line prefixed
+  `GUARD RECEIPT PRESENT BUT REPORTED <verdict>`, naming both.
+- **What `active` proves.** `CANARY_STATUS=active` rests on the guards' own receipts, the
+  session's report of each probe and the filesystem check. A receipt catches a session that
+  misreports, such as a sandbox refusal reported as a denial; it cannot stop a session that
+  deliberately writes a fake receipt into its own run directory, because the hook and the
+  session run as the same user.
+  The same user can also swap the run directory's `probes.tsv` or a receipt for a FIFO after the
+  guard or `check` has tested it, which hangs that one guard or `check` call until it is killed or
+  times out; both read only a bounded prefix of a regular file, so an oversized file cannot stall them.
   This is a readiness check, not proof; the opt-in native run is the real evidence.
-- **Refusal.** Any not-denied or inconclusive probe refuses before any mutation. The refusal
-  names pending or untrusted hooks as the likely cause and points to `/hooks`; rerun the
+- **Refusal.** Any probe that is not a receipt-backed denial refuses before any mutation. The
+  refusal names pending or untrusted hooks as the likely cause and points to `/hooks`; rerun the
   workflow after reviewing them.
 - **Cleanup.** Whatever got written is removed. A removal that fails is reported as
   `LEFTOVER: <exact path>` for you to delete by hand, and the workflow still refuses.
@@ -404,6 +434,8 @@ later, and those sessions are not yet covered (a tracked Followup).
   repository that lives under `/tmp` cannot show a denial there: the probe self-check fails and
   the canary refuses (fail closed). Keep repositories elsewhere (for example under `/var/tmp`
   or your home directory).
+- **Hook environment.** `guard-main-worktree.sh` looks for the run directory under `$TMPDIR`, then
+  `/tmp`, the same order `plan` uses to pick it. A `guard-main-worktree` probe whose run directory the hook process cannot find under `$TMPDIR` or `/tmp` gets no receipt, so the canary refuses (fail closed). That happens when Codex gives hook processes a different `$TMPDIR` than the session's tool calls, or keeps them away from the run directory.
 
 Verified so far: `codex/guard-canary.test.sh` exercises the helper against the real guard
 scripts, `codex/native-hooks.gate.test.sh` covers the native runner's canary scenario with a
@@ -411,7 +443,7 @@ Codex stub, and `codex/workflows.test.sh` asserts where each surface runs the st
 Codex 0.166.0 runs on 2026-11-04 confirmed all four probes on the host with persisted hook
 approval and in a Codex sandbox with launcher trust bypass. The sandbox trust-withheld
 variant refused and removed all four written probes, with no leftovers. `apply_patch`
-reached the `Write|Edit` matcher. Run details and remaining experiment limits are recorded in
+reached the `Write|Edit` matcher. Those runs predate guard receipts. Run details and remaining experiment limits are recorded in
 [`codex-native-evidence.md`](codex-native-evidence.md).
 
 ## Attention behavior

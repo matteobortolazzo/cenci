@@ -45,14 +45,16 @@ always wins over the config.
 **Codex-only guard canary (run before arming under Codex; skip it under Claude and OpenCode).**
 Codex skips pending or untrusted plugin hooks, so first run
 `bash "${PLUGIN_ROOT}/codex/guard-canary.sh" plan`, make exactly the tool calls its `PROBE` lines
-list, judge each from its own tool result (denied only when the guard's message shows), then run the
-`check` command it prints (`bash "${PLUGIN_ROOT}/codex/guard-canary.sh" check <run-dir> <n>=denied|not-denied…`).
-Arm only on `CANARY_STATUS=active`. On `CANARY_STATUS=refused` (or when `plan` cannot run), do not arm:
+list (a shell probe runs its `COMMAND` line verbatim), judge each from its own tool result (denied only
+when the guard's message shows; blocked when Codex's sandbox or approval policy refused the call
+before any guard answered; not-attempted when the call was never made; otherwise not-denied), then run the
+`check` command it prints (`bash "${PLUGIN_ROOT}/codex/guard-canary.sh" check <run-dir> <n>=denied|not-denied|blocked|not-attempted…`).
+A probe counts as denied only with the guard's own receipt. Arm only on `CANARY_STATUS=active`. On `CANARY_STATUS=refused` (or when `plan` cannot run), do not arm:
 report the helper's text, which names pending or untrusted hooks as the likely cause and points to
 `/hooks`, plus any `LEFTOVER:` path to remove by hand. In a sandbox session the output labels trust
 "hook trust bypassed by launcher (explicit flag)"; cenci never changes hook trust. This check covers
 only the session that arms; it does not carry over to the `ci-repair` and `babysit-attention` sessions
-the supervisor starts later, which are not yet covered.
+the supervisor starts later, which run their own canary.
 
 Detect the current client and run exactly one of the three (dropping `--interval <interval>`
 when the interval was neither passed as an argument nor resolved from config):

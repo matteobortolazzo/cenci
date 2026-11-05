@@ -41,6 +41,11 @@ worktree. The launch directory may itself be a linked worktree, so resolve the m
 root; any other shape stops the run with no write. `<ckpt>` below is the absolute path
 `<root>/.cenci/checkpoints/ci-repair-<pr>.json`.
 
+**Guard canary preflight.** Run it after the existence check, the `get` and the Restart no-op decision (see `### Restart`), and before the first `init`, `advance` or `block`:
+`bash "${PLUGIN_ROOT}/codex/guard-canary.sh" plan`, as `codex-runtime` describes;
+on any refusal stop the run with no checkpoint write, commit or push, reporting the helper's text and any
+`LEFTOVER:` path. The no-op Restart path exits before this step and runs no canary.
+
 Every helper call has one positional shape, and the phase is always the fifth argument, so `<workflow>` is
 `ci-repair` and `<target>` is the PR number on every call:
 

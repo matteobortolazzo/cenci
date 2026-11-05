@@ -1035,6 +1035,112 @@ run_shim "$REPO" advance "$REL" implement 42 baseline --gate worktree --worktree
 run_shim "$REPO" clear "$REL" implement 42; expect_rc "K3 clear a running checkpoint" 0
 [[ ! -e "$CK" ]] || fail "K3 clear removes a running checkpoint without any status check"
 
+# --- #1411: a refused guard canary in a persist turn writes no artifact and leaves the checkpoint untouched ---
+# Follows codex-runtime's Persist step order: require-runtime.sh, then the Guard canary preflight (plan, one tool
+# call per probe, check), and only on `check` exit 0 the artifact and the checkpoint. No guard is active here, so the
+# probe writes land and `check` must refuse. The fixture lives under /var/tmp because guard-main-worktree allowlists
+# /tmp/*, which would let `plan`'s own self-check refuse before the probe writes ever run.
+PR_ROOT="$(mktemp -d /var/tmp/cenci-persist-refusal.XXXXXX)" || { echo "runtime.test.sh: mktemp failed (persist-refusal fixtures)." >&2; exit 2; }
+trap 'rm -rf "$T" "$PR_ROOT"' EXIT
+CANARY="$FLOW/codex/guard-canary.sh"
+REQUIRE_RUNTIME="$FLOW/codex/require-runtime.sh"
+mkdir -p "$PR_ROOT/tmp" || { echo "runtime.test.sh: mkdir failed (persist-refusal TMPDIR)." >&2; exit 2; }
+
+# pr_repo <name> -- a cenci-configured repository with a seed commit; sets PR_REPO
+pr_repo() {
+  PR_REPO="$PR_ROOT/$1"
+  mkdir -p "$PR_REPO/.cenci" || { fail "persist refusal '$1': mkdir failed"; return 1; }
+  printf '{}\n' > "$PR_REPO/.cenci/config.json" || { fail "persist refusal '$1': config write failed"; return 1; }
+  git init -q "$PR_REPO" && git -C "$PR_REPO" add -A \
+    && git -C "$PR_REPO" -c user.name=persist-test -c user.email=persist-test@localhost -c commit.gpgsign=false commit -q -m seed \
+    || { fail "persist refusal '$1': git setup failed"; return 1; }
+}
+
+# persist_after_canary <canary-rc> <repo> <wf> <target> <artifact> -- the persist writes, gated on the canary's exit
+# status. A stand-in for codex-runtime's Persist step order, not the procedure itself: it proves only that check's
+# exit status gates the writes; the real procedure text is covered by workflows.test.sh.
+persist_after_canary() {
+  local rc="$1"
+  [[ "$rc" -eq 0 ]] || return 0
+  REPO="$2"
+  persist "$3" "$4" "$5"
+}
+
+# canary_refused_persist <name> <wf> <target> <with-checkpoint: yes|no>
+canary_refused_persist() {
+  local name="$1" wf="$2" target="$3" with_ckpt="$4" ck artifact repo run_dir n tool probe_target cmd
+  local -a verdicts=()
+  ck=".cenci/checkpoints/$wf-$target.json"
+  artifact=".plans/codex/$wf-$target.md"
+  pr_repo "$name" || return
+  repo="$PR_REPO"
+  if [[ "$with_ckpt" == yes ]]; then
+    run_shim "$repo" init "$ck" "$wf" "$target" planned; expect_rc "persist refusal $name: init a planned checkpoint" 0
+    cp "$repo/$ck" "$PR_ROOT/$name.ckpt.before" || { fail "persist refusal $name: checkpoint copy failed"; return; }
+  fi
+
+  sh "$REQUIRE_RUNTIME" || { fail "persist refusal $name: require-runtime.sh refused"; return; }
+  ( cd "$repo" && TMPDIR="$PR_ROOT/tmp" bash "$CANARY" plan ) > "$PR_ROOT/$name.plan" 2>&1
+  [[ "$?" -eq 0 ]] || { fail "persist refusal $name: plan failed: $(head -c 400 "$PR_ROOT/$name.plan")"; return; }
+  grep -qxF 'CANARY_PLAN=ok' "$PR_ROOT/$name.plan" || { fail "persist refusal $name: plan did not print CANARY_PLAN=ok"; return; }
+  run_dir="$(awk -F= '$1 == "CANARY_RUN_DIR" { print substr($0, index($0, "=") + 1); exit }' "$PR_ROOT/$name.plan")"
+  [[ -n "$run_dir" ]] || { fail "persist refusal $name: plan printed no CANARY_RUN_DIR"; return; }
+
+  # One probe write per PROBE line: a shell probe runs its COMMAND line verbatim, an apply_patch probe writes its target.
+  while IFS=$'\t' read -r _ n tool _ _ probe_target; do
+    if [[ "$tool" == shell ]]; then
+      cmd="$(awk -F'\t' -v n="$n" '$1 == "COMMAND" && $2 == n { print $3; exit }' "$PR_ROOT/$name.plan")"
+      [[ -n "$cmd" ]] || { fail "persist refusal $name: no COMMAND line for shell probe $n"; return; }
+      ( cd "$repo" && bash -c "$cmd" ) || fail "persist refusal $name: COMMAND $n failed"
+    else
+      printf 'x' > "$probe_target" || fail "persist refusal $name: apply_patch probe $n write failed"
+    fi
+    verdicts+=("$n=denied")
+  done < <(awk -F'\t' '$1 == "PROBE"' "$PR_ROOT/$name.plan")
+  [[ "${#verdicts[@]}" -ge 1 ]] || { fail "persist refusal $name: plan printed no PROBE lines"; return; }
+
+  ( cd "$repo" && TMPDIR="$PR_ROOT/tmp" bash "$CANARY" check "$run_dir" "${verdicts[@]}" ) > "$PR_ROOT/$name.check" 2>&1
+  CANARY_RC=$?
+  [[ "$CANARY_RC" -eq 1 ]] || fail "persist refusal $name: check must exit 1 when the probes were written, got $CANARY_RC"
+  grep -qxF 'CANARY_STATUS=refused' "$PR_ROOT/$name.check" || fail "persist refusal $name: check must print CANARY_STATUS=refused (got: $(head -c 400 "$PR_ROOT/$name.check"))"
+  # The refusal explanation always names WRITTEN, BAD_RECEIPT and REPORTED DENIED WITHOUT GUARD RECEIPT, so a bare
+  # substring grep passes on any refusal: assert one anchored WRITTEN result line per probe instead, and no anchored
+  # BAD_RECEIPT or missing-receipt line, so the refusal is the one the probe writes caused.
+  local v written_count
+  for v in "${verdicts[@]}"; do
+    grep -qE "^PROBE_RESULT: ${v%%=*} \([^)]*\): WRITTEN" "$PR_ROOT/$name.check" \
+      || fail "persist refusal $name: probe ${v%%=*} must be reported as WRITTEN (got: $(grep "^PROBE_RESULT: ${v%%=*} " "$PR_ROOT/$name.check"))"
+  done
+  written_count="$(grep -cE '^PROBE_RESULT: [0-9]+ \([^)]*\): WRITTEN' "$PR_ROOT/$name.check")"
+  [[ "$written_count" -eq "${#verdicts[@]}" ]] || fail "persist refusal $name: expected ${#verdicts[@]} WRITTEN result lines, got $written_count"
+  ! grep -q '^BAD_RECEIPT:' "$PR_ROOT/$name.check" || fail "persist refusal $name: no guard ran, so no BAD_RECEIPT line may appear"
+  ! grep -qE '^PROBE_RESULT: .*WITHOUT GUARD RECEIPT' "$PR_ROOT/$name.check" || fail "persist refusal $name: WRITTEN must win over a missing receipt for every probe"
+
+  # This stand-in models codex-runtime's Persist step order (canary before the first write) and only proves that
+  # check's exit status gates it: persist_after_canary self-gates on that status, so "nothing written" follows from
+  # the rc assertion above, and the non-vacuity control below shows the same call writes on rc 0. Whether a session
+  # actually follows that order is covered by workflows.test.sh's procedure-text ordering checks, not here.
+  persist_after_canary "$CANARY_RC" "$repo" "$wf" "$target" "$artifact"
+  [[ ! -e "$repo/$artifact" && ! -L "$repo/$artifact" ]] || fail "persist refusal $name: $artifact must not exist after a refused canary"
+  if [[ "$with_ckpt" == yes ]]; then
+    cmp -s "$PR_ROOT/$name.ckpt.before" "$repo/$ck" || fail "persist refusal $name: the existing checkpoint must stay byte-identical"
+  else
+    [[ ! -e "$repo/$ck" && ! -L "$repo/$ck" ]] || fail "persist refusal $name: no checkpoint may be created after a refused canary"
+  fi
+}
+
+# Non-vacuity: with a passing canary exit the same gated persist writes the artifact and the checkpoint, so the refusal cases
+# below can only pass because the canary refused.
+new_repo
+persist_after_canary 0 "$REPO" refine 42 ".plans/codex/refine-42.md"
+[[ -f "$REPO/.plans/codex/refine-42.md" && -f "$REPO/.cenci/checkpoints/refine-42.json" ]] || fail "persist refusal non-vacuity: a passing canary must let persist write the artifact and the checkpoint"
+
+for with_ckpt in yes no; do
+  canary_refused_persist "refine-42-ckpt-${with_ckpt}" refine 42 "$with_ckpt"
+  canary_refused_persist "configure-repo-ckpt-${with_ckpt}" configure repo "$with_ckpt"
+  canary_refused_persist "maintain-docs-ckpt-${with_ckpt}" maintain docs "$with_ckpt"
+done
+
 echo "runtime.test.sh: failures=${failures}"
 [[ "$failures" -eq 0 ]] && echo "runtime.test.sh: passed"
 [[ "$failures" -eq 0 ]]

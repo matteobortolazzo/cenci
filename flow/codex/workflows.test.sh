@@ -863,8 +863,9 @@ test "$count" -ge 5 || fail "Codex agent templates"
 # --- Guard canary preflight contract (#1213) -----------------------------------
 # Codex skips pending or untrusted plugin hooks, so every MUTATING Codex surface
 # runs codex/guard-canary.sh after project-core's configured-repo check and
-# before its first mutation. #1156 and later mutating companions extend this list.
-MUTATING_CODEX=(implement address-review refactor)
+# before its first mutation. Later mutating companions extend this list (#1411 added the
+# supervisor-started ci-repair and babysit-attention sessions, refine, configure, maintain and sync).
+MUTATING_CODEX=(implement address-review refactor ci-repair babysit-attention refine configure maintain sync)
 CANARY_REF='codex/guard-canary.sh'
 REPO_ROOT="$(cd "${ROOT}/.." && pwd)"
 
@@ -901,8 +902,10 @@ assert_before "$impl" "implement canary before the pipeline lifecycle" "$CANARY_
 assert_before "$impl" "implement canary before checkpoint advance" "$CANARY_REF" 'Then advance the checkpoint before any worktree call'
 # Persist is its own normal-mode turn that writes the plan artifact and the checkpoint, so
 # codex-runtime's Persist step runs the canary after require-runtime.sh and before its first write.
-grep -qF -- 'require-runtime.sh"`, then, for `implement`, `address-review` and `refactor` only, run the Guard canary preflight before the first write' "$runtime" || fail "persist must run require-runtime.sh, then the guard canary for implement/address-review/refactor only, before its first write"
-grep -qF -- "The other workflows' persist turns run no canary." "$runtime" || fail "persist canary must state that the other workflows' persist turns run none (Q&A 4 scope)"
+require_in "persist canary covers every planning workflow" "$runtime_all" \
+  'require-runtime.sh"`, then, for every planning workflow (`implement`, `address-review`, `refactor`, `refine`, `configure` and `maintain`), run the Guard canary preflight before the first write'
+forbid_in "persist canary old scope (runtime)" "$runtime_all" "The other workflows' persist turns run no canary."
+forbid_in "persist canary old scope (runtime)" "$runtime_all" 'for `implement`, `address-review` and `refactor` only'
 assert_before "$runtime" "persist canary before the artifact write" 'run the Guard canary preflight before the first write' '2. Run the workflow-specific artifact check before the artifact write'
 grep -q 'refus' <(sed -n "$(line_of "$impl" "$CANARY_REF")p" "$impl") || fail "implement canary step must state the refusal outcome"
 
@@ -922,13 +925,80 @@ for workflow in "${MUTATING_CODEX[@]}"; do
   grep -qF -- 'LEFTOVER:' <<<"$window" || fail "$workflow canary step must report a LEFTOVER: path"
 done
 
-# #979 restate: the persist turn runs the canary for these three workflows, so every site that
+# --- #1411 placements: ci-repair, babysit-attention, refine, configure, maintain, sync ---
+# canary_paragraph <file> <line-prefix> -> the paragraph that starts with <line-prefix>, newlines folded
+canary_paragraph(){ awk -v p="$2" 'index($0, p) == 1 {on=1} on && /^$/ {exit} on {print}' "$1" | tr '\n' ' ' | tr -s ' '; }
+
+# ci-repair: after `project-core`, before the first checkpoint write (the fenced helper block's `init` line)
+# and before the Worktree section's `block` instruction. The paragraph says the canary runs after the
+# existence check, the `get` and the Restart no-op decision, and that the no-op path runs none.
+repair_md="${ROOT}/skills/ci-repair/codex.md"
+assert_before "$repair_md" "ci-repair canary before the first checkpoint init" "$CANARY_REF" 'checkpoint.mjs" init'
+assert_before "$repair_md" "ci-repair canary before the Worktree block instruction" "$CANARY_REF" 'initialize the checkpoint, then run `block`'
+repair_canary="$(canary_paragraph "$repair_md" '**Guard canary preflight.**')"
+for phrase in 'after the existence check, the `get` and the Restart no-op decision' 'before the first `init`, `advance` or `block`' \
+  'on any refusal stop the run with no checkpoint write, commit or push' 'LEFTOVER:' 'no-op' 'runs no canary'; do
+  require_in "ci-repair canary paragraph" "$repair_canary" "$phrase"
+done
+
+# babysit-attention: a canary opens each mutating choice, before its `cenci babysit ... once` line; a refusal does not
+# run the command, says "not reset"/"not stopped" and prints the host command. Summary, Question (the leave-paused
+# paragraph and the headless `codex exec` path included), Never and the intro run none.
+for choice in 'reset:## Reset choice:not reset' 'stop:## Stop choice:not stopped'; do
+  verb="${choice%%:*}"; rest="${choice#*:}"; heading="${rest%%:*}"; verdict="${rest#*:}"
+  choice_text="$(section "$attention_codex" "$heading")"
+  order_in "babysit-attention ${heading} canary precedes the command" "$choice_text" "$CANARY_REF" "Run \`cenci babysit ${verb} <pr>\` once"
+  # the refusal window: from the canary to the command it guards
+  window="${choice_text#*"$CANARY_REF"}"
+  window="${window%%"Run \`cenci babysit ${verb} <pr>\` once"*}"
+  for phrase in 'on any refusal' "$verdict" "print \`cenci babysit ${verb} <pr>\` as the exact command to run on the host" 'LEFTOVER:' 'does not run'; do
+    require_in "babysit-attention ${heading} refusal window" "$window" "$phrase"
+  done
+done
+for heading in '# Codex babysit-attention procedure' '## Summary' '## Question' '## Never'; do
+  forbid_in "babysit-attention ${heading} runs no canary" "$(section "$attention_codex" "$heading")" 'guard-canary'
+done
+require_in "babysit-attention headless run runs no canary" "$(section "$attention_codex" '## Question')" 'It runs no guard canary'
+
+# refine, configure, maintain: the apply canary precedes the first mutation; the persist turn runs the same canary.
+refine_md="${ROOT}/skills/refine/codex.md"
+assert_before "$refine_md" "refine canary before the Confirmation Gate" "$CANARY_REF" '**Confirmation Gate (normal mode'
+assert_before "$refine_md" "refine canary before the shared question policy" "$CANARY_REF" '**Shared question policy.**'
+configure_md="${ROOT}/skills/configure/codex.md"
+assert_before "$configure_md" "configure canary before the config write" "$CANARY_REF" 'write `.cenci/config.json`'
+assert_before "$configure_md" "configure canary before the agent install" "$CANARY_REF" 'Install missing native agents'
+maintain_md="${ROOT}/skills/maintain/codex.md"
+assert_before "$maintain_md" "maintain canary before the backlog apply path" "$CANARY_REF" 'Mode `backlog` uses a different apply path'
+assert_before "$maintain_md" "maintain canary before the goal create step" "$CANARY_REF" 'Verify `apply` read the approved apply plan'
+maintain_apply="$(section "$maintain_md" '## Phase 6 — Apply')"
+maintain_apply="${maintain_apply#"${maintain_apply%%[![:space:]]*}"}"
+[[ "$maintain_apply" == 'In `apply`, after `verify`, first run the guard canary preflight'* ]] || fail "maintain canary must be the first paragraph of Phase 6 — Apply"
+for heading in '# Codex maintain procedure' '## Phase 1 — Scope' '## Phase 2 — Deterministic check' '## Phase 3 — Worker audit' '## Phase 4 — Report' '## Phase 5 — Approval'; do
+  forbid_in "maintain ${heading} runs no canary (Plan mode and read-only phases)" "$(section "$maintain_md" "$heading")" 'guard-canary'
+done
+# sync: its own line(s) between `project-core` and the inventory checkpoint and fetch
+sync_md="${ROOT}/skills/sync/codex.md"
+assert_before "$sync_md" "sync canary after project-core" 'Read `project-core`' "$CANARY_REF"
+assert_before "$sync_md" "sync canary before the inventory checkpoint" "$CANARY_REF" 'Checkpoint the worktree inventory'
+assert_before "$sync_md" "sync canary before the fetch" "$CANARY_REF" 'fetch in the root agent'
+for wf in refine configure maintain; do
+  require_in "${wf} persist turn runs the same canary" "$(normalize "${ROOT}/skills/${wf}/codex.md")" 'The persist turn runs the same guard canary before it writes either'
+  require_in "${wf} canary runs in apply, after verify" "$(normalize "${ROOT}/skills/${wf}/codex.md")" 'In `apply`, after `verify`, first run the guard canary preflight'
+done
+
+# #979 restate: the persist turn runs the canary for all six planning workflows, so every site that
 # lists where the canary runs says so (codex-runtime's Persist step is asserted above).
-grep -qF -- "The persist turn runs the same guard canary before it writes either" "${ROOT}/skills/address-review/codex.md" || fail "address-review codex.md must state that its persist turn runs the guard canary"
-grep -qF -- "other workflows' persist turns run none" "${ROOT}/skills/address-review/codex.md" || fail "address-review codex.md must scope the persist canary to implement, address-review and refactor"
+addr_all="$(normalize "${ROOT}/skills/address-review/codex.md")"
+adapter_all="$(normalize "${ROOT}/docs/adapter-contract.md")"
+require_in "address-review persist turn runs the guard canary" "$addr_all" "The persist turn runs the same guard canary before it writes either"
+for wf in implement address-review refactor refine configure maintain; do
+  require_in "address-review persist canary names ${wf}" "$addr_all" "\`${wf}\`"
+done
+forbid_in "address-review old persist scope" "$addr_all" "other workflows' persist turns run none"
 assert_before "${ROOT}/skills/address-review/codex.md" "address-review persist canary clause before apply" 'The persist turn runs the same guard canary' 'apply approved fixes'
-grep -qF -- 'in both their `persist` and `apply` turns' "${ROOT}/docs/adapter-contract.md" || fail "adapter-contract hook-activation precondition must say the canary runs in the persist and apply turns"
-grep -qF -- "other workflows' persist turns run none" "${ROOT}/docs/adapter-contract.md" || fail "adapter-contract must scope the persist canary to implement, address-review and refactor"
+require_in "adapter-contract persist/apply turns" "$adapter_all" 'in both their `persist` and `apply` turns'
+forbid_in "adapter-contract old persist scope" "$adapter_all" "other workflows' persist turns run none"
+forbid_in "docs/codex.md old persist scope" "$(normalize "${ROOT}/docs/codex.md")" "other workflows' persist turns run none"
 
 # babysit: portable skill, so the Codex-only step is self-contained (no codex-runtime
 # consult: adapter-drift) and sits before the --agent codex arm.
@@ -951,7 +1021,15 @@ grep -qF -- 'Guard canary preflight' "$runtime" || fail "codex-runtime guard can
 grep -qF -- 'guard-canary.sh' "$runtime" || fail "codex-runtime must name the helper"
 grep -qF -- 'review them with `/hooks`' "$runtime" || fail "codex-runtime must tell the user to review pending hooks with /hooks"
 grep -qF -- "babysit check runs once, when arming" "$runtime" || fail "codex-runtime must say the babysit arm check does not cover the later ci-repair/babysit-attention sessions"
-grep -qF -- 'not yet covered' "$runtime" || fail "codex-runtime must name the ci-repair/babysit-attention sessions as not yet covered"
+forbid_in "codex-runtime canary coverage" "$runtime_all" 'not yet covered'
+require_in "codex-runtime babysit arm check" "$runtime_all" 'babysit check runs once, when arming; the supervisor-started sessions run their own canary'
+# #1411: every mutating surface, guard receipts, the four session verdict tokens and the printed COMMAND line.
+for wf in implement address-review refactor ci-repair babysit-attention refine configure maintain sync; do
+  require_in "codex-runtime canary coverage names ${wf}" "$runtime_all" "\`${wf}\`"
+done
+for phrase in 'guard receipt' 'COMMAND' 'denied|not-denied|blocked|not-attempted' '`blocked`' '`not-attempted`' '`not-denied`'; do
+  require_in "codex-runtime canary receipts and verdict tokens" "$runtime_all" "$phrase"
+done
 grep -qF -- 'is a readiness check, not proof' "$runtime" || fail "codex-runtime must say CANARY_STATUS=active is a readiness check, not proof"
 grep -qi 'pending' "$runtime" || fail "codex-runtime must name pending trust as a cause"
 grep -qi 'leftover' "$runtime" || fail "codex-runtime must carry the leftover rule"
@@ -967,8 +1045,27 @@ grep -qF -- 'hook trust bypassed by launcher (explicit flag)' "$codex_doc" || fa
 grep -qF -- 'is a readiness check, not proof' "$codex_doc" || fail "docs/codex.md must say CANARY_STATUS=active is a readiness check, not proof"
 grep -qF -- 'cenci-guard-canary-*' "$codex_doc" || fail "docs/codex.md must document manual cleanup of cenci-guard-canary-* files"
 grep -qF -- 'delete them by hand' "$codex_doc" || fail "docs/codex.md must tell the user to delete leftover canary files by hand"
-grep -qF -- 'not yet covered' "$codex_doc" || fail "docs/codex.md must name the ci-repair/babysit-attention sessions as not yet covered"
-grep -qF -- 'not yet covered' "${ROOT}/docs/adapter-contract.md" || fail "adapter-contract must name the ci-repair/babysit-attention sessions as not yet covered"
+forbid_in "docs/codex.md canary coverage" "$codex_docs_all" 'not yet covered'
+forbid_in "docs/codex.md canary coverage" "$codex_docs_all" 'Not every mutating Codex workflow is covered yet'
+forbid_in "adapter-contract canary coverage" "$adapter_all" 'not yet covered'
+forbid_in "getting-started canary coverage" "$(normalize "${REPO_ROOT}/docs/getting-started.md")" 'not yet covered'
+forbid_in "babysit/SKILL.md canary coverage" "$babysit_all" 'not yet covered'
+require_in "babysit/SKILL.md canary coverage" "$babysit_all" 'which run their own canary'
+for phrase in 'blocked' 'not-attempted' 'COMMAND'; do
+  require_in "babysit/SKILL.md canary paragraph" "$babysit_canary" "$phrase"
+done
+for wf in implement address-review refactor ci-repair babysit-attention refine configure maintain sync; do
+  require_in "docs/codex.md canary coverage names ${wf}" "$(section "$codex_doc" '## Guard canary preflight')" "\`${wf}\`"
+  require_in "adapter-contract canary coverage names ${wf}" "$adapter_all" "\`${wf}\`"
+  require_in "getting-started canary coverage names ${wf}" "$(normalize "${REPO_ROOT}/docs/getting-started.md")" "${wf}"
+done
+# #1411: receipts and the four verdict tokens in the user doc, plus the fail-closed TMPDIR note.
+docs_canary="$(section "$codex_doc" '## Guard canary preflight')"
+for phrase in 'guard receipt' 'COMMAND' '`denied`' '`not-denied`' '`blocked`' '`not-attempted`' \
+  'REPORTED DENIED WITHOUT GUARD RECEIPT' 'BAD_RECEIPT:' \
+  'cannot find under `$TMPDIR` or `/tmp` gets no receipt, so the canary refuses'; do
+  require_in "docs/codex.md Guard canary preflight" "$docs_canary" "$phrase"
+done
 grep -qF -- 'Codex hook-activation precondition' "${ROOT}/docs/adapter-contract.md" || fail "adapter-contract hook-activation precondition"
 grep -qF -- 'Guard canary preflight' "${ROOT}/docs/codex-native-evidence.md" || fail "codex-native-evidence guard canary section"
 grep -qF -- 'hook trust bypassed by launcher (explicit flag)' "${REPO_ROOT}/docs/getting-started.md" || fail "getting-started sandbox label"

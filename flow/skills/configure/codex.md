@@ -6,7 +6,11 @@ Read `project-core` and `codex-runtime`. In Plan mode, inspect the repository an
 configuration choices with Plan-mode questions. Produce a migration preview using
 `"${PLUGIN_ROOT}/scripts/migrate-project-core.sh"`; do not apply it in Plan mode. After approval,
 the persist step records the preview, the answers and the offered IDs in the approved-plan artifact,
-and the user continues with `cenci run configure apply repo --agent codex`. In apply,
+and the user continues with `cenci run configure apply repo --agent codex`.
+In `apply`, after `verify`, first run the guard canary preflight, `bash "${PLUGIN_ROOT}/codex/guard-canary.sh" plan`,
+as `codex-runtime` describes; on any refusal stop with nothing changed, reporting the helper's text and any
+`LEFTOVER:` path. The persist turn runs the same guard canary before it writes either the artifact or the checkpoint.
+Only after `CANARY_STATUS=active`, in apply,
 write `.cenci/config.json`, AGENTS/CLAUDE adapters, `.claude/settings.json`,
 and `.codex/agents/*.toml`; preserve unknown keys and diff-gate substantive guidance.
 

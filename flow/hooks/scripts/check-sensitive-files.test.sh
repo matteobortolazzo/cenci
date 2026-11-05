@@ -1174,6 +1174,375 @@ for parity_json in "${TAP_ALLOW}" "${TAP_DENY}" "${TAP_WRITE}"; do
     fi
 done
 
+# ── Ticket #1411: guard canary receipts ────────────────────────────────
+# When this guard denies a canary-shaped probe target <run-dir>/<slug>-<n>.env
+# whose run dir's probes.tsv lists probe <n> for check-sensitive-files with
+# exactly that target, it leaves one receipt in the run dir for
+# guard-canary.sh check. The receipt must never change the exit code, the
+# stderr or the decision, and every other deny leaves no receipt anywhere.
+RCPT_BASE="${BASH_TEST_ROOT}/receipts"
+RCPT_MAIN="${BASH_TEST_ROOT}/receipt-main"
+mkdir -p "${RCPT_BASE}" "${RCPT_MAIN}"
+chmod 700 "${RCPT_BASE}"
+RCPT_SEQ=0
+RCPT_RUN=""
+RCPT_HEX=""
+TAB_CHAR=$'\t'
+
+# rcpt_new_run -- a fresh 0700 run dir with a unique 16-hex id; sets RCPT_RUN
+# and RCPT_HEX. The probe record is written separately.
+rcpt_new_run() {
+    RCPT_SEQ=$((RCPT_SEQ + 1))
+    RCPT_HEX="$(printf '%016x' "$((0xc5f000000000 + RCPT_SEQ))")"
+    RCPT_RUN="${RCPT_BASE}/cenci-guard-canary-${RCPT_HEX}"
+    mkdir -m 700 "${RCPT_RUN}" || { echo "FAIL: test setup: mkdir ${RCPT_RUN}" >&2; exit 1; }
+}
+
+# rcpt_write_probes <run-dir> <hex> <dir-in-targets> -- the probe record plan
+# writes for today's manifest: 1/3 are this guard's .env probes in
+# <dir-in-targets>, 2/4 the main-worktree probes; 5 is a .env-shaped target
+# listed for the OTHER guard.
+rcpt_write_probes() {
+    local run="$1" hex="$2" tdir="$3"
+    {
+        printf 'V1\nHEX\t%s\nMAIN\t%s\n' "${hex}" "${RCPT_MAIN}"
+        printf 'PROBE\t1\tapply_patch\tcheck-sensitive-files\tWrite|Edit\t%s/write-edit-1.env\n' "${tdir}"
+        printf 'PROBE\t2\tapply_patch\tguard-main-worktree\tWrite|Edit\t%s/cenci-guard-canary-%s-2.txt\n' "${RCPT_MAIN}" "${hex}"
+        printf 'PROBE\t3\tshell\tcheck-sensitive-files\tBash\t%s/bash-3.env\n' "${tdir}"
+        printf 'PROBE\t4\tshell\tguard-main-worktree\tBash\t%s/cenci-guard-canary-%s-4.txt\n' "${RCPT_MAIN}" "${hex}"
+        printf 'PROBE\t5\tshell\tguard-main-worktree\tBash\t%s/bash-5.env\n' "${tdir}"
+    } > "${run}/probes.tsv" || { echo "FAIL: test setup: probes.tsv in ${run}" >&2; exit 1; }
+}
+
+rcpt_shell_json() { # <target>
+    jq -n --arg c "printf x > '$1'" --arg cwd "${APPLY_PATCH_DIR}" \
+        '{hook_event_name: "PreToolUse", tool_name: "Bash", cwd: $cwd, tool_input: {command: $c}}'
+}
+
+rcpt_patch_json() { # <target>
+    jq -n --arg c "$(printf '*** Begin Patch\n*** Add File: %s\n+x\n*** End Patch' "$1")" --arg cwd "${APPLY_PATCH_DIR}" \
+        '{hook_event_name: "PreToolUse", tool_name: "apply_patch", cwd: $cwd, tool_input: {command: $c}}'
+}
+
+# rcpt_receipts <dir> -- the receipt-* entry names in <dir>, one per line.
+rcpt_receipts() {
+    local e
+    for e in "$1"/receipt-*; do
+        if [[ -e "${e}" || -L "${e}" ]]; then
+            printf '%s\n' "${e##*/}"
+        fi
+    done
+    return 0
+}
+
+# rcpt_count <dir> -- how many receipt-* entries <dir> holds ("missing-dir"
+# when <dir> does not exist, so "no receipt" never passes on a wrong path).
+rcpt_count() {
+    local l
+    [[ -d "$1" ]] || { echo "missing-dir"; return 0; }
+    l="$(rcpt_receipts "$1")"
+    if [[ -z "${l}" ]]; then echo 0; else printf '%s\n' "${l}" | wc -l | tr -d '[:space:]'; fi
+}
+
+# rcpt_snapshot -- every cenci-guard-canary-* entry and receipt under /tmp,
+# $TMPDIR and the suite's own run-dir base: a before/after comparison proves a
+# deny left nothing anywhere.
+rcpt_snapshot() {
+    local d e
+    for d in /tmp "${TMPDIR:-/tmp}" "${RCPT_BASE}"; do
+        for e in "${d}"/cenci-guard-canary-* "${d}"/cenci-guard-canary-*/receipt-*; do
+            if [[ -e "${e}" || -L "${e}" ]]; then
+                printf '%s\n' "${e}"
+            fi
+        done
+    done
+    return 0
+}
+
+# rcpt_parity <label> <json> -- the last run's exit code and stderr must be
+# byte-identical to the same payload run now (the caller has removed or
+# neutralised the run dir first).
+rcpt_parity() {
+    local label="$1" json="$2" want_exit="${CHECK_EXIT}" want_err="${CHECK_STDERR}"
+    run_check_in_dir "${APPLY_PATCH_DIR}" "${json}"
+    if [[ "${CHECK_EXIT}" -eq "${want_exit}" && "${CHECK_STDERR}" == "${want_err}" ]]; then
+        pass
+    else
+        fail "${label}: exit/stderr must be identical with and without the run dir (exit ${want_exit} vs ${CHECK_EXIT}; stderr '${want_err}' vs '${CHECK_STDERR}')"
+    fi
+}
+
+for rcpt_case in "shell|3|Bash|bash" "apply_patch|1|apply_patch|write-edit"; do
+    IFS='|' read -r rc_shape rc_n rc_tool rc_slug <<< "${rcpt_case}"
+    echo "case: a denied ${rc_shape} canary probe leaves exactly one receipt with the right fields and no command text (#1411)"
+    rcpt_new_run
+    rcpt_write_probes "${RCPT_RUN}" "${RCPT_HEX}" "${RCPT_RUN}"
+    rc_target="${RCPT_RUN}/${rc_slug}-${rc_n}.env"
+    if [[ "${rc_shape}" == shell ]]; then
+        rc_json="$(rcpt_shell_json "${rc_target}")"
+    else
+        rc_json="$(rcpt_patch_json "${rc_target}")"
+    fi
+    run_check_in_dir "${APPLY_PATCH_DIR}" "${rc_json}"
+    assert_exit "receipt (${rc_shape}): the probe is still denied" 2
+    if [[ "${CHECK_STDERR}" == *"Refusing to write"* ]]; then
+        pass
+    else
+        fail "receipt (${rc_shape}): the guard's own message must be unchanged, got: ${CHECK_STDERR}"
+    fi
+    if [[ "$(rcpt_count "${RCPT_RUN}")" == 1 ]]; then
+        pass
+    else
+        fail "receipt (${rc_shape}): expected exactly one receipt in the run dir, found $(rcpt_count "${RCPT_RUN}")"
+    fi
+    rc_name="$(rcpt_receipts "${RCPT_RUN}" | sed -n 1p)"
+    if [[ "${rc_name}" == "receipt-check-sensitive-files-${rc_n}."* && -f "${RCPT_RUN}/${rc_name}" && ! -L "${RCPT_RUN}/${rc_name}" ]]; then
+        pass
+    else
+        fail "receipt (${rc_shape}): the receipt must be a regular file named receipt-check-sensitive-files-${rc_n}.*, got '${rc_name}'"
+    fi
+    rc_body="$(cat "${RCPT_RUN}/${rc_name}" 2>/dev/null)"
+    if [[ "${rc_body}" == "V1${TAB_CHAR}check-sensitive-files${TAB_CHAR}${RCPT_HEX}${TAB_CHAR}${rc_n}${TAB_CHAR}${rc_tool}" \
+        && "$(wc -l < "${RCPT_RUN}/${rc_name}" | tr -d '[:space:]')" == 1 ]]; then
+        pass
+    else
+        fail "receipt (${rc_shape}): the receipt must be the single line V1<TAB>check-sensitive-files<TAB>${RCPT_HEX}<TAB>${rc_n}<TAB>${rc_tool}, got '${rc_body}'"
+    fi
+    if [[ "${rc_body}" == *printf* || "${rc_body}" == *"Begin Patch"* || "${rc_body}" == *"${rc_target}"* ]]; then
+        fail "receipt (${rc_shape}): the receipt must carry no probe command, patch text or target path: '${rc_body}'"
+    else
+        pass
+    fi
+    if [[ -e "${rc_target}" ]]; then
+        fail "receipt (${rc_shape}): the denied probe target must not exist"
+    else
+        pass
+    fi
+    rm -rf "${RCPT_RUN}"
+    rcpt_parity "receipt (${rc_shape})" "${rc_json}"
+done
+
+echo "case: a denial unrelated to the canary leaves no receipt and no run-dir entry anywhere (#1411)"
+rcpt_new_run
+rcpt_write_probes "${RCPT_RUN}" "${RCPT_HEX}" "${RCPT_RUN}"
+mkdir -p "${BASH_TEST_ROOT}/unrelated"
+RCPT_BEFORE="$(rcpt_snapshot)"
+for rc_json in "$(rcpt_shell_json "${BASH_TEST_ROOT}/unrelated/.env")" \
+    "$(rcpt_shell_json "${BASH_TEST_ROOT}/unrelated/bash-3.env")" \
+    "$(rcpt_patch_json "${BASH_TEST_ROOT}/unrelated/write-edit-1.env")" \
+    "$(jq -n --arg f "${BASH_TEST_ROOT}/unrelated/.env.local" '{tool_name: "Write", tool_input: {file_path: $f}}')"; do
+    run_check_in_dir "${APPLY_PATCH_DIR}" "${rc_json}"
+    assert_exit "unrelated .env deny" 2
+done
+if [[ "$(rcpt_snapshot)" == "${RCPT_BEFORE}" && "$(rcpt_count "${RCPT_RUN}")" == 0 ]]; then
+    pass
+else
+    fail "unrelated .env deny: /tmp, \$TMPDIR and the run-dir base must gain no cenci-guard-canary-* entry or receipt (before: ${RCPT_BEFORE}; after: $(rcpt_snapshot))"
+fi
+rm -rf "${RCPT_RUN}"
+
+echo "case: a canary-shaped target the probe record does not list for this guard gets no receipt (#1411)"
+rcpt_new_run
+rcpt_write_probes "${RCPT_RUN}" "${RCPT_HEX}" "${RCPT_RUN}"
+# 9: not in the record; 5: listed for guard-main-worktree; write-edit-3: probe
+# 3 is listed with a different target.
+for rc_target in "${RCPT_RUN}/bash-9.env" "${RCPT_RUN}/bash-5.env" "${RCPT_RUN}/write-edit-3.env"; do
+    run_check_in_dir "${APPLY_PATCH_DIR}" "$(rcpt_shell_json "${rc_target}")"
+    assert_exit "unlisted probe ${rc_target##*/} is still denied" 2
+done
+if [[ "$(rcpt_count "${RCPT_RUN}")" == 0 ]]; then
+    pass
+else
+    fail "unlisted probes: expected no receipt, found $(rcpt_count "${RCPT_RUN}")"
+fi
+rm -rf "${RCPT_RUN}"
+# A record whose HEX line names another run is not this run's record.
+rcpt_new_run
+rcpt_write_probes "${RCPT_RUN}" "ffffffffffffffff" "${RCPT_RUN}"
+run_check_in_dir "${APPLY_PATCH_DIR}" "$(rcpt_shell_json "${RCPT_RUN}/bash-3.env")"
+assert_exit "record from another run: still denied" 2
+if [[ "$(rcpt_count "${RCPT_RUN}")" == 0 ]]; then
+    pass
+else
+    fail "a probe record whose HEX differs from the run dir name must not earn a receipt"
+fi
+rm -rf "${RCPT_RUN}"
+# No probe record at all: the self-check situation (plan runs the guards before
+# it writes probes.tsv).
+rcpt_new_run
+run_check_in_dir "${APPLY_PATCH_DIR}" "$(rcpt_shell_json "${RCPT_RUN}/bash-3.env")"
+assert_exit "no probe record: still denied" 2
+if [[ "$(rcpt_count "${RCPT_RUN}")" == 0 ]]; then
+    pass
+else
+    fail "a run dir with no probes.tsv must not earn a receipt"
+fi
+rm -rf "${RCPT_RUN}"
+
+echo "case: a symlinked run dir gets no receipt, and exit/stderr are unchanged (#1411)"
+rcpt_new_run
+RCPT_REAL="${RCPT_BASE}/real-${RCPT_HEX}"
+mv "${RCPT_RUN}" "${RCPT_REAL}" || exit 1
+ln -s "${RCPT_REAL}" "${RCPT_RUN}" || exit 1
+rcpt_write_probes "${RCPT_REAL}" "${RCPT_HEX}" "${RCPT_RUN}"
+rc_json="$(rcpt_shell_json "${RCPT_RUN}/bash-3.env")"
+run_check_in_dir "${APPLY_PATCH_DIR}" "${rc_json}"
+assert_exit "symlinked run dir: still denied" 2
+if [[ "$(rcpt_count "${RCPT_REAL}")" == 0 ]]; then
+    pass
+else
+    fail "symlinked run dir: no receipt may be written through the symlink"
+fi
+rm -f "${RCPT_RUN}"
+rcpt_parity "symlinked run dir" "${rc_json}"
+rm -rf "${RCPT_REAL}"
+
+echo "case: a group- or world-writable run dir gets no receipt, and exit/stderr are unchanged (#1411)"
+for rc_mode in 770 707 777; do
+    rcpt_new_run
+    rcpt_write_probes "${RCPT_RUN}" "${RCPT_HEX}" "${RCPT_RUN}"
+    chmod "${rc_mode}" "${RCPT_RUN}"
+    rc_json="$(rcpt_patch_json "${RCPT_RUN}/write-edit-1.env")"
+    run_check_in_dir "${APPLY_PATCH_DIR}" "${rc_json}"
+    assert_exit "mode-${rc_mode} run dir: still denied" 2
+    if [[ "$(rcpt_count "${RCPT_RUN}")" == 0 ]]; then
+        pass
+    else
+        fail "mode-${rc_mode} run dir: expected no receipt, found $(rcpt_count "${RCPT_RUN}")"
+    fi
+    rm -rf "${RCPT_RUN}"
+    rcpt_parity "mode-${rc_mode} run dir" "${rc_json}"
+done
+
+echo "case: a run dir owned by another user gets no receipt (#1411)"
+if [[ "$(id -u)" -eq 0 ]]; then
+    rcpt_new_run
+    rcpt_write_probes "${RCPT_RUN}" "${RCPT_HEX}" "${RCPT_RUN}"
+    chown 65534 "${RCPT_RUN}" "${RCPT_RUN}/probes.tsv" || exit 1
+    rc_json="$(rcpt_shell_json "${RCPT_RUN}/bash-3.env")"
+    run_check_in_dir "${APPLY_PATCH_DIR}" "${rc_json}"
+    assert_exit "foreign-owned run dir: still denied" 2
+    if [[ "$(rcpt_count "${RCPT_RUN}")" == 0 ]]; then
+        pass
+    else
+        fail "foreign-owned run dir: expected no receipt"
+    fi
+    rm -rf "${RCPT_RUN}"
+    rcpt_parity "foreign-owned run dir" "${rc_json}"
+else
+    echo "SKIP: foreign-owned run dir needs root to chown a directory to another user"
+fi
+
+echo "case: a receipt that cannot be written still leaves the guard exiting 2 with its own message (#1411)"
+rcpt_new_run
+rcpt_write_probes "${RCPT_RUN}" "${RCPT_HEX}" "${RCPT_RUN}"
+chmod 500 "${RCPT_RUN}"
+rc_json="$(rcpt_shell_json "${RCPT_RUN}/bash-3.env")"
+run_check_in_dir "${APPLY_PATCH_DIR}" "${rc_json}"
+assert_exit "read-only run dir: still denied" 2
+if [[ "$(id -u)" -eq 0 ]]; then
+    echo "SKIP: read-only run dir: root bypasses the mode bits, so only the exit code and stderr are checked"
+elif [[ "$(rcpt_count "${RCPT_RUN}")" == 0 ]]; then
+    pass
+else
+    fail "read-only run dir: no receipt can have been written"
+fi
+chmod 700 "${RCPT_RUN}"
+rm -rf "${RCPT_RUN}"
+rcpt_parity "read-only run dir" "${rc_json}"
+
+# A same-user session can plant its own canary-shaped run dir (it passes every
+# hardening check) with a huge or sparse probes.tsv. The guard must not read it
+# unbounded before its exit 2: a stalled hook times out, and a timed-out hook
+# is non-blocking under Claude Code, so the deny would turn into an allow.
+RCPT_TIME_LIMIT=10
+# rcpt_run_timed <json> -- run_check_in_dir from APPLY_PATCH_DIR under a hard
+# RCPT_TIME_LIMIT-second limit when timeout(1) exists (exit 124 = stalled).
+rcpt_run_timed() {
+    local start
+    if command -v timeout >/dev/null 2>&1; then
+        CHECK_STDERR="$(cd "${APPLY_PATCH_DIR}" && echo "$1" | timeout "${RCPT_TIME_LIMIT}" "${HOOK_SHELL}" "${CHECK_SH}" 2>&1 >/dev/null)"
+        CHECK_EXIT=$?
+    else
+        start="${SECONDS}"
+        run_check_in_dir "${APPLY_PATCH_DIR}" "$1"
+        if [[ $((SECONDS - start)) -gt "${RCPT_TIME_LIMIT}" ]]; then
+            CHECK_EXIT=124
+        fi
+    fi
+}
+# rcpt_valid_then_pad <run-dir> <hex> <pad-bytes> -- the real probe record,
+# then <pad-bytes> of '#' on one more line, so the record itself would earn a
+# receipt and only the size can refuse it.
+rcpt_valid_then_pad() {
+    rcpt_write_probes "$1" "$2" "$1"
+    printf '%*s\n' "$3" '' | tr ' ' '#' >> "$1/probes.tsv" || { echo "FAIL: test setup: pad probes.tsv" >&2; exit 1; }
+}
+
+# rcpt_grow_huge <run-dir> <sparse|newlines> -- append a filler to probes.tsv:
+# a 1 GiB sparse extension, or 32 MiB of newlines (one read-loop iteration per
+# byte, which stalls an unbounded loop for tens of seconds).
+rcpt_grow_huge() {
+    if [[ "$2" == sparse ]]; then
+        # Without conv=notrunc, dd ftruncates the output to the seek offset,
+        # which keeps the record and extends it sparsely.
+        dd if=/dev/null of="$1/probes.tsv" bs=1 seek=1073741824 count=0 2>/dev/null \
+            || { echo "FAIL: test setup: grow probes.tsv" >&2; exit 1; }
+        [[ "$(wc -c < "$1/probes.tsv" | tr -d '[:space:]')" == 1073741824 ]] \
+            || { echo "FAIL: test setup: probes.tsv did not grow to 1 GiB" >&2; exit 1; }
+    else
+        head -c 33554432 /dev/zero | tr '\0' '\n' >> "$1/probes.tsv" \
+            || { echo "FAIL: test setup: grow probes.tsv" >&2; exit 1; }
+    fi
+}
+
+for rc_fill in sparse newlines; do
+    echo "case: a huge (${rc_fill}) probes.tsv cannot stall the guard: exit 2 promptly, identical stderr, no receipt (#1411)"
+    rcpt_new_run
+    rcpt_write_probes "${RCPT_RUN}" "${RCPT_HEX}" "${RCPT_RUN}"
+    rcpt_grow_huge "${RCPT_RUN}" "${rc_fill}"
+    rc_json="$(rcpt_shell_json "${RCPT_RUN}/bash-3.env")"
+    rcpt_run_timed "${rc_json}"
+    if [[ "${CHECK_EXIT}" -eq 124 ]]; then
+        fail "huge (${rc_fill}) probes.tsv: the guard stalled past ${RCPT_TIME_LIMIT}s reading the probe record"
+    else
+        assert_exit "huge (${rc_fill}) probes.tsv: still denied" 2
+    fi
+    if [[ "$(rcpt_count "${RCPT_RUN}")" == 0 ]]; then
+        pass
+    else
+        fail "huge (${rc_fill}) probes.tsv: an oversized probe record must earn no receipt, found $(rcpt_count "${RCPT_RUN}")"
+    fi
+    rm -rf "${RCPT_RUN}"
+    rcpt_parity "huge (${rc_fill}) probes.tsv" "${rc_json}"
+done
+
+echo "case: a probes.tsv one line over the size cap earns no receipt even though it lists the probe (#1411)"
+rcpt_new_run
+rcpt_valid_then_pad "${RCPT_RUN}" "${RCPT_HEX}" 16384
+rc_json="$(rcpt_shell_json "${RCPT_RUN}/bash-3.env")"
+rcpt_run_timed "${rc_json}"
+assert_exit "over-cap probes.tsv: still denied" 2
+if [[ "$(rcpt_count "${RCPT_RUN}")" == 0 ]]; then
+    pass
+else
+    fail "over-cap probes.tsv: a record larger than the cap must earn no receipt, found $(rcpt_count "${RCPT_RUN}")"
+fi
+rm -rf "${RCPT_RUN}"
+rcpt_parity "over-cap probes.tsv" "${rc_json}"
+# Control: the same record padded well under the cap still earns its receipt,
+# so the cap, not the padding line, is what refuses above.
+rcpt_new_run
+rcpt_valid_then_pad "${RCPT_RUN}" "${RCPT_HEX}" 1024
+rcpt_run_timed "$(rcpt_shell_json "${RCPT_RUN}/bash-3.env")"
+assert_exit "under-cap padded probes.tsv: still denied" 2
+if [[ "$(rcpt_count "${RCPT_RUN}")" == 1 ]]; then
+    pass
+else
+    fail "under-cap padded probes.tsv: the listed probe must still earn exactly one receipt, found $(rcpt_count "${RCPT_RUN}")"
+fi
+rm -rf "${RCPT_RUN}"
+
 # ── Summary ──────────────────────────────────────────────────────────
 echo
 echo "passed: ${PASSES}, failed: ${FAILURES} (shell: ${HOOK_SHELL})"

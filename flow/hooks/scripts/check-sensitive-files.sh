@@ -253,12 +253,102 @@ canonicalize_path() {
   lexical_collapse "$_cp_resolved_ancestor/$_cp_tail"
 }
 
+# Guard canary receipt (#1411): evidence for flow/codex/guard-canary.sh check
+# that THIS guard denied one of the canary's probes. Called only at the .env
+# deny below, always as `( canary_receipt <path> ) </dev/null >/dev/null 2>&1`:
+# a subshell with every stream detached, so it can never change this hook's
+# exit code, stderr, stdout or decision, and every failure is swallowed. It
+# writes only when <path> is <run-dir>/<slug>-<n>.env, the run dir's basename
+# is cenci-guard-canary-<16 lowercase hex>, the run dir is a real directory
+# (not a symlink) owned by the current user and not group/world-writable, and
+# its probes.tsv (a regular file, not a symlink, at most 16 KiB and read
+# through a bounded stream, whose HEX line names this run)
+# lists probe <n> for check-sensitive-files with exactly <path> as its target.
+# guard-canary.sh plan writes probes.tsv only after its own self-check, so the
+# self-check never leaves a receipt. The receipt is a fresh mktemp file
+# (O_EXCL, never an existing path) receipt-check-sensitive-files-<n>.XXXXXX
+# holding the single line V1<TAB>check-sensitive-files<TAB><hex><TAB><n><TAB>
+# <tool_name>; it never carries the command, the diff or the path. Same safe-
+# write pattern as capture_tap above.
+canary_receipt() {
+  _cr_target="$1"
+  case "$_cr_target" in
+    /*/*.env) ;;
+    *) return 0 ;;
+  esac
+  _cr_run="${_cr_target%/*}"
+  _cr_base="${_cr_run##*/}"
+  case "$_cr_base" in
+    cenci-guard-canary-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
+    *) return 0 ;;
+  esac
+  _cr_hex="${_cr_base#cenci-guard-canary-}"
+  _cr_stem="${_cr_target##*/}"
+  _cr_stem="${_cr_stem%.env}"
+  _cr_n="${_cr_stem##*-}"
+  [ "$_cr_n" != "$_cr_stem" ] || return 0
+  case "$_cr_n" in
+    "" | *[!0-9]*) return 0 ;;
+  esac
+  { [ -d "$_cr_run" ] && [ ! -L "$_cr_run" ] && [ -O "$_cr_run" ]; } || return 0
+  _cr_mode=$(ls -ld "$_cr_run") || return 0
+  case "$_cr_mode" in
+    ?????w* | ????????w*) return 0 ;;
+  esac
+  _cr_pf="$_cr_run/probes.tsv"
+  { [ -f "$_cr_pf" ] && [ ! -L "$_cr_pf" ]; } || return 0
+  # Bounded read: this runs before the deny's exit 2, and a same-user session
+  # can plant its own run dir (it passes every check above) with a huge or
+  # sparse probes.tsv. An unbounded read loop would stall the hook until it
+  # timed out, and a timed-out hook does not block under Claude Code. A record
+  # over _cr_cap bytes (four probe lines are well under 2 KiB) earns no
+  # receipt, and the loop reads only the first _cr_cap bytes, so a file grown
+  # or swapped after the size check is still bounded. Residual: a FIFO swapped
+  # in after the -f test blocks the open itself; that needs the same user and
+  # only hangs this hook, which is no worse than that user killing it.
+  _cr_cap=16384
+  _cr_size=$(wc -c < "$_cr_pf") || return 0
+  _cr_size="${_cr_size#"${_cr_size%%[0-9]*}"}"
+  _cr_size="${_cr_size%"${_cr_size##*[0-9]}"}"
+  case "$_cr_size" in
+    "" | *[!0-9]* | ??????*) return 0 ;;
+  esac
+  [ "$_cr_size" -le "$_cr_cap" ] || return 0
+  _cr_data=$(head -c "$_cr_cap" "$_cr_pf") || return 0
+  _cr_tab=$(printf '\t')
+  _cr_hex_ok=0
+  _cr_listed=0
+  while IFS="$_cr_tab" read -r _cr_kind _cr_f1 _cr_f2 _cr_f3 _cr_f4 _cr_f5; do
+    case "$_cr_kind" in
+      HEX)
+        [ "$_cr_f1" = "$_cr_hex" ] && _cr_hex_ok=1
+        ;;
+      PROBE)
+        if [ "$_cr_f1" = "$_cr_n" ] && [ "$_cr_f3" = check-sensitive-files ] && [ "$_cr_f5" = "$_cr_target" ]; then
+          _cr_listed=1
+        fi
+        ;;
+    esac
+  done <<CR_PROBES_EOF
+$_cr_data
+CR_PROBES_EOF
+  [ "$_cr_hex_ok" = 1 ] && [ "$_cr_listed" = 1 ] || return 0
+  _cr_tool=$(printf '%s' "$INPUT" | jq -r '.tool_name // ""') || return 0
+  case "$_cr_tool" in
+    "" | *[!A-Za-z0-9_]*) return 0 ;;
+  esac
+  _cr_file=$(mktemp "$_cr_run/receipt-check-sensitive-files-$_cr_n.XXXXXX") || return 0
+  printf 'V1\tcheck-sensitive-files\t%s\t%s\t%s\n' "$_cr_hex" "$_cr_n" "$_cr_tool" > "$_cr_file"
+  return 0
+}
+
 # Check against sensitive file patterns. Run against BOTH the raw path and
 # the canonicalized path — block (exit 2) if either matches (see header
 # comment for the union-matching rationale). Shared by both arms below.
 check_sensitive() {
   case "$1" in
     *.env|*.env.*|*/.env|*/.env.*)
+      ( canary_receipt "$1" ) </dev/null >/dev/null 2>&1
       echo "BLOCKED: Refusing to write to environment file: $1" >&2
       echo "Environment files may contain secrets. Edit manually if needed." >&2
       exit 2

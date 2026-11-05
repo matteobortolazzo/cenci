@@ -21,6 +21,14 @@
 #   C2  refusal text: pending trust, /hooks, written vs. no-guard-message
 #   C3  sandbox label only with CENCI_SANDBOX=1 plus a hard-coded marker file;
 #       never "trusted"; nothing changes trust (the fake HOME stays untouched)
+#   P5  (#1411) single-quoted COMMAND lines, INSTRUCTION text with all four
+#       verdict tokens, a quote / metacharacter repository path, and a receipt
+#       present before CANARY_PLAN=ok refuses the plan
+#   R   (#1411) a probe counts as denied only with a valid guard receipt:
+#       receipts are staged through the REAL guards (deny_probes), never
+#       hand-written on an active path; missing / wrong-hex / wrong-guard /
+#       wrong-tool / wrong-probe / symlinked / malformed receipts refuse with
+#       BAD_RECEIPT; blocked and not-attempted get their own result lines
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || exit 1
@@ -207,6 +215,27 @@ probe_count() {
     awk -F'\t' '$1 == "PROBE" { c++ } END { print c + 0 }' "$1"
 }
 
+# command_of <out-file> <n> -- the ready-to-run shell command plan printed for
+# probe <n> (the COMMAND<TAB><n><TAB><command> line), empty when there is none.
+command_of() {
+    awk -F'\t' -v n="$2" '$1 == "COMMAND" && $2 == n { print $3; exit }' "$1"
+}
+
+# make_fixture_repo <dir> -- a cenci-configured repository with a seed commit.
+make_fixture_repo() {
+    mkdir_checked "$1/.cenci"
+    printf '{}\n' > "$1/.cenci/config.json" || exit 1
+    git -C "$1" init -q || exit 1
+    git -C "$1" add -A || exit 1
+    git -C "$1" -c user.name=canary-test -c user.email=canary-test@localhost \
+        -c commit.gpgsign=false commit -q -m seed || exit 1
+}
+
+# tree_of <dir> -- sorted listing of every entry below <dir> outside .git.
+tree_of() {
+    find "$1" -mindepth 1 -not -path '*/.git' -not -path '*/.git/*' | LC_ALL=C sort
+}
+
 # count_run_dirs_in <dir> -- echo how many cenci-guard-canary-* entries exist.
 count_run_dirs_in() {
     local c=0 e
@@ -370,6 +399,54 @@ payload_shell() { # <cwd> <target>
 payload_patch() { # <cwd> <target>
     jq -n --arg cwd "$1" --arg cmd "$(printf '*** Begin Patch\n*** Add File: %s\n+x\n*** End Patch' "$2")" \
         '{hook_event_name: "PreToolUse", tool_name: "apply_patch", cwd: $cwd, tool_input: {command: $cmd}}'
+}
+
+# deny_probes <plan-out> <session-cwd> [n...] -- what a session with live hooks
+# produces: each probe's call (the shell probe's exact COMMAND line, the
+# apply_patch probe's Add File envelope) is piped through BOTH real guard
+# scripts with TMPDIR=TMP_BASE, so the denying guard leaves its own receipt in
+# the run dir. Default: every PROBE line. Nothing is hand-written here.
+deny_probes() {
+    local plan_out="$1" session="$2" n tool guard t payload g want cmd
+    shift 2
+    local -a ns=("$@")
+    if [[ "${#ns[@]}" -eq 0 ]]; then
+        while IFS=$'\t' read -r kind n _; do
+            [[ "${kind}" == PROBE ]] && ns+=("${n}")
+        done < "${plan_out}"
+    fi
+    for n in "${ns[@]}"; do
+        tool="$(probe_field "${plan_out}" "${n}" 3)"
+        guard="$(probe_field "${plan_out}" "${n}" 4)"
+        t="$(probe_field "${plan_out}" "${n}" 6)"
+        if [[ "${tool}" == shell ]]; then
+            cmd="$(command_of "${plan_out}" "${n}")"
+            [[ -n "${cmd}" ]] || fail "deny_probes: plan printed no COMMAND line for shell probe ${n}"
+            payload="$(jq -n --arg cwd "${session}" --arg cmd "${cmd}" \
+                '{hook_event_name: "PreToolUse", tool_name: "Bash", cwd: $cwd, tool_input: {command: $cmd}}')"
+        else
+            payload="$(payload_patch "${session}" "${t}")"
+        fi
+        for g in check-sensitive-files guard-main-worktree; do
+            G_ERR="$( (cd "${session}" && printf '%s' "${payload}" \
+                | env -u CENCI_CODEX_HOOK_CAPTURE_DIR TMPDIR="${TMP_BASE}" "${FLOW_DIR}/hooks/scripts/${g}.sh" 2>&1 >/dev/null) )"
+            G_RC=$?
+            want=0
+            [[ "${g}" == "${guard}" ]] && want=2
+            if [[ "${G_RC}" -ne "${want}" ]]; then
+                fail "deny_probes: probe ${n} (${tool}): ${g} exited ${G_RC}, want ${want}: ${G_ERR:0:160}"
+            fi
+        done
+    done
+}
+
+# receipts_in <run-dir> -- how many receipt-* entries the run dir holds.
+receipts_in() {
+    local c=0 e
+    for e in "$1"/receipt-*; do
+        [[ -e "${e}" || -L "${e}" ]] && c=$((c + 1))
+    done
+    echo "${c}"
 }
 
 echo "case: for each probe exactly the expected real guard exits 2 with its message, on shell and apply_patch payloads (P2)"
@@ -631,6 +708,188 @@ else
     fail "no run dir may be created inside the main worktree"
 fi
 
+# ── P5: COMMAND lines, instructions, receipts before the plan is ok (#1411) ──
+echo "case: plan prints one single-quoted COMMAND line per shell probe and none for apply_patch probes (P5)"
+N_SHELL=0
+for n in 1 2 3 4; do
+    t="$(probe_field "${PLAN1}" "${n}" 6)"
+    if [[ "$(probe_field "${PLAN1}" "${n}" 3)" == shell ]]; then
+        N_SHELL=$((N_SHELL + 1))
+        if grep -qxF "COMMAND${TAB}${n}${TAB}printf x > '${t}'" "${PLAN1}"; then
+            pass
+        else
+            fail "shell probe ${n} needs the line 'COMMAND<TAB>${n}<TAB>printf x > '<target>'' (got: $(grep "^COMMAND${TAB}${n}${TAB}" "${PLAN1}"))"
+        fi
+    elif grep -q "^COMMAND${TAB}${n}${TAB}" "${PLAN1}"; then
+        fail "apply_patch probe ${n} must get no COMMAND line"
+    else
+        pass
+    fi
+done
+if [[ "${N_SHELL}" -eq 2 && "$(grep -c "^COMMAND${TAB}" "${PLAN1}")" -eq 2 ]]; then
+    pass
+else
+    fail "expected exactly two COMMAND lines for the two shell probes (shell probes ${N_SHELL}, COMMAND lines $(grep -c "^COMMAND${TAB}" "${PLAN1}"))"
+fi
+
+echo "case: the INSTRUCTION lines say to run COMMAND verbatim and list all four verdict tokens (P5)"
+if grep '^INSTRUCTION:' "${PLAN1}" | grep -F 'COMMAND' | grep -qF 'verbatim'; then
+    pass
+else
+    fail "an INSTRUCTION line must tell the session to run the COMMAND line verbatim: $(grep '^INSTRUCTION:' "${PLAN1}")"
+fi
+if grep '^INSTRUCTION:' "${PLAN1}" | grep -qF '=<denied|not-denied|blocked|not-attempted>'; then
+    pass
+else
+    fail "the check INSTRUCTION must offer all four tokens <denied|not-denied|blocked|not-attempted>: $(grep '^INSTRUCTION:' "${PLAN1}")"
+fi
+for tok in blocked not-attempted not-denied; do
+    if grep '^INSTRUCTION: judge' "${PLAN1}" | grep -qF -- "${tok} "; then
+        pass
+    else
+        fail "the judging INSTRUCTION must say when to report ${tok}: $(grep '^INSTRUCTION: judge' "${PLAN1}")"
+    fi
+done
+
+echo "case: a main-worktree path with a single quote is quoted as '\\'' in COMMAND, and the command writes exactly its target (P5)"
+QUOTE_REPO="${TEST_ROOT}/quote'repo dir"
+make_fixture_repo "${QUOTE_REPO}"
+plan_in "${QUOTE_REPO}"
+QUOTE_PLAN="${OUT}"
+QUOTE_RUN="$(kv "${QUOTE_PLAN}" CANARY_RUN_DIR)"
+if [[ "${R_RC}" -eq 0 && -n "${QUOTE_RUN}" ]]; then
+    pass
+else
+    fail "plan in a repository whose path holds a single quote must succeed (rc=${R_RC}): $(head -c 500 "${QUOTE_PLAN}")"
+fi
+QUOTE_SHELL=0
+for n in 1 2 3 4; do
+    [[ "$(probe_field "${QUOTE_PLAN}" "${n}" 3)" == shell ]] || continue
+    t="$(probe_field "${QUOTE_PLAN}" "${n}" 6)"
+    [[ "$(probe_field "${QUOTE_PLAN}" "${n}" 4)" == guard-main-worktree ]] || continue
+    QUOTE_SHELL=$((QUOTE_SHELL + 1))
+    want_q="$(printf '%s' "${t}" | sed "s/'/'\\\\''/g")"
+    want_cmd="printf x > '${want_q}'"
+    if [[ "$(command_of "${QUOTE_PLAN}" "${n}")" == "${want_cmd}" && "${want_cmd}" == *"'\\''"* ]]; then
+        pass
+    else
+        fail "probe ${n}: COMMAND must single-quote the target with an embedded ' written as '\\'' (want: ${want_cmd}; got: $(command_of "${QUOTE_PLAN}" "${n}"))"
+    fi
+    QUOTE_CWD="${TEST_ROOT}/quote-cwd"
+    mkdir_checked "${QUOTE_CWD}"
+    before_root="$(tree_of "${QUOTE_REPO}")"
+    (cd "${QUOTE_CWD}" && "${BASH_BIN}" -c "$(command_of "${QUOTE_PLAN}" "${n}")")
+    if [[ -f "${t}" && "$(< "${t}")" == x && -z "$(tree_of "${QUOTE_CWD}")" ]] \
+        && [[ "$(tree_of "${QUOTE_REPO}")" == "$(printf '%s\n%s' "${before_root}" "${t}" | LC_ALL=C sort | sed '/^$/d')" ]]; then
+        pass
+    else
+        fail "probe ${n}: running COMMAND must create exactly ${t} and nothing else (cwd: $(tree_of "${QUOTE_CWD}"))"
+    fi
+    rm -f "${t}"
+done
+# The filters above must leave at least one shell main-worktree probe, or every
+# quoting assertion in the loop was skipped.
+[[ "${QUOTE_SHELL}" -ge 1 ]] || fail "quoted repo path: expected at least one shell guard-main-worktree probe, got ${QUOTE_SHELL}"
+[[ -n "${QUOTE_RUN}" ]] && rm -rf "${QUOTE_RUN}"
+
+echo "case: a repository path with a space, ', \$, ; and a backtick either plans a COMMAND that writes only its target, or refuses cleanly (P5)"
+META_REPO="${TEST_ROOT}/meta dir'q\$x;y\`z/repo"
+make_fixture_repo "${META_REPO}"
+META_CWD="${TEST_ROOT}/meta-cwd"
+mkdir_checked "${META_CWD}"
+plan_in "${META_REPO}"
+META_PLAN="${OUT}"
+META_RUN="$(kv "${META_PLAN}" CANARY_RUN_DIR)"
+if [[ "${R_RC}" -eq 0 ]] && grep -qxF 'CANARY_PLAN=ok' "${META_PLAN}"; then
+    echo "  (metacharacter repo: plan succeeded; checking each COMMAND)"
+    META_SHELL=0
+    for n in 1 2 3 4; do
+        [[ "$(probe_field "${META_PLAN}" "${n}" 3)" == shell ]] || continue
+        META_SHELL=$((META_SHELL + 1))
+        t="$(probe_field "${META_PLAN}" "${n}" 6)"
+        before_root="$(tree_of "${META_REPO}")"
+        before_run="$(tree_of "${META_RUN}")"
+        (cd "${META_CWD}" && "${BASH_BIN}" -c "$(command_of "${META_PLAN}" "${n}")")
+        root_now="$(tree_of "${META_REPO}")"
+        run_now="$(tree_of "${META_RUN}")"
+        case "${t}" in
+            "${META_RUN}"/*) want_root="${before_root}" want_run="$(printf '%s\n%s' "${before_run}" "${t}" | LC_ALL=C sort | sed '/^$/d')" ;;
+            *) want_root="$(printf '%s\n%s' "${before_root}" "${t}" | LC_ALL=C sort | sed '/^$/d')" want_run="${before_run}" ;;
+        esac
+        if [[ -f "${t}" && "${root_now}" == "${want_root}" && "${run_now}" == "${want_run}" && -z "$(tree_of "${META_CWD}")" ]]; then
+            pass
+        else
+            fail "metacharacter repo: COMMAND for probe ${n} must create exactly ${t} and no other entry (root: ${root_now}; run: ${run_now}; cwd: $(tree_of "${META_CWD}"))"
+        fi
+        rm -f "${t}"
+    done
+    [[ "${META_SHELL}" -eq 2 ]] || fail "metacharacter repo: expected two shell probes, got ${META_SHELL}"
+    rm -rf "${META_RUN}"
+else
+    echo "  (metacharacter repo: plan refused, $(grep -m 1 -F 'Guard canary refused:' "${META_PLAN}" | cut -c 1-160); checking the refusal left nothing)"
+    if [[ "${R_RC}" -eq 1 ]] && grep -qxF 'CANARY_STATUS=refused' "${META_PLAN}" && [[ "$(probe_count "${META_PLAN}")" -eq 0 ]]; then
+        pass
+    else
+        fail "metacharacter repo: a plan that is not ok must refuse with exit 1 and no PROBE line (rc=${R_RC}): $(head -c 400 "${META_PLAN}")"
+    fi
+    if [[ "$(count_run_dirs_in "${TMP_BASE}")" -eq "${BASELINE_RUN_DIRS}" && "$(count_run_dirs_in "${META_REPO}")" -eq 0 && -z "$(tree_of "${META_CWD}")" ]]; then
+        pass
+    else
+        fail "metacharacter repo: a refused plan must leave no run dir and no probe file"
+    fi
+fi
+
+echo "case: a receipt already in the run dir before CANARY_PLAN=ok refuses the plan and removes the run dir (P5)"
+# A fake check-sensitive-files guard plants a receipt in the run dir during the
+# self-check, then hands the call to the real guard, so the self-check itself
+# still passes. No real guard can do this (probes.tsv does not exist yet).
+H="$(make_plugin planted-receipt "")" || { echo "FAIL: test setup: plugin copy" >&2; exit 1; }
+PR_ROOT="${H%/codex/guard-canary.sh}"
+rm -f "${PR_ROOT}/hooks"
+mkdir_checked "${PR_ROOT}/hooks/scripts"
+cp -R "${FLOW_DIR}/hooks/scripts/." "${PR_ROOT}/hooks/scripts/" || exit 1
+mv "${PR_ROOT}/hooks/scripts/check-sensitive-files.sh" "${PR_ROOT}/hooks/scripts/real-check-sensitive-files.sh" || exit 1
+cat > "${PR_ROOT}/hooks/scripts/check-sensitive-files.sh" <<'PLANT_GUARD'
+#!/bin/sh
+in=$(cat)
+t=$(printf '%s' "$in" | jq -r '.tool_input.command' | sed -n -e 's|^\*\*\* Add File: ||p' -e "s|^printf x > '\(.*\)'\$|\1|p" | sed -n 1p)
+p=${t%/*}
+case "${p##*/}" in
+    cenci-guard-canary-????????????????) [ -d "$p" ] && : > "$p/receipt-check-sensitive-files-1.planted" ;;
+esac
+printf '%s' "$in" | "${0%/*}/real-check-sensitive-files.sh"
+PLANT_GUARD
+chmod +x "${PR_ROOT}/hooks/scripts/check-sensitive-files.sh" || exit 1
+run_helper "${H}" "${REPO}" "${PATH}" "TMPDIR=${TMP_BASE}" -- plan
+assert_plan_refused "receipt before the plan is ok" "already in the run dir before the plan is complete"
+if grep -qxF 'CANARY_PLAN=ok' "${OUT}"; then
+    fail "receipt before the plan is ok: CANARY_PLAN=ok must never print"
+else
+    pass
+fi
+
+echo "case: a main-worktree path with a control character is refused by plan, leaving no probe file and no run dir (P5)"
+# Outside /tmp like every fixture (guard-main-worktree allowlists /tmp/*), so the
+# only possible reason to refuse is the control character itself.
+for ctl_name in "ctl${TAB}repo" "ctl"$'\n'"repo"; do
+    CTL_REPO="${TEST_ROOT}/${ctl_name}"
+    make_fixture_repo "${CTL_REPO}"
+    ctl_label="control-character path (${ctl_name//[[:cntrl:]]/<ctl>})"
+    ctl_before="$(tree_of "${CTL_REPO}")"
+    plan_in "${CTL_REPO}"
+    assert_plan_refused "${ctl_label}" "the main worktree path contains a control character"
+    if grep -qxF 'CANARY_PLAN=ok' "${OUT}"; then
+        fail "${ctl_label}: CANARY_PLAN=ok must never print"
+    else
+        pass
+    fi
+    if [[ "$(tree_of "${CTL_REPO}")" == "${ctl_before}" && "$(count_run_dirs_in "${CTL_REPO}")" -eq 0 ]]; then
+        pass
+    else
+        fail "${ctl_label}: a refused plan must leave no probe file in the main worktree"
+    fi
+done
+
 # ── C1: check ───────────────────────────────────────────────────────────
 # fresh_plan [cwd] -- a new plan; sets CUR_DIR and CUR_PLAN (fails the suite
 # when the plan itself fails, since every check case depends on it).
@@ -653,8 +912,22 @@ check_run() {
 
 ALL_DENIED=(1=denied 2=denied 3=denied 4=denied)
 
-echo "case: all probes denied and nothing written -> active, run dir removed (C1)"
+# fresh_denied_plan [cwd] -- fresh_plan, then every probe denied by the real
+# guards (receipts staged), so a case that expects a refusal refuses for its own
+# reason and not merely because no receipt exists.
+fresh_denied_plan() {
+    fresh_plan "${1:-${REPO}}"
+    deny_probes "${CUR_PLAN}" "${1:-${REPO}}"
+}
+
+echo "case: all probes denied by the real guards (receipts present) and nothing written -> active, run dir removed (C1)"
 fresh_plan
+deny_probes "${CUR_PLAN}" "${REPO}"
+if [[ "$(receipts_in "${CUR_DIR}")" -eq 4 ]]; then
+    pass
+else
+    fail "deny_probes non-vacuity: the four real guard denials must leave four receipts, found $(receipts_in "${CUR_DIR}")"
+fi
 check_run "${CUR_DIR}" "${ALL_DENIED[@]}"
 if [[ "${R_RC}" -eq 0 ]] && grep -qxF 'CANARY_STATUS=active' "${OUT}"; then
     pass
@@ -672,8 +945,10 @@ else
     pass
 fi
 
-echo "case: a written target is removed, reported, and refuses even when claimed denied (C1)"
+echo "case: a written target is removed, reported, and refuses even when claimed denied and its receipt is present (C1)"
 fresh_plan
+# Every probe gets its real receipt first: WRITTEN must still win.
+deny_probes "${CUR_PLAN}" "${REPO}"
 T1="$(probe_field "${CUR_PLAN}" 1 6)"   # .env under the run dir
 T2="$(probe_field "${CUR_PLAN}" 2 6)"   # main-worktree .txt
 printf 'x\n' > "${T1}"
@@ -683,6 +958,18 @@ if [[ "${R_RC}" -eq 1 ]] && grep -qxF 'CANARY_STATUS=refused' "${OUT}"; then
     pass
 else
     fail "written targets must refuse (rc=${R_RC}): $(head -c 400 "${OUT}")"
+fi
+for n in 1 2; do
+    if grep -E "^PROBE_RESULT: ${n} " "${OUT}" | grep -qF 'WRITTEN' && ! grep -E "^PROBE_RESULT: ${n} " "${OUT}" | grep -qF 'denied by'; then
+        pass
+    else
+        fail "written probe ${n} with a receipt: WRITTEN must win over the receipt: $(grep -E "^PROBE_RESULT: ${n} " "${OUT}")"
+    fi
+done
+if [[ ! -e "${CUR_DIR}" ]]; then
+    pass
+else
+    fail "a refused check must remove the run dir and its receipts (${CUR_DIR})"
 fi
 if [[ ! -e "${T1}" && ! -e "${T2}" ]]; then
     pass
@@ -707,18 +994,25 @@ else
     pass
 fi
 
-echo "case: no guard message and nothing written is inconclusive, not 'written' (C2)"
+# probe_label <plan-out> <n> -- "<n> (<tool>, <guard>, group <group>)", the
+# prefix of probe <n>'s PROBE_RESULT line.
+probe_label() {
+    printf '%s (%s, %s, group %s)' "$2" "$(probe_field "$1" "$2" 3)" "$(probe_field "$1" "$2" 4)" "$(probe_field "$1" "$2" 5)"
+}
+
+echo "case: no guard message and nothing written is inconclusive, not 'written', with the line unchanged (C2)"
 fresh_plan
+deny_probes "${CUR_PLAN}" "${REPO}" 1 2 4
 check_run "${CUR_DIR}" 1=denied 2=denied 3=not-denied 4=denied
 if [[ "${R_RC}" -eq 1 ]] && grep -qxF 'CANARY_STATUS=refused' "${OUT}"; then
     pass
 else
     fail "a not-denied probe must refuse (rc=${R_RC}): $(head -c 400 "${OUT}")"
 fi
-if grep -qiE 'no guard message' "${OUT}" && grep -qiE 'inconclusive' "${OUT}"; then
+if grep -qxF "PROBE_RESULT: $(probe_label "${CUR_PLAN}" 3): NO GUARD MESSAGE -- not written, but not denied by the guard either (inconclusive)" "${OUT}"; then
     pass
 else
-    fail "an unwritten not-denied probe must be reported as 'no guard message' / inconclusive: $(head -c 600 "${OUT}")"
+    fail "an unwritten not-denied probe with no receipt keeps the exact NO GUARD MESSAGE line: $(grep '^PROBE_RESULT: 3 ' "${OUT}")"
 fi
 if grep -qE '^(REMOVED|LEFTOVER)' "${OUT}"; then
     fail "nothing was written, so nothing may be reported removed or left over"
@@ -726,27 +1020,235 @@ else
     pass
 fi
 
-echo "case: a missing probe result refuses (C1)"
+echo "case: a missing probe result refuses with the NO RESULT line unchanged (C1)"
 fresh_plan
+deny_probes "${CUR_PLAN}" "${REPO}" 1 2 3
 check_run "${CUR_DIR}" 1=denied 2=denied 3=denied
 if [[ "${R_RC}" -eq 1 ]] && grep -qxF 'CANARY_STATUS=refused' "${OUT}"; then
     pass
 else
     fail "a probe with no reported result must refuse (rc=${R_RC}): $(head -c 400 "${OUT}")"
 fi
-
-echo "case: an unrecognized result token refuses and removes nothing it should not (C1)"
-fresh_plan
-check_run "${CUR_DIR}" 1=denied 2=denied 3=denied 4=maybe
-if [[ "${R_RC}" -ne 0 ]] && ! grep -qxF 'CANARY_STATUS=active' "${OUT}"; then
+if grep -qxF "PROBE_RESULT: $(probe_label "${CUR_PLAN}" 4): NO RESULT -- the session reported nothing for this probe (inconclusive)" "${OUT}"; then
     pass
 else
-    fail "an unrecognized result must never produce an active canary (rc=${R_RC}): $(head -c 300 "${OUT}")"
+    fail "a probe with no reported result keeps the exact NO RESULT line: $(grep '^PROBE_RESULT: 4 ' "${OUT}")"
+fi
+
+# ── R: receipts and the new verdicts (#1411) ────────────────────────────
+# assert_refused_exit1 <label> -- the last check refused with exit 1.
+assert_refused_exit1() {
+    if [[ "${R_RC}" -eq 1 ]] && grep -qxF 'CANARY_STATUS=refused' "${OUT}" && ! grep -qxF 'CANARY_STATUS=active' "${OUT}"; then
+        pass
+    else
+        fail "$1: check must print CANARY_STATUS=refused and exit 1 (rc=${R_RC}): $(head -c 500 "${OUT}")"
+    fi
+}
+
+# result_line <n> -- probe <n>'s PROBE_RESULT line from the last check.
+result_line() {
+    grep -E "^PROBE_RESULT: $1 " "${OUT}" | sed -n 1p
+}
+
+echo "case: every probe reported denied but no guard ever ran (no receipt) refuses with REPORTED DENIED WITHOUT GUARD RECEIPT (R)"
+fresh_plan
+check_run "${CUR_DIR}" "${ALL_DENIED[@]}"
+assert_refused_exit1 "denied without receipts"
+for n in 1 2 3 4; do
+    if [[ "$(result_line "${n}")" == *"REPORTED DENIED WITHOUT GUARD RECEIPT"* ]]; then
+        pass
+    else
+        fail "probe ${n} reported denied with no receipt must say REPORTED DENIED WITHOUT GUARD RECEIPT: $(result_line "${n}")"
+    fi
+done
+if grep -qE '^PROBE_RESULT: .*denied by ' "${OUT}"; then
+    fail "denied without receipts: no probe may be accepted as 'denied by <guard>'"
+else
+    pass
+fi
+
+echo "case: blocked and not-attempted are accepted tokens with their own result lines, and refuse (R)"
+fresh_plan
+deny_probes "${CUR_PLAN}" "${REPO}" 3 4
+check_run "${CUR_DIR}" 1=blocked 2=not-attempted 3=denied 4=denied
+assert_refused_exit1 "blocked / not-attempted"
+if [[ "$(result_line 1)" == *"BLOCKED BEFORE THE GUARD (Codex sandbox or approval refusal)"* && "$(result_line 1)" != *RECEIPT* ]]; then
+    pass
+else
+    fail "1=blocked must print BLOCKED BEFORE THE GUARD (Codex sandbox or approval refusal): $(result_line 1)"
+fi
+if [[ "$(result_line 2)" == *"NOT ATTEMPTED"* && "$(result_line 2)" != *RECEIPT* ]]; then
+    pass
+else
+    fail "2=not-attempted must print NOT ATTEMPTED: $(result_line 2)"
+fi
+for n in 3 4; do
+    if [[ "$(result_line "${n}")" == *": denied by $(probe_field "${CUR_PLAN}" "${n}" 4)" ]]; then
+        pass
+    else
+        fail "probe ${n} with a real receipt and denied must be accepted: $(result_line "${n}")"
+    fi
+done
+if grep -q '^BAD_RESULT' "${OUT}"; then
+    fail "blocked and not-attempted are valid tokens, never BAD_RESULT: $(grep '^BAD_RESULT' "${OUT}")"
+else
+    pass
+fi
+
+echo "case: a receipt with a non-denied verdict names both the receipt and the verdict, and refuses (R)"
+fresh_plan
+deny_probes "${CUR_PLAN}" "${REPO}"
+check_run "${CUR_DIR}" 1=blocked 2=not-attempted 3=not-denied 4=denied
+assert_refused_exit1 "receipt + non-denied verdict"
+for spec in "1|blocked|BLOCKED BEFORE THE GUARD (Codex sandbox or approval refusal)" "2|not-attempted|NOT ATTEMPTED" "3|not-denied|NO GUARD MESSAGE"; do
+    IFS='|' read -r n tok phrase <<< "${spec}"
+    if [[ "$(result_line "${n}")" == *"GUARD RECEIPT PRESENT BUT REPORTED ${tok} -- ${phrase}"* ]]; then
+        pass
+    else
+        fail "probe ${n} with a receipt but ${tok}: the line must name both the receipt and the verdict: $(result_line "${n}")"
+    fi
+done
+if [[ ! -e "${CUR_DIR}" ]]; then
+    pass
+else
+    fail "a refused check must remove the run dir with its receipts (${CUR_DIR})"
+fi
+
+echo "case: the refused explanation names all six outcomes (R)"
+EXPLAIN="$(grep '^Reading the probe results:' "${OUT}")"
+for outcome in "WRITTEN" "REPORTED DENIED WITHOUT GUARD RECEIPT" "BLOCKED BEFORE THE GUARD" "NOT ATTEMPTED" "NO GUARD MESSAGE" "NO RESULT"; do
+    if [[ "${EXPLAIN}" == *"${outcome}"* ]]; then
+        pass
+    else
+        fail "the refused explanation must name ${outcome}: ${EXPLAIN}"
+    fi
+done
+
+# bad_receipt_case <label> <probe n> <receipt-body-or-@SYMLINK@> <reason-fragment>
+# -- every probe but <n> gets its real receipt; <n> gets only a hand-written one,
+# which check must reject with a BAD_RECEIPT line, and the canary refuses.
+bad_receipt_case() {
+    local label="$1" n="$2" body="$3" reason="$4" owner="${5:-}" hex guard elsewhere="" name other tool badtool m saved_bash
+    fresh_plan
+    hex="${CUR_DIR##*cenci-guard-canary-}"
+    guard="$(probe_field "${CUR_PLAN}" "${n}" 4)"
+    local -a others=()
+    for m in 1 2 3 4; do
+        [[ "${m}" == "${n}" ]] || others+=("${m}")
+    done
+    deny_probes "${CUR_PLAN}" "${REPO}" "${others[@]}"
+    name="receipt-${guard}-${n}.manual"
+    if [[ "${guard}" == check-sensitive-files ]]; then other=guard-main-worktree; else other=check-sensitive-files; fi
+    if [[ "$(probe_field "${CUR_PLAN}" "${n}" 3)" == shell ]]; then tool=Bash badtool=apply_patch; else tool=apply_patch badtool=Bash; fi
+    body="${body//@HEX@/${hex}}"
+    body="${body//@GUARD@/${guard}}"
+    body="${body//@OTHER@/${other}}"
+    body="${body//@TOOL@/${tool}}"
+    body="${body//@BADTOOL@/${badtool}}"
+    if [[ "${body}" == @SYMLINK@* ]]; then
+        elsewhere="${TEST_ROOT}/receipt-elsewhere-${n}"
+        printf '%s\n' "${body#@SYMLINK@}" > "${elsewhere}" || exit 1
+        ln -s "${elsewhere}" "${CUR_DIR}/${name}" || exit 1
+    elif [[ "${body}" == @DIR@ ]]; then
+        mkdir "${CUR_DIR}/${name}" || exit 1
+    elif [[ "${body}" == @FIFO@ ]]; then
+        mkfifo "${CUR_DIR}/${name}" || exit 1
+    else
+        printf '%s' "${body}" > "${CUR_DIR}/${name}" || exit 1
+    fi
+    if [[ -n "${owner}" ]]; then
+        chown "${owner}" "${CUR_DIR}/${name}" || exit 1
+    fi
+    saved_bash="${BASH_BIN}"
+    # A FIFO receipt must be refused without ever being read; a read would block
+    # forever, so run that check under a wall-clock limit (rc 124 fails the case).
+    if [[ "${body}" == @FIFO@ && -x "${TIMEOUT_BASH:-}" ]]; then
+        BASH_BIN="${TIMEOUT_BASH}"
+    fi
+    check_run "${CUR_DIR}" "${ALL_DENIED[@]}"
+    BASH_BIN="${saved_bash}"
+    assert_refused_exit1 "${label}"
+    if grep -F "BAD_RECEIPT: ${name}: " "${OUT}" | grep -qF -- "${reason}"; then
+        pass
+    else
+        fail "${label}: check must print 'BAD_RECEIPT: ${name}: ...${reason}...' (got: $(grep '^BAD_RECEIPT' "${OUT}"))"
+    fi
+    if [[ "$(result_line "${n}")" == *"REPORTED DENIED WITHOUT GUARD RECEIPT"* ]]; then
+        pass
+    else
+        fail "${label}: a bad receipt must not count, so probe ${n} is denied without a receipt: $(result_line "${n}")"
+    fi
+    if [[ -n "${elsewhere:-}" ]]; then
+        if [[ -f "${elsewhere}" && "$(< "${elsewhere}")" == "${body#@SYMLINK@}" ]]; then
+            pass
+        else
+            fail "${label}: check must never follow or touch a symlinked receipt's destination"
+        fi
+        rm -f "${elsewhere}"
+    fi
+}
+
+T_=$'\t'
+bad_receipt_case "wrong hex" 4 "V1${T_}@GUARD@${T_}ffffffffffffffff${T_}4${T_}@TOOL@"$'\n' "another run"
+bad_receipt_case "wrong guard" 4 "V1${T_}@OTHER@${T_}@HEX@${T_}4${T_}@TOOL@"$'\n' "names guard"
+bad_receipt_case "wrong tool" 4 "V1${T_}@GUARD@${T_}@HEX@${T_}4${T_}@BADTOOL@"$'\n' "names tool"
+bad_receipt_case "probe number not in the record" 4 "V1${T_}@GUARD@${T_}@HEX@${T_}9${T_}@TOOL@"$'\n' "not in the probe record"
+bad_receipt_case "symlinked receipt" 4 "@SYMLINK@V1${T_}@GUARD@${T_}@HEX@${T_}4${T_}@TOOL@" "symlink"
+bad_receipt_case "empty receipt (a write that failed after mktemp)" 4 "" "exactly one line"
+bad_receipt_case "two-line receipt" 4 "V1${T_}@GUARD@${T_}@HEX@${T_}4${T_}@TOOL@"$'\n'"V1${T_}@GUARD@${T_}@HEX@${T_}4${T_}@TOOL@"$'\n' "exactly one line"
+bad_receipt_case "oversized receipt" 4 "V1${T_}@GUARD@${T_}@HEX@${T_}4${T_}@TOOL@$(printf '%*s' 600 '')"$'\n' "too large to be a receipt"
+# A receipt-* entry that is not a regular file is refused with BAD_RECEIPT and is
+# never read: a directory, and a FIFO (whose read would block forever).
+bad_receipt_case "directory named like a receipt" 4 "@DIR@" "is not a regular file"
+if command -v mkfifo >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then
+    TIMEOUT_BASH="${TEST_ROOT}/timeout-bash"
+    printf '#!/bin/sh\nexec timeout 20 "%s" "$@"\n' "${BASH_BIN}" > "${TIMEOUT_BASH}" || exit 1
+    chmod +x "${TIMEOUT_BASH}" || exit 1
+    bad_receipt_case "FIFO named like a receipt (never read, never hangs)" 4 "@FIFO@" "is not a regular file"
+else
+    echo "SKIP: FIFO receipt case needs mkfifo and timeout on PATH"
+fi
+
+# A receipt owned by another user is refused (-O). Ownership cannot be faked
+# without root (chown to another uid), so this runs only as root; otherwise the
+# -O branch of do_check is NOT exercised by this suite.
+if [[ "$(id -u)" -eq 0 ]] && command -v chown >/dev/null 2>&1; then
+    bad_receipt_case "receipt owned by another user" 4 "V1${T_}@GUARD@${T_}@HEX@${T_}4${T_}@TOOL@"$'\n' "not owned by the current user" 65534
+else
+    echo "SKIP: receipt-ownership (-O) case needs root to chown a receipt to another uid (running as uid $(id -u))"
+fi
+
+# The positive control for the parser: the same hand-written line with the
+# right fields IS accepted (so each negative above fails for its own field).
+bad_receipt_control() {
+    local hex guard tool
+    fresh_plan
+    hex="${CUR_DIR##*cenci-guard-canary-}"
+    guard="$(probe_field "${CUR_PLAN}" 4 4)"
+    if [[ "$(probe_field "${CUR_PLAN}" 4 3)" == shell ]]; then tool=Bash; else tool=apply_patch; fi
+    deny_probes "${CUR_PLAN}" "${REPO}" 1 2 3
+    printf 'V1\t%s\t%s\t4\t%s\n' "${guard}" "${hex}" "${tool}" > "${CUR_DIR}/receipt-${guard}-4.manual" || exit 1
+    check_run "${CUR_DIR}" "${ALL_DENIED[@]}"
+    if [[ "${R_RC}" -eq 0 ]] && grep -qxF 'CANARY_STATUS=active' "${OUT}" && ! grep -q '^BAD_RECEIPT' "${OUT}"; then
+        pass
+    else
+        fail "receipt parser control: a well-formed receipt line must be accepted (rc=${R_RC}): $(head -c 500 "${OUT}")"
+    fi
+}
+bad_receipt_control
+
+echo "case: an unrecognized result token refuses and removes nothing it should not (C1)"
+fresh_denied_plan
+check_run "${CUR_DIR}" 1=denied 2=denied 3=denied 4=maybe
+if [[ "${R_RC}" -ne 0 ]] && ! grep -qxF 'CANARY_STATUS=active' "${OUT}" && grep -qF 'BAD_RESULT: unrecognized result token 4=maybe' "${OUT}"; then
+    pass
+else
+    fail "an unrecognized result must never produce an active canary and must be a BAD_RESULT (rc=${R_RC}): $(head -c 300 "${OUT}")"
 fi
 
 echo "case: a removal that cannot happen is reported by exact path and still refuses (C1)"
 # A directory at the main-worktree probe target: rm -f cannot remove it.
-fresh_plan
+fresh_denied_plan
 T2="$(probe_field "${CUR_PLAN}" 2 6)"
 mkdir_checked "${T2}"
 check_run "${CUR_DIR}" 1=denied 2=denied 3=denied 4=denied
@@ -769,7 +1271,7 @@ rmdir "${T2}" 2>/dev/null
 rm -rf "${CUR_DIR}"
 
 echo "case: an undeletable target inside the run dir keeps the run dir and is reported (C1)"
-fresh_plan
+fresh_denied_plan
 T1="$(probe_field "${CUR_PLAN}" 1 6)"
 mkdir_checked "${T1}"
 check_run "${CUR_DIR}" ${ALL_DENIED[@]+"${ALL_DENIED[@]}"}
@@ -994,7 +1496,7 @@ run_helper "${CANARY}" "${TEST_ROOT}" "${PATH}" "TMPDIR=${TMP_BASE}" -- check "$
 assert_hint_generic "main root undeterminable"
 
 echo "case: a repeated probe number and an unknown probe number refuse, but the cleanup still runs (C1)"
-fresh_plan
+fresh_denied_plan
 T2="$(probe_field "${CUR_PLAN}" 2 6)"
 printf 'x\n' > "${T2}" || exit 1
 check_run "${CUR_DIR}" 1=denied 1=denied 2=denied 3=denied 4=denied
@@ -1008,7 +1510,7 @@ if [[ ! -e "${T2}" ]] && grep -qxF "REMOVED: ${T2}" "${OUT}"; then
 else
     fail "the cleanup must still remove the written probe on a repeated-token refusal"
 fi
-fresh_plan
+fresh_denied_plan
 T2="$(probe_field "${CUR_PLAN}" 2 6)"
 printf 'x\n' > "${T2}" || exit 1
 check_run "${CUR_DIR}" 1=denied 2=denied 3=denied 4=denied 5=denied
@@ -1023,7 +1525,7 @@ else
     fail "the cleanup must still remove the written probe on an unknown-token refusal"
 fi
 # The first verdict for a probe number wins: a later denied cannot overwrite it.
-fresh_plan
+fresh_denied_plan
 check_run "${CUR_DIR}" 1=not-denied 1=denied 2=denied 3=denied 4=denied
 if [[ "${R_RC}" -eq 1 ]] && grep -qxF 'CANARY_STATUS=refused' "${OUT}"; then
     pass
@@ -1033,7 +1535,7 @@ fi
 rm -rf "${CUR_DIR}"
 
 echo "case: a symlink at a probe target is removed as a symlink and never followed (C1)"
-fresh_plan
+fresh_denied_plan
 T2="$(probe_field "${CUR_PLAN}" 2 6)"
 DANGLING_DEST="${TEST_ROOT}/dangling-dest.txt"
 rm -f "${DANGLING_DEST}"
@@ -1055,7 +1557,7 @@ else
     fail "a removable symlink is reported WRITTEN, not as a leftover: $(head -c 500 "${OUT}")"
 fi
 rm -rf "${CUR_DIR}"
-fresh_plan
+fresh_denied_plan
 T2="$(probe_field "${CUR_PLAN}" 2 6)"
 LINK_VICTIM="${TEST_ROOT}/link-victim.txt"
 printf '%s\n' "${VICTIM_BODY}" > "${LINK_VICTIM}" || exit 1
@@ -1124,7 +1626,11 @@ label_case() {
         printf 'x\n' > "${t2}"
         run_helper "${helper}" "${REPO}" "${PATH}" "${envs[@]}" -- check "${dir}" 1=denied 2=denied 3=denied 4=denied
     else
+        deny_probes "${plan_out}" "${REPO}"
         run_helper "${helper}" "${REPO}" "${PATH}" "${envs[@]}" -- check "${dir}" "${ALL_DENIED[@]}"
+        if ! grep -qxF 'CANARY_STATUS=active' "${OUT}"; then
+            fail "${label} (${mode}): with every probe denied by the real guards the canary must be active: $(head -c 400 "${OUT}")"
+        fi
     fi
     if grep -qF "${SANDBOX_LABEL}" "${OUT}"; then
         got=yes
