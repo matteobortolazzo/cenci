@@ -650,8 +650,12 @@ func TestHookHealthOpenCodeNeverRecords(t *testing.T) {
 			if out, err := cmd.CombinedOutput(); err != nil || len(out) != 0 {
 				t.Fatalf("notify: err %v, output %q, want exit 0 and silence", err, out)
 			}
-			if _, err := os.Lstat(filepath.Join(stateHome, "cenci")); !errors.Is(err, fs.ErrNotExist) {
-				t.Errorf("an opencode run created state under %s (stat err = %v)", stateHome, err)
+			// Only the hook-health store is checked: resolving the default
+			// socket dir may create $XDG_STATE_HOME/cenci/run when
+			// CENCI_SOCKET_DIR is unset, which is not a diagnostic record.
+			store := filepath.Join(stateHome, "cenci", "hook-health")
+			if _, err := os.Lstat(store); !errors.Is(err, fs.ErrNotExist) {
+				t.Errorf("an opencode run created the hook-health store %s (stat err = %v)", store, err)
 			}
 		})
 	}
