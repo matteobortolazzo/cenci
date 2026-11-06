@@ -24,6 +24,14 @@
 # or carry a non-empty codex.md plus the SKILL.md `Client dispatch` line naming
 # it. Fixture self-tests prove each branch of that predicate can fail.
 #
+# Section 4 (#1217) adds the OpenCode half: template.go ships no built-in OpenCode
+# workflow today (no `openCodeWF` helper), and KNOWN_HELPERS makes a reintroduced
+# one fail as unrecognized. Section 4 is the latent guard for its return: every
+# `openCodeWF("<name>")` target must be in the OpenCode delivery set
+# (PORTABLE_SKILLS minus OPENCODE_RETIRED_SKILLS, both in
+# opencode/install-skills.sh), so a retired `babysit` or a non-portable skill
+# can never be a built-in OpenCode workflow. Zero OpenCode targets is valid.
+#
 # Sections 1-2 follow the fixture-free idiom of babysit-host-supervisor-contract.test.sh
 # (REPO_ROOT resolved from FLOW_DIR/.., a `failures=` counter, failing closed
 # on an unreadable source) — it greps the real committed sources, never a copy.
@@ -56,7 +64,8 @@ required_skill_problem() {
 # 1. Extract the dispatch targets from template.go's builtinConfig().
 #
 # Every built-in workflow entry is written as `"<name>": <agent>WF("<name>")`
-# (claudeWF/codexWF/openCodeWF). The helper-call argument is the token that
+# (claudeWF/codexWF today; openCodeWF returns only with built-in OpenCode
+# workflows, see section 4). The helper-call argument is the token that
 # actually becomes the invoked skill name, so that is what is parsed — the map
 # key is only a lookup label. An empty parse fails closed: a silent zero-target
 # sweep would let this test pass vacuously after a refactor of template.go.
@@ -71,19 +80,68 @@ fi
 # not listed here would otherwise have its dispatch targets silently skipped
 # by the extraction below, so the set is asserted rather than assumed: any
 # `<word>WF(...)`-shaped call with an unrecognized prefix fails loudly.
-KNOWN_HELPERS='claudeWF codexWF openCodeWF'
-mapfile -t SEEN_HELPERS < <(grep -oE '\b[A-Za-z]+WF\("[a-z-]+"\)' "${TEMPLATE}" \
-  | sed -E 's/^([A-Za-z]+WF)\(.*/\1/' | sort -u)
-for helper in "${SEEN_HELPERS[@]:-}"; do
-  [[ -n "${helper}" ]] || continue
-  [[ " ${KNOWN_HELPERS} " == *" ${helper} "* ]] || fail "watch/internal/run/template.go: unrecognized workflow-template helper [${helper}()] — add it to this test's KNOWN_HELPERS so its dispatch targets are checked too (a new agent's targets must not slip past unchecked)"
-done
+# openCodeWF is deliberately absent: template.go ships no built-in OpenCode
+# workflow, so a reintroduced openCodeWF(...) must be reviewed against section 4.
+KNOWN_HELPERS='claudeWF codexWF'
 
-mapfile -t TARGETS < <(grep -oE '\b[A-Za-z]+WF\("[a-z-]+"\)' "${TEMPLATE}" \
-  | sed -E 's/.*\("([a-z-]+)"\)/\1/' | sort -u)
+# wf_calls_of <template.go> — every `<agent>WF("<name>")` call in the template,
+# one per line. No match is valid (prints nothing, returns 0); only a grep error
+# (exit > 1) prints the reason and returns 1.
+wf_calls_of() {
+  local template="$1" raw rc
+  raw="$(grep -oE '\b[A-Za-z]+WF\("[a-z-]+"\)' "${template}")"
+  rc=$?
+  if [[ "${rc}" -gt 1 ]]; then
+    echo "grep failed (exit ${rc}) reading ${template}"
+    return 1
+  fi
+  [[ -z "${raw}" ]] || echo "${raw}"
+}
 
-if [[ "${#TARGETS[@]}" -eq 0 ]]; then
-  fail "watch/internal/run/template.go: no <agent>WF(\"<name>\") dispatch targets parsed — the built-in workflow shape changed and this test needs updating (failing closed rather than passing vacuously)"
+# unknown_helpers_of <template.go> — the `<agent>WF` helper names used in the
+# template that are not in KNOWN_HELPERS, one per line. Pure: prints them and
+# returns 1 when any exist (or when grep itself errors); prints nothing and
+# returns 0 when every helper is recognized.
+unknown_helpers_of() {
+  local template="$1" raw helper unknown=""
+  raw="$(wf_calls_of "${template}")" || { echo "${raw}"; return 1; }
+  while IFS= read -r helper; do
+    [[ -n "${helper}" ]] || continue
+    [[ " ${KNOWN_HELPERS} " == *" ${helper} "* ]] || unknown+="${helper}"$'\n'
+  done < <(sed -E 's/^([A-Za-z]+WF)\(.*/\1/' <<<"${raw}" | sort -u)
+  if [[ -n "${unknown}" ]]; then
+    printf '%s' "${unknown}"
+    return 1
+  fi
+  return 0
+}
+
+# all_targets_of <template.go> — every `<agent>WF("<name>")` target across all
+# agents, one per line. Fails closed (prints the reason, returns 1) on a grep
+# error or an empty parse.
+all_targets_of() {
+  local template="$1" raw targets
+  raw="$(wf_calls_of "${template}")" || { echo "${raw}"; return 1; }
+  targets="$(sed -E 's/.*\("([a-z-]+)"\)/\1/' <<<"${raw}" | sort -u | sed '/^$/d')"
+  if [[ -z "${targets}" ]]; then
+    echo "no <agent>WF(\"<name>\") dispatch targets parsed from ${template}"
+    return 1
+  fi
+  echo "${targets}"
+}
+
+if ! UNKNOWN_HELPERS="$(unknown_helpers_of "${TEMPLATE}")"; then
+  while IFS= read -r helper; do
+    [[ -n "${helper}" ]] || continue
+    fail "watch/internal/run/template.go: unrecognized workflow-template helper [${helper}()] — add it to this test's KNOWN_HELPERS so its dispatch targets are checked too (a new agent's targets must not slip past unchecked)"
+  done <<<"${UNKNOWN_HELPERS}"
+fi
+
+if ! TARGETS_RAW="$(all_targets_of "${TEMPLATE}")"; then
+  fail "watch/internal/run/template.go: ${TARGETS_RAW} — the built-in workflow shape changed and this test needs updating (failing closed rather than passing vacuously)"
+  TARGETS=()
+else
+  mapfile -t TARGETS <<<"${TARGETS_RAW}"
 fi
 
 # Sanity floor: the two launcher-driven targets #1155 is about must be among
@@ -139,7 +197,7 @@ fi
 
 # codex_targets_of <template.go> — the codexWF("<name>") targets, one per
 # line. Parsed on their own (not from the all-agent TARGETS set) so a target
-# that is only a claudeWF/openCodeWF entry can never satisfy the Codex check.
+# that is only a claudeWF entry can never satisfy the Codex check.
 codex_targets_of() {
   local template="$1" raw targets
   if ! raw="$(grep -oE '\bcodexWF\("[a-z-]+"\)' "${template}")"; then
@@ -375,7 +433,7 @@ else
 fi
 
 # codexWF parsing: an empty parse fails closed, and only codexWF entries count.
-printf 'x := claudeWF("ci-repair")\ny := openCodeWF("babysit-attention")\n' > "${FIXTURE_ROOT}/no-codex.go" || fail "self-test setup: could not write no-codex.go"
+printf 'x := claudeWF("ci-repair")\ny := claudeWF("babysit-attention")\n' > "${FIXTURE_ROOT}/no-codex.go" || fail "self-test setup: could not write no-codex.go"
 if out="$(codex_targets_of "${FIXTURE_ROOT}/no-codex.go")"; then
   fail "self-test [no codexWF targets]: parse succeeded (${out}) but an empty codexWF parse must fail closed"
 fi
@@ -384,6 +442,236 @@ if out="$(codex_targets_of "${FIXTURE_ROOT}/mixed.go")"; then
   [[ "${out}" == $'alpha\ngamma' ]] || fail "self-test [codexWF-only parse]: expected alpha and gamma only, got: ${out}"
 else
   fail "self-test [codexWF-only parse]: parse failed on a valid template: ${out}"
+fi
+
+# =====================================================================
+# 4. Every OpenCode dispatch target must be in the OpenCode delivery set
+#    (#1217): PORTABLE_SKILLS minus OPENCODE_RETIRED_SKILLS in
+#    opencode/install-skills.sh. A built-in OpenCode workflow must name a skill
+#    OpenCode actually receives; checking raw PORTABLE_SKILLS would accept a
+#    retired `babysit` workflow. template.go ships no OpenCode workflow today
+#    (matching #1222), so zero targets passes — section 1's KNOWN_HELPERS makes
+#    a reintroduced openCodeWF fail as unrecognized until its owner re-adds the
+#    helper AND this delivery-set check passes.
+#
+# Same pure-predicate shape as section 3: print the reason and return 1;
+# callers record the failure in the parent shell.
+# =====================================================================
+
+# opencode_retired_skills_of <flow-dir> — the OPENCODE_RETIRED_SKILLS list of
+# opencode/install-skills.sh, space-separated. Fail-closed like
+# portable_skills_of (exactly one closed double-quoted single-line value), but an
+# empty value is valid: retiring nothing is a legitimate future state.
+opencode_retired_skills_of() {
+  local installer="$1/opencode/install-skills.sh" count decl rc
+  if [[ ! -r "${installer}" ]]; then
+    echo "opencode/install-skills.sh unreadable"
+    return 1
+  fi
+  count="$(grep -c '^OPENCODE_RETIRED_SKILLS=' "${installer}")"
+  rc=$?
+  if [[ "${rc}" -gt 1 ]]; then
+    echo "opencode/install-skills.sh: grep failed (exit ${rc})"
+    return 1
+  fi
+  if [[ "${count}" -eq 0 ]]; then
+    echo "opencode/install-skills.sh: no ^OPENCODE_RETIRED_SKILLS= line (OpenCode delivery set unknown)"
+    return 1
+  fi
+  if [[ "${count}" -gt 1 ]]; then
+    echo "opencode/install-skills.sh: ${count} ^OPENCODE_RETIRED_SKILLS= lines (OpenCode delivery set ambiguous)"
+    return 1
+  fi
+  decl="$(grep '^OPENCODE_RETIRED_SKILLS=' "${installer}")" || { echo "opencode/install-skills.sh: OPENCODE_RETIRED_SKILLS line unreadable"; return 1; }
+  if [[ ! "${decl}" =~ ^OPENCODE_RETIRED_SKILLS=\"([^\"]*)\" ]]; then
+    echo "opencode/install-skills.sh: OPENCODE_RETIRED_SKILLS is not a closed double-quoted single-line value"
+    return 1
+  fi
+  echo "${BASH_REMATCH[1]//[[:space:]]/ }"
+}
+
+# opencode_delivery_set <portable-list> <retired-list> — the skills OpenCode
+# receives, one per line: every portable skill that is not retired.
+opencode_delivery_set() {
+  local skill
+  for skill in $1; do
+    [[ " $2 " == *" ${skill} "* ]] || echo "${skill}"
+  done
+}
+
+# opencode_targets_of <template.go> — the openCodeWF("<name>") targets, one per
+# line. Zero targets is valid (prints nothing, returns 0); only a grep error
+# (exit > 1) fails closed.
+opencode_targets_of() {
+  local template="$1" raw rc
+  raw="$(grep -oE '\bopenCodeWF\("[a-z-]+"\)' "${template}")"
+  rc=$?
+  if [[ "${rc}" -gt 1 ]]; then
+    echo "grep failed (exit ${rc}) reading ${template}"
+    return 1
+  fi
+  [[ -z "${raw}" ]] || sed -E 's/.*\("([a-z-]+)"\)/\1/' <<<"${raw}" | sort -u
+}
+
+# opencode_target_problem <target> <portable-list> <retired-list> — prints why
+# the target is not delivered to OpenCode (naming it) and returns 1; prints
+# nothing and returns 0 when it is in the delivery set.
+opencode_target_problem() {
+  local target="$1" portable="$2" retired="$3"
+  [[ -n "${target}" ]] || { echo "empty OpenCode target name"; return 1; }
+  if [[ " ${retired} " == *" ${target} "* ]]; then
+    echo "${target}: retired for OpenCode (listed in OPENCODE_RETIRED_SKILLS), so OpenCode never receives it"
+    return 1
+  fi
+  if [[ " ${portable} " != *" ${target} "* ]]; then
+    echo "${target}: not in PORTABLE_SKILLS, so OpenCode never receives it"
+    return 1
+  fi
+  return 0
+}
+
+# --- 4a. The real tree ------------------------------------------------
+if ! OC_TARGETS_RAW="$(opencode_targets_of "${TEMPLATE}")"; then
+  fail "watch/internal/run/template.go: ${OC_TARGETS_RAW} (cannot verify the OpenCode dispatch targets)"
+elif [[ -z "${OC_TARGETS_RAW}" ]]; then
+  echo "dispatch-target-invocable.test.sh: note — no built-in OpenCode workflows in template.go (matches #1222); delivery-set check has no targets"
+else
+  if ! OC_RETIRED="$(opencode_retired_skills_of "${FLOW_DIR}")"; then
+    fail "${OC_RETIRED} — cannot decide which OpenCode targets are delivered (failing closed)"
+  elif [[ -z "${PORTABLE_LIST:-}" ]]; then
+    fail "PORTABLE_SKILLS unavailable — cannot decide which OpenCode targets are delivered (failing closed)"
+  else
+    while IFS= read -r t; do
+      [[ -n "${t}" ]] || continue
+      if ! problem="$(opencode_target_problem "${t}" "${PORTABLE_LIST}" "${OC_RETIRED}")"; then
+        fail "OpenCode dispatch target ${problem}"
+      fi
+    done <<<"${OC_TARGETS_RAW}"
+  fi
+fi
+
+# The real installer must itself declare a readable, well-formed retired list
+# even with zero targets, so a dropped line cannot hide until a target returns.
+if ! OC_RETIRED_REAL="$(opencode_retired_skills_of "${FLOW_DIR}")"; then
+  fail "${OC_RETIRED_REAL}"
+elif [[ -n "${PORTABLE_LIST:-}" ]]; then
+  OC_DELIVERY="$(opencode_delivery_set "${PORTABLE_LIST}" "${OC_RETIRED_REAL}" | tr '\n' ' ')"
+  [[ " ${OC_DELIVERY} " != *" babysit "* ]] || fail "OpenCode delivery set still contains babysit: ${OC_DELIVERY}"
+  [[ " ${OC_DELIVERY} " == *" project-core "* ]] || fail "OpenCode delivery set lost project-core: ${OC_DELIVERY}"
+  [[ "$(wc -w <<<"${OC_DELIVERY}" | tr -d '[:space:]')" -eq 12 ]] || fail "OpenCode delivery set is not 12 skills: ${OC_DELIVERY}"
+fi
+
+# --- 4b. Fixture self-tests (non-vacuity) ----------------------------------
+expect_opencode_problem() { # <label> <target> <portable> <retired> — must fail, naming the target
+  local out
+  if out="$(opencode_target_problem "$2" "$3" "$4")"; then
+    fail "self-test [$1]: expected a failure for OpenCode target ${2} but the predicate passed (vacuous)"
+  elif [[ "${out}" != *"${2}"* ]]; then
+    fail "self-test [$1]: the failure does not name OpenCode target ${2}: ${out}"
+  fi
+}
+
+expect_retired_error() { # <label> <flow-dir> <needle> — opencode_retired_skills_of must fail closed
+  local out
+  if out="$(opencode_retired_skills_of "$2")"; then
+    fail "self-test [$1]: opencode_retired_skills_of passed (${out}) but must fail closed"
+  elif [[ "${out}" != *"$3"* ]]; then
+    fail "self-test [$1]: expected reason containing [$3], got: ${out}"
+  fi
+}
+
+# Three targets: delivered passes, retired fails and is named, non-portable
+# fails and is named.
+if out="$(opencode_target_problem demo "babysit demo other" "babysit")"; then
+  :
+else
+  fail "self-test [delivered OpenCode target] (positive control): expected pass but got: ${out}"
+fi
+expect_opencode_problem "retired target babysit" babysit "babysit demo other" "babysit"
+expect_opencode_problem "target outside PORTABLE_SKILLS" ghost "babysit demo other" "babysit"
+
+# The delivery set is the portable list minus the retired list.
+if out="$(opencode_delivery_set "babysit demo other" "babysit" | tr '\n' ' ')"; then
+  [[ "${out}" == "demo other " ]] || fail "self-test [delivery set]: expected [demo other ], got [${out}]"
+else
+  fail "self-test [delivery set]: helper failed: ${out}"
+fi
+
+# The parser picks up openCodeWF targets, ignores other agents, and treats a
+# template with none as valid; only a grep error fails closed.
+printf 'a := openCodeWF("demo")\nb := codexWF("other")\nc := openCodeWF("babysit")\n' > "${FIXTURE_ROOT}/with-opencode.go" || fail "self-test setup: could not write with-opencode.go"
+if out="$(opencode_targets_of "${FIXTURE_ROOT}/with-opencode.go")"; then
+  [[ "${out}" == $'babysit\ndemo' ]] || fail "self-test [openCodeWF parse]: expected babysit and demo only, got: ${out}"
+else
+  fail "self-test [openCodeWF parse]: parse failed on a valid template: ${out}"
+fi
+if out="$(opencode_targets_of "${FIXTURE_ROOT}/mixed.go")"; then
+  [[ -z "${out}" ]] || fail "self-test [zero openCodeWF targets]: expected no targets, got: ${out}"
+else
+  fail "self-test [zero openCodeWF targets]: zero targets must pass, got: ${out}"
+fi
+if out="$(opencode_targets_of "${FIXTURE_ROOT}/does-not-exist.go" 2>/dev/null)"; then
+  fail "self-test [openCodeWF grep error]: unreadable template passed (${out}) but a grep error must fail closed"
+fi
+
+# OPENCODE_RETIRED_SKILLS is read fail-closed: missing, duplicated and an
+# unclosed quote fail; empty and a valid list pass.
+if F_NORETIRED="$(make_flow noretired 'PORTABLE_SKILLS="demo"')"; then
+  expect_retired_error "OPENCODE_RETIRED_SKILLS line missing" "${F_NORETIRED}" "no ^OPENCODE_RETIRED_SKILLS= line"
+else
+  fail "self-test setup: could not build the noretired fixture"
+fi
+if F_DUPRETIRED="$(make_flow dupretired $'PORTABLE_SKILLS="demo"\nOPENCODE_RETIRED_SKILLS="demo"')"; then
+  printf 'OPENCODE_RETIRED_SKILLS="demo"\n' >> "${F_DUPRETIRED}/opencode/install-skills.sh" || fail "self-test setup: could not duplicate the retired declaration"
+  expect_retired_error "OPENCODE_RETIRED_SKILLS line duplicated" "${F_DUPRETIRED}" "2 ^OPENCODE_RETIRED_SKILLS= lines"
+else
+  fail "self-test setup: could not build the dupretired fixture"
+fi
+if F_OPENQUOTE="$(make_flow openquote $'PORTABLE_SKILLS="demo"\nOPENCODE_RETIRED_SKILLS="demo')"; then
+  expect_retired_error "OPENCODE_RETIRED_SKILLS unclosed quote" "${F_OPENQUOTE}" "not a closed double-quoted single-line value"
+else
+  fail "self-test setup: could not build the openquote fixture"
+fi
+if F_EMPTYRETIRED="$(make_flow emptyretired $'PORTABLE_SKILLS="demo"\nOPENCODE_RETIRED_SKILLS=""')"; then
+  if out="$(opencode_retired_skills_of "${F_EMPTYRETIRED}")"; then
+    [[ -z "${out}" ]] || fail "self-test [OPENCODE_RETIRED_SKILLS empty]: expected an empty list, got: ${out}"
+  else
+    fail "self-test [OPENCODE_RETIRED_SKILLS empty]: an empty value is valid but the reader failed: ${out}"
+  fi
+else
+  fail "self-test setup: could not build the emptyretired fixture"
+fi
+if F_GOODRETIRED="$(make_flow goodretired $'PORTABLE_SKILLS="demo other"\nOPENCODE_RETIRED_SKILLS="demo"')"; then
+  if out="$(opencode_retired_skills_of "${F_GOODRETIRED}")"; then
+    [[ "${out}" == "demo" ]] || fail "self-test [OPENCODE_RETIRED_SKILLS valid]: expected [demo], got: ${out}"
+  else
+    fail "self-test [OPENCODE_RETIRED_SKILLS valid]: reader failed on a valid declaration: ${out}"
+  fi
+else
+  fail "self-test setup: could not build the goodretired fixture"
+fi
+
+# KNOWN_HELPERS: a reintroduced openCodeWF is flagged and named; a template
+# using only recognized helpers is clean.
+if out="$(unknown_helpers_of "${FIXTURE_ROOT}/with-opencode.go")"; then
+  fail "self-test [unknown helper openCodeWF]: expected openCodeWF to be flagged but the check passed"
+elif [[ "${out}" != *openCodeWF* ]]; then
+  fail "self-test [unknown helper openCodeWF]: the failure does not name openCodeWF: ${out}"
+fi
+if ! out="$(unknown_helpers_of "${FIXTURE_ROOT}/mixed.go")"; then
+  fail "self-test [known helpers] (positive control): claudeWF/codexWF were flagged: ${out}"
+fi
+
+# Zero targets overall still fails closed: a template with no <agent>WF("<name>")
+# call at all must not pass vacuously.
+printf 'package run\n\nfunc builtinConfig() {}\n' > "${FIXTURE_ROOT}/no-targets.go" || fail "self-test setup: could not write no-targets.go"
+if out="$(all_targets_of "${FIXTURE_ROOT}/no-targets.go")"; then
+  fail "self-test [no <agent>WF targets]: parse succeeded (${out}) but an empty overall parse must fail closed"
+fi
+if out="$(all_targets_of "${FIXTURE_ROOT}/mixed.go")"; then
+  [[ "${out}" == $'alpha\nbeta\ngamma' ]] || fail "self-test [all-agent parse]: expected alpha, beta and gamma, got: ${out}"
+else
+  fail "self-test [all-agent parse]: parse failed on a valid template: ${out}"
 fi
 
 echo "dispatch-target-invocable.test.sh: failures=${failures}"

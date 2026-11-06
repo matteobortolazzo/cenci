@@ -408,11 +408,11 @@ EOF
 }
 
 # make_opencode <bin> [version] — mocks the `opencode` executable that
-# HAS_OPENCODE / doctor_opencode_support (#491, not yet implemented) resolve
-# via `have opencode` + `opencode --version`. Unlike make_claude/make_codex,
-# OpenCode plugin/skill registration never goes through the `opencode` binary
-# itself (no marketplace CLI) — it's done by install-skills.sh symlinking and
-# seed_opencode_config merging opencode.json directly — so this mock only
+# HAS_OPENCODE / doctor_opencode_support resolve via `have opencode` +
+# `opencode --version`. Unlike make_claude/make_codex, OpenCode skill
+# registration never goes through the `opencode` binary itself (no marketplace
+# CLI) — a legacy installer symlinked skills via install-skills.sh and merged
+# opencode.json directly, and host setup is now paused — so this mock only
 # needs to report a version and log invocations, following the same
 # CALLS_FILE-logging convention as the other client mocks.
 make_opencode() {
@@ -462,21 +462,21 @@ prepare_git_tagged_checkout() {
 
 # prepare_opencode_checkout_assets <home> <client> — stages the real,
 # already-shipped OpenCode assets (flow/opencode/install-skills.sh,
-# flow/skills/*, watch/plugin/opencode, sandbox/lib/opencode-config.sh) into
-# the marketplace checkout at the exact relative paths find_plugin_path
-# resolves first (marketplace-checkout-first, no cache-fallback stripping
-# needed), so a real step_opencode_setup (#491, not yet implemented) has
-# something genuine to symlink/merge — mirroring how prepare_checkout stages
-# the real cenci wrapper + install.sh rather than a fake stand-in.
+# flow/skills/*, watch/plugin/opencode) into the marketplace checkout at the
+# exact relative paths find_plugin_path resolves first (marketplace-checkout-
+# first, no cache-fallback stripping needed), so the paused host
+# step_opencode_setup has something genuine to leave untouched — mirroring how
+# prepare_checkout stages the real cenci wrapper + install.sh rather than a
+# fake stand-in. The container-only sandbox/lib/opencode-config.sh is
+# deliberately not staged: the host installer never resolves it.
 prepare_opencode_checkout_assets() {
     local home="$1" client="$2" checkout
     checkout="${home}/.${client}/plugins/marketplaces/cenci"
-    mkdir -p "${checkout}/flow/opencode" "${checkout}/watch/plugin" "${checkout}/sandbox/lib"
+    mkdir -p "${checkout}/flow/opencode" "${checkout}/watch/plugin"
     cp "${ROOT}/flow/opencode/install-skills.sh" "${checkout}/flow/opencode/install-skills.sh"
     chmod +x "${checkout}/flow/opencode/install-skills.sh"
     cp -r "${ROOT}/flow/skills" "${checkout}/flow/skills"
     cp -r "${ROOT}/watch/plugin/opencode" "${checkout}/watch/plugin/opencode"
-    cp "${ROOT}/sandbox/lib/opencode-config.sh" "${checkout}/sandbox/lib/opencode-config.sh"
 }
 
 # prepare_opencode_cache_fallback_assets <home> <client> — like
@@ -491,11 +491,10 @@ prepare_opencode_checkout_assets() {
 prepare_opencode_cache_fallback_assets() {
     local home="$1" client="$2" checkout cache_root
     checkout="${home}/.${client}/plugins/marketplaces/cenci"
-    mkdir -p "${checkout}/flow/opencode" "${checkout}/sandbox/lib"
+    mkdir -p "${checkout}/flow/opencode"
     cp "${ROOT}/flow/opencode/install-skills.sh" "${checkout}/flow/opencode/install-skills.sh"
     chmod +x "${checkout}/flow/opencode/install-skills.sh"
     cp -r "${ROOT}/flow/skills" "${checkout}/flow/skills"
-    cp "${ROOT}/sandbox/lib/opencode-config.sh" "${checkout}/sandbox/lib/opencode-config.sh"
     if [[ "${client}" == claude ]]; then
         cache_root="${home}/.claude/plugins/cache/cenci/cenci-watch/1.0.0"
     else
@@ -614,6 +613,13 @@ printf 'cenci %s\n' "$*" >>"${CALLS_FILE}"
 exit 0
 EOF
     chmod +x "${old_root}/bin/cenci"
+    # STALE_NEWEST_HH_MODE / STALE_NEWEST_HH_VERSION (optional, prefix
+    # assignments, #1419): swap the older binary for a tagged hook-health fake
+    # (write_hook_health_fake, tag `cache`) so a test can prove the post-setup
+    # checks run against this fallback binary.
+    if [[ -n "${STALE_NEWEST_HH_MODE:-}" ]]; then
+        write_hook_health_fake "${old_root}/bin/cenci" "${STALE_NEWEST_HH_MODE}" "${STALE_NEWEST_HH_VERSION:-empty}" cache
+    fi
     # Newer version: manifest only — release assets not published yet.
     mkdir -p "${new_root}/${manifest_dir}"
     printf '{"name":"cenci-watch","version":"2.0.0"}\n' >"${new_root}/${manifest_dir}/plugin.json"
@@ -938,38 +944,37 @@ seed_hook_health_record() {
     chmod 600 "${root}/cenci/hook-health/${record}"
 }
 
-# run_doctor_case_with_hook_health <name> <clients> <mode> [NAME=value env
-# assignments for the doctor run...] — drives doctor_hook_health (#1239). <mode>
-# selects the fake `cenci` on the doctor-run PATH:
-#   healthy|recovered|no-evidence|current-failure — `cenci daemon hook-health`
-#       prints that state's stable first line (`hook health: <token>`) and
-#       exits 0, as the real reporter does (plus a detail line for
-#       current-failure);
-#   no-evidence-untrusted — first line `hook health: no-evidence`, then the
-#       reporter's `  untrusted store: …` reason line (#1416);
-#   no-evidence-generic — first line `hook health: no-evidence`, then today's
-#       `  no recent records: …` line, as an older binary prints it (#1416);
-#   healthy-untrusted|current-failure-untrusted — a first line that is NOT
-#       no-evidence followed by an `  untrusted store: …` line 2: only the
-#       no-evidence arm may react to that line (#1416);
-#   unknown-subcommand — an older binary without the subverb: prints "unknown
-#       subcommand" on stderr and exits 2;
-#   garbage — exits 0 but prints a first line that is not a known token;
-#   nonzero — prints a valid healthy first line but exits 1;
-#   none — no cenci binary at all: the bootstrapped cache binary and any PATH
-#       entry are removed after the install, so doctor must read the
-#       missing-binary and bootstrap-failure records directly. Seed them first with
-#       seed_hook_health_record into "${WORK}/<name>/home/.local/state" (the
-#       default state root, since the doctor env has only HOME and PATH) or
-#       into another root selected through a forwarded XDG_STATE_HOME=...
-run_doctor_case_with_hook_health() {
-    local name="$1" clients="$2" mode="$3"
-    shift 3
-    local bin="${WORK}/${name}/bin" output="${WORK}/${name}/doctor-output"
-    if [[ "${mode}" != none ]]; then
-        mkdir -p "${bin}"
-        cat > "${bin}/cenci" <<EOF
+# write_hook_health_fake <path> <mode> <version-mode> <tag> — writes a fake
+# `cenci` executable at <path> (#1419). Every call appends `<tag> <argv>` to
+# CALLS_FILE, so a test can tell WHICH binary ran a verb (`path` for a fake on
+# the case PATH, `cache` for the plugin-cache binary). <mode> selects the
+# `cenci daemon hook-health` answer (healthy|recovered|no-evidence|
+# current-failure|…|unknown-subcommand|garbage|nonzero, see
+# run_doctor_case_with_hook_health). <version-mode> selects the `cenci version`
+# answer: `fail` exits 1 with no output, `empty` exits 0 with no output,
+# `noisy` prints a first line carrying non-printable bytes (0x01, BEL) plus a
+# second line `second-line-marker`, and anything else is printed verbatim as
+# the single first line (e.g. `cenci 2.43.1`). Every other verb exits 0.
+write_hook_health_fake() {
+    local path="$1" mode="$2" version_mode="$3" tag="$4"
+    mkdir -p "$(dirname "${path}")"
+    cat > "${path}" <<EOF
 #!/bin/sh
+printf '%s %s\n' '${tag}' "\$*" >>"\${CALLS_FILE:?CALLS_FILE not set}"
+if [ "\${1:-}" = version ]; then
+    case '${version_mode}' in
+        fail) exit 1 ;;
+        empty) exit 0 ;;
+        noisy)
+            printf 'cenci\001 2.40.0\a\nsecond-line-marker\n'
+            exit 0
+            ;;
+        *)
+            printf '%s\n' '${version_mode}'
+            exit 0
+            ;;
+    esac
+fi
 if [ "\${1:-}" = daemon ] && [ "\${2:-}" = hook-health ]; then
     case '${mode}' in
         unknown-subcommand)
@@ -1017,7 +1022,138 @@ if [ "\${1:-}" = daemon ] && [ "\${2:-}" = hook-health ]; then
 fi
 exit 0
 EOF
-        chmod +x "${bin}/cenci"
+    chmod +x "${path}"
+}
+
+# cache_hook_health_root <home> <client> — echoes the version-pinned plugin
+# cache root prepare_cache_hook_health_cenci provisions.
+cache_hook_health_root() {
+    local home="$1" client="$2"
+    if [[ "${client}" == claude ]]; then
+        printf '%s\n' "${home}/.claude/plugins/cache/cenci/cenci-watch/1.0.0"
+    else
+        printf '%s\n' "${home}/.codex/plugins/cache/cenci/cenci-watch/1.0.0"
+    fi
+}
+
+# prepare_cache_hook_health_cenci <home> <client> <mode> <version-line> —
+# pre-seeds the plugin-cache binary (tag `cache`) BEFORE run_case: with the
+# manifest already present, prepare_bootstrap_cenci returns early, so the
+# installer's current_cenci_binary / cached_cenci_binary resolve this fake
+# instead of the generic bootstrapped one (#1419).
+prepare_cache_hook_health_cenci() {
+    local home="$1" client="$2" mode="$3" version_line="$4" root manifest_dir
+    root="$(cache_hook_health_root "${home}" "${client}")"
+    if [[ "${client}" == claude ]]; then
+        manifest_dir=.claude-plugin
+    else
+        manifest_dir=.codex-plugin
+    fi
+    mkdir -p "${root}/${manifest_dir}"
+    printf '{"name":"cenci-watch","version":"1.0.0"}\n' >"${root}/${manifest_dir}/plugin.json"
+    write_hook_health_fake "${root}/bin/cenci" "${mode}" "${version_line}" cache
+}
+
+# run_update_again <name> — re-runs the installer in update mode for an
+# already-installed run_case <name> (the opencode-idempotent update pattern),
+# setting UPDATE_EXIT and UPDATE_OUTPUT.
+run_update_again() {
+    local name="$1"
+    local case_dir="${WORK}/${name}"
+    UPDATE_OUTPUT="${case_dir}/update-output"
+    set +e
+    env -i HOME="${CASE_HOME}" PATH="${CASE_BIN}" CALLS_FILE="${CASE_CALLS}" \
+        CLAUDE_MARKETPLACE_FILE="${case_dir}/claude-marketplace" \
+        CLAUDE_INSTALLED_FILE="${case_dir}/claude-installed" \
+        bash "${ROOT}/install.sh" update --yes --no-build >"${UPDATE_OUTPUT}" 2>&1
+    UPDATE_EXIT=$?
+    set -e
+}
+
+# run_shadow_doctor_case <name> <shape> <path-version-mode> [NAME=value env
+# assignments for the doctor run...] — a `--doctor` run with a seeded healthy
+# cache binary (`cenci 2.43.1`) and a stale `cenci` earlier on the doctor PATH
+# (#1419). The install (run_case) happens first with no PATH `cenci`, then the
+# shadow is arranged, then invoke_doctor runs. <shape>:
+#   file       — a regular file at <bin>/cenci;
+#   symlink    — <bin>/cenci -> <case>/stale/cenci (a link into an old cache);
+#   chain      — <bin>/cenci -> ~/.local/bin/cenci -> the cache binary (not a
+#                shadow at all: it IS the cache binary);
+#   local-link — ~/.local/bin/cenci -> <case>/stale/cenci, with the doctor
+#                PATH forced to ~/.local/bin first (forward PATH= yourself).
+# <path-version-mode> is write_hook_health_fake's version mode for the stale
+# fake. Sets STALE_BIN (the stale fake) and CACHE_BIN (the cache binary).
+run_shadow_doctor_case() {
+    local name="$1" shape="$2" version_mode="$3"
+    shift 3
+    local home="${WORK}/${name}/home" bin="${WORK}/${name}/bin"
+    local stale_fake="${WORK}/${name}/stale/cenci"
+    prepare_cache_hook_health_cenci "${home}" claude healthy "cenci 2.43.1"
+    CACHE_BIN="$(cache_hook_health_root "${home}" claude)/bin/cenci"
+    run_case "${name}" claude
+    mkdir -p "${home}/.local/bin"
+    case "${shape}" in
+        file)
+            STALE_BIN="${bin}/cenci"
+            write_hook_health_fake "${STALE_BIN}" unknown-subcommand "${version_mode}" path
+            ;;
+        symlink)
+            STALE_BIN="${stale_fake}"
+            write_hook_health_fake "${stale_fake}" unknown-subcommand "${version_mode}" path
+            ln -sf "${stale_fake}" "${bin}/cenci"
+            ;;
+        chain)
+            STALE_BIN="${CACHE_BIN}"
+            ln -sf "${CACHE_BIN}" "${home}/.local/bin/cenci"
+            ln -sf "${home}/.local/bin/cenci" "${bin}/cenci"
+            ;;
+        local-link)
+            STALE_BIN="${stale_fake}"
+            write_hook_health_fake "${stale_fake}" unknown-subcommand "${version_mode}" path
+            ln -sf "${stale_fake}" "${home}/.local/bin/cenci"
+            ;;
+        *)
+            echo "FAIL: unknown shadow shape '${shape}'" >&2
+            exit 1
+            ;;
+    esac
+    invoke_doctor "${name}" "$@"
+}
+
+# run_doctor_case_with_hook_health <name> <clients> <mode> [NAME=value env
+# assignments for the doctor run...] — drives doctor_hook_health (#1239). <mode>
+# selects the fake `cenci` on the doctor-run PATH:
+#   healthy|recovered|no-evidence|current-failure — `cenci daemon hook-health`
+#       prints that state's stable first line (`hook health: <token>`) and
+#       exits 0, as the real reporter does (plus a detail line for
+#       current-failure);
+#   no-evidence-untrusted — first line `hook health: no-evidence`, then the
+#       reporter's `  untrusted store: …` reason line (#1416);
+#   no-evidence-generic — first line `hook health: no-evidence`, then today's
+#       `  no recent records: …` line, as an older binary prints it (#1416);
+#   healthy-untrusted|current-failure-untrusted — a first line that is NOT
+#       no-evidence followed by an `  untrusted store: …` line 2: only the
+#       no-evidence arm may react to that line (#1416);
+#   unknown-subcommand — an older binary without the subverb: prints "unknown
+#       subcommand" on stderr and exits 2;
+#   garbage — exits 0 but prints a first line that is not a known token;
+#   nonzero — prints a valid healthy first line but exits 1;
+#   none — no cenci binary at all: the bootstrapped cache binary and any PATH
+#       entry are removed after the install, so doctor must read the
+#       missing-binary and bootstrap-failure records directly. Seed them first with
+#       seed_hook_health_record into "${WORK}/<name>/home/.local/state" (the
+#       default state root, since the doctor env has only HOME and PATH) or
+#       into another root selected through a forwarded XDG_STATE_HOME=...
+run_doctor_case_with_hook_health() {
+    local name="$1" clients="$2" mode="$3"
+    shift 3
+    local bin="${WORK}/${name}/bin" output="${WORK}/${name}/doctor-output"
+    if [[ "${mode}" != none ]]; then
+        # HH_PATH_VERSION (optional, a prefix assignment like HH_SNAPSHOT_ROOT)
+        # selects what the PATH fake answers to `cenci version` (see
+        # write_hook_health_fake's version modes); default `empty` keeps the
+        # fake as silent about its version as it was before #1419.
+        write_hook_health_fake "${bin}/cenci" "${mode}" "${HH_PATH_VERSION:-empty}" path
         run_doctor_case "${name}" "${clients}" "$@"
         return 0
     fi
@@ -1384,6 +1520,168 @@ run_opencode_doctor_case() {
     DOCTOR_OUTPUT="${output}"
 }
 
+# opencode_doctor_with_fixture <name> <json> [NAME=value env assignments...] —
+# for a case prepared by run_case_opencode: writes <json> as the host
+# ~/.config/opencode/opencode.json, runs doctor (invoke_doctor), and proves
+# doctor never modified the file (cmp against a copy taken beforehand).
+opencode_doctor_with_fixture() {
+    local name="$1" json="$2"
+    shift 2
+    local config="${CASE_HOME}/.config/opencode/opencode.json"
+    mkdir -p "${CASE_HOME}/.config/opencode"
+    printf '%s\n' "${json}" >"${config}"
+    cp "${config}" "${WORK}/${name}/fixture-original"
+    invoke_doctor "${name}" "$@"
+    cmp "${WORK}/${name}/fixture-original" "${config}"
+}
+
+# assert_allow_all_line <output-file> <config-path> — <output-file> holds
+# exactly one allow-all finding, it is a `warn` line (install.sh's warn prints
+# `  ! ` when colors are off, as under env -i without a tty), and that ONE line
+# carries the finding text, the config path, the remediation framing and the
+# manual jq command.
+assert_allow_all_line() {
+    local file="$1" config="$2" count line needle rc=0
+    count="$(grep -cF -- "grants global allow-all permissions" "${file}")" || rc=$?
+    if [ "${rc}" -gt 1 ]; then
+        echo "FAIL: grep errored (rc ${rc}) counting allow-all lines in ${file}" >&2
+        exit 1
+    fi
+    [ "${rc}" -eq 1 ] && count=0
+    if ! [[ "${count}" =~ ^[0-9]+$ ]]; then
+        echo "FAIL: non-numeric allow-all line count '${count}' for ${file}" >&2
+        exit 1
+    fi
+    if [ "${count}" -ne 1 ]; then
+        echo "FAIL: expected exactly one allow-all line in ${file}, got ${count}" >&2
+        sed -n '1,240p' "${file}" >&2
+        exit 1
+    fi
+    line="$(grep -F -- "grants global allow-all permissions" "${file}")"
+    case "${line}" in
+    "  ! "*) ;;
+    *)
+        echo "FAIL: allow-all finding is not a warn line ('  ! ' marker): ${line}" >&2
+        exit 1
+        ;;
+    esac
+    for needle in \
+        "grants global allow-all permissions" \
+        "${config}" \
+        "older cenci versions may have added" \
+        "if you did not set these yourself" \
+        "jq 'del(.permission, .autoupdate)'" \
+        "cat \"${config}.tmp\" > \"${config}\" && rm \"${config}.tmp\""; do
+        case "${line}" in
+        *"${needle}"*) ;;
+        *)
+            echo "FAIL: allow-all line lacks '${needle}': ${line}" >&2
+            exit 1
+            ;;
+        esac
+    done
+}
+
+# assert_allow_all_warning <config-path> — the last doctor run flagged
+# <config-path> as granting global allow-all permissions, with the manual
+# remediation, all on one warn line.
+assert_allow_all_warning() {
+    local config="$1"
+    assert_contains "${DOCTOR_OUTPUT}" "grants global allow-all permissions"
+    assert_contains "${DOCTOR_OUTPUT}" "${config}"
+    assert_contains "${DOCTOR_OUTPUT}" "older cenci versions may have added"
+    assert_contains "${DOCTOR_OUTPUT}" "if you did not set these yourself"
+    assert_contains "${DOCTOR_OUTPUT}" "jq 'del(.permission, .autoupdate)'"
+    assert_allow_all_line "${DOCTOR_OUTPUT}" "${config}"
+}
+
+# assert_no_allow_all_warning — the last doctor run reached the OpenCode block
+# (so silence is not vacuous) yet printed no allow-all finding and no jq error.
+assert_no_allow_all_warning() {
+    assert_contains "${DOCTOR_OUTPUT}" "OpenCode skills"
+    assert_not_contains "${DOCTOR_OUTPUT}" "grants global allow-all permissions"
+    assert_not_contains "${DOCTOR_OUTPUT}" "older cenci versions may have added"
+    assert_not_contains "${DOCTOR_OUTPUT}" "jq: error"
+}
+
+# invoke_uninstall <name> [NAME=value env assignments...] — runs `install.sh
+# uninstall --yes` for a case prepared by run_case_opencode under `env -i`,
+# setting UNINSTALL_EXIT and UNINSTALL_OUTPUT.
+invoke_uninstall() {
+    local name="$1"
+    shift
+    local output="${WORK}/${name}/uninstall-output"
+    set +e
+    env -i HOME="${CASE_HOME}" PATH="${CASE_BIN}" CALLS_FILE="${CASE_CALLS}" \
+        CLAUDE_MARKETPLACE_FILE="${WORK}/${name}/claude-marketplace" \
+        CLAUDE_INSTALLED_FILE="${WORK}/${name}/claude-installed" \
+        "$@" \
+        bash "${ROOT}/install.sh" uninstall --yes >"${output}" 2>&1
+    UNINSTALL_EXIT=$?
+    set -e
+    UNINSTALL_OUTPUT="${output}"
+}
+
+# assert_allow_all_hint <config-path> — the last uninstall printed exactly one
+# legacy allow-all hint line naming <config-path> with the manual remediation.
+assert_allow_all_hint() {
+    local config="$1" hint_lines rc=0
+    assert_contains "${UNINSTALL_OUTPUT}" "older cenci versions may have added"
+    assert_contains "${UNINSTALL_OUTPUT}" "if you did not set these yourself"
+    assert_contains "${UNINSTALL_OUTPUT}" "${config}"
+    assert_contains "${UNINSTALL_OUTPUT}" "jq 'del(.permission, .autoupdate)'"
+    assert_allow_all_line "${UNINSTALL_OUTPUT}" "${config}"
+    hint_lines="$(grep -cF -- "older cenci versions may have added" "${UNINSTALL_OUTPUT}")" || rc=$?
+    if [ "${rc}" -gt 1 ]; then
+        echo "FAIL: grep errored (rc ${rc}) counting hint lines in ${UNINSTALL_OUTPUT}" >&2
+        exit 1
+    fi
+    [ "${rc}" -eq 1 ] && hint_lines=0
+    if ! [[ "${hint_lines}" =~ ^[0-9]+$ ]]; then
+        echo "FAIL: non-numeric hint line count '${hint_lines}' in ${UNINSTALL_OUTPUT}" >&2
+        exit 1
+    fi
+    if [ "${hint_lines}" -ne 1 ]; then
+        echo "FAIL: expected exactly one allow-all hint line in ${UNINSTALL_OUTPUT}, got ${hint_lines}" >&2
+        sed -n '1,240p' "${UNINSTALL_OUTPUT}" >&2
+        exit 1
+    fi
+}
+
+# references_container_seeder <file> — true when a CODE line of <file> mentions
+# the container-only seeding helper (seed_opencode_config or the basename
+# opencode-config.sh, which also catches relative sources such as
+# "${SCRIPT_DIR}/lib/opencode-config.sh"). Full-line `#` comments are skipped so the
+# pause-stub comment may name the helper it forbids; a trailing comment after
+# code still counts. grep rc 1 means "no match"; rc >= 2 is an error and fails
+# the suite instead of reading as "clean" (flow/docs/shell-scripting-gotchas.md).
+references_container_seeder() {
+    local file="$1" hits="" code="" rc=0
+    hits="$(grep -nF -e seed_opencode_config -e opencode-config.sh -- "${file}")" || rc=$?
+    if [ "${rc}" -gt 1 ]; then
+        echo "FAIL: grep errored (rc ${rc}) scanning ${file}" >&2
+        exit 1
+    fi
+    [ "${rc}" -eq 0 ] || return 1
+    rc=0
+    code="$(printf '%s\n' "${hits}" | grep -vE '^[0-9]+:[[:space:]]*#')" || rc=$?
+    if [ "${rc}" -gt 1 ]; then
+        echo "FAIL: grep errored (rc ${rc}) filtering comment lines of ${file}" >&2
+        exit 1
+    fi
+    [ -n "${code}" ]
+}
+
+# assert_detects_seeder_reference <file> — the contract detector must flag
+# <file> (an injected copy of install.sh); a silent miss would make the
+# contract case vacuous.
+assert_detects_seeder_reference() {
+    if ! references_container_seeder "$1"; then
+        echo "FAIL: references_container_seeder did not flag the injected reference in $1" >&2
+        exit 1
+    fi
+}
+
 assert_contains() {
     local file="$1" needle="$2"
     if ! grep -Fq -- "${needle}" "${file}"; then
@@ -1426,6 +1724,87 @@ assert_before() {
         sed -n '1,240p' "${file}" >&2
         exit 1
     fi
+}
+
+# collect_lines_with_both <file> <first> <second> — sets BOTH_HITS to the lines
+# of <file> containing both fixed strings. grep exit 1 (no match) is an empty
+# result; exit >=2 (missing/unreadable file, bad usage) fails loudly instead of
+# reading as "no match".
+collect_lines_with_both() {
+    local file="$1" first="$2" second="$3" first_hits rc
+    first_hits="$(grep -F -- "${first}" "${file}")" && rc=0 || rc=$?
+    if [[ "${rc}" -ge 2 ]]; then
+        echo "FAIL: grep could not read ${file} (exit ${rc})" >&2
+        exit 1
+    fi
+    BOTH_HITS=""
+    if [[ -n "${first_hits}" ]]; then
+        BOTH_HITS="$(printf '%s\n' "${first_hits}" | grep -F -- "${second}")" && rc=0 || rc=$?
+        if [[ "${rc}" -ge 2 ]]; then
+            echo "FAIL: grep failed filtering ${file} (exit ${rc})" >&2
+            exit 1
+        fi
+    fi
+}
+
+# assert_line_with_both <file> <first> <second> — asserts at least one single
+# line of <file> contains both fixed strings (so a hint is proven to sit on the
+# same warning line as its anchor, not merely somewhere in the output). The
+# match is captured instead of piped into `grep -q`, which could SIGPIPE the
+# first grep and read as "no match" under pipefail.
+assert_line_with_both() {
+    local file="$1" first="$2" second="$3" hits
+    collect_lines_with_both "${file}" "${first}" "${second}"
+    hits="${BOTH_HITS}"
+    if [[ -z "${hits}" ]]; then
+        echo "FAIL: expected one line in ${file} containing both '${first}' and '${second}'" >&2
+        sed -n '1,240p' "${file}" >&2
+        exit 1
+    fi
+}
+
+# assert_no_line_with_both <file> <first> <second> — the negative twin of
+# assert_line_with_both: no single line may contain both fixed strings.
+assert_no_line_with_both() {
+    local file="$1" first="$2" second="$3" hits
+    collect_lines_with_both "${file}" "${first}" "${second}"
+    hits="${BOTH_HITS}"
+    if [[ -n "${hits}" ]]; then
+        echo "FAIL: did not expect a line in ${file} containing both '${first}' and '${second}':" >&2
+        printf '%s\n' "${hits}" >&2
+        exit 1
+    fi
+}
+
+# assert_line_count <file> <needle> <count> — asserts exactly <count> lines of
+# <file> contain the fixed string <needle>.
+assert_line_count() {
+    local file="$1" needle="$2" want="$3" got rc
+    got="$(grep -Fc -- "${needle}" "${file}")" && rc=0 || rc=$?
+    if [[ "${rc}" -ge 2 ]]; then
+        echo "FAIL: grep could not read ${file} (exit ${rc})" >&2
+        exit 1
+    fi
+    if [[ "${got}" -ne "${want}" ]]; then
+        echo "FAIL: expected ${want} line(s) containing '${needle}' in ${file}, found ${got}" >&2
+        sed -n '1,240p' "${file}" >&2
+        exit 1
+    fi
+}
+
+# step_section <file> <title> <dest> — writes the installer output between the
+# `==> <title>…` step heading and the next step heading to <dest> (heading
+# included in neither), so an assertion can be pinned to ONE phase of the run
+# (e.g. the preflight `Checking your system`, or `Setting up cenci`, where the
+# post-setup hook-health check prints). Fails loudly when the heading is absent.
+step_section() {
+    local file="$1" title="$2" dest="$3"
+    if ! grep -Fq -- "==> ${title}" "${file}"; then
+        echo "FAIL: no '==> ${title}' step heading in ${file}" >&2
+        sed -n '1,240p' "${file}" >&2
+        exit 1
+    fi
+    awk -v t="==> ${title}" 'index($0, t) == 1 { f = 1; next } f && /^==> / { exit } f' "${file}" >"${dest}"
 }
 
 assert_cenci_installer_utility() {
@@ -2089,6 +2468,346 @@ assert_before "${DOCTOR_OUTPUT}" "was missing when" "installing the cenci binary
 assert_not_contains "${DOCTOR_OUTPUT}" "hook health: no evidence"
 assert_not_contains "${DOCTOR_OUTPUT}" "✗ hook health"
 
+# --- #1419: hook health is checked against the freshly provisioned cache
+# binary after setup, and a stale `cenci` earlier on PATH is named.
+
+# hh1419_paths <case-name> — sets the per-case paths the #1419 cases assert on:
+# hh_home, hh_bin (the case PATH dir) and hh_cache (the plugin-cache binary).
+hh1419_paths() {
+    hh_home="${WORK}/$1/home"
+    hh_bin="${WORK}/$1/bin"
+    hh_cache="$(cache_hook_health_root "${hh_home}" claude)/bin/cenci"
+}
+
+# assert_install_hook_health_never_updates <output> — no output line of an
+# install/update run pairs `hook health` with `cenci update`, and no PATH-shadow
+# warning line mentions `cenci update` (#1419 AC8).
+assert_install_hook_health_never_updates() {
+    assert_no_line_with_both "$1" "hook health" "cenci update"
+    assert_no_line_with_both "$1" "cenci on PATH" "cenci update"
+}
+
+echo "case: install checks hook health on the freshly provisioned cache binary, not a stale PATH cenci, and names the shadow (#1419)"
+name=hh1419-install-stale-path
+hh1419_paths "${name}"
+write_hook_health_fake "${hh_bin}/cenci" unknown-subcommand "cenci 2.40.0" path
+prepare_cache_hook_health_cenci "${hh_home}" claude healthy "cenci 2.43.1"
+run_case "${name}" claude
+[[ "${CASE_EXIT}" -eq 0 ]]
+step_section "${CASE_OUTPUT}" "Checking your system" "${WORK}/${name}/preflight"
+step_section "${CASE_OUTPUT}" "Setting up cenci" "${WORK}/${name}/setup"
+# The post-setup result comes from the cache binary, never the stale PATH one.
+assert_contains "${WORK}/${name}/setup" "✓ hook health: healthy"
+assert_contains "${CASE_CALLS}" "cache daemon hook-health"
+assert_not_contains "${CASE_CALLS}" "path daemon hook-health"
+# The preflight prints no hook-health result and exactly one neutral deferral line.
+assert_not_contains "${WORK}/${name}/preflight" "✓ hook health"
+assert_not_contains "${WORK}/${name}/preflight" "! hook health"
+assert_not_contains "${WORK}/${name}/preflight" "✗ hook health"
+assert_line_count "${WORK}/${name}/preflight" "hook health" 1
+assert_line_count "${WORK}/${name}/preflight" "hook health: checked after setup later in this run" 1
+# One shadow warning naming both paths and both versions.
+assert_line_count "${CASE_OUTPUT}" "cenci on PATH is" 1
+assert_contains "${WORK}/${name}/setup" "! cenci on PATH is ${hh_bin}/cenci (cenci 2.40.0) but the active plugin binary is ${hh_cache} (cenci 2.43.1)"
+assert_install_hook_health_never_updates "${CASE_OUTPUT}"
+
+echo "case: update prints the same post-setup hook-health result from the cache binary and still names the shadow (#1419)"
+name=hh1419-update-stale-path
+hh1419_paths "${name}"
+write_hook_health_fake "${hh_bin}/cenci" unknown-subcommand "cenci 2.40.0" path
+prepare_cache_hook_health_cenci "${hh_home}" claude healthy "cenci 2.43.1"
+run_case "${name}" claude
+[[ "${CASE_EXIT}" -eq 0 ]]
+: >"${CASE_CALLS}"
+run_update_again "${name}"
+[[ "${UPDATE_EXIT}" -eq 0 ]]
+assert_not_contains "${UPDATE_OUTPUT}" "Checking your system"
+step_section "${UPDATE_OUTPUT}" "Setting up cenci" "${WORK}/${name}/update-setup"
+assert_contains "${WORK}/${name}/update-setup" "✓ hook health: healthy"
+assert_contains "${CASE_CALLS}" "cache daemon hook-health"
+assert_not_contains "${CASE_CALLS}" "path daemon hook-health"
+assert_line_count "${UPDATE_OUTPUT}" "cenci on PATH is" 1
+assert_contains "${WORK}/${name}/update-setup" "! cenci on PATH is ${hh_bin}/cenci (cenci 2.40.0) but the active plugin binary is ${hh_cache} (cenci 2.43.1)"
+assert_install_hook_health_never_updates "${UPDATE_OUTPUT}"
+
+echo "case: doctor's reporter-unavailable warning names the PATH binary and its version, and still says run: cenci update (#1419)"
+name=hh1419-doctor-text-versioned
+hh1419_paths "${name}"
+HH_PATH_VERSION="cenci 2.40.0" run_doctor_case_with_hook_health "${name}" claude unknown-subcommand
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "! hook health: reporter unavailable — ${hh_bin}/cenci (cenci 2.40.0) predates it; run: cenci update"
+
+echo "case: doctor's reporter-unavailable warning says version unknown when the binary's version verb fails (#1419)"
+name=hh1419-doctor-text-version-unknown
+hh1419_paths "${name}"
+HH_PATH_VERSION=fail run_doctor_case_with_hook_health "${name}" claude unknown-subcommand
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "! hook health: reporter unavailable — ${hh_bin}/cenci (version unknown) predates it; run: cenci update"
+
+echo "case: doctor's unrecognized-output warning carries the binary path and version (#1419)"
+name=hh1419-doctor-text-garbage
+hh1419_paths "${name}"
+HH_PATH_VERSION="cenci 2.40.0" run_doctor_case_with_hook_health "${name}" claude garbage
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "! hook health: reporter unavailable — unrecognized output from ${hh_bin}/cenci (cenci 2.40.0); run: cenci update"
+
+echo "case: unrecognized-output warning without a readable version says version unknown (#1419)"
+name=hh1419-doctor-text-garbage-unknown
+hh1419_paths "${name}"
+HH_PATH_VERSION=empty run_doctor_case_with_hook_health "${name}" claude garbage
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "! hook health: reporter unavailable — unrecognized output from ${hh_bin}/cenci (version unknown); run: cenci update"
+
+echo "case: a pinned cache binary without the reporter warns with its path and version, never cenci update (#1419)"
+name=hh1419-install-pinned-no-reporter
+hh1419_paths "${name}"
+prepare_cache_hook_health_cenci "${hh_home}" claude unknown-subcommand "cenci 2.40.0"
+run_case "${name}" claude
+[[ "${CASE_EXIT}" -eq 0 ]]
+step_section "${CASE_OUTPUT}" "Setting up cenci" "${WORK}/${name}/setup"
+assert_contains "${WORK}/${name}/setup" "! hook health: reporter unavailable — ${hh_cache} (cenci 2.40.0): the installed cenci-watch release has no hook-health reporter"
+assert_not_contains "${CASE_OUTPUT}" "✓ hook health"
+assert_install_hook_health_never_updates "${CASE_OUTPUT}"
+
+echo "case: the in-sandbox shadow at the system link names the host mount and cenci sandbox stop, no link or update command (#1419)"
+name=hh1419-shadow-sandbox
+hh1419_paths "${name}"
+run_shadow_doctor_case "${name}" file "cenci 2.40.0" CENCI_SANDBOX=1 "CENCI_INSTALLER_SYSTEM_LINK=${WORK}/${name}/bin/cenci"
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "Required tools are present."
+assert_line_count "${DOCTOR_OUTPUT}" "cenci on PATH is" 1
+assert_contains "${DOCTOR_OUTPUT}" "! cenci on PATH is ${hh_bin}/cenci (cenci 2.40.0) but the active plugin binary is ${hh_cache} (cenci 2.43.1)"
+assert_line_with_both "${DOCTOR_OUTPUT}" "cenci on PATH is" "host binary mounted when this sandbox container was created"
+assert_line_with_both "${DOCTOR_OUTPUT}" "cenci on PATH is" "update cenci on the host"
+assert_line_with_both "${DOCTOR_OUTPUT}" "cenci on PATH is" "cenci sandbox stop"
+assert_line_with_both "${DOCTOR_OUTPUT}" "cenci on PATH is" "relaunch"
+assert_no_line_with_both "${DOCTOR_OUTPUT}" "cenci on PATH is" "ln -sf"
+assert_no_line_with_both "${DOCTOR_OUTPUT}" "cenci on PATH is" "cenci update"
+
+echo "case: CENCI_SANDBOX=1 with the shadow somewhere other than the system link gets the regular-file hint, not the host-mount text (#1419)"
+name=hh1419-shadow-sandbox-elsewhere
+hh1419_paths "${name}"
+run_shadow_doctor_case "${name}" file "cenci 2.40.0" CENCI_SANDBOX=1
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_line_with_both "${DOCTOR_OUTPUT}" "cenci on PATH is" "remove it"
+assert_no_line_with_both "${DOCTOR_OUTPUT}" "cenci on PATH is" "sandbox container"
+
+echo "case: a symlink shadow gets the ln -sf hint to ~/.local/bin/cenci, without sudo outside /usr/local/bin (#1419)"
+name=hh1419-shadow-symlink
+hh1419_paths "${name}"
+run_shadow_doctor_case "${name}" symlink "cenci 2.40.0"
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "Required tools are present."
+assert_line_count "${DOCTOR_OUTPUT}" "cenci on PATH is" 1
+assert_contains "${DOCTOR_OUTPUT}" "! cenci on PATH is ${hh_bin}/cenci (cenci 2.40.0) but the active plugin binary is ${hh_cache} (cenci 2.43.1)"
+assert_line_with_both "${DOCTOR_OUTPUT}" "cenci on PATH is" "ln -sf \"${hh_home}/.local/bin/cenci\" ${hh_bin}/cenci"
+assert_no_line_with_both "${DOCTOR_OUTPUT}" "cenci on PATH is" "sudo"
+assert_no_line_with_both "${DOCTOR_OUTPUT}" "cenci on PATH is" "cenci update"
+[[ -L "${hh_bin}/cenci" ]]
+
+echo "case: a symlink shadow at the system link gets the sudo ln -sf hint (#1419)"
+name=hh1419-shadow-symlink-system
+hh1419_paths "${name}"
+run_shadow_doctor_case "${name}" symlink "cenci 2.40.0" "CENCI_INSTALLER_SYSTEM_LINK=${WORK}/${name}/bin/cenci"
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_line_with_both "${DOCTOR_OUTPUT}" "cenci on PATH is" "sudo ln -sf \"${hh_home}/.local/bin/cenci\" ${hh_bin}/cenci"
+assert_no_line_with_both "${DOCTOR_OUTPUT}" "cenci on PATH is" "cenci update"
+
+echo "case: a stale ~/.local/bin/cenci symlink is re-pointed at the cache binary, never at itself (#1419)"
+name=hh1419-shadow-local-link
+hh1419_paths "${name}"
+run_shadow_doctor_case "${name}" local-link "cenci 2.40.0" "PATH=${WORK}/${name}/home/.local/bin:${WORK}/${name}/bin"
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "! cenci on PATH is ${hh_home}/.local/bin/cenci (cenci 2.40.0) but the active plugin binary is ${hh_cache} (cenci 2.43.1)"
+assert_line_with_both "${DOCTOR_OUTPUT}" "cenci on PATH is" "ln -sf \"${hh_cache}\" \"${hh_home}/.local/bin/cenci\""
+assert_no_line_with_both "${DOCTOR_OUTPUT}" "cenci on PATH is" "ln -sf \"${hh_home}/.local/bin/cenci\" ${hh_home}/.local/bin/cenci"
+assert_no_line_with_both "${DOCTOR_OUTPUT}" "cenci on PATH is" "cenci update"
+
+echo "case: a regular-file shadow gets the remove-or-link hint and is left byte-identical (#1419)"
+name=hh1419-shadow-regular-file
+hh1419_paths "${name}"
+write_hook_health_fake "${WORK}/${name}/expected-shadow" unknown-subcommand "cenci 2.40.0" path
+run_shadow_doctor_case "${name}" file "cenci 2.40.0"
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "Required tools are present."
+assert_contains "${DOCTOR_OUTPUT}" "! cenci on PATH is ${hh_bin}/cenci (cenci 2.40.0) but the active plugin binary is ${hh_cache} (cenci 2.43.1)"
+assert_line_with_both "${DOCTOR_OUTPUT}" "cenci on PATH is" "remove it"
+assert_line_with_both "${DOCTOR_OUTPUT}" "cenci on PATH is" "link to ~/.local/bin/cenci"
+assert_no_line_with_both "${DOCTOR_OUTPUT}" "cenci on PATH is" "ln -sf"
+assert_no_line_with_both "${DOCTOR_OUTPUT}" "cenci on PATH is" "cenci update"
+[[ -f "${hh_bin}/cenci" && ! -L "${hh_bin}/cenci" ]]
+cmp "${WORK}/${name}/expected-shadow" "${hh_bin}/cenci"
+
+echo "case: no shadow warning when PATH resolves to the cache binary through a symlink chain, doctor (#1419)"
+name=hh1419-chain-doctor
+hh1419_paths "${name}"
+run_shadow_doctor_case "${name}" chain empty
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "✓ hook health: healthy"
+assert_contains "${CASE_CALLS}" "cache daemon hook-health"
+assert_not_contains "${DOCTOR_OUTPUT}" "cenci on PATH is"
+
+echo "case: no shadow warning when the PATH entry chains through ~/.local/bin to the cache binary, install (#1419)"
+name=hh1419-chain-install
+hh1419_paths "${name}"
+prepare_cache_hook_health_cenci "${hh_home}" claude healthy "cenci 2.43.1"
+mkdir -p "${hh_bin}"
+ln -sf "${hh_home}/.local/bin/cenci" "${hh_bin}/cenci"
+run_case "${name}" claude
+[[ "${CASE_EXIT}" -eq 0 ]]
+step_section "${CASE_OUTPUT}" "Setting up cenci" "${WORK}/${name}/setup"
+assert_contains "${WORK}/${name}/setup" "✓ hook health: healthy"
+assert_contains "${CASE_CALLS}" "cache daemon hook-health"
+assert_not_contains "${CASE_OUTPUT}" "cenci on PATH is"
+
+echo "case: no shadow warning when the PATH cenci is the same version, newer, or a dev build (#1419)"
+for hh_version in "cenci 2.43.1" "cenci 2.50.0" "cenci dev"; do
+    name="hh1419-not-older-${hh_version//[^A-Za-z0-9]/_}"
+    hh1419_paths "${name}"
+    run_shadow_doctor_case "${name}" file "${hh_version}"
+    [[ "${DOCTOR_EXIT}" -eq 0 ]]
+    # Precondition: the PATH binary really was the one doctor looked at.
+    assert_contains "${DOCTOR_OUTPUT}" "! hook health: reporter unavailable — ${hh_bin}/cenci (${hh_version}) predates it"
+    assert_not_contains "${DOCTOR_OUTPUT}" "cenci on PATH is"
+done
+
+echo "case: a PATH cenci whose version verb fails or prints nothing is warned about with version unknown (#1419)"
+for hh_version in fail empty; do
+    name="hh1419-version-unknown-${hh_version}"
+    hh1419_paths "${name}"
+    run_shadow_doctor_case "${name}" file "${hh_version}"
+    [[ "${DOCTOR_EXIT}" -eq 0 ]]
+    assert_line_count "${DOCTOR_OUTPUT}" "cenci on PATH is" 1
+    assert_contains "${DOCTOR_OUTPUT}" "! cenci on PATH is ${hh_bin}/cenci (version unknown) but the active plugin binary is ${hh_cache} (cenci 2.43.1)"
+done
+
+echo "case: a sort that cannot compare versions still yields the shadow warning (#1419)"
+name=hh1419-sort-cannot-compare
+hh1419_paths "${name}"
+# A PATH cenci NEWER than the cache binary is never stale under a working sort
+# (the not-older case above); the warning here can only come from the
+# sort-failed fallthrough. The stub fails only the `sort -V -C` comparison.
+run_shadow_doctor_case "${name}" file "cenci 2.50.0"
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_not_contains "${DOCTOR_OUTPUT}" "cenci on PATH is"
+real_sort="$(command -v sort)"
+rm -f "${hh_bin}/sort"
+cat > "${hh_bin}/sort" <<EOF
+#!/bin/sh
+case " \$* " in
+    *" -V "*) case " \$* " in *" -C "*) exit 2 ;; esac ;;
+esac
+exec "${real_sort}" "\$@"
+EOF
+chmod +x "${hh_bin}/sort"
+invoke_doctor "${name}"
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_line_count "${DOCTOR_OUTPUT}" "cenci on PATH is" 1
+assert_contains "${DOCTOR_OUTPUT}" "! cenci on PATH is ${hh_bin}/cenci (cenci 2.50.0) but the active plugin binary is ${hh_cache} (cenci 2.43.1)"
+
+echo "case: no shadow warning when the cache binary's version cannot be read but the PATH cenci's can (#1419)"
+for hh_version in fail empty; do
+    name="hh1419-cache-version-unknown-${hh_version}"
+    hh1419_paths "${name}"
+    write_hook_health_fake "${hh_bin}/cenci" unknown-subcommand "cenci 2.40.0" path
+    prepare_cache_hook_health_cenci "${hh_home}" claude healthy "${hh_version}"
+    run_case "${name}" claude
+    [[ "${CASE_EXIT}" -eq 0 ]]
+    step_section "${CASE_OUTPUT}" "Setting up cenci" "${WORK}/${name}/setup"
+    # Preconditions: the post-setup checks ran against the cache binary, and
+    # both binaries were asked for their version, so the absence is meaningful.
+    assert_contains "${WORK}/${name}/setup" "✓ hook health: healthy"
+    assert_contains "${CASE_CALLS}" "cache version"
+    assert_contains "${CASE_CALLS}" "path version"
+    assert_not_contains "${CASE_OUTPUT}" "cenci on PATH is"
+done
+
+echo "case: multi-line / non-printable version output is reduced to a clean first line (#1419)"
+name=hh1419-version-noisy
+hh1419_paths "${name}"
+run_shadow_doctor_case "${name}" file noisy
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "! cenci on PATH is ${hh_bin}/cenci (cenci 2.40.0) but the active plugin binary is ${hh_cache} (cenci 2.43.1)"
+assert_not_contains "${DOCTOR_OUTPUT}" "second-line-marker"
+assert_not_contains "${DOCTOR_OUTPUT}" $'\001'
+assert_not_contains "${DOCTOR_OUTPUT}" $'\a'
+
+echo "case: an install where the cache binary could not be provisioned prints no post-setup hook-health or shadow line (#1419)"
+name=hh1419-install-unprovisioned
+hh1419_paths "${name}"
+write_hook_health_fake "${hh_bin}/cenci" unknown-subcommand "cenci 2.40.0" path
+run_case_broken_cenci_cache "${name}"
+[[ "${CASE_EXIT}" -eq 0 ]]
+assert_contains "${CASE_OUTPUT}" "could not provision the cenci binary yet"
+assert_not_contains "${CASE_OUTPUT}" "✓ hook health"
+assert_not_contains "${CASE_OUTPUT}" "! hook health"
+assert_not_contains "${CASE_OUTPUT}" "✗ hook health"
+assert_not_contains "${CASE_OUTPUT}" "cenci on PATH is"
+assert_not_contains "${CASE_CALLS}" "daemon hook-health"
+assert_install_hook_health_never_updates "${CASE_OUTPUT}"
+
+echo "case: an incomplete update runs the post-setup hook-health check against the previously provisioned fallback binary and still fails (#1419)"
+name=hh1419-update-fallback-binary
+hh1419_paths "${name}"
+STALE_NEWEST_HH_MODE=healthy STALE_NEWEST_HH_VERSION="cenci 2.43.1" run_case_stale_newest_cenci_cache "${name}" update
+[[ "${CASE_EXIT}" -ne 0 ]]
+assert_contains "${CASE_OUTPUT}" "cenci binary update incomplete"
+step_section "${CASE_OUTPUT}" "Setting up cenci" "${WORK}/${name}/setup"
+assert_contains "${WORK}/${name}/setup" "✓ hook health: healthy"
+assert_contains "${CASE_CALLS}" "cache daemon hook-health"
+assert_install_hook_health_never_updates "${CASE_OUTPUT}"
+
+echo "case: a cenci-watch that never installs gets no post-setup hook-health or shadow check (#1419)"
+name=hh1419-install-deselected
+hh1419_paths "${name}"
+write_hook_health_fake "${hh_bin}/cenci" unknown-subcommand "cenci 2.40.0" path
+prepare_cache_hook_health_cenci "${hh_home}" claude healthy "cenci 2.43.1"
+make_common_tools "${hh_bin}"
+make_claude "${hh_bin}"
+prepare_checkout "${hh_home}" claude
+: >"${WORK}/${name}/calls"
+set +e
+env -i HOME="${hh_home}" PATH="${hh_bin}" CALLS_FILE="${WORK}/${name}/calls" \
+    CLAUDE_MARKETPLACE_FILE="${WORK}/${name}/claude-marketplace" \
+    CLAUDE_INSTALLED_FILE="${WORK}/${name}/claude-installed" \
+    CLAUDE_SKIP_INSTALL_PLUGIN="cenci-watch" \
+    bash "${ROOT}/install.sh" --yes --no-build >"${WORK}/${name}/output" 2>&1
+hh_deselected_exit=$?
+set -e
+[[ "${hh_deselected_exit}" -eq 0 ]]
+assert_not_contains "${WORK}/${name}/output" "==> Setting up cenci"
+assert_not_contains "${WORK}/${name}/output" "✓ hook health"
+assert_not_contains "${WORK}/${name}/output" "! hook health"
+assert_not_contains "${WORK}/${name}/output" "✗ hook health"
+assert_not_contains "${WORK}/${name}/output" "cenci on PATH is"
+assert_not_contains "${WORK}/${name}/calls" "daemon hook-health"
+
+echo "case: doctor with a PATH cenci and no cache binary names no shadow and checks hook health on the PATH binary (#1419)"
+name=hh1419-doctor-no-cache
+hh1419_paths "${name}"
+write_hook_health_fake "${hh_bin}/cenci" unknown-subcommand "cenci 2.40.0" path
+run_case "${name}" claude
+rm -f "${hh_home}"/.claude/plugins/cache/cenci/cenci-watch/*/bin/cenci
+: >"${CASE_CALLS}"
+invoke_doctor "${name}"
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${CASE_CALLS}" "path daemon hook-health"
+assert_contains "${DOCTOR_OUTPUT}" "! hook health: reporter unavailable — ${hh_bin}/cenci (cenci 2.40.0) predates it; run: cenci update"
+assert_not_contains "${DOCTOR_OUTPUT}" "cenci on PATH is"
+
+echo "case: with ~/.local/bin off PATH and no other cenci, the post-setup hook-health check still runs and no shadow is named (#1419)"
+name=hh1419-install-no-path-cenci
+hh1419_paths "${name}"
+prepare_cache_hook_health_cenci "${hh_home}" claude healthy "cenci 2.43.1"
+run_case "${name}" claude
+[[ "${CASE_EXIT}" -eq 0 ]]
+[[ ! -e "${hh_bin}/cenci" ]]
+step_section "${CASE_OUTPUT}" "Setting up cenci" "${WORK}/${name}/setup"
+assert_contains "${WORK}/${name}/setup" "✓ hook health: healthy"
+assert_contains "${CASE_CALLS}" "cache daemon hook-health"
+assert_not_contains "${CASE_OUTPUT}" "cenci on PATH is"
+assert_install_hook_health_never_updates "${CASE_OUTPUT}"
+
 echo "case: doctor reports sysbox-runc registered and its resolved version when present under Docker, resolving the runtime path from docker info's Runtimes JSON (#587 presence + #630 version reporting, Q2)"
 sysbox_present_bin="${WORK}/sysbox-binaries/doctor-sysbox-present/sysbox-runc"
 make_sysbox_runc_binary "${sysbox_present_bin}" "sysbox-runc version 0.6.4"
@@ -2420,21 +3139,101 @@ echo "user content" >"${CASE_HOME}/.config/opencode/skills/my-own-skill"
 jq '. + {"theme": "dark"}' "${CASE_HOME}/.config/opencode/opencode.json" >"${CASE_HOME}/.config/opencode/opencode.json.tmp"
 mv "${CASE_HOME}/.config/opencode/opencode.json.tmp" "${CASE_HOME}/.config/opencode/opencode.json"
 
-uninstall_output="${WORK}/${name}/uninstall-output"
-set +e
-env -i HOME="${CASE_HOME}" PATH="${CASE_BIN}" CALLS_FILE="${CASE_CALLS}" \
-    CLAUDE_MARKETPLACE_FILE="${WORK}/${name}/claude-marketplace" \
-    CLAUDE_INSTALLED_FILE="${WORK}/${name}/claude-installed" \
-    bash "${ROOT}/install.sh" uninstall --yes >"${uninstall_output}" 2>&1
-opencode_uninstall_exit=$?
-set -e
-[[ "${opencode_uninstall_exit}" -eq 0 ]]
+invoke_uninstall "${name}"
+[[ "${UNINSTALL_EXIT}" -eq 0 ]]
 [[ ! -e "${CASE_HOME}/.config/opencode/skills/testing" ]]
 [[ -f "${CASE_HOME}/.config/opencode/skills/my-own-skill" ]]
 assert_contains "${CASE_HOME}/.config/opencode/opencode.json" "theme"
 assert_contains "${CASE_HOME}/.config/opencode/opencode.json" "permission"
 assert_contains "${CASE_HOME}/.config/opencode/opencode.json" "autoupdate"
 assert_not_contains "${CASE_HOME}/.config/opencode/opencode.json" "watch/plugin/opencode"
+# The legacy allow-all block survives (never auto-removed) but is flagged once.
+jq -e '.permission == {"*":"allow"} and .autoupdate == false' "${CASE_HOME}/.config/opencode/opencode.json" >/dev/null
+assert_allow_all_hint "${CASE_HOME}/.config/opencode/opencode.json"
+
+# run_opencode_uninstall_case <name> <json> [NAME=value env...] — after a fresh
+# install, seeds a legacy host opencode.json (the cenci-watch plugin spec is
+# spliced into <json> at the __PLUGIN__ placeholder) at the path OpenCode
+# resolves (XDG_CONFIG_HOME when passed), then uninstalls. Sets
+# OPENCODE_CASE_CONFIG to that path plus UNINSTALL_EXIT/UNINSTALL_OUTPUT.
+run_opencode_uninstall_case() {
+    local name="$1" json="$2" config_dir
+    shift 2
+    run_case_opencode "${name}" claude 1.18.3
+    [[ "${CASE_EXIT}" -eq 0 ]]
+    config_dir="${CASE_HOME}/.config/opencode"
+    local arg
+    for arg in "$@"; do
+        case "${arg}" in
+        XDG_CONFIG_HOME=*) config_dir="${arg#XDG_CONFIG_HOME=}/opencode" ;;
+        esac
+    done
+    OPENCODE_CASE_CONFIG="${config_dir}/opencode.json"
+    mkdir -p "${config_dir}"
+    printf '%s\n' "${json//__PLUGIN__/file://${CASE_HOME}/.claude/plugins/marketplaces/cenci/watch/plugin/opencode}" >"${OPENCODE_CASE_CONFIG}"
+    invoke_uninstall "${name}" "$@"
+}
+
+echo "case: uninstall removes the plugin entry from a config holding only the plugin plus shorthand allow-all, then flags it without touching permission"
+name=opencode-uninstall-shorthand
+run_opencode_uninstall_case "${name}" '{"plugin":["__PLUGIN__"],"permission":"allow"}'
+[[ "${UNINSTALL_EXIT}" -eq 0 ]]
+assert_contains "${UNINSTALL_OUTPUT}" "removed cenci's OpenCode plugin registration"
+jq -e '(.plugin | length) == 0 and .permission == "allow"' "${OPENCODE_CASE_CONFIG}" >/dev/null
+assert_allow_all_hint "${OPENCODE_CASE_CONFIG}"
+
+echo "case: uninstall prints no allow-all hint for a non-global permission"
+name=opencode-uninstall-nonglobal
+run_opencode_uninstall_case "${name}" '{"plugin":["__PLUGIN__"],"permission":{"*":"ask","bash":"allow"}}'
+[[ "${UNINSTALL_EXIT}" -eq 0 ]]
+assert_contains "${UNINSTALL_OUTPUT}" "removed cenci's OpenCode plugin registration"
+assert_not_contains "${UNINSTALL_OUTPUT}" "older cenci versions may have added"
+assert_not_contains "${UNINSTALL_OUTPUT}" "jq 'del(.permission, .autoupdate)'"
+
+echo "case: uninstall prints no allow-all hint when permission is absent"
+name=opencode-uninstall-no-permission
+run_opencode_uninstall_case "${name}" '{"plugin":["__PLUGIN__"],"theme":"dark"}'
+[[ "${UNINSTALL_EXIT}" -eq 0 ]]
+assert_contains "${UNINSTALL_OUTPUT}" "removed cenci's OpenCode plugin registration"
+assert_not_contains "${UNINSTALL_OUTPUT}" "older cenci versions may have added"
+
+echo "case: uninstall without jq prints only the existing manual-removal warning, no allow-all hint, and leaves the file byte-identical"
+name=opencode-uninstall-no-jq
+run_case_opencode "${name}" claude 1.18.3
+[[ "${CASE_EXIT}" -eq 0 ]]
+rm "${CASE_BIN}/jq"
+mkdir -p "${CASE_HOME}/.config/opencode"
+printf '{"plugin":["file://%s/.claude/plugins/marketplaces/cenci/watch/plugin/opencode"],"permission":"allow"}\n' "${CASE_HOME}" >"${CASE_HOME}/.config/opencode/opencode.json"
+cp "${CASE_HOME}/.config/opencode/opencode.json" "${WORK}/${name}/fixture-original"
+invoke_uninstall "${name}"
+[[ "${UNINSTALL_EXIT}" -eq 0 ]]
+assert_contains "${UNINSTALL_OUTPUT}" "jq not found — remove the cenci plugin entry"
+assert_not_contains "${UNINSTALL_OUTPUT}" "older cenci versions may have added"
+cmp "${WORK}/${name}/fixture-original" "${CASE_HOME}/.config/opencode/opencode.json"
+
+echo "case: uninstall still prints the allow-all hint when OpenCode is not detected (cleanup is not gated on HAS_OPENCODE)"
+name=opencode-uninstall-undetected
+run_case_opencode "${name}" claude absent
+[[ "${CASE_EXIT}" -eq 0 ]]
+undetected_config="${CASE_HOME}/.config/opencode/opencode.json"
+mkdir -p "${CASE_HOME}/.config/opencode"
+printf '{"plugin":["file://%s/.claude/plugins/marketplaces/cenci/watch/plugin/opencode"],"permission":{"*":"allow"}}\n' "${CASE_HOME}" >"${undetected_config}"
+invoke_uninstall "${name}"
+[[ "${UNINSTALL_EXIT}" -eq 0 ]]
+assert_contains "${UNINSTALL_OUTPUT}" "removed cenci's OpenCode plugin registration"
+jq -e '(.plugin | length) == 0 and .permission == {"*":"allow"}' "${undetected_config}" >/dev/null
+assert_allow_all_hint "${undetected_config}"
+
+echo "case: with XDG_CONFIG_HOME set, uninstall cleans and flags \$XDG_CONFIG_HOME/opencode/opencode.json, not ~/.config"
+name=opencode-uninstall-xdg
+xdg_dir="${WORK}/${name}/xdg"
+run_opencode_uninstall_case "${name}" '{"plugin":["__PLUGIN__"],"permission":{"*":"allow"}}' "XDG_CONFIG_HOME=${xdg_dir}"
+[[ "${UNINSTALL_EXIT}" -eq 0 ]]
+[[ "${OPENCODE_CASE_CONFIG}" == "${xdg_dir}/opencode/opencode.json" ]]
+assert_contains "${UNINSTALL_OUTPUT}" "removed cenci's OpenCode plugin registration"
+assert_not_contains "${OPENCODE_CASE_CONFIG}" "watch/plugin/opencode"
+assert_allow_all_hint "${xdg_dir}/opencode/opencode.json"
+assert_not_contains "${UNINSTALL_OUTPUT}" "${CASE_HOME}/.config/opencode/opencode.json"
 
 echo "case: OpenCode plugin registration is recognized (install, doctor, and uninstall) even when find_plugin_path resolves watch/plugin/opencode via the plugin-cache fallback branch, not the marketplace checkout (#491 review fix — substring-matching bug)"
 name=opencode-cache-fallback
@@ -2510,6 +3309,106 @@ set -e
 assert_not_contains "${output}" "Setting up OpenCode integration"
 assert_not_contains "${output}" "OpenCode plugin registered"
 [[ ! -e "${home}/.config/opencode/opencode.json" ]]
+
+# --- Legacy host OpenCode allow-all (#1018): doctor warns, never modifies.
+
+echo "case: doctor flags a host opencode.json granting global allow-all (shorthand, object, object with exceptions) without modifying it"
+name=opencode-allow-all
+run_case_opencode "${name}" claude 1.18.3
+[[ "${CASE_EXIT}" -eq 0 ]]
+allow_all_config="${CASE_HOME}/.config/opencode/opencode.json"
+for allow_all_json in '{"permission":"allow"}' '{"permission":{"*":"allow"}}' '{"permission":{"*":"allow","bash":"ask"},"autoupdate":false}'; do
+    opencode_doctor_with_fixture "${name}" "${allow_all_json}"
+    assert_allow_all_warning "${allow_all_config}"
+done
+
+echo "case: doctor stays silent for non-global, absent, missing, invalid, non-object and per-agent permissions"
+for silent_json in \
+    '{"permission":{"*":"ask","bash":"allow"}}' \
+    '{"theme":"dark"}' \
+    '{"autoupdate":false}' \
+    'not json {' \
+    '[]' \
+    '{"permission":true}' \
+    '{"permission":[]}' \
+    '{"agent":{"x":{"permission":{"*":"allow"}}}}'; do
+    opencode_doctor_with_fixture "${name}" "${silent_json}"
+    assert_no_allow_all_warning
+done
+rm -f "${allow_all_config}"
+invoke_doctor "${name}"
+assert_no_allow_all_warning
+[[ ! -e "${allow_all_config}" ]]
+
+echo "case: an allow-all finding is a warning only, so doctor's exit status matches the same config without permission"
+opencode_doctor_with_fixture "${name}" '{"theme":"dark"}'
+benign_doctor_exit="${DOCTOR_EXIT}"
+[[ "${benign_doctor_exit}" -eq 0 ]]
+opencode_doctor_with_fixture "${name}" '{"permission":{"*":"allow"}}'
+assert_allow_all_warning "${allow_all_config}"
+[[ "${DOCTOR_EXIT}" -eq "${benign_doctor_exit}" ]]
+
+echo "case: with XDG_CONFIG_HOME set, doctor inspects \$XDG_CONFIG_HOME/opencode/opencode.json, not ~/.config"
+xdg_dir="${WORK}/${name}/xdg"
+mkdir -p "${xdg_dir}/opencode"
+printf '{"permission":{"*":"allow"}}\n' >"${xdg_dir}/opencode/opencode.json"
+rm -f "${allow_all_config}"
+invoke_doctor "${name}" "XDG_CONFIG_HOME=${xdg_dir}"
+assert_allow_all_warning "${xdg_dir}/opencode/opencode.json"
+assert_not_contains "${DOCTOR_OUTPUT}" "${allow_all_config}"
+printf '{"theme":"dark"}\n' >"${xdg_dir}/opencode/opencode.json"
+opencode_doctor_with_fixture "${name}" '{"permission":{"*":"allow"}}' "XDG_CONFIG_HOME=${xdg_dir}"
+assert_no_allow_all_warning
+
+echo "case: doctor prints no allow-all warning when OpenCode is not detected, even with an allow-all host config"
+name=opencode-allow-all-undetected
+run_case_opencode "${name}" claude absent
+[[ "${CASE_EXIT}" -eq 0 ]]
+opencode_doctor_with_fixture "${name}" '{"permission":{"*":"allow"}}'
+assert_not_contains "${DOCTOR_OUTPUT}" "OpenCode skills"
+assert_not_contains "${DOCTOR_OUTPUT}" "grants global allow-all permissions"
+
+echo "case: without jq on PATH doctor prints no allow-all line and its exit status matches a config without permission"
+name=opencode-allow-all-no-jq
+run_case_opencode "${name}" claude 1.18.3
+[[ "${CASE_EXIT}" -eq 0 ]]
+rm "${CASE_BIN}/jq"
+opencode_doctor_with_fixture "${name}" '{"theme":"dark"}'
+no_jq_benign_exit="${DOCTOR_EXIT}"
+# Without jq doctor's required "jq" check fails, so the benign baseline is a
+# known non-zero status (1) for exactly that reason, not an unrelated failure.
+assert_contains "${DOCTOR_OUTPUT}" "install jq from your package manager"
+[[ "${no_jq_benign_exit}" -eq 1 ]]
+opencode_doctor_with_fixture "${name}" '{"permission":{"*":"allow"}}'
+assert_no_allow_all_warning
+[[ "${DOCTOR_EXIT}" -eq "${no_jq_benign_exit}" ]]
+
+echo "case: contract — install.sh never calls or sources the container-only seeding helper (code lines; full-line comments are exempt)"
+if references_container_seeder "${ROOT}/install.sh"; then
+    echo "FAIL: ${ROOT}/install.sh references seed_opencode_config or sandbox/lib/opencode-config.sh on a code line" >&2
+    exit 1
+fi
+# Non-vacuity: the detector must flag injected copies, and only on code lines.
+contract_dir="${WORK}/seeder-contract"
+mkdir -p "${contract_dir}"
+cp "${ROOT}/install.sh" "${contract_dir}/injected-call.sh"
+printf '%s\n' "seed_opencode_config \"\$f\" \"\$s\"" >>"${contract_dir}/injected-call.sh"
+assert_detects_seeder_reference "${contract_dir}/injected-call.sh"
+cp "${ROOT}/install.sh" "${contract_dir}/injected-source.sh"
+printf '%s\n' "source \"\${dir}/sandbox/lib/opencode-config.sh\"" >>"${contract_dir}/injected-source.sh"
+assert_detects_seeder_reference "${contract_dir}/injected-source.sh"
+cp "${ROOT}/install.sh" "${contract_dir}/injected-relative-source.sh"
+printf '%s\n' "source \"\${SCRIPT_DIR}/lib/opencode-config.sh\"" >>"${contract_dir}/injected-relative-source.sh"
+assert_detects_seeder_reference "${contract_dir}/injected-relative-source.sh"
+cp "${ROOT}/install.sh" "${contract_dir}/injected-trailing.sh"
+printf '%s\n' 'true # seed_opencode_config' >>"${contract_dir}/injected-trailing.sh"
+assert_detects_seeder_reference "${contract_dir}/injected-trailing.sh"
+cp "${ROOT}/install.sh" "${contract_dir}/injected-comment.sh"
+printf '%s\n' '	# re-enablement must never call seed_opencode_config' >>"${contract_dir}/injected-comment.sh"
+if references_container_seeder "${contract_dir}/injected-comment.sh"; then
+    echo "FAIL: a full-line comment naming seed_opencode_config must not trip the contract" >&2
+    exit 1
+fi
 
 # --- Supply chain: install.sh defaults to an immutable release tag instead
 # of main (#590), via cenci_latest_ref() and a piped-only re-exec guard.

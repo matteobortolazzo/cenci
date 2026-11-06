@@ -82,8 +82,9 @@ const (
 )
 
 // Sandbox DinD codes (CENCI-SANDBOX-DIND-*), attached by
-// watch/internal/sandbox/launcher/launch.go's warnDockerdStartupFailure and
-// diagnose.go's "Nested Docker:" section.
+// watch/internal/sandbox/launcher/launch.go's warnDockerdStartupFailure,
+// dindcreate.go's createFailureError and diagnose.go's "Nested Docker:"
+// section.
 const (
 	// SandboxDindStartupFailure is attached when the persistent
 	// .cenci-dockerd-startup-error marker is present: the nested dockerd
@@ -107,6 +108,16 @@ const (
 	// conversion has no mapping for. Unlike DIND-001 and DIND-002 the
 	// session does not exist at all, so this is fatal (#1077).
 	SandboxDindRuntimeCreateFailed Code = "CENCI-SANDBOX-DIND-003"
+
+	// SandboxDindStaleKernelModules is attached, as a create-time sub-case of
+	// DIND-003, when a dind launch's OCI-runtime create error names a missing
+	// /lib/modules/<release> mount source and that release is the running
+	// kernel's: the host's packages were upgraded past the running kernel
+	// without a reboot, so the modules directory sysbox-runc bind-mounts has
+	// been removed. Updating sysbox-ce cannot help; rebooting into the
+	// installed kernel does. Fatal like DIND-003, because no container is
+	// created (#1159).
+	SandboxDindStaleKernelModules Code = "CENCI-SANDBOX-DIND-004"
 )
 
 // Sandbox resource-limit codes (CENCI-SANDBOX-LIMITS-*) for the workload
@@ -235,6 +246,18 @@ var registry = map[Code]Entry{
 			"cenci open <shortcut> --no-dind to launch without nested Docker",
 		},
 	},
+	SandboxDindStaleKernelModules: {
+		Message: "The running kernel's modules directory is missing, so sysbox-runc could not create the sandbox container.",
+		Causes: []string{
+			"The host's packages were upgraded past the running kernel without a reboot, and the old kernel's /lib/modules/<release> directory was removed.",
+			"The /lib/modules/<release> directory of the running kernel was removed or never installed.",
+		},
+		Hints: []string{
+			"uname -r and ls /lib/modules to compare the running kernel with the installed ones",
+			"reboot into the installed kernel",
+			"cenci open <shortcut> --no-dind to launch without nested Docker until then",
+		},
+	},
 	SandboxLimitsHostMemoryUnreadable: {
 		Message: "The container runtime's total host memory could not be read, so the default memory limit cannot be derived.",
 		Causes: []string{
@@ -314,6 +337,7 @@ var allCodes = []Code{
 	SandboxDindStartupFailure,
 	SandboxDindPlatformUnsupported,
 	SandboxDindRuntimeCreateFailed,
+	SandboxDindStaleKernelModules,
 	SandboxLimitsHostMemoryUnreadable,
 	SandboxLimitsCreateRejected,
 	SandboxLimitsOOMKills,

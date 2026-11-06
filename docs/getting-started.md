@@ -230,6 +230,13 @@ Existing host settings, credentials, containers, and volumes remain intact.
 Diagnosis, stopping, and cleanup remain available; `cenci uninstall` can remove
 cenci-owned skill symlinks and plugin registration while preserving other settings.
 
+Older cenci versions may have added `permission` (global allow-all) and `autoupdate`
+to the host `opencode.json`. If that file still grants global allow-all permissions,
+`cenci doctor` warns and `cenci uninstall` prints a one-line hint, both with a manual
+`jq 'del(.permission, .autoupdate)'` command to run if you did not set those keys
+yourself. cenci never edits the file, and its sandbox permission seeding stays
+container-only.
+
 OpenCode-only fixes and scope extracted from shared tickets are parked in the
 [owner-opt-in milestone](https://github.com/matteobortolazzo/cenci/milestone/18),
 with no due date. Re-enablement is tracked by

@@ -37,7 +37,7 @@ Role-specific values for that reference:
 
 1. Read `flow/docs/codex.md` and `flow/docs/opencode.md` to establish each client's current portability contract.
 2. For every skill under `flow/skills/*/`, compare its front matter, presence/absence of `codex.md`, and `flow/opencode/install-skills.sh`'s `PORTABLE_SKILLS` membership against `flow/README.md`'s hand-curated "Skill portability" table.
-3. Defer to `scripts/check.sh`'s `capability-table` and `adapter-drift` results (surfaced in Phase 2) for the mechanically-derivable facts (OpenCode column vs. `PORTABLE_SKILLS`); your findings should cover what those checks can't mechanically catch — e.g. a Codex column claiming "Yes" for a skill whose native procedure is actually still a thin stub.
+3. Defer to `scripts/check.sh`'s `capability-table` and `adapter-drift` results (surfaced in Phase 2) for the mechanically-derivable facts (OpenCode column vs. the OpenCode delivery set, `PORTABLE_SKILLS` minus `OPENCODE_RETIRED_SKILLS`); your findings should cover what those checks can't mechanically catch — e.g. a Codex column claiming "Yes" for a skill whose native procedure is actually still a thin stub.
 4. Prioritize findings by how likely a user on that client would hit the mismatch.
 
 ## What NOT to Flag

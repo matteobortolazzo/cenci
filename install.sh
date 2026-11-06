@@ -150,7 +150,9 @@ run_bounded() {
 	fi
 	"$@" </dev/null &
 	pid=$!
-	{ sleep "$secs" && kill "$pid"; } 2>/dev/null &
+	# The watchdog's stdout is detached so an orphaned `sleep` never holds a
+	# caller's $(...) capture pipe open after cmd has already exited.
+	{ sleep "$secs" && kill "$pid"; } >/dev/null 2>&1 &
 	watchdog=$!
 	wait "$pid" 2>/dev/null
 	rc=$?
@@ -400,6 +402,68 @@ cenci_binary_for_doctor() {
 	cached_cenci_binary
 }
 
+# cenci_binary_version <bin> prints the first line of `<bin> version`, reduced
+# to printable characters (e.g. `cenci 2.43.1`), and returns 0. It returns 1,
+# printing nothing, when the verb fails or yields no printable first line, so
+# callers capture it with $(...) and fall back to "version unknown".
+cenci_binary_version() {
+	local out first
+	out="$(run_bounded 5 "$1" version 2>/dev/null)" || return 1
+	first="$(printf '%s' "${out%%$'\n'*}" | tr -cd '[:print:]')"
+	[ -n "$first" ] || return 1
+	printf '%s\n' "$first"
+}
+
+# check_path_shadow <active-bin> warns when the `cenci` that PATH resolves to is
+# a different file than <active-bin> (the plugin-cache binary) and is older
+# under sort -V or has an unreadable version — an older copy still shadows the
+# fresh one. A dev build sorts after numeric versions, so it is never stale; a
+# readable PATH version is never shown older than an unreadable <active-bin>
+# version, so that combination never warns. The
+# fix hint fits the shadow's location and never touches the file. Warn-only, so
+# it never sets DOCTOR_FAILED or INSTALL_FAILED. CENCI_INSTALLER_SYSTEM_LINK is
+# a test-only override of /usr/local/bin/cenci that changes hint text only.
+check_path_shadow() {
+	local active="$1" path_bin pv av hint
+	local system_link="${CENCI_INSTALLER_SYSTEM_LINK:-/usr/local/bin/cenci}"
+	local user_link="$HOME/.local/bin/cenci"
+	have cenci || return 0
+	path_bin="$(command -v cenci)"
+	[ "$path_bin" -ef "$active" ] && return 0
+	pv="$(cenci_binary_version "$path_bin" || true)"
+	av="$(cenci_binary_version "$active" || true)"
+	if [ -n "$pv" ]; then
+		[ -n "$av" ] || return 0
+		[ "${pv#cenci }" != "${av#cenci }" ] || return 0
+		# sort -C: 0 = in order (PATH <= cache, stale), 1 = PATH is newer, >=2 =
+		# sort could not compare — a stale-looking binary we cannot rank is
+		# reported rather than hidden.
+		printf '%s\n%s\n' "${pv#cenci }" "${av#cenci }" | sort -V -C 2>/dev/null
+		[ "$?" -ne 1 ] || return 0
+	fi
+	if [ "${CENCI_SANDBOX:-}" = 1 ] && [ "$path_bin" = "$system_link" ]; then
+		hint="this is the host binary mounted when this sandbox container was created; update cenci on the host, then run cenci sandbox stop <name> on the host and relaunch"
+	elif [ -L "$path_bin" ] && [ "$path_bin" = "$user_link" ]; then
+		hint="re-point it at the plugin binary: ln -sf \"$active\" \"$user_link\""
+	elif [ -L "$path_bin" ] && [ "$path_bin" = "$system_link" ]; then
+		hint="re-link it: sudo ln -sf \"$user_link\" $path_bin"
+	elif [ -L "$path_bin" ]; then
+		hint="re-link it: ln -sf \"$user_link\" $path_bin"
+	else
+		hint="left untouched; remove it or replace it with a link to ~/.local/bin/cenci"
+	fi
+	warn "cenci on PATH is $path_bin (${pv:-version unknown}) but the active plugin binary is $active (${av:-version unknown}) — $hint"
+}
+
+# post_setup_cenci_checks <cache-bin> runs the checks that need the binary
+# step_cenci_watch_setup just provisioned: hook health against it, then the
+# PATH-shadow check. Skipped when no binary was provisioned.
+post_setup_cenci_checks() {
+	[ -n "${1:-}" ] || return 0
+	doctor_hook_health "$1"
+	check_path_shadow "$1"
+}
+
 # doctor_daemon_status reports whether the cenci daemon is alive via
 # `cenci daemon status` (exit 0 = running, exit 1 = not running — see
 # runDaemonStatus in watch/main.go). A missing binary is reported like any
@@ -509,20 +573,31 @@ hook_health_record() {
 # and never DOCTOR_FAILED. With a binary it matches the stable first line of
 # `cenci daemon hook-health` (`hook health: <healthy|recovered|no-evidence|
 # current-failure>`); a non-zero exit (an older binary without the subverb
-# exits 2 with "unknown subcommand") or an unrecognized first line warns to
-# update. In the no-evidence case a line 2 starting `  untrusted store:` (the
-# reporter's fixed reason line) makes doctor print its own fixed untrusted
-# warning instead; no other state looks at line 2 for that prefix. With no
-# binary it first reports an untrusted store, else reads the missing-binary and
-# bootstrap-failure records directly (one warn per fresh record), else warns
-# that no record was found.
+# exits 2 with "unknown subcommand") or an unrecognized first line warns
+# "reporter unavailable", naming the binary's path and `cenci version`. The
+# optional first argument is the binary to check (install/update runs pass the
+# plugin-cache binary they just provisioned); without it the binary comes from
+# cenci_binary_for_doctor (PATH first) and the warnings end in `run: cenci
+# update`, which an install/update run never prints. In the no-evidence case a
+# line 2 starting `  untrusted store:` (the reporter's fixed reason line) makes
+# doctor print its own fixed untrusted warning instead; no other state looks at
+# line 2 for that prefix. With no binary it first reports an untrusted store,
+# else reads the missing-binary and bootstrap-failure records directly (one warn
+# per fresh record), else warns that no record was found.
 doctor_hook_health() {
-	local bin dir out first line2 detail rec age client category printed
+	local bin dir out first line2 detail rec age client category printed ver
 	# One fixed text for both branches, so they cannot drift apart.
 	local untrusted_msg="hook health: no evidence — the hook-health store is untrusted (symlinked, foreign-owned or group/other-writable), so hooks cannot record; fix its owner and permissions"
-	if bin="$(cenci_binary_for_doctor)"; then
+	bin="${1:-}"
+	[ -n "$bin" ] || bin="$(cenci_binary_for_doctor)" || bin=""
+	if [ -n "$bin" ]; then
 		if ! out="$("$bin" daemon hook-health 2>/dev/null)"; then
-			warn "hook health: reporter unavailable — this cenci binary may predate it; run: cenci update"
+			ver="$(cenci_binary_version "$bin" || true)"
+			if [ -n "${1:-}" ]; then
+				warn "hook health: reporter unavailable — $bin (${ver:-version unknown}): the installed cenci-watch release has no hook-health reporter"
+			else
+				warn "hook health: reporter unavailable — $bin (${ver:-version unknown}) predates it; run: cenci update"
+			fi
 			return 0
 		fi
 		first="${out%%$'\n'*}"
@@ -557,7 +632,12 @@ doctor_hook_health() {
 				warn "hook health: current failure${detail:+ — $detail} — details: cenci daemon hook-health"
 				;;
 			*)
-				warn "hook health: reporter unavailable — unrecognized output; run: cenci update"
+				ver="$(cenci_binary_version "$bin" || true)"
+				if [ -n "${1:-}" ]; then
+					warn "hook health: reporter unavailable — unrecognized output from $bin (${ver:-version unknown})"
+				else
+					warn "hook health: reporter unavailable — unrecognized output from $bin (${ver:-version unknown}); run: cenci update"
+				fi
 				;;
 		esac
 		return 0
@@ -793,8 +873,8 @@ doctor_sysbox() {
 
 # opencode_config_dir — OpenCode's config directory, matching the exact
 # expression flow/opencode/install-skills.sh uses for its own TARGET_DIR, so
-# doctor and uninstall inspect the same legacy paths. Host setup is paused;
-# sandbox/lib/opencode-config.sh remains a retained container-side helper.
+# doctor and uninstall inspect the same legacy paths. Host setup is paused, and
+# the container-side permission seeding helper never touches this directory.
 opencode_config_dir() {
 	printf '%s' "${XDG_CONFIG_HOME:-$HOME/.config}/opencode"
 }
@@ -836,6 +916,28 @@ opencode_plugin_registered() {
 	local config
 	config="$(opencode_config_dir)/opencode.json"
 	[ -f "$config" ] && grep -qE "$OPENCODE_PLUGIN_SPEC_PATTERN" "$config" 2>/dev/null
+}
+
+# opencode_host_allow_all <file> — true when <file> is a JSON object whose
+# top-level .permission grants global allow-all, in either documented form:
+# the shorthand "allow" or an object with "*": "allow". Quiet by design: a
+# missing, invalid or non-object file, a non-string/object .permission, or a
+# missing jq all return false with no output, because their shape cannot be
+# judged. jq's short-circuiting `and` keeps non-object values away from the
+# indexing that would raise a jq error; stderr is suppressed as well.
+opencode_host_allow_all() {
+	local config="$1"
+	[ -f "$config" ] && have jq || return 1
+	jq -e 'type == "object" and (.permission == "allow" or ((.permission | type) == "object" and .permission["*"] == "allow"))' \
+		"$config" >/dev/null 2>&1
+}
+
+# opencode_allow_all_message <file> — the single-line finding shared by doctor
+# and uninstall. cenci cannot prove it added these keys (a user may have set
+# the same values), so the remediation is printed text only and never run.
+opencode_allow_all_message() {
+	local config="$1"
+	printf '%s' "OpenCode config $config grants global allow-all permissions — older cenci versions may have added permission and autoupdate; if you did not set these yourself, remove them with: jq 'del(.permission, .autoupdate)' \"$config\" > \"$config.tmp\" && cat \"$config.tmp\" > \"$config\" && rm \"$config.tmp\""
 }
 
 # doctor_opencode_support reports whether the detected OpenCode is new enough
@@ -954,7 +1056,20 @@ run_doctor() {
 		fi
 	fi
 	doctor_daemon_status
-	doctor_hook_health
+	if [ "$MODE" = install ]; then
+		# The preflight runs before the plugin cache binary exists, so any
+		# result here would describe the pre-install state; step_cenci_watch_setup
+		# checks the binary it provisions instead.
+		if selected cenci-watch; then
+			say "    hook health: checked after setup later in this run"
+		fi
+	else
+		doctor_hook_health
+		local cache_bin
+		if cache_bin="$(cached_cenci_binary)"; then
+			check_path_shadow "$cache_bin"
+		fi
+	fi
 
 	say ""
 	say "  ${BOLD}Installed stack components${RESET}"
@@ -989,6 +1104,12 @@ run_doctor() {
 		# filesystem check the doctor_opencode_support comment above refers to.
 		if opencode_skills_linked; then ok "OpenCode skills linked"; else warn "OpenCode skills not linked"; fi
 		if opencode_plugin_registered; then ok "OpenCode plugin registered"; else warn "OpenCode plugin not registered"; fi
+		# Warn only: a warn never sets DOCTOR_FAILED, and the host file is never edited.
+		local opencode_json
+		opencode_json="$(opencode_config_dir)/opencode.json"
+		if opencode_host_allow_all "$opencode_json"; then
+			warn "$(opencode_allow_all_message "$opencode_json")"
+		fi
 	fi
 
 	say ""
@@ -1633,6 +1754,7 @@ step_cenci_watch_setup() {
 		if [ "$MODE" = update ] && ! restart_cenci_daemon "$cache_bin"; then
 			INSTALL_FAILED=1
 		fi
+		post_setup_cenci_checks "$cache_bin"
 		return 0
 	fi
 	# A cached binary skips bootstrap, so macOS must refresh the launcher too.
@@ -1642,6 +1764,7 @@ step_cenci_watch_setup() {
 	if [ "$MODE" = update ] && ! restart_cenci_daemon "$cache_bin"; then
 		INSTALL_FAILED=1
 	fi
+	post_setup_cenci_checks "$cache_bin"
 
 	# macOS menu bar (SwiftBar) — optional, and the fiddliest manual step, so
 	# offer to wire it up here. Delegate to the widget's self-contained
@@ -1670,7 +1793,9 @@ step_cenci_watch_setup() {
 
 # OpenCode setup is paused on both install and update. Retain detection and
 # doctor/uninstall support for existing installations, but never prompt, link
-# skills, or seed host config. Re-enablement is #1222 and must address #1018.
+# skills, or seed host config. Re-enablement is #1222 and must register the
+# cenci-watch plugin through a host-only, .plugin-only function, and must never
+# call seed_opencode_config (the container-only permission seeder; #1018).
 step_opencode_setup() {
 	[ "$HAS_OPENCODE" -eq 1 ] || return 0
 	warn "OpenCode is temporarily disabled; skipping integration setup"
@@ -2933,15 +3058,18 @@ uninstall_widget_cleanup() {
 	teardown_cenci_linux_widgets
 }
 
-# uninstall_opencode_cleanup removes only what step_opencode_setup itself
-# added: the portable skill symlinks (via install-skills.sh remove, which
-# only unlinks its own PORTABLE_SKILLS symlinks pointing at the plugin's own
-# source — a user's own skills or a foreign symlink at the same name are left
-# untouched) and the cenci-watch plugin entry from opencode.json's .plugin
-# array — every other key (permission, autoupdate, other plugins) is left
-# exactly as the user has it. Not gated on HAS_OPENCODE: leftover
-# registration/symlinks should still be cleaned up even if the opencode
-# binary itself is gone by the time uninstall runs. Must run before
+# uninstall_opencode_cleanup removes only what a legacy installer registered
+# (step_opencode_setup is now a paused stub): the portable skill symlinks (via
+# install-skills.sh remove, which only unlinks its own PORTABLE_SKILLS
+# symlinks pointing at the plugin's own source — a user's own skills or a
+# foreign symlink at the same name are left untouched) and the cenci-watch
+# plugin entry from opencode.json's .plugin array — every other key
+# (permission, autoupdate, other plugins) is left exactly as the user has it.
+# When a global allow-all permission block remains afterwards, it only prints
+# a hint with a manual jq command (older cenci versions may have added it and
+# cenci cannot prove it did) and never edits it. Not gated on HAS_OPENCODE:
+# leftover registration/symlinks should still be cleaned up even if the
+# opencode binary itself is gone by the time uninstall runs. Must run before
 # uninstall_marketplace (like uninstall_widget_cleanup above) so
 # find_plugin_path can still resolve install-skills.sh from the checkout.
 uninstall_opencode_cleanup() {
@@ -2972,6 +3100,9 @@ uninstall_opencode_cleanup() {
 		else
 			rm -f "$opencode_json.cenci-tmp"
 			warn "could not update $opencode_json — remove the cenci plugin entry manually"
+		fi
+		if opencode_host_allow_all "$opencode_json"; then
+			warn "$(opencode_allow_all_message "$opencode_json")"
 		fi
 	elif [ -f "$opencode_json" ]; then
 		warn "jq not found — remove the cenci plugin entry from $opencode_json manually"
