@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -398,4 +400,343 @@ func TestCreateFailureError_LimitMarkerSplitAcrossWrites_Classifies(t *testing.T
 	e := &Engine{Runtime: "docker"}
 	runErr := errors.New("exit status 125")
 	assertLimitsRejectedError(t, e.createFailureError(false, true, c.String(), runErr), runErr)
+}
+
+// -- ticket #1159: stale-kernel classification (CENCI-SANDBOX-DIND-004) -------
+
+// staleKernelRelease is the running-kernel release the stale-kernel fixture
+// names. It is a literal in both the stderr and the tests so a matcher that
+// quietly reads some other release still fails.
+const staleKernelRelease = "7.2.2-1-cachyos"
+
+// staleKernelStderr is the verbatim shape Docker streams on a host whose
+// packages were upgraded past the running kernel without a reboot:
+// sysbox-runc bind-mounts /lib/modules/$(uname -r) and that directory is gone.
+// The two line breaks are part of the real stream (the daemon wraps its
+// chained error), and the /lib/modules path straddles one of them. Kept as a
+// literal, not built from the matcher's own pattern, so a matcher loosened to
+// match nothing real still fails these tests.
+const staleKernelStderr = `docker: Error response from daemon: failed to create task for container: failed to create shim task:
+OCI runtime create failed: failed to create lib container mount: failed to stat mount source at
+/lib/modules/7.2.2-1-cachyos: stat /lib/modules/7.2.2-1-cachyos: no such file or directory`
+
+// withKernelProbeFixture pins both host-probe seams for one test: the running
+// kernel release (osrelease, written the way /proc does, with a trailing
+// newline) and a modules root holding one directory per entry of modules. It
+// returns the modules root and restores the seams with t.Cleanup. Tests that
+// call it must not use t.Parallel: the seams are package-level vars.
+func withKernelProbeFixture(t *testing.T, osrelease string, modules []string) string {
+	t.Helper()
+	dir := t.TempDir()
+
+	osReleaseFile := filepath.Join(dir, "osrelease")
+	if err := os.WriteFile(osReleaseFile, []byte(osrelease+"\n"), 0o600); err != nil {
+		t.Fatalf("write osrelease fixture: %v", err)
+	}
+	root := filepath.Join(dir, "lib", "modules")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatalf("create modules root fixture: %v", err)
+	}
+	for _, m := range modules {
+		if err := os.MkdirAll(filepath.Join(root, m), 0o755); err != nil {
+			t.Fatalf("create modules entry %q: %v", m, err)
+		}
+	}
+
+	prevOSRelease, prevRoot := dindOSReleasePath, dindModulesRoot
+	dindOSReleasePath, dindModulesRoot = osReleaseFile, root
+	t.Cleanup(func() { dindOSReleasePath, dindModulesRoot = prevOSRelease, prevRoot })
+	return root
+}
+
+// assertStaleKernelError asserts the DIND-004 contract: the code, the running
+// release, the display path, the remediation, the escape hatch and the
+// available list are present; the DIND-003 guidance is absent; and the wrapped
+// run error survives.
+func assertStaleKernelError(t *testing.T, got, runErr error, release, available string) {
+	t.Helper()
+	if got == nil {
+		t.Fatal("createFailureError returned nil for a failed dind create; want an error")
+	}
+	msg := got.Error()
+	for _, want := range []string{
+		string(errcode.SandboxDindStaleKernelModules),
+		release,
+		"/lib/modules/" + release + " does not exist",
+		"the kernel was upgraded without a reboot",
+		"This is not a sysbox-ce version problem",
+		"Reboot into the installed kernel",
+		"available: " + available,
+		"--no-dind",
+		`"sandbox": {"dind": false}`,
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("stale-kernel error missing %q; got:\n%s", want, msg)
+		}
+	}
+	for _, unwanted := range []string{
+		"update sysbox-ce",
+		"https://github.com/nestybox/sysbox/releases",
+		string(errcode.SandboxDindRuntimeCreateFailed),
+		string(errcode.SandboxLimitsCreateRejected),
+	} {
+		if strings.Contains(msg, unwanted) {
+			t.Errorf("stale-kernel error must not contain %q; got:\n%s", unwanted, msg)
+		}
+	}
+	if !strings.HasPrefix(msg, "docker run: exit status 125\n") {
+		t.Errorf("stale-kernel error lost the %q first line; got:\n%s", "docker run: exit status 125", msg)
+	}
+	if !errors.Is(got, runErr) {
+		t.Errorf("stale-kernel error dropped the underlying error from the %%w chain; got:\n%s", msg)
+	}
+}
+
+// assertDind003Unchanged asserts a probe miss falls through to the unchanged
+// DIND-003 wording, including its sysbox-ce hint, and never reports DIND-004.
+func assertDind003Unchanged(t *testing.T, got, runErr error) {
+	t.Helper()
+	if got == nil {
+		t.Fatal("createFailureError returned nil for a failed dind create; want an error")
+	}
+	msg := got.Error()
+	for _, want := range []string{
+		string(errcode.SandboxDindRuntimeCreateFailed),
+		"update sysbox-ce",
+		"https://github.com/nestybox/sysbox/releases",
+		"--no-dind",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("DIND-003 fall-through missing %q; got:\n%s", want, msg)
+		}
+	}
+	if strings.Contains(msg, string(errcode.SandboxDindStaleKernelModules)) {
+		t.Errorf("a probe miss was misclassified as DIND-004; got:\n%s", msg)
+	}
+	if !errors.Is(got, runErr) {
+		t.Errorf("DIND-003 fall-through dropped the underlying error from the %%w chain; got:\n%s", msg)
+	}
+}
+
+// TestCreateFailureError_StaleKernel_RemediatesWithoutBlamingSysbox is the
+// headline AC: the verbatim stale-kernel stderr, a running kernel equal to the
+// named release and no /lib/modules/<release> directory yields DIND-004 with
+// the reboot remediation, the sorted installed releases and the escape hatch,
+// and nothing that sends the operator to update sysbox-ce.
+func TestCreateFailureError_StaleKernel_RemediatesWithoutBlamingSysbox(t *testing.T) {
+	withKernelProbeFixture(t, staleKernelRelease, []string{"7.3.1-1-cachyos", "7.2.9-1-cachyos"})
+	e := &Engine{Runtime: "docker"}
+	runErr := errors.New("exit status 125")
+
+	got := e.createFailureError(true, false, staleKernelStderr, runErr)
+
+	assertStaleKernelError(t, got, runErr, staleKernelRelease, "7.2.9-1-cachyos, 7.3.1-1-cachyos")
+}
+
+// TestCreateFailureError_StaleKernel_PrintsFixedDisplayPathNotTheRoot pins that
+// the message names the path the runtime named (/lib/modules/<release>), never
+// the test-overridable modules root used for the probes.
+func TestCreateFailureError_StaleKernel_PrintsFixedDisplayPathNotTheRoot(t *testing.T) {
+	root := withKernelProbeFixture(t, staleKernelRelease, []string{"7.3.1-1-cachyos"})
+	e := &Engine{Runtime: "docker"}
+
+	runErr := errors.New("exit status 125")
+
+	got := e.createFailureError(true, false, staleKernelStderr, runErr)
+
+	// The DIND-003 fall-through also omits the root, so first prove the
+	// DIND-004 branch fired; otherwise the root-absence check below is vacuous.
+	assertStaleKernelError(t, got, runErr, staleKernelRelease, "7.3.1-1-cachyos")
+	if strings.Contains(got.Error(), root) {
+		t.Errorf("stale-kernel error leaked the probe root %q instead of /lib/modules; got:\n%s", root, got.Error())
+	}
+}
+
+// TestCreateFailureError_OtherSysboxRejection_KeepsDind003WithStaleFixture is
+// the "other spec rejections keep DIND-003" AC and the #1077 edge case: the
+// time-namespace stderr names no /lib/modules path, so it keeps DIND-003 with
+// its update-sysbox-ce hint even when the host probes would say "stale".
+func TestCreateFailureError_OtherSysboxRejection_KeepsDind003WithStaleFixture(t *testing.T) {
+	withKernelProbeFixture(t, staleKernelRelease, []string{"7.3.1-1-cachyos"})
+	e := &Engine{Runtime: "docker"}
+	runErr := errors.New("exit status 125")
+
+	got := e.createFailureError(true, false, ociCreateStderr, runErr)
+
+	assertDind003Unchanged(t, got, runErr)
+}
+
+// TestCreateFailureError_StaleKernel_ModulesDirExists_KeepsDind003 is the edge
+// case where the stderr names /lib/modules/<release> but that directory exists
+// locally: the missing directory is on another side, so the sysbox wording stays.
+func TestCreateFailureError_StaleKernel_ModulesDirExists_KeepsDind003(t *testing.T) {
+	withKernelProbeFixture(t, staleKernelRelease, []string{staleKernelRelease, "7.3.1-1-cachyos"})
+	e := &Engine{Runtime: "docker"}
+	runErr := errors.New("exit status 125")
+
+	got := e.createFailureError(true, false, staleKernelStderr, runErr)
+
+	assertDind003Unchanged(t, got, runErr)
+}
+
+// TestCreateFailureError_StaleKernel_ReleaseDiffersFromRunningKernel_KeepsDind003
+// is the remote DOCKER_HOST edge case: the stderr names a release that is not
+// the local running kernel, which the local probe cannot judge.
+func TestCreateFailureError_StaleKernel_ReleaseDiffersFromRunningKernel_KeepsDind003(t *testing.T) {
+	withKernelProbeFixture(t, "7.3.1-1-cachyos", []string{"7.3.1-1-cachyos"})
+	e := &Engine{Runtime: "docker"}
+	runErr := errors.New("exit status 125")
+
+	got := e.createFailureError(true, false, staleKernelStderr, runErr)
+
+	assertDind003Unchanged(t, got, runErr)
+}
+
+// TestCreateFailureError_StaleKernel_OSReleaseUnreadable_KeepsDind003 is the
+// edge case where /proc/sys/kernel/osrelease cannot be read.
+func TestCreateFailureError_StaleKernel_OSReleaseUnreadable_KeepsDind003(t *testing.T) {
+	withKernelProbeFixture(t, staleKernelRelease, []string{"7.3.1-1-cachyos"})
+	dindOSReleasePath = filepath.Join(t.TempDir(), "absent-osrelease")
+	e := &Engine{Runtime: "docker"}
+	runErr := errors.New("exit status 125")
+
+	got := e.createFailureError(true, false, staleKernelStderr, runErr)
+
+	assertDind003Unchanged(t, got, runErr)
+}
+
+// TestCreateFailureError_StaleKernel_StatErrorOtherThanNotExist_KeepsDind003 is
+// the edge case where the local stat fails with something other than
+// not-exist. The modules root is a regular file, so statting <root>/<release>
+// fails with ENOTDIR, which errors.Is(err, fs.ErrNotExist) does not match, and
+// the result is the same for root and non-root runners (chmod 000 is bypassed
+// by root).
+func TestCreateFailureError_StaleKernel_StatErrorOtherThanNotExist_KeepsDind003(t *testing.T) {
+	withKernelProbeFixture(t, staleKernelRelease, nil)
+	notADir := filepath.Join(t.TempDir(), "modules-is-a-file")
+	if err := os.WriteFile(notADir, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write regular-file modules root: %v", err)
+	}
+	dindModulesRoot = notADir
+	e := &Engine{Runtime: "docker"}
+	runErr := errors.New("exit status 125")
+
+	got := e.createFailureError(true, false, staleKernelStderr, runErr)
+
+	assertDind003Unchanged(t, got, runErr)
+}
+
+// TestCreateFailureError_StaleKernel_UnlistableOrEmptyRoot_PrintsNoneFound is
+// the edge case where the modules root is empty or cannot be listed: the
+// remediation still prints, with "available: none found" in place of a list.
+func TestCreateFailureError_StaleKernel_UnlistableOrEmptyRoot_PrintsNoneFound(t *testing.T) {
+	runErr := errors.New("exit status 125")
+
+	t.Run("empty root", func(t *testing.T) {
+		withKernelProbeFixture(t, staleKernelRelease, nil)
+		e := &Engine{Runtime: "docker"}
+
+		got := e.createFailureError(true, false, staleKernelStderr, runErr)
+
+		assertStaleKernelError(t, got, runErr, staleKernelRelease, "none found")
+	})
+
+	t.Run("nonexistent root", func(t *testing.T) {
+		withKernelProbeFixture(t, staleKernelRelease, nil)
+		dindModulesRoot = filepath.Join(t.TempDir(), "no-such-modules-root")
+		e := &Engine{Runtime: "docker"}
+
+		got := e.createFailureError(true, false, staleKernelStderr, runErr)
+
+		assertStaleKernelError(t, got, runErr, staleKernelRelease, "none found")
+	})
+}
+
+// TestCreateFailureError_StaleKernel_UnsafeReleaseToken_KeepsDind003 is the
+// edge case for a release token with a separator, "..", or characters outside
+// [A-Za-z0-9._+~-]. Each case sets the running kernel release to the same
+// hostile token, so a missing validation would pass the equality check, stat a
+// path that does not exist and fire DIND-004; falling through to DIND-003 shows
+// the token was rejected before any path was joined under the modules root.
+func TestCreateFailureError_StaleKernel_UnsafeReleaseToken_KeepsDind003(t *testing.T) {
+	for _, token := range []string{"../etc", "a/b", "a..b", ".hidden", "x$y"} {
+		t.Run(token, func(t *testing.T) {
+			withKernelProbeFixture(t, token, []string{"7.3.1-1-cachyos"})
+			stderr := strings.ReplaceAll(staleKernelStderr, staleKernelRelease, token)
+			e := &Engine{Runtime: "docker"}
+			runErr := errors.New("exit status 125")
+
+			got := e.createFailureError(true, false, stderr, runErr)
+
+			assertDind003Unchanged(t, got, runErr)
+		})
+	}
+}
+
+// TestCreateFailureError_StaleKernel_NonDind_KeepsPlainWording is the edge case
+// for a launch that never asked for dind: exactly the plain wording, even with
+// stale-kernel stderr and probes that would otherwise say "stale".
+func TestCreateFailureError_StaleKernel_NonDind_KeepsPlainWording(t *testing.T) {
+	withKernelProbeFixture(t, staleKernelRelease, []string{"7.3.1-1-cachyos"})
+	e := &Engine{Runtime: "docker"}
+
+	got := e.createFailureError(false, false, staleKernelStderr, errors.New("exit status 125"))
+
+	if got == nil {
+		t.Fatal("createFailureError returned nil for a failed create; want an error")
+	}
+	if want := "docker run: exit status 125"; got.Error() != want {
+		t.Errorf("createFailureError = %q, want the plain wording %q", got.Error(), want)
+	}
+}
+
+// TestCreateFailureError_StaleKernel_WithLimitsOn_YieldsDind004NotLimits002 is
+// the edge case for limitsOn=true: the stale-kernel stderr carries no limit
+// marker, so it must be DIND-004, never LIMITS-002.
+func TestCreateFailureError_StaleKernel_WithLimitsOn_YieldsDind004NotLimits002(t *testing.T) {
+	withKernelProbeFixture(t, staleKernelRelease, []string{"7.3.1-1-cachyos"})
+	e := &Engine{Runtime: "docker"}
+	runErr := errors.New("exit status 125")
+
+	got := e.createFailureError(true, true, staleKernelStderr, runErr)
+
+	assertStaleKernelError(t, got, runErr, staleKernelRelease, "7.3.1-1-cachyos")
+}
+
+// TestCreateFailureError_StaleKernel_SplitAcrossWrites_Classifies is the edge
+// case for stderr arriving in chunks with a split inside the matched span
+// "stat /lib/modules/<release>: no such file or directory" (the cut falls
+// between "stat /lib/mod" and "ules/", not at the earlier path-only line the
+// matcher ignores): the retained prefix is one contiguous buffer, so it still
+// classifies.
+func TestCreateFailureError_StaleKernel_SplitAcrossWrites_Classifies(t *testing.T) {
+	withKernelProbeFixture(t, staleKernelRelease, []string{"7.3.1-1-cachyos"})
+	const spanStart = "stat /lib/modules/"
+	const splitAt = "stat /lib/mod"
+	idx := strings.Index(staleKernelStderr, spanStart)
+	if idx < 0 {
+		t.Fatalf("fixture does not contain %q", spanStart)
+	}
+	cut := idx + len(splitAt)
+
+	c := newCapturedStderr(io.Discard)
+	for _, chunk := range []string{staleKernelStderr[:cut], staleKernelStderr[cut:]} {
+		if _, err := c.Write([]byte(chunk)); err != nil {
+			t.Fatalf("Write returned error: %v", err)
+		}
+	}
+
+	e := &Engine{Runtime: "docker"}
+	runErr := errors.New("exit status 125")
+	got := e.createFailureError(true, false, c.String(), runErr)
+
+	assertStaleKernelError(t, got, runErr, staleKernelRelease, "7.3.1-1-cachyos")
+}
+
+// TestSeverityForCode_DindStaleKernelModulesIsFatal pins DIND-004's tier
+// explicitly: like DIND-003 the container was never created, so it is fatal.
+func TestSeverityForCode_DindStaleKernelModulesIsFatal(t *testing.T) {
+	if got := severityForCode(errcode.SandboxDindStaleKernelModules); got != SeverityFatal {
+		t.Errorf("severityForCode(%s) = %q, want %q", errcode.SandboxDindStaleKernelModules, got, SeverityFatal)
+	}
 }

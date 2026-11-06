@@ -328,6 +328,55 @@ func TestSandboxSocketUnwiredCode_HintsNameContainerRecreation(t *testing.T) {
 	}
 }
 
+// TestSandboxDindStaleKernelModulesCode_ExistsAndIsRegistered pins ticket
+// #1159's stale-kernel code: its literal value, the documented format, a
+// complete registry entry (renderFinding prints Hints verbatim), membership in
+// AllCodes() (so the severity exhaustiveness and atlas-sync tests see it), and
+// distinctness from DIND-001 through DIND-003 so the stale-kernel class never
+// collapses onto the sysbox-version class it was split from.
+func TestSandboxDindStaleKernelModulesCode_ExistsAndIsRegistered(t *testing.T) {
+	if SandboxDindStaleKernelModules != "CENCI-SANDBOX-DIND-004" {
+		t.Errorf("SandboxDindStaleKernelModules = %q, want CENCI-SANDBOX-DIND-004", SandboxDindStaleKernelModules)
+	}
+	if !codeFormat.MatchString(string(SandboxDindStaleKernelModules)) {
+		t.Errorf("SandboxDindStaleKernelModules %q does not match format %s", SandboxDindStaleKernelModules, codeFormat.String())
+	}
+
+	entry, ok := Lookup(SandboxDindStaleKernelModules)
+	if !ok {
+		t.Fatalf("Lookup(%s) = _, false; want a registered entry", SandboxDindStaleKernelModules)
+	}
+	if entry.Message == "" {
+		t.Errorf("Lookup(%s).Message is empty", SandboxDindStaleKernelModules)
+	}
+	if len(entry.Causes) == 0 {
+		t.Errorf("Lookup(%s).Causes is empty", SandboxDindStaleKernelModules)
+	}
+	if len(entry.Hints) == 0 {
+		t.Errorf("Lookup(%s).Hints is empty", SandboxDindStaleKernelModules)
+	}
+
+	inAllCodes := false
+	for _, c := range AllCodes() {
+		if c == SandboxDindStaleKernelModules {
+			inAllCodes = true
+		}
+	}
+	if !inAllCodes {
+		t.Errorf("AllCodes() does not include SandboxDindStaleKernelModules (%s); it must be added to allCodes in errcode.go", SandboxDindStaleKernelModules)
+	}
+
+	for _, other := range []Code{
+		SandboxDindStartupFailure,
+		SandboxDindPlatformUnsupported,
+		SandboxDindRuntimeCreateFailed,
+	} {
+		if SandboxDindStaleKernelModules == other {
+			t.Fatalf("SandboxDindStaleKernelModules must be distinct from %q, both = %q", other, other)
+		}
+	}
+}
+
 // TestSandboxLimitsCodes_ExistAndAreRegistered pins the three resource-limit
 // codes (#1216, AC11): their literal values, the documented format, a
 // complete registry entry each (renderFinding prints Hints verbatim, so an
