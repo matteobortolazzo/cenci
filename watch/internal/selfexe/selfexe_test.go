@@ -295,7 +295,7 @@ func TestResolve_NonExecutableCandidatesAreSkipped(t *testing.T) {
 		r := failingResolver(t.TempDir())
 		r.Executable = func() (string, error) { return plain, nil }
 
-		mustFail(t, r)
+		_ = mustFail(t, r)
 	})
 
 	t.Run("os.Executable path is a directory", func(t *testing.T) {
@@ -303,7 +303,7 @@ func TestResolve_NonExecutableCandidatesAreSkipped(t *testing.T) {
 		dir := t.TempDir()
 		r.Executable = func() (string, error) { return dir, nil }
 
-		mustFail(t, r)
+		_ = mustFail(t, r)
 	})
 }
 
