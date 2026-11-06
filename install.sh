@@ -873,8 +873,8 @@ doctor_sysbox() {
 
 # opencode_config_dir — OpenCode's config directory, matching the exact
 # expression flow/opencode/install-skills.sh uses for its own TARGET_DIR, so
-# doctor and uninstall inspect the same legacy paths. Host setup is paused;
-# sandbox/lib/opencode-config.sh remains a retained container-side helper.
+# doctor and uninstall inspect the same legacy paths. Host setup is paused, and
+# the container-side permission seeding helper never touches this directory.
 opencode_config_dir() {
 	printf '%s' "${XDG_CONFIG_HOME:-$HOME/.config}/opencode"
 }
@@ -916,6 +916,28 @@ opencode_plugin_registered() {
 	local config
 	config="$(opencode_config_dir)/opencode.json"
 	[ -f "$config" ] && grep -qE "$OPENCODE_PLUGIN_SPEC_PATTERN" "$config" 2>/dev/null
+}
+
+# opencode_host_allow_all <file> — true when <file> is a JSON object whose
+# top-level .permission grants global allow-all, in either documented form:
+# the shorthand "allow" or an object with "*": "allow". Quiet by design: a
+# missing, invalid or non-object file, a non-string/object .permission, or a
+# missing jq all return false with no output, because their shape cannot be
+# judged. jq's short-circuiting `and` keeps non-object values away from the
+# indexing that would raise a jq error; stderr is suppressed as well.
+opencode_host_allow_all() {
+	local config="$1"
+	[ -f "$config" ] && have jq || return 1
+	jq -e 'type == "object" and (.permission == "allow" or ((.permission | type) == "object" and .permission["*"] == "allow"))' \
+		"$config" >/dev/null 2>&1
+}
+
+# opencode_allow_all_message <file> — the single-line finding shared by doctor
+# and uninstall. cenci cannot prove it added these keys (a user may have set
+# the same values), so the remediation is printed text only and never run.
+opencode_allow_all_message() {
+	local config="$1"
+	printf '%s' "OpenCode config $config grants global allow-all permissions — older cenci versions may have added permission and autoupdate; if you did not set these yourself, remove them with: jq 'del(.permission, .autoupdate)' \"$config\" > \"$config.tmp\" && cat \"$config.tmp\" > \"$config\" && rm \"$config.tmp\""
 }
 
 # doctor_opencode_support reports whether the detected OpenCode is new enough
@@ -1082,6 +1104,12 @@ run_doctor() {
 		# filesystem check the doctor_opencode_support comment above refers to.
 		if opencode_skills_linked; then ok "OpenCode skills linked"; else warn "OpenCode skills not linked"; fi
 		if opencode_plugin_registered; then ok "OpenCode plugin registered"; else warn "OpenCode plugin not registered"; fi
+		# Warn only: a warn never sets DOCTOR_FAILED, and the host file is never edited.
+		local opencode_json
+		opencode_json="$(opencode_config_dir)/opencode.json"
+		if opencode_host_allow_all "$opencode_json"; then
+			warn "$(opencode_allow_all_message "$opencode_json")"
+		fi
 	fi
 
 	say ""
@@ -1765,7 +1793,9 @@ step_cenci_watch_setup() {
 
 # OpenCode setup is paused on both install and update. Retain detection and
 # doctor/uninstall support for existing installations, but never prompt, link
-# skills, or seed host config. Re-enablement is #1222 and must address #1018.
+# skills, or seed host config. Re-enablement is #1222 and must register the
+# cenci-watch plugin through a host-only, .plugin-only function, and must never
+# call seed_opencode_config (the container-only permission seeder; #1018).
 step_opencode_setup() {
 	[ "$HAS_OPENCODE" -eq 1 ] || return 0
 	warn "OpenCode is temporarily disabled; skipping integration setup"
@@ -3028,15 +3058,18 @@ uninstall_widget_cleanup() {
 	teardown_cenci_linux_widgets
 }
 
-# uninstall_opencode_cleanup removes only what step_opencode_setup itself
-# added: the portable skill symlinks (via install-skills.sh remove, which
-# only unlinks its own PORTABLE_SKILLS symlinks pointing at the plugin's own
-# source — a user's own skills or a foreign symlink at the same name are left
-# untouched) and the cenci-watch plugin entry from opencode.json's .plugin
-# array — every other key (permission, autoupdate, other plugins) is left
-# exactly as the user has it. Not gated on HAS_OPENCODE: leftover
-# registration/symlinks should still be cleaned up even if the opencode
-# binary itself is gone by the time uninstall runs. Must run before
+# uninstall_opencode_cleanup removes only what a legacy installer registered
+# (step_opencode_setup is now a paused stub): the portable skill symlinks (via
+# install-skills.sh remove, which only unlinks its own PORTABLE_SKILLS
+# symlinks pointing at the plugin's own source — a user's own skills or a
+# foreign symlink at the same name are left untouched) and the cenci-watch
+# plugin entry from opencode.json's .plugin array — every other key
+# (permission, autoupdate, other plugins) is left exactly as the user has it.
+# When a global allow-all permission block remains afterwards, it only prints
+# a hint with a manual jq command (older cenci versions may have added it and
+# cenci cannot prove it did) and never edits it. Not gated on HAS_OPENCODE:
+# leftover registration/symlinks should still be cleaned up even if the
+# opencode binary itself is gone by the time uninstall runs. Must run before
 # uninstall_marketplace (like uninstall_widget_cleanup above) so
 # find_plugin_path can still resolve install-skills.sh from the checkout.
 uninstall_opencode_cleanup() {
@@ -3067,6 +3100,9 @@ uninstall_opencode_cleanup() {
 		else
 			rm -f "$opencode_json.cenci-tmp"
 			warn "could not update $opencode_json — remove the cenci plugin entry manually"
+		fi
+		if opencode_host_allow_all "$opencode_json"; then
+			warn "$(opencode_allow_all_message "$opencode_json")"
 		fi
 	elif [ -f "$opencode_json" ]; then
 		warn "jq not found — remove the cenci plugin entry from $opencode_json manually"
