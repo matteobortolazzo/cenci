@@ -1,9 +1,14 @@
 package launcher
 
 import (
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/errcode"
@@ -70,13 +75,88 @@ var limitRejectionMarker = regexp.MustCompile(
 	`memory\.max|memory\.swap\.max|pids\.max|memory\.limit_in_bytes|Minimum memory limit|` +
 		`(?i:cgroup controller\W{1,3}(?:memory|pids)\W{1,3}(?:is )?not available)`)
 
+// Host probe seams for the stale-kernel classification (#1159): the file the
+// running kernel's release is read from, and the root the installed kernels'
+// module directories live under. Production never reassigns them; tests pin
+// both (and so must not run in parallel).
+var (
+	dindOSReleasePath = "/proc/sys/kernel/osrelease"
+	dindModulesRoot   = "/lib/modules"
+)
+
+// staleKernelStatMarker captures the release token of the daemon's
+// "stat /lib/modules/<release>: no such file or directory" wording, the
+// missing mount source sysbox-runc reports when the running kernel's modules
+// directory has been removed. The capture is deliberately loose (anything up
+// to whitespace or a colon); kernelReleaseToken is what makes it safe to join
+// under the modules root.
+var staleKernelStatMarker = regexp.MustCompile(`stat /lib/modules/([^\s:]+): no such file or directory`)
+
+// kernelReleaseToken is the charset of a kernel release as it appears as a
+// single path segment under /lib/modules. It is checked, together with an
+// explicit ".." rejection, before the token from container-runtime stderr is
+// joined to any path (sandbox/AGENTS.md: validate host paths).
+var kernelReleaseToken = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+~-]*$`)
+
+// validKernelRelease reports whether s is a safe single-segment kernel release.
+func validKernelRelease(s string) bool {
+	return kernelReleaseToken.MatchString(s) && !strings.Contains(s, "..")
+}
+
+// staleKernelMissingRelease reports the running kernel's release when stderr
+// shows the stale-kernel failure: the stderr names a missing
+// /lib/modules/<release> mount source, that release is the one in
+// dindOSReleasePath, and a local stat of it returns not-exist. Every other
+// outcome (no marker, an unsafe token, an unreadable or different osrelease, a
+// directory that exists, a stat error other than not-exist) is ok=false so the
+// caller keeps the DIND-003 wording.
+func staleKernelMissingRelease(stderr string) (release string, ok bool) {
+	m := staleKernelStatMarker.FindStringSubmatch(stderr)
+	if m == nil || !validKernelRelease(m[1]) {
+		return "", false
+	}
+	raw, err := os.ReadFile(dindOSReleasePath)
+	if err != nil || strings.TrimSpace(string(raw)) != m[1] {
+		return "", false
+	}
+	if _, err := os.Stat(filepath.Join(dindModulesRoot, m[1])); !errors.Is(err, fs.ErrNotExist) {
+		return "", false
+	}
+	return m[1], true
+}
+
+// installedKernelReleases lists the entries of the modules root that look like
+// kernel releases, sorted and comma-joined, or "none found" when the root is
+// empty or cannot be listed.
+func installedKernelReleases() string {
+	entries, err := os.ReadDir(dindModulesRoot)
+	if err != nil {
+		return "none found"
+	}
+	var names []string
+	for _, entry := range entries {
+		if validKernelRelease(entry.Name()) {
+			names = append(names, entry.Name())
+		}
+	}
+	if len(names) == 0 {
+		return "none found"
+	}
+	sort.Strings(names)
+	return strings.Join(names, ", ")
+}
+
 // createFailureError translates a failed container create into the error
 // Launch returns. Every failure keeps the original "<runtime> run: %w"
-// wording except the two classes that wording actively misleads on: a create
+// wording except the three classes that wording actively misleads on: a create
 // the runtime rejected because of a memory or pids limit flag (limitsOn: at
 // least one limit flag was on the argv; LIMITS-002, checked first because
 // runc's cgroup errors arrive wrapped in the same "OCI runtime create failed"
-// text the dind check keys on), and a dind launch rejected by the OCI runtime.
+// text the dind check keys on), a dind launch rejected by the OCI runtime
+// because the running kernel's /lib/modules/<release> directory is gone
+// (DIND-004, #1159: the host was upgraded without a reboot, and updating
+// sysbox-ce cannot help), and any other dind launch rejected by the OCI
+// runtime (DIND-003).
 //
 // The raw daemon text for the dind case names neither sysbox nor dind — e.g.
 // `OCI runtime create failed: namespace {"time" ""} does not exist` — and the
@@ -102,6 +182,17 @@ func (e *Engine) createFailureError(dindOn, limitsOn bool, stderr string, runErr
 	}
 	if !dindOn || !strings.Contains(stderr, ociRuntimeCreateMarker) {
 		return fmt.Errorf("%s run: %w", e.Runtime, runErr)
+	}
+	if release, ok := staleKernelMissingRelease(stderr); ok {
+		//nolint:staticcheck // ST1005: multi-sentence user-facing guidance, matching the --agent auth errors in launch.go
+		return fmt.Errorf("%s run: %w\n"+
+			"Nested Docker (DinD) is on for this launch, so cenci created the container with --runtime=sysbox-runc, "+
+			"which bind-mounts the running kernel's modules directory [%s].\n"+
+			"The running kernel is %s, but /lib/modules/%s does not exist — the kernel was upgraded without a reboot, "+
+			"and sysbox-runc needs that directory. Reboot into the installed kernel (available: %s). "+
+			"This is not a sysbox-ce version problem.\n"+
+			"To launch without nested Docker meanwhile, pass --no-dind, or set \"sandbox\": {\"dind\": false} in .cenci/config.json.",
+			e.Runtime, runErr, errcode.SandboxDindStaleKernelModules, release, release, installedKernelReleases())
 	}
 	//nolint:staticcheck // ST1005: multi-sentence user-facing guidance, matching the --agent auth errors in launch.go
 	return fmt.Errorf("%s run: %w\n"+

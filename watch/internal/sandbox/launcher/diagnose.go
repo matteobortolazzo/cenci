@@ -53,7 +53,7 @@ type finding struct {
 func severityForCode(code errcode.Code) Severity {
 	switch code {
 	case errcode.SandboxStartAgentCLIMissing, errcode.SandboxStartGenericEntrypoint, errcode.SandboxSessionNotFound,
-		errcode.SandboxDindRuntimeCreateFailed,
+		errcode.SandboxDindRuntimeCreateFailed, errcode.SandboxDindStaleKernelModules,
 		errcode.SandboxLimitsHostMemoryUnreadable, errcode.SandboxLimitsCreateRejected:
 		return SeverityFatal
 	case errcode.SandboxStartReadinessTimeout, errcode.DaemonConnUnreachable, errcode.DaemonSocketMissing, errcode.SandboxDindStartupFailure,

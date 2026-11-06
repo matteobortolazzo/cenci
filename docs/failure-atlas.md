@@ -228,10 +228,10 @@ rejected the create with an `OCI runtime create failed` error. Sysbox *is*
 registered with Docker — `dindPreflight` checks registration and passed — it
 simply cannot create containers on this host. Attached by the launcher's
 `createFailureError` (`dindcreate.go`) at the `Launch` create call site.
-Fatal tier, and the only DinD code at that tier: `CENCI-SANDBOX-DIND-001`
-and `CENCI-SANDBOX-DIND-002` both describe a session that launched and works
-without nested Docker, whereas here no container was created and there is no
-session at all.
+Fatal tier, like its sub-case `CENCI-SANDBOX-DIND-004`, and unlike
+`CENCI-SANDBOX-DIND-001` and `CENCI-SANDBOX-DIND-002`, which both describe a
+session that launched and works without nested Docker, whereas here no
+container was created and there is no session at all.
 
 **Common causes**:
 - The installed `sysbox-ce` predates a change in the host's Docker or kernel.
@@ -242,6 +242,9 @@ session at all.
 - The sysbox helper daemons (`sysbox-mgr`, `sysbox-fs`) are registered but not
   running correctly, so the runtime binary is reachable while its supporting
   services are not.
+- The running kernel's `/lib/modules/<release>` directory is gone because the
+  host was upgraded without a reboot. That case is reported as
+  `CENCI-SANDBOX-DIND-004` instead, with a reboot remediation.
 
 **Diagnostic commands**:
 ```bash
@@ -270,6 +273,44 @@ docker run --rm alpine readlink /proc/self/ns/time # a container reports
 **Platform notes**: Linux only. On macOS a dind request degrades to
 `CENCI-SANDBOX-DIND-002` before any create is attempted, so this code can
 never be reached there.
+
+## CENCI-SANDBOX-DIND-004
+
+**Meaning**: Nested Docker was on for this launch and the daemon rejected the
+create with an `OCI runtime create failed` error that names a missing mount
+source `/lib/modules/<release>`, where `<release>` is the running kernel's
+release. `sysbox-runc` bind-mounts that directory into every container, and it
+has been removed: the host's packages were upgraded past the running kernel
+without a reboot. This is a create-time sub-case of `CENCI-SANDBOX-DIND-003`,
+attached by the same `createFailureError` (`dindcreate.go`) only when the
+stderr's release equals the one in `/proc/sys/kernel/osrelease` and a local
+`stat` of `/lib/modules/<release>` returns not-exist; every other probe result
+keeps the `CENCI-SANDBOX-DIND-003` wording. Fatal tier: no container was
+created, so there is no session at all.
+
+**Common causes**:
+- A rolling distribution (Arch, CachyOS, openSUSE Tumbleweed) upgraded the
+  kernel package and removed the old kernel's modules directory while the old
+  kernel kept running.
+- The running kernel's `/lib/modules/<release>` directory was deleted or never
+  installed.
+
+**Diagnostic commands**:
+```bash
+uname -r          # the running kernel's release
+ls /lib/modules   # the installed kernels; the running release is missing
+```
+
+**Recovery procedure**:
+1. Reboot into the installed kernel. Updating `sysbox-ce` cannot help here.
+2. To keep working without nested Docker until the reboot, launch with `cenci
+   open <shortcut> --no-dind`, or set `"sandbox": {"dind": false}` in
+   `.cenci/config.json` for a repo that does not need it.
+
+**Platform notes**: Linux only. The running release is read from
+`/proc/sys/kernel/osrelease` on the machine running cenci, so a remote
+`DOCKER_HOST` daemon on a different kernel never matches and keeps the
+`CENCI-SANDBOX-DIND-003` wording.
 
 ## CENCI-SANDBOX-LIMITS-001
 

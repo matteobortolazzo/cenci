@@ -71,6 +71,7 @@ This prevents readers and future implementers from assuming the code is actively
 | `CENCI-SANDBOX-DIND-001` | Sandbox / Dind | The nested Docker daemon (DinD) failed to start, or crashed/OOMed after starting, without an intentional-shutdown sentinel superseding the marker. Attached by the launcher's before-attach warning and by `cenci diagnose`. |
 | `CENCI-SANDBOX-DIND-002` | Sandbox / Dind | Nested Docker was requested (`--dind` or `sandbox.dind`) on a host that can never register `sysbox-runc` — macOS — so the sandbox launched without it. Attached by the launcher's degrade warning and reported by `cenci audit` as the `platform-unsupported` dind source. |
 | `CENCI-SANDBOX-DIND-003` | Sandbox / Dind | A dind launch's container create was rejected by the OCI runtime: `sysbox-runc` is registered with Docker (so `dindPreflight` passed) but could not create the container. Attached by the launcher's create-failure mapping. |
+| `CENCI-SANDBOX-DIND-004` | Sandbox / Dind | A dind launch's container create failed because the running kernel's `/lib/modules/<release>` directory is missing (the host was upgraded without a reboot). A create-time sub-case of DIND-003, attached by `dindcreate.go`'s `createFailureError`; the remediation is to reboot, not to update `sysbox-ce`. |
 | `CENCI-SANDBOX-LIMITS-001` | Sandbox / Limits | The container runtime's total host memory could not be read (or was unusable), so the default `--memory` limit cannot be derived and the launch fails before any create. Attached by the launcher's host-memory query. |
 | `CENCI-SANDBOX-LIMITS-002` | Sandbox / Limits | The container runtime rejected the create because of a memory or pids limit (e.g. an undelegated cgroup controller). Attached by the launcher's create-failure mapping; names both opt-out keys. |
 | `CENCI-SANDBOX-LIMITS-003` | Sandbox / Limits | The sandbox container's cgroup recorded out-of-memory kills (`oom_kill` above 0). Attached by `cenci diagnose`. |
@@ -128,13 +129,22 @@ for an inner `dockerd` that should have started and didn't.
 create's captured stderr carries the daemon's `OCI runtime create failed`
 wrapper; every other create failure keeps the plain `<runtime> run: %w`
 wording, so an ordinary failure (bad mount, name conflict) is never blamed on
-sysbox. It is the only DinD code at `Fatal` tier: DIND-001 and DIND-002 both
+sysbox. It is `Fatal` tier, as is DIND-004: DIND-001 and DIND-002 both
 describe a session that launched and works without nested Docker, whereas here
 the container was never created, so there is no session at all.
 
-The three DinD codes partition by *when* nested Docker failed —
+`CENCI-SANDBOX-DIND-004` (#1159) is a create-time sub-case of DIND-003,
+attached by the same `dindcreate.go` `createFailureError`. It fires only when
+the stderr names a missing `/lib/modules/<release>` mount source, that release
+equals the running kernel's (`/proc/sys/kernel/osrelease`), and a local `stat`
+of the directory returns not-exist — the host was upgraded past the running
+kernel without a reboot, so updating `sysbox-ce` cannot help and the message
+says to reboot instead. Every other probe result keeps the DIND-003 wording.
+
+The four DinD codes partition by *when* nested Docker failed —
 DIND-002 before the launch (the host can never register `sysbox-runc`),
-DIND-003 during container create (registered but non-functional),
+DIND-003 and its DIND-004 sub-case during container create (registered but
+non-functional; DIND-004 when the cause is a stale running kernel),
 DIND-001 after create (the container exists, the inner `dockerd` didn't
 start or later died).
 
