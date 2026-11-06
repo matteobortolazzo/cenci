@@ -12,12 +12,14 @@ package daemon
 // platforms.
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -25,6 +27,8 @@ import (
 	"time"
 
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/hostrepo"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/ipc"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/selfexe"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/tmux/tmuxtest"
 )
 
@@ -60,9 +64,15 @@ func (c *armSeamCalls) capturedCmd() *exec.Cmd {
 // package's existing d.armSpawn-swap test style (arm_test.go) but at the
 // package-var level, since armResolveHostRepo/armSessionForPane/
 // armStartBabysit are seams of hostArmSpawn itself, not of Daemon.
+//
+// It also stubs armResolveSelfExe with fakeSelfExe (#1372) so the suite never
+// reads the developer's ~/.local/bin/cenci, PATH or own executable
+// (watch/docs/test-isolation.md); tests that exercise the resolver replace it
+// afterwards through installSelfExe.
 func installArmSeams(t *testing.T, session func(context.Context, string) (string, error), resolve func(context.Context, string) (string, error), start func(*exec.Cmd) error) *armSeamCalls {
 	t.Helper()
 	calls := &armSeamCalls{}
+	installSelfExe(t, func() (string, error) { return fakeSelfExe, nil })
 	origSession, origResolve, origStart := armSessionForPane, armResolveHostRepo, armStartBabysit
 	armSessionForPane = func(ctx context.Context, pane string) (string, error) {
 		calls.session.Add(1)
@@ -81,6 +91,38 @@ func installArmSeams(t *testing.T, session func(context.Context, string) (string
 		armSessionForPane, armResolveHostRepo, armStartBabysit = origSession, origResolve, origStart
 	})
 	return calls
+}
+
+// fakeSelfExe is the fixed absolute path the default test resolver returns.
+const fakeSelfExe = "/opt/cenci-test/bin/cenci"
+
+// installSelfExe swaps the armResolveSelfExe seam for resolve, restoring the
+// previous value via t.Cleanup.
+func installSelfExe(t *testing.T, resolve func() (string, error)) {
+	t.Helper()
+	orig := armResolveSelfExe
+	armResolveSelfExe = resolve
+	t.Cleanup(func() { armResolveSelfExe = orig })
+}
+
+// freezeArmClock pins armNow so the token bucket never refills mid-test.
+func freezeArmClock(t *testing.T) {
+	t.Helper()
+	orig := armNow
+	fixed := time.Now()
+	armNow = func() time.Time { return fixed }
+	t.Cleanup(func() { armNow = orig })
+}
+
+// logLines splits captured log output into its non-empty lines.
+func logLines(buf *bytes.Buffer) []string {
+	var lines []string
+	for _, line := range strings.Split(buf.String(), "\n") {
+		if line != "" {
+			lines = append(lines, line)
+		}
+	}
+	return lines
 }
 
 func fixedSession(session string) func(context.Context, string) (string, error) {
@@ -261,6 +303,7 @@ func TestHostArmSpawn_SpawnFailed_Nacks(t *testing.T) {
 		fixedRepoDir("/repo"),
 		func(*exec.Cmd) error { return errors.New("fork/exec: resource temporarily unavailable") },
 	)
+	captureLog(t)
 
 	resp := d.hostArmSpawn(validArmRequest())
 
@@ -331,6 +374,10 @@ func TestHostArmSpawn_SuccessPath_CapturesCmdArgvDirEnvSetsid(t *testing.T) {
 		t.Errorf("cmd.Args = %v, want the PR %q present", cmd.Args, req.PR)
 	}
 
+	if cmd.Path != fakeSelfExe {
+		t.Errorf("cmd.Path = %q, want the resolved self-exec binary %q", cmd.Path, fakeSelfExe)
+	}
+
 	if cmd.Dir != resolvedDir {
 		t.Errorf("cmd.Dir = %q, want %q", cmd.Dir, resolvedDir)
 	}
@@ -381,7 +428,6 @@ func TestHostArmSpawn_RejectLogsUnderVerbose(t *testing.T) {
 		{"pane unresolvable", failingSeam[string](errors.New("no pane")), fixedRepoDir("/repo"), okStart()},
 		{"host repo not found", fixedSession("s"), failingSeam[string](hostrepo.ErrNoMatch), okStart()},
 		{"host repo ambiguous", fixedSession("s"), failingSeam[string](hostrepo.ErrAmbiguous), okStart()},
-		{"spawn failed", fixedSession("s"), fixedRepoDir("/repo"), func(*exec.Cmd) error { return errors.New("boom") }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -402,6 +448,288 @@ func TestHostArmSpawn_RejectLogsUnderVerbose(t *testing.T) {
 				t.Error("log output with cfg.Verbose=true: empty, want the reject branch to log")
 			}
 		})
+	}
+
+	// The rate-limited branch needs a primed bucket, so it cannot share the
+	// table's single fresh-daemon shape. The clock is frozen so no token
+	// refills between the primed requests and the asserted ones. The priming
+	// requests are admitted (the token is taken first) and then fail at the
+	// start seam: a successful start would spawn a reapArmSpawn goroutine that
+	// reads d.cfg.Verbose while this test flips it.
+	t.Run("rate limited", func(t *testing.T) {
+		freezeArmClock(t)
+		d := newArmSpawnTestDaemon()
+		installArmSeams(t, fixedSession("s"), fixedRepoDir("/repo"), func(*exec.Cmd) error { return errors.New("start refused") })
+		buf := captureLog(t)
+		for i := 0; i < armBucketBurst; i++ {
+			if resp := d.hostArmSpawn(validArmRequest()); resp.Reason != ReasonArmSpawnFailed {
+				t.Fatalf("priming request %d: resp.Reason = %q, want %q (admitted, then start refused)", i, resp.Reason, ReasonArmSpawnFailed)
+			}
+		}
+
+		buf.Reset()
+		d.cfg.Verbose = false
+		if resp := d.hostArmSpawn(validArmRequest()); resp.Reason != ReasonArmRateLimited {
+			t.Fatalf("resp.Reason = %q, want %q", resp.Reason, ReasonArmRateLimited)
+		}
+		if buf.Len() != 0 {
+			t.Errorf("log output with cfg.Verbose=false: %q, want no output", buf.String())
+		}
+
+		buf.Reset()
+		d.cfg.Verbose = true
+		if resp := d.hostArmSpawn(validArmRequest()); resp.Reason != ReasonArmRateLimited {
+			t.Fatalf("resp.Reason = %q, want %q", resp.Reason, ReasonArmRateLimited)
+		}
+		if buf.Len() == 0 {
+			t.Error("log output with cfg.Verbose=true: empty, want the rate-limited reject to log")
+		}
+	})
+}
+
+// -- #1372: self-exec binary resolution and spawn-failure visibility ---------
+
+// writeExecutableFixture creates an executable regular file in a fresh temp
+// dir and returns its path.
+func writeExecutableFixture(t *testing.T, name string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// deletedExecutablePath returns a path that existed and was then removed --
+// what os.Executable() reports for a daemon whose plugin cache was refreshed.
+func deletedExecutablePath(t *testing.T) string {
+	t.Helper()
+	path := writeExecutableFixture(t, "cenci-deleted")
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// TestHostArmSpawn_DeletedExecutable_SpawnsInstallLink is the #1372 repro: the
+// daemon's own binary was deleted by a plugin refresh, yet the install link
+// under HOME still points at a working binary. The spawned child must come
+// from that link, through the real selfexe resolver.
+func TestHostArmSpawn_DeletedExecutable_SpawnsInstallLink(t *testing.T) {
+	home := t.TempDir()
+	fixture := writeExecutableFixture(t, "cenci-installed")
+	link := filepath.Join(home, ".local", "bin", "cenci")
+	if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(fixture, link); err != nil {
+		t.Fatal(err)
+	}
+	deleted := deletedExecutablePath(t)
+
+	d := newArmSpawnTestDaemon()
+	calls := installArmSeams(t, fixedSession("host-session"), fixedRepoDir(t.TempDir()), okStart())
+	resolver := selfexe.Resolver{
+		HomeDir:    func() string { return home },
+		LookPath:   func(string) (string, error) { return "", exec.ErrNotFound },
+		Executable: func() (string, error) { return deleted, nil },
+		GOOS:       runtime.GOOS,
+	}
+	installSelfExe(t, resolver.Resolve)
+
+	resp := d.hostArmSpawn(validArmRequest())
+
+	if resp != (ipc.ArmResponse{OK: true}) {
+		t.Fatalf("resp = %+v, want an ack despite the deleted daemon executable", resp)
+	}
+	cmd := calls.capturedCmd()
+	if cmd == nil {
+		t.Fatal("armStartBabysit was invoked but captured no *exec.Cmd")
+	}
+	if cmd.Path != link {
+		t.Errorf("cmd.Path = %q, want the install link %q, not the deleted executable %q", cmd.Path, link, deleted)
+	}
+}
+
+// TestHostArmSpawn_SpawnFailure_AlwaysLogsAndNacksBareReason covers both
+// spawn-failure branches (resolver error, start error): with cfg.Verbose off
+// there is still exactly one host log line naming the attempted path (or the
+// no-usable-binary sentinel), the error and a restart hint, while the nack
+// carries only the bare constant -- no host path, no error text.
+func TestHostArmSpawn_SpawnFailure_AlwaysLogsAndNacksBareReason(t *testing.T) {
+	resolveErr := fmt.Errorf("%w: tried link, PATH and os.Executable (resolver-detail)", selfexe.ErrNoUsableBinary)
+	startErr := errors.New("fork/exec: start-detail")
+
+	cases := []struct {
+		name       string
+		resolve    func() (string, error)
+		start      func(*exec.Cmd) error
+		wantInLog  []string
+		hostDetail []string
+	}{
+		{
+			name:       "resolver error",
+			resolve:    func() (string, error) { return "", resolveErr },
+			start:      okStart(),
+			wantInLog:  []string{"no usable cenci binary", resolveErr.Error(), "restart"},
+			hostDetail: []string{"no usable cenci binary", "resolver-detail"},
+		},
+		{
+			name:       "start error",
+			resolve:    func() (string, error) { return fakeSelfExe, nil },
+			start:      func(*exec.Cmd) error { return startErr },
+			wantInLog:  []string{fakeSelfExe, startErr.Error(), "restart"},
+			hostDetail: []string{fakeSelfExe, "start-detail"},
+		},
+	}
+	for _, tc := range cases {
+		for _, verbose := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s verbose=%v", tc.name, verbose), func(t *testing.T) {
+				d := newArmSpawnTestDaemon()
+				d.cfg.Verbose = verbose
+				installArmSeams(t, fixedSession("s"), fixedRepoDir("/repo"), tc.start)
+				installSelfExe(t, tc.resolve)
+				buf := captureLog(t)
+
+				resp := d.hostArmSpawn(validArmRequest())
+
+				if resp != (ipc.ArmResponse{OK: false, Reason: ReasonArmSpawnFailed}) {
+					t.Errorf("resp = %+v, want exactly {OK:false Reason:%q}", resp, ReasonArmSpawnFailed)
+				}
+				for _, detail := range tc.hostDetail {
+					if strings.Contains(resp.Reason, detail) {
+						t.Errorf("resp.Reason = %q leaks host detail %q", resp.Reason, detail)
+					}
+				}
+				lines := logLines(buf)
+				if len(lines) != 1 {
+					t.Fatalf("log lines = %d (%q), want exactly one line per failed admitted request", len(lines), buf.String())
+				}
+				for _, want := range tc.wantInLog {
+					if !strings.Contains(lines[0], want) {
+						t.Errorf("log line %q does not contain %q", lines[0], want)
+					}
+				}
+			})
+		}
+	}
+}
+
+// TestHostArmSpawn_BinaryDeletedBeforeStart_NacksAndLogsPath covers the race
+// between resolution and start: the resolved binary vanishes, the real
+// cmd.Start() fails, and the nack is the bare reason while the always-on log
+// line names the vanished path and the start error.
+func TestHostArmSpawn_BinaryDeletedBeforeStart_NacksAndLogsPath(t *testing.T) {
+	gone := deletedExecutablePath(t)
+	var startErr error
+	start := func(cmd *exec.Cmd) error {
+		startErr = cmd.Start()
+		return startErr
+	}
+
+	d := newArmSpawnTestDaemon()
+	d.cfg.Verbose = false
+	installArmSeams(t, fixedSession("s"), fixedRepoDir(t.TempDir()), start)
+	installSelfExe(t, func() (string, error) { return gone, nil })
+	buf := captureLog(t)
+
+	resp := d.hostArmSpawn(validArmRequest())
+
+	if resp != (ipc.ArmResponse{OK: false, Reason: ReasonArmSpawnFailed}) {
+		t.Errorf("resp = %+v, want exactly {OK:false Reason:%q}", resp, ReasonArmSpawnFailed)
+	}
+	if startErr == nil {
+		t.Fatal("the real cmd.Start() succeeded for a deleted binary, want a start error")
+	}
+	lines := logLines(buf)
+	if len(lines) != 1 {
+		t.Fatalf("log lines = %d (%q), want exactly one", len(lines), buf.String())
+	}
+	if !strings.Contains(lines[0], gone) {
+		t.Errorf("log line %q does not name the deleted path %q", lines[0], gone)
+	}
+	if !strings.Contains(lines[0], startErr.Error()) {
+		t.Errorf("log line %q does not contain the start error %q", lines[0], startErr)
+	}
+}
+
+// TestHostArmSpawn_ProcSelfExe_ArgvKeepsBabysitAndPR covers the last-resort
+// candidate: when the child is spawned through /proc/self/exe its argv must
+// still carry `babysit` and the PR, because internal/babysit's
+// /proc/<pid>/cmdline ownership check matches on argv, not on the binary path.
+func TestHostArmSpawn_ProcSelfExe_ArgvKeepsBabysitAndPR(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("/proc/self/exe is only a spawn candidate on Linux")
+	}
+	if _, err := os.Lstat("/proc/self/exe"); err != nil {
+		t.Skipf("procfs unavailable: %v", err)
+	}
+	resolver := selfexe.Resolver{
+		HomeDir:    func() string { return "" },
+		LookPath:   func(string) (string, error) { return "", exec.ErrNotFound },
+		Executable: func() (string, error) { return deletedExecutablePath(t), nil },
+		GOOS:       "linux",
+	}
+
+	d := newArmSpawnTestDaemon()
+	calls := installArmSeams(t, fixedSession("s"), fixedRepoDir(t.TempDir()), okStart())
+	installSelfExe(t, resolver.Resolve)
+
+	req := validArmRequest()
+	resp := d.hostArmSpawn(req)
+
+	if !resp.OK {
+		t.Fatalf("resp = %+v, want an ack through /proc/self/exe", resp)
+	}
+	cmd := calls.capturedCmd()
+	if cmd == nil {
+		t.Fatal("armStartBabysit was invoked but captured no *exec.Cmd")
+	}
+	if cmd.Path != "/proc/self/exe" {
+		t.Errorf("cmd.Path = %q, want /proc/self/exe", cmd.Path)
+	}
+	var hasBabysit, hasPR bool
+	for _, a := range cmd.Args[1:] {
+		hasBabysit = hasBabysit || a == "babysit"
+		hasPR = hasPR || a == req.PR
+	}
+	if !hasBabysit || !hasPR {
+		t.Errorf("cmd.Args = %v, want both %q and the PR %q so babysit's cmdline ownership check still matches", cmd.Args, "babysit", req.PR)
+	}
+}
+
+// TestHostArmSpawn_RepeatedSpawnFailures_OneLogLinePerAdmittedRequest bounds
+// the always-on log volume: requests past the token bucket are rejected before
+// resolution and stay verbose-only, so 2*armBucketBurst failing requests with
+// verbose off write exactly armBucketBurst lines.
+func TestHostArmSpawn_RepeatedSpawnFailures_OneLogLinePerAdmittedRequest(t *testing.T) {
+	freezeArmClock(t)
+	d := newArmSpawnTestDaemon()
+	d.cfg.Verbose = false
+	installArmSeams(t, fixedSession("s"), fixedRepoDir("/repo"), okStart())
+	installSelfExe(t, func() (string, error) { return "", selfexe.ErrNoUsableBinary })
+	buf := captureLog(t)
+
+	var spawnFailed, rateLimited int
+	for i := 0; i < 2*armBucketBurst; i++ {
+		switch resp := d.hostArmSpawn(validArmRequest()); resp.Reason {
+		case ReasonArmSpawnFailed:
+			spawnFailed++
+		case ReasonArmRateLimited:
+			rateLimited++
+		default:
+			t.Fatalf("request %d: resp = %+v, want a spawn-failed or rate-limited nack", i, resp)
+		}
+	}
+
+	if spawnFailed != armBucketBurst || rateLimited != armBucketBurst {
+		t.Fatalf("spawn-failed nacks = %d, rate-limited nacks = %d, want %d of each", spawnFailed, rateLimited, armBucketBurst)
+	}
+	if got := len(logLines(buf)); got != armBucketBurst {
+		t.Errorf("log lines = %d (%q), want %d: one per admitted request, none for over-rate ones", got, buf.String(), armBucketBurst)
 	}
 }
 

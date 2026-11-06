@@ -20,6 +20,7 @@ import (
 
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/hostrepo"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/ipc"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/selfexe"
 )
 
 // armBucketBurst and armBucketRefill are hostArmSpawn's token-bucket
@@ -125,6 +126,12 @@ var armSessionForPane = defaultArmSessionForPane
 // SysProcAttr all already set by hostArmSpawn) so tests can capture and
 // assert on it without a real process ever starting.
 var armStartBabysit = defaultArmStartBabysit
+
+// armResolveSelfExe is the injectable seam over selfexe.Resolve (#1372): the
+// binary hostArmSpawn starts as the detached `cenci babysit` child. It is not
+// os.Executable, which names a deleted path once a plugin refresh removes the
+// daemon's own cache directory.
+var armResolveSelfExe = selfexe.Resolve
 
 // defaultArmSessionForPane is armSessionForPane's production
 // implementation: a bounded `tmux display-message -t <pane> -p
@@ -250,9 +257,9 @@ func (d *Daemon) hostArmSpawn(req ipc.ArmRequest) ipc.ArmResponse {
 		return ipc.ArmResponse{OK: false, Reason: reason}
 	}
 
-	exePath, err := os.Executable()
+	exePath, err := armResolveSelfExe()
 	if err != nil {
-		d.logArmSpawnReject(req, ReasonArmSpawnFailed, err)
+		d.logArmSpawnFailure(req, "", err)
 		return ipc.ArmResponse{OK: false, Reason: ReasonArmSpawnFailed}
 	}
 
@@ -264,7 +271,7 @@ func (d *Daemon) hostArmSpawn(req ipc.ArmRequest) ipc.ArmResponse {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 
 	if err := armStartBabysit(cmd); err != nil {
-		d.logArmSpawnReject(req, ReasonArmSpawnFailed, err)
+		d.logArmSpawnFailure(req, exePath, err)
 		return ipc.ArmResponse{OK: false, Reason: ReasonArmSpawnFailed}
 	}
 
@@ -284,10 +291,27 @@ func (d *Daemon) reapArmSpawn(cmd *exec.Cmd) {
 	}
 }
 
+// logArmSpawnFailure writes the always-on host log line for a spawn failure
+// (#1372): a selfexe resolution failure (exePath empty) or a start failure of
+// the resolved exePath. Unlike logArmSpawnReject it ignores cfg.Verbose, so a
+// normal daemon leaves a trace of why every arm request is nacked; it is
+// bounded to one line per admitted request by armTokenBucket. The nack reason
+// stays the bare ReasonArmSpawnFailed -- path and error only reach this log.
+func (d *Daemon) logArmSpawnFailure(req ipc.ArmRequest, exePath string, err error) {
+	const hint = "restart the daemon with `systemctl --user restart cenci-watch.service` or `cenci daemon restart`"
+	if exePath != "" {
+		log.Printf("arm: failed to spawn host babysit supervisor pr=%q repo=%q exe=%q: %v (%s)", req.PR, req.Repo, exePath, err, hint)
+		return
+	}
+	log.Printf("arm: failed to spawn host babysit supervisor pr=%q repo=%q: %v (%s)", req.PR, req.Repo, err, hint)
+}
+
 // logArmSpawnReject logs a hostArmSpawn reject branch under cfg.Verbose
 // (watch/docs/hook-events.md rule 2). The nack reason returned to the
 // client carries no host detail (arm.go's Reason* constants); err, when
-// non-nil, is only ever written to this host-side log.
+// non-nil, is only ever written to this host-side log. Spawn failures
+// (resolver and start errors) are not logged here: logArmSpawnFailure logs
+// them always.
 func (d *Daemon) logArmSpawnReject(req ipc.ArmRequest, reason string, err error) {
 	if !d.cfg.Verbose {
 		return

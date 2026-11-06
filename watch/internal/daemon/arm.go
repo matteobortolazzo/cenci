@@ -84,8 +84,9 @@ const (
 	ReasonArmResolutionTimedOut = "host repo resolution timed out"
 	// ReasonArmSpawnFailed is returned when the resolved-and-validated
 	// request could not actually be turned into a running detached
-	// supervisor (os.Executable failure, or the armStartBabysit seam
-	// itself failing to start the process).
+	// supervisor (selfexe resolution failure, or the armStartBabysit seam
+	// itself failing to start the process). Like every reason it carries no
+	// host detail; the path and error go only to the always-on host log.
 	ReasonArmSpawnFailed = "failed to spawn host babysit supervisor"
 
 	// ReasonArmCapabilityUnavailable is returned when no capability predicate
