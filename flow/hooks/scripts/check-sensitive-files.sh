@@ -44,6 +44,20 @@
 # declared Add/Update/Delete/Move targets before the tokenizer ever sees the
 # diff body, and suppresses this backstop's raw-text marker scan in that
 # case — see the Bash arm below.
+#
+# CHANGED-VARIABLE and cwd-change checks (#816): the supported expansions
+# ($HOME/${HOME}/~, $PWD/${PWD}, $TMPDIR/${TMPDIR}/${TMPDIR:-/tmp}) and the
+# relative-target join to this hook's $(pwd) both assume the command does not
+# change them first. The Bash arm computes bwt_changed_vars once and, per
+# target, BEFORE bwt_expand_safe_vars, blocks a target whose leading expansion
+# uses a variable the command changes (`HOME=/x; echo k > $HOME/.ssh/...`),
+# naming it and asking for a literal absolute path; that block wins over the
+# supported-expansion allowance. A relative target is blocked ("relative
+# target cannot be resolved after a directory change") when the command
+# contains cd, pushd, popd, eval, source or a command-position `.`. Because
+# this hook runs in every repo, that relative block is an accepted over-block
+# where guard-main-worktree.sh is inactive (unconfigured repos). apply_patch
+# declared targets are never shell-expanded and keep their $(pwd) join.
 
 command -v jq >/dev/null 2>&1 || {
   echo "BLOCKED: jq is required by check-sensitive-files.sh but was not found on PATH." >&2
@@ -515,16 +529,20 @@ elif [ -n "$TOOL_COMMAND" ]; then
         echo "BLOCKED: check-sensitive-files.sh could not inspect this Bash command's write targets: it contains an unquoted brace expansion (e.g. {a,b} or {1..3}) in write-target position, which is not supported for direct extraction: $TOOL_COMMAND" >&2
         echo "Rewrite the command without brace expansion (e.g. one command per target) or edit the file manually if needed." >&2
       elif [ "$BWT_EXTRACT_STATUS" -eq 7 ]; then
-        # #810 stabilization: a command/process/function substitution appears
-        # inside a double-quoted string within a comparison construct
-        # (`[[ ]]`/`(( ))`), which cannot be safely resolved -- this tokenizer
-        # has no safe way to resume precise parsing through the real syntax of
-        # such a substitution once it is wrapped in an outer double-quoted
-        # string, so the whole command fails closed unconditionally, regardless
-        # of whether the raw command also happens to mention a sensitive
-        # marker.
-        echo "BLOCKED: check-sensitive-files.sh could not inspect this Bash command's write targets: a command/process/function substitution appears inside a double-quoted string within a comparison construct, which cannot be safely resolved: $TOOL_COMMAND" >&2
-        echo "Rewrite the command without a double-quoted nested substitution inside [[ ]] / (( )) (e.g. hoist it to its own statement first) or edit the file manually if needed." >&2
+        # #810 stabilization, generalised by #816: a command/process/function
+        # substitution appears inside a double-quoted string -- inside a
+        # comparison construct (`[[ ]]`/`(( ))`, #810), or anywhere in a
+        # command that also carries quoted write-shaped text (`>` or a
+        # delimited `tee`, #816) -- which cannot be safely resolved: this
+        # tokenizer has no safe way to resume precise parsing through the real
+        # syntax of such a substitution once it is wrapped in an outer
+        # double-quoted string, so the whole command fails closed
+        # unconditionally, regardless of whether the raw command also happens
+        # to mention a sensitive marker. The second line covers the common
+        # no-write case (#1084 posture): pass message text through a file,
+        # never add a redirect.
+        echo "BLOCKED: check-sensitive-files.sh could not inspect this Bash command's write targets: a command/process/function substitution appears inside a double-quoted string, which cannot be safely resolved: $TOOL_COMMAND" >&2
+        echo "If the command DOES write: hoist the substitution to its own statement first, or edit the file manually if needed. If it performs NO write -- the quoted text is message or body text -- pass that text through a file instead (git commit -F <abs-file>, gh ... --body-file <abs-file>); NEVER add a redirect just to satisfy this message." >&2
       else
         echo "BLOCKED: check-sensitive-files.sh requires awk (via lib/bash-write-targets.sh) to inspect this Bash command's write targets, but awk was not found on PATH." >&2
       fi
@@ -566,10 +584,59 @@ elif [ -n "$TOOL_COMMAND" ]; then
     exit 2
   fi
 
+  # Changed-variable set (#816 gap 3): computed once, only for the ordinary
+  # tokenizer path with at least one extracted target (the zero-target
+  # backstop above has already exited). bwt_changed_vars prints the subset of
+  # HOME/PWD/TMPDIR/CWD the raw command can change before a write; it fails
+  # closed itself when awk is missing (prints all four), so a non-zero status
+  # here is a real awk failure and blocks. apply_patch declared targets are
+  # never shell-expanded and keep their unchanged $BWT_CWD join, so neither
+  # check below applies to them.
+  BWT_CHANGED=""
+  BWT_CWD_CHANGED=0
+  if [ "$BWT_APPLY_PATCH" -eq 0 ]; then
+    if ! BWT_CHANGED=$(bwt_changed_vars "$TOOL_COMMAND"); then
+      echo "BLOCKED: check-sensitive-files.sh could not determine whether this Bash command changes HOME, PWD, TMPDIR or the working directory before its writes (bwt_changed_vars failed): $TOOL_COMMAND" >&2
+      exit 2
+    fi
+    case "
+$BWT_CHANGED
+" in
+      *"
+CWD
+"*) BWT_CWD_CHANGED=1 ;;
+    esac
+  fi
+
   while IFS= read -r BWT_TARGET; do
     [ -z "$BWT_TARGET" ] && continue
 
     bwt_is_exempt_device "$BWT_TARGET" && continue
+
+    # #816 gap 3: a target whose leading $HOME/~/$PWD/$TMPDIR expansion uses
+    # a variable this same command changes (or, for $PWD, a directory change)
+    # cannot be expanded against this hook's environment -- bash would write
+    # somewhere else, so a sensitive real target could hide behind a benign
+    # hook-environment expansion. Checked BEFORE bwt_expand_safe_vars, so this
+    # block wins over the supported-expansion allowance.
+    if [ "$BWT_APPLY_PATCH" -eq 0 ] && [ -n "$BWT_CHANGED" ]; then
+      if ! BWT_CHANGED_VAR=$(bwt_target_changed_var "$BWT_TARGET" "$BWT_CHANGED"); then
+        echo "BLOCKED: check-sensitive-files.sh could not classify the Bash write target '$BWT_TARGET' against the variables this command changes (bwt_target_changed_var failed): $TOOL_COMMAND" >&2
+        exit 2
+      fi
+      if [ -n "$BWT_CHANGED_VAR" ]; then
+        if [ "$BWT_CHANGED_VAR" = PWD ]; then
+          BWT_CHANGED_WHY="this command changes the working directory or PWD before the write"
+        else
+          BWT_CHANGED_WHY="it expands $BWT_CHANGED_VAR, which is changed by this command before the write"
+        fi
+        {
+          echo "BLOCKED: check-sensitive-files.sh cannot trust the Bash write target '$BWT_TARGET': $BWT_CHANGED_WHY, so this hook's own value is not where bash would write: $TOOL_COMMAND"
+          echo "Use a literal absolute path for this write target; \${TMPDIR:-/tmp}, \$TMPDIR, \$HOME, ~ and \$PWD are honoured only when the same command does not change that variable or, for \$PWD, the directory."
+        } >&2
+        exit 2
+      fi
+    fi
 
     # #1036: an apply_patch declared path is the literal, verbatim payload
     # text -- under a quoted heredoc delimiter (the only form recognized) the
@@ -624,7 +691,22 @@ elif [ -n "$TOOL_COMMAND" ]; then
 
     case "$BWT_EXPANDED" in
       /*) BWT_ABS="$BWT_EXPANDED" ;;
-      *) BWT_ABS="$BWT_CWD/$BWT_EXPANDED" ;;
+      *)
+        # #816 gap 3: a relative target is joined to this hook's own cwd only
+        # when the command cannot change the directory first (no cd, pushd,
+        # popd, eval, source or command-position `.`); otherwise the join
+        # would name a file bash never writes. Accepted over-block: this hook
+        # runs in every repo, so `cd /x && echo y > out.txt` now blocks here
+        # even where guard-main-worktree.sh is inactive (unconfigured repos).
+        if [ "$BWT_CWD_CHANGED" -eq 1 ]; then
+          {
+            echo "BLOCKED: check-sensitive-files.sh: the relative target cannot be resolved after a directory change -- this command changes the working directory (cd, pushd, popd, eval, source or .) before writing '$BWT_EXPANDED': $TOOL_COMMAND"
+            echo "Use a literal absolute path for this write target."
+          } >&2
+          exit 2
+        fi
+        BWT_ABS="$BWT_CWD/$BWT_EXPANDED"
+        ;;
     esac
 
     BWT_COLLAPSED=$(lexical_collapse "$BWT_ABS")

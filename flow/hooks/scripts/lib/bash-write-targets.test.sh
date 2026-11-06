@@ -41,7 +41,7 @@ fi
 # shellcheck source=/dev/null
 . "${LIB_SH}"
 
-for fn in bwt_has_write_candidate bwt_extract_targets bwt_zero_parse_suspicious bwt_has_delimited_tee bwt_has_reparse_verb bwt_has_unmodelled_write_verb bwt_zero_parse_inert bwt_is_exempt_device bwt_expand_safe_vars bwt_is_unresolved bwt_is_unresolved_literal bwt_is_apply_patch_payload bwt_apply_patch_targets; do
+for fn in bwt_has_write_candidate bwt_extract_targets bwt_zero_parse_suspicious bwt_has_delimited_tee bwt_has_reparse_verb bwt_has_unmodelled_write_verb bwt_zero_parse_inert bwt_is_exempt_device bwt_expand_safe_vars bwt_is_unresolved bwt_is_unresolved_literal bwt_is_apply_patch_payload bwt_apply_patch_targets bwt_changed_vars bwt_target_changed_var; do
     if ! command -v "${fn}" >/dev/null 2>&1; then
         fail "lib did not define expected function: ${fn}"
     fi
@@ -1638,6 +1638,364 @@ assert_false "same pipeline + a re-parse verb only" \
     bwt_zero_parse_inert "eval \"${INERT_READONLY_CMD}\""
 assert_false "same pipeline + path-write syntax only" \
     bwt_zero_parse_inert "${INERT_READONLY_CMD} > /abs/out.txt"
+
+# ── #816 gap 1: a double-quoted command/process/function substitution ANYWHERE
+# in the command fails the whole extraction closed (exit 7) when the same
+# command also carries write-shaped text (`>` or a delimited `tee`) that the
+# tokenizer saw as quoted. Bash lets the substitution escape the double quote,
+# so that quoted-looking write really executes; before #816 only the in-region
+# ([[ ]]/(( ))) form failed closed and this out-of-region form extracted only
+# the decoy target, skipping the empty-parse backstop entirely.
+echo "case: #816 gap 1 -- double-quoted substitution plus quoted write-shaped text fails closed (exit 7)"
+assert_extract_exit "decoy redirect + double-quoted \$( ) hiding a redirect exits 7" \
+    'echo ok > /tmp/ok; echo "$(printf x > /repo/.env)"' 7
+assert_extract_exit "double-quoted \$( ) with inner double quotes hiding a redirect exits 7" \
+    'echo "$(printf "x" > /repo/.env)"' 7
+assert_extract_exit "double-quoted \$( ) hiding a tee exits 7" \
+    'echo "$(echo p | tee /repo/.env)"' 7
+assert_extract_exit "double-quoted backtick hiding a redirect exits 7" \
+    'echo "`printf x > /repo/.env`"' 7
+assert_extract_exit "double-quoted \${ cmd; } funsub hiding a redirect exits 7" \
+    'echo "${ printf x > /repo/.env; }"' 7
+assert_extract_exit "double-quoted \${| cmd; } funsub hiding a redirect exits 7" \
+    'echo "${| printf x > /repo/.env; }"' 7
+DQ_CONTINUED_OUT_OF_REGION=$'echo "$\\\n(printf x > /repo/.env)"'
+assert_extract_exit "a backslash-newline between \$ and ( inside double quotes still exits 7" \
+    "${DQ_CONTINUED_OUT_OF_REGION}" 7
+assert_extract_exit "double-quoted substitution + a SINGLE-quoted > elsewhere exits 7 (any quote counts)" \
+    "echo \"\$(date)\" 'a > b'" 7
+assert_extract_exit "double-quoted substitution + an ANSI-C-quoted > elsewhere exits 7 (#816 Q3)" \
+    "echo \"\$(date)\" \$'a > b'" 7
+assert_extract_exit "double-quoted <( ) marker + double-quoted > elsewhere exits 7 (#816 Q4)" \
+    'echo "<(true)" "x > y"' 7
+WS_EXIT7_OUT="$(bwt_extract_targets 'echo "$(echo p | tee /repo/.env)"' writesyntax)"
+WS_EXIT7_RC=$?
+if [[ "${WS_EXIT7_RC}" -eq 7 && -z "${WS_EXIT7_OUT}" ]]; then
+    pass
+else
+    fail "writesyntax mode on a double-quoted tee substitution: exit=${WS_EXIT7_RC} output=<${WS_EXIT7_OUT}>, expected exit 7 and no output"
+fi
+# Target deliberately NOT `.env`: `env` is itself a re-parse verb, which would
+# deny inertness on its own and make this case vacuous.
+assert_false "a double-quoted tee substitution is never inert" \
+    bwt_zero_parse_inert 'echo "$(echo p | tee /repo/AGENTS.md)"'
+
+echo "case: #816 gap 1 -- no exit 7 without quoted write-shaped text, or without a real substitution"
+assert_extract_exit "double-quoted \$(date) + an UNQUOTED >> exits 0" \
+    'echo "$(date)" >> /tmp/cenci/x.log' 0
+assert_targets "double-quoted \$(date) + an UNQUOTED >> extracts exactly that target" \
+    'echo "$(date)" >> /tmp/cenci/x.log' "/tmp/cenci/x.log"
+assert_extract_exit "double-quoted \$(date) piped into an UNQUOTED tee exits 0" \
+    'echo "$(date)" | tee /tmp/x' 0
+assert_targets "double-quoted \$(date) piped into an UNQUOTED tee extracts the tee operand" \
+    'echo "$(date)" | tee /tmp/x' "/tmp/x"
+assert_targets "double-quoted \${HOME} parameter expansion is not a substitution marker" \
+    'echo "${HOME}" "a > b" > /tmp/ok' "/tmp/ok"
+assert_targets "a backslash-escaped \\\$( inside double quotes is literal text, not a substitution" \
+    'echo "\$(printf x > /repo/.env)" > /tmp/ok' "/tmp/ok"
+assert_targets "an alnum-embedded tee in a double-quoted span is not write-shaped" \
+    'echo "$(date) committee" > /tmp/ok' "/tmp/ok"
+assert_extract_exit "the #810 in-region double-quoted case still exits 7" \
+    '[[ "$(printf x > /repo/.env)" ]]' 7
+
+# ── #816 gap 2: `$'...'` ANSI-C quoting is its own quote state in every
+# quote-tracking pass. Inside it a backslash escapes the next character, so
+# `\'` does not close the span; treating it as single quoting let the quote
+# state drift from bash's and made a real redirect look quoted.
+echo "case: #816 gap 2 -- \$'...' ANSI-C quoting in the main tokenizer pass"
+assert_extract_exit "an escaped quote inside \$'...' does not end the span (exit 0)" \
+    "echo ok > /tmp/ok; echo \$'a\\'b' > /repo/.env #'" 0
+assert_targets "an escaped quote inside \$'...' does not end the span -- both real targets extracted" \
+    "echo ok > /tmp/ok; echo \$'a\\'b' > /repo/.env #'" \
+    "$(printf '%s\n%s' "/tmp/ok" "/repo/.env")"
+ANSIC_CONTINUED=$'echo $\\\n\'a\\\'b\' > /repo/.env #\''
+assert_targets "a backslash-newline between \$ and ' still opens an ANSI-C span" \
+    "${ANSIC_CONTINUED}" "/repo/.env"
+assert_targets "\$' inside double quotes is not ANSI-C quoting" \
+    "echo \"\$'x'\" > /tmp/ok" "/tmp/ok"
+assert_targets "a backslash-escaped \$ does not open an ANSI-C span" \
+    "echo \\\$'a' > /tmp/ok" "/tmp/ok"
+assert_targets "an ANSI-C target word keeps its \$' so it stays unresolved" \
+    "echo x > \$'/tmp/ok'" "\$'/tmp/ok'"
+ANSIC_TARGET_OUT="$(bwt_extract_targets "echo x > \$'/tmp/ok'")"
+assert_true "the emitted ANSI-C target word is unresolved" bwt_is_unresolved "${ANSIC_TARGET_OUT}"
+assert_extract_exit "an unterminated \$'abc ... > /repo/.env exits 0" \
+    "echo \$'abc > /repo/.env" 0
+assert_targets "an unterminated \$'abc ... > /repo/.env extracts zero targets (left to the backstop)" \
+    "echo \$'abc > /repo/.env" ""
+assert_true "the unterminated ANSI-C zero-target command still trips the empty-parse backstop" \
+    bwt_zero_parse_suspicious "echo \$'abc > /repo/.env"
+assert_targets "an escaped backslash right before the closing quote still closes \$'...'" \
+    "echo \$'a\\\\' > /tmp/ok" "/tmp/ok"
+
+# One discriminating case per remaining quote-tracking pass: each string is
+# red unless THAT pass models `$'...'` (checked against real bash: each one
+# writes only the final target).
+echo "case: #816 gap 2 -- mark_regions models \$'...' (the region after it is still suppressed)"
+assert_targets "mark_regions: \$'\\'' before a [[ z > a ]] comparison leaves it suppressed" \
+    "echo \$'\\'' ; [[ z > a ]] ; echo x > /tmp/ok" "/tmp/ok"
+echo "case: #816 gap 2 -- has_nested_substitution and find_close_bracket model \$'...'"
+assert_targets "[[ \$'\\'' > '\$(date)' ]]: the single-quoted \$(date) is inert and the region is suppressed" \
+    "[[ \$'\\'' > '\$(date)' ]] ; echo x > /tmp/ok" "/tmp/ok"
+echo "case: #816 gap 2 -- find_close models \$'...'"
+assert_targets "(( \$'\\'' > 0 )): the arithmetic region still closes and is suppressed" \
+    "(( \$'\\'' > 0 )) ; echo x > /tmp/ok" "/tmp/ok"
+
+# ── #816 gap 3: bwt_changed_vars <cmd> -- raw-text scan for anything in the
+# command that can change HOME/PWD/TMPDIR or the working directory (CWD)
+# before a write. Output order is fixed: HOME, PWD, TMPDIR, CWD.
+assert_changed_vars() {
+    local label="$1" cmd="$2" expected="$3" actual rc
+    actual="$(bwt_changed_vars "${cmd}")"
+    rc=$?
+    if [[ "${rc}" -eq 0 && "${actual}" == "${expected}" ]]; then
+        pass
+    else
+        fail "${label}: changed_vars(<${cmd}>) = <${actual}> (exit ${rc}), expected <${expected}> (exit 0)"
+    fi
+}
+CV_ALL="$(printf '%s\n%s\n%s\n%s' HOME PWD TMPDIR CWD)"
+CV_PWD_CWD="$(printf '%s\n%s' PWD CWD)"
+
+echo "case: #816 gap 3 -- bwt_changed_vars positives"
+assert_changed_vars "HOME= assignment" 'HOME=/x; echo y > ~/f' "HOME"
+assert_changed_vars "export HOME=" 'export HOME=/x && echo y > $HOME/f' "HOME"
+assert_changed_vars "unset HOME" 'unset HOME; echo y > $HOME/f' "HOME"
+assert_changed_vars "read HOME" 'read HOME < /tmp/in; echo y > $HOME/f' "HOME"
+assert_changed_vars "printf -v TMPDIR" 'printf -v TMPDIR %s /x; echo y > $TMPDIR/f' "TMPDIR"
+assert_changed_vars "for PWD in" 'for PWD in /x; do echo y > $PWD/f; done' "PWD"
+assert_changed_vars "\${TMPDIR:=x} assigns" ': ${TMPDIR:=/x}; echo y > ${TMPDIR:-/tmp}/f' "TMPDIR"
+assert_changed_vars "\${HOME=x} assigns" ': ${HOME=/x}; echo y > ~/f' "HOME"
+assert_changed_vars "a bare HOME word anywhere (accepted over-block)" 'echo HOME > $HOME/x' "HOME"
+assert_changed_vars "TMPDIR= assignment" 'TMPDIR=/x; tee ${TMPDIR:-/tmp}/f' "TMPDIR"
+assert_changed_vars "cd marks PWD and CWD" 'cd /x && echo y > $PWD/f' "${CV_PWD_CWD}"
+assert_changed_vars "pushd marks PWD and CWD" 'pushd /x >/dev/null; echo y > ${PWD}/f' "${CV_PWD_CWD}"
+assert_changed_vars "popd marks PWD and CWD" 'popd >/dev/null; echo y > out' "${CV_PWD_CWD}"
+assert_changed_vars "/usr/bin/cd-style path still names cd" 'command cd /x; echo y > out' "${CV_PWD_CWD}"
+assert_changed_vars "TMPDIR= plus cd keeps the fixed output order" 'TMPDIR=/x; cd /y' \
+    "$(printf '%s\n%s\n%s' PWD TMPDIR CWD)"
+assert_changed_vars "eval marks all four" "eval 'HOME=/x'; echo y > \$HOME/z" "${CV_ALL}"
+assert_changed_vars "source marks all four" 'source ./env.sh; echo y > $HOME/z' "${CV_ALL}"
+assert_changed_vars "a leading . marks all four" '. ./env.sh; echo y > $HOME/z' "${CV_ALL}"
+assert_changed_vars ". after ; marks all four" 'true; . ./env.sh; echo y > $HOME/z' "${CV_ALL}"
+assert_changed_vars ". glued after ; marks all four" 'true;. ./env.sh; echo y > $HOME/z' "${CV_ALL}"
+assert_changed_vars ". after && marks all four" 'true && . ./env.sh' "${CV_ALL}"
+assert_changed_vars ". after then marks all four" 'if true; then . ./env.sh; fi' "${CV_ALL}"
+assert_changed_vars ". after a NAME=value prefix marks all four" 'FOO=1 . ./env.sh' "${CV_ALL}"
+assert_changed_vars ". after a quoted NAME=value prefix marks all four" 'FOO="a b" . ./env.sh' "${CV_ALL}"
+assert_changed_vars ". after a case-pattern ) marks all four" 'case x in x) . ./env.sh ;; esac' "${CV_ALL}"
+assert_changed_vars "an escaped \\. marks all four" '\. ./env.sh' "${CV_ALL}"
+assert_changed_vars "a quoted '.' marks all four" "'.' ./env.sh" "${CV_ALL}"
+assert_changed_vars "a double-quoted \".\" marks all four" '"." ./env.sh' "${CV_ALL}"
+assert_changed_vars "an ANSI-C \$'.' marks all four" "\$'.' ./env.sh" "${CV_ALL}"
+assert_changed_vars "a quoted '.' after && marks all four" "true && '.' ./env.sh" "${CV_ALL}"
+assert_changed_vars ". after a quoted jq filter and ; still marks all four" \
+    "jq '. * {}' f > /tmp/o; . ./env.sh" "${CV_ALL}"
+# Bash removes backslash-newline first, so this `$'a\''` is ANSI-C (`a'`) and
+# the `.` after it is real. The joined second pass also sees this one, so it
+# does not on its own prove the raw pass models the continued `$`; the
+# negative "a dot inside a continued ANSI-C span" below does.
+CV_CONTINUED_ANSIC=$'echo $\\\n\'a\\\'\' ; . ./env.sh'
+assert_changed_vars ". after a continued ANSI-C span still marks all four" \
+    "${CV_CONTINUED_ANSIC}" "${CV_ALL}"
+assert_changed_vars ". inside \$( ) marks all four" 'x=$(. ./env.sh)' "${CV_ALL}"
+# Review fix: a quote-ending previous word counts only as a quoted NAME=value
+# assignment (possibly several adjacent quoted pieces), and `)` only as a
+# case-pattern terminator.
+assert_changed_vars ". after a NAME=value prefix with adjacent quoted pieces marks all four" \
+    "FOO=\"a b\"'c d' . ./env.sh" "${CV_ALL}"
+assert_changed_vars ". after two quoted NAME=value prefixes marks all four" \
+    'A="x y" B="p q" . ./env.sh' "${CV_ALL}"
+assert_changed_vars ". after an optional-( case pattern marks all four" \
+    'case x in (x) . ./env.sh ;; esac' "${CV_ALL}"
+assert_changed_vars ". glued to a case-pattern ) marks all four" \
+    'case x in x). ./env.sh ;; esac' "${CV_ALL}"
+# Review fix (subscripted default assignment): bash assigns the scalar for
+# `${NAME[0]:=x}` / `${NAME[0]=x}`, so `${NAME[` counts as a change.
+assert_changed_vars "\${TMPDIR[0]:=/x} assigns" ': ${TMPDIR[0]:=/x}; echo y > ${TMPDIR:-/tmp}/f' "TMPDIR"
+assert_changed_vars "\${HOME[0]=x} assigns" ': ${HOME[0]=x}; echo y > ~/f' "HOME"
+# Review fix (backslash-newline): bash removes a continuation before it
+# tokenizes, so a name, verb, or dot split by one is still a change.
+assert_changed_vars "a HOME name split by backslash-newline still marks HOME" \
+    $'HO\\\nME=/x; echo y > ~/f' "HOME"
+assert_changed_vars "a cd verb split by backslash-newline still marks PWD and CWD" \
+    $'c\\\nd /x && echo y > $PWD/f' "${CV_PWD_CWD}"
+assert_changed_vars "an eval verb split by backslash-newline still marks all four" \
+    $'ev\\\nal true; echo y > $HOME/f' "${CV_ALL}"
+assert_changed_vars "a dot followed by backslash-newline still marks all four" \
+    $'.\\\n ./env.sh; echo y > $HOME/f' "${CV_ALL}"
+# Review round 2: assignment-prefix words built from braces, expansions,
+# appends, and subscripts are still assignment prefixes.
+assert_changed_vars ". after FOO=\${x} marks all four" 'FOO=${x} . ./env.sh; echo y > ~/f' "${CV_ALL}"
+assert_changed_vars ". after PATH=\${PATH}:/x marks all four" 'PATH=${PATH}:/x . ./env.sh; echo y > ~/f' "${CV_ALL}"
+assert_changed_vars ". after FOO+=x marks all four" 'FOO+=x . ./env.sh; echo y > ~/f' "${CV_ALL}"
+assert_changed_vars ". after a[0]=x marks all four" 'a[0]=x . ./env.sh; echo y > ~/f' "${CV_ALL}"
+assert_changed_vars ". after X={a,b} marks all four" 'X={a,b} . ./env.sh; echo y > ~/f' "${CV_ALL}"
+assert_changed_vars ". after FOO=\$(x y) marks all four" 'FOO=$(x y) . ./env.sh; echo y > ~/f' "${CV_ALL}"
+# The backtick holds a blank, so without the backtick rule the walk would
+# stop there, read the tail as the previous word, and report nothing.
+assert_changed_vars ". after a word holding a backtick fails closed" \
+    'FOO=`echo a b`x . ./env.sh; echo y > ~/f' "${CV_ALL}"
+# The leading `true;` keeps the misread word from looking like an assignment,
+# so only the open-depth rule can make this fail closed.
+assert_changed_vars ". after a word whose paren depth stays open fails closed" \
+    'true; FOO="$(echo ")")" . ./env.sh; echo y > ~/f' "${CV_ALL}"
+# Review round 2: a quoted or escaped command/builtin is still that builtin.
+assert_changed_vars ". after \\command marks all four" '\command . ./env.sh' "${CV_ALL}"
+assert_changed_vars ". after \"command\" marks all four" '"command" . ./env.sh' "${CV_ALL}"
+assert_changed_vars ". after 'builtin' marks all four" "'builtin' . ./env.sh" "${CV_ALL}"
+# Review round 2: a quote span left open at end of string (a stray apostrophe
+# in a comment) cannot hide a later standalone dot.
+assert_changed_vars ". after a stray apostrophe in a comment fails closed" \
+    $'echo ok # it\'s\n. ./env.sh' "${CV_ALL}"
+# Review round 2: pathological `) .` inputs finish and fail closed (a hook
+# timeout fails open). Neither of these two proves the 400-character walk
+# cap: the nested input fails closed without it too (only slower), and the
+# flat one fails closed through the open-paren-depth rule before the cap is
+# reached. The long-argument case after them is the cap's behavioural pin.
+CV_OPENS=""
+CV_CLOSES=""
+for ((cv_i = 0; cv_i < 3000; cv_i++)); do
+    CV_OPENS+="( "
+    CV_CLOSES+=") . "
+done
+assert_changed_vars "a pathological nested ) . input finishes and fails closed" \
+    $'echo a > /tmp/x\n'"${CV_OPENS}${CV_CLOSES}" "${CV_ALL}"
+assert_changed_vars "3000 repetitions of ) . after a decoy redirect line fail closed (open paren depth)" \
+    $'echo a > /tmp/x\n'"${CV_CLOSES}" "${CV_ALL}"
+# The walk cap itself: a standalone `.` after an ordinary quoted argument
+# longer than 400 characters fails closed (a documented over-block), where
+# the same short argument (`grep "x" .`) reports nothing.
+CV_LONG_ARG=""
+for ((cv_i = 0; cv_i < 450; cv_i++)); do
+    CV_LONG_ARG+="x"
+done
+assert_changed_vars "a standalone . after a quoted argument past the 400-character walk cap fails closed (over-block)" \
+    "grep \"${CV_LONG_ARG}\" . > /tmp/o" "${CV_ALL}"
+
+echo "case: #816 gap 3 -- bwt_changed_vars negatives"
+assert_changed_vars "\$HOME read" 'echo x > $HOME/f' ""
+assert_changed_vars "\${HOME} read" 'echo x > ${HOME}/f' ""
+assert_changed_vars "\${TMPDIR:-/tmp} read" 'echo x > ${TMPDIR:-/tmp}/cenci/f' ""
+assert_changed_vars "\$PWD / \${PWD} reads" 'echo x > $PWD/a; echo y > ${PWD}/b' ""
+assert_changed_vars "MYHOME= is a different name" 'MYHOME=/x cmd > /tmp/o' ""
+assert_changed_vars "HOME_DIR= is a different name" 'HOME_DIR=/x cmd > /tmp/o' ""
+assert_changed_vars "OLDPWD= is a different name" 'OLDPWD=/x cmd > /tmp/o' ""
+assert_changed_vars "timeout is not a variable-changing verb" \
+    'timeout 60 make test > ${TMPDIR:-/tmp}/cenci/t-816.log 2>&1' ""
+assert_changed_vars "env is not a variable-changing verb" 'env FOO=1 cmd > /tmp/o' ""
+assert_changed_vars "find . is not a command-position dot" 'find . -name x > /tmp/o' ""
+assert_changed_vars "git add . is not a command-position dot" 'git add . > /tmp/o 2>&1' ""
+assert_changed_vars "go test ./... is not a dot word" 'go test ./... > /tmp/o' ""
+assert_changed_vars "cd-tool is not cd (hyphen is part of the word)" 'cd-tool x > /tmp/o' ""
+assert_changed_vars "abcd is not cd" 'abcd x > /tmp/o' ""
+assert_changed_vars "sourcefile is not source" 'sourcefile x > /tmp/o' ""
+assert_changed_vars "evaluate is not eval" 'evaluate x > /tmp/o' ""
+assert_changed_vars "a literal absolute target with an unrelated assignment" 'FOO=/x some-cmd > /tmp/o' ""
+# A `.` inside quoted text cannot source anything in THIS shell (a second
+# parse of that text is eval/sh -c territory, handled or out of scope on its
+# own), so the /cenci:configure jq filters pinned by guard-main-worktree.test.sh
+# must not mark anything changed.
+assert_changed_vars "a single-quoted jq filter with else . end is not a source" \
+    "jq 'if .a == {} then del(.a) else . end' f > g.tmp" ""
+assert_changed_vars "a single-quoted jq filter with | . + 1 is not a source" \
+    "jq '.a | . + 1' f > g.tmp" ""
+assert_changed_vars "a single-quoted jq filter starting with . is not a source" \
+    "jq '. * {}' f > g.tmp" ""
+assert_changed_vars "a double-quoted then . y is not a source" \
+    'echo "if x; then . y; fi" > /tmp/x' ""
+assert_changed_vars "an ANSI-C-quoted ; . y is not a source" \
+    "echo \$'a; . y' > /tmp/x" ""
+assert_changed_vars "a quoted '.' inside a larger double-quoted word is not a source" \
+    "echo \"'.' y\" > /tmp/x" ""
+assert_changed_vars "an escaped \\. inside double quotes is not a source" \
+    'echo "a; \. y" > /tmp/x' ""
+# Review fix: an ordinary argument that merely ends in a quote, or a `)` that
+# closes a command substitution, does not put the next `.` in command position.
+assert_changed_vars "grep \"x\" . is not a source" 'grep "x" . > /tmp/o' ""
+assert_changed_vars "grep -rn \"foo\" . with a \${TMPDIR:-/tmp} log is not a source" \
+    'grep -rn "foo" . > ${TMPDIR:-/tmp}/cenci/g.log' ""
+assert_changed_vars "rg 'x' . is not a source" "rg 'x' . > /tmp/o" ""
+assert_changed_vars "git grep 'x' . is not a source" "git grep 'x' . > /tmp/o" ""
+assert_changed_vars "cp \"\$(pwd)/a\" . is not a source" 'cp "$(pwd)/a" . > /tmp/o' ""
+assert_changed_vars "cp \$(pwd) . is not a source" 'cp $(pwd) . > /tmp/o' ""
+assert_changed_vars "ls \$(git rev-parse --show-toplevel) . is not a source" \
+    'ls $(git rev-parse --show-toplevel) . > /tmp/o' ""
+assert_changed_vars "a quoted case word does not make \$(pwd) . a case pattern" \
+    'grep "case" $(pwd) . > /tmp/o' ""
+assert_changed_vars "a non-assignment word ending in a quoted span is not a prefix" \
+    'grep --label="a b" . > /tmp/o' ""
+assert_changed_vars "\${TMPDIR} stays a read next to the subscript rule" 'echo x > ${TMPDIR}/f' ""
+# Review round 2: a backslash-newline continuation is whitespace, not a
+# command separator, so the `.` after it is still an argument.
+assert_changed_vars "a . argument after a backslash-newline continuation is not a source" \
+    $'docker build -t x \\\n  . > ${TMPDIR:-/tmp}/cenci/b.log' ""
+# Discriminates the raw pass modelling a `$` continued onto its ANSI-C quote:
+# read as single quoting, the span would close early and expose `; . b`.
+assert_changed_vars "a dot inside a continued ANSI-C span is not a source" \
+    $'echo $\\\n\'a\\\' ; . b\' > /tmp/x' ""
+# The first word inside `$(` is in command position, so the walk-back stops
+# at an unmatched `(` and tests that word like any other.
+assert_changed_vars "wc -l \$(find . -name x) is not a source" 'wc -l $(find . -name x) > /tmp/o' ""
+# `time` is a reserved word only when unquoted; a quoted one runs a child.
+assert_changed_vars "a quoted \"time\" is not stripped into the reserved word" '"time" . ./env.sh > /tmp/o' ""
+
+echo "case: #816 gap 3 -- bwt_changed_vars fails closed without awk"
+CV_NO_AWK_BIN="${TEST_ROOT}/bin-no-awk-cv"
+mkdir -p "${CV_NO_AWK_BIN}"
+CV_NO_AWK_OUT="$(PATH="${CV_NO_AWK_BIN}" bwt_changed_vars 'echo x > $HOME/f')"
+CV_NO_AWK_RC=$?
+if [[ "${CV_NO_AWK_RC}" -eq 0 && "${CV_NO_AWK_OUT}" == "${CV_ALL}" ]]; then
+    pass
+else
+    fail "bwt_changed_vars with no awk on PATH: got <${CV_NO_AWK_OUT}> (exit ${CV_NO_AWK_RC}), expected all four (exit 0)"
+fi
+
+# ── #816 gap 3: bwt_target_changed_var <raw-target> <changed-set> -- the
+# changed variable a raw target's LEADING expansion depends on, or nothing.
+assert_target_changed() {
+    local label="$1" target="$2" set="$3" expected="$4" actual
+    actual="$(bwt_target_changed_var "${target}" "${set}")"
+    if [[ "${actual}" == "${expected}" ]]; then
+        pass
+    else
+        fail "${label}: target_changed_var(<${target}>, <${set}>) = <${actual}>, expected <${expected}>"
+    fi
+}
+echo "case: #816 gap 3 -- bwt_target_changed_var"
+assert_target_changed "bare ~ uses HOME" '~' "${CV_ALL}" "HOME"
+assert_target_changed "~/x uses HOME" '~/x' "${CV_ALL}" "HOME"
+assert_target_changed "~user/x is never expanded" '~user/x' "${CV_ALL}" ""
+assert_target_changed "~+/x uses PWD" '~+/x' "${CV_ALL}" "PWD"
+assert_target_changed "\$HOME/x uses HOME" '$HOME/x' "${CV_ALL}" "HOME"
+assert_target_changed "\${HOME}/x uses HOME" '${HOME}/x' "${CV_ALL}" "HOME"
+assert_target_changed "\$HOME.bak uses HOME" '$HOME.bak' "${CV_ALL}" "HOME"
+assert_target_changed "\$PWD/x uses PWD" '$PWD/x' "${CV_ALL}" "PWD"
+assert_target_changed "\${PWD}/x uses PWD" '${PWD}/x' "${CV_ALL}" "PWD"
+assert_target_changed "\$TMPDIR/x uses TMPDIR" '$TMPDIR/x' "${CV_ALL}" "TMPDIR"
+assert_target_changed "\${TMPDIR}/x uses TMPDIR" '${TMPDIR}/x' "${CV_ALL}" "TMPDIR"
+assert_target_changed "\${TMPDIR:-/tmp}/x uses TMPDIR" '${TMPDIR:-/tmp}/x' "${CV_ALL}" "TMPDIR"
+assert_target_changed "\$HOMEX/x is a different variable" '$HOMEX/x' "${CV_ALL}" ""
+assert_target_changed "\$PWDX/x is a different variable" '$PWDX/x' "${CV_ALL}" ""
+assert_target_changed "a literal absolute target uses nothing" '/abs/x' "${CV_ALL}" ""
+assert_target_changed "a relative target uses nothing" 'rel/x' "${CV_ALL}" ""
+assert_target_changed "\${TMPDIR:-/tmp} is unaffected when only PWD/CWD changed" \
+    '${TMPDIR:-/tmp}/cenci/t-816.log' "${CV_PWD_CWD}" ""
+assert_target_changed "\$HOME is unaffected when only PWD/CWD changed" '$HOME/x' "${CV_PWD_CWD}" ""
+assert_target_changed "\$PWD is affected when PWD changed" '$PWD/x' "${CV_PWD_CWD}" "PWD"
+assert_target_changed "~/x is unaffected by an empty set" '~/x' "" ""
+
+# ── #816 Q1: an unbraced $HOME/$PWD/$TMPDIR expands only when the next
+# character is not a name character -- bash reads `$PWDX` as the unset
+# variable PWDX, so expanding it as `$PWD` + `X...` misreported the target.
+echo "case: #816 Q1 -- bwt_expand_safe_vars respects the variable-name boundary"
+assert_expand_with_var "\$PWDX/a stays unexpanded" PWD "${TEST_ROOT}/cwd" '$PWDX/a' '$PWDX/a'
+assert_expand_with_var "\$HOMEX/a stays unexpanded" HOME "${TEST_ROOT}/home" '$HOMEX/a' '$HOMEX/a'
+assert_expand_with_var "\$HOME_x stays unexpanded" HOME "${TEST_ROOT}/home" '$HOME_x' '$HOME_x'
+assert_expand_with_tmpdir "\$TMPDIRX/a stays unexpanded" "${VALID_TMPDIR}" '$TMPDIRX/a' '$TMPDIRX/a'
+assert_expand_with_var "\$HOME.bak still expands" HOME "${TEST_ROOT}/home" '$HOME.bak' "${TEST_ROOT}/home.bak"
+assert_expand_with_var "\$HOME/x still expands" HOME "${TEST_ROOT}/home" '$HOME/x' "${TEST_ROOT}/home/x"
+assert_expand_with_var "bare \$HOME still expands" HOME "${TEST_ROOT}/home" '$HOME' "${TEST_ROOT}/home"
 
 # ── Summary ──────────────────────────────────────────────────────────
 echo

@@ -3001,6 +3001,142 @@ else
     fail "zero-parse message must warn against inventing a redirect, got: ${GUARD_STDERR}"
 fi
 
+# ── Ticket #816: three Bash write-guard bypasses left after #810 ──────────
+# Gap 1: a double-quoted substitution anywhere (not only inside [[ ]]/(( )))
+# next to quoted write-shaped text fails closed with exit 7 and a generalised
+# message. Gap 2: `$'...'` is its own quote state, so `\'` inside it cannot
+# make a real redirect look quoted. Gap 3: a $HOME/~/$PWD/$TMPDIR expansion is
+# honoured only when the same command does not change that variable (or, for
+# $PWD, the directory); otherwise the target is blocked with a message naming
+# the change. Root for the feature-worktree-cwd cases is WORKTREE_REPRO_REPO.
+T816_HOME="${TEST_ROOT}/t816-home"
+T816_TMP="${TEST_ROOT}/t816-tmp"
+mkdir -p "${T816_HOME}" "${T816_TMP}"
+
+echo "case: an out-of-region double-quoted \$( ) substitution hiding a main-worktree write is blocked with the generalised exit-7 message (#816 AC 30)"
+run_guard "${FEATURE_WORKTREE_REPRO}" "$(dl_bash_json "echo ok > /tmp/ok; echo \"\$(printf x > ${WORKTREE_REPRO_REPO}/AGENTS.md)\"")"
+assert_exit "#816 AC 30 out-of-region double-quoted substitution blocked" 2
+assert_stderr_has "#816 AC 30" "command/process/function substitution appears inside a double-quoted string"
+assert_stderr_has "#816 AC 30" "cannot be safely resolved"
+assert_stderr_lacks "#816 AC 30" "within a comparison construct"
+assert_stderr_has "#816 AC 30 remediation" "git commit -F"
+assert_stderr_has "#816 AC 30 remediation" "--body-file"
+
+echo "case: \$'a\\'b' cannot hide a real main-worktree redirect behind drifted quote state (#816 AC 34)"
+run_guard "${FEATURE_WORKTREE_REPRO}" "$(dl_bash_json "echo ok > /tmp/ok; echo \$'a\\'b' > ${WORKTREE_REPRO_REPO}/AGENTS.md #'")"
+assert_exit "#816 AC 34 ANSI-C quoted redirect blocked" 2
+assert_stderr_has "#816 AC 34" "targets the main worktree"
+
+echo "case: HOME reassigned before a ~ redirect is blocked as a changed variable (#816 AC 36)"
+run_guard_with_home "${BASH_REPO}" "${T816_HOME}" "$(dl_bash_json "HOME=${BASH_REPO}; echo x > ~/AGENTS.md")"
+assert_exit "#816 AC 36 HOME= then ~ redirect blocked" 2
+assert_stderr_has "#816 AC 36" "HOME"
+assert_stderr_has "#816 AC 36" "changed by this command"
+assert_stderr_has "#816 AC 36" "literal absolute path"
+
+echo "case: export HOME before a \$HOME redirect is blocked as a changed variable (#816 AC 37)"
+run_guard_with_home "${BASH_REPO}" "${T816_HOME}" "$(dl_bash_json "export HOME=${BASH_REPO} && echo x > \$HOME/AGENTS.md")"
+assert_exit "#816 AC 37 export HOME then \$HOME redirect blocked" 2
+assert_stderr_has "#816 AC 37" "changed by this command"
+
+echo "case: cd to the main worktree before a \$PWD redirect is blocked from a feature-worktree cwd (#816 AC 38)"
+run_guard "${FEATURE_WORKTREE_REPRO}" "$(dl_bash_json "cd ${WORKTREE_REPRO_REPO} && echo x > \$PWD/AGENTS.md")"
+assert_exit "#816 AC 38 cd then \$PWD redirect blocked" 2
+assert_stderr_has "#816 AC 38" "changes the working directory"
+assert_stderr_has "#816 AC 38" "literal absolute path"
+
+echo "case: TMPDIR reassigned before a \${TMPDIR:-/tmp} tee is blocked as a changed variable (#816 AC 39)"
+run_guard_with_tmpdir "${BASH_REPO}" "${T816_TMP}" "$(dl_bash_json "TMPDIR=${BASH_REPO}; tee \${TMPDIR:-/tmp}/AGENTS.md")"
+assert_exit "#816 AC 39 TMPDIR= then \${TMPDIR:-/tmp} tee blocked" 2
+assert_stderr_has "#816 AC 39" "TMPDIR"
+assert_stderr_has "#816 AC 39" "changed by this command"
+assert_stderr_has "#816 AC 39" "literal absolute path"
+
+echo "case: eval marks HOME changed, so a later \$HOME redirect is blocked (#816 AC 40)"
+run_guard_with_home "${BASH_REPO}" "${T816_HOME}" "$(dl_bash_json "eval 'HOME=/x'; echo y > \$HOME/z")"
+assert_exit "#816 AC 40 eval then \$HOME redirect blocked" 2
+assert_stderr_has "#816 AC 40" "changed by this command"
+
+echo "case: source marks TMPDIR changed, so a later \$TMPDIR redirect is blocked (#816 AC 40, source)"
+run_guard_with_tmpdir "${BASH_REPO}" "${T816_TMP}" "$(dl_bash_json "source ./env.sh; echo y > \$TMPDIR/z")"
+assert_exit "#816 AC 40 source then \$TMPDIR redirect blocked" 2
+assert_stderr_has "#816 AC 40 source" "TMPDIR"
+assert_stderr_has "#816 AC 40 source" "changed by this command"
+
+echo "case: a command-position . marks PWD changed, so a later \${PWD} redirect is blocked (#816 AC 40, dot)"
+run_guard "${FEATURE_WORKTREE_REPRO}" "$(dl_bash_json ". ./env.sh; echo y > \${PWD}/z")"
+assert_exit "#816 AC 40 . then \${PWD} redirect blocked" 2
+assert_stderr_has "#816 AC 40 dot" "changes the working directory"
+
+echo "case: cd does not affect a \${TMPDIR:-/tmp} expansion (#816 AC 43)"
+run_guard_with_tmpdir "${FEATURE_WORKTREE_REPRO}" "${T816_TMP}" "$(dl_bash_json "cd ${FEATURE_WORKTREE_REPRO} && go test ./... > \${TMPDIR:-/tmp}/cenci/t-816.log 2>&1")"
+assert_exit "#816 AC 43 cd then \${TMPDIR:-/tmp} log allowed" 0
+
+echo "case: a non-eval/source re-parse verb marks nothing changed (#816 AC 44)"
+run_guard_with_tmpdir "${BASH_REPO}" "${T816_TMP}" "$(dl_bash_json "timeout 60 make test > \${TMPDIR:-/tmp}/cenci/t-816.log 2>&1")"
+assert_exit "#816 AC 44 timeout then \${TMPDIR:-/tmp} log allowed" 0
+
+echo "case: a literal absolute target is unaffected by a variable change (#816 AC 45)"
+run_guard "${BASH_REPO}" "$(dl_bash_json "HOME=/x some-cmd > /tmp/cenci/t-816.out")"
+assert_exit "#816 AC 45 HOME= with literal absolute target allowed" 0
+
+echo "case: a target word still holding \$' is unresolved (#816 edge case)"
+run_guard "${BASH_REPO}" "$(dl_bash_json "echo x > \$'/tmp/ok'")"
+assert_exit "#816 edge \$'/tmp/ok' target blocked" 2
+assert_stderr_has "#816 edge \$'/tmp/ok'" "cannot resolve the Bash write target"
+
+echo "case: a double-quoted substitution with no > and no tee is allowed (#816 edge case)"
+run_guard "${BASH_REPO}" "$(dl_bash_json "git commit -m \"\$(printf 'msg')\"")"
+assert_exit "#816 edge git commit -m \"\$(printf)\" allowed" 0
+
+echo "case: a bare HOME word marks HOME changed -- accepted over-block (#816 edge case)"
+run_guard_with_home "${BASH_REPO}" "${T816_HOME}" "$(dl_bash_json "echo HOME > \$HOME/x")"
+assert_exit "#816 edge echo HOME > \$HOME/x blocked" 2
+assert_stderr_has "#816 edge echo HOME" "changed by this command"
+
+echo "case: a literal absolute feature-worktree target after cd is allowed (#816 edge case)"
+run_guard "${FEATURE_WORKTREE_REPRO}" "$(dl_bash_json "cd ${FEATURE_WORKTREE_REPRO} && echo x > ${FEATURE_WORKTREE_REPRO}/out.txt")"
+assert_exit "#816 edge cd <wt> then absolute <wt> target allowed" 0
+
+echo "case: ~user is never expanded and falls to the relative-target policy (#816 edge case)"
+run_guard_with_home "${BASH_REPO}" "${T816_HOME}" "$(dl_bash_json "HOME=${BASH_REPO}; tee ~user/AGENTS.md")"
+assert_exit "#816 edge ~user target blocked" 2
+assert_stderr_has "#816 edge ~user" "cannot verify the relative Bash write target"
+assert_stderr_lacks "#816 edge ~user" "changed by this command"
+
+echo "case: pushd marks PWD changed while /dev/null stays exempt (#816 edge case)"
+run_guard "${FEATURE_WORKTREE_REPRO}" "$(dl_bash_json "pushd ${WORKTREE_REPRO_REPO} >/dev/null; echo x > \${PWD}/AGENTS.md")"
+assert_exit "#816 edge pushd >/dev/null then \${PWD} redirect blocked" 2
+assert_stderr_has "#816 edge pushd" "changes the working directory"
+assert_stderr_has "#816 edge pushd names the \${PWD} target" "'\${PWD}/AGENTS.md'"
+
+echo "case: control -- pushd with only /dev/null and a literal absolute temp target is allowed (#816 edge case)"
+run_guard "${FEATURE_WORKTREE_REPRO}" "$(dl_bash_json "pushd ${WORKTREE_REPRO_REPO} >/dev/null; echo x > /tmp/cenci/t-816.out")"
+assert_exit "#816 edge pushd >/dev/null with literal temp target allowed" 0
+
+echo "case: an apply_patch envelope whose body holds HOME= and cd is unaffected by the change check (#816 edge case)"
+run_guard "${FEATURE_WORKTREE_REPRO}" "$(jq -n --arg cmd "*** Begin Patch
+*** Add File: ~/notes-816.txt
++HOME=/x
++cd /tmp
+*** End Patch" --arg cwd "${FEATURE_WORKTREE_REPRO}" "${AP_SHAPE}")"
+assert_exit "#816 edge apply_patch body with HOME= and cd allowed" 0
+
+echo "case: grep with a quoted pattern and a . path argument logging to \${TMPDIR:-/tmp} is allowed (#816 review fix)"
+run_guard_with_tmpdir "${FEATURE_WORKTREE_REPRO}" "${T816_TMP}" "$(dl_bash_json "grep \"x\" . > \${TMPDIR:-/tmp}/cenci/g-816.log")"
+assert_exit "#816 review grep \"x\" . > \${TMPDIR:-/tmp} log allowed" 0
+
+echo "case: a sourced dot behind a FOO=\${x} assignment prefix marks HOME changed, so a later ~ redirect is blocked (#816 review fix)"
+run_guard_with_home "${BASH_REPO}" "${T816_HOME}" "$(dl_bash_json "FOO=\${x} . ./env.sh; echo y > ~/f")"
+assert_exit "#816 review FOO=\${x} . ./env.sh then ~ redirect blocked" 2
+assert_stderr_has "#816 review FOO=\${x} dot" "HOME"
+assert_stderr_has "#816 review FOO=\${x} dot" "changed by this command"
+
+echo "case: a sourced dot after a case-pattern ) marks HOME changed, so a later ~ redirect is blocked (#816 review fix)"
+run_guard_with_home "${BASH_REPO}" "${T816_HOME}" "$(dl_bash_json "case x in x) . ./env.sh;; esac; echo y > ~/f")"
+assert_exit "#816 review case-pattern . then ~ redirect blocked" 2
+assert_stderr_has "#816 review case-pattern dot" "changed by this command"
+
 # ── Ticket #1411: guard canary receipts ────────────────────────────────
 # When this guard denies a canary-shaped probe target
 # <main-root>/cenci-guard-canary-<hex>-<n>.txt whose run dir

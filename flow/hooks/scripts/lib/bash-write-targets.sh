@@ -109,6 +109,49 @@
 #     joining relative targets to its own cwd (#1212 Q5), so a symlink that
 #     exists only in an invisible workdir is a documented, narrow residual
 #     there. Absolute declared targets never needed a cwd.
+#   - (#816) The variable/cwd-change scan (bwt_changed_vars) is lexical: a
+#     variable name assembled from strings or expansions (for example
+#     `declare "${a}OME=/x"`), or an escape- or quote-split name or verb
+#     (`H\OME=/x` handed to `export`, escape-split `c\d`, `'c'd`), is not
+#     recognized as a change. `~-` (bash reads OLDPWD) and an `OLDPWD=`
+#     assignment are not modelled either: `~-` is never expanded and falls to
+#     each guard's relative-target policy.
+#   - (#816) An ANSI-C-quoted COMMAND word (`$'tee' <path>`) keeps its `$'`
+#     and so never matches the basename-"tee" check; it does not arm tee
+#     detection, exactly as before #816.
+#   - (#816) The command-position `.` rule recognizes only the prefixes
+#     listed at bwt_changed_vars: a `.` after a redirection word
+#     (`2>/dev/null . f`) or after an option word of `time`/`command`
+#     (`time -p . f`), and a `.` built by expansion (`$d f`), are not seen as
+#     a source. An assignment prefix is modelled only as NAME=, NAME+=, or
+#     NAME[sub]= whose value the previous-word walk reads as ONE word: plain
+#     text, single/double/ANSI-C quoted text, a paren-balanced `$( )` (which
+#     may hold blanks), a `${ }` with no whitespace or parenthesis inside it
+#     (`FOO=${x}`, `FOO=${x:-y}`), or a brace list (`X={a,b}`); a value with
+#     an unquoted backtick fails closed. Any other prefix shape is not
+#     modelled, including the `${ }` values named in the next entry. A
+#     `"$( )"` assignment value with nested quotes is read with the
+#     outer-quote rules: when that leaves the paren depth unbalanced the scan
+#     fails closed, but a balanced misread is not detected. The continuation
+#     join is not escape-aware (`\\<newline>` is joined too), so the second
+#     pass can misread text around an escaped backslash at a line end. The
+#     gap-1 tee test reads raw span text, so a quote-split `tee` name inside
+#     a double-quoted command substitution (`"$(t""ee x)"`) does not count as
+#     quoted write-shaped text; dequoting the whole command instead would
+#     block `echo "$(date)" | tee /tmp/x`. These checks fail closed on what
+#     they detect and never chase per-construct completeness (#795/#810).
+#   - (#816) An assignment-prefix word whose unquoted `${ }` value holds
+#     whitespace or a parenthesis (`FOO=${x:-a b} . ./env.sh`,
+#     `FOO=${x%% *} . f`, `FOO=${x// /_} . f`, `FOO=${x:-(} . f`) hides the
+#     command-position `.` after it: the previous-word walk treats the space
+#     or paren inside the braces as a word boundary, so it sees only the tail
+#     (`b}`, `*}`, `/_}`, `}`), which is not an assignment word, and
+#     bwt_changed_vars reports nothing although bash sources the file in this
+#     shell. The same value written inside double quotes (`FOO="${x:-a b}"`)
+#     is a quoted piece and is caught. Accepted rather than chased: the
+#     detection fails closed on what it can see and never chases
+#     per-construct completeness (#795/#810), and exploiting this needs a
+#     script written by an earlier Bash call for the `.` to source.
 #
 #   Comparison-context recognition is intentionally narrow, PERMANENTLY
 #   (#810, round-3 stabilization review — this is a settled design choice,
@@ -205,6 +248,83 @@
 #   mark_regions(), is_boundary_char(), is_opener_boundary(), and
 #   is_bracket_command_position() below.
 #
+#   (#816, gap 1 -- double-quoted substitution outside a comparison region):
+#   the exit 7 above covered a double-quoted substitution only INSIDE a
+#   `[[ ]]`/`(( ))` interior. Everywhere else the main loop treated
+#   double-quoted text as opaque, so `echo ok > /tmp/ok; echo "$(printf x >
+#   <root>/AGENTS.md)"` extracted only the decoy, the non-empty result
+#   skipped the empty-parse backstop, and the inner write was allowed. The
+#   main loop now records two facts as it scans: a substitution marker inside
+#   a double-quoted span (a backtick, `$(`, a `${ `/`${|` funsub, `<(`, `>(`),
+#   and write-shaped text inside ANY quoted span (single, double, or ANSI-C: a
+#   `>` or a delimited `tee`). When both hold, the whole extraction fails
+#   closed with exit 7, the same blunt code as the in-region case -- there is
+#   still no attempt to resume precise parsing inside the substitution. A
+#   substitution with no quoted write-shaped text (`echo "$(date)" >>
+#   /tmp/x.log`, `git commit -m "$(printf msg)"`) is unaffected.
+#
+#   (#816, gap 2 -- ANSI-C quoting): `$'...'` is its own quote state in all
+#   five quote-tracking passes (the main loop, mark_regions(),
+#   has_nested_substitution(), find_close(), find_close_bracket()). It opens
+#   only on an unquoted, unescaped `$` whose logical next character is a
+#   single quote; inside it a backslash escapes the next character and an
+#   unescaped single quote closes it. Read as plain single quoting, `\'`
+#   closed the span early, the quote state drifted from bash's, and a real
+#   redirect later in the command looked quoted (`echo $'a\'b' > <path> #'`
+#   extracted nothing for <path>). A target word keeps its `$'`, so it stays
+#   unresolved (bwt_is_unresolved's `$` test) and blocks. `$'` inside double
+#   quotes or after a backslash is not ANSI-C quoting and is unaffected.
+#
+#   (#816, gap 3 -- variables or cwd changed by the command itself): both
+#   guards expand `~`/`$HOME`/`${HOME}`, `$PWD`/`${PWD}`, and
+#   `$TMPDIR`/`${TMPDIR}`/`${TMPDIR:-/tmp}` against the HOOK process
+#   environment, and check-sensitive-files.sh joins relative targets to its
+#   own cwd -- both wrong when the command reassigns that variable or changes
+#   directory before the write (`HOME=<root>; echo x > ~/AGENTS.md`,
+#   `cd $HOME/.ssh && echo k >> authorized_keys`). bwt_changed_vars scans the
+#   raw command once for anything that can change HOME, PWD, TMPDIR, or the
+#   cwd (see its header for the exact rule), and the guards consult
+#   bwt_target_changed_var per target BEFORE bwt_expand_safe_vars: an
+#   allowlisted expansion is honoured only when the same command does not
+#   change that variable (or, for `$PWD`, the directory); otherwise the
+#   target is blocked. check-sensitive-files.sh also blocks a relative target
+#   when the cwd may change. A literal absolute target is never affected, and
+#   apply_patch declared targets (never shell-expanded) are outside this
+#   check. The same change closed a bare-prefix bug (#816 Q1): an unbraced
+#   `$HOMEX`/`$PWDX`/`$TMPDIRX` used to expand as the safe variable plus a
+#   suffix while bash reads a different, unset variable; an unbraced name now
+#   expands only at a variable-name boundary, so those stay unresolved.
+#
+#   Recorded over-blocks of the #816 changes (accepted; each only fails
+#   closed):
+#   - Any bare HOME/PWD/TMPDIR word, or cd/pushd/popd/eval/source text,
+#     anywhere in the command (`echo HOME > $HOME/x`) blocks every target
+#     that uses the matching expansion.
+#   - check-sensitive-files.sh blocks every relative target after a possible
+#     cwd change (`cd /x && echo y > out.txt`) in every repo, since the #795
+#     sensitive-file arm is unconditional by design. guard-main-worktree.sh
+#     already blocks every relative Bash target (#810), so where that guard
+#     is active the pair gains no new over-block; in a repo without
+#     .cenci/config.json (where it exits 0) the block is new.
+#   - `<(`/`>(` inside double quotes counts as a gap-1 marker although bash
+#     leaves it inert there, and any quoted `>` counts as write-shaped, so a
+#     message built as `-m "$(cat <<EOF ... a -> b ... EOF)"` exits 7. The
+#     remedy is a message file (`git commit -F <abs-file>`, `--body-file`).
+#   - In a command holding an unquoted `case` word, any unquoted `)` before a
+#     standalone `.` counts as a case-pattern terminator (`cp $(pwd) .`).
+#   - A subscripted read (`${TMPDIR[0]}`) counts as a change, like the
+#     subscripted default assignment (`${TMPDIR[0]:=x}`) it cannot be told
+#     apart from cheaply.
+#   - A standalone `.` marks all four changed when it follows a reserved
+#     word used as an ordinary argument (`grep -rn exec .`, `grep if .`), a
+#     closing backtick, or an escaped `\;`, or when a stray unclosed quote
+#     (an apostrophe in a comment or heredoc body) appears anywhere in the
+#     command.
+#   - A standalone `.` marks all four changed when the previous word or
+#     argument is longer than the previous-word walk cap of 400 characters,
+#     even when it is an ordinary argument (`grep "<450 chars>" . > /tmp/o`):
+#     the walk stops at the cap and fails closed instead of reading on.
+#
 # Functions:
 #   bwt_has_write_candidate <command>    -- cheap early-exit predicate
 #   bwt_extract_targets <command>        -- emits one raw target per line
@@ -212,6 +332,8 @@
 #   bwt_has_delimited_tee <command>      -- delimited-tee raw-text scan (#810)
 #   bwt_is_exempt_device <target>        -- true for /dev/null etc.
 #   bwt_expand_safe_vars <target>        -- internal expansion, never eval
+#   bwt_changed_vars <command>           -- HOME/PWD/TMPDIR/CWD the command may change (#816)
+#   bwt_target_changed_var <target> <set> -- changed variable a target's leading expansion uses (#816)
 #   bwt_is_unresolved <expanded-target>  -- true if still unresolved
 #   bwt_is_unresolved_literal <target>   -- unresolved test for apply_patch's
 #                                           never-expanded literal paths (#1045)
@@ -553,7 +675,11 @@ bwt_expand_safe_vars() {
       printf '%s\n' "${_bwt_in}"
       return 0
       ;;
-    '$TMPDIR'*)
+    # Unbraced forms expand only at a variable-name boundary (#816 Q1): bash
+    # reads `$TMPDIRX` as the different, unset variable TMPDIRX, so a name
+    # character after the bare name leaves the target unexpanded (and
+    # unresolved) instead of being misread as `$TMPDIR` plus a suffix.
+    '$TMPDIR' | '$TMPDIR'[!A-Za-z0-9_]*)
       _bwt_suffix="${_bwt_in#'$TMPDIR'}"
       if [ -n "${TMPDIR:-}" ]; then
         case "${TMPDIR}" in
@@ -581,7 +707,7 @@ bwt_expand_safe_vars() {
       printf '%s\n' "${_bwt_in}"
       return 0
       ;;
-    '$HOME'*)
+    '$HOME' | '$HOME'[!A-Za-z0-9_]*)
       _bwt_suffix="${_bwt_in#'$HOME'}"
       if [ -n "${HOME:-}" ]; then
         case "${HOME}" in
@@ -607,7 +733,7 @@ bwt_expand_safe_vars() {
       printf '%s\n' "${_bwt_in}"
       return 0
       ;;
-    '$PWD'*)
+    '$PWD' | '$PWD'[!A-Za-z0-9_]*)
       _bwt_suffix="${_bwt_in#'$PWD'}"
       if [ -n "${PWD:-}" ]; then
         case "${PWD}" in
@@ -623,6 +749,334 @@ bwt_expand_safe_vars() {
   esac
 
   printf '%s\n' "${_bwt_in}"
+}
+
+# ---------------------------------------------------------------------------
+# bwt_changed_vars <command>
+#
+# Raw-text scan (#816 gap 3) for anything in <command> that can change, before
+# a write, one of the values bwt_expand_safe_vars resolves against the HOOK
+# process environment. Prints zero or more of HOME, PWD, TMPDIR, CWD, one per
+# line, always in that order. CWD means the working directory itself may
+# change, which matters to a caller that joins relative targets to its own
+# cwd. Callers run it once per hook call with the checked `if ! X=$(...)`
+# pattern and, per target, ask bwt_target_changed_var whether that target
+# depends on a changed value.
+#
+# Detection rules, all lexical and all deliberately over-matching:
+#   - A bare HOME/PWD/TMPDIR word, delimited by [^A-Za-z0-9_] on both sides,
+#     marks that variable changed. This covers assignment, export, declare,
+#     typeset, local, readonly, unset, read, printf -v, and for-in. A read is
+#     skipped: the name preceded by `$`, or by `{` with a `$` before it --
+#     except that `${NAME=` and `${NAME:=` assign defaults and count as a
+#     change, as does `${NAME[` (a subscripted default such as
+#     `${NAME[0]:=x}` assigns the scalar; a subscripted read is an accepted
+#     over-block). Any other occurrence (`echo HOME`, `${#HOME}`) is an
+#     accepted over-block.
+#   - cd, pushd, and popd (delimited by [^A-Za-z0-9_-]) mark PWD and CWD.
+#   - eval, source, and a command-position `.` hand text to a second parse in
+#     THIS shell, so they mark all four. A `.` counts when it is a standalone
+#     word (optionally wrapped in quotes or a backslash, which bash removes)
+#     followed by whitespace or end of string, and the token before it
+#     (spaces/tabs skipped) is start of string, one of ; & | ( { a backtick
+#     ! or a newline, a reserved/prefix word (then do else elif if while
+#     until command builtin exec time; command and builtin also after quote
+#     removal, as in `\command` or `"builtin"`), or an assignment word
+#     (NAME=, NAME+=, NAME[sub]=) read quote- and paren-aware. Its value is
+#     recognized when it is plain text, quoted text (`FOO="a b"`), a
+#     paren-balanced `$( )` (`FOO=$(x y)`), a `${ }` with no whitespace or
+#     parenthesis inside it (`FOO=${x}`, `FOO=${x:-y}`), or a brace list
+#     (`X={a,b}`). An unquoted `${ }` value that holds whitespace or a paren
+#     (`FOO=${x:-a b}`, `FOO=${x%% *}`, `FOO=${x:-(}`) is NOT: the walk stops
+#     at that space or paren, and the dot after it is missed (a named
+#     residual in the file header). That previous-word walk fails closed on
+#     an unquoted backtick, on a paren depth still open at the start of the
+#     string, or past 400 characters (so a long ordinary argument before a
+#     standalone `.` over-blocks). A backslash-newline is a blank, not a
+#     separator.
+#     A standalone `.` anywhere also fails closed when a quote span is still
+#     open at end of string. An unquoted `)`
+#     counts only when the command also holds an unquoted `case` word (a
+#     case-pattern terminator). `find . -name x`, `git add .`, `grep "x" .`,
+#     and `cp $(pwd) .` do not match. A `.` inside quoted or escaped text
+#     counts only when it is the whole quoted unit (`\.`, or `.` alone in
+#     single, double, or ANSI-C quotes), which bash dequotes into the dot
+#     builtin; a `.` within longer quoted text (`jq 'if .a then . else .
+#     end'`, `echo "then . y"`) cannot source anything in this shell --
+#     re-parsing that text needs eval (already a verb here) or a child shell
+#     (`sh -c`), which cannot change this shell anyway.
+#   - Other re-parse verbs (timeout, env, xargs, sh -c, ...) run a CHILD
+#     process, which cannot change this shell's variables or cwd, so they are
+#     deliberately not included.
+#   - Every rule runs on the raw text and, when it holds any, again on the
+#     text with each backslash-newline pair removed (bash removes an
+#     unescaped one before it tokenizes), so `HO\<newline>ME=`,
+#     `c\<newline>d`, and `.\<newline> f` are caught. That join is not
+#     escape-aware: it also removes an escaped backslash followed by a real
+#     newline (`\\<newline>`), so the second pass can misread such text
+#     (a named residual in the file header). The results are OR-ed: the
+#     second pass can only add detections.
+#
+# Fails closed: if awk is missing it prints all four (and returns 0), the
+# same direction as bwt_has_reparse_verb. Any other awk failure returns
+# non-zero, which callers treat as a block.
+bwt_changed_vars() {
+  if ! command -v awk >/dev/null 2>&1; then
+    printf '%s\n' HOME PWD TMPDIR CWD
+    return 0
+  fi
+  BWT_CMD="$1" awk '
+    BEGIN {
+      sq = sprintf("%c", 39)
+      dq = sprintf("%c", 34)
+      bsl = sprintf("%c", 92)
+      nl = sprintf("%c", 10)
+      # Separator characters that put the following word in command position.
+      # A `)` is handled on its own in has_dot_command (case patterns only).
+      sep = ";&|({`!" nl
+      all = chhome = chpwd = chtmp = chcwd = 0
+
+      # Scan the raw text, then (when it has any) the text with every
+      # backslash-newline removed, as bash does before it tokenizes. The
+      # results are OR-ed, so the second pass can only add detections.
+      cmd = ENVIRON["BWT_CMD"]
+      scan()
+      joined = join_lines(cmd)
+      if (joined != cmd) {
+        cmd = joined
+        split("", qclose)
+        scan()
+      }
+
+      if (all) chhome = chpwd = chtmp = chcwd = 1
+      if (chhome) print "HOME"
+      if (chpwd) print "PWD"
+      if (chtmp) print "TMPDIR"
+      if (chcwd) print "CWD"
+      exit 0
+    }
+
+    # scan(): one pass of every rule over the current cmd, OR-ing the flags.
+    function scan() {
+      n = length(cmd)
+      if (cmd ~ /(^|[^A-Za-z0-9_-])(eval|source)([^A-Za-z0-9_-]|$)/) all = 1
+      if (!all && has_dot_command()) all = 1
+      if (name_changed("HOME")) chhome = 1
+      if (name_changed("PWD")) chpwd = 1
+      if (name_changed("TMPDIR")) chtmp = 1
+      if (cmd ~ /(^|[^A-Za-z0-9_-])(cd|pushd|popd)([^A-Za-z0-9_-]|$)/) chpwd = chcwd = 1
+    }
+
+    # join_lines(s): s with every backslash-newline pair removed. Naive about
+    # quoting, which is safe here: its result only ever adds detections.
+    function join_lines(s,   out, p) {
+      out = ""
+      while ((p = index(s, bsl nl)) > 0) {
+        out = out substr(s, 1, p - 1)
+        s = substr(s, p + 2)
+      }
+      return out s
+    }
+
+    # name_changed(name): 1 when any delimited occurrence of name is not a
+    # plain read (see the function header above for the rule).
+    function name_changed(name,   start, pos, at, len, before, before2, after, after2) {
+      len = length(name)
+      start = 1
+      while ((pos = index(substr(cmd, start), name)) > 0) {
+        at = start + pos - 1
+        start = at + 1
+        before = (at > 1) ? substr(cmd, at - 1, 1) : ""
+        after = (at + len <= n) ? substr(cmd, at + len, 1) : ""
+        if (before ~ /[A-Za-z0-9_]/ || after ~ /[A-Za-z0-9_]/) continue
+        if (before == "$") continue
+        before2 = (at > 2) ? substr(cmd, at - 2, 1) : ""
+        if (before == "{" && before2 == "$") {
+          after2 = (at + len + 1 <= n) ? substr(cmd, at + len + 1, 1) : ""
+          # A subscript (`${NAME[0]:=x}`) may assign the scalar: a change.
+          if (after == "=" || after == "[" || (after == ":" && after2 == "=")) return 1
+          continue
+        }
+        return 1
+      }
+      return 0
+    }
+
+    # mark_quotes(): records, per position, whether the character is quoted.
+    # qin[k] is 1 for a character inside a single, double, or ANSI-C span,
+    # or escaped by a backslash anywhere; qopen[k] is the position of the
+    # opening quote of the span holding k (0 when unquoted); qclose[o] is
+    # the position of the quote that closes the span opened at o. Same quote
+    # rules as the bwt_extract_targets passes, including a `$` separated from
+    # its ANSI-C quote by backslash-newline pairs (see dollar_before()).
+    # Returns the quote state at end of string (non-zero: a span is open).
+    function mark_quotes(   k, c, q, o, esc) {
+      q = 0
+      o = 0
+      esc = 0
+      for (k = 1; k <= n; k++) {
+        c = substr(cmd, k, 1)
+        qin[k] = 0
+        qopen[k] = 0
+        if (esc) { qin[k] = 1; qopen[k] = o; esc = 0; continue }
+        if (q == 1) {
+          if (c == sq) { qclose[o] = k; q = 0; o = 0 }
+          else { qin[k] = 1; qopen[k] = o }
+          continue
+        }
+        if (q == 2 || q == 3) {
+          if ((q == 2 && c == dq) || (q == 3 && c == sq)) { qclose[o] = k; q = 0; o = 0; continue }
+          qin[k] = 1
+          qopen[k] = o
+          if (c == bsl) esc = 1
+          continue
+        }
+        if (c == bsl) { esc = 1; continue }
+        if (c == sq) { q = dollar_before(k) ? 3 : 1; o = k; continue }
+        if (c == dq) { q = 2; o = k; continue }
+      }
+      return q
+    }
+
+    # dollar_before(k): 1 when the character before position k, skipping
+    # backslash-newline pairs (removed by bash before tokenizing), is an
+    # unquoted, unescaped `$` -- so the quote at k opens an ANSI-C span.
+    function dollar_before(k,   p) {
+      p = k - 1
+      while (p >= 2 && substr(cmd, p, 1) == nl && substr(cmd, p - 1, 1) == bsl) p -= 2
+      return (p >= 1 && substr(cmd, p, 1) == "$" && !qin[p])
+    }
+
+    # has_dot_command(): 1 when some `.` word sits in command position. A
+    # quoted or escaped `.` counts only when it is the WHOLE quoted unit --
+    # `\.` from unquoted text, or a span holding nothing but the dot (`.`
+    # in single, double, or ANSI-C quotes) -- since bash removes those
+    # quotes and runs the dot builtin. A `.` that is part of longer quoted
+    # text (a jq filter, an echo message) cannot source anything in THIS
+    # shell. The previous word is read quote- and paren-aware, so a quoted
+    # or `$( )` piece stays inside it: only a reserved/prefix word or a
+    # NAME=value assignment (`FOO="a b"`, `FOO=$(x y)`) qualifies, never an
+    # ordinary argument (`grep "x" .`, `cp $(pwd) .`). An unquoted `)` right
+    # before the dot counts only when the command has an unquoted `case`
+    # word, as a case-pattern terminator.
+    function has_dot_command(   k, r, l, j, e, rc, lc, pc, w, o, c, d, casectx, wb) {
+      # A quote span still open at end of string (a stray apostrophe in a
+      # comment or heredoc) may hide a standalone dot: fail closed.
+      if (mark_quotes() && cmd ~ /(^|[ \t\n;&|(){`!])[.]([ \t\n]|$)/) return 1
+      casectx = unquoted_case()
+      # Word boundaries for the previous-word walk-back; `{`, `!`, and `(`
+      # are ordinary characters inside a word (`X={a,b}`, `FOO=${x}`).
+      wb = " \t;&|<>" nl
+      for (k = 1; k <= n; k++) {
+        if (substr(cmd, k, 1) != ".") continue
+        if (qin[k]) {
+          o = qopen[k]
+          if (o == 0) {
+            if (!(k > 1 && substr(cmd, k - 1, 1) == bsl && !qin[k - 1])) continue
+          } else if (o != k - 1 || qclose[o] != k + 1) {
+            continue
+          }
+        }
+        r = k + 1
+        while (r <= n && (substr(cmd, r, 1) == sq || substr(cmd, r, 1) == dq)) r++
+        rc = (r <= n) ? substr(cmd, r, 1) : ""
+        if (rc != "" && rc != " " && rc != "\t" && rc != nl) continue
+        l = k - 1
+        while (l >= 1 && index(sq dq bsl "$", substr(cmd, l, 1)) > 0) l--
+        if (l < 1) return 1
+        lc = substr(cmd, l, 1)
+        if (lc == ")") { if (casectx && !qin[l]) return 1; continue }
+        # An escaped newline (a continuation) is whitespace, not a separator.
+        if (index(sep, lc) > 0 && !is_blank(l)) return 1
+        if (!is_blank(l)) continue
+        j = l
+        while (j >= 1 && (is_blank(j) || (substr(cmd, j, 1) == bsl && is_blank(j + 1)))) j--
+        if (j < 1) return 1
+        pc = substr(cmd, j, 1)
+        if (pc == ")" && casectx && !qin[j]) return 1
+        if (index(sep, pc) > 0) return 1
+        # Walk back over the previous word, quote- and paren-aware. A
+        # backtick, a depth still open at the start, or a walk longer than
+        # the cap fails closed (the cap keeps the scan linear in practice).
+        e = j
+        d = 0
+        while (j >= 1) {
+          if (e - j > 400) return 1
+          c = substr(cmd, j, 1)
+          if (!qin[j]) {
+            if (c == "`") return 1
+            if (c == ")") d++
+            else if (c == "(") { if (d == 0) break; d-- }
+            else if (d == 0 && index(wb, c) > 0) break
+          }
+          j--
+        }
+        if (d > 0) return 1
+        w = substr(cmd, j + 1, e - j)
+        if (w ~ /^(then|do|else|elif|if|while|until|command|builtin|exec|time)$/) return 1
+        if (w ~ /^[A-Za-z_][A-Za-z0-9_]*(\[[^]]*\])?\+?=/) return 1
+        # Quote removal turns `\command`, `"command"`, or a single-quoted
+        # builtin into the builtin itself (not so for the reserved word time).
+        gsub("[" sq dq bsl bsl "]", "", w)
+        if (w ~ /^(command|builtin)$/) return 1
+      }
+      return 0
+    }
+
+    # is_blank(p): 1 for a space or tab, or a backslash-escaped newline (a
+    # continuation, which bash removes).
+    function is_blank(p,   c) {
+      c = substr(cmd, p, 1)
+      return (c == " " || c == "\t" || (c == nl && qin[p] && p > 1 && substr(cmd, p - 1, 1) == bsl))
+    }
+
+    # unquoted_case(): 1 when cmd holds a delimited, unquoted `case` word.
+    function unquoted_case(   s, off, p) {
+      s = cmd
+      off = 0
+      while (match(s, /(^|[^A-Za-z0-9_-])case([^A-Za-z0-9_-]|$)/)) {
+        p = off + RSTART + (substr(s, RSTART, 4) == "case" ? 0 : 1)
+        if (!qin[p]) return 1
+        off = p
+        s = substr(cmd, p + 1)
+      }
+      return 0
+    }
+  '
+}
+
+# ---------------------------------------------------------------------------
+# bwt_target_changed_var <raw-target> <changed-set>
+#
+# Pure `case` companion of bwt_changed_vars (#816 gap 3): prints the variable
+# that <raw-target>'s LEADING expansion depends on when that variable is in
+# <changed-set> (bwt_changed_vars output, newline-separated), else nothing.
+# Always returns 0. Recognized leading forms are exactly the ones
+# bwt_expand_safe_vars expands -- `~`/`~/...` (HOME), `${HOME}`/`$HOME`,
+# `${PWD}`/`$PWD`, `${TMPDIR:-/tmp}`/`${TMPDIR}`/`$TMPDIR` -- plus `~+`/`~+/...`
+# (bash reads it from PWD). An unbraced name needs a variable-name boundary
+# after it (#816 Q1): `$HOMEX` is a different variable and maps to nothing
+# (it stays unresolved downstream anyway). `~user` is never expanded, so it
+# maps to nothing and falls to each caller's relative-target policy.
+bwt_target_changed_var() {
+  case "$1" in
+    '~' | '~/'*) _bwt_tcv_var=HOME ;;
+    '~+' | '~+/'*) _bwt_tcv_var=PWD ;;
+    '${HOME}'* | '$HOME' | '$HOME'[!A-Za-z0-9_]*) _bwt_tcv_var=HOME ;;
+    '${PWD}'* | '$PWD' | '$PWD'[!A-Za-z0-9_]*) _bwt_tcv_var=PWD ;;
+    '${TMPDIR:-/tmp}'* | '${TMPDIR}'* | '$TMPDIR' | '$TMPDIR'[!A-Za-z0-9_]*) _bwt_tcv_var=TMPDIR ;;
+    *) return 0 ;;
+  esac
+  case "
+$2
+" in
+    *"
+${_bwt_tcv_var}
+"*)
+      printf '%s\n' "${_bwt_tcv_var}"
+      ;;
+  esac
+  return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -686,8 +1140,9 @@ bwt_is_unresolved_literal() {
 # ---------------------------------------------------------------------------
 # bwt_extract_targets <command>
 #
-# Quote-state-aware tokenizer (single quotes, double quotes, backslash
-# escapes -- operators are recognized only when unquoted and unescaped).
+# Quote-state-aware tokenizer (single quotes, double quotes, ANSI-C `$'...'`
+# quotes (#816), backslash escapes -- operators are recognized only when
+# unquoted and unescaped).
 # Emits one raw (dequoted, un-expanded) target per line, in command order,
 # for `>`, `>>`, `>|`, fd-prefixed `N>`/`N>>`, `&>`, `&>>`, `>&`, and for
 # every `tee`/`tee -a` operand. Option words are skipped either until a
@@ -772,7 +1227,11 @@ bwt_is_unresolved_literal() {
 # parsing through such a marker's real syntax, so rather than attempt that
 # (and risk the class of bugs a precise-resume mechanism kept introducing),
 # the whole call fails closed instead -- deliberately blunt and maximally
-# conservative, but never silently wrong. The same substitution appearing in
+# conservative, but never silently wrong. Since #816 the same exit 7 also
+# covers such a marker in a double-quoted string ANYWHERE in the command,
+# whenever the command also carries write-shaped text (a `>` or a delimited
+# `tee`) that the tokenizer saw as quoted -- single, double, or ANSI-C (see
+# the gap-1 paragraph in the file header). The same substitution appearing in
 # UNQUOTED text is unaffected by this and is still precisely handled: the
 # existing unquoted-path tokenizing already extracts the real write inside
 # it, no special mechanism needed. All extracted-target output is buffered
@@ -844,8 +1303,19 @@ bwt_extract_targets() {
       cmd = ENVIRON["BWT_CMD"]
       n = length(cmd)
 
-      quote = 0 # 0=none 1=single 2=double
+      quote = 0 # 0=none 1=single 2=double 3=ANSI-C $-single (#816)
       esc = 0
+      # #816 gap 1: dqsub latches when a double-quoted span holds a
+      # command/process/function substitution marker (a backtick, `$(`, a
+      # `${` funsub, `<(`, `>(`); quotedwrite latches when any quoted span
+      # (single, double, or ANSI-C) holds a `>` or a delimited tee. Both
+      # together fail the whole scan closed with exit 7 just before the print
+      # block: bash runs that substitution, so its quoted-looking write is
+      # real. qspan collects the text of the quoted span currently open, for
+      # the per-span delimited-tee test in closespan().
+      dqsub = 0
+      quotedwrite = 0
+      qspan = ""
       word = ""
       wordhas = 0
       mode = "" # "" | "target" | "fddup"
@@ -931,16 +1401,52 @@ bwt_extract_targets() {
           word = word c
           wordhas = 1
           esc = 0
+          if (quote) {
+            qspan = qspan c
+            if (c == ">") quotedwrite = 1
+          }
           continue
         }
 
         if (quote == 1) {
           if (c == sq) {
             quote = 0
+            closespan()
           } else {
             word = word c
             wordhas = 1
+            qspan = qspan c
+            if (c == ">") quotedwrite = 1
           }
+          continue
+        }
+
+        # #816 gap 2: ANSI-C quoting. The opening `$` and quote were already
+        # appended when the span opened, so the word keeps its `$` and stays
+        # unresolved downstream (bwt_is_unresolved). Inside, a backslash
+        # escapes the next character (so an escaped quote does not close the
+        # span) and an unescaped single quote closes it. The raw text is kept
+        # in the word verbatim, escapes included.
+        if (quote == 3) {
+          word = word c
+          wordhas = 1
+          if (c == bsl) {
+            if (i <= n) {
+              c = substr(cmd, i, 1)
+              i++
+              word = word c
+              qspan = qspan c
+              if (c == ">") quotedwrite = 1
+            }
+            continue
+          }
+          if (c == sq) {
+            quote = 0
+            closespan()
+            continue
+          }
+          qspan = qspan c
+          if (c == ">") quotedwrite = 1
           continue
         }
 
@@ -958,16 +1464,56 @@ bwt_extract_targets() {
           # characters in the unquoted dispatch below, so that case is
           # already correctly tokenized without this branch doing anything
           # special.
-          if (c == dq) { quote = 0; continue }
+          #
+          # #816 gap 1: this branch still never resumes parsing inside a
+          # substitution; it only RECORDS that one is present (dqsub) and that
+          # the quoted text is write-shaped (quotedwrite), so the end of the
+          # scan can fail closed with exit 7 when both hold. `<(`/`>(` count
+          # here too (an accepted over-block: bash leaves them inert inside
+          # double quotes), unlike the in-region has_nested_substitution().
+          if (c == dq) { quote = 0; closespan(); continue }
           if (c == bsl) { esc = 1; continue }
+          if (c == "`") {
+            dqsub = 1
+          } else if (c == "$") {
+            ncpos = logical_next_pos(i, n)
+            nc = (ncpos <= n) ? substr(cmd, ncpos, 1) : ""
+            if (nc == "(") {
+              dqsub = 1
+            } else if (nc == "{") {
+              nc2pos = logical_next_pos(ncpos + 1, n)
+              nc2 = (nc2pos <= n) ? substr(cmd, nc2pos, 1) : ""
+              if (nc2 == " " || nc2 == "\t" || nc2 == "\n" || nc2 == "|") dqsub = 1
+            }
+          } else if (c == "<" || c == ">") {
+            ncpos = logical_next_pos(i, n)
+            nc = (ncpos <= n) ? substr(cmd, ncpos, 1) : ""
+            if (nc == "(") dqsub = 1
+          }
+          if (c == ">") quotedwrite = 1
           word = word c
           wordhas = 1
+          qspan = qspan c
           continue
         }
 
         # Unquoted context from here on.
-        if (c == sq) { quote = 1; wordhas = 1; continue }
-        if (c == dq) { quote = 2; wordhas = 1; continue }
+        if (c == sq) { quote = 1; qspan = ""; wordhas = 1; continue }
+        if (c == dq) { quote = 2; qspan = ""; wordhas = 1; continue }
+        # #816 gap 2: an unquoted, unescaped `$` whose logical next character
+        # (backslash-newline pairs removed, as bash does first) is a single
+        # quote opens an ANSI-C span. Both characters go into the word.
+        if (c == "$") {
+          ncpos = logical_next_pos(i, n)
+          if (ncpos <= n && substr(cmd, ncpos, 1) == sq) {
+            word = word "$" sq
+            wordhas = 1
+            quote = 3
+            qspan = ""
+            i = ncpos + 1
+            continue
+          }
+        }
         if (c == bsl) { esc = 1; continue }
         if (c == " " || c == "\t") { flush(); continue }
         if (c == "\n") { flush(); tee = 0; continue }
@@ -1130,6 +1676,11 @@ bwt_extract_targets() {
         wordhas = 1
       }
       flush()
+      # #816 gap 1: an unterminated quoted span still gets its tee test, then
+      # a double-quoted substitution plus quoted write-shaped text anywhere
+      # in the command fails the whole scan closed, before anything prints.
+      if (quote) closespan()
+      if (dqsub && quotedwrite) exit 7
 
       # #810: only print buffered targets once the whole scan completes
       # successfully -- any exit 6 above (brace-expansion fail-closed) exits
@@ -1138,7 +1689,8 @@ bwt_extract_targets() {
       # (double-quoted nested-substitution fail-closed) exits even earlier,
       # from inside mark_regions() itself (called once, before this loop
       # starts at all -- see mark_regions()), so outn is guaranteed to still
-      # be 0 at that point regardless.
+      # be 0 at that point regardless. The out-of-region exit 7 (#816 gap 1)
+      # fires just above, after the scan but still before this print block.
       #
       # #1084: "writesyntax" mode reports the pathwrite flag INSTEAD of the
       # targets, and only from here -- the same "printed only on a fully
@@ -1247,7 +1799,13 @@ bwt_extract_targets() {
     # nested content that reuses the same characters, e.g. a POSIX
     # character class inside `[[ $x =~ [[:alpha:]] ]]` ("[[:alpha:]]"
     # contains one extra "[" and one extra "]", which balance to net zero).
-    function find_close(open_pos, ochar, cchar,   fi, fc, fquote, fesc, fdepth, fnc) {
+    #
+    # #816 gap 2: fquote 3 models ANSI-C quoting exactly like the main loop
+    # (see quote 3 there): it opens on an unquoted, unescaped `$` whose
+    # logical next character is a single quote, a backslash skips the next
+    # character, and an unescaped single quote closes it. find_close_bracket,
+    # has_nested_substitution, and mark_regions carry the same state.
+    function find_close(open_pos, ochar, cchar,   fi, fc, fquote, fesc, fdepth, fnc, fnpos) {
       fquote = 0
       fesc = 0
       fdepth = 0
@@ -1267,9 +1825,19 @@ bwt_extract_targets() {
           fi++
           continue
         }
+        if (fquote == 3) {
+          if (fc == bsl) fesc = 1
+          else if (fc == sq) fquote = 0
+          fi++
+          continue
+        }
         if (fc == sq) { fquote = 1; fi++; continue }
         if (fc == dq) { fquote = 2; fi++; continue }
         if (fc == bsl) { fesc = 1; fi++; continue }
+        if (fc == "$") {
+          fnpos = logical_next_pos(fi + 1, n)
+          if (fnpos <= n && substr(cmd, fnpos, 1) == sq) { fquote = 3; fi = fnpos + 1; continue }
+        }
 
         if (fc == ochar) { fdepth++; fi++; continue }
         if (fc == cchar) {
@@ -1325,7 +1893,7 @@ bwt_extract_targets() {
     # so a quoted/escaped "]]" never counts. Returns -1 (abandon -- mark
     # nothing, same anti-fail-open principle as find_close) when the command
     # ends with no standalone "]]" ever found.
-    function find_close_bracket(open_pos,   fi, fc, fquote, fesc, fnc, fafter, prevc) {
+    function find_close_bracket(open_pos,   fi, fc, fquote, fesc, fnc, fafter, prevc, fnpos) {
       fquote = 0
       fesc = 0
       prevc = substr(cmd, open_pos + 1, 1) # second "[" of the opener -- never "]"/whitespace, a safe seed
@@ -1343,9 +1911,19 @@ bwt_extract_targets() {
           else if (fc == bsl) fesc = 1
           prevc = fc; fi++; continue
         }
+        # #816 gap 2: ANSI-C span, same state as find_close (see there).
+        if (fquote == 3) {
+          if (fc == bsl) fesc = 1
+          else if (fc == sq) fquote = 0
+          prevc = fc; fi++; continue
+        }
         if (fc == sq) { fquote = 1; prevc = fc; fi++; continue }
         if (fc == dq) { fquote = 2; prevc = fc; fi++; continue }
         if (fc == bsl) { fesc = 1; prevc = fc; fi++; continue }
+        if (fc == "$") {
+          fnpos = logical_next_pos(fi + 1, n)
+          if (fnpos <= n && substr(cmd, fnpos, 1) == sq) { fquote = 3; prevc = sq; fi = fnpos + 1; continue }
+        }
 
         if (fc == "]") {
           fnc = (fi + 1 <= n) ? substr(cmd, fi + 1, 1) : ""
@@ -1490,9 +2068,21 @@ bwt_extract_targets() {
           hi++
           continue
         }
+        # #816 gap 2: ANSI-C span, same state as find_close (see there) --
+        # inert like a single-quoted span, so no marker is looked for inside.
+        if (hquote == 3) {
+          if (hc == bsl) hesc = 1
+          else if (hc == sq) hquote = 0
+          hi++
+          continue
+        }
         if (hc == sq) { hquote = 1; hi++; continue }
         if (hc == dq) { hquote = 2; hi++; continue }
         if (hc == bsl) { hesc = 1; hi++; continue }
+        if (hc == "$") {
+          hnpos = logical_next_pos(hi + 1, end_pos)
+          if (hnpos <= end_pos && substr(cmd, hnpos, 1) == sq) { hquote = 3; hi = hnpos + 1; continue }
+        }
 
         if (hc == "`") return 1
         if (hc == "$" || hc == "<" || hc == ">") {
@@ -1602,7 +2192,11 @@ bwt_extract_targets() {
     # concerned -- only case 1 interior is deliberately left unsuppressed),
     # so a construct immediately following it still sees accurate boundary
     # state.
-    function mark_regions(   ri, rc, rquote, resc, rnc, rk, close_pos, lastsig, beforesig, prevunq, nsub) {
+    #
+    # #816 gap 2: rquote 3 is the ANSI-C span (same state as find_close, see
+    # there). Its opening `$` updates lastsig/beforesig/prevunq exactly like
+    # any other quote opener, and the scan then resumes just past the quote.
+    function mark_regions(   ri, rc, rquote, resc, rnc, rk, close_pos, lastsig, beforesig, prevunq, nsub, rnpos, rskip) {
       rquote = 0
       resc = 0
       lastsig = ""
@@ -1625,6 +2219,12 @@ bwt_extract_targets() {
         if (rquote == 2) {
           if (rc == dq) rquote = 0
           else if (rc == bsl) resc = 1
+          ri++
+          continue
+        }
+        if (rquote == 3) {
+          if (rc == bsl) resc = 1
+          else if (rc == sq) rquote = 0
           ri++
           continue
         }
@@ -1669,16 +2269,22 @@ bwt_extract_targets() {
           }
         }
 
+        rskip = 0
         if (rc == sq) { rquote = 1 }
         else if (rc == dq) { rquote = 2 }
         else if (rc == bsl) { resc = 1 }
+        else if (rc == "$") {
+          rnpos = logical_next_pos(ri + 1, n)
+          if (rnpos <= n && substr(cmd, rnpos, 1) == sq) { rquote = 3; rskip = rnpos }
+        }
 
         if (rc != " " && rc != "\t") {
           beforesig = prevunq
           lastsig = rc
         }
         prevunq = rc
-        ri++
+        if (rskip) ri = rskip + 1
+        else ri++
       }
     }
 
@@ -1764,6 +2370,15 @@ bwt_extract_targets() {
       bn = w
       sub(/.*\//, "", bn) # basename, so /usr/bin/tee and ./tee are matched too
       if (bn == "tee" && !wregion) { tee = 1; pathwrite = 1 }
+    }
+
+    # closespan() (#816 gap 1): called when a quoted span closes (or the
+    # command ends inside one). A delimited tee in the span text -- the same
+    # word-boundary rule as bwt_has_delimited_tee -- marks the command as
+    # carrying quoted write-shaped text; qspan is reset for the next span.
+    function closespan() {
+      if (qspan ~ /(^|[^A-Za-z0-9_])tee([^A-Za-z0-9_]|$)/) quotedwrite = 1
+      qspan = ""
     }
 
     # emit(w) -- buffer an extracted target into outbuf[] (printed only once
