@@ -42,7 +42,7 @@ use it as `<interval>`; empty output (field unset, or no config file) → omit `
 entirely and let `cenci babysit` apply its built-in `15m` default. An explicit second argument
 always wins over the config.
 
-**Codex-only guard canary (run before arming under Codex; skip it under Claude and OpenCode).**
+**Codex-only guard canary (run before arming under Codex; skip it under Claude).**
 Codex skips pending or untrusted plugin hooks, so first run
 `bash "${PLUGIN_ROOT}/codex/guard-canary.sh" plan`, make exactly the tool calls its `PROBE` lines
 list (a shell probe runs its `COMMAND` line verbatim), judge each from its own tool result (denied only
@@ -56,7 +56,7 @@ report the helper's text, which names pending or untrusted hooks as the likely c
 only the session that arms; it does not carry over to the `ci-repair` and `babysit-attention` sessions
 the supervisor starts later, which run their own canary.
 
-Detect the current client and run exactly one of the three (dropping `--interval <interval>`
+Detect the current client and run exactly one of the two (dropping `--interval <interval>`
 when the interval was neither passed as an argument nor resolved from config):
 
 ```bash
@@ -65,10 +65,6 @@ cenci babysit <pr> --agent claude --interval <interval>
 
 ```bash
 cenci babysit <pr> --agent codex --interval <interval>
-```
-
-```bash
-cenci babysit <pr> --agent opencode --interval <interval>
 ```
 
 Use `--once` only when the user explicitly requests one tick. To stop a supervisor:

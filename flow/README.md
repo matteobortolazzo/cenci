@@ -82,7 +82,7 @@ Codex and OpenCode so neither mistakes a pipeline command for a supported workfl
 | `attachments` | Yes | Yes | Yes | Uses the active client's user-input and file/image tools |
 | `frontend-classification` | Yes | Yes | Yes | Pure classification rule |
 | `pr-comment-filter` | Yes | Yes | Yes | Pure review-filtering rule |
-| `project-core` | Yes | Yes | Yes | Client-neutral config/guidance resolution; portable because `babysit` consults it |
+| `project-core` | Yes | Yes | Yes | Client-neutral config/guidance resolution; portable because Codex's portable `babysit` consults it |
 | `shell-rules` | Yes | Yes | Yes | Shared rules with client-specific approval notes |
 | `stack-angular` | Yes | Yes | Yes | Framework and test conventions |
 | `stack-dotnet` | Yes | Yes | Yes | Framework and test conventions |
@@ -92,7 +92,7 @@ Codex and OpenCode so neither mistakes a pipeline command for a supported workfl
 | `verify-ui` | Yes | Yes | Yes | Playwright visual-verification procedure; browser tooling availability is client-neutral |
 | `worktrees` | Yes | Yes | Yes | Git worktree conventions |
 | `address-review` | Yes | In development | No | Native approval/checkpoint foundation |
-| `babysit` | Yes | Yes | Yes | Thin wrapper over the client-neutral `cenci babysit` supervisor |
+| `babysit` | Yes | Yes | No | Thin wrapper over the client-neutral `cenci babysit` supervisor; portable for Codex, retired for OpenCode (it cannot arm a supervisor) |
 | `babysit-attention` | Yes | Yes | No | Launcher-dispatched by `cenci babysit` when a decision needs a human; offers "leave paused for manual repair", "retry with a fresh budget" (`cenci babysit reset <pr>`, host-only) and "stop babysitting"; Codex companion is `codex.md`, no OpenCode companion yet |
 | `ci-repair` | Yes | Yes | No | Launcher-dispatched by `cenci babysit` on failing CI; Codex companion is `codex.md` (never enters `/plan`), no OpenCode companion yet |
 | `close` | Yes | In development | No | Split-parent coverage review before closing; the writes run through `scripts/close-parent.sh` on both clients |
@@ -123,7 +123,7 @@ companion) for every skill, including the internal ones not listed above.
 | `address-review` | Address PR review comments by fetching, evaluating, fixing, replying, pushing, and re-requesting review. | No | Yes | Yes | Yes |
 | `attachments` | Discover, select, download, and inspect GitHub ticket attachments. Use when an issue or pull request contains screenshots, mockups, documents, or uploaded files needed as task context. | Yes | No | Yes | Yes |
 | `babysit-attention` | Resolve a paused PR supervisor decision with explicit human input. | No | Yes | Yes | Yes |
-| `babysit` | Follow an open PR with the client-neutral cenci supervisor until it merges or closes. | Yes | Yes | Yes | Yes |
+| `babysit` | Follow an open PR with the client-neutral cenci supervisor until it merges or closes. | No | Yes | Yes | Yes |
 | `ci-repair` | Diagnose and repair failing CI for an existing pull request without reopening the implementation pipeline. | No | Yes | Yes | Yes |
 | `close` | Close a split parent ticket only after an item-by-item coverage review of its merged child PRs. | No | Yes | Yes | Yes |
 | `codex-runtime` | Shared native Codex stage, checkpoint, goal, and agent-adapter contract. | No | No | Yes | No |

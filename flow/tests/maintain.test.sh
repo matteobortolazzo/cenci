@@ -553,6 +553,50 @@ assert_all_fixes_present "case11 capability-table fail must carry a fix"
 rm -rf "${ROOT}"
 
 # =====================================================================
+# Case 11b (#1217): a skill in OPENCODE_RETIRED_SKILLS is portable (Codex keeps
+# it) but not delivered to OpenCode, so the README showing OpenCode "Yes" for it
+# must fail capability-table and name the skill.
+# =====================================================================
+ROOT="$(mktemp -d)" || exit 1
+setup_base "${ROOT}"
+bootstrap_markers "${ROOT}"
+# bootstrap rendered demo as portable (OpenCode "Yes", Codex "Yes"); now retire
+# it for OpenCode without regenerating the README.
+printf 'OPENCODE_RETIRED_SKILLS="demo"\n' >> "${ROOT}/flow/opencode/install-skills.sh"
+run_check "${ROOT}"
+assert_has_result "capability-table" "fail" "case11b README OpenCode Yes for a retired skill"
+N_RETIRED_NAMED_11B="$(printf '%s' "${REPORT_JSON}" | jq '[.results[]? | select(.check=="capability-table" and .status=="fail" and .target=="demo")] | length' 2>/dev/null)"
+is_ge1 "${N_RETIRED_NAMED_11B}" || fail "case11b: expected a capability-table fail targeting demo, got '${N_RETIRED_NAMED_11B:-N/A}' (report: ${REPORT_JSON})"
+assert_all_fixes_present "case11b capability-table fail must carry a fix"
+rm -rf "${ROOT}"
+
+# Case 11c (#1217): once the README is regenerated, the OpenCode cell reads
+# "No" while the Codex cell stays "Yes", and capability-table passes.
+ROOT="$(mktemp -d)" || exit 1
+setup_base "${ROOT}"
+printf 'OPENCODE_RETIRED_SKILLS="demo"\n' >> "${ROOT}/flow/opencode/install-skills.sh"
+bootstrap_markers "${ROOT}"
+DEMO_ROW_11C="$(grep -F '| `demo` |' "${ROOT}/flow/README.md" | head -n 1)"
+[[ "${DEMO_ROW_11C}" == *"| No | "*"| Yes | Yes |" ]] || fail "case11c: expected the generated demo row to read OpenCode No and Codex Yes, got: ${DEMO_ROW_11C}"
+run_check "${ROOT}"
+assert_no_result_status "capability-table" "fail" "case11c regenerated README matches the delivery set"
+assert_has_result "capability-table" "pass" "case11c capability-table actually ran and passed (not a vacuous absence)"
+rm -rf "${ROOT}"
+
+# Case 11d (#1217): the hand-curated Skill portability table is held to the same
+# delivery set -- a retired skill still showing OpenCode "Yes" there fails and
+# names the skill, even when the regenerated inventory is correct.
+ROOT="$(mktemp -d)" || exit 1
+setup_base "${ROOT}"
+add_fixture_client_matrix "${ROOT}"
+printf 'OPENCODE_RETIRED_SKILLS="demo"\n' >> "${ROOT}/flow/opencode/install-skills.sh"
+bootstrap_markers "${ROOT}"
+run_check "${ROOT}"
+N_HC_RETIRED_11D="$(printf '%s' "${REPORT_JSON}" | jq '[.results[]? | select(.check=="capability-table" and .status=="fail" and .target=="demo" and (.message|test("hand-curated")))] | length' 2>/dev/null)"
+is_ge1 "${N_HC_RETIRED_11D}" || fail "case11d: expected a hand-curated capability-table fail targeting demo, got '${N_HC_RETIRED_11D:-N/A}' (report: ${REPORT_JSON})"
+rm -rf "${ROOT}"
+
+# =====================================================================
 # Case 12: adapter-drift — install-skills.sh's PORTABLE_SKILLS names a skill
 # that has no corresponding flow/skills/<name>/ directory
 # =====================================================================
