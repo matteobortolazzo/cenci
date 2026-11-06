@@ -1,0 +1,196 @@
+# Expected outcomes for every dorny/paths-filter step under .github/workflows/
+# (ticket #956). paths-filter-semantics.sh turns these into a matrix; each
+# matrix job commits the listed paths into a scratch git repo, runs the real
+# pinned dorny/paths-filter action against that changeset, and compares every
+# filter output key with the `expect` map below.
+#
+# Case schema:
+#   name      unique, ^[A-Za-z0-9._-]+$
+#   workflow  basename of the file under .github/workflows/
+#   job       job key
+#   step      the step's `id:`
+#   paths     non-empty list of repo-relative changed files (added in the head
+#             commit); never starts with '/', never contains '..'
+#   expect    one entry per filter output key of that step, each value the
+#             QUOTED string 'true' or 'false' (action outputs are strings; an
+#             unquoted YAML boolean is rejected)
+#
+# Coverage rule enforced by `paths-filter-semantics.sh generate`: every filter
+# output key of every step needs at least one case expecting 'true' (a gate
+# that is permanently false cannot pass it) and at least one expecting 'false'
+# (a gate that is permanently true -- the #950 negation footgun -- cannot pass
+# it). The self-test's own step (workflow-lint.yml, job
+# paths-filter-semantics-run, step semantics) is excluded and needs no cases.
+cases:
+  # ── flow-ci.yml: `code` (predicate-quantifier: every) ─────────────────────
+  # #950 isolation property: the excluded root files alone never trigger flow.
+  - name: flow-code-agents-md-alone
+    workflow: flow-ci.yml
+    job: changes
+    step: code
+    paths: [flow/AGENTS.md]
+    expect: {flow: 'false'}
+  - name: flow-code-claude-md-alone
+    workflow: flow-ci.yml
+    job: changes
+    step: code
+    paths: [flow/CLAUDE.md]
+    expect: {flow: 'false'}
+  - name: flow-code-readme-alone
+    workflow: flow-ci.yml
+    job: changes
+    step: code
+    paths: [flow/README.md]
+    expect: {flow: 'false'}
+  - name: flow-code-skill-doc
+    workflow: flow-ci.yml
+    job: changes
+    step: code
+    paths: [flow/skills/example/SKILL.md]
+    expect: {flow: 'true'}
+  - name: flow-code-excluded-plus-skill-doc
+    workflow: flow-ci.yml
+    job: changes
+    step: code
+    paths: [flow/AGENTS.md, flow/skills/example/SKILL.md]
+    expect: {flow: 'true'}
+
+  # ── flow-ci.yml: `extra` (default quantifier: some) ───────────────────────
+  - name: flow-extra-cenci-config
+    workflow: flow-ci.yml
+    job: changes
+    step: extra
+    paths: [.cenci/config.json]
+    expect: {flow: 'true', maintenance: 'true'}
+  - name: flow-extra-skill-doc
+    workflow: flow-ci.yml
+    job: changes
+    step: extra
+    paths: [flow/skills/example/SKILL.md]
+    expect: {flow: 'false', maintenance: 'true'}
+  - name: flow-extra-flow-script
+    workflow: flow-ci.yml
+    job: changes
+    step: extra
+    paths: [flow/scripts/example.sh]
+    expect: {flow: 'false', maintenance: 'false'}
+
+  # ── watch-ci.yml: `code` (predicate-quantifier: every) ────────────────────
+  - name: watch-code-agents-md-alone
+    workflow: watch-ci.yml
+    job: changes
+    step: code
+    paths: [watch/AGENTS.md]
+    expect: {watch: 'false'}
+  - name: watch-code-claude-md-alone
+    workflow: watch-ci.yml
+    job: changes
+    step: code
+    paths: [watch/CLAUDE.md]
+    expect: {watch: 'false'}
+  - name: watch-code-readme-alone
+    workflow: watch-ci.yml
+    job: changes
+    step: code
+    paths: [watch/README.md]
+    expect: {watch: 'false'}
+  - name: watch-code-internal-doc
+    workflow: watch-ci.yml
+    job: changes
+    step: code
+    paths: [watch/internal/example/notes.md]
+    expect: {watch: 'true'}
+  - name: watch-code-excluded-plus-internal-doc
+    workflow: watch-ci.yml
+    job: changes
+    step: code
+    paths: [watch/AGENTS.md, watch/internal/example/notes.md]
+    expect: {watch: 'true'}
+
+  # ── watch-ci.yml: `extra` (default quantifier: some) ──────────────────────
+  - name: watch-extra-sandbox-test-lib
+    workflow: watch-ci.yml
+    job: changes
+    step: extra
+    paths: [sandbox/tests/lib/example.sh]
+    expect: {watch: 'true'}
+  - name: watch-extra-watch-source
+    workflow: watch-ci.yml
+    job: changes
+    step: extra
+    paths: [watch/main.go]
+    expect: {watch: 'false'}
+
+  # ── sandbox-ci.yml: `code` (predicate-quantifier: every) ──────────────────
+  - name: sandbox-code-agents-md-alone
+    workflow: sandbox-ci.yml
+    job: changes
+    step: code
+    paths: [sandbox/AGENTS.md]
+    expect: {sandbox: 'false'}
+  - name: sandbox-code-claude-md-alone
+    workflow: sandbox-ci.yml
+    job: changes
+    step: code
+    paths: [sandbox/CLAUDE.md]
+    expect: {sandbox: 'false'}
+  - name: sandbox-code-readme-alone
+    workflow: sandbox-ci.yml
+    job: changes
+    step: code
+    paths: [sandbox/README.md]
+    expect: {sandbox: 'false'}
+  - name: sandbox-code-lib-doc
+    workflow: sandbox-ci.yml
+    job: changes
+    step: code
+    paths: [sandbox/lib/example/notes.md]
+    expect: {sandbox: 'true'}
+  - name: sandbox-code-excluded-plus-lib-doc
+    workflow: sandbox-ci.yml
+    job: changes
+    step: code
+    paths: [sandbox/AGENTS.md, sandbox/lib/example/notes.md]
+    expect: {sandbox: 'true'}
+
+  # ── sandbox-ci.yml: `extra` (default quantifier: some) ────────────────────
+  - name: sandbox-extra-installer
+    workflow: sandbox-ci.yml
+    job: changes
+    step: extra
+    paths: [install.sh]
+    expect: {sandbox: 'true'}
+  - name: sandbox-extra-sandbox-script
+    workflow: sandbox-ci.yml
+    job: changes
+    step: extra
+    paths: [sandbox/example.sh]
+    expect: {sandbox: 'false'}
+
+  # ── issue-templates-ci.yml: `filter` ──────────────────────────────────────
+  - name: issue-templates-template-file
+    workflow: issue-templates-ci.yml
+    job: changes
+    step: filter
+    paths: [.github/ISSUE_TEMPLATE/bug.yml]
+    expect: {issue_templates: 'true'}
+  - name: issue-templates-unrelated-file
+    workflow: issue-templates-ci.yml
+    job: changes
+    step: filter
+    paths: [watch/main.go]
+    expect: {issue_templates: 'false'}
+
+  # ── workflow-lint.yml: `changes` / `filter` ───────────────────────────────
+  - name: workflow-lint-installer
+    workflow: workflow-lint.yml
+    job: changes
+    step: filter
+    paths: [install.sh]
+    expect: {workflows: 'true'}
+  - name: workflow-lint-unrelated-file
+    workflow: workflow-lint.yml
+    job: changes
+    step: filter
+    paths: [watch/main.go]
+    expect: {workflows: 'false'}
