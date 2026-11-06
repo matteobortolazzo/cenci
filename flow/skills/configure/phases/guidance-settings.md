@@ -317,6 +317,7 @@ For each MCP selected in question 5:
      ```bash
      mv ~/.claude/settings.json.tmp ~/.claude/settings.json
      ```
+     This `mv` step relies on `guard-main-worktree.sh` not modelling `mv` targets (it models only redirect and `tee` write targets); that dependency is pinned by tests in `flow/hooks/scripts/guard-main-worktree.test.sh`, and modelling `mv` would break this step unless it migrates in the same change.
      If `~/.claude/settings.json` does not exist, use the `Write` tool to create
      `~/.claude/settings.json.tmp` (the same `.tmp` intermediate as the existing-file
      path above, not the final file) with `{"autoCompactEnabled": false}` as its
@@ -344,6 +345,7 @@ For each MCP selected in question 5:
      ```bash
      mv ~/.claude/settings.json.tmp ~/.claude/settings.json
      ```
+     This `mv` step relies on `guard-main-worktree.sh` not modelling `mv` targets (it models only redirect and `tee` write targets); that dependency is pinned by tests in `flow/hooks/scripts/guard-main-worktree.test.sh`, and modelling `mv` would break this step unless it migrates in the same change.
    Both paths also delete any `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` env key left behind by earlier versions of this skill — that override makes compaction trigger at 1% of context *used*, i.e. constantly (#725).
    This writes to `~/.claude/settings.json` (user-level Claude Code settings).
 
@@ -368,6 +370,7 @@ For each MCP selected in question 5:
      ```bash
      mv ~/.claude/settings.json.tmp ~/.claude/settings.json
      ```
+     This `mv` step relies on `guard-main-worktree.sh` not modelling `mv` targets (it models only redirect and `tee` write targets); that dependency is pinned by tests in `flow/hooks/scripts/guard-main-worktree.test.sh`, and modelling `mv` would break this step unless it migrates in the same change.
      If `~/.claude/settings.json` does not exist, use the `Write` tool to create
      `~/.claude/settings.json.tmp` (the same `.tmp` intermediate as the existing-file
      path above, not the final file) with
@@ -394,4 +397,5 @@ For each MCP selected in question 5:
      ```bash
      mv ~/.claude/settings.json.tmp ~/.claude/settings.json
      ```
+     This `mv` step relies on `guard-main-worktree.sh` not modelling `mv` targets (it models only redirect and `tee` write targets); that dependency is pinned by tests in `flow/hooks/scripts/guard-main-worktree.test.sh`, and modelling `mv` would break this step unless it migrates in the same change.
    This writes to `~/.claude/settings.json` (user-level Claude Code settings). Takes effect on **new** sessions only — remind the user to restart if the current session is on a `[1m]` model.

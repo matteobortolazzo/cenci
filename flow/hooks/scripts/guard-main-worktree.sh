@@ -496,20 +496,89 @@ scope_precheck() {
 # bash_target_allowed's idiom below -- these are literal patterns, not
 # variables, so ordinary case globbing is exactly what's wanted here.
 #
-# Best-effort defense-in-depth, NOT a complete security boundary: it only
-# catches direct-redirect/Write shapes against this fixed pattern set. It
-# does NOT catch unmodelled Bash write verbs (mv, cp, sed -i, and friends --
-# only Bash-arm redirect/tee-shaped targets are extracted at all), a
-# symlinked ~/.claude or ~/.ssh directory (the pattern match is purely
-# lexical on the canonicalized target path, not a symlink-aware policy
-# decision), or every session-security-sensitive path in general --
-# ~/.gitconfig, ~/.codex/, and shell rc files (.bashrc, .zshrc, etc.) are
-# NOT covered. Nor is a `.git` DIRECTORY outside the repository (hooks there
-# execute on the next git command in that repo). These are accepted residual gaps for this cycle (#1072
-# follow-up), not bugs to close here -- see also the zero-parse backstop's
-# own documented residual below for the same "defense-in-depth, not a load-
-# bearing guarantee" posture on the Bash arm's unmodelled-construct path.
-scope_self_protection_denied() {
+# Coverage (#1074, closing the gaps #1072/#1073 left): the shapes are
+# scope_self_protection_shape's fixed pattern set -- Claude Code hook/MCP/
+# plugin config, ~/.ssh/**, ~/.codex/** (Codex hook/MCP/plugin config),
+# ~/.gitconfig and its XDG peer ~/.config/git/config (core.hooksPath and
+# core.fsmonitor run code on the next git command), the bash/zsh/profile
+# startup files, and a `.git` hooks/config directory outside the repository
+# (a hook there executes on the next git command in that repo). A target is
+# matched three ways: (1) the canonical path; (2) the canonical path rewritten
+# back to its `$HOME/<dir>` form when it sits under the canonical form of
+# ~/.claude, ~/.ssh or ~/.codex, so a symlinked config directory (for example
+# into a dotfiles repo) cannot hide it, a write straight to the symlink's real
+# directory included; (3) the path AS WRITTEN, before canonicalization (the
+# optional second argument), so a symlinked dotfile (~/.bashrc ->
+# dotfiles/bashrc) is caught on both arms. The anchors are canonicalized lazily
+# on the first call, so an in-scope path spawns no realpath. Every anchor is
+# tried independently (overlapping anchors such as ~/.codex -> ~/.claude must
+# not stop at the first one that contains the target). HOME unset, empty,
+# relative or "/" skips the anchor rewrite; an anchor that does not exist, does
+# not resolve, or resolves to "/" is skipped too -- every failure falls back to
+# the lexical match, never to a weaker check. The "/" skips are defence in
+# depth: a "/" anchor would only produce the degenerate pattern `//*`, which no
+# canonical path matches, so they are not observable and the tests pin "no
+# over-block", not "would rewrite every path".
+#
+# The zero-parse backstop (empty target extraction, not provably inert) also
+# consults a home-anchored raw-text scan of the same names (see
+# scope_home_mention_hit), AFTER its repo-root scan. The same scan runs after
+# the per-target loop when a command has parsed targets AND names a re-parse
+# verb (bwt_has_reparse_verb, plain `env` masked out but `env -S` kept; see
+# scope_partial_parse_reparse_verb) or a delimited `tee` token
+# (bwt_has_delimited_tee): one parseable redirect must not hide an
+# `eval`/`sh -c`/`{tee,-a,~/.bashrc}` write to a home-anchored path. The repo-root raw scan has the
+# same partial-parse limitation (it only runs on zero parsed targets) -- a
+# pre-existing residual, not changed here.
+#
+# Best-effort defense-in-depth, NOT a complete security boundary. Remaining
+# accepted residuals, recorded rather than closed here:
+#   - Unmodelled Bash write verbs (mv, cp, dd of=, sed -i, truncate): only
+#     redirect/tee-shaped targets are extracted at all. Modelling `mv` targets
+#     would BREAK /cenci:configure's settings.json bootstrap (`mv
+#     ~/.claude/settings.json.tmp ~/.claude/settings.json`,
+#     skills/configure/phases/guidance-settings.md) unless that flow migrates
+#     in the same change; guard-main-worktree.test.sh pins the exact commands.
+#   - Nested `.git/modules/*/hooks`, `.git/worktrees/*/config*`,
+#     `core.hooksPath` targets, ZDOTDIR and fish config, and a symlinked
+#     ~/.config.
+#   - The zero-parse scan covers home-anchored names only: the non-home `.git`
+#     shapes stay a backstop residual (an unanchored fragment scan would block
+#     configure's in-worktree `.worktrees/<id>/.claude/settings.json` mentions).
+#   - The zero-parse scan is a substring match, so it over-blocks fail-closed:
+#     `~/.claude/settings.json.tmp` named inside an `eval`/`sh -c` command is
+#     blocked (the prefix match on .claude/settings; configure's real commands
+#     are unaffected -- its jq extracts a target and its `mv` carries no `>`),
+#     as are `~/.bashrc.bak` and `/other/home/u/.claude/settings...` when the
+#     literal HOME value is a substring of the path.
+#   - `mv ~/.claude/settings.json.tmp ~/.claude/settings.json 2>&1` is blocked
+#     on purpose: the fd-dup sends it to the suspicious backstop and `mv`
+#     keeps it from being classed inert. Pinned by a test.
+#   - The over-block is not limited to eval/sh -c: ANY non-inert zero-parse
+#     command (or a command with a parsed redirect plus a re-parse verb or a
+#     delimited `tee`, e.g. `cat ~/.bashrc | tee /tmp/out; echo a > /tmp/b`)
+#     that names a home-anchored denylisted path is blocked even when it only
+#     reads, e.g. `ssh-add -l -F ~/.ssh/config 2>&1` (previously allowed).
+#     Pinned.
+#   - The home scan is a literal substring match on the raw text. Spellings the
+#     shell normalizes to the same path (`~/'.bashrc'`, `~//.bashrc`,
+#     `~/./.ssh/...`, `$HOME"/.bashrc"`, `${HOME%/}/...`), `cd ~ && ... .bashrc`
+#     and variable indirection are NOT caught.
+#   - A write straight to the real target of a symlinked single file (stow-style
+#     `~/dotfiles/bashrc` for `~/.bashrc`) is not caught: only directories get
+#     the anchor rewrite; a symlinked dotfile is caught only by its as-written
+#     path.
+#   - Matching is case-sensitive, so on a case-insensitive filesystem (macOS
+#     default) a differently-cased spelling of a not-yet-existing shape is not
+#     caught.
+#   - `.bash_logout` and `.zlogout` are not in the shell-file list.
+# See also the zero-parse backstop's own documented residual below for the same
+# "defense-in-depth, not a load-bearing guarantee" posture on the Bash arm's
+# unmodelled-construct path.
+#
+# scope_self_protection_shape <path> -- the lexical shape list, shared by every
+# match above. Plain glob case patterns, matching bash_target_allowed's idiom.
+scope_self_protection_shape() {
   case "$1" in
     */.claude/settings*.json) return 0 ;;
     */.claude/plugins/*) return 0 ;;
@@ -519,17 +588,214 @@ scope_self_protection_denied() {
     # on the next session start -- the same threat this denylist exists for.
     */.claude.json) return 0 ;;
     */.ssh/*) return 0 ;;
+    # ~/.codex/ is the Codex peer of ~/.claude/: hook, MCP and plugin config.
+    */.codex/*) return 0 ;;
+    # git config runs code on the next git command (core.hooksPath,
+    # core.fsmonitor); ~/.config/git/config is ~/.gitconfig's XDG peer.
+    */.gitconfig) return 0 ;;
+    */.config/git/config) return 0 ;;
+    # Shell startup files execute on the next shell start.
+    */.bashrc | */.bash_profile | */.bash_login | */.profile) return 0 ;;
+    */.zshrc | */.zshenv | */.zprofile | */.zlogin) return 0 ;;
+    # A `.git` hooks/config directory OUTSIDE the repository (an in-repo one
+    # never reaches this function).
+    */.git/hooks/*) return 0 ;;
+    */.git/config) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+# Canonical anchors for the symlink-aware rewrite, computed lazily by
+# scope_self_protection_init_anchors (empty = skipped). SP_HOME is the
+# lexically collapsed HOME, set only when HOME is absolute and not "/".
+SP_ANCHORS_READY=0
+SP_HOME=""
+SP_ANCHOR_CLAUDE=""
+SP_ANCHOR_SSH=""
+SP_ANCHOR_CODEX=""
+SP_REWRITTEN=""
+
+# scope_self_protection_init_anchors -- idempotent, always returns 0. Every
+# substitution is checked; any failure leaves that anchor empty (skipped).
+scope_self_protection_init_anchors() {
+  if [ "$SP_ANCHORS_READY" -eq 1 ]; then
+    return 0
+  fi
+  SP_ANCHORS_READY=1
+  case "${HOME:-}" in
+    /*) ;;
+    *) return 0 ;;
+  esac
+  if ! _sp_home=$(lexical_collapse "$HOME"); then
+    return 0
+  fi
+  if [ -z "$_sp_home" ] || [ "$_sp_home" = "/" ]; then
+    return 0
+  fi
+  SP_HOME="$_sp_home"
+  for _sp_dir in .claude .ssh .codex; do
+    _sp_anchor="$SP_HOME/$_sp_dir"
+    if [ ! -e "$_sp_anchor" ]; then
+      continue
+    fi
+    if ! _sp_canon=$(resolve_path "$_sp_anchor" 2>/dev/null); then
+      continue
+    fi
+    # A "/" anchor is skipped as defence in depth: it would only produce the
+    # degenerate pattern `//*`, which no canonical path matches, so deleting
+    # this skip would not be observable.
+    if [ -z "$_sp_canon" ] || [ "$_sp_canon" = "/" ]; then
+      continue
+    fi
+    case "$_sp_dir" in
+      .claude) SP_ANCHOR_CLAUDE="$_sp_canon" ;;
+      .ssh) SP_ANCHOR_SSH="$_sp_canon" ;;
+      .codex) SP_ANCHOR_CODEX="$_sp_canon" ;;
+    esac
+  done
+  return 0
+}
+
+# scope_self_protection_rewrite_one <canonical-target> <canonical-anchor> <dir>
+# -- when the target sits under (or is) the anchor, set SP_REWRITTEN to the
+# `$HOME/<dir>/...` form and return 0; otherwise return 1.
+scope_self_protection_rewrite_one() {
+  if [ -z "$2" ]; then
+    return 1
+  fi
+  case "$1" in
+    "$2")
+      SP_REWRITTEN="$SP_HOME/$3"
+      return 0
+      ;;
+    "$2"/*)
+      SP_REWRITTEN="$SP_HOME/$3/${1#"$2"/}"
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+# scope_self_protection_denied <canonical-path> [<as-written-path>] -- see the
+# block comment above. Returns 0 (denylisted) or 1.
+scope_self_protection_denied() {
+  if scope_self_protection_shape "$1"; then
+    return 0
+  fi
+  if [ -n "${2:-}" ] && scope_self_protection_shape "$2"; then
+    return 0
+  fi
+  scope_self_protection_init_anchors
+  # Each anchor is tried independently: overlapping anchors (~/.codex ->
+  # ~/.claude, or a real ~/.ssh inside a real ~/.claude) can all contain the
+  # target, and only a later one may rewrite it to a denylisted shape.
+  SP_REWRITTEN=""
+  if scope_self_protection_rewrite_one "$1" "$SP_ANCHOR_CLAUDE" .claude \
+    && scope_self_protection_shape "$SP_REWRITTEN"; then
+    return 0
+  fi
+  if scope_self_protection_rewrite_one "$1" "$SP_ANCHOR_SSH" .ssh \
+    && scope_self_protection_shape "$SP_REWRITTEN"; then
+    return 0
+  fi
+  if scope_self_protection_rewrite_one "$1" "$SP_ANCHOR_CODEX" .codex \
+    && scope_self_protection_shape "$SP_REWRITTEN"; then
+    return 0
+  fi
+  return 1
+}
+
+# scope_home_mention_hit <raw-command-text> -- the zero-parse backstop's
+# home-anchored denylist scan (#1074). Returns 0 and sets SP_HOME_HIT to the
+# matched `<anchor><suffix>` fragment when the text names a denylisted path
+# directly after a home anchor: `~/`, `$HOME/`, `${HOME}/`, the quoted spellings
+# `"$HOME"/` and `"${HOME}"/`, or the literal HOME value. A substring match, so
+# it over-blocks fail-closed (see the residuals above). The literal-HOME
+# anchor is skipped when HOME is unset, empty, relative or "/" -- defence in
+# depth (a "/" HOME would only yield the degenerate prefix `//`), not a guard
+# against a scan that would otherwise match every path.
+SP_HOME_HIT=""
+scope_home_mention_hit() {
+  scope_self_protection_init_anchors
+  SP_HOME_HIT=""
+  _sp_lit=""
+  if [ -n "$SP_HOME" ]; then
+    _sp_lit="$SP_HOME/"
+  fi
+  for _sp_pre in '~/' '$HOME/' '${HOME}/' '"$HOME"/' '"${HOME}"/' "$_sp_lit"; do
+    if [ -z "$_sp_pre" ]; then
+      continue
+    fi
+    for _sp_suf in .claude/settings .claude.json .claude/plugins/ .ssh/ .codex/ \
+      .gitconfig .config/git/config .bashrc .bash_profile .bash_login .profile \
+      .zshrc .zshenv .zprofile .zlogin; do
+      case "$1" in
+        *"$_sp_pre$_sp_suf"*)
+          SP_HOME_HIT="$_sp_pre$_sp_suf"
+          return 0
+          ;;
+      esac
+    done
+  done
+  return 1
+}
+
+# scope_partial_parse_reparse_verb <command> -- bwt_has_reparse_verb for the
+# partial-parse scan, with the bare word `env` masked out first. A plain `env`
+# only execs argv (`env sh -c ...` still hits on `sh`), but it is also a data
+# word: /cenci:configure's pinned jq commands carry `.env` and `"env"` and must
+# keep exiting 0. The exception is `env -S` / `--split-string` (also in a
+# cluster such as `-iS`, or after other options), which re-parses its argument
+# text like a shell: that `env` is left unmasked so the verb check blocks it.
+# The inertness check keeps the full verb list (this masking is local to this
+# scan). A failed masking falls back to the unmasked text, so it can only
+# over-block.
+scope_partial_parse_reparse_verb() {
+  if ! _sp_masked=$(BWT_CMD="$1" awk 'BEGIN {
+    s = ENVIRON["BWT_CMD"]
+    out = ""
+    while (match(s, /(^|[^A-Za-z0-9_-])env([^A-Za-z0-9_-]|$)/)) {
+      p = index(substr(s, RSTART, RLENGTH), "env")
+      rest = substr(s, RSTART + p + 2)
+      word = "xxx"
+      if (rest ~ /^([ \t]+-[^ \t]*)*[ \t]+(-[A-Za-z]*S|--split-string)/) word = "env"
+      out = out substr(s, 1, RSTART + p - 2) word
+      s = rest
+    }
+    printf "%s", out s
+  }'); then
+    _sp_masked="$1"
+  fi
+  bwt_has_reparse_verb "$_sp_masked"
+}
+
+# scope_home_mention_message [partial] -- the BLOCKED message for a
+# scope_home_mention_hit hit, shared by the zero-parse backstop (no argument:
+# the first line says no targets could be extracted) and the partial-parse
+# (parsed redirect plus re-parse verb or delimited tee) scan after the
+# per-target loop (argument `partial`: targets WERE extracted, so the first
+# line says the command carries unmodelled text alongside them). Reads
+# SP_HOME_HIT and TOOL_COMMAND.
+scope_home_mention_message() {
+  if [ "${1:-}" = partial ]; then
+    _sp_msg_lead="found that this Bash command contains unmodelled shell text (a re-parsing verb or brace-built tee) alongside parsed redirects, and"
+  else
+    _sp_msg_lead="could not extract this Bash command's write targets (unmodelled shell construct), and"
+  fi
+  {
+    echo "BLOCKED: guard-main-worktree.sh ${_sp_msg_lead:-} the raw command text names a session-security-sensitive path outside the repository (hook/MCP config, plugin script, git config or hooks, shell startup file, or SSH config/keys) anchored at home ($SP_HOME_HIT): $TOOL_COMMAND"
+    echo "A write to such a path is refused regardless of the out-of-repo-scope allow policy. If the command performs NO write -- its write-shaped text comes from a re-parsing verb (eval, sh -c, xargs) or a shell-composed construct -- rewrite it without that text, or read files with your client's file-read tooling instead of a shell pipeline. NEVER add a redirect just to satisfy this message, and never route around it with git checkout/stash/apply, cp/mv, or by copying files."
+  } >&2
 }
 
 # scope_self_protection_message <path> -- the BLOCKED message shared by both
 # arms' self-protection denylist hit (#1072 Fix 3). Deliberately never says
 # "targets the main worktree" -- these targets are outside the repository
-# entirely; the risk is session self-compromise (hook config, plugin script,
-# or SSH config/keys), not a main-worktree write.
+# entirely; the risk is session self-compromise (hook/MCP config, plugin
+# script, git config or hooks, shell startup file, or SSH config/keys), not a
+# main-worktree write.
 scope_self_protection_message() {
-  echo "BLOCKED: $1 targets a session-security-sensitive path outside the repository (hook/MCP config, plugin script, or SSH config/keys) and is refused regardless of the out-of-repo-scope allow policy." >&2
+  echo "BLOCKED: $1 targets a session-security-sensitive path outside the repository (hook/MCP config, plugin script, git config or hooks, shell startup file, or SSH config/keys) and is refused regardless of the out-of-repo-scope allow policy." >&2
 }
 
 # Compute the canonicalized TMPDIR-widening allowlist prefix once (#749).
@@ -732,6 +998,11 @@ if [ -n "$FILE_PATH" ]; then
       ;;
   esac
 
+  # The path exactly as the tool call wrote it, before canonicalization: the
+  # self-protection denylist also matches it (#1074) so a symlinked dotfile
+  # (~/.bashrc -> dotfiles/bashrc) is caught by its link name.
+  FILE_PATH_AS_WRITTEN="$FILE_PATH"
+
   # Parent-anchored canonicalization: only ever feed *existing* paths to the
   # resolver, sidestepping realpath/readlink -f divergence on non-existent
   # trailing components (no -m / -f-on-missing-target usage). When FILE_PATH
@@ -788,7 +1059,7 @@ if [ -n "$FILE_PATH" ]; then
   # logic below, completely unaffected by the denylist. See
   # scope_self_protection_denied() above for the full rationale.
   if ! scope_precheck "$FILE_PATH"; then
-    if scope_self_protection_denied "$FILE_PATH"; then
+    if scope_self_protection_denied "$FILE_PATH" "$FILE_PATH_AS_WRITTEN"; then
       scope_self_protection_message "$FILE_PATH"
       exit 2
     fi
@@ -1110,6 +1381,18 @@ elif [ -n "$TOOL_COMMAND" ]; then
         } >&2
         exit 2
       fi
+      # #1074: home-anchored self-protection scan. Runs AFTER the repo-root
+      # scan above, so a command that matches the root scan keeps that
+      # message byte for byte; either hit blocks. The target paths here are
+      # unknown (the tokenizer extracted none), so the denylist can only be
+      # applied to the raw text -- anchored at home, never as an unanchored
+      # fragment (that would block configure's in-worktree
+      # `.worktrees/<id>/.claude/settings.json` mentions). See
+      # scope_home_mention_hit for the anchors and the accepted false positives.
+      if scope_home_mention_hit "$TOOL_COMMAND"; then
+        scope_home_mention_message
+        exit 2
+      fi
     fi
     exit 0
   fi
@@ -1232,7 +1515,7 @@ elif [ -n "$TOOL_COMMAND" ]; then
     # completely unaffected by the denylist. See scope_self_protection_denied()
     # above for the full rationale.
     if ! scope_precheck "$BWT_CANON"; then
-      if scope_self_protection_denied "$BWT_CANON"; then
+      if scope_self_protection_denied "$BWT_CANON" "$BWT_ABS"; then
         scope_self_protection_message "$BWT_CANON"
         exit 2
       fi
@@ -1254,6 +1537,26 @@ elif [ -n "$TOOL_COMMAND" ]; then
   done <<BWT_TARGETS_EOF
 $BWT_TARGETS
 BWT_TARGETS_EOF
+
+  # #1074 review: partial-parse home scan. One parseable redirect makes
+  # BWT_TARGETS non-empty, which skips the zero-parse backstop above -- so
+  # `echo ok > /tmp/x; eval "echo x >> ~/.bashrc"` would pass the per-target loop
+  # on /tmp/x alone while the re-parsed write lands in a denylisted home path.
+  # Narrow on purpose: it needs a re-parse verb or a delimited `tee` token (the
+  # constructs that hide a write from the tokenizer: `eval`, `sh -c`, and the
+  # brace-built `{tee,-a,~/.bashrc}`), so a plain parsed redirect that merely
+  # mentions ~/.bashrc (`grep PATH ~/.bashrc > /tmp/out`) keeps exiting 0.
+  # Exception: in `~/.ssh/` the `ssh` is a separate word (`.` and `/` are word
+  # boundaries), so it always counts as a re-parse verb -- a read-only
+  # `cat ~/.ssh/id_ed25519.pub > /tmp/k` is therefore blocked (fail-closed).
+  # The cheap pure-sh home scan runs first; the awk checks only when it hits.
+  if [ "$BWT_APPLY_PATCH" -eq 0 ] \
+    && scope_home_mention_hit "$TOOL_COMMAND" \
+    && { scope_partial_parse_reparse_verb "$TOOL_COMMAND" \
+      || bwt_has_delimited_tee "$TOOL_COMMAND"; }; then
+    scope_home_mention_message partial
+    exit 2
+  fi
 
   exit 0
 else

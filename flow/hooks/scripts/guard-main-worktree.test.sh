@@ -2375,6 +2375,541 @@ echo "case: out-of-repo Write to ~/.claude.json.tmp is still allowed (negative c
 run_guard "${OOR_REPO}" "{\"tool_input\":{\"file_path\":\"${OOR_HOME}/.claude.json.tmp\"}}"
 assert_exit "out-of-repo ~/.claude.json.tmp allowed" 0
 
+# ── Ticket #1074: widened self-protection denylist ─────────────────────────
+# Closes the three gaps #1073 left open in scope_self_protection_denied():
+#   1. the zero-parse backstop never consulted the denylist,
+#   2. a symlinked ~/.claude, ~/.ssh or ~/.codex hid the canonical path from
+#      the text match (and a symlinked dotfile hid ~/.bashrc, ~/.gitconfig),
+#   3. ~/.codex/, ~/.gitconfig, shell startup files and an out-of-repo .git
+#      hooks/config directory were not covered.
+# It does NOT model cp/mv/dd/sed -i/truncate; /cenci:configure's mv-based
+# settings.json bootstrap depends on that, so its exact commands are pinned
+# below ("configure pins"). Every case drives the hook through its real
+# JSON-on-stdin entry point and asserts only the exit code and the stderr
+# substrings `session-security-sensitive` / `outside the repository`.
+echo "── #1074: widened self-protection denylist ──"
+
+DL_OTHER_REPO="${TEST_ROOT}/oor-other-repo"
+make_git_repo "${DL_OTHER_REPO}"
+
+# dl_write_json <abs-path> / dl_bash_json <command> — PreToolUse JSON builders.
+dl_write_json() { jq -n --arg p "$1" '{tool_input:{file_path:$p}}'; }
+dl_bash_json() { jq -n --arg c "$1" '{tool_input:{command:$c}}'; }
+
+# assert_stderr_has / assert_stderr_lacks <label> <substring> — literal match
+# against the last run's GUARD_STDERR.
+assert_stderr_has() {
+    if [[ "${GUARD_STDERR}" == *"$2"* ]]; then
+        pass
+    else
+        fail "$1: stderr should contain '$2', got: ${GUARD_STDERR}"
+    fi
+}
+assert_stderr_lacks() {
+    if [[ "${GUARD_STDERR}" == *"$2"* ]]; then
+        fail "$1: stderr must not contain '$2', got: ${GUARD_STDERR}"
+    else
+        pass
+    fi
+}
+
+# assert_sensitive_block <label> — the self-protection verdict: exit 2 with
+# the `session-security-sensitive` wording.
+assert_sensitive_block() {
+    assert_exit "$1" 2
+    assert_stderr_has "$1" "session-security-sensitive"
+}
+
+# run_guard_with_home_unset <cwd> <json> — like run_guard_with_home, but with
+# HOME removed from the environment entirely.
+run_guard_with_home_unset() {
+    local cwd="$1" json="$2"
+    GUARD_STDERR="$(cd "${cwd}" && echo "${json}" | env -u HOME "${HOOK_SHELL}" "${GUARD_SH}" 2>&1 >/dev/null)"
+    GUARD_EXIT=$?
+}
+
+# AC 1 + AC 3: each of the 13 new shapes, written out-of-repo through
+# Write|Edit, is blocked with the self-protection wording AND the "outside the
+# repository" wording.
+for dl_target in \
+    "${OOR_HOME}/.codex/config.toml" \
+    "${OOR_HOME}/.gitconfig" \
+    "${OOR_HOME}/.config/git/config" \
+    "${OOR_HOME}/.bashrc" \
+    "${OOR_HOME}/.bash_profile" \
+    "${OOR_HOME}/.bash_login" \
+    "${OOR_HOME}/.profile" \
+    "${OOR_HOME}/.zshrc" \
+    "${OOR_HOME}/.zshenv" \
+    "${OOR_HOME}/.zprofile" \
+    "${OOR_HOME}/.zlogin" \
+    "${DL_OTHER_REPO}/.git/hooks/pre-commit" \
+    "${DL_OTHER_REPO}/.git/config"; do
+    dl_label="${dl_target#"${TEST_ROOT}"/}"
+    echo "case: out-of-repo Write|Edit to ${dl_label} is blocked (#1074 AC 1)"
+    run_guard "${OOR_REPO}" "$(dl_write_json "${dl_target}")"
+    assert_sensitive_block "Write|Edit ${dl_label} (#1074 AC 1)"
+    assert_stderr_has "Write|Edit ${dl_label} (#1074 AC 3)" "outside the repository"
+done
+
+# AC 3: the category list now names git config and shell startup files.
+echo "case: the self-protection message names git config and shell startup files (#1074 AC 3)"
+run_guard "${OOR_REPO}" "$(dl_write_json "${OOR_HOME}/.gitconfig")"
+assert_stderr_has "message categories: git config (#1074 AC 3)" "git config"
+assert_stderr_has "message categories: shell startup file (#1074 AC 3)" "shell startup file"
+
+# AC 2: the five required paths on the Bash arm too (redirect form). $HOME is
+# left literal in the command, so the guard itself expands it from the HOME
+# the case sets.
+for dl_rel in .codex/config.toml .gitconfig .bashrc .zshrc; do
+    echo "case: out-of-repo Bash redirect to \$HOME/${dl_rel} is blocked (#1074 AC 2)"
+    run_guard_with_home "${OOR_REPO}" "${OOR_HOME}" "$(dl_bash_json "echo x > \$HOME/${dl_rel}")"
+    assert_sensitive_block "Bash redirect \$HOME/${dl_rel} (#1074 AC 2)"
+    assert_stderr_has "Bash redirect \$HOME/${dl_rel} (#1074 AC 3)" "outside the repository"
+done
+echo "case: out-of-repo Bash redirect to <other-repo>/.git/hooks/pre-commit is blocked (#1074 AC 2)"
+run_guard "${OOR_REPO}" "$(dl_bash_json "echo x > ${DL_OTHER_REPO}/.git/hooks/pre-commit")"
+assert_sensitive_block "Bash redirect other-repo .git/hooks/pre-commit (#1074 AC 2)"
+assert_stderr_has "Bash redirect other-repo .git/hooks/pre-commit (#1074 AC 3)" "outside the repository"
+
+# AC 4: symlinked config directories. HOME/.claude, HOME/.ssh and HOME/.codex
+# are symlinks into HOME/dotfiles/<dir>; the canonical target no longer
+# contains /.claude/ (etc.), so a write to the link, a write straight to the
+# real directory, and a Bash redirect through $HOME must all still be blocked.
+DL_SYM_HOME="${TEST_ROOT}/sym-home"
+mkdir -p "${DL_SYM_HOME}/dotfiles/claude" "${DL_SYM_HOME}/dotfiles/ssh" "${DL_SYM_HOME}/dotfiles/codex" \
+    || fail "fixture: mkdir symlinked-config-directory home"
+echo '{}' > "${DL_SYM_HOME}/dotfiles/claude/settings.json" || fail "fixture: write dotfiles/claude/settings.json"
+touch "${DL_SYM_HOME}/dotfiles/ssh/authorized_keys" "${DL_SYM_HOME}/dotfiles/codex/config.toml" \
+    || fail "fixture: touch dotfiles ssh/codex files"
+ln -s "${DL_SYM_HOME}/dotfiles/claude" "${DL_SYM_HOME}/.claude" || fail "fixture: ln -s ~/.claude"
+ln -s "${DL_SYM_HOME}/dotfiles/ssh" "${DL_SYM_HOME}/.ssh" || fail "fixture: ln -s ~/.ssh"
+ln -s "${DL_SYM_HOME}/dotfiles/codex" "${DL_SYM_HOME}/.codex" || fail "fixture: ln -s ~/.codex"
+for dl_sym in "claude|.claude|settings.json" "ssh|.ssh|authorized_keys" "codex|.codex|config.toml"; do
+    dl_real="${dl_sym%%|*}"
+    dl_rest="${dl_sym#*|}"
+    dl_link="${dl_rest%%|*}"
+    dl_file="${dl_rest#*|}"
+
+    echo "case: symlinked ~/${dl_link}: Write to the link path is blocked (#1074 AC 4)"
+    run_guard_with_home "${OOR_REPO}" "${DL_SYM_HOME}" "$(dl_write_json "${DL_SYM_HOME}/${dl_link}/${dl_file}")"
+    assert_sensitive_block "symlinked ${dl_link}: Write to the link (#1074 AC 4)"
+
+    echo "case: symlinked ~/${dl_link}: Write to the real dotfiles/${dl_real} directory is blocked (#1074 AC 4)"
+    run_guard_with_home "${OOR_REPO}" "${DL_SYM_HOME}" "$(dl_write_json "${DL_SYM_HOME}/dotfiles/${dl_real}/${dl_file}")"
+    assert_sensitive_block "symlinked ${dl_link}: Write to the real directory (#1074 AC 4)"
+
+    echo "case: symlinked ~/${dl_link}: Bash redirect through \$HOME/${dl_link} is blocked (#1074 AC 4)"
+    run_guard_with_home "${OOR_REPO}" "${DL_SYM_HOME}" "$(dl_bash_json "echo x > \$HOME/${dl_link}/${dl_file}")"
+    assert_sensitive_block "symlinked ${dl_link}: Bash redirect (#1074 AC 4)"
+done
+
+# Q&A 1 (a): a symlinked dotfile (~/.bashrc -> real-dotfiles/bashrc). The
+# canonical target is real-dotfiles/bashrc, which matches no shape, so the
+# as-written path (pre-canonical) must be matched too -- on both arms.
+DL_RC_HOME="${TEST_ROOT}/sym-rc-home"
+mkdir -p "${DL_RC_HOME}/real-dotfiles" || fail "fixture: mkdir symlinked-dotfile home"
+touch "${DL_RC_HOME}/real-dotfiles/bashrc" "${DL_RC_HOME}/real-dotfiles/gitconfig" \
+    || fail "fixture: touch real-dotfiles"
+ln -s "${DL_RC_HOME}/real-dotfiles/bashrc" "${DL_RC_HOME}/.bashrc" || fail "fixture: ln -s ~/.bashrc"
+ln -s "${DL_RC_HOME}/real-dotfiles/gitconfig" "${DL_RC_HOME}/.gitconfig" || fail "fixture: ln -s ~/.gitconfig"
+for dl_rc in .bashrc .gitconfig; do
+    echo "case: symlinked dotfile ~/${dl_rc}: Bash redirect is blocked via the as-written path (#1074 Q&A 1a)"
+    run_guard_with_home "${OOR_REPO}" "${DL_RC_HOME}" "$(dl_bash_json "echo x > \$HOME/${dl_rc}")"
+    assert_sensitive_block "symlinked dotfile ${dl_rc}: Bash redirect (#1074 Q&A 1a)"
+
+    echo "case: symlinked dotfile ~/${dl_rc}: Write|Edit is blocked via the as-written path (#1074 Q&A 1a)"
+    run_guard_with_home "${OOR_REPO}" "${DL_RC_HOME}" "$(dl_write_json "${DL_RC_HOME}/${dl_rc}")"
+    assert_sensitive_block "symlinked dotfile ${dl_rc}: Write|Edit (#1074 Q&A 1a)"
+done
+
+# Review-fix B: overlapping anchors. HOME/.codex is a symlink to the REAL
+# directory HOME/.claude, so the canonical target <home>/.claude/config.toml
+# rewrites to `.claude/config.toml` through the .claude anchor (no shape) but to
+# `.codex/config.toml` through the .codex anchor (a shape). Every anchor must be
+# tried, not only the first one that contains the target.
+DL_OVL_HOME="${TEST_ROOT}/overlap-home"
+mkdir -p "${DL_OVL_HOME}/.claude" || fail "fixture: mkdir overlapping-anchor home"
+touch "${DL_OVL_HOME}/.claude/config.toml" || fail "fixture: touch overlapping-anchor config.toml"
+ln -s "${DL_OVL_HOME}/.claude" "${DL_OVL_HOME}/.codex" || fail "fixture: ln -s ~/.codex -> ~/.claude"
+echo "case: ~/.codex -> ~/.claude: Write to the real .claude/config.toml is blocked via the later anchor (#1074 review B)"
+run_guard_with_home "${OOR_REPO}" "${DL_OVL_HOME}" "$(dl_write_json "${DL_OVL_HOME}/.claude/config.toml")"
+assert_sensitive_block "overlapping anchors: Write to the real directory (#1074 review B)"
+echo "case: ~/.codex -> ~/.claude: Bash redirect to \$HOME/.claude/config.toml is blocked via the later anchor (#1074 review B)"
+run_guard_with_home "${OOR_REPO}" "${DL_OVL_HOME}" "$(dl_bash_json 'echo x > $HOME/.claude/config.toml')"
+assert_sensitive_block "overlapping anchors: Bash redirect to the real directory (#1074 review B)"
+
+# AC 5: zero-parse commands. The tokenizer extracts no target from these (the
+# `>` is inside quotes), so only the raw-text backstop runs -- and it names no
+# repo root, so before #1074 they exited 0. The new home-anchored scan blocks
+# them.
+echo "case: eval \"echo x > \$HOME/.claude/settings.json\" is blocked by the zero-parse home scan (#1074 AC 5)"
+run_guard_with_home "${OOR_REPO}" "${OOR_HOME}" "$(dl_bash_json 'eval "echo x > $HOME/.claude/settings.json"')"
+assert_sensitive_block "zero-parse eval \$HOME/.claude/settings.json (#1074 AC 5)"
+assert_stderr_has "zero-parse eval: names the matched fragment (#1074 Q&A 8)" ".claude/settings"
+assert_stderr_has "zero-parse eval: keeps the #1084 no-invented-redirect guidance (#1074 Q&A 8)" "NEVER add a redirect"
+
+echo "case: sh -c 'echo x >> ~/.bashrc' is blocked by the zero-parse home scan (#1074 AC 5)"
+run_guard_with_home "${OOR_REPO}" "${OOR_HOME}" "$(dl_bash_json "sh -c 'echo x >> ~/.bashrc'")"
+assert_sensitive_block "zero-parse sh -c ~/.bashrc (#1074 AC 5)"
+
+# AC 5: every denylisted suffix is recognised after a home anchor.
+for dl_suffix in \
+    .claude/settings.json .claude.json .claude/plugins/x/hook.sh .ssh/authorized_keys \
+    .codex/config.toml .gitconfig .config/git/config \
+    .bashrc .bash_profile .bash_login .profile .zshrc .zshenv .zprofile .zlogin; do
+    echo "case: zero-parse eval naming \$HOME/${dl_suffix} is blocked (#1074 AC 5)"
+    run_guard_with_home "${OOR_REPO}" "${OOR_HOME}" "$(dl_bash_json "eval \"echo x > \$HOME/${dl_suffix}\"")"
+    assert_sensitive_block "zero-parse eval \$HOME/${dl_suffix} (#1074 AC 5)"
+    assert_stderr_has "zero-parse eval \$HOME/${dl_suffix}: blocked by the home scan, not a per-target block (#1074 AC 5)" "anchored at home"
+done
+
+# AC 5: every home anchor spelling is recognised, including the quoted-home
+# spellings (Q&A 1b) and the literal HOME value.
+for dl_anchor in '~/' '$HOME/' '${HOME}/' '"$HOME"/' '"${HOME}"/' "${OOR_HOME}/"; do
+    echo "case: zero-parse sh -c naming ${dl_anchor}.bashrc is blocked (#1074 AC 5 / Q&A 1b)"
+    run_guard_with_home "${OOR_REPO}" "${OOR_HOME}" "$(dl_bash_json "sh -c 'echo x >> ${dl_anchor}.bashrc'")"
+    assert_sensitive_block "zero-parse anchor ${dl_anchor}.bashrc (#1074 AC 5 / Q&A 1b)"
+    assert_stderr_has "zero-parse anchor ${dl_anchor}.bashrc: blocked by the home scan, not a per-target block (#1074 AC 5 / Q&A 1b)" "anchored at home"
+done
+
+# Control: a home-anchored mention of a NON-denylisted file keeps exiting 0, so
+# the scan is not simply blocking every zero-parse command.
+echo "case: zero-parse eval naming \$HOME/notes.txt (not denylisted) is still allowed (#1074 control)"
+run_guard_with_home "${OOR_REPO}" "${OOR_HOME}" "$(dl_bash_json 'eval "echo x > $HOME/notes.txt"')"
+assert_exit "zero-parse non-denylisted home mention allowed (#1074 control)" 0
+
+# Review-fix A: ONE parseable redirect makes the target list non-empty, which
+# skips the zero-parse arm -- so a re-parsed home-anchored write hidden behind
+# it (eval / sh -c) must still be caught by the post-loop home scan.
+echo "case: a parsed redirect plus eval \"echo x >> ~/.bashrc\" is blocked by the home scan (#1074 review A)"
+run_guard_with_home "${OOR_REPO}" "${OOR_HOME}" "$(dl_bash_json 'echo ok > /tmp/x; eval "echo x >> ~/.bashrc"')"
+assert_sensitive_block "partial parse: eval ~/.bashrc after a parsed redirect (#1074 review A)"
+assert_stderr_has "partial parse: eval ~/.bashrc names the home-anchored scan (#1074 review A)" "anchored at home"
+
+echo "case: a parsed redirect plus sh -c with \$HOME/.claude/settings.json is blocked by the home scan (#1074 review A)"
+run_guard_with_home "${OOR_REPO}" "${OOR_HOME}" "$(dl_bash_json ": > /tmp/x && sh -c 'echo x > \$HOME/.claude/settings.json'")"
+assert_sensitive_block "partial parse: sh -c \$HOME/.claude/settings.json after a parsed redirect (#1074 review A)"
+assert_stderr_has "partial parse: sh -c \$HOME/.claude/settings.json names the home-anchored scan (#1074 review A)" "anchored at home"
+
+# `env` is masked out of the post-loop verb check (it is a data word in the
+# configure jq pins), but a real re-parse verb behind it still counts.
+echo "case: a parsed redirect plus env sh -c with ~/.bashrc is still blocked (#1074 review A)"
+run_guard_with_home "${OOR_REPO}" "${OOR_HOME}" "$(dl_bash_json "echo ok > /tmp/x; env sh -c 'echo x >> ~/.bashrc'")"
+assert_sensitive_block "partial parse: env sh -c ~/.bashrc after a parsed redirect (#1074 review A)"
+assert_stderr_has "partial parse: env sh -c ~/.bashrc names the home-anchored scan (#1074 review A)" "anchored at home"
+
+# Negative control: the post-loop scan needs a re-parse verb, so a plain parsed
+# redirect that merely MENTIONS a denylisted home path keeps exiting 0.
+echo "case: grep PATH ~/.bashrc > /tmp/out (parsed redirect, no re-parse verb) is still allowed (#1074 review A control)"
+run_guard_with_home "${OOR_REPO}" "${OOR_HOME}" "$(dl_bash_json 'grep PATH ~/.bashrc > /tmp/out')"
+assert_exit "parsed redirect mentioning ~/.bashrc without a re-parse verb allowed (#1074 review A control)" 0
+assert_stderr_lacks "parsed redirect mentioning ~/.bashrc: no self-protection wording (#1074 review A control)" "session-security-sensitive"
+
+# Review-fix E: a brace-built tee (`{tee,-a,~/.bashrc}`) is not a re-parse verb,
+# so with a parseable decoy redirect in front it slipped past the verb-only
+# trigger. A delimited `tee` token now also triggers the post-loop home scan.
+echo "case: a parsed redirect decoy plus '| {tee,-a,~/.bashrc}' is blocked by the home scan (#1074 review E)"
+run_guard_with_home "${OOR_REPO}" "${OOR_HOME}" "$(dl_bash_json 'echo ok > /tmp/x; echo evil | {tee,-a,~/.bashrc}')"
+assert_sensitive_block "partial parse: decoy redirect + brace tee ~/.bashrc (#1074 review E)"
+assert_stderr_has "partial parse: decoy redirect + brace tee names the home-anchored scan (#1074 review E)" "anchored at home"
+
+echo "case: a parsed redirect decoy plus '| {tee,-a,\$HOME/.claude/settings.json}' is blocked by the home scan (#1074 review E)"
+run_guard_with_home "${OOR_REPO}" "${OOR_HOME}" "$(dl_bash_json 'echo ok > /tmp/x; echo evil | {tee,-a,$HOME/.claude/settings.json}')"
+assert_sensitive_block "partial parse: decoy redirect + brace tee \$HOME/.claude/settings.json (#1074 review E)"
+
+# Pinned over-block: the delimited-tee trigger is a raw-text signal, so a
+# parsed redirect plus a tee that only READS a home-anchored sensitive file is
+# blocked too.
+echo "case: 'cat ~/.bashrc | tee /tmp/out; echo a > /tmp/b' is blocked (#1074 pinned fail-closed)"
+run_guard_with_home "${OOR_REPO}" "${OOR_HOME}" "$(dl_bash_json 'cat ~/.bashrc | tee /tmp/out; echo a > /tmp/b')"
+assert_sensitive_block "parsed redirect + delimited tee reading ~/.bashrc blocked (#1074 pinned fail-closed)"
+assert_stderr_has "parsed redirect + delimited tee reading ~/.bashrc: home scan (#1074 pinned fail-closed)" "anchored at home"
+
+# Review-fix F: `env -S` / `--split-string` re-parses its argument text, so the
+# `env` mask must not apply to it (the five configure pins, whose `.env` /
+# `"env"` words are data, stay exit 0 -- they are pinned below).
+echo "case: a parsed redirect decoy plus env -S 'tee -a \${HOME}/.bashrc' is blocked (#1074 review F)"
+run_guard_with_home "${OOR_REPO}" "${OOR_HOME}" "$(dl_bash_json "echo ok > /tmp/x; echo evil | env -S 'tee -a \${HOME}/.bashrc'")"
+assert_sensitive_block "partial parse: decoy redirect + env -S tee \${HOME}/.bashrc (#1074 review F)"
+
+# The tee above is also caught by the delimited-tee trigger, so these variants
+# carry no tee: only the unmasked `env` verb can make them block.
+echo "case: a parsed redirect decoy plus env -S 'dd of=\${HOME}/.bashrc' is blocked (#1074 review F)"
+run_guard_with_home "${OOR_REPO}" "${OOR_HOME}" "$(dl_bash_json "echo ok > /tmp/x; env -S 'dd of=\${HOME}/.bashrc'")"
+assert_sensitive_block "partial parse: decoy redirect + env -S dd (#1074 review F)"
+
+echo "case: a parsed redirect decoy plus env -iS 'dd of=~/.bashrc' is blocked (#1074 review F)"
+run_guard_with_home "${OOR_REPO}" "${OOR_HOME}" "$(dl_bash_json "echo ok > /tmp/x; env -iS 'dd of=~/.bashrc'")"
+assert_sensitive_block "partial parse: decoy redirect + env -iS dd (#1074 review F)"
+
+echo "case: a parsed redirect decoy plus env -i -S 'dd of=~/.bashrc' is blocked (#1074 review F)"
+run_guard_with_home "${OOR_REPO}" "${OOR_HOME}" "$(dl_bash_json "echo ok > /tmp/x; env -i -S 'dd of=~/.bashrc'")"
+assert_sensitive_block "partial parse: decoy redirect + env -i -S dd (#1074 review F)"
+
+echo "case: a parsed redirect decoy plus env --split-string 'dd of=~/.bashrc' is blocked (#1074 review F)"
+run_guard_with_home "${OOR_REPO}" "${OOR_HOME}" "$(dl_bash_json "echo ok > /tmp/x; env --split-string 'dd of=~/.bashrc'")"
+assert_sensitive_block "partial parse: decoy redirect + env --split-string dd (#1074 review F)"
+
+# Review-fix G: the partial-parse arm DID extract targets, so its first line
+# must not claim it could not.
+echo "case: the partial-parse home-scan message words its first line accurately (#1074 review G)"
+run_guard_with_home "${OOR_REPO}" "${OOR_HOME}" "$(dl_bash_json 'echo ok > /tmp/x; echo evil | {tee,-a,~/.bashrc}')"
+assert_stderr_has "partial-parse message: names the unmodelled text (#1074 review G)" "contains unmodelled shell text (a re-parsing verb or brace-built tee) alongside parsed redirects"
+assert_stderr_lacks "partial-parse message: does not claim targets were not extracted (#1074 review G)" "could not extract"
+assert_stderr_has "partial-parse message: names the matched fragment (#1074 review G)" "anchored at home (~/.bashrc)"
+assert_stderr_has "partial-parse message: keeps the no-redirect guidance (#1074 review G)" "NEVER add a redirect just to satisfy this message"
+
+# Q&A 2: the home scan runs AFTER the repo-root scan. A zero-parse command that
+# names BOTH the main worktree root and a home-anchored denylisted path is
+# blocked by the root scan, with its existing message (not the home-scan block's
+# wording).
+echo "case: zero-parse command naming the repo root AND \$HOME/.bashrc keeps the root-scan message (#1074 Q&A 2)"
+run_guard_with_home "${OOR_REPO}" "${OOR_HOME}" "$(dl_bash_json "eval \"echo x > ${OOR_REPO}/notes.txt; echo y >> \$HOME/.bashrc\"")"
+assert_exit "zero-parse root + home mention blocked (#1074 Q&A 2)" 2
+assert_stderr_has "zero-parse root + home mention: root-scan message is emitted (#1074 Q&A 2)" "the raw command text mentions the main worktree root (${OOR_REPO})"
+assert_stderr_has "zero-parse root + home mention: root-scan rewrite guidance is emitted (#1074 Q&A 2)" "targeting the feature worktree (.worktrees/<id>-<desc>/) or a temp path."
+assert_stderr_lacks "zero-parse root + home mention: not the home-scan wording (#1074 Q&A 2)" "anchored at home"
+assert_stderr_lacks "zero-parse root + home mention: not the self-protection wording (#1074 Q&A 2)" "session-security-sensitive"
+
+# Q&A 8: the zero-parse home-scan block names the matched fragment and keeps the
+# #1084 agent-safe guidance: a no-write command is rewritten (never given an
+# invented redirect), and the agent is told not to route around the block.
+echo "case: zero-parse home-scan message keeps the #1084 guidance (#1074 Q&A 8)"
+run_guard_with_home "${OOR_REPO}" "${OOR_HOME}" "$(dl_bash_json "sh -c 'echo x >> ~/.bashrc'")"
+assert_sensitive_block "zero-parse home-scan message (#1074 Q&A 8)"
+assert_stderr_has "zero-parse home-scan message: names the matched fragment (#1074 Q&A 8)" "(~/.bashrc)"
+assert_stderr_has "zero-parse home-scan message: no-write rewrite clause (#1074 Q&A 8)" "If the command performs NO write"
+assert_stderr_has "zero-parse home-scan message: rewrite without the re-parse text (#1074 Q&A 8)" "rewrite it without that text"
+assert_stderr_has "zero-parse home-scan message: never add a redirect (#1074 Q&A 8)" "NEVER add a redirect just to satisfy this message"
+assert_stderr_has "zero-parse home-scan message: never route around with git checkout/stash (#1074 Q&A 8)" "never route around it with git checkout/stash/apply"
+assert_stderr_has "zero-parse home-scan message: never route around with cp/mv (#1074 Q&A 8)" "cp/mv"
+assert_stderr_has "zero-parse home-scan message: never route around by copying files (#1074 Q&A 8)" "by copying files"
+
+# Review-fix G: byte-identity of the whole zero-parse message. The expected text
+# is built from the known command and fragment and compared whole (the capture
+# strips the final newline on both sides), so any drift in either line fails.
+echo "case: the zero-parse home-scan message is byte-identical (#1074 review G)"
+DL_EXACT_CMD="sh -c 'echo x >> ~/.bashrc'"
+DL_EXACT_LINE1="BLOCKED: guard-main-worktree.sh could not extract this Bash command's write targets (unmodelled shell construct), and the raw command text names a session-security-sensitive path outside the repository (hook/MCP config, plugin script, git config or hooks, shell startup file, or SSH config/keys) anchored at home (~/.bashrc): ${DL_EXACT_CMD}"
+DL_EXACT_LINE2="A write to such a path is refused regardless of the out-of-repo-scope allow policy. If the command performs NO write -- its write-shaped text comes from a re-parsing verb (eval, sh -c, xargs) or a shell-composed construct -- rewrite it without that text, or read files with your client's file-read tooling instead of a shell pipeline. NEVER add a redirect just to satisfy this message, and never route around it with git checkout/stash/apply, cp/mv, or by copying files."
+DL_EXACT_EXPECTED="${DL_EXACT_LINE1}"$'\n'"${DL_EXACT_LINE2}"
+run_guard_with_home "${OOR_REPO}" "${OOR_HOME}" "$(dl_bash_json "${DL_EXACT_CMD}")"
+assert_exit "zero-parse home-scan exact stderr: blocked (#1074 review G)" 2
+if [[ "${GUARD_STDERR}" == "${DL_EXACT_EXPECTED}" ]]; then
+    pass
+else
+    fail "zero-parse home-scan exact stderr: expected:
+${DL_EXACT_EXPECTED}
+got:
+${GUARD_STDERR}"
+fi
+
+# AC 6: /cenci:configure's settings.json bootstrap. The four jq commands and
+# the mv command below are copied VERBATIM from
+# flow/skills/configure/phases/guidance-settings.md; each must exit 0 under the
+# Bash arm. The flow depends on the guard NOT modelling `mv` targets; each case
+# also greps the doc for the exact command, so drift on either side fails a
+# named test here.
+DL_CONF_DOC="${SCRIPT_DIR}/../../skills/configure/phases/guidance-settings.md"
+DL_CONF_HOME="${TEST_ROOT}/conf-home"
+mkdir -p "${DL_CONF_HOME}/.claude" || fail "fixture: mkdir configure home"
+echo '{}' > "${DL_CONF_HOME}/.claude/settings.json" || fail "fixture: write configure settings.json"
+
+# guidance-settings.md step 5c (disable auto-compact), jq call.
+DL_CONF_JQ_COMPACT_OFF="jq '.autoCompactEnabled = false | del(.env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE) | if .env == {} then del(.env) else . end' ~/.claude/settings.json > ~/.claude/settings.json.tmp"
+# guidance-settings.md step 5c undo (re-enable auto-compact), jq call.
+DL_CONF_JQ_COMPACT_ON="jq 'del(.autoCompactEnabled) | del(.env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE) | if .env == {} then del(.env) else . end' ~/.claude/settings.json > ~/.claude/settings.json.tmp"
+# guidance-settings.md subagent-model step (set), jq call.
+DL_CONF_JQ_SUBAGENT_SET="jq '. * {\"env\": {\"CLAUDE_CODE_SUBAGENT_MODEL\": \"claude-sonnet-5\"}}' ~/.claude/settings.json > ~/.claude/settings.json.tmp"
+# guidance-settings.md subagent-model step (undo), jq call.
+DL_CONF_JQ_SUBAGENT_DEL="jq 'del(.env.CLAUDE_CODE_SUBAGENT_MODEL) | if .env == {} then del(.env) else . end' ~/.claude/settings.json > ~/.claude/settings.json.tmp"
+# guidance-settings.md, every one of the four steps: the mv into place.
+DL_CONF_MV="mv ~/.claude/settings.json.tmp ~/.claude/settings.json"
+
+# dl_configure_pin <label> <command> <home> — the guard allows <command> (exit
+# 0, no self-protection wording) and guidance-settings.md still contains it.
+dl_configure_pin() {
+    local label="$1" cmd="$2" home="$3"
+    run_guard_with_home "${OOR_REPO}" "${home}" "$(dl_bash_json "${cmd}")"
+    assert_exit "${label}" 0
+    assert_stderr_lacks "${label}" "session-security-sensitive"
+    if grep -qF -- "${cmd}" "${DL_CONF_DOC}"; then
+        pass
+    else
+        fail "${label}: command not found verbatim in guidance-settings.md (drift)"
+    fi
+}
+
+echo "case: configure pin (guidance-settings.md): jq disabling auto-compact exits 0 (#1074 AC 6)"
+dl_configure_pin "configure pin: jq autoCompactEnabled=false (guidance-settings.md)" "${DL_CONF_JQ_COMPACT_OFF}" "${DL_CONF_HOME}"
+echo "case: configure pin (guidance-settings.md): jq re-enabling auto-compact exits 0 (#1074 AC 6)"
+dl_configure_pin "configure pin: jq del(.autoCompactEnabled) (guidance-settings.md)" "${DL_CONF_JQ_COMPACT_ON}" "${DL_CONF_HOME}"
+echo "case: configure pin (guidance-settings.md): jq setting the subagent model exits 0 (#1074 AC 6)"
+dl_configure_pin "configure pin: jq set CLAUDE_CODE_SUBAGENT_MODEL (guidance-settings.md)" "${DL_CONF_JQ_SUBAGENT_SET}" "${DL_CONF_HOME}"
+echo "case: configure pin (guidance-settings.md): jq removing the subagent model exits 0 (#1074 AC 6)"
+dl_configure_pin "configure pin: jq del CLAUDE_CODE_SUBAGENT_MODEL (guidance-settings.md)" "${DL_CONF_JQ_SUBAGENT_DEL}" "${DL_CONF_HOME}"
+echo "case: configure pin (guidance-settings.md): mv settings.json.tmp into place exits 0 (#1074 AC 6)"
+dl_configure_pin "configure pin: mv settings.json.tmp settings.json (guidance-settings.md)" "${DL_CONF_MV}" "${DL_CONF_HOME}"
+# Same pin, under a HOME whose .claude is a symlink (the anchor rewrite must
+# not turn settings.json.tmp into a denylisted target).
+echo "case: configure pin (guidance-settings.md) still exits 0 when ~/.claude is a symlink (#1074 AC 6)"
+dl_configure_pin "configure pin under symlinked ~/.claude: jq autoCompactEnabled=false (guidance-settings.md)" "${DL_CONF_JQ_COMPACT_OFF}" "${DL_SYM_HOME}"
+
+# Edge cases ──────────────────────────────────────────────────────────────
+
+# An in-repo write never reaches the denylist: .codex is blocked by the
+# ordinary logic in the main worktree and allowed under .worktrees/<id>/.
+echo "case: in-repo Write to <repo>/.codex/agents/planner.toml is blocked by the ordinary logic (#1074 edge)"
+run_guard "${OOR_REPO}" "$(dl_write_json "${OOR_REPO}/.codex/agents/planner.toml")"
+assert_exit "in-repo .codex/agents/planner.toml blocked (#1074 edge)" 2
+assert_stderr_has "in-repo .codex/agents/planner.toml: ordinary wording (#1074 edge)" "targets the main worktree"
+assert_stderr_lacks "in-repo .codex/agents/planner.toml: no self-protection wording (#1074 edge)" "session-security-sensitive"
+
+echo "case: in-repo Bash redirect to <repo>/.codex/agents/planner.toml is blocked by the ordinary logic (#1074 edge)"
+run_guard "${OOR_REPO}" "$(dl_bash_json "echo x > ${OOR_REPO}/.codex/agents/planner.toml")"
+assert_exit "in-repo bash .codex/agents/planner.toml blocked (#1074 edge)" 2
+assert_stderr_has "in-repo bash .codex/agents/planner.toml: ordinary wording (#1074 edge)" "targets the main worktree"
+assert_stderr_lacks "in-repo bash .codex/agents/planner.toml: no self-protection wording (#1074 edge)" "session-security-sensitive"
+
+echo "case: in-repo Write to <repo>/.worktrees/configure-init/.codex/agents/planner.toml is allowed (#1074 edge)"
+run_guard "${OOR_REPO}" "$(dl_write_json "${OOR_REPO}/.worktrees/configure-init/.codex/agents/planner.toml")"
+assert_exit "in-repo feature-worktree .codex/agents/planner.toml allowed (#1074 edge)" 0
+
+echo "case: in-repo Write to <repo>/.git/config is blocked by the ordinary logic (#1074 edge)"
+run_guard "${OOR_REPO}" "$(dl_write_json "${OOR_REPO}/.git/config")"
+assert_exit "in-repo .git/config blocked (#1074 edge)" 2
+assert_stderr_has "in-repo .git/config: ordinary wording (#1074 edge)" "targets the main worktree"
+assert_stderr_lacks "in-repo .git/config: no self-protection wording (#1074 edge)" "session-security-sensitive"
+
+# A zero-parse mention of a feature-worktree .claude/settings.json is not
+# anchored at home -- even when the repo lives directly under HOME, because
+# <HOME>/<subdir>/.../.claude/settings is not <HOME>/.claude/settings.
+echo "case: zero-parse mention of <repo>/.worktrees/x/.claude/settings.json is allowed, HOME = the repo's parent (#1074 edge)"
+run_guard_with_home "${OOR_REPO}" "${TEST_ROOT}" "$(dl_bash_json "eval \"echo x > ${OOR_REPO}/.worktrees/x/.claude/settings.json\"")"
+assert_exit "zero-parse feature-worktree .claude/settings.json mention allowed (#1074 edge)" 0
+
+# HOME unset, empty, relative or `/`: the literal-$HOME form and the anchor
+# rewrite are skipped, the `~/` and `$HOME/` raw forms and the lexical shapes
+# still apply, and the guard never treats every path as denylisted.
+# dl_run_odd_home <cwd> <json> — run the guard with the HOME value in $dl_home.
+dl_run_odd_home() {
+    case "${dl_home}" in
+        "<unset>") run_guard_with_home_unset "$1" "$2" ;;
+        "<empty>") run_guard_with_home "$1" "" "$2" ;;
+        *) run_guard_with_home "$1" "${dl_home}" "$2" ;;
+    esac
+}
+for dl_home in "<empty>" "relative/home" "/" "<unset>"; do
+    echo "case: HOME=${dl_home}: zero-parse '~/.bashrc' mention is still blocked (#1074 edge)"
+    dl_run_odd_home "${OOR_REPO}" "$(dl_bash_json 'eval "echo x >> ~/.bashrc"')"
+    assert_sensitive_block "HOME=${dl_home}: zero-parse ~/.bashrc (#1074 edge)"
+
+    echo "case: HOME=${dl_home}: zero-parse '\$HOME/.bashrc' mention is still blocked (#1074 edge)"
+    dl_run_odd_home "${OOR_REPO}" "$(dl_bash_json 'eval "echo x >> $HOME/.bashrc"')"
+    assert_sensitive_block "HOME=${dl_home}: zero-parse \$HOME/.bashrc (#1074 edge)"
+
+    # The braced raw form: the single quotes keep the literal text `${HOME}/`
+    # reaching the guard, which must match it without expanding HOME.
+    echo "case: HOME=${dl_home}: zero-parse '\${HOME}/.bashrc' mention is still blocked (#1074 edge)"
+    dl_run_odd_home "${OOR_REPO}" "$(dl_bash_json 'sh -c '"'"'echo x >> ${HOME}/.bashrc'"'"'')"
+    assert_sensitive_block "HOME=${dl_home}: zero-parse \${HOME}/.bashrc via sh -c (#1074 edge)"
+    assert_stderr_has "HOME=${dl_home}: zero-parse \${HOME}/.bashrc names the matched fragment (#1074 edge)" '${HOME}/.bashrc'
+
+    echo "case: HOME=${dl_home}: zero-parse eval '\${HOME}/.claude/settings.json' mention is still blocked (#1074 edge)"
+    dl_run_odd_home "${OOR_REPO}" "$(dl_bash_json 'eval "echo x > ${HOME}/.claude/settings.json"')"
+    assert_sensitive_block "HOME=${dl_home}: zero-parse \${HOME}/.claude/settings.json via eval (#1074 edge)"
+    assert_stderr_has "HOME=${dl_home}: zero-parse \${HOME}/.claude/settings.json names the matched fragment (#1074 edge)" '${HOME}/.claude/settings'
+
+    echo "case: HOME=${dl_home}: an unrelated zero-parse '/tmp/.../.codex/x' mention is NOT blocked (#1074 edge)"
+    dl_run_odd_home "${OOR_REPO}" "$(dl_bash_json 'eval "echo x > /tmp/oor-zp-1074/.codex/x"')"
+    assert_exit "HOME=${dl_home}: unrelated .codex mention allowed (#1074 edge)" 0
+
+    echo "case: HOME=${dl_home}: the lexical Write to <home>/.gitconfig is still blocked (#1074 edge)"
+    dl_run_odd_home "${OOR_REPO}" "$(dl_write_json "${OOR_HOME}/.gitconfig")"
+    assert_sensitive_block "HOME=${dl_home}: lexical Write .gitconfig (#1074 edge)"
+
+    echo "case: HOME=${dl_home}: an ordinary out-of-repo Write is NOT denylisted (#1074 edge)"
+    dl_run_odd_home "${OOR_REPO}" "$(dl_write_json "${OOR_HOME}/.claude/projects/-workspace/memory/notes.md")"
+    assert_exit "HOME=${dl_home}: ordinary out-of-repo Write allowed (#1074 edge)" 0
+done
+
+# A dangling .claude symlink: the anchor rewrite is skipped, and the existing
+# unresolvable-symlink block (not the self-protection wording) still applies.
+DL_DANG_HOME="${TEST_ROOT}/dangling-home"
+mkdir -p "${DL_DANG_HOME}" || fail "fixture: mkdir dangling-symlink home"
+ln -s "${DL_DANG_HOME}/missing-dotfiles" "${DL_DANG_HOME}/.claude" || fail "fixture: ln -s dangling ~/.claude"
+echo "case: dangling ~/.claude symlink: Write is blocked by the existing unresolvable-symlink message (#1074 edge)"
+run_guard_with_home "${OOR_REPO}" "${DL_DANG_HOME}" "$(dl_write_json "${DL_DANG_HOME}/.claude/settings.json")"
+assert_exit "dangling .claude: Write blocked (#1074 edge)" 2
+assert_stderr_has "dangling .claude: Write uses the unresolvable-symlink message (#1074 edge)" "does not resolve"
+assert_stderr_lacks "dangling .claude: Write is not mislabeled self-protection (#1074 edge)" "session-security-sensitive"
+echo "case: dangling ~/.claude symlink: Bash redirect is blocked by the existing unresolvable-symlink message (#1074 edge)"
+run_guard_with_home "${OOR_REPO}" "${DL_DANG_HOME}" "$(dl_bash_json 'echo x > $HOME/.claude/settings.json')"
+assert_exit "dangling .claude: Bash redirect blocked (#1074 edge)" 2
+assert_stderr_has "dangling .claude: Bash uses the unresolvable-symlink message (#1074 edge)" "unresolvable symlink"
+assert_stderr_lacks "dangling .claude: Bash is not mislabeled self-protection (#1074 edge)" "session-security-sensitive"
+
+# A config directory symlinked to `/`. The guard skips an anchor whose
+# canonical form is "/" as defence in depth: a "/" anchor would only produce the
+# degenerate pattern `//*`, which no canonical path matches, so deleting that
+# skip is not observable from here. This block pins the behaviour that matters
+# -- "no over-block": an ordinary out-of-repo write elsewhere stays allowed,
+# while a lexical-shape write is still blocked.
+DL_ROOTLINK_HOME="${TEST_ROOT}/rootlink-home"
+DL_ROOTLINK_OTHER="${TEST_ROOT}/rootlink-other"
+mkdir -p "${DL_ROOTLINK_HOME}" "${DL_ROOTLINK_OTHER}" || fail "fixture: mkdir ~/.codex -> / homes"
+ln -s / "${DL_ROOTLINK_HOME}/.codex" || fail "fixture: ln -s / ~/.codex"
+echo "case: ~/.codex -> / : an ordinary out-of-repo Write elsewhere is NOT denylisted (#1074 Q&A 4)"
+run_guard_with_home "${OOR_REPO}" "${DL_ROOTLINK_HOME}" "$(dl_write_json "${DL_ROOTLINK_OTHER}/notes.md")"
+assert_exit "~/.codex -> /: ordinary out-of-repo Write allowed (#1074 Q&A 4)" 0
+assert_stderr_lacks "~/.codex -> /: ordinary Write not mislabeled self-protection (#1074 Q&A 4)" "session-security-sensitive"
+
+echo "case: ~/.codex -> / : an ordinary out-of-repo Bash redirect elsewhere is NOT denylisted (#1074 Q&A 4)"
+run_guard_with_home "${OOR_REPO}" "${DL_ROOTLINK_HOME}" "$(dl_bash_json "echo x > ${DL_ROOTLINK_OTHER}/notes.md")"
+assert_exit "~/.codex -> /: ordinary out-of-repo Bash redirect allowed (#1074 Q&A 4)" 0
+assert_stderr_lacks "~/.codex -> /: ordinary Bash redirect not mislabeled self-protection (#1074 Q&A 4)" "session-security-sensitive"
+
+echo "case: ~/.codex -> / : the lexical Write to <home>/.gitconfig is still blocked (#1074 Q&A 4)"
+run_guard_with_home "${OOR_REPO}" "${DL_ROOTLINK_HOME}" "$(dl_write_json "${DL_ROOTLINK_HOME}/.gitconfig")"
+assert_sensitive_block "~/.codex -> /: lexical Write .gitconfig (#1074 Q&A 4)"
+
+echo "case: ~/.codex -> / : the lexical Bash redirect to \$HOME/.gitconfig is still blocked (#1074 Q&A 4)"
+run_guard_with_home "${OOR_REPO}" "${DL_ROOTLINK_HOME}" "$(dl_bash_json 'echo x > $HOME/.gitconfig')"
+assert_sensitive_block "~/.codex -> /: lexical Bash redirect .gitconfig (#1074 Q&A 4)"
+
+# Accepted fail-closed false positive: the prefix match on .claude/settings
+# also catches settings.json.tmp in a zero-parse (eval) command.
+echo "case: zero-parse eval naming ~/.claude/settings.json.tmp is blocked (#1074 pinned false positive)"
+run_guard_with_home "${OOR_REPO}" "${OOR_HOME}" "$(dl_bash_json 'eval "echo x > ~/.claude/settings.json.tmp"')"
+assert_sensitive_block "zero-parse eval ~/.claude/settings.json.tmp (#1074 pinned false positive)"
+
+# The plain configure mv is allowed (pinned above); the same mv with an
+# fd-dup lands in the suspicious backstop and is blocked on purpose.
+echo "case: 'mv ~/.claude/settings.json.tmp ~/.claude/settings.json 2>&1' is blocked (#1074 pinned fail-closed)"
+run_guard_with_home "${OOR_REPO}" "${OOR_HOME}" "$(dl_bash_json "${DL_CONF_MV} 2>&1")"
+assert_sensitive_block "mv with 2>&1 blocked (#1074 pinned fail-closed)"
+
+# Over-block, pinned: ANY non-inert zero-parse command that names a home-anchored
+# denylisted path is blocked even when it only reads. `ssh` inside `~/.ssh/`
+# counts as a re-parse verb, so this read-only command is not provably inert.
+echo "case: read-only 'ssh-add -l -F ~/.ssh/config 2>&1' is blocked (#1074 pinned fail-closed)"
+run_guard_with_home "${OOR_REPO}" "${OOR_HOME}" "$(dl_bash_json 'ssh-add -l -F ~/.ssh/config 2>&1')"
+assert_sensitive_block "read-only ssh-add naming ~/.ssh/config with 2>&1 blocked (#1074 pinned fail-closed)"
+assert_stderr_has "read-only ssh-add: blocked by the home scan (#1074 pinned fail-closed)" "anchored at home"
+
+# A provably inert read that mentions ~/.bashrc skips the backstop entirely.
+echo "case: 'grep -n PATH ~/.bashrc 2>&1' (provably inert) is still allowed (#1074 edge)"
+run_guard_with_home "${OOR_REPO}" "${OOR_HOME}" "$(dl_bash_json 'grep -n PATH ~/.bashrc 2>&1')"
+assert_exit "inert grep of ~/.bashrc with 2>&1 allowed (#1074 edge)" 0
+
+# The unconditional #810 delimited-tee block runs first, with its own message.
+echo "case: '{tee,cat} ~/.bashrc' keeps the existing tee message (#1074 edge)"
+run_guard_with_home "${OOR_REPO}" "${OOR_HOME}" "$(dl_bash_json '{tee,cat} ~/.bashrc')"
+assert_exit "brace tee ~/.bashrc blocked (#1074 edge)" 2
+assert_stderr_has "brace tee ~/.bashrc: existing tee message (#1074 edge)" "tee invocation"
+assert_stderr_lacks "brace tee ~/.bashrc: not the new self-protection wording (#1074 edge)" "session-security-sensitive"
+
 # ── #1084: the zero-parse backstop must not block PROVABLY INERT commands ──
 # The backstop's suspicion test (bwt_zero_parse_suspicious) is a quoting-blind
 # `*'>'*` substring match, so a read-only command whose only `>` characters
