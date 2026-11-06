@@ -3374,7 +3374,26 @@ Records are also written inside a sandbox. `cenci doctor` runs this reporter and
 shows `healthy` and `recovered` as ok, `current-failure` and `no-evidence` as a
 warning (an untrusted store gets its own warning naming that cause); hook health never
 fails `cenci doctor`. With no binary at all, doctor reports an untrusted store, else
-reads both the `missing-binary` and the `bootstrap-failure` records directly.
+reads both the `missing-binary` and the `bootstrap-failure` records directly. A
+`reporter unavailable` warning names the binary it ran and its `cenci version`
+(`version unknown` when that fails); standalone `cenci doctor` resolves `cenci` from
+`PATH` first and ends it with `run: cenci update`.
+
+The installer's own preflight does not check hook health, because it runs before the
+plugin cache binary exists; it prints one line saying hook health is checked after
+setup. After the "Setting up cenci" step of an install or update run it checks the
+binary that step just provisioned, so a stale `cenci` earlier on `PATH` cannot
+produce a misleading result, and it never suggests `cenci update`; a provisioned
+binary that predates the reporter gets a warning saying so. A second warning,
+`cenci on PATH is <path> (<version>) but the active plugin binary is <path>
+(<version>)`, names a `cenci` earlier on `PATH` that is older than the plugin binary or whose
+version cannot be read (`cenci doctor` runs the same check when both exist). Its fix depends on the location: inside a sandbox, a stale
+`/usr/local/bin/cenci` is the host binary mounted when the container was created, so
+update cenci on the host, run `cenci sandbox stop <name>` there and relaunch; for a
+symlink it gives an `ln -sf` command (with `sudo` for `/usr/local/bin/cenci`); for a
+regular file it says to remove it or replace it with a link to `~/.local/bin/cenci`.
+The installer never removes or overwrites that file, and none of these warnings fail
+the install or `cenci doctor`.
 
 ### Human status overview (`cenci status`)
 
