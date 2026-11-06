@@ -64,7 +64,11 @@
 #     risk without justifying the added maintenance cost. Where normal
 #     client permission rules are active they may add defense in depth,
 #     but they are never the sandbox boundary -- the container itself is.
-#     (#808)
+#     (#808) Modelling `mv` targets would break /cenci:configure's
+#     settings.json bootstrap (`mv ~/.claude/settings.json.tmp
+#     ~/.claude/settings.json`, skills/configure/phases/guidance-settings.md)
+#     unless that flow migrates in the same change; the exact commands are
+#     pinned by guard-main-worktree.test.sh (#1074).
 #   - Out-of-repo-root targets are allowed by guard-main-worktree.sh's Bash
 #     arm outright (Q1a, deliberate — see that script's header).
 #   - A command that evades even bwt_has_write_candidate (e.g. an
