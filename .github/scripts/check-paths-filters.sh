@@ -31,6 +31,10 @@
 # (predicate-quantifier: 'every' on a pure OR list, which silently makes a
 # gate permanently false) -- no false-positive-free formulation exists,
 # since it would also flag legitimate overlapping-positive-pattern filters.
+# The semantics self-test covers that inverse footgun instead, not this
+# guard: paths-filter-semantics.sh runs the real pinned action against the
+# cases in paths-filter-cases.yml, which require a positive and a negative
+# case per filter key (#956).
 #
 # Re-parses the nested filters: value with yq (all string scalars, keys and
 # leaves, checked for a leading '!') rather than line-regexing it, so it

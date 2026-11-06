@@ -64,10 +64,118 @@ jobs:
         run: bash .github/scripts/check-paths-filters.sh
       - name: Run paths-filter guard unit tests
         run: bash .github/scripts/check-paths-filters.test.sh
+      - name: Run paths-filter semantics generator unit tests
+        run: bash .github/scripts/paths-filter-semantics.test.sh
       - name: Lint GitHub Actions workflows
         uses: docker://rhysd/actionlint:1.7.7
         with:
           args: -color
+
+  # Semantics self-test (#956): runs the real pinned dorny/paths-filter action
+  # against synthetic changesets and compares every filter output key with
+  # .github/scripts/paths-filter-cases.yml. The generator builds one matrix
+  # entry per case; the aggregator is the single check name to require.
+  paths-filter-semantics-generate:
+    name: paths-filter-semantics-generate
+    needs: changes
+    if: ${{ needs.changes.outputs.workflows == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      matrix: ${{ steps.generate.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Generate the paths-filter semantics matrix
+        id: generate
+        run: |
+          matrix=$(bash .github/scripts/paths-filter-semantics.sh generate)
+          echo "matrix=${matrix}" >> "${GITHUB_OUTPUT}"
+
+  paths-filter-semantics-run:
+    name: paths-filter-case (${{ matrix.case }})
+    needs: [changes, paths-filter-semantics-generate]
+    if: ${{ needs.changes.outputs.workflows == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.paths-filter-semantics-generate.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build the scratch repository for this case
+        id: setup
+        env:
+          CASE_JSON: ${{ toJSON(matrix) }}
+        run: bash .github/scripts/paths-filter-semantics.sh setup
+      # The step under test: the same pinned ref as every other workflow
+      # (paths-filter-semantics.sh generate fails on drift). `token: ''` makes
+      # `base` override the pull request base, and `ref` is the scratch head
+      # commit because `ref` defaults to github.ref, which the scratch repo lacks.
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        id: semantics
+        with:
+          working-directory: ${{ steps.setup.outputs.working_directory }}
+          token: ''
+          base: ${{ steps.setup.outputs.base_sha }}
+          ref: ${{ steps.setup.outputs.head_sha }}
+          filters: ${{ steps.setup.outputs.filters_file }}
+          predicate-quantifier: ${{ matrix.quantifier }}
+      - name: Assert the action outputs match the case
+        env:
+          CASE_JSON: ${{ toJSON(matrix) }}
+          ACTUAL_JSON: ${{ toJSON(steps.semantics.outputs) }}
+        run: bash .github/scripts/paths-filter-semantics.sh assert
+
+  paths-filter-semantics:
+    name: paths-filter-semantics
+    needs: [changes, paths-filter-semantics-generate, paths-filter-semantics-run]
+    # Always runs: a SKIPPED required check counts as passing, and a failed or
+    # cancelled `changes` job leaves its `workflows` output empty, so gating
+    # this job on that output would let a broken `changes` job pass the check.
+    # The script below decides instead: `changes` must be `success`, and its
+    # `workflows` output must be exactly `true` (the generator and matrix must
+    # then both succeed) or exactly `false` (nothing to test, pass). Any other
+    # value, including an empty one, fails closed.
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Require the generator and every matrix case to succeed
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          WORKFLOWS: ${{ needs.changes.outputs.workflows }}
+          GENERATE_RESULT: ${{ needs.paths-filter-semantics-generate.result }}
+          RUN_RESULT: ${{ needs.paths-filter-semantics-run.result }}
+        run: |
+          if [ "${CHANGES_RESULT}" != "success" ]; then
+            echo "changes result: ${CHANGES_RESULT}" >&2
+            exit 1
+          fi
+          if [ "${WORKFLOWS}" = "false" ]; then
+            echo "workflows output is 'false': nothing to test"
+            exit 0
+          fi
+          if [ "${WORKFLOWS}" != "true" ]; then
+            echo "workflows output is '${WORKFLOWS}', expected true or false" >&2
+            exit 1
+          fi
+          failed=0
+          if [ "${GENERATE_RESULT}" != "success" ]; then
+            echo "paths-filter-semantics-generate result: ${GENERATE_RESULT}" >&2
+            failed=1
+          fi
+          if [ "${RUN_RESULT}" != "success" ]; then
+            echo "paths-filter-semantics-run result: ${RUN_RESULT}" >&2
+            failed=1
+          fi
+          exit "${failed}"
 
   check-codeowners:
     runs-on: ubuntu-latest
