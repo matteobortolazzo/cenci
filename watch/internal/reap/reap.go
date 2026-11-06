@@ -8,9 +8,19 @@ package reap
 
 import (
 	"log"
-	"os"
 	"os/exec"
 	"sync/atomic"
+
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/selfexe"
+)
+
+// resolveSelfExe and runReapCmd are the default run's injectable seams
+// (#1372): the binary to self-exec comes from selfexe, not os.Executable,
+// which names a deleted path once a plugin refresh removes the daemon's own
+// cache directory; runReapCmd starts and waits for the command.
+var (
+	resolveSelfExe = selfexe.Resolve
+	runReapCmd     = func(cmd *exec.Cmd) error { return cmd.Run() }
 )
 
 // Reaper is the seam the daemon injects; ExecReaper is the production
@@ -24,11 +34,11 @@ type Reaper interface {
 type ExecReaper struct {
 	verbose bool
 	running atomic.Bool
-	// run is injectable for tests; defaults to re-invoking this very binary
-	// (os.Executable) as `<self> sandbox reap-orphans`. A subprocess (rather
-	// than calling launcher.ReapOrphans in-process) keeps the daemon isolated
-	// from any crash in the reap pass and preserves the single-flight
-	// semantics across the process boundary.
+	// run is injectable for tests; defaults to re-invoking the installed cenci
+	// binary (resolved through selfexe) as `<self> sandbox reap-orphans`. A
+	// subprocess (rather than calling launcher.ReapOrphans in-process) keeps
+	// the daemon isolated from any crash in the reap pass and preserves the
+	// single-flight semantics across the process boundary.
 	run func() error
 }
 
@@ -39,11 +49,11 @@ func NewExecReaper(verbose bool) *ExecReaper {
 	return &ExecReaper{
 		verbose: verbose,
 		run: func() error {
-			self, err := os.Executable()
+			self, err := resolveSelfExe()
 			if err != nil {
 				return err
 			}
-			return exec.Command(self, "sandbox", "reap-orphans").Run()
+			return runReapCmd(exec.Command(self, "sandbox", "reap-orphans"))
 		},
 	}
 }

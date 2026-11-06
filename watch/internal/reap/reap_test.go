@@ -180,6 +180,81 @@ func TestNewExecReaper_WiresVerboseAndDefaultRun(t *testing.T) {
 	}
 }
 
+// installReapSeams swaps the package's resolveSelfExe and runReapCmd seams for
+// the duration of the test (#1372), so the default run is exercised without
+// resolving a real binary or starting a real process.
+func installReapSeams(t *testing.T, resolve func() (string, error), run func(*exec.Cmd) error) {
+	t.Helper()
+	origResolve, origRun := resolveSelfExe, runReapCmd
+	resolveSelfExe, runReapCmd = resolve, run
+	t.Cleanup(func() { resolveSelfExe, runReapCmd = origResolve, origRun })
+}
+
+// TestNewExecReaper_DefaultRunUsesResolvedBinary asserts the default run
+// builds `<resolved> sandbox reap-orphans` from the selfexe result rather than
+// from os.Executable (#1372: that path is gone after a plugin refresh).
+func TestNewExecReaper_DefaultRunUsesResolvedBinary(t *testing.T) {
+	const resolved = "/opt/cenci-test/bin/cenci"
+	var captured *exec.Cmd
+	installReapSeams(t,
+		func() (string, error) { return resolved, nil },
+		func(cmd *exec.Cmd) error {
+			captured = cmd
+			return nil
+		},
+	)
+
+	if err := NewExecReaper(false).run(); err != nil {
+		t.Fatalf("run() error = %v, want nil", err)
+	}
+
+	if captured == nil {
+		t.Fatal("run() never handed a command to runReapCmd")
+	}
+	if captured.Path != resolved {
+		t.Errorf("cmd.Path = %q, want the resolved binary %q", captured.Path, resolved)
+	}
+	wantArgs := []string{"sandbox", "reap-orphans"}
+	if len(captured.Args) != 1+len(wantArgs) || captured.Args[1] != wantArgs[0] || captured.Args[2] != wantArgs[1] {
+		t.Errorf("cmd.Args = %v, want argv [%s %s %s]", captured.Args, resolved, wantArgs[0], wantArgs[1])
+	}
+}
+
+// TestNewExecReaper_DefaultRunPropagatesCommandFailure asserts a failing
+// reap-orphans child is reported to Reap(), which logs it under verbose.
+func TestNewExecReaper_DefaultRunPropagatesCommandFailure(t *testing.T) {
+	runErr := errors.New("exit status 1")
+	installReapSeams(t,
+		func() (string, error) { return "/opt/cenci-test/bin/cenci", nil },
+		func(*exec.Cmd) error { return runErr },
+	)
+
+	if err := NewExecReaper(false).run(); !errors.Is(err, runErr) {
+		t.Errorf("run() error = %v, want %v", err, runErr)
+	}
+}
+
+// TestNewExecReaper_DefaultRunStopsOnResolverError asserts that an
+// unresolvable binary is returned as the run error and no command is started.
+func TestNewExecReaper_DefaultRunStopsOnResolverError(t *testing.T) {
+	resolveErr := errors.New("no usable cenci binary")
+	var started atomic.Int32
+	installReapSeams(t,
+		func() (string, error) { return "", resolveErr },
+		func(*exec.Cmd) error {
+			started.Add(1)
+			return nil
+		},
+	)
+
+	if err := NewExecReaper(false).run(); !errors.Is(err, resolveErr) {
+		t.Errorf("run() error = %v, want %v", err, resolveErr)
+	}
+	if got := started.Load(); got != 0 {
+		t.Errorf("runReapCmd calls = %d, want 0 when the binary cannot be resolved", got)
+	}
+}
+
 // TestExecReaper_ImplementsReaper is a compile-time-ish assertion that
 // *ExecReaper satisfies the Reaper seam the daemon injects.
 func TestExecReaper_ImplementsReaper(t *testing.T) {
