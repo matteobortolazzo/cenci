@@ -408,11 +408,11 @@ EOF
 }
 
 # make_opencode <bin> [version] — mocks the `opencode` executable that
-# HAS_OPENCODE / doctor_opencode_support (#491, not yet implemented) resolve
-# via `have opencode` + `opencode --version`. Unlike make_claude/make_codex,
-# OpenCode plugin/skill registration never goes through the `opencode` binary
-# itself (no marketplace CLI) — it's done by install-skills.sh symlinking and
-# seed_opencode_config merging opencode.json directly — so this mock only
+# HAS_OPENCODE / doctor_opencode_support resolve via `have opencode` +
+# `opencode --version`. Unlike make_claude/make_codex, OpenCode skill
+# registration never goes through the `opencode` binary itself (no marketplace
+# CLI) — a legacy installer symlinked skills via install-skills.sh and merged
+# opencode.json directly, and host setup is now paused — so this mock only
 # needs to report a version and log invocations, following the same
 # CALLS_FILE-logging convention as the other client mocks.
 make_opencode() {
@@ -462,21 +462,21 @@ prepare_git_tagged_checkout() {
 
 # prepare_opencode_checkout_assets <home> <client> — stages the real,
 # already-shipped OpenCode assets (flow/opencode/install-skills.sh,
-# flow/skills/*, watch/plugin/opencode, sandbox/lib/opencode-config.sh) into
-# the marketplace checkout at the exact relative paths find_plugin_path
-# resolves first (marketplace-checkout-first, no cache-fallback stripping
-# needed), so a real step_opencode_setup (#491, not yet implemented) has
-# something genuine to symlink/merge — mirroring how prepare_checkout stages
-# the real cenci wrapper + install.sh rather than a fake stand-in.
+# flow/skills/*, watch/plugin/opencode) into the marketplace checkout at the
+# exact relative paths find_plugin_path resolves first (marketplace-checkout-
+# first, no cache-fallback stripping needed), so the paused host
+# step_opencode_setup has something genuine to leave untouched — mirroring how
+# prepare_checkout stages the real cenci wrapper + install.sh rather than a
+# fake stand-in. The container-only sandbox/lib/opencode-config.sh is
+# deliberately not staged: the host installer never resolves it.
 prepare_opencode_checkout_assets() {
     local home="$1" client="$2" checkout
     checkout="${home}/.${client}/plugins/marketplaces/cenci"
-    mkdir -p "${checkout}/flow/opencode" "${checkout}/watch/plugin" "${checkout}/sandbox/lib"
+    mkdir -p "${checkout}/flow/opencode" "${checkout}/watch/plugin"
     cp "${ROOT}/flow/opencode/install-skills.sh" "${checkout}/flow/opencode/install-skills.sh"
     chmod +x "${checkout}/flow/opencode/install-skills.sh"
     cp -r "${ROOT}/flow/skills" "${checkout}/flow/skills"
     cp -r "${ROOT}/watch/plugin/opencode" "${checkout}/watch/plugin/opencode"
-    cp "${ROOT}/sandbox/lib/opencode-config.sh" "${checkout}/sandbox/lib/opencode-config.sh"
 }
 
 # prepare_opencode_cache_fallback_assets <home> <client> — like
@@ -491,11 +491,10 @@ prepare_opencode_checkout_assets() {
 prepare_opencode_cache_fallback_assets() {
     local home="$1" client="$2" checkout cache_root
     checkout="${home}/.${client}/plugins/marketplaces/cenci"
-    mkdir -p "${checkout}/flow/opencode" "${checkout}/sandbox/lib"
+    mkdir -p "${checkout}/flow/opencode"
     cp "${ROOT}/flow/opencode/install-skills.sh" "${checkout}/flow/opencode/install-skills.sh"
     chmod +x "${checkout}/flow/opencode/install-skills.sh"
     cp -r "${ROOT}/flow/skills" "${checkout}/flow/skills"
-    cp "${ROOT}/sandbox/lib/opencode-config.sh" "${checkout}/sandbox/lib/opencode-config.sh"
     if [[ "${client}" == claude ]]; then
         cache_root="${home}/.claude/plugins/cache/cenci/cenci-watch/1.0.0"
     else
@@ -1382,6 +1381,168 @@ run_opencode_doctor_case() {
     DOCTOR_EXIT=$?
     set -e
     DOCTOR_OUTPUT="${output}"
+}
+
+# opencode_doctor_with_fixture <name> <json> [NAME=value env assignments...] —
+# for a case prepared by run_case_opencode: writes <json> as the host
+# ~/.config/opencode/opencode.json, runs doctor (invoke_doctor), and proves
+# doctor never modified the file (cmp against a copy taken beforehand).
+opencode_doctor_with_fixture() {
+    local name="$1" json="$2"
+    shift 2
+    local config="${CASE_HOME}/.config/opencode/opencode.json"
+    mkdir -p "${CASE_HOME}/.config/opencode"
+    printf '%s\n' "${json}" >"${config}"
+    cp "${config}" "${WORK}/${name}/fixture-original"
+    invoke_doctor "${name}" "$@"
+    cmp "${WORK}/${name}/fixture-original" "${config}"
+}
+
+# assert_allow_all_line <output-file> <config-path> — <output-file> holds
+# exactly one allow-all finding, it is a `warn` line (install.sh's warn prints
+# `  ! ` when colors are off, as under env -i without a tty), and that ONE line
+# carries the finding text, the config path, the remediation framing and the
+# manual jq command.
+assert_allow_all_line() {
+    local file="$1" config="$2" count line needle rc=0
+    count="$(grep -cF -- "grants global allow-all permissions" "${file}")" || rc=$?
+    if [ "${rc}" -gt 1 ]; then
+        echo "FAIL: grep errored (rc ${rc}) counting allow-all lines in ${file}" >&2
+        exit 1
+    fi
+    [ "${rc}" -eq 1 ] && count=0
+    if ! [[ "${count}" =~ ^[0-9]+$ ]]; then
+        echo "FAIL: non-numeric allow-all line count '${count}' for ${file}" >&2
+        exit 1
+    fi
+    if [ "${count}" -ne 1 ]; then
+        echo "FAIL: expected exactly one allow-all line in ${file}, got ${count}" >&2
+        sed -n '1,240p' "${file}" >&2
+        exit 1
+    fi
+    line="$(grep -F -- "grants global allow-all permissions" "${file}")"
+    case "${line}" in
+    "  ! "*) ;;
+    *)
+        echo "FAIL: allow-all finding is not a warn line ('  ! ' marker): ${line}" >&2
+        exit 1
+        ;;
+    esac
+    for needle in \
+        "grants global allow-all permissions" \
+        "${config}" \
+        "older cenci versions may have added" \
+        "if you did not set these yourself" \
+        "jq 'del(.permission, .autoupdate)'" \
+        "cat \"${config}.tmp\" > \"${config}\" && rm \"${config}.tmp\""; do
+        case "${line}" in
+        *"${needle}"*) ;;
+        *)
+            echo "FAIL: allow-all line lacks '${needle}': ${line}" >&2
+            exit 1
+            ;;
+        esac
+    done
+}
+
+# assert_allow_all_warning <config-path> — the last doctor run flagged
+# <config-path> as granting global allow-all permissions, with the manual
+# remediation, all on one warn line.
+assert_allow_all_warning() {
+    local config="$1"
+    assert_contains "${DOCTOR_OUTPUT}" "grants global allow-all permissions"
+    assert_contains "${DOCTOR_OUTPUT}" "${config}"
+    assert_contains "${DOCTOR_OUTPUT}" "older cenci versions may have added"
+    assert_contains "${DOCTOR_OUTPUT}" "if you did not set these yourself"
+    assert_contains "${DOCTOR_OUTPUT}" "jq 'del(.permission, .autoupdate)'"
+    assert_allow_all_line "${DOCTOR_OUTPUT}" "${config}"
+}
+
+# assert_no_allow_all_warning — the last doctor run reached the OpenCode block
+# (so silence is not vacuous) yet printed no allow-all finding and no jq error.
+assert_no_allow_all_warning() {
+    assert_contains "${DOCTOR_OUTPUT}" "OpenCode skills"
+    assert_not_contains "${DOCTOR_OUTPUT}" "grants global allow-all permissions"
+    assert_not_contains "${DOCTOR_OUTPUT}" "older cenci versions may have added"
+    assert_not_contains "${DOCTOR_OUTPUT}" "jq: error"
+}
+
+# invoke_uninstall <name> [NAME=value env assignments...] — runs `install.sh
+# uninstall --yes` for a case prepared by run_case_opencode under `env -i`,
+# setting UNINSTALL_EXIT and UNINSTALL_OUTPUT.
+invoke_uninstall() {
+    local name="$1"
+    shift
+    local output="${WORK}/${name}/uninstall-output"
+    set +e
+    env -i HOME="${CASE_HOME}" PATH="${CASE_BIN}" CALLS_FILE="${CASE_CALLS}" \
+        CLAUDE_MARKETPLACE_FILE="${WORK}/${name}/claude-marketplace" \
+        CLAUDE_INSTALLED_FILE="${WORK}/${name}/claude-installed" \
+        "$@" \
+        bash "${ROOT}/install.sh" uninstall --yes >"${output}" 2>&1
+    UNINSTALL_EXIT=$?
+    set -e
+    UNINSTALL_OUTPUT="${output}"
+}
+
+# assert_allow_all_hint <config-path> — the last uninstall printed exactly one
+# legacy allow-all hint line naming <config-path> with the manual remediation.
+assert_allow_all_hint() {
+    local config="$1" hint_lines rc=0
+    assert_contains "${UNINSTALL_OUTPUT}" "older cenci versions may have added"
+    assert_contains "${UNINSTALL_OUTPUT}" "if you did not set these yourself"
+    assert_contains "${UNINSTALL_OUTPUT}" "${config}"
+    assert_contains "${UNINSTALL_OUTPUT}" "jq 'del(.permission, .autoupdate)'"
+    assert_allow_all_line "${UNINSTALL_OUTPUT}" "${config}"
+    hint_lines="$(grep -cF -- "older cenci versions may have added" "${UNINSTALL_OUTPUT}")" || rc=$?
+    if [ "${rc}" -gt 1 ]; then
+        echo "FAIL: grep errored (rc ${rc}) counting hint lines in ${UNINSTALL_OUTPUT}" >&2
+        exit 1
+    fi
+    [ "${rc}" -eq 1 ] && hint_lines=0
+    if ! [[ "${hint_lines}" =~ ^[0-9]+$ ]]; then
+        echo "FAIL: non-numeric hint line count '${hint_lines}' in ${UNINSTALL_OUTPUT}" >&2
+        exit 1
+    fi
+    if [ "${hint_lines}" -ne 1 ]; then
+        echo "FAIL: expected exactly one allow-all hint line in ${UNINSTALL_OUTPUT}, got ${hint_lines}" >&2
+        sed -n '1,240p' "${UNINSTALL_OUTPUT}" >&2
+        exit 1
+    fi
+}
+
+# references_container_seeder <file> — true when a CODE line of <file> mentions
+# the container-only seeding helper (seed_opencode_config or the basename
+# opencode-config.sh, which also catches relative sources such as
+# "${SCRIPT_DIR}/lib/opencode-config.sh"). Full-line `#` comments are skipped so the
+# pause-stub comment may name the helper it forbids; a trailing comment after
+# code still counts. grep rc 1 means "no match"; rc >= 2 is an error and fails
+# the suite instead of reading as "clean" (flow/docs/shell-scripting-gotchas.md).
+references_container_seeder() {
+    local file="$1" hits="" code="" rc=0
+    hits="$(grep -nF -e seed_opencode_config -e opencode-config.sh -- "${file}")" || rc=$?
+    if [ "${rc}" -gt 1 ]; then
+        echo "FAIL: grep errored (rc ${rc}) scanning ${file}" >&2
+        exit 1
+    fi
+    [ "${rc}" -eq 0 ] || return 1
+    rc=0
+    code="$(printf '%s\n' "${hits}" | grep -vE '^[0-9]+:[[:space:]]*#')" || rc=$?
+    if [ "${rc}" -gt 1 ]; then
+        echo "FAIL: grep errored (rc ${rc}) filtering comment lines of ${file}" >&2
+        exit 1
+    fi
+    [ -n "${code}" ]
+}
+
+# assert_detects_seeder_reference <file> — the contract detector must flag
+# <file> (an injected copy of install.sh); a silent miss would make the
+# contract case vacuous.
+assert_detects_seeder_reference() {
+    if ! references_container_seeder "$1"; then
+        echo "FAIL: references_container_seeder did not flag the injected reference in $1" >&2
+        exit 1
+    fi
 }
 
 assert_contains() {
@@ -2420,21 +2581,101 @@ echo "user content" >"${CASE_HOME}/.config/opencode/skills/my-own-skill"
 jq '. + {"theme": "dark"}' "${CASE_HOME}/.config/opencode/opencode.json" >"${CASE_HOME}/.config/opencode/opencode.json.tmp"
 mv "${CASE_HOME}/.config/opencode/opencode.json.tmp" "${CASE_HOME}/.config/opencode/opencode.json"
 
-uninstall_output="${WORK}/${name}/uninstall-output"
-set +e
-env -i HOME="${CASE_HOME}" PATH="${CASE_BIN}" CALLS_FILE="${CASE_CALLS}" \
-    CLAUDE_MARKETPLACE_FILE="${WORK}/${name}/claude-marketplace" \
-    CLAUDE_INSTALLED_FILE="${WORK}/${name}/claude-installed" \
-    bash "${ROOT}/install.sh" uninstall --yes >"${uninstall_output}" 2>&1
-opencode_uninstall_exit=$?
-set -e
-[[ "${opencode_uninstall_exit}" -eq 0 ]]
+invoke_uninstall "${name}"
+[[ "${UNINSTALL_EXIT}" -eq 0 ]]
 [[ ! -e "${CASE_HOME}/.config/opencode/skills/testing" ]]
 [[ -f "${CASE_HOME}/.config/opencode/skills/my-own-skill" ]]
 assert_contains "${CASE_HOME}/.config/opencode/opencode.json" "theme"
 assert_contains "${CASE_HOME}/.config/opencode/opencode.json" "permission"
 assert_contains "${CASE_HOME}/.config/opencode/opencode.json" "autoupdate"
 assert_not_contains "${CASE_HOME}/.config/opencode/opencode.json" "watch/plugin/opencode"
+# The legacy allow-all block survives (never auto-removed) but is flagged once.
+jq -e '.permission == {"*":"allow"} and .autoupdate == false' "${CASE_HOME}/.config/opencode/opencode.json" >/dev/null
+assert_allow_all_hint "${CASE_HOME}/.config/opencode/opencode.json"
+
+# run_opencode_uninstall_case <name> <json> [NAME=value env...] — after a fresh
+# install, seeds a legacy host opencode.json (the cenci-watch plugin spec is
+# spliced into <json> at the __PLUGIN__ placeholder) at the path OpenCode
+# resolves (XDG_CONFIG_HOME when passed), then uninstalls. Sets
+# OPENCODE_CASE_CONFIG to that path plus UNINSTALL_EXIT/UNINSTALL_OUTPUT.
+run_opencode_uninstall_case() {
+    local name="$1" json="$2" config_dir
+    shift 2
+    run_case_opencode "${name}" claude 1.18.3
+    [[ "${CASE_EXIT}" -eq 0 ]]
+    config_dir="${CASE_HOME}/.config/opencode"
+    local arg
+    for arg in "$@"; do
+        case "${arg}" in
+        XDG_CONFIG_HOME=*) config_dir="${arg#XDG_CONFIG_HOME=}/opencode" ;;
+        esac
+    done
+    OPENCODE_CASE_CONFIG="${config_dir}/opencode.json"
+    mkdir -p "${config_dir}"
+    printf '%s\n' "${json//__PLUGIN__/file://${CASE_HOME}/.claude/plugins/marketplaces/cenci/watch/plugin/opencode}" >"${OPENCODE_CASE_CONFIG}"
+    invoke_uninstall "${name}" "$@"
+}
+
+echo "case: uninstall removes the plugin entry from a config holding only the plugin plus shorthand allow-all, then flags it without touching permission"
+name=opencode-uninstall-shorthand
+run_opencode_uninstall_case "${name}" '{"plugin":["__PLUGIN__"],"permission":"allow"}'
+[[ "${UNINSTALL_EXIT}" -eq 0 ]]
+assert_contains "${UNINSTALL_OUTPUT}" "removed cenci's OpenCode plugin registration"
+jq -e '(.plugin | length) == 0 and .permission == "allow"' "${OPENCODE_CASE_CONFIG}" >/dev/null
+assert_allow_all_hint "${OPENCODE_CASE_CONFIG}"
+
+echo "case: uninstall prints no allow-all hint for a non-global permission"
+name=opencode-uninstall-nonglobal
+run_opencode_uninstall_case "${name}" '{"plugin":["__PLUGIN__"],"permission":{"*":"ask","bash":"allow"}}'
+[[ "${UNINSTALL_EXIT}" -eq 0 ]]
+assert_contains "${UNINSTALL_OUTPUT}" "removed cenci's OpenCode plugin registration"
+assert_not_contains "${UNINSTALL_OUTPUT}" "older cenci versions may have added"
+assert_not_contains "${UNINSTALL_OUTPUT}" "jq 'del(.permission, .autoupdate)'"
+
+echo "case: uninstall prints no allow-all hint when permission is absent"
+name=opencode-uninstall-no-permission
+run_opencode_uninstall_case "${name}" '{"plugin":["__PLUGIN__"],"theme":"dark"}'
+[[ "${UNINSTALL_EXIT}" -eq 0 ]]
+assert_contains "${UNINSTALL_OUTPUT}" "removed cenci's OpenCode plugin registration"
+assert_not_contains "${UNINSTALL_OUTPUT}" "older cenci versions may have added"
+
+echo "case: uninstall without jq prints only the existing manual-removal warning, no allow-all hint, and leaves the file byte-identical"
+name=opencode-uninstall-no-jq
+run_case_opencode "${name}" claude 1.18.3
+[[ "${CASE_EXIT}" -eq 0 ]]
+rm "${CASE_BIN}/jq"
+mkdir -p "${CASE_HOME}/.config/opencode"
+printf '{"plugin":["file://%s/.claude/plugins/marketplaces/cenci/watch/plugin/opencode"],"permission":"allow"}\n' "${CASE_HOME}" >"${CASE_HOME}/.config/opencode/opencode.json"
+cp "${CASE_HOME}/.config/opencode/opencode.json" "${WORK}/${name}/fixture-original"
+invoke_uninstall "${name}"
+[[ "${UNINSTALL_EXIT}" -eq 0 ]]
+assert_contains "${UNINSTALL_OUTPUT}" "jq not found — remove the cenci plugin entry"
+assert_not_contains "${UNINSTALL_OUTPUT}" "older cenci versions may have added"
+cmp "${WORK}/${name}/fixture-original" "${CASE_HOME}/.config/opencode/opencode.json"
+
+echo "case: uninstall still prints the allow-all hint when OpenCode is not detected (cleanup is not gated on HAS_OPENCODE)"
+name=opencode-uninstall-undetected
+run_case_opencode "${name}" claude absent
+[[ "${CASE_EXIT}" -eq 0 ]]
+undetected_config="${CASE_HOME}/.config/opencode/opencode.json"
+mkdir -p "${CASE_HOME}/.config/opencode"
+printf '{"plugin":["file://%s/.claude/plugins/marketplaces/cenci/watch/plugin/opencode"],"permission":{"*":"allow"}}\n' "${CASE_HOME}" >"${undetected_config}"
+invoke_uninstall "${name}"
+[[ "${UNINSTALL_EXIT}" -eq 0 ]]
+assert_contains "${UNINSTALL_OUTPUT}" "removed cenci's OpenCode plugin registration"
+jq -e '(.plugin | length) == 0 and .permission == {"*":"allow"}' "${undetected_config}" >/dev/null
+assert_allow_all_hint "${undetected_config}"
+
+echo "case: with XDG_CONFIG_HOME set, uninstall cleans and flags \$XDG_CONFIG_HOME/opencode/opencode.json, not ~/.config"
+name=opencode-uninstall-xdg
+xdg_dir="${WORK}/${name}/xdg"
+run_opencode_uninstall_case "${name}" '{"plugin":["__PLUGIN__"],"permission":{"*":"allow"}}' "XDG_CONFIG_HOME=${xdg_dir}"
+[[ "${UNINSTALL_EXIT}" -eq 0 ]]
+[[ "${OPENCODE_CASE_CONFIG}" == "${xdg_dir}/opencode/opencode.json" ]]
+assert_contains "${UNINSTALL_OUTPUT}" "removed cenci's OpenCode plugin registration"
+assert_not_contains "${OPENCODE_CASE_CONFIG}" "watch/plugin/opencode"
+assert_allow_all_hint "${xdg_dir}/opencode/opencode.json"
+assert_not_contains "${UNINSTALL_OUTPUT}" "${CASE_HOME}/.config/opencode/opencode.json"
 
 echo "case: OpenCode plugin registration is recognized (install, doctor, and uninstall) even when find_plugin_path resolves watch/plugin/opencode via the plugin-cache fallback branch, not the marketplace checkout (#491 review fix — substring-matching bug)"
 name=opencode-cache-fallback
@@ -2510,6 +2751,106 @@ set -e
 assert_not_contains "${output}" "Setting up OpenCode integration"
 assert_not_contains "${output}" "OpenCode plugin registered"
 [[ ! -e "${home}/.config/opencode/opencode.json" ]]
+
+# --- Legacy host OpenCode allow-all (#1018): doctor warns, never modifies.
+
+echo "case: doctor flags a host opencode.json granting global allow-all (shorthand, object, object with exceptions) without modifying it"
+name=opencode-allow-all
+run_case_opencode "${name}" claude 1.18.3
+[[ "${CASE_EXIT}" -eq 0 ]]
+allow_all_config="${CASE_HOME}/.config/opencode/opencode.json"
+for allow_all_json in '{"permission":"allow"}' '{"permission":{"*":"allow"}}' '{"permission":{"*":"allow","bash":"ask"},"autoupdate":false}'; do
+    opencode_doctor_with_fixture "${name}" "${allow_all_json}"
+    assert_allow_all_warning "${allow_all_config}"
+done
+
+echo "case: doctor stays silent for non-global, absent, missing, invalid, non-object and per-agent permissions"
+for silent_json in \
+    '{"permission":{"*":"ask","bash":"allow"}}' \
+    '{"theme":"dark"}' \
+    '{"autoupdate":false}' \
+    'not json {' \
+    '[]' \
+    '{"permission":true}' \
+    '{"permission":[]}' \
+    '{"agent":{"x":{"permission":{"*":"allow"}}}}'; do
+    opencode_doctor_with_fixture "${name}" "${silent_json}"
+    assert_no_allow_all_warning
+done
+rm -f "${allow_all_config}"
+invoke_doctor "${name}"
+assert_no_allow_all_warning
+[[ ! -e "${allow_all_config}" ]]
+
+echo "case: an allow-all finding is a warning only, so doctor's exit status matches the same config without permission"
+opencode_doctor_with_fixture "${name}" '{"theme":"dark"}'
+benign_doctor_exit="${DOCTOR_EXIT}"
+[[ "${benign_doctor_exit}" -eq 0 ]]
+opencode_doctor_with_fixture "${name}" '{"permission":{"*":"allow"}}'
+assert_allow_all_warning "${allow_all_config}"
+[[ "${DOCTOR_EXIT}" -eq "${benign_doctor_exit}" ]]
+
+echo "case: with XDG_CONFIG_HOME set, doctor inspects \$XDG_CONFIG_HOME/opencode/opencode.json, not ~/.config"
+xdg_dir="${WORK}/${name}/xdg"
+mkdir -p "${xdg_dir}/opencode"
+printf '{"permission":{"*":"allow"}}\n' >"${xdg_dir}/opencode/opencode.json"
+rm -f "${allow_all_config}"
+invoke_doctor "${name}" "XDG_CONFIG_HOME=${xdg_dir}"
+assert_allow_all_warning "${xdg_dir}/opencode/opencode.json"
+assert_not_contains "${DOCTOR_OUTPUT}" "${allow_all_config}"
+printf '{"theme":"dark"}\n' >"${xdg_dir}/opencode/opencode.json"
+opencode_doctor_with_fixture "${name}" '{"permission":{"*":"allow"}}' "XDG_CONFIG_HOME=${xdg_dir}"
+assert_no_allow_all_warning
+
+echo "case: doctor prints no allow-all warning when OpenCode is not detected, even with an allow-all host config"
+name=opencode-allow-all-undetected
+run_case_opencode "${name}" claude absent
+[[ "${CASE_EXIT}" -eq 0 ]]
+opencode_doctor_with_fixture "${name}" '{"permission":{"*":"allow"}}'
+assert_not_contains "${DOCTOR_OUTPUT}" "OpenCode skills"
+assert_not_contains "${DOCTOR_OUTPUT}" "grants global allow-all permissions"
+
+echo "case: without jq on PATH doctor prints no allow-all line and its exit status matches a config without permission"
+name=opencode-allow-all-no-jq
+run_case_opencode "${name}" claude 1.18.3
+[[ "${CASE_EXIT}" -eq 0 ]]
+rm "${CASE_BIN}/jq"
+opencode_doctor_with_fixture "${name}" '{"theme":"dark"}'
+no_jq_benign_exit="${DOCTOR_EXIT}"
+# Without jq doctor's required "jq" check fails, so the benign baseline is a
+# known non-zero status (1) for exactly that reason, not an unrelated failure.
+assert_contains "${DOCTOR_OUTPUT}" "install jq from your package manager"
+[[ "${no_jq_benign_exit}" -eq 1 ]]
+opencode_doctor_with_fixture "${name}" '{"permission":{"*":"allow"}}'
+assert_no_allow_all_warning
+[[ "${DOCTOR_EXIT}" -eq "${no_jq_benign_exit}" ]]
+
+echo "case: contract — install.sh never calls or sources the container-only seeding helper (code lines; full-line comments are exempt)"
+if references_container_seeder "${ROOT}/install.sh"; then
+    echo "FAIL: ${ROOT}/install.sh references seed_opencode_config or sandbox/lib/opencode-config.sh on a code line" >&2
+    exit 1
+fi
+# Non-vacuity: the detector must flag injected copies, and only on code lines.
+contract_dir="${WORK}/seeder-contract"
+mkdir -p "${contract_dir}"
+cp "${ROOT}/install.sh" "${contract_dir}/injected-call.sh"
+printf '%s\n' "seed_opencode_config \"\$f\" \"\$s\"" >>"${contract_dir}/injected-call.sh"
+assert_detects_seeder_reference "${contract_dir}/injected-call.sh"
+cp "${ROOT}/install.sh" "${contract_dir}/injected-source.sh"
+printf '%s\n' "source \"\${dir}/sandbox/lib/opencode-config.sh\"" >>"${contract_dir}/injected-source.sh"
+assert_detects_seeder_reference "${contract_dir}/injected-source.sh"
+cp "${ROOT}/install.sh" "${contract_dir}/injected-relative-source.sh"
+printf '%s\n' "source \"\${SCRIPT_DIR}/lib/opencode-config.sh\"" >>"${contract_dir}/injected-relative-source.sh"
+assert_detects_seeder_reference "${contract_dir}/injected-relative-source.sh"
+cp "${ROOT}/install.sh" "${contract_dir}/injected-trailing.sh"
+printf '%s\n' 'true # seed_opencode_config' >>"${contract_dir}/injected-trailing.sh"
+assert_detects_seeder_reference "${contract_dir}/injected-trailing.sh"
+cp "${ROOT}/install.sh" "${contract_dir}/injected-comment.sh"
+printf '%s\n' '	# re-enablement must never call seed_opencode_config' >>"${contract_dir}/injected-comment.sh"
+if references_container_seeder "${contract_dir}/injected-comment.sh"; then
+    echo "FAIL: a full-line comment naming seed_opencode_config must not trip the contract" >&2
+    exit 1
+fi
 
 # --- Supply chain: install.sh defaults to an immutable release tag instead
 # of main (#590), via cenci_latest_ref() and a piped-only re-exec guard.

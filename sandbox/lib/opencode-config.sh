@@ -2,6 +2,13 @@
 # OpenCode opencode.json permission/plugin seeding for the sandbox home
 # volume.
 #
+# CONTAINER-ONLY: the seeded `permission: {"*": "allow"}` block is safe only
+# behind the container boundary. This helper must never be sourced or called
+# against a host config (~/.config/opencode/opencode.json): the host installer
+# (install.sh) never references it (enforced by a contract test in
+# sandbox/tests/installer-clients.test.sh), and the host test harness sources
+# it only against temp files.
+#
 # Sourced by entrypoint.sh (in the container, via the copy baked at
 # /usr/local/bin/lib/) and by the test harness
 # (sandbox/tests/opencode-config.test.sh) on the host, so this logic lives in
