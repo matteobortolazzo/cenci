@@ -37,7 +37,8 @@ untouched rather than clobbered.
 
 Re-run the install command above after pulling a newer `flow/` — there's no separate
 update step; `install` always converges the target directory to the current
-`PORTABLE_SKILLS` list.
+OpenCode delivery set (`PORTABLE_SKILLS` minus `OPENCODE_RETIRED_SKILLS`), and first
+removes any leftover cenci-owned link for a retired skill such as `babysit`.
 
 ## Remove
 
@@ -47,7 +48,10 @@ PLUGIN_ROOT=/path/to/flow sh opencode/install-skills.sh remove
 
 `remove` deletes only the symlinks this script would have created (matching both the
 skill name and the `$PLUGIN_ROOT/skills/<name>` target) and leaves anything else at that
-path untouched.
+path untouched. That includes a leftover cenci-owned `babysit` link from a legacy
+install: `babysit` is retired for OpenCode, but `remove` still deletes its link and
+counts it in the `removed:` summary. A `babysit` link pointing at another plugin root,
+a real directory, or a plain file is left untouched.
 
 ## OpenCode skill discovery paths
 
@@ -73,16 +77,22 @@ own resolution order.
 
 ## Portable vs. excluded skills
 
-`install-skills.sh` links exactly the 13 skills declared in its `PORTABLE_SKILLS`
-variable — the same skills marked `Yes` in the OpenCode column of the root
+`install-skills.sh` links exactly the 12 skills in its delivery set — the skills in its
+`PORTABLE_SKILLS` variable minus those in `OPENCODE_RETIRED_SKILLS` — which are the
+skills marked `Yes` in the OpenCode column of the root
 [`README.md`](../README.md#skill-portability) skill-portability table:
 
-`attachments`, `babysit`, `frontend-classification`, `pr-comment-filter`,
+`attachments`, `frontend-classification`, `pr-comment-filter`,
 `project-core`, `shell-rules`, `stack-angular`, `stack-dotnet`, `stack-go`,
 `subagent-safety`, `testing`, `verify-ui`, `worktrees`.
 
 These are portable because each one avoids depending on a Claude Code-only tool or
 approval mechanism.
+
+`babysit` is **retired for OpenCode** (#1217). It stays in `PORTABLE_SKILLS` because
+Codex runs it portable, but OpenCode cannot arm a babysit supervisor, so
+`OPENCODE_RETIRED_SKILLS="babysit"` keeps it out of the delivery set and `remove`
+cleans up a leftover cenci-owned link (see "Remove" above).
 
 Pipeline and interactive skills — `implement`, `configure`, `refine`,
 `maintain`, `address-review`, `review`, `refactor`, `sync`, `codex-runtime`,
@@ -93,9 +103,11 @@ subagents) that OpenCode does not provide, so shipping them would let OpenCode
 mistake a Claude-only pipeline command for a supported workflow.
 
 `project-core` is the exception to that grouping: it is a non-user-invocable reference
-skill, but `babysit` is directed to consult it and this delivery mechanism resolves no
-dependencies, so excluding it shipped `babysit` pointing at a skill OpenCode never
-installed (#1042).
+skill, but Codex's portable `babysit` is directed to consult it, and the `adapter-drift`
+check requires every portable skill to reference only portable skills. (It was first
+added for #1042, when OpenCode still received `babysit` and this delivery mechanism,
+which resolves no dependencies, shipped it pointing at a skill OpenCode never
+installed.)
 
 **Authoring against this list.** Adding or changing a skill means deciding its OpenCode
 status deliberately, not by omission — see
@@ -139,6 +151,9 @@ the full staging and error-handling details.
   `config.json` `opencode` agent entry is required — see
   [cenci-watch's configuration reference](../../watch/README.md)) to drive OpenCode
   from an AGENTS.md-guided run instead.
+- No `babysit` skill and no babysit arming: `babysit` is retired for OpenCode
+  (`OPENCODE_RETIRED_SKILLS`), so OpenCode cannot arm a PR supervisor; use Claude Code
+  or Codex for `cenci babysit`.
 - No usage-budget/token-headroom tracking yet — no `TokenReader` is wired for OpenCode,
   so `cenci status`/`cenci dispatch` never show it headroom (see
   [cenci-watch's budget headroom section](../../watch/README.md#budget-headroom)).

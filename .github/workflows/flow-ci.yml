@@ -44,6 +44,7 @@ jobs:
               - 'docs/autonomous-loop.md'
               - 'watch/**/*_test.go'
               - 'watch/internal/babysit/arm.go'
+              - 'watch/internal/run/template.go' # dispatch-target-invocable.test.sh reads its built-in workflow targets.
               - 'watch/internal/pipeline/statemachine.go' # implement-resume-contract.test.sh reads its Stage constants.
             maintenance:
               - 'flow/skills/**'

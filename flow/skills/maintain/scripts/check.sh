@@ -235,6 +235,23 @@ is_portable_skill() {
   [[ " ${list} " == *" ${name} "* ]]
 }
 
+# Lenient like portable_skills_list: a missing OPENCODE_RETIRED_SKILLS line
+# means nothing is retired (the dispatch contract test reads it fail-closed).
+opencode_retired_skills_list() {
+  grep '^OPENCODE_RETIRED_SKILLS=' "$FLOW_DIR/opencode/install-skills.sh" 2>/dev/null \
+    | sed -E 's/^OPENCODE_RETIRED_SKILLS="([^"]*)".*/\1/'
+}
+
+# is_opencode_delivered_skill <name> — portable and not retired for OpenCode.
+# The Codex column keeps using is_portable_skill: a skill retired for OpenCode
+# (babysit) is still portable for Codex.
+is_opencode_delivered_skill() {
+  local name="$1" retired
+  is_portable_skill "$name" || return 1
+  retired="$(opencode_retired_skills_list)"
+  [[ " ${retired} " != *" ${name} "* ]]
+}
+
 # config_is_monorepo <cfg> — prints "true"/"false"; shared by every call site
 # that needs to branch on .cenci/config.json's top-level isMonorepo flag.
 config_is_monorepo() {
@@ -570,7 +587,7 @@ generate_skills_section() {
     ui="$(fm_field "${d}SKILL.md" user-invocable)"
     if [[ "$ui" == "true" ]]; then ui="Yes"; else ui="No"; fi
     claude="Yes"
-    if is_portable_skill "$skillname"; then opencode_col="Yes"; else opencode_col="No"; fi
+    if is_opencode_delivered_skill "$skillname"; then opencode_col="Yes"; else opencode_col="No"; fi
     if is_portable_skill "$skillname" || [[ -f "${d}codex.md" ]]; then codex_col="Yes"; else codex_col="No"; fi
     # OpenCode is the leftmost Yes/No column: check_capability_table (and the
     # retired portability.test.sh's drift logic it replaces) hand-edits this
@@ -1102,10 +1119,16 @@ check_shell_syntax() {
 }
 
 check_capability_table() {
-  local readme="$FLOW_DIR/README.md" body hc_lines portable any_fail=0 checked=0
+  local readme="$FLOW_DIR/README.md" body hc_lines portable retired delivered="" any_fail=0 checked=0
   [[ -f "$readme" ]] || { add_result capability-table "(repo)" skip "flow/README.md not found" ""; return; }
-  portable="$(portable_skills_list)"
   local col_skill col_desc col_opencode col_ui col_claude col_codex col_notes _junk name ocval expect
+  portable="$(portable_skills_list)"
+  # The OpenCode delivery set: portable minus retired. The expected hand-curated
+  # row set below stays keyed on the full portable list (babysit keeps its row).
+  retired="$(opencode_retired_skills_list)"
+  for name in $portable; do
+    [[ " ${retired} " == *" ${name} "* ]] || delivered+="${name} "
+  done
 
   body="$(extract_marker_body "$readme" skills)"
   if [[ -n "$body" ]]; then
@@ -1115,11 +1138,11 @@ check_capability_table() {
       name="$(printf '%s' "$col_skill" | tr -d ' `')"
       ocval="$(printf '%s' "$col_opencode" | xargs 2>/dev/null)"
       expect="No"
-      [[ " ${portable} " == *" ${name} "* ]] && expect="Yes"
+      [[ " ${delivered} " == *" ${name} "* ]] && expect="Yes"
       if [[ "$ocval" != "$expect" ]]; then
         add_result capability-table "$name" fail \
-          "README skill inventory lists OpenCode='${ocval}' for '${name}' but install-skills.sh PORTABLE_SKILLS says '${expect}'" \
-          "regenerate flow/README.md's skill inventory (check.sh --write) or fix flow/opencode/install-skills.sh's PORTABLE_SKILLS"
+          "README skill inventory lists OpenCode='${ocval}' for '${name}' but the OpenCode delivery set (PORTABLE_SKILLS minus OPENCODE_RETIRED_SKILLS in install-skills.sh) says '${expect}'" \
+          "regenerate flow/README.md's skill inventory (check.sh --write) or fix PORTABLE_SKILLS / OPENCODE_RETIRED_SKILLS in flow/opencode/install-skills.sh"
         any_fail=1
       fi
     done <<< "$body"
@@ -1175,11 +1198,11 @@ check_capability_table() {
       name="$(printf '%s' "$col_skill" | tr -d ' `')"
       ocval="$(printf '%s' "$col_opencode" | xargs 2>/dev/null)"
       expect="No"
-      [[ " ${portable} " == *" ${name} "* ]] && expect="Yes"
+      [[ " ${delivered} " == *" ${name} "* ]] && expect="Yes"
       if [[ "$ocval" != "$expect" ]]; then
         add_result capability-table "$name" fail \
-          "README hand-curated Skill portability table lists OpenCode='${ocval}' for '${name}' but install-skills.sh PORTABLE_SKILLS says '${expect}'" \
-          "fix flow/README.md's Skill portability table's OpenCode column for '${name}' or update flow/opencode/install-skills.sh's PORTABLE_SKILLS"
+          "README hand-curated Skill portability table lists OpenCode='${ocval}' for '${name}' but the OpenCode delivery set (PORTABLE_SKILLS minus OPENCODE_RETIRED_SKILLS in install-skills.sh) says '${expect}'" \
+          "fix flow/README.md's Skill portability table's OpenCode column for '${name}' or update PORTABLE_SKILLS / OPENCODE_RETIRED_SKILLS in flow/opencode/install-skills.sh"
         any_fail=1
       fi
     done <<< "$hc_lines"
@@ -1189,7 +1212,7 @@ check_capability_table() {
     add_result capability-table "(repo)" pass "no generated or hand-curated skill inventory to check yet" ""
     return
   fi
-  [[ "$any_fail" -eq 0 ]] && add_result capability-table "(repo)" pass "README OpenCode column matches install-skills.sh PORTABLE_SKILLS" ""
+  [[ "$any_fail" -eq 0 ]] && add_result capability-table "(repo)" pass "README OpenCode column matches the OpenCode delivery set (PORTABLE_SKILLS minus OPENCODE_RETIRED_SKILLS)" ""
 }
 
 check_adapter_drift() {

@@ -23,7 +23,11 @@ written down.
 |---|---|---|
 | Claude Code | `skills/<name>/SKILL.md` | every skill, implicitly |
 | Codex | `skills/<name>/codex.md` companion | presence of the file |
-| OpenCode | symlink of the skill directory | `PORTABLE_SKILLS` in `opencode/install-skills.sh` |
+| OpenCode | symlink of the skill directory | `PORTABLE_SKILLS` minus `OPENCODE_RETIRED_SKILLS` in `opencode/install-skills.sh` |
+
+`OPENCODE_RETIRED_SKILLS` exists because `PORTABLE_SKILLS` also decides Codex portability:
+`babysit` stays portable for Codex but is retired for OpenCode, which cannot arm a babysit
+supervisor (#1217).
 
 Reconciling does not mean "make every skill support every client". Most exclusions are
 correct: the pipeline skills (`implement`, `configure`, `refine`, `close`, `maintain`,
