@@ -3341,7 +3341,7 @@ record, and `cenci daemon hook-health` reads them back. The first line is always
 | `current-failure` | A failure is not yet superseded by a later successful delivery. Each detail line names the category, the client, the time (UTC) and a recovery hint. |
 | `recovered` | A successful delivery happened after the last failure. The superseded failure is still listed. |
 | `healthy` | A successful delivery was recorded and no failure is on record. |
-| `no-evidence` | No record newer than 24 hours exists, or the store is absent. This is **not proof of health**: hooks may simply not have run. |
+| `no-evidence` | No record newer than 24 hours exists, the store is absent, or the store is untrusted (second line `  untrusted store:`, see below). This is **not proof of health**: hooks may simply not have run. |
 
 The categories are a closed set: `missing-binary` (no `cenci` binary resolved by the
 `notify.sh` wrapper), `bootstrap-failure` (installing the binary failed),
@@ -3364,10 +3364,17 @@ reporter never creates, repairs or removes anything. Because of the 60-second ru
 a failure right after a recovery keeps its old timestamp and can still read
 `recovered` for up to a minute.
 
+An untrusted store (the `cenci` state directory or the `hook-health` directory is a
+symlink, not a directory, foreign-owned — for example left root-owned by a `sudo` run —
+or group/other-writable) is reported as `no-evidence` with a second line starting
+`  untrusted store:` instead of the generic no-records line. Hooks cannot record until
+its owner and permissions are fixed, and the records inside are never read.
+
 Records are also written inside a sandbox. `cenci doctor` runs this reporter and
 shows `healthy` and `recovered` as ok, `current-failure` and `no-evidence` as a
-warning; hook health never fails `cenci doctor`. With no binary at all, doctor reads
-the `missing-binary` record directly.
+warning (an untrusted store gets its own warning naming that cause); hook health never
+fails `cenci doctor`. With no binary at all, doctor reports an untrusted store, else
+reads both the `missing-binary` and the `bootstrap-failure` records directly.
 
 ### Human status overview (`cenci status`)
 
@@ -3900,7 +3907,8 @@ naming that too. Either line still means the download itself failed — the log
 records it as the reason regardless of whether a fallback was found. If bootstrap
 can't run, install the binary manually and start the daemon (see
 [Advanced / development](#advanced--development)). A failed install also leaves a
-`bootstrap-failure` record that `cenci daemon hook-health` reports.
+`bootstrap-failure` record that `cenci daemon hook-health` reports (and that
+`cenci doctor` reports directly when no binary resolves).
 
 **Names not restoring**: cenci restores names on clean exit (Ctrl+C / SIGTERM) and via the stale sweep. If it was killed with SIGKILL, manually rename windows or restart tmux.
 

@@ -945,13 +945,20 @@ seed_hook_health_record() {
 #       prints that state's stable first line (`hook health: <token>`) and
 #       exits 0, as the real reporter does (plus a detail line for
 #       current-failure);
+#   no-evidence-untrusted — first line `hook health: no-evidence`, then the
+#       reporter's `  untrusted store: …` reason line (#1416);
+#   no-evidence-generic — first line `hook health: no-evidence`, then today's
+#       `  no recent records: …` line, as an older binary prints it (#1416);
+#   healthy-untrusted|current-failure-untrusted — a first line that is NOT
+#       no-evidence followed by an `  untrusted store: …` line 2: only the
+#       no-evidence arm may react to that line (#1416);
 #   unknown-subcommand — an older binary without the subverb: prints "unknown
 #       subcommand" on stderr and exits 2;
 #   garbage — exits 0 but prints a first line that is not a known token;
 #   nonzero — prints a valid healthy first line but exits 1;
 #   none — no cenci binary at all: the bootstrapped cache binary and any PATH
 #       entry are removed after the install, so doctor must read the
-#       missing-binary record directly. Seed it first with
+#       missing-binary and bootstrap-failure records directly. Seed them first with
 #       seed_hook_health_record into "${WORK}/<name>/home/.local/state" (the
 #       default state root, since the doctor env has only HOME and PATH) or
 #       into another root selected through a forwarded XDG_STATE_HOME=...
@@ -982,6 +989,26 @@ if [ "\${1:-}" = daemon ] && [ "\${2:-}" = hook-health ]; then
             echo "  delivery-failure (claude, 2026-01-01T00:00:00Z): daemon unreachable"
             exit 0
             ;;
+        no-evidence-untrusted)
+            echo "hook health: no-evidence"
+            echo "  untrusted store: stubbed reporter reason line"
+            exit 0
+            ;;
+        no-evidence-generic)
+            echo "hook health: no-evidence"
+            echo "  no recent records: this is not proof of health (hooks may not have run, or records are older than 24h)"
+            exit 0
+            ;;
+        healthy-untrusted)
+            echo "hook health: healthy"
+            echo "  untrusted store: stubbed reporter reason line"
+            exit 0
+            ;;
+        current-failure-untrusted)
+            echo "hook health: current-failure"
+            echo "  untrusted store: stubbed reporter reason line"
+            exit 0
+            ;;
         *)
             echo "hook health: ${mode}"
             exit 0
@@ -1003,7 +1030,74 @@ EOF
     # PATH carries neither.
     ln -sf "$(command -v date)" "${bin}/date"
     ln -sf "$(command -v find)" "${bin}/find"
+    # HH_SNAPSHOT_ROOT (optional, set by the caller as a prefix assignment):
+    # the state root whose whole tree must come out of doctor exactly as it went
+    # in. The snapshot is taken after the install and before the doctor run, so
+    # only doctor's own effect is compared (#1416: doctor never creates, chmods,
+    # chowns or removes anything in the store).
+    local before="" after=""
+    if [[ -n "${HH_SNAPSHOT_ROOT:-}" ]]; then
+        before="${WORK}/${name}/store-before"
+        after="${WORK}/${name}/store-after"
+        snapshot_tree "${HH_SNAPSHOT_ROOT}" >"${before}"
+    fi
     invoke_doctor "${name}" "$@"
+    if [[ -n "${HH_SNAPSHOT_ROOT:-}" ]]; then
+        snapshot_tree "${HH_SNAPSHOT_ROOT}" >"${after}"
+        if ! cmp -s "${before}" "${after}"; then
+            echo "FAIL: doctor changed the hook-health store tree under ${HH_SNAPSHOT_ROOT}" >&2
+            diff "${before}" "${after}" >&2 || true
+            exit 1
+        fi
+    fi
+}
+
+# snapshot_tree <dir> — prints a stable description of everything under <dir>
+# (including <dir> itself): per entry its path, type, mode, owner, group, size
+# and mtime, a symlink's target, and a regular file's exact bytes. Two
+# snapshots are equal only when nothing was created, removed, chmod'd, chown'd,
+# rewritten or retargeted in between. Fails the whole suite loudly when <dir> is
+# missing, when find fails, or when the listing is empty or lacks <dir> itself,
+# so a vacuous snapshot can never pass a comparison. Uses GNU stat or BSD stat,
+# detected once.
+SNAPSHOT_STAT_FLAVOR=""
+snapshot_tree() {
+    local dir="$1" entry listing
+    if [[ ! -e "${dir}" && ! -L "${dir}" ]]; then
+        echo "FAIL: snapshot root does not exist: ${dir}" >&2
+        exit 1
+    fi
+    if [[ -z "${SNAPSHOT_STAT_FLAVOR}" ]]; then
+        if stat -c '%n' / >/dev/null 2>&1; then
+            SNAPSHOT_STAT_FLAVOR="gnu"
+        else
+            SNAPSHOT_STAT_FLAVOR="bsd"
+        fi
+    fi
+    listing="$(find "${dir}")" || {
+        echo "FAIL: find failed while snapshotting ${dir}" >&2
+        exit 1
+    }
+    listing="$(printf '%s\n' "${listing}" | sort)" || {
+        echo "FAIL: sort failed while snapshotting ${dir}" >&2
+        exit 1
+    }
+    if [[ -z "${listing}" || $'\n'"${listing}"$'\n' != *$'\n'"${dir}"$'\n'* ]]; then
+        echo "FAIL: snapshot of ${dir} is empty or lacks the root entry" >&2
+        exit 1
+    fi
+    while IFS= read -r entry; do
+        if [[ "${SNAPSHOT_STAT_FLAVOR}" == "gnu" ]]; then
+            stat -c '%n|%F|%a|%u|%g|%s|%Y' "${entry}" || exit 1
+        else
+            stat -f '%N|%HT|%Lp|%u|%g|%z|%m' "${entry}" || exit 1
+        fi
+        if [[ -L "${entry}" ]]; then
+            readlink "${entry}"
+        elif [[ -f "${entry}" ]]; then
+            cat "${entry}"
+        fi
+    done <<<"${listing}"
 }
 
 # run_doctor_case_with_docker_runtimes <name> <clients> <runtimes_json> — like
@@ -1593,7 +1687,13 @@ assert_not_contains "${DOCTOR_OUTPUT}" "mutating Codex workflows run a guard can
 assert_contains "${DOCTOR_OUTPUT}" "hook trust bypassed by launcher (explicit flag)"
 assert_contains "${DOCTOR_OUTPUT}" "cenci never changes trust"
 assert_not_contains "${DOCTOR_OUTPUT}" "supports cenci hooks"
-assert_not_contains "${DOCTOR_OUTPUT}" "trusted"
+# The "Neutral project config: <path>" line echoes the checkout path, which can
+# itself contain "trusted" (e.g. a worktree named after an untrusted-store ticket),
+# so the wording check must not see it.
+DOCTOR_OUTPUT_NO_PATHS="${DOCTOR_OUTPUT}.no-paths"
+# grep exits 1 when no line is left, which is fine; exit 2 is a read error.
+grep -v 'Neutral project config:' "${DOCTOR_OUTPUT}" > "${DOCTOR_OUTPUT_NO_PATHS}" || [[ $? -eq 1 ]]
+assert_not_contains "${DOCTOR_OUTPUT_NO_PATHS}" "trusted"
 assert_not_contains "${DOCTOR_OUTPUT}" "protection active"
 
 echo "case: doctor reports the Codex workflow runtime separately from plugin installation, ok with Node 18+ on PATH (#1233)"
@@ -1725,7 +1825,51 @@ assert_not_contains "${DOCTOR_OUTPUT}" "✓ hook health"
 hh_now="$(date +%s)"
 # The exact no-binary, no-usable-record warning: asserting it (not just the
 # absence of the "was missing when" text) proves which branch ran.
-hh_no_record="hook health: no evidence yet — cenci binary not found and no recent missing-binary record found (not proof hooks work)"
+hh_no_record="hook health: no evidence yet — cenci binary not found and no recent missing-binary or bootstrap-failure record found (not proof hooks work)"
+# The fixed untrusted-store warning, identical for the binary-present
+# no-evidence arm and the no-binary path (#1416). Doctor prints its own text and
+# never echoes the reporter's `untrusted store:` line.
+hh_untrusted="hook health: no evidence — the hook-health store is untrusted (symlinked, foreign-owned or group/other-writable), so hooks cannot record; fix its owner and permissions"
+# The exact no-binary bootstrap-failure warning for a 120 s old claude record.
+hh_bootstrap_claude="hook health: installing the cenci binary failed when a claude hook last ran (2m ago) — check the bootstrap log and network access, then restart the session; if it persists, run: cenci update"
+# The exact binary-present no-evidence warning with no untrusted line (#1239).
+hh_generic_no_evidence="hook health: no evidence yet (absent or stale records are not proof hooks work) — details: cenci daemon hook-health"
+
+echo "case: doctor warns that the store is untrusted when the reporter's no-evidence output carries an untrusted store line, never a failure (#1416)"
+run_doctor_case_with_hook_health doctor-hook-health-no-evidence-untrusted claude no-evidence-untrusted
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "! ${hh_untrusted}"
+assert_not_contains "${DOCTOR_OUTPUT}" "hook health: no evidence yet"
+assert_not_contains "${DOCTOR_OUTPUT}" "stubbed reporter reason line"
+assert_not_contains "${DOCTOR_OUTPUT}" "✓ hook health"
+assert_not_contains "${DOCTOR_OUTPUT}" "✗ hook health"
+
+echo "case: doctor keeps the generic no-evidence warning when line 2 is not an untrusted store line, as an older binary prints it (#1416)"
+run_doctor_case_with_hook_health doctor-hook-health-no-evidence-generic claude no-evidence-generic
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "! ${hh_generic_no_evidence}"
+assert_not_contains "${DOCTOR_OUTPUT}" "hook-health store is untrusted"
+assert_not_contains "${DOCTOR_OUTPUT}" "✗ hook health"
+
+echo "case: doctor keeps the generic no-evidence warning when the reporter prints a single no-evidence line (#1416)"
+run_doctor_case_with_hook_health doctor-hook-health-no-evidence-single-line claude no-evidence
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "! ${hh_generic_no_evidence}"
+assert_not_contains "${DOCTOR_OUTPUT}" "hook-health store is untrusted"
+
+echo "case: an untrusted store line under a healthy first line does not trigger the untrusted warning (#1416)"
+run_doctor_case_with_hook_health doctor-hook-health-healthy-untrusted claude healthy-untrusted
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "✓ hook health: healthy"
+assert_not_contains "${DOCTOR_OUTPUT}" "hook-health store is untrusted"
+assert_not_contains "${DOCTOR_OUTPUT}" "! hook health"
+
+echo "case: an untrusted store line under a current-failure first line does not trigger the untrusted warning (#1416)"
+run_doctor_case_with_hook_health doctor-hook-health-current-failure-untrusted claude current-failure-untrusted
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "! hook health: current failure"
+assert_not_contains "${DOCTOR_OUTPUT}" "hook-health store is untrusted"
+assert_not_contains "${DOCTOR_OUTPUT}" "✗ hook health"
 
 echo "case: no binary and a fresh missing-binary record warns naming the failure, never a failure (#1239)"
 seed_hook_health_record "${WORK}/doctor-hook-health-record-fresh/home/.local/state" missing-binary "$((hh_now - 120)) claude\n"
@@ -1781,22 +1925,25 @@ run_doctor_case_with_hook_health doctor-hook-health-record-future claude none
 assert_contains "${DOCTOR_OUTPUT}" "! ${hh_no_record}"
 assert_not_contains "${DOCTOR_OUTPUT}" "was missing when"
 
-echo "case: no binary counts malformed missing-binary records as absent (#1239)"
+echo "case: no binary counts malformed missing-binary and bootstrap-failure records as absent (#1239, #1416)"
 hh_malformed_n=0
-for hh_bad in \
-    "garbage\n" \
-    "${hh_now} opencode\n" \
-    "${hh_now} claude" \
-    "${hh_now} claude\nextra\n" \
-    "${hh_now} claude                          padded-beyond-32-bytes\n" \
-    "\n"; do
-    hh_malformed_n=$((hh_malformed_n + 1))
-    hh_case="doctor-hook-health-record-malformed-${hh_malformed_n}"
-    seed_hook_health_record "${WORK}/${hh_case}/home/.local/state" missing-binary "${hh_bad}"
-    run_doctor_case_with_hook_health "${hh_case}" claude none
-    [[ "${DOCTOR_EXIT}" -eq 0 ]]
-    assert_contains "${DOCTOR_OUTPUT}" "! ${hh_no_record}"
-    assert_not_contains "${DOCTOR_OUTPUT}" "was missing when"
+for hh_category in missing-binary bootstrap-failure; do
+    for hh_bad in \
+        "garbage\n" \
+        "${hh_now} opencode\n" \
+        "${hh_now} claude" \
+        "${hh_now} claude\nextra\n" \
+        "${hh_now} claude                          padded-beyond-32-bytes\n" \
+        "\n"; do
+        hh_malformed_n=$((hh_malformed_n + 1))
+        hh_case="doctor-hook-health-record-malformed-${hh_malformed_n}"
+        seed_hook_health_record "${WORK}/${hh_case}/home/.local/state" "${hh_category}" "${hh_bad}"
+        run_doctor_case_with_hook_health "${hh_case}" claude none
+        [[ "${DOCTOR_EXIT}" -eq 0 ]]
+        assert_contains "${DOCTOR_OUTPUT}" "! ${hh_no_record}"
+        assert_not_contains "${DOCTOR_OUTPUT}" "was missing when"
+        assert_not_contains "${DOCTOR_OUTPUT}" "installing the cenci binary failed"
+    done
 done
 
 echo "case: no binary counts a symlinked missing-binary record as absent (#1239)"
@@ -1808,13 +1955,139 @@ run_doctor_case_with_hook_health doctor-hook-health-record-symlink claude none
 assert_contains "${DOCTOR_OUTPUT}" "! ${hh_no_record}"
 assert_not_contains "${DOCTOR_OUTPUT}" "was missing when"
 
-echo "case: no binary ignores a record inside a group/other-writable store dir (#1239)"
+echo "case: no binary reports a group/other-writable store dir as untrusted and ignores its record (#1239, #1416)"
 seed_hook_health_record "${WORK}/doctor-hook-health-record-wide/home/.local/state" missing-binary "$((hh_now - 30)) claude\n"
 chmod 777 "${WORK}/doctor-hook-health-record-wide/home/.local/state/cenci/hook-health"
-run_doctor_case_with_hook_health doctor-hook-health-record-wide claude none
+HH_SNAPSHOT_ROOT="${WORK}/doctor-hook-health-record-wide/home/.local/state" \
+    run_doctor_case_with_hook_health doctor-hook-health-record-wide claude none
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "! ${hh_untrusted}"
+assert_not_contains "${DOCTOR_OUTPUT}" "hook health: no evidence yet"
+assert_not_contains "${DOCTOR_OUTPUT}" "was missing when"
+assert_not_contains "${DOCTOR_OUTPUT}" "✗ hook health"
+
+echo "case: no binary reports an untrusted leaf as untrusted without listing either valid fresh record (#1416)"
+hh_wide_both_state="${WORK}/doctor-hook-health-untrusted-both/home/.local/state"
+seed_hook_health_record "${hh_wide_both_state}" missing-binary "$((hh_now - 30)) claude\n"
+seed_hook_health_record "${hh_wide_both_state}" bootstrap-failure "$((hh_now - 30)) claude\n"
+chmod 777 "${hh_wide_both_state}/cenci/hook-health"
+HH_SNAPSHOT_ROOT="${hh_wide_both_state}" \
+    run_doctor_case_with_hook_health doctor-hook-health-untrusted-both claude none
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "! ${hh_untrusted}"
+assert_not_contains "${DOCTOR_OUTPUT}" "${hh_no_record}"
+assert_not_contains "${DOCTOR_OUTPUT}" "was missing when"
+assert_not_contains "${DOCTOR_OUTPUT}" "installing the cenci binary failed"
+assert_not_contains "${DOCTOR_OUTPUT}" "✗ hook health"
+
+echo "case: no binary reports a symlinked leaf as untrusted even when it points at a trusted dir holding fresh records (#1416)"
+hh_link_leaf_state="${WORK}/doctor-hook-health-untrusted-symlink-leaf/home/.local/state"
+seed_hook_health_record "${hh_link_leaf_state}" missing-binary "$((hh_now - 30)) claude\n"
+seed_hook_health_record "${hh_link_leaf_state}" bootstrap-failure "$((hh_now - 30)) claude\n"
+mv "${hh_link_leaf_state}/cenci/hook-health" "${hh_link_leaf_state}/cenci/real-store"
+ln -s real-store "${hh_link_leaf_state}/cenci/hook-health"
+HH_SNAPSHOT_ROOT="${hh_link_leaf_state}" \
+    run_doctor_case_with_hook_health doctor-hook-health-untrusted-symlink-leaf claude none
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "! ${hh_untrusted}"
+assert_not_contains "${DOCTOR_OUTPUT}" "${hh_no_record}"
+assert_not_contains "${DOCTOR_OUTPUT}" "was missing when"
+assert_not_contains "${DOCTOR_OUTPUT}" "installing the cenci binary failed"
+assert_not_contains "${DOCTOR_OUTPUT}" "✗ hook health"
+
+echo "case: no binary reports a group/other-writable state root with an absent leaf as untrusted (#1416)"
+hh_wide_root_state="${WORK}/doctor-hook-health-untrusted-root/home/.local/state"
+mkdir -p "${hh_wide_root_state}/cenci"
+chmod 777 "${hh_wide_root_state}/cenci"
+HH_SNAPSHOT_ROOT="${hh_wide_root_state}" \
+    run_doctor_case_with_hook_health doctor-hook-health-untrusted-root claude none
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "! ${hh_untrusted}"
+assert_not_contains "${DOCTOR_OUTPUT}" "${hh_no_record}"
+assert_not_contains "${DOCTOR_OUTPUT}" "was missing when"
+assert_not_contains "${DOCTOR_OUTPUT}" "installing the cenci binary failed"
+assert_not_contains "${DOCTOR_OUTPUT}" "✗ hook health"
+
+echo "case: no binary treats a trusted state root with an absent leaf as plain no-record, not untrusted (#1416)"
+mkdir -p "${WORK}/doctor-hook-health-absent-leaf/home/.local/state/cenci"
+chmod 700 "${WORK}/doctor-hook-health-absent-leaf/home/.local/state/cenci"
+HH_SNAPSHOT_ROOT="${WORK}/doctor-hook-health-absent-leaf/home/.local/state" \
+    run_doctor_case_with_hook_health doctor-hook-health-absent-leaf claude none
 [[ "${DOCTOR_EXIT}" -eq 0 ]]
 assert_contains "${DOCTOR_OUTPUT}" "! ${hh_no_record}"
+assert_not_contains "${DOCTOR_OUTPUT}" "hook-health store is untrusted"
+
+echo "case: no binary and a fresh bootstrap-failure record warns naming the failure and its age, never a failure (#1416)"
+# Re-read the clock right before seeding: hh_now was captured earlier, and the
+# exact "(2m ago)" text drifts to "3m ago" once the suite has run for a minute.
+now_fresh="$(date +%s)"
+seed_hook_health_record "${WORK}/doctor-hook-health-bootstrap-fresh/home/.local/state" bootstrap-failure "$((now_fresh - 120)) claude\n"
+HH_SNAPSHOT_ROOT="${WORK}/doctor-hook-health-bootstrap-fresh/home/.local/state" \
+    run_doctor_case_with_hook_health doctor-hook-health-bootstrap-fresh claude none
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "binary not found yet"
+assert_contains "${DOCTOR_OUTPUT}" "! ${hh_bootstrap_claude}"
 assert_not_contains "${DOCTOR_OUTPUT}" "was missing when"
+assert_not_contains "${DOCTOR_OUTPUT}" "hook health: no evidence"
+assert_not_contains "${DOCTOR_OUTPUT}" "✗ hook health"
+
+echo "case: no binary reads the bootstrap-failure record from an absolute XDG_STATE_HOME (#1416)"
+seed_hook_health_record "${WORK}/doctor-hook-health-bootstrap-xdg/xdg-state" bootstrap-failure "$((hh_now - 30)) codex\n"
+run_doctor_case_with_hook_health doctor-hook-health-bootstrap-xdg codex none "XDG_STATE_HOME=${WORK}/doctor-hook-health-bootstrap-xdg/xdg-state"
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "! hook health: installing the cenci binary failed when a codex hook last ran"
+
+echo "case: no binary treats a relative XDG_STATE_HOME as unset for the bootstrap-failure record too (#1416)"
+seed_hook_health_record "${WORK}/doctor-hook-health-bootstrap-relxdg/home/.local/state" bootstrap-failure "$((hh_now - 30)) claude\n"
+run_doctor_case_with_hook_health doctor-hook-health-bootstrap-relxdg claude none "XDG_STATE_HOME=relative/state"
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "! hook health: installing the cenci binary failed when a claude hook last ran"
+
+echo "case: no binary treats a relative HOME as no bootstrap-failure record, even when the relative path holds one (#1416)"
+hh_bs_rel_case="doctor-hook-health-bootstrap-relhome"
+seed_hook_health_record "${WORK}/${hh_bs_rel_case}/rel-home/.local/state" bootstrap-failure "$((hh_now - 30)) claude\n"
+pushd "${WORK}/${hh_bs_rel_case}" >/dev/null
+run_doctor_case_with_hook_health "${hh_bs_rel_case}" claude none "HOME=rel-home"
+popd >/dev/null
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "! ${hh_no_record}"
+assert_not_contains "${DOCTOR_OUTPUT}" "installing the cenci binary failed"
+
+echo "case: no binary counts a stale (older than 24h) bootstrap-failure record as absent (#1416)"
+seed_hook_health_record "${WORK}/doctor-hook-health-bootstrap-stale/home/.local/state" bootstrap-failure "$((hh_now - 90000)) claude\n"
+run_doctor_case_with_hook_health doctor-hook-health-bootstrap-stale claude none
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "! ${hh_no_record}"
+assert_not_contains "${DOCTOR_OUTPUT}" "installing the cenci binary failed"
+
+echo "case: no binary counts a future-dated bootstrap-failure record as absent (#1416)"
+seed_hook_health_record "${WORK}/doctor-hook-health-bootstrap-future/home/.local/state" bootstrap-failure "$((hh_now + 3600)) claude\n"
+run_doctor_case_with_hook_health doctor-hook-health-bootstrap-future claude none
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "! ${hh_no_record}"
+assert_not_contains "${DOCTOR_OUTPUT}" "installing the cenci binary failed"
+
+echo "case: no binary counts a symlinked bootstrap-failure record as absent (#1416)"
+hh_bs_link_state="${WORK}/doctor-hook-health-bootstrap-symlink/home/.local/state"
+seed_hook_health_record "${hh_bs_link_state}" decoy "${hh_now} claude\n"
+ln -s decoy "${hh_bs_link_state}/cenci/hook-health/bootstrap-failure"
+run_doctor_case_with_hook_health doctor-hook-health-bootstrap-symlink claude none
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "! ${hh_no_record}"
+assert_not_contains "${DOCTOR_OUTPUT}" "installing the cenci binary failed"
+
+echo "case: no binary with both fresh records prints the missing-binary warning first, then the bootstrap-failure warning (#1416)"
+hh_both_state="${WORK}/doctor-hook-health-both-records/home/.local/state"
+now_fresh="$(date +%s)"
+seed_hook_health_record "${hh_both_state}" missing-binary "$((now_fresh - 60)) claude\n"
+seed_hook_health_record "${hh_both_state}" bootstrap-failure "$((now_fresh - 120)) claude\n"
+run_doctor_case_with_hook_health doctor-hook-health-both-records claude none
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "! hook health: cenci binary was missing when a claude hook last ran"
+assert_contains "${DOCTOR_OUTPUT}" "! ${hh_bootstrap_claude}"
+assert_before "${DOCTOR_OUTPUT}" "was missing when" "installing the cenci binary failed"
+assert_not_contains "${DOCTOR_OUTPUT}" "hook health: no evidence"
+assert_not_contains "${DOCTOR_OUTPUT}" "✗ hook health"
 
 echo "case: doctor reports sysbox-runc registered and its resolved version when present under Docker, resolving the runtime path from docker info's Runtimes JSON (#587 presence + #630 version reporting, Q2)"
 sysbox_present_bin="${WORK}/sysbox-binaries/doctor-sysbox-present/sysbox-runc"
