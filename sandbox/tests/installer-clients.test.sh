@@ -614,6 +614,13 @@ printf 'cenci %s\n' "$*" >>"${CALLS_FILE}"
 exit 0
 EOF
     chmod +x "${old_root}/bin/cenci"
+    # STALE_NEWEST_HH_MODE / STALE_NEWEST_HH_VERSION (optional, prefix
+    # assignments, #1419): swap the older binary for a tagged hook-health fake
+    # (write_hook_health_fake, tag `cache`) so a test can prove the post-setup
+    # checks run against this fallback binary.
+    if [[ -n "${STALE_NEWEST_HH_MODE:-}" ]]; then
+        write_hook_health_fake "${old_root}/bin/cenci" "${STALE_NEWEST_HH_MODE}" "${STALE_NEWEST_HH_VERSION:-empty}" cache
+    fi
     # Newer version: manifest only — release assets not published yet.
     mkdir -p "${new_root}/${manifest_dir}"
     printf '{"name":"cenci-watch","version":"2.0.0"}\n' >"${new_root}/${manifest_dir}/plugin.json"
@@ -938,38 +945,37 @@ seed_hook_health_record() {
     chmod 600 "${root}/cenci/hook-health/${record}"
 }
 
-# run_doctor_case_with_hook_health <name> <clients> <mode> [NAME=value env
-# assignments for the doctor run...] — drives doctor_hook_health (#1239). <mode>
-# selects the fake `cenci` on the doctor-run PATH:
-#   healthy|recovered|no-evidence|current-failure — `cenci daemon hook-health`
-#       prints that state's stable first line (`hook health: <token>`) and
-#       exits 0, as the real reporter does (plus a detail line for
-#       current-failure);
-#   no-evidence-untrusted — first line `hook health: no-evidence`, then the
-#       reporter's `  untrusted store: …` reason line (#1416);
-#   no-evidence-generic — first line `hook health: no-evidence`, then today's
-#       `  no recent records: …` line, as an older binary prints it (#1416);
-#   healthy-untrusted|current-failure-untrusted — a first line that is NOT
-#       no-evidence followed by an `  untrusted store: …` line 2: only the
-#       no-evidence arm may react to that line (#1416);
-#   unknown-subcommand — an older binary without the subverb: prints "unknown
-#       subcommand" on stderr and exits 2;
-#   garbage — exits 0 but prints a first line that is not a known token;
-#   nonzero — prints a valid healthy first line but exits 1;
-#   none — no cenci binary at all: the bootstrapped cache binary and any PATH
-#       entry are removed after the install, so doctor must read the
-#       missing-binary and bootstrap-failure records directly. Seed them first with
-#       seed_hook_health_record into "${WORK}/<name>/home/.local/state" (the
-#       default state root, since the doctor env has only HOME and PATH) or
-#       into another root selected through a forwarded XDG_STATE_HOME=...
-run_doctor_case_with_hook_health() {
-    local name="$1" clients="$2" mode="$3"
-    shift 3
-    local bin="${WORK}/${name}/bin" output="${WORK}/${name}/doctor-output"
-    if [[ "${mode}" != none ]]; then
-        mkdir -p "${bin}"
-        cat > "${bin}/cenci" <<EOF
+# write_hook_health_fake <path> <mode> <version-mode> <tag> — writes a fake
+# `cenci` executable at <path> (#1419). Every call appends `<tag> <argv>` to
+# CALLS_FILE, so a test can tell WHICH binary ran a verb (`path` for a fake on
+# the case PATH, `cache` for the plugin-cache binary). <mode> selects the
+# `cenci daemon hook-health` answer (healthy|recovered|no-evidence|
+# current-failure|…|unknown-subcommand|garbage|nonzero, see
+# run_doctor_case_with_hook_health). <version-mode> selects the `cenci version`
+# answer: `fail` exits 1 with no output, `empty` exits 0 with no output,
+# `noisy` prints a first line carrying non-printable bytes (0x01, BEL) plus a
+# second line `second-line-marker`, and anything else is printed verbatim as
+# the single first line (e.g. `cenci 2.43.1`). Every other verb exits 0.
+write_hook_health_fake() {
+    local path="$1" mode="$2" version_mode="$3" tag="$4"
+    mkdir -p "$(dirname "${path}")"
+    cat > "${path}" <<EOF
 #!/bin/sh
+printf '%s %s\n' '${tag}' "\$*" >>"\${CALLS_FILE:?CALLS_FILE not set}"
+if [ "\${1:-}" = version ]; then
+    case '${version_mode}' in
+        fail) exit 1 ;;
+        empty) exit 0 ;;
+        noisy)
+            printf 'cenci\001 2.40.0\a\nsecond-line-marker\n'
+            exit 0
+            ;;
+        *)
+            printf '%s\n' '${version_mode}'
+            exit 0
+            ;;
+    esac
+fi
 if [ "\${1:-}" = daemon ] && [ "\${2:-}" = hook-health ]; then
     case '${mode}' in
         unknown-subcommand)
@@ -1017,7 +1023,138 @@ if [ "\${1:-}" = daemon ] && [ "\${2:-}" = hook-health ]; then
 fi
 exit 0
 EOF
-        chmod +x "${bin}/cenci"
+    chmod +x "${path}"
+}
+
+# cache_hook_health_root <home> <client> — echoes the version-pinned plugin
+# cache root prepare_cache_hook_health_cenci provisions.
+cache_hook_health_root() {
+    local home="$1" client="$2"
+    if [[ "${client}" == claude ]]; then
+        printf '%s\n' "${home}/.claude/plugins/cache/cenci/cenci-watch/1.0.0"
+    else
+        printf '%s\n' "${home}/.codex/plugins/cache/cenci/cenci-watch/1.0.0"
+    fi
+}
+
+# prepare_cache_hook_health_cenci <home> <client> <mode> <version-line> —
+# pre-seeds the plugin-cache binary (tag `cache`) BEFORE run_case: with the
+# manifest already present, prepare_bootstrap_cenci returns early, so the
+# installer's current_cenci_binary / cached_cenci_binary resolve this fake
+# instead of the generic bootstrapped one (#1419).
+prepare_cache_hook_health_cenci() {
+    local home="$1" client="$2" mode="$3" version_line="$4" root manifest_dir
+    root="$(cache_hook_health_root "${home}" "${client}")"
+    if [[ "${client}" == claude ]]; then
+        manifest_dir=.claude-plugin
+    else
+        manifest_dir=.codex-plugin
+    fi
+    mkdir -p "${root}/${manifest_dir}"
+    printf '{"name":"cenci-watch","version":"1.0.0"}\n' >"${root}/${manifest_dir}/plugin.json"
+    write_hook_health_fake "${root}/bin/cenci" "${mode}" "${version_line}" cache
+}
+
+# run_update_again <name> — re-runs the installer in update mode for an
+# already-installed run_case <name> (the opencode-idempotent update pattern),
+# setting UPDATE_EXIT and UPDATE_OUTPUT.
+run_update_again() {
+    local name="$1"
+    local case_dir="${WORK}/${name}"
+    UPDATE_OUTPUT="${case_dir}/update-output"
+    set +e
+    env -i HOME="${CASE_HOME}" PATH="${CASE_BIN}" CALLS_FILE="${CASE_CALLS}" \
+        CLAUDE_MARKETPLACE_FILE="${case_dir}/claude-marketplace" \
+        CLAUDE_INSTALLED_FILE="${case_dir}/claude-installed" \
+        bash "${ROOT}/install.sh" update --yes --no-build >"${UPDATE_OUTPUT}" 2>&1
+    UPDATE_EXIT=$?
+    set -e
+}
+
+# run_shadow_doctor_case <name> <shape> <path-version-mode> [NAME=value env
+# assignments for the doctor run...] — a `--doctor` run with a seeded healthy
+# cache binary (`cenci 2.43.1`) and a stale `cenci` earlier on the doctor PATH
+# (#1419). The install (run_case) happens first with no PATH `cenci`, then the
+# shadow is arranged, then invoke_doctor runs. <shape>:
+#   file       — a regular file at <bin>/cenci;
+#   symlink    — <bin>/cenci -> <case>/stale/cenci (a link into an old cache);
+#   chain      — <bin>/cenci -> ~/.local/bin/cenci -> the cache binary (not a
+#                shadow at all: it IS the cache binary);
+#   local-link — ~/.local/bin/cenci -> <case>/stale/cenci, with the doctor
+#                PATH forced to ~/.local/bin first (forward PATH= yourself).
+# <path-version-mode> is write_hook_health_fake's version mode for the stale
+# fake. Sets STALE_BIN (the stale fake) and CACHE_BIN (the cache binary).
+run_shadow_doctor_case() {
+    local name="$1" shape="$2" version_mode="$3"
+    shift 3
+    local home="${WORK}/${name}/home" bin="${WORK}/${name}/bin"
+    local stale_fake="${WORK}/${name}/stale/cenci"
+    prepare_cache_hook_health_cenci "${home}" claude healthy "cenci 2.43.1"
+    CACHE_BIN="$(cache_hook_health_root "${home}" claude)/bin/cenci"
+    run_case "${name}" claude
+    mkdir -p "${home}/.local/bin"
+    case "${shape}" in
+        file)
+            STALE_BIN="${bin}/cenci"
+            write_hook_health_fake "${STALE_BIN}" unknown-subcommand "${version_mode}" path
+            ;;
+        symlink)
+            STALE_BIN="${stale_fake}"
+            write_hook_health_fake "${stale_fake}" unknown-subcommand "${version_mode}" path
+            ln -sf "${stale_fake}" "${bin}/cenci"
+            ;;
+        chain)
+            STALE_BIN="${CACHE_BIN}"
+            ln -sf "${CACHE_BIN}" "${home}/.local/bin/cenci"
+            ln -sf "${home}/.local/bin/cenci" "${bin}/cenci"
+            ;;
+        local-link)
+            STALE_BIN="${stale_fake}"
+            write_hook_health_fake "${stale_fake}" unknown-subcommand "${version_mode}" path
+            ln -sf "${stale_fake}" "${home}/.local/bin/cenci"
+            ;;
+        *)
+            echo "FAIL: unknown shadow shape '${shape}'" >&2
+            exit 1
+            ;;
+    esac
+    invoke_doctor "${name}" "$@"
+}
+
+# run_doctor_case_with_hook_health <name> <clients> <mode> [NAME=value env
+# assignments for the doctor run...] — drives doctor_hook_health (#1239). <mode>
+# selects the fake `cenci` on the doctor-run PATH:
+#   healthy|recovered|no-evidence|current-failure — `cenci daemon hook-health`
+#       prints that state's stable first line (`hook health: <token>`) and
+#       exits 0, as the real reporter does (plus a detail line for
+#       current-failure);
+#   no-evidence-untrusted — first line `hook health: no-evidence`, then the
+#       reporter's `  untrusted store: …` reason line (#1416);
+#   no-evidence-generic — first line `hook health: no-evidence`, then today's
+#       `  no recent records: …` line, as an older binary prints it (#1416);
+#   healthy-untrusted|current-failure-untrusted — a first line that is NOT
+#       no-evidence followed by an `  untrusted store: …` line 2: only the
+#       no-evidence arm may react to that line (#1416);
+#   unknown-subcommand — an older binary without the subverb: prints "unknown
+#       subcommand" on stderr and exits 2;
+#   garbage — exits 0 but prints a first line that is not a known token;
+#   nonzero — prints a valid healthy first line but exits 1;
+#   none — no cenci binary at all: the bootstrapped cache binary and any PATH
+#       entry are removed after the install, so doctor must read the
+#       missing-binary and bootstrap-failure records directly. Seed them first with
+#       seed_hook_health_record into "${WORK}/<name>/home/.local/state" (the
+#       default state root, since the doctor env has only HOME and PATH) or
+#       into another root selected through a forwarded XDG_STATE_HOME=...
+run_doctor_case_with_hook_health() {
+    local name="$1" clients="$2" mode="$3"
+    shift 3
+    local bin="${WORK}/${name}/bin" output="${WORK}/${name}/doctor-output"
+    if [[ "${mode}" != none ]]; then
+        # HH_PATH_VERSION (optional, a prefix assignment like HH_SNAPSHOT_ROOT)
+        # selects what the PATH fake answers to `cenci version` (see
+        # write_hook_health_fake's version modes); default `empty` keeps the
+        # fake as silent about its version as it was before #1419.
+        write_hook_health_fake "${bin}/cenci" "${mode}" "${HH_PATH_VERSION:-empty}" path
         run_doctor_case "${name}" "${clients}" "$@"
         return 0
     fi
@@ -1426,6 +1563,87 @@ assert_before() {
         sed -n '1,240p' "${file}" >&2
         exit 1
     fi
+}
+
+# collect_lines_with_both <file> <first> <second> — sets BOTH_HITS to the lines
+# of <file> containing both fixed strings. grep exit 1 (no match) is an empty
+# result; exit >=2 (missing/unreadable file, bad usage) fails loudly instead of
+# reading as "no match".
+collect_lines_with_both() {
+    local file="$1" first="$2" second="$3" first_hits rc
+    first_hits="$(grep -F -- "${first}" "${file}")" && rc=0 || rc=$?
+    if [[ "${rc}" -ge 2 ]]; then
+        echo "FAIL: grep could not read ${file} (exit ${rc})" >&2
+        exit 1
+    fi
+    BOTH_HITS=""
+    if [[ -n "${first_hits}" ]]; then
+        BOTH_HITS="$(printf '%s\n' "${first_hits}" | grep -F -- "${second}")" && rc=0 || rc=$?
+        if [[ "${rc}" -ge 2 ]]; then
+            echo "FAIL: grep failed filtering ${file} (exit ${rc})" >&2
+            exit 1
+        fi
+    fi
+}
+
+# assert_line_with_both <file> <first> <second> — asserts at least one single
+# line of <file> contains both fixed strings (so a hint is proven to sit on the
+# same warning line as its anchor, not merely somewhere in the output). The
+# match is captured instead of piped into `grep -q`, which could SIGPIPE the
+# first grep and read as "no match" under pipefail.
+assert_line_with_both() {
+    local file="$1" first="$2" second="$3" hits
+    collect_lines_with_both "${file}" "${first}" "${second}"
+    hits="${BOTH_HITS}"
+    if [[ -z "${hits}" ]]; then
+        echo "FAIL: expected one line in ${file} containing both '${first}' and '${second}'" >&2
+        sed -n '1,240p' "${file}" >&2
+        exit 1
+    fi
+}
+
+# assert_no_line_with_both <file> <first> <second> — the negative twin of
+# assert_line_with_both: no single line may contain both fixed strings.
+assert_no_line_with_both() {
+    local file="$1" first="$2" second="$3" hits
+    collect_lines_with_both "${file}" "${first}" "${second}"
+    hits="${BOTH_HITS}"
+    if [[ -n "${hits}" ]]; then
+        echo "FAIL: did not expect a line in ${file} containing both '${first}' and '${second}':" >&2
+        printf '%s\n' "${hits}" >&2
+        exit 1
+    fi
+}
+
+# assert_line_count <file> <needle> <count> — asserts exactly <count> lines of
+# <file> contain the fixed string <needle>.
+assert_line_count() {
+    local file="$1" needle="$2" want="$3" got rc
+    got="$(grep -Fc -- "${needle}" "${file}")" && rc=0 || rc=$?
+    if [[ "${rc}" -ge 2 ]]; then
+        echo "FAIL: grep could not read ${file} (exit ${rc})" >&2
+        exit 1
+    fi
+    if [[ "${got}" -ne "${want}" ]]; then
+        echo "FAIL: expected ${want} line(s) containing '${needle}' in ${file}, found ${got}" >&2
+        sed -n '1,240p' "${file}" >&2
+        exit 1
+    fi
+}
+
+# step_section <file> <title> <dest> — writes the installer output between the
+# `==> <title>…` step heading and the next step heading to <dest> (heading
+# included in neither), so an assertion can be pinned to ONE phase of the run
+# (e.g. the preflight `Checking your system`, or `Setting up cenci`, where the
+# post-setup hook-health check prints). Fails loudly when the heading is absent.
+step_section() {
+    local file="$1" title="$2" dest="$3"
+    if ! grep -Fq -- "==> ${title}" "${file}"; then
+        echo "FAIL: no '==> ${title}' step heading in ${file}" >&2
+        sed -n '1,240p' "${file}" >&2
+        exit 1
+    fi
+    awk -v t="==> ${title}" 'index($0, t) == 1 { f = 1; next } f && /^==> / { exit } f' "${file}" >"${dest}"
 }
 
 assert_cenci_installer_utility() {
@@ -2088,6 +2306,346 @@ assert_contains "${DOCTOR_OUTPUT}" "! ${hh_bootstrap_claude}"
 assert_before "${DOCTOR_OUTPUT}" "was missing when" "installing the cenci binary failed"
 assert_not_contains "${DOCTOR_OUTPUT}" "hook health: no evidence"
 assert_not_contains "${DOCTOR_OUTPUT}" "✗ hook health"
+
+# --- #1419: hook health is checked against the freshly provisioned cache
+# binary after setup, and a stale `cenci` earlier on PATH is named.
+
+# hh1419_paths <case-name> — sets the per-case paths the #1419 cases assert on:
+# hh_home, hh_bin (the case PATH dir) and hh_cache (the plugin-cache binary).
+hh1419_paths() {
+    hh_home="${WORK}/$1/home"
+    hh_bin="${WORK}/$1/bin"
+    hh_cache="$(cache_hook_health_root "${hh_home}" claude)/bin/cenci"
+}
+
+# assert_install_hook_health_never_updates <output> — no output line of an
+# install/update run pairs `hook health` with `cenci update`, and no PATH-shadow
+# warning line mentions `cenci update` (#1419 AC8).
+assert_install_hook_health_never_updates() {
+    assert_no_line_with_both "$1" "hook health" "cenci update"
+    assert_no_line_with_both "$1" "cenci on PATH" "cenci update"
+}
+
+echo "case: install checks hook health on the freshly provisioned cache binary, not a stale PATH cenci, and names the shadow (#1419)"
+name=hh1419-install-stale-path
+hh1419_paths "${name}"
+write_hook_health_fake "${hh_bin}/cenci" unknown-subcommand "cenci 2.40.0" path
+prepare_cache_hook_health_cenci "${hh_home}" claude healthy "cenci 2.43.1"
+run_case "${name}" claude
+[[ "${CASE_EXIT}" -eq 0 ]]
+step_section "${CASE_OUTPUT}" "Checking your system" "${WORK}/${name}/preflight"
+step_section "${CASE_OUTPUT}" "Setting up cenci" "${WORK}/${name}/setup"
+# The post-setup result comes from the cache binary, never the stale PATH one.
+assert_contains "${WORK}/${name}/setup" "✓ hook health: healthy"
+assert_contains "${CASE_CALLS}" "cache daemon hook-health"
+assert_not_contains "${CASE_CALLS}" "path daemon hook-health"
+# The preflight prints no hook-health result and exactly one neutral deferral line.
+assert_not_contains "${WORK}/${name}/preflight" "✓ hook health"
+assert_not_contains "${WORK}/${name}/preflight" "! hook health"
+assert_not_contains "${WORK}/${name}/preflight" "✗ hook health"
+assert_line_count "${WORK}/${name}/preflight" "hook health" 1
+assert_line_count "${WORK}/${name}/preflight" "hook health: checked after setup later in this run" 1
+# One shadow warning naming both paths and both versions.
+assert_line_count "${CASE_OUTPUT}" "cenci on PATH is" 1
+assert_contains "${WORK}/${name}/setup" "! cenci on PATH is ${hh_bin}/cenci (cenci 2.40.0) but the active plugin binary is ${hh_cache} (cenci 2.43.1)"
+assert_install_hook_health_never_updates "${CASE_OUTPUT}"
+
+echo "case: update prints the same post-setup hook-health result from the cache binary and still names the shadow (#1419)"
+name=hh1419-update-stale-path
+hh1419_paths "${name}"
+write_hook_health_fake "${hh_bin}/cenci" unknown-subcommand "cenci 2.40.0" path
+prepare_cache_hook_health_cenci "${hh_home}" claude healthy "cenci 2.43.1"
+run_case "${name}" claude
+[[ "${CASE_EXIT}" -eq 0 ]]
+: >"${CASE_CALLS}"
+run_update_again "${name}"
+[[ "${UPDATE_EXIT}" -eq 0 ]]
+assert_not_contains "${UPDATE_OUTPUT}" "Checking your system"
+step_section "${UPDATE_OUTPUT}" "Setting up cenci" "${WORK}/${name}/update-setup"
+assert_contains "${WORK}/${name}/update-setup" "✓ hook health: healthy"
+assert_contains "${CASE_CALLS}" "cache daemon hook-health"
+assert_not_contains "${CASE_CALLS}" "path daemon hook-health"
+assert_line_count "${UPDATE_OUTPUT}" "cenci on PATH is" 1
+assert_contains "${WORK}/${name}/update-setup" "! cenci on PATH is ${hh_bin}/cenci (cenci 2.40.0) but the active plugin binary is ${hh_cache} (cenci 2.43.1)"
+assert_install_hook_health_never_updates "${UPDATE_OUTPUT}"
+
+echo "case: doctor's reporter-unavailable warning names the PATH binary and its version, and still says run: cenci update (#1419)"
+name=hh1419-doctor-text-versioned
+hh1419_paths "${name}"
+HH_PATH_VERSION="cenci 2.40.0" run_doctor_case_with_hook_health "${name}" claude unknown-subcommand
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "! hook health: reporter unavailable — ${hh_bin}/cenci (cenci 2.40.0) predates it; run: cenci update"
+
+echo "case: doctor's reporter-unavailable warning says version unknown when the binary's version verb fails (#1419)"
+name=hh1419-doctor-text-version-unknown
+hh1419_paths "${name}"
+HH_PATH_VERSION=fail run_doctor_case_with_hook_health "${name}" claude unknown-subcommand
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "! hook health: reporter unavailable — ${hh_bin}/cenci (version unknown) predates it; run: cenci update"
+
+echo "case: doctor's unrecognized-output warning carries the binary path and version (#1419)"
+name=hh1419-doctor-text-garbage
+hh1419_paths "${name}"
+HH_PATH_VERSION="cenci 2.40.0" run_doctor_case_with_hook_health "${name}" claude garbage
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "! hook health: reporter unavailable — unrecognized output from ${hh_bin}/cenci (cenci 2.40.0); run: cenci update"
+
+echo "case: unrecognized-output warning without a readable version says version unknown (#1419)"
+name=hh1419-doctor-text-garbage-unknown
+hh1419_paths "${name}"
+HH_PATH_VERSION=empty run_doctor_case_with_hook_health "${name}" claude garbage
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "! hook health: reporter unavailable — unrecognized output from ${hh_bin}/cenci (version unknown); run: cenci update"
+
+echo "case: a pinned cache binary without the reporter warns with its path and version, never cenci update (#1419)"
+name=hh1419-install-pinned-no-reporter
+hh1419_paths "${name}"
+prepare_cache_hook_health_cenci "${hh_home}" claude unknown-subcommand "cenci 2.40.0"
+run_case "${name}" claude
+[[ "${CASE_EXIT}" -eq 0 ]]
+step_section "${CASE_OUTPUT}" "Setting up cenci" "${WORK}/${name}/setup"
+assert_contains "${WORK}/${name}/setup" "! hook health: reporter unavailable — ${hh_cache} (cenci 2.40.0): the installed cenci-watch release has no hook-health reporter"
+assert_not_contains "${CASE_OUTPUT}" "✓ hook health"
+assert_install_hook_health_never_updates "${CASE_OUTPUT}"
+
+echo "case: the in-sandbox shadow at the system link names the host mount and cenci sandbox stop, no link or update command (#1419)"
+name=hh1419-shadow-sandbox
+hh1419_paths "${name}"
+run_shadow_doctor_case "${name}" file "cenci 2.40.0" CENCI_SANDBOX=1 "CENCI_INSTALLER_SYSTEM_LINK=${WORK}/${name}/bin/cenci"
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "Required tools are present."
+assert_line_count "${DOCTOR_OUTPUT}" "cenci on PATH is" 1
+assert_contains "${DOCTOR_OUTPUT}" "! cenci on PATH is ${hh_bin}/cenci (cenci 2.40.0) but the active plugin binary is ${hh_cache} (cenci 2.43.1)"
+assert_line_with_both "${DOCTOR_OUTPUT}" "cenci on PATH is" "host binary mounted when this sandbox container was created"
+assert_line_with_both "${DOCTOR_OUTPUT}" "cenci on PATH is" "update cenci on the host"
+assert_line_with_both "${DOCTOR_OUTPUT}" "cenci on PATH is" "cenci sandbox stop"
+assert_line_with_both "${DOCTOR_OUTPUT}" "cenci on PATH is" "relaunch"
+assert_no_line_with_both "${DOCTOR_OUTPUT}" "cenci on PATH is" "ln -sf"
+assert_no_line_with_both "${DOCTOR_OUTPUT}" "cenci on PATH is" "cenci update"
+
+echo "case: CENCI_SANDBOX=1 with the shadow somewhere other than the system link gets the regular-file hint, not the host-mount text (#1419)"
+name=hh1419-shadow-sandbox-elsewhere
+hh1419_paths "${name}"
+run_shadow_doctor_case "${name}" file "cenci 2.40.0" CENCI_SANDBOX=1
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_line_with_both "${DOCTOR_OUTPUT}" "cenci on PATH is" "remove it"
+assert_no_line_with_both "${DOCTOR_OUTPUT}" "cenci on PATH is" "sandbox container"
+
+echo "case: a symlink shadow gets the ln -sf hint to ~/.local/bin/cenci, without sudo outside /usr/local/bin (#1419)"
+name=hh1419-shadow-symlink
+hh1419_paths "${name}"
+run_shadow_doctor_case "${name}" symlink "cenci 2.40.0"
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "Required tools are present."
+assert_line_count "${DOCTOR_OUTPUT}" "cenci on PATH is" 1
+assert_contains "${DOCTOR_OUTPUT}" "! cenci on PATH is ${hh_bin}/cenci (cenci 2.40.0) but the active plugin binary is ${hh_cache} (cenci 2.43.1)"
+assert_line_with_both "${DOCTOR_OUTPUT}" "cenci on PATH is" "ln -sf \"${hh_home}/.local/bin/cenci\" ${hh_bin}/cenci"
+assert_no_line_with_both "${DOCTOR_OUTPUT}" "cenci on PATH is" "sudo"
+assert_no_line_with_both "${DOCTOR_OUTPUT}" "cenci on PATH is" "cenci update"
+[[ -L "${hh_bin}/cenci" ]]
+
+echo "case: a symlink shadow at the system link gets the sudo ln -sf hint (#1419)"
+name=hh1419-shadow-symlink-system
+hh1419_paths "${name}"
+run_shadow_doctor_case "${name}" symlink "cenci 2.40.0" "CENCI_INSTALLER_SYSTEM_LINK=${WORK}/${name}/bin/cenci"
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_line_with_both "${DOCTOR_OUTPUT}" "cenci on PATH is" "sudo ln -sf \"${hh_home}/.local/bin/cenci\" ${hh_bin}/cenci"
+assert_no_line_with_both "${DOCTOR_OUTPUT}" "cenci on PATH is" "cenci update"
+
+echo "case: a stale ~/.local/bin/cenci symlink is re-pointed at the cache binary, never at itself (#1419)"
+name=hh1419-shadow-local-link
+hh1419_paths "${name}"
+run_shadow_doctor_case "${name}" local-link "cenci 2.40.0" "PATH=${WORK}/${name}/home/.local/bin:${WORK}/${name}/bin"
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "! cenci on PATH is ${hh_home}/.local/bin/cenci (cenci 2.40.0) but the active plugin binary is ${hh_cache} (cenci 2.43.1)"
+assert_line_with_both "${DOCTOR_OUTPUT}" "cenci on PATH is" "ln -sf \"${hh_cache}\" \"${hh_home}/.local/bin/cenci\""
+assert_no_line_with_both "${DOCTOR_OUTPUT}" "cenci on PATH is" "ln -sf \"${hh_home}/.local/bin/cenci\" ${hh_home}/.local/bin/cenci"
+assert_no_line_with_both "${DOCTOR_OUTPUT}" "cenci on PATH is" "cenci update"
+
+echo "case: a regular-file shadow gets the remove-or-link hint and is left byte-identical (#1419)"
+name=hh1419-shadow-regular-file
+hh1419_paths "${name}"
+write_hook_health_fake "${WORK}/${name}/expected-shadow" unknown-subcommand "cenci 2.40.0" path
+run_shadow_doctor_case "${name}" file "cenci 2.40.0"
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "Required tools are present."
+assert_contains "${DOCTOR_OUTPUT}" "! cenci on PATH is ${hh_bin}/cenci (cenci 2.40.0) but the active plugin binary is ${hh_cache} (cenci 2.43.1)"
+assert_line_with_both "${DOCTOR_OUTPUT}" "cenci on PATH is" "remove it"
+assert_line_with_both "${DOCTOR_OUTPUT}" "cenci on PATH is" "link to ~/.local/bin/cenci"
+assert_no_line_with_both "${DOCTOR_OUTPUT}" "cenci on PATH is" "ln -sf"
+assert_no_line_with_both "${DOCTOR_OUTPUT}" "cenci on PATH is" "cenci update"
+[[ -f "${hh_bin}/cenci" && ! -L "${hh_bin}/cenci" ]]
+cmp "${WORK}/${name}/expected-shadow" "${hh_bin}/cenci"
+
+echo "case: no shadow warning when PATH resolves to the cache binary through a symlink chain, doctor (#1419)"
+name=hh1419-chain-doctor
+hh1419_paths "${name}"
+run_shadow_doctor_case "${name}" chain empty
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "✓ hook health: healthy"
+assert_contains "${CASE_CALLS}" "cache daemon hook-health"
+assert_not_contains "${DOCTOR_OUTPUT}" "cenci on PATH is"
+
+echo "case: no shadow warning when the PATH entry chains through ~/.local/bin to the cache binary, install (#1419)"
+name=hh1419-chain-install
+hh1419_paths "${name}"
+prepare_cache_hook_health_cenci "${hh_home}" claude healthy "cenci 2.43.1"
+mkdir -p "${hh_bin}"
+ln -sf "${hh_home}/.local/bin/cenci" "${hh_bin}/cenci"
+run_case "${name}" claude
+[[ "${CASE_EXIT}" -eq 0 ]]
+step_section "${CASE_OUTPUT}" "Setting up cenci" "${WORK}/${name}/setup"
+assert_contains "${WORK}/${name}/setup" "✓ hook health: healthy"
+assert_contains "${CASE_CALLS}" "cache daemon hook-health"
+assert_not_contains "${CASE_OUTPUT}" "cenci on PATH is"
+
+echo "case: no shadow warning when the PATH cenci is the same version, newer, or a dev build (#1419)"
+for hh_version in "cenci 2.43.1" "cenci 2.50.0" "cenci dev"; do
+    name="hh1419-not-older-${hh_version//[^A-Za-z0-9]/_}"
+    hh1419_paths "${name}"
+    run_shadow_doctor_case "${name}" file "${hh_version}"
+    [[ "${DOCTOR_EXIT}" -eq 0 ]]
+    # Precondition: the PATH binary really was the one doctor looked at.
+    assert_contains "${DOCTOR_OUTPUT}" "! hook health: reporter unavailable — ${hh_bin}/cenci (${hh_version}) predates it"
+    assert_not_contains "${DOCTOR_OUTPUT}" "cenci on PATH is"
+done
+
+echo "case: a PATH cenci whose version verb fails or prints nothing is warned about with version unknown (#1419)"
+for hh_version in fail empty; do
+    name="hh1419-version-unknown-${hh_version}"
+    hh1419_paths "${name}"
+    run_shadow_doctor_case "${name}" file "${hh_version}"
+    [[ "${DOCTOR_EXIT}" -eq 0 ]]
+    assert_line_count "${DOCTOR_OUTPUT}" "cenci on PATH is" 1
+    assert_contains "${DOCTOR_OUTPUT}" "! cenci on PATH is ${hh_bin}/cenci (version unknown) but the active plugin binary is ${hh_cache} (cenci 2.43.1)"
+done
+
+echo "case: a sort that cannot compare versions still yields the shadow warning (#1419)"
+name=hh1419-sort-cannot-compare
+hh1419_paths "${name}"
+# A PATH cenci NEWER than the cache binary is never stale under a working sort
+# (the not-older case above); the warning here can only come from the
+# sort-failed fallthrough. The stub fails only the `sort -V -C` comparison.
+run_shadow_doctor_case "${name}" file "cenci 2.50.0"
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_not_contains "${DOCTOR_OUTPUT}" "cenci on PATH is"
+real_sort="$(command -v sort)"
+rm -f "${hh_bin}/sort"
+cat > "${hh_bin}/sort" <<EOF
+#!/bin/sh
+case " \$* " in
+    *" -V "*) case " \$* " in *" -C "*) exit 2 ;; esac ;;
+esac
+exec "${real_sort}" "\$@"
+EOF
+chmod +x "${hh_bin}/sort"
+invoke_doctor "${name}"
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_line_count "${DOCTOR_OUTPUT}" "cenci on PATH is" 1
+assert_contains "${DOCTOR_OUTPUT}" "! cenci on PATH is ${hh_bin}/cenci (cenci 2.50.0) but the active plugin binary is ${hh_cache} (cenci 2.43.1)"
+
+echo "case: no shadow warning when the cache binary's version cannot be read but the PATH cenci's can (#1419)"
+for hh_version in fail empty; do
+    name="hh1419-cache-version-unknown-${hh_version}"
+    hh1419_paths "${name}"
+    write_hook_health_fake "${hh_bin}/cenci" unknown-subcommand "cenci 2.40.0" path
+    prepare_cache_hook_health_cenci "${hh_home}" claude healthy "${hh_version}"
+    run_case "${name}" claude
+    [[ "${CASE_EXIT}" -eq 0 ]]
+    step_section "${CASE_OUTPUT}" "Setting up cenci" "${WORK}/${name}/setup"
+    # Preconditions: the post-setup checks ran against the cache binary, and
+    # both binaries were asked for their version, so the absence is meaningful.
+    assert_contains "${WORK}/${name}/setup" "✓ hook health: healthy"
+    assert_contains "${CASE_CALLS}" "cache version"
+    assert_contains "${CASE_CALLS}" "path version"
+    assert_not_contains "${CASE_OUTPUT}" "cenci on PATH is"
+done
+
+echo "case: multi-line / non-printable version output is reduced to a clean first line (#1419)"
+name=hh1419-version-noisy
+hh1419_paths "${name}"
+run_shadow_doctor_case "${name}" file noisy
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "! cenci on PATH is ${hh_bin}/cenci (cenci 2.40.0) but the active plugin binary is ${hh_cache} (cenci 2.43.1)"
+assert_not_contains "${DOCTOR_OUTPUT}" "second-line-marker"
+assert_not_contains "${DOCTOR_OUTPUT}" $'\001'
+assert_not_contains "${DOCTOR_OUTPUT}" $'\a'
+
+echo "case: an install where the cache binary could not be provisioned prints no post-setup hook-health or shadow line (#1419)"
+name=hh1419-install-unprovisioned
+hh1419_paths "${name}"
+write_hook_health_fake "${hh_bin}/cenci" unknown-subcommand "cenci 2.40.0" path
+run_case_broken_cenci_cache "${name}"
+[[ "${CASE_EXIT}" -eq 0 ]]
+assert_contains "${CASE_OUTPUT}" "could not provision the cenci binary yet"
+assert_not_contains "${CASE_OUTPUT}" "✓ hook health"
+assert_not_contains "${CASE_OUTPUT}" "! hook health"
+assert_not_contains "${CASE_OUTPUT}" "✗ hook health"
+assert_not_contains "${CASE_OUTPUT}" "cenci on PATH is"
+assert_not_contains "${CASE_CALLS}" "daemon hook-health"
+assert_install_hook_health_never_updates "${CASE_OUTPUT}"
+
+echo "case: an incomplete update runs the post-setup hook-health check against the previously provisioned fallback binary and still fails (#1419)"
+name=hh1419-update-fallback-binary
+hh1419_paths "${name}"
+STALE_NEWEST_HH_MODE=healthy STALE_NEWEST_HH_VERSION="cenci 2.43.1" run_case_stale_newest_cenci_cache "${name}" update
+[[ "${CASE_EXIT}" -ne 0 ]]
+assert_contains "${CASE_OUTPUT}" "cenci binary update incomplete"
+step_section "${CASE_OUTPUT}" "Setting up cenci" "${WORK}/${name}/setup"
+assert_contains "${WORK}/${name}/setup" "✓ hook health: healthy"
+assert_contains "${CASE_CALLS}" "cache daemon hook-health"
+assert_install_hook_health_never_updates "${CASE_OUTPUT}"
+
+echo "case: a cenci-watch that never installs gets no post-setup hook-health or shadow check (#1419)"
+name=hh1419-install-deselected
+hh1419_paths "${name}"
+write_hook_health_fake "${hh_bin}/cenci" unknown-subcommand "cenci 2.40.0" path
+prepare_cache_hook_health_cenci "${hh_home}" claude healthy "cenci 2.43.1"
+make_common_tools "${hh_bin}"
+make_claude "${hh_bin}"
+prepare_checkout "${hh_home}" claude
+: >"${WORK}/${name}/calls"
+set +e
+env -i HOME="${hh_home}" PATH="${hh_bin}" CALLS_FILE="${WORK}/${name}/calls" \
+    CLAUDE_MARKETPLACE_FILE="${WORK}/${name}/claude-marketplace" \
+    CLAUDE_INSTALLED_FILE="${WORK}/${name}/claude-installed" \
+    CLAUDE_SKIP_INSTALL_PLUGIN="cenci-watch" \
+    bash "${ROOT}/install.sh" --yes --no-build >"${WORK}/${name}/output" 2>&1
+hh_deselected_exit=$?
+set -e
+[[ "${hh_deselected_exit}" -eq 0 ]]
+assert_not_contains "${WORK}/${name}/output" "==> Setting up cenci"
+assert_not_contains "${WORK}/${name}/output" "✓ hook health"
+assert_not_contains "${WORK}/${name}/output" "! hook health"
+assert_not_contains "${WORK}/${name}/output" "✗ hook health"
+assert_not_contains "${WORK}/${name}/output" "cenci on PATH is"
+assert_not_contains "${WORK}/${name}/calls" "daemon hook-health"
+
+echo "case: doctor with a PATH cenci and no cache binary names no shadow and checks hook health on the PATH binary (#1419)"
+name=hh1419-doctor-no-cache
+hh1419_paths "${name}"
+write_hook_health_fake "${hh_bin}/cenci" unknown-subcommand "cenci 2.40.0" path
+run_case "${name}" claude
+rm -f "${hh_home}"/.claude/plugins/cache/cenci/cenci-watch/*/bin/cenci
+: >"${CASE_CALLS}"
+invoke_doctor "${name}"
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${CASE_CALLS}" "path daemon hook-health"
+assert_contains "${DOCTOR_OUTPUT}" "! hook health: reporter unavailable — ${hh_bin}/cenci (cenci 2.40.0) predates it; run: cenci update"
+assert_not_contains "${DOCTOR_OUTPUT}" "cenci on PATH is"
+
+echo "case: with ~/.local/bin off PATH and no other cenci, the post-setup hook-health check still runs and no shadow is named (#1419)"
+name=hh1419-install-no-path-cenci
+hh1419_paths "${name}"
+prepare_cache_hook_health_cenci "${hh_home}" claude healthy "cenci 2.43.1"
+run_case "${name}" claude
+[[ "${CASE_EXIT}" -eq 0 ]]
+[[ ! -e "${hh_bin}/cenci" ]]
+step_section "${CASE_OUTPUT}" "Setting up cenci" "${WORK}/${name}/setup"
+assert_contains "${WORK}/${name}/setup" "✓ hook health: healthy"
+assert_contains "${CASE_CALLS}" "cache daemon hook-health"
+assert_not_contains "${CASE_OUTPUT}" "cenci on PATH is"
+assert_install_hook_health_never_updates "${CASE_OUTPUT}"
 
 echo "case: doctor reports sysbox-runc registered and its resolved version when present under Docker, resolving the runtime path from docker info's Runtimes JSON (#587 presence + #630 version reporting, Q2)"
 sysbox_present_bin="${WORK}/sysbox-binaries/doctor-sysbox-present/sysbox-runc"
