@@ -57,7 +57,8 @@ user-invocable: false
   compound. `## Worktrees and Cross-Directory Writes`'s absolute-path requirement still binds:
   `guard-main-worktree.sh` refuses a relative redirect target, so the log path in the redirect
   must itself be absolute (`${TMPDIR:-/tmp}`/`$TMPDIR`/`$HOME`/`$PWD` are its supported
-  expansions).
+  expansions, each honoured only when the same command does not reassign that variable —
+  or, for `$PWD`, change directory; otherwise use a literal absolute path).
 
 ## Search and File Operations
 

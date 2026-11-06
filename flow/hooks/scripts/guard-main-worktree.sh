@@ -127,6 +127,21 @@
 # `..`-escape out of an allowlisted-looking relative shape is still caught
 # before the allowlist/repo-scope decision. Absolute declared targets never
 # needed a cwd and are decided exactly as before.
+#
+# CHANGED-VARIABLE check (#816): the supported expansions ($HOME/${HOME}/~,
+# $PWD/${PWD}, $TMPDIR/${TMPDIR}/${TMPDIR:-/tmp}) are resolved against THIS
+# hook's environment, which is wrong when the command itself reassigns the
+# variable (`HOME=<root>; echo x > ~/AGENTS.md`) or changes directory before a
+# $PWD write. The Bash arm therefore computes bwt_changed_vars once (raw-text
+# scan, lib/bash-write-targets.sh) and, per target, after the exempt-device
+# skip and BEFORE bwt_expand_safe_vars, blocks a target whose leading
+# expansion uses a changed variable -- naming the variable, or "changes the
+# working directory or PWD", and asking for a literal absolute path. The block
+# wins over the supported-expansion allowance. eval, source and a
+# command-position `.` mark every variable changed; other re-parse verbs
+# (timeout, env, xargs) run a child process and mark nothing. Literal absolute
+# targets and apply_patch declared targets (never shell-expanded) are
+# unaffected; relative targets already block under #810.
 
 # Only enforce in repos configured for cenci. .cenci/config.json is canonical;
 # .claude/config.json remains a read-only migration signal. In unconfigured repos this
@@ -1201,15 +1216,19 @@ elif [ -n "$TOOL_COMMAND" ]; then
         echo "BLOCKED: guard-main-worktree.sh could not inspect this Bash command's write targets: it contains an unquoted brace expansion (e.g. {a,b} or {1..3}) in write-target position, which is not supported for direct extraction: $TOOL_COMMAND" >&2
         echo "Rewrite the command without brace expansion (e.g. one command per target) targeting the feature worktree (.worktrees/<id>-<desc>/) or edit manually if needed." >&2
       elif [ "$BWT_EXTRACT_STATUS" -eq 7 ]; then
-        # #810 stabilization: a command/process/function substitution appears
-        # inside a double-quoted string within a comparison construct
-        # (`[[ ]]`/`(( ))`), which cannot be safely resolved -- this tokenizer
-        # has no safe way to resume precise parsing through the real syntax of
-        # such a substitution once it is wrapped in an outer double-quoted
-        # string (possibly hiding a main-worktree target), so the whole command
-        # fails closed unconditionally.
-        echo "BLOCKED: guard-main-worktree.sh could not inspect this Bash command's write targets: a command/process/function substitution appears inside a double-quoted string within a comparison construct, which cannot be safely resolved: $TOOL_COMMAND" >&2
-        echo "Rewrite the command without a double-quoted nested substitution inside [[ ]] / (( )) (e.g. hoist it to its own statement first) targeting the feature worktree (.worktrees/<id>-<desc>/) or edit manually if needed." >&2
+        # #810 stabilization, generalised by #816: a command/process/function
+        # substitution appears inside a double-quoted string -- inside a
+        # comparison construct (`[[ ]]`/`(( ))`, #810), or anywhere in a
+        # command that also carries quoted write-shaped text (`>` or a
+        # delimited `tee`, #816) -- which cannot be safely resolved: this
+        # tokenizer has no safe way to resume precise parsing through the real
+        # syntax of such a substitution once it is wrapped in an outer
+        # double-quoted string (possibly hiding a main-worktree target), so the
+        # whole command fails closed unconditionally. The second line covers
+        # the common no-write case (#1084 posture): an agent passing message
+        # text must move it into a file, never add a redirect.
+        echo "BLOCKED: guard-main-worktree.sh could not inspect this Bash command's write targets: a command/process/function substitution appears inside a double-quoted string, which cannot be safely resolved: $TOOL_COMMAND" >&2
+        echo "If the command DOES write: hoist the substitution to its own statement first and target the feature worktree (.worktrees/<id>-<desc>/) or a temp path. If it performs NO write -- the quoted text is message or body text -- pass that text through a file instead (git commit -F <abs-file>, gh ... --body-file <abs-file>); NEVER add a redirect just to satisfy this message." >&2
       else
         echo "BLOCKED: guard-main-worktree.sh requires awk (via lib/bash-write-targets.sh) to inspect this Bash command's write targets, but awk was not found on PATH." >&2
       fi
@@ -1397,10 +1416,49 @@ elif [ -n "$TOOL_COMMAND" ]; then
     exit 0
   fi
 
+  # Changed-variable set (#816 gap 3): computed once, only for the ordinary
+  # tokenizer path with at least one extracted target (the zero-target
+  # backstop above has already exited). bwt_changed_vars prints the subset of
+  # HOME/PWD/TMPDIR/CWD the raw command can change before a write; it fails
+  # closed itself when awk is missing (prints all four), so a non-zero status
+  # here is a real awk failure and blocks. apply_patch declared targets are
+  # never shell-expanded, so the check does not apply to them.
+  BWT_CHANGED=""
+  if [ "$BWT_APPLY_PATCH" -eq 0 ]; then
+    if ! BWT_CHANGED=$(bwt_changed_vars "$TOOL_COMMAND"); then
+      echo "BLOCKED: guard-main-worktree.sh could not determine whether this Bash command changes HOME, PWD, TMPDIR or the working directory before its writes (bwt_changed_vars failed): $TOOL_COMMAND" >&2
+      exit 2
+    fi
+  fi
+
   while IFS= read -r BWT_TARGET; do
     [ -z "$BWT_TARGET" ] && continue
 
     bwt_is_exempt_device "$BWT_TARGET" && continue
+
+    # #816 gap 3: a target whose leading $HOME/~/$PWD/$TMPDIR expansion uses
+    # a variable this same command changes (or, for $PWD, a directory change)
+    # cannot be expanded against this hook's environment -- bash would write
+    # somewhere else. Checked BEFORE bwt_expand_safe_vars, so this block wins
+    # over the supported-expansion allowance.
+    if [ "$BWT_APPLY_PATCH" -eq 0 ] && [ -n "$BWT_CHANGED" ]; then
+      if ! BWT_CHANGED_VAR=$(bwt_target_changed_var "$BWT_TARGET" "$BWT_CHANGED"); then
+        echo "BLOCKED: guard-main-worktree.sh could not classify the Bash write target '$BWT_TARGET' against the variables this command changes (bwt_target_changed_var failed): $TOOL_COMMAND" >&2
+        exit 2
+      fi
+      if [ -n "$BWT_CHANGED_VAR" ]; then
+        if [ "$BWT_CHANGED_VAR" = PWD ]; then
+          BWT_CHANGED_WHY="this command changes the working directory or PWD before the write"
+        else
+          BWT_CHANGED_WHY="it expands $BWT_CHANGED_VAR, which is changed by this command before the write"
+        fi
+        {
+          echo "BLOCKED: guard-main-worktree.sh cannot trust the Bash write target '$BWT_TARGET': $BWT_CHANGED_WHY, so this hook's own value is not where bash would write: $TOOL_COMMAND"
+          echo "Use a literal absolute path for this write target (a feature-worktree or temp path); \${TMPDIR:-/tmp}, \$TMPDIR, \$HOME, ~ and \$PWD are honoured only when the same command does not change that variable or, for \$PWD, the directory."
+        } >&2
+        exit 2
+      fi
+    fi
 
     # #1036: an apply_patch declared path is the literal, verbatim payload
     # text -- under a quoted heredoc delimiter (the only form recognized) the

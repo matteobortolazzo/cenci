@@ -989,6 +989,157 @@ run_check_in_dir "${RESIDUAL_WORKDIR}" "${JSON}"
 assert_exit "relative symlink to .env in the hook's own cwd blocked" 2
 assert_blocked_stderr "relative symlink to .env in the hook's own cwd blocked"
 
+# ── Ticket #816: three Bash write-guard bypasses left after #810 ──────────
+# Gap 1: a double-quoted substitution anywhere next to quoted write-shaped
+# text fails closed (exit 7, generalised message). Gap 2: `$'...'` is its own
+# quote state. Gap 3: an expansion of a variable the command itself changes is
+# untrusted, and a relative target is no longer joined to this hook's cwd when
+# the command contains cd/pushd/popd/eval/source/command-position `.`.
+T816_DIR="${BASH_TEST_ROOT}/t816-cwd"
+T816_TMP="${BASH_TEST_ROOT}/t816-tmp"
+mkdir -p "${T816_DIR}" "${T816_TMP}"
+
+# t816_json <command> -- a Bash PreToolUse payload.
+t816_json() { jq -n --arg cmd "$1" '{tool_input:{command:$cmd}}'; }
+
+# t816_has / t816_lacks <label> <substring> -- literal match against the last
+# run's CHECK_STDERR.
+t816_has() {
+    if [[ "${CHECK_STDERR}" == *"$2"* ]]; then
+        pass
+    else
+        fail "$1: stderr should contain '$2', got: ${CHECK_STDERR}"
+    fi
+}
+t816_lacks() {
+    if [[ "${CHECK_STDERR}" == *"$2"* ]]; then
+        fail "$1: stderr must not contain '$2', got: ${CHECK_STDERR}"
+    else
+        pass
+    fi
+}
+
+# run_check_in_dir_tmpdir <cwd> <tmpdir> <json> -- run_check_in_dir with TMPDIR
+# pinned for one invocation.
+run_check_in_dir_tmpdir() {
+    local cwd="$1" tmpdir_override="$2" json="$3"
+    CHECK_STDERR="$(cd "${cwd}" && echo "${json}" | TMPDIR="${tmpdir_override}" "${HOOK_SHELL}" "${CHECK_SH}" 2>&1 >/dev/null)"
+    CHECK_EXIT=$?
+}
+
+echo "case: an out-of-region double-quoted \$( ) substitution hiding a tee to .env is blocked (#816 AC 31)"
+run_check_in_dir "${T816_DIR}" "$(t816_json "echo ok > /tmp/ok; echo \"\$(echo k | tee ${BASH_TEST_ROOT}/.env)\"")"
+assert_exit "#816 AC 31 out-of-region double-quoted substitution blocked" 2
+t816_has "#816 AC 31" "command/process/function substitution appears inside a double-quoted string"
+t816_has "#816 AC 31" "cannot be safely resolved"
+t816_lacks "#816 AC 31" "within a comparison construct"
+t816_has "#816 AC 31 remediation" "git commit -F"
+
+echo "case: \$'a\\'b' cannot hide a real .env redirect behind drifted quote state (#816 AC 33)"
+run_check_in_dir "${T816_DIR}" "$(t816_json "echo ok > /tmp/ok; echo \$'a\\'b' > ${BASH_TEST_ROOT}/.env #'")"
+assert_exit "#816 AC 33 ANSI-C quoted .env redirect blocked" 2
+t816_has "#816 AC 33" "Refusing to write to environment file"
+
+echo "case: an unterminated \$'... before a .env redirect is caught by the zero-parse backstop (#816 edge case)"
+run_check_in_dir "${T816_DIR}" "$(t816_json "echo \$'abc > ${BASH_TEST_ROOT}/.env")"
+assert_exit "#816 edge unterminated \$' backstop blocked" 2
+assert_blocked_stderr "#816 edge unterminated \$' backstop blocked"
+
+echo "case: a relative target after cd is blocked, not joined to the hook cwd (#816 AC 41)"
+run_check_in_dir "${T816_DIR}" "$(t816_json "cd \$HOME/.ssh && echo k >> authorized_keys")"
+assert_exit "#816 AC 41 relative target after cd blocked" 2
+t816_has "#816 AC 41" "relative target cannot be resolved after a directory change"
+t816_has "#816 AC 41" "literal absolute path"
+
+echo "case: control -- the same relative target with no directory change is joined and allowed (#816 AC 41 control)"
+run_check_in_dir "${T816_DIR}" "$(t816_json "echo k >> authorized_keys")"
+assert_exit "#816 AC 41 control relative target without cd allowed" 0
+
+echo "case: a changed HOME makes a \$HOME target untrusted even when the hook-HOME path would also be blocked (#816 AC 42)"
+run_check_in_dir "${T816_DIR}" "$(t816_json "HOME=${BASH_TEST_ROOT}/fake; echo k > \$HOME/.ssh/authorized_keys")"
+assert_exit "#816 AC 42 HOME= then \$HOME target blocked" 2
+t816_has "#816 AC 42" "HOME"
+t816_has "#816 AC 42" "changed by this command"
+t816_has "#816 AC 42" "literal absolute path"
+
+echo "case: a changed TMPDIR makes a \${TMPDIR:-/tmp} target untrusted (#816, TMPDIR parity)"
+run_check_in_dir_tmpdir "${T816_DIR}" "${T816_TMP}" "$(t816_json "TMPDIR=${BASH_TEST_ROOT}; echo k > \${TMPDIR:-/tmp}/notes.txt")"
+assert_exit "#816 TMPDIR= then \${TMPDIR:-/tmp} target blocked" 2
+t816_has "#816 TMPDIR parity" "TMPDIR"
+t816_has "#816 TMPDIR parity" "changed by this command"
+
+for t816_case in \
+    "pushd|pushd /x >/dev/null; echo y > out.txt" \
+    "popd|popd; echo y > out.txt" \
+    "eval|eval 'true'; echo y > out.txt" \
+    "source|source ./env.sh; echo y > out.txt" \
+    "dot|. ./env.sh && echo y > out.txt"; do
+    t816_label="${t816_case%%|*}"
+    t816_cmd="${t816_case#*|}"
+    echo "case: '${t816_label}' blocks a later relative target (#816 AC 41, ${t816_label})"
+    run_check_in_dir "${T816_DIR}" "$(t816_json "${t816_cmd}")"
+    assert_exit "#816 '${t816_label}' then relative target blocked" 2
+    t816_has "#816 '${t816_label}'" "relative target cannot be resolved after a directory change"
+done
+
+echo "case: cd /x && echo y > out.txt is blocked as a relative target after a directory change (#816 edge case)"
+run_check_in_dir "${T816_DIR}" "$(t816_json "cd /x && echo y > out.txt")"
+assert_exit "#816 edge cd /x then out.txt blocked" 2
+t816_has "#816 edge cd /x" "relative target cannot be resolved after a directory change"
+
+echo "case: cd does not affect a \${TMPDIR:-/tmp} expansion (#816 AC 43)"
+run_check_in_dir_tmpdir "${T816_DIR}" "${T816_TMP}" "$(t816_json "cd ${T816_DIR} && go test ./... > \${TMPDIR:-/tmp}/cenci/t-816.log 2>&1")"
+assert_exit "#816 AC 43 cd then \${TMPDIR:-/tmp} log allowed" 0
+
+echo "case: a non-eval/source re-parse verb marks nothing changed (#816 AC 44)"
+run_check_in_dir_tmpdir "${T816_DIR}" "${T816_TMP}" "$(t816_json "timeout 60 make test > \${TMPDIR:-/tmp}/cenci/t-816.log 2>&1")"
+assert_exit "#816 AC 44 timeout then \${TMPDIR:-/tmp} log allowed" 0
+
+echo "case: a literal absolute target is unaffected by a variable change (#816 AC 45)"
+run_check_in_dir "${T816_DIR}" "$(t816_json "HOME=/x some-cmd > /tmp/cenci/t-816.out")"
+assert_exit "#816 AC 45 HOME= with literal absolute target allowed" 0
+
+echo "case: a target word still holding \$' is unresolved (#816 edge case)"
+run_check_in_dir "${T816_DIR}" "$(t816_json "echo x > \$'/tmp/ok'")"
+assert_exit "#816 edge \$'/tmp/ok' target blocked" 2
+t816_has "#816 edge \$'/tmp/ok'" "cannot resolve the Bash write target"
+
+echo "case: a double-quoted substitution with no > and no tee is allowed (#816 edge case)"
+run_check_in_dir "${T816_DIR}" "$(t816_json "git commit -m \"\$(printf 'msg')\"")"
+assert_exit "#816 edge git commit -m \"\$(printf)\" allowed" 0
+
+echo "case: a bare HOME word marks HOME changed -- accepted over-block (#816 edge case)"
+run_check_in_dir "${T816_DIR}" "$(t816_json "echo HOME > \$HOME/x")"
+assert_exit "#816 edge echo HOME > \$HOME/x blocked" 2
+t816_has "#816 edge echo HOME" "changed by this command"
+
+echo "case: an apply_patch envelope whose body holds HOME= and cd keeps its relative cwd join (#816 edge case)"
+JSON=$(jq -n --arg cmd "*** Begin Patch
+*** Add File: notes-816.txt
++HOME=/x
++cd /tmp
+*** End Patch" --arg cwd "${T816_DIR}" "${AP_SHAPE}")
+run_check_in_dir "${T816_DIR}" "${JSON}"
+assert_exit "#816 edge apply_patch body with HOME= and cd allowed" 0
+
+echo "case: grep with a quoted pattern and a . path argument logging to \${TMPDIR:-/tmp} is allowed (#816 review fix)"
+run_check_in_dir_tmpdir "${T816_DIR}" "${T816_TMP}" "$(t816_json "grep \"x\" . > \${TMPDIR:-/tmp}/cenci/g-816.log")"
+assert_exit "#816 review grep \"x\" . > \${TMPDIR:-/tmp} log allowed" 0
+
+echo "case: grep with a quoted pattern and a . path argument to a relative target is still joined and allowed (#816 review fix)"
+run_check_in_dir "${T816_DIR}" "$(t816_json "grep \"x\" . > out.txt")"
+assert_exit "#816 review grep \"x\" . > out.txt allowed" 0
+
+echo "case: a . argument after a backslash-newline continuation logging to \${TMPDIR:-/tmp} is allowed (#816 review fix)"
+run_check_in_dir_tmpdir "${T816_DIR}" "${T816_TMP}" "$(t816_json "docker build -t x \\
+  . > \${TMPDIR:-/tmp}/cenci/b-816.log")"
+assert_exit "#816 review continued docker build . > \${TMPDIR:-/tmp} log allowed" 0
+
+echo "case: a sourced dot behind a FOO=\${x} assignment prefix marks HOME changed, so a later ~ redirect is blocked (#816 review fix)"
+run_check_in_dir "${T816_DIR}" "$(t816_json "FOO=\${x} . ./env.sh; echo y > ~/f")"
+assert_exit "#816 review FOO=\${x} . ./env.sh then ~ redirect blocked" 2
+t816_has "#816 review FOO=\${x} dot" "changed by this command"
+
 # ── Ticket #1212: env-gated capture tap ────────────────────────────────
 # CENCI_CODEX_HOOK_CAPTURE_DIR lets the native runner record the payload cwd
 # and the hook process cwd. It is write-only evidence plumbing inside a
