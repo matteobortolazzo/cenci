@@ -97,10 +97,17 @@ func auditSecurityEnv(t *testing.T, home, xdg string) []string {
 	if err := os.Chmod(xdg, 0700); err != nil {
 		t.Fatalf("hardening CENCI_SOCKET_DIR %q: %v", xdg, err)
 	}
+	// The launcher reads the user fleet config's sandboxEnv.forward (#1016) on
+	// every audit, from $XDG_CONFIG_HOME. Pin it inside the fixture home so a
+	// developer's or CI runner's REAL fleet config can never change these
+	// exact-output assertions (watch/docs/test-isolation.md, "Ambient
+	// config-dir isolation"); tests that need a config write it there
+	// (writeFleetConfigFixture).
 	return append(os.Environ(),
 		"PATH="+fakeDir+":"+os.Getenv("PATH"),
 		"HOME="+home,
 		"CENCI_SOCKET_DIR="+xdg,
+		"XDG_CONFIG_HOME="+filepath.Join(home, ".config"),
 	)
 }
 
@@ -125,6 +132,8 @@ func auditFakeRuntimeCmd(t *testing.T, repo, home string, args ...string) (cmd *
 		"PATH="+fakeDir+":"+os.Getenv("PATH"),
 		"HOME="+home,
 		"CENCI_SOCKET_DIR="+socketDir,
+		// Same hermeticity pin as auditSecurityEnv (#1016).
+		"XDG_CONFIG_HOME="+filepath.Join(home, ".config"),
 	)
 	cmd.Dir = repo
 	return cmd, callLog

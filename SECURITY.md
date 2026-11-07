@@ -38,11 +38,12 @@ container, but the container is what stands between it and your host. See
   dependencies, MCP servers, or plugins you add. `watch` release tarballs themselves
   carry a SLSA build provenance attestation you can verify — see
   [watch/README.md#verifying-release-provenance](./watch/README.md#verifying-release-provenance).
-- **The opt-in flag below**, which deliberately widens the boundary.
+- **The opt-in weakenings below**, which deliberately widen the boundary.
 
 ### Opt-in weakenings
 
-Off by default and must be explicitly requested per-launch:
+Off by default and must be explicitly requested: either per-launch, with a flag, or
+persistently, in your own user config:
 
 - **`--host-network`** — switches the container to host networking, needed for OAuth
   flows that require a browser callback to `localhost`. The container joins a *shared*
@@ -58,6 +59,24 @@ Off by default and must be explicitly requested per-launch:
   [watch/README.md](./watch/README.md#effective-security-posture-cenci-audit). A louder, more visible
   warning when this flag is used is tracked in
   [#148](https://github.com/matteobortolazzo/cenci/issues/148) (not yet landed).
+- **`sandboxEnv.forward`** — a list of extra host environment variable *names* in your
+  user fleet config (`$XDG_CONFIG_HOME/cenci/config.json`, else
+  `~/.config/cenci/config.json`) that `cenci open` forwards into every agent exec
+  session, for secrets the built-in set does not cover (a second host's token, an MCP
+  server's key, a registry credential). Each listed variable that is set on the host
+  crosses the container boundary, so anything the agent runs can read and send it.
+  The key is deliberately **user-scoped, never read from the repo's
+  `.cenci/config.json`**: a repo-committed list arrives via a pull request, so a
+  contributor could add a name such as `AWS_SECRET_ACCESS_KEY` and hand the
+  maintainer's own credential to an agent running with `--dangerously-skip-permissions`.
+  The repo must not be able to widen what crosses the boundary on its own. The key
+  holds names only (an entry containing `=` is refused, and its value redacted from
+  the error), values are read from the launcher's environment at exec time and never
+  enter argv, names are never forwarded at container-create time, every configured
+  name is classified secret whatever its suffix, and `cenci audit`/`cenci security explain`
+  report each name that widens the default forward set as a boundary weakening — see
+  [watch/README.md](./watch/README.md#forwarding-extra-host-env-vars-sandboxenvforward).
+  List only variables you intend the agent to see.
 
 ### Nested Docker (`--dind`) preserves the boundary
 
@@ -209,7 +228,8 @@ and the home volume
 [read-only mounts](./sandbox/README.md#whats-bind-mounted-read-only)), the forwarded
 credentials (the `/tmp/host-claude-creds` staging path, its copy in the home volume that
 Claude uses, the `gh` hosts file, and environment-forwarded keys such as
-`ANTHROPIC_API_KEY` and `OPENAI_API_KEY` when set, and `CONTEXT7_API_KEY`; see
+`ANTHROPIC_API_KEY` and `OPENAI_API_KEY` when set, `CONTEXT7_API_KEY`, and any names in
+`sandboxEnv.forward`; see
 [Credentials](#credentials) and the
 [sandbox README](./sandbox/README.md#what-persists-home-volume) for the full list), and the
 network mode and opt-in options. The default bridge network still allows outbound

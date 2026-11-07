@@ -211,7 +211,11 @@ func deriveObservedDind(obs observedInspect) DindPosture {
 // inspect source — they are per-exec-only values — so they are copied
 // verbatim from planned (Q4: the running-basis "next-exec" qualifier is
 // carried in WriteText/WriteExplanation's rendering, not a second JSON
-// field). Env (create-time env names) is likewise carried over from planned:
+// field); so are the planned boundary weakenings that describe forwardedEnv,
+// the sandboxEnv.forward entries (#1016), appended after the observed
+// --host-network and host-socket weakenings. Every other weakening is derived
+// from the inspect probe alone. Env (create-time env names) is likewise
+// carried over from planned:
 // the combined inspect probe deliberately does not read back .Config.Env
 // (mirroring inspectReusePosture's "one combined inspect call" minimalism),
 // so it is not an observed fact of the running container either.
@@ -256,6 +260,14 @@ func (e *Engine) deriveObservedPosture(scope Scope, agent, home string, opts Opt
 	}
 	if mountExposesHostSocket(observedReuseMounts(obs.Mounts)) {
 		weakenings = append(weakenings, hostSocketBoundaryWeakening())
+	}
+	// The configured sandboxEnv.forward entries are per-exec state with no
+	// inspect source, so they are copied from planned like ForwardedEnv, which
+	// they describe (#1016).
+	for _, w := range planned.BoundaryWeakenings {
+		if w.Option == sandboxEnvForwardOption {
+			weakenings = append(weakenings, w)
+		}
 	}
 
 	imageType := ImageTypeMonolith

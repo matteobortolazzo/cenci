@@ -82,7 +82,12 @@ type DryRunPlan struct {
 // prints the --host-network isolation warning once (on the real engine, e), so
 // calling it on a Stderr-discarding clone avoids printing it a second time.
 // It is handed the secret set the launch context already resolved, so the
-// Posture and the redacted argv share one set (#1201).
+// Posture and the redacted argv share one set (#1201). That set includes the
+// user fleet config's sandboxEnv.forward names (#1016), so redaction and the
+// Posture classify them as secret like the built-ins; as with a real launch, a
+// malformed sandboxEnv.forward fails DryRun before any runtime call, and each
+// configured name that is unset or empty on the host prints one stderr warning
+// (resolveLaunchContext).
 func (e *Engine) DryRun(opts Options) (DryRunPlan, error) {
 	ctx, err := e.resolveLaunchContext(opts)
 	if err != nil {

@@ -227,17 +227,108 @@ func TestDryRun_WriteText_RedactsUserSuppliedSecretValueThroughResolvedSet(t *te
 // emit the value-less form for secrets now), so it needs direct coverage to
 // avoid rotting untested.
 func TestRedactSecretEnv_DirectUnitTest(t *testing.T) {
-	got := redactSecretEnv("OPENAI_API_KEY=sk-cenci-test-secret", resolveSecretEnvSet())
+	got := redactSecretEnv("OPENAI_API_KEY=sk-cenci-test-secret", builtinSecretEnvSet())
 	want := "OPENAI_API_KEY=<redacted>"
 	if got != want {
 		t.Errorf("redactSecretEnv(%q) = %q, want %q", "OPENAI_API_KEY=sk-cenci-test-secret", got, want)
 	}
 
-	if got := redactSecretEnv("TERM=xterm-256color", resolveSecretEnvSet()); got != "TERM=xterm-256color" {
+	if got := redactSecretEnv("TERM=xterm-256color", builtinSecretEnvSet()); got != "TERM=xterm-256color" {
 		t.Errorf("redactSecretEnv(non-secret) = %q, want unchanged", got)
 	}
-	if got := redactSecretEnv("OPENAI_API_KEY", resolveSecretEnvSet()); got != "OPENAI_API_KEY" {
+	if got := redactSecretEnv("OPENAI_API_KEY", builtinSecretEnvSet()); got != "OPENAI_API_KEY" {
 		t.Errorf("redactSecretEnv(bare token, no '=') = %q, want unchanged", got)
+	}
+}
+
+// TestRedactSecretEnv_ConfiguredNameRedactedWhateverItsSuffix (#1016): a name
+// from sandboxEnv.forward is redacted although MY_THING matches none of the
+// secret suffixes, and a built-in-only set leaves the same token readable (so
+// the redaction is the configuration's doing, not a heuristic).
+func TestRedactSecretEnv_ConfiguredNameRedactedWhateverItsSuffix(t *testing.T) {
+	const token = "MY_THING=sk-cenci-test-secret"
+	configured, err := resolveSecretEnvSet([]string{"MY_THING"})
+	if err != nil {
+		t.Fatalf("resolveSecretEnvSet: %v", err)
+	}
+
+	if got, want := redactSecretEnv(token, configured), "MY_THING=<redacted>"; got != want {
+		t.Errorf("redactSecretEnv(%q, configured) = %q, want %q", token, got, want)
+	}
+	if got := redactSecretEnv(token, builtinSecretEnvSet()); got != token {
+		t.Errorf("redactSecretEnv(%q, built-in only) = %q, want it unchanged (MY_THING is only secret by configuration)", token, got)
+	}
+}
+
+// TestDryRun_ConfiguredForward_RedactsAUserSuppliedValueForAConfiguredName runs
+// the real DryRun -> WriteText path: a value-bearing "-e MY_THING=<value>" in
+// opts.AgentArgs is redacted because DryRun hands the merged set (not the
+// built-in one) to the plan.
+func TestDryRun_ConfiguredForward_RedactsAUserSuppliedValueForAConfiguredName(t *testing.T) {
+	eng, _ := limitsDryRunFixture(t, "docker", "", nil)
+	writeFleetConfig(t, `{"sandboxEnv":{"forward":["MY_THING"]}}`)
+	const userSupplied = "sk-user-supplied-sentinel"
+
+	plan, err := eng.DryRun(Options{Agent: "claude", AgentArgs: []string{"-e", "MY_THING=" + userSupplied}})
+	if err != nil {
+		t.Fatalf("DryRun: %v", err)
+	}
+	if !plan.secrets.Has("MY_THING") {
+		t.Fatalf("DryRunPlan.secrets does not classify the configured MY_THING as a secret")
+	}
+	var buf bytes.Buffer
+	if err := plan.WriteText(&buf); err != nil {
+		t.Fatalf("WriteText: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "MY_THING=<redacted>") {
+		t.Errorf("WriteText output missing MY_THING=<redacted>:\n%s", out)
+	}
+	if strings.Contains(out, userSupplied) {
+		t.Errorf("WriteText output leaks the user-supplied value:\n%s", out)
+	}
+}
+
+// TestDryRun_ConfiguredForward_WarnsOncePerUnsetNameOnStderr: every configured
+// name that is unset or empty gets exactly one Warning line on the engine's
+// stderr (not on the dry-run stdout report), naming the variable and
+// sandboxEnv.forward; set names get none, and the dry-run still succeeds.
+func TestDryRun_ConfiguredForward_WarnsOncePerUnsetNameOnStderr(t *testing.T) {
+	eng, _ := limitsDryRunFixture(t, "docker", "", nil)
+	stderr := &bytes.Buffer{}
+	eng.Stderr = stderr
+	writeFleetConfig(t, `{"sandboxEnv":{"forward":["UNSET_ONE","EMPTY_TWO","SET_THREE"]}}`)
+	t.Setenv("EMPTY_TWO", "")
+	t.Setenv("SET_THREE", "sentinel")
+
+	plan, err := eng.DryRun(Options{Agent: "claude"})
+	if err != nil {
+		t.Fatalf("DryRun: %v", err)
+	}
+	var stdout bytes.Buffer
+	if err := plan.WriteText(&stdout); err != nil {
+		t.Fatalf("WriteText: %v", err)
+	}
+
+	lines := strings.Split(strings.TrimRight(stderr.String(), "\n"), "\n")
+	var warnings []string
+	for _, line := range lines {
+		if strings.HasPrefix(line, "Warning:") {
+			warnings = append(warnings, line)
+		}
+	}
+	want := []string{
+		"Warning: UNSET_ONE is listed in sandboxEnv.forward but is unset or empty in this environment; not forwarding it",
+		"Warning: EMPTY_TWO is listed in sandboxEnv.forward but is unset or empty in this environment; not forwarding it",
+	}
+	if !slices.Equal(warnings, want) {
+		t.Errorf("stderr warnings = %q, want exactly %q (once per unset name, config order)", warnings, want)
+	}
+	if strings.Contains(stderr.String(), "SET_THREE") {
+		t.Errorf("stderr warns about the set name SET_THREE:\n%s", stderr)
+	}
+	if strings.Contains(stdout.String(), "Warning:") {
+		t.Errorf("the dry-run stdout report carries a Warning line; warnings belong on stderr:\n%s", stdout.String())
 	}
 }
 

@@ -3,6 +3,7 @@ package launcher
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -244,7 +245,7 @@ func TestAssembleExecEnvAndAssembleEnv_NeverEmitProviderSecretValues(t *testing.
 
 	for _, tc := range cases {
 		t.Run(tc.agent, func(t *testing.T) {
-			execArgs := assembleExecEnv(tc.agent, resolveSecretEnvSet())
+			execArgs := assembleExecEnv(tc.agent, builtinSecretEnvSet())
 			e := &Engine{Runtime: "docker", Stderr: &bytes.Buffer{}}
 			createArgs := e.assembleEnv(tc.agent, Scope{WorkspaceScope: "s"}, Options{}, false, DefaultSandboxPlugins())
 
@@ -302,7 +303,7 @@ func TestAssembleExecEnvAndAssembleEnv_EmptyProviderKeys_OmitEntirely(t *testing
 	}
 
 	for _, agent := range []string{"claude", "codex", "opencode"} {
-		execArgs := assembleExecEnv(agent, resolveSecretEnvSet())
+		execArgs := assembleExecEnv(agent, builtinSecretEnvSet())
 		e := &Engine{Runtime: "docker", Stderr: &bytes.Buffer{}}
 		createArgs := e.assembleEnv(agent, Scope{WorkspaceScope: "s"}, Options{}, false, DefaultSandboxPlugins())
 
@@ -314,6 +315,241 @@ func TestAssembleExecEnvAndAssembleEnv_EmptyProviderKeys_OmitEntirely(t *testing
 				t.Errorf("assembleEnv(%q) emitted %s with an empty host value, want entirely absent; got: %v", agent, name, createArgs)
 			}
 		}
+	}
+}
+
+// -- ticket #1016: sandboxEnv.forward through the real launch plan ------------
+//
+// These drive DryRun, which shares resolveLaunchContext and planArgvs with a
+// real launch (#620), so the argvs asserted here are the ones Launch builds.
+// The black-box open/attach runs live in watch/sandbox_open_test.go.
+
+// forwardConfigBody renders a fleet config whose sandboxEnv.forward lists
+// names.
+func forwardConfigBody(names ...string) string {
+	quoted := make([]string, len(names))
+	for i, n := range names {
+		quoted[i] = fmt.Sprintf("%q", n)
+	}
+	return `{"sandboxEnv":{"forward":[` + strings.Join(quoted, ",") + `]}}`
+}
+
+// forwardDryRunFixture is limitsDryRunFixture with the three built-in host keys
+// emptied, so the attach argv carries only what a test configures; it returns
+// the engine with a fresh stderr buffer.
+func forwardDryRunFixture(t *testing.T) (*Engine, *bytes.Buffer) {
+	t.Helper()
+	eng, _ := limitsDryRunFixture(t, "docker", "", nil)
+	setAllSecretHostKeys(t, func(string) string { return "" })
+	stderr := &bytes.Buffer{}
+	eng.Stderr = stderr
+	return eng, stderr
+}
+
+func TestDryRun_ConfiguredForward_AttachArgvCarriesBareTokensForSetNamesOnly(t *testing.T) {
+	eng, _ := forwardDryRunFixture(t)
+	writeFleetConfig(t, forwardConfigBody("MY_THING", "TAVILY_API_KEY", "UNSET_THING", "EMPTY_THING"))
+	t.Setenv("MY_THING", "sentinel-1")
+	t.Setenv("TAVILY_API_KEY", "sentinel-2")
+	t.Setenv("EMPTY_THING", "")
+
+	plan, err := eng.DryRun(Options{Agent: "claude"})
+	if err != nil {
+		t.Fatalf("DryRun: %v", err)
+	}
+
+	if got, want := bareEnvNames(plan.AttachArgv), []string{"MY_THING", "TAVILY_API_KEY"}; !slices.Equal(got, want) {
+		t.Errorf("attach argv bare -e names = %v, want %v (set names only, config order)", got, want)
+	}
+}
+
+// TestDryRun_ConfiguredForward_BuiltinDuplicateIsEmittedOnceInItsOwnPosition
+// pins the duplicate rule: a configured built-in is emitted exactly once, at
+// the built-in's position (before the configured-only names even when listed
+// after them), and is forwarded to every agent, claude included.
+func TestDryRun_ConfiguredForward_BuiltinDuplicateIsEmittedOnceInItsOwnPosition(t *testing.T) {
+	eng, _ := forwardDryRunFixture(t)
+	writeFleetConfig(t, forwardConfigBody("MY_THING", "OPENAI_API_KEY"))
+	t.Setenv("CONTEXT7_API_KEY", "sentinel-c7")
+	t.Setenv("OPENAI_API_KEY", "sentinel-openai")
+	t.Setenv("MY_THING", "sentinel-thing")
+
+	plan, err := eng.DryRun(Options{Agent: "claude"})
+	if err != nil {
+		t.Fatalf("DryRun: %v", err)
+	}
+
+	want := []string{"CONTEXT7_API_KEY", "OPENAI_API_KEY", "MY_THING"}
+	if got := bareEnvNames(plan.AttachArgv); !slices.Equal(got, want) {
+		t.Errorf("attach argv bare -e names = %v, want %v (OPENAI_API_KEY once, built-in position, forwarded to claude)", got, want)
+	}
+}
+
+// TestDryRun_ConfiguredForward_CreateArgvIsByteIdenticalWithAndWithoutConfig:
+// configured names are per-exec only, so the create argv built from the same
+// inputs must not change by a single token when a config appears.
+func TestDryRun_ConfiguredForward_CreateArgvIsByteIdenticalWithAndWithoutConfig(t *testing.T) {
+	eng, _ := forwardDryRunFixture(t)
+	t.Setenv("MY_THING", "sentinel-thing")
+	t.Setenv("TAVILY_API_KEY", "sentinel-tavily")
+	t.Setenv("OPENAI_API_KEY", "sentinel-openai")
+
+	writeFleetConfig(t, "")
+	without, err := eng.DryRun(Options{Agent: "claude"})
+	if err != nil {
+		t.Fatalf("DryRun without config: %v", err)
+	}
+	if len(without.CreateArgv) == 0 {
+		t.Fatalf("no create argv without config (the container is not running), the comparison would be vacuous")
+	}
+
+	writeFleetConfig(t, forwardConfigBody("MY_THING", "TAVILY_API_KEY", "OPENAI_API_KEY"))
+	with, err := eng.DryRun(Options{Agent: "claude"})
+	if err != nil {
+		t.Fatalf("DryRun with config: %v", err)
+	}
+
+	if !slices.Equal(with.CreateArgv, without.CreateArgv) {
+		t.Errorf("create argv differs with a sandboxEnv.forward config:\nwith:    %v\nwithout: %v", with.CreateArgv, without.CreateArgv)
+	}
+	if slices.Equal(with.AttachArgv, without.AttachArgv) {
+		t.Errorf("attach argv did not change with the config; the forward was never applied: %v", with.AttachArgv)
+	}
+}
+
+// TestDryRun_ConfiguredForward_NoValueAndNoNameEqualsInAnyOutput: with a
+// sentinel value for each configured name (including the oddly named MY_THING
+// and a built-in duplicate), neither the sentinel nor "NAME=" appears in the
+// joined create argv, the joined attach argv or the dry-run text.
+func TestDryRun_ConfiguredForward_NoValueAndNoNameEqualsInAnyOutput(t *testing.T) {
+	eng, _ := forwardDryRunFixture(t)
+	names := []string{"MY_THING", "TAVILY_API_KEY", "OPENAI_API_KEY"}
+	writeFleetConfig(t, forwardConfigBody(names...))
+	sentinels := map[string]string{}
+	for _, name := range names {
+		sentinels[name] = "sentinel-value-for-" + strings.ToLower(name)
+		t.Setenv(name, sentinels[name])
+	}
+
+	plan, err := eng.DryRun(Options{Agent: "claude"})
+	if err != nil {
+		t.Fatalf("DryRun: %v", err)
+	}
+	var text bytes.Buffer
+	if err := plan.WriteText(&text); err != nil {
+		t.Fatalf("WriteText: %v", err)
+	}
+
+	outputs := map[string]string{
+		"create argv": strings.Join(plan.CreateArgv, " "),
+		"attach argv": strings.Join(plan.AttachArgv, " "),
+		"dry-run":     text.String(),
+	}
+	for label, out := range outputs {
+		for _, name := range names {
+			if strings.Contains(out, sentinels[name]) {
+				t.Errorf("%s leaks the %s sentinel value:\n%s", label, name, out)
+			}
+			if strings.Contains(out, name+"=") {
+				t.Errorf("%s carries a %s= value-bearing token:\n%s", label, name, out)
+			}
+		}
+	}
+	for _, name := range names {
+		if strings.Contains(outputs["create argv"], name) {
+			t.Errorf("create argv mentions the configured name %s; configured names are per-exec only", name)
+		}
+	}
+}
+
+// TestDryRun_ConfiguredForward_NextAttachReflectsTheChangedConfig: the config is
+// re-read on every launch, so editing it between two attaches (same container,
+// no recreate) changes the second attach argv.
+func TestDryRun_ConfiguredForward_NextAttachReflectsTheChangedConfig(t *testing.T) {
+	eng, _ := forwardDryRunFixture(t)
+	t.Setenv("FIRST_ONE", "sentinel-1")
+	t.Setenv("SECOND_ONE", "sentinel-2")
+
+	writeFleetConfig(t, forwardConfigBody("FIRST_ONE"))
+	first, err := eng.DryRun(Options{Agent: "claude"})
+	if err != nil {
+		t.Fatalf("first DryRun: %v", err)
+	}
+	if got, want := bareEnvNames(first.AttachArgv), []string{"FIRST_ONE"}; !slices.Equal(got, want) {
+		t.Fatalf("first attach bare names = %v, want %v", got, want)
+	}
+
+	writeFleetConfig(t, forwardConfigBody("SECOND_ONE"))
+	second, err := eng.DryRun(Options{Agent: "claude"})
+	if err != nil {
+		t.Fatalf("second DryRun: %v", err)
+	}
+	if got, want := bareEnvNames(second.AttachArgv), []string{"SECOND_ONE"}; !slices.Equal(got, want) {
+		t.Errorf("second attach bare names = %v, want %v (the second config)", got, want)
+	}
+}
+
+// TestDryRun_ConfiguredForward_SetThenUnset_HostStateAtExecTimeWins: a name set
+// at one launch and unset at the next gives no token the second time, plus the
+// one-line warning naming it.
+func TestDryRun_ConfiguredForward_SetThenUnset_HostStateAtExecTimeWins(t *testing.T) {
+	eng, stderr := forwardDryRunFixture(t)
+	writeFleetConfig(t, forwardConfigBody("MY_THING"))
+
+	t.Setenv("MY_THING", "sentinel")
+	first, err := eng.DryRun(Options{Agent: "claude"})
+	if err != nil {
+		t.Fatalf("first DryRun: %v", err)
+	}
+	if !slices.Contains(bareEnvNames(first.AttachArgv), "MY_THING") {
+		t.Fatalf("first attach lacks -e MY_THING: %v", first.AttachArgv)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("a set name must not warn, got stderr:\n%s", stderr)
+	}
+
+	t.Setenv("MY_THING", "")
+	second, err := eng.DryRun(Options{Agent: "claude"})
+	if err != nil {
+		t.Fatalf("second DryRun (name now unset) must still proceed: %v", err)
+	}
+	if slices.Contains(bareEnvNames(second.AttachArgv), "MY_THING") {
+		t.Errorf("second attach still carries -e MY_THING after the host unset it: %v", second.AttachArgv)
+	}
+	const wantWarning = "Warning: MY_THING is listed in sandboxEnv.forward but is unset or empty in this environment; not forwarding it\n"
+	if stderr.String() != wantWarning {
+		t.Errorf("stderr = %q, want exactly %q", stderr.String(), wantWarning)
+	}
+}
+
+// TestResolveLaunchContext_MalformedForwardConfig_FailsBeforeRuntimeResolution:
+// a malformed sandboxEnv.forward is a plain error returned before the container
+// runtime is resolved or called, so create, attach and dry-run all make no
+// runtime call.
+func TestResolveLaunchContext_MalformedForwardConfig_FailsBeforeRuntimeResolution(t *testing.T) {
+	_, callLog := limitsDryRunFixture(t, "docker", "", nil)
+	writeFleetConfig(t, `{"sandboxEnv":{"forward":["FOO=s3cr3t-sentinel"]}}`)
+	eng := &Engine{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}} // Runtime unset: resolution has not happened
+
+	_, err := eng.resolveLaunchContext(Options{Agent: "claude"})
+	if err == nil {
+		t.Fatalf("resolveLaunchContext succeeded, want the config error")
+	}
+	if IsUsage(err) {
+		t.Errorf("error %q is a usage error, want a plain error (exit 1)", err)
+	}
+	if !strings.Contains(err.Error(), "FOO=<redacted>") || strings.Contains(err.Error(), "s3cr3t-sentinel") {
+		t.Errorf("error %q must show FOO=<redacted> and never the value", err)
+	}
+	if eng.Runtime != "" {
+		t.Errorf("Runtime resolved to %q before the config error; the config read must precede runtime resolution", eng.Runtime)
+	}
+	if lines := readCallLog(t, callLog); len(lines) != 0 {
+		t.Errorf("runtime calls made before the config error: %v", lines)
+	}
+
+	if _, err := eng.DryRun(Options{Agent: "claude"}); err == nil {
+		t.Errorf("DryRun succeeded on a malformed sandboxEnv.forward, want the same hard error")
 	}
 }
 
@@ -837,7 +1073,7 @@ func inTmux(t *testing.T) {
 // attachArgvWithTag assembles the agent-attach argv exactly as a launch does:
 // the per-exec env plus whatever tagLaunchPane returned.
 func attachArgvWithTag(agent, container string, tag []string) []string {
-	execEnv := append(assembleExecEnv(agent, resolveSecretEnvSet()), tag...)
+	execEnv := append(assembleExecEnv(agent, builtinSecretEnvSet()), tag...)
 	return buildAgentExecArgv(container, agent, buildAgentCmdArgs(agent, DefaultModel(agent)), execEnv, Options{Agent: agent})
 }
 

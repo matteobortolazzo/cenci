@@ -4715,7 +4715,11 @@ func TestCenciSandArgv0_TombstoneExits2WithMigrationMap(t *testing.T) {
 // the "always explicit, never unset" contract is visible as a set: absent
 // must stay meaningful as its own third state for the consuming skill, so an
 // off, missing, or broken host flag has to say "0" rather than omit the
-// variable — and a broken fleet config must never fail the launch.
+// variable. A fleet config whose `planning.attended` is wrong-typed still folds
+// to "0" here (resolveAttendedFlag). An UNPARSABLE fleet config used to fold
+// to "0" too, but since #1016 `sandboxEnv.forward` is read from the same file
+// and fails closed, so `cenci open` exits 1 on it instead; see
+// TestOpen_UnparsableFleetConfig_FailsClosedNamingThePath.
 func TestOpenClaude_ForwardsResolvedAttendedFlag(t *testing.T) {
 	cases := []struct {
 		name        string
@@ -4725,7 +4729,7 @@ func TestOpenClaude_ForwardsResolvedAttendedFlag(t *testing.T) {
 		{name: "attended on", fleetConfig: `{"planning": {"attended": true}}`, want: "CENCI_ATTENDED=1"},
 		{name: "attended off", fleetConfig: `{"planning": {"attended": false}}`, want: "CENCI_ATTENDED=0"},
 		{name: "no fleet config", fleetConfig: "", want: "CENCI_ATTENDED=0"},
-		{name: "malformed fleet config", fleetConfig: `{"planning": `, want: "CENCI_ATTENDED=0"},
+		{name: "non-bool attended value", fleetConfig: `{"planning": {"attended": "yes"}}`, want: "CENCI_ATTENDED=0"},
 	}
 
 	for _, tc := range cases {
@@ -4904,6 +4908,365 @@ func TestOpenClaude_AttendedFlagAddsNoFleetConfigMount(t *testing.T) {
 		if strings.Contains(runLine, forbidden) {
 			t.Errorf("create-time run args must never mount the host fleet config (%q); got:\n%s", forbidden, runLine)
 		}
+	}
+}
+
+// -- ticket #1016: sandboxEnv.forward in the user fleet config ----------------
+//
+// The fleet config is read from $XDG_CONFIG_HOME/cenci/config.json, which
+// openTestEnv pins under the fixture home (writeFleetConfigFixture). These
+// black-box runs pin what the launcher does with the allowlist end to end:
+// bare per-exec tokens for set names, one stderr warning per unset name, and a
+// fail-closed exit 1 with no runtime call for a malformed entry.
+
+// TestOpen_ConfiguredForward_AttachCarriesBareTokensForSetNamesOnly covers the
+// headline AC in repo scope and in legacy (non-repo) workspace scope: a set
+// configured name is a bare `-e NAME` pair on the attach argv, never on the
+// create argv, never with a value; an unset or empty name gets no token and one
+// `Warning:` line on stderr, and the launch still proceeds.
+func TestOpen_ConfiguredForward_AttachCarriesBareTokensForSetNamesOnly(t *testing.T) {
+	scopes := []struct {
+		name string
+		repo bool
+	}{
+		{"legacy non-repo scope", false},
+		{"repo scope", true},
+	}
+	for _, sc := range scopes {
+		t.Run(sc.name, func(t *testing.T) {
+			fakeDir := t.TempDir()
+			callLog := writeScriptedRuntimes(t, fakeDir)
+			assets := writeAssetFixture(t)
+			env, home, _ := openTestEnv(t, fakeDir, assets)
+			writeFleetConfigFixture(t, home, `{"sandboxEnv":{"forward":["MY_THING","TAVILY_API_KEY","UNSET_ONE","EMPTY_TWO"]}}`)
+			const thingValue, tavilyValue = "sk-cenci-sentinel-thing", "sk-cenci-sentinel-tavily"
+			env = append(env, "MY_THING="+thingValue, "TAVILY_API_KEY="+tavilyValue, "UNSET_ONE=", "EMPTY_TWO=")
+			dir := t.TempDir()
+			if sc.repo {
+				dir = configuredRepoEnv(t, `{}`)
+			}
+
+			run := runCenci(t, env, dir, "open", "ch")
+			if run.exitCode != 0 {
+				t.Fatalf("open ch: exit %d (unset configured names must never fail the launch)\n%s", run.exitCode, run.stderr)
+			}
+
+			lines := callLogLines(t, callLog)
+			runLine, ok := findLineWithPrefix(lines, "run --name ")
+			if !ok {
+				t.Fatalf("expected a container run, got calls:\n%s", strings.Join(lines, "\n"))
+			}
+			attach := attachLine(t, lines)
+			for _, name := range []string{"MY_THING", "TAVILY_API_KEY"} {
+				if !hasBareEnvToken(attach, name) {
+					t.Errorf("attach argv lacks the bare -e %s pair:\n%s", name, attach)
+				}
+			}
+			for _, name := range []string{"UNSET_ONE", "EMPTY_TWO"} {
+				if strings.Contains(attach, name) {
+					t.Errorf("attach argv carries %s although it is unset or empty on the host:\n%s", name, attach)
+				}
+			}
+			for label, line := range map[string]string{"create": runLine, "attach": attach} {
+				for _, leaked := range []string{thingValue, tavilyValue, "MY_THING=", "TAVILY_API_KEY="} {
+					if strings.Contains(line, leaked) {
+						t.Errorf("%s argv carries %q; values and NAME= forms must never reach argv:\n%s", label, leaked, line)
+					}
+				}
+			}
+			for _, name := range []string{"MY_THING", "TAVILY_API_KEY", "UNSET_ONE", "EMPTY_TWO"} {
+				if strings.Contains(runLine, name) {
+					t.Errorf("create argv mentions the configured name %s; forwarding is per exec only:\n%s", name, runLine)
+				}
+			}
+
+			var warnings []string
+			for _, line := range strings.Split(run.stderr, "\n") {
+				if strings.HasPrefix(line, "Warning:") && strings.Contains(line, "sandboxEnv.forward") {
+					warnings = append(warnings, line)
+				}
+			}
+			want := []string{
+				"Warning: UNSET_ONE is listed in sandboxEnv.forward but is unset or empty in this environment; not forwarding it",
+				"Warning: EMPTY_TWO is listed in sandboxEnv.forward but is unset or empty in this environment; not forwarding it",
+			}
+			if !slices.Equal(warnings, want) {
+				t.Errorf("sandboxEnv.forward warnings on stderr = %q, want exactly %q (one per unset name)", warnings, want)
+			}
+		})
+	}
+}
+
+// TestOpen_ConfiguredForward_EntryWithEquals_FailsClosedBeforeAnyRuntimeCall is
+// the open and open --dry-run half of the "=" AC: exit 1 (a plain config error,
+// not the usage exit 2) naming the config path, the key and FOO=<redacted>,
+// never the value, with an empty runtime call log whether the container would be
+// created or attached.
+func TestOpen_ConfiguredForward_EntryWithEquals_FailsClosedBeforeAnyRuntimeCall(t *testing.T) {
+	modes := []struct {
+		name      string
+		args      []string
+		attaching bool
+	}{
+		{"create", []string{"open", "ch"}, false},
+		{"attach", []string{"open", "ch"}, true},
+		{"dry-run", []string{"open", "ch", "--dry-run"}, false},
+		{"dry-run against a running container", []string{"open", "ch", "--dry-run"}, true},
+	}
+	for _, m := range modes {
+		t.Run(m.name, func(t *testing.T) {
+			fakeDir := t.TempDir()
+			callLog := writeScriptedRuntimes(t, fakeDir)
+			assets := writeAssetFixture(t)
+			var env []string
+			if m.attaching {
+				env = openAttachEnvFor(t, fakeDir, assets, "claude-cenci-default", defaultPluginsContainerEnv)
+			} else {
+				env, _, _ = openTestEnv(t, fakeDir, assets)
+			}
+			xdg := t.TempDir()
+			env = append(env, "XDG_CONFIG_HOME="+xdg)
+			configPath := filepath.Join(xdg, "cenci", "config.json")
+			if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+				t.Fatalf("mkdir: %v", err)
+			}
+			if err := os.WriteFile(configPath, []byte(`{"sandboxEnv":{"forward":["FOO=bar"]}}`), 0o600); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+
+			run := runCenci(t, env, t.TempDir(), m.args...)
+
+			if run.exitCode != 1 {
+				t.Fatalf("expected exit 1 (plain config error, not usage exit 2), got %d\nstdout:\n%s\nstderr:\n%s", run.exitCode, run.stdout, run.stderr)
+			}
+			if !strings.Contains(run.stderr, configPath) {
+				t.Errorf("error does not name the config file %s:\n%s", configPath, run.stderr)
+			}
+			// The path is host-derived (a temp dir named after this test); strip
+			// it before looking for a leaked value.
+			for label, stream := range map[string]string{"stderr": run.stderr, "stdout": run.stdout} {
+				msg := strings.ReplaceAll(stream, configPath, "<path>")
+				if strings.Contains(msg, "bar") {
+					t.Errorf("%s leaks the value after the first '=':\n%s", label, msg)
+				}
+			}
+			for _, want := range []string{"sandboxEnv.forward", "FOO=<redacted>"} {
+				if !strings.Contains(run.stderr, want) {
+					t.Errorf("error does not contain %q:\n%s", want, run.stderr)
+				}
+			}
+			if lines := callLogLines(t, callLog); len(lines) != 0 {
+				t.Errorf("a malformed sandboxEnv.forward must make no runtime call, got:\n%s", strings.Join(lines, "\n"))
+			}
+		})
+	}
+}
+
+// TestOpen_UnparsableFleetConfig_FailsClosedNamingThePath: sandboxEnv.forward is
+// read from the user fleet config, so a file that is not valid JSON fails
+// `cenci open` with exit 1 and the path, before any runtime call. This replaces
+// the old fold-to-off behavior TestOpenClaude_ForwardsResolvedAttendedFlag used
+// to pin for an unparsable file: silently dropping the allowlist would hide a
+// config error behind a confusing in-container failure.
+func TestOpen_UnparsableFleetConfig_FailsClosedNamingThePath(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, home, _ := openTestEnv(t, fakeDir, assets)
+	writeFleetConfigFixture(t, home, `{"planning": `)
+	configPath := filepath.Join(home, ".config", "cenci", "config.json")
+
+	run := runCenci(t, env, t.TempDir(), "open", "ch")
+
+	if run.exitCode != 1 {
+		t.Fatalf("expected exit 1, got %d\nstdout:\n%s\nstderr:\n%s", run.exitCode, run.stdout, run.stderr)
+	}
+	if !strings.Contains(run.stderr, configPath) {
+		t.Errorf("error does not name the config file %s:\n%s", configPath, run.stderr)
+	}
+	if lines := callLogLines(t, callLog); len(lines) != 0 {
+		t.Errorf("an unparsable fleet config must make no runtime call, got:\n%s", strings.Join(lines, "\n"))
+	}
+}
+
+// TestOpen_FleetConfigWithOtherBlocksAndNoSandboxEnv_LaunchesWithBuiltinSet: a
+// fleet config that is valid JSON with other blocks (including "sandbox": false,
+// which run.Load reads as cenci run's own boolean) but no sandboxEnv resolves to
+// the built-in set with no error and no warning.
+func TestOpen_FleetConfigWithOtherBlocksAndNoSandboxEnv_LaunchesWithBuiltinSet(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, home, _ := openTestEnv(t, fakeDir, assets)
+	writeFleetConfigFixture(t, home, `{"dispatch":{},"automerge":{},"planning":{},"sandbox":false}`)
+	env = append(env, "CONTEXT7_API_KEY=sk-cenci-sentinel-context7")
+
+	run := runCenci(t, env, t.TempDir(), "open", "ch")
+	if run.exitCode != 0 {
+		t.Fatalf("open ch: exit %d\n%s", run.exitCode, run.stderr)
+	}
+	if strings.Contains(run.stderr, "sandboxEnv") || strings.Contains(run.stderr, "Warning:") {
+		t.Errorf("a config without sandboxEnv must produce no sandboxEnv error or warning, got stderr:\n%s", run.stderr)
+	}
+	attach := attachLine(t, callLogLines(t, callLog))
+	if !hasBareEnvToken(attach, "CONTEXT7_API_KEY") {
+		t.Errorf("built-in CONTEXT7_API_KEY no longer forwarded with an unrelated fleet config present:\n%s", attach)
+	}
+}
+
+// TestOpenAttachToRunning_ReloadsForwardConfigBetweenLaunches: editing
+// sandboxEnv.forward while a container runs takes effect on the next attach to
+// that same container, with no recreate; the second attach reflects only the
+// second config.
+func TestOpenAttachToRunning_ReloadsForwardConfigBetweenLaunches(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, home, socketDir := openTestEnv(t, fakeDir, assets)
+	const container = "claude-cenci-default"
+	env = append(env,
+		"FAKE_PS="+container+"\n",
+		"FAKE_INSPECT_LABEL=detached",
+		"FAKE_INSPECT_MOUNTS=/workspace::/workspace\n/home/dev::/home/dev\n"+socketDir+"::/run/user/1000/cenci\n",
+		"FIRST_ONE=sentinel-first",
+		"SECOND_ONE=sentinel-second",
+	)
+	launchDir := t.TempDir()
+
+	forwards := []struct{ listed, notListed string }{
+		{"FIRST_ONE", "SECOND_ONE"},
+		{"SECOND_ONE", "FIRST_ONE"},
+	}
+	for launch, f := range forwards {
+		writeFleetConfigFixture(t, home, fmt.Sprintf(`{"sandboxEnv":{"forward":[%q]}}`, f.listed))
+		before := len(callLogLines(t, callLog))
+
+		run := runCenci(t, env, launchDir, "open", "ch")
+		if run.exitCode != 0 {
+			t.Fatalf("launch %d into running container: exit %d\n%s", launch+1, run.exitCode, run.stderr)
+		}
+
+		lines := callLogLines(t, callLog)[before:]
+		if _, ok := findLineWithPrefix(lines, "run --name "); ok {
+			t.Fatalf("launch %d must reuse the running container, got calls:\n%s", launch+1, strings.Join(lines, "\n"))
+		}
+		attach := attachLine(t, lines)
+		if !hasBareEnvToken(attach, f.listed) {
+			t.Errorf("launch %d attach lacks the bare -e %s pair of its own config:\n%s", launch+1, f.listed, attach)
+		}
+		if strings.Contains(attach, f.notListed) {
+			t.Errorf("launch %d attach still carries %s from the other config:\n%s", launch+1, f.notListed, attach)
+		}
+	}
+}
+
+// TestOpenAttachToRunning_UnsetConfiguredNamesWarnOncePerNameAndProceed: the
+// attach path (an already-running container, so no create) prints exactly one
+// `Warning:` line on stderr per configured name that is unset or empty (one
+// never exported, one exported empty), emits no `-e <NAME>` token for either,
+// still forwards the set name, proceeds with exit 0 and makes no create call.
+func TestOpenAttachToRunning_UnsetConfiguredNamesWarnOncePerNameAndProceed(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, home, socketDir := openTestEnv(t, fakeDir, assets)
+	const container = "claude-cenci-default"
+	env = append(env,
+		"FAKE_PS="+container+"\n",
+		"FAKE_INSPECT_LABEL=detached",
+		"FAKE_INSPECT_MOUNTS=/workspace::/workspace\n/home/dev::/home/dev\n"+socketDir+"::/run/user/1000/cenci\n",
+		"SET_ONE=sk-cenci-sentinel-set",
+		"EMPTY_TWO=",
+	)
+	writeFleetConfigFixture(t, home, `{"sandboxEnv":{"forward":["SET_ONE","NEVER_EXPORTED","EMPTY_TWO"]}}`)
+
+	run := runCenci(t, env, t.TempDir(), "open", "ch")
+	if run.exitCode != 0 {
+		t.Fatalf("attach into running container: exit %d (unset configured names must never fail the launch)\n%s", run.exitCode, run.stderr)
+	}
+
+	lines := callLogLines(t, callLog)
+	if runLine, ok := findLineWithPrefix(lines, "run --name "); ok {
+		t.Fatalf("attach must reuse the running container, got a create call:\n%s", runLine)
+	}
+	attach := attachLine(t, lines)
+	if !hasBareEnvToken(attach, "SET_ONE") {
+		t.Errorf("attach argv lacks the bare -e SET_ONE pair:\n%s", attach)
+	}
+	for _, name := range []string{"NEVER_EXPORTED", "EMPTY_TWO"} {
+		if strings.Contains(attach, name) {
+			t.Errorf("attach argv carries %s although it is unset or empty on the host:\n%s", name, attach)
+		}
+	}
+
+	var warnings []string
+	for _, line := range strings.Split(run.stderr, "\n") {
+		if strings.HasPrefix(line, "Warning:") && strings.Contains(line, "sandboxEnv.forward") {
+			warnings = append(warnings, line)
+		}
+	}
+	want := []string{
+		"Warning: NEVER_EXPORTED is listed in sandboxEnv.forward but is unset or empty in this environment; not forwarding it",
+		"Warning: EMPTY_TWO is listed in sandboxEnv.forward but is unset or empty in this environment; not forwarding it",
+	}
+	if !slices.Equal(warnings, want) {
+		t.Errorf("sandboxEnv.forward warnings on stderr = %q, want exactly %q (one per unset name)", warnings, want)
+	}
+	if strings.Contains(run.stderr, "SET_ONE") {
+		t.Errorf("a set name must produce no warning, got stderr:\n%s", run.stderr)
+	}
+}
+
+// TestOpen_RepoConfigSandboxEnvForward_IsIgnored pins the user-scope-only
+// boundary: a repo-committed .cenci/config.json listing sandboxEnv.forward is
+// never a forwarding source. Even with the host value set, the attach argv
+// carries no `-e REPO_ONLY_SECRET` (the create argv neither), there is no
+// warning or error for it, and the launch proceeds. The user fleet config
+// carries a different name so the user-scope path stays exercised.
+func TestOpen_RepoConfigSandboxEnvForward_IsIgnored(t *testing.T) {
+	fleets := []struct {
+		name  string
+		fleet string
+	}{
+		{"no fleet config", ""},
+		{"fleet config naming a different variable", `{"sandboxEnv":{"forward":["USER_ONLY"]}}`},
+	}
+	for _, f := range fleets {
+		t.Run(f.name, func(t *testing.T) {
+			fakeDir := t.TempDir()
+			callLog := writeScriptedRuntimes(t, fakeDir)
+			assets := writeAssetFixture(t)
+			env, home, _ := openTestEnv(t, fakeDir, assets)
+			if f.fleet != "" {
+				writeFleetConfigFixture(t, home, f.fleet)
+			}
+			const repoSecret = "sk-cenci-sentinel-repo-only"
+			env = append(env, "REPO_ONLY_SECRET="+repoSecret, "USER_ONLY=sk-cenci-sentinel-user")
+			repo := configuredRepoEnv(t, `{"sandboxEnv":{"forward":["REPO_ONLY_SECRET"]}}`)
+
+			run := runCenci(t, env, repo, "open", "ch")
+			if run.exitCode != 0 {
+				t.Fatalf("open ch: exit %d (a repo sandboxEnv block must be ignored, not an error)\n%s", run.exitCode, run.stderr)
+			}
+			if strings.Contains(run.stderr, "REPO_ONLY_SECRET") || strings.Contains(run.stderr, "sandboxEnv") {
+				t.Errorf("a repo sandboxEnv.forward must produce no warning or error, got stderr:\n%s", run.stderr)
+			}
+
+			lines := callLogLines(t, callLog)
+			runLine, ok := findLineWithPrefix(lines, "run --name ")
+			if !ok {
+				t.Fatalf("expected a container run, got calls:\n%s", strings.Join(lines, "\n"))
+			}
+			attach := attachLine(t, lines)
+			for label, line := range map[string]string{"create": runLine, "attach": attach} {
+				if strings.Contains(line, "REPO_ONLY_SECRET") || strings.Contains(line, repoSecret) {
+					t.Errorf("%s argv forwards the repo-listed REPO_ONLY_SECRET; the repo must not widen the boundary:\n%s", label, line)
+				}
+			}
+			if f.fleet != "" && !hasBareEnvToken(attach, "USER_ONLY") {
+				t.Errorf("the user fleet config's USER_ONLY must still be forwarded:\n%s", attach)
+			}
+		})
 	}
 }
 

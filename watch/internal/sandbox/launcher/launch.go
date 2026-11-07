@@ -228,9 +228,10 @@ type launchCtx struct {
 	// Only the config is resolved here; the runtime's total memory is queried
 	// later, in planArgvs' create branch, so an attach never depends on it.
 	Limits workloadLimits
-	// Secrets is the resolved secret env-name set (names only, never values),
-	// built once here so forwarding (assembleExecEnv) and dry-run redaction
-	// share one set (#1201).
+	// Secrets is the resolved secret env-name set (names only, never values):
+	// the built-in names merged with the user's sandboxEnv.forward (#1016),
+	// loaded once here so forwarding (assembleExecEnv), classification and
+	// dry-run redaction share one set (#1201).
 	Secrets secretEnvSet
 }
 
@@ -240,10 +241,13 @@ type launchCtx struct {
 // UsageError on conflicting/misplaced --dind flags), container-runtime
 // resolution (mutates e.Runtime only when unset — docker-first under dind,
 // else podman-first), and dindPreflight when dind is on. The sandbox.plugins,
-// sandbox.azure and sandbox.memoryLimit/pidsLimit config reads happen before
-// runtime resolution, so a malformed value makes no runtime call. Both Launch
-// and DryRun call this so their failure modes for these steps can never
-// diverge.
+// sandbox.azure and sandbox.memoryLimit/pidsLimit config reads, and the user
+// fleet config's sandboxEnv.forward read (loadSecretEnvSet, #1016), happen
+// before runtime resolution, so a malformed value makes no runtime call. A
+// configured forward name that is unset or empty on the host prints one
+// warning (warnUnsetForwardNames) as the last step, so Launch and DryRun each
+// warn exactly once. Both Launch and DryRun call this so their failure modes
+// for these steps can never diverge.
 func (e *Engine) resolveLaunchContext(opts Options) (launchCtx, error) {
 	agent := opts.Agent
 	if agent == "" {
@@ -310,6 +314,16 @@ func (e *Engine) resolveLaunchContext(opts Options) (launchCtx, error) {
 		return launchCtx{}, err
 	}
 
+	// The user-scoped sandboxEnv.forward allowlist (#1016), read from the fleet
+	// config rather than the repo's (a repo-committed list would arrive via PR).
+	// Same fail-closed rule: a malformed list hard-fails create, attach and
+	// --dry-run alike before any runtime call, never a launch that silently
+	// drops it. After the repo-config reads so their usage errors keep priority.
+	secrets, err := loadSecretEnvSet()
+	if err != nil {
+		return launchCtx{}, err
+	}
+
 	if e.Runtime == "" {
 		if dindOn {
 			e.Runtime, err = sandbox.ContainerRuntimePreferDocker()
@@ -326,7 +340,25 @@ func (e *Engine) resolveLaunchContext(opts Options) (launchCtx, error) {
 		}
 	}
 
-	return launchCtx{Agent: agent, Model: model, Home: home, Scope: scope, DindOn: dindOn, AzureOn: azureOn, Plugins: plugins, Limits: limits, Secrets: resolveSecretEnvSet()}, nil
+	ctx := launchCtx{Agent: agent, Model: model, Home: home, Scope: scope, DindOn: dindOn, AzureOn: azureOn, Plugins: plugins, Limits: limits, Secrets: secrets}
+	e.warnUnsetForwardNames(ctx)
+	return ctx, nil
+}
+
+// warnUnsetForwardNames prints one stderr line per sandboxEnv.forward name that
+// is unset or empty in this environment (#1016): it is not forwarded
+// (appendSecretEnvPassthrough forwards only a set, non-empty variable), so the
+// user is told why the agent will not see it instead of finding out from an
+// in-container failure. Never fatal — host state at exec time wins — and it
+// prints names only. Only names the user listed are warned about: an unset
+// built-in key (CONTEXT7_API_KEY and friends) the user never asked for stays
+// silent, as it always has.
+func (e *Engine) warnUnsetForwardNames(ctx launchCtx) {
+	for _, name := range ctx.Secrets.configuredNames() {
+		if os.Getenv(name) == "" {
+			_, _ = fmt.Fprintf(e.Stderr, "Warning: %s is listed in %s but is unset or empty in this environment; not forwarding it\n", name, sandboxEnvForwardKey)
+		}
+	}
 }
 
 // planArgvs performs the read-only container-disposition probing
@@ -462,8 +494,9 @@ func (e *Engine) Launch(opts Options) error {
 	// container-lifetime create-time env/PID-1 environ), and scoped to the
 	// agent that can use them: OpenCode reads ANTHROPIC_API_KEY/
 	// OPENAI_API_KEY natively, Codex only OPENAI_API_KEY, and Claude neither
-	// (#490); CONTEXT7_API_KEY goes to every agent. The scoping lives in the
-	// resolved secret set (secretenv.go).
+	// (#490); CONTEXT7_API_KEY goes to every agent, and so does every name the
+	// user lists in sandboxEnv.forward (#1016, also per-exec only). The scoping
+	// lives in the resolved secret set (secretenv.go).
 	execEnvArgs := assembleExecEnv(ctx.Agent, ctx.Secrets)
 
 	// Printed before the create/attach decision below whenever the resolved
@@ -682,8 +715,10 @@ func resolveAttendedFlag() string {
 // each is scoped to, comes from the resolved secrets set (secretenv.go), in
 // its registration order: CONTEXT7_API_KEY for every agent (it is forwarded
 // here only, never at container creation, #1201), ANTHROPIC_API_KEY for
-// OpenCode, OPENAI_API_KEY for Codex and OpenCode (#490). Side-effect free,
-// but it reads host state — env vars, plus the fleet config behind
+// OpenCode, OPENAI_API_KEY for Codex and OpenCode (#490), then the user's
+// sandboxEnv.forward names for every agent (#1016; a configured duplicate of a
+// built-in keeps the built-in's position, widened to every agent).
+// Side-effect free, but it reads host state — env vars, plus the fleet config behind
 // resolveAttendedFlag (#1087) — so its result depends on the host, not on
 // agent alone. That is exactly why both Launch and Audit's posture
 // classification (audit.go) call it rather than re-deriving this list

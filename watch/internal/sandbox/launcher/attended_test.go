@@ -78,7 +78,7 @@ func attendedTokens(args []string) []string {
 // token, carrying want.
 func requireAttended(t *testing.T, agent, want string) {
 	t.Helper()
-	args := assembleExecEnv(agent, resolveSecretEnvSet())
+	args := assembleExecEnv(agent, builtinSecretEnvSet())
 	got := attendedTokens(args)
 	if len(got) != 1 {
 		t.Fatalf("assembleExecEnv(%q) emitted %d CENCI_ATTENDED tokens, want exactly 1; got: %v", agent, len(got), args)
@@ -123,10 +123,13 @@ func TestAssembleExecEnv_AttendedFalseOrAbsent_ExplicitZero(t *testing.T) {
 }
 
 // TestAssembleExecEnv_MalformedFleetConfig_ResolvesZero covers the AC that a
-// broken fleet config must never make the sandbox unusable: it resolves to
-// CENCI_ATTENDED=0 and the launch proceeds. Both a malformed whole file and a
-// non-bool attended value (QueryPlanningAttended's two distinct error shapes,
-// including the explicit-null case its doc comment calls out) are covered.
+// broken fleet config must never make the attended flag unresolvable: it
+// resolves to CENCI_ATTENDED=0. Both a malformed whole file and a non-bool
+// attended value (QueryPlanningAttended's two distinct error shapes, including
+// the explicit-null case its doc comment calls out) are covered. This pins
+// assembleExecEnv alone: since #1016 the launch as a whole fails closed on an
+// unparsable fleet config, because sandboxEnv.forward is read from the same
+// file (see forwardenv_test.go and watch/sandbox_open_test.go).
 func TestAssembleExecEnv_MalformedFleetConfig_ResolvesZero(t *testing.T) {
 	cases := map[string]string{
 		"malformed json":    `{"planning": `,
@@ -203,11 +206,11 @@ func TestAssembleExecEnv_AttendedNotSecretAndValueInline(t *testing.T) {
 	clearAttendedEnv(t)
 	writeFleetConfig(t, `{"planning": {"attended": true}}`)
 
-	args := assembleExecEnv("claude", resolveSecretEnvSet())
+	args := assembleExecEnv("claude", builtinSecretEnvSet())
 	if slices.Contains(args, "CENCI_ATTENDED") {
 		t.Errorf("assembleExecEnv emitted a bare -e CENCI_ATTENDED token; want the inline NAME=value form (the flag is not a secret); got: %v", args)
 	}
-	if isSecretEnvName(resolveSecretEnvSet(), "CENCI_ATTENDED") {
+	if isSecretEnvName(builtinSecretEnvSet(), "CENCI_ATTENDED") {
 		t.Error("isSecretEnvName(\"CENCI_ATTENDED\") = true, want false — the attended flag carries no secret and must render unredacted in audit/dry-run output")
 	}
 }
@@ -222,7 +225,7 @@ func TestForwardedEnvVars_ReportsAttended(t *testing.T) {
 	writeFleetConfig(t, `{"planning": {"attended": true}}`)
 
 	var found bool
-	for _, e := range forwardedEnvVars("claude", resolveSecretEnvSet()) {
+	for _, e := range forwardedEnvVars("claude", builtinSecretEnvSet()) {
 		if e.Name != "CENCI_ATTENDED" {
 			continue
 		}
@@ -232,6 +235,6 @@ func TestForwardedEnvVars_ReportsAttended(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Errorf("forwardedEnvVars(\"claude\") does not report CENCI_ATTENDED; got: %+v", forwardedEnvVars("claude", resolveSecretEnvSet()))
+		t.Errorf("forwardedEnvVars(\"claude\") does not report CENCI_ATTENDED; got: %+v", forwardedEnvVars("claude", builtinSecretEnvSet()))
 	}
 }
