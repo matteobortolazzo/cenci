@@ -680,6 +680,7 @@ run_restart_function() {
         sed -n -e '/^say()/p' -e '/^ok()/p' -e '/^warn()/p' -e '/^fail()/p' -e '/^have()/p' "${ROOT}/install.sh"
         sed -n '/^restart_cenci_daemon() {$/,/^}$/p' "${ROOT}/install.sh"
         sed -n '/^restart_cenci_daemon_fallback() {$/,/^}$/p' "${ROOT}/install.sh"
+        # shellcheck disable=SC2016 # "$1" must stay literal: it expands in the generated script
         printf 'set -u\nrestart_cenci_daemon "$1"\n'
     } >"${script}"
     set +e
