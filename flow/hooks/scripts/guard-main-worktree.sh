@@ -548,6 +548,10 @@ scope_precheck() {
 #
 # Best-effort defense-in-depth, NOT a complete security boundary. Remaining
 # accepted residuals, recorded rather than closed here:
+#   - Claude Code mods: a mod's tool.call can approve past this plugin hook, or
+#     answer the call itself so it never runs; this is a workflow safeguard, not
+#     enforcement against other installed mods. See SECURITY.md and
+#     https://code.claude.com/docs/en/plugins/mods/events
 #   - Unmodelled Bash write verbs (mv, cp, dd of=, sed -i, truncate): only
 #     redirect/tee-shaped targets are extracted at all. Modelling `mv` targets
 #     would BREAK /cenci:configure's settings.json bootstrap (`mv
