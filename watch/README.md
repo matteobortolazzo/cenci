@@ -3683,6 +3683,56 @@ Dispatch loop: enabled
   last_skipped: 0
 ```
 
+#### `/cenci-status` in Claude Code
+
+The Claude Code plugin can show the same `cenci status` report from inside a
+session with `/cenci-status`, without leaving the conversation and without
+starting a model turn. The command is `immediate`, so it also runs while Claude is
+working.
+
+- **Release**: first shipped in cenci-watch v2.47.0 (the next minor after v2.46.1; a
+  `feat` commit bumps the minor version).
+- **Minimum Claude Code**: v2.1.287, for mods (the plugin's `hooks/register.js`
+  module). The settings hooks in `hooks.json` do not depend on the module.
+- **Enable or disable**: the plugin option `statusCommand` (a boolean, default
+  `false`, so the command is off until you opt in). Set it to `true` in the cenci-watch
+  plugin's configuration to register `/cenci-status` when a session starts; set it back
+  to `false` to turn it off. While it is not exactly `true` the module adds no hooks and
+  starts no process.
+- **Surfaces**: the interactive terminal. Headless (`claude -p`): not yet verified — to
+  be filled in from the manual run recorded in the PR.
+- **Read-only**: the command runs `cenci status` and shows its output. It does not restart
+  the daemon, enroll dispatch, change tickets, approve permissions, submit prompts, call
+  the model or make network requests.
+
+How it works: the module runs the plugin's own `hooks/status.sh` with
+`/bin/sh` (an argument array, working directory set to the plugin root), which resolves
+the binary in the same order as `hooks/notify.sh`: the plugin-local `bin/cenci`, then
+`CENCI_BIN` and the other known locations. The module never runs a bare `cenci` itself:
+it always runs `hooks/status.sh`, which resolves the binary through the same trusted
+chain as `notify.sh`. That chain's last step is a `PATH` lookup, and it only accepts a
+binary that passes the self-adoption and liveness checks. Each outcome maps to a fixed
+message:
+
+| Result | Shown |
+|---|---|
+| Exit 0, stdout starts with `daemon: ` | the stdout, verbatim (`sessions: none` and `sessions: unavailable (...)` stay distinct) |
+| Exit 127 | `cenci status unavailable: cenci binary not found (install cenci-watch or set CENCI_BIN)` |
+| Other non-zero exit N | `cenci status failed (exit N)` plus the first stderr line, control characters stripped, cut to 200 characters |
+| Timeout | `cenci status did not finish within 10s` |
+| Any other start failure | `could not start cenci status:` plus the failure message |
+| Exit 0, any other stdout | `cenci status returned unexpected output; run cenci status in a terminal` |
+
+If another command already owns the name, a toast says `/cenci-status` is not available
+because the name is taken; the session continues unaffected.
+
+Limits: the command is bounded to 10 seconds. Mods are not sandboxed, so enable the
+option only if you accept that; see
+[Claude Code mods and plugin guards](../SECURITY.md#claude-code-mods-and-plugin-guards).
+Maintainers run the module's `claude plugin test` and `claude plugin validate` checks
+with `make -C watch test-claude-plugin`; the target prints `SKIP: claude not installed`
+when `claude` is missing.
+
 ### Machine-readable status for widgets (`cenci widget-json`)
 
 `cenci widget-json` connects to the daemon's broadcast socket, reads the current state, prints a single line of JSON in the [Waybar custom module protocol](https://github.com/Alexays/Waybar/wiki/Module:-Custom), and exits. This is the hidden plumbing subcommand every bar widget (Waybar itself, noctalia, DMS, GNOME Shell, KDE Plasma, macOS/SwiftBar) polls — it used to be named `cenci status` before `status` became the human-readable overview above. (`cenci waybar` remains a backwards-compatible hidden alias for `widget-json`.)

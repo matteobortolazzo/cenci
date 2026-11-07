@@ -9,7 +9,7 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 PLUGIN_JSON := plugin/.claude-plugin/plugin.json
 PLUGIN_VERSION := $(shell sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' $(PLUGIN_JSON) | head -n1)
 
-.PHONY: build clean test test-plugins test-macos install-macos lint plugin-bin $(PLATFORMS)
+.PHONY: build clean test test-plugins test-claude-plugin test-macos install-macos lint plugin-bin $(PLATFORMS)
 
 build:
 	go build -ldflags "$(LDFLAGS)" -o $(BINARY) .
@@ -30,6 +30,16 @@ test-plugins:
 	./plugin/hooks/test.sh
 	./plugin/codex/test.sh
 	./plugin/opencode/test.sh
+
+# Manifest validation and the mods-module tests for the Claude Code plugin
+# (hooks/register.test.ts, #1183). Not part of `test`: it needs the claude CLI,
+# so it prints SKIP when that is missing.
+test-claude-plugin:
+	@if command -v claude >/dev/null 2>&1; then \
+		claude plugin validate ./plugin && claude plugin test ./plugin; \
+	else \
+		echo "SKIP: claude not installed"; \
+	fi
 
 # Smoke test for the macOS SwiftBar frontend (macOS-only; skips without osascript).
 test-macos:
