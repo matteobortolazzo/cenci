@@ -122,7 +122,7 @@ Usage:
   cenci <command> [flags]
 
 Commands:
-  daemon start|stop|restart|status|hook-health
+  daemon start|stop|restart|status|hook-health|install-service|uninstall-service|service-status
                                      manage the background daemon (bare "daemon" acts as "start")
   status                             human-readable session/daemon/dispatch overview
   widget-json                        machine-readable status for bar widgets (Waybar custom module protocol); "waybar" is a hidden alias

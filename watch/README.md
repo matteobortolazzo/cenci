@@ -3319,9 +3319,12 @@ that same symlink still hard-errors.
 
 ```bash
 cenci daemon stop      # SIGTERM, then SIGKILL if still alive after a few seconds; exits 0 whether or not anything was running
-cenci daemon restart   # stop (if running), then spawn a fresh detached daemon and wait for it to come up
+cenci daemon restart   # stop (if running), then spawn a fresh detached daemon and wait for it to come up (with the login service enabled: restart through the service manager instead)
 cenci daemon status    # running/not-running + PID; exits 1 when not running
 cenci daemon hook-health  # read-only hook-delivery diagnostics; exits 0 whenever it renders
+cenci daemon install-service    # start the daemon at login and restart it if it crashes (see "Login service" below)
+cenci daemon uninstall-service  # remove that login service
+cenci daemon service-status     # read-only: first line is service: enabled|disabled|not-installed|unsupported
 ```
 
 `daemon stop` determines liveness via the same event-socket dial `EnsureRunning`
@@ -3350,9 +3353,10 @@ file is always removed once it's known stale.
 | `-symbol-input` | `!` | Symbol shown in status bar indicator |
 | `-symbol-idle` | `~` | Symbol shown in status bar indicator |
 
-(Flags above apply to `daemon start`; `stop`/`restart`/`status`/`hook-health` take no
-flags — they always resolve the default socket/PID/state paths. An extra argument or
-flag is a usage error, exit 2.)
+(Flags above apply to `daemon start`; `stop`/`restart`/`status`/`hook-health`/
+`service-status` take no flags — they always resolve the default socket/PID/state
+paths — and `install-service`/`uninstall-service` take only `--force`. An extra
+argument or an unknown flag is a usage error, exit 2.)
 
 `CENCI_LOG_JSON=1` sets `-json`'s default without passing the flag; an
 explicit `-json`/`-json=false` on the command line always overrides the
@@ -3361,6 +3365,98 @@ environment variable. Only `daemon_cmd.go`'s own
 and the PID-file warning) go through the JSON seam — the daemon's own
 internal event/sweep/attention `-v` logging is unaffected and stays plain
 text.
+
+#### Login service (`cenci daemon install-service|uninstall-service|service-status`)
+
+Without a login service the daemon only starts when the first agent session's
+`SessionStart` hook spawns it, so after every login nothing listens until then
+(`cenci widget-json` consumers have no daemon, tmux windows get no
+`@cenci-symbol`), and a crashed daemon is never restarted. The login service
+closes both gaps with a systemd user unit on Linux and a launchd agent on macOS.
+Both run the stable launcher `~/.local/bin/cenci daemon start`, which the bootstrap
+relinks on every version bump, so the service survives updates.
+
+```bash
+cenci daemon install-service              # write, enable and start the service
+cenci daemon install-service --force      # also replace a file cenci did not write
+cenci daemon uninstall-service [--force]  # disable, stop and remove it
+cenci daemon service-status               # read-only; always exits 0
+```
+
+| | Linux (systemd user unit) | macOS (launchd agent) |
+|---|---|---|
+| File | `cenci-watch.service` in `$XDG_CONFIG_HOME/systemd/user/` (default `~/.config/systemd/user/`) | `~/Library/LaunchAgents/io.github.matteobortolazzo.cenci-watch.plist` |
+| Start | `systemctl --user daemon-reload`, then `systemctl --user enable --now cenci-watch.service` | `launchctl bootstrap gui/<uid> <plist>` |
+| Remove | `systemctl --user disable --now cenci-watch.service`, delete the file, `daemon-reload` | `launchctl bootout gui/<uid>/io.github.matteobortolazzo.cenci-watch`, delete the plist |
+| Restart | `systemctl --user restart cenci-watch.service` | `launchctl kickstart -k gui/<uid>/io.github.matteobortolazzo.cenci-watch` |
+| Crash restart | `Restart=on-failure` (a `daemon stop` exits 0 and is not restarted) | `KeepAlive` → `SuccessfulExit` false |
+| Child processes | `KillMode=process`: a service restart leaves host babysit supervisors and a daemon-started tmux server running | `AbandonProcessGroup` |
+
+`install-service` prints `service installed and started`, or `service already
+installed` when an identical file was already there (it still runs `enable --now`
+or `bootstrap`, which is harmless). `uninstall-service` prints `service removed;
+the daemon starts again on your next agent session or with: cenci daemon start`,
+or `service not installed` (with no service-manager calls) when there is nothing to
+remove; it does not respawn the daemon.
+
+`service-status` prints the token `service: <state>` as its first line:
+
+| Token | Meaning |
+|---|---|
+| `service: enabled` | A file is at the cenci path and the manager reports it enabled (systemd) or loaded (launchd). |
+| `service: disabled` | A file is at the cenci path but the manager does not have it enabled or loaded. |
+| `service: not-installed` | No file at the cenci path. |
+| `service: unsupported` | No usable service manager: inside the cenci sandbox, `systemctl` missing or `systemctl --user show-environment` failing (WSL without systemd, a container), `launchctl` missing or no `gui/<uid>` domain (an SSH-only session), or another OS. |
+
+A file at the cenci path counts as installed whoever wrote it. `cenci doctor` turns the
+token into one extra line after the running/not-running line (and stays silent on a
+binary that predates `service-status`).
+
+- **Captured environment.** The service runs with a minimal environment, so
+  `install-service` copies `PATH` (the daemon shells out to `tmux`, `gh` and
+  docker/podman) and, only when set in the invoking shell, `CENCI_SOCKET_DIR`,
+  `XDG_STATE_HOME` and `XDG_CONFIG_HOME` (the socket directory resolves from them). Re-run
+  `cenci daemon install-service` after your `PATH` changes to rewrite the captured values (a marked
+  file whose content differs is rewritten), then `cenci daemon restart` so the running daemon picks
+  them up. A value containing a newline, `"` or `\` is rejected (exit 1, naming the variable, nothing written); in
+  the unit a `%` is written as `%%`, in the plist values are XML-escaped.
+- **The marker and `--force`.** A written unit starts with `# Managed by cenci daemon install-service`
+  (the plist carries the same text as an XML comment on the line after the XML declaration).
+  `install-service` and `uninstall-service` refuse, with exit 1 naming the path and `--force`, to
+  touch an existing file without that marker, such as a hand-written `cenci-watch.service`, and leave it
+  byte-identical. `--force` replaces or removes it.
+- **Handover.** If a daemon is already running without supervision, `install-service`
+  stops it before enabling the service (otherwise the service's own start would hit the
+  already-running path, exit 0 and go inactive) and waits up to 3s for the event
+  socket. On systemd this happens on every run; on launchd, when the agent is already loaded and
+  the plist is unchanged, `install-service` does not hand over, so use `cenci daemon restart`,
+  which does. A daemon the active unit already owns is left alone. The `SessionStart`
+  bootstrap hook is unchanged: with the service running, its `cenci daemon start`
+  takes the already-running path and exits 0.
+- **Service-aware `restart`.** With the service enabled, `cenci daemon restart` (and so the
+  installer's update path) restarts through the service manager and never spawns an unsupervised
+  daemon. It hands over like `install-service`: when a daemon is already running but the unit is
+  inactive (systemd: `is-active` fails; launchd: the agent's job is not `state = running`), it stops
+  that daemon first, so the manager's own start does not hit the already-running path. A daemon the
+  active unit owns is not stopped. With no service installed it behaves exactly as before. Residual: if
+  `daemon restart` itself fails, the installer's `pkill`+`nohup` fallback starts a daemon outside
+  supervision until the next service restart.
+- **Failure modes.** Inside the sandbox (`CENCI_SANDBOX=1`) `install-service` and `uninstall-service` exit 1 with
+  `not supported inside the cenci sandbox` and write nothing. A missing `~/.local/bin/cenci` exits 1
+  naming that path, with nothing written. Without a systemd user manager, `install-service` exits 1 with
+  `no systemd user manager available`. A failing `systemctl`/`launchctl` call exits 1 naming the command.
+  A crash-restart race is possible: a hook can spawn an unsupervised daemon in the 1s before
+  the manager restarts the crashed one, and the unit's start then goes inactive; run
+  `cenci daemon restart`, which hands over from that daemon on both platforms.
+- **Installer.** `cenci-installer` install mode offers the service
+  (`Start the cenci daemon automatically at login?`, default yes) when `service-status` reports `not-installed`; pass
+  `--no-login-service` to decline it, which also covers `--yes` and `curl | bash`
+  installs. Update mode never prompts. `cenci-installer uninstall` removes the service
+  before the binary goes away. If the binary is already gone, remove it by hand:
+  `systemctl --user disable --now cenci-watch.service` and delete the unit file
+  (macOS: `launchctl bootout gui/$(id -u)/io.github.matteobortolazzo.cenci-watch`, then delete the plist).
+- **Lingering (optional).** The service starts at login. To start it at boot, before you log in, enable
+  user lingering yourself with `loginctl enable-linger $USER`; cenci never changes system-level settings.
 
 #### Hook health (`cenci daemon hook-health`)
 

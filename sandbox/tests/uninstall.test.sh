@@ -108,6 +108,11 @@ EOF
 # to CALL_LOG, prints socket_dir on `socket-dir`, and exits 0 on
 # `daemon stop` — the two lifecycle calls uninstall must make (in that
 # order, "while the binary still exists") before removing anything else.
+# `daemon service-status` answers `service: $SERVICE_STATUS` when the run's
+# environment sets SERVICE_STATUS (pass it before run_uninstall's `--`) and
+# prints nothing otherwise, so every case that does not opt in sees a binary
+# whose reporter says nothing recognizable. `daemon uninstall-service` exits
+# $UNINSTALL_SERVICE_EXIT (default 0).
 make_cenci_daemon() {
     local path="$1" socket_dir="$2"
     mkdir -p "$(dirname "${path}")"
@@ -122,6 +127,13 @@ if [ "\${1:-}" = socket-dir ]; then
 fi
 if [ "\${1:-}" = daemon ] && [ "\${2:-}" = stop ]; then
     exit 0
+fi
+if [ "\${1:-}" = daemon ] && [ "\${2:-}" = service-status ]; then
+    [ -n "\${SERVICE_STATUS:-}" ] && printf 'service: %s\n' "\${SERVICE_STATUS}"
+    exit 0
+fi
+if [ "\${1:-}" = daemon ] && [ "\${2:-}" = uninstall-service ]; then
+    exit "\${UNINSTALL_SERVICE_EXIT:-0}"
 fi
 exit 0
 EOF
@@ -356,6 +368,59 @@ fi
 [[ ! -d "${LAYOUT_SOCKET_DIR}" ]]
 [[ ! -e "${LAYOUT_HOME}/.config/cenci/config.json" ]]
 [[ ! -d "${LAYOUT_HOME}/.config/cenci" ]]
+# A binary whose service-status prints nothing recognizable (an older build,
+# or the default fake) never gets an uninstall-service call.
+assert_not_contains "${LAYOUT_CALL_LOG}" "uninstall-service"
+
+# --- login service (#1168) ----------------------------------------------------
+echo "case: the target list names the cenci daemon login service"
+prepare_full_layout service-targets
+run_uninstall -- --yes
+[[ "${UNINSTALL_EXIT}" -eq 0 ]]
+assert_contains "${UNINSTALL_OUTPUT}" "the cenci daemon login service"
+
+echo "case: an enabled login service is uninstalled before the daemon is stopped, without --force"
+prepare_full_layout service-enabled
+run_uninstall SERVICE_STATUS=enabled -- --yes
+[[ "${UNINSTALL_EXIT}" -eq 0 ]]
+assert_contains "${LAYOUT_CALL_LOG}" "daemon service-status"
+if ! grep -qx "daemon uninstall-service" "${LAYOUT_CALL_LOG}"; then
+    echo "FAIL: expected a bare 'daemon uninstall-service' invocation (no --force) in ${LAYOUT_CALL_LOG}" >&2
+    cat "${LAYOUT_CALL_LOG}" >&2
+    exit 1
+fi
+assert_not_contains "${LAYOUT_CALL_LOG}" "--force"
+assert_before "${LAYOUT_CALL_LOG}" "daemon uninstall-service" "daemon stop"
+assert_not_contains "${UNINSTALL_OUTPUT}" "login service removal failed"
+
+echo "case: a disabled (installed) login service is also uninstalled before the daemon is stopped"
+prepare_full_layout service-disabled
+run_uninstall SERVICE_STATUS=disabled -- --yes
+[[ "${UNINSTALL_EXIT}" -eq 0 ]]
+assert_before "${LAYOUT_CALL_LOG}" "daemon uninstall-service" "daemon stop"
+
+echo "case: a not-installed login service makes no uninstall-service call, and uninstall still stops the daemon"
+prepare_full_layout service-not-installed
+run_uninstall SERVICE_STATUS=not-installed -- --yes
+[[ "${UNINSTALL_EXIT}" -eq 0 ]]
+assert_contains "${LAYOUT_CALL_LOG}" "daemon service-status"
+assert_not_contains "${LAYOUT_CALL_LOG}" "uninstall-service"
+assert_contains "${LAYOUT_CALL_LOG}" "daemon stop"
+
+echo "case: an unsupported login service makes no uninstall-service call"
+prepare_full_layout service-unsupported
+run_uninstall SERVICE_STATUS=unsupported -- --yes
+[[ "${UNINSTALL_EXIT}" -eq 0 ]]
+assert_not_contains "${LAYOUT_CALL_LOG}" "uninstall-service"
+
+echo "case: a failing uninstall-service warns with the manual command and uninstall carries on"
+prepare_full_layout service-failure
+run_uninstall SERVICE_STATUS=enabled UNINSTALL_SERVICE_EXIT=1 -- --yes
+[[ "${UNINSTALL_EXIT}" -eq 0 ]]
+assert_contains "${UNINSTALL_OUTPUT}" "login service removal failed"
+assert_contains "${UNINSTALL_OUTPUT}" "cenci daemon uninstall-service"
+assert_contains "${LAYOUT_CALL_LOG}" "daemon stop"
+assert_contains "${LAYOUT_CALL_LOG}" "claude plugin uninstall cenci@cenci"
 
 # --- case 2: CLI-absent/failure fallback -------------------------------------
 echo "case: a failing claude removal verb and an absent codex CLI both fall back to rm -rf of the marketplace checkout, touching nothing else"

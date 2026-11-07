@@ -934,6 +934,77 @@ EOF
     run_doctor_case "${name}" "${clients}"
 }
 
+# write_service_fake <path> <service-mode> <daemon-exit> <install-exit> <tag> —
+# writes a fake `cenci` at <path> for the login-service flows (#1168). Every call
+# appends `<tag> <argv>` to CALLS_FILE. `daemon status` exits <daemon-exit>;
+# `daemon install-service` exits <install-exit> (printing a reason on stderr when
+# non-zero). <service-mode> selects the `daemon service-status` answer:
+# enabled|disabled|not-installed|unsupported print `service: <mode>` and exit 0;
+# `unknown-subcommand` is an older binary (stderr message, exit 2); `garbage`
+# exits 0 with a first line that is not a service token. Every other verb
+# exits 0 with no output.
+write_service_fake() {
+    local path="$1" mode="$2" daemon_exit="$3" install_exit="$4" tag="$5"
+    mkdir -p "$(dirname "${path}")"
+    cat > "${path}" <<EOF
+#!/bin/sh
+printf '%s %s\n' '${tag}' "\$*" >>"\${CALLS_FILE:?CALLS_FILE not set}"
+if [ "\${1:-}" = daemon ] && [ "\${2:-}" = status ]; then
+    exit ${daemon_exit}
+fi
+if [ "\${1:-}" = daemon ] && [ "\${2:-}" = service-status ]; then
+    case '${mode}' in
+        unknown-subcommand)
+            echo "cenci: unknown subcommand 'service-status'" >&2
+            exit 2
+            ;;
+        garbage)
+            echo "something else entirely"
+            exit 0
+            ;;
+        *)
+            echo "service: ${mode}"
+            exit 0
+            ;;
+    esac
+fi
+if [ "\${1:-}" = daemon ] && [ "\${2:-}" = install-service ]; then
+    if [ ${install_exit} -ne 0 ]; then
+        echo "systemctl --user enable --now cenci-watch.service: exit status 1" >&2
+    fi
+    exit ${install_exit}
+fi
+exit 0
+EOF
+    chmod +x "${path}"
+}
+
+# run_doctor_case_with_service <name> <service-mode> [daemon-exit] — a doctor run
+# whose PATH `cenci` answers `daemon service-status` per write_service_fake
+# (`daemon status` exits <daemon-exit>, default 0 = running).
+run_doctor_case_with_service() {
+    local name="$1" mode="$2" daemon_exit="${3:-0}"
+    mkdir -p "${WORK}/${name}/bin"
+    write_service_fake "${WORK}/${name}/bin/cenci" "${mode}" "${daemon_exit}" 0 path
+    run_doctor_case "${name}" claude
+}
+
+# run_install_case_with_service <name> <service-mode> <install-exit> [install.sh
+# args...] — an install run (run_case, so --yes --no-build plus the extra args)
+# whose plugin-cache binary (tag `cache`, the one step_cenci_watch_setup
+# provisions) is a write_service_fake. Pre-seeding the cache manifest makes
+# prepare_bootstrap_cenci return early, so this fake is the binary the installer
+# resolves.
+run_install_case_with_service() {
+    local name="$1" mode="$2" install_exit="$3"
+    shift 3
+    local root="${WORK}/${name}/home/.claude/plugins/cache/cenci/cenci-watch/1.0.0"
+    mkdir -p "${root}/.claude-plugin"
+    printf '{"name":"cenci-watch","version":"1.0.0"}\n' >"${root}/.claude-plugin/plugin.json"
+    write_service_fake "${root}/bin/cenci" "${mode}" 1 "${install_exit}" cache
+    run_case "${name}" claude --no-build "$@"
+}
+
 # seed_hook_health_record <state_root> <record_name> <content> — plants a
 # plain-text record at <state_root>/cenci/hook-health/<record_name> with the
 # store's modes (dirs 0700, file 0600). <state_root> is a per-case temp dir, so
@@ -2157,6 +2228,104 @@ echo "case: doctor reports the cenci daemon as not running, without failing doct
 run_doctor_case_with_daemon_status doctor-daemon-down claude 1
 [[ "${DOCTOR_EXIT}" -eq 0 ]]
 assert_contains "${DOCTOR_OUTPUT}" "cenci daemon: not running"
+
+echo "case: doctor's not-running text names the login service and no longer reads only 'first agent session' (#1168)"
+assert_line_with_both "${DOCTOR_OUTPUT}" "cenci daemon: not running" "run: cenci daemon start"
+assert_line_with_both "${DOCTOR_OUTPUT}" "cenci daemon: not running" "next agent session"
+assert_line_with_both "${DOCTOR_OUTPUT}" "cenci daemon: not running" "at login with the login service"
+
+echo "case: doctor maps service 'enabled' to an ok line after the running line, without failing doctor (#1168)"
+run_doctor_case_with_service doctor-service-enabled enabled
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "✓ cenci daemon service: enabled (starts at login)"
+assert_before "${DOCTOR_OUTPUT}" "cenci daemon: running" "cenci daemon service: enabled"
+assert_not_contains "${DOCTOR_OUTPUT}" "! cenci daemon service"
+assert_not_contains "${DOCTOR_OUTPUT}" "✗ cenci daemon service"
+
+echo "case: doctor maps service 'not-installed' to a warn naming install-service, without failing doctor (#1168)"
+run_doctor_case_with_service doctor-service-not-installed not-installed
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "! cenci daemon service: not installed — to start at login run: cenci daemon install-service"
+assert_not_contains "${DOCTOR_OUTPUT}" "✗ cenci daemon service"
+assert_not_contains "${DOCTOR_OUTPUT}" "✓ cenci daemon service"
+
+echo "case: doctor maps service 'disabled' to a warn naming install-service, without failing doctor (#1168)"
+run_doctor_case_with_service doctor-service-disabled disabled
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "! cenci daemon service: installed but disabled — run: cenci daemon install-service"
+assert_not_contains "${DOCTOR_OUTPUT}" "✗ cenci daemon service"
+assert_not_contains "${DOCTOR_OUTPUT}" "✓ cenci daemon service"
+
+echo "case: doctor maps service 'unsupported' to a plain info line (no ok/warn/fail mark), without failing doctor (#1168)"
+run_doctor_case_with_service doctor-service-unsupported unsupported
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "cenci daemon service: unsupported on this host"
+assert_not_contains "${DOCTOR_OUTPUT}" "✓ cenci daemon service"
+assert_not_contains "${DOCTOR_OUTPUT}" "! cenci daemon service"
+assert_not_contains "${DOCTOR_OUTPUT}" "✗ cenci daemon service"
+
+echo "case: the service line also prints when the daemon is not running (#1168)"
+run_doctor_case_with_service doctor-service-enabled-daemon-down enabled 1
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "cenci daemon: not running"
+assert_contains "${DOCTOR_OUTPUT}" "✓ cenci daemon service: enabled (starts at login)"
+
+echo "case: an older binary whose daemon service-status exits 2 yields only the running line, no service line and no failure (#1168)"
+run_doctor_case_with_service doctor-service-older-binary unknown-subcommand
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "cenci daemon: running"
+assert_not_contains "${DOCTOR_OUTPUT}" "cenci daemon service"
+assert_not_contains "${DOCTOR_OUTPUT}" "unknown subcommand"
+assert_not_contains "${DOCTOR_OUTPUT}" "✗"
+
+echo "case: an unrecognized service-status first line prints no service line and no failure (#1168)"
+run_doctor_case_with_service doctor-service-garbage garbage
+[[ "${DOCTOR_EXIT}" -eq 0 ]]
+assert_contains "${DOCTOR_OUTPUT}" "cenci daemon: running"
+assert_not_contains "${DOCTOR_OUTPUT}" "cenci daemon service"
+assert_not_contains "${DOCTOR_OUTPUT}" "✗"
+
+echo "case: install --yes with no login service installed runs install-service on the provisioned binary and reports ok (#1168)"
+run_install_case_with_service install-service-yes not-installed 0
+[[ "${CASE_EXIT}" -eq 0 ]]
+assert_contains "${CASE_CALLS}" "cache daemon service-status"
+assert_contains "${CASE_CALLS}" "cache daemon install-service"
+assert_not_contains "${CASE_CALLS}" "--force"
+assert_before "${CASE_CALLS}" "cache daemon service-status" "cache daemon install-service"
+assert_contains "${CASE_OUTPUT}" "✓ cenci daemon login service installed"
+assert_not_contains "${CASE_OUTPUT}" "✗"
+
+echo "case: install --yes --no-login-service never calls install-service (#1168)"
+run_install_case_with_service install-service-declined not-installed 0 --no-login-service
+[[ "${CASE_EXIT}" -eq 0 ]]
+assert_not_contains "${CASE_CALLS}" "install-service"
+assert_not_contains "${CASE_OUTPUT}" "login service installed"
+assert_not_contains "${CASE_OUTPUT}" "✗"
+
+echo "case: a failing install-service warns without failing the install (#1168)"
+run_install_case_with_service install-service-failing not-installed 1
+[[ "${CASE_EXIT}" -eq 0 ]]
+assert_contains "${CASE_CALLS}" "cache daemon install-service"
+assert_contains "${CASE_OUTPUT}" "! could not install the cenci daemon login service"
+assert_contains "${CASE_OUTPUT}" "cenci daemon install-service"
+assert_not_contains "${CASE_OUTPUT}" "login service installed"
+assert_not_contains "${CASE_OUTPUT}" "✗"
+
+for service_mode in enabled disabled unsupported unknown-subcommand garbage; do
+    echo "case: install --yes with service-status '${service_mode}' never calls install-service (#1168)"
+    run_install_case_with_service "install-service-skip-${service_mode}" "${service_mode}" 0
+    [[ "${CASE_EXIT}" -eq 0 ]]
+    assert_contains "${CASE_CALLS}" "cache daemon service-status"
+    assert_not_contains "${CASE_CALLS}" "install-service"
+    assert_not_contains "${CASE_OUTPUT}" "login service installed"
+done
+
+echo "case: update mode never reads the service state, prompts for, or installs the login service (#1168)"
+run_install_case_with_service install-service-update not-installed 0 update
+[[ "${CASE_EXIT}" -eq 0 ]]
+assert_not_contains "${CASE_CALLS}" "service-status"
+assert_not_contains "${CASE_CALLS}" "install-service"
+assert_not_contains "${CASE_OUTPUT}" "login service"
 
 echo "case: doctor maps hook-health 'healthy' to ok without failing doctor (#1239)"
 run_doctor_case_with_hook_health doctor-hook-health-healthy claude healthy
