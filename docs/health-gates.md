@@ -126,6 +126,8 @@ This repo configures a `gateCommand` for each of its three projects in
 guards (the two bullets above) to `flow/scripts/run-checks.sh` — the same
 script CI's `flow-test` job invokes, so the two never drift apart.
 
+Every CI job that runs the flow gate (`flow-ci.yml`'s `flow-test` and `flow-maintenance` jobs and `cenci-maintenance.yml`'s `audit` job) must install `zsh` and `fish`, because under `CI=true` `flow/codex/hooks-launch.test.sh` fails rather than skips when a login shell is missing.
+
 ## See also
 
 `flow/skills/configure/references/config-schema.md` documents the full config
