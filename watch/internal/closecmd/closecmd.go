@@ -45,7 +45,7 @@ type Decision struct {
 // consumer-defined interface rather than growing tmux.Client, mirroring the
 // launcher-facing-method precedent documented on tmux.ExecClient.
 type windowKiller interface {
-	KillWindow(target string) error
+	KillWindow(socket, target string) error
 }
 
 // Opts holds the resolved options for one close invocation.
@@ -166,7 +166,7 @@ func Run(opts Opts) ([]Decision, error) {
 		// A window that closed itself between the snapshot and now (its agent
 		// exited) is closed, not a failure; any other kill-window error is still
 		// reported.
-		if kerr := opts.Killer.KillWindow(target); kerr != nil && !errors.Is(kerr, tmux.ErrWindowGone) {
+		if kerr := opts.Killer.KillWindow("", target); kerr != nil && !errors.Is(kerr, tmux.ErrWindowGone) {
 			errs = append(errs, fmt.Errorf("killing %s (%s): %w", w.WindowName, target, kerr))
 			continue
 		}

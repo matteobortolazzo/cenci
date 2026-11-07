@@ -40,23 +40,23 @@ type mockCtrl struct {
 type winCall struct{ session, name, cmd string }
 type optCall struct{ target, key, value string }
 
-func (m *mockCtrl) CurrentSession() (string, error) { return m.session, m.sessionErr }
-func (m *mockCtrl) IsGroupedSession(session string) (bool, error) {
+func (m *mockCtrl) CurrentSession(string) (string, error) { return m.session, m.sessionErr }
+func (m *mockCtrl) IsGroupedSession(_, session string) (bool, error) {
 	m.groupedSessions = append(m.groupedSessions, session)
 	return m.grouped, m.groupedErr
 }
-func (m *mockCtrl) NewWindow(session, name, cmd string) error {
+func (m *mockCtrl) NewWindow(_, session, name, cmd string) error {
 	m.windows = append(m.windows, winCall{session, name, cmd})
 	return m.newWindowErr
 }
-func (m *mockCtrl) SetWindowOption(target, key, value string) error {
+func (m *mockCtrl) SetWindowOption(_, target, key, value string) error {
 	m.options = append(m.options, optCall{target, key, value})
 	if err, ok := m.optErrByKey[key]; ok {
 		return err
 	}
 	return m.optErr
 }
-func (m *mockCtrl) HasSession(string) (bool, error) { return m.hasSession, m.hasSessionErr }
+func (m *mockCtrl) HasSession(string, string) (bool, error) { return m.hasSession, m.hasSessionErr }
 
 // noConfigOpts returns Opts pinned to a non-existent config (built-ins only),
 // so tests are deterministic.

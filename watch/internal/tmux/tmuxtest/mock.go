@@ -19,6 +19,9 @@ type MockClient struct {
 	WindowOptErr    error
 	GetOptErr       error
 	OptErr          error
+	// Sockets records the socket each call targeted, in call order across all
+	// five methods ("" is the ambient server).
+	Sockets []string
 }
 
 type RenameCall struct {
@@ -38,12 +41,14 @@ type OptCall struct {
 	Value string
 }
 
-func (m *MockClient) ListPanes() ([]tmux.PaneInfo, error) {
+func (m *MockClient) ListPanes(socket string) ([]tmux.PaneInfo, error) {
+	m.Sockets = append(m.Sockets, socket)
 	m.ListCalls++
 	return m.Panes, m.ListErr
 }
 
-func (m *MockClient) RenameWindow(target string, name string) error {
+func (m *MockClient) RenameWindow(socket, target string, name string) error {
+	m.Sockets = append(m.Sockets, socket)
 	target = m.windowTarget(target)
 	m.Renames = append(m.Renames, RenameCall{target, name})
 	if m.RenameErr == nil {
@@ -56,7 +61,8 @@ func (m *MockClient) RenameWindow(target string, name string) error {
 	return m.RenameErr
 }
 
-func (m *MockClient) SetWindowOption(target string, key string, value string) error {
+func (m *MockClient) SetWindowOption(socket, target string, key string, value string) error {
+	m.Sockets = append(m.Sockets, socket)
 	target = m.windowTarget(target)
 	m.WindowOpts = append(m.WindowOpts, WindowOptCall{target, key, value})
 	if m.WindowOptValues == nil {
@@ -66,7 +72,8 @@ func (m *MockClient) SetWindowOption(target string, key string, value string) er
 	return m.WindowOptErr
 }
 
-func (m *MockClient) GetWindowOption(target string, key string) (string, error) {
+func (m *MockClient) GetWindowOption(socket, target string, key string) (string, error) {
+	m.Sockets = append(m.Sockets, socket)
 	target = m.windowTarget(target)
 	if m.GetOptErr != nil {
 		return "", m.GetOptErr
@@ -95,7 +102,8 @@ func (m *MockClient) windowTarget(target string) string {
 
 // SetOption records a session-wide (global) tmux option set, mirroring
 // SetWindowOption's recording pattern.
-func (m *MockClient) SetOption(key string, value string) error {
+func (m *MockClient) SetOption(socket, key string, value string) error {
+	m.Sockets = append(m.Sockets, socket)
 	m.Opts = append(m.Opts, OptCall{key, value})
 	return m.OptErr
 }

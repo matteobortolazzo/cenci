@@ -55,7 +55,7 @@ func New(stderr io.Writer) *Killer {
 // per pane and returned together, so one bad pane never shields or blocks its
 // siblings. ctx bounds every in-container exec; the host path is local syscalls.
 func (k *Killer) KillWindowProcesses(ctx context.Context, target string) error {
-	panes, err := tmux.ListWindowPaneProcs(target)
+	panes, err := tmux.ListWindowPaneProcs("", target)
 	if errors.Is(err, tmux.ErrWindowGone) {
 		return nil
 	}

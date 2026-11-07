@@ -71,7 +71,7 @@ func clampPercent(agent string, frac float64) int {
 // failure here (e.g. no tmux server, unreachable tmux binary) can silently
 // stop headroom reporting for the life of the process.
 func (f *Frontend) setOpt(key, value, errMsg string) {
-	if err := f.client.SetOption(key, value); err != nil {
+	if err := f.client.SetOption("", key, value); err != nil {
 		log.Printf("%s: %v", errMsg, err)
 	}
 }

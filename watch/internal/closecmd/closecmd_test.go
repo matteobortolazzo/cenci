@@ -23,7 +23,7 @@ type fakeKiller struct {
 	err    error
 }
 
-func (f *fakeKiller) KillWindow(target string) error {
+func (f *fakeKiller) KillWindow(_, target string) error {
 	if f.err != nil {
 		return f.err
 	}
@@ -732,7 +732,7 @@ type logKiller struct {
 	err error
 }
 
-func (k *logKiller) KillWindow(target string) error {
+func (k *logKiller) KillWindow(_, target string) error {
 	*k.log = append(*k.log, "kill-window "+target)
 	return k.err
 }
