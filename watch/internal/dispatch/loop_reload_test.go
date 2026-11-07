@@ -36,16 +36,18 @@ import (
 // environment — so every method here only needs to satisfy the interface.
 type fakeController struct{}
 
-func (fakeController) CurrentSession() (string, error)                    { return "", nil }
-func (fakeController) IsGroupedSession(session string) (bool, error)      { return false, nil }
-func (fakeController) NewWindow(session, name, shellCommand string) error { return nil }
-func (fakeController) SetWindowOption(target, key, value string) error    { return nil }
+func (fakeController) CurrentSession(socket string) (string, error) { return "", nil }
+func (fakeController) IsGroupedSession(socket, session string) (bool, error) {
+	return false, nil
+}
+func (fakeController) NewWindow(socket, session, name, shellCommand string) error { return nil }
+func (fakeController) SetWindowOption(socket, target, key, value string) error    { return nil }
 
 // HasSession always reports the session as live (#927): the reload tests
 // never construct a scenario meant to exercise the per-repo session gate, so
 // a fixed (true, nil) keeps every existing fakeController-based test's
 // dispatch decisions ungated by session configuration.
-func (fakeController) HasSession(session string) (bool, error) { return true, nil }
+func (fakeController) HasSession(socket, session string) (bool, error) { return true, nil }
 
 // seedDispatchConfig writes a fresh config.json under dir enrolling repo, and
 // returns its path. Using EnrollRepo (rather than hand-written JSON) exercises
@@ -761,12 +763,12 @@ type windowCallRecorder struct {
 	calls []string
 }
 
-func (r *windowCallRecorder) NewWindow(session, name, shellCommand string) error {
+func (r *windowCallRecorder) NewWindow(socket, session, name, shellCommand string) error {
 	r.calls = append(r.calls, "NewWindow "+session+" "+name)
 	return nil
 }
 
-func (r *windowCallRecorder) SetWindowOption(target, key, value string) error {
+func (r *windowCallRecorder) SetWindowOption(socket, target, key, value string) error {
 	r.calls = append(r.calls, "SetWindowOption "+target+" "+key)
 	return nil
 }

@@ -5,6 +5,8 @@ import (
 	"encoding/hex"
 	"fmt"
 	"regexp"
+
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/tmux"
 )
 
 // LaunchIDEnvName is the per-exec env var carrying a sandbox launch's unique
@@ -74,15 +76,15 @@ func ValidPaneID(s string) bool {
 }
 
 // ValidSocketPath reports whether s is a usable tmux socket path: absolute,
-// no tab or newline, length-bounded (see socketPattern).
+// no tab or newline, length-bounded (see tmux.ValidSocket, the one definition).
 func ValidSocketPath(s string) bool {
-	return socketPattern.MatchString(s)
+	return tmux.ValidSocket(s)
 }
 
 // malformedFieldMarker is the fixed value the in-container scan prints in place
 // of a TMUX_PANE, CENCI_TMUX_SOCKET or CENCI_LAUNCH_ID value that is not a
 // well-formed field (so it can neither forge nor shift scan rows). It matches
-// none of panePattern, socketPattern or the launch-ID shape, so a sanitized
+// none of panePattern, tmux.ValidSocket or the launch-ID shape, so a sanitized
 // field always fails open host-side. tests/reap-orphans.test.sh hard-codes the
 // same string.
 const malformedFieldMarker = "__MALFORMED__"

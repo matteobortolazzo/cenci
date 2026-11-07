@@ -37,7 +37,7 @@ func TestHasSession_ExactMatchArgumentShape(t *testing.T) {
 	installFakeTmuxOnPath(t, "echo \"$@\" > "+argsFile+"\nexit 0\n")
 
 	client := &ExecClient{}
-	if _, err := client.HasSession("work"); err != nil {
+	if _, err := client.HasSession("", "work"); err != nil {
 		t.Fatalf("HasSession returned unexpected error: %v", err)
 	}
 
@@ -60,13 +60,13 @@ func TestLaunchOperationsPreserveExactTargets(t *testing.T) {
 	installFakeTmuxOnPath(t, "printf '%s\\n' \"$#\" \"$@\" >> "+argsFile+"\nif [ \"$1\" = display-message ]; then echo 0; fi\nexit 0\n")
 
 	client := &ExecClient{}
-	if _, err := client.IsGroupedSession("=work"); err != nil {
+	if _, err := client.IsGroupedSession("", "=work"); err != nil {
 		t.Fatalf("IsGroupedSession returned unexpected error: %v", err)
 	}
-	if err := client.NewWindow("=work", "40-implement", "agent command"); err != nil {
+	if err := client.NewWindow("", "=work", "40-implement", "agent command"); err != nil {
 		t.Fatalf("NewWindow returned unexpected error: %v", err)
 	}
-	if err := client.SetWindowOption("=work:=40-implement", "automatic-rename", "off"); err != nil {
+	if err := client.SetWindowOption("", "=work:=40-implement", "automatic-rename", "off"); err != nil {
 		t.Fatalf("SetWindowOption returned unexpected error: %v", err)
 	}
 
@@ -90,7 +90,7 @@ func TestHasSession_LiveSessionReportsTrue(t *testing.T) {
 	installFakeTmuxOnPath(t, "exit 0\n")
 
 	client := &ExecClient{}
-	exists, err := client.HasSession("work")
+	exists, err := client.HasSession("", "work")
 	if err != nil {
 		t.Fatalf("HasSession returned unexpected error: %v", err)
 	}
@@ -107,7 +107,7 @@ func TestHasSession_ExitErrorClassifiesAsAbsentNotProbeFailure(t *testing.T) {
 	installFakeTmuxOnPath(t, "exit 1\n")
 
 	client := &ExecClient{}
-	exists, err := client.HasSession("work")
+	exists, err := client.HasSession("", "work")
 	if err != nil {
 		t.Fatalf("HasSession err = %v, want nil (a tmux exit error classifies as absent, not a probe failure)", err)
 	}
@@ -125,7 +125,7 @@ func TestHasSession_RunFailureReturnsError(t *testing.T) {
 	t.Setenv("PATH", t.TempDir()) // no tmux binary resolvable at all
 
 	client := &ExecClient{}
-	exists, err := client.HasSession("work")
+	exists, err := client.HasSession("", "work")
 	if err == nil {
 		t.Fatal("HasSession err = nil, want a non-nil error when tmux cannot be run at all")
 	}

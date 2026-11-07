@@ -71,9 +71,9 @@ type orderedWindowKiller struct {
 	order *killOrder
 }
 
-func (k *orderedWindowKiller) KillWindow(target string) error {
+func (k *orderedWindowKiller) KillWindow(socket, target string) error {
 	k.order.add("window " + target)
-	return k.inner.KillWindow(target)
+	return k.inner.KillWindow(socket, target)
 }
 
 // wcWindow is one tracked agent window of a fixture.
@@ -661,7 +661,7 @@ func (m *tmuxModel) KillWindowProcesses(_ context.Context, target string) error 
 	return nil
 }
 
-func (m *tmuxModel) KillWindow(target string) error {
+func (m *tmuxModel) KillWindow(_, target string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	i, ok := m.find(target)
@@ -781,7 +781,7 @@ func (f failingProcKiller) KillWindowProcesses(context.Context, string) error { 
 
 type failingWindowKiller struct{ err error }
 
-func (f failingWindowKiller) KillWindow(string) error { return f.err }
+func (f failingWindowKiller) KillWindow(string, string) error { return f.err }
 
 // A failed process kill and a failed kill-window are each logged under the
 // window-cleanup prefix, naming the window; a window that is already gone is
@@ -930,9 +930,9 @@ type listCounter struct {
 	lists atomic.Int64
 }
 
-func (c *listCounter) ListPanes() ([]tmux.PaneInfo, error) {
+func (c *listCounter) ListPanes(socket string) ([]tmux.PaneInfo, error) {
 	c.lists.Add(1)
-	return c.MockClient.ListPanes()
+	return c.MockClient.ListPanes(socket)
 }
 
 // A non-positive interval disables the pass, and the 1s sweep tick alone never

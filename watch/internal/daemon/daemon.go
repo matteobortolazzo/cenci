@@ -27,7 +27,7 @@ import (
 // tmux.Client, mirroring internal/closecmd.windowKiller and the rationale
 // documented on tmux.ExecClient.KillWindow (#522).
 type windowKiller interface {
-	KillWindow(target string) error
+	KillWindow(socket, target string) error
 }
 
 // windowProcKiller kills the process tree behind a tmux window target before

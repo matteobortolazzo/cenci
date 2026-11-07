@@ -26,19 +26,20 @@ var ErrWindowSpawned = errors.New("tmux window already spawned")
 // Controller is the small consumer-side tmux interface the launcher needs.
 // *tmux.ExecClient satisfies it structurally (SetWindowOption already exists;
 // CurrentSession/IsGroupedSession/NewWindow are added alongside it). Tests use
-// their own mock.
+// their own mock. Every method takes the tmux socket it targets first; the
+// launcher passes "" (the ambient server).
 type Controller interface {
-	CurrentSession() (string, error)
+	CurrentSession(socket string) (string, error)
 	// Launch-target methods receive tmux's exact-match session form.
-	IsGroupedSession(session string) (bool, error)
-	NewWindow(session, name, shellCommand string) error
-	SetWindowOption(target, key, value string) error
+	IsGroupedSession(socket, session string) (bool, error)
+	NewWindow(socket, session, name, shellCommand string) error
+	SetWindowOption(socket, target, key, value string) error
 	// HasSession reports whether session exists on the tmux server (#927):
 	// the dispatch spawn path's per-repo pre-mutation gate uses this to
 	// classify a configured-but-absent session before ever claiming a
 	// ticket Working. It is never consulted by Run itself (:163-176 stays
 	// as-is for the interactive `cenci run` path).
-	HasSession(session string) (bool, error)
+	HasSession(socket, session string) (bool, error)
 }
 
 // Opts holds the resolved launcher inputs, mirroring the `run` flags.
@@ -210,7 +211,7 @@ func Run(opts Opts, ctrl Controller) error {
 	// 3. Resolve target session: flag > current tmux session.
 	session := strings.TrimSpace(opts.Session)
 	if session == "" {
-		s, serr := ctrl.CurrentSession()
+		s, serr := ctrl.CurrentSession("")
 		s = strings.TrimSpace(s)
 		switch {
 		case serr == nil && s != "":
@@ -254,7 +255,7 @@ func Run(opts Opts, ctrl Controller) error {
 
 	// 4. Safety guard: refuse grouped sessions — a new window would propagate
 	// to every session in the group.
-	grouped, err := ctrl.IsGroupedSession(exactSession)
+	grouped, err := ctrl.IsGroupedSession("", exactSession)
 	if err != nil {
 		return fmt.Errorf("checking session %q: %w", session, err)
 	}
@@ -268,13 +269,13 @@ func Run(opts Opts, ctrl Controller) error {
 	}
 	ensure()
 
-	if err := ctrl.NewWindow(exactSession, name, shellCommand); err != nil {
+	if err := ctrl.NewWindow("", exactSession, name, shellCommand); err != nil {
 		return fmt.Errorf("creating window %q in session %q: %w", name, session, err)
 	}
 	// Pin the name so the daemon flags the window ManuallyNamed and preserves
 	// the join key instead of renaming it to the detected task.
 	target := exactSession + ":=" + name
-	if err := ctrl.SetWindowOption(target, "automatic-rename", "off"); err != nil {
+	if err := ctrl.SetWindowOption("", target, "automatic-rename", "off"); err != nil {
 		displayTarget := session + ":" + name
 		return fmt.Errorf("setting automatic-rename off on %q: %w: %w", displayTarget, err, ErrWindowSpawned)
 	}
@@ -302,7 +303,7 @@ func recordRepoDir(ctrl Controller, target, dir string) error {
 	if err != nil {
 		return err
 	}
-	return ctrl.SetWindowOption(target, frontend.RepoDirOption, repoDir)
+	return ctrl.SetWindowOption("", target, frontend.RepoDirOption, repoDir)
 }
 
 // launchRepoDir returns the absolute directory the new window starts in: the

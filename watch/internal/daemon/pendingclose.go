@@ -148,7 +148,7 @@ func (d *Daemon) killWindowTarget(target, desc, prefix string) {
 				log.Printf("%s: error killing processes of %s: %v", prefix, desc, err)
 			}
 		}
-		err := killer.KillWindow(target)
+		err := killer.KillWindow("", target)
 		switch {
 		case errors.Is(err, tmux.ErrWindowGone):
 			if verbose {

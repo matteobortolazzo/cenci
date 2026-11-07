@@ -124,7 +124,7 @@ func TestKillWindow_MissingTargetIsErrWindowGone(t *testing.T) {
 		t.Run(msg, func(t *testing.T) {
 			failingTmux(t, msg)
 
-			err := (&ExecClient{}).KillWindow("=work:7")
+			err := (&ExecClient{}).KillWindow("", "=work:7")
 
 			if !errors.Is(err, ErrWindowGone) {
 				t.Fatalf("KillWindow err = %v, want errors.Is(err, ErrWindowGone)", err)
@@ -141,7 +141,7 @@ func TestKillWindow_UnrelatedFailureIsNotErrWindowGone(t *testing.T) {
 		t.Run(msg, func(t *testing.T) {
 			failingTmux(t, msg)
 
-			err := (&ExecClient{}).KillWindow("=work:7")
+			err := (&ExecClient{}).KillWindow("", "=work:7")
 
 			if err == nil {
 				t.Fatal("KillWindow err = nil, want the tmux failure")
@@ -159,7 +159,7 @@ func TestKillWindow_UnrelatedFailureIsNotErrWindowGone(t *testing.T) {
 func TestKillWindow_SuccessIsNil(t *testing.T) {
 	installFakeTmuxOnPath(t, "exit 0\n")
 
-	if err := (&ExecClient{}).KillWindow("=work:7"); err != nil {
+	if err := (&ExecClient{}).KillWindow("", "=work:7"); err != nil {
 		t.Errorf("KillWindow err = %v, want nil", err)
 	}
 }
@@ -169,7 +169,7 @@ func TestListWindowPaneProcs_MissingTargetIsErrWindowGone(t *testing.T) {
 		t.Run(msg, func(t *testing.T) {
 			failingTmux(t, msg)
 
-			panes, err := ListWindowPaneProcs("=work:7")
+			panes, err := ListWindowPaneProcs("", "=work:7")
 
 			if !errors.Is(err, ErrWindowGone) {
 				t.Fatalf("ListWindowPaneProcs err = %v, want errors.Is(err, ErrWindowGone)", err)
@@ -186,7 +186,7 @@ func TestListWindowPaneProcs_UnrelatedFailureIsNotErrWindowGone(t *testing.T) {
 		t.Run(msg, func(t *testing.T) {
 			failingTmux(t, msg)
 
-			_, err := ListWindowPaneProcs("=work:7")
+			_, err := ListWindowPaneProcs("", "=work:7")
 
 			if err == nil {
 				t.Fatal("ListWindowPaneProcs err = nil, want the tmux failure")
@@ -229,7 +229,7 @@ func TestListWindowPaneProcs_ParsesFiveTabFieldsKeepingEmptyColumns(t *testing.T
 		"%3\t789\t" + launchID + "\tcodex-cenci-y\t\n"
 	twoListTmux(t, argsFile, owned, rows)
 
-	got, err := ListWindowPaneProcs("=work:7")
+	got, err := ListWindowPaneProcs("", "=work:7")
 	if err != nil {
 		t.Fatalf("ListWindowPaneProcs: %v", err)
 	}
@@ -309,7 +309,7 @@ func TestListWindowPaneProcs_ForgedOrMismatchedRowsAreDroppedAndReported(t *test
 		t.Run(tt.name, func(t *testing.T) {
 			twoListTmux(t, filepath.Join(t.TempDir(), "args"), tt.owned, tt.options)
 
-			got, err := ListWindowPaneProcs("=work:7")
+			got, err := ListWindowPaneProcs("", "=work:7")
 
 			if err == nil {
 				t.Fatal("ListWindowPaneProcs err = nil, want the dropped rows reported")
@@ -334,7 +334,7 @@ func TestListWindowPaneProcs_ForgedOrMismatchedRowsAreDroppedAndReported(t *test
 func TestListWindowPaneProcs_NoPanesIsEmptyNotAnError(t *testing.T) {
 	installFakeTmuxOnPath(t, "exit 0\n")
 
-	got, err := ListWindowPaneProcs("=work:7")
+	got, err := ListWindowPaneProcs("", "=work:7")
 	if err != nil {
 		t.Fatalf("ListWindowPaneProcs err = %v, want nil for empty output", err)
 	}

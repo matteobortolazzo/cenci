@@ -47,19 +47,25 @@ type sessionProbeController struct {
 	hasSessionCalls []string
 }
 
-func (c *sessionProbeController) CurrentSession() (string, error) {
+func (c *sessionProbeController) CurrentSession(socket string) (string, error) {
 	c.t.Helper()
 	c.t.Fatal("dispatch spawn path must never consult ctrl.CurrentSession() -- the ambient fallback stays scoped to the interactive `cenci run` path only (#927)")
 	return "", nil
 }
 
-func (c *sessionProbeController) IsGroupedSession(session string) (bool, error) { return false, nil }
+func (c *sessionProbeController) IsGroupedSession(socket, session string) (bool, error) {
+	return false, nil
+}
 
-func (c *sessionProbeController) NewWindow(session, name, shellCommand string) error { return nil }
+func (c *sessionProbeController) NewWindow(socket, session, name, shellCommand string) error {
+	return nil
+}
 
-func (c *sessionProbeController) SetWindowOption(target, key, value string) error { return nil }
+func (c *sessionProbeController) SetWindowOption(socket, target, key, value string) error {
+	return nil
+}
 
-func (c *sessionProbeController) HasSession(session string) (bool, error) {
+func (c *sessionProbeController) HasSession(socket, session string) (bool, error) {
 	c.hasSessionCalls = append(c.hasSessionCalls, session)
 	if err, ok := c.probeErrs[session]; ok {
 		return false, err

@@ -60,7 +60,7 @@ func (f *Frontend) trackWindow(windowTarget string, paneInfo *tmuxc.PaneInfo, se
 
 	// Check if manually named. A name still leading with an agent status
 	// symbol came from a previous cenci run, not from the user.
-	autoRename, err := f.client.GetWindowOption(windowTarget, "automatic-rename")
+	autoRename, err := f.client.GetWindowOption("", windowTarget, "automatic-rename")
 	manuallyNamed := false
 	if err == nil && autoRename == "off" && !probeName {
 		r, _ := utf8.DecodeRuneInString(currentName)
@@ -74,21 +74,21 @@ func (f *Frontend) trackWindow(windowTarget string, paneInfo *tmuxc.PaneInfo, se
 	currentName = frontend.SanitizeName(detect.TaskName(currentName))
 
 	// Save original styles.
-	origStyle, err := f.client.GetWindowOption(windowTarget, "window-status-style")
+	origStyle, err := f.client.GetWindowOption("", windowTarget, "window-status-style")
 	if err != nil {
 		origStyle = "default"
 	}
-	origCurrentStyle, err := f.client.GetWindowOption(windowTarget, "window-status-current-style")
+	origCurrentStyle, err := f.client.GetWindowOption("", windowTarget, "window-status-current-style")
 	if err != nil {
 		origCurrentStyle = "default"
 	}
 
 	// Save original format strings.
-	origFormat, err := f.client.GetWindowOption(windowTarget, "window-status-format")
+	origFormat, err := f.client.GetWindowOption("", windowTarget, "window-status-format")
 	if err != nil {
 		origFormat = ""
 	}
-	origCurrentFormat, err := f.client.GetWindowOption(windowTarget, "window-status-current-format")
+	origCurrentFormat, err := f.client.GetWindowOption("", windowTarget, "window-status-current-format")
 	if err != nil {
 		origCurrentFormat = ""
 	}
@@ -96,7 +96,7 @@ func (f *Frontend) trackWindow(windowTarget string, paneInfo *tmuxc.PaneInfo, se
 	// Record the launch directory `cenci run` wrote. An unset or unreadable
 	// option leaves it empty, which the window-cleanup pass treats as "repo
 	// unknown".
-	repoDir, err := f.client.GetWindowOption(windowTarget, frontend.RepoDirOption)
+	repoDir, err := f.client.GetWindowOption("", windowTarget, frontend.RepoDirOption)
 	if err != nil {
 		repoDir = ""
 	}
@@ -191,7 +191,7 @@ func (f *Frontend) restoreWindow(windowTarget string) {
 	// belong to another session. A pane ID cannot retarget that survivor.
 	target := ws.PaneID
 	// Restore original window name.
-	if err := f.client.RenameWindow(target, ws.OriginalName); err != nil {
+	if err := f.client.RenameWindow("", target, ws.OriginalName); err != nil {
 		if f.cfg.Verbose {
 			log.Printf("error restoring window %s: %v", windowTarget, err)
 		}
@@ -302,7 +302,7 @@ func (f *Frontend) applyStatus(windowTarget string, ws *windowState, status dete
 	// Defensive: inputs should already be sanitized, but guard against
 	// future code paths that bypass upstream sanitization.
 	displayName = frontend.SanitizeName(displayName)
-	if err := f.client.RenameWindow(windowTarget, displayName); err != nil {
+	if err := f.client.RenameWindow("", windowTarget, displayName); err != nil {
 		if f.cfg.Verbose {
 			log.Printf("error renaming window %s: %v", windowTarget, err)
 		}
@@ -316,7 +316,7 @@ func (f *Frontend) applyStatus(windowTarget string, ws *windowState, status dete
 
 // setWindowOpt sets a tmux window option and logs on failure when verbose mode is on.
 func (f *Frontend) setWindowOpt(target, key, value, errMsg string) {
-	if err := f.client.SetWindowOption(target, key, value); err != nil && f.cfg.Verbose {
+	if err := f.client.SetWindowOption("", target, key, value); err != nil && f.cfg.Verbose {
 		log.Printf("%s for %s: %v", errMsg, target, err)
 	}
 }
