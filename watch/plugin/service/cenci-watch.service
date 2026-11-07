@@ -1,0 +1,14 @@
+# Managed by cenci daemon install-service
+[Unit]
+Description=cenci watch daemon (attention layer for coding-agent sessions)
+
+[Service]
+Type=simple
+@CENCI_ENVIRONMENT@
+ExecStart=%h/.local/bin/cenci daemon start
+Restart=on-failure
+RestartSec=1
+KillMode=process
+
+[Install]
+WantedBy=default.target

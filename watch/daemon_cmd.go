@@ -2,15 +2,18 @@ package main
 
 import (
 	"context"
+	_ "embed" // go:embed for the login-service templates
 	"flag"
 	"fmt"
 	"io"
 	"os"
 	"os/signal"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/autostart"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/config"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/daemon"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/dispatch"
@@ -31,7 +34,8 @@ const daemonRestartReadyTimeout = 3 * time.Second
 // daemonRestartPollInterval is the polling cadence within daemonRestartReadyTimeout.
 const daemonRestartPollInterval = 50 * time.Millisecond
 
-// runDaemonGroup implements `cenci daemon [start|stop|restart|status|hook-health|model-switches]`.
+// runDaemonGroup implements `cenci daemon [start|stop|restart|status|hook-health|
+// model-switches|install-service|uninstall-service|service-status]`.
 // A bare `daemon` (no args) or `daemon` followed only by flags acts as
 // `start`, so `cenci daemon -v` still works exactly as the old bare
 // `cenci -v` did.
@@ -51,6 +55,12 @@ func runDaemonGroup(args []string) {
 		runDaemonStatus(args[1:])
 	case "hook-health":
 		runDaemonHookHealth(args[1:])
+	case "install-service":
+		runDaemonInstallService(args[1:])
+	case "uninstall-service":
+		runDaemonUninstallService(args[1:])
+	case "service-status":
+		runDaemonServiceStatus(args[1:])
 	case "model-switches":
 		runDaemonModelSwitches(args[1:])
 	default:
@@ -171,36 +181,143 @@ func runDaemonStop(args []string) {
 	fmt.Println("daemon not running")
 }
 
-// runDaemonRestart implements `cenci daemon restart`: stop (if running),
-// then spawn a fresh detached daemon the same way EnsureRunning does
-// (daemon.Spawn — `cenci daemon start`, Setsid'd), and wait briefly for
-// it to become reachable.
+// runDaemonRestart implements `cenci daemon restart`. With the login service
+// enabled it restarts through the service manager and never spawns a daemon of
+// its own, so supervision is kept (the installer's update path lands here); the
+// backend first stops a daemon the inactive unit does not own. Otherwise it stops the daemon (if running), spawns a fresh detached one the
+// same way EnsureRunning does (daemon.Spawn — `cenci daemon start`, Setsid'd),
+// and waits briefly for it to become reachable.
 func runDaemonRestart(args []string) {
 	fs := flag.NewFlagSet("daemon restart", flag.ExitOnError)
 	_ = fs.Parse(args)
 	rejectExtra("cenci daemon restart", fs.Args())
 
-	outcome, err := daemon.Stop(ipc.DefaultEventSocketPath(), ipc.DefaultPIDPath())
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "cenci daemon restart: %v\n", err)
+	service := newAutostart()
+	if service.Status(context.Background()) == autostart.StateEnabled {
+		if err := service.Restart(context.Background()); err != nil {
+			fmt.Fprintf(os.Stderr, "cenci daemon restart: %v\n", err)
+			os.Exit(1)
+		}
+	} else {
+		outcome, err := daemon.Stop(ipc.DefaultEventSocketPath(), ipc.DefaultPIDPath())
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "cenci daemon restart: %v\n", err)
+			os.Exit(1)
+		}
+		if outcome.WasRunning {
+			fmt.Printf("stopped daemon (pid %d)\n", outcome.PID)
+		}
+		daemon.Spawn()
+	}
+
+	if !waitDaemonReady() {
+		fmt.Fprintln(os.Stderr, "cenci daemon restart: daemon did not become ready in time")
 		os.Exit(1)
 	}
-	if outcome.WasRunning {
-		fmt.Printf("stopped daemon (pid %d)\n", outcome.PID)
-	}
+	fmt.Println("daemon restarted")
+}
 
-	daemon.Spawn()
-
+// waitDaemonReady polls the event socket for up to daemonRestartReadyTimeout.
+func waitDaemonReady() bool {
 	deadline := time.Now().Add(daemonRestartReadyTimeout)
 	for time.Now().Before(deadline) {
 		if daemon.Alive(ipc.DefaultEventSocketPath()) {
-			fmt.Println("daemon restarted")
-			return
+			return true
 		}
 		time.Sleep(daemonRestartPollInterval)
 	}
-	fmt.Fprintln(os.Stderr, "cenci daemon restart: daemon did not become ready in time")
-	os.Exit(1)
+	return false
+}
+
+//go:embed plugin/service/cenci-watch.service
+var systemdUnitTemplate string
+
+//go:embed plugin/service/cenci-watch.plist
+var launchdPlistTemplate string
+
+// newAutostart wires the login-service backend to this process: the real OS,
+// home, environment and uid, the embedded templates, and daemon control over the
+// default event socket and PID file.
+func newAutostart() autostart.Backend {
+	home, _ := os.UserHomeDir() // an unknown home makes autostart.New return its unsupported stub
+	return autostart.New(autostart.Options{
+		GOOS:      runtime.GOOS,
+		Home:      home,
+		LookupEnv: os.LookupEnv,
+		UID:       os.Getuid(),
+		Templates: autostart.Templates{Systemd: systemdUnitTemplate, Launchd: launchdPlistTemplate},
+		Daemon: autostart.Daemon{
+			Alive: func() bool { return daemon.Alive(ipc.DefaultEventSocketPath()) },
+			Stop: func() error {
+				_, err := daemon.Stop(ipc.DefaultEventSocketPath(), ipc.DefaultPIDPath())
+				return err
+			},
+		},
+	})
+}
+
+// parseServiceFlags parses a service subverb's flags. Usage errors print a
+// one-line hint (the flag package's own multi-line usage block is discarded) and
+// exit 2. --force exists only when allowForce is set.
+func parseServiceFlags(verb string, args []string, allowForce bool) (force bool) {
+	prefix := "cenci daemon " + verb
+	fs := flag.NewFlagSet("daemon "+verb, flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	if allowForce {
+		fs.BoolVar(&force, "force", false, "replace or remove a service file cenci did not write")
+	}
+	if err := fs.Parse(args); err != nil {
+		fmt.Fprintf(os.Stderr, "%s: %v\n", prefix, err)
+		os.Exit(2)
+	}
+	rejectExtra(prefix, fs.Args())
+	return force
+}
+
+// runDaemonInstallService implements `cenci daemon install-service [--force]`:
+// write the login service for this OS, hand over from an unsupervised daemon,
+// then enable and start it. Exits 1 on any failed precondition or command.
+func runDaemonInstallService(args []string) {
+	force := parseServiceFlags("install-service", args, true)
+
+	outcome, err := newAutostart().Install(context.Background(), force)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cenci daemon install-service: %v\n", err)
+		os.Exit(1)
+	}
+	if outcome == autostart.OutcomeAlreadyInstalled {
+		fmt.Println("service already installed")
+		return
+	}
+	fmt.Println("service installed and started")
+}
+
+// runDaemonUninstallService implements `cenci daemon uninstall-service
+// [--force]`: disable, stop and remove the login service. The daemon is not
+// respawned; the next agent session's bootstrap restores it.
+func runDaemonUninstallService(args []string) {
+	force := parseServiceFlags("uninstall-service", args, true)
+
+	outcome, err := newAutostart().Uninstall(context.Background(), force)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cenci daemon uninstall-service: %v\n", err)
+		os.Exit(1)
+	}
+	if outcome == autostart.OutcomeNotInstalled {
+		fmt.Println("service not installed")
+		return
+	}
+	fmt.Println("service removed; the daemon starts again on your next agent session or with: cenci daemon start")
+}
+
+// runDaemonServiceStatus implements `cenci daemon service-status`: a read-only
+// report whose first line is the stable token `service: <enabled|disabled|
+// not-installed|unsupported>` that `cenci doctor` matches. It takes no flags and
+// always exits 0 once it parses; any doubt reads as `unsupported`.
+func runDaemonServiceStatus(args []string) {
+	parseServiceFlags("service-status", args, false)
+
+	fmt.Println(newAutostart().Status(context.Background()).Line())
 }
 
 // runDaemonStatus implements `cenci daemon status`: a narrow

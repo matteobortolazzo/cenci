@@ -1,6 +1,7 @@
 package main_test
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"strings"
@@ -103,6 +104,55 @@ func TestDaemonStart_WritesPIDFile_RemovedOnCleanShutdown(t *testing.T) {
 	}
 }
 
+// TestDaemonStart_SIGTERMExitsZero pins the premise behind the login service's
+// Restart=on-failure: a SIGTERM (what `daemon stop` and `systemctl stop` send)
+// ends the daemon with exit 0, so a deliberate stop is never restarted.
+func TestDaemonStart_SIGTERMExitsZero(t *testing.T) {
+	t.Setenv("CENCI_SOCKET_DIR", t.TempDir())
+	bg := startDaemonBackground(t)
+
+	if err := bg.cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatalf("SIGTERM: %v", err)
+	}
+	select {
+	case <-bg.done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("daemon did not exit after SIGTERM")
+	}
+	if code := bg.cmd.ProcessState.ExitCode(); code != 0 {
+		t.Errorf("exit code after SIGTERM = %d, want 0", code)
+	}
+}
+
+// TestDaemonStart_AlreadyRunningExitsZeroPIDUnchanged covers the bootstrap hook
+// when the login service already owns the daemon: its `cenci daemon start`
+// takes the ErrAlreadyRunning path, exits 0, and leaves the running daemon and
+// its PID file alone.
+func TestDaemonStart_AlreadyRunningExitsZeroPIDUnchanged(t *testing.T) {
+	t.Setenv("CENCI_SOCKET_DIR", t.TempDir())
+	bg := startDaemonBackground(t)
+	pidPath := ipc.DefaultPIDPath()
+	pid := bg.cmd.Process.Pid
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	output, err := exec.CommandContext(ctx, binaryPath, "daemon", "start").CombinedOutput()
+	if err != nil {
+		t.Fatalf("second `daemon start`: expected exit 0, got %v\n%s", err, output)
+	}
+
+	got, err := daemon.ReadPIDFile(pidPath)
+	if err != nil {
+		t.Fatalf("ReadPIDFile: %v", err)
+	}
+	if got != pid {
+		t.Errorf("pid file holds %d after the second start, want the original %d", got, pid)
+	}
+	if !daemon.ProcessAlive(pid) {
+		t.Errorf("the original daemon %d must still be running", pid)
+	}
+}
+
 // TestDaemonStatus_NotRunning covers `daemon status` against an empty
 // runtime dir: it must report not-running and exit non-zero.
 func TestDaemonStatus_NotRunning(t *testing.T) {
@@ -193,6 +243,11 @@ func TestDaemonStop_NothingRunningIsNoop(t *testing.T) {
 // tear down an existing daemon and bring up a fresh one reachable at the
 // same socket, reporting the old PID and a "restarted" confirmation.
 func TestDaemonRestart_StopsOldAndStartsNew(t *testing.T) {
+	// `restart` reads the ambient login-service unit, so isolate the unit path
+	// and the sandbox gate: a real installed unit must never be restarted here.
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("CENCI_SANDBOX", "")
 	t.Setenv("CENCI_SOCKET_DIR", t.TempDir())
 	oldBg := startDaemonBackground(t)
 	oldPID := oldBg.cmd.Process.Pid

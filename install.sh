@@ -40,6 +40,8 @@
 #                                          (dedicated "cenci" tmux server config; update
 #                                          mode: --tmux-defaults also creates a missing copy;
 #                                          uninstall mode: --no-tmux-defaults keeps it)
+#   --no-login-service                    decline the install-mode offer to start the cenci
+#                                          daemon at login (systemd user unit / launchd agent)
 #   --ref <ref>                           marketplace + plugin content, and the installer
 #                                          itself, all come from this ref instead of the
 #                                          resolved latest release tag (e.g. --ref main);
@@ -612,7 +614,61 @@ doctor_daemon_status() {
 	if "$bin" daemon status >/dev/null 2>&1; then
 		ok "cenci daemon: running"
 	else
-		warn "cenci daemon: not running (starts automatically on your first agent session, or run: cenci daemon start)"
+		warn "cenci daemon: not running — run: cenci daemon start (it also starts on your next agent session, or at login with the login service)"
+	fi
+	doctor_service_status "$bin"
+}
+
+# service_status_token <bin> prints the token of `cenci daemon service-status`
+# (`service: <enabled|disabled|not-installed|unsupported>`) and returns 0. It
+# returns 1 and prints nothing on a non-zero exit (an older binary without the
+# subverb exits 2 with "unknown subcommand"), a timeout, or a first line that is
+# not one of the four tokens, so callers treat "no answer" as "say nothing".
+service_status_token() {
+	local out first
+	out="$(run_bounded 10 "$1" daemon service-status 2>/dev/null)" || return 1
+	first="${out%%$'\n'*}"
+	case "$first" in
+		"service: enabled" | "service: disabled" | "service: not-installed" | "service: unsupported")
+			printf '%s\n' "${first#service: }"
+			;;
+		*) return 1 ;;
+	esac
+}
+
+# doctor_service_status <bin> reports the login service state right after the
+# running/not-running line. Warn/info only: it never sets DOCTOR_FAILED, and it
+# prints nothing when service_status_token has no answer.
+doctor_service_status() {
+	local token
+	token="$(service_status_token "$1")" || return 0
+	case "$token" in
+		enabled) ok "cenci daemon service: enabled (starts at login)" ;;
+		not-installed) warn "cenci daemon service: not installed — to start at login run: cenci daemon install-service" ;;
+		disabled) warn "cenci daemon service: installed but disabled — run: cenci daemon install-service" ;;
+		unsupported) say "  cenci daemon service: unsupported on this host" ;;
+	esac
+}
+
+# setup_cenci_login_service <cache-bin> offers to start the cenci daemon at
+# login (systemd user unit / launchd agent, via `cenci daemon install-service`).
+# Install mode only — update mode never prompts — and only when the provisioned
+# binary reports `not-installed`: an installed service (enabled or disabled), an
+# unsupported host, or a binary that predates service-status all skip the offer.
+# --no-login-service (LOGIN_SERVICE=no) declines it. A failing install-service
+# warns and leaves INSTALL_FAILED untouched, like the other optional steps.
+setup_cenci_login_service() {
+	local bin="${1:-}" token
+	[ "$MODE" = install ] || return 0
+	[ -n "$bin" ] || return 0
+	[ "$LOGIN_SERVICE" != no ] || return 0
+	token="$(service_status_token "$bin")" || return 0
+	[ "$token" = not-installed ] || return 0
+	ask_yn "Start the cenci daemon automatically at login?" y || return 0
+	if "$bin" daemon install-service </dev/null; then
+		ok "cenci daemon login service installed — the daemon now starts at login"
+	else
+		warn "could not install the cenci daemon login service — run: cenci daemon install-service"
 	fi
 }
 
@@ -1918,6 +1974,7 @@ step_cenci_watch_setup() {
 		if [ -n "$cache_bin" ]; then
 			setup_cenci_linux_path "$cache_bin"
 		fi
+		setup_cenci_login_service "$cache_bin"
 		setup_cenci_linux_widgets
 		if [ "$MODE" = update ] && ! restart_cenci_daemon "$cache_bin"; then
 			INSTALL_FAILED=1
@@ -1929,6 +1986,7 @@ step_cenci_watch_setup() {
 	if [ -n "$cache_bin" ] && ! link_launcher cenci "$cache_bin"; then
 		INSTALL_FAILED=1
 	fi
+	setup_cenci_login_service "$cache_bin"
 	if [ "$MODE" = update ] && ! restart_cenci_daemon "$cache_bin"; then
 		INSTALL_FAILED=1
 	fi
@@ -2670,6 +2728,7 @@ collect_uninstall_targets() {
 		say "  • Codex plugins ($ALL_PLUGINS) and the cenci marketplace registration"
 	fi
 	say "  • ~/.local/bin/{cenci,cn,cenci-installer} (only if they're cenci-managed symlinks)"
+	say "  • the cenci daemon login service (if installed)"
 	say "  • the cenci daemon (stopped) and its managed state"
 	collect_sandbox_cleanup_targets
 	say "  • ${XDG_CONFIG_HOME:-$HOME/.config}/cenci/config.json"
@@ -2978,6 +3037,29 @@ uninstall_socket_dir_is_safe() {
 		;;
 	esac
 	return 0
+}
+
+# uninstall_login_service removes the cenci daemon login service (#1168) while
+# the binary that manages it still exists, and before uninstall_stop_daemon so
+# the service manager cannot restart the daemon it is about to stop. It reads
+# `daemon service-status` first and calls `daemon uninstall-service` (never
+# --force: an unmarked, user-written unit is left alone) only for `enabled` or
+# `disabled`; no binary, no answer, `not-installed` and `unsupported` do
+# nothing. A failure warns and names the manual command; uninstall carries on.
+uninstall_login_service() {
+	local bin token
+	bin="$(resolve_uninstall_cenci_binary || true)"
+	[ -n "$bin" ] && [ -x "$bin" ] || return 0
+	token="$(service_status_token "$bin")" || return 0
+	case "$token" in
+		enabled | disabled)
+			if "$bin" daemon uninstall-service </dev/null >/dev/null; then
+				ok "cenci daemon login service removed"
+			else
+				warn "cenci daemon login service removal failed — run manually: cenci daemon uninstall-service"
+			fi
+			;;
+	esac
 }
 
 # uninstall_stop_daemon resolves the binary while it still exists, captures
@@ -3421,6 +3503,7 @@ run_uninstall() {
 	CLAUDE_UNINSTALL_FAILED=0
 	CODEX_UNINSTALL_FAILED=0
 
+	uninstall_login_service
 	uninstall_stop_daemon
 	uninstall_sandbox_cleanup
 	uninstall_widget_cleanup
@@ -3448,6 +3531,7 @@ LAZYBOARDS_EXPLICIT=0
 # wins); an unanswerable prompt resolves to its default (install) inside
 # step_tmux_defaults_setup, so there is no global ask->yes resolution.
 TMUX_DEFAULTS=ask
+LOGIN_SERVICE=ask
 INSTALL_FAILED=0
 CENCI_REF="${CENCI_REF:-}"
 # Captured before the arg-parse loop below consumes "$@" via shift, so the
@@ -3494,6 +3578,10 @@ Flags:
                                          tmux config). Installed by default; update mode
                                          creates a missing copy only with --tmux-defaults;
                                          uninstall mode keeps it with --no-tmux-defaults
+  --no-login-service                    decline the install-mode offer to start the cenci
+                                         daemon at login (a systemd user unit or launchd
+                                         agent); without it, --yes and non-interactive
+                                         installs accept the offer
   --ref <ref>                           marketplace + plugin content, and the installer
                                          itself, all come from this ref instead of the
                                          resolved latest release tag (e.g. --ref main,
@@ -3515,6 +3603,7 @@ while [ $# -gt 0 ]; do
 	--no-lazyboards) LAZYBOARDS=no; LAZYBOARDS_EXPLICIT=1 ;;
 	--tmux-defaults) TMUX_DEFAULTS=yes ;;
 	--no-tmux-defaults) TMUX_DEFAULTS=no ;;
+	--no-login-service) LOGIN_SERVICE=no ;;
 	--ref)
 		[ $# -ge 2 ] || die "--ref requires a value (see --help)"
 		CENCI_REF="$2"

@@ -431,6 +431,9 @@ cenci diagnose --name <session>
    daemon and waits for it to become reachable).
 3. Re-run `cenci diagnose --name <session> --verify` — it re-dials the same event
    socket and reports `[pass]` once the daemon answers.
+4. So a crashed daemon restarts on its own and is up at login, install the login
+   service once with `cenci daemon install-service` (check it with `cenci daemon
+   service-status`).
 
 **Platform notes**: None specific to this code — the event socket is a Unix
 domain socket under the resolved socket directory (`$CENCI_SOCKET_DIR`, or
