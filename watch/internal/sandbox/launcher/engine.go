@@ -19,6 +19,11 @@ const (
 	imageAgentLifecycleLabel = "cenci.agent-cli"
 	imageAgentLifecycleValue = "shared-v2"
 	imageBaseVersionLabel    = "cenci.base-version"
+
+	// imageFreshnessLabelsFormat is the combined agent-cli|base-version
+	// `image inspect --format` template shared by imageCurrent and
+	// imageBaseVersion, so one format string serves both call sites.
+	imageFreshnessLabelsFormat = `{{ index .Config.Labels "` + imageAgentLifecycleLabel + `" }}|{{ index .Config.Labels "` + imageBaseVersionLabel + `" }}`
 )
 
 // Engine bundles what every launcher operation needs: the resolved container
@@ -166,10 +171,9 @@ func (e *Engine) imageCurrent(image string) (current bool, baseDrift bool, err e
 	if err != nil || !exists {
 		return false, false, err
 	}
-	out, err := exec.Command(e.Runtime, "image", "inspect", "--format",
-		`{{ index .Config.Labels "`+imageAgentLifecycleLabel+`" }}|{{ index .Config.Labels "`+imageBaseVersionLabel+`" }}`, image).Output()
+	out, err := e.imageInspectFormat(image, imageFreshnessLabelsFormat, "")
 	if err != nil {
-		return false, false, fmt.Errorf("%s image inspect %s: %w", e.Runtime, image, err)
+		return false, false, err
 	}
 	parts := strings.SplitN(strings.TrimSpace(string(out)), "|", 2)
 	if len(parts) < 2 {
@@ -213,9 +217,9 @@ func parseSingleLineID(raw string) (string, error) {
 // imageID resolves the create-time content ID of the freshly built image, for
 // printStaleContainerNotice's staleness comparison.
 func (e *Engine) imageID(image string) (string, error) {
-	out, err := exec.Command(e.Runtime, "image", "inspect", "--format", "{{.Id}}", image).Output()
+	out, err := e.imageInspectFormat(image, "{{.Id}}", "")
 	if err != nil {
-		return "", fmt.Errorf("%s image inspect %s: %w", e.Runtime, image, err)
+		return "", err
 	}
 	id, err := parseSingleLineID(string(out))
 	if err != nil {
@@ -246,9 +250,9 @@ func parseContainerImageLine(raw string) (ref, id string, err error) {
 // resolved image ID via a single combined inspect probe, mirroring
 // inspectObservedPosture's multi-field-in-one-probe shape (audit_observed.go).
 func (e *Engine) containerImage(name string) (ref, id string, err error) {
-	out, err := exec.Command(e.Runtime, "inspect", "--format", "{{.Config.Image}}|{{.Image}}", name).Output()
+	out, err := e.inspectFormat(name, "{{.Config.Image}}|{{.Image}}", "")
 	if err != nil {
-		return "", "", fmt.Errorf("%s inspect %s: %w", e.Runtime, name, err)
+		return "", "", err
 	}
 	ref, id, err = parseContainerImageLine(string(out))
 	if err != nil {

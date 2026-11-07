@@ -22,7 +22,7 @@ var githubLoginPattern = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$
 
 // permissionProbeTimeout bounds every individual write-permission `gh api
 // .../collaborators/<login>/permission` call (#882), mirroring
-// ghIssueCommentsTimeout's rationale (resume.go): a hung network call must
+// ghTimeout's rationale (gh.go): a hung network call must
 // never stall a dispatch pass indefinitely. A var (not a const), like
 // maxOpenPRProbeDuration (openpr.go): permission_test.go overrides it to a
 // small value for the duration of one test so proving the timeout

@@ -1,16 +1,13 @@
 package dispatch
 
 import (
-	"bytes"
-	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
-	"os/exec"
 	"regexp"
 	"sort"
 	"strings"
-	"time"
 )
 
 // escalationAnchorPrefix (#849) is the persisted escalation anchor's fixed
@@ -31,17 +28,6 @@ const escalationAnchorPrefix = "<!-- cenci-planner-escalation:"
 // `openssl rand -hex 16`, so a genuine nonce is always exactly 32 lowercase
 // hex characters; anything else is treated as absent.
 var escalationNoncePattern = regexp.MustCompile(`^[0-9a-f]{32}$`)
-
-// ghIssueCommentsTimeout bounds every individual escalation-answer REST probe
-// call (#827/#849), mirroring ghIssueViewTimeout's rationale (dependency.go):
-// a hung network call must never stall a dispatch pass indefinitely.
-const ghIssueCommentsTimeout = 60 * time.Second
-
-// ghIssueCommentsWaitDelay bounds how long cmd.Wait can block after the gh
-// process itself has exited or been killed by ghIssueCommentsTimeout's
-// context, mirroring ghIssueViewWaitDelay (dependency.go) --
-// watch/docs/go-gotchas.md's cmd.WaitDelay rule (#822).
-const ghIssueCommentsWaitDelay = 5 * time.Second
 
 // maxAnswerProbes caps how many escalation-answer REST probe calls one
 // RunOnce pass may make (#827), mirroring maxDependencyResolutions
@@ -146,17 +132,16 @@ func validAnchor(anchorID int64, nonce string) bool {
 // The call is `gh api "repos/<owner>/<repo>/issues/<number>/comments?per_page=100"
 // --paginate` (#849 plan Q1: REST over `gh issue view --json comments`, so
 // the numeric comment id and `user.type` are first-class fields instead of a
-// URL-fragment scrape / login-shape heuristic), bounded by
-// ghIssueCommentsTimeout/ghIssueCommentsWaitDelay (watch/docs/go-gotchas.md
-// #822) so a hung network call can never stall a dispatch pass indefinitely,
-// mirroring mainsync.go's/dependency.go's subprocess conventions per
-// watch/AGENTS.md's #825 rule: exec.CommandContext + timeout + WaitDelay +
-// separate stdout/stderr buffers (never CombinedOutput) + one collapsed,
-// truncated log line. stdout is additionally capped at maxProbeStdoutBytes
-// (#849 Risks section): --paginate on a very long thread could otherwise
-// return an unbounded payload, and an oversized payload fails closed to
-// AnswerProbeUnresolved rather than decoding a truncated/corrupted partial
-// JSON payload.
+// URL-fragment scrape / login-shape heuristic), made through execGhBounded
+// (gh.go) per watch/AGENTS.md's #825/#852 rule, so it is bounded by
+// ghTimeout/ghWaitDelay (watch/docs/go-gotchas.md #822) and a hung network
+// call can never stall a dispatch pass indefinitely, with separate
+// stdout/stderr buffers (never CombinedOutput) and one collapsed, truncated
+// log line per failure. maxProbeStdoutBytes is passed as execGhBounded's
+// output bound (#849 Risks section): --paginate on a very long thread could
+// otherwise return an unbounded payload, and an oversized payload fails
+// closed to AnswerProbeUnresolved rather than decoding a truncated/corrupted
+// partial JSON payload.
 //
 // Per-pass call budget (#825 review fix #1 precedent): past maxAnswerProbes,
 // no gh call is made at all and the cap-hit line is logged exactly once via
@@ -182,61 +167,35 @@ func probeEscalationAnswer(repo string, number int, anchorID int64, nonce string
 	}
 	budget.calls++
 
-	ctx, cancel := context.WithTimeout(context.Background(), ghIssueCommentsTimeout)
-	defer cancel()
 	endpoint := fmt.Sprintf("repos/%s/issues/%d/comments?per_page=100", repo, number)
-	cmd := exec.CommandContext(ctx, "gh", "api", endpoint, "--paginate")
-	cmd.WaitDelay = ghIssueCommentsWaitDelay
-	var stdout cappedBuffer
-	stdout.max = maxProbeStdoutBytes
-	var stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	err := cmd.Run()
-
-	if stdout.exceeded {
-		logf(out, "dispatch: escalation answer probe for %s#%d exceeded the %d-byte stdout cap, remaining unresolved\n",
-			repo, number, maxProbeStdoutBytes)
-		return AnswerProbeUnresolved
-	}
+	stdout, stderr, err := execGhBounded(maxProbeStdoutBytes, "api", endpoint, "--paginate")
 	if err != nil {
-		detail := truncateDetail(collapseLines(stdout.buf.String()+stderr.String()), maxProbeLogDetailBytes)
-		logf(out, "dispatch: escalation answer probe failed for %s#%d: %v (%s)\n", repo, number, err, detail)
+		// execGhBounded attaches its sentinels with errors.Join, whose Error()
+		// text contains a newline: the timeout and truncation lines below
+		// therefore never print err itself, keeping one record per log line.
+		// Truncation is checked first: it must win over a timeout that also
+		// fired mid-stream.
+		switch {
+		case errors.Is(err, errGhOutputTruncated):
+			logf(out, "dispatch: escalation answer probe for %s#%d exceeded the %d-byte stdout cap, remaining unresolved\n",
+				repo, number, maxProbeStdoutBytes)
+		case errors.Is(err, errGhTimeout):
+			detail := truncateDetail(collapseLines(stdout+stderr), maxProbeLogDetailBytes)
+			logf(out, "dispatch: escalation answer probe for %s#%d timed out: %s\n", repo, number, detail)
+		default:
+			detail := truncateDetail(collapseLines(stdout+stderr), maxProbeLogDetailBytes)
+			logf(out, "dispatch: escalation answer probe failed for %s#%d: %v (%s)\n", repo, number, err, detail)
+		}
 		return AnswerProbeUnresolved
 	}
 
 	var comments []restIssueComment
-	if err := json.Unmarshal(stdout.buf.Bytes(), &comments); err != nil {
-		detail := truncateDetail(collapseLines(stdout.buf.String()+stderr.String()), maxProbeLogDetailBytes)
+	if err := json.Unmarshal([]byte(stdout), &comments); err != nil {
+		detail := truncateDetail(collapseLines(stdout+stderr), maxProbeLogDetailBytes)
 		logf(out, "dispatch: escalation answer probe failed for %s#%d: %v (%s)\n", repo, number, err, detail)
 		return AnswerProbeUnresolved
 	}
 	return classifyComments(comments, anchorID, nonce, permOf)
-}
-
-// cappedBuffer is an io.Writer that stops accumulating bytes once buf would
-// exceed max total bytes, recording that the cap was hit rather than
-// silently truncating -- the caller must treat exceeded as a hard failure
-// (#849 Risks section), never attempt to decode the partial buf. Write never
-// returns an error on overflow (returning len(p), nil for the discarded
-// bytes): a write error here would abort exec.Cmd's own output-copying
-// goroutine with a spurious "short write" failure instead of the clean,
-// classified AnswerProbeUnresolved this cap exists to produce.
-type cappedBuffer struct {
-	buf      bytes.Buffer
-	max      int
-	exceeded bool
-}
-
-func (c *cappedBuffer) Write(p []byte) (int, error) {
-	if c.exceeded {
-		return len(p), nil
-	}
-	if c.buf.Len()+len(p) > c.max {
-		c.exceeded = true
-		return len(p), nil
-	}
-	return c.buf.Write(p)
 }
 
 // maxProbeLogDetailBytes bounds the collapsed gh output logged/errored on a
