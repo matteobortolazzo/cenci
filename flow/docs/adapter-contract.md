@@ -112,3 +112,18 @@ Claude Code is excluded: it has no pending-trust state for plugin hooks, so the 
 [`skill-authoring.md`](skill-authoring.md#client-surfaces)). A sandbox session is labelled
 "hook trust bypassed by launcher (explicit flag)", never "trusted", and cenci never changes hook
 trust.
+
+## Claude Code mod precedence
+
+On Claude Code, `worktree-isolation` and `sensitive-file-refusal` are ordinary plugin
+`PreToolUse` hooks. A Claude Code mod's `tool.call` hook can approve a call past them, and a
+mod that answers the call itself keeps them from running; the order is in the events page's
+[order mods run in](https://code.claude.com/docs/en/plugins/mods/events#the-order-mods-run-in).
+These properties are workflow safeguards, not enforcement against other installed mods.
+The built-in guard that limits what a user's mod can approve is present only under managed
+settings or a Team or Enterprise login; cenci ships no managed settings, so inside `cn` it
+depends on the plan of the copied login. The official documentation does not describe that
+guard as stopping a mod from answering a call itself, so these hooks can be skipped even
+where it is loaded. This note covers Claude Code
+mods only and makes no claim about Codex. The container remains the isolation boundary; see
+[Claude Code mods and plugin guards](../../SECURITY.md#claude-code-mods-and-plugin-guards).
