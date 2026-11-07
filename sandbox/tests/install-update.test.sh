@@ -252,6 +252,9 @@ setup_layout() {
 # prompt in setup_cenci_linux_path, answered by its own EOF default) as the
 # only interactive gates. Sets PTY_EXIT; output lands in
 # "${WORK}/last-output" (mirrors run_update's capture convention).
+# --no-tmux-defaults keeps the single fed answer for the prompt under test (the
+# rebuild prompt, #519): the default-yes tmux-defaults prompt (#645) would consume it
+# and leave the next read on /dev/tty to the pty's EOF handling.
 run_installer_pty() {
     local mode="$1" feed="$2" mode_arg=""
     [ "${mode}" = update ] && mode_arg=update
@@ -260,7 +263,7 @@ run_installer_pty() {
 #!/bin/sh
 exec env -i HOME="${LAYOUT_HOME}" PATH="${LAYOUT_BIN}" CALL_LOG="${LAYOUT_CALL_LOG}" \
     PIDS_FILE="${PIDS_FILE}" PKILL_LOG="${LAYOUT_PKILL_LOG}" \
-    bash "${ROOT}/install.sh" ${mode_arg} --no-lazyboards
+    bash "${ROOT}/install.sh" ${mode_arg} --no-lazyboards --no-tmux-defaults
 EOF
     chmod +x "${wrapper}"
     set +e

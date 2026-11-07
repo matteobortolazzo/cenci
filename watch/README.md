@@ -42,7 +42,9 @@ Other integrations are available for [Waybar](#waybar-config),
 [KDE Plasma](plugin/plasma/README.md), and the
 [macOS menu bar](plugin/macos/README.md).
 
-<a id="tmux-appearance"></a>**tmux appearance:** the installer ships an opinionated
+## tmux appearance
+
+The installer ships an opinionated
 default tmux experience for a dedicated tmux server named `cenci`: a transparent bottom
 status bar, `● name` tabs that carry the state symbol and color, your remaining agent
 budget and the session name on the right, plus `mouse on`, `base-index 1`,
