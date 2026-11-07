@@ -4,5 +4,13 @@
   "description": "cenci attention layer for Claude Code and Codex: live status, dispatch, and optional display integrations",
   "author": {
     "name": "Matteo Bortolazzo"
+  },
+  "userConfig": {
+    "statusCommand": {
+      "type": "boolean",
+      "title": "/cenci-status command",
+      "description": "Register the read-only /cenci-status command, which shows `cenci status` immediately, even while Claude is working. Needs Claude Code v2.1.287 or later.",
+      "default": false
+    }
   }
 }

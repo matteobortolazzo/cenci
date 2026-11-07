@@ -927,6 +927,17 @@ for HOOK_SHELL in bash dash; do
     test -f "$HH_STORE" -a "$(cat "$HH_STORE")" = "plain file"
 done
 
+# --- Client-specific cases ---------------------------------------------------
+#
+# A caller may define client_extra_cases before sourcing this file to add
+# cases that exist for one client only (hooks/test.sh: hooks.json contract and
+# status.sh). They run with every hh_* helper above, add to pass/fail, and land
+# in the one summary below. A caller that defines none (codex/test.sh) is
+# unchanged.
+if declare -F client_extra_cases >/dev/null 2>&1; then
+  client_extra_cases
+fi
+
 echo
 echo "passed: $pass  failed: $fail"
 [ "$fail" -eq 0 ]
