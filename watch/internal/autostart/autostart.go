@@ -47,6 +47,12 @@ const (
 type Backend interface {
 	// Status never fails: it answers StateUnsupported on any doubt.
 	Status(ctx context.Context) State
+	// Probe is the restart-only read of the same state. It reports a definitive
+	// read with a nil error, and a doubtful one as StateUnsupported plus a
+	// *ProbeError: a cenci unit or plist exists but the service manager did not
+	// answer cleanly (a timed-out command, or no user bus on a systemd-booted
+	// host). Restart must not guess a state from a doubtful read.
+	Probe(ctx context.Context) (State, error)
 	// Install writes the marked unit or plist, hands over from an unsupervised
 	// daemon, and enables and starts the service. It writes nothing when a
 	// check made before the file is written fails (sandbox, unsupported host,
@@ -61,6 +67,17 @@ type Backend interface {
 	// running daemon the service does not own (the same handover as Install).
 	Restart(ctx context.Context) error
 }
+
+// ProbeError is the doubt Probe reports: the read of the service manager was not
+// clean while a cenci service file exists, so the service may well be enabled.
+type ProbeError struct {
+	// Reason is one line saying what went wrong, for example that a command timed out.
+	Reason string
+	// Remedy is the manual command that restarts the service through its manager.
+	Remedy string
+}
+
+func (e *ProbeError) Error() string { return e.Reason }
 
 // Templates carries the embedded service templates; package main embeds them
 // because //go:embed cannot reach outside its own module directory.
@@ -94,10 +111,22 @@ type Options struct {
 	// ReadyTimeout bounds the wait for the event socket after the service was
 	// started; zero means DefaultReadyTimeout.
 	ReadyTimeout time.Duration
+	// CommandTimeout bounds each service-manager command; zero means
+	// DefaultCommandTimeout.
+	CommandTimeout time.Duration
+	// SystemdBootedDir is the directory whose presence says the host was booted
+	// with systemd; zero means /run/systemd/system.
+	SystemdBootedDir string
 }
 
-// DefaultReadyTimeout is how long Install waits for the event socket.
-const DefaultReadyTimeout = 3 * time.Second
+const (
+	// DefaultReadyTimeout is how long Install waits for the event socket.
+	DefaultReadyTimeout = 3 * time.Second
+	// DefaultCommandTimeout bounds each service-manager command.
+	DefaultCommandTimeout = 10 * time.Second
+	// defaultSystemdBootedDir is how systemd itself tells a booted host apart.
+	defaultSystemdBootedDir = "/run/systemd/system"
+)
 
 const (
 	// SystemdUnit is the systemd user unit name.
@@ -108,7 +137,6 @@ const (
 	markerText       = "Managed by cenci daemon install-service"
 	systemdMarker    = "# " + markerText
 	launchdMarker    = "<!-- " + markerText + " -->"
-	commandTimeout   = 10 * time.Second
 	commandWaitGrace = 2 * time.Second
 	readyPoll        = 50 * time.Millisecond
 )
@@ -134,6 +162,12 @@ func New(opts Options) Backend {
 	if opts.ReadyTimeout <= 0 {
 		opts.ReadyTimeout = DefaultReadyTimeout
 	}
+	if opts.CommandTimeout <= 0 {
+		opts.CommandTimeout = DefaultCommandTimeout
+	}
+	if opts.SystemdBootedDir == "" {
+		opts.SystemdBootedDir = defaultSystemdBootedDir
+	}
 	switch opts.GOOS {
 	case "linux":
 		return &systemd{opts}
@@ -148,6 +182,8 @@ func New(opts Options) Backend {
 type unsupported struct{ reason error }
 
 func (u unsupported) Status(context.Context) State { return StateUnsupported }
+
+func (u unsupported) Probe(context.Context) (State, error) { return StateUnsupported, nil }
 
 func (u unsupported) Install(context.Context, bool) (Outcome, error) { return "", u.reason }
 
@@ -261,10 +297,10 @@ func writeAtomic(path, content string) error {
 	return os.Rename(tmp.Name(), path)
 }
 
-// run executes one bounded service-manager command and, on failure, returns an
-// error that names the command and carries its output.
-func run(ctx context.Context, name string, args ...string) (string, error) {
-	ctx, cancel := context.WithTimeout(ctx, commandTimeout)
+// run executes one service-manager command bounded by timeout and, on failure,
+// returns an error that names the command and carries its output.
+func run(ctx context.Context, timeout time.Duration, name string, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.WaitDelay = commandWaitGrace
@@ -283,6 +319,20 @@ func run(ctx context.Context, name string, args ...string) (string, error) {
 	}
 	return text, fmt.Errorf("%s failed: %w", cmdline, err)
 }
+
+// doubt builds the ProbeError for a failed command. A timeout names the command
+// and the bound; any other failure carries the command's own error text. The
+// reason is collapsed to one line so a refusal stays a single stderr line.
+func (o Options) doubt(cmdline string, err error, remedy string) *ProbeError {
+	reason := strings.Join(strings.Fields(err.Error()), " ")
+	if timedOut(err) {
+		reason = fmt.Sprintf("%s timed out after %s", cmdline, o.CommandTimeout)
+	}
+	return &ProbeError{Reason: reason, Remedy: remedy}
+}
+
+// timedOut reports whether err is a command that ran out of time, as run marks it.
+func timedOut(err error) bool { return errors.Is(err, context.DeadlineExceeded) }
 
 func (o Options) daemonAlive() bool { return o.Daemon.Alive != nil && o.Daemon.Alive() }
 

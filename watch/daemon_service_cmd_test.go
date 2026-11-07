@@ -3,12 +3,14 @@ package main_test
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -33,10 +35,16 @@ type serviceHost struct {
 func newServiceHost(t *testing.T) serviceHost {
 	t.Helper()
 	h := serviceHost{home: t.TempDir(), xdg: t.TempDir()}
+	socketDir := t.TempDir()
+	// The daemon warns on stderr about a socket dir looser than 0700, which would
+	// pollute the one-line stderr contract the restart refusal tests assert.
+	if err := os.Chmod(socketDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("HOME", h.home)
 	t.Setenv("XDG_CONFIG_HOME", h.xdg)
 	t.Setenv("CENCI_SANDBOX", "")
-	t.Setenv("CENCI_SOCKET_DIR", t.TempDir())
+	t.Setenv("CENCI_SOCKET_DIR", socketDir)
 	return h
 }
 
@@ -121,7 +129,13 @@ func daemonRunning(t *testing.T) bool {
 // runServiceCmd runs the built binary and returns its streams and exit code.
 func runServiceCmd(t *testing.T, args ...string) (stdout, stderr string, code int) {
 	t.Helper()
-	cmd := exec.Command(binaryPath, args...)
+	return runServiceCmdWith(t, binaryPath, args...)
+}
+
+// runServiceCmdWith is runServiceCmd against an explicit cenci binary.
+func runServiceCmdWith(t *testing.T, bin string, args ...string) (stdout, stderr string, code int) {
+	t.Helper()
+	cmd := exec.Command(bin, args...)
 	var out, errOut bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errOut
 	err := cmd.Run()
@@ -326,6 +340,314 @@ func TestDaemonRestart_ServiceBranchRestartsThroughTheManager(t *testing.T) {
 	}
 	if got != want {
 		t.Errorf("pid file holds %d, want the manager-started daemon %d", got, want)
+	}
+}
+
+// -- restart refuses to bypass a login service it cannot read (#1439) --------------
+//
+// A doubtful service read must never fall through to the legacy stop-then-Spawn
+// path: that would stop the supervised daemon and start an unsupervised one next
+// to an enabled unit. The timeout cases run a second binary stamped with a 1s
+// service-command timeout (-X main.serviceCommandTimeout), so a hanging fake
+// systemctl costs about a second instead of the 10s default.
+
+const (
+	refusalPrefix = "cenci daemon restart: cannot read the login service state"
+	systemdRemedy = "systemctl --user restart cenci-watch.service"
+	// refusalCeiling is well under the 10s default timeout: a run that took longer
+	// ran the unstamped timeout, which means the -X flag did not take effect.
+	refusalCeiling = 5 * time.Second
+)
+
+var (
+	shortTimeoutOnce sync.Once
+	shortTimeoutPath string
+	shortTimeoutErr  error
+)
+
+// shortTimeoutBinary builds, once, a cenci whose service commands time out after
+// one second. It lives beside binaryPath, so TestMain's cleanup removes it.
+func shortTimeoutBinary(t *testing.T) string {
+	t.Helper()
+	shortTimeoutOnce.Do(func() {
+		shortTimeoutPath = filepath.Join(filepath.Dir(binaryPath), "cenci-short-timeout")
+		out, err := exec.Command("go", "build", "-ldflags", "-X main.serviceCommandTimeout=1s", "-o", shortTimeoutPath, ".").CombinedOutput()
+		if err != nil {
+			shortTimeoutErr = fmt.Errorf("building the short-timeout binary: %w\n%s", err, out)
+		}
+	})
+	if shortTimeoutErr != nil {
+		t.Fatal(shortTimeoutErr)
+	}
+	return shortTimeoutPath
+}
+
+// sleepBody is a fake-systemctl hook body that never answers: the shell replaces
+// itself with a long sleep so only the CLI's own timeout ends the call. The sleep
+// path is resolved here because the fake runs with PATH replaced.
+func sleepBody(t *testing.T) string {
+	t.Helper()
+	sleep, err := exec.LookPath("sleep")
+	if err != nil {
+		t.Skipf("no sleep binary to build a hanging fake: %v", err)
+	}
+	return "exec '" + sleep + "' 30"
+}
+
+func (h serviceHost) writeUnit(t *testing.T) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(h.unitPath()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(h.unitPath(), []byte(unitMarker+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// assertRefusal checks the refusal contract: exit 1, one stderr line carrying the
+// reason and the manual remedy, and no sign of a stop or a restart on stdout.
+func assertRefusal(t *testing.T, stdout, stderr string, code int, elapsed time.Duration, wantReason string) {
+	t.Helper()
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1 (stdout %q, stderr %q)", code, stdout, stderr)
+	}
+	line := strings.TrimRight(stderr, "\n")
+	if line == "" || strings.Contains(line, "\n") {
+		t.Errorf("stderr = %q, want exactly one line", stderr)
+	}
+	for _, want := range []string{refusalPrefix, wantReason, "not restarting outside the service", systemdRemedy} {
+		if !strings.Contains(line, want) {
+			t.Errorf("stderr %q must contain %q", line, want)
+		}
+	}
+	if !strings.HasPrefix(line, refusalPrefix) {
+		t.Errorf("stderr %q must start with %q", line, refusalPrefix)
+	}
+	for _, banned := range []string{"stopped daemon", "daemon restarted"} {
+		if strings.Contains(stdout, banned) {
+			t.Errorf("stdout %q must not contain %q on a refusal", stdout, banned)
+		}
+	}
+	if elapsed >= refusalCeiling {
+		t.Errorf("took %v, want under %v: the stamped 1s timeout did not apply", elapsed, refusalCeiling)
+	}
+}
+
+func systemctlCalls(t *testing.T, log string) string {
+	t.Helper()
+	data, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatalf("reading the systemctl call log: %v", err)
+	}
+	return string(data)
+}
+
+// assertDaemonUntouched proves the refusal left the running daemon alone: same
+// process, still answering on its socket, same PID file contents.
+func assertDaemonUntouched(t *testing.T, old *bgDaemon, pidFileBefore []byte) {
+	t.Helper()
+	select {
+	case <-old.done:
+		t.Error("the running daemon was stopped")
+	default:
+	}
+	if !daemonRunning(t) {
+		t.Error("the running daemon no longer answers")
+	}
+	after, err := os.ReadFile(ipc.DefaultPIDPath())
+	if err != nil {
+		t.Fatalf("reading the PID file after the refusal: %v", err)
+	}
+	if !bytes.Equal(after, pidFileBefore) {
+		t.Errorf("PID file = %q, want it unchanged %q", after, pidFileBefore)
+	}
+}
+
+func TestDaemonRestart_ShowEnvironmentTimeoutRefusesAndKeepsTheDaemon(t *testing.T) {
+	requireLinux(t)
+	short := shortTimeoutBinary(t) // built before HOME is isolated, so go finds its build cache
+	h := newServiceHost(t)
+	h.writeUnit(t)
+	calls := installFakeSystemctlHooks(t, map[string]string{"--user show-environment": sleepBody(t)})
+	old := startDaemonBackground(t)
+	pidFileBefore, err := os.ReadFile(ipc.DefaultPIDPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	start := time.Now()
+	stdout, stderr, code := runServiceCmdWith(t, short, "daemon", "restart")
+	elapsed := time.Since(start)
+
+	assertRefusal(t, stdout, stderr, code, elapsed, "timed out")
+	assertDaemonUntouched(t, old, pidFileBefore)
+	if log := systemctlCalls(t, calls); strings.Contains(log, "--user restart") {
+		t.Errorf("systemctl log %q must hold no restart call", log)
+	}
+}
+
+func TestDaemonRestart_IsEnabledTimeoutRefusesAndKeepsTheDaemon(t *testing.T) {
+	requireLinux(t)
+	short := shortTimeoutBinary(t) // built before HOME is isolated, so go finds its build cache
+	h := newServiceHost(t)
+	h.writeUnit(t)
+	calls := installFakeSystemctlHooks(t, map[string]string{"--user is-enabled cenci-watch.service": sleepBody(t)})
+	old := startDaemonBackground(t)
+	pidFileBefore, err := os.ReadFile(ipc.DefaultPIDPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	start := time.Now()
+	stdout, stderr, code := runServiceCmdWith(t, short, "daemon", "restart")
+	elapsed := time.Since(start)
+
+	assertRefusal(t, stdout, stderr, code, elapsed, "is-enabled")
+	assertDaemonUntouched(t, old, pidFileBefore)
+	if log := systemctlCalls(t, calls); strings.Contains(log, "--user restart") {
+		t.Errorf("systemctl log %q must hold no restart call", log)
+	}
+}
+
+// With a unit file present on a systemd-booted host, a show-environment failure
+// that is not a timeout (an SSH shell with no user bus) is doubtful too. The
+// booted check reads the real /run/systemd/system, so it only runs where that
+// directory exists; the package tests cover it with an injected path.
+func TestDaemonRestart_NoUserBusOnASystemdHostRefusesAndKeepsTheDaemon(t *testing.T) {
+	requireLinux(t)
+	if info, err := os.Stat("/run/systemd/system"); err != nil || !info.IsDir() {
+		t.Skip("this host was not booted with systemd")
+	}
+	h := newServiceHost(t)
+	h.writeUnit(t)
+	installFakeSystemctlHooks(t, map[string]string{
+		"--user show-environment": "echo 'Failed to connect to bus: No medium found' >&2\nexit 1",
+	})
+	old := startDaemonBackground(t)
+	pidFileBefore, err := os.ReadFile(ipc.DefaultPIDPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	start := time.Now()
+	stdout, stderr, code := runServiceCmd(t, "daemon", "restart")
+	elapsed := time.Since(start)
+
+	assertRefusal(t, stdout, stderr, code, elapsed, "Failed to connect to bus")
+	assertDaemonUntouched(t, old, pidFileBefore)
+}
+
+func TestDaemonRestart_DoubtfulReadWithNoDaemonRunningDoesNotSpawnOne(t *testing.T) {
+	requireLinux(t)
+	short := shortTimeoutBinary(t) // built before HOME is isolated, so go finds its build cache
+	h := newServiceHost(t)
+	h.writeUnit(t)
+	installFakeSystemctlHooks(t, map[string]string{"--user show-environment": sleepBody(t)})
+	t.Cleanup(func() { _, _ = daemon.Stop(ipc.DefaultEventSocketPath(), ipc.DefaultPIDPath()) })
+
+	start := time.Now()
+	stdout, stderr, code := runServiceCmdWith(t, short, "daemon", "restart")
+	elapsed := time.Since(start)
+
+	assertRefusal(t, stdout, stderr, code, elapsed, "timed out")
+	// A spawn is asynchronous, so give a wrongly spawned daemon time to appear.
+	time.Sleep(500 * time.Millisecond)
+	if daemonRunning(t) {
+		t.Error("a doubtful read with no daemon running must not spawn one")
+	}
+	if _, err := os.Stat(ipc.DefaultPIDPath()); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("no PID file may be written (stat err %v)", err)
+	}
+}
+
+// Every definitive non-service case keeps the legacy path: stop the running
+// daemon, spawn a fresh one, print "daemon restarted", exit 0.
+func TestDaemonRestart_DefinitiveNonServiceCasesTakeTheLegacyPath(t *testing.T) {
+	requireLinux(t)
+	cases := []struct {
+		name  string
+		short bool // run the binary stamped with a 1s service-command timeout
+		setup func(t *testing.T, h serviceHost)
+	}{
+		{
+			name:  "show-environment times out with no unit file",
+			short: true,
+			setup: func(t *testing.T, _ serviceHost) {
+				installFakeSystemctlHooks(t, map[string]string{"--user show-environment": sleepBody(t)})
+			},
+		},
+		{
+			name: "is-enabled exits non-zero without a timeout",
+			setup: func(t *testing.T, h serviceHost) {
+				h.writeUnit(t)
+				installFakeSystemctlHooks(t, map[string]string{"--user is-enabled cenci-watch.service": "exit 1"})
+			},
+		},
+		{
+			name: "systemctl is not on PATH",
+			setup: func(t *testing.T, h serviceHost) {
+				h.writeUnit(t)
+				t.Setenv("PATH", t.TempDir())
+			},
+		},
+		{
+			name: "inside the cenci sandbox",
+			setup: func(t *testing.T, h serviceHost) {
+				h.writeUnit(t)
+				installFakeSystemctlHooks(t, map[string]string{"--user show-environment": sleepBody(t)})
+				t.Setenv("CENCI_SANDBOX", "1")
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			bin := binaryPath
+			if tc.short {
+				bin = shortTimeoutBinary(t) // built before HOME and PATH are replaced
+			}
+			h := newServiceHost(t)
+			tc.setup(t, h)
+			t.Cleanup(func() { _, _ = daemon.Stop(ipc.DefaultEventSocketPath(), ipc.DefaultPIDPath()) })
+			old := startDaemonBackground(t)
+
+			stdout, stderr, code := runServiceCmdWith(t, bin, "daemon", "restart")
+			if code != 0 {
+				t.Fatalf("exit code = %d, want 0 (stdout %q, stderr %q)", code, stdout, stderr)
+			}
+			if !strings.Contains(stdout, "daemon restarted") {
+				t.Errorf("stdout = %q, want %q", stdout, "daemon restarted")
+			}
+			if !strings.Contains(stdout, "stopped daemon (pid "+strconv.Itoa(old.cmd.Process.Pid)+")") {
+				t.Errorf("stdout = %q, want the legacy stop of the old daemon", stdout)
+			}
+			select {
+			case <-old.done:
+			case <-time.After(3 * time.Second):
+				t.Error("the legacy path must stop the old daemon")
+			}
+		})
+	}
+}
+
+func TestServiceStatus_ManagerTimeoutStillReadsUnsupportedAndExitsZero(t *testing.T) {
+	requireLinux(t)
+	short := shortTimeoutBinary(t) // built before HOME is isolated, so go finds its build cache
+	h := newServiceHost(t)
+	h.writeUnit(t)
+	installFakeSystemctlHooks(t, map[string]string{"--user show-environment": sleepBody(t)})
+
+	start := time.Now()
+	stdout, stderr, code := runServiceCmdWith(t, short, "daemon", "service-status")
+	elapsed := time.Since(start)
+
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0 (stderr %q)", code, stderr)
+	}
+	if stdout != "service: unsupported\n" {
+		t.Errorf("stdout = %q, want %q", stdout, "service: unsupported\n")
+	}
+	if elapsed >= refusalCeiling {
+		t.Errorf("took %v, want under %v: the stamped 1s timeout did not apply", elapsed, refusalCeiling)
 	}
 }
 

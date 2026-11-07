@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -22,13 +23,20 @@ const (
 // rule makes a fake service-manager binary answer a call with a fixed exit
 // status. match is compared against the call's argument string; a trailing `*`
 // makes it a prefix match, anything else must match exactly. The first matching
-// rule wins and every unmatched call exits 0.
+// rule wins and every unmatched call exits 0. A sleeping rule never answers: the
+// fake replaces itself with a long sleep, so only the backend's own command
+// timeout ends the call.
 type rule struct {
 	match  string
 	code   int
 	stderr string
 	stdout string
+	sleep  bool
 }
+
+// commandTimeoutForTests is the per-command bound the test backends run with, so
+// a sleeping fake costs a fraction of a second instead of the 10s default.
+const commandTimeoutForTests = 300 * time.Millisecond
 
 // world is one isolated host: temp HOME and XDG dirs, an injected environment,
 // a PATH replaced (never prepended) with a dir holding only the fake binaries,
@@ -46,18 +54,29 @@ type world struct {
 	// neverReady keeps the daemon unreachable even after the unit was started.
 	neverReady bool
 	watch      string // file whose presence each fake call records
+	// sleepPath is the absolute sleep binary a sleeping fake execs into; it is
+	// resolved before PATH is replaced.
+	sleepPath string
+	// bootedDir stands in for /run/systemd/system: absent unless booted() is called.
+	bootedDir string
 }
 
 func newWorld(t *testing.T) *world {
 	t.Helper()
+	sleepPath, err := exec.LookPath("sleep")
+	if err != nil {
+		t.Skipf("no sleep binary to build a hanging fake: %v", err)
+	}
 	root := t.TempDir()
 	w := &world{
-		t:     t,
-		home:  filepath.Join(root, "home"),
-		xdg:   filepath.Join(root, "xdg"),
-		bin:   filepath.Join(root, "bin"),
-		log:   filepath.Join(root, "calls.log"),
-		state: filepath.Join(root, "state.log"),
+		t:         t,
+		home:      filepath.Join(root, "home"),
+		xdg:       filepath.Join(root, "xdg"),
+		bin:       filepath.Join(root, "bin"),
+		log:       filepath.Join(root, "calls.log"),
+		state:     filepath.Join(root, "state.log"),
+		sleepPath: sleepPath,
+		bootedDir: filepath.Join(root, "run-systemd-system"),
 	}
 	w.env = map[string]string{"PATH": testPathValue, "XDG_CONFIG_HOME": w.xdg}
 	for _, dir := range []string{w.home, w.xdg, w.bin, filepath.Join(w.home, ".local", "bin")} {
@@ -88,6 +107,10 @@ func (w *world) fake(name string, rules ...rule) {
 			pattern = shellQuote(strings.TrimSuffix(r.match, "*")) + "*"
 		}
 		b.WriteString(pattern + ")\n")
+		if r.sleep {
+			b.WriteString("exec " + shellQuote(w.sleepPath) + " 30 ;;\n")
+			continue
+		}
 		if r.stdout != "" {
 			b.WriteString("echo " + shellQuote(r.stdout) + "\n")
 		}
@@ -168,8 +191,19 @@ func (w *world) backend(goos string) Backend {
 				return w.stopErr
 			},
 		},
-		ReadyTimeout: 100 * time.Millisecond,
+		ReadyTimeout:     100 * time.Millisecond,
+		CommandTimeout:   commandTimeoutForTests,
+		SystemdBootedDir: w.bootedDir,
 	})
+}
+
+// booted marks the host as booted with systemd (the stand-in for
+// /run/systemd/system exists).
+func (w *world) booted() {
+	w.t.Helper()
+	if err := os.MkdirAll(w.bootedDir, 0o755); err != nil {
+		w.t.Fatal(err)
+	}
 }
 
 func (w *world) unitPath() string {
@@ -604,6 +638,8 @@ func TestSystemdStatus_Tokens(t *testing.T) {
 		{name: "no user manager", installed: true, rules: []rule{{match: "--user show-environment", code: 1}}, want: StateUnsupported},
 		{name: "no user manager and no file", rules: []rule{{match: "--user show-environment", code: 1}}, want: StateUnsupported},
 		{name: "systemctl absent", installed: true, noBinary: true, want: StateUnsupported},
+		{name: "show-environment times out", installed: true, rules: []rule{{match: "--user show-environment", sleep: true}}, want: StateUnsupported},
+		{name: "is-enabled times out", installed: true, rules: []rule{{match: "--user is-enabled*", sleep: true}}, want: StateUnsupported},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -620,6 +656,110 @@ func TestSystemdStatus_Tokens(t *testing.T) {
 			}
 		})
 	}
+}
+
+// probeCase is one row of a Probe classification table. wantDoubt means the read
+// is doubtful: a *ProbeError whose Reason contains every wantReason fragment and
+// whose Remedy is the manual restart command. Otherwise the error must be nil.
+type probeCase struct {
+	name       string
+	installed  bool
+	noBinary   bool
+	booted     bool
+	rules      []rule
+	wantState  State
+	wantDoubt  bool
+	wantReason []string
+}
+
+func runProbeCases(t *testing.T, goos, binary, wantRemedy string, pathOf func(*world) string, cases []probeCase) {
+	t.Helper()
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			w := newWorld(t)
+			w.watch = pathOf(w)
+			if !tc.noBinary {
+				w.fake(binary, tc.rules...)
+			}
+			if tc.installed {
+				mustWrite(t, pathOf(w), handWritten) // a file at the path counts, whoever wrote it
+			}
+			if tc.booted {
+				w.booted()
+			}
+
+			got, err := w.backend(goos).Probe(context.Background())
+			if got != tc.wantState {
+				t.Errorf("Probe state = %q, want %q (err %v)", got, tc.wantState, err)
+			}
+			if !tc.wantDoubt {
+				if err != nil {
+					t.Errorf("Probe err = %v, want a definitive read", err)
+				}
+				return
+			}
+			var probeErr *ProbeError
+			if !errors.As(err, &probeErr) {
+				t.Fatalf("Probe err = %v, want a *ProbeError", err)
+			}
+			for _, fragment := range tc.wantReason {
+				if !strings.Contains(probeErr.Reason, fragment) {
+					t.Errorf("Reason %q must contain %q", probeErr.Reason, fragment)
+				}
+			}
+			if strings.Contains(probeErr.Reason, "\n") {
+				t.Errorf("Reason must be one line, got %q", probeErr.Reason)
+			}
+			if probeErr.Remedy != wantRemedy {
+				t.Errorf("Remedy = %q, want %q", probeErr.Remedy, wantRemedy)
+			}
+			if err.Error() != probeErr.Reason {
+				t.Errorf("Error() = %q, want the Reason %q", err.Error(), probeErr.Reason)
+			}
+		})
+	}
+}
+
+func TestSystemdProbe_Classification(t *testing.T) {
+	showEnv := "--user show-environment"
+	cases := []probeCase{
+		// Doubtful reads: a cenci unit file exists but the manager did not answer cleanly.
+		{name: "show-environment times out with a unit file", installed: true, rules: []rule{{match: showEnv, sleep: true}},
+			wantState: StateUnsupported, wantDoubt: true, wantReason: []string{"show-environment", "timed out"}},
+		{name: "no user bus on a systemd-booted host with a unit file", installed: true, booted: true,
+			rules:     []rule{{match: showEnv, code: 1, stderr: "Failed to connect to bus:\nNo medium found"}},
+			wantState: StateUnsupported, wantDoubt: true, wantReason: []string{"show-environment", "Failed to connect to bus: No medium found"}},
+		{name: "is-enabled times out", installed: true, rules: []rule{{match: "--user is-enabled*", sleep: true}},
+			wantState: StateUnsupported, wantDoubt: true, wantReason: []string{"is-enabled", "timed out"}},
+		// Definitive reads.
+		{name: "show-environment times out with no unit file", rules: []rule{{match: showEnv, sleep: true}}, wantState: StateUnsupported},
+		{name: "no user bus on a booted host with no unit file", booted: true, rules: []rule{{match: showEnv, code: 1}}, wantState: StateUnsupported},
+		{name: "unit file synced onto a host not booted with systemd", installed: true, rules: []rule{{match: showEnv, code: 1}}, wantState: StateUnsupported},
+		{name: "systemctl missing with a unit file on a booted host", installed: true, booted: true, noBinary: true, wantState: StateUnsupported},
+		{name: "manager answers and no unit file", wantState: StateNotInstalled},
+		{name: "is-enabled exits non-zero without a timeout", installed: true, rules: []rule{{match: "--user is-enabled*", code: 1}}, wantState: StateDisabled},
+		{name: "enabled", installed: true, wantState: StateEnabled},
+	}
+	runProbeCases(t, "linux", "systemctl", "systemctl --user restart cenci-watch.service", (*world).unitPath, cases)
+}
+
+func TestLaunchdProbe_Classification(t *testing.T) {
+	remedy := "launchctl kickstart -k gui/501/" + testLabel
+	cases := []probeCase{
+		// Doubtful reads: a plist exists but launchctl timed out.
+		{name: "print of the gui domain times out with a plist", installed: true, rules: []rule{{match: "print gui/501", sleep: true}},
+			wantState: StateUnsupported, wantDoubt: true, wantReason: []string{"print gui/501", "timed out"}},
+		{name: "print of the target times out", installed: true, rules: []rule{{match: "print gui/501/*", sleep: true}},
+			wantState: StateUnsupported, wantDoubt: true, wantReason: []string{"print gui/501/" + testLabel, "timed out"}},
+		// Definitive reads.
+		{name: "print of the gui domain times out with no plist", rules: []rule{{match: "print gui/501", sleep: true}}, wantState: StateUnsupported},
+		{name: "gui domain missing (an SSH-only session)", installed: true, rules: []rule{{match: "print gui/501", code: 113}}, wantState: StateUnsupported},
+		{name: "launchctl missing", installed: true, noBinary: true, wantState: StateUnsupported},
+		{name: "domain answers and no plist", wantState: StateNotInstalled},
+		{name: "print of the target fails without a timeout", installed: true, rules: []rule{{match: "print gui/501/*", code: 113}}, wantState: StateDisabled},
+		{name: "loaded", installed: true, wantState: StateEnabled},
+	}
+	runProbeCases(t, "darwin", "launchctl", remedy, (*world).plistPath, cases)
 }
 
 func TestSystemdInstall_UnsupportedHostFailsClosed(t *testing.T) {
@@ -902,6 +1042,8 @@ func TestLaunchdStatus_Tokens(t *testing.T) {
 		{name: "disabled", installed: true, rules: []rule{{match: "print gui/501/*", code: 113}}, want: StateDisabled},
 		{name: "no gui domain", installed: true, rules: []rule{{match: "print gui/501", code: 113}}, want: StateUnsupported},
 		{name: "launchctl absent", installed: true, noBinary: true, want: StateUnsupported},
+		{name: "gui domain print times out", installed: true, rules: []rule{{match: "print gui/501", sleep: true}}, want: StateUnsupported},
+		{name: "target print times out", installed: true, rules: []rule{{match: "print gui/501/*", sleep: true}}, want: StateUnsupported},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1071,6 +1213,9 @@ func TestSandbox_MutatingVerbsFailClosedAndStatusIsUnsupported(t *testing.T) {
 			if got := b.Status(context.Background()); got != StateUnsupported {
 				t.Errorf("Status = %q, want unsupported", got)
 			}
+			if got, err := b.Probe(context.Background()); got != StateUnsupported || err != nil {
+				t.Errorf("Probe = %q, %v; want a definitive unsupported", got, err)
+			}
 			if !notExist(t, f.path(w)) {
 				t.Error("nothing may be written inside the sandbox")
 			}
@@ -1088,6 +1233,9 @@ func TestNew_UnknownOSIsUnsupported(t *testing.T) {
 	if got := b.Status(context.Background()); got != StateUnsupported {
 		t.Errorf("Status = %q, want unsupported", got)
 	}
+	if got, err := b.Probe(context.Background()); got != StateUnsupported || err != nil {
+		t.Errorf("Probe = %q, %v; want a definitive unsupported", got, err)
+	}
 	if _, err := b.Install(context.Background(), false); err == nil || !strings.Contains(err.Error(), "plan9") {
 		t.Errorf("Install err = %v, want one naming the OS", err)
 	}
@@ -1096,6 +1244,50 @@ func TestNew_UnknownOSIsUnsupported(t *testing.T) {
 	}
 	if err := b.Restart(context.Background()); err == nil {
 		t.Error("Restart must fail on an unsupported OS")
+	}
+}
+
+// An unknown home directory is a definitive unsupported read, never a doubt: the
+// backend cannot locate the unit or plist, so restart takes the legacy
+// stop-then-Spawn path instead of refusing. A service file sits at the path the
+// world's home would resolve to, so a backend that ignored the empty Home would
+// read it (systemd) or fall through to not-installed (launchd) rather than
+// answer unsupported.
+func TestNew_UnknownHomeIsDefinitivelyUnsupported(t *testing.T) {
+	for _, f := range flavors {
+		t.Run(f.name, func(t *testing.T) {
+			w, _ := f.setup(t)
+			mustWrite(t, f.path(w), handWritten)
+			b := New(Options{
+				GOOS: f.goos,
+				Home: "",
+				LookupEnv: func(k string) (string, bool) {
+					v, ok := w.env[k]
+					return v, ok
+				},
+				UID: testUID,
+			})
+			ctx := context.Background()
+
+			if got, err := b.Probe(ctx); got != StateUnsupported || err != nil {
+				t.Errorf("Probe = %q, %v; want a definitive unsupported with a nil error", got, err)
+			}
+			if got := b.Status(ctx); got != StateUnsupported {
+				t.Errorf("Status = %q, want unsupported", got)
+			}
+			if _, err := b.Install(ctx, false); err == nil || !strings.Contains(err.Error(), "home directory") {
+				t.Errorf("Install err = %v, want one naming the home directory", err)
+			}
+			if err := b.Restart(ctx); err == nil || !strings.Contains(err.Error(), "home directory") {
+				t.Errorf("Restart err = %v, want one naming the home directory", err)
+			}
+			if got := mustRead(t, f.path(w)); got != handWritten {
+				t.Errorf("an unknown home must leave the service file untouched, got:\n%s", got)
+			}
+			if calls := w.calls(); len(calls) != 0 {
+				t.Errorf("an unknown home must make no service-manager calls, got %q", calls)
+			}
+		})
 	}
 }
 

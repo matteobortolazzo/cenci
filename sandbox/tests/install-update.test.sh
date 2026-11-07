@@ -126,8 +126,11 @@ EOF
 
 # make_cenci writes a fake cenci binary at path that logs every
 # invocation's argv (space-joined) to CALL_LOG. `daemon restart` exits
-# restart_exit (0 = the binary handled its own restart; nonzero = simulate a
-# binary that can't self-restart, so install.sh's fallback should kick in). A
+# restart_exit (0 = the binary handled its own restart; 2 = simulate a binary
+# without the `restart` subverb, so install.sh's pkill/nohup fallback should
+# kick in; 1 = a real runtime failure the installer must surface, never
+# paper over with the fallback) after printing restart_stderr to stderr
+# (default empty; interpreted with printf '%b', so "\n" separates lines). A
 # bare `daemon` invocation (the fallback's nohup-spawned form) loops until
 # signaled, recording its pid to PIDS_FILE for the harness to reap.
 # `sandbox update-plugins --all` (the running-sandbox plugin refresh, #461)
@@ -142,7 +145,7 @@ EOF
 # test can simulate a refresh failure and assert it only warns rather than
 # failing the update — mirrors refresh_exit's role for update-plugins --all.
 make_cenci() {
-    local path="$1" restart_exit="${2:-0}" refresh_exit="${3:-0}" check_exit="${4:-1}" agent_update_exit="${5:-0}"
+    local path="$1" restart_exit="${2:-0}" refresh_exit="${3:-0}" check_exit="${4:-1}" agent_update_exit="${5:-0}" restart_stderr="${6:-}"
     mkdir -p "$(dirname "${path}")"
     cat >"${path}" <<EOF
 #!/bin/sh
@@ -153,6 +156,7 @@ printf '%s\n' "\$*" >>"\${CALL_LOG}"
 [ -n "\${OPENAI_API_KEY:-}" ] && printf 'env-leak OPENAI_API_KEY=%s\n' "\${OPENAI_API_KEY}" >>"\${CALL_LOG}"
 [ -n "\${CONTEXT7_API_KEY:-}" ] && printf 'env-leak CONTEXT7_API_KEY=%s\n' "\${CONTEXT7_API_KEY}" >>"\${CALL_LOG}"
 if [ "\${1:-}" = daemon ] && [ "\${2:-}" = restart ]; then
+    printf '%b' '${restart_stderr}' >&2
     exit ${restart_exit}
 fi
 if [ "\${1:-}" = daemon ] && [ -z "\${2:-}" ]; then
@@ -204,9 +208,10 @@ prepare_checkout() {
 # that binary's `sandbox build --check` exit code (default 1 — see
 # make_cenci) for the #519 rebuild-prompt-skip PTY cases below; agent_update_exit
 # scripts step_sandbox_update_agents's `sandbox update-agent --all` exit code
-# (default 0, #709).
+# (default 0, #709); restart_stderr is what `daemon restart` prints to stderr
+# (default empty, see make_cenci).
 setup_layout() {
-    local name="$1" client="$2" restart_exit="$3" refresh_exit="${4:-0}" check_exit="${5:-1}" agent_update_exit="${6:-0}"
+    local name="$1" client="$2" restart_exit="$3" refresh_exit="${4:-0}" check_exit="${5:-1}" agent_update_exit="${6:-0}" restart_stderr="${7:-}"
     local home="${WORK}/${name}/home" mock_bin="${WORK}/${name}/bin"
     local call_log="${WORK}/${name}/calls" pkill_log="${WORK}/${name}/pkill-calls"
     mkdir -p "${home}"
@@ -227,7 +232,7 @@ setup_layout() {
     fi
     new_root="${cache_dir}/2.0.0"
     new_bin="${new_root}/bin/cenci"
-    make_cenci "${new_bin}" "${restart_exit}" "${refresh_exit}" "${check_exit}" "${agent_update_exit}"
+    make_cenci "${new_bin}" "${restart_exit}" "${refresh_exit}" "${check_exit}" "${agent_update_exit}" "${restart_stderr}"
     mkdir -p "${new_root}/${manifest_dir}"
     printf '{"name":"cenci-watch","version":"2.0.0"}\n' >"${new_root}/${manifest_dir}/plugin.json"
 
@@ -545,8 +550,8 @@ if [[ -s "${LAYOUT_PKILL_LOG}" ]]; then
     exit 1
 fi
 
-echo "case: when 'daemon restart' fails, the installer falls back to a manual pkill/nohup restart"
-setup_layout fallback claude 1
+echo "case: when 'daemon restart' exits 2 (a binary without the subverb), the installer falls back to a manual pkill/nohup restart"
+setup_layout fallback claude 2
 run_update
 if ! grep -qx "daemon restart" "${LAYOUT_CALL_LOG}"; then
     echo "FAIL: expected the installer to still try 'daemon restart' first" >&2
@@ -568,6 +573,158 @@ if ! grep -q "restarted cenci with the selected binary" "${WORK}/last-output"; t
     cat "${WORK}/last-output" >&2
     exit 1
 fi
+
+echo "case: when 'daemon restart' exits 2 with multi-line stderr (a Go panic), the installer shows every stderr line and still falls back to pkill/nohup"
+setup_layout fallback-panic claude 2 0 1 0 'panic: runtime error: invalid memory address\ngoroutine 1 [running]:\nmain.main()\n'
+run_update
+for line in \
+    'panic: runtime error: invalid memory address' \
+    'goroutine 1 [running]:' \
+    'main.main()'; do
+    if ! grep -Fqx "    ${line}" "${WORK}/last-output"; then
+        echo "FAIL: expected exit-2 stderr line '${line}' shown indented in the installer output" >&2
+        cat "${WORK}/last-output" >&2
+        exit 1
+    fi
+done
+if ! grep -q '^pkill ' "${LAYOUT_PKILL_LOG}"; then
+    echo "FAIL: expected the exit-2 fallback to still invoke pkill when stderr is shown" >&2
+    cat "${LAYOUT_PKILL_LOG}" >&2
+    exit 1
+fi
+if ! grep -qx "daemon" "${LAYOUT_CALL_LOG}"; then
+    echo "FAIL: expected the exit-2 fallback to still nohup-spawn a bare 'daemon' invocation" >&2
+    cat "${LAYOUT_CALL_LOG}" >&2
+    exit 1
+fi
+
+# assert_restart_refused <case-label> asserts the shared shape of a surfaced
+# `daemon restart` runtime failure (exit 1): the installer ends non-zero,
+# never reaches pkill/pgrep or the nohup-spawned bare `daemon`, never claims
+# success, and prints the manual remedy. Reads the current layout/run_update
+# globals.
+assert_restart_refused() {
+    local label="$1"
+    if ! grep -qx "daemon restart" "${LAYOUT_CALL_LOG}"; then
+        echo "FAIL: (${label}) expected the installer to try 'daemon restart'" >&2
+        cat "${LAYOUT_CALL_LOG}" >&2
+        exit 1
+    fi
+    if [[ -s "${LAYOUT_PKILL_LOG}" ]]; then
+        echo "FAIL: (${label}) pkill/pgrep must never run after 'daemon restart' exits 1" >&2
+        cat "${LAYOUT_PKILL_LOG}" >&2
+        exit 1
+    fi
+    if grep -qx "daemon" "${LAYOUT_CALL_LOG}"; then
+        echo "FAIL: (${label}) the installer must not nohup-spawn a bare 'daemon' after 'daemon restart' exits 1" >&2
+        cat "${LAYOUT_CALL_LOG}" >&2
+        exit 1
+    fi
+    if [[ "${UPDATE_EXIT}" -eq 0 ]]; then
+        echo "FAIL: (${label}) expected a non-zero installer exit (INSTALL_FAILED)" >&2
+        cat "${WORK}/last-output" >&2
+        exit 1
+    fi
+    if grep -q "restarted cenci with the selected binary" "${WORK}/last-output"; then
+        echo "FAIL: (${label}) the installer must not report a successful restart" >&2
+        cat "${WORK}/last-output" >&2
+        exit 1
+    fi
+    if ! grep -Fq "run: cenci daemon restart" "${WORK}/last-output"; then
+        echo "FAIL: (${label}) expected the manual remedy 'run: cenci daemon restart'" >&2
+        cat "${WORK}/last-output" >&2
+        exit 1
+    fi
+}
+
+echo "case: when 'daemon restart' exits 1, the installer shows every stderr line, never runs pkill, prints the remedy and fails"
+setup_layout restart-fails claude 1 0 1 0 'cenci daemon restart: cannot read the login service state (timed out)\nsecond line of detail\nthird line of detail\n'
+run_update
+assert_restart_refused "exit 1, multi-line stderr"
+for line in \
+    'cenci daemon restart: cannot read the login service state (timed out)' \
+    'second line of detail' \
+    'third line of detail'; do
+    if ! grep -Fqx "    ${line}" "${WORK}/last-output"; then
+        echo "FAIL: expected stderr line '${line}' shown indented in the installer output" >&2
+        cat "${WORK}/last-output" >&2
+        exit 1
+    fi
+done
+
+echo "case: when 'daemon restart' exits 1 with empty stderr, the failure line names the command and its exit status"
+setup_layout restart-fails-silent claude 1
+run_update
+assert_restart_refused "exit 1, empty stderr"
+if ! grep -Fq "'${LAYOUT_NEW_BIN} daemon restart'" "${WORK}/last-output"; then
+    echo "FAIL: expected the failure line to name '${LAYOUT_NEW_BIN} daemon restart'" >&2
+    cat "${WORK}/last-output" >&2
+    exit 1
+fi
+if ! grep -Fq "exit 1" "${WORK}/last-output"; then
+    echo "FAIL: expected the failure line to name the exit status 1" >&2
+    cat "${WORK}/last-output" >&2
+    exit 1
+fi
+
+# run_restart_function <layout-name> <bin-path> runs restart_cenci_daemon (and
+# the output helpers and fallback it uses, extracted verbatim from install.sh)
+# in a bash subprocess on the layout's mock PATH. update mode only ever passes
+# a binary that already passed `[ -x ]`, so the missing/non-executable guard is
+# unreachable through a black-box `install.sh update` run. Sets RESTART_EXIT;
+# output lands in "${WORK}/last-output".
+run_restart_function() {
+    local name="$1" bin="$2" script="${WORK}/$1-extract.sh"
+    {
+        printf 'GREEN= YELLOW= RED= RESET=\n'
+        sed -n -e '/^say()/p' -e '/^ok()/p' -e '/^warn()/p' -e '/^fail()/p' -e '/^have()/p' "${ROOT}/install.sh"
+        sed -n '/^restart_cenci_daemon() {$/,/^}$/p' "${ROOT}/install.sh"
+        sed -n '/^restart_cenci_daemon_fallback() {$/,/^}$/p' "${ROOT}/install.sh"
+        # shellcheck disable=SC2016 # "$1" must stay literal: it expands in the generated script
+        printf 'set -u\nrestart_cenci_daemon "$1"\n'
+    } >"${script}"
+    set +e
+    env -i PATH="${LAYOUT_BIN}" PKILL_LOG="${LAYOUT_PKILL_LOG}" \
+        bash "${script}" "${bin}" >"${WORK}/last-output" 2>&1
+    RESTART_EXIT=$?
+    set -e
+}
+
+assert_unusable_binary_refused() {
+    local label="$1"
+    if [[ "${RESTART_EXIT}" -eq 0 ]]; then
+        echo "FAIL: (${label}) expected restart_cenci_daemon to return non-zero" >&2
+        cat "${WORK}/last-output" >&2
+        exit 1
+    fi
+    if ! grep -Fq "no usable cenci binary to restart" "${WORK}/last-output"; then
+        echo "FAIL: (${label}) expected 'no usable cenci binary to restart'" >&2
+        cat "${WORK}/last-output" >&2
+        exit 1
+    fi
+    if ! grep -Fq "run: cenci daemon restart" "${WORK}/last-output"; then
+        echo "FAIL: (${label}) expected the manual remedy 'run: cenci daemon restart'" >&2
+        cat "${WORK}/last-output" >&2
+        exit 1
+    fi
+    if [[ -s "${LAYOUT_PKILL_LOG}" ]]; then
+        echo "FAIL: (${label}) pkill/pgrep must never run without a usable binary" >&2
+        cat "${LAYOUT_PKILL_LOG}" >&2
+        exit 1
+    fi
+}
+
+echo "case: restart_cenci_daemon with a missing binary fails with the remedy and never runs pkill"
+new_layout restart-missing-bin claude
+run_restart_function restart-missing-bin "${WORK}/restart-missing-bin/no-such-cenci"
+assert_unusable_binary_refused "missing binary"
+
+echo "case: restart_cenci_daemon with a non-executable binary fails with the remedy and never runs pkill"
+new_layout restart-noexec-bin claude
+printf '#!/bin/sh\nexit 0\n' >"${WORK}/restart-noexec-bin/cenci"
+chmod 0644 "${WORK}/restart-noexec-bin/cenci"
+run_restart_function restart-noexec-bin "${WORK}/restart-noexec-bin/cenci"
+assert_unusable_binary_refused "non-executable binary"
 
 echo "case: host secrets in the parent env never reach the daemon call log or run_update output (regression, #353)"
 setup_layout sentinel-secrets claude 0
@@ -1107,4 +1264,4 @@ if ! grep -qx "sandbox build" "${LAYOUT_CALL_LOG}"; then
     exit 1
 fi
 
-echo "passed: restart path delegates to 'cenci daemon restart', falling back to pkill/nohup only on failure; update output reports per-plugin version transitions from authoritative client state (#492); sandbox plugin refresh runs best-effort on update (#461); rebuild prompt is skipped when the sandbox image is already current, for both install and update (#519)"
+echo "passed: restart path delegates to 'cenci daemon restart', falling back to pkill/nohup only when the binary lacks the subverb (exit 2, still showing any stderr it printed) and surfacing any other failure with its stderr, no pkill, and a failed update; update output reports per-plugin version transitions from authoritative client state (#492); sandbox plugin refresh runs best-effort on update (#461); rebuild prompt is skipped when the sandbox image is already current, for both install and update (#519)"

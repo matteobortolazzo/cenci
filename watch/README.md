@@ -3404,7 +3404,7 @@ that same symlink still hard-errors.
 
 ```bash
 cenci daemon stop      # SIGTERM, then SIGKILL if still alive after a few seconds; exits 0 whether or not anything was running
-cenci daemon restart   # stop (if running), then spawn a fresh detached daemon and wait for it to come up (with the login service enabled: restart through the service manager instead)
+cenci daemon restart   # stop (if running), then spawn a fresh detached daemon and wait for it to come up (with the login service enabled: restart through the service manager instead; exit 1 without touching the daemon when the service state cannot be read)
 cenci daemon status    # running/not-running + PID; exits 1 when not running
 cenci daemon hook-health  # read-only hook-delivery diagnostics; exits 0 whenever it renders
 cenci daemon install-service    # start the daemon at login and restart it if it crashes (see "Login service" below)
@@ -3493,7 +3493,7 @@ remove; it does not respawn the daemon.
 | `service: enabled` | A file is at the cenci path and the manager reports it enabled (systemd) or loaded (launchd). |
 | `service: disabled` | A file is at the cenci path but the manager does not have it enabled or loaded. |
 | `service: not-installed` | No file at the cenci path. |
-| `service: unsupported` | No usable service manager: inside the cenci sandbox, `systemctl` missing or `systemctl --user show-environment` failing (WSL without systemd, a container), `launchctl` missing or no `gui/<uid>` domain (an SSH-only session), or another OS. |
+| `service: unsupported` | No usable service manager: inside the cenci sandbox, `systemctl` missing or `systemctl --user show-environment` failing (WSL without systemd, a container), `launchctl` missing or no `gui/<uid>` domain (an SSH-only session), another OS, or the manager could not be read (a timeout). |
 
 A file at the cenci path counts as installed whoever wrote it. `cenci doctor` turns the
 token into one extra line after the running/not-running line (and stays silent on a
@@ -3525,9 +3525,20 @@ binary that predates `service-status`).
   daemon. It hands over like `install-service`: when a daemon is already running but the unit is
   inactive (systemd: `is-active` fails; launchd: the agent's job is not `state = running`), it stops
   that daemon first, so the manager's own start does not hit the already-running path. A daemon the
-  active unit owns is not stopped. With no service installed it behaves exactly as before. Residual: if
-  `daemon restart` itself fails, the installer's `pkill`+`nohup` fallback starts a daemon outside
-  supervision until the next service restart.
+  active unit owns is not stopped. With no service installed it behaves exactly as before.
+  `restart` refuses to bypass a login service whose state it cannot read. When a cenci unit file or
+  plist exists but the manager did not answer cleanly (a service-manager command timed out, or
+  `systemctl --user show-environment` failed on a systemd-booted host with no user bus, such as an
+  SSH shell), it exits 1 and leaves the running daemon, and the PID file, alone, because stopping the
+  supervised daemon to spawn another would leave an unsupervised daemon next to an enabled service.
+  Stderr is one line, `cenci daemon restart: cannot read the login service state (<reason>); not
+  restarting outside the service — retry, or run: <command>`, where the command is the manual
+  restart: `systemctl --user restart cenci-watch.service` on Linux, or
+  `launchctl kickstart -k gui/<uid>/io.github.matteobortolazzo.cenci-watch` on macOS. A host with no
+  cenci unit file or plist, no `systemctl`/`launchctl`, no systemd boot, or a clean `disabled` read
+  is not doubtful and takes the stop-then-spawn path. The installer's update path shows that
+  error and ends with a failed update; it falls back to `pkill`+`nohup` only when `daemon restart`
+  exits 2, a binary that predates the `restart` subverb.
 - **Failure modes.** Inside the sandbox (`CENCI_SANDBOX=1`) `install-service` and `uninstall-service` exit 1 with
   `not supported inside the cenci sandbox` and write nothing. A missing `~/.local/bin/cenci` exits 1
   naming that path, with nothing written. Without a systemd user manager, `install-service` exits 1 with

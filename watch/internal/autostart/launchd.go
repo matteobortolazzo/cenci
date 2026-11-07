@@ -26,7 +26,7 @@ func (l *launchd) plistPath() string {
 }
 
 func (l *launchd) ctl(ctx context.Context, args ...string) (string, error) {
-	return run(ctx, "launchctl", args...)
+	return run(ctx, l.opts.CommandTimeout, "launchctl", args...)
 }
 
 // requireSession fails unless launchctl exists and the gui/<uid> domain does,
@@ -43,20 +43,37 @@ func (l *launchd) loaded(ctx context.Context) bool {
 	return err == nil
 }
 
-// Status reports a plist at the cenci path as enabled when launchd has it
-// loaded and disabled when it does not.
+// Status is Probe with every doubt read as unsupported, so it never fails.
 func (l *launchd) Status(ctx context.Context) State {
-	if l.requireSession(ctx) != nil {
-		return StateUnsupported
+	state, _ := l.Probe(ctx)
+	return state
+}
+
+// Probe reports a plist at the cenci path as enabled when launchd has it loaded
+// and disabled when it does not. A timed-out launchctl is doubt, reported as a
+// *ProbeError, when the plist exists; any other failure of the gui domain read
+// means no agent can be running there and is definitive.
+func (l *launchd) Probe(ctx context.Context) (State, error) {
+	if _, err := l.ctl(ctx, "print", l.domain()); err != nil {
+		if timedOut(err) && fileExists(l.plistPath()) {
+			return StateUnsupported, l.opts.doubt("launchctl print "+l.domain(), err, l.remedy())
+		}
+		return StateUnsupported, nil
 	}
 	if !fileExists(l.plistPath()) {
-		return StateNotInstalled
+		return StateNotInstalled, nil
 	}
-	if !l.loaded(ctx) {
-		return StateDisabled
+	if _, err := l.ctl(ctx, "print", l.target()); err != nil {
+		if timedOut(err) {
+			return StateUnsupported, l.opts.doubt("launchctl print "+l.target(), err, l.remedy())
+		}
+		return StateDisabled, nil
 	}
-	return StateEnabled
+	return StateEnabled, nil
 }
+
+// remedy is the manual restart a refusal points at.
+func (l *launchd) remedy() string { return "launchctl kickstart -k " + l.target() }
 
 func (l *launchd) Install(ctx context.Context, force bool) (Outcome, error) {
 	if err := l.requireSession(ctx); err != nil {
