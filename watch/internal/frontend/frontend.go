@@ -10,6 +10,7 @@ import (
 
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/detect"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/ipc"
+	"github.com/matteobortolazzo/cenci/watch/v2/pkg/watch"
 )
 
 // SessionState is the daemon core's view of one agent session.
@@ -30,6 +31,11 @@ type SessionState struct {
 	// idle-marker title until the background work wakes it (#706). The hold
 	// expires after BackgroundHoldTTL of event silence (#1079).
 	BackgroundHold bool
+	// ModelSwitches are the PostModelSwitch records of this session and its
+	// subagents, oldest first and capped by the daemon; ModelSwitchesMore counts
+	// those past the cap (#1179). Display only: they never feed Status.
+	ModelSwitches     []watch.ModelSwitch
+	ModelSwitchesMore int
 }
 
 // BackgroundHoldTTL bounds how long a background-held session (#698) may stay

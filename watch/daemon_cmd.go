@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"strings"
@@ -17,6 +18,7 @@ import (
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/hookhealth"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/ipc"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/logging"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/modelswitch"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/run"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/tmux"
 )
@@ -29,7 +31,7 @@ const daemonRestartReadyTimeout = 3 * time.Second
 // daemonRestartPollInterval is the polling cadence within daemonRestartReadyTimeout.
 const daemonRestartPollInterval = 50 * time.Millisecond
 
-// runDaemonGroup implements `cenci daemon [start|stop|restart|status|hook-health]`.
+// runDaemonGroup implements `cenci daemon [start|stop|restart|status|hook-health|model-switches]`.
 // A bare `daemon` (no args) or `daemon` followed only by flags acts as
 // `start`, so `cenci daemon -v` still works exactly as the old bare
 // `cenci -v` did.
@@ -49,6 +51,8 @@ func runDaemonGroup(args []string) {
 		runDaemonStatus(args[1:])
 	case "hook-health":
 		runDaemonHookHealth(args[1:])
+	case "model-switches":
+		runDaemonModelSwitches(args[1:])
 	default:
 		if strings.HasPrefix(args[0], "-") {
 			runDaemonStart(args)
@@ -231,4 +235,59 @@ func runDaemonHookHealth(args []string) {
 	rejectExtra("cenci daemon hook-health", fs.Args())
 
 	fmt.Print(hookhealth.Render(hookhealth.Read(hookhealth.Dir(), time.Now())))
+}
+
+// runDaemonModelSwitches implements `cenci daemon model-switches [--session
+// <id>]` (#1179): a read-only report over the hook-side model-switch store, as
+// the implement pipeline's Phase 9 reads it. The session id defaults to
+// $CLAUDE_CODE_SESSION_ID, so the caller runs a fixed command; an explicit
+// --session (even an empty one) always wins, which keeps tests and the
+// environment-less case honest.
+//
+// Exit 0 prints one ready-made line per recorded switch plus a `+<n> more` line
+// past the cap, or nothing when the session has no record. Exit 1 prints exactly
+// `Model switch status unknown` on stdout and a path-free reason on stderr only
+// for a store that cannot answer (an unresolvable session id or store, an
+// untrusted directory, a corrupt record or an .incomplete marker) — unknown is
+// never rendered as "no switch". When the report itself cannot be written to
+// stdout, exit 1 prints a reason on stderr and stdout is NOT guaranteed (empty
+// or partial), so a caller must not copy stdout on exit 1 and must write the
+// literal unknown line itself. A broken pipe ends the process with SIGPIPE
+// (shell status 141), not exit 1; a caller treats any other outcome as unknown.
+// Exit 2 is a usage error. It never creates or repairs anything.
+func runDaemonModelSwitches(args []string) {
+	fs := flag.NewFlagSet("daemon model-switches", flag.ExitOnError)
+	session := fs.String("session", "", "session id to report (default $CLAUDE_CODE_SESSION_ID)")
+	_ = fs.Parse(args)
+	rejectExtra("cenci daemon model-switches", fs.Args())
+
+	id := os.Getenv("CLAUDE_CODE_SESSION_ID")
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "session" {
+			id = *session
+		}
+	})
+
+	res := modelswitch.Read(modelswitch.Dir(), id)
+	if res.State == modelswitch.StateUnknown {
+		fmt.Println(modelswitch.UnknownLine)
+		fmt.Fprintf(os.Stderr, "cenci daemon model-switches: %s\n", res.Reason)
+		os.Exit(1)
+	}
+	// The whole report is written once and the write is checked: a failed or
+	// short write (a full disk) exits 1 with a stderr reason and no guaranteed
+	// stdout, which Phase 9 reads as unknown by writing the unknown line itself,
+	// so truncated or empty output is never mistaken for no record. A broken
+	// pipe ends the process with SIGPIPE (status 141) before this check runs.
+	var out strings.Builder
+	for _, sw := range res.Switches {
+		out.WriteString(sw.Line() + "\n")
+	}
+	if res.More > 0 {
+		out.WriteString(modelswitch.FormatMore(res.More) + "\n")
+	}
+	if _, err := io.WriteString(os.Stdout, out.String()); err != nil {
+		fmt.Fprintf(os.Stderr, "cenci daemon model-switches: cannot write the report: %v\n", err)
+		os.Exit(1)
+	}
 }

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/ipc"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/modelswitch"
 )
 
 func TestNotifyCodexPromptSendsOnlyCompactTaskName(t *testing.T) {
@@ -1064,5 +1065,271 @@ func TestNotifyExcludedEventDoesNotAutostartDaemon(t *testing.T) {
 		if _, err := os.Stat(path); !os.IsNotExist(err) {
 			t.Errorf("%s exists after an excluded event (stat err = %v), want no daemon autostart", path, err)
 		}
+	}
+}
+
+// --- PostModelSwitch (#1179) ------------------------------------------------
+
+// modelSwitchNotify runs the real `cenci notify` binary with input on stdin
+// against a receiver and an isolated state home, and returns the delivered
+// event plus the store directory a Claude run would have written.
+func modelSwitchNotify(t *testing.T, agent, input string) (ipc.HookEvent, string) {
+	t.Helper()
+	stateHome := t.TempDir()
+	if err := os.Chmod(stateHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	socket := filepath.Join(t.TempDir(), "events.sock")
+	receiver, err := ipc.NewEventReceiver(socket)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = receiver.Close() })
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go receiver.Accept(ctx)
+
+	cmd := exec.Command(binaryPath, "notify", "-agent", agent, "-event-socket", socket)
+	cmd.Stdin = strings.NewReader(input)
+	// XDG_CONFIG_HOME is isolated too: an ambient watch.excludeCwd covering the
+	// payload's cwd would make notify return before recording or delivering
+	// (watch/docs/test-isolation.md, "Ambient config-dir isolation").
+	cmd.Env = append(os.Environ(), "XDG_STATE_HOME="+stateHome, "XDG_CONFIG_HOME="+t.TempDir(), "CLAUDE_CODE_SESSION_ID=")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("notify: %v: %s", err, output)
+	}
+
+	select {
+	case event := <-receiver.Events():
+		return event, filepath.Join(stateHome, "cenci", "model-switch")
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for notify event")
+	}
+	return ipc.HookEvent{}, ""
+}
+
+// TestNotifyParsesModelSwitchFromStdin covers AC4 and AC5 through the real
+// entry point (watch/docs/hook-events.md): a PostModelSwitch payload shaped
+// like the captured one reaches the daemon with the session id, the agent id
+// when present, both models, the agent type and the source, and the same
+// switch lands in the hook-side store.
+func TestNotifyParsesModelSwitchFromStdin(t *testing.T) {
+	const common = `"hook_event_name":"PostModelSwitch","session_id":"ms-session","transcript_path":"/tmp/t.jsonl","cwd":"/tmp","from_model":"claude-sonnet-5-5","to_model":"claude-opus-5-5","requested_model":"opus","context_tokens":1234,"prompt_cache_warm":true`
+	cases := []struct {
+		name          string
+		input         string
+		wantAgentID   string
+		wantAgentType string
+		wantSource    string
+		wantSubagent  bool
+	}{
+		{"main session, no agent id", `{` + common + `,"source":"auto"}`, "", "", "auto", false},
+		{"subagent with agent id and type", `{` + common + `,"source":"sdk","agent_id":"sub1","agent_type":"cenci:reviewer"}`, "sub1", "cenci:reviewer", "sdk", true},
+		{"missing source stays empty", `{` + common + `}`, "", "", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			event, store := modelSwitchNotify(t, "claude", tc.input)
+
+			if event.EventType != "PostModelSwitch" || event.SessionID != "ms-session" {
+				t.Errorf("event = %+v", event)
+			}
+			if event.AgentID != tc.wantAgentID {
+				t.Errorf("agent_id = %q, want %q", event.AgentID, tc.wantAgentID)
+			}
+			if event.AgentType != tc.wantAgentType {
+				t.Errorf("agent_type = %q, want %q", event.AgentType, tc.wantAgentType)
+			}
+			if event.FromModel != "claude-sonnet-5-5" || event.ToModel != "claude-opus-5-5" {
+				t.Errorf("models = %q -> %q", event.FromModel, event.ToModel)
+			}
+			if event.ModelSwitchSource != tc.wantSource {
+				t.Errorf("source = %q, want %q", event.ModelSwitchSource, tc.wantSource)
+			}
+
+			res := modelswitch.Read(store, "ms-session")
+			if res.State != modelswitch.StateOK || len(res.Switches) != 1 {
+				t.Fatalf("store = %+v, want one recorded switch", res)
+			}
+			got := res.Switches[0]
+			if got.From != "claude-sonnet-5-5" || got.To != "claude-opus-5-5" || got.Subagent != tc.wantSubagent {
+				t.Errorf("stored switch = %+v", got)
+			}
+			if tc.wantSubagent && got.AgentType != tc.wantAgentType {
+				t.Errorf("stored agent type = %q, want %q", got.AgentType, tc.wantAgentType)
+			}
+		})
+	}
+}
+
+// TestNotifyModelSwitchSanitizesInvalidStringsBeforeForwardingOrStoring covers
+// the validation edge case at the real entry point: control characters and
+// over-long values never reach the IPC event or the store; the switch is still
+// delivered with the placeholder.
+func TestNotifyModelSwitchSanitizesInvalidStringsBeforeForwardingOrStoring(t *testing.T) {
+	rawFrom := "claude\x1b[31m-opus\nevil"
+	rawTo := strings.Repeat("m", 129)
+	rawType := "bad\x1b[0m type"
+	input := `{"hook_event_name":"PostModelSwitch","session_id":"ms-session","agent_id":"sub1","agent_type":` +
+		string(mustJSON(t, rawType)) + `,"from_model":` + string(mustJSON(t, rawFrom)) +
+		`,"to_model":` + string(mustJSON(t, rawTo)) + `,"source":"auto"}`
+
+	event, store := modelSwitchNotify(t, "claude", input)
+
+	encoded, err := json.Marshal(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, raw := range []string{rawFrom, rawTo, rawType, "\\u001b", "evil"} {
+		if strings.Contains(string(encoded), raw) {
+			t.Errorf("raw value %q was forwarded: %s", raw, encoded)
+		}
+	}
+	if event.FromModel != "(invalid model id)" || event.ToModel != "(invalid model id)" || event.AgentType != "unknown" {
+		t.Errorf("event = %+v, want placeholders", event)
+	}
+	data, err := os.ReadFile(filepath.Join(store, "ms-session"))
+	if err != nil {
+		t.Fatalf("the switch must still be recorded: %v", err)
+	}
+	if strings.ContainsAny(string(data), "\x1b") || strings.Contains(string(data), "evil") {
+		t.Errorf("raw value reached the store: %q", data)
+	}
+}
+
+// TestNotifyReadsSourceOnlyForPostModelSwitch pins that SessionStart's own
+// `source` field (startup|resume|clear) is never mistaken for a model-switch
+// source.
+func TestNotifyReadsSourceOnlyForPostModelSwitch(t *testing.T) {
+	event, store := modelSwitchNotify(t, "claude", `{"hook_event_name":"SessionStart","session_id":"ms-session","source":"startup"}`)
+	if event.ModelSwitchSource != "" || event.FromModel != "" || event.ToModel != "" {
+		t.Errorf("SessionStart carried model switch fields: %+v", event)
+	}
+	if _, err := os.Lstat(store); !os.IsNotExist(err) {
+		t.Errorf("a SessionStart created the model-switch store (err = %v)", err)
+	}
+}
+
+// TestNotifyNonStringModelSwitchFieldsNeverDropAnEvent pins the lenient decode:
+// from_model, to_model, agent_type and source are model-switch fields, so a
+// non-string value in any of them must never fail the whole payload and drop an
+// event of another type (here a SessionStart, whose own `source` is read as a
+// string elsewhere, so a numeric one must not matter).
+func TestNotifyNonStringModelSwitchFieldsNeverDropAnEvent(t *testing.T) {
+	event, store := modelSwitchNotify(t, "claude", `{"hook_event_name":"SessionStart","session_id":"ms-session","agent_id":"sub1","source":7,"agent_type":{"name":"cenci:reviewer"},"from_model":5,"to_model":[1]}`)
+	if event.EventType != "SessionStart" || event.SessionID != "ms-session" || event.AgentID != "sub1" {
+		t.Errorf("event = %+v, want the SessionStart delivered with its normal fields", event)
+	}
+	if event.FromModel != "" || event.ToModel != "" || event.ModelSwitchSource != "" || event.AgentType != "" {
+		t.Errorf("a non-switch event carried model switch fields: %+v", event)
+	}
+	if _, err := os.Lstat(store); !os.IsNotExist(err) {
+		t.Errorf("a SessionStart created the model-switch store (err = %v)", err)
+	}
+}
+
+// TestNotifyPostModelSwitchWithNonStringFieldsUsesPlaceholders pins that a
+// PostModelSwitch with a non-string field is still delivered and recorded, with
+// the existing placeholder in place of the field, never dropped or forwarded raw.
+func TestNotifyPostModelSwitchWithNonStringFieldsUsesPlaceholders(t *testing.T) {
+	cases := []struct {
+		name          string
+		input         string
+		wantFrom      string
+		wantTo        string
+		wantSource    string
+		wantAgentType string
+	}{
+		{
+			"numeric from_model",
+			`{"hook_event_name":"PostModelSwitch","session_id":"ms-session","from_model":12345,"to_model":"claude-opus-5-5","source":"auto"}`,
+			"(invalid model id)", "claude-opus-5-5", "auto", "",
+		},
+		{
+			"object to_model",
+			`{"hook_event_name":"PostModelSwitch","session_id":"ms-session","from_model":"claude-sonnet-5-5","to_model":{"id":"x"},"source":"auto"}`,
+			"claude-sonnet-5-5", "(invalid model id)", "auto", "",
+		},
+		{
+			"numeric source and object agent_type on a subagent",
+			`{"hook_event_name":"PostModelSwitch","session_id":"ms-session","agent_id":"sub1","agent_type":{"name":"r"},"from_model":"claude-sonnet-5-5","to_model":"claude-opus-5-5","source":3}`,
+			"claude-sonnet-5-5", "claude-opus-5-5", "unknown", "unknown",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			event, store := modelSwitchNotify(t, "claude", tc.input)
+			if event.EventType != "PostModelSwitch" || event.SessionID != "ms-session" {
+				t.Fatalf("event = %+v, want the PostModelSwitch delivered", event)
+			}
+			if event.FromModel != tc.wantFrom || event.ToModel != tc.wantTo || event.ModelSwitchSource != tc.wantSource || event.AgentType != tc.wantAgentType {
+				t.Errorf("event = %+v, want from %q to %q source %q agent type %q", event, tc.wantFrom, tc.wantTo, tc.wantSource, tc.wantAgentType)
+			}
+			res := modelswitch.Read(store, "ms-session")
+			if res.State != modelswitch.StateOK || len(res.Switches) != 1 {
+				t.Fatalf("store = %+v, want one recorded switch", res)
+			}
+			if got := res.Switches[0]; got.From != tc.wantFrom || got.To != tc.wantTo {
+				t.Errorf("stored switch = %+v", got)
+			}
+		})
+	}
+}
+
+// TestNotifyOnlyClaudeRecordsModelSwitches pins the client scoping: Codex and
+// OpenCode have no flag fallback, so only `-agent claude` writes the store.
+func TestNotifyOnlyClaudeRecordsModelSwitches(t *testing.T) {
+	input := `{"hook_event_name":"PostModelSwitch","session_id":"ms-session","from_model":"claude-sonnet-5-5","to_model":"claude-opus-5-5","source":"auto"}`
+	for _, agent := range []string{"codex", "opencode", ""} {
+		t.Run("agent="+agent, func(t *testing.T) {
+			_, store := modelSwitchNotify(t, agent, input)
+			if _, err := os.Lstat(store); !os.IsNotExist(err) {
+				t.Errorf("agent %q wrote the model-switch store (err = %v)", agent, err)
+			}
+		})
+	}
+}
+
+// TestClaudeHooksRegisterPostModelSwitchThroughTheNotifyWrapper covers the
+// manifest AC: PostModelSwitch uses the same wrapper command and timeout as the
+// other events, and the Codex manifest stays unchanged.
+func TestClaudeHooksRegisterPostModelSwitchThroughTheNotifyWrapper(t *testing.T) {
+	type manifest struct {
+		Hooks map[string][]struct {
+			Matcher string `json:"matcher"`
+			Hooks   []struct {
+				Type    string `json:"type"`
+				Command string `json:"command"`
+				Timeout int    `json:"timeout"`
+			} `json:"hooks"`
+		} `json:"hooks"`
+	}
+	load := func(path string) manifest {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var m manifest
+		if err := json.Unmarshal(data, &m); err != nil {
+			t.Fatalf("parse %s: %v", path, err)
+		}
+		return m
+	}
+
+	claude := load(filepath.Join("plugin", "hooks", "hooks.json"))
+	groups := claude.Hooks["PostModelSwitch"]
+	if len(groups) != 1 || len(groups[0].Hooks) != 1 {
+		t.Fatalf("expected exactly one PostModelSwitch hook, got %+v", groups)
+	}
+	got, stop := groups[0].Hooks[0], claude.Hooks["Stop"][0].Hooks[0]
+	if got.Type != "command" || got.Command != stop.Command || got.Timeout != 5 {
+		t.Errorf("PostModelSwitch hook = %+v, want the Stop wrapper command %q with a 5s timeout", got, stop.Command)
+	}
+	if groups[0].Matcher != "" {
+		t.Errorf("PostModelSwitch must not be filtered by a matcher, got %q", groups[0].Matcher)
+	}
+
+	if _, ok := load(filepath.Join("plugin", "codex", "hooks.json")).Hooks["PostModelSwitch"]; ok {
+		t.Error("the Codex manifest must not register PostModelSwitch")
 	}
 }

@@ -1272,3 +1272,133 @@ func TestFormatSessionLine_PangoEscapedThroughSharedHelper(t *testing.T) {
 		t.Errorf("FormatSessionLine() leaked raw markup into output: %q", got)
 	}
 }
+
+// --- Model switches (#1179) -------------------------------------------------
+
+func modelSwitchSnapshot() *ipc.StateSnapshot {
+	return &ipc.StateSnapshot{
+		Timestamp: "2024-01-01T00:00:00Z",
+		Windows: []ipc.WindowState{
+			{
+				Session: "main", WindowIndex: "0", WindowName: "42-implement", Status: "running", Agent: "claude",
+				ModelSwitches: []watch.ModelSwitch{
+					{FromModel: "claude-sonnet-5-5", ToModel: "claude-opus-5-5", Source: "auto", Fallback: true},
+					{FromModel: "claude-opus-5-5", ToModel: "claude-sonnet-5-5", Source: "sdk", Subagent: true, AgentType: "cenci:reviewer"},
+				},
+				ModelSwitchesMore: 3,
+			},
+			{Session: "main", WindowIndex: "1", WindowName: "43-plan", Status: "idle", Agent: "claude"},
+		},
+		Summary: ipc.StatusSummary{Total: 2, Running: 1, Idle: 1},
+	}
+}
+
+// TestFormat_ModelSwitchesFieldPerSession asserts AC6's widget half: the
+// switches appear as a top-level model_switches entry for the session that
+// has them, with the overflow count, and only for that session.
+func TestFormat_ModelSwitchesFieldPerSession(t *testing.T) {
+	out := Format(modelSwitchSnapshot(), testConfig())
+
+	if len(out.ModelSwitches) != 1 {
+		t.Fatalf("expected 1 model_switches entry (only the session with switches), got %d: %+v", len(out.ModelSwitches), out.ModelSwitches)
+	}
+	entry := out.ModelSwitches[0]
+	if entry.Session != "main" || entry.WindowIndex != "0" || entry.WindowName != "42-implement" {
+		t.Errorf("entry identity = %+v", entry)
+	}
+	if entry.More != 3 {
+		t.Errorf("more = %d, want 3", entry.More)
+	}
+	if len(entry.Switches) != 2 {
+		t.Fatalf("got %d switches, want 2", len(entry.Switches))
+	}
+	if first := entry.Switches[0]; first.FromModel != "claude-sonnet-5-5" || first.ToModel != "claude-opus-5-5" || !first.Fallback || first.Source != "auto" || first.Subagent {
+		t.Errorf("first switch = %+v", first)
+	}
+	if second := entry.Switches[1]; !second.Subagent || second.AgentType != "cenci:reviewer" || second.Fallback {
+		t.Errorf("second switch = %+v", second)
+	}
+
+	data, err := json.Marshal(out)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	var decoded map[string]json.RawMessage
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	raw, ok := decoded["model_switches"]
+	if !ok {
+		t.Fatalf("expected a top-level model_switches key, got %s", data)
+	}
+	var entries []map[string]any
+	if err := json.Unmarshal(raw, &entries); err != nil {
+		t.Fatalf("model_switches is not an array of objects: %v (%s)", err, raw)
+	}
+	for _, key := range []string{"session", "window_index", "window_name", "switches", "more"} {
+		if _, ok := entries[0][key]; !ok {
+			t.Errorf("model_switches entry lacks %q: %v", key, entries[0])
+		}
+	}
+	switches, _ := entries[0]["switches"].([]any)
+	if len(switches) != 2 {
+		t.Fatalf("switches = %v", entries[0]["switches"])
+	}
+	for _, key := range []string{"from_model", "to_model", "source", "fallback"} {
+		if _, ok := switches[0].(map[string]any)[key]; !ok {
+			t.Errorf("switch lacks %q: %v", key, switches[0])
+		}
+	}
+}
+
+// TestFormat_ModelSwitchesCountOnlyOverflowStillListed covers a session whose
+// every recorded switch is past the cap view: the entry carries the count.
+func TestFormat_ModelSwitchesOverflowOnlyEntry(t *testing.T) {
+	snap := &ipc.StateSnapshot{
+		Windows: []ipc.WindowState{
+			{Session: "main", WindowIndex: "0", WindowName: "42-implement", Status: "running", ModelSwitchesMore: 2},
+		},
+		Summary: ipc.StatusSummary{Total: 1, Running: 1},
+	}
+	out := Format(snap, testConfig())
+	if len(out.ModelSwitches) != 1 || out.ModelSwitches[0].More != 2 {
+		t.Errorf("model_switches = %+v, want one entry with more=2", out.ModelSwitches)
+	}
+}
+
+// TestFormat_ModelSwitchesOmittedWhenNone asserts the key is absent (not an
+// empty array) when no session has a switch, and that the text and tooltip
+// are byte-identical to a snapshot without the fields.
+func TestFormat_ModelSwitchesOmittedWhenNone(t *testing.T) {
+	snap := &ipc.StateSnapshot{
+		Timestamp: "2024-01-01T00:00:00Z",
+		Windows:   []ipc.WindowState{{Session: "main", WindowIndex: "0", TaskName: "writing tests", Status: "running"}},
+		Summary:   ipc.StatusSummary{Total: 1, Running: 1},
+	}
+	out := Format(snap, testConfig())
+	if len(out.ModelSwitches) != 0 {
+		t.Errorf("model_switches = %+v, want none", out.ModelSwitches)
+	}
+	data, err := json.Marshal(out)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	if strings.Contains(string(data), "model_switch") {
+		t.Errorf("expected no model_switches key when no session has a switch, got %s", data)
+	}
+}
+
+// TestFormat_ModelSwitchesLeaveTooltipAndTextUnchanged pins the "tooltip
+// unchanged" decision: the switches ride the JSON field only.
+func TestFormat_ModelSwitchesLeaveTooltipAndTextUnchanged(t *testing.T) {
+	with := modelSwitchSnapshot()
+	without := modelSwitchSnapshot()
+	for i := range without.Windows {
+		without.Windows[i].ModelSwitches = nil
+		without.Windows[i].ModelSwitchesMore = 0
+	}
+	a, b := Format(with, testConfig()), Format(without, testConfig())
+	if a.Text != b.Text || a.Tooltip != b.Tooltip || a.Class != b.Class || a.Alt != b.Alt {
+		t.Errorf("model switches changed the rendered text/tooltip/class:\nwith:    %+v\nwithout: %+v", a, b)
+	}
+}
