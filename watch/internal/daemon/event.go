@@ -7,6 +7,8 @@ import (
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/detect"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/frontend"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/ipc"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/modelswitch"
+	"github.com/matteobortolazzo/cenci/watch/v2/pkg/watch"
 )
 
 // sessionKeyForEvent returns the key for the daemon's sessions map: the agent
@@ -95,6 +97,15 @@ func (d *Daemon) handleEvent(event ipc.HookEvent) {
 		return
 	}
 
+	// A model switch is display-only state (#1179): it must never change the
+	// session's status, so it skips the status mapping and frontend.OnEvent
+	// entirely. A subagent's switch (AgentID set) lands on the parent session.
+	if event.EventType == "PostModelSwitch" {
+		d.recordModelSwitch(key, sess, event)
+		d.broadcast()
+		return
+	}
+
 	status := d.mapEventToStatus(event)
 	if status == detect.StatusUnknown {
 		return
@@ -154,6 +165,42 @@ func (d *Daemon) handleEvent(event ipc.HookEvent) {
 	}
 
 	d.broadcast()
+}
+
+// recordModelSwitch appends a PostModelSwitch event to the session's display
+// list, or counts it as overflow past modelswitch.MaxSwitches. The event socket
+// also receives events from containers, so every free-text field is validated
+// again here and an invalid value becomes a placeholder, never a snapshot value.
+func (d *Daemon) recordModelSwitch(key string, sess *frontend.SessionState, event ipc.HookEvent) {
+	sw := watch.ModelSwitch{
+		FromModel: modelswitch.SanitizeModel(event.FromModel),
+		ToModel:   modelswitch.SanitizeModel(event.ToModel),
+		Source:    modelswitch.SanitizeSource(event.ModelSwitchSource),
+		Subagent:  event.AgentID != "",
+	}
+	if sw.Subagent {
+		sw.AgentType = modelswitch.SanitizeAgentType(event.AgentType)
+	}
+	sw.Fallback = modelswitch.Fallback(sw.Source)
+
+	if d.cfg.Verbose {
+		if sw.FromModel != event.FromModel || sw.ToModel != event.ToModel ||
+			(sw.Subagent && sw.AgentType != event.AgentType) ||
+			(event.ModelSwitchSource != "" && sw.Source != event.ModelSwitchSource) {
+			log.Printf("model-switch: replaced invalid field(s) with placeholders on session %s", key)
+		}
+	}
+	if len(sess.ModelSwitches) >= modelswitch.MaxSwitches {
+		sess.ModelSwitchesMore++
+		if d.cfg.Verbose {
+			log.Printf("model-switch: session %s is past the %d switch cap, counted %d more", key, modelswitch.MaxSwitches, sess.ModelSwitchesMore)
+		}
+		return
+	}
+	sess.ModelSwitches = append(sess.ModelSwitches, sw)
+	if d.cfg.Verbose {
+		log.Printf("model-switch: session=%s %s -> %s source=%s subagent=%t status unchanged", key, sw.FromModel, sw.ToModel, sw.Source, sw.Subagent)
+	}
 }
 
 // suppressNeedInputClear reports whether a Running-mapping event must be

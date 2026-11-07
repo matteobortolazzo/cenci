@@ -78,7 +78,7 @@ func attendedTokens(args []string) []string {
 // token, carrying want.
 func requireAttended(t *testing.T, agent, want string) {
 	t.Helper()
-	args := assembleExecEnv(agent)
+	args := assembleExecEnv(agent, resolveSecretEnvSet())
 	got := attendedTokens(args)
 	if len(got) != 1 {
 		t.Fatalf("assembleExecEnv(%q) emitted %d CENCI_ATTENDED tokens, want exactly 1; got: %v", agent, len(got), args)
@@ -203,11 +203,11 @@ func TestAssembleExecEnv_AttendedNotSecretAndValueInline(t *testing.T) {
 	clearAttendedEnv(t)
 	writeFleetConfig(t, `{"planning": {"attended": true}}`)
 
-	args := assembleExecEnv("claude")
+	args := assembleExecEnv("claude", resolveSecretEnvSet())
 	if slices.Contains(args, "CENCI_ATTENDED") {
 		t.Errorf("assembleExecEnv emitted a bare -e CENCI_ATTENDED token; want the inline NAME=value form (the flag is not a secret); got: %v", args)
 	}
-	if isSecretEnvName("CENCI_ATTENDED") {
+	if isSecretEnvName(resolveSecretEnvSet(), "CENCI_ATTENDED") {
 		t.Error("isSecretEnvName(\"CENCI_ATTENDED\") = true, want false — the attended flag carries no secret and must render unredacted in audit/dry-run output")
 	}
 }
@@ -222,7 +222,7 @@ func TestForwardedEnvVars_ReportsAttended(t *testing.T) {
 	writeFleetConfig(t, `{"planning": {"attended": true}}`)
 
 	var found bool
-	for _, e := range forwardedEnvVars("claude") {
+	for _, e := range forwardedEnvVars("claude", resolveSecretEnvSet()) {
 		if e.Name != "CENCI_ATTENDED" {
 			continue
 		}
@@ -232,6 +232,6 @@ func TestForwardedEnvVars_ReportsAttended(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Errorf("forwardedEnvVars(\"claude\") does not report CENCI_ATTENDED; got: %+v", forwardedEnvVars("claude"))
+		t.Errorf("forwardedEnvVars(\"claude\") does not report CENCI_ATTENDED; got: %+v", forwardedEnvVars("claude", resolveSecretEnvSet()))
 	}
 }

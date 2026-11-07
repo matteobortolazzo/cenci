@@ -13,6 +13,7 @@ import (
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/frontend"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/hookhealth"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/ipc"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/modelswitch"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/run"
 )
 
@@ -92,6 +93,20 @@ var terminalBackgroundTaskStatus = map[string]bool{
 	"paused":    true,
 }
 
+// lenientString reads a model-switch field that may hold any JSON value. It
+// returns the string for a JSON string, "" for an absent or null field, and
+// notString for any other JSON type, so a malformed value is visible to the
+// caller instead of failing the whole payload decode.
+func lenientString(raw json.RawMessage) (value string, notString bool) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return "", false
+	}
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return "", true
+	}
+	return value, false
+}
+
 func runNotify(args []string) {
 	fs := flag.NewFlagSet("notify", flag.ExitOnError)
 	socketPath := fs.String("event-socket", ipc.DefaultEventSocketPath(), "event socket path")
@@ -143,6 +158,15 @@ func runNotify(args []string) {
 		// the session will be woken (#705). Only the count is read: schedules
 		// and prompts stay local, like the raw prompt above.
 		SessionCrons []json.RawMessage `json:"session_crons"`
+		// PostModelSwitch fields (#1179). They decode as raw JSON so a
+		// non-string value never fails the whole payload and drops an event of
+		// any type; lenientString reads them, and only for PostModelSwitch.
+		// Source in particular is read only for that event: SessionStart has its
+		// own `source` (startup|resume|clear).
+		FromModel json.RawMessage `json:"from_model"`
+		ToModel   json.RawMessage `json:"to_model"`
+		AgentType json.RawMessage `json:"agent_type"`
+		Source    json.RawMessage `json:"source"`
 	}
 	if err := json.Unmarshal(data, &hookInput); err != nil {
 		hookhealth.RecordFailure(hookhealth.MalformedInput, agentName)
@@ -167,6 +191,36 @@ func runNotify(args []string) {
 	if event.EventType == "SessionEnd" {
 		event.SessionEndReason = hookInput.Reason
 	}
+	// An invalid model id or agent type is never stored or forwarded; the
+	// switch is still delivered with a placeholder. The daemon validates again.
+	var modelSwitch modelswitch.Switch
+	if event.EventType == "PostModelSwitch" {
+		// A non-string value reads as "" for the models and agent type, which the
+		// sanitizers turn into their placeholders; a non-string source is an
+		// invalid source, not an absent one.
+		fromModel, _ := lenientString(hookInput.FromModel)
+		toModel, _ := lenientString(hookInput.ToModel)
+		agentType, _ := lenientString(hookInput.AgentType)
+		source, sourceNotString := lenientString(hookInput.Source)
+		if sourceNotString {
+			source = modelswitch.UnknownSource
+		}
+		event.FromModel = modelswitch.SanitizeModel(fromModel)
+		event.ToModel = modelswitch.SanitizeModel(toModel)
+		if source != "" {
+			event.ModelSwitchSource = modelswitch.SanitizeSource(source)
+		}
+		modelSwitch = modelswitch.Switch{
+			Source:   source,
+			From:     event.FromModel,
+			To:       event.ToModel,
+			Subagent: event.AgentID != "",
+		}
+		if modelSwitch.Subagent {
+			event.AgentType = modelswitch.SanitizeAgentType(agentType)
+			modelSwitch.AgentType = event.AgentType
+		}
+	}
 	for _, task := range hookInput.BackgroundTasks {
 		if !terminalBackgroundTaskStatus[task.Status] {
 			event.BackgroundWork = true
@@ -187,6 +241,13 @@ func runNotify(args []string) {
 	if hookInput.Cwd != "" && filepath.IsAbs(hookInput.Cwd) &&
 		cwdExcluded(hookInput.Cwd, loadExcludeCwd(run.DefaultConfigPath())) {
 		return
+	}
+
+	// Persist a Claude model switch on the hook side so a later process (Phase 9)
+	// can read it without the daemon; Record swallows every error. Only Claude
+	// has the flag fallback, so no other agent records.
+	if event.EventType == "PostModelSwitch" && event.Agent == "claude" {
+		modelswitch.Record(modelswitch.Dir(), event.SessionID, modelSwitch, time.Now())
 	}
 
 	// Delivery is silent and non-fatal. For the default socket it starts a

@@ -187,14 +187,14 @@ func containsSubsequence(args, want []string) bool {
 //
 // `docker exec -e NAME=value ...`/`docker run ... -e NAME=value ...` argv is
 // readable by any host user via `ps` for the entire session (execAttach's
-// syscall.Exec handoff never returns). Both call sites that ever forward a
-// provider API key -- assembleExecEnv (per-exec attach path) and
-// Engine.assembleEnv (container-create path's CONTEXT7_API_KEY forward) --
-// must emit only the bare "-e NAME" token, letting the runtime CLI read the
-// value from its own inherited environment instead. Assertions below use
-// slices.Contains for an exact-token match against a bare "-e NAME" entry,
-// as opposed to strings.Contains against the joined argv, which would also
-// match the value-bearing "NAME=value" form.
+// syscall.Exec handoff never returns). The only call site that forwards a
+// provider API key or CONTEXT7_API_KEY since #1201 is assembleExecEnv
+// (per-exec attach path); Engine.assembleEnv (container-create path)
+// forwards none. It must emit only the bare "-e NAME" token, letting the
+// runtime CLI read the value from its own inherited environment instead.
+// Assertions below use slices.Contains for an exact-token match against a
+// bare "-e NAME" entry, as opposed to strings.Contains against the joined
+// argv, which would also match the value-bearing "NAME=value" form.
 
 // providerSecretEnvNames are the three host env vars whose VALUES must never
 // appear in any assembled argv token (ticket #759's AC list).
@@ -203,10 +203,11 @@ var providerSecretEnvNames = []string{"CONTEXT7_API_KEY", "ANTHROPIC_API_KEY", "
 // TestAssembleExecEnvAndAssembleEnv_NeverEmitProviderSecretValues is the
 // core AC test: with distinct sentinel values set for all three provider
 // secret names, neither assembleExecEnv (every agent) nor Engine.assembleEnv
-// (the create-time CONTEXT7_API_KEY forward) may ever emit a sentinel value
+// (which forwards no secret since #1201) may ever emit a sentinel value
 // anywhere in their argv, or a "NAME=" prefixed token for any of the three
-// names -- only the bare "-e NAME" form. Per-agent scoping (#490) is
-// verified against the actual assembleExecEnv switch: opencode forwards
+// names -- only the bare "-e NAME" form, and only from assembleExecEnv.
+// Per-agent scoping (#490) is verified against the resolved secret set's
+// forwardNames: opencode forwards
 // ANTHROPIC_API_KEY+OPENAI_API_KEY, codex forwards OPENAI_API_KEY only,
 // claude forwards neither -- CONTEXT7_API_KEY is unscoped (forwarded for
 // every agent when set).
@@ -243,7 +244,7 @@ func TestAssembleExecEnvAndAssembleEnv_NeverEmitProviderSecretValues(t *testing.
 
 	for _, tc := range cases {
 		t.Run(tc.agent, func(t *testing.T) {
-			execArgs := assembleExecEnv(tc.agent)
+			execArgs := assembleExecEnv(tc.agent, resolveSecretEnvSet())
 			e := &Engine{Runtime: "docker", Stderr: &bytes.Buffer{}}
 			createArgs := e.assembleEnv(tc.agent, Scope{WorkspaceScope: "s"}, Options{}, false, DefaultSandboxPlugins())
 
@@ -271,11 +272,11 @@ func TestAssembleExecEnvAndAssembleEnv_NeverEmitProviderSecretValues(t *testing.
 				}
 			}
 
-			// The create-time path only ever forwards CONTEXT7_API_KEY,
-			// unconditionally on agent (assembleEnv's own CONTEXT7_API_KEY
-			// passthrough has no agent gate).
-			if !slices.Contains(createArgs, "CONTEXT7_API_KEY") {
-				t.Errorf("assembleEnv(%q) missing bare -e CONTEXT7_API_KEY token; got: %v", tc.agent, createArgs)
+			// The create-time path forwards no secret at all since #1201
+			// (CONTEXT7_API_KEY has no container-side consumer outside the
+			// per-exec agent session), for every agent.
+			if slices.Contains(createArgs, "CONTEXT7_API_KEY") {
+				t.Errorf("assembleEnv(%q) must not emit a bare -e CONTEXT7_API_KEY token (no create-time forward, #1201); got: %v", tc.agent, createArgs)
 			}
 
 			for _, args := range [][]string{execArgs, createArgs} {
@@ -301,7 +302,7 @@ func TestAssembleExecEnvAndAssembleEnv_EmptyProviderKeys_OmitEntirely(t *testing
 	}
 
 	for _, agent := range []string{"claude", "codex", "opencode"} {
-		execArgs := assembleExecEnv(agent)
+		execArgs := assembleExecEnv(agent, resolveSecretEnvSet())
 		e := &Engine{Runtime: "docker", Stderr: &bytes.Buffer{}}
 		createArgs := e.assembleEnv(agent, Scope{WorkspaceScope: "s"}, Options{}, false, DefaultSandboxPlugins())
 
@@ -836,7 +837,7 @@ func inTmux(t *testing.T) {
 // attachArgvWithTag assembles the agent-attach argv exactly as a launch does:
 // the per-exec env plus whatever tagLaunchPane returned.
 func attachArgvWithTag(agent, container string, tag []string) []string {
-	execEnv := append(assembleExecEnv(agent), tag...)
+	execEnv := append(assembleExecEnv(agent, resolveSecretEnvSet()), tag...)
 	return buildAgentExecArgv(container, agent, buildAgentCmdArgs(agent, DefaultModel(agent)), execEnv, Options{Agent: agent})
 }
 

@@ -642,6 +642,47 @@ Accepted and documented, not bugs:
   branch is behind base`, but performs no branch mutation — pushing the rebase remains a
   manual step (`/cenci:sync`).
 
+### Model fallback on flagged requests
+
+Claude Code re-runs a flagged request on an older fallback model, and the session then stays on that model until someone runs `/model`; in an unattended run nobody sees the transcript notice. Verdict: a flag-triggered fallback **is** detectable without reading the transcript, because Claude Code's `PostModelSwitch` hook fires for it and reports `source: "auto"`, while an explicit `/model` or SDK switch reports another value.
+
+That verdict comes from inspecting the shipped Claude Code bundle (version 2.1.319) and the hooks reference, not from a live flagged request, which was deliberately never provoked.
+
+`switchModelsOnFlag: false` does not avoid the problem in non-interactive mode: a flagged request then ends the turn with a refusal instead of falling back. That is a refusal, not a model switch, so nothing is recorded for it. cenci does not change `switchModelsOnFlag`.
+
+`cenci notify` records each `PostModelSwitch` event in a bounded per-session store under the session's own state directory, and forwards it to the daemon. The stored record survives a daemon restart and the paneless-session TTL; the daemon's own copy does not. It is shown in three places:
+
+- **`cenci status`** — an indented `<previous> → <new>` line under the session (`+<n> more` past the cap). The switch never changes the session's status.
+- **Widget JSON** — a per-session `model_switches` field, omitted when the session has none.
+- **PR body** — Phase 9 reads the record with `cenci daemon model-switches` and writes a `## Model switches` section with one `Model switch: <from> → <to> (main session)` or `Model switch: <from> → <to> (subagent <agent_type>)` line per switch, ` — fallback` appended only when the source is `auto`, and `Model switch: +<n> more` past the cap. When the record cannot be read, the section says `Model switch status unknown`, never that no fallback happened. A session with no recorded switch gets no section.
+
+Residual gaps:
+
+- **Codex and OpenCode** have no flag-fallback behavior and register no `PostModelSwitch` hook, so their runs emit neither a switch line nor the unknown line.
+- **Refusal mode** (`switchModelsOnFlag: false`, non-interactive) ends the turn with a refusal that this feature does not surface.
+- **Cross-session resume.** The record is keyed by the Claude Code session id that runs Phase 9 and its subagents. A pipeline resumed in a fresh session, or after `/clear`, under-reports: earlier sessions' switches are not listed.
+- **Automatic restores.** Claude Code also reports a restore to the earlier model as `source: "auto"`, so a restore reads as a fallback line too.
+- **Sandboxes** carry the last published cenci-watch plugin, so the hook reaches a sandbox only after the release that registers it.
+- **Status and widget are not durable.** They come from the daemon's in-memory copy, which is gone after a daemon restart or when the session ends. Only the PR line comes from the durable hook-side store.
+- **The hook-side store is best-effort.** A switch can be lost, and Phase 9 then reads "no record", not "unknown". The CLI reports "unknown" only when:
+  - the session id is missing or invalid;
+  - the state directory cannot be resolved;
+  - the store is untrusted (a symlink, not a directory, foreign-owned, or group- or other-writable);
+  - a record is unreadable or corrupt;
+  - a marked failed write (`.incomplete`) exists.
+
+  These read as "no record", not "unknown":
+  - a hook payload that does not decode (for example a wrongly typed `agent_id`, `cwd` or `session_id`, or a truncated stdin);
+  - a payload with a missing or invalid session id;
+  - a state directory that cannot be created or written (full or read-only disk, no permission);
+  - a marker that could not be written;
+  - a hook that cannot run (binary missing, or a plugin-local `cenci` older than the manifest);
+  - a record or marker removed by pruning (older than 14 days, or past 256 sessions; a pruned marker turns an earlier "unknown" into "no record").
+- **Excluded directories.** Sessions under a `watch.excludeCwd` directory are not recorded.
+- **Unseen sessions.** A switch event for a session the daemon has not seen shows a session entry with no status until its next event.
+
+Automerge and babysit gating are unchanged by a fallback. To put a session back on its configured model, run `/model`.
+
 ## Where the details live
 
 | For… | Read… |
@@ -656,3 +697,4 @@ Accepted and documented, not bugs:
 | How a session resolves attended vs. the repo's autonomy | [Phase 1 — Plan, `## Resolve Planning Autonomy`](../flow/skills/implement/phases/phase-1-plan.md) |
 | Which test pins which claim on this page | [Pipeline coverage map](pipeline-coverage-map.md) |
 | Where the supervisor runs, forwarded arming, and the arming/host verification recipe | [cenci-watch README — Automerge](../watch/README.md#automerge-cenci-babysit) |
+| What a flag-triggered model fallback looks like in status, the widget JSON and the PR body | [Model fallback on flagged requests](#model-fallback-on-flagged-requests); the PR line as the pipeline writes it: [Phase 9 — PR](../flow/skills/implement/phases/phase-9-pr.md) |

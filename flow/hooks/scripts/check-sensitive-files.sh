@@ -58,6 +58,10 @@
 # this hook runs in every repo, that relative block is an accepted over-block
 # where guard-main-worktree.sh is inactive (unconfigured repos). apply_patch
 # declared targets are never shell-expanded and keep their $(pwd) join.
+# Claude Code mods: a mod's tool.call can approve past this plugin hook, or
+# answer the call itself so it never runs; this is a workflow safeguard, not
+# enforcement against other installed mods. See SECURITY.md and
+# https://code.claude.com/docs/en/plugins/mods/events
 
 command -v jq >/dev/null 2>&1 || {
   echo "BLOCKED: jq is required by check-sensitive-files.sh but was not found on PATH." >&2

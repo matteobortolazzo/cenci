@@ -30,7 +30,9 @@ import (
 // argv (each after the runtime binary — Runtime carries the binary name
 // itself; CreateArgv is nil in the attach branch), whether the create
 // branch's cenci-wiring outcome could not be determined read-only
-// (CenciWiringUnknown), and the full audit Posture breakdown.
+// (CenciWiringUnknown), and the full audit Posture breakdown. secrets is the
+// resolved secret-name set (names only) WriteText redacts the argv with; it is
+// unexported, so it is never part of any serialized output.
 type DryRunPlan struct {
 	Runtime            string
 	Mode               string
@@ -39,6 +41,8 @@ type DryRunPlan struct {
 	AttachArgv         []string
 	CenciWiringUnknown bool
 	Posture            Posture
+
+	secrets secretEnvSet
 }
 
 // DryRun performs the same non-side-effecting steps Launch performs, in the
@@ -73,11 +77,12 @@ type DryRunPlan struct {
 // generates an ID and never calls tmux, so its output stays deterministic and
 // the random value never appears.
 //
-// The Posture breakdown is composed by calling Audit on a shallow engine
-// copy with Stderr discarded: DryRun's own create-argv build already prints
-// the --host-network isolation warning once (on the real engine, e), so
-// calling Audit on a Stderr-discarding clone avoids printing it a second
-// time.
+// The Posture breakdown is composed by calling auditWithSecrets on a shallow
+// engine copy with Stderr discarded: DryRun's own create-argv build already
+// prints the --host-network isolation warning once (on the real engine, e), so
+// calling it on a Stderr-discarding clone avoids printing it a second time.
+// It is handed the secret set the launch context already resolved, so the
+// Posture and the redacted argv share one set (#1201).
 func (e *Engine) DryRun(opts Options) (DryRunPlan, error) {
 	ctx, err := e.resolveLaunchContext(opts)
 	if err != nil {
@@ -119,12 +124,13 @@ func (e *Engine) DryRun(opts Options) (DryRunPlan, error) {
 	clone := *e
 	clone.Stderr = io.Discard
 	clone.Runtime = ""
-	posture, err := clone.Audit(opts)
+	posture, err := clone.auditWithSecrets(opts, ctx.Secrets)
 	if err != nil {
 		return DryRunPlan{}, err
 	}
 
 	return DryRunPlan{
+		secrets:            ctx.Secrets,
 		Runtime:            e.Runtime,
 		Mode:               mode,
 		ContainerName:      ctx.Scope.ContainerName,
@@ -155,7 +161,7 @@ func (p DryRunPlan) WriteText(w io.Writer) error {
 		_, _ = fmt.Fprintf(bw, "Container '%s' is already running and compatible — attaching, no create.\n\n", p.ContainerName)
 	} else {
 		_, _ = fmt.Fprintln(bw, "Container create (detached):")
-		_, _ = fmt.Fprintf(bw, "  %s %s\n\n", p.Runtime, renderArgv(p.CreateArgv))
+		_, _ = fmt.Fprintf(bw, "  %s %s\n\n", p.Runtime, renderArgv(p.CreateArgv, p.secrets))
 		if p.CenciWiringUnknown {
 			_, _ = fmt.Fprintln(bw, "Note: the cenci events daemon is not yet running, so whether this launch would include cenci wiring mounts could not be determined read-only; a real launch may start the daemon and include them.")
 			_, _ = fmt.Fprintln(bw)
@@ -163,7 +169,7 @@ func (p DryRunPlan) WriteText(w io.Writer) error {
 	}
 
 	_, _ = fmt.Fprintln(bw, "Agent attach (exec):")
-	_, _ = fmt.Fprintf(bw, "  %s %s\n\n", p.Runtime, renderArgv(p.AttachArgv))
+	_, _ = fmt.Fprintf(bw, "  %s %s\n\n", p.Runtime, renderArgv(p.AttachArgv, p.secrets))
 
 	if err := bw.Flush(); err != nil {
 		return err
@@ -172,8 +178,8 @@ func (p DryRunPlan) WriteText(w io.Writer) error {
 }
 
 // renderArgv shell-quotes every token of argv and redacts any "-e NAME=value"
-// token whose NAME is a forwarded secret (forwardedEnvVarNames, the single
-// source of truth audit.go already uses for secret classification) to
+// token whose NAME is in the resolved secret set (the same set audit.go
+// classifies against and assembleExecEnv forwards from) to
 // "-e NAME=<redacted>" — masking the value while keeping the token
 // structurally visible. Since ticket #759, secret env forwards arrive as a
 // bare "-e NAME" (value-less) token in the first place, so redactSecretEnv
@@ -182,14 +188,14 @@ func (p DryRunPlan) WriteText(w io.Writer) error {
 // ever reintroduced. Every other token, including non-secret env and host
 // paths, renders literally (consistent with audit/diagnose's own
 // value-free-but-path-visible discipline).
-func renderArgv(argv []string) string {
+func renderArgv(argv []string, secrets secretEnvSet) string {
 	rendered := make([]string, 0, len(argv))
 	for i := 0; i < len(argv); i++ {
 		tok := argv[i]
 		if tok == "-e" && i+1 < len(argv) {
 			rendered = append(rendered, shellQuote(tok))
 			i++
-			rendered = append(rendered, shellQuote(redactSecretEnv(argv[i])))
+			rendered = append(rendered, shellQuote(redactSecretEnv(argv[i], secrets)))
 			continue
 		}
 		rendered = append(rendered, shellQuote(tok))
@@ -198,18 +204,18 @@ func renderArgv(argv []string) string {
 }
 
 // redactSecretEnv masks the value of a "NAME=value" token to
-// "NAME=<redacted>" when NAME is in forwardedEnvVarNames; every other token
+// "NAME=<redacted>" when NAME is in the resolved secret set; every other token
 // (including non-secret "NAME=value" env) passes through unchanged. Since
 // ticket #759, secret env forwards arrive as a bare "NAME" (no "=") token,
 // which has no index for '=' below and so passes through unchanged here too
 // — this function only fires if a value-bearing form is ever reintroduced.
-func redactSecretEnv(tok string) string {
+func redactSecretEnv(tok string, secrets secretEnvSet) string {
 	idx := strings.IndexByte(tok, '=')
 	if idx < 0 {
 		return tok
 	}
 	name := tok[:idx]
-	if !forwardedEnvVarNames[name] {
+	if !isSecretEnvName(secrets, name) {
 		return tok
 	}
 	return name + "=<redacted>"
