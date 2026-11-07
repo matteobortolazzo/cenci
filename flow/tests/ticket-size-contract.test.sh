@@ -93,6 +93,16 @@ assert_file_contains "${REFINE}" 'an `L` whose bound still reads `<reason>`' "re
 assert_file_contains "${REFINE}" '`### Size Estimate: <letter>` (with its `Bound:` and `Rationale:` lines)' "refine skill persists the size section into the body"
 assert_file_contains "${REFINE_CODEX}" '`### Size Estimate: <S|M|L>` with the letter'"'"'s bound line copied verbatim' "codex refine mirrors the size format"
 
+# --- 1b. split-parent size reason (aggregate epic that ships no PR) -------------
+SPLIT_PARENT_REASON='split parent: a tracking epic that ships no PR of its own; its PRs are the S or M children in Suggested Split'
+assert_file_contains "${SIZING}" '## Split parents' "sizing doc defines the split-parent rule"
+for f in "${SIZING}" "${REFINER}"; do
+  assert_file_contains "$f" "${SPLIT_PARENT_REASON}" "carries the split-parent reason sentence verbatim"
+done
+assert_file_contains "${REFINE}" 'exactly the split-parent reason sentence in `docs/ticket-sizing.md`' "refine skill accepts only the verbatim split-parent reason"
+assert_file_contains "${REFINE}" 'on a ticket that ships its own PR, is an unfilled reason' "refine skill rejects the split-parent reason on a non-split ticket"
+assert_file_contains "${REFINE_CODEX}" 'exactly the split-parent reason sentence in `docs/ticket-sizing.md`' "codex refine mirrors the split-parent reason"
+
 # --- 2. vague acceptance criteria rejected --------------------------------------
 assert_file_contains "${REFINE}" '#### Acceptance-criteria concreteness check (every proposal)' "refine skill has the concreteness check"
 assert_file_contains "${REFINE}" '`works correctly`, `works as expected`, `works properly`, `handles edge cases`, `handles errors gracefully`' "refine skill names the vague shapes"
