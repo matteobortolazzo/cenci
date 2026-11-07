@@ -23,7 +23,7 @@ import (
 // failed per-runtime query must surface the healthy runtime's output plus a
 // stderr error and a non-zero exit, never a silently empty result (AC #4).
 // These black-box tests drive the real built `cenci` binary as a subprocess,
-// reusing the fakes/env-builders from sandbox_open_test.go/diagnose_test.go/
+// reusing the fakes/env-builders from sandbox_clitest_helpers_test.go/diagnose_test.go/
 // support_bundle_test.go (same package).
 
 // -- sandbox ls -------------------------------------------------------------
@@ -890,7 +890,7 @@ func TestDiagnose_RunningFirstTieBreak_RunningOwnerReportedBeforeStoppedOwner(t 
 		"FAKE_IMAGE_BASE_VERSION="+tag,
 		// docker's copy is stopped (tab-shaped row passed through verbatim);
 		// podman's copy is running (the fake synthesizes "Up 1 hour" for a
-		// bare name) — sandbox_open_test.go:337-362.
+		// bare name) — writeScriptedRuntime in sandbox_clitest_helpers_test.go.
 		"FAKE_PS_DOCKER=claude-cenci-default\tExited (0) 2 hours ago\tcenci-sandbox:latest\n",
 		"FAKE_PS_PODMAN=claude-cenci-default\n",
 	)

@@ -14,7 +14,7 @@ import (
 // Posture breakdown, without creating any container, volume, network, or
 // daemon, and without attaching. These black-box tests drive the real built
 // `cenci` binary as a subprocess against the scripted-runtime harness
-// already shared by sandbox_open_test.go (writeScriptedRuntimes,
+// already shared by sandbox_clitest_helpers_test.go (writeScriptedRuntimes,
 // openTestEnv, callLogLines, buildArgv0Alias, etc. --
 // watch/docs/test-strategy.md #493) rather than reinventing it.
 //
@@ -203,7 +203,7 @@ func TestOpenDryRun_DindAndNoDind_Exits2(t *testing.T) {
 }
 
 // TestOpenDryRun_MalformedDindConfig_Exits1 mirrors the real-launch #632
-// hard-fail (TestOpen_MalformedDindConfig_Exits1 in sandbox_open_test.go)
+// hard-fail (TestOpen_MalformedDindConfig_Exits1 in open_test.go)
 // for --dry-run: a corrupt .cenci/config.json must hard-fail dry-run too,
 // not render a plan with dind silently resolved off.
 func TestOpenDryRun_MalformedDindConfig_Exits1(t *testing.T) {
@@ -233,7 +233,7 @@ func TestOpenDryRun_MalformedDindConfig_Exits1(t *testing.T) {
 
 // TestOpenDryRunNoDind_SucceedsDespiteMalformedConfig pinned --no-dind as a
 // config-free escape hatch for --dry-run too pre-#1002 (#632). #1002 narrows
-// it the same way as the real-launch case (sandbox_open_test.go's
+// it the same way as the real-launch case (open_test.go's
 // TestOpenNoDind_SucceedsDespiteMalformedConfig): resolveLaunchContext (which
 // DryRun shares) now ALSO resolves sandbox.plugins unconditionally, so the
 // same corrupt config.json --no-dind used to route around now hard-fails the

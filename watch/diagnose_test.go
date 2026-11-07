@@ -20,7 +20,7 @@ import (
 // each failure annotated with a registered errcode.Code and a
 // fatal/degraded/warning severity. These black-box tests drive the real
 // built `cenci` binary as a subprocess via writeScriptedRuntime/
-// writeAssetFixture (shared with sandbox_open_test.go, same package).
+// writeAssetFixture (shared with sandbox_clitest_helpers_test.go, same package).
 
 // diagEnv builds the black-box environment for native `cenci diagnose` runs.
 // Unlike openTestEnv (used by the `open` launch-path tests), diagnose is

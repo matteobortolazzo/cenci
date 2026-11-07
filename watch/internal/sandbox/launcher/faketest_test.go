@@ -37,7 +37,7 @@ import (
 //	FAKE_INFO_RUNTIMES → `info --format ...` stdout (the sysbox-runc
 //	                     registration probe, sandbox.SysboxRegistered);
 //	                     defaults to "{}" (no runtimes registered), mirroring
-//	                     sandbox_open_test.go's writeScriptedRuntime.
+//	                     sandbox_clitest_helpers_test.go's writeScriptedRuntime.
 //	FAKE_INFO_EXIT     → `info ...` exit code (default 0); set nonzero to
 //	                     simulate a `docker info` failure (daemon down),
 //	                     distinct from FAKE_INFO_RUNTIMES's stdout-shape
@@ -45,7 +45,7 @@ import (
 //	                     INFO_RUNTIMES` controls stdout, `fe INFO` (→
 //	                     FAKE_INFO_EXIT, not FAKE_INFO_RUNTIMES_EXIT) controls
 //	                     the exit code. Must stay byte-parallel with
-//	                     sandbox_open_test.go's writeScriptedRuntime (#493
+//	                     sandbox_clitest_helpers_test.go's writeScriptedRuntime (#493
 //	                     keep-in-sync note). writeAuditFakeRuntime
 //	                     (audit_security_faketest_test.go) deliberately does
 //	                     NOT get this hook: it has no `info` arm at all, and
@@ -54,7 +54,7 @@ import (
 //	                     format containerHasSharedAgentMount uses (ticket
 //	                     #620's read-only running-container disposition
 //	                     probe); defaults to "" (no mounts -> incompatible).
-//	                     Named to mirror sandbox_open_test.go's
+//	                     Named to mirror sandbox_clitest_helpers_test.go's
 //	                     writeScriptedRuntime FAKE_INSPECT_MOUNTS var (#493
 //	                     keep-in-sync note), though that fake's var answers a
 //	                     different inspect format (the "<source>::<destination>"
@@ -75,14 +75,14 @@ import (
 //	                     dind env, and a workspace-only mount (derives
 //	                     dindOff, no host socket) so existing reuse tests
 //	                     that don't care about posture keep passing; must
-//	                     stay byte-parallel with sandbox_open_test.go's
+//	                     stay byte-parallel with sandbox_clitest_helpers_test.go's
 //	                     writeScriptedRuntime FAKE_REUSE_POSTURE var (#493
 //	                     keep-in-sync note).
 //	FAKE_INSPECT_STATE  → `inspect --format ...` stdout for the
 //	                     "{{.State.Status}} {{.State.ExitCode}}" format
 //	                     containerStartupState uses (Diagnose's
 //	                     container-status probe, #630); defaults to
-//	                     "running 0", mirroring sandbox_open_test.go's
+//	                     "running 0", mirroring sandbox_clitest_helpers_test.go's
 //	                     writeScriptedRuntime default.
 //	FAKE_DOCKERD_MARKER → content returned by the short-lived
 //	                     `run --entrypoint /bin/cat ... .cenci-dockerd-
@@ -109,7 +109,7 @@ import (
 //	                     Diagnose's "Recent logs (tail):" section); unset/
 //	                     empty simulates no logs. FAKE_LOGS_EXIT (default 0)
 //	                     is that same read's exit code. Must stay
-//	                     byte-parallel with sandbox_open_test.go's
+//	                     byte-parallel with sandbox_clitest_helpers_test.go's
 //	                     writeScriptedRuntime FAKE_LOGS var (#493
 //	                     keep-in-sync note).
 //	FAKE_OBSERVED_POSTURE → `inspect --format ...` stdout for ticket #627's
@@ -129,7 +129,7 @@ import (
 //	                     no-mounts, dind-off header so existing tests that
 //	                     don't care about observed content still parse
 //	                     cleanly. Per the plan's #493 keep-in-sync note:
-//	                     sandbox_open_test.go's writeScriptedRuntime does
+//	                     sandbox_clitest_helpers_test.go's writeScriptedRuntime does
 //	                     NOT need this format — it never exercises Audit's
 //	                     observed path (only the launch/dry-run paths,
 //	                     which reuse FAKE_REUSE_POSTURE/FAKE_INSPECT_MOUNTS
@@ -163,7 +163,7 @@ import (
 //	                     from the list defaults to
 //	                     "cenci-sandbox:latest|<FAKE_IMAGE_ID default>".
 //	                     Must stay byte-parallel with engine_test.go's
-//	                     buildEngine and sandbox_open_test.go's
+//	                     buildEngine and sandbox_clitest_helpers_test.go's
 //	                     writeScriptedRuntime (#493 keep-in-sync note).
 //	FAKE_INSPECT_IMAGE_EXIT — the per-container combined probe's exit code
 //	                     (default 0); nonzero simulates that probe failing.
@@ -180,7 +180,7 @@ import (
 //	                     own exit code — deliberately NOT FAKE_INFO_EXIT, so
 //	                     a test can fail just the memory query without also
 //	                     failing dind's sysbox-registration probe. Must stay
-//	                     byte-parallel with sandbox_open_test.go's
+//	                     byte-parallel with sandbox_clitest_helpers_test.go's
 //	                     writeScriptedRuntime (#493 keep-in-sync note).
 //	FAKE_CONTAINER_LIMITS — (#1216) `inspect --format ...` stdout for the
 //	                     container-limits probe (the attach-path drift check
@@ -198,7 +198,7 @@ import (
 //	                     existing attach/diagnose tests stay drift-free).
 //	                     FAKE_CONTAINER_LIMITS_EXIT (default 0) is that
 //	                     probe's exit code. Must stay byte-parallel with
-//	                     sandbox_open_test.go's writeScriptedRuntime (#493).
+//	                     sandbox_clitest_helpers_test.go's writeScriptedRuntime (#493).
 //	FAKE_MEMORY_EVENTS — (#1216) `exec <name> /bin/cat
 //	                     /sys/fs/cgroup/memory.events` stdout (Diagnose's
 //	                     cgroup OOM-kill count), told apart by the
@@ -208,7 +208,7 @@ import (
 //	                     (default 0) is that exec's exit code — nonzero
 //	                     simulates a container that is not running or a
 //	                     cgroup file that cannot be read. Must stay
-//	                     byte-parallel with sandbox_open_test.go's
+//	                     byte-parallel with sandbox_clitest_helpers_test.go's
 //	                     writeScriptedRuntime (#493).
 //
 // Every FAKE_<VERB>[_EXIT] var above also has a FAKE_<VERB>_DOCKER/
@@ -244,7 +244,7 @@ esac
 # fv NAME DEFAULT prints FAKE_<NAME>_<rt> when that exact var is set (even to
 # an empty string), else FAKE_<NAME> when set, else DEFAULT — see the doc
 # comment above for why (#629 dual-runtime test-fake keying). Must stay
-# byte-parallel with sandbox_open_test.go's writeScriptedRuntime fv/fe/fset.
+# byte-parallel with sandbox_clitest_helpers_test.go's writeScriptedRuntime fv/fe/fset.
 fv() {
   n=$1; d=$2
   if [ -n "$rt" ]; then

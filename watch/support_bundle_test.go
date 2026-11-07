@@ -28,7 +28,7 @@ import (
 // writing a top-level "cenci-support-bundle-<UTCstamp>/" dir into a .tar.gz.
 // These black-box tests drive the real built `cenci` binary as a subprocess
 // via writeScriptedRuntimes/writeAssetFixture (shared with
-// sandbox_open_test.go/diagnose_test.go, same package).
+// sandbox_clitest_helpers_test.go/diagnose_test.go, same package).
 
 // fakePS is a scripted `ps -a` listing with one running and one exited
 // sandbox container across both agents, used by every support-bundle test

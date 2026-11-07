@@ -17,7 +17,7 @@ import (
 // merge into the secretEnvSet seam (secretenv.go): the tables are unit-level on
 // purpose, because driving every malformed-config class through a launch would
 // repeat the same exit-1 path dozens of times; the end-to-end exit codes and
-// empty runtime call logs are pinned in watch/sandbox_open_test.go and
+// empty runtime call logs are pinned in watch/open_test.go and
 // watch/audit_cmd_test.go.
 
 // TestMain pins XDG_CONFIG_HOME to an empty temp dir for the whole package, so

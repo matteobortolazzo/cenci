@@ -58,7 +58,7 @@ func dualRuntimeAgentEngine(t *testing.T) (e *Engine, dockerLog, podmanLog strin
 // monolith image as present/current, the claude agent-CLI volume as already
 // existing and populated — the `agent-cli.sh status claude` probe
 // (ticket #710's agent-cli.sh swap; must stay byte-parallel with
-// engine_test.go's volumeCheckEngine and sandbox_open_test.go's
+// engine_test.go's volumeCheckEngine and sandbox_clitest_helpers_test.go's
 // writeScriptedRuntime per watch/docs/test-strategy.md #493) reports a
 // fresh last_success (computed at fixture-write time, "now") so
 // TestEnsureAgentVolume_ViaWithRuntime_BootstrapsUnderSpecifiedRuntimeOnly's

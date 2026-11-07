@@ -803,11 +803,11 @@ func TestDryRun_DeterminateWiring_LiveSocketIncludesMountsAndClearsUnknownFlag(t
 // posture) must reject/attach identically in both. At least one reject case
 // and one reuse case are mirrored here (dryrun_test.go:437-459's pattern);
 // the full case matrix (all four rejections plus both compatible-reuse
-// paths) lives in sandbox_open_test.go's black-box `cenci open` tests.
+// paths) lives in open_test.go's black-box `cenci open` tests.
 
 // TestDryRun_RunningContainerWithHostSocketMount_RejectsEvenWithCompatibleAgentMount
 // mirrors TestOpen_RunningContainerWithHostSocketMount_RejectsEvenWithCompatibleAgentMount
-// (sandbox_open_test.go): a running container exposing a host Docker/Podman
+// (open_test.go): a running container exposing a host Docker/Podman
 // socket must never be previewed as attach-only, even though its shared
 // agent-CLI mount is otherwise compatible.
 func TestDryRun_RunningContainerWithHostSocketMount_RejectsEvenWithCompatibleAgentMount(t *testing.T) {
@@ -840,7 +840,7 @@ func TestDryRun_RunningContainerWithHostSocketMount_RejectsEvenWithCompatibleAge
 }
 
 // TestDryRun_CompatibleDindContainer_RendersAttachOnlyWithNoCreateArgv mirrors
-// TestOpenDind_CompatibleDindContainer_ReusesSuccessfully (sandbox_open_test.go):
+// TestOpenDind_CompatibleDindContainer_ReusesSuccessfully (open_test.go):
 // a running container whose derived DinD posture matches the requested
 // --dind must still preview as attach-only, exactly like a real Launch would
 // reuse it.
@@ -876,7 +876,7 @@ func TestDryRun_CompatibleDindContainer_RendersAttachOnlyWithNoCreateArgv(t *tes
 }
 
 // TestDryRun_MalformedReusePostureOutput_Rejects mirrors
-// TestOpen_MalformedReusePostureHeader_Rejects (sandbox_open_test.go): a
+// TestOpen_MalformedReusePostureHeader_Rejects (open_test.go): a
 // scripted docker fake answering the reuse-posture inspect with a header
 // that exits 0 but doesn't match the expected "<label>|<runtime>|<dindenv>"
 // shape must reject the reuse attempt rather than silently falling through
@@ -917,7 +917,7 @@ func TestDryRun_MalformedReusePostureOutput_Rejects(t *testing.T) {
 // across the combined create-argv-build + WriteText output -- proving the
 // Stderr=io.Discard clone DryRun hands to Audit (see dryrun.go) actually
 // avoids a double warning. Mirrors
-// TestOpenHostNetwork_AddsNetworkHostWithWarning (sandbox_open_test.go) at
+// TestOpenHostNetwork_AddsNetworkHostWithWarning (open_test.go) at
 // the launcher level.
 func TestDryRun_HostNetwork_AddsNetworkHostAndWarnsOnce(t *testing.T) {
 	repo := newAuditTestRepo(t)
@@ -954,7 +954,7 @@ func TestDryRun_HostNetwork_AddsNetworkHostAndWarnsOnce(t *testing.T) {
 
 // TestDryRun_Dind_SuccessfulPreviewShowsSysboxRuntimeWithNoSideEffects
 // mirrors TestOpenDind_ViaRepoConfig_AddsSysboxRuntimeVolumeAndEnv
-// (sandbox_open_test.go) but for a successful `--dry-run --dind` preview: a
+// (open_test.go) but for a successful `--dry-run --dind` preview: a
 // scripted docker fake answers dindPreflight's sysbox-runc registration
 // probe via FAKE_INFO_RUNTIMES, and the create argv shows
 // "--runtime=sysbox-runc" with zero container/volume side effects -- only

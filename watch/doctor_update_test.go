@@ -13,7 +13,7 @@ import (
 // -- fakes ---------------------------------------------------------------
 //
 // These black-box tests exercise the real built `cenci` binary (see
-// sandbox_open_test.go for the shared itoa helper and internal/exectest for
+// sandbox_clitest_helpers_test.go for the shared itoa helper and internal/exectest for
 // the shared WriteExecutable/ShellQuote helpers) with PATH overridden to a
 // temp dir containing a fake `cenci-installer`
 // wrapper script that records the argv it receives and exits with a given
