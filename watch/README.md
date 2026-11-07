@@ -3277,7 +3277,7 @@ make plugin-bin
 claude --plugin-dir /path/to/watch/plugin
 ```
 
-### Daemon lifecycle (`cenci daemon start|stop|restart|status|hook-health`)
+### Daemon lifecycle (`cenci daemon start|stop|restart|status|hook-health|model-switches`)
 
 When you install the binary by hand, start the daemon once (the marketplace plugin
 does this for you via `EnsureRunning`, which spawns `cenci daemon start` detached
@@ -3322,6 +3322,7 @@ cenci daemon stop      # SIGTERM, then SIGKILL if still alive after a few second
 cenci daemon restart   # stop (if running), then spawn a fresh detached daemon and wait for it to come up
 cenci daemon status    # running/not-running + PID; exits 1 when not running
 cenci daemon hook-health  # read-only hook-delivery diagnostics; exits 0 whenever it renders
+cenci daemon model-switches [--session <id>]  # read-only Claude Code model switches of a session; exit 0/1/2
 ```
 
 `daemon stop` determines liveness via the same event-socket dial `EnsureRunning`
@@ -3351,8 +3352,8 @@ file is always removed once it's known stale.
 | `-symbol-idle` | `~` | Symbol shown in status bar indicator |
 
 (Flags above apply to `daemon start`; `stop`/`restart`/`status`/`hook-health` take no
-flags — they always resolve the default socket/PID/state paths. An extra argument or
-flag is a usage error, exit 2.)
+flags — they always resolve the default socket/PID/state paths — and `model-switches`
+takes only `--session`. An extra argument or flag is a usage error, exit 2.)
 
 `CENCI_LOG_JSON=1` sets `-json`'s default without passing the flag; an
 explicit `-json`/`-json=false` on the command line always overrides the
@@ -3428,6 +3429,54 @@ symlink it gives an `ln -sf` command (with `sudo` for `/usr/local/bin/cenci`); f
 regular file it says to remove it or replace it with a link to `~/.local/bin/cenci`.
 The installer never removes or overwrites that file, and none of these warnings fail
 the install or `cenci doctor`.
+
+#### Model switches (`cenci daemon model-switches`)
+
+Claude Code fires a `PostModelSwitch` hook whenever the session model changes,
+including the automatic fallback it applies to a flagged request (the payload's
+`source` is `auto`). `cenci notify -agent claude` records each switch, and
+`cenci daemon model-switches` reads them back, so an unattended run's model change
+is visible without reading the transcript. Codex and OpenCode do not register the
+hook and never record.
+
+```bash
+cenci daemon model-switches                  # the session in $CLAUDE_CODE_SESSION_ID
+cenci daemon model-switches --session <id>   # an explicit session (wins over the environment)
+```
+
+| Exit | Stdout | Meaning |
+|------|--------|---------|
+| `0` | one line per switch, then `Model switch: +<n> more` past the cap | The session's switches. A valid session with no record prints nothing and still exits 0. |
+| `1` | exactly `Model switch status unknown` | The store cannot answer: no or invalid session id, an untrusted store directory, a corrupt record or a leftover `.incomplete` marker. A reason with no path goes to stderr. Unknown is never "no switch". A failed stdout write also exits `1` with a stderr reason and no guaranteed stdout, so a caller writes the literal line itself. |
+| `2` | | Usage error (an extra argument, an unknown flag, `--session` without a value). |
+
+Line forms: `Model switch: <from> → <to> (main session)` or `(subagent <agent_type>)`,
+with ` — fallback` appended only when the payload's `source` is `auto` (any other or
+missing source keeps the neutral label; an explicit `/model` switch is not labelled a
+fallback). An invalid model id (empty, longer than 128 characters or with a character
+outside `[A-Za-z0-9._:\[\]-]`) is never stored or printed: the switch is kept with the
+placeholder `(invalid model id)`, and an invalid subagent type prints `subagent unknown`.
+
+Records live in `$XDG_STATE_HOME/cenci/model-switch/` (default
+`~/.local/state/cenci/model-switch/`; a relative `$XDG_STATE_HOME` falls back to the
+default), a `0700` directory with one `0600` file per session id. A file holds up to 8
+lines `<epoch> <source> <from> <to> <main|subagent:<type>>` and an optional `more <n>`
+overflow line. Writers hold a whole-store lock on `.lock`, replace each file through a
+temp file and rename, drop files older than 14 days and keep at most 256 sessions. A
+write that fails leaves `<session>.incomplete`, which the reader reports as unknown.
+Like hook health, a symlinked, foreign-owned or group/other-writable directory is never
+trusted, and the reader creates, repairs and removes nothing. The record is kept per
+filesystem: inside a sandbox it lives in the container's own state directory, the same
+place the implement pipeline's Phase 9 reads it from, and it survives a daemon restart
+and the paneless-session TTL because the daemon is not involved.
+
+The daemon keeps its own in-memory copy (the last 8 per session, plus a count) for
+display only. A `PostModelSwitch` event never changes a session's status. `cenci
+status` prints the switches indented under their session, and `cenci widget-json`
+carries a top-level `model_switches` array (one entry per session with switches:
+`session`, `window_index`, `window_name`, `switches[]` of `{from_model, to_model,
+source, subagent, agent_type, fallback}` and `more`), omitted when empty; the tooltip is
+unchanged.
 
 ### Human status overview (`cenci status`)
 
@@ -3702,6 +3751,7 @@ never renamed, removed, or repurposed, and unknown fields must be ignored (Go's
 | `PreToolUse` (when NeedInput) | Running | Permission was granted |
 | `Stop` | Done | Claude finished responding |
 | `Stop` (background work in flight) | Running | Turn ended, but a backgrounded task or a pending wakeup can still resume it |
+| `PostModelSwitch` | (unchanged) | The model changed, possibly by Claude Code's own fallback; recorded for display and in the hook-side store, never a status change (see [Model switches](#model-switches-cenci-daemon-model-switches)) |
 | `SessionEnd` | Remove | Restore window, clean up |
 
 A `Stop` that reports in-flight background work — a backgrounded subagent or
@@ -3876,7 +3926,7 @@ call maps the `$TMUX_PANE` to the correct window — and status consumers such a
 see it on their next poll. Custom `-event-socket` instances are never started
 automatically. To restart deliberately (e.g. after a config change), use `cenci
 daemon restart` instead of waiting for the next hook — see
-[Daemon lifecycle](#daemon-lifecycle-cenci-daemon-startstoprestartstatushook-health) above.
+[Daemon lifecycle](#daemon-lifecycle-cenci-daemon-startstoprestartstatushook-healthmodel-switches) above.
 Until a window's next hook event the daemon does not track it, so the
 [finished-ticket window cleanup](#automatic-cleanup-of-finished-tickets) skips it.
 

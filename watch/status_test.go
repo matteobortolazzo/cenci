@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/ipc"
+	"github.com/matteobortolazzo/cenci/watch/v2/pkg/watch"
 )
 
 // TestWidgetJSONAndWaybarSubcommandsBothRoute covers the widget-json split
@@ -495,5 +496,167 @@ func TestFormatEquivalence_WidgetJSONTooltipMatchesHumanStatusLine(t *testing.T)
 	}
 	if !strings.Contains(string(statusOut), wantLine) {
 		t.Errorf("status: expected %q in %q", wantLine, statusOut)
+	}
+}
+
+// --- Model switches (#1179) -------------------------------------------------
+
+// broadcastModelSwitchSnapshot serves one snapshot whose first window carries
+// two model switches and an overflow count, and returns the socket path.
+func broadcastModelSwitchSnapshot(t *testing.T) string {
+	t.Helper()
+	socket := filepath.Join(t.TempDir(), "ms.sock")
+	srv, err := ipc.NewServer(socket)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	t.Cleanup(func() { _ = srv.Close() })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go srv.Accept(ctx)
+	time.Sleep(20 * time.Millisecond)
+
+	srv.Broadcast(ipc.StateSnapshot{
+		Windows: []ipc.WindowState{
+			{
+				Session: "sess-a", WindowIndex: "0", WindowName: "77-implement", TaskName: "implement thing", Agent: "claude", Status: "running",
+				ModelSwitches: []watch.ModelSwitch{
+					{FromModel: "claude-sonnet-5-5", ToModel: "claude-opus-5-5", Source: "auto", Fallback: true},
+					{FromModel: "claude-opus-5-5", ToModel: "claude-sonnet-5-5", Source: "sdk", Subagent: true, AgentType: "cenci:reviewer"},
+				},
+				ModelSwitchesMore: 4,
+			},
+			{Session: "sess-a", WindowIndex: "1", WindowName: "78-plan", TaskName: "plan thing", Agent: "claude", Status: "idle"},
+		},
+		Summary: ipc.StatusSummary{Total: 2, Running: 1, Idle: 1},
+	})
+	time.Sleep(20 * time.Millisecond)
+	return socket
+}
+
+// TestStatusSubcommand_HumanReadable_ShowsModelSwitchesUnderTheSession asserts
+// AC6's human half: the `<previous> → <new>` lines (with attribution, the
+// fallback label only on the automatic switch, and the `+<n> more` overflow)
+// are printed indented under the session that has them, and only there.
+func TestStatusSubcommand_HumanReadable_ShowsModelSwitchesUnderTheSession(t *testing.T) {
+	socket := broadcastModelSwitchSnapshot(t)
+
+	cmd := exec.Command(binaryPath, "status",
+		"-socket", socket,
+		"-event-socket", filepath.Join(t.TempDir(), "nope-events.sock"))
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("status: %v\n%s", err, output)
+	}
+
+	want := []string{
+		"  sess-a:0 - implement thing (claude) (running)",
+		"    Model switch: claude-sonnet-5-5 → claude-opus-5-5 (main session) — fallback",
+		"    Model switch: claude-opus-5-5 → claude-sonnet-5-5 (subagent cenci:reviewer)",
+		"    Model switch: +4 more",
+		"  sess-a:1 - plan thing (claude) (idle)",
+	}
+	lines := strings.Split(string(output), "\n")
+	next := 0
+	for _, line := range lines {
+		if next < len(want) && line == want[next] {
+			next++
+		}
+	}
+	if next != len(want) {
+		t.Errorf("expected these lines in order, matched %d of %d (first missing: %q); got:\n%s", next, len(want), want[next], output)
+	}
+	if strings.Count(string(output), "Model switch:") != 3 {
+		t.Errorf("expected exactly 3 model switch lines (the idle session has none), got:\n%s", output)
+	}
+}
+
+// TestStatusSubcommand_HumanReadable_ResanitizesModelSwitchesAtRender pins that
+// the human renderer does not trust the snapshot: a switch whose model or agent
+// type carries an escape sequence renders the placeholder, never the raw bytes.
+func TestStatusSubcommand_HumanReadable_ResanitizesModelSwitchesAtRender(t *testing.T) {
+	socket := filepath.Join(t.TempDir(), "ms.sock")
+	srv, err := ipc.NewServer(socket)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	t.Cleanup(func() { _ = srv.Close() })
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go srv.Accept(ctx)
+	time.Sleep(20 * time.Millisecond)
+
+	srv.Broadcast(ipc.StateSnapshot{
+		Windows: []ipc.WindowState{{
+			Session: "sess-a", WindowIndex: "0", WindowName: "77-implement", TaskName: "implement thing", Agent: "claude", Status: "running",
+			ModelSwitches: []watch.ModelSwitch{
+				{FromModel: "opus\x1b[31mevil", ToModel: "claude-opus-5-5", Source: "auto", Fallback: true},
+				{FromModel: "claude-opus-5-5", ToModel: "claude-sonnet-5-5", Subagent: true, AgentType: "bad\x1b]0;title\x07type"},
+			},
+		}},
+		Summary: ipc.StatusSummary{Total: 1, Running: 1},
+	})
+	time.Sleep(20 * time.Millisecond)
+
+	output, err := exec.Command(binaryPath, "status",
+		"-socket", socket,
+		"-event-socket", filepath.Join(t.TempDir(), "nope-events.sock")).CombinedOutput()
+	if err != nil {
+		t.Fatalf("status: %v\n%s", err, output)
+	}
+	if strings.ContainsAny(string(output), "\x1b\x07") || strings.Contains(string(output), "evil") || strings.Contains(string(output), "title") {
+		t.Errorf("raw snapshot bytes reached the terminal: %q", output)
+	}
+	for _, want := range []string{
+		"    Model switch: (invalid model id) → claude-opus-5-5 (main session) — fallback",
+		"    Model switch: claude-opus-5-5 → claude-sonnet-5-5 (subagent unknown)",
+	} {
+		if !strings.Contains(string(output), want+"\n") {
+			t.Errorf("missing line %q in:\n%s", want, output)
+		}
+	}
+}
+
+// TestWidgetJSON_ExposesModelSwitchesField asserts AC6's widget half through
+// the real binary: widget-json carries the top-level model_switches array.
+func TestWidgetJSON_ExposesModelSwitchesField(t *testing.T) {
+	socket := broadcastModelSwitchSnapshot(t)
+
+	out, err := exec.Command(binaryPath, "widget-json", "-socket", socket).CombinedOutput()
+	if err != nil {
+		t.Fatalf("widget-json: %v\n%s", err, out)
+	}
+	var decoded struct {
+		ModelSwitches []struct {
+			Session     string `json:"session"`
+			WindowIndex string `json:"window_index"`
+			WindowName  string `json:"window_name"`
+			More        int    `json:"more"`
+			Switches    []struct {
+				FromModel string `json:"from_model"`
+				ToModel   string `json:"to_model"`
+				Source    string `json:"source"`
+				Subagent  bool   `json:"subagent"`
+				AgentType string `json:"agent_type"`
+				Fallback  bool   `json:"fallback"`
+			} `json:"switches"`
+		} `json:"model_switches"`
+	}
+	if err := json.Unmarshal(out, &decoded); err != nil {
+		t.Fatalf("decode widget-json output: %v\n%s", err, out)
+	}
+	if len(decoded.ModelSwitches) != 1 {
+		t.Fatalf("expected 1 model_switches entry, got %d: %s", len(decoded.ModelSwitches), out)
+	}
+	entry := decoded.ModelSwitches[0]
+	if entry.Session != "sess-a" || entry.WindowIndex != "0" || entry.WindowName != "77-implement" || entry.More != 4 || len(entry.Switches) != 2 {
+		t.Errorf("entry = %+v", entry)
+	}
+	if first := entry.Switches[0]; first.FromModel != "claude-sonnet-5-5" || first.ToModel != "claude-opus-5-5" || !first.Fallback {
+		t.Errorf("first switch = %+v", first)
+	}
+	if second := entry.Switches[1]; !second.Subagent || second.AgentType != "cenci:reviewer" {
+		t.Errorf("second switch = %+v", second)
 	}
 }

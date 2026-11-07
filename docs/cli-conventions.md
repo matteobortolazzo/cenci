@@ -77,6 +77,7 @@ cenci <verb> [subverb] [args] [flags]
 | Sockets | `$CENCI_SOCKET_DIR` (verbatim) → `$XDG_STATE_HOME/cenci/run` (default `~/.local/state/cenci/run`) → `/tmp/cenci-<uid>/cenci` |
 | Hook health records | `$XDG_STATE_HOME/cenci/hook-health/` (default `~/.local/state/cenci/hook-health/`): one `<category>` file plus `last-ok`, each `<unix-epoch> <client>`; read by `cenci daemon hook-health` |
 | tmux server socket | `cenci` (`tmux -L cenci`), loaded with `-f "${XDG_CONFIG_HOME:-$HOME/.config}/cenci/tmux.conf"` (the installer-managed copy of `watch/plugin/tmux/tmux.conf`) |
+| Model switch records | `$XDG_STATE_HOME/cenci/model-switch/` (default `~/.local/state/cenci/model-switch/`): one `<session-id>` file of up to 8 `<unix-epoch> <source> <from> <to> <main\|subagent:<type>>` lines plus an optional `more <n>` line, and a `<session-id>.incomplete` marker after a failed write; written by `cenci notify` (Claude Code only) on a `PostModelSwitch` hook, read by `cenci daemon model-switches [--session <id>]` (session id defaults to `$CLAUDE_CODE_SESSION_ID`) |
 | Readiness marker | `/tmp/cenci-ready` (inside the container) |
 | Per-repo Dockerfile | `<repo-root>/.cenci/Dockerfile` |
 

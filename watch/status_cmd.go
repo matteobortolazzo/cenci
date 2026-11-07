@@ -13,6 +13,7 @@ import (
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/dispatch"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/frontend/status"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/ipc"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/modelswitch"
 	"github.com/matteobortolazzo/cenci/watch/v2/pkg/watch"
 )
 
@@ -104,6 +105,16 @@ func renderHumanStatus(info daemon.StatusInfo, socketPath string) string {
 		fmt.Fprintf(&b, "sessions (%d):\n", len(snap.Windows))
 		for _, w := range snap.Windows {
 			fmt.Fprintf(&b, "  %s\n", status.FormatSessionLine(w, status.Identity))
+			for _, sw := range w.ModelSwitches {
+				// The snapshot comes from a socket, so the values are
+				// sanitized again before they reach the terminal.
+				fmt.Fprintf(&b, "    %s\n", modelswitch.FormatLine(
+					modelswitch.SanitizeModel(sw.FromModel), modelswitch.SanitizeModel(sw.ToModel),
+					sw.Subagent, modelswitch.SanitizeAgentType(sw.AgentType), sw.Fallback))
+			}
+			if w.ModelSwitchesMore > 0 {
+				fmt.Fprintf(&b, "    %s\n", modelswitch.FormatMore(w.ModelSwitchesMore))
+			}
 		}
 	}
 
