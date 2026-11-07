@@ -3042,8 +3042,9 @@ missing file from an unreadable/stat-error one), `applicable` (whether this
 credential type applies to the selected `--agent`), and `staged` (whether it
 is actually staged into this session by the real mount plan). Each `env`
 entry carries `name` and `secret` (whether the name is classified
-secret-bearing, e.g. `CONTEXT7_API_KEY`), matching how `forwardedEnv` is
-already classified.
+secret-bearing; no built-in secret is a create-time name today, so this is a
+guard that still flags one if it ever appears there), matching how
+`forwardedEnv` is already classified.
 
 **Migration notes (additive, backward compatible):** `basis` and
 `inspectWarning` are new top-level fields (ticket #627) — existing
@@ -3061,6 +3062,8 @@ distinguishes a genuinely missing file (`"missing"`) from an
 unreadable/stat-error one (`"error"`); both previously collapsed into
 `present:false`. Create-time `env` entries now mark secret-bearing names
 with `secret:true`, the same classification forwarded exec env already had.
+`CONTEXT7_API_KEY` is no longer a create-time variable, so it is reported
+under `forwardedEnv`, not `env`; the key shapes are unchanged.
 
 Like `diagnose`, `audit` is read-only and exits 0 on a successful render;
 only usage errors (e.g. `--dind` with `--no-dind`, or `--dind` outside a

@@ -2,9 +2,11 @@ package main_test
 
 import (
 	"encoding/json"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -143,10 +145,62 @@ func TestAudit_JSONOutput_HasProbeApplicableStagedFields(t *testing.T) {
 	}
 }
 
-// TestAudit_JSONOutput_EnvSecretFlagsContextKeyTrue covers create-time env
-// names getting the same explicit secret classification as forwarded exec
-// env (#598): CONTEXT7_API_KEY must be reported with "secret":true, and its
-// VALUE must never appear anywhere in the JSON output.
+// TestAudit_JSONOutput_KeyShapePinned pins the `cenci audit --json` key shape
+// for `--agent claude` (#1201 AC: "no change to the audit --json field shape"):
+// the top-level key set and the key set of every `env` and `forwardedEnv`
+// entry are asserted as explicit expected lists, so a refactor of how the
+// secret-name set is resolved cannot silently add, drop or rename a key.
+// CONTEXT7_API_KEY is set so forwardedEnv carries a secret entry whose key set
+// is checked alongside the non-secret ones.
+func TestAudit_JSONOutput_KeyShapePinned(t *testing.T) {
+	repo := auditRepoDir(t)
+	home := t.TempDir()
+	cmd := exec.Command(binaryPath, "audit", "--agent", "claude", "--json")
+	cmd.Env = append(auditSecurityEnv(t, home, t.TempDir()), "CONTEXT7_API_KEY=sentinel-keyshape-1201")
+	cmd.Dir = repo
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("cenci audit --json: %v\n%s", err, output)
+	}
+
+	var parsed map[string]any
+	if err := json.Unmarshal(output, &parsed); err != nil {
+		t.Fatalf("cenci audit --json produced invalid JSON: %v\noutput:\n%s", err, output)
+	}
+
+	wantTop := []string{
+		"agent", "basis", "boundaryWeakenings", "credentialSources", "dind",
+		"env", "forwardedEnv", "image", "mounts", "network", "repoRoot",
+		"reseedCreds", "scope", "volumes", "workspace",
+	}
+	if got := slices.Sorted(maps.Keys(parsed)); !slices.Equal(got, wantTop) {
+		t.Errorf("top-level keys = %v, want %v", got, wantTop)
+	}
+
+	wantEntry := []string{"name", "secret"}
+	for _, field := range []string{"env", "forwardedEnv"} {
+		entries, ok := parsed[field].([]any)
+		if !ok || len(entries) == 0 {
+			t.Fatalf("%s = %v, want a non-empty array", field, parsed[field])
+		}
+		for i, e := range entries {
+			obj, ok := e.(map[string]any)
+			if !ok {
+				t.Fatalf("%s[%d] = %v, want an object", field, i, e)
+			}
+			if got := slices.Sorted(maps.Keys(obj)); !slices.Equal(got, wantEntry) {
+				t.Errorf("%s[%d] keys = %v, want %v", field, i, got, wantEntry)
+			}
+		}
+	}
+}
+
+// TestAudit_JSONOutput_EnvSecretFlagsContextKeyTrue covers the secret
+// classification of CONTEXT7_API_KEY in the audit JSON (#598, reshaped by
+// #1201): the key is no longer forwarded at container creation, so it is
+// ABSENT from the create-time "env" list; it is forwarded per exec, so it is
+// PRESENT in "forwardedEnv" with "secret":true; and its VALUE must never
+// appear anywhere in the JSON output.
 func TestAudit_JSONOutput_EnvSecretFlagsContextKeyTrue(t *testing.T) {
 	repo := auditRepoDir(t)
 	home := t.TempDir()
@@ -161,30 +215,34 @@ func TestAudit_JSONOutput_EnvSecretFlagsContextKeyTrue(t *testing.T) {
 		t.Fatalf("cenci audit --json: %v\n%s", err, output)
 	}
 
+	type envEntry struct {
+		Name   string `json:"name"`
+		Secret bool   `json:"secret"`
+	}
 	var parsed struct {
-		Env []struct {
-			Name   string `json:"name"`
-			Secret bool   `json:"secret"`
-		} `json:"env"`
+		Env          []envEntry `json:"env"`
+		ForwardedEnv []envEntry `json:"forwardedEnv"`
 	}
 	if err := json.Unmarshal(output, &parsed); err != nil {
 		t.Fatalf("cenci audit --json produced invalid JSON: %v\noutput:\n%s", err, output)
 	}
 
-	var contextEnv *struct {
-		Name   string `json:"name"`
-		Secret bool   `json:"secret"`
-	}
-	for i := range parsed.Env {
-		if parsed.Env[i].Name == "CONTEXT7_API_KEY" {
-			contextEnv = &parsed.Env[i]
+	for _, e := range parsed.Env {
+		if e.Name == "CONTEXT7_API_KEY" {
+			t.Errorf("env must not carry CONTEXT7_API_KEY (no create-time forward, #1201), got %+v", parsed.Env)
 		}
 	}
-	if contextEnv == nil {
-		t.Fatalf("expected CONTEXT7_API_KEY in env, got %+v", parsed.Env)
+	var forwarded *envEntry
+	for i := range parsed.ForwardedEnv {
+		if parsed.ForwardedEnv[i].Name == "CONTEXT7_API_KEY" {
+			forwarded = &parsed.ForwardedEnv[i]
+		}
 	}
-	if !contextEnv.Secret {
-		t.Errorf("env CONTEXT7_API_KEY secret = false, want true")
+	if forwarded == nil {
+		t.Fatalf("expected CONTEXT7_API_KEY in forwardedEnv, got %+v", parsed.ForwardedEnv)
+	}
+	if !forwarded.Secret {
+		t.Errorf("forwardedEnv CONTEXT7_API_KEY secret = false, want true")
 	}
 	if strings.Contains(string(output), contextSecret) {
 		t.Errorf("cenci audit --json leaked the CONTEXT7_API_KEY sentinel value:\n%s", output)

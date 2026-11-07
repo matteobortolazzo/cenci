@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -3760,15 +3761,28 @@ func TestOpenClaude_NeverForwardsProviderKeys(t *testing.T) {
 	}
 }
 
-// TestOpenClaude_ForwardsContext7KeyValuelessAtCreateTime pins ticket #759's
-// create-path fix: unlike the provider API keys (per-exec only),
-// CONTEXT7_API_KEY is also forwarded at container-create time
-// (Engine.assembleEnv), but its VALUE must never land in the create-time
-// `run --name` argv — only the bare "-e CONTEXT7_API_KEY" token, letting the
-// entrypoint's own inherited environment supply the value. openTestEnv
-// scrubs CONTEXT7_API_KEY= from the inherited env, and os/exec keeps the
-// last duplicate key, so the sentinel is appended explicitly here.
-func TestOpenClaude_ForwardsContext7KeyValuelessAtCreateTime(t *testing.T) {
+// hasBareEnvToken reports whether the space-joined argv line carries the
+// value-less `-e NAME` pair for name (an exact-token match, so the
+// value-bearing `-e NAME=value` form never counts).
+func hasBareEnvToken(line, name string) bool {
+	args := strings.Fields(line)
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == "-e" && args[i+1] == name {
+			return true
+		}
+	}
+	return false
+}
+
+// TestOpenClaude_Context7KeyForwardedPerExecNeverAtCreateTime pins ticket
+// #1201: CONTEXT7_API_KEY has no container-side consumer outside the per-exec
+// agent session, so the create-time `run --name` argv must carry no mention of
+// it at all (it would land in `docker inspect` and the PID-1 environ for the
+// container's whole lifetime). The attach `exec -it` argv still carries the
+// bare `-e CONTEXT7_API_KEY` token (#759: never the value, never `NAME=`).
+// openTestEnv scrubs CONTEXT7_API_KEY= from the inherited env, and os/exec
+// keeps the last duplicate key, so the sentinel is appended explicitly here.
+func TestOpenClaude_Context7KeyForwardedPerExecNeverAtCreateTime(t *testing.T) {
 	fakeDir := t.TempDir()
 	callLog := writeScriptedRuntimes(t, fakeDir)
 	assets := writeAssetFixture(t)
@@ -3787,14 +3801,106 @@ func TestOpenClaude_ForwardsContext7KeyValuelessAtCreateTime(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected a container run, got calls:\n%s", strings.Join(lines, "\n"))
 	}
-	if !strings.Contains(runLine, "-e CONTEXT7_API_KEY") {
-		t.Errorf("create-time run args missing the bare -e CONTEXT7_API_KEY token; got:\n%s", runLine)
+	if strings.Contains(runLine, "CONTEXT7_API_KEY") {
+		t.Errorf("create-time run args must not mention CONTEXT7_API_KEY at all (#1201: no create-time forward); got:\n%s", runLine)
 	}
-	if strings.Contains(runLine, context7Secret) {
-		t.Errorf("create-time run args must never carry the CONTEXT7_API_KEY secret VALUE (readable via ps/docker inspect for the container's whole lifetime, #759); got:\n%s", runLine)
+
+	attach := attachLine(t, lines)
+	if !hasBareEnvToken(attach, "CONTEXT7_API_KEY") {
+		t.Errorf("attach exec args missing the bare -e CONTEXT7_API_KEY token; got:\n%s", attach)
 	}
-	if strings.Contains(runLine, "CONTEXT7_API_KEY=") {
-		t.Errorf("create-time run args must forward CONTEXT7_API_KEY value-less (bare -e NAME, #759); got:\n%s", runLine)
+	if strings.Contains(attach, "CONTEXT7_API_KEY=") {
+		t.Errorf("attach exec args must forward CONTEXT7_API_KEY value-less (bare -e NAME, #759); got:\n%s", attach)
+	}
+	if strings.Contains(attach, context7Secret) {
+		t.Errorf("attach exec args must never carry the CONTEXT7_API_KEY secret VALUE (#759); got:\n%s", attach)
+	}
+}
+
+// TestOpenClaude_EmptyContext7Key_NoTokenAnywhere pins the empty-string edge
+// case: a host CONTEXT7_API_KEY set to the empty string (openTestEnv's own
+// scrub value) is "unset" for forwarding, so neither the create argv nor the
+// attach argv carries a `-e CONTEXT7_API_KEY` token. (The per-agent matrix for
+// codex/opencode lives in the launcher package's unit test.)
+func TestOpenClaude_EmptyContext7Key_NoTokenAnywhere(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, _ := openTestEnv(t, fakeDir, assets)
+
+	cmd := exec.Command(binaryPath, "open", "ch")
+	cmd.Env = append(env, "CONTEXT7_API_KEY=")
+	cmd.Dir = t.TempDir()
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("open ch: %v\n%s", err, output)
+	}
+
+	lines := callLogLines(t, callLog)
+	runLine, ok := findLineWithPrefix(lines, "run --name ")
+	if !ok {
+		t.Fatalf("expected a container run, got calls:\n%s", strings.Join(lines, "\n"))
+	}
+	if hasBareEnvToken(runLine, "CONTEXT7_API_KEY") {
+		t.Errorf("create-time run args carry -e CONTEXT7_API_KEY with an empty host value; got:\n%s", runLine)
+	}
+	if attach := attachLine(t, lines); hasBareEnvToken(attach, "CONTEXT7_API_KEY") {
+		t.Errorf("attach exec args carry -e CONTEXT7_API_KEY with an empty host value; got:\n%s", attach)
+	}
+}
+
+// TestOpenAttachToRunning_StaleHostKey_PerExecHostStateWins documents the
+// accepted #1201 delta: a container created while the host CONTEXT7_API_KEY
+// was set, later attached to with the key unset, gets an attach argv that
+// carries no `-e CONTEXT7_API_KEY`. Per-exec host state wins, the same "set
+// and non-empty at exec time" gate the provider keys and CENCI_ATTENDED use.
+// The second launch attaches to the now-running container (FAKE_PS) with the
+// key scrubbed and must carry no CONTEXT7_API_KEY token. This pins only the
+// cenci-built argv: the fake runtime cannot model docker's Config.Env
+// inheritance, and only containers created after #1201 stop receiving a
+// create-time copy. A container created before this change keeps its old
+// create-time copy until `cenci sandbox stop <name>` and a relaunch.
+// Written as a characterization on the pre-change code (where nothing reads
+// a create-time copy at attach), and it must keep passing after the
+// create-time forward is deleted.
+func TestOpenAttachToRunning_StaleHostKey_PerExecHostStateWins(t *testing.T) {
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	assets := writeAssetFixture(t)
+	env, _, socketDir := openTestEnv(t, fakeDir, assets)
+	launchDir := t.TempDir()
+
+	// Launch 1: container absent, key set -> creates it and attaches.
+	create := exec.Command(binaryPath, "open", "ch")
+	create.Env = append(slices.Clone(env), "CONTEXT7_API_KEY=sk-context7-created-with")
+	create.Dir = launchDir
+	if output, err := create.CombinedOutput(); err != nil {
+		t.Fatalf("launch 1 (create): %v\n%s", err, output)
+	}
+	if _, ok := findLineWithPrefix(callLogLines(t, callLog), "run --name "); !ok {
+		t.Fatalf("launch 1 must create the container, got calls:\n%s", strings.Join(callLogLines(t, callLog), "\n"))
+	}
+
+	// Launch 2: container running, key unset on the host.
+	before := len(callLogLines(t, callLog))
+	attach := exec.Command(binaryPath, "open", "ch")
+	attach.Env = append(slices.Clone(env),
+		"CONTEXT7_API_KEY=",
+		"FAKE_PS=claude-cenci-default\n",
+		"FAKE_INSPECT_LABEL=detached",
+		"FAKE_INSPECT_MOUNTS=/workspace::/workspace\n/home/dev::/home/dev\n"+socketDir+"::/run/user/1000/cenci\n",
+	)
+	attach.Dir = launchDir
+	if output, err := attach.CombinedOutput(); err != nil {
+		t.Fatalf("launch 2 (attach to running): %v\n%s", err, output)
+	}
+
+	lines := callLogLines(t, callLog)[before:]
+	if _, ok := findLineWithPrefix(lines, "run --name "); ok {
+		t.Fatalf("launch 2 must reuse the running container, got calls:\n%s", strings.Join(lines, "\n"))
+	}
+	line := attachLine(t, lines)
+	if strings.Contains(line, "CONTEXT7_API_KEY") {
+		t.Errorf("attach with the host key unset must carry no CONTEXT7_API_KEY token (per-exec host state wins); got:\n%s", line)
 	}
 }
 

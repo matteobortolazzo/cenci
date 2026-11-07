@@ -686,7 +686,7 @@ Limits are fixed when a container is created and running containers are never re
 
 ### MCP servers
 
-MCP servers are picked up from project-scoped `.mcp.json` files inside the workspace (e.g. `./.mcp.json` under the project you're working on). The launcher forwards `CONTEXT7_API_KEY` from the host when set, so `.mcp.json` entries referencing `${CONTEXT7_API_KEY}` resolve correctly inside the container.
+MCP servers are picked up from project-scoped `.mcp.json` files inside the workspace (e.g. `./.mcp.json` under the project you're working on). The launcher forwards `CONTEXT7_API_KEY` from the host when set, once per agent session (`exec`) at each `cenci open` and never at container creation, so `.mcp.json` entries referencing `${CONTEXT7_API_KEY}` resolve correctly inside the agent session. A container created before this change keeps a stale create-time copy of the key until you run `cenci sandbox stop <name>` and relaunch.
 
 ### Azure CLI
 

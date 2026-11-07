@@ -228,6 +228,10 @@ type launchCtx struct {
 	// Only the config is resolved here; the runtime's total memory is queried
 	// later, in planArgvs' create branch, so an attach never depends on it.
 	Limits workloadLimits
+	// Secrets is the resolved secret env-name set (names only, never values),
+	// built once here so forwarding (assembleExecEnv) and dry-run redaction
+	// share one set (#1201).
+	Secrets secretEnvSet
 }
 
 // resolveLaunchContext resolves the shared preamble: agent/model
@@ -322,7 +326,7 @@ func (e *Engine) resolveLaunchContext(opts Options) (launchCtx, error) {
 		}
 	}
 
-	return launchCtx{Agent: agent, Model: model, Home: home, Scope: scope, DindOn: dindOn, AzureOn: azureOn, Plugins: plugins, Limits: limits}, nil
+	return launchCtx{Agent: agent, Model: model, Home: home, Scope: scope, DindOn: dindOn, AzureOn: azureOn, Plugins: plugins, Limits: limits, Secrets: resolveSecretEnvSet()}, nil
 }
 
 // planArgvs performs the read-only container-disposition probing
@@ -359,7 +363,7 @@ func (e *Engine) resolveLaunchContext(opts Options) (launchCtx, error) {
 // launch would rather than silently assuming "not running".
 func (e *Engine) planArgvs(ctx launchCtx, opts Options, cenciBin, socketDir string, cenciAvailable bool) (createArgv, attachArgv []string, attaching bool, err error) {
 	agentCmdArgs := buildAgentCmdArgs(ctx.Agent, ctx.Model)
-	execEnvArgs := assembleExecEnv(ctx.Agent)
+	execEnvArgs := assembleExecEnv(ctx.Agent, ctx.Secrets)
 	// Show the launch ID placeholder (and the container and runtime next to it,
 	// which are deterministic) only where a real launch would try to tag the
 	// pane (Q1); the random value is never generated here.
@@ -458,8 +462,9 @@ func (e *Engine) Launch(opts Options) error {
 	// container-lifetime create-time env/PID-1 environ), and scoped to the
 	// agent that can use them: OpenCode reads ANTHROPIC_API_KEY/
 	// OPENAI_API_KEY natively, Codex only OPENAI_API_KEY, and Claude neither
-	// (#490).
-	execEnvArgs := assembleExecEnv(ctx.Agent)
+	// (#490); CONTEXT7_API_KEY goes to every agent. The scoping lives in the
+	// resolved secret set (secretenv.go).
+	execEnvArgs := assembleExecEnv(ctx.Agent, ctx.Secrets)
 
 	// Printed before the create/attach decision below whenever the resolved
 	// plugin list differs from the default pair — never printed for the
@@ -670,31 +675,29 @@ func resolveAttendedFlag() string {
 // CENCI_SANDBOX marker/agent name, the resolved CENCI_ATTENDED planning
 // posture (#1087 — see resolveAttendedFlag; forwarded at exec time, not
 // container-create time, so a mid-session host toggle takes effect on the
-// next `cenci open` instead of needing the container recreated), and provider
-// API key passthroughs
-// forwarded per-exec only (never baked into the container-lifetime
-// create-time env/PID-1 environ) as bare "-e NAME" tokens (see
-// appendSecretEnvPassthrough; #759), scoped to the agent that can use them:
-// OpenCode reads ANTHROPIC_API_KEY/OPENAI_API_KEY natively, Codex only
-// OPENAI_API_KEY, and Claude neither (#490). Side-effect free, but it reads
-// host state — env vars, plus the fleet config behind resolveAttendedFlag
-// (#1087) — so its result depends on the host, not on agent alone. That is
-// exactly why both Launch and Audit's posture classification (audit.go) call
-// it rather than re-deriving this list independently: whatever the host says
-// right now, they stay byte-identical to each other.
-func assembleExecEnv(agent string) []string {
+// next `cenci open` instead of needing the container recreated), and the
+// secret API key passthroughs forwarded per-exec only (never baked into the
+// container-lifetime create-time env/PID-1 environ) as bare "-e NAME" tokens (see
+// appendSecretEnvPassthrough; #759). Which names those are, and which agent
+// each is scoped to, comes from the resolved secrets set (secretenv.go), in
+// its registration order: CONTEXT7_API_KEY for every agent (it is forwarded
+// here only, never at container creation, #1201), ANTHROPIC_API_KEY for
+// OpenCode, OPENAI_API_KEY for Codex and OpenCode (#490). Side-effect free,
+// but it reads host state — env vars, plus the fleet config behind
+// resolveAttendedFlag (#1087) — so its result depends on the host, not on
+// agent alone. That is exactly why both Launch and Audit's posture
+// classification (audit.go) call it rather than re-deriving this list
+// independently: whatever the host says right now, they stay byte-identical
+// to each other.
+func assembleExecEnv(agent string, secrets secretEnvSet) []string {
 	execEnvArgs := []string{"-u", "dev",
 		"-e", "TMUX_PANE=" + os.Getenv("TMUX_PANE"),
 		"-e", "CENCI_TMUX_SOCKET=" + hostTmuxSocket(),
 		"-e", "CENCI_SANDBOX=1",
 		"-e", "CENCI_SANDBOX_AGENT=" + agent,
 		"-e", attendedEnvName + "=" + resolveAttendedFlag()}
-	execEnvArgs = appendSecretEnvPassthrough(execEnvArgs, "CONTEXT7_API_KEY")
-	if agent == "opencode" {
-		execEnvArgs = appendSecretEnvPassthrough(execEnvArgs, "ANTHROPIC_API_KEY")
-	}
-	if agent == "codex" || agent == "opencode" {
-		execEnvArgs = appendSecretEnvPassthrough(execEnvArgs, "OPENAI_API_KEY")
+	for _, name := range secrets.forwardNames(agent) {
+		execEnvArgs = appendSecretEnvPassthrough(execEnvArgs, name)
 	}
 	return execEnvArgs
 }
@@ -1006,9 +1009,10 @@ func (e *Engine) assembleVolumeMounts(agent, cenciBin, socketDir string, cenciAv
 // joined in config order — always set, including for the default list, so
 // its absence in a running container is reserved as the legacy-container
 // signal, #1002), the HOST_UID/HOST_GID/WORKSPACE_SCOPE entrypoint contract,
-// the opt-in reseed-creds flag, and the COLORTERM/CONTEXT7_API_KEY
-// passthroughs. CONTEXT7_API_KEY is forwarded as a bare "-e NAME" token, not
-// "-e NAME=value" — see appendSecretEnvPassthrough (#759).
+// the opt-in reseed-creds flag, and the COLORTERM passthrough. It carries no
+// secret: provider and CONTEXT7_API_KEY secrets are forwarded per-exec only
+// (assembleExecEnv), never baked into the container-lifetime create-time env
+// (#759, #1201).
 func (e *Engine) assembleEnv(agent string, scope Scope, opts Options, dindOn bool, plugins []string) []string {
 	term := os.Getenv("TERM")
 	if term == "" {
@@ -1039,7 +1043,6 @@ func (e *Engine) assembleEnv(agent string, scope Scope, opts Options, dindOn boo
 	if v := os.Getenv("COLORTERM"); v != "" {
 		args = append(args, "-e", "COLORTERM="+v)
 	}
-	args = appendSecretEnvPassthrough(args, "CONTEXT7_API_KEY")
 
 	return args
 }
@@ -1400,8 +1403,10 @@ const inspectContainerSandboxPluginsTimeout = 3 * time.Second
 // The --format template filters server-side (only the CENCI_SANDBOX_PLUGINS
 // entry ever leaves the container runtime and crosses into this process),
 // rather than dumping the container's whole env and filtering in Go — the
-// full env can carry secrets (e.g. CONTEXT7_API_KEY) that have no business
-// transiting the launcher (#1002 security review).
+// full env can carry secrets (a container created before #1201 still holds
+// CONTEXT7_API_KEY in its create-time env, and any future create-time secret
+// would too) that have no business transiting the launcher (#1002 security
+// review).
 func (e *Engine) inspectContainerSandboxPlugins(name string) (value string, found, ok bool) {
 	out, err := runtimeOutput(inspectContainerSandboxPluginsTimeout, e.Runtime, "inspect", "--format",
 		`{{range .Config.Env}}{{if eq (index (split . "=") 0) "CENCI_SANDBOX_PLUGINS"}}{{.}}{{end}}{{end}}`, name)
