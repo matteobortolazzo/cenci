@@ -321,6 +321,8 @@ install fix for `unavailable`; a missing prerequisite is never a `skip` and neve
 The drift check is wired only into Claude Code's SessionStart (`hooks/hooks.json`), not
 `codex/hooks.json`. `cenci doctor` and the launcher's model shortcuts are out of scope here.
 
+The `lint-command` advisory (`hooks/scripts/check-lint-command.sh`) is wired only into Claude Code's SessionStart, like the config-staleness and agent-role-drift advisories, and not into `codex/hooks.json`.
+
 ## Hook launch failures
 
 Codex runs every hook as `$SHELL -lc "<command>"` with `${PLUGIN_ROOT}` substituted into the

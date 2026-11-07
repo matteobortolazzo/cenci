@@ -45,7 +45,7 @@ restoring autostashed edits is a failure too, even if Git's rebase command
 itself returned 0. Preserve the recovery stash until the edits are confirmed
 restored; never drop or blindly re-apply it.
 
-If rebase succeeds, rerun full build and tests, then lint (when `lintCommand` is set). An absent `lintCommand` skips the lint step cleanly — no error. If build, tests, or lint fail, stop and report the rebase-induced failure. Lint is an unconditional hard gate here, exactly like build/test: no PR is created if it fails.
+If rebase succeeds, rerun full build and tests, then lint (when `lintCommand` is set). An absent `lintCommand` skips the lint step cleanly — no error. If build, tests, or lint fail, stop and report the rebase-induced failure. Lint is an unconditional hard gate here, exactly like build/test: no PR is created if it fails. Run each from the project directory inside the worktree, per the working-directory contract in `skills/configure/references/config-schema.md`.
 
 A fetch/config error is reported as such, never treated as a conflict. If the
 helper fails because of conflicts, go to `## Rebase Conflicts` below.
