@@ -95,6 +95,24 @@ cenci marketplace and the three components (`cenci`, `cenci-watch`, and
 `cenci-sandbox`) for each detected client: it adds missing pieces and refreshes
 existing ones. It then puts the `cenci` binary and its `cn` launch alias on your PATH.
 
+### tmux defaults
+
+When `cenci-watch` is installed, the installer also offers cenci's tmux defaults
+(default yes; `--yes` and non-interactive runs accept it). They are a status-line theme
+for a dedicated tmux server named `cenci`, installed as a managed copy at
+`${XDG_CONFIG_HOME:-$HOME/.config}/cenci/tmux.conf`. Your own tmux server, sessions and
+tmux config are never touched. Pass `--tmux-defaults` to force the step or
+`--no-tmux-defaults` to skip it (the last flag given wins). Start the cenci server with:
+
+```bash
+tmux -L cenci -f "${XDG_CONFIG_HOME:-$HOME/.config}/cenci/tmux.conf" new-session -A -s cenci
+```
+
+The installer prints this command when the copy is installed, and `cenci doctor`
+reports its state. A copy you edited, or a file at that path that is not cenci-managed,
+is never overwritten or removed, even with `--tmux-defaults`: remove the file and
+re-run to get the shipped defaults back.
+
 ## 3. Verify
 
 `doctor` changes nothing and separates required platform dependencies, detected
@@ -256,6 +274,11 @@ replaces a stale running cenci daemon with the updated binary. Use
 `cenci update --lazyboards` to install or reconcile the optional board binary; an
 already-managed lazyboards installation is also refreshed by a normal update.
 
+A normal update also refreshes an existing, unmodified tmux defaults copy (the new
+defaults apply the next time the cenci tmux server starts) but never creates one. To
+create a missing copy, run the installer directly: `cenci-installer update
+--tmux-defaults` (`cenci update` does not forward the tmux flags).
+
 The host binary follows the active installed cenci-watch version, ignoring older
 cache timestamps. If both clients are installed, it uses the newer active version.
 If that binary cannot be provisioned, an available older binary remains usable,
@@ -300,6 +323,11 @@ The command removes installed plugins, `PATH` links, the daemon, and config by
 delegating to the managed `cenci-installer uninstall` wrapper. `cenci uninstall`
 takes no flags or arguments; destructive flags like `--yes` and `--lazyboards`
 require invoking `cenci-installer uninstall` directly.
+
+Uninstall also removes an unmodified tmux defaults copy and lists it in the "This will
+remove:" preview; a modified or non-cenci-managed file is kept and its path reported.
+To keep an unmodified copy too, run `cenci-installer uninstall --yes
+--no-tmux-defaults`.
 
 ## Troubleshooting
 

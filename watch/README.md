@@ -18,7 +18,9 @@ surfaces.
 *Live agent state in the tmux window list: `▶ 6-implement` running (blue), `! 12-refine`
 needs input (red), `✓ 9-refine` done (green). cenci-watch supplies the symbols and state
 colors; the board is [lazyboards](https://github.com/matteobortolazzo/lazyboards) and the
-surrounding tmux theme is user-provided.*
+surrounding status line (transparent bar, `● name` tabs, session name on the right) is
+the tmux defaults the installer ships, described under
+[tmux appearance](#tmux-appearance).*
 
 The same four states appear everywhere:
 
@@ -40,11 +42,38 @@ Other integrations are available for [Waybar](#waybar-config),
 [KDE Plasma](plugin/plasma/README.md), and the
 [macOS menu bar](plugin/macos/README.md).
 
-**tmux appearance:** no tmux theme is bundled or required. cenci-watch augments
-tmux's default window list automatically and applies the state colors above. If
-your theme replaces `window-status-format` or `window-status-current-format`, wire
-its two stable user variables into the theme instead; see
+## tmux appearance
+
+The installer ships an opinionated
+default tmux experience for a dedicated tmux server named `cenci`: a transparent bottom
+status bar, `● name` tabs that carry the state symbol and color, your remaining agent
+budget and the session name on the right, plus `mouse on`, `base-index 1`,
+`renumber-windows on`, a short `escape-time` and `focus-events on`. The prefix stays
+`C-b`. It never runs on your default tmux server, so your own tmux sessions and tmux
+config are never touched or restyled. Start it with:
+
+```bash
+tmux -L cenci -f "${XDG_CONFIG_HOME:-$HOME/.config}/cenci/tmux.conf" new-session -A -s cenci
+```
+
+The installer keeps a managed copy of the shipped config at that path (the installer
+prints this start command when the copy is installed). It is installed by default; pass
+`--no-tmux-defaults` to `cenci-installer` to skip it, or `--tmux-defaults` to
+`cenci-installer update` to create a missing copy (see
+[Installer integration](#installer-integration-cenci-doctor-cenci-update-cenci-uninstall)).
+Updates refresh the copy only while it is unmodified; a copy you edited, or a file that
+is not cenci-managed, is never overwritten or removed. Updated defaults apply the next
+time the cenci server starts.
+
+No personal tmux config line is needed on the cenci server: the shipped formats already
+read `@cenci-symbol`, `@cenci-style` and `@cenci-headroom-<agent>`. If you run your own
+tmux server, keep your theme and wire those variables in yourself; see
 [Custom status-format integration](#custom-status-format-integration).
+
+Until [#646](https://github.com/matteobortolazzo/cenci/issues/646) lands, the daemon
+writes the `@cenci-*` markers on the tmux server named by its own ambient `$TMUX`, not
+on the `cenci` server by itself, so state markers reach the cenci server only when the
+daemon runs inside it.
 
 ## How live status reaches you
 
@@ -3156,7 +3185,12 @@ uninstall` take no flags or extra arguments (exit 2 if given any); `cenci update
 forwards a fixed set of flags (`--yes`/`-y`, `--build`/`--no-build`,
 `--lazyboards`/`--no-lazyboards`). Destructive flags like `--yes` and `--lazyboards`
 are not forwarded by `cenci uninstall` — invoke `cenci-installer uninstall` directly
-if you need them. If `cenci-installer` isn't on `PATH`, all three exit 1 with a clear
+if you need them. The tmux defaults flags are the same: `--tmux-defaults` and
+`--no-tmux-defaults` go to `cenci-installer` directly (for example
+`cenci-installer update --tmux-defaults` or
+`cenci-installer uninstall --yes --no-tmux-defaults`), not through `cenci update`.
+`cenci doctor` reports the tmux defaults state (`tmux defaults installed`, modified
+locally, present but not cenci-managed, or not installed) and never fails on it. If `cenci-installer` isn't on `PATH`, all three exit 1 with a clear
 error instead of silently doing nothing — re-run the [installer](#installation) to
 create it.
 
@@ -3800,12 +3834,16 @@ Use them in your `status-format` to replace the default indicator and color:
 #{?#{@cenci-style},#[#{@cenci-style}],#[fg=brightblack]}
 ```
 
-cenci-watch intentionally does not ship a tmux theme: it supplies live state while
-your existing theme remains responsible for layout, spacing, separators, and the
-active-window treatment. For users with the default tmux status format, cenci-watch
-automatically prepends `#{@cenci-symbol}` to `window-status-format` and
-`window-status-current-format` during tracking, and restores them on cleanup.
-Themes that fully replace those formats should reference the variables above.
+The dedicated `cenci` tmux server needs none of this: its shipped defaults
+(see [tmux appearance](#tmux-appearance)) already render these variables, so no
+personal tmux config line is needed there. The snippets above stay useful on your
+own tmux servers, where your theme remains responsible for layout, spacing,
+separators, and the active-window treatment. For users with the default tmux status
+format, cenci-watch automatically prepends `#{@cenci-symbol}` to
+`window-status-format` and `window-status-current-format` during tracking, and
+restores them on cleanup. Themes that fully replace those formats should reference
+the variables above. The shipped config sets those formats only globally, never
+window-local, so the prepend cannot double the marker on the cenci server.
 
 ### Budget headroom in status-line
 

@@ -211,6 +211,10 @@ prepare_checkout() {
         cp "${ROOT}/cenci" "${checkout}/cenci"
         chmod +x "${checkout}/cenci"
     fi
+    # The default-yes tmux-defaults step (#645) resolves its shipped asset
+    # through find_plugin_path, so the fake checkout must carry it.
+    mkdir -p "${checkout}/watch/plugin/tmux"
+    cp "${ROOT}/watch/plugin/tmux/tmux.conf" "${checkout}/watch/plugin/tmux/tmux.conf"
     root="${home}/.claude/plugins/cache/cenci/cenci-watch/1.0.0"
     mkdir -p "${root}/bin" "${root}/.claude-plugin"
     printf '{"name":"cenci-watch","version":"1.0.0"}\n' >"${root}/.claude-plugin/plugin.json"

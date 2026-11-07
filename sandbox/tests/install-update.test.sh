@@ -30,7 +30,7 @@ trap cleanup EXIT
 make_tools() {
     local bin="$1" tool
     mkdir -p "${bin}"
-    for tool in bash cat touch uname grep git mkdir dirname ln readlink sleep nohup chmod sed head tail sort rm mv jq; do
+    for tool in bash cat touch uname grep git mkdir dirname ln readlink sleep nohup chmod sed head tail sort rm mv mktemp jq sha256sum; do
         ln -s "$(command -v "${tool}")" "${bin}/${tool}"
     done
     cat >"${bin}/docker" <<'EOF'
@@ -187,6 +187,10 @@ prepare_checkout() {
     mkdir -p "${checkout}"
     cp "${ROOT}/cenci" "${ROOT}/install.sh" "${checkout}/"
     chmod +x "${checkout}/cenci" "${checkout}/install.sh"
+    # The default-yes tmux-defaults step (#645) resolves its shipped asset
+    # through find_plugin_path, so the fake checkout must carry it.
+    mkdir -p "${checkout}/watch/plugin/tmux"
+    cp "${ROOT}/watch/plugin/tmux/tmux.conf" "${checkout}/watch/plugin/tmux/tmux.conf"
 }
 
 # setup_layout provisions a fake HOME with a client plugin cache containing
@@ -248,6 +252,9 @@ setup_layout() {
 # prompt in setup_cenci_linux_path, answered by its own EOF default) as the
 # only interactive gates. Sets PTY_EXIT; output lands in
 # "${WORK}/last-output" (mirrors run_update's capture convention).
+# --no-tmux-defaults keeps the single fed answer for the prompt under test (the
+# rebuild prompt, #519): the default-yes tmux-defaults prompt (#645) would consume it
+# and leave the next read on /dev/tty to the pty's EOF handling.
 run_installer_pty() {
     local mode="$1" feed="$2" mode_arg=""
     [ "${mode}" = update ] && mode_arg=update
@@ -256,7 +263,7 @@ run_installer_pty() {
 #!/bin/sh
 exec env -i HOME="${LAYOUT_HOME}" PATH="${LAYOUT_BIN}" CALL_LOG="${LAYOUT_CALL_LOG}" \
     PIDS_FILE="${PIDS_FILE}" PKILL_LOG="${LAYOUT_PKILL_LOG}" \
-    bash "${ROOT}/install.sh" ${mode_arg} --no-lazyboards
+    bash "${ROOT}/install.sh" ${mode_arg} --no-lazyboards --no-tmux-defaults
 EOF
     chmod +x "${wrapper}"
     set +e
