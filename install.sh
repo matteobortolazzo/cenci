@@ -1879,21 +1879,53 @@ current_cenci_binary() {
 
 # restart_cenci_daemon replaces the standard plugin-managed daemon after
 # an explicit update. It delegates to the binary's own `daemon restart`
-# lifecycle verb (stop the old daemon, spawn the new one, wait for it to
-# become reachable — see runDaemonRestart in watch/main.go), so this
-# installer path and a user running `cenci daemon restart` by hand share
-# one implementation instead of install.sh reimplementing daemon process
-# control. Falls back to the pre-daemon-lifecycle ad-hoc pkill/nohup restart
-# when the binary can't do it itself (missing/not executable, older cached
-# binary without the `daemon` verb group, or the invocation otherwise fails).
+# lifecycle verb (restart through the login service when one is enabled,
+# otherwise stop the old daemon, spawn the new one and wait for it to become
+# reachable — see runDaemonRestart in watch/daemon_cmd.go), so this installer
+# path and a user running `cenci daemon restart` by hand share one
+# implementation instead of install.sh reimplementing daemon process control.
+#
+# The exit status decides what happens next:
+#   0      restarted.
+#   2      the usage-error code: an older cached binary whose `daemon` group
+#          has no `restart` subverb. Only then does the pre-daemon-lifecycle
+#          pkill/nohup restart (restart_cenci_daemon_fallback) still run.
+#   other  a real runtime failure (exit 1: e.g. the login service state could
+#          not be read). The captured stderr is shown and the update fails;
+#          pkill/nohup would pull the daemon out from under an enabled login
+#          service, so it is never used here.
+# A missing or non-executable binary fails without touching any process.
 restart_cenci_daemon() {
-	local bin="$1"
-	if [ -x "$bin" ] && "$bin" daemon restart >/dev/null 2>&1; then
+	local bin="$1" out rc line
+	if [ -z "$bin" ] || [ ! -x "$bin" ]; then
+		fail "no usable cenci binary to restart"
+		say "    run: cenci daemon restart"
+		return 1
+	fi
+	if out="$("$bin" daemon restart 2>&1 >/dev/null)"; then
 		ok "restarted cenci with the selected binary"
 		return 0
+	else
+		rc=$?
 	fi
-	warn "'$bin daemon restart' did not succeed — falling back to a manual restart"
-	restart_cenci_daemon_fallback "$bin"
+	if [ "$rc" -eq 2 ]; then
+		warn "'$bin daemon restart' is not supported by this binary — falling back to a manual restart"
+		if [ -n "$out" ]; then
+			while IFS= read -r line; do
+				say "    $line"
+			done <<<"$out"
+		fi
+		restart_cenci_daemon_fallback "$bin"
+		return
+	fi
+	fail "'$bin daemon restart' failed (exit $rc)"
+	if [ -n "$out" ]; then
+		while IFS= read -r line; do
+			say "    $line"
+		done <<<"$out"
+	fi
+	say "    run: cenci daemon restart"
+	return 1
 }
 
 # restart_cenci_daemon_fallback is the pre-daemon-lifecycle ad-hoc

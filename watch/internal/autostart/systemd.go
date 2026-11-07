@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 )
@@ -23,7 +24,7 @@ func (s *systemd) unitPath() string {
 }
 
 func (s *systemd) ctl(ctx context.Context, args ...string) (string, error) {
-	return run(ctx, "systemctl", append([]string{"--user"}, args...)...)
+	return run(ctx, s.opts.CommandTimeout, "systemctl", append([]string{"--user"}, args...)...)
 }
 
 // requireManager fails unless `systemctl --user show-environment` succeeds,
@@ -35,20 +36,54 @@ func (s *systemd) requireManager(ctx context.Context) error {
 	return nil
 }
 
-// Status asks the manager first only whether it exists; the file at the cenci
-// path then decides installed or not, so a unit elsewhere on the manager's
-// search path is never mistaken for ours.
+// Status is Probe with every doubt read as unsupported, so it never fails.
 func (s *systemd) Status(ctx context.Context) State {
-	if s.requireManager(ctx) != nil {
-		return StateUnsupported
+	state, _ := s.Probe(ctx)
+	return state
+}
+
+// systemdRemedy is the manual restart a refusal points at.
+const systemdRemedy = "systemctl --user restart " + SystemdUnit
+
+// Probe asks the manager first only whether it exists; the file at the cenci
+// path then decides installed or not, so a unit elsewhere on the manager's
+// search path is never mistaken for ours. A read is doubtful, and reported as a
+// *ProbeError, only when that file exists (so a cenci service may be enabled) and
+// the manager did not answer cleanly.
+func (s *systemd) Probe(ctx context.Context) (State, error) {
+	if _, err := s.ctl(ctx, "show-environment"); err != nil {
+		return s.unreadableManager(err)
 	}
 	if !fileExists(s.unitPath()) {
-		return StateNotInstalled
+		return StateNotInstalled, nil
 	}
 	if _, err := s.ctl(ctx, "is-enabled", SystemdUnit); err != nil {
-		return StateDisabled
+		if timedOut(err) {
+			return StateUnsupported, s.opts.doubt("systemctl --user is-enabled "+SystemdUnit, err, systemdRemedy)
+		}
+		return StateDisabled, nil
 	}
-	return StateEnabled
+	return StateEnabled, nil
+}
+
+// unreadableManager classifies a failed show-environment. With no cenci unit
+// file no cenci service can be enabled, and a missing systemctl or a host not
+// booted with systemd has no manager to ask, so all of those are definitive. A
+// timeout, or a failure on a systemd-booted host (an SSH shell with no user bus
+// while the manager runs), is doubt.
+func (s *systemd) unreadableManager(err error) (State, error) {
+	switch {
+	case !fileExists(s.unitPath()):
+		return StateUnsupported, nil
+	case timedOut(err):
+		return StateUnsupported, s.opts.doubt("systemctl --user show-environment", err, systemdRemedy)
+	case errors.Is(err, exec.ErrNotFound):
+		return StateUnsupported, nil
+	case !fileExists(s.opts.SystemdBootedDir):
+		return StateUnsupported, nil
+	default:
+		return StateUnsupported, s.opts.doubt("systemctl --user show-environment", err, systemdRemedy)
+	}
 }
 
 func (s *systemd) Install(ctx context.Context, force bool) (Outcome, error) {

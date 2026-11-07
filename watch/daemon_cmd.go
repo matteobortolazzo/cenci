@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	_ "embed" // go:embed for the login-service templates
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -181,24 +182,40 @@ func runDaemonStop(args []string) {
 	fmt.Println("daemon not running")
 }
 
-// runDaemonRestart implements `cenci daemon restart`. With the login service
-// enabled it restarts through the service manager and never spawns a daemon of
-// its own, so supervision is kept (the installer's update path lands here); the
-// backend first stops a daemon the inactive unit does not own. Otherwise it stops the daemon (if running), spawns a fresh detached one the
-// same way EnsureRunning does (daemon.Spawn — `cenci daemon start`, Setsid'd),
-// and waits briefly for it to become reachable.
+// runDaemonRestart implements `cenci daemon restart`. It switches on
+// autostart.Probe, the restart-only read of the login service:
+//   - enabled: restart through the service manager and never spawn a daemon of
+//     its own, so supervision is kept (the installer's update path lands here);
+//     the backend first stops a daemon the inactive unit does not own.
+//   - a doubtful read (a cenci unit or plist exists but the manager did not
+//     answer cleanly): refuse with exit 1 before touching any daemon. Stopping
+//     the running daemon and spawning another would leave an unsupervised one
+//     next to an enabled service.
+//   - anything else: stop the daemon (if running), spawn a fresh detached one the
+//     same way EnsureRunning does (daemon.Spawn: `cenci daemon start`, Setsid'd).
+//
+// Either way it then waits briefly for the daemon to become reachable.
 func runDaemonRestart(args []string) {
 	fs := flag.NewFlagSet("daemon restart", flag.ExitOnError)
 	_ = fs.Parse(args)
 	rejectExtra("cenci daemon restart", fs.Args())
 
 	service := newAutostart()
-	if service.Status(context.Background()) == autostart.StateEnabled {
+	state, probeErr := service.Probe(context.Background())
+	var doubt *autostart.ProbeError
+	switch {
+	case errors.As(probeErr, &doubt):
+		fmt.Fprintf(os.Stderr, "cenci daemon restart: cannot read the login service state (%s); not restarting outside the service — retry, or run: %s\n", doubt.Reason, doubt.Remedy)
+		os.Exit(1)
+	case probeErr != nil:
+		fmt.Fprintf(os.Stderr, "cenci daemon restart: %v\n", probeErr)
+		os.Exit(1)
+	case state == autostart.StateEnabled:
 		if err := service.Restart(context.Background()); err != nil {
 			fmt.Fprintf(os.Stderr, "cenci daemon restart: %v\n", err)
 			os.Exit(1)
 		}
-	} else {
+	default:
 		outcome, err := daemon.Stop(ipc.DefaultEventSocketPath(), ipc.DefaultPIDPath())
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "cenci daemon restart: %v\n", err)
@@ -235,6 +252,12 @@ var systemdUnitTemplate string
 //go:embed plugin/service/cenci-watch.plist
 var launchdPlistTemplate string
 
+// serviceCommandTimeout bounds each service-manager command; empty or
+// unparsable means the autostart default. It is set at link time
+// (-ldflags "-X main.serviceCommandTimeout=1s") so the CLI tests can run a
+// hanging fake manager without waiting out the default.
+var serviceCommandTimeout string
+
 // newAutostart wires the login-service backend to this process: the real OS,
 // home, environment and uid, the embedded templates, and daemon control over the
 // default event socket and PID file.
@@ -245,7 +268,9 @@ func newAutostart() autostart.Backend {
 		Home:      home,
 		LookupEnv: os.LookupEnv,
 		UID:       os.Getuid(),
-		Templates: autostart.Templates{Systemd: systemdUnitTemplate, Launchd: launchdPlistTemplate},
+		// An empty or invalid value parses to zero, which autostart reads as its default.
+		CommandTimeout: parseServiceCommandTimeout(),
+		Templates:      autostart.Templates{Systemd: systemdUnitTemplate, Launchd: launchdPlistTemplate},
 		Daemon: autostart.Daemon{
 			Alive: func() bool { return daemon.Alive(ipc.DefaultEventSocketPath()) },
 			Stop: func() error {
@@ -254,6 +279,14 @@ func newAutostart() autostart.Backend {
 			},
 		},
 	})
+}
+
+func parseServiceCommandTimeout() time.Duration {
+	d, err := time.ParseDuration(serviceCommandTimeout)
+	if err != nil {
+		return 0
+	}
+	return d
 }
 
 // parseServiceFlags parses a service subverb's flags. Usage errors print a
