@@ -12,7 +12,9 @@ type secretEnvSpec struct {
 
 // forwardedEnvVarNames is the built-in spec literal, in forwarding order: the
 // order assembleExecEnv emits the bare "-e NAME" tokens in, which the exec-argv
-// goldens pin. Production code reads it only through resolveSecretEnvSet.
+// goldens pin. Production code reads it only through builtinSecretEnvSet and
+// resolveSecretEnvSet; the user's sandboxEnv.forward names (#1016) are merged
+// in after it, never written into it.
 //
 // Forwarding is agent-scoped, via Agents: OpenCode reads ANTHROPIC_API_KEY and
 // OPENAI_API_KEY natively, Codex only OPENAI_API_KEY, and Claude neither
@@ -23,12 +25,13 @@ var forwardedEnvVarNames = []secretEnvSpec{
 	{Name: "OPENAI_API_KEY", Agents: []string{"codex", "opencode"}},
 }
 
-// secretEnvSet is the resolved set of host secret env var names. It is built
-// once per Launch, Audit and `cenci open --dry-run` operation by
-// resolveSecretEnvSet and threaded through the call chain: it drives both
-// per-exec forwarding (forwardNames, consumed by assembleExecEnv) and
-// classification (Has, consumed by isSecretEnvName, classifyEnvNames,
-// forwardedEnvVars and dry-run redaction), so the two cannot drift apart.
+// secretEnvSet is the resolved set of host secret env var names: the built-in
+// names plus any the user lists in sandboxEnv.forward. It is built once per
+// Launch, Audit and `cenci open --dry-run` operation by loadSecretEnvSet and
+// threaded through the call chain: it drives both per-exec forwarding
+// (forwardNames, consumed by assembleExecEnv) and classification (Has,
+// consumed by isSecretEnvName, classifyEnvNames, forwardedEnvVars and dry-run
+// redaction), so the two cannot drift apart.
 //
 // Invariant: the set holds secret env var NAMES only — never their values. A
 // value is read from the host environment at the moment a bare "-e NAME" token
@@ -40,6 +43,10 @@ var forwardedEnvVarNames = []secretEnvSpec{
 type secretEnvSet struct {
 	specs []secretEnvSpec
 	names map[string]bool
+	// configured holds the names that came from sandboxEnv.forward, in config
+	// order (including any that duplicate a built-in name). The audit's
+	// boundary-weakening check reads it; forwarding and classification do not.
+	configured []string
 }
 
 // newSecretEnvSet builds a set from specs, in order. It copies the specs, so a
@@ -55,11 +62,43 @@ func newSecretEnvSet(specs []secretEnvSpec) secretEnvSet {
 	return secretEnvSet{specs: owned, names: names}
 }
 
-// resolveSecretEnvSet resolves the built-in secret-name set. It is the only
-// production reader of forwardedEnvVarNames. Resolving cannot fail, so it adds
-// no error path to Launch, Audit or DryRun.
-func resolveSecretEnvSet() secretEnvSet {
+// builtinSecretEnvSet returns the built-in secret-name set alone, with none of
+// the user's configured names merged in. Weakening checks use it as the
+// baseline "what the default already forwards"; production launch, dry-run and
+// audit paths use loadSecretEnvSet instead.
+func builtinSecretEnvSet() secretEnvSet {
 	return newSecretEnvSet(forwardedEnvVarNames)
+}
+
+// resolveSecretEnvSet merges the user's configured names into the built-in set
+// and is pure: it reads no file (loadSecretEnvSet does). The built-in specs
+// come first, in registration order. A configured name that duplicates a
+// built-in keeps that spec's position and its Agents widen to nil (every
+// agent); the remaining configured names follow in config order, forwarded to
+// every agent. Every configured name is a secret whatever its suffix.
+//
+// configured is re-validated with the reader's own validator, so a name that
+// bypassed the reader (a future second source) is refused here rather than
+// reaching a runtime argv. A failure returns the zero set.
+func resolveSecretEnvSet(configured []string) (secretEnvSet, error) {
+	if err := validateForwardNames(configured); err != nil {
+		return secretEnvSet{}, err
+	}
+
+	// A shallow clone is enough: widening replaces a spec's Agents field in the
+	// clone and never touches the shared forwardedEnvVarNames literal.
+	specs := slices.Clone(forwardedEnvVarNames)
+	for _, name := range configured {
+		if i := slices.IndexFunc(specs, func(spec secretEnvSpec) bool { return spec.Name == name }); i >= 0 {
+			specs[i].Agents = nil
+			continue
+		}
+		specs = append(specs, secretEnvSpec{Name: name})
+	}
+
+	set := newSecretEnvSet(specs)
+	set.configured = slices.Clone(configured)
+	return set, nil
 }
 
 // Has reports whether name is a registered secret env var name, for every
@@ -77,4 +116,10 @@ func (s secretEnvSet) forwardNames(agent string) []string {
 		}
 	}
 	return forwarded
+}
+
+// configuredNames returns a copy of the names that came from sandboxEnv.forward,
+// in config order. Empty for a built-in-only set.
+func (s secretEnvSet) configuredNames() []string {
+	return slices.Clone(s.configured)
 }

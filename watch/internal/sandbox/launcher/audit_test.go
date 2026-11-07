@@ -643,10 +643,14 @@ func secretSuffixedEmissionViolations(forwarding, registered secretEnvSet) (viol
 // Known blind spots (deliberately out of scope, per ticket #760's Q&A,
 // restated against the #1201 resolved-set shape):
 //
-//  1. An oddly-named future secret that matches none of the four suffixes
-//     (_KEY/_TOKEN/_SECRET/_PASSWORD) stays undetected by this heuristic —
-//     accepted tradeoff over a second hand-maintained allowlist, since there
-//     is nothing to keep in sync against the single resolved set.
+//  1. An oddly-named future BUILT-IN secret that matches none of the four
+//     suffixes (_KEY/_TOKEN/_SECRET/_PASSWORD) stays undetected by this
+//     heuristic — accepted tradeoff over a second hand-maintained allowlist,
+//     since there is nothing to keep in sync against the single resolved set.
+//     The suffix heuristic applies to built-in names only: a name from the
+//     user's sandboxEnv.forward config (#1016) is registered by Has
+//     unconditionally, never by suffix, so a non-suffixed configured name such
+//     as MY_THING is not a blind spot (see the configured-names sub-test).
 //  2. A future "-e" forward whose host gate var isn't also t.Setenv'd below
 //     is silently dropped from the enumeration this test drives — whoever
 //     adds a new gated forward to assembleExecEnv/assembleEnv MUST also add
@@ -669,7 +673,7 @@ func TestForwardedEnvVarNames_CoversEverySecretSuffixedEnvName(t *testing.T) {
 	t.Setenv("COLORTERM", "truecolor")
 
 	t.Run("production set registers every emitted secret-suffixed name", func(t *testing.T) {
-		secrets := resolveSecretEnvSet()
+		secrets := builtinSecretEnvSet()
 		violations, seen := secretSuffixedEmissionViolations(secrets, secrets)
 		for _, v := range violations {
 			t.Error(v)
@@ -688,13 +692,47 @@ func TestForwardedEnvVarNames_CoversEverySecretSuffixedEnvName(t *testing.T) {
 		}
 	})
 
+	// Config-supplied names (#1016) are registered by Has unconditionally: the
+	// non-suffixed MY_THING matches none of the four suffixes, so only the
+	// configuration can be what classifies it. Driving the emission check against
+	// the merged set proves the configured name is both emitted and registered,
+	// and the built-in set's own Has proves the suffix heuristic never did it.
+	t.Run("configured names are registered unconditionally, not by suffix", func(t *testing.T) {
+		const plain, suffixed = "MY_THING", "TAVILY_API_KEY"
+		t.Setenv(plain, "sentinel-my-thing")
+		t.Setenv(suffixed, "sentinel-tavily")
+		configured, err := resolveSecretEnvSet([]string{plain, suffixed})
+		if err != nil {
+			t.Fatalf("resolveSecretEnvSet: %v", err)
+		}
+
+		if builtinSecretEnvSet().Has(plain) {
+			t.Fatalf("the built-in set classifies %s as a secret; this arm needs a name only configuration can register", plain)
+		}
+		for _, name := range []string{plain, suffixed} {
+			if !configured.Has(name) {
+				t.Errorf("Has(%q) = false for a configured name, want true unconditionally", name)
+			}
+		}
+
+		violations, seen := secretSuffixedEmissionViolations(configured, configured)
+		for _, v := range violations {
+			t.Error(v)
+		}
+		for _, name := range []string{plain, suffixed} {
+			if !seen[name] {
+				t.Errorf("configured name %q was never observed emitted (anti-vacuity); seen %v", name, seen)
+			}
+		}
+	})
+
 	// Proves the guard can fail: a test-only set forwards FOO_TOKEN (every
 	// agent), which the production set does not register, so the check against
 	// the production set must report it once per agent's exec env.
 	t.Run("an unregistered FOO_TOKEN forward is reported", func(t *testing.T) {
 		t.Setenv("FOO_TOKEN", "sentinel-foo")
 		forwarding := newSecretEnvSet([]secretEnvSpec{{Name: "FOO_TOKEN"}})
-		violations, seen := secretSuffixedEmissionViolations(forwarding, resolveSecretEnvSet())
+		violations, seen := secretSuffixedEmissionViolations(forwarding, builtinSecretEnvSet())
 		if !seen["FOO_TOKEN"] {
 			t.Fatalf("FOO_TOKEN forwarded through the test-only set was never observed emitted; seen %v", seen)
 		}
@@ -775,7 +813,7 @@ func TestAudit_EnvSecretClassification_ContextKeySecretTermNot(t *testing.T) {
 // mark it Secret:true -- an explicit assertion rather than an inference
 // from other passing tests (AC6).
 func TestClassifyEnvNames_BareSecretToken(t *testing.T) {
-	envs := classifyEnvNames([]string{"-e", "OPENAI_API_KEY"}, resolveSecretEnvSet())
+	envs := classifyEnvNames([]string{"-e", "OPENAI_API_KEY"}, builtinSecretEnvSet())
 	if len(envs) != 1 {
 		t.Fatalf("classifyEnvNames([-e OPENAI_API_KEY]) = %+v, want exactly one entry", envs)
 	}
@@ -797,7 +835,7 @@ func TestClassifyEnvNames_BareSecretToken(t *testing.T) {
 // claude, which never forwards it) is still Secret:true, so dry-run redaction
 // is not weakened by per-agent forwarding.
 func TestClassifyEnvNames_CreateTimeArgs_ClassifiesAgainstResolvedSet(t *testing.T) {
-	secrets := resolveSecretEnvSet()
+	secrets := builtinSecretEnvSet()
 
 	got := classifyEnvNames([]string{"-e", "TERM=xterm-256color", "-e", "OPENAI_API_KEY"}, secrets)
 	want := []EnvVarName{{Name: "TERM", Secret: false}, {Name: "OPENAI_API_KEY", Secret: true}}
@@ -832,7 +870,7 @@ func setAllSecretHostKeys(t *testing.T, value func(name string) string) {
 // in the create-time argv as well as the attach argv. The create-time argv
 // carries no secret name for any agent in either case.
 func TestForwardedSecretNames_ExactPerAgentAndOrder(t *testing.T) {
-	secrets := resolveSecretEnvSet()
+	secrets := builtinSecretEnvSet()
 	scope := Scope{WorkspaceScope: "repo"}
 	e := &Engine{Runtime: "docker", Stderr: &bytes.Buffer{}}
 
@@ -891,7 +929,7 @@ func TestAudit_ForwardedEnvAgreesWithAttachArgv_EveryAgent(t *testing.T) {
 	t.Chdir(repo)
 	t.Setenv("FAKE_PS", "")
 	setAllSecretHostKeys(t, func(name string) string { return "sentinel-" + name })
-	secrets := resolveSecretEnvSet()
+	secrets := builtinSecretEnvSet()
 
 	for _, agent := range sandbox.SupportedAgents {
 		t.Run(agent, func(t *testing.T) {
@@ -938,6 +976,388 @@ func TestAudit_ForwardedEnvAgreesWithAttachArgv_EveryAgent(t *testing.T) {
 				t.Errorf("attach argv forwarded no secret name for %q with all three host keys set (vacuous agreement)", agent)
 			}
 		})
+	}
+}
+
+// -- ticket #1016: sandboxEnv.forward classification and weakenings ----------
+
+// configuredForwardAuditFixture isolates HOME, enters a fresh git repo and
+// writes a fleet config whose sandboxEnv.forward lists names, so Audit reads it
+// through the real loader. The three built-in host keys are emptied so only the
+// configured names (and whatever a test sets) are forwarded.
+func configuredForwardAuditFixture(t *testing.T, names ...string) {
+	t.Helper()
+	repo := newAuditTestRepo(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Chdir(repo)
+	setAllSecretHostKeys(t, func(string) string { return "" })
+	quoted := make([]string, len(names))
+	for i, n := range names {
+		quoted[i] = fmt.Sprintf("%q", n)
+	}
+	writeFleetConfig(t, `{"sandboxEnv":{"forward":[`+strings.Join(quoted, ",")+`]}}`)
+}
+
+// forwardWeakenings filters a posture's weakenings down to the
+// sandboxEnv.forward entries.
+func forwardWeakenings(p Posture) []BoundaryWeakening {
+	var out []BoundaryWeakening
+	for _, w := range p.BoundaryWeakenings {
+		if w.Option == "sandboxEnv.forward" {
+			out = append(out, w)
+		}
+	}
+	return out
+}
+
+// TestAudit_ConfiguredForward_NonSuffixedNameIsSecretInForwardedEnv covers the
+// classification AC: MY_THING matches none of the secret suffixes, yet a
+// configured name is Secret:true in forwardedEnv, and only when it would really
+// be forwarded (set and non-empty); the unset configured name has no entry.
+func TestAudit_ConfiguredForward_NonSuffixedNameIsSecretInForwardedEnv(t *testing.T) {
+	configuredForwardAuditFixture(t, "MY_THING", "UNSET_THING")
+	const sentinel = "sk-cenci-sentinel-my-thing"
+	t.Setenv("MY_THING", sentinel)
+	t.Setenv("UNSET_THING", "")
+
+	posture, err := auditEngine().Audit(Options{Agent: "claude"})
+	if err != nil {
+		t.Fatalf("Audit: %v", err)
+	}
+
+	var mine *ForwardedEnvVar
+	for i, f := range posture.ForwardedEnv {
+		switch f.Name {
+		case "MY_THING":
+			mine = &posture.ForwardedEnv[i]
+		case "UNSET_THING":
+			t.Errorf("forwardedEnv lists the unset configured name UNSET_THING; audit lists only what would actually be forwarded: %+v", posture.ForwardedEnv)
+		}
+	}
+	if mine == nil {
+		t.Fatalf("forwardedEnv has no MY_THING entry: %+v", posture.ForwardedEnv)
+	}
+	if !mine.Secret {
+		t.Errorf("forwardedEnv MY_THING Secret = false, want true (every configured name is secret)")
+	}
+
+	data, err := json.Marshal(posture)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if strings.Contains(string(data), sentinel) {
+		t.Errorf("posture JSON leaks the MY_THING sentinel value:\n%s", data)
+	}
+}
+
+func TestAudit_ConfiguredForward_PlannedWeakeningNamesTheVariable(t *testing.T) {
+	configuredForwardAuditFixture(t, "MY_THING", "TAVILY_API_KEY", "UNSET_THING")
+	t.Setenv("MY_THING", "sentinel-1")
+	t.Setenv("TAVILY_API_KEY", "sentinel-2")
+	t.Setenv("UNSET_THING", "")
+
+	posture, err := auditEngine().Audit(Options{Agent: "claude"})
+	if err != nil {
+		t.Fatalf("Audit: %v", err)
+	}
+
+	if posture.Basis != PostureBasisPlanned {
+		t.Fatalf("Basis = %q, want planned", posture.Basis)
+	}
+	got := forwardWeakenings(posture)
+	if len(got) != 2 {
+		t.Fatalf("sandboxEnv.forward weakenings = %+v, want one per forwarded configured name (MY_THING, TAVILY_API_KEY) and none for the unset one", got)
+	}
+	for i, name := range []string{"MY_THING", "TAVILY_API_KEY"} {
+		if got[i].Option != "sandboxEnv.forward" || !got[i].Active {
+			t.Errorf("weakening[%d] = %+v, want option sandboxEnv.forward active", i, got[i])
+		}
+		if !strings.Contains(got[i].Effect, name) {
+			t.Errorf("weakening[%d] effect %q does not name %s (config order)", i, got[i].Effect, name)
+		}
+	}
+	if len(posture.BoundaryWeakenings) != 2 {
+		t.Errorf("BoundaryWeakenings = %+v, want only the two configured forwards", posture.BoundaryWeakenings)
+	}
+}
+
+// TestAudit_ConfiguredForward_WeakeningJSONKeysAreUnchanged pins AC13/14 for the
+// new entry: it reuses BoundaryWeakening, so the entry's key set is exactly the
+// existing {option, active, effect}.
+func TestAudit_ConfiguredForward_WeakeningJSONKeysAreUnchanged(t *testing.T) {
+	configuredForwardAuditFixture(t, "MY_THING")
+	t.Setenv("MY_THING", "sentinel")
+
+	posture, err := auditEngine().Audit(Options{Agent: "claude"})
+	if err != nil {
+		t.Fatalf("Audit: %v", err)
+	}
+	data, err := json.Marshal(posture)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	var parsed struct {
+		BoundaryWeakenings []map[string]any `json:"boundaryWeakenings"`
+	}
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if len(parsed.BoundaryWeakenings) != 1 {
+		t.Fatalf("boundaryWeakenings = %v, want exactly one entry", parsed.BoundaryWeakenings)
+	}
+	keys := make([]string, 0, 3)
+	for k := range parsed.BoundaryWeakenings[0] {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	if want := []string{"active", "effect", "option"}; !slices.Equal(keys, want) {
+		t.Errorf("weakening entry keys = %v, want %v", keys, want)
+	}
+}
+
+func TestAudit_ConfiguredForward_TextOutputShowsWeakeningsAndNoBaselineLine(t *testing.T) {
+	configuredForwardAuditFixture(t, "MY_THING")
+	t.Setenv("MY_THING", "sentinel")
+
+	posture, err := auditEngine().Audit(Options{Agent: "claude"})
+	if err != nil {
+		t.Fatalf("Audit: %v", err)
+	}
+	var buf bytes.Buffer
+	if err := posture.WriteText(&buf); err != nil {
+		t.Fatalf("WriteText: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "⚠ Boundary weakenings") {
+		t.Errorf("text output lacks the ⚠ Boundary weakenings section:\n%s", out)
+	}
+	if strings.Contains(out, "none (default-safe baseline)") {
+		t.Errorf("text output prints the reassuring baseline line while a user-added secret crosses the boundary:\n%s", out)
+	}
+	if !strings.Contains(out, "MY_THING") {
+		t.Errorf("text output does not name MY_THING:\n%s", out)
+	}
+}
+
+// TestAudit_ConfiguredForward_UnsetOrEmptyNameAddsNothing: a configured name
+// that is not set (or is empty) is never forwarded, so audit reports neither a
+// forwardedEnv nor a weakening entry, and the empty weakenings list still
+// serializes as [] (the nil-slice trap, watch/docs/go-gotchas.md).
+func TestAudit_ConfiguredForward_UnsetOrEmptyNameAddsNothing(t *testing.T) {
+	configuredForwardAuditFixture(t, "MY_THING")
+	t.Setenv("MY_THING", "")
+
+	posture, err := auditEngine().Audit(Options{Agent: "claude"})
+	if err != nil {
+		t.Fatalf("Audit: %v", err)
+	}
+	for _, f := range posture.ForwardedEnv {
+		if f.Name == "MY_THING" {
+			t.Errorf("forwardedEnv lists MY_THING although it is empty on the host: %+v", posture.ForwardedEnv)
+		}
+	}
+	if posture.BoundaryWeakenings == nil || len(posture.BoundaryWeakenings) != 0 {
+		t.Errorf("BoundaryWeakenings = %#v, want a non-nil empty slice", posture.BoundaryWeakenings)
+	}
+	data, err := json.Marshal(posture)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if !strings.Contains(string(data), `"boundaryWeakenings":[]`) {
+		t.Errorf("posture JSON must carry \"boundaryWeakenings\":[] when nothing is forwarded:\n%s", data)
+	}
+}
+
+// TestAudit_ConfiguredForward_BuiltinDuplicates covers the edge cases: a
+// configured built-in that is already forwarded to the audited agent widens
+// nothing (no weakening), one that is not forwarded to that agent by default
+// gets exactly one entry.
+func TestAudit_ConfiguredForward_BuiltinDuplicates(t *testing.T) {
+	cases := []struct {
+		agent    string
+		name     string
+		wantNone bool
+	}{
+		{"claude", "CONTEXT7_API_KEY", true},
+		{"claude", "OPENAI_API_KEY", false},
+		{"claude", "ANTHROPIC_API_KEY", false},
+		{"codex", "OPENAI_API_KEY", true},
+		{"codex", "ANTHROPIC_API_KEY", false},
+		{"opencode", "ANTHROPIC_API_KEY", true},
+		{"opencode", "OPENAI_API_KEY", true},
+		{"opencode", "CONTEXT7_API_KEY", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.agent+"/"+tc.name, func(t *testing.T) {
+			configuredForwardAuditFixture(t, tc.name)
+			t.Setenv(tc.name, "sentinel-"+tc.name)
+			// codex's credential check is non-fatal for Audit, so no auth file
+			// is needed.
+
+			posture, err := auditEngine().Audit(Options{Agent: tc.agent})
+			if err != nil {
+				t.Fatalf("Audit: %v", err)
+			}
+			got := forwardWeakenings(posture)
+			switch {
+			case tc.wantNone && len(got) != 0:
+				t.Errorf("%s already forwarded to %s by default, got weakening(s) %+v, want none", tc.name, tc.agent, got)
+			case !tc.wantNone && len(got) != 1:
+				t.Errorf("%s is not forwarded to %s by default, got weakening(s) %+v, want exactly one", tc.name, tc.agent, got)
+			case !tc.wantNone && !strings.Contains(got[0].Effect, tc.name):
+				t.Errorf("weakening effect %q does not name %s", got[0].Effect, tc.name)
+			}
+
+			// Whether or not it is a weakening, the name is forwarded for this
+			// agent now and classified secret.
+			var forwarded bool
+			for _, f := range posture.ForwardedEnv {
+				if f.Name == tc.name {
+					forwarded = true
+					if !f.Secret {
+						t.Errorf("forwardedEnv %s Secret = false, want true", tc.name)
+					}
+				}
+			}
+			if !forwarded {
+				t.Errorf("forwardedEnv lacks %s for %s after configuring it: %+v", tc.name, tc.agent, posture.ForwardedEnv)
+			}
+		})
+	}
+}
+
+// TestAudit_ConfiguredForward_RunningBasisCopiesWeakenings covers the
+// "running" half of the weakening AC: per-exec state has no inspect source, so
+// the observed posture carries the planned sandboxEnv.forward entries next to
+// whatever the inspect probe found (here a host-network container).
+func TestAudit_ConfiguredForward_RunningBasisCopiesWeakenings(t *testing.T) {
+	configuredForwardAuditFixture(t, "MY_THING", "UNSET_THING")
+	t.Setenv("MY_THING", "sentinel")
+	t.Setenv("UNSET_THING", "")
+
+	scope := ComputeScope("claude", "", mustGetwd(t), os.Getenv("HOME"))
+	eng, _ := auditEngineWithFakeRuntime(t)
+	t.Setenv("FAKE_PS", scope.ContainerName+"\n")
+
+	t.Run("bridge container", func(t *testing.T) {
+		t.Setenv("FAKE_OBSERVED_POSTURE", "cenci-sandbox:latest|bridge|runc||0\n\n")
+		posture, err := eng.Audit(Options{Agent: "claude"})
+		if err != nil {
+			t.Fatalf("Audit: %v", err)
+		}
+		if posture.Basis != PostureBasisRunning {
+			t.Fatalf("Basis = %q, want running", posture.Basis)
+		}
+		got := forwardWeakenings(posture)
+		if len(got) != 1 || !strings.Contains(got[0].Effect, "MY_THING") || !got[0].Active {
+			t.Errorf("running-basis sandboxEnv.forward weakenings = %+v, want exactly one active entry naming MY_THING", got)
+		}
+		if len(posture.BoundaryWeakenings) != 1 {
+			t.Errorf("BoundaryWeakenings = %+v, want only the configured forward", posture.BoundaryWeakenings)
+		}
+	})
+
+	t.Run("host-network container keeps its own weakening alongside", func(t *testing.T) {
+		t.Setenv("FAKE_OBSERVED_POSTURE", "cenci-sandbox:latest|host|runc||0\n\n")
+		posture, err := eng.Audit(Options{Agent: "claude"})
+		if err != nil {
+			t.Fatalf("Audit: %v", err)
+		}
+		var options []string
+		for _, w := range posture.BoundaryWeakenings {
+			options = append(options, w.Option)
+		}
+		if want := []string{"--host-network", "sandboxEnv.forward"}; !slices.Equal(options, want) {
+			t.Errorf("weakening options = %v, want %v", options, want)
+		}
+	})
+
+	t.Run("an unforwarded name adds nothing on the running basis either", func(t *testing.T) {
+		t.Setenv("MY_THING", "")
+		t.Setenv("FAKE_OBSERVED_POSTURE", "cenci-sandbox:latest|bridge|runc||0\n\n")
+		posture, err := eng.Audit(Options{Agent: "claude"})
+		if err != nil {
+			t.Fatalf("Audit: %v", err)
+		}
+		if posture.Basis != PostureBasisRunning {
+			t.Fatalf("Basis = %q, want running", posture.Basis)
+		}
+		if posture.BoundaryWeakenings == nil || len(posture.BoundaryWeakenings) != 0 {
+			t.Errorf("BoundaryWeakenings = %#v, want a non-nil empty slice", posture.BoundaryWeakenings)
+		}
+	})
+}
+
+// mustGetwd returns the test's working directory; the audit fixtures chdir
+// into a resolved repo, so it equals the repo path ComputeScope derives.
+func mustGetwd(t *testing.T) string {
+	t.Helper()
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	return wd
+}
+
+// TestAudit_ConfiguredForward_AttendedStaysNonSecret covers the last edge
+// case: with a sandboxEnv.forward config present, CENCI_ATTENDED still
+// classifies Secret:false and is still reported in forwardedEnv.
+func TestAudit_ConfiguredForward_AttendedStaysNonSecret(t *testing.T) {
+	repo := newAuditTestRepo(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Chdir(repo)
+	setAllSecretHostKeys(t, func(string) string { return "" })
+	t.Setenv("MY_THING", "sentinel")
+	writeFleetConfig(t, `{"sandboxEnv":{"forward":["MY_THING"]},"planning":{"attended":true}}`)
+
+	secrets, err := loadSecretEnvSet()
+	if err != nil {
+		t.Fatalf("loadSecretEnvSet: %v", err)
+	}
+	if isSecretEnvName(secrets, "CENCI_ATTENDED") {
+		t.Errorf("CENCI_ATTENDED classified secret with a sandboxEnv.forward config present, want non-secret")
+	}
+
+	posture, err := auditEngine().Audit(Options{Agent: "claude"})
+	if err != nil {
+		t.Fatalf("Audit: %v", err)
+	}
+	var attended *ForwardedEnvVar
+	for i, f := range posture.ForwardedEnv {
+		if f.Name == "CENCI_ATTENDED" {
+			attended = &posture.ForwardedEnv[i]
+		}
+	}
+	if attended == nil {
+		t.Fatalf("forwardedEnv lacks CENCI_ATTENDED: %+v", posture.ForwardedEnv)
+	}
+	if attended.Secret {
+		t.Errorf("forwardedEnv CENCI_ATTENDED Secret = true, want false")
+	}
+}
+
+// TestAudit_MalformedForwardConfig_HardErrorBeforeAnyRuntimeCall: Audit fails
+// closed on a malformed sandboxEnv.forward with a plain error, and (the engine
+// has a resolved runtime) makes no ps/inspect call before failing.
+func TestAudit_MalformedForwardConfig_HardErrorBeforeAnyRuntimeCall(t *testing.T) {
+	repo := newAuditTestRepo(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Chdir(repo)
+	writeFleetConfig(t, `{"sandboxEnv":{"forward":["FOO=s3cr3t-sentinel"]}}`)
+	eng, callLog := auditEngineWithFakeRuntime(t)
+
+	_, err := eng.Audit(Options{Agent: "claude"})
+	if err == nil {
+		t.Fatalf("Audit succeeded, want a hard config error")
+	}
+	if IsUsage(err) {
+		t.Errorf("error %q is a usage error, want a plain error (exit 1)", err)
+	}
+	if !strings.Contains(err.Error(), "FOO=<redacted>") || strings.Contains(err.Error(), "s3cr3t-sentinel") {
+		t.Errorf("error %q must show FOO=<redacted> and never the value", err)
+	}
+	if lines := readCallLog(t, callLog); len(lines) != 0 {
+		t.Errorf("Audit made runtime calls before failing on the config: %v", lines)
 	}
 }
 

@@ -443,6 +443,138 @@ func TestAudit_MalformedSandboxPluginsConfig_Exits1(t *testing.T) {
 	}
 }
 
+// -- ticket #1016: sandboxEnv.forward at the command level ------------------
+//
+// The user fleet config lives under the fixture home's .config (auditSecurityEnv
+// and auditFakeRuntimeCmd pin XDG_CONFIG_HOME there), written with
+// writeFleetConfigFixture.
+
+// TestAudit_ConfiguredForward_JSONListsSecretAndOneWeakening: a configured,
+// set MY_THING (matching none of the secret suffixes) is forwardedEnv
+// secret:true, a configured but unset name has no entry, exactly one
+// boundaryWeakenings entry names the forward with exactly the existing
+// {option, active, effect} keys, and the value is nowhere in the output.
+func TestAudit_ConfiguredForward_JSONListsSecretAndOneWeakening(t *testing.T) {
+	repo := auditRepoDir(t)
+	home := t.TempDir()
+	writeFleetConfigFixture(t, home, `{"sandboxEnv":{"forward":["MY_THING","UNSET_THING"]}}`)
+	const sentinel = "sk-cenci-sentinel-audit-my-thing"
+
+	cmd := exec.Command(binaryPath, "audit", "--agent", "claude", "--json")
+	cmd.Env = append(auditSecurityEnv(t, home, t.TempDir()), "MY_THING="+sentinel, "UNSET_THING=", "CONTEXT7_API_KEY=")
+	cmd.Dir = repo
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("cenci audit --json: %v\n%s", err, output)
+	}
+
+	var parsed struct {
+		ForwardedEnv []struct {
+			Name   string `json:"name"`
+			Secret bool   `json:"secret"`
+		} `json:"forwardedEnv"`
+		BoundaryWeakenings []map[string]any `json:"boundaryWeakenings"`
+	}
+	if err := json.Unmarshal(output, &parsed); err != nil {
+		t.Fatalf("cenci audit --json produced invalid JSON: %v\noutput:\n%s", err, output)
+	}
+
+	var foundMine bool
+	for _, f := range parsed.ForwardedEnv {
+		switch f.Name {
+		case "MY_THING":
+			foundMine = true
+			if !f.Secret {
+				t.Errorf("forwardedEnv MY_THING secret = false, want true")
+			}
+		case "UNSET_THING":
+			t.Errorf("forwardedEnv lists the unset configured name UNSET_THING: %+v", parsed.ForwardedEnv)
+		}
+	}
+	if !foundMine {
+		t.Errorf("forwardedEnv has no MY_THING entry: %+v", parsed.ForwardedEnv)
+	}
+
+	if len(parsed.BoundaryWeakenings) != 1 {
+		t.Fatalf("boundaryWeakenings = %v, want exactly one entry", parsed.BoundaryWeakenings)
+	}
+	entry := parsed.BoundaryWeakenings[0]
+	if got := slices.Sorted(maps.Keys(entry)); !slices.Equal(got, []string{"active", "effect", "option"}) {
+		t.Errorf("weakening entry keys = %v, want [active effect option]", got)
+	}
+	if entry["option"] != "sandboxEnv.forward" || entry["active"] != true {
+		t.Errorf("weakening entry = %v, want option sandboxEnv.forward and active true", entry)
+	}
+	if effect, _ := entry["effect"].(string); !strings.Contains(effect, "MY_THING") {
+		t.Errorf("weakening effect %q does not name MY_THING", effect)
+	}
+	if strings.Contains(string(output), sentinel) {
+		t.Errorf("cenci audit --json leaked the MY_THING sentinel value:\n%s", output)
+	}
+}
+
+// TestAudit_ConfiguredForward_TextOutputPrintsWeakeningsNotTheBaselineLine: the
+// reassuring baseline line must not appear while a user-added secret crosses
+// the boundary.
+func TestAudit_ConfiguredForward_TextOutputPrintsWeakeningsNotTheBaselineLine(t *testing.T) {
+	repo := auditRepoDir(t)
+	home := t.TempDir()
+	writeFleetConfigFixture(t, home, `{"sandboxEnv":{"forward":["MY_THING"]}}`)
+
+	cmd := exec.Command(binaryPath, "audit", "--agent", "claude")
+	cmd.Env = append(auditSecurityEnv(t, home, t.TempDir()), "MY_THING=sentinel")
+	cmd.Dir = repo
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("cenci audit: %v\n%s", err, output)
+	}
+	out := string(output)
+	if !strings.Contains(out, "⚠ Boundary weakenings") {
+		t.Errorf("expected the ⚠ Boundary weakenings section, got:\n%s", out)
+	}
+	if strings.Contains(out, "none (default-safe baseline)") {
+		t.Errorf("text output prints the baseline line although a configured secret is forwarded:\n%s", out)
+	}
+}
+
+// TestAudit_MalformedForwardConfig_Exits1NamingRedactedEntryAndMakesNoRuntimeCall
+// is the audit half of the "=" AC: `cenci audit` exits 1 (a plain config error,
+// not usage exit 2) naming the config path, the key and FOO=<redacted> — never
+// the text after the first "=" — and no ps/inspect call reaches the runtime.
+func TestAudit_MalformedForwardConfig_Exits1NamingRedactedEntryAndMakesNoRuntimeCall(t *testing.T) {
+	repo := auditRepoDir(t)
+	home := t.TempDir()
+	writeFleetConfigFixture(t, home, `{"sandboxEnv":{"forward":["FOO=bar"]}}`)
+	configPath := filepath.Join(home, ".config", "cenci", "config.json")
+
+	cmd, callLog := auditFakeRuntimeCmd(t, repo, home, "audit", "--agent", "claude")
+	output, err := cmd.CombinedOutput()
+
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 1 {
+		t.Fatalf("expected exit 1 (hard config error, not a usage error), got %T %v\n%s", err, err, output)
+	}
+	// Strip the path first: it is host-derived (a temp dir named after the test)
+	// and unrelated to the entry.
+	out := string(output)
+	if !strings.Contains(out, configPath) {
+		t.Errorf("error does not name the config file %s:\n%s", configPath, out)
+	}
+	msg := strings.ReplaceAll(out, configPath, "<path>")
+	if !strings.Contains(msg, "sandboxEnv.forward") {
+		t.Errorf("error does not name the key sandboxEnv.forward:\n%s", msg)
+	}
+	if !strings.Contains(msg, "FOO=<redacted>") {
+		t.Errorf("error does not show FOO=<redacted>:\n%s", msg)
+	}
+	if strings.Contains(msg, "bar") {
+		t.Errorf("error leaks the value after the first '=':\n%s", msg)
+	}
+	if lines := callLogLines(t, callLog); len(lines) != 0 {
+		t.Errorf("a malformed sandboxEnv.forward must make no runtime call, got:\n%s", strings.Join(lines, "\n"))
+	}
+}
+
 // TestAudit_NeverStartsADaemon pins audit's read-only contract: no live
 // event socket or PID file exists under CENCI_SOCKET_DIR after the run —
 // audit must probe wiring read-only and never call daemon.EnsureRunning(),

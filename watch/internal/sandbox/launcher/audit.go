@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/ipc"
@@ -154,7 +155,7 @@ type WorkspacePosture struct {
 
 // NetworkPosture is Posture.Network: the container network mode and whether
 // it is weakened from the default-safe bridge mode (only --host-network
-// weakens it; see BoundaryWeakenings' doc comment for why dind is never
+// weakens it; see BoundaryWeakening's doc comment for why dind is never
 // counted here).
 type NetworkPosture struct {
 	Mode     string `json:"mode"`
@@ -216,8 +217,10 @@ type EnvVarName struct {
 // (not create-time) environment variable NAME actually forwarded for this
 // agent/opts combination (mirrors Launch's execEnvArgs construction —
 // provider API keys are scoped per agent and only listed here when they
-// would actually be forwarded). Secret marks whether the variable's value is
-// sensitive (true for provider API keys); like EnvVarName, this type never
+// would actually be forwarded, and so are the names the user lists in
+// sandboxEnv.forward, #1016). Secret marks whether the variable's value is
+// sensitive (true for provider API keys and for every configured
+// sandboxEnv.forward name); like EnvVarName, this type never
 // carries the value itself.
 type ForwardedEnvVar struct {
 	Name   string `json:"name"`
@@ -252,10 +255,13 @@ type CredentialSource struct {
 }
 
 // BoundaryWeakening is one entry of Posture.BoundaryWeakenings: an opt-in
-// flag that weakens the container's isolation boundary from its
-// default-safe configuration. Today the only such flag is --host-network
-// (see assembleOptionalFeatures's own warning). dind is NEVER listed here —
-// see DindPosture's doc comment.
+// setting that weakens what crosses the container's boundary from its
+// default-safe configuration. Three kinds exist: the --host-network flag (see
+// assembleOptionalFeatures's own warning), a host Docker/Podman socket mount
+// (observed mode only), and each name in the user's sandboxEnv.forward config
+// that widens the forward set for the audited agent (#1016; Option is
+// "sandboxEnv.forward", one entry per name). dind is NEVER listed here — see
+// DindPosture's doc comment.
 type BoundaryWeakening struct {
 	Option string `json:"option"`
 	Active bool   `json:"active"`
@@ -332,11 +338,20 @@ type Posture struct {
 // malformed or unrecognized plugins value hard-fails Audit exactly like
 // Launch, never silently falling back to the default plugin pair.
 //
-// Audit resolves the secret-name set once and delegates to auditWithSecrets;
-// DryRun calls auditWithSecrets directly with the set its own launch context
-// already resolved, so argv redaction and the Posture share one set.
+// Audit loads the secret-name set once (loadSecretEnvSet: the built-in names
+// merged with the user fleet config's sandboxEnv.forward, #1016) and delegates
+// to auditWithSecrets; DryRun calls auditWithSecrets directly with the set its
+// own launch context already resolved, so argv redaction and the Posture share
+// one set. A malformed sandboxEnv.forward is returned unmodified as a hard
+// error (a plain, path-bearing, non-usage error, exit 1) before any runtime
+// call, exactly like the repo config failures above: an audit must never render
+// a report under an assumed built-in-only forward set.
 func (e *Engine) Audit(opts Options) (Posture, error) {
-	return e.auditWithSecrets(opts, resolveSecretEnvSet())
+	secrets, err := loadSecretEnvSet()
+	if err != nil {
+		return Posture{}, err
+	}
+	return e.auditWithSecrets(opts, secrets)
 }
 
 // auditWithSecrets is Audit's body, classifying and reporting secrets against
@@ -462,6 +477,10 @@ func buildPlannedPosture(agent string, scope Scope, home string, opts Options, d
 		imageType = ImageTypeRepo
 	}
 
+	// boundaryWeakenings is non-nil, so appending the configured forwards keeps
+	// an empty result a JSON [] and never null.
+	weakenings := append(boundaryWeakenings(featureArgs), configuredForwardWeakenings(agent, secrets)...)
+
 	return Posture{
 		Basis:    PostureBasisPlanned,
 		Agent:    agent,
@@ -482,7 +501,7 @@ func buildPlannedPosture(agent string, scope Scope, home string, opts Options, d
 		Env:                classifyEnvNames(allEnvArgs, secrets),
 		ForwardedEnv:       forwardedEnvVars(agent, secrets),
 		CredentialSources:  credentialSources(home, agent, stagedKinds),
-		BoundaryWeakenings: boundaryWeakenings(featureArgs),
+		BoundaryWeakenings: weakenings,
 
 		ReseedCreds: opts.ReseedCreds,
 	}
@@ -623,11 +642,11 @@ func isSecretEnvName(secrets secretEnvSet, name string) bool {
 
 // forwardedEnvVars reports the per-exec forwards assembleExecEnv would
 // actually make for agent that belong in a security/behavior posture — names
-// only, never values: the provider API keys (Secret:true, and only when the
-// corresponding host env var is actually set, matching assembleExecEnv's own
-// "only listed when they would actually be forwarded" behavior), plus the
-// non-secret posture forwards registered in postureEnvVarNames (Secret:false,
-// #1087).
+// only, never values: the provider API keys and the user's configured
+// sandboxEnv.forward names (Secret:true, and only when the corresponding host
+// env var is actually set, matching assembleExecEnv's own "only listed when
+// they would actually be forwarded" behavior), plus the non-secret posture
+// forwards registered in postureEnvVarNames (Secret:false, #1087).
 func forwardedEnvVars(agent string, secrets secretEnvSet) []ForwardedEnvVar {
 	envNames := classifyEnvNames(assembleExecEnv(agent, secrets), secrets)
 	forwarded := make([]ForwardedEnvVar, 0, len(envNames))
@@ -754,11 +773,12 @@ func networkPosture(featureArgs []string) NetworkPosture {
 	return NetworkPosture{Mode: NetworkModeBridge, Weakened: false}
 }
 
-// boundaryWeakenings reports every active opt-in isolation-weakening flag.
-// Today the only one is --host-network (see BoundaryWeakening's doc
+// boundaryWeakenings reports every active opt-in isolation-weakening FLAG.
+// Of the flags only --host-network exists (see BoundaryWeakening's doc
 // comment) — dind is deliberately never included here (see DindPosture's
-// doc comment). Returns a non-nil, zero-length slice (never a slice of
-// inactive entries, and never nil) when nothing is active, so the
+// doc comment), and the config-driven sandboxEnv.forward entries are added by
+// configuredForwardWeakenings. Returns a non-nil, zero-length slice (never a
+// slice of inactive entries, and never nil) when nothing is active, so the
 // default-safe baseline serializes as an explicitly empty JSON list ([])
 // rather than null.
 func boundaryWeakenings(featureArgs []string) []BoundaryWeakening {
@@ -771,6 +791,34 @@ func boundaryWeakenings(featureArgs []string) []BoundaryWeakening {
 		Active: true,
 		Effect: "the container joins the host network namespace instead of an isolated bridge network",
 	}}
+}
+
+// sandboxEnvForwardOption is the BoundaryWeakening.Option of a configured
+// sandboxEnv.forward entry.
+const sandboxEnvForwardOption = sandboxEnvForwardKey
+
+// configuredForwardWeakenings reports one BoundaryWeakening per
+// sandboxEnv.forward name that is actually forwarded to agent and that the
+// built-in set alone would not forward to it (#1016), in config order. A name
+// that is unset or empty on the host is not forwarded, so it adds nothing
+// (forwardedEnvVars lists only what would really be forwarded), and a built-in
+// name already forwarded to this agent by default widens nothing. Returns
+// nil when there is none, for the caller to append onto boundaryWeakenings'
+// non-nil base.
+func configuredForwardWeakenings(agent string, secrets secretEnvSet) []BoundaryWeakening {
+	builtin := builtinSecretEnvSet().forwardNames(agent)
+	var weakenings []BoundaryWeakening
+	for _, name := range secrets.configuredNames() {
+		if slices.Contains(builtin, name) || os.Getenv(name) == "" {
+			continue
+		}
+		weakenings = append(weakenings, BoundaryWeakening{
+			Option: sandboxEnvForwardOption,
+			Active: true,
+			Effect: fmt.Sprintf("host env var %s is forwarded into every agent exec session (user config %s)", name, sandboxEnvForwardKey),
+		})
+	}
+	return weakenings
 }
 
 // dindSourceForOpts attributes dindOn's decision to its input, mirroring

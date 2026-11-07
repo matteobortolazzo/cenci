@@ -2842,7 +2842,8 @@ performs (starting the events daemon on demand) that the read-only preview
 never performs itself; when that outcome can't be determined read-only, the
 create argv omits the wiring mounts and the report says so explicitly instead
 of claiming to be exact. Any forwarded secret env var (`OPENAI_API_KEY`,
-`ANTHROPIC_API_KEY`, `CONTEXT7_API_KEY`) renders as a bare `-e NAME` — no
+`ANTHROPIC_API_KEY`, `CONTEXT7_API_KEY`, or a name you configured in
+[`sandboxEnv.forward`](#forwarding-extra-host-env-vars-sandboxenvforward)) renders as a bare `-e NAME` — no
 `=value` at all, since the runtime CLI (docker/podman) resolves `NAME`
 client-side from its own inherited environment rather than from argv. This
 also means the value never appears in `ps` output while an attached session
@@ -2860,6 +2861,80 @@ trailing `--` forwarded-args section.
 argument `remote` routes to `cenci remote` instead; `cn -- remote` still forwards
 `remote` to the sandboxed agent. It is the one alias binary; the retired
 `cenci-sand` name is a tombstone that prints a migration map and exits 2.
+
+### Forwarding extra host env vars (`sandboxEnv.forward`)
+
+By default `cenci open` forwards only a built-in set of secret env var names
+(`CONTEXT7_API_KEY` to every agent, `ANTHROPIC_API_KEY` to opencode,
+`OPENAI_API_KEY` to codex and opencode). To forward more — a `TAVILY_API_KEY`
+for an MCP server, a private-registry `NPM_TOKEN` — list their **names** in a
+`sandboxEnv` block of your user fleet config, `$XDG_CONFIG_HOME/cenci/config.json`
+(else `~/.config/cenci/config.json`):
+
+```json
+{ "sandboxEnv": { "forward": ["TAVILY_API_KEY", "NPM_TOKEN"] } }
+```
+
+This is a new top-level block, separate from the fleet config's `"sandbox"`
+boolean (`cenci run`'s default), which is unchanged.
+
+- **Names only, never values.** The config stores names; each value is read
+  from the environment of the `cenci open` process at exec time and handed to
+  the runtime as a bare `-e NAME`, so it never enters argv or `ps` output. List
+  names only: a token pasted into the list is not a valid use, and a value made
+  only of letters, digits and `_` would pass the name check and be echoed in
+  the unset-name warning below.
+- **Name rules.** Each entry must match `^[A-Za-z_][A-Za-z0-9_]*$`. `TMUX_PANE`
+  and every `CENCI_*` name are reserved for the launcher and rejected. A name
+  listed twice is rejected. Naming a built-in (for example `OPENAI_API_KEY`)
+  is accepted: it is forwarded once, in the built-in's position, and to every
+  agent rather than only the agents it is scoped to by default.
+- **Per-exec, every agent.** Configured names are never on the container
+  create argv; they ride only on the attach (`exec`) argv, for every agent. The
+  file is re-read on every `cenci open`, so an edit takes effect on the next
+  attach to an already-running container without recreating it, and a name that
+  is unset or empty at that moment is simply not forwarded.
+- **Always secret.** Every configured name is classified secret whatever its
+  suffix: `--dry-run` renders it as a bare `-e NAME` with no value, and
+  `cenci audit --json` lists it under `forwardedEnv` with `"secret": true`.
+  Each name that is actually forwarded and that the built-in set would not
+  already forward to the audited agent is also reported as a boundary
+  weakening (see [`cenci audit`](#effective-security-posture-cenci-audit)).
+- **Unset names warn, never fail.** A configured name that is unset or empty
+  in the launcher's environment prints one line per name to stderr on
+  `cenci open` and `cenci open --dry-run`, and the launch proceeds without it:
+  `Warning: <NAME> is listed in sandboxEnv.forward but is unset or empty in this environment; not forwarding it`.
+  `cenci audit` lists only what would actually be forwarded, so it stays silent.
+- **Fail-closed config errors.** A malformed list never launches without it.
+  `cenci open`, `cenci open --dry-run` and `cenci audit` exit 1 before any
+  container-runtime call, with an error naming the config path, for an
+  unreadable file, unparsable JSON, a non-object top level or `sandboxEnv`, a
+  non-array `forward`, a non-string element, or an invalid, reserved or
+  duplicate name. The entry-level errors read
+  `<path>: sandboxEnv.forward entry "--privileged" is not a valid environment variable name (must match ^[A-Za-z_][A-Za-z0-9_]*$)`,
+  `<path>: sandboxEnv.forward entry "CENCI_ATTENDED" is reserved for the launcher` and
+  `<path>: sandboxEnv.forward names "NPM_TOKEN" as a duplicate`. An entry
+  containing `=` is a mistake that would otherwise leak a value, so it is
+  reported with everything after the first `=` redacted:
+  `<path>: sandboxEnv.forward entry "FOO=<redacted>" must be an environment variable name, not NAME=value; the config stores names only`.
+  An absent file, an absent `sandboxEnv` or `forward` key, `null`, and `[]` all
+  mean "built-in set only", with no error and no warning.
+- **Any unreadable or unparsable fleet config now fails `open` and `audit`.**
+  `cenci open` and `cenci audit` read this file on every run and exit 1 when it
+  cannot be read or is not valid JSON, even if the broken part has nothing to do
+  with `sandboxEnv`. Previously `cenci open` ignored an unparsable fleet
+  config; fix or remove the file to proceed.
+- **User scope only.** The list is read from the user fleet config alone,
+  never from the repo's `.cenci/config.json`: a repo-committed list would arrive
+  via a pull request and could forward your own credentials to an agent. It is
+  honored in every workspace scope, including outside a git repo.
+- **Names that override the container.** Names such as `PATH`, `HOME` or
+  `LD_PRELOAD` are allowed, and a forwarded value replaces the container's own
+  value for that exec session. Forward only variables you intend the agent to
+  see.
+
+See [SECURITY.md](../SECURITY.md#opt-in-weakenings) for the threat-model
+rationale.
 
 ## Native remote control (`cenci remote`, `cn remote`)
 
@@ -3020,10 +3095,14 @@ On a host that can never register `sysbox-runc` (macOS), that section
 reports `source: platform-unsupported` with a note explaining why — an off
 state deliberately distinct from the plain `off` a repo that never asked for
 dind reports.
-Only `--host-network` is reported as a **boundary weakening**, and the text
-report visually marks it (`⚠`) instead of burying it in a flat list; the
-default-safe baseline (no weakenings active) is reported explicitly, not
-just omitted.
+`--host-network`, and each
+[`sandboxEnv.forward`](#forwarding-extra-host-env-vars-sandboxenvforward) name
+that would actually be forwarded and that the built-in set alone would not
+forward to the audited agent (`option: "sandboxEnv.forward"`, one entry per
+name, in both `basis:"planned"` and `basis:"running"`), are reported as
+**boundary weakenings**, and the text report visually marks them (`⚠`) instead of
+burying them in a flat list; the default-safe baseline (no weakenings active)
+is reported explicitly, not just omitted.
 
 `cenci audit --json` emits the same data with stable field names
 (`basis`, `agent`, `scope`, `image`, `workspace`, `network`, `dind`,
@@ -3066,8 +3145,11 @@ with `secret:true`, the same classification forwarded exec env already had.
 under `forwardedEnv`, not `env`; the key shapes are unchanged.
 
 Like `diagnose`, `audit` is read-only and exits 0 on a successful render;
-only usage errors (e.g. `--dind` with `--no-dind`, or `--dind` outside a
-repo-scoped session) exit 2.
+usage errors (e.g. `--dind` with `--no-dind`, or `--dind` outside a
+repo-scoped session) exit 2, and a config error exits 1 before any
+container-runtime call: a malformed `sandboxEnv.forward` list, or any
+unreadable or unparsable user fleet config (see
+[Forwarding extra host env vars](#forwarding-extra-host-env-vars-sandboxenvforward)).
 
 ## Explain the security posture (`cenci security explain`)
 
