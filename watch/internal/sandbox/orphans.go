@@ -6,12 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"os/exec"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/tmux"
 )
 
 // reapScanScript is the minimal POSIX in-container scan (originally ported
@@ -84,61 +85,12 @@ done`
 // value is malformed and never signaled.
 var panePattern = regexp.MustCompile(`^%[0-9]+$`)
 
-// socketPattern validates a CENCI_TMUX_SOCKET value before it is ever passed
-// to `tmux -S` (#1007): an absolute path, containing no tab or newline
-// (mirrors panePattern's shape-validation style), and length-bounded so a
-// pathological value can't be used to overload the classification path
-// (Go's regexp repeat-count ceiling caps this at 1000). A
-// container process fully controls its own environ, so anything else is
-// malformed and — exactly like a missing socket — fails open: never
-// signaled, never passed to tmux (see legacyNoSocketNoteText's aggregated
-// diagnostic in launcher/reap_test.go).
-var socketPattern = regexp.MustCompile(`^/[^\t\n]{0,1000}$`)
-
-// tmuxEnvAllowlist is the minimal set of env vars a `tmux -S <path>` child
-// process needs to run correctly. tmux forwards its full process environment
-// to whatever server it connects to (the MSG_IDENTIFY_ENVIRON/
-// update-environment handshake), and CENCI_TMUX_SOCKET is attacker-controlled
-// — any container process can set it to point at a socket it controls. Rather
-// than scrubbing a couple of ambient vars (TMUX/TMUX_PANE) out of the full
-// os.Environ() and forwarding everything else, buildMinimalTmuxEnv builds an
-// explicit allowlisted env from scratch, so no secret ambient var (API keys,
-// tokens, ...) is ever available to hand to a hostile peer if a malformed
-// socket path does get dialed. This does not restrict *which* socket path
-// gets dialed (deferred to future #646 work per the plan's Risks section) —
-// only what's in that connection's environment.
-var tmuxEnvAllowlist = []string{"PATH", "HOME", "TERM", "LANG"}
-
-// buildMinimalTmuxEnv builds the child env for a `tmux -S <path>` process:
-// only the vars in tmuxEnvAllowlist, each included only if actually set in
-// the current process env (never fabricated). watch/docs/tmux.md documents
-// that unscoped tmux target resolution honors an ambient $TMUX_PANE; since
-// the scan always passes an explicit -S, TMUX/TMUX_PANE are never in the
-// allowlist and so are never forwarded — the reaper's own self-exec'd
-// invocation (internal/reap.ExecReaper) routinely carries a $TMUX_PANE that
-// doesn't exist on the socket being queried.
-func buildMinimalTmuxEnv() []string {
-	out := make([]string, 0, len(tmuxEnvAllowlist))
-	for _, key := range tmuxEnvAllowlist {
-		if v, ok := os.LookupEnv(key); ok {
-			out = append(out, key+"="+v)
-		}
-	}
-	return out
-}
-
-// tmuxQueryTimeout bounds the `tmux -S <socket> list-panes` call
-// resolveSocketLiveness makes: CENCI_TMUX_SOCKET is attacker-controlled, so a
-// peer that accepts the connection and never completes tmux's handshake must
-// never block a scan indefinitely. Mirrors internal/dispatch/mainsync.go's
-// gitTimeout/gitWaitDelay convention, scaled down for a local socket call
-// rather than a network one.
-const tmuxQueryTimeout = 5 * time.Second
-
-// tmuxQueryWaitDelay bounds how long Cmd.Wait can block after tmuxQueryTimeout's
-// context has already killed the process, in case a lingering grandchild keeps
-// the stdout/stderr pipes open (same rationale as mainsync.go's gitWaitDelay).
-const tmuxQueryWaitDelay = 2 * time.Second
+// A CENCI_TMUX_SOCKET value is validated with tmux.ValidSocket (the one
+// definition of the socket shape check, #1007) before it is ever passed to
+// `tmux -S`. A container process fully controls its own environ, so a malformed
+// value — exactly like a missing socket — fails open: never signaled, never
+// passed to tmux (see legacyNoSocketNoteText's aggregated diagnostic in
+// launcher/reap_test.go).
 
 // containerCmdTimeout bounds each container-runtime call the scan makes (`ps`
 // and the in-container `exec` scan), so a hung runtime daemon or a stuck
@@ -402,7 +354,7 @@ func (s *OrphanScanner) ScanContainer(ctx context.Context, rt, container string)
 		if r.PID == "1" || !panePattern.MatchString(r.Pane) {
 			continue
 		}
-		if !socketPattern.MatchString(r.Socket) {
+		if !tmux.ValidSocket(r.Socket) {
 			continue
 		}
 		if _, err := s.resolveSocketLiveness(ctx, r.Socket); err != nil {
@@ -444,11 +396,11 @@ func (s *OrphanScanner) classify(r OrphanScanRow) OrphanRowClass {
 	// open — a container process fully controls its own
 	// environ, and a false kill here is irreversible loss of
 	// in-flight agent work. Never passed to tmux.
-	if !socketPattern.MatchString(r.Socket) {
+	if !tmux.ValidSocket(r.Socket) {
 		return OrphanNoSocket
 	}
 
-	// A socket that passed socketPattern above is always resolved
+	// A socket that passed tmux.ValidSocket above is always resolved
 	// in ScanContainer's pre-resolve loop before classification runs (same
 	// pid/pane/socket guards), so this cache-miss branch is
 	// currently unreachable — defensive against future drift, so
@@ -492,11 +444,11 @@ const socketListFormat = "#{pane_id}\t#{" + PaneOptionLaunchID + "}"
 // (socketListFormat; a line with no tab or an empty second column is a pane
 // with no ID; a non-empty line whose pane part is not a pane id, or whose
 // second column is non-empty but fails ValidLaunchID, is an unexpected tmux
-// format and hard-fails like any other tmux resolution error), run with a minimal
-// allowlisted env (buildMinimalTmuxEnv) so no ambient secret is ever
-// available to hand to a hostile peer, and bounded by tmuxQueryTimeout/
-// tmuxQueryWaitDelay (and the caller's ctx) so a peer that never completes the
-// handshake can't block a scan indefinitely. A "no server running" stderr
+// format and hard-fails like any other tmux resolution error), run through
+// tmux.RunSocket: a minimal allowlisted env so no ambient secret is ever
+// available to hand to a hostile peer, and bounded by its timeout and WaitDelay
+// (and the caller's ctx) so a peer that never completes the handshake can't
+// block a scan indefinitely. A "no server running" stderr
 // substring resolves to an empty live set (every pane on that socket is
 // therefore an orphan) with a per-socket "Note:" retaining the existing "No
 // tmux server detected" substring pinned by tests/reap-orphans.test.sh case 5;
@@ -511,18 +463,11 @@ func (s *OrphanScanner) resolveSocketLiveness(ctx context.Context, socket string
 		return sl, nil
 	}
 
-	cctx, cancel := context.WithTimeout(ctx, tmuxQueryTimeout)
-	defer cancel()
-
 	var tmuxStdout, tmuxStderr bytes.Buffer
-	tmuxCmd := exec.CommandContext(cctx, "tmux", "-S", socket, "list-panes", "-a", "-F", socketListFormat)
-	tmuxCmd.Stdout = &tmuxStdout
-	tmuxCmd.Stderr = &tmuxStderr
-	tmuxCmd.Env = buildMinimalTmuxEnv()
-	tmuxCmd.WaitDelay = tmuxQueryWaitDelay
+	runErr := tmux.RunSocket(ctx, socket, &tmuxStdout, &tmuxStderr, "list-panes", "-a", "-F", socketListFormat)
 
 	sl := socketLiveness{live: map[string]bool{}, launchIDs: map[string]bool{}}
-	if err := tmuxCmd.Run(); err == nil {
+	if runErr == nil {
 		for _, line := range SplitLines(tmuxStdout.String()) {
 			if line == "" {
 				continue
@@ -550,7 +495,7 @@ func (s *OrphanScanner) resolveSocketLiveness(ctx context.Context, socket string
 	} else {
 		errText := strings.TrimRight(tmuxStderr.String(), "\n")
 		_, _ = fmt.Fprintf(s.stderr, "Error: failed to query tmux panes on %q: %q\n", socket, errText)
-		return socketLiveness{}, fmt.Errorf("tmux -S %s list-panes: %w%s", logSafeText(socket), classifyExecTimeout(cctx, err), stderrSuffix(&tmuxStderr))
+		return socketLiveness{}, fmt.Errorf("tmux -S %s list-panes: %w%s", logSafeText(socket), runErr, stderrSuffix(&tmuxStderr))
 	}
 
 	s.socketCache[socket] = sl

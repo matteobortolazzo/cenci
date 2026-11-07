@@ -56,7 +56,7 @@ func (f *Frontend) OnEvent(sess *frontend.SessionState, event ipc.HookEvent) fro
 	pane := sess.TmuxPane
 
 	// Call ListPanes once for the entire event.
-	panes, err := f.client.ListPanes()
+	panes, err := f.client.ListPanes("")
 	if err != nil {
 		if f.cfg.Verbose {
 			log.Printf("event: error listing panes for %s: %v", pane, err)
@@ -187,7 +187,7 @@ func (f *Frontend) OnSessionEnd(sess *frontend.SessionState) {
 	}
 	pane := sess.TmuxPane
 
-	panes, err := f.client.ListPanes()
+	panes, err := f.client.ListPanes("")
 	if err != nil {
 		if f.cfg.Verbose {
 			log.Printf("event: error listing panes for %s: %v", pane, err)
@@ -253,7 +253,7 @@ func (f *Frontend) OnSessionHandoff(sess *frontend.SessionState) {
 		return
 	}
 
-	panes, err := f.client.ListPanes()
+	panes, err := f.client.ListPanes("")
 	if err != nil {
 		if f.cfg.Verbose {
 			log.Printf("event: error listing panes for %s: %v", sess.TmuxPane, err)
@@ -301,7 +301,7 @@ func (f *Frontend) Sweep(sessions map[string]*frontend.SessionState) []frontend.
 		return nil
 	}
 
-	panes, err := f.client.ListPanes()
+	panes, err := f.client.ListPanes("")
 	if err != nil {
 		if f.cfg.Verbose {
 			log.Printf("sweep: error listing panes: %v", err)

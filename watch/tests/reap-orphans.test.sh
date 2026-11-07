@@ -335,7 +335,7 @@ ln -s docker "${BIN_DIR}/podman"
 # live panes.
 #
 # #1007 review fix: the reap binary now runs this process under a minimal,
-# explicit allowlisted env (buildMinimalTmuxEnv, reap.go) that forwards only
+# explicit allowlisted env (minimalEnv, internal/tmux/socket.go) that forwards only
 # PATH/HOME/TERM/LANG -- an ambient MOCK_TMUX_MODE*/MOCK_LIVE_PANES* export
 # (or even CALLS_FILE) set only in the parent test script's own process can
 # no longer reach this process. CALLS_FILE is therefore baked in as a literal
@@ -431,7 +431,7 @@ source "${REPO_ROOT}/sandbox/tests/lib/assert.sh"
 # TMUX_MODE_CENCI, LIVE_PANES_CENCI) to a file under $HOME, read back by the
 # mock tmux script's own mock_get (#1007 review fix): the reap binary now
 # runs the tmux child under a minimal, explicit allowlisted env
-# (buildMinimalTmuxEnv, watch/internal/sandbox/launcher/reap.go) that never
+# (minimalEnv, watch/internal/tmux/socket.go) that never
 # forwards arbitrary ambient vars, so a MOCK_TMUX_MODE*/MOCK_LIVE_PANES*
 # export set only in this test script's own process can no longer reach the
 # mock tmux process -- the file travels via $HOME instead, which IS in that

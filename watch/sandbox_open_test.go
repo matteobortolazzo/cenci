@@ -547,18 +547,26 @@ func fakeTmuxLogPath(dir string) string {
 	return filepath.Join(dir, "tmux-calls.txt")
 }
 
+// fakeTmuxFailMarkerPath is the file whose existence makes writeFakeTmux's
+// fake fail every call.
+func fakeTmuxFailMarkerPath(dir string) string {
+	return filepath.Join(dir, "tmux-fail")
+}
+
 // writeFakeTmux writes a fake `tmux` to dir so the real /usr/bin/tmux (which
 // sits on the same `PATH=<dir>:/usr/bin:/bin` the open tests use) can never
 // tag a developer's real pane when the launcher records its launch ID
 // (#1252, watch/docs/test-isolation.md). It appends each invocation's argv
-// (space-joined) to fakeTmuxLogPath(dir) and exits 0; a non-empty
-// FAKE_TMUX_SET_FAIL makes every call fail, to exercise the launcher's
-// "no launch ID, warn" fallback.
+// (space-joined) to fakeTmuxLogPath(dir) and exits 0; the presence of
+// fakeTmuxFailMarkerPath(dir) makes every call fail, to exercise the launcher's
+// "no launch ID, warn" fallback. The switch is a file, not an env var: a
+// socket-carrying tmux call runs with only {PATH, HOME, TERM, LANG}, so a
+// test-only variable never reaches the fake.
 func writeFakeTmux(t *testing.T, dir string) {
 	t.Helper()
 	body := `#!/bin/sh
 printf '%s\n' "$*" >> ` + exectest.ShellQuote(fakeTmuxLogPath(dir)) + `
-if [ -n "${FAKE_TMUX_SET_FAIL:-}" ]; then
+if [ -e ` + exectest.ShellQuote(fakeTmuxFailMarkerPath(dir)) + ` ]; then
   echo "fake tmux: set-option refused" >&2
   exit 1
 fi
@@ -1927,8 +1935,12 @@ func TestOpen_LaunchID_FailedPaneTagInjectsNoIDAndWarns(t *testing.T) {
 				stageCodexAuth(t, home)
 			}
 
+			if err := os.WriteFile(fakeTmuxFailMarkerPath(fakeDir), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+
 			cmd := exec.Command(binaryPath, "open", agent.token)
-			cmd.Env = append(env, "FAKE_TMUX_SET_FAIL=1")
+			cmd.Env = env
 			cmd.Dir = t.TempDir()
 			output, err := cmd.CombinedOutput()
 			if err != nil {
@@ -1942,6 +1954,14 @@ func TestOpen_LaunchID_FailedPaneTagInjectsNoIDAndWarns(t *testing.T) {
 					t.Errorf("attach argv carries %s although tagging the pane failed:\n%s", name, got)
 				}
 			}
+			// The fake tmux must have been reached and refused the first tag
+			// (@cenci-container, the first option set); any other failure (the
+			// fake missing from PATH, a malformed socket) would otherwise pass.
+			tmuxLines := callLogLines(t, fakeTmuxLogPath(fakeDir))
+			const firstTag = "-S /tmp/tmux-1000/cenci set-option -p -t %7 -- @cenci-container "
+			if len(tmuxLines) != 1 || !strings.HasPrefix(tmuxLines[0], firstTag) {
+				t.Errorf("fake tmux calls = %q, want exactly one line starting %q", tmuxLines, firstTag)
+			}
 			var warnings []string
 			for _, line := range strings.Split(string(output), "\n") {
 				if strings.HasPrefix(line, "Warning: could not record ") {
@@ -1950,6 +1970,8 @@ func TestOpen_LaunchID_FailedPaneTagInjectsNoIDAndWarns(t *testing.T) {
 			}
 			if len(warnings) != 1 {
 				t.Errorf("want exactly one single-line tagging warning, got %d in output:\n%s", len(warnings), output)
+			} else if !strings.Contains(warnings[0], "fake tmux: set-option refused") {
+				t.Errorf("warning does not carry the fake tmux's refusal text:\n%s", warnings[0])
 			}
 		})
 	}

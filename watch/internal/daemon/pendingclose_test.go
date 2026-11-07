@@ -629,7 +629,7 @@ type targetKiller struct {
 	killed chan string
 }
 
-func (k *targetKiller) KillWindow(target string) error {
+func (k *targetKiller) KillWindow(_, target string) error {
 	k.killed <- target
 	return nil
 }

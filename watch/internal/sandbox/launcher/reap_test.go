@@ -20,14 +20,14 @@ import (
 // pattern every fake-tmux shell snippet below uses in place of an inherited
 // FAKE_* env var. Uses the `read` shell builtin rather than `cat`: production
 // now runs the tmux child with a minimal, single-directory PATH (the test's
-// fake-binary dir, via buildMinimalTmuxEnv), which has no external `cat` on
+// fake-binary dir, via tmux.RunSocket's minimalEnv), which has no external `cat` on
 // it — only a builtin can be relied on to read the file back.
 const readFakeCfg = `read_fake_cfg() { if [ -f "$HOME/$1" ]; then IFS= read -r rfc_val < "$HOME/$1"; printf '%s' "$rfc_val"; else printf '%s' "$2"; fi; }`
 
 // writeFakeTmuxValue writes a fake-tmux configuration value (e.g.
 // FAKE_LIVE_PANES) to a file under dir, read back via readFakeCfg (#1007
 // review fix: production now runs the tmux child under a minimal, explicit
-// allowlisted env — buildMinimalTmuxEnv, in internal/sandbox/orphans.go — that never forwards
+// allowlisted env — minimalEnv, in internal/tmux/socket.go — that never forwards
 // arbitrary ambient vars, so a FAKE_* test knob set only via t.Setenv can no
 // longer reach the fake tmux process; the file travels via $HOME instead,
 // which IS in that allowlist).

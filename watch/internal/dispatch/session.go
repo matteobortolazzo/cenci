@@ -70,7 +70,7 @@ func gateSessions(decisions []Decision, sessionByRepo map[string]string, ctrl ru
 			continue
 		}
 
-		live, err := ctrl.HasSession(session)
+		live, err := ctrl.HasSession("", session)
 		if err != nil {
 			skip[repo] = true
 			errs = append(errs, ErrSessionMissing)

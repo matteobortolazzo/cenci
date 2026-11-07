@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"slices"
@@ -33,16 +34,19 @@ func (p PaneInfo) WindowTarget() string {
 	return fmt.Sprintf("%s:%s", p.SessionName, p.WindowIndex)
 }
 
-// Client is the interface for interacting with tmux.
+// Client is the interface for interacting with tmux. Every method takes the
+// tmux socket it targets as its first argument: an empty socket is the ambient
+// server (bare `tmux`, the full ambient environment), a non-empty one goes
+// through RunSocket (`tmux -S <socket>`, shape-checked, allowlisted env).
 type Client interface {
-	ListPanes() ([]PaneInfo, error)
-	RenameWindow(target string, name string) error
-	SetWindowOption(target string, key string, value string) error
-	GetWindowOption(target string, key string) (string, error)
+	ListPanes(socket string) ([]PaneInfo, error)
+	RenameWindow(socket, target string, name string) error
+	SetWindowOption(socket, target string, key string, value string) error
+	GetWindowOption(socket, target string, key string) (string, error)
 	// SetOption sets a session-wide (global) tmux option, e.g. for user
 	// variables like @cenci-headroom-<agent> that aren't scoped to a
 	// single window.
-	SetOption(key string, value string) error
+	SetOption(socket, key string, value string) error
 }
 
 // ExecClient implements Client by shelling out to the tmux binary.
@@ -50,26 +54,26 @@ type ExecClient struct{}
 
 const listFormat = "#{session_name}\t#{window_index}\t#{window_name}\t#{pane_index}\t#{pane_current_command}\t#{pane_title}\t#{pane_id}"
 
-func (c *ExecClient) ListPanes() ([]PaneInfo, error) {
-	out, err := tmuxCmd("list-panes", "-a", "-F", listFormat)
+func (c *ExecClient) ListPanes(socket string) ([]PaneInfo, error) {
+	out, err := tmuxCmd(socket, "list-panes", "-a", "-F", listFormat)
 	if err != nil {
 		return nil, err
 	}
 	return parsePanes(out), nil
 }
 
-func (c *ExecClient) RenameWindow(target string, name string) error {
-	_, err := tmuxCmd("rename-window", "-t", target, name)
+func (c *ExecClient) RenameWindow(socket, target string, name string) error {
+	_, err := tmuxCmd(socket, "rename-window", "-t", target, name)
 	return err
 }
 
-func (c *ExecClient) SetWindowOption(target string, key string, value string) error {
-	_, err := tmuxCmd("set-window-option", "-t", target, key, value)
+func (c *ExecClient) SetWindowOption(socket, target string, key string, value string) error {
+	_, err := tmuxCmd(socket, "set-window-option", "-t", target, key, value)
 	return err
 }
 
-func (c *ExecClient) GetWindowOption(target string, key string) (string, error) {
-	out, err := tmuxCmd("show-window-option", "-t", target, "-v", key)
+func (c *ExecClient) GetWindowOption(socket, target string, key string) (string, error) {
+	out, err := tmuxCmd(socket, "show-window-option", "-t", target, "-v", key)
 	if err != nil {
 		return "", err
 	}
@@ -77,25 +81,26 @@ func (c *ExecClient) GetWindowOption(target string, key string) (string, error) 
 }
 
 // SetOption sets a session-wide (global) tmux option.
-func (c *ExecClient) SetOption(key string, value string) error {
-	_, err := tmuxCmd("set-option", "-g", key, value)
+func (c *ExecClient) SetOption(socket, key string, value string) error {
+	_, err := tmuxCmd(socket, "set-option", "-g", key, value)
 	return err
 }
 
 // CurrentSession returns the name of the tmux session the caller's pane
-// belongs to, resolved via the inherited $TMUX_PANE environment variable.
-// It errors when $TMUX_PANE is unset/blank (no tmux pane context) or when
-// it names a pane that no longer exists.
+// belongs to, resolved via the inherited $TMUX_PANE environment variable (read
+// in-process, so it is the -t target even when a non-empty socket scrubs the
+// child env). It errors when $TMUX_PANE is unset/blank (no tmux pane context) or
+// when it names a pane that no longer exists.
 //
 // These launcher-facing methods are intentionally kept OFF the daemon-facing
 // Client interface so the frontend seam stays unchanged; the run package
 // defines its own small consumer interface that *ExecClient satisfies.
-func (c *ExecClient) CurrentSession() (string, error) {
+func (c *ExecClient) CurrentSession(socket string) (string, error) {
 	pane := strings.TrimSpace(os.Getenv("TMUX_PANE"))
 	if pane == "" {
 		return "", fmt.Errorf("TMUX_PANE is not set; not running inside a tmux pane")
 	}
-	out, err := tmuxCmd("display-message", "-t", pane, "-p", "#{session_name}")
+	out, err := tmuxCmd(socket, "display-message", "-t", pane, "-p", "#{session_name}")
 	if err != nil {
 		return "", err
 	}
@@ -112,8 +117,8 @@ func (c *ExecClient) CurrentSession() (string, error) {
 // IsGroupedSession reports whether the given exact session target is part of
 // a session group. New windows propagate to every session in a group, so the
 // launcher refuses to spawn into one.
-func (c *ExecClient) IsGroupedSession(session string) (bool, error) {
-	out, err := tmuxCmd("display-message", "-t", session, "-p", "#{session_grouped}")
+func (c *ExecClient) IsGroupedSession(socket, session string) (bool, error) {
+	out, err := tmuxCmd(socket, "display-message", "-t", session, "-p", "#{session_grouped}")
 	if err != nil {
 		return false, err
 	}
@@ -124,8 +129,8 @@ func (c *ExecClient) IsGroupedSession(session string) (bool, error) {
 // target running shellCommand. shellCommand is passed to tmux as a single
 // argument, so it must already be a valid shell command line (see
 // run.shellJoin).
-func (c *ExecClient) NewWindow(session, name, shellCommand string) error {
-	_, err := tmuxCmd("new-window", "-d", "-t", session+":", "-n", name, shellCommand)
+func (c *ExecClient) NewWindow(socket, session, name, shellCommand string) error {
+	_, err := tmuxCmd(socket, "new-window", "-d", "-t", session+":", "-n", name, shellCommand)
 	return err
 }
 
@@ -136,12 +141,17 @@ func (c *ExecClient) NewWindow(session, name, shellCommand string) error {
 // session, or no server running at all) classifies as (false, nil): a normal
 // negative result, not a probe failure. A failure to run tmux at all (e.g.
 // the binary isn't resolvable) is a distinct (false, non-nil error)
-// classification, kept off the daemon-facing Client interface for the same
-// launcher/consumer-facing reason as CurrentSession/IsGroupedSession/NewWindow
-// above.
-func (c *ExecClient) HasSession(session string) (bool, error) {
-	_, err := tmuxCmd("has-session", "-t", "="+session)
+// classification, and so is a timeout of a socket-carrying call: a context kill
+// surfaces as an *exec.ExitError ("signal: killed"), so the deadline is checked
+// first and a hung server never reads as "no such session". Kept off the
+// daemon-facing Client interface for the same launcher/consumer-facing reason as
+// CurrentSession/IsGroupedSession/NewWindow above.
+func (c *ExecClient) HasSession(socket, session string) (bool, error) {
+	_, err := tmuxCmd(socket, "has-session", "-t", "="+session)
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return false, err
+		}
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
 			return false, nil
@@ -163,8 +173,8 @@ func (c *ExecClient) HasSession(session string) (bool, error) {
 // launcher/consumer-facing capability, not part of the daemon frontend seam.
 // Consumers that only need to kill a window define their own small interface
 // (see internal/closecmd.windowKiller) rather than growing Client.
-func (c *ExecClient) KillWindow(target string) error {
-	_, err := windowCmd("kill-window", "-t", target)
+func (c *ExecClient) KillWindow(socket, target string) error {
+	_, err := windowCmd(socket, "kill-window", "-t", target)
 	return err
 }
 
@@ -186,31 +196,37 @@ func isMissingTarget(stderr string) bool {
 }
 
 // windowCmdTimeout bounds one window-scoped tmux call (list-panes, kill-window)
-// so a wedged tmux server can never stall the close path indefinitely; the
-// matching WaitDelay covers a lingering grandchild holding the output pipes.
-// windowCmdTimeout is a variable only so a test can shorten it.
+// and every socket-carrying call (RunSocket) so a wedged tmux server can never
+// stall a caller indefinitely; the matching WaitDelay covers a lingering
+// grandchild holding the output pipes. windowCmdTimeout is a variable only so a
+// test can shorten it.
 var windowCmdTimeout = 5 * time.Second
 
 const windowCmdWaitDelay = 2 * time.Second
 
-// windowCmd runs `tmux <args...>` against the ambient server with
-// windowCmdTimeout. A missing-target failure wraps ErrWindowGone; tmux's own
-// message is kept in every error.
-func windowCmd(args ...string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), windowCmdTimeout)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, "tmux", args...)
+// windowCmd runs `tmux <args...>` with windowCmdTimeout: against the ambient
+// server for an empty socket, through RunSocket otherwise. A missing-target
+// failure wraps ErrWindowGone; tmux's own message is kept in every error.
+func windowCmd(socket string, args ...string) (string, error) {
 	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	cmd.WaitDelay = windowCmdWaitDelay
-	err := cmd.Run()
+	var err error
+	if socket == "" {
+		ctx, cancel := context.WithTimeout(context.Background(), windowCmdTimeout)
+		defer cancel()
+
+		cmd := exec.CommandContext(ctx, "tmux", args...)
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		cmd.WaitDelay = windowCmdWaitDelay
+		err = cmd.Run()
+		if err != nil && (ctx.Err() == context.DeadlineExceeded || errors.Is(err, exec.ErrWaitDelay)) {
+			err = errors.Join(err, context.DeadlineExceeded)
+		}
+	} else {
+		err = RunSocket(context.Background(), socket, &stdout, &stderr, args...)
+	}
 	if err == nil {
 		return stdout.String(), nil
-	}
-	if ctx.Err() == context.DeadlineExceeded || errors.Is(err, exec.ErrWaitDelay) {
-		err = errors.Join(err, context.DeadlineExceeded)
 	}
 	text := strings.TrimSpace(stderr.String())
 	switch {
@@ -242,9 +258,9 @@ const paneOwnedFormat = "#{pane_id}\t#{pane_pid}"
 const paneProcFields = 5
 
 // ListWindowPaneProcs lists the panes of the window at target with their pid
-// and recorded launch options, against the same ambient server KillWindow uses.
-// It returns the raw fields: validating their values is the caller's job. A
-// missing target wraps ErrWindowGone.
+// and recorded launch options, against the same server KillWindow targets (the
+// ambient one for an empty socket). It returns the raw fields: validating their
+// values is the caller's job. A missing target wraps ErrWindowGone.
 //
 // The options are user-writable and printed raw, so a newline or tab inside one
 // can forge extra, well-formed five-field rows with an attacker-chosen pane_pid.
@@ -257,8 +273,8 @@ const paneProcFields = 5
 // row neither hides nor shields its siblings. Only the trailing newline is
 // trimmed: a pane with unset options prints trailing TABs that TrimSpace would
 // swallow (watch/docs/tmux.md).
-func ListWindowPaneProcs(target string) ([]PaneProc, error) {
-	ownedOut, err := windowCmd("list-panes", "-t", target, "-F", paneOwnedFormat)
+func ListWindowPaneProcs(socket, target string) ([]PaneProc, error) {
+	ownedOut, err := windowCmd(socket, "list-panes", "-t", target, "-F", paneOwnedFormat)
 	if err != nil {
 		return nil, err
 	}
@@ -266,7 +282,7 @@ func ListWindowPaneProcs(target string) ([]PaneProc, error) {
 	if ownedOut == "" {
 		return nil, nil
 	}
-	optionOut, err := windowCmd("list-panes", "-t", target, "-F", paneProcFormat)
+	optionOut, err := windowCmd(socket, "list-panes", "-t", target, "-F", paneProcFormat)
 	if err != nil {
 		return nil, err
 	}
@@ -367,11 +383,11 @@ func ListLivePanes() ([]LivePane, error) {
 }
 
 func readLivePanes() ([]LivePane, error) {
-	windowOut, err := windowCmd("list-panes", "-a", "-F", liveWindowFormat)
+	windowOut, err := windowCmd("", "list-panes", "-a", "-F", liveWindowFormat)
 	if err != nil {
 		return nil, err
 	}
-	pathOut, err := windowCmd("list-panes", "-a", "-F", livePathFormat)
+	pathOut, err := windowCmd("", "list-panes", "-a", "-F", livePathFormat)
 	if err != nil {
 		return nil, err
 	}
@@ -434,49 +450,39 @@ func parseLiveRows(out string) (map[string]string, []string, error) {
 	return rows, order, nil
 }
 
-// setPaneOptionTimeout bounds one SetPaneOption call so a wedged tmux server
-// can never stall a sandbox launch indefinitely.
-const setPaneOptionTimeout = 5 * time.Second
-
-// setPaneOptionWaitDelay bounds how long Cmd.Wait can block after the timeout
-// has killed tmux, in case a lingering grandchild keeps the output pipes open
-// (watch/docs/go-gotchas.md).
-const setPaneOptionWaitDelay = 2 * time.Second
-
 // SetPaneOption sets the pane-scoped user option key (e.g. @cenci-launch-id)
 // on pane through the server at socket: `tmux -S <socket> set-option -p -t
 // <pane> -- <key> <value>`. Pane options need tmux 3.0+; on older tmux the
 // call fails and the caller decides how to degrade. The explicit -S and -t
 // mean it never depends on the ambient $TMUX/$TMUX_PANE ownership resolution
-// (watch/docs/tmux.md). The socket is the caller's own trusted $TMUX socket, so
-// unlike the reaper's queries against container-supplied sockets the child env
-// is inherited rather than allowlisted. A package function (not a method on
-// ExecClient or the daemon-facing Client interface): the sandbox launcher holds
-// no tmux client.
+// (watch/docs/tmux.md). It goes through RunSocket like every socket-carrying
+// call: the socket is shape-checked, the child env is the allowlist rather than
+// the full ambient environment, and the call is bounded by windowCmdTimeout plus
+// windowCmdWaitDelay. A package function (not a method on ExecClient or the
+// daemon-facing Client interface): the sandbox launcher holds no tmux client.
 func SetPaneOption(socket, pane, key, value string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), setPaneOptionTimeout)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, "tmux", "-S", socket, "set-option", "-p", "-t", pane, "--", key, value)
 	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	cmd.WaitDelay = setPaneOptionWaitDelay
-	err := cmd.Run()
+	err := RunSocket(context.Background(), socket, io.Discard, &stderr, "set-option", "-p", "-t", pane, "--", key, value)
 	if err == nil {
 		return nil
-	}
-	if ctx.Err() == context.DeadlineExceeded || errors.Is(err, exec.ErrWaitDelay) {
-		err = errors.Join(err, context.DeadlineExceeded)
 	}
 	return fmt.Errorf("tmux set-option %s: %w: %s", key, err, strings.TrimSpace(stderr.String()))
 }
 
-func tmuxCmd(args ...string) (string, error) {
-	cmd := exec.Command("tmux", args...)
+// tmuxCmd runs `tmux <args...>`: against the ambient server (no timeout, the
+// full ambient environment) for an empty socket, through RunSocket otherwise.
+func tmuxCmd(socket string, args ...string) (string, error) {
 	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
+	var err error
+	if socket == "" {
+		cmd := exec.Command("tmux", args...)
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		err = cmd.Run()
+	} else {
+		err = RunSocket(context.Background(), socket, &stdout, &stderr, args...)
+	}
+	if err != nil {
 		return "", fmt.Errorf("tmux %s: %w: %s", args[0], err, strings.TrimSpace(stderr.String()))
 	}
 	return stdout.String(), nil

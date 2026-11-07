@@ -39,7 +39,7 @@ type fakeKiller struct {
 	killed []string
 }
 
-func (f *fakeKiller) KillWindow(target string) error {
+func (f *fakeKiller) KillWindow(_, target string) error {
 	f.killed = append(f.killed, target)
 	return nil
 }

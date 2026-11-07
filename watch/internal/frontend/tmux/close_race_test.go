@@ -19,7 +19,7 @@ type closingClient struct {
 	closeAfterList bool
 }
 
-func (c *closingClient) ListPanes() ([]tmuxc.PaneInfo, error) {
+func (c *closingClient) ListPanes(string) ([]tmuxc.PaneInfo, error) {
 	panes := append([]tmuxc.PaneInfo(nil), c.Panes...)
 	if c.closeAfterList {
 		c.closeAfterList = false
@@ -44,20 +44,20 @@ func (c *closingClient) resolve(target string) (string, error) {
 	return "", fmt.Errorf("can't find pane: %s", target)
 }
 
-func (c *closingClient) RenameWindow(target, name string) error {
+func (c *closingClient) RenameWindow(socket, target, name string) error {
 	resolved, err := c.resolve(target)
 	if err != nil {
 		return err
 	}
-	return c.MockClient.RenameWindow(resolved, name)
+	return c.MockClient.RenameWindow(socket, resolved, name)
 }
 
-func (c *closingClient) SetWindowOption(target, key, value string) error {
+func (c *closingClient) SetWindowOption(socket, target, key, value string) error {
 	resolved, err := c.resolve(target)
 	if err != nil {
 		return err
 	}
-	return c.MockClient.SetWindowOption(resolved, key, value)
+	return c.MockClient.SetWindowOption(socket, resolved, key, value)
 }
 
 func TestClosingWindowDuringRestoreDoesNotResetSurvivor(t *testing.T) {
@@ -90,5 +90,35 @@ func TestClosingWindowDuringRestoreDoesNotResetSurvivor(t *testing.T) {
 	}
 	if wi := f.WindowInfo("1"); wi == nil || wi.WindowName != "second task" || wi.WindowIndex != "0" {
 		t.Errorf("survivor lost tracking after close: %+v", wi)
+	}
+}
+
+// #1428: the frontend still talks to the ambient server, so every tmux call it
+// makes carries the empty socket, and MockClient records one socket per call
+// (readable by tests) across ListPanes, RenameWindow, SetWindowOption and
+// SetOption.
+func TestFrontendCallsRecordTheEmptySocket(t *testing.T) {
+	mc := &tmuxtest.MockClient{Panes: []tmuxc.PaneInfo{
+		{SessionName: "main", WindowIndex: "0", WindowName: "docker", PaneCurrentCmd: "docker", PaneTitle: "◐ first task", PaneID: "%0"},
+	}}
+	f := New(config.Default(), mc)
+	sess := &frontend.SessionState{SessionID: "0", TmuxPane: "%0", Agent: "claude", Status: detect.StatusRunning}
+
+	f.OnEvent(sess, ipc.HookEvent{EventType: "PreToolUse", SessionID: "0"})
+	f.RenderHeadroom(map[string]float64{"claude": 0.5})
+	f.OnSessionEnd(sess)
+	f.Sweep(map[string]*frontend.SessionState{})
+
+	if mc.ListCalls == 0 || len(mc.Renames) == 0 || len(mc.WindowOpts) == 0 || len(mc.Opts) == 0 {
+		t.Fatalf("flow did not exercise every recorded call: list=%d renames=%d windowOpts=%d opts=%d",
+			mc.ListCalls, len(mc.Renames), len(mc.WindowOpts), len(mc.Opts))
+	}
+	if calls := mc.ListCalls + len(mc.Renames) + len(mc.WindowOpts) + len(mc.Opts); len(mc.Sockets) < calls {
+		t.Errorf("MockClient recorded %d sockets, want at least one per call (%d)", len(mc.Sockets), calls)
+	}
+	for i, socket := range mc.Sockets {
+		if socket != "" {
+			t.Errorf("call %d targeted socket %q, want the ambient server (empty socket)", i, socket)
+		}
 	}
 }

@@ -67,7 +67,7 @@ func TestCurrentSessionErrorsWithoutTmuxPane(t *testing.T) {
 	t.Setenv("TMUX_PANE", "")
 
 	client := &ExecClient{}
-	session, err := client.CurrentSession()
+	session, err := client.CurrentSession("")
 
 	if err == nil {
 		t.Fatalf("expected an error when TMUX_PANE is blank, got session %q", session)
@@ -98,7 +98,7 @@ func TestCurrentSessionErrorsWithStaleTmuxPane(t *testing.T) {
 	t.Setenv("TMUX_PANE", stalePane)
 
 	client := &ExecClient{}
-	session, err := client.CurrentSession()
+	session, err := client.CurrentSession("")
 
 	if err == nil {
 		t.Fatalf("expected an error when TMUX_PANE points at a nonexistent pane, got session %q", session)
@@ -146,7 +146,7 @@ func TestCurrentSessionTargetsTmuxPaneSession(t *testing.T) {
 	}
 
 	client := &ExecClient{}
-	session, err := client.CurrentSession()
+	session, err := client.CurrentSession("")
 	if err != nil {
 		t.Fatalf("CurrentSession() returned error: %v", err)
 	}
