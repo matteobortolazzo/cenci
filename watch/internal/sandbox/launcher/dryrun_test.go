@@ -123,10 +123,12 @@ func TestDryRun_AttachArgv_ContainsExecAgentFlagsAndForwardedArgs(t *testing.T) 
 // audit_test.go's TestAudit_SecretLeakRegression_NeverEmitsSecretValues: it
 // seeds real secret VALUES for the forwarded provider keys (never just
 // checking for non-empty output), then asserts WriteText's rendered argv
-// carries only the bare "-e CONTEXT7_API_KEY" token (ticket #759: the value
-// is supplied by the runtime CLI's own inherited environment, never argv --
-// so there is no "NAME=value" token left for renderArgv to redact) and never
-// leaks either sentinel value anywhere in the printed output.
+// carries only the bare "-e CONTEXT7_API_KEY" token, which comes from the
+// attach argv alone (since #1201 the create argv forwards no secret; ticket
+// #759: the value is supplied by the runtime CLI's own inherited environment,
+// never argv -- so there is no "NAME=value" token left for renderArgv to
+// redact) and never leaks either sentinel value anywhere in the printed
+// output.
 func TestDryRun_SecretLeakRegression_NeverEmitsForwardedSecretValues(t *testing.T) {
 	repo := newAuditTestRepo(t)
 	home := t.TempDir()
@@ -164,6 +166,60 @@ func TestDryRun_SecretLeakRegression_NeverEmitsForwardedSecretValues(t *testing.
 	}
 }
 
+// TestDryRun_WriteText_RedactsUserSuppliedSecretValueThroughResolvedSet runs
+// the real DryRun -> WriteText path with a user-supplied value-bearing
+// "-e OPENAI_API_KEY=<value>" pair in opts.AgentArgs (the one place a user's
+// own tokens reach the printed argv: launch.go appends AgentArgs verbatim to
+// the attach argv, and renderArgv inspects every "-e" pair). The launcher's
+// own forwards are bare "-e NAME" since #759, so this is the only real flow
+// where redactSecretEnv fires on printed output; it fails if DryRun stops
+// handing the resolved secret set to the plan (a zero-value set classifies
+// nothing, so the value would print unredacted). A non-secret pair must still
+// render literally.
+func TestDryRun_WriteText_RedactsUserSuppliedSecretValueThroughResolvedSet(t *testing.T) {
+	repo := newAuditTestRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Chdir(repo)
+
+	const hostOpenAI = "sentinel-host-openai-value"
+	const userSupplied = "sk-user-supplied-sentinel"
+	t.Setenv("OPENAI_API_KEY", hostOpenAI) // also satisfies codex's credential check
+	setFakeDockerNotRunning(t)
+
+	plan, err := dryRunEngine().DryRun(Options{
+		Agent:     "codex",
+		AgentArgs: []string{"-e", "OPENAI_API_KEY=" + userSupplied, "-e", "PLAIN_SETTING=visible-value"},
+	})
+	if err != nil {
+		t.Fatalf("DryRun: %v", err)
+	}
+
+	for _, name := range []string{"OPENAI_API_KEY", "CONTEXT7_API_KEY", "ANTHROPIC_API_KEY"} {
+		if !plan.secrets.Has(name) {
+			t.Errorf("DryRunPlan.secrets does not classify %s as a secret; DryRun must hand the resolved set to the plan", name)
+		}
+	}
+
+	var buf bytes.Buffer
+	if err := plan.WriteText(&buf); err != nil {
+		t.Fatalf("WriteText: %v", err)
+	}
+	out := buf.String()
+
+	if !strings.Contains(out, "OPENAI_API_KEY=<redacted>") {
+		t.Errorf("WriteText output missing the redacted OPENAI_API_KEY=<redacted> token, got:\n%s", out)
+	}
+	for _, leaked := range []string{userSupplied, hostOpenAI} {
+		if strings.Contains(out, leaked) {
+			t.Errorf("WriteText output leaks %q:\n%s", leaked, out)
+		}
+	}
+	if !strings.Contains(out, "-e PLAIN_SETTING=visible-value") {
+		t.Errorf("WriteText output redacted or dropped the non-secret pair, got:\n%s", out)
+	}
+}
+
 // TestRedactSecretEnv_DirectUnitTest is a direct unit test of
 // redactSecretEnv (ticket #759): after the bare "-e NAME" emission change,
 // this "NAME=value" redaction branch of renderArgv is no longer reachable
@@ -171,16 +227,16 @@ func TestDryRun_SecretLeakRegression_NeverEmitsForwardedSecretValues(t *testing.
 // emit the value-less form for secrets now), so it needs direct coverage to
 // avoid rotting untested.
 func TestRedactSecretEnv_DirectUnitTest(t *testing.T) {
-	got := redactSecretEnv("OPENAI_API_KEY=sk-cenci-test-secret")
+	got := redactSecretEnv("OPENAI_API_KEY=sk-cenci-test-secret", resolveSecretEnvSet())
 	want := "OPENAI_API_KEY=<redacted>"
 	if got != want {
 		t.Errorf("redactSecretEnv(%q) = %q, want %q", "OPENAI_API_KEY=sk-cenci-test-secret", got, want)
 	}
 
-	if got := redactSecretEnv("TERM=xterm-256color"); got != "TERM=xterm-256color" {
+	if got := redactSecretEnv("TERM=xterm-256color", resolveSecretEnvSet()); got != "TERM=xterm-256color" {
 		t.Errorf("redactSecretEnv(non-secret) = %q, want unchanged", got)
 	}
-	if got := redactSecretEnv("OPENAI_API_KEY"); got != "OPENAI_API_KEY" {
+	if got := redactSecretEnv("OPENAI_API_KEY", resolveSecretEnvSet()); got != "OPENAI_API_KEY" {
 		t.Errorf("redactSecretEnv(bare token, no '=') = %q, want unchanged", got)
 	}
 }

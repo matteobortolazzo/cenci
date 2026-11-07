@@ -50,6 +50,10 @@ Read this file on every run, after `phases/mcp-lsp-ui-questions.md` (see `SKILL.
    | `react` / `next` | `npx eslint .` | `npm run build` | `npm test -- --coverage --watchAll=false` |
    | `vue` | `npx eslint .` | `npm run build` | `npm run test:unit -- --coverage` |
 
+   **Lint column sync**: the Lint column is copied into the `LINT_MAP` block of `flow/hooks/scripts/check-lint-command.sh`, the detector for a missing `lintCommand`. Change both together; `flow/hooks/scripts/check-lint-command.test.sh` fails when they differ.
+
+   These commands run from the project's directory inside the worktree; the working-directory contract is in `references/config-schema.md`.
+
    **Package manager detection** (for Node-based stacks): use `detection.packageManager`. Manual fallback:
    - `pnpm-lock.yaml` → pnpm
    - `yarn.lock` → yarn

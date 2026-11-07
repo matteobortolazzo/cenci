@@ -46,6 +46,15 @@ jobs:
           fi
           printf 'enabled=%s\n' "$ENABLED" >> "$GITHUB_OUTPUT"
 
+      # The checker's gate-command check runs the flow gateCommand
+      # (flow/scripts/run-checks.sh), which includes flow/codex/hooks-launch.test.sh;
+      # under CI=true that suite fails, rather than skips, when a login shell is missing.
+      - name: Install login shells for hook launch tests
+        if: ${{ steps.maintenance-enabled.outputs.enabled == 'true' }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zsh fish
+
       # This step intentionally has no write-token environment. The checker receives only a
       # read-only checkout and writes its report to runner-local scratch state.
       - name: Run maintenance audit

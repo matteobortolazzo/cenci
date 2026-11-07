@@ -45,7 +45,7 @@ restoring autostashed edits is a failure too, even if Git's rebase command
 itself returned 0. Preserve the recovery stash until the edits are confirmed
 restored; never drop or blindly re-apply it.
 
-If rebase succeeds, rerun full build and tests, then lint (when `lintCommand` is set). An absent `lintCommand` skips the lint step cleanly — no error. If build, tests, or lint fail, stop and report the rebase-induced failure. Lint is an unconditional hard gate here, exactly like build/test: no PR is created if it fails.
+If rebase succeeds, rerun full build and tests, then lint (when `lintCommand` is set). An absent `lintCommand` skips the lint step cleanly — no error. If build, tests, or lint fail, stop and report the rebase-induced failure. Lint is an unconditional hard gate here, exactly like build/test: no PR is created if it fails. Run each from the project directory inside the worktree, per the working-directory contract in `skills/configure/references/config-schema.md`.
 
 A fetch/config error is reported as such, never treated as a conflict. If the
 helper fails because of conflicts, go to `## Rebase Conflicts` below.
@@ -395,6 +395,9 @@ A comment on this PR overrules a decision.
 ## Review
 <Review line — see below>
 
+## Model switches
+<Model switch lines — see below; omit this whole section when there are none>
+
 ## Screenshots
 _Temporary secret gist, not part of the repo — delete after merge: `gh gist delete <gist-id>`_
 
@@ -488,6 +491,15 @@ Any reported or deferred maintenance findings (from a `— reported` status) eac
 `## Size` is sourced from `$RUN_DIR/size.txt` (written by the `## Size` step above): always the `Size: <letter> (<files> files, <lines> lines) vs ticket <letter>` line, plus the flag line on a mismatch. If `$RUN_DIR` is unknown, re-run `scripts/pr-size.sh` directly for this entry — the measurement is cheap and read-only — rather than omitting the section; never write a size line from memory.
 
 `## Acceptance` is sourced from `$RUN_DIR/acceptance.md` and `$RUN_DIR/acceptance-verdict.txt` (Phase 6 + 7's `## Acceptance Review`, completed by the Screenshots step's gist evidence for a UI ticket): the reviewer's item table verbatim and the verdict line. In ticketless mode write `Acceptance: n/a (ticketless)`. If `$RUN_DIR` is unknown or the file is absent, write `Acceptance: unknown (RUN_DIR lost — the acceptance review could not be read back; verify manually before merge)` and the matching unchecked checklist line — mirroring the Review/Security "RUN_DIR lost" honesty rule, never a claimed pass. A `fail` verdict should not normally reach this phase (Phase 6 + 7 returns the run to implementation first); when it does (a UI ticket whose gist upload failed, or a re-entry in a fresh session), the table and its blocking rows are rendered honestly and the checklist line stays unchecked.
+
+`## Model switches` (Claude Code only) says when this run partly ran on a different model, for example after a flag-triggered fallback that no one saw in the transcript. It applies in ticket mode and in ticketless mode. Never write a model-switch line from memory, from the transcript, or from an earlier entry's body: run `cenci daemon model-switches` as its own Bash call each time this phase builds the PR body, and build the section from that run's output alone. The command reads `CLAUDE_CODE_SESSION_ID` itself, so it takes no argument and needs no command substitution. Re-run it on every re-entry into this phase, after the atomicity rule's restart at Rebase, because switches recorded since the earlier entry would otherwise be missing. Map its result as follows:
+
+- Exit `0` with output: copy each stdout line into the section verbatim, one per line. The forms are `Model switch: <from> → <to> (main session)` and `Model switch: <from> → <to> (subagent <agent_type>)`, plus a final `Model switch: +<n> more` line when the record held more switches than its cap. The command appends ` — fallback` only when the switch source is `auto`. Never reword, reorder, drop or add a line, and never add a fallback label yourself.
+- Exit `0` with empty output: the session recorded no switch, so omit the whole section.
+- Exit `1`: the record could not be read, the session id could not be resolved, or the command could not write its report to stdout. Write the literal line `Model switch status unknown` as the section's only line, and never copy whatever stdout held (after a failed write it can be partial or empty). Unknown means the record is unreadable, never that no fallback happened.
+- Any other outcome (exit `2`, a launch failure, an older `cenci` without the `model-switches` verb): treat it as unknown too and write `Model switch status unknown` as the section's only line, with no reason text.
+
+The section holds only those lines, which carry model ids and agent types the command already validated; add no payload content, evidence or commentary (#979). The record covers the session that runs this phase and its subagents, so a pipeline resumed in a fresh session or after `/clear` has a different session id and under-reports: earlier switches are not listed, and that is a documented gap, not an unknown. A Codex run never reaches this rule; see `codex.md`.
 
 ## Followup Ticket
 

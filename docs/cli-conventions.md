@@ -79,6 +79,7 @@ cenci <verb> [subverb] [args] [flags]
 | tmux server socket | `cenci` (`tmux -L cenci`), loaded with `-f "${XDG_CONFIG_HOME:-$HOME/.config}/cenci/tmux.conf"` (the installer-managed copy of `watch/plugin/tmux/tmux.conf`) |
 | Login service (systemd unit) | `cenci-watch.service` at `$XDG_CONFIG_HOME/systemd/user/cenci-watch.service` (default `~/.config/systemd/user/`); written by `cenci daemon install-service`, first line `# Managed by cenci daemon install-service` |
 | Login service (launchd label) | `io.github.matteobortolazzo.cenci-watch` (reverse DNS of the GitHub repo), plist at `~/Library/LaunchAgents/io.github.matteobortolazzo.cenci-watch.plist`; written by `cenci daemon install-service`, XML-comment marker on the line after `<?xml ...?>` |
+| Model switch records | `$XDG_STATE_HOME/cenci/model-switch/` (default `~/.local/state/cenci/model-switch/`): one `<session-id>` file of up to 8 `<unix-epoch> <source> <from> <to> <main\|subagent:<type>>` lines plus an optional `more <n>` line, and a `<session-id>.incomplete` marker after a failed write; written by `cenci notify` (Claude Code only) on a `PostModelSwitch` hook, read by `cenci daemon model-switches [--session <id>]` (session id defaults to `$CLAUDE_CODE_SESSION_ID`) |
 | Readiness marker | `/tmp/cenci-ready` (inside the container) |
 | Per-repo Dockerfile | `<repo-root>/.cenci/Dockerfile` |
 

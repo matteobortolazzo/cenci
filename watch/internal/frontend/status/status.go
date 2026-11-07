@@ -118,6 +118,43 @@ type output struct {
 	Alt      string               `json:"alt"`
 	Headroom map[string]float64   `json:"headroom,omitempty"`
 	Dispatch *watch.DispatchState `json:"dispatch,omitempty"`
+	// ModelSwitches (#1179) carries one entry per session that has model
+	// switches. Omitted when no session has one; the tooltip is unchanged.
+	ModelSwitches []SessionModelSwitches `json:"model_switches,omitempty"`
+}
+
+// SessionModelSwitches is the widget JSON entry for one session's model
+// switches: the window identity plus the switches the daemon kept and the count
+// past its cap.
+type SessionModelSwitches struct {
+	Session     string              `json:"session"`
+	WindowIndex string              `json:"window_index"`
+	WindowName  string              `json:"window_name"`
+	Switches    []watch.ModelSwitch `json:"switches"`
+	More        int                 `json:"more"`
+}
+
+// modelSwitchEntries collects the per-session model switch entries in window
+// order; a session with neither switches nor overflow contributes nothing.
+func modelSwitchEntries(windows []ipc.WindowState) []SessionModelSwitches {
+	var entries []SessionModelSwitches
+	for _, w := range windows {
+		if len(w.ModelSwitches) == 0 && w.ModelSwitchesMore == 0 {
+			continue
+		}
+		switches := w.ModelSwitches
+		if switches == nil {
+			switches = []watch.ModelSwitch{} // an overflow-only entry encodes [] not null
+		}
+		entries = append(entries, SessionModelSwitches{
+			Session:     w.Session,
+			WindowIndex: w.WindowIndex,
+			WindowName:  w.WindowName,
+			Switches:    switches,
+			More:        w.ModelSwitchesMore,
+		})
+	}
+	return entries
 }
 
 // Run connects to the IPC socket, reads one snapshot, prints Waybar JSON, and exits.
@@ -205,6 +242,8 @@ func Format(snap *ipc.StateSnapshot, cfg Config) output {
 		Tooltip: tooltip,
 		Class:   class,
 		Alt:     "active",
+
+		ModelSwitches: modelSwitchEntries(snap.Windows),
 	}
 
 	if len(snap.Headroom) > 0 {

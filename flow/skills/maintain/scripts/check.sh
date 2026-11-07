@@ -41,7 +41,11 @@
 # with one deliberate, documented exception: ticket #753 widens
 # check_context_budget itself into a cross-project check BODY — it now scans
 # the repo root plus every configured projects[].path (via PROJECT_PATHS),
-# not just $ROOT + $FLOW_DIR. Every other check body stays flow-scoped.
+# not just $ROOT + $FLOW_DIR. Ticket #1200 adds a second documented exception,
+# the lint-command check: it reports a missing lintCommand per configured
+# project (one (repo) result for a single-repo config) by delegating to the
+# bundled hooks/scripts/check-lint-command.sh, since a flow-only body would
+# always skip in this repo. Every other check body stays flow-scoped.
 set -uo pipefail
 
 # Force deterministic sort/glob ordering regardless of the invoking
@@ -94,6 +98,7 @@ SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || { echo "check.sh: fa
 RUN_GATE_SH="${SELF_DIR}/../../../hooks/scripts/run-gate.sh"
 STALENESS_SH="${SELF_DIR}/../../../hooks/scripts/check-config-staleness.sh"
 AGENT_ROLE_DRIFT_SH="${SELF_DIR}/../../../hooks/scripts/check-agent-role-drift.sh"
+LINT_COMMAND_SH="${SELF_DIR}/../../../hooks/scripts/check-lint-command.sh"
 
 MARKER_IDS=(skills agents workflow-deps docs-nav)
 
@@ -481,6 +486,8 @@ is_relevant() {
         case "$f" in .cenci/config.json) return 0 ;; esac ;;
       agent-roles)
         case "$f" in .codex/agents/*|flow/templates/codex/agent-roles/*) return 0 ;; esac ;;
+      lint-command)
+        case "$f" in .cenci/config.json|flow/hooks/scripts/check-lint-command.sh|flow/skills/configure/phases/runtime-ci-sandbox-questions.md) return 0 ;; esac ;;
       shell-syntax)
         case "$f" in *.sh) return 0 ;; esac ;;
       stale-generated|capability-table|adapter-drift)
@@ -1053,6 +1060,131 @@ check_config_version() {
       add_result config-version "(repo)" skip "could not determine config staleness (resolver said: ${out:-nothing})" ""
       ;;
   esac
+}
+
+# lint_safe_token <value> — prints the value when it is a charset-safe slug or
+# token (^[A-Za-z0-9._-]+$, or a resolver-owned placeholder), else (redacted).
+# Second layer over the resolver's own guard, as check_config_version re-checks
+# missing_keys: nothing from the resolver reaches a message unchecked.
+lint_safe_token() {
+  case "$1" in
+    '(repo)' | '(unknown)' | '(redacted)') printf '%s' "$1" ;;
+    '' | *[!A-Za-z0-9._-]*) printf '(redacted)' ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
+# lint_safe_list <a,b,...> — lint_safe_token applied to each comma-joined part.
+lint_safe_list() {
+  local value="$1" part out=""
+  local -a parts
+  [[ -n "$value" ]] || { printf '(redacted)'; return; }
+  IFS=',' read -r -a parts <<< "$value"
+  for part in "${parts[@]}"; do
+    out="${out:+${out},}$(lint_safe_token "$part")"
+  done
+  printf '%s' "$out"
+}
+
+# lint_safe_command <value> — a Stack-to-CI table command contains only these
+# characters; anything else from the resolver prints as (redacted).
+lint_safe_command() {
+  case "$1" in
+    '' | *[!A-Za-z0-9\ ._/=-]*) printf '(redacted)' ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
+# check_lint_command — does every project whose stack has a Lint row in the
+# Stack-to-CI table configure a lintCommand? (#1200) Delegated to
+# hooks/scripts/check-lint-command.sh --plain (the same script the SessionStart
+# advisory runs), so this check and the advisory can never disagree. One result
+# per resolver line: fail when the stack has a Lint row and lintCommand is
+# absent or empty, pass when it is set to any value, skip for no Lint row, no
+# stack, or any unreadable input. The check reads config only and executes no
+# configured command, so it also runs in --advisory mode. Never echoes the
+# configured lintCommand value.
+check_lint_command() {
+  local cfg="$ROOT/.cenci/config.json"
+  if [[ ! -f "$cfg" ]]; then
+    add_result lint-command "(repo)" skip "no .cenci/config.json — repo is not configured" ""
+    return
+  fi
+  if [[ ! -f "$LINT_COMMAND_SH" ]]; then
+    add_result lint-command "(repo)" skip "bundled check-lint-command.sh not found next to this checker" ""
+    return
+  fi
+  local out
+  out="$(cd "$ROOT" && bash "$LINT_COMMAND_SH" --plain 2>/dev/null)" || {
+    add_result lint-command "(repo)" skip "lint-command resolver failed" ""
+    return
+  }
+  local status target stack detail unknown=0 emitted=0
+  local safe_target safe_stack pair tok cmd suggestions bad fix_head reason
+  local -a pairs
+  while IFS=$'\t' read -r status target stack detail; do
+    [[ -n "$status" ]] || continue
+    case "$status" in
+      pass | fail | skip) ;;
+      *) unknown=1; continue ;;
+    esac
+    if [[ -z "$target" || -z "$stack" || -z "$detail" ]]; then
+      unknown=1
+      continue
+    fi
+    safe_target="$(lint_safe_token "$target")"
+    safe_stack="$(lint_safe_list "$stack")"
+    case "$status" in
+      pass)
+        add_result lint-command "$safe_target" pass \
+          "stack ${safe_stack} matches a Lint row and lintCommand is set" ""
+        emitted=$((emitted + 1))
+        ;;
+      skip)
+        case "$detail" in
+          no-lint-row) reason="stack ${safe_stack} has no Lint row in the Stack-to-CI table" ;;
+          no-stack) reason="no stack configured, so no Lint row applies" ;;
+          no-projects) reason="no projects configured to check" ;;
+          no-config) reason="no .cenci/config.json — repo is not configured" ;;
+          invalid-config) reason="could not read .cenci/config.json as a JSON object" ;;
+          no-jq) reason="jq is not available to the resolver" ;;
+          *) reason="resolver reported: $(lint_safe_token "$detail")" ;;
+        esac
+        add_result lint-command "$safe_target" skip "$reason" ""
+        emitted=$((emitted + 1))
+        ;;
+      fail)
+        suggestions=""
+        bad=0
+        IFS='|' read -r -a pairs <<< "$detail"
+        for pair in "${pairs[@]}"; do
+          if [[ "$pair" != *:* ]]; then
+            bad=1
+            break
+          fi
+          tok="$(lint_safe_token "${pair%%:*}")"
+          cmd="$(lint_safe_command "${pair#*:}")"
+          suggestions="${suggestions:+${suggestions}, and }\`${cmd}\` (for ${tok})"
+        done
+        if [[ "$bad" -eq 1 ]]; then
+          unknown=1
+          continue
+        fi
+        if [[ "$target" == "(repo)" ]]; then
+          fix_head="set top-level \`lintCommand\`"
+        else
+          fix_head="set \`projects[].lintCommand\` for '${safe_target}'"
+        fi
+        add_result lint-command "$safe_target" fail \
+          "stack ${safe_stack} matches a Lint row in the Stack-to-CI table but lintCommand is absent or empty" \
+          "${fix_head} to ${suggestions}, or to the custom lint command CI runs"
+        emitted=$((emitted + 1))
+        ;;
+    esac
+  done <<< "$out"
+  if [[ "$unknown" -eq 1 || "$emitted" -eq 0 ]]; then
+    add_result lint-command "(repo)" skip "lint-command resolver output was not recognised" ""
+  fi
 }
 
 # check_agent_roles — do this repo's installed .codex/agents/*.toml files
@@ -2048,6 +2180,7 @@ main() {
   is_relevant invalid-json && check_invalid_json
   is_relevant config-version && check_config_version
   is_relevant agent-roles && check_agent_roles
+  is_relevant lint-command && check_lint_command
   is_relevant shell-syntax && check_shell_syntax
   is_relevant capability-table && check_capability_table
   is_relevant adapter-drift && check_adapter_drift

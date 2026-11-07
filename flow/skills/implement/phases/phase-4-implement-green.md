@@ -21,7 +21,7 @@ Pass:
 - Return evidence to the orchestrator after two failed attempts at the same unexplained defect, before spending the next attempt; do not delegate diagnosis yourself.
 - Attachment paths if relevant.
 - LSP diagnostic reminder if configured.
-- The resolved Verification command: the single lane's Verification cell (its `Tests:` value), split at `; lint: ` into the scoped test command and the optional scoped lint command, or its `full:` fallback with the reason. Tell the implementer to report with the `Verification (scoped)` or `Verification (full fallback)` format from `## Verification` below; the project's full build, test suite and lint are not passed here, they belong to Phase 5's Completed-Change Verification.
+- The resolved Verification command: the single lane's Verification cell (its `Tests:` value), split at `; lint: ` into the scoped test command and the optional scoped lint command, or its `full:` fallback with the reason. Tell the implementer to report with the `Verification (scoped)` or `Verification (full fallback)` format from `## Verification` below; the project's full build, test suite and lint are not passed here, they belong to Phase 5's Completed-Change Verification. The scoped command runs from the project directory inside the worktree, under the same working-directory contract in `skills/configure/references/config-schema.md`.
 - Resolved topic docs: at most 3 `docs/<topic>.md` paths matched to Files to Modify/Create.
 - The plan's `### Documentation Routing` section, verbatim.
 

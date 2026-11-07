@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"reflect"
 	"slices"
 	"strings"
 	"syscall"
@@ -838,7 +839,7 @@ func TestRun_DryRunAndSkippedWindowsNeverTouchProcesses(t *testing.T) {
 				}
 				want := tt.want
 				want.Window = snap.Windows[0]
-				if len(decisions) != 1 || decisions[0] != want {
+				if len(decisions) != 1 || !reflect.DeepEqual(decisions[0], want) {
 					t.Errorf("decisions = %+v, want [%+v]", decisions, want)
 				}
 				if len(killProcessCalls) != 0 {

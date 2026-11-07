@@ -6,6 +6,7 @@ import (
 
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/detect"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/ipc"
+	"github.com/matteobortolazzo/cenci/watch/v2/pkg/watch"
 )
 
 func (d *Daemon) broadcast() {
@@ -32,6 +33,9 @@ func (d *Daemon) buildSnapshot() ipc.StateSnapshot {
 			TaskName: sess.TaskName,
 			Status:   sess.Status.String(),
 			Agent:    sess.Agent,
+
+			ModelSwitches:     append([]watch.ModelSwitch(nil), sess.ModelSwitches...),
+			ModelSwitchesMore: sess.ModelSwitchesMore,
 		}
 		e := entry{sortKey: key, paneless: true}
 		if wi := d.frontend.WindowInfo(key); wi != nil {

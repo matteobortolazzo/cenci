@@ -67,6 +67,30 @@ type WindowState struct {
 	// ManuallyNamed reports whether the window name was set by the user rather
 	// than derived by cenci.
 	ManuallyNamed bool `json:"manually_named"`
+	// ModelSwitches lists the model switches Claude Code reported for the
+	// session (and its subagents), oldest first, capped by the daemon. It never
+	// influences Status. Omitted from the JSON when empty, so older NDJSON
+	// consumers are unaffected.
+	ModelSwitches []ModelSwitch `json:"model_switches,omitempty"`
+	// ModelSwitchesMore counts switches past the cap that are not listed.
+	// Omitted from the JSON when zero.
+	ModelSwitchesMore int `json:"model_switches_more,omitempty"`
+}
+
+// ModelSwitch is one model change reported by a Claude Code PostModelSwitch
+// hook. FromModel and ToModel hold a validated model id or the placeholder
+// "(invalid model id)"; AgentType is set only when Subagent is true.
+type ModelSwitch struct {
+	FromModel string `json:"from_model"`
+	ToModel   string `json:"to_model"`
+	// Source is the hook's source value ("auto" for a change Claude Code made on
+	// its own, such as the fallback after a flagged request), or "unknown".
+	Source    string `json:"source"`
+	Subagent  bool   `json:"subagent"`
+	AgentType string `json:"agent_type,omitempty"`
+	// Fallback is true only for Source "auto"; any other source keeps the
+	// neutral label.
+	Fallback bool `json:"fallback"`
 }
 
 // DispatchState describes the daemon-embedded fleet dispatch loop.

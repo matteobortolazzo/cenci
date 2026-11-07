@@ -202,10 +202,11 @@ type VolumePosture struct {
 // not "a Value field that happens to stay empty," an actual absence at the
 // type level, so a future accidental assignment can't silently reintroduce a
 // secret-leak regression through this type. Secret is a classification FLAG
-// only — never a value — reusing the same forwardedEnvVarNames source of
-// truth ForwardedEnv's Secret already uses (isSecretEnvName), so a
-// create-time name like CONTEXT7_API_KEY is marked secret consistently with
-// its forwarded-exec-env counterpart.
+// only — never a value — classified against the same resolved secret-name set
+// ForwardedEnv's Secret uses (isSecretEnvName). Since #1201 no built-in secret
+// is a create-time name (CONTEXT7_API_KEY is reported under ForwardedEnv, not
+// here), so for Env the classification is a guard: a secret name that ever
+// reappears in a create-time env arg is still marked secret.
 type EnvVarName struct {
 	Name   string `json:"name"`
 	Secret bool   `json:"secret"`
@@ -330,7 +331,17 @@ type Posture struct {
 // right after dind and passed into assembleEnv alongside dindOn: a
 // malformed or unrecognized plugins value hard-fails Audit exactly like
 // Launch, never silently falling back to the default plugin pair.
+//
+// Audit resolves the secret-name set once and delegates to auditWithSecrets;
+// DryRun calls auditWithSecrets directly with the set its own launch context
+// already resolved, so argv redaction and the Posture share one set.
 func (e *Engine) Audit(opts Options) (Posture, error) {
+	return e.auditWithSecrets(opts, resolveSecretEnvSet())
+}
+
+// auditWithSecrets is Audit's body, classifying and reporting secrets against
+// the caller-supplied resolved set.
+func (e *Engine) auditWithSecrets(opts Options, secrets secretEnvSet) (Posture, error) {
 	agent := opts.Agent
 	if agent == "" {
 		agent = "claude"
@@ -400,7 +411,7 @@ func (e *Engine) Audit(opts Options) (Posture, error) {
 	allEnvArgs = append(allEnvArgs, mountArgs...)
 	allEnvArgs = append(allEnvArgs, envArgs...)
 
-	planned := buildPlannedPosture(agent, scope, home, opts, dindOn, dindDegraded, mounts, allEnvArgs, featureArgs, stagedKinds)
+	planned := buildPlannedPosture(agent, scope, home, opts, dindOn, dindDegraded, mounts, allEnvArgs, featureArgs, stagedKinds, secrets)
 
 	// Observed-mode dispatch (ticket #627): only attempted when a runtime is
 	// resolved (e.Runtime != "") — a runtime-less Engine (NewForAudit) always
@@ -445,7 +456,7 @@ func (e *Engine) Audit(opts Options) (Posture, error) {
 // — the single construction site both Audit's runtime-less path and its
 // observed-mode fallback (ps/inspect failure) share, so neither can silently
 // re-derive a different planned posture (audit.go:14-23).
-func buildPlannedPosture(agent string, scope Scope, home string, opts Options, dindOn, dindDegraded bool, mounts []MountPosture, allEnvArgs []string, featureArgs []string, stagedKinds map[string]bool) Posture {
+func buildPlannedPosture(agent string, scope Scope, home string, opts Options, dindOn, dindDegraded bool, mounts []MountPosture, allEnvArgs []string, featureArgs []string, stagedKinds map[string]bool, secrets secretEnvSet) Posture {
 	imageType := ImageTypeMonolith
 	if scope.UsingRepoImage {
 		imageType = ImageTypeRepo
@@ -468,8 +479,8 @@ func buildPlannedPosture(agent string, scope Scope, home string, opts Options, d
 
 		Mounts:             mounts,
 		Volumes:            namedVolumes(mounts),
-		Env:                classifyEnvNames(allEnvArgs),
-		ForwardedEnv:       forwardedEnvVars(agent),
+		Env:                classifyEnvNames(allEnvArgs, secrets),
+		ForwardedEnv:       forwardedEnvVars(agent, secrets),
 		CredentialSources:  credentialSources(home, agent, stagedKinds),
 		BoundaryWeakenings: boundaryWeakenings(featureArgs),
 
@@ -560,15 +571,17 @@ func namedVolumes(mounts []MountPosture) []VolumePosture {
 }
 
 // classifyEnvNames parses every "-e" flag's following token out of args (as
-// emitted by assembleVolumeMounts/assembleEnv) into an EnvVarName carrying
-// only the NAME — never the value — with Secret set via isSecretEnvName so a
-// create-time name (e.g. CONTEXT7_API_KEY, emitted here for the create-time
-// env args) gets the same explicit secret classification as its forwarded
-// exec-env counterpart (ticket #598). Handles both the "-e NAME=value" form
-// (non-secret env, e.g. TERM) and the bare "-e NAME" form (provider secret
-// passthroughs, since ticket #759) — the split on "=" is a no-op when the
-// token has none.
-func classifyEnvNames(args []string) []EnvVarName {
+// emitted by assembleVolumeMounts/assembleEnv, or by assembleExecEnv for the
+// forwarded-env report) into an EnvVarName carrying only the NAME — never the
+// value — with Secret set via isSecretEnvName against the resolved set
+// (ticket #598). Create-time args carry no built-in secret since #1201, so
+// for them the classification is a guard: a secret name that ever reappears
+// in a create-time "-e" is still marked secret rather than slipping through
+// unflagged. Classification does not depend on the agent. Handles both the
+// "-e NAME=value" form (non-secret env, e.g. TERM) and the bare "-e NAME"
+// form (provider secret passthroughs, since ticket #759) — the split on "="
+// is a no-op when the token has none.
+func classifyEnvNames(args []string, secrets secretEnvSet) []EnvVarName {
 	envs := make([]EnvVarName, 0, len(args)/2)
 	for i := 0; i < len(args); i++ {
 		if args[i] != "-e" || i+1 >= len(args) {
@@ -578,27 +591,9 @@ func classifyEnvNames(args []string) []EnvVarName {
 		if idx := strings.IndexByte(name, '='); idx >= 0 {
 			name = name[:idx]
 		}
-		envs = append(envs, EnvVarName{Name: name, Secret: isSecretEnvName(name)})
+		envs = append(envs, EnvVarName{Name: name, Secret: isSecretEnvName(secrets, name)})
 	}
 	return envs
-}
-
-// forwardedEnvVarNames are the provider API keys assembleExecEnv may forward
-// per-exec — the only names ForwardedEnv ever reports (see
-// ForwardedEnvVar's doc comment). This is the single source of truth for
-// secret-env classification: both `cenci audit`'s reporting (via
-// isSecretEnvName, for both create-time and forwarded env) and
-// `cenci open --dry-run`'s redaction (renderArgv/redactSecretEnv in
-// dryrun.go) depend on it. Any new secret "-e" env forward added in
-// assembleExecEnv/assembleEnv MUST also be added here, or it will render
-// unredacted in dry-run output. Since ticket #759, these forwards use the
-// bare "-e NAME" (value-less) form — the value is never in argv to begin
-// with, so redaction/classification here is now a defense-in-depth
-// regression guard rather than the only protection.
-var forwardedEnvVarNames = map[string]bool{
-	"CONTEXT7_API_KEY":  true,
-	"ANTHROPIC_API_KEY": true,
-	"OPENAI_API_KEY":    true,
 }
 
 // postureEnvVarNames are the non-secret per-exec forwards whose VALUE changes
@@ -618,13 +613,12 @@ var postureEnvVarNames = map[string]bool{
 	attendedEnvName: true,
 }
 
-// isSecretEnvName reports whether name is one of the provider-API-key names
-// that must never have its value shown — wrapping forwardedEnvVarNames
-// (the single source of truth) rather than forking a second classification
-// list, so create-time env (classifyEnvNames) and forwarded exec env
-// (forwardedEnvVars) always agree.
-func isSecretEnvName(name string) bool {
-	return forwardedEnvVarNames[name]
+// isSecretEnvName reports whether name is a registered secret env var name
+// whose value must never be shown — a thin wrapper over the resolved set's
+// Has, so create-time env (classifyEnvNames), forwarded exec env
+// (forwardedEnvVars) and dry-run redaction all classify from the same set.
+func isSecretEnvName(secrets secretEnvSet, name string) bool {
+	return secrets.Has(name)
 }
 
 // forwardedEnvVars reports the per-exec forwards assembleExecEnv would
@@ -634,12 +628,12 @@ func isSecretEnvName(name string) bool {
 // "only listed when they would actually be forwarded" behavior), plus the
 // non-secret posture forwards registered in postureEnvVarNames (Secret:false,
 // #1087).
-func forwardedEnvVars(agent string) []ForwardedEnvVar {
-	envNames := classifyEnvNames(assembleExecEnv(agent))
+func forwardedEnvVars(agent string, secrets secretEnvSet) []ForwardedEnvVar {
+	envNames := classifyEnvNames(assembleExecEnv(agent, secrets), secrets)
 	forwarded := make([]ForwardedEnvVar, 0, len(envNames))
 	for _, name := range envNames {
 		switch {
-		case isSecretEnvName(name.Name):
+		case isSecretEnvName(secrets, name.Name):
 			forwarded = append(forwarded, ForwardedEnvVar{Name: name.Name, Secret: true})
 		case postureEnvVarNames[name.Name]:
 			forwarded = append(forwarded, ForwardedEnvVar{Name: name.Name, Secret: false})

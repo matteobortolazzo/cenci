@@ -172,6 +172,17 @@ session — so the snippet above adds explicit entries for it and for the equiva
 Deny rules still apply under `bypassPermissions` — only *allow* rules become inert there —
 so this mitigation works inside `cn` too.
 
+Deny rules cover Claude's tool calls, not code in installed Claude Code mods: a mod's own
+`$.fs` / `$.process` calls are not checked by permission rules, so a mod can still read
+`.env` through `$.fs` with the deny block above active. Against a user's mod `tool.call`
+approval, the deny rules hold only while the built-in `sec-default@builtin` guard is loaded
+and managed `allowModsToOverrideDenyRules` is not `true`; a session without it, such as one
+on an API key, has no such precedence. This applies to Claude Code mods only. See
+[Claude Code mods and plugin guards](../SECURITY.md#claude-code-mods-and-plugin-guards) and
+the official [mods overview](https://code.claude.com/docs/en/plugins/mods/overview) and
+[admin](https://code.claude.com/docs/en/plugins/mods/admin) pages, as read in November
+2026 (documented behavior, not tested here); re-verify after any Claude Code upgrade.
+
 The write-blocking half of this snippet (the `Edit(...)` entries) was verified empirically in
 the same `cn` pass; the `Read(...)` entries were not independently exercised in this session,
 and Bash-mediated reads like `cat`/`grep` are a known gap regardless (see Gaps below). A few

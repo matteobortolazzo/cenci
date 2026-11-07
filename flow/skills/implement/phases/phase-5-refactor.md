@@ -13,7 +13,7 @@ Pass:
 - Changed file list.
 - LSP diagnostic reminder if configured.
 - The scoped Verification command of the lane (every lane's cell in lane mode), with its optional scoped lint command, as resolved in Phase 3's Delegation Context.
-- The project's `buildCommand`, `testCommand` and `lintCommand` (when set), for `## Completed-Change Verification` below: the refactor worker receives them only in ordinary mode, where Completed-Change Verification is its last step; in lane mode they go only to the barrier worker.
+- The project's `buildCommand`, `testCommand` and `lintCommand` (when set), for `## Completed-Change Verification` below: the refactor worker receives them only in ordinary mode, where Completed-Change Verification is its last step; in lane mode they go only to the barrier worker. They run from the project directory inside the worktree, per the working-directory contract in `skills/configure/references/config-schema.md`.
 - Resolved topic docs: at most 3 `docs/<topic>.md` paths matched to Files to Modify/Create.
 
 **Missing context stop.** The worker's first summary line `Missing context: <absolute path> [<section heading>] — <reason>` takes the error gate `Missing context in Phase 5: <path> [<heading>] — <reason>`, whose fix is to repair the plan or run `/cenci:implement <id> replan`. It covers the refactor worker, the Lane Verification Barrier worker and compact mode. It is never absorbed as an ordinary failure by a hard-gate retry.

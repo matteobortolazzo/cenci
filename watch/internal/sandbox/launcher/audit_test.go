@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -551,23 +553,100 @@ func TestCredentialStatusText_UnrecognizedProbe_NotRenderedAsAbsent(t *testing.T
 
 // -- env-secret classification (ticket #598) -------------------------------
 
+// dashEnvNames parses every token following a "-e" flag in args, handling both
+// "-e NAME=value" and the bare "-e NAME" (#759) — mirrors classifyEnvNames's
+// own parse rule — and returns the NAMEs in argv order.
+func dashEnvNames(args []string) []string {
+	var names []string
+	for i := 0; i < len(args); i++ {
+		if args[i] != "-e" || i+1 >= len(args) {
+			continue
+		}
+		name := args[i+1]
+		if idx := strings.IndexByte(name, '='); idx >= 0 {
+			name = name[:idx]
+		}
+		names = append(names, name)
+	}
+	return names
+}
+
+// bareEnvNames returns, in argv order, only the NAMEs passed in the value-less
+// "-e NAME" form (no "=value") — the form secret passthroughs use (#759).
+func bareEnvNames(args []string) []string {
+	var names []string
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == "-e" && !strings.Contains(args[i+1], "=") {
+			names = append(names, args[i+1])
+		}
+	}
+	return names
+}
+
+// secretSuffixedEmissionViolations enumerates every "-e" name assembleExecEnv
+// (built from forwarding, for every supported agent) and assembleEnv (every
+// dindOn/ReseedCreds combination) emit, and returns one message per name that
+// looks like a secret (suffix heuristic _KEY$|_TOKEN$|_SECRET$|_PASSWORD$) but
+// is NOT registered in registered.Has — plus the set of every name seen, for
+// the caller's anti-vacuity check. forwarding and registered are separate
+// parameters so a test can forward a name through a test-only set and prove the
+// check reports it against the production set.
+func secretSuffixedEmissionViolations(forwarding, registered secretEnvSet) (violations []string, seen map[string]bool) {
+	looksSecret := func(name string) bool {
+		for _, suffix := range []string{"_KEY", "_TOKEN", "_SECRET", "_PASSWORD"} {
+			if strings.HasSuffix(name, suffix) {
+				return true
+			}
+		}
+		return false
+	}
+
+	seen = make(map[string]bool)
+	scope := Scope{WorkspaceScope: "repo"}
+
+	for _, agent := range sandbox.SupportedAgents {
+		for _, name := range dashEnvNames(assembleExecEnv(agent, forwarding)) {
+			seen[name] = true
+			if looksSecret(name) && !registered.Has(name) {
+				violations = append(violations, fmt.Sprintf("assembleExecEnv(%q) emitted secret-suffixed env %q, which is NOT in the resolved secret set (resolveSecretEnvSet, watch/internal/sandbox/launcher/secretenv.go) — register it or dry-run output will leak its value unredacted", agent, name))
+			}
+		}
+
+		for _, dindOn := range []bool{false, true} {
+			for _, reseed := range []bool{false, true} {
+				opts := Options{Agent: agent, ReseedCreds: reseed}
+				args := (&Engine{}).assembleEnv(agent, scope, opts, dindOn, DefaultSandboxPlugins())
+				for _, name := range dashEnvNames(args) {
+					seen[name] = true
+					if looksSecret(name) && !registered.Has(name) {
+						violations = append(violations, fmt.Sprintf("assembleEnv(%q, dindOn=%t, ReseedCreds=%t) emitted secret-suffixed env %q, which is NOT in the resolved secret set (resolveSecretEnvSet, watch/internal/sandbox/launcher/secretenv.go) — register it or dry-run output will leak its value unredacted", agent, dindOn, reseed, name))
+					}
+				}
+			}
+		}
+	}
+	return violations, seen
+}
+
 // TestForwardedEnvVarNames_CoversEverySecretSuffixedEnvName is a completeness
-// guard over forwardedEnvVarNames (audit.go): it enumerates every "-e" name
-// assembleExecEnv/assembleEnv actually emit today, across every supported
-// agent and every dindOn/ReseedCreds combination, and fails any name that
-// looks like a secret (matches the suffix heuristic _KEY$|_TOKEN$|_SECRET$|
-// _PASSWORD$) but is NOT registered in forwardedEnvVarNames — the single
-// source of truth both isSecretEnvName (cenci audit's reporting) and
-// redactSecretEnv (dryrun.go's `cenci open --dry-run` redaction) depend on. A
-// map-miss there would silently render an unredacted secret value in
-// dry-run output.
+// guard over the resolved secret set (resolveSecretEnvSet, secretenv.go): it
+// enumerates every "-e" name assembleExecEnv/assembleEnv actually emit today,
+// across every supported agent and every dindOn/ReseedCreds combination, and
+// fails any name that looks like a secret (matches the suffix heuristic
+// _KEY$|_TOKEN$|_SECRET$|_PASSWORD$) but is NOT in the resolved set — the one
+// set both isSecretEnvName (cenci audit's reporting) and redactSecretEnv
+// (dryrun.go's `cenci open --dry-run` redaction) classify against. A miss
+// there would silently render an unredacted secret value in dry-run output.
+// The check lives in secretSuffixedEmissionViolations so a sub-test can prove
+// it can fail (FOO_TOKEN).
 //
-// Known blind spots (deliberately out of scope, per ticket #760's Q&A):
+// Known blind spots (deliberately out of scope, per ticket #760's Q&A,
+// restated against the #1201 resolved-set shape):
 //
 //  1. An oddly-named future secret that matches none of the four suffixes
 //     (_KEY/_TOKEN/_SECRET/_PASSWORD) stays undetected by this heuristic —
 //     accepted tradeoff over a second hand-maintained allowlist, since there
-//     is nothing to keep in sync against a single forwardedEnvVarNames source.
+//     is nothing to keep in sync against the single resolved set.
 //  2. A future "-e" forward whose host gate var isn't also t.Setenv'd below
 //     is silently dropped from the enumeration this test drives — whoever
 //     adds a new gated forward to assembleExecEnv/assembleEnv MUST also add
@@ -589,110 +668,104 @@ func TestForwardedEnvVarNames_CoversEverySecretSuffixedEnvName(t *testing.T) {
 	t.Setenv("TERM", "xterm-256color")
 	t.Setenv("COLORTERM", "truecolor")
 
-	secretSuffixes := []string{"_KEY", "_TOKEN", "_SECRET", "_PASSWORD"}
-	looksSecret := func(name string) bool {
-		for _, suffix := range secretSuffixes {
-			if strings.HasSuffix(name, suffix) {
-				return true
-			}
-		}
-		return false
-	}
-
-	// parseDashE parses every token following a "-e" flag in args, handling
-	// both "-e NAME=value" and a bare "-e NAME" (so this test survives #759's
-	// argv-shape change in either landing order) — mirrors classifyEnvNames's
-	// own parse rule (audit.go:544-557).
-	parseDashE := func(args []string) []string {
-		var names []string
-		for i := 0; i < len(args); i++ {
-			if args[i] != "-e" || i+1 >= len(args) {
-				continue
-			}
-			name := args[i+1]
-			if idx := strings.IndexByte(name, '='); idx >= 0 {
-				name = name[:idx]
-			}
-			names = append(names, name)
-		}
-		return names
-	}
-
-	seen := make(map[string]bool)
-	scope := Scope{WorkspaceScope: "repo"}
-
-	for _, agent := range sandbox.SupportedAgents {
-		for _, name := range parseDashE(assembleExecEnv(agent)) {
-			seen[name] = true
-			if looksSecret(name) && !forwardedEnvVarNames[name] {
-				t.Errorf("assembleExecEnv(%q) emitted secret-suffixed env %q, which is NOT registered in forwardedEnvVarNames (watch/internal/sandbox/launcher/audit.go) — register it or dry-run output will leak its value unredacted", agent, name)
-			}
+	t.Run("production set registers every emitted secret-suffixed name", func(t *testing.T) {
+		secrets := resolveSecretEnvSet()
+		violations, seen := secretSuffixedEmissionViolations(secrets, secrets)
+		for _, v := range violations {
+			t.Error(v)
 		}
 
-		for _, dindOn := range []bool{false, true} {
-			for _, reseed := range []bool{false, true} {
-				opts := Options{Agent: agent, ReseedCreds: reseed}
-				args := (&Engine{}).assembleEnv(agent, scope, opts, dindOn, DefaultSandboxPlugins())
-				for _, name := range parseDashE(args) {
-					seen[name] = true
-					if looksSecret(name) && !forwardedEnvVarNames[name] {
-						t.Errorf("assembleEnv(%q, dindOn=%t, ReseedCreds=%t) emitted secret-suffixed env %q, which is NOT registered in forwardedEnvVarNames (watch/internal/sandbox/launcher/audit.go) — register it or dry-run output will leak its value unredacted", agent, dindOn, reseed, name)
-					}
-				}
+		// Anti-vacuity guard: assert each of the three currently-registered
+		// secrets was actually observed emitted somewhere above. This is a
+		// per-name presence check (not a bare "not empty" — watch/docs/
+		// test-strategy.md #914), and deliberately a SUBSET check rather than
+		// set equality: a legitimately added-and-registered future secret must
+		// not fail this test.
+		for _, want := range []string{"CONTEXT7_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"} {
+			if !seen[want] {
+				t.Errorf("expected %q to be emitted by some agent/branch combination (gate var not driving emission?), got emitted set %v", want, seen)
 			}
 		}
-	}
+	})
 
-	// Anti-vacuity guard: assert each of the three currently-registered
-	// secrets was actually observed emitted somewhere above. This is a
-	// per-name presence check (not a bare "not empty" — watch/docs/
-	// test-strategy.md #914), and deliberately a SUBSET check rather than set
-	// equality: a legitimately added-and-registered future secret must not
-	// fail this test.
-	for _, want := range []string{"CONTEXT7_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"} {
-		if !seen[want] {
-			t.Errorf("expected %q to be emitted by some agent/branch combination (gate var not driving emission?), got emitted set %v", want, seen)
+	// Proves the guard can fail: a test-only set forwards FOO_TOKEN (every
+	// agent), which the production set does not register, so the check against
+	// the production set must report it once per agent's exec env.
+	t.Run("an unregistered FOO_TOKEN forward is reported", func(t *testing.T) {
+		t.Setenv("FOO_TOKEN", "sentinel-foo")
+		forwarding := newSecretEnvSet([]secretEnvSpec{{Name: "FOO_TOKEN"}})
+		violations, seen := secretSuffixedEmissionViolations(forwarding, resolveSecretEnvSet())
+		if !seen["FOO_TOKEN"] {
+			t.Fatalf("FOO_TOKEN forwarded through the test-only set was never observed emitted; seen %v", seen)
 		}
-	}
+		var foo int
+		for _, v := range violations {
+			if strings.Contains(v, `"FOO_TOKEN"`) {
+				foo++
+			}
+		}
+		if foo != len(sandbox.SupportedAgents) {
+			t.Errorf("FOO_TOKEN reported %d times, want once per supported agent (%d); violations: %v", foo, len(sandbox.SupportedAgents), violations)
+		}
+	})
 }
 
-// TestAudit_EnvSecretClassification_ContextKeySecretTermNot covers giving
-// create-time env names the same explicit secret classification semantics
-// as forwarded exec env (isSecretEnvName wrapping forwardedEnvVarNames):
-// CONTEXT7_API_KEY must be marked Secret:true, while an ordinary,
-// non-secret create-time name (TERM) must be marked Secret:false.
+// TestAudit_EnvSecretClassification_ContextKeySecretTermNot covers the secret
+// classification split between create-time env and forwarded exec env (#598,
+// reshaped by #1201). With the host CONTEXT7_API_KEY set: the key is no longer
+// forwarded at container creation, so it is ABSENT from posture.Env (JSON
+// "env"); it is forwarded per exec, so it is PRESENT in ForwardedEnv (JSON
+// "forwardedEnv") with Secret:true; an ordinary create-time name (TERM) stays
+// in Env with Secret:false; and the sentinel value appears nowhere in the
+// marshaled posture.
 func TestAudit_EnvSecretClassification_ContextKeySecretTermNot(t *testing.T) {
 	repo := newAuditTestRepo(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Chdir(repo)
-	t.Setenv("CONTEXT7_API_KEY", "sentinel-secret-value-envsecret1")
+	const contextSecret = "sentinel-secret-value-envsecret1"
+	t.Setenv("CONTEXT7_API_KEY", contextSecret)
 
 	posture, err := auditEngine().Audit(Options{Agent: "claude"})
 	if err != nil {
 		t.Fatalf("Audit: %v", err)
 	}
 
-	var contextEnv, termEnv *EnvVarName
+	var termEnv *EnvVarName
 	for i := range posture.Env {
 		switch posture.Env[i].Name {
 		case "CONTEXT7_API_KEY":
-			contextEnv = &posture.Env[i]
+			t.Errorf("Env must not carry CONTEXT7_API_KEY (no create-time forward, #1201), got %+v", posture.Env)
 		case "TERM":
 			termEnv = &posture.Env[i]
 		}
-	}
-	if contextEnv == nil {
-		t.Fatalf("expected CONTEXT7_API_KEY in Env, got %+v", posture.Env)
-	}
-	if !contextEnv.Secret {
-		t.Errorf("CONTEXT7_API_KEY Env entry Secret = false, want true")
 	}
 	if termEnv == nil {
 		t.Fatalf("expected TERM in Env, got %+v", posture.Env)
 	}
 	if termEnv.Secret {
 		t.Errorf("TERM Env entry Secret = true, want false (not a create-time secret name)")
+	}
+
+	var forwarded *ForwardedEnvVar
+	for i := range posture.ForwardedEnv {
+		if posture.ForwardedEnv[i].Name == "CONTEXT7_API_KEY" {
+			forwarded = &posture.ForwardedEnv[i]
+		}
+	}
+	if forwarded == nil {
+		t.Fatalf("expected CONTEXT7_API_KEY in ForwardedEnv, got %+v", posture.ForwardedEnv)
+	}
+	if !forwarded.Secret {
+		t.Errorf("CONTEXT7_API_KEY ForwardedEnv entry Secret = false, want true")
+	}
+
+	data, err := json.Marshal(posture)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if strings.Contains(string(data), contextSecret) {
+		t.Errorf("posture JSON leaks the CONTEXT7_API_KEY sentinel value:\n%s", data)
 	}
 }
 
@@ -702,7 +775,7 @@ func TestAudit_EnvSecretClassification_ContextKeySecretTermNot(t *testing.T) {
 // mark it Secret:true -- an explicit assertion rather than an inference
 // from other passing tests (AC6).
 func TestClassifyEnvNames_BareSecretToken(t *testing.T) {
-	envs := classifyEnvNames([]string{"-e", "OPENAI_API_KEY"})
+	envs := classifyEnvNames([]string{"-e", "OPENAI_API_KEY"}, resolveSecretEnvSet())
 	if len(envs) != 1 {
 		t.Fatalf("classifyEnvNames([-e OPENAI_API_KEY]) = %+v, want exactly one entry", envs)
 	}
@@ -714,17 +787,174 @@ func TestClassifyEnvNames_BareSecretToken(t *testing.T) {
 	}
 }
 
+// TestClassifyEnvNames_CreateTimeArgs_ClassifiesAgainstResolvedSet keeps
+// direct coverage of create-time secret classification (#1201): since the
+// create-time path no longer emits any built-in secret, classifyEnvNames
+// called on synthetic create-time args is the only way to exercise Secret:true
+// there. The "-e NAME=value" form (TERM) and the bare "-e NAME" form
+// (OPENAI_API_KEY) both parse, and classification is agent-independent: a name
+// registered but scoped away from the audited agent (ANTHROPIC_API_KEY for
+// claude, which never forwards it) is still Secret:true, so dry-run redaction
+// is not weakened by per-agent forwarding.
+func TestClassifyEnvNames_CreateTimeArgs_ClassifiesAgainstResolvedSet(t *testing.T) {
+	secrets := resolveSecretEnvSet()
+
+	got := classifyEnvNames([]string{"-e", "TERM=xterm-256color", "-e", "OPENAI_API_KEY"}, secrets)
+	want := []EnvVarName{{Name: "TERM", Secret: false}, {Name: "OPENAI_API_KEY", Secret: true}}
+	if !slices.Equal(got, want) {
+		t.Errorf("classifyEnvNames(TERM=..., OPENAI_API_KEY) = %+v, want %+v", got, want)
+	}
+
+	// Classification takes no agent: ANTHROPIC_API_KEY is secret even though a
+	// claude launch never forwards it.
+	scoped := classifyEnvNames([]string{"-e", "ANTHROPIC_API_KEY"}, secrets)
+	if !slices.Equal(scoped, []EnvVarName{{Name: "ANTHROPIC_API_KEY", Secret: true}}) {
+		t.Errorf("classifyEnvNames(ANTHROPIC_API_KEY) = %+v, want exactly one Secret:true entry (classification is agent-independent)", scoped)
+	}
+}
+
+// setAllSecretHostKeys sets the three built-in secret host vars to value (or
+// to the empty string) for the duration of the test.
+func setAllSecretHostKeys(t *testing.T, value func(name string) string) {
+	t.Helper()
+	for _, name := range []string{"CONTEXT7_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"} {
+		t.Setenv(name, value(name))
+	}
+}
+
+// TestForwardedSecretNames_ExactPerAgentAndOrder pins the per-agent forwarding
+// matrix exactly (#1201), including the argv ORDER the exec goldens require
+// (CONTEXT7, then ANTHROPIC, then OPENAI). Unit-level on purpose: the
+// opencode row is unreachable black-box (#1219 refuses it in
+// resolveLaunchContext). With all three host keys set: claude forwards
+// {CONTEXT7_API_KEY}, codex {CONTEXT7_API_KEY, OPENAI_API_KEY}, opencode all
+// three. With all three set to the empty string every agent forwards nothing,
+// in the create-time argv as well as the attach argv. The create-time argv
+// carries no secret name for any agent in either case.
+func TestForwardedSecretNames_ExactPerAgentAndOrder(t *testing.T) {
+	secrets := resolveSecretEnvSet()
+	scope := Scope{WorkspaceScope: "repo"}
+	e := &Engine{Runtime: "docker", Stderr: &bytes.Buffer{}}
+
+	t.Run("all three keys set", func(t *testing.T) {
+		setAllSecretHostKeys(t, func(name string) string { return "sentinel-" + name })
+		cases := []struct {
+			agent string
+			want  []string
+		}{
+			{"claude", []string{"CONTEXT7_API_KEY"}},
+			{"codex", []string{"CONTEXT7_API_KEY", "OPENAI_API_KEY"}},
+			{"opencode", []string{"CONTEXT7_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"}},
+		}
+		for _, tc := range cases {
+			t.Run(tc.agent, func(t *testing.T) {
+				if got := bareEnvNames(assembleExecEnv(tc.agent, secrets)); !slices.Equal(got, tc.want) {
+					t.Errorf("assembleExecEnv(%q) bare -e names = %v, want exactly %v (in this order)", tc.agent, got, tc.want)
+				}
+				create := e.assembleEnv(tc.agent, scope, Options{Agent: tc.agent}, false, DefaultSandboxPlugins())
+				if got := bareEnvNames(create); len(got) != 0 {
+					t.Errorf("assembleEnv(%q) bare -e names = %v, want none (no create-time secret forward, #1201)", tc.agent, got)
+				}
+				if strings.Contains(strings.Join(create, " "), "CONTEXT7_API_KEY") {
+					t.Errorf("assembleEnv(%q) mentions CONTEXT7_API_KEY, want no create-time forward; got %v", tc.agent, create)
+				}
+			})
+		}
+	})
+
+	t.Run("all three keys empty", func(t *testing.T) {
+		setAllSecretHostKeys(t, func(string) string { return "" })
+		for _, agent := range sandbox.SupportedAgents {
+			if got := bareEnvNames(assembleExecEnv(agent, secrets)); len(got) != 0 {
+				t.Errorf("assembleExecEnv(%q) bare -e names = %v with empty host keys, want {}", agent, got)
+			}
+			create := e.assembleEnv(agent, scope, Options{Agent: agent}, false, DefaultSandboxPlugins())
+			if got := bareEnvNames(create); len(got) != 0 {
+				t.Errorf("assembleEnv(%q) bare -e names = %v with empty host keys, want {}", agent, got)
+			}
+		}
+	})
+}
+
+// TestAudit_ForwardedEnvAgreesWithAttachArgv_EveryAgent pins that Audit's
+// report and the real attach argv can never drift (#1201): for every agent in
+// sandbox.SupportedAgents, with all three host keys set, the secret names in
+// Audit(...).ForwardedEnv equal, as a set, the bare "-e" secret names in the
+// attach argv planArgvs builds for the same agent. resolveLaunchContext
+// refuses opencode (#1219) while Audit accepts it, so the launchCtx is built
+// directly against an absolute-path fake runtime (no running container, so
+// planArgvs takes the create branch and still returns the attach argv).
+func TestAudit_ForwardedEnvAgreesWithAttachArgv_EveryAgent(t *testing.T) {
+	repo := newAuditTestRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Chdir(repo)
+	t.Setenv("FAKE_PS", "")
+	setAllSecretHostKeys(t, func(name string) string { return "sentinel-" + name })
+	secrets := resolveSecretEnvSet()
+
+	for _, agent := range sandbox.SupportedAgents {
+		t.Run(agent, func(t *testing.T) {
+			eng, _ := auditEngineWithFakeRuntime(t)
+
+			posture, err := eng.Audit(Options{Agent: agent})
+			if err != nil {
+				t.Fatalf("Audit: %v", err)
+			}
+			var auditNames []string
+			for _, f := range posture.ForwardedEnv {
+				if f.Secret {
+					auditNames = append(auditNames, f.Name)
+				}
+			}
+
+			ctx := launchCtx{
+				Agent:   agent,
+				Home:    home,
+				Scope:   ComputeScope(agent, "", repo, home),
+				Plugins: DefaultSandboxPlugins(),
+				Secrets: secrets,
+			}
+			_, attachArgv, attaching, err := eng.planArgvs(ctx, Options{Agent: agent}, "", "", false)
+			if err != nil {
+				t.Fatalf("planArgvs: %v", err)
+			}
+			if attaching {
+				t.Fatalf("planArgvs attached to a running container, want the create branch (FAKE_PS empty)")
+			}
+			var argvNames []string
+			for _, name := range bareEnvNames(attachArgv) {
+				if secrets.Has(name) {
+					argvNames = append(argvNames, name)
+				}
+			}
+
+			slices.Sort(auditNames)
+			slices.Sort(argvNames)
+			if !slices.Equal(auditNames, argvNames) {
+				t.Errorf("Audit ForwardedEnv secret names = %v, attach argv bare secret names = %v; want the same set", auditNames, argvNames)
+			}
+			if len(argvNames) == 0 {
+				t.Errorf("attach argv forwarded no secret name for %q with all three host keys set (vacuous agreement)", agent)
+			}
+		})
+	}
+}
+
 // -- env names only -------------------------------------------------------
 
-// TestAudit_EnvReportedAsNamesOnly covers the create-time env list: names
-// are reported, and CONTEXT7_API_KEY (an optional passthrough) shows up by
-// name once set on the host.
+// TestAudit_EnvReportedAsNamesOnly covers the env lists: names only, never
+// values. The create-time Env list still reports its names (TERM), but
+// CONTEXT7_API_KEY (an optional passthrough) is no longer one of them since
+// #1201 — it shows up by name in ForwardedEnv once set on the host, and its
+// value is nowhere in the marshaled posture.
 func TestAudit_EnvReportedAsNamesOnly(t *testing.T) {
 	repo := newAuditTestRepo(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Chdir(repo)
-	t.Setenv("CONTEXT7_API_KEY", "sentinel-secret-value-xyz123")
+	const contextSecret = "sentinel-secret-value-xyz123"
+	t.Setenv("CONTEXT7_API_KEY", contextSecret)
 
 	posture, err := auditEngine().Audit(Options{Agent: "claude"})
 	if err != nil {
@@ -734,14 +964,30 @@ func TestAudit_EnvReportedAsNamesOnly(t *testing.T) {
 	if len(posture.Env) == 0 {
 		t.Fatalf("Env is empty, want at least the create-time env names")
 	}
-	found := false
 	for _, ev := range posture.Env {
 		if ev.Name == "CONTEXT7_API_KEY" {
-			found = true
+			t.Errorf("Env must not carry CONTEXT7_API_KEY (no create-time forward, #1201), got %+v", posture.Env)
 		}
 	}
-	if !found {
-		t.Errorf("expected CONTEXT7_API_KEY in Env names, got %+v", posture.Env)
+	var forwarded *ForwardedEnvVar
+	for i := range posture.ForwardedEnv {
+		if posture.ForwardedEnv[i].Name == "CONTEXT7_API_KEY" {
+			forwarded = &posture.ForwardedEnv[i]
+		}
+	}
+	if forwarded == nil {
+		t.Fatalf("expected CONTEXT7_API_KEY in ForwardedEnv names, got %+v", posture.ForwardedEnv)
+	}
+	if !forwarded.Secret {
+		t.Errorf("CONTEXT7_API_KEY ForwardedEnv entry Secret = false, want true")
+	}
+
+	data, err := json.Marshal(posture)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if strings.Contains(string(data), contextSecret) {
+		t.Errorf("posture JSON leaks the CONTEXT7_API_KEY sentinel value:\n%s", data)
 	}
 }
 

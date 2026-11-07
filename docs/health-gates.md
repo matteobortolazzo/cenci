@@ -27,6 +27,14 @@ reaches CI. Three consumers rely on it:
   can't be resolved or run in the current environment (e.g. `run-gate.sh` is
   unreachable, or the gate command itself isn't found).
 
+The maintain checker also hosts a sibling check that is not a gate consumer: `lint-command`, with a matching never-blocking SessionStart advisory for consumer repos, where the maintain checker never runs. Both read one resolver, `flow/hooks/scripts/check-lint-command.sh`, so they cannot disagree. They report a missing `lintCommand` for stacks that have a Lint row in the Stack-to-CI mapping table, because "no linter" and "forgot to configure the linter" otherwise look identical.
+
+- Each target resolves to one of three outcomes: `pass`, `fail` or `skip`. `pass` means the stack matches a Lint row and `lintCommand` is set to any value, which is never compared to the table's suggestion. `fail` means the stack matches a Lint row and `lintCommand` is absent, empty or whitespace-only. `skip` means no Lint row, an unrecognized stack token, no stack, or an unreadable config.
+- Resolution depends on the config shape: a single-repo config checks `stack.framework`, `stack.backend` and `stack.frontend` against the top-level `lintCommand`, while a monorepo reads only each `projects[].lintCommand` with no top-level fallback.
+- The check is report-only: an absent `lintCommand` still skips cleanly at runtime in Phases 4, 5 and 9, and nothing writes `.cenci/config.json`.
+
+Working directory: `buildCommand`, `testCommand` and `lintCommand` run from `<worktree>/<projects[].path>` (the worktree root for a single-repo config), the same directory `run-gate.sh` enters for `gateCommand` (step 2 below); the contract is stated in `flow/skills/configure/references/config-schema.md`.
+
 ## Exit-0-is-healthy contract
 
 `gateCommand` follows the same contract everywhere it's consumed:
@@ -99,6 +107,10 @@ When reporting verification from anything narrower than the gate, name the gap r
 
 - **Scoped runs**: A scoped verification run (one lane's tests, one package, one file set) must report what it did not cover, using the `Verification (scoped): <command> — <pass|fail> — not covered: <scope outside the command>` line. Scoped green is never full-suite green, and a scoped pass is never reported as "full suite", "all tests" or "CI green" (#994). The one full check is the implement pipeline's Completed-Change Verification (plus Phase 9's post-rebase run).
 
+When a gate's tool resolves its own file set from ignore files instead of an explicit list, a worktree can hide every file from it:
+
+- **Worktree `.gitignore` false-pass**: a tool that applies `.gitignore` files from directories above the worktree root matches zero files inside `.worktrees/<id>-<desc>/` and exits `0`, because the pipeline's own worktree convention puts `.worktrees/` in the main checkout's `.gitignore`. CSharpier is the reported instance: it prints `Checked 0 files` and exits `0`. Verify a gate by its reported file count, not its exit code, and pass an explicit file list or an ignore-path override where the tool supports one; Velka's changed-files workaround is one possible fix, not a prescribed one. Prettier's defaults are not affected: its documented default reads only `./.gitignore` and `./.prettierignore` in the directory it runs from (prettier.io/docs/cli, `--ignore-path`), so the main checkout's `.gitignore` is never consulted. The claim cannot be verified against this repo's own gates, because none of them uses a `.gitignore`-honoring tool.
+
 ## This repo's gates (dogfooding)
 
 This repo configures a `gateCommand` for each of its three projects in
@@ -113,6 +125,8 @@ This repo configures a `gateCommand` for each of its three projects in
 `flow`'s gate delegates its JSON-validation and discovery/execution false-green
 guards (the two bullets above) to `flow/scripts/run-checks.sh` — the same
 script CI's `flow-test` job invokes, so the two never drift apart.
+
+Every CI job that runs the flow gate (`flow-ci.yml`'s `flow-test` and `flow-maintenance` jobs and `cenci-maintenance.yml`'s `audit` job) must install `zsh` and `fish`, because under `CI=true` `flow/codex/hooks-launch.test.sh` fails rather than skips when a login shell is missing.
 
 ## See also
 
