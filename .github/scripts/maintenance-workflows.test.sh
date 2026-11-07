@@ -71,5 +71,104 @@ RECONCILE_BLOCK="$(sed -n '/^  reconcile:/,$p' "$SCHEDULED")"
 [[ "$RECONCILE_BLOCK" == *"issues: write"* ]] || fail "scheduled reconciliation job lacks issue-write permission"
 lacks "$SCHEDULED" 'scheduled-maintain-report.json' "scheduled report must not use a reusable checkout path"
 
+# The audit runs the flow gate, whose hooks-launch.test.sh fails (not skips) under CI=true
+# without zsh and fish. Prints the failure reason for a block, or nothing when it is sound.
+INSTALL_NEEDLE='apt-get install -y zsh fish'
+STRICT_NEEDLE='check.sh --strict'
+REASON_MISSING="scheduled audit job must install zsh and fish (hooks-launch.test.sh fails under CI=true without them)"
+REASON_ORDER="scheduled audit job must install zsh and fish before check.sh --strict"
+REASON_NO_STRICT="scheduled audit job must run check.sh --strict (install ordering cannot be checked)"
+audit_shell_install_problem() {
+  local code install_line strict_line
+  # A commented-out line is not an install or a strict run.
+  code="$(printf '%s\n' "$1" | grep -vE -- '^[[:space:]]*#')"
+  install_line="$(printf '%s\n' "$code" | grep -nF -- "$INSTALL_NEEDLE" | head -n 1 | cut -d: -f1)"
+  strict_line="$(printf '%s\n' "$code" | grep -nF -- "$STRICT_NEEDLE" | head -n 1 | cut -d: -f1)"
+  if [[ -z "$install_line" ]]; then
+    printf '%s\n' "$REASON_MISSING"
+  elif [[ -z "$strict_line" ]]; then
+    printf '%s\n' "$REASON_NO_STRICT"
+  elif [[ "$install_line" -ge "$strict_line" ]]; then
+    printf '%s\n' "$REASON_ORDER"
+  fi
+}
+
+REAL_PROBLEM="$(audit_shell_install_problem "$AUDIT_BLOCK")"
+[[ -z "$REAL_PROBLEM" ]] || fail "$REAL_PROBLEM"
+
+# Non-vacuity: a fixture must be non-empty, differ from the real block and still hold what
+# it must keep (else the checker reports the expected reason for the wrong cause); then the
+# checker must report the expected reason. Runs in the parent shell so fail() counts.
+expect_problem() { # <checker fn> <fixture> <expected reason> <message> [text the fixture must still contain]
+  local fn="$1" fixture="$2" expected="$3" msg="$4" keep="${5:-}"
+  if [[ -z "$fixture" || "$fixture" == "$AUDIT_BLOCK" || ( -n "$keep" && "$fixture" != *"$keep"* ) ]]; then
+    fail "self-test: fixture was not derived from the audit block (${msg})"
+  elif [[ "$("$fn" "$fixture")" != "$expected" ]]; then
+    fail "self-test: ${msg}"
+  fi
+}
+
+MISSING_BLOCK="$(printf '%s\n' "$AUDIT_BLOCK" | grep -vF -- "$INSTALL_NEEDLE")"
+REORDERED_BLOCK="${MISSING_BLOCK}"$'\n'"      sudo ${INSTALL_NEEDLE}"
+NO_STRICT_BLOCK="$(printf '%s\n' "$AUDIT_BLOCK" | grep -vF -- "$STRICT_NEEDLE")"
+COMMENTED_BLOCK="$(printf '%s\n' "$AUDIT_BLOCK" | sed "s|^\( *\)\(.*${INSTALL_NEEDLE}\)|\1# \2|")"
+expect_problem audit_shell_install_problem "$MISSING_BLOCK" "$REASON_MISSING" \
+  "block without the install line was not reported as missing" "$STRICT_NEEDLE"
+expect_problem audit_shell_install_problem "$REORDERED_BLOCK" "$REASON_ORDER" \
+  "install line after check.sh --strict was not reported as misordered" "$STRICT_NEEDLE"
+expect_problem audit_shell_install_problem "$NO_STRICT_BLOCK" "$REASON_NO_STRICT" \
+  "block without the check.sh --strict line was not reported" "$INSTALL_NEEDLE"
+expect_problem audit_shell_install_problem "$COMMENTED_BLOCK" "$REASON_MISSING" \
+  "commented-out install line was not reported as missing" "$INSTALL_NEEDLE"
+
+# With maintenance.enabled: false the install step must be skipped like the audit step is.
+INSTALL_STEP='Install login shells for hook launch tests'
+GATE_NEEDLE="if: \${{ steps.maintenance-enabled.outputs.enabled == 'true' }}"
+REASON_UNGATED="scheduled audit install step must be gated on steps.maintenance-enabled.outputs.enabled == 'true' like Run maintenance audit"
+REASON_AUDIT_UNGATED="scheduled Run maintenance audit step must be gated on steps.maintenance-enabled.outputs.enabled == 'true'"
+# Whole-line comments are dropped first: a commented-out if: is not a gate, and a commented-out
+# "# - name:" line must not win grep -m 1 ahead of the real step.
+step_gated() { printf '%s\n' "$1" | grep -vE -- '^[[:space:]]*#' | grep -A2 -m 1 -F -- "name: $2" | grep -qF -- "$GATE_NEEDLE"; }
+audit_install_gate_problem() {
+  step_gated "$1" "$INSTALL_STEP" || { printf '%s\n' "$REASON_UNGATED"; return; }
+  step_gated "$1" "Run maintenance audit" || printf '%s\n' "$REASON_AUDIT_UNGATED"
+}
+GATE_PROBLEM="$(audit_install_gate_problem "$AUDIT_BLOCK")"
+[[ -z "$GATE_PROBLEM" ]] || fail "$GATE_PROBLEM"
+# Non-vacuity: dropping or commenting out one step's own if: line from the real block must be
+# reported. The flag resets at every step start (any "- key:"), so a step without an if: never
+# costs the next step its own.
+edit_step_if() { # <block> <step name> <drop|comment>
+  printf '%s\n' "$1" | awk -v n="- name: $2" -v m="$3" '/^ *- [A-Za-z_-]+:/ { f = index($0, n) > 0 } f && /^ *if:/ { if (m == "comment") { sub(/^ */, "&# "); print }; next } { print }'
+}
+HYPHEN_IN=$'      - name: a\n        if: x\n      - timeout-minutes: 5\n        if: y'
+HYPHEN_OUT=$'      - name: a\n      - timeout-minutes: 5\n        if: y'
+[[ "$(edit_step_if "$HYPHEN_IN" a drop)" == "$HYPHEN_OUT" ]] || fail "self-test: if: removal leaked past a hyphenated step-start key"
+# Each fixture must differ from the real block by exactly the gate line (drop: 1 diff line,
+# comment: 2) and the other step must keep its own gate, or the reason could come from a leak.
+expect_only_gate_edited() { # <fixture> <changed line count> <other step name> <message>
+  local delta
+  delta="$(diff <(printf '%s\n' "$AUDIT_BLOCK") <(printf '%s\n' "$1") | grep '^[<>]')"
+  [[ "$(printf '%s\n' "$delta" | grep -c .)" -eq "$2" && "$(printf '%s\n' "$delta" | grep -cF -- "$GATE_NEEDLE")" -eq "$2" ]] \
+    || fail "self-test: fixture changed more than the one gate line (${4})"
+  step_gated "$1" "$3" || fail "self-test: fixture also removed the other step's gate (${4})"
+}
+UNGATED_BLOCK="$(edit_step_if "$AUDIT_BLOCK" "$INSTALL_STEP" drop)"
+UNGATED_AUDIT_BLOCK="$(edit_step_if "$AUDIT_BLOCK" "Run maintenance audit" drop)"
+COMMENTED_GATE_BLOCK="$(edit_step_if "$AUDIT_BLOCK" "$INSTALL_STEP" comment)"
+COMMENTED_AUDIT_GATE_BLOCK="$(edit_step_if "$AUDIT_BLOCK" "Run maintenance audit" comment)"
+expect_only_gate_edited "$UNGATED_BLOCK" 1 "Run maintenance audit" "install if: dropped"
+expect_only_gate_edited "$UNGATED_AUDIT_BLOCK" 1 "$INSTALL_STEP" "audit if: dropped"
+expect_only_gate_edited "$COMMENTED_GATE_BLOCK" 2 "Run maintenance audit" "install if: commented out"
+expect_only_gate_edited "$COMMENTED_AUDIT_GATE_BLOCK" 2 "$INSTALL_STEP" "audit if: commented out"
+expect_problem audit_install_gate_problem "$UNGATED_BLOCK" "$REASON_UNGATED" \
+  "install step without its if: gate was not reported as ungated" "name: ${INSTALL_STEP}"
+expect_problem audit_install_gate_problem "$UNGATED_AUDIT_BLOCK" "$REASON_AUDIT_UNGATED" \
+  "Run maintenance audit step without its if: gate was not reported as ungated" "name: Run maintenance audit"
+expect_problem audit_install_gate_problem "$COMMENTED_GATE_BLOCK" "$REASON_UNGATED" \
+  "install step with its if: gate commented out was not reported as ungated" "name: ${INSTALL_STEP}"
+expect_problem audit_install_gate_problem "$COMMENTED_AUDIT_GATE_BLOCK" "$REASON_AUDIT_UNGATED" \
+  "Run maintenance audit step with its if: gate commented out was not reported as ungated" "name: Run maintenance audit"
+
 echo "maintenance-workflows.test.sh: failures=${failures}"
 [[ "$failures" -eq 0 ]]
