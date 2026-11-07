@@ -186,7 +186,7 @@ func TestDaemon_PeriodicReapBackstopFires(t *testing.T) {
 		case <-deadline:
 			cancel()
 			if err := <-done; err != nil {
-				t.Logf("loop returned %v after cancel", err)
+				t.Errorf("expected nil error from loop, got %v", err)
 			}
 			t.Fatalf("expected periodic reap passes, got %d call(s) in 2s", mr.calls.Load())
 		case <-time.After(5 * time.Millisecond):

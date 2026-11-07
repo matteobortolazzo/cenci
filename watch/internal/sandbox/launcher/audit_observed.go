@@ -3,7 +3,6 @@ package launcher
 import (
 	"errors"
 	"fmt"
-	"os/exec"
 	"strings"
 )
 
@@ -68,10 +67,10 @@ func (e *Engine) inspectObservedPosture(name string) (observedInspect, error) {
 	// (faketest_test.go/audit_security_faketest_test.go), which would make
 	// TestAudit_ObservedMode_NoMutation_CallLogOnlyPsAndInspect misread one
 	// inspect invocation as multiple non-ps/inspect "calls".
-	out, err := exec.Command(e.Runtime, "inspect", "--format",
-		`{{.Config.Image}}|{{.HostConfig.NetworkMode}}|{{.HostConfig.Runtime}}|{{index .Config.Labels "cenci-sand.dind"}}|{{range .Config.Env}}{{if eq . "CENCI_SANDBOX_DIND=1"}}1{{end}}{{end}}{{"\n"}}{{range .Mounts}}{{.Source}}::{{.Destination}}::{{.RW}}{{"\n"}}{{end}}`, name).Output()
+	out, err := e.inspectFormat(name,
+		`{{.Config.Image}}|{{.HostConfig.NetworkMode}}|{{.HostConfig.Runtime}}|{{index .Config.Labels "cenci-sand.dind"}}|{{range .Config.Env}}{{if eq . "CENCI_SANDBOX_DIND=1"}}1{{end}}{{end}}{{"\n"}}{{range .Mounts}}{{.Source}}::{{.Destination}}::{{.RW}}{{"\n"}}{{end}}`, "observed posture")
 	if err != nil {
-		return observedInspect{}, fmt.Errorf("%s inspect %s observed posture: %w", e.Runtime, name, err)
+		return observedInspect{}, err
 	}
 	obs, err := parseObservedInspect(string(out))
 	if err != nil {

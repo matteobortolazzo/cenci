@@ -1,15 +1,11 @@
 package dispatch
 
 import (
-	"bytes"
-	"context"
 	"encoding/json"
 	"io"
-	"os/exec"
 	"regexp"
 	"strconv"
 	"strings"
-	"time"
 )
 
 // dependsOnPattern matches a line-anchored, case-insensitive "Depends on #N"
@@ -44,21 +40,6 @@ const maxDependencyResolutions = 50
 // maxProbeLogDetailBytes' rationale (resume.go), scaled down since a
 // dependency token is expected to be short.
 const maxDependencyTokenBytes = 200
-
-// ghIssueViewTimeout bounds every individual `gh issue view` fallback call
-// the dependency resolver makes (#825 review fix #2), mirroring gitTimeout's
-// rationale (mainsync.go): a hung network call must never stall a dispatch
-// pass indefinitely.
-const ghIssueViewTimeout = 60 * time.Second
-
-// ghIssueViewWaitDelay bounds how long cmd.Wait can block *after* the gh
-// process itself has exited or been killed by ghIssueViewTimeout's context.
-// Without it, a grandchild process that inherited the stdout/stderr pipes
-// could keep those pipes open and stall CombinedOutput indefinitely even
-// though gh itself is gone -- defeating ghIssueViewTimeout's "can never
-// stall a dispatch pass indefinitely" guarantee, mirroring gitWaitDelay
-// (mainsync.go).
-const ghIssueViewWaitDelay = 5 * time.Second
 
 // parseDependsOn extracts every "Depends on #N" reference from body, in body
 // order. Pure -- no I/O. Returns nil nums when body contains no such line
@@ -159,13 +140,13 @@ func resolveDependencyState(repo string, n int, openNumbers map[int]bool, cache 
 // review round 2 fix #4: an issue number alone is ambiguous across a
 // multi-repo pass) with the failure detail so a broadly failing gh (expired
 // token, rate limit, gh not installed) is diagnosable rather than a silent
-// blind spot (#825 review fix #3). The call is bounded by
-// ghIssueViewTimeout/ghIssueViewWaitDelay (#825 review fix #2) so a hung
+// blind spot (#825 review fix #3). The call goes through execGh (gh.go), so
+// it is bounded by ghTimeout/ghWaitDelay (#825 review fix #2) and a hung
 // network call can never stall a dispatch pass indefinitely; a
 // context-deadline kill surfaces as an exec error here and falls through to
 // the same fail-closed DependencyStateUnresolved path.
 //
-// stdout and stderr are captured into separate buffers rather than via
+// execGh captures stdout and stderr into separate buffers rather than via
 // CombinedOutput (#825 review round 2 fix #2): a benign stderr diagnostic on
 // an otherwise-successful (exit 0) call would otherwise get merged into the
 // bytes decoded as JSON, corrupting the payload and silently misclassifying
@@ -173,25 +154,17 @@ func resolveDependencyState(repo string, n int, openNumbers map[int]bool, cache 
 // alongside stdout for the log line, mirroring syncMains' newline-collapse
 // convention, #825 review round 2 fix #3) is diagnostic detail only.
 func fetchDependencyState(repo string, n int, out io.Writer) DependencyState {
-	ctx, cancel := context.WithTimeout(context.Background(), ghIssueViewTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "gh", "issue", "view", strconv.Itoa(n),
-		"--repo", repo, "--json", "state,number")
-	cmd.WaitDelay = ghIssueViewWaitDelay
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	err := cmd.Run()
+	stdout, stderr, err := execGh("issue", "view", strconv.Itoa(n), "--repo", repo, "--json", "state,number")
 	if err != nil {
-		detail := collapseLines(stdout.String() + stderr.String())
+		detail := collapseLines(stdout + stderr)
 		logf(out, "dispatch: dependency #%d resolution failed for %s: %v (%s)\n", n, repo, err, detail)
 		return DependencyStateUnresolved
 	}
 	var res struct {
 		State string `json:"state"`
 	}
-	if err := json.Unmarshal(stdout.Bytes(), &res); err != nil {
-		detail := collapseLines(stdout.String() + stderr.String())
+	if err := json.Unmarshal([]byte(stdout), &res); err != nil {
+		detail := collapseLines(stdout + stderr)
 		logf(out, "dispatch: dependency #%d resolution failed for %s: %v (%s)\n", n, repo, err, detail)
 		return DependencyStateUnresolved
 	}

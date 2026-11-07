@@ -1119,19 +1119,19 @@ func isRegularFile(path string) bool {
 // created by this launcher initialize asynchronously and carry "detached",
 // older attached containers have no label and are already initialized.
 func (e *Engine) lifecycleLabel(name string) (string, error) {
-	out, err := exec.Command(e.Runtime, "inspect", "--format",
-		`{{ index .Config.Labels "cenci-sand.lifecycle" }}`, name).Output()
+	out, err := e.inspectFormat(name,
+		`{{ index .Config.Labels "cenci-sand.lifecycle" }}`, "lifecycle label")
 	if err != nil {
-		return "", fmt.Errorf("%s inspect %s lifecycle label: %w", e.Runtime, name, err)
+		return "", err
 	}
 	return trimTrailingNewline(string(out)), nil
 }
 
 func (e *Engine) containerHasSharedAgentMount(name, agent string) (bool, error) {
-	out, err := exec.Command(e.Runtime, "inspect", "--format",
-		`{{range .Mounts}}{{printf "%s|%s|%t\n" .Name .Destination .RW}}{{end}}`, name).Output()
+	out, err := e.inspectFormat(name,
+		`{{range .Mounts}}{{printf "%s|%s|%t\n" .Name .Destination .RW}}{{end}}`, "mounts")
 	if err != nil {
-		return false, fmt.Errorf("%s inspect %s mounts: %w", e.Runtime, name, err)
+		return false, err
 	}
 	want := AgentCLIVolumeName(agent) + "|/opt/cenci-agent|false"
 	for _, line := range splitLines(string(out)) {
@@ -1180,12 +1180,12 @@ const (
 // mount's source/destination. One combined inspect call keeps the fake-runtime
 // surface (and the #493 keep-in-sync burden) minimal.
 func (e *Engine) inspectReusePosture(name string) (reusePosture, error) {
-	out, err := exec.Command(e.Runtime, "inspect", "--format",
+	out, err := e.inspectFormat(name,
 		`{{index .Config.Labels "cenci-sand.dind"}}|{{.HostConfig.Runtime}}|{{range .Config.Env}}{{if eq . "CENCI_SANDBOX_DIND=1"}}1{{end}}{{end}}
 {{range .Mounts}}{{.Source}}::{{.Destination}}
-{{end}}`, name).Output()
+{{end}}`, "reuse posture")
 	if err != nil {
-		return reusePosture{}, fmt.Errorf("%s inspect %s reuse posture: %w", e.Runtime, name, err)
+		return reusePosture{}, err
 	}
 	p, err := parseReusePosture(string(out))
 	if err != nil {
@@ -1327,10 +1327,10 @@ func (e *Engine) warnIfUnwired(name string, cenciAvailable bool, socketDir strin
 	if !cenciAvailable {
 		return nil
 	}
-	out, err := exec.Command(e.Runtime, "inspect", "--format",
-		`{{range .Mounts}}{{.Source}}::{{.Destination}}{{"\n"}}{{end}}`, name).Output()
+	out, err := e.inspectFormat(name,
+		`{{range .Mounts}}{{.Source}}::{{.Destination}}{{"\n"}}{{end}}`, "mounts")
 	if err != nil {
-		return fmt.Errorf("%s inspect %s mounts: %w", e.Runtime, name, err)
+		return err
 	}
 	wantSocketDir := filepath.Clean(socketDir)
 	for _, line := range splitLines(string(out)) {
@@ -1441,7 +1441,7 @@ func (e *Engine) warnSandboxPluginsDrift(ctx launchCtx) {
 }
 
 func (e *Engine) containerStartupState(name string) (status, exitCode string, err error) {
-	out, err := exec.Command(e.Runtime, "inspect", "--format", "{{.State.Status}} {{.State.ExitCode}}", name).Output()
+	out, err := e.inspectFormat(name, "{{.State.Status}} {{.State.ExitCode}}", "state")
 	if err != nil {
 		return "", "", err
 	}

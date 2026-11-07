@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // -- #849: classifyComments (pure, ID+nonce anchor matching) -----------------
@@ -474,7 +475,7 @@ func TestProbeEscalationAnswer_NonzeroExit_UnresolvedWithOneCollapsedLogLine(t *
 // carry an entire comment thread, so the logged failure detail must be
 // bounded even when the fake `gh` fixture returns a large payload.
 func TestProbeEscalationAnswer_LargeGhOutputOnFailure_LogLineBounded(t *testing.T) {
-	installFakeGH(t, `yes x | tr -d '\n' | head -c 5000 >&2
+	installFakeGHOnPath(t, `yes x | tr -d '\n' | head -c 5000 >&2
 exit 1
 `)
 
@@ -534,7 +535,7 @@ printf '%s'
 // AnswerProbeUnresolved rather than decoding a truncated/corrupted partial
 // JSON payload.
 func TestProbeEscalationAnswer_OversizedPaginatePayload_Unresolved(t *testing.T) {
-	installFakeGH(t, fmt.Sprintf("yes x | tr -d '\\n' | head -c %d\n", maxProbeStdoutBytes+1000))
+	installFakeGHOnPath(t, fmt.Sprintf("yes x | tr -d '\\n' | head -c %d\n", maxProbeStdoutBytes+1000))
 
 	var buf bytes.Buffer
 	got := probeEscalationAnswer("o/r", 99, 100, testNonce, &answerProbeBudget{}, grantAllPermission, &buf)
@@ -543,6 +544,75 @@ func TestProbeEscalationAnswer_OversizedPaginatePayload_Unresolved(t *testing.T)
 	}
 	if !strings.Contains(buf.String(), "o/r#99") {
 		t.Fatalf("expected a logged detail naming o/r#99, got: %q", buf.String())
+	}
+}
+
+// TestProbeEscalationAnswer_OversizedStdout_LogsCapLine pins the exact cap
+// line (#944): a stdout payload over maxProbeStdoutBytes classifies through
+// execGhBounded's errGhOutputTruncated sentinel, logs the byte-cap line as
+// one record, and fails closed.
+func TestProbeEscalationAnswer_OversizedStdout_LogsCapLine(t *testing.T) {
+	installFakeGHOnPath(t, fmt.Sprintf("yes x | tr -d '\\n' | head -c %d\n", maxProbeStdoutBytes+1000))
+
+	var buf bytes.Buffer
+	got := probeEscalationAnswer("o/r", 99, 100, testNonce, &answerProbeBudget{}, grantAllPermission, &buf)
+	if got != AnswerProbeUnresolved {
+		t.Fatalf("probe = %q, want AnswerProbeUnresolved", got)
+	}
+	const want = "exceeded the 1048576-byte stdout cap"
+	if !strings.Contains(buf.String(), want) {
+		t.Fatalf("log = %q, want it to contain %q", buf.String(), want)
+	}
+	if strings.Count(buf.String(), "\n") != 1 {
+		t.Fatalf("expected exactly one log line, got: %q", buf.String())
+	}
+}
+
+// TestProbeEscalationAnswer_ExactlyCapStdout_Decoded pins the overflow
+// threshold (#944): a payload of exactly maxProbeStdoutBytes valid JSON bytes
+// is decoded, never reported as truncated (overflow only when total > max).
+// The empty array has no anchor comment, so the decoded verdict is
+// AnswerProbeAnchorMismatch.
+func TestProbeEscalationAnswer_ExactlyCapStdout_Decoded(t *testing.T) {
+	installFakeGHOnPath(t, fmt.Sprintf("printf '['\nhead -c %d /dev/zero | tr '\\0' ' '\nprintf ']'\n", maxProbeStdoutBytes-2))
+
+	var buf bytes.Buffer
+	got := probeEscalationAnswer("o/r", 99, 100, testNonce, &answerProbeBudget{}, grantAllPermission, &buf)
+	if got != AnswerProbeAnchorMismatch {
+		t.Fatalf("probe = %q, want AnswerProbeAnchorMismatch (exactly-max payload must decode); log: %q", got, buf.String())
+	}
+	if strings.Contains(buf.String(), "exceeded") {
+		t.Fatalf("exactly-max payload must not be reported as truncated, got: %q", buf.String())
+	}
+}
+
+// TestProbeEscalationAnswer_LingeringGrandchild_TimedOutSingleLine pins the
+// timeout classification (#944): a gh that exits 0 but leaves a backgrounded
+// child holding stdout open is released by ghWaitDelay, classifies as
+// errGhTimeout, and logs one `timed out` record (never the multi-line
+// errors.Join text of the generic failure line). Takes about ghWaitDelay.
+func TestProbeEscalationAnswer_LingeringGrandchild_TimedOutSingleLine(t *testing.T) {
+	installFakeGHOnPath(t, "(sleep 10 &)\nexit 0\n")
+
+	var buf bytes.Buffer
+	start := time.Now()
+	got := probeEscalationAnswer("o/r", 99, 100, testNonce, &answerProbeBudget{}, grantAllPermission, &buf)
+	elapsed := time.Since(start)
+	if got != AnswerProbeUnresolved {
+		t.Fatalf("probe = %q, want AnswerProbeUnresolved", got)
+	}
+	if elapsed < ghWaitDelay {
+		t.Fatalf("probe returned after %v, want >= ghWaitDelay (%v): the lingering grandchild should hold the pipe until WaitDelay", elapsed, ghWaitDelay)
+	}
+	log := buf.String()
+	if strings.Count(log, "\n") != 1 {
+		t.Fatalf("expected exactly one log line, got: %q", log)
+	}
+	if !strings.Contains(log, "timed out") {
+		t.Fatalf("log = %q, want it to contain %q", log, "timed out")
+	}
+	if strings.Contains(log, "probe failed") {
+		t.Fatalf("log = %q, must not use the generic `probe failed` line for a timeout", log)
 	}
 }
 

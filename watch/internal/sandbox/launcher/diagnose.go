@@ -202,8 +202,9 @@ func pluginManifestVersionDisplay(content string, status homeVolumeReadStatus) s
 }
 
 // imageBaseVersion best-effort reads image's baked cenci.base-version label.
-// It reuses imageCurrent's combined agent-cli|base-version format string so a
-// single `image inspect` invocation serves both call sites identically. The
+// It reuses imageCurrent's combined agent-cli|base-version format string
+// (imageFreshnessLabelsFormat) so a single `image inspect` invocation serves
+// both call sites identically. The
 // label's value comes from a per-repo .cenci/Dockerfile — the same
 // untrusted-repo-content boundary as the other sanitized fields — and is
 // rendered into Diagnose's single-line "Image base version: %s" field, so it
@@ -212,8 +213,7 @@ func pluginManifestVersionDisplay(content string, status homeVolumeReadStatus) s
 // unsanitized value first, mirroring readHomeVolumeFile's own ordering, so a
 // genuinely present-but-all-control-byte label can't misreport as absent.
 func (e *Engine) imageBaseVersion(image string) (string, bool) {
-	out, err := exec.Command(e.Runtime, "image", "inspect", "--format",
-		`{{ index .Config.Labels "`+imageAgentLifecycleLabel+`" }}|{{ index .Config.Labels "`+imageBaseVersionLabel+`" }}`, image).Output()
+	out, err := e.imageInspectFormat(image, imageFreshnessLabelsFormat, "")
 	if err != nil {
 		return "", false
 	}
@@ -245,8 +245,8 @@ func (e *Engine) containerLogsTail(name string, n int) (string, bool) {
 // inspectMounts best-effort reads the container's mount list as
 // "<host source> -> <container destination>" lines.
 func (e *Engine) inspectMounts(name string) (string, bool) {
-	out, err := exec.Command(e.Runtime, "inspect", "--format",
-		`{{range .Mounts}}{{.Source}} -> {{.Destination}}{{"\n"}}{{end}}`, name).Output()
+	out, err := e.inspectFormat(name,
+		`{{range .Mounts}}{{.Source}} -> {{.Destination}}{{"\n"}}{{end}}`, "")
 	if err != nil {
 		return "", false
 	}
