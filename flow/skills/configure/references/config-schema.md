@@ -232,7 +232,11 @@ Two independent optional leaves share that local `refinement` object:
 }
 ```
 
-Each project entry's `lintCommand` is optional — it is omitted for stacks with no Lint row in the Stack-to-CI mapping table (e.g. `markdown-shell`, `docker-shell`), the same way `buildCommand`/`testCommand` are already handled for stacks without one.
+Each project entry's `lintCommand` is optional — it is omitted for stacks with no Lint row in the Stack-to-CI mapping table (e.g. `markdown-shell`, `docker-shell`), the same way `buildCommand`/`testCommand` are already handled for stacks without one. A missing `lintCommand` on a stack that does have a Lint row is surfaced, never written: maintain's `lint-command` check and the SessionStart advisory (`flow/hooks/scripts/check-lint-command.sh`) report it, and detection is report-only: nothing writes `.cenci/config.json`; the user or `/cenci:configure` sets the value.
+
+**Working directory**: `buildCommand`, `testCommand` and `lintCommand` run with the working directory set to `<worktree>/<projects[].path>` (the worktree root for a single-repo config), the same resolution `hooks/scripts/run-gate.sh` applies to `gateCommand`. The Stack-to-CI commands (`dotnet test --no-build`, `ng lint`, `npx eslint .`) only work from the project directory, so the implement pipeline and the implementer agent run them there.
+
+To call a repo-root script from a per-project command, prefer a static relative path from the project directory, which needs no substitution: `sh ../scripts/gate.sh api` for a project at depth one. When the depth is not fixed, use a checked substitution: `root=$(git rev-parse --show-toplevel) && [ -n "$root" ] && sh "$root/scripts/gate.sh" api`. Inside a worktree, `--show-toplevel` resolves to the worktree root. Use the checked form, never an unchecked `$(git rev-parse --show-toplevel)` substitution: a failed substitution silently collapses the path to a root-relative one.
 
 Each project entry's `gateCommand` is optional — unlike `lintCommand`, its presence isn't tied to the Stack-to-CI mapping table; it may simply be omitted for any project. Like the other `<verb>Command` fields, its value is executed as a shell command, so it must come only from trusted project configuration, never from untrusted input.
 

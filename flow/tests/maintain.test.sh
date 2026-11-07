@@ -2554,6 +2554,367 @@ rm -rf "${ROOT}"
 fi
 
 # =====================================================================
+# Cases 58-79 (#1200): the lint-command check. Missing lint configuration is
+# detected by the plugin-bundled resolver hooks/scripts/check-lint-command.sh
+# (--plain), which check.sh renders as one `lint-command` result per project
+# (one `(repo)` result for a single-repo config). Most cases run in --advisory
+# mode: the check executes no configured command, so it runs there too, and
+# the run never touches the fixture's report file.
+# =====================================================================
+
+assert_lacks_text() { [[ "$1" != *"$2"* ]] || fail "$3: expected text NOT to contain [$2], got [$1]"; }
+
+# set_lint_config <root> <jq-filter> — rewrites the base fixture's config.
+set_lint_config() {
+  local root="$1" filter="$2"
+  jq "${filter}" "${root}/.cenci/config.json" > "${root}/.cenci/config.json.tmp" \
+    && mv "${root}/.cenci/config.json.tmp" "${root}/.cenci/config.json"
+}
+
+# lint_n <target> <status> — number of lint-command results matching both.
+lint_n() {
+  printf '%s' "${REPORT_JSON}" | jq --arg t "$1" --arg s "$2" \
+    '[.results[]? | select(.check=="lint-command" and .target==$t and .status==$s)] | length' 2>/dev/null
+}
+
+# assert_lint <target> <status> <label> — exactly one lint-command result.
+assert_lint() {
+  local n; n="$(lint_n "$1" "$2")"
+  [[ "${n}" == "1" ]] || fail "$3: expected exactly 1 lint-command ${2} result for ${1}, got '${n:-N/A}' (report: ${REPORT_JSON})"
+}
+
+# lint_total — number of lint-command results of any status.
+lint_total() {
+  printf '%s' "${REPORT_JSON}" | jq '[.results[]? | select(.check=="lint-command")] | length' 2>/dev/null
+}
+
+# lint_field <target> <status> <field> — message or fix of that result.
+lint_field() {
+  printf '%s' "${REPORT_JSON}" | jq -r --arg t "$1" --arg s "$2" --arg f "$3" \
+    '[.results[]? | select(.check=="lint-command" and .target==$t and .status==$s) | .[$f]] | (first | if . == null then "" else . end)' 2>/dev/null
+}
+
+# lint_all_text — every lint-command message and fix, joined.
+lint_all_text() {
+  printf '%s' "${REPORT_JSON}" | jq -r \
+    '[.results[]? | select(.check=="lint-command") | (.message + " " + .fix)] | join(" | ")' 2>/dev/null
+}
+
+# lint_fixture <jq-filter> — fresh base fixture (ROOT) with the filter applied
+# to its config, then an advisory run.
+lint_fixture() {
+  ROOT="$(mktemp -d)" || ROOT=""
+  if [[ -z "${ROOT}" || ! -d "${ROOT}" ]]; then
+    fail "lint_fixture: mktemp -d failed"
+    return 1
+  fi
+  setup_base "${ROOT}"
+  set_lint_config "${ROOT}" "$1"
+  run_advisory "${ROOT}"
+}
+
+# Case 58 (AC3): dotnet10 without lintCommand -> fail, fix names the command
+lint_fixture '.projects = [{slug:"api", path:"api", stack:{framework:"dotnet10"}}]'
+assert_lint "api" "fail" "case58 dotnet10 without lintCommand"
+assert_contains "$(lint_field api fail fix)" "dotnet format --verify-no-changes" "case58 fix names the row's command"
+assert_contains "$(lint_field api fail fix)" "projects[].lintCommand" "case58 fix names the per-project field"
+assert_contains "$(lint_field api fail fix)" "'api'" "case58 fix names the slug"
+assert_eq "$(lint_total)" "1" "case58 exactly one lint-command result for one project"
+rm -rf "${ROOT}"
+
+# Case 59 (AC4): dotnet10 with lintCommand "" -> fail
+lint_fixture '.projects = [{slug:"api", path:"api", stack:{framework:"dotnet10"}, lintCommand:""}]'
+assert_lint "api" "fail" "case59 dotnet10 with an empty lintCommand"
+rm -rf "${ROOT}"
+
+# Case 60 (AC5): angular21 with a custom lintCommand -> pass, value not compared
+lint_fixture '.projects = [{slug:"web", path:"web", stack:{framework:"angular21"}, lintCommand:"npm run lint:ci"}]'
+assert_lint "web" "pass" "case60 angular21 with a custom lintCommand"
+assert_eq "$(lint_n web fail)" "0" "case60 no fail for a configured lintCommand"
+assert_lacks_text "$(lint_all_text)" "npm run lint:ci" "case60 the configured lintCommand value is never echoed"
+rm -rf "${ROOT}"
+
+# Case 61 (AC6): markdown-shell without lintCommand -> skip, no lint-command fail
+lint_fixture '.projects = [{slug:"docs", path:"docs", stack:{framework:"markdown-shell"}}]'
+assert_lint "docs" "skip" "case61 markdown-shell without lintCommand"
+assert_no_result_status "lint-command" "fail" "case61 markdown-shell produces no lint-command fail"
+rm -rf "${ROOT}"
+
+# Case 62 (AC7): unrecognized token (elixir) -> skip, separate from case 61
+lint_fixture '.projects = [{slug:"svc", path:"svc", stack:{framework:"elixir"}}]'
+assert_lint "svc" "skip" "case62 unrecognized token without lintCommand"
+assert_no_result_status "lint-command" "fail" "case62 unrecognized token produces no lint-command fail"
+rm -rf "${ROOT}"
+
+# Case 63 (AC8): single-repo go1.25 without lintCommand -> (repo) fail with the
+# row's command; with a top-level lintCommand -> (repo) pass
+lint_fixture 'del(.isMonorepo) | del(.projects) | .stack = {backend:"go1.25"}'
+assert_lint "(repo)" "fail" "case63a single-repo go1.25 without lintCommand"
+assert_contains "$(lint_field '(repo)' fail fix)" "golangci-lint run ./..." "case63a fix names the go row's command"
+assert_contains "$(lint_field '(repo)' fail fix)" "top-level" "case63a fix names the top-level field"
+rm -rf "${ROOT}"
+lint_fixture 'del(.isMonorepo) | del(.projects) | .stack = {backend:"go1.25"} | .lintCommand = "make lint"'
+assert_lint "(repo)" "pass" "case63b single-repo go1.25 with a top-level lintCommand"
+rm -rf "${ROOT}"
+
+# Case 64 (edge): no stack object, or a stack without framework -> skip
+lint_fixture '.projects = [{slug:"nostack", path:"nostack"}, {slug:"nofw", path:"nofw", stack:{testing:"x"}}]'
+assert_lint "nostack" "skip" "case64a project without a stack object"
+assert_lint "nofw" "skip" "case64b stack without framework"
+assert_no_result_status "lint-command" "fail" "case64 neither shape may fail"
+rm -rf "${ROOT}"
+
+# Case 65 (edge): a project without a slug is reported as (unknown)
+lint_fixture '.projects = [{path:"anon", stack:{framework:"dotnet10"}}]'
+assert_lint "(unknown)" "fail" "case65 missing slug reports (unknown)"
+rm -rf "${ROOT}"
+
+# Case 65b (edge): a monorepo project whose configured slug is literally (repo)
+# cannot impersonate the single-repo target — it is reported as (unknown) and
+# its fix names the per-project field, never the top-level one
+if lint_fixture '.projects = [{slug:"(repo)", path:"api", stack:{framework:"go"}}]'; then
+  assert_lint "(unknown)" "fail" "case65b config slug (repo) is reported as (unknown)"
+  assert_eq "$(lint_n '(repo)' fail)" "0" "case65b no monorepo project claims the (repo) target"
+  assert_contains "$(lint_field '(unknown)' fail fix)" "projects[].lintCommand" "case65b fix names the per-project field"
+  assert_lacks_text "$(lint_field '(unknown)' fail fix)" "top-level" "case65b fix never tells a monorepo project to set the top-level lintCommand"
+  rm -rf "${ROOT}"
+fi
+
+# Case 66 (edge): whitespace-only lintCommand is empty -> fail
+lint_fixture '.projects = [{slug:"api", path:"api", stack:{framework:"dotnet10"}, lintCommand:"   "}]'
+assert_lint "api" "fail" "case66 whitespace-only lintCommand"
+rm -rf "${ROOT}"
+
+# Case 67 (edge): non-string lintCommand (true) on a Lint-row stack -> fail
+lint_fixture '.projects = [{slug:"api", path:"api", stack:{framework:"dotnet10"}, lintCommand:true}]'
+assert_lint "api" "fail" "case67 non-string lintCommand"
+rm -rf "${ROOT}"
+
+# Case 68 (edge): go and go1.25 match the go row; gopher does not
+lint_fixture '.projects = [{slug:"a", path:"a", stack:{framework:"go"}}, {slug:"b", path:"b", stack:{framework:"go1.25"}}, {slug:"c", path:"c", stack:{framework:"gopher"}}]'
+assert_lint "a" "fail" "case68a go matches the go row"
+assert_lint "b" "fail" "case68b go1.25 matches the go row"
+assert_lint "c" "skip" "case68c gopher does not match"
+rm -rf "${ROOT}"
+
+# Case 69 (edge): next and react19 each suggest npx eslint .
+lint_fixture '.projects = [{slug:"n", path:"n", stack:{framework:"next"}}, {slug:"r", path:"r", stack:{framework:"react19"}}]'
+assert_lint "n" "fail" "case69a next matches the react/next row"
+assert_lint "r" "fail" "case69b react19 matches the react/next row"
+assert_contains "$(lint_field n fail fix)" "npx eslint ." "case69a fix suggests npx eslint ."
+assert_contains "$(lint_field r fail fix)" "npx eslint ." "case69b fix suggests npx eslint ."
+rm -rf "${ROOT}"
+
+# Case 70 (edge): single-repo backend dotnet10 + frontend angular21 -> ONE (repo)
+# fail whose fix names both commands
+lint_fixture 'del(.isMonorepo) | del(.projects) | .stack = {backend:"dotnet10", frontend:"angular21"}'
+assert_lint "(repo)" "fail" "case70 single-repo with two Lint-row stacks"
+assert_eq "$(lint_total)" "1" "case70 exactly one (repo) result"
+assert_contains "$(lint_field '(repo)' fail fix)" "dotnet format --verify-no-changes" "case70 fix names the dotnet command"
+assert_contains "$(lint_field '(repo)' fail fix)" "ng lint" "case70 fix names the angular command"
+rm -rf "${ROOT}"
+
+# Case 71 (edge): a monorepo's top-level lintCommand is not inherited
+lint_fixture '.lintCommand = "make lint" | .projects = [{slug:"api", path:"api", stack:{framework:"dotnet10"}}]'
+assert_lint "api" "fail" "case71 top-level lintCommand does not satisfy a project"
+rm -rf "${ROOT}"
+
+# Case 72 (edge): a monorepo with an empty projects list -> one (repo) skip
+lint_fixture '.projects = []'
+assert_lint "(repo)" "skip" "case72 empty projects list"
+assert_eq "$(lint_total)" "1" "case72 never zero results and never more than one"
+rm -rf "${ROOT}"
+
+# Case 73 (edge): a missing config -> (repo) skip; an unparseable one too
+if lint_fixture '.'; then
+  rm -f "${ROOT}/.cenci/config.json"
+  run_advisory "${ROOT}"
+  assert_lint "(repo)" "skip" "case73a missing config"
+  rm -rf "${ROOT}"
+fi
+if lint_fixture '.'; then
+  printf '{ not json' > "${ROOT}/.cenci/config.json"
+  run_advisory "${ROOT}"
+  assert_lint "(repo)" "skip" "case73b unparseable config"
+  assert_no_result_status "lint-command" "fail" "case73b unparseable config never fails lint-command"
+  rm -rf "${ROOT}"
+fi
+
+# Case 74 (edge): the bundled resolver missing next to check.sh -> (repo) skip
+# with a "not found" message; never exit 2. SELF_DIR resolves the resolver
+# relative to the checker, so the checker is copied into a tree without
+# hooks/scripts/.
+LINT_COPY_DIR="$(mktemp -d)" || LINT_COPY_DIR=""
+if [[ -z "${LINT_COPY_DIR}" || ! -d "${LINT_COPY_DIR}" ]]; then
+  fail "case74: mktemp -d failed or produced no directory, case body skipped"
+else
+  mkdir -p "${LINT_COPY_DIR}/skills/maintain/scripts"
+  cp "${CHECK}" "${LINT_COPY_DIR}/skills/maintain/scripts/check.sh"
+  if lint_fixture '.projects = [{slug:"api", path:"api", stack:{framework:"dotnet10"}}]'; then
+    REPORT_JSON="$(cd "${ROOT}" && bash "${LINT_COPY_DIR}/skills/maintain/scripts/check.sh" --advisory 2>/dev/null)"
+    REPORT_CODE=$?
+    assert_lint "(repo)" "skip" "case74 missing bundled resolver"
+    assert_contains "$(lint_field '(repo)' skip message)" "not found" "case74 message says the resolver was not found"
+    [[ "${REPORT_CODE}" -ne 2 ]] || fail "case74: a missing bundled resolver must not exit 2"
+    rm -rf "${ROOT}"
+  fi
+  rm -rf "${LINT_COPY_DIR}"
+fi
+
+# Case 75 (edge): unsafe slug/token -> (redacted), status unchanged, and the raw
+# value is in no message or fix
+if lint_fixture '.'; then
+  jq --arg slug 'bad slug;$(echo pwned)' --arg fw 'dotnet10 $(echo pwned2)' \
+    '.projects = [{slug:$slug, path:"x", stack:{framework:"dotnet10"}}, {slug:"tok", path:"tok", stack:{framework:$fw}}]' \
+    "${ROOT}/.cenci/config.json" > "${ROOT}/.cenci/config.json.tmp" \
+    && mv "${ROOT}/.cenci/config.json.tmp" "${ROOT}/.cenci/config.json"
+  run_advisory "${ROOT}"
+  assert_lint "(redacted)" "fail" "case75a unsafe slug is redacted and still fails"
+  assert_lint "tok" "fail" "case75b unsafe token still matches the dotnet row and fails"
+  assert_lacks_text "$(lint_all_text)" "pwned" "case75 no raw slug or token in any lint-command message or fix"
+  assert_lacks_text "$(printf '%s' "${REPORT_JSON}" | jq -r '[.results[]? | select(.check=="lint-command") | .target] | join(" ")')" "pwned" "case75 no raw value in any target"
+  rm -rf "${ROOT}"
+fi
+
+# Case 76: check.sh re-applies the charset guard to a misbehaving resolver, and
+# unrecognised resolver output degrades to skip rather than a made-up status
+LINT_COPY_DIR="$(mktemp -d)" || LINT_COPY_DIR=""
+if [[ -z "${LINT_COPY_DIR}" || ! -d "${LINT_COPY_DIR}" ]]; then
+  fail "case76: mktemp -d failed or produced no directory, case body skipped"
+else
+  mkdir -p "${LINT_COPY_DIR}/skills/maintain/scripts" "${LINT_COPY_DIR}/hooks/scripts"
+  cp "${CHECK}" "${LINT_COPY_DIR}/skills/maintain/scripts/check.sh"
+  cat > "${LINT_COPY_DIR}/hooks/scripts/check-lint-command.sh" <<'EOF'
+#!/usr/bin/env bash
+printf 'fail\tevil slug$(id)\tbad;tok\tbad;tok:echo $(id)|dotnet10:dotnet format --verify-no-changes\n'
+EOF
+  if lint_fixture '.'; then
+    REPORT_JSON="$(cd "${ROOT}" && bash "${LINT_COPY_DIR}/skills/maintain/scripts/check.sh" --advisory 2>/dev/null)"
+    assert_lint "(redacted)" "fail" "case76a second-layer guard redacts the target and keeps the status"
+    assert_lacks_text "$(lint_all_text)" '$(id)' "case76a raw resolver fields never reach a message or fix"
+    assert_lacks_text "$(lint_all_text)" "evil" "case76a raw slug never reaches a message or fix"
+    assert_contains "$(lint_field '(redacted)' fail fix)" "dotnet format --verify-no-changes" "case76a a well-formed pair keeps its command"
+    cat > "${LINT_COPY_DIR}/hooks/scripts/check-lint-command.sh" <<'EOF'
+#!/usr/bin/env bash
+printf 'weird output that is not a result line\n'
+EOF
+    REPORT_JSON="$(cd "${ROOT}" && bash "${LINT_COPY_DIR}/skills/maintain/scripts/check.sh" --advisory 2>/dev/null)"
+    assert_lint "(repo)" "skip" "case76b unrecognised resolver output degrades to skip"
+    assert_no_result_status "lint-command" "fail" "case76b unrecognised output never fails"
+    rm -rf "${ROOT}"
+  fi
+  rm -rf "${LINT_COPY_DIR}"
+fi
+
+# Case 77 (AC9): --advisory emits the lint-command results
+if lint_fixture '.'; then
+  assert_check_ran "lint-command" "case77 advisory mode runs lint-command"
+  rm -rf "${ROOT}"
+fi
+
+# Case 78 (edge): --changed relevance — .cenci/config.json, the resolver and the
+# Stack-to-CI table doc run the check; an unrelated file does not
+if lint_fixture '.'; then
+  run_check "${ROOT}" --changed flow/skills/sample/SKILL.md
+  assert_no_result "lint-command" "case78 lint-command not relevant to an unrelated changed file"
+  run_check "${ROOT}" --changed .cenci/config.json
+  assert_check_ran "lint-command" "case78 lint-command runs when .cenci/config.json changed"
+  run_check "${ROOT}" --changed flow/hooks/scripts/check-lint-command.sh
+  assert_check_ran "lint-command" "case78 lint-command runs when the resolver changed"
+  run_check "${ROOT}" --changed flow/skills/configure/phases/runtime-ci-sandbox-questions.md
+  assert_check_ran "lint-command" "case78 lint-command runs when the Stack-to-CI table doc changed"
+  rm -rf "${ROOT}"
+fi
+
+# Case 78b: every command in the resolver's marker-bounded LINT_MAP survives
+# check.sh's second-layer command guard unchanged. A Lint-row edit that adds a
+# character the guard rejects would otherwise render as (redacted) in the fix
+# text. The real map is extracted from the resolver; a stub resolver in a copied
+# tree feeds each of its commands to the real check.sh.
+LINT_MAP_RESOLVER="${FLOW_DIR}/hooks/scripts/check-lint-command.sh"
+LINT_MAP_BLOCK="$(awk '/^# cenci-lint-map:start$/ {on = 1; next} /^# cenci-lint-map:end$/ {on = 0} on' "${LINT_MAP_RESOLVER}")" || LINT_MAP_BLOCK=""
+LINT_MAP_TEXT="$(bash -uc "${LINT_MAP_BLOCK}"$'\n''printf "%s\n" "$LINT_MAP"' 2>/dev/null)" || LINT_MAP_TEXT=""
+LINT_COPY_DIR="$(mktemp -d)" || LINT_COPY_DIR=""
+if [[ -z "${LINT_MAP_TEXT}" ]]; then
+  fail "case78b: could not extract any LINT_MAP rows from ${LINT_MAP_RESOLVER} (markers missing or map empty)"
+elif [[ -z "${LINT_COPY_DIR}" || ! -d "${LINT_COPY_DIR}" ]]; then
+  fail "case78b: mktemp -d failed or produced no directory, case body skipped"
+else
+  mkdir -p "${LINT_COPY_DIR}/skills/maintain/scripts" "${LINT_COPY_DIR}/hooks/scripts"
+  cp "${CHECK}" "${LINT_COPY_DIR}/skills/maintain/scripts/check.sh"
+  printf '#!/usr/bin/env bash\ncat "$(dirname "$0")/rows.tsv"\n' > "${LINT_COPY_DIR}/hooks/scripts/check-lint-command.sh"
+  : > "${LINT_COPY_DIR}/hooks/scripts/rows.tsv"
+  map_rows=0
+  while IFS= read -r map_line; do
+    [[ -n "${map_line}" ]] || continue
+    map_rows=$((map_rows + 1))
+    printf 'fail\tproj%s\ttok%s\ttok%s:%s\n' "${map_rows}" "${map_rows}" "${map_rows}" "${map_line#*|}" >> "${LINT_COPY_DIR}/hooks/scripts/rows.tsv"
+  done <<< "${LINT_MAP_TEXT}"
+  [[ "${map_rows}" -gt 0 ]] || fail "case78b: LINT_MAP yielded zero rows"
+  if lint_fixture '.'; then
+    REPORT_JSON="$(cd "${ROOT}" && bash "${LINT_COPY_DIR}/skills/maintain/scripts/check.sh" --advisory 2>/dev/null)"
+    assert_eq "$(lint_total)" "${map_rows}" "case78b one lint-command result per LINT_MAP row"
+    assert_lacks_text "$(lint_all_text)" "(redacted)" "case78b no LINT_MAP command is redacted by check.sh's command guard"
+    map_rows=0
+    while IFS= read -r map_line; do
+      [[ -n "${map_line}" ]] || continue
+      map_rows=$((map_rows + 1))
+      assert_contains "$(lint_field "proj${map_rows}" fail fix)" "\`${map_line#*|}\` (for tok${map_rows})" "case78b LINT_MAP command '${map_line#*|}' reaches the fix text unchanged"
+    done <<< "${LINT_MAP_TEXT}"
+    rm -rf "${ROOT}"
+  fi
+  rm -rf "${LINT_COPY_DIR}"
+fi
+
+# Case 79 (AC9): this repo's own config -> flow skip, watch pass, sandbox skip,
+# zero lint-command fails. --advisory keeps the real repo's report untouched.
+LINT_REAL_ROOT="$(cd "${FLOW_DIR}/.." && pwd)" || LINT_REAL_ROOT=""
+if [[ -z "${LINT_REAL_ROOT}" || ! -d "${LINT_REAL_ROOT}" ]]; then
+  fail "case79: could not resolve the repo root"
+else
+  REPORT_JSON="$(cd "${LINT_REAL_ROOT}" && bash "${CHECK}" --advisory 2>/dev/null)"
+  assert_lint "flow" "skip" "case79 flow (markdown-shell) skips"
+  assert_lint "watch" "pass" "case79 watch (go1.25, make lint) passes"
+  assert_lint "sandbox" "skip" "case79 sandbox (docker-shell) skips"
+  assert_no_result_status "lint-command" "fail" "case79 this repo has no lint-command fail"
+fi
+
+# Case 80 (edge): a non-string lintCommand (true) is reported by BOTH checks,
+# each from the input it actually reads. lint-command reads the live
+# .cenci/config.json and fails the Lint-row stack; config-examples reads only
+# fenced ```json blocks in docs and reports its own type finding for a doc
+# example giving lintCommand a boolean. A valid-string example is the control
+# proving the config-examples assertion is not vacuous.
+ROOT="$(mktemp -d)" || ROOT=""
+if [[ -z "${ROOT}" || ! -d "${ROOT}" ]]; then
+  fail "case80: mktemp -d failed or produced no directory, case body skipped"
+else
+  setup_base "${ROOT}"
+  set_lint_config "${ROOT}" '.projects = [{slug:"api", path:"api", stack:{framework:"dotnet10"}, lintCommand:true}]'
+  mkdir -p "${ROOT}/docs"
+  cat > "${ROOT}/docs/lint-example.md" <<'EOF'
+# Lint config
+
+```json
+{
+  "lintCommand": "make lint"
+}
+```
+EOF
+  run_advisory "${ROOT}"
+  assert_lint "api" "fail" "case80 control: non-string lintCommand in the live config fails lint-command"
+  assert_no_result_status "config-examples" "fail" "case80 control: a string lintCommand example does not fail config-examples"
+  sed -i 's/"lintCommand": "make lint"/"lintCommand": true/' "${ROOT}/docs/lint-example.md"
+  run_advisory "${ROOT}"
+  assert_lint "api" "fail" "case80 non-string lintCommand still fails lint-command"
+  assert_has_result "config-examples" "fail" "case80 non-string lintCommand example fails config-examples"
+  CE_MSG="$(printf '%s' "${REPORT_JSON}" | jq -r '[.results[]? | select(.check=="config-examples" and .status=="fail") | .message] | join(" | ")' 2>/dev/null)"
+  assert_contains "${CE_MSG}" "lintCommand" "case80 config-examples message names the lintCommand field"
+  assert_contains "${CE_MSG}" "type boolean; canonical type is string" "case80 config-examples message reports the type mismatch"
+  rm -rf "${ROOT}"
+fi
+
+# =====================================================================
 # Skill markdown contract cases (ticket #545) -- grep-based anchor-phrase
 # assertions against flow/skills/maintain/{SKILL.md,codex.md,modes/*.md},
 # none of which exist yet at RED-phase time (the skill/mode/agent files are
