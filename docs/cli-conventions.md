@@ -76,6 +76,7 @@ cenci <verb> [subverb] [args] [flags]
 | Config | `~/.config/cenci/config.json` |
 | Sockets | `$CENCI_SOCKET_DIR` (verbatim) → `$XDG_STATE_HOME/cenci/run` (default `~/.local/state/cenci/run`) → `/tmp/cenci-<uid>/cenci` |
 | Hook health records | `$XDG_STATE_HOME/cenci/hook-health/` (default `~/.local/state/cenci/hook-health/`): one `<category>` file plus `last-ok`, each `<unix-epoch> <client>`; read by `cenci daemon hook-health` |
+| tmux server socket | `cenci` (`tmux -L cenci`), loaded with `-f "${XDG_CONFIG_HOME:-$HOME/.config}/cenci/tmux.conf"` (the installer-managed copy of `watch/plugin/tmux/tmux.conf`) |
 | Readiness marker | `/tmp/cenci-ready` (inside the container) |
 | Per-repo Dockerfile | `<repo-root>/.cenci/Dockerfile` |
 

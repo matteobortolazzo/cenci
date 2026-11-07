@@ -36,6 +36,10 @@
 #   --build / --no-build                  force / skip the sandbox image build
 #   --lazyboards / --no-lazyboards        force / skip lazyboards install
 #                                          (uninstall mode: --lazyboards also removes it)
+#   --tmux-defaults / --no-tmux-defaults  force / skip cenci's managed tmux defaults
+#                                          (dedicated "cenci" tmux server config; update
+#                                          mode: --tmux-defaults also creates a missing copy;
+#                                          uninstall mode: --no-tmux-defaults keeps it)
 #   --ref <ref>                           marketplace + plugin content, and the installer
 #                                          itself, all come from this ref instead of the
 #                                          resolved latest release tag (e.g. --ref main);
@@ -366,6 +370,135 @@ find_plugin_path() {
 	return 1
 }
 
+# ------------------------------------------------------------ tmux defaults ----
+
+# The shipped tmux config (watch/plugin/tmux/tmux.conf) is installed as a
+# managed copy at ${XDG_CONFIG_HOME:-$HOME/.config}/cenci/tmux.conf. Its first
+# line is a header carrying the sha256 of every byte after that line, so the
+# installer can tell its own unmodified copy (safe to refresh or remove) from a
+# user-edited or foreign file (never touched). The file is loaded only by the
+# dedicated `tmux -L cenci` server and is never written to a personal tmux
+# config path.
+TMUX_DEFAULTS_ASSET_REL="watch/plugin/tmux/tmux.conf"
+TMUX_DEFAULTS_HEADER_PREFIX='# cenci-managed tmux defaults — sha256='
+
+tmux_defaults_path() {
+	printf '%s\n' "${XDG_CONFIG_HOME:-$HOME/.config}/cenci/tmux.conf"
+}
+
+# tmux_defaults_sumtool succeeds when a SHA-256 tool is available (sha256sum,
+# else shasum -a 256 — the same detection install_lazyboards_binary uses).
+tmux_defaults_sumtool() {
+	have sha256sum || have shasum
+}
+
+# tmux_defaults_sha256 prints the hex SHA-256 of stdin.
+tmux_defaults_sha256() {
+	local out
+	if have sha256sum; then
+		out="$(sha256sum)" || return 1
+	elif have shasum; then
+		out="$(shasum -a 256)" || return 1
+	else
+		return 1
+	fi
+	printf '%s\n' "${out%% *}"
+}
+
+# tmux_defaults_body_sha256 <path> prints the hex SHA-256 of every byte after
+# the file's first line. It consumes the header line with read and hashes the
+# rest of the same descriptor, so it needs no tail.
+tmux_defaults_body_sha256() {
+	{
+		IFS= read -r _ || true
+		tmux_defaults_sha256
+	} <"$1" 2>/dev/null
+}
+
+# tmux_defaults_state <path> prints one of: absent, managed, modified,
+# unmanaged, unverifiable.
+#   - a symlink (even a dangling one) or any non-regular file is unmanaged: it
+#     is never followed, replaced or deleted;
+#   - managed: the first line is the managed header and its hash equals the
+#     SHA-256 of everything after that line;
+#   - modified: a valid header whose hash does not match the body;
+#   - unmanaged: anything else;
+#   - unverifiable: a valid header but no SHA-256 tool to check it with.
+tmux_defaults_state() {
+	local path="$1" first="" hex="" body_hex
+	if [ -L "$path" ]; then
+		printf 'unmanaged\n'
+		return 0
+	fi
+	if [ ! -e "$path" ]; then
+		printf 'absent\n'
+		return 0
+	fi
+	if [ ! -f "$path" ]; then
+		printf 'unmanaged\n'
+		return 0
+	fi
+	IFS= read -r first <"$path" || true
+	case "$first" in
+	"$TMUX_DEFAULTS_HEADER_PREFIX"*) hex="${first#"$TMUX_DEFAULTS_HEADER_PREFIX"}" ;;
+	esac
+	if ! [[ "$hex" =~ ^[0-9a-f]{64}$ ]]; then
+		printf 'unmanaged\n'
+		return 0
+	fi
+	if ! tmux_defaults_sumtool; then
+		printf 'unverifiable\n'
+		return 0
+	fi
+	body_hex="$(tmux_defaults_body_sha256 "$path")" || body_hex=""
+	if [ "$body_hex" = "$hex" ]; then
+		printf 'managed\n'
+	else
+		printf 'modified\n'
+	fi
+}
+
+# tmux_defaults_write <asset> <dest> installs the managed copy atomically: a
+# checked mktemp in the destination directory, header + asset, then mv -f. The
+# temp file is removed on any failure.
+tmux_defaults_write() {
+	local asset="$1" dest="$2" dir tmp hash
+	dir="$(dirname "$dest")"
+	if ! mkdir -p "$dir"; then
+		fail "tmux defaults: could not create $dir"
+		return 1
+	fi
+	tmp="$(mktemp "$dir/.tmux.conf.XXXXXX")" || tmp=""
+	if [ -z "$tmp" ] || [ ! -f "$tmp" ]; then
+		fail "tmux defaults: could not create a staged file in $dir"
+		return 1
+	fi
+	hash="$(tmux_defaults_sha256 <"$asset")" || hash=""
+	if ! [[ "$hash" =~ ^[0-9a-f]{64}$ ]]; then
+		fail "tmux defaults: could not hash $asset"
+		rm -f "$tmp"
+		return 1
+	fi
+	if ! { printf '%s%s\n' "$TMUX_DEFAULTS_HEADER_PREFIX" "$hash"; cat "$asset"; } >"$tmp" ||
+		! chmod 644 "$tmp"; then
+		fail "tmux defaults: could not write $dest"
+		rm -f "$tmp"
+		return 1
+	fi
+	# The asset is read twice (hash, then body), so re-verify the staged file
+	# before it can land: a header/body mismatch never reaches $dest.
+	if [ "$(tmux_defaults_state "$tmp")" != managed ]; then
+		fail "tmux defaults: staged copy failed its integrity check (was $asset modified while installing?) — nothing written to $dest"
+		rm -f "$tmp"
+		return 1
+	fi
+	if ! mv -f "$tmp" "$dest"; then
+		fail "tmux defaults: could not write $dest"
+		rm -f "$tmp"
+		return 1
+	fi
+}
+
 # ------------------------------------------------------------------ doctor ----
 
 # check <label> <required|optional> <hint> <cmd...>
@@ -674,16 +807,38 @@ doctor_hook_health() {
 # nothing happened rather than a visible break. This is read-only: doctor's
 # contract is to change nothing, so it warns instead of rewriting the dotfile.
 check_stale_tmux_vars() {
-	local conf found=0
+	local conf found=0 cenci_found=0
 	for conf in "$HOME/.tmux.conf" "${XDG_CONFIG_HOME:-$HOME/.config}/tmux/tmux.conf"; do
 		[ -f "$conf" ] || continue
 		if grep -qE '@agentwatch-(symbol|style|headroom-)' "$conf" 2>/dev/null; then
 			found=1
 		fi
+		if grep -qE '@cenci-(symbol|style|headroom-)' "$conf" 2>/dev/null; then
+			cenci_found=1
+		fi
 	done
 	if [ "$found" -eq 1 ]; then
 		warn "tmux config references old @agentwatch-* variables — see docs/migrating-to-cenci.md#tmux-user-variables"
 	fi
+	# Informational only (say, not warn): the dedicated cenci tmux server ships
+	# these formats itself, so the lines are harmless dead lookups there and
+	# only still matter on a server the daemon targets today.
+	if [ "$cenci_found" -eq 1 ]; then
+		say "    ${DIM}your tmux config references @cenci-* variables — the dedicated cenci server (tmux -L cenci) ships those formats itself; the lines become removable once agent windows run on it (#646)${RESET}"
+	fi
+}
+
+# check_tmux_defaults <not-installed-hint> prints exactly one status line for
+# the managed tmux defaults copy. Read-only, and never sets DOCTOR_FAILED.
+check_tmux_defaults() {
+	local hint="$1"
+	case "$(tmux_defaults_state "$(tmux_defaults_path)")" in
+	managed) ok "tmux defaults installed" ;;
+	modified) warn "tmux defaults modified locally — not refreshed by updates" ;;
+	unmanaged) warn "tmux defaults present but not cenci-managed" ;;
+	unverifiable) warn "tmux defaults present — integrity not verifiable (neither sha256sum nor shasum found)" ;;
+	*) warn "tmux defaults not installed — $hint" ;;
+	esac
 }
 
 # check_stale_marketplace_pin <client> — the only signal a stranded pre-#678
@@ -977,12 +1132,24 @@ run_doctor() {
 	local launcher_hint="re-run the installer to create it"
 	local image_hint="build it with: cenci sandbox build"
 	local lazyboards_hint="optional; install with: cenci-installer --lazyboards"
+	local tmux_defaults_hint="install with: cenci-installer --tmux-defaults"
 	if [ "$MODE" = install ]; then
 		launcher_hint="created later in this run"
 		[ "$BUILD_IMAGE" = no ] || image_hint="you'll be offered the build later in this run"
 		case "$LAZYBOARDS" in
 		ask) lazyboards_hint="optional; you'll be asked later in this run" ;;
 		yes) lazyboards_hint="optional; installed later in this run" ;;
+		esac
+		# An unanswerable prompt (--yes, no tty) resolves to its default, install.
+		case "$TMUX_DEFAULTS" in
+		ask)
+			if [ "$INTERACTIVE" -eq 1 ] && [ "$ASSUME_YES" -eq 0 ]; then
+				tmux_defaults_hint="you'll be asked later in this run"
+			else
+				tmux_defaults_hint="installed later in this run"
+			fi
+			;;
+		yes) tmux_defaults_hint="installed later in this run" ;;
 		esac
 	fi
 	step "Checking your system ($(platform_label))"
@@ -1040,6 +1207,7 @@ run_doctor() {
 	check "tmux" optional \
 		"cenci's main frontend is the tmux status bar; other surfaces (waybar, macOS menu bar) still work without it" \
 		command -v tmux
+	check_tmux_defaults "$tmux_defaults_hint"
 	check_stale_tmux_vars
 	if [ "$OS" = macos ]; then
 		check "SwiftBar (menu bar widget)" optional \
@@ -2346,6 +2514,82 @@ step_lazyboards_setup() {
 	fi
 }
 
+# step_tmux_defaults_setup installs or refreshes the managed tmux defaults
+# copy. It writes only an absent file or its own unmodified managed copy — a
+# modified, unmanaged or symlinked file is always kept, even with an explicit
+# --tmux-defaults. TMUX_DEFAULTS is ask|yes|no: only the flags set yes/no, so
+# "no" always means an explicit skip, and an unanswerable prompt (--yes, no
+# tty) resolves to its default, install.
+step_tmux_defaults_setup() {
+	selected cenci-watch || return 0
+	local dest state asset current
+	[ "$TMUX_DEFAULTS" = no ] && return 0
+	dest="$(tmux_defaults_path)"
+	state="$(tmux_defaults_state "$dest")"
+	case "$state" in
+	unverifiable)
+		step "Setting up tmux defaults"
+		fail "tmux defaults: cannot verify $dest — neither sha256sum nor shasum found; install one and re-run"
+		INSTALL_FAILED=1
+		return 0
+		;;
+	absent)
+		# Update mode refreshes what exists; it creates a copy only on request.
+		if [ "$MODE" = update ] && [ "$TMUX_DEFAULTS" != yes ]; then
+			return 0
+		fi
+		;;
+	modified | unmanaged)
+		if [ "$state" = modified ]; then
+			warn "tmux defaults: $dest was modified locally — not refreshed"
+		else
+			warn "tmux defaults: $dest is not cenci-managed — left untouched"
+		fi
+		if [ "$TMUX_DEFAULTS" = yes ]; then
+			say "    ${DIM}to get the shipped defaults, remove $dest and re-run: cenci-installer --tmux-defaults${RESET}"
+		fi
+		return 0
+		;;
+	esac
+
+	if [ "$state" = absent ] && [ "$TMUX_DEFAULTS" = ask ]; then
+		if ! ask_yn "Install cenci's tmux defaults (dedicated \"cenci\" tmux server; your own tmux config is never touched)?" y; then
+			say "  ${DIM}skipped — install later with: cenci-installer --tmux-defaults${RESET}"
+			return 0
+		fi
+	fi
+
+	step "Setting up tmux defaults"
+	# A resolved path that is not a regular, non-empty file (a directory, a
+	# truncated or zero-byte asset) is as unusable as an unresolved one.
+	if ! asset="$(find_plugin_path "$TMUX_DEFAULTS_ASSET_REL")" || [ ! -f "$asset" ] || [ ! -s "$asset" ]; then
+		fail "tmux defaults: could not find the shipped $TMUX_DEFAULTS_ASSET_REL in the cenci marketplace checkout or the cenci-watch plugin cache"
+		INSTALL_FAILED=1
+		return 0
+	fi
+	if ! tmux_defaults_sumtool; then
+		fail "tmux defaults: neither sha256sum nor shasum found — install one and re-run"
+		INSTALL_FAILED=1
+		return 0
+	fi
+	if [ "$state" = managed ]; then
+		current="$(tmux_defaults_sha256 <"$asset")" || current=""
+		if [ -n "$current" ] && [ "$current" = "$(tmux_defaults_body_sha256 "$dest")" ]; then
+			ok "tmux defaults already up to date → $dest"
+			return 0
+		fi
+	fi
+	if ! tmux_defaults_write "$asset" "$dest"; then
+		INSTALL_FAILED=1
+		return 0
+	fi
+	if [ "$state" = managed ]; then
+		ok "tmux defaults refreshed → $dest (applies the next time the cenci tmux server starts)"
+	else
+		ok "tmux defaults installed → $dest"
+	fi
+}
+
 step_cenci_notes() {
 	selected cenci || return 0
 	[ "$HAS_CLAUDE" -eq 1 ] || return 0
@@ -2389,6 +2633,9 @@ final_summary() {
 	fi
 	if selected cenci-watch; then
 		say "    (start a supported agent session — status appears in configured surfaces)"
+		if [ "$(tmux_defaults_state "$(tmux_defaults_path)")" = managed ]; then
+			say "    tmux -L cenci -f \"$(tmux_defaults_path)\" new-session -A -s cenci   # cenci's own tmux server with the shipped defaults"
+		fi
 	fi
 	if lazyboards_binary >/dev/null 2>&1; then
 		if have tmux; then
@@ -2426,6 +2673,9 @@ collect_uninstall_targets() {
 	say "  • the cenci daemon (stopped) and its managed state"
 	collect_sandbox_cleanup_targets
 	say "  • ${XDG_CONFIG_HOME:-$HOME/.config}/cenci/config.json"
+	if [ "$TMUX_DEFAULTS" != no ] && [ "$(tmux_defaults_state "$(tmux_defaults_path)")" = managed ]; then
+		say "  • $(tmux_defaults_path) (cenci-managed tmux defaults)"
+	fi
 	say "  • desktop bar widgets for any detected bar (GNOME/Plasma/DMS/noctalia/SwiftBar)"
 	if [ "$LAZYBOARDS" = yes ]; then
 		say "  • lazyboards and ${XDG_CONFIG_HOME:-$HOME/.config}/lazyboards/config.yml (--lazyboards)"
@@ -2940,6 +3190,31 @@ uninstall_config() {
 	rmdir "$cfg_dir" >/dev/null 2>&1 || true
 }
 
+# uninstall_tmux_defaults removes the managed tmux defaults copy only when it
+# is the installer's own unmodified file. A modified, unmanaged or symlinked
+# file — and any copy under --no-tmux-defaults — is kept and reported by path.
+# Runs before uninstall_config so that function's rmdir sees the final state.
+uninstall_tmux_defaults() {
+	local path state
+	path="$(tmux_defaults_path)"
+	state="$(tmux_defaults_state "$path")"
+	case "$state" in
+	absent) return 0 ;;
+	managed)
+		if [ "$TMUX_DEFAULTS" = no ]; then
+			warn "kept $path (--no-tmux-defaults)"
+		elif rm -f "$path"; then
+			ok "removed $path"
+		else
+			warn "could not remove $path — remove it manually: rm $path"
+		fi
+		;;
+	modified) warn "kept $path (modified locally — remove it manually if you no longer want it)" ;;
+	unverifiable) warn "kept $path (integrity not verifiable — neither sha256sum nor shasum found)" ;;
+	*) warn "kept $path (not cenci-managed)" ;;
+	esac
+}
+
 # uninstall_lazyboards is strictly opt-in: --lazyboards (LAZYBOARDS=yes), or
 # an interactive prompt defaulting to no. Declined/absent leaves the managed
 # binary and its config untouched.
@@ -3153,6 +3428,7 @@ run_uninstall() {
 	uninstall_plugins
 	uninstall_marketplace
 	uninstall_links
+	uninstall_tmux_defaults
 	uninstall_config
 	uninstall_lazyboards
 	print_manual_path_note
@@ -3168,6 +3444,10 @@ MODE=install
 BUILD_IMAGE=ask
 LAZYBOARDS=ask
 LAZYBOARDS_EXPLICIT=0
+# ask|yes|no — only --tmux-defaults / --no-tmux-defaults set yes/no (last flag
+# wins); an unanswerable prompt resolves to its default (install) inside
+# step_tmux_defaults_setup, so there is no global ask->yes resolution.
+TMUX_DEFAULTS=ask
 INSTALL_FAILED=0
 CENCI_REF="${CENCI_REF:-}"
 # Captured before the arg-parse loop below consumes "$@" via shift, so the
@@ -3209,6 +3489,11 @@ Flags:
   --build / --no-build                  force / skip the sandbox image build
   --lazyboards / --no-lazyboards        force / skip the optional lazyboards board install
                                          (uninstall mode: --lazyboards also removes it)
+  --tmux-defaults / --no-tmux-defaults  force / skip cenci's managed tmux defaults for its own
+                                         "cenci" tmux server (never your default server or
+                                         tmux config). Installed by default; update mode
+                                         creates a missing copy only with --tmux-defaults;
+                                         uninstall mode keeps it with --no-tmux-defaults
   --ref <ref>                           marketplace + plugin content, and the installer
                                          itself, all come from this ref instead of the
                                          resolved latest release tag (e.g. --ref main,
@@ -3228,6 +3513,8 @@ while [ $# -gt 0 ]; do
 	--no-build) BUILD_IMAGE=no ;;
 	--lazyboards) LAZYBOARDS=yes; LAZYBOARDS_EXPLICIT=1 ;;
 	--no-lazyboards) LAZYBOARDS=no; LAZYBOARDS_EXPLICIT=1 ;;
+	--tmux-defaults) TMUX_DEFAULTS=yes ;;
+	--no-tmux-defaults) TMUX_DEFAULTS=no ;;
 	--ref)
 		[ $# -ge 2 ] || die "--ref requires a value (see --help)"
 		CENCI_REF="$2"
@@ -3383,6 +3670,7 @@ if [ "$MODE" = update ]; then
 	step_cli_setup
 	step_sandbox_setup
 	step_cenci_watch_setup
+	step_tmux_defaults_setup
 	step_opencode_setup
 	step_sandbox_refresh_plugins
 	step_sandbox_update_agents
@@ -3402,6 +3690,7 @@ prune_selected_to_installed
 step_cli_setup
 step_sandbox_setup
 step_cenci_watch_setup
+step_tmux_defaults_setup
 step_opencode_setup
 step_lazyboards_setup
 step_cenci_notes

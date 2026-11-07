@@ -84,6 +84,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install tmux for the real-tmux suites
+        # tmux-defaults-isolation.test.sh exercises real tmux servers and fails
+        # under CI=true when tmux is missing, so the isolation criterion is
+        # proven here instead of silently skipped (#645).
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tmux
+          tmux -V
       - name: Run host-runnable test suites
         run: |
           set -uo pipefail

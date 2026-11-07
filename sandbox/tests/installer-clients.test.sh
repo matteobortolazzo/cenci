@@ -10,7 +10,7 @@ make_common_tools() {
     local bin="$1"
     mkdir -p "${bin}"
     local tool
-    for tool in bash cat touch uname grep git mkdir dirname ln readlink sleep pkill pgrep nohup chmod sed head tail cut tr rm mktemp jq mv sort cp cmp; do
+    for tool in bash cat touch uname grep git mkdir dirname ln readlink sleep pkill pgrep nohup chmod sed head tail cut tr rm mktemp jq mv sort cp cmp sha256sum; do
         ln -s "$(command -v "${tool}")" "${bin}/${tool}"
     done
     # docker mock: `image inspect` fails (no cenci-sandbox:latest yet, the
@@ -437,6 +437,10 @@ prepare_checkout() {
         chmod +x "${checkout}/cenci"
     fi
     cp "${ROOT}/install.sh" "${checkout}/install.sh"
+    # The default-yes tmux-defaults step (#645) resolves its shipped asset
+    # through find_plugin_path, so the fake checkout must carry it.
+    mkdir -p "${checkout}/watch/plugin/tmux"
+    cp "${ROOT}/watch/plugin/tmux/tmux.conf" "${checkout}/watch/plugin/tmux/tmux.conf"
 }
 
 # prepare_git_tagged_checkout <checkout-dir> <tag> — turns an existing

@@ -23,7 +23,7 @@ link_tools() {
     # SessionStart payload exclusively through jq), so without it on PATH
     # doctor hard-fails before widget wiring is ever reached.
     for tool in bash cat touch uname grep git mkdir dirname ln readlink sleep pgrep nohup chmod sed head rm mktemp cp \
-        rmdir tail cut tr id basename jq; do
+        rmdir tail cut tr id basename mv jq sha256sum; do
         ln -s "$(command -v "${tool}")" "${bin}/${tool}"
     done
     cat >"${bin}/docker" <<'EOF'
@@ -141,6 +141,10 @@ prepare_checkout() {
     # checkout, so provision it like the real marketplace clone does.
     cp "${ROOT}/cenci" "${ROOT}/install.sh" "${checkout}/"
     chmod +x "${checkout}/cenci" "${checkout}/install.sh"
+    # The default-yes tmux-defaults step (#645) resolves its shipped asset
+    # through find_plugin_path, so the fake checkout must carry it.
+    mkdir -p "${checkout}/watch/plugin/tmux"
+    cp "${ROOT}/watch/plugin/tmux/tmux.conf" "${checkout}/watch/plugin/tmux/tmux.conf"
 }
 
 run_install() {

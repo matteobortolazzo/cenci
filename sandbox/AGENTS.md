@@ -38,6 +38,8 @@ bash sandbox/tests/heal-plugins.test.sh          # plugin self-heal (Write->Edit
 bash sandbox/tests/dind.test.sh                  # lib/dind.sh start_dind() background dockerd + marker
 bash sandbox/tests/uninstall.test.sh             # `install.sh uninstall` MODE (plugins, PATH links, daemon, sandbox cleanup)
 bash sandbox/tests/lazyboards-install.test.sh    # optional lazyboards step: download, update refresh, doctor report
+bash sandbox/tests/tmux-defaults-install.test.sh # tmux defaults step: install, update, uninstall, skip, doctor (mock PATH + fake HOME)
+bash sandbox/tests/tmux-defaults-isolation.test.sh # real tmux: dedicated cenci server leaves a user server untouched; skips without tmux locally, fails when CI=true
 bash sandbox/tests/opencode-config.test.sh       # lib/opencode-config.sh opencode.json permission/plugin seeding
 bash sandbox/tests/opencode-plugins.test.sh      # OpenCode cenci-src provisioning + TTL-gated refresh
 bash sandbox/tests/setup-skill-content.test.sh   # sandbox/skills/setup/SKILL.md content accuracy
