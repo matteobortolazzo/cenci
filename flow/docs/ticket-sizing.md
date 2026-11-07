@@ -242,6 +242,24 @@ to an unattended pipeline run. The refiner treats an authorized resplit exactly 
 split once authorized — same Coverage gate, same Confirmation Gate manifest and single
 confirmation, same Pass 1/Pass 2 child creation — no special-cased bypass of any of those checks.
 
+## Split parents
+
+A split parent is a tracking epic: it ships no PR of its own, and its PRs are its children. Its
+`### Size Estimate` records the **aggregate** scope of all children (the sum the coverage map
+tracks), not the size of a PR. When that aggregate is within L but over M, the parent is written
+`### Size Estimate: L` and the bound line's `<reason>` placeholder is filled in with exactly:
+
+```
+split parent: a tracking epic that ships no PR of its own; its PRs are the S or M children in Suggested Split
+```
+
+This is the only reason that may stand in for the stacked-M test, and only when the proposal
+carries a `### Suggested Split` whose every child is S or M (a child may be L only with its own
+recorded inseparability reason, as above). It never applies to a ticket that ships its own PR: a
+non-split L still needs a real reason why its slices cannot ship as stacked M PRs. An aggregate
+beyond L is split and written with the honest rationale that the scope exceeds L, as before.
+Evidence is still required for the parent (aggregate totals) and for every child.
+
 ## Mapping to S/M/L
 
 - **S** — one concern in one project. One ticket, one PR, no split; eligible for automerge.
