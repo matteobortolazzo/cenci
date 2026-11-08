@@ -56,7 +56,11 @@ attention notification does not suppress the first automatic repair after upgrad
 Apart from those automatic clears (a fresh green read of the current head, a conflict
 episode ending), `cenci babysit reset <pr>` (host-only; refuses inside a sandbox) is the
 supported way to zero a paused PR's budget while keeping its feedback bookkeeping. It
-also clears `ciRepairPaused` and `ciCapNotified`.
+also clears `ciRepairPaused` and `ciCapNotified`. A recorded PID that is no longer
+running is treated as gone: its stale lock is cleared before the reset re-arms. A lock
+naming a live supervisor for the PR, or an empty or unparseable lock, is refused and
+nothing is changed (confirm no supervisor is running and delete the lock file to
+recover), and a live PID that is not this PR's babysit process is also refused.
 
 CI repair has its own budget, separate from the merge-repair budget; each is capped
 at `fixCap` (3) launches. When a tick reaches the CI cap (failing checks, no conflict hold, head not yet repaired, budget

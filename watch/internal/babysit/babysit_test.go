@@ -1,6 +1,7 @@
 package babysit
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -2369,6 +2370,17 @@ func stubProcessOwned(t *testing.T, owned bool) {
 	t.Cleanup(func() { processOwned = original })
 }
 
+// stubProcessGone replaces the signal-0 "is this pid gone" probe for the
+// duration of a test (#1490). Tests that stub processOwned to false with a
+// made-up pid stub this to false too, so they keep exercising the
+// live-but-not-ours refusal instead of depending on whether that pid exists.
+func stubProcessGone(t *testing.T, gone bool) {
+	t.Helper()
+	original := processGone
+	processGone = func(int) bool { return gone }
+	t.Cleanup(func() { processGone = original })
+}
+
 func TestBlocksCloseMatrix(t *testing.T) {
 	live := State{PR: "790", RepoRoot: "/repo/root", ClosingIssues: []int{782}, CIStatus: "failing", PID: 4242, Status: "running"}
 	now := time.Now().UTC()
@@ -4003,6 +4015,7 @@ func TestStop_HostOutputAndErrorsUnchanged(t *testing.T) {
 	t.Run("an unverified pid keeps the refusal text and the state", func(t *testing.T) {
 		dir, path := hostStopFixture(t, "o/r", "42")
 		stubProcessOwned(t, false)
+		stubProcessGone(t, false)
 		writeStateFile(t, path, State{PR: "42", Repo: "o/r", PID: 4242, Status: "running"})
 
 		err := Stop("42", dir)
@@ -4037,6 +4050,7 @@ func TestStopRepo_ClassifiesFailuresBySentinel(t *testing.T) {
 	t.Run("an unverified pid is ErrSupervisorUnverified and is never signalled", func(t *testing.T) {
 		dir := t.TempDir()
 		stubProcessOwned(t, false)
+		stubProcessGone(t, false)
 		writeStateFile(t, statePath(dir, "o/r", "42"), State{PR: "42", Repo: "o/r", PID: 4242})
 		err := StopRepo("o/r", "42", dir)
 		if !errors.Is(err, ErrSupervisorUnverified) {
@@ -4124,6 +4138,57 @@ func TestStopRepo_ClassifiesFailuresBySentinel(t *testing.T) {
 		}
 		if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
 			t.Errorf("state file still exists (stat err = %v)", statErr)
+		}
+	})
+
+	// #1490: the daemon-forwarded stop inherits the gone path, but it prints
+	// nothing: the host-only stderr note belongs to the host Stop.
+	t.Run("a dead recorded pid returns nil, removes the state and the lock and prints nothing", func(t *testing.T) {
+		dir := t.TempDir()
+		path := statePath(dir, "o/r", "42")
+		lock := path + ".lock"
+		dead := deadPID(t)
+		writeStateFile(t, path, ciPausedLiveState(dead))
+		writeLock(t, lock, dead)
+
+		doneErr := captureStderr(t)
+		doneOut := captureStdout(t)
+		err := StopRepo("o/r", "42", dir)
+		out, errOut := doneOut(), doneErr()
+
+		if err != nil {
+			t.Fatalf("StopRepo: %v", err)
+		}
+		requireMissing(t, path, "state file")
+		requireMissing(t, lock, "lock file")
+		if out != "" || errOut != "" {
+			t.Errorf("StopRepo wrote stdout %q stderr %q, want nothing", out, errOut)
+		}
+	})
+
+	t.Run("a dead recorded pid with a lock naming a live supervisor is ErrSupervisorUnverified and changes nothing", func(t *testing.T) {
+		dir := t.TempDir()
+		path := statePath(dir, "o/r", "42")
+		lock := path + ".lock"
+		owner := startOwnedFixture(t, false)
+		writeStateFile(t, path, ciPausedLiveState(deadPID(t)))
+		writeLock(t, lock, owner.pid)
+		stateBefore, lockBefore := readFileBytes(t, path), readFileBytes(t, lock)
+
+		err := StopRepo("o/r", "42", dir)
+
+		if !errors.Is(err, ErrSupervisorUnverified) {
+			t.Fatalf("err = %v, want errors.Is(err, ErrSupervisorUnverified)", err)
+		}
+		if errors.Is(err, ErrStopFailed) {
+			t.Error("a live-supervisor lock refusal must not also classify as ErrStopFailed")
+		}
+		if want := fmt.Sprintf("supervisor already running for PR #42 (%d)", owner.pid); err.Error() != want {
+			t.Errorf("err text = %q, want exactly %q", err.Error(), want)
+		}
+		requireStillRunning(t, owner)
+		if !bytes.Equal(readFileBytes(t, path), stateBefore) || !bytes.Equal(readFileBytes(t, lock), lockBefore) {
+			t.Error("state file or lock changed")
 		}
 	})
 }
