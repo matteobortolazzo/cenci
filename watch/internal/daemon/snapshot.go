@@ -42,6 +42,7 @@ func (d *Daemon) buildSnapshot() ipc.StateSnapshot {
 			w.Session = wi.Session
 			w.WindowIndex = wi.WindowIndex
 			w.PaneID = wi.PaneID
+			w.Socket = wi.Socket
 			w.WindowName = wi.WindowName
 			w.ManuallyNamed = wi.ManuallyNamed
 			e.paneless = false
@@ -59,12 +60,17 @@ func (d *Daemon) buildSnapshot() ipc.StateSnapshot {
 	}
 
 	// tmux entries first, ordered by session:index; paneless entries after,
-	// ordered by session key for stable output.
+	// ordered by session key for stable output. Windows sharing session:index on
+	// different tmux servers fall back to their socket, so the order is
+	// deterministic.
 	sort.Slice(entries, func(i, j int) bool {
 		if entries[i].paneless != entries[j].paneless {
 			return !entries[i].paneless
 		}
-		return entries[i].sortKey < entries[j].sortKey
+		if entries[i].sortKey != entries[j].sortKey {
+			return entries[i].sortKey < entries[j].sortKey
+		}
+		return entries[i].w.Socket < entries[j].w.Socket
 	})
 	for _, e := range entries {
 		snap.Windows = append(snap.Windows, e.w)

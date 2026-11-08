@@ -8,6 +8,7 @@ type HookEvent struct {
 	SessionID        string `json:"session_id"`                   // agent session ID
 	Agent            string `json:"agent,omitempty"`              // claude, codex, opencode, or empty when unknown
 	TmuxPane         string `json:"tmux_pane"`                    // $TMUX_PANE (e.g. %5)
+	TmuxSocket       string `json:"tmux_socket,omitempty"`        // first field of $TMUX; the daemon validates it at ingest
 	NotificationType string `json:"notification_type,omitempty"`  // Notification events only
 	ToolName         string `json:"tool_name,omitempty"`          // PreToolUse, PermissionRequest, PostToolUse events
 	TaskName         string `json:"task_name,omitempty"`          // compact first-prompt label; raw prompt is never sent

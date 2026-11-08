@@ -3,34 +3,90 @@ package daemon
 import (
 	"log"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/detect"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/frontend"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/ipc"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/modelswitch"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/tmux"
 	"github.com/matteobortolazzo/cenci/watch/v2/pkg/watch"
 )
 
 // sessionKeyForEvent returns the key for the daemon's sessions map: the agent
 // session ID when present, otherwise a pane-derived fallback. Events carrying
-// neither are dropped.
+// neither are dropped. The fallback carries the (already sanitized) socket when
+// it is non-empty, because pane ids repeat across tmux servers; an empty socket
+// keeps "pane:<id>". It must stay in sync with frontend.SessionState.Key.
 func sessionKeyForEvent(event ipc.HookEvent) string {
 	if event.SessionID != "" {
 		return event.SessionID
 	}
 	if event.TmuxPane != "" {
+		if event.TmuxSocket != "" {
+			return "pane:" + event.TmuxPane + "@" + event.TmuxSocket
+		}
 		return "pane:" + event.TmuxPane
 	}
 	return ""
 }
 
+// sanitizeTmuxSocket validates a hook event's tmux_socket at ingest. The event
+// socket also receives events from containers, so any in-container process can
+// write a raw event with an arbitrary value: notify's pre-sending is not a
+// check. A value passes only when it has the socket shape, is valid UTF-8 made
+// of printable runes only (it is later printed in verbose logs, where a raw ESC,
+// CR, C1 control or bidi override would forge log output), the trusted socket
+// directory resolves, and the value is exactly
+// one name directly under it. Any failure (an error resolving the directory
+// included) yields an empty socket, i.e. the default server, plus a rejection
+// description for the verbose log. A malformed value is never echoed into that
+// description.
+func (d *Daemon) sanitizeTmuxSocket(socket string) (clean, rejection string) {
+	if socket == "" {
+		return "", ""
+	}
+	if !tmux.ValidSocket(socket) || hasUnprintable(socket) {
+		return "", "malformed"
+	}
+	dir, err := d.tmuxSocketDir()
+	if err == nil {
+		err = tmux.CheckTrustedSocket(dir, socket)
+	}
+	if err != nil {
+		return "", "untrusted: " + err.Error()
+	}
+	return socket, ""
+}
+
+// hasUnprintable reports whether s is not valid UTF-8 or holds a rune that is
+// not printable: C0 and C1 controls, DEL, and format characters such as the
+// bidi overrides. A printable non-ASCII name is not flagged.
+func hasUnprintable(s string) bool {
+	if !utf8.ValidString(s) {
+		return true
+	}
+	for _, r := range s {
+		if !unicode.IsPrint(r) {
+			return true
+		}
+	}
+	return false
+}
+
 func (d *Daemon) handleEvent(event ipc.HookEvent) {
+	var rejection string
+	event.TmuxSocket, rejection = d.sanitizeTmuxSocket(event.TmuxSocket)
 	key := sessionKeyForEvent(event)
 	if key == "" {
 		if d.cfg.Verbose {
 			log.Printf("event: dropping %s event with empty session_id and tmux_pane", event.EventType)
 		}
 		return
+	}
+	if rejection != "" && d.cfg.Verbose {
+		log.Printf("event: %s event on session %s: tmux_socket %s, using the default server", event.EventType, key, rejection)
 	}
 
 	sess := d.sessions[key]
@@ -40,9 +96,11 @@ func (d *Daemon) handleEvent(event ipc.HookEvent) {
 	}
 	sess.LastEvent = d.now()
 	// Upgrade paneless→pane when a later event carries a pane; never clear a
-	// known pane on an empty-pane event.
+	// known pane on an empty-pane event. The socket travels with the pane: they
+	// are set together, and an event without a pane changes neither.
 	if event.TmuxPane != "" {
 		sess.TmuxPane = event.TmuxPane
+		sess.TmuxSocket = event.TmuxSocket
 	}
 	if event.Agent != "" {
 		sess.Agent = event.Agent

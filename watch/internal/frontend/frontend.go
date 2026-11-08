@@ -23,6 +23,7 @@ type SessionState struct {
 	// PromptTaskName is true after the first non-empty prompt label is pinned.
 	PromptTaskName bool
 	TmuxPane       string    // tmux pane ID (e.g. %5); empty = paneless session
+	TmuxSocket     string    // tmux server socket of TmuxPane; empty = the ambient server
 	LastEvent      time.Time // last event time, drives paneless TTL expiry
 	// BackgroundHold is true while the session's latest main-agent Stop was
 	// held at running because in-flight background work will wake it (#698).
@@ -66,12 +67,18 @@ const BackgroundHoldTTL = 2 * time.Minute
 const RepoDirOption = "@cenci-repo-dir"
 
 // Key returns the session key used in the daemon's sessions map: the agent
-// session ID when known, otherwise a pane-derived fallback.
+// session ID when known, otherwise a pane-derived fallback. The fallback
+// carries the socket when it is non-empty ("pane:<id>@<socket>"), because pane
+// ids repeat across tmux servers; an empty socket keeps "pane:<id>". It must
+// stay in sync with the daemon's sessionKeyForEvent.
 func (s *SessionState) Key() string {
 	if s.SessionID != "" {
 		return s.SessionID
 	}
 	if s.TmuxPane != "" {
+		if s.TmuxSocket != "" {
+			return "pane:" + s.TmuxPane + "@" + s.TmuxSocket
+		}
 		return "pane:" + s.TmuxPane
 	}
 	return ""
@@ -146,4 +153,7 @@ type WindowInfo struct {
 	// runs, so a deferred kill bound to it cannot land on another window (#1251).
 	// Daemon-internal: it is not copied into the IPC snapshot.
 	PaneID string
+	// Socket is the tmux server socket the window lives on; empty = the ambient
+	// server.
+	Socket string
 }

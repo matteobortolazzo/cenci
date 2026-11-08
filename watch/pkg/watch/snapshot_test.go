@@ -28,6 +28,58 @@ func TestStatusSummary_EscalatedWireKey(t *testing.T) {
 	}
 }
 
+// -- WindowState.Socket (#1429) ---------------------------------------------
+
+// A window on the default server (an empty socket) carries no "socket" key, so
+// a snapshot is byte-identical to one from a daemon that predates the field.
+// This is a JSON-shape unit test on purpose: an integration test decoding into
+// the same struct cannot catch a tag or omitempty typo.
+func TestWindowState_SocketOmittedWhenEmpty(t *testing.T) {
+	data, err := json.Marshal(watch.WindowState{Session: "main", WindowIndex: "0", PaneID: "%5", Status: "idle"})
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	if strings.Contains(string(data), `"socket"`) {
+		t.Errorf("marshaled window = %s, want no %q key when Socket is empty", data, "socket")
+	}
+}
+
+// A window on a named server surfaces its socket under the wire key "socket".
+func TestWindowState_SocketPresentWhenSet(t *testing.T) {
+	const socket = "/run/user/1000/tmux-1000/work"
+	data, err := json.Marshal(watch.WindowState{Session: "main", WindowIndex: "0", PaneID: "%5", Status: "idle", Socket: socket})
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	if want := `"socket":"` + socket + `"`; !strings.Contains(string(data), want) {
+		t.Errorf("marshaled window = %s, want %s", data, want)
+	}
+
+	var back watch.WindowState
+	if err := json.Unmarshal(data, &back); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+	if back.Socket != socket {
+		t.Errorf("round-tripped Socket = %q, want %q", back.Socket, socket)
+	}
+}
+
+// A snapshot from an older daemon has no "socket" key and still decodes, with an
+// empty Socket (the default server), leaving every other field intact.
+func TestWindowState_OlderSnapshotWithoutSocketDecodes(t *testing.T) {
+	const older = `{"session":"main","window_index":"2","pane_id":"%7","window_name":"42-implement","task_name":"t","status":"running","manually_named":false}`
+	var w watch.WindowState
+	if err := json.Unmarshal([]byte(older), &w); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+	if w.Socket != "" {
+		t.Errorf("Socket = %q, want empty for a snapshot without the key", w.Socket)
+	}
+	if w.Session != "main" || w.WindowIndex != "2" || w.PaneID != "%7" || w.WindowName != "42-implement" || w.Status != "running" {
+		t.Errorf("decoded window = %+v, want the older fields intact", w)
+	}
+}
+
 // -- StateSnapshot.Dispatch (#219) -----------------------------------------
 
 // TestStateSnapshot_DispatchOmittedWhenNil locks in that a nil Dispatch field

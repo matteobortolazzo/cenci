@@ -70,3 +70,30 @@ func TestWindowInfo_RepoDirReflectsTheRepoDirWindowOption(t *testing.T) {
 		})
 	}
 }
+
+// The @cenci-repo-dir option is read from the window's own server: the ambient
+// server has a different value at the same target, and a window on a server
+// that never set the option reads empty.
+func TestWindowInfo_RepoDirReadFromTheWindowsOwnSocket(t *testing.T) {
+	const ownDir, ambientDir = "/work/acme/own", "/work/acme/ambient"
+	mc := twoSocketMock()
+	mc.WindowOptValues = map[string]string{"main:0:" + frontend.RepoDirOption: ambientDir}
+	mc.SocketWindowOptValues = map[string]map[string]string{
+		sockA: {"main:0:" + frontend.RepoDirOption: ownDir},
+	}
+	f := New(config.Default(), mc)
+
+	touch(f, runningOn("a", "%5", sockA))
+	touch(f, runningOn("b", "%5", sockB))
+
+	wiA, wiB := f.WindowInfo("a"), f.WindowInfo("b")
+	if wiA == nil || wiB == nil {
+		t.Fatalf("WindowInfo a=%+v b=%+v, want both tracked", wiA, wiB)
+	}
+	if wiA.RepoDir != ownDir {
+		t.Errorf("A's RepoDir = %q, want %q read from its own server", wiA.RepoDir, ownDir)
+	}
+	if wiB.RepoDir != "" {
+		t.Errorf("B's RepoDir = %q, want empty: B's server never set the option", wiB.RepoDir)
+	}
+}

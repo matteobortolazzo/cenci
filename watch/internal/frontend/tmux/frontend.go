@@ -6,6 +6,7 @@ package tmux
 
 import (
 	"log"
+	"sort"
 	"strings"
 	"time"
 
@@ -18,12 +19,17 @@ import (
 
 // Frontend styles tmux windows to mirror agent session state.
 type Frontend struct {
-	cfg          config.Config
-	client       tmuxc.Client
-	windows      map[string]*windowState // key: window target (session:windowIdx)
-	panes        map[string]string       // key: pane ID (%5) → window target
-	sessionKeys  map[string]string       // key: core session key → window target
-	headroomVars map[string]string       // key: agent type → last @cenci-headroom-<agent> value set (#171)
+	cfg         config.Config
+	client      tmuxc.Client
+	windows     map[windowKey]*windowState // key: (socket, window target session:windowIdx)
+	panes       map[paneKey]string         // key: (socket, pane ID %5) → window target on that socket
+	sessionKeys map[string]windowKey       // key: core session key → window
+	// headroomVars is the last @cenci-headroom-<agent> value set (#171) per
+	// socket: socket → agent type → value. "" is the default server.
+	headroomVars map[string]map[string]string
+	// lastHeadroom is the agent → value map the latest RenderHeadroom rendered,
+	// pushed to a server when its first window is tracked.
+	lastHeadroom map[string]string
 }
 
 var _ frontend.Frontend = (*Frontend)(nil)
@@ -40,10 +46,10 @@ func New(cfg config.Config, client tmuxc.Client) *Frontend {
 	return &Frontend{
 		cfg:          cfg,
 		client:       client,
-		windows:      make(map[string]*windowState),
-		panes:        make(map[string]string),
-		sessionKeys:  make(map[string]string),
-		headroomVars: make(map[string]string),
+		windows:      make(map[windowKey]*windowState),
+		panes:        make(map[paneKey]string),
+		sessionKeys:  make(map[string]windowKey),
+		headroomVars: make(map[string]map[string]string),
 	}
 }
 
@@ -53,59 +59,59 @@ func (f *Frontend) OnEvent(sess *frontend.SessionState, event ipc.HookEvent) fro
 	if sess.TmuxPane == "" {
 		return frontend.Observations{}
 	}
-	pane := sess.TmuxPane
+	pk := paneKey{sess.TmuxSocket, sess.TmuxPane}
 
-	// Call ListPanes once for the entire event.
-	panes, err := f.client.ListPanes("")
+	// Call ListPanes once for the entire event, on the pane's own server.
+	panes, err := f.client.ListPanes(pk.socket)
 	if err != nil {
 		if f.cfg.Verbose {
-			log.Printf("event: error listing panes for %s: %v", pane, err)
+			log.Printf("event: error listing panes for %s: %v", pk, err)
 		}
 		return frontend.Observations{}
 	}
 
 	var paneInfo *tmuxc.PaneInfo
 	for i := range panes {
-		if panes[i].PaneID == pane {
+		if panes[i].PaneID == pk.pane {
 			paneInfo = &panes[i]
 			break
 		}
 	}
 	if paneInfo == nil {
 		if f.cfg.Verbose {
-			log.Printf("event: pane %s not found in tmux", pane)
+			log.Printf("event: pane %s not found in tmux", pk)
 		}
 		return frontend.Observations{}
 	}
 
-	windowTarget := paneInfo.WindowTarget()
-	f.panes[pane] = windowTarget
+	wk := windowKey{pk.socket, paneInfo.WindowTarget()}
+	f.panes[pk] = wk.target
 	var obs frontend.Observations
-	obs.EvictedKeys = append(obs.EvictedKeys, f.migratePaneIfRenumbered(windowTarget, pane)...)
+	obs.EvictedKeys = append(obs.EvictedKeys, f.migratePaneIfRenumbered(wk, pk.pane)...)
 
 	// Ensure window is tracked (first event or daemon restart).
-	ws := f.windows[windowTarget]
-	if ws != nil && ws.PaneID != pane {
+	ws := f.windows[wk]
+	if ws != nil && ws.PaneID != pk.pane {
 		// Window index reused by a different pane — discard stale state.
 		if ws.SessionKey != "" {
 			obs.EvictedKeys = append(obs.EvictedKeys, ws.SessionKey)
 		}
-		f.discardStaleWindow(windowTarget, ws.PaneID)
+		f.discardStaleWindow(wk, ws.PaneID)
 		ws = nil
 	}
 	if ws == nil {
-		ws = f.trackWindow(windowTarget, paneInfo, event.SessionID)
+		ws = f.trackWindow(wk, paneInfo, event.SessionID)
 		if ws == nil {
 			return obs // tracking failed
 		}
 	}
 
 	key := sess.Key()
-	if ws.SessionKey != "" && ws.SessionKey != key && f.sessionKeys[ws.SessionKey] == windowTarget {
+	if ws.SessionKey != "" && ws.SessionKey != key && f.sessionKeys[ws.SessionKey] == wk {
 		delete(f.sessionKeys, ws.SessionKey)
 	}
 	ws.SessionKey = key
-	f.sessionKeys[key] = windowTarget
+	f.sessionKeys[key] = wk
 
 	ws.SessionID = event.SessionID
 	if sess.Agent != "" {
@@ -131,11 +137,11 @@ func (f *Frontend) OnEvent(sess *frontend.SessionState, event ipc.HookEvent) fro
 		ws.ManuallyNamed = true
 		ws.OriginalName = frontend.SanitizeName(paneInfo.WindowName)
 		if f.cfg.Verbose {
-			log.Printf("window %s was renamed by user (%q → %q), will keep name", windowTarget, truncateForLog(ws.LastSetName, logMaxLen), truncateForLog(ws.OriginalName, logMaxLen))
+			log.Printf("window %s was renamed by user (%q → %q), will keep name", wk, truncateForLog(ws.LastSetName, logMaxLen), truncateForLog(ws.OriginalName, logMaxLen))
 		}
 	}
 
-	f.applyStatus(windowTarget, ws, sess.Status, taskName)
+	f.applyStatus(wk, ws, sess.Status, taskName)
 	return obs
 }
 
@@ -185,45 +191,45 @@ func (f *Frontend) OnSessionEnd(sess *frontend.SessionState) {
 	if sess.TmuxPane == "" {
 		return
 	}
-	pane := sess.TmuxPane
+	pk := paneKey{sess.TmuxSocket, sess.TmuxPane}
 
-	panes, err := f.client.ListPanes("")
+	panes, err := f.client.ListPanes(pk.socket)
 	if err != nil {
 		if f.cfg.Verbose {
-			log.Printf("event: error listing panes for %s: %v", pane, err)
+			log.Printf("event: error listing panes for %s: %v", pk, err)
 		}
 		return
 	}
 
 	var paneInfo *tmuxc.PaneInfo
 	for i := range panes {
-		if panes[i].PaneID == pane {
+		if panes[i].PaneID == pk.pane {
 			paneInfo = &panes[i]
 			break
 		}
 	}
 
-	// Determine window target from fresh data or cache.
-	var windowTarget string
+	// Determine the window from fresh data or cache.
+	var wk windowKey
 	if paneInfo != nil {
-		windowTarget = paneInfo.WindowTarget()
-		f.panes[pane] = windowTarget
-		f.migratePaneIfRenumbered(windowTarget, pane)
+		wk = windowKey{pk.socket, paneInfo.WindowTarget()}
+		f.panes[pk] = wk.target
+		f.migratePaneIfRenumbered(wk, pk.pane)
 	} else {
 		// Pane no longer in tmux. Use cached target for cleanup.
-		windowTarget = f.panes[pane]
-		if windowTarget == "" {
+		wk = windowKey{pk.socket, f.panes[pk]}
+		if wk.target == "" {
 			if f.cfg.Verbose {
-				log.Printf("event: pane %s not found in tmux", pane)
+				log.Printf("event: pane %s not found in tmux", pk)
 			}
 			return
 		}
 	}
 
-	ws := f.windows[windowTarget]
-	if ws != nil && ws.PaneID != pane {
+	ws := f.windows[wk]
+	if ws != nil && ws.PaneID != pk.pane {
 		// Late SessionEnd for a dead pane — don't touch the new window.
-		delete(f.panes, pane)
+		delete(f.panes, pk)
 		return
 	}
 	// When the pane is gone, check if another pane now occupies the
@@ -231,15 +237,15 @@ func (f *Frontend) OnSessionEnd(sess *frontend.SessionState) {
 	// without restoring to avoid overwriting the surviving window.
 	if paneInfo == nil {
 		for _, p := range panes {
-			if p.WindowTarget() == windowTarget {
-				f.forgetWindow(windowTarget)
-				delete(f.panes, pane)
+			if p.WindowTarget() == wk.target {
+				f.forgetWindow(wk)
+				delete(f.panes, pk)
 				return
 			}
 		}
 	}
-	f.restoreWindow(windowTarget)
-	delete(f.panes, pane)
+	f.restoreWindow(wk)
+	delete(f.panes, pk)
 }
 
 // OnSessionHandoff releases the ended session's claim on its window while
@@ -253,10 +259,10 @@ func (f *Frontend) OnSessionHandoff(sess *frontend.SessionState) {
 		return
 	}
 
-	panes, err := f.client.ListPanes("")
+	panes, err := f.client.ListPanes(sess.TmuxSocket)
 	if err != nil {
 		if f.cfg.Verbose {
-			log.Printf("event: error listing panes for %s: %v", sess.TmuxPane, err)
+			log.Printf("event: error listing panes for %s: %v", paneKey{sess.TmuxSocket, sess.TmuxPane}, err)
 		}
 		return
 	}
@@ -273,16 +279,16 @@ func (f *Frontend) OnSessionHandoff(sess *frontend.SessionState) {
 	}
 
 	key := sess.Key()
-	wt, ok := f.sessionKeys[key]
+	wk, ok := f.sessionKeys[key]
 	if !ok {
 		return
 	}
 	delete(f.sessionKeys, key)
-	if ws := f.windows[wt]; ws != nil && ws.SessionKey == key {
+	if ws := f.windows[wk]; ws != nil && ws.SessionKey == key {
 		ws.SessionKey = ""
 	}
 	if f.cfg.Verbose {
-		log.Printf("session %s handed off window %s to its successor", key, wt)
+		log.Printf("session %s handed off window %s to its successor", key, wk)
 	}
 }
 
@@ -301,22 +307,47 @@ func (f *Frontend) Sweep(sessions map[string]*frontend.SessionState) []frontend.
 		return nil
 	}
 
-	panes, err := f.client.ListPanes("")
-	if err != nil {
-		if f.cfg.Verbose {
-			log.Printf("sweep: error listing panes: %v", err)
-		}
-		return nil
+	// One listing per distinct socket that hosts a tracked window or a
+	// pane-backed session, in sorted order ("" first). A socket whose listing
+	// fails is left alone for this tick: a failed listing is never read as "pane
+	// gone", and the other servers are swept normally.
+	socketSet := make(map[string]bool)
+	for wk := range f.windows {
+		socketSet[wk.socket] = true
 	}
+	for _, s := range sessions {
+		if s.TmuxPane != "" {
+			socketSet[s.TmuxSocket] = true
+		}
+	}
+	sockets := make([]string, 0, len(socketSet))
+	for socket := range socketSet {
+		sockets = append(sockets, socket)
+	}
+	sort.Strings(sockets)
 
-	// Build paneID → current target map.
-	paneToTarget := make(map[string]string)
-	existing := make(map[string]bool)
-	currentPaneForWindow := make(map[string]string)
-	for _, p := range panes {
-		paneToTarget[p.PaneID] = p.WindowTarget()
-		existing[p.PaneID] = true
-		currentPaneForWindow[p.WindowTarget()] = p.PaneID
+	// Build (socket, paneID) → current target maps from the listings that worked.
+	paneToTarget := make(map[paneKey]string)
+	existing := make(map[paneKey]bool)
+	currentPaneForWindow := make(map[windowKey]string)
+	paneByID := make(map[paneKey]*tmuxc.PaneInfo)
+	unlisted := make(map[string]bool)
+	for _, socket := range sockets {
+		panes, err := f.client.ListPanes(socket)
+		if err != nil {
+			unlisted[socket] = true
+			if f.cfg.Verbose {
+				log.Printf("sweep: error listing panes%s: %v", socketLogSuffix(socket), err)
+			}
+			continue
+		}
+		for i, p := range panes {
+			pk := paneKey{socket, p.PaneID}
+			paneToTarget[pk] = p.WindowTarget()
+			existing[pk] = true
+			currentPaneForWindow[windowKey{socket, p.WindowTarget()}] = p.PaneID
+			paneByID[pk] = &panes[i]
+		}
 	}
 
 	remove := make(map[string]bool)
@@ -325,64 +356,64 @@ func (f *Frontend) Sweep(sessions map[string]*frontend.SessionState) []frontend.
 
 	// Phase 1: Migrate renumbered panes (pane alive but at a different target).
 	type migrationInfo struct {
-		oldTarget string
-		newTarget string
-		ws        *windowState
+		oldKey windowKey
+		newKey windowKey
+		ws     *windowState
 	}
 	var migrations []migrationInfo
-	for wt, ws := range f.windows {
-		if newTarget, ok := paneToTarget[ws.PaneID]; ok && newTarget != wt {
-			migrations = append(migrations, migrationInfo{oldTarget: wt, newTarget: newTarget, ws: ws})
+	for wk, ws := range f.windows {
+		if newTarget, ok := paneToTarget[paneKey{wk.socket, ws.PaneID}]; ok && newTarget != wk.target {
+			migrations = append(migrations, migrationInfo{oldKey: wk, newKey: windowKey{wk.socket, newTarget}, ws: ws})
 		}
 	}
 	// Remove all migrating entries from old positions first.
 	for _, m := range migrations {
-		delete(f.windows, m.oldTarget)
+		delete(f.windows, m.oldKey)
 	}
 	// Then insert at new positions (discarding any stale occupants).
 	for _, m := range migrations {
-		if occupant, ok := f.windows[m.newTarget]; ok && occupant.PaneID != m.ws.PaneID {
+		if occupant, ok := f.windows[m.newKey]; ok && occupant.PaneID != m.ws.PaneID {
 			if occupant.SessionKey != "" {
 				remove[occupant.SessionKey] = true
 			}
-			f.discardStaleWindow(m.newTarget, occupant.PaneID)
+			f.discardStaleWindow(m.newKey, occupant.PaneID)
 		}
-		f.windows[m.newTarget] = m.ws
-		f.panes[m.ws.PaneID] = m.newTarget
+		f.windows[m.newKey] = m.ws
+		f.panes[paneKey{m.newKey.socket, m.ws.PaneID}] = m.newKey.target
 		if m.ws.SessionKey != "" {
-			f.sessionKeys[m.ws.SessionKey] = m.newTarget
+			f.sessionKeys[m.ws.SessionKey] = m.newKey
 		}
 		displayChanged = true
 		if f.cfg.Verbose {
-			log.Printf("sweep: pane %s renumbered from %s to %s, migrating state", m.ws.PaneID, m.oldTarget, m.newTarget)
+			log.Printf("sweep: pane %s renumbered from %s to %s, migrating state", paneKey{m.newKey.socket, m.ws.PaneID}, m.oldKey.target, m.newKey.target)
 		}
 	}
 
-	// Phase 2: Clean up truly stale entries (pane gone).
+	// Phase 2: Clean up truly stale entries (pane gone from its own server).
 	paneGone := false
 	paneGoneKeys := make(map[string]bool)
-	var stale []string
-	for wt, ws := range f.windows {
-		if !existing[ws.PaneID] {
-			stale = append(stale, wt)
+	var stale []windowKey
+	for wk, ws := range f.windows {
+		if !unlisted[wk.socket] && !existing[paneKey{wk.socket, ws.PaneID}] {
+			stale = append(stale, wk)
 		}
 	}
-	for _, wt := range stale {
-		ws := f.windows[wt]
+	for _, wk := range stale {
+		ws := f.windows[wk]
 		if f.cfg.Verbose {
-			log.Printf("sweep: pane %s gone, cleaning up window %s", ws.PaneID, wt)
+			log.Printf("sweep: pane %s gone, cleaning up window %s", paneKey{wk.socket, ws.PaneID}, wk)
 		}
 		paneGone = true
 		if ws.SessionKey != "" {
 			remove[ws.SessionKey] = true
 			paneGoneKeys[ws.SessionKey] = true
 		}
-		delete(f.panes, ws.PaneID)
-		if currentPane, ok := currentPaneForWindow[wt]; ok && currentPane != ws.PaneID {
+		delete(f.panes, paneKey{wk.socket, ws.PaneID})
+		if currentPane, ok := currentPaneForWindow[wk]; ok && currentPane != ws.PaneID {
 			// Window target reused by another pane — discard without restore.
-			f.forgetWindow(wt)
+			f.forgetWindow(wk)
 		} else {
-			f.restoreWindow(wt)
+			f.restoreWindow(wk)
 		}
 	}
 
@@ -409,24 +440,20 @@ func (f *Frontend) Sweep(sessions map[string]*frontend.SessionState) []frontend.
 	// "opencode" (unlike Codex, which has no such alias list), so
 	// agentCommandMatches naturally treats them as "still running" here and only
 	// an unambiguous shell revert triggers the restore below.
-	paneByID := make(map[string]*tmuxc.PaneInfo, len(panes))
-	for i := range panes {
-		paneByID[panes[i].PaneID] = &panes[i]
-	}
-	for wt, ws := range f.windows {
-		p, ok := paneByID[ws.PaneID]
+	for wk, ws := range f.windows {
+		p, ok := paneByID[paneKey{wk.socket, ws.PaneID}]
 		if !ok {
 			continue
 		}
 		if (ws.Agent == "codex" || ws.Agent == "opencode") && ws.Status != detect.StatusRunning && ws.Status != detect.StatusNeedInput && !agentCommandMatches(ws.Agent, p.PaneCurrentCmd) {
 			if f.cfg.Verbose {
-				log.Printf("sweep: pane %s no longer running %s (current command %q), restoring window %s", ws.PaneID, ws.Agent, p.PaneCurrentCmd, wt)
+				log.Printf("sweep: pane %s no longer running %s (current command %q), restoring window %s", paneKey{wk.socket, ws.PaneID}, ws.Agent, p.PaneCurrentCmd, wk)
 			}
 			if ws.SessionKey != "" {
 				remove[ws.SessionKey] = true
 			}
-			delete(f.panes, ws.PaneID)
-			f.restoreWindow(wt)
+			delete(f.panes, paneKey{wk.socket, ws.PaneID})
+			f.restoreWindow(wk)
 			continue
 		}
 		if ws.Agent == "codex" {
@@ -436,7 +463,7 @@ func (f *Frontend) Sweep(sessions map[string]*frontend.SessionState) []frontend.
 					taskName = fallback
 				}
 				if ws.Status != detect.StatusNeedInput || ws.TaskName != taskName {
-					f.applyStatus(wt, ws, detect.StatusNeedInput, taskName)
+					f.applyStatus(wk, ws, detect.StatusNeedInput, taskName)
 					if ws.SessionKey != "" {
 						updates = append(updates, frontend.SweepAction{SessionKey: ws.SessionKey, NewStatus: detect.StatusNeedInput, NewTask: taskName, AttentionSource: "action-required-title"})
 					}
@@ -448,7 +475,7 @@ func (f *Frontend) Sweep(sessions map[string]*frontend.SessionState) []frontend.
 			// to Claude Code's half-circle marker (#1039) would let a glyph
 			// Codex never writes clear a Codex need-input state.
 			if ws.Status == detect.StatusNeedInput && detect.IsBraille(firstRune(p.PaneTitle)) {
-				f.applyStatus(wt, ws, detect.StatusRunning, ws.TaskName)
+				f.applyStatus(wk, ws, detect.StatusRunning, ws.TaskName)
 				if ws.SessionKey != "" {
 					updates = append(updates, frontend.SweepAction{SessionKey: ws.SessionKey, NewStatus: detect.StatusRunning, NewTask: ws.TaskName})
 				}
@@ -476,7 +503,7 @@ func (f *Frontend) Sweep(sessions map[string]*frontend.SessionState) []frontend.
 			// Status-only change: each side keeps the task name it already
 			// holds (the core's may be a pinned prompt label, the window's is
 			// title-derived), since nothing about the release renames anything.
-			f.applyStatus(wt, ws, detect.StatusDone, ws.TaskName)
+			f.applyStatus(wk, ws, detect.StatusDone, ws.TaskName)
 			if ws.SessionKey != "" {
 				updates = append(updates, frontend.SweepAction{SessionKey: ws.SessionKey, NewStatus: detect.StatusDone, NewTask: sess.TaskName})
 			}
@@ -497,7 +524,7 @@ func (f *Frontend) Sweep(sessions map[string]*frontend.SessionState) []frontend.
 				continue
 			}
 			taskName := frontend.SanitizeName(detect.TaskName(p.PaneTitle))
-			f.applyStatus(wt, ws, detect.StatusStopped, taskName)
+			f.applyStatus(wk, ws, detect.StatusStopped, taskName)
 			if ws.SessionKey != "" {
 				updates = append(updates, frontend.SweepAction{SessionKey: ws.SessionKey, NewStatus: detect.StatusStopped, NewTask: taskName})
 			}
@@ -510,28 +537,30 @@ func (f *Frontend) Sweep(sessions map[string]*frontend.SessionState) []frontend.
 	// Phase 4: Remove core sessions whose pane is gone (or now owned by a
 	// different session) but that no tracked window pointed at — e.g. after a
 	// stale-window discard, or when tracking never succeeded.
-	paneOwner := make(map[string]string, len(f.windows))
-	for _, ws := range f.windows {
+	// A session on a socket whose listing failed is left alone.
+	paneOwner := make(map[paneKey]string, len(f.windows))
+	for wk, ws := range f.windows {
 		if ws.SessionKey != "" {
-			paneOwner[ws.PaneID] = ws.SessionKey
+			paneOwner[paneKey{wk.socket, ws.PaneID}] = ws.SessionKey
 		}
 	}
 	for key, sess := range sessions {
-		if sess.TmuxPane == "" || remove[key] {
+		if sess.TmuxPane == "" || remove[key] || unlisted[sess.TmuxSocket] {
 			continue
 		}
-		if !existing[sess.TmuxPane] {
+		pk := paneKey{sess.TmuxSocket, sess.TmuxPane}
+		if !existing[pk] {
 			if f.cfg.Verbose {
-				log.Printf("sweep: session %s pane %s gone, removing", key, sess.TmuxPane)
+				log.Printf("sweep: session %s pane %s gone, removing", key, pk)
 			}
 			remove[key] = true
 			paneGone = true
 			paneGoneKeys[key] = true
 			continue
 		}
-		if owner, ok := paneOwner[sess.TmuxPane]; ok && owner != key {
+		if owner, ok := paneOwner[pk]; ok && owner != key {
 			if f.cfg.Verbose {
-				log.Printf("sweep: session %s superseded on pane %s, removing", key, sess.TmuxPane)
+				log.Printf("sweep: session %s superseded on pane %s, removing", key, pk)
 			}
 			remove[key] = true
 		}
@@ -564,34 +593,44 @@ func firstRune(s string) rune {
 	return 0
 }
 
-// Cleanup restores all tracked windows on daemon shutdown and clears any
-// tracked @cenci-headroom-<agent> global user variables (#171).
+// socketLogSuffix is " on <socket>" for a non-empty socket and "" for the
+// ambient server, so the ambient server's log text is unchanged.
+func socketLogSuffix(socket string) string {
+	if socket == "" {
+		return ""
+	}
+	return " on " + socket
+}
+
+// Cleanup restores all tracked windows (each on its own server) on daemon
+// shutdown and clears any tracked @cenci-headroom-<agent> user variables on
+// every server they were set on (#171).
 func (f *Frontend) Cleanup(map[string]*frontend.SessionState) {
 	if f.cfg.Verbose && len(f.windows) > 0 {
 		log.Printf("cleaning up %d tracked window(s)", len(f.windows))
 	}
-	for wt := range f.windows {
-		f.restoreWindow(wt)
+	for wk := range f.windows {
+		f.restoreWindow(wk)
 	}
-	for agent := range f.headroomVars {
-		f.setOpt(headroomVarName(agent), "", "error clearing @cenci-headroom-"+agent)
-		delete(f.headroomVars, agent)
+	for socket := range f.headroomVars {
+		f.renderHeadroomOn(socket, nil)
+		delete(f.headroomVars, socket)
 	}
 }
 
 // WindowInfo returns display fields for the window owned by the given core
 // session key, or nil when no window is tracked for it.
 func (f *Frontend) WindowInfo(sessionKey string) *frontend.WindowInfo {
-	target, ok := f.sessionKeys[sessionKey]
+	wk, ok := f.sessionKeys[sessionKey]
 	if !ok {
 		return nil
 	}
-	ws := f.windows[target]
+	ws := f.windows[wk]
 	if ws == nil {
 		return nil
 	}
 
-	parts := strings.SplitN(target, ":", 2)
+	parts := strings.SplitN(wk.target, ":", 2)
 	session, winIdx := parts[0], ""
 	if len(parts) == 2 {
 		winIdx = parts[1]
@@ -609,5 +648,6 @@ func (f *Frontend) WindowInfo(sessionKey string) *frontend.WindowInfo {
 		ManuallyNamed: ws.ManuallyNamed,
 		RepoDir:       ws.RepoDir,
 		PaneID:        ws.PaneID,
+		Socket:        wk.socket,
 	}
 }

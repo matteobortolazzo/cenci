@@ -414,3 +414,97 @@ func TestEventReceiver_ContextCancelStopsAccept(t *testing.T) {
 		t.Fatal("Accept did not return after context cancellation")
 	}
 }
+
+// receiveRawLine serves a receiver on a fresh socket, writes line to it
+// verbatim (no struct marshalling on the sending side) and returns the one
+// HookEvent the receiver decoded from it.
+func receiveRawLine(t *testing.T, line string) HookEvent {
+	t.Helper()
+	path := tempSocket(t)
+	recv, err := NewEventReceiver(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = recv.Close() }()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go recv.Accept(ctx)
+	time.Sleep(10 * time.Millisecond)
+
+	conn, err := net.Dial("unix", path)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	if _, err := conn.Write([]byte(line + "\n")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	_ = conn.Close()
+
+	select {
+	case got := <-recv.Events():
+		return got
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the hook event")
+		return HookEvent{}
+	}
+}
+
+// #1429: the receiver decodes the wire key "tmux_socket" into
+// HookEvent.TmuxSocket, from a raw line (the shape any in-container process can
+// write) and from what SendEvent marshals.
+func TestEventReceiver_DecodesTmuxSocket(t *testing.T) {
+	const socket = "/run/user/1000/tmux-1000/default"
+
+	t.Run("raw line", func(t *testing.T) {
+		got := receiveRawLine(t, `{"event_type":"Stop","session_id":"sess-sock","tmux_pane":"%5","tmux_socket":"`+socket+`","timestamp":"2024-01-01T00:00:00Z"}`)
+		if got.TmuxSocket != socket {
+			t.Errorf("TmuxSocket = %q, want %q", got.TmuxSocket, socket)
+		}
+		if got.TmuxPane != "%5" || got.SessionID != "sess-sock" {
+			t.Errorf("event = %+v, want the neighbouring fields decoded too", got)
+		}
+	})
+
+	t.Run("SendEvent round trip", func(t *testing.T) {
+		path := tempSocket(t)
+		recv, err := NewEventReceiver(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = recv.Close() }()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go recv.Accept(ctx)
+		time.Sleep(10 * time.Millisecond)
+
+		if err := SendEvent(path, HookEvent{EventType: "Stop", SessionID: "sess-rt", TmuxPane: "%5", TmuxSocket: socket}); err != nil {
+			t.Fatalf("SendEvent: %v", err)
+		}
+		select {
+		case got := <-recv.Events():
+			if got.TmuxSocket != socket {
+				t.Errorf("TmuxSocket = %q, want %q after a SendEvent round trip", got.TmuxSocket, socket)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for the hook event")
+		}
+	})
+}
+
+// #1429: a line from an older `cenci notify`, with no "tmux_socket" key,
+// decodes field for field as it did before, with an empty TmuxSocket.
+func TestEventReceiver_HookEventWithoutTmuxSocketDecodesAsBefore(t *testing.T) {
+	got := receiveRawLine(t, `{"event_type":"PreToolUse","session_id":"sess-old","agent":"claude","tmux_pane":"%2","tool_name":"Write","timestamp":"2024-01-01T00:00:00Z"}`)
+
+	want := HookEvent{
+		EventType: "PreToolUse",
+		SessionID: "sess-old",
+		Agent:     "claude",
+		TmuxPane:  "%2",
+		ToolName:  "Write",
+		Timestamp: "2024-01-01T00:00:00Z",
+	}
+	if got != want {
+		t.Errorf("decoded event = %+v, want %+v", got, want)
+	}
+}

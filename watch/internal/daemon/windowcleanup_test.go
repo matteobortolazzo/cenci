@@ -1042,3 +1042,127 @@ func TestLoop_WindowCleanupBlockedReaderStartsNoSecondPassAndLaterCloses(t *test
 		t.Fatal("the released pass's verdict never closed the window")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Interim foreign-socket guard (#1429, replaced by #1430)
+// ---------------------------------------------------------------------------
+
+// addWindowOnSocket tracks a done "<ticket>-implement" window whose pane lives on
+// the given tmux server ("" is the ambient one), the way `cenci run` leaves it,
+// with @cenci-repo-dir set on that server and the socket carried by the agent's
+// events.
+func (fx *wcFixture) addWindowOnSocket(socket string, ticket int, repoDir string) wcWindow {
+	fx.t.Helper()
+	idx := fx.windows
+	fx.windows++
+	w := wcWindow{key: fmt.Sprintf("sess%d", idx), pane: fmt.Sprintf("%%%d", idx), index: strconv.Itoa(idx)}
+	pane := tmux.PaneInfo{
+		SessionName: "main", WindowIndex: w.index, WindowName: fmt.Sprintf("%d-implement", ticket), PaneIndex: "0",
+		PaneCurrentCmd: "claude", PaneTitle: "⠋ writing tests", PaneID: w.pane,
+	}
+	windowTarget := "main:" + w.index
+	opts := map[string]string{
+		windowTarget + ":automatic-rename":          "off",
+		windowTarget + ":" + frontend.RepoDirOption: repoDir,
+	}
+	if socket == "" {
+		fx.mc.Panes = append(fx.mc.Panes, pane)
+		if fx.mc.WindowOptValues == nil {
+			fx.mc.WindowOptValues = make(map[string]string)
+		}
+		for k, v := range opts {
+			fx.mc.WindowOptValues[k] = v
+		}
+	} else {
+		if fx.mc.PanesBySocket == nil {
+			fx.mc.PanesBySocket = make(map[string][]tmux.PaneInfo)
+			fx.mc.SocketWindowOptValues = make(map[string]map[string]string)
+		}
+		fx.mc.PanesBySocket[socket] = append(fx.mc.PanesBySocket[socket], pane)
+		if fx.mc.SocketWindowOptValues[socket] == nil {
+			fx.mc.SocketWindowOptValues[socket] = make(map[string]string)
+		}
+		for k, v := range opts {
+			fx.mc.SocketWindowOptValues[socket][k] = v
+		}
+	}
+	for _, eventType := range []string{"SessionStart", "Stop"} {
+		fx.d.handleEvent(ipc.HookEvent{EventType: eventType, SessionID: w.key, TmuxPane: w.pane, TmuxSocket: socket})
+	}
+	return w
+}
+
+// Until #1430 targets the recorded socket, the kill goes to the daemon's own
+// tmux server. A finished window recorded on any other server is therefore left
+// open, with one verbose line, instead of killing whatever shares its pane id on
+// the ambient server. Windows on the ambient server (by socket path or with no
+// socket) are closed exactly as before; they are the controls that the pass ran.
+func TestWindowCleanup_FinishedWindowOnAForeignSocketIsNotKilled(t *testing.T) {
+	for _, verbose := range []bool{true, false} {
+		t.Run(fmt.Sprintf("verbose=%v", verbose), func(t *testing.T) {
+			fx := newWCFixture(t)
+			dir := trustedSocketDir(t, fx.d)
+			ambient, foreign := filepath.Join(dir, "ambient"), filepath.Join(dir, "foreign")
+			t.Setenv("TMUX", ambient+",4242,0")
+			repoDir, repo := fx.addRepo("alpha", "")
+			foreignW := fx.addWindowOnSocket(foreign, 11, repoDir)
+			sameServerW := fx.addWindowOnSocket(ambient, 12, repoDir)
+			noSocketW := fx.addWindowOnSocket("", 13, repoDir)
+			for _, n := range []int{11, 12, 13} {
+				fx.reader.script(repo, n, ticketstate.Finished)
+			}
+			fx.d.cfg.Verbose = verbose
+			logs := captureLog(t)
+
+			fx.runPass()
+
+			fx.requireClosed(sameServerW, noSocketW)
+			if slices.Contains(fx.fk.killed, foreignW.target()) {
+				t.Errorf("killed %v, want the foreign-socket window %s left open", fx.fk.killed, foreignW.target())
+			}
+			lines := linesContaining(logs.String(), foreign)
+			wantLines := 0
+			if verbose {
+				wantLines = 1
+			}
+			if len(lines) != wantLines {
+				t.Fatalf("log has %d lines naming the foreign socket %q, want %d", len(lines), lines, wantLines)
+			}
+			if verbose && !strings.Contains(lines[0], "window-cleanup:") {
+				t.Errorf("skip line %q lacks the window-cleanup: prefix", lines[0])
+			}
+		})
+	}
+}
+
+// With no $TMUX the daemon's own server is the default socket of the trusted
+// directory, so a window recorded there is closed and one on any other server is
+// not.
+func TestWindowCleanup_AmbientSocketIsTheTrustedDirDefaultWhenTMUXIsUnset(t *testing.T) {
+	fx := newWCFixture(t)
+	t.Setenv("TMUX_TMPDIR", t.TempDir())
+	t.Setenv("TMUX", "")
+	if err := os.Unsetenv("TMUX"); err != nil {
+		t.Fatal(err)
+	}
+	dir, err := tmux.TrustedSocketDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fx.d.tmuxSocketDir = tmux.TrustedSocketDir
+	repoDir, repo := fx.addRepo("alpha", "")
+	defaultW := fx.addWindowOnSocket(filepath.Join(dir, "default"), 21, repoDir)
+	otherW := fx.addWindowOnSocket(filepath.Join(dir, "other"), 22, repoDir)
+	fx.reader.script(repo, 21, ticketstate.Finished)
+	fx.reader.script(repo, 22, ticketstate.Finished)
+
+	fx.runPass()
+
+	fx.requireClosed(defaultW)
+	if slices.Contains(fx.fk.killed, otherW.target()) {
+		t.Errorf("killed %v, want the window on the non-default server left open", fx.fk.killed)
+	}
+}

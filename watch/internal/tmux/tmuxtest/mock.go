@@ -7,29 +7,51 @@ import (
 )
 
 // MockClient implements tmux.Client for testing.
+//
+// The empty socket is the ambient (default) server: Panes, ListErr and
+// WindowOptValues describe it, exactly as before sockets existed. A non-empty
+// socket is a separate server with its own pane list (PanesBySocket), listing
+// error (ListErrBySocket) and window options (SocketWindowOptValues): a pane-id
+// target and a rename resolve only inside the call's own socket's pane list, so
+// the same pane id on two sockets is two panes, as in real tmux.
 type MockClient struct {
 	Panes           []tmux.PaneInfo
 	ListCalls       int
 	Renames         []RenameCall
 	WindowOpts      []WindowOptCall
-	WindowOptValues map[string]string // key: "target:key" → value
+	WindowOptValues map[string]string // ambient server; key: "target:key" → value
 	Opts            []OptCall
-	ListErr         error
-	RenameErr       error
-	WindowOptErr    error
-	GetOptErr       error
-	OptErr          error
+	// ListErr is the ambient server's listing error; ListErrBySocket's entry for
+	// a non-empty socket takes the place of it for that socket.
+	ListErr      error
+	RenameErr    error
+	WindowOptErr error
+	GetOptErr    error
+	OptErr       error
 	// Sockets records the socket each call targeted, in call order across all
 	// five methods ("" is the ambient server).
 	Sockets []string
+
+	// PanesBySocket is the pane list of each non-empty socket.
+	PanesBySocket map[string][]tmux.PaneInfo
+	// ListErrBySocket makes ListPanes on that socket fail.
+	ListErrBySocket map[string]error
+	// ListSockets records the socket of each ListPanes call, in call order.
+	ListSockets []string
+	// SocketWindowOptValues holds the window options of each non-empty socket;
+	// key: socket → "target:key" → value. The ambient server's stay in
+	// WindowOptValues.
+	SocketWindowOptValues map[string]map[string]string
 }
 
 type RenameCall struct {
+	Socket string
 	Target string
 	Name   string
 }
 
 type WindowOptCall struct {
+	Socket string
 	Target string
 	Key    string
 	Value  string
@@ -37,24 +59,38 @@ type WindowOptCall struct {
 
 // OptCall records a call to SetOption (session-wide/global tmux option).
 type OptCall struct {
-	Key   string
-	Value string
+	Socket string
+	Key    string
+	Value  string
+}
+
+// panesFor returns the pane list of the given socket's server.
+func (m *MockClient) panesFor(socket string) []tmux.PaneInfo {
+	if socket == "" {
+		return m.Panes
+	}
+	return m.PanesBySocket[socket]
 }
 
 func (m *MockClient) ListPanes(socket string) ([]tmux.PaneInfo, error) {
 	m.Sockets = append(m.Sockets, socket)
+	m.ListSockets = append(m.ListSockets, socket)
 	m.ListCalls++
-	return m.Panes, m.ListErr
+	if socket == "" {
+		return m.Panes, m.ListErr
+	}
+	return m.PanesBySocket[socket], m.ListErrBySocket[socket]
 }
 
 func (m *MockClient) RenameWindow(socket, target string, name string) error {
 	m.Sockets = append(m.Sockets, socket)
-	target = m.windowTarget(target)
-	m.Renames = append(m.Renames, RenameCall{target, name})
+	target = m.windowTarget(socket, target)
+	m.Renames = append(m.Renames, RenameCall{Socket: socket, Target: target, Name: name})
 	if m.RenameErr == nil {
-		for i := range m.Panes {
-			if m.Panes[i].WindowTarget() == target {
-				m.Panes[i].WindowName = name
+		panes := m.panesFor(socket)
+		for i := range panes {
+			if panes[i].WindowTarget() == target {
+				panes[i].WindowName = name
 			}
 		}
 	}
@@ -63,23 +99,37 @@ func (m *MockClient) RenameWindow(socket, target string, name string) error {
 
 func (m *MockClient) SetWindowOption(socket, target string, key string, value string) error {
 	m.Sockets = append(m.Sockets, socket)
-	target = m.windowTarget(target)
-	m.WindowOpts = append(m.WindowOpts, WindowOptCall{target, key, value})
-	if m.WindowOptValues == nil {
-		m.WindowOptValues = make(map[string]string)
+	target = m.windowTarget(socket, target)
+	m.WindowOpts = append(m.WindowOpts, WindowOptCall{Socket: socket, Target: target, Key: key, Value: value})
+	if socket == "" {
+		if m.WindowOptValues == nil {
+			m.WindowOptValues = make(map[string]string)
+		}
+		m.WindowOptValues[target+":"+key] = value
+		return m.WindowOptErr
 	}
-	m.WindowOptValues[target+":"+key] = value
+	if m.SocketWindowOptValues == nil {
+		m.SocketWindowOptValues = make(map[string]map[string]string)
+	}
+	if m.SocketWindowOptValues[socket] == nil {
+		m.SocketWindowOptValues[socket] = make(map[string]string)
+	}
+	m.SocketWindowOptValues[socket][target+":"+key] = value
 	return m.WindowOptErr
 }
 
 func (m *MockClient) GetWindowOption(socket, target string, key string) (string, error) {
 	m.Sockets = append(m.Sockets, socket)
-	target = m.windowTarget(target)
+	target = m.windowTarget(socket, target)
 	if m.GetOptErr != nil {
 		return "", m.GetOptErr
 	}
+	values := m.WindowOptValues
+	if socket != "" {
+		values = m.SocketWindowOptValues[socket]
+	}
 	k := target + ":" + key
-	if v, ok := m.WindowOptValues[k]; ok {
+	if v, ok := values[k]; ok {
 		return v, nil
 	}
 	if key == "automatic-rename" {
@@ -90,9 +140,10 @@ func (m *MockClient) GetWindowOption(socket, target string, key string) (string,
 
 // Like tmux, window commands accept a pane ID as the stable identity of its
 // owning window. Record the resolved window so existing behavior assertions
-// continue to describe the window that was actually changed.
-func (m *MockClient) windowTarget(target string) string {
-	for _, p := range m.Panes {
+// continue to describe the window that was actually changed. The pane id is
+// resolved inside the call's own socket's pane list only.
+func (m *MockClient) windowTarget(socket, target string) string {
+	for _, p := range m.panesFor(socket) {
 		if p.PaneID == target {
 			return p.WindowTarget()
 		}
@@ -104,7 +155,7 @@ func (m *MockClient) windowTarget(target string) string {
 // SetWindowOption's recording pattern.
 func (m *MockClient) SetOption(socket, key string, value string) error {
 	m.Sockets = append(m.Sockets, socket)
-	m.Opts = append(m.Opts, OptCall{key, value})
+	m.Opts = append(m.Opts, OptCall{Socket: socket, Key: key, Value: value})
 	return m.OptErr
 }
 
@@ -112,6 +163,16 @@ func (m *MockClient) SetOption(socket, key string, value string) error {
 func FindOpt(opts []OptCall, key string) (string, bool) {
 	for i := len(opts) - 1; i >= 0; i-- {
 		if opts[i].Key == key {
+			return opts[i].Value, true
+		}
+	}
+	return "", false
+}
+
+// FindSocketOpt returns the value of the last SetOption call on socket matching key.
+func FindSocketOpt(opts []OptCall, socket, key string) (string, bool) {
+	for i := len(opts) - 1; i >= 0; i-- {
+		if opts[i].Socket == socket && opts[i].Key == key {
 			return opts[i].Value, true
 		}
 	}
@@ -128,10 +189,31 @@ func FindWindowOpt(opts []WindowOptCall, target, key string) (string, bool) {
 	return "", false
 }
 
+// FindSocketWindowOpt returns the value of the last SetWindowOption call on
+// socket matching target and key.
+func FindSocketWindowOpt(opts []WindowOptCall, socket, target, key string) (string, bool) {
+	for i := len(opts) - 1; i >= 0; i-- {
+		if opts[i].Socket == socket && opts[i].Target == target && opts[i].Key == key {
+			return opts[i].Value, true
+		}
+	}
+	return "", false
+}
+
 // LastRename returns the last rename call for a given target.
 func LastRename(renames []RenameCall, target string) (string, bool) {
 	for i := len(renames) - 1; i >= 0; i-- {
 		if renames[i].Target == target {
+			return renames[i].Name, true
+		}
+	}
+	return "", false
+}
+
+// LastSocketRename returns the last rename call on socket for a given target.
+func LastSocketRename(renames []RenameCall, socket, target string) (string, bool) {
+	for i := len(renames) - 1; i >= 0; i-- {
+		if renames[i].Socket == socket && renames[i].Target == target {
 			return renames[i].Name, true
 		}
 	}

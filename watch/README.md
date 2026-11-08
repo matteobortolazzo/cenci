@@ -4275,7 +4275,7 @@ For agent-types with budget tracking configured (see [Usage budgets](#usage-budg
 
 - `@cenci-headroom-<agent>` — remaining headroom, `0`–`100` (e.g. `@cenci-headroom-claude` → `73`)
 
-Unlike `@cenci-symbol`/`@cenci-style`, this is a global option (`set-option -g`), not scoped to any one window, since headroom is a per-agent-type fact rather than a per-session/window one. Reference it once in your own `status-line`:
+Unlike `@cenci-symbol`/`@cenci-style`, this is a global option (`set-option -g`), not scoped to any one window, since headroom is a per-agent-type fact rather than a per-session/window one. It is set on the default tmux server and, when a tracked window lives on another tmux server (a different `-L`/`-S` socket), on that server too, so the same `status-line` works there. Reference it once in your own `status-line`:
 
 ```
 set -g status-right "claude: #{@cenci-headroom-claude}% | codex: #{@cenci-headroom-codex}%"

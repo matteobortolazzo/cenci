@@ -25,6 +25,12 @@
 // indexes even against a new daemon. Paneless and synthetic entries have no
 // pane identity.
 //
+// WindowState.Socket (JSON "socket") is the tmux server socket the window lives
+// on, so the pane identity is the pair (socket, "pane_id"): the same "%N" can
+// exist on two servers. A snapshot from an older daemon omits it, and an empty
+// or absent value means the default server, exactly as before the field
+// existed.
+//
 // This package is a leaf: it imports only the standard library and nothing from
 // cenci's internal packages, so it is safe to import from external tools.
 // Versioning follows the existing watch/v* Go submodule tags.
