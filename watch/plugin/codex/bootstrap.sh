@@ -1,5 +1,5 @@
 #!/bin/sh
-# cenci bootstrap (Codex) — provisions the plugin-local binary, puts it on
+# cenci bootstrap (Codex) — provisions the runtime binary, puts it on
 # $PATH, and starts the daemon.
 #
 # Runs detached from the SessionStart hook, so it MUST never block the agent and
@@ -7,7 +7,7 @@
 # the release artifact matching the plugin version is missing from bin/, it is
 # downloaded (with sha256 verification) from the GitHub release. Codex hooks do
 # not need the PATH link: they call codex/notify.sh, which resolves the binary
-# itself (plugin-local bin/cenci first, then the shared resolver). The binary
+# itself (versioned runtime storage first, then the shared resolver). The binary
 # is still symlinked onto $PATH at ~/.local/bin/cenci for interactive and
 # skill invocations of `cenci`. The daemon is finally started if it isn't
 # already (the daemon's own already-running guard makes a redundant start a
@@ -26,6 +26,13 @@ set -u
 ROOT="${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-$(dirname "$0")/..}}"
 PLUGIN_MANIFEST_REL=".codex-plugin/plugin.json"
 PATH_AUDIENCE="Codex hooks can find it"
+
+# A failed path resolution is kept empty for bootstrap-common.sh to report;
+# it must never fall back to writing into the trusted plugin directory.
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=../lib/codex-bin-dir.sh
+. "$(dirname "$0")/../lib/codex-bin-dir.sh"
+BIN_DIR=$(cenci_codex_bin_dir "$ROOT") || BIN_DIR=""
 
 # shellcheck source-path=SCRIPTDIR
 # shellcheck source=../lib/bootstrap-common.sh

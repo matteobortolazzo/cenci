@@ -20,6 +20,7 @@ set -u
 # Resolve the plugin root. CLAUDE_PLUGIN_ROOT is set by Claude Code; fall back to
 # this script's parent directory for manual/dev invocation.
 ROOT="${CLAUDE_PLUGIN_ROOT:-$(dirname "$0")/..}"
+BIN_DIR="$ROOT/bin"
 PLUGIN_MANIFEST_REL=".claude-plugin/plugin.json"
 PATH_AUDIENCE="bare cenci invocations resolve"
 

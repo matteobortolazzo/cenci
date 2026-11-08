@@ -12,9 +12,11 @@
 #   2. /usr/local/bin/cenci — host binary bind-mounted read-only in a
 #      sandbox, and install.sh's optional sudo link on a host
 #   3. /opt/homebrew/bin/cenci — macOS parity with the widget resolver
-#   4. Sibling plugin caches (Claude Code cache, Codex cache, marketplace
+#   4. ~/.local/bin/cenci — bootstrap's maintained launcher, even when a
+#      GUI session's PATH does not include ~/.local/bin
+#   5. Sibling plugin caches (Claude Code cache, Codex cache, marketplace
 #      checkout)
-#   5. `command -v cenci` last
+#   6. `command -v cenci` last
 #
 # Two guards the widget resolver does not need:
 #
@@ -134,6 +136,7 @@ resolve_cenci_bin() {
 	for c in \
 		"$CENCI_RESOLVE_USR_LOCAL_BIN" \
 		"$CENCI_RESOLVE_HOMEBREW_BIN" \
+		"$HOME/.local/bin/cenci" \
 		"$HOME"/.claude/plugins/cache/*/cenci-watch/*/bin/cenci \
 		"$HOME"/.codex/plugins/cache/*/cenci-watch/*/bin/cenci \
 		"$HOME"/.claude/plugins/marketplaces/*/watch/plugin/bin/cenci; do

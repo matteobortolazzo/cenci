@@ -24,6 +24,7 @@ set -u
 # PLUGIN_ROOT for Claude Code/Codex); resolve one level above opencode/, same
 # as the Codex/Claude Code layout, so the plugin-local bin/ is shared.
 ROOT="$(dirname "$0")/.."
+BIN_DIR="$ROOT/bin"
 PLUGIN_MANIFEST_REL="opencode/package.json"
 PATH_AUDIENCE="the OpenCode plugin can find it"
 

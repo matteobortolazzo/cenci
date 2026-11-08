@@ -18,5 +18,8 @@ HOOKS_JSON="$DIR/hooks.json"
 NOTIFY_REL="codex/notify.sh"
 CLIENT="codex"
 
+# shellcheck source=./storage.test.sh
+source "$DIR/storage.test.sh"
+
 # shellcheck source=../lib/test-common.sh
 source "$DIR/../lib/test-common.sh"

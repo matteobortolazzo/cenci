@@ -1883,6 +1883,34 @@ newest_cenci_root() {
 	[ -n "$newest_manifest" ] && dirname "$(dirname "$newest_manifest")"
 }
 
+# Packages contain both client manifests. The cache location determines which
+# client installed this copy, including which bootstrap/storage policy to use.
+cenci_root_uses_codex() {
+	case "$1" in
+	"$HOME"/.claude/plugins/cache/*) return 1 ;;
+	"$HOME"/.codex/plugins/cache/*) return 0 ;;
+	esac
+	[ -f "$1/.codex-plugin/plugin.json" ]
+}
+
+# New Codex plugins keep binaries outside their fingerprinted bundle. Manual
+# installer runs use the helper's deterministic cache fallback: PLUGIN_DATA may
+# belong to the plugin that launched this command, not the selected cache root.
+# Older plugins without the helper retain their original storage layout.
+plugin_cenci_binary_path() (
+	local root="$1" bin_dir
+	if cenci_root_uses_codex "$root" && [ -f "$root/lib/codex-bin-dir.sh" ]; then
+		unset PLUGIN_DATA CLAUDE_PLUGIN_DATA
+		# shellcheck disable=SC1091 # helper ships with the selected plugin
+		. "$root/lib/codex-bin-dir.sh" || return 1
+		bin_dir="$(cenci_codex_bin_dir "$root")" || return 1
+		[ -n "$bin_dir" ] || return 1
+		printf '%s/cenci\n' "$bin_dir"
+	else
+		printf '%s/bin/cenci\n' "$root"
+	fi
+)
+
 # newest_provisioned_cenci_binary — path to the executable cenci binary from the
 # most recently installed version-pinned cache root that has ALREADY bootstrapped
 # one. Unlike current_cenci_binary it never triggers a download; it only reports
@@ -1898,7 +1926,7 @@ newest_provisioned_cenci_binary() {
 		"$HOME"/.codex/plugins/cache/cenci/cenci-watch/*/.codex-plugin/plugin.json; do
 		[ -f "$manifest" ] || continue
 		root="$(dirname "$(dirname "$manifest")")"
-		bin="$root/bin/cenci"
+		bin="$(plugin_cenci_binary_path "$root")" || continue
 		[ -x "$bin" ] || continue
 		if [ -z "$newest_manifest" ] || [ "$manifest" -nt "$newest_manifest" ]; then
 			newest_manifest="$manifest"
@@ -1914,7 +1942,7 @@ cached_cenci_binary() {
 	local root bin
 	root="$(newest_cenci_root || true)"
 	[ -n "$root" ] || return 1
-	bin="$root/bin/cenci"
+	bin="$(plugin_cenci_binary_path "$root")" || return 1
 	[ -x "$bin" ] || return 1
 	printf '%s\n' "$bin"
 }
@@ -1929,7 +1957,7 @@ current_cenci_binary() {
 	fi
 	root="$(newest_cenci_root || true)"
 	[ -n "$root" ] || return 1
-	if [ -f "$root/.codex-plugin/plugin.json" ]; then
+	if cenci_root_uses_codex "$root"; then
 		bootstrap="$root/codex/bootstrap.sh"
 		root_var=PLUGIN_ROOT
 	else
@@ -1938,7 +1966,10 @@ current_cenci_binary() {
 	fi
 	if [ -f "$bootstrap" ]; then
 		if [ "$root_var" = PLUGIN_ROOT ]; then
-			PLUGIN_ROOT="$root" bash "$bootstrap" >/dev/null || return 1
+			(
+				unset PLUGIN_DATA CLAUDE_PLUGIN_DATA
+				PLUGIN_ROOT="$root" bash "$bootstrap" >/dev/null
+			) || return 1
 		else
 			CLAUDE_PLUGIN_ROOT="$root" bash "$bootstrap" >/dev/null || return 1
 		fi

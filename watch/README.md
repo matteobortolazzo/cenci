@@ -152,11 +152,16 @@ codex plugin add cenci-watch@cenci
 ```
 
 On the first `SessionStart` after install, the plugin downloads the `cenci`
-binary matching the plugin version (with checksum verification) into the plugin's
-`bin/` directory, symlinks it onto your writable `$PATH` (`~/.local/bin`), and
+binary matching the plugin version (with checksum verification), symlinks it
+onto your writable `$PATH` (`~/.local/bin`), and
 starts the daemon. Bootstrap runs detached and never blocks the agent, so the
 very first session may take a moment before status appears; the daemon then
 persists for all later sessions.
+
+Claude Code stores the binary in the plugin's `bin/` directory. Codex stores it
+outside the approved plugin contents, under `$PLUGIN_DATA/<version>/bin/` or
+the [manual-bootstrap cache](plugin/codex/README.md#binary-and-daemon-self-bootstrapping),
+so installing the binary does not invalidate hook approval.
 
 The on-`$PATH` symlink is re-pointed on every session (so it follows version
 bumps) and lets bare `cenci` invocations resolve — shell, tmux `run-shell`,
@@ -173,10 +178,12 @@ the matching binary.
 
 Codex will ask you to review/trust new hooks. Use `/hooks` in Codex if the hooks are listed as pending review.
 
-**Trust model:** Codex hash-pins `hooks.json`, so every plugin update that changes
-the file changes its hash and requires re-trusting the hooks via `/hooks` in Codex.
-Adding the `Interrupt` and `SessionEnd` hooks changed the Codex manifest, so
-re-trust it via `/hooks`. cenci never bypasses hook trust.
+**Trust model:** Codex approves the current hook definitions and plugin contents.
+**Trust all and continue** applies to those contents; a plugin update can require
+another `/hooks` review even when `hooks.json` is unchanged. Startup keeps mutable
+binaries and markers outside the Codex plugin bundle. See the
+[Codex trust model](plugin/codex/README.md#trust-model) for recovery from older
+bootstrap errors. cenci never changes persisted hook approval.
 
 The marketplace plugin includes a native Codex manifest at
 `plugin/.codex-plugin/plugin.json`, which loads the Codex-specific hooks from
