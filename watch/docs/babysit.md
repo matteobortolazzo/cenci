@@ -53,9 +53,33 @@ non-conflicting GitHub observation clears the episode; unknown mergeability
 preserves its retry budget.
 The older `conflictNotifiedHeadSha` state field remains readable, but an old
 attention notification does not suppress the first automatic repair after upgrade.
-Apart from those automatic clears (green CI at a new head, a conflict episode ending),
-`cenci babysit reset <pr>` (host-only; refuses inside a sandbox) is the supported way
-to zero a paused PR's budget while keeping its feedback bookkeeping.
+Apart from those automatic clears (a fresh green read of the current head, a conflict
+episode ending), `cenci babysit reset <pr>` (host-only; refuses inside a sandbox) is the
+supported way to zero a paused PR's budget while keeping its feedback bookkeeping. It
+also clears `ciRepairPaused` and `ciCapNotified`.
+
+CI repair has its own budget, separate from the merge-repair budget; each is capped
+at `fixCap` (3) launches. When a tick reaches the CI cap (failing checks, no conflict hold, head not yet repaired, budget
+used up) the supervisor records a lasting `ciRepairPaused` episode, sets the status to
+`needs-input` and opens one `babysit-attention` session for that episode, then marks it
+sent in `ciCapNotified`. The session is not reopened on later failing heads, on retried
+reads or across supervisor restarts. If the launch fails, the cap and the automerge reason
+`workflow launch failed` stay, the tick returns the error, `Run`'s retry backoff tries the
+notification again, and `ciCapNotified` is set only after a successful launch. The
+supervisor does not exit and keeps its PID. While CI repair is paused every tick still
+reads the PR and its checks, reconciles review feedback, runs merge repair on its own
+budget (conflict repair goes first) and detects MERGED or CLOSED. A notification still
+pending while a conflict hold is active waits for the hold to clear.
+
+The episode ends only on a fresh green read of the current head, taken in that tick, on
+a tick with no conflict hold. That includes a failed check that is rerun green at the
+same head with no push. It resets `ciFixAttempts`, `ciRepairPending` and both markers, and
+the status goes back to `running`. Pending, unknown (for example a `cancel` bucket),
+zero checks, read errors, a head change alone, a restart, a push, a poll and an attention
+launch never reset it, and a head change alone never authorizes a merge. A status file
+written before the markers existed (`needs-input`, `ciFixAttempts` at the cap, empty
+`conflictNotifiedHeadSha`) is read as already paused and notified when the supervisor
+loads it, so arming it again does not open a second attention session.
 
 While conflicting, or while mergeability is unknown during a conflict episode,
 CI repair and review dispatch wait for merge repair. Deferred CI work consumes

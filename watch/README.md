@@ -2087,14 +2087,17 @@ three outcomes:
 `cenci babysit status <pr>` prints exactly one JSON object and exits 0:
 
 ```json
-{"pr":42,"repo":"owner/repo","status":"needs-input","ciFixAttempts":3,"conflictFixAttempts":0,"fixCap":3,"supervisorLive":false}
+{"pr":42,"repo":"owner/repo","status":"needs-input","ciFixAttempts":3,"conflictFixAttempts":0,"fixCap":3,"supervisorLive":true}
 ```
 
 `status` is the persisted supervisor status; `ciFixAttempts` and
 `conflictFixAttempts` count CI-repair and merge-repair launches against `fixCap`.
 `supervisorLive` is `true` only when the state records a PID that is verified to be
-this PR's babysit process (by its command line on Linux, by liveness elsewhere), so a
-supervisor paused as `needs-input` (no process) reports `false`. The output contains no filesystem path. On the host it is read from
+this PR's babysit process (by its command line on Linux, by liveness elsewhere). A
+supervisor paused as `needs-input` after a CI or merge-repair retry cap keeps polling
+under its own PID, so it reports `true`, as in the example. A state file written before
+the CI cap kept the supervisor running (`needs-input` with PID 0 and no process) reports
+`false` until it is armed again, and still blocks closing the window. The output contains no filesystem path. On the host it is read from
 the state file; in a sandbox it comes from the host daemon. With no state for the PR
 it exits 1 with `no supervisor found for PR #<pr>`; in a sandbox a rejection or a
 missing reply exits 1 and prints the host command `cenci babysit status <pr>`. A
@@ -2108,7 +2111,8 @@ so inside a sandbox it exits 1 (`not reset: the babysit supervisor runs on the h
 naming the exact host command) and sends nothing over the event socket; no socket kind
 or daemon handler carries it. On the host it zeroes `ciFixAttempts`, `ciRepairPending`,
 `lastRepairedCiHeadSha`, `conflictFixAttempts` and `conflictNotifiedHeadSha` (for both
-budgets, whatever the launch reason) and keeps the feedback bookkeeping
+budgets, whatever the launch reason) and clears the CI-cap markers `ciRepairPaused` and
+`ciCapNotified`. It keeps the feedback bookkeeping
 (`addressedCommentKeys`, `pendingCommentKeys`, `launchedFeedbackKeys`,
 `lastCommentTimestamp`) and `conflictRepairHeadSha`. A live supervisor is sent SIGTERM,
 awaited for up to 10s and its lock removed first; the reset then re-arms through the
@@ -2238,6 +2242,19 @@ review repair dispatch during the conflict episode. After three repair launches,
 an unresolved conflict opens a deduplicated `babysit-attention` window and sets
 `Status = "needs-input"`; polling continues so a later confirmed conflict-free state
 releases the hold and resets the budget. Unknown mergeability never resets that budget.
+
+CI repair has its own, separate budget, also capped at `fixCap` (3). After three
+`ci-repair` launches the next failing, non-conflicting tick records `ciRepairPaused`,
+sets `Status = "needs-input"` and opens one `babysit-attention` window for that
+episode (`ciCapNotified` marks it sent, so later failing heads and supervisor restarts
+do not reopen it; a failed launch is retried with backoff). The supervisor does not
+exit: it keeps its PID and keeps polling, reconciling review feedback, repairing
+conflicts on the merge-repair budget and detecting MERGED or CLOSED. Only a fresh green
+read of the current head on a tick with no conflict hold ends the episode, including a
+rerun that goes green at the same head: it resets `ciFixAttempts` and
+`ciRepairPending`, clears both markers and returns the status to `running`. Pending,
+unknown or zero checks, read errors and a head change alone never reset it, and
+automerge stays held while the CI repair is pending.
 
 A denied or held tick is logged once, e.g.:
 

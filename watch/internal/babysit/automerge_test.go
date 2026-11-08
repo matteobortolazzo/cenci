@@ -1232,8 +1232,9 @@ func TestTickAutomergeDisabledMakesNoExtraGHCalls(t *testing.T) {
 }
 
 // TestTickAutomergeHeldOnRepairOrReviewPending is test-strategy case (c):
-// RepairPending or a non-empty PendingKeys holds automerge, without ever
-// reaching the policy fetch or merge call.
+// a non-empty PendingKeys holds automerge, without ever reaching the policy
+// fetch or merge call. The RepairPending half is covered at tick level by
+// TestTickAutomergeHeldOnCIRepairPendingWhileTheGreenResetIsSuppressed.
 func TestTickAutomergeHeldOnRepairOrReviewPending(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -1246,20 +1247,19 @@ func TestTickAutomergeHeldOnRepairOrReviewPending(t *testing.T) {
 		extraScript []scriptedCall
 		wantReason  string
 	}{
-		// LastHeadSHA is pinned to automergeEligiblePR's "abc" headRefOid: the
-		// pre-existing (out-of-scope) CI-repair head-advance detection treats
-		// a HeadRefOID/LastHeadSHA mismatch as "the head moved on since this
-		// was recorded, so it's now stale" and resets RepairPending to false
-		// -- well before automerge's insertion point after the
-		// review-feedback block. Without pinning it, the "CI repair pending"
-		// subtest's RepairPending would already be wiped by the time
-		// automerge runs and would spuriously fall through to the policy
-		// stage. PendingHeadSHA is no longer compared for clearing purposes
+		// There is no "CI repair pending" row here any more: a green tick with
+		// no conflict hold now clears RepairPending whatever the head (#1456),
+		// so a green PR can no longer reach this hold through tick().
+		// TestTickAutomergeHeldOnCIRepairPendingWhileTheGreenResetIsSuppressed
+		// covers the tick-level hold (conflict hold suppresses the green
+		// reset), and TestEvaluateAutomergeConditionMatrix pins
+		// reasonRepairPending at the condition-chain level.
+		//
+		// PendingHeadSHA is no longer compared for clearing purposes
 		// at all (#850 deletes that rule) -- it survives only as
 		// repair-attempt/dedup metadata, so the "review feedback pending"
 		// subtest sets it purely for fixture realism, not because anything
 		// still reads it to decide resolution.
-		{"CI repair pending", func(s *State) { s.RepairPending = true; s.LastHeadSHA = "abc" }, nil, reasonRepairPending},
 		{"review feedback pending", func(s *State) { s.PendingKeys = []string{"comment:1"}; s.PendingHeadSHA = "abc" }, []scriptedCall{
 			// Left unresolved so PendingKeys stays non-empty and the hold
 			// still reaches reasonReviewPending (an ordinary hold, not one

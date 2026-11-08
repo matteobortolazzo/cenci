@@ -36,8 +36,12 @@ procedure never detects whether the session is interactive: a headless `codex ex
 question and exits without choosing, mutating, pushing or stopping. It runs no guard canary. Only a later user turn that names
 one option acts on it.
 
-"leave paused for manual repair" changes nothing: report that the PR stays paused and the supervisor keeps
-polling, and that merge conflicts are repaired by a human in a normal session. "retry with a fresh budget"
+"leave paused for manual repair" changes nothing: report that the PR stays paused and that merge conflicts
+are repaired by a human in a normal session. Leaving it paused is safe: for a CI or merge-repair retry cap the
+supervisor keeps polling, and a used-up budget pauses only that kind of automatic repair. CI and merge-repair
+budgets are separate; the other repair kind, review feedback and MERGED or CLOSED detection carry on. Once
+GitHub shows a confirmed green head (CI) or a confirmed conflict-free state (merge), the supervisor clears the
+pause automatically; no separate re-arm step is needed. "retry with a fresh budget"
 continues at `## Reset choice`. "stop babysitting" continues at `## Stop choice`.
 
 ## Reset choice

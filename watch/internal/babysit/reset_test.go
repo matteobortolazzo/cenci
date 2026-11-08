@@ -692,6 +692,84 @@ func TestBudgetReset_HasNoEventSocketKindOrDaemonHandler(t *testing.T) {
 	}
 }
 
+// ciPausedLiveState is a CI-paused supervisor whose process is alive: it keeps
+// its pid while paused (#1456), so reset and stop reach it through the
+// verified-pid path.
+func ciPausedLiveState(pid int) State {
+	s := pausedState()
+	s.PID = pid
+	s.CIRepairPaused, s.CICapNotified = true, true
+	return s
+}
+
+// #1456 AC 8: a reset of a CI-paused state with a live verified supervisor
+// stops that process and clears the five budget fields plus both new markers.
+func TestReset_CIPausedLiveSupervisorClearsAllSevenFields(t *testing.T) {
+	e := newResetEnv(t)
+	p := startOwnedFixture(t, false)
+	writeStateFile(t, e.path, ciPausedLiveState(p.pid))
+	writeLock(t, e.lock, p.pid)
+
+	done := captureStdout(t)
+	err := Reset("42", e.dir, nil)
+	_ = done()
+	if err != nil {
+		t.Fatalf("Reset: %v", err)
+	}
+
+	if len(e.started) != 1 {
+		t.Fatalf("supervisor starts = %d, want 1", len(e.started))
+	}
+	select {
+	case <-p.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the paused supervisor never exited")
+	}
+	status, ok := p.cmd.ProcessState.Sys().(syscall.WaitStatus)
+	if !ok || !status.Signaled() || status.Signal() != syscall.SIGTERM {
+		t.Errorf("paused supervisor exit = %v, want it ended by SIGTERM", p.cmd.ProcessState)
+	}
+	s := mustReadState(t, e.path)
+	if s.FixAttempts != 0 || s.ConflictFixAttempts != 0 || s.RepairPending || s.LastRepairedSHA != "" || s.ConflictNotifiedSHA != "" {
+		t.Errorf("budget not zeroed: ciFixAttempts=%d conflictFixAttempts=%d ciRepairPending=%v lastRepairedCiHeadSha=%q conflictNotifiedHeadSha=%q",
+			s.FixAttempts, s.ConflictFixAttempts, s.RepairPending, s.LastRepairedSHA, s.ConflictNotifiedSHA)
+	}
+	if s.CIRepairPaused || s.CICapNotified {
+		t.Errorf("ciRepairPaused=%v ciCapNotified=%v, want both cleared by the reset", s.CIRepairPaused, s.CICapNotified)
+	}
+}
+
+// #1456 AC 8: stop against the live PID of a CI-paused supervisor signals that
+// process and removes the state.
+func TestStop_CIPausedLiveSupervisorIsSignalledAndStateRemoved(t *testing.T) {
+	dir, path := hostStopFixture(t, "o/r", "42")
+	p := startOwnedFixture(t, false)
+	writeStateFile(t, path, ciPausedLiveState(p.pid))
+
+	done := captureStdout(t)
+	err := Stop("42", dir)
+	out := done()
+	if err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+
+	if out != "Stopped babysitting PR #42.\n" {
+		t.Errorf("stdout = %q, want %q", out, "Stopped babysitting PR #42.\n")
+	}
+	select {
+	case <-p.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the paused supervisor never exited")
+	}
+	status, ok := p.cmd.ProcessState.Sys().(syscall.WaitStatus)
+	if !ok || !status.Signaled() || status.Signal() != syscall.SIGTERM {
+		t.Errorf("paused supervisor exit = %v, want it ended by SIGTERM", p.cmd.ProcessState)
+	}
+	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+		t.Errorf("state file still exists after Stop (stat err = %v)", statErr)
+	}
+}
+
 // P35: a reset lifts the cap's counters, never the cap itself.
 func TestFixCapStaysThree(t *testing.T) {
 	if fixCap != 3 {
