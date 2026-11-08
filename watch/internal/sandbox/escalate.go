@@ -111,7 +111,7 @@ func runRuntime(ctx context.Context, rt string, stdout, stderr io.Writer, args .
 func probeStartTime(ctx context.Context, rt, container, pid string) (string, error) {
 	// -u root: `docker run --user X` persists as the container's Config.User
 	// for the container's lifetime, so this exec call site carries its own
-	// explicit -u (see sandbox project's CLAUDE.md). The probe stays root
+	// explicit -u (see sandbox/AGENTS.md's routed docs/entrypoint.md). The probe stays root
 	// regardless of which user the scan runs as.
 	var probeOut, probeErr bytes.Buffer
 	if err := runRuntime(ctx, rt, &probeOut, &probeErr, "exec", "-u", "root", container, "sh", "-c", livenessScript, "_", pid); err != nil {
@@ -136,7 +136,7 @@ func SignalTerm(ctx context.Context, rt, container, pid string, stdout, stderr i
 	// -u root: `docker run --user X` persists as the container's Config.User for
 	// the container's lifetime, not just its initial process, so every exec call
 	// site must carry its own explicit -u rather than relying on the
-	// container's default user (see sandbox project's CLAUDE.md). Signaling
+	// container's default user (see sandbox/AGENTS.md's routed docs/entrypoint.md). Signaling
 	// stays root regardless of which user the scan runs as.
 	termErr := runRuntime(ctx, rt, stdout, stderr, "exec", "-u", "root", container, "kill", "-TERM", pid)
 	if termErr == nil {

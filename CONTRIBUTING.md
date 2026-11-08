@@ -1,13 +1,13 @@
 # Contributing
 
 Thanks for looking at cenci. This repo contains one product implemented as three
-independently versioned internal plugins—read the relevant layer's `CLAUDE.md` before making changes, and
-see the root [`CLAUDE.md`](./CLAUDE.md) and [`README.md`](./README.md) for the overall
+independently versioned internal plugins—read the relevant layer's `AGENTS.md` before making changes, and
+see the root [`AGENTS.md`](./AGENTS.md) and [`README.md`](./README.md) for the overall
 architecture.
 
 ## Dev setup per project
 
-- **watch** (Go): install the Go toolchain per [`watch/CLAUDE.md`](./watch/CLAUDE.md),
+- **watch** (Go): install the Go toolchain per [`watch/AGENTS.md`](./watch/AGENTS.md),
   then from `watch/`:
   ```bash
   make build
@@ -20,11 +20,11 @@ architecture.
     sandbox/lib/*.sh sandbox/tests/*.test.sh
   bash -n install.sh sandbox/entrypoint.sh
   ```
-  See [`sandbox/CLAUDE.md`](./sandbox/CLAUDE.md) for the full build/test/smoke
+  See [`sandbox/AGENTS.md`](./sandbox/AGENTS.md) for the full build/test/smoke
   commands.
 - **flow** (markdown/JSON/shell): no build step. Skills and docs are plain
   Markdown; hooks are shell scripts and should still pass `shellcheck`/`bash -n`. See
-  [`flow/CLAUDE.md`](./flow/CLAUDE.md).
+  [`flow/AGENTS.md`](./flow/AGENTS.md).
 
 ## Workflow: worktrees, 1 ticket = 1 PR
 
@@ -107,6 +107,6 @@ triggers a bump.
 
 ## Questions
 
-Repo-wide conventions live in [`CLAUDE.md`](./CLAUDE.md); user-facing setup and
+Repo-wide conventions live in [`AGENTS.md`](./AGENTS.md); user-facing setup and
 architecture are in [`README.md`](./README.md). For anything security-sensitive, see
 [`SECURITY.md`](./SECURITY.md).

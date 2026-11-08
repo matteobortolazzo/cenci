@@ -8,7 +8,7 @@ Code with `--dangerously-skip-permissions` and Codex with
 per-command approval prompts. That's only safe because isolation moves from the agent's
 own permission system to the container: the agent can do anything *inside* the
 container, but the container is what stands between it and your host. See
-[`sandbox/CLAUDE.md`](./sandbox/CLAUDE.md) and
+[`sandbox/AGENTS.md`](./sandbox/AGENTS.md) and
 [`sandbox/README.md`](./sandbox/README.md#permission-model) for the full model.
 
 ![The current repository is mounted into a container where the coding agent has full permissions, while the host stays outside the default boundary](docs/assets/cenci-sandbox-boundary.svg)
