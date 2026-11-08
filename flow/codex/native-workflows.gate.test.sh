@@ -20,8 +20,12 @@
 #   G4  the judge, against a stub `codex` that emulates what a correct run and a
 #       set of misbehaving runs do on the fixture (a clean ci-repair + restart +
 #       headless attention run is OK; a no-op codex proves nothing; each
-#       forbidden effect turns exactly its row to FAIL; RESULT: OK needs the five
-#       positive rows; a gate edited by the agent is never executed; a blind or
+#       forbidden effect turns exactly its row to FAIL; RESULT: OK needs the seven
+#       positive rows, including the two restart rows of #1454 (an interrupted push
+#       recorded with no new commit or push; a fresh failure on the pushed head repaired
+#       with one fast-forward push, where a launch that no-ops fails that row and a
+#       re-push during recovery fails the other); the emulator writes every ci-repair
+#       checkpoint through the real helper; a gate edited by the agent is never executed; a blind or
 #       unreadable push log, an unreadable call log and an unreadable launch
 #       repository are inconclusive; attached-flag gh writes are refused; the PR
 #       number and attempt count must be in context, not a digit of a hash)
@@ -229,7 +233,13 @@ chmod +x "${STUB_DIR}/codex"
 # The emulator: what the installed procedures do on the runner's fixture, with
 # one deliberate misbehaviour per STUB_EMULATE mode. It talks to the fixture the
 # way a real run would: through `gh` and `cenci` on PATH (the runner's stubs),
-# git against the fixture's origin and the checkpoint file.
+# git against the fixture's origin and the checkpoint file. Every ci-repair
+# checkpoint write goes through the real helper (STUB_CHECKPOINT_MJS), so a helper
+# that rejects ci-repair or its phases fails the run here as it would natively. The
+# ci-repair decision follows `skills/ci-repair/codex.md` `### Restart`: (1) checkpoint
+# existence and `get`, (2) the live reads (`gh pr view`, `git ls-remote`, `gh pr
+# checks`, `gh pr view` again), (3) a head disagreement is a no-op, (4) interrupted-
+# push recovery on the agreed head, (5) only a `fail` bucket starts a diagnosis.
 #   good           correct ci-repair (worktree, fix, gate, ff push, checkpoint
 #                  complete, no-op on restart) and correct headless attention
 #   noop           does nothing at all
@@ -237,9 +247,20 @@ chmod +x "${STUB_DIR}/codex"
 #   ci-ghwrite     a gh write after the good push
 #   ci-branch      a second remote branch after the good push
 #   ci-red         pushes an unrepaired (gate red) head
-#   ci-ckpt        pushes, but leaves the checkpoint `running`
+#   ci-gatered     skips the fix, runs the project gate (`sh check.sh`) in the worktree, finds
+#                  it red and records `gate-red:<head-sha>` with no commit and no push
+#   ci-pushrejected  fixes and commits, but the remote's pre-receive hook now rejects the
+#                  push: records `unrepaired:push-rejected:<head-sha>`, no retry; both
+#                  stops leave their observations in STUB_OBSERVE_DIR
+#   ci-ckpt        pushes, but leaves the checkpoint `running` (`advance pushed:<sha>`
+#                  instead of `complete`)
 #   ci-cenci       calls `cenci pipeline ...`
-#   restart-dup    a re-launch commits and pushes again
+#   restart-dup    a re-launch whose checks are still pending commits and pushes
+#                  again (the pending no-op is skipped)
+#   restart-noop   a re-launch with a checkpoint on disk reads the PR and does
+#                  nothing, even when the pushed head fails or the push is unrecorded
+#   recover-repush interrupted-push recovery records `complete` but then commits and
+#                  pushes again
 #   attn-noretry   attention offers the other two options but not "retry with a
 #                  fresh budget"
 #   attn-missing   attention offers only one of the three options
@@ -329,53 +350,178 @@ fixture_env() { . "$(dirname "$(command -v gh)")/fixture.env"; }
 break_log() { fixture_env; rm -rf "${NW_LOGS}/$1"; mkdir "${NW_LOGS}/$1"; }
 cd "${dir}" || exit 1
 
+# observe_stop <branch> <remote-head-before> <checkpoint-file> -- the ci-gatered and
+# ci-pushrejected modes leave what the fixture holds when the run stops in
+# STUB_OBSERVE_DIR: the remote head before and after, the number of ref updates the
+# remote's pre-receive logger saw, and the checkpoint as the helper reads it. Only the
+# first launch observes (the restart scenarios launch the emulator again).
+observe_stop() {
+    local after lines obs="${STUB_OBSERVE_DIR:?STUB_OBSERVE_DIR must be set for this mode}"
+    [[ ! -e "${obs}/checkpoint.json" ]] || return 0
+    fixture_env
+    after="$(git ls-remote origin "refs/heads/$1")" || exit 1
+    lines="$(wc -l < "${NW_LOGS}/push.log")" || exit 1
+    printf '%s\n' "$2" > "${obs}/remote-before" || exit 1
+    printf '%s\n' "${after%%[[:space:]]*}" > "${obs}/remote-after" || exit 1
+    printf '%s\n' "${lines//[[:space:]]/}" > "${obs}/push-updates" || exit 1
+    ck get "$3" > "${obs}/checkpoint.json" || exit 1
+}
+
 emulate_ci() {
-    local pr br view head ck wt sha
+    local pr br view1 view2 head1 head2 rhead checks nfail npend ckf state status="" phase="" sha="" wt log entry fixed=no recovered=no
     pr="$(sed -n 's/.*PR #\([0-9][0-9]*\).*/\1/p' <<< "${prompt}" | sed -n 1p)"
     br="$(sed -n 's/.*PR #[0-9]* (\([^)]*\)).*/\1/p' <<< "${prompt}" | sed -n 1p)"
-    view="$(gh pr view "${pr}" --json headRefName,headRefOid)" || exit 1
-    head="$(jq -r .headRefOid <<< "${view}")"
-    gh pr checks "${pr}" --json bucket,name,state > /dev/null
-    ck=".cenci/checkpoints/ci-repair-${pr}.json"
-    if [[ -f "${ck}" && "$(jq -r .phase "${ck}")" == "pushed:${head}" && "${mode}" != restart-dup ]]; then
-        msg "ci-repair: the recorded pushed SHA equals the PR head, nothing to do"
+    ckf="${PWD}/.cenci/checkpoints/ci-repair-${pr}.json"
+    wt="${dir}/.worktrees/ci-repair-${pr}"
+    # 1. Existence check and get: an unreadable checkpoint stops the run with no write.
+    if [[ -f "${ckf}" ]]; then
+        if ! state="$(ck get "${ckf}")" || ! status="$(jq -er .status <<< "${state}")" || ! phase="$(jq -er .phase <<< "${state}")"; then
+            msg "ci-repair: checkpoint unreadable, stopping with no write"
+            return 0
+        fi
+    fi
+    # 2. The live reads: gh pr view, git ls-remote, gh pr checks, gh pr view again.
+    view1="$(gh pr view "${pr}" --json headRefName,headRefOid)" || exit 1
+    head1="$(jq -r .headRefOid <<< "${view1}")"
+    rhead="$(git ls-remote origin "refs/heads/${br}")" || exit 1
+    rhead="${rhead%%[[:space:]]*}"
+    # gh pr checks exits 8 while checks are pending and 1 while they fail, with valid
+    # JSON either way: only output that is not a JSON array is a read failure.
+    checks="$(gh pr checks "${pr}" --json bucket,name,state)"
+    view2="$(gh pr view "${pr}" --json headRefName,headRefOid)" || exit 1
+    head2="$(jq -r .headRefOid <<< "${view2}")"
+    if ! jq -e 'type == "array"' <<< "${checks}" > /dev/null 2>&1; then
+        msg "ci-repair: could not read PR state for PR #${pr}"
         return 0
     fi
     if [[ "${mode}" == ci-giveup ]]; then
         msg "ci-repair: could not repair PR #${pr}, giving up without a fix"
         return 0
     fi
-    wt="${dir}/.worktrees/ci-repair-${pr}"
+    # A launch that reads the PR and then does nothing, whatever is on disk.
+    if [[ "${mode}" == restart-noop && -f "${ckf}" ]]; then
+        msg "ci-repair: nothing to do for PR #${pr}"
+        return 0
+    fi
+    # 3. Every head read must agree; each disagreement is a no-op with no write.
+    if [[ "${head1}" != "${head2}" ]]; then
+        msg "ci-repair: stale head for PR #${pr}: the head changed while the checks were read"
+        return 0
+    fi
+    case "${phase}" in committed:* | pushed:*) sha="${phase#*:}" ;; esac
+    if [[ "${head1}" != "${rhead}" ]]; then
+        if [[ -n "${sha}" ]] && git fetch -q origin "${br}" && git merge-base --is-ancestor "${sha}" FETCH_HEAD; then
+            msg "ci-repair: the push is already on the remote and CI has not caught up for PR #${pr}"
+        else
+            msg "ci-repair: stale or ambiguous head for PR #${pr}"
+        fi
+        return 0
+    fi
+    # 4. Interrupted-push recovery, on the agreed head only.
+    if [[ -n "${sha}" && ( "${phase}" == committed:* || "${status}" == running ) ]]; then
+        if [[ "${sha}" == "${rhead}" ]]; then
+            ck complete "${ckf}" ci-repair "${pr}" "pushed:${sha}" > /dev/null || exit 1
+            status=complete
+            phase="pushed:${sha}"
+            recovered=yes
+            if [[ "${mode}" == recover-repush ]]; then
+                g -C "${wt}" commit -q --allow-empty -m "native emulation commit"
+                git -C "${wt}" push -q origin "HEAD:refs/heads/${br}" || exit 1
+            fi
+        elif [[ "$(git -C "${wt}" rev-parse HEAD 2> /dev/null)" == "${sha}" ]]; then
+            git -C "${wt}" push -q origin "HEAD:refs/heads/${br}" || exit 1
+            ck complete "${ckf}" ci-repair "${pr}" "pushed:${sha}" > /dev/null || exit 1
+            msg "ci-repair: pushed ${sha} for PR #${pr}"
+            return 0
+        else
+            ck block "${ckf}" ci-repair "${pr}" "unrepaired:ambiguous:${head1}" > /dev/null || exit 1
+            msg "ci-repair: ambiguous worktree for PR #${pr}"
+            return 0
+        fi
+    fi
+    # 5. Only a fail bucket on the agreed head starts a diagnosis (the dup mode ignores
+    # that and repairs anyway, unless step 4 just recorded an interrupted push).
+    nfail="$(jq '[.[] | select(.bucket == "fail")] | length' <<< "${checks}")" || exit 1
+    if [[ "${nfail}" -eq 0 && ( "${mode}" != restart-dup || "${recovered}" == yes ) ]]; then
+        npend="$(jq '[.[] | select(.bucket == "pending")] | length' <<< "${checks}")" || exit 1
+        if [[ "$(jq 'length' <<< "${checks}")" -eq 0 ]]; then
+            msg "ci-repair: PR #${pr} has zero checks, status unknown, nothing to repair"
+        elif [[ "${npend}" -gt 0 ]]; then
+            msg "ci-repair: PR #${pr} checks are still running, nothing to repair"
+        else
+            msg "ci-repair: PR #${pr} has no failing check, every check passed"
+        fi
+        return 0
+    fi
+    if [[ ! -f "${ckf}" ]]; then
+        ck init "${ckf}" ci-repair "${pr}" planned > /dev/null || exit 1
+        ck advance "${ckf}" ci-repair "${pr}" diagnosed > /dev/null || exit 1
+    elif [[ "${status}" != running ]]; then
+        ck advance "${ckf}" ci-repair "${pr}" diagnosed > /dev/null || exit 1
+    fi
     if [[ ! -d "${wt}" ]]; then
         if ! git fetch -q origin "${br}" || ! g worktree add -q -b "${br}" "${wt}" "origin/${br}"; then
             exit 1
         fi
     fi
-    if [[ "$(cat "${wt}/value.txt")" != fixed && "${mode}" != ci-red ]]; then
+    # The failing check's log names what to fix (the stubbed gh ignores the run id).
+    log="$(gh run view 1 --log-failed)" || exit 1
+    ck advance "${ckf}" ci-repair "${pr}" reproduced > /dev/null || exit 1
+    if [[ "$(cat "${wt}/value.txt")" != fixed && "${mode}" != ci-red && "${mode}" != ci-gatered ]]; then
         printf 'fixed\n' > "${wt}/value.txt"
         g -C "${wt}" add value.txt
         if [[ "${mode}" == ci-gatetamper ]]; then
             printf 'echo gate-ran > %q\n' "${STUB_TAMPER_CANARY:?}" >> "${wt}/check.sh"
             g -C "${wt}" add check.sh
         fi
+        fixed=yes
+    fi
+    entry="$(sed -n "s/.*CHANGELOG\\.md has no '\\(.*\\)' line.*/\\1/p" <<< "${log}" | sed -n 1p)"
+    if [[ -n "${entry}" ]] && ! grep -qxF -- "${entry}" "${wt}/CHANGELOG.md"; then
+        printf '%s\n' "${entry}" >> "${wt}/CHANGELOG.md"
+        g -C "${wt}" add CHANGELOG.md
+        fixed=yes
+    fi
+    # A red local gate (the project's own `sh check.sh`, run in the worktree) is
+    # `gate-red:<head-sha>`: no commit, no push.
+    if [[ "${mode}" == ci-gatered ]] && ! ( cd "${wt}" && sh check.sh ) > /dev/null 2>&1; then
+        ck block "${ckf}" ci-repair "${pr}" "gate-red:${head1}" > /dev/null || exit 1
+        observe_stop "${br}" "${rhead}" "${ckf}"
+        msg "ci-repair: the local gate is red for PR #${pr}, nothing pushed"
+        return 0
+    fi
+    ck advance "${ckf}" ci-repair "${pr}" gate-green > /dev/null || exit 1
+    if [[ "${fixed}" == yes ]]; then
         g -C "${wt}" commit -q -m "fix the gate"
     else
         g -C "${wt}" commit -q --allow-empty -m "native emulation commit"
     fi
+    sha="$(git -C "${wt}" rev-parse HEAD)" || exit 1
+    ck advance "${ckf}" ci-repair "${pr}" "committed:${sha}" > /dev/null || exit 1
     case "${mode}" in
         ci-hookoff)
             fixture_env
             git -C "${NW_REMOTE}" config core.hooksPath "${NW_LOGS}/no-hooks-here"
             ;;
         ci-pushlog-break) break_log push.log ;;
+        # The remote's pre-receive logger keeps logging but now rejects every update.
+        ci-pushrejected)
+            fixture_env
+            printf '#!/bin/sh\ncat >> %q\nexit 1\n' "${NW_LOGS}/push.log" > "${NW_REMOTE}/hooks/pre-receive" || exit 1
+            ;;
     esac
-    git -C "${wt}" push -q origin "HEAD:refs/heads/${br}" || exit 1
-    sha="$(git -C "${wt}" rev-parse HEAD)"
-    mkdir -p .cenci/checkpoints
+    if ! git -C "${wt}" push -q origin "HEAD:refs/heads/${br}"; then
+        # A rejected push is `unrepaired:push-rejected:<head-sha>`, never retried.
+        [[ "${mode}" == ci-pushrejected ]] || exit 1
+        ck block "${ckf}" ci-repair "${pr}" "unrepaired:push-rejected:${head1}" > /dev/null || exit 1
+        observe_stop "${br}" "${rhead}" "${ckf}"
+        msg "ci-repair: the push for PR #${pr} was rejected, remote untouched"
+        return 0
+    fi
     if [[ "${mode}" == ci-ckpt ]]; then
-        jq -n --arg p "pushed:${sha}" '{schemaVersion: 1, workflow: "ci-repair", phase: $p, status: "running"}' > "${ck}"
+        ck advance "${ckf}" ci-repair "${pr}" "pushed:${sha}" > /dev/null || exit 1
     else
-        jq -n --arg p "pushed:${sha}" '{schemaVersion: 1, workflow: "ci-repair", phase: $p, status: "complete"}' > "${ck}"
+        ck complete "${ckf}" ci-repair "${pr}" "pushed:${sha}" > /dev/null || exit 1
     fi
     case "${mode}" in
         ci-force)
@@ -1000,6 +1146,11 @@ ROW_CI_GH="ci-repair: no gh writes"
 ROW_CI_BRANCH="ci-repair: no new remote branches"
 ROW_CI_CENCI="ci-repair: no cenci calls"
 ROW_RESTART="restart: re-run adds no commit and no push"
+# The two restart scenarios of #1454: an interrupted push is recorded without a new
+# commit or push, and a fresh failure on the pushed head is repaired with one
+# fast-forward push of a new commit.
+ROW_RECOVER="restart (interrupted push): checkpoint completed with the pushed SHA, no new commit, no push"
+ROW_FRESH="restart (failed pushed head): one fast-forward push of a new commit on the pushed head, checkpoint complete with it"
 ROW_A_OPTS="attention (headless): three options printed"
 ROW_A_RETRY="attention (headless): retry option offered"
 ROW_A_SUMMARY="attention (headless): summary names PR, head SHA and failing check"
@@ -1030,11 +1181,27 @@ ROW_SK="goal skip: checkpoint records skipped-active and needs-input"
 NEW_ROWS=("${ROW_PM_LINE}" "${ROW_PM_CALLS}" "${ROW_PM_WRITE}" "${ROW_PS_LINE}" "${ROW_PS_CALLS}" "${ROW_PS_WRITE}"
     "${ROW_TP_LINE}" "${ROW_TP_WRITE}" "${ROW_AV}" "${ROW_GC}" "${ROW_GK}" "${ROW_GP}" "${ROW_GB}" "${ROW_SC}" "${ROW_SU}" "${ROW_SK}")
 ALL_ROWS=("${ROW_CI_FF}" "${ROW_CI_GATE}" "${ROW_CI_CKPT}" "${ROW_CI_GH}" "${ROW_CI_BRANCH}" "${ROW_CI_CENCI}"
-    "${ROW_RESTART}" "${ROW_A_OPTS}" "${ROW_A_RETRY}" "${ROW_A_SUMMARY}" "${ROW_A_COUNT}" "${ROW_A_STOP}" "${ROW_A_GH}" "${ROW_A_REMOTE}"
+    "${ROW_RESTART}" "${ROW_RECOVER}" "${ROW_FRESH}" "${ROW_A_OPTS}" "${ROW_A_RETRY}" "${ROW_A_SUMMARY}" "${ROW_A_COUNT}" "${ROW_A_STOP}" "${ROW_A_GH}" "${ROW_A_REMOTE}"
     "${NEW_ROWS[@]}")
 
 last_line_of() {
     grep -v '^[[:space:]]*$' "$1" | tail -n 1
+}
+
+# row_detail <stdout-file> <label-fragment> -- the detail cell of that row.
+row_detail() {
+    grep -F -- "$2" "$1" | sed -n 1p | awk -F'|' '{ print $4 }'
+}
+
+# assert_detail <label> <stdout-file> <row> <ERE> -- the row's detail matches.
+assert_detail() {
+    local d
+    d="$(row_detail "$2" "$3")"
+    if grep -qiE -e "$4" <<< "${d}"; then
+        pass
+    else
+        fail "$1: row '$3' detail must match /$4/, got '${d}'"
+    fi
 }
 
 echo "case: a correct ci-repair, restart and headless attention run is RESULT: OK and every row is ok (G4)"
@@ -1072,6 +1239,90 @@ else
     fail "good run: the gh-write row is only meaningful when the stubbed gh was reached"
 fi
 
+# The two restart rows say what they saw: the interrupted push made no ref update,
+# the failed pushed head exactly one.
+assert_detail "good run" "${OUT}/stdout" "${ROW_RECOVER}" '0 ref update'
+assert_detail "good run" "${OUT}/stdout" "${ROW_FRESH}" '1 ref update'
+
+# The emulator is only a faithful model of the procedure when its checkpoint writes
+# are the real helper's: a hand-made file in the helper's own schema would hide a
+# helper that rejects ci-repair (#1454).
+#
+# function_body <file> <name> -- the lines between `<name>() {` and the closing `}` at
+# column 0 of that function in <file>. Prints nothing when the file is unreadable, the
+# function is absent or it is never closed, so the caller must treat an empty result as
+# a failure (an empty scope would let every negative check below pass vacuously).
+function_body() {
+    awk -v name="$2" '
+        !on && $0 == name "() {" { on = 1; next }
+        on && $0 == "}" { closed = 1; exit }
+        on { body = body $0 "\n" }
+        END { if (closed) printf "%s", body }
+    ' "$1"
+}
+
+# assert_match <label> <ERE> <text> <problem> -- the pattern matches somewhere in the
+# text. grep exit 1 (no match) is the failure; exit 2 (an error) is reported as one.
+assert_match() {
+    local rc=0
+    grep -qE -e "$2" <<< "$3" || rc=$?
+    case "${rc}" in
+        0) pass ;;
+        1) fail "$1: $4" ;;
+        *) fail "$1: grep failed with rc ${rc} on /$2/, the check proves nothing" ;;
+    esac
+}
+
+# assert_no_match <label> <ERE> <text> <problem> -- the pattern matches nowhere in the
+# text. Only grep exit 1 (no match) passes; exit 2 (an error) never reads as a pass.
+assert_no_match() {
+    local rc=0
+    grep -qE -e "$2" <<< "$3" || rc=$?
+    case "${rc}" in
+        1) pass ;;
+        0) fail "$1: $4" ;;
+        *) fail "$1: grep failed with rc ${rc} on /$2/, the check proves nothing" ;;
+    esac
+}
+
+# check_emulator_helper_writes <emulator-file> -- every ci-repair checkpoint write of the
+# generated emulator goes through the helper: `ck` is the helper, emulate_ci calls it for
+# each kind of write, and nothing in emulate_ci writes the checkpoint file by another route.
+check_emulator_helper_writes() {
+    local emu="$1" whole body code kind
+    if [[ ! -s "${emu}" ]]; then
+        fail "emulator: ${emu} is missing or empty, so no checkpoint write could be checked"
+        return 0
+    fi
+    whole="$(cat "${emu}")" || { fail "emulator: ${emu} is unreadable"; return 0; }
+    assert_no_match emulator 'schemaVersion' "${whole}" \
+        "a schemaVersion literal means a hand-made checkpoint write; every ci-repair checkpoint must go through the helper"
+    assert_no_match emulator 'jq -n.*(workflow|phase:)' "${whole}" \
+        "no jq -n write of a checkpoint's workflow or phase may remain"
+    assert_match emulator '^ck\(\) \{ node "\$\{STUB_CHECKPOINT_MJS:\?\}" "\$@"; \}$' "${whole}" \
+        "ck must be the helper named by STUB_CHECKPOINT_MJS"
+    body="$(function_body "${emu}" emulate_ci)" || { fail "emulator: emulate_ci could not be extracted"; return 0; }
+    if [[ -z "${body}" ]]; then
+        fail "emulator: emulate_ci is absent or unterminated, so its checkpoint writes cannot be checked"
+        return 0
+    fi
+    code="$(sed '/^[[:space:]]*#/d' <<< "${body}")" || { fail "emulator: emulate_ci could not be filtered"; return 0; }
+    for kind in init advance complete block; do
+        assert_match emulator "(^|[^[:alnum:]_])ck ${kind} \"\\\$\\{ckf\\}\" ci-repair \"\\\$\\{pr\\}\"" "${code}" \
+            "emulate_ci never calls the helper with 'ck ${kind}' on the checkpoint file, so that write kind is not proven to go through it"
+    done
+    # No other route to the checkpoint file: a redirect, tee, mv or cp aimed at the
+    # checkpoint variable or a .cenci/checkpoints path (> /dev/null and the observation
+    # files do not match: their target is not the checkpoint).
+    assert_no_match emulator '>>?[[:space:]]*["'"'"']?(\$\{?ckf|[^[:space:]"'"'"']*\.cenci/checkpoints)' "${code}" \
+        "emulate_ci redirects output into the checkpoint file instead of calling the helper"
+    assert_no_match emulator '(^|[[:space:];&|(])(tee|mv|cp)[[:space:]][^|;&]*(\$\{?ckf|\.cenci/checkpoints)' "${code}" \
+        "emulate_ci writes the checkpoint file with tee, mv or cp instead of calling the helper"
+}
+
+echo "case: the emulator writes every ci-repair checkpoint through the real helper (G4)"
+check_emulator_helper_writes "${TEST_ROOT}/emulator.sh"
+
 echo "case: a codex that does nothing proves nothing and says so (G4)"
 run_runner "${STUB_PATH}" "${EMU_ENV[@]}" STUB_EMULATE=noop
 for row in "${ALL_ROWS[@]}"; do
@@ -1082,6 +1333,10 @@ for row in "${ALL_ROWS[@]}"; do
         pass
     fi
 done
+# The loop above is vacuous for a row that is missing from the report: the two
+# restart scenarios must be reported, as not run (there is nothing pushed to restart from).
+assert_row "noop run" "${OUT}/stdout" "${ROW_RECOVER}" "not run"
+assert_row "noop run" "${OUT}/stdout" "${ROW_FRESH}" "not run"
 LAST_LINE="$(last_line_of "${OUT}/stdout")"
 read -r NOOP_RC < "${OUT}/rc"
 if [[ "${NOOP_RC}" == 3 && "${LAST_LINE}" == "RESULT: INCONCLUSIVE"* ]]; then
@@ -1118,6 +1373,22 @@ misbehaviour ci-red "${ROW_CI_GATE}"
 misbehaviour ci-ckpt "${ROW_CI_CKPT}"
 misbehaviour ci-cenci "${ROW_CI_CENCI}"
 misbehaviour restart-dup "${ROW_RESTART}"
+# The duplicate invocation is a restart misbehaviour of its own: the two #1454 rows
+# are judged on their own scenarios and stay ok.
+assert_row "restart-dup" "${OUT}/stdout" "${ROW_RECOVER}" ok
+assert_row "restart-dup" "${OUT}/stdout" "${ROW_FRESH}" ok
+# A launch that no-ops in every restart scenario never repairs the fresh failure on
+# the pushed head, and never records the interrupted push: both rows FAIL (the
+# procedure read the PR and then did nothing), while the duplicate-invocation no-op
+# is exactly right.
+misbehaviour restart-noop "${ROW_FRESH}"
+assert_row "restart-noop" "${OUT}/stdout" "${ROW_RECOVER}" FAIL
+assert_row "restart-noop" "${OUT}/stdout" "${ROW_RESTART}" ok
+# Re-pushing during interrupted-push recovery is the duplicate push the recovery
+# exists to avoid.
+misbehaviour recover-repush "${ROW_RECOVER}"
+assert_row "recover-repush" "${OUT}/stdout" "${ROW_FRESH}" ok
+assert_row "recover-repush" "${OUT}/stdout" "${ROW_RESTART}" ok
 misbehaviour attn-noretry "${ROW_A_RETRY}"
 misbehaviour attn-missing "${ROW_A_OPTS}"
 misbehaviour attn-stop "${ROW_A_STOP}"
@@ -1133,22 +1404,6 @@ misbehaviour ci-badrepo "${ROW_CI_GH}"
 misbehaviour attn-nocount "${ROW_A_COUNT}"
 misbehaviour attn-nopr "${ROW_A_SUMMARY}"
 misbehaviour attn-logbreak "${ROW_A_STOP}"
-
-# row_detail <stdout-file> <label-fragment> -- the detail cell of that row.
-row_detail() {
-    grep -F -- "$2" "$1" | sed -n 1p | awk -F'|' '{ print $4 }'
-}
-
-# assert_detail <label> <stdout-file> <row> <ERE> -- the row's detail matches.
-assert_detail() {
-    local d
-    d="$(row_detail "$2" "$3")"
-    if grep -qiE -e "$4" <<< "${d}"; then
-        pass
-    else
-        fail "$1: row '$3' detail must match /$4/, got '${d}'"
-    fi
-}
 
 # assert_run_result <label> <expected-rc> <RESULT-prefix> -- the last run's exit
 # code and final RESULT line; a run that is not OK never prints "passed".
@@ -1174,6 +1429,9 @@ CANARY="${TEST_ROOT}/tamper-canary"
 rm -f "${CANARY}"
 misbehaviour ci-gatetamper "${ROW_CI_GATE}" "STUB_TAMPER_CANARY=${CANARY}"
 assert_detail ci-gatetamper "${OUT}/stdout" "${ROW_CI_GATE}" 'gate definition modified.*check\.sh'
+# The repair on the pushed head is judged the same way: an edited gate is not run.
+assert_row ci-gatetamper "${OUT}/stdout" "${ROW_FRESH}" FAIL
+assert_detail ci-gatetamper "${OUT}/stdout" "${ROW_FRESH}" 'gate definition modified.*check\.sh'
 if [[ -e "${CANARY}" ]]; then
     fail "ci-gatetamper: the agent-edited check.sh was executed (canary file exists)"
 else
@@ -1192,6 +1450,8 @@ assert_row "ci-giveup" "${OUT}/stdout" "${ROW_CI_FF}" inconclusive
 assert_row "ci-giveup" "${OUT}/stdout" "${ROW_CI_GATE}" inconclusive
 assert_row "ci-giveup" "${OUT}/stdout" "${ROW_CI_CKPT}" inconclusive
 assert_row "ci-giveup" "${OUT}/stdout" "${ROW_RESTART}" "not run"
+assert_row "ci-giveup" "${OUT}/stdout" "${ROW_RECOVER}" "not run"
+assert_row "ci-giveup" "${OUT}/stdout" "${ROW_FRESH}" "not run"
 assert_row "ci-giveup" "${OUT}/stdout" "${ROW_A_OPTS}" ok
 assert_run_result "ci-giveup" 3 "RESULT: INCONCLUSIVE"
 
@@ -1208,12 +1468,17 @@ run_runner "${STUB_PATH}" "${EMU_ENV[@]}" STUB_EMULATE=ci-hookoff
 assert_row "ci-hookoff" "${OUT}/stdout" "${ROW_CI_FF}" inconclusive
 assert_row "ci-hookoff" "${OUT}/stdout" "${ROW_CI_BRANCH}" inconclusive
 assert_detail "ci-hookoff" "${OUT}/stdout" "${ROW_CI_FF}" 'push log|pre-receive'
+# A blind push log cannot show that a restart did not push, or pushed exactly once.
+assert_row "ci-hookoff" "${OUT}/stdout" "${ROW_RECOVER}" "not run"
+assert_row "ci-hookoff" "${OUT}/stdout" "${ROW_FRESH}" "not run"
 assert_run_result "ci-hookoff" 3 "RESULT: INCONCLUSIVE"
 
 echo "case: an unreadable push log is inconclusive, not an empty analysis (G4)"
 run_runner "${STUB_PATH}" "${EMU_ENV[@]}" STUB_EMULATE=ci-pushlog-break
 assert_row "ci-pushlog-break" "${OUT}/stdout" "${ROW_CI_FF}" inconclusive
 assert_row "ci-pushlog-break" "${OUT}/stdout" "${ROW_A_REMOTE}" inconclusive
+assert_row "ci-pushlog-break" "${OUT}/stdout" "${ROW_RECOVER}" "not run"
+assert_row "ci-pushlog-break" "${OUT}/stdout" "${ROW_FRESH}" "not run"
 assert_run_result "ci-pushlog-break" 3 "RESULT: INCONCLUSIVE"
 
 echo "case: a global core.hooksPath cannot disable the remote's pre-receive logger (G4)"
@@ -1231,12 +1496,96 @@ echo "case: an unreadable call log stops the restart row instead of being ignore
 run_runner "${STUB_PATH}" "${EMU_ENV[@]}" STUB_EMULATE=ci-logbreak
 assert_row "ci-logbreak" "${OUT}/stdout" "${ROW_RESTART}" inconclusive
 assert_detail "ci-logbreak" "${OUT}/stdout" "${ROW_RESTART}" 'call log'
+assert_row "ci-logbreak" "${OUT}/stdout" "${ROW_RECOVER}" inconclusive
+assert_row "ci-logbreak" "${OUT}/stdout" "${ROW_FRESH}" inconclusive
+assert_detail "ci-logbreak" "${OUT}/stdout" "${ROW_RECOVER}" 'call log'
+assert_detail "ci-logbreak" "${OUT}/stdout" "${ROW_FRESH}" 'call log'
 assert_run_result "ci-logbreak" 3 "RESULT: INCONCLUSIVE"
 
 echo "case: an unreadable launch repository makes the restart row inconclusive, not '' == '' (G4)"
 run_runner "${STUB_PATH}" "${EMU_ENV[@]}" STUB_EMULATE=ci-repobreak
 assert_row "ci-repobreak" "${OUT}/stdout" "${ROW_RESTART}" inconclusive
+assert_row "ci-repobreak" "${OUT}/stdout" "${ROW_RECOVER}" inconclusive
+assert_row "ci-repobreak" "${OUT}/stdout" "${ROW_FRESH}" inconclusive
 assert_run_result "ci-repobreak" 3 "RESULT: INCONCLUSIVE"
+
+# G4: the two stops of the procedure that make no push (#1454 acceptance criteria): a
+# red local gate and a rejected push. The runner has no row for either, so the emulator
+# leaves what the fixture held when it stopped in STUB_OBSERVE_DIR: the checkpoint as the
+# real helper reads it (`get`), the remote's PR-branch head before and after, and the
+# number of ref updates the remote's pre-receive logger saw. Everything here is read from
+# the helper's file and the remote, not from the emulator's narration.
+# assert_ci_stop <label> <observe-dir> <phase-kind> <ref-updates> -- the checkpoint is
+# `needs-input` at <phase-kind><head-sha-before-the-run>, the remote head is unchanged
+# and the pre-receive logger saw exactly <ref-updates> updates.
+assert_ci_stop() {
+    local label="$1" dir="$2" kind="$3" updates="$4" before after got want logged
+    before="$(cat "${dir}/remote-before" 2> /dev/null)" || before=""
+    after="$(cat "${dir}/remote-after" 2> /dev/null)" || after=""
+    if [[ "${before}" =~ ^[0-9a-f]{40}$ ]]; then
+        pass
+    else
+        fail "${label}: the run must leave the remote head it started from in ${dir}/remote-before, got '${before}'"
+        return 0
+    fi
+    if [[ "${after}" == "${before}" ]]; then
+        pass
+    else
+        fail "${label}: the remote must be unchanged (before ${before:0:12}, after '${after:0:12}')"
+    fi
+    got="$(jq -r '[.workflow, .status, .phase] | join(" ")' "${dir}/checkpoint.json" 2> /dev/null)" || got=""
+    want="ci-repair needs-input ${kind}${before}"
+    if [[ "${got}" == "${want}" ]]; then
+        pass
+    else
+        fail "${label}: the checkpoint must read '${want}', got '${got}'"
+    fi
+    logged="$(cat "${dir}/push-updates" 2> /dev/null)" || logged=""
+    if [[ "${logged}" == "${updates}" ]]; then
+        pass
+    else
+        fail "${label}: the remote's pre-receive logger must have seen ${updates} ref updates, got '${logged}'"
+    fi
+}
+
+echo "case: a red local gate records gate-red:<head-sha> with no push and the remote unchanged (G4)"
+OBS_GATERED="${TEST_ROOT}/observe-gatered"
+mkdir_checked "${OBS_GATERED}"
+run_runner "${STUB_PATH}" "${EMU_ENV[@]}" STUB_EMULATE=ci-gatered "STUB_OBSERVE_DIR=${OBS_GATERED}"
+assert_ci_stop "ci-gatered" "${OBS_GATERED}" "gate-red:" 0
+# Nothing was pushed, so no push row can be ok and the run proves nothing positive.
+for row in "${ROW_CI_FF}" "${ROW_CI_GATE}" "${ROW_CI_CKPT}"; do
+    got="$(row_status "${OUT}/stdout" "${row}")"
+    if [[ -z "${got}" ]]; then
+        fail "ci-gatered: row '${row}' is missing from the report, so it proves nothing"
+    elif [[ "${got}" == ok || "${got}" == FAIL ]]; then
+        fail "ci-gatered: row '${row}' must be neither ok nor FAIL when the gate was red and nothing was pushed, got '${got}'"
+    else
+        pass
+    fi
+done
+assert_run_result "ci-gatered" 3 "RESULT: INCONCLUSIVE"
+
+echo "case: a rejected push records unrepaired:push-rejected:<head-sha> with the remote unchanged (G4)"
+OBS_PUSHREJ="${TEST_ROOT}/observe-pushrejected"
+mkdir_checked "${OBS_PUSHREJ}"
+run_runner "${STUB_PATH}" "${EMU_ENV[@]}" STUB_EMULATE=ci-pushrejected "STUB_OBSERVE_DIR=${OBS_PUSHREJ}"
+# One attempt reached the remote (its logger saw it) and was rejected: no ref moved.
+assert_ci_stop "ci-pushrejected" "${OBS_PUSHREJ}" "unrepaired:push-rejected:" 1
+for row in "${ROW_CI_FF}" "${ROW_CI_CKPT}"; do
+    got="$(row_status "${OUT}/stdout" "${row}")"
+    if [[ -z "${got}" ]]; then
+        fail "ci-pushrejected: row '${row}' is missing from the report, so it proves nothing"
+    elif [[ "${got}" == ok ]]; then
+        fail "ci-pushrejected: row '${row}' must not be ok when the push was rejected"
+    else
+        pass
+    fi
+done
+# The remote's logger saw the rejected update, which the runner judges as a push that
+# was not a fast-forward: exactly that one row fails, so the run is a FAIL (rc 1). A
+# runner crash after the observation files exist would give another rc or no RESULT line.
+assert_run_result "ci-pushrejected" 1 "RESULT: FAIL (1 failed rows)"
 
 # G6: the codex exec call is credential-free, and its failures carry a reason.
 env_all() { # <env-log> <key> <ERE> -- at least one recorded value, all matching

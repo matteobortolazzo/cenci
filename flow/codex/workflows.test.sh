@@ -42,6 +42,18 @@ forbid_in(){
   [[ -n "$2" ]] || { fail "$1: scope is empty, so absence of '$3' proves nothing"; return; }
   [[ "$2" != *"$3"* ]] || fail "$1: must not contain '$3'"
 }
+# order_in <label> <text> <phrase>...: each phrase must occur, in the given order, in a non-empty text
+order_in(){
+  local label="$1" text="$2" phrase rest
+  shift 2
+  [[ -n "$text" ]] || { fail "$label: scope is empty, so order cannot be asserted"; return; }
+  rest="$text"
+  for phrase in "$@"; do
+    [[ -n "$phrase" ]] || { fail "$label: empty phrase"; return; }
+    [[ "$rest" == *"$phrase"* ]] || { fail "$label: '$phrase' missing or out of order"; return; }
+    rest="${rest#*"$phrase"}"
+  done
+}
 
 # --- ci-repair native procedure: AC2 and the four AC5 behavior cases ---
 repair="${ROOT}/skills/ci-repair/codex.md"
@@ -87,17 +99,157 @@ pushed="$(section "$repair" '### Successful push')"
 for phrase in 'without force' 'git push origin HEAD:refs/heads/<branch>' 'git ls-remote' 'checkpoint.mjs complete' 'pushed:<sha>' 'never `git add -A`'; do
   require_in "ci-repair Successful push" "$pushed" "$phrase"
 done
+# #1454: a later fresh failure on the pushed head (or a newer descendant) re-enters through ### Restart, never by init or deletion.
+for phrase in 'A later fresh failure' 're-enters through `### Restart`' 'never through `init` or by deleting the checkpoint'; do
+  require_in "ci-repair Successful push (#1454 re-entry)" "$pushed" "$phrase"
+done
 
 restart="$(section "$repair" '### Restart')"
-for phrase in '.cenci/checkpoints/ci-repair-<pr>.json' 'checkpoint.mjs get' 'last completed gate' 'no-op' 'recorded pushed SHA' 'current head' 'never duplicates a commit'; do
+for phrase in '.cenci/checkpoints/ci-repair-<pr>.json' 'checkpoint.mjs get' 'last completed gate' 'never duplicates a commit'; do
   require_in "ci-repair Restart" "$restart" "$phrase"
 done
-# Restart no-op honesty: the head still has failing checks, so the report names them and says no repair was
-# attempted; and a recorded push already on the remote is a no-op even while `gh pr view` shows an older head.
-for phrase in 'the head still has failing checks' 'names them' 'no repair was attempted' \
-  'git ls-remote origin refs/heads/<branch>' 'git merge-base --is-ancestor' 'still shows an older head' 'no re-diagnosis'; do
-  require_in "ci-repair Restart" "$restart" "$phrase"
+
+# #1454 retired phrases: "recorded pushed SHA equals the current head" alone is no longer a no-op, and the
+# no-op report no longer claims the head still has failing checks. Asserted at all three restatement sites below.
+RETIRED_NOOP='recorded pushed SHA equals the current head'
+for phrase in "$RETIRED_NOOP" 'because that SHA was already pushed' 'the head still has failing checks' 'no repair was attempted'; do
+  forbid_in "ci-repair Restart (retired no-op)" "$restart" "$phrase"
 done
+forbid_in "ci-repair/codex.md (retired no-op, whole file)" "$repair_all" "$RETIRED_NOOP"
+
+# Decision order: the five steps appear in the stated order, and step 2's reads run in the stated order.
+order_in "ci-repair Restart decision order" "$restart" \
+  '1. Existence check and `get`' '2. Read the live PR state' '3. Every head read must agree' \
+  '4. Interrupted-push recovery' '5. Only a `fail` bucket on the agreed head'
+order_in "ci-repair Restart step 2 read order" "$restart" \
+  '(read 1)' 'git ls-remote origin refs/heads/<branch>' 'gh pr checks <pr>' '(read 2)'
+# The restart decisions that write run the canary first (after the no-write no-ops), and a failed restart
+# `advance` stops after the canary and before any worktree write, commit or push (edge 60 / Q1).
+order_in "ci-repair Restart canary before the restart advance" "$restart" \
+  'run the guard canary, then record the start of the diagnosis' 'with phase `diagnosed`' \
+  'checkpoint not recorded' 'after the canary and before any worktree write, commit or push'
+
+# Step 1: existence check and `get`; an unreadable file stops with no write and is never init-ed over.
+for phrase in 'checkpoint unreadable' 'exits non-zero or prints non-JSON' 'A missing file is a first run'; do
+  require_in "ci-repair Restart step 1 (unreadable checkpoint)" "$restart" "$phrase"
+done
+# Step 2: a failed read is a read failure under the `## Inputs` rules.
+for phrase in 'The `## Inputs` read-failure rules apply to each read' 'could not read PR state'; do
+  require_in "ci-repair Restart step 2 (read failure)" "$restart" "$phrase"
+done
+# Step 3: every disagreement is a no-write no-op; one assertion per outcome (AC45 stale head, AC46, edge 61).
+require_in "ci-repair Restart step 3 (no-write no-ops)" "$restart" 'Each disagreement is a no-op with no write, no guard canary, no commit and no push'
+for phrase in 'read 1 differs from read 2' 'a stale head' 'the head changed while the checks were read'; do
+  require_in "ci-repair Restart step 3 (AC45 stale head between reads)" "$restart" "$phrase"
+done
+for phrase in 'the PR head differs from the remote head' 'git fetch origin <branch>' 'git merge-base --is-ancestor <recorded-sha> FETCH_HEAD' \
+  'the push is already on the remote and CI has not caught up'; do
+  require_in "ci-repair Restart step 3 (AC46 remote ahead of the PR head)" "$restart" "$phrase"
+done
+for phrase in 'a stale or ambiguous head' 'not descended from the recorded SHA' 'no recorded SHA to compare'; do
+  require_in "ci-repair Restart step 3 (edge 61 force-moved remote)" "$restart" "$phrase"
+done
+# Step 4: interrupted-push recovery runs on an agreed head only, before the bucket gate, with no new commit or push.
+for phrase in 'on the agreed head only' 'before the `fail` bucket is looked at' \
+  '`committed:<sha>` checkpoint, or a `running` one at `pushed:<sha>`' 'whose `<sha>` is the remote head' \
+  'with no new commit and no `git push`' 'checkpoint.mjs complete` with phase `pushed:<sha>`'; do
+  require_in "ci-repair Restart step 4 (AC interrupted push)" "$restart" "$phrase"
+done
+for phrase in 'whose `<sha>` is not the remote head' 'when the worktree HEAD equals `<sha>`, push it without force' \
+  '`block` with `unrepaired:ambiguous:<head-sha>` and no new commit' 'the only write a run without a `fail` bucket can make'; do
+  require_in "ci-repair Restart step 4 (edge committed worktree mismatch)" "$restart" "$phrase"
+done
+# Review fix A (1): the step 4 recovery is the only write without a `fail` bucket, and that includes the non-force push of
+# a `committed:<sha>` commit not yet on the remote, always after the guard canary; the record alone is never "the only write".
+for phrase in 'The step 4 recovery (its checkpoint record, and the non-force push of a `committed:<sha>` commit that is not yet on the remote, always after the guard canary) is the only write a run without a `fail` bucket can make'; do
+  require_in "ci-repair Restart step 4 (only write includes the non-force push)" "$restart" "$phrase"
+done
+forbid_in "ci-repair Restart step 4 (record is not the only write)" "$restart" 'This recovery record is the only write'
+forbid_in "ci-repair/codex.md (record is not the only write, whole file)" "$repair_all" 'recovery record is the only write'
+# Step 5: AC45 outcomes without a `fail` bucket, one labelled assertion each.
+require_in "ci-repair Restart step 5 (no-op: no write beyond a step 4 record)" "$restart" 'no new commit, no push beyond the step 4 recovery push, and no checkpoint write beyond a step 4 record'
+# Review fix C (1): the step 4 recovery may push an unpushed `committed:<sha>` commit, so a bare "no push" would contradict it.
+forbid_in "ci-repair Restart step 5 (old bare no-push wording)" "$restart" 'no commit, no push and no checkpoint write'
+forbid_in "ci-repair/codex.md (old bare no-push wording, whole file)" "$repair_all" 'no commit, no push and no checkpoint write'
+# Review fix A (2): green is "at least one check exists and every check is in `pass`" (shell-rules, Reading PR CI Status);
+# `cancel`, `skipping` and an empty or unrecognized bucket are not green and are named as themselves; a non-array is unreadable.
+GREEN_DEF='green only when at least one check exists and every check is in the `pass` bucket'
+NOT_GREEN='a `cancel` or `skipping` check, or an empty or unrecognized bucket, is not green and is reported by name as itself'
+NOT_ARRAY='is valid JSON but not an array (such as `{}` or `null`), is "could not read PR state"'
+require_in "ci-repair Restart step 5 (AC45 green)" "$restart" "$GREEN_DEF"
+require_in "ci-repair Restart step 5 (cancel and skipping are not green)" "$restart" "$NOT_GREEN"
+require_in "ci-repair Restart step 5 (non-array is unreadable)" "$restart" "$NOT_ARRAY"
+forbid_in "ci-repair Restart step 5 (old bare green phrase)" "$restart" 'every check in the `pass` bucket is green'
+require_in "ci-repair Restart step 5 (cancel and skipping write nothing)" "$restart" 'never "green" or "passed", and no write'
+# Review fix C (3): assert the whole pending clause, because `never "green" or "passed"` also sits in the cancel/skipping clause.
+require_in "ci-repair Restart step 5 (AC45 pending)" "$restart" 'any `pending` check is "still running" (name them, never "green" or "passed")'
+for phrase in 'zero checks (`[]`) is "unknown"' 'never green'; do
+  require_in "ci-repair Restart step 5 (AC45 zero checks)" "$restart" "$phrase"
+done
+for phrase in 'is not valid JSON' 'could not read PR state'; do
+  require_in "ci-repair Restart step 5 (AC45 unreadable checks)" "$restart" "$phrase"
+done
+require_in "ci-repair Restart step 5 (fail bucket with non-zero exit)" "$restart" 'a valid failure observation, not a read failure'
+forbid_in "ci-repair Restart step 5 (no failing check = green)" "$restart" 'no failing check is green'
+# Step 5: AC43 newer descendant head, AC44 failed pushed head, edge 62 second fresh failure.
+for phrase in 'ancestry alone never causes a no-op' 'newer failing head' 'descends from'; do
+  require_in "ci-repair Restart step 5 (AC43 newer descendant head)" "$restart" "$phrase"
+done
+# Review fix A (3): a `fail` bucket on the agreed head starts a fresh diagnosis whatever its ancestry relative to the
+# recorded `pushed:<sha>`; the failure belongs to the head `gh pr view` and `git ls-remote` agree on, and pushes stay non-force.
+ANCESTRY='whatever that head'"'"'s ancestry relative to the recorded `pushed:<sha>`'
+for phrase in "$ANCESTRY" 'the failure must belong to the current head that `gh pr view` and `git ls-remote` agree on' 'pushes stay non-force'; do
+  require_in "ci-repair Restart step 5 (explicit ancestry for an agreed head)" "$restart" "$phrase"
+done
+for phrase in 'a `complete` checkpoint at `pushed:<sha>` is restarted with `checkpoint.mjs advance` with phase `diagnosed`' \
+  'never `init` over it' 'never deleting the file' 'never pushing the recorded commit again'; do
+  require_in "ci-repair Restart step 5 (AC44 failed pushed head)" "$restart" "$phrase"
+done
+for phrase in 'a `gate-red:` or `unrepaired:` checkpoint is moved with `advance`' 'a missing file is `init` then `advance`' \
+  '`diagnosed` re-reproduces' '`reproduced` goes on to the fix' '`gate-green` goes on to commit'; do
+  require_in "ci-repair Restart step 5 (resume and re-diagnose)" "$restart" "$phrase"
+done
+for phrase in 'a second fresh failure restarts the same way' 'from `complete` at `pushed:<new-sha>`' 'retry budgets belong to the supervisor'; do
+  require_in "ci-repair Restart step 5 (edge 62 second fresh failure)" "$restart" "$phrase"
+done
+
+# AC47: the existing refusal outcomes stay (red gate, dirty or ambiguous worktree, rejected push, unreadable checkpoint).
+for phrase in 'a dirty worktree is an `unrepaired:ambiguous:<head-sha>` block'; do
+  require_in "ci-repair Worktree (AC47 ambiguous)" "$(section "$repair" '## Worktree')" "$phrase"
+done
+for phrase in 'a rejected push is `push-rejected`' 'leave the remote untouched'; do
+  require_in "ci-repair Repair failure (AC47 push-rejected)" "$cause" "$phrase"
+done
+require_in "ci-repair Gate failure (AC47 gate-red)" "$gate" 'There is no push'
+
+# The same decision order is restated in flow/docs/codex.md's ci-repair bullet; shared phrases are checked at both sites.
+docs_codex="${ROOT}/docs/codex.md"
+# bullet <file> <line-prefix> -> the list item that starts with <line-prefix>, up to the next item or blank line, newlines folded
+bullet(){ awk -v p="$2" 'index($0, p) == 1 {on=1; print; next} on && (/^$/ || /^- /) {exit} on {print}' "$1" | tr '\n' ' ' | tr -s ' '; }
+docs_bullet="$(bullet "$docs_codex" '- `$cenci:ci-repair` works only')"
+# (compared case-insensitively: the procedure's numbered steps start a sentence, the docs bullet does not)
+lower(){ printf '%s' "$1" | tr 'A-Z' 'a-z'; }
+restart_lc="$(lower "$restart")"
+docs_bullet_lc="$(lower "$docs_bullet")"
+for phrase in 'existence check and `get`' 'head read must agree' 'interrupted-push recovery' \
+  'only a `fail` bucket on the agreed head' 'fresh diagnosis' '"still running"' '"unknown"' 'ci has not caught up' 'a stale head'; do
+  require_in "ci-repair Restart (shared decision-order phrase)" "$restart_lc" "$phrase"
+  require_in "docs/codex.md ci-repair bullet (shared decision-order phrase)" "$docs_bullet_lc" "$phrase"
+done
+forbid_in "docs/codex.md ci-repair bullet (retired no-op)" "$docs_bullet" "$RETIRED_NOOP"
+require_in "docs/codex.md ci-repair bullet (fresh failure re-diagnosis)" "$docs_bullet" 'A `fail` bucket on the agreed head gets a fresh diagnosis rather than a no-op'
+# Review fix A (3): the docs bullet states the same explicit-ancestry rule as step 5, and the old narrower sentence is gone.
+require_in "docs/codex.md ci-repair bullet (explicit ancestry for an agreed head)" "$docs_bullet" "$ANCESTRY"
+require_in "docs/codex.md ci-repair bullet (explicit ancestry, recorded commit)" "$docs_bullet" 'the recorded commit is never pushed again'
+forbid_in "docs/codex.md ci-repair bullet (old pushed-head-or-descendant sentence)" "$docs_bullet" 'A failing pushed head, or a newer head descended from it'
+# Review fix A (2): the docs bullet restates the green rule with the same cancel/skipping/array coverage.
+for phrase in 'green only when at least one check exists and every check is in `pass`' \
+  'a `cancel` or `skipping` check is not green and is named as itself' \
+  'output that is not a JSON array is "could not read PR state"'; do
+  require_in "docs/codex.md ci-repair bullet (green definition)" "$docs_bullet" "$phrase"
+done
+forbid_in "docs/codex.md ci-repair bullet (old bare green phrase)" "$docs_bullet" 'every check in the `pass` bucket is green'
+forbid_in "docs/codex.md ci-repair bullet (old bare green wording)" "$docs_bullet" 'A head with no `fail` bucket is a no-op: green, "still running"'
 
 # Inputs: owner/repo derivation from the origin URL and a failed `gh` read (finding: a failed read must
 # stop as a read failure, never be reported as "no failing check").
@@ -109,6 +261,23 @@ for phrase in '`<n> PR #<n> (<branch>) has failing CI checks: ...`' 'leading tok
   'exits 8 while checks are pending'; do
   require_in "ci-repair Inputs" "$inputs" "$phrase"
 done
+# #1454: the Inputs tail defers the no-`fail` decision to ### Restart and keeps green, pending and zero checks apart.
+for phrase in 'is decided in `### Restart`' "$GREEN_DEF" \
+  'any `pending` check is "still running" (never "green" or "passed")' 'zero checks is "unknown" (never green)'; do
+  require_in "ci-repair Inputs (green, pending, zero checks)" "$inputs" "$phrase"
+done
+# Review fix A (2): the Inputs tail states the same green rule as step 5, including cancel, skipping and the JSON array.
+require_in "ci-repair Inputs (cancel and skipping are not green)" "$inputs" 'a `cancel` or `skipping` check, or an empty or unrecognized bucket, is not green and is reported by name as itself'
+require_in "ci-repair Inputs (non-array is unreadable)" "$inputs" 'not a JSON array (such as `{}` or `null`) is "could not read PR state"'
+# Review fix C (2): the non-array rule lives with the read-failure rules, before any step 3/4 write, and step 2 points at it.
+NOT_ARRAY_READ='`gh pr checks` output that is valid JSON but not an array (such as `{}` or `null`) is a read failure too'
+require_in "ci-repair Inputs (non-array is a read failure, at the read-failure rules)" "$inputs" "$NOT_ARRAY_READ"
+order_in "ci-repair Inputs (non-array read failure precedes the no-fail decision)" "$inputs" \
+  'A failed read stops the run with no write' "$NOT_ARRAY_READ" 'is decided in `### Restart`'
+require_in "ci-repair Restart step 2 (non-array stops with no write before any step 3/4 write)" "$restart" \
+  'a `gh pr checks` output that is valid JSON but not an array (such as `{}` or `null`) is a read failure here too, so it stops the run with no write before step 3 or step 4'
+forbid_in "ci-repair Inputs (old bare green phrase)" "$inputs" 'every check in the `pass` bucket is green'
+forbid_in "ci-repair Inputs (old blanket no-fail stop)" "$inputs" 'include no `fail` bucket entry, stops with no write'
 
 # Gate parse (finding: a nested `GATE_STATUS=green` printed by the repo's own fixtures, plus a kill or timeout,
 # must never read as green) and the unset rule (skipped only when no gateCommand exists anywhere).
@@ -138,6 +307,22 @@ for phrase in \
   'a failed `complete` after a successful push is reported plainly' 'never as a clean success' \
   'git rev-parse --path-format=absolute --git-common-dir' 'may itself be a linked worktree' 'never inside the PR worktree'; do
   require_in "ci-repair Checkpoint" "$checkpoint" "$phrase"
+done
+# #1454: `init` never overwrites; the phase grammar and the single restart move are documented.
+for phrase in 'an existing v2 file is returned unchanged' 'a v1 file is upgraded in place'; do
+  require_in "ci-repair Checkpoint (real init behavior)" "$checkpoint" "$phrase"
+done
+forbid_in "ci-repair Checkpoint (retired init claim)" "$checkpoint" 'overwrites unconditionally'
+forbid_in "ci-repair/codex.md (retired init claim, whole file)" "$repair_all" 'overwrites unconditionally'
+for phrase in '`<sha>` is a full lowercase hex object name of 40 or 64 characters' \
+  '`<class>` is exactly one of `ambiguous`, `infra`, `flaky`, `external` or `push-rejected`' \
+  'Any other `advance`, `block` or `complete` on a `complete` checkpoint still fails with `checkpoint is complete (terminal)`' \
+  'the one exception is the restart move `advance` to `diagnosed` from `complete` at `pushed:<sha>`' \
+  'only `### Restart` makes' 'Never pass `--gate` for `ci-repair`'; do
+  require_in "ci-repair Checkpoint (phase grammar and restart move)" "$checkpoint" "$phrase"
+done
+for phrase in 'Every no-op outcome of `### Restart`' 'runs no canary' 'interrupted-push recovery and a fresh diagnosis run it before their first checkpoint write'; do
+  require_in "ci-repair Checkpoint (canary and no-op outcomes)" "$checkpoint" "$phrase"
 done
 
 # The fork/external case: init, then block, before any worktree or write (no contradiction with the
@@ -264,18 +449,6 @@ grep -qx '## Goal lifecycle' "$runtime" || fail "goal lifecycle contract"
 grep -q 'built-in' "$runtime" && grep -q 'same bounded role prompt' "$runtime" || fail "agent fallback contract"
 
 # --- Approved-plan handoff (#1234): C2, C3, C5, C6, C7 and C9 contract text ---
-# order_in <label> <text> <phrase>...: each phrase must occur, in the given order, in a non-empty text
-order_in(){
-  local label="$1" text="$2" phrase rest
-  shift 2
-  [[ -n "$text" ]] || { fail "$label: scope is empty, so order cannot be asserted"; return; }
-  rest="$text"
-  for phrase in "$@"; do
-    [[ -n "$phrase" ]] || { fail "$label: empty phrase"; return; }
-    [[ "$rest" == *"$phrase"* ]] || { fail "$label: '$phrase' missing or out of order"; return; }
-    rest="${rest#*"$phrase"}"
-  done
-}
 # handoff_artifact <workflow> -> the artifact path literal the companion and docs/codex.md both name
 handoff_artifact(){
   case "$1" in
@@ -941,6 +1114,13 @@ for phrase in 'after the existence check, the `get` and the Restart no-op decisi
   'on any refusal stop the run with no checkpoint write, commit or push' 'LEFTOVER:' 'no-op' 'runs no canary'; do
   require_in "ci-repair canary paragraph" "$repair_canary" "$phrase"
 done
+# #1454: the docs/codex.md canary sentence says a no-op re-launch runs none, and that the writing restart paths run one.
+docs_canary="$(canary_paragraph "${ROOT}/docs/codex.md" 'The babysit check runs once')"
+for phrase in 'A `ci-repair` re-launch that makes no write' 'exits before the canary and runs none' \
+  'recovery or a fresh diagnosis runs it before its first checkpoint write'; do
+  require_in "docs/codex.md canary sentence (no-op re-launch runs no canary)" "$docs_canary" "$phrase"
+done
+forbid_in "docs/codex.md canary sentence (retired current-push wording)" "$docs_canary" 'finds its recorded push already current'
 
 # babysit-attention: a canary opens each mutating choice, before its `cenci babysit ... once` line; a refusal does not
 # run the command, says "not reset"/"not stopped" and prints the host command. Summary, Question (the leave-paused

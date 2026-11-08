@@ -52,8 +52,19 @@ invoked by hand: `$cenci:ci-repair` (repair one PR's failing CI) and
   (`docs/health-gates.md` at the repo root), commits explicit paths and pushes
   without force. It never runs `cenci pipeline`, changes a lifecycle label or opens a PR.
   Its checkpoint lives at `.cenci/checkpoints/ci-repair-<pr>.json` and a restart reads it
-  rather than repeating a commit or push. A gate failure, or a repair that is ambiguous,
-  infrastructure, flaky or external, pushes nothing and returns control to the supervisor.
+  rather than repeating a commit or push. A restart decides in this order: the checkpoint
+  existence check and `get`; the live PR state (`gh pr view`, `git ls-remote`, `gh pr checks`,
+  then `gh pr view` again); every head read must agree, or the run is a no-op (a stale head,
+  or a push already on the remote that CI has not caught up with); interrupted-push recovery
+  on the agreed head; and only a `fail` bucket on the agreed head starts a fresh diagnosis
+  through `checkpoint.mjs advance` to `diagnosed`. A head with no `fail` bucket is a no-op:
+  green only when at least one check exists and every check is in `pass`, "still running" while
+  checks are `pending`, "unknown" with zero checks, and a `cancel` or `skipping` check is not green
+  and is named as itself; output that is not a JSON array is "could not read PR state". A `fail`
+  bucket on the agreed head gets a fresh diagnosis rather than a no-op, whatever that head's
+  ancestry relative to the recorded `pushed:<sha>`, and the recorded commit is never pushed again. A gate failure, or a repair that is
+  ambiguous, infrastructure, flaky or external, pushes nothing and returns control to the
+  supervisor.
 - `$cenci:babysit-attention` prints the PR, head SHA, failing checks (or the merge-repair
   reason) and attempt count, then asks one blocking question with exactly three options:
   "leave paused for manual repair", "retry with a fresh budget" and "stop babysitting".
@@ -375,8 +386,9 @@ Claude Code has no pending-trust state for plugin hooks.
 
 The babysit check runs once, when arming. It does not carry over to the `ci-repair` and
 `babysit-attention` sessions the supervisor starts later, which run their own canary. A
-`ci-repair` re-launch that finds its recorded push already current exits before the canary and
-runs none.
+`ci-repair` re-launch that makes no write (a stale head, a push already on the remote, or no
+`fail` bucket) exits before the canary and runs none; recovery or a fresh diagnosis runs it
+before its first checkpoint write.
 
 - **Probes.** `plan` reads `codex/hooks.json` and gives every (matcher group, guard) pair its
   own probe (four with today's manifest: `Write|Edit` and `Bash`, each with both guards). Each

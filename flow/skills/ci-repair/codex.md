@@ -30,11 +30,16 @@ launch text: read them with
 and the report "could not read PR state": a `gh pr view` with a non-zero exit, and either command with empty
 output or output that is not valid JSON, is a read failure and is never reported as "no failing check". `gh pr
 checks` exits 8 while checks are pending and exits non-zero while checks fail, yet still writes valid JSON, so
-for it a non-zero exit is a read failure only when the JSON does not decode. Only checks in the `fail` bucket
+for it a non-zero exit is a read failure only when the JSON does not decode. `gh pr checks` output that is valid
+JSON but not an array (such as `{}` or `null`) is a read failure too, so it stops the run with no write before any
+checkpoint write, commit or push. Only checks in the `fail` bucket
 are repair targets; a `pending` check is still running and is never repaired or reported as passed. Validate
 the branch against `^[A-Za-z0-9._/-]+$`, with no `..` and no leading `-`, before any git command uses it.
-A closed or merged PR, or a PR whose successfully read checks include no `fail` bucket entry, stops with no
-write and a report saying so.
+A closed or merged PR stops with no write and a report saying so. A successful read with no `fail` bucket entry
+is decided in `### Restart`: the checks are green only when at least one check exists and every check is in the `pass` bucket;
+any `pending` check is "still running" (never "green" or "passed"); a `cancel` or `skipping` check, or an empty or
+unrecognized bucket, is not green and is reported by name as itself; zero checks is "unknown" (never green); and `gh pr checks`
+output that is not a JSON array (such as `{}` or `null`) is "could not read PR state". None of them is repaired.
 
 ## Checkpoint
 
@@ -47,7 +52,9 @@ root; any other shape stops the run with no write. `<ckpt>` below is the absolut
 **Guard canary preflight.** Run it after the existence check, the `get` and the Restart no-op decision (see `### Restart`), and before the first `init`, `advance` or `block`:
 `bash "${PLUGIN_ROOT}/codex/guard-canary.sh" plan`, as `codex-runtime` describes;
 on any refusal stop the run with no checkpoint write, commit or push, reporting the helper's text and any
-`LEFTOVER:` path. The no-op Restart path exits before this step and runs no canary.
+`LEFTOVER:` path. Every no-op outcome of `### Restart` (a stale head, a push already on the remote, no `fail`
+bucket) exits before this step and runs no canary; interrupted-push recovery and a fresh diagnosis run it before
+their first checkpoint write.
 
 Every helper call has one positional shape, and the phase is always the fifth argument, so `<workflow>` is
 `ci-repair` and `<target>` is the PR number on every call:
@@ -61,14 +68,20 @@ node "${PLUGIN_ROOT}/codex/checkpoint.mjs" complete <ckpt> ci-repair <pr> <phase
 ```
 
 Order: run the existence check and `get` right after the input checks pass and before any `block`, because
-`advance`, `block` and `complete` throw when the file is missing. A missing file is created with `init` (it
-overwrites unconditionally, so it is never used on an existing file); an existing file is read with `get` and
-then updated with `advance`. A file that exists but whose `get` exits non-zero or prints non-JSON is
-unparseable: stop with no write and report "checkpoint unreadable", and never `init` over it.
+`advance`, `block` and `complete` throw when the file is missing. A missing file is created with `init` (an
+existing v2 file is returned unchanged and a v1 file is upgraded in place, so `init` never resets a record);
+an existing file is read with `get` and then updated with `advance`. A file that exists but whose `get` exits
+non-zero or prints non-JSON is unparseable: stop with no write and report "checkpoint unreadable", and never
+`init` over it.
 
 The helper's `phase` argument carries both evidence and the pushed SHA. Progress phases are `diagnosed`,
 `reproduced`, `gate-green`, `committed:<sha>` and `pushed:<sha>`; block phases are `gate-red:<head-sha>` and
-`unrepaired:<class>:<head-sha>`. The checkpoint contract is not extended here: the full evidence (failing
+`unrepaired:<class>:<head-sha>`. `<sha>` is a full lowercase hex object name of 40 or 64 characters and
+`<class>` is exactly one of `ambiguous`, `infra`, `flaky`, `external` or `push-rejected`; the helper rejects any
+other shape. Any other `advance`, `block` or `complete` on a `complete` checkpoint still fails with
+`checkpoint is complete (terminal)`; the one exception is the restart move `advance` to `diagnosed` from
+`complete` at `pushed:<sha>`, which only `### Restart` makes. Never pass `--gate` for `ci-repair`. The
+checkpoint contract is not extended here: the full evidence (failing
 check names, the gate's `GATE_LOG=` path and the classification) goes in the final report.
 
 Check every helper call. A non-zero exit, or an echoed `phase` (in the JSON the helper prints) that differs from
@@ -148,22 +161,62 @@ procedure.
 Only after the gate is green (or unset with the reproduced failing command passing) and the commit exists. Push
 without force with `git push origin HEAD:refs/heads/<branch>`, verify with `git ls-remote`, run
 `checkpoint.mjs complete` with phase `pushed:<sha>`, and report the PR, the pushed SHA and the gate result. Stage only
-explicit fix paths and never `git add -A`. The supervisor then re-reads CI for the new head.
+explicit fix paths and never `git add -A`. The supervisor then re-reads CI for the new head. A later fresh
+failure on the pushed head, or on a newer head descended from it, re-enters through `### Restart` and never
+through `init` or by deleting the checkpoint.
 
 ### Restart
 
-A re-launch reads `.cenci/checkpoints/ci-repair-<pr>.json` with `checkpoint.mjs get` before anything else. When the
-recorded pushed SHA equals the current head from `gh pr view`, the run is a no-op: exit with no commit, no push and
-no re-diagnosis. The report still states that the head still has failing checks, names them, and says no repair was
-attempted because that SHA was already pushed. The same no-op applies when the recorded `pushed:<sha>` is already on
-the remote although `gh pr view` still shows an older head: read `git ls-remote origin refs/heads/<branch>`, and when
-the remote head equals the recorded SHA, or `git fetch origin <branch>` then
-`git merge-base --is-ancestor <recorded-sha> FETCH_HEAD` shows the remote head descends from it, report that the push
-is already on the remote and CI has not caught up, with no re-diagnosis. Otherwise resume from the last completed gate: `diagnosed` re-reproduces, `reproduced` goes on to the fix,
-`gate-green` goes on to commit, and `committed:<sha>` goes straight to the push when the worktree HEAD already equals
-that SHA, so a restart never duplicates a commit. A `gate-red:` or `unrepaired:` checkpoint at the same head starts a
-fresh diagnosis with `advance`. A checkpoint whose recorded head differs from the current head describes an older
-state: begin again at `diagnosed` with `advance`, never re-push the older commit.
+A recorded push proves the push landed, not that the new head passed CI. A re-launch therefore decides in this
+order, and each step finishes before the next one starts:
+
+1. Existence check and `get`. Check whether `.cenci/checkpoints/ci-repair-<pr>.json` exists and, when it does,
+   read it with `checkpoint.mjs get`. A `get` that exits non-zero or prints non-JSON stops the run with no write and
+   the report "checkpoint unreadable"; never `init` over it. A missing file is a first run, not an error.
+2. Read the live PR state, in this order: `gh pr view <pr> --repo <owner>/<repo> --json headRefName,headRefOid,isCrossRepository,state`
+   (read 1), `git ls-remote origin refs/heads/<branch>`,
+   `gh pr checks <pr> --repo <owner>/<repo> --json bucket,name,state`, then `gh pr view` a second time (read 2).
+   The `## Inputs` read-failure rules apply to each read: a failed read stops the run with no write and the report
+   "could not read PR state", and a `gh pr checks` output that is valid JSON but not an array (such as `{}` or `null`)
+   is a read failure here too, so it stops the run with no write before step 3 or step 4.
+3. Every head read must agree: read 1, read 2 and the `git ls-remote` head are the same SHA. Each disagreement is a
+   no-op with no write, no guard canary, no commit and no push, and the report names the actual condition:
+   - read 1 differs from read 2: a stale head, because the head changed while the checks were read;
+   - the PR head differs from the remote head and the remote head equals the recorded SHA or descends from it
+     (`git fetch origin <branch>`, then `git merge-base --is-ancestor <recorded-sha> FETCH_HEAD`): the push is already
+     on the remote and CI has not caught up;
+   - any other difference (the remote head was moved by someone else and is not descended from the recorded SHA, or
+     there is no recorded SHA to compare): a stale or ambiguous head.
+4. Interrupted-push recovery. Run it on the agreed head only, before the `fail` bucket is looked at. A
+   `committed:<sha>` checkpoint, or a `running` one at `pushed:<sha>`, whose `<sha>` is the remote head: run the
+   guard canary, then `checkpoint.mjs complete` with phase `pushed:<sha>`, with no new commit and no `git push`.
+   A `committed:<sha>` checkpoint whose `<sha>` is not the remote head: when the worktree HEAD equals `<sha>`, push it
+   without force as in `## Repair` step 6 (after the guard canary), otherwise `block` with
+   `unrepaired:ambiguous:<head-sha>` and no new commit; a restart never duplicates a commit. The step 4 recovery (its
+   checkpoint record, and the non-force push of a `committed:<sha>` commit that is not yet on the remote, always after
+   the guard canary) is the only write a run without a `fail` bucket can make.
+5. Only a `fail` bucket on the agreed head starts a fresh diagnosis, whatever that head's ancestry relative to the
+   recorded `pushed:<sha>` (the failure must belong to the current head that `gh pr view` and `git ls-remote` agree on,
+   and pushes stay non-force), and ancestry alone never causes a no-op: a `complete` checkpoint at `pushed:<sha>` does
+   not block a newer failing head that descends from `<sha>`.
+   - With no `fail` bucket the run ends with no new commit, no push beyond the step 4 recovery push, and no
+     checkpoint write beyond a step 4 record, and
+     the report names the actual condition: the checks are green only when at least one check exists and every check
+     is in the `pass` bucket; any `pending` check is "still running" (name them, never "green" or "passed"); a `cancel`
+     or `skipping` check, or an empty or unrecognized bucket, is not green and is reported by name as itself (never
+     "green" or "passed", and no write); zero checks (`[]`) is "unknown", never green; output from `gh pr checks` that
+     is not valid JSON, or is valid JSON but not an array (such as `{}` or `null`), is "could not read PR state". A
+     non-zero `gh pr checks` exit with valid JSON holding a `fail` bucket is a valid failure observation, not a read
+     failure.
+   - With a `fail` bucket, run the guard canary, then record the start of the diagnosis: a `complete` checkpoint at
+     `pushed:<sha>` is restarted with `checkpoint.mjs advance` with phase `diagnosed` (never `init` over it, never
+     deleting the file, never pushing the recorded commit again); a `gate-red:` or `unrepaired:` checkpoint is moved
+     with `advance` to `diagnosed`; a missing file is `init` then `advance` to `diagnosed`; a running checkpoint
+     resumes from the last completed gate (`diagnosed` re-reproduces, `reproduced` goes on to the fix, `gate-green`
+     goes on to commit). A restart `advance` that exits non-zero or echoes another phase stops with "checkpoint not
+     recorded" after the canary and before any worktree write, commit or push.
+   - No limit lives in this procedure: a second fresh failure restarts the same way from `complete` at
+     `pushed:<new-sha>`, because retry budgets belong to the supervisor.
 
 ## Final report
 
