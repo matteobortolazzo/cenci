@@ -26,7 +26,7 @@ cmp "$WORK/before.json" "$CLAUDE_CONFIG_DIR/settings.json"
 HOST_PERMISSIONS=yes
 step_host_setup
 jq -e '.theme == "dark" and .permissions.deny == ["Bash(gh repo delete *)"] and (.permissions.allow | index("Read")) and (.permissions.allow | index("Bash(gh:*)"))' "$CLAUDE_CONFIG_DIR/settings.json" >/dev/null
-rg -q 'pattern=\["gh"\], decision="allow"' "$CODEX_HOME/rules/cenci-host.rules"
+grep -Fq 'pattern=["gh"], decision="allow"' "$CODEX_HOME/rules/cenci-host.rules"
 cp "$CLAUDE_CONFIG_DIR/settings.json" "$WORK/once.json"
 cp "$CODEX_HOME/rules/cenci-host.rules" "$WORK/once.rules"
 step_host_setup
