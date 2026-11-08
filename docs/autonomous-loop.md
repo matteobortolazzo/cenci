@@ -263,8 +263,9 @@ earlier unattended escalation (still `approval: lean-resumed`) are unaffected to
 sandbox` container, so the flag is forwarded at exec time as `CENCI_ATTENDED=1` or
 `CENCI_ATTENDED=0` — always explicitly, never "unset means off". Toggling it on the host
 takes effect on the next `cenci open`, with no container rebuild. Sessions `cenci
-dispatch` launches are pinned to `CENCI_ATTENDED=0` whatever the host flag says: a
-detached tmux window must never stall on a question nobody is there to answer.
+dispatch` launches are pinned to `CENCI_ATTENDED=0` whatever the host flag says, and so
+are the sessions `cenci babysit` launches: a detached tmux window must never stall on a
+question nobody is there to answer.
 
 **The resolution order** a planning session follows, first match wins:
 

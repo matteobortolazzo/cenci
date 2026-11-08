@@ -24,6 +24,8 @@ func TestConflictRepairAlwaysUsesOpusWithoutChangingSupervisorAgent(t *testing.T
 			}
 			assertFlagValue(t, args, "--agent", "claude")
 			assertFlagValue(t, args, "--model", "opus")
+			// #1497: forcing claude/opus must not drop the unattended pin.
+			assertPinnedUnattendedOnce(t, args)
 			assertFlagValue(t, args, "--session", "work")
 			assertFlagValue(t, args, "--dir", "/repo/root")
 			if s.Agent != agent || s.Status != "running" || s.ConflictRepairSHA != "abc" || s.ConflictFixAttempts != 1 {

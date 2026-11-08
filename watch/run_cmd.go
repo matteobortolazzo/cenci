@@ -22,6 +22,7 @@ func runRun(args []string) {
 	slug := fs.String("slug", "", "window-name slug for free-text runs (ignored for numeric tickets, which are named <number>-<skill>)")
 	configPath := fs.String("config", "", "path to config.json (default: $XDG_CONFIG_HOME/cenci/config.json)")
 	dryRun := fs.Bool("dry-run", false, "print the resolved session, window name, and command without spawning")
+	unattended := fs.Bool("unattended", false, "pin CENCI_ATTENDED=0 on the launched agent command (cenci babysit sets it)")
 
 	// The stdlib flag parser stops at the first positional, but the documented
 	// form is `run <workflow> [ticket] [flags]`. Peel leading positionals, parse
@@ -49,6 +50,7 @@ func runRun(args []string) {
 		Slug:       *slug,
 		ConfigPath: *configPath,
 		DryRun:     *dryRun,
+		Unattended: *unattended,
 	}
 	// Everything after the workflow is the skill argument: a ticket id or task
 	// description plus optional context (mirrors `/cenci:<workflow> $ARGUMENTS`).

@@ -241,6 +241,7 @@ descriptive slug: `--slug` if given, else the whole description slugified.
 | `--model <model>` | Model override passed to the agent (substituted into `{model}`, else appended as `--model`) |
 | `--session <name>` | Target tmux session (default: the current session) |
 | `--dir <path>` | Working directory the window starts in (default: current); prepended as a `cd '<dir>' &&` prefix on the launched command, visible in `--dry-run` output too |
+| `--unattended` | Pin `CENCI_ATTENDED=0` on the launched agent command (a `CENCI_ATTENDED=0 ` assignment scoped to the agent argv, after any `--dir` `cd` prefix), so the session counts as unattended (see **Who is unattended**). `cenci babysit` sets it on every launch; an interactive `cenci run` without it leaves the variable unset. Place it after the positionals like the other flags |
 | `--slug <slug>` | Window-name slug for free-text runs; ignored for numeric tickets (named `<number>-<skill>`) |
 | `--config <path>` | Config file (default: `$XDG_CONFIG_HOME/cenci/config.json`) |
 | `--dry-run` | Print the resolved session, window name, command, and template provenance without spawning; refusals (missing template, unsatisfied sandbox, disabled agent) still fail, but the host Codex adapter check does not run (the installed plugin is not inspected) |
@@ -1076,10 +1077,11 @@ content-exact binding are documented in `watch/docs/dispatch-reconcile.md`.
 
 **Who is unattended.** A session counts as unattended when `CENCI_ATTENDED` is exactly
 `0` and `CENCI_ATTENDED_ORIGIN` is not `host-config`. Every dispatched session pins
-`CENCI_ATTENDED=0`. The sandbox launcher forwards `CENCI_ATTENDED_ORIGIN` beside it:
-`pinned` when the value came from its own environment (the dispatcher's pin),
-`host-config` when it read the fleet's `planning.attended` (a human `cenci open`/`cenci
-run` session), and `config-unreadable` when it could not read the fleet config and fell
+`CENCI_ATTENDED=0`, and so does every session `cenci babysit` launches (it passes
+`cenci run --unattended`). The sandbox launcher forwards `CENCI_ATTENDED_ORIGIN` beside it:
+`pinned` when the value came from its own environment (the dispatcher's or babysit's pin),
+`host-config` when it read the fleet's `planning.attended` (a human `cenci open` or a
+`cenci run` session launched without `--unattended`), and `config-unreadable` when it could not read the fleet config and fell
 back to `CENCI_ATTENDED=0`. Only the exact `host-config` is attended; `pinned`,
 `config-unreadable`, any other value and a missing marker all count as unattended. A
 launch that cannot read the config prints one `Warning: cannot read planning.attended

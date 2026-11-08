@@ -79,8 +79,9 @@ func TestBabysitCodexLaunchResolvesToSandboxAgentArgv(t *testing.T) {
 			}
 			argv := strings.Split(strings.TrimSuffix(string(data), "\x00"), "\x00")
 			wantHead := []string{"run", tc.workflow, tc.ticket, "--agent", "codex", "--session", chainFakeTmuxSession, "--dir"}
-			if len(argv) != len(wantHead)+1 || !slices.Equal(argv[:len(wantHead)], wantHead) || argv[len(wantHead)] == "" {
-				t.Fatalf("recorded self-exec argv = %q, want %q followed by the launch dir", argv, wantHead)
+			// #1497: babysit appends `--unattended` after the launch dir.
+			if len(argv) != len(wantHead)+2 || !slices.Equal(argv[:len(wantHead)], wantHead) || argv[len(wantHead)] == "" || argv[len(wantHead)+1] != "--unattended" {
+				t.Fatalf("recorded self-exec argv = %q, want %q followed by the launch dir and --unattended", argv, wantHead)
 			}
 
 			var out bytes.Buffer

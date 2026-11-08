@@ -1010,6 +1010,12 @@ var errWindowSpawned = errors.New("window spawned but its post-spawn setup faile
 // (watch/docs/error-handling.md's rule against collapsing "probe errored"
 // into "condition false"). A `cenci run` exit status 3 (window spawned,
 // post-spawn setup failed) returns an error wrapping errWindowSpawned.
+//
+// Every launch is pinned unattended (#1497): `--unattended` is appended as the
+// last argument, so `cenci run` pins CENCI_ATTENDED=0 on the agent command, the
+// same pin dispatch sets. The workers read untrusted PR text and must never
+// count as a human session that could release a held plan (#1464), whatever
+// the host's planning.attended flag says.
 func launch(s *State, workflow, arg string) error {
 	if s.LaunchSession == "" {
 		return fmt.Errorf("launch %s: no tmux session was recorded at arm time; re-arm from a host tmux pane", workflow)
@@ -1032,6 +1038,7 @@ func launch(s *State, workflow, arg string) error {
 	if s.LaunchDir != "" {
 		args = append(args, "--dir", s.LaunchDir)
 	}
+	args = append(args, "--unattended")
 	out, err := command(os.Args[0], args...)
 	if err != nil {
 		var exitErr *exec.ExitError
