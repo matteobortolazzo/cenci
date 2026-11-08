@@ -29,7 +29,8 @@ assert_contains skills/implement/phases/phase-1-plan.md 'interactive mode carrie
 assert_contains skills/implement/phases/phase-1-plan.md '**Both modes**: apply the shared question selection' 'delegation must activate the shared policy'
 assert_contains skills/implement/phases/phase-1-plan.md '**interactive mode** presents all questions using the planner' 'interactive questions must still use the tool'
 assert_contains skills/implement/phases/phase-1-plan.md 'every ticket-mode lean-mode escalation instead goes to `## Unattended Escalation Path`' 'unattended questions must still use GitHub'
-assert_contains skills/implement/phases/phase-1-plan.md 'front matter records `approval: human`' 'interactive planning must retain plan review'
+assert_contains skills/implement/phases/phase-1-plan.md 'front matter records `approval: pending-human`' 'interactive planning must retain plan review without recording human provenance before review'
+assert_lacks skills/implement/phases/phase-1-plan.md 'front matter records `approval: human`' 'no planning path may record human approval before the plan is reviewed'
 assert_contains skills/implement/codex.md "Apply \`agents/planner.md\`'s shared question selection" 'Codex must apply the same filter'
 
 # Refiner agent plus native inline Codex procedure must agree on all cases.

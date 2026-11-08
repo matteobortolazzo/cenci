@@ -30,6 +30,9 @@ func runDispatch(args []string) {
 		case "plan-refined":
 			runDispatchPlanRefined(args[1:])
 			return
+		case "approve":
+			runDispatchApprove(args[1:])
+			return
 		default:
 			// A stale/rebuilt binary invoked with a typo'd verb (e.g. "statas")
 			// must never silently fall through to a real dispatch pass: Go's
@@ -43,7 +46,7 @@ func runDispatch(args []string) {
 	fs := flag.NewFlagSet("dispatch", flag.ExitOnError)
 	once := fs.Bool("once", false, "run a single dispatch pass then exit (default)")
 	interval := fs.Duration("interval", 0, "run continuously on this interval (e.g. 5m); mutually exclusive with --once")
-	dryRun := fs.Bool("dry-run", false, "print the decision table without dispatching")
+	dryRun := fs.Bool("dry-run", false, "print the decision table without dispatching (--dry-run cannot be combined with --interval; use --dry-run --once for a single preview pass)")
 	reconcile := fs.Bool("reconcile", false, "run a single failure-reconciliation pass instead of a dispatch pass (cron path)")
 	configPath := fs.String("config", "", "path to config.json (default: $XDG_CONFIG_HOME/cenci/config.json)")
 	model := fs.String("model", "", "model override for every session dispatched this pass (overrides config.json dispatch.model / agents.*.model)")
@@ -53,6 +56,16 @@ func runDispatch(args []string) {
 	// stops at the first non-flag token, so a trailing typo or stray argument
 	// would otherwise be silently swallowed along with any flags after it.
 	rejectExtra("cenci dispatch", fs.Args())
+
+	// A continuous dry run is unsupported (#1464): RunLoop reloads config and
+	// runs real passes on every tick, so --dry-run with --interval used to do
+	// real work. --once and --reconcile each pick a single pass and --interval 0
+	// means no interval, so those combinations stay valid. Rejected here, after
+	// parsing and before LoadConfig, so nothing has been read or run yet.
+	if *dryRun && *interval > 0 && !*once && !*reconcile {
+		fmt.Fprintln(os.Stderr, "cenci dispatch: --dry-run cannot be combined with --interval (continuous dry-run is not supported); use --dry-run --once for a single preview pass")
+		os.Exit(2)
+	}
 
 	cfg, err := dispatch.LoadConfig(*configPath)
 	if err != nil {

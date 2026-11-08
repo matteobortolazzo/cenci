@@ -347,6 +347,7 @@ func TestPassError(t *testing.T) {
 	unconfiguredErr := fmt.Errorf("dispatch: no target tmux session for o/r: %w", ErrSessionUnconfigured)
 	missingErr := fmt.Errorf("dispatch: configured session %q not found in tmux for o/r: %w", "ghost", ErrSessionMissing)
 	bothSentinelsErr := errors.Join(ErrSessionUnconfigured, ErrSessionMissing)
+	probeFailedErr := fmt.Errorf("dispatch: probing session %q for o/r: %w", "ghost", ErrSessionProbeFailed)
 
 	tests := []struct {
 		name         string
@@ -367,6 +368,12 @@ func TestPassError(t *testing.T) {
 		{name: "reconcile_state_unreadable outranks session-missing dispatch error (#883)", dispatchErr: missingErr, reconcileErr: sentinelErr, want: "reconcile_state_unreadable"},
 		{name: "session-unconfigured outranks a generic reconcile error", dispatchErr: unconfiguredErr, reconcileErr: genericReconcileErr, want: "dispatch_session_unconfigured"},
 		{name: "session-missing outranks a generic reconcile error", dispatchErr: missingErr, reconcileErr: genericReconcileErr, want: "dispatch_session_missing"},
+
+		// -- #1464: dispatch_session_probe_failed, ranked after missing --
+		{name: "session-probe-failed dispatch error", dispatchErr: probeFailedErr, reconcileErr: nil, want: "dispatch_session_probe_failed"},
+		{name: "session-missing outranks session-probe-failed", dispatchErr: errors.Join(probeFailedErr, missingErr), reconcileErr: nil, want: "dispatch_session_missing"},
+		{name: "session-probe-failed outranks a generic dispatch error", dispatchErr: errors.Join(dispatchErr, probeFailedErr), reconcileErr: nil, want: "dispatch_session_probe_failed"},
+		{name: "reconcile_state_unreadable outranks session-probe-failed", dispatchErr: probeFailedErr, reconcileErr: sentinelErr, want: "reconcile_state_unreadable"},
 	}
 
 	for _, tt := range tests {

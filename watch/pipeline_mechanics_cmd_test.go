@@ -477,6 +477,9 @@ func TestPipelineCrossWorktreeContinuity_MainCheckoutAndLinkedWorktreeShareState
 	if c := runAtMain("plan", "42"); c.State != "waiting_for_plan_approval" {
 		t.Fatalf("plan: state = %q, want %q", c.State, "waiting_for_plan_approval")
 	}
+	// `plan --approve` binds or checks the plan's authorization record, so the
+	// plan must exist in the main checkout by now (#1464).
+	writePlanFileForCLITest(t, mainRepo, "42", "continuity-e2e")
 	if c := runAtMain("plan", "42", "--approve"); c.State != "plan_approved" {
 		t.Fatalf("plan --approve: state = %q, want %q", c.State, "plan_approved")
 	}

@@ -377,6 +377,17 @@ if [[ -n "${LIFECYCLE:-}" ]]; then
     "a resume's plan --approve/execute no-op warnings must be described"
   assert_contains "${LIFECYCLE}" 'never treat them as failures' \
     "the resume no-op warnings must never be treated as failures"
+  # #1464: the plan call carries the held authorization on a new-plan apply and
+  # no flag on a saved-plan apply; --approve takes no kind and names the release
+  # command when an unattended apply is refused. Codex gains no lean path.
+  assert_contains "${LIFECYCLE}" 'a new-plan apply runs `cenci pipeline plan <id> --authorization held`' \
+    "lifecycle step 2 must record the held authorization on a new-plan apply"
+  assert_contains "${LIFECYCLE}" 'a saved-plan apply passes no `--authorization` flag' \
+    "lifecycle step 2 must pass no authorization flag on a saved-plan apply"
+  assert_contains "${LIFECYCLE}" 'takes no `--authorization` kind' \
+    "lifecycle step 3 must say plan --approve takes no authorization kind"
+  assert_contains "${LIFECYCLE}" 'run `cenci dispatch approve <id>`' \
+    "lifecycle step 3 must name cenci dispatch approve <id> for a refused unattended apply"
 fi
 
 # Each call is also named at the step that runs it (wired, not just listed).
@@ -549,6 +560,10 @@ if [[ -n "${PERSIST_PARA:-}" ]]; then
     "the apply step must pass the plan path to artifact --plan for both apply kinds"
   assert_contains "${PERSIST_PARA}" 'a new-plan apply uses the file the persist step wrote at `resolved.planPath` and apply never rewrites it' \
     "a new-plan apply must use the persisted plan and never rewrite it"
+  assert_contains "${PERSIST_PARA}" 'run `cenci pipeline plan <id> --authorization held` on a new-plan apply' \
+    "the apply step must run plan --authorization held on a new-plan apply (#1464)"
+  assert_contains "${PERSIST_PARA}" 'a saved-plan apply passes no `--authorization` flag' \
+    "the apply step must pass no authorization flag on a saved-plan apply (#1464)"
   assert_contains "${PERSIST_PARA}" 'The three-heading check ran in the persist step, so apply neither writes the plan nor repeats that check.' \
     "the heading check belongs to the persist step, not to apply"
   assert_contains "${PERSIST_PARA}" '`checkpoint.mjs advance` to `worktree` on a new-plan apply, or to `verify`'"'"'s `nextPhase` on an attach route, never `init`' \

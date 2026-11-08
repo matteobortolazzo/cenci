@@ -44,6 +44,11 @@
 #     banner variant)
 #   - flow/docs/comment-attribution.md (the plan-comment banner's two forms)
 #   - flow/skills/implement/codex.md (the recorded Codex exclusion)
+#   - Ticket #1464: `pending-human` replaces `human` as the `## New Plan`
+#     front-matter value, every `cenci pipeline plan` persist site in
+#     phase-1-plan.md passes its `--authorization` kind, phase-2-worktree.md
+#     step 3 is the authorization gate, SKILL.md says a reviewed plan is
+#     `held`, and codex.md records `held` only (no lean approval path).
 #   - flow/opencode/install-skills.sh (the recorded OpenCode exclusion)
 set -uo pipefail
 
@@ -178,17 +183,17 @@ assert_banner_then_marker() {
 # The template is what an implementing agent copies, so the key has to be in
 # it, not only described in the prose below it. #1131 widened the value set
 # with `lean-decided` (a plan carrying at least one planner `decided:` entry).
-FRONTMATTER_KEY_MARKER='approval: human | lean | trivial | lean-resumed | lean-decided'
+FRONTMATTER_KEY_MARKER='approval: pending-human | lean | trivial | lean-resumed | lean-decided'
 assert_file_contains "${PHASE1_PLAN}" "${FRONTMATTER_KEY_MARKER}" "front-matter template must carry the approval key"
 
 # The value table is the single authority on which path writes which value.
 # Each row is asserted separately: a table that documents three of four
 # values is exactly the silent gap this ticket exists to close.
-APPROVAL_HUMAN_ROW='`human` | `## New Plan`'
+APPROVAL_PENDING_ROW='`pending-human` | `## New Plan`'
 APPROVAL_LEAN_ROW='`lean` | `## Lean Approval Path`'
 APPROVAL_TRIVIAL_ROW='`trivial` | `## Trivial Fast Path`'
 APPROVAL_RESUMED_ROW='`lean-resumed` | `## Resume From Draft`'
-assert_file_contains "${PHASE1_PLAN}" "${APPROVAL_HUMAN_ROW}" "approval table must document the human value"
+assert_file_contains "${PHASE1_PLAN}" "${APPROVAL_PENDING_ROW}" "approval table must document the pending-human value (#1464)"
 assert_file_contains "${PHASE1_PLAN}" "${APPROVAL_LEAN_ROW}" "approval table must document the lean value"
 assert_file_contains "${PHASE1_PLAN}" "${APPROVAL_TRIVIAL_ROW}" "approval table must document the trivial value"
 assert_file_contains "${PHASE1_PLAN}" "${APPROVAL_RESUMED_ROW}" "approval table must document the lean-resumed value"
@@ -199,14 +204,31 @@ assert_file_contains "${PHASE1_PLAN}" "${APPROVAL_RESUMED_ROW}" "approval table 
 # From Draft, and the lean `## New Plan` fallback).
 APPROVAL_DECIDED_ROW='`lean-decided` | any path that persists a plan carrying at least one `decided:` entry'
 assert_file_contains "${PHASE1_PLAN}" "${APPROVAL_DECIDED_ROW}" "approval table must document the lean-decided value"
+assert_file_contains "${PHASE1_PLAN}" 'or the lean `## New Plan` fallback (replaces `pending-human`)' "lean-decided row must say the New Plan fallback replaces pending-human (#1464)"
+assert_file_lacks "${PHASE1_PLAN}" 'or the lean `## New Plan` fallback (replaces `human`)' "lean-decided row must drop the retired human replacement (#1464)"
 
 if require_content PHASE1_CONTENT "${PHASE1_PLAN}" "phase-1-plan.md" \
    && require_section PERSIST_SECTION "${PHASE1_CONTENT}" "## Persist the Plan" "phase-1-plan.md"; then
   # The precedence sentence: lean-decided wins over every other non-trivial value,
   # and a trivial plan can never carry a decision (the planner is skipped).
-  DECIDED_PRECEDENCE_MARKER='A plan carrying at least one `decided:` entry records `lean-decided`, which overrides `lean`, `lean-resumed` and `human`; `trivial` can never carry a decision'
+  DECIDED_PRECEDENCE_MARKER='A plan carrying at least one `decided:` entry records `lean-decided`, which overrides `lean`, `lean-resumed` and `pending-human`; `trivial` can never carry a decision'
   assert_contains_ws "${PERSIST_SECTION}" "${DECIDED_PRECEDENCE_MARKER}" \
-    "phase-1-plan.md (## Persist the Plan) must state lean-decided overrides lean, lean-resumed and human, and trivial never carries a decision"
+    "phase-1-plan.md (## Persist the Plan) must state lean-decided overrides lean, lean-resumed and pending-human, and trivial never carries a decision"
+
+  # #1464: the front-matter value never carries human provenance. `human` is a
+  # readable legacy value only; the `## New Plan` default is `pending-human`, and
+  # a `lean-decided` fallback plan is still recorded `held` in the state record.
+  PENDING_DEFAULT_MARKER='This section'"'"'s own default is `pending-human`'
+  LEGACY_HUMAN_MARKER='`human` stays a readable value for plans written before #1464, but no path writes it into front matter'
+  DECIDED_STILL_HELD_MARKER='A `lean-decided` plan persisted through the `## New Plan` fallback is still recorded `held`'
+  assert_contains_ws "${PERSIST_SECTION}" "${PENDING_DEFAULT_MARKER}" \
+    "phase-1-plan.md (## Persist the Plan) default must be pending-human, not human (#1464)"
+  assert_absent_paired_ws "${PERSIST_SECTION}" "${PENDING_DEFAULT_MARKER}" 'This section'"'"'s own default is `human`' \
+    "phase-1-plan.md (## Persist the Plan) must drop the retired human default (#1464)"
+  assert_contains_ws "${PERSIST_SECTION}" "${LEGACY_HUMAN_MARKER}" \
+    "phase-1-plan.md (## Persist the Plan) must state human is legacy-readable and never written (#1464)"
+  assert_contains_ws "${PERSIST_SECTION}" "${DECIDED_STILL_HELD_MARKER}" \
+    "phase-1-plan.md (## Persist the Plan) must state a lean-decided New Plan fallback is still held (#1464)"
 
   # "the three autonomous values" became four once lean-decided joined lean,
   # trivial and lean-resumed.
@@ -261,6 +283,104 @@ if require_section RESUME_SECTION "${PHASE1_CONTENT}" "## Resume From Draft" "ph
 fi
 
 # =====================================================================
+# #1464 -- every `cenci pipeline plan` persist site passes its authorization
+# kind. The kind is the record `cenci dispatch` reads before it launches a plan
+# unattended: a held plan is released only by a human, an autonomous path
+# records the kind that explains why no human did. A site that omits it leaves
+# an `unrecorded` plan that dispatch holds visibly. Each site is asserted by
+# its own case, scoped to its own section and matched as a whole trimmed line,
+# so the table or another site's call can never satisfy it.
+# =====================================================================
+
+# assert_has_fence_line <region> <exact-line> <label> -- some line of the region,
+# trimmed, equals the exact fenced command line.
+assert_has_fence_line() {
+  local region="$1" exact="$2" label="$3"
+  [[ -n "${exact}" ]] || { fail "${label}: empty line (test bug)"; return; }
+  local verdict
+  verdict="$(awk -v c="${exact}" '
+    { t = $0; sub(/^[ \t]+/, "", t); sub(/[ \t]+$/, "", t) }
+    t == c { found = 1 }
+    END { print found ? "ok" : "missing" }
+  ' <<<"${region}")"
+  [[ "${verdict}" == "ok" ]] || fail "${label}: no fenced line equals [${exact}]"
+}
+
+if [[ -n "${PHASE1_CONTENT:-}" ]]; then
+  if require_section TRIVIAL_SECTION "${PHASE1_CONTENT}" "## Trivial Fast Path" "phase-1-plan.md (#1464)"; then
+    assert_has_fence_line "${TRIVIAL_SECTION}" 'cenci pipeline plan <id> --authorization trivial' \
+      "Trivial Fast Path must record the trivial authorization kind"
+  fi
+  if [[ -n "${LEAN_SECTION:-}" ]]; then
+    assert_has_fence_line "${LEAN_SECTION}" 'cenci pipeline plan <id> --authorization lean' \
+      "Lean Approval Path must record the lean authorization kind"
+    assert_contains_ws "${LEAN_SECTION}" 'When the plan carries at least one `decided:` entry, pass `--authorization lean-decided` instead of `--authorization lean`' \
+      "Lean Approval Path must record lean-decided when the plan carries a decision"
+  fi
+  if [[ -n "${RESUME_SECTION:-}" ]]; then
+    assert_has_fence_line "${RESUME_SECTION}" 'cenci pipeline plan <id> --authorization lean-resumed' \
+      "Resume From Draft must record the lean-resumed authorization kind"
+    assert_contains_ws "${RESUME_SECTION}" 'When the plan carries at least one `decided:` entry, pass `--authorization lean-decided` instead of `--authorization lean-resumed`' \
+      "Resume From Draft must record lean-decided when the plan carries a decision"
+  fi
+  if [[ -n "${PERSIST_SECTION:-}" ]]; then
+    assert_has_fence_line "${PERSIST_SECTION}" 'cenci pipeline plan <id> --authorization held' \
+      "Persist the Plan (the ## New Plan path) must record the held authorization kind"
+    assert_contains_ws "${PERSIST_SECTION}" 'never `human`' \
+      "Persist the Plan must say the ## New Plan path never records human"
+  fi
+  if require_section NEWPLAN_SECTION "${PHASE1_CONTENT}" "## New Plan" "phase-1-plan.md (#1464)"; then
+    assert_contains_ws "${NEWPLAN_SECTION}" 'cenci pipeline plan <id> --authorization held' \
+      "## New Plan must name the held authorization its persist step records"
+  fi
+  if require_section EXISTING_SECTION "${PHASE1_CONTENT}" "## Existing Plan" "phase-1-plan.md (#1464)"; then
+    assert_contains_ws "${EXISTING_SECTION}" 'Invoke `cenci pipeline plan <id>` with no `--authorization` flag' \
+      "Existing Plan step 3 re-records an existing plan and must pass no --authorization flag"
+  fi
+  # No bare plan fence line survives anywhere, and --approve never takes a kind.
+  assert_file_lacks "${PHASE1_PLAN}" 'plan <id> --approve --authorization' \
+    "phase-1-plan.md: --approve is never combined with --authorization (usage error, #1464)"
+  assert_file_lacks "${PHASE1_PLAN}" 'plan <id> --authorization human' \
+    "phase-1-plan.md: no path passes --authorization human (written only by dispatch approve or an attended --approve, #1464)"
+  BARE_FENCE_COUNT="$(grep -cE '^[[:space:]]*cenci pipeline plan <id>[[:space:]]*$' <<<"${PHASE1_CONTENT}")"
+  [[ "${BARE_FENCE_COUNT}" -eq 0 ]] || \
+    fail "phase-1-plan.md: ${BARE_FENCE_COUNT} bare 'cenci pipeline plan <id>' fence line(s) left without an --authorization kind"
+fi
+
+# phase-2-worktree.md: step 3 is the authorization gate, passes no kind, and
+# names the release command in its stop message.
+PHASE2_WORKTREE="${FLOW_DIR}/skills/implement/phases/phase-2-worktree.md"
+if require_content PHASE2_CONTENT "${PHASE2_WORKTREE}" "phase-2-worktree.md"; then
+  PHASE2_STEP3="$(awk '/^3\. Ticket mode: /{on=1} on&&/^## Create Worktree/{exit} on{print}' <<<"${PHASE2_CONTENT}")"
+  if [[ -z "${PHASE2_STEP3}" ]]; then
+    fail "phase-2-worktree.md: could not locate Gate Check step 3"
+  else
+    assert_contains_ws "${PHASE2_STEP3}" 'Invoke `cenci pipeline plan <id> --approve`' \
+      "phase-2-worktree.md step 3 must still invoke plan --approve (with no --authorization kind)"
+    assert_contains_ws "${PHASE2_STEP3}" '`plan --approve` takes no `--authorization` kind' \
+      "phase-2-worktree.md step 3 must say --approve passes no kind"
+    assert_contains_ws "${PHASE2_STEP3}" 'An attended session records `human` (source `attended-launch`)' \
+      "phase-2-worktree.md step 3 must say an attended launch records human approval"
+    assert_contains_ws "${PHASE2_STEP3}" 'an unattended session refuses a `held`, changed or unrecorded plan' \
+      "phase-2-worktree.md step 3 must say an unattended run refuses held, changed and unrecorded plans"
+    assert_contains_ws "${PHASE2_STEP3}" 'run `cenci dispatch approve <id>`' \
+      "phase-2-worktree.md step 3 stop message must name cenci dispatch approve <id>"
+    assert_absent_paired_ws "${PHASE2_STEP3}" 'run `cenci dispatch approve <id>`' 'is what this step records as approval' \
+      "phase-2-worktree.md step 3 must drop the launch-is-approval claim (#1464)"
+  fi
+fi
+
+# SKILL.md: the pipeline overview says a reviewed plan is held, not approved.
+assert_file_lacks "${PHASE2_WORKTREE}" 'plan <id> --approve --authorization' \
+  "phase-2-worktree.md: --approve never takes an --authorization kind (#1464)"
+
+SKILL_MD="${FLOW_DIR}/skills/implement/SKILL.md"
+if require_content SKILL_MD_CONTENT "${SKILL_MD}" "SKILL.md"; then
+  assert_contains_ws "${SKILL_MD_CONTENT}" 'a reviewed plan is `held` until released by `cenci dispatch approve` or an attended plan-file launch' \
+    "SKILL.md pipeline overview must say a saved plan is held until released (#1464)"
+fi
+
+# =====================================================================
 # phase-1-plan.md — the plan-comment banner variant.
 # =====================================================================
 
@@ -285,8 +405,9 @@ assert_file_contains "${PHASE1_PLAN}" "${BANNER_DECIDED_MARKER}" "the planner-de
 # lean-resumed take the auto-approved banner, lean-decided takes the decisions
 # banner, human keeps the original -- not guessable from the literals alone.
 # The #1050 two-way rule ("every value other than human") is now false.
-BANNER_SELECTION_MARKER='every `approval` value other than `human` and `lean-decided` uses the auto-approved variant, and `lean-decided` uses the planner-decisions variant'
-RETIRED_BANNER_SELECTION_MARKER='every `approval` value other than `human` uses the auto-approved variant'
+BANNER_SELECTION_MARKER='every `approval` value other than `human`, `pending-human` and `lean-decided` uses the auto-approved variant, and `lean-decided` uses the planner-decisions variant'
+RETIRED_BANNER_SELECTION_MARKER='every `approval` value other than `human` and `lean-decided` uses the auto-approved variant'
+BANNER_PENDING_MARKER='A `pending-human` plan takes the plain `(planning)` banner'
 BANNER_THREE_FORMS_MARKER='The banner has three forms, selected by this plan'"'"'s `approval` value'
 RETIRED_BANNER_TWO_FORMS_MARKER='The banner has two forms'
 assert_file_contains "${PHASE1_PLAN}" "${BANNER_SELECTION_MARKER}" "the banner selection rule must be stated"
@@ -294,6 +415,8 @@ assert_file_contains "${PHASE1_PLAN}" "${BANNER_THREE_FORMS_MARKER}" "the banner
 if [[ -n "${PERSIST_SECTION:-}" ]]; then
   assert_absent_paired_ws "${PERSIST_SECTION}" "${BANNER_SELECTION_MARKER}" "${RETIRED_BANNER_SELECTION_MARKER}" \
     "phase-1-plan.md (## Persist the Plan) must drop the retired two-way selection rule"
+  assert_contains_ws "${PERSIST_SECTION}" "${BANNER_PENDING_MARKER}" \
+    "phase-1-plan.md (## Persist the Plan) must say a pending-human plan takes the plain (planning) banner, never the auto-approved one (#1464)"
   assert_absent_paired_ws "${PERSIST_SECTION}" "${BANNER_THREE_FORMS_MARKER}" "${RETIRED_BANNER_TWO_FORMS_MARKER}" \
     "phase-1-plan.md (## Persist the Plan) must drop the retired two-forms wording"
   # The third form keeps the marker on its own non-blockquoted line, exactly
@@ -338,8 +461,18 @@ fi
 # written-down half.
 # =====================================================================
 
-CODEX_EXCLUSION_MARKER='every plan it persists is `approval: human` by construction'
+CODEX_EXCLUSION_MARKER='every plan it persists is recorded `held`'
 assert_file_contains "${IMPLEMENT_CODEX}" "${CODEX_EXCLUSION_MARKER}" "the Codex procedure must record why it needs no approval-value branch"
+assert_file_lacks "${IMPLEMENT_CODEX}" 'is `approval: human` by construction' "the Codex procedure must drop the retired human-by-construction claim (#1464)"
+# No path writes `approval: human` any more, so the interactive-resolution rule
+# must not name it as the value those resolutions leave alone.
+assert_file_lacks "${IMPLEMENT_CODEX}" 'change `approval: human`' "codex.md must not name the retired approval: human value as the plan's approval (#1464)"
+assert_file_contains "${IMPLEMENT_CODEX}" "These resolutions do not post GitHub decision comments or change the plan's \`approval\` value." "codex.md interactive resolutions must leave the plan's approval value unchanged (#1464)"
+# Codex gains no lean approval path: the only kind it ever passes is held.
+for retired_kind in lean trivial lean-resumed lean-decided human; do
+  assert_file_lacks "${IMPLEMENT_CODEX}" "--authorization ${retired_kind}" "codex.md must pass no --authorization ${retired_kind} (no lean approval path, #1464)"
+done
+assert_file_contains "${IMPLEMENT_CODEX}" '`cenci pipeline plan <id> --authorization held`' "codex.md new-plan apply must record the held authorization (#1464)"
 
 # OpenCode needs no edit for this ticket — `implement`'s exclusion is already
 # recorded next to PORTABLE_SKILLS, and this assertion pins that it stays

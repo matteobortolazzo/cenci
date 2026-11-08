@@ -252,8 +252,9 @@ type launchCtx struct {
 // sandboxEnv.forward read (loadSecretEnvSet, #1016), happen before runtime
 // resolution, so a malformed value or a rejected path makes no runtime call. A
 // configured forward name that is unset or empty on the host prints one
-// warning (warnUnsetForwardNames) as the last step, so Launch and DryRun each
-// warn exactly once. Both Launch and DryRun call this so their failure modes
+// warning (warnUnsetForwardNames), and an unreadable planning.attended prints
+// one more (warnAttendedConfigUnreadable, #1464), as the last steps, so Launch
+// and DryRun each warn exactly once. Both Launch and DryRun call this so their failure modes
 // for these steps can never diverge.
 func (e *Engine) resolveLaunchContext(opts Options) (launchCtx, error) {
 	agent := opts.Agent
@@ -357,7 +358,20 @@ func (e *Engine) resolveLaunchContext(opts Options) (launchCtx, error) {
 
 	ctx := launchCtx{Agent: agent, Model: model, Home: home, Scope: scope, DindOn: dindOn, AzureOn: azureOn, Plugins: plugins, Limits: limits, Secrets: secrets, AddDirs: addDirs}
 	e.warnUnsetForwardNames(ctx)
+	e.warnAttendedConfigUnreadable()
 	return ctx, nil
+}
+
+// warnAttendedConfigUnreadable prints one stderr line when the fleet config's
+// planning.attended cannot be read (#1464), so the user knows why the session
+// is forwarded CENCI_ATTENDED=0 with origin config-unreadable (and so counts as
+// unattended) instead of their configured posture. Never fatal: the launch
+// carries on with the restrictive fallback. Silent when CENCI_ATTENDED is
+// pinned, because the config is then never consulted.
+func (e *Engine) warnAttendedConfigUnreadable() {
+	if _, _, err := resolveAttendedFlag(); err != nil {
+		_, _ = fmt.Fprintf(e.Stderr, "Warning: cannot read planning.attended from the fleet config (%v); this session is forwarded %s=%s and counts as unattended\n", err, attendedEnvName, attendedOff)
+	}
 }
 
 // warnUnsetForwardNames prints one stderr line per sandboxEnv.forward name that
@@ -706,6 +720,24 @@ const (
 	attendedOff = "0"
 )
 
+// attendedOriginEnvName and attendedOriginHostConfig mirror
+// pipeline.AttendedOriginEnv and pipeline.AttendedOriginHostConfig (#1464);
+// keep them in sync — TestAttendedOrigin_ConstantsMirrorPipeline pins the
+// equality. The marker records how the forwarded CENCI_ATTENDED was resolved:
+// "host-config" (read from the fleet config), "pinned" (set in the launcher's
+// own environment, the dispatcher's Unattended pin) or "config-unreadable"
+// (the fleet config could not be read, so the "0" is a fallback, not the
+// host's answer). Only host-config exempts "0" from the pipeline's unattended
+// gate, so the other two must never equal it. It is launcher-owned: the CENCI_
+// reserved prefix in forwardenv.go keeps a user sandboxEnv.forward entry from
+// forwarding or overriding it.
+const (
+	attendedOriginEnvName          = "CENCI_ATTENDED_ORIGIN"
+	attendedOriginHostConfig       = "host-config"
+	attendedOriginPinned           = "pinned"
+	attendedOriginConfigUnreadable = "config-unreadable"
+)
+
 // resolveAttendedFlag resolves the value CENCI_ATTENDED is forwarded with.
 //
 // The host's ~/.config/cenci/config.json cannot simply be mounted in: the
@@ -727,22 +759,42 @@ const (
 // same file already use, so a caller scrubbing its child environment with a
 // bare `CENCI_ATTENDED=` never accidentally asserts a posture.
 //
-// A missing, malformed, or unreadable fleet config resolves to "0" rather
-// than failing: a broken fleet config must never make the sandbox unusable,
-// and "0" is exactly today's behavior for every session that predates this
-// flag.
-func resolveAttendedFlag() string {
+// A missing fleet config, or one without planning.attended, is the host
+// saying "off" and resolves to "0". A malformed or unreadable one also
+// resolves to "0" rather than failing: a broken fleet config must never make
+// the sandbox unusable, and "0" is exactly today's behavior for every session
+// that predates this flag.
+//
+// The second result is the origin forwarded as CENCI_ATTENDED_ORIGIN (#1464):
+// attendedOriginPinned when the value came from the launcher's own
+// environment, attendedOriginHostConfig when the fleet config was read and
+// gave the answer, and attendedOriginConfigUnreadable when it could not be
+// read. The pipeline's unattended gate treats "0" as a dispatcher pin unless
+// the origin is host-config, so a human `cenci open` with planning.attended
+// off is not mistaken for a dispatched session, while neither a pin nor an
+// unreadable config's fallback "0" can ever be reported as host-config
+// (default-deny: a read error is not the config saying "off"). An ambient
+// CENCI_ATTENDED_ORIGIN is never consulted.
+//
+// The third result is the read error behind attendedOriginConfigUnreadable
+// (nil otherwise), for the one-line launch warning
+// (warnAttendedConfigUnreadable); the forwarded origin already carries it, so
+// assembleExecEnv does not need it.
+func resolveAttendedFlag() (value, origin string, err error) {
 	if pinned := os.Getenv(attendedEnvName); pinned != "" {
 		if pinned == attendedOn {
-			return attendedOn
+			return attendedOn, attendedOriginPinned, nil
 		}
-		return attendedOff
+		return attendedOff, attendedOriginPinned, nil
 	}
 	attended, err := dispatch.QueryPlanningAttended("")
-	if err != nil || !attended {
-		return attendedOff
+	if err != nil {
+		return attendedOff, attendedOriginConfigUnreadable, err
 	}
-	return attendedOn
+	if !attended {
+		return attendedOff, attendedOriginHostConfig, nil
+	}
+	return attendedOn, attendedOriginHostConfig, nil
 }
 
 // assembleExecEnv builds the per-exec (not create-time) "-e"/"-u" argument
@@ -770,12 +822,16 @@ func resolveAttendedFlag() string {
 // independently: whatever the host says right now, they stay byte-identical
 // to each other.
 func assembleExecEnv(agent string, secrets secretEnvSet) []string {
+	// The read error is reported once per launch by
+	// warnAttendedConfigUnreadable; the origin marker already records it here.
+	attended, attendedOrigin, _ := resolveAttendedFlag()
 	execEnvArgs := []string{"-u", "dev",
 		"-e", "TMUX_PANE=" + os.Getenv("TMUX_PANE"),
 		"-e", "CENCI_TMUX_SOCKET=" + hostTmuxSocket(),
 		"-e", "CENCI_SANDBOX=1",
 		"-e", "CENCI_SANDBOX_AGENT=" + agent,
-		"-e", attendedEnvName + "=" + resolveAttendedFlag()}
+		"-e", attendedEnvName + "=" + attended,
+		"-e", attendedOriginEnvName + "=" + attendedOrigin}
 	for _, name := range secrets.forwardNames(agent) {
 		execEnvArgs = appendSecretEnvPassthrough(execEnvArgs, name)
 	}

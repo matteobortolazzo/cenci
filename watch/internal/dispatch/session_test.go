@@ -22,10 +22,12 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/pipeline"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/run"
 	"github.com/matteobortolazzo/cenci/watch/v2/pkg/watch"
 )
@@ -124,12 +126,10 @@ func TestSessionGate_MissingSentinelDirectlyDetectable(t *testing.T) {
 	}
 }
 
-// TestSessionGate_MissingSentinelDirectlyDetectable_ProbeError covers the
-// other half of the AC's "missing" classification: a non-empty session for
-// which HasSession itself errors (rather than cleanly reporting absent)
-// classifies identically -- (false, err) and (false, nil) both land in
-// "missing".
-func TestSessionGate_MissingSentinelDirectlyDetectable_ProbeError(t *testing.T) {
+// TestSessionGate_ProbeFailedSentinelDirectlyDetectable: a non-empty session
+// for which HasSession itself errors is "could not check", not "absent"
+// (#1464) -- it wraps ErrSessionProbeFailed and never ErrSessionMissing.
+func TestSessionGate_ProbeFailedSentinelDirectlyDetectable(t *testing.T) {
 	stubRunFn(t, func(run.Opts, run.Controller) error {
 		t.Fatal("a repo whose session probe errored must never spawn")
 		return nil
@@ -143,8 +143,8 @@ func TestSessionGate_MissingSentinelDirectlyDetectable_ProbeError(t *testing.T) 
 	prior := 0
 
 	_, err := applyDispatch(cfg, dispatchableDeps(now), ctrl, mut, false, io.Discard, &prior)
-	if !errors.Is(err, ErrSessionMissing) {
-		t.Fatalf("applyDispatch err = %v, want errors.Is(err, ErrSessionMissing)", err)
+	if !errors.Is(err, ErrSessionProbeFailed) || errors.Is(err, ErrSessionMissing) {
+		t.Fatalf("applyDispatch err = %v, want errors.Is(err, ErrSessionProbeFailed) and not ErrSessionMissing", err)
 	}
 }
 
@@ -184,6 +184,7 @@ func TestApplyDispatchRoutesEachRepoToItsOwnSession(t *testing.T) {
 		Now:         now,
 		CurrentUser: "octocat",
 	}
+	authorizedAll(deps.Tickets, deps.Plans)
 
 	if _, err := applyDispatch(cfg, deps, ctrl, mut, false, io.Discard, &prior); err != nil {
 		t.Fatalf("applyDispatch returned unexpected error: %v", err)
@@ -238,6 +239,7 @@ func TestApplyDispatchIsolatesUnconfiguredRepoFromLiveRepo(t *testing.T) {
 		Now:         now,
 		CurrentUser: "octocat",
 	}
+	authorizedAll(deps.Tickets, deps.Plans)
 
 	_, err := applyDispatch(cfg, deps, ctrl, mut, false, io.Discard, &prior)
 	if !errors.Is(err, ErrSessionUnconfigured) {
@@ -291,6 +293,7 @@ func TestApplyDispatchRealErrorSurvivesAlongsideSessionSentinel(t *testing.T) {
 		Now:         now,
 		CurrentUser: "octocat",
 	}
+	authorizedAll(deps.Tickets, deps.Plans)
 
 	_, err := applyDispatch(cfg, deps, ctrl, mut, false, io.Discard, &prior)
 	if !errors.Is(err, ErrSessionUnconfigured) {
@@ -558,11 +561,11 @@ esac
 
 // -- Dry-run ----------------------------------------------------------------
 
-// TestRunOnceDryRun_NoSessionsConfigured_NoProbesAndUnsetInTable covers the
-// AC's "cenci dispatch --dry-run still prints its decision table with no
-// sessions configured -- it resolves nothing, probes nothing, and spawns
-// nothing" requirement.
-func TestRunOnceDryRun_NoSessionsConfigured_NoProbesAndUnsetInTable(t *testing.T) {
+// TestRunOnceDryRun_NoSessionsConfigured_NoProbesAndUnconfiguredSkip:
+// `--dry-run --once` still prints its decision table with no sessions
+// configured, probes nothing and spawns nothing, and (#1464) reports the
+// config-known `session unconfigured` as the ticket's skip reason.
+func TestRunOnceDryRun_NoSessionsConfigured_NoProbesAndUnconfiguredSkip(t *testing.T) {
 	mainSyncGitEnv(t)
 	serveChainSnapshot(t, watch.StateSnapshot{}) // reachable, idle daemon, so o/r#42 actually reaches ActionDispatch
 	local, _ := initOriginAndLocal(t)
@@ -587,11 +590,116 @@ func TestRunOnceDryRun_NoSessionsConfigured_NoProbesAndUnsetInTable(t *testing.T
 	if len(ctrl.hasSessionCalls) != 0 {
 		t.Errorf("expected zero HasSession probes on dry-run, got %v", ctrl.hasSessionCalls)
 	}
-	if len(decisions) != 1 || decisions[0].Action != ActionDispatch {
-		t.Fatalf("decisions = %+v, want a single ActionDispatch decision", decisions)
+	assertDecisions(t, decisions, []wantDecision{{42, ActionSkip, "session unconfigured", ""}})
+	if !strings.Contains(buf.String(), "o/r#42 skip: session unconfigured") {
+		t.Errorf("expected the decision table to show the session unconfigured skip, got %q", buf.String())
 	}
-	if !strings.Contains(buf.String(), "(unset)") {
-		t.Errorf("expected the decision table to show the unconfigured session as (unset), got %q", buf.String())
+}
+
+// -- #1464: session eligibility resolved before Decide ----------------------
+
+// recordClears swaps clearLaunchFn for a counter of the tickets it would clear.
+func recordClears(t *testing.T) *[]string {
+	t.Helper()
+	var cleared []string
+	restore := clearLaunchFn
+	clearLaunchFn = func(o pipeline.ArtifactOpts) error {
+		cleared = append(cleared, o.ID)
+		return nil
+	}
+	t.Cleanup(func() { clearLaunchFn = restore })
+	return &cleared
+}
+
+// TestSessionGate_ThreeDistinctFailures: a missing repos[].session, an absent
+// configured session and a HasSession error give three distinct reasons and
+// three distinct sentinels, each with zero EditLabels and zero launch-state
+// clears for the failed repo.
+func TestSessionGate_ThreeDistinctFailures(t *testing.T) {
+	sentinels := []error{ErrSessionUnconfigured, ErrSessionMissing, ErrSessionProbeFailed}
+	tests := []struct {
+		name     string
+		session  string
+		ctrl     func(t *testing.T) *sessionProbeController
+		reason   string
+		sentinel error
+		remedy   string
+	}{
+		{"unconfigured", "", func(t *testing.T) *sessionProbeController {
+			return &sessionProbeController{t: t}
+		}, "session unconfigured", ErrSessionUnconfigured, "set repos[].session in"},
+		{"absent", "ghost", func(t *testing.T) *sessionProbeController {
+			return &sessionProbeController{t: t, live: map[string]bool{}}
+		}, "session absent", ErrSessionMissing, "tmux new-session -d -s"},
+		{"probe error", "ghost", func(t *testing.T) *sessionProbeController {
+			return &sessionProbeController{t: t, probeErrs: map[string]error{"ghost": errors.New("tmux: lost server")}}
+		}, "session probe failed", ErrSessionProbeFailed, "tmux: lost server"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			failOnSpawn(t)
+			cleared := recordClears(t)
+			for _, deps := range []dispatchDeps{dispatchableDeps(time.Now()), resumeDispatchDeps(time.Now())} {
+				cfg := testConfig()
+				cfg.Path = "/cfg/config.json"
+				cfg.Repos = []RepoConfig{{Repo: "o/r", Dir: t.TempDir(), Session: tt.session}}
+				mut := &fakeMutator{}
+				var buf bytes.Buffer
+				decisions, err := applyDispatch(cfg, deps, tt.ctrl(t), mut, false, &buf, nil)
+				assertDecisions(t, decisions, []wantDecision{{42, ActionSkip, tt.reason, ""}})
+				for _, s := range sentinels {
+					if got, want := errors.Is(err, s), s == tt.sentinel; got != want {
+						t.Errorf("errors.Is(err, %v) = %v, want %v (err = %v)", s, got, want, err)
+					}
+				}
+				if len(mut.labelEdits) != 0 {
+					t.Errorf("EditLabels calls = %+v, want none", mut.labelEdits)
+				}
+				if !strings.Contains(buf.String(), tt.remedy) {
+					t.Errorf("log missing the repo's remedy %q:\n%s", tt.remedy, buf.String())
+				}
+			}
+			if len(*cleared) != 0 {
+				t.Errorf("launch-state clears = %v, want none", *cleared)
+			}
+		})
+	}
+}
+
+// TestSessionGate_ErrorAndFalseInSamePass: a HasSession error for one repo and
+// false for another in the same pass stay two distinct reasons and sentinels.
+func TestSessionGate_ErrorAndFalseInSamePass(t *testing.T) {
+	failOnSpawn(t)
+	cfg := testConfig()
+	cfg.Repos = []RepoConfig{{Repo: "o/a", Session: "a-work"}, {Repo: "o/b", Session: "b-work"}}
+	ctrl := &sessionProbeController{t: t, live: map[string]bool{"b-work": false}, probeErrs: map[string]error{"a-work": errors.New("tmux: timeout")}}
+	decisions, err := applyDispatch(cfg, plannedAcross(time.Now(), repoTicket{"o/a", 1}, repoTicket{"o/b", 2}), ctrl, &fakeMutator{}, false, io.Discard, nil)
+	assertDecisions(t, decisions, []wantDecision{{1, ActionSkip, "session probe failed", ""}, {2, ActionSkip, "session absent", ""}})
+	if !errors.Is(err, ErrSessionProbeFailed) || !errors.Is(err, ErrSessionMissing) {
+		t.Errorf("err = %v, want both ErrSessionProbeFailed and ErrSessionMissing", err)
+	}
+	if errors.Is(err, ErrSessionUnconfigured) {
+		t.Errorf("err = %v, must not wrap ErrSessionUnconfigured", err)
+	}
+}
+
+// TestSessionGate_ProbeAndSpawnUseTrimmedConfiguredSession: both the
+// eligibility probe and the spawn use the trimmed repos[].session, on the
+// default socket; ctrl.CurrentSession is never called (sessionProbeController
+// fails the test if it is).
+func TestSessionGate_ProbeAndSpawnUseTrimmedConfiguredSession(t *testing.T) {
+	spawns := captureSpawns(t)
+	cfg := testConfig()
+	cfg.Repos = []RepoConfig{{Repo: "o/r", Session: "  work  "}}
+	ctrl := &sessionProbeController{t: t, live: map[string]bool{"work": true}}
+	if _, err := applyDispatch(cfg, dispatchableDeps(time.Now()), ctrl, &fakeMutator{}, false, io.Discard, nil); err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if got, want := ctrl.hasSessionCalls, []string{"work"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("HasSession calls = %v, want %v", got, want)
+	}
+	if got, want := spawnIdentities(*spawns), []string{"42@work"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("spawns = %v, want %v", got, want)
 	}
 }
 

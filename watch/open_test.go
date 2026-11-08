@@ -3532,11 +3532,15 @@ func TestOpenClaude_ForwardsResolvedAttendedFlag(t *testing.T) {
 		name        string
 		fleetConfig string
 		want        string
+		// wantOrigin, when set, is the CENCI_ATTENDED_ORIGIN the attach argv
+		// must carry (#1464: an unreadable planning.attended is never
+		// reported as host-config).
+		wantOrigin string
 	}{
 		{name: "attended on", fleetConfig: `{"planning": {"attended": true}}`, want: "CENCI_ATTENDED=1"},
 		{name: "attended off", fleetConfig: `{"planning": {"attended": false}}`, want: "CENCI_ATTENDED=0"},
 		{name: "no fleet config", fleetConfig: "", want: "CENCI_ATTENDED=0"},
-		{name: "non-bool attended value", fleetConfig: `{"planning": {"attended": "yes"}}`, want: "CENCI_ATTENDED=0"},
+		{name: "non-bool attended value", fleetConfig: `{"planning": {"attended": "yes"}}`, want: "CENCI_ATTENDED=0", wantOrigin: "CENCI_ATTENDED_ORIGIN=config-unreadable"},
 	}
 
 	for _, tc := range cases {
@@ -3560,6 +3564,9 @@ func TestOpenClaude_ForwardsResolvedAttendedFlag(t *testing.T) {
 			line := attachLine(t, callLogLines(t, callLog))
 			if !strings.Contains(line, "-e "+tc.want) {
 				t.Errorf("attach exec args missing %q; got:\n%s", "-e "+tc.want, line)
+			}
+			if tc.wantOrigin != "" && !strings.Contains(line, "-e "+tc.wantOrigin) {
+				t.Errorf("attach exec args missing %q; got:\n%s", "-e "+tc.wantOrigin, line)
 			}
 		})
 	}

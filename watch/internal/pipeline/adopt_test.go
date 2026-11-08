@@ -32,7 +32,9 @@ package pipeline
 // Run/mustSeedState/loadState surface.
 
 import (
+	"bytes"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -462,5 +464,83 @@ func TestAdopt_InvokesCommandSeamZeroTimes(t *testing.T) {
 	}
 	if len(*calls) != 0 {
 		t.Errorf("command seam invocations = %v, want none -- adoption must be a purely local/offline decision (no gh/git freshness re-check)", *calls)
+	}
+}
+
+// -- #1464: adoption hands off to the authorization gate -------------------------
+
+// TestAdopt_UnattendedSelfAdopt_WithNoRecord_IsRefused pins the edge case
+// where an unattended `plan --approve` would self-adopt a pre-tracking plan:
+// the plan file alone is not a human review, so with no authorization record
+// the call is refused, the persisted stage stays put and nothing is saved.
+func TestAdopt_UnattendedSelfAdopt_WithNoRecord_IsRefused(t *testing.T) {
+	setUnattended(t)
+	for _, stage := range []Stage{StageNew, StagePrepared} {
+		t.Run(string(stage), func(t *testing.T) {
+			repoRoot := t.TempDir()
+			stateDir := t.TempDir()
+			mustWriteValidAdoptPlan(t, repoRoot, "42", "add-thing")
+			statePath := filepath.Join(stateDir, "42.json")
+			if stage != StageNew {
+				mustSeedState(t, stateDir, "42", stage)
+			}
+			var before []byte
+			if stage != StageNew {
+				var err error
+				if before, err = os.ReadFile(statePath); err != nil {
+					t.Fatalf("read state: %v", err)
+				}
+			}
+
+			out, err := Run(Opts{Stage: "plan", ID: "42", Approve: true, RepoRoot: repoRoot, StateDir: stateDir})
+			if !errors.Is(err, ErrAuthorizationUnrecorded) {
+				t.Fatalf("error = %v, want errors.Is(_, ErrAuthorizationUnrecorded)", err)
+			}
+			if len(out.Errors) == 0 {
+				t.Error("Errors = [], want the refusal in errors[]")
+			}
+			if out.State != string(stage) {
+				t.Errorf("Output.State = %q, want the persisted stage %q", out.State, stage)
+			}
+			if stage == StageNew {
+				if _, serr := os.Stat(statePath); !errors.Is(serr, os.ErrNotExist) {
+					t.Errorf("state file stat err = %v, want none created by a refused adoption", serr)
+				}
+				return
+			}
+			after, rerr := os.ReadFile(statePath)
+			if rerr != nil || !bytes.Equal(before, after) {
+				t.Errorf("state file changed on a refused adoption (read err %v)", rerr)
+			}
+		})
+	}
+}
+
+// TestAdopt_AttendedSelfAdopt_RecordsHumanForThePlan is the attended
+// equivalent: adoption proceeds and the attended launch is recorded as the
+// human review of those exact plan bytes.
+func TestAdopt_AttendedSelfAdopt_RecordsHumanForThePlan(t *testing.T) {
+	setAttended(t)
+	repoRoot := t.TempDir()
+	stateDir := t.TempDir()
+	path := mustWriteValidAdoptPlan(t, repoRoot, "42", "add-thing")
+
+	out, err := Run(Opts{Stage: "plan", ID: "42", Approve: true, RepoRoot: repoRoot, StateDir: stateDir})
+	if err != nil {
+		t.Fatalf("attended adoption: %v", err)
+	}
+	assertAdoptionWarning(t, out.Warnings, path, StageNew)
+
+	s, lerr := loadState(filepath.Join(stateDir, "42.json"))
+	if lerr != nil {
+		t.Fatalf("load state: %v", lerr)
+	}
+	content, rerr := os.ReadFile(path)
+	if rerr != nil {
+		t.Fatalf("read plan: %v", rerr)
+	}
+	rec, class := ParseAuthorization(s.Authorization)
+	if class != AuthorizationRecorded || rec.Kind != AuthorizationHuman || rec.Source != AuthorizationSourceAttendedLaunch || rec.PlanSHA256 != PlanFingerprint(string(content)) {
+		t.Errorf("record = %+v (%s), want human/attended-launch bound to the adopted plan's hash", rec, class)
 	}
 }

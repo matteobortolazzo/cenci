@@ -197,7 +197,13 @@ order_problems() {
 
 # --- Markers -------------------------------------------------------------------
 
-M_PLAN='cenci pipeline plan <id>'
+# The plan fence line is region-specific since #1464: each persist site passes
+# its own `--authorization` kind (held / trivial / lean / lean-resumed), and the
+# exact-line match pins that kind together with the call's position.
+M_PLAN_PERSIST='cenci pipeline plan <id> --authorization held'
+M_PLAN_TRIVIAL='cenci pipeline plan <id> --authorization trivial'
+M_PLAN_LEAN='cenci pipeline plan <id> --authorization lean'
+M_PLAN_RESUME='cenci pipeline plan <id> --authorization lean-resumed'
 M_LABEL='cenci pipeline label <id> --transition planned'
 M_LABEL_TRIVIAL='cenci pipeline label <id> --transition planned --trivial'
 M_ARTIFACT='cenci pipeline artifact <id> --plan'
@@ -233,11 +239,22 @@ region_of() {
 # marker sequence, pure.
 region_problems() {
   case "$1" in
-    persist) order_problems "$2" "sub:${M_GH_COMMENT}" "exact:${M_PLAN}" "exact:${M_LABEL}" "sub:${M_ARTIFACT}" ;;
-    trivial) order_problems "$2" "exact:${M_PLAN}" "exact:${M_LABEL_TRIVIAL}" "sub:${M_ARTIFACT}" "sub:${M_CONTINUE}" ;;
-    lean) order_problems "$2" "exact:${M_PLAN}" "exact:${M_LABEL_TRIVIAL}" "sub:${M_ARTIFACT}" "sub:${M_LEAN_SUMMARY}" "sub:${M_CONTINUE}" ;;
-    resume) order_problems "$2" "exact:${M_PLAN}" "exact:${M_LABEL}" "sub:${M_ARTIFACT}" ;;
+    persist) order_problems "$2" "sub:${M_GH_COMMENT}" "exact:${M_PLAN_PERSIST}" "exact:${M_LABEL}" "sub:${M_ARTIFACT}" ;;
+    trivial) order_problems "$2" "exact:${M_PLAN_TRIVIAL}" "exact:${M_LABEL_TRIVIAL}" "sub:${M_ARTIFACT}" "sub:${M_CONTINUE}" ;;
+    lean) order_problems "$2" "exact:${M_PLAN_LEAN}" "exact:${M_LABEL_TRIVIAL}" "sub:${M_ARTIFACT}" "sub:${M_LEAN_SUMMARY}" "sub:${M_CONTINUE}" ;;
+    resume) order_problems "$2" "exact:${M_PLAN_RESUME}" "exact:${M_LABEL}" "sub:${M_ARTIFACT}" ;;
     *) echo "unknown region [$1] (test bug)" ;;
+  esac
+}
+
+# plan_marker_of <persist|trivial|lean|resume> -- the region's plan fence line.
+plan_marker_of() {
+  case "$1" in
+    persist) printf '%s' "${M_PLAN_PERSIST}" ;;
+    trivial) printf '%s' "${M_PLAN_TRIVIAL}" ;;
+    lean) printf '%s' "${M_PLAN_LEAN}" ;;
+    resume) printf '%s' "${M_PLAN_RESUME}" ;;
+    *) return 1 ;;
   esac
 }
 
@@ -435,14 +452,25 @@ if require_doc CONTENT1 "${FILE1}"; then
   done
 
   # --- Self-test (a): stripping the plan fenced line must surface in every region -
-  STRIPPED="$(drop_exact_lines "${CONTENT1}" "${M_PLAN}")"
-  if [[ "${STRIPPED}" == "${CONTENT1}" ]]; then
-    fail "${FILE1} (self-test a): no exact '${M_PLAN}' line exists anywhere to strip (marker would be vacuous)"
-  fi
   for name in "${REGIONS[@]}"; do
+    plan_marker="$(plan_marker_of "${name}")"
+    STRIPPED="$(drop_exact_lines "${CONTENT1}" "${plan_marker}")"
+    if [[ "${STRIPPED}" == "${CONTENT1}" ]]; then
+      fail "${FILE1} (self-test a, ${name}): no exact '${plan_marker}' line exists anywhere to strip (marker would be vacuous)"
+      continue
+    fi
     stripped_problems="$(region_problems "${name}" "$(region_of "${STRIPPED}" "${name}")")"
-    [[ "${stripped_problems}" == *"marker not found: [${M_PLAN}]"* ]] || \
+    [[ "${stripped_problems}" == *"marker not found: [${plan_marker}]"* ]] || \
       fail "${FILE1} (self-test a, ${name}): removing the plan fenced line did not report a missing plan marker -- the checker is vacuous here"
+  done
+
+  # --- Every persist site's plan fence line carries its --authorization kind ----
+  # The bare `cenci pipeline plan <id>` fence line is retired at all four persist
+  # sites: a call without the kind records no authorization, so a held plan
+  # would stay indistinguishable from an unrecorded one (#1464).
+  for name in "${REGIONS[@]}"; do
+    BARE_LINE="$(first_exact_line_of "${REGION_TEXT[${name}]}" 'cenci pipeline plan <id>')"
+    [[ -z "${BARE_LINE}" ]] || fail "${FILE1} (${name}): bare 'cenci pipeline plan <id>' fence line must carry its --authorization kind"
   done
 else
   fail "${FILE1}: could not read file, skipping its assertions"
@@ -464,37 +492,37 @@ synthetic_doc() {
   printf '%s\n' '## Persist the Plan' '' 'Intro with `cenci pipeline plan <id> --approve` in prose.' '' '### Mark the ticket `Planned`' ''
   syn_block 'gh issue comment <number> --repo o/r --body-file x'
   printf '%s\n' '```text' '## Implementation Plan' '### Decoy' '```' ''
-  syn_calls_standard "${mode}"
+  syn_calls_standard "${mode}" "${M_PLAN_PERSIST}"
   printf '%s\n' '' '## Resume From Draft' ''
-  syn_calls_standard "${mode}"
+  syn_calls_standard "${mode}" "${M_PLAN_RESUME}"
   printf '%s\n' '```text' '## Decoy inside resume' '```' ''
   printf '%s\n' '## Lean Approval Path' ''
-  syn_calls_trivial "${mode}"
+  syn_calls_trivial "${mode}" "${M_PLAN_LEAN}"
   printf '%s\n' '8. Emit a 3-5 line status summary only.' '9. Set `hasPlanFile = true` and continue into Phase 2.' ''
   printf '%s\n' '## Trivial Fast Path' ''
-  syn_calls_trivial "${mode}"
+  syn_calls_trivial "${mode}" "${M_PLAN_TRIVIAL}"
   printf '%s\n' '8. Set `hasPlanFile = true` and continue into Phase 2.' ''
 }
 syn_calls_standard() {
   if [[ "$1" == "correct" ]]; then
-    syn_block 'cenci pipeline plan <id>'
+    syn_block "$2"
     syn_block 'cenci pipeline label <id> --transition planned'
     syn_block 'cenci pipeline artifact <id> --plan .plans/<filename>'
   else
     syn_block 'cenci pipeline label <id> --transition planned'
     syn_block 'cenci pipeline artifact <id> --plan .plans/<filename>'
-    syn_block 'cenci pipeline plan <id>'
+    syn_block "$2"
   fi
 }
 syn_calls_trivial() {
   if [[ "$1" == "correct" ]]; then
-    syn_block 'cenci pipeline plan <id>'
+    syn_block "$2"
     syn_block 'cenci pipeline label <id> --transition planned --trivial'
     syn_block 'cenci pipeline artifact <id> --plan .plans/<filename>'
   else
     syn_block 'cenci pipeline label <id> --transition planned --trivial'
     syn_block 'cenci pipeline artifact <id> --plan .plans/<filename>'
-    syn_block 'cenci pipeline plan <id>'
+    syn_block "$2"
   fi
 }
 

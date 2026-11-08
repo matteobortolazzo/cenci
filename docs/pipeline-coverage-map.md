@@ -270,6 +270,35 @@ claim to execute a live agent's questionnaire or GitHub mutations.
 | 16 | This coverage map gains a #1131 section mapping each criterion to its named test; the sync check fails closed on any token that stops resolving. | `flow/scripts/run-checks.test.sh::Case 17: Happy path -- a well-formed fixture (valid map, all tokens` |
 | 17 | Contract tests cover the class split, the decided-entry format, the decision comment, the approval value, and the attended behavior; `run-checks.sh` and `go test ./...` pass. | `flow/tests/lean-planning-contract.test.sh`, `flow/tests/plan-approval-provenance.test.sh`, `flow/tests/attended-autonomy-contract.test.sh`, `TestCheckPlan_ApprovalKeyPresent_StillHealthy` |
 
+### #1464 — unattended admission: plan-review hold, continuous dry-run, session eligibility, escalation recovery
+
+The chain tests below drive real plan persistence (`pipeline.Run` with
+`--authorization`), the real label transitions, the real
+`cenci dispatch approve` engine and real `RunOnce`/`RunReconcileOnce` passes.
+The harness pins the dispatcher's unattended posture (`CENCI_ATTENDED=0`, no
+origin marker) so the result never depends on the developer's shell.
+
+| AC | Claim | Test |
+|---|---|---|
+| Sensitive-path hold | A `## New Plan` fallback plan (`approval: pending-human`, a `held` record, +Planned −Working) is skipped with `awaiting human plan review`: zero launches, zero label edits, no stage change, and the identical result after a restart. | `TestAutonomousChain_SensitivePathFallbackHoldsPlanForHumanReview` |
+| Open Questions hold | The same hold for a plan sent to the fallback by an unresolved Open Question. | `TestAutonomousChain_OpenQuestionsFallbackHoldsPlanForHumanReview` |
+| `lean-decided` fallback hold | The same hold when the held plan's front matter reads `approval: lean-decided`. | `TestAutonomousChain_LeanDecidedFallbackHoldsPlanForHumanReview` |
+| CLI approval releases the exact plan | `cenci dispatch approve` exits 0, prints the path and 12-hex hash, and records `human`/`cli` for that hash; the next pass launches the `.plans/<file>` argument. | `TestDispatchApprove_AttendedReleasesTheExactPlan`, `TestAutonomousChain_CLIApprovalReleasesTheExactPlanThenLaunches` |
+| Changed plans need fresh approval | Changed bytes after approval skip with `plan changed since approval` and launch nothing; approving again releases. | `TestAutonomousChain_ChangedPlanAfterApprovalNeedsFreshApproval`, `TestDispatchApprove_ChangedPlanIsReleasedAgainByAFreshApproval` |
+| Unattended approve is refused | Exit 1, state byte-identical. | `TestDispatchApprove_UnattendedIsRefusedAndLeavesStateByteIdentical`, `TestApproveHeldPlan_UnattendedIsRefusedWithNoWriteAtAll` |
+| Attended launch records approval | Attended `plan --approve` over a `held` record writes `human` and advances. | `TestPipelinePlanApprove_AttendedAgainstHeldRecordsHumanAndAdvances` |
+| Unattended execution-time hold | Unattended `plan --approve` over held or changed records is refused for every start form. | `TestPipelinePlanApprove_UnattendedHold_EachStartForm` |
+| Legitimate autonomous paths still progress | `lean`, `trivial`, `lean-resumed` and `lean-decided` reach `plan_approved` unattended, and a resumed plan dispatches through the full chain. | `TestPipelinePlanApprove_UnattendedLegitimatePaths_ReachPlanApprovedInOneSession`, `TestAutonomousChain_PositiveEndToEnd` |
+| Interrupted executions and legacy records | Past `plan_approved` admits a non-held record without a hash re-check, and a missing one with `legacy approval (unrecorded provenance)`; below it, missing or broken records are held visibly. | `TestDecideAuthorizationPastApproval`, `TestDecideAuthorizationHold`, `TestApplyDispatch_LegacyApprovalNoteOnDecisionLine`, `TestApplyDispatch_AuthorizationHoldsMakeNoMutation` |
+| The hold never blocks a resume or planning pickup, and takes no slot | — | `TestDecideAuthorizationHold_NotAppliedToResumePlanningOrReplan`, `TestDecideAuthorizationHold_TakesNoCapacity` |
+| Continuous dry-run rejected | `--dry-run` with `--interval` exits 2 before loading config, with zero fake-binary calls; the neighbouring forms keep today's behaviour. | `TestDispatchDryRunInterval_RejectedWithExit2AndNoCalls`, `TestDispatchDryRunInterval_RejectedBeforeLoadingConfig`, `TestDispatchDryRunIntervalZero_IsSinglePreviewPass`, `TestDispatchDryRunOnceWithInterval_SinglePreviewPassNoMutation`, `TestDispatchDryRunFalseWithInterval_EntersLoop` |
+| Session eligibility before capacity | A bad repo's ticket never takes the only slot; three distinct failures; repeated passes; no phantom capacity; exact session targeting. | `TestApplyDispatch_HealthyRepoLaunchesAtCapOne`, `TestSessionGate_ThreeDistinctFailures`, `TestSessionGate_ErrorAndFalseInSamePass`, `TestApplyDispatch_RepeatedPassesStayHealthy`, `TestApplyDispatch_NoPhantomCapacity`, `TestSessionGate_ProbeAndSpawnUseTrimmedConfiguredSession`, `TestDecideSessionEligibility_GateOrder`, `TestRunLoop_SessionProbeFailedKeepsTicking` |
+| Dry-run session reporting | `session unconfigured` without a probe; configured sessions noted `session not probed (dry-run)`. | `TestApplyDispatchDryRun_SessionReporting` |
+| P1 | After worker death, a restarted daemon's reconcile and further restarts, an `Input Needed` ticket keeps both holds (label and awaiting-input draft); unauthorized replies resume nothing; only an authorized answer resumes. | `TestAutonomousChain_EscalationHoldsSurviveWorkerDeathRestartAndReconcile` |
+| P18 | An authorized answer posted while the daemon is stopped resumes exactly once, on the first successful pass after restart (never on a failed one). | `TestAutonomousChain_AnswerPostedWhileDaemonStoppedResumesExactlyOnce` |
+| Escalation answers stay scoped | An answer to ticket A's escalation resumes A alone: not an unanswered ticket B, not a draft anchored to A's comment and nonce, and never a `held` plan. | `TestAutonomousChain_EscalationAnswerStaysScopedToItsTicket` |
+| Dry-run resume | `--dry-run --once` shows an answered `Input Needed` ticket as a resume with zero label edits and zero spawns. | `TestAutonomousChain_DryRunOnceShowsResumeWithoutMutation`, `TestApplyDispatchDryRun_AnsweredResumeShownWithoutMutation` |
+
 ## Doc-claim coverage
 
 Per Q1/Q2's answer, scope is AC3's four authority-model claim families plus

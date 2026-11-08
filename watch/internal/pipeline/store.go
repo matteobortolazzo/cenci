@@ -11,6 +11,7 @@ package pipeline
 // which scopes every file operation to an os.Root on the state directory.
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -61,6 +62,14 @@ type State struct {
 	// Stored as a string (not time.Time) so an absent baseline round-trips
 	// as "" under omitempty.
 	TicketUpdatedAt string `json:"ticketUpdatedAt,omitempty"`
+
+	// Authorization (#1464) is the plan-authorization record, kept as raw JSON
+	// so a field this binary cannot parse still round-trips through every other
+	// state writer unchanged and reads back as "unreadable" (ParseAuthorization)
+	// instead of failing the state load. An old binary that decodes into the
+	// typed State drops the unknown field when it saves; the next reader then
+	// sees the plan as unrecorded (held visibly), never as authorized.
+	Authorization json.RawMessage `json:"authorization,omitempty"`
 }
 
 // The State.Session keys that record the sandbox launch a ticket's `working`

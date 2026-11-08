@@ -161,7 +161,7 @@ func collectRepoTickets(rc RepoConfig, sync MainSync, resolveDeps bool, out io.W
 		for i, a := range is.Assignees {
 			assignees[i] = a.Login
 		}
-		stage, probe, launch := probeStageState(rc.Dir, is.Number)
+		state := probeStageState(rc.Dir, is.Number)
 		milestone, milestoneProbe := classifyMilestone(is.Milestone)
 
 		// resolveDeps==false (the reconciler's call, #825 review fix #1) skips
@@ -195,8 +195,8 @@ func collectRepoTickets(rc RepoConfig, sync MainSync, resolveDeps bool, out io.W
 			Assignees:           assignees,
 			HasOpenPR:           openPR[is.Number],
 			Agent:               agentFromLabels(labels),
-			Stage:               stage,
-			StageProbe:          probe,
+			Stage:               state.Stage,
+			StageProbe:          state.Probe,
 			MainSync:            sync,
 			DependsOn:           dependsOn,
 			DependencyStates:    depStates,
@@ -206,7 +206,10 @@ func collectRepoTickets(rc RepoConfig, sync MainSync, resolveDeps bool, out io.W
 
 			OpenPRProbe: openPRProbe,
 
-			Launch: launch,
+			Launch: state.Launch,
+
+			Authorization:      state.Authorization,
+			AuthorizationProbe: state.AuthorizationProbe,
 
 			Milestone:      milestone,
 			MilestoneProbe: milestoneProbe,
@@ -244,39 +247,67 @@ func classifyMilestone(raw json.RawMessage) (int, MilestoneProbe) {
 // back to resolving a repo root from the daemon's own working directory,
 // which would read an unrelated repo's state.
 func probeStage(dir string, number int) (string, StageProbe) {
-	stage, probe, _ := probeStageState(dir, number)
-	return stage, probe
+	r := probeStageState(dir, number)
+	return r.Stage, r.Probe
 }
 
-// probeStageState is probeStage plus the launch recorded in the same state-file
-// read (#1292): the raw session triple (`launchId`/`container`/`runtime`),
-// verbatim and unvalidated -- resolveLaunchVerdicts re-validates it before use.
-// A read that fails (StageProbeError) or finds no state returns no launch, so
-// the collector never costs a second read per ticket.
-func probeStageState(dir string, number int) (string, StageProbe, RecordedLaunch) {
+// stageRead is everything the collector takes from one ticket's state-file
+// read.
+type stageRead struct {
+	Stage  string
+	Probe  StageProbe
+	Launch RecordedLaunch
+	// Authorization and AuthorizationProbe are the plan-authorization record
+	// (#1464), classified by pipeline.ParseAuthorization.
+	Authorization      pipeline.Authorization
+	AuthorizationProbe AuthorizationProbe
+}
+
+// probeStageState is probeStage plus the launch (#1292) and the
+// plan-authorization record (#1464) recorded in the same state-file read. The
+// launch is the raw session triple (`launchId`/`container`/`runtime`), verbatim
+// and unvalidated -- resolveLaunchVerdicts re-validates it before use. A read
+// that fails, or a file whose stage is not a known one (StageProbeError),
+// returns no launch and an unreadable authorization: a state the dispatcher
+// cannot trust can never authorize a launch. No state returns neither, so the
+// collector never costs a second read per ticket.
+func probeStageState(dir string, number int) stageRead {
 	if dir == "" {
-		return "", StageProbeAbsent, RecordedLaunch{}
+		return stageRead{Probe: StageProbeAbsent}
 	}
 	s, err := pipeline.GetArtifacts(pipeline.ArtifactOpts{ID: strconv.Itoa(number), RepoRoot: dir})
 	if err != nil {
-		return "", StageProbeError, RecordedLaunch{} // unreadable/undecodable → default-deny
+		// unreadable/undecodable → default-deny
+		return stageRead{Probe: StageProbeError, AuthorizationProbe: AuthorizationProbeUnreadable}
 	}
-	launch := RecordedLaunch{
-		ID:        s.Session[pipeline.SessionKeyLaunchID],
-		Container: s.Session[pipeline.SessionKeyContainer],
-		Runtime:   s.Session[pipeline.SessionKeyRuntime],
-	}
-	switch {
-	case s.Stage == pipeline.StageNew:
-		return string(s.Stage), StageProbeAbsent, launch // missing file AND a literal "new" both land here
-	case !pipeline.IsKnownStage(s.Stage):
+	if !pipeline.IsKnownStage(s.Stage) {
 		// e.g. "bogus", or a file with an empty/absent stage field. A
 		// StageProbeError ticket is always judged by the window-name rule, so
 		// it carries no launch.
-		return string(s.Stage), StageProbeError, RecordedLaunch{}
-	default:
-		return string(s.Stage), StageProbePresent, launch
+		return stageRead{Stage: string(s.Stage), Probe: StageProbeError, AuthorizationProbe: AuthorizationProbeUnreadable}
 	}
+	r := stageRead{
+		Stage: string(s.Stage),
+		Probe: StageProbePresent,
+		Launch: RecordedLaunch{
+			ID:        s.Session[pipeline.SessionKeyLaunchID],
+			Container: s.Session[pipeline.SessionKeyContainer],
+			Runtime:   s.Session[pipeline.SessionKeyRuntime],
+		},
+	}
+	if s.Stage == pipeline.StageNew {
+		r.Probe = StageProbeAbsent // missing file AND a literal "new" both land here
+	}
+	auth, class := pipeline.ParseAuthorization(s.Authorization)
+	switch class {
+	case pipeline.AuthorizationAbsent:
+		r.AuthorizationProbe = AuthorizationProbeAbsent
+	case pipeline.AuthorizationRecorded:
+		r.Authorization, r.AuthorizationProbe = auth, AuthorizationProbeRecorded
+	default:
+		r.AuthorizationProbe = AuthorizationProbeUnreadable
+	}
+	return r
 }
 
 func agentFromLabels(labels []string) string {
@@ -458,6 +489,7 @@ func buildPlan(repo string, e planfile.Entry) Plan {
 		StalenessPaths:      planfile.SplitPaths(fm["stalenessPaths"]),
 		EscalationNonce:     validEscalationNonce(fm["escalationNonce"]),
 		EscalationCommentID: validEscalationCommentID(fm["escalationCommentId"]),
+		Sha256:              pipeline.PlanFingerprint(e.Content),
 	}
 }
 

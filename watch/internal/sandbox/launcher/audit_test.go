@@ -1602,6 +1602,44 @@ func TestAudit_ConfiguredForward_AttendedStaysNonSecret(t *testing.T) {
 	}
 }
 
+// TestAudit_ReportsAttendedOriginMarker covers #1464: the origin marker
+// forwarded beside CENCI_ATTENDED changes how the pipeline's unattended gate
+// treats the session, so Audit reports it by name as a non-secret posture
+// forward, for a host-config launch and a dispatcher-pinned one alike.
+func TestAudit_ReportsAttendedOriginMarker(t *testing.T) {
+	for name, pin := range map[string]string{"host-config launch": "", "pinned launch": "0"} {
+		t.Run(name, func(t *testing.T) {
+			repo := newAuditTestRepo(t)
+			t.Setenv("HOME", t.TempDir())
+			t.Chdir(repo)
+			setAllSecretHostKeys(t, func(string) string { return "" })
+			writeFleetConfig(t, `{"planning":{"attended":false}}`)
+			if pin == "" {
+				clearAttendedEnv(t)
+			} else {
+				t.Setenv("CENCI_ATTENDED", pin)
+			}
+
+			posture, err := auditEngine().Audit(Options{Agent: "claude"})
+			if err != nil {
+				t.Fatalf("Audit: %v", err)
+			}
+			var marker *ForwardedEnvVar
+			for i, f := range posture.ForwardedEnv {
+				if f.Name == "CENCI_ATTENDED_ORIGIN" {
+					marker = &posture.ForwardedEnv[i]
+				}
+			}
+			if marker == nil {
+				t.Fatalf("forwardedEnv lacks CENCI_ATTENDED_ORIGIN: %+v", posture.ForwardedEnv)
+			}
+			if marker.Secret {
+				t.Errorf("forwardedEnv CENCI_ATTENDED_ORIGIN Secret = true, want false")
+			}
+		})
+	}
+}
+
 // TestAudit_MalformedForwardConfig_HardErrorBeforeAnyRuntimeCall: Audit fails
 // closed on a malformed sandboxEnv.forward with a plain error, and (the engine
 // has a resolved runtime) makes no ps/inspect call before failing.

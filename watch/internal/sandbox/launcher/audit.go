@@ -651,8 +651,14 @@ func classifyEnvNames(args []string, secrets secretEnvSet) []EnvVarName {
 // same kind of identity forward: Launch adds them outside assembleExecEnv (only
 // after the pane tag succeeds), so audit never sees them, and the only place
 // they surface is the dry-run attach argv.
+//
+// CENCI_ATTENDED_ORIGIN (#1464) belongs here too: it records whether that
+// attended value was pinned by the dispatcher or read from the host config,
+// which decides whether the pipeline's unattended gate treats a "0" session as
+// dispatched.
 var postureEnvVarNames = map[string]bool{
-	attendedEnvName: true,
+	attendedEnvName:       true,
+	attendedOriginEnvName: true,
 }
 
 // isSecretEnvName reports whether name is a registered secret env var name

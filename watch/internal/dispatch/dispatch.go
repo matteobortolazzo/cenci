@@ -230,14 +230,14 @@ func RunOnce(cfg Config, ctrl run.Controller, mut TicketMutator, dryRun bool, ou
 		OOMBackoffSince:           oomBackoffSince,
 	}, ctrl, mut, dryRun, out, prior)
 
-	// #927: the per-repo session gate's sentinel(s) must outrank a same-pass
+	// #927, #1464: the per-repo session sentinel(s) must outrank a same-pass
 	// collectErr (a likely co-occurrence -- both can be driven by the same
 	// underlying outage), mirroring RunReconcileOnce's documented
 	// ErrReconcileStateUnreadable special-case (watch/docs/dispatch-
 	// reconcile.md). errors.Join (rather than returning applyErr alone)
 	// keeps collectErr's own diagnostic text reachable too, while
-	// errors.Is(..., ErrSessionUnconfigured/ErrSessionMissing) still finds
-	// the sentinel through the join.
+	// errors.Is(..., ErrSessionUnconfigured/ErrSessionMissing/
+	// ErrSessionProbeFailed) still finds the sentinel through the join.
 	if isSessionSentinel(applyErr) {
 		return decisions, errors.Join(applyErr, collectErr)
 	}
@@ -364,6 +364,12 @@ func applyDispatch(cfg Config, deps dispatchDeps, ctrl run.Controller, mut Ticke
 		priorVal = *prior
 	}
 
+	// Per-repo session eligibility (#1464), resolved before Decide so the gate
+	// sits ahead of the cap check and an ineligible repo never takes a slot. A
+	// dry run probes nothing (configured sessions get the not-probed note
+	// below) but still reports an unconfigured session from config alone.
+	eligibility := resolveSessionEligibility(cfg.Repos, deps.Tickets, ctrl, dryRun, cfg.Path, out)
+
 	decisions := Decide(Inputs{
 		Tickets:                   deps.Tickets,
 		Plans:                     deps.Plans,
@@ -381,7 +387,16 @@ func applyDispatch(cfg Config, deps dispatchDeps, ctrl run.Controller, mut Ticke
 		ContainerSessionProbe:     deps.ContainerSessionProbe,
 		RepoMemory:                deps.RepoMemory,
 		OOMBackoffSince:           deps.OOMBackoffSince,
+		SessionEligibility:        eligibility,
 	})
+
+	if dryRun {
+		for i := range decisions {
+			if decisions[i].Action == ActionDispatch && sessionByRepo[decisions[i].Ticket.Repo] != "" {
+				decisions[i].Note = joinNotes(decisions[i].Note, noteSessionNotProbed)
+			}
+		}
+	}
 
 	// Surface the pinned model in the same log stream as the decision table so
 	// it's never silent: a dispatch pass with no Model set falls back to
@@ -396,26 +411,30 @@ func applyDispatch(cfg Config, deps dispatchDeps, ctrl run.Controller, mut Ticke
 		logf(out, "%s\n", formatDecision(d, sessionByRepo))
 	}
 
+	// A dry run returns no session sentinel (#1464): it probed nothing, and its
+	// exit code must not depend on tmux.
 	if dryRun {
 		return decisions, nil
 	}
 
-	// #927 per-repo pre-mutation gate: skips every ActionDispatch decision
-	// for a repo whose session is unconfigured or absent from tmux, before
-	// any label mutation for that repo (in particular, before the resume
-	// claim below). Runs after the dryRun return above, so dry-run probes
-	// nothing.
-	skipRepo, sessionErr := gateSessions(decisions, sessionByRepo, ctrl, cfg.Path, out)
+	// The session skips above are per-repo misconfigurations, surfaced as
+	// sentinels the caller can match (RunOnce, isLoopContinuable, passError).
+	sessionErr := sessionSkipSentinels(decisions)
 
 	var firstErr error
 	for _, d := range decisions {
-		if skipRepo[d.Ticket.Repo] {
-			continue
-		}
 		// A planning-pickup dispatch (#828) carries Plan == nil by design (no
 		// plan file exists yet) -- admit it alongside the ordinary/resume/
 		// re-plan kinds, all of which carry a non-nil Plan.
 		if d.Action != ActionDispatch || (d.Plan == nil && !d.Planning) {
+			continue
+		}
+		// Spawn only into a session this pass proved live (#1464): Decide's map
+		// miss is permissive, so a dispatch whose repo has no explicit
+		// SessionEligible verdict is logged and left untouched -- no clear, no
+		// label edit, no spawn -- rather than launched unverified.
+		if eligibility[d.Ticket.Repo] != SessionEligible {
+			logf(out, "dispatch: #%d not spawned: no session verdict for %s this pass\n", d.Ticket.Number, d.Ticket.Repo)
 			continue
 		}
 
@@ -465,9 +484,10 @@ func applyDispatch(cfg Config, deps dispatchDeps, ctrl run.Controller, mut Ticke
 			Agent:        d.Agent,
 			Model:        cfg.Model,
 			// Session (#927): resolved from this decision's own repo's
-			// repos[].session -- the gate above already proved it live for
-			// every repo reaching this point. The dispatch spawn path never
-			// consults ctrl.CurrentSession(); config is the only source.
+			// trimmed repos[].session -- the same string
+			// resolveSessionEligibility proved live this pass. The dispatch
+			// spawn path never consults ctrl.CurrentSession(); config is the
+			// only source.
 			Session: sessionByRepo[d.Ticket.Repo],
 			Dir:     dirByRepo[d.Ticket.Repo],
 			// Unattended (#1087): every dispatched session pins
@@ -516,9 +536,9 @@ func applyDispatch(cfg Config, deps dispatchDeps, ctrl run.Controller, mut Ticke
 			}
 		}
 	}
-	// #927: the session gate's sentinel(s) must remain discoverable via
-	// errors.Is(err, ErrSessionUnconfigured/ErrSessionMissing) even when a
-	// live-session repo in the same pass hit an unrelated spawn/claim
+	// #927: the session sentinel(s) must remain discoverable via errors.Is
+	// (ErrSessionUnconfigured/ErrSessionMissing/ErrSessionProbeFailed) even
+	// when a live-session repo in the same pass hit an unrelated spawn/claim
 	// failure -- but that real per-ticket failure must never be silently
 	// discarded just because a sentinel also fired for a different repo
 	// (previously firstNonNil picked only one of the two, stranding a
@@ -542,9 +562,9 @@ var errConfigReload = errors.New("loading dispatch config")
 // the process exits.
 func RunLoop(configPath string, ctrl run.Controller, mut TicketMutator, interval time.Duration, out io.Writer, modelOverride string) error {
 	prior := 0
-	// #927: a session-gate sentinel is a per-repo misconfiguration, not a
+	// #927: a session sentinel is a per-repo misconfiguration, not a
 	// loop-fatal condition -- the pass that produced it already logged the
-	// affected repo(s) via gateSessions, so RunLoop just keeps ticking
+	// affected repo(s) via resolveSessionEligibility, so RunLoop just keeps ticking
 	// instead of terminating the whole fleet loop over one repo's bad
 	// config. #1385: a failed config reload (a bad hand edit of a filter, say)
 	// is the same kind of non-fatal condition -- the tick was skipped and the
@@ -565,7 +585,7 @@ func RunLoop(configPath string, ctrl run.Controller, mut TicketMutator, interval
 }
 
 // isLoopContinuable reports whether err leaves RunLoop running: a per-repo
-// session-gate sentinel (#927) or a skipped config reload (#1385).
+// session sentinel (#927, #1464) or a skipped config reload (#1385).
 func isLoopContinuable(err error) bool {
 	return isSessionSentinel(err) || errors.Is(err, errConfigReload)
 }
@@ -656,11 +676,12 @@ func logf(out io.Writer, format string, args ...any) {
 // (or "(unset)") so the table is self-explanatory. The ` skip:` / ` dispatch `
 // substrings are load-bearing: downstream consumers (lazyboards) classify
 // lines by matching on them. Skip lines are unchanged -- they never render a
-// session.
+// session. A Decision.Note (#1464) follows the reason after "; ".
 func formatDecision(d Decision, sessionByRepo map[string]string) string {
+	reason := joinNotes(d.Reason, d.Note)
 	if d.Action == ActionDispatch && d.Plan != nil {
 		return fmt.Sprintf("%s#%d dispatch (%s, %s, session %s): %s",
-			d.Ticket.Repo, d.Ticket.Number, d.Agent, filepath.Base(d.Plan.Path), sessionLabel(sessionByRepo[d.Ticket.Repo]), d.Reason)
+			d.Ticket.Repo, d.Ticket.Number, d.Agent, filepath.Base(d.Plan.Path), sessionLabel(sessionByRepo[d.Ticket.Repo]), reason)
 	}
 	// A planning-pickup dispatch (#828) carries Plan == nil by design -- no
 	// plan file exists yet -- so it needs its own branch rather than falling
@@ -668,15 +689,32 @@ func formatDecision(d Decision, sessionByRepo map[string]string) string {
 	// lazyboards " dispatch " substring contract for this dispatch kind.
 	if d.Action == ActionDispatch && d.Planning {
 		return fmt.Sprintf("%s#%d dispatch (%s, session %s): %s",
-			d.Ticket.Repo, d.Ticket.Number, d.Agent, sessionLabel(sessionByRepo[d.Ticket.Repo]), d.Reason)
+			d.Ticket.Repo, d.Ticket.Number, d.Agent, sessionLabel(sessionByRepo[d.Ticket.Repo]), reason)
 	}
-	return fmt.Sprintf("%s#%d skip: %s", d.Ticket.Repo, d.Ticket.Number, d.Reason)
+	return fmt.Sprintf("%s#%d skip: %s", d.Ticket.Repo, d.Ticket.Number, reason)
+}
+
+// noteSessionNotProbed is applyDispatch's dry-run Decision.Note (#1464) for a
+// dispatch into a configured session: a dry run never calls HasSession, so the
+// preview cannot say whether the session exists.
+const noteSessionNotProbed = "session not probed (dry-run)"
+
+// joinNotes appends note to s after "; ", or returns s alone for an empty note.
+func joinNotes(s, note string) string {
+	switch {
+	case note == "":
+		return s
+	case s == "":
+		return note
+	default:
+		return s + "; " + note
+	}
 }
 
 // sessionLabel renders a repo's configured session for formatDecision: the
 // literal "(unset)" for an empty/whitespace-only session (the exact token
 // the #927 AC's dry-run test asserts), else the %q-quoted session name --
-// matching session.go's gateSessions log-line convention -- so a session name
+// matching session.go's resolveSessionEligibility log-line convention -- so a session name
 // containing a newline or the literal " skip: "/" dispatch " substrings can
 // never forge or break the parsed decision-line contract lazyboards depends
 // on.

@@ -3,8 +3,9 @@ package pipeline
 import "testing"
 
 // The `approval` front-matter key (#1050) records which path approved a plan
-// — `human`, `lean`, `trivial`, `lean-resumed`, or `lean-decided` (#1131: a
-// plan carrying at least one planner `decided:` entry). It is written by flow's
+// — `human` (legacy, no longer written), `pending-human` (#1464: a saved plan
+// still held for human review), `lean`, `trivial`, `lean-resumed`, or
+// `lean-decided` (#1131: a plan carrying at least one planner `decided:` entry). It is written by flow's
 // `## Persist the Plan` and read by no Go consumer: ParseFrontMatter collects
 // front matter into a flat map and parseAndValidatePlan reads only the keys
 // it knows, so an unrecognized key is inert by construction.
@@ -19,7 +20,7 @@ import "testing"
 // TestCheckPlan_ApprovalKeyPresent_StillHealthy pins the forward direction:
 // a plan carrying the new key validates exactly as one without it.
 func TestCheckPlan_ApprovalKeyPresent_StillHealthy(t *testing.T) {
-	for _, approval := range []string{"human", "lean", "trivial", "lean-resumed", "lean-decided"} {
+	for _, approval := range []string{"human", "pending-human", "lean", "trivial", "lean-resumed", "lean-decided"} {
 		t.Run(approval, func(t *testing.T) {
 			repoRoot := t.TempDir()
 			initGitRepoWithCommit(t, repoRoot)

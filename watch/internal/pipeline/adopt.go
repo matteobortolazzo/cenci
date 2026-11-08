@@ -22,6 +22,13 @@ package pipeline
 // Reuses the shared planfile.Read/Select identity contract (#884) and
 // parseAndValidatePlan validation verbatim -- this file does not
 // reimplement front-matter parsing or directory-enumeration logic.
+//
+// Adoption decides the stage only; since #1464 it hands off to the plan
+// authorization gate (authorization.go's applyApproveGate), which runs right
+// after transition(): an adopted plan is a real forward transition, so an
+// unattended run with no authorization record is refused (a plan file on disk
+// is not a human review), while an attended one records `human`
+// (attended-launch) for the adopted plan's bytes.
 
 import (
 	"fmt"

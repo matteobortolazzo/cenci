@@ -1015,7 +1015,9 @@ if require_content PHASE1_CONTENT "${PHASE1_PLAN}" "phase-1-plan.md"; then
   CS_MENTION='post the `## Decision Comment`'
   CS_ORDER_MARKER='after the `planComment` comment and before the `cenci pipeline plan <id>` call and the label call'
   CS_NONBLOCKING_MARKER='A failed decision comment is non-blocking: report it and continue, with no retry loop'
-  PLAN_CMD_LINE='cenci pipeline plan <id>'
+  PLAN_CMD_LINE_LEAN='cenci pipeline plan <id> --authorization lean'
+  PLAN_CMD_LINE_RESUME='cenci pipeline plan <id> --authorization lean-resumed'
+  PLAN_CMD_LINE_PERSIST='cenci pipeline plan <id> --authorization held'
 
   # --- new ## Decision Comment section --------------------------------------
   DC_BANNER1_MARKER='> 🤖 **cenci** — planner decisions posted by `/cenci:implement` (lean planning — decide and notify).'
@@ -1113,7 +1115,7 @@ if require_content PHASE1_CONTENT "${PHASE1_PLAN}" "phase-1-plan.md"; then
       assert_contains_ws "${LEAN_STEP4}" "${CS_NONBLOCKING_MARKER}" \
         "phase-1-plan.md (## Lean Approval Path) step 4 must restate that a failed decision comment is non-blocking"
     fi
-    assert_mention_precedes_line "${LEAN_1131}" "${CS_MENTION}" "${PLAN_CMD_LINE}" \
+    assert_mention_precedes_line "${LEAN_1131}" "${CS_MENTION}" "${PLAN_CMD_LINE_LEAN}" \
       "phase-1-plan.md (## Lean Approval Path) the decision comment must be posted before the cenci pipeline plan <id> call of step 5 (AC4)"
     if require_block LEAN_STEP8 "${LEAN_1131}" '8. Emit a 3-5 line status summary only' "phase-1-plan.md (## Lean Approval Path) step 8"; then
       assert_contains_ws "${LEAN_STEP8}" "${LEAN_STEP8_MARKER}" \
@@ -1206,7 +1208,7 @@ if require_content PHASE1_CONTENT "${PHASE1_PLAN}" "phase-1-plan.md"; then
       assert_contains_ws "${RESUME_STEP7}" "${RESUME_STEP7_OVERFLOW_MARKER}" \
         "phase-1-plan.md (## Resume From Draft) step 7 must post the decisions an earlier escalating run left decided in the draft (Q1)"
     fi
-    assert_mention_precedes_line "${RESUME_1131}" "${CS_MENTION}" "${PLAN_CMD_LINE}" \
+    assert_mention_precedes_line "${RESUME_1131}" "${CS_MENTION}" "${PLAN_CMD_LINE_RESUME}" \
       "phase-1-plan.md (## Resume From Draft) the decision comment must be posted before the cenci pipeline plan <id> call of step 7 (AC4)"
     assert_contains_ws "${RESUME_1131}" 'The draft'"'"'s `decided:` entries are passed to the planner as fixed decisions too' \
       "phase-1-plan.md (## Resume From Draft) step 5 must pass the draft's decided: entries to the planner as fixed decisions on the stale/unknown path"
@@ -1245,7 +1247,7 @@ if require_content PHASE1_CONTENT "${PHASE1_PLAN}" "phase-1-plan.md"; then
         "phase-1-plan.md (## Persist the Plan, Mark-Planned) must cover the lean ## New Plan fallback (Q2)"
       assert_contains_ws "${MARK_BODY}" "${PERSIST_TICKETLESS_MARKER}" \
         "phase-1-plan.md (## Persist the Plan, Mark-Planned) must record decisions in the plan and PR body in ticketless mode with no comment (ticket assumption)"
-      assert_mention_precedes_line "${MARK_BODY}" "${CS_MENTION}" "${PLAN_CMD_LINE}" \
+      assert_mention_precedes_line "${MARK_BODY}" "${CS_MENTION}" "${PLAN_CMD_LINE_PERSIST}" \
         "phase-1-plan.md (## Persist the Plan, Mark-Planned) the decision comment must be posted before the cenci pipeline plan <id> call (AC4)"
     fi
   fi

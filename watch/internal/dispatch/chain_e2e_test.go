@@ -256,11 +256,20 @@ func TestAutonomousChain_PositiveEndToEnd(t *testing.T) {
 		{"status", "planned"},
 		{"planCommitSha", freshSHA},
 	})
-	if _, err := pipeline.Run(pipeline.Opts{Stage: "plan", ID: "101", RepoRoot: h.local}); err != nil {
-		t.Fatalf("phase D: pipeline plan (bare) failed: %v", err)
+	// #1464: the resumed session persists its plan the way Phase 1's
+	// `## Resume From Draft` does -- `plan --authorization lean-resumed` -- so
+	// the unattended `--approve` gate (the harness pins CENCI_ATTENDED=0) finds
+	// a non-held record bound to these exact plan bytes and admits it.
+	if _, err := pipeline.Run(pipeline.Opts{Stage: "plan", ID: "101", RepoRoot: h.local, Authorization: string(pipeline.AuthorizationLeanResumed)}); err != nil {
+		t.Fatalf("phase D: pipeline plan --authorization lean-resumed failed: %v", err)
 	}
 	if _, err := pipeline.Run(pipeline.Opts{Stage: "plan", Approve: true, ID: "101", RepoRoot: h.local}); err != nil {
 		t.Fatalf("phase D: pipeline plan --approve failed: %v", err)
+	}
+	if st, err := pipeline.GetArtifacts(pipeline.ArtifactOpts{ID: "101", RepoRoot: h.local}); err != nil {
+		t.Fatalf("phase D: GetArtifacts reload after --approve failed: %v", err)
+	} else if a, class := pipeline.ParseAuthorization(st.Authorization); class != pipeline.AuthorizationRecorded || a.Kind != pipeline.AuthorizationLeanResumed {
+		t.Fatalf("phase D: authorization after --approve = %+v (%s), want an unchanged lean-resumed record", a, class)
 	}
 	if _, err := pipeline.ApplyLabelTransition(pipeline.LabelOpts{
 		ID: "101", RepoRoot: h.local, RepoSlug: h.repo, Transition: "planned",
@@ -271,7 +280,9 @@ func TestAutonomousChain_PositiveEndToEnd(t *testing.T) {
 	// -- E. Implementation produces a PR tied to the granted ticket ----------
 	decisions, _ = chainRunOnce(t, cfg, mut, false)
 	implDecision := decisionFor(t, decisions, 101)
-	if implDecision.Resume || implDecision.Planning || implDecision.Reason != "dispatch" {
+	// Note == "": a recorded lean-resumed authorization is never the
+	// legacy-approval note (#1464).
+	if implDecision.Resume || implDecision.Planning || implDecision.Reason != "dispatch" || implDecision.Note != "" {
 		t.Fatalf("phase E: #101 decision = %+v, want an ordinary dispatch", implDecision)
 	}
 	if len(captured) != 1 {

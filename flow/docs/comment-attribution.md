@@ -105,7 +105,9 @@ appear under `flow/skills/`:
 
 Every other kind has exactly one banner literal. `plan-comment` has three,
 selected by the plan's `approval` front-matter key (`skills/implement/phases/phase-1-plan.md`'s
-`## Persist the Plan`). A human-approved plan keeps the original wording:
+`## Persist the Plan`). A plan held for human review (`pending-human`, the value
+the `## New Plan` path writes) keeps the original wording, as does a legacy
+`human` plan written before #1464:
 
 ```markdown
 > 🤖 **cenci** — implementation plan posted by `/cenci:implement` (planning).
@@ -120,17 +122,19 @@ Every other `approval` value except `lean-decided` — `lean`, `trivial`,
 
 A `lean-decided` plan uses the planner-decisions variant instead (the plan
 carries at least one `decided:` entry, which replaces `lean`, `lean-resumed` and
-`human`):
+`pending-human`):
 
 ```markdown
 > 🤖 **cenci** — implementation plan posted by `/cenci:implement` (planning — with planner decisions; see the decision comment, overrule on the PR).
 ```
 
-The selection rule: `human` takes the original form, `lean-decided` takes the
-planner-decisions form, and every other value takes the auto-approved form. The
-third form deliberately avoids the words "auto-approved": a lean plan persisted
-through the `## New Plan` fallback still stops for human review, so
-"auto-approved" would be false for it.
+The selection rule: `pending-human` and `human` take the original form,
+`lean-decided` takes the planner-decisions form, and every other value (`lean`,
+`trivial`, `lean-resumed`) takes the auto-approved form. A `pending-human` plan
+never takes the auto-approved variant: it is held for human review, so
+"auto-approved" would be false for it. The third form deliberately avoids the
+words "auto-approved" for the same reason: a `lean-decided` plan persisted
+through the `## New Plan` fallback is held for human review too.
 
 Only the banner line differs; the `<!-- cenci-plan-comment -->` marker and its
 own non-blockquoted line are identical in all three forms, so the marker invariant
