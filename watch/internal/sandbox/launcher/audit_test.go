@@ -106,6 +106,272 @@ func TestAudit_RepoScopeDefault_IsBaselineWithNoWeakenings(t *testing.T) {
 	}
 }
 
+// -- ticket #737: --add-dir as a boundary weakening ---------------------------
+
+// addDirAuditEnv is a repo cwd, an isolated HOME and two resolved extra dirs.
+func addDirAuditEnv(t *testing.T) (repo, home string, extras []string) {
+	t.Helper()
+	repo = newAuditTestRepo(t)
+	home = t.TempDir()
+	isolateAddDirEnv(t, home)
+	t.Chdir(repo)
+	for _, name := range []string{"notes-repo", "Shared Lib"} {
+		dir := filepath.Join(t.TempDir(), name)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		resolved, err := filepath.EvalSymlinks(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		extras = append(extras, resolved)
+	}
+	return repo, home, extras
+}
+
+// TestAddDirAudit_PlannedPosture_ListsOneWeakeningPerDirInTextAndJSON covers
+// the planned-posture AC: one BoundaryWeakening per added dir, option
+// "--add-dir", carrying the host and container paths in text and in --json.
+func TestAddDirAudit_PlannedPosture_ListsOneWeakeningPerDirInTextAndJSON(t *testing.T) {
+	_, _, extras := addDirAuditEnv(t)
+
+	posture, err := auditEngine().Audit(Options{Agent: "claude", AddDirs: extras})
+	if err != nil {
+		t.Fatalf("Audit: %v", err)
+	}
+
+	wantContainer := []string{"/repos/notes-repo", "/repos/shared-lib"}
+	if len(posture.BoundaryWeakenings) != 2 {
+		t.Fatalf("BoundaryWeakenings = %+v, want one entry per added dir", posture.BoundaryWeakenings)
+	}
+	for i, w := range posture.BoundaryWeakenings {
+		if w.Option != "--add-dir" || !w.Active || w.HostPath != extras[i] || w.ContainerPath != wantContainer[i] || w.Effect == "" {
+			t.Errorf("BoundaryWeakenings[%d] = %+v, want active --add-dir %s -> %s with an effect", i, w, extras[i], wantContainer[i])
+		}
+	}
+	if posture.Network.Weakened {
+		t.Errorf("--add-dir must not flip the network posture: %+v", posture.Network)
+	}
+
+	var added []MountPosture
+	for _, m := range posture.Mounts {
+		if m.Kind == MountKindAddedDir {
+			added = append(added, m)
+		}
+	}
+	if len(added) != 2 || added[0].Source != extras[0] || added[0].Destination != wantContainer[0] || added[0].ReadOnly || added[1].ReadOnly {
+		t.Errorf("added-dir mounts = %+v, want two read-write binds %v -> %v", added, extras, wantContainer)
+	}
+	for _, v := range posture.Volumes {
+		if v.Kind == MountKindAddedDir {
+			t.Errorf("a host bind must not be listed as a named volume: %+v", v)
+		}
+	}
+
+	var text bytes.Buffer
+	if err := posture.WriteText(&text); err != nil {
+		t.Fatalf("WriteText: %v", err)
+	}
+	for i := range extras {
+		want := "--add-dir active=true: " + extras[i] + " -> " + wantContainer[i] + ": "
+		if !strings.Contains(text.String(), want) {
+			t.Errorf("text output missing %q:\n%s", want, text.String())
+		}
+	}
+
+	data, err := json.Marshal(posture)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var parsed struct {
+		BoundaryWeakenings []map[string]any `json:"boundaryWeakenings"`
+	}
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(parsed.BoundaryWeakenings) != 2 {
+		t.Fatalf("JSON boundaryWeakenings = %v, want two entries", parsed.BoundaryWeakenings)
+	}
+	for i, w := range parsed.BoundaryWeakenings {
+		if w["option"] != "--add-dir" || w["hostPath"] != extras[i] || w["containerPath"] != wantContainer[i] || w["active"] != true {
+			t.Errorf("JSON boundaryWeakenings[%d] = %v, want option/hostPath/containerPath", i, w)
+		}
+	}
+}
+
+// TestAddDirAudit_HostNetworkEntryKeepsItsExactJSONKeys pins the omitempty
+// contract: the new hostPath/containerPath fields never appear on the
+// pre-existing --host-network entry, and it still comes before --add-dir.
+func TestAddDirAudit_HostNetworkEntryKeepsItsExactJSONKeys(t *testing.T) {
+	_, _, extras := addDirAuditEnv(t)
+
+	posture, err := auditEngine().Audit(Options{Agent: "claude", HostNetwork: true, AddDirs: extras[:1]})
+	if err != nil {
+		t.Fatalf("Audit: %v", err)
+	}
+	data, err := json.Marshal(posture)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var parsed struct {
+		BoundaryWeakenings []map[string]any `json:"boundaryWeakenings"`
+	}
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(parsed.BoundaryWeakenings) != 2 {
+		t.Fatalf("boundaryWeakenings = %v, want --host-network then --add-dir", parsed.BoundaryWeakenings)
+	}
+	net := parsed.BoundaryWeakenings[0]
+	if net["option"] != "--host-network" {
+		t.Fatalf("first entry = %v, want --host-network", net)
+	}
+	keys := make([]string, 0, len(net))
+	for k := range net {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	if !slices.Equal(keys, []string{"active", "effect", "option"}) {
+		t.Errorf("--host-network entry keys = %v, want exactly active/effect/option (hostPath and containerPath are omitempty)", keys)
+	}
+	if parsed.BoundaryWeakenings[1]["option"] != "--add-dir" {
+		t.Errorf("second entry = %v, want --add-dir", parsed.BoundaryWeakenings[1])
+	}
+}
+
+// TestAddDirAudit_HostSocketMountEntryKeepsItsExactJSONKeys pins the omitempty
+// contract for the observed host-socket-mount entry: it serializes with exactly
+// active/effect/option, never the new hostPath/containerPath, even when an
+// --add-dir entry sits next to it in the same observed posture.
+func TestAddDirAudit_HostSocketMountEntryKeepsItsExactJSONKeys(t *testing.T) {
+	posture := addDirObservedPosture(t, "cenci-sandbox:latest|bridge|runc||0\n"+
+		"/host/repo::/workspace::true\n"+
+		"/var/run/docker.sock::/var/run/docker.sock::true\n"+
+		"/srv/alpha::/repos/alpha::true\n\n", Options{})
+
+	data, err := json.Marshal(posture)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var parsed struct {
+		BoundaryWeakenings []map[string]any `json:"boundaryWeakenings"`
+	}
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	var socket, addDir map[string]any
+	for _, w := range parsed.BoundaryWeakenings {
+		switch w["option"] {
+		case "host-socket-mount":
+			socket = w
+		case "--add-dir":
+			addDir = w
+		}
+	}
+	if socket == nil || addDir == nil {
+		t.Fatalf("boundaryWeakenings = %v, want a host-socket-mount and an --add-dir entry", parsed.BoundaryWeakenings)
+	}
+	keys := make([]string, 0, len(socket))
+	for k := range socket {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	if !slices.Equal(keys, []string{"active", "effect", "option"}) {
+		t.Errorf("host-socket-mount entry keys = %v, want exactly active/effect/option (hostPath and containerPath are omitempty)", keys)
+	}
+	if addDir["hostPath"] != "/srv/alpha" || addDir["containerPath"] != "/repos/alpha" {
+		t.Errorf("--add-dir entry = %v, want hostPath/containerPath populated", addDir)
+	}
+}
+
+// TestAddDirAudit_NoWeakenings_JSONIsAnEmptyListNotNull is the regression
+// guard for the empty-list AC: no added dirs and no other weakening must
+// serialize as [], never null (it already holds today; this pins it).
+func TestAddDirAudit_NoWeakenings_JSONIsAnEmptyListNotNull(t *testing.T) {
+	addDirAuditEnv(t)
+
+	posture, err := auditEngine().Audit(Options{Agent: "claude"})
+	if err != nil {
+		t.Fatalf("Audit: %v", err)
+	}
+	data, err := json.Marshal(posture)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got := string(raw["boundaryWeakenings"]); got != "[]" {
+		t.Errorf(`"boundaryWeakenings" = %s, want []`, got)
+	}
+}
+
+// TestAddDirAudit_Explain_NamesTheMountAndStopsClaimingOnlyTheRepoIsMounted
+// covers `cenci security explain`: the narrative lists each added dir with its
+// host -> container paths and a blast-radius note, and the "only the current
+// repo" sentence is replaced because it would no longer be true.
+func TestAddDirAudit_Explain_NamesTheMountAndStopsClaimingOnlyTheRepoIsMounted(t *testing.T) {
+	_, _, extras := addDirAuditEnv(t)
+
+	withDir, err := auditEngine().Audit(Options{Agent: "claude", AddDirs: extras[:1]})
+	if err != nil {
+		t.Fatalf("Audit: %v", err)
+	}
+	var out bytes.Buffer
+	if err := withDir.WriteExplanation(&out); err != nil {
+		t.Fatalf("WriteExplanation: %v", err)
+	}
+	for _, want := range []string{"⚠ --add-dir: " + extras[0] + " -> /repos/notes-repo: ", "Blast radius: the agent can read, modify and delete everything in that host"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("explanation missing %q:\n%s", want, out.String())
+		}
+	}
+	if strings.Contains(out.String(), "Only the current repo") {
+		t.Errorf("explanation still claims only the repo is mounted:\n%s", out.String())
+	}
+
+	baseline, err := auditEngine().Audit(Options{Agent: "claude"})
+	if err != nil {
+		t.Fatalf("Audit: %v", err)
+	}
+	out.Reset()
+	if err := baseline.WriteExplanation(&out); err != nil {
+		t.Fatalf("WriteExplanation: %v", err)
+	}
+	if !strings.Contains(out.String(), "Only the current repo") || strings.Contains(out.String(), "--add-dir") {
+		t.Errorf("a launch without --add-dir must keep the original narrative:\n%s", out.String())
+	}
+}
+
+func TestAddDirAudit_RejectedPath_IsUsageError(t *testing.T) {
+	repo, _, _ := addDirAuditEnv(t)
+
+	_, err := auditEngine().Audit(Options{Agent: "claude", AddDirs: []string{repo}})
+	if !IsUsage(err) {
+		t.Fatalf("Audit error = %v, want a usage error for an add-dir overlapping the primary workspace", err)
+	}
+}
+
+// TestAddDirMountKindForDestination_OnlyPathsUnderReposComponentWiseAreAddedDirs
+// is a direct classifier test: the sibling-prefix cases cannot be reached
+// through a real launch, which only ever emits /repos/<slug>.
+func TestAddDirMountKindForDestination_OnlyPathsUnderReposComponentWiseAreAddedDirs(t *testing.T) {
+	for dest, want := range map[string]string{
+		"/repos/alpha":     MountKindAddedDir,
+		"/repos/a/b":       MountKindAddedDir,
+		"/repos":           MountKindUnknown,
+		"/repos-evil/x":    MountKindUnknown,
+		"/reposx":          MountKindUnknown,
+		"/workspace-repos": MountKindUnknown,
+		"/workspace":       MountKindWorkspace,
+	} {
+		if got := mountKindForDestination(dest); got != want {
+			t.Errorf("mountKindForDestination(%q) = %q, want %q", dest, got, want)
+		}
+	}
+}
+
 // TestAudit_LegacyScope_DindUnavailable covers a non-git cwd: scope falls
 // back to legacy, and dind is unavailable (source "off") since it is only
 // ever available in repo scope (#585).

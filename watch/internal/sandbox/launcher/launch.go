@@ -24,7 +24,8 @@ import (
 
 // Options are the launch parameters `cenci open` collects: which agent and
 // model to run, the instance name (empty = not given), attach/isolation
-// modifiers, and the verbatim passthrough args for the agent CLI.
+// modifiers, the raw --add-dir host paths (resolved and validated by
+// resolveAddDirs, #737), and the verbatim passthrough args for the agent CLI.
 type Options struct {
 	Agent       string
 	Model       string
@@ -34,6 +35,7 @@ type Options struct {
 	NoDind      bool
 	HostNetwork bool
 	ReseedCreds bool
+	AddDirs     []string
 	AgentArgs   []string
 }
 
@@ -233,6 +235,10 @@ type launchCtx struct {
 	// loaded once here so forwarding (assembleExecEnv), classification and
 	// dry-run redaction share one set (#1201).
 	Secrets secretEnvSet
+	// AddDirs is the resolved, validated --add-dir set (#737): host paths
+	// bound read-write at /repos/<slug>. Resolved once here so the create
+	// argv, the forwarded agent flags and the reuse check share one answer.
+	AddDirs []addDirMount
 }
 
 // resolveLaunchContext resolves the shared preamble: agent/model
@@ -241,9 +247,10 @@ type launchCtx struct {
 // UsageError on conflicting/misplaced --dind flags), container-runtime
 // resolution (mutates e.Runtime only when unset — docker-first under dind,
 // else podman-first), and dindPreflight when dind is on. The sandbox.plugins,
-// sandbox.azure and sandbox.memoryLimit/pidsLimit config reads, and the user
-// fleet config's sandboxEnv.forward read (loadSecretEnvSet, #1016), happen
-// before runtime resolution, so a malformed value makes no runtime call. A
+// sandbox.azure and sandbox.memoryLimit/pidsLimit config reads, the --add-dir
+// resolution (resolveAddDirs, #737), and the user fleet config's
+// sandboxEnv.forward read (loadSecretEnvSet, #1016), happen before runtime
+// resolution, so a malformed value or a rejected path makes no runtime call. A
 // configured forward name that is unset or empty on the host prints one
 // warning (warnUnsetForwardNames) as the last step, so Launch and DryRun each
 // warn exactly once. Both Launch and DryRun call this so their failure modes
@@ -314,6 +321,14 @@ func (e *Engine) resolveLaunchContext(opts Options) (launchCtx, error) {
 		return launchCtx{}, err
 	}
 
+	// Resolved after the config reads above (so dind/plugins/limits errors keep
+	// their priority) and before runtime resolution: a rejected --add-dir is a
+	// usage error that makes no runtime call (#737).
+	addDirs, err := resolveAddDirs(opts.AddDirs, scope, home)
+	if err != nil {
+		return launchCtx{}, err
+	}
+
 	// The user-scoped sandboxEnv.forward allowlist (#1016), read from the fleet
 	// config rather than the repo's (a repo-committed list would arrive via PR).
 	// Same fail-closed rule: a malformed list hard-fails create, attach and
@@ -340,7 +355,7 @@ func (e *Engine) resolveLaunchContext(opts Options) (launchCtx, error) {
 		}
 	}
 
-	ctx := launchCtx{Agent: agent, Model: model, Home: home, Scope: scope, DindOn: dindOn, AzureOn: azureOn, Plugins: plugins, Limits: limits, Secrets: secrets}
+	ctx := launchCtx{Agent: agent, Model: model, Home: home, Scope: scope, DindOn: dindOn, AzureOn: azureOn, Plugins: plugins, Limits: limits, Secrets: secrets, AddDirs: addDirs}
 	e.warnUnsetForwardNames(ctx)
 	return ctx, nil
 }
@@ -373,7 +388,9 @@ func (e *Engine) warnUnsetForwardNames(ctx launchCtx) {
 //     derived from its create-time signals) is inspected before
 //     attaching; a host Docker/Podman socket mount, an ambiguous
 //     `cenci-sand.dind` label, or a DinD-mode mismatch against the
-//     requested launch all reject with a plain error (ticket #628).
+//     requested launch all reject with a plain error (ticket #628), and so
+//     does an added-dir set (the container's /repos/ mounts, #737) that
+//     differs from the requested --add-dir set in either direction.
 //     Otherwise a best-effort limits drift warning is printed
 //     (warnLimitsDrift, #1216) and attaching=true, createArgv=nil — a real
 //     launch only attaches, never creates.
@@ -394,7 +411,7 @@ func (e *Engine) warnUnsetForwardNames(ctx launchCtx) {
 // Launch has always propagated it — DryRun must fail the same way a real
 // launch would rather than silently assuming "not running".
 func (e *Engine) planArgvs(ctx launchCtx, opts Options, cenciBin, socketDir string, cenciAvailable bool) (createArgv, attachArgv []string, attaching bool, err error) {
-	agentCmdArgs := buildAgentCmdArgs(ctx.Agent, ctx.Model)
+	agentCmdArgs := agentCmdArgsFor(ctx)
 	execEnvArgs := assembleExecEnv(ctx.Agent, ctx.Secrets)
 	// Show the launch ID placeholder (and the container and runtime next to it,
 	// which are deterministic) only where a real launch would try to tag the
@@ -434,6 +451,15 @@ func (e *Engine) planArgvs(ctx launchCtx, opts Options, cenciBin, socketDir stri
 			return nil, nil, false, fmt.Errorf("running container '%s' was created without --dind; run 'cenci sandbox stop %s', then relaunch", ctx.Scope.ContainerName, ctx.Scope.ContainerName)
 		}
 
+		// Mounts are fixed for a container's lifetime, so the requested
+		// --add-dir set must equal the one the container was created with, in
+		// both directions: attaching with a missing dir would hide a path the
+		// agent was told about, and attaching with an unrequested one would
+		// silently keep a writable host mount nobody asked for (#737).
+		if !sameAddDirSet(ctx.AddDirs, posture.Mounts) {
+			return nil, nil, false, fmt.Errorf("running container '%s' was created with a different --add-dir set; run 'cenci sandbox stop %s', then relaunch", ctx.Scope.ContainerName, ctx.Scope.ContainerName)
+		}
+
 		e.warnLimitsDrift(ctx)
 		return nil, attachArgv, true, nil
 	}
@@ -445,7 +471,7 @@ func (e *Engine) planArgvs(ctx launchCtx, opts Options, cenciBin, socketDir stri
 	if err != nil {
 		return nil, nil, false, err
 	}
-	createArgv, err = e.buildRunArgv(ctx.Agent, cenciBin, socketDir, cenciAvailable, ctx.Scope, opts, ctx.Home, ctx.DindOn, ctx.AzureOn, ctx.Plugins, limitArgs)
+	createArgv, err = e.buildRunArgv(ctx.Agent, cenciBin, socketDir, cenciAvailable, ctx.Scope, opts, ctx.Home, ctx.DindOn, ctx.AzureOn, ctx.Plugins, ctx.AddDirs, limitArgs)
 	if err != nil {
 		return nil, nil, false, err
 	}
@@ -488,7 +514,7 @@ func (e *Engine) Launch(opts Options) error {
 	// Credentials are still staged from the host.
 	cenciBin, socketDir, cenciAvailable := e.resolveCenciWiring()
 
-	agentCmdArgs := buildAgentCmdArgs(ctx.Agent, ctx.Model)
+	agentCmdArgs := agentCmdArgsFor(ctx)
 
 	// Provider API keys are forwarded per-exec only (never baked into the
 	// container-lifetime create-time env/PID-1 environ), and scoped to the
@@ -593,8 +619,9 @@ func (e *Engine) Launch(opts Options) error {
 // trust non-interactively (openai/codex#21615), and the config trust-store
 // key format is flagged in-source as temporary — the per-invocation flag is
 // the only stable route (#426). Pure aside from its inputs — no printing, no
-// side effects — so both Launch and DryRun can call it and stay
-// byte-identical to each other.
+// side effects. Launch and planArgvs (and so DryRun) do not call it directly:
+// they go through agentCmdArgsFor, which adds the --add-dir tokens, so the two
+// can never drift.
 func buildAgentCmdArgs(agent, model string) []string {
 	switch agent {
 	case "codex":
@@ -611,6 +638,23 @@ func buildAgentCmdArgs(agent, model string) []string {
 	default:
 		return []string{"--dangerously-skip-permissions", "--model", model}
 	}
+}
+
+// agentCmdArgsFor is the one place the agent's command-line flags for a launch
+// are assembled: buildAgentCmdArgs' per-agent flags, then — for Claude and
+// Codex, the agents with a native --add-dir — one single-token
+// "--add-dir=/repos/<slug>" per resolved added directory (#737), so a
+// positional passthrough prompt that follows is not read as one more
+// directory. OpenCode forwards none (it is blocked by ValidateActiveAgent
+// anyway). Launch and planArgvs both call it, so the real exec and the
+// dry-run preview carry identical flags; --shell needs no special case because
+// buildAgentExecArgv drops these args when it attaches /bin/bash.
+func agentCmdArgsFor(ctx launchCtx) []string {
+	args := buildAgentCmdArgs(ctx.Agent, ctx.Model)
+	if ctx.Agent == "claude" || ctx.Agent == "codex" {
+		args = append(args, addDirAgentTokens(ctx.AddDirs)...)
+	}
+	return args
 }
 
 // appendSecretEnvPassthrough appends a bare "-e NAME" token (no "=value") to
@@ -805,14 +849,16 @@ func isSocket(path string) bool {
 // opt-in features), called in sequence and threaded through a single args
 // slice, followed by the caller-resolved limitArgs (--memory/--memory-swap/
 // --pids-limit, appended after the opt-in features and before the dind
-// --runtime flag). Grouping by theme means some -v/-e flags end up in a different
-// relative order than cenci-sand's original single-block layout; that's
+// --runtime flag). The caller-resolved addDirs (#737) become read-write
+// /repos/<slug> binds inside assembleVolumeMounts. Grouping by theme means
+// some -v/-e flags end up in a different relative order than cenci-sand's
+// original single-block layout; that's
 // behaviorally identical since docker/podman treat flag order between
 // distinct -v/-e flags as independent — only the trailing image + command
 // (appended by the caller, buildRunArgv, after this returns) must stay last.
-func (e *Engine) assembleRunArgs(agent, cenciBin, socketDir string, cenciAvailable bool, scope Scope, opts Options, home string, dindOn, azureOn bool, plugins []string, limitArgs []string) ([]string, error) {
+func (e *Engine) assembleRunArgs(agent, cenciBin, socketDir string, cenciAvailable bool, scope Scope, opts Options, home string, dindOn, azureOn bool, plugins []string, addDirs []addDirMount, limitArgs []string) ([]string, error) {
 	args := e.baseRunArgs(scope, dindOn)
-	args = append(args, e.assembleVolumeMounts(agent, cenciBin, socketDir, cenciAvailable, scope, home, dindOn, azureOn)...)
+	args = append(args, e.assembleVolumeMounts(agent, cenciBin, socketDir, cenciAvailable, scope, home, dindOn, azureOn, addDirs)...)
 	args = append(args, e.assembleEnv(agent, scope, opts, dindOn, plugins)...)
 
 	credArgs, err := e.validateCredentials(agent, home)
@@ -846,8 +892,8 @@ func (e *Engine) assembleRunArgs(agent, cenciBin, socketDir string, cenciAvailab
 // container. Shared by Launch and DryRun so the create argv can never drift
 // between a real launch and its dry-run preview. The validateCredentials hard
 // error (inside assembleRunArgs) propagates through unchanged.
-func (e *Engine) buildRunArgv(agent, cenciBin, socketDir string, cenciAvailable bool, scope Scope, opts Options, home string, dindOn, azureOn bool, plugins []string, limitArgs []string) ([]string, error) {
-	runArgs, err := e.assembleRunArgs(agent, cenciBin, socketDir, cenciAvailable, scope, opts, home, dindOn, azureOn, plugins, limitArgs)
+func (e *Engine) buildRunArgv(agent, cenciBin, socketDir string, cenciAvailable bool, scope Scope, opts Options, home string, dindOn, azureOn bool, plugins []string, addDirs []addDirMount, limitArgs []string) ([]string, error) {
+	runArgs, err := e.assembleRunArgs(agent, cenciBin, socketDir, cenciAvailable, scope, opts, home, dindOn, azureOn, plugins, addDirs, limitArgs)
 	if err != nil {
 		return nil, err
 	}
@@ -947,7 +993,9 @@ func (e *Engine) baseRunArgs(scope Scope, dindOn bool) []string {
 }
 
 // assembleVolumeMounts builds every bind/named-volume mount: the workspace
-// and home volumes, git config (read-only, if present), the optional cenci
+// and home volumes, the resolved --add-dir binds (read-write, at
+// /repos/<slug>, right after the workspace/home/agent-CLI mounts — #737), git
+// config (read-only, if present), the optional cenci
 // binary + host socket dir wiring (paired with its own XDG_RUNTIME_DIR and
 // CENCI_SOCKET_DIR envs under the same cenciAvailable guard as the mount
 // itself),
@@ -957,11 +1005,19 @@ func (e *Engine) baseRunArgs(scope Scope, dindOn bool) []string {
 // live in the persistent home, so no agent binary is mounted here. Codex
 // credentials are handled separately by validateCredentials, since a missing
 // codex auth source is a hard launch error rather than an optional mount.
-func (e *Engine) assembleVolumeMounts(agent, cenciBin, socketDir string, cenciAvailable bool, scope Scope, home string, dindOn, azureOn bool) []string {
+func (e *Engine) assembleVolumeMounts(agent, cenciBin, socketDir string, cenciAvailable bool, scope Scope, home string, dindOn, azureOn bool, addDirs []addDirMount) []string {
 	args := []string{
 		"-v", scope.WorkspaceBindHost + ":" + workspaceContainer,
 		"-v", scope.VolumeName + ":/home/dev",
 		"-v", AgentCLIVolumeName(agent) + ":/opt/cenci-agent:ro",
+	}
+
+	// Added directories (#737): read-write host binds outside the repo scope,
+	// the one deliberate widening of the single-workspace mount. They are
+	// already validated and symlink-resolved (resolveAddDirs), so the source is
+	// bound exactly as audited.
+	for _, d := range addDirs {
+		args = append(args, "-v", d.Host+":"+d.Container)
 	}
 
 	// Dind's own isolated Docker storage (nested `docker` inside the sandbox
@@ -1271,10 +1327,16 @@ func parseReusePosture(out string) (reusePosture, error) {
 		mountLines = mountLines[:len(mountLines)-1]
 	}
 	for _, line := range mountLines {
-		source, dest, ok := strings.Cut(line, "::")
-		if !ok {
+		// Exactly one delimiter: a second "::" would be split at the first one
+		// and could hide a /repos destination inside the "destination" half
+		// (#737); path validation already refuses ':' in an added directory.
+		// A ":::" run is one "::" by count but still ambiguous (source "/x:"
+		// with destination "/repos/y", or source "/x" with destination
+		// ":/repos/y", which Cut would pick and hide from the /repos set).
+		if strings.Count(line, "::") != 1 || strings.Contains(line, ":::") {
 			return reusePosture{}, fmt.Errorf("malformed reuse posture mount line %q: expected \"source::destination\"", line)
 		}
+		source, dest, _ := strings.Cut(line, "::")
 		p.Mounts = append(p.Mounts, reuseMount{Source: source, Destination: dest})
 	}
 	return p, nil

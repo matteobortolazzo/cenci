@@ -2756,6 +2756,9 @@ cenci open ch --dry-run -- --resume
                                  # print the exact launch commands (and posture) without creating anything
 cenci open --dind                # force-enable nested Docker (Sysbox-isolated), overriding a repo's sandbox.dind config
 cenci open --no-dind             # force-disable nested Docker, overriding a repo's sandbox.dind config
+cenci open --add-dir ../other    # also mount ../other read-write at /repos/other and tell the agent about it
+cenci open --name multi --add-dir ../a --add-dir ../b
+                                 # a separate multi-repo container, leaving the default one untouched
 ```
 
 Nested Docker is a **Linux-only host capability**: Sysbox must be installed on
@@ -2814,12 +2817,115 @@ conflicting explicit `--agent` (e.g. `open ch --agent codex`) is a usage error
 rather than silently picking one; all usage errors (unknown flag, unknown
 verb, stray positional, conflicts) exit 2.
 Supported flags: `--agent`, `--model`, `--name`, `--shell`, `--dind`,
-`--no-dind`, `--host-network`, `--reseed-creds`, `--dry-run`; anything after a
+`--no-dind`, `--host-network`, `--add-dir`, `--reseed-creds`, `--dry-run`;
+anything after a
 bare `--` is forwarded to the agent CLI verbatim (this is also how
 single-dash agent flags like `-p "prompt"` are passed:
 `cenci open -- -p "prompt"`). For the final attach, `open` execs the
 container runtime (replacing the `cenci` process) so the interactive session
 owns the TTY and its exit code propagates.
+
+**`--add-dir <path>`** (repeatable; also `cn --add-dir <path>`) mounts an
+additional host directory into the sandbox so one session can work across
+repositories. A container otherwise sees one repo: the git toplevel of the
+launch directory, at `/workspace`. Each added directory is resolved on the
+host (a relative path resolves against the current directory, and a symlink
+resolves to its target), then bind-mounted **read-write** at `/repos/<slug>`,
+where `<slug>` is the slugified base name of the resolved path. cenci then
+forwards one single token, `--add-dir=/repos/<slug>`, per directory to Claude
+Code or Codex, after the per-agent flags and before any `--` passthrough
+args. (A single token, not `--add-dir /repos/<slug>`, because Claude Code's
+`--add-dir` takes several values and would otherwise swallow a positional
+prompt that follows.) With `--shell` the directories are still mounted, but no
+flag is forwarded, since there is no agent process to receive it. The same
+directory passed twice, by any spelling that resolves to one path, is mounted
+once. Added directories are mounts only: the primary repo still decides the
+container name, home volume and image. The mount is outside the repo scope and
+read-write, so the agent can modify or delete anything in it — see
+[SECURITY.md](../SECURITY.md#opt-in-weakenings).
+
+Each of these is a usage error (exit 2, a one-line hint naming the path, no
+container created and no runtime call): an empty value; a path that does not
+exist or is not a directory; a path containing `:` or any non-printable
+character, including a newline, other control characters and non-ASCII spaces
+such as U+00A0 or U+202F (it would break the `-v src:dst` syntax or the
+line-based container-state parsing); two directories whose `/repos/<slug>`
+collide; a
+directory that overlaps the primary workspace in either direction (the repo
+root, a subdirectory of it, or a parent of it — in a non-git directory this is
+the `~/Repos` workspace mount); a linked git worktree (its `.git` file points
+at a host path that does not exist in the container, so the hint names the
+main checkout to pass instead); and a sensitive host location, with no
+override: `/`, `$HOME` or a parent of it, `~/.ssh`, `~/.gnupg`, a directory
+holding or inside one that holds a credential file cenci stages (for example
+`~/.claude`), cenci's own control paths (`~/.config/cenci`,
+`~/.local/state/cenci`, the daemon socket directory and `~/.local/bin`), the
+system directories (`/etc`, `/boot`, `/usr`, `/bin`, `/sbin`, `/lib`, `/lib64`,
+`/proc`, `/sys`, `/dev`, `/run`, and on macOS `/private/etc`, `/Library` and
+`/System`; `/root` too, unless `$HOME` is `/root` or inside it. With `$HOME=/root`, `/root` itself stays
+refused as a parent of `$HOME` and a project directory inside it is accepted.
+With `$HOME` strictly inside `/root` (for example `/root/me`), `/root`,
+`/root/.ssh`, `/root/.gnupg`, `/root/.config/systemd`, `/root/.docker`,
+`/root/.local/bin` and the rest of `/root`'s own credential and control
+directories are refused exactly as for a home of `/root`, while `/root/me/code/x`
+and other non-sensitive `/root/...` directories are accepted), the root-run host
+state directories (`/var/spool`,
+`/var/lib`, `/var/db`, `/nix`, `/opt/homebrew`, `/snap`), the shared parent
+directories `/tmp`, `/private/tmp`, `/var/tmp`, `$TMPDIR`, `/var`,
+`/private/var` and `/opt` (refused when named directly or as a parent of
+another refused location, but a directory inside them, such as `/tmp/app`,
+`/var/www/app` or `/opt/app`, is accepted), the runtime, tmux and agent socket
+directories (`$XDG_RUNTIME_DIR`, `~/.docker`, `~/.colima`, `~/.orbstack`, the
+host tmux server's `/tmp/tmux-<uid>` (or `tmux-<uid>` under `$TMUX_TMPDIR`) and
+the directory of the socket named by `$TMUX`, the directory of `$SSH_AUTH_SOCK`,
+`/tmp/.X11-unix` and the host emacs server's `/tmp/emacs<uid>`; the agent is
+root with sudo, so a tmux socket is host code execution), and the directories whose contents run at login
+(`~/.config/systemd`, `~/.local/share/systemd`, `$XDG_CONFIG_HOME/systemd`,
+`$XDG_CONFIG_HOME/autostart`, `$XDG_DATA_HOME/systemd`, `~/.config/autostart`
+and `~/Library/LaunchAgents`, where cenci's own autostart unit lives).
+The directory of a socket (`$TMUX`, `$SSH_AUTH_SOCK`) is refused together with
+its parents but not its children, since a socket is exposed only by mounting its
+directory or an ancestor: a socket directly in `$HOME` refuses `$HOME`, not the
+projects inside it. A relative `$SSH_AUTH_SOCK` or `$TMUX_TMPDIR` is resolved
+against the current directory, the way ssh and tmux resolve it, and an empty one
+adds no guard; a relative `$TMPDIR` or `XDG_*` value is ignored, as the XDG
+specification says. `/run` is refused as a whole, including `/run/media` where
+removable drives automount, so copy such a repository elsewhere first. `/srv`,
+`/mnt`, `/home` and the other directories inside `/var`, `/opt` and `/tmp` are
+not refused, since repositories live there. The list is a denylist, not
+exhaustive: it refuses only the locations named above (the host tmux, ssh-agent
+via `$SSH_AUTH_SOCK`, X11 and emacs sockets and the container runtime and agent
+directories), so other socket directories under `/tmp`, for example the
+`/tmp/ssh-*` directories of other ssh sessions, are not covered. Mount only
+directories you would hand to the agent anyway. The denylist and the primary-workspace check run on
+both the as-typed absolute path and the symlink-resolved path, on every
+spelling of a repeated directory (so acceptance never depends on argument
+order), compare path components (never string prefixes) and also match by file
+identity, so a spelling such as `~/.SSH` on a case-insensitive filesystem is
+refused too; a guard path whose identity cannot be read (any error other than
+"does not exist" or "not a directory") counts as a match. The check fails closed: with
+`--add-dir`, a non-absolute `$HOME` or a daemon socket directory that cannot be
+resolved is itself a usage error, and so is a directory whose `.git` entry
+cannot be read. An added directory whose slug equals the primary repo's slug
+is allowed, since the primary repo lives at `/workspace`, not under `/repos/`.
+
+Mounts are fixed for a container's lifetime, so cenci never recreates a
+running container. When a scoped container is already running and its
+`/repos/` mounts differ from the requested `--add-dir` set, in either
+direction, the launch fails with exit 1 and no attach: `running container
+'<name>' was created with a different --add-dir set; run 'cenci sandbox stop
+<name>', then relaunch`. That includes a plain `cenci open` (or a dispatched
+`cenci run` session) aimed at a repo whose running container was created with
+added directories. The same set in a different argument order attaches
+normally, and a container created before this flag existed (no `/repos/`
+mounts) attaches normally when no `--add-dir` is passed. Keep multi-repo work
+in its own container with `--name` (`cenci open --name multi --add-dir <path>`
+uses the separate `<agent>-cenci-<slug>-multi` container) so the default one
+stays unaffected. A user-supplied passthrough `cenci open -- --add-dir /x` is
+still forwarded verbatim, with no translation and no mount. `--dry-run`
+prints the `-v <host>:/repos/<slug>` pair and the forwarded
+`--add-dir=/repos/<slug>` token without creating anything. OpenCode stays
+blocked.
 
 `--dry-run` renders the branch a real launch would actually take, followed by
 the full `cenci audit` posture breakdown (see below), without creating any
@@ -3040,11 +3146,12 @@ cenci audit                                 # text report for the current repo/s
 cenci audit --agent codex                   # audit as codex instead of claude
 cenci audit --dind                          # audit as if launched with nested Docker (sysbox-runc) enabled
 cenci audit --host-network                  # audit as if launched with host network mode
+cenci audit --add-dir ../other              # audit as if ../other were mounted read-write at /repos/other
 cenci audit --json                          # same report as stable JSON, for scripting/CI
 ```
 
 `cenci audit [--agent claude|codex|opencode] [--name NAME] [--dind] [--no-dind]
-[--host-network] [--reseed-creds] [--json]` reports the effective security
+[--host-network] [--add-dir PATH]... [--reseed-creds] [--json]` reports the effective security
 posture the sandbox launcher **would apply** for the current repo/agent/flags:
 mounted host paths and whether each is read-only or read-write, forwarded
 environment variable NAMES only (never values), network mode, credential
@@ -3059,9 +3166,9 @@ current repo/agent's scoped container is actually running, `audit` inspects
 it read-only (`ps`/`inspect` only — never a mutating call) and reports its
 *real, current* mounts (ro/rw), image, network mode, nested-Docker state,
 and any detectable boundary weakening (e.g. a container that was actually
-launched with `--host-network`, or one with a host Docker/Podman socket
-mounted into it) — even if the current `cenci audit` invocation didn't pass
-that flag. When no scoped container is running (never launched, stopped, or
+launched with `--host-network`, one with a host Docker/Podman socket
+mounted into it, or one with `--add-dir` mounts) — even if the current
+`cenci audit` invocation didn't pass that flag. When no scoped container is running (never launched, stopped, or
 stale), `audit` falls back to the same hypothetical next-launch derivation
 it has always used: it reuses the same construction logic `open`/`Launch`
 uses to assemble mounts, env, and network flags, and classifies the result
@@ -3095,20 +3202,34 @@ On a host that can never register `sysbox-runc` (macOS), that section
 reports `source: platform-unsupported` with a note explaining why — an off
 state deliberately distinct from the plain `off` a repo that never asked for
 dind reports.
-`--host-network`, and each
+`--host-network`, `--add-dir`, each
 [`sandboxEnv.forward`](#forwarding-extra-host-env-vars-sandboxenvforward) name
 that would actually be forwarded and that the built-in set alone would not
 forward to the audited agent (`option: "sandboxEnv.forward"`, one entry per
-name, in both `basis:"planned"` and `basis:"running"`), are reported as
+name, in both `basis:"planned"` and `basis:"running"`), and, for a running
+container only, a mounted host Docker/Podman socket are reported as
 **boundary weakenings**, and the text report visually marks them (`⚠`) instead of
 burying them in a flat list; the default-safe baseline (no weakenings active)
-is reported explicitly, not just omitted.
+is reported explicitly, not just omitted. `cenci audit --add-dir <path>` (repeatable, same validation
+and usage errors as `cenci open --add-dir`) lists one weakening per added
+directory in the planned posture, as
+`--add-dir active=true: <host path> -> /repos/<slug>: <effect>`; its mount
+appears in `mounts` with kind `added-dir`, read-write. For a running container,
+every mount under `/repos/` is reported the same way with `basis:"running"`,
+even if the current invocation passed no `--add-dir`. Planned and observed
+entries come from the same classified mounts, so they agree.
 
 `cenci audit --json` emits the same data with stable field names
 (`basis`, `agent`, `scope`, `image`, `workspace`, `network`, `dind`,
 `mounts`, `volumes`, `env`, `forwardedEnv`, `credentialSources`,
 `boundaryWeakenings`, `reseedCreds`, `inspectWarning`) suitable for
-scripting or CI checks. As with the text report, no field ever carries a
+scripting or CI checks. An `--add-dir` entry in `boundaryWeakenings` carries
+`"option":"--add-dir"`, `active`, `effect`, and the structured `hostPath` and
+`containerPath` of the mount it describes; those two fields are omitted from
+every other entry (`--host-network`, `sandboxEnv.forward`, the host-socket
+mount), whose JSON is
+unchanged. With nothing weakened the field is `"boundaryWeakenings":[]`, never
+`null`. As with the text report, no field ever carries a
 secret or credential *value* — only names, paths, and presence/status
 booleans. `basis` is always present (`"running"` or `"planned"`, never a
 third value). `inspectWarning` is present with a non-empty string only
@@ -3145,10 +3266,11 @@ with `secret:true`, the same classification forwarded exec env already had.
 under `forwardedEnv`, not `env`; the key shapes are unchanged.
 
 Like `diagnose`, `audit` is read-only and exits 0 on a successful render;
-usage errors (e.g. `--dind` with `--no-dind`, or `--dind` outside a
-repo-scoped session) exit 2, and a config error exits 1 before any
-container-runtime call: a malformed `sandboxEnv.forward` list, or any
-unreadable or unparsable user fleet config (see
+usage errors (e.g. `--dind` with `--no-dind`, `--dind` outside a
+repo-scoped session, or a rejected `--add-dir` path) exit 2, and a config
+error exits 1 before any container-runtime call: a malformed
+`sandboxEnv.forward` list, or any unreadable or unparsable user fleet config
+(see
 [Forwarding extra host env vars](#forwarding-extra-host-env-vars-sandboxenvforward)).
 
 ## Explain the security posture (`cenci security explain`)
@@ -3194,6 +3316,15 @@ enforcement. `--host-network` additionally states what changes: a *shared*
 host network namespace, loss of network namespace separation, and
 host-`localhost` exposure, with the blast-radius warning kept front and
 center.
+
+`cenci security explain` has no `--add-dir` flag, but when the scoped
+container is running with `/repos/` mounts it narrates them from the shared
+observed posture: the workspace paragraph says the repo is bind-mounted
+together with the additional host directories listed under boundary
+weakenings (instead of claiming only the repo is mounted), and each
+`--add-dir` entry is followed by a blast-radius note — the agent can read,
+modify and delete everything in that directory, outside the repo scope, for as
+long as the container runs.
 
 ```
 cenci security explain: agent=claude scope=my-repo basis=planned

@@ -150,7 +150,7 @@ sandboxes still on the old image so you know which ones need it.
 
 This is deliberately just a taste: the full launcher reference — every `cenci open`
 flag (`--agent`, `--model`, `--name`, `--shell`, `--dind`, `--no-dind`, `--host-network`,
-`--reseed-creds`), the `cenci sandbox` verbs (`build`, `build-base`, `prune`,
+`--add-dir`, `--reseed-creds`), the `cenci sandbox` verbs (`build`, `build-base`, `prune`,
 `update-agent`, `update-plugins`, `reseed-creds`, `reap-orphans`, `ls`, `stop`), the shortcut table,
 and the flag-parsing rules (unknown long flags are usage errors and exit 2; agent
 flags go after `--`) — lives in
@@ -162,6 +162,9 @@ Run the launcher (`cn` / `cenci open`) from inside a git repo (or any subdirecto
 one) and it mounts **only that repo's root** at `/workspace` — not your whole `~/Repos`.
 The container `WORKDIR` mirrors your host `$PWD` relative to the repo root, so launching
 from a subdirectory starts the shell/agent in the matching `/workspace/<subpath>`.
+`--add-dir <path>` is the one opt-in exception: it also mounts that host directory
+read-write at `/repos/<slug>` (see the
+[`cenci open` reference](../watch/README.md#sandbox-management-and-session-launching-cenci-sandbox-cenci-open)).
 
 The container name and home volume are derived from the repo directory name (slugified):
 `<agent>-cenci-<repo-slug>` / `<agent>-cenci-home-<repo-slug>`. Pass `--name` to append an
@@ -626,7 +629,8 @@ OpenCode (`--agent opencode`) has no per-flag "skip permissions" equivalent to b
 ### Isolation
 
 - Container has its **own home directory** (`/home/dev`) backed by a named Docker volume
-- Only the current repo's root (not the whole `~/Repos`) is mounted at `/workspace` — see
+- Only the current repo's root (not the whole `~/Repos`) is mounted at `/workspace`, unless
+  `--add-dir` is passed (extra host directories, read-write at `/repos/<slug>`) — see
   [Per-repo containers](#per-repo-containers)
 - Outbound network only (no inbound ports published)
 

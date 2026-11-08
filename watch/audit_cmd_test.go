@@ -145,6 +145,130 @@ func TestAudit_JSONOutput_HasProbeApplicableStagedFields(t *testing.T) {
 	}
 }
 
+// -- ticket #737: cenci audit --add-dir --------------------------------------
+
+// addDirAuditTarget makes a fresh resolved directory outside the repo and HOME.
+func addDirAuditTarget(t *testing.T, name string) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), name)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resolved
+}
+
+type auditAddDirEntry struct {
+	Option        string `json:"option"`
+	Active        bool   `json:"active"`
+	Effect        string `json:"effect"`
+	HostPath      string `json:"hostPath"`
+	ContainerPath string `json:"containerPath"`
+}
+
+// TestAuditAddDir_PlannedPosture_TextAndJSONCarryOptionHostAndContainerPath
+// covers the planned-posture AC at the command level: each --add-dir is one
+// boundary weakening with option "--add-dir", hostPath and containerPath.
+func TestAuditAddDir_PlannedPosture_TextAndJSONCarryOptionHostAndContainerPath(t *testing.T) {
+	repo := auditRepoDir(t)
+	home := t.TempDir()
+	a, b := addDirAuditTarget(t, "notes-repo"), addDirAuditTarget(t, "Shared Lib")
+	env := auditSecurityEnv(t, home, t.TempDir())
+
+	jsonCmd := exec.Command(binaryPath, "audit", "--json", "--add-dir", a, "--add-dir", b)
+	jsonCmd.Env = env
+	jsonCmd.Dir = repo
+	output, err := jsonCmd.Output()
+	if err != nil {
+		t.Fatalf("cenci audit --json --add-dir: %v\n%s", err, output)
+	}
+	var parsed struct {
+		Basis              string             `json:"basis"`
+		BoundaryWeakenings []auditAddDirEntry `json:"boundaryWeakenings"`
+	}
+	if err := json.Unmarshal(output, &parsed); err != nil {
+		t.Fatalf("invalid JSON: %v\n%s", err, output)
+	}
+	want := []auditAddDirEntry{
+		{Option: "--add-dir", Active: true, HostPath: a, ContainerPath: "/repos/notes-repo"},
+		{Option: "--add-dir", Active: true, HostPath: b, ContainerPath: "/repos/shared-lib"},
+	}
+	if len(parsed.BoundaryWeakenings) != len(want) {
+		t.Fatalf("boundaryWeakenings = %+v, want one entry per added dir\n%s", parsed.BoundaryWeakenings, output)
+	}
+	for i, got := range parsed.BoundaryWeakenings {
+		if got.Option != want[i].Option || !got.Active || got.HostPath != want[i].HostPath || got.ContainerPath != want[i].ContainerPath || got.Effect == "" {
+			t.Errorf("boundaryWeakenings[%d] = %+v, want %+v with an effect", i, got, want[i])
+		}
+	}
+
+	textCmd := exec.Command(binaryPath, "audit", "--add-dir", a)
+	textCmd.Env = env
+	textCmd.Dir = repo
+	text, err := textCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("cenci audit --add-dir: %v\n%s", err, text)
+	}
+	if line := "--add-dir active=true: " + a + " -> /repos/notes-repo: "; !strings.Contains(string(text), line) {
+		t.Errorf("text output missing %q:\n%s", line, text)
+	}
+}
+
+func TestAuditAddDir_RejectedPath_Exits2WithOneLineHint(t *testing.T) {
+	repo := auditRepoDir(t)
+	cmd := exec.Command(binaryPath, "audit", "--add-dir", repo)
+	cmd.Env = auditSecurityEnv(t, t.TempDir(), t.TempDir())
+	cmd.Dir = repo
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 2 {
+		t.Fatalf("exit = %v, want 2\nstderr: %s", err, stderr.String())
+	}
+	line := strings.TrimRight(stderr.String(), "\n")
+	if strings.Contains(line, "\n") || !strings.Contains(line, "overlaps the primary workspace") {
+		t.Errorf("stderr = %q, want one overlap hint line", stderr.String())
+	}
+}
+
+// TestAuditAddDir_RunningContainer_ReportsItsReposMountsWithBasisRunning covers
+// the observed-posture AC: no --add-dir flag is needed, the entries come from
+// the running container's own /repos/ mounts.
+func TestAuditAddDir_RunningContainer_ReportsItsReposMountsWithBasisRunning(t *testing.T) {
+	repo := auditRepoDir(t)
+	home := t.TempDir()
+	scope := launcher.ComputeScope("claude", "", repo, home)
+	cmd, _ := auditFakeRuntimeCmd(t, repo, home, "audit", "--json")
+	cmd.Env = append(cmd.Env,
+		"FAKE_PS="+scope.ContainerName+"\n",
+		"FAKE_OBSERVED_POSTURE=cenci-sandbox:latest|bridge|runc||0\n"+repo+"::/workspace::true\n/srv/alpha::/repos/alpha::true\n\n",
+	)
+	output, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("cenci audit --json: %v\n%s", err, output)
+	}
+
+	var parsed struct {
+		Basis              string             `json:"basis"`
+		BoundaryWeakenings []auditAddDirEntry `json:"boundaryWeakenings"`
+	}
+	if err := json.Unmarshal(output, &parsed); err != nil {
+		t.Fatalf("invalid JSON: %v\n%s", err, output)
+	}
+	if parsed.Basis != "running" {
+		t.Errorf(`"basis" = %q, want "running"`, parsed.Basis)
+	}
+	if len(parsed.BoundaryWeakenings) != 1 || parsed.BoundaryWeakenings[0].Option != "--add-dir" ||
+		parsed.BoundaryWeakenings[0].HostPath != "/srv/alpha" || parsed.BoundaryWeakenings[0].ContainerPath != "/repos/alpha" {
+		t.Errorf("boundaryWeakenings = %+v, want the one observed --add-dir /srv/alpha -> /repos/alpha", parsed.BoundaryWeakenings)
+	}
+}
+
 // TestAudit_JSONOutput_KeyShapePinned pins the `cenci audit --json` key shape
 // for `--agent claude` (#1201 AC: "no change to the audit --json field shape"):
 // the top-level key set and the key set of every `env` and `forwardedEnv`
