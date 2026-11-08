@@ -296,12 +296,29 @@ printf 'claude %s\n' "$*" >>"${CALLS_FILE}"
 # can prove this test harness's env -i scrub keeps host secrets out.
 [ -n "${OPENAI_API_KEY:-}" ] && printf 'env-leak OPENAI_API_KEY=%s\n' "${OPENAI_API_KEY}" >>"${CALLS_FILE}"
 [ -n "${CONTEXT7_API_KEY:-}" ] && printf 'env-leak CONTEXT7_API_KEY=%s\n' "${CONTEXT7_API_KEY}" >>"${CALLS_FILE}"
+record_marketplace() {
+    printf '%s' "${1:-default-branch}" >"${CLAUDE_MARKETPLACE_FILE}"
+    # Modern Claude versions persist the added marketplace in user settings.
+    # Opt in for the dedicated compatibility case without changing unrelated
+    # legacy-client fixtures in this shared mock.
+    if [ "${CLAUDE_ADD_WRITES_SETTINGS:-}" = 1 ]; then
+        mkdir -p "${HOME}/.claude"
+        settings="${HOME}/.claude/settings.json"
+        [ -f "${settings}" ] || printf '{}\n' >"${settings}"
+        jq --arg ref "$1" '.extraKnownMarketplaces.cenci = {source: {source: "github", repo: "matteobortolazzo/cenci", ref: $ref}}' \
+            "${settings}" >"${settings}.mock-staged"
+        mv "${settings}.mock-staged" "${settings}"
+    fi
+}
 case "$*" in
   "plugin marketplace list") [ -f "${CLAUDE_MARKETPLACE_FILE}" ] && echo cenci; exit 0 ;;
   "plugin marketplace add "*)
-    # Mirror the real CLI: when user settings declare an extraKnownMarketplaces
-    # "cenci" entry, any add whose ref differs from the entry's is refused.
+    # Managed declarations take precedence over user declarations. Any add
+    # whose ref differs from the effective entry is refused.
     settings="${HOME}/.claude/settings.json"
+    if [ -f "${CENCI_CLAUDE_MANAGED_SETTINGS:-}" ] && jq -e '.extraKnownMarketplaces.cenci' "${CENCI_CLAUDE_MANAGED_SETTINGS}" >/dev/null 2>&1; then
+      settings="${CENCI_CLAUDE_MANAGED_SETTINGS}"
+    fi
     if [ -f "${settings}" ] && jq -e '.extraKnownMarketplaces.cenci' "${settings}" >/dev/null 2>&1; then
       declared="$(jq -r '.extraKnownMarketplaces.cenci.source.ref // ""' "${settings}")"
       case "$4" in *@*) requested="${4#*@}" ;; *) requested="" ;; esac
@@ -309,12 +326,12 @@ case "$*" in
         printf 'Failed to add marketplace: Cannot add marketplace "cenci": its source does not match its extraKnownMarketplaces entry in user or managed settings\n' >&2
         exit 1
       fi
-      printf '%s' "${requested:-default-branch}" >"${CLAUDE_MARKETPLACE_FILE}"
+      record_marketplace "${requested}"
       exit 0
     fi
     case "$4" in
       *@*)
-        printf '%s' "${4#*@}" >"${CLAUDE_MARKETPLACE_FILE}"
+        record_marketplace "${4#*@}"
         exit 0
         ;;
       *)
@@ -2004,9 +2021,9 @@ assert_contains "${case_dir}/codex-marketplace" "watch/v9.9.9"
 
 # extraKnownMarketplaces: Claude refuses `marketplace add` from any source
 # other than the one a settings entry declares (the cenci sandbox seeds a
-# ref-less entry), so remove+re-add at RESOLVED_REF would delete the
-# registration and then fail to restore it.
-run_declared_case() {
+# ref-less entry). Repair must remove only a plain unpinned user entry before
+# re-registering at the selected release, preserving intentional declarations.
+prepare_declared_case() {
     local name="$1" registered="$2" entry="$3"
     case_dir="${WORK}/${name}" home="${WORK}/${name}/home"
     bin="${WORK}/${name}/bin" output="${WORK}/${name}/output" calls="${WORK}/${name}/calls"
@@ -2016,33 +2033,100 @@ run_declared_case() {
     make_claude "${bin}"
     prepare_checkout "${home}" claude
     prepare_bootstrap_cenci "${home}" claude
-    printf '{"extraKnownMarketplaces":{"cenci":{"source":%s}}}\n' "${entry}" >"${home}/.claude/settings.json"
+    printf '{"permissions":{"deny":["Read(.env)"]},"enabledPlugins":{"cenci@cenci":true},"extraKnownMarketplaces":{"other":{"source":{"source":"github","repo":"example/other"}},"cenci":{"source":%s}}}\n' "${entry}" >"${home}/.claude/settings.json"
+    cp "${home}/.claude/settings.json" "${case_dir}/original-settings.json"
     if [ "${registered}" = yes ]; then printf 'default-branch' >"${case_dir}/claude-marketplace"; fi
+}
+
+execute_declared_case() {
+    local ref="${1:-watch/v9.9.9}"
     set +e
     env -i HOME="${home}" PATH="${bin}" CALLS_FILE="${calls}" \
         CLAUDE_MARKETPLACE_FILE="${case_dir}/claude-marketplace" \
         CLAUDE_INSTALLED_FILE="${case_dir}/claude-installed" \
-        CENCI_CLAUDE_MANAGED_SETTINGS="${case_dir}/no-managed-settings.json" \
-        bash "${ROOT}/install.sh" --yes --no-build --ref watch/v9.9.9 >"${output}" 2>&1
+        CLAUDE_ADD_WRITES_SETTINGS="${2:-}" \
+        CODEX_MARKETPLACE_FILE="${case_dir}/codex-marketplace" \
+        CODEX_INSTALLED_FILE="${case_dir}/codex-installed" \
+        CENCI_CLAUDE_MANAGED_SETTINGS="${case_dir}/managed-settings.json" \
+        bash "${ROOT}/install.sh" --yes --no-build --ref "${ref}" >"${output}" 2>&1
     declared_exit=$?
     set -e
 }
 
-echo "case: a registered marketplace declared ref-less in extraKnownMarketplaces is refreshed in place, never removed or re-pinned"
-run_declared_case declared-registered yes '{"source":"github","repo":"matteobortolazzo/cenci"}'
-[[ "${declared_exit}" -eq 0 ]]
-assert_contains "${calls}" "claude plugin marketplace update cenci"
-assert_not_contains "${calls}" "claude plugin marketplace remove"
-assert_not_contains "${calls}" "claude plugin marketplace add"
-assert_contains "${output}" "extraKnownMarketplaces"
-assert_contains "${case_dir}/claude-marketplace" "default-branch"
+run_declared_case() {
+    prepare_declared_case "$@"
+    execute_declared_case
+}
 
-echo "case: an unregistered marketplace declared ref-less in extraKnownMarketplaces is added from the declared (ref-less) source"
-run_declared_case declared-unregistered no '{"source":"github","repo":"matteobortolazzo/cenci"}'
+file_mode() {
+    stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"
+}
+
+assert_declared_repaired() {
+    local backup
+    [[ "${declared_exit}" -eq 0 ]]
+    assert_contains "${case_dir}/claude-marketplace" "watch/v9.9.9"
+    for plugin in cenci cenci-watch cenci-sandbox; do
+        assert_contains "${case_dir}/claude-installed-${plugin}" "watch/v9.9.9"
+    done
+    jq -e --slurpfile original "${case_dir}/original-settings.json" \
+        '. == ($original[0] | del(.extraKnownMarketplaces.cenci))' "${home}/.claude/settings.json" >/dev/null
+    local backups=("${home}/.claude/settings.json.cenci-backup."*)
+    [[ "${#backups[@]}" -eq 1 && -f "${backups[0]}" ]]
+    backup="${backups[0]}"
+    cmp "${case_dir}/original-settings.json" "${backup}"
+    [[ "$(file_mode "${backup}")" = 600 ]]
+    assert_contains "${output}" "${backup}"
+    assert_not_contains "${output}" "so it tracks that source instead of"
+}
+
+echo "case: a registered unpinned user declaration is backed up and repaired to the selected release"
+run_declared_case declared-registered yes '{"source":"github","repo":"matteobortolazzo/cenci"}'
+assert_declared_repaired
+assert_before "${calls}" "claude plugin marketplace remove cenci" "claude plugin marketplace add matteobortolazzo/cenci@watch/v9.9.9"
+
+echo "case: repairing settings preserves their original permissions and keeps the backup private"
+prepare_declared_case declared-permissions yes '{"source":"github","repo":"matteobortolazzo/cenci"}'
+chmod 640 "${home}/.claude/settings.json"
+execute_declared_case
+assert_declared_repaired
+[[ "$(file_mode "${home}/.claude/settings.json")" = 640 ]]
+
+echo "case: repaired settings do not freeze the next update at the previous release"
+execute_declared_case watch/v9.9.10
 [[ "${declared_exit}" -eq 0 ]]
-assert_contains "${calls}" "claude plugin marketplace add matteobortolazzo/cenci"
-assert_not_contains "${calls}" "claude plugin marketplace add matteobortolazzo/cenci@"
-assert_contains "${case_dir}/claude-marketplace" "default-branch"
+assert_contains "${case_dir}/claude-marketplace" "watch/v9.9.10"
+assert_contains "${case_dir}/claude-installed-cenci" "watch/v9.9.10"
+backups=("${home}/.claude/settings.json.cenci-backup."*)
+[[ "${#backups[@]}" -eq 1 ]]
+
+echo "case: an unregistered unpinned user declaration is repaired before registration"
+run_declared_case declared-unregistered no '{"source":"github","repo":"matteobortolazzo/cenci"}'
+assert_declared_repaired
+assert_not_contains "${calls}" "claude plugin marketplace remove"
+
+echo "case: declarations created by modern Claude add do not freeze subsequent updates"
+prepare_declared_case declared-modern yes '{"source":"github","repo":"matteobortolazzo/cenci"}'
+execute_declared_case watch/v9.9.9 1
+[[ "${declared_exit}" -eq 0 ]]
+jq -e --slurpfile original "${case_dir}/original-settings.json" \
+    '. == ($original[0] | del(.extraKnownMarketplaces.cenci))' "${home}/.claude/settings.json" >/dev/null
+assert_contains "${case_dir}/claude-installed-cenci" "watch/v9.9.9"
+backups=("${home}/.claude/settings.json.cenci-backup."*)
+[[ "${#backups[@]}" -eq 2 ]]
+for backup in "${backups[@]}"; do assert_contains "${output}" "${backup}"; done
+execute_declared_case watch/v9.9.10 1
+[[ "${declared_exit}" -eq 0 ]]
+assert_contains "${case_dir}/claude-installed-cenci" "watch/v9.9.10"
+jq -e '(.extraKnownMarketplaces | has("cenci")) | not' "${home}/.claude/settings.json" >/dev/null
+backups=("${home}/.claude/settings.json.cenci-backup."*)
+[[ "${#backups[@]}" -eq 3 ]]
+
+for empty_ref in null '""'; do
+    echo "case: a null or empty ref is still an unpinned user declaration"
+    run_declared_case "declared-empty-${empty_ref//\"/empty}" yes "{\"source\":\"github\",\"repo\":\"matteobortolazzo/cenci\",\"ref\":${empty_ref}}"
+    assert_declared_repaired
+done
 
 echo "case: an unregistered marketplace declared with a ref in extraKnownMarketplaces is added at the declared ref, not the resolved one"
 run_declared_case declared-ref no '{"source":"github","repo":"matteobortolazzo/cenci","ref":"watch/v1.0.0"}'
@@ -2050,6 +2134,139 @@ run_declared_case declared-ref no '{"source":"github","repo":"matteobortolazzo/c
 assert_contains "${calls}" "claude plugin marketplace add matteobortolazzo/cenci@watch/v1.0.0"
 assert_not_contains "${calls}" "claude plugin marketplace add matteobortolazzo/cenci@watch/v9.9.9"
 assert_contains "${output}" "watch/v9.9.9"
+cmp "${case_dir}/original-settings.json" "${home}/.claude/settings.json"
+assert_contains "${output}" "extraKnownMarketplaces.cenci"
+assert_contains "${output}" "cenci update"
+
+echo "case: managed declarations take precedence and preserve the unpinned user entry"
+prepare_declared_case declared-managed no '{"source":"github","repo":"matteobortolazzo/cenci"}'
+printf '%s\n' '{"extraKnownMarketplaces":{"cenci":{"source":{"source":"github","repo":"matteobortolazzo/cenci","ref":"watch/v2.0.0"}}}}' >"${case_dir}/managed-settings.json"
+cp "${case_dir}/managed-settings.json" "${case_dir}/original-managed.json"
+execute_declared_case
+[[ "${declared_exit}" -eq 0 ]]
+cmp "${case_dir}/original-settings.json" "${home}/.claude/settings.json"
+cmp "${case_dir}/original-managed.json" "${case_dir}/managed-settings.json"
+assert_contains "${case_dir}/claude-marketplace" "watch/v2.0.0"
+assert_contains "${output}" "${case_dir}/managed-settings.json"
+assert_contains "${output}" "administrator"
+
+echo "case: invalid managed JSON prevents automatic user settings repair"
+prepare_declared_case declared-invalid-managed yes '{"source":"github","repo":"matteobortolazzo/cenci"}'
+printf '{invalid json\n' >"${case_dir}/managed-settings.json"
+execute_declared_case
+cmp "${case_dir}/original-settings.json" "${home}/.claude/settings.json"
+assert_not_contains "${calls}" "claude plugin marketplace remove"
+assert_contains "${output}" "${case_dir}/managed-settings.json"
+
+echo "case: custom sources and entry options are preserved"
+for variant in custom-repo custom-source custom-entry invalid-ref; do
+    prepare_declared_case "declared-${variant}" yes '{"source":"github","repo":"matteobortolazzo/cenci"}'
+    case "${variant}" in
+        custom-repo) filter='.extraKnownMarketplaces.cenci.source.repo = "example/cenci"' ;;
+        custom-source) filter='.extraKnownMarketplaces.cenci.source.path = "custom/marketplace.json"' ;;
+        custom-entry) filter='.extraKnownMarketplaces.cenci.autoUpdate = true' ;;
+        invalid-ref) filter='.extraKnownMarketplaces.cenci.source.ref = false' ;;
+    esac
+    jq "${filter}" "${home}/.claude/settings.json" >"${case_dir}/original-settings.json"
+    cp "${case_dir}/original-settings.json" "${home}/.claude/settings.json"
+    execute_declared_case
+    [[ "${declared_exit}" -eq 0 ]]
+    cmp "${case_dir}/original-settings.json" "${home}/.claude/settings.json"
+    assert_contains "${case_dir}/claude-marketplace" "default-branch"
+    assert_not_contains "${calls}" "claude plugin marketplace remove"
+    assert_contains "${output}" "extraKnownMarketplaces.cenci"
+done
+
+echo "case: symlinked user settings are preserved with actionable instructions"
+prepare_declared_case declared-symlink yes '{"source":"github","repo":"matteobortolazzo/cenci"}'
+mv "${home}/.claude/settings.json" "${case_dir}/linked-settings.json"
+ln -s "${case_dir}/linked-settings.json" "${home}/.claude/settings.json"
+execute_declared_case
+[[ "${declared_exit}" -eq 0 && -L "${home}/.claude/settings.json" ]]
+cmp "${case_dir}/original-settings.json" "${case_dir}/linked-settings.json"
+assert_not_contains "${calls}" "claude plugin marketplace remove"
+assert_contains "${output}" "extraKnownMarketplaces.cenci"
+assert_contains "${output}" "cenci update"
+
+for failure in backup-mktemp backup-cp stage-mktemp stage-cp transform-jq rename-mv; do
+    operation="${failure##*-}"
+    case "${failure}" in
+        backup-*) fail_pattern='*settings.json.cenci-backup.*' ;;
+        stage-*) fail_pattern='*settings.json.cenci-tmp.*' ;;
+        transform-jq) fail_pattern='*settings.json.cenci-backup.*' ;;
+        rename-mv) fail_pattern='*settings.json' ;;
+    esac
+    echo "case: settings repair ${failure} failure preserves settings and registration, and skips Claude plugins"
+    prepare_declared_case "declared-failed-${failure}" yes '{"source":"github","repo":"matteobortolazzo/cenci"}'
+    make_codex "${bin}"
+    prepare_checkout "${home}" codex
+    # Rename the symlink before writing the wrapper, so the host tool itself
+    # is never overwritten. Match the backup/staged path so a failure at a
+    # later stage cannot pass by accidentally failing the first prerequisite.
+    mv "${bin}/${operation}" "${bin}/${operation}-real"
+    cat >"${bin}/${operation}" <<EOF
+#!/bin/sh
+for arg do
+    case "\$arg" in ${fail_pattern}) exit 1 ;; esac
+done
+exec "${bin}/${operation}-real" "\$@"
+EOF
+    chmod +x "${bin}/${operation}"
+    execute_declared_case
+    [[ "${declared_exit}" -ne 0 ]]
+    cmp "${case_dir}/original-settings.json" "${home}/.claude/settings.json"
+    assert_contains "${case_dir}/claude-marketplace" "default-branch"
+    assert_not_contains "${calls}" "claude plugin marketplace remove"
+    assert_not_contains "${calls}" "claude plugin marketplace add"
+    assert_not_contains "${calls}" "claude plugin install"
+    assert_not_contains "${calls}" "claude plugin update"
+    assert_contains "${case_dir}/codex-installed-cenci" "watch/v9.9.9"
+done
+
+echo "case: a concurrent settings edit is preserved and aborts marketplace and plugin changes"
+prepare_declared_case declared-concurrent yes '{"source":"github","repo":"matteobortolazzo/cenci"}'
+jq '.permissions.deny += ["Read(concurrent-secret)"]' "${home}/.claude/settings.json" >"${case_dir}/concurrent-settings.json"
+mv "${bin}/cmp" "${bin}/cmp-real"
+cat >"${bin}/cmp" <<EOF
+#!/bin/sh
+case "\$*" in
+    *settings.json.cenci-backup.*) cp "${case_dir}/concurrent-settings.json" "${home}/.claude/settings.json" ;;
+esac
+exec "${bin}/cmp-real" "\$@"
+EOF
+chmod +x "${bin}/cmp"
+execute_declared_case
+[[ "${declared_exit}" -ne 0 ]]
+cmp "${case_dir}/concurrent-settings.json" "${home}/.claude/settings.json"
+assert_contains "${case_dir}/claude-marketplace" "default-branch"
+assert_not_contains "${calls}" "claude plugin marketplace remove"
+assert_not_contains "${calls}" "claude plugin marketplace add"
+assert_not_contains "${calls}" "claude plugin install"
+assert_not_contains "${calls}" "claude plugin update"
+
+echo "case: modern Claude declaration cleanup failure is reported before plugin installation"
+prepare_declared_case declared-modern-cleanup-failure yes '{"source":"github","repo":"matteobortolazzo/cenci"}'
+mv "${bin}/mv" "${bin}/mv-real"
+cat >"${bin}/mv" <<EOF
+#!/bin/sh
+case "\$*" in
+    *settings.json.cenci-tmp.*)
+        if grep -Fxq 'watch/v9.9.9' "${case_dir}/claude-marketplace"; then exit 1; fi
+        ;;
+esac
+exec "${bin}/mv-real" "\$@"
+EOF
+chmod +x "${bin}/mv"
+execute_declared_case watch/v9.9.9 1
+[[ "${declared_exit}" -ne 0 ]]
+assert_contains "${case_dir}/claude-marketplace" "watch/v9.9.9"
+jq -e --slurpfile original "${case_dir}/original-settings.json" \
+    '. == ($original[0] | .extraKnownMarketplaces.cenci.source.ref = "watch/v9.9.9")' "${home}/.claude/settings.json" >/dev/null
+assert_not_contains "${calls}" "claude plugin install"
+assert_not_contains "${calls}" "claude plugin update"
+assert_contains "${output}" "generated settings declaration could not be cleaned up"
+assert_contains "${output}" "extraKnownMarketplaces.cenci"
+assert_contains "${output}" "cenci update"
 
 echo "case: install repairs a missing core plugin without substring false positives"
 name=repair-missing-core
