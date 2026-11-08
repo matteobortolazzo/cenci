@@ -198,8 +198,8 @@ func TestDaemon_SweepIgnoresNonRunningWindows(t *testing.T) {
 // ("✳ …") while the session waits at the prompt to be woken. The Phase-3
 // title sweep must not override the hold while it lasts, since no hook event
 // fires until the background work wakes the session. The hold is not
-// unbounded: after frontend.BackgroundHoldTTL of total silence it resolves to
-// done rather than stopped — see backgroundhold_test.go (#1079).
+// unbounded for timer-only/legacy events: after frontend.BackgroundHoldTTL of
+// total silence those resolve to done — see backgroundhold_test.go (#1079).
 func TestDaemon_SweepDoesNotStopSessionHeldForBackgroundWork(t *testing.T) {
 	mc := &tmuxtest.MockClient{
 		Panes: []tmux.PaneInfo{

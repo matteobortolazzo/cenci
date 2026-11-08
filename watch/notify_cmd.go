@@ -83,9 +83,8 @@ func cwdExcluded(cwd string, entries []string) bool {
 // finished states plus paused — a paused task resumes only when the user or
 // the agent resumes it, and either way that resumption fires its own events
 // (#1079) — and treats every other value, including one added by a future
-// Claude Code release, as still in flight: a session wrongly held at running
-// now recovers on its own after frontend.BackgroundHoldTTL, while one wrongly
-// marked done stays wrong until the next event (#698).
+// Claude Code release, as still in flight. Only a later main-agent event can
+// resolve that evidence: a quiet shell or subagent can run for arbitrarily long.
 var terminalBackgroundTaskStatus = map[string]bool{
 	"completed": true,
 	"failed":    true,
@@ -230,6 +229,7 @@ func runNotify(args []string) {
 	for _, task := range hookInput.BackgroundTasks {
 		if !terminalBackgroundTaskStatus[task.Status] {
 			event.BackgroundWork = true
+			event.BackgroundTasksActive = true
 			break
 		}
 	}

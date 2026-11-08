@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -11,8 +12,96 @@ import (
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/tmux/tmuxtest"
 )
 
+// A quiet shell or subagent can run longer than the timer-only hold TTL.
+// Exercise both sweep paths, including the idle title shown in Claude's prompt.
+func TestDaemon_ActiveBackgroundTasksSurviveSilence(t *testing.T) {
+	for _, pane := range []string{"%0", ""} {
+		t.Run("pane="+pane, func(t *testing.T) {
+			d, mc := heldPaneDaemon(t, "✳ waiting for background work")
+			if pane == "" {
+				d = newTestDaemon(&tmuxtest.MockClient{})
+			}
+			var stop ipc.HookEvent
+			if err := json.Unmarshal([]byte(`{"event_type":"Stop","session_id":"sess1","agent":"claude","background_work":true,"background_tasks_active":true}`), &stop); err != nil {
+				t.Fatal(err)
+			}
+			stop.TmuxPane = pane
+			d.handleEvent(stop)
+			sess := d.sessions["sess1"]
+			for _, elapsed := range []time.Duration{3 * time.Minute, 30 * time.Minute} {
+				sess.LastEvent = time.Now().Add(-elapsed)
+				mc.WindowOpts = nil
+				d.runSweep()
+				if sess.Status != detect.StatusRunning || !sess.BackgroundHold {
+					t.Fatalf("after %s silence: status=%v hold=%v, want running/held", elapsed, sess.Status, sess.BackgroundHold)
+				}
+				if sym, ok := findWindowOpt(mc.WindowOpts, "main:0", "@cenci-symbol"); ok && sym != d.cfg.SymbolRunning {
+					t.Fatalf("sweep changed running symbol to %q", sym)
+				}
+			}
+
+			// Child traffic cannot release the parent hold, including a child Stop.
+			for _, eventType := range []string{"PreToolUse", "PostToolUse", "Stop"} {
+				d.handleEvent(ipc.HookEvent{EventType: eventType, SessionID: "sess1", AgentID: "child", TmuxPane: pane})
+				sess.LastEvent = time.Now().Add(-3 * time.Minute)
+				d.runSweep()
+				if sess.Status != detect.StatusRunning || !sess.BackgroundHold {
+					t.Fatalf("child %s released parent hold: %+v", eventType, sess)
+				}
+			}
+
+			// A real wake and a subsequent main Stop with no work finish normally.
+			d.handleEvent(ipc.HookEvent{EventType: "PostToolUse", SessionID: "sess1", TmuxPane: pane})
+			if sess.Status != detect.StatusRunning || sess.BackgroundHold {
+				t.Fatalf("wake did not resume normal running: %+v", sess)
+			}
+			d.handleEvent(ipc.HookEvent{EventType: "Stop", SessionID: "sess1", TmuxPane: pane})
+			d.runSweep()
+			if sess.Status != detect.StatusDone || sess.BackgroundHold {
+				t.Fatalf("final Stop did not finish: %+v", sess)
+			}
+			if pane != "" {
+				if sym, ok := findWindowOpt(mc.WindowOpts, "main:0", "@cenci-symbol"); !ok || sym != d.cfg.SymbolDone {
+					t.Fatalf("final window symbol=%q, set=%v, want done", sym, ok)
+				}
+			}
+		})
+	}
+}
+
+func TestDaemon_ActiveBackgroundHoldUsesLatestMainEvent(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		event ipc.HookEvent
+		want  detect.Status
+	}{
+		{"finished", ipc.HookEvent{EventType: "Stop"}, detect.StatusDone},
+		{"timer only", ipc.HookEvent{EventType: "Stop", BackgroundWork: true}, detect.StatusDone},
+		{"permission", ipc.HookEvent{EventType: "PermissionRequest", ToolName: "Bash"}, detect.StatusNeedInput},
+		{"failed", ipc.HookEvent{EventType: "StopFailure"}, detect.StatusStopped},
+		{"interrupted", ipc.HookEvent{EventType: "PostToolUseFailure", IsInterrupt: true}, detect.StatusStopped},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d, _ := heldPaneDaemon(t, "✳ waiting")
+			// The additive task flag is sufficient even without the legacy flag.
+			d.handleEvent(ipc.HookEvent{EventType: "Stop", SessionID: "sess1", TmuxPane: "%0", BackgroundTasksActive: true})
+			sess := d.sessions["sess1"]
+			if sess.Status != detect.StatusRunning || !sess.BackgroundHold {
+				t.Fatalf("active task did not hold session: %+v", sess)
+			}
+			tc.event.SessionID, tc.event.TmuxPane = "sess1", "%0"
+			d.handleEvent(tc.event)
+			sess.LastEvent = time.Now().Add(-3 * time.Minute)
+			d.runSweep()
+			if sess.Status != tc.want || sess.BackgroundHold || sess.BackgroundTasksActive {
+				t.Fatalf("after %s: %+v, want %v with hold cleared", tc.name, sess, tc.want)
+			}
+		})
+	}
+}
+
 // heldPaneDaemon wires a daemon whose single session has just been held at
-// running by a main-agent Stop reporting in-flight background work (#698).
+// running by a main-agent Stop with a legacy background-work flag (#698).
 func heldPaneDaemon(t *testing.T, paneTitle string) (*Daemon, *tmuxtest.MockClient) {
 	t.Helper()
 	mc := &tmuxtest.MockClient{
@@ -35,9 +124,8 @@ func heldPaneDaemon(t *testing.T, paneTitle string) (*Daemon, *tmuxtest.MockClie
 
 // TestDaemon_SweepReleasesExpiredBackgroundHoldToDone covers #1079: the hold
 // #698 puts on a finished turn assumes the reported background work will wake
-// the session, and that is false for work that never re-invokes the agent — a
-// backgrounded server, a paused task, a far-future wakeup. With no expiry the
-// window sat at running until the user's next prompt. Once hook events have
+// the session. For timer-only/legacy events, no active task is known. Without
+// expiry the window sat at running until the user's next prompt. Once hook events have
 // been quiet past BackgroundHoldTTL the session is released to done, not
 // stopped: the main agent's Stop did fire, so the agent really is parked at
 // the prompt.
@@ -109,7 +197,7 @@ func TestDaemon_SweepKeepsFreshBackgroundHoldRunning(t *testing.T) {
 // TestDaemon_SubagentEventRearmsBackgroundHold pins the TTL to quiet rather
 // than to hold age: the backgrounded work's own events land on the session key
 // and refresh LastEvent, so work that is genuinely in flight keeps the hold
-// alive indefinitely and only a phantom hold expires.
+// alive indefinitely. Explicitly active tasks need no such heartbeat.
 func TestDaemon_SubagentEventRearmsBackgroundHold(t *testing.T) {
 	d, mc := heldPaneDaemon(t, "⠋ delegating work")
 
