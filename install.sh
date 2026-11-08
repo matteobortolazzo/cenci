@@ -237,6 +237,8 @@ claude_managed_settings_file() {
 
 claude_declared_marketplace() {
 	local f ref managed
+	CLAUDE_DECLARED_FILE=""
+	CLAUDE_DECLARED_REF=""
 	have jq || return 1
 	managed="$(claude_managed_settings_file)"
 	for f in "$managed" "$HOME/.claude/settings.json"; do
@@ -249,6 +251,54 @@ claude_declared_marketplace() {
 		return 0
 	done
 	return 1
+}
+
+# Only the plain, official declaration belongs to the installer's automatic
+# repair. An explicit ref, different source, or extra options are user policy.
+# Emit the repaired document; jq -e rejects a nonmatching declaration.
+claude_without_default_marketplace() {
+	local file="$1" ref="$2"
+	jq -e --arg n "$MARKETPLACE_NAME" --arg repo "$MARKETPLACE_REPO" --arg ref "$ref" '
+		.extraKnownMarketplaces[$n] as $entry
+		| select(($entry.source.ref == $ref or ($ref == "" and $entry.source.ref == null))
+			and (($entry | del(.source.ref)) == {source: {source: "github", repo: $repo}}))
+		| del(.extraKnownMarketplaces[$n])' "$file"
+}
+
+# Remove a redundant declaration only after a private, unique backup and a
+# same-directory staged rewrite. Never replace a symlink or a concurrent edit.
+# Return 0 for an ineligible declaration as well; the caller checks whether
+# CLAUDE_DECLARED_FILE was cleared to decide which registration path to use.
+claude_repair_default_marketplace() {
+	local file="$1" ref="$2" managed backup tmp
+	[ -f "$file" ] && [ ! -L "$file" ] || return 0
+	claude_without_default_marketplace "$file" "$ref" >/dev/null 2>&1 || return 0
+	managed="$(claude_managed_settings_file)"
+	if [ -e "$managed" ] && ! jq -e 'type == "object"' "$managed" >/dev/null 2>&1; then
+		warn "Claude: automatic marketplace repair skipped because managed settings could not be read: $managed"
+		return 0
+	fi
+	backup="$(mktemp "$file.cenci-backup.XXXXXX")" || return 1
+	[ -n "$backup" ] && [ -f "$backup" ] || return 1
+	if ! cp "$file" "$backup"; then
+		rm -f "$backup"
+		return 1
+	fi
+	say "  Claude settings backup: $backup"
+	tmp="$(mktemp "$file.cenci-tmp.XXXXXX")" || return 1
+	[ -n "$tmp" ] && [ -f "$tmp" ] || return 1
+	# cp -p preserves the original settings' permissions on the replacement;
+	# the backup retains mktemp's private permissions.
+	if ! cp -p "$file" "$tmp" ||
+		! claude_without_default_marketplace "$backup" "$ref" >"$tmp" ||
+		[ -L "$file" ] || ! cmp -s "$file" "$backup" ||
+		! mv -f "$tmp" "$file"; then
+		rm -f "$tmp"
+		return 1
+	fi
+	ok "Claude: removed redundant extraKnownMarketplaces.$MARKETPLACE_NAME from $file; the installer selects $RESOLVED_REF"
+	CLAUDE_DECLARED_FILE=""
+	CLAUDE_DECLARED_REF=""
 }
 
 codex_plugin_installed() {
@@ -1443,16 +1493,26 @@ step_claude_declared_marketplace() {
 		fi
 	fi
 	if [ "$CLAUDE_DECLARED_REF" != "$RESOLVED_REF" ]; then
-		warn "Claude: ${CLAUDE_DECLARED_FILE} declares the '$MARKETPLACE_NAME' marketplace under extraKnownMarketplaces (${label}), so it tracks that source instead of ${RESOLVED_REF}; edit that entry to pin a different ref"
+		warn "Claude: ${CLAUDE_DECLARED_FILE} declares the '$MARKETPLACE_NAME' marketplace under extraKnownMarketplaces (${label}), so it tracks that source instead of ${RESOLVED_REF}.
+  To let the installer select releases, remove only extraKnownMarketplaces.${MARKETPLACE_NAME} from ${CLAUDE_DECLARED_FILE}, then run: cenci update
+  For managed settings, ask your administrator to make this change. Keep the entry if this source is intentional."
 	fi
 }
 
 step_marketplace() {
-	local state
+	local state repair_failed=0
 	step "Reconciling the cenci marketplace"
-	if [ "$HAS_CLAUDE" -eq 0 ]; then
+	if [ "$HAS_CLAUDE" -eq 1 ] && claude_declared_marketplace &&
+		[ "$CLAUDE_DECLARED_FILE" = "$HOME/.claude/settings.json" ]; then
+		if ! claude_repair_default_marketplace "$CLAUDE_DECLARED_FILE" ""; then
+			fail "Claude: could not safely repair $CLAUDE_DECLARED_FILE; marketplace registration left unchanged. Fix settings file permissions or remove only extraKnownMarketplaces.$MARKETPLACE_NAME, then run: cenci update"
+			repair_failed=1
+			INSTALL_FAILED=1
+		fi
+	fi
+	if [ "$HAS_CLAUDE" -eq 0 ] || [ "$repair_failed" -eq 1 ]; then
 		:
-	elif claude_declared_marketplace; then
+	elif [ -n "$CLAUDE_DECLARED_FILE" ]; then
 		step_claude_declared_marketplace
 	elif marketplace_registered; then
 		# Registered, possibly at a different (or unpinned) ref. Neither
@@ -1491,6 +1551,17 @@ step_marketplace() {
 		fi
 	fi
 
+	# Recent Claude versions write the source back to user settings on add.
+	# Remove only the plain declaration at the ref we just registered, so the
+	# next update can move forward. Pre-existing explicit pins use the declared
+	# branch above and never enter this cleanup.
+	if [ "$CLAUDE_MARKETPLACE_READY" -eq 1 ] && [ -z "$CLAUDE_DECLARED_FILE" ]; then
+		if ! claude_repair_default_marketplace "$HOME/.claude/settings.json" "$RESOLVED_REF"; then
+			fail "Claude: marketplace registered, but its generated settings declaration could not be cleaned up. Remove only extraKnownMarketplaces.$MARKETPLACE_NAME from $HOME/.claude/settings.json, then run: cenci update"
+			CLAUDE_MARKETPLACE_READY=0
+			INSTALL_FAILED=1
+		fi
+	fi
 	[ "$HAS_CODEX" -eq 1 ] || return 0
 	if codex_marketplace_registered; then
 		# Same remove+re-add contract as Claude above (#625, Q4).

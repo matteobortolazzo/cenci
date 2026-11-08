@@ -85,9 +85,26 @@ unverified ref.
 
 Resolves to the latest release tag by default. That resolved ref pins the client
 marketplace manifests and all three plugins' content — not just which install.sh
-runs — for every install, update, and repair run. Set `CENCI_REF=main` (or pass
+runs — for install, update, and repair runs, subject to the preserved Claude
+settings declarations described below. Set `CENCI_REF=main` (or pass
 `--ref main`) to explicitly opt into bleeding-edge, unverified main instead (unsafe;
 development use only) — it is the only path that intentionally tracks main.
+
+If Claude user settings contain the default, unpinned cenci declaration under
+`extraKnownMarketplaces`, the installer backs up `~/.claude/settings.json` to a
+unique `settings.json.cenci-backup.*` file, removes just that declaration, and
+registers the selected release through Claude's marketplace CLI. The backup path
+is printed. Removing the redundant declaration lets future updates select newer
+releases without leaving a fixed settings pin behind; other settings are preserved.
+If Claude's CLI recreates the declaration during registration, the installer also
+backs up and removes that generated declaration at the selected ref.
+
+Explicit refs, managed settings, customized declarations, and symlinked settings
+files are preserved. These declarations can override the installer's selected ref.
+When they do, the installer prints the exact settings file and key to change. To
+let cenci select releases, remove only `extraKnownMarketplaces.cenci` from that
+file, then run `cenci update`. For managed settings, ask the administrator to make
+the change. To keep an intentional pin, leave the declaration as it is.
 
 From a clone, run `./install.sh`. Non-interactive automation can add `--yes`; use
 `./install.sh --help` for the complete public interface. Every run reconciles the
