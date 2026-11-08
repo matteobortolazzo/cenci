@@ -15,9 +15,10 @@ container, but the container is what stands between it and your host. See
 
 ### What the sandbox protects against
 
-- Arbitrary file writes/deletes outside the mounted repo — only the current repo's root
-  is mounted at `/workspace` (not your whole `~/Repos`), and the container has its own
-  home directory backed by a named volume, not your host `~/`.
+- Arbitrary file writes/deletes outside the mounted repo — by default only the current
+  repo's root is mounted at `/workspace` (not your whole `~/Repos`; `--add-dir` below is
+  the explicit opt-in to mount more), and the container has its own home directory
+  backed by a named volume, not your host `~/`.
 - Host process/credential access — the agent cannot see host processes, host
   environment variables (beyond what's explicitly forwarded), or host files outside the
   mount points documented in the [sandbox README](./sandbox/README.md#what-persists-home-volume).
@@ -77,6 +78,62 @@ persistently, in your own user config:
   report each name that widens the default forward set as a boundary weakening — see
   [watch/README.md](./watch/README.md#forwarding-extra-host-env-vars-sandboxenvforward).
   List only variables you intend the agent to see.
+- **`--add-dir <path>`** (repeatable) — bind-mounts an additional host directory
+  **read-write** at `/repos/<slug>` and forwards it to the agent as
+  `--add-dir=/repos/<slug>`. The directory sits outside the repo scope, so the agent
+  (running unattended) can read, modify and delete everything in it, and a
+  build/test/tooling hook in any file there runs with the same container privileges
+  as in the repo. It is opt-in because a writable bind is exactly the access the
+  default boundary withholds; the default mounts only the current repo. A writable
+  `.git/` under an added directory (hooks, `core.fsmonitor`) runs code on the host
+  the next time you use git there. cenci refuses, with a usage error and no
+  override, these host locations, whose read-write exposure would defeat the rest
+  of the model: `/`, `$HOME` and any parent of it, `~/.ssh`, `~/.gnupg`, any
+  directory that holds (or sits inside one that holds) a credential file cenci
+  stages read-only into the container (such as `~/.claude`), cenci's own control
+  paths (`~/.config/cenci`, `~/.local/state/cenci`, the daemon socket directory and
+  `~/.local/bin`), the system directories (`/etc`, `/boot`, `/usr`, `/bin`,
+  `/sbin`, `/lib`, `/lib64`, `/proc`, `/sys`, `/dev`, `/run`, and on macOS
+  `/private/etc`, `/Library`, `/System`; also `/root`, except that when `$HOME` is
+  `/root` `/root` itself stays refused as a parent of `$HOME` while a project
+  directory inside it is accepted, and when `$HOME` is strictly inside `/root`
+  (such as `/root/me`) `/root`, `/root/.ssh`, `/root/.gnupg`,
+  `/root/.config/systemd` and the rest of `/root`'s own credential and control
+  directories stay refused while non-sensitive directories under `/root` are
+  accepted), the root-run host state directories
+  (`/var/spool`, `/var/lib`, `/var/db`, `/nix`, `/opt/homebrew`, `/snap`), the
+  shared parent directories `/tmp`, `/private/tmp`, `/var/tmp`, `$TMPDIR`, `/var`,
+  `/private/var` and `/opt` (refused as such or as a parent of a refused location,
+  while a directory inside them such as `/tmp/app` or `/opt/app` is accepted), the
+  runtime, tmux and agent socket directories (`$XDG_RUNTIME_DIR`, `~/.docker`,
+  `~/.colima`, `~/.orbstack`, the host tmux server's `/tmp/tmux-<uid>` (or
+  `tmux-<uid>` under `$TMUX_TMPDIR`), the directory of the `$TMUX` socket and of
+  `$SSH_AUTH_SOCK` (refused together with their parents, not their children, so a
+  socket directly in `$HOME` refuses `$HOME` and not the projects inside it; a
+  relative `$SSH_AUTH_SOCK` or `$TMUX_TMPDIR` is resolved against the current
+  directory), `/tmp/.X11-unix` and the host emacs server's `/tmp/emacs<uid>`; the
+  agent is root with sudo, so a writable tmux socket would run code on the host),
+  the directories whose contents run at
+  login (`~/.config/systemd`, `~/.local/share/systemd`, `$XDG_CONFIG_HOME/systemd`,
+  `$XDG_CONFIG_HOME/autostart`, `$XDG_DATA_HOME/systemd`, `~/.config/autostart`,
+  `~/Library/LaunchAgents`, where cenci's autostart unit lives), and a linked git
+  worktree. The list is not exhaustive: it refuses exactly those locations, and
+  only the socket locations named above (tmux, ssh-agent via `$SSH_AUTH_SOCK`,
+  X11, emacs, container runtime and agent directories) are guarded; other socket
+  directories under `/tmp`, for example from other ssh sessions, are not covered,
+  so only mount directories you would hand to the agent. `/run` is refused as a
+  whole, including `/run/media` where removable drives automount, so copy such a
+  repository elsewhere. The denylist runs on both the
+  as-typed absolute path and the symlink-resolved path, on every spelling of a
+  repeated directory, and also matches by file identity (a guard path whose
+  identity cannot be read, meaning any error other than "does not exist" or "not
+  a directory", counts as a match). Mounts are fixed for a container's lifetime: a
+  running container created with a different `--add-dir` set is never recreated
+  automatically, the launch fails with a `cenci sandbox stop` hint. Use
+  `--name` to keep multi-repo work in its own container. `cenci audit` (planned and
+  running) and `cenci security explain` (running containers) list every added
+  directory as a boundary weakening — see
+  [watch/README.md](./watch/README.md#effective-security-posture-cenci-audit).
 
 ### Nested Docker (`--dind`) preserves the boundary
 

@@ -83,7 +83,7 @@ func TestAssembleRunArgs_NoCreationTimeTmuxPane(t *testing.T) {
 		WorkspaceScope:    "repo",
 	}
 
-	args, err := e.assembleRunArgs("claude", "/usr/local/bin/cenci", "/run/user/1000/cenci", true, scope, Options{Agent: "claude"}, home, false, false, DefaultSandboxPlugins(), nil)
+	args, err := e.assembleRunArgs("claude", "/usr/local/bin/cenci", "/run/user/1000/cenci", true, scope, Options{Agent: "claude"}, home, false, false, DefaultSandboxPlugins(), nil, nil)
 	if err != nil {
 		t.Fatalf("assembleRunArgs: %v", err)
 	}
@@ -122,7 +122,7 @@ func TestAssembleRunArgs_LimitArgsAreCarriedVerbatim(t *testing.T) {
 	scope := limitsTestScope(t)
 	limitArgs := []string{"--memory", "8192m", "--memory-swap", "8192m", "--pids-limit", "4096"}
 
-	with, err := e.assembleRunArgs("claude", "/usr/local/bin/cenci", "/run/user/1000/cenci", true, scope, Options{Agent: "claude"}, t.TempDir(), false, false, DefaultSandboxPlugins(), limitArgs)
+	with, err := e.assembleRunArgs("claude", "/usr/local/bin/cenci", "/run/user/1000/cenci", true, scope, Options{Agent: "claude"}, t.TempDir(), false, false, DefaultSandboxPlugins(), nil, limitArgs)
 	if err != nil {
 		t.Fatalf("assembleRunArgs with limits: %v", err)
 	}
@@ -130,7 +130,7 @@ func TestAssembleRunArgs_LimitArgsAreCarriedVerbatim(t *testing.T) {
 		t.Errorf("assembleRunArgs dropped or reordered the limit flags %v; got:\n%s", limitArgs, strings.Join(with, " "))
 	}
 
-	without, err := e.assembleRunArgs("claude", "/usr/local/bin/cenci", "/run/user/1000/cenci", true, scope, Options{Agent: "claude"}, t.TempDir(), false, false, DefaultSandboxPlugins(), nil)
+	without, err := e.assembleRunArgs("claude", "/usr/local/bin/cenci", "/run/user/1000/cenci", true, scope, Options{Agent: "claude"}, t.TempDir(), false, false, DefaultSandboxPlugins(), nil, nil)
 	if err != nil {
 		t.Fatalf("assembleRunArgs without limits: %v", err)
 	}
@@ -150,7 +150,7 @@ func TestAssembleRunArgs_Dind_LimitFlagsAlongsideSysboxRuntime(t *testing.T) {
 	scope := limitsTestScope(t)
 	limitArgs := []string{"--memory", "8192m", "--memory-swap", "8192m", "--pids-limit", "4096"}
 
-	args, err := e.assembleRunArgs("claude", "/usr/local/bin/cenci", "/run/user/1000/cenci", true, scope, Options{Agent: "claude"}, t.TempDir(), true, false, DefaultSandboxPlugins(), limitArgs)
+	args, err := e.assembleRunArgs("claude", "/usr/local/bin/cenci", "/run/user/1000/cenci", true, scope, Options{Agent: "claude"}, t.TempDir(), true, false, DefaultSandboxPlugins(), nil, limitArgs)
 	if err != nil {
 		t.Fatalf("assembleRunArgs (dind): %v", err)
 	}
@@ -711,6 +711,21 @@ func TestParseReusePosture_FailsClosedOnMalformedOrEmptyOutput(t *testing.T) {
 			out:        "off|runc|0\nno-delimiter-here\n",
 			wantErrSub: "malformed reuse posture mount line",
 		},
+		{
+			name:       "a mount line with a second \"::\" is rejected, not split at the first one (#737)",
+			out:        "off|runc|0\n/x::y::/repos/z\n",
+			wantErrSub: "malformed reuse posture mount line",
+		},
+		{
+			name:       "a source ending in ':' makes a \":::\" run that would hide a /repos destination, so it is rejected (#737)",
+			out:        "off|runc|0\n/x:::/repos/y\n",
+			wantErrSub: "malformed reuse posture mount line",
+		},
+		{
+			name:       "a destination ending in ':' next to the delimiter is rejected too (#737)",
+			out:        "off|runc|0\n/x:::/repos/y:\n",
+			wantErrSub: "malformed reuse posture mount line",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -832,7 +847,7 @@ func buildRunArgvTrailingCommand(t *testing.T, dindOn bool) string {
 		WorkspaceScope:    "repo",
 	}
 
-	argv, err := e.buildRunArgv("claude", "/usr/local/bin/cenci", "/run/user/1000/cenci", true, scope, Options{Agent: "claude"}, home, dindOn, false, DefaultSandboxPlugins(), nil)
+	argv, err := e.buildRunArgv("claude", "/usr/local/bin/cenci", "/run/user/1000/cenci", true, scope, Options{Agent: "claude"}, home, dindOn, false, DefaultSandboxPlugins(), nil, nil)
 	if err != nil {
 		t.Fatalf("buildRunArgv(dindOn=%v): %v", dindOn, err)
 	}
@@ -1292,6 +1307,144 @@ func TestTagLaunchPane_OutsideTmuxMakesNoTmuxCallInjectsNoIDAndWarns(t *testing.
 				requireSingleLineWarning(t, stderr.String())
 			})
 		}
+	}
+}
+
+// -- ticket #737: `cenci open --add-dir` argv shape ------------------------
+//
+// Pure argv-shape tests: the resolver's filesystem behavior is covered against
+// real directories in adddir_test.go, and the end-to-end exec lines in the
+// black-box sandbox_open_test.go. These pin the two places a regression would
+// otherwise hide: the create argv's exact -v pairs and the position of the
+// forwarded agent tokens relative to the per-agent flags and the passthrough.
+
+var addDirTestMounts = []addDirMount{
+	{Host: "/srv/alpha", Container: "/repos/alpha"},
+	{Host: "/data/beta-repo", Container: "/repos/beta-repo"},
+}
+
+// reposVolumeValues returns, in order, every "-v" value of args whose
+// container side is under /repos/.
+func reposVolumeValues(args []string) []string {
+	var out []string
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == "-v" && strings.Contains(args[i+1], ":/repos/") {
+			out = append(out, args[i+1])
+		}
+	}
+	return out
+}
+
+func TestAddDirAssembleRunArgs_TwoDirsGetExactReadWriteVolumePairs(t *testing.T) {
+	e := &Engine{Runtime: "docker", Stderr: &bytes.Buffer{}}
+	scope := limitsTestScope(t)
+
+	args, err := e.assembleRunArgs("claude", "/usr/local/bin/cenci", "/run/user/1000/cenci", true, scope, Options{Agent: "claude"}, t.TempDir(), false, false, DefaultSandboxPlugins(), addDirTestMounts, nil)
+	if err != nil {
+		t.Fatalf("assembleRunArgs: %v", err)
+	}
+
+	want := []string{"/srv/alpha:/repos/alpha", "/data/beta-repo:/repos/beta-repo"}
+	if got := reposVolumeValues(args); !slices.Equal(got, want) {
+		t.Errorf("-v pairs under /repos = %q, want exactly %q (read-write: no :ro suffix)", got, want)
+	}
+	if !slices.Contains(args, scope.WorkspaceBindHost+":/workspace") {
+		t.Errorf("the primary workspace bind must stay in place, got:\n%s", strings.Join(args, " "))
+	}
+}
+
+func TestAddDirAssembleRunArgs_NoAddDirsMountsNothingUnderRepos(t *testing.T) {
+	e := &Engine{Runtime: "docker", Stderr: &bytes.Buffer{}}
+
+	args, err := e.assembleRunArgs("claude", "/usr/local/bin/cenci", "/run/user/1000/cenci", true, limitsTestScope(t), Options{Agent: "claude"}, t.TempDir(), false, false, DefaultSandboxPlugins(), nil, nil)
+	if err != nil {
+		t.Fatalf("assembleRunArgs: %v", err)
+	}
+	if got := reposVolumeValues(args); len(got) != 0 {
+		t.Errorf("a launch without --add-dir mounted %q under /repos", got)
+	}
+}
+
+func TestAddDirAgentCmdArgsFor_ClaudeAndCodexForwardOneSingleTokenFlagPerDirAfterModel(t *testing.T) {
+	for _, agent := range []string{"claude", "codex"} {
+		t.Run(agent, func(t *testing.T) {
+			ctx := launchCtx{Agent: agent, Model: DefaultModel(agent), AddDirs: addDirTestMounts}
+
+			got := agentCmdArgsFor(ctx)
+
+			want := append(buildAgentCmdArgs(agent, ctx.Model), "--add-dir=/repos/alpha", "--add-dir=/repos/beta-repo")
+			if !slices.Equal(got, want) {
+				t.Errorf("agentCmdArgsFor(%s) = %q, want the per-agent flags then one --add-dir=<container> token per dir: %q", agent, got, want)
+			}
+			if got[len(got)-3] != DefaultModel(agent) {
+				t.Errorf("tokens must follow `--model %s`, got %q", DefaultModel(agent), got)
+			}
+		})
+	}
+}
+
+func TestAddDirAgentCmdArgsFor_NoAddDirsIsExactlyThePerAgentFlags(t *testing.T) {
+	for _, agent := range launchTestAgents {
+		ctx := launchCtx{Agent: agent, Model: DefaultModel(agent)}
+		if got, want := agentCmdArgsFor(ctx), buildAgentCmdArgs(agent, ctx.Model); !slices.Equal(got, want) {
+			t.Errorf("agentCmdArgsFor(%s) = %q, want unchanged %q", agent, got, want)
+		}
+	}
+}
+
+func TestAddDirAttachArgv_PositionalPromptFollowsTheLastTokenSoItIsNotReadAsADirectory(t *testing.T) {
+	for _, agent := range []string{"claude", "codex"} {
+		t.Run(agent, func(t *testing.T) {
+			ctx := launchCtx{Agent: agent, Model: DefaultModel(agent), AddDirs: addDirTestMounts}
+			opts := Options{Agent: agent, AgentArgs: []string{"fix the flaky test", "--resume"}}
+
+			argv := buildAgentExecArgv("c", agent, agentCmdArgsFor(ctx), nil, opts)
+
+			tail := argv[len(argv)-4:]
+			want := []string{"--add-dir=/repos/alpha", "--add-dir=/repos/beta-repo", "fix the flaky test", "--resume"}
+			if !slices.Equal(tail, want) {
+				t.Errorf("argv tail = %q, want the last --add-dir= token immediately followed by the passthrough args %q", tail, want)
+			}
+			for _, tok := range argv {
+				if tok == "--add-dir" {
+					t.Errorf("a bare two-token --add-dir would swallow the positional prompt; argv = %q", argv)
+				}
+			}
+		})
+	}
+}
+
+func TestAddDirAttachArgv_ShellForwardsNoToken(t *testing.T) {
+	ctx := launchCtx{Agent: "claude", Model: "sonnet", AddDirs: addDirTestMounts}
+
+	argv := buildAgentExecArgv("c", "claude", agentCmdArgsFor(ctx), nil, Options{Agent: "claude", Shell: true})
+
+	if argv[len(argv)-1] != "/bin/bash" {
+		t.Errorf("--shell attach must end in /bin/bash, got %q", argv)
+	}
+	for _, tok := range argv {
+		if strings.HasPrefix(tok, "--add-dir") {
+			t.Errorf("--shell has no agent process to receive %q; argv = %q", tok, argv)
+		}
+	}
+}
+
+func TestAddDirPassthroughFlag_IsForwardedVerbatimWithoutMountOrTranslation(t *testing.T) {
+	ctx := launchCtx{Agent: "claude", Model: "sonnet"}
+	opts := Options{Agent: "claude", AgentArgs: []string{"--add-dir", "/x"}}
+
+	argv := buildAgentExecArgv("c", "claude", agentCmdArgsFor(ctx), nil, opts)
+
+	if tail := argv[len(argv)-2:]; !slices.Equal(tail, []string{"--add-dir", "/x"}) {
+		t.Errorf("passthrough tail = %q, want the user's own --add-dir /x verbatim", tail)
+	}
+	e := &Engine{Runtime: "docker", Stderr: &bytes.Buffer{}}
+	args, err := e.assembleRunArgs("claude", "/usr/local/bin/cenci", "/run/user/1000/cenci", true, limitsTestScope(t), opts, t.TempDir(), false, false, DefaultSandboxPlugins(), nil, nil)
+	if err != nil {
+		t.Fatalf("assembleRunArgs: %v", err)
+	}
+	if got := reposVolumeValues(args); len(got) != 0 {
+		t.Errorf("a passthrough --add-dir must not create a mount, got %q", got)
 	}
 }
 

@@ -59,10 +59,20 @@ func (p Posture) WriteExplanation(w io.Writer) error {
 	_, _ = fmt.Fprintln(bw)
 
 	_, _ = fmt.Fprintln(bw, "Workspace and home:")
-	_, _ = fmt.Fprintf(bw, "Only the current repo (%s) is bind-mounted into the container at %s — not\n", p.Workspace.HostPath, p.Workspace.ContainerPath)
-	_, _ = fmt.Fprintln(bw, "your whole host filesystem. The container's home directory is backed by a")
-	_, _ = fmt.Fprintln(bw, "named volume, not your host home, so the agent cannot read or write host files")
-	_, _ = fmt.Fprintln(bw, "outside the mounted repo and the documented mount points.")
+	if hasMountKind(p.Mounts, MountKindAddedDir) {
+		// #737: with --add-dir the repo is no longer the only bind-mounted host
+		// directory; say so rather than claim it is.
+		_, _ = fmt.Fprintf(bw, "The current repo (%s) is bind-mounted into the container at %s, together\n", p.Workspace.HostPath, p.Workspace.ContainerPath)
+		_, _ = fmt.Fprintln(bw, "with the additional host directories listed under Boundary weakenings below —")
+		_, _ = fmt.Fprintln(bw, "not your whole host filesystem. The container's home directory is backed by a")
+		_, _ = fmt.Fprintln(bw, "named volume, not your host home, so the agent cannot read or write host files")
+		_, _ = fmt.Fprintln(bw, "outside those mounted directories and the documented mount points.")
+	} else {
+		_, _ = fmt.Fprintf(bw, "Only the current repo (%s) is bind-mounted into the container at %s — not\n", p.Workspace.HostPath, p.Workspace.ContainerPath)
+		_, _ = fmt.Fprintln(bw, "your whole host filesystem. The container's home directory is backed by a")
+		_, _ = fmt.Fprintln(bw, "named volume, not your host home, so the agent cannot read or write host files")
+		_, _ = fmt.Fprintln(bw, "outside the mounted repo and the documented mount points.")
+	}
 	_, _ = fmt.Fprintln(bw)
 
 	_, _ = fmt.Fprintln(bw, "Network:")
@@ -186,16 +196,35 @@ func (p Posture) WriteExplanation(w io.Writer) error {
 	} else {
 		_, _ = fmt.Fprintln(bw, "⚠ Boundary weakenings (opt-in, reduces isolation):")
 		for _, bwk := range p.BoundaryWeakenings {
-			_, _ = fmt.Fprintf(bw, "⚠ %s: %s\n", bwk.Option, bwk.Effect)
-			if bwk.Option == "--host-network" {
+			if bwk.HostPath != "" {
+				// --add-dir (#737): name the mount the entry describes.
+				_, _ = fmt.Fprintf(bw, "⚠ %s: %s -> %s: %s\n", bwk.Option, bwk.HostPath, bwk.ContainerPath, bwk.Effect)
+			} else {
+				_, _ = fmt.Fprintf(bw, "⚠ %s: %s\n", bwk.Option, bwk.Effect)
+			}
+			switch bwk.Option {
+			case "--host-network":
 				_, _ = fmt.Fprintln(bw, "  Blast radius: any process inside the container can reach services on your")
 				_, _ = fmt.Fprintln(bw, "  host's network as if it were running there directly — the loss of network")
 				_, _ = fmt.Fprintln(bw, "  isolation lasts for the life of this session.")
+			case "--add-dir":
+				_, _ = fmt.Fprintln(bw, "  Blast radius: the agent can read, modify and delete everything in that host")
+				_, _ = fmt.Fprintln(bw, "  directory, outside the repo scope, for as long as this container runs.")
 			}
 		}
 	}
 
 	return bw.Flush()
+}
+
+// hasMountKind reports whether any mount in mounts has the given kind.
+func hasMountKind(mounts []MountPosture, kind string) bool {
+	for _, m := range mounts {
+		if m.Kind == kind {
+			return true
+		}
+	}
+	return false
 }
 
 // writeCredentialSourceExplanation narrates a single CredentialSource's

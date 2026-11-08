@@ -88,6 +88,86 @@ func TestDryRun_CreateArgv_ContainsRunNameWorkspaceRwAgentCliRoAndCredsRo(t *tes
 	}
 }
 
+// -- ticket #737: --add-dir in the dry-run preview ---------------------------
+
+// dryRunWithCallLog puts a fake docker that records every invocation first on
+// PATH and returns the call-log path.
+func dryRunWithCallLog(t *testing.T) string {
+	t.Helper()
+	fakeDir := t.TempDir()
+	callLog := filepath.Join(fakeDir, "calls.txt")
+	writeFakeRuntime(t, fakeDir, "docker", callLog)
+	t.Setenv("PATH", fakeDir+":"+os.Getenv("PATH"))
+	return callLog
+}
+
+// TestAddDirDryRun_PrintsBindAndForwardedTokenWithoutCreateRmOrExec covers the
+// dry-run AC: the preview carries the exact `-v <host>:/repos/<slug>` pair and
+// the single-token forwarded `--add-dir=/repos/<slug>`, and nothing is created,
+// removed or executed.
+func TestAddDirDryRun_PrintsBindAndForwardedTokenWithoutCreateRmOrExec(t *testing.T) {
+	repo := newAuditTestRepo(t)
+	home := t.TempDir()
+	extra, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	isolateAddDirEnv(t, home)
+	t.Chdir(repo)
+	callLog := dryRunWithCallLog(t)
+
+	plan, err := dryRunEngine().DryRun(Options{Agent: "claude", AddDirs: []string{extra}})
+	if err != nil {
+		t.Fatalf("DryRun: %v", err)
+	}
+
+	slug := Slugify(filepath.Base(extra))
+	wantBind := extra + ":/repos/" + slug
+	create := strings.Join(plan.CreateArgv, " ")
+	if !strings.Contains(create, "-v "+wantBind+" ") || strings.Contains(create, wantBind+":ro") {
+		t.Errorf("CreateArgv missing the read-write bind %q:\n%s", "-v "+wantBind, create)
+	}
+	attach := strings.Join(plan.AttachArgv, " ")
+	if !strings.HasSuffix(attach, "--model sonnet --add-dir=/repos/"+slug) {
+		t.Errorf("AttachArgv = %q, want it to end with the forwarded --add-dir=/repos/%s token", attach, slug)
+	}
+
+	var out bytes.Buffer
+	if err := plan.WriteText(&out); err != nil {
+		t.Fatalf("WriteText: %v", err)
+	}
+	for _, want := range []string{"-v " + wantBind, "--add-dir=/repos/" + slug} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("dry-run output missing %q:\n%s", want, out.String())
+		}
+	}
+
+	for _, line := range readCallLog(t, callLog) {
+		for _, forbidden := range []string{"run ", "create ", "rm ", "exec ", "start "} {
+			if strings.HasPrefix(line, forbidden) {
+				t.Errorf("--dry-run made a mutating runtime call %q", line)
+			}
+		}
+	}
+}
+
+// TestAddDirDryRun_UsageErrorMakesNoRuntimeCall pins that a rejected path is
+// raised from the shared launch preamble, before any runtime probe.
+func TestAddDirDryRun_UsageErrorMakesNoRuntimeCall(t *testing.T) {
+	repo := newAuditTestRepo(t)
+	isolateAddDirEnv(t, t.TempDir())
+	t.Chdir(repo)
+	callLog := dryRunWithCallLog(t)
+
+	_, err := dryRunEngine().DryRun(Options{Agent: "claude", AddDirs: []string{filepath.Join(repo, "missing")}})
+	if !IsUsage(err) {
+		t.Fatalf("DryRun error = %v, want a usage error", err)
+	}
+	if lines := readCallLog(t, callLog); len(lines) != 0 {
+		t.Errorf("a rejected --add-dir made runtime calls: %q", lines)
+	}
+}
+
 // -- attach argv content ---------------------------------------------------
 
 // TestDryRun_AttachArgv_ContainsExecAgentFlagsAndForwardedArgs pins the

@@ -1,8 +1,12 @@
 package launcher
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
+	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -21,6 +25,134 @@ import (
 // the intended red-phase state.
 
 // -- well-formed input ------------------------------------------------------
+
+// -- ticket #737: observed --add-dir weakenings -----------------------------
+
+// addDirObservedPosture audits a running scoped container whose inspect output
+// is observed (FAKE_OBSERVED_POSTURE), from a hermetic repo cwd.
+func addDirObservedPosture(t *testing.T, observed string, opts Options) Posture {
+	t.Helper()
+	repo := newAuditTestRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Chdir(repo)
+	scope := ComputeScope("claude", "", repo, home)
+	eng, _ := auditEngineWithFakeRuntime(t)
+	t.Setenv("FAKE_PS", scope.ContainerName+"\n")
+	t.Setenv("FAKE_OBSERVED_POSTURE", observed)
+	if opts.Agent == "" {
+		opts.Agent = "claude"
+	}
+	posture, err := eng.Audit(opts)
+	if err != nil {
+		t.Fatalf("Audit: %v", err)
+	}
+	return posture
+}
+
+// TestAddDirAuditObserved_ReposMountsReportedAsAddDirWeakeningsWithBasisRunning
+// covers the observed-posture AC: a running container's /repos/ mounts give the
+// same --add-dir entries a planned audit does, with basis "running" and no
+// --add-dir flag needed on the audit command.
+func TestAddDirAuditObserved_ReposMountsReportedAsAddDirWeakeningsWithBasisRunning(t *testing.T) {
+	posture := addDirObservedPosture(t, "cenci-sandbox:latest|bridge|runc||0\n"+
+		"/host/repo::/workspace::true\n"+
+		"/srv/alpha::/repos/alpha::true\n"+
+		"/data/beta-repo::/repos/beta-repo::true\n\n", Options{})
+
+	if posture.Basis != PostureBasisRunning {
+		t.Fatalf("Basis = %q, want %q", posture.Basis, PostureBasisRunning)
+	}
+	want := []BoundaryWeakening{
+		{Option: "--add-dir", Active: true, HostPath: "/srv/alpha", ContainerPath: "/repos/alpha"},
+		{Option: "--add-dir", Active: true, HostPath: "/data/beta-repo", ContainerPath: "/repos/beta-repo"},
+	}
+	if len(posture.BoundaryWeakenings) != len(want) {
+		t.Fatalf("BoundaryWeakenings = %+v, want %d --add-dir entries", posture.BoundaryWeakenings, len(want))
+	}
+	for i, w := range posture.BoundaryWeakenings {
+		if w.Option != want[i].Option || !w.Active || w.HostPath != want[i].HostPath || w.ContainerPath != want[i].ContainerPath || w.Effect == "" {
+			t.Errorf("BoundaryWeakenings[%d] = %+v, want %s -> %s", i, w, want[i].HostPath, want[i].ContainerPath)
+		}
+	}
+	var text bytes.Buffer
+	if err := posture.WriteText(&text); err != nil {
+		t.Fatalf("WriteText: %v", err)
+	}
+	if !strings.Contains(text.String(), "basis=running") || !strings.Contains(text.String(), "--add-dir active=true: /srv/alpha -> /repos/alpha: ") {
+		t.Errorf("text output missing the running-basis add-dir line:\n%s", text.String())
+	}
+}
+
+// TestAddDirAuditObserved_PlannedAndObservedEntriesForTheSameMountAreIdentical
+// pins the no-drift rule: both bases build their entries through one helper, so
+// a planned audit and an audit of the container that launch produced agree.
+func TestAddDirAuditObserved_PlannedAndObservedEntriesForTheSameMountAreIdentical(t *testing.T) {
+	extra, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	observed := addDirObservedPosture(t, "cenci-sandbox:latest|bridge|runc||0\n"+
+		"/host/repo::/workspace::true\n"+
+		extra+"::/repos/"+Slugify(filepath.Base(extra))+"::true\n\n", Options{})
+
+	planned, err := auditEngine().Audit(Options{Agent: "claude", AddDirs: []string{extra}})
+	if err != nil {
+		t.Fatalf("planned Audit: %v", err)
+	}
+	if !reflect.DeepEqual(planned.BoundaryWeakenings, observed.BoundaryWeakenings) {
+		t.Errorf("planned %+v != observed %+v", planned.BoundaryWeakenings, observed.BoundaryWeakenings)
+	}
+}
+
+// TestAddDirAuditObserved_Explain_RunningContainerNamesTheMountAndStopsClaimingOnlyTheRepoIsMounted
+// covers `cenci security explain` against a running container: the narrative is
+// rendered from the observed posture (basis=running), lists each added dir's
+// host -> container paths with the blast-radius note, and no longer claims only
+// the current repo is mounted.
+func TestAddDirAuditObserved_Explain_RunningContainerNamesTheMountAndStopsClaimingOnlyTheRepoIsMounted(t *testing.T) {
+	posture := addDirObservedPosture(t, "cenci-sandbox:latest|bridge|runc||0\n"+
+		"/host/repo::/workspace::true\n"+
+		"/srv/alpha::/repos/alpha::true\n\n", Options{})
+	if posture.Basis != PostureBasisRunning {
+		t.Fatalf("Basis = %q, want %q", posture.Basis, PostureBasisRunning)
+	}
+
+	var out bytes.Buffer
+	if err := posture.WriteExplanation(&out); err != nil {
+		t.Fatalf("WriteExplanation: %v", err)
+	}
+	for _, want := range []string{
+		"basis=running",
+		"⚠ --add-dir: /srv/alpha -> /repos/alpha: ",
+		"Blast radius: the agent can read, modify and delete everything in that host",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("explanation of a running container missing %q:\n%s", want, out.String())
+		}
+	}
+	if strings.Contains(out.String(), "Only the current repo") {
+		t.Errorf("explanation still claims only the repo is mounted:\n%s", out.String())
+	}
+}
+
+// TestAddDirAuditObserved_NoReposMounts_ReportsNoAddDirEntriesAndAnEmptyList
+// covers the legacy container: without /repos/ mounts there is nothing to
+// report, and the JSON list is [] rather than null.
+func TestAddDirAuditObserved_NoReposMounts_ReportsNoAddDirEntriesAndAnEmptyList(t *testing.T) {
+	posture := addDirObservedPosture(t, "cenci-sandbox:latest|bridge|runc||0\n/host/repo::/workspace::true\n\n", Options{})
+
+	if posture.BoundaryWeakenings == nil || len(posture.BoundaryWeakenings) != 0 {
+		t.Errorf("BoundaryWeakenings = %#v, want a non-nil empty slice", posture.BoundaryWeakenings)
+	}
+	data, err := json.Marshal(posture)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(data), `"boundaryWeakenings":[]`) {
+		t.Errorf("JSON = %s, want \"boundaryWeakenings\":[]", data)
+	}
+}
 
 // TestParseObservedInspect_WellFormed_ParsesAllFields pins the parser's
 // happy-path contract: every header field and every mount line's three
@@ -168,6 +300,33 @@ func TestParseObservedInspect_MalformedMountLine_FailsClosedWithSentinel(t *test
 	}
 	if !errors.Is(err, ErrMalformedObservedInspect) {
 		t.Errorf("parseObservedInspect malformed mount line error = %v, want errors.Is(err, ErrMalformedObservedInspect) to hold", err)
+	}
+}
+
+// TestParseObservedInspect_ColonRunNextToTheDelimiter_FailsClosedWithSentinel
+// pins #737's SF1: a bind whose source ends in ':' renders "/x:::/repos/y::true",
+// which would otherwise split into destination ":/repos/y" and hide a /repos
+// mount from every later check. A ':' adjacent to the "::" delimiter is rejected
+// like any other malformed mount line.
+func TestParseObservedInspect_ColonRunNextToTheDelimiter_FailsClosedWithSentinel(t *testing.T) {
+	for name, line := range map[string]string{
+		"source ending in a colon":      "/x:::/repos/y::true",
+		"destination ending in a colon": "/x::/repos/y:::true",
+		"four colons":                   "/x::::/repos/y::true",
+	} {
+		t.Run(name, func(t *testing.T) {
+			out := "cenci-sandbox:latest|bridge|runc||0\n" + line + "\n"
+			got, err := parseObservedInspect(out)
+			if err == nil {
+				t.Fatalf("parseObservedInspect(%q) = %+v, nil error, want a fail-closed error", out, got)
+			}
+			if !errors.Is(err, ErrMalformedObservedInspect) {
+				t.Errorf("error = %v, want errors.Is(err, ErrMalformedObservedInspect) to hold", err)
+			}
+			if !strings.Contains(err.Error(), "mount line") {
+				t.Errorf("error = %q, want it to name the malformed mount line", err.Error())
+			}
+		})
 	}
 }
 

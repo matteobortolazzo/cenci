@@ -32,6 +32,8 @@ func runAudit(args []string) {
 	noDindFlag := fs.Bool("no-dind", false, "audit as if launched with nested Docker forced off")
 	hostNetworkFlag := fs.Bool("host-network", false, "audit as if launched with host network mode")
 	reseedFlag := fs.Bool("reseed-creds", false, "audit as if launched with a forced credential reseed")
+	var addDirs stringSliceFlag
+	fs.Var(&addDirs, "add-dir", "audit as if launched with a host directory mounted read-write at /repos/<slug> (repeatable)")
 	jsonFlag := fs.Bool("json", false, "emit the posture as stable JSON instead of human-readable text")
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintf(os.Stderr, "cenci audit: %v\n", err)
@@ -60,6 +62,7 @@ func runAudit(args []string) {
 		NoDind:      *noDindFlag,
 		HostNetwork: *hostNetworkFlag,
 		ReseedCreds: *reseedFlag,
+		AddDirs:     addDirs,
 	})
 	if err != nil {
 		if launcher.IsUsage(err) {

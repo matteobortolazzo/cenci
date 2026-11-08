@@ -15,6 +15,18 @@ import (
 // shells out to the sandbox/cenci-sand bash launcher anymore. See
 // sandbox_cmd.go for the `cenci sandbox <verb>` group.
 
+// stringSliceFlag is a repeatable string flag (`flag.Value`): every occurrence
+// appends one value in command-line order. `cenci open` and `cenci audit` share
+// it for --add-dir (#737).
+type stringSliceFlag []string
+
+func (s *stringSliceFlag) String() string { return strings.Join(*s, ",") }
+
+func (s *stringSliceFlag) Set(v string) error {
+	*s = append(*s, v)
+	return nil
+}
+
 // runOpen implements `cenci open [shortcut] [flags] [-- passthrough]`
 // (and the "cn" argv[0] alias, which prepends no extra token — args here is
 // already everything after the binary name). It launches natively via the
@@ -63,6 +75,8 @@ func runOpen(args []string) {
 	noDindFlag := fs.Bool("no-dind", false, "force dind off, overriding the repo's .cenci/config.json sandbox.dind setting")
 	hostNetworkFlag := fs.Bool("host-network", false, "use host network mode")
 	reseedFlag := fs.Bool("reseed-creds", false, "force a credential reseed from the host on the next container create")
+	var addDirs stringSliceFlag
+	fs.Var(&addDirs, "add-dir", "mount a host directory read-write at /repos/<slug> and forward it to the agent (repeatable)")
 	dryRunFlag := fs.Bool("dry-run", false, "print the exact docker/podman launch commands and posture without creating anything")
 	_ = fs.Parse(args)
 	rejectExtra("cenci open", fs.Args())
@@ -108,6 +122,7 @@ func runOpen(args []string) {
 		NoDind:      *noDindFlag,
 		HostNetwork: *hostNetworkFlag,
 		ReseedCreds: *reseedFlag,
+		AddDirs:     addDirs,
 		AgentArgs:   passthrough,
 	}
 

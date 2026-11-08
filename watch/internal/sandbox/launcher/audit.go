@@ -102,6 +102,7 @@ const (
 	MountKindOpencodeCreds  = "opencode-creds"
 	MountKindGhCreds        = "gh-creds"
 	MountKindAzureCreds     = "azure-creds"
+	MountKindAddedDir       = "added-dir"
 
 	// MountKindUnknown is an explicit sentinel for a mount destination that
 	// doesn't match any case in mountKindForDestination's switch — a visible
@@ -256,16 +257,24 @@ type CredentialSource struct {
 
 // BoundaryWeakening is one entry of Posture.BoundaryWeakenings: an opt-in
 // setting that weakens what crosses the container's boundary from its
-// default-safe configuration. Three kinds exist: the --host-network flag (see
-// assembleOptionalFeatures's own warning), a host Docker/Podman socket mount
-// (observed mode only), and each name in the user's sandboxEnv.forward config
-// that widens the forward set for the audited agent (#1016; Option is
-// "sandboxEnv.forward", one entry per name). dind is NEVER listed here — see
-// DindPosture's doc comment.
+// default-safe configuration. Four kinds exist: the --host-network flag (see
+// assembleOptionalFeatures's own warning), the --add-dir flag (#737, one entry
+// per added directory), a host Docker/Podman socket mount (observed mode
+// only), and each name in the user's sandboxEnv.forward config that widens the
+// forward set for the audited agent (#1016; Option is "sandboxEnv.forward",
+// one entry per name). dind is NEVER listed here — see DindPosture's doc
+// comment.
+//
+// HostPath and ContainerPath are only set by --add-dir entries, which carry
+// the mount they describe as structured fields so --json consumers need not
+// parse the Effect prose; omitempty keeps every other entry's JSON
+// byte-identical to what it was before they existed.
 type BoundaryWeakening struct {
-	Option string `json:"option"`
-	Active bool   `json:"active"`
-	Effect string `json:"effect"`
+	Option        string `json:"option"`
+	Active        bool   `json:"active"`
+	Effect        string `json:"effect"`
+	HostPath      string `json:"hostPath,omitempty"`
+	ContainerPath string `json:"containerPath,omitempty"`
 }
 
 // Posture is the full effective sandbox security posture `cenci audit`
@@ -393,9 +402,17 @@ func (e *Engine) auditWithSecrets(opts Options, secrets secretEnvSet) (Posture, 
 		return Posture{}, err
 	}
 
+	// The same resolver Launch uses (#737): a path a launch would refuse is a
+	// usage error here too, never an audit report for a mount that could not
+	// exist.
+	addDirs, err := resolveAddDirs(opts.AddDirs, scope, home)
+	if err != nil {
+		return Posture{}, err
+	}
+
 	cenciBin, socketDir, cenciAvailable := cenciWiringReadOnly()
 
-	mountArgs := e.assembleVolumeMounts(agent, cenciBin, socketDir, cenciAvailable, scope, home, dindOn, azureOn)
+	mountArgs := e.assembleVolumeMounts(agent, cenciBin, socketDir, cenciAvailable, scope, home, dindOn, azureOn, addDirs)
 	envArgs := e.assembleEnv(agent, scope, opts, dindOn, plugins)
 	featureArgs := e.assembleOptionalFeatures(opts)
 
@@ -479,7 +496,7 @@ func buildPlannedPosture(agent string, scope Scope, home string, opts Options, d
 
 	// boundaryWeakenings is non-nil, so appending the configured forwards keeps
 	// an empty result a JSON [] and never null.
-	weakenings := append(boundaryWeakenings(featureArgs), configuredForwardWeakenings(agent, secrets)...)
+	weakenings := append(boundaryWeakenings(featureArgs, mounts), configuredForwardWeakenings(agent, secrets)...)
 
 	return Posture{
 		Basis:    PostureBasisPlanned,
@@ -543,6 +560,12 @@ func mountKindForDestination(destination string) string {
 	// without a second edit here.
 	if strings.HasPrefix(destination, azureCredsStageDir+"/") {
 		return MountKindAzureCreds
+	}
+
+	// --add-dir mounts (#737) sit one level under /repos, matched as a path
+	// prefix with its trailing separator so /repos-evil/x is not an added dir.
+	if strings.HasPrefix(destination, addDirContainerRoot+"/") {
+		return MountKindAddedDir
 	}
 
 	switch destination {
@@ -773,24 +796,59 @@ func networkPosture(featureArgs []string) NetworkPosture {
 	return NetworkPosture{Mode: NetworkModeBridge, Weakened: false}
 }
 
-// boundaryWeakenings reports every active opt-in isolation-weakening FLAG.
-// Of the flags only --host-network exists (see BoundaryWeakening's doc
-// comment) — dind is deliberately never included here (see DindPosture's
-// doc comment), and the config-driven sandboxEnv.forward entries are added by
-// configuredForwardWeakenings. Returns a non-nil, zero-length slice (never a
-// slice of inactive entries, and never nil) when nothing is active, so the
-// default-safe baseline serializes as an explicitly empty JSON list ([])
-// rather than null.
-func boundaryWeakenings(featureArgs []string) []BoundaryWeakening {
-	net := networkPosture(featureArgs)
-	if !net.Weakened {
-		return []BoundaryWeakening{}
+// boundaryWeakenings reports every active opt-in isolation-weakening FLAG:
+// --host-network (from featureArgs) and one --add-dir entry per added-dir
+// mount (from the already-computed mounts, #737 — read from the classified
+// mounts, like staging, so it cannot drift from what Launch would mount).
+// See BoundaryWeakening's doc comment — dind is deliberately never included
+// here (see DindPosture's doc comment), and the config-driven
+// sandboxEnv.forward entries are added by configuredForwardWeakenings.
+// Returns a non-nil, zero-length slice (never a slice of inactive entries, and
+// never nil) when nothing is active, so the default-safe baseline serializes
+// as an explicitly empty JSON list ([]) rather than null.
+func boundaryWeakenings(featureArgs []string, mounts []MountPosture) []BoundaryWeakening {
+	weakenings := []BoundaryWeakening{}
+	if networkPosture(featureArgs).Weakened {
+		weakenings = append(weakenings, hostNetworkBoundaryWeakening())
 	}
-	return []BoundaryWeakening{{
+	return append(weakenings, addDirWeakenings(mounts)...)
+}
+
+// hostNetworkBoundaryWeakening is the --host-network entry, shared by the
+// planned (boundaryWeakenings) and observed (deriveObservedPosture) derivations
+// so the two can never word it differently.
+func hostNetworkBoundaryWeakening() BoundaryWeakening {
+	return BoundaryWeakening{
 		Option: "--host-network",
 		Active: true,
 		Effect: "the container joins the host network namespace instead of an isolated bridge network",
-	}}
+	}
+}
+
+// addDirWeakenings reports one --add-dir BoundaryWeakening per added-dir mount
+// in mounts, in mount order. It is the single builder both boundaryWeakenings
+// (planned) and deriveObservedPosture (observed) call, so a planned audit and
+// an audit of the container that launch produced agree entry for entry. The
+// access mode is read from the mount itself (rw/ro) rather than assumed.
+func addDirWeakenings(mounts []MountPosture) []BoundaryWeakening {
+	var out []BoundaryWeakening
+	for _, m := range mounts {
+		if m.Kind != MountKindAddedDir {
+			continue
+		}
+		mode := "read-write"
+		if m.ReadOnly {
+			mode = "read-only"
+		}
+		out = append(out, BoundaryWeakening{
+			Option:        "--add-dir",
+			Active:        true,
+			Effect:        "a host directory outside the repo scope is bind-mounted " + mode + " into the container, so the agent can reach everything in it",
+			HostPath:      m.Source,
+			ContainerPath: m.Destination,
+		})
+	}
+	return out
 }
 
 // sandboxEnvForwardOption is the BoundaryWeakening.Option of a configured
@@ -1009,6 +1067,11 @@ func (p Posture) WriteText(w io.Writer) error {
 	} else {
 		_, _ = fmt.Fprintln(bw, "\n⚠ Boundary weakenings (opt-in, reduces isolation):")
 		for _, bwk := range p.BoundaryWeakenings {
+			if bwk.HostPath != "" {
+				// --add-dir (#737): name the mount the entry describes.
+				_, _ = fmt.Fprintf(bw, "  %s active=%t: %s -> %s: %s\n", bwk.Option, bwk.Active, bwk.HostPath, bwk.ContainerPath, bwk.Effect)
+				continue
+			}
 			_, _ = fmt.Fprintf(bw, "  %s active=%t: %s\n", bwk.Option, bwk.Active, bwk.Effect)
 		}
 	}

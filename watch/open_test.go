@@ -2,12 +2,15 @@ package main_test
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -2768,6 +2771,596 @@ func TestOpen_AttachExitCodePropagates(t *testing.T) {
 	}
 	if exitErr.ExitCode() != 7 {
 		t.Errorf("exit code = %d, want the attach's own 7 (syscall.Exec propagation)\n%s", exitErr.ExitCode(), output)
+	}
+}
+
+// -- ticket #737: cenci open --add-dir -----------------------------------------
+//
+// Black-box coverage of the real binary: the create argv's /repos binds, the
+// forwarded single-token --add-dir=/repos/<slug> on the exec line that Launch
+// actually hands to the runtime, the usage-error table (exit 2, one stderr
+// line naming the path, an empty call log), and the both-directions reuse
+// check against a running container.
+
+// addDirOpenFixture is a git repo nested away from $HOME (so its parent is a
+// legitimate "parent of the primary repo" case), the scripted runtimes, and
+// the isolated open environment.
+type addDirOpenFixture struct {
+	env       []string
+	callLog   string
+	home      string
+	socketDir string
+	repo      string
+	container string
+}
+
+func newAddDirOpenFixture(t *testing.T) addDirOpenFixture {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := filepath.Join(root, "work", "app", "repo")
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("git", "-C", repo, "init", "-q").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+	fakeDir := t.TempDir()
+	callLog := writeScriptedRuntimes(t, fakeDir)
+	env, home, socketDir := openTestEnv(t, fakeDir, writeAssetFixture(t))
+	// An ambient ssh-agent or tmux socket directory is a denylist entry (#737):
+	// scrub them so a developer's own SSH_AUTH_SOCK=/tmp/agent.sock cannot make
+	// every temp-dir target look sensitive.
+	env = append(env, "SSH_AUTH_SOCK=", "TMUX_TMPDIR=")
+	stageCodexAuth(t, home)
+	return addDirOpenFixture{env: env, callLog: callLog, home: home, socketDir: socketDir, repo: repo, container: containerNameFor(repo)}
+}
+
+// addDirTarget makes a fresh resolved directory called name outside the repo
+// and $HOME.
+func addDirTarget(t *testing.T, name string) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), name)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resolved
+}
+
+func mkdirAll(t *testing.T, parts ...string) string {
+	t.Helper()
+	dir := filepath.Join(parts...)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// runningEnv scripts a running, detached-labeled, otherwise compatible
+// container named f.container whose reuse-inspect reports the given
+// "<source>::<destination>" mounts after the workspace mount.
+func (f addDirOpenFixture) runningEnv(mounts ...string) []string {
+	return f.runningEnvNamed(f.container, mounts...)
+}
+
+// runningEnvNamed is runningEnv for a running container called name (the
+// default name or a --name-suffixed one); no other container is running.
+func (f addDirOpenFixture) runningEnvNamed(name string, mounts ...string) []string {
+	posture := "off|runc|0\nworkspace-vol::/workspace\n"
+	for _, m := range mounts {
+		posture += m + "\n"
+	}
+	return append(slices.Clone(f.env),
+		"FAKE_PS="+name+"\n",
+		"FAKE_INSPECT_LABEL=detached",
+		"FAKE_INSPECT_MOUNTS=/workspace::/workspace\n/home/dev::/home/dev\n"+f.socketDir+"::/run/user/1000/cenci\n",
+		"FAKE_CONTAINER_ENV="+defaultPluginsContainerEnv,
+		"FAKE_REUSE_POSTURE="+posture+"\n",
+	)
+}
+
+func runLineOf(t *testing.T, lines []string) string {
+	t.Helper()
+	line, ok := findLineWithPrefix(lines, "run --name ")
+	if !ok {
+		t.Fatalf("expected a container create, got calls:\n%s", strings.Join(lines, "\n"))
+	}
+	return line
+}
+
+func TestOpenAddDir_Claude_MountsEachDirReadWriteAndForwardsSingleTokensAfterTheModel(t *testing.T) {
+	f := newAddDirOpenFixture(t)
+	a, b := addDirTarget(t, "notes-repo"), addDirTarget(t, "Shared Lib")
+
+	run := runCenci(t, f.env, f.repo, "open", "--add-dir", a, "--add-dir", b)
+	if run.exitCode != 0 {
+		t.Fatalf("open --add-dir: exit %d\n%s", run.exitCode, run.stderr)
+	}
+
+	lines := callLogLines(t, f.callLog)
+	create := runLineOf(t, lines)
+	for _, pair := range []string{a + ":/repos/notes-repo", b + ":/repos/shared-lib"} {
+		if !strings.Contains(create, " -v "+pair+" ") {
+			t.Errorf("create argv missing the read-write bind %q:\n%s", "-v "+pair, create)
+		}
+	}
+	// The added dirs never change the container's identity, volume or image.
+	for _, want := range []string{"--name " + f.container + " ", "-v claude-cenci-home-" + strings.TrimPrefix(f.container, "claude-cenci-") + ":/home/dev", " -v " + f.repo + ":/workspace "} {
+		if !strings.Contains(create, want) {
+			t.Errorf("create argv missing %q:\n%s", want, create)
+		}
+	}
+	attach := attachLine(t, lines)
+	wantTail := "/opt/cenci-agent/current/node_modules/.bin/claude --dangerously-skip-permissions --model sonnet --add-dir=/repos/notes-repo --add-dir=/repos/shared-lib"
+	if !strings.HasSuffix(attach, wantTail) {
+		t.Errorf("attach argv = %q, want it to end with %q", attach, wantTail)
+	}
+}
+
+func TestOpenAddDir_Codex_ForwardsTheSameSingleTokensAfterTheModel(t *testing.T) {
+	f := newAddDirOpenFixture(t)
+	a, b := addDirTarget(t, "notes-repo"), addDirTarget(t, "other")
+
+	run := runCenci(t, f.env, f.repo, "open", "--agent", "codex", "--add-dir", a, "--add-dir", b)
+	if run.exitCode != 0 {
+		t.Fatalf("open --agent codex --add-dir: exit %d\n%s", run.exitCode, run.stderr)
+	}
+
+	lines := callLogLines(t, f.callLog)
+	create := runLineOf(t, lines)
+	for _, pair := range []string{a + ":/repos/notes-repo", b + ":/repos/other"} {
+		if !strings.Contains(create, " -v "+pair+" ") {
+			t.Errorf("create argv missing %q:\n%s", "-v "+pair, create)
+		}
+	}
+	wantTail := "/opt/cenci-agent/current/node_modules/.bin/codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust --model gpt-5.6-terra --add-dir=/repos/notes-repo --add-dir=/repos/other"
+	if attach := attachLine(t, lines); !strings.HasSuffix(attach, wantTail) {
+		t.Errorf("attach argv = %q, want it to end with %q", attach, wantTail)
+	}
+}
+
+func TestOpenAddDir_Shell_StillMountsButAttachesBashWithNoToken(t *testing.T) {
+	f := newAddDirOpenFixture(t)
+	a := addDirTarget(t, "notes-repo")
+
+	run := runCenci(t, f.env, f.repo, "open", "--shell", "--add-dir", a)
+	if run.exitCode != 0 {
+		t.Fatalf("open --shell --add-dir: exit %d\n%s", run.exitCode, run.stderr)
+	}
+
+	lines := callLogLines(t, f.callLog)
+	if create := runLineOf(t, lines); !strings.Contains(create, " -v "+a+":/repos/notes-repo ") {
+		t.Errorf("--shell must still mount the added dir:\n%s", create)
+	}
+	attach := attachLine(t, lines)
+	if !strings.HasSuffix(attach, " /bin/bash") || strings.Contains(attach, "--add-dir") {
+		t.Errorf("attach argv = %q, want a bare /bin/bash with no --add-dir token", attach)
+	}
+}
+
+func TestOpenAddDir_PositionalPassthroughPromptStaysRightAfterTheLastToken(t *testing.T) {
+	f := newAddDirOpenFixture(t)
+	a := addDirTarget(t, "notes-repo")
+
+	run := runCenci(t, f.env, f.repo, "open", "--add-dir", a, "--", "fix the flaky test")
+	if run.exitCode != 0 {
+		t.Fatalf("open --add-dir -- <prompt>: exit %d\n%s", run.exitCode, run.stderr)
+	}
+
+	attach := attachLine(t, callLogLines(t, f.callLog))
+	if !strings.HasSuffix(attach, "--model sonnet --add-dir=/repos/notes-repo fix the flaky test") {
+		t.Errorf("attach argv = %q, want the prompt immediately after the --add-dir= token", attach)
+	}
+}
+
+func TestOpenAddDir_UserPassthroughAddDirIsForwardedVerbatimWithNoMount(t *testing.T) {
+	f := newAddDirOpenFixture(t)
+
+	run := runCenci(t, f.env, f.repo, "open", "--", "--add-dir", "/x")
+	if run.exitCode != 0 {
+		t.Fatalf("open -- --add-dir /x: exit %d\n%s", run.exitCode, run.stderr)
+	}
+
+	lines := callLogLines(t, f.callLog)
+	if create := runLineOf(t, lines); strings.Contains(create, "/repos/") {
+		t.Errorf("a passthrough --add-dir must not create a mount:\n%s", create)
+	}
+	if attach := attachLine(t, lines); !strings.HasSuffix(attach, "--model sonnet --add-dir /x") {
+		t.Errorf("attach argv = %q, want the user's own `--add-dir /x` verbatim", attach)
+	}
+}
+
+func TestOpenAddDir_RelativePathAndSymlinkAndRepeat_ResolveToOneAbsoluteBind(t *testing.T) {
+	f := newAddDirOpenFixture(t)
+	target := addDirTarget(t, "notes-repo")
+	link := filepath.Join(t.TempDir(), "short")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	rel, err := filepath.Rel(f.repo, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	run := runCenci(t, f.env, f.repo, "open", "--add-dir", rel, "--add-dir", link, "--add-dir", target)
+	if run.exitCode != 0 {
+		t.Fatalf("open --add-dir x3: exit %d\n%s", run.exitCode, run.stderr)
+	}
+
+	lines := callLogLines(t, f.callLog)
+	create := runLineOf(t, lines)
+	if got := strings.Count(create, ":/repos/"); got != 1 {
+		t.Errorf("three spellings of one dir produced %d binds, want exactly 1:\n%s", got, create)
+	}
+	if !strings.Contains(create, " -v "+target+":/repos/notes-repo ") {
+		t.Errorf("bind source must be the absolute symlink-resolved path %q:\n%s", target, create)
+	}
+	if got := strings.Count(attachLine(t, lines), "--add-dir="); got != 1 {
+		t.Errorf("attach argv forwarded --add-dir= %d times, want exactly 1", got)
+	}
+}
+
+func TestOpenAddDir_CnAlias_AcceptsTheFlag(t *testing.T) {
+	f := newAddDirOpenFixture(t)
+	a := addDirTarget(t, "notes-repo")
+	cnPath := buildArgv0Alias(t, t.TempDir(), "cn")
+
+	cmd := exec.Command(cnPath, "--add-dir", a)
+	cmd.Env = f.env
+	cmd.Dir = f.repo
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("cn --add-dir: %v\n%s", err, output)
+	}
+
+	lines := callLogLines(t, f.callLog)
+	if create := runLineOf(t, lines); !strings.Contains(create, " -v "+a+":/repos/notes-repo ") {
+		t.Errorf("cn did not mount the added dir:\n%s", create)
+	}
+	if attach := attachLine(t, lines); !strings.HasSuffix(attach, "--add-dir=/repos/notes-repo") {
+		t.Errorf("cn attach argv = %q, want the forwarded token", attach)
+	}
+}
+
+func TestOpenAddDir_NameFlag_CreatesTheSeparateMultiRepoContainerLeavingTheDefaultAlone(t *testing.T) {
+	f := newAddDirOpenFixture(t)
+	a := addDirTarget(t, "notes-repo")
+	// The default container is running WITHOUT added dirs: had --name not
+	// scoped the launch to its own container, this would be a reuse mismatch.
+	env := f.runningEnv()
+
+	run := runCenci(t, env, f.repo, "open", "--name", "multi", "--add-dir", a)
+	if run.exitCode != 0 {
+		t.Fatalf("open --name multi --add-dir: exit %d\n%s", run.exitCode, run.stderr)
+	}
+
+	multi := f.container + "-multi"
+	lines := callLogLines(t, f.callLog)
+	if create := runLineOf(t, lines); !strings.Contains(create, "--name "+multi+" ") || !strings.Contains(create, " -v "+a+":/repos/notes-repo ") {
+		t.Errorf("create argv = %q, want a fresh %s with the bind", create, multi)
+	}
+	if attach := attachLine(t, lines); !strings.Contains(attach, " "+multi+" /opt/cenci-agent/") {
+		t.Errorf("attach argv = %q, want it aimed at %s", attach, multi)
+	}
+	wantNoCallTargetsDefaultContainer(t, lines, f.container, multi)
+}
+
+// wantNoCallTargetsDefaultContainer fails when any runtime call names the
+// default container: the -multi name is removed first so it cannot match the
+// default name as a prefix.
+func wantNoCallTargetsDefaultContainer(t *testing.T, lines []string, container, multi string) {
+	t.Helper()
+	for _, line := range lines {
+		if strings.Contains(strings.ReplaceAll(line, multi, ""), container) {
+			t.Errorf("runtime call %q targets the default container %s, which --name must leave alone", line, container)
+		}
+	}
+}
+
+func TestOpenAddDir_NameFlag_ReusesTheRunningMultiRepoContainerLeavingTheDefaultAlone(t *testing.T) {
+	f := newAddDirOpenFixture(t)
+	a := addDirTarget(t, "notes-repo")
+	multi := f.container + "-multi"
+	// Only the -multi container is running, with the matching /repos mount.
+	env := f.runningEnvNamed(multi, a+"::/repos/notes-repo")
+
+	run := runCenci(t, env, f.repo, "open", "--name", "multi", "--add-dir", a)
+	if run.exitCode != 0 {
+		t.Fatalf("open --name multi --add-dir: exit %d\n%s", run.exitCode, run.stderr)
+	}
+
+	lines := callLogLines(t, f.callLog)
+	if _, ok := findLineWithPrefix(lines, "run --name "); ok {
+		t.Errorf("a matching running %s must be attached to, never recreated, got calls:\n%s", multi, strings.Join(lines, "\n"))
+	}
+	if attach := attachLine(t, lines); !strings.Contains(attach, " "+multi+" /opt/cenci-agent/") {
+		t.Errorf("attach argv = %q, want it aimed at %s", attach, multi)
+	}
+	wantNoCallTargetsDefaultContainer(t, lines, f.container, multi)
+}
+
+// -- usage errors: exit 2, one stderr line naming the path, no runtime call ----
+
+func TestOpenAddDir_RejectedPaths_Exit2WithOneLineHintAndMakeNoRuntimeCall(t *testing.T) {
+	f := newAddDirOpenFixture(t)
+	file := filepath.Join(addDirTarget(t, "files"), "notes.txt")
+	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	claudeDir := mkdirAll(t, f.home, ".claude")
+	sharedA, sharedB := addDirTarget(t, "shared"), addDirTarget(t, "shared")
+
+	cases := []struct {
+		name   string
+		paths  []string
+		marker string
+	}{
+		{"non-existent path", []string{filepath.Join(f.home, "..", "no-such-dir")}, "does not exist"},
+		{"regular file", []string{file}, "not a directory"},
+		{"two dirs with colliding slugs", []string{sharedA, sharedB}, "both mount at"},
+		{"primary repo root", []string{f.repo}, "overlaps the primary workspace"},
+		{"subdirectory of the primary repo", []string{mkdirAll(t, f.repo, "pkg")}, "overlaps the primary workspace"},
+		{"parent of the primary repo", []string{filepath.Dir(f.repo)}, "overlaps the primary workspace"},
+		{"filesystem root", []string{"/"}, "sensitive host location"},
+		{"home directory", []string{f.home}, "sensitive host location"},
+		{"parent of home", []string{filepath.Dir(f.home)}, "sensitive host location"},
+		{"~/.ssh", []string{mkdirAll(t, f.home, ".ssh")}, "sensitive host location"},
+		{"inside ~/.ssh", []string{mkdirAll(t, f.home, ".ssh", "keys")}, "sensitive host location"},
+		{"~/.gnupg", []string{mkdirAll(t, f.home, ".gnupg")}, "sensitive host location"},
+		{"directory holding a credential file (~/.claude)", []string{claudeDir}, "sensitive host location"},
+		{"inside a credential directory", []string{mkdirAll(t, claudeDir, "projects")}, "sensitive host location"},
+		{"cenci fleet config dir", []string{mkdirAll(t, f.home, ".config", "cenci")}, "sensitive host location"},
+		{"cenci state dir", []string{mkdirAll(t, f.home, ".local", "state", "cenci")}, "sensitive host location"},
+		{"cenci socket dir", []string{f.socketDir}, "sensitive host location"},
+		{"cenci install link dir", []string{mkdirAll(t, f.home, ".local", "bin")}, "sensitive host location"},
+		{"system directory /etc", []string{"/etc"}, "sensitive host location"},
+		{"system directory /usr", []string{"/usr"}, "sensitive host location"},
+		{"system directory /dev", []string{"/dev"}, "sensitive host location"},
+		{"shared tmp directory /tmp (host tmux and ssh-agent sockets)", []string{"/tmp"}, "sensitive host location"},
+		{"shared state parent /var", []string{"/var"}, "sensitive host location"},
+		{"container runtime socket dir ~/.docker", []string{mkdirAll(t, f.home, ".docker")}, "sensitive host location"},
+		{"container runtime socket dir ~/.colima", []string{mkdirAll(t, f.home, ".colima")}, "sensitive host location"},
+		{"container runtime socket dir ~/.orbstack", []string{mkdirAll(t, f.home, ".orbstack")}, "sensitive host location"},
+		{"inside ~/.docker", []string{mkdirAll(t, f.home, ".docker", "run")}, "sensitive host location"},
+		{"cenci autostart unit dir", []string{mkdirAll(t, f.home, ".config", "systemd", "user")}, "sensitive host location"},
+		{"login autostart dir", []string{mkdirAll(t, f.home, ".config", "autostart")}, "sensitive host location"},
+		{"launchd agents dir", []string{mkdirAll(t, f.home, "Library", "LaunchAgents")}, "sensitive host location"},
+		{"empty path", []string{""}, "non-empty"},
+		{"colon in path", []string{filepath.Join(f.home, "..", "a:b")}, "':' or a non-printable character"},
+		{"newline in path", []string{filepath.Join(f.home, "..", "a\nb")}, "':' or a non-printable character"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.Truncate(f.callLog, 0); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				t.Fatal(err)
+			}
+			args := []string{"open"}
+			for _, p := range tc.paths {
+				args = append(args, "--add-dir", p)
+			}
+			run := runCenci(t, f.env, f.repo, args...)
+
+			if run.exitCode != 2 {
+				t.Fatalf("exit code = %d, want 2\nstderr: %s", run.exitCode, run.stderr)
+			}
+			stderr := strings.TrimRight(run.stderr, "\n")
+			if stderr == "" || strings.Contains(stderr, "\n") {
+				t.Errorf("stderr = %q, want exactly one hint line", run.stderr)
+			}
+			if !strings.Contains(stderr, tc.marker) {
+				t.Errorf("stderr = %q, want it to contain %q", stderr, tc.marker)
+			}
+			offending := tc.paths[len(tc.paths)-1]
+			if !strings.Contains(stderr, strconv.Quote(offending)) {
+				t.Errorf("stderr = %q, want it to name the offending path %s", stderr, strconv.Quote(offending))
+			}
+			if lines := callLogLines(t, f.callLog); len(lines) != 0 {
+				t.Errorf("a rejected --add-dir made runtime calls:\n%s", strings.Join(lines, "\n"))
+			}
+		})
+	}
+}
+
+func TestOpenAddDir_LinkedWorktree_Exits2AndHintNamesTheMainCheckout(t *testing.T) {
+	f := newAddDirOpenFixture(t)
+	elsewhere := addDirTarget(t, "elsewhere")
+	mainCheckout := mkdirAll(t, elsewhere, "main-checkout")
+	for _, args := range [][]string{
+		{"init", "-q"},
+		{"-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", "init"},
+		{"worktree", "add", "-q", filepath.Join(elsewhere, "wt")},
+	} {
+		if out, err := exec.Command("git", append([]string{"-C", mainCheckout}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	worktree := filepath.Join(elsewhere, "wt")
+
+	run := runCenci(t, f.env, f.repo, "open", "--add-dir", worktree)
+
+	if run.exitCode != 2 {
+		t.Fatalf("exit code = %d, want 2\nstderr: %s", run.exitCode, run.stderr)
+	}
+	stderr := strings.TrimRight(run.stderr, "\n")
+	if strings.Contains(stderr, "\n") || !strings.Contains(stderr, "linked git worktree") || !strings.Contains(stderr, "main checkout "+strconv.Quote(mainCheckout)) {
+		t.Errorf("stderr = %q, want one line naming the main checkout %s", stderr, strconv.Quote(mainCheckout))
+	}
+	if lines := callLogLines(t, f.callLog); len(lines) != 0 {
+		t.Errorf("a rejected worktree made runtime calls:\n%s", strings.Join(lines, "\n"))
+	}
+}
+
+func TestOpenAddDir_DryRunWithARejectedPath_Exits2AndMakesNoRuntimeCall(t *testing.T) {
+	f := newAddDirOpenFixture(t)
+
+	run := runCenci(t, f.env, f.repo, "open", "--dry-run", "--add-dir", f.repo)
+
+	if run.exitCode != 2 || !strings.Contains(run.stderr, "overlaps the primary workspace") {
+		t.Fatalf("exit %d, stderr %q; want exit 2 with the overlap hint", run.exitCode, run.stderr)
+	}
+	if lines := callLogLines(t, f.callLog); len(lines) != 0 {
+		t.Errorf("a rejected --dry-run --add-dir made runtime calls:\n%s", strings.Join(lines, "\n"))
+	}
+}
+
+// A socket directory that cannot be resolved must not silently drop the socket
+// guard: with --add-dir the launch is refused (exit 2, one line naming the
+// cause, no runtime call) so an added directory can never be validated against
+// an incomplete denylist.
+func TestOpenAddDir_UnresolvableSocketDir_Exits2NamingTheCauseAndMakesNoRuntimeCall(t *testing.T) {
+	f := newAddDirOpenFixture(t)
+	target := addDirTarget(t, "notes-repo")
+	env := append(slices.Clone(f.env), "CENCI_SOCKET_DIR=relative/socket-dir")
+
+	run := runCenci(t, env, f.repo, "open", "--add-dir", target)
+
+	if run.exitCode != 2 {
+		t.Fatalf("exit code = %d, want 2\nstderr: %s", run.exitCode, run.stderr)
+	}
+	stderr := strings.TrimRight(run.stderr, "\n")
+	if strings.Contains(stderr, "\n") || !strings.Contains(stderr, "CENCI_SOCKET_DIR") {
+		t.Errorf("stderr = %q, want one line naming the CENCI_SOCKET_DIR cause", run.stderr)
+	}
+	if lines := callLogLines(t, f.callLog); len(lines) != 0 {
+		t.Errorf("a refused --add-dir made runtime calls:\n%s", strings.Join(lines, "\n"))
+	}
+}
+
+// -- reuse: the added-dir set is fixed for a container's lifetime ------------
+
+func wantAddDirMismatch(t *testing.T, run openRun, container string, lines []string) {
+	t.Helper()
+	if run.exitCode != 1 {
+		t.Fatalf("exit code = %d, want 1\nstderr: %s", run.exitCode, run.stderr)
+	}
+	want := "running container '" + container + "' was created with a different --add-dir set; run 'cenci sandbox stop " + container + "', then relaunch"
+	if !strings.Contains(run.stderr, want) {
+		t.Errorf("stderr = %q, want it to contain %q", run.stderr, want)
+	}
+	if anyLineContains(lines, "exec -it") {
+		t.Errorf("a mismatched container must not receive an agent session, got calls:\n%s", strings.Join(lines, "\n"))
+	}
+	if _, ok := findLineWithPrefix(lines, "run --name "); ok {
+		t.Errorf("a running container is never recreated automatically, got calls:\n%s", strings.Join(lines, "\n"))
+	}
+}
+
+func TestOpenAddDir_RunningContainerCreatedWithoutDirs_IsRejectedWithTheStopHint(t *testing.T) {
+	f := newAddDirOpenFixture(t)
+	a := addDirTarget(t, "notes-repo")
+
+	run := runCenci(t, f.runningEnv(), f.repo, "open", "--add-dir", a)
+
+	wantAddDirMismatch(t, run, f.container, callLogLines(t, f.callLog))
+}
+
+func TestOpenAddDir_RunningContainerWithDirs_RejectsALaunchWithoutAnyFlag(t *testing.T) {
+	f := newAddDirOpenFixture(t)
+	a := addDirTarget(t, "notes-repo")
+
+	// Also the dispatch case: `cenci open` with no --add-dir aimed at a repo
+	// whose running container has added dirs.
+	run := runCenci(t, f.runningEnv(a+"::/repos/notes-repo"), f.repo, "open")
+
+	wantAddDirMismatch(t, run, f.container, callLogLines(t, f.callLog))
+}
+
+func TestOpenAddDir_RunningContainerWithADifferentDirOfTheSameCount_IsRejected(t *testing.T) {
+	f := newAddDirOpenFixture(t)
+	a, b := addDirTarget(t, "notes-repo"), addDirTarget(t, "other")
+
+	// Same size, different member: a count-only comparison would attach.
+	run := runCenci(t, f.runningEnv(a+"::/repos/notes-repo"), f.repo, "open", "--add-dir", b)
+	wantAddDirMismatch(t, run, f.container, callLogLines(t, f.callLog))
+}
+
+func TestOpenAddDir_SameSetInADifferentOrder_AttachesNormally(t *testing.T) {
+	f := newAddDirOpenFixture(t)
+	a, b := addDirTarget(t, "notes-repo"), addDirTarget(t, "other")
+
+	for _, args := range [][]string{
+		{"open", "--add-dir", a, "--add-dir", b},
+		{"open", "--add-dir", b, "--add-dir", a},
+	} {
+		if err := os.Truncate(f.callLog, 0); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			t.Fatal(err)
+		}
+		// The container reports its mounts in yet another order.
+		run := runCenci(t, f.runningEnv(b+"::/repos/other", a+"::/repos/notes-repo"), f.repo, args...)
+
+		if run.exitCode != 0 {
+			t.Fatalf("%v: exit %d, want a normal attach\n%s", args[1:], run.exitCode, run.stderr)
+		}
+		lines := callLogLines(t, f.callLog)
+		if _, ok := findLineWithPrefix(lines, "run --name "); ok {
+			t.Errorf("%v: must attach, never create, got calls:\n%s", args[1:], strings.Join(lines, "\n"))
+		}
+		attachLine(t, lines)
+	}
+}
+
+func TestOpenAddDir_LegacyRunningContainerWithoutReposMounts_AttachesNormally(t *testing.T) {
+	f := newAddDirOpenFixture(t)
+
+	run := runCenci(t, f.runningEnv(), f.repo, "open")
+
+	if run.exitCode != 0 {
+		t.Fatalf("exit code = %d, want a normal attach\n%s", run.exitCode, run.stderr)
+	}
+	attachLine(t, callLogLines(t, f.callLog))
+}
+
+func TestOpenAddDir_MalformedReposMountLineInReuseInspect_FailsClosed(t *testing.T) {
+	f := newAddDirOpenFixture(t)
+	a := addDirTarget(t, "notes-repo")
+
+	for badName, bad := range map[string]string{
+		// A /repos destination with a single colon instead of the "::"
+		// delimiter: it must hit the malformed-mount-line error, not be skipped.
+		"single colon": "/srv/alpha:/repos/alpha",
+		// A second "::" must not be split at the first one: that would read
+		// the line as source "/x" and destination "y::/repos/z" and drop it
+		// from the /repos set instead of failing closed.
+		"two delimiters": "/x::y::/repos/z",
+		// A bind source ending in ':' renders "/x:::/repos/y": one "::" by
+		// count, but its destination would read ":/repos/y" and hide the
+		// mount from the /repos set (SF1).
+		"triple colon": "/x:::/repos/y",
+	} {
+		env := f.runningEnv(a+"::/repos/notes-repo", bad)
+		for name, args := range map[string][]string{
+			"with the flag":    {"open", "--add-dir", a},
+			"without the flag": {"open"},
+		} {
+			t.Run(badName+" "+name, func(t *testing.T) {
+				if err := os.Truncate(f.callLog, 0); err != nil && !errors.Is(err, fs.ErrNotExist) {
+					t.Fatal(err)
+				}
+				run := runCenci(t, env, f.repo, args...)
+
+				if run.exitCode != 1 || !strings.Contains(run.stderr, "reuse posture") {
+					t.Fatalf("exit %d, stderr %q; want exit 1 naming the reuse-posture parse failure", run.exitCode, run.stderr)
+				}
+				if !strings.Contains(run.stderr, bad) {
+					t.Errorf("stderr = %q, want it to quote the malformed mount line %q", run.stderr, bad)
+				}
+				lines := callLogLines(t, f.callLog)
+				if anyLineContains(lines, "exec -it") {
+					t.Errorf("an unparseable /repos line must never read as \"no added dirs\" and attach")
+				}
+				if _, ok := findLineWithPrefix(lines, "run --name "); ok {
+					t.Errorf("an unparseable /repos line must never fall through to a create, got calls:\n%s", strings.Join(lines, "\n"))
+				}
+			})
+		}
 	}
 }
 

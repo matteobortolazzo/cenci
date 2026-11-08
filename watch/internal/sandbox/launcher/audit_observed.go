@@ -123,7 +123,10 @@ func parseObservedInspect(out string) (observedInspect, error) {
 	}
 	for _, line := range mountLines {
 		parts := strings.SplitN(line, "::", 3)
-		if len(parts) != 3 {
+		// A ":::" run (a source or destination ending in ':') is ambiguous: the
+		// first "::" would shift a ':' into the next component and could hide a
+		// /repos destination (#737), so it fails closed like any malformed line.
+		if len(parts) != 3 || strings.Contains(line, ":::") {
 			return observedInspect{}, fmt.Errorf("malformed observed inspect mount line %q: expected \"source::destination::rw\": %w", line, ErrMalformedObservedInspect)
 		}
 		var readOnly bool
@@ -213,7 +216,7 @@ func deriveObservedDind(obs observedInspect) DindPosture {
 // carried in WriteText/WriteExplanation's rendering, not a second JSON
 // field); so are the planned boundary weakenings that describe forwardedEnv,
 // the sandboxEnv.forward entries (#1016), appended after the observed
-// --host-network and host-socket weakenings. Every other weakening is derived
+// --host-network, host-socket and --add-dir weakenings. Every other weakening is derived
 // from the inspect probe alone. Env (create-time env names) is likewise
 // carried over from planned:
 // the combined inspect probe deliberately does not read back .Config.Env
@@ -252,15 +255,14 @@ func (e *Engine) deriveObservedPosture(scope Scope, agent, home string, opts Opt
 
 	weakenings := make([]BoundaryWeakening, 0, 2)
 	if netWeakened {
-		weakenings = append(weakenings, BoundaryWeakening{
-			Option: "--host-network",
-			Active: true,
-			Effect: "the container joins the host network namespace instead of an isolated bridge network",
-		})
+		weakenings = append(weakenings, hostNetworkBoundaryWeakening())
 	}
 	if mountExposesHostSocket(observedReuseMounts(obs.Mounts)) {
 		weakenings = append(weakenings, hostSocketBoundaryWeakening())
 	}
+	// Each /repos/ mount of the running container is an --add-dir entry (#737),
+	// built by the same helper the planned posture uses.
+	weakenings = append(weakenings, addDirWeakenings(mounts)...)
 	// The configured sandboxEnv.forward entries are per-exec state with no
 	// inspect source, so they are copied from planned like ForwardedEnv, which
 	// they describe (#1016).
