@@ -30,8 +30,13 @@ type SessionState struct {
 	// While set, the tmux sweep's idle-title detection must not flip the
 	// session to stopped — the pane legitimately sits at the prompt with an
 	// idle-marker title until the background work wakes it (#706). The hold
-	// expires after BackgroundHoldTTL of event silence (#1079).
+	// expires after BackgroundHoldTTL of event silence only when no active
+	// tasks were explicitly reported (#1079).
 	BackgroundHold bool
+	// BackgroundTasksActive distinguishes actual tasks from scheduled wakeups
+	// and legacy BackgroundWork-only producers. It is meaningful only during
+	// BackgroundHold and clears with the next applied main-agent event.
+	BackgroundTasksActive bool
 	// ModelSwitches are the PostModelSwitch records of this session and its
 	// subagents, oldest first and capped by the daemon; ModelSwitchesMore counts
 	// those past the cap (#1179). Display only: they never feed Status.
@@ -44,22 +49,11 @@ type SessionState struct {
 	NativeMeasuredAt  time.Time
 }
 
-// BackgroundHoldTTL bounds how long a background-held session (#698) may stay
-// at running with no event at all before it is released to done.
-//
-// The hold assumes the reported background work will wake the session. That is
-// true for a subagent or a build, and false for work that never re-invokes the
-// agent — a backgrounded server, a `tail`, a far-future wakeup. Without an
-// expiry the false cases pinned a finished turn at running until the user's
-// next prompt, because a hook event is the only other way out of running and
-// the hold also disables the tmux idle-title backstop (#1079).
-//
-// The window is measured from SessionState.LastEvent, which every event
-// refreshes — including the backgrounded work's own subagent events. So work
-// that is genuinely in flight keeps re-arming the hold for as long as it runs,
-// and only a hold nothing is working behind expires. Two minutes is well past
-// any gap between a live subagent's tool calls while still correcting a stuck
-// window inside the same sitting.
+// BackgroundHoldTTL releases timer-only and legacy background holds after
+// event silence (#1079). Explicitly reported active tasks are exempt: shells
+// and subagents can be quiet for longer than this without having completed.
+// Their next applied main-agent event resolves the hold; session teardown and
+// the normal pane-gone/paneless session TTL cleanup still apply.
 const BackgroundHoldTTL = 2 * time.Minute
 
 // RepoDirOption is the tmux window user option `cenci run` writes on every

@@ -4131,12 +4131,17 @@ never renamed, removed, or repurposed, and unknown fields must be ignored (Go's
 A `Stop` that reports in-flight background work — a backgrounded subagent or
 shell task, a `ScheduleWakeup`/`/loop` timer — holds the window at `running`
 rather than `done`, since the session is paused waiting to be woken rather than
-finished. Any event, including the background work's own, re-arms that hold.
-Work that never wakes the session (a backgrounded server, a `tail`) would
-otherwise pin the window at `running` until your next prompt, so the hold
-expires after two minutes of complete event silence and the window falls back
-to `done`. If the work does wake the session later, its next event moves the
-window straight back to `running`.
+finished. Explicitly reported active tasks keep that hold even when they emit
+no hooks for several minutes: silence does not mean a shell or subagent has
+finished. The next applied main-agent event resolves the hold; a subsequent
+`Stop` with no background work marks the session `done`. A background server or
+`tail` therefore also keeps the session `running` while it remains registered
+as active. Stop those tasks when they are no longer needed.
+
+Holds for scheduled wakeups alone, or events from an older notifier that does
+not distinguish tasks from timers, still expire after two minutes of complete
+event silence. A later wake moves the session back to `running`. Session-end,
+missing-pane cleanup, and the paneless session TTL still apply to every hold.
 
 #### OpenAI Codex
 

@@ -197,7 +197,8 @@ func (d *Daemon) handleEvent(event ipc.HookEvent) {
 	// the gaps between the subagent's tool calls. Suppressed/dropped events
 	// return above and never clear it either.
 	if event.AgentID == "" {
-		sess.BackgroundHold = event.EventType == "Stop" && event.BackgroundWork
+		sess.BackgroundHold = event.EventType == "Stop" && (event.BackgroundWork || event.BackgroundTasksActive)
+		sess.BackgroundTasksActive = sess.BackgroundHold && event.BackgroundTasksActive
 	}
 	switch status {
 	case detect.StatusNeedInput:
@@ -367,7 +368,7 @@ func (d *Daemon) mapEventToStatusRaw(event ipc.HookEvent) detect.Status {
 		// the session is paused waiting to be woken by it — not done (#698).
 		// Restricted to main-agent events so a subagent-scoped Stop stays the
 		// no-op the guard in mapEventToStatus makes it (#277).
-		if event.BackgroundWork && event.AgentID == "" {
+		if (event.BackgroundWork || event.BackgroundTasksActive) && event.AgentID == "" {
 			if d.cfg.Verbose {
 				log.Printf("event: Stop on session %s reports in-flight background work, holding running instead of done", sessionKeyForEvent(event))
 			}

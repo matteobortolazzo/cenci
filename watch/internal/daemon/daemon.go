@@ -452,6 +452,7 @@ func (d *Daemon) runSweep() {
 			// whole remaining life.
 			if a.NewStatus != detect.StatusRunning {
 				sess.BackgroundHold = false
+				sess.BackgroundTasksActive = false
 			}
 			if d.cfg.Verbose && a.AttentionSource != "" {
 				log.Printf("attention: session=%s source=%s", a.SessionKey, a.AttentionSource)
@@ -497,8 +498,8 @@ func (d *Daemon) triggerReap() {
 	}
 }
 
-// backgroundHoldSweep releases paneless sessions whose background hold (#698)
-// has gone silent past frontend.BackgroundHoldTTL, marking them done — the
+// backgroundHoldSweep releases paneless timer-only/legacy background holds
+// that have gone silent past frontend.BackgroundHoldTTL, marking them done — the
 // core-side half of the release the tmux sweep performs for pane-backed
 // windows (#1079). Paneless sessions (sandboxed or plain-terminal agents) have
 // no frontend to sweep them, yet they surface in `cenci status` and every
@@ -511,7 +512,7 @@ func (d *Daemon) backgroundHoldSweep() bool {
 		if sess.TmuxPane != "" || !sess.BackgroundHold || sess.Status != detect.StatusRunning {
 			continue
 		}
-		if now.Sub(sess.LastEvent) < frontend.BackgroundHoldTTL {
+		if sess.BackgroundTasksActive || now.Sub(sess.LastEvent) < frontend.BackgroundHoldTTL {
 			continue
 		}
 		if d.cfg.Verbose {
