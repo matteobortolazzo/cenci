@@ -98,7 +98,9 @@ func (d *Daemon) handleEvent(event ipc.HookEvent) {
 	// Upgrade paneless→pane when a later event carries a pane; never clear a
 	// known pane on an empty-pane event. The socket travels with the pane: they
 	// are set together, and an event without a pane changes neither.
-	if event.TmuxPane != "" {
+	recheckMissingPane := sess.TmuxPane == "" && event.TmuxPane != "" &&
+		event.TmuxPane == sess.MissingTmuxPane && event.TmuxSocket == sess.MissingTmuxSocket
+	if event.TmuxPane != "" && !recheckMissingPane {
 		sess.TmuxPane = event.TmuxPane
 		sess.TmuxSocket = event.TmuxSocket
 	}
@@ -210,7 +212,28 @@ func (d *Daemon) handleEvent(event ipc.HookEvent) {
 		sess.AttentionSource = ""
 	}
 
+	// Ignored events above must leave a rejected pane detached. Only applied
+	// events recheck it through the frontend, including a reused pane ID after
+	// a tmux server restart.
+	if recheckMissingPane {
+		sess.TmuxPane = event.TmuxPane
+		sess.TmuxSocket = event.TmuxSocket
+	}
 	obs := d.frontend.OnEvent(sess, event)
+	// Codex's shared app-server can inherit the tmux environment of a client
+	// that has since closed. A new thread's events still carry that dead pane.
+	// Keep the independently identified session visible in status/counts rather
+	// than letting the pane-gone sweep immediately delete it. Previously tracked
+	// windows retain normal pane-gone cleanup; a listing error is not evidence.
+	if obs.UntrackedPaneMissing && sess.Agent == "codex" && sess.SessionID != "" {
+		if d.cfg.Verbose {
+			log.Printf("event: Codex session %s supplied an untracked missing pane; retaining as paneless", key)
+		}
+		sess.MissingTmuxPane = sess.TmuxPane
+		sess.MissingTmuxSocket = sess.TmuxSocket
+		sess.TmuxPane = ""
+		sess.TmuxSocket = ""
+	}
 	for _, evicted := range obs.EvictedKeys {
 		if evicted != key {
 			delete(d.sessions, evicted)

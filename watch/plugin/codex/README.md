@@ -59,6 +59,21 @@ The marketplace plugin root includes the Codex manifest at
 their bundled hooks are stable and enabled by default in current Codex releases — no
 feature flag is required.
 
+## Shared app-server and stale tmux panes
+
+Codex's shared app-server can keep `TMUX_PANE` from the terminal that first
+started it. If that pane closes, hooks from a new terminal can still deliver
+events with the old pane ID. Hook trust and delivery can both be healthy while
+that session disappears during watch's pane cleanup.
+
+When a successful tmux listing proves an untracked Codex pane absent, watch
+retains the session without a pane association. It remains visible in status
+output and widget counts, follows Stop/SessionEnd, and expires through the normal
+session TTL. A later event with a valid pane attaches it normally. Watch cannot
+infer which other terminal belongs to the thread, so this fallback does not
+rename/style that terminal's tmux window. A previously tracked pane closing keeps
+the normal cleanup behavior; a failed tmux listing never proves a pane missing.
+
 ## Trust model
 
 Codex hash-pins `hooks.json`: it records a hash of the file it trusted. Every
