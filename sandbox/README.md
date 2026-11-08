@@ -493,8 +493,8 @@ the download; the ownership only guarantees a drifted repo still works.
 Override versions at build time. The monolith `Dockerfile` builds `FROM
 cenci-sandbox-base:${BASE_VERSION}`, so build (or pull) the base image first and pass
 the matching `BASE_VERSION` — `cenci sandbox build` does both steps for you
-automatically, resolving `BASE_VERSION` to a content hash of `Dockerfile.base` +
-`entrypoint.sh` + `lib/` (see [Two-image model](#two-image-model-base--monolith)
+automatically, using a stable toolchain base and adding current startup scripts last
+for supported recipes (see [Two-image model](#two-image-model-base--monolith)
 below). For a manual build, `cenci sandbox build-base` always additionally tags
 `cenci-sandbox-base:latest`, so a bare `--build-arg BASE_VERSION=latest` works once
 any base has been built:
@@ -525,13 +525,45 @@ The image is built in two layers:
   `uv`, GitHub CLI, the non-root `dev` user, and the entrypoint. No language
   runtimes, and — since #831 — no Docker CLI or engine either: those moved to the
   config-selected `fragments/docker.dockerfile` so only images that actually run nested
-  Docker carry them. `cenci sandbox build-base` builds it explicitly, and `cenci sandbox build` /
-  `cenci open` builds it automatically the first time (or whenever the current content-hash
-  tag is missing locally). Run `cenci sandbox prune` to clean up superseded hash tags left
+  Docker carry them. `cenci sandbox build-base` builds this complete base explicitly;
+  custom repo builds also build it when its content-hash tag is missing locally.
+  Run `cenci sandbox prune` to clean up superseded hash tags left
   behind by earlier `Dockerfile.base` changes.
 - **`Dockerfile`** → `cenci-sandbox:latest`, `FROM cenci-sandbox-base:${BASE_VERSION}`
   (default `latest`). Layers the runtime stacks on top: .NET SDK, Node.js, Playwright, and
   Go. This is the image `cenci open` actually runs; agent CLIs live in shared volumes.
+
+**Reusing dependency installations.** The launcher builds the monolith and supported
+generated repo images in two steps. First, it builds their dependencies on the
+`Dockerfile.base` **`toolchain` target**, tagged
+`cenci-sandbox-base:toolchain-<12-char Dockerfile.base hash>`. This target contains the
+system packages and image configuration but no cenci startup scripts. Second, a small
+overlay copies the current `entrypoint.sh` and `lib/` into the finished image and stamps
+the full `cenci.base-version` hash. Updating a startup script therefore refreshes the
+image without reinstalling .NET, Node, Playwright, Go, Docker, or Azure. The shared
+agent updater's monolith benefits from the same caching.
+
+The first build after adopting this layout populates a new dependency cache. Changes
+to the toolchain recipe or dependency instructions still invalidate the affected layers;
+an empty or pruned builder cache still requires installations. `cenci sandbox prune`
+keeps the current toolchain base tag. Direct `docker build` commands continue to use
+the complete base and its original caching behavior.
+
+For compatibility, the optimized repo path requires a recognized single-stage
+Dockerfile whose instructions are all inside the generated managed block. Custom
+instructions outside that block, explicit startup-script references, complex syntax,
+and older installed sandbox assets retain the complete-base build path. Existing
+supported Dockerfiles need no edits: their original path, build context, and ignore
+files are used unchanged. The final overlay preserves their image configuration.
+
+Run the real build-cache regression from `watch/` with a working container runtime:
+
+```bash
+CENCI_TEST_BUILD_CACHE_RUNTIME=docker go test ./internal/sandbox/launcher -run '^TestBuildCacheContainer$' -v
+```
+
+It builds small isolated test images, verifies dependency reuse after script changes
+and invalidation after a toolchain change, and removes its temporary image tags.
 
 `sandbox/fragments/*.dockerfile` holds the same composable blocks (`dotnet`, `node`,
 `playwright`, `go`, `python`, `rust`, `docker`, `azure`) used for per-project image
@@ -544,7 +576,8 @@ A repo can opt into its own thin image instead of the shared monolith by adding
 `.cenci/Dockerfile` (and any files it needs, e.g. a fragment copy) under
 `.cenci/` at the repo root. When present, the launcher builds
 `cenci-sandbox-<repo-slug>:latest` `FROM cenci-sandbox-base:${BASE_VERSION}` — the
-same base image and content-hash `BASE_VERSION` as the monolith — using
+same toolchain base as the monolith for supported managed recipes, or the complete
+base for custom recipes — using
 `.cenci/` as the build context, and runs that instead of `cenci-sandbox:latest`. The
 built image records the base it was built against in a `cenci.base-version` label, so
 if the base later drifts, `cenci open` / `cenci sandbox build` detect the mismatch and

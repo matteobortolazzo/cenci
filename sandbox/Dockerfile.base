@@ -1,7 +1,7 @@
 ARG UV_VERSION=0.13.7
 FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
 
-FROM ubuntu:24.04
+FROM ubuntu:24.04 AS toolchain
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -62,7 +62,12 @@ WORKDIR /workspace
 ENV PATH="/home/dev/.local/bin:/home/dev/go/bin:${PATH}"
 ENV GOPATH="/home/dev/go"
 
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+
+# Keep changing startup scripts out of the toolchain target: derived images
+# install their SDKs on that stable target, then add the current scripts last.
+# A default build still produces the complete, directly usable base image.
+FROM toolchain AS runtime
+
 COPY --chown=dev:dev entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY --chown=dev:dev lib/ /usr/local/bin/lib/
-
-ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

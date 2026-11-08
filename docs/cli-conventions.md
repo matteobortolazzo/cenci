@@ -72,6 +72,8 @@ cenci <verb> [subverb] [args] [flags]
 | Monolith image | `cenci-sandbox:latest` |
 | Per-repo image | `cenci-sandbox-<slug>:latest` |
 | Base image | `cenci-sandbox-base:<content-hash>` (+ `:latest` alias) |
+| Toolchain base image | `cenci-sandbox-base:toolchain-<Dockerfile.base-hash>` |
+| Temporary dependency image | `cenci-sandbox-build:<unique-build-id>` (removed after the runtime overlay) |
 | Container hostname | `sandbox-<slug>` |
 | Config | `~/.config/cenci/config.json` |
 | Sockets | `$CENCI_SOCKET_DIR` (verbatim) → `$XDG_STATE_HOME/cenci/run` (default `~/.local/state/cenci/run`) → `/tmp/cenci-<uid>/cenci` |

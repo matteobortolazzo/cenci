@@ -39,6 +39,7 @@ jobs:
             watch:
               - '.cenci/config.json' # Run the real policy-resolver dogfood test on config-only changes.
               - 'sandbox/tests/lib/**'
+              - 'sandbox/Dockerfile.base' # Toolchain-stage contract used by the real build-cache regression.
               - 'flow/tests/adversarial-chain/fixtures/**'
               - '.github/workflows/watch-ci.yml'
               - 'watch/README.md' # Run TestIncidentDocs* (incident_docs_test.go), which reads the README's incident CLI reference.
@@ -76,6 +77,10 @@ jobs:
         with:
           go-version: '1.26.x'
       - run: go test ./...
+      - name: Verify dependency cache survives startup-script updates
+        run: go test ./internal/sandbox/launcher -run '^TestBuildCacheContainer$' -v -count=1
+        env:
+          CENCI_TEST_BUILD_CACHE_RUNTIME: docker
       - run: go build ./...
       - run: go build -o cenci .
       - run: ./plugin/hooks/test.sh

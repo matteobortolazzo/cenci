@@ -81,6 +81,15 @@ contract suite `watch/tests/reap-orphans.test.sh` (run with `CENCI_BIN`).
 digest of `Dockerfile.base` + `entrypoint.sh` + `lib/` (Ubuntu, system packages, locale,
 `uv`, GitHub CLI, non-root `dev` user, entrypoint — no language runtimes, and no Docker
 CLI or engine: those moved to the config-selected `docker` fragment in #831).
+The `toolchain` target stops before copying startup scripts. The launcher tags it
+`cenci-sandbox-base:toolchain-<12-char Dockerfile.base hash>` and builds the monolith
+and supported managed-only repo recipes on it, then adds current `entrypoint.sh` and
+`lib/` in a final overlay. Script changes therefore reuse SDK installation layers;
+changes to `Dockerfile.base` invalidate the toolchain. The full content hash still
+governs final-image freshness. Custom or unrecognized repo recipes and older asset
+versions retain the complete-base build path. `build-base` still builds the complete
+base, and prune preserves the current toolchain tag. See the README's image architecture
+section for compatibility details and the real-container cache regression command.
 `Dockerfile` (the monolith) builds `cenci-sandbox:latest` `FROM` that base image and
 layers on the runtime stacks in order: .NET, Node, Playwright, and Go. Agent CLIs are not
 image layers: the launcher bootstraps absent `cenci-agent-cli-<agent>` volumes through a
