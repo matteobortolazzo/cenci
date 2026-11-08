@@ -152,12 +152,15 @@ STUB
             }
 
             if [ -n "$cenci_sandbox" ]; then
-                env TMPDIR="$logdir" HOME="$home" XDG_STATE_HOME="$home/state" \
+                env BIN_DIR= TMPDIR="$logdir" HOME="$home" XDG_STATE_HOME="$home/state" \
                     CENCI_SANDBOX="$cenci_sandbox" bash "$layout/opencode/bootstrap.sh"
             else
                 (
                     unset CENCI_SANDBOX
+                    # shellcheck disable=SC2030,SC2031 # intentionally subshell-scoped
                     export TMPDIR="$logdir" HOME="$home" XDG_STATE_HOME="$home/state"
+                    # shellcheck disable=SC2030,SC2031 # intentionally subshell-scoped
+                    export BIN_DIR="$home/ambient-bin-dir"
                     bash "$layout/opencode/bootstrap.sh"
                 )
             fi
@@ -270,7 +273,10 @@ STUB
 
             (
                 unset CENCI_SANDBOX
+                # shellcheck disable=SC2030,SC2031 # intentionally subshell-scoped
                 export TMPDIR="$logdir" HOME="$home" XDG_STATE_HOME="$home/state" PATH="$stubdir:/usr/bin:/bin"
+                # shellcheck disable=SC2030,SC2031 # intentionally subshell-scoped
+                export BIN_DIR="$home/ambient-bin-dir"
                 export CENCI_SANDBOX=1
                 export CENCI_RESOLVE_USR_LOCAL_BIN="$TMP/no-such-usr-local-cenci"
                 export CENCI_RESOLVE_HOMEBREW_BIN="$TMP/no-such-homebrew-cenci"

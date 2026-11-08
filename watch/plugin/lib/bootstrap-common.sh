@@ -15,10 +15,13 @@
 #   PLUGIN_MANIFEST_REL   - path to plugin.json relative to ROOT
 #   PATH_AUDIENCE         - tail clause of the "add to PATH" log hint (e.g.
 #                            "Codex hooks can find it")
+#   BIN_DIR               - optional runtime binary directory; an explicitly
+#                           empty value is a resolution failure, never ROOT/bin
 
 LOG="${TMPDIR:-/tmp}/cenci-bootstrap.log"
-BIN="$ROOT/bin/cenci"
-MARKER="$ROOT/bin/.cenci-version"
+BIN_DIR="${BIN_DIR-$ROOT/bin}"
+BIN="$BIN_DIR/cenci"
+MARKER="$BIN_DIR/.cenci-version"
 PLUGIN_JSON="$ROOT/$PLUGIN_MANIFEST_REL"
 
 # shellcheck source-path=SCRIPTDIR
@@ -51,6 +54,12 @@ case "$PLUGIN_MANIFEST_REL" in
 .claude-plugin/*) HOOK_HEALTH_CLIENT=claude ;;
 *) HOOK_HEALTH_CLIENT="" ;;
 esac
+
+if [ -z "$BIN_DIR" ]; then
+	log "could not resolve a safe runtime binary directory"
+	[ -z "$HOOK_HEALTH_CLIENT" ] || cenci_hook_health_record bootstrap-failure "$HOOK_HEALTH_CLIENT"
+	exit 0
+fi
 
 # start_daemon launches the daemon detached. The already-running guard in the
 # binary makes this a no-op when a daemon already owns the socket. Inside a
@@ -159,7 +168,7 @@ download_binary() {
 		return 1
 	fi
 
-	mkdir -p "$ROOT/bin" 2>/dev/null || true
+	mkdir -p "$BIN_DIR" 2>/dev/null || true
 	if ! mv "$tmp/cenci" "$BIN" 2>/dev/null && ! cp "$tmp/cenci" "$BIN" 2>/dev/null; then
 		log "failed to install binary to $BIN"
 		rm -rf "$tmp"
@@ -185,10 +194,17 @@ adopt_fallback_binary() {
 	# already in place — never re-copy or re-probe on later sessions.
 	[ -x "$BIN" ] && return 0
 
-	candidate=$(resolve_cenci_bin) || return 1
+	# Older Codex releases provisioned inside ROOT. During an offline upgrade,
+	# copy that working binary out without changing the reviewed plugin tree.
+	if [ "$HOOK_HEALTH_CLIENT" = codex ] && [ -x "$ROOT/bin/cenci" ] &&
+		"$ROOT/bin/cenci" --version >/dev/null 2>&1; then
+		candidate="$ROOT/bin/cenci"
+	else
+		candidate=$(resolve_cenci_bin) || return 1
+	fi
 	[ -n "$candidate" ] || return 1
 
-	mkdir -p "$ROOT/bin" 2>/dev/null || true
+	mkdir -p "$BIN_DIR" 2>/dev/null || true
 	if ! cp "$candidate" "$BIN" 2>/dev/null; then
 		log "failed to adopt fallback cenci from $candidate"
 		return 1

@@ -100,22 +100,9 @@ func newHookHealthHook(t *testing.T, c hookHealthClient, event, socket, stateHom
 	}
 	hook := groups[0].Hooks[0]
 
-	root := t.TempDir()
-	wrapper, err := os.ReadFile(filepath.Join("plugin", c.dir, "notify.sh"))
-	if err != nil {
-		t.Fatalf("read %s notify.sh: %v", c.name, err)
-	}
-	if err := os.MkdirAll(filepath.Join(root, c.dir), 0o755); err != nil {
-		t.Fatalf("create wrapper dir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(root, c.dir, "notify.sh"), wrapper, 0o755); err != nil {
-		t.Fatalf("write notify.sh copy: %v", err)
-	}
-	if err := os.MkdirAll(filepath.Join(root, "bin"), 0o755); err != nil {
-		t.Fatalf("create plugin bin dir: %v", err)
-	}
+	root, pluginData, fixtureBin := newHookPluginFixture(t, c.dir)
 	shim := "#!/bin/sh\nexec \"$CENCI_TEST_BIN\" \"$@\" -event-socket \"$CENCI_TEST_SOCKET\"\n"
-	if err := os.WriteFile(filepath.Join(root, "bin", "cenci"), []byte(shim), 0o755); err != nil {
+	if err := os.WriteFile(fixtureBin, []byte(shim), 0o755); err != nil {
 		t.Fatalf("write cenci shim: %v", err)
 	}
 	socketDir, err := os.MkdirTemp("", "cenci")
@@ -129,6 +116,8 @@ func newHookHealthHook(t *testing.T, c hookHealthClient, event, socket, stateHom
 		timeout: time.Duration(hook.Timeout) * time.Second,
 		env: []string{
 			c.rootEnv + "=" + root,
+			"PLUGIN_DATA=" + pluginData,
+			"CLAUDE_PLUGIN_DATA=",
 			"CENCI_TEST_BIN=" + binaryPath,
 			"CENCI_TEST_SOCKET=" + socket,
 			"CENCI_SANDBOX=",

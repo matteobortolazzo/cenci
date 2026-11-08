@@ -312,17 +312,17 @@ func TestCodexStopHookEmitsJSON(t *testing.T) {
 		t.Fatalf("expected exactly one Codex Stop hook, got %#v", stopGroups)
 	}
 
-	pluginRoot := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(pluginRoot, "bin"), 0o755); err != nil {
-		t.Fatalf("create plugin bin dir: %v", err)
-	}
-	stub := filepath.Join(pluginRoot, "bin", "cenci")
-	if err := os.WriteFile(stub, []byte("#!/bin/sh\ncat >/dev/null\n"), 0o755); err != nil {
+	pluginRoot, pluginData, stub := newHookPluginFixture(t, "codex")
+	marker := filepath.Join(t.TempDir(), "stop-ran")
+	if err := os.WriteFile(stub, []byte("#!/bin/sh\nprintf ran >\"$CENCI_TEST_STOP_MARKER\"\ncat >/dev/null\n"), 0o755); err != nil {
 		t.Fatalf("write hook binary stub: %v", err)
 	}
 
 	cmd := exec.Command("sh", "-c", stopGroups[0].Hooks[0].Command)
-	cmd.Env = append(os.Environ(), "PLUGIN_ROOT="+pluginRoot)
+	cmd.Env = append(os.Environ(), "PLUGIN_ROOT="+pluginRoot, "PLUGIN_DATA="+pluginData,
+		"CLAUDE_PLUGIN_DATA=", "CENCI_TEST_STOP_MARKER="+marker,
+		// A wrapper regression must not reach the host daemon or health store.
+		"CENCI_SOCKET_DIR="+t.TempDir(), "XDG_STATE_HOME="+t.TempDir(), "CENCI_SANDBOX=1")
 	cmd.Stdin = strings.NewReader(`{"hook_event_name":"Stop","session_id":"test"}`)
 	output, err := cmd.Output()
 	if err != nil {
@@ -332,6 +332,53 @@ func TestCodexStopHookEmitsJSON(t *testing.T) {
 	if err := json.Unmarshal(output, &response); err != nil {
 		t.Fatalf("Codex Stop hook output must be JSON, got %q: %v", output, err)
 	}
+	if got, err := os.ReadFile(marker); err != nil || string(got) != "ran" {
+		t.Fatalf("Codex Stop wrapper did not invoke its binary: marker=%q, err=%v", got, err)
+	}
+}
+
+// newHookPluginFixture copies the real notification wrapper and its runtime
+// dependencies. Codex fixtures provision the shim in the same external,
+// versioned data directory used by native hooks; Claude retains ROOT/bin.
+func newHookPluginFixture(t *testing.T, clientDir string) (root, dataDir, binary string) {
+	t.Helper()
+	root, dataDir = t.TempDir(), t.TempDir()
+	manifestDir := ".claude-plugin"
+	files := []string{filepath.Join(clientDir, "notify.sh"), "lib/resolve-bin.sh", "lib/hook-health.sh"}
+	if clientDir == "codex" {
+		manifestDir = ".codex-plugin"
+		files = append(files, "lib/codex-bin-dir.sh")
+	}
+	files = append(files, filepath.Join(manifestDir, "plugin.json"))
+	for _, rel := range files {
+		contents, err := os.ReadFile(filepath.Join("plugin", rel))
+		if err != nil {
+			t.Fatalf("read plugin fixture %s: %v", rel, err)
+		}
+		dest := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+			t.Fatalf("create plugin fixture directory: %v", err)
+		}
+		if err := os.WriteFile(dest, contents, 0o755); err != nil {
+			t.Fatalf("copy plugin fixture %s: %v", rel, err)
+		}
+	}
+	binary = filepath.Join(root, "bin", "cenci")
+	if clientDir == "codex" {
+		contents, err := os.ReadFile(filepath.Join(root, manifestDir, "plugin.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var manifest struct{ Version string }
+		if err := json.Unmarshal(contents, &manifest); err != nil || manifest.Version == "" {
+			t.Fatalf("read Codex plugin version: %v", err)
+		}
+		binary = filepath.Join(dataDir, manifest.Version, "bin", "cenci")
+	}
+	if err := os.MkdirAll(filepath.Dir(binary), 0o755); err != nil {
+		t.Fatalf("create fixture binary directory: %v", err)
+	}
+	return root, dataDir, binary
 }
 
 // codexManifestHook is one hook command registered in plugin/codex/hooks.json
@@ -375,8 +422,8 @@ func codexManifestHooks(t *testing.T, event string) []codexManifestHook {
 // event, exactly as Codex would (sh -c with PLUGIN_ROOT set), and returns its
 // stdout, its exit error and the ipc.HookEvent that reached a temp event socket.
 //
-// The temp PLUGIN_ROOT holds a copy of the real codex/notify.sh plus a
-// bin/cenci shim that execs the test-built binary with -event-socket pointing
+// The temp PLUGIN_ROOT holds the real codex/notify.sh and its runtime files.
+// A PLUGIN_DATA/<version>/bin/cenci shim execs the test-built binary with -event-socket pointing
 // at the temp socket, so the default daemon socket is never touched and no
 // daemon is autostarted. The hook command swallows failures (`|| true`), so
 // receiving the event on the temp socket is also the proof that the shim — and
@@ -403,33 +450,23 @@ func runCodexManifestHook(t *testing.T, event, payload string) (stdout string, g
 	t.Cleanup(cancel)
 	go receiver.Accept(ctx)
 
-	pluginRoot := t.TempDir()
-	wrapper, err := os.ReadFile(filepath.Join("plugin", "codex", "notify.sh"))
-	if err != nil {
-		t.Fatalf("read codex/notify.sh: %v", err)
-	}
-	if err := os.MkdirAll(filepath.Join(pluginRoot, "codex"), 0o755); err != nil {
-		t.Fatalf("create plugin codex dir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(pluginRoot, "codex", "notify.sh"), wrapper, 0o755); err != nil {
-		t.Fatalf("write notify.sh copy: %v", err)
-	}
-	if err := os.MkdirAll(filepath.Join(pluginRoot, "bin"), 0o755); err != nil {
-		t.Fatalf("create plugin bin dir: %v", err)
-	}
+	pluginRoot, pluginData, fixtureBin := newHookPluginFixture(t, "codex")
 	shim := "#!/bin/sh\nexec \"$CENCI_TEST_BIN\" \"$@\" -event-socket \"$CENCI_TEST_SOCKET\"\n"
-	if err := os.WriteFile(filepath.Join(pluginRoot, "bin", "cenci"), []byte(shim), 0o755); err != nil {
+	if err := os.WriteFile(fixtureBin, []byte(shim), 0o755); err != nil {
 		t.Fatalf("write cenci shim: %v", err)
 	}
 
 	cmd := exec.Command("sh", "-c", hooks[0].Command)
 	cmd.Env = append(os.Environ(),
 		"PLUGIN_ROOT="+pluginRoot,
+		"PLUGIN_DATA="+pluginData,
+		"CLAUDE_PLUGIN_DATA=",
 		"CENCI_TEST_BIN="+binaryPath,
 		"CENCI_TEST_SOCKET="+socket,
 		"CENCI_SANDBOX=",
 		// A wrapper fallback to an installed cenci must never reach the real daemon.
 		"CENCI_SOCKET_DIR="+t.TempDir(),
+		"XDG_STATE_HOME="+t.TempDir(),
 	)
 	cmd.Stdin = strings.NewReader(payload)
 	var out bytes.Buffer

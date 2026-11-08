@@ -30,8 +30,20 @@ if [ -z "$VERSION" ] || [ "$VERSION" = "null" ]; then
   exit 0
 fi
 
-TMP="$(mktemp -d)"
+TMP="$(mktemp -d)" || exit 1
 trap 'rm -rf "$TMP"' EXIT
+
+# Never inherit a live plugin's writable data/cache directory into a fixture.
+unset PLUGIN_DATA CLAUDE_PLUGIN_DATA
+export XDG_CACHE_HOME="$TMP/cache"
+
+test_bin_dir() {
+  if [ "$CLIENT" = codex ]; then
+    printf '%s-data/%s/bin\n' "$1" "$VERSION"
+  else
+    printf '%s/bin\n' "$1"
+  fi
+}
 
 pass=0
 fail=0
@@ -58,23 +70,25 @@ wait_for_file() {
 # Codex, CLAUDE_PLUGIN_ROOT for Claude Code).
 run_bootstrap() {
   local root="$1" calls="$2" logdir="$3" cenci_sandbox="$4"
+  local bindir
+  bindir="$(test_bin_dir "$root")"
 
-  mkdir -p "$root/bin" "$root/$MANIFEST_DIR"
+  mkdir -p "$bindir" "$root/$MANIFEST_DIR"
   cp "$PLUGIN_JSON" "$root/$MANIFEST_DIR/plugin.json"
 
-  cat >"$root/bin/cenci" <<STUB
+  cat >"$bindir/cenci" <<STUB
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "$calls"
 exit 0
 STUB
-  chmod +x "$root/bin/cenci"
-  printf '%s\n' "$VERSION" >"$root/bin/.cenci-version"
+  chmod +x "$bindir/cenci"
+  printf '%s\n' "$VERSION" >"$bindir/.cenci-version"
 
   local home
   home="$(mktemp -d)"
 
   if [ -n "$cenci_sandbox" ]; then
-    env "${ROOT_VAR_NAME}=${root}" TMPDIR="$logdir" HOME="$home" XDG_STATE_HOME="$home/state" \
+    env "${ROOT_VAR_NAME}=${root}" BIN_DIR= PLUGIN_DATA="$root-data" TMPDIR="$logdir" HOME="$home" XDG_STATE_HOME="$home/state" \
       CENCI_SANDBOX="$cenci_sandbox" bash "$BOOTSTRAP"
   else
     (
@@ -82,6 +96,10 @@ STUB
       # shellcheck disable=SC2030,SC2031 # intentionally subshell-scoped
       export TMPDIR="$logdir" HOME="$home" XDG_STATE_HOME="$home/state"
       export "${ROOT_VAR_NAME}=${root}"
+      # shellcheck disable=SC2030,SC2031 # intentionally subshell-scoped
+      export PLUGIN_DATA="$root-data"
+      # shellcheck disable=SC2030,SC2031 # intentionally subshell-scoped
+      export BIN_DIR="$home/ambient-bin-dir"
       bash "$BOOTSTRAP"
     )
   fi
@@ -192,6 +210,10 @@ STUB
     # shellcheck disable=SC2030,SC2031 # intentionally subshell-scoped
     export TMPDIR="$logdir" HOME="$home" XDG_STATE_HOME="$home/state" PATH="$stubdir:/usr/bin:/bin"
     export "${ROOT_VAR_NAME}=${root}"
+    # shellcheck disable=SC2030,SC2031 # intentionally subshell-scoped
+    export PLUGIN_DATA="$root-data"
+    # shellcheck disable=SC2030,SC2031 # intentionally subshell-scoped
+    export BIN_DIR="$home/ambient-bin-dir"
     export CENCI_SANDBOX=1
     export CENCI_RESOLVE_USR_LOCAL_BIN="$TMP/no-such-usr-local-cenci"
     export CENCI_RESOLVE_HOMEBREW_BIN="$TMP/no-such-homebrew-cenci"
@@ -243,7 +265,7 @@ STUB
 
   run_bootstrap_nobin "$HOOK_SHELL" "$root_adopt" "$calls_adopt" "$log_adopt" "$fixture_bin"
 
-  adopted_bin="$root_adopt/bin/cenci"
+  adopted_bin="$(test_bin_dir "$root_adopt")/cenci"
   if [ -x "$adopted_bin" ] && [ ! -L "$adopted_bin" ] && cmp -s "$adopted_bin" "$fixture_bin"; then
     echo "ok   - [$HOOK_SHELL] adopts a fallback binary (real copy, not a symlink) when the download fails"
     pass=$((pass + 1))
@@ -264,13 +286,14 @@ STUB
 
   # --- New case: a fallback marker never suppresses a later real download --
   root_marker="$shell_tmp/root-marker"
-  mkdir -p "$root_marker/bin"
-  cat >"$root_marker/bin/cenci" <<'STUB'
+  marker_bin_dir="$(test_bin_dir "$root_marker")"
+  mkdir -p "$marker_bin_dir"
+  cat >"$marker_bin_dir/cenci" <<'STUB'
 #!/usr/bin/env bash
 exit 0
 STUB
-  chmod +x "$root_marker/bin/cenci"
-  printf 'fallback:/prior/fixture/cenci\n' >"$root_marker/bin/.cenci-version"
+  chmod +x "$marker_bin_dir/cenci"
+  printf 'fallback:/prior/fixture/cenci\n' >"$marker_bin_dir/.cenci-version"
 
   log_marker="$shell_tmp/log-marker"
   mkdir -p "$log_marker"
@@ -315,7 +338,7 @@ STUB
     fail=$((fail + 1))
   fi
 
-  if [ ! -e "$root_none/bin/cenci" ]; then
+  if [ ! -e "$(test_bin_dir "$root_none")/cenci" ]; then
     echo "ok   - [$HOOK_SHELL] no \$ROOT/bin/cenci is created when nothing resolves"
     pass=$((pass + 1))
   else
@@ -559,6 +582,7 @@ hh_setup() {
   HH_CASE=$((HH_CASE + 1))
   local base="$TMP/hh/$1-$HH_CASE-$2"
   HH_ROOT="$base/root"
+  HH_BIN_DIR="$(test_bin_dir "$HH_ROOT")"
   HH_HOME="$base/home"
   HH_STATE="$base/state"
   HH_TMPD="$base/tmp"
@@ -589,7 +613,8 @@ hh_setup() {
 # environment. CENCI_BIN/CENCI_SANDBOX are scrubbed unless the caller sets them.
 hh_env() {
   env -u CENCI_BIN -u CENCI_SANDBOX \
-    HOME="$HH_HOME" XDG_STATE_HOME="$HH_STATE" TMPDIR="$HH_TMPD" \
+    HOME="$HH_HOME" XDG_STATE_HOME="$HH_STATE" XDG_CACHE_HOME="$HH_HOME/cache" \
+    BIN_DIR="$HH_HOME/ambient-bin-dir" PLUGIN_DATA="$HH_ROOT-data" CLAUDE_PLUGIN_DATA= TMPDIR="$HH_TMPD" \
     PATH="$HH_STUBS:/usr/bin:/bin" \
     CENCI_RESOLVE_USR_LOCAL_BIN="$TMP/hh-no-such-usr-local-cenci" \
     CENCI_RESOLVE_HOMEBREW_BIN="$TMP/hh-no-such-homebrew-cenci" \
@@ -728,9 +753,9 @@ for HOOK_SHELL in bash dash; do
 
   # --- Happy path unchanged: a working binary leaves no record --------------
   hh_setup "$HOOK_SHELL" happy
-  mkdir -p "$HH_ROOT/bin"
-  printf '#!/bin/sh\nexit 0\n' >"$HH_ROOT/bin/cenci"
-  chmod +x "$HH_ROOT/bin/cenci"
+  mkdir -p "$HH_BIN_DIR"
+  printf '#!/bin/sh\nexit 0\n' >"$HH_BIN_DIR/cenci"
+  chmod +x "$HH_BIN_DIR/cenci"
   hh_run UserPromptSubmit "$HH_PAYLOAD"
   hh_assert "$tag a resolvable binary writes no hook-health record" \
     test "$HH_RC" -eq 0 -a ! -e "$HH_STATE/cenci"
@@ -744,13 +769,13 @@ for HOOK_SHELL in bash dash; do
     </dev/null >"$HH_OUT" 2>"$HH_ERR"
   HH_RC=$?
   hh_assert "$tag a fallback adoption after a failed download records nothing" \
-    test "$HH_RC" -eq 0 -a -x "$HH_ROOT/bin/cenci" -a ! -e "$HH_STORE/bootstrap-failure"
+    test "$HH_RC" -eq 0 -a -x "$HH_BIN_DIR/cenci" -a ! -e "$HH_STORE/bootstrap-failure"
 
   hh_setup "$HOOK_SHELL" bootstrap-link
-  mkdir -p "$HH_ROOT/bin" "$HH_HOME/.local/bin"
-  printf '#!/bin/sh\nexit 0\n' >"$HH_ROOT/bin/cenci"
-  chmod +x "$HH_ROOT/bin/cenci"
-  printf '%s\n' "$VERSION" >"$HH_ROOT/bin/.cenci-version"
+  mkdir -p "$HH_BIN_DIR" "$HH_HOME/.local/bin"
+  printf '#!/bin/sh\nexit 0\n' >"$HH_BIN_DIR/cenci"
+  chmod +x "$HH_BIN_DIR/cenci"
+  printf '%s\n' "$VERSION" >"$HH_BIN_DIR/.cenci-version"
   printf 'not a symlink\n' >"$HH_HOME/.local/bin/cenci"
   hh_env CENCI_SANDBOX=1 "$HH_ROOT/${NOTIFY_REL%/*}/bootstrap.sh" \
     </dev/null >"$HH_OUT" 2>"$HH_ERR"
@@ -779,7 +804,7 @@ for HOOK_SHELL in bash dash; do
     </dev/null >"$HH_OUT" 2>"$HH_ERR"
   HH_RC=$?
   hh_assert "$tag bootstrap still exits 0 and installs when hook-health.sh is missing" \
-    test "$HH_RC" -eq 0 -a -x "$HH_ROOT/bin/cenci"
+    test "$HH_RC" -eq 0 -a -x "$HH_BIN_DIR/cenci"
   hh_assert "$tag bootstrap logs that hook-health.sh is missing and diagnostics are disabled" \
     grep -q "hook-health.sh missing; diagnostics disabled" "$HH_TMPD/cenci-bootstrap.log"
 
@@ -930,10 +955,9 @@ done
 # --- Client-specific cases ---------------------------------------------------
 #
 # A caller may define client_extra_cases before sourcing this file to add
-# cases that exist for one client only (hooks/test.sh: hooks.json contract and
-# status.sh). They run with every hh_* helper above, add to pass/fail, and land
-# in the one summary below. A caller that defines none (codex/test.sh) is
-# unchanged.
+# cases that exist for one client only (Claude: hooks.json/status.sh; Codex:
+# external runtime storage). They run with every hh_* helper above, add to
+# pass/fail, and land in the one summary below.
 if declare -F client_extra_cases >/dev/null 2>&1; then
   client_extra_cases
 fi

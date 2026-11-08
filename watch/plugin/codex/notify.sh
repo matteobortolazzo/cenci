@@ -4,10 +4,11 @@
 #
 # Covers the SessionStart race: bootstrap.sh runs detached from the
 # SessionStart hook, so the first hook events of a session can fire before
-# it has finished (or even started) installing the plugin-local binary —
-# on a genuinely fresh container, the plugin-local binary does not exist
+# it has finished (or even started) installing the runtime binary —
+# on a genuinely fresh container, the runtime binary does not exist
 # yet no matter what bootstrap.sh eventually does. Resolution order: the
-# plugin-local binary first (the common case once bootstrap has run), then
+# runtime binary first (the common case once bootstrap has run), then
+# an existing plugin-local binary for upgrades from older releases, then
 # the shared resolver (../lib/resolve-bin.sh) for every other known
 # location. Hooks stay silent by design; when nothing resolves, this records
 # a `missing-binary` hook-health record (../lib/hook-health.sh, #1239), then
@@ -18,7 +19,17 @@ set -u
 # Codex sets PLUGIN_ROOT for native plugins. Keep the legacy variable as a
 # compatibility fallback, then resolve one level above codex/ for manual runs.
 ROOT="${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-$(dirname "$0")/..}}"
-BIN="$ROOT/bin/cenci"
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=../lib/codex-bin-dir.sh
+. "$(dirname "$0")/../lib/codex-bin-dir.sh"
+BIN=""
+if BIN_DIR=$(cenci_codex_bin_dir "$ROOT" 2>/dev/null); then
+	BIN="$BIN_DIR/cenci"
+fi
+if [ ! -x "$BIN" ] && [ -x "$ROOT/bin/cenci" ]; then
+	# Read only: bootstrap never rewrites or removes this legacy location.
+	BIN="$ROOT/bin/cenci"
+fi
 
 if [ ! -x "$BIN" ]; then
 	# shellcheck source-path=SCRIPTDIR

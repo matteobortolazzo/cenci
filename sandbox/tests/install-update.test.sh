@@ -319,7 +319,7 @@ run_update() {
     set +e
     env -i HOME="${LAYOUT_HOME}" PATH="${LAYOUT_BIN}" CALL_LOG="${LAYOUT_CALL_LOG}" \
         PIDS_FILE="${PIDS_FILE}" PKILL_LOG="${LAYOUT_PKILL_LOG}" \
-        bash "${ROOT}/install.sh" update --yes --no-build >"${WORK}/last-output" 2>&1
+        "$@" bash "${ROOT}/install.sh" update --yes --no-build >"${WORK}/last-output" 2>&1
     UPDATE_EXIT=$?
     set -e
 }
@@ -549,6 +549,112 @@ if [[ -s "${LAYOUT_PKILL_LOG}" ]]; then
     cat "${LAYOUT_PKILL_LOG}" >&2
     exit 1
 fi
+
+# Model the storage API shipped by newer Codex plugins. The installer must
+# consume the returned path rather than assume that a binary lives in ROOT/bin.
+# The hook suite exercises the real helper and bootstrap, including immutable
+# plugin contents; these cases drive the complete installer against that API.
+seed_codex_storage_helper() {
+    local root="$1"
+    mkdir -p "${root}/lib"
+    cat >"${root}/lib/codex-bin-dir.sh" <<'EOF'
+cenci_codex_bin_dir() {
+    [ -z "${PLUGIN_DATA:-}${CLAUDE_PLUGIN_DATA:-}" ] || return 1
+    printf '%s/cenci/codex/%s/bin\n' "${XDG_CACHE_HOME:-$HOME/.cache}" "${1##*/}"
+}
+EOF
+}
+
+assert_external_codex_update() {
+    if [[ "${UPDATE_EXIT}" -ne 0 ]] ||
+        ! grep -qx 'daemon restart' "${LAYOUT_CALL_LOG}" ||
+        [[ "$(readlink "${LAYOUT_HOME}/.local/bin/cenci")" != "${EXTERNAL_BIN}" ]]; then
+        echo 'FAIL: update must restart and link the external Codex binary' >&2
+        cat "${WORK}/last-output" >&2
+        exit 1
+    fi
+    [[ ! -e "${STORAGE_ROOT}/bin" ]] || {
+        echo 'FAIL: installer wrote into the Codex plugin bundle' >&2
+        exit 1
+    }
+}
+
+echo 'case: update discovers a provisioned external Codex binary and ignores unrelated plugin data'
+new_layout codex-external codex
+make_client "${LAYOUT_BIN}" codex
+STORAGE_ROOT="${LAYOUT_HOME}/.codex/plugins/cache/cenci/cenci-watch/2.0.0"
+mkdir -p "${STORAGE_ROOT}/.codex-plugin"
+printf '{"name":"cenci-watch","version":"2.0.0"}\n' >"${STORAGE_ROOT}/.codex-plugin/plugin.json"
+seed_codex_storage_helper "${STORAGE_ROOT}"
+EXTERNAL_BIN="${LAYOUT_HOME}/custom cache/cenci/codex/2.0.0/bin/cenci"
+make_cenci "${EXTERNAL_BIN}"
+run_update "XDG_CACHE_HOME=${LAYOUT_HOME}/custom cache" \
+    "PLUGIN_DATA=${WORK}/unrelated-plugin" "CLAUDE_PLUGIN_DATA=${WORK}/unrelated-legacy-plugin"
+assert_external_codex_update
+
+echo 'case: an unavailable update preserves the previous external Codex binary and reports failure'
+NEW_STORAGE_ROOT="${LAYOUT_HOME}/.codex/plugins/cache/cenci/cenci-watch/3.0.0"
+mkdir -p "${NEW_STORAGE_ROOT}/.codex-plugin"
+printf '{"name":"cenci-watch","version":"3.0.0"}\n' >"${NEW_STORAGE_ROOT}/.codex-plugin/plugin.json"
+seed_codex_storage_helper "${NEW_STORAGE_ROOT}"
+touch -t 200001010000 "${STORAGE_ROOT}/.codex-plugin/plugin.json"
+touch -t 200101010000 "${NEW_STORAGE_ROOT}/.codex-plugin/plugin.json"
+: >"${LAYOUT_CALL_LOG}"
+run_update "XDG_CACHE_HOME=${LAYOUT_HOME}/custom cache"
+if [[ "${UPDATE_EXIT}" -eq 0 ]] ||
+    ! grep -q 'cenci binary update incomplete' "${WORK}/last-output" ||
+    ! grep -qx 'daemon restart' "${LAYOUT_CALL_LOG}" ||
+    [[ "$(readlink "${LAYOUT_HOME}/.local/bin/cenci")" != "${EXTERNAL_BIN}" ]]; then
+    echo 'FAIL: failed update must retain the previous external binary without reporting success' >&2
+    cat "${WORK}/last-output" >&2
+    exit 1
+fi
+
+echo 'case: update provisions the external Codex binary with plugin-data variables cleared'
+new_layout codex-external-bootstrap codex
+make_client "${LAYOUT_BIN}" codex
+STORAGE_ROOT="${LAYOUT_HOME}/.codex/plugins/cache/cenci/cenci-watch/2.0.0"
+mkdir -p "${STORAGE_ROOT}/.codex-plugin" "${STORAGE_ROOT}/codex"
+printf '{"name":"cenci-watch","version":"2.0.0"}\n' >"${STORAGE_ROOT}/.codex-plugin/plugin.json"
+seed_codex_storage_helper "${STORAGE_ROOT}"
+EXTERNAL_BIN="${LAYOUT_HOME}/.cache/cenci/codex/2.0.0/bin/cenci"
+make_cenci "${WORK}/external-binary-fixture"
+cat >"${STORAGE_ROOT}/codex/bootstrap.sh" <<'EOF'
+#!/bin/sh
+[ -z "${PLUGIN_DATA:-}${CLAUDE_PLUGIN_DATA:-}" ] || exit 1
+. "$PLUGIN_ROOT/lib/codex-bin-dir.sh"
+bin_dir=$(cenci_codex_bin_dir "$PLUGIN_ROOT") || exit 1
+mkdir -p "$bin_dir" || exit 1
+cat "$CENCI_TEST_BINARY" >"$bin_dir/cenci" || exit 1
+chmod +x "$bin_dir/cenci"
+EOF
+run_update "CENCI_TEST_BINARY=${WORK}/external-binary-fixture" \
+    "PLUGIN_DATA=${WORK}/unrelated-plugin" "CLAUDE_PLUGIN_DATA=${WORK}/unrelated-legacy-plugin"
+assert_external_codex_update
+
+echo 'case: a Claude cache with both manifests uses Claude bootstrap and bundle-local storage'
+new_layout claude-dual-manifests claude
+make_client "${LAYOUT_BIN}" claude
+STORAGE_ROOT="${LAYOUT_HOME}/.claude/plugins/cache/cenci/cenci-watch/2.0.0"
+mkdir -p "${STORAGE_ROOT}/.claude-plugin" "${STORAGE_ROOT}/.codex-plugin" "${STORAGE_ROOT}/hooks" "${STORAGE_ROOT}/codex"
+printf '{"name":"cenci-watch","version":"2.0.0"}\n' >"${STORAGE_ROOT}/.claude-plugin/plugin.json"
+cp "${STORAGE_ROOT}/.claude-plugin/plugin.json" "${STORAGE_ROOT}/.codex-plugin/plugin.json"
+seed_codex_storage_helper "${STORAGE_ROOT}"
+make_cenci "${WORK}/claude-binary-fixture"
+cat >"${STORAGE_ROOT}/hooks/bootstrap.sh" <<'EOF'
+#!/bin/sh
+mkdir -p "$CLAUDE_PLUGIN_ROOT/bin" || exit 1
+cat "$CENCI_TEST_BINARY" >"$CLAUDE_PLUGIN_ROOT/bin/cenci" || exit 1
+chmod +x "$CLAUDE_PLUGIN_ROOT/bin/cenci"
+EOF
+printf '#!/bin/sh\nexit 1\n' >"${STORAGE_ROOT}/codex/bootstrap.sh"
+run_update "CENCI_TEST_BINARY=${WORK}/claude-binary-fixture"
+[[ "${UPDATE_EXIT}" -eq 0 ]] &&
+    [[ "$(readlink "${LAYOUT_HOME}/.local/bin/cenci")" == "${STORAGE_ROOT}/bin/cenci" ]] || {
+    echo 'FAIL: the cache client must determine bootstrap and binary storage' >&2
+    cat "${WORK}/last-output" >&2
+    exit 1
+}
 
 echo "case: when 'daemon restart' exits 2 (a binary without the subverb), the installer falls back to a manual pkill/nohup restart"
 setup_layout fallback claude 2
