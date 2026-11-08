@@ -81,7 +81,8 @@ func (f *Frontend) OnEvent(sess *frontend.SessionState, event ipc.HookEvent) fro
 		if f.cfg.Verbose {
 			log.Printf("event: pane %s not found in tmux", pk)
 		}
-		return frontend.Observations{}
+		_, tracked := f.sessionKeys[sess.Key()]
+		return frontend.Observations{UntrackedPaneMissing: !tracked}
 	}
 
 	wk := windowKey{pk.socket, paneInfo.WindowTarget()}

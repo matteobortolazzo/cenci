@@ -25,6 +25,11 @@ type SessionState struct {
 	TmuxPane       string    // tmux pane ID (e.g. %5); empty = paneless session
 	TmuxSocket     string    // tmux server socket of TmuxPane; empty = the ambient server
 	LastEvent      time.Time // last event time, drives paneless TTL expiry
+	// MissingTmuxPane/Socket remember the Codex association rejected by a
+	// successful listing. Ignored events must not reattach that same pair;
+	// applied events still check it again so a live pane can attach normally.
+	MissingTmuxPane   string
+	MissingTmuxSocket string
 	// BackgroundHold is true while the session's latest main-agent Stop was
 	// held at running because in-flight background work will wake it (#698).
 	// While set, the tmux sweep's idle-title detection must not flip the
@@ -117,9 +122,10 @@ type Frontend interface {
 
 // Observations carries facts a frontend learned while handling an event.
 type Observations struct {
-	TaskNameHint string   // task name resolved from the pane (title-derived; codex path)
-	AgentHint    string   // agent inferred from the pane's running command
-	EvictedKeys  []string // core sessions whose presentation state was discarded (dead panes)
+	UntrackedPaneMissing bool     // successful listing proved the supplied pane absent; no prior window was tracked
+	TaskNameHint         string   // task name resolved from the pane (title-derived; codex path)
+	AgentHint            string   // agent inferred from the pane's running command
+	EvictedKeys          []string // core sessions whose presentation state was discarded (dead panes)
 }
 
 // SweepAction asks the core to update or remove a session after a sweep.
