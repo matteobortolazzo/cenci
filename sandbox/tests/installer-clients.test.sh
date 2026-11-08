@@ -4241,4 +4241,14 @@ assert_contains "${ROOT}/SECURITY.md" "inner daemon"
 assert_contains "${ROOT}/SECURITY.md" "shared-kernel attack surface"
 assert_not_contains "${ROOT}/SECURITY.md" "VM-grade isolation"
 
+echo "case: optional host permissions reach both clients during install and update"
+for host_mode in install update; do
+    host_flags=()
+    if [[ "${host_mode}" == update ]]; then host_flags=(update); fi
+    run_case "host-grants-${host_mode}" dual --no-build ${host_flags[@]+"${host_flags[@]}"} --host-permissions --no-host-ccline
+    [[ "${CASE_EXIT}" -eq 0 ]]
+    jq -e '.permissions.allow | index("Bash(gh:*)")' "${CASE_HOME}/.claude/settings.json" >/dev/null
+    assert_contains "${CASE_HOME}/.codex/rules/cenci-host.rules" 'prefix_rule(pattern=["gh"], decision="allow")'
+done
+
 echo "passed: client detection, installation, launchers, and summaries"

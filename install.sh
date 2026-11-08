@@ -32,6 +32,8 @@
 #   see docs/getting-started.md's manual download-verify-run sequence.
 #
 # Flags:
+#   --host-ccline / --no-host-ccline       opt in / skip host Claude status line
+#   --host-permissions / --no-host-permissions  opt in / skip host gh command grants
 #   --yes                                 accept defaults, never prompt
 #   --build / --no-build                  force / skip the sandbox image build
 #   --lazyboards / --no-lazyboards        force / skip lazyboards install
@@ -3655,6 +3657,124 @@ run_uninstall() {
 	return 0
 }
 
+# Optional host customization. These steps never run in doctor/uninstall and
+# default to no, including under --yes. Host approvals remain separate from
+# the container's approval bypass and from Codex hook trust.
+host_settings_update() {
+	local file="$1" filter="$2" value="$3" tmp backup
+	if [ -L "$file" ] || { [ -e "$file" ] && [ ! -f "$file" ]; }; then
+		fail "host settings: refusing unsupported file $file"
+		return 1
+	fi
+	mkdir -p "$(dirname "$file")" || return 1
+	tmp="$(mktemp "${file}.cenci-tmp.XXXXXX")" || return 1
+	if [ -f "$file" ]; then
+		if ! jq -e 'type == "object"' "$file" >/dev/null 2>&1 ||
+			! jq --arg value "$value" "$filter" "$file" >"$tmp"; then
+			fail "host settings: invalid settings in $file; left untouched"
+			rm -f "$tmp"
+			return 1
+		fi
+		if cmp -s "$file" "$tmp"; then rm -f "$tmp"; return 0; fi
+		backup="$(mktemp "${file}.cenci-backup.XXXXXX")" || { rm -f "$tmp"; return 1; }
+		if ! cp "$file" "$backup"; then rm -f "$tmp"; return 1; fi
+		ok "backed up $file to $backup"
+	else
+		if ! printf '{}\n' | jq --arg value "$value" "$filter" >"$tmp"; then
+			rm -f "$tmp"
+			return 1
+		fi
+	fi
+	chmod 600 "$tmp" && mv "$tmp" "$file"
+}
+
+install_host_ccline() {
+	# Same pinned release as sandbox/Dockerfile.base. Digests are the upstream
+	# GitHub release asset SHA-256 values, fixed here rather than fetched beside
+	# the archive being verified.
+	local archive digest tmp actual dest staged
+	case "$OS/$ARCH" in
+	linux/amd64) archive=ccline-linux-x64-static.tar.gz; digest=9b7d4b2bdd8f24e6db09c837f4e464ec7aa5155d963cbec191b683b760bc2706 ;;
+	linux/arm64) archive=ccline-linux-arm64-static.tar.gz; digest=4010abd7048bb14c65f4784d5bfe1e7a1ddeca3193172a0cc3cce4e3e121fcab ;;
+	macos/amd64) archive=ccline-macos-x64.tar.gz; digest=33fb5ee0584495e9bab4b533dd920850628a5a3e2bdcfd241c07bb2c1fb88dfd ;;
+	macos/arm64) archive=ccline-macos-arm64.tar.gz; digest=75f6a15a606c5a9d7fb0daebb0c76fec941add4e978e7efe127988bf3dcac2f7 ;;
+	*) fail "ccline: unsupported host $OS/$ARCH"; return 1 ;;
+	esac
+	tmp="$(mktemp -d)" || return 1
+	[ -n "$tmp" ] && [ -d "$tmp" ] || return 1
+	if ! curl -fsSL -o "$tmp/archive" "https://github.com/Haleclipse/CCometixLine/releases/download/v1.1.2/$archive"; then
+		rm -rf "$tmp"; return 1
+	fi
+	actual=""
+	if have sha256sum; then actual="$(sha256sum "$tmp/archive")" || actual="";
+	elif have shasum; then actual="$(shasum -a 256 "$tmp/archive")" || actual=""; fi
+	if [ "${actual%% *}" != "$digest" ]; then
+		fail "ccline: checksum verification failed for $archive"
+		rm -rf "$tmp"; return 1
+	fi
+	# Extract only the executable, to stdout: archive paths and links cannot
+	# create arbitrary filesystem entries.
+	if ! tar -xOzf "$tmp/archive" ccline >"$tmp/ccline" || [ ! -s "$tmp/ccline" ]; then
+		rm -rf "$tmp"; return 1
+	fi
+	dest="$HOME/.local/bin/ccline"
+	if [ -L "$dest" ] || { [ -e "$dest" ] && [ ! -f "$dest" ]; }; then
+		fail "ccline: refusing unsupported file $dest"; rm -rf "$tmp"; return 1
+	fi
+	mkdir -p "$HOME/.local/bin" || { rm -rf "$tmp"; return 1; }
+	staged="$(mktemp "$HOME/.local/bin/.ccline.XXXXXX")" || { rm -rf "$tmp"; return 1; }
+	if ! cp "$tmp/ccline" "$staged" || ! chmod 755 "$staged" || ! mv "$staged" "$dest"; then
+		rm -f "$staged"; rm -rf "$tmp"; return 1
+	fi
+	rm -rf "$tmp"
+	HOST_CCLINE_BIN="$dest"
+}
+
+step_host_setup() {
+	local settings rules tmp command
+	settings="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json"
+	if [ "$HAS_CLAUDE" -eq 1 ] && { [ "$HOST_CCLINE" = yes ] ||
+		{ [ "$HOST_CCLINE" = ask ] && [ "$MODE" = install ] && ask_yn "Set up ccline for host Claude Code (preserve an existing status line)?" n; }; }; then
+		step "Host Claude status line"
+		# Existing status lines belong to the user, including existing ccline.
+		if [ -f "$settings" ] && jq -e 'has("statusLine")' "$settings" >/dev/null 2>&1; then
+			ok "existing Claude status line preserved"
+		else
+			HOST_CCLINE_BIN="$(command -v ccline 2>/dev/null)" || HOST_CCLINE_BIN=""
+			if [ -z "$HOST_CCLINE_BIN" ] && ! install_host_ccline; then
+				fail "could not install host ccline"; INSTALL_FAILED=1
+			else
+				# @sh handles spaces and quotes in home/PATH entries.
+				command="$(jq -nr --arg bin "$HOST_CCLINE_BIN" '$bin | @sh')" || return 1
+				# shellcheck disable=SC2016 # jq variable, not a shell expansion
+				host_settings_update "$settings" '.statusLine = {type:"command",command:$value,padding:0}' "$command" || INSTALL_FAILED=1
+			fi
+		fi
+	fi
+	if [ "$HOST_PERMISSIONS" = yes ] || { [ "$HOST_PERMISSIONS" = ask ] && [ "$MODE" = install ] &&
+		ask_yn "Allow all gh commands (including GitHub API writes) in host Claude Code and Codex without repeated command approvals?" n; }; then
+		step "Host GitHub command permissions"
+		if [ "$HAS_CLAUDE" -eq 1 ]; then
+			host_settings_update "$settings" '.permissions.allow = (((.permissions.allow // []) + ["Bash(gh:*)"]) | unique)' '' || INSTALL_FAILED=1
+		fi
+		if [ "$HAS_CODEX" -eq 1 ]; then
+			rules="${CODEX_HOME:-$HOME/.codex}/rules/cenci-host.rules"
+			if [ -L "$rules" ] || { [ -e "$rules" ] && { [ ! -f "$rules" ] || ! grep -qx '# Managed by cenci host permissions' "$rules"; }; }; then
+				fail "host permissions: $rules is not a cenci-managed regular file; left untouched"
+				INSTALL_FAILED=1
+			elif mkdir -p "$(dirname "$rules")" && tmp="$(mktemp "${rules}.XXXXXX")"; then
+				if ! printf '%s\n' '# Managed by cenci host permissions' 'prefix_rule(pattern=["gh"], decision="allow")' >"$tmp" ||
+					! chmod 600 "$tmp" || ! mv "$tmp" "$rules"; then
+					INSTALL_FAILED=1; rm -f "$tmp"
+				fi
+			else INSTALL_FAILED=1; fi
+		fi
+		if [ "$INSTALL_FAILED" -eq 0 ]; then
+			ok "GitHub setup finished; existing deny/prompt policies still apply. Restart host clients to load settings."
+		fi
+	fi
+}
+
 # ------------------------------------------------------------------- main ----
 
 MODE=install
@@ -3666,6 +3786,8 @@ LAZYBOARDS_EXPLICIT=0
 # step_tmux_defaults_setup, so there is no global ask->yes resolution.
 TMUX_DEFAULTS=ask
 LOGIN_SERVICE=ask
+HOST_CCLINE=ask
+HOST_PERMISSIONS=ask
 INSTALL_FAILED=0
 CENCI_REF="${CENCI_REF:-}"
 # Captured before the arg-parse loop below consumes "$@" via shift, so the
@@ -3679,6 +3801,7 @@ cenci installer — one command for the whole package.
 
 Usage:
   cenci-installer              interactive installer / repair
+  cenci-installer --host-ccline --host-permissions  optional host setup
   cenci-installer update       update installed plugins (+ optional rebuild)
   cenci-installer doctor       check prerequisites, change nothing
   cenci-installer uninstall    remove plugins, PATH links, daemon, config,
@@ -3703,6 +3826,10 @@ Initial install (one command):
 From a source checkout, ./install.sh accepts the same arguments.
 
 Flags:
+  --host-ccline / --no-host-ccline       set up / skip host Claude status line (default No)
+  --host-permissions / --no-host-permissions
+                                        allow all host gh commands, including API writes
+                                        / skip command grants (default No)
   --yes                                 accept defaults, never prompt
   --build / --no-build                  force / skip the sandbox image build
   --lazyboards / --no-lazyboards        force / skip the optional lazyboards board install
@@ -3738,6 +3865,10 @@ while [ $# -gt 0 ]; do
 	--tmux-defaults) TMUX_DEFAULTS=yes ;;
 	--no-tmux-defaults) TMUX_DEFAULTS=no ;;
 	--no-login-service) LOGIN_SERVICE=no ;;
+	--host-ccline) [ "$HOST_CCLINE" != no ] || die "conflicting host ccline flags"; HOST_CCLINE=yes ;;
+	--no-host-ccline) [ "$HOST_CCLINE" != yes ] || die "conflicting host ccline flags"; HOST_CCLINE=no ;;
+	--host-permissions) [ "$HOST_PERMISSIONS" != no ] || die "conflicting host permissions flags"; HOST_PERMISSIONS=yes ;;
+	--no-host-permissions) [ "$HOST_PERMISSIONS" != yes ] || die "conflicting host permissions flags"; HOST_PERMISSIONS=no ;;
 	--ref)
 		[ $# -ge 2 ] || die "--ref requires a value (see --help)"
 		CENCI_REF="$2"
@@ -3891,6 +4022,7 @@ if [ "$MODE" = update ]; then
 	step_reconcile_plugins
 	prune_selected_to_installed
 	step_cli_setup
+	step_host_setup
 	step_sandbox_setup
 	step_cenci_watch_setup
 	step_tmux_defaults_setup
@@ -3911,6 +4043,7 @@ step_marketplace
 step_reconcile_plugins
 prune_selected_to_installed
 step_cli_setup
+step_host_setup
 step_sandbox_setup
 step_cenci_watch_setup
 step_tmux_defaults_setup

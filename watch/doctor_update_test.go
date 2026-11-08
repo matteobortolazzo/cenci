@@ -249,7 +249,7 @@ func TestUpdate_ForwardsSupportedInstallerFlags(t *testing.T) {
 	capture := filepath.Join(home, "argv.txt")
 	writeFakeCenciInstaller(t, home, capture, 0)
 
-	cmd := exec.Command(binaryPath, "update", "--yes", "--build", "--lazyboards")
+	cmd := exec.Command(binaryPath, "update", "--yes", "--build", "--lazyboards", "--host-ccline", "--host-permissions")
 	cmd.Env = wrapperEnv(home, t.TempDir())
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -257,8 +257,28 @@ func TestUpdate_ForwardsSupportedInstallerFlags(t *testing.T) {
 	}
 
 	got := readCapturedArgv(t, capture)
-	if joinArgv(got) != "update --yes --build --lazyboards" {
+	if joinArgv(got) != "update --yes --build --lazyboards --host-ccline --host-permissions" {
 		t.Errorf("captured argv = %v, want supported flags forwarded", got)
+	}
+}
+
+func TestUpdate_RejectsConflictingHostFlags(t *testing.T) {
+	for _, option := range []string{"host-ccline", "host-permissions"} {
+		t.Run(option, func(t *testing.T) {
+			home := t.TempDir()
+			capture := filepath.Join(home, "argv.txt")
+			writeFakeCenciInstaller(t, home, capture, 0)
+			cmd := exec.Command(binaryPath, "update", "--"+option, "--no-"+option)
+			cmd.Env = wrapperEnv(home, t.TempDir())
+			output, err := cmd.CombinedOutput()
+			exitErr, ok := err.(*exec.ExitError)
+			if !ok || exitErr.ExitCode() != 2 {
+				t.Fatalf("error = %v, want exit 2: %s", err, output)
+			}
+			if _, err := os.Stat(capture); !os.IsNotExist(err) {
+				t.Fatalf("installer invoked for conflicting flags: %v", err)
+			}
+		})
 	}
 }
 
