@@ -211,6 +211,10 @@ func runUpdate(args []string) {
 	noBuild := fs.Bool("no-build", false, "skip the sandbox image build")
 	lazyboards := fs.Bool("lazyboards", false, "install or reconcile lazyboards")
 	noLazyboards := fs.Bool("no-lazyboards", false, "skip lazyboards reconciliation")
+	hostCcline := fs.Bool("host-ccline", false, "set up ccline for host Claude Code")
+	noHostCcline := fs.Bool("no-host-ccline", false, "skip host ccline setup")
+	hostPermissions := fs.Bool("host-permissions", false, "allow gh commands in host clients")
+	noHostPermissions := fs.Bool("no-host-permissions", false, "skip host command permissions")
 	_ = fs.Parse(args)
 	rejectExtra("cenci update", fs.Args())
 	if *build && *noBuild {
@@ -222,6 +226,10 @@ func runUpdate(args []string) {
 		os.Exit(2)
 	}
 	forward := make([]string, 0, 3)
+	if (*hostCcline && *noHostCcline) || (*hostPermissions && *noHostPermissions) {
+		fmt.Fprintln(os.Stderr, "cenci update: conflicting host setup flags")
+		os.Exit(2)
+	}
 	if *yes || *shortYes {
 		forward = append(forward, "--yes")
 	}
@@ -234,6 +242,16 @@ func runUpdate(args []string) {
 		forward = append(forward, "--lazyboards")
 	} else if *noLazyboards {
 		forward = append(forward, "--no-lazyboards")
+	}
+	if *hostCcline {
+		forward = append(forward, "--host-ccline")
+	} else if *noHostCcline {
+		forward = append(forward, "--no-host-ccline")
+	}
+	if *hostPermissions {
+		forward = append(forward, "--host-permissions")
+	} else if *noHostPermissions {
+		forward = append(forward, "--no-host-permissions")
 	}
 	runWrapperMode("update", forward)
 }

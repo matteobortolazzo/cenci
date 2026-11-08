@@ -83,6 +83,38 @@ Requires [cosign](https://docs.sigstore.dev/system_config/installation/) — the
 release identity before it runs; verification fails closed, with no fallback to an
 unverified ref.
 
+### Optional host status line and GitHub permissions
+
+The installer offers these separately during interactive installation; both default
+to **No**, including with `--yes`. Enable either explicitly during install or update:
+
+```bash
+cenci update --host-ccline --host-permissions
+```
+
+With an older cenci binary, use `cenci-installer update --host-ccline
+--host-permissions` directly. `--no-host-ccline` and `--no-host-permissions` skip
+the corresponding step; they do not revoke previously installed settings.
+
+`--host-ccline` configures Claude Code's host status line. It uses an existing
+`ccline` on PATH, or downloads CCometixLine 1.1.2 for Linux/macOS x64/arm64,
+verifies a pinned SHA-256 digest, and installs it to `~/.local/bin/ccline`.
+An existing `statusLine` is preserved. Settings use `CLAUDE_CONFIG_DIR` when set,
+otherwise `~/.claude`; changed settings receive a uniquely named backup.
+
+`--host-permissions` grants **all `gh` commands**, including issue/PR creation
+and arbitrary GitHub API writes, in both detected clients. It adds `Bash(gh:*)`
+to Claude's user allowlist and writes Codex's separate managed
+`${CODEX_HOME:-~/.codex}/rules/cenci-host.rules`. Existing deny/prompt rules remain
+effective. Restart the host clients to load the changes. These command grants do
+not change filesystem/network policy, trust hooks, or approve MCP tools. Commands
+wrapped in complex shell scripts can still require approval.
+
+These host customizations persist through cenci uninstall. To revoke them, remove
+only `Bash(gh:*)` from Claude's allowlist and Codex's `cenci-host.rules`; restore a
+Claude settings backup to undo its status-line change, and remove the downloaded
+`~/.local/bin/ccline` if it is no longer wanted.
+
 Resolves to the latest release tag by default. That resolved ref pins the client
 marketplace manifests and all three plugins' content — not just which install.sh
 runs — for install, update, and repair runs, subject to the preserved Claude

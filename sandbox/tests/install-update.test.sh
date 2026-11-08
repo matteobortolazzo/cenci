@@ -268,7 +268,7 @@ run_installer_pty() {
 #!/bin/sh
 exec env -i HOME="${LAYOUT_HOME}" PATH="${LAYOUT_BIN}" CALL_LOG="${LAYOUT_CALL_LOG}" \
     PIDS_FILE="${PIDS_FILE}" PKILL_LOG="${LAYOUT_PKILL_LOG}" \
-    bash "${ROOT}/install.sh" ${mode_arg} --no-lazyboards --no-tmux-defaults
+    bash "${ROOT}/install.sh" ${mode_arg} --no-lazyboards --no-tmux-defaults --no-host-ccline --no-host-permissions
 EOF
     chmod +x "${wrapper}"
     set +e

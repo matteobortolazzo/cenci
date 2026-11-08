@@ -3436,7 +3436,11 @@ doctor`/`update`/`uninstall`) that reaches the same installer logic as running
 `cenci-installer doctor`/`update`/`uninstall` directly. `cenci doctor` and `cenci
 uninstall` take no flags or extra arguments (exit 2 if given any); `cenci update`
 forwards a fixed set of flags (`--yes`/`-y`, `--build`/`--no-build`,
-`--lazyboards`/`--no-lazyboards`). Destructive flags like `--yes` and `--lazyboards`
+`--lazyboards`/`--no-lazyboards`, `--host-ccline`/`--no-host-ccline`, and
+`--host-permissions`/`--no-host-permissions`). The host flags opt into a Claude
+status line and persistent GitHub command grants; see
+[optional host setup](../docs/getting-started.md#optional-host-status-line-and-github-permissions).
+Destructive flags like `--yes` and `--lazyboards`
 are not forwarded by `cenci uninstall` — invoke `cenci-installer uninstall` directly
 if you need them. The tmux defaults flags are the same: `--tmux-defaults` and
 `--no-tmux-defaults` go to `cenci-installer` directly (for example

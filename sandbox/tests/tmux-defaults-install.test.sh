@@ -212,7 +212,7 @@ run_installer_pty() {
     cat >"${wrapper}" <<EOF
 #!/bin/sh
 exec env -i HOME="${CASE_HOME}" PATH="${CASE_BIN}:${CASE_HOME}/.local/bin" \\
-    bash "${ROOT}/install.sh" ${args}
+    bash "${ROOT}/install.sh" ${args} --no-host-ccline --no-host-permissions
 EOF
     chmod +x "${wrapper}"
     set +e
