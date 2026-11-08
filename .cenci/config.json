@@ -3,7 +3,7 @@
   "branchPattern": "feature/<id>-<description>",
   "isMonorepo": true,
   "stack": {
-    "backend": "go1.25",
+    "backend": "go1.26",
     "testing": [
       "go-testing",
       "shellcheck"
@@ -48,7 +48,7 @@
       "name": "watch",
       "description": "Go binary + Claude Code plugin: coding-agent session monitoring (tmux, waybar, noctalia, DMS)",
       "stack": {
-        "framework": "go1.25",
+        "framework": "go1.26",
         "testing": "go-testing"
       },
       "buildCommand": "make build",

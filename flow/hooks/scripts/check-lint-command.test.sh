@@ -432,7 +432,7 @@ assert_eq "${CODE}" "0" "case25 hook exit against this repo's config"
 assert_eq "${OUT}" "" "case25 hook silent against this repo's config"
 OUT="$(cd "${REPO_ROOT}" && bash "${HOOK}" --plain 2>&1)"
 assert_plain_line "skip${TAB}flow${TAB}markdown-shell${TAB}no-lint-row" "case25 this repo's flow project skips"
-assert_plain_line "pass${TAB}watch${TAB}go1.25${TAB}lint-set" "case25 this repo's watch project passes"
+assert_plain_line "pass${TAB}watch${TAB}go1.26${TAB}lint-set" "case25 this repo's watch project passes"
 assert_plain_line "skip${TAB}sandbox${TAB}docker-shell${TAB}no-lint-row" "case25 this repo's sandbox project skips"
 
 # --- Case 26: single-repo failure in hook mode names (repo) ------------------
