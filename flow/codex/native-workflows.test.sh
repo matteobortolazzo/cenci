@@ -12,7 +12,18 @@
 #                head, the checkpoint is `complete` with `pushed:<sha>`, no GitHub
 #                write was attempted, no other branch was created, no `cenci`
 #                command was run
-#   restart      the same launch again: no new commit, no push
+#   restart      the same launch again while the stubbed checks are `pending`: no new
+#                commit, no push, checkpoint unchanged
+#   restart (failed pushed head)
+#                the checkpoint is `complete` at the pushed SHA B, B is the remote head
+#                and a second check (`native-lint`, outside `gateCommand`) fails on it:
+#                one fast-forward push of a new commit C whose parent is B, the seeded
+#                gate green at C, the lint definition untouched, the checkpoint
+#                `complete` with `pushed:C`; a no-op or a block is a FAIL
+#   restart (interrupted push)
+#                a runner-seeded `committed:<sha>` checkpoint (written with the plugin's
+#                own checkpoint.mjs) on a head the remote already has, checks `pending`:
+#                the checkpoint ends `complete` with that SHA, no new commit, no push
 #   attention    a headless `$cenci:babysit-attention`: all three options printed
 #                (including "retry with a fresh budget"), the attempt count read
 #                through the stubbed `cenci babysit status`, no `cenci babysit stop` or
@@ -48,7 +59,12 @@
 # The fixture lives under /var/tmp (never /tmp: the guards allowlist /tmp/*): a
 # local bare remote with a PR branch whose gate (`sh check.sh`) fails, a clone of it
 # as the launch directory, a stubbed `gh` and a stubbed `cenci` first on codex's
-# PATH. The stubbed `gh` answers reads and REFUSES and logs every write; the stubbed
+# PATH. The stubbed `gh` answers reads and REFUSES and logs every write; `gh pr checks`
+# answers the check buckets of ${LOGS}/checks.json when the runner armed it (`pending`
+# only: exit 8, valid JSON, as the real one) and `gh run view` the text of
+# ${LOGS}/run-log.txt, otherwise the failing `native-gate` the fixture starts with. The fixture
+# seeds a second failure outside the gate (`lint.sh` fails until CHANGELOG.md holds one
+# line), so a repair of the pushed head can differ from the first one. The stubbed
 # `cenci` logs every call (`babysit status` answers with the attempt count, `babysit stop`
 # fails like a host nack, as a forwarded stop does when the host daemon rejects it, and
 # `babysit reset` fails like the host-only refusal a sandbox gets).
@@ -87,11 +103,14 @@
 #
 # Output: a sanitized markdown fragment on stdout, and also in the file named by
 # $CENCI_CODEX_NATIVE_OUT when set. The fragment ends with one RESULT line:
-#   RESULT: OK            exit 0  the five positive ci-repair/attention rows and
+#   RESULT: OK            exit 0  the seven positive ci-repair/attention rows and
 #                                 every Plan-mode, handoff and goal row are ok
 #                                 (fast-forward advance, gate green on the pushed
 #                                 head, checkpoint complete with the pushed SHA,
-#                                 restart adds no commit, all three attention options
+#                                 restart adds no commit, the interrupted push is
+#                                 recorded without a commit or push, the failed pushed
+#                                 head is repaired with one fast-forward push, all
+#                                 three attention options
 #                                 printed; the probe recorded, both refusal lines
 #                                 with zero tool calls and writes, apply verifies,
 #                                 the tampered artifact refused with zero writes,
@@ -109,6 +128,8 @@ MIN_VERSION="0.166.0"
 PR_NUMBER=7
 PR_BRANCH="fix/native-ci"
 CHECK_NAME="native-gate"
+LINT_NAME="native-lint"   # the second check: it fails outside gateCommand until CHANGELOG.md holds LINT_ENTRY
+LINT_ENTRY="- native fixture entry"
 FIXTURE_ATTEMPTS=3   # ciFixAttempts the stubbed `cenci babysit status` reports and the attention rows expect to see
 FIXTURE_SLUG="cenci-native/fixture"
 ZERO_SHA="0000000000000000000000000000000000000000"
@@ -247,6 +268,8 @@ LBL_CI_FF="ci-repair: remote branch advanced fast-forward only"
 LBL_CI_GATE="ci-repair: gate green on the pushed head"
 LBL_CI_CKPT="ci-repair: checkpoint complete with pushed SHA"
 LBL_RESTART="restart: re-run adds no commit and no push"
+LBL_RECOVER="restart (interrupted push): checkpoint completed with the pushed SHA, no new commit, no push"
+LBL_FRESH="restart (failed pushed head): one fast-forward push of a new commit on the pushed head, checkpoint complete with it"
 LBL_A_OPTS="attention (headless): three options printed"
 # The Plan-mode, handoff and goal rows (#1235) are required too.
 LBL_PROBE="startup-control probe: Plan/collaboration-mode option recorded"
@@ -266,7 +289,7 @@ LBL_GB="goal complete: update_goal complete before cenci babysit"
 LBL_SC="goal skip: no create_goal while a goal exists"
 LBL_SU="goal skip: no update_goal"
 LBL_SK="goal skip: checkpoint records skipped-active and needs-input"
-REQUIRED_ROWS=("${LBL_CI_FF}" "${LBL_CI_GATE}" "${LBL_CI_CKPT}" "${LBL_RESTART}" "${LBL_A_OPTS}"
+REQUIRED_ROWS=("${LBL_CI_FF}" "${LBL_CI_GATE}" "${LBL_CI_CKPT}" "${LBL_RESTART}" "${LBL_RECOVER}" "${LBL_FRESH}" "${LBL_A_OPTS}"
     "${LBL_PROBE}" "${LBL_PM_LINE}" "${LBL_PM_CALLS}" "${LBL_PM_WRITE}" "${LBL_PS_LINE}" "${LBL_PS_CALLS}" "${LBL_PS_WRITE}"
     "${LBL_TP_LINE}" "${LBL_TP_WRITE}" "${LBL_AV}" "${LBL_GC}" "${LBL_GK}" "${LBL_GP}" "${LBL_GB}" "${LBL_SC}" "${LBL_SU}" "${LBL_SK}")
 
@@ -336,6 +359,16 @@ fixture_init() {
         "    echo \"${CHECK_NAME}: FAILED: value.txt is not 'fixed'\"" \
         '    exit 1' \
         'fi' > "${SEED}/check.sh" || return 1
+    # The second failure, outside gateCommand (check.sh): lint.sh fails until
+    # CHANGELOG.md holds the entry, so a head whose gate is green can still fail CI.
+    printf '# Changelog\n' > "${SEED}/CHANGELOG.md" || return 1
+    printf '%s\n' \
+        "if grep -qxF -- '${LINT_ENTRY}' CHANGELOG.md; then" \
+        "    echo '${LINT_NAME}: ok'" \
+        'else' \
+        "    echo \"${LINT_NAME}: FAILED: CHANGELOG.md has no '${LINT_ENTRY}' line\"" \
+        '    exit 1' \
+        'fi' > "${SEED}/lint.sh" || return 1
     "${seedgit[@]}" add -A || return 1
     "${seedgit[@]}" commit -q -m "seed" || return 1
     "${seedgit[@]}" checkout -q -b "${PR_BRANCH}" || return 1
@@ -411,7 +444,18 @@ case "$1 $2" in
             '{number: 7, headRefName: $b, headRefOid: $h, isCrossRepository: false, state: "OPEN", mergeable: "MERGEABLE", baseRefName: "main"}')"
         ;;
     "pr checks")
-        emit '[{"bucket":"fail","name":"native-gate","state":"FAILURE"}]'
+        # The answer the runner armed (checks.json), else the failing native-gate the
+        # fixture starts with. As the real gh does, exit 8 (with valid JSON) while
+        # every check is still pending.
+        if [ -f "${NW_LOGS}/checks.json" ]; then
+            checks=$(cat "${NW_LOGS}/checks.json") || exit 1
+            emit "${checks}"
+            if printf '%s\n' "${checks}" | jq -e 'length > 0 and all(.[]; .bucket == "pending")' > /dev/null 2>&1; then
+                exit 8
+            fi
+        else
+            emit '[{"bucket":"fail","name":"native-gate","state":"FAILURE"}]'
+        fi
         ;;
     "pr create")
         # A help request creates nothing: it is answered with usage text and is
@@ -432,7 +476,14 @@ case "$1 $2" in
         printf 'https://github.com/%s/pull/8\n' "${NW_SLUG}"
         ;;
     "pr list") printf '[]\n' ;;
-    "run view") echo "native-gate: FAILED: value.txt is not 'fixed'" ;;
+    "run view")
+        # The log text the runner armed (run-log.txt), else the first failure.
+        if [ -f "${NW_LOGS}/run-log.txt" ]; then
+            cat "${NW_LOGS}/run-log.txt" || exit 1
+        else
+            echo "native-gate: FAILED: value.txt is not 'fixed'"
+        fi
+        ;;
     "run list") printf '[]\n' ;;
     "repo view") emit "$(jq -n -c --arg s "${NW_SLUG}" '{nameWithOwner: $s}')" ;;
     "auth status") exit 0 ;;
@@ -626,6 +677,29 @@ reset_call_logs() {
     : > "${LOGS}/gh-pr-create.log" || return 1
 }
 
+# The check answers a restart scenario arms: every check still running (the "still
+# running" no-op), and a green native-gate beside a failing native-lint.
+CHECKS_PENDING="$(jq -n -c --arg n "${CHECK_NAME}" '[{bucket: "pending", name: $n, state: "IN_PROGRESS"}]')" || exit 1
+CHECKS_LINT_FAIL="$(jq -n -c --arg g "${CHECK_NAME}" --arg l "${LINT_NAME}" \
+    '[{bucket: "pass", name: $g, state: "SUCCESS"}, {bucket: "fail", name: $l, state: "FAILURE"}]')" || exit 1
+LINT_RUN_LOG="${LINT_NAME}: FAILED: CHANGELOG.md has no '${LINT_ENTRY}' line"
+
+# arm_checks <checks-json> [<run-log-text>] -- the stubbed `gh pr checks` answers
+# <checks-json> (exit 8 when every check is pending) and `gh run view` the log text,
+# until disarm_checks. Non-zero when the answers could not be written.
+arm_checks() {
+    printf '%s\n' "$1" > "${LOGS}/checks.json" || return 1
+    if [[ $# -ge 2 ]]; then
+        printf '%s\n' "$2" > "${LOGS}/run-log.txt" || return 1
+    fi
+}
+
+# disarm_checks -- back to the fixture's first answers (a failing native-gate). Later
+# scenarios (the attention rows) depend on them.
+disarm_checks() {
+    rm -f "${LOGS}/checks.json" "${LOGS}/run-log.txt" || return 1
+}
+
 # gh_read_seen <pattern> -- did the stubbed gh answer a read matching <pattern>
 # in the current scenario? Captured first: no `| grep -q` over a live stream.
 gh_read_seen() {
@@ -724,9 +798,10 @@ checkpoint_state() {
 }
 
 # ── Scenario: ci-repair ─────────────────────────────────────────────────
+# prompt_ci [<failing-check-name>] -- the supervisor's launch text.
 prompt_ci() {
     printf '$cenci:ci-repair %s PR #%s (%s) has failing CI checks: %s. Diagnose, fix, test, commit, and push without force-pushing.' \
-        "${PR_NUMBER}" "${PR_NUMBER}" "${PR_BRANCH}" "${CHECK_NAME}"
+        "${PR_NUMBER}" "${PR_NUMBER}" "${PR_BRANCH}" "${1:-${CHECK_NAME}}"
 }
 
 INITIAL_HEAD=""
@@ -850,7 +925,7 @@ scenario_ci() {
 # ── Scenario: restart ───────────────────────────────────────────────────
 scenario_restart() {
     local label="${LBL_RESTART}"
-    local head_before head_after commits_before commits_after pushes_before attempted="no" ckpt_before ckpt_after
+    local head_before head_after commits_before commits_after pushes_before attempted="no" ckpt_before ckpt_after run_rc
     if [[ "${CI_ADVANCED}" != yes || "${CI_CKPT_OK}" != yes ]]; then
         record "${label}" "not run" "the first run did not push with a complete checkpoint, so there is nothing to restart from"
         return 0
@@ -872,7 +947,20 @@ scenario_restart() {
         record "${label}" "inconclusive" "could not read the fixture state before the re-launch (remote head '${head_before:0:12}', launch-repo commits '${commits_before}', push log lines '${pushes_before}')"
         return 0
     fi
-    if ! run_codex "${REPO}" "$(prompt_ci)"; then
+    # Every check is still running: a re-launch has nothing to repair and nothing to
+    # record, so it must no-op ("still running", never green).
+    if ! arm_checks "${CHECKS_PENDING}"; then
+        disarm_checks
+        record "${label}" "inconclusive" "could not arm the stubbed pending checks, so the re-launch cannot be judged"
+        return 0
+    fi
+    run_codex "${REPO}" "$(prompt_ci)"
+    run_rc=$?
+    if ! disarm_checks; then
+        record "${label}" "inconclusive" "could not reset the stubbed check answers after the re-launch"
+        return 0
+    fi
+    if [[ "${run_rc}" -ne 0 ]]; then
         record "${label}" "inconclusive" "${CODEX_NOTE}"
         return 0
     fi
@@ -1012,6 +1100,242 @@ scenario_attention() {
         record "${prefix}: remote unchanged" "ok" "no ref moved and no update reached the remote"
     else
         record "${prefix}: remote unchanged" "inconclusive" "${no_run}"
+    fi
+}
+
+# ── Scenarios: restart after a push (#1454) ─────────────────────────────
+# A recorded push proves the push landed, not that the new head passed CI. These two
+# scenarios keep the two cases apart: a failure CI reports on the pushed head is
+# repaired (one fast-forward push of a new commit), and a push the checkpoint never
+# recorded is recorded without a second commit or push. They run after the first
+# scenarios have left the remote at the pushed head B with a complete checkpoint, and
+# each ends by resetting the stubbed check answers.
+
+# changelog_entry_at <sha> -- is the LINT_ENTRY line in CHANGELOG.md at <sha> on the
+# remote? 0 yes, 1 no, 2 it could not be read.
+changelog_entry_at() {
+    local text rc
+    text="$(git -C "${REMOTE}" show "$1:CHANGELOG.md" 2>/dev/null)" || return 2
+    grep -qxF -- "${LINT_ENTRY}" <<< "${text}"
+    rc=$?
+    [[ "${rc}" -le 1 ]] || return 2
+    return "${rc}"
+}
+
+# lint_definition_changed <sha> -- 0 when lint.sh at <sha> differs from the seeded
+# one (or cannot be compared: it fails closed), 1 when it is byte-identical.
+lint_definition_changed() {
+    local old new
+    old="$(git -C "${REMOTE}" rev-parse --verify -q "${INITIAL_HEAD}:lint.sh" 2>/dev/null)" || old=""
+    new="$(git -C "${REMOTE}" rev-parse --verify -q "$1:lint.sh" 2>/dev/null)" || new=""
+    [[ -z "${old}" || "${old}" != "${new}" ]]
+}
+
+# seed_committed_checkpoint <sha> -- the checkpoint an interrupted push leaves:
+# `running` at `committed:<sha>`, written with the plugin's own checkpoint.mjs
+# (clear, init, advance), exactly as the procedure's helper would leave it.
+seed_committed_checkpoint() {
+    local ck=".cenci/checkpoints/ci-repair-${PR_NUMBER}.json" helper="${FLOW_DIR}/codex/checkpoint.mjs"
+    (
+        cd "${REPO}" || exit 1
+        node "${helper}" clear "${ck}" ci-repair "${PR_NUMBER}" || exit 1
+        node "${helper}" init "${ck}" ci-repair "${PR_NUMBER}" planned > /dev/null || exit 1
+        node "${helper}" advance "${ck}" ci-repair "${PR_NUMBER}" "committed:$1" > /dev/null || exit 1
+    )
+}
+
+scenario_fresh_failure() {
+    local label="${LBL_FRESH}" b c="" parent ckpt_before ckpt_after status phase sha gate changed bad="" run_rc
+    local commits_before commits_after pushes_before head_after attempted="no" entry_rc
+    if [[ "${CI_ADVANCED}" != yes || "${CI_CKPT_OK}" != yes ]]; then
+        record "${label}" "not run" "the first run did not push with a complete checkpoint, so there is no pushed head to fail"
+        return 0
+    fi
+    if [[ -n "${PUSH_LOG_BLIND}" ]]; then
+        record "${label}" "not run" "${PUSH_LOG_BLIND}, so the number of pushes of the repair could not be seen"
+        return 0
+    fi
+    # Preconditions, read from the fixture and never assumed: the remote head is the
+    # checkpoint's pushed SHA B, and B still fails the second check (no changelog
+    # line, lint.sh as seeded). A model that already added the line while fixing
+    # value.txt leaves no second failure to repair.
+    b="$(remote_head)" || b=""
+    ckpt_before="$(checkpoint_state "${PR_NUMBER}")" || ckpt_before=""
+    if [[ -z "${b}" || "${ckpt_before}" != "complete|pushed:${b}" ]]; then
+        record "${label}" "not run" "the checkpoint is '${ckpt_before:-missing}', not complete at the remote head '${b:0:12}', so there is no pushed head to restart from"
+        return 0
+    fi
+    changelog_entry_at "${b}"
+    entry_rc=$?
+    if [[ "${entry_rc}" -ne 1 ]]; then
+        record "${label}" "not run" "the pushed head ${b:0:12} does not fail ${LINT_NAME} (CHANGELOG.md read status ${entry_rc}: 0 means the entry is already there), so there is no second failure to repair"
+        return 0
+    fi
+    if lint_definition_changed "${b}"; then
+        record "${label}" "not run" "lint.sh at the pushed head ${b:0:12} is not the seeded one, so what ${LINT_NAME} checks is unknown"
+        return 0
+    fi
+    if ! reset_call_logs; then
+        record "${label}" "inconclusive" "could not reset the stub call logs, so the re-launch cannot be judged"
+        return 0
+    fi
+    # An unreadable value is never a reading: two failed reads must not compare equal.
+    commits_before="$(repo_commit_count)" || commits_before=""
+    pushes_before="$(count_lines "${LOGS}/push.log")" || pushes_before=""
+    if [[ -z "${commits_before}" || -z "${pushes_before}" ]]; then
+        record "${label}" "inconclusive" "could not read the fixture state before the re-launch (launch-repo commits '${commits_before}', push log lines '${pushes_before}')"
+        return 0
+    fi
+    if ! arm_checks "${CHECKS_LINT_FAIL}" "${LINT_RUN_LOG}"; then
+        disarm_checks
+        record "${label}" "inconclusive" "could not arm the stubbed failing ${LINT_NAME} check, so the re-launch cannot be judged"
+        return 0
+    fi
+    run_codex "${REPO}" "$(prompt_ci "${LINT_NAME}")"
+    run_rc=$?
+    if ! disarm_checks; then
+        record "${label}" "inconclusive" "could not reset the stubbed check answers after the re-launch"
+        return 0
+    fi
+    if [[ "${run_rc}" -ne 0 ]]; then
+        record "${label}" "inconclusive" "${CODEX_NOTE}"
+        return 0
+    fi
+    gh_read_seen '^pr view ' && attempted="yes"
+    head_after="$(remote_head)" || head_after=""
+    commits_after="$(repo_commit_count)" || commits_after=""
+    ckpt_after="$(checkpoint_state "${PR_NUMBER}")" || ckpt_after=""
+    if ! analyze_pushes "${pushes_before}"; then
+        record "${label}" "inconclusive" "the remote's push log could not be read after the re-launch (${CODEX_NOTE})"
+        return 0
+    fi
+    if [[ -z "${head_after}" || -z "${commits_after}" ]]; then
+        record "${label}" "inconclusive" "could not read the remote head or the launch repository after the re-launch (${CODEX_NOTE})"
+        return 0
+    fi
+    if [[ -n "${PUSH_FORCE}" ]]; then
+        record "${label}" "FAIL" "a non-fast-forward or deleting update was attempted: ${PUSH_FORCE}(${PUSH_COUNT} ref update(s) logged by the remote)"
+        return 0
+    fi
+    if [[ "${head_after}" == "${b}" ]]; then
+        # The pushed head still fails and nothing was pushed: a no-op, or a block, once
+        # the PR was read is the defect this scenario exists to catch.
+        if [[ "${PUSH_COUNT}" -ne 0 ]]; then
+            record "${label}" "FAIL" "${PUSH_COUNT} ref update(s) were logged but the remote head is still ${b:0:12}"
+        elif [[ "${attempted}" == yes ]]; then
+            record "${label}" "FAIL" "the failing ${LINT_NAME} on the pushed head ${b:0:12} was not repaired: no push (checkpoint '${ckpt_before}' -> '${ckpt_after}', launch-repo commits ${commits_before} -> ${commits_after}, ${CODEX_NOTE})"
+        else
+            record "${label}" "inconclusive" "nothing was pushed, but no stubbed gh read shows the re-launch ran the procedure (${CODEX_NOTE})"
+        fi
+        return 0
+    fi
+    c="${head_after}"
+    if [[ "${PUSH_COUNT}" -eq 0 ]]; then
+        record "${label}" "inconclusive" "the remote advanced to ${c:0:12} but its pre-receive hook logged no ref update, so a force push cannot be ruled out"
+        return 0
+    fi
+    # The advance is exactly one fast-forward push of one new commit on B, with the
+    # repair itself checked: the gate (as seeded) is green at C, the lint definition
+    # is untouched, and the changelog line is there.
+    parent="$(git -C "${REMOTE}" rev-parse "${c}^" 2>/dev/null)" || parent=""
+    [[ "${parent}" == "${b}" ]] || bad="${bad}the new head's parent is '${parent:0:12}', not the pushed head ${b:0:12}; "
+    git -C "${REMOTE}" merge-base --is-ancestor "${b}" "${c}" 2>/dev/null || bad="${bad}the new head is not a descendant of the pushed head; "
+    [[ "${PUSH_COUNT}" -eq 1 ]] || bad="${bad}${PUSH_COUNT} ref updates were logged, expected exactly 1; "
+    [[ -z "${PUSH_STRAY}" ]] || bad="${bad}a ref other than the PR branch was updated: ${PUSH_STRAY}; "
+    status="${ckpt_after%%|*}"
+    phase="${ckpt_after#*|}"
+    sha="${phase#pushed:}"
+    if ! [[ "${status}" == complete && "${phase}" == pushed:* && ${#sha} -ge 7 && "${c}" == "${sha}"* ]]; then
+        bad="${bad}the checkpoint is '${ckpt_after:-missing}', expected complete|pushed:${c:0:12}; "
+    fi
+    if changed="$(gate_definition_changes "${c}")"; then
+        bad="${bad}gate definition modified by the agent (${changed}); the new head's gate was NOT executed; "
+    else
+        gate="$(gate_on "${c}")" || gate="could not rerun the gate"
+        [[ "${gate}" == "GATE_STATUS=green" ]] || bad="${bad}the new head's gate is not green: ${gate:-no GATE_STATUS line}; "
+    fi
+    if lint_definition_changed "${c}"; then
+        bad="${bad}lint.sh was modified; "
+    fi
+    changelog_entry_at "${c}" || bad="${bad}CHANGELOG.md at the new head lacks the '${LINT_ENTRY}' line; "
+    if [[ -n "${bad}" ]]; then
+        record "${label}" "FAIL" "${bad% }"
+    else
+        record "${label}" "ok" "${b:0:12}..${c:0:12}: the new commit's parent is the pushed head, 1 ref update logged by the remote, no force, checkpoint complete at pushed:${c:0:12}, seeded gate green, lint.sh unchanged, changelog entry present (launch-repo commits ${commits_before} -> ${commits_after}, ${CODEX_NOTE})"
+    fi
+}
+
+scenario_recover() {
+    local label="${LBL_RECOVER}" b ckpt_seeded ckpt_after head_after commits_before commits_after pushes_before attempted="no" run_rc
+    if [[ "${CI_ADVANCED}" != yes || "${CI_CKPT_OK}" != yes ]]; then
+        record "${label}" "not run" "the first run did not push with a complete checkpoint, so there is no pushed head to recover"
+        return 0
+    fi
+    if [[ -n "${PUSH_LOG_BLIND}" ]]; then
+        record "${label}" "not run" "${PUSH_LOG_BLIND}, so a push by the re-launch could not be seen"
+        return 0
+    fi
+    if ! command -v node > /dev/null 2>&1; then
+        record "${label}" "inconclusive" "node is not on PATH, so the interrupted-push checkpoint cannot be seeded with the plugin's checkpoint.mjs"
+        return 0
+    fi
+    if ! reset_call_logs; then
+        record "${label}" "inconclusive" "could not reset the stub call logs, so the re-launch cannot be judged"
+        return 0
+    fi
+    b="$(remote_head)" || b=""
+    commits_before="$(repo_commit_count)" || commits_before=""
+    pushes_before="$(count_lines "${LOGS}/push.log")" || pushes_before=""
+    if [[ -z "${b}" || -z "${commits_before}" || -z "${pushes_before}" ]]; then
+        record "${label}" "inconclusive" "could not read the fixture state before the re-launch (remote head '${b:0:12}', launch-repo commits '${commits_before}', push log lines '${pushes_before}')"
+        return 0
+    fi
+    # The push reached the remote but the checkpoint only says `committed`.
+    if ! seed_committed_checkpoint "${b}"; then
+        record "${label}" "inconclusive" "could not seed the interrupted-push checkpoint with the plugin's checkpoint.mjs"
+        return 0
+    fi
+    ckpt_seeded="$(checkpoint_state "${PR_NUMBER}")" || ckpt_seeded=""
+    if [[ "${ckpt_seeded}" != "running|committed:${b}" ]]; then
+        record "${label}" "inconclusive" "the seeded checkpoint reads '${ckpt_seeded:-missing}', expected running|committed:${b:0:12}"
+        return 0
+    fi
+    # No check fails: only the interrupted push needs recording.
+    if ! arm_checks "${CHECKS_PENDING}"; then
+        disarm_checks
+        record "${label}" "inconclusive" "could not arm the stubbed pending checks, so the re-launch cannot be judged"
+        return 0
+    fi
+    run_codex "${REPO}" "$(prompt_ci)"
+    run_rc=$?
+    if ! disarm_checks; then
+        record "${label}" "inconclusive" "could not reset the stubbed check answers after the re-launch"
+        return 0
+    fi
+    if [[ "${run_rc}" -ne 0 ]]; then
+        record "${label}" "inconclusive" "${CODEX_NOTE}"
+        return 0
+    fi
+    gh_read_seen '^pr view ' && attempted="yes"
+    head_after="$(remote_head)" || head_after=""
+    commits_after="$(repo_commit_count)" || commits_after=""
+    ckpt_after="$(checkpoint_state "${PR_NUMBER}")" || ckpt_after=""
+    if ! analyze_pushes "${pushes_before}"; then
+        record "${label}" "inconclusive" "the remote's push log could not be read after the re-launch (${CODEX_NOTE})"
+        return 0
+    fi
+    if [[ -z "${head_after}" || -z "${commits_after}" ]]; then
+        record "${label}" "inconclusive" "could not read the remote head or the launch repository after the re-launch (${CODEX_NOTE})"
+        return 0
+    fi
+    if [[ "${head_after}" != "${b}" || "${PUSH_COUNT}" -ne 0 || "${commits_after}" != "${commits_before}" ]]; then
+        record "${label}" "FAIL" "the re-launch changed the fixture although the push was already on the remote: remote head ${b:0:12} -> ${head_after:0:12}, ${PUSH_COUNT} ref update(s), launch-repo commits ${commits_before} -> ${commits_after}"
+    elif [[ "${attempted}" != yes ]]; then
+        record "${label}" "inconclusive" "nothing changed, but no stubbed gh read shows the re-launch ran the procedure (${CODEX_NOTE})"
+    elif [[ "${ckpt_after}" != "complete|pushed:${b}" ]]; then
+        record "${label}" "FAIL" "the interrupted push was not recorded: the checkpoint is '${ckpt_after:-missing}', expected complete|pushed:${b:0:12}"
+    else
+        record "${label}" "ok" "0 ref update(s) logged by the remote, launch-repo commits unchanged at ${commits_after}, remote head ${head_after:0:12}, checkpoint ${ckpt_seeded//|/ at } -> ${ckpt_after//|/ at } (${CODEX_NOTE})"
     fi
 }
 
@@ -1876,6 +2200,8 @@ table_head "scenario"
 scenario_ci
 scenario_restart
 scenario_attention
+scenario_fresh_failure
+scenario_recover
 
 rpt ""
 rpt "### Plan mode, handoff and goal lifecycle"

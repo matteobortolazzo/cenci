@@ -1141,6 +1141,218 @@ for with_ckpt in yes no; do
   canary_refused_persist "maintain-docs-ckpt-${with_ckpt}" maintain docs "$with_ckpt"
 done
 
+# ===========================================================================
+# L1 (#1454) -- the ci-repair workflow: SHA/class phase grammar, no --gate, and the single
+# ci-repair-only restart move complete|pushed:<sha> -> advance diagnosed. Every case is its
+# own labeled assertion; rejects also prove the file bytes are unchanged (cmp).
+# ===========================================================================
+SHA_B="0123456789abcdef0123456789abcdef01234567"
+SHA_C="fedcba9876543210fedcba9876543210fedcba98"
+SHA_64="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+[[ "${#SHA_B}" -eq 40 && "${#SHA_C}" -eq 40 && "${#SHA_64}" -eq 64 ]] || fail "L1 fixture: SHA literals have the wrong length"
+CI_CLASSES="ambiguous infra flaky external push-rejected"
+
+# l1_repo -- a fresh repo; CIK is the absolute ci-repair checkpoint path under its real root
+l1_repo() {
+  new_repo
+  L1_ROOT="$(real_of "$REPO")" || { echo "runtime.test.sh: real_of failed." >&2; exit 2; }
+  CIK="$L1_ROOT/.cenci/checkpoints/ci-repair-7.json"
+}
+# l1_state <label> <phase> <status> -- stdout echoes it and the file records it
+l1_state() {
+  expect_stdout_jq "$1 echoes phase" '.workflow == "ci-repair" and .phase == "'"$2"'" and .status == "'"$3"'"'
+  expect_jq "$1 file records phase" '.phase == "'"$2"'" and .status == "'"$3"'" and .lastCompletedGate == null' "$CIK"
+}
+# l1_ok <label> <phase> <status> <args...> -- the CLI exits 0 and records <phase>|<status>
+l1_ok() {
+  local label="$1" phase="$2" status="$3"; shift 3
+  run "$REPO" "$@"; expect_rc "$label" 0
+  l1_state "$label" "$phase" "$status"
+}
+
+# --- accept: init and every phase form (AC38) ---
+l1_repo
+run "$REPO" init "$CIK" ci-repair 7 planned; expect_rc "L1 init ci-repair planned" 0
+expect_stdout_jq "L1 init echoes the ci-repair workflow" '.workflow == "ci-repair" and .target == "7" and .phase == "planned" and .status == "planned"'
+l1_ok "L1 advance diagnosed" diagnosed running advance "$CIK" ci-repair 7 diagnosed
+l1_ok "L1 advance reproduced" reproduced running advance "$CIK" ci-repair 7 reproduced
+l1_ok "L1 advance gate-green" gate-green running advance "$CIK" ci-repair 7 gate-green
+l1_ok "L1 advance committed:<sha40>" "committed:$SHA_B" running advance "$CIK" ci-repair 7 "committed:$SHA_B"
+l1_ok "L1 complete pushed:<sha40>" "pushed:$SHA_B" complete complete "$CIK" ci-repair 7 "pushed:$SHA_B"
+
+l1_repo
+run "$REPO" init "$CIK" ci-repair 7 planned; expect_rc "L1 block setup init" 0
+l1_ok "L1 block gate-red:<sha40>" "gate-red:$SHA_B" needs-input block "$CIK" ci-repair 7 "gate-red:$SHA_B"
+for class in $CI_CLASSES; do
+  l1_ok "L1 block unrepaired:$class:<sha40>" "unrepaired:$class:$SHA_B" needs-input block "$CIK" ci-repair 7 "unrepaired:$class:$SHA_B"
+done
+l1_ok "L1 advance diagnosed after a needs-input block" diagnosed running advance "$CIK" ci-repair 7 diagnosed
+
+l1_repo
+run "$REPO" init "$CIK" ci-repair 7 planned; expect_rc "L1 64-hex setup init" 0
+l1_ok "L1 advance committed:<sha64>" "committed:$SHA_64" running advance "$CIK" ci-repair 7 "committed:$SHA_64"
+l1_ok "L1 complete pushed:<sha64>" "pushed:$SHA_64" complete complete "$CIK" ci-repair 7 "pushed:$SHA_64"
+l1_repo
+run "$REPO" init "$CIK" ci-repair 7 planned; expect_rc "L1 64-hex block setup init" 0
+l1_ok "L1 block gate-red:<sha64>" "gate-red:$SHA_64" needs-input block "$CIK" ci-repair 7 "gate-red:$SHA_64"
+l1_ok "L1 block unrepaired:infra:<sha64>" "unrepaired:infra:$SHA_64" needs-input block "$CIK" ci-repair 7 "unrepaired:infra:$SHA_64"
+
+# --- reject: malformed phases (AC39); one case per label, file bytes unchanged ---
+l1_repo
+run "$REPO" init "$CIK" ci-repair 7 planned; expect_rc "L1 reject setup init" 0
+run "$REPO" advance "$CIK" ci-repair 7 diagnosed; expect_rc "L1 reject setup advance" 0
+SHA_UPPER="$(printf '%s' "$SHA_B" | tr 'a-f' 'A-F')" || fail "L1 fixture: tr failed"
+declare -a BAD_SHAS=(
+  "non-hex|${SHA_B:0:39}g"
+  "39-char|${SHA_B:0:39}"
+  "41-char|${SHA_B}0"
+  "7-char|${SHA_B:0:7}"
+  "63-char|${SHA_64:0:63}"
+  "65-char|${SHA_64}0"
+  "uppercase|${SHA_UPPER}"
+  "empty|"
+)
+PHRASE="is not a phase of workflow ci-repair"
+for entry in "${BAD_SHAS[@]}"; do
+  kind="${entry%%|*}"; bad="${entry#*|}"
+  reject "L1 reject committed with $kind suffix" "$CIK" "$PHRASE" advance "$CIK" ci-repair 7 "committed:$bad"
+  reject "L1 reject pushed with $kind suffix" "$CIK" "$PHRASE" complete "$CIK" ci-repair 7 "pushed:$bad"
+  reject "L1 reject gate-red with $kind suffix" "$CIK" "$PHRASE" block "$CIK" ci-repair 7 "gate-red:$bad"
+  reject "L1 reject unrepaired with $kind suffix" "$CIK" "$PHRASE" block "$CIK" ci-repair 7 "unrepaired:ambiguous:$bad"
+done
+reject "L1 reject suffix on diagnosed" "$CIK" "$PHRASE" advance "$CIK" ci-repair 7 "diagnosed:$SHA_B"
+reject "L1 reject suffix on reproduced" "$CIK" "$PHRASE" advance "$CIK" ci-repair 7 "reproduced:$SHA_B"
+reject "L1 reject suffix on gate-green" "$CIK" "$PHRASE" advance "$CIK" ci-repair 7 "gate-green:$SHA_B"
+reject "L1 reject suffix on planned" "$CIK" "$PHRASE" advance "$CIK" ci-repair 7 "planned:$SHA_B"
+reject "L1 reject bare committed" "$CIK" "$PHRASE" advance "$CIK" ci-repair 7 committed
+reject "L1 reject bare pushed" "$CIK" "$PHRASE" complete "$CIK" ci-repair 7 pushed
+reject "L1 reject bare gate-red" "$CIK" "$PHRASE" block "$CIK" ci-repair 7 gate-red
+reject "L1 reject bare unrepaired" "$CIK" "$PHRASE" block "$CIK" ci-repair 7 unrepaired
+reject "L1 reject empty phase argument" "$CIK" "$PHRASE" advance "$CIK" ci-repair 7 ""
+reject "L1 reject unrepaired with a class outside the enum" "$CIK" "$PHRASE" block "$CIK" ci-repair 7 "unrepaired:bogus:$SHA_B"
+# single-line format: the phase problem adds no ';' of its own, so the only separator is the remedy's
+semicolons="$(grep -o '; ' "$T/stderr" | wc -l | tr -d '[:space:]')"
+[[ "$semicolons" == "1" ]] || fail "L1 phase rejection must contain exactly one '; ' separator (got $semicolons: $(cat "$T/stderr"))"
+reject "L1 reject unrepaired with an uppercase class" "$CIK" "$PHRASE" block "$CIK" ci-repair 7 "unrepaired:AMBIGUOUS:$SHA_B"
+reject "L1 reject unrepaired with a sha and no class" "$CIK" "$PHRASE" block "$CIK" ci-repair 7 "unrepaired:$SHA_B"
+reject "L1 reject unrepaired with a class and no sha" "$CIK" "$PHRASE" block "$CIK" ci-repair 7 "unrepaired:ambiguous"
+reject "L1 reject unrepaired with a class and an empty sha" "$CIK" "$PHRASE" block "$CIK" ci-repair 7 "unrepaired:ambiguous:"
+reject "L1 reject a phase of another workflow" "$CIK" "$PHRASE" advance "$CIK" ci-repair 7 baseline
+reject "L1 reject init with a non-planned phase" "$CIK" "init only accepts the planned phase" init "$CIK" ci-repair 7 "pushed:$SHA_B"
+# the same grammar guards a hand-edited file, and ci-repair has no gate to record
+mutate "$CIK" '.phase = "pushed"'
+reject "L1 file with a bare pushed phase" "$CIK" "invalid field phase" get "$CIK"
+mutate "$CIK" '.phase = "pushed:'"${SHA_B:0:39}"'"'
+reject "L1 file with a 39-char pushed suffix" "$CIK" "invalid field phase" get "$CIK"
+mutate "$CIK" '.phase = "unrepaired:bogus:'"$SHA_B"'"'
+reject "L1 file with an unknown unrepaired class" "$CIK" "invalid field phase" get "$CIK"
+mutate "$CIK" '.phase = "diagnosed" | .lastCompletedGate = "diagnosed"'
+reject "L1 file with a recorded gate" "$CIK" "invalid field lastCompletedGate" get "$CIK"
+
+# --- reject: --gate is a usage error for ci-repair ---
+l1_repo
+run "$REPO" init "$CIK" ci-repair 7 planned; expect_rc "L1 gate setup init" 0
+reject "L1 --gate on advance" "$CIK" "--gate is not valid for ci-repair" advance "$CIK" ci-repair 7 reproduced --gate diagnosed
+reject "L1 --gate on block" "$CIK" "--gate is not valid for ci-repair" block "$CIK" ci-repair 7 "gate-red:$SHA_B" --gate diagnosed
+reject "L1 --gate on complete" "$CIK" "--gate is not valid for ci-repair" complete "$CIK" ci-repair 7 "pushed:$SHA_B" --gate gate-green
+reject "L1 --gate planned on advance" "$CIK" "--gate is not valid for ci-repair" advance "$CIK" ci-repair 7 diagnosed --gate planned
+l1_repo
+reject "L1 --gate on init creates nothing" "$CIK" "--gate is not valid for ci-repair" init "$CIK" ci-repair 7 planned --gate diagnosed
+
+# --- restart: complete|pushed:<sha> -> advance diagnosed (AC40) and edge 62 (second cycle) ---
+l1_repo
+run "$REPO" init "$CIK" ci-repair 7 planned --worktree .worktrees/ci-7; expect_rc "L1 restart setup init" 0
+run "$REPO" advance "$CIK" ci-repair 7 "committed:$SHA_B"; expect_rc "L1 restart setup advance" 0
+run "$REPO" complete "$CIK" ci-repair 7 "pushed:$SHA_B"; expect_rc "L1 restart setup complete" 0
+reject "L1 complete|pushed: advance reproduced is terminal" "$CIK" "checkpoint is complete (terminal)" advance "$CIK" ci-repair 7 reproduced
+reject "L1 complete|pushed: advance gate-green is terminal" "$CIK" "checkpoint is complete (terminal)" advance "$CIK" ci-repair 7 gate-green
+reject "L1 complete|pushed: advance committed is terminal" "$CIK" "checkpoint is complete (terminal)" advance "$CIK" ci-repair 7 "committed:$SHA_C"
+reject "L1 complete|pushed: advance pushed is terminal" "$CIK" "checkpoint is complete (terminal)" advance "$CIK" ci-repair 7 "pushed:$SHA_C"
+reject "L1 complete|pushed: block diagnosed is terminal" "$CIK" "checkpoint is complete (terminal)" block "$CIK" ci-repair 7 diagnosed
+reject "L1 complete|pushed: block gate-red is terminal" "$CIK" "checkpoint is complete (terminal)" block "$CIK" ci-repair 7 "gate-red:$SHA_B"
+reject "L1 complete|pushed: block unrepaired is terminal" "$CIK" "checkpoint is complete (terminal)" block "$CIK" ci-repair 7 "unrepaired:flaky:$SHA_B"
+reject "L1 complete|pushed: complete pushed is terminal" "$CIK" "checkpoint is complete (terminal)" complete "$CIK" ci-repair 7 "pushed:$SHA_B"
+reject "L1 complete|pushed: complete diagnosed is terminal" "$CIK" "checkpoint is complete (terminal)" complete "$CIK" ci-repair 7 diagnosed
+l1_ok "L1 restart: advance diagnosed from complete|pushed" diagnosed running advance "$CIK" ci-repair 7 diagnosed
+expect_jq "L1 restart keeps the file and its other fields" '.worktree == ".worktrees/ci-7" and .schemaVersion == 2 and .target == "7" and (keys | length) == 12' "$CIK"
+run "$REPO" get "$CIK" ci-repair 7; expect_rc "L1 get after restart" 0
+l1_state "L1 get after restart" diagnosed running
+l1_ok "L1 restart cycle: advance reproduced" reproduced running advance "$CIK" ci-repair 7 reproduced
+l1_ok "L1 restart cycle: advance gate-green" gate-green running advance "$CIK" ci-repair 7 gate-green
+l1_ok "L1 restart cycle: advance committed:<C>" "committed:$SHA_C" running advance "$CIK" ci-repair 7 "committed:$SHA_C"
+l1_ok "L1 restart cycle: complete pushed:<C>" "pushed:$SHA_C" complete complete "$CIK" ci-repair 7 "pushed:$SHA_C"
+reject "L1 second cycle: advance reproduced is terminal" "$CIK" "checkpoint is complete (terminal)" advance "$CIK" ci-repair 7 reproduced
+reject "L1 second cycle: block diagnosed is terminal" "$CIK" "checkpoint is complete (terminal)" block "$CIK" ci-repair 7 diagnosed
+reject "L1 second cycle: complete is terminal" "$CIK" "checkpoint is complete (terminal)" complete "$CIK" ci-repair 7 "pushed:$SHA_C"
+l1_ok "L1 edge 62: restart again from complete|pushed:<C>" diagnosed running advance "$CIK" ci-repair 7 diagnosed
+
+# the restart move never applies to another complete phase
+for phase in diagnosed reproduced gate-green "committed:$SHA_B" "gate-red:$SHA_B" "unrepaired:ambiguous:$SHA_B"; do
+  l1_repo
+  run "$REPO" init "$CIK" ci-repair 7 planned; expect_rc "L1 terminal setup init ($phase)" 0
+  run "$REPO" complete "$CIK" ci-repair 7 "$phase"; expect_rc "L1 terminal setup complete ($phase)" 0
+  reject "L1 restart refused from complete|$phase" "$CIK" "checkpoint is complete (terminal)" advance "$CIK" ci-repair 7 diagnosed
+done
+
+# edge 60 (helper side): a failed restart write leaves the complete|pushed checkpoint untouched
+l1_repo
+run "$REPO" init "$CIK" ci-repair 7 planned; expect_rc "L1 edge 60 setup init" 0
+run "$REPO" complete "$CIK" ci-repair 7 "pushed:$SHA_B"; expect_rc "L1 edge 60 setup complete" 0
+cp "$CIK" "$T/l1-complete.json" || fail "L1 edge 60: snapshot failed"
+run_fault "$REPO" advance "$CIK" ci-repair 7 diagnosed
+expect_rc "L1 edge 60 restart write failure exits 1" 1
+expect_no_stdout "L1 edge 60 restart write failure"
+expect_stderr "L1 edge 60 restart write failure names the problem" "write failed (EIO)"
+cmp -s "$T/l1-complete.json" "$CIK" || fail "L1 edge 60: a failed restart advance must leave complete|pushed byte-identical"
+
+# --- other workflows gain no restart and no SHA phases (AC41) ---
+new_repo
+run "$REPO" init "$REL" implement 42 planned; expect_rc "L1 implement setup init" 0
+reject "L1 implement rejects a pushed:<sha> phase" "$CK" "is not a phase of workflow implement" advance "$REL" implement 42 "pushed:$SHA_B"
+reject "L1 implement rejects a bare diagnosed phase" "$CK" "is not a phase of workflow implement" advance "$REL" implement 42 diagnosed
+run "$REPO" complete "$REL" implement 42 pr; expect_rc "L1 implement setup complete" 0
+reject "L1 implement has no restart move" "$CK" "checkpoint is complete (terminal)" advance "$REL" implement 42 tests
+run "$REPO" init "$REL" implement 42; expect_rc "L1 implement init after complete is still a no-op" 0
+
+# --- verify keeps refusing a plan-less or complete ci-repair checkpoint ---
+l1_repo
+run "$REPO" init "$CIK" ci-repair 7 planned; expect_rc "L1 verify setup init" 0
+reject "L1 verify refuses a plan-less ci-repair checkpoint" "$CIK" "checkpoint records no approved plan" verify "$CIK" ci-repair 7
+run "$REPO" complete "$CIK" ci-repair 7 "pushed:$SHA_B"; expect_rc "L1 verify setup complete" 0
+reject "L1 verify refuses a complete ci-repair checkpoint" "$CIK" "checkpoint is complete (terminal)" verify "$CIK" ci-repair 7
+
+# --- legacy v1 ci-repair files (edge 63) ---
+l1_write_v1() {
+  mkdir -p "$L1_ROOT/.cenci/checkpoints" || fail "L1: mkdir failed"
+  cat > "$CIK" <<EOF
+{"schemaVersion":1,"workflow":"ci-repair","target":"7","phase":"pushed:$SHA_B","status":"complete","planPath":null,"worktree":null,"lastCompletedGate":null,"agentFallbacks":[],"updatedAt":"2026-01-01T00:00:00.000Z"}
+EOF
+}
+l1_repo
+l1_write_v1
+run "$REPO" get "$CIK"; expect_rc "L1 get v1 ci-repair" 0
+expect_stdout_jq "L1 get marks the v1 ci-repair file legacy" '.legacy == true and .schemaVersion == 1 and .phase == "pushed:'"$SHA_B"'"'
+reject "L1 v1 ci-repair: advance gives the legacy error" "$CIK" "legacy v1 checkpoint; run init to upgrade it" advance "$CIK" ci-repair 7 diagnosed
+reject "L1 v1 ci-repair: block gives the legacy error" "$CIK" "legacy v1 checkpoint; run init to upgrade it" block "$CIK" ci-repair 7 "gate-red:$SHA_B"
+reject "L1 v1 ci-repair: complete gives the legacy error" "$CIK" "legacy v1 checkpoint; run init to upgrade it" complete "$CIK" ci-repair 7 "pushed:$SHA_B"
+run "$REPO" init "$CIK" ci-repair 7; expect_rc "L1 init upgrades an identity-valid v1 ci-repair file" 0
+expect_jq "L1 v1 ci-repair upgraded in place" '.schemaVersion == 2 and .workflow == "ci-repair" and .phase == "pushed:'"$SHA_B"'" and .status == "complete" and .lastCompletedGate == null and (keys | length) == 12' "$CIK"
+l1_ok "L1 restart works on the upgraded file" diagnosed running advance "$CIK" ci-repair 7 diagnosed
+for bad in "pushed" "pushed:${SHA_B:0:39}" "unrepaired:bogus:$SHA_B" "diagnosed:$SHA_B"; do
+  l1_repo
+  l1_write_v1; mutate "$CIK" '.phase = "'"$bad"'"'
+  reject "L1 v1 ci-repair with phase [$bad] cannot be upgraded" "$CIK" "cannot be upgraded" init "$CIK" ci-repair 7
+done
+l1_repo
+l1_write_v1; mutate "$CIK" '.lastCompletedGate = "diagnosed"'
+reject "L1 v1 ci-repair with a recorded gate cannot be upgraded" "$CIK" "cannot be upgraded" init "$CIK" ci-repair 7
+# the literal target-less emulator shape is not identity-valid
+l1_repo
+l1_write_v1; mutate "$CIK" 'del(.target)'
+reject "L1 target-less v1 ci-repair: init" "$CIK" "invalid field target" init "$CIK" ci-repair 7
+reject "L1 target-less v1 ci-repair: get" "$CIK" "invalid field target" get "$CIK"
+reject "L1 target-less v1 ci-repair: advance" "$CIK" "invalid field target" advance "$CIK" ci-repair 7 diagnosed
+
 echo "runtime.test.sh: failures=${failures}"
 [[ "$failures" -eq 0 ]] && echo "runtime.test.sh: passed"
 [[ "$failures" -eq 0 ]]

@@ -24,7 +24,15 @@ const WORKFLOW_PHASES = {
   refine: ["planned", "apply"],
   review: ["planned", "review", "post"],
   sync: ["planned", "sync"],
+  // ci-repair lists phase kinds: committed, pushed, gate-red and unrepaired carry a SHA (and
+  // a class), so phaseKind() validates the full phase string and maps it to its kind here.
+  "ci-repair": ["planned", "diagnosed", "reproduced", "gate-green", "committed", "pushed", "gate-red", "unrepaired"],
 };
+const CI_SHA = "(?:[0-9a-f]{40}|[0-9a-f]{64})";
+const CI_REPAIR_SHA_PHASE_RE = new RegExp(`^(committed|pushed|gate-red):${CI_SHA}$`);
+const CI_REPAIR_UNREPAIRED_RE = new RegExp(`^unrepaired:(?:ambiguous|infra|flaky|external|push-rejected):${CI_SHA}$`);
+const CI_REPAIR_PLAIN_PHASES = ["planned", "diagnosed", "reproduced", "gate-green"];
+const CI_REPAIR_PHASE_FORMS = "planned, diagnosed, reproduced, gate-green, committed:<sha>, pushed:<sha>, gate-red:<sha>, unrepaired:<class>:<sha>";
 const STATUSES = ["planned", "running", "needs-input", "complete"];
 const GOALS = ["created", "skipped-active", "unavailable"];
 const COMMANDS = ["init", "advance", "block", "complete", "get", "clear", "verify", "digest"];
@@ -58,6 +66,19 @@ const printable = (text) => String(text).replace(/[\u0000-\u001f\u007f]/g, "?");
 const fail = (exitCode, label, problem, remedy) =>
   new Failure(exitCode, `checkpoint: ${printable(label)}: ${problem}${remedy ? `; ${remedy}` : ""}`);
 const usageError = (problem) => new Failure(2, `checkpoint: usage: ${problem}; ${USAGE}`);
+
+// The kind of a phase string, or null when it is not a valid phase of the workflow. Identity for
+// every workflow except ci-repair, whose SHA- and class-carrying phases are matched strictly.
+function phaseKind(workflow, phase) {
+  if (typeof phase !== "string") return null;
+  if (workflow !== "ci-repair") return WORKFLOW_PHASES[workflow].includes(phase) ? phase : null;
+  if (CI_REPAIR_PLAIN_PHASES.includes(phase)) return phase;
+  const suffixed = CI_REPAIR_SHA_PHASE_RE.exec(phase);
+  if (suffixed !== null) return suffixed[1];
+  return CI_REPAIR_UNREPAIRED_RE.test(phase) ? "unrepaired" : null;
+}
+const isPhase = (workflow, phase) => phaseKind(workflow, phase) !== null;
+const phaseForms = (workflow) => (workflow === "ci-repair" ? CI_REPAIR_PHASE_FORMS : WORKFLOW_PHASES[workflow].join(", "));
 
 const isObject = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
 const hasOwn = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
@@ -148,6 +169,7 @@ function validateMetadata(command, flags, workflow) {
     meta.worktree = flags.worktree;
   }
   if (hasOwn(flags, "gate")) {
+    if (workflow === "ci-repair") throw usageError("--gate is not valid for ci-repair (it records no gate)");
     if (!workflow || !WORKFLOW_PHASES[workflow].includes(flags.gate)) {
       throw usageError("invalid --gate (expected a phase of the workflow)");
     }
@@ -176,11 +198,10 @@ function identityFrom(positionals, command) {
   if (!TARGET_RE.test(target) || target.includes("..")) {
     throw usageError("invalid target (expected [A-Za-z0-9][A-Za-z0-9._-]{0,127}, no '..')");
   }
-  const phases = WORKFLOW_PHASES[workflow];
   if (phase !== undefined) {
     if (command === "get" || command === "clear" || command === "verify") throw usageError(`${command} takes no <phase>`);
-    if (!phases.includes(phase)) {
-      throw usageError(`"${printable(phase)}" is not a phase of workflow ${workflow} (expected one of ${phases.join(", ")})`);
+    if (!isPhase(workflow, phase)) {
+      throw usageError(`"${printable(phase)}" is not a phase of workflow ${workflow} (expected one of ${phaseForms(workflow)})`);
     }
     if (command === "init" && phase !== "planned") throw usageError("init only accepts the planned phase");
   } else if (command === "advance" || command === "block") {
@@ -393,12 +414,13 @@ function validateV2(state) {
   const phases = hasOwn(WORKFLOW_PHASES, state.workflow) ? WORKFLOW_PHASES[state.workflow] : null;
   if (typeof state.workflow !== "string" || phases === null) return "invalid field workflow";
   if (typeof state.target !== "string" || !TARGET_RE.test(state.target) || state.target.includes("..")) return "invalid field target";
-  if (!phases.includes(state.phase)) return "invalid field phase";
+  if (!isPhase(state.workflow, state.phase)) return "invalid field phase";
   if (!STATUSES.includes(state.status)) return "invalid field status";
   if (state.planPath !== null && !validRelativePath(state.planPath)) return "invalid field planPath";
   if (state.planDigest !== null && (typeof state.planDigest !== "string" || !DIGEST_RE.test(state.planDigest) || state.planPath === null)) return "invalid field planDigest";
   if (state.worktree !== null && !validRelativePath(state.worktree)) return "invalid field worktree";
-  if (state.lastCompletedGate !== null && (!phases.includes(state.lastCompletedGate) || phases.indexOf(state.lastCompletedGate) > phases.indexOf(state.phase))) {
+  // ci-repair records no gate, so its lastCompletedGate is always null.
+  if (state.lastCompletedGate !== null && (state.workflow === "ci-repair" || !phases.includes(state.lastCompletedGate) || phases.indexOf(state.lastCompletedGate) > phases.indexOf(state.phase))) {
     return "invalid field lastCompletedGate";
   }
   if (!Array.isArray(state.agentFallbacks)) return "invalid field agentFallbacks";
@@ -499,7 +521,8 @@ function writeAtomic(loc, state) {
 const nowIso = () => new Date().toISOString();
 
 function phaseIndex(workflow, phase) {
-  return phase === null ? -1 : WORKFLOW_PHASES[workflow].indexOf(phase);
+  const kind = phase === null ? null : phaseKind(workflow, phase);
+  return kind === null ? -1 : WORKFLOW_PHASES[workflow].indexOf(kind);
 }
 
 function mergeFallbacks(current, additions) {
@@ -554,10 +577,10 @@ function upgradeV1(v1, meta, loc) {
   const cannot = (problem) => fail(2, loc.label, `legacy v1 checkpoint cannot be upgraded (${problem})`, "remove it with: checkpoint.mjs clear <path> <workflow> <target>, then init again");
   const phases = hasOwn(WORKFLOW_PHASES, v1.workflow) ? WORKFLOW_PHASES[v1.workflow] : null;
   if (phases === null) throw cannot("workflow is not in the phase table");
-  if (!phases.includes(v1.phase)) throw cannot("phase is not in the phase table");
+  if (!isPhase(v1.workflow, v1.phase)) throw cannot("phase is not in the phase table");
   if (!STATUSES.includes(v1.status)) throw cannot("status is not recognized");
   const gate = v1.lastCompletedGate ?? null;
-  if (gate !== null && !phases.includes(gate)) throw cannot("last completed gate is not in the phase table");
+  if (gate !== null && (v1.workflow === "ci-repair" || !phases.includes(gate))) throw cannot("last completed gate is not in the phase table");
   const relativize = (value, name) => {
     if (value === null || value === undefined) return null;
     if (typeof value !== "string") throw cannot(`${name} is not a path`);
@@ -586,8 +609,14 @@ function upgradeV1(v1, meta, loc) {
   return upgraded;
 }
 
+// The one move out of a terminal checkpoint: a ci-repair run that pushed (complete|pushed:<sha>)
+// starts a fresh diagnosis when CI fails on the pushed head. The helper cannot see live state,
+// so the procedure allows the move only after it verified a fail bucket on an agreed head.
+const isCiRepairRestart = (state, command, phaseArg) =>
+  state.workflow === "ci-repair" && command === "advance" && phaseArg === "diagnosed" && phaseKind(state.workflow, state.phase) === "pushed";
+
 function transition(state, command, phaseArg, meta, loc) {
-  if (state.status === "complete") {
+  if (state.status === "complete" && !isCiRepairRestart(state, command, phaseArg)) {
     throw fail(2, loc.label, "checkpoint is complete (terminal)", "only clear resets it: checkpoint.mjs clear <path> <workflow> <target>");
   }
   const phase = phaseArg ?? state.phase;

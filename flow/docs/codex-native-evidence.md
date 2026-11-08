@@ -222,6 +222,17 @@ one JSON line, `babysit stop` fails like a host nack, `not stopped: <reason>`, a
 fails like the host-only refusal a sandbox gets, `not reset: ...`). The remote's `pre-receive` hook logs every ref update, so a force push or a stray
 branch shows up even when the remote rejects it.
 
+The restart scenarios (#1454) need two more things from that fixture. The stubbed `gh` answers
+`gh pr checks` from a check file the runner arms per scenario (`pending` only, it exits 8 with valid
+JSON as the real one does; an unarmed `gh` keeps the failing `native-gate`) and `gh run view` from a
+log file the runner arms with it. And the fixture seeds a second failure outside `gateCommand`:
+`lint.sh` (check `native-lint`) fails until `CHANGELOG.md` holds the line `- native fixture entry`,
+so a repair of a head whose gate is already green can differ from the first repair. After the first
+repair the runner arms `pending` checks for the duplicate invocation, a failing `native-lint` for the
+failed pushed head, and `pending` checks again for the interrupted push, whose `committed:<sha>`
+checkpoint it writes with the plugin's own `checkpoint.mjs` (`clear`, `init`, `advance`), so that
+row is `inconclusive` without `node`. The check answers are reset after each scenario.
+
 ### How to produce a run
 
 ```bash
@@ -238,10 +249,18 @@ CENCI_CODEX_NATIVE=1 CENCI_CODEX_NATIVE_OUT=./native-workflows.md bash flow/code
   exit 1) and the sanitization (`<HOME>`, `<USER>`, `<HOST>`, `<FIXTURE>`, `<UUID>`, `<TOKEN>`,
   commit SHAs kept) are the same as for the hook runner above. The runner refuses to print a
   report in which a home path, user name or host name survived sanitization.
-- `RESULT: OK` needs the five positive rows to be `ok` (fast-forward advance, gate green on the
-  pushed head, checkpoint `complete` with the pushed SHA, restart adds no commit, all three attention
-  options printed) and no failed row. A run that fails nothing but leaves one of them
-  unproven (for example a `codex` that reads the PR and gives up) is `RESULT: INCONCLUSIVE`.
+- `RESULT: OK` needs the seven positive rows to be `ok` (fast-forward advance, gate green on the
+  pushed head, checkpoint `complete` with the pushed SHA, restart adds no commit, the interrupted
+  push is recorded with no new commit and no push, the failed pushed head is repaired with one
+  fast-forward push of a new commit, all three attention options printed) and no failed row. A run
+  that fails nothing but leaves one of them unproven (for example a `codex` that reads the PR and
+  gives up) is `RESULT: INCONCLUSIVE`.
+- The failed-pushed-head row is `not run` unless the remote head is the checkpoint's pushed SHA
+  and that head still fails `native-lint` (a model that added the changelog line while repairing the
+  first failure leaves no second failure). It is `ok` only when the new commit's parent is the
+  pushed head, exactly one ref update was logged, none was a force, the checkpoint is `complete`
+  with the new SHA, the seeded gate is green at the new head, `lint.sh` is unchanged and the
+  changelog line is present. A no-op, or a block, after the PR was read is a `FAIL`.
 - A row is judged from the fixture's own state (remote refs and ancestry, the remote's ref-update
   log, the checkpoint file, the gate rerun on a fresh clone of the pushed head, the `gh` and
   `cenci` call logs), never from the model's narration. The headless `babysit-attention` rows are
@@ -280,6 +299,8 @@ CENCI_CODEX_NATIVE=1 CENCI_CODEX_NATIVE_OUT=./native-workflows.md bash flow/code
 | `ci-repair`: checkpoint `complete` with `pushed:<sha>` | pending native run |
 | `ci-repair`: no `gh` writes, no new remote branches, no `cenci` calls | pending native run |
 | Restart re-run: no new commit, no push, checkpoint unchanged | pending native run |
+| Restart (interrupted push): checkpoint completed with the pushed SHA, no new commit, no push | pending native run |
+| Restart (failed pushed head): one fast-forward push of a new commit on the pushed head, checkpoint complete with it | pending native run |
 | Headless `babysit-attention`: three options printed, retry option offered | pending native run |
 | Headless `babysit-attention`: summary names the PR, head SHA, failing check and attempt count | pending native run |
 | Headless `babysit-attention`: no `babysit stop` or `reset` call (a `babysit status` read is allowed), no `gh` writes, remote unchanged | pending native run |
@@ -328,7 +349,7 @@ CENCI_CODEX_NATIVE=1 CENCI_CODEX_NATIVE_OUT=./native-workflows.md bash flow/code
 
 ### Judging rules
 
-- `RESULT: OK` needs the five `ci-repair`/`babysit-attention` positive rows and every row of
+- `RESULT: OK` needs the seven `ci-repair`/`babysit-attention` positive rows and every row of
   this section to be `ok`, and no row failed. A run that fails nothing but leaves one unproven
   is `RESULT: INCONCLUSIVE`.
 - **Startup-control probe**: `codex --help`, `codex exec --help` and `codex features list` are
