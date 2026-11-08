@@ -137,8 +137,12 @@ Run this from a git repository — only that repository root is mounted at
 `/workspace`. cenci-watch needs no separate binary install: the first supported
 client session provisions it and starts the shared host daemon.
 
-Codex reads the repository's canonical `AGENTS.md` guidance directly. Generated
-`CLAUDE.md` files are client adapters, not the shared source of truth.
+Claude Code and Codex both read the repository's canonical `AGENTS.md` guidance natively,
+and `/cenci:configure` generates no `CLAUDE.md`. A `CLAUDE.md` is an optional fallback
+adapter you opt in to, and an existing `CLAUDE.md` or `CLAUDE.local.md` at or above the
+working directory makes Claude Code skip native `AGENTS.md` loading. See
+[`flow/docs/claude-instruction-files.md`](../flow/docs/claude-instruction-files.md) for the
+version floor, that suppression trap and the fallback.
 
 If Codex reports updated plugin hooks as pending, review them with `/hooks`: pending hooks are
 inactive protection, and every mutating Codex workflow (implement, address-review, refactor,

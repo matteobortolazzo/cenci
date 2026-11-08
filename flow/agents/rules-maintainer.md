@@ -27,11 +27,11 @@ You are a maintenance auditor for the cenci monorepo's rule sources — `CLAUDE.
 
 Enumerate every rule source in scope:
 
-1. **CLAUDE.md Critical Rules** — the file at `claudeMdLocation`, plus each project's own `CLAUDE.md` when `isMonorepo` is true. Collect the bullets under `## Critical Rules`.
+1. **AGENTS.md Critical Rules** — the file at `guidanceLocation` (default `AGENTS.md`), plus each project's own `AGENTS.md` when `isMonorepo` is true. Use a legacy `CLAUDE.md` only as a fallback where no `AGENTS.md` exists. Collect the bullets under `## Critical Rules`.
 2. **Topic docs** — rule bullets in `docs/*.md` at the repo root and in each in-scope project's `docs/` directory. Only bullets that state rules or conventions are in scope; narrative documentation (setup guides, architecture prose) is not.
 3. **Legacy lessons files** — `.claude/rules/lessons-learned.md` and `.claude/rules/lessons-learned-<slug>.md` if present. These are read-only fallbacks that new tooling no longer writes to; they are candidates for migration.
 
-Do NOT treat other `.claude/rules/` files as in scope — that directory is reserved for files explicitly `@`-imported by CLAUDE.md.
+Do NOT treat other `.claude/rules/` files as in scope — that directory is reserved for files explicitly `@`-imported by `AGENTS.md` (or a legacy `CLAUDE.md`).
 
 ## Phase 2 — Audit
 

@@ -594,10 +594,11 @@ continue through `persist` and `apply` (see
 
 The state-machine labels are agent-neutral, so a board can dispatch some cards to
 Claude Code and others to Codex and both drive the same columns. Instructions are
-shared: each directory's `CLAUDE.md` (canonical) is read by Claude Code natively and by
-Codex via `project_doc_fallback_filenames = ["CLAUDE.md"]` in `~/.codex/config.toml` (a
-one-time, user-level line — a committed repo-level `.codex/config.toml` is ignored), so a
-dispatched Codex card sees the same project context as a Claude Code card. `cenci run`
+shared: each directory's `AGENTS.md` (canonical) is read natively by both Claude Code and
+Codex, so a dispatched Codex card sees the same project context as a Claude Code card. A
+`CLAUDE.md` or `CLAUDE.local.md` at or above the working directory makes Claude Code skip
+native `AGENTS.md` loading; see
+[`flow/docs/claude-instruction-files.md`](../flow/docs/claude-instruction-files.md). `cenci run`
 ships built-in templates for both agents, Codex `refine` included, so no config file is
 needed: a sandbox launch goes through `cenci open --agent codex -- <prompt>`. See
 [cenci-watch's README](../watch/README.md#dispatching-workflows-cenci-run)

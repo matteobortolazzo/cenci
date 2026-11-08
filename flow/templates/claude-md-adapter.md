@@ -1,3 +1,4 @@
+<!-- cenci:agents-md-fallback -->
 @AGENTS.md
 
 <!-- cenci:claude-only:start -->
