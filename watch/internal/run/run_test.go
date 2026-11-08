@@ -1045,6 +1045,22 @@ func TestWindowName(t *testing.T) {
 	}
 }
 
+// #1455: babysit's numeric-first ci-repair argument names the window by the
+// leading PR number alone. Numbers later in the prose (a closed issue, a check
+// name with digits, a `#2` suffix) and shell-hostile branch characters never
+// change the name.
+func TestWindowNameCIRepairUsesLeadingPRNumber(t *testing.T) {
+	for _, arg := range []string{
+		"42 PR #42 (fix/closes-7) has failing CI checks: py3.11-shard-2. Diagnose, fix, test, commit, and push without force-pushing.",
+		"42 PR #42 (7-fix) has failing CI checks: lint, test (3.11), e2e #2. Diagnose, fix, test, commit, and push without force-pushing.",
+		"42 PR #42 (it's $HOME `id` (x) a b) has failing CI checks: lint. Diagnose, fix, test, commit, and push without force-pushing.",
+	} {
+		if got := windowName(arg, "ci-repair", ""); got != "42-ci-repair" {
+			t.Errorf("windowName(%q) = %q, want 42-ci-repair", arg, got)
+		}
+	}
+}
+
 // TestRunImplementExplicitSandboxFlagResolvesSandbox pins that an explicit
 // --sandbox flag (SandboxSet && Sandbox) resolves the sandbox launcher, the
 // same as the default (#98).

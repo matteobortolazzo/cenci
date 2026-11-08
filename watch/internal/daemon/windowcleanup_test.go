@@ -872,6 +872,22 @@ func TestWindowCleanup_LeadingZeroWindowNameIsNotReadAsAnotherTicket(t *testing.
 	fx.requireReads(readCall{Repo: repo, Nums: []int{782}})
 }
 
+// #1455: babysit's ci-repair window is named `<PR>-ci-repair`, so it is a
+// cleanup candidate read (and closed) as ticket 42. The old `pr-42-...` slug
+// carried no numeric identity and is never read.
+func TestWindowCleanup_CIRepairWindowIsACandidateForItsPRNumber(t *testing.T) {
+	fx := newWCFixture(t)
+	dir, repo := fx.addRepo("alpha", "")
+	ciRepair := fx.addNamedWindow("42-ci-repair", dir)
+	fx.addNamedWindow("pr-42-has-failing-ci-checks", dir)
+	fx.reader.script(repo, 42, ticketstate.Finished)
+
+	fx.runPass()
+
+	fx.requireClosed(ciRepair)
+	fx.requireReads(readCall{Repo: repo, Nums: []int{42}})
+}
+
 // ---------------------------------------------------------------------------
 // Loop scheduling
 // ---------------------------------------------------------------------------

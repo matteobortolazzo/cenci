@@ -54,26 +54,37 @@ func execTmux(args ...string) (stdout, stderr string, err error) {
 	return outBuf.String(), errBuf.String(), runErr
 }
 
-var mergeRepairActive = defaultMergeRepairActive
+// mergeRepairActive and ciRepairActive report whether a live `<PR>-merge-repair`
+// or `<PR>-ci-repair` worker exists in the recorded session (#1455). Both are
+// test seams over the one defaultWorkerActive probe.
+var (
+	mergeRepairActive = func(session, pr string) (bool, error) {
+		return defaultWorkerActive(session, pr, "merge-repair")
+	}
+	ciRepairActive = func(session, pr string) (bool, error) {
+		return defaultWorkerActive(session, pr, "ci-repair")
+	}
+)
 
-// defaultMergeRepairActive observes every pane in the recorded session. A
-// retained dead pane is not a worker; a live pane in the exact repair window is.
-// Unreadable or malformed output cannot safely authorize another writer.
-func defaultMergeRepairActive(session, pr string) (bool, error) {
+// defaultWorkerActive observes every pane in the recorded session. A retained
+// dead pane is not a worker; a live pane in the exact `<pr>-<workflow>` window
+// is. Unreadable or malformed output cannot safely authorize another writer, so
+// it is an error, a separate return from "no live worker".
+func defaultWorkerActive(session, pr, workflow string) (bool, error) {
 	stdout, stderr, err := execTmux("list-panes", "-s", "-t", "="+session, "-F", "#{window_name}\t#{pane_dead}")
 	if err != nil {
-		return false, fmt.Errorf("observe merge repair in tmux session %q: %s: %w", session, strings.TrimSpace(stderr), err)
+		return false, fmt.Errorf("observe %s in tmux session %q: %s: %w", workflow, session, strings.TrimSpace(stderr), err)
 	}
 	if stdout == "" {
-		return false, fmt.Errorf("observe merge repair in tmux session %q: empty pane inventory", session)
+		return false, fmt.Errorf("observe %s in tmux session %q: empty pane inventory", workflow, session)
 	}
 	active := false
 	for _, line := range strings.Split(strings.TrimSuffix(stdout, "\n"), "\n") {
 		fields := strings.Split(line, "\t")
 		if len(fields) != 2 || fields[0] == "" || (fields[1] != "0" && fields[1] != "1") {
-			return false, fmt.Errorf("observe merge repair in tmux session %q: malformed pane inventory", session)
+			return false, fmt.Errorf("observe %s in tmux session %q: malformed pane inventory", workflow, session)
 		}
-		if fields[0] == pr+"-merge-repair" && fields[1] == "0" {
+		if fields[0] == pr+"-"+workflow && fields[1] == "0" {
 			active = true
 		}
 	}

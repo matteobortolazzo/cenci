@@ -40,14 +40,17 @@ func installArgvRecorder(t *testing.T) (logPath string) {
 }
 
 func TestBabysitCodexLaunchResolvesToSandboxAgentArgv(t *testing.T) {
-	const ciRepairPrompt = "PR #103 (main) has failing CI checks: build. Diagnose, fix, test, commit, and push without force-pushing."
+	// #1455: the ci-repair argument leads with the PR number (the window's
+	// numeric identity) and its finite template routes through `codex exec`.
+	const ciRepairPrompt = "103 PR #103 (main) has failing CI checks: build. Diagnose, fix, test, commit, and push without force-pushing."
 	for _, tc := range []struct {
-		name, workflow, ticket, prompt string
-		seed                           func(h *chainHarness)
+		name, workflow, ticket string
+		passthrough            []string
+		seed                   func(h *chainHarness)
 	}{
-		{"address-review", "address-review", "103", "$cenci:address-review 103",
+		{"address-review", "address-review", "103", []string{"$cenci:address-review 103"},
 			func(h *chainHarness) { h.seedReview(103, "reviewer", "CHANGES_REQUESTED", "2026-01-01T00:00:00Z") }},
-		{"ci-repair", "ci-repair", ciRepairPrompt, "$cenci:ci-repair " + ciRepairPrompt,
+		{"ci-repair", "ci-repair", ciRepairPrompt, []string{"exec", "$cenci:ci-repair " + ciRepairPrompt},
 			func(h *chainHarness) { h.seedChecks(103, ghCheck{Bucket: "fail", Name: "build", State: "FAILURE"}) }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -93,7 +96,7 @@ func TestBabysitCodexLaunchResolvesToSandboxAgentArgv(t *testing.T) {
 				t.Errorf("dry-run consulted the controller: %v", ctrl.hasSessionCalls)
 			}
 			got := exectest.ShellArgv(t, exectest.DryRunCommand(t, out.String()), "cenci")
-			if want := []string{"cenci", "open", "--agent", "codex", "--", tc.prompt}; !slices.Equal(got, want) {
+			if want := append([]string{"cenci", "open", "--agent", "codex", "--"}, tc.passthrough...); !slices.Equal(got, want) {
 				t.Errorf("resolved argv = %q, want %q", got, want)
 			}
 		})

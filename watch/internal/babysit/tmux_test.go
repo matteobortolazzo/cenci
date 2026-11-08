@@ -170,14 +170,7 @@ func TestDefaultMergeRepairActive(t *testing.T) {
 		{"empty output cannot prove absent", "", false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			installFakeTmux(t, `
-[ "$1" = list-panes ] && [ "$2" = -s ] && [ "$3" = -t ] && [ "$4" = =work ] || exit 1
-[ "$5" = -F ] && [ "$6" = "$FAKE_FORMAT" ] || exit 1
-printf '%s' "$FAKE_PANES"
-`)
-			t.Setenv("FAKE_PANES", tc.output)
-			t.Setenv("FAKE_FORMAT", "#{window_name}\t#{pane_dead}")
-			active, err := defaultMergeRepairActive("work", "42")
+			active, err := workerActiveOver(t, tc.output, "merge-repair")
 			if active != tc.wantActive || (err != nil) != tc.wantErr {
 				t.Fatalf("active=%v err=%v, want active=%v err=%v", active, err, tc.wantActive, tc.wantErr)
 			}
@@ -185,16 +178,30 @@ printf '%s' "$FAKE_PANES"
 	}
 }
 
+// workerActiveOver runs defaultWorkerActive("work", "42", workflow) against a
+// fake tmux that answers the exact session-wide pane listing with output.
+func workerActiveOver(t *testing.T, output, workflow string) (bool, error) {
+	t.Helper()
+	installFakeTmux(t, `
+[ "$1" = list-panes ] && [ "$2" = -s ] && [ "$3" = -t ] && [ "$4" = =work ] || exit 1
+[ "$5" = -F ] && [ "$6" = "$FAKE_FORMAT" ] || exit 1
+printf '%s' "$FAKE_PANES"
+`)
+	t.Setenv("FAKE_PANES", output)
+	t.Setenv("FAKE_FORMAT", "#{window_name}\t#{pane_dead}")
+	return defaultWorkerActive("work", "42", workflow)
+}
+
 func TestDefaultMergeRepairActiveProbeFailure(t *testing.T) {
 	installFakeTmux(t, "printf 'server unavailable' >&2\nexit 1\n")
-	if active, err := defaultMergeRepairActive("work", "42"); active || err == nil || !strings.Contains(err.Error(), "server unavailable") {
+	if active, err := defaultWorkerActive("work", "42", "merge-repair"); active || err == nil || !strings.Contains(err.Error(), "server unavailable") {
 		t.Fatalf("probe failure active=%v err=%v", active, err)
 	}
 }
 
 func TestDefaultMergeRepairActiveMissingBinaryIsProbeFailure(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
-	if active, err := defaultMergeRepairActive("work", "42"); active || err == nil {
+	if active, err := defaultWorkerActive("work", "42", "merge-repair"); active || err == nil {
 		t.Fatalf("missing binary active=%v err=%v", active, err)
 	}
 }
@@ -204,7 +211,35 @@ func TestDefaultMergeRepairActiveTruncationCannotProveWorkerAbsent(t *testing.T)
 	// ends on a complete record. Reject it before interpreting any rows.
 	output := strings.Repeat("other\t0\n", ghOutputCap/8+1)
 	installFakeTmux(t, "printf '%s' '"+output+"'\n")
-	if active, err := defaultMergeRepairActive("work", "42"); active || err == nil || !strings.Contains(err.Error(), "bounded cap") {
+	if active, err := defaultWorkerActive("work", "42", "merge-repair"); active || err == nil || !strings.Contains(err.Error(), "bounded cap") {
 		t.Fatalf("truncated inventory active=%v err=%v", active, err)
+	}
+}
+
+// #1455: the ci-repair liveness probe matches only the exact live
+// `<PR>-ci-repair` window, and fails closed on an inventory it cannot read.
+func TestDefaultWorkerActiveCIRepair(t *testing.T) {
+	for _, tc := range []struct {
+		name, output string
+		wantActive   bool
+		wantErr      bool
+	}{
+		{"live exact worker", "42-ci-repair\t0\n", true, false},
+		{"retained dead worker", "42-ci-repair\t1\n", false, false},
+		{"prefix sibling ignored", "42-ci-repair-old\t0\n", false, false},
+		{"another PR ignored", "142-ci-repair\t0\n", false, false},
+		{"merge repair is not a ci-repair worker", "42-merge-repair\t0\n", false, false},
+		{"malformed pane status", "42-ci-repair\tunknown\n", false, true},
+		{"empty output cannot prove absent", "", false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			active, err := workerActiveOver(t, tc.output, "ci-repair")
+			if active != tc.wantActive || (err != nil) != tc.wantErr {
+				t.Fatalf("active=%v err=%v, want active=%v err=%v", active, err, tc.wantActive, tc.wantErr)
+			}
+			if err != nil && !strings.Contains(err.Error(), "ci-repair") {
+				t.Errorf("probe error %q does not name the ci-repair workflow", err)
+			}
+		})
 	}
 }

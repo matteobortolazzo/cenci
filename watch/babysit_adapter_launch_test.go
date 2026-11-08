@@ -112,10 +112,12 @@ func newAdapterLaunchWorld(t *testing.T, pluginList string, installAdapter bool)
 
 	// Fake tmux: one NUL-separated record per call, "<argc>\0<arg>\0...", so
 	// argument boundaries survive spaces and `$`. display-message prints 0, the
-	// answer to the launcher's `#{session_grouped}` probe; everything else exits 0.
+	// answer to the launcher's `#{session_grouped}` probe; list-panes reports one
+	// unrelated live window, so babysit's fail-closed ci-repair liveness probe
+	// (#1455) sees no live worker; everything else exits 0.
 	exectest.WriteExecutable(t, filepath.Join(binDir, "tmux"), "#!/bin/sh\n"+
 		`printf '%s\000' "$#" "$@" >> `+exectest.ShellQuote(w.tmuxLog)+"\n"+
-		`case "$1" in display-message) echo 0 ;; esac`+"\nexit 0\n")
+		`case "$1" in display-message) echo 0 ;; list-panes) printf '1-implement\t0\n' ;; esac`+"\nexit 0\n")
 
 	// Fake gh: a PR with a failing check at head "abc", no comments or reviews;
 	// anything else fails (and is logged, so an unexpected call is visible).
@@ -182,10 +184,16 @@ func newAdapterLaunchWorld(t *testing.T, pluginList string, installAdapter bool)
 	return w
 }
 
-// statePath mirrors babysit's statePath (sha256(repo)[:6] hex + "-<pr>.json").
+// statePath is this world's babysitStatePath.
 func (w *adapterLaunchWorld) statePath() string {
-	sum := sha256.Sum256([]byte(adapterLaunchRepo))
-	return filepath.Join(w.stateDir, hex.EncodeToString(sum[:6])+"-"+adapterLaunchPR+".json")
+	return babysitStatePath(w.stateDir, adapterLaunchRepo, adapterLaunchPR)
+}
+
+// babysitStatePath mirrors babysit's statePath (sha256(repo)[:6] hex +
+// "-<pr>.json" under stateDir).
+func babysitStatePath(stateDir, repo, pr string) string {
+	sum := sha256.Sum256([]byte(repo))
+	return filepath.Join(stateDir, hex.EncodeToString(sum[:6])+"-"+pr+".json")
 }
 
 // seedState writes a supervisor state with non-trivial values in the five AC 2
@@ -340,9 +348,11 @@ func TestBabysitAdapterLaunch_InstalledPluginSpawnsCiRepairWindow(t *testing.T) 
 	if !strings.HasPrefix(shellCommand, "cd ") || !strings.Contains(shellCommand, w.workDir) {
 		t.Errorf("window command %q does not start in the recorded --dir %q", shellCommand, w.workDir)
 	}
+	// #1455: the finite host template is `codex exec`, and the argument leads
+	// with the PR number.
 	argv := exectest.ShellArgv(t, shellCommand, "codex")
-	if len(argv) != 2 || argv[0] != "codex" || !strings.HasPrefix(argv[1], "$cenci:ci-repair ") {
-		t.Errorf("window argv = %q, want [codex, \"$cenci:ci-repair ...\"]", argv)
+	if len(argv) != 3 || argv[0] != "codex" || argv[1] != "exec" || !strings.HasPrefix(argv[2], "$cenci:ci-repair "+adapterLaunchPR+" PR #"+adapterLaunchPR+" (") {
+		t.Errorf("window argv = %q, want [codex, exec, \"$cenci:ci-repair 42 PR #42 (...\"]", argv)
 	}
 
 	// Fake codex logs one "$*" line per call.

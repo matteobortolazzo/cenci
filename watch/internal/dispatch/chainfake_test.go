@@ -646,11 +646,13 @@ const chainFakeTmuxSession = "chain-test-session"
 // installChainGH. Needed by any chain test whose tick reaches a launch()
 // call: #975 gates every launch on a bounded `tmux has-session -t =<name>`
 // probe of the state's recorded LaunchSession, which would otherwise shell
-// out to a real (and here, absent) tmux server.
+// out to a real (and here, absent) tmux server. `list-panes` answers one live,
+// unrelated window: babysit's ci-repair liveness probe (#1455) fails closed on
+// an empty pane inventory, and no `<PR>-ci-repair` worker is live here.
 func installFakeTmux(t *testing.T) {
 	t.Helper()
 	dir := t.TempDir()
-	script := "#!/bin/sh\ncase \"$1\" in\n  has-session) exit 0 ;;\n  display-message) echo " + chainFakeTmuxSession + " ;;\n  *) exit 0 ;;\nesac\n"
+	script := "#!/bin/sh\ncase \"$1\" in\n  has-session) exit 0 ;;\n  display-message) echo " + chainFakeTmuxSession + " ;;\n  list-panes) printf '1-implement\\t0\\n' ;;\n  *) exit 0 ;;\nesac\n"
 	path := filepath.Join(dir, "tmux")
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatal(err)

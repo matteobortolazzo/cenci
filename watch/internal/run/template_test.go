@@ -158,10 +158,11 @@ func TestCodexNativeWorkflowTemplates(t *testing.T) {
 		{"maintain", "$cenci:maintain 42"},
 		{"babysit", "$cenci:babysit 42"},
 		{"babysit-attention", "$cenci:babysit-attention 42"},
-		{"ci-repair", "$cenci:ci-repair 42"},
 	}
-	if len(workflows) != len(wantCodexWorkflows) {
-		t.Fatalf("table covers %d workflows, want all %d built-in Codex workflows", len(workflows), len(wantCodexWorkflows))
+	// ci-repair is the one finite (`codex exec`) Codex workflow (#1455); its
+	// expectation lives in TestBuiltinCIRepairTemplatesAreFinite.
+	if len(workflows)+1 != len(wantCodexWorkflows) {
+		t.Fatalf("table covers %d workflows, want every built-in Codex workflow except ci-repair (%d)", len(workflows), len(wantCodexWorkflows)-1)
 	}
 	sandboxCommand := []string{"cenci", "open", "--agent", "codex", "--"}
 	modelCommand := []string{"cenci", "open", "--model", "m", "--agent", "codex", "--"}
@@ -192,6 +193,121 @@ func TestCodexNativeWorkflowTemplates(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// #1455 AC3: the built-in ci-repair templates are one-shot -- Claude print mode
+// and `codex exec` -- on host and through `cenci open`, so a finished repair
+// never leaves an interactive prompt behind. An injected model keeps the
+// selected client's model: before the passthrough marker on `cenci open` (the
+// launcher places it inside the container), and after the leading `exec` on a
+// host Codex launch.
+func TestBuiltinCIRepairTemplatesAreFinite(t *testing.T) {
+	const ticket = "42 PR #42 (feat/x) has failing CI checks: lint."
+	claudePrompt := "/cenci:ci-repair " + ticket
+	codexPrompt := "$cenci:ci-repair " + ticket
+	for _, tc := range []struct {
+		name, agent, model string
+		sandbox            bool
+		want               []string
+	}{
+		{"claude/host", "claude", "", false, []string{"claude", "--print", "--", claudePrompt}},
+		{"claude/sandbox", "claude", "", true, []string{"cenci", "open", "--", "--print", claudePrompt}},
+		{"codex/host", "codex", "", false, []string{"codex", "exec", codexPrompt}},
+		{"codex/sandbox", "codex", "", true, []string{"cenci", "open", "--agent", "codex", "--", "exec", codexPrompt}},
+		{"claude/host/model", "claude", "m", false, []string{"claude", "--model", "m", "--print", "--", claudePrompt}},
+		{"claude/sandbox/model", "claude", "m", true, []string{"cenci", "open", "--model", "m", "--", "--print", claudePrompt}},
+		{"codex/host/model", "codex", "m", false, []string{"codex", "exec", "--model", "m", codexPrompt}},
+		{"codex/sandbox/model", "codex", "m", true, []string{"cenci", "open", "--model", "m", "--agent", "codex", "--", "exec", codexPrompt}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			argv, err := builtinConfig().BuildCommand(tc.agent, "ci-repair", ticket, tc.model, tc.sandbox)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !equalArgs(argv, tc.want) {
+				t.Errorf("argv = %q, want %q", argv, tc.want)
+			}
+		})
+	}
+}
+
+// #1455 AC10: every built-in workflow other than ci-repair resolves to exactly
+// the bytes it did before the finite ci-repair templates, on host and in the
+// sandbox, for both agents. Spelled out literally so a modifier leaking into a
+// sibling template fails by name.
+func TestBuiltinNonCIRepairTemplatesUnchanged(t *testing.T) {
+	type pin struct {
+		agent, workflow string
+		host, sandbox   []string
+	}
+	var pins []pin
+	for _, wf := range []string{"implement", "refine", "address-review", "babysit", "babysit-attention"} {
+		pins = append(pins,
+			pin{"claude", wf, []string{"claude", "--", "/cenci:" + wf + " 42"}, []string{"cenci", "open", "--", "/cenci:" + wf + " 42"}},
+			pin{"codex", wf, []string{"codex", "$cenci:" + wf + " 42"}, []string{"cenci", "open", "--agent", "codex", "--", "$cenci:" + wf + " 42"}},
+		)
+	}
+	pins = append(pins, pin{"claude", "merge-repair",
+		[]string{"claude", "--print", "--", "/cenci:merge-repair 42"},
+		[]string{"cenci", "open", "--", "--print", "/cenci:merge-repair 42"}})
+	for _, p := range pins {
+		for _, sandbox := range []bool{false, true} {
+			t.Run(p.agent+"/"+p.workflow+"/sandbox="+strconv.FormatBool(sandbox), func(t *testing.T) {
+				argv, err := builtinConfig().BuildCommand(p.agent, p.workflow, "42", "", sandbox)
+				if err != nil {
+					t.Fatal(err)
+				}
+				want := p.host
+				if sandbox {
+					want = p.sandbox
+				}
+				if !equalArgs(argv, want) {
+					t.Errorf("argv = %q, want unchanged %q", argv, want)
+				}
+			})
+		}
+	}
+	// A model on a non-exec Codex template stays root-level, as before.
+	argv, err := builtinConfig().BuildCommand("codex", "implement", "42", "m", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"codex", "--model", "m", "$cenci:implement 42"}; !equalArgs(argv, want) {
+		t.Errorf("codex implement with model = %q, want %q", argv, want)
+	}
+	if ac := builtinConfig().Agents["opencode"]; len(ac.Workflows) != 0 {
+		t.Errorf("opencode ships workflows %v, want none", ac.Workflows)
+	}
+	if _, disabled := DisabledAgent("opencode"); !disabled {
+		t.Error(`DisabledAgent("opencode") reports enabled, want disabled`)
+	}
+}
+
+// #1455 edge case: a user ci-repair template is used verbatim, never rewritten
+// to print/exec mode, even when it is interactive.
+func TestCustomCIRepairArgsAreUsedVerbatim(t *testing.T) {
+	path := writeConfigFile(t, `{"agents": {
+	  "claude": {"workflows": {"ci-repair": {"args": ["--", "/cenci:ci-repair {ticket}"]}}},
+	  "codex": {"model": "m", "workflows": {"ci-repair": {"args": ["$cenci:ci-repair {ticket}"]}}}
+	}}`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	argv, err := cfg.BuildCommand("claude", "ci-repair", "42", "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"claude", "--", "/cenci:ci-repair 42"}; !equalArgs(argv, want) {
+		t.Errorf("custom claude ci-repair = %q, want %q", argv, want)
+	}
+	argv, err = cfg.BuildCommand("codex", "ci-repair", "42", "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"codex", "--model", "m", "$cenci:ci-repair 42"}; !equalArgs(argv, want) {
+		t.Errorf("custom codex ci-repair = %q, want %q", argv, want)
 	}
 }
 

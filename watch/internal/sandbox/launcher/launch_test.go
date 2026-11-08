@@ -1414,6 +1414,60 @@ func TestAddDirAttachArgv_PositionalPromptFollowsTheLastTokenSoItIsNotReadAsADir
 	}
 }
 
+// #1455 AC4: a Codex passthrough that starts with `exec` (the finite ci-repair
+// template) gets the sandbox permission flags and the model after `exec`, the
+// position `codex exec` accepts; the flag set itself is unchanged. Any
+// --add-dir tokens are agent flags too, so they follow `exec` as well.
+func TestCodexExecPassthroughPlacesAgentFlagsAfterExec(t *testing.T) {
+	const bin = "/opt/cenci-agent/current/node_modules/.bin/codex"
+	const prompt = "$cenci:ci-repair 42 PR #42 (b) has failing CI checks: lint."
+	opts := Options{Agent: "codex", AgentArgs: []string{"exec", prompt}}
+
+	argv := buildAgentExecArgv("c", "codex", agentCmdArgsFor(launchCtx{Agent: "codex", Model: "gpt-x"}), nil, opts)
+	want := []string{"exec", "-it", "c", bin, "exec",
+		"--dangerously-bypass-approvals-and-sandbox", "--dangerously-bypass-hook-trust", "--model", "gpt-x", prompt}
+	if !slices.Equal(argv, want) {
+		t.Errorf("codex exec argv = %q, want %q", argv, want)
+	}
+
+	argv = buildAgentExecArgv("c", "codex", agentCmdArgsFor(launchCtx{Agent: "codex", Model: "gpt-x", AddDirs: addDirTestMounts}), nil, opts)
+	want = []string{"exec", "-it", "c", bin, "exec",
+		"--dangerously-bypass-approvals-and-sandbox", "--dangerously-bypass-hook-trust", "--model", "gpt-x",
+		"--add-dir=/repos/alpha", "--add-dir=/repos/beta-repo", prompt}
+	if !slices.Equal(argv, want) {
+		t.Errorf("codex exec argv with --add-dir = %q, want %q", argv, want)
+	}
+}
+
+// #1455: every other attach keeps the agent flags right after the binary: an
+// interactive Codex prompt, and Claude even when its passthrough is print mode
+// (the finite Claude ci-repair template) or happens to start with `exec`.
+func TestNonCodexExecPassthroughKeepsAgentFlagsAfterBinary(t *testing.T) {
+	const prompt = "/cenci:ci-repair 42 PR #42 (b) has failing CI checks: lint."
+	for _, tc := range []struct {
+		name, agent string
+		args, want  []string
+	}{
+		{"codex/interactive", "codex", []string{"$cenci:implement 42"}, []string{"exec", "-it", "c",
+			"/opt/cenci-agent/current/node_modules/.bin/codex",
+			"--dangerously-bypass-approvals-and-sandbox", "--dangerously-bypass-hook-trust", "--model", "m", "$cenci:implement 42"}},
+		{"claude/print", "claude", []string{"--print", prompt}, []string{"exec", "-it", "-e", "DISABLE_UPDATES=1", "c",
+			"/opt/cenci-agent/current/node_modules/.bin/claude",
+			"--dangerously-skip-permissions", "--model", "m", "--print", prompt}},
+		{"claude/exec-word", "claude", []string{"exec", "x"}, []string{"exec", "-it", "-e", "DISABLE_UPDATES=1", "c",
+			"/opt/cenci-agent/current/node_modules/.bin/claude",
+			"--dangerously-skip-permissions", "--model", "m", "exec", "x"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			argv := buildAgentExecArgv("c", tc.agent, agentCmdArgsFor(launchCtx{Agent: tc.agent, Model: "m"}), nil,
+				Options{Agent: tc.agent, AgentArgs: tc.args})
+			if !slices.Equal(argv, tc.want) {
+				t.Errorf("argv = %q, want %q", argv, tc.want)
+			}
+		})
+	}
+}
+
 func TestAddDirAttachArgv_ShellForwardsNoToken(t *testing.T) {
 	ctx := launchCtx{Agent: "claude", Model: "sonnet", AddDirs: addDirTestMounts}
 

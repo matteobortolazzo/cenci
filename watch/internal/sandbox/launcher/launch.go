@@ -610,7 +610,8 @@ func (e *Engine) Launch(opts Options) error {
 }
 
 // buildAgentCmdArgs builds the per-agent CLI flags Launch/DryRun append after
-// the resolved agent binary. The container is the security boundary: the
+// the resolved agent binary (after a leading `exec` passthrough token for
+// Codex, see buildAgentExecArgv). The container is the security boundary: the
 // agent runs with full permissions inside it (rejected if root — we run as
 // uid 1000 'dev'). Codex also bypasses hook trust: trust lives in the user
 // config layer and provisioning never seeds it, so without the flag the
@@ -1786,8 +1787,11 @@ func (e *Engine) runAgent(name, agent string, agentCmdArgs, execEnvArgs []string
 // runtime binary): the per-exec env, the DISABLE_UPDATES=1 native-update
 // suppression (claude, non-shell only), the container name, and either
 // /bin/bash (--shell) or the resolved agent binary with its per-agent flags
-// and the trailing "--" forwarded args. Pure argv assembly — no printing, no
-// side effects — so both runAgent and DryRun can call it and stay
+// and the trailing "--" forwarded args. A Codex passthrough that starts with
+// `exec` (the finite ci-repair template, #1455) gets the agent flags after that
+// `exec` -- `codex exec <flags> <prompt>`, the position `codex exec` accepts --
+// rather than before it; the flag set is unchanged. Pure argv assembly — no
+// printing, no side effects — so both runAgent and DryRun can call it and stay
 // byte-identical to each other.
 func buildAgentExecArgv(name, agent string, agentCmdArgs, execEnvArgs []string, opts Options) []string {
 	argv := []string{"exec", "-it"}
@@ -1797,13 +1801,16 @@ func buildAgentExecArgv(name, agent string, agentCmdArgs, execEnvArgs []string, 
 	}
 	argv = append(argv, name)
 	if opts.Shell {
-		argv = append(argv, "/bin/bash")
-	} else {
-		argv = append(argv, "/opt/cenci-agent/current/node_modules/.bin/"+agent)
-		argv = append(argv, agentCmdArgs...)
-		argv = append(argv, opts.AgentArgs...)
+		return append(argv, "/bin/bash")
 	}
-	return argv
+	argv = append(argv, "/opt/cenci-agent/current/node_modules/.bin/"+agent)
+	passthrough := opts.AgentArgs
+	if agent == "codex" && len(passthrough) > 0 && passthrough[0] == "exec" {
+		argv = append(argv, "exec")
+		passthrough = passthrough[1:]
+	}
+	argv = append(argv, agentCmdArgs...)
+	return append(argv, passthrough...)
 }
 
 // trimTrailingNewline drops a single trailing newline (command output).

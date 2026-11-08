@@ -361,6 +361,13 @@ Codex adapter check does not (see its entry):
   the tmux server environment, so it can pass where the session's own Codex configuration
   would not.
 
+`cenci run` exit statuses: `0` launched (a failure to record `@cenci-repo-dir` on the
+new window only prints a warning); `1` refused or failed before the window was
+spawned; `2` usage error; `3` the window was spawned but a post-spawn step (setting
+`automatic-rename off`) failed, so an agent session is starting even though `run`
+reports an error. `cenci babysit` counts a `3` from a `ci-repair` launch as a
+dispatched attempt instead of launching a second worker.
+
 Unattended paths — `cenci dispatch` and `cenci babysit` arming — are stricter than
 `run`: they accept only built-in (agent, workflow) pairs from the table above, and a
 `config.json` entry never counts. A custom agent, or one defined only in the config
@@ -386,6 +393,27 @@ overriding only a built-in Codex workflow's `args` in `config.json` changes host
 launches (`--no-sandbox`) only; sandbox launches keep the built-in `sandboxArgs`. To
 change a sandbox launch, set `sandboxArgs` too. A workflow you define yourself with no
 `sandboxArgs` runs as `cenci open <its args>`, with no injected `--agent`.
+
+`ci-repair` is the one-shot exception among the built-in workflows, so a finished
+repair never leaves an interactive prompt behind:
+
+- Claude host: `claude --print -- "/cenci:ci-repair {ticket}"` (`args: ["--print", "--",
+  "<prompt>"]`); sandbox: `cenci open -- --print "/cenci:ci-repair {ticket}"`
+  (`sandboxArgs: ["--", "--print", "<prompt>"]`).
+- Codex host: `codex exec "$cenci:ci-repair {ticket}"` (`args: ["exec", "<prompt>"]`);
+  sandbox: `cenci open --agent codex -- exec "$cenci:ci-repair {ticket}"`
+  (`sandboxArgs: ["--agent", "codex", "--", "exec", "<prompt>"]`).
+
+When a Codex passthrough starts with `exec`, the sandbox launcher places its agent flags
+(`--dangerously-bypass-approvals-and-sandbox`, `--dangerously-bypass-hook-trust`,
+`--model <m>`, any `--add-dir=`) after `exec`, and a host Codex `--model` likewise goes
+after a leading `exec`; the flag set is unchanged. Host launches add no
+permission-bypass flags, so a denied tool ends the run with a reported failure.
+`cenci babysit` names the window `<PR>-ci-repair`: its argument leads with the PR
+number. A custom `agents.<agent>.workflows.ci-repair` template is used verbatim, never
+rewritten to `--print` or `exec`, and must itself be finite, because babysit reads a
+live `<PR>-ci-repair` pane as a repair still running. Overriding only its `args` keeps
+the built-in finite `sandboxArgs` for sandbox launches.
 
 **OpenCode (paused):** the retained adapter targets OpenCode 1.18.3 or newer. Doctor
 reports the pause and inspects legacy integration state (see
@@ -2020,6 +2048,15 @@ window can be opened and records an empty session. The detached supervisor's
 stdout/stderr are written to a `0600` append-mode log file under the state
 directory (one per repo/PR, printed on arming), so a failed repair launch is
 readable there instead of being silently discarded.
+
+CI repair launches as `cenci run ci-repair "<PR> PR #<PR> (<branch>) has failing CI
+checks: …"`: the leading PR number names the window `<PR>-ci-repair`, which the
+supervisor's liveness probe and the daemon's window cleanup both match on. The built-in
+template is one-shot (Claude `--print`, `codex exec`), so the worker exits when the
+repair ends. A live `<PR>-ci-repair` pane in the recorded session suppresses another
+launch without consuming an attempt, and an unreadable pane inventory fails the tick
+without launching. A `cenci run` exit status 3 (window spawned, post-spawn setup
+failed) counts as a dispatched attempt. Details: `watch/docs/babysit.md`.
 
 Running `cenci babysit` from inside a `cenci sandbox`-launched
 container (`CENCI_SANDBOX=1`) never supervises locally — the container has no host

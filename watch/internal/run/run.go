@@ -19,8 +19,9 @@ import (
 // call still returns an error, so dispatch's resume rollback can retain
 // Working instead of restoring Input Needed (relying on the reconciler's
 // interrupted-resume recovery as the backstop if that session turns out to
-// be dead). Every failure that occurs before ctrl.NewWindow ever succeeds
-// must NOT wrap this sentinel.
+// be dead). `cenci run` exits 3 on it, which babysit counts as a dispatched
+// ci-repair attempt (#1455). Every failure that occurs before ctrl.NewWindow
+// ever succeeds must NOT wrap this sentinel.
 var ErrWindowSpawned = errors.New("tmux window already spawned")
 
 // Controller is the small consumer-side tmux interface the launcher needs.
@@ -47,8 +48,9 @@ type Opts struct {
 	Workflow string
 	// Ticket is the full skill argument: a ticket id or task description plus
 	// any additional context (e.g. "42 focus on the API layer"). It is
-	// substituted whole into {ticket}; only the first token drives gh lookup
-	// and the numeric window-name prefix.
+	// substituted whole into {ticket}; only its first token drives the
+	// numeric window-name prefix (babysit's ci-repair argument leads with the
+	// PR number for that reason, #1455).
 	Ticket  string
 	Agent   string // --agent; empty falls back to config defaultAgent then "claude"
 	Sandbox bool   // resolved --sandbox value; only honored when SandboxSet

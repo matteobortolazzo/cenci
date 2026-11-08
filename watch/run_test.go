@@ -301,6 +301,57 @@ func TestRunDryRunDisabledOpenCodeFails(t *testing.T) {
 	}
 }
 
+// runSpawn runs a real (non-dry-run) `cenci run ci-repair` against the fake
+// tmux of writeCIRepairFakeTmux, with ctlFile created to steer it, and returns
+// stdout followed by stderr, the exit code and the recorded tmux calls.
+func runSpawn(t *testing.T, ctlFile string) (string, int, [][]string) {
+	t.Helper()
+	root := t.TempDir()
+	binDir, ctlDir, workDir := filepath.Join(root, "bin"), filepath.Join(root, "ctl"), filepath.Join(root, "work")
+	for _, d := range []string{binDir, ctlDir, workDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tmuxLog := filepath.Join(root, "tmux.log")
+	writeCIRepairFakeTmux(t, binDir, ctlDir, tmuxLog)
+	if err := os.WriteFile(filepath.Join(ctlDir, ctlFile), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// openTestEnv supplies the isolated HOME/XDG_CONFIG_HOME and a live event
+	// socket, so this launch never spawns a daemon.
+	env, _, _ := openTestEnv(t, binDir, writeAssetFixture(t))
+	stdout, stderr, code := runBabysitCLI(t, env, "run", "ci-repair", "42 PR #42 (b) has failing CI checks: lint.",
+		"--agent", "claude", "--no-sandbox", "--session", "work", "--dir", workDir)
+	return stdout + stderr, code, adapterLaunchCalls(t, tmuxLog)
+}
+
+// #1455: a failure after the window was spawned (automatic-rename) exits 3, a
+// status distinct from the pre-spawn refusals' 1 and the usage errors' 2.
+func TestRunPostSpawnFailureExitsThree(t *testing.T) {
+	out, code, calls := runSpawn(t, "fail-automatic-rename")
+	if code != 3 {
+		t.Fatalf("cenci run exit = %d, want 3; output:\n%s", code, out)
+	}
+	if !strings.Contains(out, "automatic-rename") {
+		t.Errorf("output %q does not name the failed post-spawn step", out)
+	}
+	if !slices.ContainsFunc(calls, func(c []string) bool { return len(c) > 0 && c[0] == "new-window" }) {
+		t.Errorf("tmux calls %q, want the window spawned before the failure", calls)
+	}
+}
+
+// #1455/#1250: a @cenci-repo-dir write failure only warns; `cenci run` exits 0.
+func TestRunRepoDirFailureWarnsAndExitsZero(t *testing.T) {
+	out, code, _ := runSpawn(t, "fail-@cenci-repo-dir")
+	if code != 0 {
+		t.Fatalf("cenci run exit = %d, want 0; output:\n%s", code, out)
+	}
+	if !strings.Contains(out, "warning: could not record the launch directory") {
+		t.Errorf("output %q, want the launch-directory warning", out)
+	}
+}
+
 // dryRunArgv resolves `cenci run <workflow> <flags> [target]` to the argv the
 // shell would hand the launcher program: the dry-run `command:` line run
 // through /bin/sh against a recording fake, so element boundaries are exact. A
@@ -345,7 +396,12 @@ func TestRunDryRunCodexSandboxRoutesPromptAfterAgentFlag(t *testing.T) {
 					flags = append(flags, "--model", model)
 					want = append(want, "--model", model)
 				}
-				want = append(want, "--agent", "codex", "--", prompt)
+				want = append(want, "--agent", "codex", "--")
+				if c.Workflow == "ci-repair" {
+					// #1455: the one finite Codex template runs `codex exec`.
+					want = append(want, "exec")
+				}
+				want = append(want, prompt)
 				t.Run(c.Workflow+"/"+target+"/model="+model, func(t *testing.T) {
 					if got := dryRunArgv(t, c.Workflow, target, flags...); !slices.Equal(got, want) {
 						t.Errorf("argv = %q, want %q", got, want)
