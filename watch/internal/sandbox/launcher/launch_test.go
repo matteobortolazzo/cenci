@@ -322,7 +322,7 @@ func TestAssembleExecEnvAndAssembleEnv_EmptyProviderKeys_OmitEntirely(t *testing
 //
 // These drive DryRun, which shares resolveLaunchContext and planArgvs with a
 // real launch (#620), so the argvs asserted here are the ones Launch builds.
-// The black-box open/attach runs live in watch/sandbox_open_test.go.
+// The black-box open/attach runs live in watch/open_test.go.
 
 // forwardConfigBody renders a fleet config whose sandboxEnv.forward lists
 // names.
@@ -1017,7 +1017,7 @@ func TestWarnDockerdStartupFailure_EmbeddedNewlineInMarker_RenderedSingleLine(t 
 // only when all three sets succeeded. The tmux call goes through the
 // setPaneOption seam, so these tests never reach a real tmux server; the
 // end-to-end wiring (the attach line carries the same ID that was set, the run
-// line never does) is asserted black-box in sandbox_open_test.go.
+// line never does) is asserted black-box in open_test.go.
 
 const (
 	// launchTestSocket and launchTestPane are what $TMUX / $TMUX_PANE hold in

@@ -129,7 +129,7 @@ func TestAssembleExecEnv_AttendedFalseOrAbsent_ExplicitZero(t *testing.T) {
 // the explicit-null case its doc comment calls out) are covered. This pins
 // assembleExecEnv alone: since #1016 the launch as a whole fails closed on an
 // unparsable fleet config, because sandboxEnv.forward is read from the same
-// file (see forwardenv_test.go and watch/sandbox_open_test.go).
+// file (see forwardenv_test.go and watch/open_test.go).
 func TestAssembleExecEnv_MalformedFleetConfig_ResolvesZero(t *testing.T) {
 	cases := map[string]string{
 		"malformed json":    `{"planning": `,
@@ -190,7 +190,7 @@ func TestAssembleExecEnv_UnrecognizedEnvValue_FoldsToZero(t *testing.T) {
 // forwards in this same file already use, and it is what lets a caller scrub
 // its child environment with a bare `CENCI_ATTENDED=` without silently
 // asserting "nobody is watching" — the exact shape the black-box open-path
-// fixture uses (openTestEnv, watch/sandbox_open_test.go).
+// fixture uses (openTestEnv, watch/sandbox_clitest_helpers_test.go).
 func TestAssembleExecEnv_EmptyEnvValueIsNotAPin(t *testing.T) {
 	writeFleetConfig(t, `{"planning": {"attended": true}}`)
 	t.Setenv("CENCI_ATTENDED", "")

@@ -365,7 +365,7 @@ func TestAudit_UsageErrors_Exit2(t *testing.T) {
 }
 
 // TestAudit_MalformedDindConfig_Exits1 mirrors the real-launch and dry-run
-// #632 hard-fail (sandbox_open_test.go's TestOpen_MalformedDindConfig_Exits1
+// #632 hard-fail (open_test.go's TestOpen_MalformedDindConfig_Exits1
 // and open_dryrun_test.go's TestOpenDryRun_MalformedDindConfig_Exits1) for
 // `cenci audit`: per Q2, audit hard-fails on malformed stored config exactly
 // like launch/dry-run, rather than degrading it to a warning finding.
@@ -578,7 +578,7 @@ func TestAudit_MalformedForwardConfig_Exits1NamingRedactedEntryAndMakesNoRuntime
 // TestAudit_NeverStartsADaemon pins audit's read-only contract: no live
 // event socket or PID file exists under CENCI_SOCKET_DIR after the run —
 // audit must probe wiring read-only and never call daemon.EnsureRunning(),
-// unlike Launch's resolveCenciWiring (see sandbox_open_test.go's
+// unlike Launch's resolveCenciWiring (see open_test.go's
 // TestOpen_NoEventsSocket_LaunchesUnwiredWithWarning for the contrasting
 // case where a launch DOES attempt to start the daemon).
 func TestAudit_NeverStartsADaemon(t *testing.T) {

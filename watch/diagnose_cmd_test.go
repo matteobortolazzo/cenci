@@ -16,7 +16,7 @@ import (
 // --verify must never launch or attach — it stays within diagnose's
 // existing read-only contract. These black-box tests drive the real built
 // `cenci` binary as a subprocess via diagEnv/writeScriptedRuntimes/
-// writeAssetFixture, shared with diagnose_test.go and sandbox_open_test.go
+// writeAssetFixture, shared with diagnose_test.go and sandbox_clitest_helpers_test.go
 // (same package).
 
 // TestDiagnoseVerify_MissingDaemonSocket_ReportsFail covers verify case (a):

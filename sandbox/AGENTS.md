@@ -58,8 +58,11 @@ Note: docs-only edits to `sandbox/AGENTS.md`, `sandbox/CLAUDE.md`, or
 became real once the filter moved to `predicate-quantifier: 'every'` (#950).
 
 The launcher-behavior suites live with the launcher code in `watch/`: Go
-black-box tests in `watch/sandbox_open_test.go` plus the reap contract suite
-`watch/tests/reap-orphans.test.sh` (run with `CENCI_BIN`).
+black-box tests in `watch/open_test.go` and the per-command files
+`watch/sandbox_build_test.go`, `watch/sandbox_update_agent_test.go`,
+`watch/sandbox_update_plugins_test.go` and `watch/sandbox_subcmds_test.go`
+(shared fixtures in `watch/sandbox_clitest_helpers_test.go`) plus the reap
+contract suite `watch/tests/reap-orphans.test.sh` (run with `CENCI_BIN`).
 
 ## Critical Rules
 - Keep the image minimal; agent CLIs belong in host-global volumes mounted read-only in workloads. Only the isolated updater may mount them writable.
