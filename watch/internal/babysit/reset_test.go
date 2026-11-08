@@ -12,6 +12,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -200,6 +201,70 @@ func startUnrelatedFixture(t *testing.T) *fixtureProc {
 		t.Skip("real ownership check needs a readable procfs")
 	}
 	return spawnFixture(t, exec.Command("sleep", "30"))
+}
+
+// requireStillRunning fails when p exits shortly after the code under test
+// ran: a signalled `sleep` dies within milliseconds, so a plain immediate
+// check could race the signal.
+func requireStillRunning(t *testing.T, p *fixtureProc) {
+	t.Helper()
+	select {
+	case <-p.done:
+		t.Errorf("process %d exited: it was signalled", p.pid)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+// deadPID returns the pid of a real child that was started, killed and reaped
+// (#1490). It deliberately does not use spawnFixture: that helper's cleanup
+// kills the process group at test end, which could hit a recycled group once
+// the pid is gone. It skips unless a signal-0 probe proves the pid is gone, so
+// a recycled pid can never turn into a test that signals a stranger.
+func deadPID(t *testing.T) int {
+	t.Helper()
+	cmd := exec.Command("sleep", "30")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pid := cmd.Process.Pid
+	if err := cmd.Process.Kill(); err != nil {
+		t.Fatalf("kill fixture child: %v", err)
+	}
+	_ = cmd.Wait()
+	if err := syscall.Kill(pid, 0); !errors.Is(err, syscall.ESRCH) {
+		t.Skipf("pid %d is not provably gone after the reap (probe err = %v)", pid, err)
+	}
+	return pid
+}
+
+// captureStderr mirrors captureStdout for os.Stderr.
+func captureStderr(t *testing.T) func() string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	orig := os.Stderr
+	os.Stderr = w
+	return func() string {
+		os.Stderr = orig
+		_ = w.Close()
+		b, _ := io.ReadAll(r)
+		_ = r.Close()
+		return string(b)
+	}
+}
+
+// goneNote is the host-only stderr line printed when a dead recorded pid is
+// cleared (#1490).
+func goneNote(pid int) string {
+	return fmt.Sprintf("cenci babysit: recorded supervisor pid %d for PR #42 is no longer running; cleared its stale state", pid)
+}
+
+// refusalText is the live-but-not-ours refusal, pinned byte for byte by
+// TestStop_HostOutputAndErrorsUnchanged (#1390 P34).
+func refusalText(pid int) string {
+	return fmt.Sprintf("refusing to signal pid %d: it is not the recorded cenci babysit process", pid)
 }
 
 func TestReset_PausedSupervisorZeroesBudgetKeepsFeedbackAndReArms(t *testing.T) {
@@ -427,13 +492,14 @@ func TestReset_UnownedPIDRefusesWithStateAndLockUnchanged(t *testing.T) {
 
 	err := Reset("42", e.dir, nil)
 
-	want := fmt.Sprintf("refusing to signal pid %d", p.pid)
-	if err == nil || !strings.Contains(err.Error(), want) {
-		t.Fatalf("Reset err = %v, want it to contain %q", err, want)
+	want := fmt.Sprintf("refusing to signal pid %d: it is not the recorded cenci babysit process", p.pid)
+	if err == nil || err.Error() != want {
+		t.Fatalf("Reset err = %v, want exactly %q", err, want)
 	}
-	if !p.alive() {
-		t.Error("the unrelated process was signalled")
+	if !errors.Is(err, ErrSupervisorUnverified) {
+		t.Errorf("Reset err = %v, want errors.Is ErrSupervisorUnverified", err)
 	}
+	requireStillRunning(t, p)
 	if !bytes.Equal(readFileBytes(t, e.path), stateBefore) || !bytes.Equal(readFileBytes(t, e.lock), lockBefore) {
 		t.Error("state file or lock changed")
 	}
@@ -774,5 +840,435 @@ func TestStop_CIPausedLiveSupervisorIsSignalledAndStateRemoved(t *testing.T) {
 func TestFixCapStaysThree(t *testing.T) {
 	if fixCap != 3 {
 		t.Fatalf("fixCap = %d, want 3", fixCap)
+	}
+}
+
+// -- #1490: a recorded supervisor pid that has died -------------------------
+
+// requireSevenFieldsCleared pins the reset's seven cleared fields and pid 0.
+func requireSevenFieldsCleared(t *testing.T, s State) {
+	t.Helper()
+	if s.FixAttempts != 0 || s.ConflictFixAttempts != 0 || s.RepairPending || s.LastRepairedSHA != "" || s.ConflictNotifiedSHA != "" || s.CIRepairPaused || s.CICapNotified || s.PID != 0 {
+		t.Errorf("reset fields not cleared: ciFixAttempts=%d conflictFixAttempts=%d ciRepairPending=%v lastRepairedCiHeadSha=%q conflictNotifiedHeadSha=%q ciRepairPaused=%v ciCapNotified=%v pid=%d",
+			s.FixAttempts, s.ConflictFixAttempts, s.RepairPending, s.LastRepairedSHA, s.ConflictNotifiedSHA, s.CIRepairPaused, s.CICapNotified, s.PID)
+	}
+}
+
+func requireMissing(t *testing.T, path, what string) {
+	t.Helper()
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("%s still exists (stat err = %v)", what, err)
+	}
+}
+
+// AC1: a CI-paused supervisor that died (a reboot) leaves its state and lock.
+// Reset treats the proven-gone pid as already stopped, clears the lock before
+// the re-arm starts, zeroes all seven fields and re-arms exactly once.
+func TestReset_DeadPIDClearsStaleLockZeroesBudgetAndReArms(t *testing.T) {
+	e := newResetEnv(t)
+	dead := deadPID(t)
+	s := ciPausedLiveState(dead)
+	s.FixAttempts = 3
+	writeStateFile(t, e.path, s)
+	writeLock(t, e.lock, dead)
+
+	var lockGone bool
+	var atStart State
+	e.onStart = func() {
+		_, statErr := os.Stat(e.lock)
+		lockGone = os.IsNotExist(statErr)
+		atStart = mustReadState(t, e.path)
+	}
+
+	doneErr := captureStderr(t)
+	doneOut := captureStdout(t)
+	err := Reset("42", e.dir, nil)
+	out, errOut := doneOut(), doneErr()
+	if err != nil {
+		t.Fatalf("Reset: %v", err)
+	}
+
+	if len(e.started) != 1 {
+		t.Fatalf("supervisor starts = %d, want 1", len(e.started))
+	}
+	wantArgv := []string{os.Args[0], "babysit", "42", "--agent", "codex", "--interval", "5m0s", "--state-dir", e.dir, "--session", "work", "--dir", "/repo/work"}
+	if !reflect.DeepEqual(e.started[0], wantArgv) {
+		t.Errorf("supervisor argv = %q, want %q", e.started[0], wantArgv)
+	}
+	if !lockGone {
+		t.Error("the dead supervisor's lock still existed when the new one started")
+	}
+	requireSevenFieldsCleared(t, atStart)
+	requireSevenFieldsCleared(t, mustReadState(t, e.path))
+	if !strings.Contains(out, "Reset the retry budget for PR #42.") {
+		t.Errorf("stdout = %q, want the reset line", out)
+	}
+	if !strings.Contains(errOut, goneNote(dead)) {
+		t.Errorf("stderr = %q, want it to contain %q", errOut, goneNote(dead))
+	}
+}
+
+// AC2: stop on a state that records a dead pid removes the state and the stale
+// lock and reports the usual stdout line; the gone note goes to stderr only.
+func TestStop_DeadPIDRemovesStateAndLock(t *testing.T) {
+	dir, path := hostStopFixture(t, "o/r", "42")
+	lock := path + ".lock"
+	dead := deadPID(t)
+	writeStateFile(t, path, ciPausedLiveState(dead))
+	writeLock(t, lock, dead)
+
+	doneErr := captureStderr(t)
+	doneOut := captureStdout(t)
+	err := Stop("42", dir)
+	out, errOut := doneOut(), doneErr()
+	if err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+
+	if out != "Stopped babysitting PR #42.\n" {
+		t.Errorf("stdout = %q, want %q", out, "Stopped babysitting PR #42.\n")
+	}
+	requireMissing(t, path, "state file")
+	requireMissing(t, lock, "lock file")
+	if !strings.Contains(errOut, goneNote(dead)) {
+		t.Errorf("stderr = %q, want it to contain %q", errOut, goneNote(dead))
+	}
+}
+
+// "Sends no signal": a dead pid cannot observably receive one, so the gone
+// branch is proven over a live unrelated process with the seam stubbed to
+// gone. The process must survive, and Go's pidfd-backed Signal on a dead pid
+// returns ErrProcessDone, so a nil return alone would prove nothing.
+func TestReset_GonePIDIsNeverSignalled(t *testing.T) {
+	e := newResetEnv(t)
+	p := startUnrelatedFixture(t)
+	stubProcessGone(t, true)
+	writeStateFile(t, e.path, ciPausedLiveState(p.pid))
+
+	doneErr := captureStderr(t)
+	doneOut := captureStdout(t)
+	err := Reset("42", e.dir, nil)
+	_, errOut := doneOut(), doneErr()
+	if err != nil {
+		t.Fatalf("Reset: %v", err)
+	}
+
+	requireStillRunning(t, p)
+	if len(e.started) != 1 {
+		t.Errorf("supervisor starts = %d, want 1", len(e.started))
+	}
+	if !strings.Contains(errOut, goneNote(p.pid)) {
+		t.Errorf("stderr = %q, want the gone note, which proves the gone branch ran", errOut)
+	}
+}
+
+func TestStop_GonePIDIsNeverSignalled(t *testing.T) {
+	dir, path := hostStopFixture(t, "o/r", "42")
+	p := startUnrelatedFixture(t)
+	stubProcessGone(t, true)
+	writeStateFile(t, path, ciPausedLiveState(p.pid))
+
+	doneErr := captureStderr(t)
+	doneOut := captureStdout(t)
+	err := Stop("42", dir)
+	out, errOut := doneOut(), doneErr()
+	if err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+
+	requireStillRunning(t, p)
+	if out != "Stopped babysitting PR #42.\n" {
+		t.Errorf("stdout = %q, want %q", out, "Stopped babysitting PR #42.\n")
+	}
+	requireMissing(t, path, "state file")
+	if !strings.Contains(errOut, goneNote(p.pid)) {
+		t.Errorf("stderr = %q, want the gone note, which proves the gone branch ran", errOut)
+	}
+}
+
+// AC4: a recorded pid that is a live process not owned by this PR keeps the
+// exact refusal text and class, and nothing on disk changes. The Reset twin is
+// TestReset_UnownedPIDRefusesWithStateAndLockUnchanged.
+func TestStop_LiveUnrelatedPIDRefusesWithStateAndLockUnchanged(t *testing.T) {
+	dir, path := hostStopFixture(t, "o/r", "42")
+	lock := path + ".lock"
+	p := startUnrelatedFixture(t)
+	writeStateFile(t, path, ciPausedLiveState(p.pid))
+	writeLock(t, lock, p.pid)
+	stateBefore, lockBefore := readFileBytes(t, path), readFileBytes(t, lock)
+
+	doneOut := captureStdout(t)
+	err := Stop("42", dir)
+	out := doneOut()
+
+	if err == nil || err.Error() != refusalText(p.pid) {
+		t.Fatalf("Stop err = %v, want exactly %q", err, refusalText(p.pid))
+	}
+	if !errors.Is(err, ErrSupervisorUnverified) {
+		t.Errorf("Stop err = %v, want errors.Is ErrSupervisorUnverified", err)
+	}
+	if out != "" {
+		t.Errorf("stdout = %q, want nothing on a refused stop", out)
+	}
+	requireStillRunning(t, p)
+	if !bytes.Equal(readFileBytes(t, path), stateBefore) || !bytes.Equal(readFileBytes(t, lock), lockBefore) {
+		t.Error("state file or lock changed")
+	}
+}
+
+// The seam's probe matrix. Only a proven ESRCH is gone; every other result,
+// including a pid the caller may not signal, is not gone (default-deny,
+// watch/docs/error-handling.md).
+func TestDefaultProcessGone(t *testing.T) {
+	dead := deadPID(t)
+	live := spawnFixture(t, exec.Command("sleep", "30"))
+	if os.Geteuid() == 0 {
+		t.Log("running as root: kill(1, 0) succeeds, so the EPERM result is not exercised for pid 1")
+	}
+	for _, tc := range []struct {
+		name string
+		pid  int
+		want bool
+	}{
+		{"a reaped child (ESRCH) is gone", dead, true},
+		{"a live child is not gone", live.pid, false},
+		{"pid 1 (EPERM unprivileged, alive as root) is not gone", 1, false},
+		{"pid 0 is not gone", 0, false},
+		{"pid -1 is not gone", -1, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := defaultProcessGone(tc.pid); got != tc.want {
+				t.Errorf("defaultProcessGone(%d) = %v, want %v", tc.pid, got, tc.want)
+			}
+		})
+	}
+}
+
+// goneHarness runs Reset or Stop against a state recording a dead pid, so the
+// lock variants and edge cases below hold for both commands.
+type goneHarness struct {
+	command             string
+	statePath, lockPath string
+	run                 func() error
+	starts              func() int
+	stderr              string
+}
+
+// newGoneHarness writes s (with its pid set to a freshly dead one unless the
+// caller already set one) and returns the harness plus the recorded pid.
+func newGoneHarness(t *testing.T, command string, s State) (*goneHarness, int) {
+	t.Helper()
+	h := &goneHarness{command: command}
+	if s.PID == 0 {
+		s.PID = deadPID(t)
+	}
+	switch command {
+	case "reset":
+		e := newResetEnv(t)
+		h.statePath, h.lockPath = e.path, e.lock
+		h.starts = func() int { return len(e.started) }
+		h.run = func() error { return Reset("42", e.dir, nil) }
+	case "stop":
+		dir, path := hostStopFixture(t, "o/r", "42")
+		h.statePath, h.lockPath = path, path+".lock"
+		h.starts = func() int { return 0 }
+		h.run = func() error { return Stop("42", dir) }
+	default:
+		t.Fatalf("unknown command %q", command)
+	}
+	writeStateFile(t, h.statePath, s)
+	inner := h.run
+	h.run = func() error {
+		doneErr := captureStderr(t)
+		doneOut := captureStdout(t)
+		err := inner()
+		doneOut()
+		h.stderr = doneErr()
+		return err
+	}
+	return h, s.PID
+}
+
+// requireCleared asserts the command succeeded and cleared everything.
+func (h *goneHarness) requireCleared(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("%s: %v", h.command, err)
+	}
+	requireMissing(t, h.lockPath, "lock file")
+	switch h.command {
+	case "reset":
+		if h.starts() != 1 {
+			t.Errorf("supervisor starts = %d, want 1", h.starts())
+		}
+		requireSevenFieldsCleared(t, mustReadState(t, h.statePath))
+	case "stop":
+		requireMissing(t, h.statePath, "state file")
+	}
+}
+
+// requireRefused asserts a refusal that left state and lock byte-identical and
+// started nothing. stateBefore and lockBefore are the file contents captured
+// before the command ran.
+func (h *goneHarness) requireRefused(t *testing.T, err error, wantText string, stateBefore, lockBefore []byte) {
+	t.Helper()
+	if err == nil || err.Error() != wantText {
+		t.Fatalf("%s err = %v, want exactly %q", h.command, err, wantText)
+	}
+	if !errors.Is(err, ErrSupervisorUnverified) {
+		t.Errorf("%s err = %v, want errors.Is ErrSupervisorUnverified", h.command, err)
+	}
+	if !bytes.Equal(readFileBytes(t, h.statePath), stateBefore) {
+		t.Error("state file changed")
+	}
+	if !bytes.Equal(readFileBytes(t, h.lockPath), lockBefore) {
+		t.Error("lock file changed")
+	}
+	if h.starts() != 0 {
+		t.Errorf("supervisor starts = %d, want 0", h.starts())
+	}
+}
+
+var goneCommands = []string{"reset", "stop"}
+
+// Lock variants for a dead recorded pid. The lock is cleared unless it names a
+// live supervisor for this PR or cannot be read as a pid: removing a live
+// supervisor's lock would allow two supervisors, and an empty lock most likely
+// means an arm is mid-flight (Run writes the pid right after its O_EXCL create).
+func TestResetAndStop_DeadPIDLockVariants(t *testing.T) {
+	for _, command := range goneCommands {
+		t.Run(command+"/no lock", func(t *testing.T) {
+			h, _ := newGoneHarness(t, command, ciPausedLiveState(0))
+			h.requireCleared(t, h.run())
+		})
+
+		t.Run(command+"/lock naming a dead pid is stale and removed", func(t *testing.T) {
+			h, _ := newGoneHarness(t, command, ciPausedLiveState(0))
+			writeLock(t, h.lockPath, deadPID(t))
+			h.requireCleared(t, h.run())
+		})
+
+		t.Run(command+"/lock naming a live unrelated process is stale and removed", func(t *testing.T) {
+			h, _ := newGoneHarness(t, command, ciPausedLiveState(0))
+			other := startUnrelatedFixture(t)
+			writeLock(t, h.lockPath, other.pid)
+			h.requireCleared(t, h.run())
+			requireStillRunning(t, other)
+		})
+
+		t.Run(command+"/lock naming a live supervisor for this PR is refused", func(t *testing.T) {
+			h, _ := newGoneHarness(t, command, ciPausedLiveState(0))
+			owner := startOwnedFixture(t, false)
+			writeLock(t, h.lockPath, owner.pid)
+			stateBefore, lockBefore := readFileBytes(t, h.statePath), readFileBytes(t, h.lockPath)
+
+			err := h.run()
+
+			h.requireRefused(t, err, fmt.Sprintf("supervisor already running for PR #42 (%d)", owner.pid), stateBefore, lockBefore)
+			requireStillRunning(t, owner)
+		})
+
+		for _, tc := range []struct{ name, contents, wantText string }{
+			{"empty", "", "supervisor already running for PR #42 ()"},
+			{"unparseable", "garbage\n", "supervisor already running for PR #42 (garbage)"},
+		} {
+			t.Run(command+"/"+tc.name+" lock is refused", func(t *testing.T) {
+				h, _ := newGoneHarness(t, command, ciPausedLiveState(0))
+				if err := os.WriteFile(h.lockPath, []byte(tc.contents), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				stateBefore, lockBefore := readFileBytes(t, h.statePath), readFileBytes(t, h.lockPath)
+
+				err := h.run()
+
+				h.requireRefused(t, err, tc.wantText, stateBefore, lockBefore)
+			})
+		}
+	}
+}
+
+// Edge cases on a dead recorded pid.
+func TestResetAndStop_DeadPIDEdgeCases(t *testing.T) {
+	for _, command := range goneCommands {
+		t.Run(command+"/a running status takes the same gone path as needs-input", func(t *testing.T) {
+			s := pausedState()
+			s.Status = "running"
+			h, dead := newGoneHarness(t, command, s)
+			writeLock(t, h.lockPath, dead)
+
+			h.requireCleared(t, h.run())
+
+			if !strings.Contains(h.stderr, goneNote(dead)) {
+				t.Errorf("stderr = %q, want it to contain %q", h.stderr, goneNote(dead))
+			}
+		})
+
+		// Only a proven ESRCH is gone: when the probe is not conclusive (here
+		// stubbed to "not gone", as EPERM would give) the unchanged refusal
+		// applies, even though the pid is in fact dead.
+		t.Run(command+"/a probe that does not prove the pid gone keeps the refusal", func(t *testing.T) {
+			h, dead := newGoneHarness(t, command, ciPausedLiveState(0))
+			writeLock(t, h.lockPath, dead)
+			stubProcessGone(t, false)
+			stateBefore, lockBefore := readFileBytes(t, h.statePath), readFileBytes(t, h.lockPath)
+
+			err := h.run()
+
+			h.requireRefused(t, err, refusalText(dead), stateBefore, lockBefore)
+		})
+	}
+}
+
+// The agent check runs before anything is removed or written, gone pid or not.
+func TestReset_DeadPIDAgentRefusalPrecedesLockRemovalAndStateWrite(t *testing.T) {
+	e := newResetEnv(t)
+	dead := deadPID(t)
+	writeStateFile(t, e.path, ciPausedLiveState(dead))
+	writeLock(t, e.lock, dead)
+	stateBefore, lockBefore := readFileBytes(t, e.path), readFileBytes(t, e.lock)
+
+	const reason = "agent codex may not be re-armed here"
+	err := Reset("42", e.dir, func(string) string { return reason })
+
+	if !errors.Is(err, ErrAgentRefused) || err.Error() != reason {
+		t.Fatalf("Reset err = %v, want ErrAgentRefused carrying %q", err, reason)
+	}
+	if !bytes.Equal(readFileBytes(t, e.path), stateBefore) || !bytes.Equal(readFileBytes(t, e.lock), lockBefore) {
+		t.Error("state file or lock changed")
+	}
+	e.requireNoStart(t)
+}
+
+// The host-only guards keep their existing messages and change nothing, even
+// when the recorded pid is dead.
+func TestReset_DeadPIDHostOnlyGuardsKeepTheirMessages(t *testing.T) {
+	for _, tc := range []struct{ name, env, want string }{
+		{
+			"inside a sandbox", "CENCI_SANDBOX",
+			"not reset: the babysit supervisor runs on the host and its retry budget can only be reset there; run `cenci babysit reset 42` from a host tmux pane",
+		},
+		{
+			"inside a supervisor", "CENCI_BABYSIT_SUPERVISOR",
+			"not reset: cannot re-arm from inside a babysit supervisor; run `cenci babysit reset` from a host tmux pane",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newResetEnv(t)
+			t.Setenv(tc.env, "1")
+			dead := deadPID(t)
+			writeStateFile(t, e.path, ciPausedLiveState(dead))
+			writeLock(t, e.lock, dead)
+			stateBefore, lockBefore := readFileBytes(t, e.path), readFileBytes(t, e.lock)
+
+			err := Reset("42", e.dir, nil)
+
+			if err == nil || err.Error() != tc.want {
+				t.Fatalf("Reset err = %v, want exactly %q", err, tc.want)
+			}
+			if !bytes.Equal(readFileBytes(t, e.path), stateBefore) || !bytes.Equal(readFileBytes(t, e.lock), lockBefore) {
+				t.Error("state file or lock changed")
+			}
+			e.requireNoStart(t)
+		})
 	}
 }

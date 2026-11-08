@@ -1217,8 +1217,11 @@ func save(path string, s State) error {
 var (
 	// ErrNoSupervisor: no state file exists for the (repo, PR).
 	ErrNoSupervisor = errors.New("no supervisor found")
-	// ErrSupervisorUnverified: the state records a PID that is not the
-	// recorded cenci babysit process, so nothing was signalled.
+	// ErrSupervisorUnverified: nothing was signalled or removed because the
+	// recorded supervisor could not be verified: the state records a live PID
+	// that is not the recorded cenci babysit process ("refusing to signal
+	// pid"), or its PID is gone but the lock names a live supervisor for the PR
+	// or cannot be parsed ("supervisor already running", #1490).
 	ErrSupervisorUnverified = errors.New("recorded supervisor process could not be verified")
 	// ErrStopFailed: signalling the verified supervisor or removing its state
 	// failed.
@@ -1249,7 +1252,9 @@ func (e *classifiedError) Unwrap() []error {
 // "Stopped babysitting PR #N." line. Inside a sandbox the supervisor and its
 // state live on the host, so the request is forwarded to the host daemon
 // (#1390); explicit is ignored there, as the host uses its own state
-// directory.
+// directory. When the recorded supervisor is gone (stopRepo's second outcome)
+// the host additionally notes on stderr that its stale state was cleared;
+// stdout is unchanged.
 func Stop(pr, explicit string) error {
 	cleanPR := strings.TrimPrefix(pr, "#")
 	if os.Getenv("CENCI_SANDBOX") == "1" {
@@ -1267,8 +1272,12 @@ func Stop(pr, explicit string) error {
 	if err != nil {
 		return err
 	}
-	if err := stopRepo(repo, pr, dir, false); err != nil {
+	gonePID, err := stopRepo(repo, pr, dir, false)
+	if err != nil {
 		return err
+	}
+	if gonePID > 0 {
+		fmt.Fprintln(os.Stderr, staleStateNote(gonePID, cleanPR))
 	}
 	fmt.Printf("Stopped babysitting PR #%s.\n", cleanPR)
 	return nil
@@ -1281,19 +1290,28 @@ func Stop(pr, explicit string) error {
 // the state file. Unlike the host CLI's Stop, which keeps treating an
 // unreadable state as empty, it reads the state strictly: a container-driven
 // stop must never report success for a supervisor it could not identify.
+// A recorded PID has three outcomes (#1490): owned and live (SIGTERM, then the
+// state is removed), gone (processGone proved ESRCH: nothing is signalled, the
+// stale lock is cleared, then the state is removed), or live but not ours
+// (refused, state and lock untouched). A gone PID prints nothing here: the
+// daemon reply carries no PID.
 // Failures wrap ErrNoSupervisor, ErrStateUnreadable (state kept, message
-// path-free), ErrSupervisorUnverified or ErrStopFailed.
+// path-free), ErrSupervisorUnverified (a live PID that is not ours, or a lock
+// naming a live supervisor or that cannot be parsed) or ErrStopFailed.
 func StopRepo(repo, pr, explicit string) error {
-	return stopRepo(repo, pr, explicit, true)
+	_, err := stopRepo(repo, pr, explicit, true)
+	return err
 }
 
 // stopRepo is StopRepo with the state read mode chosen by strict. The host
 // CLI passes false to keep its pre-#1390 handling of an unreadable state
-// byte for byte (#1390 P34).
-func stopRepo(repo, pr, explicit string, strict bool) error {
+// byte for byte (#1390 P34). It returns the recorded PID when it was gone, so
+// the host Stop can note the cleared stale state and StopRepo stays silent;
+// otherwise 0.
+func stopRepo(repo, pr, explicit string, strict bool) (gonePID int, err error) {
 	dir, err := stateDir(explicit)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	cleanPR := strings.TrimPrefix(pr, "#")
 	path := statePath(dir, repo, cleanPR)
@@ -1302,33 +1320,43 @@ func stopRepo(repo, pr, explicit string, strict bool) error {
 		var rerr error
 		s, rerr = readStateStrict(path)
 		if errors.Is(rerr, os.ErrNotExist) {
-			return &classifiedError{class: ErrNoSupervisor, msg: fmt.Sprintf("no supervisor found for PR #%s", pr)}
+			return 0, &classifiedError{class: ErrNoSupervisor, msg: fmt.Sprintf("no supervisor found for PR #%s", pr)}
 		}
 		if rerr != nil {
-			return &classifiedError{class: ErrStateUnreadable, cause: rerr, msg: fmt.Sprintf("babysit state for PR #%s could not be read", cleanPR)}
+			return 0, &classifiedError{class: ErrStateUnreadable, cause: rerr, msg: fmt.Sprintf("babysit state for PR #%s could not be read", cleanPR)}
 		}
 	} else {
 		if _, err := os.Stat(path); os.IsNotExist(err) {
-			return &classifiedError{class: ErrNoSupervisor, msg: fmt.Sprintf("no supervisor found for PR #%s", pr)}
+			return 0, &classifiedError{class: ErrNoSupervisor, msg: fmt.Sprintf("no supervisor found for PR #%s", pr)}
 		}
 		s = load(path)
 	}
 	if s.PID > 0 {
-		if !processOwned(s.PID, cleanPR) {
-			return &classifiedError{class: ErrSupervisorUnverified, msg: fmt.Sprintf("refusing to signal pid %d: it is not the recorded cenci babysit process", s.PID)}
-		}
-		proc, e := os.FindProcess(s.PID)
-		if e != nil {
-			return &classifiedError{class: ErrStopFailed, cause: e, msg: e.Error()}
-		}
-		if e = proc.Signal(syscall.SIGTERM); e != nil {
-			return &classifiedError{class: ErrStopFailed, cause: e, msg: fmt.Sprintf("stop pid %d: %v", s.PID, e)}
+		if processOwned(s.PID, cleanPR) {
+			proc, e := os.FindProcess(s.PID)
+			if e != nil {
+				return 0, &classifiedError{class: ErrStopFailed, cause: e, msg: e.Error()}
+			}
+			if e = proc.Signal(syscall.SIGTERM); e != nil {
+				return 0, &classifiedError{class: ErrStopFailed, cause: e, msg: fmt.Sprintf("stop pid %d: %v", s.PID, e)}
+			}
+		} else {
+			if !processGone(s.PID) {
+				return 0, &classifiedError{class: ErrSupervisorUnverified, msg: fmt.Sprintf("refusing to signal pid %d: it is not the recorded cenci babysit process", s.PID)}
+			}
+			if e := clearStaleLock(path+".lock", cleanPR); e != nil {
+				if errors.Is(e, ErrSupervisorUnverified) {
+					return 0, e
+				}
+				return 0, &classifiedError{class: ErrStopFailed, cause: e, msg: e.Error()}
+			}
+			gonePID = s.PID
 		}
 	}
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return &classifiedError{class: ErrStopFailed, cause: err, msg: err.Error()}
+		return 0, &classifiedError{class: ErrStopFailed, cause: err, msg: err.Error()}
 	}
-	return nil
+	return gonePID, nil
 }
 
 // Status prints the supervisor summary for pr as one JSON object (#1390):
@@ -1413,6 +1441,57 @@ func defaultProcessOwned(pid int, pr string) bool {
 	}
 	cmdline := strings.ReplaceAll(string(b), "\x00", " ")
 	return strings.Contains(cmdline, "babysit") && strings.Contains(cmdline, pr)
+}
+
+// processGone is a test seam over defaultProcessGone: it reports whether a
+// recorded supervisor pid is provably gone (#1490). Callers consult it only
+// after processOwned is false, to tell a gone pid from a live one that is not
+// ours.
+var processGone = defaultProcessGone
+
+// defaultProcessGone is true only when a signal-0 probe proves the pid does not
+// exist (ESRCH). Every other result (the pid answers, EPERM, anything else) is
+// not gone: default-deny, so an uncertain probe keeps the refusal.
+func defaultProcessGone(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	return errors.Is(syscall.Kill(pid, 0), syscall.ESRCH)
+}
+
+// clearStaleLock removes the supervisor lock at lockPath once the state's
+// recorded pid is gone (#1490), unless the lock may belong to a live
+// supervisor: an empty or unparseable lock (an arm may be writing its pid) or
+// one naming a pid processOwned verifies for pr is refused with the same
+// "supervisor already running" error Run's arming branch gives, classified
+// ErrSupervisorUnverified. A lock naming a dead pid, or a live one that is not
+// ours, is stale and removed. A missing lock is not an error; a lock that
+// cannot be read or removed is returned as is. The lock is read and then
+// removed by path, so a lock a concurrent arm creates in between can be removed
+// too (the accepted arm race; the losing child's O_EXCL open is the backstop).
+func clearStaleLock(lockPath, pr string) error {
+	owner, err := os.ReadFile(lockPath)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	held := strings.TrimSpace(string(owner))
+	lockPID, perr := strconv.Atoi(held)
+	if perr != nil || lockPID <= 0 || processOwned(lockPID, pr) {
+		return &classifiedError{class: ErrSupervisorUnverified, msg: fmt.Sprintf("supervisor already running for PR #%s (%s)", pr, held)}
+	}
+	if err := os.Remove(lockPath); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+// staleStateNote is the host-only stderr line for a recorded supervisor pid
+// that was no longer running when reset or stop cleared its stale state.
+func staleStateNote(pid int, pr string) string {
+	return fmt.Sprintf("cenci babysit: recorded supervisor pid %d for PR #%s is no longer running; cleared its stale state", pid, pr)
 }
 
 // procfsReadable reports whether this process can read its own procfs cmdline

@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -441,6 +442,59 @@ func TestBabysitControl_EndToEnd_ForwardedStopRemovesTheHostState(t *testing.T) 
 	}
 	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
 		t.Errorf("host state file still exists (stat err = %v)", statErr)
+	}
+}
+
+// TestBabysitControl_EndToEnd_ForwardedStopClearsADeadSupervisor is #1490: a
+// supervisor that died while CI-paused (a reboot) leaves its state, with the
+// old pid and needs-input, and its lock behind. The forwarded stop treats the
+// proven-gone pid as already stopped and removes both. The dead pid comes from
+// a throwaway child this test started, killed and reaped, never the test
+// binary (watch/docs/test-isolation.md).
+func TestBabysitControl_EndToEnd_ForwardedStopClearsADeadSupervisor(t *testing.T) {
+	_, stateHome := newE2EDaemon(t)
+
+	child := exec.Command("sleep", "30")
+	if err := child.Start(); err != nil {
+		t.Fatalf("start child: %v", err)
+	}
+	dead := child.Process.Pid
+	if err := child.Process.Kill(); err != nil {
+		t.Fatalf("kill child: %v", err)
+	}
+	_ = child.Wait()
+	if err := syscall.Kill(dead, 0); !errors.Is(err, syscall.ESRCH) {
+		t.Skipf("pid %d is not provably gone after the reap (probe err = %v)", dead, err)
+	}
+
+	path := hostStateFile(stateHome, "o/r", "42")
+	lock := path + ".lock"
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	body := fmt.Sprintf(`{"schemaVersion":2,"pr":"42","repo":"o/r","pid":%d,"status":"needs-input","ciRepairPaused":true,"ciCapNotified":true}`, dead)
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(lock, []byte(fmt.Sprintf("%d\n", dead)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	done := captureStdout(t)
+	err := babysit.Stop("42", "")
+	out := done()
+
+	if err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if out != "Stopped babysitting PR #42 on the host.\n" {
+		t.Errorf("stdout = %q, want %q", out, "Stopped babysitting PR #42 on the host.\n")
+	}
+	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+		t.Errorf("host state file still exists (stat err = %v)", statErr)
+	}
+	if _, statErr := os.Stat(lock); !os.IsNotExist(statErr) {
+		t.Errorf("host lock file still exists (stat err = %v)", statErr)
 	}
 }
 

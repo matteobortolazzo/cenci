@@ -2199,12 +2199,20 @@ counts without access to the host state directory. A forwarded stop reports one 
 three outcomes:
 
 - **stopped** — prints `Stopped babysitting PR #<pr> on the host.` and exits 0; the
-  host state file is gone.
+  host state file is gone. A recorded PID that is no longer running is treated as
+  gone: nothing is signalled, its stale lock is cleared and the state file is removed.
+  A lock naming a live supervisor for the PR, or an empty or unparseable lock, is
+  refused instead and nothing is changed (see **not stopped**).
 - **not stopped** — the host rejected the request, or no daemon is reachable on the
-  host event socket. Exit 1 with `not stopped: <reason>` (the reason is relayed
-  verbatim, e.g. `no supervisor found for PR #<pr>`, or the recorded supervisor
-  process could not be verified, so nothing was signalled) and the host command to
-  run, `cenci babysit stop <pr>`.
+  host event socket. Exit 1 with `not stopped: <reason>` and the host command to run,
+  `cenci babysit stop <pr>`. The reason is relayed verbatim for rejections such as
+  `no supervisor found for PR #<pr>`. A live PID that is not this PR's babysit
+  process, and a lock naming a live supervisor (or an empty or unparseable lock), both
+  arrive from a sandbox as the same fixed reason, that the recorded supervisor
+  process could not be verified; nothing is signalled and the state and lock are left
+  untouched. The literal `refusing to signal pid <n>` and `supervisor already
+  running for PR #<pr>` texts appear only when running `cenci babysit stop <pr>` or
+  `cenci babysit reset <pr>` on the host.
 - **stop status unknown** — the daemon sent no reply within 5s, or closed the
   connection without one (which is what a host daemon that predates the request
   does). Exit 1, with the same host command; the supervisor may or may not have been
@@ -2241,15 +2249,23 @@ budgets, whatever the launch reason) and clears the CI-cap markers `ciRepairPaus
 `ciCapNotified`. It keeps the feedback bookkeeping
 (`addressedCommentKeys`, `pendingCommentKeys`, `launchedFeedbackKeys`,
 `lastCommentTimestamp`) and `conflictRepairHeadSha`. A live supervisor is sent SIGTERM,
-awaited for up to 10s and its lock removed first; the reset then re-arms through the
-normal arming path with the recorded agent, interval (15m when none was recorded),
-launch session and launch directory, and prints `Reset the retry budget for PR #<pr>.`.
+awaited for up to 10s and its lock removed first. A recorded PID that is no longer
+running (for example after a reboot) is treated as gone: nothing is signalled, its
+stale lock is cleared before the reset re-arms and a note goes to stderr. The reset then
+re-arms through the normal arming path with the recorded agent, interval (15m when none
+was recorded), launch session and launch directory, and prints
+`Reset the retry budget for PR #<pr>.`.
 It refuses, changing nothing and exiting 1, when no supervisor exists
 (`no supervisor found for PR #<pr>`), the state cannot be read or decoded, the recorded
-PID is not this PR's babysit process (`refusing to signal pid <n>`), the supervisor did
-not exit in time (`supervisor for PR #<pr> did not exit`), a lock exists with no
-recorded PID (`supervisor already running for PR #<pr>`), or the command runs inside a
-supervisor (`CENCI_BABYSIT_SUPERVISOR` set). A recorded agent that arming would refuse
+PID is a live process that is not this PR's babysit process (`refusing to signal pid
+<n>`), the supervisor did not exit in time (`supervisor for PR #<pr> did not exit`), a
+lock exists with no recorded PID (`supervisor already running for PR #<pr>`), or the
+command runs inside a supervisor (`CENCI_BABYSIT_SUPERVISOR` set). With a gone
+recorded PID it also refuses, with the same `supervisor already running for PR #<pr>`
+text, when the lock names a live supervisor for the PR or is empty or unparseable.
+An empty or unparseable lock is refused because an arm may be writing its PID; to
+recover, confirm no supervisor is running for the PR and delete the lock file (next
+to the state file, with a `.lock` suffix). A recorded agent that arming would refuse
 (for example OpenCode, or an agent missing an arm-time workflow) exits 2 before any
 write or signal; a malformed invocation (no PR, a PR that is not a positive integer,
 extra arguments) also exits 2. If the budget was zeroed but re-arming failed, it exits

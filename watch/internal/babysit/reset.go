@@ -34,9 +34,18 @@ const defaultResetInterval = 15 * time.Minute
 // ciRepairPending, lastRepairedCiHeadSha, conflictFixAttempts,
 // conflictNotifiedHeadSha) and the two CI-cap episode markers (ciRepairPaused,
 // ciCapNotified, #1456); feedback bookkeeping and conflictRepairHeadSha are
-// kept. A CI-paused supervisor keeps its pid while paused, so it takes the same
-// path as any live supervisor: one that processOwned verifies is sent SIGTERM
-// and awaited for resetExitWait.
+// kept. A CI-paused supervisor keeps its pid while paused, so a recorded pid
+// has three outcomes (#1490):
+//   - owned and live: processOwned verifies it, it is sent SIGTERM and awaited
+//     for resetExitWait.
+//   - gone: processOwned is false and processGone proves the pid no longer
+//     exists (ESRCH), e.g. after a reboot. Nothing is signalled; the stale lock
+//     is cleared (unless it names a live supervisor for the PR or cannot be
+//     parsed, which refuses with "supervisor already running"), a stderr note
+//     says so, and the reset carries on as if no pid were recorded.
+//   - live but not ours: any other probe result is refused ("refusing to
+//     signal pid") with state and lock untouched.
+//
 // The supervisor has no SIGTERM handler, so its deferred lock removal never
 // runs and Reset removes the lock itself. refusal is the CLI's agent check
 // (babysitAgentRefusal); it lives in package main, so it is passed in and
@@ -46,7 +55,12 @@ const defaultResetInterval = 15 * time.Minute
 // Reset refuses when CENCI_BABYSIT_SUPERVISOR is set. Accepted race: a reset
 // that lands between another arm's parent save and its child taking the lock
 // (pid 0, no lock yet) can start a second child, but the child's O_EXCL lock
-// open fails, so only one supervisor survives.
+// open fails, so only one supervisor survives. The gone path accepts the same
+// race: a child that takes the lock after clearStaleLock found none loses its
+// O_EXCL open to whichever supervisor Reset starts, or the reverse. Likewise
+// clearStaleLock reads the lock and then removes it by path, so a lock created
+// by a concurrent arm between the read and the remove can be deleted too; the
+// losing child's O_EXCL open is the backstop.
 func Reset(pr, explicit string, refusal func(agent string) string) error {
 	cleanPR := strings.TrimPrefix(pr, "#")
 	if os.Getenv("CENCI_SANDBOX") == "1" {
@@ -84,18 +98,28 @@ func Reset(pr, explicit string, refusal func(agent string) string) error {
 
 	if s.PID > 0 {
 		if !processOwned(s.PID, cleanPR) {
-			return &classifiedError{class: ErrSupervisorUnverified, msg: fmt.Sprintf("refusing to signal pid %d: it is not the recorded cenci babysit process", s.PID)}
-		}
-		if err := terminateAndWait(s.PID, cleanPR); err != nil {
-			return err
-		}
-		if err := os.Remove(lockPath); err != nil && !os.IsNotExist(err) {
-			return err
-		}
-		// Re-read only now: the supervisor may have saved while it was dying,
-		// and zeroing the first read would overwrite that with stale data.
-		if s, err = readStateStrict(path); err != nil {
-			return err
+			if !processGone(s.PID) {
+				return &classifiedError{class: ErrSupervisorUnverified, msg: fmt.Sprintf("refusing to signal pid %d: it is not the recorded cenci babysit process", s.PID)}
+			}
+			// Gone: nothing is signalled and nothing was dying, so the first
+			// strict read stays current (no re-read). The stale lock goes
+			// before the state is saved and Run re-arms.
+			if err := clearStaleLock(lockPath, cleanPR); err != nil {
+				return err
+			}
+			fmt.Fprintln(os.Stderr, staleStateNote(s.PID, cleanPR))
+		} else {
+			if err := terminateAndWait(s.PID, cleanPR); err != nil {
+				return err
+			}
+			if err := os.Remove(lockPath); err != nil && !os.IsNotExist(err) {
+				return err
+			}
+			// Re-read only now: the supervisor may have saved while it was dying,
+			// and zeroing the first read would overwrite that with stale data.
+			if s, err = readStateStrict(path); err != nil {
+				return err
+			}
 		}
 	} else if _, err := os.Stat(lockPath); err == nil {
 		owner, _ := os.ReadFile(lockPath)
