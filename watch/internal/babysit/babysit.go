@@ -689,21 +689,22 @@ func tick(s *State) (bool, time.Duration, error) {
 				return false, 0, err
 			}
 			return false, 0, errNeedsInput
-		} else {
-			prompt := fmt.Sprintf("PR #%s (%s) has failing CI checks: %s. Diagnose, fix, test, commit, and push without force-pushing.", s.PR, pr.HeadRefName, strings.Join(failing, ", "))
-			if err := launch(s, "ci-repair", prompt); err != nil {
-				recordUpstreamReadFailure(s, reasonWorkflowLaunchFailed, err)
-				return false, 0, err
-			}
 		}
-		// Consume the CI retry budget and dedup marker only for work dispatched.
-		s.FixAttempts++
-		s.RepairPending = true
-		s.LastHeadSHA = pr.HeadRefOID
-		// #1169: LastRepairedSHA is the dispatch guard's own dedup marker --
-		// distinct from LastHeadSHA above, which the reset branch below
-		// keeps advancing for its unrelated retry-budget-reset job.
-		s.LastRepairedSHA = pr.HeadRefOID
+		dispatched, err := dispatchCIRepair(s, pr, failing)
+		if err != nil {
+			recordUpstreamReadFailure(s, reasonWorkflowLaunchFailed, err)
+			return false, 0, err
+		}
+		if dispatched {
+			// Consume the CI retry budget and dedup marker only for work dispatched.
+			s.FixAttempts++
+			s.RepairPending = true
+			s.LastHeadSHA = pr.HeadRefOID
+			// #1169: LastRepairedSHA is the dispatch guard's own dedup marker --
+			// distinct from LastHeadSHA above, which the reset branch below
+			// keeps advancing for its unrelated retry-budget-reset job.
+			s.LastRepairedSHA = pr.HeadRefOID
+		}
 		actionable = true
 	} else if !conflictHeld && pr.HeadRefOID != s.LastHeadSHA {
 		// Only green CI at a new head proves a repair succeeded. Keep the
@@ -887,6 +888,48 @@ func tick(s *State) (bool, time.Duration, error) {
 	return false, time.Duration(s.CurrentDelaySeconds) * time.Second, nil
 }
 
+// dispatchCIRepair starts one finite ci-repair worker for the failing checks
+// and reports whether an attempt was dispatched (#1455). The argument leads
+// with the PR number, so `cenci run` names the window `<PR>-ci-repair`; the
+// prose after it is unchanged. A live `<PR>-ci-repair` pane in the recorded
+// session means a repair is still executing: nothing is launched and no
+// attempt is consumed. An unreadable pane inventory is an error, a separate
+// return from "no live worker" (watch/docs/error-handling.md). With no recorded
+// session the probe is skipped, so launch() reports its own refusal. A
+// `cenci run` that spawned the window but failed its post-spawn setup (exit 3)
+// is a dispatched attempt: the worker is starting.
+func dispatchCIRepair(s *State, pr prView, failing []string) (bool, error) {
+	if s.LaunchSession != "" {
+		active, err := ciRepairActive(s.LaunchSession, s.PR)
+		if err != nil {
+			return false, err
+		}
+		if active {
+			fmt.Printf("PR #%s has failing CI checks at head commit %s; ci-repair window %s-ci-repair is still running, no new window opened\n", s.PR, pr.HeadRefOID, s.PR)
+			return false, nil
+		}
+	}
+	prompt := fmt.Sprintf("%s PR #%s (%s) has failing CI checks: %s. Diagnose, fix, test, commit, and push without force-pushing.", s.PR, s.PR, pr.HeadRefName, strings.Join(failing, ", "))
+	if err := launch(s, "ci-repair", prompt); err != nil {
+		if !errors.Is(err, errWindowSpawned) {
+			return false, err
+		}
+		fmt.Printf("warning: PR #%s: %v; the ci-repair window was spawned, counting the attempt as dispatched\n", s.PR, err)
+	}
+	return true, nil
+}
+
+// cenciRunExitWindowSpawned is the `cenci run` exit status for "the window was
+// spawned but its post-spawn setup failed" (run.ErrWindowSpawned, mapped in
+// watch/run_cmd.go). Duplicated rather than imported: internal/run imports
+// internal/daemon, which imports this package.
+const cenciRunExitWindowSpawned = 3
+
+// errWindowSpawned is wrapped by launch() when `cenci run` exits
+// cenciRunExitWindowSpawned. Only the ci-repair call site reads it as
+// dispatched; every other caller still sees a failed launch.
+var errWindowSpawned = errors.New("window spawned but its post-spawn setup failed")
+
 // launch dispatches workflow via a self-exec of `cenci run`, targeting the
 // tmux session recorded at arm time (#975) rather than inheriting whatever
 // $TMUX_PANE/cwd happen to be live when this tick's launch actually fires --
@@ -897,7 +940,8 @@ func tick(s *State) (bool, time.Duration, error) {
 // session, never creating one (ticket Decision). The probe-error and
 // session-absent branches are kept as separate returns
 // (watch/docs/error-handling.md's rule against collapsing "probe errored"
-// into "condition false").
+// into "condition false"). A `cenci run` exit status 3 (window spawned,
+// post-spawn setup failed) returns an error wrapping errWindowSpawned.
 func launch(s *State, workflow, arg string) error {
 	if s.LaunchSession == "" {
 		return fmt.Errorf("launch %s: no tmux session was recorded at arm time; re-arm from a host tmux pane", workflow)
@@ -922,6 +966,10 @@ func launch(s *State, workflow, arg string) error {
 	}
 	out, err := command(os.Args[0], args...)
 	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == cenciRunExitWindowSpawned {
+			return fmt.Errorf("launch %s: %s: %w: %w", workflow, strings.TrimSpace(string(out)), err, errWindowSpawned)
+		}
 		return fmt.Errorf("launch %s: %s: %w", workflow, strings.TrimSpace(string(out)), err)
 	}
 	return nil

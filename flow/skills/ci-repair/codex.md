@@ -13,9 +13,12 @@ commits, pushes and writes the checkpoint; workers never push.
 
 ## Inputs
 
-The launch argument is the supervisor's prose prompt (`PR #<n> (<branch>) has failing CI checks: ...`)
-or the manual `<pr> <branch> <checks>` form. Take only the PR number from it and validate it against
-`^[1-9][0-9]*$`; an invalid number stops the run with no write. Derive `owner/repo` from
+The launch argument is the supervisor's prose prompt (`<n> PR #<n> (<branch>) has failing CI checks: ...`)
+or the manual `<pr> <branch> <checks>` form. The supervisor puts the PR number first so the window is named
+`<n>-ci-repair`; take the leading token as the PR number and ignore the prose after it for identity. Validate it
+against `^[1-9][0-9]*$`; an invalid number stops the run with no write.
+This run is one-shot: it never waits for input and ends with a reported outcome (success, a blocked or failed
+repair, or a permission denial) that returns control to the supervisor. Derive `owner/repo` from
 `git remote get-url origin`: strip one trailing `.git`, accept only the https form
 `https://github.com/<owner>/<repo>` or the ssh forms `git@github.com:<owner>/<repo>` and
 `ssh://git@github.com/<owner>/<repo>`, reduce it to `<owner>/<repo>` and validate that against

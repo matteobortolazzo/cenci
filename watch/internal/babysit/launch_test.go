@@ -13,12 +13,14 @@ package babysit
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -757,6 +759,68 @@ func TestLaunchRefusalLeavesRepairStateUnchanged(t *testing.T) {
 			}
 			if s.AutomergeReason != reasonWorkflowLaunchFailed {
 				t.Fatalf("AutomergeReason = %q, want %q", s.AutomergeReason, reasonWorkflowLaunchFailed)
+			}
+		})
+	}
+}
+
+// #1455 AC1/AC2: the ci-repair launch argument starts with the PR number, so
+// `cenci run` names the window `42-ci-repair`; the prose after it is today's
+// diagnostic text byte-for-byte, whatever the branch and check names hold.
+func TestLaunchCIRepairArgumentIsNumericFirst(t *testing.T) {
+	const branch = "fix/closes-7 it's $HOME `id` (x)"
+	pr, err := json.Marshal(map[string]any{
+		"number": 42, "title": "Change", "state": "OPEN", "headRefName": branch, "headRefOid": "abc",
+		"url": "https://example/pr/42", "closingIssuesReferences": []map[string]any{{"number": 7}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	checks := `[{"bucket":"fail","name":"lint","state":"FAILURE"},{"bucket":"fail","name":"test (3.11)","state":"FAILURE"},{"bucket":"fail","name":"e2e #2","state":"FAILURE"},{"bucket":"pass","name":"py3.11-shard-2","state":"SUCCESS"}]`
+	var calls [][]string
+	withCommands(t, []string{string(pr), checks, `[]`, `[]`}, &calls)
+	s := State{
+		PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 300, CurrentDelaySeconds: 900,
+		LaunchSession: "work", LaunchDir: "/repo/root",
+	}
+
+	if _, _, err := tick(&s); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	got, found := launchCallArgs(calls, "ci-repair")
+	if !found {
+		t.Fatalf("no ci-repair launch: %#v", calls)
+	}
+	want := []string{os.Args[0], "run", "ci-repair",
+		"42 PR #42 (" + branch + ") has failing CI checks: lint, test (3.11), e2e #2. Diagnose, fix, test, commit, and push without force-pushing.",
+		"--agent", "codex", "--session", "work", "--dir", "/repo/root"}
+	if !slices.Equal(got, want) {
+		t.Errorf("cenci run argv =\n %q\nwant\n %q", got, want)
+	}
+}
+
+// #1455: `cenci run` exit status 3 (window spawned, post-spawn setup failed)
+// wraps errWindowSpawned; any other failure does not.
+func TestLaunchExitThreeWrapsErrWindowSpawned(t *testing.T) {
+	for _, tc := range []struct {
+		code int
+		want bool
+	}{{3, true}, {1, false}, {2, false}} {
+		t.Run(strconv.Itoa(tc.code), func(t *testing.T) {
+			var calls [][]string
+			withCommands(t, nil, &calls)
+			stubCenciRunExit(t, &calls, tc.code, "cenci run: failed")
+			s := State{PR: "42", Agent: "claude", LaunchSession: "work"}
+
+			err := launch(&s, "ci-repair", "42 x")
+			if err == nil {
+				t.Fatal("launch: err = nil, want the non-zero cenci run exit")
+			}
+			if got := errors.Is(err, errWindowSpawned); got != tc.want {
+				t.Errorf("errors.Is(%v, errWindowSpawned) = %v, want %v", err, got, tc.want)
+			}
+			if !strings.Contains(err.Error(), "cenci run: failed") {
+				t.Errorf("err = %q, want cenci run's output kept", err)
 			}
 		})
 	}

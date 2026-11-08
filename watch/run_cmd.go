@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -62,6 +63,12 @@ func runRun(args []string) {
 
 	if err := run.Run(opts, &tmux.ExecClient{}); err != nil {
 		fmt.Fprintf(os.Stderr, "cenci run: %v\n", err)
+		// Exit 3: the window was spawned but its post-spawn setup failed
+		// (#1455). A self-exec caller (babysit) cannot see the Go sentinel, so
+		// the status is its only signal that an agent session is starting.
+		if errors.Is(err, run.ErrWindowSpawned) {
+			os.Exit(3)
+		}
 		os.Exit(1)
 	}
 }

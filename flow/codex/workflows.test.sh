@@ -102,7 +102,8 @@ done
 # Inputs: owner/repo derivation from the origin URL and a failed `gh` read (finding: a failed read must
 # stop as a read failure, never be reported as "no failing check").
 inputs="$(section "$repair" '## Inputs')"
-for phrase in 'strip one trailing `.git`' 'https://github.com/<owner>/<repo>' 'git@github.com:<owner>/<repo>' \
+for phrase in '`<n> PR #<n> (<branch>) has failing CI checks: ...`' 'leading token' \
+  'strip one trailing `.git`' 'https://github.com/<owner>/<repo>' 'git@github.com:<owner>/<repo>' \
   'any other shape stops' \
   'could not read PR state' 'non-zero exit' 'empty output' 'not valid JSON' 'never reported as "no failing check"' \
   'exits 8 while checks are pending'; do

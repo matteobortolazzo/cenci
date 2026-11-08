@@ -48,6 +48,29 @@ func (t WorkflowTemplate) portable() WorkflowTemplate {
 	return t
 }
 
+// printMode makes a Claude workflow one-shot (#1455): print mode on host
+// (`claude --print -- <prompt>`) and through `cenci open -- --print <prompt>`,
+// the placement merge-repair already uses, so the session exits once the
+// procedure reports its outcome instead of waiting at a prompt. Used only as
+// `claudeWF("<wf>").printMode()`, keeping the parsed call shape intact.
+func (t WorkflowTemplate) printMode() WorkflowTemplate {
+	prompt := t.Args[len(t.Args)-1]
+	t.Args = []string{"--print", "--", prompt}
+	t.SandboxArgs = []string{"--", "--print", prompt}
+	return t
+}
+
+// execMode makes a Codex workflow one-shot (#1455): `codex exec <prompt>` on
+// host and `cenci open --agent codex -- exec <prompt>` in the sandbox, where
+// the launcher places its agent flags after the leading `exec`. Used only as
+// `codexWF("<wf>").execMode()`, keeping the parsed call shape intact.
+func (t WorkflowTemplate) execMode() WorkflowTemplate {
+	prompt := t.Args[len(t.Args)-1]
+	t.Args = []string{"exec", prompt}
+	t.SandboxArgs = []string{"--agent", "codex", "--", "exec", prompt}
+	return t
+}
+
 // AgentConfig describes how to launch one agent CLI.
 type AgentConfig struct {
 	// Command is the host executable, e.g. "claude". Multi-token commands
@@ -58,7 +81,8 @@ type AgentConfig struct {
 	// whitespace-only) fails closed instead of falling back to the host command.
 	SandboxCommand string `json:"sandboxCommand"`
 	// Model, when set, is injected: substituted into any {model} placeholder,
-	// otherwise appended as "--model <model>". A specific model value is never
+	// otherwise appended as "--model <model>" (after a leading `exec` on a host
+	// Codex launch, #1455). A specific model value is never
 	// hardcoded in the built-ins — it is purely a config/flag concern.
 	Model string `json:"model"`
 	// Workflows maps a workflow name (refine/implement/...) to its template.
@@ -246,6 +270,8 @@ func CapabilityTableMarkdown() string {
 // matching cenci skill, with `cenci open` as their sandbox command. Claude's
 // sandbox launch is `cenci open -- <prompt>`; Codex's is `cenci open --agent
 // codex -- <prompt>` (its SandboxArgs), since `cenci open` defaults to Claude.
+// ci-repair (printMode/execMode) and merge-repair are the one-shot exceptions:
+// Claude print mode and `codex exec`, which exit once the procedure ends.
 // Fresh maps are constructed on each call so callers may mutate the result freely.
 func builtinConfig() FileConfig {
 	claudeWF := func(wf string) WorkflowTemplate {
@@ -279,7 +305,9 @@ func builtinConfig() FileConfig {
 					"address-review":    claudeWF("address-review"),
 					"babysit":           claudeWF("babysit"),
 					"babysit-attention": claudeWF("babysit-attention"),
-					"ci-repair":         claudeWF("ci-repair"),
+					// CI repair is a finite worker (#1455): babysit reads a live
+					// `<PR>-ci-repair` pane as a repair still executing.
+					"ci-repair": claudeWF("ci-repair").printMode(),
 					// Babysit selects Claude Opus explicitly for conflict repair,
 					// regardless of the client that originally armed supervision.
 					"merge-repair": {
@@ -299,7 +327,8 @@ func builtinConfig() FileConfig {
 					"refactor": codexWF("refactor"), "sync": codexWF("sync"),
 					"maintain": codexWF("maintain"),
 					// Babysit has no codex.md: it runs from its portable SKILL.md.
-					"babysit": codexWF("babysit").portable(), "babysit-attention": codexWF("babysit-attention"), "ci-repair": codexWF("ci-repair"),
+					// CI repair is a finite `codex exec` worker (#1455).
+					"babysit": codexWF("babysit").portable(), "babysit-attention": codexWF("babysit-attention"), "ci-repair": codexWF("ci-repair").execMode(),
 				},
 			},
 			// OpenCode is disabled (see DisabledAgent). The entry keeps its
@@ -461,6 +490,12 @@ func (fc FileConfig) BuildCommand(agent, workflow, ticket, model string, sandbox
 	// a single nonexistent program word.
 	argv := strings.Fields(cmd)
 	if model != "" && !usedModelPlaceholder {
+		// A host `codex exec` launch takes the model after `exec` (#1455), the
+		// position the sandbox launcher also uses; `cenci open` places it itself.
+		if agent == "codex" && !sandbox && len(rest) > 0 && rest[0] == "exec" {
+			argv = append(argv, "exec", "--model", model)
+			return append(argv, rest[1:]...), nil
+		}
 		argv = append(argv, "--model", model)
 	}
 	argv = append(argv, rest...)

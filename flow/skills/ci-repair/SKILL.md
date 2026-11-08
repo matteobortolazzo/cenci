@@ -15,6 +15,12 @@ source paths, and attempted fixes. Validate its evidence before applying advice.
 This does not add repair attempts or defer the ambiguity stop below; if that stop
 already applies, return the diagnosis through it without another fix attempt.
 
+The babysit supervisor launches this procedure with the prose argument
+`<n> PR #<n> (<branch>) has failing CI checks: ...`: the leading token is the PR number (it names the
+`<n>-ci-repair` window) and the prose follows. Take the leading token as the PR number; the manual
+`<pr-number> <head-branch> <failing-checks>` form still works. The run is one-shot (finite): it never waits
+for input and ends with a reported outcome (success, a blocked or failed repair, or a permission denial).
+
 Read `project-core`, `testing`, `shell-rules`, and `subagent-safety`. Diagnose the named
 failing jobs, work only in the PR branch worktree, reproduce the root cause locally, make
 the smallest test-backed fix, verify the fix is green via the project's local gate

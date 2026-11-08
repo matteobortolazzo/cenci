@@ -28,11 +28,14 @@ import (
 func TestMain(m *testing.M) {
 	original := fleetConfigPath
 	originalRepairActive := mergeRepairActive
+	originalCIRepairActive := ciRepairActive
 	fleetConfigPath = func() string { return "" }
 	mergeRepairActive = func(string, string) (bool, error) { return false, nil }
+	ciRepairActive = func(string, string) (bool, error) { return false, nil }
 	code := m.Run()
 	fleetConfigPath = original
 	mergeRepairActive = originalRepairActive
+	ciRepairActive = originalCIRepairActive
 	os.Exit(code)
 }
 
@@ -164,6 +167,7 @@ func withCommands(t *testing.T, responses []string, calls *[][]string) {
 	originalCurrentTmuxSession := currentTmuxSession
 	originalTmuxHasSession := tmuxHasSession
 	originalRepairActive := mergeRepairActive
+	originalCIRepairActive := ciRepairActive
 	i := 0
 	command = func(name string, args ...string) ([]byte, error) {
 		*calls = append(*calls, append([]string{name}, args...))
@@ -181,12 +185,14 @@ func withCommands(t *testing.T, responses []string, calls *[][]string) {
 	currentTmuxSession = func() (string, error) { return "test-session", nil }
 	tmuxHasSession = func(string) (bool, error) { return true, nil }
 	mergeRepairActive = func(string, string) (bool, error) { return false, nil }
+	ciRepairActive = func(string, string) (bool, error) { return false, nil }
 	t.Cleanup(func() {
 		command = originalCommand
 		execGh = originalExecGh
 		currentTmuxSession = originalCurrentTmuxSession
 		tmuxHasSession = originalTmuxHasSession
 		mergeRepairActive = originalRepairActive
+		ciRepairActive = originalCIRepairActive
 	})
 }
 
@@ -4177,5 +4183,217 @@ func TestPackageHasNoDecideWhetherToRetryWording(t *testing.T) {
 		if strings.Contains(string(b), needle) {
 			t.Errorf("%s still contains %q", f, needle)
 		}
+	}
+}
+
+// -- #1455: finite ci-repair workers -----------------------------------------
+
+// ciRepairTickResponses scripts one failing-checks tick at headSHA (pr view,
+// checks, comments, reviews).
+func ciRepairTickResponses(headSHA string) []string {
+	return []string{cleanOpenPR(headSHA), `[{"bucket":"fail","name":"test","state":"FAILURE"}]`, `[]`, `[]`}
+}
+
+// ciRepairSeedState is a supervisor with one repair already dispatched at an
+// older head, so a dispatch, a refusal and a suppression are all observable on
+// the four repair fields.
+func ciRepairSeedState() State {
+	return State{
+		PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 900,
+		LastHeadSHA: "sha-old", LastRepairedSHA: "sha-old", FixAttempts: 1, RepairPending: true,
+		LaunchSession: "work", LaunchDir: "/repo/root",
+	}
+}
+
+// assertCIRepairFieldsUnchanged compares the four ci-repair bookkeeping fields.
+func assertCIRepairFieldsUnchanged(t *testing.T, got, want State) {
+	t.Helper()
+	if got.FixAttempts != want.FixAttempts || got.RepairPending != want.RepairPending ||
+		got.LastHeadSHA != want.LastHeadSHA || got.LastRepairedSHA != want.LastRepairedSHA {
+		t.Errorf("repair fields = {FixAttempts:%d RepairPending:%v LastHeadSHA:%q LastRepairedSHA:%q}, want unchanged {%d %v %q %q}",
+			got.FixAttempts, got.RepairPending, got.LastHeadSHA, got.LastRepairedSHA,
+			want.FixAttempts, want.RepairPending, want.LastHeadSHA, want.LastRepairedSHA)
+	}
+}
+
+// A live `<PR>-ci-repair` worker in the recorded session suppresses another
+// launch: no `cenci run`, no attempt consumed, and the tick stays actionable so
+// the supervisor keeps polling at its interval.
+func TestTickCIRepairLiveWorkerSuppressesDispatch(t *testing.T) {
+	var calls [][]string
+	withCommands(t, ciRepairTickResponses("sha-new"), &calls)
+	var probed []string
+	ciRepairActive = func(session, pr string) (bool, error) {
+		probed = append(probed, session+"/"+pr)
+		return true, nil
+	}
+	s := ciRepairSeedState()
+	before := s
+
+	if _, _, err := tick(&s); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	if n := countWorkflowLaunches(calls, "ci-repair"); n != 0 {
+		t.Fatalf("ci-repair launches = %d, want 0 while 42-ci-repair is live: %#v", n, calls)
+	}
+	if !reflect.DeepEqual(probed, []string{"work/42"}) {
+		t.Errorf("probed %v, want exactly the recorded session and PR [work/42]", probed)
+	}
+	assertCIRepairFieldsUnchanged(t, s, before)
+	if s.CurrentDelaySeconds != s.IntervalSeconds {
+		t.Errorf("CurrentDelaySeconds = %d, want %d: a live repair keeps the tick actionable", s.CurrentDelaySeconds, s.IntervalSeconds)
+	}
+}
+
+// An unreadable pane inventory fails closed: no launch, no attempt consumed,
+// and the tick records reasonWorkflowLaunchFailed with the probe error.
+func TestTickCIRepairProbeErrorRefusesDispatch(t *testing.T) {
+	withFleetAutomergeEnabled(t, true)
+	var calls [][]string
+	withCommands(t, ciRepairTickResponses("sha-new"), &calls)
+	ciRepairActive = func(string, string) (bool, error) {
+		return false, errors.New("observe ci-repair in tmux session \"work\": malformed pane inventory")
+	}
+	s := ciRepairSeedState()
+	before := s
+
+	_, _, err := tick(&s)
+	if err == nil || !strings.Contains(err.Error(), "malformed pane inventory") {
+		t.Fatalf("tick err = %v, want the probe failure", err)
+	}
+	if n := countWorkflowLaunches(calls, "ci-repair"); n != 0 {
+		t.Fatalf("ci-repair launches = %d, want 0 on an unreadable inventory: %#v", n, calls)
+	}
+	assertCIRepairFieldsUnchanged(t, s, before)
+	if s.AutomergeReason != reasonWorkflowLaunchFailed {
+		t.Errorf("AutomergeReason = %q, want %q", s.AutomergeReason, reasonWorkflowLaunchFailed)
+	}
+}
+
+// With no recorded session the probe is never consulted; launch() reports its
+// own "no tmux session was recorded" refusal and nothing is consumed.
+func TestTickCIRepairNoSessionSkipsProbe(t *testing.T) {
+	withFleetAutomergeEnabled(t, true)
+	var calls [][]string
+	withCommands(t, ciRepairTickResponses("sha-new"), &calls)
+	ciRepairActive = func(string, string) (bool, error) {
+		t.Error("ciRepairActive consulted without a recorded session")
+		return false, nil
+	}
+	s := ciRepairSeedState()
+	s.LaunchSession = ""
+	before := s
+
+	_, _, err := tick(&s)
+	if err == nil || !strings.Contains(err.Error(), "no tmux session was recorded") {
+		t.Fatalf("tick err = %v, want launch()'s no-session refusal", err)
+	}
+	assertCIRepairFieldsUnchanged(t, s, before)
+	if s.AutomergeReason != reasonWorkflowLaunchFailed {
+		t.Errorf("AutomergeReason = %q, want %q", s.AutomergeReason, reasonWorkflowLaunchFailed)
+	}
+}
+
+// stubCenciRunExit makes the `cenci run` self-exec exit with code (a real
+// *exec.ExitError), printing msg; every other command succeeds. Calls are
+// recorded like withCommands does.
+func stubCenciRunExit(t *testing.T, calls *[][]string, code int, msg string) {
+	t.Helper()
+	original := command
+	command = func(name string, args ...string) ([]byte, error) {
+		*calls = append(*calls, append([]string{name}, args...))
+		if len(args) > 0 && args[0] == "run" {
+			return exec.Command("sh", "-c", `printf '%s\n' "$1"; exit "$2"`, "sh", msg, fmt.Sprint(code)).CombinedOutput()
+		}
+		return []byte(""), nil
+	}
+	t.Cleanup(func() { command = original })
+}
+
+// `cenci run` exit 3 means the window was spawned but its post-spawn setup
+// failed: babysit counts the attempt as dispatched, and the next tick at the
+// same head starts no second ci-repair window.
+func TestTickCIRepairWindowSpawnedCountsAsDispatched(t *testing.T) {
+	var calls [][]string
+	withCommands(t, append(ciRepairTickResponses("sha-new"), ciRepairTickResponses("sha-new")...), &calls)
+	stubCenciRunExit(t, &calls, 3, "cenci run: setting automatic-rename off on \"work:42-ci-repair\": boom: tmux window already spawned")
+	s := ciRepairSeedState()
+
+	restore := captureStdout(t)
+	_, _, err := tick(&s)
+	stdout := restore()
+	if err != nil {
+		t.Fatalf("tick 1: %v, want a spawned window counted as dispatched", err)
+	}
+	if n := countWorkflowLaunches(calls, "ci-repair"); n != 1 {
+		t.Fatalf("tick 1: ci-repair launches = %d, want 1: %#v", n, calls)
+	}
+	if s.FixAttempts != 2 || !s.RepairPending || s.LastRepairedSHA != "sha-new" {
+		t.Fatalf("tick 1: FixAttempts/RepairPending/LastRepairedSHA = %d/%v/%q, want 2/true/sha-new", s.FixAttempts, s.RepairPending, s.LastRepairedSHA)
+	}
+	if !strings.Contains(stdout, "warning") || !strings.Contains(stdout, "automatic-rename") {
+		t.Errorf("stdout = %q, want a warning carrying cenci run's post-spawn failure", stdout)
+	}
+
+	if _, _, err := tick(&s); err != nil {
+		t.Fatalf("tick 2: %v", err)
+	}
+	if n := countWorkflowLaunches(calls, "ci-repair"); n != 1 {
+		t.Fatalf("tick 2 at the same head: ci-repair launches = %d total, want still 1: %#v", n, calls)
+	}
+	if s.FixAttempts != 2 {
+		t.Errorf("tick 2: FixAttempts = %d, want unchanged 2", s.FixAttempts)
+	}
+}
+
+// Any other `cenci run` failure is still a pre-spawn refusal: nothing consumed.
+func TestTickCIRepairOrdinaryLaunchFailureConsumesNothing(t *testing.T) {
+	withFleetAutomergeEnabled(t, true)
+	var calls [][]string
+	withCommands(t, ciRepairTickResponses("sha-new"), &calls)
+	stubCenciRunExit(t, &calls, 1, "cenci run: codex adapter unavailable")
+	s := ciRepairSeedState()
+	before := s
+
+	if _, _, err := tick(&s); err == nil {
+		t.Fatal("tick: err = nil, want the exit-1 launch failure")
+	}
+	assertCIRepairFieldsUnchanged(t, s, before)
+	if s.AutomergeReason != reasonWorkflowLaunchFailed {
+		t.Errorf("AutomergeReason = %q, want %q", s.AutomergeReason, reasonWorkflowLaunchFailed)
+	}
+}
+
+// Exit 3 counts as dispatched for ci-repair only: an address-review launch
+// that exits 3 is still a failed launch, so its keys stay unlaunched.
+func TestTickWindowSpawnedIsStillAFailureOutsideCIRepair(t *testing.T) {
+	var calls [][]string
+	withCommands(t, []string{openPR(), `[]`, `[{"id":7,"updated_at":"2026-01-02T00:00:00Z","user":{"login":"reviewer"}}]`, `[]`, unresolvedThreadFor(7)}, &calls)
+	stubCenciRunExit(t, &calls, 3, "cenci run: tmux window already spawned")
+	s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 300, CurrentDelaySeconds: 900, LaunchSession: "work"}
+
+	if _, _, err := tick(&s); err == nil {
+		t.Fatal("tick: err = nil, want an address-review exit 3 to stay a launch failure")
+	}
+	if len(s.LaunchedKeys) != 0 {
+		t.Errorf("LaunchedKeys = %v, want none after a failed address-review launch", s.LaunchedKeys)
+	}
+}
+
+// The retry-cap path is not guarded and still launches the interactive
+// babysit-attention with its unchanged argument.
+func TestTickCIRetryCapLaunchesAttentionUnchanged(t *testing.T) {
+	var calls [][]string
+	withCommands(t, ciRepairTickResponses("sha-new"), &calls)
+	ciRepairActive = func(string, string) (bool, error) { return true, nil }
+	s := ciRepairSeedState()
+	s.FixAttempts = fixCap
+
+	if _, _, err := tick(&s); !errors.Is(err, errNeedsInput) {
+		t.Fatalf("tick err = %v, want errNeedsInput", err)
+	}
+	arg, ok := launchArg(calls, "babysit-attention")
+	if !ok || arg != "42 CI retry cap reached" {
+		t.Errorf("babysit-attention arg = %q (found %v), want %q", arg, ok, "42 CI retry cap reached")
 	}
 }

@@ -725,8 +725,8 @@ checkpoint_state() {
 
 # ── Scenario: ci-repair ─────────────────────────────────────────────────
 prompt_ci() {
-    printf '$cenci:ci-repair PR #%s (%s) has failing CI checks: %s. Diagnose, fix, test, commit, and push without force-pushing.' \
-        "${PR_NUMBER}" "${PR_BRANCH}" "${CHECK_NAME}"
+    printf '$cenci:ci-repair %s PR #%s (%s) has failing CI checks: %s. Diagnose, fix, test, commit, and push without force-pushing.' \
+        "${PR_NUMBER}" "${PR_NUMBER}" "${PR_BRANCH}" "${CHECK_NAME}"
 }
 
 INITIAL_HEAD=""
