@@ -120,6 +120,12 @@ cases:
     step: extra
     paths: [watch/main.go]
     expect: {watch: 'false'}
+  - name: watch-extra-sandbox-base
+    workflow: watch-ci.yml
+    job: changes
+    step: extra
+    paths: [sandbox/Dockerfile.base]
+    expect: {watch: 'true'}
 
   # ── sandbox-ci.yml: `code` (predicate-quantifier: every) ──────────────────
   - name: sandbox-code-agents-md-alone

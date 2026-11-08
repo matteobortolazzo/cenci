@@ -60,6 +60,10 @@ func (e *Engine) PruneWithReader(images, volumes bool, reader *bufio.Reader) err
 }
 
 func (e *Engine) prune(images, volumes bool, reader *bufio.Reader) error {
+	toolchain, err := toolchainTag(e.AssetDir)
+	if err != nil {
+		return err
+	}
 	_, _ = fmt.Fprintln(e.Stdout, "Removing superseded cenci-sandbox-base tags...")
 	out, err := exec.Command(e.Runtime, "images", "--format", "{{.Repository}}:{{.Tag}}", baseImageRepo).Output()
 	if err != nil {
@@ -67,7 +71,7 @@ func (e *Engine) prune(images, volumes bool, reader *bufio.Reader) error {
 		return fmt.Errorf("%s images: %w", e.Runtime, err)
 	}
 	for _, tag := range splitLines(string(out)) {
-		if tag == "" || tag == e.BaseImage() || tag == baseImageRepo+":latest" {
+		if tag == "" || tag == e.BaseImage() || tag == baseImageRepo+":latest" || tag == baseImageRepo+":"+toolchain {
 			continue
 		}
 		_, _ = fmt.Fprintf(e.Stdout, "  removing %s\n", tag)

@@ -369,16 +369,8 @@ func (e *Engine) ensureBaseImage() error {
 // building the base first if its current tag is missing. Agent CLIs live in
 // persistent home volumes and are never image build inputs.
 func (e *Engine) BuildMonolith() error {
-	if err := e.ensureBaseImage(); err != nil {
+	if err := e.buildDerivedImage(filepath.Join(e.AssetDir, "Dockerfile"), e.AssetDir, MonolithImage, false); err != nil {
 		return err
-	}
-	_, _ = fmt.Fprintf(e.Stdout, "Building %s with %s...\n", MonolithImage, e.Runtime)
-	args := []string{"build", "--build-arg", "BASE_VERSION=" + e.BaseTag,
-		"--label", imageAgentLifecycleLabel + "=" + imageAgentLifecycleValue,
-		"--label", imageBaseVersionLabel + "=" + e.BaseTag,
-		"-t", MonolithImage, "-f", filepath.Join(e.AssetDir, "Dockerfile"), e.AssetDir}
-	if err := e.command(args...).Run(); err != nil {
-		return fmt.Errorf("%s build %s: %w", e.Runtime, MonolithImage, err)
 	}
 	_, _ = fmt.Fprintln(e.Stdout, "Done.")
 	e.printPluginRefreshHint()
@@ -389,16 +381,8 @@ func (e *Engine) BuildMonolith() error {
 // BuildRepoImage builds a repo's own image from <repo-root>/.cenci/Dockerfile,
 // building the base first if its current tag is missing.
 func (e *Engine) BuildRepoImage(repoRoot, image string) error {
-	if err := e.ensureBaseImage(); err != nil {
+	if err := e.buildDerivedImage(filepath.Join(repoRoot, ".cenci", "Dockerfile"), filepath.Join(repoRoot, ".cenci"), image, true); err != nil {
 		return err
-	}
-	_, _ = fmt.Fprintf(e.Stdout, "Building %s with %s...\n", image, e.Runtime)
-	args := []string{"build", "--build-arg", "BASE_VERSION=" + e.BaseTag,
-		"--label", imageAgentLifecycleLabel + "=" + imageAgentLifecycleValue,
-		"--label", imageBaseVersionLabel + "=" + e.BaseTag,
-		"-t", image, "-f", filepath.Join(repoRoot, ".cenci", "Dockerfile"), filepath.Join(repoRoot, ".cenci")}
-	if err := e.command(args...).Run(); err != nil {
-		return fmt.Errorf("%s build %s: %w", e.Runtime, image, err)
 	}
 	_, _ = fmt.Fprintln(e.Stdout, "Done.")
 	e.printPluginRefreshHint()
