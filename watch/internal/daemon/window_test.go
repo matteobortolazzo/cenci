@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/ipc"
@@ -435,5 +437,35 @@ func TestDaemon_DaemonRestartStripsResidualSymbol(t *testing.T) {
 	d.handleEvent(ipc.HookEvent{EventType: "SessionEnd", SessionID: "sess1", TmuxPane: "%0"})
 	if len(mc.Renames) < 1 || mc.Renames[0].Name != "writing tests" {
 		t.Errorf("expected restore to 'writing tests', got %v", mc.Renames)
+	}
+}
+
+// Windows that share session:index across servers sort by that key and then by
+// socket, so the snapshot order is stable between broadcasts (the daemon builds
+// it from a map). The empty socket sorts first, leaving today's order for it. The
+// session ids are chosen so that sorting by session key would give the opposite
+// order from the socket order.
+func TestSnapshotOrdersSameIndexAcrossSocketsDeterministically(t *testing.T) {
+	mc := &tmuxtest.MockClient{Panes: []tmux.PaneInfo{claudePane("bash", "0", "%0", "default task")}}
+	d := newTestDaemon(mc)
+	dir := trustedSocketDir(t, d)
+	sockA, sockZ := filepath.Join(dir, "a"), filepath.Join(dir, "z")
+	mc.PanesBySocket = map[string][]tmux.PaneInfo{
+		sockA: {claudePane("bash", "0", "%0", "alpha task")},
+		sockZ: {claudePane("bash", "0", "%0", "zulu task")},
+	}
+	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "s-aaa", TmuxPane: "%0", TmuxSocket: sockZ})
+	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "s-zzz", TmuxPane: "%0", TmuxSocket: sockA})
+	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "s-mmm", TmuxPane: "%0"})
+
+	want := []string{"", sockA, sockZ}
+	for i := 0; i < 25; i++ {
+		var got []string
+		for _, w := range d.buildSnapshot().Windows {
+			got = append(got, w.Socket)
+		}
+		if !slices.Equal(got, want) {
+			t.Fatalf("snapshot %d socket order = %q, want %q", i, got, want)
+		}
 	}
 }

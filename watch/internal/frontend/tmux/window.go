@@ -22,7 +22,41 @@ func truncateForLog(s string, maxLen int) string {
 	return string(runes[:maxLen]) + "..."
 }
 
+// windowKey identifies a tracked window: its tmux server socket and its
+// session:index target. window targets repeat across servers, so the target
+// alone is not an identity. An empty socket is the ambient (default) server.
+type windowKey struct {
+	socket string
+	target string
+}
+
+// String is the log form: the bare target for the ambient server, so its log
+// text is unchanged, and target@socket otherwise.
+func (k windowKey) String() string {
+	if k.socket == "" {
+		return k.target
+	}
+	return k.target + "@" + k.socket
+}
+
+// paneKey identifies a pane: pane ids ("%5") repeat across tmux servers, so a
+// pane is (socket, id).
+type paneKey struct {
+	socket string
+	pane   string
+}
+
+// String is the log form: the bare pane id for the ambient server, and
+// pane@socket otherwise.
+func (k paneKey) String() string {
+	if k.socket == "" {
+		return k.pane
+	}
+	return k.pane + "@" + k.socket
+}
+
 // windowState tracks the original name and current status for a managed window.
+// The window's socket is the socket of its windowKey.
 type windowState struct {
 	OriginalName          string
 	OriginalStyle         string // saved window-status-style
@@ -43,7 +77,8 @@ type windowState struct {
 const symbolPrefix = "#{@cenci-symbol} "
 
 // trackWindow sets up tracking for a new window using pre-fetched pane info.
-func (f *Frontend) trackWindow(windowTarget string, paneInfo *tmuxc.PaneInfo, sessionID string) *windowState {
+// Every tmux call runs on the window's own server.
+func (f *Frontend) trackWindow(wk windowKey, paneInfo *tmuxc.PaneInfo, sessionID string) *windowState {
 	currentName := paneInfo.WindowName
 	taskName := frontend.SanitizeName(detect.TaskName(paneInfo.PaneTitle))
 	if isGraphicsProbeTitle(paneInfo.PaneTitle) {
@@ -60,7 +95,7 @@ func (f *Frontend) trackWindow(windowTarget string, paneInfo *tmuxc.PaneInfo, se
 
 	// Check if manually named. A name still leading with an agent status
 	// symbol came from a previous cenci run, not from the user.
-	autoRename, err := f.client.GetWindowOption("", windowTarget, "automatic-rename")
+	autoRename, err := f.client.GetWindowOption(wk.socket, wk.target, "automatic-rename")
 	manuallyNamed := false
 	if err == nil && autoRename == "off" && !probeName {
 		r, _ := utf8.DecodeRuneInString(currentName)
@@ -74,21 +109,21 @@ func (f *Frontend) trackWindow(windowTarget string, paneInfo *tmuxc.PaneInfo, se
 	currentName = frontend.SanitizeName(detect.TaskName(currentName))
 
 	// Save original styles.
-	origStyle, err := f.client.GetWindowOption("", windowTarget, "window-status-style")
+	origStyle, err := f.client.GetWindowOption(wk.socket, wk.target, "window-status-style")
 	if err != nil {
 		origStyle = "default"
 	}
-	origCurrentStyle, err := f.client.GetWindowOption("", windowTarget, "window-status-current-style")
+	origCurrentStyle, err := f.client.GetWindowOption(wk.socket, wk.target, "window-status-current-style")
 	if err != nil {
 		origCurrentStyle = "default"
 	}
 
 	// Save original format strings.
-	origFormat, err := f.client.GetWindowOption("", windowTarget, "window-status-format")
+	origFormat, err := f.client.GetWindowOption(wk.socket, wk.target, "window-status-format")
 	if err != nil {
 		origFormat = ""
 	}
-	origCurrentFormat, err := f.client.GetWindowOption("", windowTarget, "window-status-current-format")
+	origCurrentFormat, err := f.client.GetWindowOption(wk.socket, wk.target, "window-status-current-format")
 	if err != nil {
 		origCurrentFormat = ""
 	}
@@ -96,7 +131,7 @@ func (f *Frontend) trackWindow(windowTarget string, paneInfo *tmuxc.PaneInfo, se
 	// Record the launch directory `cenci run` wrote. An unset or unreadable
 	// option leaves it empty, which the window-cleanup pass treats as "repo
 	// unknown".
-	repoDir, err := f.client.GetWindowOption("", windowTarget, frontend.RepoDirOption)
+	repoDir, err := f.client.GetWindowOption(wk.socket, wk.target, frontend.RepoDirOption)
 	if err != nil {
 		repoDir = ""
 	}
@@ -113,24 +148,28 @@ func (f *Frontend) trackWindow(windowTarget string, paneInfo *tmuxc.PaneInfo, se
 		Agent:                 inferAgent(paneInfo.PaneCurrentCmd),
 		RepoDir:               repoDir,
 	}
-	f.windows[windowTarget] = ws
+	f.windows[wk] = ws
+
+	// A server this frontend has not set headroom on yet gets the last rendered
+	// values now, not at the next reconciler tick.
+	f.syncHeadroom(wk.socket)
 
 	// Disable automatic-rename for all tracked windows (we manage names now).
-	f.setWindowOpt(windowTarget, "automatic-rename", "off", "error disabling automatic-rename")
+	f.setWindowOpt(wk.socket, wk.target, "automatic-rename", "off", "error disabling automatic-rename")
 
 	// Prepend symbol variable to format strings for default-format users.
 	if origFormat != "" {
-		f.setWindowOpt(windowTarget, "window-status-format", symbolPrefix+origFormat, "error setting window-status-format")
+		f.setWindowOpt(wk.socket, wk.target, "window-status-format", symbolPrefix+origFormat, "error setting window-status-format")
 	}
 	if origCurrentFormat != "" {
-		f.setWindowOpt(windowTarget, "window-status-current-format", symbolPrefix+origCurrentFormat, "error setting window-status-current-format")
+		f.setWindowOpt(wk.socket, wk.target, "window-status-current-format", symbolPrefix+origCurrentFormat, "error setting window-status-current-format")
 	}
 
 	if f.cfg.Verbose {
 		if manuallyNamed {
-			log.Printf("tracking manually-named window %s (%q)", windowTarget, truncateForLog(currentName, logMaxLen))
+			log.Printf("tracking manually-named window %s (%q)", wk, truncateForLog(currentName, logMaxLen))
 		} else {
-			log.Printf("tracking window %s (original name: %q)", windowTarget, truncateForLog(currentName, logMaxLen))
+			log.Printf("tracking window %s (original name: %q)", wk, truncateForLog(currentName, logMaxLen))
 		}
 	}
 
@@ -172,17 +211,17 @@ func (f *Frontend) stripCenciPrefix(name string) string {
 }
 
 // forgetWindow removes a window's tracking state and its session-key mapping.
-func (f *Frontend) forgetWindow(windowTarget string) {
-	if ws, ok := f.windows[windowTarget]; ok {
-		if ws.SessionKey != "" && f.sessionKeys[ws.SessionKey] == windowTarget {
+func (f *Frontend) forgetWindow(wk windowKey) {
+	if ws, ok := f.windows[wk]; ok {
+		if ws.SessionKey != "" && f.sessionKeys[ws.SessionKey] == wk {
 			delete(f.sessionKeys, ws.SessionKey)
 		}
 	}
-	delete(f.windows, windowTarget)
+	delete(f.windows, wk)
 }
 
-func (f *Frontend) restoreWindow(windowTarget string) {
-	ws, ok := f.windows[windowTarget]
+func (f *Frontend) restoreWindow(wk windowKey) {
+	ws, ok := f.windows[wk]
 	if !ok {
 		return
 	}
@@ -191,78 +230,80 @@ func (f *Frontend) restoreWindow(windowTarget string) {
 	// belong to another session. A pane ID cannot retarget that survivor.
 	target := ws.PaneID
 	// Restore original window name.
-	if err := f.client.RenameWindow("", target, ws.OriginalName); err != nil {
+	if err := f.client.RenameWindow(wk.socket, target, ws.OriginalName); err != nil {
 		if f.cfg.Verbose {
-			log.Printf("error restoring window %s: %v", windowTarget, err)
+			log.Printf("error restoring window %s: %v", wk, err)
 		}
 	}
 
-	f.restoreWindowIndicators(target, ws)
+	f.restoreWindowIndicators(wk.socket, target, ws)
 
 	// Re-enable automatic-rename only for non-manually-named windows.
 	if !ws.ManuallyNamed {
-		f.setWindowOpt(target, "automatic-rename", "on", "error re-enabling automatic-rename")
+		f.setWindowOpt(wk.socket, target, "automatic-rename", "on", "error re-enabling automatic-rename")
 	}
 
 	if f.cfg.Verbose {
-		log.Printf("restored window %s to %q", windowTarget, truncateForLog(ws.OriginalName, logMaxLen))
+		log.Printf("restored window %s to %q", wk, truncateForLog(ws.OriginalName, logMaxLen))
 	}
 
-	f.forgetWindow(windowTarget)
+	f.forgetWindow(wk)
 }
 
 // restoreWindowIndicators restores the original styles, format strings, and
 // clears cenci user variables for a tracked window.
-func (f *Frontend) restoreWindowIndicators(target string, ws *windowState) {
+func (f *Frontend) restoreWindowIndicators(socket, target string, ws *windowState) {
 	// Restore original styles.
-	f.setWindowOpt(target, "window-status-style", ws.OriginalStyle, "error restoring window-status-style")
-	f.setWindowOpt(target, "window-status-current-style", ws.OriginalCurrentStyle, "error restoring window-status-current-style")
+	f.setWindowOpt(socket, target, "window-status-style", ws.OriginalStyle, "error restoring window-status-style")
+	f.setWindowOpt(socket, target, "window-status-current-style", ws.OriginalCurrentStyle, "error restoring window-status-current-style")
 
 	// Restore original format strings.
 	if ws.OriginalFormat != "" {
-		f.setWindowOpt(target, "window-status-format", ws.OriginalFormat, "error restoring window-status-format")
+		f.setWindowOpt(socket, target, "window-status-format", ws.OriginalFormat, "error restoring window-status-format")
 	}
 	if ws.OriginalCurrentFormat != "" {
-		f.setWindowOpt(target, "window-status-current-format", ws.OriginalCurrentFormat, "error restoring window-status-current-format")
+		f.setWindowOpt(socket, target, "window-status-current-format", ws.OriginalCurrentFormat, "error restoring window-status-current-format")
 	}
 
 	// Clear cenci user variables.
-	f.setWindowOpt(target, "@cenci-style", "", "error clearing @cenci-style")
-	f.setWindowOpt(target, "@cenci-symbol", "", "error clearing @cenci-symbol")
+	f.setWindowOpt(socket, target, "@cenci-style", "", "error clearing @cenci-style")
+	f.setWindowOpt(socket, target, "@cenci-symbol", "", "error clearing @cenci-symbol")
 }
 
-// discardStaleWindow removes stale state for a window target without restoring
+// discardStaleWindow removes stale state for a window without restoring
 // (the old window is gone, so there's nothing to restore).
-func (f *Frontend) discardStaleWindow(windowTarget, stalePaneID string) {
+func (f *Frontend) discardStaleWindow(wk windowKey, stalePaneID string) {
 	if f.cfg.Verbose {
-		log.Printf("discarding stale state for window %s (pane %s gone)", windowTarget, stalePaneID)
+		log.Printf("discarding stale state for window %s (pane %s gone)", wk, paneKey{wk.socket, stalePaneID})
 	}
-	delete(f.panes, stalePaneID)
-	f.forgetWindow(windowTarget)
+	delete(f.panes, paneKey{wk.socket, stalePaneID})
+	f.forgetWindow(wk)
 }
 
-// migratePaneIfRenumbered checks if paneID is tracked at a different window target
-// and migrates state to newTarget. This handles tmux renumber-windows where a pane
-// moves to a different window index. It returns the session keys of any stale
-// occupant states discarded along the way.
-func (f *Frontend) migratePaneIfRenumbered(newTarget, paneID string) []string {
-	for oldTarget, ws := range f.windows {
-		if ws.PaneID == paneID && oldTarget != newTarget {
+// migratePaneIfRenumbered checks if paneID is tracked at a different window
+// target on newKey's own server and migrates state to newKey. This handles tmux
+// renumber-windows where a pane moves to a different window index. A window on
+// another server is never a candidate: the same pane id there is a different
+// pane. It returns the session keys of any stale occupant states discarded along
+// the way.
+func (f *Frontend) migratePaneIfRenumbered(newKey windowKey, paneID string) []string {
+	for oldKey, ws := range f.windows {
+		if oldKey.socket == newKey.socket && ws.PaneID == paneID && oldKey != newKey {
 			if f.cfg.Verbose {
-				log.Printf("pane %s renumbered from %s to %s, migrating state", paneID, oldTarget, newTarget)
+				log.Printf("pane %s renumbered from %s to %s, migrating state", paneKey{newKey.socket, paneID}, oldKey.target, newKey.target)
 			}
 			var evicted []string
-			// If newTarget is occupied by a different pane's state, discard it.
-			if existing, ok := f.windows[newTarget]; ok && existing.PaneID != paneID {
+			// If newKey is occupied by a different pane's state, discard it.
+			if existing, ok := f.windows[newKey]; ok && existing.PaneID != paneID {
 				if existing.SessionKey != "" {
 					evicted = append(evicted, existing.SessionKey)
 				}
-				f.discardStaleWindow(newTarget, existing.PaneID)
+				f.discardStaleWindow(newKey, existing.PaneID)
 			}
-			f.windows[newTarget] = ws
-			delete(f.windows, oldTarget)
+			f.windows[newKey] = ws
+			delete(f.windows, oldKey)
 			if ws.SessionKey != "" {
-				f.sessionKeys[ws.SessionKey] = newTarget
+				f.sessionKeys[ws.SessionKey] = newKey
 			}
 			return evicted
 		}
@@ -271,7 +312,7 @@ func (f *Frontend) migratePaneIfRenumbered(newTarget, paneID string) []string {
 }
 
 // applyStatus updates the window's style, symbol variable, and name for the given status.
-func (f *Frontend) applyStatus(windowTarget string, ws *windowState, status detect.Status, taskName string) {
+func (f *Frontend) applyStatus(wk windowKey, ws *windowState, status detect.Status, taskName string) {
 	taskChanged := ws.TaskName != taskName
 	ws.TaskName = taskName
 
@@ -283,11 +324,11 @@ func (f *Frontend) applyStatus(windowTarget string, ws *windowState, status dete
 	style, symbol := f.attrsFor(status)
 
 	// Set styles FIRST so they apply even if rename fails.
-	f.setWindowOpt(windowTarget, "window-status-style", style, "error setting window-status-style")
-	f.setWindowOpt(windowTarget, "window-status-current-style", style, "error setting window-status-current-style")
+	f.setWindowOpt(wk.socket, wk.target, "window-status-style", style, "error setting window-status-style")
+	f.setWindowOpt(wk.socket, wk.target, "window-status-current-style", style, "error setting window-status-current-style")
 	// User variables for custom status-format integration.
-	f.setWindowOpt(windowTarget, "@cenci-style", style, "error setting @cenci-style")
-	f.setWindowOpt(windowTarget, "@cenci-symbol", symbol, "error setting @cenci-symbol")
+	f.setWindowOpt(wk.socket, wk.target, "@cenci-style", style, "error setting @cenci-style")
+	f.setWindowOpt(wk.socket, wk.target, "@cenci-symbol", symbol, "error setting @cenci-symbol")
 
 	// Build the display name (no symbol prefix — symbol is in @cenci-symbol and format string).
 	var displayName string
@@ -302,22 +343,23 @@ func (f *Frontend) applyStatus(windowTarget string, ws *windowState, status dete
 	// Defensive: inputs should already be sanitized, but guard against
 	// future code paths that bypass upstream sanitization.
 	displayName = frontend.SanitizeName(displayName)
-	if err := f.client.RenameWindow("", windowTarget, displayName); err != nil {
+	if err := f.client.RenameWindow(wk.socket, wk.target, displayName); err != nil {
 		if f.cfg.Verbose {
-			log.Printf("error renaming window %s: %v", windowTarget, err)
+			log.Printf("error renaming window %s: %v", wk, err)
 		}
 	}
 	ws.LastSetName = displayName
 
 	if f.cfg.Verbose {
-		log.Printf("window %s: %s → %q (symbol: %s, style: %s)", windowTarget, status, truncateForLog(displayName, logMaxLen), symbol, style)
+		log.Printf("window %s: %s → %q (symbol: %s, style: %s)", wk, status, truncateForLog(displayName, logMaxLen), symbol, style)
 	}
 }
 
-// setWindowOpt sets a tmux window option and logs on failure when verbose mode is on.
-func (f *Frontend) setWindowOpt(target, key, value, errMsg string) {
-	if err := f.client.SetWindowOption("", target, key, value); err != nil && f.cfg.Verbose {
-		log.Printf("%s for %s: %v", errMsg, target, err)
+// setWindowOpt sets a tmux window option on the given server and logs on
+// failure when verbose mode is on.
+func (f *Frontend) setWindowOpt(socket, target, key, value, errMsg string) {
+	if err := f.client.SetWindowOption(socket, target, key, value); err != nil && f.cfg.Verbose {
+		log.Printf("%s for %s: %v", errMsg, windowKey{socket, target}, err)
 	}
 }
 

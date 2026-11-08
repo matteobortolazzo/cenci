@@ -162,6 +162,11 @@ type Daemon struct {
 	// host processes.
 	babysitStop   func(repo string, pr int) error
 	babysitStatus func(repo string, pr int) (ipc.BabysitStatus, error)
+
+	// tmuxSocketDir resolves the directory a hook event's tmux_socket must live
+	// directly under to be trusted (#1429). Production is tmux.TrustedSocketDir;
+	// tests point it at a 0700 fixture directory.
+	tmuxSocketDir func() (string, error)
 }
 
 // newDaemon creates a Daemon with the given dependencies.
@@ -183,6 +188,7 @@ func newDaemon(cfg config.Config, fe frontend.Frontend, events <-chan ipc.HookEv
 		armSpawn:      defaultArmSpawn,
 		babysitStop:   defaultBabysitStop,
 		babysitStatus: defaultBabysitStatus,
+		tmuxSocketDir: tmux.TrustedSocketDir,
 		// cleanupReader stays nil here: installHostSeams installs the real one.
 		cleanupEnabled: ticketstate.CleanupEnabled,
 		cleanupResults: make(chan windowCleanupResult, 1),

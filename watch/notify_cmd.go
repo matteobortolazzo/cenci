@@ -177,11 +177,17 @@ func runNotify(args []string) {
 	// sandbox) are still tracked by the daemon as paneless sessions.
 	tmuxPane := os.Getenv("TMUX_PANE")
 
+	// $TMUX is "<socket>,<server pid>,<session>". The first field is sent as-is:
+	// the daemon's trusted-directory check at ingest is the authority, so notify
+	// does not filter. An unset $TMUX or an empty first field omits the key.
+	tmuxSocket, _, _ := strings.Cut(os.Getenv("TMUX"), ",")
+
 	event := ipc.HookEvent{
 		EventType:        hookInput.HookEventName,
 		SessionID:        hookInput.SessionID,
 		Agent:            agentName,
 		TmuxPane:         tmuxPane,
+		TmuxSocket:       tmuxSocket,
 		NotificationType: hookInput.Notification.Type,
 		ToolName:         hookInput.ToolName,
 		IsInterrupt:      hookInput.IsInterrupt,

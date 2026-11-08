@@ -770,3 +770,87 @@ func TestDaemon_VerboseLogsAlreadyGoneWindowAsClosed(t *testing.T) {
 		t.Errorf("log = %q, want no error logged for a window that was already gone", logs.String())
 	}
 }
+
+// Interim foreign-socket guard (#1429, replaced by #1430): until the kill targets
+// the recorded socket it goes to the daemon's own tmux server, so a pending-close
+// whose window is recorded on any other server is not killed at SessionEnd, and
+// one verbose line says so. A window on the ambient server (by socket path or with
+// no socket) is killed exactly as before: those cases are the controls.
+func TestDaemon_PendingCloseOnAForeignSocketWindowIsNotKilledAtSessionEnd(t *testing.T) {
+	tests := []struct {
+		name       string
+		socket     func(dir string) string
+		wantKilled bool
+	}{
+		{"foreign socket", func(dir string) string { return filepath.Join(dir, "foreign") }, false},
+		{"the ambient server's socket", func(dir string) string { return filepath.Join(dir, "ambient") }, true},
+		{"no recorded socket", func(string) string { return "" }, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			mc := &tmuxtest.MockClient{}
+			d := newTestDaemon(mc)
+			d.cfg.Verbose = true
+			fk := d.killer.(*fakeKiller)
+			dir := trustedSocketDir(t, d)
+			t.Setenv("TMUX", filepath.Join(dir, "ambient")+",4242,0")
+			socket := tc.socket(dir)
+			pane := claudePane("bash", "0", "%0", "writing tests")
+			if socket == "" {
+				mc.Panes = []tmux.PaneInfo{pane}
+			} else {
+				mc.PanesBySocket = map[string][]tmux.PaneInfo{socket: {pane}}
+			}
+			logs := captureLog(t)
+
+			d.handleEvent(ipc.HookEvent{EventType: "SessionStart", SessionID: "sess1", TmuxPane: "%0", TmuxSocket: socket})
+			d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "sess1", TmuxPane: "%0", TmuxSocket: socket})
+			d.registerPendingClose(ipc.PendingClose{PaneID: "%0", Session: "main", WindowIndex: "0", WindowName: "bash"})
+			d.handleEvent(ipc.HookEvent{EventType: "SessionEnd", SessionID: "sess1", TmuxPane: "%0", TmuxSocket: socket})
+
+			if tc.wantKilled {
+				if len(fk.killed) != 1 || fk.killed[0] != "%0" {
+					t.Errorf("killed = %v, want exactly %%0", fk.killed)
+				}
+				return
+			}
+			if len(fk.killed) != 0 {
+				t.Errorf("killed = %v, want nothing: the window lives on a foreign server", fk.killed)
+			}
+			lines := linesContaining(logs.String(), socket)
+			if len(lines) != 1 || !strings.Contains(lines[0], "pending-close:") {
+				t.Errorf("log lines naming the foreign socket = %q, want exactly one, prefixed pending-close:", lines)
+			}
+		})
+	}
+}
+
+// The registry is keyed by the bare pane id and carries no socket until #1430,
+// so a registration made for a foreign window's %5 cannot be told apart from one
+// for the daemon's own %5. Skipping the foreign kill therefore drops the entry:
+// a kept one would later match an unrelated window with the same pane id on the
+// daemon's own server and kill a window nobody asked to close. A dropped close
+// request only leaves a window open.
+func TestDaemon_ForeignSocketSessionEndDropsTheRegistrationSoItCannotHitAnUnrelatedSamePaneIDWindow(t *testing.T) {
+	mc := &tmuxtest.MockClient{Panes: []tmux.PaneInfo{claudePane("bash", "0", "%5", "ambient task")}}
+	d := newTestDaemon(mc)
+	fk := d.killer.(*fakeKiller)
+	dir := trustedSocketDir(t, d)
+	t.Setenv("TMUX", filepath.Join(dir, "ambient")+",4242,0")
+	foreign := filepath.Join(dir, "foreign")
+	mc.PanesBySocket = map[string][]tmux.PaneInfo{foreign: {claudePane("bash", "0", "%5", "foreign task")}}
+
+	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "ambient", TmuxPane: "%5"})
+	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "foreign", TmuxPane: "%5", TmuxSocket: foreign})
+	d.registerPendingClose(ipc.PendingClose{PaneID: "%5", Session: "main", WindowIndex: "0", WindowName: "bash"})
+
+	d.handleEvent(ipc.HookEvent{EventType: "SessionEnd", SessionID: "foreign", TmuxPane: "%5", TmuxSocket: foreign})
+	if len(fk.killed) != 0 {
+		t.Fatalf("killed = %v, want nothing when the foreign window ends", fk.killed)
+	}
+
+	d.handleEvent(ipc.HookEvent{EventType: "SessionEnd", SessionID: "ambient", TmuxPane: "%5"})
+	if len(fk.killed) != 0 {
+		t.Errorf("killed = %v, want nothing: the registration was meant for the foreign window and must not survive to hit an unrelated %%5", fk.killed)
+	}
+}

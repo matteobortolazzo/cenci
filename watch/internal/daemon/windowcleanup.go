@@ -44,6 +44,7 @@ type cleanupCandidate struct {
 	windowIndex string
 	windowName  string
 	paneID      string // the kill target: unlike session:index, tmux never reuses or shifts it
+	socket      string // the tmux server the window lives on; "" = the daemon's own
 	ticket      string // the window name's ticket prefix, as the babysit guard takes it
 	num         int
 	repoDir     string
@@ -52,7 +53,8 @@ type cleanupCandidate struct {
 // matches reports whether wi is still the window c was evaluated for.
 func (c cleanupCandidate) matches(wi *frontend.WindowInfo) bool {
 	return wi != nil && wi.Session == c.session && wi.WindowIndex == c.windowIndex &&
-		wi.WindowName == c.windowName && wi.RepoDir == c.repoDir && wi.PaneID == c.paneID
+		wi.WindowName == c.windowName && wi.RepoDir == c.repoDir && wi.PaneID == c.paneID &&
+		wi.Socket == c.socket
 }
 
 // windowCleanupResult is what the evaluate step hands back to the loop: the
@@ -93,7 +95,9 @@ func (d *Daemon) snapshotCleanupCandidates() []cleanupCandidate {
 		if err != nil || num < 1 || strconv.Itoa(num) != ticket {
 			continue
 		}
-		windowKey := wi.Session + ":" + wi.WindowIndex
+		// session:index repeats across tmux servers, so a window is one per
+		// (socket, session:index).
+		windowKey := wi.Socket + "|" + wi.Session + ":" + wi.WindowIndex
 		if seen[windowKey] {
 			continue
 		}
@@ -104,6 +108,7 @@ func (d *Daemon) snapshotCleanupCandidates() []cleanupCandidate {
 			windowIndex: wi.WindowIndex,
 			windowName:  wi.WindowName,
 			paneID:      wi.PaneID,
+			socket:      wi.Socket,
 			ticket:      ticket,
 			num:         num,
 			repoDir:     wi.RepoDir,
@@ -210,6 +215,9 @@ func (d *Daemon) applyWindowCleanup(res windowCleanupResult) {
 			continue
 		}
 		if !c.matches(d.frontend.WindowInfo(c.sessionKey)) {
+			continue
+		}
+		if d.skipForeignSocketKill("window-cleanup", fmt.Sprintf("%s:%s (%s)", c.session, c.windowIndex, c.windowName), c.socket) {
 			continue
 		}
 		if sess.Status == detect.StatusRunning || sess.Status == detect.StatusNeedInput {

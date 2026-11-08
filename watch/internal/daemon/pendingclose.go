@@ -3,7 +3,11 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
+	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/detect"
@@ -64,6 +68,12 @@ func (d *Daemon) registerPendingClose(pc ipc.PendingClose) {
 // likely hitting today — lazyboards' cleanup fires while the implement agent
 // is mid-Phase-9, gets deferred here, and then the window is destroyed the
 // instant that session exits, with `cenci babysit` still supervising CI.
+//
+// A window on a foreign tmux socket is the other exception (the #1429 interim
+// guard): the kill is skipped and the entry is dropped. The registry is keyed by
+// the bare pane id and carries no socket until #1430, so a kept entry could later
+// match an unrelated window with the same pane id on the daemon's own server and
+// kill it; a dropped close request only leaves a window open.
 func (d *Daemon) killPendingClose(wi *frontend.WindowInfo) {
 	if wi == nil {
 		return
@@ -71,6 +81,10 @@ func (d *Daemon) killPendingClose(wi *frontend.WindowInfo) {
 	key := wi.PaneID
 	entry, ok := d.pending[key]
 	if !ok {
+		return
+	}
+	if d.skipForeignSocketKill("pending-close", fmt.Sprintf("%s (%s)", key, entry.pc.WindowName), wi.Socket) {
+		delete(d.pending, key)
 		return
 	}
 	if blocked, reason := d.babysitBlocks(entry); blocked {
@@ -83,6 +97,40 @@ func (d *Daemon) killPendingClose(wi *frontend.WindowInfo) {
 	}
 	delete(d.pending, key)
 	d.killWindowTarget(entry.pc.PaneID, entry.pc.PaneID, "pending-close")
+}
+
+// ambientTmuxSocket is the socket of the tmux server the daemon's own kill
+// calls reach: the first field of $TMUX when the daemon runs inside tmux, else
+// the default server of the trusted socket directory. An unresolvable directory
+// yields "", which no recorded socket equals.
+func (d *Daemon) ambientTmuxSocket() string {
+	if socket, _, _ := strings.Cut(os.Getenv("TMUX"), ","); socket != "" {
+		return socket
+	}
+	dir, err := d.tmuxSocketDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(dir, "default")
+}
+
+// skipForeignSocketKill is the interim guard of #1429, replaced by #1430: the
+// kill paths still address a window by pane id on the daemon's own tmux server,
+// so a window recorded on any other server must not be killed, or whatever
+// shares its pane id here would be. An empty socket (older notify, a rejected
+// value, a container) and the daemon's own server are killed exactly as before.
+// It reports whether the kill is skipped, logging one verbose line when so. A
+// pending-close caller must also drop its registry entry when it is skipped: the
+// registry has no socket field until #1430, so a kept entry could hit an
+// unrelated window with the same pane id on the daemon's own server.
+func (d *Daemon) skipForeignSocketKill(prefix, desc, socket string) bool {
+	if socket == "" || socket == d.ambientTmuxSocket() {
+		return false
+	}
+	if d.cfg.Verbose {
+		log.Printf("%s: not closing %s: its tmux server %q is not the daemon's own", prefix, desc, socket)
+	}
+	return true
 }
 
 // retryBlockedPendingCloses re-evaluates every pending-close the babysit

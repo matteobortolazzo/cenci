@@ -3,10 +3,12 @@ package tmux
 import (
 	"bytes"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // requireTmux skips the test when the tmux binary isn't on PATH.
@@ -205,5 +207,82 @@ func TestSetPaneOptionFailsForAPaneThatDoesNotExist(t *testing.T) {
 
 	if err := SetPaneOption(socket, "%999", "@cenci-launch-id", "x"); err == nil {
 		t.Fatal("SetPaneOption on a nonexistent pane returned nil, want an error")
+	}
+}
+
+// readWindowEnv polls for the file a window's `env > f.tmp && mv f.tmp f`
+// command publishes (the rename makes it appear complete or not at all) and
+// returns its variables, without TMUX_PANE (differs per pane by design) and `_`
+// (the shell's own last-command variable).
+func readWindowEnv(t *testing.T, path string) map[string]string {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		raw, err := os.ReadFile(path)
+		if err == nil {
+			env := make(map[string]string)
+			for _, line := range strings.Split(strings.TrimRight(string(raw), "\n"), "\n") {
+				name, value, ok := strings.Cut(line, "=")
+				if !ok || name == "TMUX_PANE" || name == "_" {
+					continue
+				}
+				env[name] = value
+			}
+			return env
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the window never wrote %s: %v", path, err)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
+// P32: a window created through a socket-carrying NewWindow (the minimal
+// allowlisted client env) inherits exactly the environment of one created
+// through today's bare, full-env `tmux new-window` on the same server. A new
+// window's environment comes from the server, not the client, so a variable
+// exported to the client only after the server started reaches neither.
+func TestNewWindowMinimalEnvInheritsSameEnvironmentAsFullEnv(t *testing.T) {
+	requireTmux(t)
+	socket, pid, _ := startScratchServer(t, "only")
+
+	const marker = "CENCI_P32_CLIENT_ONLY_MARKER"
+	t.Setenv(marker, "leaked")
+	out := t.TempDir()
+	publish := func(name string) string {
+		file := filepath.Join(out, name)
+		return fmt.Sprintf("env > '%s.tmp' && mv '%s.tmp' '%s'", file, file, file)
+	}
+
+	client := &ExecClient{}
+	if err := client.NewWindow(socket, "=only", "minimal", publish("minimal")); err != nil {
+		t.Fatalf("NewWindow with a socket: %v", err)
+	}
+	// Today's call: no socket, so bare tmux with the full ambient environment,
+	// reaching the same server through $TMUX.
+	t.Setenv("TMUX", fmt.Sprintf("%s,%s,0", socket, pid))
+	if err := client.NewWindow("", "=only", "full", publish("full")); err != nil {
+		t.Fatalf("NewWindow without a socket: %v", err)
+	}
+
+	minimal, full := readWindowEnv(t, filepath.Join(out, "minimal")), readWindowEnv(t, filepath.Join(out, "full"))
+
+	if len(minimal) == 0 || len(full) == 0 {
+		t.Fatalf("empty environments: minimal=%d full=%d variables", len(minimal), len(full))
+	}
+	for name, env := range map[string]map[string]string{"minimal": minimal, "full": full} {
+		if _, ok := env[marker]; ok {
+			t.Errorf("the %s window inherited %s from the client", name, marker)
+		}
+	}
+	for name, value := range full {
+		if got, ok := minimal[name]; !ok || got != value {
+			t.Errorf("%s: minimal window has (%q, %v), full-env window has %q", name, got, ok, value)
+		}
+	}
+	for name := range minimal {
+		if _, ok := full[name]; !ok {
+			t.Errorf("%s is set in the minimal window only", name)
+		}
 	}
 }

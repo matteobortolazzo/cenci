@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1331,5 +1333,137 @@ func TestClaudeHooksRegisterPostModelSwitchThroughTheNotifyWrapper(t *testing.T)
 
 	if _, ok := load(filepath.Join("plugin", "codex", "hooks.json")).Hooks["PostModelSwitch"]; ok {
 		t.Error("the Codex manifest must not register PostModelSwitch")
+	}
+}
+
+// --- tmux_socket (#1429) ----------------------------------------------------
+
+// notifyRawLineWithTMUX runs the real `cenci notify` binary against a plain unix
+// listener and returns the raw JSON line it wrote, so a test can assert on the
+// wire key itself. tmux nil removes TMUX from the child's environment; non-nil
+// sets it to *tmux (an empty string is a set-but-empty TMUX). An ambient
+// CENCI_TMUX_SOCKET is always removed, so only extraEnv can set it.
+func notifyRawLineWithTMUX(t *testing.T, tmux *string, extraEnv ...string) string {
+	t.Helper()
+	setTempSocketDir(t)
+	dir, err := os.MkdirTemp("", "cenci")
+	if err != nil {
+		t.Fatalf("create socket dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	socket := filepath.Join(dir, "events.sock")
+	ln, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+
+	lines := make(chan string, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			lines <- ""
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		raw, _ := io.ReadAll(conn)
+		lines <- string(raw)
+	}()
+
+	var env []string
+	for _, kv := range os.Environ() {
+		if !strings.HasPrefix(kv, "TMUX=") && !strings.HasPrefix(kv, "CENCI_TMUX_SOCKET=") {
+			env = append(env, kv)
+		}
+	}
+	env = append(env, "TMUX_PANE=%5", "CENCI_SANDBOX=")
+	if tmux != nil {
+		env = append(env, "TMUX="+*tmux)
+	}
+	env = append(env, extraEnv...)
+	cmd := exec.Command(binaryPath, "notify", "-agent", "claude", "-event-socket", socket)
+	cmd.Stdin = strings.NewReader(`{"hook_event_name":"Stop","session_id":"sock-session"}`)
+	cmd.Env = env
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("notify: %v: %s", err, output)
+	}
+
+	select {
+	case line := <-lines:
+		if line == "" {
+			t.Fatal("notify wrote nothing to the event socket")
+		}
+		return line
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for the raw event line")
+	}
+	return ""
+}
+
+// The socket is the first comma-separated field of $TMUX (tmux's own
+// "<socket>,<server pid>,<session id>" value), sent through the real binary.
+func TestNotifySendsTmuxSocketFromFirstFieldOfTMUX(t *testing.T) {
+	const socket = "/x/tmux-1/default"
+	fx := newNotifyFixture(t)
+
+	notifyRun(t, fx.socket, "claude", hookPayload(t, "Stop", "sock-session", nil), "TMUX_PANE=%5", "TMUX="+socket+",123,0")
+
+	select {
+	case ev := <-fx.receiver.Events():
+		if ev.TmuxSocket != socket {
+			t.Errorf("TmuxSocket = %q, want exactly %q (the first field of $TMUX)", ev.TmuxSocket, socket)
+		}
+		if ev.TmuxPane != "%5" {
+			t.Errorf("TmuxPane = %q, want %q: the pane still travels with its socket", ev.TmuxPane, "%5")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for notify event")
+	}
+}
+
+// The field is omitted, not sent empty, when $TMUX is unset or its first field is
+// empty. The first subtest is the control that proves the wire key is sent at all,
+// so the absences below cannot pass vacuously.
+func TestNotifyOmitsTmuxSocketWhenTMUXUnsetOrEmptyField(t *testing.T) {
+	t.Run("control: TMUX set puts the key on the wire", func(t *testing.T) {
+		tmux := "/x/tmux-1/default,123,0"
+		line := notifyRawLineWithTMUX(t, &tmux)
+		if !strings.Contains(line, `"tmux_socket":"/x/tmux-1/default"`) {
+			t.Errorf("raw line = %s, want a %q key", line, `"tmux_socket":"/x/tmux-1/default"`)
+		}
+	})
+
+	// Q&A 13: a container session has CENCI_TMUX_SOCKET but no $TMUX, and notify
+	// must not fall back to it; such sessions keep default-server behavior.
+	t.Run("TMUX unset with CENCI_TMUX_SOCKET set does not fall back to it", func(t *testing.T) {
+		const containerSocket = "/tmp/tmux-1000/default"
+		line := notifyRawLineWithTMUX(t, nil, "CENCI_TMUX_SOCKET="+containerSocket)
+		if strings.Contains(line, "tmux_socket") || strings.Contains(line, containerSocket) {
+			t.Errorf("raw line = %s, want no tmux_socket key and no CENCI_TMUX_SOCKET value", line)
+		}
+		if !strings.Contains(line, `"tmux_pane":"%5"`) {
+			t.Errorf("raw line = %s, want the event itself still delivered with its pane", line)
+		}
+	})
+
+	empty, leadingComma := "", ",1,2"
+	for _, tc := range []struct {
+		name string
+		tmux *string
+	}{
+		{"TMUX unset", nil},
+		{"TMUX empty", &empty},
+		{"TMUX with an empty first field", &leadingComma},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			line := notifyRawLineWithTMUX(t, tc.tmux)
+			if strings.Contains(line, "tmux_socket") {
+				t.Errorf("raw line = %s, want no tmux_socket key", line)
+			}
+			if !strings.Contains(line, `"tmux_pane":"%5"`) {
+				t.Errorf("raw line = %s, want the event itself still delivered with its pane", line)
+			}
+		})
 	}
 }

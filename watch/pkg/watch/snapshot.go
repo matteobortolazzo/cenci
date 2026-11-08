@@ -46,6 +46,10 @@ type WindowState struct {
 	// operations use it throughout shutdown; session indexes can be reused.
 	// Empty for paneless sessions and synthetic attention entries.
 	PaneID string `json:"pane_id,omitempty"`
+	// Socket is the tmux server socket the window lives on. Empty means the
+	// default server, which is also what a snapshot from an older daemon (one
+	// that predates this field) means.
+	Socket string `json:"socket,omitempty"`
 	// WindowName is the "<number>-<skill>" window name (e.g. "42-implement"),
 	// where skill is the running workflow. The leading ticket number is the
 	// stable join key external tools use to associate cenci state with
