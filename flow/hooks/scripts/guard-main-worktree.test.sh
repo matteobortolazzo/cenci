@@ -3223,11 +3223,18 @@ rg_count() {
 }
 
 # rg_snapshot -- every cenci-guard-canary-* entry and receipt under /tmp and
-# the TMPDIR the cases pass.
+# the TMPDIR the cases pass. /tmp is shared with other processes (a sibling
+# worktree's gate, a live guard canary), so there only entries this suite itself
+# can have created count: its run ids start with 0000a9e0 (rg_new_run) and the
+# /tmp fallback case uses RG_SYS_HEX. The suite's own RG_TMP is scanned in full.
 rg_snapshot() {
-    local d e
+    local d e name
     for d in /tmp "${RG_TMP}"; do
         for e in "${d}"/cenci-guard-canary-* "${d}"/cenci-guard-canary-*/receipt-*; do
+            if [[ "${d}" != "${RG_TMP}" ]]; then
+                name="${e#"${d}"/}"
+                [[ "${name}" == cenci-guard-canary-0000a9e0* || "${name}" == cenci-guard-canary-"${RG_SYS_HEX}"* ]] || continue
+            fi
             if [[ -e "${e}" || -L "${e}" ]]; then
                 printf '%s\n' "${e}"
             fi
@@ -3336,6 +3343,12 @@ rg_new_run
 rg_write_probes "${RG_RUN}" "${RG_HEX}"
 mkdir -p "${RG_ROOT}/sub"
 RG_BEFORE="$(rg_snapshot)"
+# Hermeticity: plant one foreign cenci-guard-canary-* entry in the shared /tmp
+# between the snapshots, as a concurrent gate or live canary would; the
+# assertion below must not attribute it to these denials.
+RG_FOREIGN="/tmp/cenci-guard-canary-ffff$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n')"
+mkdir -m 700 "${RG_FOREIGN}" && mkdir "${RG_FOREIGN}/receipt-foreign" \
+    || { echo "FAIL: test setup: foreign canary decoy ${RG_FOREIGN}" >&2; exit 1; }
 # An ordinary source write, an unlisted probe number, a probe listed for the
 # other guard, and the right leaf in the wrong directory.
 for rg_spec in "shell|${RG_ROOT}/src/foo.txt" "write|${RG_ROOT}/src/foo.txt" "apply_patch|${RG_ROOT}/src/foo.txt" \
@@ -3349,7 +3362,7 @@ if [[ "$(rg_snapshot)" == "${RG_BEFORE}" && "$(rg_count "${RG_RUN}")" == 0 ]]; t
 else
     fail "unrelated deny: /tmp and \$TMPDIR must gain no cenci-guard-canary-* entry or receipt (before: ${RG_BEFORE}; after: $(rg_snapshot))"
 fi
-rm -rf "${RG_RUN}"
+rm -rf "${RG_FOREIGN}" "${RG_RUN}"
 # A record whose HEX names another run, and a run dir with no record at all.
 rg_new_run
 rg_write_probes "${RG_RUN}" "ffffffffffffffff"
