@@ -37,6 +37,11 @@ type SessionState struct {
 	// those past the cap (#1179). Display only: they never feed Status.
 	ModelSwitches     []watch.ModelSwitch
 	ModelSwitchesMore int
+	// NativeMeasurement is the latest validated native Claude measurement for
+	// this session and NativeMeasuredAt its measured_at, which orders later
+	// samples (#1450). Display only: they never feed Status or LastEvent.
+	NativeMeasurement *watch.NativeMeasurement
+	NativeMeasuredAt  time.Time
 }
 
 // BackgroundHoldTTL bounds how long a background-held session (#698) may stay

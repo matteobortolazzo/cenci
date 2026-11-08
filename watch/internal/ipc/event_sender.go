@@ -32,6 +32,21 @@ func SendPendingClose(socketPath string, pc PendingClose) error {
 	return sendLine(socketPath, pendingCloseWire{Kind: pendingCloseKind, PendingClose: pc})
 }
 
+// nativeMeasurementWire is the on-wire envelope for a NativeMeasurement: the
+// "kind" discriminator plus the promoted measurement body (#1450). Its
+// top-level keys are exactly kind and measurement, so a pre-change daemon
+// decodes it as a HookEvent with no session_id and drops it.
+type nativeMeasurementWire struct {
+	Kind string `json:"kind"`
+	NativeMeasurement
+}
+
+// SendNativeMeasurement writes one native-measurement envelope to the event
+// socket without autostarting a daemon (#1450).
+func SendNativeMeasurement(socketPath string, nm NativeMeasurement) error {
+	return sendLine(socketPath, nativeMeasurementWire{Kind: nativeMeasurementKind, NativeMeasurement: nm})
+}
+
 // armRequestWire is the on-wire envelope for an ArmRequest: the "kind"
 // discriminator field plus the promoted ArmRequest fields, mirroring
 // pendingCloseWire (#1094).

@@ -79,6 +79,50 @@ type WindowState struct {
 	// ModelSwitchesMore counts switches past the cap that are not listed.
 	// Omitted from the JSON when zero.
 	ModelSwitchesMore int `json:"model_switches_more,omitempty"`
+	// NativeMeasurement is the latest validated native Claude measurement for
+	// the session (#1450). Display only: it never feeds Status.
+	NativeMeasurement *NativeMeasurement `json:"native_measurement,omitempty"`
+}
+
+// NativeMeasurement is the validated snapshot of one native Claude
+// measurement sample (#1450), stored per session. Freshness ("fresh|stale") and
+// quota state ("current|expired (reset passed)") are not stored: they depend on
+// the reader's clock, so consumers derive them from MeasuredAt and ResetsAt.
+type NativeMeasurement struct {
+	// MeasuredAt is the sample's RFC 3339 timestamp.
+	MeasuredAt    string `json:"measured_at"`
+	Source        string `json:"source,omitempty"`
+	ClaudeVersion string `json:"claude_version,omitempty"`
+	// Context is nil when the context object was absent or not an object.
+	Context *NativeContext `json:"context,omitempty"`
+	// Quota is nil (encodes null) when rate_limits was absent or rejected, and
+	// an empty slice (encodes []) when it was an empty array.
+	Quota []NativeQuotaWindow `json:"quota"`
+	// Missing names every absent or rejected field (dotted JSON paths with
+	// indexes); Invalid names only the rejected subset. Both are non-nil so an
+	// empty list encodes as [], never null. A "rate_limits[<i>]..." index is the
+	// position in the input array, not in Quota: a rejected non-object entry is
+	// skipped in Quota, so the two can differ.
+	Missing []string `json:"missing"`
+	Invalid []string `json:"invalid"`
+}
+
+// NativeContext is the context-window part of a NativeMeasurement. A rejected
+// value is a nil pointer, never zero.
+type NativeContext struct {
+	Tokens  *int64   `json:"tokens,omitempty"`
+	Window  *int64   `json:"window,omitempty"`
+	Percent *float64 `json:"percent,omitempty"`
+	// OverWindow is true when Percent is above 100 (tokens over the window).
+	OverWindow bool `json:"over_window,omitempty"`
+}
+
+// NativeQuotaWindow is one rate-limit window of a NativeMeasurement. Kind is
+// "five_hour", "weekly" or "unknown:<sanitized kind>".
+type NativeQuotaWindow struct {
+	Kind        string   `json:"kind"`
+	PercentUsed *float64 `json:"percent_used,omitempty"`
+	ResetsAt    string   `json:"resets_at,omitempty"`
 }
 
 // ModelSwitch is one model change reported by a Claude Code PostModelSwitch

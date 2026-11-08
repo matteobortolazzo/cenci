@@ -1,6 +1,9 @@
 package ipc
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 // HookEvent represents an agent hook event delivered via cenci notify.
 type HookEvent struct {
@@ -45,6 +48,18 @@ type PendingClose struct {
 	Session     string `json:"session"`
 	WindowIndex string `json:"window_index"`
 	WindowName  string `json:"window_name"`
+}
+
+// nativeMeasurementKind is the "kind" discriminator value for a native Claude
+// measurement sent over the event socket (#1450). An older daemon routes the
+// line to Events() as a HookEvent with no session_id and drops it.
+const nativeMeasurementKind = "native-measurement"
+
+// NativeMeasurement carries one measurement body, unvalidated: the per-field
+// validation lives in internal/measurement so that a single bad field cannot
+// fail the whole decode. Measurement is a JSON object.
+type NativeMeasurement struct {
+	Measurement json.RawMessage `json:"measurement"`
 }
 
 // armRequestKind is the "kind" discriminator value for a babysit-arm request

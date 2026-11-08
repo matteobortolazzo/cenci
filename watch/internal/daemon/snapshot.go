@@ -36,6 +36,7 @@ func (d *Daemon) buildSnapshot() ipc.StateSnapshot {
 
 			ModelSwitches:     append([]watch.ModelSwitch(nil), sess.ModelSwitches...),
 			ModelSwitchesMore: sess.ModelSwitchesMore,
+			NativeMeasurement: sess.NativeMeasurement,
 		}
 		e := entry{sortKey: key, paneless: true}
 		if wi := d.frontend.WindowInfo(key); wi != nil {
