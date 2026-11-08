@@ -84,6 +84,16 @@
 #                                 in references/migrations.md `## Board migration
 #                                 notes`, read when re-configuring an existing
 #                                 project
+#   * case_1448_no_instruction_files_write  (#1448) no fenced block in any
+#                                 configure markdown file names pluginConfigs or
+#                                 instructionFiles
+#   * case_1448_compat_notice     (#1448) phases/commit-pr.md carries every part of
+#                                 the instruction-file compatibility notice; codex.md
+#                                 mirrors it in the apply report
+#   * case_1448_stop_on_failure   (#1448) migrations.md and codex.md state that a
+#                                 non-zero migration exit stops configure
+#   * case_1448_adapter_wording   (#1448) the configure files no longer describe
+#                                 generated CLAUDE.md adapters as unconditional output
 #
 # Pinned constants, never derived from the doc under test. Every absence check
 # is paired with an existence marker (flow/docs/shell-scripting-gotchas.md) so
@@ -381,7 +391,7 @@ INLINE_MARKERS=(
 # zero times in SKILL.md (where only the stubs above remain).
 MOVED_STEP_MARKERS=(
   "${GUIDANCE_FILE}|0. **Generate Codex agent adapters**"
-  "${GUIDANCE_FILE}|1. **Generate canonical guidance and client adapters**"
+  "${GUIDANCE_FILE}|1. **Generate canonical AGENTS.md guidance**"
   "${GUIDANCE_FILE}|2. Create the \`docs/\` directory at the repo root (if it doesn't exist) and deploy on-demand reference docs"
   "${GUIDANCE_FILE}|3a. For each project, create \`<project-path>/AGENTS.md\` using \`templates/agents-md-project.md\`"
   "${GUIDANCE_FILE}|3c. **Ensure board lifecycle labels exist**"
@@ -480,31 +490,54 @@ RUNTIME_OPEN_POINTER='steps 5d and 5e in `phases/ci-dockerfile.md`'
 OLD_RUNTIME_OPEN_POINTER='steps 5d and 5e use them'
 MONOREPO_ANCHOR='**Monorepo**: fragments are'
 
-# P30 (#1343): step 1's AGENTS.md/CLAUDE.md generation moves verbatim --
-# whatever #1182 has shipped when the work starts (#1182 is open, so this is the
-# AGENTS.md-canonical text with CLAUDE.md import adapters). Pinned byte for byte
-# from the pre-move SKILL.md (`git show main:flow/skills/configure/SKILL.md`,
-# lines 133-150), never read from the doc under test. Mirrors the P5 pins in
-# configure-fragment-markers.test.sh.
+# P30 (#1343, re-pinned by #1448): step 1's guidance generation lives in
+# phases/guidance-settings.md. #1343 moved it verbatim from SKILL.md; #1448 made
+# AGENTS.md the only generated guidance file, so the CLAUDE.md import-adapter
+# bullets are gone and the text now states the fallback-marked, inert and
+# substantive rules (P3, P4, P23-P27) and the CLAUDE.local.md rule (P28). Pinned
+# byte for byte from the intended post-#1448 text, never read from the doc under
+# test. Mirrors the P5 pins in configure-fragment-markers.test.sh. #1448 review
+# round B added the stop-on-failure obligations to the inert rule (AGENTS.md exists
+# before any removal, a failing `git rm` stops and reports the path) and the
+# untracked-or-gitignored suppressor bullet.
 IFS= read -r -d '' P30_STEP1_BLOCK <<'PINNED_BLOCK'
-1. **Generate canonical guidance and client adapters**:
-   - `AGENTS.md` at the repository root is canonical shared guidance. Use
+1. **Generate canonical AGENTS.md guidance**:
+   - `AGENTS.md` at the repository root is the only generated guidance file. Use
      `templates/agents-md-root.md` or `templates/agents-md-root-monorepo.md`.
    - For each monorepo project, generate `<project>/AGENTS.md` from
      `templates/agents-md-project.md`.
-   - Generate root `CLAUDE.md` as `@AGENTS.md`, followed only by an optional block
-     delimited with `<!-- cenci:claude-only:start -->` and
-     `<!-- cenci:claude-only:end -->`.
-   - Generate each `<project>/CLAUDE.md` as `@AGENTS.md` with the same optional block.
+   - Generate no `CLAUDE.md`, `.claude/CLAUDE.md` or `CLAUDE.local.md`: Claude Code and Codex
+     both read `AGENTS.md` natively. Write no `instructionFiles` or `pluginConfigs` setting to
+     any settings file.
 
-   Discover root `AGENTS.md`, root `CLAUDE.md`, legacy `.claude/CLAUDE.md`, and every
-   configured project's AGENTS/CLAUDE pair. A retained `.claude/CLAUDE.md` adapter imports
-   `@../AGENTS.md`. Before replacing any substantive existing guidance, render and show
-   the complete proposed diff with `git diff --no-index`, then require approval through
-   `AskUserQuestion`. Preserve existing material by merging it into the shared AGENTS
-   content or the explicitly Claude-only block. Never silently delete guidance. Stable
-   markers make reruns idempotent. Never delete a second substantive guidance file unless
-   the user explicitly approves its content having been merged into AGENTS.md.
+   Discover root `AGENTS.md`, root `CLAUDE.md`, `.claude/CLAUDE.md`, `CLAUDE.local.md`, and
+   every configured project's `AGENTS.md` and `CLAUDE.md`. Classify each existing `CLAUDE.md`
+   and `.claude/CLAUDE.md`, and apply its rule:
+   - **Fallback-marked**: a line `<!-- cenci:agents-md-fallback -->` means the user opted in to
+     the fallback adapter. Never remove or rewrite it, even when the rest of its content is
+     inert.
+   - **Inert**: no line other than `@AGENTS.md`, the two markers
+     `<!-- cenci:claude-only:start -->` and `<!-- cenci:claude-only:end -->`, and the template
+     comment line `<!-- Optional Claude Code-only guidance belongs inside this block. -->`,
+     ignoring blank lines. For `.claude/CLAUDE.md` the import line is `@../AGENTS.md`. Remove
+     it with `git -C <worktree-path> rm --quiet -- <path>`, without a prompt, but only once
+     that directory's `AGENTS.md` exists in the worktree. If the `git rm` fails, stop and report
+     the path; never skip a failed removal silently.
+   - **Substantive**: any other line, so any other `.claude/CLAUDE.md` content too. Render the
+     complete merge into `AGENTS.md` with `git diff --no-index` and require approval through
+     `AskUserQuestion`, with two options: merge it into `AGENTS.md` (then remove the file the
+     same way), or decline. A declined file stays byte-identical, and its path goes to the
+     final report in `phases/commit-pr.md` with the suppression trap.
+   - **Untracked or gitignored**: a `CLAUDE.md` or `.claude/CLAUDE.md` in `<worktree-path>` that
+     git does not track cannot be removed with `git rm` and still suppresses `AGENTS.md`. Report
+     its path in the final report as a suppressor instead of ignoring it.
+   - **`CLAUDE.local.md`**: never touched. List each one seen at the main-checkout root or in
+     a configured project in the final report.
+
+   Before replacing any substantive existing `AGENTS.md`, render and show the complete proposed
+   diff the same way and require the same approval. Never silently delete guidance. Stable
+   markers make reruns idempotent. Never delete a substantive guidance file unless the user
+   approved its content having been merged into `AGENTS.md`.
 PINNED_BLOCK
 P30_STEP1_BLOCK="${P30_STEP1_BLOCK%$'\n'}"
 
@@ -723,8 +756,10 @@ require_doc ci_phase "skills/configure/${CI_FILE}" || true
 require_doc write_config_phase "skills/configure/${WRITE_CONFIG_FILE}" || true
 require_doc schema_ref "skills/configure/${SCHEMA_FILE}" || true
 require_doc commit_pr_phase "skills/configure/${COMMIT_PR_FILE}" || true
+require_doc codex_doc "skills/configure/codex.md" || true
 require_doc board_labels_doc "docs/board-labels.md" || true
 require_doc readme "README.md" || true
+require_doc instruction_doc "docs/claude-instruction-files.md" || true
 
 # every_configure_md -- SKILL.md plus every phases/*.md and references/*.md on
 # disk (not just the five named above), so a stray sixth file is still counted.
@@ -1902,6 +1937,236 @@ case_fail_closed_read_rule() {
   assert_contains_ws "${step_map_body}" "${FAIL_CLOSED_READ_RULE}" "${STEP_MAP_HEADING}: states the fail-closed read rule for unreadable Every run files"
 }
 
+# =============================================================================
+# #1448: AGENTS.md-only guidance. The configure files stop describing generated
+# CLAUDE.md adapters, print the compatibility notice, and never write an
+# instruction-file setting.
+# =============================================================================
+
+# extract_fenced_raw <content> -- the lines inside fenced code blocks (the fence
+# markers may be indented inside a list item). Pure.
+extract_fenced_raw() {
+  awk '
+    /^[[:space:]]*```/ { infence = !infence; next }
+    infence { print }
+  ' <<<"$1"
+}
+
+# P17, P36 (#1448): no fenced block in any configure markdown file contains an
+# instruction-file setting key. The prose may describe the remedy; a fenced block
+# is what an agent would copy and write.
+case_1448_no_instruction_files_write() {
+  local sample fenced files file content hits n_files=0
+  # Non-vacuity self-test: a fenced key is seen, a prose-only key is not.
+  sample=$'prose mentions pluginConfigs here\n```json\n{"options": {"instructionFiles": "x"}}\n```\nafter'
+  fenced="$(extract_fenced_raw "${sample}")"
+  [[ "${fenced}" == *instructionFiles* ]] || fail "1448 no-write: the fenced extractor missed a fenced instructionFiles key"
+  [[ "${fenced}" != *pluginConfigs* ]] || fail "1448 no-write: the fenced extractor captured prose outside a fence"
+
+  if ! files="$(find "${CONFIGURE_DIR}" -name '*.md' -type f | LC_ALL=C sort)"; then
+    fail "1448 no-write: could not enumerate ${CONFIGURE_DIR}"
+    return
+  fi
+  while IFS= read -r file; do
+    [[ -n "${file}" ]] || continue
+    n_files=$((n_files + 1))
+    if ! content="$(cat "${file}")"; then
+      fail "1448 no-write: ${file#"${FLOW_DIR}/"} unreadable"
+      continue
+    fi
+    hits="$(extract_fenced_raw "${content}" | grep -E 'pluginConfigs|instructionFiles' || true)"
+    [[ -z "${hits}" ]] || fail "1448 no-write: ${file#"${FLOW_DIR}/"} has a fenced block naming an instruction-file setting: ${hits}"
+  done <<<"${files}"
+  [[ "${n_files}" -ge 15 ]] || fail "1448 no-write: only ${n_files} configure markdown files scanned, expected at least 15"
+  # Paired existence marker: the remedy is described in prose, so the scan is not
+  # passing because the notice is simply absent.
+  assert_contains_ws "${commit_pr_phase}" '`pluginConfigs`' "1448 no-write: ${COMMIT_PR_FILE} describes the remedy in prose"
+}
+
+# P17 (#1448): the final report prints the instruction-file compatibility notice,
+# and the notice carries every part the ticket names. Each part is a pinned phrase;
+# the read-or-stop rule pairs with the floor so the number is never hardcoded here
+# or in the notice.
+#
+# The floor line the notice reads is a whole line `Claude Code >= X.Y.Z` in the plugin
+# doc, and the doc has exactly one. Neither the notice text in commit-pr.md nor the one
+# in codex.md may carry a version number. Step 7 has already pushed the branch when the
+# notice prints, so an unreadable floor never stops the report: the rest still prints
+# and the notice is reported as omitted with its reason.
+FLOOR_LINE_RE='^Claude Code >= [0-9]+\.[0-9]+\.[0-9]+$'
+VERSION_SHAPE_RE='[0-9]+\.[0-9]+\.[0-9]+'
+
+# count_floor_lines <content> -- whole lines matching FLOOR_LINE_RE. Pure.
+count_floor_lines() {
+  grep -cE -- "${FLOOR_LINE_RE}" <<<"$1" | tr -d '[:space:]'
+}
+
+# has_version_shape <content> -- succeeds when <content> holds an X.Y.Z version. Pure.
+has_version_shape() {
+  grep -qE -- "${VERSION_SHAPE_RE}" <<<"$1"
+}
+
+case_1448_compat_notice() {
+  local part sample n notice_region codex_region
+  [[ -n "${commit_pr_phase}" ]] || { fail "1448 notice: ${COMMIT_PR_FILE} missing or empty"; return; }
+
+  # Non-vacuity self-test for the floor-line counter and the version-shape scan: one
+  # valid whole line counts 1, near misses (trailing text, backticks, two-part version,
+  # indentation) count 0, two valid lines count 2, and an injected version is seen.
+  sample=$'intro\nClaude Code >= 1.2.3\nClaude Code >= 1.2.3, decided today\n`Claude Code >= 1.2.3`\nClaude Code >= 1.2\n Claude Code >= 1.2.3'
+  [[ "$(count_floor_lines "${sample}")" -eq 1 ]] || fail "1448 notice: floor-line counter self-test: expected 1, got $(count_floor_lines "${sample}")"
+  [[ "$(count_floor_lines "${sample}"$'\nClaude Code >= 4.5.6')" -eq 2 ]] || fail "1448 notice: floor-line counter self-test: a second valid line was not counted"
+  [[ "$(count_floor_lines $'no floor here\nClaude Code >= 1.2')" -eq 0 ]] || fail "1448 notice: floor-line counter self-test: a near miss was counted"
+  has_version_shape 'the floor is Claude Code >= 2.1.319' || fail "1448 notice: version-shape self-test missed an injected version"
+  ! has_version_shape 'the `Claude Code >= <version>` line' || fail "1448 notice: version-shape self-test flagged the placeholder"
+
+  # The doc the notice reads: readable, with exactly one whole floor line.
+  if [[ -z "${instruction_doc}" ]]; then
+    fail "1448 notice: docs/claude-instruction-files.md missing, unreadable or empty (the floor line cannot be verified)"
+  else
+    n="$(count_floor_lines "${instruction_doc}")"
+    [[ "${n}" -eq 1 ]] || fail "1448 notice: docs/claude-instruction-files.md must hold exactly one whole line matching ${FLOOR_LINE_RE}, found ${n}"
+  fi
+
+  # Scoped to the notice text: the Claude paragraph runs from its marker to the delta-run
+  # paragraph, the Codex sentence from "It also prints" to the next sentence. Each region
+  # is anchored by the placeholder line, so an empty extraction cannot pass the pins or
+  # the scans below.
+  notice_region="$(extract_between_raw "${commit_pr_phase}" '**Instruction-file compatibility notice.**' 'On a delta run, the final report also covers')"
+  codex_region="$(extract_between_raw "${codex_doc}" 'It also prints' 'A fallen-back')"
+  assert_contains_ws "${notice_region}" '`Claude Code >= <version>` line' "1448 notice: the commit-pr.md notice region was extracted"
+  assert_contains_ws "${codex_region}" '`Claude Code >= <version>`' "1448 notice: the codex.md notice region was extracted"
+
+  # Every part of the notice is pinned inside the notice paragraph, never the whole
+  # file: a part that only appears elsewhere in commit-pr.md must not satisfy the pin.
+  for part in \
+    '**Instruction-file compatibility notice.**' \
+    'terminal final report' \
+    'never goes into the PR body' \
+    '`${CLAUDE_PLUGIN_ROOT}/docs/claude-instruction-files.md`' \
+    '`Claude Code >= <version>` line' \
+    'If that doc or that line cannot be read, the rest of the final report still prints' \
+    'the notice is reported as omitted, with the reason' \
+    'Never guess a version and never omit the notice silently' \
+    'earlier builds are untested and unsupported' \
+    'skip native `AGENTS.md` loading' \
+    '`CLAUDE.local.md`' \
+    '`pluginConfigs`' \
+    '`cc-plugin-agents-md@builtin`' \
+    '`options.instructionFiles`' \
+    '`claude-md-and-agents-md`' \
+    '`~/.claude/settings.json`' \
+    'project `.claude/settings.json` is not read' \
+    'configure never writes this setting' \
+    '`templates/claude-md-adapter.md`' \
+    'every configured project' \
+    'Never hardcode the version number'; do
+    assert_contains_ws "${notice_region}" "${part}" "1448 notice: ${COMMIT_PR_FILE} notice paragraph carries [${part}]"
+  done
+  # The declined-file report is a separate obligation of the final report, outside
+  # the notice paragraph, so it is pinned against the whole file.
+  assert_contains_ws "${commit_pr_phase}" 'each declined substantive file' "1448 notice: ${COMMIT_PR_FILE} carries [each declined substantive file]"
+  # The Codex apply report mirrors the obligation (plan Q&A 18).
+  for part in \
+    'compatibility notice' \
+    '`${PLUGIN_ROOT}/docs/claude-instruction-files.md`' \
+    'cannot be read' \
+    'the rest of the report still prints' \
+    'reported as omitted, with the reason' \
+    'never a guessed version' \
+    'declined substantive'; do
+    assert_contains_ws "${codex_doc}" "${part}" "1448 notice: codex.md apply report carries [${part}]"
+  done
+  # The regions extracted above are also scanned for a hardcoded version.
+  if has_version_shape "${notice_region}"; then
+    fail "1448 notice: ${COMMIT_PR_FILE} hardcodes an X.Y.Z version in the notice text"
+  fi
+  if has_version_shape "${codex_region}"; then
+    fail "1448 notice: codex.md hardcodes an X.Y.Z version in the notice text"
+  fi
+  # The retired stop-the-report wording must be gone from both regions.
+  for part in 'stop and report' 'stops and reports'; do
+    [[ "$(normalize_ws "${notice_region}")" != *"${part}"* ]] || fail "1448 notice: ${COMMIT_PR_FILE} notice still says [${part}] although step 7 already pushed the branch"
+    [[ "$(normalize_ws "${codex_region}")" != *"${part}"* ]] || fail "1448 notice: codex.md notice still says [${part}] although the apply report must still print"
+  done
+  # The notice is wired into step 7's report, not floating prose: the paragraph
+  # sits after step 7's body, i.e. in the final report.
+  [[ "$(offset_of "${commit_pr_phase}" '**Instruction-file compatibility notice.**')" -gt "$(offset_of "${commit_pr_phase}" 'Delete the PR-body temp file')" ]] \
+    || fail "1448 notice: the notice must follow step 7's PR steps, in the final report"
+}
+
+# Review round B (#1448): the prose obligations that stop configure on a failure. The
+# step 1 rules (AGENTS.md before any removal, a failing `git rm` stops, the untracked
+# suppressor report) are byte-pinned in P30_STEP1_BLOCK; here the migration reference
+# and the Codex procedure are pinned, so a non-zero exit from migrate-project-core.sh
+# cannot be read as a warning, and the `skip:` lines are reported instead of dropped.
+case_1448_stop_on_failure() {
+  local part
+  for part in \
+    'A non-zero exit from the script, in preview or `--apply`, stops configure' \
+    'report its stderr verbatim' \
+    'do not commit' \
+    'do not continue to any `CLAUDE.md` removal' \
+    'no `CLAUDE.md` is removed before every `AGENTS.md` write has been verified' \
+    'non-zero exit from the removal loop stops configure' \
+    '(`removed: <path>` lines)' \
+    'the output lists what was already removed' \
+    'A `skip: <project> (reason)` line on stderr means'; do
+    assert_contains_ws "${migrations}" "${part}" "1448 stop: ${MIGRATIONS_FILE} carries [${part}]"
+  done
+  for part in \
+    'only once the `AGENTS.md` beside it exists in the worktree' \
+    'a failing `git -C <worktree-path> rm --quiet -- <path>` stops the run and reports the path' \
+    'untracked or gitignored' \
+    'reported as a suppressor in the final report' \
+    'A non-zero exit from `migrate-project-core.sh`, in preview or apply, stops the run' \
+    'report its stderr verbatim' \
+    'A `skip: <project> (reason)` line from the script means that configured project was not migrated' \
+    'report each such line in the final report'; do
+    assert_contains_ws "${codex_doc}" "${part}" "1448 stop: codex.md carries [${part}]"
+  done
+}
+
+# P18 (#1448): the configure files no longer describe generated CLAUDE.md adapters
+# as unconditional output. Every absence is paired with an existence marker (the file
+# still talks about AGENTS.md), and every file that describes the default says so.
+case_1448_adapter_wording() {
+  local entry file content phrase
+  local -a files=(
+    "SKILL.md|${skill}"
+    "codex.md|${codex_doc}"
+    "${DETECT_FILE}|${detect_phase}"
+    "${MIGRATIONS_FILE}|${migrations}"
+    "${GUIDANCE_FILE}|${guidance_phase}"
+    "${COMMIT_PR_FILE}|${commit_pr_phase}"
+  )
+  local -a forbidden=(
+    'Generate root `CLAUDE.md`'
+    'create its `CLAUDE.md` import adapter'
+    'project_doc_fallback_filenames = ["CLAUDE.md"]'
+    '`CLAUDE.md` (canonical)'
+    'AGENTS/CLAUDE'
+    '`AGENTS.md`/`CLAUDE.md`'
+  )
+  for entry in "${files[@]}"; do
+    file="${entry%%|*}"
+    content="${entry#*|}"
+    for phrase in "${forbidden[@]}"; do
+      assert_absent_paired_ws "${content}" 'AGENTS.md' "${phrase}" "1448 wording: ${file} no longer says [${phrase}]"
+    done
+  done
+  # The four reconciliation files describe the default and the opt-in.
+  for entry in "SKILL.md|${skill}" "codex.md|${codex_doc}" "${DETECT_FILE}|${detect_phase}" "${MIGRATIONS_FILE}|${migrations}"; do
+    file="${entry%%|*}"
+    content="${entry#*|}"
+    assert_contains_ws "${content}" 'AGENTS.md-only' "1448 wording: ${file} names AGENTS.md-only as the default"
+    assert_contains_ws "${content}" 'fallback adapter' "1448 wording: ${file} names the fallback adapter as opt-in"
+  done
+  assert_contains_ws "${codex_doc}" 'go through a Plan-mode question' "1448 wording: codex.md routes substantive-file approval through a Plan-mode question"
+  assert_contains_ws "${migrations}" 'The script writes no `CLAUDE.md`' "1448 wording: migrations.md states the script writes no CLAUDE.md"
+  assert_contains_ws "${guidance_phase}" 'explicitly imported from `AGENTS.md` or a fallback adapter' "1448 wording: step 2 names AGENTS.md or a fallback adapter as the .claude/rules importer"
+}
+
 # --- Run every case ----------------------------------------------------------
 
 case_step_map
@@ -1932,6 +2197,10 @@ case_P9_board_labels_pointer
 case_P11_schema_only_in_reference
 case_P24_board_migration_notes
 case_fail_closed_read_rule
+case_1448_no_instruction_files_write
+case_1448_compat_notice
+case_1448_stop_on_failure
+case_1448_adapter_wording
 
 if [[ "${failures}" -gt 0 ]]; then
   echo "configure-router-contract.test.sh: ${failures} failure(s)." >&2

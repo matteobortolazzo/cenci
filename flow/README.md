@@ -218,6 +218,7 @@ companion) for every skill, including the internal ones not listed above.
 **Core workflow docs**
 - `docs/adapter-contract.md`
 - `docs/board-labels.md`
+- `docs/claude-instruction-files.md`
 - `docs/codex-native-evidence.md`
 - `docs/comment-attribution.md`
 - `docs/followup-triage.md`
@@ -339,8 +340,7 @@ cenci skills (`/refine`, `/implement`, `/design`) are **interactive** — they a
 
 ```
 your-project/
-├── AGENTS.md              # canonical shared project guidance
-├── CLAUDE.md              # generated @AGENTS.md adapter
+├── AGENTS.md              # canonical shared project guidance (read natively by Claude Code and Codex)
 ├── .claudeignore          # Files tracked by git but excluded from Claude's context
 ├── docs/
 │   └── git-workflow.md    # On-demand reference: branching, commits, PRs
@@ -349,20 +349,22 @@ your-project/
 └── .worktrees/            # Git worktrees for feature branches (gitignored)
 ```
 
+Configure generates no `CLAUDE.md`. An optional fallback adapter is available for Claude Code builds that cannot load `AGENTS.md` natively; see [`docs/claude-instruction-files.md`](docs/claude-instruction-files.md) for the version floor, the suppression trap, and how to opt in.
+
 **Where reference docs live**
 
 - `docs/<topic>.md` — on-demand reference docs read by skills/agents when their topic intersects the work. The lessons-collector appends a flat bullet here when a lesson's subject has an existing owner doc.
 - `AGENTS.md` — canonical shared critical rules and project-wide invariants.
-- `CLAUDE.md` — generated import adapter with an optional Claude-only block.
-- `.claude/rules/` — reserved for files explicitly `@`-imported by `CLAUDE.md` (auto-loaded at session start). Configure does not create files here today.
+- `CLAUDE.md` — opt-in fallback adapter only (`templates/claude-md-adapter.md`, marked `<!-- cenci:agents-md-fallback -->`), copied to the root and every configured project; configure never generates it.
+- `.claude/rules/` — reserved for files explicitly `@`-imported by `AGENTS.md` or a fallback adapter (auto-loaded at session start). Configure does not create files here today.
 
 **Lesson lifecycle**
 
-Rules only enter through the lessons-collector (append, after implementation sessions) and only leave through `/cenci:maintain rules` (curation, human-gated). Because `CLAUDE.md` is loaded into every session, each rule it holds is a permanent context cost — maintenance periodically merges duplicates, moves non-invariants into on-demand `docs/<topic>.md` files, demotes rules that a regression test or lint gate now enforces, and archives rules whose subject no longer exists. The collector suggests a maintenance run in its summary when a session pushes a rules section past its size threshold.
+Rules only enter through the lessons-collector (append, after implementation sessions) and only leave through `/cenci:maintain rules` (curation, human-gated). Because `AGENTS.md` is loaded into every session, each rule it holds is a permanent context cost — maintenance periodically merges duplicates, moves non-invariants into on-demand `docs/<topic>.md` files, demotes rules that a regression test or lint gate now enforces, and archives rules whose subject no longer exists. The collector suggests a maintenance run in its summary when a session pushes a rules section past its size threshold.
 
 **Backward compatibility**
 
-If your project already has `.claude/rules/lessons-learned.md` (or `lessons-learned-<slug>.md`) from an earlier cenci setup, cenci leaves it in place and skills still read it as a legacy fallback. New lessons go to `docs/` or `CLAUDE.md` only.
+If your project already has `.claude/rules/lessons-learned.md` (or `lessons-learned-<slug>.md`) from an earlier cenci setup, cenci leaves it in place and skills still read it as a legacy fallback. New lessons go to `docs/` or `AGENTS.md` only.
 
 ### Monorepo Support
 
@@ -372,8 +374,8 @@ For monorepos, `/cenci:configure` detects projects automatically and creates a *
 
 | Tier | Mechanism | Loading | Content |
 |------|-----------|---------|---------|
-| Root | `CLAUDE.md` at repo root | Eager | Repo-wide conventions, projects table, critical rules |
-| Project | `packages/api/CLAUDE.md` etc. | Lazy (on file access) | Stack, build/test commands, project conventions |
+| Root | `AGENTS.md` at repo root | Eager | Repo-wide conventions, projects table, critical rules |
+| Project | `packages/api/AGENTS.md` etc. | Lazy (on file access) | Stack, build/test commands, project conventions |
 | Reference docs | `docs/<topic>.md` at repo root | On-demand | Git workflow + topic-specific lessons routed by the collector |
 
 **Monorepo file structure:**
@@ -381,17 +383,14 @@ For monorepos, `/cenci:configure` detects projects automatically and creates a *
 ```
 your-project/
 ├── AGENTS.md                  # Root — projects table + shared critical rules
-├── CLAUDE.md                  # generated @AGENTS.md adapter
 ├── .claudeignore              # Files tracked by git but excluded from Claude's context
 ├── docs/
 │   └── git-workflow.md        # On-demand reference (read by skills as needed)
 ├── packages/
 │   ├── api/
-│   │   ├── AGENTS.md          # Per-project — stack, build/test
-│   │   └── CLAUDE.md          # generated adapter
+│   │   └── AGENTS.md          # Per-project — stack, build/test
 │   └── web/
-│       ├── AGENTS.md
-│       └── CLAUDE.md
+│       └── AGENTS.md
 ├── .cenci/config.json         # canonical config (includes projects)
 ├── .claude/settings.json      # Claude-specific adapter
 └── .worktrees/
@@ -865,14 +864,13 @@ flow/
 │   ├── shell-scripting-gotchas.md  # Narrow shell/jq/grep pitfalls (CWD persistence, jq fallback semantics, contract-test markers)
 │   ├── adapter-contract.md         # The 8-property behavioral-parity contract client adapters (Claude Code, Codex) must satisfy
 │   ├── followup-triage.md          # The Followup capture-queue invariant and the /cenci:maintain backlog consolidation mechanics
+│   ├── claude-instruction-files.md # Claude Code CLAUDE.md vs AGENTS.md loading: version floor, suppression trap, user-scope remedy, opt-in fallback, evidence
 │   ├── codex.md                    # What cenci offers OpenAI Codex, and how it wires
 │   └── opencode.md                 # What cenci offers OpenCode, and how it wires
 │                                   # (git workflow lives at <repo-root>/docs/git-workflow.md, not here)
 ├── templates/
 │   ├── claudeignore
-│   ├── claude-md-root.md
-│   ├── claude-md-root-monorepo.md
-│   ├── claude-md-project.md
+│   ├── claude-md-adapter.md        # Opt-in fallback CLAUDE.md adapter (marker <!-- cenci:agents-md-fallback -->); configure never generates it
 │   ├── settings.json
 │   ├── agents-md-codex.md          # Short AGENTS.md guidance for Codex: points at the native $cenci:* skills and states the always-on rules
 │   ├── cenci-codex-config.json     # Codex agent block for cenci's run launcher

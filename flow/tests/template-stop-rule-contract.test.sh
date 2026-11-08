@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Contract test for ticket #1178: every generated root CLAUDE.md/AGENTS.md
-# template, the Codex AGENTS template (agents-md-codex.md, #695) -- and this
+# Contract test for ticket #1178: every generated root AGENTS.md template (the
+# claude-md-root*.md templates were retired by #1448: AGENTS.md is the only
+# generated guidance), the Codex AGENTS template (agents-md-codex.md, #695) -- and this
 # repo's own root AGENTS.md, which eats its own templates' rules -- carries a "keep going / stop before destructive"
 # Critical Rule: proceed without asking when a step needs no user input, and
 # stop only when blocked on the user or before something destructive
@@ -84,8 +85,6 @@ grep -qF -- '- Never force-push to shared branches.' <<<"${SELFTEST_BULLETS}" ||
 
 # --- The contract: each template and the root AGENTS.md carry the rule ------
 TARGETS=(
-  "${FLOW_DIR}/templates/claude-md-root.md"
-  "${FLOW_DIR}/templates/claude-md-root-monorepo.md"
   "${FLOW_DIR}/templates/agents-md-root.md"
   "${FLOW_DIR}/templates/agents-md-root-monorepo.md"
   "${FLOW_DIR}/templates/agents-md-codex.md"

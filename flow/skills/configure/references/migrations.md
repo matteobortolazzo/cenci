@@ -18,6 +18,26 @@ Rerun it with `--apply` only after approval, with `<root>` set to `<worktree-pat
 Create Worktree in `SKILL.md` — the worktree exists by the time any `--apply` can run). Never
 rewrite or delete `.claude/config.json`; it is a read-only compatibility artifact.
 
+The migration is AGENTS.md-only. The script writes no `CLAUDE.md` and never reads or touches
+`CLAUDE.local.md`. A lone substantive `CLAUDE.md` is migrated verbatim into `AGENTS.md` (written
+first, then the `CLAUDE.md` is removed), an inert adapter is removed, and a substantive
+`CLAUDE.md` beside an existing `AGENTS.md` is kept. A fallback adapter (a `CLAUDE.md` carrying
+`<!-- cenci:agents-md-fallback -->`) is kept byte-identical. The preview names every kept or
+removed `CLAUDE.md` on a `keep:` or `remove:` line; `.claude/CLAUDE.md` is handled by step 1 in
+`phases/guidance-settings.md`, not by the script.
+
+A non-zero exit from the script, in preview or `--apply`, stops configure: report its stderr
+verbatim, do not commit, and do not continue to any `CLAUDE.md` removal or other step that
+depends on the migration. Exit 2 is an unknown mode, exit 3 a refusal (an unreadable
+`CLAUDE.md`, a symlinked `AGENTS.md` or lone `CLAUDE.md`, invalid `projects` in the config),
+and exit 1 either an `AGENTS.md` write that could not be verified or a failing `rm -f` in the
+removal loop. In every case no `CLAUDE.md` is removed before every `AGENTS.md` write has been
+verified; only a failure in the removal loop itself can follow earlier removals. A non-zero exit
+from the removal loop stops configure, and the output lists what was already removed
+(`removed: <path>` lines): report them. A `skip: <project> (reason)` line on stderr means that configured project was not
+migrated (an unsafe or unresolvable path): report each such line in the final report; it does
+not stop the run.
+
 ## Board migration notes
 
 Read this section only when re-configuring an existing project (`existingConfig` or `migrationBase` is present), and state the note that matches how old the project's board is (see `SKILL.md` `### Step Map` and `### Board lifecycle labels`).

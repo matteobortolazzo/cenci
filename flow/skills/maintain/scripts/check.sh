@@ -45,7 +45,10 @@
 # the lint-command check: it reports a missing lintCommand per configured
 # project (one (repo) result for a single-repo config) by delegating to the
 # bundled hooks/scripts/check-lint-command.sh, since a flow-only body would
-# always skip in this repo. Every other check body stays flow-scoped.
+# always skip in this repo. Ticket #1448 adds a third documented exception:
+# check_instruction_docs iterates PROJECT_PATHS to require an AGENTS.md in the
+# root and in every configured project. Every other check body stays
+# flow-scoped.
 set -uo pipefail
 
 # Force deterministic sort/glob ordering regardless of the invoking
@@ -116,6 +119,7 @@ COUNT_SKIP=0
 RESULTS_FILE=""
 MARKERS_OK=1
 PROJECT_PATHS_OK=1
+PROJECT_LIST_UNREAD=0
 declare -A MARKER_PRESENT
 
 # ============================================================================
@@ -331,18 +335,93 @@ project_path_is_safe() {
   return 0
 }
 
+# guidance_file_physical <abs-path> — prints the physical path of a file. Every
+# hop is resolved physically, the way the kernel does it: the directory part of
+# the current path goes through `cd -P` (so a '..' that follows a symlinked
+# directory means that directory's real parent, never a textual collapse), then
+# a leaf symlink's target is appended to that physical directory and the loop
+# repeats (at most 40 hops, so a link loop terminates). Returns 1 for a missing
+# directory, a hop limit, or a leaf that is empty, '.' or '..' (not a file).
+guidance_file_physical() {
+  local p="$1" hops=0 target dir base
+  while :; do
+    dir="${p%/*}"
+    base="${p##*/}"
+    case "$base" in ''|.|..) return 1 ;; esac
+    [[ -n "$dir" ]] || dir="/"
+    dir="$(unset CDPATH; cd -P -- "$dir" 2>/dev/null && pwd -P)" || return 1
+    if [[ "$dir" == "/" ]]; then
+      p="/$base"
+    else
+      p="$dir/$base"
+    fi
+    [[ -L "$p" ]] || break
+    hops=$((hops + 1))
+    [[ "$hops" -le 40 ]] || return 1
+    target="$(readlink -- "$p")" || return 1
+    case "$target" in
+      /*) p="$target" ;;
+      *) p="$dir/$target" ;;
+    esac
+  done
+  printf '%s\n' "$p"
+}
+
+# leaf_symlink_contained <abs-path> — the physical-containment test for one
+# instruction file. A non-symlink path is left to the caller's -f test (its
+# directories are vetted separately). A leaf symlink is contained only when its
+# physical target lies under $ROOT; an existing link whose resolution fails
+# (hop limit, unresolvable directory) is NOT contained -- fail closed -- while a
+# dangling or looping link (not -e) stays with the caller's -f test.
+leaf_symlink_contained() {
+  local path="$1" resolved
+  [[ -L "$path" ]] || return 0
+  if ! resolved="$(guidance_file_physical "$path")"; then
+    [[ ! -e "$path" ]]
+    return
+  fi
+  case "$resolved" in
+    "$ROOT"/*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# guidance_location_status <repo-relative-file> — vets guidanceLocation, a FILE
+# path (project_path_is_safe is built for directories and rejects any leaf
+# symlink, which would turn a root AGENTS.md symlinked to an in-repo file into a
+# failure). Returns 0 when usable (missing, dangling and looping files are left
+# to the caller's -f test), 1 for an unsafe spelling (empty, absolute, '.'/'..'
+# segment) or a directory component resolving outside the repo, and 2 for a leaf
+# symlink whose physical target lies outside $ROOT or cannot be resolved
+# although the link exists (see leaf_symlink_contained).
+guidance_location_status() {
+  local path="$1"
+  [[ -n "$path" && "$path" != /* ]] || return 1
+  case "/$path/" in
+    */../*|*/./*) return 1 ;;
+  esac
+  if [[ -L "$ROOT/$path" ]]; then
+    leaf_symlink_contained "$ROOT/$path" || return 2
+    return 0
+  fi
+  project_path_is_safe "$path" || return 1
+  return 0
+}
+
 # Populate PROJECT_PATHS (repo-root-relative dir prefixes for every configured
 # project) from .cenci/config.json's projects[].path. Single-repo configs yield
 # ("") meaning the repo root. Used by is_relevant()'s --changed mapping so a
 # change under any project subtree maps to the cross-project checks instead of a
-# silent no-op; it never widens what a check body scans (that stays flow-scoped
-# per the #530 charter) -- except that PROJECT_PATHS now additionally feeds
-# check_context_budget's scan list via context_budget_scan_dirs() (#753);
-# every other check body remains flow-scoped.
+# silent no-op; it does not widen what a check body scans (that stays flow-scoped
+# per the #530 charter) -- except that PROJECT_PATHS additionally feeds
+# check_context_budget's scan list via context_budget_scan_dirs() (#753) and
+# check_instruction_docs' per-project AGENTS.md requirement (#1448); every other
+# check body remains flow-scoped.
 resolve_project_dirs() {
   local cfg="$ROOT/.cenci/config.json" p slug jq_out jq_rc=0 any_fail=0 checked=0
   PROJECT_PATHS=()
   PROJECT_PATHS_OK=1
+  PROJECT_LIST_UNREAD=0
   if [[ -f "$cfg" && "$(config_is_monorepo "$cfg")" == "true" ]]; then
     jq_out="$(jq -r '.projects[]? | [(.slug // "(unknown)"), (.path // "")] | @tsv' "$cfg" 2>/dev/null)"
     jq_rc=$?
@@ -360,15 +439,24 @@ resolve_project_dirs() {
         fi
         PROJECT_PATHS+=("$p")
       done <<< "$jq_out"
+    else
+      # The config parsed as a monorepo but its project list could not be read
+      # (e.g. string entries: jq cannot index them). Recorded in its own flag --
+      # PROJECT_PATHS_OK also gates gate-command, which this must not change --
+      # so check_instruction_docs never claims it checked "every configured
+      # project" from a root-only fallback.
+      PROJECT_LIST_UNREAD=1
     fi
-    # jq_rc != 0 here means a genuinely malformed config.json (distinct from
+    # jq_rc != 0 here means the project list is unreadable (distinct from
     # a legitimate single-repo/no-.projects[] config, which jq parses cleanly
     # and just yields no output) -- deliberately not conflated with that case
     # above; PROJECT_PATHS still falls through to the single-repo default
-    # below either way. This is safe because PROJECT_PATHS only ever feeds
-    # is_relevant()'s --changed relevance mapping (never a check body's scan
-    # scope), and the parse failure itself is already surfaced loudly and
-    # separately by check_invalid_json's own dedicated result.
+    # below either way. A genuinely malformed config.json never reaches this
+    # branch (config_is_monorepo is then not "true") and is surfaced separately
+    # by check_invalid_json's own dedicated result; the check bodies that do
+    # consume PROJECT_PATHS (context_budget_scan_dirs, check_instruction_docs)
+    # then only see the repo root -- check_instruction_docs limits its pass
+    # message from config_unparsed / PROJECT_LIST_UNREAD.
   fi
   [[ "${#PROJECT_PATHS[@]}" -eq 0 ]] && PROJECT_PATHS=("")
   # Only a monorepo config whose project list was actually read earns a
@@ -378,7 +466,7 @@ resolve_project_dirs() {
   if [[ "$checked" -eq 1 && "$any_fail" -eq 0 ]]; then
     add_result config-paths "(repo)" pass "all configured project paths stay within the repository" ""
   elif [[ "$jq_rc" -ne 0 ]]; then
-    add_result config-paths "(repo)" skip "configured project paths could not be read from invalid JSON" ""
+    add_result config-paths "(repo)" skip "configured projects could not be read from .cenci/config.json (the projects list is not an array of objects), so their paths were not validated" ""
   fi
 }
 
@@ -897,31 +985,201 @@ check_orphan_files() {
   [[ "$any_orphan" -eq 0 ]] && add_result orphan-files "(repo)" pass "no orphan scripts, phase files or reference files" ""
 }
 
-check_instruction_docs() {
-  local any_fail=0 guidance cfg="$ROOT/.cenci/config.json"
+# instruction_guidance_location — prints the root guidance file: the config's
+# guidanceLocation, or AGENTS.md when the key is absent/empty/unreadable (P32).
+instruction_guidance_location() {
+  local cfg="$ROOT/.cenci/config.json" guidance
   guidance="$(jq -r 'if (.guidanceLocation // "") != "" then .guidanceLocation else "AGENTS.md" end' "$cfg" 2>/dev/null)"
-  [[ -z "$guidance" || "$guidance" == "null" ]] && guidance="AGENTS.md"
-  if [[ ! -f "$ROOT/$guidance" ]]; then
-    add_result instruction-docs "$guidance" fail "missing root instruction file $guidance" \
-      "create $guidance at the repo root (see /cenci:configure)"
+  if [[ -z "$guidance" || "$guidance" == "null" ]]; then
+    guidance="AGENTS.md"
+  fi
+  printf '%s\n' "$guidance"
+}
+
+# claude_md_has_import <file> <line>... — true when the file holds any of the
+# given lines verbatim (a whole-line match, never a substring). A trailing CR is
+# stripped first so a CRLF file matches exactly as it does in the migration
+# script, which strips CR before classifying.
+claude_md_has_import() {
+  local file="$1" line content
+  shift
+  content="$(tr -d '\r' < "$file")" || return 1
+  for line in "$@"; do
+    if grep -qxF -- "$line" <<< "$content"; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# check_instruction_docs (#1448) — AGENTS.md is the canonical, only required
+# guidance: the root guidance file (guidanceLocation, default AGENTS.md) plus an
+# AGENTS.md in every configured, path-safe project (PROJECT_PATHS; a single-repo
+# or absent config means root only). CLAUDE.md files are optional; the checks
+# below only warn about the ways they (or a CLAUDE.local.md / an ancestor's)
+# stop Claude Code's native AGENTS.md loading. A complete legacy inert adapter
+# set (root + every project importing @AGENTS.md) deliberately stays warn-free
+# so scheduled --strict maintenance stays green until those adapters are removed.
+# Runtime loading itself is not verified here -- see the owner doc.
+check_instruction_docs() {
+  local any_fail=0 guidance doc="flow/docs/claude-instruction-files.md"
+  local remedy remedy_user_scope fallback_marker='<!-- cenci:agents-md-fallback -->'
+  local p seen=$'\n' projects=() root_has_claude=0 root_is_fallback=0 root_claude_label="" rf
+  local dir ancestor_rel name fix cfg="$ROOT/.cenci/config.json" config_unparsed=0 pass_msg guidance_rc
+  guidance="$(instruction_guidance_location)"
+  # The user-scope setting is the only remedy that also covers an ancestor
+  # directory outside the repository; the fallback adapter does not (see $doc).
+  remedy_user_scope="set pluginConfigs -> cc-plugin-agents-md@builtin -> options.instructionFiles to \"claude-md-and-agents-md\" in ~/.claude/settings.json, a --settings file or managed settings (project .claude/settings.json is not read); see $doc"
+  remedy="set pluginConfigs -> cc-plugin-agents-md@builtin -> options.instructionFiles to \"claude-md-and-agents-md\" in ~/.claude/settings.json, a --settings file or managed settings (project .claude/settings.json is not read), or opt in to the fallback adapter by copying flow/templates/claude-md-adapter.md to the root and every configured project; see $doc"
+  if [[ -f "$cfg" ]] && ! jq -e . "$cfg" >/dev/null 2>&1; then
+    config_unparsed=1
+  fi
+
+  for p in "${PROJECT_PATHS[@]}"; do
+    [[ -n "$p" ]] || continue
+    case "$seen" in *$'\n'"$p"$'\n'*) continue ;; esac
+    seen="${seen}${p}"$'\n'
+    projects+=("$p")
+  done
+
+  # --- Canonical guidance: root, then each configured project (fail) --------
+  # guidanceLocation is user config used as a file path: vet it like a project
+  # path before any -f test or read, so '../x' or an absolute path can never
+  # satisfy the root check. An unsafe value fails (rather than silently falling
+  # back to AGENTS.md, which would hide the misconfiguration); the remaining
+  # checks then use AGENTS.md for the import-line wording.
+  guidance_rc=0
+  guidance_location_status "$guidance" || guidance_rc=$?
+  if [[ "$guidance_rc" -eq 1 ]]; then
+    add_result instruction-docs "guidanceLocation" fail \
+      "guidanceLocation '$guidance' in .cenci/config.json is not a safe repo-relative path (absolute, '.' or '..' segments, or resolving outside the repository), so the root instruction file was not checked" \
+      "set guidanceLocation to a repository-relative file path without '.' or '..' segments that stays inside the repository (or remove the key to use AGENTS.md)"
+    any_fail=1
+    guidance="AGENTS.md"
+  elif [[ "$guidance_rc" -eq 2 ]]; then
+    add_result instruction-docs "$guidance" fail \
+      "$guidance is a symlink that resolves outside the repository (or could not be resolved), so it was not trusted as the root instruction file" \
+      "replace $guidance with a regular file, or a symlink to a file inside the repository"
+    any_fail=1
+  elif [[ ! -f "$ROOT/$guidance" ]]; then
+    fix="create $guidance at the repo root (see /cenci:configure)"
+    if [[ -f "$ROOT/CLAUDE.md" ]]; then
+      fix="migrate the root CLAUDE.md into $guidance via /cenci:configure (it merges substantive content and removes an inert adapter)"
+    fi
+    add_result instruction-docs "$guidance" fail "missing root instruction file $guidance" "$fix"
     any_fail=1
   fi
-  if [[ ! -f "$ROOT/CLAUDE.md" ]]; then
-    add_result instruction-docs "CLAUDE.md" fail "missing root CLAUDE.md adapter" \
-      "create CLAUDE.md at the repo root importing $guidance (e.g. '@$guidance')"
-    any_fail=1
+  for p in ${projects[@]+"${projects[@]}"}; do
+    if [[ ! -f "$ROOT/$p/AGENTS.md" ]]; then
+      fix="create $p/AGENTS.md with project-specific guidance (see /cenci:configure)"
+      if [[ -f "$ROOT/$p/CLAUDE.md" || -f "$ROOT/$p/.claude/CLAUDE.md" ]]; then
+        fix="migrate $p's CLAUDE.md into $p/AGENTS.md via /cenci:configure (it merges substantive content and removes an inert adapter)"
+      fi
+      add_result instruction-docs "$p/AGENTS.md" fail "missing project instruction file $p/AGENTS.md for configured project '$p'" "$fix"
+      any_fail=1
+    fi
+  done
+
+  # --- CLAUDE.local.md at the root or in a project (warn) --------------------
+  if [[ -f "$ROOT/CLAUDE.local.md" ]]; then
+    add_result instruction-docs "CLAUDE.local.md" warn \
+      "CLAUDE.local.md at the repo root stops Claude Code's native AGENTS.md loading under the default mode (cenci never edits it)" \
+      "delete CLAUDE.local.md if it is unneeded, or $remedy"
   fi
-  if [[ ! -f "$FLOW_DIR/AGENTS.md" ]]; then
-    add_result instruction-docs "flow/AGENTS.md" fail "missing flow project instruction file AGENTS.md" \
-      "create flow/AGENTS.md with project-specific guidance"
-    any_fail=1
+  for p in ${projects[@]+"${projects[@]}"}; do
+    if [[ -f "$ROOT/$p/CLAUDE.local.md" ]]; then
+      add_result instruction-docs "$p/CLAUDE.local.md" warn \
+        "$p/CLAUDE.local.md stops Claude Code's native AGENTS.md loading under the default mode (cenci never edits it)" \
+        "delete $p/CLAUDE.local.md if it is unneeded, or $remedy"
+    fi
+  done
+
+  # --- CLAUDE.md / CLAUDE.local.md in an ancestor of the repo root (warn) ----
+  dir="$ROOT"
+  ancestor_rel=""
+  while [[ "$dir" != "/" && -n "$dir" ]]; do
+    dir="$(dirname "$dir")"
+    ancestor_rel="../${ancestor_rel}"
+    for name in CLAUDE.md CLAUDE.local.md; do
+      if [[ -f "$dir/$name" ]]; then
+        add_result instruction-docs "${ancestor_rel}${name}" warn \
+          "${ancestor_rel}${name} (an ancestor of the repo root) stops Claude Code's native AGENTS.md loading under the default mode" \
+          "remove ${ancestor_rel}${name} if it is unneeded, or $remedy_user_scope"
+      fi
+    done
+  done
+
+  # --- Import lines in existing CLAUDE.md adapters (warn) --------------------
+  # A root .claude/CLAUDE.md suppresses native AGENTS.md loading exactly like a
+  # root CLAUDE.md, so either one makes the root a CLAUDE.md-carrying root for
+  # the coverage warn below; the fallback marker may sit in whichever exists.
+  for rf in "$ROOT/CLAUDE.md" "$ROOT/.claude/CLAUDE.md"; do
+    [[ -f "$rf" ]] || continue
+    root_has_claude=1
+    if [[ -z "$root_claude_label" ]]; then
+      root_claude_label="root ${rf#"$ROOT"/}"
+    fi
+    if claude_md_has_import "$rf" "$fallback_marker"; then
+      root_is_fallback=1
+    fi
+  done
+  if [[ -f "$ROOT/CLAUDE.md" ]]; then
+    if ! claude_md_has_import "$ROOT/CLAUDE.md" "@AGENTS.md" "@$guidance"; then
+      add_result instruction-docs "CLAUDE.md" warn \
+        "root CLAUDE.md has no '@AGENTS.md' (or '@$guidance') import line, so it hides the canonical guidance from Claude Code" \
+        "add '@$guidance' as its own line in CLAUDE.md, or remove the file via /cenci:configure and rely on native AGENTS.md loading; see $doc"
+    fi
   fi
-  if [[ ! -f "$FLOW_DIR/CLAUDE.md" ]]; then
-    add_result instruction-docs "flow/CLAUDE.md" fail "missing flow project CLAUDE.md adapter" \
-      "create flow/CLAUDE.md importing flow/AGENTS.md"
-    any_fail=1
+  if [[ -f "$ROOT/.claude/CLAUDE.md" ]] && ! claude_md_has_import "$ROOT/.claude/CLAUDE.md" "@../AGENTS.md" "@../$guidance"; then
+    add_result instruction-docs ".claude/CLAUDE.md" warn \
+      ".claude/CLAUDE.md has no '@../AGENTS.md' (or '@../$guidance') import line, so it hides the canonical guidance from Claude Code" \
+      "add '@../$guidance' as its own line in .claude/CLAUDE.md, or remove the file via /cenci:configure; see $doc"
   fi
-  [[ "$any_fail" -eq 0 ]] && add_result instruction-docs "(repo)" pass "all configured instruction files are present" ""
+  for p in ${projects[@]+"${projects[@]}"}; do
+    if [[ -f "$ROOT/$p/CLAUDE.md" ]] && ! claude_md_has_import "$ROOT/$p/CLAUDE.md" "@AGENTS.md"; then
+      add_result instruction-docs "$p/CLAUDE.md" warn \
+        "$p/CLAUDE.md has no '@AGENTS.md' import line, so it hides $p/AGENTS.md from Claude Code" \
+        "add '@AGENTS.md' as its own line in $p/CLAUDE.md, or remove the file via /cenci:configure; see $doc"
+    fi
+    if [[ -f "$ROOT/$p/.claude/CLAUDE.md" ]] && ! claude_md_has_import "$ROOT/$p/.claude/CLAUDE.md" "@../AGENTS.md"; then
+      add_result instruction-docs "$p/.claude/CLAUDE.md" warn \
+        "$p/.claude/CLAUDE.md has no '@../AGENTS.md' import line, so it hides $p/AGENTS.md from Claude Code" \
+        "add '@../AGENTS.md' as its own line in $p/.claude/CLAUDE.md, or remove the file via /cenci:configure; see $doc"
+    fi
+  done
+
+  # --- A root CLAUDE.md leaves a project without one uncovered (warn) --------
+  if [[ "$root_has_claude" -eq 1 ]]; then
+    for p in ${projects[@]+"${projects[@]}"}; do
+      if [[ ! -f "$ROOT/$p/CLAUDE.md" && ! -f "$ROOT/$p/.claude/CLAUDE.md" ]]; then
+        if [[ "$root_is_fallback" -eq 1 ]]; then
+          add_result instruction-docs "$p/CLAUDE.md" warn \
+            "root carries a fallback adapter but configured project '$p' has none, so under the default mode $p/AGENTS.md would not load" \
+            "copy flow/templates/claude-md-adapter.md to $p/CLAUDE.md (a fallback set needs an adapter at the root and in every configured project), or remove the fallback adapters and $remedy"
+        else
+          add_result instruction-docs "$p/CLAUDE.md" warn \
+            "$root_claude_label exists but configured project '$p' has no CLAUDE.md, so under the default mode $p/AGENTS.md would not load" \
+            "run /cenci:configure to migrate the $root_claude_label away (AGENTS.md then loads natively), or add $p/CLAUDE.md importing '@AGENTS.md', or $remedy"
+        fi
+      fi
+    done
+  fi
+
+  if [[ "$any_fail" -eq 0 ]]; then
+    # Never claim "every configured project" when the project list was not
+    # fully read: an unparseable config leaves only the root checked, and a
+    # dropped unsafe project entry was never checked.
+    if [[ "$config_unparsed" -eq 1 ]]; then
+      pass_msg="canonical AGENTS.md guidance is present at the root only; .cenci/config.json could not be parsed, so configured projects were not checked"
+    elif [[ "$PROJECT_LIST_UNREAD" -eq 1 ]]; then
+      pass_msg="canonical AGENTS.md guidance is present at the root only; the configured project list could not be read, so configured projects were not checked"
+    elif [[ "$PROJECT_PATHS_OK" -ne 1 ]]; then
+      pass_msg="canonical AGENTS.md guidance is present at the root and in each configured project with a safe path; unsafe project entries were skipped, so they were not checked"
+    else
+      pass_msg="canonical AGENTS.md guidance is present at the root and in every configured project"
+    fi
+    add_result instruction-docs "(repo)" pass "$pass_msg; runtime loading is not verified (see $doc)" ""
+  fi
 }
 
 # _topic_docs_for <agents_md> <base> [--check-orphans] — the [--check-orphans]
@@ -1532,12 +1790,48 @@ check_gate_command() {
   esac
 }
 
+# instruction_source_files (#1448) — prints one existing instruction file per
+# line for check_claude_rules_imports: the root guidance file, then AGENTS.md
+# and CLAUDE.md in the repo root, every configured project directory and
+# $FLOW_DIR, deduplicated. CLAUDE.md is optional, so an AGENTS.md-only repo
+# scans AGENTS.md alone.
+instruction_source_files() {
+  local guidance dir f seen=$'\n' candidates=() guidance_rc=0
+  guidance="$(instruction_guidance_location)"
+  # guidanceLocation is user config: an unsafe value ('../x', absolute) or a
+  # symlink resolving outside the repo must not be read as a source file;
+  # check_instruction_docs reports both as a fail. An in-repo symlink is read.
+  guidance_location_status "$guidance" || guidance_rc=$?
+  if [[ "$guidance_rc" -eq 0 ]]; then
+    candidates+=("$ROOT/$guidance")
+  fi
+  while IFS= read -r dir; do
+    candidates+=("$dir/AGENTS.md" "$dir/CLAUDE.md")
+  done < <(context_budget_scan_dirs)
+  candidates+=("$FLOW_DIR/AGENTS.md" "$FLOW_DIR/CLAUDE.md")
+  for f in "${candidates[@]}"; do
+    case "$seen" in *$'\n'"$f"$'\n'*) continue ;; esac
+    seen="${seen}${f}"$'\n'
+    # -f follows symlinks, so every candidate that is a leaf symlink gets the
+    # same physical-containment test as the guidance file: an escaping link is
+    # skipped, never read (check_instruction_docs reports the root one).
+    if [[ -f "$f" ]] && leaf_symlink_contained "$f"; then
+      printf '%s\n' "$f"
+    fi
+  done
+}
+
 check_claude_rules_imports() {
   local dir="$ROOT/.claude/rules"
   [[ -d "$dir" ]] || { add_result claude-rules-imports "(repo)" pass "no .claude/rules/ directory present" ""; return; }
-  local imports f rel any_fail=0
-  imports="$( { cat "$ROOT/AGENTS.md" "$ROOT/CLAUDE.md" "$FLOW_DIR/AGENTS.md" "$FLOW_DIR/CLAUDE.md" 2>/dev/null; } \
-    | grep -oE '@\.claude/rules/[A-Za-z0-9_.-]+\.md' | sed 's/^@//' | sort -u)"
+  local imports f rel any_fail=0 sources source_file
+  sources="$(instruction_source_files)"
+  imports=""
+  while IFS= read -r source_file; do
+    [[ -n "$source_file" ]] || continue
+    imports="${imports}$(grep -oE '@\.claude/rules/[A-Za-z0-9_.-]+\.md' "$source_file" 2>/dev/null | sed 's/^@//')"$'\n'
+  done <<< "$sources"
+  imports="$(printf '%s' "$imports" | sort -u)"
   for f in "$dir"/*.md; do
     [[ -f "$f" ]] || continue
     case "$(basename "$f")" in

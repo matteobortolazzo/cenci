@@ -99,8 +99,22 @@ run_explicit_report() {
   fi
 }
 
-# count_results <check-id> <status> — number of results matching both.
+# report_is_valid — true only when REPORT_JSON is a parseable report with a
+# results array. run_check falls back to REPORT_JSON="null" when check.sh wrote
+# no report (e.g. it crashed), and `.results[]?` over null yields zero matches,
+# so every "expected 0 results" assertion would pass vacuously.
+report_is_valid() {
+  printf '%s' "${REPORT_JSON}" | jq -e '(.results | type) == "array"' >/dev/null 2>&1
+}
+
+# count_results <check-id> <status> — number of results matching both, or the
+# non-numeric "no-report" when there is no valid report, so is_eq0/is_ge1 both
+# fail loudly instead of treating a missing report as "zero results".
 count_results() {
+  if ! report_is_valid; then
+    printf 'no-report'
+    return 0
+  fi
   printf '%s' "${REPORT_JSON}" | jq --arg c "$1" --arg s "$2" \
     '[.results[]? | select(.check==$c and .status==$s)] | length' 2>/dev/null
 }
@@ -128,6 +142,7 @@ assert_no_result_status() {
 assert_no_result() {
   local check="$1" label="$2"
   local n
+  report_is_valid || { fail "${label}: no valid report to assert against (report: ${REPORT_JSON})"; return; }
   n="$(printf '%s' "${REPORT_JSON}" | jq --arg c "$1" '[.results[]? | select(.check==$c)] | length' 2>/dev/null)"
   is_eq0 "${n}" || fail "${label}: expected 0 results for '${check}' (narrowed-out category), got '${n:-N/A}'"
 }
@@ -145,6 +160,7 @@ assert_check_ran() {
 assert_all_fixes_present() {
   local label="$1"
   local n
+  report_is_valid || { fail "${label}: no valid report to assert against (report: ${REPORT_JSON})"; return; }
   n="$(printf '%s' "${REPORT_JSON}" | jq \
     '[.results[]? | select((.status=="fail" or .status=="warn") and ((.fix // "")==""))] | length' 2>/dev/null)"
   is_eq0 "${n}" || fail "${label}: found fail/warn result(s) with empty fix (count='${n:-N/A}')"
@@ -153,6 +169,7 @@ assert_all_fixes_present() {
 assert_clean_report() {
   local label="$1"
   local n
+  report_is_valid || { fail "${label}: no valid report to assert against (report: ${REPORT_JSON})"; return; }
   n="$(printf '%s' "${REPORT_JSON}" | jq '[.results[]? | select(.status=="fail" or .status=="warn")] | length' 2>/dev/null)"
   is_eq0 "${n}" || fail "${label}: expected a fully clean report (no fail/warn), got '${n:-N/A}'"
 }
@@ -198,10 +215,6 @@ EOF
 - Rule three.
 EOF
 
-  cat > "${root}/CLAUDE.md" <<'EOF'
-@AGENTS.md
-EOF
-
   cat > "${root}/.cenci/config.json" <<EOF
 {
   "configVersion": "${FLOW_PLUGIN_VERSION}",
@@ -223,10 +236,6 @@ EOF
 
 ## Reference Docs
 - `docs/sample-topic.md` — sample topic doc.
-EOF
-
-  cat > "${root}/flow/CLAUDE.md" <<'EOF'
-@AGENTS.md
 EOF
 
   cat > "${root}/flow/docs/sample-topic.md" <<'EOF'
@@ -350,6 +359,8 @@ add_fixture_client_matrix() {
 # =====================================================================
 ROOT="$(mktemp -d)"
 setup_base "${ROOT}"
+# #1448 (P11): the shared fixture is AGENTS.md-only; no CLAUDE.md anywhere.
+[[ ! -e "${ROOT}/CLAUDE.md" && ! -e "${ROOT}/flow/CLAUDE.md" ]] || fail "case1 fixture must not create a CLAUDE.md at the root or in flow"
 bootstrap_markers "${ROOT}"
 assert_exit_zero "case1 bootstrap (--write)"
 run_check "${ROOT}"
@@ -464,6 +475,9 @@ rm -f "${ROOT}/flow/AGENTS.md"
 run_check "${ROOT}"
 assert_has_result "instruction-docs" "fail" "case6 missing flow/AGENTS.md"
 assert_all_fixes_present "case6 instruction-docs fail must carry a fix"
+# #1448 (P8): the failing result names the configured project path, not just any file.
+CASE6_TARGETS="$(printf '%s' "${REPORT_JSON}" | jq -r '[.results[]? | select(.check=="instruction-docs" and .status=="fail") | (.target + " " + .message)] | join(" | ")' 2>/dev/null)"
+assert_contains "${CASE6_TARGETS}" "flow/AGENTS.md" "case6 fail names the project path flow/AGENTS.md"
 rm -rf "${ROOT}"
 
 # =====================================================================
@@ -2913,6 +2927,607 @@ EOF
   assert_contains "${CE_MSG}" "type boolean; canonical type is string" "case80 config-examples message reports the type mismatch"
   rm -rf "${ROOT}"
 fi
+
+# =====================================================================
+# #1448 -- AGENTS.md-only setup is first-class for instruction-docs and
+# claude-rules-imports. The shared fixture carries no CLAUDE.md; each case
+# adds exactly the files it needs. Ancestor cases nest the repo at
+# "$PARENT/repo" so the ancestor walk meets only files the case created
+# (the assumption that /tmp and / hold no CLAUDE.md is what keeps case 1's
+# clean report host-independent).
+# =====================================================================
+INSTR_DOC="flow/docs/claude-instruction-files.md"
+INSTR_FALLBACK_MARKER='<!-- cenci:agents-md-fallback -->'
+INSTR_SHIPPED_ADAPTER="${FLOW_DIR}/templates/claude-md-adapter.md"
+
+# instr_n <status> <target> -- number of instruction-docs results with that
+# exact status and target.
+instr_n() {
+  if ! report_is_valid; then
+    printf 'no-report'
+    return 0
+  fi
+  printf '%s' "${REPORT_JSON}" | jq --arg s "$1" --arg t "$2" \
+    '[.results[]? | select(.check=="instruction-docs" and .status==$s and .target==$t)] | length' 2>/dev/null
+}
+
+# instr_field <status> <target> <field> -- field of the matching results, joined.
+instr_field() {
+  printf '%s' "${REPORT_JSON}" | jq -r --arg s "$1" --arg t "$2" --arg f "$3" \
+    '[.results[]? | select(.check=="instruction-docs" and .status==$s and .target==$t) | .[$f]] | join(" | ")' 2>/dev/null
+}
+
+# instr_all <status> -- every instruction-docs result of that status as
+# "target: message -> fix", joined; used for "names X" / "does not name X".
+instr_all() {
+  printf '%s' "${REPORT_JSON}" | jq -r --arg s "$1" \
+    '[.results[]? | select(.check=="instruction-docs" and .status==$s) | (.target + ": " + .message + " -> " + .fix)] | join(" | ")' 2>/dev/null
+}
+
+assert_instr() {
+  local status="$1" target="$2" label="$3" n
+  n="$(instr_n "${status}" "${target}")"
+  is_ge1 "${n}" || fail "${label}: expected >=1 instruction-docs ${status} result with target '${target}', got '${n:-N/A}' (report: ${REPORT_JSON})"
+}
+
+assert_no_instr() {
+  local status="$1" target="$2" label="$3" n
+  n="$(instr_n "${status}" "${target}")"
+  is_eq0 "${n}" || fail "${label}: expected 0 instruction-docs ${status} results with target '${target}', got '${n:-N/A}'"
+}
+
+# no_claude_md_under <root> -- true when no CLAUDE.md exists in the tree
+# outside .git (the AGENTS.md-only precondition of P7).
+no_claude_md_under() {
+  local found
+  found="$(find "$1" -name 'CLAUDE.md' -not -path "$1/.git/*" 2>/dev/null)"
+  [[ -z "${found}" ]]
+}
+
+# set_guidance_location <root> <value|-> -- sets (or, with "-", removes) the
+# fixture config's guidanceLocation.
+set_guidance_location() {
+  local root="$1" value="$2"
+  if [[ "${value}" == "-" ]]; then
+    jq 'del(.guidanceLocation)' "${root}/.cenci/config.json" > "${root}/.cenci/config.json.tmp"
+  else
+    jq --arg v "${value}" '.guidanceLocation = $v' "${root}/.cenci/config.json" > "${root}/.cenci/config.json.tmp"
+  fi
+  mv "${root}/.cenci/config.json.tmp" "${root}/.cenci/config.json"
+}
+
+write_import_adapter() { printf '@AGENTS.md\n' > "$1"; }
+
+write_marked_adapter() {
+  printf '%s\n@AGENTS.md\n' "${INSTR_FALLBACK_MARKER}" > "$1"
+}
+
+# --- 80b: a missing report is never read as "zero results" ---------------------
+# Non-vacuity self-test for the negative-assertion helpers: with no report
+# (REPORT_JSON=null, what run_check leaves when check.sh crashes) count_results
+# and instr_n must return a non-numeric value, so assert_no_result_status's
+# is_eq0 cannot pass.
+SAVED_REPORT_JSON="${REPORT_JSON}"
+REPORT_JSON="null"
+assert_eq "$(count_results instruction-docs warn)" "no-report" "case80b count_results flags a null report"
+assert_eq "$(instr_n warn "CLAUDE.md")" "no-report" "case80b instr_n flags a null report"
+if is_eq0 "$(count_results instruction-docs warn)"; then
+  fail "case80b a null report must not satisfy an 'expected 0 results' assertion"
+fi
+REPORT_JSON="not json at all"
+assert_eq "$(count_results instruction-docs warn)" "no-report" "case80b count_results flags an unparseable report"
+REPORT_JSON="${SAVED_REPORT_JSON}"
+
+# --- 81 (P7): root + two projects, AGENTS.md-only: pass message ---------------
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+add_second_project "${ROOT}" watch
+no_claude_md_under "${ROOT}" || fail "case81 precondition: no CLAUDE.md anywhere in the fixture"
+run_check "${ROOT}"
+assert_no_result_status "instruction-docs" "fail" "case81 AGENTS.md-only repo has no instruction-docs fail"
+assert_no_result_status "instruction-docs" "warn" "case81 AGENTS.md-only repo has no instruction-docs warn"
+assert_instr "pass" "(repo)" "case81 instruction-docs passes"
+CASE81_MSG="$(instr_field pass "(repo)" message)"
+assert_contains "${CASE81_MSG}" "canonical" "case81 pass message says canonical guidance is present"
+assert_contains "${CASE81_MSG}" "every configured project" "case81 normal-path pass message covers every configured project"
+assert_contains "${CASE81_MSG}" "runtime loading is not verified" "case81 pass message says runtime loading is not verified"
+assert_contains "${CASE81_MSG}" "${INSTR_DOC}" "case81 pass message names the owner doc"
+rm -rf "${ROOT}"
+
+# --- 82a (P8): missing root AGENTS.md ------------------------------------------
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+rm -f "${ROOT}/AGENTS.md"
+run_check "${ROOT}"
+assert_instr "fail" "AGENTS.md" "case82a missing root AGENTS.md fails naming it"
+assert_all_fixes_present "case82a every instruction-docs fail carries a fix"
+rm -rf "${ROOT}"
+
+# --- 82b (P32): guidanceLocation is the required root file ---------------------
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+set_guidance_location "${ROOT}" "docs/GUIDE.md"
+run_check "${ROOT}"
+assert_instr "fail" "docs/GUIDE.md" "case82b configured guidanceLocation missing fails naming it"
+rm -f "${ROOT}/AGENTS.md"
+mkdir -p "${ROOT}/docs"
+printf '# Guide\n\n## Critical Rules\n- Guide rule.\n' > "${ROOT}/docs/GUIDE.md"
+run_check "${ROOT}"
+assert_no_instr "fail" "docs/GUIDE.md" "case82b present GUIDE.md does not fail"
+assert_no_instr "fail" "AGENTS.md" "case82b no root AGENTS.md fail when guidanceLocation points at GUIDE.md"
+assert_no_result_status "instruction-docs" "fail" "case82b GUIDE.md as root guidance leaves no instruction-docs fail"
+assert_instr "pass" "(repo)" "case82b GUIDE.md present: instruction-docs ran and passes"
+set_guidance_location "${ROOT}" "-"
+run_check "${ROOT}"
+assert_instr "fail" "AGENTS.md" "case82b absent guidanceLocation falls back to AGENTS.md"
+rm -rf "${ROOT}"
+
+# --- 83a (P9, P28): root CLAUDE.local.md warns, never fails --------------------
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+bootstrap_markers "${ROOT}"
+printf 'my private notes\n' > "${ROOT}/CLAUDE.local.md"
+run_check "${ROOT}"
+assert_instr "warn" "CLAUDE.local.md" "case83a root CLAUDE.local.md warns"
+assert_no_result_status "instruction-docs" "fail" "case83a CLAUDE.local.md never fails"
+assert_exit_zero "case83a CLAUDE.local.md leaves exit 0"
+assert_contains "$(instr_field warn "CLAUDE.local.md" fix)" "claude-md-and-agents-md" "case83a fix names the user-scope remedy"
+assert_eq "$(cat "${ROOT}/CLAUDE.local.md")" "my private notes" "case83a CLAUDE.local.md is never modified"
+rm -rf "${ROOT}"
+
+# --- 83b (P9): project CLAUDE.local.md warns -----------------------------------
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+printf 'private\n' > "${ROOT}/flow/CLAUDE.local.md"
+run_check "${ROOT}"
+assert_instr "warn" "flow/CLAUDE.local.md" "case83b project CLAUDE.local.md warns naming it"
+assert_no_result_status "instruction-docs" "fail" "case83b project CLAUDE.local.md never fails"
+rm -rf "${ROOT}"
+
+# --- 83c (P9): ancestor CLAUDE.md / CLAUDE.local.md warn as ../ paths ----------
+PARENT="$(mktemp -d)"
+ROOT="${PARENT}/repo"
+mkdir -p "${ROOT}"
+setup_base "${ROOT}"
+write_import_adapter "${PARENT}/CLAUDE.md"
+printf 'parent private\n' > "${PARENT}/CLAUDE.local.md"
+run_check "${ROOT}"
+assert_instr "warn" "../CLAUDE.md" "case83c ancestor CLAUDE.md warns as ../CLAUDE.md"
+assert_instr "warn" "../CLAUDE.local.md" "case83c ancestor CLAUDE.local.md warns as ../CLAUDE.local.md"
+assert_no_result_status "instruction-docs" "fail" "case83c ancestor files never fail"
+assert_contains "$(instr_field warn "../CLAUDE.md" fix)" "claude-md-and-agents-md" "case83c ancestor fix names the user-scope remedy"
+# The fallback adapter does not remove the suppression trap for an ancestor
+# outside the repository (flow/docs/claude-instruction-files.md), so the
+# ancestor-specific fix must not offer it.
+[[ "$(instr_field warn "../CLAUDE.md" fix)" != *fallback* ]] || fail "case83c ancestor CLAUDE.md fix must not offer the fallback adapter (got: $(instr_field warn "../CLAUDE.md" fix))"
+[[ "$(instr_field warn "../CLAUDE.local.md" fix)" != *fallback* ]] || fail "case83c ancestor CLAUDE.local.md fix must not offer the fallback adapter (got: $(instr_field warn "../CLAUDE.local.md" fix))"
+rm -rf "${PARENT}"
+
+# --- 84a (P10, P14): a deliberate fallback set passes --------------------------
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+cp "${INSTR_SHIPPED_ADAPTER}" "${ROOT}/CLAUDE.md"
+cp "${INSTR_SHIPPED_ADAPTER}" "${ROOT}/flow/CLAUDE.md"
+run_check "${ROOT}"
+assert_no_result_status "instruction-docs" "warn" "case84a shipped fallback adapters at root and flow do not warn"
+assert_no_result_status "instruction-docs" "fail" "case84a shipped fallback adapters at root and flow do not fail"
+assert_instr "pass" "(repo)" "case84a fallback set passes"
+rm -rf "${ROOT}"
+
+# --- 84b (P10): fallback root leaves a project uncovered -----------------------
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+add_second_project "${ROOT}" watch
+write_marked_adapter "${ROOT}/CLAUDE.md"
+write_marked_adapter "${ROOT}/flow/CLAUDE.md"
+run_check "${ROOT}"
+assert_instr "warn" "watch/CLAUDE.md" "case84b fallback root without a watch adapter warns naming watch"
+assert_no_instr "warn" "flow/CLAUDE.md" "case84b covered flow project does not warn"
+assert_no_result_status "instruction-docs" "fail" "case84b uncovered project warns, never fails"
+assert_contains "$(instr_field warn "watch/CLAUDE.md" fix)" "claude-md-adapter.md" "case84b fallback fix names the fallback template"
+assert_all_fixes_present "case84b every warn carries a fix"
+rm -rf "${ROOT}"
+
+# --- 85 (unchecked AC): unmarked root CLAUDE.md leaves flow uncovered ----------
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+write_import_adapter "${ROOT}/CLAUDE.md"
+run_check "${ROOT}"
+assert_instr "warn" "flow/CLAUDE.md" "case85 unmarked root CLAUDE.md with no flow/CLAUDE.md warns naming flow"
+assert_no_result_status "instruction-docs" "fail" "case85 uncovered project never fails"
+assert_contains "$(instr_field warn "flow/CLAUDE.md" fix)" "/cenci:configure" "case85 legacy-root fix points at /cenci:configure"
+assert_all_fixes_present "case85 every warn carries a fix"
+rm -rf "${ROOT}"
+
+# --- 86 (unchecked AC): CLAUDE.md files without the import line warn -----------
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+printf '# notes without an import\n' > "${ROOT}/CLAUDE.md"
+printf '# notes without an import\n' > "${ROOT}/flow/CLAUDE.md"
+mkdir -p "${ROOT}/.claude"
+printf '@AGENTS.md\n' > "${ROOT}/.claude/CLAUDE.md"
+run_check "${ROOT}"
+assert_instr "warn" "CLAUDE.md" "case86 root CLAUDE.md without an import warns"
+assert_instr "warn" "flow/CLAUDE.md" "case86 flow/CLAUDE.md without an import warns"
+assert_instr "warn" ".claude/CLAUDE.md" "case86 .claude/CLAUDE.md without @../AGENTS.md warns"
+assert_no_result_status "instruction-docs" "fail" "case86 missing imports never fail"
+assert_all_fixes_present "case86 every warn carries a fix"
+printf '@AGENTS.md\n' > "${ROOT}/CLAUDE.md"
+printf '@AGENTS.md\n' > "${ROOT}/flow/CLAUDE.md"
+printf '@../AGENTS.md\n' > "${ROOT}/.claude/CLAUDE.md"
+run_check "${ROOT}"
+assert_no_result_status "instruction-docs" "warn" "case86 control: files carrying their import line do not warn"
+assert_instr "pass" "(repo)" "case86 control: instruction-docs ran and passes"
+rm -rf "${ROOT}"
+
+# --- 87 (P29): unsafe project paths are skipped by instruction-docs ------------
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+jq '.projects += [{"slug":"outside","path":"../outside"},{"slug":"dotdot","path":"a/../b"}]' \
+  "${ROOT}/.cenci/config.json" > "${ROOT}/.cenci/config.json.tmp"
+mv "${ROOT}/.cenci/config.json.tmp" "${ROOT}/.cenci/config.json"
+run_check "${ROOT}"
+assert_has_result "config-paths" "fail" "case87 config-paths still fails on unsafe project paths"
+# Positive anchors first: the negative assertions below pass vacuously when
+# instruction-docs emitted nothing, so prove it ran and said what it skipped.
+assert_instr "pass" "(repo)" "case87 instruction-docs ran and passes for the safe projects"
+assert_contains "$(instr_field pass "(repo)" message)" "skipped" "case87 pass message mentions the skipped unsafe entries"
+CASE87_ALL="$(printf '%s' "${REPORT_JSON}" | jq -r '[.results[]? | select(.check=="instruction-docs") | (.target + ": " + .message + " -> " + .fix)] | join(" | ")' 2>/dev/null)"
+[[ "${CASE87_ALL}" != *"../outside"* ]] || fail "case87 instruction-docs must skip '../outside' (got: ${CASE87_ALL})"
+[[ "${CASE87_ALL}" != *"a/../b"* ]] || fail "case87 instruction-docs must skip 'a/../b' (got: ${CASE87_ALL})"
+assert_no_result_status "instruction-docs" "fail" "case87 safe projects still pass with unsafe siblings skipped"
+rm -rf "${ROOT}"
+
+# --- 88 (P30): legacy project with only a substantive CLAUDE.md fails ----------
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+mkdir -p "${ROOT}/legacy"
+printf '# Legacy rules\n\n- Never ship on Fridays.\n' > "${ROOT}/legacy/CLAUDE.md"
+jq '.projects += [{"slug":"legacy","path":"legacy"}]' \
+  "${ROOT}/.cenci/config.json" > "${ROOT}/.cenci/config.json.tmp"
+mv "${ROOT}/.cenci/config.json.tmp" "${ROOT}/.cenci/config.json"
+run_check "${ROOT}"
+assert_instr "fail" "legacy/AGENTS.md" "case88 legacy project without AGENTS.md fails naming it"
+assert_contains "$(instr_field fail "legacy/AGENTS.md" message)" "legacy" "case88 message names the legacy project"
+assert_contains "$(instr_field fail "legacy/AGENTS.md" fix)" "/cenci:configure" "case88 fix points at /cenci:configure migration"
+assert_all_fixes_present "case88 every fail carries a fix"
+rm -rf "${ROOT}"
+
+# --- 89a/89b/89c (P12): rules imports come from every AGENTS.md source ---------
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+add_second_project "${ROOT}" watch
+mkdir -p "${ROOT}/.claude/rules"
+printf '# Shared rule\n' > "${ROOT}/.claude/rules/x.md"
+printf '\n@.claude/rules/x.md\n' >> "${ROOT}/watch/AGENTS.md"
+no_claude_md_under "${ROOT}" || fail "case89a precondition: no CLAUDE.md anywhere"
+run_check "${ROOT}"
+assert_no_result_status "claude-rules-imports" "fail" "case89a rule imported only from watch/AGENTS.md is accepted without any CLAUDE.md"
+assert_has_result "claude-rules-imports" "pass" "case89a claude-rules-imports passes"
+rm -rf "${ROOT}"
+
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+mkdir -p "${ROOT}/.claude/rules"
+printf '# Shared rule\n' > "${ROOT}/.claude/rules/x.md"
+printf '@AGENTS.md\n@.claude/rules/x.md\n' > "${ROOT}/CLAUDE.md"
+run_check "${ROOT}"
+assert_no_result_status "claude-rules-imports" "fail" "case89b rule imported only from root CLAUDE.md is accepted"
+assert_has_result "claude-rules-imports" "pass" "case89b claude-rules-imports passes"
+rm -rf "${ROOT}"
+
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+set_guidance_location "${ROOT}" "docs/GUIDE.md"
+mkdir -p "${ROOT}/docs" "${ROOT}/.claude/rules"
+printf '# Guide\n\n@.claude/rules/x.md\n' > "${ROOT}/docs/GUIDE.md"
+printf '# Shared rule\n' > "${ROOT}/.claude/rules/x.md"
+run_check "${ROOT}"
+assert_no_result_status "claude-rules-imports" "fail" "case89c rule imported only from the guidanceLocation file is accepted"
+assert_has_result "claude-rules-imports" "pass" "case89c claude-rules-imports passes"
+rm -rf "${ROOT}"
+
+# --- 90: a complete legacy inert adapter set stays warn-free (strict-safe) -----
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+add_second_project "${ROOT}" watch
+write_import_adapter "${ROOT}/CLAUDE.md"
+write_import_adapter "${ROOT}/flow/CLAUDE.md"
+write_import_adapter "${ROOT}/watch/CLAUDE.md"
+run_check "${ROOT}"
+assert_no_result_status "instruction-docs" "warn" "case90 complete legacy inert adapter set must not warn"
+assert_no_result_status "instruction-docs" "fail" "case90 complete legacy inert adapter set must not fail"
+assert_instr "pass" "(repo)" "case90 instruction-docs ran and passes on the legacy inert set"
+rm -rf "${ROOT}"
+
+# --- 91: this repo's own four adapters still pass instruction-docs -------------
+INSTR_REAL_ROOT="$(cd "${FLOW_DIR}/.." && pwd)" || INSTR_REAL_ROOT=""
+if [[ -z "${INSTR_REAL_ROOT}" || ! -d "${INSTR_REAL_ROOT}" ]]; then
+  fail "case91: could not resolve the repo root"
+else
+  REPORT_JSON="$(cd "${INSTR_REAL_ROOT}" && bash "${CHECK}" --advisory 2>/dev/null)"
+  assert_no_result_status "instruction-docs" "fail" "case91 this repo has no instruction-docs fail"
+  assert_has_result "instruction-docs" "pass" "case91 this repo's instruction-docs passes"
+fi
+
+# --- 92: every new instruction-docs fail and warn carries a fix ----------------
+PARENT="$(mktemp -d)"
+ROOT="${PARENT}/repo"
+mkdir -p "${ROOT}"
+setup_base "${ROOT}"
+add_second_project "${ROOT}" watch
+write_import_adapter "${PARENT}/CLAUDE.md"
+printf 'parent private\n' > "${PARENT}/CLAUDE.local.md"
+rm -f "${ROOT}/AGENTS.md"
+printf 'private\n' > "${ROOT}/CLAUDE.local.md"
+printf 'private\n' > "${ROOT}/flow/CLAUDE.local.md"
+printf '# no import\n' > "${ROOT}/CLAUDE.md"
+mkdir -p "${ROOT}/.claude"
+printf '# no import\n' > "${ROOT}/.claude/CLAUDE.md"
+rm -f "${ROOT}/watch/AGENTS.md"
+printf '# no import\n' > "${ROOT}/watch/CLAUDE.md"
+run_check "${ROOT}"
+CASE92_FAILS="$(count_results instruction-docs fail)"
+CASE92_WARNS="$(count_results instruction-docs warn)"
+[[ "${CASE92_FAILS}" =~ ^[0-9]+$ && "${CASE92_FAILS}" -ge 2 ]] || fail "case92 expected >=2 instruction-docs fails (root + watch AGENTS.md), got '${CASE92_FAILS}'"
+[[ "${CASE92_WARNS}" =~ ^[0-9]+$ && "${CASE92_WARNS}" -ge 8 ]] || fail "case92 expected >=8 instruction-docs warns (local x2, ancestor x2, imports x3, coverage x1), got '${CASE92_WARNS}'"
+assert_all_fixes_present "case92 every instruction-docs fail and warn carries a fix"
+rm -rf "${PARENT}"
+
+# --- 93: a root .claude/CLAUDE.md alone also leaves a project uncovered --------
+# A root .claude/CLAUDE.md suppresses native AGENTS.md loading exactly like a
+# root CLAUDE.md, so the "configured project left uncovered" warn must fire for
+# it too (no root CLAUDE.md, no project adapters).
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+mkdir -p "${ROOT}/.claude"
+printf '@../AGENTS.md\n' > "${ROOT}/.claude/CLAUDE.md"
+[[ ! -f "${ROOT}/CLAUDE.md" ]] || fail "case93 precondition: no root CLAUDE.md"
+run_check "${ROOT}"
+assert_instr "warn" "flow/CLAUDE.md" "case93 root .claude/CLAUDE.md only: uncovered flow project warns naming it"
+assert_contains "$(instr_field warn "flow/CLAUDE.md" message)" "flow" "case93 message names the uncovered project"
+assert_contains "$(instr_field warn "flow/CLAUDE.md" message)" ".claude/CLAUDE.md" "case93 message names the root .claude/CLAUDE.md that suppresses loading"
+assert_contains "$(instr_field warn "flow/CLAUDE.md" fix)" "/cenci:configure" "case93 legacy-root fix points at /cenci:configure"
+assert_no_instr "warn" ".claude/CLAUDE.md" "case93 the import line is present so no import warn"
+assert_no_result_status "instruction-docs" "fail" "case93 uncovered project never fails"
+assert_all_fixes_present "case93 every warn carries a fix"
+# A fallback-marked root .claude/CLAUDE.md gets the fallback-set coverage fix.
+printf '%s\n@../AGENTS.md\n' "${INSTR_FALLBACK_MARKER}" > "${ROOT}/.claude/CLAUDE.md"
+run_check "${ROOT}"
+assert_instr "warn" "flow/CLAUDE.md" "case93 fallback root .claude/CLAUDE.md: uncovered flow project warns"
+assert_contains "$(instr_field warn "flow/CLAUDE.md" fix)" "claude-md-adapter.md" "case93 fallback fix names the fallback template"
+assert_all_fixes_present "case93 every fallback warn carries a fix"
+# Control: the legacy complete inert set (root .claude/CLAUDE.md + project
+# adapters) stays warn-free, as does a root CLAUDE.md with project adapters.
+printf '@../AGENTS.md\n' > "${ROOT}/.claude/CLAUDE.md"
+write_import_adapter "${ROOT}/flow/CLAUDE.md"
+run_check "${ROOT}"
+assert_no_result_status "instruction-docs" "warn" "case93 control: root .claude/CLAUDE.md plus a project adapter does not warn"
+assert_instr "pass" "(repo)" "case93 control: instruction-docs ran and passes"
+rm -rf "${ROOT}"
+
+# --- 94: the pass message never overclaims when project coverage was limited ---
+# (a) an unsafe project entry was dropped; (b) .cenci/config.json is unparseable
+# so the project list is unknown. Neither may claim "every configured project".
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+run_check "${ROOT}"
+assert_contains "$(instr_field pass "(repo)" message)" "every configured project" "case94 control: the normal pass message covers every configured project"
+jq '.projects += [{"slug":"outside","path":"../outside"}]' \
+  "${ROOT}/.cenci/config.json" > "${ROOT}/.cenci/config.json.tmp"
+mv "${ROOT}/.cenci/config.json.tmp" "${ROOT}/.cenci/config.json"
+run_check "${ROOT}"
+assert_instr "pass" "(repo)" "case94a unsafe project entry: instruction-docs still passes with a limit"
+CASE94A_MSG="$(instr_field pass "(repo)" message)"
+[[ "${CASE94A_MSG}" != *"every configured project"* ]] || fail "case94a pass message must not claim every configured project (got: ${CASE94A_MSG})"
+assert_contains "${CASE94A_MSG}" "skipped" "case94a pass message says unsafe project entries were skipped"
+assert_contains "${CASE94A_MSG}" "canonical" "case94a pass message still says canonical guidance"
+assert_contains "${CASE94A_MSG}" "runtime loading is not verified" "case94a pass message still says runtime loading is not verified"
+assert_contains "${CASE94A_MSG}" "${INSTR_DOC}" "case94a pass message still names the owner doc"
+printf '{ this is not json\n' > "${ROOT}/.cenci/config.json"
+run_check "${ROOT}"
+assert_has_result "invalid-json" "fail" "case94b the unparseable config is still reported by invalid-json"
+assert_instr "pass" "(repo)" "case94b unparseable config: instruction-docs still passes with a limit"
+CASE94B_MSG="$(instr_field pass "(repo)" message)"
+[[ "${CASE94B_MSG}" != *"every configured project"* ]] || fail "case94b pass message must not claim every configured project (got: ${CASE94B_MSG})"
+assert_contains "${CASE94B_MSG}" "root" "case94b pass message says only the root was checked"
+assert_contains "${CASE94B_MSG}" "could not be parsed" "case94b pass message says the config could not be parsed"
+assert_contains "${CASE94B_MSG}" "runtime loading is not verified" "case94b pass message still says runtime loading is not verified"
+assert_contains "${CASE94B_MSG}" "${INSTR_DOC}" "case94b pass message still names the owner doc"
+rm -rf "${ROOT}"
+
+# (c) the config is valid JSON but the project list cannot be read (string
+# entries make jq exit non-zero; a null entry yields an empty path): neither may
+# claim "every configured project", and the positive pass anchor proves
+# instruction-docs ran rather than emitted nothing.
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+jq '.projects = ["flow"]' "${ROOT}/.cenci/config.json" > "${ROOT}/.cenci/config.json.tmp"
+mv "${ROOT}/.cenci/config.json.tmp" "${ROOT}/.cenci/config.json"
+run_check "${ROOT}"
+assert_instr "pass" "(repo)" "case94c string project entries: instruction-docs still passes with a limit"
+CASE94C_MSG="$(instr_field pass "(repo)" message)"
+[[ "${CASE94C_MSG}" != *"every configured project"* ]] || fail "case94c pass message must not claim every configured project for an unreadable project list (got: ${CASE94C_MSG})"
+assert_contains "${CASE94C_MSG}" "root" "case94c pass message says only the root was checked"
+assert_contains "${CASE94C_MSG}" "could not be read" "case94c pass message says the project list could not be read"
+assert_contains "${CASE94C_MSG}" "canonical" "case94c pass message still says canonical guidance"
+assert_contains "${CASE94C_MSG}" "runtime loading is not verified" "case94c pass message still says runtime loading is not verified"
+assert_contains "${CASE94C_MSG}" "${INSTR_DOC}" "case94c pass message still names the owner doc"
+CASE94C_SKIP="$(printf '%s' "${REPORT_JSON}" | jq -r '[.results[]? | select(.check=="config-paths" and .status=="skip") | .message] | join(" | ")' 2>/dev/null)"
+assert_contains "${CASE94C_SKIP}" "could not be read" "case94c config-paths skip says the projects could not be read"
+[[ "${CASE94C_SKIP}" != *"invalid JSON"* ]] || fail "case94c config-paths skip must not blame invalid JSON for valid JSON (got: ${CASE94C_SKIP})"
+jq '.projects = [null]' "${ROOT}/.cenci/config.json" > "${ROOT}/.cenci/config.json.tmp"
+mv "${ROOT}/.cenci/config.json.tmp" "${ROOT}/.cenci/config.json"
+run_check "${ROOT}"
+assert_instr "pass" "(repo)" "case94c null project entry: instruction-docs still passes with a limit"
+CASE94C_NULL_MSG="$(instr_field pass "(repo)" message)"
+[[ "${CASE94C_NULL_MSG}" != *"every configured project"* ]] || fail "case94c null entry pass message must not claim every configured project (got: ${CASE94C_NULL_MSG})"
+assert_contains "${CASE94C_NULL_MSG}" "root" "case94c null entry pass message names the root"
+rm -rf "${ROOT}"
+
+# --- 95: guidanceLocation is path-vetted before it is read as a file -----------
+PARENT="$(mktemp -d)"
+ROOT="${PARENT}/repo"
+mkdir -p "${ROOT}"
+setup_base "${ROOT}"
+printf '# Outside guidance\n' > "${PARENT}/x"
+set_guidance_location "${ROOT}" "../x"
+run_check "${ROOT}"
+assert_instr "fail" "guidanceLocation" "case95 a ../x guidanceLocation fails instead of satisfying the root -f test"
+assert_contains "$(instr_field fail "guidanceLocation" message)" "../x" "case95 the fail names the offending value"
+assert_no_instr "pass" "(repo)" "case95 an unsafe guidanceLocation never yields a pass"
+assert_all_fixes_present "case95 the guidanceLocation fail carries a fix"
+set_guidance_location "${ROOT}" "/etc/passwd"
+run_check "${ROOT}"
+assert_instr "fail" "guidanceLocation" "case95 an absolute guidanceLocation fails"
+# The rules-imports scan must not read the out-of-repo file either.
+set_guidance_location "${ROOT}" "../x"
+mkdir -p "${ROOT}/.claude/rules"
+printf '# Shared rule\n' > "${ROOT}/.claude/rules/x.md"
+printf '@.claude/rules/x.md\n' > "${PARENT}/x"
+run_check "${ROOT}"
+assert_has_result "claude-rules-imports" "fail" "case95 an import found only in an out-of-repo guidanceLocation is not accepted"
+rm -rf "${PARENT}"
+
+# --- 96: a guidance file that is a symlink is accepted only inside the repo ----
+# project_path_is_safe was built for directories and rejects any leaf symlink, so
+# a root AGENTS.md symlinked to an in-repo file (fine under the old -f test) must
+# not start failing, while a symlink escaping the repo must fail with a message
+# that names the symlink, not the guidanceLocation key.
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+mkdir -p "${ROOT}/docs"
+mv "${ROOT}/AGENTS.md" "${ROOT}/docs/real-agents.md"
+ln -s docs/real-agents.md "${ROOT}/AGENTS.md"
+run_check "${ROOT}"
+assert_no_result_status "instruction-docs" "fail" "case96a a root AGENTS.md symlinked to an in-repo file does not fail"
+assert_instr "pass" "(repo)" "case96a symlinked in-repo AGENTS.md: instruction-docs ran and passes"
+rm -rf "${ROOT}"
+
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+mkdir -p "${ROOT}/docs"
+printf '# Guide\n' > "${ROOT}/docs/real-guide.md"
+ln -s real-guide.md "${ROOT}/docs/GUIDE.md"
+set_guidance_location "${ROOT}" "docs/GUIDE.md"
+run_check "${ROOT}"
+assert_no_result_status "instruction-docs" "fail" "case96b a docs/GUIDE.md guidanceLocation symlinked to an in-repo file does not fail"
+assert_instr "pass" "(repo)" "case96b symlinked in-repo guidanceLocation: instruction-docs ran and passes"
+rm -rf "${ROOT}"
+
+PARENT="$(mktemp -d)"
+ROOT="${PARENT}/repo"
+mkdir -p "${ROOT}"
+setup_base "${ROOT}"
+printf '# Outside guidance\n' > "${PARENT}/outside.md"
+rm -f "${ROOT}/AGENTS.md"
+ln -s "${PARENT}/outside.md" "${ROOT}/AGENTS.md"
+run_check "${ROOT}"
+assert_instr "fail" "AGENTS.md" "case96c a root AGENTS.md symlinked outside the repo fails naming the file"
+CASE96C_MSG="$(instr_field fail "AGENTS.md" message)"
+assert_contains "${CASE96C_MSG}" "symlink" "case96c the fail says it is a symlink"
+assert_contains "${CASE96C_MSG}" "outside" "case96c the fail says it resolves outside the repository"
+[[ "${CASE96C_MSG}" != *"guidanceLocation"* ]] || fail "case96c the fail must not blame guidanceLocation for a symlink escape (got: ${CASE96C_MSG})"
+assert_no_instr "pass" "(repo)" "case96c a symlink escaping the repo never yields a pass"
+assert_all_fixes_present "case96c the symlink-escape fail carries a fix"
+rm -f "${ROOT}/AGENTS.md"
+printf '# Root\n' > "${ROOT}/AGENTS.md"
+mkdir -p "${ROOT}/docs" "${ROOT}/.claude/rules"
+ln -s "${PARENT}/outside.md" "${ROOT}/docs/GUIDE.md"
+set_guidance_location "${ROOT}" "docs/GUIDE.md"
+run_check "${ROOT}"
+assert_instr "fail" "docs/GUIDE.md" "case96c a guidanceLocation symlinked outside the repo fails naming the file"
+assert_all_fixes_present "case96c the guidanceLocation symlink-escape fail carries a fix"
+# The rules-imports scan must not follow the escaping symlink either.
+printf '# Shared rule\n' > "${ROOT}/.claude/rules/x.md"
+printf '@.claude/rules/x.md\n' > "${PARENT}/outside.md"
+run_check "${ROOT}"
+assert_has_result "claude-rules-imports" "fail" "case96c an import found only through an escaping guidance symlink is not accepted"
+rm -rf "${PARENT}"
+
+# --- 96d: a '..' hop inside a symlink chain is resolved physically -------------
+# AGENTS.md -> l/../x with l -> an outside directory: a textual '..' collapse
+# lands on $ROOT/x (inside) while the kernel opens $PARENT/o/x (outside).
+PARENT="$(mktemp -d)"
+ROOT="${PARENT}/repo"
+mkdir -p "${ROOT}" "${PARENT}/o/d"
+setup_base "${ROOT}"
+printf '# Outside guidance\n' > "${PARENT}/o/x"
+rm -f "${ROOT}/AGENTS.md"
+ln -s "${PARENT}/o/d" "${ROOT}/l"
+ln -s "l/../x" "${ROOT}/AGENTS.md"
+run_check "${ROOT}"
+assert_instr "fail" "AGENTS.md" "case96d a root AGENTS.md reaching outside through a l/../x symlink hop fails naming the file"
+CASE96D_MSG="$(instr_field fail "AGENTS.md" message)"
+assert_contains "${CASE96D_MSG}" "symlink" "case96d the fail says it is a symlink"
+assert_contains "${CASE96D_MSG}" "outside" "case96d the fail says it resolves outside the repository"
+[[ "${CASE96D_MSG}" != *"guidanceLocation"* ]] || fail "case96d the fail must not blame guidanceLocation (got: ${CASE96D_MSG})"
+assert_no_instr "pass" "(repo)" "case96d a '..' symlink hop escaping the repo never yields a pass"
+assert_all_fixes_present "case96d the escaping-hop fail carries a fix"
+rm -rf "${PARENT}"
+
+# --- 96e: no candidate source file escapes the repo (rules-imports scan) -------
+# The root AGENTS.md is a leaf symlink to an outside file that imports x.md. The
+# guidanceLocation candidate is vetted, but the AGENTS.md/CLAUDE.md candidates
+# are appended per scan directory, so each must be vetted too: x.md is imported
+# by nothing trusted, so claude-rules-imports fails, and instruction-docs keeps
+# the visible root fail.
+PARENT="$(mktemp -d)"
+ROOT="${PARENT}/repo"
+mkdir -p "${ROOT}/.claude/rules"
+setup_base "${ROOT}"
+printf '# Shared rule\n' > "${ROOT}/.claude/rules/x.md"
+printf '# Outside\n\n@.claude/rules/x.md\n' > "${PARENT}/outside.md"
+rm -f "${ROOT}/AGENTS.md"
+ln -s "${PARENT}/outside.md" "${ROOT}/AGENTS.md"
+run_check "${ROOT}"
+assert_has_result "claude-rules-imports" "fail" "case96e an import found only in an escaping root AGENTS.md is not accepted"
+assert_instr "fail" "AGENTS.md" "case96e the escaping root AGENTS.md stays a visible instruction-docs fail"
+assert_no_instr "pass" "(repo)" "case96e an escaping root AGENTS.md never yields an instruction-docs pass"
+# The same through a root CLAUDE.md symlinked outside the repo.
+rm -f "${ROOT}/AGENTS.md"
+printf '# Root\n' > "${ROOT}/AGENTS.md"
+ln -s "${PARENT}/outside.md" "${ROOT}/CLAUDE.md"
+run_check "${ROOT}"
+assert_has_result "claude-rules-imports" "fail" "case96e an import found only in an escaping root CLAUDE.md is not accepted"
+rm -f "${ROOT}/CLAUDE.md"
+# A project AGENTS.md symlinked outside the repo is not read either.
+add_second_project "${ROOT}" watch
+rm -f "${ROOT}/watch/AGENTS.md"
+ln -s "${PARENT}/outside.md" "${ROOT}/watch/AGENTS.md"
+run_check "${ROOT}"
+assert_has_result "claude-rules-imports" "fail" "case96e an import found only in an escaping project AGENTS.md is not accepted"
+# Control: the same import through an in-repo symlinked project AGENTS.md is read.
+rm -f "${ROOT}/watch/AGENTS.md"
+mkdir -p "${ROOT}/watch/docs"
+printf '# Watch\n\n@.claude/rules/x.md\n' > "${ROOT}/watch/docs/real-agents.md"
+ln -s docs/real-agents.md "${ROOT}/watch/AGENTS.md"
+run_check "${ROOT}"
+assert_no_result_status "claude-rules-imports" "fail" "case96e control: an import in an in-repo symlinked project AGENTS.md is accepted"
+assert_has_result "claude-rules-imports" "pass" "case96e control: claude-rules-imports passes"
+rm -rf "${PARENT}"
+
+# --- 97: CRLF line endings do not hide the import line or fallback marker ------
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+printf '@AGENTS.md\r\n' > "${ROOT}/CLAUDE.md"
+printf '@AGENTS.md\r\n' > "${ROOT}/flow/CLAUDE.md"
+run_check "${ROOT}"
+assert_no_instr "warn" "CLAUDE.md" "case97 a CRLF-ended root CLAUDE.md with @AGENTS.md has no import warn"
+assert_no_instr "warn" "flow/CLAUDE.md" "case97 a CRLF-ended project CLAUDE.md with @AGENTS.md has no import warn"
+assert_no_result_status "instruction-docs" "warn" "case97 a complete CRLF legacy inert set does not warn"
+rm -rf "${ROOT}"
+
+ROOT="$(mktemp -d)"
+setup_base "${ROOT}"
+add_second_project "${ROOT}" watch
+printf '%s\r\n@AGENTS.md\r\n' "${INSTR_FALLBACK_MARKER}" > "${ROOT}/CLAUDE.md"
+printf '%s\r\n@AGENTS.md\r\n' "${INSTR_FALLBACK_MARKER}" > "${ROOT}/flow/CLAUDE.md"
+run_check "${ROOT}"
+assert_instr "warn" "watch/CLAUDE.md" "case97 a CRLF fallback-marked root leaves the watch project uncovered"
+assert_contains "$(instr_field warn "watch/CLAUDE.md" message)" "fallback adapter" "case97 a CRLF fallback marker is still detected (the message is the fallback-root one, not the legacy-root one)"
+assert_contains "$(instr_field warn "watch/CLAUDE.md" fix)" "a fallback set needs an adapter" "case97 a CRLF fallback marker is still detected (the fix is the fallback-set one)"
+rm -rf "${ROOT}"
 
 # =====================================================================
 # Skill markdown contract cases (ticket #545) -- grep-based anchor-phrase

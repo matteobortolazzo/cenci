@@ -1,6 +1,6 @@
 # Guidance and Settings Generation
 
-Read this file on every run, after the questions and `### Auth Verification` in `SKILL.md` (see `SKILL.md` `### Step Map`). It holds steps 0 to 5c-bis: Codex agent adapters, guidance and client adapters, `.lsp.json`, board lifecycle labels, `.claude/settings.json`, MCP server configuration, `.claudeignore`, auto-compact and the subagent pin.
+Read this file on every run, after the questions and `### Auth Verification` in `SKILL.md` (see `SKILL.md` `### Step Map`). It holds steps 0 to 5c-bis: Codex agent adapters, AGENTS.md guidance (inert `CLAUDE.md` adapters removed), `.lsp.json`, board lifecycle labels, `.claude/settings.json`, MCP server configuration, `.claudeignore`, auto-compact and the subagent pin.
 
 0. **Generate Codex agent adapters**: copy the reviewed TOML role templates from
    `templates/codex/agent-roles/` into `.codex/agents/` with `install-agents.sh`, but only after
@@ -50,24 +50,43 @@ Read this file on every run, after the questions and `### Auth Verification` in 
      the role, the configured value and Codex's error; the built-in-worker fallback applies only
      when a role file is missing, never to an unavailable model.
 
-1. **Generate canonical guidance and client adapters**:
-   - `AGENTS.md` at the repository root is canonical shared guidance. Use
+1. **Generate canonical AGENTS.md guidance**:
+   - `AGENTS.md` at the repository root is the only generated guidance file. Use
      `templates/agents-md-root.md` or `templates/agents-md-root-monorepo.md`.
    - For each monorepo project, generate `<project>/AGENTS.md` from
      `templates/agents-md-project.md`.
-   - Generate root `CLAUDE.md` as `@AGENTS.md`, followed only by an optional block
-     delimited with `<!-- cenci:claude-only:start -->` and
-     `<!-- cenci:claude-only:end -->`.
-   - Generate each `<project>/CLAUDE.md` as `@AGENTS.md` with the same optional block.
+   - Generate no `CLAUDE.md`, `.claude/CLAUDE.md` or `CLAUDE.local.md`: Claude Code and Codex
+     both read `AGENTS.md` natively. Write no `instructionFiles` or `pluginConfigs` setting to
+     any settings file.
 
-   Discover root `AGENTS.md`, root `CLAUDE.md`, legacy `.claude/CLAUDE.md`, and every
-   configured project's AGENTS/CLAUDE pair. A retained `.claude/CLAUDE.md` adapter imports
-   `@../AGENTS.md`. Before replacing any substantive existing guidance, render and show
-   the complete proposed diff with `git diff --no-index`, then require approval through
-   `AskUserQuestion`. Preserve existing material by merging it into the shared AGENTS
-   content or the explicitly Claude-only block. Never silently delete guidance. Stable
-   markers make reruns idempotent. Never delete a second substantive guidance file unless
-   the user explicitly approves its content having been merged into AGENTS.md.
+   Discover root `AGENTS.md`, root `CLAUDE.md`, `.claude/CLAUDE.md`, `CLAUDE.local.md`, and
+   every configured project's `AGENTS.md` and `CLAUDE.md`. Classify each existing `CLAUDE.md`
+   and `.claude/CLAUDE.md`, and apply its rule:
+   - **Fallback-marked**: a line `<!-- cenci:agents-md-fallback -->` means the user opted in to
+     the fallback adapter. Never remove or rewrite it, even when the rest of its content is
+     inert.
+   - **Inert**: no line other than `@AGENTS.md`, the two markers
+     `<!-- cenci:claude-only:start -->` and `<!-- cenci:claude-only:end -->`, and the template
+     comment line `<!-- Optional Claude Code-only guidance belongs inside this block. -->`,
+     ignoring blank lines. For `.claude/CLAUDE.md` the import line is `@../AGENTS.md`. Remove
+     it with `git -C <worktree-path> rm --quiet -- <path>`, without a prompt, but only once
+     that directory's `AGENTS.md` exists in the worktree. If the `git rm` fails, stop and report
+     the path; never skip a failed removal silently.
+   - **Substantive**: any other line, so any other `.claude/CLAUDE.md` content too. Render the
+     complete merge into `AGENTS.md` with `git diff --no-index` and require approval through
+     `AskUserQuestion`, with two options: merge it into `AGENTS.md` (then remove the file the
+     same way), or decline. A declined file stays byte-identical, and its path goes to the
+     final report in `phases/commit-pr.md` with the suppression trap.
+   - **Untracked or gitignored**: a `CLAUDE.md` or `.claude/CLAUDE.md` in `<worktree-path>` that
+     git does not track cannot be removed with `git rm` and still suppresses `AGENTS.md`. Report
+     its path in the final report as a suppressor instead of ignoring it.
+   - **`CLAUDE.local.md`**: never touched. List each one seen at the main-checkout root or in
+     a configured project in the final report.
+
+   Before replacing any substantive existing `AGENTS.md`, render and show the complete proposed
+   diff the same way and require the same approval. Never silently delete guidance. Stable
+   markers make reruns idempotent. Never delete a substantive guidance file unless the user
+   approved its content having been merged into `AGENTS.md`.
 
 1b. **Generate `.lsp.json`** (if any LSP servers were selected in question 6):
 
@@ -97,7 +116,7 @@ Read this file on every run, after the questions and `### Auth Verification` in 
 2. Create the `docs/` directory at the repo root (if it doesn't exist) and deploy on-demand reference docs from `${CLAUDE_PLUGIN_ROOT}/templates/docs/`:
    - `docs/git-workflow.md` — branching, commit format, PR workflow
 
-   `.claude/rules/` is reserved for files explicitly imported by the generated Claude adapter. Do NOT deploy shared reference docs there.
+   `.claude/rules/` is reserved for files explicitly imported from `AGENTS.md` or a fallback adapter. Do NOT deploy shared reference docs there.
 
    **Backward compatibility**: Do NOT delete or migrate any existing `.claude/rules/lessons-learned.md`, `.claude/rules/lessons-learned-<slug>.md`, or `.claude/rules/git-workflow.md` files. Skills and agents continue to read them as legacy fallback if present.
 
@@ -105,7 +124,7 @@ Read this file on every run, after the questions and `### Auth Verification` in 
 
 **Monorepo-only additional files:**
 
-3a. For each project, create `<project-path>/AGENTS.md` using `templates/agents-md-project.md`, then create its `CLAUDE.md` import adapter — customize with:
+3a. For each project, create `<project-path>/AGENTS.md` using `templates/agents-md-project.md`, customized with:
    - `<project-name>`: the project name (from slug or user input)
    - `<stack>`: detected stack
    - `<repo-name>`: the repository name

@@ -11,8 +11,20 @@ In `apply`, after `verify`, first run the guard canary preflight, `bash "${PLUGI
 as `codex-runtime` describes; on any refusal stop with nothing changed, reporting the helper's text and any
 `LEFTOVER:` path. The persist turn runs the same guard canary before it writes either the artifact or the checkpoint.
 Only after `CANARY_STATUS=active`, in apply,
-write `.cenci/config.json`, AGENTS/CLAUDE adapters, `.claude/settings.json`,
+write `.cenci/config.json`, the `AGENTS.md` guidance files, `.claude/settings.json`,
 and `.codex/agents/*.toml`; preserve unknown keys and diff-gate substantive guidance.
+Guidance is AGENTS.md-only by default: configure generates no `CLAUDE.md`, and a fallback adapter
+exists only when the user opted in. Apply step 1 of `phases/guidance-settings.md`: an inert
+`CLAUDE.md` or `.claude/CLAUDE.md` is removed without a prompt, a fallback-marked file and
+`CLAUDE.local.md` are never touched, and a substantive file's merge preview and approval go through
+a Plan-mode question, carried in the approved-plan artifact (a declined file stays byte-identical).
+An inert file is removed only once the `AGENTS.md` beside it exists in the worktree, and a failing
+`git -C <worktree-path> rm --quiet -- <path>` stops the run and reports the path. A `CLAUDE.md` or
+`.claude/CLAUDE.md` that git does not track (untracked or gitignored) is reported as a suppressor in the
+final report instead of being ignored. A non-zero exit from `migrate-project-core.sh`, in preview or apply,
+stops the run: report its stderr verbatim, make no commit and remove nothing further.
+A `skip: <project> (reason)` line from the script means that configured project was not migrated (an unsafe
+or unresolvable path); report each such line in the final report. It does not stop the run.
 
 The `docs` config field mirrors the `docs` schema paragraph in `references/config-schema.md` and, like `maintenance`, has no question.
 Preserve the optional implementation controls of the `cenci` schema in `references/config-schema.md` on reconfiguration:
@@ -199,7 +211,11 @@ carried-through summary (question IDs and config key names, never values in the 
 `--all` would re-open them), the Dockerfile report (the block diff for a refreshed block, or "left untouched"
 for no or malformed markers), the lazyboards report including the notice when question 10 is carried but
 `.lazyboards.yml` is missing (it is not regenerated; `--all` re-offers it), and a ledger-not-stamped
-notice when the ledger overlay fell back, so this run's questions will be asked again. A fallen-back
+notice when the ledger overlay fell back, so this run's questions will be asked again. It also prints
+the instruction-file compatibility notice from `phases/commit-pr.md`, with the `Claude Code >= <version>`
+floor read from `${PLUGIN_ROOT}/docs/claude-instruction-files.md` (if it cannot be read, the rest of the report still prints and the notice is reported as omitted, with the reason, never a guessed version),
+and names each declined substantive guidance file with the suppression trap and any `CLAUDE.local.md`
+seen. A fallen-back
 question 13/14/15 overlay or a failed `cenci dispatch enroll` is reported the same conditional way: asked
 again on the next delta run only when the key is absent and the ID is not already in the existing ledger,
 otherwise re-run `/cenci:configure --all`.
