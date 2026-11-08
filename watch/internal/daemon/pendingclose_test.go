@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -408,7 +409,14 @@ const (
 // closePathDaemon is a test daemon wired to the real kill path.
 func closePathDaemon(t *testing.T) (*Daemon, *syncOffLoop) {
 	t.Helper()
-	d, runner := newTestDaemonWithRunner(babysitTrackedMock())
+	return closePathDaemonOver(t, babysitTrackedMock())
+}
+
+// closePathDaemonOver is closePathDaemon over a caller-built tmux mock, for tests
+// that track windows on more than one server.
+func closePathDaemonOver(t *testing.T, mc *tmuxtest.MockClient) (*Daemon, *syncOffLoop) {
+	t.Helper()
+	d, runner := newTestDaemonWithRunner(mc)
 	d.killer = &tmux.ExecClient{}
 	d.procKiller = windowproc.New(io.Discard)
 	return d, runner
@@ -617,7 +625,7 @@ type gatedProcKiller struct {
 	release      chan struct{}
 }
 
-func (g *gatedProcKiller) KillWindowProcesses(ctx context.Context, target string) error {
+func (g *gatedProcKiller) KillWindowProcesses(ctx context.Context, _, target string) error {
 	_, ok := ctx.Deadline()
 	g.deadlineSeen <- ok
 	<-g.release
@@ -771,86 +779,256 @@ func TestDaemon_VerboseLogsAlreadyGoneWindowAsClosed(t *testing.T) {
 	}
 }
 
-// Interim foreign-socket guard (#1429, replaced by #1430): until the kill targets
-// the recorded socket it goes to the daemon's own tmux server, so a pending-close
-// whose window is recorded on any other server is not killed at SessionEnd, and
-// one verbose line says so. A window on the ambient server (by socket path or with
-// no socket) is killed exactly as before: those cases are the controls.
-func TestDaemon_PendingCloseOnAForeignSocketWindowIsNotKilledAtSessionEnd(t *testing.T) {
-	tests := []struct {
-		name       string
-		socket     func(dir string) string
-		wantKilled bool
-	}{
-		{"foreign socket", func(dir string) string { return filepath.Join(dir, "foreign") }, false},
-		{"the ambient server's socket", func(dir string) string { return filepath.Join(dir, "ambient") }, true},
-		{"no recorded socket", func(string) string { return "" }, true},
+// -- recorded tmux socket (#1430) ---------------------------------------------
+
+// rawPendingCloseLine is a pending-close message exactly as a container process
+// would write it: a JSON object with a literal socket key, never going through
+// ipc.PendingClose.
+func rawPendingCloseLine(t *testing.T, pane, socket string) string {
+	t.Helper()
+	b, err := json.Marshal(map[string]string{
+		"kind": "pending-close", "pane_id": pane, "session": "main",
+		"window_index": "0", "window_name": "bash", "socket": socket,
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			mc := &tmuxtest.MockClient{}
-			d := newTestDaemon(mc)
-			d.cfg.Verbose = true
-			fk := d.killer.(*fakeKiller)
-			dir := trustedSocketDir(t, d)
-			t.Setenv("TMUX", filepath.Join(dir, "ambient")+",4242,0")
-			socket := tc.socket(dir)
-			pane := claudePane("bash", "0", "%0", "writing tests")
-			if socket == "" {
-				mc.Panes = []tmux.PaneInfo{pane}
-			} else {
-				mc.PanesBySocket = map[string][]tmux.PaneInfo{socket: {pane}}
-			}
-			logs := captureLog(t)
+	return string(b)
+}
 
-			d.handleEvent(ipc.HookEvent{EventType: "SessionStart", SessionID: "sess1", TmuxPane: "%0", TmuxSocket: socket})
-			d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "sess1", TmuxPane: "%0", TmuxSocket: socket})
-			d.registerPendingClose(ipc.PendingClose{PaneID: "%0", Session: "main", WindowIndex: "0", WindowName: "bash"})
-			d.handleEvent(ipc.HookEvent{EventType: "SessionEnd", SessionID: "sess1", TmuxPane: "%0", TmuxSocket: socket})
-
-			if tc.wantKilled {
-				if len(fk.killed) != 1 || fk.killed[0] != "%0" {
-					t.Errorf("killed = %v, want exactly %%0", fk.killed)
-				}
-				return
-			}
-			if len(fk.killed) != 0 {
-				t.Errorf("killed = %v, want nothing: the window lives on a foreign server", fk.killed)
-			}
-			lines := linesContaining(logs.String(), socket)
-			if len(lines) != 1 || !strings.Contains(lines[0], "pending-close:") {
-				t.Errorf("log lines naming the foreign socket = %q, want exactly one, prefixed pending-close:", lines)
-			}
-		})
+// newRawPendingCloseFeeder writes one raw line to a real EventReceiver's socket
+// and hands the PendingClose the receiver decoded to d, as the daemon loop would.
+func newRawPendingCloseFeeder(t *testing.T, d *Daemon) func(line string) {
+	t.Helper()
+	recv, send := serveRawLines(t)
+	return func(line string) {
+		t.Helper()
+		send(line)
+		select {
+		case pc := <-recv.PendingCloses():
+			d.registerPendingClose(pc)
+		case <-time.After(2 * time.Second):
+			t.Fatalf("the receiver delivered no pending-close for %s", line)
+		}
 	}
 }
 
-// The registry is keyed by the bare pane id and carries no socket until #1430,
-// so a registration made for a foreign window's %5 cannot be told apart from one
-// for the daemon's own %5. Skipping the foreign kill therefore drops the entry:
-// a kept one would later match an unrelated window with the same pane id on the
-// daemon's own server and kill a window nobody asked to close. A dropped close
-// request only leaves a window open.
-func TestDaemon_ForeignSocketSessionEndDropsTheRegistrationSoItCannotHitAnUnrelatedSamePaneIDWindow(t *testing.T) {
-	mc := &tmuxtest.MockClient{Panes: []tmux.PaneInfo{claudePane("bash", "0", "%5", "ambient task")}}
+// P27: a raw PendingClose written straight to the event socket with a socket that
+// fails the trusted-socket check is ingested with an empty socket (the registry
+// holds it under (empty socket, pane)) and logs exactly one verbose-gated line
+// naming the rejection class, never echoing a malformed value; with verbose off
+// it logs nothing. The first case is the control that proves a trusted socket
+// does reach the registry on this very path, so the empty-socket assertions
+// cannot pass vacuously.
+func TestRawPendingCloseWithUntrustedSocketIsIngestedWithAnEmptySocket(t *testing.T) {
+	t.Run("control: a trusted socket is kept", func(t *testing.T) {
+		d := newTestDaemon(&tmuxtest.MockClient{})
+		d.cfg.Verbose = true
+		socket := filepath.Join(trustedSocketDir(t, d), "work")
+		logs := captureLog(t)
+
+		newRawPendingCloseFeeder(t, d)(rawPendingCloseLine(t, "%5", socket))
+
+		if _, ok := d.pending[pendingKey{socket: socket, pane: "%5"}]; !ok || len(d.pending) != 1 {
+			t.Errorf("pending = %+v, want exactly one entry keyed (%q, %%5)", d.pending, socket)
+		}
+		for _, class := range []string{"malformed", "untrusted"} {
+			if lines := linesContaining(logs.String(), class); len(lines) != 0 {
+				t.Errorf("a trusted socket logged a %s rejection %q, want none", class, lines)
+			}
+		}
+	})
+
+	tests := []struct {
+		name   string
+		class  string // "malformed" or "untrusted"
+		socket func(t *testing.T, trusted string) string
+	}{
+		{"outside the trusted directory", "untrusted", func(t *testing.T, _ string) string {
+			return filepath.Join(privateDir(t), "work")
+		}},
+		{"nested below the trusted directory", "untrusted", func(_ *testing.T, trusted string) string {
+			return filepath.Join(trusted, "a", "b")
+		}},
+		{"relative path", "malformed", func(*testing.T, string) string { return "tmux-1000/work" }},
+		{"tab in the name", "malformed", func(_ *testing.T, trusted string) string { return trusted + "/wo\trk" }},
+		{"control bytes in the name", "malformed", func(_ *testing.T, trusted string) string { return trusted + "/a\r\x1b[2K" }},
+	}
+	for _, tc := range tests {
+		for _, verbose := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s/verbose=%v", tc.name, verbose), func(t *testing.T) {
+				d := newTestDaemon(&tmuxtest.MockClient{})
+				d.cfg.Verbose = verbose
+				socket := tc.socket(t, trustedSocketDir(t, d))
+				logs := captureLog(t)
+
+				newRawPendingCloseFeeder(t, d)(rawPendingCloseLine(t, "%5", socket))
+
+				if _, ok := d.pending[pendingKey{pane: "%5"}]; !ok || len(d.pending) != 1 {
+					t.Errorf("pending = %+v, want exactly one entry keyed (empty socket, %%5)", d.pending)
+				}
+				lines := linesContaining(logs.String(), "pending-close:")
+				rejections := linesContaining(strings.Join(lines, "\n"), tc.class)
+				switch {
+				case verbose && len(rejections) != 1:
+					t.Errorf("verbose log has %d %s-rejection lines %q, want exactly one", len(rejections), tc.class, rejections)
+				case !verbose && len(lines) != 0:
+					t.Errorf("verbose off logged %q, want no pending-close line", lines)
+				}
+				if tc.class == "malformed" && strings.Contains(logs.String(), socket) {
+					t.Errorf("log %q echoes the malformed value %q", logs.String(), socket)
+				}
+			})
+		}
+	}
+}
+
+// twoServerMock has pane %5 on both sockets: pane ids repeat across tmux servers.
+func twoServerMock(sockA, sockB string) *tmuxtest.MockClient {
+	return &tmuxtest.MockClient{PanesBySocket: map[string][]tmux.PaneInfo{
+		sockA: {claudePane("782-implement", "0", "%5", "alpha task")},
+		sockB: {claudePane("782-implement", "0", "%5", "beta task")},
+	}}
+}
+
+// trackOnSocket makes the daemon track the session's window on socket.
+func trackOnSocket(d *Daemon, session, pane, socket string) {
+	d.handleEvent(ipc.HookEvent{EventType: "SessionStart", SessionID: session, TmuxPane: pane, TmuxSocket: socket})
+	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: session, TmuxPane: pane, TmuxSocket: socket})
+}
+
+func endOnSocket(d *Daemon, session, pane, socket string) {
+	d.handleEvent(ipc.HookEvent{EventType: "SessionEnd", SessionID: session, TmuxPane: pane, TmuxSocket: socket})
+}
+
+// AC3: a pending close for %5 on one socket never lists or kills %5 on another.
+// Through the real kill path over the fake tmux: ending B's session lists and
+// kills nothing and keeps A's entry; ending A's session then lists and kills %5
+// on A only, with `-S` to A on every tmux call (the processes of its sandbox
+// pane included).
+func TestDaemon_PendingCloseForOneSocketNeverListsOrKillsTheSamePaneIDOnAnother(t *testing.T) {
+	t.Setenv("CENCI_SANDBOX_REAP_GRACE_SECS", "0")
+	mc := &tmuxtest.MockClient{}
+	d, _ := closePathDaemonOver(t, mc)
+	dir := trustedSocketDir(t, d)
+	sockA, sockB := filepath.Join(dir, "a"), filepath.Join(dir, "b")
+	mc.PanesBySocket = twoServerMock(sockA, sockB).PanesBySocket
+	flavor := windowproctest.Flavors[0]
+	fakes := windowproctest.Install(t, flavor.SandboxSpec(dcLaunchID, windowproctest.HarmlessPanePID(t), dcStubbornProcs()...))
+	trackOnSocket(d, "sa", "%5", sockA)
+	trackOnSocket(d, "sb", "%5", sockB)
+	d.registerPendingClose(ipc.PendingClose{PaneID: "%5", Session: "main", WindowIndex: "0", WindowName: "bash", Socket: sockA})
+
+	endOnSocket(d, "sb", "%5", sockB)
+
+	if calls := fakes.Calls(t); len(calls) != 0 {
+		t.Fatalf("calls:\n%s\nwant no list or kill when the other server's %%5 ends", strings.Join(calls, "\n"))
+	}
+	if _, ok := d.pending[pendingKey{socket: sockA, pane: "%5"}]; !ok || len(d.pending) != 1 {
+		t.Fatalf("pending = %+v, want A's entry kept after B's session ended", d.pending)
+	}
+
+	endOnSocket(d, "sa", "%5", sockA)
+
+	want := windowproctest.SandboxCloseCallsOn(flavor.Runtime, flavor.Container, dcLaunchID, sockA, "%5", "101", "102")
+	if got := fakes.Calls(t); !slices.Equal(got, want) {
+		t.Errorf("calls:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+	if len(d.pending) != 0 {
+		t.Errorf("pending = %+v, want the fired entry removed", d.pending)
+	}
+}
+
+// A registration an older `cenci close` made carries no socket, so it is keyed
+// (empty socket, pane) and can only ever match a window on the default server:
+// it never kills a same-numbered pane on a recorded socket. The default-server
+// window is the control that the entry is live.
+func TestDaemon_PendingCloseWithNoSocketOnlyMatchesTheDefaultServersPane(t *testing.T) {
+	mc := &tmuxtest.MockClient{Panes: []tmux.PaneInfo{claudePane("782-implement", "0", "%5", "default task")}}
+	d := newTestDaemon(mc)
+	fk := d.killer.(*fakeKiller)
+	sockA := filepath.Join(trustedSocketDir(t, d), "a")
+	mc.PanesBySocket = map[string][]tmux.PaneInfo{sockA: {claudePane("782-implement", "0", "%5", "alpha task")}}
+	trackOnSocket(d, "sa", "%5", sockA)
+	trackOnSocket(d, "sd", "%5", "")
+	d.registerPendingClose(ipc.PendingClose{PaneID: "%5", Session: "main", WindowIndex: "0", WindowName: "bash"})
+
+	endOnSocket(d, "sa", "%5", sockA)
+
+	if len(fk.killed) != 0 {
+		t.Fatalf("killed = %v on %q, want nothing: the registration has no socket and A's window is on a recorded one", fk.killed, fk.sockets)
+	}
+
+	endOnSocket(d, "sd", "%5", "")
+
+	if !slices.Equal(fk.killed, []string{"%5"}) || !slices.Equal(fk.sockets, []string{""}) {
+		t.Errorf("killed = %v on %q, want %%5 on the default server", fk.killed, fk.sockets)
+	}
+}
+
+// Registration is deduplicated per (socket, pane): the same pane on the same
+// socket twice is one entry and one kill, while the same pane id on another socket
+// (or with no socket) is a separate entry that fires for its own window, on its
+// own server.
+func TestDaemon_PendingCloseDedupIsPerSocketAndPane(t *testing.T) {
+	mc := &tmuxtest.MockClient{}
 	d := newTestDaemon(mc)
 	fk := d.killer.(*fakeKiller)
 	dir := trustedSocketDir(t, d)
-	t.Setenv("TMUX", filepath.Join(dir, "ambient")+",4242,0")
-	foreign := filepath.Join(dir, "foreign")
-	mc.PanesBySocket = map[string][]tmux.PaneInfo{foreign: {claudePane("bash", "0", "%5", "foreign task")}}
+	sockA, sockB := filepath.Join(dir, "a"), filepath.Join(dir, "b")
+	mc.PanesBySocket = twoServerMock(sockA, sockB).PanesBySocket
+	trackOnSocket(d, "sa", "%5", sockA)
+	trackOnSocket(d, "sb", "%5", sockB)
 
-	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "ambient", TmuxPane: "%5"})
-	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "foreign", TmuxPane: "%5", TmuxSocket: foreign})
-	d.registerPendingClose(ipc.PendingClose{PaneID: "%5", Session: "main", WindowIndex: "0", WindowName: "bash"})
-
-	d.handleEvent(ipc.HookEvent{EventType: "SessionEnd", SessionID: "foreign", TmuxPane: "%5", TmuxSocket: foreign})
-	if len(fk.killed) != 0 {
-		t.Fatalf("killed = %v, want nothing when the foreign window ends", fk.killed)
+	for _, socket := range []string{sockA, sockA, sockB, "", ""} {
+		d.registerPendingClose(ipc.PendingClose{PaneID: "%5", Session: "main", WindowIndex: "0", WindowName: "bash", Socket: socket})
 	}
 
-	d.handleEvent(ipc.HookEvent{EventType: "SessionEnd", SessionID: "ambient", TmuxPane: "%5"})
+	if len(d.pending) != 3 {
+		t.Fatalf("pending = %+v, want one entry each for (A, %%5), (B, %%5) and (empty, %%5)", d.pending)
+	}
+
+	endOnSocket(d, "sa", "%5", sockA)
+	endOnSocket(d, "sb", "%5", sockB)
+
+	if !slices.Equal(fk.killed, []string{"%5", "%5"}) || !slices.Equal(fk.sockets, []string{sockA, sockB}) {
+		t.Errorf("killed = %v on %q, want %%5 once on A and once on B", fk.killed, fk.sockets)
+	}
+	if _, ok := d.pending[pendingKey{pane: "%5"}]; !ok || len(d.pending) != 1 {
+		t.Errorf("pending = %+v, want only the empty-socket entry left", d.pending)
+	}
+}
+
+// The babysit retry kills on the entry's own socket: the close held back by the
+// guard on server A fires, once the guard clears, as %5 on A, never on the
+// daemon's own server.
+func TestDaemon_BabysitRetryKillsOnTheEntrysSocket(t *testing.T) {
+	mc := &tmuxtest.MockClient{}
+	d := newTestDaemon(mc)
+	fk := d.killer.(*fakeKiller)
+	dir := trustedSocketDir(t, d)
+	sockA, sockB := filepath.Join(dir, "a"), filepath.Join(dir, "b")
+	mc.PanesBySocket = twoServerMock(sockA, sockB).PanesBySocket
+	g := &countingGuard{blocked: true}
+	d.closeGuard = g.guard
+	now := time.Now()
+	d.now = func() time.Time { return now }
+	trackOnSocket(d, "sa", "%5", sockA)
+	d.registerPendingClose(ipc.PendingClose{PaneID: "%5", Session: "main", WindowIndex: "0", WindowName: "782-implement", Socket: sockA})
+
+	endOnSocket(d, "sa", "%5", sockA)
 	if len(fk.killed) != 0 {
-		t.Errorf("killed = %v, want nothing: the registration was meant for the foreign window and must not survive to hit an unrelated %%5", fk.killed)
+		t.Fatalf("killed = %v, want none while babysit still owns the ticket", fk.killed)
+	}
+
+	g.blocked = false
+	now = now.Add(pendingCloseRecheckInterval + time.Second)
+	d.runSweep()
+
+	if !slices.Equal(fk.killed, []string{"%5"}) || !slices.Equal(fk.sockets, []string{sockA}) {
+		t.Errorf("killed = %v on %q, want %%5 on %q once the guard clears", fk.killed, fk.sockets, sockA)
+	}
+	if len(d.pending) != 0 {
+		t.Errorf("pending = %+v, want the retried entry removed", d.pending)
 	}
 }

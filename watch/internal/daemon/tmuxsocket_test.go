@@ -55,10 +55,9 @@ func claudePane(window, index, id, task string) tmux.PaneInfo {
 	}
 }
 
-// newRawFeeder serves a real EventReceiver and returns a function that writes one
-// raw JSON line to its socket and hands the event the receiver decoded to d, as
-// the daemon loop would.
-func newRawFeeder(t *testing.T, d *Daemon) func(line string) {
+// serveRawLines serves a real EventReceiver and returns it with a function that
+// writes one raw JSON line to its socket.
+func serveRawLines(t *testing.T) (*ipc.EventReceiver, func(line string)) {
 	t.Helper()
 	// Short path: t.TempDir() embeds the full test name and can overflow sun_path.
 	dir, err := os.MkdirTemp("", "cenci")
@@ -77,7 +76,7 @@ func newRawFeeder(t *testing.T, d *Daemon) func(line string) {
 	go recv.Accept(ctx)
 	time.Sleep(20 * time.Millisecond)
 
-	return func(line string) {
+	return recv, func(line string) {
 		t.Helper()
 		conn, err := net.Dial("unix", path)
 		if err != nil {
@@ -87,6 +86,17 @@ func newRawFeeder(t *testing.T, d *Daemon) func(line string) {
 			t.Fatalf("write: %v", err)
 		}
 		_ = conn.Close()
+	}
+}
+
+// newRawFeeder writes one raw JSON line to a real EventReceiver's socket and
+// hands the event the receiver decoded to d, as the daemon loop would.
+func newRawFeeder(t *testing.T, d *Daemon) func(line string) {
+	t.Helper()
+	recv, send := serveRawLines(t)
+	return func(line string) {
+		t.Helper()
+		send(line)
 		select {
 		case ev := <-recv.Events():
 			d.handleEvent(ev)

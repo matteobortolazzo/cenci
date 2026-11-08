@@ -1909,6 +1909,10 @@ Behavior:
   older direct-close clients still use indexes even with an upgraded daemon.
   `--force` cannot bypass this
   identity requirement; `--dry-run` never registers or kills a window.
+- Closes, deferred closes and the automatic finished-ticket cleanup act on the
+  window's own recorded tmux server (its `socket`), never on a same-numbered pane
+  (`%N`) of another tmux server. A window with no recorded socket is closed on the
+  default server, as before.
 - A numeric target matches every window named exactly that number or prefixed
   `<number>-` (e.g. `42` matches `42` and `42-refine`, but not `420-anything`).
   A non-numeric target matches windows by exact name.

@@ -84,12 +84,13 @@ type Opts struct {
 	// `cenci close` on every board refresh.
 	Guard func(ticket string) (bool, string)
 	// KillProcesses, if non-nil, kills the process tree behind a resolved
-	// window target (the stable pane ID) before KillWindow runs (#1253).
-	// Production: a closure over windowproc.Killer. It runs only for windows
-	// about to be closed -- never for --dry-run, busy or babysit-skipped
-	// windows -- and its error is collected but never stops KillWindow: a failed
-	// process kill must not strand the window.
-	KillProcesses func(target string) error
+	// window target (the stable pane ID) on the tmux server at socket (the
+	// window's recorded socket; empty: the ambient server) before KillWindow
+	// runs (#1253, #1430). Production: a closure over windowproc.Killer. It runs
+	// only for windows about to be closed -- never for --dry-run, busy or
+	// babysit-skipped windows -- and its error is collected but never stops
+	// KillWindow: a failed process kill must not strand the window.
+	KillProcesses func(socket, target string) error
 }
 
 // Run reads a one-shot snapshot from the daemon, matches Target against the
@@ -101,7 +102,9 @@ type Opts struct {
 // collection in internal/dispatch/collect.go's CollectTickets). For each
 // window it closes, Run first kills the window's process tree through
 // Opts.KillProcesses (#1253); a failure there is collected and the window is
-// still killed.
+// still killed. Both calls target the window's recorded tmux socket
+// (WindowState.Socket, #1430), so a kill never reaches a same-numbered pane on
+// another tmux server; an empty socket is the ambient server.
 func Run(opts Opts) ([]Decision, error) {
 	snap, err := opts.ReadSnapshot(opts.SocketPath)
 	if err != nil {
@@ -159,14 +162,14 @@ func Run(opts Opts) ([]Decision, error) {
 		// shift or be reused while the process killer waits for exit.
 		target := w.PaneID
 		if opts.KillProcesses != nil {
-			if perr := opts.KillProcesses(target); perr != nil {
+			if perr := opts.KillProcesses(w.Socket, target); perr != nil {
 				errs = append(errs, fmt.Errorf("killing processes of %s (%s): %w", w.WindowName, target, perr))
 			}
 		}
 		// A window that closed itself between the snapshot and now (its agent
 		// exited) is closed, not a failure; any other kill-window error is still
 		// reported.
-		if kerr := opts.Killer.KillWindow("", target); kerr != nil && !errors.Is(kerr, tmux.ErrWindowGone) {
+		if kerr := opts.Killer.KillWindow(w.Socket, target); kerr != nil && !errors.Is(kerr, tmux.ErrWindowGone) {
 			errs = append(errs, fmt.Errorf("killing %s (%s): %w", w.WindowName, target, kerr))
 			continue
 		}

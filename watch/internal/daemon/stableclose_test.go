@@ -30,7 +30,7 @@ func stableRegistration(t *testing.T, pane string) ipc.PendingClose {
 
 type callbackProcKiller struct{ kill func(string) error }
 
-func (k callbackProcKiller) KillWindowProcesses(_ context.Context, target string) error {
+func (k callbackProcKiller) KillWindowProcesses(_ context.Context, _, target string) error {
 	return k.kill(target)
 }
 
@@ -52,8 +52,8 @@ func TestStableClose_DirectDisappearanceDuringShutdown(t *testing.T) {
 	}
 	decisions, err := closecmd.Run(closecmd.Opts{
 		Target: "782", ReadSnapshot: func(string) (*watch.StateSnapshot, error) { return &snap, nil }, Killer: model,
-		KillProcesses: func(target string) error {
-			_ = model.KillWindowProcesses(context.Background(), target)
+		KillProcesses: func(socket, target string) error {
+			_ = model.KillWindowProcesses(context.Background(), socket, target)
 			model.replace(0, "%90") // process shutdown makes the original window exit
 			return nil
 		},
@@ -81,7 +81,7 @@ func TestStableClose_DeferredReplacement(t *testing.T) {
 				d.killer, d.procKiller, d.runOffLoop = model, model, runner.run
 				if during {
 					d.procKiller = callbackProcKiller{kill: func(target string) error {
-						_ = model.KillWindowProcesses(context.Background(), target)
+						_ = model.KillWindowProcesses(context.Background(), "", target)
 						model.replace(0, "%90")
 						return nil
 					}}
@@ -142,7 +142,9 @@ func TestStableClose_SequentialClosesSurviveRenumbering(t *testing.T) {
 				if err := json.Unmarshal([]byte(`{"windows":[{"session":"main","window_index":"0","window_name":"782-implement","status":"done","pane_id":"%0"},{"session":"main","window_index":"1","window_name":"782-implement","status":"done","pane_id":"%1"}]}`), &snap); err != nil {
 					t.Fatal(err)
 				}
-				_, err := closecmd.Run(closecmd.Opts{Target: "782", ReadSnapshot: func(string) (*watch.StateSnapshot, error) { return &snap, nil }, Killer: model, KillProcesses: func(target string) error { return model.KillWindowProcesses(context.Background(), target) }})
+				_, err := closecmd.Run(closecmd.Opts{Target: "782", ReadSnapshot: func(string) (*watch.StateSnapshot, error) { return &snap, nil }, Killer: model, KillProcesses: func(socket, target string) error {
+					return model.KillWindowProcesses(context.Background(), socket, target)
+				}})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -173,7 +175,7 @@ func TestStableClose_InvalidIdentityFailsClosed(t *testing.T) {
 				killer := &fakeKiller{}
 				registered := false
 				processes := false
-				_, err := closecmd.Run(closecmd.Opts{Target: "782", Force: mode.force, DryRun: mode.dryRun, ReadSnapshot: func(string) (*watch.StateSnapshot, error) { return &snap, nil }, Killer: killer, Register: func(watch.WindowState) error { registered = true; return nil }, KillProcesses: func(string) error { processes = true; return nil }})
+				_, err := closecmd.Run(closecmd.Opts{Target: "782", Force: mode.force, DryRun: mode.dryRun, ReadSnapshot: func(string) (*watch.StateSnapshot, error) { return &snap, nil }, Killer: killer, Register: func(watch.WindowState) error { registered = true; return nil }, KillProcesses: func(string, string) error { processes = true; return nil }})
 				if err == nil || !strings.Contains(err.Error(), "pane") || len(killer.killed) != 0 || registered || processes {
 					t.Fatalf("mode=%+v invalid identity used: err=%v killed=%v registered=%v processes=%v", mode, err, killer.killed, registered, processes)
 				}
@@ -215,7 +217,7 @@ func TestStableClose_ReplacementSessionEndCannotJoinOldRegistration(t *testing.T
 				if killed := d.killer.(*fakeKiller).killed; len(killed) != 0 {
 					t.Fatalf("replacement teardown triggered old registration: %v", killed)
 				}
-				if entry := d.pending["%99"]; len(d.pending) != 1 || entry == nil || entry.pc.PaneID != "%99" || entry.blocked != blocked {
+				if entry := d.pending[pendingKey{pane: "%99"}]; len(d.pending) != 1 || entry == nil || entry.pc.PaneID != "%99" || entry.blocked != blocked {
 					t.Fatalf("replacement teardown removed or changed original pending close: %+v", d.pending)
 				}
 			})

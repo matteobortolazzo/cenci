@@ -31,9 +31,10 @@ type windowKiller interface {
 }
 
 // windowProcKiller kills the process tree behind a tmux window target before
-// the window itself is killed (#1253). Production is *windowproc.Killer.
+// the window itself is killed (#1253), on the tmux server at socket (empty: the
+// ambient server, #1430). Production is *windowproc.Killer.
 type windowProcKiller interface {
-	KillWindowProcesses(ctx context.Context, target string) error
+	KillWindowProcesses(ctx context.Context, socket, target string) error
 }
 
 // Daemon manages the event-driven loop and per-session core state. All tmux
@@ -73,11 +74,12 @@ type Daemon struct {
 	closeGuard func(ticket string) (bool, string)
 
 	// pending is the in-memory pending-close registry (#522), keyed by
-	// stable pane ID (the same identity closecmd kills by). Dropped on
+	// (tmux socket, stable pane ID): the pane identity closecmd kills by, on the
+	// server it lives on, since pane ids repeat across servers (#1430). Dropped on
 	// daemon restart, per plan assumption; pruned when the owning session is
 	// removed (runSweep/ttlSweep) to bound growth from windows closed by
 	// other means.
-	pending map[string]*pendingCloseEntry
+	pending map[pendingKey]*pendingCloseEntry
 
 	// attention is the reconciler's overlay of synthetic "failed"/"escalated"
 	// windows (#46, extended by #826). It is appended to every snapshot
@@ -180,7 +182,7 @@ func newDaemon(cfg config.Config, fe frontend.Frontend, events <-chan ipc.HookEv
 		now:      time.Now,
 		reaper:   reaper,
 		killer:   &tmux.ExecClient{},
-		pending:  make(map[string]*pendingCloseEntry),
+		pending:  make(map[pendingKey]*pendingCloseEntry),
 		// procKiller stays nil here: Run installs the real one.
 		runOffLoop: runInGoroutine,
 		closeGuard: func(ticket string) (bool, string) {

@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/tmux"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/windowproc/windowproctest"
 )
 
@@ -37,14 +38,21 @@ func row(id, pid, launchID, container, runtime string) string {
 	return strings.Join([]string{id, pid, launchID, container, runtime}, "\t")
 }
 
-// runKiller installs the fakes (grace window 0) and runs the killer once.
+// runKiller installs the fakes (grace window 0) and runs the killer once against
+// the ambient tmux server (an empty socket).
 func runKiller(t *testing.T, spec windowproctest.Spec) (*windowproctest.Fakes, error) {
+	t.Helper()
+	return runKillerOn(t, "", spec)
+}
+
+// runKillerOn is runKiller for a window recorded on the tmux server at socket.
+func runKillerOn(t *testing.T, socket string, spec windowproctest.Spec) (*windowproctest.Fakes, error) {
 	t.Helper()
 	t.Setenv("CENCI_SANDBOX_REAP_GRACE_SECS", "0")
 	fakes := windowproctest.Install(t, spec)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	return fakes, New(io.Discard).KillWindowProcesses(ctx, wpTarget)
+	return fakes, New(io.Discard).KillWindowProcesses(ctx, socket, wpTarget)
 }
 
 func rawList(lines ...string) *string {
@@ -583,7 +591,7 @@ func TestKillWindowProcesses_ExpiredContextFailsTheRuntimeExecs(t *testing.T) {
 	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
 	defer cancel()
 
-	err := New(io.Discard).KillWindowProcesses(ctx, wpTarget)
+	err := New(io.Discard).KillWindowProcesses(ctx, "", wpTarget)
 
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("error = %v, want one wrapping context.DeadlineExceeded", err)
@@ -605,7 +613,7 @@ func TestKillWindowProcesses_RealGroupIsTerminatedAndSetsidProcessSurvives(t *te
 	fakes := windowproctest.Install(t, windowproctest.Spec{Panes: []windowproctest.Pane{{ID: "%1", PanePID: fmt.Sprint(leader.PID)}}})
 
 	start := time.Now()
-	err := New(io.Discard).KillWindowProcesses(context.Background(), wpTarget)
+	err := New(io.Discard).KillWindowProcesses(context.Background(), "", wpTarget)
 	elapsed := time.Since(start)
 
 	if err != nil {
@@ -630,7 +638,7 @@ func TestKillWindowProcesses_RealGroupIgnoringTermIsKilled(t *testing.T) {
 	t.Setenv("CENCI_SANDBOX_REAP_GRACE_SECS", "0")
 	windowproctest.Install(t, windowproctest.Spec{Panes: []windowproctest.Pane{{ID: "%1", PanePID: fmt.Sprint(leader.PID)}}})
 
-	if err := New(io.Discard).KillWindowProcesses(context.Background(), wpTarget); err != nil {
+	if err := New(io.Discard).KillWindowProcesses(context.Background(), "", wpTarget); err != nil {
 		t.Fatalf("KillWindowProcesses: %v", err)
 	}
 
@@ -638,4 +646,90 @@ func TestKillWindowProcesses_RealGroupIgnoringTermIsKilled(t *testing.T) {
 	// With a zero grace window the KILL follows the TERM immediately, so a
 	// cooperative member may be ended by either.
 	member.RequireDeathBy(t, "group member", syscall.SIGTERM, syscall.SIGKILL)
+}
+
+// -- recorded tmux socket (#1430) ---------------------------------------------
+
+// wpSocket is a recorded socket of the right shape; the killer only shape-checks
+// it (the daemon owns the trusted-directory check at ingest), and the fake tmux
+// never connects to it.
+const wpSocket = "/tmp/tmux-1000/cenci"
+
+// A window recorded on a socket has both pane listings issued with `-S` to that
+// socket, and a window with no recorded socket has them issued bare. A sandbox
+// pane's runtime calls carry no tmux socket at all.
+func TestKillWindowProcesses_ListingsCarryTheRecordedSocketOrNone(t *testing.T) {
+	for _, socket := range []string{wpSocket, ""} {
+		name := socket
+		if name == "" {
+			name = "no recorded socket"
+		}
+		t.Run(name, func(t *testing.T) {
+			installFakeSys(t)
+			spec := windowproctest.Spec{
+				Launches: map[string][]windowproctest.Proc{wpLaunchID: {{PID: "301", Start: "9", IgnoreTerm: true}}},
+				Panes:    []windowproctest.Pane{{ID: "%1", PanePID: fmt.Sprint(wpPanePID), LaunchID: wpLaunchID, Container: wpContainer, Runtime: "docker"}},
+			}
+
+			fakes, err := runKillerOn(t, socket, spec)
+
+			if err != nil {
+				t.Fatalf("KillWindowProcesses: %v", err)
+			}
+			want := windowproctest.SandboxCloseCallsOn("docker", wpContainer, wpLaunchID, socket, wpTarget, "301")
+			want = want[:len(want)-1] // the killer never closes the window itself
+			if got := fakes.Calls(t); !slices.Equal(got, want) {
+				t.Errorf("calls:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+			}
+		})
+	}
+}
+
+// A malformed recorded socket fails closed: the error wraps ErrMalformedSocket,
+// no tmux runs (so nothing reaches the ambient server) and nothing is signaled.
+func TestKillWindowProcesses_MalformedSocketFailsWithZeroCalls(t *testing.T) {
+	for _, socket := range []string{"relative/sock", "/tmp/tmux-1000/with\ttab", "/tmp/tmux-1000/with\nnewline"} {
+		t.Run(fmt.Sprintf("%q", socket), func(t *testing.T) {
+			sys := installFakeSys(t)
+
+			fakes, err := runKillerOn(t, socket, windowproctest.Spec{Panes: []windowproctest.Pane{hostPane()}})
+
+			if !errors.Is(err, tmux.ErrMalformedSocket) {
+				t.Fatalf("error = %v, want one wrapping tmux.ErrMalformedSocket", err)
+			}
+			if calls := fakes.Calls(t); len(calls) != 0 {
+				t.Errorf("tmux/runtime calls = %q, want none for a malformed socket", calls)
+			}
+			if len(sys.calls) != 0 || len(sys.getpgidCalls) != 0 {
+				t.Errorf("host signals = %v, getpgid = %v, want none", sys.calls, sys.getpgidCalls)
+			}
+		})
+	}
+}
+
+// A listing failure on a recorded socket names that socket, so a failure on one
+// server is told apart from the same pane id on another; tmux's own message
+// still reaches the error.
+func TestKillWindowProcesses_ListFailureNamesTheRecordedSocket(t *testing.T) {
+	installFakeSys(t)
+
+	_, err := runKillerOn(t, wpSocket, windowproctest.Spec{ListFails: true})
+
+	if err == nil || !strings.Contains(err.Error(), wpSocket) || !strings.Contains(err.Error(), windowproctest.TmuxUnrelatedErrorText) {
+		t.Fatalf("error = %v, want it to name %q and carry tmux's message %q", err, wpSocket, windowproctest.TmuxUnrelatedErrorText)
+	}
+}
+
+// A recorded socket's window that is already gone is still not an error.
+func TestKillWindowProcesses_GoneWindowOnARecordedSocketIsNotAnError(t *testing.T) {
+	installFakeSys(t)
+
+	fakes, err := runKillerOn(t, wpSocket, windowproctest.Spec{ListGone: true})
+
+	if err != nil {
+		t.Fatalf("KillWindowProcesses = %v, want nil for a window that is already gone", err)
+	}
+	if got, want := fakes.Calls(t), windowproctest.ListCallsOn(wpSocket, wpTarget)[:1]; !slices.Equal(got, want) {
+		t.Errorf("calls = %q, want %q", got, want)
+	}
 }
