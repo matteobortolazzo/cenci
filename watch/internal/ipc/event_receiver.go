@@ -19,11 +19,12 @@ const (
 
 // EventReceiver listens on a Unix socket for hook events from cenci notify.
 type EventReceiver struct {
-	listener     net.Listener
-	path         string
-	events       chan HookEvent
-	pendingClose chan PendingClose
-	activeSem    chan struct{}
+	listener           net.Listener
+	path               string
+	events             chan HookEvent
+	pendingClose       chan PendingClose
+	nativeMeasurements chan NativeMeasurement // native-measurement envelopes (#1450)
+	activeSem          chan struct{}
 
 	// armHandler is the synchronous, injectable babysit-arm handler (#1094).
 	// It executes on the connection goroutine, outside any daemon loop, so it
@@ -47,12 +48,19 @@ func NewEventReceiver(socketPath string) (*EventReceiver, error) {
 		return nil, err
 	}
 	return &EventReceiver{
-		listener:     ln,
-		path:         socketPath,
-		events:       make(chan HookEvent, eventChanCap),
-		pendingClose: make(chan PendingClose, eventChanCap),
-		activeSem:    make(chan struct{}, maxEventConns),
+		listener:           ln,
+		path:               socketPath,
+		events:             make(chan HookEvent, eventChanCap),
+		pendingClose:       make(chan PendingClose, eventChanCap),
+		nativeMeasurements: make(chan NativeMeasurement, eventChanCap),
+		activeSem:          make(chan struct{}, maxEventConns),
 	}, nil
+}
+
+// NativeMeasurements returns the channel that delivers native-measurement
+// envelopes (#1450).
+func (r *EventReceiver) NativeMeasurements() <-chan NativeMeasurement {
+	return r.nativeMeasurements
 }
 
 // Events returns the channel that delivers parsed hook events.
@@ -149,6 +157,11 @@ func (r *EventReceiver) handleConn(conn net.Conn) {
 		return
 	}
 
+	if envelope.Kind == nativeMeasurementKind {
+		r.handleNativeMeasurement(scanner.Bytes())
+		return
+	}
+
 	if envelope.Kind == armRequestKind {
 		r.handleArmRequestConn(conn, scanner.Bytes())
 		return
@@ -176,6 +189,27 @@ func (r *EventReceiver) handleConn(conn net.Conn) {
 	case r.events <- event:
 	default:
 		log.Printf("event: channel full, dropping %s event", event.EventType)
+	}
+}
+
+// handleNativeMeasurement routes a native-measurement envelope to its own
+// channel (#1450). It never reaches Events(). Only the envelope is checked
+// here (the body must be a JSON object); per-field validation belongs to
+// internal/measurement, so one bad field cannot fail the whole decode.
+func (r *EventReceiver) handleNativeMeasurement(raw []byte) {
+	var nm NativeMeasurement
+	if err := json.Unmarshal(raw, &nm); err != nil {
+		log.Printf("event: invalid native-measurement JSON: %v", err)
+		return
+	}
+	if len(nm.Measurement) == 0 || nm.Measurement[0] != '{' {
+		log.Printf("event: native-measurement body is not a JSON object, dropping")
+		return
+	}
+	select {
+	case r.nativeMeasurements <- nm:
+	default:
+		log.Printf("event: native-measurement channel full, dropping")
 	}
 }
 

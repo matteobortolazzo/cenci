@@ -1,9 +1,13 @@
 package ipc
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
+	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -384,6 +388,183 @@ func TestEventReceiver_HookEventWithoutKindRoutesToEvents(t *testing.T) {
 		t.Fatalf("expected no pending-close from an unrecognized-kind message, but got: %+v", pc)
 	case <-time.After(200 * time.Millisecond):
 		// Good -- an unrecognized kind never lands on PendingCloses() either.
+	}
+}
+
+// -- native-measurement routing (#1450) ---------------------------------------
+
+func startReceiver(t *testing.T) (*EventReceiver, string) {
+	t.Helper()
+	path := tempSocket(t)
+	recv, err := NewEventReceiver(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = recv.Close() })
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go recv.Accept(ctx)
+	return recv, path
+}
+
+// writeRawLine writes bytes straight to the event socket, bypassing every
+// sender, the way a container (or a buggy mod) can.
+func writeRawLine(t *testing.T, path, line string) {
+	t.Helper()
+	conn, err := net.Dial("unix", path)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+	if _, err := conn.Write([]byte(line + "\n")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+}
+
+func sameJSON(t *testing.T, got, want []byte) {
+	t.Helper()
+	var g, w any
+	if err := json.Unmarshal(got, &g); err != nil {
+		t.Fatalf("decode got %s: %v", got, err)
+	}
+	if err := json.Unmarshal(want, &w); err != nil {
+		t.Fatalf("decode want %s: %v", want, err)
+	}
+	if !reflect.DeepEqual(g, w) {
+		t.Errorf("body = %s, want %s", got, want)
+	}
+}
+
+const measurementBody = `{"session_id":"sess-1","measured_at":"2026-11-08T11:59:00Z","source":"claude-mods","context":{"tokens":1000,"window":200000,"percent":0.5}}`
+
+// TestSendNativeMeasurement_RoundTripsToNativeMeasurements asserts the envelope
+// lands on its own channel, body intact, and on neither Events() nor
+// PendingCloses().
+func TestSendNativeMeasurement_RoundTripsToNativeMeasurements(t *testing.T) {
+	recv, path := startReceiver(t)
+
+	if err := SendNativeMeasurement(path, NativeMeasurement{Measurement: json.RawMessage(measurementBody)}); err != nil {
+		t.Fatalf("SendNativeMeasurement: %v", err)
+	}
+
+	select {
+	case got := <-recv.NativeMeasurements():
+		sameJSON(t, got.Measurement, []byte(measurementBody))
+	case evt := <-recv.Events():
+		t.Fatalf("a native measurement must not reach Events(), got %+v", evt)
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the native measurement")
+	}
+
+	select {
+	case evt := <-recv.Events():
+		t.Fatalf("unexpected hook event: %+v", evt)
+	case pc := <-recv.PendingCloses():
+		t.Fatalf("unexpected pending close: %+v", pc)
+	case <-time.After(150 * time.Millisecond):
+	}
+}
+
+// TestSendNativeMeasurement_WireShapeDecodesAsAnEmptyHookEvent pins P27: the
+// line's top-level keys are exactly kind and measurement, so a pre-change
+// daemon decodes it as a HookEvent with empty session_id and tmux_pane and
+// drops it.
+func TestSendNativeMeasurement_WireShapeDecodesAsAnEmptyHookEvent(t *testing.T) {
+	path := tempSocket(t)
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+
+	lines := make(chan string, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		line, _ := bufio.NewReader(conn).ReadString('\n')
+		lines <- line
+	}()
+
+	if err := SendNativeMeasurement(path, NativeMeasurement{Measurement: json.RawMessage(measurementBody)}); err != nil {
+		t.Fatalf("SendNativeMeasurement: %v", err)
+	}
+
+	var line string
+	select {
+	case line = <-lines:
+	case <-time.After(3 * time.Second):
+		t.Fatal("nothing was written to the socket")
+	}
+	if !strings.HasSuffix(line, "\n") {
+		t.Errorf("line %q is not newline-terminated", line)
+	}
+
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(line), &top); err != nil {
+		t.Fatalf("line %q is not a JSON object: %v", line, err)
+	}
+	keys := make([]string, 0, len(top))
+	for k := range top {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	if want := []string{"kind", "measurement"}; !reflect.DeepEqual(keys, want) {
+		t.Errorf("top-level keys = %v, want %v", keys, want)
+	}
+	var kind string
+	if err := json.Unmarshal(top["kind"], &kind); err != nil || kind != "native-measurement" {
+		t.Errorf("kind = %q (err %v), want the literal native-measurement", kind, err)
+	}
+	sameJSON(t, top["measurement"], []byte(measurementBody))
+
+	var legacy HookEvent
+	if err := json.Unmarshal([]byte(line), &legacy); err != nil {
+		t.Fatalf("a pre-change daemon could not decode the line as a HookEvent: %v", err)
+	}
+	if legacy.SessionID != "" || legacy.TmuxPane != "" || legacy.EventType != "" {
+		t.Errorf("HookEvent = %+v, want empty session_id, tmux_pane and event_type", legacy)
+	}
+}
+
+// TestEventReceiver_NativeMeasurementWithoutAnObjectBodyIsDropped asserts a
+// malformed envelope never reaches Events() or the measurement channel, and
+// that the receiver keeps serving afterwards. A body that is an object but
+// carries invalid fields is delivered as-is: per-field validation belongs to
+// the daemon, so one bad field cannot fail the whole decode.
+func TestEventReceiver_NativeMeasurementWithoutAnObjectBodyIsDropped(t *testing.T) {
+	recv, path := startReceiver(t)
+
+	for _, line := range []string{
+		`{"kind":"native-measurement"}`,
+		`{"kind":"native-measurement","measurement":null}`,
+		`{"kind":"native-measurement","measurement":"text"}`,
+		`{"kind":"native-measurement","measurement":5}`,
+		`{"kind":"native-measurement","measurement":true}`,
+		`{"kind":"native-measurement","measurement":[1,2]}`,
+		`{"kind":"native-measurement","measurement":{"session_id":`,
+	} {
+		writeRawLine(t, path, line)
+	}
+	const fieldInvalid = `{"session_id":5,"context":"abc","rate_limits":"x"}`
+	writeRawLine(t, path, `{"kind":"native-measurement","measurement":`+fieldInvalid+`}`)
+
+	select {
+	case got := <-recv.NativeMeasurements():
+		sameJSON(t, got.Measurement, []byte(fieldInvalid))
+	case <-time.After(2 * time.Second):
+		t.Fatal("the object body with invalid fields must still be delivered")
+	}
+
+	select {
+	case got := <-recv.NativeMeasurements():
+		t.Fatalf("a malformed envelope was delivered: %s", got.Measurement)
+	case evt := <-recv.Events():
+		t.Fatalf("a malformed native-measurement reached Events(): %+v", evt)
+	case <-time.After(300 * time.Millisecond):
 	}
 }
 

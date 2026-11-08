@@ -39,15 +39,16 @@ type windowProcKiller interface {
 // Daemon manages the event-driven loop and per-session core state. All tmux
 // interaction lives behind the injected frontend.
 type Daemon struct {
-	cfg           config.Config
-	frontend      frontend.Frontend
-	sessions      map[string]*frontend.SessionState // key: session ID (fallback "pane:<id>")
-	ipc           *ipc.Server                       // nil if IPC not enabled
-	events        <-chan ipc.HookEvent
-	pendingCloses <-chan ipc.PendingClose // nil unless wired by Run (#522); loop skips this select case when nil
-	now           func() time.Time        // injectable clock for TTL tests
-	reaper        reap.Reaper             // triggers cenci sandbox reap-orphans on pane-gone sweep/startup (#292)
-	killer        windowKiller            // kills a pending-close window's target at SessionEnd (#522)
+	cfg                config.Config
+	frontend           frontend.Frontend
+	sessions           map[string]*frontend.SessionState // key: session ID (fallback "pane:<id>")
+	ipc                *ipc.Server                       // nil if IPC not enabled
+	events             <-chan ipc.HookEvent
+	pendingCloses      <-chan ipc.PendingClose      // nil unless wired by attachReceiver (#522); loop skips this select case when nil
+	nativeMeasurements <-chan ipc.NativeMeasurement // nil unless wired by attachReceiver (#1450); loop skips this select case when nil
+	now                func() time.Time             // injectable clock for TTL tests
+	reaper             reap.Reaper                  // triggers cenci sandbox reap-orphans on pane-gone sweep/startup (#292)
+	killer             windowKiller                 // kills a pending-close window's target at SessionEnd (#522)
 
 	// procKiller kills a pending-close window's process tree before killer runs
 	// (#1253). Nil (newDaemon's default) skips it, so newDaemon-based tests never
@@ -200,6 +201,15 @@ func newDaemon(cfg config.Config, fe frontend.Frontend, events <-chan ipc.HookEv
 	}
 }
 
+// attachReceiver wires the event receiver's side channels into the daemon: the
+// pending-close registrations (#522) and the native measurements (#1450). Run
+// and the end-to-end measurement test both use it, so a channel the loop reads
+// can never be left unwired.
+func (d *Daemon) attachReceiver(recv *ipc.EventReceiver) {
+	d.pendingCloses = recv.PendingCloses()
+	d.nativeMeasurements = recv.NativeMeasurements()
+}
+
 // installHostSeams installs the daemon's real host-side seams, the ones that
 // shell out or signal processes: the babysit-arm resolver/spawn (#1095), its
 // capability predicate (#1215), the babysit-stop / babysit-status seams
@@ -277,7 +287,7 @@ func Run(ctx context.Context, cfg config.Config, fe frontend.Frontend, attention
 	}
 
 	d := newDaemon(cfg, fe, recv.Events(), reap.NewExecReaper(cfg.Verbose))
-	d.pendingCloses = recv.PendingCloses()
+	d.attachReceiver(recv)
 	// Install the real host-side seams (#1095, #1253): newDaemon's constructor
 	// keeps its inert defaults so newDaemon-based tests never shell out or
 	// signal real processes, and only a live Run installs the real ones.
@@ -374,6 +384,8 @@ func (d *Daemon) loop(ctx context.Context, attention <-chan ipc.AttentionUpdate)
 			d.handleEvent(event)
 		case pc := <-d.pendingCloses:
 			d.registerPendingClose(pc)
+		case m := <-d.nativeMeasurements:
+			d.applyNativeMeasurement(m)
 		case <-sweep.C:
 			d.runSweep()
 		case <-reapC:
