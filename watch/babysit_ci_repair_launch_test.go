@@ -450,6 +450,30 @@ func (w *ciRepairWorld) clientArgv(t *testing.T) []string {
 	return calls[0]
 }
 
+// assertWindowCommandPinsUnattended is #1497's end-to-end check that a
+// babysit-launched window carries the unattended pin: the supervisor's
+// `cenci run ci-repair ... --unattended` put `CENCI_ATTENDED=0 ` on the agent
+// command, after the `cd <dir> &&` prefix (so the assignment scopes to the
+// agent, not the `cd`), exactly once, and with no CENCI_ATTENDED_ORIGIN: a host
+// launch carries only the bare `0`, which pipeline.Unattended() reads as
+// unattended (covered by TestUnattended_Matrix in internal/pipeline).
+func assertWindowCommandPinsUnattended(t *testing.T, shellCommand string) {
+	t.Helper()
+	const pin = "CENCI_ATTENDED=0 "
+	if !strings.Contains(shellCommand, " && "+pin) {
+		t.Errorf("window command %q lacks %q after the cd prefix", shellCommand, " && "+pin)
+	}
+	if strings.HasPrefix(shellCommand, "CENCI_ATTENDED") {
+		t.Errorf("window command %q starts with the assignment: it must sit on the agent argv, not the cd", shellCommand)
+	}
+	if n := strings.Count(shellCommand, pin); n != 1 {
+		t.Errorf("window command %q carries %d %q assignments, want exactly 1", shellCommand, n, pin)
+	}
+	if strings.Contains(shellCommand, "CENCI_ATTENDED_ORIGIN") {
+		t.Errorf("window command %q must not carry CENCI_ATTENDED_ORIGIN on a host launch", shellCommand)
+	}
+}
+
 // AC1/AC2/AC4/AC5/AC6: in every cell the supervisor launches `42-ci-repair`, the
 // captured command runs the client in its finite mode with the argument intact,
 // and the client process exits -- after success and after an explicit failure.
@@ -467,6 +491,7 @@ func TestCIRepairMatrix_WorkerExits(t *testing.T) {
 					t.Fatalf("cenci babysit --once exit = %d, want 0; output:\n%s", code, out)
 				}
 				shellCommand := w.onlyWindowCommand(t)
+				assertWindowCommandPinsUnattended(t, shellCommand)
 				w.assertWindowOptions(t)
 				if got, want := w.repairFields(t), (ciRepairFields{FixAttempts: 2, RepairPending: true, LastRepairedSHA: ciRepairHead}); got != want {
 					t.Errorf("state after dispatch = %+v, want %+v", got, want)

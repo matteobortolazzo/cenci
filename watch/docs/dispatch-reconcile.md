@@ -656,10 +656,12 @@ approval.
 **Who counts as unattended (`pipeline.Unattended`).** A session is unattended when
 `CENCI_ATTENDED` is exactly `0` and `CENCI_ATTENDED_ORIGIN` is anything other than
 `host-config`, absent included. The sandbox launcher sets `CENCI_ATTENDED=0` for every
-sandbox launch while the host's `planning.attended` is off, human `cenci open`/`cenci run`
-sessions included, so the value alone cannot tell a dispatched session from a human
-one. The launcher therefore also forwards `CENCI_ATTENDED_ORIGIN`: `pinned` when the
-value came from its own environment (the dispatcher's `Unattended` pin), `host-config`
+sandbox launch while the host's `planning.attended` is off, human `cenci open` sessions
+and interactive `cenci run` sessions launched without `--unattended` included, so the
+value alone cannot tell a dispatched session from a human one. The launcher therefore
+also forwards `CENCI_ATTENDED_ORIGIN`: `pinned` when the value came from its own
+environment (the dispatcher's `Unattended` pin, and babysit's, which passes `cenci run
+--unattended` and reaches the same `run.Opts.Unattended`), `host-config`
 when it resolved it from the fleet config, and `config-unreadable` when it could not read
 the fleet config (`resolveAttendedFlag` falls back to `CENCI_ATTENDED=0`, which is a
 fallback and not the host's answer). Only the exact `host-config` lifts the hold: `pinned`,
@@ -674,8 +676,9 @@ planning.attended ...` line (`warnAttendedConfigUnreadable`), silent when
 - The watch side closes the bypass by dispatcher launch and by launch argument. It does
   not defend against an agent session that deliberately breaks the Phase 1 procedure:
   one that rewrites `.cenci/pipeline/<id>.json` itself, sets the origin marker in its own
-  environment, or rewrites the plan and self-authorizes. The state file sits in the
-  agent-writable repository.
+  environment, clears or overrides `CENCI_ATTENDED` in its own environment (the
+  classification reads only the calling process's environment), or rewrites the plan and
+  self-authorizes. The state file sits in the agent-writable repository.
 - The no-downgrade defence (an unattended autonomous kind cannot replace a `held` record
   for the same hash) is content-exact. A re-plan that changes a single byte and records
   `lean` is admitted. That is within the accepted limit above, not a gap to close here.
@@ -688,14 +691,18 @@ planning.attended ...` line (`warnAttendedConfigUnreadable`), silent when
   is Phase 9's archive `mv` to `.plans/done/` after the PR exists. A future phase that
   edits the plan before Phase 2 would turn every approved plan into
   `plan changed since approval`.
-- Babysit-launched sessions count as human (known limit). `babysit`'s `launch` self-execs
-  `cenci run <workflow> ... --session` for `address-feedback`, `ci-repair` and
-  `merge-repair`, and only dispatch's `applyDispatch` sets `run.Opts.Unattended`, so
-  these sessions carry no unattended pin. With `planning.attended` off the launcher
-  forwards `CENCI_ATTENDED=0` with origin `host-config`, and `pipeline.Unattended()` is
-  false. Such a session reads untrusted PR review text and could run `cenci dispatch
-  approve <id>` or `plan --approve` as a human. This is not fixed here; a Followup ticket
-  tracks pinning babysit launches as unattended.
+- Babysit-launched sessions count as unattended (#1497). `babysit`'s `launch` self-execs
+  `cenci run <workflow> ... --unattended` for `address-review`, `ci-repair`,
+  `merge-repair` and both `babysit-attention` launches, so every one reaches
+  `run.Opts.Unattended` and pins `CENCI_ATTENDED=0`, whatever the host's
+  `planning.attended` says. These sessions read untrusted PR review text, so they are
+  classified as unattended and a session that follows the procedure is refused by
+  `cenci dispatch approve <id>` and `plan --approve`. This is a classification, not a
+  boundary against a session that deliberately changes its own environment (see the first
+  bullet). A host (`--no-sandbox`) launch carries `CENCI_ATTENDED=0` with no origin
+  marker, which `pipeline.Unattended()` also reads as unattended. It relies on the tmux
+  server and session environment not carrying `CENCI_ATTENDED_ORIGIN=host-config`, which
+  is normally set only inside containers.
 
 **Version skew.** An old binary drops the unknown `authorization` field when it saves a
 state file (plain `json.Unmarshal`), and an old flow plugin calls `plan` without
@@ -703,7 +710,8 @@ state file (plain `json.Unmarshal`), and an old flow plugin calls `plan` without
 silently admitted. A new plugin calling an old binary hits exit 2 on `--authorization`,
 and the pipeline stops. A sandbox session started by a launcher that predates the
 origin marker forwards `CENCI_ATTENDED=0` with no marker, so it counts as unattended
-(and `cenci dispatch approve` refuses there) until it is relaunched.
+(and `cenci dispatch approve` refuses there) until it is relaunched. A babysit supervisor
+started on an older binary launches unpinned sessions until it is restarted.
 
 ## Session eligibility before capacity (#1464)
 

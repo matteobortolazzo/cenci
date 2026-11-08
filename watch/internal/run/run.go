@@ -74,15 +74,17 @@ type Opts struct {
 	Dir string
 
 	// Unattended pins CENCI_ATTENDED=0 into the spawned window's environment
-	// (#1087). dispatch sets it on every session it launches: #1086's fleet
-	// gate already stops dispatch from starting a planning session while
-	// planning.attended is on, so this is defense-in-depth for a flag toggled
-	// mid-flight — a dispatched session must never route into an interactive
-	// AskUserQuestion inside a detached tmux window, where it would wait
-	// forever with the ticket stuck on Working. Left false by the interactive
-	// `cenci run` path, which must leave the variable entirely unset: absent
-	// is its own meaningful third state ("no launcher resolved this; read the
-	// host config") for the skill-side resolution order.
+	// (#1087). Two callers set it: dispatch sets it on every session it
+	// launches, and babysit sets it on every session it launches through
+	// `cenci run --unattended` (#1497). #1086's fleet gate already stops
+	// dispatch from starting a planning session while planning.attended is on,
+	// so this is defense-in-depth for a flag toggled mid-flight — a dispatched
+	// session must never route into an interactive AskUserQuestion inside a
+	// detached tmux window, where it would wait forever with the ticket stuck
+	// on Working. Left false by an interactive `cenci run` WITHOUT
+	// `--unattended`, which must leave the variable entirely unset: absent is
+	// its own meaningful third state ("no launcher resolved this; read the host
+	// config") for the skill-side resolution order.
 	Unattended bool
 
 	// Out receives dry-run output; nil defaults to os.Stdout.
@@ -191,7 +193,7 @@ func Run(opts Opts, ctrl Controller) error {
 		}
 	}
 
-	// Pin the attended flag off for an unattended (dispatch) spawn, as a
+	// Pin the attended flag off for an unattended (dispatch or babysit) spawn, as a
 	// shell env assignment scoped to the agent command alone (#1087). It rides
 	// in the command string for the same reason Dir does — no Controller
 	// change is needed — and covers both runtimes: a sandboxed session's

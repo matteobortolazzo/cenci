@@ -47,7 +47,7 @@ func TestRunUnattendedPinsAttendedZero(t *testing.T) {
 }
 
 // TestRunAttendedPinIsUnattendedOnly pins the negative: the interactive
-// `cenci run` path leaves CENCI_ATTENDED entirely unset, preserving the absent
+// `cenci run` path without `--unattended` leaves CENCI_ATTENDED entirely unset, preserving the absent
 // third state a host run must keep for #1088's resolution order (absent means
 // "no launcher resolved this; read the host config").
 func TestRunAttendedPinIsUnattendedOnly(t *testing.T) {

@@ -3578,26 +3578,42 @@ func TestOpenClaude_ForwardsResolvedAttendedFlag(t *testing.T) {
 // pin must survive `cenci open` even when the host fleet config says
 // attended. A dispatched session that reached an interactive question inside
 // a detached tmux window would wait there forever with its ticket on Working.
+//
+// #1497: `cenci babysit` pins its sessions the same way (`cenci run
+// --unattended` puts CENCI_ATTENDED=0 on the window command), so this is the
+// launcher side of a pinned babysit launch. Whatever the host's
+// planning.attended says, the attach forwards the pin with origin `pinned`,
+// never `host-config` (which would count the session as human).
 func TestOpenClaude_PinnedAttendedEnvOverridesFleetConfig(t *testing.T) {
-	fakeDir := t.TempDir()
-	callLog := writeScriptedRuntimes(t, fakeDir)
-	assets := writeAssetFixture(t)
-	env, home, _ := openTestEnv(t, fakeDir, assets)
-	writeFleetConfigFixture(t, home, `{"planning": {"attended": true}}`)
+	for _, hostAttended := range []bool{true, false} {
+		t.Run(fmt.Sprintf("planning.attended=%t", hostAttended), func(t *testing.T) {
+			fakeDir := t.TempDir()
+			callLog := writeScriptedRuntimes(t, fakeDir)
+			assets := writeAssetFixture(t)
+			env, home, _ := openTestEnv(t, fakeDir, assets)
+			writeFleetConfigFixture(t, home, fmt.Sprintf(`{"planning": {"attended": %t}}`, hostAttended))
 
-	cmd := exec.Command(binaryPath, "open", "ch")
-	cmd.Env = append(env, "CENCI_ATTENDED=0")
-	cmd.Dir = t.TempDir()
-	if output, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("open ch: %v\n%s", err, output)
-	}
+			cmd := exec.Command(binaryPath, "open", "ch")
+			cmd.Env = append(env, "CENCI_ATTENDED=0")
+			cmd.Dir = t.TempDir()
+			if output, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("open ch: %v\n%s", err, output)
+			}
 
-	line := attachLine(t, callLogLines(t, callLog))
-	if !strings.Contains(line, "-e CENCI_ATTENDED=0") {
-		t.Errorf("attach exec args must honor the pinned CENCI_ATTENDED=0 over the host fleet config; got:\n%s", line)
-	}
-	if strings.Contains(line, "CENCI_ATTENDED=1") {
-		t.Errorf("attach exec args must never forward CENCI_ATTENDED=1 for a pinned-unattended launch; got:\n%s", line)
+			line := attachLine(t, callLogLines(t, callLog))
+			if !strings.Contains(line, "-e CENCI_ATTENDED=0") {
+				t.Errorf("attach exec args must honor the pinned CENCI_ATTENDED=0 over the host fleet config; got:\n%s", line)
+			}
+			if !strings.Contains(line, "-e CENCI_ATTENDED_ORIGIN=pinned") {
+				t.Errorf("attach exec args must mark the pin with CENCI_ATTENDED_ORIGIN=pinned; got:\n%s", line)
+			}
+			if strings.Contains(line, "CENCI_ATTENDED_ORIGIN=host-config") {
+				t.Errorf("attach exec args must never label a pinned launch host-config; got:\n%s", line)
+			}
+			if strings.Contains(line, "CENCI_ATTENDED=1") {
+				t.Errorf("attach exec args must never forward CENCI_ATTENDED=1 for a pinned-unattended launch; got:\n%s", line)
+			}
+		})
 	}
 }
 

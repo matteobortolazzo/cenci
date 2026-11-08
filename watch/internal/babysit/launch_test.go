@@ -66,6 +66,25 @@ func assertFlagValue(t *testing.T, args []string, flag, want string) {
 	t.Errorf("launch argv %v: %s not found", args, flag)
 }
 
+// assertPinnedUnattendedOnce asserts args ends in `--unattended` (appended
+// after any `--dir`, so argv-head assertions stay stable) and carries it
+// exactly once (#1497).
+func assertPinnedUnattendedOnce(t *testing.T, args []string) {
+	t.Helper()
+	if len(args) == 0 || args[len(args)-1] != "--unattended" {
+		t.Errorf("launch argv %q: last argument is not --unattended", args)
+	}
+	n := 0
+	for _, a := range args {
+		if a == "--unattended" {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("launch argv %q: carries --unattended %d times, want exactly once", args, n)
+	}
+}
+
 // installHarmlessSelfExecShim overwrites os.Args[0] (restored via
 // t.Cleanup) with a tiny script that exits immediately. Run's detach/arm
 // branch still calls cmd.Start() directly against os.Args[0] today (the
@@ -143,15 +162,20 @@ func TestArmResolvesAndPersistsLaunchTargetBeforeFirstTick(t *testing.T) {
 // -- AC 3: every launch() call site passes the recorded target --------------
 
 // TestLaunchPassesRecordedSessionAndDir drives tick() through every
-// launch() call site (ci-repair, babysit-attention, merge-repair, address-review) with a
-// recorded LaunchSession/LaunchDir on State, and asserts the exact
-// --session/--dir values reach the launched `cenci run` argv at every site.
+// launch() call site (ci-repair, both babysit-attention sites, merge-repair,
+// address-review) with a recorded LaunchSession/LaunchDir on State, and
+// asserts the exact --session/--dir values reach the launched `cenci run`
+// argv at every site. #1497: it also asserts every site's argv ends in a single
+// --unattended, so no real call site can bypass launch()'s pin. The two
+// babysit-attention rows share a workflow name and are told apart by their
+// launch argument.
 func TestLaunchPassesRecordedSessionAndDir(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		state     State
 		responses []string
 		workflow  string
+		wantArg   string // checked only when non-empty
 	}{
 		{
 			name: "ci-repair",
@@ -171,6 +195,18 @@ func TestLaunchPassesRecordedSessionAndDir(t *testing.T) {
 			},
 			responses: []string{openPR(), `[{"bucket":"fail","name":"test","state":"FAILURE"}]`, `[]`, `[]`},
 			workflow:  "babysit-attention",
+			wantArg:   "42 CI retry cap reached",
+		},
+		{
+			name: "merge-repair-cap-attention",
+			state: State{
+				PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 300, CurrentDelaySeconds: 900,
+				LastHeadSHA: "abc", ConflictRepairSHA: "abc", ConflictFixAttempts: fixCap,
+				LaunchSession: "work", LaunchDir: "/repo/root",
+			},
+			responses: []string{conflictingOpenPR("abc"), `[{"bucket":"pass","name":"test","state":"SUCCESS"}]`, `[]`, `[]`},
+			workflow:  "babysit-attention",
+			wantArg:   "42 merge repair retry cap reached",
 		},
 		{
 			name: "address-review",
@@ -205,6 +241,10 @@ func TestLaunchPassesRecordedSessionAndDir(t *testing.T) {
 			}
 			assertFlagValue(t, args, "--session", "work")
 			assertFlagValue(t, args, "--dir", "/repo/root")
+			if arg, _ := launchArg(calls, tc.workflow); tc.wantArg != "" && arg != tc.wantArg {
+				t.Errorf("launch argument = %q, want %q (the wrong attention site was driven)", arg, tc.wantArg)
+			}
+			assertPinnedUnattendedOnce(t, args)
 		})
 	}
 }
@@ -784,9 +824,56 @@ func TestLaunchCIRepairArgumentIsNumericFirst(t *testing.T) {
 	}
 	want := []string{os.Args[0], "run", "ci-repair",
 		"42 PR #42 (" + branch + ") has failing CI checks: lint, test (3.11), e2e #2. Diagnose, fix, test, commit, and push without force-pushing.",
-		"--agent", "codex", "--session", "work", "--dir", "/repo/root"}
+		"--agent", "codex", "--session", "work", "--dir", "/repo/root", "--unattended"}
 	if !slices.Equal(got, want) {
 		t.Errorf("cenci run argv =\n %q\nwant\n %q", got, want)
+	}
+}
+
+// #1497: launch() pins every worker it starts as unattended. Called directly,
+// one row per workflow (both babysit-attention sites included), the argv is the
+// exact `cenci run` line ending in `--dir <d> --unattended`; merge-repair keeps
+// its forced `--agent claude --model opus`. The empty-LaunchDir row proves the
+// pin does not ride on the optional `--dir`.
+func TestLaunchPinsEveryWorkflowUnattended(t *testing.T) {
+	const (
+		session = "work"
+		dir     = "/repo/root"
+	)
+	for _, tc := range []struct {
+		name, workflow, arg, agent, launchDir string
+		wantTail                              []string // everything after `run <workflow> <arg>`
+	}{
+		{"address-review", "address-review", "42", "codex", dir,
+			[]string{"--agent", "codex", "--session", session, "--dir", dir, "--unattended"}},
+		{"ci-repair", "ci-repair", "42 PR #42 (feature) has failing CI checks: test.", "codex", dir,
+			[]string{"--agent", "codex", "--session", session, "--dir", dir, "--unattended"}},
+		{"merge-repair forces claude and opus", "merge-repair", "42", "codex", dir,
+			[]string{"--agent", "claude", "--session", session, "--model", "opus", "--dir", dir, "--unattended"}},
+		{"babysit-attention CI retry cap", "babysit-attention", "42 CI retry cap reached", "codex", dir,
+			[]string{"--agent", "codex", "--session", session, "--dir", dir, "--unattended"}},
+		{"babysit-attention merge repair retry cap", "babysit-attention", "42 merge repair retry cap reached", "claude", dir,
+			[]string{"--agent", "claude", "--session", session, "--dir", dir, "--unattended"}},
+		{"empty LaunchDir still pinned", "address-review", "42", "codex", "",
+			[]string{"--agent", "codex", "--session", session, "--unattended"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls [][]string
+			withCommands(t, nil, &calls)
+			s := State{PR: "42", Repo: "o/r", Agent: tc.agent, LaunchSession: session, LaunchDir: tc.launchDir}
+
+			if err := launch(&s, tc.workflow, tc.arg); err != nil {
+				t.Fatalf("launch: %v", err)
+			}
+			got, found := launchCallArgs(calls, tc.workflow)
+			if !found {
+				t.Fatalf("no %s launch recorded: %#v", tc.workflow, calls)
+			}
+			want := append([]string{os.Args[0], "run", tc.workflow, tc.arg}, tc.wantTail...)
+			if !slices.Equal(got, want) {
+				t.Errorf("cenci run argv =\n %q\nwant\n %q", got, want)
+			}
+		})
 	}
 }
 

@@ -94,6 +94,74 @@ func TestRunDryRunNoSandboxUsesHostCommand(t *testing.T) {
 	}
 }
 
+// #1497 AC1: `--unattended` pins CENCI_ATTENDED=0 as a shell assignment scoped
+// to the agent command, right before the launcher/agent argv, and only once.
+func TestRunDryRunUnattendedPinsAttendedZero(t *testing.T) {
+	noCfg := filepath.Join(t.TempDir(), "none.json")
+	stdout, stderr, code := runDryRun(t, "implement", "40", "--unattended", "--session", "demo", "--config", noCfg)
+	if code != 0 {
+		t.Fatalf("--unattended dry-run exit = %d, want 0\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	const pin = "CENCI_ATTENDED=0 "
+	line := exectest.DryRunCommand(t, stdout)
+	if !strings.HasPrefix(line, pin+"cenci open ") {
+		t.Errorf("command = %q, want the %q assignment right before `cenci open `", line, pin)
+	}
+	if n := strings.Count(line, pin); n != 1 {
+		t.Errorf("command carries %d %q assignments, want exactly 1: %q", n, pin, line)
+	}
+}
+
+// #1497 AC2 + edge: without `--unattended` (or with `--unattended=false`, the
+// stdlib bool form, placed after the positionals) the interactive path stays
+// unpinned: no CENCI_ATTENDED anywhere in the output.
+func TestRunDryRunWithoutUnattendedLeavesAttendedUnset(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		flags []string
+	}{
+		{"flag absent", nil},
+		{"--unattended=false", []string{"--unattended=false"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			noCfg := filepath.Join(t.TempDir(), "none.json")
+			args := append([]string{"implement", "40"}, tc.flags...)
+			args = append(args, "--session", "demo", "--config", noCfg)
+			stdout, stderr, code := runDryRun(t, args...)
+			if code != 0 {
+				t.Fatalf("dry-run exit = %d, want 0\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+			}
+			if strings.Contains(stdout, "CENCI_ATTENDED") {
+				t.Errorf("an unpinned dry-run must not mention CENCI_ATTENDED, got:\n%s", stdout)
+			}
+		})
+	}
+}
+
+// #1497 edge: the assignment sits on the agent argv, not on the `cd` the
+// `--dir` prefix adds. shellQuote leaves a plain path bare and quotes one with
+// a space.
+func TestRunDryRunUnattendedPinFollowsDir(t *testing.T) {
+	for _, tc := range []struct {
+		name, dir, wantPrefix string
+	}{
+		{"plain path stays unquoted", "/tmp/x", "cd /tmp/x && CENCI_ATTENDED=0 cenci open "},
+		{"spaced path is quoted", "/tmp/my x", "cd '/tmp/my x' && CENCI_ATTENDED=0 "},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			noCfg := filepath.Join(t.TempDir(), "none.json")
+			stdout, stderr, code := runDryRun(t, "implement", "40", "--unattended", "--dir", tc.dir,
+				"--session", "demo", "--config", noCfg)
+			if code != 0 {
+				t.Fatalf("dry-run exit = %d, want 0\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+			}
+			if line := exectest.DryRunCommand(t, stdout); !strings.HasPrefix(line, tc.wantPrefix) {
+				t.Errorf("command = %q, want prefix %q", line, tc.wantPrefix)
+			}
+		})
+	}
+}
+
 func TestRunForwardsUnquotedCustomText(t *testing.T) {
 	// Unquoted multi-word context (id + additional context) must all reach the
 	// skill argument, not just the first token — even though the numeric window
