@@ -148,11 +148,10 @@ func TestArmResolvesAndPersistsLaunchTargetBeforeFirstTick(t *testing.T) {
 // --session/--dir values reach the launched `cenci run` argv at every site.
 func TestLaunchPassesRecordedSessionAndDir(t *testing.T) {
 	for _, tc := range []struct {
-		name           string
-		state          State
-		responses      []string
-		workflow       string
-		wantNeedsInput bool
+		name      string
+		state     State
+		responses []string
+		workflow  string
 	}{
 		{
 			name: "ci-repair",
@@ -170,9 +169,8 @@ func TestLaunchPassesRecordedSessionAndDir(t *testing.T) {
 				FixAttempts:   fixCap,
 				LaunchSession: "work", LaunchDir: "/repo/root",
 			},
-			responses:      []string{openPR(), `[{"bucket":"fail","name":"test","state":"FAILURE"}]`},
-			workflow:       "babysit-attention",
-			wantNeedsInput: true,
+			responses: []string{openPR(), `[{"bucket":"fail","name":"test","state":"FAILURE"}]`, `[]`, `[]`},
+			workflow:  "babysit-attention",
 		},
 		{
 			name: "address-review",
@@ -198,13 +196,7 @@ func TestLaunchPassesRecordedSessionAndDir(t *testing.T) {
 			var calls [][]string
 			withCommands(t, tc.responses, &calls)
 			s := tc.state
-			_, _, err := tick(&s)
-			switch {
-			case tc.wantNeedsInput:
-				if !errors.Is(err, errNeedsInput) {
-					t.Fatalf("tick err = %v, want errors.Is(err, errNeedsInput)", err)
-				}
-			case err != nil:
+			if _, _, err := tick(&s); err != nil {
 				t.Fatalf("tick: %v", err)
 			}
 			args, found := launchCallArgs(calls, tc.workflow)
@@ -235,9 +227,8 @@ func TestLaunchFailsWhenRecordedSessionGone(t *testing.T) {
 	s := State{
 		PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 300, CurrentDelaySeconds: 900,
 		// FixAttempts stays below fixCap, so this drives the ci-repair call
-		// site: a direct, unwrapped tick error, not the babysit-attention
-		// site's errNeedsInput sentinel -- cleaner for the content-specific
-		// error-text assertion below.
+		// site rather than the babysit-attention one -- a cleaner target for
+		// the content-specific error-text assertion below.
 		LaunchSession: "gone-session", LaunchDir: "/repo/dir",
 	}
 	_, _, err := tick(&s)

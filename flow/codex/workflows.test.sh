@@ -178,6 +178,13 @@ for pair in "SKILL.md:${attention_skill_all}" "codex.md:${attention_codex_all}";
   require_in "babysit-attention/${name}" "$text" 'not reset'
   require_in "babysit-attention/${name}" "$text" 'run on the host'
   forbid_in "babysit-attention/${name}" "$text" 'exactly two options'
+  # #1456: a CI or merge-repair retry cap pauses only that repair kind. The supervisor keeps polling, the two budgets
+  # are separate, and a confirmed green head (CI) or conflict-free state (merge) clears the pause on its own.
+  require_in "babysit-attention/${name}" "$text" 'for a CI or merge-repair retry cap the supervisor keeps polling'
+  require_in "babysit-attention/${name}" "$text" 'CI and merge-repair budgets are separate'
+  require_in "babysit-attention/${name}" "$text" 'a confirmed green head'
+  require_in "babysit-attention/${name}" "$text" 'a confirmed conflict-free state'
+  require_in "babysit-attention/${name}" "$text" 'clears the pause automatically'
 done
 require_in "babysit-attention/SKILL.md" "$attention_skill_all" '`AskUserQuestion`'
 

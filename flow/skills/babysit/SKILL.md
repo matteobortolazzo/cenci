@@ -101,7 +101,8 @@ name the host command to run instead: `cenci babysit stop <pr>` from a host tmux
 `cenci babysit reset <pr>` is host-only and is never forwarded: a reset lifts the cap on automated
 repair launches, so inside a sandbox it exits 1 without sending any event-socket message and says the
 supervisor runs on the host and the budget can only be reset there. On the host it stops a live
-supervisor, zeroes the CI and merge repair budgets (feedback bookkeeping is kept) and re-arms with
+supervisor, zeroes the CI and merge repair budgets and clears the CI-cap markers `ciRepairPaused`
+and `ciCapNotified` (feedback bookkeeping is kept) and re-arms with
 the recorded agent, interval, launch session and launch dir. Run it from a host tmux pane.
 
 **Verify with `status`.** `cenci babysit status <pr>` works on the host and inside a sandbox
@@ -137,8 +138,13 @@ episode exhaust the budget and open an attention window. Probe failures are repo
 without launching a second worker. A confirmed conflict-free state resets that budget. Launched
 repair agents confirm a fix against the project's local gate (`docs/health-gates.md`,
 exit-0-is-healthy) before pushing, so a broken fix is caught locally instead of via a
-CI round-trip. After three failed repair launches it pauses and opens a visible babysit
-window for human direction.
+CI round-trip. CI repair has its own budget: after three `ci-repair` launches it pauses
+CI repair for that PR (status `needs-input`) and opens one visible babysit window for human
+direction. The supervisor does not exit: it keeps polling, so review and merge repair on its own
+budget and MERGED or CLOSED detection continue. The pause ends, and `ciFixAttempts`
+and the pause markers reset, only when the supervisor reads a confirmed green head from GitHub
+with no conflict hold, which includes a rerun that goes green at the same head. Pending or
+unknown checks, zero checks, a failed read and a head change alone never end it.
 
 On a merged PR, each closing issue's `In Review` label swaps to `Implemented` first,
 exactly as before. The supervisor then reconciles split-parent completion at merge

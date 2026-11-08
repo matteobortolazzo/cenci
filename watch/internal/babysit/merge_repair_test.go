@@ -59,13 +59,13 @@ func TestLegacyConflictNotificationDoesNotSuppressRepair(t *testing.T) {
 
 func TestKnownConflictResolutionResetsBudgetBeforeCIRetryCap(t *testing.T) {
 	var calls [][]string
-	withCommands(t, []string{cleanOpenPR("abc"), `[{"bucket":"fail","name":"test","state":"FAILURE"}]`}, &calls)
+	withCommands(t, []string{cleanOpenPR("abc"), `[{"bucket":"fail","name":"test","state":"FAILURE"}]`, `[]`, `[]`}, &calls)
 	s := State{PR: "42", Repo: "o/r", Agent: "codex", LaunchSession: "work", ConflictRepairSHA: "previous", ConflictFixAttempts: 3, FixAttempts: fixCap}
-	if _, _, err := tick(&s); !errors.Is(err, errNeedsInput) {
-		t.Fatalf("CI retry cap error = %v", err)
+	if _, _, err := tick(&s); err != nil {
+		t.Fatalf("CI retry cap error = %v, want nil: the cap pauses CI repair without stopping the tick", err)
 	}
-	if s.ConflictRepairSHA != "" || s.ConflictFixAttempts != 0 || s.Status != "needs-input" {
-		t.Fatalf("CI retry cap retained stale conflict episode: %+v", s)
+	if s.ConflictRepairSHA != "" || s.ConflictFixAttempts != 0 || s.Status != "needs-input" || !s.CIRepairPaused {
+		t.Fatalf("CI retry cap retained stale conflict episode or lost the pause: %+v", s)
 	}
 }
 

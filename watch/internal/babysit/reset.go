@@ -30,10 +30,13 @@ const defaultResetInterval = 15 * time.Minute
 // a reset lifts fixCap, the bound on automated repair launches, so it refuses
 // inside a sandbox and no event-socket kind or daemon handler carries it.
 //
-// Only the five budget fields are zeroed (ciFixAttempts, ciRepairPending,
-// lastRepairedCiHeadSha, conflictFixAttempts, conflictNotifiedHeadSha);
-// feedback bookkeeping and conflictRepairHeadSha are kept. A live supervisor
-// that processOwned verifies is sent SIGTERM and awaited for resetExitWait.
+// Only seven fields are cleared: the five budget fields (ciFixAttempts,
+// ciRepairPending, lastRepairedCiHeadSha, conflictFixAttempts,
+// conflictNotifiedHeadSha) and the two CI-cap episode markers (ciRepairPaused,
+// ciCapNotified, #1456); feedback bookkeeping and conflictRepairHeadSha are
+// kept. A CI-paused supervisor keeps its pid while paused, so it takes the same
+// path as any live supervisor: one that processOwned verifies is sent SIGTERM
+// and awaited for resetExitWait.
 // The supervisor has no SIGTERM handler, so its deferred lock removal never
 // runs and Reset removes the lock itself. refusal is the CLI's agent check
 // (babysitAgentRefusal); it lives in package main, so it is passed in and
@@ -106,6 +109,8 @@ func Reset(pr, explicit string, refusal func(agent string) string) error {
 	s.RepairPending = false
 	s.LastRepairedSHA = ""
 	s.ConflictNotifiedSHA = ""
+	s.CIRepairPaused = false
+	s.CICapNotified = false
 	s.PID = 0
 	s.UpdatedAt = time.Now().UTC()
 	if err := save(path, s); err != nil {

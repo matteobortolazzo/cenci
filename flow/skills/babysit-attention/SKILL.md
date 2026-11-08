@@ -24,9 +24,12 @@ automatically before that choice.
 
 - "leave paused for manual repair" changes nothing. Conflicts ordinarily go straight to Claude
   Opus through `merge-repair`; this window is the exhausted-budget fallback, so a human may run
-  `/cenci:merge-repair <pr>` to inspect and repair that PR. The supervisor keeps polling and
-  clears its conflict hold once GitHub confirms a conflict-free mergeability state; no separate
-  re-arm step is needed.
+  `/cenci:merge-repair <pr>` to inspect and repair that PR. Leaving it paused is safe: for a CI or
+  merge-repair retry cap the supervisor keeps polling, and a used-up budget pauses only that kind of
+  automatic repair. CI and merge-repair budgets are separate; the other repair kind, review feedback
+  and MERGED or CLOSED detection carry on. Once GitHub shows a confirmed green head (CI) or a confirmed
+  conflict-free state (merge), the supervisor clears the pause automatically; no separate re-arm step
+  is needed.
 - "retry with a fresh budget" runs `cenci babysit reset <pr>` once. The reset is host-only: inside a
   sandbox the command refuses without sending anything to the host. Exit 0 means the budget was reset
   and the supervisor re-armed: report that. On a non-zero exit, say the budget was **not reset**,

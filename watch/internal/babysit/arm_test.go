@@ -627,6 +627,43 @@ func TestStatus_HostReadsTheStateFile(t *testing.T) {
 		}
 	})
 
+	// #1456 AC 9: a CI-paused supervisor keeps its live pid, so it reports
+	// supervisorLive true; an old PID-0 needs-input state (written before the
+	// pause kept the process) stays false until it is armed again.
+	t.Run("a live CI-paused supervisor reports supervisorLive true", func(t *testing.T) {
+		dir, path := hostStopFixture(t, "o/r", "42")
+		stubProcessOwned(t, true)
+		writeStateFile(t, path, State{PR: "42", Repo: "o/r", PID: 4242, Status: "needs-input", FixAttempts: 3, CIRepairPaused: true, CICapNotified: true})
+
+		done := captureStdout(t)
+		err := Status("42", dir)
+		out := done()
+		if err != nil {
+			t.Fatalf("Status: %v", err)
+		}
+		const want = `{"pr":42,"repo":"o/r","status":"needs-input","ciFixAttempts":3,"conflictFixAttempts":0,"fixCap":3,"supervisorLive":true}` + "\n"
+		if out != want {
+			t.Errorf("stdout = %q, want %q", out, want)
+		}
+	})
+
+	t.Run("an old PID-0 needs-input state reports supervisorLive false", func(t *testing.T) {
+		dir, path := hostStopFixture(t, "o/r", "42")
+		stubProcessOwned(t, true)
+		writeLegacyCIPausedState(t, path)
+
+		done := captureStdout(t)
+		err := Status("42", dir)
+		out := done()
+		if err != nil {
+			t.Fatalf("Status: %v", err)
+		}
+		const want = `{"pr":42,"repo":"o/r","status":"needs-input","ciFixAttempts":3,"conflictFixAttempts":0,"fixCap":3,"supervisorLive":false}` + "\n"
+		if out != want {
+			t.Errorf("stdout = %q, want %q", out, want)
+		}
+	})
+
 	t.Run("no state is no supervisor found", func(t *testing.T) {
 		dir, _ := hostStopFixture(t, "o/r", "42")
 		err := Status("42", dir)

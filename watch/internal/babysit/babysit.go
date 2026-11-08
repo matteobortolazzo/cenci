@@ -58,26 +58,28 @@ type State struct {
 	Agent               string `json:"agent"`
 	IntervalSeconds     int64  `json:"intervalSeconds"`
 	CurrentDelaySeconds int64  `json:"currentDelaySeconds"`
-	LastHeadSHA         string `json:"lastCiHeadSha,omitempty"`
+	// LastHeadSHA is the head commit of the last ci-repair dispatch or green
+	// reset. It no longer gates the green reset (#1456): a fresh green result
+	// clears the retry budget whether or not the head moved, so a same-head
+	// rerun ends a CI-paused episode too. It is kept as recorded history.
+	LastHeadSHA string `json:"lastCiHeadSha,omitempty"`
 	// LastRepairedSHA (#1169) is the head commit SHA the failing-checks
 	// branch below last dispatched a ci-repair launch for -- purely
 	// additive `omitempty`, no stateSchemaVersion bump, mirroring
 	// ConflictNotifiedSHA/ChecksAbsentHeadSHA above: its zero value already
 	// means "never repaired", so no migration is needed for a state file
 	// written before this field existed. Dedicated rather than reusing
-	// LastHeadSHA, which keeps its own separate job of gating the retry-
-	// budget reset (the reset branch below).
+	// LastHeadSHA, which used to gate the retry-budget reset.
 	//
 	// The two were never safe to conflate. Before #1169 the dispatch guard
-	// keyed on LastHeadSHA, which that reset branch advanced on *every*
+	// keyed on LastHeadSHA, which the reset branch advanced on *every*
 	// tick where checks were not red yet -- pending, or green-so-far. A
 	// fresh push therefore burned the only edge the guard could fire on
 	// before CI had reported anything, and a red result arriving later at
 	// that same head commit was unreachable forever: babysit went quiet on
 	// a failing PR and backed off to the 1h ceiling (#1169's root cause).
-	// Splitting the two fixed that; the reset branch below no longer
-	// advances LastHeadSHA on a non-green tick at all -- see its own
-	// comment for why that staleness is deliberate.
+	// Splitting the two fixed that; the reset branch below advances
+	// LastHeadSHA only on a green tick.
 	//
 	// Set only after a CI repair launch succeeds. A conflicting tick defers
 	// CI repair without consuming this dispatch marker or its retry budget.
@@ -173,6 +175,21 @@ type State struct {
 	// non-conflicting observation resets the episode.
 	ConflictRepairSHA   string `json:"conflictRepairHeadSha,omitempty"`
 	ConflictFixAttempts int    `json:"conflictFixAttempts,omitempty"`
+
+	// CIRepairPaused (#1456) records that the CI repair budget is used up and
+	// unresolved: the supervisor keeps polling (review, merge repair, MERGED/
+	// CLOSED detection) with only CI repair paused. Set the first time a tick
+	// reaches the CI cap branch; cleared only by a fresh green result for the
+	// current head on a tick with no conflict hold, or by a host reset.
+	// CICapNotified marks that the one babysit-attention session for this
+	// episode was launched successfully, so it is never reopened on later
+	// failing heads, retried reads, or supervisor restarts. Both are additive
+	// `omitempty` fields with no stateSchemaVersion bump, mirroring
+	// LastRepairedSHA/ConflictNotifiedSHA: their zero values already mean "not
+	// paused" and "not notified". A state file written before they existed is
+	// handled by deriveLegacyCIPause in Run.
+	CIRepairPaused bool `json:"ciRepairPaused,omitempty"`
+	CICapNotified  bool `json:"ciCapNotified,omitempty"`
 
 	// Automerge fields (#824). The supervisor's detached mode sets
 	// cmd.Stdout = nil, so the automerge decision log line only reaches a
@@ -273,7 +290,28 @@ type review struct {
 	User        struct{ Login string }
 }
 
-var errNeedsInput = errors.New("human input required")
+// sleep is a test seam over time.Sleep for Run's poll and retry waits, mirroring
+// the command/processOwned/startSupervisor seams (a var pointing at a default
+// func, restorable via t.Cleanup), so multi-tick Run fixtures finish instantly
+// and can record every wait.
+var sleep = time.Sleep
+
+// deriveLegacyCIPause marks a state file written before CIRepairPaused and
+// CICapNotified existed as an already-notified CI-paused episode (#1456). Only
+// a successful CI cap attention launch produced such a file: needs-input, the
+// budget used up, and no ConflictNotifiedSHA (a merge-repair cap sets that
+// marker, so it never reads as a sent CI notification). It runs once per Run
+// load, before the startup status write overwrites needs-input, and only when
+// neither marker is present, so it can never undo a new-format state.
+func deriveLegacyCIPause(s *State) {
+	if s.CIRepairPaused || s.CICapNotified {
+		return
+	}
+	if s.Status == "needs-input" && s.FixAttempts >= fixCap && s.ConflictNotifiedSHA == "" {
+		s.CIRepairPaused = true
+		s.CICapNotified = true
+	}
+}
 
 var command = func(name string, args ...string) ([]byte, error) { return exec.Command(name, args...).CombinedOutput() }
 
@@ -413,6 +451,9 @@ func Run(o Options) error {
 		if s.Repo != "" && (s.Repo != repo || s.Agent != o.Agent) {
 			return errors.New("existing supervisor state belongs to different repository or agent")
 		}
+		// Before the "arming" overwrite below, which would hide the old
+		// needs-input status the derivation keys on.
+		deriveLegacyCIPause(&s)
 		s.PR = o.PR
 		s.SchemaVersion = stateSchemaVersion
 		s.Repo = repo
@@ -513,6 +554,9 @@ func Run(o Options) error {
 	if s.Repo != "" && (s.Repo != repo || s.Agent != o.Agent) {
 		return errors.New("existing supervisor state belongs to different repository or agent")
 	}
+	// Before the startup status write below, which would hide the old
+	// needs-input status the derivation keys on.
+	deriveLegacyCIPause(&s)
 	s.PR = o.PR
 	s.SchemaVersion = stateSchemaVersion
 	s.Repo = repo
@@ -522,7 +566,12 @@ func Run(o Options) error {
 		s.CurrentDelaySeconds = s.IntervalSeconds
 	}
 	s.PID = os.Getpid()
+	// A restarted supervisor over a CI-paused state stays needs-input until its
+	// first tick, rather than briefly reading as running (#1456).
 	s.Status = "running"
+	if s.CIRepairPaused {
+		s.Status = "needs-input"
+	}
 	s.RepoRoot = localRepoRoot()
 	s.LaunchSession, s.LaunchDir = resolveLaunchTarget(o)
 	// Fill in a blocking verdict + settle clock only when nothing has
@@ -548,10 +597,6 @@ func Run(o Options) error {
 	for {
 		terminal, delay, err := tick(&s)
 		s.UpdatedAt = time.Now().UTC()
-		if errors.Is(err, errNeedsInput) {
-			s.PID = 0
-			return save(path, s)
-		}
 		if err != nil {
 			s.Status = "retrying"
 			s.CurrentDelaySeconds *= 2
@@ -566,7 +611,7 @@ func Run(o Options) error {
 				s.PID = 0
 				return err
 			}
-			time.Sleep(time.Duration(s.CurrentDelaySeconds) * time.Second)
+			sleep(time.Duration(s.CurrentDelaySeconds) * time.Second)
 			continue
 		}
 		if terminal {
@@ -579,7 +624,7 @@ func Run(o Options) error {
 		if o.Once {
 			return nil
 		}
-		time.Sleep(delay)
+		sleep(delay)
 	}
 }
 
@@ -678,43 +723,59 @@ func tick(s *State) (bool, time.Duration, error) {
 	}
 	if !conflictHeld && len(failing) > 0 && pr.HeadRefOID != s.LastRepairedSHA {
 		if s.FixAttempts >= fixCap {
-			s.Status = "needs-input"
-			if err := launch(s, "babysit-attention", s.PR+" CI retry cap reached"); err != nil {
-				// One-decision-per-tick (Decision 7, #854): without this, a
-				// failed workflow dispatch on an enabled automerge tick
-				// returned tick's error with no automerge decision recorded
-				// at all, leaving a stale decision from the previous tick
-				// displayed.
+			// #1456: the CI budget is used up. Record the lasting paused
+			// episode, open the one babysit-attention session for it, and fall
+			// through -- the rest of the tick (merge repair, feedback, review,
+			// automerge, MERGED/CLOSED detection on later ticks) keeps running.
+			// Only CI repair is paused. The pause is cleared by a fresh green
+			// result below or a host reset, never by a poll, push or restart.
+			s.CIRepairPaused = true
+			if !s.CICapNotified {
+				if err := launch(s, "babysit-attention", s.PR+" CI retry cap reached"); err != nil {
+					// One-decision-per-tick (Decision 7, #854): without this, a
+					// failed workflow dispatch on an enabled automerge tick
+					// returned tick's error with no automerge decision recorded
+					// at all, leaving a stale decision from the previous tick
+					// displayed. CICapNotified stays false, so Run's retry
+					// backoff retries the notification on a later tick.
+					recordUpstreamReadFailure(s, reasonWorkflowLaunchFailed, err)
+					return false, 0, err
+				}
+				s.CICapNotified = true
+			}
+		} else {
+			dispatched, err := dispatchCIRepair(s, pr, failing)
+			if err != nil {
 				recordUpstreamReadFailure(s, reasonWorkflowLaunchFailed, err)
 				return false, 0, err
 			}
-			return false, 0, errNeedsInput
+			if dispatched {
+				// Consume the CI retry budget and dedup marker only for work dispatched.
+				s.FixAttempts++
+				s.RepairPending = true
+				s.LastHeadSHA = pr.HeadRefOID
+				// #1169: LastRepairedSHA is the dispatch guard's own dedup marker --
+				// distinct from LastHeadSHA above, which only records the head of
+				// the last dispatch or green reset and no longer gates the reset.
+				s.LastRepairedSHA = pr.HeadRefOID
+			}
+			actionable = true
 		}
-		dispatched, err := dispatchCIRepair(s, pr, failing)
-		if err != nil {
-			recordUpstreamReadFailure(s, reasonWorkflowLaunchFailed, err)
-			return false, 0, err
-		}
-		if dispatched {
-			// Consume the CI retry budget and dedup marker only for work dispatched.
-			s.FixAttempts++
-			s.RepairPending = true
-			s.LastHeadSHA = pr.HeadRefOID
-			// #1169: LastRepairedSHA is the dispatch guard's own dedup marker --
-			// distinct from LastHeadSHA above, which the reset branch below
-			// keeps advancing for its unrelated retry-budget-reset job.
-			s.LastRepairedSHA = pr.HeadRefOID
-		}
-		actionable = true
-	} else if !conflictHeld && pr.HeadRefOID != s.LastHeadSHA {
-		// Only green CI at a new head proves a repair succeeded. Keep the
-		// previous head across pending/unknown ticks so a later green result
-		// at this same SHA can still clear RepairPending and reset the budget.
-		if s.CIStatus == ciStatusGreen {
-			s.FixAttempts = 0
-			s.RepairPending = false
-			s.LastHeadSHA = pr.HeadRefOID
-		}
+	} else if !conflictHeld && s.CIStatus == ciStatusGreen {
+		// #1456: only a fresh green result read from GitHub in this tick proves
+		// a repair succeeded or the pause is over -- never a CIStatus saved from
+		// an earlier tick, and never pending/unknown/zero checks, a read error
+		// or a head change alone. The reset is independent of the head, so a
+		// failed check rerun that goes green at the same commit ends the
+		// episode too. A tick in a conflict hold never resets: conflict repair
+		// keeps priority until the first non-held green tick. A notification
+		// still pending when the PR turns green is dropped here.
+		s.FixAttempts = 0
+		s.RepairPending = false
+		s.LastHeadSHA = pr.HeadRefOID
+		s.CIRepairPaused = false
+		s.CICapNotified = false
+		s.Status = "running"
 	}
 	// Merge repair is independent of automerge policy. A successful dispatch
 	// keeps polling so a repaired push can release the conflict hold.
@@ -761,6 +822,13 @@ func tick(s *State) (bool, time.Duration, error) {
 			s.Status = "running"
 			fmt.Printf("PR #%s has merge conflicts at head commit %s; opened merge-repair with Claude Opus\n", s.PR, pr.HeadRefOID)
 		}
+	}
+	// #1456: the status is needs-input for as long as the CI budget is used up
+	// and unresolved, whatever the merge-repair block above set; once the green
+	// reset clears the pause it keeps what the merge branch or the reset set
+	// (running).
+	if s.CIRepairPaused {
+		s.Status = "needs-input"
 	}
 	// Fully paginated (#854): fetchPaged follows every page up to
 	// maxFeedbackPages, so a PR with more comments than one page no longer
@@ -1287,7 +1355,9 @@ func Status(pr, explicit string) error {
 // ErrStateUnreadable and, unlike readStateStrict's, never name the state
 // path. SupervisorLive requires a recorded PID that processOwned verifies:
 // supervisorLive's broader rule (which also counts needs-input and arming as
-// live) would misreport a paused supervisor as running (#1390 P24).
+// live) would misreport an old PID-0 needs-input state as running (#1390 P24).
+// A live CI-paused supervisor keeps its verified pid, so it reports true; an
+// old PID-0 paused state reports false until it is armed again (#1456).
 func StatusRepo(repo, pr, explicit string) (ipc.BabysitStatus, error) {
 	cleanPR := strings.TrimPrefix(pr, "#")
 	n, err := strconv.Atoi(cleanPR)
@@ -1589,10 +1659,12 @@ func closesIssue(s State, number int) bool {
 const armingLivenessGrace = 2 * time.Minute
 
 // supervisorLive reports whether the supervisor described by s is still on
-// the hook for its PR. A running supervisor is identified by its own pid; a
-// supervisor paused for human input deliberately zeroes its pid (see Run's
-// errNeedsInput branch) but has *not* finished the work, so its window must
-// stay open too (#787). A supervisor mid-arm (Status "arming", PID 0 -- the
+// the hook for its PR. A running supervisor is identified by its own pid. A
+// supervisor paused at the CI cap keeps polling and keeps that pid (#1456), so
+// it is live through the pid check; the needs-input clause below exists for
+// old states written before that, where a paused supervisor zeroed its pid and
+// exited but had *not* finished the work, so its window must stay open too
+// (#787). A supervisor mid-arm (Status "arming", PID 0 -- the
 // detaching parent's pre-Start write, #924 D3) is live too: there is no
 // process to check yet, but the guard must still hold before the child's
 // first tick ever runs -- bounded by armingLivenessGrace so an orphaned arm
