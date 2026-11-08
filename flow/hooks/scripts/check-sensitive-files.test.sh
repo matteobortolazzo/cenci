@@ -1397,11 +1397,17 @@ rcpt_count() {
 
 # rcpt_snapshot -- every cenci-guard-canary-* entry and receipt under /tmp,
 # $TMPDIR and the suite's own run-dir base: a before/after comparison proves a
-# deny left nothing anywhere.
+# deny left nothing anywhere. /tmp and $TMPDIR are shared with other processes
+# (a sibling worktree's gate, a live guard canary), so there only entries this
+# suite itself can have created count: every run id it mints starts with the
+# 0000c5f0 prefix (rcpt_new_run). The suite's own run-dir base is scanned in full.
 rcpt_snapshot() {
     local d e
     for d in /tmp "${TMPDIR:-/tmp}" "${RCPT_BASE}"; do
         for e in "${d}"/cenci-guard-canary-* "${d}"/cenci-guard-canary-*/receipt-*; do
+            if [[ "${d}" != "${RCPT_BASE}" && "${e#"${d}"/}" != cenci-guard-canary-0000c5f0* ]]; then
+                continue
+            fi
             if [[ -e "${e}" || -L "${e}" ]]; then
                 printf '%s\n' "${e}"
             fi
@@ -1478,6 +1484,13 @@ rcpt_new_run
 rcpt_write_probes "${RCPT_RUN}" "${RCPT_HEX}" "${RCPT_RUN}"
 mkdir -p "${BASH_TEST_ROOT}/unrelated"
 RCPT_BEFORE="$(rcpt_snapshot)"
+# Hermeticity: another process (a sibling worktree's gate, a live guard canary)
+# may create or remove cenci-guard-canary-* entries in the shared /tmp while
+# this case runs. Plant one foreign entry between the two snapshots; the
+# assertion below must not attribute it to the denials.
+RCPT_FOREIGN="/tmp/cenci-guard-canary-ffff$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n')"
+mkdir -m 700 "${RCPT_FOREIGN}" && mkdir "${RCPT_FOREIGN}/receipt-foreign" \
+    || { echo "FAIL: test setup: foreign canary decoy ${RCPT_FOREIGN}" >&2; exit 1; }
 for rc_json in "$(rcpt_shell_json "${BASH_TEST_ROOT}/unrelated/.env")" \
     "$(rcpt_shell_json "${BASH_TEST_ROOT}/unrelated/bash-3.env")" \
     "$(rcpt_patch_json "${BASH_TEST_ROOT}/unrelated/write-edit-1.env")" \
@@ -1490,7 +1503,7 @@ if [[ "$(rcpt_snapshot)" == "${RCPT_BEFORE}" && "$(rcpt_count "${RCPT_RUN}")" ==
 else
     fail "unrelated .env deny: /tmp, \$TMPDIR and the run-dir base must gain no cenci-guard-canary-* entry or receipt (before: ${RCPT_BEFORE}; after: $(rcpt_snapshot))"
 fi
-rm -rf "${RCPT_RUN}"
+rm -rf "${RCPT_FOREIGN}" "${RCPT_RUN}"
 
 echo "case: a canary-shaped target the probe record does not list for this guard gets no receipt (#1411)"
 rcpt_new_run
