@@ -6,6 +6,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/pipeline"
 )
 
 // -- ticket #1087: forward planning.attended as CENCI_ATTENDED -------------
@@ -212,6 +214,325 @@ func TestAssembleExecEnv_AttendedNotSecretAndValueInline(t *testing.T) {
 	}
 	if isSecretEnvName(builtinSecretEnvSet(), "CENCI_ATTENDED") {
 		t.Error("isSecretEnvName(\"CENCI_ATTENDED\") = true, want false — the attended flag carries no secret and must render unredacted in audit/dry-run output")
+	}
+}
+
+// -- ticket #1464: forward where CENCI_ATTENDED came from ------------------
+//
+// resolveAttendedFlag yields "0" for every sandbox launch while the host's
+// planning.attended is off, a human `cenci open` included, so the pipeline's
+// unattended gate cannot tell a dispatcher-pinned session from a host-config
+// one by CENCI_ATTENDED alone. The launcher therefore forwards
+// CENCI_ATTENDED_ORIGIN beside it: "host-config" when it resolved the flag
+// from the fleet config, "pinned" when CENCI_ATTENDED was set in its own
+// environment (the dispatcher's Unattended pin, #1087).
+
+// originTokens returns every "-e CENCI_ATTENDED_ORIGIN=<v>" value
+// assembleExecEnv emitted, in order (a slice for the same duplicate-visibility
+// reason as attendedTokens).
+func originTokens(args []string) []string {
+	var values []string
+	for i := 0; i < len(args); i++ {
+		if args[i] != "-e" || i+1 >= len(args) {
+			continue
+		}
+		if v, ok := strings.CutPrefix(args[i+1], "CENCI_ATTENDED_ORIGIN="); ok {
+			values = append(values, v)
+		}
+	}
+	return values
+}
+
+// requireOrigin asserts assembleExecEnv emitted exactly one
+// CENCI_ATTENDED_ORIGIN token, carrying want.
+func requireOrigin(t *testing.T, agent, want string) {
+	t.Helper()
+	args := assembleExecEnv(agent, builtinSecretEnvSet())
+	got := originTokens(args)
+	if len(got) != 1 {
+		t.Fatalf("assembleExecEnv(%q) emitted %d CENCI_ATTENDED_ORIGIN tokens, want exactly 1; got: %v", agent, len(got), args)
+	}
+	if got[0] != want {
+		t.Errorf("assembleExecEnv(%q) forwarded CENCI_ATTENDED_ORIGIN=%s, want CENCI_ATTENDED_ORIGIN=%s", agent, got[0], want)
+	}
+}
+
+// clearAttendedOriginEnv removes CENCI_ATTENDED_ORIGIN from the process env
+// for the test (see clearAttendedEnv for the Setenv-then-Unsetenv idiom).
+func clearAttendedOriginEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("CENCI_ATTENDED_ORIGIN", "")
+	if err := os.Unsetenv("CENCI_ATTENDED_ORIGIN"); err != nil {
+		t.Fatalf("unset CENCI_ATTENDED_ORIGIN: %v", err)
+	}
+}
+
+// TestAssembleExecEnv_AttendedOrigin_HostConfig: a flag resolved from the host
+// fleet config is forwarded with origin host-config, whatever it resolved to.
+func TestAssembleExecEnv_AttendedOrigin_HostConfig(t *testing.T) {
+	cases := map[string]struct {
+		body     string
+		attended string
+	}{
+		"attended false":  {`{"planning": {"attended": false}}`, "0"},
+		"attended true":   {`{"planning": {"attended": true}}`, "1"},
+		"no config file":  {"", "0"},
+		"planning absent": {`{}`, "0"},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			clearAttendedEnv(t)
+			clearAttendedOriginEnv(t)
+			writeFleetConfig(t, tc.body)
+			requireAttended(t, "claude", tc.attended)
+			requireOrigin(t, "claude", "host-config")
+		})
+	}
+}
+
+// unreadableFleetConfigs are fleet configs QueryPlanningAttended cannot read
+// an attended value from (its error shapes).
+var unreadableFleetConfigs = map[string]string{
+	"malformed json":    `{"planning": `,
+	"non-bool attended": `{"planning": {"attended": "yes"}}`,
+	"null attended":     `{"planning": {"attended": null}}`,
+}
+
+// TestAssembleExecEnv_AttendedOrigin_ConfigUnreadable: a fleet config the
+// launcher cannot read still forwards "0" (a broken config never makes the
+// sandbox unusable), but never with origin host-config — that origin exempts
+// "0" from the pipeline's unattended gate, so an unreadable config would
+// otherwise let a non-dispatcher unattended launch count as a human session.
+func TestAssembleExecEnv_AttendedOrigin_ConfigUnreadable(t *testing.T) {
+	for name, body := range unreadableFleetConfigs {
+		t.Run(name, func(t *testing.T) {
+			clearAttendedEnv(t)
+			clearAttendedOriginEnv(t)
+			writeFleetConfig(t, body)
+			requireAttended(t, "claude", "0")
+			requireOrigin(t, "claude", "config-unreadable")
+			if got := originTokens(assembleExecEnv("claude", builtinSecretEnvSet())); len(got) == 1 && got[0] == pipeline.AttendedOriginHostConfig {
+				t.Errorf("an unreadable fleet config forwarded origin %q, the human-session exemption", got[0])
+			}
+		})
+	}
+}
+
+// TestWarnAttendedConfigUnreadable_OneLineNamingTheError: an unreadable fleet
+// config prints exactly one warning line naming the read error; a readable
+// config, or a pinned flag (the config is never consulted), prints nothing.
+func TestWarnAttendedConfigUnreadable_OneLineNamingTheError(t *testing.T) {
+	for name, body := range unreadableFleetConfigs {
+		t.Run(name, func(t *testing.T) {
+			clearAttendedEnv(t)
+			writeFleetConfig(t, body)
+			var buf strings.Builder
+			e := &Engine{Stderr: &buf}
+			e.warnAttendedConfigUnreadable()
+
+			out := buf.String()
+			if strings.Count(out, "\n") != 1 || !strings.HasPrefix(out, "Warning: ") {
+				t.Fatalf("stderr = %q, want exactly one Warning: line", out)
+			}
+			if !strings.Contains(out, "planning.attended") || !strings.Contains(out, "parsing") {
+				t.Errorf("stderr = %q, want it to name planning.attended and the read error", out)
+			}
+		})
+	}
+	silent := map[string]func(t *testing.T){
+		"readable config": func(t *testing.T) {
+			clearAttendedEnv(t)
+			writeFleetConfig(t, `{"planning": {"attended": false}}`)
+		},
+		"pinned flag with an unreadable config": func(t *testing.T) {
+			writeFleetConfig(t, `{"planning": `)
+			t.Setenv("CENCI_ATTENDED", "0")
+		},
+	}
+	for name, setup := range silent {
+		t.Run(name, func(t *testing.T) {
+			setup(t)
+			var buf strings.Builder
+			e := &Engine{Stderr: &buf}
+			e.warnAttendedConfigUnreadable()
+			if buf.Len() != 0 {
+				t.Errorf("stderr = %q, want no warning", buf.String())
+			}
+		})
+	}
+}
+
+// TestResolveLaunchContext_UnreadableAttendedWarnsOnce pins the launch-level
+// wiring: a fleet config whose planning.attended cannot be read (but which
+// still parses, so loadSecretEnvSet does not fail the launch first) prints
+// exactly one warning line through the launch preamble that Launch and DryRun
+// share.
+func TestResolveLaunchContext_UnreadableAttendedWarnsOnce(t *testing.T) {
+	for name, body := range map[string]string{
+		"non-bool attended": `{"planning": {"attended": "yes"}}`,
+		"null attended":     `{"planning": {"attended": null}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			clearAttendedEnv(t)
+			writeFleetConfig(t, body)
+			repo := newAuditTestRepo(t)
+			writeFile(t, filepath.Join(repo, ".cenci", "config.json"), `{"sandbox":{"dind":false}}`)
+			t.Setenv("HOME", t.TempDir())
+			t.Chdir(repo)
+			fakeDir := t.TempDir()
+			writeFakeRuntime(t, fakeDir, "podman", filepath.Join(fakeDir, "calls.txt"))
+			t.Setenv("PATH", fakeDir+":"+os.Getenv("PATH"))
+
+			var stderr strings.Builder
+			eng := &Engine{Stderr: &stderr}
+			if _, err := eng.resolveLaunchContext(Options{Agent: "claude"}); err != nil {
+				t.Fatalf("resolveLaunchContext with an unreadable planning.attended = %v, want a usable launch context", err)
+			}
+			if got := strings.Count(stderr.String(), "cannot read planning.attended"); got != 1 {
+				t.Errorf("stderr has %d \"cannot read planning.attended\" lines, want exactly 1; got:\n%s", got, stderr.String())
+			}
+		})
+	}
+}
+
+// TestAttendedOrigin_ConfigUnreadableIsUnattended cross-checks the launcher's
+// new origin against the pipeline gate: CENCI_ATTENDED=0 with origin
+// config-unreadable is an unattended session, never a human one.
+func TestAttendedOrigin_ConfigUnreadableIsUnattended(t *testing.T) {
+	t.Setenv(pipeline.AttendedEnv, attendedOff)
+	t.Setenv(pipeline.AttendedOriginEnv, attendedOriginConfigUnreadable)
+	if !pipeline.Unattended() {
+		t.Errorf("pipeline.Unattended() = false for %s=0 %s=%s, want true", pipeline.AttendedEnv, pipeline.AttendedOriginEnv, attendedOriginConfigUnreadable)
+	}
+}
+
+// TestAssembleExecEnv_AttendedOrigin_EmptyPinIsHostConfig: an empty
+// CENCI_ATTENDED is not a pin (TestAssembleExecEnv_EmptyEnvValueIsNotAPin), so
+// the flag came from the host config and the origin says so.
+func TestAssembleExecEnv_AttendedOrigin_EmptyPinIsHostConfig(t *testing.T) {
+	clearAttendedOriginEnv(t)
+	writeFleetConfig(t, `{"planning": {"attended": false}}`)
+	t.Setenv("CENCI_ATTENDED", "")
+
+	requireOrigin(t, "claude", "host-config")
+}
+
+// TestAssembleExecEnv_AttendedOrigin_Pinned: a CENCI_ATTENDED set in the
+// launcher's own environment (the dispatcher's pin) is forwarded with origin
+// pinned, never host-config, for the pinned "0", the pinned "1" and an
+// unrecognized value that folds to "0".
+func TestAssembleExecEnv_AttendedOrigin_Pinned(t *testing.T) {
+	for _, pin := range []string{"0", "1", "true", "2"} {
+		t.Run("pin "+pin, func(t *testing.T) {
+			clearAttendedOriginEnv(t)
+			writeFleetConfig(t, `{"planning": {"attended": true}}`)
+			t.Setenv("CENCI_ATTENDED", pin)
+
+			requireOrigin(t, "claude", "pinned")
+		})
+	}
+}
+
+// TestAssembleExecEnv_AttendedOrigin_PinnedIgnoresHostConfig: the origin
+// follows how the flag was resolved, not what the host config says, so a pin
+// stays "pinned" with the host attended flag on or off.
+func TestAssembleExecEnv_AttendedOrigin_PinnedIgnoresHostConfig(t *testing.T) {
+	for name, body := range map[string]string{
+		"host attended":   `{"planning": {"attended": true}}`,
+		"host unattended": `{"planning": {"attended": false}}`,
+		"no config":       "",
+	} {
+		t.Run(name, func(t *testing.T) {
+			clearAttendedOriginEnv(t)
+			writeFleetConfig(t, body)
+			t.Setenv("CENCI_ATTENDED", "0")
+
+			requireOrigin(t, "claude", "pinned")
+		})
+	}
+}
+
+// TestAssembleExecEnv_AttendedOrigin_AmbientOriginCannotSpoof: a
+// CENCI_ATTENDED_ORIGIN already present in the launcher's own environment is
+// never passed through. A dispatcher-pinned launch with an ambient
+// host-config marker still forwards pinned (the pin is what makes the session
+// unattended), and an unpinned launch forwards host-config whatever the
+// ambient marker says.
+func TestAssembleExecEnv_AttendedOrigin_AmbientOriginCannotSpoof(t *testing.T) {
+	t.Run("pin with ambient host-config", func(t *testing.T) {
+		writeFleetConfig(t, `{"planning": {"attended": false}}`)
+		t.Setenv("CENCI_ATTENDED", "0")
+		t.Setenv("CENCI_ATTENDED_ORIGIN", "host-config")
+
+		requireOrigin(t, "claude", "pinned")
+	})
+	t.Run("no pin with ambient pinned", func(t *testing.T) {
+		clearAttendedEnv(t)
+		writeFleetConfig(t, `{"planning": {"attended": false}}`)
+		t.Setenv("CENCI_ATTENDED_ORIGIN", "pinned")
+
+		requireOrigin(t, "claude", "host-config")
+	})
+}
+
+// TestAssembleExecEnv_AttendedOrigin_EveryAgent: the marker rides on every
+// agent's exec, like CENCI_ATTENDED itself.
+func TestAssembleExecEnv_AttendedOrigin_EveryAgent(t *testing.T) {
+	clearAttendedEnv(t)
+	clearAttendedOriginEnv(t)
+	writeFleetConfig(t, `{"planning": {"attended": false}}`)
+
+	for _, agent := range []string{"claude", "codex", "opencode"} {
+		requireOrigin(t, agent, "host-config")
+	}
+}
+
+// TestAssembleExecEnv_AttendedOriginNotSecretAndValueInline: the marker is an
+// inline NAME=value token and is not a secret name, so audit and dry-run
+// render it unredacted.
+func TestAssembleExecEnv_AttendedOriginNotSecretAndValueInline(t *testing.T) {
+	clearAttendedEnv(t)
+	clearAttendedOriginEnv(t)
+	writeFleetConfig(t, `{"planning": {"attended": true}}`)
+
+	args := assembleExecEnv("claude", builtinSecretEnvSet())
+	if slices.Contains(args, "CENCI_ATTENDED_ORIGIN") {
+		t.Errorf("assembleExecEnv emitted a bare -e CENCI_ATTENDED_ORIGIN token; want the inline NAME=value form; got: %v", args)
+	}
+	if isSecretEnvName(builtinSecretEnvSet(), "CENCI_ATTENDED_ORIGIN") {
+		t.Error("isSecretEnvName(\"CENCI_ATTENDED_ORIGIN\") = true, want false")
+	}
+}
+
+// TestAttendedOrigin_ConstantsMirrorPipeline: the launcher mirrors the
+// pipeline package's marker names (the gate reads them there); a drift would
+// silently disconnect the forward from the gate.
+func TestAttendedOrigin_ConstantsMirrorPipeline(t *testing.T) {
+	if attendedEnvName != pipeline.AttendedEnv {
+		t.Errorf("attendedEnvName = %q, pipeline.AttendedEnv = %q", attendedEnvName, pipeline.AttendedEnv)
+	}
+	if attendedOriginEnvName != pipeline.AttendedOriginEnv {
+		t.Errorf("attendedOriginEnvName = %q, pipeline.AttendedOriginEnv = %q", attendedOriginEnvName, pipeline.AttendedOriginEnv)
+	}
+	if attendedOriginHostConfig != pipeline.AttendedOriginHostConfig {
+		t.Errorf("attendedOriginHostConfig = %q, pipeline.AttendedOriginHostConfig = %q", attendedOriginHostConfig, pipeline.AttendedOriginHostConfig)
+	}
+	if attendedOriginPinned == pipeline.AttendedOriginHostConfig {
+		t.Errorf("attendedOriginPinned = %q must differ from the host-config exemption value", attendedOriginPinned)
+	}
+}
+
+// TestForwardNameValidation_RejectsAttendedOriginMarker: the marker is
+// launcher-owned (the CENCI_ reserved prefix), so a user sandboxEnv.forward
+// entry can neither forward nor spoof it.
+func TestForwardNameValidation_RejectsAttendedOriginMarker(t *testing.T) {
+	err := validateForwardName("CENCI_ATTENDED_ORIGIN")
+	if err == nil {
+		t.Fatal("validateForwardName(CENCI_ATTENDED_ORIGIN) = nil, want a reserved-for-the-launcher error")
+	}
+	if !strings.Contains(err.Error(), "reserved for the launcher") {
+		t.Errorf("error = %q, want it to say the name is reserved for the launcher", err)
 	}
 }
 

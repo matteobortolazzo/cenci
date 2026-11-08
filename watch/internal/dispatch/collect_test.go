@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/pipeline"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/planfile"
 )
 
@@ -339,6 +340,7 @@ func TestCollectRepoTickets_MilestoneFilterKeysOnNumberNotMilestoneTitle(t *test
 		in.Tickets = tickets
 		in.Config.Repos = []RepoConfig{{Repo: "o/r", Filter: RepoFilter{Milestones: filterMilestones}}}
 		in.Plans = []Plan{{Repo: "o/r", Path: ".plans/10.md", TicketID: 10, Status: "planned"}}
+		authorizedAll(in.Tickets, in.Plans)
 		decisions := Decide(in)
 		if len(decisions) != 1 {
 			t.Fatalf("decisions = %+v, want one", decisions)
@@ -1169,17 +1171,13 @@ func TestProbeStageState_CarriesRecordedLaunch(t *testing.T) {
 			case tt.content != "":
 				writeStateFile(t, dir, 42, tt.content)
 			}
-			var (
-				stage  string
-				probe  StageProbe
-				launch RecordedLaunch
-			)
-			returnsWithin(t, fifoDeadline, func() { stage, probe, launch = probeStageState(dir, 42) })
-			if stage != tt.wantStage || probe != tt.wantProbe {
-				t.Errorf("probeStageState = (%q, %q), want (%q, %q)", stage, probe, tt.wantStage, tt.wantProbe)
+			var got stageRead
+			returnsWithin(t, fifoDeadline, func() { got = probeStageState(dir, 42) })
+			if got.Stage != tt.wantStage || got.Probe != tt.wantProbe {
+				t.Errorf("probeStageState = (%q, %q), want (%q, %q)", got.Stage, got.Probe, tt.wantStage, tt.wantProbe)
 			}
-			if launch != tt.wantLaunch {
-				t.Errorf("launch = %+v, want %+v", launch, tt.wantLaunch)
+			if got.Launch != tt.wantLaunch {
+				t.Errorf("launch = %+v, want %+v", got.Launch, tt.wantLaunch)
 			}
 		})
 	}
@@ -1206,6 +1204,133 @@ func TestCollectRepoTickets_FillsLaunchFromStateFile(t *testing.T) {
 	}
 	if got := byNumber[11].Launch; got != (RecordedLaunch{}) {
 		t.Errorf("#11 Launch = %+v, want none (no state file)", got)
+	}
+}
+
+// -- #1464: plan-authorization record and plan fingerprint -------------------
+
+// seedPlanAuthorization records a `kind` authorization for ticket number's
+// plan in repoDir through the real `cenci pipeline plan --authorization`
+// engine (pipeline.Run), from a prepared state, so the record's hash is the
+// one the pipeline itself computes over the plan file on disk. The plan file
+// must already be written.
+func seedPlanAuthorization(t *testing.T, repoDir string, number int, kind pipeline.AuthorizationKind) {
+	t.Helper()
+	writeStateFile(t, repoDir, number, fmt.Sprintf(`{"schemaVersion":2,"id":"%d","stage":"prepared"}`, number))
+	out, err := pipeline.Run(pipeline.Opts{Stage: "plan", ID: strconv.Itoa(number), Authorization: string(kind), RepoRoot: repoDir})
+	if err != nil {
+		t.Fatalf("seeding %s authorization for #%d: %v (errors %v)", kind, number, err, out.Errors)
+	}
+}
+
+// writeAuthorizedPlan is writePlan for a plan an unattended session approved:
+// it writes .plans/<name> and records a `lean` authorization for it through
+// the real pipeline engine (seedPlanAuthorization), so an on-disk RunOnce
+// fixture passes the admission hold exactly as a real lean-approved plan does.
+// name must start with the ticket number ("42-x.md").
+func writeAuthorizedPlan(t *testing.T, dir, name, content string) {
+	t.Helper()
+	writePlan(t, dir, name, content)
+	prefix, _, _ := strings.Cut(name, "-")
+	number, err := strconv.Atoi(prefix)
+	if err != nil {
+		t.Fatalf("writeAuthorizedPlan: plan name %q has no ticket-number prefix", name)
+	}
+	seedPlanAuthorization(t, dir, number, pipeline.AuthorizationLean)
+}
+
+// TestProbeStageState_AuthorizationClasses: the collector classifies the
+// record from the same state-file read as the stage, default-deny.
+func TestProbeStageState_AuthorizationClasses(t *testing.T) {
+	record := func(kind, sha, source string) string {
+		src := ""
+		if source != "" {
+			src = `,"source":"` + source + `"`
+		}
+		return `{"schemaVersion":2,"id":"42","stage":"waiting_for_plan_approval","authorization":{"kind":"` + kind + `","planSha256":"` + sha + `","recordedAt":"2026-11-08T12:00:00Z"` + src + `}}`
+	}
+	tests := []struct {
+		name      string
+		content   string // "" = no state file
+		wantProbe AuthorizationProbe
+		wantKind  pipeline.AuthorizationKind
+	}{
+		{"no state file", "", AuthorizationProbeAbsent, ""},
+		{"state without a record", `{"schemaVersion":2,"id":"42","stage":"prepared"}`, AuthorizationProbeAbsent, ""},
+		{"held record", record("held", testPlanSha, ""), AuthorizationProbeRecorded, pipeline.AuthorizationHeld},
+		{"lean record", record("lean", testPlanSha, ""), AuthorizationProbeRecorded, pipeline.AuthorizationLean},
+		{"human record", record("human", testPlanSha, "cli"), AuthorizationProbeRecorded, pipeline.AuthorizationHuman},
+		{"undecodable record", `{"schemaVersion":2,"id":"42","stage":"prepared","authorization":"yes"}`, AuthorizationProbeUnreadable, ""},
+		{"unknown kind", record("root", testPlanSha, ""), AuthorizationProbeUnreadable, ""},
+		{"malformed planSha256", record("lean", "ABC", ""), AuthorizationProbeUnreadable, ""},
+		{"undecodable state file", `{not json`, AuthorizationProbeUnreadable, ""},
+		{"unknown stage", `{"schemaVersion":2,"id":"42","stage":"bogus","authorization":{"kind":"lean","planSha256":"` + testPlanSha + `","recordedAt":"2026-11-08T12:00:00Z"}}`, AuthorizationProbeUnreadable, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if tt.content != "" {
+				writeStateFile(t, dir, 42, tt.content)
+			}
+			got := probeStageState(dir, 42)
+			if got.AuthorizationProbe != tt.wantProbe || got.Authorization.Kind != tt.wantKind {
+				t.Errorf("authorization = (%q, kind %q), want (%q, kind %q)", got.AuthorizationProbe, got.Authorization.Kind, tt.wantProbe, tt.wantKind)
+			}
+			if tt.wantProbe == AuthorizationProbeRecorded && got.Authorization.PlanSHA256 != testPlanSha {
+				t.Errorf("planSha256 = %q, want %q", got.Authorization.PlanSHA256, testPlanSha)
+			}
+		})
+	}
+}
+
+// TestReadPlans_Sha256MatchesPipelineRecord: Plan.Sha256 is the fingerprint of
+// the plan file's exact bytes, and the collector reads back the record the real
+// pipeline engine wrote for that same file -- both sides hash the same bytes.
+func TestReadPlans_Sha256MatchesPipelineRecord(t *testing.T) {
+	dir := t.TempDir()
+	content := "---\nticketId: 42\nstatus: planned\n---\nbody\n"
+	writePlan(t, dir, "42-x.md", content)
+	seedPlanAuthorization(t, dir, 42, pipeline.AuthorizationLean)
+
+	scan, err := ReadPlans("o/r", dir, nil, io.Discard)
+	if err != nil {
+		t.Fatalf("ReadPlans: %v", err)
+	}
+	if len(scan.Plans) != 1 {
+		t.Fatalf("plans = %+v, want one", scan.Plans)
+	}
+	if got, want := scan.Plans[0].Sha256, pipeline.PlanFingerprint(content); got != want {
+		t.Errorf("Plan.Sha256 = %q, want %q (SHA-256 of the file's bytes)", got, want)
+	}
+	read := probeStageState(dir, 42)
+	if read.AuthorizationProbe != AuthorizationProbeRecorded || read.Authorization.Kind != pipeline.AuthorizationLean {
+		t.Fatalf("authorization = (%q, %q), want a recorded lean record", read.AuthorizationProbe, read.Authorization.Kind)
+	}
+	if read.Authorization.PlanSHA256 != scan.Plans[0].Sha256 {
+		t.Errorf("record hash %q != Plan.Sha256 %q", read.Authorization.PlanSHA256, scan.Plans[0].Sha256)
+	}
+}
+
+// TestCollectRepoTickets_FillsAuthorizationFromStateFile pins the production
+// wiring: the collected Ticket carries the record and its probe.
+func TestCollectRepoTickets_FillsAuthorizationFromStateFile(t *testing.T) {
+	installFakeGHOnPath(t, twoIssuesFakeGHScript)
+	dir := t.TempDir()
+	writeStateFile(t, dir, 10, `{"schemaVersion":2,"id":"10","stage":"waiting_for_plan_approval","authorization":{"kind":"held","planSha256":"`+testPlanSha+`","recordedAt":"2026-11-08T12:00:00Z"}}`)
+
+	tickets, err := collectRepoTickets(RepoConfig{Repo: "o/r", Dir: dir}, MainSyncSkipped, true, io.Discard)
+	if err != nil {
+		t.Fatalf("collectRepoTickets: %v", err)
+	}
+	byNumber := map[int]Ticket{}
+	for _, tk := range tickets {
+		byNumber[tk.Number] = tk
+	}
+	if got := byNumber[10]; got.AuthorizationProbe != AuthorizationProbeRecorded || got.Authorization.Kind != pipeline.AuthorizationHeld || got.Authorization.PlanSHA256 != testPlanSha {
+		t.Errorf("#10 authorization = (%q, %+v), want a recorded held record", got.AuthorizationProbe, got.Authorization)
+	}
+	if got := byNumber[11]; got.AuthorizationProbe != AuthorizationProbeAbsent {
+		t.Errorf("#11 AuthorizationProbe = %q, want absent (no state file)", got.AuthorizationProbe)
 	}
 }
 

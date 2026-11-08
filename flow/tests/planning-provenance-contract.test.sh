@@ -348,7 +348,7 @@ assert_file_contains "${AUTONOMOUS_LOOP_DOC}" "${AUTOLOOP_FALLBACK_MARKER}" \
 assert_file_contains "${AUTONOMOUS_LOOP_DOC}" "${AUTOLOOP_SENSITIVE_PATH_BULLET_UNCHANGED}" \
   "docs/autonomous-loop.md's existing sensitive-path disqualifier bullet must stay unchanged (Q&A round 5 answer)"
 
-CODEX_EXCLUSION_MARKER='every plan it persists is `approval: human` by construction'
+CODEX_EXCLUSION_MARKER='every plan it persists is recorded `held`'
 assert_file_contains "${IMPLEMENT_CODEX}" "${CODEX_EXCLUSION_MARKER}" \
   "flow/skills/implement/codex.md's recorded exclusion (no autonomous approval path) must remain the documented reason no Codex edit is needed (Q&A round 1 answer)"
 

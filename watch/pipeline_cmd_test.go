@@ -11,6 +11,8 @@ package main_test
 // ticket (prepare's `gh issue view <id>`, Q&A #2).
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -19,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/exectest"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/pipeline"
 )
 
 // pipelineContract mirrors the JSON contract's field names exactly
@@ -61,23 +64,42 @@ func writeFakeGh(t *testing.T, dir string, notFound bool) {
 // label --transition working` records whatever launch it finds (#1292), so an
 // ambient value would silently change what every working-transition test
 // writes. A test that wants a launch sets it explicitly on top of this.
+//
+// The attended posture is stripped for the same reason (#1464): the sandbox
+// also sets CENCI_ATTENDED=0 ambiently, and `plan --approve` now reads it, so
+// the baseline here is a human at the keyboard. A test that wants the
+// unattended posture passes it through pipelineEnvWith.
 func pipelineEnv(fakeDir string) []string {
+	return pipelineEnvWith(fakeDir)
+}
+
+// pipelineEnvWith is pipelineEnv plus extra KEY=VALUE entries. An empty
+// fakeDir leaves PATH as inherited.
+func pipelineEnvWith(fakeDir string, extra ...string) []string {
 	var env []string
 	for _, kv := range os.Environ() {
-		if strings.HasPrefix(kv, "CENCI_LAUNCH_ID=") || strings.HasPrefix(kv, "CENCI_SANDBOX_CONTAINER=") || strings.HasPrefix(kv, "CENCI_SANDBOX_RUNTIME=") {
+		if strings.HasPrefix(kv, "CENCI_LAUNCH_ID=") || strings.HasPrefix(kv, "CENCI_SANDBOX_CONTAINER=") || strings.HasPrefix(kv, "CENCI_SANDBOX_RUNTIME=") ||
+			strings.HasPrefix(kv, pipeline.AttendedEnv+"=") || strings.HasPrefix(kv, pipeline.AttendedOriginEnv+"=") {
 			continue
 		}
 		env = append(env, kv)
 	}
-	return append(env, "PATH="+fakeDir+":"+os.Getenv("PATH"))
+	if fakeDir != "" {
+		env = append(env, "PATH="+fakeDir+":"+os.Getenv("PATH"))
+	}
+	return append(env, extra...)
 }
 
 func runPipelineCLI(t *testing.T, fakeDir string, args ...string) (pipelineContract, []byte, *exec.ExitError) {
 	t.Helper()
+	return runPipelineCLIWith(t, fakeDir, nil, args...)
+}
+
+// runPipelineCLIWith is runPipelineCLI with extra KEY=VALUE environment entries.
+func runPipelineCLIWith(t *testing.T, fakeDir string, extraEnv []string, args ...string) (pipelineContract, []byte, *exec.ExitError) {
+	t.Helper()
 	cmd := exec.Command(binaryPath, append([]string{"pipeline"}, args...)...)
-	if fakeDir != "" {
-		cmd.Env = pipelineEnv(fakeDir)
-	}
+	cmd.Env = pipelineEnvWith(fakeDir, extraEnv...)
 	output, err := cmd.Output()
 	var exitErr *exec.ExitError
 	if err != nil {
@@ -177,6 +199,7 @@ func TestPipelineFullValidSequence_AllFiveStagesExit0(t *testing.T) {
 	fakeDir := t.TempDir()
 	writeFakeGh(t, fakeDir, false)
 	stateDir := t.TempDir()
+	planRepo := planRepoForCLITest(t)
 
 	steps := []struct {
 		args      []string
@@ -190,7 +213,7 @@ func TestPipelineFullValidSequence_AllFiveStagesExit0(t *testing.T) {
 		{[]string{"finalize", "42"}, "finalized"},
 	}
 	for _, step := range steps {
-		args := append(append([]string{}, step.args...), "--state-dir", stateDir)
+		args := append(append([]string{}, step.args...), "--state-dir", stateDir, "--repo", planRepo)
 		c, _, exitErr := runPipelineCLI(t, fakeDir, args...)
 		if exitErr != nil {
 			t.Fatalf("%v: unexpected exit %d", step.args, exitErr.ExitCode())
@@ -380,9 +403,10 @@ func TestPipelineReview_BeforeExecute_Exit1WithErrors(t *testing.T) {
 	fakeDir := t.TempDir()
 	writeFakeGh(t, fakeDir, false)
 	stateDir := t.TempDir()
+	planRepo := planRepoForCLITest(t)
 
 	for _, step := range [][]string{{"prepare", "42"}, {"plan", "42"}, {"plan", "42", "--approve"}} {
-		args := append(append([]string{}, step...), "--state-dir", stateDir)
+		args := append(append([]string{}, step...), "--state-dir", stateDir, "--repo", planRepo)
 		if _, _, exitErr := runPipelineCLI(t, fakeDir, args...); exitErr != nil {
 			t.Fatalf("%v: unexpected exit %d", step, exitErr.ExitCode())
 		}
@@ -401,9 +425,10 @@ func TestPipelineFinalize_BeforeReview_Exit1WithErrors(t *testing.T) {
 	fakeDir := t.TempDir()
 	writeFakeGh(t, fakeDir, false)
 	stateDir := t.TempDir()
+	planRepo := planRepoForCLITest(t)
 
 	for _, step := range [][]string{{"prepare", "42"}, {"plan", "42"}, {"plan", "42", "--approve"}, {"execute", "42"}} {
-		args := append(append([]string{}, step...), "--state-dir", stateDir)
+		args := append(append([]string{}, step...), "--state-dir", stateDir, "--repo", planRepo)
 		if _, _, exitErr := runPipelineCLI(t, fakeDir, args...); exitErr != nil {
 			t.Fatalf("%v: unexpected exit %d", step, exitErr.ExitCode())
 		}
@@ -567,12 +592,13 @@ func TestPipelineReset_AfterFinalize_ContractShowsNewStateAndStageWarning(t *tes
 	fakeDir := t.TempDir()
 	writeFakeGh(t, fakeDir, false)
 	stateDir := t.TempDir()
+	planRepo := planRepoForCLITest(t)
 
 	for _, step := range [][]string{
 		{"prepare", "42"}, {"plan", "42"}, {"plan", "42", "--approve"},
 		{"execute", "42"}, {"review", "42"}, {"finalize", "42"},
 	} {
-		args := append(append([]string{}, step...), "--state-dir", stateDir)
+		args := append(append([]string{}, step...), "--state-dir", stateDir, "--repo", planRepo)
 		if _, _, exitErr := runPipelineCLI(t, fakeDir, args...); exitErr != nil {
 			t.Fatalf("%v: unexpected exit %d", step, exitErr.ExitCode())
 		}
@@ -788,5 +814,283 @@ func TestPipelinePlanApprove_AdoptsPreStageTrackingPlan_Exit0WithWarning(t *test
 	}
 	if !found {
 		t.Errorf("warnings = %v, want an adoption warning", c.Warnings)
+	}
+}
+
+// -- plan authorization (#1464) -----------------------------------------------
+
+const (
+	unattendedEnv = pipeline.AttendedEnv + "=0"
+	attendedEnv   = pipeline.AttendedEnv + "=1"
+)
+
+// planRepoForCLITest returns a directory holding one valid plan for ticket 42,
+// for the `--repo` flag: plan --approve now resolves the plan to bind or check
+// its authorization record.
+func planRepoForCLITest(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	writePlanFileForCLITest(t, dir, "42", "add-thing")
+	return dir
+}
+
+func cliPlanHash(t *testing.T, repoDir string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(repoDir, ".plans", "42-add-thing.md"))
+	if err != nil {
+		t.Fatalf("read plan: %v", err)
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
+// cliAuthorization returns the decoded authorization field of ticket 42's
+// state file, or nil when it carries none.
+func cliAuthorization(t *testing.T, stateDir string) map[string]any {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(stateDir, "42.json"))
+	if err != nil {
+		t.Fatalf("read state: %v", err)
+	}
+	var s struct {
+		Authorization map[string]any `json:"authorization"`
+	}
+	if err := json.Unmarshal(b, &s); err != nil {
+		t.Fatalf("decode state: %v", err)
+	}
+	return s.Authorization
+}
+
+// cliStep runs one CLI step against the shared state dir and plan repo and
+// fails the test on a non-zero exit.
+func cliStep(t *testing.T, fakeDir string, env []string, stateDir, planRepo string, args ...string) pipelineContract {
+	t.Helper()
+	full := append(append([]string{}, args...), "--state-dir", stateDir, "--repo", planRepo)
+	c, _, exitErr := runPipelineCLIWith(t, fakeDir, env, full...)
+	if exitErr != nil {
+		t.Fatalf("%v: unexpected exit %d (errors %v)", args, exitErr.ExitCode(), c.Errors)
+	}
+	return c
+}
+
+func TestPipelineAuthorization_UsageErrors_Exit2AndNothingIsWritten(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{"human is writable only by dispatch approve or an attended launch", []string{"plan", "42", "--authorization", "human"}},
+		{"unknown kind", []string{"plan", "42", "--authorization", "bogus"}},
+		{"empty kind", []string{"plan", "42", "--authorization", ""}},
+		{"missing value", []string{"plan", "42", "--authorization"}},
+		{"together with --approve", []string{"plan", "42", "--approve", "--authorization", "lean"}},
+		{"on prepare", []string{"prepare", "42", "--authorization", "lean"}},
+		{"on await-input", []string{"await-input", "42", "--authorization", "lean"}},
+		{"on execute", []string{"execute", "42", "--authorization", "lean"}},
+		{"on review", []string{"review", "42", "--authorization", "lean"}},
+		{"on finalize", []string{"finalize", "42", "--authorization", "lean"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			stateDir := t.TempDir()
+			args := append(append([]string{"pipeline"}, tc.args...), "--state-dir", stateDir, "--repo", planRepoForCLITest(t))
+			cmd := exec.Command(binaryPath, args...)
+			cmd.Env = pipelineEnvWith("")
+			var stdout, stderr strings.Builder
+			cmd.Stdout, cmd.Stderr = &stdout, &stderr
+			err := cmd.Run()
+			exitErr, ok := err.(*exec.ExitError)
+			if !ok || exitErr.ExitCode() != 2 {
+				t.Fatalf("exit = %v, want 2", err)
+			}
+			if !strings.Contains(stderr.String(), usageMarker) {
+				t.Errorf("stderr = %q, want pipeline's usage hint", stderr.String())
+			}
+			if stdout.Len() != 0 {
+				t.Errorf("stdout = %q, want empty for a usage error", stdout.String())
+			}
+			if entries, _ := os.ReadDir(stateDir); len(entries) != 0 {
+				t.Errorf("state dir holds %d entries after a usage error, want none", len(entries))
+			}
+		})
+	}
+}
+
+func TestPipelineAuthorization_UsageLineNamesTheFlag(t *testing.T) {
+	cmd := exec.Command(binaryPath, "pipeline")
+	cmd.Env = pipelineEnvWith("")
+	out, _ := cmd.CombinedOutput()
+	if !strings.Contains(string(out), "--authorization") {
+		t.Errorf("usage = %q, want it to name --authorization", out)
+	}
+}
+
+func TestPipelineAuthorization_EachKindIsRecordedBoundToThePlanHash(t *testing.T) {
+	for _, kind := range []string{"held", "lean", "trivial", "lean-resumed", "lean-decided"} {
+		t.Run(kind, func(t *testing.T) {
+			fakeDir := t.TempDir()
+			writeFakeGh(t, fakeDir, false)
+			stateDir := t.TempDir()
+			planRepo := planRepoForCLITest(t)
+
+			cliStep(t, fakeDir, []string{unattendedEnv}, stateDir, planRepo, "prepare", "42")
+			c := cliStep(t, fakeDir, []string{unattendedEnv}, stateDir, planRepo, "plan", "42", "--authorization", kind)
+			if c.State != "waiting_for_plan_approval" {
+				t.Errorf("state = %q, want waiting_for_plan_approval", c.State)
+			}
+			auth := cliAuthorization(t, stateDir)
+			if auth["kind"] != kind || auth["planSha256"] != cliPlanHash(t, planRepo) {
+				t.Errorf("authorization = %v, want kind %s bound to the plan's SHA-256", auth, kind)
+			}
+			if _, has := auth["source"]; has {
+				t.Errorf("authorization = %v, want no source on a non-human kind", auth)
+			}
+		})
+	}
+}
+
+func assertHeld(t *testing.T, c pipelineContract, exitErr *exec.ExitError, wantState string) {
+	t.Helper()
+	if exitErr == nil || exitErr.ExitCode() != 1 {
+		t.Fatalf("plan --approve: exit = %v, want 1 (domain error)", exitErr)
+	}
+	if len(c.Errors) == 0 {
+		t.Error("plan --approve refused with errors[] = [], want the reason")
+	}
+	if c.State != wantState {
+		t.Errorf("state = %q, want %q", c.State, wantState)
+	}
+	assertArraysNonNil(t, "plan --approve (held)", c)
+}
+
+// TestPipelinePlanApprove_UnattendedHold_EachStartForm pins the execution-time
+// hold for the three ways a session can reach Phase 2's `plan <id> --approve`.
+// The binary cannot tell the forms apart (they differ only in how the state
+// got there), so each is reproduced by the state it leaves behind. Every one
+// must exit 1 with errors[] and leave the persisted stage untouched.
+func TestPipelinePlanApprove_UnattendedHold_EachStartForm(t *testing.T) {
+	unattended := []string{unattendedEnv}
+
+	t.Run("plan-file path: held record from the New Plan fallback", func(t *testing.T) {
+		fakeDir := t.TempDir()
+		writeFakeGh(t, fakeDir, false)
+		stateDir := t.TempDir()
+		planRepo := planRepoForCLITest(t)
+		cliStep(t, fakeDir, unattended, stateDir, planRepo, "prepare", "42")
+		cliStep(t, fakeDir, unattended, stateDir, planRepo, "plan", "42", "--authorization", "held")
+
+		c, _, exitErr := runPipelineCLIWith(t, fakeDir, unattended, "plan", "42", "--approve", "--state-dir", stateDir, "--repo", planRepo)
+		assertHeld(t, c, exitErr, "waiting_for_plan_approval")
+		if auth := cliAuthorization(t, stateDir); auth["kind"] != "held" {
+			t.Errorf("authorization = %v, want it left held", auth)
+		}
+	})
+
+	t.Run("bare numeric ticket: nothing recorded, the plan file alone is not a review", func(t *testing.T) {
+		fakeDir := t.TempDir()
+		writeFakeGh(t, fakeDir, false)
+		stateDir := t.TempDir()
+		planRepo := planRepoForCLITest(t)
+
+		c, _, exitErr := runPipelineCLIWith(t, fakeDir, unattended, "plan", "42", "--approve", "--state-dir", stateDir, "--repo", planRepo)
+		assertHeld(t, c, exitErr, "new")
+		if _, err := os.Stat(filepath.Join(stateDir, "42.json")); !os.IsNotExist(err) {
+			t.Errorf("state file stat err = %v, want none created by a refused self-adoption", err)
+		}
+	})
+
+	t.Run("resume argument: human approval no longer matches the plan", func(t *testing.T) {
+		fakeDir := t.TempDir()
+		writeFakeGh(t, fakeDir, false)
+		stateDir := t.TempDir()
+		planRepo := planRepoForCLITest(t)
+		cliStep(t, fakeDir, nil, stateDir, planRepo, "prepare", "42")
+		cliStep(t, fakeDir, nil, stateDir, planRepo, "plan", "42", "--authorization", "held")
+		cliStep(t, fakeDir, []string{attendedEnv}, stateDir, planRepo, "plan", "42", "--approve")
+		// The session crashed after the approval; the stage is rolled back to
+		// the review gate the way a re-plan leaves it, and the plan then changes.
+		statePath := filepath.Join(stateDir, "42.json")
+		raw, err := os.ReadFile(statePath)
+		if err != nil {
+			t.Fatalf("read state: %v", err)
+		}
+		rolledBack := strings.Replace(string(raw), `"stage": "plan_approved"`, `"stage": "waiting_for_plan_approval"`, 1)
+		if err := os.WriteFile(statePath, []byte(rolledBack), 0o644); err != nil {
+			t.Fatalf("roll back stage: %v", err)
+		}
+		planPath := filepath.Join(planRepo, ".plans", "42-add-thing.md")
+		edited, err := os.ReadFile(planPath)
+		if err != nil {
+			t.Fatalf("read plan: %v", err)
+		}
+		if err := os.WriteFile(planPath, append(edited, []byte("\nedited after approval\n")...), 0o644); err != nil {
+			t.Fatalf("edit plan: %v", err)
+		}
+
+		c, _, exitErr := runPipelineCLIWith(t, fakeDir, unattended, "plan", "42", "--approve", "--state-dir", stateDir, "--repo", planRepo)
+		assertHeld(t, c, exitErr, "waiting_for_plan_approval")
+	})
+}
+
+// TestPipelinePlanApprove_UnattendedLegitimatePaths_ReachPlanApprovedInOneSession
+// runs the four autonomous approval paths end to end in the unattended posture
+// each: persist with the path's kind, then the execution-boundary approve.
+func TestPipelinePlanApprove_UnattendedLegitimatePaths_ReachPlanApprovedInOneSession(t *testing.T) {
+	for _, kind := range []string{"lean", "trivial", "lean-resumed", "lean-decided"} {
+		t.Run(kind, func(t *testing.T) {
+			fakeDir := t.TempDir()
+			writeFakeGh(t, fakeDir, false)
+			stateDir := t.TempDir()
+			planRepo := planRepoForCLITest(t)
+			env := []string{unattendedEnv}
+
+			cliStep(t, fakeDir, env, stateDir, planRepo, "prepare", "42")
+			cliStep(t, fakeDir, env, stateDir, planRepo, "plan", "42", "--authorization", kind)
+			c := cliStep(t, fakeDir, env, stateDir, planRepo, "plan", "42", "--approve")
+			if c.State != "plan_approved" || len(c.Errors) != 0 {
+				t.Errorf("state = %q errors = %v, want plan_approved with none", c.State, c.Errors)
+			}
+			if auth := cliAuthorization(t, stateDir); auth["kind"] != kind {
+				t.Errorf("authorization = %v, want the %s record left as the path wrote it", auth, kind)
+			}
+			if c := cliStep(t, fakeDir, env, stateDir, planRepo, "execute", "42"); c.State != "executed" {
+				t.Errorf("execute: state = %q, want executed", c.State)
+			}
+		})
+	}
+}
+
+func TestPipelinePlanApprove_UnattendedCannotDowngradeAHeldRecord(t *testing.T) {
+	fakeDir := t.TempDir()
+	writeFakeGh(t, fakeDir, false)
+	stateDir := t.TempDir()
+	planRepo := planRepoForCLITest(t)
+	env := []string{unattendedEnv}
+	cliStep(t, fakeDir, env, stateDir, planRepo, "prepare", "42")
+	cliStep(t, fakeDir, env, stateDir, planRepo, "plan", "42", "--authorization", "held")
+
+	c, _, exitErr := runPipelineCLIWith(t, fakeDir, env, "plan", "42", "--authorization", "lean", "--state-dir", stateDir, "--repo", planRepo)
+	if exitErr == nil || exitErr.ExitCode() != 1 || len(c.Errors) == 0 {
+		t.Fatalf("exit = %v errors = %v, want exit 1 with errors[]", exitErr, c.Errors)
+	}
+	if auth := cliAuthorization(t, stateDir); auth["kind"] != "held" {
+		t.Errorf("authorization = %v, want it left held", auth)
+	}
+}
+
+func TestPipelinePlanApprove_AttendedAgainstHeldRecordsHumanAndAdvances(t *testing.T) {
+	fakeDir := t.TempDir()
+	writeFakeGh(t, fakeDir, false)
+	stateDir := t.TempDir()
+	planRepo := planRepoForCLITest(t)
+	cliStep(t, fakeDir, []string{unattendedEnv}, stateDir, planRepo, "prepare", "42")
+	cliStep(t, fakeDir, []string{unattendedEnv}, stateDir, planRepo, "plan", "42", "--authorization", "held")
+
+	c := cliStep(t, fakeDir, []string{attendedEnv}, stateDir, planRepo, "plan", "42", "--approve")
+	if c.State != "plan_approved" {
+		t.Errorf("state = %q, want plan_approved", c.State)
+	}
+	auth := cliAuthorization(t, stateDir)
+	if auth["kind"] != "human" || auth["source"] != "attended-launch" || auth["planSha256"] != cliPlanHash(t, planRepo) {
+		t.Errorf("authorization = %v, want human/attended-launch bound to the plan hash", auth)
 	}
 }

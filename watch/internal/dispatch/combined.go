@@ -213,6 +213,12 @@ func passError(dispatchErr, reconcileErr error) string {
 	if errors.Is(dispatchErr, ErrSessionMissing) {
 		return "dispatch_session_missing"
 	}
+	// #1464: a session that could not be probed ranks after missing -- an
+	// absent session is a definite misconfiguration, a probe error may be a
+	// transient tmux outage.
+	if errors.Is(dispatchErr, ErrSessionProbeFailed) {
+		return "dispatch_session_probe_failed"
+	}
 	if dispatchErr != nil {
 		return "dispatch_pass_failed"
 	}

@@ -184,6 +184,28 @@ const (
 // backoff, rounded up to a whole minute (minimum 1).
 const reasonOOMBackoffFmt = "oom backoff (%dm left)"
 
+// Session-eligibility gate skip reasons (#1464), one per SessionEligibility
+// failure class plus a distinct one for an unrecognized value (#446/#598).
+// sessionSkipSentinels (session.go) maps the first three to their sentinels.
+const (
+	reasonSessionUnconfigured       = "session unconfigured"
+	reasonSessionAbsent             = "session absent"
+	reasonSessionProbeFailed        = "session probe failed"
+	reasonSessionEligibilityUnknown = "session eligibility unrecognized"
+)
+
+// Plan-authorization hold reasons (#1464). The texts match the pipeline
+// package's ErrAuthorization* sentinels, so the dispatch log and a refused
+// `cenci pipeline plan --approve` name a hold the same way. noteLegacyApproval
+// is a Decision.Note on an admitted dispatch, never a skip reason.
+const (
+	reasonAuthorizationHeld       = "awaiting human plan review"
+	reasonAuthorizationChanged    = "plan changed since approval"
+	reasonAuthorizationUnrecorded = "plan authorization unrecorded (legacy plan; run cenci dispatch approve)"
+	reasonAuthorizationUnreadable = "plan authorization unreadable"
+	noteLegacyApproval            = "legacy approval (unrecorded provenance)"
+)
+
 // Resume-gate skip reasons (#827). reasonAnswerProbeUnknown is deliberately
 // distinct from the enumerated probe-class reasons below, for the same
 // reason reasonStageProbeUnknown is distinct from reasonPipelineUnreadable
@@ -337,6 +359,12 @@ type Inputs struct {
 	// ticket with no entry (a nil map, an ordinary retry) is never gated; with
 	// Config.OOMBackoff <= 0 the gate is disabled.
 	OOMBackoffSince map[string]time.Time
+
+	// SessionEligibility maps repo -> that repo's session verdict this pass
+	// (#1464), resolved by resolveSessionEligibility (session.go) before Decide
+	// is ever called. A missing entry is permissive, mirroring RepoMemory; the
+	// spawn loop still launches only for an explicit SessionEligible.
+	SessionEligibility map[string]SessionEligibility
 }
 
 // Decide is pure: identical Inputs yield an identical ordered []Decision with no
@@ -652,6 +680,26 @@ func decideTicket(t Ticket, in Inputs, planByTicket map[string]*Plan, filterByRe
 	if reason, gated := memoryHeadroomSkip(in.Config.MemoryHeadroom, t.Repo, in.RepoMemory[t.Repo]); gated {
 		return skip(reason)
 	}
+	// Session eligibility (#1464), before the cap check so a repo whose session
+	// cannot take a launch never holds a slot another repo could use. Applies
+	// to every pickup type: each one launches into the repo's session.
+	if reason, gated := sessionEligibilitySkip(in.SessionEligibility, t.Repo); gated {
+		return skip(reason)
+	}
+	// Plan-authorization hold (#1464), also before the cap check. Ordinary
+	// Planned dispatch only: an answered `Input Needed` draft and a fresh
+	// planning pickup carry no record by design (Phase 1 records one when it
+	// persists the plan), and an autonomous re-plan replaces the plan it would
+	// check. Deliberately not behind Config.PipelineStageGate: the kill switch
+	// turns off the stage gate, never the human-review hold.
+	var note string
+	if !resuming && !planning && !replanning {
+		reason, n, gated := authorizationSkip(t, plan)
+		if gated {
+			return skip(reason)
+		}
+		note = n
+	}
 	if in.Snapshot.Summary.Running+in.OrphanedContainerSessions+dispatchedThisPass >= in.Config.ConcurrencyCap {
 		if in.OrphanedContainerSessions > 0 {
 			return skip(fmt.Sprintf(reasonConcurrencyCapOrphansFmt, in.OrphanedContainerSessions))
@@ -692,7 +740,91 @@ func decideTicket(t Ticket, in Inputs, planByTicket map[string]*Plan, filterByRe
 		}
 		return Decision{Ticket: t, Plan: nil, Action: ActionDispatch, Planning: true, Reason: "plan — Refined, no plan file", Agent: agent}
 	}
-	return Decision{Ticket: t, Plan: plan, Action: ActionDispatch, Reason: "dispatch", Agent: agent}
+	return Decision{Ticket: t, Plan: plan, Action: ActionDispatch, Reason: "dispatch", Agent: agent, Note: note}
+}
+
+// sessionEligibilitySkip evaluates the session-eligibility gate (#1464) for
+// repo. A repo with no entry is permissive (mirroring RepoMemory's map miss);
+// only SessionEligible passes an explicit entry, and an unrecognized value
+// (the zero value included) default-denies with its own reason.
+func sessionEligibilitySkip(eligibility map[string]SessionEligibility, repo string) (string, bool) {
+	e, ok := eligibility[repo]
+	if !ok {
+		return "", false
+	}
+	switch e {
+	case SessionEligible:
+		return "", false
+	case SessionUnconfigured:
+		return reasonSessionUnconfigured, true
+	case SessionAbsent:
+		return reasonSessionAbsent, true
+	case SessionProbeFailed:
+		return reasonSessionProbeFailed, true
+	default:
+		return reasonSessionEligibilityUnknown, true
+	}
+}
+
+// pastPlanApproval reports whether a persisted stage is at or past
+// plan_approved: the release boundary has been crossed, so admission no longer
+// re-checks the plan's hash (later phases may legitimately touch the file).
+func pastPlanApproval(s pipeline.Stage) bool {
+	switch s {
+	case pipeline.StagePlanApproved, pipeline.StageExecuted, pipeline.StageReviewed, pipeline.StageFinalized:
+		return true
+	default:
+		return false
+	}
+}
+
+// authorizationSkip evaluates the plan-authorization hold (#1464) for an
+// ordinary Planned ticket t with its matched plan. Default-deny: it returns
+// (reason, "", true) for every state that does not prove a release of these
+// plan bytes, and ("", note, false) otherwise.
+//
+//   - an unreadable state file, or an unreadable/unrecognized record: unreadable
+//     (a StageProbeError ticket maps here even when the stage gate is off);
+//   - a held record: awaiting human plan review, at any stage;
+//   - no record: unrecorded below plan_approved; at or past it, a legacy
+//     in-flight execution, admitted with noteLegacyApproval;
+//   - any other known kind: admitted at or past plan_approved without a hash
+//     re-check, and below it only when its hash is the plan's current one
+//     (otherwise plan changed since approval).
+func authorizationSkip(t Ticket, plan *Plan) (reason, note string, gated bool) {
+	if t.StageProbe == StageProbeError {
+		return reasonAuthorizationUnreadable, "", true
+	}
+	past := t.StageProbe == StageProbePresent && pastPlanApproval(pipeline.Stage(t.Stage))
+	switch t.AuthorizationProbe {
+	case AuthorizationProbeAbsent:
+		if past {
+			return "", noteLegacyApproval, false
+		}
+		return reasonAuthorizationUnrecorded, "", true
+	case AuthorizationProbeRecorded:
+	default:
+		return reasonAuthorizationUnreadable, "", true
+	}
+
+	a := t.Authorization
+	if !pipeline.IsPlanFingerprint(a.PlanSHA256) {
+		return reasonAuthorizationUnreadable, "", true
+	}
+	switch a.Kind {
+	case pipeline.AuthorizationHeld:
+		return reasonAuthorizationHeld, "", true
+	case pipeline.AuthorizationLean, pipeline.AuthorizationTrivial, pipeline.AuthorizationLeanResumed, pipeline.AuthorizationLeanDecided, pipeline.AuthorizationHuman:
+	default:
+		return reasonAuthorizationUnreadable, "", true
+	}
+	if past {
+		return "", "", false
+	}
+	if plan == nil || a.PlanSHA256 != plan.Sha256 {
+		return reasonAuthorizationChanged, "", true
+	}
+	return "", "", false
 }
 
 // blockingSibling returns the number of the sibling that blocks dispatch of

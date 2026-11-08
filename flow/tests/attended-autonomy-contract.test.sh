@@ -344,14 +344,14 @@ if require_doc PHASE1 "${PHASE1_REL}"; then
   else
     assert_contains_ws "${ROUTE_SECTION}" '**Lean mode, ticket mode** (`resolvedAutonomy` is `lean` — the repo'"'"'s `planning.autonomy` is exactly `"lean"` and no attended override narrowed it — **and** this is ticket mode)' \
       "phase-1-plan.md (## Route Planner Output) questions-exist bullet must gate on resolvedAutonomy while keeping the exact-lean repo condition"
-    # AC2: lean repo + attended + no questions -> ## New Plan, approval: human,
+    # AC2: lean repo + attended + no questions -> ## New Plan, approval: pending-human,
     # stop for plan review. Scoped to the no-questions bullet.
     NO_QUESTIONS_BULLET="$(extract_bullet "${ROUTE_SECTION}" '- If no questions (or none remain):')"
     if [[ -z "${NO_QUESTIONS_BULLET}" ]]; then
       fail "phase-1-plan.md (## Route Planner Output): could not locate the no-questions routing bullet"
     else
-      assert_contains_ws "${NO_QUESTIONS_BULLET}" 'An attended session in a `"lean"` repo lands here: the plan is persisted via `## New Plan`, its front matter records `approval: human`, and the session stops for plan review — it never takes `## Lean Approval Path` and never writes `approval: lean`.' \
-        "phase-1-plan.md (## Route Planner Output, no-questions bullet) must route an attended lean session to ## New Plan with approval: human"
+      assert_contains_ws "${NO_QUESTIONS_BULLET}" 'An attended session in a `"lean"` repo lands here: the plan is persisted via `## New Plan`, its front matter records `approval: pending-human`, and the session stops for plan review — it never takes `## Lean Approval Path` and never writes `approval: lean`.' \
+        "phase-1-plan.md (## Route Planner Output, no-questions bullet) must route an attended lean session to ## New Plan with approval: pending-human"
     fi
     assert_contains_ws "${ROUTE_SECTION}" '**Lean mode (`resolvedAutonomy` is `lean`), `## Clarifying Questions` is `None`, and `escalated` was never set this session**' \
       "phase-1-plan.md (## Route Planner Output) Lean-Approval routing bullet must gate on resolvedAutonomy"
@@ -414,7 +414,7 @@ LOOP_OVERRIDE_HEADING='#### The attended override'
 LOOP_NOT_A_SWITCH_MARKER='This is an override on switch 1, not an independent switch: it only ever suspends switch 1, never grants it.'
 OLD_LOOP_NOT_A_SWITCH_MARKER='This is an override, not a sixth switch: it only ever suspends switch 1, never grants it.'
 LOOP_ASKED_MARKER='a clarifying question is asked directly instead of being posted to the ticket — no `Input Needed` label, no `awaiting-input` draft, and no waiting for the next dispatch pass'
-LOOP_APPROVAL_HUMAN_MARKER='a plan with no escalations is **not** self-approved: it is saved, the session stops for you to read it, and its front matter records `approval: human`, not `approval: lean`'
+LOOP_APPROVAL_HUMAN_MARKER='a plan with no escalations is **not** self-approved: it is saved, the session stops for you to read it, and its front matter records `approval: pending-human`, not `approval: lean`'
 LOOP_SANDBOX_MARKER='the flag is forwarded at exec time as `CENCI_ATTENDED=1` or `CENCI_ATTENDED=0` — always explicitly, never "unset means off"'
 LOOP_SANDBOX_REBUILD_MARKER='Toggling it on the host takes effect on the next `cenci open`, with no container rebuild.'
 LOOP_DISPATCH_PIN_MARKER='Sessions `cenci dispatch` launches are pinned to `CENCI_ATTENDED=0` whatever the host flag says'
@@ -444,7 +444,7 @@ if require_repo_doc LOOP_DOC "${LOOP_REL}"; then
   assert_contains_ws "${LOOP_DOC}" "${LOOP_ASKED_MARKER}" \
     "docs/autonomous-loop.md must state the no-comment/no-label/no-draft attended behavior"
   assert_contains_ws "${LOOP_DOC}" "${LOOP_APPROVAL_HUMAN_MARKER}" \
-    "docs/autonomous-loop.md must state the attended plan stops for review and records approval: human"
+    "docs/autonomous-loop.md must state the attended plan stops for review and records approval: pending-human"
   assert_contains_ws "${LOOP_DOC}" "${LOOP_SANDBOX_MARKER}" \
     "docs/autonomous-loop.md must document the CENCI_ATTENDED sandbox forward"
   assert_contains_ws "${LOOP_DOC}" "${LOOP_SANDBOX_REBUILD_MARKER}" \

@@ -556,10 +556,11 @@ not used for ownership. If the active GitHub login cannot be resolved, the pass 
 closed and launches nothing.
 
 ```bash
-# Print the decision table without spawning anything
+# Print the decision table without spawning anything (a single preview pass)
 cenci dispatch --dry-run
 # owner/name#45 skip: not Planned
-# owner/name#78 dispatch (claude, 78-add-cache.md): dispatch
+# owner/name#80 skip: awaiting human plan review
+# owner/name#78 dispatch (claude, 78-add-cache.md, session "work"): dispatch; session not probed (dry-run)
 
 # Run a single pass
 cenci dispatch --once
@@ -569,6 +570,10 @@ cenci dispatch --interval 5m
 
 # Run a single failure-reconciliation pass (recover stranded dispatched work)
 cenci dispatch --reconcile
+
+# Release a plan held for human review, after reading it (attended sessions only)
+cenci dispatch approve 80
+# approved #80: .plans/80-add-retry.md (sha256 3f9a1c0b7e42)
 ```
 
 | Flag | Purpose |
@@ -576,7 +581,7 @@ cenci dispatch --reconcile
 | `--once` | Run a single dispatch pass then exit (the default when neither `--once` nor `--interval` is given) |
 | `--interval <dur>` | Re-run on this interval (e.g. `5m`); mutually exclusive with `--once` |
 | `--reconcile` | Run one failure-reconciliation pass instead of a dispatch pass (see [Failure reconciliation](#failure-reconciliation)); pair with a cron entry |
-| `--dry-run` | Print the decision (or reconciliation) table and never merge; it still runs the local-main sync's `git fetch` for real (updates each enrolled repo's remote-tracking refs only, so the decision table reflects an accurate gate) — see [Pickup rules and gates](#pickup-rules-and-gates) |
+| `--dry-run` | Print the decision (or reconciliation) table and never spawn, edit a label or merge; it still runs the local-main sync's `git fetch` for real (updates each enrolled repo's remote-tracking refs only, so the decision table reflects an accurate gate) — see [Pickup rules and gates](#pickup-rules-and-gates). A dry run never probes tmux: a repo with no `repos[].session` shows `session unconfigured`, and a dispatch into a configured session is noted `session not probed (dry-run)`. **`--dry-run` cannot be combined with `--interval`** (ticket #1464): `cenci dispatch --dry-run --interval 5m` (in any flag spelling) exits `2` before loading config, with `cenci dispatch: --dry-run cannot be combined with --interval (continuous dry-run is not supported); use --dry-run --once for a single preview pass`. `--dry-run --interval 5m --once`, `--reconcile --dry-run --interval 5m` and `--interval 0 --dry-run` each still run a single preview pass |
 | `--config <path>` | Config file (default: `$XDG_CONFIG_HOME/cenci/config.json`) |
 | `--model <model>` | Model override for every session dispatched this pass — overrides `dispatch.model` and `agents.*.model` in `config.json`. With `--interval`, re-applied on every tick (a config reload can't drop it). |
 
@@ -586,6 +591,45 @@ a reason — so nothing fails silently. When a model is pinned (via `--model` or
 (`dispatch: model override "..."`), so a dispatched session's model is never a
 silent surprise — without a pin, it falls back to `agents.*.model`, or otherwise
 whatever ambient default the agent CLI itself resolves.
+
+A decision can carry a note after its reason, separated by `; `: a dry-run dispatch
+reads `...: dispatch; session not probed (dry-run)`, and an in-flight legacy execution
+reads `...: dispatch; legacy approval (unrecorded provenance)`. A note never turns a
+dispatch into a skip, and the ` skip:`/` dispatch ` substrings stay as they were.
+
+### Approving a held plan (`cenci dispatch approve`)
+
+A plan saved for human review (Phase 1's `## New Plan` fallback, front matter
+`approval: pending-human`) is recorded as `held` in `.cenci/pipeline/<id>.json` and
+skipped with `awaiting human plan review` on every pass until a human releases it
+(ticket #1464; see [Plan authorization](#plan-authorization) below). Read the plan,
+then release exactly those bytes from an attended session:
+
+```bash
+cenci dispatch approve <id> [--repo PATH]
+```
+
+- On release it exits `0` and prints `approved #<id>: <plan path> (sha256 <first 12 hex>)`,
+  plus `replaced authorization record: <kind>` when it replaced a record (`held`, an
+  earlier `human` approval for other bytes, or an unreadable one). It records
+  `authorization.kind: human` (source `cli`) bound to the plan file's SHA-256, and the
+  next pass launches the ticket with its `.plans/<file>` argument.
+- A plan that is not held (`lean`, `trivial`, `lean-resumed`, `lean-decided` or an
+  approval for these same bytes) exits `0` with `#<id> is not awaiting human review
+  (<kind>)` and leaves the state file byte-identical.
+- Exit `1`, writing nothing, for: an unattended session (`approval requires an attended
+  session`), no plan file (`no plan file for #<id>`), several plan files (both paths
+  named), an awaiting-input draft (answer the escalation on the ticket instead), or an
+  unreadable state file or symlinked `.cenci/pipeline` level.
+- No id or an extra positional exits `2` with usage. `--repo` overrides the repo root
+  (default: the git repo containing the current directory).
+
+Approval is bound to content: if the plan file changes afterwards, the next pass skips
+the ticket with `plan changed since approval`, and running `cenci dispatch approve`
+again releases the new bytes. The release is local by design: no GitHub comment, label
+or answered question can release a held plan. Launching `/cenci:implement .plans/<file>`
+yourself (attended) is the other release channel: its Phase 2 `cenci pipeline plan
+<id> --approve` records the same `human` approval (source `attended-launch`).
 
 ### Enrollment (`cenci dispatch enroll|unenroll|status`)
 
@@ -660,9 +704,12 @@ adds a `Memory headroom: <N>%` line (`disabled` when `0`). `last_dispatched` cou
 spawns (not merely dispatch decisions), and `last_error` is intentionally redacted to
 `dispatch_pass_failed`, `reconcile_pass_failed`, `reconcile_state_unreadable`
 (ticket #883, a persistent reconciliation-state corruption hold — see "Corrupt
-reconciliation state" below), `dispatch_session_unconfigured`, or
+reconciliation state" below), `dispatch_session_unconfigured`,
 `dispatch_session_missing` (ticket #927: at least one enrolled repo's `session` is
-unset, or names a tmux session absent from the server); detailed errors stay in
+unset, or names a tmux session absent from the server), or
+`dispatch_session_probe_failed` (ticket #1464: the `tmux has-session` probe for a
+repo's configured session itself failed), ranked in that order after
+`reconcile_state_unreadable` and ahead of `dispatch_pass_failed`; detailed errors stay in
 daemon logs.
 
 This daemon-embedded path (`dispatch loop on` alongside a running `cenci daemon`)
@@ -670,15 +717,17 @@ is the canonical way to run dispatch continuously. `cenci dispatch --interval
 <duration>` (see [Auto-dispatch](#auto-dispatch-cenci-dispatch)) remains a
 separate, standalone loop for running dispatch directly from the CLI without a daemon.
 It stops and exits nonzero on its first pass error, except a per-repo
-session skip (`dispatch_session_unconfigured`/`dispatch_session_missing`, ticket
-#927): that is logged and the loop keeps ticking, since it names a single
+session skip (`ErrSessionUnconfigured`, `ErrSessionMissing` or `ErrSessionProbeFailed`,
+tickets #927 and #1464): that is logged and the loop keeps ticking, since it names a single
 misconfigured repo rather than a fleet-wide failure. A failed config *reload*
 (for example a bad edit to a [machine-local filter](#machine-local-filters)) behaves
 the same way: the pass is skipped, nothing is dispatched, `dispatch: loading config: …`
 is logged and the loop keeps ticking, so correcting the file restores dispatch on the
-next pass. Only the initial load at startup exits nonzero. One-shot, dry-run, and
-reconcile invocations still exit nonzero on any pass error, including a session
-skip — so the misconfiguration is loud interactively.
+next pass. Only the initial load at startup exits nonzero. One-shot and reconcile
+invocations still exit nonzero on any pass error, including a session skip — so the
+misconfiguration is loud interactively. A dry run probes no session and returns no
+session sentinel, so its exit code never depends on tmux. There is no continuous
+dry run: `--dry-run` with `--interval` is rejected with exit `2`.
 
 ### Planning-pickup toggle (`cenci dispatch plan-refined on|off|status`)
 
@@ -941,6 +990,26 @@ failing gate is the logged skip reason):
    precedence over it. This gate does not stop two pickups in one pass: the reading
    does not change until the new session allocates memory, and bounding that is
    `concurrencyCap`'s job;
+10.5. **session eligibility** — the ticket's repo has a configured `repos[].session`
+   that exists in tmux this pass (ticket #1464), else `session unconfigured` (empty or
+   whitespace-only `session`), `session absent` (`tmux has-session` reports it
+   missing) or `session probe failed` (the probe itself errored). The verdict is
+   resolved once per pass, before any decision, for every repo holding a `Planned`,
+   `Input Needed` or `Refined` ticket, with one probe per distinct trimmed session
+   name, so repos sharing a session share one probe. Each ineligible repo logs one
+   `dispatch:` line naming its remedy. It applies to every pickup type, and because it
+   sits ahead of the cap a misconfigured repo's ticket never takes a slot a healthy
+   repo could use. The probe and the spawn both use the trimmed configured name;
+   the ambient/current tmux session is never consulted. A dry run probes nothing: it
+   still reports `session unconfigured` from config, and notes a dispatch into a
+   configured session `session not probed (dry-run)`;
+10.75. **plan authorization** — an ordinary `Planned` dispatch (never a resume,
+   planning pickup or re-plan) needs a plan-authorization record that releases these
+   exact plan bytes, else `awaiting human plan review`, `plan changed since approval`,
+   `plan authorization unrecorded (legacy plan; run cenci dispatch approve)` or
+   `plan authorization unreadable` (see [Plan authorization](#plan-authorization)
+   below). It runs regardless of `dispatch.pipelineStageGate` and, sitting ahead of
+   the cap, a held ticket never takes a slot either;
 11. `running + orphaned container sessions + dispatched-this-pass` is below
    `concurrencyCap`. Orphaned container sessions are the distinct (tmux socket,
    launch ID) pairs — (tmux socket, pane) for processes that carry no launch
@@ -965,6 +1034,56 @@ never reads `StatusSummary.Escalated` (ticket #826: a ticket the unattended
 planner escalated, `Input Needed`). The two are different concepts and must
 never be conflated: a single planner escalation must never freeze dispatch
 for the whole fleet the way `needInputThreshold` windows-awaiting-input can.
+
+#### Plan authorization
+
+A `Planned` ticket's plan launches unattended only if a plan-authorization record says
+who released it, for which exact bytes (ticket #1464). The record is the `authorization`
+field of `.cenci/pipeline/<id>.json`: `kind`, `planSha256` (SHA-256 of the plan file's
+exact bytes), `recordedAt` and, for `human` only, `source` (`cli` or `attended-launch`).
+No username or hostname is stored.
+
+| Kind | Written by |
+|------|------------|
+| `held` | `cenci pipeline plan <id> --authorization held`: Phase 1's `## New Plan` fallback (sensitive-path backstop, unresolved Open Questions); front matter `approval: pending-human` (or `lean-decided` when it carries decisions) |
+| `lean`, `lean-decided`, `trivial`, `lean-resumed` | `cenci pipeline plan <id> --authorization <kind>` on the Lean Approval Path, the Trivial Fast Path and Resume From Draft |
+| `human` | only `cenci dispatch approve <id>` (source `cli`) or an attended `cenci pipeline plan <id> --approve` (source `attended-launch`) |
+
+What dispatch does with it:
+
+| Record | Decision |
+|--------|----------|
+| `held` | skip `awaiting human plan review` |
+| none, below `plan_approved` | skip `plan authorization unrecorded (legacy plan; run cenci dispatch approve)` |
+| none, at or past `plan_approved` | dispatch, noted `legacy approval (unrecorded provenance)` (an in-flight execution) |
+| undecodable, unknown kind, malformed hash, or an unreadable state file | skip `plan authorization unreadable` |
+| any other kind, below `plan_approved`, plan bytes changed | skip `plan changed since approval` |
+| any other kind, matching bytes, or at or past `plan_approved` | dispatch (no hash re-check once execution has started) |
+
+Every skip launches nothing and edits no label. Release a held plan with
+[`cenci dispatch approve`](#approving-a-held-plan-cenci-dispatch-approve), or by
+launching `/cenci:implement .plans/<file>` yourself. The same rules are enforced again
+at the execution boundary by `cenci pipeline plan <id> --approve` (see
+[Pipeline stage commands](#pipeline-stage-commands-cenci-pipeline)). Limits and the
+content-exact binding are documented in `watch/docs/dispatch-reconcile.md`.
+
+**Who is unattended.** A session counts as unattended when `CENCI_ATTENDED` is exactly
+`0` and `CENCI_ATTENDED_ORIGIN` is not `host-config`. Every dispatched session pins
+`CENCI_ATTENDED=0`. The sandbox launcher forwards `CENCI_ATTENDED_ORIGIN` beside it:
+`pinned` when the value came from its own environment (the dispatcher's pin),
+`host-config` when it read the fleet's `planning.attended` (a human `cenci open`/`cenci
+run` session), and `config-unreadable` when it could not read the fleet config and fell
+back to `CENCI_ATTENDED=0`. Only the exact `host-config` is attended; `pinned`,
+`config-unreadable`, any other value and a missing marker all count as unattended. A
+launch that cannot read the config prints one `Warning: cannot read planning.attended
+...` line. The marker is launcher-owned and cannot be set through
+`sandboxEnv.forward`, which reserves the `CENCI_` prefix.
+
+**Version skew.** Upgrade the binary and the flow plugin together. A new plugin calling an
+old binary fails `cenci pipeline plan --authorization` with exit `2`, and the pipeline
+stops. An old plugin calling a new binary records no authorization, so its plans are
+held visibly as `plan authorization unrecorded`. A sandbox started by an older launcher
+forwards no origin marker, so it counts as unattended until it is relaunched.
 
 #### Local main sync
 
@@ -1471,7 +1590,7 @@ Dispatch reads the same `config.json` as `run`, under a top-level `"dispatch"` b
 
 | Key | Default | Purpose |
 |-----|---------|---------|
-| `repos` | — | Repos to scan; each entry requires `repo`, `dir` (holds that repo's `.plans/` and git tree), and `session` (the tmux session that repo's dispatched windows target — never an ambient/current session). Normally managed via `cenci dispatch enroll`/`unenroll` (see [Enrollment](#enrollment-cenci-dispatch-enrollunenrollstatus)) rather than hand-edited, though hand-editing remains supported. A repo whose `session` is empty or names a tmux session that doesn't exist is skipped entirely for that pass (`dispatch: no target tmux session for <repo>; set repos[].session in <config path>`, or the equivalent "not found in tmux" line naming the remedy `tmux new-session -d -s <name>`) — every other enrolled repo still dispatches normally in the same pass. |
+| `repos` | — | Repos to scan; each entry requires `repo`, `dir` (holds that repo's `.plans/` and git tree), and `session` (the tmux session that repo's dispatched windows target — never an ambient/current session). Normally managed via `cenci dispatch enroll`/`unenroll` (see [Enrollment](#enrollment-cenci-dispatch-enrollunenrollstatus)) rather than hand-edited, though hand-editing remains supported. A repo whose `session` is empty, names a tmux session that doesn't exist, or whose `tmux has-session` probe fails has its tickets skipped for that pass with `session unconfigured`, `session absent` or `session probe failed` (each logged once: `dispatch: no target tmux session for <repo>; set repos[].session in <config path>`, the "not found in tmux" line naming the remedy `tmux new-session -d -s <name>`, or the "probing configured session ... failed" line). The check runs before the concurrency cap, so every other enrolled repo still dispatches normally in the same pass and never loses a slot to it (see [Pickup rules and gates](#pickup-rules-and-gates)). |
 | `repos[].filters` | none | Optional machine-local pickup filter on a `repos` entry: `milestones` (repo-local numbers), `labelsAll`, `labelsAny`, `labelsNone`. Dimensions AND together; omitted, `{}` and empty lists mean no restriction; an unknown key, `null`, wrong type or invalid entry is a config error that stops every repo for that pass. Read only from this user config, never a committed `.cenci/config.json`. See [Machine-local filters](#machine-local-filters) |
 | `concurrencyCap` | `3` | Max concurrent running sessions (counts in-flight windows, orphaned container sessions still alive after their pane closed, and this pass's dispatches) |
 | `needInputThreshold` | `1` | Pause dispatch when at least this many windows await input |
@@ -2306,8 +2425,9 @@ Go tests rather than prompt interpretation:
 ```bash
 cenci pipeline prepare 42            # new -> prepared (confirms the ticket exists via `gh issue view`)
 cenci pipeline plan 42               # prepared -> waiting_for_plan_approval (or waiting_for_input -> waiting_for_plan_approval on resume)
+cenci pipeline plan 42 --authorization held   # the same, recording who may release the plan (ticket #1464)
 cenci pipeline await-input 42        # prepared -> waiting_for_input (unattended planner escalation; ticket #826)
-cenci pipeline plan 42 --approve     # waiting_for_plan_approval -> plan_approved (run after human approval)
+cenci pipeline plan 42 --approve     # waiting_for_plan_approval -> plan_approved, through the authorization gate
 cenci pipeline execute 42            # plan_approved -> executed (blocked before a plan is approved)
 cenci pipeline review 42             # executed -> reviewed
 cenci pipeline finalize 42           # reviewed -> finalized
@@ -2344,6 +2464,33 @@ Behavior:
 - `execute` is blocked until the plan has been explicitly approved
   (`plan --approve`); running it any earlier is a domain error, not a
   transition.
+- `plan --authorization <held|lean|trivial|lean-resumed|lean-decided>`
+  (ticket #1464) records the plan-authorization record described in
+  [Plan authorization](#plan-authorization), bound to the SHA-256 of the plan
+  file as it stands at the call. It records even when the stage step is a
+  no-op. `held` always overwrites. An unattended autonomous kind over a `held`
+  record for the same plan bytes is refused with `errors[]` (a held plan
+  cannot be downgraded). An autonomous kind over a `human` approval of the same
+  bytes keeps it and adds a warning. An unattended autonomous kind (`lean`,
+  `trivial`, `lean-resumed`, `lean-decided`) over an `unreadable` record is
+  refused with `errors[]` and nothing is saved (recover with `cenci dispatch
+  approve`); `held` still overwrites it, and an attended persist overwrites it
+  and warns, naming the replaced kind. Omitting the flag leaves the recorded
+  authorization unchanged, which is how a re-record of an existing plan stays
+  held or approved. `human` is never accepted here.
+- `plan --approve` is the execution-boundary authorization gate (ticket
+  #1464). In an **unattended** session (`CENCI_ATTENDED=0`, see
+  [Plan authorization](#plan-authorization)) a transition from
+  `waiting_for_plan_approval` is admitted only for a recorded, non-held
+  authorization whose hash matches the plan's current bytes; a held, changed,
+  unrecorded or unreadable record returns `errors[]`, exits `1` and leaves the
+  stage at `waiting_for_plan_approval`. At or past `plan_approved` (the no-op)
+  it refuses only a held or unreadable record. In an **attended** session it
+  records `human` (source `attended-launch`) for the current hash over a held,
+  absent or changed record, keeps a matching autonomous or human one, and
+  refuses an unreadable one, pointing to `cenci dispatch approve`. Adoption
+  (below) goes through the same gate: an unattended adoption with no record is
+  refused, an attended one records `human`.
 - `await-input` (ticket #826) is the unattended planner-escalation stage:
   `prepared -> waiting_for_input`, reusing bare `plan`'s own "too early"
   sentinel (a ticket that never reached `prepared` cannot escalate either).
@@ -2386,7 +2533,9 @@ Behavior:
   **domain error**: the full JSON contract still prints on stdout with
   `errors` populated, and the process exits `1`.
 - Malformed CLI usage (unknown/missing stage, missing or non-numeric `<id>`,
-  an unrecognized flag, `--approve` on any stage but `plan`, or a trailing
+  an unrecognized flag, `--approve` on any stage but `plan`,
+  `--authorization` on any stage but `plan`, together with `--approve`, or with
+  a value outside its closed set (including `human`), or a trailing
   unexpected argument) prints a one-line hint to stderr and exits `2` —
   no JSON is printed for these.
 

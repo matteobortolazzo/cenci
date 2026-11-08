@@ -46,6 +46,7 @@ import (
 	"time"
 
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/ipc"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/pipeline"
 	"github.com/matteobortolazzo/cenci/watch/v2/pkg/watch"
 )
 
@@ -404,6 +405,15 @@ func newChainHarness(t *testing.T) *chainHarness {
 	t.Setenv("GITHUB_ENTERPRISE_TOKEN", "")
 	t.Setenv("GH_HOST", "")
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	// #1464: every pipeline.Run this harness drives stands in for a
+	// dispatched worker, and applyDispatch pins those sessions unattended
+	// (CENCI_ATTENDED=0, no host-config origin marker). Pinned here so the
+	// plan-authorization rules the chain exercises never depend on the
+	// developer's ambient posture: an attended shell would silently release
+	// every held plan at `plan --approve`. A test that plays the human (the
+	// `cenci dispatch approve` release) flips this for that one call only.
+	t.Setenv(pipeline.AttendedEnv, "0")
+	t.Setenv(pipeline.AttendedOriginEnv, "")
 	mainSyncGitEnv(t)
 	local, origin := initOriginAndLocal(t)
 

@@ -234,7 +234,8 @@ func TestParity_UnattributableFile_HoldsNothing_SiblingTicketUnaffectedBothSides
 		Budgets:         FloorProvider{},
 		CurrentUser:     "octocat",
 	}
-	in.Tickets = []Ticket{{Repo: "o/r", Number: 42, Labels: []string{"Planned"}, Assignees: []string{"octocat"}}}
+	in.Tickets = []Ticket{authorized(Ticket{Repo: "o/r", Number: 42, Labels: []string{"Planned"}, Assignees: []string{"octocat"}})}
+	in.Tickets[0].Authorization.PlanSHA256 = scan.Plans[0].Sha256 // approved these exact bytes
 	assertDecisions(t, Decide(in), []wantDecision{{42, ActionDispatch, "dispatch", "claude"}})
 
 	// -- pipeline side -- ReplanRequested: true short-circuits straight past

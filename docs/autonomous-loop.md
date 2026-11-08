@@ -185,9 +185,31 @@ Other paths reach a plan without human review and are labelled distinctly:
 `approval: trivial` (triage judged the ticket trivial and skipped planning entirely),
 `approval: lean-resumed` (planning escalated, you answered the questions on the
 ticket, and the plan those answers produced was never shown to you),
-and `approval: lean-decided` (the plan carries at least one planner decision, and its plan comment names them). `approval: human`
-is the ordinary path where you read the plan and launched the run. Plans written before
-this key existed carry none — that means unrecorded, not unapproved.
+and `approval: lean-decided` (the plan carries at least one planner decision, and its plan comment names them).
+`approval: pending-human` is a plan saved for you to review: planning stopped short of
+self-approval (a sensitive path, an unresolved Open Question, or an attended session),
+and the plan is held until you release it. Its plan comment uses the ordinary banner.
+`approval: human` is still read on old plans but is no longer written by any path.
+Plans written before this key existed carry none — that means unrecorded, not unapproved.
+
+**A held plan never launches by itself.** Front matter is only a label: the hold lives
+in `.cenci/pipeline/<id>.json` as an `authorization` record bound to the SHA-256 of the
+plan file's exact bytes. A plan saved for review records `held`, even when its front
+matter reads `approval: lean-decided` (the value the self-approving path writes too).
+Every dispatch pass skips it with `awaiting human plan review`, launching nothing and
+editing no label. Read the plan, then release exactly those bytes:
+
+```bash
+cenci dispatch approve <id>
+# approved #<id>: .plans/<id>-<slug>.md (sha256 <first 12 hex>)
+```
+
+The next pass launches it. If the plan file changes after you approve it, the next pass
+skips it with `plan changed since approval` until you approve it again. Launching
+`/cenci:implement .plans/<file>` yourself releases it too: that attended run records
+the same approval. `cenci dispatch approve` refuses to run in an unattended session,
+and nothing posted on GitHub (a comment, a label, an answered question) can release a
+held plan.
 
 **Planner decisions.** In lean mode the planner no longer stops to ask the contradiction
 and product-ambiguity questions it can justify from the repo (one option, with a rationale
@@ -229,7 +251,7 @@ With it on, a planning session in a `"lean"` repo behaves as `"interactive"`:
 - a clarifying question is asked directly instead of being posted to the ticket — no
   `Input Needed` label, no `awaiting-input` draft, and no waiting for the next dispatch pass;
 - a plan with no escalations is **not** self-approved: it is saved, the session stops for
-  you to read it, and its front matter records `approval: human`, not `approval: lean`;
+  you to read it, and its front matter records `approval: pending-human`, not `approval: lean`;
 - supported contradiction and product-ambiguity choices are recorded as `auto-adopted:` answers for plan review; only consequential or unresolved questions are asked in the session. The planner emits no `decided:` entry and the fresh plan never records `approval: lean-decided`.
 
 This is an override on switch 1, not an independent switch: it only ever suspends switch 1, never grants it.
@@ -479,6 +501,26 @@ Planning also auto-adopts a settled posture: a posture already settled verbatim 
 
 **Dispatch won't pick up into a starved container.** A repo whose most-loaded running container has less than `dispatch.memoryHeadroom` (default 25%) of its memory limit free is skipped until it recovers; an unreadable reading skips it too.
 
+**A plan saved for review waits for you.** When planning stops short of self-approval,
+the plan is saved as `held` and stays out of every dispatch pass until
+`cenci dispatch approve <id>` (or your own attended launch of the plan) releases its
+exact bytes. A plan changed after approval waits again. A plan whose authorization was
+never recorded (saved by an older plugin) or cannot be read waits as well, under its own
+reason. The same check runs again when the run reaches `cenci pipeline plan <id>
+--approve`, so a plan-file launch alone never counts as approval in an unattended
+session. A held ticket takes no concurrency slot.
+
+**Dispatch won't launch into a session that isn't there.** Before any capacity is
+handed out, each repo's configured `repos[].session` is checked once per pass. A repo
+with no session, a session tmux doesn't have, or a probe that fails has its tickets
+skipped under that reason, and the slot goes to a healthy repo instead. Dispatch never
+falls back to whichever tmux session happens to be current.
+
+**A preview is only ever one pass.** `cenci dispatch --dry-run` previews a single pass
+and changes nothing. `--dry-run` cannot be combined with `--interval`: that command exits
+`2` before reading any config, because the continuous loop runs real passes. Use
+`--dry-run --once` (or plain `--dry-run`) for a preview.
+
 **An OOM-recovered ticket waits before it re-launches.** A session the kernel's out-of-memory killer ended is re-queued on its own `dispatch.oomRetryBudget` (default 3), and the ticket waits `dispatch.oomBackoff` (default 10m) before dispatch picks it up again.
 
 **The merge chain is fail-closed at every link.** "Green" requires at least one check
@@ -521,6 +563,26 @@ claiming the PR is being watched, and the loop stalls honestly on that PR — an
 never reaches an automerge tick — rather than silently pretending it is supervised.
 
 ## Reading a decision
+
+### Dispatch
+
+Every dispatch pass logs exactly one line per ticket, either `<repo>#<n> skip: <reason>`
+or `<repo>#<n> dispatch (<agent>, <plan file>, session "<name>"): <reason>`. A note can
+follow the reason after `; `; it never changes the outcome.
+
+| Line text | Meaning |
+|---|---|
+| `skip: awaiting human plan review` | The plan is held for you; run `cenci dispatch approve <id>` after reading it |
+| `skip: plan changed since approval` | The plan file changed after you approved it; approve it again |
+| `skip: plan authorization unrecorded (legacy plan; run cenci dispatch approve)` | No authorization was recorded for a plan that has not started executing |
+| `skip: plan authorization unreadable` | The authorization record or the ticket's pipeline state file cannot be read |
+| `skip: session unconfigured` | The repo has no `repos[].session`; set one with `cenci dispatch enroll --session <name>` |
+| `skip: session absent` | The configured tmux session does not exist; create it |
+| `skip: session probe failed` | tmux could not be asked whether the session exists |
+| `...; session not probed (dry-run)` | A preview: dry runs never ask tmux, so the session is unverified |
+| `...; legacy approval (unrecorded provenance)` | An execution already under way before authorization records existed; it continues |
+
+### Babysit
 
 Every enabled tick logs exactly one line per PR, including ticks that failed to read
 upstream state:

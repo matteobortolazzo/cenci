@@ -17,10 +17,25 @@ package pipeline
 
 import (
 	"errors"
+	"os"
 	"path/filepath"
 	"slices"
 	"testing"
 )
+
+// TestMain pins the package's baseline posture to a human at the keyboard.
+// The authorization gate (authorization.go) reads CENCI_ATTENDED and its
+// origin marker, and the developer sandbox these tests run in sets
+// CENCI_ATTENDED=0 ambiently; a test that cares about the posture pins it
+// itself (setAttended / setUnattended).
+func TestMain(m *testing.M) {
+	for _, name := range []string{AttendedEnv, AttendedOriginEnv} {
+		if err := os.Unsetenv(name); err != nil {
+			panic("unset " + name + ": " + err.Error())
+		}
+	}
+	os.Exit(m.Run())
+}
 
 // -- warnings plumbing (#636 AC5) --------------------------------------------
 
@@ -142,8 +157,9 @@ func TestRun_NoOp_NeverRewindsPersistedState(t *testing.T) {
 // working` (past-minimum today, since the minimum is `prepared`), `plan
 // --approve`, and `execute` must all succeed with empty errors[].
 func TestResumeSequence_PlanFileResume_FromWaitingForPlanApproval(t *testing.T) {
-	stateDir := t.TempDir()
-	mustSeedState(t, stateDir, "42", StageWaitingForPlanApproval)
+	setAttended(t)
+	f := newAuthFixture(t, StageWaitingForPlanApproval)
+	stateDir := f.stateDir
 	gh := newFakeGh(t, "octocat", []string{"octocat"})
 	gh.install()
 
@@ -151,7 +167,7 @@ func TestResumeSequence_PlanFileResume_FromWaitingForPlanApproval(t *testing.T) 
 		t.Fatalf("label --transition working: %v", err)
 	}
 
-	out, err := Run(Opts{Stage: "plan", ID: "42", Approve: true, StateDir: stateDir})
+	out, err := f.approve()
 	if err != nil {
 		t.Fatalf("plan --approve: %v", err)
 	}
@@ -160,6 +176,9 @@ func TestResumeSequence_PlanFileResume_FromWaitingForPlanApproval(t *testing.T) 
 	}
 	if out.State != string(StagePlanApproved) {
 		t.Errorf("plan --approve: Output.State = %q, want %q", out.State, StagePlanApproved)
+	}
+	if rec, class := f.record(t); class != AuthorizationRecorded || rec.Kind != AuthorizationHuman {
+		t.Errorf("persisted authorization = %+v (%s), want the attended approve to record human", rec, class)
 	}
 
 	out, err = Run(Opts{Stage: "execute", ID: "42", StateDir: stateDir})
@@ -248,7 +267,10 @@ func TestResumeSequence_ReplanOverExecuted(t *testing.T) {
 // flow-side decision), `plan --approve`, and `execute` must all succeed
 // with empty errors[].
 func TestResumeSequence_StageNew_PrepareThenFullSequence(t *testing.T) {
+	setAttended(t)
 	stateDir := t.TempDir()
+	repoRoot := t.TempDir()
+	mustWriteValidAdoptPlan(t, repoRoot, "42", "add-thing")
 	gh := newFakeGh(t, "octocat", []string{"octocat"})
 	gh.install()
 
@@ -278,7 +300,7 @@ func TestResumeSequence_StageNew_PrepareThenFullSequence(t *testing.T) {
 		t.Errorf("plan: Output.State = %q, want %q (a real transition, not skipped)", out.State, StageWaitingForPlanApproval)
 	}
 
-	out, err = Run(Opts{Stage: "plan", ID: "42", Approve: true, StateDir: stateDir})
+	out, err = Run(Opts{Stage: "plan", ID: "42", Approve: true, RepoRoot: repoRoot, StateDir: stateDir})
 	if err != nil {
 		t.Fatalf("plan --approve: %v", err)
 	}

@@ -3,13 +3,81 @@ package dispatch
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
+
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/run"
+	"github.com/matteobortolazzo/cenci/watch/v2/pkg/watch"
 )
+
+// failingProbeController is a goroutine-safe run.Controller whose HasSession
+// always errors, counting its calls (RunLoop runs on its own goroutine).
+type failingProbeController struct{ probes atomic.Int32 }
+
+func (*failingProbeController) CurrentSession(string) (string, error) {
+	return "", errors.New("the dispatch path must never consult CurrentSession")
+}
+func (*failingProbeController) IsGroupedSession(string, string) (bool, error) { return false, nil }
+func (*failingProbeController) NewWindow(string, string, string, string) error {
+	return errors.New("a probe-failed repo must never spawn")
+}
+func (*failingProbeController) SetWindowOption(string, string, string, string) error { return nil }
+func (c *failingProbeController) HasSession(string, string) (bool, error) {
+	c.probes.Add(1)
+	return false, errors.New("tmux: lost server")
+}
+
+// TestRunLoop_SessionProbeFailedKeepsTicking (#1464): a pass that returns
+// ErrSessionProbeFailed does not stop RunLoop -- the next tick runs. The fake gh
+// fails the identity read on the second tick, a genuinely fatal error, so the
+// loop's return proves that tick ran and the test needs no stop seam.
+func TestRunLoop_SessionProbeFailedKeepsTicking(t *testing.T) {
+	mainSyncGitEnv(t)
+	serveChainSnapshot(t, watch.StateSnapshot{})
+	local, _ := initOriginAndLocal(t)
+	planSha := gitTest(t, local, "rev-parse", "HEAD")
+	writePlan(t, local, "42-x.md", "---\nticketId: 42\nstatus: planned\nplanCommitSha: "+planSha+"\n---\nbody\n")
+	path := filepath.Join(t.TempDir(), "config.json")
+	writeFile(t, path, fmt.Sprintf(`{"dispatch": {"repos": [{"repo": "o/r", "dir": %q, "session": "ghost"}]}}`, local))
+
+	marker := filepath.Join(t.TempDir(), "identity-read")
+	installFakeGHOnPath(t, `
+case "$1 $2" in
+  "issue list") printf '[{"number":42,"title":"Fix thing","labels":[{"name":"Planned"}],"assignees":[{"login":"octocat"}]}]' ;;
+  "api graphql") printf '`+emptyOpenPRPageJSON+`' ;;
+  "api user")
+    if [ -e '`+marker+`' ]; then printf 'token expired\n' >&2; exit 1; fi
+    : > '`+marker+`'
+    printf 'octocat\n' ;;
+  *) exit 1 ;;
+esac
+`)
+	stubRunFn(t, func(run.Opts, run.Controller) error { return errors.New("a probe-failed repo must never spawn") })
+
+	ctrl := &failingProbeController{}
+	done := make(chan error, 1)
+	go func() { done <- RunLoop(path, ctrl, &fakeMutator{}, 10*time.Millisecond, io.Discard, "") }()
+
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "detecting current GitHub user") {
+			t.Fatalf("RunLoop returned %v, want the second tick's identity failure (the probe-failed first tick must not stop the loop)", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("RunLoop did not reach its second tick")
+	}
+	if got := ctrl.probes.Load(); got != 1 {
+		t.Errorf("HasSession probes = %d, want 1 (the first tick's)", got)
+	}
+}
 
 // -- SetLoopEnabled --------------------------------------------------------
 

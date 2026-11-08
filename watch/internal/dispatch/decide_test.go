@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/pipeline"
 	"github.com/matteobortolazzo/cenci/watch/v2/pkg/watch"
 )
 
@@ -60,12 +61,42 @@ func snapshot(running, needInput int, windows ...watch.WindowState) *watch.State
 	}
 }
 
-// baseInputs is the happy path: one Planned ticket #42 with a planned, fresh
-// plan and a reachable, idle daemon.
+// testPlanSha is the plan fingerprint in-memory fixture plans carry
+// (Plan.Sha256) and authorized() binds its record to, so the pair reads as an
+// approved, unchanged plan (#1464).
+var testPlanSha = pipeline.PlanFingerprint("fixture plan bytes\n")
+
+// authorized returns t carrying a recorded `lean` authorization bound to
+// testPlanSha -- the fixture form of a plan Phase 1 approved unattended. The
+// admission hold (#1464) is default-deny, so every in-memory ordinary Planned
+// fixture that expects a dispatch below plan_approved needs it, together with
+// a plan whose Sha256 is testPlanSha (see authorizedAll).
+func authorized(t Ticket) Ticket {
+	t.Authorization = pipeline.Authorization{Kind: pipeline.AuthorizationLean, PlanSHA256: testPlanSha}
+	t.AuthorizationProbe = AuthorizationProbeRecorded
+	return t
+}
+
+// authorizedAll applies authorized to every ticket in place and stamps
+// testPlanSha on every plan that has none -- for fixtures that build several
+// Planned tickets and plans inline.
+func authorizedAll(tickets []Ticket, plans []Plan) {
+	for i := range tickets {
+		tickets[i] = authorized(tickets[i])
+	}
+	for i := range plans {
+		if plans[i].Sha256 == "" {
+			plans[i].Sha256 = testPlanSha
+		}
+	}
+}
+
+// baseInputs is the happy path: one Planned ticket #42 with a planned, fresh,
+// authorized plan and a reachable, idle daemon.
 func baseInputs() Inputs {
 	return Inputs{
-		Tickets:     []Ticket{{Repo: "o/r", Number: 42, Labels: []string{"Planned"}, Assignees: []string{"octocat"}}},
-		Plans:       []Plan{{Repo: "o/r", Path: ".plans/42-x.md", TicketID: 42, Status: "planned"}},
+		Tickets:     []Ticket{authorized(Ticket{Repo: "o/r", Number: 42, Labels: []string{"Planned"}, Assignees: []string{"octocat"}})},
+		Plans:       []Plan{{Repo: "o/r", Path: ".plans/42-x.md", TicketID: 42, Status: "planned", Sha256: testPlanSha}},
 		Snapshot:    snapshot(0, 0),
 		Budgets:     FloorProvider{},
 		Now:         time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC),
@@ -260,6 +291,17 @@ func TestDecideGates(t *testing.T) {
 				in.Tickets[0].StageProbe = StageProbePresent
 			},
 			want: []wantDecision{{42, ActionDispatch, "dispatch", "claude"}},
+		},
+		{
+			// #1464: the stage gate still does not gate waiting_for_plan_approval;
+			// the authorization hold does, for a plan saved for human review.
+			name: "stage gate: waiting_for_plan_approval + held record skips awaiting human plan review",
+			mutate: func(in *Inputs) {
+				in.Tickets[0].Stage = "waiting_for_plan_approval"
+				in.Tickets[0].StageProbe = StageProbePresent
+				in.Tickets[0].Authorization.Kind = pipeline.AuthorizationHeld
+			},
+			want: []wantDecision{{42, ActionSkip, "awaiting human plan review", ""}},
 		},
 		{
 			name: "stage gate: plan_approved + present dispatches (not gated)",
@@ -515,6 +557,7 @@ func TestDecideMultiDispatchRespectsCaps(t *testing.T) {
 		{Repo: "o/r", Path: ".plans/2.md", TicketID: 2, Status: "planned"},
 		{Repo: "o/r", Path: ".plans/3.md", TicketID: 3, Status: "planned"},
 	}
+	authorizedAll(in.Tickets, in.Plans)
 	// Two dispatch (filling the cap of 2), the third is capped.
 	assertDecisions(t, Decide(in), []wantDecision{
 		{1, ActionDispatch, "dispatch", ""},
@@ -570,6 +613,7 @@ func TestDecideSiblingSerialization(t *testing.T) {
 			{Repo: "o/r", Path: ".plans/41.md", TicketID: 41, Status: "planned", IsChild: true, ParentID: 40},
 			{Repo: "o/r", Path: ".plans/42.md", TicketID: 42, Status: "planned", IsChild: true, ParentID: 40},
 		}
+		authorizedAll(in.Tickets, in.Plans)
 		assertDecisions(t, Decide(in), []wantDecision{
 			{41, ActionDispatch, "dispatch", ""},
 			{42, ActionSkip, "waiting on sibling #41", ""},
@@ -587,6 +631,7 @@ func TestDecideSiblingSerialization(t *testing.T) {
 			{Repo: "o/r", Path: ".plans/41.md", TicketID: 41, Status: "planned", IsChild: true, ParentID: 30},
 			{Repo: "o/r", Path: ".plans/42.md", TicketID: 42, Status: "planned", IsChild: true, ParentID: 40},
 		}
+		authorizedAll(in.Tickets, in.Plans)
 		assertDecisions(t, Decide(in), []wantDecision{
 			{41, ActionDispatch, "dispatch", ""},
 			{42, ActionDispatch, "dispatch", ""},
@@ -604,6 +649,7 @@ func TestDecideSiblingSerialization(t *testing.T) {
 			{Repo: "o/r", Path: ".plans/41.md", TicketID: 41, Status: "planned", IsChild: true, ParentID: 40},
 			{Repo: "o/r", Path: ".plans/42.md", TicketID: 42, Status: "planned"}, // not a child
 		}
+		authorizedAll(in.Tickets, in.Plans)
 		assertDecisions(t, Decide(in), []wantDecision{
 			{41, ActionSkip, "not Planned", ""},
 			{42, ActionDispatch, "dispatch", ""},
@@ -621,6 +667,7 @@ func TestDecideSiblingSerialization(t *testing.T) {
 			{Repo: "o/r", Path: ".plans/41.md", TicketID: 41, Status: "planned", IsChild: true, ParentID: 40}, // ticket closed/absent
 			{Repo: "o/r", Path: ".plans/42.md", TicketID: 42, Status: "planned", IsChild: true, ParentID: 40},
 		}
+		authorizedAll(in.Tickets, in.Plans)
 		assertDecisions(t, Decide(in), []wantDecision{
 			{42, ActionDispatch, "dispatch", ""},
 		})
@@ -640,6 +687,7 @@ func TestDecideMultiRepoNoNumberCollision(t *testing.T) {
 		{Repo: "o/a", Path: ".plans/42-a.md", TicketID: 42, Status: "planned"},
 		{Repo: "o/b", Path: ".plans/42-b.md", TicketID: 42, Status: "planned"},
 	}
+	authorizedAll(in.Tickets, in.Plans)
 	got := Decide(in)
 	if len(got) != 2 {
 		t.Fatalf("got %d decisions, want 2", len(got))
@@ -666,6 +714,7 @@ func TestDecideMultiRepoSiblingsIndependent(t *testing.T) {
 		{Repo: "o/a", Path: ".plans/41.md", TicketID: 41, Status: "planned", IsChild: true, ParentID: 40},
 		{Repo: "o/b", Path: ".plans/42.md", TicketID: 42, Status: "planned", IsChild: true, ParentID: 40},
 	}
+	authorizedAll(in.Tickets, in.Plans)
 	assertDecisions(t, Decide(in), []wantDecision{
 		{41, ActionSkip, "not Planned", ""},
 		{42, ActionDispatch, "dispatch", ""},
@@ -787,6 +836,7 @@ func TestDecideMainSyncGate_DivergedRepoSkipsEveryTicket(t *testing.T) {
 		{Repo: "o/a", Path: ".plans/42-x.md", TicketID: 42, Status: "planned"},
 		{Repo: "o/b", Path: ".plans/44-x.md", TicketID: 44, Status: "planned"},
 	}
+	authorizedAll(in.Tickets, in.Plans)
 	assertDecisions(t, Decide(in), []wantDecision{
 		{42, ActionSkip, "local main diverged", ""},
 		{43, ActionSkip, "local main diverged", ""},
@@ -1320,8 +1370,8 @@ func TestDecideResumeGate_PermissionReasonsAreAllPairwiseDistinct(t *testing.T) 
 func TestDecideResumeCountsIntoDispatchedThisPass(t *testing.T) {
 	in := resumeInputs()
 	in.Config.ConcurrencyCap = 1
-	in.Tickets = append(in.Tickets, Ticket{Repo: "o/r", Number: 43, Labels: []string{"Planned"}, Assignees: []string{"octocat"}})
-	in.Plans = append(in.Plans, Plan{Repo: "o/r", Path: ".plans/43-x.md", TicketID: 43, Status: "planned"})
+	in.Tickets = append(in.Tickets, authorized(Ticket{Repo: "o/r", Number: 43, Labels: []string{"Planned"}, Assignees: []string{"octocat"}}))
+	in.Plans = append(in.Plans, Plan{Repo: "o/r", Path: ".plans/43-x.md", TicketID: 43, Status: "planned", Sha256: testPlanSha})
 
 	got := Decide(in)
 	if len(got) != 2 {
@@ -2698,6 +2748,7 @@ func TestDecideContainerSessionOrphans_CountWithDispatchedThisPass(t *testing.T)
 		{Repo: "o/r", Path: ".plans/1.md", TicketID: 1, Status: "planned"},
 		{Repo: "o/r", Path: ".plans/2.md", TicketID: 2, Status: "planned"},
 	}
+	authorizedAll(in.Tickets, in.Plans)
 
 	assertDecisions(t, Decide(in), []wantDecision{
 		{1, ActionDispatch, "dispatch", ""},
@@ -2921,6 +2972,7 @@ func TestDecideMemoryHeadroom_PerRepoFailureIsolated(t *testing.T) {
 		"o/b": limitedMemory(10, 100),
 		// o/c has no entry: the permissive zero value.
 	}
+	authorizedAll(in.Tickets, in.Plans)
 
 	assertDecisions(t, Decide(in), []wantDecision{
 		{1, ActionSkip, "memory probe failed", ""},
@@ -2948,6 +3000,7 @@ func TestDecideMemoryHeadroom_ReadingIsPerRepo(t *testing.T) {
 		"o/a": limitedMemory(80, 100),
 		"o/b": limitedMemory(20, 100),
 	}
+	authorizedAll(in.Tickets, in.Plans)
 
 	assertDecisions(t, Decide(in), []wantDecision{
 		{1, ActionSkip, "memory headroom below 25% (o/a container at 80%)", ""},
@@ -3531,6 +3584,7 @@ func TestDecideFilter_ExcludedTicketsKeepInventoryIntegrity(t *testing.T) {
 			{Repo: "o/r", Path: ".plans/41.md", TicketID: 41, Status: "planned", IsChild: true, ParentID: 40},
 			{Repo: "o/r", Path: ".plans/42.md", TicketID: 42, Status: "planned", IsChild: true, ParentID: 40},
 		}
+		authorizedAll(in.Tickets, in.Plans)
 		assertDecisions(t, Decide(in), []wantDecision{
 			{41, ActionSkip, "filter: milestone 7 not in [3]", ""},
 			{42, ActionDispatch, "dispatch", ""},
@@ -3588,6 +3642,7 @@ func TestDecideFilter_ExcludedTicketsConsumeNoSlotOrQuota(t *testing.T) {
 			{Repo: "o/r", Path: ".plans/41.md", TicketID: 41, Status: "planned"},
 			{Repo: "o/r", Path: ".plans/42.md", TicketID: 42, Status: "planned"},
 		}
+		authorizedAll(in.Tickets, in.Plans)
 		return in
 	}
 	want := []wantDecision{
@@ -3626,6 +3681,7 @@ func TestDecideFilter_FiltersAreScopedPerRepo(t *testing.T) {
 		{Repo: "o/b", Path: ".plans/42.md", TicketID: 42, Status: "planned"},
 		{Repo: "o/c", Path: ".plans/42.md", TicketID: 42, Status: "planned"},
 	}
+	authorizedAll(in.Tickets, in.Plans)
 
 	byRepo := map[string]Decision{}
 	for _, d := range Decide(in) {
@@ -3658,4 +3714,326 @@ func TestDecideFilter_HostileLabelsAreQuotedAndBounded(t *testing.T) {
 	if len(d.Reason) > maxProbeLogDetailBytes+64 {
 		t.Errorf("reason is %d bytes, want it bounded near %d", len(d.Reason), maxProbeLogDetailBytes)
 	}
+}
+
+// -- #1464: plan-authorization hold -------------------------------------------
+
+// otherPlanSha is a well-formed fingerprint of different plan bytes: a record
+// bound to it no longer matches the fixture plan.
+var otherPlanSha = pipeline.PlanFingerprint("edited plan bytes\n")
+
+// withStage sets the persisted stage of ticket i as a readable state file.
+func withStage(in *Inputs, i int, stage pipeline.Stage) {
+	in.Tickets[i].Stage = string(stage)
+	in.Tickets[i].StageProbe = StageProbePresent
+}
+
+// TestDecideAuthorizationHold covers the admission hold below plan_approved:
+// each record class and kind gets its own case and its own exact reason.
+func TestDecideAuthorizationHold(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(in *Inputs)
+		want   []wantDecision
+	}{
+		{
+			name:   "held record skips awaiting human plan review",
+			mutate: func(in *Inputs) { in.Tickets[0].Authorization.Kind = pipeline.AuthorizationHeld },
+			want:   []wantDecision{{42, ActionSkip, "awaiting human plan review", ""}},
+		},
+		{
+			name: "held record skips even with the pipelineStageGate kill switch off",
+			mutate: func(in *Inputs) {
+				in.Config.PipelineStageGate = false
+				in.Tickets[0].Authorization.Kind = pipeline.AuthorizationHeld
+			},
+			want: []wantDecision{{42, ActionSkip, "awaiting human plan review", ""}},
+		},
+		{
+			name: "human record for the current plan bytes dispatches",
+			mutate: func(in *Inputs) {
+				in.Tickets[0].Authorization = pipeline.Authorization{Kind: pipeline.AuthorizationHuman, PlanSHA256: testPlanSha, Source: pipeline.AuthorizationSourceCLI}
+			},
+			want: []wantDecision{{42, ActionDispatch, "dispatch", "claude"}},
+		},
+		{
+			name: "human record for other plan bytes skips plan changed since approval",
+			mutate: func(in *Inputs) {
+				in.Tickets[0].Authorization = pipeline.Authorization{Kind: pipeline.AuthorizationHuman, PlanSHA256: otherPlanSha, Source: pipeline.AuthorizationSourceCLI}
+			},
+			want: []wantDecision{{42, ActionSkip, "plan changed since approval", ""}},
+		},
+		{
+			name:   "lean record for other plan bytes skips plan changed since approval",
+			mutate: func(in *Inputs) { in.Tickets[0].Authorization.PlanSHA256 = otherPlanSha },
+			want:   []wantDecision{{42, ActionSkip, "plan changed since approval", ""}},
+		},
+		{
+			name:   "plan with no fingerprint never matches a record",
+			mutate: func(in *Inputs) { in.Plans[0].Sha256 = "" },
+			want:   []wantDecision{{42, ActionSkip, "plan changed since approval", ""}},
+		},
+		{
+			name: "no record and no state file skips unrecorded (legacy plan)",
+			mutate: func(in *Inputs) {
+				in.Tickets[0].Authorization = pipeline.Authorization{}
+				in.Tickets[0].AuthorizationProbe = AuthorizationProbeAbsent
+			},
+			want: []wantDecision{{42, ActionSkip, "plan authorization unrecorded (legacy plan; run cenci dispatch approve)", ""}},
+		},
+		{
+			name: "no record at waiting_for_plan_approval skips unrecorded (legacy plan)",
+			mutate: func(in *Inputs) {
+				withStage(in, 0, pipeline.StageWaitingForPlanApproval)
+				in.Tickets[0].Authorization = pipeline.Authorization{}
+				in.Tickets[0].AuthorizationProbe = AuthorizationProbeAbsent
+			},
+			want: []wantDecision{{42, ActionSkip, "plan authorization unrecorded (legacy plan; run cenci dispatch approve)", ""}},
+		},
+		{
+			name:   "unreadable record skips plan authorization unreadable",
+			mutate: func(in *Inputs) { in.Tickets[0].AuthorizationProbe = AuthorizationProbeUnreadable },
+			want:   []wantDecision{{42, ActionSkip, "plan authorization unreadable", ""}},
+		},
+		{
+			name:   "unrecognized probe value skips plan authorization unreadable",
+			mutate: func(in *Inputs) { in.Tickets[0].AuthorizationProbe = AuthorizationProbe("wat") },
+			want:   []wantDecision{{42, ActionSkip, "plan authorization unreadable", ""}},
+		},
+		{
+			name:   "recorded record of an unknown kind skips plan authorization unreadable",
+			mutate: func(in *Inputs) { in.Tickets[0].Authorization.Kind = pipeline.AuthorizationKind("root") },
+			want:   []wantDecision{{42, ActionSkip, "plan authorization unreadable", ""}},
+		},
+		{
+			name:   "recorded record with a malformed hash skips plan authorization unreadable",
+			mutate: func(in *Inputs) { in.Tickets[0].Authorization.PlanSHA256 = "abc" },
+			want:   []wantDecision{{42, ActionSkip, "plan authorization unreadable", ""}},
+		},
+		{
+			name: "unreadable state with the kill switch off skips plan authorization unreadable",
+			mutate: func(in *Inputs) {
+				in.Config.PipelineStageGate = false
+				in.Tickets[0].StageProbe = StageProbeError
+			},
+			want: []wantDecision{{42, ActionSkip, "plan authorization unreadable", ""}},
+		},
+		{
+			name:   "unreadable state with the stage gate on keeps the stage gate's reason",
+			mutate: func(in *Inputs) { in.Tickets[0].StageProbe = StageProbeError },
+			want:   []wantDecision{{42, ActionSkip, "pipeline state unreadable", ""}},
+		},
+	}
+	for _, kind := range []pipeline.AuthorizationKind{pipeline.AuthorizationLean, pipeline.AuthorizationTrivial, pipeline.AuthorizationLeanResumed, pipeline.AuthorizationLeanDecided} {
+		tests = append(tests, struct {
+			name   string
+			mutate func(in *Inputs)
+			want   []wantDecision
+		}{
+			name:   "autonomous " + string(kind) + " record for the current plan bytes dispatches",
+			mutate: func(in *Inputs) { in.Tickets[0].Authorization.Kind = kind },
+			want:   []wantDecision{{42, ActionDispatch, "dispatch", "claude"}},
+		})
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			in := baseInputs()
+			tc.mutate(&in)
+			got := Decide(in)
+			assertDecisions(t, got, tc.want)
+			if got[0].Note != "" {
+				t.Errorf("Note = %q, want none below plan_approved", got[0].Note)
+			}
+		})
+	}
+}
+
+// TestDecideAuthorizationPastApproval: an interrupted execution at or past
+// plan_approved is admitted with any non-held record and no hash re-check; with
+// no record it is admitted with the legacy note; a held record still holds.
+func TestDecideAuthorizationPastApproval(t *testing.T) {
+	for _, stage := range []pipeline.Stage{pipeline.StagePlanApproved, pipeline.StageExecuted, pipeline.StageReviewed} {
+		t.Run(string(stage)+" non-held record dispatches without a hash re-check", func(t *testing.T) {
+			in := baseInputs()
+			withStage(&in, 0, stage)
+			in.Tickets[0].Authorization.PlanSHA256 = otherPlanSha
+			got := Decide(in)
+			assertDecisions(t, got, []wantDecision{{42, ActionDispatch, "dispatch", "claude"}})
+			if got[0].Note != "" {
+				t.Errorf("Note = %q, want none for a recorded authorization", got[0].Note)
+			}
+		})
+		t.Run(string(stage)+" no record dispatches with the legacy note", func(t *testing.T) {
+			in := baseInputs()
+			withStage(&in, 0, stage)
+			in.Tickets[0].Authorization = pipeline.Authorization{}
+			in.Tickets[0].AuthorizationProbe = AuthorizationProbeAbsent
+			got := Decide(in)
+			assertDecisions(t, got, []wantDecision{{42, ActionDispatch, "dispatch", "claude"}})
+			if want := "legacy approval (unrecorded provenance)"; got[0].Note != want {
+				t.Errorf("Note = %q, want %q", got[0].Note, want)
+			}
+		})
+		t.Run(string(stage)+" held record still skips", func(t *testing.T) {
+			in := baseInputs()
+			withStage(&in, 0, stage)
+			in.Tickets[0].Authorization.Kind = pipeline.AuthorizationHeld
+			assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, "awaiting human plan review", ""}})
+		})
+		t.Run(string(stage)+" unreadable record still skips", func(t *testing.T) {
+			in := baseInputs()
+			withStage(&in, 0, stage)
+			in.Tickets[0].AuthorizationProbe = AuthorizationProbeUnreadable
+			assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, "plan authorization unreadable", ""}})
+		})
+	}
+}
+
+// TestDecideAuthorizationHold_NotAppliedToResumePlanningOrReplan: the hold
+// governs ordinary Planned dispatch only. An answered Input Needed draft carries
+// no record (await-input records none), and neither does a fresh planning
+// pickup; a stale held plan may still be re-planned autonomously.
+func TestDecideAuthorizationHold_NotAppliedToResumePlanningOrReplan(t *testing.T) {
+	t.Run("Input Needed + answered + no record resumes", func(t *testing.T) {
+		in := resumeInputs()
+		got := Decide(in)
+		if len(got) != 1 || got[0].Action != ActionDispatch || !got[0].Resume {
+			t.Fatalf("got %+v, want one ActionDispatch with Resume: true", got)
+		}
+	})
+	t.Run("Input Needed + answered + held record resumes", func(t *testing.T) {
+		in := resumeInputs()
+		in.Tickets[0].Authorization = pipeline.Authorization{Kind: pipeline.AuthorizationHeld, PlanSHA256: testPlanSha}
+		in.Tickets[0].AuthorizationProbe = AuthorizationProbeRecorded
+		got := Decide(in)
+		if len(got) != 1 || got[0].Action != ActionDispatch || !got[0].Resume {
+			t.Fatalf("got %+v, want one ActionDispatch with Resume: true", got)
+		}
+	})
+	t.Run("Refined planning pickup with no record dispatches", func(t *testing.T) {
+		in := planningCandidateInputs()
+		in.Tickets[0].Authorization = pipeline.Authorization{}
+		in.Tickets[0].AuthorizationProbe = AuthorizationProbeAbsent
+		got := Decide(in)
+		if len(got) != 1 || got[0].Action != ActionDispatch || !got[0].Planning {
+			t.Fatalf("got %+v, want one planning ActionDispatch", got)
+		}
+	})
+	t.Run("stale held plan is re-planned", func(t *testing.T) {
+		in := baseInputs()
+		in.Config.PlanRefined = true
+		in.RepoAutonomy = leanAutonomy("o/r")
+		in.Plans[0].CommitsBehind = 10
+		in.Tickets[0].Authorization.Kind = pipeline.AuthorizationHeld
+		got := Decide(in)
+		if len(got) != 1 || got[0].Action != ActionDispatch || !got[0].Replan {
+			t.Fatalf("got %+v, want one re-plan ActionDispatch", got)
+		}
+	})
+}
+
+// TestDecideAuthorizationHold_TakesNoCapacity: a held ticket is skipped before
+// the cap check, so at cap 1 the next authorized ticket still dispatches.
+func TestDecideAuthorizationHold_TakesNoCapacity(t *testing.T) {
+	in := baseInputs()
+	in.Config.ConcurrencyCap = 1
+	in.Tickets = append(in.Tickets, authorized(Ticket{Repo: "o/r", Number: 43, Labels: []string{"Planned"}, Assignees: []string{"octocat"}}))
+	in.Plans = append(in.Plans, Plan{Repo: "o/r", Path: ".plans/43-y.md", TicketID: 43, Status: "planned", Sha256: testPlanSha})
+	in.Tickets[0].Authorization.Kind = pipeline.AuthorizationHeld
+	assertDecisions(t, Decide(in), []wantDecision{
+		{42, ActionSkip, "awaiting human plan review", ""},
+		{43, ActionDispatch, "dispatch", "claude"},
+	})
+}
+
+// -- #1464: session eligibility before capacity ------------------------------
+
+// TestDecideSessionEligibility covers the gate's closed set, the permissive map
+// miss and the default-denied unrecognized value.
+func TestDecideSessionEligibility(t *testing.T) {
+	tests := []struct {
+		name string
+		elig map[string]SessionEligibility
+		want wantDecision
+	}{
+		{"eligible dispatches", map[string]SessionEligibility{"o/r": SessionEligible}, wantDecision{42, ActionDispatch, "dispatch", "claude"}},
+		{"missing map entry is permissive", map[string]SessionEligibility{"o/other": SessionAbsent}, wantDecision{42, ActionDispatch, "dispatch", "claude"}},
+		{"nil map is permissive", nil, wantDecision{42, ActionDispatch, "dispatch", "claude"}},
+		{"unconfigured skips", map[string]SessionEligibility{"o/r": SessionUnconfigured}, wantDecision{42, ActionSkip, "session unconfigured", ""}},
+		{"absent skips", map[string]SessionEligibility{"o/r": SessionAbsent}, wantDecision{42, ActionSkip, "session absent", ""}},
+		{"probe failed skips", map[string]SessionEligibility{"o/r": SessionProbeFailed}, wantDecision{42, ActionSkip, "session probe failed", ""}},
+		{"explicit zero value skips unrecognized", map[string]SessionEligibility{"o/r": ""}, wantDecision{42, ActionSkip, "session eligibility unrecognized", ""}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			in := baseInputs()
+			in.SessionEligibility = tc.elig
+			assertDecisions(t, Decide(in), []wantDecision{tc.want})
+		})
+	}
+}
+
+// TestDecideSessionEligibility_AppliesToEveryPickupType: resume and planning
+// pickups need a launchable session too.
+func TestDecideSessionEligibility_AppliesToEveryPickupType(t *testing.T) {
+	for name, in := range map[string]Inputs{"resume": resumeInputs(), "planning": planningCandidateInputs()} {
+		t.Run(name, func(t *testing.T) {
+			in.SessionEligibility = map[string]SessionEligibility{"o/r": SessionAbsent}
+			assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, "session absent", ""}})
+		})
+	}
+}
+
+// TestDecideSessionEligibility_GateOrder pins the order right after the memory
+// headroom gate: memory headroom, session eligibility, authorization, cap.
+func TestDecideSessionEligibility_GateOrder(t *testing.T) {
+	t.Run("memory headroom outranks session eligibility", func(t *testing.T) {
+		in := baseInputs()
+		in.Config.MemoryHeadroom = 10
+		in.RepoMemory = map[string]RepoMemory{"o/r": {Probe: MemoryProbeFailed}}
+		in.SessionEligibility = map[string]SessionEligibility{"o/r": SessionAbsent}
+		assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, "memory probe failed", ""}})
+	})
+	t.Run("session eligibility outranks authorization", func(t *testing.T) {
+		in := baseInputs()
+		in.SessionEligibility = map[string]SessionEligibility{"o/r": SessionAbsent}
+		in.Tickets[0].Authorization.Kind = pipeline.AuthorizationHeld
+		assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, "session absent", ""}})
+	})
+	t.Run("authorization outranks the cap check", func(t *testing.T) {
+		in := baseInputs()
+		in.Config.ConcurrencyCap = 1
+		in.Snapshot = snapshot(1, 0)
+		in.Tickets[0].Authorization.Kind = pipeline.AuthorizationHeld
+		assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, "awaiting human plan review", ""}})
+	})
+	t.Run("session eligibility outranks the cap check", func(t *testing.T) {
+		in := baseInputs()
+		in.Config.ConcurrencyCap = 1
+		in.Snapshot = snapshot(1, 0)
+		in.SessionEligibility = map[string]SessionEligibility{"o/r": SessionProbeFailed}
+		assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, "session probe failed", ""}})
+	})
+}
+
+// TestDecideSessionEligibility_IneligibleRepoTakesNoSlot: at cap 1 the bad
+// repo's lower-numbered ticket is skipped for its session and the healthy
+// repo's ticket takes the only slot.
+func TestDecideSessionEligibility_IneligibleRepoTakesNoSlot(t *testing.T) {
+	in := baseInputs()
+	in.Config.ConcurrencyCap = 1
+	in.Tickets = []Ticket{
+		authorized(Ticket{Repo: "o/bad", Number: 1, Labels: []string{"Planned"}, Assignees: []string{"octocat"}}),
+		authorized(Ticket{Repo: "o/good", Number: 2, Labels: []string{"Planned"}, Assignees: []string{"octocat"}}),
+	}
+	in.Plans = []Plan{
+		{Repo: "o/bad", Path: ".plans/1-a.md", TicketID: 1, Status: "planned", Sha256: testPlanSha},
+		{Repo: "o/good", Path: ".plans/2-b.md", TicketID: 2, Status: "planned", Sha256: testPlanSha},
+	}
+	in.SessionEligibility = map[string]SessionEligibility{"o/bad": SessionUnconfigured, "o/good": SessionEligible}
+	assertDecisions(t, Decide(in), []wantDecision{
+		{1, ActionSkip, "session unconfigured", ""},
+		{2, ActionDispatch, "dispatch", "claude"},
+	})
 }

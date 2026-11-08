@@ -592,3 +592,195 @@ counters) and classifies a violation as `StateProbeInvalid`. Every `StateProbe` 
 besides the zero-value `StateProbeAbsent` is a broken-input class that must default-deny —
 adding a new failure class to `Load` without adding it to this closed set (and to the
 abort contract above) would silently let a new corruption shape slip past the hold.
+
+## Plan authorization hold (#1464)
+
+A plan saved for human review must never launch unattended. Phase 1's `## New Plan`
+fallback (taken when the sensitive-path backstop or an unresolved Open Question
+disqualifies the lean paths) used to leave a `Planned` ticket at
+`waiting_for_plan_approval`, and the next pass dispatched `.plans/<file>` as if a human
+had approved it. Front matter cannot carry the hold: `lean-decided` is written both by
+the self-approving Lean Approval Path and by the held fallback, and rewriting the plan
+at approval would change its own fingerprint. The hold therefore lives in pipeline state.
+
+**The record.** `.cenci/pipeline/<id>.json` gains one additive `authorization` field:
+`kind`, `planSha256` (the lowercase hex SHA-256 of the plan file's exact bytes,
+`pipeline.PlanFingerprint` over `planfile.Entry.Content`, so dispatch and pipeline hash
+the same bytes), `recordedAt` and, on `human` records only, `source` (`cli` or
+`attended-launch`). No username or hostname is stored. `State.Authorization` is kept as
+raw bytes, so a record this binary cannot parse round-trips untouched through every
+other state writer. `pipeline.ParseAuthorization` classifies it into a closed set:
+absent (no field), recorded (a well-formed record of a known kind), or unreadable
+(undecodable, an unknown kind, a malformed `planSha256`, a `human` record without a
+known `source`, or a `source` on any other kind).
+
+**Kinds and writers.**
+
+| Writer | Writes |
+|---|---|
+| `cenci pipeline plan <id> --authorization <kind>` (each Phase 1 persist site) | `held` (`## New Plan`), `lean`/`lean-decided` (Lean Approval Path), `trivial` (Trivial Fast Path), `lean-resumed`/`lean-decided` (Resume From Draft). `held` always overwrites. An unattended autonomous kind over a `held` record for the same hash is refused (no downgrade). An autonomous kind over a `human` record for the same hash leaves it in place with a warning. An unattended autonomous kind (`lean`, `trivial`, `lean-resumed`, `lean-decided`) over an `unreadable` record is refused (`ErrAuthorizationUnreadable`, nothing is saved; the record may be a `held` one this binary cannot parse, and recovery is `cenci dispatch approve`); `held` still overwrites it, and an attended persist overwrites it and warns, naming the replaced kind. Omitting the flag leaves the record unchanged. `human`, an unknown kind, `--authorization` with `--approve`, or on a non-`plan` stage exits 2. |
+| `cenci pipeline plan <id> --approve`, attended (Phase 2's Gate Check) | A held, absent or other-hash record becomes `human`/`attended-launch` for the current hash. A matching autonomous or human record is kept. An unreadable record is refused, pointing to `cenci dispatch approve`. |
+| `cenci dispatch approve <id> [--repo PATH]`, attended only | A held, absent, other-hash or unreadable record becomes `human`/`cli` for the current hash. The command prints `approved #<id>: <path> (sha256 <12 hex>)`, plus `replaced authorization record: <kind>` when it replaced one. Any other record prints `#<id> is not awaiting human review (<kind>)` and leaves the file byte-identical. No plan, several plans, or an awaiting-input draft exits 1 with nothing written, as does an unattended session. |
+
+An unattended `plan --approve` from `waiting_for_plan_approval` is admitted only for a
+recorded, non-held record whose hash matches the plan's current bytes. Held, changed,
+unrecorded and unreadable records are all refused with `errors[]`. At or past
+`plan_approved` (a no-op transition) it refuses only a held or unreadable record. A
+missing record there is an in-flight legacy execution. This is the execution-boundary
+check behind the admission gate below. A dispatcher launch of a `human`-released plan
+passes it, because the record and hash match.
+
+**Admission (`authorizationSkip`, `decide.go`).** The gate applies to ordinary
+`Planned` dispatch only, never to a resume, a fresh planning pickup or an autonomous
+re-plan: an awaiting-input draft carries no record by design, and Resume From Draft
+records one when it persists the plan. Evaluating it for a resume would skip every
+answered `Input Needed` ticket forever. It does not sit behind `dispatch.pipelineStageGate`
+either: the kill switch turns off the stage gate, never the human-review hold.
+
+| State | Decision |
+|---|---|
+| State file unreadable (`StageProbeError`), or record unreadable | skip `plan authorization unreadable` |
+| `held`, at any stage | skip `awaiting human plan review` |
+| No record, below `plan_approved` | skip `plan authorization unrecorded (legacy plan; run cenci dispatch approve)` |
+| No record, at or past `plan_approved` | admitted, decision line noted `legacy approval (unrecorded provenance)` |
+| Any other kind, at or past `plan_approved` | admitted, no hash re-check (later phases may touch the plan; the release boundary has passed) |
+| Any other kind, below `plan_approved`, hash differs | skip `plan changed since approval` |
+| Any other kind, below `plan_approved`, hash matches | admitted |
+
+Every skip makes zero launches and zero label edits. A held ticket also takes no
+concurrency slot, because the gate runs before the cap check (see the ordering below).
+The release is the human, never GitHub: no comment, label or answered escalation can
+release a held plan. A re-plan that saves a new held plan replaces an earlier human
+approval.
+
+**Who counts as unattended (`pipeline.Unattended`).** A session is unattended when
+`CENCI_ATTENDED` is exactly `0` and `CENCI_ATTENDED_ORIGIN` is anything other than
+`host-config`, absent included. The sandbox launcher sets `CENCI_ATTENDED=0` for every
+sandbox launch while the host's `planning.attended` is off, human `cenci open`/`cenci run`
+sessions included, so the value alone cannot tell a dispatched session from a human
+one. The launcher therefore also forwards `CENCI_ATTENDED_ORIGIN`: `pinned` when the
+value came from its own environment (the dispatcher's `Unattended` pin), `host-config`
+when it resolved it from the fleet config, and `config-unreadable` when it could not read
+the fleet config (`resolveAttendedFlag` falls back to `CENCI_ATTENDED=0`, which is a
+fallback and not the host's answer). Only the exact `host-config` lifts the hold: `pinned`,
+`config-unreadable`, any other value and an absent marker all count as unattended. A
+launch that cannot read the fleet config also prints one `Warning: cannot read
+planning.attended ...` line (`warnAttendedConfigUnreadable`), silent when
+`CENCI_ATTENDED` is pinned because the config is then never consulted. An ambient
+`CENCI_ATTENDED_ORIGIN` is never consulted, and the reserved `CENCI_` prefix keeps a user
+`sandboxEnv.forward` entry from setting it.
+
+**Limits of enforcement.**
+- The watch side closes the bypass by dispatcher launch and by launch argument. It does
+  not defend against an agent session that deliberately breaks the Phase 1 procedure:
+  one that rewrites `.cenci/pipeline/<id>.json` itself, sets the origin marker in its own
+  environment, or rewrites the plan and self-authorizes. The state file sits in the
+  agent-writable repository.
+- The no-downgrade defence (an unattended autonomous kind cannot replace a `held` record
+  for the same hash) is content-exact. A re-plan that changes a single byte and records
+  `lean` is admitted. That is within the accepted limit above, not a gap to close here.
+- The binding is to exact bytes, so nothing may rewrite the plan file between
+  `cenci dispatch approve` and Phase 2's `plan --approve`. Checked for #1464: no watch
+  production code writes `.plans/<file>`. In `flow/skills/implement`, Phase 1 finishes
+  every write (the context-bundle append and the candidate `mv`) before its
+  `plan --authorization` call. `## Existing Plan` re-records with no flag and never edits
+  the file. A re-plan deletes it and persists a fresh `held` plan. The only later write
+  is Phase 9's archive `mv` to `.plans/done/` after the PR exists. A future phase that
+  edits the plan before Phase 2 would turn every approved plan into
+  `plan changed since approval`.
+- Babysit-launched sessions count as human (known limit). `babysit`'s `launch` self-execs
+  `cenci run <workflow> ... --session` for `address-feedback`, `ci-repair` and
+  `merge-repair`, and only dispatch's `applyDispatch` sets `run.Opts.Unattended`, so
+  these sessions carry no unattended pin. With `planning.attended` off the launcher
+  forwards `CENCI_ATTENDED=0` with origin `host-config`, and `pipeline.Unattended()` is
+  false. Such a session reads untrusted PR review text and could run `cenci dispatch
+  approve <id>` or `plan --approve` as a human. This is not fixed here; a Followup ticket
+  tracks pinning babysit launches as unattended.
+
+**Version skew.** An old binary drops the unknown `authorization` field when it saves a
+state file (plain `json.Unmarshal`), and an old flow plugin calls `plan` without
+`--authorization`. Either way the plan is left unrecorded and held visibly, never
+silently admitted. A new plugin calling an old binary hits exit 2 on `--authorization`,
+and the pipeline stops. A sandbox session started by a launcher that predates the
+origin marker forwards `CENCI_ATTENDED=0` with no marker, so it counts as unattended
+(and `cenci dispatch approve` refuses there) until it is relaunched.
+
+## Session eligibility before capacity (#1464)
+
+`applyDispatch` used to run `Decide` (which allocates the concurrency cap) before
+`gateSessions` skipped repos with a bad session, so at cap 1 a misconfigured repo's
+ticket took the only slot and a healthy repo's ticket never launched.
+`resolveSessionEligibility` (`session.go`) now resolves a per-repo verdict once per pass,
+before `Decide`, and hands it in as `Inputs.SessionEligibility`. `gateSessions` is gone.
+
+- **Candidates.** Only repos holding a `Planned`, `Input Needed` or `Refined` ticket are
+  resolved, in config order. Each logs one line with its remedy when ineligible.
+- **Verdicts.** An empty or whitespace-only `repos[].session` is `session unconfigured`
+  (sentinel `ErrSessionUnconfigured`). Otherwise the trimmed name is probed with
+  `ctrl.HasSession` on the default socket, at most once per distinct name per pass, so
+  repos sharing a session share one probe. An error gives `session probe failed`
+  (`ErrSessionProbeFailed`), `false` gives `session absent` (`ErrSessionMissing`), and
+  `true` makes the repo eligible. An error and a `false` in the same pass stay two
+  distinct reasons. `ctrl.CurrentSession()` is never consulted: config is the only
+  source of the target, and the spawn uses the same trimmed string the probe proved.
+- **Gate order in `decideTicket`.** After the OOM backoff: daemon unreachable →
+  need-input pause → container-session probe → memory headroom → **session eligibility**
+  → **plan authorization** → concurrency cap → daily quota → quiet hours → agent checks.
+  Both new gates are skips that sit ahead of the cap, so an ineligible or held ticket
+  never holds a slot another repo could use, and never counts toward the daily quota.
+  Session eligibility applies to every pickup type, because each one launches into the
+  repo's session. An unrecognized verdict default-denies with
+  `session eligibility unrecognized`.
+- **Spawn.** `Decide` treats a repo missing from the map as permissive (mirroring
+  `RepoMemory`), but `applyDispatch` spawns only for an explicit eligible verdict. Any
+  other dispatch is logged `dispatch: #<n> not spawned: no session verdict for <repo>
+  this pass` and left untouched.
+- **Sentinels.** A real pass builds one wrapped sentinel per repo with a session skip
+  and returns them joined with any spawn or claim failure, so `errors.Is` finds each one.
+  `RunOnce` lets them outrank a same-pass collection error. `RunLoop` and the daemon's
+  combined loop keep ticking on them. `passError` maps them to
+  `dispatch_session_unconfigured`, then `dispatch_session_missing`, then
+  `dispatch_session_probe_failed`, all after `reconcile_state_unreadable` and ahead of
+  `dispatch_pass_failed`.
+- **Dry run.** A dry run probes nothing. `session unconfigured` is still reported from
+  config alone. A dispatch into a configured session is noted
+  `session not probed (dry-run)`. No sentinel is returned, so the exit code never
+  depends on tmux.
+
+**Decision notes.** `Decision.Note` is rendered after the reason as `<reason>; <note>`,
+for example `o/r#7 dispatch (claude, 7-x.md, session "s"): dispatch; legacy approval
+(unrecorded provenance)`. A note never turns a dispatch into a skip, and the
+` skip:`/` dispatch ` substrings downstream consumers match on are unchanged.
+
+## Escalation recovery across restarts (#1464)
+
+The planner-escalation resume (#827/#849/#882) keeps no in-memory state, so it survives
+worker death and daemon restarts with no extra mechanism. Every pass re-reads each
+`Input Needed` ticket's thread through `resolveAnswerProbes`, verifies the escalation
+anchor by the exact comment id and nonce stored in that ticket's own awaiting-input
+draft, and resolves each replier's current write permission through a per-pass cache
+that is never persisted.
+
+- **Worker death and reconcile.** The reconciler never converts an `Input Needed` ticket
+  with an awaiting-input draft into `Planned` or `dispatch-failed`. Its only actions are
+  the stray-`Working` cleanup (a crash left both labels) and the plan heal for a draft
+  that already reads `status: planned`. Both holds (the `Input Needed` label and the
+  awaiting-input draft) survive a dead worker, a daemon restart and the reconcile pass
+  after it. Only an authorized answer (a non-bot, authorized association, with current
+  write permission, posted after the anchor) resumes. A reply with no association, or
+  from a member without write permission, resumes nothing.
+- **An answer posted while the daemon is stopped** is found by the first pass after
+  restart that completes ticket collection. A pass whose collection fails makes no
+  decision for the ticket. The resume claim (+`Working` −`Input Needed`) lands before
+  the spawn, so later passes never resume it again.
+- **Scoping.** An answer counts only on the thread of the ticket whose draft names the
+  anchor. A draft that points at another ticket's anchor comment and nonce is refused
+  as `escalation anchor comment not found or nonce mismatch`. An answered escalation
+  never touches any ticket's authorization record: a `held` plan stays held even when
+  its own thread carries an escalation marker and an authorized "approved".
+- **Dry run.** Under `--dry-run --once`, an answered `Input Needed` ticket is shown as a
+  resume decision (noted `session not probed (dry-run)`), with zero label edits and zero
+  spawns.
+
+These are pinned by the chain suite in `chain_negative_dispatch_test.go`
+(`docs/pipeline-coverage-map.md`'s `#1464` table).

@@ -15,12 +15,18 @@ import "time"
 // entirely); otherwise RepoRoot (or, if empty, the git repo root resolved
 // from the working directory) anchors the canonical
 // <repo>/.cenci/pipeline/<id>.json path.
+//
+// Authorization (#1464) is `cenci pipeline plan --authorization <kind>`: the
+// kind of plan-authorization record bare `plan` persists, bound to the plan
+// file's bytes (authorization.go). Empty leaves the record unchanged; it is
+// rejected on any other stage and together with Approve.
 type Opts struct {
-	Stage    string
-	ID       string
-	Approve  bool
-	RepoRoot string
-	StateDir string
+	Stage         string
+	ID            string
+	Approve       bool
+	Authorization string
+	RepoRoot      string
+	StateDir      string
 }
 
 // Output is the structured {state, next_actions, artifacts, warnings,
@@ -89,6 +95,11 @@ func Run(o Opts) (Output, error) {
 			return lerr
 		}
 
+		if uerr := checkAuthorizationOpts(o); uerr != nil {
+			out = errOutput(s.Stage, path, uerr)
+			return uerr
+		}
+
 		if o.Stage == "prepare" && s.Stage == StageNew {
 			if _, ghErr := ghIssueView(o.ID, defaultRetryConfig()); ghErr != nil {
 				out = errOutput(s.Stage, path, ghErr)
@@ -116,10 +127,21 @@ func Run(o Opts) (Output, error) {
 			return tErr
 		}
 
+		// Authorization rules run after the transition is known to be valid
+		// and before anything mutates or saves: a refusal reports the
+		// persisted stage (oldStage, not an adopted in-memory one) and leaves
+		// the state file untouched.
+		authWarnings, aErr := applyAuthorization(o, &s, noop)
+		if aErr != nil {
+			out = errOutput(oldStage, path, aErr)
+			return aErr
+		}
+
 		warnings := []string{}
 		if adopted {
 			warnings = append(warnings, planAdoptionWarning(adoptedPath, oldStage))
 		}
+		warnings = append(warnings, authWarnings...)
 		if noop {
 			warnings = append(warnings, noopWarning(next, o.Stage, o.Approve))
 		}

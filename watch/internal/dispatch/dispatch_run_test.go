@@ -30,11 +30,11 @@ func stubRunFn(t *testing.T, fn func(run.Opts, run.Controller) error) {
 }
 
 // dispatchableDeps is the happy path: one Planned ticket #42 with a planned,
-// fresh plan and a reachable, idle daemon — every gate passes.
+// fresh, authorized plan and a reachable, idle daemon — every gate passes.
 func dispatchableDeps(now time.Time) dispatchDeps {
 	return dispatchDeps{
-		Tickets:     []Ticket{{Repo: "o/r", Number: 42, Title: "Fix thing", Labels: []string{"Planned"}, Assignees: []string{"octocat"}}},
-		Plans:       []Plan{{Repo: "o/r", Path: ".plans/42-x.md", TicketID: 42, Status: "planned"}},
+		Tickets:     []Ticket{authorized(Ticket{Repo: "o/r", Number: 42, Title: "Fix thing", Labels: []string{"Planned"}, Assignees: []string{"octocat"}})},
+		Plans:       []Plan{{Repo: "o/r", Path: ".plans/42-x.md", TicketID: 42, Status: "planned", Sha256: testPlanSha}},
 		Snapshot:    &watch.StateSnapshot{},
 		Now:         now,
 		CurrentUser: "octocat",
@@ -1146,7 +1146,7 @@ func TestRunOnce_PlanningAttendedUnparseable_LogsOnceAndOrdinaryDispatchUnaffect
 
 	repo, _ := initOriginAndLocal(t)
 	planSha := gitTest(t, repo, "rev-parse", "HEAD")
-	writePlan(t, repo, "20-x.md", "---\nticketId: 20\nstatus: planned\nplanCommitSha: "+planSha+"\n---\nbody\n")
+	writeAuthorizedPlan(t, repo, "20-x.md", "---\nticketId: 20\nstatus: planned\nplanCommitSha: "+planSha+"\n---\nbody\n")
 
 	installFakeGHOnPath(t, `
 case "$1 $2" in
@@ -1455,7 +1455,7 @@ func TestRunOnce_FetchOutage_HoldsPlanningLaunchesNothing_OrdinaryPlannedStillDi
 	// repoB: an ordinary, already-Planned, fresh ticket in a healthy repo.
 	repoB, _ := initOriginAndLocal(t)
 	planSha := gitTest(t, repoB, "rev-parse", "HEAD")
-	writePlan(t, repoB, "20-x.md", "---\nticketId: 20\nstatus: planned\nplanCommitSha: "+planSha+"\n---\nbody\n")
+	writeAuthorizedPlan(t, repoB, "20-x.md", "---\nticketId: 20\nstatus: planned\nplanCommitSha: "+planSha+"\n---\nbody\n")
 
 	installFakeGHOnPath(t, `
 case "$1 $2" in
@@ -1954,7 +1954,7 @@ func setupGatePass(t *testing.T, snap watch.StateSnapshot, repos ...gatePassRepo
 		planSha := gitTest(t, local, "rev-parse", "HEAD")
 		issues := make([]string, 0, len(r.tickets))
 		for _, n := range r.tickets {
-			writePlan(t, local, fmt.Sprintf("%d-x.md", n),
+			writeAuthorizedPlan(t, local, fmt.Sprintf("%d-x.md", n),
 				fmt.Sprintf("---\nticketId: %d\nstatus: planned\nplanCommitSha: %s\n---\nbody\n", n, planSha))
 			issues = append(issues, fmt.Sprintf(`{"number":%d,"title":"Ticket %d","labels":[{"name":"Planned"}],"assignees":[{"login":"octocat"}]}`, n, n))
 		}
@@ -2777,7 +2777,7 @@ func setupFilterPass(t *testing.T, snap watch.StateSnapshot, issues ...filterPas
 	planSha := gitTest(t, local, "rev-parse", "HEAD")
 	items := make([]string, 0, len(issues))
 	for _, is := range issues {
-		writePlan(t, local, fmt.Sprintf("%d-x.md", is.number),
+		writeAuthorizedPlan(t, local, fmt.Sprintf("%d-x.md", is.number),
 			fmt.Sprintf("---\nticketId: %d\nstatus: planned\nplanCommitSha: %s\n---\nbody\n", is.number, planSha))
 		milestone := `null`
 		if is.milestone > 0 {
@@ -2997,4 +2997,279 @@ esac
 		t.Fatalf("RunOnce: %v", err)
 	}
 	assertDecisions(t, passed, []wantDecision{{42, ActionDispatch, "dispatch", ""}})
+}
+
+// -- #1464: session eligibility before capacity, through applyDispatch --------
+
+// repoTicket names one authorized Planned ticket for plannedAcross.
+type repoTicket struct {
+	repo   string
+	number int
+}
+
+// plannedAcross builds deps holding one authorized Planned ticket with a fresh
+// plan per entry, plus a reachable idle daemon.
+func plannedAcross(now time.Time, rts ...repoTicket) dispatchDeps {
+	deps := dispatchDeps{Snapshot: &watch.StateSnapshot{}, Now: now, CurrentUser: "octocat"}
+	for _, rt := range rts {
+		deps.Tickets = append(deps.Tickets, authorized(Ticket{Repo: rt.repo, Number: rt.number, Title: "T", Labels: []string{"Planned"}, Assignees: []string{"octocat"}}))
+		deps.Plans = append(deps.Plans, Plan{Repo: rt.repo, Path: fmt.Sprintf(".plans/%d-t.md", rt.number), TicketID: rt.number, Status: "planned", Sha256: testPlanSha})
+	}
+	return deps
+}
+
+// captureSpawns records every spawn's run.Opts.
+func captureSpawns(t *testing.T) *[]run.Opts {
+	t.Helper()
+	var got []run.Opts
+	stubRunFn(t, func(o run.Opts, _ run.Controller) error {
+		got = append(got, o)
+		return nil
+	})
+	return &got
+}
+
+// spawnIdentities renders spawns as "<window ticket>@<session>".
+func spawnIdentities(spawns []run.Opts) []string {
+	ids := make([]string, 0, len(spawns))
+	for _, o := range spawns {
+		ids = append(ids, o.WindowTicket+"@"+o.Session)
+	}
+	return ids
+}
+
+// TestApplyDispatch_HealthyRepoLaunchesAtCapOne: at cap 1, repo A's
+// misconfigured session (each failure class) never takes the slot -- one pass
+// launches exactly B's #2 into B's session, and #1's line shows its reason.
+func TestApplyDispatch_HealthyRepoLaunchesAtCapOne(t *testing.T) {
+	tests := []struct {
+		name     string
+		aSession string
+		ctrl     func(t *testing.T) *sessionProbeController
+		reason   string
+	}{
+		{"unconfigured", "", func(t *testing.T) *sessionProbeController {
+			return &sessionProbeController{t: t, live: map[string]bool{"b-work": true}}
+		}, "session unconfigured"},
+		{"absent", "a-work", func(t *testing.T) *sessionProbeController {
+			return &sessionProbeController{t: t, live: map[string]bool{"b-work": true}}
+		}, "session absent"},
+		{"probe failed", "a-work", func(t *testing.T) *sessionProbeController {
+			return &sessionProbeController{t: t, live: map[string]bool{"b-work": true}, probeErrs: map[string]error{"a-work": errors.New("tmux: lost server")}}
+		}, "session probe failed"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			spawns := captureSpawns(t)
+			cfg := testConfig()
+			cfg.ConcurrencyCap = 1
+			cfg.Repos = []RepoConfig{{Repo: "o/a", Session: tt.aSession}, {Repo: "o/b", Session: "b-work"}}
+			var buf bytes.Buffer
+			_, _ = applyDispatch(cfg, plannedAcross(time.Now(), repoTicket{"o/a", 1}, repoTicket{"o/b", 2}), tt.ctrl(t), &fakeMutator{}, false, &buf, nil)
+
+			if got, want := spawnIdentities(*spawns), []string{"2@b-work"}; !reflect.DeepEqual(got, want) {
+				t.Fatalf("spawns = %v, want %v", got, want)
+			}
+			if want := "o/a#1 skip: " + tt.reason; !strings.Contains(buf.String(), want) {
+				t.Errorf("log missing %q:\n%s", want, buf.String())
+			}
+		})
+	}
+}
+
+// TestApplyDispatch_RepeatedPassesStayHealthy: over three passes with repo A
+// still bad, repo B's next eligible ticket launches every pass, A's real reason
+// is logged every pass, and A's ticket never reports a capacity skip.
+func TestApplyDispatch_RepeatedPassesStayHealthy(t *testing.T) {
+	spawns := captureSpawns(t)
+	cfg := testConfig()
+	cfg.ConcurrencyCap = 1
+	cfg.Repos = []RepoConfig{{Repo: "o/a", Session: "a-work"}, {Repo: "o/b", Session: "b-work"}}
+	prior := 0
+	for pass := 1; pass <= 3; pass++ {
+		ctrl := &sessionProbeController{t: t, live: map[string]bool{"b-work": true}}
+		var buf bytes.Buffer
+		before := len(*spawns)
+		_, err := applyDispatch(cfg, plannedAcross(time.Now(), repoTicket{"o/a", 1}, repoTicket{"o/b", 10 + pass}), ctrl, &fakeMutator{}, false, &buf, &prior)
+		if !errors.Is(err, ErrSessionMissing) {
+			t.Errorf("pass %d: err = %v, want ErrSessionMissing", pass, err)
+		}
+		if got, want := spawnIdentities((*spawns)[before:]), []string{fmt.Sprintf("%d@b-work", 10+pass)}; !reflect.DeepEqual(got, want) {
+			t.Errorf("pass %d: spawns = %v, want %v", pass, got, want)
+		}
+		log := buf.String()
+		if !strings.Contains(log, "o/a#1 skip: session absent") {
+			t.Errorf("pass %d: log missing the bad repo's real reason:\n%s", pass, log)
+		}
+		if strings.Contains(log, "o/a#1 skip: concurrency cap reached") {
+			t.Errorf("pass %d: the bad repo's ticket reported a capacity skip:\n%s", pass, log)
+		}
+	}
+	if prior != 3 {
+		t.Errorf("prior = %d, want 3 (one spawn per pass)", prior)
+	}
+}
+
+// TestApplyDispatch_NoPhantomCapacity: an ineligible repo never consumes a
+// slot or a quota unit, whatever the config order, and a shared session name is
+// probed once per pass.
+func TestApplyDispatch_NoPhantomCapacity(t *testing.T) {
+	t.Run("two bad repos plus one healthy", func(t *testing.T) {
+		spawns := captureSpawns(t)
+		cfg := testConfig()
+		cfg.ConcurrencyCap = 1
+		cfg.Repos = []RepoConfig{{Repo: "o/a", Session: ""}, {Repo: "o/b", Session: "ghost"}, {Repo: "o/c", Session: "c-work"}}
+		ctrl := &sessionProbeController{t: t, live: map[string]bool{"c-work": true}}
+		_, _ = applyDispatch(cfg, plannedAcross(time.Now(), repoTicket{"o/a", 1}, repoTicket{"o/b", 2}, repoTicket{"o/c", 3}), ctrl, &fakeMutator{}, false, io.Discard, nil)
+		if got, want := spawnIdentities(*spawns), []string{"3@c-work"}; !reflect.DeepEqual(got, want) {
+			t.Errorf("spawns = %v, want %v", got, want)
+		}
+	})
+	t.Run("bad repo listed after the healthy repo", func(t *testing.T) {
+		spawns := captureSpawns(t)
+		cfg := testConfig()
+		cfg.ConcurrencyCap = 1
+		cfg.Repos = []RepoConfig{{Repo: "o/good", Session: "good-work"}, {Repo: "o/bad", Session: "ghost"}}
+		ctrl := &sessionProbeController{t: t, live: map[string]bool{"good-work": true}}
+		decisions, _ := applyDispatch(cfg, plannedAcross(time.Now(), repoTicket{"o/bad", 1}, repoTicket{"o/good", 2}), ctrl, &fakeMutator{}, false, io.Discard, nil)
+		if got, want := spawnIdentities(*spawns), []string{"2@good-work"}; !reflect.DeepEqual(got, want) {
+			t.Errorf("spawns = %v, want %v", got, want)
+		}
+		assertDecisions(t, decisions, []wantDecision{{1, ActionSkip, "session absent", ""}, {2, ActionDispatch, "dispatch", ""}})
+	})
+	for _, live := range []bool{false, true} {
+		t.Run(fmt.Sprintf("two repos sharing one session name, live=%v", live), func(t *testing.T) {
+			spawns := captureSpawns(t)
+			cfg := testConfig()
+			cfg.ConcurrencyCap = 2
+			cfg.Repos = []RepoConfig{{Repo: "o/a", Session: "shared"}, {Repo: "o/b", Session: " shared "}}
+			ctrl := &sessionProbeController{t: t, live: map[string]bool{"shared": live}}
+			decisions, _ := applyDispatch(cfg, plannedAcross(time.Now(), repoTicket{"o/a", 1}, repoTicket{"o/b", 2}), ctrl, &fakeMutator{}, false, io.Discard, nil)
+			if got, want := ctrl.hasSessionCalls, []string{"shared"}; !reflect.DeepEqual(got, want) {
+				t.Errorf("HasSession calls = %v, want %v (one probe per distinct trimmed name)", got, want)
+			}
+			if live {
+				if got, want := spawnIdentities(*spawns), []string{"1@shared", "2@shared"}; !reflect.DeepEqual(got, want) {
+					t.Errorf("spawns = %v, want %v", got, want)
+				}
+				return
+			}
+			if len(*spawns) != 0 {
+				t.Errorf("spawns = %v, want none", spawnIdentities(*spawns))
+			}
+			assertDecisions(t, decisions, []wantDecision{{1, ActionSkip, "session absent", ""}, {2, ActionSkip, "session absent", ""}})
+		})
+	}
+	t.Run("daily quota tally prior increments only for actual spawns", func(t *testing.T) {
+		spawns := captureSpawns(t)
+		cfg := testConfig()
+		cfg.DailyQuota = 1
+		cfg.Repos = []RepoConfig{{Repo: "o/bad", Session: "ghost"}, {Repo: "o/good", Session: "good-work"}}
+		ctrl := &sessionProbeController{t: t, live: map[string]bool{"good-work": true}}
+		prior := 0
+		_, _ = applyDispatch(cfg, plannedAcross(time.Now(), repoTicket{"o/bad", 1}, repoTicket{"o/good", 2}), ctrl, &fakeMutator{}, false, io.Discard, &prior)
+		if got, want := spawnIdentities(*spawns), []string{"2@good-work"}; !reflect.DeepEqual(got, want) {
+			t.Errorf("spawns = %v, want %v (the bad repo's ticket must not use the only quota unit)", got, want)
+		}
+		if prior != 1 {
+			t.Errorf("prior = %d, want 1 (one actual spawn)", prior)
+		}
+	})
+}
+
+// TestApplyDispatchDryRun_SessionReporting: a dry-run reports a config-known
+// unconfigured session as a skip, makes no HasSession call, notes every
+// configured session as not probed, and returns no session sentinel.
+func TestApplyDispatchDryRun_SessionReporting(t *testing.T) {
+	failOnSpawn(t)
+	cfg := testConfig()
+	cfg.Repos = []RepoConfig{{Repo: "o/a", Session: ""}, {Repo: "o/b", Session: "b-work"}}
+	ctrl := &sessionProbeController{t: t, live: map[string]bool{}}
+	mut := &fakeMutator{}
+	var buf bytes.Buffer
+	decisions, err := applyDispatch(cfg, plannedAcross(time.Now(), repoTicket{"o/a", 1}, repoTicket{"o/b", 2}), ctrl, mut, true, &buf, nil)
+	if err != nil {
+		t.Fatalf("dry-run err = %v, want nil (no session sentinel from a dry-run pass)", err)
+	}
+	if len(ctrl.hasSessionCalls) != 0 {
+		t.Errorf("HasSession calls = %v, want none on dry-run", ctrl.hasSessionCalls)
+	}
+	if len(mut.labelEdits) != 0 {
+		t.Errorf("label edits = %+v, want none on dry-run", mut.labelEdits)
+	}
+	assertDecisions(t, decisions, []wantDecision{{1, ActionSkip, "session unconfigured", ""}, {2, ActionDispatch, "dispatch", ""}})
+	if want := "session not probed (dry-run)"; decisions[1].Note != want {
+		t.Errorf("#2 Note = %q, want %q", decisions[1].Note, want)
+	}
+	if want := `o/b#2 dispatch (claude, 2-t.md, session "b-work"): dispatch; session not probed (dry-run)`; !strings.Contains(buf.String(), want) {
+		t.Errorf("log missing %q:\n%s", want, buf.String())
+	}
+}
+
+// TestApplyDispatchDryRun_AnsweredResumeShownWithoutMutation: an Input Needed
+// ticket with an authorized answer previews as a resume decision, with zero
+// label edits and zero spawns.
+func TestApplyDispatchDryRun_AnsweredResumeShownWithoutMutation(t *testing.T) {
+	failOnSpawn(t)
+	ctrl := &sessionProbeController{t: t, live: map[string]bool{}}
+	mut := &fakeMutator{}
+	decisions, err := applyDispatch(dispatchTestConfig(), resumeDispatchDeps(time.Now()), ctrl, mut, true, io.Discard, nil)
+	if err != nil {
+		t.Fatalf("dry-run err = %v", err)
+	}
+	if len(decisions) != 1 || decisions[0].Action != ActionDispatch || !decisions[0].Resume {
+		t.Fatalf("decisions = %+v, want one resume dispatch", decisions)
+	}
+	if len(mut.labelEdits) != 0 {
+		t.Errorf("label edits = %+v, want none", mut.labelEdits)
+	}
+}
+
+// TestApplyDispatch_AuthorizationHoldsMakeNoMutation: every hold class makes
+// zero launches and zero label edits, and is not a pass error.
+func TestApplyDispatch_AuthorizationHoldsMakeNoMutation(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(tk *Ticket)
+		reason string
+	}{
+		{"held", func(tk *Ticket) { tk.Authorization.Kind = pipeline.AuthorizationHeld }, "awaiting human plan review"},
+		{"changed", func(tk *Ticket) { tk.Authorization.PlanSHA256 = otherPlanSha }, "plan changed since approval"},
+		{"unrecorded", func(tk *Ticket) { *tk = Ticket{Repo: tk.Repo, Number: tk.Number, Labels: tk.Labels, Assignees: tk.Assignees} }, "plan authorization unrecorded (legacy plan; run cenci dispatch approve)"},
+		{"unreadable", func(tk *Ticket) { tk.AuthorizationProbe = AuthorizationProbeUnreadable }, "plan authorization unreadable"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			failOnSpawn(t)
+			deps := dispatchableDeps(time.Now())
+			tt.mutate(&deps.Tickets[0])
+			mut := &fakeMutator{}
+			decisions, err := applyDispatch(dispatchTestConfig(), deps, fakeController{}, mut, false, io.Discard, nil)
+			if err != nil {
+				t.Errorf("err = %v, want nil (a hold is a skip, not a pass failure)", err)
+			}
+			assertDecisions(t, decisions, []wantDecision{{42, ActionSkip, tt.reason, ""}})
+			if len(mut.labelEdits) != 0 {
+				t.Errorf("label edits = %+v, want none", mut.labelEdits)
+			}
+		})
+	}
+}
+
+// TestApplyDispatch_LegacyApprovalNoteOnDecisionLine: an in-flight execution
+// with no record launches and its decision line carries the legacy note.
+func TestApplyDispatch_LegacyApprovalNoteOnDecisionLine(t *testing.T) {
+	spawns := captureSpawns(t)
+	deps := dispatchableDeps(time.Now())
+	deps.Tickets[0] = Ticket{Repo: "o/r", Number: 42, Labels: []string{"Planned"}, Assignees: []string{"octocat"}, Stage: string(pipeline.StageExecuted), StageProbe: StageProbePresent}
+	var buf bytes.Buffer
+	if _, err := applyDispatch(dispatchTestConfig(), deps, fakeController{}, &fakeMutator{}, false, &buf, nil); err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if got, want := spawnIdentities(*spawns), []string{"42@test-session"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("spawns = %v, want %v", got, want)
+	}
+	if want := `o/r#42 dispatch (claude, 42-x.md, session "test-session"): dispatch; legacy approval (unrecorded provenance)`; !strings.Contains(buf.String(), want) {
+		t.Errorf("log missing %q:\n%s", want, buf.String())
+	}
 }

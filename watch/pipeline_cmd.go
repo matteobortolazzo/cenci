@@ -15,8 +15,9 @@ import (
 // pipelineUsage is the one-line hint printed for every malformed-CLI
 // invocation of `cenci pipeline` (unknown/missing stage, missing/non-numeric
 // id, unrecognized flag, trailing positional, --approve on a non-plan
-// stage) — exit 2, per docs/cli-conventions.md.
-const pipelineUsage = "cenci pipeline: usage: cenci pipeline prepare|plan|await-input|execute|review|finalize|reset <id> [--approve] [--state-dir DIR] [--repo PATH]"
+// stage, --authorization off the plan stage, beside --approve or with a value
+// outside the closed set) — exit 2, per docs/cli-conventions.md.
+const pipelineUsage = "cenci pipeline: usage: cenci pipeline prepare|plan|await-input|execute|review|finalize|reset <id> [--approve | --authorization held|lean|trivial|lean-resumed|lean-decided] [--state-dir DIR] [--repo PATH]"
 
 // pipelineStages are the six valid `cenci pipeline` subcommands: the five
 // stages from the plan's State Machine Design order, plus "await-input"
@@ -92,6 +93,7 @@ func runPipeline(args []string) {
 	fs := flag.NewFlagSet("pipeline "+stage, flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	approve := fs.Bool("approve", false, "mark the plan as approved (plan stage only)")
+	authorization := fs.String("authorization", "", "record the plan's authorization kind: held|lean|trivial|lean-resumed|lean-decided (bare plan stage only; not with --approve)")
 	stateDir := fs.String("state-dir", "", "override the pipeline state directory (test hook)")
 	repo := fs.String("repo", "", "override the resolved repo root (test hook)")
 	if err := fs.Parse(rest[1:]); err != nil {
@@ -103,13 +105,26 @@ func runPipeline(args []string) {
 	if *approve && stage != "plan" {
 		pipelineUsageExit()
 	}
+	authorizationSet := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "authorization" {
+			authorizationSet = true
+		}
+	})
+	// An explicit --authorization must name a persistable kind, on the bare
+	// plan stage only. human is deliberately outside the set: it is written
+	// only by `cenci dispatch approve` or an attended `plan --approve`.
+	if authorizationSet && (stage != "plan" || *approve || !pipeline.IsPersistAuthorizationKind(*authorization)) {
+		pipelineUsageExit()
+	}
 
 	out, err := pipeline.Run(pipeline.Opts{
-		Stage:    stage,
-		ID:       id,
-		Approve:  *approve,
-		RepoRoot: *repo,
-		StateDir: *stateDir,
+		Stage:         stage,
+		ID:            id,
+		Approve:       *approve,
+		Authorization: *authorization,
+		RepoRoot:      *repo,
+		StateDir:      *stateDir,
 	})
 
 	b, marshalErr := json.Marshal(out)

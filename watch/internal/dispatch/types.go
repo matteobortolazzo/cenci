@@ -13,6 +13,8 @@
 // `dispatch-failed`, which means the dispatched work failed.
 package dispatch
 
+import "github.com/matteobortolazzo/cenci/watch/v2/internal/pipeline"
+
 // StageProbe classifies the collector's read of a ticket's persisted
 // `cenci pipeline` stage (#732) into a closed set, rather than collapsing
 // distinct failure classes (watch/docs/go-gotchas.md #598,
@@ -747,7 +749,55 @@ type Ticket struct {
 	// unreadable one, or no launch keys) means no recorded launch, so every
 	// pre-#1292 Ticket construction site keeps today's window-name liveness rule.
 	Launch RecordedLaunch
+
+	// Authorization is the plan-authorization record (#1464) read from the
+	// same state-file read as Stage, meaningful only when AuthorizationProbe is
+	// AuthorizationProbeRecorded. AuthorizationProbe classifies the read. Its
+	// zero value is "no record", which holds an ordinary Planned dispatch below
+	// plan_approved (authorizationSkip, decide.go): a Ticket built without
+	// either field is never authorized.
+	Authorization      pipeline.Authorization
+	AuthorizationProbe AuthorizationProbe
 }
+
+// AuthorizationProbe classifies the collector's read of a ticket's
+// plan-authorization record (#1464), mirroring pipeline.AuthorizationClass
+// with an absent zero value like StageProbe. An unrecognized value is
+// default-denied as unreadable.
+type AuthorizationProbe string
+
+const (
+	// AuthorizationProbeAbsent is the zero value: the state has no
+	// authorization field (or there is no state file at all).
+	AuthorizationProbeAbsent AuthorizationProbe = ""
+	// AuthorizationProbeRecorded: a well-formed record of a known kind;
+	// Ticket.Authorization carries it.
+	AuthorizationProbeRecorded AuthorizationProbe = "recorded"
+	// AuthorizationProbeUnreadable: the field, or the state file holding it,
+	// could not be classified.
+	AuthorizationProbeUnreadable AuthorizationProbe = "unreadable"
+)
+
+// SessionEligibility is one repo's once-per-pass session verdict (#1464),
+// resolved by resolveSessionEligibility (session.go) before Decide runs and
+// applied by sessionEligibilitySkip ahead of the cap check, so a repo whose
+// session cannot take a launch never takes a capacity slot. A closed set
+// without a permissive zero value: an Inputs.SessionEligibility map miss is
+// permissive (mirroring RepoMemory), but an explicit "" is unrecognized and
+// denied, and applyDispatch spawns only for an explicit SessionEligible.
+type SessionEligibility string
+
+const (
+	// SessionEligible: the configured repos[].session exists in tmux.
+	SessionEligible SessionEligibility = "eligible"
+	// SessionUnconfigured: repos[].session is empty or whitespace-only.
+	SessionUnconfigured SessionEligibility = "unconfigured"
+	// SessionAbsent: HasSession reported the configured session absent.
+	SessionAbsent SessionEligibility = "absent"
+	// SessionProbeFailed: HasSession returned an error, so whether the
+	// session exists is unknown.
+	SessionProbeFailed SessionEligibility = "probe_failed"
+)
 
 // Plan is the parsed front matter of one .plans/<id>-<slug>.md file.
 type Plan struct {
@@ -775,6 +825,11 @@ type Plan struct {
 	// plan-file drop; the malformed value is simply not trusted.
 	EscalationNonce     string
 	EscalationCommentID int64
+
+	// Sha256 is the lowercase hex SHA-256 of the plan file's exact bytes
+	// (#1464, pipeline.PlanFingerprint over planfile.Entry.Content), compared
+	// against the ticket's authorization record below plan_approved.
+	Sha256 string
 }
 
 // Action is the outcome the engine chose for a ticket.
@@ -820,4 +875,10 @@ type Decision struct {
 	// pickup for a Refined ticket with no plan yet. Invariants: Replan ⇒
 	// Plan != nil; Planning && !Replan ⇒ Plan == nil.
 	Replan bool
+
+	// Note is an optional remark rendered after Reason on the decision line
+	// (#1464): `legacy approval (unrecorded provenance)` from Decide, and
+	// applyDispatch's dry-run `session not probed (dry-run)`. Never a skip
+	// reason: a noted dispatch is still a dispatch.
+	Note string
 }
