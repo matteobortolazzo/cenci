@@ -180,6 +180,18 @@ func CheckTrustedSocket(dir, socket string) error {
 	return nil
 }
 
+// CenciSocketPath returns the path of the cenci tmux server's socket,
+// <trusted dir>/cenci: where `tmux -L cenci` puts it. `cenci up` and the
+// ResolveSocket fallback both use it, so they never disagree about which server
+// is the cenci one.
+func CenciSocketPath() (string, error) {
+	dir, err := TrustedSocketDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "cenci"), nil
+}
+
 // ResolveSocket returns the first comma-separated field of $TMUX when it is set
 // and non-empty (tmux's own "<socket>,<server pid>,<session id>" value), else
 // the cenci socket under TrustedSocketDir. A non-empty $TMUX field is returned
@@ -195,9 +207,5 @@ func ResolveSocket() (string, error) {
 		}
 		return socket, nil
 	}
-	dir, err := TrustedSocketDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(dir, "cenci"), nil
+	return CenciSocketPath()
 }
