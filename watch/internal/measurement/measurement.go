@@ -57,9 +57,12 @@ var (
 	labelPattern     = regexp.MustCompile(`^[A-Za-z0-9._+-]+$`)
 )
 
-// kindTable maps a raw rate-limit kind to its window label. It is closed and
-// provisional: #1451 changes it once real values are observed. Every other raw
-// kind is stored as "unknown:<sanitized>", never as one of these.
+// kindTable maps a raw rate-limit kind to its window label. It is closed. The
+// kinds Claude Code 2.1.319's $.session.usage() produces are five_hour,
+// seven_day and, on a gateway provider only, spend_limit; the last is a spend
+// cap, not a time window, so it is deliberately not mapped
+// (watch/docs/claude-native-measurements.md). Every other raw kind is stored as
+// "unknown:<sanitized>", never as one of these.
 var kindTable = map[string]string{
 	"five_hour": "five_hour",
 	"seven_day": "weekly",

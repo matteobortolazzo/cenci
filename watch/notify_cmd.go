@@ -13,6 +13,7 @@ import (
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/frontend"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/hookhealth"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/ipc"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/measurement"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/modelswitch"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/run"
 )
@@ -106,16 +107,126 @@ func lenientString(raw json.RawMessage) (value string, notString bool) {
 	return value, false
 }
 
+// measurementSource is the constant source label notify puts on every native
+// measurement it sends; the validator's label pattern rejects spaces.
+const measurementSource = "session.measure"
+
+// measurementMaxBytes is the receiver's per-line limit (eventMaxBytes in
+// internal/ipc); the mod's stdin is read up to this size and nothing larger is
+// sent.
+const measurementMaxBytes = 4096
+
+// measurementInput is the stdin contract of `notify -measurement`, written by the
+// hooks/register.js mods module: the session cwd (only compared against
+// watch.excludeCwd, never forwarded) and the measurement body.
+type measurementInput struct {
+	Cwd         string                     `json:"cwd"`
+	Measurement map[string]json.RawMessage `json:"measurement"`
+}
+
+// projectObject keeps only the allowed keys of a JSON object, each as the
+// sender wrote it. A value that is not an object is returned unchanged so the
+// daemon's own validation marks it invalid instead of this projection hiding it.
+func projectObject(raw json.RawMessage, allowed ...string) json.RawMessage {
+	var fields map[string]json.RawMessage
+	if len(raw) == 0 || raw[0] != '{' || json.Unmarshal(raw, &fields) != nil {
+		return raw
+	}
+	kept := make(map[string]json.RawMessage, len(allowed))
+	for _, key := range allowed {
+		if value, ok := fields[key]; ok {
+			kept[key] = value
+		}
+	}
+	out, err := json.Marshal(kept)
+	if err != nil {
+		return raw
+	}
+	return out
+}
+
+// projectMeasurement rebuilds the measurement body from an allowlist, nested
+// keys included, so `cost` and every other unlisted field never reach the
+// socket (P46), and sets the constant source label. Field values pass through
+// untouched: only a whole-sample failure drops a sample.
+func projectMeasurement(in map[string]json.RawMessage) ([]byte, error) {
+	body := map[string]json.RawMessage{}
+	for _, key := range []string{"session_id", "measured_at"} {
+		if value, ok := in[key]; ok {
+			body[key] = value
+		}
+	}
+	if value, ok := in["context"]; ok {
+		body["context"] = projectObject(value, "tokens", "window", "percent")
+	}
+	if value, ok := in["rate_limits"]; ok {
+		body["rate_limits"] = value
+		var entries []json.RawMessage
+		if len(value) > 0 && value[0] == '[' && json.Unmarshal(value, &entries) == nil {
+			for i, entry := range entries {
+				entries[i] = projectObject(entry, "kind", "percent_used", "resets_at")
+			}
+			if projected, err := json.Marshal(entries); err == nil {
+				body["rate_limits"] = projected
+			}
+		}
+	}
+	source, err := json.Marshal(measurementSource)
+	if err != nil {
+		return nil, err
+	}
+	body["source"] = source
+	return json.Marshal(body)
+}
+
+// runNotifyMeasurement is `notify -agent claude -measurement`: it reads the
+// mods module's {"cwd", "measurement"} object from stdin and sends the
+// allowlisted, validated body as a native-measurement envelope. Every outcome is
+// silent with exit 0 and no hook-health record (the categories are a closed set
+// none of which describes a measurement). Delivery never autostarts the daemon
+// and never reaches DeliverEvent.
+func runNotifyMeasurement(socketPath, agentName string) {
+	if agentName != "claude" {
+		return
+	}
+	data, err := io.ReadAll(io.LimitReader(os.Stdin, measurementMaxBytes+1))
+	if err != nil || len(data) > measurementMaxBytes {
+		return
+	}
+	var input measurementInput
+	if err := json.Unmarshal(data, &input); err != nil || input.Measurement == nil {
+		return
+	}
+	if input.Cwd != "" && filepath.IsAbs(input.Cwd) &&
+		cwdExcluded(input.Cwd, loadExcludeCwd(run.DefaultConfigPath())) {
+		return
+	}
+	body, err := projectMeasurement(input.Measurement)
+	if err != nil {
+		return
+	}
+	if _, err := measurement.Parse(body, time.Now()); err != nil {
+		return
+	}
+	_ = ipc.SendNativeMeasurement(socketPath, ipc.NativeMeasurement{Measurement: body})
+}
+
 func runNotify(args []string) {
 	fs := flag.NewFlagSet("notify", flag.ExitOnError)
 	socketPath := fs.String("event-socket", ipc.DefaultEventSocketPath(), "event socket path")
 	agent := fs.String("agent", "", "agent name (claude, codex, or opencode)")
+	measurementMode := fs.Bool("measurement", false, "send one native measurement read from stdin (used by hooks/measure.sh)")
 	_ = fs.Parse(args)
 
 	// Hooks stay silent and exit 0, so a failure is left as a bounded
 	// hook-health record (#1239). Only claude and codex ever record; any other
 	// agent value (OpenCode stays disabled, #1219) is ignored by the store.
 	agentName := strings.ToLower(strings.TrimSpace(*agent))
+
+	if *measurementMode {
+		runNotifyMeasurement(*socketPath, agentName)
+		return
+	}
 
 	// Read hook JSON from stdin.
 	data, err := io.ReadAll(os.Stdin)

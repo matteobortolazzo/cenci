@@ -11,6 +11,12 @@
       "title": "/cenci-status command",
       "description": "Register the read-only /cenci-status command, which shows `cenci status` immediately, even while Claude is working. Needs Claude Code v2.1.287 or later.",
       "default": false
+    },
+    "nativeMeasurements": {
+      "type": "boolean",
+      "title": "Native measurements",
+      "description": "Send Claude Code's own context and rate-limit figures to the cenci daemon after each turn. Off by default; sends no cost; never starts the daemon. Needs Claude Code v2.1.319 or later.",
+      "default": false
     }
   }
 }

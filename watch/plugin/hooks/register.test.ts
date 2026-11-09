@@ -365,6 +365,50 @@ test('a reload (session.start twice) leaves one registration and no collision me
   expect(rec.sessionStartsReached).toBe(2)
 })
 
+// -- nativeMeasurements is independent of statusCommand (#1451) ----------------
+//
+// The measurement producer (hooks/register.js, tested in measure.test.ts) is
+// gated by its own option. These tests pin that the two options neither enable
+// nor disable each other.
+
+test('statusCommand and nativeMeasurements both on: /cenci-status registers once and still shows the status output', { options: { statusCommand: true, nativeMeasurements: true } }, async ($, on) => {
+  const rec = wire(on)
+  await $.session.start(SESSION)
+  const { text } = await $.command.run({ command: COMMAND })
+
+  expect(rec.registers.length).toBe(1)
+  expect(rec.registers[0].name).toBe(COMMAND)
+  expect(rec.registers[0].immediate).toBe(true)
+  expect(rec.runs.length).toBe(1)
+  expect(rec.runs[0].argv).toEqual(['/bin/sh', `${PLUGIN_ROOT}/hooks/status.sh`])
+  expect(rec.runs[0].init?.cwd).toBe(PLUGIN_ROOT)
+  expect(rec.runs[0].init?.timeoutMs).toBe(10000)
+  expect(text).toBe(RUNNING)
+})
+
+test('statusCommand on and nativeMeasurements false: /cenci-status behaves as before', { options: { statusCommand: true, nativeMeasurements: false } }, async ($, on) => {
+  const rec = wire(on)
+  await $.session.start(SESSION)
+  const { text } = await $.command.run({ command: COMMAND })
+
+  expect(rec.registers.length).toBe(1)
+  expect(rec.runs.length).toBe(1)
+  expect(rec.runs[0].argv).toEqual(['/bin/sh', `${PLUGIN_ROOT}/hooks/status.sh`])
+  expect(text).toBe(RUNNING)
+})
+
+test('only nativeMeasurements on: no command is registered, no process runs and /cenci-status is not answered', { options: { nativeMeasurements: true } }, async ($, on) => {
+  const rec = wire(on)
+  on('command.run', () => ({ text: 'engine answered' }))
+  await $.session.start(SESSION)
+  const { text } = await $.command.run({ command: COMMAND })
+
+  expect(rec.registers.length).toBe(0)
+  expect(rec.runs.length).toBe(0)
+  expect(rec.sessionStartsReached).toBe(1)
+  expect(text).toBe('engine answered')
+})
+
 test('registration and command runs never reach the model, prompt or session-send entry points', ENABLED, async ($, on) => {
   const rec = wire(on)
   await $.session.start(SESSION)
