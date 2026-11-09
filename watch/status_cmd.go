@@ -5,14 +5,20 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"maps"
+	"math"
 	"os"
+	"slices"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/config"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/daemon"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/dispatch"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/frontend/status"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/ipc"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/measurement"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/modelswitch"
 	"github.com/matteobortolazzo/cenci/watch/v2/pkg/watch"
 )
@@ -92,6 +98,7 @@ func renderHumanStatus(info daemon.StatusInfo, socketPath string) string {
 	}
 
 	snap, err := dispatch.ReadSnapshot(socketPath)
+	now := time.Now()
 	switch {
 	case errors.Is(err, watch.ErrDaemonUnreachable):
 		fmt.Fprintf(&b, "sessions: unavailable (daemon not reachable)\n")
@@ -115,11 +122,199 @@ func renderHumanStatus(info daemon.StatusInfo, socketPath string) string {
 			if w.ModelSwitchesMore > 0 {
 				fmt.Fprintf(&b, "    %s\n", modelswitch.FormatMore(w.ModelSwitchesMore))
 			}
+			if w.NativeMeasurement != nil {
+				renderNativeLines(&b, w.NativeMeasurement, now)
+			}
 		}
+	}
+
+	// The configured estimate is the dispatch input; it is printed on its own
+	// line and never mixed into the native lines above.
+	if err == nil && snap != nil && len(snap.Headroom) > 0 {
+		b.WriteString(renderBudgetHeadroom(snap.Headroom))
 	}
 
 	dstate := dispatch.ResolveDispatchState("", socketPath, io.Discard)
 	b.WriteString(renderDispatchState(dstate))
 
 	return b.String()
+}
+
+const (
+	nativeNotReported = "unknown (not reported)"
+	nativeInvalid     = "unknown (invalid)"
+	nativeExpired     = "expired (reset passed)"
+	nativeStale       = "stale"
+)
+
+// renderNativeLines writes the two native-measurement lines under a session.
+// The sample came from a socket, so every value is checked again here instead of
+// trusting what the daemon stored: a nil value is never shown as zero, a value
+// out of range is "unknown (invalid)", and free text goes through
+// measurement.SanitizeKind. The quota line is labelled session-scoped plan
+// quota and the context line carries no quota wording, so one is never read as
+// the other.
+func renderNativeLines(b *strings.Builder, m *watch.NativeMeasurement, now time.Time) {
+	suffix := nativeSuffix(m, now)
+	fmt.Fprintf(b, "    context: %s — %s\n", nativeContextText(m), suffix)
+	fmt.Fprintf(b, "    plan quota (native, session-scoped): %s — %s\n", nativeQuotaText(m, now), suffix)
+}
+
+// nativeSuffix is the source and age tail of both native lines. The source is
+// always claude: the measurement mode accepts only `-agent claude`. A measured_at
+// that does not parse, or is past measurement.FutureTolerance ahead of now (the
+// cap the parser applies), is "unknown (invalid)", never a fresh age.
+func nativeSuffix(m *watch.NativeMeasurement, now time.Time) string {
+	source := "source: claude " + measurement.SanitizeKind(m.Source)
+	measuredAt, err := time.Parse(time.RFC3339, m.MeasuredAt)
+	if err != nil || measuredAt.After(now.Add(measurement.FutureTolerance)) {
+		return source + ", measured " + nativeInvalid
+	}
+	suffix := fmt.Sprintf("%s, measured %s ago", source, nativeAge(now.Sub(measuredAt)))
+	if measurement.Freshness(measuredAt, now) == nativeStale {
+		suffix += " (stale)"
+	}
+	return suffix
+}
+
+// nativeAge renders d in one compact unit, rounded down: s, m, h, then d from
+// 48h. A negative d (a sample slightly ahead of this clock) is 0s.
+func nativeAge(d time.Duration) string {
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds", max(int(d/time.Second), 0))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d/time.Minute))
+	case d < 48*time.Hour:
+		return fmt.Sprintf("%dh", int(d/time.Hour))
+	default:
+		return fmt.Sprintf("%dd", int(d/(24*time.Hour)))
+	}
+}
+
+// nativeMissingText is the placeholder for a field the sample has no value for:
+// "unknown (invalid)" when the daemon rejected it, "unknown (not reported)" when
+// it was never sent.
+func nativeMissingText(m *watch.NativeMeasurement, path string) string {
+	if slices.Contains(m.Invalid, path) {
+		return nativeInvalid
+	}
+	return nativeNotReported
+}
+
+// nativePercent renders v as a percentage with at most one decimal (a trailing
+// ".0" is dropped, so a real 0.4 never reads as 0), or the placeholder for a
+// nil value or one outside [0, upper].
+func nativePercent(m *watch.NativeMeasurement, v *float64, upper float64, path string) string {
+	switch {
+	case v == nil:
+		return nativeMissingText(m, path)
+	case math.IsNaN(*v) || *v < 0 || *v > upper:
+		return nativeInvalid
+	default:
+		return strings.TrimSuffix(strconv.FormatFloat(*v, 'f', 1, 64), ".0") + "%"
+	}
+}
+
+// nativeCount renders a whole-number context field, or the placeholder.
+func nativeCount(m *watch.NativeMeasurement, v *int64, lowest int64, path string) string {
+	switch {
+	case v == nil:
+		return nativeMissingText(m, path)
+	case *v < lowest:
+		return nativeInvalid
+	default:
+		return strconv.FormatInt(*v, 10)
+	}
+}
+
+func nativeContextText(m *watch.NativeMeasurement) string {
+	c := m.Context
+	if c == nil {
+		return nativeMissingText(m, "context")
+	}
+	percent := nativePercent(m, c.Percent, math.Inf(1), "context.percent")
+	// Over-window is worked out from the percentage, not from the stored flag.
+	if c.Percent != nil && *c.Percent > 100 {
+		percent += " (over window)"
+	}
+	return fmt.Sprintf("percent %s, tokens %s, window %s", percent,
+		nativeCount(m, c.Tokens, 0, "context.tokens"), nativeCount(m, c.Window, 1, "context.window"))
+}
+
+func nativeQuotaText(m *watch.NativeMeasurement, now time.Time) string {
+	if m.Quota == nil {
+		return nativeMissingText(m, "rate_limits")
+	}
+	if len(m.Quota) == 0 {
+		return "none reported"
+	}
+	// rate_limits[<i>] paths index the input array, but Quota skips every entry
+	// that was rejected as a non-object, so walk past those input indexes.
+	windows := make([]string, 0, len(m.Quota))
+	input := 0
+	for _, w := range m.Quota {
+		for slices.Contains(m.Invalid, rateLimitPath(input)) {
+			input++
+		}
+		windows = append(windows, nativeWindowText(m, w, rateLimitPath(input), now))
+		input++
+	}
+	return strings.Join(windows, ", ")
+}
+
+func rateLimitPath(i int) string {
+	return "rate_limits[" + strconv.Itoa(i) + "]"
+}
+
+// nativeWindowText renders one quota window: `<kind> <p>% used, resets in <age>`,
+// or `<kind> expired (reset passed)` with no percentage once the reset passed.
+func nativeWindowText(m *watch.NativeMeasurement, w watch.NativeQuotaWindow, path string, now time.Time) string {
+	kind := nativeKind(w.Kind)
+
+	resets := "resets " + nativeMissingText(m, path+".resets_at")
+	if w.ResetsAt != "" {
+		resetsAt, err := time.Parse(time.RFC3339, w.ResetsAt)
+		switch {
+		case err != nil:
+			resets = "resets " + nativeInvalid
+		case measurement.QuotaState(resetsAt, now) == nativeExpired:
+			return kind + " " + nativeExpired
+		default:
+			resets = "resets in " + nativeAge(resetsAt.Sub(now))
+		}
+	}
+
+	used := nativePercent(m, w.PercentUsed, 100, path+".percent_used")
+	if w.PercentUsed != nil && used != nativeInvalid {
+		used += " used"
+	} else {
+		used = "used " + used
+	}
+	return kind + " " + used + ", " + resets
+}
+
+// nativeKind passes the two closed window labels through and reduces every
+// other value to "unknown:" plus a sanitized label.
+func nativeKind(kind string) string {
+	if kind == "five_hour" || kind == "weekly" {
+		return kind
+	}
+	return "unknown:" + measurement.SanitizeKind(strings.TrimPrefix(kind, "unknown:"))
+}
+
+// renderBudgetHeadroom renders the configured budget estimate (the dispatch
+// input) as one separately labelled line: `<agent> <p>%` pairs in key order.
+// Keys and values come from a socket, so keys are sanitized and a value outside
+// [0, 1] is "unknown (invalid)".
+func renderBudgetHeadroom(headroom map[string]float64) string {
+	parts := make([]string, 0, len(headroom))
+	for _, k := range slices.Sorted(maps.Keys(headroom)) {
+		value := nativeInvalid
+		if v := headroom[k]; !math.IsNaN(v) && v >= 0 && v <= 1 {
+			value = fmt.Sprintf("%d%%", int(math.Floor(v*100+0.5)))
+		}
+		parts = append(parts, measurement.SanitizeKind(k)+" "+value)
+	}
+	return "budget headroom (configured estimate): " + strings.Join(parts, "  ") + "\n"
 }
