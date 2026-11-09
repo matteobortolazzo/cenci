@@ -10,6 +10,7 @@ import (
 
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/daemon"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/frontend"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/tmux"
 )
 
 // ErrWindowSpawned is the sentinel a caller detects via errors.Is to
@@ -27,8 +28,10 @@ var ErrWindowSpawned = errors.New("tmux window already spawned")
 // Controller is the small consumer-side tmux interface the launcher needs.
 // *tmux.ExecClient satisfies it structurally (SetWindowOption already exists;
 // CurrentSession/IsGroupedSession/NewWindow are added alongside it). Tests use
-// their own mock. Every method takes the tmux socket it targets first; the
-// launcher passes "" (the ambient server).
+// their own mock. Every method takes the tmux socket it targets first; Run
+// passes the one socket it resolved (Opts.TmuxSocket, else $TMUX's first field,
+// else the cenci socket, #1431), never "". An empty socket stays the ambient
+// server for other callers.
 type Controller interface {
 	CurrentSession(socket string) (string, error)
 	// Launch-target methods receive tmux's exact-match session form.
@@ -58,6 +61,9 @@ type Opts struct {
 	SandboxSet bool
 	Model      string // --model
 	Session    string // --session; empty uses the current tmux session
+	// TmuxSocket is the tmux server socket every launch call targets (#1431);
+	// empty resolves one with tmux.ResolveSocket.
+	TmuxSocket string
 	Slug       string // --slug
 	ConfigPath string // --config
 	DryRun     bool   // --dry-run
@@ -212,10 +218,20 @@ func Run(opts Opts, ctrl Controller) error {
 		shellCommand = "cd " + shellQuote(dir) + " && " + shellCommand
 	}
 
+	// Resolve the one tmux socket every Controller call below targets (#1431):
+	// the explicit --tmux-socket value, else the invoking pane's server, else
+	// the cenci socket. A malformed value is refused here, before any tmux
+	// call and without wrapping ErrWindowSpawned, so it can never fall back to
+	// the ambient server.
+	socket, err := resolveSocket(opts.TmuxSocket)
+	if err != nil {
+		return err
+	}
+
 	// 3. Resolve target session: flag > current tmux session.
 	session := strings.TrimSpace(opts.Session)
 	if session == "" {
-		s, serr := ctrl.CurrentSession("")
+		s, serr := ctrl.CurrentSession(socket)
 		s = strings.TrimSpace(s)
 		switch {
 		case serr == nil && s != "":
@@ -259,7 +275,7 @@ func Run(opts Opts, ctrl Controller) error {
 
 	// 4. Safety guard: refuse grouped sessions — a new window would propagate
 	// to every session in the group.
-	grouped, err := ctrl.IsGroupedSession("", exactSession)
+	grouped, err := ctrl.IsGroupedSession(socket, exactSession)
 	if err != nil {
 		return fmt.Errorf("checking session %q: %w", session, err)
 	}
@@ -273,13 +289,13 @@ func Run(opts Opts, ctrl Controller) error {
 	}
 	ensure()
 
-	if err := ctrl.NewWindow("", exactSession, name, shellCommand); err != nil {
+	if err := ctrl.NewWindow(socket, exactSession, name, shellCommand); err != nil {
 		return fmt.Errorf("creating window %q in session %q: %w", name, session, err)
 	}
 	// Pin the name so the daemon flags the window ManuallyNamed and preserves
 	// the join key instead of renaming it to the detected task.
 	target := exactSession + ":=" + name
-	if err := ctrl.SetWindowOption("", target, "automatic-rename", "off"); err != nil {
+	if err := ctrl.SetWindowOption(socket, target, "automatic-rename", "off"); err != nil {
 		displayTarget := session + ":" + name
 		return fmt.Errorf("setting automatic-rename off on %q: %w: %w", displayTarget, err, ErrWindowSpawned)
 	}
@@ -289,7 +305,7 @@ func Run(opts Opts, ctrl Controller) error {
 	// failure here only costs it the auto-close: warn and report success. This
 	// failure must never wrap ErrWindowSpawned, which dispatch reads as a failed
 	// launch.
-	if err := recordRepoDir(ctrl, target, opts.Dir); err != nil {
+	if err := recordRepoDir(ctrl, socket, target, opts.Dir); err != nil {
 		warn := opts.Warn
 		if warn == nil {
 			warn = os.Stderr
@@ -302,12 +318,26 @@ func Run(opts Opts, ctrl Controller) error {
 
 // recordRepoDir writes the absolute launch directory onto the window as
 // frontend.RepoDirOption.
-func recordRepoDir(ctrl Controller, target, dir string) error {
+func recordRepoDir(ctrl Controller, socket, target, dir string) error {
 	repoDir, err := launchRepoDir(dir)
 	if err != nil {
 		return err
 	}
-	return ctrl.SetWindowOption("", target, frontend.RepoDirOption, repoDir)
+	return ctrl.SetWindowOption(socket, target, frontend.RepoDirOption, repoDir)
+}
+
+// resolveSocket returns the tmux socket a launch targets: an explicit socket
+// when one is given (it must pass the shape check), else tmux.ResolveSocket (the
+// first field of $TMUX, else the cenci socket). The result is never "", which
+// every socket-carrying call reads as "bare tmux on the ambient server".
+func resolveSocket(explicit string) (string, error) {
+	if explicit == "" {
+		return tmux.ResolveSocket()
+	}
+	if !tmux.ValidSocket(explicit) {
+		return "", fmt.Errorf("%w: %q", tmux.ErrMalformedSocket, explicit)
+	}
+	return explicit, nil
 }
 
 // launchRepoDir returns the absolute directory the new window starts in: the

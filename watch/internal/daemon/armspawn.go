@@ -21,6 +21,7 @@ import (
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/hostrepo"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/ipc"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/selfexe"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/tmux"
 )
 
 // armBucketBurst and armBucketRefill are hostArmSpawn's token-bucket
@@ -113,8 +114,9 @@ func armHostRepoFailureReason(err error) string {
 
 // armSessionForPane is the injectable seam over the bounded
 // `tmux display-message -t <pane> -p '#{session_name}'` pane->session
-// resolution (watch/docs/tmux.md: empty output on an invalid/gone pane is
-// not itself a command error and must be checked explicitly). Distinct
+// resolution (watch/docs/tmux.md: empty output on an invalid/gone pane is not
+// itself a command error and must be checked explicitly) on the request's own
+// socket, or the daemon's ambient server when that is empty (#1431). Distinct
 // from internal/babysit's currentTmuxSession, which resolves the *current*
 // process's own $TMUX_PANE -- this seam resolves an arbitrary
 // caller-supplied pane ID crossing the container->host trust boundary.
@@ -138,8 +140,23 @@ var armResolveSelfExe = selfexe.Resolve
 // '#{session_name}'`, treating empty stdout as its own failure per
 // watch/docs/tmux.md ("tmux display-message -t <nonexistent-pane> -p
 // exits 0 with empty stdout instead of erroring").
-func defaultArmSessionForPane(ctx context.Context, pane string) (string, error) {
-	stdout, stderr, err := execArmTmux(ctx, "display-message", "-t", pane, "-p", "#{session_name}")
+//
+// A pane id like %5 repeats across tmux servers, so a non-empty socket (the
+// arm request's own, already validated by handleArmRequest, #1431) resolves the
+// pane on that server through the hardened tmux.RunSocket -- `-S <socket>`,
+// allowlisted env, inside ctx (armSpawnBudget). An empty socket keeps the bare
+// execArmTmux call and today's behaviour.
+func defaultArmSessionForPane(ctx context.Context, socket, pane string) (string, error) {
+	args := []string{"display-message", "-t", pane, "-p", "#{session_name}"}
+	var stdout, stderr string
+	var err error
+	if socket == "" {
+		stdout, stderr, err = execArmTmux(ctx, args...)
+	} else {
+		var outBuf, errBuf bytes.Buffer
+		err = tmux.RunSocket(ctx, socket, &outBuf, &errBuf, args...)
+		stdout, stderr = strings.TrimSpace(outBuf.String()), strings.TrimSpace(errBuf.String())
+	}
 	if err != nil {
 		return "", fmt.Errorf("tmux display-message: %s: %w", stderr, err)
 	}
@@ -240,7 +257,7 @@ func (d *Daemon) hostArmSpawn(req ipc.ArmRequest) ipc.ArmResponse {
 	ctx, cancel := context.WithTimeout(context.Background(), armSpawnBudget)
 	defer cancel()
 
-	session, err := armSessionForPane(ctx, req.TmuxPane)
+	session, err := armSessionForPane(ctx, req.TmuxSocket, req.TmuxPane)
 	if err != nil {
 		reason := ReasonArmPaneUnresolvable
 		if errors.Is(err, context.DeadlineExceeded) {
@@ -264,6 +281,11 @@ func (d *Daemon) hostArmSpawn(req ipc.ArmRequest) ipc.ArmResponse {
 	}
 
 	args := []string{"babysit", req.PR, "--agent", req.Agent, "--interval", req.Interval.String(), "--session", session, "--dir", dir}
+	// The supervisor records the server its session was found on (#1431); with
+	// no socket the argv is today's.
+	if req.TmuxSocket != "" {
+		args = append(args, "--tmux-socket", req.TmuxSocket)
+	}
 	cmd := exec.Command(exePath, args...)
 	cmd.Dir = dir
 	cmd.Env = scrubArmSpawnEnv(os.Environ())

@@ -63,18 +63,21 @@ func sessionCandidateRepos(tickets []Ticket) map[string]bool {
 // order:
 //
 //   - an empty/whitespace-only repos[].session is SessionUnconfigured;
-//   - otherwise the trimmed name is probed with ctrl.HasSession on the default
-//     socket -- at most once per distinct name per pass, so repos sharing a
-//     session share one probe -- giving SessionProbeFailed on an error,
-//     SessionAbsent on false and SessionEligible on true. ctrl.CurrentSession
-//     is never consulted: config is the only source of the target.
+//   - otherwise the trimmed name is probed with ctrl.HasSession on socket (the
+//     one tmux socket the spawn will launch on, #1431) -- at most once per
+//     distinct name per pass, so repos sharing a session share one probe --
+//     giving SessionProbeFailed on an error, SessionAbsent on false and
+//     SessionEligible on true. ctrl.CurrentSession is never consulted: config
+//     is the only source of the target. When socketErr is non-nil the socket
+//     could not be resolved: nothing is probed (never on the ambient server),
+//     every probed repo is SessionProbeFailed, and the cause is logged once.
 //
 // A dry run probes nothing: a configured session gets no entry (the dispatch
 // line notes it as not probed instead), while SessionUnconfigured, known from
 // config alone, is still reported. Each ineligible repo logs one line naming
 // its remedy. A repo absent from the result is permissive in Decide (mirroring
 // RepoMemory), but applyDispatch spawns only for an explicit SessionEligible.
-func resolveSessionEligibility(repos []RepoConfig, tickets []Ticket, ctrl run.Controller, dryRun bool, configPath string, out io.Writer) map[string]SessionEligibility {
+func resolveSessionEligibility(repos []RepoConfig, tickets []Ticket, ctrl run.Controller, socket string, socketErr error, dryRun bool, configPath string, out io.Writer) map[string]SessionEligibility {
 	candidates := sessionCandidateRepos(tickets)
 	sessionByRepo := buildSessionByRepo(repos)
 	type probeResult struct {
@@ -83,6 +86,7 @@ func resolveSessionEligibility(repos []RepoConfig, tickets []Ticket, ctrl run.Co
 	}
 	probes := make(map[string]probeResult)
 	eligibility := make(map[string]SessionEligibility)
+	socketErrLogged := false
 
 	for _, rc := range repos {
 		if !candidates[rc.Repo] {
@@ -100,9 +104,17 @@ func resolveSessionEligibility(repos []RepoConfig, tickets []Ticket, ctrl run.Co
 		if dryRun {
 			continue
 		}
+		if socketErr != nil {
+			eligibility[rc.Repo] = SessionProbeFailed
+			if !socketErrLogged {
+				socketErrLogged = true
+				logf(out, "dispatch: resolving the tmux socket to probe sessions on failed: %v; check $TMUX\n", socketErr)
+			}
+			continue
+		}
 		p, probed := probes[session]
 		if !probed {
-			live, err := ctrl.HasSession("", session)
+			live, err := ctrl.HasSession(socket, session)
 			p = probeResult{live: live, err: err}
 			probes[session] = p
 		}

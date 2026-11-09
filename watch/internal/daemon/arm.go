@@ -176,6 +176,15 @@ func (d *Daemon) handleArmRequest(req ipc.ArmRequest) ipc.ArmResponse {
 		d.logArmReject(req, ReasonInvalidTmuxPane)
 		return ipc.ArmResponse{OK: false, Reason: ReasonInvalidTmuxPane}
 	}
+	// The pane's server socket crosses the same trust boundary as the pane id
+	// (#1431). A rejected value becomes empty -- the daemon's ambient server and
+	// today's supervisor argv -- never a nack, and its description never echoes a
+	// malformed value.
+	var socketRejection string
+	req.TmuxSocket, socketRejection = d.sanitizeTmuxSocket(req.TmuxSocket)
+	if socketRejection != "" && d.cfg.Verbose {
+		log.Printf("arm: rejected pr=%q repo=%q agent=%q: tmux_socket %s, using the default server", req.PR, req.Repo, req.Agent, socketRejection)
+	}
 	// Forward the canonicalized decimal form, not the raw validated string --
 	// strconv.Atoi accepts "+42"/"0042" as valid but the raw string would
 	// reach armSpawn un-canonicalized otherwise.

@@ -82,13 +82,16 @@ const armRequestKind = "babysit-arm"
 // behalf (#1094). PR/Repo are validated daemon-side before the request ever
 // reaches the injectable spawn seam; Agent is validated against the same
 // closed set `parseBabysitArgs` accepts. Interval and TmuxPane carry the
-// arguments the host-side spawn (#1095's hostArmSpawn) needs.
+// arguments the host-side spawn (#1095's hostArmSpawn) needs. TmuxSocket is the
+// tmux server socket TmuxPane lives on (#1431), omitted when empty so an
+// unset socket keeps today's wire form; the daemon validates it on receipt.
 type ArmRequest struct {
-	PR       string        `json:"pr"`
-	Repo     string        `json:"repo"`
-	Agent    string        `json:"agent"`
-	Interval time.Duration `json:"interval"`
-	TmuxPane string        `json:"tmux_pane"`
+	PR         string        `json:"pr"`
+	Repo       string        `json:"repo"`
+	Agent      string        `json:"agent"`
+	Interval   time.Duration `json:"interval"`
+	TmuxPane   string        `json:"tmux_pane"`
+	TmuxSocket string        `json:"tmux_socket,omitempty"`
 }
 
 // ArmResponse is the daemon's single ack-or-nack reply to an ArmRequest,

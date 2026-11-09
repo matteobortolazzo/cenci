@@ -19,7 +19,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -74,7 +76,7 @@ func installArmSeams(t *testing.T, session func(context.Context, string) (string
 	calls := &armSeamCalls{}
 	installSelfExe(t, func() (string, error) { return fakeSelfExe, nil })
 	origSession, origResolve, origStart := armSessionForPane, armResolveHostRepo, armStartBabysit
-	armSessionForPane = func(ctx context.Context, pane string) (string, error) {
+	armSessionForPane = func(ctx context.Context, _, pane string) (string, error) {
 		calls.session.Add(1)
 		return session(ctx, pane)
 	}
@@ -933,7 +935,7 @@ func TestHostArmSpawn_HostRepoResolutionRealDeadlineExceeded_NacksResolutionTime
 
 	d := newArmSpawnTestDaemon()
 	origSession, origStart := armSessionForPane, armStartBabysit
-	armSessionForPane = fixedSession("host-session")
+	armSessionForPane = func(context.Context, string, string) (string, error) { return "host-session", nil }
 	armStartBabysit = func(*exec.Cmd) error {
 		t.Fatal("armStartBabysit must never be invoked when host-repo resolution times out")
 		return nil
@@ -952,6 +954,233 @@ func TestHostArmSpawn_HostRepoResolutionRealDeadlineExceeded_NacksResolutionTime
 	}
 	if elapsed >= 9*time.Second {
 		t.Fatalf("hostArmSpawn took %v, want it bounded by armSpawnBudget (%v), not the full 10s sleep", elapsed, armSpawnBudget)
+	}
+}
+
+// -- #1431 (P29): the arm request's own socket resolves its pane -------------
+//
+// These drive handleArmRequest -> hostArmSpawn with the REAL pane resolver
+// (defaultArmSessionForPane) over a fake `tmux` that answers per `-S <socket>`,
+// so what reaches tmux and the spawned supervisor's argv are what is asserted.
+
+// armWorld is a daemon wired to the real pane resolver, with the repo and
+// process-start seams faked and a trusted tmux socket directory.
+type armWorld struct {
+	d         *Daemon
+	socketDir string // the trusted directory handleArmRequest checks sockets against
+	tmuxLog   string
+	start     *armSeamCalls
+}
+
+const armWorldRepoDir = "/resolved/host/repo"
+
+// newArmWorld installs a fake tmux that logs every call (argv, one line per call)
+// and then answers `display-message` by the socket it was given: session-a on
+// <trusted>/a, session-b on <trusted>/b, and ambient-session when no -S leads.
+// The log path is baked into the script: a socket call's child env is only
+// PATH/HOME/TERM/LANG.
+func newArmWorld(t *testing.T) *armWorld {
+	t.Helper()
+	d := newArmSpawnTestDaemon()
+	d.armSpawn = d.hostArmSpawn
+	w := &armWorld{d: d, socketDir: trustedSocketDir(t, d), start: &armSeamCalls{}}
+
+	shimDir := t.TempDir()
+	w.tmuxLog = filepath.Join(t.TempDir(), "tmux.log")
+	script := "#!/bin/sh\n" +
+		`printf '%s\n' "$*" >> '` + w.tmuxLog + "'\n" +
+		"sock=\n" +
+		`if [ "$1" = -S ]; then sock=$2; shift 2; fi` + "\n" +
+		`case "$sock" in` + "\n" +
+		`  */a) printf 'session-a\n' ;;` + "\n" +
+		`  */b) printf 'session-b\n' ;;` + "\n" +
+		`  *) printf 'ambient-session\n' ;;` + "\n" +
+		"esac\n"
+	if err := os.WriteFile(filepath.Join(shimDir, "tmux"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", shimDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	installSelfExe(t, func() (string, error) { return fakeSelfExe, nil })
+	origResolve, origStart := armResolveHostRepo, armStartBabysit
+	armResolveHostRepo = fixedRepoDir(armWorldRepoDir)
+	truePath, err := exec.LookPath("true")
+	if err != nil {
+		t.Skip("needs a `true` binary to stand in for the supervisor process")
+	}
+	armStartBabysit = func(cmd *exec.Cmd) error {
+		w.start.start.Add(1)
+		w.start.recordCmd(cmd)
+		// Start a harmless real process in place of the supervisor (argv is
+		// untouched), so the reaper goroutine's Wait ends silently instead of
+		// logging a "not started" failure that would race the log assertions.
+		cmd.Path, cmd.Dir = truePath, ""
+		return cmd.Start()
+	}
+	t.Cleanup(func() { armResolveHostRepo, armStartBabysit = origResolve, origStart })
+	return w
+}
+
+func (w *armWorld) socket(name string) string { return filepath.Join(w.socketDir, name) }
+
+// arm sends a valid request for pane on socket through handleArmRequest.
+func (w *armWorld) arm(pane, socket string) ipc.ArmResponse {
+	req := validArmRequest()
+	req.TmuxPane, req.TmuxSocket = pane, socket
+	return w.d.handleArmRequest(req)
+}
+
+// tmuxCalls returns the logged tmux argv lines (a missing log is no calls).
+func (w *armWorld) tmuxCalls(t *testing.T) []string {
+	t.Helper()
+	raw, err := os.ReadFile(w.tmuxLog)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.Split(strings.TrimSuffix(string(raw), "\n"), "\n")
+}
+
+// supervisorArgs returns the argv of the supervisor the last ack spawned.
+func (w *armWorld) supervisorArgs(t *testing.T) []string {
+	t.Helper()
+	cmd := w.start.capturedCmd()
+	if cmd == nil {
+		t.Fatal("no supervisor was spawned")
+	}
+	return cmd.Args
+}
+
+// The same pane id exists on two servers. Each request's pane resolves on its
+// own socket, and the supervisor is told which server its session lives on.
+func TestArmRequest_PaneResolvesOnTheRequestsOwnSocket(t *testing.T) {
+	w := newArmWorld(t)
+	captureLog(t)
+
+	for _, tc := range []struct{ name, wantSession string }{{"a", "session-a"}, {"b", "session-b"}} {
+		sock := w.socket(tc.name)
+		if resp := w.arm("%5", sock); !resp.OK {
+			t.Fatalf("arm on %s: nack %q, want an ack", sock, resp.Reason)
+		}
+		args := w.supervisorArgs(t)
+		assertArgAfter(t, args, "--session", tc.wantSession)
+		if n := len(args); n < 2 || args[n-2] != "--tmux-socket" || args[n-1] != sock {
+			t.Errorf("supervisor argv = %q, want it to end with --tmux-socket %s", args, sock)
+		}
+	}
+	wantCalls := []string{
+		"-S " + w.socket("a") + " display-message -t %5 -p #{session_name}",
+		"-S " + w.socket("b") + " display-message -t %5 -p #{session_name}",
+	}
+	if got := w.tmuxCalls(t); !reflect.DeepEqual(got, wantCalls) {
+		t.Errorf("tmux calls = %q, want %q", got, wantCalls)
+	}
+}
+
+// A socket that fails the shape or trusted-directory check is dropped to the
+// ambient default (never a nack): no -S reaches tmux, the supervisor gets no
+// --tmux-socket, the rejection is logged only under Verbose, and a malformed value
+// is never echoed into that log.
+func TestArmRequest_UntrustedSocketSendsNoDashS(t *testing.T) {
+	loose := t.TempDir() // 0755: not the trusted directory
+	for _, tc := range []struct {
+		name   string
+		socket func(w *armWorld) string
+	}{
+		{"outside the trusted directory", func(w *armWorld) string { return filepath.Join(loose, "a") }},
+		{"nested below the trusted directory", func(w *armWorld) string { return w.socket("sub/a") }},
+		{"relative path", func(w *armWorld) string { return "relative/a" }},
+		{"unprintable character", func(w *armWorld) string { return w.socket("evil\x1b[31mred") }},
+		{"tab", func(w *armWorld) string { return w.socket("a\tb") }},
+	} {
+		for _, verbose := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/verbose=%v", tc.name, verbose), func(t *testing.T) {
+				w := newArmWorld(t)
+				w.d.cfg.Verbose = verbose
+				buf := captureLog(t)
+
+				resp := w.arm("%5", tc.socket(w))
+
+				if !resp.OK {
+					t.Fatalf("nack %q: a rejected socket falls back to the default server, it is not a nack", resp.Reason)
+				}
+				calls := w.tmuxCalls(t)
+				if len(calls) != 1 || strings.HasPrefix(calls[0], "-S") {
+					t.Errorf("tmux calls = %q, want exactly one with no -S", calls)
+				}
+				args := w.supervisorArgs(t)
+				if slices.Contains(args, "--tmux-socket") {
+					t.Errorf("supervisor argv = %q, want no --tmux-socket for a rejected socket", args)
+				}
+				assertArgAfter(t, args, "--session", "ambient-session")
+				out := buf.String()
+				if verbose && !strings.Contains(out, "socket") {
+					t.Errorf("verbose log = %q, want a line naming the rejected socket", out)
+				}
+				if !verbose && out != "" {
+					t.Errorf("log = %q, want nothing without Verbose", out)
+				}
+				if strings.Contains(out, "evil") || strings.Contains(out, "\x1b") || strings.Contains(out, "\t") {
+					t.Errorf("log = %q echoes a malformed socket value", out)
+				}
+			})
+		}
+	}
+}
+
+// An empty socket keeps today's exact supervisor argv -- no --tmux-socket -- and
+// today's bare tmux call.
+func TestArmRequest_EmptySocketKeepsTodaysArgv(t *testing.T) {
+	w := newArmWorld(t)
+	captureLog(t)
+	req := validArmRequest()
+
+	if resp := w.d.handleArmRequest(req); !resp.OK {
+		t.Fatalf("nack %q, want an ack", resp.Reason)
+	}
+
+	want := []string{fakeSelfExe, "babysit", req.PR, "--agent", req.Agent, "--interval", req.Interval.String(), "--session", "ambient-session", "--dir", armWorldRepoDir}
+	if got := w.supervisorArgs(t); !slices.Equal(got, want) {
+		t.Errorf("supervisor argv = %q, want %q", got, want)
+	}
+	if got, want := w.tmuxCalls(t), []string{"display-message -t %3 -p #{session_name}"}; !slices.Equal(got, want) {
+		t.Errorf("tmux calls = %q, want %q", got, want)
+	}
+}
+
+// The socket-carrying resolution stays bounded by armSpawnBudget: a tmux that
+// never answers on the request's socket is a resolution timeout, classified like
+// the bare call (the real subprocess is killed, not just a fabricated error).
+func TestArmRequest_SocketResolutionRealDeadlineNacksResolutionTimedOut(t *testing.T) {
+	shimDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(shimDir, "tmux"), []byte("#!/bin/sh\nexec sleep 10\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", shimDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	d := newArmSpawnTestDaemon()
+	d.armSpawn = d.hostArmSpawn
+	sockDir := trustedSocketDir(t, d)
+	origResolve, origStart := armResolveHostRepo, armStartBabysit
+	armResolveHostRepo = failingSeam[string](errors.New("armResolveHostRepo must never be invoked"))
+	armStartBabysit = func(*exec.Cmd) error {
+		t.Error("armStartBabysit must never be invoked when pane resolution times out")
+		return nil
+	}
+	t.Cleanup(func() { armResolveHostRepo, armStartBabysit = origResolve, origStart })
+	req := validArmRequest()
+	req.TmuxSocket = filepath.Join(sockDir, "a")
+
+	start := time.Now()
+	resp := d.handleArmRequest(req)
+	elapsed := time.Since(start)
+
+	if resp.OK || resp.Reason != ReasonArmResolutionTimedOut {
+		t.Errorf("resp = %+v, want a nack with reason %q", resp, ReasonArmResolutionTimedOut)
+	}
+	if elapsed >= 9*time.Second {
+		t.Errorf("handleArmRequest took %v, want it bounded by armSpawnBudget (%v)", elapsed, armSpawnBudget)
 	}
 }
 

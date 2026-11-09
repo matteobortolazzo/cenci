@@ -129,7 +129,7 @@ func newCICapEnv(t *testing.T, steps ...ciCapStep) *ciCapEnv {
 		}
 		return []byte(""), nil
 	}
-	tmuxHasSession = func(string) (bool, error) {
+	tmuxHasSession = func(string, string) (bool, error) {
 		e.attempts++
 		return e.sessionUp == nil || e.sessionUp(e.attempts), nil
 	}

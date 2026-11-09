@@ -3,12 +3,14 @@ package run
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/frontend"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/tmux"
 )
 
 // mockCtrl records launcher calls for assertions.
@@ -35,33 +37,52 @@ type mockCtrl struct {
 	windows         []winCall
 	options         []optCall
 	groupedSessions []string
+	// socketCalls records, in order, the Controller method and the tmux socket
+	// of every call (#1431), so a test can assert what reached tmux.
+	socketCalls []socketCall
 }
 
 type winCall struct{ session, name, cmd string }
 type optCall struct{ target, key, value string }
 
-func (m *mockCtrl) CurrentSession(string) (string, error) { return m.session, m.sessionErr }
-func (m *mockCtrl) IsGroupedSession(_, session string) (bool, error) {
+// socketCall is one Controller call: the method name and the socket it carried.
+type socketCall struct{ method, socket string }
+
+func (m *mockCtrl) CurrentSession(socket string) (string, error) {
+	m.socketCalls = append(m.socketCalls, socketCall{"CurrentSession", socket})
+	return m.session, m.sessionErr
+}
+func (m *mockCtrl) IsGroupedSession(socket, session string) (bool, error) {
+	m.socketCalls = append(m.socketCalls, socketCall{"IsGroupedSession", socket})
 	m.groupedSessions = append(m.groupedSessions, session)
 	return m.grouped, m.groupedErr
 }
-func (m *mockCtrl) NewWindow(_, session, name, cmd string) error {
+func (m *mockCtrl) NewWindow(socket, session, name, cmd string) error {
+	m.socketCalls = append(m.socketCalls, socketCall{"NewWindow", socket})
 	m.windows = append(m.windows, winCall{session, name, cmd})
 	return m.newWindowErr
 }
-func (m *mockCtrl) SetWindowOption(_, target, key, value string) error {
+func (m *mockCtrl) SetWindowOption(socket, target, key, value string) error {
+	m.socketCalls = append(m.socketCalls, socketCall{"SetWindowOption", socket})
 	m.options = append(m.options, optCall{target, key, value})
 	if err, ok := m.optErrByKey[key]; ok {
 		return err
 	}
 	return m.optErr
 }
-func (m *mockCtrl) HasSession(string, string) (bool, error) { return m.hasSession, m.hasSessionErr }
+func (m *mockCtrl) HasSession(socket, _ string) (bool, error) {
+	m.socketCalls = append(m.socketCalls, socketCall{"HasSession", socket})
+	return m.hasSession, m.hasSessionErr
+}
 
 // noConfigOpts returns Opts pinned to a non-existent config (built-ins only),
-// so tests are deterministic.
+// so tests are deterministic. $TMUX is cleared and $TMUX_TMPDIR points at a
+// test-owned directory, so the socket Run resolves never depends on the
+// developer's (or the sandbox's) ambient tmux (watch/docs/test-isolation.md).
 func noConfigOpts(t *testing.T) Opts {
 	t.Helper()
+	t.Setenv("TMUX", "")
+	t.Setenv("TMUX_TMPDIR", t.TempDir())
 	return Opts{
 		ConfigPath: filepath.Join(t.TempDir(), "none.json"),
 		// Stub the daemon hook: the real daemon.EnsureRunning spawns
@@ -1519,5 +1540,104 @@ func TestRunAdapterRefusalDoesNotMaskEarlierRefusals(t *testing.T) {
 	}
 	if len(calls) != 0 {
 		t.Errorf("probe was called for an earlier refusal: %+v", calls)
+	}
+}
+
+// -- #1431: every Controller call goes to one resolved tmux socket -----------
+
+// requireSocketCalls asserts the exact ordered Controller calls Run made and
+// that every one of them carried want: the launcher never mixes sockets and
+// never falls back to the ambient (empty) one.
+func requireSocketCalls(t *testing.T, m *mockCtrl, want string, methods ...string) {
+	t.Helper()
+	var got []string
+	for _, c := range m.socketCalls {
+		got = append(got, c.method)
+		if c.socket != want {
+			t.Errorf("%s targeted socket %q, want %q", c.method, c.socket, want)
+		}
+	}
+	if strings.Join(got, ",") != strings.Join(methods, ",") {
+		t.Errorf("Controller calls = %v, want %v", got, methods)
+	}
+}
+
+// P11: with $TMUX set, the first field of it is the invoking pane's server and
+// every call (session lookup, grouped check, window, both window options)
+// carries it.
+func TestRunTargetsTheInvokingPanesServer(t *testing.T) {
+	m := &mockCtrl{session: "work"}
+	opts := noConfigOpts(t)
+	t.Setenv("TMUX", "/s/a,4242,0")
+	opts.Workflow, opts.Ticket = "implement", "40"
+
+	if err := Run(opts, m); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	requireSocketCalls(t, m, "/s/a", "CurrentSession", "IsGroupedSession", "NewWindow", "SetWindowOption", "SetWindowOption")
+}
+
+// P11: outside tmux (no $TMUX) a run with --session targets the cenci socket
+// under the trusted tmux directory, never the default server.
+func TestRunHeadlessTargetsTheCenciSocket(t *testing.T) {
+	m := &mockCtrl{}
+	opts := noConfigOpts(t)
+	tmpdir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMUX_TMPDIR", tmpdir)
+	opts.Workflow, opts.Ticket, opts.Session = "implement", "40", "work"
+
+	if err := Run(opts, m); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	want := filepath.Join(tmpdir, fmt.Sprintf("tmux-%d", os.Getuid()), "cenci")
+	requireSocketCalls(t, m, want, "IsGroupedSession", "NewWindow", "SetWindowOption", "SetWindowOption")
+}
+
+// An explicit Opts.TmuxSocket (the --tmux-socket flag) wins over $TMUX.
+func TestRunExplicitSocketWinsOverTMUX(t *testing.T) {
+	m := &mockCtrl{}
+	opts := noConfigOpts(t)
+	t.Setenv("TMUX", "/s/a,4242,0")
+	opts.Workflow, opts.Ticket, opts.Session, opts.TmuxSocket = "implement", "40", "work", "/s/b"
+
+	if err := Run(opts, m); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	requireSocketCalls(t, m, "/s/b", "IsGroupedSession", "NewWindow", "SetWindowOption", "SetWindowOption")
+}
+
+// A socket that fails the shape check, or a $TMUX with an empty socket field
+// (which would otherwise read as "bare tmux"), returns ErrMalformedSocket
+// before any tmux call and is never a spawned-window failure.
+func TestRunMalformedSocketFailsBeforeAnyControllerCall(t *testing.T) {
+	for _, tc := range []struct {
+		name, explicit, tmuxEnv string
+	}{
+		{"relative explicit socket", "relative/sock", ""},
+		{"explicit socket with a tab", "/tmp/tmux-1000/a\tb", ""},
+		{"explicit socket with a newline", "/tmp/tmux-1000/a\nb", ""},
+		{"empty socket field in $TMUX", "", ",4242,0"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &mockCtrl{session: "work"}
+			opts := noConfigOpts(t)
+			t.Setenv("TMUX", tc.tmuxEnv)
+			opts.Workflow, opts.Ticket, opts.TmuxSocket = "implement", "40", tc.explicit
+
+			err := Run(opts, m)
+
+			if !errors.Is(err, tmux.ErrMalformedSocket) {
+				t.Fatalf("Run err = %v, want errors.Is tmux.ErrMalformedSocket", err)
+			}
+			if errors.Is(err, ErrWindowSpawned) {
+				t.Errorf("Run err = %v, a refusal before any tmux call must not wrap ErrWindowSpawned", err)
+			}
+			if len(m.socketCalls) != 0 {
+				t.Errorf("Controller calls = %+v, want none", m.socketCalls)
+			}
+		})
 	}
 }

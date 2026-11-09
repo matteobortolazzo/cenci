@@ -1289,7 +1289,7 @@ func TestTickAutomergeHeldOnRepairOrReviewPending(t *testing.T) {
 			// reasonReviewPending assertion below, rather than short-
 			// circuiting into reasonWorkflowLaunchFailed.
 			originalTmuxHasSession := tmuxHasSession
-			tmuxHasSession = func(string) (bool, error) { return true, nil }
+			tmuxHasSession = func(string, string) (bool, error) { return true, nil }
 			t.Cleanup(func() { tmuxHasSession = originalTmuxHasSession })
 			s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 60, LaunchSession: "work"}
 			tc.setup(&s)
@@ -1487,7 +1487,7 @@ func TestTickFeedbackHoldsAutomerge(t *testing.T) {
 			// reason is even assigned -- see the identical note on
 			// TestTickAutomergeHeldOnRepairOrReviewPending above.
 			originalTmuxHasSession := tmuxHasSession
-			tmuxHasSession = func(string) (bool, error) { return true, nil }
+			tmuxHasSession = func(string, string) (bool, error) { return true, nil }
 			t.Cleanup(func() { tmuxHasSession = originalTmuxHasSession })
 
 			s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 60, PendingKeys: tc.pendingKeys, LaunchSession: "work"}
@@ -2034,7 +2034,7 @@ func TestTickRecordsAutomergeHoldWhenAddressReviewLaunchFails(t *testing.T) {
 	// for the intended reason, rather than short-circuiting on the new
 	// "no session recorded" gate before command() is ever called.
 	originalTmuxHasSession := tmuxHasSession
-	tmuxHasSession = func(string) (bool, error) { return true, nil }
+	tmuxHasSession = func(string, string) (bool, error) { return true, nil }
 	t.Cleanup(func() {
 		command = originalCommand
 		execGh = originalExecGh
@@ -2085,7 +2085,7 @@ func TestTickRecordsAutomergeHoldWhenCIRepairLaunchFails(t *testing.T) {
 	}
 	// #975: see the identical note on TestTickRecordsAutomergeHoldWhenAddressReviewLaunchFails.
 	originalTmuxHasSession := tmuxHasSession
-	tmuxHasSession = func(string) (bool, error) { return true, nil }
+	tmuxHasSession = func(string, string) (bool, error) { return true, nil }
 	t.Cleanup(func() {
 		command = originalCommand
 		execGh = originalExecGh
@@ -2136,7 +2136,7 @@ func TestTickRecordsAutomergeHoldWhenBabysitAttentionLaunchFails(t *testing.T) {
 	}
 	// #975: see the identical note on TestTickRecordsAutomergeHoldWhenAddressReviewLaunchFails.
 	originalTmuxHasSession := tmuxHasSession
-	tmuxHasSession = func(string) (bool, error) { return true, nil }
+	tmuxHasSession = func(string, string) (bool, error) { return true, nil }
 	t.Cleanup(func() {
 		command = originalCommand
 		execGh = originalExecGh

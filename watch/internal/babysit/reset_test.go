@@ -302,6 +302,34 @@ func TestReset_PausedSupervisorZeroesBudgetKeepsFeedbackAndReArms(t *testing.T) 
 	}
 }
 
+// #1431: the re-armed supervisor gets the recorded launch socket on its argv,
+// beside --session, and the saved state keeps it; a state recorded before the
+// socket existed re-arms with today's argv (asserted by the tests above).
+func TestReset_ReArmsWithTheRecordedLaunchSocket(t *testing.T) {
+	e := newResetEnv(t)
+	paused := pausedState()
+	paused.LaunchSocket = "/s/a"
+	writeStateFile(t, e.path, paused)
+
+	done := captureStdout(t)
+	err := Reset("42", e.dir, nil)
+	_ = done()
+	if err != nil {
+		t.Fatalf("Reset: %v", err)
+	}
+
+	if len(e.started) != 1 {
+		t.Fatalf("supervisor starts = %d, want 1", len(e.started))
+	}
+	argv := e.started[0]
+	assertFlagValue(t, argv, "--session", "work")
+	assertFlagValue(t, argv, "--tmux-socket", "/s/a")
+	assertFlagValue(t, argv, "--dir", "/repo/work")
+	if s := mustReadState(t, e.path); s.LaunchSocket != "/s/a" {
+		t.Errorf("saved launchSocket = %q, want /s/a kept", s.LaunchSocket)
+	}
+}
+
 func TestReset_LiveOwnedSupervisorIsTerminatedLockRemovedThenReArmed(t *testing.T) {
 	e := newResetEnv(t)
 	p := startOwnedFixture(t, false)

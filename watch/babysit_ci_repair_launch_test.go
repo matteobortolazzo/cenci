@@ -118,6 +118,8 @@ func writeCIRepairFakeTmux(t *testing.T, binDir, ctlDir, logPath string) {
 	ctl := func(name string) string { return exectest.ShellQuote(filepath.Join(ctlDir, name)) }
 	exectest.WriteExecutable(t, filepath.Join(binDir, "tmux"), "#!/bin/sh\n"+
 		`printf '%s\000' "$#" "$@" >> `+exectest.ShellQuote(logPath)+"\n"+
+		// `cenci run` always leads with `-S <socket>` (#1431): drop it after logging.
+		`if [ "$1" = -S ]; then shift 2; fi`+"\n"+
 		`case "$1" in`+"\n"+
 		`has-session) exit 0 ;;`+"\n"+
 		`display-message) if [ -e `+ctl("grouped")+` ]; then echo 1; else echo 0; fi ;;`+"\n"+
@@ -369,7 +371,7 @@ func (w *ciRepairWorld) tmuxCalls(t *testing.T, verb string) [][]string {
 	t.Helper()
 	var out [][]string
 	for _, c := range adapterLaunchCalls(t, w.tmuxLog) {
-		if len(c) > 0 && c[0] == verb {
+		if c = withoutTmuxSocket(c); len(c) > 0 && c[0] == verb {
 			out = append(out, c)
 		}
 	}

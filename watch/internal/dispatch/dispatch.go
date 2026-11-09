@@ -13,6 +13,7 @@ import (
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/pipeline"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/planfile"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/run"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/tmux"
 	"github.com/matteobortolazzo/cenci/watch/v2/pkg/watch"
 )
 
@@ -20,6 +21,10 @@ import (
 // so tests never ensure a real daemon or tmux window (same idiom as
 // internal/daemon's spawn var).
 var runFn = run.Run
+
+// resolveLaunchSocket is the seam over the tmux socket a real pass probes and
+// spawns on (#1431); tests stub it so no ambient $TMUX decides the socket.
+var resolveLaunchSocket = tmux.ResolveSocket
 
 // clearLaunchFn is the recorded-launch clearing seam (#1292): applyDispatch
 // calls it before each spawn so tests can inject a failure.
@@ -368,7 +373,16 @@ func applyDispatch(cfg Config, deps dispatchDeps, ctrl run.Controller, mut Ticke
 	// sits ahead of the cap check and an ineligible repo never takes a slot. A
 	// dry run probes nothing (configured sessions get the not-probed note
 	// below) but still reports an unconfigured session from config alone.
-	eligibility := resolveSessionEligibility(cfg.Repos, deps.Tickets, ctrl, dryRun, cfg.Path, out)
+	//
+	// The socket is resolved once per real pass (#1431) and the same string
+	// goes to the HasSession probe and to run.Opts.TmuxSocket below, so the gate
+	// and the spawn can never name different servers. A dry run resolves none.
+	var socket string
+	var socketErr error
+	if !dryRun {
+		socket, socketErr = resolveLaunchSocket()
+	}
+	eligibility := resolveSessionEligibility(cfg.Repos, deps.Tickets, ctrl, socket, socketErr, dryRun, cfg.Path, out)
 
 	decisions := Decide(Inputs{
 		Tickets:                   deps.Tickets,
@@ -488,8 +502,9 @@ func applyDispatch(cfg Config, deps dispatchDeps, ctrl run.Controller, mut Ticke
 			// resolveSessionEligibility proved live this pass. The dispatch
 			// spawn path never consults ctrl.CurrentSession(); config is the
 			// only source.
-			Session: sessionByRepo[d.Ticket.Repo],
-			Dir:     dirByRepo[d.Ticket.Repo],
+			Session:    sessionByRepo[d.Ticket.Repo],
+			TmuxSocket: socket,
+			Dir:        dirByRepo[d.Ticket.Repo],
 			// Unattended (#1087): every dispatched session pins
 			// CENCI_ATTENDED=0 in its own window environment. #1086's fleet
 			// gate already refuses to start a planning session while

@@ -23,6 +23,7 @@ func runRun(args []string) {
 	configPath := fs.String("config", "", "path to config.json (default: $XDG_CONFIG_HOME/cenci/config.json)")
 	dryRun := fs.Bool("dry-run", false, "print the resolved session, window name, and command without spawning")
 	unattended := fs.Bool("unattended", false, "pin CENCI_ATTENDED=0 on the launched agent command (cenci babysit sets it)")
+	tmuxSocket := fs.String("tmux-socket", "", "tmux server socket to launch on (absolute path; default: the invoking pane's server, else the cenci socket)")
 
 	// The stdlib flag parser stops at the first positional, but the documented
 	// form is `run <workflow> [ticket] [flags]`. Peel leading positionals, parse
@@ -41,11 +42,28 @@ func runRun(args []string) {
 		os.Exit(2)
 	}
 
+	// A usage error, before any tmux call. The rejected value is never echoed:
+	// it may hold a tab or newline that would break the one-line hint.
+	if *tmuxSocket != "" {
+		if !tmux.ValidSocket(*tmuxSocket) {
+			fmt.Fprintln(os.Stderr, "cenci run: --tmux-socket must be an absolute path with no tab or newline")
+			os.Exit(2)
+		}
+		// Without --session the target is $TMUX_PANE's session, a %N that only
+		// means something on the invoking pane's own server (#1431).
+		paneSocket, _, _ := strings.Cut(os.Getenv("TMUX"), ",")
+		if strings.TrimSpace(*session) == "" && *tmuxSocket != paneSocket {
+			fmt.Fprintln(os.Stderr, "cenci run: --tmux-socket is not this pane's tmux server; pass --session <name> to launch on it")
+			os.Exit(2)
+		}
+	}
+
 	opts := run.Opts{
 		Workflow:   positionals[0],
 		Agent:      *agent,
 		Model:      *model,
 		Session:    *session,
+		TmuxSocket: *tmuxSocket,
 		Dir:        *dir,
 		Slug:       *slug,
 		ConfigPath: *configPath,

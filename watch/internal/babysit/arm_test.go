@@ -6,6 +6,7 @@ package babysit
 // forwards (stopOnHost, statusOnHost) with their own three outcomes.
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -154,6 +155,123 @@ func TestRun_ForwardsArmRequestWhenSandboxed(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Errorf("state dir has %d entries, want 0 -- the forward path must write no container-side state/lock", len(entries))
+	}
+}
+
+// forwardedArmLine drives babysit.Run through the CENCI_SANDBOX forward gate
+// with CENCI_TMUX_SOCKET set to socket (the sandbox launcher exports it from the
+// pane's $TMUX; "" is unset) and returns the raw request line a real listener
+// received, plus the decoded request from a real ipc.EventReceiver round trip
+// of the same Run.
+func forwardedArmLine(t *testing.T, socket string) (raw string, decoded ipc.ArmRequest) {
+	t.Helper()
+	t.Setenv("CENCI_SANDBOX", "1")
+	t.Setenv("CENCI_BABYSIT_SUPERVISOR", "")
+	t.Setenv("TMUX_PANE", "%7")
+	t.Setenv("CENCI_TMUX_SOCKET", socket)
+
+	originalExecGh := execGh
+	execGh = func(args ...string) (string, string, error) {
+		if len(args) > 0 && args[0] == "repo" {
+			return "o/r\n", "", nil
+		}
+		return "", "", nil
+	}
+	originalStartSupervisor := startSupervisor
+	startSupervisor = func(*exec.Cmd) error {
+		t.Error("startSupervisor must never be invoked when forwarding to the host")
+		return nil
+	}
+	originalArmSocketPath := armSocketPath
+	t.Cleanup(func() {
+		execGh, startSupervisor, armSocketPath = originalExecGh, originalStartSupervisor, originalArmSocketPath
+	})
+
+	// Raw line, as written on the wire.
+	rawPath := tempArmSocket(t)
+	ln, err := net.Listen("unix", rawPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	lines := make(chan string, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		line, _ := bufio.NewReader(conn).ReadString('\n')
+		lines <- line
+		_, _ = conn.Write([]byte(`{"ok":true}` + "\n"))
+	}()
+	armSocketPath = func() string { return rawPath }
+	done := captureStdout(t)
+	err = Run(Options{PR: "42", Agent: "claude", StateDir: t.TempDir(), Interval: 15 * time.Minute})
+	_ = done()
+	if err != nil {
+		t.Fatalf("Run (forward, raw listener): %v", err)
+	}
+	select {
+	case raw = <-lines:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the raw listener never received the arm request")
+	}
+
+	// Decoded request, through the real receiver.
+	path := tempArmSocket(t)
+	recv, err := ipc.NewEventReceiver(path)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = recv.Close() })
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	received := make(chan ipc.ArmRequest, 1)
+	recv.SetArmHandler(func(req ipc.ArmRequest) ipc.ArmResponse {
+		received <- req
+		return ipc.ArmResponse{OK: true}
+	})
+	go recv.Accept(ctx)
+	time.Sleep(10 * time.Millisecond)
+	armSocketPath = func() string { return path }
+	done = captureStdout(t)
+	err = Run(Options{PR: "42", Agent: "claude", StateDir: t.TempDir(), Interval: 15 * time.Minute})
+	_ = done()
+	if err != nil {
+		t.Fatalf("Run (forward, receiver): %v", err)
+	}
+	select {
+	case decoded = <-received:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the receiver never delivered the arm request")
+	}
+	return raw, decoded
+}
+
+// #1431: the container's CENCI_TMUX_SOCKET rides the arm request as tmux_socket
+// so the host daemon resolves %<pane> on the right server; when it is unset the
+// wire line is exactly today's, with no tmux_socket key.
+func TestRun_ForwardsCENCITmuxSocketAsTheArmRequestSocket(t *testing.T) {
+	raw, req := forwardedArmLine(t, "/tmp/tmux-1000/cenci")
+	if req.TmuxSocket != "/tmp/tmux-1000/cenci" || req.TmuxPane != "%7" {
+		t.Errorf("arm request = %+v, want TmuxSocket /tmp/tmux-1000/cenci and TmuxPane %%7", req)
+	}
+	if !strings.Contains(raw, `"tmux_socket":"/tmp/tmux-1000/cenci"`) {
+		t.Errorf("wire line %q, want the tmux_socket key", raw)
+	}
+}
+
+func TestRun_ArmRequestOmitsTheSocketKeyWhenUnset(t *testing.T) {
+	raw, req := forwardedArmLine(t, "")
+	if req.TmuxSocket != "" || req.TmuxPane != "%7" {
+		t.Errorf("arm request = %+v, want an empty TmuxSocket and TmuxPane %%7", req)
+	}
+	if strings.Contains(raw, "tmux_socket") {
+		t.Errorf("wire line %q carries a tmux_socket key, want none when the socket is unset", raw)
+	}
+	if !strings.Contains(raw, `"tmux_pane":"%7"`) {
+		t.Errorf("wire line %q lost the tmux_pane key", raw)
 	}
 }
 

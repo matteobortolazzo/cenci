@@ -374,6 +374,15 @@ func TestRunDryRunDisabledOpenCodeFails(t *testing.T) {
 // stdout followed by stderr, the exit code and the recorded tmux calls.
 func runSpawn(t *testing.T, ctlFile string) (string, int, [][]string) {
 	t.Helper()
+	return runSpawnWith(t, ctlFile, nil, "--session", "work")
+}
+
+// runSpawnWith is runSpawn with the launch flags (after --no-sandbox, before
+// --dir) and extra environment entries chosen by the caller; an empty ctlFile
+// steers the fake tmux with nothing. The recorded calls are raw: each leads with
+// the `-S <socket>` pair `cenci run` passes (#1431).
+func runSpawnWith(t *testing.T, ctlFile string, extraEnv []string, flags ...string) (string, int, [][]string) {
+	t.Helper()
 	root := t.TempDir()
 	binDir, ctlDir, workDir := filepath.Join(root, "bin"), filepath.Join(root, "ctl"), filepath.Join(root, "work")
 	for _, d := range []string{binDir, ctlDir, workDir} {
@@ -383,14 +392,18 @@ func runSpawn(t *testing.T, ctlFile string) (string, int, [][]string) {
 	}
 	tmuxLog := filepath.Join(root, "tmux.log")
 	writeCIRepairFakeTmux(t, binDir, ctlDir, tmuxLog)
-	if err := os.WriteFile(filepath.Join(ctlDir, ctlFile), nil, 0o644); err != nil {
-		t.Fatal(err)
+	if ctlFile != "" {
+		if err := os.WriteFile(filepath.Join(ctlDir, ctlFile), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
 	// openTestEnv supplies the isolated HOME/XDG_CONFIG_HOME and a live event
-	// socket, so this launch never spawns a daemon.
+	// socket, so this launch never spawns a daemon. It also pins
+	// TMUX=/tmp/tmux-1000/cenci,12345,0 (the invoking pane's server).
 	env, _, _ := openTestEnv(t, binDir, writeAssetFixture(t))
-	stdout, stderr, code := runBabysitCLI(t, env, "run", "ci-repair", "42 PR #42 (b) has failing CI checks: lint.",
-		"--agent", "claude", "--no-sandbox", "--session", "work", "--dir", workDir)
+	env = append(env, extraEnv...)
+	args := append([]string{"run", "ci-repair", "42 PR #42 (b) has failing CI checks: lint.", "--agent", "claude", "--no-sandbox"}, flags...)
+	stdout, stderr, code := runBabysitCLI(t, env, append(args, "--dir", workDir)...)
 	return stdout + stderr, code, adapterLaunchCalls(t, tmuxLog)
 }
 
@@ -404,7 +417,7 @@ func TestRunPostSpawnFailureExitsThree(t *testing.T) {
 	if !strings.Contains(out, "automatic-rename") {
 		t.Errorf("output %q does not name the failed post-spawn step", out)
 	}
-	if !slices.ContainsFunc(calls, func(c []string) bool { return len(c) > 0 && c[0] == "new-window" }) {
+	if !slices.ContainsFunc(calls, func(c []string) bool { c = withoutTmuxSocket(c); return len(c) > 0 && c[0] == "new-window" }) {
 		t.Errorf("tmux calls %q, want the window spawned before the failure", calls)
 	}
 }
@@ -418,6 +431,102 @@ func TestRunRepoDirFailureWarnsAndExitsZero(t *testing.T) {
 	if !strings.Contains(out, "warning: could not record the launch directory") {
 		t.Errorf("output %q, want the launch-directory warning", out)
 	}
+}
+
+// socketOf returns the socket a raw fake-tmux call was made on ("" when it
+// carried no leading `-S <socket>`).
+func socketOf(call []string) string {
+	if len(call) >= 2 && call[0] == "-S" {
+		return call[1]
+	}
+	return ""
+}
+
+// requireAllCallsOn asserts there is at least one recorded call and that every
+// one carried -S want, with a new-window among them.
+func requireAllCallsOn(t *testing.T, calls [][]string, want string) {
+	t.Helper()
+	if len(calls) == 0 {
+		t.Fatal("no tmux calls were recorded")
+	}
+	for _, c := range calls {
+		if got := socketOf(c); got != want {
+			t.Errorf("tmux call %q on socket %q, want %q", c, got, want)
+		}
+	}
+	if !slices.ContainsFunc(calls, func(c []string) bool { c = withoutTmuxSocket(c); return len(c) > 0 && c[0] == "new-window" }) {
+		t.Errorf("tmux calls %q, want a new-window", calls)
+	}
+}
+
+// requireOneLineUsageError asserts a refused `cenci run`: exit 2, a single
+// non-empty stderr line naming wantHint, and no tmux call at all.
+func requireOneLineUsageError(t *testing.T, out string, code int, calls [][]string, wantHint string) {
+	t.Helper()
+	if code != 2 {
+		t.Errorf("cenci run exit = %d, want 2; output:\n%s", code, out)
+	}
+	line := strings.TrimSuffix(out, "\n")
+	if line == "" || strings.Contains(line, "\n") {
+		t.Errorf("output = %q, want exactly one line", out)
+	}
+	if !strings.Contains(line, wantHint) {
+		t.Errorf("output = %q, want a hint naming %q", line, wantHint)
+	}
+	if len(calls) != 0 {
+		t.Errorf("tmux calls = %q, want none: a refused run creates no window", calls)
+	}
+}
+
+// P11: without --tmux-socket, `cenci run` targets the first field of $TMUX (the
+// invoking pane's server) on every tmux call, through the real binary.
+func TestRunDefaultsToTheInvokingPanesSocket(t *testing.T) {
+	out, code, calls := runSpawnWith(t, "", nil, "--session", "work")
+	if code != 0 {
+		t.Fatalf("cenci run exit = %d, want 0; output:\n%s", code, out)
+	}
+	requireAllCallsOn(t, calls, "/tmp/tmux-1000/cenci")
+}
+
+// `cenci run --tmux-socket <path>` creates the window on <path>, whatever $TMUX
+// says.
+func TestRunTmuxSocketFlagCreatesTheWindowOnThatSocket(t *testing.T) {
+	const sock = "/tmp/tmux-1000/other"
+	out, code, calls := runSpawnWith(t, "", nil, "--session", "work", "--tmux-socket", sock)
+	if code != 0 {
+		t.Fatalf("cenci run exit = %d, want 0; output:\n%s", code, out)
+	}
+	requireAllCallsOn(t, calls, sock)
+}
+
+// A --tmux-socket value that fails the shape check (relative, TAB or newline)
+// is a usage error: exit 2, one stderr line, no window.
+func TestRunTmuxSocketFlagMalformedExitsTwoWithNoWindow(t *testing.T) {
+	for _, tc := range []struct{ name, value string }{
+		{"relative path", "relative/tmux.sock"},
+		{"contains a tab", "/tmp/tmux-1000/a\tb"},
+		{"contains a newline", "/tmp/tmux-1000/a\nb"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, code, calls := runSpawnWith(t, "", nil, "--session", "work", "--tmux-socket", tc.value)
+			requireOneLineUsageError(t, out, code, calls, "--tmux-socket")
+		})
+	}
+}
+
+// An explicit socket that is not the invoking pane's server, with no --session,
+// would resolve $TMUX_PANE (a %N that belongs to the other server) on the wrong
+// server: a usage error pointing at --session. The control with the pane's own
+// socket proves the refusal is about the mismatch, not the flag.
+func TestRunTmuxSocketForeignWithoutSessionExitsTwo(t *testing.T) {
+	out, code, calls := runSpawnWith(t, "", nil, "--tmux-socket", "/tmp/tmux-1000/other")
+	requireOneLineUsageError(t, out, code, calls, "--session")
+
+	out, code, calls = runSpawnWith(t, "", nil, "--tmux-socket", "/tmp/tmux-1000/cenci")
+	if code != 0 {
+		t.Fatalf("control: cenci run with the pane's own socket exit = %d, want 0; output:\n%s", code, out)
+	}
+	requireAllCallsOn(t, calls, "/tmp/tmux-1000/cenci")
 }
 
 // dryRunArgv resolves `cenci run <workflow> <flags> [target]` to the argv the
