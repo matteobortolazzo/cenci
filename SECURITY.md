@@ -116,12 +116,54 @@ persistently, in your own user config:
   the directories whose contents run at
   login (`~/.config/systemd`, `~/.local/share/systemd`, `$XDG_CONFIG_HOME/systemd`,
   `$XDG_CONFIG_HOME/autostart`, `$XDG_DATA_HOME/systemd`, `~/.config/autostart`,
-  `~/Library/LaunchAgents`, where cenci's autostart unit lives), and a linked git
-  worktree. The list is not exhaustive: it refuses exactly those locations, and
-  only the socket locations named above (tmux, ssh-agent via `$SSH_AUTH_SOCK`,
-  X11, emacs, container runtime and agent directories) are guarded; other socket
-  directories under `/tmp`, for example from other ssh sessions, are not covered,
-  so only mount directories you would hand to the agent. `/run` is refused as a
+  `~/Library/LaunchAgents`, where cenci's autostart unit lives), the per-session
+  socket directories under the temp roots (a direct child of `/tmp`,
+  `/private/tmp`, `/var/tmp` or an absolute `$TMPDIR` named `ssh-*`, `tmux-*`,
+  `emacs*`, `.ICE-unix`, `.XIM-unix`, `.font-unix` or `com.apple.launchd.*`,
+  matched on the start of the name only and case-insensitively, so another
+  session's `/tmp/ssh-XXXX` is refused and `/tmp/app` is accepted), every absolute
+  `$PATH` entry of the launching process (relative and empty entries add no guard,
+  and an entry only an interactive shell adds is not covered when `cenci` is launched
+  from a minimal environment), the developer tool homes
+  `~/go/bin`, `$GOBIN`, the `bin` of each absolute `$GOPATH` entry,
+  `~/.cargo` / `$CARGO_HOME`, `~/.rustup` / `$RUSTUP_HOME`, `~/.nvm` / `$NVM_DIR`,
+  `~/.pyenv` / `$PYENV_ROOT`, `~/.volta`, `~/.bun`, `~/.deno`, `~/.rbenv`,
+  `~/.asdf`, `~/.local/share/mise`, `~/.sdkman` and `~/.npm-global`, the
+  command-running config directories `~/.config/git`, `~/.config/fish`,
+  `~/.config/tmux`, `~/.tmux`, `~/.oh-my-zsh`, `~/.config/nvim`, `~/.vim`,
+  `~/.emacs.d`, `~/.config/emacs`, `~/.config/direnv`, `~/.config/environment.d`,
+  `~/.config/containers`, `~/.aws`, `~/.kube` and the same eight children
+  (`git`, `fish`, `tmux`, `nvim`, `emacs`, `direnv`, `environment.d`,
+  `containers`) of an absolute `$XDG_CONFIG_HOME`, and a linked git worktree.
+  Each `$PATH` entry, tool home and config directory is refused with everything
+  inside it and as a parent too, so a project whose own `bin` is on `$PATH` (direnv,
+  a nix dev shell, `node_modules/.bin`) is refused as a parent of that entry. Two
+  more checks cover the gap between validating a path and the runtime binding it,
+  where another running cenci sandbox's agent could swap a path component for a
+  symlink to a refused location, and both fail closed: a directory strictly inside
+  the `/workspace` or `/repos/<slug>` bind source of another running sandbox on the
+  launch runtime is refused (exit 1, nothing created, the error names the target,
+  the source and that sandbox and says it `mounts read-write`; a directory equal to
+  such a source, or a parent of it, is accepted; `cenci open --dry-run` refuses
+  identically; a listing or inspect failure refuses with `--add-dir cannot be
+  checked against other running sandboxes`, skipping only a container that vanished
+  in between; a running sandbox whose `/workspace` or `/repos/*` source no longer
+  exists at the path the runtime reports, or cannot be examined on the host, refuses
+  the launch, so stop that sandbox first), and after the stopped same-name container is removed and right before
+  the create the `--add-dir` values are re-resolved and must equal the validated set,
+  or the launch exits 1 with `changed between validation and container create` and
+  creates nothing (a directory deleted in between is still a usage error, exit 2).
+  Attaching to a running container with the same set, and `cenci audit --add-dir`,
+  run neither check, and a launch without `--add-dir` makes no extra runtime call.
+  The list is not exhaustive: it does not cover other command-running config
+  elsewhere in `$HOME`, sockets outside the temp roots, relative `$PATH` entries,
+  sandboxes on the other container runtime or on another daemon or connection of
+  the same runtime (another `DOCKER_HOST`/`DOCKER_CONTEXT`, rootful against rootless
+  podman, a `podman --connection`), or the residual window between the
+  re-check and the runtime's own bind resolution (that check also cannot detect a
+  running sandbox's source renamed and then recreated at the old name: the old path
+  exists again), so only mount directories you
+  would hand to the agent. `/run` is refused as a
   whole, including `/run/media` where removable drives automount, so copy such a
   repository elsewhere. The denylist runs on both the
   as-typed absolute path and the symlink-resolved path, on every spelling of a

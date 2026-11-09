@@ -2792,6 +2792,7 @@ type addDirOpenFixture struct {
 	socketDir string
 	repo      string
 	container string
+	fakeDir   string // the scripted runtimes' directory, the first entry of $PATH
 }
 
 func newAddDirOpenFixture(t *testing.T) addDirOpenFixture {
@@ -2817,8 +2818,15 @@ func newAddDirOpenFixture(t *testing.T) addDirOpenFixture {
 	// scrub them so a developer's own SSH_AUTH_SOCK=/tmp/agent.sock cannot make
 	// every temp-dir target look sensitive.
 	env = append(env, "SSH_AUTH_SOCK=", "TMUX_TMPDIR=")
+	// The denylist also guards every absolute $PATH entry (openTestEnv already
+	// pins PATH to the fake runtime directory plus /usr/bin:/bin) and the
+	// tool-home variables (#1460): clear the latter so a developer's own GOPATH
+	// or CARGO_HOME cannot make a fixture directory look like a host tool home.
+	for _, name := range []string{"GOBIN", "GOPATH", "CARGO_HOME", "RUSTUP_HOME", "NVM_DIR", "PYENV_ROOT"} {
+		env = append(env, name+"=")
+	}
 	stageCodexAuth(t, home)
-	return addDirOpenFixture{env: env, callLog: callLog, home: home, socketDir: socketDir, repo: repo, container: containerNameFor(repo)}
+	return addDirOpenFixture{env: env, callLog: callLog, home: home, socketDir: socketDir, repo: repo, container: containerNameFor(repo), fakeDir: fakeDir}
 }
 
 // addDirTarget makes a fresh resolved directory called name outside the repo
@@ -2853,9 +2861,13 @@ func (f addDirOpenFixture) runningEnv(mounts ...string) []string {
 }
 
 // runningEnvNamed is runningEnv for a running container called name (the
-// default name or a --name-suffixed one); no other container is running.
+// default name or a --name-suffixed one); no other container is running. Its
+// /workspace mount reports the real bind source assembleVolumeMounts creates
+// (the repo root), not a volume name: a launch with --add-dir scans every
+// running sandbox's writable binds and refuses a source it cannot read as an
+// absolute path (#1460).
 func (f addDirOpenFixture) runningEnvNamed(name string, mounts ...string) []string {
-	posture := "off|runc|0\nworkspace-vol::/workspace\n"
+	posture := "off|runc|0\n" + f.repo + "::/workspace\n"
 	for _, m := range mounts {
 		posture += m + "\n"
 	}
@@ -3055,10 +3067,15 @@ func TestOpenAddDir_NameFlag_CreatesTheSeparateMultiRepoContainerLeavingTheDefau
 
 // wantNoCallTargetsDefaultContainer fails when any runtime call names the
 // default container: the -multi name is removed first so it cannot match the
-// default name as a prefix.
+// default name as a prefix. The one allowed mention is the read-only
+// reuse-posture inspect the other-sandbox scan makes of every running sandbox
+// (#1460), whose multi-line format puts the container name on the last line.
 func wantNoCallTargetsDefaultContainer(t *testing.T, lines []string, container, multi string) {
 	t.Helper()
 	for _, line := range lines {
+		if line == reusePostureInspectTail(container) {
+			continue
+		}
 		if strings.Contains(strings.ReplaceAll(line, multi, ""), container) {
 			t.Errorf("runtime call %q targets the default container %s, which --name must leave alone", line, container)
 		}
@@ -3133,6 +3150,10 @@ func TestOpenAddDir_RejectedPaths_Exit2WithOneLineHintAndMakeNoRuntimeCall(t *te
 		{"cenci autostart unit dir", []string{mkdirAll(t, f.home, ".config", "systemd", "user")}, "sensitive host location"},
 		{"login autostart dir", []string{mkdirAll(t, f.home, ".config", "autostart")}, "sensitive host location"},
 		{"launchd agents dir", []string{mkdirAll(t, f.home, "Library", "LaunchAgents")}, "sensitive host location"},
+		{"developer tool home ~/.cargo", []string{mkdirAll(t, f.home, ".cargo")}, "sensitive host location"},
+		{"inside ~/.cargo", []string{mkdirAll(t, f.home, ".cargo", "bin")}, "sensitive host location"},
+		{"command-running config dir ~/.config/git", []string{mkdirAll(t, f.home, ".config", "git")}, "sensitive host location"},
+		{"directory on $PATH (the fake runtime dir)", []string{f.fakeDir}, "sensitive host location (a directory on your $PATH"},
 		{"empty path", []string{""}, "non-empty"},
 		{"colon in path", []string{filepath.Join(f.home, "..", "a:b")}, "':' or a non-printable character"},
 		{"newline in path", []string{filepath.Join(f.home, "..", "a\nb")}, "':' or a non-printable character"},
@@ -3231,6 +3252,526 @@ func TestOpenAddDir_UnresolvableSocketDir_Exits2NamingTheCauseAndMakesNoRuntimeC
 	}
 	if lines := callLogLines(t, f.callLog); len(lines) != 0 {
 		t.Errorf("a refused --add-dir made runtime calls:\n%s", strings.Join(lines, "\n"))
+	}
+}
+
+// -- #1460: the validation-to-create race and other sandboxes' writable mounts --
+//
+// Between resolveLaunchContext's validation and the container create, the only
+// untrusted writer that can swap a path component for a symlink is the agent of
+// another running sandbox that mounts a parent of the target read-write. Launch
+// therefore re-resolves the --add-dir set after the stopped-container `rm` and
+// refuses any target strictly inside another running sandbox's /workspace or
+// /repos/* bind source.
+
+// foreignSandbox is the name of the one other running cenci sandbox the scan
+// tests script. It is never f.container, so the launch under test creates.
+const foreignSandbox = "claude-cenci-other"
+
+// foreignEnv scripts foreignSandbox as the only running container, with the
+// given "<source>::<destination>" mounts in its reuse-inspect.
+func (f addDirOpenFixture) foreignEnv(mounts ...string) []string {
+	posture := "off|runc|0\n"
+	for _, m := range mounts {
+		posture += m + "\n"
+	}
+	return append(slices.Clone(f.env), "FAKE_PS="+foreignSandbox+"\n", "FAKE_REUSE_POSTURE="+posture+"\n")
+}
+
+// resetCallLog empties the runtime call log between the runs of one test. A log
+// that was never written is already empty.
+func (f addDirOpenFixture) resetCallLog(t *testing.T) {
+	t.Helper()
+	if err := os.Truncate(f.callLog, 0); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		t.Fatal(err)
+	}
+}
+
+// wantNoCreate fails when the call log shows the container was created or the
+// stopped same-name container was removed.
+func wantNoCreate(t *testing.T, lines []string) {
+	t.Helper()
+	for _, prefix := range []string{"run --name ", "rm "} {
+		if line, ok := findLineWithPrefix(lines, prefix); ok {
+			t.Errorf("a refused launch must create and remove nothing, got %q in:\n%s", line, strings.Join(lines, "\n"))
+		}
+	}
+}
+
+// wantOtherSandboxRefusal asserts the one-line exit-1 refusal naming the target,
+// the other sandbox's bind source and that sandbox's container.
+func wantOtherSandboxRefusal(t *testing.T, run openRun, target, source string) {
+	t.Helper()
+	if run.exitCode != 1 {
+		t.Fatalf("exit code = %d, want 1\nstderr: %s", run.exitCode, run.stderr)
+	}
+	stderr := strings.TrimRight(run.stderr, "\n")
+	if stderr == "" || strings.Contains(stderr, "\n") {
+		t.Errorf("stderr = %q, want exactly one error line", run.stderr)
+	}
+	for _, want := range []string{strconv.Quote(target), strconv.Quote(source), foreignSandbox, "mounts read-write"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("stderr = %q, want it to contain %q", stderr, want)
+		}
+	}
+}
+
+// reusePostureInspectTail is the call-log line that names the container of a
+// reuse-posture inspect: the probe's format template spans several lines, so the
+// fake runtime logs it as three lines and only the last one ends in the name.
+func reusePostureInspectTail(container string) string {
+	return "{{end}} " + container
+}
+
+// reusePostureInspects counts the reuse-posture inspects of container in the log.
+func reusePostureInspects(lines []string, container string) int {
+	n := 0
+	for _, l := range lines {
+		if l == reusePostureInspectTail(container) {
+			n++
+		}
+	}
+	return n
+}
+
+// psListingCount counts the container-listing probes in the call log: the same
+// `ps --format {{.Names}}` argv serves containerRunning and the other-sandbox scan.
+func psListingCount(lines []string) int {
+	n := 0
+	for _, l := range lines {
+		if l == "ps --format {{.Names}}" {
+			n++
+		}
+	}
+	return n
+}
+
+func TestOpenAddDir_RmSwapsTheTargetForASymlink_ExitsOneAndCreatesNothing(t *testing.T) {
+	f := newAddDirOpenFixture(t)
+	target, elsewhere := addDirTarget(t, "notes-repo"), addDirTarget(t, "elsewhere")
+	env := append(slices.Clone(f.env), "FAKE_RM_SWAP_DIR="+target, "FAKE_RM_SWAP_TARGET="+elsewhere)
+
+	run := runCenci(t, env, f.repo, "open", "--add-dir", target)
+
+	if run.exitCode != 1 {
+		t.Fatalf("exit code = %d, want 1\nstderr: %s", run.exitCode, run.stderr)
+	}
+	stderr := strings.TrimRight(run.stderr, "\n")
+	if strings.Contains(stderr, "\n") || !strings.Contains(stderr, "changed between validation and container create") {
+		t.Errorf("stderr = %q, want one line containing %q", run.stderr, "changed between validation and container create")
+	}
+	lines := callLogLines(t, f.callLog)
+	if line, ok := findLineWithPrefix(lines, "run --name "); ok {
+		t.Errorf("the container must not be created after the swap, got %q in:\n%s", line, strings.Join(lines, "\n"))
+	}
+	if anyLineContains(lines, "exec -it") {
+		t.Errorf("no agent session may start after the swap, got calls:\n%s", strings.Join(lines, "\n"))
+	}
+}
+
+func TestOpenAddDir_RmDeletesTheTarget_ExitsTwoWithTheUsageErrorAndCreatesNothing(t *testing.T) {
+	f := newAddDirOpenFixture(t)
+	target := addDirTarget(t, "notes-repo")
+	env := append(slices.Clone(f.env), "FAKE_RM_SWAP_DIR="+target)
+
+	run := runCenci(t, env, f.repo, "open", "--add-dir", target)
+
+	if run.exitCode != 2 {
+		t.Fatalf("exit code = %d, want 2 (the re-check's own usage error, unchanged)\nstderr: %s", run.exitCode, run.stderr)
+	}
+	if !strings.Contains(run.stderr, "does not exist") || !strings.Contains(run.stderr, strconv.Quote(target)) {
+		t.Errorf("stderr = %q, want the does-not-exist usage error naming %s", run.stderr, strconv.Quote(target))
+	}
+	if line, ok := findLineWithPrefix(callLogLines(t, f.callLog), "run --name "); ok {
+		t.Errorf("the container must not be created after the delete, got %q", line)
+	}
+}
+
+func TestOpenAddDir_NothingChanged_CreateArgvCarriesExactlyOneBindPerDirectory(t *testing.T) {
+	f := newAddDirOpenFixture(t)
+	a, b := addDirTarget(t, "notes-repo"), addDirTarget(t, "Shared Lib")
+
+	run := runCenci(t, f.env, f.repo, "open", "--add-dir", a, "--add-dir", b)
+	if run.exitCode != 0 {
+		t.Fatalf("open --add-dir x2: exit %d\n%s", run.exitCode, run.stderr)
+	}
+
+	create := runLineOf(t, callLogLines(t, f.callLog))
+	if got := strings.Count(create, ":/repos/"); got != 2 {
+		t.Errorf("create argv has %d /repos binds, want exactly 2:\n%s", got, create)
+	}
+	for _, pair := range []string{a + ":/repos/notes-repo", b + ":/repos/shared-lib"} {
+		if got := strings.Count(create, " -v "+pair+" "); got != 1 {
+			t.Errorf("create argv has %d copies of %q, want exactly 1:\n%s", got, "-v "+pair, create)
+		}
+	}
+}
+
+func TestOpenAddDir_TargetInsideAnotherSandboxsWorkspace_IsRefusedWithNoCreate(t *testing.T) {
+	f := newAddDirOpenFixture(t)
+	parent := addDirTarget(t, "parent")
+	child := mkdirAll(t, parent, "child")
+
+	run := runCenci(t, f.foreignEnv(parent+"::/workspace"), f.repo, "open", "--add-dir", child)
+
+	wantOtherSandboxRefusal(t, run, child, parent)
+	wantNoCreate(t, callLogLines(t, f.callLog))
+}
+
+func TestOpenAddDir_TargetInsideAnotherSandboxsReposMount_IsRefusedWithNoCreate(t *testing.T) {
+	f := newAddDirOpenFixture(t)
+	otherRepo, parent := addDirTarget(t, "other-repo"), addDirTarget(t, "parent")
+	child := mkdirAll(t, parent, "deep", "child")
+
+	run := runCenci(t, f.foreignEnv(otherRepo+"::/workspace", parent+"::/repos/shared"), f.repo, "open", "--add-dir", child)
+
+	wantOtherSandboxRefusal(t, run, child, parent)
+	wantNoCreate(t, callLogLines(t, f.callLog))
+}
+
+func TestOpenAddDir_OtherSandboxSourceGivenThroughASymlink_IsStillRefused(t *testing.T) {
+	f := newAddDirOpenFixture(t)
+	parent := addDirTarget(t, "parent")
+	child := mkdirAll(t, parent, "child")
+	link := filepath.Join(t.TempDir(), "parent-link")
+	if err := os.Symlink(parent, link); err != nil {
+		t.Fatal(err)
+	}
+
+	// The other sandbox reports its source through the link; the target is the
+	// real path under it.
+	run := runCenci(t, f.foreignEnv(link+"::/workspace"), f.repo, "open", "--add-dir", child)
+
+	if run.exitCode != 1 {
+		t.Fatalf("exit code = %d, want 1\nstderr: %s", run.exitCode, run.stderr)
+	}
+	for _, want := range []string{strconv.Quote(child), foreignSandbox, "mounts read-write"} {
+		if !strings.Contains(run.stderr, want) {
+			t.Errorf("stderr = %q, want it to contain %q", run.stderr, want)
+		}
+	}
+	wantNoCreate(t, callLogLines(t, f.callLog))
+}
+
+func TestOpenAddDir_DryRunUnderTheSameConditions_RefusesWithTheSameErrorAndPrintsNoCreateArgv(t *testing.T) {
+	f := newAddDirOpenFixture(t)
+	parent := addDirTarget(t, "parent")
+	child := mkdirAll(t, parent, "child")
+	env := f.foreignEnv(parent + "::/workspace")
+
+	launch := runCenci(t, env, f.repo, "open", "--add-dir", child)
+	f.resetCallLog(t)
+	dry := runCenci(t, env, f.repo, "open", "--dry-run", "--add-dir", child)
+
+	wantOtherSandboxRefusal(t, dry, child, parent)
+	if dry.stderr != launch.stderr {
+		t.Errorf("--dry-run stderr = %q, want the real launch's %q", dry.stderr, launch.stderr)
+	}
+	if strings.Contains(dry.stdout, "run --name") {
+		t.Errorf("--dry-run printed a create argv for a refused launch:\n%s", dry.stdout)
+	}
+	if line, ok := findLineWithPrefix(callLogLines(t, f.callLog), "run --name "); ok {
+		t.Errorf("--dry-run made a create call %q", line)
+	}
+}
+
+func TestOpenAddDir_TargetEqualToOrAParentOfAnotherSandboxsSource_IsNotRefused(t *testing.T) {
+	f := newAddDirOpenFixture(t)
+	grand := addDirTarget(t, "grand")
+	source := mkdirAll(t, grand, "mid", "src")
+
+	// The other agent cannot rename its own mount point, and a parent of its
+	// source only shows the same directory from above.
+	for name, target := range map[string]string{
+		"equal to the source":        source,
+		"the source's parent":        filepath.Dir(source),
+		"the source's grandparent":   grand,
+		"a sibling of the source":    mkdirAll(t, grand, "mid", "sibling"),
+		"a name sharing its prefix":  mkdirAll(t, grand, "mid", "src-notes"),
+		"inside a sibling of source": mkdirAll(t, grand, "other", "src"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			f.resetCallLog(t)
+			run := runCenci(t, f.foreignEnv(source+"::/workspace"), f.repo, "open", "--add-dir", target)
+
+			if run.exitCode != 0 {
+				t.Fatalf("exit code = %d, want the launch to proceed\nstderr: %s", run.exitCode, run.stderr)
+			}
+			create := runLineOf(t, callLogLines(t, f.callLog))
+			if !strings.Contains(create, " -v "+target+":/repos/") {
+				t.Errorf("create argv missing the bind of %q:\n%s", target, create)
+			}
+		})
+	}
+}
+
+func TestOpenAddDir_ScanCannotReadAnotherSandbox_FailsClosedWithNoCreate(t *testing.T) {
+	f := newAddDirOpenFixture(t)
+	target := addDirTarget(t, "notes-repo")
+
+	for name, stderr := range map[string]string{
+		"a runtime error that is not a vanished container": "Error: permission denied while connecting to the daemon",
+		"no runtime message at all":                        "",
+		"a different missing object":                       "Error: No such volume: claude-cenci-other",
+	} {
+		t.Run(name, func(t *testing.T) {
+			f.resetCallLog(t)
+			env := append(f.foreignEnv("/srv/other::/workspace"), "FAKE_CONTAINER_INSPECT_EXIT=1", "FAKE_REUSE_POSTURE_STDERR="+stderr)
+
+			run := runCenci(t, env, f.repo, "open", "--add-dir", target)
+
+			if run.exitCode != 1 {
+				t.Fatalf("exit code = %d, want 1\nstderr: %s", run.exitCode, run.stderr)
+			}
+			if !strings.Contains(run.stderr, "cannot be checked against other running sandboxes") {
+				t.Errorf("stderr = %q, want it to contain %q", run.stderr, "cannot be checked against other running sandboxes")
+			}
+			wantNoCreate(t, callLogLines(t, f.callLog))
+		})
+	}
+}
+
+// A source that is not an absolute path cannot be compared (a named volume where
+// a bind belongs, a garbled reply), and "cannot compare" refuses.
+func TestOpenAddDir_OtherSandboxWithAnUnreadableWritableSource_FailsClosedWithNoCreate(t *testing.T) {
+	f := newAddDirOpenFixture(t)
+	target := addDirTarget(t, "notes-repo")
+	// An existing, readable /workspace source, so only the bad mount can refuse.
+	workspace := addDirTarget(t, "other-sandbox") + "::/workspace"
+
+	for name, mounts := range map[string][]string{
+		"a named volume on /workspace":   {"workspace-vol::/workspace"},
+		"a relative source on /repos/x":  {workspace, "relative/dir::/repos/x"},
+		"a malformed mount line":         {workspace, "/x:::/repos/y"},
+		"an empty source on /workspace":  {"::/workspace"},
+		"a volume only on a /repos path": {workspace, "some-volume::/repos/shared"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f.resetCallLog(t)
+
+			run := runCenci(t, f.foreignEnv(mounts...), f.repo, "open", "--add-dir", target)
+
+			if run.exitCode != 1 || !strings.Contains(run.stderr, "cannot be checked against other running sandboxes") {
+				t.Fatalf("exit %d, stderr %q; want exit 1 with the cannot-be-checked error", run.exitCode, run.stderr)
+			}
+			wantNoCreate(t, callLogLines(t, f.callLog))
+		})
+	}
+}
+
+func TestOpenAddDir_ContainerGoneBetweenListingAndInspect_IsSkippedAndTheLaunchProceeds(t *testing.T) {
+	f := newAddDirOpenFixture(t)
+	parent := addDirTarget(t, "parent")
+	child := mkdirAll(t, parent, "child")
+
+	for name, stderr := range map[string]string{
+		"docker: No such container": "Error: No such container: " + foreignSandbox,
+		"docker: No such object":    "Error: No such object: " + foreignSandbox,
+		"podman: no such container": "Error: no such container " + foreignSandbox,
+		"podman: no such object":    "Error: no such object: " + foreignSandbox,
+	} {
+		t.Run(name, func(t *testing.T) {
+			f.resetCallLog(t)
+			// The scripted stdout would refuse the target if it were read: only the
+			// vanished-container skip lets this launch through.
+			env := append(f.foreignEnv(parent+"::/workspace"), "FAKE_CONTAINER_INSPECT_EXIT=1", "FAKE_REUSE_POSTURE_STDERR="+stderr)
+
+			run := runCenci(t, env, f.repo, "open", "--add-dir", child)
+
+			if run.exitCode != 0 {
+				t.Fatalf("exit code = %d, want the launch to proceed\nstderr: %s", run.exitCode, run.stderr)
+			}
+			lines := callLogLines(t, f.callLog)
+			runLineOf(t, lines)
+			if got := reusePostureInspects(lines, foreignSandbox); got < 1 {
+				t.Errorf("the vanished sandbox was never inspected, so the skip branch did not run:\n%s", strings.Join(lines, "\n"))
+			}
+		})
+	}
+}
+
+// A bind follows the inode, so a user who renames a running sandbox's source on
+// the host leaves that sandbox's agent writing under the new name while `inspect`
+// still reports the old path. Nothing can relate a target under the new name to
+// that bind, so the scan refuses the launch instead of passing it.
+func TestOpenAddDir_OtherSandboxSourceNoLongerOnTheHost_FailsClosedWithNoCreate(t *testing.T) {
+	f := newAddDirOpenFixture(t)
+	present := addDirTarget(t, "present")
+
+	renamed := func(t *testing.T) (oldPath, target string) {
+		t.Helper()
+		oldPath = addDirTarget(t, "parent")
+		newPath := oldPath + "-renamed"
+		if err := os.Rename(oldPath, newPath); err != nil {
+			t.Fatal(err)
+		}
+		return oldPath, mkdirAll(t, newPath, "child")
+	}
+	deleted := func(t *testing.T) (oldPath, target string) {
+		t.Helper()
+		oldPath = addDirTarget(t, "parent")
+		if err := os.RemoveAll(oldPath); err != nil {
+			t.Fatal(err)
+		}
+		return oldPath, addDirTarget(t, "notes-repo")
+	}
+	for name, tc := range map[string]struct {
+		source func(t *testing.T) (oldPath, target string)
+		mount  func(oldPath string) []string
+	}{
+		"a /workspace source renamed on the host": {renamed, func(old string) []string { return []string{old + "::/workspace"} }},
+		"a /workspace source deleted":             {deleted, func(old string) []string { return []string{old + "::/workspace"} }},
+		"a /repos source deleted":                 {deleted, func(old string) []string { return []string{present + "::/workspace", old + "::/repos/shared"} }},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f.resetCallLog(t)
+			oldPath, target := tc.source(t)
+
+			run := runCenci(t, f.foreignEnv(tc.mount(oldPath)...), f.repo, "open", "--add-dir", target)
+
+			if run.exitCode != 1 {
+				t.Fatalf("exit code = %d, want 1\nstderr: %s", run.exitCode, run.stderr)
+			}
+			for _, want := range []string{"cannot be checked against other running sandboxes", foreignSandbox, strconv.Quote(oldPath), "no longer exists on the host"} {
+				if !strings.Contains(run.stderr, want) {
+					t.Errorf("stderr = %q, want it to contain %q", run.stderr, want)
+				}
+			}
+			wantNoCreate(t, callLogLines(t, f.callLog))
+		})
+	}
+}
+
+// The control for the test above: a source that still exists keeps today's
+// behavior, so a target that is not inside it proceeds.
+func TestOpenAddDir_OtherSandboxSourceStillOnTheHost_LetsAnUnrelatedTargetThrough(t *testing.T) {
+	f := newAddDirOpenFixture(t)
+	source := addDirTarget(t, "other-sandbox")
+	target := addDirTarget(t, "notes-repo")
+
+	run := runCenci(t, f.foreignEnv(source+"::/workspace", source+"::/repos/shared"), f.repo, "open", "--add-dir", target)
+
+	if run.exitCode != 0 {
+		t.Fatalf("exit code = %d, want the launch to proceed\nstderr: %s", run.exitCode, run.stderr)
+	}
+	if create := runLineOf(t, callLogLines(t, f.callLog)); !strings.Contains(create, " -v "+target+":/repos/notes-repo ") {
+		t.Errorf("create argv missing the bind of %q:\n%s", target, create)
+	}
+}
+
+// Every other scan-failure test fails the plan-time scan before the stopped-
+// container `rm`. Here the plan-time scan passes, `rm` runs, and only then does
+// the runtime start failing its reuse-posture inspect: the refusal can only come
+// from the scan inside the pre-create re-check.
+func TestOpenAddDir_RecheckScanFailsAfterTheRm_FailsClosedWithNoCreate(t *testing.T) {
+	f := newAddDirOpenFixture(t)
+	source := addDirTarget(t, "other-sandbox")
+	target := addDirTarget(t, "notes-repo")
+	marker := filepath.Join(t.TempDir(), "rm-ran")
+	env := append(f.foreignEnv(source+"::/workspace"), "FAKE_RM_ARM_REUSE_POSTURE_FAIL="+marker)
+
+	run := runCenci(t, env, f.repo, "open", "--add-dir", target)
+
+	if run.exitCode != 1 {
+		t.Fatalf("exit code = %d, want 1\nstderr: %s", run.exitCode, run.stderr)
+	}
+	if !strings.Contains(run.stderr, "cannot be checked against other running sandboxes") {
+		t.Errorf("stderr = %q, want it to contain %q", run.stderr, "cannot be checked against other running sandboxes")
+	}
+	lines := callLogLines(t, f.callLog)
+	if _, ok := findLineWithPrefix(lines, "rm "); !ok {
+		t.Errorf("the refusal must come after the stopped-container rm (the re-check), got calls:\n%s", strings.Join(lines, "\n"))
+	}
+	if got := reusePostureInspects(lines, foreignSandbox); got != 2 {
+		t.Errorf("the other sandbox was inspected %d times, want 2 (the plan-time scan passed, the re-check's failed):\n%s", got, strings.Join(lines, "\n"))
+	}
+	if line, ok := findLineWithPrefix(lines, "run --name "); ok {
+		t.Errorf("a failed re-check must not create the container, got %q in:\n%s", line, strings.Join(lines, "\n"))
+	}
+}
+
+func TestOpenAddDir_AttachWithTheSameSet_RunsNeitherTheScanNorTheRecheck(t *testing.T) {
+	f := newAddDirOpenFixture(t)
+	parent := addDirTarget(t, "parent")
+	a := mkdirAll(t, parent, "notes-repo")
+	// The default container is running with the requested set, and its /workspace
+	// source is a parent of the requested directory: a scan of it would refuse.
+	env := append(f.runningEnv(a+"::/repos/notes-repo"), "FAKE_PS="+f.container+"\n"+foreignSandbox+"\n",
+		"FAKE_REUSE_POSTURE=off|runc|0\n"+parent+"::/workspace\n"+a+"::/repos/notes-repo\n\n",
+		"FAKE_RM_SWAP_DIR="+a, "FAKE_RM_SWAP_TARGET="+addDirTarget(t, "elsewhere"))
+
+	run := runCenci(t, env, f.repo, "open", "--add-dir", a)
+
+	if run.exitCode != 0 {
+		t.Fatalf("exit code = %d, want a normal attach\nstderr: %s", run.exitCode, run.stderr)
+	}
+	lines := callLogLines(t, f.callLog)
+	attachLine(t, lines)
+	if got := reusePostureInspects(lines, foreignSandbox); got != 0 {
+		t.Errorf("an attach inspected another sandbox %d times, want 0:\n%s", got, strings.Join(lines, "\n"))
+	}
+	for _, l := range lines {
+		if strings.HasPrefix(l, "rm ") {
+			t.Errorf("an attach must not reach the stopped-container rm, got %q", l)
+		}
+	}
+	if got := psListingCount(lines); got != 2 {
+		t.Errorf("attach made %d container listings, want exactly the 2 disposition probes", got)
+	}
+}
+
+func TestOpenAddDir_OnlyALaunchWithTheFlagScansOtherSandboxes(t *testing.T) {
+	f := newAddDirOpenFixture(t)
+	target := addDirTarget(t, "notes-repo")
+	env := f.foreignEnv(addDirTarget(t, "other-sandbox") + "::/workspace")
+
+	run := runCenci(t, env, f.repo, "open")
+	if run.exitCode != 0 {
+		t.Fatalf("open without the flag: exit %d\n%s", run.exitCode, run.stderr)
+	}
+	lines := callLogLines(t, f.callLog)
+	runLineOf(t, lines)
+	if got := psListingCount(lines); got != 2 {
+		t.Errorf("a launch without --add-dir made %d container listings, want exactly the 2 it always made", got)
+	}
+	for _, l := range lines {
+		if strings.HasPrefix(l, "inspect ") {
+			t.Errorf("a launch without --add-dir must not inspect any container, got %q", l)
+		}
+	}
+
+	// The positive control: with the flag the scan runs once in the plan and once
+	// in the pre-create re-check, listing and inspecting the other sandbox each time.
+	f.resetCallLog(t)
+	run = runCenci(t, env, f.repo, "open", "--add-dir", target)
+	if run.exitCode != 0 {
+		t.Fatalf("open --add-dir: exit %d\n%s", run.exitCode, run.stderr)
+	}
+	lines = callLogLines(t, f.callLog)
+	if got := psListingCount(lines); got != 4 {
+		t.Errorf("a launch with --add-dir made %d container listings, want 4 (2 dispositions + 2 scans):\n%s", got, strings.Join(lines, "\n"))
+	}
+	if got := reusePostureInspects(lines, foreignSandbox); got != 2 {
+		t.Errorf("the other sandbox was inspected %d times, want 2 (plan and re-check):\n%s", got, strings.Join(lines, "\n"))
+	}
+}
+
+func TestOpenAddDir_SameDirectoryUnderTwoSpellings_PassesTheRecheckAndCreatesOnce(t *testing.T) {
+	f := newAddDirOpenFixture(t)
+	target := addDirTarget(t, "notes-repo")
+	link := filepath.Join(t.TempDir(), "short")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+
+	run := runCenci(t, f.foreignEnv(addDirTarget(t, "other-sandbox")+"::/workspace"), f.repo, "open", "--add-dir", target, "--add-dir", link)
+
+	if run.exitCode != 0 {
+		t.Fatalf("exit code = %d, want the launch to proceed\nstderr: %s", run.exitCode, run.stderr)
+	}
+	create := runLineOf(t, callLogLines(t, f.callLog))
+	if got := strings.Count(create, ":/repos/"); got != 1 || !strings.Contains(create, " -v "+target+":/repos/notes-repo ") {
+		t.Errorf("two spellings of one directory must produce one bind of %q:\n%s", target, create)
 	}
 }
 

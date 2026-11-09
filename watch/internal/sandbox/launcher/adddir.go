@@ -2,7 +2,9 @@ package launcher
 
 import (
 	"cmp"
+	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -15,6 +17,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/ipc"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/sandbox"
 )
 
 // This file implements `cenci open --add-dir` / `cenci audit --add-dir`
@@ -50,13 +53,19 @@ const (
 	// forbidOverlap refuses a target equal to, an ancestor of, or inside the
 	// guard path.
 	forbidOverlap
+	// forbidChildPattern refuses a target equal to, or inside, a direct child of
+	// the guard path whose name matches the guard's pattern (compared on ASCII-
+	// lowered names). The guard path itself and its parents are not matched.
+	forbidChildPattern
 )
 
-// addDirGuard is one sensitive host location the denylist protects.
+// addDirGuard is one sensitive host location the denylist protects. pattern is
+// only read by forbidChildPattern.
 type addDirGuard struct {
-	path string
-	mode addDirForbidden
-	why  string
+	path    string
+	mode    addDirForbidden
+	why     string
+	pattern string
 }
 
 // resolveAddDirs validates and resolves raw (the --add-dir values, in command
@@ -78,6 +87,19 @@ type addDirGuard struct {
 // repeated directory is deduplicated only after it passed); the input-shape,
 // existence and worktree checks run on the resolved target. Path comparison is
 // always component-wise, never a string prefix.
+//
+// The denylist is addDirSensitiveGuards': besides the credential, control and
+// system locations it refuses the per-session socket directories under the temp
+// roots, every absolute $PATH entry, the developer tool homes and the tool config
+// directories whose contents the host executes (#1460). This function only
+// validates the paths; it cannot close the window between validation and the
+// container create. Launch does that: it re-runs this function on the same raw
+// values after the stopped-container rm, immediately before the create, and
+// refuses when the result differs from the validated set
+// (recheckAddDirsBeforeCreate); planArgvs (so --dry-run too) and that re-check also
+// refuse a directory strictly inside another running sandbox's read-write mount
+// (scanOtherSandboxes). Audit calls this function for the denylist alone and runs
+// neither of those checks, as does the attach path.
 func resolveAddDirs(raw []string, scope Scope, home string) ([]addDirMount, error) {
 	if len(raw) == 0 {
 		return nil, nil
@@ -232,8 +254,9 @@ func mainCheckoutOf(dir string) string {
 // per-home guards instead (see addDirSensitiveGuards). /srv, /mnt and
 // /home are deliberately absent: repositories legitimately live there; /var,
 // /opt and the tmp directories are guarded only against being mounted whole
-// (addDirCoveringDirs) and against their root-run state subdirectories
-// (addDirHostStateDirs).
+// (addDirCoveringDirs), against their root-run state subdirectories
+// (addDirHostStateDirs) and, for the tmp directories, against their per-session
+// socket subdirectories (addDirTempRoots, addDirTempSocketPatterns).
 var addDirSystemDirs = []string{
 	"/etc", "/boot", "/usr", "/bin", "/sbin", "/lib", "/lib64",
 	"/proc", "/sys", "/dev", "/run",
@@ -248,7 +271,8 @@ const addDirRootHome = "/root"
 // one is fine, so each is refused itself and as a parent only. The tmp
 // directories hold the host's tmux server sockets, ssh-agent sockets and X11
 // sockets, and /var and /opt hold root-run state such as /var/spool and
-// /opt/homebrew (guarded below).
+// /opt/homebrew (guarded below). The socket directories of other sessions and
+// users inside the tmp directories are guarded by name (addDirTempSocketPatterns).
 var addDirCoveringDirs = []string{"/tmp", "/private/tmp", "/var/tmp", "/var", "/private/var", "/opt"}
 
 // addDirHostStateDirs are the root-run host state directories under the
@@ -257,6 +281,43 @@ var addDirHostStateDirs = []string{
 	"/var/spool", "/var/lib", "/var/db", "/nix", "/opt/homebrew", "/snap",
 	"/tmp/.X11-unix", // the X server's sockets
 }
+
+// addDirTempRoots are the temp roots whose direct children named like a
+// per-session socket directory (addDirTempSocketPatterns) are refused, with
+// everything inside them: another session's ssh-agent directory, another user's
+// tmux or emacs server, the X11 helper directories. An absolute $TMPDIR is added
+// next to them by addDirSensitiveGuards.
+var addDirTempRoots = []string{"/tmp", "/private/tmp", "/var/tmp"}
+
+// addDirTempSocketPatterns are the direct-child name patterns of the temp roots
+// that hold per-session sockets. They match the start of the name only (a plain
+// filepath.Match pattern, compared ASCII-case-insensitively), so /tmp/app,
+// /tmp/sshfoo and /tmp/my-tmux-notes stay mountable.
+var addDirTempSocketPatterns = []string{
+	"ssh-*", "tmux-*", "emacs*", ".ICE-unix", ".XIM-unix", ".font-unix", "com.apple.launchd.*",
+}
+
+// addDirToolHomes are the developer tool homes under a home directory (slash
+// separated, relative to it) the host runs programs from. Each is refused with
+// everything inside it and every parent of it.
+var addDirToolHomes = []string{
+	"go/bin", ".cargo", ".rustup", ".nvm", ".pyenv", ".volta", ".bun", ".deno", ".rbenv", ".asdf",
+	".local/share/mise", ".sdkman", ".npm-global",
+}
+
+// addDirConfigDirs are the tool config directories under a home directory (slash
+// separated, relative to it) whose contents the host executes or that carry
+// command-running settings: shell and editor startup files, git hooks and
+// aliases, direnv, the container runtimes' credential helpers, cloud-CLI
+// credential helpers. The list is deliberately curated, never "all of ~/.config".
+var addDirConfigDirs = []string{
+	".config/git", ".config/fish", ".config/tmux", ".tmux", ".oh-my-zsh", ".config/nvim", ".vim", ".emacs.d",
+	".config/emacs", ".config/direnv", ".config/environment.d", ".config/containers", ".aws", ".kube",
+}
+
+// addDirXDGConfigDirs are the children of an absolute $XDG_CONFIG_HOME that are
+// refused like their addDirConfigDirs counterparts under the home directory.
+var addDirXDGConfigDirs = []string{"git", "fish", "tmux", "nvim", "emacs", "direnv", "environment.d", "containers"}
 
 // addDirHomeGuards are the guards derived from one home directory: the
 // directory itself and its parents, its credential, control and login-run
@@ -288,6 +349,17 @@ func addDirHomeGuards(home string) []addDirGuard {
 			why:  "it holds " + spec.typ + " credentials",
 		})
 	}
+	// The host runs programs from the tool homes and executes the contents of the
+	// config directories (a git hook or alias, a shell or editor startup file, a
+	// credential helper), so a read-write bind of one is code the host runs next.
+	for _, rel := range addDirToolHomes {
+		path := filepath.Join(home, filepath.FromSlash(rel))
+		guards = append(guards, addDirGuard{path: path, mode: forbidOverlap, why: "the developer tool home " + path + ", which the host runs programs from"})
+	}
+	for _, rel := range addDirConfigDirs {
+		path := filepath.Join(home, filepath.FromSlash(rel))
+		guards = append(guards, addDirGuard{path: path, mode: forbidOverlap, why: "the tool config directory " + path + ", whose contents the host executes"})
+	}
 	return guards
 }
 
@@ -316,12 +388,33 @@ func addDirEnvPath(name string) (string, error) {
 // directories (and the shared tmp directories holding them), the directories
 // whose contents run at login (cenci's own autostart unit, XDG autostart,
 // launchd agents), and cenci's own host control paths (fleet config, state, the
-// daemon socket directory and the install link directory). Mounting any of them
-// read-write would walk around the narrow, read-only credential staging in
-// assembleVolumeMounts, hand the agent a runtime, tmux or agent socket (the
-// agent is root with sudo, so a tmux socket is host code execution), let it
-// plant code the host runs at the next login, or let it rewrite cenci's own
-// configuration and sockets.
+// daemon socket directory and the install link directory). Since #1460 it also
+// holds three more classes:
+//   - per-session socket directories: a direct child of /tmp, /private/tmp,
+//     /var/tmp or an absolute $TMPDIR named ssh-*, tmux-*, emacs*, .ICE-unix,
+//     .XIM-unix, .font-unix or com.apple.launchd.* (forbidChildPattern), with
+//     everything inside it;
+//   - developer tool bin directories and homes: every absolute $PATH entry, the
+//     ~/go/bin, ~/.cargo, ~/.rustup, ~/.nvm, ~/.pyenv and similar homes (the
+//     addDirToolHomes list), and their relocations $GOBIN, each absolute $GOPATH
+//     entry's bin, $CARGO_HOME, $RUSTUP_HOME, $NVM_DIR and $PYENV_ROOT, each with
+//     everything inside it and every parent of it;
+//   - tool config directories whose contents the host executes (the
+//     addDirConfigDirs list and the addDirXDGConfigDirs children of an absolute
+//     $XDG_CONFIG_HOME), again with everything inside and every parent.
+//
+// Mounting any of them read-write would walk around the narrow, read-only
+// credential staging in assembleVolumeMounts, hand the agent a runtime, tmux or
+// agent socket (the agent is root with sudo, so a tmux socket is host code
+// execution), let it plant code the host runs at the next login or the next time
+// it runs a tool, or let it rewrite cenci's own configuration and sockets. What it
+// still does not cover is named in the README's --add-dir section: other
+// command-running config elsewhere in $HOME, sockets outside the temp roots,
+// relative $PATH entries (and $PATH entries only an interactive shell adds: the
+// guard reads the launching process's $PATH), sandboxes on the other container
+// runtime or on another daemon or connection of the same runtime, and the window
+// between the pre-create re-check (recheckAddDirsBeforeCreate) and the runtime's
+// own bind resolution.
 //
 // It fails closed: when the daemon socket directory cannot be resolved the
 // denylist cannot be complete, so the result is a usage error naming the cause.
@@ -365,8 +458,53 @@ func addDirSensitiveGuards(home string) ([]addDirGuard, error) {
 	for _, dir := range addDirHostStateDirs {
 		guards = append(guards, addDirGuard{path: dir, mode: forbidOverlap, why: "the host state directory " + dir})
 	}
+	tempRoots := slices.Clone(addDirTempRoots)
 	if base := os.Getenv("TMPDIR"); filepath.IsAbs(base) {
 		guards = append(guards, addDirGuard{path: base, mode: forbidCovering, why: "your temp directory $TMPDIR or a parent of it; mount a directory inside it instead"})
+		tempRoots = append(tempRoots, base)
+	}
+	// Per-session socket directories (another session's ssh-agent, another user's
+	// tmux or emacs server) sit directly under a temp root; the fixed
+	// /tmp/tmux-<uid> and /tmp/emacs<uid> guards above only name this user's.
+	for _, root := range tempRoots {
+		for _, pattern := range addDirTempSocketPatterns {
+			guards = append(guards, addDirGuard{path: root, mode: forbidChildPattern, pattern: pattern, why: "a per-session socket directory under " + root + " (a name matching " + pattern + ")"})
+		}
+	}
+	// $PATH is where the host runs programs from: a read-write bind of an entry,
+	// of a directory inside it or of a parent of it lets the agent replace a
+	// program the host runs next. Only absolute entries count: an empty or
+	// relative one (".", "bin") names a location that depends on the directory a
+	// shell happens to be in, which a launch-time denylist cannot pin down.
+	for _, entry := range filepath.SplitList(os.Getenv("PATH")) {
+		if filepath.IsAbs(entry) {
+			guards = append(guards, addDirGuard{path: entry, mode: forbidOverlap, why: "a directory on your $PATH (" + entry + "), which the host runs programs from"})
+		}
+	}
+	// Tool homes relocated through the environment. Go rejects a relative $GOBIN
+	// or $GOPATH entry, so only absolute ones count; the other tools resolve a
+	// relative home against their working directory, which addDirEnvPath follows.
+	if bin := os.Getenv("GOBIN"); filepath.IsAbs(bin) {
+		guards = append(guards, addDirGuard{path: bin, mode: forbidOverlap, why: "your Go install directory $GOBIN, which the host runs programs from"})
+	}
+	for _, entry := range filepath.SplitList(os.Getenv("GOPATH")) {
+		if filepath.IsAbs(entry) {
+			guards = append(guards, addDirGuard{path: filepath.Join(entry, "bin"), mode: forbidOverlap, why: "the bin directory of an entry of your $GOPATH, which the host runs programs from"})
+		}
+	}
+	for _, tool := range []struct{ env, why string }{
+		{"CARGO_HOME", "your Cargo home $CARGO_HOME, which the host runs programs from"},
+		{"RUSTUP_HOME", "your Rustup home $RUSTUP_HOME, which the host runs toolchains from"},
+		{"NVM_DIR", "your nvm directory $NVM_DIR, which the host runs programs from"},
+		{"PYENV_ROOT", "your pyenv root $PYENV_ROOT, which the host runs programs from"},
+	} {
+		dir, err := addDirEnvPath(tool.env)
+		if err != nil {
+			return nil, err
+		}
+		if dir != "" {
+			guards = append(guards, addDirGuard{path: dir, mode: forbidOverlap, why: tool.why})
+		}
 	}
 	// A socket is exposed by mounting its directory or an ancestor of it, so the
 	// directory of a socket is guarded as a covering directory: a socket directly
@@ -392,10 +530,12 @@ func addDirSensitiveGuards(home string) ([]addDirGuard, error) {
 	if socket != "" {
 		guards = append(guards, addDirGuard{path: filepath.Dir(socket), mode: forbidCovering, why: "the directory of your ssh-agent socket ($SSH_AUTH_SOCK) or a parent of it; mount a directory inside it instead"})
 	}
-	// A relative XDG_* value is ignored on purpose, not by oversight: the XDG
-	// Base Directory specification says a relative path is invalid and must be
-	// ignored, so the tools that honor these variables never use one. $TMPDIR
-	// above follows the same rule.
+	// A relative XDG_* value is ignored on purpose, not by oversight: its meaning
+	// depends on the cwd of whichever tool reads it (the XDG Base Directory
+	// specification calls a relative path invalid, but not every tool ignores it;
+	// git, for one, does use a relative $XDG_CONFIG_HOME), so the guard cannot name
+	// one directory for it. That is a documented gap. $TMPDIR above follows the
+	// same rule.
 	if base := os.Getenv("XDG_RUNTIME_DIR"); filepath.IsAbs(base) {
 		guards = append(guards, addDirGuard{path: base, mode: forbidOverlap, why: "your session runtime directory (agent and bus sockets)"})
 	}
@@ -405,6 +545,10 @@ func addDirSensitiveGuards(home string) ([]addDirGuard, error) {
 			addDirGuard{path: filepath.Join(base, "systemd"), mode: forbidOverlap, why: "the systemd user units that run at login"},
 			addDirGuard{path: filepath.Join(base, "autostart"), mode: forbidOverlap, why: "the autostart entries that run at login"},
 		)
+		for _, name := range addDirXDGConfigDirs {
+			path := filepath.Join(base, name)
+			guards = append(guards, addDirGuard{path: path, mode: forbidOverlap, why: "the tool config directory " + path + " under $XDG_CONFIG_HOME, whose contents the host executes"})
+		}
 	}
 	if base := os.Getenv("XDG_DATA_HOME"); filepath.IsAbs(base) {
 		guards = append(guards, addDirGuard{path: filepath.Join(base, "systemd"), mode: forbidOverlap, why: "the systemd user units that run at login"})
@@ -441,6 +585,10 @@ func (g addDirGuard) refusesByIdentity(targetForms []string) bool {
 			}
 		case forbidCovering:
 			if identityContains(tp, g.path) {
+				return true
+			}
+		case forbidChildPattern:
+			if childPatternByIdentity(tp, g.path, g.pattern) {
 				return true
 			}
 		default:
@@ -516,6 +664,10 @@ func (g addDirGuard) refusesByPath(targetForms []string) bool {
 				if pathContains(tp, gp) {
 					return true
 				}
+			case forbidChildPattern:
+				if childPatternContains(gp, tp, g.pattern) {
+					return true
+				}
 			default:
 				if pathContains(tp, gp) || pathContains(gp, tp) {
 					return true
@@ -524,6 +676,58 @@ func (g addDirGuard) refusesByPath(targetForms []string) bool {
 		}
 	}
 	return false
+}
+
+// childPatternContains reports whether target is, or sits inside, a direct child
+// of root whose name matches pattern. The root itself and a target next to or
+// above the matching child never match. Like pathContains, a pair that cannot be
+// related (filepath.Rel fails) counts as a match: a denylist refuses what it
+// cannot compare.
+func childPatternContains(root, target, pattern string) bool {
+	rel, err := filepath.Rel(root, target)
+	if err != nil {
+		return true
+	}
+	if rel == "." || !filepath.IsLocal(rel) {
+		return false
+	}
+	child, _, _ := strings.Cut(rel, string(filepath.Separator))
+	return nameMatchesPattern(child, pattern)
+}
+
+// childPatternByIdentity is childPatternContains' file-identity half: it walks
+// target's ancestors and matches one whose name fits pattern and whose parent is
+// the same file as root, which also catches a spelling no string comparison
+// equates (such as /TMP on a case-insensitive filesystem).
+func childPatternByIdentity(target, root, pattern string) bool {
+	for cur := filepath.Clean(target); filepath.Dir(cur) != cur; cur = filepath.Dir(cur) {
+		if nameMatchesPattern(filepath.Base(cur), pattern) && sameFile(filepath.Dir(cur), root) {
+			return true
+		}
+	}
+	return false
+}
+
+// nameMatchesPattern matches a path component against a filepath.Match pattern
+// on ASCII-lowered spellings of both, because the filesystems the temp roots live
+// on are often case-insensitive (the macOS default) and /tmp/SSH-x then names the
+// same directory as /tmp/ssh-x. A malformed pattern cannot be evaluated, so it
+// matches: the patterns are fixed in this file, never user input.
+func nameMatchesPattern(name, pattern string) bool {
+	ok, err := filepath.Match(asciiLower(pattern), asciiLower(name))
+	return err != nil || ok
+}
+
+// asciiLower lowers only the ASCII letters of s: Unicode case folding would also
+// equate names (the Kelvin sign with "k") no filesystem treats as the same entry.
+func asciiLower(s string) string {
+	b := []byte(s)
+	for i, c := range b {
+		if 'A' <= c && c <= 'Z' {
+			b[i] = c + 'a' - 'A'
+		}
+	}
+	return string(b)
 }
 
 // pathContains reports whether child equals parent or sits inside it, compared
@@ -562,6 +766,186 @@ func uniqueStrings(vals ...string) []string {
 		}
 	}
 	return out
+}
+
+// otherSandboxScanFailure prefixes every error of the other-sandbox scan that is
+// not a refusal: the scan could not establish that a target is safe.
+const otherSandboxScanFailure = "--add-dir cannot be checked against other running sandboxes"
+
+// otherSandboxWritableBinds returns the host source of every mount of a running
+// sandbox that its agent can write to from inside: the /workspace bind and each
+// /repos/<slug> bind (assembleVolumeMounts creates no other read-write host
+// bind; credentials are bound read-only and the home, agent-CLI and dind mounts
+// are named volumes). A source that is not an absolute path cannot be compared
+// with a target, and "cannot compare" refuses: it is an error, never a skip. It
+// only reads the mounts; whether each source still exists on the host is
+// requireBindSourcesOnHost's question.
+func otherSandboxWritableBinds(mounts []reuseMount) ([]string, error) {
+	var sources []string
+	for _, m := range mounts {
+		if !isOtherSandboxWritableDestination(m.Destination) {
+			continue
+		}
+		if !filepath.IsAbs(m.Source) {
+			return nil, fmt.Errorf("its %s mount has the source %q, which is not an absolute host path", m.Destination, m.Source)
+		}
+		sources = append(sources, filepath.Clean(m.Source))
+	}
+	return sources, nil
+}
+
+// isOtherSandboxWritableDestination reports whether a mount at this container
+// path is one of the read-write host binds of a sandbox: /workspace or a
+// /repos/<slug> directory.
+func isOtherSandboxWritableDestination(dest string) bool {
+	return dest == workspaceContainer || strings.HasPrefix(dest, addDirContainerRoot+"/")
+}
+
+// requireBindSourcesOnHost refuses a running sandbox whose read-write bind source
+// is absent at the path the runtime reports. A bind follows the inode, so a user
+// who renamed the source while that sandbox runs leaves its agent writing under
+// the new name while `inspect` still reports the old path: neither the reported
+// spelling nor file identity (the old path stats as absent) can relate a target
+// under the new name to that bind, so the sandbox cannot be checked and the launch
+// is refused, never skipped. A Stat error that is not "absent" (statIsAbsent) says
+// nothing about identity either and refuses the same way. A source that exists
+// passes, so a source renamed and then recreated at the old name is not detected.
+// Only mounts otherSandboxWritableBinds already accepted (absolute sources) reach
+// it.
+func requireBindSourcesOnHost(name string, mounts []reuseMount) error {
+	for _, m := range mounts {
+		if !isOtherSandboxWritableDestination(m.Destination) {
+			continue
+		}
+		_, err := os.Stat(m.Source)
+		switch {
+		case err == nil:
+		case statIsAbsent(err):
+			return fmt.Errorf("%s: running sandbox %s: its %s source %q no longer exists on the host", otherSandboxScanFailure, name, m.Destination, m.Source)
+		default:
+			return fmt.Errorf("%s: running sandbox %s: its %s source %q cannot be examined on the host: %w", otherSandboxScanFailure, name, m.Destination, m.Source, err)
+		}
+	}
+	return nil
+}
+
+// strictlyInsideBind reports whether target sits strictly inside source, the host
+// path another sandbox binds read-write: the parent of target equals source or
+// sits inside it. Only a target below the source is reachable for a swap by that
+// sandbox's agent, which can write inside its own mount but cannot rename the
+// mount point itself, so a target equal to source, or a parent of it, never
+// matches. source is compared on the spelling the runtime reported and on its
+// symlink-resolved one, and by file identity, so a source given through a
+// symlink still matches the real path below it.
+func strictlyInsideBind(target, source string) bool {
+	parent := filepath.Dir(target)
+	for _, src := range uniqueStrings(filepath.Clean(source), resolveExistingPrefix(source)) {
+		if pathContains(src, parent) {
+			return true
+		}
+	}
+	return identityContains(source, parent)
+}
+
+// refuseInsideOtherSandbox is the exit-1 refusal for a target strictly inside
+// another running sandbox's read-write bind. It is a plain error, not a usage
+// error: the arguments are fine, the host state makes the launch unsafe.
+func refuseInsideOtherSandbox(target, source, container string) error {
+	return fmt.Errorf("--add-dir %q is inside %q, which running sandbox %s mounts read-write: its agent could swap a path component before this container is created; mount %q itself (or a parent of it) instead, or stop that sandbox first", target, source, container, source)
+}
+
+// containerVanished reports whether a failed inspect means the container is gone:
+// the runtime ran and answered "no such container" or "no such object" (an
+// *exec.ExitError carrying that stderr). It is stricter than
+// containerExistenceFinding, which treats any *exec.ExitError as a container that
+// is not found: here the stderr text must also say so, because a skip in a
+// security scan must not hide a runtime failure. Anything else (a runtime that
+// could not run, a timeout, any other stderr) says nothing about the container
+// and is not "gone".
+func containerVanished(err error) bool {
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		return false
+	}
+	stderr := strings.ToLower(string(exitErr.Stderr))
+	return strings.Contains(stderr, "no such container") || strings.Contains(stderr, "no such object")
+}
+
+// scanOtherSandboxes refuses any added directory that sits strictly inside the
+// /workspace or /repos/* bind source of another running sandbox on the launch
+// runtime (#1460): that sandbox's agent can write there and swap a path component
+// for a symlink between validation and the container create. Called from
+// planArgvs' create branch (so --dry-run refuses like a real launch) and again
+// from the pre-create re-check; never from the attach path or Audit.
+//
+// It fails closed: a listing failure, an inspect failure, a mount it cannot read
+// and a writable bind source absent at the reported path (or that cannot be
+// examined; requireBindSourcesOnHost) all refuse the launch. The one benign skip
+// is a container that `ps` listed and `inspect` no longer finds
+// (containerVanished); that branch is kept
+// apart from the error branch so a runtime failure can never read as "gone". The
+// launching container itself is not filtered: it is not running on the create
+// path, and a concurrent launch that just created it makes the create fail on
+// the name clash anyway.
+func (e *Engine) scanOtherSandboxes(addDirs []addDirMount) error {
+	names, err := sandbox.RunningContainerNames(context.Background(), e.Runtime)
+	if err != nil {
+		return fmt.Errorf("%s: %w", otherSandboxScanFailure, err)
+	}
+	for _, name := range names {
+		posture, err := e.inspectReusePosture(name)
+		if err != nil {
+			if containerVanished(err) {
+				continue
+			}
+			return fmt.Errorf("%s: %w", otherSandboxScanFailure, err)
+		}
+		sources, err := otherSandboxWritableBinds(posture.Mounts)
+		if err != nil {
+			return fmt.Errorf("%s: running sandbox %s: %w", otherSandboxScanFailure, name, err)
+		}
+		if err := requireBindSourcesOnHost(name, posture.Mounts); err != nil {
+			return err
+		}
+		for _, d := range addDirs {
+			for _, source := range sources {
+				if strictlyInsideBind(d.Host, source) {
+					return refuseInsideOtherSandbox(d.Host, source, name)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// recheckAddDirsBeforeCreate is Launch's last --add-dir check, run after the
+// stopped-container rm and immediately before the container create (#1460). It
+// re-runs resolveAddDirs on the same raw values: a failure there (a directory
+// deleted during rm, a path that now hits the denylist) is returned unchanged, and
+// the result must equal the set validated earlier, host path, container path and
+// order. Any difference aborts with nothing created: the threat is a path
+// component swapped for a symlink, which always changes the resolved host path.
+// It then repeats the other-sandbox scan, so the last look at the runtime's state
+// is as close to the create as the launcher can get. A residual window remains
+// between this check and the runtime's own bind resolution.
+func (e *Engine) recheckAddDirsBeforeCreate(ctx launchCtx, opts Options) error {
+	again, err := resolveAddDirs(opts.AddDirs, ctx.Scope, ctx.Home)
+	if err != nil {
+		return err
+	}
+	if !slices.Equal(again, ctx.AddDirs) {
+		return fmt.Errorf("--add-dir directories changed between validation and container create (validated %s, now %s); nothing was created", addDirHostList(ctx.AddDirs), addDirHostList(again))
+	}
+	return e.scanOtherSandboxes(again)
+}
+
+// addDirHostList renders the resolved host paths of mounts for an error line.
+func addDirHostList(mounts []addDirMount) string {
+	hosts := make([]string, 0, len(mounts))
+	for _, m := range mounts {
+		hosts = append(hosts, strconv.Quote(m.Host))
+	}
+	return strings.Join(hosts, ", ")
 }
 
 // addDirAgentTokens builds the agent flags that make the agent aware of each

@@ -173,6 +173,39 @@ func joinArgv(argv []string) string {
 //	                        byte-parallel with
 //	                        internal/sandbox/launcher/faketest_test.go's
 //	                        writeFakeRuntime.
+//	FAKE_REUSE_POSTURE_STDERR — (#1460) text written to stderr by the same
+//	                        reuse-posture `inspect`, before its stdout. Together
+//	                        with FAKE_CONTAINER_INSPECT_EXIT it scripts a
+//	                        container that `ps` listed but the runtime no longer
+//	                        knows (e.g. "Error: No such container: x"), or any
+//	                        other inspect failure text; unset/empty prints
+//	                        nothing. Must stay byte-parallel with
+//	                        internal/sandbox/launcher/faketest_test.go's
+//	                        writeFakeRuntime (#493 keep-in-sync note).
+//	FAKE_RM_SWAP_DIR     — (#1460) when set and non-empty, every `rm` call
+//	                        deletes that directory (rm -rf) before exiting 0,
+//	                        which is exactly the window between Launch's
+//	                        stopped-container `rm` and the container create:
+//	                        the validated --add-dir target is gone by the
+//	                        pre-create re-check. FAKE_RM_SWAP_TARGET, when also
+//	                        set, then replaces the deleted directory with a
+//	                        symlink to that path, so the re-resolved host path
+//	                        differs from the validated one. Unset leaves `rm`
+//	                        a plain exit 0. The launcher discards `rm`'s exit
+//	                        status and stderr, so a `rm -rf` or `ln -s` that
+//	                        fails (exit 97) shows up as the dependent test
+//	                        failing with a wrong exit code: no swap happened.
+//	FAKE_RM_ARM_REUSE_POSTURE_FAIL — (#1460) a marker file path. When set and
+//	                        non-empty, every `rm` call creates that file, and
+//	                        from then on the reuse-posture `inspect` exits 1
+//	                        with a non-vanished "permission denied" stderr
+//	                        (ignoring FAKE_REUSE_POSTURE*). It scripts a runtime
+//	                        that answers the plan-time other-sandbox scan and
+//	                        fails only the pre-create re-check's scan, which
+//	                        runs after Launch's stopped-container `rm`. The
+//	                        launcher fake (faketest_test.go) has no such marker
+//	                        on purpose: no launcher test needs a runtime whose
+//	                        answer changes after the `rm`.
 //	FAKE_INSPECT_STATE   — container startup state (default "running 0")
 //	FAKE_CONTAINER_INSPECT_EXIT — container `inspect` exit code, for all three
 //	                        format-string lookups (State.Status, .RW mounts,
@@ -473,7 +506,14 @@ info)
   esac
   fv INFO_RUNTIMES "{}"; exit "$(fe INFO)"
   ;;
-rm) exit 0 ;;
+rm)
+  if [ -n "$FAKE_RM_SWAP_DIR" ]; then
+    /bin/rm -rf "$FAKE_RM_SWAP_DIR" || { echo "fake rm swap failed" >&2; exit 97; }
+    [ -z "$FAKE_RM_SWAP_TARGET" ] || /bin/ln -s "$FAKE_RM_SWAP_TARGET" "$FAKE_RM_SWAP_DIR" || { echo "fake rm swap failed" >&2; exit 97; }
+  fi
+  [ -z "$FAKE_RM_ARM_REUSE_POSTURE_FAIL" ] || : > "$FAKE_RM_ARM_REUSE_POSTURE_FAIL" || { echo "fake rm marker failed" >&2; exit 97; }
+  exit 0
+  ;;
 run) case "$*" in
   *'/bin/cat'*)
     case "$*" in
@@ -518,7 +558,13 @@ inspect)
     printf '%s\n' "$result"
     exit "$(fe INSPECT_IMAGE)"
     ;;
-  *'cenci-sand.dind'*) fvb REUSE_POSTURE "|runc|0\nworkspace-vol::/workspace\n\n"; exit "$(fe CONTAINER_INSPECT)" ;;
+  *'cenci-sand.dind'*)
+    if [ -n "$FAKE_RM_ARM_REUSE_POSTURE_FAIL" ] && [ -e "$FAKE_RM_ARM_REUSE_POSTURE_FAIL" ]; then
+      echo "Error: permission denied while connecting to the daemon" >&2
+      exit 1
+    fi
+    rs="$(fv REUSE_POSTURE_STDERR "")"; [ -z "$rs" ] || printf '%s\n' "$rs" >&2
+    fvb REUSE_POSTURE "|runc|0\nworkspace-vol::/workspace\n\n"; exit "$(fe CONTAINER_INSPECT)" ;;
   *'.Config.Env'*) fvb CONTAINER_ENV ""; exit "$(fe CONTAINER_ENV)" ;;
   *State.Status*) printf '%s\n' "$(fv INSPECT_STATE "running 0")"; exit "$(fe CONTAINER_INSPECT)" ;;
   *Labels*) printf '%s\n' "$(fv INSPECT_LABEL "")" ;;
