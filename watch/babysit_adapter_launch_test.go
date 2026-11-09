@@ -117,6 +117,8 @@ func newAdapterLaunchWorld(t *testing.T, pluginList string, installAdapter bool)
 	// (#1455) sees no live worker; everything else exits 0.
 	exectest.WriteExecutable(t, filepath.Join(binDir, "tmux"), "#!/bin/sh\n"+
 		`printf '%s\000' "$#" "$@" >> `+exectest.ShellQuote(w.tmuxLog)+"\n"+
+		// `cenci run` always leads with `-S <socket>` (#1431): drop it after logging.
+		`if [ "$1" = -S ]; then shift 2; fi`+"\n"+
 		`case "$1" in display-message) echo 0 ;; list-panes) printf '1-implement\t0\n' ;; esac`+"\nexit 0\n")
 
 	// Fake gh: a PR with a failing check at head "abc", no comments or reviews;
@@ -278,12 +280,22 @@ func adapterLaunchCalls(t *testing.T, path string) [][]string {
 	return calls
 }
 
-// newWindowCalls returns the recorded tmux `new-window` calls.
+// withoutTmuxSocket drops the leading `-S <socket>` pair `cenci run` puts on
+// every tmux call it makes (#1431), so a caller can match on the subcommand.
+func withoutTmuxSocket(call []string) []string {
+	if len(call) >= 2 && call[0] == "-S" {
+		return call[2:]
+	}
+	return call
+}
+
+// newWindowCalls returns the recorded tmux `new-window` calls, without their
+// leading `-S <socket>`.
 func (w *adapterLaunchWorld) newWindowCalls(t *testing.T) [][]string {
 	t.Helper()
 	var out [][]string
 	for _, c := range adapterLaunchCalls(t, w.tmuxLog) {
-		if len(c) > 0 && c[0] == "new-window" {
+		if c = withoutTmuxSocket(c); len(c) > 0 && c[0] == "new-window" {
 			out = append(out, c)
 		}
 	}

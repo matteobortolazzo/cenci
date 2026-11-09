@@ -35,6 +35,9 @@ func armOnHost(o Options, repo string) error {
 		Agent:    o.Agent,
 		Interval: o.Interval,
 		TmuxPane: os.Getenv("TMUX_PANE"),
+		// The sandbox launcher exports the host server's socket as
+		// CENCI_TMUX_SOCKET; the daemon validates it on receipt (#1431).
+		TmuxSocket: os.Getenv("CENCI_TMUX_SOCKET"),
 	}
 
 	resp, err := ipc.SendArmRequest(armSocketPath(), req)

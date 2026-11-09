@@ -240,6 +240,7 @@ descriptive slug: `--slug` if given, else the whole description slugified.
 | `--sandbox` / `--no-sandbox` | Sandbox is the default (`claude`→`cenci open`, the container being the mandatory runtime); `--no-sandbox` is the host opt-out. Both override the config default. A sandbox request for an agent with no `sandboxCommand` fails before spawn (no host fallback) — see [Configuration](#configuration) |
 | `--model <model>` | Model override passed to the agent (substituted into `{model}`, else appended as `--model`) |
 | `--session <name>` | Target tmux session (default: the current session) |
+| `--tmux-socket <path>` | tmux server socket to launch on, an absolute path with no tab or newline (default: the first field of `$TMUX`, else the `cenci` socket). Without the flag every tmux call goes to that one resolved socket, so a headless or outside-tmux run, and `cenci dispatch`, use the `cenci` socket rather than the default server. A shape-invalid value, or an explicit socket that is not `$TMUX`'s first field while `--session` is empty, exits `2` (see the exit statuses below) |
 | `--dir <path>` | Working directory the window starts in (default: current); prepended as a `cd '<dir>' &&` prefix on the launched command, visible in `--dry-run` output too |
 | `--unattended` | Pin `CENCI_ATTENDED=0` on the launched agent command (a `CENCI_ATTENDED=0 ` assignment scoped to the agent argv, after any `--dir` `cd` prefix), so the session counts as unattended (see **Who is unattended**). `cenci babysit` sets it on every launch; an interactive `cenci run` without it leaves the variable unset. Place it after the positionals like the other flags |
 | `--slug <slug>` | Window-name slug for free-text runs; ignored for numeric tickets (named `<number>-<skill>`) |
@@ -375,6 +376,13 @@ spawned; `2` usage error; `3` the window was spawned but a post-spawn step (sett
 `automatic-rename off`) failed, so an agent session is starting even though `run`
 reports an error. `cenci babysit` counts a `3` from a `ci-repair` launch as a
 dispatched attempt instead of launching a second worker.
+
+The `2` cases for `--tmux-socket` (ticket #1431) both print one stderr line and
+create no window: a value that is not an absolute path, or that holds a tab or newline
+(the value is never echoed); and an explicit socket that is not the first field of
+`$TMUX` while `--session` is empty, because without `--session` the target is
+`$TMUX_PANE`'s session and a `%N` pane id only means something on the invoking pane's
+own server. The hint says to pass `--session <name>` to launch on another server.
 
 Unattended paths — `cenci dispatch` and `cenci babysit` arming — are stricter than
 `run`: they accept only built-in (agent, workflow) pairs from the table above, and a
@@ -1008,7 +1016,12 @@ failing gate is the logged skip reason):
    `dispatch:` line naming its remedy. It applies to every pickup type, and because it
    sits ahead of the cap a misconfigured repo's ticket never takes a slot a healthy
    repo could use. The probe and the spawn both use the trimmed configured name;
-   the ambient/current tmux session is never consulted. A dry run probes nothing: it
+   the ambient/current tmux session is never consulted. The probe runs on the one tmux
+   socket `cenci run` will spawn on (ticket #1431: the first field of `$TMUX`, else the
+   `cenci` socket), resolved once per real pass, so the gate and the spawn cannot name
+   different servers (a headless `cenci dispatch` therefore reads a session that lives
+   only on the default server as `session absent`); a socket that cannot be resolved
+   makes every probed repo `session probe failed`. A dry run probes nothing: it
    still reports `session unconfigured` from config, and notes a dispatch into a
    configured session `session not probed (dry-run)`;
 10.75. **plan authorization** — an ordinary `Planned` dispatch (never a resume,
@@ -2181,6 +2194,20 @@ stdout/stderr are written to a `0600` append-mode log file under the state
 directory (one per repo/PR, printed on arming), so a failed repair launch is
 readable there instead of being silently discarded.
 
+Arming also records the tmux server socket that session lives on (ticket #1431) as
+`launchSocket`, beside `launchSession`. `cenci babysit` takes `--tmux-socket <path>`
+for it (the same shape check as `cenci run`; a bad value exits `2`). Without the flag
+the recorded socket is the first field of `$TMUX` when the session was resolved from
+the arming pane, and empty when `--session` was passed explicitly, since nothing then
+says which server holds it. The deferred launch probes `has-session` on that socket
+and starts `cenci run ... --session <name> --tmux-socket <path>`, so the window is
+created on the server the session was found on; so do the `ci-repair`/`merge-repair`
+live-worker probes. A state file without `launchSocket` (armed before this change, or
+an empty recorded socket) keeps probing bare `tmux` and passes no flag. A recorded
+socket that fails the shape or trusted-directory check fails the launch with an error:
+it never falls back to the default server, `cenci run` is not called and no attempt is
+spent.
+
 CI repair launches as `cenci run ci-repair "<PR> PR #<PR> (<branch>) has failing CI
 checks: …"`: the leading PR number names the window `<PR>-ci-repair`, which the
 supervisor's liveness probe and the daemon's window cleanup both match on. The built-in
@@ -2198,6 +2225,14 @@ rejected the request; the reason is relayed verbatim), or **arm status unknown**
 (the host didn't respond within 5s — verify or repair by running
 `cenci babysit <pr> --agent <agent>` from a host tmux pane, which safely no-ops if a
 supervisor is already running).
+
+The forwarded arm request also carries `tmux_socket`, taken from the
+`CENCI_TMUX_SOCKET` the sandbox launcher exports (omitted when unset). The daemon
+validates it on receipt like the pane id: a rejected value becomes empty (the daemon's
+own server and today's supervisor command line; logged only under verbose, never
+echoing a malformed value) and is never a nack. A valid socket is the one the pane id
+is resolved on, so a `%5` that exists on two servers resolves to the right session, and
+the spawned supervisor gets `--tmux-socket <socket>` only when one is set.
 
 `cenci babysit stop <pr>` and `cenci babysit status <pr>` forward the same way from
 inside a sandbox, so an agent there can stop a supervisor and read its attempt

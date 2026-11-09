@@ -50,6 +50,10 @@ type Options struct {
 	// Dir, when set, is the working directory babysit's launch() calls
 	// start their windows in (#975), mirroring run.Opts.Dir.
 	Dir string
+	// TmuxSocket, when set, is the tmux server socket the recorded Session
+	// lives on (#1431): the `--tmux-socket` flag, which the arming parent and
+	// the daemon-spawned path thread onto the detached supervisor's argv.
+	TmuxSocket string
 }
 type State struct {
 	SchemaVersion       int    `json:"schemaVersion"`
@@ -126,6 +130,10 @@ type State struct {
 	// stateSchemaVersion bump needed (contrast #885's LaunchedKeys
 	// migration).
 	LaunchSession string `json:"launchSession,omitempty"`
+	// LaunchSocket is the tmux server socket LaunchSession lives on (#1431),
+	// recorded at arm time beside it. Additive and omitted when empty: a state
+	// file without it keeps probing the ambient server with bare tmux.
+	LaunchSocket string `json:"launchSocket,omitempty"`
 	// LaunchDir is the working directory every launch() call's spawned
 	// window starts in, resolved alongside LaunchSession at arm time
 	// (#975).
@@ -325,21 +333,31 @@ func defaultStartSupervisor(cmd *exec.Cmd) error {
 	return cmd.Start()
 }
 
-// resolveLaunchTarget resolves the tmux session and start directory every
-// launch() call will target, at arm time (#975): an explicit Options field
-// wins over ambient resolution, mirroring run.Opts's own "flag > current
-// tmux session" precedence -- so a detached child or a `--once` invocation
-// that already carries --session/--dir never re-resolves. Dir falls back
-// from an explicit flag to `git rev-parse --show-toplevel` to os.Getwd(),
-// computed independently of (and stored separately from) RepoRoot. When no
-// session can be resolved at all (armed outside tmux), arming must still
-// succeed -- this only warns to stderr and returns an empty session, which
-// launch() later gates on (AC 6).
-func resolveLaunchTarget(o Options) (session, dir string) {
+// resolveLaunchTarget resolves the tmux session, the tmux server socket it
+// lives on and the start directory every launch() call will target, at arm time
+// (#975): an explicit Options field wins over ambient resolution, mirroring
+// run.Opts's own "flag > current tmux session" precedence -- so a detached
+// child or a `--once` invocation that already carries --session/--dir never
+// re-resolves. Dir falls back from an explicit flag to `git rev-parse
+// --show-toplevel` to os.Getwd(), computed independently of (and stored
+// separately from) RepoRoot. When no session can be resolved at all (armed
+// outside tmux), arming must still succeed -- this only warns to stderr and
+// returns an empty session, which launch() later gates on (AC 6).
+//
+// The socket (#1431) is the explicit --tmux-socket value when given. Otherwise,
+// for a session resolved from the arming pane, it is the first field of $TMUX:
+// the server that bare lookup actually queried (inlined, because this package
+// cannot import internal/run). An explicit --session without a socket stays ""
+// -- the legacy bare behaviour -- since nothing says which server holds it.
+func resolveLaunchTarget(o Options) (session, socket, dir string) {
 	session = strings.TrimSpace(o.Session)
+	socket = o.TmuxSocket
 	if session == "" {
 		if s, err := currentTmuxSession(); err == nil {
 			session = s
+			if socket == "" {
+				socket, _, _ = strings.Cut(os.Getenv("TMUX"), ",")
+			}
 		} else {
 			fmt.Fprintf(os.Stderr, "cenci babysit: %v -- no repair window can be opened until you re-arm from inside a tmux pane\n", err)
 		}
@@ -353,7 +371,7 @@ func resolveLaunchTarget(o Options) (session, dir string) {
 			}
 		}
 	}
-	return session, dir
+	return session, socket, dir
 }
 
 // gitToplevel runs `git rev-parse --show-toplevel` via the package's command
@@ -495,13 +513,20 @@ func Run(o Options) error {
 		if err := save(path, s); err != nil {
 			return err
 		}
-		session, launchDir := resolveLaunchTarget(o)
+		session, socket, launchDir := resolveLaunchTarget(o)
 		lp := logPath(dir, repo, o.PR)
 		logFile, err := openSupervisorLog(lp)
 		if err != nil {
 			return fmt.Errorf("open supervisor log %s: %w", lp, err)
 		}
-		cmd := exec.Command(os.Args[0], "babysit", o.PR, "--agent", o.Agent, "--interval", o.Interval.String(), "--state-dir", dir, "--session", session, "--dir", launchDir)
+		argv := []string{"babysit", o.PR, "--agent", o.Agent, "--interval", o.Interval.String(), "--state-dir", dir, "--session", session, "--dir", launchDir}
+		// The supervisor re-resolves its launch target from this argv, so the
+		// socket the session was found on rides along when one is known (#1431);
+		// with none the argv is unchanged and the child records no socket.
+		if socket != "" {
+			argv = append(argv, "--tmux-socket", socket)
+		}
+		cmd := exec.Command(os.Args[0], argv...)
 		cmd.Env = append(os.Environ(), "CENCI_BABYSIT_SUPERVISOR=1")
 		cmd.Stdin = nil
 		cmd.Stdout = logFile
@@ -573,7 +598,7 @@ func Run(o Options) error {
 		s.Status = "needs-input"
 	}
 	s.RepoRoot = localRepoRoot()
-	s.LaunchSession, s.LaunchDir = resolveLaunchTarget(o)
+	s.LaunchSession, s.LaunchSocket, s.LaunchDir = resolveLaunchTarget(o)
 	// Fill in a blocking verdict + settle clock only when nothing has
 	// published one yet (#924 AC 13): a re-arm over an existing state file
 	// (e.g. one the detaching parent already wrote, or a prior episode's
@@ -783,7 +808,7 @@ func tick(s *State) (bool, time.Duration, error) {
 		actionable = true
 		// Probe even before our first recorded dispatch: a manually-started
 		// repair owns the same branch and must not receive a second writer.
-		workerActive, err := mergeRepairActive(s.LaunchSession, s.PR)
+		workerActive, err := mergeRepairActive(s.LaunchSocket, s.LaunchSession, s.PR)
 		if err != nil {
 			recordUpstreamReadFailure(s, reasonWorkflowLaunchFailed, err)
 			return false, 0, err
@@ -968,7 +993,7 @@ func tick(s *State) (bool, time.Duration, error) {
 // is a dispatched attempt: the worker is starting.
 func dispatchCIRepair(s *State, pr prView, failing []string) (bool, error) {
 	if s.LaunchSession != "" {
-		active, err := ciRepairActive(s.LaunchSession, s.PR)
+		active, err := ciRepairActive(s.LaunchSocket, s.LaunchSession, s.PR)
 		if err != nil {
 			return false, err
 		}
@@ -1016,11 +1041,19 @@ var errWindowSpawned = errors.New("window spawned but its post-spawn setup faile
 // same pin dispatch sets. The workers read untrusted PR text and must never
 // count as a human session that could release a held plan (#1464), whatever
 // the host's planning.attended flag says.
+//
+// The recorded socket (#1431) is probed with has-session and forwarded as
+// `--tmux-socket`, right after `--session`, so the window is created on the
+// server the session was found on; a state with no recorded socket probes bare
+// and passes no flag.
 func launch(s *State, workflow, arg string) error {
 	if s.LaunchSession == "" {
 		return fmt.Errorf("launch %s: no tmux session was recorded at arm time; re-arm from a host tmux pane", workflow)
 	}
-	exists, err := tmuxHasSession(s.LaunchSession)
+	// The probe runs on the socket recorded at arm time (#1431); a state without
+	// one probes with bare tmux as before. A socket that fails the execTmux
+	// re-check is an error here, so it never reaches `cenci run`.
+	exists, err := tmuxHasSession(s.LaunchSocket, s.LaunchSession)
 	if err != nil {
 		return fmt.Errorf("launch %s: checking tmux session %q: %w", workflow, s.LaunchSession, err)
 	}
@@ -1032,6 +1065,9 @@ func launch(s *State, workflow, arg string) error {
 		agent = "claude"
 	}
 	args := []string{"run", workflow, arg, "--agent", agent, "--session", s.LaunchSession}
+	if s.LaunchSocket != "" {
+		args = append(args, "--tmux-socket", s.LaunchSocket)
+	}
 	if workflow == "merge-repair" {
 		args = append(args, "--model", "opus")
 	}

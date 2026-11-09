@@ -31,8 +31,8 @@ func TestMain(m *testing.M) {
 	originalRepairActive := mergeRepairActive
 	originalCIRepairActive := ciRepairActive
 	fleetConfigPath = func() string { return "" }
-	mergeRepairActive = func(string, string) (bool, error) { return false, nil }
-	ciRepairActive = func(string, string) (bool, error) { return false, nil }
+	mergeRepairActive = func(string, string, string) (bool, error) { return false, nil }
+	ciRepairActive = func(string, string, string) (bool, error) { return false, nil }
 	code := m.Run()
 	fleetConfigPath = original
 	mergeRepairActive = originalRepairActive
@@ -184,9 +184,9 @@ func withCommands(t *testing.T, responses []string, calls *[][]string) {
 		return out, "", nil
 	}
 	currentTmuxSession = func() (string, error) { return "test-session", nil }
-	tmuxHasSession = func(string) (bool, error) { return true, nil }
-	mergeRepairActive = func(string, string) (bool, error) { return false, nil }
-	ciRepairActive = func(string, string) (bool, error) { return false, nil }
+	tmuxHasSession = func(string, string) (bool, error) { return true, nil }
+	mergeRepairActive = func(string, string, string) (bool, error) { return false, nil }
+	ciRepairActive = func(string, string, string) (bool, error) { return false, nil }
 	t.Cleanup(func() {
 		command = originalCommand
 		execGh = originalExecGh
@@ -808,7 +808,7 @@ func TestTickFailingCIExitCodeToleranceLaunchesCIRepair(t *testing.T) {
 		{out: `[]`},
 	}, &calls)
 	originalTmuxHasSession := tmuxHasSession
-	tmuxHasSession = func(string) (bool, error) { return true, nil }
+	tmuxHasSession = func(string, string) (bool, error) { return true, nil }
 	t.Cleanup(func() { tmuxHasSession = originalTmuxHasSession })
 
 	s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 60, LaunchSession: "work"}
@@ -1164,7 +1164,7 @@ func TestTickCIRepairDispatchesOnPendingToFailingTransitionSameSHA(t *testing.T)
 	// defaults (babysit_test.go's withCommands doc comment), so the launch
 	// probe and target must be stubbed/set explicitly here.
 	originalTmuxHasSession := tmuxHasSession
-	tmuxHasSession = func(string) (bool, error) { return true, nil }
+	tmuxHasSession = func(string, string) (bool, error) { return true, nil }
 	t.Cleanup(func() { tmuxHasSession = originalTmuxHasSession })
 
 	s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 60, LaunchSession: "work"}
@@ -1243,7 +1243,7 @@ func TestTickCIRepairDispatchesOnGreenToFailingTransitionSameSHA(t *testing.T) {
 		{out: `[]`},
 	}, &calls)
 	originalTmuxHasSession := tmuxHasSession
-	tmuxHasSession = func(string) (bool, error) { return true, nil }
+	tmuxHasSession = func(string, string) (bool, error) { return true, nil }
 	t.Cleanup(func() { tmuxHasSession = originalTmuxHasSession })
 
 	s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 60, LaunchSession: "work"}
@@ -1319,7 +1319,7 @@ func TestTickCIRepairNoDispatchStormOnRepeatedFailingSameSHA(t *testing.T) {
 		{out: `[]`},
 	}, &calls)
 	originalTmuxHasSession := tmuxHasSession
-	tmuxHasSession = func(string) (bool, error) { return true, nil }
+	tmuxHasSession = func(string, string) (bool, error) { return true, nil }
 	t.Cleanup(func() { tmuxHasSession = originalTmuxHasSession })
 
 	s := State{
@@ -1359,7 +1359,7 @@ func TestTickCIRepairReArmsOnNewFailingHeadSHA(t *testing.T) {
 		{out: `[]`},
 	}, &calls)
 	originalTmuxHasSession := tmuxHasSession
-	tmuxHasSession = func(string) (bool, error) { return true, nil }
+	tmuxHasSession = func(string, string) (bool, error) { return true, nil }
 	t.Cleanup(func() { tmuxHasSession = originalTmuxHasSession })
 
 	s := State{
@@ -1419,7 +1419,7 @@ func TestTickCIRepairRetryBudgetSurvivesPendingTickBetweenFailingSHAs(t *testing
 		{out: `[]`},
 	}, &calls)
 	originalTmuxHasSession := tmuxHasSession
-	tmuxHasSession = func(string) (bool, error) { return true, nil }
+	tmuxHasSession = func(string, string) (bool, error) { return true, nil }
 	t.Cleanup(func() { tmuxHasSession = originalTmuxHasSession })
 
 	s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 60, LaunchSession: "work"}
@@ -1562,7 +1562,7 @@ func TestTickCIRepairGreenAfterPendingAtNewSHAStillResetsBudget(t *testing.T) {
 		{out: `[]`},
 	}, &calls)
 	originalTmuxHasSession := tmuxHasSession
-	tmuxHasSession = func(string) (bool, error) { return true, nil }
+	tmuxHasSession = func(string, string) (bool, error) { return true, nil }
 	t.Cleanup(func() { tmuxHasSession = originalTmuxHasSession })
 
 	s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 60, LaunchSession: "work"}
@@ -1620,7 +1620,7 @@ func TestTickCIRepairGreenAfterUnknownAtNewSHAStillResetsBudget(t *testing.T) {
 		{out: `[]`},
 	}, &calls)
 	originalTmuxHasSession := tmuxHasSession
-	tmuxHasSession = func(string) (bool, error) { return true, nil }
+	tmuxHasSession = func(string, string) (bool, error) { return true, nil }
 	t.Cleanup(func() { tmuxHasSession = originalTmuxHasSession })
 
 	s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 60, LaunchSession: "work"}
@@ -1690,7 +1690,7 @@ func TestTickCIRepairRetryCapReachedOnlyAfterDistinctFailingHeadSHAs(t *testing.
 	var calls [][]string
 	withScriptedCommands(t, script, &calls)
 	originalTmuxHasSession := tmuxHasSession
-	tmuxHasSession = func(string) (bool, error) { return true, nil }
+	tmuxHasSession = func(string, string) (bool, error) { return true, nil }
 	t.Cleanup(func() { tmuxHasSession = originalTmuxHasSession })
 
 	s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 60, LaunchSession: "work"}
@@ -3135,7 +3135,7 @@ func TestTickReopenLaunchFailureRetriesNextTickAndPreservesReopenState(t *testin
 	// there, as intended) rather than short-circuiting on the recorded-
 	// session gate before command() is ever called.
 	originalTmuxHasSession := tmuxHasSession
-	tmuxHasSession = func(string) (bool, error) { return true, nil }
+	tmuxHasSession = func(string, string) (bool, error) { return true, nil }
 	t.Cleanup(func() {
 		command = originalCommand
 		execGh = originalExecGh
@@ -3698,7 +3698,7 @@ func TestTickConflictingDIRTYLaunchesMergeRepairOnce(t *testing.T) {
 func TestTickConflictSameSHAStillConflictingOpensNoSecondWindow(t *testing.T) {
 	var calls [][]string
 	withCommands(t, []string{conflictingOpenPR("abc"), `[{"bucket":"pass","name":"test","state":"SUCCESS"}]`, `[]`, `[]`}, &calls)
-	mergeRepairActive = func(string, string) (bool, error) { return true, nil }
+	mergeRepairActive = func(string, string, string) (bool, error) { return true, nil }
 	s := State{
 		PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 300, CurrentDelaySeconds: 900,
 		LastHeadSHA: "abc", LaunchSession: "work",
@@ -3747,7 +3747,7 @@ func TestTickConflictSameSHAStillConflictingOpensNoSecondWindow(t *testing.T) {
 func TestTickConflictNewHeadSHAReArmsWindow(t *testing.T) {
 	var calls [][]string
 	withCommands(t, []string{conflictingOpenPR("def"), `[{"bucket":"pass","name":"test","state":"SUCCESS"}]`, `[]`, `[]`}, &calls)
-	mergeRepairActive = func(string, string) (bool, error) { return false, nil }
+	mergeRepairActive = func(string, string, string) (bool, error) { return false, nil }
 	s := State{
 		PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 300, CurrentDelaySeconds: 900,
 		LastHeadSHA: "abc", LaunchSession: "work",
@@ -3893,7 +3893,7 @@ func TestTickConflictLaunchFailureRecordsWorkflowLaunchFailedAndRetries(t *testi
 		return []byte("boom"), errors.New("exit status 1")
 	}
 	originalTmuxHasSession := tmuxHasSession
-	tmuxHasSession = func(string) (bool, error) { return true, nil }
+	tmuxHasSession = func(string, string) (bool, error) { return true, nil }
 	t.Cleanup(func() {
 		command = originalCommand
 		execGh = originalExecGh
@@ -4362,7 +4362,7 @@ func TestTickCIRepairLiveWorkerSuppressesDispatch(t *testing.T) {
 	var calls [][]string
 	withCommands(t, ciRepairTickResponses("sha-new"), &calls)
 	var probed []string
-	ciRepairActive = func(session, pr string) (bool, error) {
+	ciRepairActive = func(socket, session, pr string) (bool, error) {
 		probed = append(probed, session+"/"+pr)
 		return true, nil
 	}
@@ -4390,7 +4390,7 @@ func TestTickCIRepairProbeErrorRefusesDispatch(t *testing.T) {
 	withFleetAutomergeEnabled(t, true)
 	var calls [][]string
 	withCommands(t, ciRepairTickResponses("sha-new"), &calls)
-	ciRepairActive = func(string, string) (bool, error) {
+	ciRepairActive = func(string, string, string) (bool, error) {
 		return false, errors.New("observe ci-repair in tmux session \"work\": malformed pane inventory")
 	}
 	s := ciRepairSeedState()
@@ -4415,7 +4415,7 @@ func TestTickCIRepairNoSessionSkipsProbe(t *testing.T) {
 	withFleetAutomergeEnabled(t, true)
 	var calls [][]string
 	withCommands(t, ciRepairTickResponses("sha-new"), &calls)
-	ciRepairActive = func(string, string) (bool, error) {
+	ciRepairActive = func(string, string, string) (bool, error) {
 		t.Error("ciRepairActive consulted without a recorded session")
 		return false, nil
 	}
@@ -4525,7 +4525,7 @@ func TestTickWindowSpawnedIsStillAFailureOutsideCIRepair(t *testing.T) {
 func TestTickCIRetryCapLaunchesAttentionUnchanged(t *testing.T) {
 	var calls [][]string
 	withCommands(t, ciRepairTickResponses("sha-new"), &calls)
-	ciRepairActive = func(string, string) (bool, error) { return true, nil }
+	ciRepairActive = func(string, string, string) (bool, error) { return true, nil }
 	s := ciRepairSeedState()
 	s.FixAttempts = fixCap
 

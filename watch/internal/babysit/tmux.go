@@ -8,6 +8,8 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/tmux"
 )
 
 // currentTmuxSession and tmuxHasSession are the two package-level tmux seams
@@ -34,20 +36,43 @@ const tmuxTimeout = 10 * time.Second
 // ghWaitDelay (watch/docs/go-gotchas.md #822).
 const tmuxWaitDelay = 5 * time.Second
 
-// execTmux runs `tmux <args...>` bounded by a fresh tmuxTimeout-scoped
-// context per call, with cmd.WaitDelay bounding a lingering grandchild,
-// separate bounded stdout/stderr buffers (boundedWriter, shared with gh.go),
-// and cmd.Stdin = nil.
-func execTmux(args ...string) (stdout, stderr string, err error) {
+// execTmux runs `tmux <args...>` on socket, bounded by a fresh
+// tmuxTimeout-scoped context per call, with separate bounded stdout/stderr
+// buffers (boundedWriter, shared with gh.go).
+//
+// An empty socket is today's bare call: the ambient server and env, with
+// cmd.WaitDelay bounding a lingering grandchild and cmd.Stdin = nil. A
+// non-empty socket (#1431) is hardened, because the supervisor inherits the
+// daemon's full env and the value can come from an arm request: it must pass the
+// shape check and the trusted-directory check -- a failure returns the error and
+// execs nothing, never falling back to the ambient server -- and then runs
+// through tmux.RunSocket (`tmux -S <socket>`, allowlisted env, 5s bound, a
+// timeout joined with context.DeadlineExceeded).
+func execTmux(socket string, args ...string) (stdout, stderr string, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), tmuxTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "tmux", args...)
-	cmd.WaitDelay = tmuxWaitDelay
-	cmd.Stdin = nil
 	var outBuf, errBuf boundedWriter
-	cmd.Stdout = &outBuf
-	cmd.Stderr = &errBuf
-	runErr := cmd.Run()
+	var runErr error
+	if socket == "" {
+		cmd := exec.CommandContext(ctx, "tmux", args...)
+		cmd.WaitDelay = tmuxWaitDelay
+		cmd.Stdin = nil
+		cmd.Stdout = &outBuf
+		cmd.Stderr = &errBuf
+		runErr = cmd.Run()
+	} else {
+		if !tmux.ValidSocket(socket) {
+			return "", "", fmt.Errorf("%w: %q", tmux.ErrMalformedSocket, socket)
+		}
+		dir, derr := tmux.TrustedSocketDir()
+		if derr != nil {
+			return "", "", derr
+		}
+		if cerr := tmux.CheckTrustedSocket(dir, socket); cerr != nil {
+			return "", "", cerr
+		}
+		runErr = tmux.RunSocket(ctx, socket, &outBuf, &errBuf, args...)
+	}
 	if outBuf.truncated || errBuf.truncated {
 		runErr = errors.Join(runErr, errors.New("tmux output exceeded bounded cap"))
 	}
@@ -58,11 +83,11 @@ func execTmux(args ...string) (stdout, stderr string, err error) {
 // or `<PR>-ci-repair` worker exists in the recorded session (#1455). Both are
 // test seams over the one defaultWorkerActive probe.
 var (
-	mergeRepairActive = func(session, pr string) (bool, error) {
-		return defaultWorkerActive(session, pr, "merge-repair")
+	mergeRepairActive = func(socket, session, pr string) (bool, error) {
+		return defaultWorkerActive(socket, session, pr, "merge-repair")
 	}
-	ciRepairActive = func(session, pr string) (bool, error) {
-		return defaultWorkerActive(session, pr, "ci-repair")
+	ciRepairActive = func(socket, session, pr string) (bool, error) {
+		return defaultWorkerActive(socket, session, pr, "ci-repair")
 	}
 )
 
@@ -70,8 +95,8 @@ var (
 // dead pane is not a worker; a live pane in the exact `<pr>-<workflow>` window
 // is. Unreadable or malformed output cannot safely authorize another writer, so
 // it is an error, a separate return from "no live worker".
-func defaultWorkerActive(session, pr, workflow string) (bool, error) {
-	stdout, stderr, err := execTmux("list-panes", "-s", "-t", "="+session, "-F", "#{window_name}\t#{pane_dead}")
+func defaultWorkerActive(socket, session, pr, workflow string) (bool, error) {
+	stdout, stderr, err := execTmux(socket, "list-panes", "-s", "-t", "="+session, "-F", "#{window_name}\t#{pane_dead}")
 	if err != nil {
 		return false, fmt.Errorf("observe %s in tmux session %q: %s: %w", workflow, session, strings.TrimSpace(stderr), err)
 	}
@@ -103,7 +128,7 @@ func defaultCurrentTmuxSession() (string, error) {
 	if pane == "" {
 		return "", fmt.Errorf("TMUX_PANE is not set; not running inside a tmux pane")
 	}
-	stdout, stderr, err := execTmux("display-message", "-t", pane, "-p", "#{session_name}")
+	stdout, stderr, err := execTmux("", "display-message", "-t", pane, "-p", "#{session_name}")
 	if err != nil {
 		return "", fmt.Errorf("tmux display-message: %s: %w", strings.TrimSpace(stderr), err)
 	}
@@ -128,10 +153,17 @@ var tmuxHasSession = defaultTmuxHasSession
 // binary isn't resolvable, or the bounded call timed out) is kept as a
 // distinct (false, non-nil error) classification -- collapsing that into the
 // negative-boolean case would violate watch/docs/error-handling.md's rule
-// against folding "probe errored" into "condition false" (#822).
-func defaultTmuxHasSession(session string) (bool, error) {
-	_, _, err := execTmux("has-session", "-t", "="+session)
+// against folding "probe errored" into "condition false" (#822). The probe runs
+// on socket (#1431; empty is the legacy bare call). A timeout on a socket call
+// is joined onto an *exec.ExitError, so the deadline is checked first: it is a
+// probe failure, never "absent". A refused socket (malformed or untrusted) is an
+// error too.
+func defaultTmuxHasSession(socket, session string) (bool, error) {
+	_, _, err := execTmux(socket, "has-session", "-t", "="+session)
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return false, err
+		}
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
 			return false, nil

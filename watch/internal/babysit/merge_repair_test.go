@@ -76,7 +76,7 @@ func TestConflictRepairBudgetSurvivesUnknownAndResetsOnlyWhenClear(t *testing.T)
 	for _, head := range []string{"a", "b", "c"} {
 		var calls [][]string
 		withCommands(t, []string{conflictingOpenPR(head), `[]`, `[]`, `[]`}, &calls)
-		mergeRepairActive = func(string, string) (bool, error) { return false, nil }
+		mergeRepairActive = func(string, string, string) (bool, error) { return false, nil }
 		if _, _, err := tick(&s); err != nil {
 			t.Fatal(err)
 		}
@@ -94,7 +94,7 @@ func TestConflictRepairBudgetSurvivesUnknownAndResetsOnlyWhenClear(t *testing.T)
 		t.Fatalf("unknown mergeability erased budget: %+v", s)
 	}
 	withCommands(t, []string{conflictingOpenPR("d"), `[]`, `[]`, `[]`}, &calls)
-	mergeRepairActive = func(string, string) (bool, error) { return false, nil }
+	mergeRepairActive = func(string, string, string) (bool, error) { return false, nil }
 	if _, _, err := tick(&s); err != nil {
 		t.Fatalf("cap must keep polling: %v", err)
 	}
@@ -103,7 +103,7 @@ func TestConflictRepairBudgetSurvivesUnknownAndResetsOnlyWhenClear(t *testing.T)
 	}
 	calls = nil
 	withCommands(t, []string{conflictingOpenPR("d"), `[]`, `[]`, `[]`}, &calls)
-	mergeRepairActive = func(string, string) (bool, error) { return false, nil }
+	mergeRepairActive = func(string, string, string) (bool, error) { return false, nil }
 	if _, _, err := tick(&s); err != nil {
 		t.Fatal(err)
 	}
@@ -202,7 +202,7 @@ func TestConflictRepairLifecycleRecoversEndedWorkersAtSameHead(t *testing.T) {
 		t.Run(step.name, func(t *testing.T) {
 			var calls [][]string
 			withCommands(t, []string{conflictingOpenPR(step.head), `[]`, `[]`, `[]`}, &calls)
-			mergeRepairActive = func(session, pr string) (bool, error) {
+			mergeRepairActive = func(socket, session, pr string) (bool, error) {
 				if session != "work" || pr != "42" {
 					t.Fatalf("liveness target = %q/%q", session, pr)
 				}
@@ -223,7 +223,7 @@ func TestConflictRepairProbeFailureDoesNotLaunchDuplicate(t *testing.T) {
 	withFleetAutomergeEnabled(t, true)
 	var calls [][]string
 	withCommands(t, []string{conflictingOpenPR("abc"), `[]`}, &calls)
-	mergeRepairActive = func(string, string) (bool, error) { return false, errors.New("tmux unavailable") }
+	mergeRepairActive = func(string, string, string) (bool, error) { return false, errors.New("tmux unavailable") }
 	s := State{PR: "42", Repo: "o/r", Agent: "codex", LaunchSession: "work", ConflictRepairSHA: "abc", ConflictFixAttempts: 1}
 	if _, _, err := tick(&s); err == nil || !strings.Contains(err.Error(), "tmux unavailable") {
 		t.Fatalf("probe failure not surfaced: %v", err)
@@ -236,7 +236,7 @@ func TestConflictRepairProbeFailureDoesNotLaunchDuplicate(t *testing.T) {
 func TestConflictRepairDefersToManuallyStartedWorker(t *testing.T) {
 	var calls [][]string
 	withCommands(t, []string{conflictingOpenPR("abc"), `[]`, `[]`, `[]`}, &calls)
-	mergeRepairActive = func(string, string) (bool, error) { return true, nil }
+	mergeRepairActive = func(string, string, string) (bool, error) { return true, nil }
 	s := State{PR: "42", Repo: "o/r", Agent: "codex", LaunchSession: "work", IntervalSeconds: 300}
 	if _, delay, err := tick(&s); err != nil || delay != 300*time.Second {
 		t.Fatalf("manual worker tick delay=%v err=%v", delay, err)

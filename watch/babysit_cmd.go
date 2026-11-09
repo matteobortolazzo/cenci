@@ -13,11 +13,12 @@ import (
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/babysit"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/run"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/sandbox"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/tmux"
 )
 
 // babysitUsage is the one-line usage hint for `cenci babysit <pr> --agent
 // ...`, printed to stderr on a malformed-CLI invocation (exit 2).
-const babysitUsage = "cenci babysit: usage: cenci babysit <pr> --agent <claude|codex> [--interval 15m] [--once] [--session <name>] [--dir <path>]"
+const babysitUsage = "cenci babysit: usage: cenci babysit <pr> --agent <claude|codex> [--interval 15m] [--once] [--session <name>] [--dir <path>] [--tmux-socket <path>]"
 
 // parseBabysitArgs parses and validates the arguments for the main (non-
 // "stop") `cenci babysit <pr> --agent <agent> ...` invocation. It performs no
@@ -35,6 +36,7 @@ func parseBabysitArgs(args []string) (babysit.Options, bool) {
 	stateDir := fs.String("state-dir", "", "state directory (default: $XDG_STATE_HOME/cenci/babysit)")
 	session := fs.String("session", "", "tmux session every launch() call targets (default: resolved from the current tmux pane at arm time)")
 	dir := fs.String("dir", "", "working directory every launch() call's window starts in (default: resolved from the local repo root at arm time)")
+	tmuxSocket := fs.String("tmux-socket", "", "tmux server socket the --session lives on (absolute path; default: the arming pane's server)")
 	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
 		return babysit.Options{}, false
 	}
@@ -45,7 +47,12 @@ func parseBabysitArgs(args []string) (babysit.Options, bool) {
 	if len(fs.Args()) != 0 || (*agent != "claude" && *agent != "codex" && *agent != "opencode") {
 		return babysit.Options{}, false
 	}
-	return babysit.Options{PR: pr, Agent: *agent, Interval: *interval, Once: *once, StateDir: *stateDir, Session: *session, Dir: *dir}, true
+	// A shape-invalid socket is a usage error, never a silent fallback to the
+	// ambient server (#1431).
+	if *tmuxSocket != "" && !tmux.ValidSocket(*tmuxSocket) {
+		return babysit.Options{}, false
+	}
+	return babysit.Options{PR: pr, Agent: *agent, Interval: *interval, Once: *once, StateDir: *stateDir, Session: *session, Dir: *dir, TmuxSocket: *tmuxSocket}, true
 }
 
 // babysitAgentRefusal returns the reason `cenci babysit` must refuse to arm

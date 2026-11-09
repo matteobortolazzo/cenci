@@ -146,7 +146,7 @@ func Reset(pr, explicit string, refusal func(agent string) string) error {
 		interval = defaultResetInterval
 	}
 	fmt.Printf("Reset the retry budget for PR #%s.\n", cleanPR)
-	if err := Run(Options{PR: cleanPR, Agent: s.Agent, Interval: interval, StateDir: dir, Session: s.LaunchSession, Dir: s.LaunchDir}); err != nil {
+	if err := Run(Options{PR: cleanPR, Agent: s.Agent, Interval: interval, StateDir: dir, Session: s.LaunchSession, TmuxSocket: s.LaunchSocket, Dir: s.LaunchDir}); err != nil {
 		return fmt.Errorf("budget reset for PR #%s but not re-armed: %w; re-arm with cenci babysit %s --agent %s", cleanPR, err, cleanPR, s.Agent)
 	}
 	return nil

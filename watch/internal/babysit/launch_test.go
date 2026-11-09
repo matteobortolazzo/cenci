@@ -24,6 +24,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/tmux"
 )
 
 // expectedLogPath mirrors statePath's own hashing formula
@@ -261,7 +263,7 @@ func TestLaunchFailsWhenRecordedSessionGone(t *testing.T) {
 	var calls [][]string
 	withCommands(t, []string{openPR(), `[{"bucket":"fail","name":"test","state":"FAILURE"}]`}, &calls)
 	originalTmuxHasSession := tmuxHasSession
-	tmuxHasSession = func(session string) (bool, error) { return false, nil }
+	tmuxHasSession = func(socket, session string) (bool, error) { return false, nil }
 	t.Cleanup(func() { tmuxHasSession = originalTmuxHasSession })
 
 	s := State{
@@ -300,7 +302,7 @@ func TestLaunchFailsForConflictWhenRecordedSessionGone(t *testing.T) {
 	var calls [][]string
 	withCommands(t, []string{conflictingOpenPR("abc"), `[{"bucket":"pass","name":"test","state":"SUCCESS"}]`}, &calls)
 	originalTmuxHasSession := tmuxHasSession
-	tmuxHasSession = func(session string) (bool, error) { return false, nil }
+	tmuxHasSession = func(socket, session string) (bool, error) { return false, nil }
 	t.Cleanup(func() { tmuxHasSession = originalTmuxHasSession })
 
 	s := State{
@@ -337,7 +339,7 @@ func TestLaunchFailsWhenNoSessionRecorded(t *testing.T) {
 	withCommands(t, []string{openPR(), `[{"bucket":"fail","name":"test","state":"FAILURE"}]`}, &calls)
 	probeCalled := false
 	originalTmuxHasSession := tmuxHasSession
-	tmuxHasSession = func(session string) (bool, error) { probeCalled = true; return true, nil }
+	tmuxHasSession = func(socket, session string) (bool, error) { probeCalled = true; return true, nil }
 	t.Cleanup(func() { tmuxHasSession = originalTmuxHasSession })
 
 	s := State{
@@ -600,6 +602,10 @@ func TestArmInsideTmuxSupervisionOtherwiseUnchanged(t *testing.T) {
 	// #1094 isolation fix (watch/docs/test-isolation.md #202): see the
 	// identical comment in TestArmDetachWiresSupervisorLogAndLaunchFlags.
 	t.Setenv("CENCI_SANDBOX", "")
+	// #1431: a session resolved from the arming pane records that pane's server
+	// from $TMUX; this test pins the argv of an arm with no known server, so
+	// the ambient value must not leak in.
+	t.Setenv("TMUX", "")
 
 	var captured *exec.Cmd
 	originalStartSupervisor := startSupervisor
@@ -901,5 +907,341 @@ func TestLaunchExitThreeWrapsErrWindowSpawned(t *testing.T) {
 				t.Errorf("err = %q, want cenci run's output kept", err)
 			}
 		})
+	}
+}
+
+// -- #1431: babysit records and honors the tmux socket of its launch target -----
+
+// armedStateAtFirstTick runs a foreground arm with o, the arming-pane lookup
+// answering paneSession ("" fails it), and returns the state the first tick saw:
+// the launch target as persisted before any poll.
+func armedStateAtFirstTick(t *testing.T, o Options, paneSession string) State {
+	t.Helper()
+	t.Setenv("CENCI_SANDBOX", "")
+	t.Setenv("CENCI_BABYSIT_SUPERVISOR", "")
+	dir := t.TempDir()
+	o.PR, o.Agent, o.StateDir, o.Interval, o.Once = "42", "claude", dir, time.Minute, true
+	var atFirstTick *State
+	originalCommand, originalExecGh, originalCurrent := command, execGh, currentTmuxSession
+	command = func(name string, args ...string) ([]byte, error) {
+		if name == "git" {
+			return []byte("/repo/root\n"), nil
+		}
+		return []byte(""), nil
+	}
+	execGh = func(args ...string) (string, string, error) {
+		switch {
+		case len(args) > 0 && args[0] == "repo":
+			return "o/r\n", "", nil
+		case len(args) > 1 && args[0] == "pr" && args[1] == "view":
+			s := load(statePath(dir, "o/r", "42"))
+			atFirstTick = &s
+			return "", "", errors.New("exit status 1")
+		}
+		return "", "", nil
+	}
+	currentTmuxSession = func() (string, error) {
+		if paneSession == "" {
+			return "", errors.New("TMUX_PANE is not set; not running inside a tmux pane")
+		}
+		return paneSession, nil
+	}
+	t.Cleanup(func() { command, execGh, currentTmuxSession = originalCommand, originalExecGh, originalCurrent })
+
+	if err := Run(o); err == nil {
+		t.Fatal("Run: want the stubbed gh failure to surface")
+	}
+	if atFirstTick == nil {
+		t.Fatal("the first tick never ran")
+	}
+	return *atFirstTick
+}
+
+// Arm time records launchSocket beside launchSession: the --tmux-socket flag
+// first; else, for a session resolved from the arming pane, the first field of
+// $TMUX (the server that lookup actually queried); an explicit --session without
+// the flag stays legacy (no socket, bare tmux).
+func TestArmRecordsLaunchSocketBesideLaunchSession(t *testing.T) {
+	for _, tc := range []struct {
+		name, tmuxEnv, pane string
+		opts                Options
+		wantSession         string
+		wantSocket          string
+	}{
+		{"flag with an explicit session", "/s/ambient,4242,0", "", Options{Session: "work", TmuxSocket: "/s/flag"}, "work", "/s/flag"},
+		{"flag over a pane-resolved session", "/s/ambient,4242,0", "host-pane", Options{TmuxSocket: "/s/flag"}, "host-pane", "/s/flag"},
+		{"ambient $TMUX for a pane-resolved session", "/s/ambient,4242,0", "host-pane", Options{}, "host-pane", "/s/ambient"},
+		{"explicit session without a flag is legacy bare", "/s/ambient,4242,0", "", Options{Session: "work"}, "work", ""},
+		{"no $TMUX records no socket", "", "host-pane", Options{}, "host-pane", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("TMUX", tc.tmuxEnv)
+
+			s := armedStateAtFirstTick(t, tc.opts, tc.pane)
+
+			if s.LaunchSession != tc.wantSession || s.LaunchSocket != tc.wantSocket {
+				t.Errorf("recorded (session, socket) = (%q, %q), want (%q, %q)", s.LaunchSession, s.LaunchSocket, tc.wantSession, tc.wantSocket)
+			}
+		})
+	}
+}
+
+// detachedSupervisorArgv arms with o (the detaching parent) and returns the argv
+// of the supervisor child it hands to startSupervisor.
+func detachedSupervisorArgv(t *testing.T, o Options, paneSession string) []string {
+	t.Helper()
+	installHarmlessSelfExecShim(t)
+	t.Setenv("CENCI_BABYSIT_SUPERVISOR", "")
+	t.Setenv("CENCI_SANDBOX", "")
+	o.PR, o.Agent, o.StateDir, o.Interval = "42", "claude", t.TempDir(), time.Minute
+	var captured *exec.Cmd
+	originalStart, originalCommand, originalExecGh, originalCurrent := startSupervisor, command, execGh, currentTmuxSession
+	startSupervisor = func(cmd *exec.Cmd) error { captured = cmd; return nil }
+	command = func(name string, args ...string) ([]byte, error) {
+		if name == "git" {
+			return []byte("/repo/root\n"), nil
+		}
+		return []byte(""), nil
+	}
+	execGh = func(args ...string) (string, string, error) {
+		if len(args) > 0 && args[0] == "repo" {
+			return "o/r\n", "", nil
+		}
+		return "", "", nil
+	}
+	currentTmuxSession = func() (string, error) { return paneSession, nil }
+	t.Cleanup(func() {
+		startSupervisor, command, execGh, currentTmuxSession = originalStart, originalCommand, originalExecGh, originalCurrent
+	})
+
+	if err := Run(o); err != nil {
+		t.Fatalf("Run (arm): %v", err)
+	}
+	if captured == nil {
+		t.Fatal("startSupervisor was never invoked")
+	}
+	return captured.Args
+}
+
+// The detaching parent threads the socket onto the supervisor child's argv, so
+// the child records the same launch target; with no known server the argv has no
+// --tmux-socket at all.
+func TestArmDetachForwardsTheTmuxSocketToTheSupervisor(t *testing.T) {
+	for _, tc := range []struct {
+		name, tmuxEnv, pane string
+		opts                Options
+		wantSocket          string // "" means the argv must not carry the flag
+	}{
+		{"flag", "/s/ambient,4242,0", "", Options{Session: "work", TmuxSocket: "/s/flag"}, "/s/flag"},
+		{"ambient $TMUX for a pane-resolved session", "/s/ambient,4242,0", "host-pane", Options{}, "/s/ambient"},
+		{"explicit session without a flag", "/s/ambient,4242,0", "", Options{Session: "work"}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("TMUX", tc.tmuxEnv)
+
+			argv := detachedSupervisorArgv(t, tc.opts, tc.pane)
+
+			if tc.wantSocket != "" {
+				assertFlagValue(t, argv, "--tmux-socket", tc.wantSocket)
+			} else if slices.Contains(argv, "--tmux-socket") {
+				t.Errorf("supervisor argv %q carries --tmux-socket, want none for a legacy arm", argv)
+			}
+		})
+	}
+}
+
+// The deferred launch probes has-session on the socket recorded at arm time and
+// hands the same socket to `cenci run --tmux-socket`, after --session. A state
+// file without launchSocket (legacy) probes bare and passes no flag.
+func TestLaunchUsesTheRecordedSocket(t *testing.T) {
+	for _, workflow := range []string{"ci-repair", "merge-repair"} {
+		for _, tc := range []struct {
+			name, socket string
+		}{
+			{"recorded socket", "/s/a"},
+			{"legacy state without a socket", ""},
+		} {
+			t.Run(workflow+"/"+tc.name, func(t *testing.T) {
+				var calls [][]string
+				withCommands(t, nil, &calls)
+				var probes []string
+				tmuxHasSession = func(socket, session string) (bool, error) {
+					probes = append(probes, socket+"|"+session)
+					return true, nil
+				}
+				s := State{PR: "42", Repo: "o/r", Agent: "codex", LaunchSession: "work", LaunchSocket: tc.socket, LaunchDir: "/repo/root"}
+
+				if err := launch(&s, workflow, "42 x"); err != nil {
+					t.Fatalf("launch: %v", err)
+				}
+
+				if want := []string{tc.socket + "|work"}; !slices.Equal(probes, want) {
+					t.Errorf("has-session probes = %q, want %q", probes, want)
+				}
+				argv, found := launchCallArgs(calls, workflow)
+				if !found {
+					t.Fatalf("no %s launch recorded: %#v", workflow, calls)
+				}
+				assertFlagValue(t, argv, "--session", "work")
+				assertPinnedUnattendedOnce(t, argv)
+				at := slices.Index(argv, "--tmux-socket")
+				switch {
+				case tc.socket == "" && at >= 0:
+					t.Errorf("legacy argv %q carries --tmux-socket, want none", argv)
+				case tc.socket != "":
+					assertFlagValue(t, argv, "--tmux-socket", tc.socket)
+					if at < slices.Index(argv, "--session") {
+						t.Errorf("argv %q: --tmux-socket must follow --session", argv)
+					}
+				}
+			})
+		}
+	}
+}
+
+// The worker-liveness probes (a live <PR>-ci-repair / <PR>-merge-repair window)
+// read the recorded session on the recorded socket, so a worker on the arming
+// pane's own server is seen and a same-named session elsewhere is not.
+func TestTickWorkerProbesReadTheRecordedSocket(t *testing.T) {
+	t.Run("ci-repair", func(t *testing.T) {
+		var calls [][]string
+		withCommands(t, ciRepairTickResponses("sha-new"), &calls)
+		var probed []string
+		ciRepairActive = func(socket, session, pr string) (bool, error) {
+			probed = append(probed, socket+"|"+session+"|"+pr)
+			return false, nil
+		}
+		s := ciRepairSeedState()
+		s.LaunchSocket = "/s/a"
+
+		if _, _, err := tick(&s); err != nil {
+			t.Fatalf("tick: %v", err)
+		}
+		if want := []string{"/s/a|work|42"}; !slices.Equal(probed, want) {
+			t.Errorf("ci-repair liveness probes = %q, want %q", probed, want)
+		}
+	})
+	t.Run("merge-repair", func(t *testing.T) {
+		var calls [][]string
+		withCommands(t, []string{conflictingOpenPR("abc"), `[{"bucket":"pass","name":"test","state":"SUCCESS"}]`, `[]`, `[]`}, &calls)
+		var probed []string
+		mergeRepairActive = func(socket, session, pr string) (bool, error) {
+			probed = append(probed, socket+"|"+session+"|"+pr)
+			return false, nil
+		}
+		s := State{
+			PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 300, CurrentDelaySeconds: 900,
+			LastHeadSHA: "abc", LaunchSession: "work", LaunchSocket: "/s/a", LaunchDir: "/repo/root",
+		}
+
+		if _, _, err := tick(&s); err != nil {
+			t.Fatalf("tick: %v", err)
+		}
+		if want := []string{"/s/a|work|42"}; !slices.Equal(probed, want) {
+			t.Errorf("merge-repair liveness probes = %q, want %q", probed, want)
+		}
+	})
+}
+
+// A recorded launchSocket that the launch-time re-check rejects (a malformed
+// shape, or a path outside the private tmux directory -- the state file and the
+// arm request are both attacker-reachable) fails the launch with that error: it
+// is never read as "session absent", never falls back to the ambient server, never
+// reaches `cenci run`, and spends no repair attempt. The real defaultTmuxHasSession
+// runs over a recording fake tmux, so "no tmux call at all" is observed, not assumed.
+func TestLaunchRefusesARejectedRecordedSocketAndSpendsNoAttempt(t *testing.T) {
+	for _, sc := range []struct {
+		name   string
+		socket func(t *testing.T) string
+		want   error
+	}{
+		{"relative path", func(t *testing.T) string { return "tmux-1000/sock" }, tmux.ErrMalformedSocket},
+		{"contains a tab", func(t *testing.T) string { return filepath.Join(filepath.Dir(trustedTmuxSocket(t)), "a\tb") }, tmux.ErrMalformedSocket},
+		{"outside the trusted directory", func(t *testing.T) string {
+			trustedTmuxSocket(t)
+			return filepath.Join(t.TempDir(), "sock")
+		}, tmux.ErrUntrustedSocket},
+	} {
+		t.Run("ci-repair/"+sc.name, func(t *testing.T) {
+			withFleetAutomergeEnabled(t, true)
+			var calls [][]string
+			withCommands(t, []string{openPR(), `[{"bucket":"fail","name":"test","state":"FAILURE"}]`, `[]`, `[]`}, &calls)
+			tmuxHasSession = defaultTmuxHasSession
+			tmuxLog := installRecordingTmux(t, "exit 0\n")
+			s := State{
+				PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 300, CurrentDelaySeconds: 900,
+				LaunchSession: "work", LaunchSocket: sc.socket(t), LaunchDir: "/repo/root",
+				FixAttempts: 1, RepairPending: true, LastRepairedSHA: "old-sha",
+			}
+			before := repairFieldsOf(s)
+
+			_, _, err := tick(&s)
+
+			if !errors.Is(err, sc.want) {
+				t.Fatalf("tick err = %v, want errors.Is %v", err, sc.want)
+			}
+			if strings.Contains(err.Error(), "no longer exists") {
+				t.Errorf("tick err = %q: a rejected socket must not read as an absent session", err)
+			}
+			if _, found := launchCallArgs(calls, "ci-repair"); found {
+				t.Errorf("cenci run was called for a rejected socket: %#v", calls)
+			}
+			if got := recordedTmuxCalls(t, tmuxLog); len(got) != 0 {
+				t.Errorf("tmux was exec'd %d times (bare fallback?), want 0", len(got))
+			}
+			if after := repairFieldsOf(s); !reflect.DeepEqual(after, before) {
+				t.Errorf("a rejected-socket launch changed repair state:\n got %+v\nwant %+v", after, before)
+			}
+			if s.AutomergeReason != reasonWorkflowLaunchFailed {
+				t.Errorf("AutomergeReason = %q, want %q", s.AutomergeReason, reasonWorkflowLaunchFailed)
+			}
+		})
+		t.Run("merge-repair/"+sc.name, func(t *testing.T) {
+			withFleetAutomergeEnabled(t, true)
+			var calls [][]string
+			withCommands(t, []string{conflictingOpenPR("abc"), `[{"bucket":"pass","name":"test","state":"SUCCESS"}]`}, &calls)
+			tmuxHasSession = defaultTmuxHasSession
+			tmuxLog := installRecordingTmux(t, "exit 0\n")
+			s := State{
+				PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 300, CurrentDelaySeconds: 900,
+				LastHeadSHA: "abc", LaunchSession: "work", LaunchSocket: sc.socket(t), LaunchDir: "/repo/root",
+			}
+
+			_, _, err := tick(&s)
+
+			if !errors.Is(err, sc.want) {
+				t.Fatalf("tick err = %v, want errors.Is %v", err, sc.want)
+			}
+			if _, found := launchCallArgs(calls, "merge-repair"); found {
+				t.Errorf("cenci run was called for a rejected socket: %#v", calls)
+			}
+			if got := recordedTmuxCalls(t, tmuxLog); len(got) != 0 {
+				t.Errorf("tmux was exec'd %d times (bare fallback?), want 0", len(got))
+			}
+			if s.ConflictRepairSHA != "" || s.ConflictFixAttempts != 0 {
+				t.Errorf("a rejected-socket launch consumed repair state: %+v", s)
+			}
+		})
+	}
+}
+
+// launchSocket is additive state: it is stored under its own key and omitted
+// when empty, so a state file written before this change is byte-compatible. A
+// missed omitempty is invisible to the arm tests above, which read it back
+// through load(), hence this direct check.
+func TestStateLaunchSocketJSONKey(t *testing.T) {
+	with, err := json.Marshal(State{PR: "42", LaunchSession: "work", LaunchSocket: "/s/a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(with), `"launchSocket":"/s/a"`) {
+		t.Errorf("state JSON %s, want launchSocket recorded", with)
+	}
+	without, err := json.Marshal(State{PR: "42", LaunchSession: "work"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(without), "launchSocket") {
+		t.Errorf("state JSON %s, want no launchSocket key when empty", without)
 	}
 }

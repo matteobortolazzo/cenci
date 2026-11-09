@@ -47,6 +47,10 @@ type sessionProbeController struct {
 	probeErrs map[string]error // session name -> HasSession error (takes precedence over live)
 
 	hasSessionCalls []string
+	// hasSessionSockets and windowSockets record the tmux socket of every
+	// HasSession probe and every NewWindow call, in order (#1431).
+	hasSessionSockets []string
+	windowSockets     []string
 }
 
 func (c *sessionProbeController) CurrentSession(socket string) (string, error) {
@@ -60,6 +64,7 @@ func (c *sessionProbeController) IsGroupedSession(socket, session string) (bool,
 }
 
 func (c *sessionProbeController) NewWindow(socket, session, name, shellCommand string) error {
+	c.windowSockets = append(c.windowSockets, socket)
 	return nil
 }
 
@@ -69,6 +74,7 @@ func (c *sessionProbeController) SetWindowOption(socket, target, key, value stri
 
 func (c *sessionProbeController) HasSession(socket, session string) (bool, error) {
 	c.hasSessionCalls = append(c.hasSessionCalls, session)
+	c.hasSessionSockets = append(c.hasSessionSockets, socket)
 	if err, ok := c.probeErrs[session]; ok {
 		return false, err
 	}
@@ -685,8 +691,8 @@ func TestSessionGate_ErrorAndFalseInSamePass(t *testing.T) {
 
 // TestSessionGate_ProbeAndSpawnUseTrimmedConfiguredSession: both the
 // eligibility probe and the spawn use the trimmed repos[].session, on the
-// default socket; ctrl.CurrentSession is never called (sessionProbeController
-// fails the test if it is).
+// resolved launch socket; ctrl.CurrentSession is never called
+// (sessionProbeController fails the test if it is).
 func TestSessionGate_ProbeAndSpawnUseTrimmedConfiguredSession(t *testing.T) {
 	spawns := captureSpawns(t)
 	cfg := testConfig()
@@ -700,6 +706,116 @@ func TestSessionGate_ProbeAndSpawnUseTrimmedConfiguredSession(t *testing.T) {
 	}
 	if got, want := spawnIdentities(*spawns), []string{"42@work"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("spawns = %v, want %v", got, want)
+	}
+}
+
+// -- #1431: the gate probes the socket the spawn will use ---------------------
+
+// spawnThroughRealRun records each spawn's dispatch-built run.Opts, then runs
+// the real launcher over the pass's controller (host launch, no daemon start,
+// no user config), so the socket NewWindow receives is the one run.Run itself
+// resolved from those Opts.
+func spawnThroughRealRun(t *testing.T) *[]run.Opts {
+	t.Helper()
+	var got []run.Opts
+	stubRunFn(t, func(o run.Opts, ctrl run.Controller) error {
+		got = append(got, o)
+		o.ConfigPath = filepath.Join(t.TempDir(), "none.json")
+		o.EnsureDaemon = func() {}
+		o.SandboxSet, o.Sandbox = true, false
+		return run.Run(o, ctrl)
+	})
+	return &got
+}
+
+// The gate's HasSession probe, run.Opts.TmuxSocket and the NewWindow the real
+// launcher then issues all carry one socket, for a pass started inside a tmux
+// pane ($TMUX) and for a headless pass (the cenci socket under the trusted
+// directory). A divergence would probe one server and spawn on another.
+func TestSessionGate_ProbeAndSpawnShareOneSocket(t *testing.T) {
+	headlessDir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, tmuxEnv, want string
+	}{
+		{"inside a tmux pane", "/s/a,4242,0", "/s/a"},
+		{"headless", "", filepath.Join(headlessDir, fmt.Sprintf("tmux-%d", os.Getuid()), "cenci")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("TMUX", tc.tmuxEnv)
+			t.Setenv("TMUX_TMPDIR", headlessDir)
+			spawns := spawnThroughRealRun(t)
+			cfg := testConfig()
+			cfg.Repos = []RepoConfig{{Repo: "o/r", Dir: t.TempDir(), Session: "work"}}
+			ctrl := &sessionProbeController{t: t, live: map[string]bool{"work": true}}
+
+			if _, err := applyDispatch(cfg, dispatchableDeps(time.Now()), ctrl, &fakeMutator{}, false, io.Discard, nil); err != nil {
+				t.Fatalf("applyDispatch: %v", err)
+			}
+
+			if len(*spawns) != 1 {
+				t.Fatalf("spawns = %d, want 1", len(*spawns))
+			}
+			if got := (*spawns)[0].TmuxSocket; got != tc.want {
+				t.Errorf("run.Opts.TmuxSocket = %q, want %q", got, tc.want)
+			}
+			if want := []string{tc.want}; !reflect.DeepEqual(ctrl.hasSessionSockets, want) {
+				t.Errorf("HasSession sockets = %q, want %q", ctrl.hasSessionSockets, want)
+			}
+			if want := []string{tc.want}; !reflect.DeepEqual(ctrl.windowSockets, want) {
+				t.Errorf("NewWindow sockets = %q, want %q", ctrl.windowSockets, want)
+			}
+		})
+	}
+}
+
+// $TMUX with an empty socket field cannot name a server. Every probed repo is
+// "could not check" (never "absent", never a probe on the ambient server), no
+// session is probed, nothing spawns, and the cause is logged once.
+func TestSessionGate_UnresolvableSocketIsProbeFailed(t *testing.T) {
+	t.Setenv("TMUX", ",4242,0")
+	failOnSpawn(t)
+	cfg := testConfig()
+	cfg.Repos = []RepoConfig{{Repo: "o/r", Dir: t.TempDir(), Session: "work"}}
+	ctrl := &sessionProbeController{t: t, live: map[string]bool{"work": true}}
+	var buf bytes.Buffer
+
+	decisions, err := applyDispatch(cfg, dispatchableDeps(time.Now()), ctrl, &fakeMutator{}, false, &buf, nil)
+
+	assertDecisions(t, decisions, []wantDecision{{42, ActionSkip, "session probe failed", ""}})
+	if !errors.Is(err, ErrSessionProbeFailed) || errors.Is(err, ErrSessionMissing) {
+		t.Errorf("err = %v, want ErrSessionProbeFailed and not ErrSessionMissing", err)
+	}
+	if len(ctrl.hasSessionCalls) != 0 {
+		t.Errorf("HasSession calls = %v, want none: an unresolvable socket is never probed or guessed", ctrl.hasSessionCalls)
+	}
+	if n := strings.Count(buf.String(), "tmux socket is malformed"); n != 1 {
+		t.Errorf("log mentions the unresolvable socket %d times, want once:\n%s", n, buf.String())
+	}
+}
+
+// A dry run probes nothing, so it resolves no socket either: a broken $TMUX must
+// not turn a dry run into a failure.
+func TestSessionGate_DryRunResolvesNoSocket(t *testing.T) {
+	t.Setenv("TMUX", ",4242,0")
+	restore := resolveLaunchSocket
+	resolveLaunchSocket = func() (string, error) {
+		t.Error("a dry run must not resolve a tmux socket")
+		return "", errors.New("unexpected resolve")
+	}
+	t.Cleanup(func() { resolveLaunchSocket = restore })
+	failOnSpawn(t)
+	cfg := testConfig()
+	cfg.Repos = []RepoConfig{{Repo: "o/r", Dir: t.TempDir(), Session: "work"}}
+	ctrl := &sessionProbeController{t: t, live: map[string]bool{"work": true}}
+
+	if _, err := applyDispatch(cfg, dispatchableDeps(time.Now()), ctrl, &fakeMutator{}, true, io.Discard, nil); err != nil {
+		t.Fatalf("dry-run applyDispatch: %v", err)
+	}
+	if len(ctrl.hasSessionCalls) != 0 {
+		t.Errorf("HasSession calls = %v, want none on a dry run", ctrl.hasSessionCalls)
 	}
 }
 
