@@ -240,6 +240,9 @@ func tmuxScript(callLog string, spec Spec) string {
 	b.WriteString("line=tmux\n")
 	b.WriteString("for a in \"$@\"; do\n  if [ \"$a\" = " + q(PaneFormat) + " ]; then a=" + q(PaneFormatToken) + "; fi\n  if [ \"$a\" = " + q(OwnedFormat) + " ]; then a=" + q(OwnedFormatToken) + "; fi\n  line=\"$line $a\"\ndone\n")
 	b.WriteString("printf '%s\\n' \"$line\" >> " + q(callLog) + "\n")
+	// A recorded socket leads the argv as `-S <sock>` (#1430); the log above keeps
+	// it, and the shift below lets the subcommand dispatch on $1/$5 as before.
+	b.WriteString("if [ \"$1\" = -S ]; then shift 2; fi\n")
 
 	var out, owned string
 	if spec.ListOutput != nil {
@@ -388,9 +391,25 @@ func runtimeScript(callLog, state string, spec Spec) string {
 // ListCalls is the call-log prefix of every window kill: the listing of tmux's
 // own fields, then the listing of the user-writable options, both for target.
 func ListCalls(target string) []string {
+	return ListCallsOn("", target)
+}
+
+// TmuxPrefix is the logged start of a tmux call on socket: bare `tmux` for the
+// ambient server (empty socket), `tmux -S <socket>` otherwise.
+func TmuxPrefix(socket string) string {
+	if socket == "" {
+		return "tmux"
+	}
+	return "tmux -S " + socket
+}
+
+// ListCallsOn is ListCalls for a window on the tmux server at socket: both
+// listings lead with `-S <socket>` (none when socket is empty).
+func ListCallsOn(socket, target string) []string {
+	p := TmuxPrefix(socket)
 	return []string{
-		"tmux list-panes -t " + target + " -F " + OwnedFormatToken,
-		"tmux list-panes -t " + target + " -F " + PaneFormatToken,
+		p + " list-panes -t " + target + " -F " + OwnedFormatToken,
+		p + " list-panes -t " + target + " -F " + PaneFormatToken,
 	}
 }
 
@@ -400,7 +419,14 @@ func ListCalls(target string) []string {
 // per pid a liveness probe and a KILL, the bounded re-list, and finally
 // kill-window. rt is the runtime binary name and target the exact tmux target.
 func SandboxCloseCalls(rt, container, launchID, target string, pids ...string) []string {
-	calls := ListCalls(target)
+	return SandboxCloseCallsOn(rt, container, launchID, "", target, pids...)
+}
+
+// SandboxCloseCallsOn is SandboxCloseCalls for a window on the tmux server at
+// socket: the two listings and the final kill-window lead with `-S <socket>`
+// (none when socket is empty); the runtime calls are unchanged.
+func SandboxCloseCallsOn(rt, container, launchID, socket, target string, pids ...string) []string {
+	calls := ListCallsOn(socket, target)
 	probe := rt + " exec -u dev " + container + " sh -c " + LaunchProbeToken + " _ " + launchID
 	calls = append(calls, probe)
 	for _, pid := range pids {
@@ -412,6 +438,6 @@ func SandboxCloseCalls(rt, container, launchID, target string, pids ...string) [
 			rt+" exec -u root "+container+" kill -KILL "+pid,
 		)
 	}
-	calls = append(calls, probe, fmt.Sprintf("tmux kill-window -t %s", target))
+	calls = append(calls, probe, fmt.Sprintf("%s kill-window -t %s", TmuxPrefix(socket), target))
 	return calls
 }

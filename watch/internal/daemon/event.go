@@ -131,8 +131,8 @@ func (d *Daemon) handleEvent(event ipc.HookEvent) {
 		if event.SessionEndReason == "clear" || event.SessionEndReason == "resume" {
 			// A pending-close means "close once the agent's work ends" — and on
 			// a handoff the work continues in this window under a successor
-			// session. Keep the registry entry (keyed by pane ID, which
-			// survives the handoff) so the kill fires on the successor's own
+			// session. Keep the registry entry (keyed by (socket, pane ID),
+			// both of which survive the handoff) so the kill fires on the successor's own
 			// SessionEnd instead of destroying the window mid-continuation. If
 			// the handoff fell back to teardown because the pane is already
 			// gone, the sweep's prunePendingCloseForWindow reclaims the entry.

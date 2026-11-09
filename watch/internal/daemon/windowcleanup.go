@@ -217,9 +217,6 @@ func (d *Daemon) applyWindowCleanup(res windowCleanupResult) {
 		if !c.matches(d.frontend.WindowInfo(c.sessionKey)) {
 			continue
 		}
-		if d.skipForeignSocketKill("window-cleanup", fmt.Sprintf("%s:%s (%s)", c.session, c.windowIndex, c.windowName), c.socket) {
-			continue
-		}
 		if sess.Status == detect.StatusRunning || sess.Status == detect.StatusNeedInput {
 			continue
 		}
@@ -232,13 +229,14 @@ func (d *Daemon) applyWindowCleanup(res windowCleanupResult) {
 			}
 		}
 		key := c.session + ":" + c.windowIndex
-		delete(d.pending, c.paneID)
+		delete(d.pending, pendingKey{socket: c.socket, pane: c.paneID})
 		log.Printf("window-cleanup: closing %s (%s): ticket #%d is finished", key, c.windowName, c.num)
 		// The kill runs off the loop after a grace wait, so it targets the pane id
 		// (resolved to its window by tmux at kill time), not session:index: with
 		// renumber-windows a close earlier in this pass shifts later indexes, and
-		// a freed index can be reused by a freshly dispatched window.
-		d.killWindowTarget(c.paneID, fmt.Sprintf("%s (pane %s)", key, c.paneID), "window-cleanup")
+		// a freed index can be reused by a freshly dispatched window. It runs on the
+		// window's recorded tmux socket, never a same-numbered pane elsewhere.
+		d.killWindowTarget(c.socket, c.paneID, fmt.Sprintf("%s (pane %s)", key, c.paneID), "window-cleanup")
 	}
 }
 

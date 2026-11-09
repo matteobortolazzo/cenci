@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"reflect"
 	"slices"
 	"strings"
@@ -20,14 +21,17 @@ import (
 
 type fakeKiller struct {
 	killed []string
-	err    error
+	// sockets holds the socket of each KillWindow call, in parallel with killed.
+	sockets []string
+	err     error
 }
 
-func (f *fakeKiller) KillWindow(_, target string) error {
+func (f *fakeKiller) KillWindow(socket, target string) error {
 	if f.err != nil {
 		return f.err
 	}
 	f.killed = append(f.killed, target)
+	f.sockets = append(f.sockets, socket)
 	return nil
 }
 
@@ -558,14 +562,22 @@ func stubbornProcs() []windowproctest.Proc {
 	}
 }
 
-func realProcessKiller() func(string) error {
+func realProcessKiller() func(socket, target string) error {
 	k := windowproc.New(io.Discard)
-	return func(target string) error { return k.KillWindowProcesses(context.Background(), target) }
+	return func(socket, target string) error {
+		return k.KillWindowProcesses(context.Background(), socket, target)
+	}
 }
 
 func closeSnapshot(status string) *watch.StateSnapshot {
+	return closeSnapshotOn(status, "")
+}
+
+// closeSnapshotOn is closeSnapshot for a window recorded on the tmux server at
+// socket (empty: no recorded socket).
+func closeSnapshotOn(status, socket string) *watch.StateSnapshot {
 	return &watch.StateSnapshot{Windows: []watch.WindowState{
-		{Session: "s1", WindowIndex: "1", PaneID: "%1", WindowName: ccWindow, Status: status},
+		{Session: "s1", WindowIndex: "1", PaneID: "%1", WindowName: ccWindow, Status: status, Socket: socket},
 	}}
 }
 
@@ -708,7 +720,7 @@ func TestRun_KillProcessesErrorDoesNotSkipKillWindow(t *testing.T) {
 		Target:       "42",
 		ReadSnapshot: fakeReadSnapshot(closeSnapshot("done"), nil),
 		Killer:       &logKiller{log: &log},
-		KillProcesses: func(target string) error {
+		KillProcesses: func(_, target string) error {
 			log = append(log, "kill-processes "+target)
 			return errors.New("exec transport broke")
 		},
@@ -826,9 +838,9 @@ func TestRun_DryRunAndSkippedWindowsNeverTouchProcesses(t *testing.T) {
 				var killProcessCalls []string
 				real := realProcessKiller()
 				opts := realCloseOpts(snap)
-				opts.KillProcesses = func(target string) error {
+				opts.KillProcesses = func(socket, target string) error {
 					killProcessCalls = append(killProcessCalls, target)
-					return real(target)
+					return real(socket, target)
 				}
 				tt.mutate(&opts)
 
@@ -861,4 +873,115 @@ func TestRun_DryRunAndSkippedWindowsNeverTouchProcesses(t *testing.T) {
 			})
 		}
 	}
+}
+
+// -- recorded tmux socket (#1430) ---------------------------------------------
+
+// P28: a window recorded on tmux-<uid>/cenci is closed with `-S` to that
+// socket on both pane listings and on kill-window; a window recorded with no
+// socket is closed with no `-S` at all. The real ExecClient and the real
+// windowproc run over the fakes, and the whole ordered call log is asserted.
+func TestRun_CloseTargetsTheWindowsRecordedSocket(t *testing.T) {
+	recorded := fmt.Sprintf("/tmp/tmux-%d/cenci", os.Getuid())
+	tests := []struct {
+		name   string
+		socket string
+	}{
+		{"recorded socket gets -S on both listings and on kill-window", recorded},
+		{"no recorded socket gets no -S", ""},
+	}
+	f := windowproctest.Flavors[0]
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("CENCI_SANDBOX_REAP_GRACE_SECS", "0")
+			fakes := windowproctest.Install(t, f.SandboxSpec(ccLaunchID, windowproctest.HarmlessPanePID(t), stubbornProcs()...))
+
+			decisions, err := closecmd.Run(realCloseOpts(closeSnapshotOn("done", tt.socket)))
+
+			if err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			requireClosedOnce(t, decisions)
+			want := windowproctest.SandboxCloseCallsOn(f.Runtime, f.Container, ccLaunchID, tt.socket, ccTarget, "101", "102")
+			if got := fakes.Calls(t); !slices.Equal(got, want) {
+				t.Errorf("calls:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+			}
+			if tt.socket == "" {
+				for _, c := range fakes.Calls(t) {
+					if strings.Contains(c, " -S ") {
+						t.Errorf("call %q carries -S for a window with no recorded socket", c)
+					}
+				}
+			}
+		})
+	}
+}
+
+// A malformed recorded socket fails closed: the error is collected, no tmux
+// runs at all (so nothing reaches the ambient server, where a same-numbered
+// pane could live), and the window is not reported closed.
+func TestRun_MalformedRecordedSocketIsAnErrorWithZeroTmuxCalls(t *testing.T) {
+	for _, socket := range []string{"relative/sock", "tmux-1000/cenci", "/tmp/tmux-1000/bad\tsock"} {
+		t.Run(fmt.Sprintf("%q", socket), func(t *testing.T) {
+			t.Setenv("CENCI_SANDBOX_REAP_GRACE_SECS", "0")
+			f := windowproctest.Flavors[0]
+			fakes := windowproctest.Install(t, f.SandboxSpec(ccLaunchID, windowproctest.HarmlessPanePID(t), stubbornProcs()...))
+
+			decisions, err := closecmd.Run(realCloseOpts(closeSnapshotOn("done", socket)))
+
+			if !errors.Is(err, tmux.ErrMalformedSocket) {
+				t.Fatalf("Run err = %v, want one wrapping tmux.ErrMalformedSocket", err)
+			}
+			if len(decisions) != 0 {
+				t.Errorf("decisions = %+v, want none for a window that could not be killed", decisions)
+			}
+			if calls := fakes.Calls(t); len(calls) != 0 {
+				t.Errorf("calls:\n%s\nwant no tmux or runtime call for a malformed socket", strings.Join(calls, "\n"))
+			}
+		})
+	}
+}
+
+// With injected seams, Run hands the window's recorded socket to both the
+// process kill and the window kill, in that order, for every matched window --
+// two windows on two servers each reach their own.
+func TestRun_ThreadsEachWindowsSocketToProcessKillAndWindowKill(t *testing.T) {
+	snap := &watch.StateSnapshot{Windows: []watch.WindowState{
+		{Session: "s1", WindowIndex: "1", PaneID: "%5", WindowName: "42-implement", Status: "done", Socket: "/tmp/tmux-1000/a"},
+		{Session: "s2", WindowIndex: "1", PaneID: "%5", WindowName: "42-review", Status: "done", Socket: "/tmp/tmux-1000/b"},
+		{Session: "s3", WindowIndex: "1", PaneID: "%5", WindowName: "42-refine", Status: "done"},
+	}}
+	var log []string
+	killer := &socketLogKiller{log: &log}
+
+	_, err := closecmd.Run(closecmd.Opts{
+		Target:       "42",
+		ReadSnapshot: fakeReadSnapshot(snap, nil),
+		Killer:       killer,
+		KillProcesses: func(socket, target string) error {
+			log = append(log, fmt.Sprintf("kill-processes socket=%q target=%s", socket, target))
+			return nil
+		},
+	})
+
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	want := []string{
+		`kill-processes socket="/tmp/tmux-1000/a" target=%5`, `kill-window socket="/tmp/tmux-1000/a" target=%5`,
+		`kill-processes socket="/tmp/tmux-1000/b" target=%5`, `kill-window socket="/tmp/tmux-1000/b" target=%5`,
+		`kill-processes socket="" target=%5`, `kill-window socket="" target=%5`,
+	}
+	if !slices.Equal(log, want) {
+		t.Errorf("order:\n%s\nwant:\n%s", strings.Join(log, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+// socketLogKiller records kill-window calls, socket included, into a log shared
+// with the process-kill fake.
+type socketLogKiller struct{ log *[]string }
+
+func (k *socketLogKiller) KillWindow(socket, target string) error {
+	*k.log = append(*k.log, fmt.Sprintf("kill-window socket=%q target=%s", socket, target))
+	return nil
 }

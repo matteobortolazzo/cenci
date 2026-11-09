@@ -51,6 +51,12 @@ type PendingClose struct {
 	Session     string `json:"session"`
 	WindowIndex string `json:"window_index"`
 	WindowName  string `json:"window_name"`
+	// Socket is the tmux server socket the window lives on (the window's
+	// recorded WindowState.Socket). The daemon checks it at ingest with the same
+	// trusted-socket check as a hook event's socket and treats a rejected value as
+	// empty (the ambient server); it keys the registration by (socket, pane)
+	// because pane ids repeat across servers (#1430). An older client sends none.
+	Socket string `json:"socket,omitempty"`
 }
 
 // nativeMeasurementKind is the "kind" discriminator value for a native Claude

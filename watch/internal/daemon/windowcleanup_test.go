@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -20,6 +21,8 @@ import (
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/ticketstate"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/tmux"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/tmux/tmuxtest"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/windowproc"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/windowproc/windowproctest"
 )
 
 // The window-cleanup pass (#1251) closes the windows of tickets whose work is
@@ -59,7 +62,7 @@ func (o *killOrder) reset() {
 // was asked to kill into the shared order log.
 type orderedProcKiller struct{ order *killOrder }
 
-func (p *orderedProcKiller) KillWindowProcesses(_ context.Context, target string) error {
+func (p *orderedProcKiller) KillWindowProcesses(_ context.Context, _, target string) error {
 	p.order.add("processes " + target)
 	return nil
 }
@@ -536,10 +539,10 @@ func TestWindowCleanup_CloseRemovesThePendingCloseEntryForThatWindow(t *testing.
 	fx.runPass()
 
 	fx.requireClosed(closed)
-	if _, ok := fx.d.pending[closed.pane]; ok {
+	if _, ok := fx.d.pending[pendingKey{pane: closed.pane}]; ok {
 		t.Error("pending-close entry of the closed window still registered, want it removed")
 	}
-	if _, ok := fx.d.pending[kept.pane]; !ok {
+	if _, ok := fx.d.pending[pendingKey{pane: kept.pane}]; !ok {
 		t.Error("pending-close entry of the window that was not closed was removed, want it kept")
 	}
 
@@ -652,7 +655,7 @@ func (m *tmuxModel) find(target string) (int, bool) {
 	return 0, false
 }
 
-func (m *tmuxModel) KillWindowProcesses(_ context.Context, target string) error {
+func (m *tmuxModel) KillWindowProcesses(_ context.Context, _, target string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if i, ok := m.find(target); ok {
@@ -777,7 +780,7 @@ func TestWindowCleanup_IndexReusedByANewWindowBeforeTheKillNeverRedirectsIt(t *t
 
 type failingProcKiller struct{ err error }
 
-func (f failingProcKiller) KillWindowProcesses(context.Context, string) error { return f.err }
+func (f failingProcKiller) KillWindowProcesses(context.Context, string, string) error { return f.err }
 
 type failingWindowKiller struct{ err error }
 
@@ -1060,18 +1063,25 @@ func TestLoop_WindowCleanupBlockedReaderStartsNoSecondPassAndLaterCloses(t *test
 }
 
 // ---------------------------------------------------------------------------
-// Interim foreign-socket guard (#1429, replaced by #1430)
+// Kills on the window's recorded tmux socket (#1430)
 // ---------------------------------------------------------------------------
 
 // addWindowOnSocket tracks a done "<ticket>-implement" window whose pane lives on
 // the given tmux server ("" is the ambient one), the way `cenci run` leaves it,
 // with @cenci-repo-dir set on that server and the socket carried by the agent's
-// events.
+// events. Its pane id is its fixture position.
 func (fx *wcFixture) addWindowOnSocket(socket string, ticket int, repoDir string) wcWindow {
+	fx.t.Helper()
+	return fx.addWindowOnSocketPane(socket, fmt.Sprintf("%%%d", fx.windows), ticket, repoDir)
+}
+
+// addWindowOnSocketPane is addWindowOnSocket with an explicit pane id, so two
+// windows on two servers can share one (pane ids repeat across servers).
+func (fx *wcFixture) addWindowOnSocketPane(socket, paneID string, ticket int, repoDir string) wcWindow {
 	fx.t.Helper()
 	idx := fx.windows
 	fx.windows++
-	w := wcWindow{key: fmt.Sprintf("sess%d", idx), pane: fmt.Sprintf("%%%d", idx), index: strconv.Itoa(idx)}
+	w := wcWindow{key: fmt.Sprintf("sess%d", idx), pane: paneID, index: strconv.Itoa(idx)}
 	pane := tmux.PaneInfo{
 		SessionName: "main", WindowIndex: w.index, WindowName: fmt.Sprintf("%d-implement", ticket), PaneIndex: "0",
 		PaneCurrentCmd: "claude", PaneTitle: "⠋ writing tests", PaneID: w.pane,
@@ -1108,77 +1118,126 @@ func (fx *wcFixture) addWindowOnSocket(socket string, ticket int, repoDir string
 	return w
 }
 
-// Until #1430 targets the recorded socket, the kill goes to the daemon's own
-// tmux server. A finished window recorded on any other server is therefore left
-// open, with one verbose line, instead of killing whatever shares its pane id on
-// the ambient server. Windows on the ambient server (by socket path or with no
-// socket) are closed exactly as before; they are the controls that the pass ran.
-func TestWindowCleanup_FinishedWindowOnAForeignSocketIsNotKilled(t *testing.T) {
-	for _, verbose := range []bool{true, false} {
-		t.Run(fmt.Sprintf("verbose=%v", verbose), func(t *testing.T) {
+// realKillPath rewires the fixture's daemon to the real kill path (the real
+// tmux.ExecClient and windowproc.Killer) over the fake tmux alone on PATH, so a
+// test asserts the ordered call log -- `-S` socket included -- instead of the
+// arguments a fake received.
+func (fx *wcFixture) realKillPath(spec windowproctest.Spec) *windowproctest.Fakes {
+	fx.t.Helper()
+	fx.t.Setenv("CENCI_SANDBOX_REAP_GRACE_SECS", "0")
+	fakes := windowproctest.Install(fx.t, spec)
+	fx.d.killer = &tmux.ExecClient{}
+	fx.d.procKiller = windowproc.New(io.Discard)
+	return fakes
+}
+
+// callsOn returns the calls of a call log that name socket (`-S <socket> `), in
+// order; "" returns the calls that carry no `-S` at all.
+func callsOn(calls []string, socket string) []string {
+	var out []string
+	for _, c := range calls {
+		if socket == "" && !strings.Contains(c, " -S ") ||
+			socket != "" && strings.Contains(c, " -S "+socket+" ") {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// AC4: the pass issues its kill for a socket-recorded finished window with `-S`
+// to that window's socket and the tracked pane id as the target: its panes are
+// listed on that server and then kill-window runs there. A finished window with
+// no recorded socket is the control: the same calls with no `-S`.
+func TestWindowCleanup_FinishedWindowIsKilledOnItsRecordedSocket(t *testing.T) {
+	for _, recorded := range []bool{true, false} {
+		name := "no recorded socket"
+		if recorded {
+			name = "recorded socket"
+		}
+		t.Run(name, func(t *testing.T) {
 			fx := newWCFixture(t)
 			dir := trustedSocketDir(t, fx.d)
-			ambient, foreign := filepath.Join(dir, "ambient"), filepath.Join(dir, "foreign")
-			t.Setenv("TMUX", ambient+",4242,0")
-			repoDir, repo := fx.addRepo("alpha", "")
-			foreignW := fx.addWindowOnSocket(foreign, 11, repoDir)
-			sameServerW := fx.addWindowOnSocket(ambient, 12, repoDir)
-			noSocketW := fx.addWindowOnSocket("", 13, repoDir)
-			for _, n := range []int{11, 12, 13} {
-				fx.reader.script(repo, n, ticketstate.Finished)
+			socket := ""
+			if recorded {
+				socket = filepath.Join(dir, "work")
 			}
-			fx.d.cfg.Verbose = verbose
-			logs := captureLog(t)
+			repoDir, repo := fx.addRepo("alpha", "")
+			w := fx.addWindowOnSocket(socket, 21, repoDir)
+			fx.reader.script(repo, 21, ticketstate.Finished)
+			fakes := fx.realKillPath(windowproctest.Spec{})
 
 			fx.runPass()
 
-			fx.requireClosed(sameServerW, noSocketW)
-			if slices.Contains(fx.fk.killed, foreignW.target()) {
-				t.Errorf("killed %v, want the foreign-socket window %s left open", fx.fk.killed, foreignW.target())
+			prefix := windowproctest.TmuxPrefix(socket)
+			want := []string{
+				prefix + " list-panes -t " + w.target() + " -F " + windowproctest.OwnedFormatToken,
+				prefix + " kill-window -t " + w.target(),
 			}
-			lines := linesContaining(logs.String(), foreign)
-			wantLines := 0
-			if verbose {
-				wantLines = 1
-			}
-			if len(lines) != wantLines {
-				t.Fatalf("log has %d lines naming the foreign socket %q, want %d", len(lines), lines, wantLines)
-			}
-			if verbose && !strings.Contains(lines[0], "window-cleanup:") {
-				t.Errorf("skip line %q lacks the window-cleanup: prefix", lines[0])
+			if got := fakes.Calls(t); !slices.Equal(got, want) {
+				t.Errorf("calls:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 			}
 		})
 	}
 }
 
-// With no $TMUX the daemon's own server is the default socket of the trusted
-// directory, so a window recorded there is closed and one on any other server is
-// not.
-func TestWindowCleanup_AmbientSocketIsTheTrustedDirDefaultWhenTMUXIsUnset(t *testing.T) {
+// Windows with the same pane id on two servers are each killed on their own
+// server, with the full ordered call log per server: nothing reaches the other
+// server and nothing goes to the ambient one. Pane ids repeat across servers, so
+// a bare %5 would be ambiguous. (The order between the two windows follows map
+// iteration, so each server's log is asserted on its own.)
+func TestWindowCleanup_WindowsOnTwoSocketsAreEachKilledOnTheirOwnServer(t *testing.T) {
 	fx := newWCFixture(t)
-	t.Setenv("TMUX_TMPDIR", t.TempDir())
-	t.Setenv("TMUX", "")
-	if err := os.Unsetenv("TMUX"); err != nil {
-		t.Fatal(err)
-	}
-	dir, err := tmux.TrustedSocketDir()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	fx.d.tmuxSocketDir = tmux.TrustedSocketDir
+	dir := trustedSocketDir(t, fx.d)
+	sockA, sockB := filepath.Join(dir, "a"), filepath.Join(dir, "b")
 	repoDir, repo := fx.addRepo("alpha", "")
-	defaultW := fx.addWindowOnSocket(filepath.Join(dir, "default"), 21, repoDir)
-	otherW := fx.addWindowOnSocket(filepath.Join(dir, "other"), 22, repoDir)
-	fx.reader.script(repo, 21, ticketstate.Finished)
-	fx.reader.script(repo, 22, ticketstate.Finished)
+	fx.addWindowOnSocketPane(sockA, "%5", 31, repoDir)
+	fx.addWindowOnSocketPane(sockB, "%5", 32, repoDir)
+	fx.reader.script(repo, 31, ticketstate.Finished)
+	fx.reader.script(repo, 32, ticketstate.Finished)
+	fakes := fx.realKillPath(windowproctest.Spec{})
 
 	fx.runPass()
 
-	fx.requireClosed(defaultW)
-	if slices.Contains(fx.fk.killed, otherW.target()) {
-		t.Errorf("killed %v, want the window on the non-default server left open", fx.fk.killed)
+	calls := fakes.Calls(t)
+	for _, socket := range []string{sockA, sockB} {
+		want := []string{
+			windowproctest.ListCallsOn(socket, "%5")[0],
+			"tmux -S " + socket + " kill-window -t %5",
+		}
+		if got := callsOn(calls, socket); !slices.Equal(got, want) {
+			t.Errorf("calls on %s:\n%s\nwant:\n%s", socket, strings.Join(got, "\n"), strings.Join(want, "\n"))
+		}
+	}
+	if bare := callsOn(calls, ""); len(bare) != 0 {
+		t.Errorf("calls with no -S: %q, want every call on a recorded socket", bare)
+	}
+}
+
+// Closing the window on one server removes only that server's pending-close
+// entry: the entry for the same pane id on the other server, and the one an
+// older client registered with no socket, stay.
+func TestWindowCleanup_CloseRemovesOnlyThePendingCloseEntryOfThatSocketAndPane(t *testing.T) {
+	fx := newWCFixture(t)
+	dir := trustedSocketDir(t, fx.d)
+	sockA, sockB := filepath.Join(dir, "a"), filepath.Join(dir, "b")
+	repoDir, repo := fx.addRepo("alpha", "")
+	fx.addWindowOnSocketPane(sockA, "%5", 31, repoDir)
+	fx.reader.script(repo, 31, ticketstate.Finished)
+	for _, socket := range []string{sockA, sockB, ""} {
+		fx.d.registerPendingClose(ipc.PendingClose{PaneID: "%5", Session: "main", WindowIndex: "0", WindowName: "31-implement", Socket: socket})
+	}
+
+	fx.runPass()
+
+	if _, ok := fx.d.pending[pendingKey{socket: sockA, pane: "%5"}]; ok {
+		t.Error("pending-close entry of the closed window (socket A, %5) still registered, want it removed")
+	}
+	for _, key := range []pendingKey{{socket: sockB, pane: "%5"}, {pane: "%5"}} {
+		if _, ok := fx.d.pending[key]; !ok {
+			t.Errorf("pending-close entry %+v was removed, want it kept: it belongs to another server's %%5", key)
+		}
+	}
+	if want := []string{sockA}; !slices.Equal(fx.fk.sockets, want) {
+		t.Errorf("kill-window sockets = %q, want %q", fx.fk.sockets, want)
 	}
 }

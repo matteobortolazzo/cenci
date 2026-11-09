@@ -49,20 +49,25 @@ func New(stderr io.Writer) *Killer {
 	return &Killer{stderr: stderr}
 }
 
-// KillWindowProcesses reads target's panes and kills each pane's process tree.
-// A window that is already gone is not an error; every other failure (the
-// listing, a malformed pane, a signal that could not be delivered) is collected
-// per pane and returned together, so one bad pane never shields or blocks its
-// siblings. ctx bounds every in-container exec; the host path is local syscalls.
-func (k *Killer) KillWindowProcesses(ctx context.Context, target string) error {
-	panes, err := tmux.ListWindowPaneProcs("", target)
+// KillWindowProcesses reads target's panes on the tmux server at socket (empty:
+// the ambient server) and kills each pane's process tree. A window that is
+// already gone is not an error; every other failure (the listing, a malformed
+// pane, a signal that could not be delivered) is collected per pane and returned
+// together, so one bad pane never shields or blocks its siblings. ctx bounds
+// every in-container exec; the host path is local syscalls.
+func (k *Killer) KillWindowProcesses(ctx context.Context, socket, target string) error {
+	panes, err := tmux.ListWindowPaneProcs(socket, target)
 	if errors.Is(err, tmux.ErrWindowGone) {
 		return nil
 	}
 	var errs []error
 	if err != nil {
 		// Panes that did parse are still killed.
-		errs = append(errs, fmt.Errorf("listing panes of %s: %w", target, err))
+		if socket != "" {
+			errs = append(errs, fmt.Errorf("listing panes of %s on socket %q: %w", target, socket, err))
+		} else {
+			errs = append(errs, fmt.Errorf("listing panes of %s: %w", target, err))
+		}
 	}
 
 	grace := sandbox.GraceFromEnv()

@@ -2,6 +2,7 @@ package main_test
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -201,6 +202,52 @@ func TestClose_BabysitSupervisedWindow_SkippedAndForceable(t *testing.T) {
 	wantCalls := []string{"tmux list-panes -t %77 -F " + windowproctest.OwnedFormatToken, "tmux kill-window -t %77"}
 	if got := fakes.Calls(t); !slices.Equal(got, wantCalls) {
 		t.Errorf("forced close calls = %v, want %v", got, wantCalls)
+	}
+}
+
+// P28 against the real binary (#1430): a window the snapshot records on
+// tmux-<uid>/cenci is closed with `-S` to that socket on its pane listing and
+// its kill-window, and a window recorded with no socket is closed with no `-S`.
+func TestClose_TargetsTheWindowsRecordedSocket(t *testing.T) {
+	recorded := fmt.Sprintf("/tmp/tmux-%d/cenci", os.Getuid())
+	for _, tc := range []struct {
+		name       string
+		tmuxSocket string
+		wantCalls  []string
+	}{
+		{
+			"recorded socket",
+			recorded,
+			[]string{
+				"tmux -S " + recorded + " list-panes -t %77 -F " + windowproctest.OwnedFormatToken,
+				"tmux -S " + recorded + " kill-window -t %77",
+			},
+		},
+		{
+			"no recorded socket",
+			"",
+			[]string{"tmux list-panes -t %77 -F " + windowproctest.OwnedFormatToken, "tmux kill-window -t %77"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			socket := startCloseIPCServer(t, ipc.StateSnapshot{
+				Windows: []ipc.WindowState{
+					{Session: "sess-a", WindowIndex: "0", WindowName: "77-implement", Status: "done", PaneID: "%77", Socket: tc.tmuxSocket},
+				},
+			})
+			fakes := windowproctest.Install(t, windowproctest.Spec{ListGone: true})
+			cmd := exec.Command(binaryPath, "close", "77", "--socket", socket)
+			cmd.Env = emptyStateHome(t)
+
+			output, err := cmd.CombinedOutput()
+
+			if err != nil {
+				t.Fatalf("close: %v\n%s", err, output)
+			}
+			if got := fakes.Calls(t); !slices.Equal(got, tc.wantCalls) {
+				t.Errorf("calls:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(tc.wantCalls, "\n"))
+			}
+		})
 	}
 }
 

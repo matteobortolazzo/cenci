@@ -391,6 +391,101 @@ func TestEventReceiver_HookEventWithoutKindRoutesToEvents(t *testing.T) {
 	}
 }
 
+// -- pending-close socket (#1430) ---------------------------------------------
+
+// TestEventReceiver_PendingCloseSocketDecodesFromTheRawLine pins the wire key:
+// a raw pending-close line (the way a container can write one) carrying
+// `socket` decodes into PendingClose.Socket, and a line without the key -- an
+// older `cenci close` -- decodes to the empty socket.
+func TestEventReceiver_PendingCloseSocketDecodesFromTheRawLine(t *testing.T) {
+	const socket = "/tmp/tmux-1000/cenci"
+	tests := []struct {
+		name string
+		line string
+		want PendingClose
+	}{
+		{
+			name: "with a socket key",
+			line: `{"kind":"pending-close","pane_id":"%5","session":"main","window_index":"2","window_name":"42-implement","socket":"` + socket + `"}`,
+			want: PendingClose{PaneID: "%5", Session: "main", WindowIndex: "2", WindowName: "42-implement", Socket: socket},
+		},
+		{
+			name: "without a socket key",
+			line: `{"kind":"pending-close","pane_id":"%5","session":"main","window_index":"2","window_name":"42-implement"}`,
+			want: PendingClose{PaneID: "%5", Session: "main", WindowIndex: "2", WindowName: "42-implement"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			recv, path := startReceiver(t)
+
+			writeRawLine(t, path, tt.line)
+
+			select {
+			case got := <-recv.PendingCloses():
+				if got != tt.want {
+					t.Errorf("PendingCloses() = %+v, want %+v", got, tt.want)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("timed out waiting for pending-close")
+			}
+		})
+	}
+}
+
+// TestSendPendingClose_CarriesSocketAndOmitsItWhenEmpty asserts the sender's
+// wire line has a `socket` key only when one is recorded, so a window with no
+// recorded socket sends the exact pre-#1430 line.
+func TestSendPendingClose_CarriesSocketAndOmitsItWhenEmpty(t *testing.T) {
+	const socket = "/tmp/tmux-1000/cenci"
+	for _, tt := range []struct {
+		name       string
+		pc         PendingClose
+		wantSocket bool
+	}{
+		{"recorded socket", PendingClose{PaneID: "%5", Session: "main", WindowIndex: "2", WindowName: "w", Socket: socket}, true},
+		{"empty socket", PendingClose{PaneID: "%5", Session: "main", WindowIndex: "2", WindowName: "w"}, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			path := tempSocket(t)
+			ln, err := net.Listen("unix", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = ln.Close() }()
+			lines := make(chan string, 1)
+			go func() {
+				conn, err := ln.Accept()
+				if err != nil {
+					return
+				}
+				defer func() { _ = conn.Close() }()
+				_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+				line, _ := bufio.NewReader(conn).ReadString('\n')
+				lines <- line
+			}()
+
+			if err := SendPendingClose(path, tt.pc); err != nil {
+				t.Fatalf("SendPendingClose: %v", err)
+			}
+
+			select {
+			case line := <-lines:
+				var keys map[string]any
+				if err := json.Unmarshal([]byte(line), &keys); err != nil {
+					t.Fatalf("decode %q: %v", line, err)
+				}
+				got, present := keys["socket"]
+				if present != tt.wantSocket || (present && got != socket) {
+					t.Errorf("socket key = %v (present %v) in %s, want present=%v", got, present, line, tt.wantSocket)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("timed out waiting for the line")
+			}
+		})
+	}
+}
+
 // -- native-measurement routing (#1450) ---------------------------------------
 
 func startReceiver(t *testing.T) (*EventReceiver, string) {

@@ -37,10 +37,13 @@ func (m *mockReaper) Reap() {
 // SessionEnd without touching a real tmux binary.
 type fakeKiller struct {
 	killed []string
+	// sockets holds the tmux socket of each kill, in parallel with killed (#1430).
+	sockets []string
 }
 
-func (f *fakeKiller) KillWindow(_, target string) error {
+func (f *fakeKiller) KillWindow(socket, target string) error {
 	f.killed = append(f.killed, target)
+	f.sockets = append(f.sockets, socket)
 	return nil
 }
 

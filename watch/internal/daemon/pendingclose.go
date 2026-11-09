@@ -3,11 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log"
-	"os"
-	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/detect"
@@ -24,6 +20,14 @@ import (
 // would only burn syscalls without noticing anything sooner.
 const pendingCloseRecheckInterval = 30 * time.Second
 
+// pendingKey identifies one pending-close registration: the tmux server socket
+// the window lives on (empty: the ambient server) and its pane id. Pane ids
+// repeat across tmux servers, so the pane alone would let a registration for one
+// server's %5 match another server's %5 (#1430).
+type pendingKey struct {
+	socket, pane string
+}
+
 // pendingCloseEntry is one entry of the pending-close registry: the
 // registration itself plus the bookkeeping for a close deferred a second time
 // by the babysit guard (#787).
@@ -37,7 +41,10 @@ type pendingCloseEntry struct {
 }
 
 // registerPendingClose records pc in the daemon's in-memory pending-close
-// registry, keyed by stable pane identity. Registering the same pane
+// registry, keyed by (tmux socket, stable pane identity). pc.Socket is checked
+// like a hook event's socket (sanitizeTmuxSocket); a rejected value becomes empty,
+// the ambient server, with one verbose-gated line that names the rejection
+// class; a malformed value is never echoed (#1430). Registering the same (socket, pane)
 // twice is a no-op past the first call, so a repeated lazyboards cleanup
 // invocation before the session ends never produces more than one eventual
 // kill (#522 dedup AC).
@@ -46,13 +53,18 @@ func (d *Daemon) registerPendingClose(pc ipc.PendingClose) {
 		log.Printf("pending-close: refusing registration for %q:%q: missing or invalid stable pane identity %q; restart the daemon and retry with a fresh snapshot", pc.Session, pc.WindowIndex, pc.PaneID)
 		return
 	}
-	key := pc.PaneID
+	var rejection string
+	pc.Socket, rejection = d.sanitizeTmuxSocket(pc.Socket)
+	if rejection != "" && d.cfg.Verbose {
+		log.Printf("pending-close: registration for %s: socket %s, using the default server", pc.PaneID, rejection)
+	}
+	key := pendingKey{socket: pc.Socket, pane: pc.PaneID}
 	if _, exists := d.pending[key]; exists {
 		return
 	}
 	d.pending[key] = &pendingCloseEntry{pc: pc}
 	if d.cfg.Verbose {
-		log.Printf("pending-close: registered %s (%s)", key, pc.WindowName)
+		log.Printf("pending-close: registered %s (%s)", pc.PaneID, pc.WindowName)
 	}
 }
 
@@ -69,68 +81,28 @@ func (d *Daemon) registerPendingClose(pc ipc.PendingClose) {
 // is mid-Phase-9, gets deferred here, and then the window is destroyed the
 // instant that session exits, with `cenci babysit` still supervising CI.
 //
-// A window on a foreign tmux socket is the other exception (the #1429 interim
-// guard): the kill is skipped and the entry is dropped. The registry is keyed by
-// the bare pane id and carries no socket until #1430, so a kept entry could later
-// match an unrelated window with the same pane id on the daemon's own server and
-// kill it; a dropped close request only leaves a window open.
+// The registry is keyed by (socket, pane id), so a window only ever matches the
+// registration made for its own tmux server, and the kill runs on that server
+// (#1430).
 func (d *Daemon) killPendingClose(wi *frontend.WindowInfo) {
 	if wi == nil {
 		return
 	}
-	key := wi.PaneID
+	key := pendingKey{socket: wi.Socket, pane: wi.PaneID}
 	entry, ok := d.pending[key]
 	if !ok {
-		return
-	}
-	if d.skipForeignSocketKill("pending-close", fmt.Sprintf("%s (%s)", key, entry.pc.WindowName), wi.Socket) {
-		delete(d.pending, key)
 		return
 	}
 	if blocked, reason := d.babysitBlocks(entry); blocked {
 		entry.blocked = true
 		entry.lastChecked = d.now()
 		if d.cfg.Verbose {
-			log.Printf("pending-close: holding %s (%s): %s", key, entry.pc.WindowName, reason)
+			log.Printf("pending-close: holding %s (%s): %s", key.pane, entry.pc.WindowName, reason)
 		}
 		return
 	}
 	delete(d.pending, key)
-	d.killWindowTarget(entry.pc.PaneID, entry.pc.PaneID, "pending-close")
-}
-
-// ambientTmuxSocket is the socket of the tmux server the daemon's own kill
-// calls reach: the first field of $TMUX when the daemon runs inside tmux, else
-// the default server of the trusted socket directory. An unresolvable directory
-// yields "", which no recorded socket equals.
-func (d *Daemon) ambientTmuxSocket() string {
-	if socket, _, _ := strings.Cut(os.Getenv("TMUX"), ","); socket != "" {
-		return socket
-	}
-	dir, err := d.tmuxSocketDir()
-	if err != nil {
-		return ""
-	}
-	return filepath.Join(dir, "default")
-}
-
-// skipForeignSocketKill is the interim guard of #1429, replaced by #1430: the
-// kill paths still address a window by pane id on the daemon's own tmux server,
-// so a window recorded on any other server must not be killed, or whatever
-// shares its pane id here would be. An empty socket (older notify, a rejected
-// value, a container) and the daemon's own server are killed exactly as before.
-// It reports whether the kill is skipped, logging one verbose line when so. A
-// pending-close caller must also drop its registry entry when it is skipped: the
-// registry has no socket field until #1430, so a kept entry could hit an
-// unrelated window with the same pane id on the daemon's own server.
-func (d *Daemon) skipForeignSocketKill(prefix, desc, socket string) bool {
-	if socket == "" || socket == d.ambientTmuxSocket() {
-		return false
-	}
-	if d.cfg.Verbose {
-		log.Printf("%s: not closing %s: its tmux server %q is not the daemon's own", prefix, desc, socket)
-	}
-	return true
+	d.killWindowTarget(key.socket, key.pane, key.pane, "pending-close")
 }
 
 // retryBlockedPendingCloses re-evaluates every pending-close the babysit
@@ -155,9 +127,9 @@ func (d *Daemon) retryBlockedPendingCloses() {
 		}
 		delete(d.pending, key)
 		if d.cfg.Verbose {
-			log.Printf("pending-close: babysit guard cleared for %s (%s), closing now", key, entry.pc.WindowName)
+			log.Printf("pending-close: babysit guard cleared for %s (%s), closing now", key.pane, entry.pc.WindowName)
 		}
-		d.killWindowTarget(entry.pc.PaneID, entry.pc.PaneID, "pending-close")
+		d.killWindowTarget(key.socket, key.pane, key.pane, "pending-close")
 	}
 }
 
@@ -176,15 +148,16 @@ func (d *Daemon) babysitBlocks(entry *pendingCloseEntry) (bool, string) {
 	return d.closeGuard(ticket)
 }
 
-// killWindowTarget kills processes and then the window off the event loop.
-// A process-kill failure is logged and does not prevent closing the window;
-// an already-gone window counts as closed. The closure captures only locals.
-// desc names the window in log lines. A
+// killWindowTarget kills processes and then the window off the event loop, both
+// on the tmux server at socket (the window's recorded socket; empty: the ambient
+// server, #1430). A process-kill failure is logged and does not prevent closing
+// the window; an already-gone window counts as closed. The closure captures only
+// locals. desc names the window in log lines. A
 // deferred kill must pass a target that cannot drift to another window between
 // scheduling and the kill: a "=session:index" is resolved again at kill time,
 // after the grace wait, so a renumber or index reuse in between would hit the
 // wrong window; a pane id ("%N") is never reused while the tmux server runs.
-func (d *Daemon) killWindowTarget(target, desc, prefix string) {
+func (d *Daemon) killWindowTarget(socket, target, desc, prefix string) {
 	if !sandbox.ValidPaneID(target) {
 		log.Printf("%s: refusing to close %q: missing or invalid stable pane identity %q", prefix, desc, target)
 		return
@@ -192,11 +165,11 @@ func (d *Daemon) killWindowTarget(target, desc, prefix string) {
 	killer, procKiller, verbose := d.killer, d.procKiller, d.cfg.Verbose
 	d.runOffLoop(sandbox.GraceFromEnv()+sandbox.CloseKillMargin, func(ctx context.Context) {
 		if procKiller != nil {
-			if err := procKiller.KillWindowProcesses(ctx, target); err != nil {
+			if err := procKiller.KillWindowProcesses(ctx, socket, target); err != nil {
 				log.Printf("%s: error killing processes of %s: %v", prefix, desc, err)
 			}
 		}
-		err := killer.KillWindow("", target)
+		err := killer.KillWindow(socket, target)
 		switch {
 		case errors.Is(err, tmux.ErrWindowGone):
 			if verbose {
@@ -225,5 +198,5 @@ func (d *Daemon) prunePendingCloseForWindow(wi *frontend.WindowInfo) {
 	if wi == nil {
 		return
 	}
-	delete(d.pending, wi.PaneID)
+	delete(d.pending, pendingKey{socket: wi.Socket, pane: wi.PaneID})
 }

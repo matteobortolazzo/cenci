@@ -24,9 +24,13 @@ import (
 // observes the window's session end (#522). Production wiring for
 // closecmd.Opts.Register; the daemon read (which already succeeded before
 // this branch runs) makes fire-and-forget acceptable here, matching the
-// existing SendEvent pattern.
+// existing SendEvent pattern. The window's own recorded socket (w.Socket, which
+// the daemon already checked at hook ingest) travels with the registration so
+// the daemon keys it by (socket, pane) and kills on that server (#1430); it is
+// never taken from this process's environment.
 func registerPendingClose(w watch.WindowState) error {
 	return ipc.SendPendingClose(ipc.DefaultEventSocketPath(), ipc.PendingClose{
+		Socket:      w.Socket,
 		PaneID:      w.PaneID,
 		Session:     w.Session,
 		WindowIndex: w.WindowIndex,
@@ -34,10 +38,11 @@ func registerPendingClose(w watch.WindowState) error {
 	})
 }
 
-// windowProcKiller kills the process tree behind a tmux window target;
-// production is *windowproc.Killer.
+// windowProcKiller kills the process tree behind a tmux window target on the
+// tmux server at socket (empty: the ambient server); production is
+// *windowproc.Killer.
 type windowProcKiller interface {
-	KillWindowProcesses(ctx context.Context, target string) error
+	KillWindowProcesses(ctx context.Context, socket, target string) error
 }
 
 // killProcessesFunc returns the production closecmd.Opts.KillProcesses. Each
@@ -45,11 +50,11 @@ type windowProcKiller interface {
 // plus sandbox.CloseKillMargin, the same bound the daemon's off-loop close uses
 // -- so a hung runtime exec can never hang `cenci close`, while windows closed
 // one after another each get the full bound instead of sharing one.
-func killProcessesFunc(k windowProcKiller) func(target string) error {
-	return func(target string) error {
+func killProcessesFunc(k windowProcKiller) func(socket, target string) error {
+	return func(socket, target string) error {
 		ctx, cancel := context.WithTimeout(context.Background(), sandbox.GraceFromEnv()+sandbox.CloseKillMargin)
 		defer cancel()
-		return k.KillWindowProcesses(ctx, target)
+		return k.KillWindowProcesses(ctx, socket, target)
 	}
 }
 
