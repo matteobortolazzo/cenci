@@ -1,9 +1,12 @@
 package launcher
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -64,6 +67,12 @@ func newAddDirFixture(t *testing.T) addDirFixture {
 // (watch/docs/test-isolation.md). The socket dir is a short os.MkdirTemp name,
 // not a t.TempDir() child: a long test name would push the path past the Unix
 // socket path limit the resolver enforces. MkdirTemp creates it 0700.
+//
+// The denylist also reads $PATH and the tool-home variables (#1460), so those
+// are pinned too: PATH is /usr/bin:/bin plus the directory of the git binary the
+// fixtures need, and the tool homes are cleared, so a developer's own PATH
+// entries or GOPATH can never make a fixture directory look like a host tool
+// location.
 func isolateAddDirEnv(t *testing.T, home string) {
 	t.Helper()
 	socketDir, err := os.MkdirTemp("", "ad")
@@ -71,6 +80,14 @@ func isolateAddDirEnv(t *testing.T, home string) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(socketDir) })
+	path := "/usr/bin:/bin"
+	if gitPath, err := exec.LookPath("git"); err == nil {
+		path += ":" + filepath.Dir(gitPath)
+	}
+	t.Setenv("PATH", path)
+	for _, name := range addDirToolHomeEnv {
+		t.Setenv(name, "")
+	}
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", "")
 	t.Setenv("XDG_DATA_HOME", "")
@@ -81,6 +98,12 @@ func isolateAddDirEnv(t *testing.T, home string) {
 	t.Setenv("SSH_AUTH_SOCK", "")
 	t.Setenv("CENCI_SOCKET_DIR", socketDir)
 }
+
+// addDirToolHomeEnv are the variables that relocate a developer tool home the
+// denylist guards (#1460). They are spelled out here, not read from the
+// production guard builder, so a variable the builder forgot to guard cannot
+// also be forgotten by the isolation.
+var addDirToolHomeEnv = []string{"GOBIN", "GOPATH", "CARGO_HOME", "RUSTUP_HOME", "NVM_DIR", "PYENV_ROOT"}
 
 func mkdir(t *testing.T, parts ...string) string {
 	t.Helper()
@@ -1223,5 +1246,612 @@ func TestAddDirResolve_CaseVariantOfASensitiveDirectory_IsRefusedOnCaseInsensiti
 			_, err := resolveAddDirs([]string{path}, f.scope, f.home)
 			wantAddDirUsageError(t, err, path, "sensitive host location")
 		})
+	}
+}
+
+// -- #1460: temp-root socket directories --------------------------------------
+//
+// The host's per-session socket directories live directly under the temp roots
+// (ssh-agent, other users' tmux and emacs servers, the X11 helpers). They are
+// refused by the start of the direct child's name, together with everything
+// inside them; the temp roots themselves stay mountable only as a project
+// directory below them.
+
+var tempRoots = []string{"/tmp", "/private/tmp", "/var/tmp"}
+
+// tempSocketDirNames are direct-child names the guard refuses. None of them is
+// the current user's /tmp/tmux-<uid> or /tmp/emacs<uid>, so each one is caught by
+// the name pattern alone and not by one of the older fixed guards.
+var tempSocketDirNames = []string{
+	"ssh-XXXX", "tmux-4242", "emacs4242", "emacs", ".ICE-unix", ".XIM-unix", ".font-unix", "com.apple.launchd.AbCdEf",
+}
+
+func TestAddDirGuards_TempRootSocketDirectoryPatterns_AreRefusedWithEverythingInside(t *testing.T) {
+	newAddDirFixture(t)
+	for _, root := range tempRoots {
+		for _, name := range tempSocketDirNames {
+			dir := filepath.Join(root, name)
+			for _, target := range []string{dir, filepath.Join(dir, "inner", "deep")} {
+				if !refusedBySomeGuard(t, "/home/dev", target) {
+					t.Errorf("target %q is accepted, want another session's socket directory refused", target)
+				}
+			}
+		}
+	}
+}
+
+func TestAddDirGuards_TempRootSocketDirectoryPatterns_MatchWithoutRegardToCase(t *testing.T) {
+	newAddDirFixture(t)
+	// A case-insensitive filesystem (the macOS default) reaches /tmp/ssh-x as
+	// /tmp/SSH-x: the pattern is compared on ASCII-lowered names.
+	for _, name := range []string{"SSH-XXXX", "Tmux-4242", "EMACS4242", ".ice-unix", ".Xim-Unix", ".FONT-UNIX", "COM.APPLE.LAUNCHD.x"} {
+		target := filepath.Join("/tmp", name, "inner")
+		if !refusedBySomeGuard(t, "/home/dev", target) {
+			t.Errorf("target %q is accepted, want the case variant of a socket directory refused", target)
+		}
+	}
+}
+
+// The patterns match the start of a DIRECT child's name only: a longer name
+// that merely contains one, a name one level down, and the temp roots' own
+// project directories stay accepted.
+func TestAddDirGuards_TempRootSocketDirectoryPatterns_DoNotRefuseOrdinaryProjectDirectories(t *testing.T) {
+	newAddDirFixture(t)
+	for _, target := range []string{
+		"/tmp/app", "/tmp/sshfoo", "/tmp/ssh", "/tmp/tmux", "/tmp/my-tmux-notes", "/tmp/xssh-1", "/var/tmp/build",
+		"/private/tmp/app", "/tmp/app/ssh-keys-notes", "/var/tmp/app/.ICE-unix", "/tmp/com.apple.launchd",
+	} {
+		if refusedBySomeGuard(t, "/home/dev", target) {
+			t.Errorf("target %q is refused, want it accepted: the patterns match only the start of a direct child's name", target)
+		}
+	}
+}
+
+func TestAddDirResolve_TmpdirSocketDirectories_AreUsageErrors(t *testing.T) {
+	f := newAddDirFixture(t)
+	tmp := mkdir(t, f.root, "sockets", "tmp")
+	t.Setenv("TMPDIR", tmp)
+	for name, path := range map[string]string{
+		"another session's ssh-agent directory": mkdir(t, tmp, "ssh-AbCd"),
+		"inside it":                             mkdir(t, tmp, "ssh-AbCd", "inner"),
+		"another user's tmux directory":         mkdir(t, tmp, "tmux-4242"),
+		"a case variant of an emacs directory":  mkdir(t, tmp, "Emacs4242"),
+		"the ICE socket directory":              mkdir(t, tmp, ".ICE-unix"),
+		"a launchd socket directory":            mkdir(t, tmp, "com.apple.launchd.AbCdEf"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := resolveAddDirs([]string{path}, f.scope, f.home)
+			wantAddDirUsageError(t, err, path, "sensitive host location")
+		})
+	}
+	for _, path := range []string{mkdir(t, tmp, "sshfoo"), mkdir(t, tmp, "my-tmux-notes"), mkdir(t, tmp, "app", "ssh-notes")} {
+		if got, err := resolveAddDirs([]string{path}, f.scope, f.home); err != nil || len(got) != 1 {
+			t.Errorf("%s must be accepted, got %+v, %v", path, got, err)
+		}
+	}
+}
+
+// $TMPDIR may be spelled through a symlink while the target is spelled through
+// the real path: the pattern guard compares both spellings of its root.
+func TestAddDirResolve_TmpdirBehindASymlink_StillRefusesItsSocketDirectories(t *testing.T) {
+	f := newAddDirFixture(t)
+	realTmp := mkdir(t, f.root, "sockets", "real-tmp")
+	link := filepath.Join(f.root, "sockets", "link-tmp")
+	if err := os.Symlink(realTmp, link); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMPDIR", link)
+	for _, path := range []string{mkdir(t, realTmp, "ssh-ZZ"), mkdir(t, realTmp, "tmux-4242", "inner")} {
+		_, err := resolveAddDirs([]string{path}, f.scope, f.home)
+		wantAddDirUsageError(t, err, path, "sensitive host location")
+	}
+}
+
+func TestAddDirGuard_ChildPatternMode_MatchesDirectChildrenByIdentityOnCaseInsensitiveFilesystems(t *testing.T) {
+	f := newAddDirFixture(t)
+	root := mkdir(t, f.root, "Roots", "shared")
+	child := mkdir(t, root, "ssh-1", "inner")
+	variant := filepath.Join(f.root, "roots", "SHARED")
+	if _, err := os.Stat(variant); err != nil {
+		t.Skip("filesystem is case-sensitive")
+	}
+	guard := addDirGuard{path: variant, mode: forbidChildPattern, pattern: "ssh-*", why: "synthetic"}
+	if !guard.refusesByIdentity([]string{child}) {
+		t.Errorf("%q is accepted, want it refused through the root's other-case spelling", child)
+	}
+	if guard.refusesByIdentity([]string{mkdir(t, root, "app")}) {
+		t.Errorf("a child whose name matches no pattern must not be refused by identity")
+	}
+}
+
+// The identity half of the pattern guard runs on any filesystem: the guard root
+// is a symlink to the real root, so the real spelling of a child shares no path
+// prefix with it and only os.SameFile can relate the two.
+func TestAddDirGuard_ChildPatternMode_MatchesDirectChildrenThroughASymlinkedRootByIdentity(t *testing.T) {
+	f := newAddDirFixture(t)
+	realRoot := mkdir(t, f.root, "sockets", "real-root")
+	link := filepath.Join(f.root, "sockets", "link-root")
+	if err := os.Symlink(realRoot, link); err != nil {
+		t.Fatal(err)
+	}
+	guard := addDirGuard{path: link, mode: forbidChildPattern, pattern: "ssh-*", why: "synthetic"}
+
+	for name, target := range map[string]string{
+		"a child by its real spelling":        mkdir(t, realRoot, "ssh-1"),
+		"inside a child by its real spelling": mkdir(t, realRoot, "ssh-2", "inner"),
+		"a child through the symlink":         filepath.Join(link, "ssh-1"),
+		"inside a child through the symlink":  filepath.Join(link, "ssh-2", "inner"),
+	} {
+		t.Run("refuses "+name, func(t *testing.T) {
+			if !guard.refusesByIdentity([]string{target}) {
+				t.Errorf("%q is accepted, want it refused by identity", target)
+			}
+		})
+	}
+	for name, target := range map[string]string{
+		"a name that only starts like the pattern, real spelling": mkdir(t, realRoot, "sshfoo"),
+		"a name containing the pattern, real spelling":            mkdir(t, realRoot, "my-tmux-notes"),
+		"a name that only starts like the pattern, via the link":  filepath.Join(link, "sshfoo"),
+		"a name containing the pattern, via the link":             filepath.Join(link, "my-tmux-notes"),
+		"the root itself, real spelling":                          realRoot,
+		"a matching name one level down":                          mkdir(t, realRoot, "app", "ssh-notes"),
+	} {
+		t.Run("accepts "+name, func(t *testing.T) {
+			if guard.refusesByIdentity([]string{target}) {
+				t.Errorf("%q is refused by identity, want it accepted", target)
+			}
+		})
+	}
+}
+
+// -- #1460: every absolute $PATH entry -----------------------------------------
+
+func TestAddDirResolve_PathEntries_AreUsageErrorsNamingPATH(t *testing.T) {
+	f := newAddDirFixture(t)
+	tools := mkdir(t, f.root, "tools", "dev")
+	binDir := mkdir(t, tools, "bin")
+	second := mkdir(t, f.root, "tools", "other", "bin")
+	t.Setenv("PATH", binDir+":"+second+":"+os.Getenv("PATH"))
+	for name, path := range map[string]string{
+		"a $PATH entry":              binDir,
+		"the second $PATH entry":     second,
+		"inside a $PATH entry":       mkdir(t, binDir, "scripts"),
+		"a parent of a $PATH entry":  tools,
+		"a parent of the second one": filepath.Dir(second),
+		"a grandparent of both":      filepath.Dir(tools),
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := resolveAddDirs([]string{path}, f.scope, f.home)
+			wantAddDirUsageError(t, err, path, "sensitive host location")
+			if !strings.Contains(err.Error(), "$PATH") {
+				t.Errorf("error = %q, want the reason to mention $PATH", err.Error())
+			}
+		})
+	}
+	// A sibling of an entry is neither inside it nor a parent of it.
+	sibling := mkdir(t, tools, "project")
+	if got, err := resolveAddDirs([]string{sibling}, f.scope, f.home); err != nil || len(got) != 1 {
+		t.Fatalf("a sibling of a $PATH entry must be accepted, got %+v, %v", got, err)
+	}
+}
+
+// Relative and empty entries mean "the current directory" to a shell, and the
+// guard ignores them like every other relative environment value that names no
+// absolute location: the fixture runs in f.root, so honoring "." or "bin" would
+// refuse everything below it.
+func TestAddDirResolve_RelativeAndEmptyPathEntries_AddNoGuard(t *testing.T) {
+	f := newAddDirFixture(t)
+	absolute := mkdir(t, f.root, "tools", "bin")
+	relativeBin := mkdir(t, f.root, "bin")
+	t.Setenv("PATH", "bin:.::"+absolute+":"+os.Getenv("PATH"))
+	for _, path := range []string{relativeBin, f.other} {
+		if got, err := resolveAddDirs([]string{path}, f.scope, f.home); err != nil || len(got) != 1 {
+			t.Errorf("%s must be accepted next to relative and empty $PATH entries, got %+v, %v", path, got, err)
+		}
+	}
+	_, err := resolveAddDirs([]string{absolute}, f.scope, f.home)
+	wantAddDirUsageError(t, err, absolute, "sensitive host location")
+}
+
+func TestAddDirGuards_PathEntryAbsentOnThisHost_StillGuardsItsLocation(t *testing.T) {
+	newAddDirFixture(t)
+	t.Setenv("PATH", "/srv/tools/bin:"+os.Getenv("PATH"))
+	for _, target := range []string{"/srv/tools/bin", "/srv/tools/bin/child", "/srv/tools"} {
+		if !refusedBySomeGuard(t, "/home/dev", target) {
+			t.Errorf("target %q is accepted, want the absent $PATH entry guarded", target)
+		}
+	}
+	for _, target := range []string{"/srv/tools2", "/srv/other", "/srv/tools/src"} {
+		if refusedBySomeGuard(t, "/home/dev", target) {
+			t.Errorf("target %q is refused, want it accepted: neither inside the $PATH entry nor a parent of it", target)
+		}
+	}
+}
+
+// -- #1460: developer tool homes ----------------------------------------------
+
+// homeToolDirs are the tool homes derived from $HOME (relative to it): each is
+// refused, with everything inside it, wherever the tool runs from.
+var homeToolDirs = []string{
+	"go/bin", ".cargo", ".rustup", ".nvm", ".pyenv", ".volta", ".bun", ".deno", ".rbenv", ".asdf",
+	".local/share/mise", ".sdkman", ".npm-global",
+}
+
+func TestAddDirResolve_HomeToolHomes_AreUsageErrors(t *testing.T) {
+	f := newAddDirFixture(t)
+	for _, rel := range homeToolDirs {
+		t.Run(rel, func(t *testing.T) {
+			dir := mkdir(t, f.home, filepath.FromSlash(rel))
+			for _, path := range []string{dir, mkdir(t, dir, "inner", "deep")} {
+				_, err := resolveAddDirs([]string{path}, f.scope, f.home)
+				wantAddDirUsageError(t, err, path, "sensitive host location")
+			}
+		})
+	}
+	// A directory that holds a tool home is a parent of it: ~/go (holding
+	// ~/go/bin) and ~/.local/share (holding ~/.local/share/mise) are refused
+	// while a project beside the tool home is not.
+	for name, path := range map[string]string{
+		"parent of ~/go/bin":            mkdir(t, f.home, "go"),
+		"parent of ~/.local/share/mise": mkdir(t, f.home, ".local", "share"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := resolveAddDirs([]string{path}, f.scope, f.home)
+			wantAddDirUsageError(t, err, path, "sensitive host location")
+		})
+	}
+	for _, path := range []string{mkdir(t, f.home, "go", "src", "app"), mkdir(t, f.home, ".cargo-old"), mkdir(t, f.home, "code", "cargo")} {
+		if got, err := resolveAddDirs([]string{path}, f.scope, f.home); err != nil || len(got) != 1 {
+			t.Errorf("%s must be accepted, got %+v, %v", path, got, err)
+		}
+	}
+}
+
+func TestAddDirGuards_AbsentHomeToolHomes_AreGuardedAndUnrelatedDirectoriesAccepted(t *testing.T) {
+	newAddDirFixture(t)
+	for _, rel := range homeToolDirs {
+		target := filepath.Join("/home/dev", filepath.FromSlash(rel), "child")
+		if !refusedBySomeGuard(t, "/home/dev", target) {
+			t.Errorf("target %q is accepted, want the tool home guarded even when it does not exist", target)
+		}
+	}
+	for _, target := range []string{"/home/dev/code/app", "/home/dev/.config/other-tool", "/home/dev/.cargo-old", "/home/dev/gopher"} {
+		if guardedByPath(t, "/home/dev", target) {
+			t.Errorf("target %q is refused, want an unrelated directory accepted", target)
+		}
+	}
+}
+
+func TestAddDirResolve_RelocatedToolHomes_AreUsageErrorsWithInsideAndParent(t *testing.T) {
+	f := newAddDirFixture(t)
+	tools := mkdir(t, f.root, "tools")
+	gopath1, gopath2 := mkdir(t, tools, "gopath1"), mkdir(t, tools, "gopath2")
+	for name, tc := range map[string]struct {
+		env     string
+		value   string
+		guarded []string
+	}{
+		"GOBIN":       {"GOBIN", mkdir(t, tools, "gobin"), []string{filepath.Join(tools, "gobin")}},
+		"GOPATH":      {"GOPATH", gopath1 + ":" + gopath2, []string{filepath.Join(gopath1, "bin"), filepath.Join(gopath2, "bin")}},
+		"CARGO_HOME":  {"CARGO_HOME", mkdir(t, tools, "cargo"), []string{filepath.Join(tools, "cargo")}},
+		"RUSTUP_HOME": {"RUSTUP_HOME", mkdir(t, tools, "rustup"), []string{filepath.Join(tools, "rustup")}},
+		"NVM_DIR":     {"NVM_DIR", mkdir(t, tools, "nvm"), []string{filepath.Join(tools, "nvm")}},
+		"PYENV_ROOT":  {"PYENV_ROOT", mkdir(t, tools, "pyenv"), []string{filepath.Join(tools, "pyenv")}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv(tc.env, tc.value)
+			for _, dir := range tc.guarded {
+				mkdir(t, dir)
+				for label, path := range map[string]string{
+					"itself": dir, "inside": mkdir(t, dir, "inner"), "parent": filepath.Dir(dir),
+				} {
+					_, err := resolveAddDirs([]string{path}, f.scope, f.home)
+					if err == nil {
+						t.Errorf("%s (%s) %q is accepted, want a sensitive host location", label, tc.env, path)
+						continue
+					}
+					wantAddDirUsageError(t, err, path, "sensitive host location")
+				}
+			}
+			// A project beside the tool home, and a Go source tree next to the
+			// GOPATH bin directory, are neither inside nor a parent of it.
+			for _, path := range []string{mkdir(t, tools, "project"), mkdir(t, gopath1, "src", "app")} {
+				if got, err := resolveAddDirs([]string{path}, f.scope, f.home); err != nil || len(got) != 1 {
+					t.Errorf("%s must be accepted, got %+v, %v", path, got, err)
+				}
+			}
+		})
+	}
+}
+
+// Go itself rejects a relative GOBIN or GOPATH entry, so the guard ignores it;
+// the other tools resolve a relative home against their working directory, so
+// the guard follows them there (the fixture runs in f.root).
+func TestAddDirResolve_RelativeToolHomeValues_FollowTheToolsOwnRule(t *testing.T) {
+	f := newAddDirFixture(t)
+	relGoBin := mkdir(t, f.root, "relgobin")
+	relGoPath := mkdir(t, f.root, "relgopath", "bin")
+	t.Setenv("GOBIN", "relgobin")
+	t.Setenv("GOPATH", "relgopath")
+	for _, path := range []string{relGoBin, relGoPath, filepath.Dir(relGoPath)} {
+		if got, err := resolveAddDirs([]string{path}, f.scope, f.home); err != nil || len(got) != 1 {
+			t.Errorf("%s must be accepted: a relative GOBIN/GOPATH adds no guard, got %+v, %v", path, got, err)
+		}
+	}
+	relCargo := mkdir(t, f.root, "relcargo")
+	t.Setenv("CARGO_HOME", "relcargo")
+	_, err := resolveAddDirs([]string{relCargo}, f.scope, f.home)
+	wantAddDirUsageError(t, err, relCargo, "sensitive host location")
+}
+
+// -- #1460: tool config directories whose contents the host executes ---------
+
+// homeConfigDirs are the command-running config directories derived from $HOME
+// (relative to it).
+var homeConfigDirs = []string{
+	".config/git", ".config/fish", ".config/tmux", ".tmux", ".oh-my-zsh", ".config/nvim", ".vim", ".emacs.d",
+	".config/emacs", ".config/direnv", ".config/environment.d", ".config/containers", ".aws", ".kube",
+}
+
+// xdgConfigDirs are the children of an absolute $XDG_CONFIG_HOME the guard names.
+var xdgConfigDirs = []string{"git", "fish", "tmux", "nvim", "emacs", "direnv", "environment.d", "containers"}
+
+func TestAddDirResolve_HomeConfigDirectories_AreUsageErrors(t *testing.T) {
+	f := newAddDirFixture(t)
+	for _, rel := range homeConfigDirs {
+		t.Run(rel, func(t *testing.T) {
+			dir := mkdir(t, f.home, filepath.FromSlash(rel))
+			for _, path := range []string{dir, mkdir(t, dir, "inner")} {
+				_, err := resolveAddDirs([]string{path}, f.scope, f.home)
+				wantAddDirUsageError(t, err, path, "sensitive host location")
+			}
+		})
+	}
+	// The list is curated, not "all of ~/.config": a sibling tool stays mountable.
+	for _, path := range []string{mkdir(t, f.home, ".config", "other-tool"), mkdir(t, f.home, ".vim-old"), mkdir(t, f.home, ".kube-notes")} {
+		if got, err := resolveAddDirs([]string{path}, f.scope, f.home); err != nil || len(got) != 1 {
+			t.Errorf("%s must be accepted, got %+v, %v", path, got, err)
+		}
+	}
+}
+
+func TestAddDirGuards_AbsentHomeConfigDirectories_AreGuardedEvenWhenAbsentOnThisHost(t *testing.T) {
+	newAddDirFixture(t)
+	for _, rel := range homeConfigDirs {
+		target := filepath.Join("/home/dev", filepath.FromSlash(rel), "child")
+		if !refusedBySomeGuard(t, "/home/dev", target) {
+			t.Errorf("target %q is accepted, want the config directory guarded even when it does not exist", target)
+		}
+	}
+}
+
+func TestAddDirResolve_XDGRelocatedConfigDirectories_AreUsageErrorsAndOtherToolsAreNot(t *testing.T) {
+	f := newAddDirFixture(t)
+	xdgConfig := mkdir(t, f.root, "xdg", "config")
+	t.Setenv("XDG_CONFIG_HOME", xdgConfig)
+	for _, name := range xdgConfigDirs {
+		t.Run(name, func(t *testing.T) {
+			dir := mkdir(t, xdgConfig, name)
+			for _, path := range []string{dir, mkdir(t, dir, "inner")} {
+				_, err := resolveAddDirs([]string{path}, f.scope, f.home)
+				wantAddDirUsageError(t, err, path, "sensitive host location")
+			}
+		})
+	}
+	if got, err := resolveAddDirs([]string{mkdir(t, xdgConfig, "other-tool")}, f.scope, f.home); err != nil || len(got) != 1 {
+		t.Fatalf("a sibling of the relocated config dirs must be accepted, got %+v, %v", got, err)
+	}
+}
+
+// A relative $XDG_CONFIG_HOME is invalid by the XDG specification and ignored.
+func TestAddDirResolve_RelativeXDGConfigHome_AddsNoConfigGuard(t *testing.T) {
+	f := newAddDirFixture(t)
+	t.Setenv("XDG_CONFIG_HOME", "rel-config")
+	git := mkdir(t, f.root, "rel-config", "git")
+	if got, err := resolveAddDirs([]string{git}, f.scope, f.home); err != nil || len(got) != 1 {
+		t.Fatalf("a relative XDG_CONFIG_HOME must be ignored, got %+v, %v", got, err)
+	}
+}
+
+// -- #1460: the other-sandbox scan's building blocks ------------------------------
+
+func TestAddDirStrictlyInsideBind_OnlyATargetBelowTheSourceMatches(t *testing.T) {
+	f := newAddDirFixture(t)
+	source := mkdir(t, f.root, "other", "src")
+	link := filepath.Join(f.root, "src-link")
+	if err := os.Symlink(source, link); err != nil {
+		t.Fatal(err)
+	}
+	for name, tc := range map[string]struct {
+		target, source string
+		want           bool
+	}{
+		"a child of the source":                   {mkdir(t, source, "child"), source, true},
+		"a deeper descendant":                     {mkdir(t, source, "a", "b"), source, true},
+		"equal to the source":                     {source, source, false},
+		"the parent of the source":                {filepath.Dir(source), source, false},
+		"a grandparent of the source":             {f.root, source, false},
+		"a sibling of the source":                 {mkdir(t, f.root, "other", "sibling"), source, false},
+		"a sibling sharing the source's prefix":   {mkdir(t, f.root, "other", "src-notes"), source, false},
+		"a child, the source given as a symlink":  {filepath.Join(source, "child"), link, true},
+		"the source's own real path via the link": {source, link, false},
+		"a source that is absent on this host":    {mkdir(t, f.root, "elsewhere", "x"), filepath.Join(f.root, "absent", "src"), false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := strictlyInsideBind(tc.target, tc.source); got != tc.want {
+				t.Errorf("strictlyInsideBind(%q, %q) = %v, want %v", tc.target, tc.source, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestAddDirOtherSandboxWritableBinds_OnlyWorkspaceAndReposMountsCountAndMustBeAbsolute(t *testing.T) {
+	got, err := otherSandboxWritableBinds([]reuseMount{
+		{Source: "/srv/app", Destination: "/workspace"},
+		{Source: "/srv/lib/", Destination: "/repos/lib"},
+		// Mounts that are not read-write host binds cenci creates are ignored, even
+		// when their source is not a path.
+		{Source: "claude-cenci-home-app", Destination: "/home/dev"},
+		{Source: "cenci-agent-cli-claude", Destination: "/opt/cenci-agent"},
+		{Source: "/run/user/1000/cenci", Destination: "/run/user/1000/cenci"},
+		{Source: "relative", Destination: "/repository"},
+	})
+	if err != nil {
+		t.Fatalf("otherSandboxWritableBinds: %v", err)
+	}
+	if want := []string{"/srv/app", "/srv/lib"}; !slices.Equal(got, want) {
+		t.Errorf("sources = %q, want %q", got, want)
+	}
+
+	for name, m := range map[string]reuseMount{
+		"a named volume on /workspace": {Source: "workspace-vol", Destination: "/workspace"},
+		"a relative source on /repos":  {Source: "rel/dir", Destination: "/repos/x"},
+		"an empty source":              {Source: "", Destination: "/workspace"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got, err := otherSandboxWritableBinds([]reuseMount{m}); err == nil || !strings.Contains(err.Error(), "not an absolute host path") {
+				t.Errorf("otherSandboxWritableBinds(%+v) = %q, %v; want an error naming the non-absolute source", m, got, err)
+			}
+		})
+	}
+}
+
+// A bind follows the inode: when the host renames a running sandbox's source,
+// `inspect` still reports the old path and the agent still writes under the new
+// name, which no comparison on the reported path can relate to a target. The
+// sandbox is unverifiable, so it refuses; a source that exists passes.
+func TestAddDirRequireBindSourcesOnHost_AbsentSourceRefusesAndPresentOneDoesNot(t *testing.T) {
+	f := newAddDirFixture(t)
+	present := mkdir(t, f.root, "present")
+	gone := mkdir(t, f.root, "gone")
+	if err := os.RemoveAll(gone); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(f.root, "afile")
+	writeFile(t, file, "x")
+
+	if err := requireBindSourcesOnHost("claude-cenci-x", []reuseMount{
+		{Source: present, Destination: "/workspace"},
+		{Source: present, Destination: "/repos/lib"},
+		// Mounts that are not writable host binds are never examined.
+		{Source: gone, Destination: "/home/dev"},
+		{Source: "claude-cenci-home-app", Destination: "/opt/cenci-agent"},
+	}); err != nil {
+		t.Errorf("requireBindSourcesOnHost with only existing writable sources = %v, want nil", err)
+	}
+
+	for name, m := range map[string]reuseMount{
+		"a deleted /workspace source":      {Source: gone, Destination: "/workspace"},
+		"a deleted /repos source":          {Source: gone, Destination: "/repos/lib"},
+		"a path below a regular file":      {Source: filepath.Join(file, "sub"), Destination: "/workspace"},
+		"a dangling symlink as the source": {Source: dangling(t, f.root, gone), Destination: "/repos/x"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := requireBindSourcesOnHost("claude-cenci-x", []reuseMount{{Source: present, Destination: "/workspace"}, m})
+			if err == nil {
+				t.Fatal("requireBindSourcesOnHost = nil, want a refusal")
+			}
+			for _, want := range []string{"cannot be checked against other running sandboxes", "claude-cenci-x", strconv.Quote(m.Source), "no longer exists on the host"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error = %q, want it to contain %q", err.Error(), want)
+				}
+			}
+			if IsUsage(err) {
+				t.Errorf("a scan failure is a runtime error (exit 1), not a usage error: %v", err)
+			}
+		})
+	}
+}
+
+// A Stat error that is not "absent" says nothing about whether the source exists,
+// so it refuses too, with its own wording.
+func TestAddDirRequireBindSourcesOnHost_UnreadableSourceRefuses(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory search permission")
+	}
+	f := newAddDirFixture(t)
+	locked := mkdir(t, f.root, "locked")
+	source := mkdir(t, locked, "src")
+	if err := os.Chmod(locked, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+
+	err := requireBindSourcesOnHost("claude-cenci-x", []reuseMount{{Source: source, Destination: "/workspace"}})
+
+	if err == nil {
+		t.Fatal("requireBindSourcesOnHost = nil, want a refusal for a source that cannot be stat'ed")
+	}
+	for _, want := range []string{"cannot be checked against other running sandboxes", "claude-cenci-x", strconv.Quote(source), "cannot be examined on the host"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %q, want it to contain %q", err.Error(), want)
+		}
+	}
+}
+
+// dangling returns a symlink under root that points at the absent path gone.
+func dangling(t *testing.T, root, gone string) string {
+	t.Helper()
+	link := filepath.Join(root, "dangling-link")
+	if err := os.Symlink(gone, link); err != nil {
+		t.Fatal(err)
+	}
+	return link
+}
+
+// exitErrorWithStderr returns the *exec.ExitError a runtime that exits 1 with the
+// given stderr produces from the untimed .Output() the inspect probes use.
+func exitErrorWithStderr(t *testing.T, stderr string) error {
+	t.Helper()
+	_, err := exec.Command("sh", "-c", `printf '%s' "$1" >&2; exit 1`, "sh", stderr).Output()
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("fixture command error = %T %v, want an *exec.ExitError", err, err)
+	}
+	return err
+}
+
+func TestAddDirContainerVanished_OnlyANoSuchContainerOrObjectExitErrorCounts(t *testing.T) {
+	for stderr, want := range map[string]bool{
+		"Error: No such container: claude-cenci-x":      true,
+		"Error: No such object: claude-cenci-x":         true,
+		"Error: no such container claude-cenci-x":       true,
+		"Error: no such object: claude-cenci-x":         true,
+		"Error: permission denied":                      false,
+		"Error: No such volume: claude-cenci-x":         false,
+		"Cannot connect to the Docker daemon":           false,
+		"":                                              false,
+		"no such  container (two spaces, not the text)": false,
+	} {
+		t.Run(stderr, func(t *testing.T) {
+			err := exitErrorWithStderr(t, stderr)
+			if got := containerVanished(err); got != want {
+				t.Errorf("containerVanished(exit 1, stderr %q) = %v, want %v", stderr, got, want)
+			}
+			// The classification survives the "<runtime> inspect <name>: %w" wrap.
+			if got := containerVanished(fmt.Errorf("docker inspect x reuse posture: %w", err)); got != want {
+				t.Errorf("wrapped containerVanished(stderr %q) = %v, want %v", stderr, got, want)
+			}
+		})
+	}
+	// The same words in an error that is not an *exec.ExitError (a runtime that
+	// could not run at all) prove nothing about the container.
+	if containerVanished(errors.New("docker inspect x: no such container")) {
+		t.Error("a non-exit error must never count as a vanished container")
+	}
+}
+
+func TestAddDirScanOtherSandboxes_ListingFailureFailsClosed(t *testing.T) {
+	newAddDirFixture(t)
+	dryRunWithCallLog(t)
+	t.Setenv("FAKE_PS_EXIT", "1")
+
+	err := dryRunEngine().scanOtherSandboxes([]addDirMount{{Host: "/srv/x", Container: "/repos/x"}})
+
+	if err == nil || !strings.Contains(err.Error(), "cannot be checked against other running sandboxes") {
+		t.Fatalf("scanOtherSandboxes error = %v, want it to contain %q", err, "cannot be checked against other running sandboxes")
+	}
+	if IsUsage(err) {
+		t.Errorf("a scan failure is a runtime error (exit 1), not a usage error: %v", err)
 	}
 }

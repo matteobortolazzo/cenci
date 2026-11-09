@@ -414,7 +414,12 @@ func (e *Engine) warnUnsetForwardNames(ctx launchCtx) {
 //     step that may query the runtime, for the default memory limit; its
 //     LIMITS-001 error propagates unchanged), then createArgv is built via
 //     buildRunArgv (credential validation included — its hard error
-//     propagates unchanged), attaching=false.
+//     propagates unchanged), attaching=false. With --add-dir, scanOtherSandboxes
+//     then refuses a directory strictly inside another running sandbox's
+//     read-write mount (#1460), after the errors above so they keep their
+//     priority; it is the only extra runtime call a launch with --add-dir makes
+//     here, a launch without the flag makes none, and DryRun refuses exactly as a
+//     real launch does. The attach branch above runs no scan.
 //
 // attachArgv is always built (buildAgentExecArgv is pure and cannot fail)
 // since both branches need it: Launch's runAgent rebuilds it from the same
@@ -488,6 +493,13 @@ func (e *Engine) planArgvs(ctx launchCtx, opts Options, cenciBin, socketDir stri
 	createArgv, err = e.buildRunArgv(ctx.Agent, cenciBin, socketDir, cenciAvailable, ctx.Scope, opts, ctx.Home, ctx.DindOn, ctx.AzureOn, ctx.Plugins, ctx.AddDirs, limitArgs)
 	if err != nil {
 		return nil, nil, false, err
+	}
+	// After buildRunArgv, so the limit and credential errors keep their priority.
+	// Only a launch with --add-dir lists and inspects other sandboxes (#1460).
+	if len(ctx.AddDirs) > 0 {
+		if err := e.scanOtherSandboxes(ctx.AddDirs); err != nil {
+			return nil, nil, false, err
+		}
 	}
 	return createArgv, attachArgv, false, nil
 }
@@ -596,6 +608,19 @@ func (e *Engine) Launch(opts Options) error {
 	// container leaves that container in place instead of deleting it — a
 	// deliberate, no-worse-than-before behavior change, not an oversight.
 	_ = exec.Command(e.Runtime, "rm", ctx.Scope.ContainerName).Run()
+
+	// The last --add-dir check, as close to the create as it can be: the set
+	// resolved again must equal the validated one, and no other running sandbox
+	// may hold a writable mount above a target (#1460). It is deliberately
+	// sequenced AFTER the rm above, which is the last runtime call between
+	// validation and the create (the rm-swap tests in open_test.go pin the order),
+	// so a path swapped while it ran is still caught. A refusal here has already
+	// let the rm run, which only ever removes a stopped container.
+	if len(ctx.AddDirs) > 0 {
+		if err := e.recheckAddDirsBeforeCreate(ctx, opts); err != nil {
+			return err
+		}
+	}
 
 	// Start the shared container detached, then exec this agent into it: PID 1
 	// stays independent from every tmux pane, so closing the first pane can't

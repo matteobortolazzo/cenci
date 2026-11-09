@@ -168,6 +168,70 @@ func TestAddDirDryRun_UsageErrorMakesNoRuntimeCall(t *testing.T) {
 	}
 }
 
+// TestAddDirDryRun_TargetInsideAnotherRunningSandbox_RefusesWithAnEmptyPlan pins
+// #1460's parity rule: the other-sandbox scan runs in planArgvs' create branch, so
+// a preview refuses exactly where a real launch would, returns no plan and makes
+// no mutating runtime call.
+func TestAddDirDryRun_TargetInsideAnotherRunningSandbox_RefusesWithAnEmptyPlan(t *testing.T) {
+	repo := newAuditTestRepo(t)
+	parent, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	child := mkdir(t, parent, "child")
+	isolateAddDirEnv(t, t.TempDir())
+	t.Chdir(repo)
+	callLog := dryRunWithCallLog(t)
+	t.Setenv("FAKE_PS", "claude-cenci-x\n")
+	t.Setenv("FAKE_REUSE_POSTURE", "off|runc|0\n"+parent+"::/workspace\n\n")
+
+	plan, err := dryRunEngine().DryRun(Options{Agent: "claude", AddDirs: []string{child}})
+
+	if err == nil {
+		t.Fatalf("DryRun accepted %q inside another sandbox's /workspace %q, want a refusal", child, parent)
+	}
+	if IsUsage(err) {
+		t.Errorf("DryRun error = %v, want a plain error (exit 1), not a usage error", err)
+	}
+	for _, want := range []string{quoted(child), quoted(parent), "claude-cenci-x", "mounts read-write"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %q, want it to contain %q", err.Error(), want)
+		}
+	}
+	if len(plan.CreateArgv) != 0 || len(plan.AttachArgv) != 0 {
+		t.Errorf("a refused preview must return an empty plan, got create %q attach %q", plan.CreateArgv, plan.AttachArgv)
+	}
+	for _, line := range readCallLog(t, callLog) {
+		for _, forbidden := range []string{"run ", "create ", "rm ", "exec ", "start "} {
+			if strings.HasPrefix(line, forbidden) {
+				t.Errorf("--dry-run made a mutating runtime call %q", line)
+			}
+		}
+	}
+}
+
+// TestDryRun_WithoutAddDir_MakesNoReusePostureInspect is the no-flag pin: the
+// scan is gated on --add-dir, so a preview without it never lists-and-inspects
+// another sandbox even when one is running.
+func TestDryRun_WithoutAddDir_MakesNoReusePostureInspect(t *testing.T) {
+	repo := newAuditTestRepo(t)
+	isolateAddDirEnv(t, t.TempDir())
+	t.Chdir(repo)
+	callLog := dryRunWithCallLog(t)
+	t.Setenv("FAKE_PS", "claude-cenci-x\n")
+	t.Setenv("FAKE_REUSE_POSTURE", "off|runc|0\n/srv/other::/workspace\n\n")
+
+	if _, err := dryRunEngine().DryRun(Options{Agent: "claude"}); err != nil {
+		t.Fatalf("DryRun: %v", err)
+	}
+
+	for _, line := range readCallLog(t, callLog) {
+		if strings.HasPrefix(line, "inspect ") {
+			t.Errorf("a preview without --add-dir inspected a container: %q", line)
+		}
+	}
+}
+
 // -- attach argv content ---------------------------------------------------
 
 // TestDryRun_AttachArgv_ContainsExecAgentFlagsAndForwardedArgs pins the

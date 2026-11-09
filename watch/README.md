@@ -3115,20 +3115,58 @@ root with sudo, so a tmux socket is host code execution), and the directories wh
 (`~/.config/systemd`, `~/.local/share/systemd`, `$XDG_CONFIG_HOME/systemd`,
 `$XDG_CONFIG_HOME/autostart`, `$XDG_DATA_HOME/systemd`, `~/.config/autostart`
 and `~/Library/LaunchAgents`, where cenci's own autostart unit lives).
+Three more classes are refused the same way, each with everything inside it:
+the per-session socket directories under the temp roots (a direct child of
+`/tmp`, `/private/tmp`, `/var/tmp` or an absolute `$TMPDIR` named `ssh-*`,
+`tmux-*`, `emacs*`, `.ICE-unix`, `.XIM-unix`, `.font-unix` or
+`com.apple.launchd.*`, matched on the start of the name only and
+case-insensitively, so another session's `/tmp/ssh-XXXX` or another user's
+`/tmp/tmux-<uid>` is refused while `/tmp/app`, `/tmp/sshfoo`,
+`/tmp/my-tmux-notes` and `/var/tmp/build` are accepted); the directories the
+host runs programs from, which are every absolute `$PATH` entry of the
+launching process (the refusal names `$PATH`; an empty or relative entry such as
+`.` or `bin` adds no guard, and an entry only an interactive shell adds is not
+covered when `cenci` or `cn` is launched from a minimal environment)
+and the developer tool homes `~/go/bin`, `$GOBIN`, the `bin` of each absolute
+`$GOPATH` entry, `~/.cargo` / `$CARGO_HOME`, `~/.rustup` / `$RUSTUP_HOME`,
+`~/.nvm` / `$NVM_DIR`, `~/.pyenv` / `$PYENV_ROOT`, `~/.volta`, `~/.bun`,
+`~/.deno`, `~/.rbenv`, `~/.asdf`, `~/.local/share/mise`, `~/.sdkman` and
+`~/.npm-global` (a relative `$GOBIN` or `$GOPATH` entry is ignored, as Go
+ignores it; a relative `$CARGO_HOME`, `$RUSTUP_HOME`, `$NVM_DIR` or
+`$PYENV_ROOT` resolves against the current directory); and the tool config
+directories whose contents the host executes, `~/.config/git`,
+`~/.config/fish`, `~/.config/tmux`, `~/.tmux`, `~/.oh-my-zsh`,
+`~/.config/nvim`, `~/.vim`, `~/.emacs.d`, `~/.config/emacs`,
+`~/.config/direnv`, `~/.config/environment.d`, `~/.config/containers`,
+`~/.aws` and `~/.kube`, plus the `git`, `fish`, `tmux`, `nvim`, `emacs`,
+`direnv`, `environment.d` and `containers` directories under an absolute
+`$XDG_CONFIG_HOME` (`~/.config` as a whole is not refused, so
+`~/.config/other-tool` is accepted). Each `$PATH` entry, tool home and config
+directory is refused as a parent too, so a project whose own `bin` directory
+is on `$PATH` (a direnv `PATH_add`, a nix dev shell, `node_modules/.bin`) is
+refused as a parent of that `$PATH` entry unless you take that `bin` off
+`$PATH` for the launch. A tool home or config directory that does not exist on
+this host adds a harmless guard.
 The directory of a socket (`$TMUX`, `$SSH_AUTH_SOCK`) is refused together with
 its parents but not its children, since a socket is exposed only by mounting its
 directory or an ancestor: a socket directly in `$HOME` refuses `$HOME`, not the
 projects inside it. A relative `$SSH_AUTH_SOCK` or `$TMUX_TMPDIR` is resolved
 against the current directory, the way ssh and tmux resolve it, and an empty one
-adds no guard; a relative `$TMPDIR` or `XDG_*` value is ignored, as the XDG
-specification says. `/run` is refused as a whole, including `/run/media` where
+adds no guard; a relative `$TMPDIR` or `XDG_*` value is ignored, since its
+meaning depends on the directory of the tool that reads it (a documented gap:
+git, for one, does use a relative `$XDG_CONFIG_HOME`). `/run` is refused as a whole, including `/run/media` where
 removable drives automount, so copy such a repository elsewhere first. `/srv`,
-`/mnt`, `/home` and the other directories inside `/var`, `/opt` and `/tmp` are
-not refused, since repositories live there. The list is a denylist, not
-exhaustive: it refuses only the locations named above (the host tmux, ssh-agent
-via `$SSH_AUTH_SOCK`, X11 and emacs sockets and the container runtime and agent
-directories), so other socket directories under `/tmp`, for example the
-`/tmp/ssh-*` directories of other ssh sessions, are not covered. Mount only
+`/mnt`, `/home` and the other directories inside `/var`, `/opt` and `/tmp`
+(apart from the socket directories named above) are not refused, since
+repositories live there. The list is a denylist, not exhaustive: it refuses
+only the locations named above, so it does not cover other command-running
+config elsewhere in `$HOME`, sockets outside the temp roots, relative `$PATH`
+entries, sandboxes on the other container runtime or on another daemon or
+connection of the same runtime (another `DOCKER_HOST` or `DOCKER_CONTEXT`,
+rootful against rootless podman, a `podman --connection`; the other-sandbox
+check below scans only the runtime connection the launch uses), or the residual window between the
+pre-create re-check below and the runtime's own bind resolution (that check also cannot detect a
+running sandbox's source renamed and then recreated at the old name: the old path exists again). Mount only
 directories you would hand to the agent anyway. The denylist and the primary-workspace check run on
 both the as-typed absolute path and the symlink-resolved path, on every
 spelling of a repeated directory (so acceptance never depends on argument
@@ -3158,6 +3196,37 @@ still forwarded verbatim, with no translation and no mount. `--dry-run`
 prints the `-v <host>:/repos/<slug>` pair and the forwarded
 `--add-dir=/repos/<slug>` token without creating anything. OpenCode stays
 blocked.
+
+Two more checks guard the gap between validating a path and the runtime
+binding it, in which a path component can be swapped for a symlink only by the
+agent of another running cenci sandbox that mounts a parent of the target
+read-write. Both apply only to a launch that creates a container with
+`--add-dir`, and both fail closed. First, the launch lists the running sandboxes
+on the launch runtime and reads each one's `/workspace` and `/repos/<slug>` bind
+sources; a directory strictly inside one of those sources is refused with
+exit 1 and nothing created, by one line naming the target, the source and the
+container (`--add-dir "<target>" is inside "<source>", which running sandbox
+<name> mounts read-write: …`). A directory equal to such a source, or a parent
+of it, is accepted, since the other agent cannot rename its own mount point; the
+source is compared as the runtime reports it, symlink-resolved and by file
+identity. `cenci open --dry-run` refuses identically. A listing or inspect
+failure, a mount source that is not an absolute path, or a running sandbox
+whose `/workspace` or `/repos/*` source no longer exists at the path the runtime
+reports, or cannot be examined on the host (stop that sandbox first), exits 1
+with
+`--add-dir cannot be checked against other running sandboxes: …`; the only
+skipped case is a container that vanished between the listing and its inspect
+(`no such container` or `no such object`). Second, after the stopped
+same-name container is removed and immediately before the create, the launch
+re-resolves the `--add-dir` values, which must equal the validated set (host
+paths, mount points and order), and repeats the scan. Any difference exits 1
+with `--add-dir directories changed between validation and container create
+(validated …, now …); nothing was created`, and nothing is created; a
+re-resolution failure, such as a directory deleted in between, is returned
+unchanged as a usage error (exit 2, `does not exist`). Attaching to a running
+container with the same set runs neither check, a launch without `--add-dir`
+makes no extra runtime call, and `cenci audit --add-dir` runs neither (it
+creates nothing; it does apply the denylist).
 
 `--dry-run` renders the branch a real launch would actually take, followed by
 the full `cenci audit` posture breakdown (see below), without creating any

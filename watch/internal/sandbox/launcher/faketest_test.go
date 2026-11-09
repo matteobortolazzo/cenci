@@ -78,6 +78,17 @@ import (
 //	                     stay byte-parallel with sandbox_clitest_helpers_test.go's
 //	                     writeScriptedRuntime FAKE_REUSE_POSTURE var (#493
 //	                     keep-in-sync note).
+//	FAKE_REUSE_POSTURE_STDERR → (#1460) text written to stderr by the same
+//	                     reuse-posture `inspect`, before its stdout; unset or
+//	                     empty prints nothing. This hook is parity with
+//	                     writeScriptedRuntime's (#493 keep-in-sync note): the
+//	                     launcher tests here do not script the failure or
+//	                     vanished-container cases, which are exercised through
+//	                     the CLI tests' writeScriptedRuntime in
+//	                     watch/open_test.go. The scripted runtime's stateful
+//	                     FAKE_RM_ARM_REUSE_POSTURE_FAIL hook has no
+//	                     counterpart here on purpose: no launcher test needs a
+//	                     runtime whose answer changes after the `rm`.
 //	FAKE_INSPECT_STATE  → `inspect --format ...` stdout for the
 //	                     "{{.State.Status}} {{.State.ExitCode}}" format
 //	                     containerStartupState uses (Diagnose's
@@ -358,7 +369,9 @@ inspect)
     printf '%s\n' "$result"
     exit "$(fe INSPECT_IMAGE)"
     ;;
-  *'cenci-sand.dind'*) fvb REUSE_POSTURE "|runc|0\nworkspace-vol::/workspace\n\n" ;;
+  *'cenci-sand.dind'*)
+    rs="$(fv REUSE_POSTURE_STDERR "")"; [ -z "$rs" ] || printf '%s\n' "$rs" >&2
+    fvb REUSE_POSTURE "|runc|0\nworkspace-vol::/workspace\n\n" ;;
   *State.Status*) fv INSPECT_STATE "running 0"; printf '\n' ;;
   *'.RW'*) fvb INSPECT_MOUNTS "" ;;
   esac
