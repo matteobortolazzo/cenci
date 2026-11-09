@@ -28,7 +28,12 @@ const (
 	reasonLabelMissing      = "ticket lacks automerge:ok"
 	reasonNoChecks          = "no CI checks reported"
 	reasonRepairPending     = "CI repair pending"
-	reasonReviewPending     = "review feedback pending"
+	// reasonRepairWorkerLive (#1457) holds while this PR's ci-repair or
+	// merge-repair worker (owned or of unknown ownership) is still running:
+	// it may still push, and a merge worker that outlives a clear GitHub read
+	// has no other hold. Checked first in the review stage.
+	reasonRepairWorkerLive = "branch repair worker still running"
+	reasonReviewPending    = "review feedback pending"
 	// The four #850 feedback-hold reasons: distinct from reasonReviewPending
 	// (an ordinary, resolvable hold) because none of these states can ever
 	// resolve on their own -- an unreadable/truncated/unknown/unsupported
@@ -310,7 +315,10 @@ type automergeInputs struct {
 	LabelsErr     error
 
 	RepairPending bool
-	PendingKeys   []string
+	// RepairWorkerLive (#1457) is this tick's pane inventory verdict: a live
+	// ci-repair or merge-repair worker for this PR. Never stored.
+	RepairWorkerLive bool
+	PendingKeys      []string
 	// FeedbackHold is the feedback-resolution verdict for this evaluation
 	// pass -- reconcileFeedback's (tick's own mutating resolution pass) or
 	// revalidateFeedback's (the pre-merge recheck's read-only pass, #885):
@@ -538,8 +546,11 @@ func evaluateAutomerge(in automergeInputs) automergeDecision {
 	}
 	pass("ci")
 
-	// 4. !RepairPending && detection reads proven complete && no feedback
-	// hold && len(PendingKeys) == 0.
+	// 4. no live branch repair worker && !RepairPending && detection reads
+	// proven complete && no feedback hold && len(PendingKeys) == 0.
+	if in.RepairWorkerLive {
+		return fail("review", reasonRepairWorkerLive)
+	}
 	if in.RepairPending {
 		return fail("review", reasonRepairPending)
 	}
@@ -697,6 +708,17 @@ const detailMaxLen = 200
 // free to break that one-line contract or corrupt the persisted state file;
 // every rune below 0x20, plus DEL (0x7f), is replaced with a single space.
 func sanitizeDetail(detail string) string {
+	return sanitizeBounded(detail, detailMaxLen)
+}
+
+// workerNoteMaxLen bounds the supervisor's own recovery notes in Detail
+// (#1457). They are longer than detailMaxLen allows for raw `gh` output, and
+// the instruction they carry must survive whole; the bound still caps the
+// session name a note echoes.
+const workerNoteMaxLen = 1024
+
+// sanitizeBounded is sanitizeDetail with an explicit byte bound.
+func sanitizeBounded(detail string, maxLen int) string {
 	var sb strings.Builder
 	sb.Grow(len(detail))
 	for _, r := range detail {
@@ -707,11 +729,11 @@ func sanitizeDetail(detail string) string {
 		sb.WriteRune(r)
 	}
 	sanitized := sb.String()
-	if len(sanitized) > detailMaxLen {
+	if len(sanitized) > maxLen {
 		// Walk back from the byte cutoff to the nearest rune start so a
-		// multi-byte UTF-8 character straddling detailMaxLen is never split
+		// multi-byte UTF-8 character straddling maxLen is never split
 		// mid-encoding in the persisted state file or log line.
-		cut := detailMaxLen
+		cut := maxLen
 		for cut > 0 && !utf8.RuneStart(sanitized[cut]) {
 			cut--
 		}
@@ -1138,11 +1160,15 @@ func recordUpstreamReadFailure(s *State, reason string, err error) {
 // s.AddressedKeys already reflect GitHub-authoritative resolution (including
 // any reopen) by the time runAutomerge reads them below. It persists exactly one decision via
 // recordDecision and returns whether a merge was actually issued this tick,
-// so tick can reset the backoff delay.
-func runAutomerge(s *State, pr prView, checks []check, verdict feedbackVerdict, commentsComplete, reviewsComplete bool) bool {
+// so tick can reset the backoff delay. workerLive is tick's pane inventory
+// verdict (#1457) and workerNote its recovery instructions (unknown ownership,
+// legacy hold); the note leads the recorded Detail for every outcome,
+// including automerge disabled, so `cenci babysit status` readers see it.
+func runAutomerge(s *State, pr prView, checks []check, verdict feedbackVerdict, commentsComplete, reviewsComplete, workerLive bool, workerNote string) bool {
 	in := automergeInputs{
 		Enabled:          loadFleetEnabled(),
 		Checks:           checks,
+		RepairWorkerLive: workerLive,
 		RepairPending:    s.RepairPending,
 		PendingKeys:      s.PendingKeys,
 		FeedbackHold:     verdict.Hold,
@@ -1302,6 +1328,13 @@ func runAutomerge(s *State, pr prView, checks []check, verdict feedbackVerdict, 
 		}
 	}
 
+	if workerNote != "" {
+		note := sanitizeBounded(workerNote, workerNoteMaxLen)
+		if decision.Detail != "" {
+			note += "; " + decision.Detail
+		}
+		decision.Detail = note
+	}
 	recordDecision(s, decision, merged)
 	return merged
 }

@@ -105,21 +105,40 @@ type ciCapEnv struct {
 	attempts    int
 	sessionUp   func(attempt int) bool
 	killAtSleep int
+	// panes answers tick k's (the pr view number's) tmux pane inventory (#1457;
+	// nil: no repair worker), and inventoryReads[k] counts tick k's reads: proof
+	// that a tick read the inventory at most once.
+	panes          func(tick int) (string, error)
+	inventoryReads map[int]int
+	// agent is the supervisor's recorded agent (default claude).
+	agent string
 }
 
 func newCICapEnv(t *testing.T, steps ...ciCapStep) *ciCapEnv {
 	t.Helper()
 	t.Setenv("CENCI_SANDBOX", "")
 	t.Setenv("CENCI_BABYSIT_SUPERVISOR", "1")
-	e := &ciCapEnv{t: t, dir: t.TempDir(), steps: steps, commentReads: map[int]int{}, reviewReads: map[int]int{}}
+	e := &ciCapEnv{t: t, dir: t.TempDir(), steps: steps, commentReads: map[int]int{}, reviewReads: map[int]int{}, inventoryReads: map[int]int{}, agent: "claude"}
 	e.path = statePath(e.dir, "o/r", "42")
 
 	originalGh, originalCommand := execGh, command
 	originalTmux, originalSleep := tmuxHasSession, sleep
+	originalInventory := tmuxPaneInventory
 	t.Cleanup(func() {
 		execGh, command = originalGh, originalCommand
 		tmuxHasSession, sleep = originalTmux, originalSleep
+		tmuxPaneInventory = originalInventory
 	})
+	tmuxPaneInventory = func(socket, session string) (string, error) {
+		e.inventoryReads[e.viewN]++
+		if session != "work" {
+			t.Errorf("inventory read of session %q, want the recorded work", session)
+		}
+		if e.panes == nil {
+			return noWorkerInventory, nil
+		}
+		return e.panes(e.viewN)
+	}
 
 	execGh = e.gh
 	command = func(name string, args ...string) ([]byte, error) {
@@ -213,7 +232,7 @@ func ciCapJSONField(args []string) string {
 func (e *ciCapEnv) seed(s State) {
 	e.t.Helper()
 	s.SchemaVersion = stateSchemaVersion
-	s.PR, s.Repo, s.Agent = "42", "o/r", "claude"
+	s.PR, s.Repo, s.Agent = "42", "o/r", e.agent
 	s.IntervalSeconds = 60
 	if err := save(e.path, s); err != nil {
 		e.t.Fatal(err)
@@ -221,7 +240,7 @@ func (e *ciCapEnv) seed(s State) {
 }
 
 func (e *ciCapEnv) opts(once bool) Options {
-	return Options{PR: "42", Agent: "claude", StateDir: e.dir, Interval: time.Minute, Once: once, Session: "work", Dir: "/repo/root"}
+	return Options{PR: "42", Agent: e.agent, StateDir: e.dir, Interval: time.Minute, Once: once, Session: "work", Dir: ownedRepoDir}
 }
 
 func (e *ciCapEnv) run() error {
@@ -784,23 +803,70 @@ func TestCICap_AC10_RestartedSupervisorDoesNotRenotifyOrRepair(t *testing.T) {
 
 // -- Edge cases --------------------------------------------------------------
 
+// #1457: the third worker ended without fixing its head. The unchanged
+// failing head is eligible again, so the tick takes the cap branch and opens
+// exactly one CI retry cap attention; no fourth ci-repair launches.
 func TestCICap_Edge_ThirdWorkersHeadStillFailingLaunchesNothing(t *testing.T) {
 	e := newCICapEnv(t,
 		ciCapTickOf(ciCapOpen("head-a"), ciCapFailing), // still the head the third ci-repair worked on
+		ciCapTickOf(ciCapOpen("head-a"), ciCapFailing), // already notified
 		ciCapMerged(),
 	)
-	e.seed(atCap(func(s *State) { s.LastHeadSHA, s.LastRepairedSHA = "head-a", "head-a" }))
+	e.seed(atCap(func(s *State) {
+		s.LastHeadSHA, s.LastRepairedSHA, s.CIRepairTracked = "head-a", "head-a", true
+	}))
 
 	if err := e.run(); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 
-	if e.attempts != 0 || e.launches("ci-repair") != 0 || e.launches("babysit-attention") != 0 {
-		t.Errorf("launch attempts=%d ci-repair=%d babysit-attention=%d, want none: re-eligibility of this head is #1457's job",
-			e.attempts, e.launches("ci-repair"), e.launches("babysit-attention"))
+	if e.launches("ci-repair") != 0 {
+		t.Errorf("ci-repair launches = %d, want 0 at the cap", e.launches("ci-repair"))
 	}
-	if s := e.after(1); s.CIRepairPaused || s.CICapNotified {
-		t.Errorf("the cap branch ran for an already-repaired head: ciRepairPaused=%v ciCapNotified=%v", s.CIRepairPaused, s.CICapNotified)
+	arg, ok := launchArg(e.calls, "babysit-attention")
+	if n := e.launches("babysit-attention"); n != 1 || !ok || arg != "42 CI retry cap reached" {
+		t.Errorf("babysit-attention launches = %d (arg %q), want exactly 1 with %q", n, arg, "42 CI retry cap reached")
+	}
+	if s := e.after(1); !s.CIRepairPaused || !s.CICapNotified || s.FixAttempts != fixCap {
+		t.Errorf("after the cap tick: ciRepairPaused=%v ciCapNotified=%v ciFixAttempts=%d, want true/true/%d", s.CIRepairPaused, s.CICapNotified, s.FixAttempts, fixCap)
+	}
+}
+
+// #1457: a cap notification still pending while a writer is live waits for no
+// writer; then it opens exactly once.
+func TestCICap_Edge_PendingNotificationWaitsForTheLiveWriter(t *testing.T) {
+	e := newCICapEnv(t,
+		ciCapTickOf(ciCapOpen("head-a"), ciCapFailing), // tick 1: the last ci-repair worker is still live
+		ciCapTickOf(ciCapOpen("head-a"), ciCapFailing), // tick 2: a manual merge-repair is live
+		ciCapTickOf(ciCapOpen("head-a"), ciCapFailing), // tick 3: no writer: the attention opens
+		ciCapTickOf(ciCapOpen("head-a"), ciCapFailing), // tick 4: already notified
+		ciCapMerged(),
+	)
+	e.panes = panesByTick(liveCI(), paneRowOf("42-merge-repair", false, ownedRepoDir), deadCI(), deadCI())
+	e.seed(atCap(func(s *State) { s.CIRepairPaused, s.CIRepairTracked = true, true }))
+
+	if err := e.run(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	for _, tick := range []int{1, 2} {
+		if s := e.after(tick); s.CICapNotified {
+			t.Errorf("tick %d: the attention was sent while a writer was live", tick)
+		}
+	}
+	if s := e.after(3); !s.CICapNotified || !s.CIRepairPaused {
+		t.Errorf("tick 3: ciCapNotified=%v ciRepairPaused=%v, want the notification sent once no writer is live", s.CICapNotified, s.CIRepairPaused)
+	}
+	if n := e.launches("babysit-attention"); n != 1 {
+		t.Errorf("babysit-attention launches = %d, want 1", n)
+	}
+	if n := e.launches("ci-repair") + e.launches("merge-repair"); n != 0 {
+		t.Errorf("repair launches = %d, want 0", n)
+	}
+	for tick := 1; tick <= 4; tick++ {
+		if e.inventoryReads[tick] != 1 {
+			t.Errorf("tick %d: inventory reads = %d, want exactly 1", tick, e.inventoryReads[tick])
+		}
 	}
 }
 

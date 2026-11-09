@@ -30,11 +30,12 @@ const defaultResetInterval = 15 * time.Minute
 // a reset lifts fixCap, the bound on automated repair launches, so it refuses
 // inside a sandbox and no event-socket kind or daemon handler carries it.
 //
-// Only seven fields are cleared: the five budget fields (ciFixAttempts,
+// Only eight fields are cleared: the five budget fields (ciFixAttempts,
 // ciRepairPending, lastRepairedCiHeadSha, conflictFixAttempts,
-// conflictNotifiedHeadSha) and the two CI-cap episode markers (ciRepairPaused,
-// ciCapNotified, #1456); feedback bookkeeping and conflictRepairHeadSha are
-// kept. A CI-paused supervisor keeps its pid while paused, so a recorded pid
+// conflictNotifiedHeadSha), the two CI-cap episode markers (ciRepairPaused,
+// ciCapNotified, #1456) and the ci-repair tracking marker (ciRepairTracked,
+// #1457), so a legacy same-head hold ends too; feedback bookkeeping and
+// conflictRepairHeadSha are kept. A CI-paused supervisor keeps its pid while paused, so a recorded pid
 // has three outcomes (#1490):
 //   - owned and live: processOwned verifies it, it is sent SIGTERM and awaited
 //     for resetExitWait.
@@ -135,6 +136,7 @@ func Reset(pr, explicit string, refusal func(agent string) string) error {
 	s.ConflictNotifiedSHA = ""
 	s.CIRepairPaused = false
 	s.CICapNotified = false
+	s.CIRepairTracked = false
 	s.PID = 0
 	s.UpdatedAt = time.Now().UTC()
 	if err := save(path, s); err != nil {

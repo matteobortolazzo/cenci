@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -68,25 +69,19 @@ type State struct {
 	// rerun ends a CI-paused episode too. It is kept as recorded history.
 	LastHeadSHA string `json:"lastCiHeadSha,omitempty"`
 	// LastRepairedSHA (#1169) is the head commit SHA the failing-checks
-	// branch below last dispatched a ci-repair launch for -- purely
-	// additive `omitempty`, no stateSchemaVersion bump, mirroring
-	// ConflictNotifiedSHA/ChecksAbsentHeadSHA above: its zero value already
-	// means "never repaired", so no migration is needed for a state file
-	// written before this field existed. Dedicated rather than reusing
-	// LastHeadSHA, which used to gate the retry-budget reset.
+	// branch last dispatched a ci-repair launch for -- purely additive
+	// `omitempty`, no stateSchemaVersion bump. Set only after a CI repair
+	// launch is dispatched; a conflicting tick defers CI repair without
+	// consuming it or the retry budget.
 	//
-	// The two were never safe to conflate. Before #1169 the dispatch guard
-	// keyed on LastHeadSHA, which the reset branch advanced on *every*
-	// tick where checks were not red yet -- pending, or green-so-far. A
-	// fresh push therefore burned the only edge the guard could fire on
-	// before CI had reported anything, and a red result arriving later at
-	// that same head commit was unreachable forever: babysit went quiet on
-	// a failing PR and backed off to the 1h ceiling (#1169's root cause).
-	// Splitting the two fixed that; the reset branch below advances
-	// LastHeadSHA only on a green tick.
-	//
-	// Set only after a CI repair launch succeeds. A conflicting tick defers
-	// CI repair without consuming this dispatch marker or its retry budget.
+	// It no longer gates dispatch (#1457): a live `<PR>-ci-repair` or
+	// `<PR>-merge-repair` worker does, read fresh from the pane inventory on
+	// every tick, so an ended worker is retried at an unchanged head until
+	// fixCap. It is kept as history and for the legacy gate: a value equal to
+	// the failing head with no CIRepairTracked marker was written by an older
+	// supervisor whose worker cannot be probed, so that head keeps the old
+	// same-head hold (with a recovery instruction) until the head changes or
+	// `cenci babysit reset` clears it.
 	LastRepairedSHA string   `json:"lastRepairedCiHeadSha,omitempty"`
 	FixAttempts     int      `json:"ciFixAttempts"`
 	RepairPending   bool     `json:"ciRepairPending"`
@@ -198,6 +193,13 @@ type State struct {
 	// handled by deriveLegacyCIPause in Run.
 	CIRepairPaused bool `json:"ciRepairPaused,omitempty"`
 	CICapNotified  bool `json:"ciCapNotified,omitempty"`
+	// CIRepairTracked (#1457) marks that LastRepairedSHA was written by a
+	// supervisor that dedups ci-repair launches on worker liveness: it is set
+	// with LastRepairedSHA on every dispatched launch and cleared by a host
+	// reset. Its absence beside a LastRepairedSHA equal to the failing head is
+	// the legacy same-head hold (a pre-#1457 worker cannot be probed). Additive
+	// `omitempty`, no stateSchemaVersion bump.
+	CIRepairTracked bool `json:"ciRepairTracked,omitempty"`
 
 	// Automerge fields (#824). The supervisor's detached mode sets
 	// cmd.Stdout = nil, so the automerge decision log line only reaches a
@@ -724,15 +726,47 @@ func tick(s *State) (bool, time.Duration, error) {
 		clearChecksClock(s)
 	}
 	actionable := s.CIStatus == ciStatusPending || (s.CIStatus == ciStatusFailing && s.RepairPending)
+	// #1457: branch-writer liveness comes from one pane inventory per tick,
+	// read lazily the first time a decision needs it and memoized, so a quiet
+	// green tick never probes. With no recorded session there is nothing to
+	// read: launch() refuses with its own error instead. An unreadable inventory
+	// fails the tick (watch/docs/error-handling.md), never "no worker".
+	var observed *workerLiveness
+	live := func() (workerLiveness, error) {
+		if observed == nil {
+			w := workerLiveness{}
+			if s.LaunchSession != "" {
+				var err error
+				if w, err = observeWorkers(s); err != nil {
+					recordUpstreamReadFailure(s, reasonWorkflowLaunchFailed, err)
+					return w, err
+				}
+			}
+			observed = &w
+		}
+		return *observed, nil
+	}
+	// workerNotes carries this tick's recovery instructions into AutomergeDetail.
+	var workerNotes []string
 	// Conflict repair owns the branch ahead of CI repair and review work.
 	conflicting := prConflicting(pr)
 	if prConflictCleared(pr) && (s.ConflictNotifiedSHA != "" || s.ConflictRepairSHA != "" || s.ConflictFixAttempts != 0) {
 		// Release before CI dispatch: even a CI retry-cap return must retain
-		// the authoritative observation that this conflict episode ended.
-		s.ConflictNotifiedSHA = ""
-		s.ConflictRepairSHA = ""
-		s.ConflictFixAttempts = 0
-		s.Status = "running"
+		// the authoritative observation that this conflict episode ended. A
+		// merge-repair worker that outlives GitHub's clear read may still push,
+		// so the release waits for the first clear tick after it has ended.
+		w, err := live()
+		if err != nil {
+			return false, 0, err
+		}
+		if w.mergeLive {
+			fmt.Printf("PR #%s reports no merge conflicts, but merge-repair window %s-merge-repair is still running; keeping the conflict episode until it ends\n", s.PR, s.PR)
+		} else {
+			s.ConflictNotifiedSHA = ""
+			s.ConflictRepairSHA = ""
+			s.ConflictFixAttempts = 0
+			s.Status = "running"
+		}
 	}
 	// UNKNOWN is not proof that a repair finished. Keep other branch writers
 	// deferred until GitHub authoritatively reports this episode clear.
@@ -746,7 +780,49 @@ func tick(s *State) (bool, time.Duration, error) {
 			failing = append(failing, c.Name)
 		}
 	}
-	if !conflictHeld && len(failing) > 0 && pr.HeadRefOID != s.LastRepairedSHA {
+	// At most one branch writer launches per tick, in priority order: merge
+	// repair for an observed conflict, then CI repair, then address-review
+	// below. A live CI or merge worker for this PR suppresses all of them.
+	ciLaunched := false
+	switch {
+	case conflicting:
+		// Merge repair is independent of automerge policy. A successful
+		// dispatch keeps polling so a repaired push can release the hold.
+		actionable = true
+		if pr.HeadRefOID == "" {
+			// No key to dedup on -- opening a window every tick would be
+			// wrong (the Assumptions' degenerate case), so this only
+			// observes and prints, leaving repair bookkeeping untouched.
+			// reasonHeadSHAUnknown's own automerge hold already covers the
+			// same underlying condition.
+			fmt.Printf("PR #%s has merge conflicts but its head commit SHA is unknown; not opening a new merge-repair window\n", s.PR)
+			break
+		}
+		if err := repairConflict(s, pr, live); err != nil {
+			return false, 0, err
+		}
+	case !conflictHeld && len(failing) > 0:
+		if !s.CIRepairTracked && s.LastRepairedSHA != "" && s.LastRepairedSHA == pr.HeadRefOID {
+			// Legacy hold: a state written before #1457 recorded this head's
+			// launch without the tracking marker, and that worker (possibly a
+			// pre-#1455 slug-named window) cannot be probed. Keep the old
+			// same-head dedup and say how to recover, rather than silently
+			// treating the worker as gone. A head change or a reset ends it.
+			note := fmt.Sprintf("ci-repair was already launched for head commit %s by an earlier cenci version and cannot be tracked; let that worker finish in tmux session %s, or run cenci babysit reset %s to retry this head", pr.HeadRefOID, s.LaunchSession, s.PR)
+			fmt.Printf("PR #%s has failing CI checks: %s\n", s.PR, note)
+			workerNotes = append(workerNotes, note)
+			break
+		}
+		w, err := live()
+		if err != nil {
+			return false, 0, err
+		}
+		if w.any() {
+			// No launch and no attempt consumed, at this head or a new one:
+			// an ended worker is retried on the first tick after it ends.
+			fmt.Printf("PR #%s has failing CI checks at head commit %s; %s, no new window opened\n", s.PR, pr.HeadRefOID, w.describe(s.PR))
+			break
+		}
 		if s.FixAttempts >= fixCap {
 			// #1456: the CI budget is used up. Record the lasting paused
 			// episode, open the one babysit-attention session for it, and fall
@@ -754,6 +830,8 @@ func tick(s *State) (bool, time.Duration, error) {
 			// automerge, MERGED/CLOSED detection on later ticks) keeps running.
 			// Only CI repair is paused. The pause is cleared by a fresh green
 			// result below or a host reset, never by a poll, push or restart.
+			// #1457: reached only with no live writer, whether or not the head
+			// ever changed.
 			s.CIRepairPaused = true
 			if !s.CICapNotified {
 				if err := launch(s, "babysit-attention", s.PR+" CI retry cap reached"); err != nil {
@@ -768,25 +846,24 @@ func tick(s *State) (bool, time.Duration, error) {
 				}
 				s.CICapNotified = true
 			}
-		} else {
-			dispatched, err := dispatchCIRepair(s, pr, failing)
-			if err != nil {
-				recordUpstreamReadFailure(s, reasonWorkflowLaunchFailed, err)
-				return false, 0, err
-			}
-			if dispatched {
-				// Consume the CI retry budget and dedup marker only for work dispatched.
-				s.FixAttempts++
-				s.RepairPending = true
-				s.LastHeadSHA = pr.HeadRefOID
-				// #1169: LastRepairedSHA is the dispatch guard's own dedup marker --
-				// distinct from LastHeadSHA above, which only records the head of
-				// the last dispatch or green reset and no longer gates the reset.
-				s.LastRepairedSHA = pr.HeadRefOID
-			}
-			actionable = true
+			break
 		}
-	} else if !conflictHeld && s.CIStatus == ciStatusGreen {
+		if err := dispatchCIRepair(s, pr, failing); err != nil {
+			recordUpstreamReadFailure(s, reasonWorkflowLaunchFailed, err)
+			return false, 0, err
+		}
+		// Consume the CI retry budget only for work dispatched.
+		ciLaunched = true
+		s.FixAttempts++
+		s.RepairPending = true
+		s.LastHeadSHA = pr.HeadRefOID
+		// LastRepairedSHA is history now (#1457): liveness gates the next
+		// launch. CIRepairTracked marks it as written under that rule, so it
+		// is never mistaken for the legacy same-head hold above.
+		s.LastRepairedSHA = pr.HeadRefOID
+		s.CIRepairTracked = true
+		actionable = true
+	case !conflictHeld && s.CIStatus == ciStatusGreen:
 		// #1456: only a fresh green result read from GitHub in this tick proves
 		// a repair succeeded or the pause is over -- never a CIStatus saved from
 		// an earlier tick, and never pending/unknown/zero checks, a read error
@@ -794,59 +871,25 @@ func tick(s *State) (bool, time.Duration, error) {
 		// failed check rerun that goes green at the same commit ends the
 		// episode too. A tick in a conflict hold never resets: conflict repair
 		// keeps priority until the first non-held green tick. A notification
-		// still pending when the PR turns green is dropped here.
+		// still pending when the PR turns green is dropped here. #1457: a green
+		// read while a branch writer is live is not yet success (it may still
+		// push), so the reset waits for the first green tick after it ends.
+		if s.FixAttempts > 0 || s.RepairPending || s.CIRepairPaused || s.CICapNotified {
+			w, err := live()
+			if err != nil {
+				return false, 0, err
+			}
+			if w.any() {
+				fmt.Printf("PR #%s CI is green at head commit %s, but %s; keeping the CI retry episode until it ends\n", s.PR, pr.HeadRefOID, w.describe(s.PR))
+				break
+			}
+		}
 		s.FixAttempts = 0
 		s.RepairPending = false
 		s.LastHeadSHA = pr.HeadRefOID
 		s.CIRepairPaused = false
 		s.CICapNotified = false
 		s.Status = "running"
-	}
-	// Merge repair is independent of automerge policy. A successful dispatch
-	// keeps polling so a repaired push can release the conflict hold.
-	if conflicting {
-		actionable = true
-		// Probe even before our first recorded dispatch: a manually-started
-		// repair owns the same branch and must not receive a second writer.
-		workerActive, err := mergeRepairActive(s.LaunchSocket, s.LaunchSession, s.PR)
-		if err != nil {
-			recordUpstreamReadFailure(s, reasonWorkflowLaunchFailed, err)
-			return false, 0, err
-		}
-		switch {
-		case pr.HeadRefOID == "":
-			// No key to dedup on -- opening a window every tick would be
-			// wrong (the Assumptions' degenerate case), so this only
-			// observes and prints, leaving repair bookkeeping untouched.
-			// reasonHeadSHAUnknown's own automerge hold already covers the
-			// same underlying condition.
-			fmt.Printf("PR #%s has merge conflicts but its head commit SHA is unknown; not opening a new merge-repair window\n", s.PR)
-		case workerActive:
-			if s.ConflictRepairSHA == "" {
-				// Retain manual-worker ownership across a later UNKNOWN tick.
-				s.ConflictRepairSHA = pr.HeadRefOID
-			}
-			s.Status = "running"
-			fmt.Printf("PR #%s has merge conflicts at head commit %s; repair already dispatched and still active, no new window opened\n", s.PR, pr.HeadRefOID)
-		case s.ConflictFixAttempts >= fixCap:
-			if s.ConflictNotifiedSHA != pr.HeadRefOID {
-				if err := launch(s, "babysit-attention", s.PR+" merge repair retry cap reached"); err != nil {
-					recordUpstreamReadFailure(s, reasonWorkflowLaunchFailed, err)
-					return false, 0, err
-				}
-				s.ConflictNotifiedSHA = pr.HeadRefOID
-			}
-			s.Status = "needs-input"
-		default:
-			if err := launch(s, "merge-repair", s.PR); err != nil {
-				recordUpstreamReadFailure(s, reasonWorkflowLaunchFailed, err)
-				return false, 0, err
-			}
-			s.ConflictRepairSHA = pr.HeadRefOID
-			s.ConflictFixAttempts++
-			s.Status = "running"
-			fmt.Printf("PR #%s has merge conflicts at head commit %s; opened merge-repair with Claude Opus\n", s.PR, pr.HeadRefOID)
-		}
 	}
 	// #1456: the status is needs-input for as long as the CI budget is used up
 	// and unresolved, whatever the merge-repair block above set; once the green
@@ -957,16 +1000,34 @@ func tick(s *State) (bool, time.Duration, error) {
 	// still leaves the keys recorded as pending (merge safety must not
 	// depend on launch success) but out of LaunchedKeys, so the very next
 	// tick retries -- matching today's effectively-unbounded retry behavior,
-	// no fixCap-style cap.
-	if toLaunch := removeKeys(s.PendingKeys, s.LaunchedKeys); !conflictHeld && len(toLaunch) > 0 {
-		if err := launch(s, "address-review", s.PR); err != nil {
-			recordUpstreamReadFailure(s, reasonWorkflowLaunchFailed, err)
+	// no fixCap-style cap. #1457: review is the lowest-priority branch writer:
+	// it waits while a conflict is held, when ci-repair launched this tick, and
+	// while this PR's CI or merge worker is live. Deferred keys stay pending and
+	// out of LaunchedKeys, so the first tick with no writer launches them.
+	if toLaunch := removeKeys(s.PendingKeys, s.LaunchedKeys); !conflictHeld && !ciLaunched && len(toLaunch) > 0 {
+		w, err := live()
+		if err != nil {
 			return false, 0, err
 		}
-		s.LaunchedKeys = append(s.LaunchedKeys, toLaunch...)
-		actionable = true
+		if w.any() {
+			fmt.Printf("PR #%s has new review feedback, but %s; address-review waits for it\n", s.PR, w.describe(s.PR))
+		} else {
+			if err := launch(s, "address-review", s.PR); err != nil {
+				recordUpstreamReadFailure(s, reasonWorkflowLaunchFailed, err)
+				return false, 0, err
+			}
+			s.LaunchedKeys = append(s.LaunchedKeys, toLaunch...)
+			actionable = true
+		}
 	}
-	if runAutomerge(s, pr, checks, verdict, commentsComplete, reviewsComplete) {
+	// A live writer keeps the tick actionable, holds automerge, and its
+	// unknown-ownership notes lead the recorded AutomergeDetail.
+	workerLive := observed != nil && observed.any()
+	actionable = actionable || workerLive
+	if observed != nil {
+		workerNotes = append(slices.Clone(observed.notes), workerNotes...)
+	}
+	if runAutomerge(s, pr, checks, verdict, commentsComplete, reviewsComplete, workerLive, strings.Join(workerNotes, "; ")) {
 		actionable = true
 	}
 	if actionable {
@@ -981,35 +1042,64 @@ func tick(s *State) (bool, time.Duration, error) {
 	return false, time.Duration(s.CurrentDelaySeconds) * time.Second, nil
 }
 
-// dispatchCIRepair starts one finite ci-repair worker for the failing checks
-// and reports whether an attempt was dispatched (#1455). The argument leads
-// with the PR number, so `cenci run` names the window `<PR>-ci-repair`; the
-// prose after it is unchanged. A live `<PR>-ci-repair` pane in the recorded
-// session means a repair is still executing: nothing is launched and no
-// attempt is consumed. An unreadable pane inventory is an error, a separate
-// return from "no live worker" (watch/docs/error-handling.md). With no recorded
-// session the probe is skipped, so launch() reports its own refusal. A
-// `cenci run` that spawned the window but failed its post-spawn setup (exit 3)
-// is a dispatched attempt: the worker is starting.
-func dispatchCIRepair(s *State, pr prView, failing []string) (bool, error) {
-	if s.LaunchSession != "" {
-		active, err := ciRepairActive(s.LaunchSocket, s.LaunchSession, s.PR)
-		if err != nil {
-			return false, err
-		}
-		if active {
-			fmt.Printf("PR #%s has failing CI checks at head commit %s; ci-repair window %s-ci-repair is still running, no new window opened\n", s.PR, pr.HeadRefOID, s.PR)
-			return false, nil
-		}
+// repairConflict handles a conflicting tick with a known head (#1457: one
+// writer per tick). A live CI or merge worker for this PR, ours or of unknown
+// ownership, means no launch: the episode is recorded (a manual worker keeps
+// ownership across a later UNKNOWN tick) and an ended worker is retried on the
+// first tick after it ends. Otherwise the cap branch opens attention once per
+// head, or merge-repair launches.
+func repairConflict(s *State, pr prView, live func() (workerLiveness, error)) error {
+	// Probe even before our first recorded dispatch: a manually-started
+	// repair owns the same branch and must not receive a second writer.
+	w, err := live()
+	if err != nil {
+		return err
 	}
+	switch {
+	case w.any():
+		if s.ConflictRepairSHA == "" {
+			s.ConflictRepairSHA = pr.HeadRefOID
+		}
+		s.Status = "running"
+		fmt.Printf("PR #%s has merge conflicts at head commit %s; repair already dispatched or %s, no new window opened\n", s.PR, pr.HeadRefOID, w.describe(s.PR))
+	case s.ConflictFixAttempts >= fixCap:
+		if s.ConflictNotifiedSHA != pr.HeadRefOID {
+			if err := launch(s, "babysit-attention", s.PR+" merge repair retry cap reached"); err != nil {
+				recordUpstreamReadFailure(s, reasonWorkflowLaunchFailed, err)
+				return err
+			}
+			s.ConflictNotifiedSHA = pr.HeadRefOID
+		}
+		s.Status = "needs-input"
+	default:
+		if err := launch(s, "merge-repair", s.PR); err != nil {
+			recordUpstreamReadFailure(s, reasonWorkflowLaunchFailed, err)
+			return err
+		}
+		s.ConflictRepairSHA = pr.HeadRefOID
+		s.ConflictFixAttempts++
+		s.Status = "running"
+		fmt.Printf("PR #%s has merge conflicts at head commit %s; opened merge-repair with Claude Opus\n", s.PR, pr.HeadRefOID)
+	}
+	return nil
+}
+
+// dispatchCIRepair starts one finite ci-repair worker for the failing checks
+// (#1455). The argument leads with the PR number, so `cenci run` names the
+// window `<PR>-ci-repair`; the prose after it is unchanged. tick has already
+// read the pane inventory and found no live writer (#1457). A `cenci run` that
+// spawned the window but failed its post-spawn setup (exit 3) is a dispatched
+// attempt: the worker is starting. Any other error is a launch that consumed
+// nothing.
+func dispatchCIRepair(s *State, pr prView, failing []string) error {
 	prompt := fmt.Sprintf("%s PR #%s (%s) has failing CI checks: %s. Diagnose, fix, test, commit, and push without force-pushing.", s.PR, s.PR, pr.HeadRefName, strings.Join(failing, ", "))
 	if err := launch(s, "ci-repair", prompt); err != nil {
 		if !errors.Is(err, errWindowSpawned) {
-			return false, err
+			return err
 		}
 		fmt.Printf("warning: PR #%s: %v; the ci-repair window was spawned, counting the attempt as dispatched\n", s.PR, err)
 	}
-	return true, nil
+	return nil
 }
 
 // cenciRunExitWindowSpawned is the `cenci run` exit status for "the window was

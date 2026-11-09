@@ -113,13 +113,14 @@ func newAdapterLaunchWorld(t *testing.T, pluginList string, installAdapter bool)
 	// Fake tmux: one NUL-separated record per call, "<argc>\0<arg>\0...", so
 	// argument boundaries survive spaces and `$`. display-message prints 0, the
 	// answer to the launcher's `#{session_grouped}` probe; list-panes reports one
-	// unrelated live window, so babysit's fail-closed ci-repair liveness probe
-	// (#1455) sees no live worker; everything else exits 0.
+	// unrelated live window as the three-column inventory row (name, pane_dead,
+	// @cenci-repo-dir), so babysit's fail-closed pane inventory (#1455, #1457) sees
+	// no live worker; everything else exits 0.
 	exectest.WriteExecutable(t, filepath.Join(binDir, "tmux"), "#!/bin/sh\n"+
 		`printf '%s\000' "$#" "$@" >> `+exectest.ShellQuote(w.tmuxLog)+"\n"+
 		// `cenci run` always leads with `-S <socket>` (#1431): drop it after logging.
 		`if [ "$1" = -S ]; then shift 2; fi`+"\n"+
-		`case "$1" in display-message) echo 0 ;; list-panes) printf '1-implement\t0\n' ;; esac`+"\nexit 0\n")
+		`case "$1" in display-message) echo 0 ;; list-panes) printf '1-implement\t0\t\n' ;; esac`+"\nexit 0\n")
 
 	// Fake gh: a PR with a failing check at head "abc", no comments or reviews;
 	// anything else fails (and is logged, so an unexpected call is visible).

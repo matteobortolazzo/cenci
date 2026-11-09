@@ -275,10 +275,25 @@ func (w *ciRepairWorld) setPR(t *testing.T, head string) {
 	ciRepairWrite(t, filepath.Join(w.fixtures, "pr.json"), string(pr))
 }
 
+// ciRepairOtherRow is an unrelated window as one three-column inventory row
+// (window_name, pane_dead, @cenci-repo-dir): no worker, no recorded repo-dir.
+const ciRepairOtherRow = "1-implement\t0\t\n"
+
 // setPanes sets the `list-panes` inventory the fake tmux reports.
 func (w *ciRepairWorld) setPanes(t *testing.T, panes string) {
 	t.Helper()
 	ciRepairWrite(t, filepath.Join(w.ctlDir, "panes"), panes)
+}
+
+// workerRow is one inventory row for a window this repository owns: its
+// @cenci-repo-dir is the recorded launch dir, so only the name and pane_dead
+// decide whether it is a live worker.
+func (w *ciRepairWorld) workerRow(name string, dead bool) string {
+	state := "0"
+	if dead {
+		state = "1"
+	}
+	return name + "\t" + state + "\t" + w.workDir + "\n"
 }
 
 // touch creates one fake-tmux control file.
@@ -378,19 +393,39 @@ func (w *ciRepairWorld) tmuxCalls(t *testing.T, verb string) [][]string {
 	return out
 }
 
+// windowNames returns the `-n` name of every `new-window` issued so far, in
+// order, after checking each targets the recorded session.
+func (w *ciRepairWorld) windowNames(t *testing.T) []string {
+	t.Helper()
+	var names []string
+	for _, c := range w.tmuxCalls(t, "new-window") {
+		if len(c) < 6 || !slices.Equal(c[:4], []string{"new-window", "-d", "-t", "=" + ciRepairSession + ":"}) || c[4] != "-n" {
+			t.Fatalf("new-window argv = %q, want -d -t =%s: -n <name> followed by the command", c, ciRepairSession)
+		}
+		names = append(names, c[5])
+	}
+	return names
+}
+
+// lastWindowCommand returns the shell command of the most recent `new-window`.
+func (w *ciRepairWorld) lastWindowCommand(t *testing.T) string {
+	t.Helper()
+	windows := w.tmuxCalls(t, "new-window")
+	if len(windows) == 0 {
+		t.Fatal("no tmux new-window was issued")
+	}
+	last := windows[len(windows)-1]
+	return last[len(last)-1]
+}
+
 // onlyWindowCommand asserts exactly one `new-window` was issued, in the recorded
 // session and named 42-ci-repair, and returns its shell command.
 func (w *ciRepairWorld) onlyWindowCommand(t *testing.T) string {
 	t.Helper()
-	windows := w.tmuxCalls(t, "new-window")
-	if len(windows) != 1 {
-		t.Fatalf("tmux new-window calls = %q, want exactly one", windows)
+	if got, want := w.windowNames(t), []string{ciRepairPR + "-ci-repair"}; !slices.Equal(got, want) {
+		t.Fatalf("tmux new-window names = %q, want exactly %q", got, want)
 	}
-	want := []string{"new-window", "-d", "-t", "=" + ciRepairSession + ":", "-n", ciRepairPR + "-ci-repair"}
-	if got := windows[0]; len(got) != len(want)+1 || !slices.Equal(got[:len(want)], want) {
-		t.Fatalf("new-window argv = %q, want %q followed by the command", got, want)
-	}
-	return windows[0][len(want)]
+	return w.lastWindowCommand(t)
 }
 
 // assertWindowOptions asserts 42-ci-repair got automatic-rename off and the
@@ -479,15 +514,16 @@ func assertWindowCommandPinsUnattended(t *testing.T, shellCommand string) {
 // AC1/AC2/AC4/AC5/AC6: in every cell the supervisor launches `42-ci-repair`, the
 // captured command runs the client in its finite mode with the argument intact,
 // and the client process exits -- after success and after an explicit failure.
-// A failed (blocked) outcome leaves RepairPending set and the retained dead pane
-// blocks nothing: the same head launches no second worker, a new head does.
+// A failed (blocked) outcome leaves RepairPending set, and the retained dead
+// pane blocks nothing (#1457): the next tick at the same head retries, spending
+// the next attempt.
 func TestCIRepairMatrix_WorkerExits(t *testing.T) {
 	for _, cell := range ciRepairCells {
 		for _, exit := range []int{0, 1} {
 			t.Run(cell.name()+"/exit="+strconv.Itoa(exit), func(t *testing.T) {
 				w := newCIRepairWorld(t, cell, ciRepairWorldOpts{})
 				w.seedState(t)
-				w.setPanes(t, "1-implement\t0\n")
+				w.setPanes(t, ciRepairOtherRow)
 
 				if out, code := w.babysitOnce(t, ciRepairSession); code != 0 {
 					t.Fatalf("cenci babysit --once exit = %d, want 0; output:\n%s", code, out)
@@ -510,26 +546,15 @@ func TestCIRepairMatrix_WorkerExits(t *testing.T) {
 					return
 				}
 
-				w.setPanes(t, "42-ci-repair\t1\n")
+				w.setPanes(t, w.workerRow(ciRepairPR+"-ci-repair", true))
 				if out, code := w.babysitOnce(t, ciRepairSession); code != 0 {
 					t.Fatalf("tick at the same head: exit = %d; output:\n%s", code, out)
 				}
-				if n := len(w.tmuxCalls(t, "new-window")); n != 1 {
-					t.Errorf("new-window calls after a same-head tick = %d, want still 1", n)
+				if got, want := w.windowNames(t), []string{ciRepairPR + "-ci-repair", ciRepairPR + "-ci-repair"}; !slices.Equal(got, want) {
+					t.Errorf("new-window names after a same-head tick = %q, want %q: a dead 42-ci-repair pane must not block the retry", got, want)
 				}
-				if got, want := w.repairFields(t), (ciRepairFields{FixAttempts: 2, RepairPending: true, LastRepairedSHA: ciRepairHead}); got != want {
-					t.Errorf("state after the blocked outcome = %+v, want %+v (RepairPending kept, attempts not reset)", got, want)
-				}
-
-				w.setPR(t, "def")
-				if out, code := w.babysitOnce(t, ciRepairSession); code != 0 {
-					t.Fatalf("tick at a new head: exit = %d; output:\n%s", code, out)
-				}
-				if n := len(w.tmuxCalls(t, "new-window")); n != 2 {
-					t.Errorf("new-window calls after a new-head tick = %d, want 2: a dead 42-ci-repair pane must not block", n)
-				}
-				if got := w.fields(t); got.FixAttempts != 3 || got.LastRepairedSHA != "def" {
-					t.Errorf("state after the new-head dispatch = %+v, want FixAttempts 3 at def", got)
+				if got, want := w.repairFields(t), (ciRepairFields{FixAttempts: 3, RepairPending: true, LastRepairedSHA: ciRepairHead}); got != want {
+					t.Errorf("state after the same-head retry = %+v, want %+v", got, want)
 				}
 			})
 		}
@@ -543,7 +568,7 @@ func TestCIRepairMatrix_HostPermissionDenialExits(t *testing.T) {
 		t.Run(cell.name(), func(t *testing.T) {
 			w := newCIRepairWorld(t, cell, ciRepairWorldOpts{})
 			w.seedState(t)
-			w.setPanes(t, "1-implement\t0\n")
+			w.setPanes(t, ciRepairOtherRow)
 			if out, code := w.babysitOnce(t, ciRepairSession); code != 0 {
 				t.Fatalf("cenci babysit --once exit = %d; output:\n%s", code, out)
 			}
@@ -559,16 +584,21 @@ func TestCIRepairMatrix_HostPermissionDenialExits(t *testing.T) {
 // attempt; a live 42-ci-repair-old or 142-ci-repair window does not.
 func TestCIRepairLiveWorkerGuard(t *testing.T) {
 	for _, tc := range []struct {
-		name, panes string
-		dispatch    bool
+		name     string
+		panes    func(w *ciRepairWorld) string
+		dispatch bool
 	}{
-		{"live exact worker suppresses", "1-implement\t0\n42-ci-repair\t0\n", false},
-		{"siblings do not block", "42-ci-repair-old\t0\n142-ci-repair\t0\n", true},
+		{"live exact worker suppresses", func(w *ciRepairWorld) string {
+			return ciRepairOtherRow + w.workerRow(ciRepairPR+"-ci-repair", false)
+		}, false},
+		{"siblings do not block", func(w *ciRepairWorld) string {
+			return w.workerRow(ciRepairPR+"-ci-repair-old", false) + w.workerRow("1"+ciRepairPR+"-ci-repair", false)
+		}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			w := newCIRepairWorld(t, ciRepairCell{"claude", false}, ciRepairWorldOpts{})
 			w.seedState(t)
-			w.setPanes(t, tc.panes)
+			w.setPanes(t, tc.panes(w))
 			if out, code := w.babysitOnce(t, ciRepairSession); code != 0 {
 				t.Fatalf("cenci babysit --once exit = %d; output:\n%s", code, out)
 			}
@@ -611,7 +641,7 @@ func TestCIRepairRefusalsConsumeNothing(t *testing.T) {
 			tc.opts.automergeEnabled = true
 			w := newCIRepairWorld(t, tc.cell, tc.opts)
 			w.seedState(t)
-			w.setPanes(t, "1-implement\t0\n")
+			w.setPanes(t, ciRepairOtherRow)
 			if tc.setup != nil {
 				tc.setup(t, w)
 			}
@@ -632,8 +662,9 @@ func TestCIRepairRefusalsConsumeNothing(t *testing.T) {
 }
 
 // AC8: a post-spawn failure (`cenci run` exit 3) is a dispatched attempt, and
-// the next tick at the same head opens no second window. A @cenci-repo-dir
-// write failure only warns: the launch is dispatched too.
+// while its window is live (#1457) the next tick at the same head opens no
+// second one. A @cenci-repo-dir write failure only warns: the launch is
+// dispatched too.
 func TestCIRepairPostSpawnFailuresCountAsDispatched(t *testing.T) {
 	for _, tc := range []struct{ name, marker, wantOutput string }{
 		{"automatic-rename failure exits 3", "fail-automatic-rename", "warning"},
@@ -642,7 +673,7 @@ func TestCIRepairPostSpawnFailuresCountAsDispatched(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			w := newCIRepairWorld(t, ciRepairCell{"claude", false}, ciRepairWorldOpts{})
 			w.seedState(t)
-			w.setPanes(t, "1-implement\t0\n")
+			w.setPanes(t, ciRepairOtherRow)
 			w.touch(t, tc.marker)
 
 			out, code := w.babysitOnce(t, ciRepairSession)
@@ -658,12 +689,76 @@ func TestCIRepairPostSpawnFailuresCountAsDispatched(t *testing.T) {
 				t.Errorf("state = %+v, want %+v", got, want)
 			}
 
+			w.setPanes(t, ciRepairOtherRow+w.workerRow(ciRepairPR+"-ci-repair", false))
 			if out, code := w.babysitOnce(t, ciRepairSession); code != 0 {
 				t.Fatalf("tick at the same head: exit = %d; output:\n%s", code, out)
 			}
 			if n := len(w.tmuxCalls(t, "new-window")); n != 1 {
 				t.Errorf("new-window calls after a same-head tick = %d, want still 1", n)
 			}
+			if got := w.repairFields(t); got != want {
+				t.Errorf("state after the live-worker tick = %+v, want %+v (no second attempt)", got, want)
+			}
 		})
+	}
+}
+
+// #1457: black-box, finite fake worker. Each ended worker (it exits without
+// pushing, leaving a dead pane) is retried at the same failing head with a new
+// `42-ci-repair` window; a live one suppresses the relaunch. After the third
+// window ends, exactly one babysit-attention window opens for the cap and no
+// further window follows.
+func TestCIRepairEndedWorkersRetryToCapAttention(t *testing.T) {
+	w := newCIRepairWorld(t, ciRepairCell{"claude", false}, ciRepairWorldOpts{})
+	if err := os.MkdirAll(w.stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	tick := func(step string) {
+		t.Helper()
+		if out, code := w.babysitOnce(t, ciRepairSession); code != 0 {
+			t.Fatalf("%s: cenci babysit --once exit = %d; output:\n%s", step, code, out)
+		}
+	}
+	ciWindow := ciRepairPR + "-ci-repair"
+	wantWindows := []string{}
+
+	for attempt := 1; attempt <= 3; attempt++ {
+		w.setPanes(t, ciRepairOtherRow)
+		tick("launch tick")
+		wantWindows = append(wantWindows, ciWindow)
+		if got := w.windowNames(t); !slices.Equal(got, wantWindows) {
+			t.Fatalf("attempt %d: new-window names = %q, want %q", attempt, got, wantWindows)
+		}
+		if got := w.fields(t).FixAttempts; got != attempt {
+			t.Fatalf("attempt %d: FixAttempts = %d", attempt, got)
+		}
+
+		w.setPanes(t, ciRepairOtherRow+w.workerRow(ciWindow, false))
+		tick("live-worker tick")
+		if got := w.windowNames(t); !slices.Equal(got, wantWindows) {
+			t.Fatalf("attempt %d: a live worker still got a new window: %q, want %q", attempt, got, wantWindows)
+		}
+		if got := w.fields(t).FixAttempts; got != attempt {
+			t.Fatalf("attempt %d: FixAttempts after the live tick = %d", attempt, got)
+		}
+
+		// The worker really runs to its end without pushing; its pane is retained dead.
+		if code, out := w.runWorker(t, w.lastWindowCommand(t), "FAKE_CLIENT_EXIT=1"); code != 1 {
+			t.Fatalf("attempt %d: worker exit = %d, want 1; output:\n%s", attempt, code, out)
+		}
+		w.setPanes(t, w.workerRow(ciWindow, true))
+	}
+
+	// The cap tick opens the window `cenci run babysit-attention 42 ...` names:
+	// "<PR>-" plus the workflow (internal/run windowName). The next opens none.
+	wantWindows = append(wantWindows, ciRepairPR+"-babysit-attention")
+	for _, step := range []string{"cap tick", "tick after the cap"} {
+		tick(step)
+		if got := w.windowNames(t); !slices.Equal(got, wantWindows) {
+			t.Fatalf("%s: new-window names = %q, want %q (exactly one attention window)", step, got, wantWindows)
+		}
+	}
+	if got := w.fields(t).FixAttempts; got != 3 {
+		t.Errorf("FixAttempts at the cap = %d, want 3", got)
 	}
 }

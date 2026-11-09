@@ -93,6 +93,7 @@ func recheckAutomergeInputs(s *State, first automergeInputs) (automergeInputs, s
 	in := automergeInputs{
 		Checks:            checks,
 		RepairPending:     s.RepairPending,
+		RepairWorkerLive:  first.RepairWorkerLive,
 		FeedbackHold:      verdict.Hold,
 		FeedbackDetail:    verdict.Detail,
 		IsDraft:           pr.IsDraft,

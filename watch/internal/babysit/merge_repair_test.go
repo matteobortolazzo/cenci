@@ -76,7 +76,6 @@ func TestConflictRepairBudgetSurvivesUnknownAndResetsOnlyWhenClear(t *testing.T)
 	for _, head := range []string{"a", "b", "c"} {
 		var calls [][]string
 		withCommands(t, []string{conflictingOpenPR(head), `[]`, `[]`, `[]`}, &calls)
-		mergeRepairActive = func(string, string, string) (bool, error) { return false, nil }
 		if _, _, err := tick(&s); err != nil {
 			t.Fatal(err)
 		}
@@ -94,7 +93,6 @@ func TestConflictRepairBudgetSurvivesUnknownAndResetsOnlyWhenClear(t *testing.T)
 		t.Fatalf("unknown mergeability erased budget: %+v", s)
 	}
 	withCommands(t, []string{conflictingOpenPR("d"), `[]`, `[]`, `[]`}, &calls)
-	mergeRepairActive = func(string, string, string) (bool, error) { return false, nil }
 	if _, _, err := tick(&s); err != nil {
 		t.Fatalf("cap must keep polling: %v", err)
 	}
@@ -103,7 +101,6 @@ func TestConflictRepairBudgetSurvivesUnknownAndResetsOnlyWhenClear(t *testing.T)
 	}
 	calls = nil
 	withCommands(t, []string{conflictingOpenPR("d"), `[]`, `[]`, `[]`}, &calls)
-	mergeRepairActive = func(string, string, string) (bool, error) { return false, nil }
 	if _, _, err := tick(&s); err != nil {
 		t.Fatal(err)
 	}
@@ -182,7 +179,7 @@ func TestConflictDefersFeedbackUntilClear(t *testing.T) {
 }
 
 func TestConflictRepairLifecycleRecoversEndedWorkersAtSameHead(t *testing.T) {
-	s := State{PR: "42", Repo: "o/r", Agent: "codex", LaunchSession: "work", IntervalSeconds: 300}
+	s := State{PR: "42", Repo: "o/r", Agent: "codex", LaunchSession: "work", LaunchDir: "/repo/root", IntervalSeconds: 300}
 	for _, step := range []struct {
 		name, head string
 		active     bool
@@ -202,15 +199,13 @@ func TestConflictRepairLifecycleRecoversEndedWorkersAtSameHead(t *testing.T) {
 		t.Run(step.name, func(t *testing.T) {
 			var calls [][]string
 			withCommands(t, []string{conflictingOpenPR(step.head), `[]`, `[]`, `[]`}, &calls)
-			mergeRepairActive = func(socket, session, pr string) (bool, error) {
-				if session != "work" || pr != "42" {
-					t.Fatalf("liveness target = %q/%q", session, pr)
-				}
-				return step.active, nil
-			}
+			reads := stubPanes(t, panesAlways(paneRowOf("42-merge-repair", !step.active, "/repo/root")))
 			terminal, delay, err := tick(&s)
 			if terminal || err != nil || delay != 300*time.Second {
 				t.Fatalf("tick terminal=%v, delay=%v, err=%v", terminal, delay, err)
+			}
+			if !slices.Equal(*reads, []string{"|work"}) {
+				t.Fatalf("inventory reads = %v, want one of the recorded session", *reads)
 			}
 			if (countWorkflowLaunches(calls, "merge-repair") == 1) != step.wantRepair || (countWorkflowLaunches(calls, "babysit-attention") == 1) != step.wantCap || s.ConflictFixAttempts != step.attempts {
 				t.Fatalf("wrong lifecycle dispatch: state=%+v calls=%v", s, calls)
@@ -223,7 +218,7 @@ func TestConflictRepairProbeFailureDoesNotLaunchDuplicate(t *testing.T) {
 	withFleetAutomergeEnabled(t, true)
 	var calls [][]string
 	withCommands(t, []string{conflictingOpenPR("abc"), `[]`}, &calls)
-	mergeRepairActive = func(string, string, string) (bool, error) { return false, errors.New("tmux unavailable") }
+	stubPanes(t, func(int) (string, error) { return "", errors.New("tmux unavailable") })
 	s := State{PR: "42", Repo: "o/r", Agent: "codex", LaunchSession: "work", ConflictRepairSHA: "abc", ConflictFixAttempts: 1}
 	if _, _, err := tick(&s); err == nil || !strings.Contains(err.Error(), "tmux unavailable") {
 		t.Fatalf("probe failure not surfaced: %v", err)
@@ -236,12 +231,117 @@ func TestConflictRepairProbeFailureDoesNotLaunchDuplicate(t *testing.T) {
 func TestConflictRepairDefersToManuallyStartedWorker(t *testing.T) {
 	var calls [][]string
 	withCommands(t, []string{conflictingOpenPR("abc"), `[]`, `[]`, `[]`}, &calls)
-	mergeRepairActive = func(string, string, string) (bool, error) { return true, nil }
-	s := State{PR: "42", Repo: "o/r", Agent: "codex", LaunchSession: "work", IntervalSeconds: 300}
+	stubPanes(t, panesAlways(paneRowOf("42-merge-repair", false, "/repo/root")))
+	s := State{PR: "42", Repo: "o/r", Agent: "codex", LaunchSession: "work", LaunchDir: "/repo/root", IntervalSeconds: 300}
 	if _, delay, err := tick(&s); err != nil || delay != 300*time.Second {
 		t.Fatalf("manual worker tick delay=%v err=%v", delay, err)
 	}
 	if countWorkflowLaunches(calls, "merge-repair") != 0 || s.ConflictFixAttempts != 0 || s.ConflictRepairSHA != "abc" || s.Status != "running" {
 		t.Fatalf("manual worker duplicated or consumed budget: state=%+v calls=%v", s, calls)
+	}
+}
+
+// #1457 (plan Q&A 5): the merge-repair cap attention also waits for no live
+// writer. At the cap, a live CI worker (any live writer counts) opens no
+// attention and records no notification; once it ends, the next tick opens
+// exactly one attention and records it.
+func TestConflictCapAttentionWaitsForLiveWriter(t *testing.T) {
+	s := State{PR: "42", Repo: "o/r", Agent: "codex", LaunchSession: "work", LaunchDir: "/repo/root", IntervalSeconds: 300,
+		ConflictRepairSHA: "abc", ConflictFixAttempts: fixCap}
+
+	var calls [][]string
+	withCommands(t, []string{conflictingOpenPR("abc"), `[]`, `[]`, `[]`}, &calls)
+	stubPanes(t, panesAlways(paneRowOf("42-ci-repair", false, "/repo/root")))
+	if _, _, err := tick(&s); err != nil {
+		t.Fatalf("tick with a live writer at the cap: %v", err)
+	}
+	if n := countWorkflowLaunches(calls, "babysit-attention"); n != 0 || s.ConflictNotifiedSHA != "" {
+		t.Fatalf("cap attention opened beside a live writer: launches=%d notified=%q", n, s.ConflictNotifiedSHA)
+	}
+
+	calls = nil
+	withCommands(t, []string{conflictingOpenPR("abc"), `[]`, `[]`, `[]`}, &calls)
+	stubPanes(t, panesAlways(paneRowOf("42-ci-repair", true, "/repo/root")))
+	if _, _, err := tick(&s); err != nil {
+		t.Fatalf("tick after the writer ended: %v", err)
+	}
+	if n := countWorkflowLaunches(calls, "babysit-attention"); n != 1 || s.ConflictNotifiedSHA != "abc" {
+		t.Fatalf("cap attention after the writer ended: launches=%d notified=%q, want 1 and abc", n, s.ConflictNotifiedSHA)
+	}
+	if n := countWorkflowLaunches(calls, "merge-repair"); n != 0 || s.ConflictFixAttempts != fixCap {
+		t.Fatalf("merge-repair launched at the cap: launches=%d attempts=%d", n, s.ConflictFixAttempts)
+	}
+}
+
+// #1457: GitHub reporting the PR clear while this PR's merge-repair worker is
+// still live keeps the conflict episode, launches no ci-repair and keeps review
+// deferred. The first clear tick after the pane ends releases the episode, and
+// failing CI is then eligible on that same tick.
+func TestConflictReleaseWaitsForTheMergeWorker(t *testing.T) {
+	failing := `[{"bucket":"fail","name":"test","state":"FAILURE"}]`
+	comments := `[{"id":7,"updated_at":"2026-01-02T00:00:00Z","user":{"login":"reviewer"}}]`
+	s := State{PR: "42", Repo: "o/r", Agent: "codex", LaunchSession: "work", LaunchDir: "/repo/root", IntervalSeconds: 300,
+		ConflictRepairSHA: "abc", ConflictFixAttempts: 1}
+
+	var calls [][]string
+	withCommands(t, []string{cleanOpenPR("abc"), failing, comments, `[]`, unresolvedThreadFor(7)}, &calls)
+	stubPanes(t, panesAlways(paneRowOf("42-merge-repair", false, "/repo/root")))
+	if _, delay, err := tick(&s); err != nil || delay != 300*time.Second {
+		t.Fatalf("clear tick with a live merge worker: delay=%v err=%v", delay, err)
+	}
+	if s.ConflictRepairSHA != "abc" || s.ConflictFixAttempts != 1 {
+		t.Fatalf("the episode was released while the merge worker was live: %+v", s)
+	}
+	if n := countWorkflowLaunches(calls, "ci-repair") + countAddressReviewLaunches(calls); n != 0 || s.FixAttempts != 0 {
+		t.Fatalf("a second writer launched beside the live merge worker: launches=%d FixAttempts=%d calls=%v", n, s.FixAttempts, calls)
+	}
+	if !slices.Equal(s.PendingKeys, []string{"comment:7"}) || len(s.LaunchedKeys) != 0 {
+		t.Fatalf("review feedback pending=%v launched=%v, want [comment:7] pending and unlaunched", s.PendingKeys, s.LaunchedKeys)
+	}
+
+	calls = nil
+	withCommands(t, []string{cleanOpenPR("abc"), failing, comments, `[]`, unresolvedThreadFor(7)}, &calls)
+	stubPanes(t, panesAlways(paneRowOf("42-merge-repair", true, "/repo/root")))
+	if _, _, err := tick(&s); err != nil {
+		t.Fatalf("clear tick after the merge worker ended: %v", err)
+	}
+	if s.ConflictRepairSHA != "" || s.ConflictFixAttempts != 0 {
+		t.Fatalf("the episode was not released once the merge worker ended: %+v", s)
+	}
+	if n := countWorkflowLaunches(calls, "ci-repair"); n != 1 || s.FixAttempts != 1 {
+		t.Fatalf("failing CI after the release: ci-repair launches=%d FixAttempts=%d, want 1/1", n, s.FixAttempts)
+	}
+	if n := countAddressReviewLaunches(calls); n != 0 || len(s.LaunchedKeys) != 0 {
+		t.Fatalf("address-review launched on the ci-repair tick: launches=%d launched=%v", n, s.LaunchedKeys)
+	}
+}
+
+// #1457: a live `42-merge-repair` window whose repository has a different git
+// common dir belongs to another repository's PR 42: it neither defers this
+// PR's merge repair nor blocks its CI repair.
+func TestForeignMergeRepairWindowDoesNotBlock(t *testing.T) {
+	stubGitCommonDir(t, map[string]string{"/repo/root": "/repo/root/.git", "/elsewhere/repo": "/elsewhere/repo/.git"})
+	foreign := paneRowOf("42-merge-repair", false, "/elsewhere/repo")
+
+	var calls [][]string
+	withCommands(t, []string{conflictingOpenPR("abc"), `[]`, `[]`, `[]`}, &calls)
+	stubPanes(t, panesAlways(foreign))
+	s := State{PR: "42", Repo: "o/r", Agent: "codex", LaunchSession: "work", LaunchDir: "/repo/root", IntervalSeconds: 300}
+	if _, _, err := tick(&s); err != nil {
+		t.Fatal(err)
+	}
+	if countWorkflowLaunches(calls, "merge-repair") != 1 || s.ConflictFixAttempts != 1 {
+		t.Fatalf("a foreign merge-repair window deferred this PR's merge repair: state=%+v calls=%v", s, calls)
+	}
+
+	calls = nil
+	withCommands(t, []string{cleanOpenPR("def"), `[{"bucket":"fail","name":"test","state":"FAILURE"}]`, `[]`, `[]`}, &calls)
+	stubPanes(t, panesAlways(foreign))
+	ci := State{PR: "42", Repo: "o/r", Agent: "codex", LaunchSession: "work", LaunchDir: "/repo/root", IntervalSeconds: 300}
+	if _, _, err := tick(&ci); err != nil {
+		t.Fatal(err)
+	}
+	if countWorkflowLaunches(calls, "ci-repair") != 1 || ci.FixAttempts != 1 {
+		t.Fatalf("a foreign merge-repair window blocked this PR's CI repair: state=%+v calls=%v", ci, calls)
 	}
 }

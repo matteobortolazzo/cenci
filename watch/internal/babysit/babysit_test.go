@@ -26,18 +26,54 @@ import (
 // override the seam themselves (see automerge_test.go's
 // withFleetAutomergeEnabled) and restore it via t.Cleanup, which puts the
 // seam back to this "" pin, not whatever the real environment had set.
+//
+// It also pins the #1457 worker-inventory seams: tmuxPaneInventory reports a
+// session with no repair worker, and gitCommonDir fails, so no test runs a real
+// tmux or git unless it installs its own stub or fake binary.
 func TestMain(m *testing.M) {
 	original := fleetConfigPath
-	originalRepairActive := mergeRepairActive
-	originalCIRepairActive := ciRepairActive
+	originalInventory := tmuxPaneInventory
+	originalCommonDir := gitCommonDir
 	fleetConfigPath = func() string { return "" }
-	mergeRepairActive = func(string, string, string) (bool, error) { return false, nil }
-	ciRepairActive = func(string, string, string) (bool, error) { return false, nil }
+	tmuxPaneInventory = func(string, string) (string, error) { return noWorkerInventory, nil }
+	gitCommonDir = func(string) (string, error) { return "", errors.New("gitCommonDir is not stubbed in this test") }
 	code := m.Run()
 	fleetConfigPath = original
-	mergeRepairActive = originalRepairActive
-	ciRepairActive = originalCIRepairActive
+	tmuxPaneInventory = originalInventory
+	gitCommonDir = originalCommonDir
 	os.Exit(code)
+}
+
+// noWorkerInventory is a 3-column pane inventory with no repair worker in it.
+const noWorkerInventory = "1-implement\t0\t\n"
+
+// paneRowOf renders one inventory row: window name, pane_dead and repo-dir.
+func paneRowOf(window string, dead bool, repoDir string) string {
+	d := "0"
+	if dead {
+		d = "1"
+	}
+	return window + "\t" + d + "\t" + repoDir + "\n"
+}
+
+// stubPanes replaces the tmuxPaneInventory seam with inventory, which receives
+// the 1-based read number, and returns the recorded reads as
+// "<socket>|<session>".
+func stubPanes(t *testing.T, inventory func(read int) (string, error)) *[]string {
+	t.Helper()
+	var reads []string
+	original := tmuxPaneInventory
+	tmuxPaneInventory = func(socket, session string) (string, error) {
+		reads = append(reads, socket+"|"+session)
+		return inventory(len(reads))
+	}
+	t.Cleanup(func() { tmuxPaneInventory = original })
+	return &reads
+}
+
+// panesAlways serves the same inventory on every read.
+func panesAlways(inventory string) func(int) (string, error) {
+	return func(int) (string, error) { return inventory, nil }
 }
 
 // TestGhJSONRejectsNonzeroExitEvenWithValidJSON is the #886 fail-closed
@@ -160,15 +196,15 @@ func TestGhJSONNonJSONBodyClassifiesAsParse(t *testing.T) {
 // starts consulting these seams (Phase 4) instead of failing on the new
 // "no session recorded"/"session gone" gates. Tests that care about the
 // tmux-target resolution/probe behavior itself override them directly,
-// after calling withCommands.
+// after calling withCommands. The #1457 pane inventory seam is reset to a
+// session with no repair worker; stubPanes overrides it.
 func withCommands(t *testing.T, responses []string, calls *[][]string) {
 	t.Helper()
 	originalCommand := command
 	originalExecGh := execGh
 	originalCurrentTmuxSession := currentTmuxSession
 	originalTmuxHasSession := tmuxHasSession
-	originalRepairActive := mergeRepairActive
-	originalCIRepairActive := ciRepairActive
+	originalInventory := tmuxPaneInventory
 	i := 0
 	command = func(name string, args ...string) ([]byte, error) {
 		*calls = append(*calls, append([]string{name}, args...))
@@ -185,15 +221,13 @@ func withCommands(t *testing.T, responses []string, calls *[][]string) {
 	}
 	currentTmuxSession = func() (string, error) { return "test-session", nil }
 	tmuxHasSession = func(string, string) (bool, error) { return true, nil }
-	mergeRepairActive = func(string, string, string) (bool, error) { return false, nil }
-	ciRepairActive = func(string, string, string) (bool, error) { return false, nil }
+	tmuxPaneInventory = func(string, string) (string, error) { return noWorkerInventory, nil }
 	t.Cleanup(func() {
 		command = originalCommand
 		execGh = originalExecGh
 		currentTmuxSession = originalCurrentTmuxSession
 		tmuxHasSession = originalTmuxHasSession
-		mergeRepairActive = originalRepairActive
-		ciRepairActive = originalCIRepairActive
+		tmuxPaneInventory = originalInventory
 	})
 }
 
@@ -1301,47 +1335,61 @@ func TestTickCIRepairDispatchesOnGreenToFailingTransitionSameSHA(t *testing.T) {
 }
 
 // TestTickCIRepairNoDispatchStormOnRepeatedFailingSameSHA is the "no
-// dispatch storm" AC: a third tick, still failing at the same head SHA
-// after a repair was already dispatched, must launch no second ci-repair,
-// must leave FixAttempts unchanged, and must still report actionable (no
-// backoff) via the pre-existing RepairPending term at tick's :614. State is
-// pre-seeded to exactly what a prior dispatch tick would have left behind
-// (LastHeadSHA and LastRepairedSHA both pinned to headSHA, per
-// watch/docs/test-strategy.md's rule against pinning only one dependent
-// identity field), so this tick exercises only the storm guard.
+// dispatch storm" AC, rewritten for #1457's liveness-based retry episode: a
+// tick still failing at the head a repair was already dispatched for launches
+// again only once that worker has ended. A tracked dispatch with a live
+// `42-ci-repair` pane launches nothing; the same state with no live pane
+// retries at the unchanged head; a legacy state (the SHA marker without the
+// tracking marker, written before #1457) keeps the old same-head hold, because
+// its worker cannot be probed. Every case stays actionable (no backoff).
 func TestTickCIRepairNoDispatchStormOnRepeatedFailingSameSHA(t *testing.T) {
 	headSHA := "sha-storm"
-	var calls [][]string
-	withScriptedCommands(t, []scriptedCall{
-		{out: cleanOpenPR(headSHA)},
-		{out: `[{"bucket":"fail","name":"test","state":"FAILURE"}]`},
-		{out: `[]`},
-		{out: `[]`},
-	}, &calls)
-	originalTmuxHasSession := tmuxHasSession
-	tmuxHasSession = func(string, string) (bool, error) { return true, nil }
-	t.Cleanup(func() { tmuxHasSession = originalTmuxHasSession })
+	for _, tc := range []struct {
+		name         string
+		tracked      bool
+		inventory    string
+		wantLaunches int
+		wantAttempts int
+	}{
+		{"tracked and live: no second launch", true, liveCI(), 0, 1},
+		{"tracked and ended: retried at the same head", true, deadCI(), 1, 2},
+		{"legacy marker: same-head hold kept", false, noWorkerInventory, 0, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls [][]string
+			withScriptedCommands(t, []scriptedCall{
+				{out: cleanOpenPR(headSHA)},
+				{out: `[{"bucket":"fail","name":"test","state":"FAILURE"}]`},
+				{out: `[]`},
+				{out: `[]`},
+			}, &calls)
+			originalTmuxHasSession := tmuxHasSession
+			tmuxHasSession = func(string, string) (bool, error) { return true, nil }
+			t.Cleanup(func() { tmuxHasSession = originalTmuxHasSession })
+			stubPanes(t, panesAlways(tc.inventory))
 
-	s := State{
-		PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 900,
-		LastHeadSHA: headSHA, LastRepairedSHA: headSHA,
-		FixAttempts: 1, RepairPending: true,
-		LaunchSession: "work",
-	}
-	if _, _, err := tick(&s); err != nil {
-		t.Fatalf("tick: %v", err)
-	}
-	if n := countWorkflowLaunches(calls, "ci-repair"); n != 0 {
-		t.Fatalf("ci-repair launches = %d, want 0: a repair was already dispatched for this head SHA, a repeated failing tick must not launch a second one: %#v", n, calls)
-	}
-	if s.FixAttempts != 1 {
-		t.Fatalf("FixAttempts = %d, want unchanged 1", s.FixAttempts)
-	}
-	if !s.RepairPending {
-		t.Fatal("RepairPending = false, want unchanged true")
-	}
-	if s.CurrentDelaySeconds != s.IntervalSeconds {
-		t.Fatalf("CurrentDelaySeconds = %d, want %d (IntervalSeconds): still actionable via the existing RepairPending term, no backoff", s.CurrentDelaySeconds, s.IntervalSeconds)
+			s := State{
+				PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 900,
+				LastHeadSHA: headSHA, LastRepairedSHA: headSHA, CIRepairTracked: tc.tracked,
+				FixAttempts: 1, RepairPending: true,
+				LaunchSession: "work", LaunchDir: "/repo/root",
+			}
+			if _, _, err := tick(&s); err != nil {
+				t.Fatalf("tick: %v", err)
+			}
+			if n := countWorkflowLaunches(calls, "ci-repair"); n != tc.wantLaunches {
+				t.Fatalf("ci-repair launches = %d, want %d: %#v", n, tc.wantLaunches, calls)
+			}
+			if s.FixAttempts != tc.wantAttempts {
+				t.Fatalf("FixAttempts = %d, want %d", s.FixAttempts, tc.wantAttempts)
+			}
+			if !s.RepairPending {
+				t.Fatal("RepairPending = false, want true")
+			}
+			if s.CurrentDelaySeconds != s.IntervalSeconds {
+				t.Fatalf("CurrentDelaySeconds = %d, want %d (IntervalSeconds): still actionable, no backoff", s.CurrentDelaySeconds, s.IntervalSeconds)
+			}
+		})
 	}
 }
 
@@ -1658,8 +1706,9 @@ func TestTickCIRepairGreenAfterUnknownAtNewSHAStillResetsBudget(t *testing.T) {
 // distinct failing head commits, never repeated ticks at one SHA (Decision:
 // "cap semantics stay per-commit, not per-tick"). Drives fixCap distinct
 // failing SHAs to reach the cap; each round interleaves TWO kinds of tick
-// that must not advance FixAttempts: a repeated tick at the same SHA
-// (storm check) AND a PENDING tick at the next round's SHA (the
+// that must not advance FixAttempts: a repeated tick at the same SHA while
+// that round's worker is still live (storm check; since #1457 an ended worker
+// is retried at the same SHA) AND a PENDING tick at the next round's SHA (the
 // coordinator's code-review follow-up: the repair agent pushed, CI has not
 // reported red -- or green -- yet, the common case, not an edge case).
 // A final distinct failing SHA then trips the retry-cap escalation (launch
@@ -1692,6 +1741,12 @@ func TestTickCIRepairRetryCapReachedOnlyAfterDistinctFailingHeadSHAs(t *testing.
 	originalTmuxHasSession := tmuxHasSession
 	tmuxHasSession = func(string, string) (bool, error) { return true, nil }
 	t.Cleanup(func() { tmuxHasSession = originalTmuxHasSession })
+	// #1457: the repeated tick at each SHA sees that round's worker still live
+	// (the even inventory reads; pending ticks read none), so it is the live
+	// worker, not the SHA, that keeps it from launching again.
+	stubPanes(t, func(read int) (string, error) {
+		return paneRowOf("42-ci-repair", read%2 == 1, ""), nil
+	})
 
 	s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 60, LaunchSession: "work"}
 	for i, sha := range shas[:fixCap] {
@@ -3698,10 +3753,10 @@ func TestTickConflictingDIRTYLaunchesMergeRepairOnce(t *testing.T) {
 func TestTickConflictSameSHAStillConflictingOpensNoSecondWindow(t *testing.T) {
 	var calls [][]string
 	withCommands(t, []string{conflictingOpenPR("abc"), `[{"bucket":"pass","name":"test","state":"SUCCESS"}]`, `[]`, `[]`}, &calls)
-	mergeRepairActive = func(string, string, string) (bool, error) { return true, nil }
+	stubPanes(t, panesAlways(paneRowOf("42-merge-repair", false, "/repo/root")))
 	s := State{
 		PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 300, CurrentDelaySeconds: 900,
-		LastHeadSHA: "abc", LaunchSession: "work",
+		LastHeadSHA: "abc", LaunchSession: "work", LaunchDir: "/repo/root",
 		Status: "running", ConflictRepairSHA: "abc", ConflictFixAttempts: 1,
 	}
 
@@ -3747,7 +3802,7 @@ func TestTickConflictSameSHAStillConflictingOpensNoSecondWindow(t *testing.T) {
 func TestTickConflictNewHeadSHAReArmsWindow(t *testing.T) {
 	var calls [][]string
 	withCommands(t, []string{conflictingOpenPR("def"), `[{"bucket":"pass","name":"test","state":"SUCCESS"}]`, `[]`, `[]`}, &calls)
-	mergeRepairActive = func(string, string, string) (bool, error) { return false, nil }
+	stubPanes(t, panesAlways(paneRowOf("42-merge-repair", true, "/repo/root")))
 	s := State{
 		PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 300, CurrentDelaySeconds: 900,
 		LastHeadSHA: "abc", LaunchSession: "work",
@@ -4361,11 +4416,7 @@ func assertCIRepairFieldsUnchanged(t *testing.T, got, want State) {
 func TestTickCIRepairLiveWorkerSuppressesDispatch(t *testing.T) {
 	var calls [][]string
 	withCommands(t, ciRepairTickResponses("sha-new"), &calls)
-	var probed []string
-	ciRepairActive = func(socket, session, pr string) (bool, error) {
-		probed = append(probed, session+"/"+pr)
-		return true, nil
-	}
+	reads := stubPanes(t, panesAlways(liveCI()))
 	s := ciRepairSeedState()
 	before := s
 
@@ -4375,8 +4426,8 @@ func TestTickCIRepairLiveWorkerSuppressesDispatch(t *testing.T) {
 	if n := countWorkflowLaunches(calls, "ci-repair"); n != 0 {
 		t.Fatalf("ci-repair launches = %d, want 0 while 42-ci-repair is live: %#v", n, calls)
 	}
-	if !reflect.DeepEqual(probed, []string{"work/42"}) {
-		t.Errorf("probed %v, want exactly the recorded session and PR [work/42]", probed)
+	if !reflect.DeepEqual(*reads, []string{"|work"}) {
+		t.Errorf("inventory reads %v, want exactly one of the recorded session [|work]", *reads)
 	}
 	assertCIRepairFieldsUnchanged(t, s, before)
 	if s.CurrentDelaySeconds != s.IntervalSeconds {
@@ -4390,9 +4441,7 @@ func TestTickCIRepairProbeErrorRefusesDispatch(t *testing.T) {
 	withFleetAutomergeEnabled(t, true)
 	var calls [][]string
 	withCommands(t, ciRepairTickResponses("sha-new"), &calls)
-	ciRepairActive = func(string, string, string) (bool, error) {
-		return false, errors.New("observe ci-repair in tmux session \"work\": malformed pane inventory")
-	}
+	stubPanes(t, func(int) (string, error) { return "42-ci-repair\t0\n", nil })
 	s := ciRepairSeedState()
 	before := s
 
@@ -4415,10 +4464,7 @@ func TestTickCIRepairNoSessionSkipsProbe(t *testing.T) {
 	withFleetAutomergeEnabled(t, true)
 	var calls [][]string
 	withCommands(t, ciRepairTickResponses("sha-new"), &calls)
-	ciRepairActive = func(string, string, string) (bool, error) {
-		t.Error("ciRepairActive consulted without a recorded session")
-		return false, nil
-	}
+	reads := stubPanes(t, panesAlways(noWorkerInventory))
 	s := ciRepairSeedState()
 	s.LaunchSession = ""
 	before := s
@@ -4430,6 +4476,12 @@ func TestTickCIRepairNoSessionSkipsProbe(t *testing.T) {
 	assertCIRepairFieldsUnchanged(t, s, before)
 	if s.AutomergeReason != reasonWorkflowLaunchFailed {
 		t.Errorf("AutomergeReason = %q, want %q", s.AutomergeReason, reasonWorkflowLaunchFailed)
+	}
+	if len(*reads) != 0 {
+		t.Errorf("inventory reads = %v, want none without a recorded session", *reads)
+	}
+	if n := countWorkflowLaunches(calls, "ci-repair"); n != 0 {
+		t.Errorf("cenci run ci-repair calls = %d, want 0", n)
 	}
 }
 
@@ -4451,11 +4503,12 @@ func stubCenciRunExit(t *testing.T, calls *[][]string, code int, msg string) {
 
 // `cenci run` exit 3 means the window was spawned but its post-spawn setup
 // failed: babysit counts the attempt as dispatched, and the next tick at the
-// same head starts no second ci-repair window.
+// same head, with that window's pane live, starts no second ci-repair window.
 func TestTickCIRepairWindowSpawnedCountsAsDispatched(t *testing.T) {
 	var calls [][]string
 	withCommands(t, append(ciRepairTickResponses("sha-new"), ciRepairTickResponses("sha-new")...), &calls)
 	stubCenciRunExit(t, &calls, 3, "cenci run: setting automatic-rename off on \"work:42-ci-repair\": boom: tmux window already spawned")
+	stubPanes(t, panesByTick("", liveCI()))
 	s := ciRepairSeedState()
 
 	restore := captureStdout(t)
@@ -4519,18 +4572,25 @@ func TestTickWindowSpawnedIsStillAFailureOutsideCIRepair(t *testing.T) {
 	}
 }
 
-// The retry-cap path is not guarded and still launches the interactive
-// babysit-attention with its unchanged argument; since #1456 it pauses only CI
-// repair, so the tick itself succeeds.
+// The retry-cap path launches the interactive babysit-attention with its
+// unchanged argument; since #1456 it pauses only CI repair, so the tick itself
+// succeeds. Since #1457 it waits while the last worker is still live: that
+// tick opens nothing, and the first tick after the pane ends opens it.
 func TestTickCIRetryCapLaunchesAttentionUnchanged(t *testing.T) {
 	var calls [][]string
-	withCommands(t, ciRepairTickResponses("sha-new"), &calls)
-	ciRepairActive = func(string, string, string) (bool, error) { return true, nil }
+	withCommands(t, append(ciRepairTickResponses("sha-new"), ciRepairTickResponses("sha-new")...), &calls)
+	stubPanes(t, panesByTick(liveCI(), deadCI()))
 	s := ciRepairSeedState()
 	s.FixAttempts = fixCap
 
 	if _, _, err := tick(&s); err != nil {
-		t.Fatalf("tick err = %v, want nil: the cap pauses CI repair, not the supervisor", err)
+		t.Fatalf("tick 1: %v", err)
+	}
+	if n := countWorkflowLaunches(calls, "babysit-attention"); n != 0 || s.CIRepairPaused || s.CICapNotified {
+		t.Fatalf("tick 1 with a live worker: attention launches=%d CIRepairPaused=%v CICapNotified=%v, want 0/false/false", n, s.CIRepairPaused, s.CICapNotified)
+	}
+	if _, _, err := tick(&s); err != nil {
+		t.Fatalf("tick 2 err = %v, want nil: the cap pauses CI repair, not the supervisor", err)
 	}
 	if !s.CIRepairPaused || !s.CICapNotified {
 		t.Errorf("CIRepairPaused/CICapNotified = %v/%v, want true/true", s.CIRepairPaused, s.CICapNotified)

@@ -602,7 +602,7 @@ it was evaluated.
 | `enabled` | Fleet kill switch | `automerge.enabled` is not `true` in `~/.config/cenci/config.json` |
 | `label` | Per-ticket grant | The PR closes no issue, an issue's labels are unreadable, or any closed issue lacks `automerge:ok` |
 | `ci` | CI green (≥1 `pass`, rest `pass`/`skipping`) | No checks reported, zero `pass` with the rest `skipping`, or any check's bucket is `fail`, `pending`, `cancel`, empty, or unrecognized |
-| `review` | Feedback | CI repair in flight, pending feedback, a reopened resolution, or a detection read that couldn't be proven complete |
+| `review` | Feedback | A CI or merge repair worker still running (`branch repair worker still running`), CI repair in flight, pending feedback, a reopened resolution, or a detection read that couldn't be proven complete |
 | `mergeable` | PR state | Draft, `MERGEABLE` unknown, or not mergeable (`PR has merge conflicts` when `mergeStateStatus` is `DIRTY`, `PR branch is behind base` when `BEHIND`) |
 | `headsha` | Head commit | The PR's head SHA is unreadable at evaluation time |
 | `files` | Diff readability | Zero changed files, or a truncated file list |
@@ -638,7 +638,7 @@ including across head changes. If that worker exits with conflicts remaining, ba
 retries at the same head SHA, up to three launches per continuous conflict episode;
 an exhausted budget opens an attention window. An ambiguous resolution still needs a human. Babysit keeps polling
 at its normal interval and releases the hold once GitHub confirms the conflict has
-cleared — no re-arm required.
+cleared and that merge worker has ended — no re-arm required.
 
 ## Knowing a merge was automatic
 
