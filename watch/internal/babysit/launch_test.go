@@ -1099,36 +1099,29 @@ func TestLaunchUsesTheRecordedSocket(t *testing.T) {
 	}
 }
 
-// The worker-liveness probes (a live <PR>-ci-repair / <PR>-merge-repair window)
-// read the recorded session on the recorded socket, so a worker on the arming
-// pane's own server is seen and a same-named session elsewhere is not.
+// The worker-liveness inventory (#1457: one read per tick for both a live
+// <PR>-ci-repair and a live <PR>-merge-repair window) reads the recorded session
+// on the recorded socket, so a worker on the arming pane's own server is seen
+// and a same-named session elsewhere is not.
 func TestTickWorkerProbesReadTheRecordedSocket(t *testing.T) {
 	t.Run("ci-repair", func(t *testing.T) {
 		var calls [][]string
 		withCommands(t, ciRepairTickResponses("sha-new"), &calls)
-		var probed []string
-		ciRepairActive = func(socket, session, pr string) (bool, error) {
-			probed = append(probed, socket+"|"+session+"|"+pr)
-			return false, nil
-		}
+		reads := stubPanes(t, panesAlways(noWorkerInventory))
 		s := ciRepairSeedState()
 		s.LaunchSocket = "/s/a"
 
 		if _, _, err := tick(&s); err != nil {
 			t.Fatalf("tick: %v", err)
 		}
-		if want := []string{"/s/a|work|42"}; !slices.Equal(probed, want) {
-			t.Errorf("ci-repair liveness probes = %q, want %q", probed, want)
+		if want := []string{"/s/a|work"}; !slices.Equal(*reads, want) {
+			t.Errorf("inventory reads = %q, want %q", *reads, want)
 		}
 	})
 	t.Run("merge-repair", func(t *testing.T) {
 		var calls [][]string
 		withCommands(t, []string{conflictingOpenPR("abc"), `[{"bucket":"pass","name":"test","state":"SUCCESS"}]`, `[]`, `[]`}, &calls)
-		var probed []string
-		mergeRepairActive = func(socket, session, pr string) (bool, error) {
-			probed = append(probed, socket+"|"+session+"|"+pr)
-			return false, nil
-		}
+		reads := stubPanes(t, panesAlways(noWorkerInventory))
 		s := State{
 			PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 300, CurrentDelaySeconds: 900,
 			LastHeadSHA: "abc", LaunchSession: "work", LaunchSocket: "/s/a", LaunchDir: "/repo/root",
@@ -1137,8 +1130,8 @@ func TestTickWorkerProbesReadTheRecordedSocket(t *testing.T) {
 		if _, _, err := tick(&s); err != nil {
 			t.Fatalf("tick: %v", err)
 		}
-		if want := []string{"/s/a|work|42"}; !slices.Equal(probed, want) {
-			t.Errorf("merge-repair liveness probes = %q, want %q", probed, want)
+		if want := []string{"/s/a|work"}; !slices.Equal(*reads, want) {
+			t.Errorf("inventory reads = %q, want %q", *reads, want)
 		}
 	})
 }

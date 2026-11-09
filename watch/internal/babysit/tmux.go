@@ -6,7 +6,10 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/tmux"
@@ -79,41 +82,206 @@ func execTmux(socket string, args ...string) (stdout, stderr string, err error) 
 	return outBuf.String(), errBuf.String(), runErr
 }
 
-// mergeRepairActive and ciRepairActive report whether a live `<PR>-merge-repair`
-// or `<PR>-ci-repair` worker exists in the recorded session (#1455). Both are
-// test seams over the one defaultWorkerActive probe.
-var (
-	mergeRepairActive = func(socket, session, pr string) (bool, error) {
-		return defaultWorkerActive(socket, session, pr, "merge-repair")
+// paneInventoryFormat is the one pane inventory a tick reads (#1457): every
+// pane's window name, whether it is dead, and the @cenci-repo-dir window option
+// `cenci run` records on each window it spawns (frontend.RepoDirOption). tmux
+// expands an unset user option to "", so a row always has three columns.
+const paneInventoryFormat = "#{window_name}\t#{pane_dead}\t#{@cenci-repo-dir}"
+
+// tmuxPaneInventory reads the raw pane inventory of the recorded session on the
+// recorded socket. It is a test seam, like command/execGh.
+var tmuxPaneInventory = defaultTmuxPaneInventory
+
+// defaultTmuxPaneInventory is a single bounded execTmux call (#1431's
+// socket-explicit path, its timeout, WaitDelay and stderr conventions). A tmux
+// failure, a timeout or a truncated read is an error, never "no worker".
+func defaultTmuxPaneInventory(socket, session string) (string, error) {
+	stdout, stderr, err := execTmux(socket, "list-panes", "-s", "-t", "="+session, "-F", paneInventoryFormat)
+	if err != nil {
+		return "", fmt.Errorf("read the pane inventory of tmux session %q: %s: %w", session, strings.TrimSpace(stderr), err)
 	}
-	ciRepairActive = func(socket, session, pr string) (bool, error) {
-		return defaultWorkerActive(socket, session, pr, "ci-repair")
+	return stdout, nil
+}
+
+// paneRow is one parsed pane inventory row.
+type paneRow struct {
+	window  string
+	dead    bool
+	repoDir string
+}
+
+// parsePaneInventory parses the 3-column inventory, trimming only the trailing
+// newline so a row with an empty repo-dir keeps its trailing TAB (watch/docs/
+// tmux.md). Empty output or any row that is not exactly a non-empty name, a
+// 0/1 pane_dead and a repo-dir cannot prove a worker absent, so it fails the
+// whole read. The error never echoes a row: a repo-dir is a local path.
+func parsePaneInventory(out string) ([]paneRow, error) {
+	if out == "" {
+		return nil, errors.New("empty pane inventory")
 	}
+	var rows []paneRow
+	for i, line := range strings.Split(strings.TrimSuffix(out, "\n"), "\n") {
+		fields := strings.Split(line, "\t")
+		if len(fields) != 3 || fields[0] == "" || (fields[1] != "0" && fields[1] != "1") {
+			return nil, fmt.Errorf("malformed pane inventory (row %d)", i+1)
+		}
+		rows = append(rows, paneRow{window: fields[0], dead: fields[1] == "1", repoDir: fields[2]})
+	}
+	return rows, nil
+}
+
+// gitCommonDirTimeout bounds the one `git rev-parse --git-common-dir` call per
+// lookup, mirroring tmuxTimeout; a var so a test can shorten it.
+var gitCommonDirTimeout = 10 * time.Second
+
+// gitCommonDir resolves a directory's git common dir. It is a test seam.
+var gitCommonDir = defaultGitCommonDir
+
+// defaultGitCommonDir runs `git -C <dir> rev-parse --path-format=absolute
+// --git-common-dir` with mainsync.go's conventions: a bounded context,
+// WaitDelay, bounded separate stdout/stderr, no stdin, and prompts disabled. A
+// failure, a timeout or a non-absolute answer is an error.
+func defaultGitCommonDir(dir string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), gitCommonDirTimeout)
+	defer cancel()
+	var outBuf, errBuf boundedWriter
+	cmd := exec.CommandContext(ctx, "git", "-C", dir, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=", "SSH_ASKPASS_REQUIRE=never")
+	cmd.WaitDelay = tmuxWaitDelay
+	cmd.Stdin = nil
+	cmd.Stdout = &outBuf
+	cmd.Stderr = &errBuf
+	err := cmd.Run()
+	if ctx.Err() != nil {
+		err = errors.Join(err, ctx.Err())
+	}
+	if outBuf.truncated || errBuf.truncated {
+		err = errors.Join(err, errors.New("git output exceeded bounded cap"))
+	}
+	if err != nil {
+		return "", fmt.Errorf("git rev-parse --git-common-dir: %s: %w", strings.TrimSpace(errBuf.String()), err)
+	}
+	common := strings.TrimSuffix(outBuf.String(), "\n")
+	if !filepath.IsAbs(common) {
+		return "", fmt.Errorf("git rev-parse --git-common-dir: not an absolute path")
+	}
+	return filepath.Clean(common), nil
+}
+
+// workerLiveness is one tick's view of this PR's branch repair workers: a live
+// `<PR>-ci-repair` or `<PR>-merge-repair` pane that is ours or of unknown
+// ownership, plus the recovery note for each unknown one.
+type workerLiveness struct {
+	ciLive, mergeLive bool
+	notes             []string
+}
+
+func (w workerLiveness) any() bool { return w.ciLive || w.mergeLive }
+
+// describe names the live workers for a log line.
+func (w workerLiveness) describe(pr string) string {
+	switch {
+	case w.ciLive && w.mergeLive:
+		return pr + "-ci-repair and " + pr + "-merge-repair are still running"
+	case w.ciLive:
+		return "ci-repair window " + pr + "-ci-repair is still running"
+	default:
+		return "merge-repair window " + pr + "-merge-repair is still running"
+	}
+}
+
+type paneOwner int
+
+const (
+	paneOwned paneOwner = iota
+	paneUnknown
+	paneForeign
 )
 
-// defaultWorkerActive observes every pane in the recorded session. A retained
-// dead pane is not a worker; a live pane in the exact `<pr>-<workflow>` window
-// is. Unreadable or malformed output cannot safely authorize another writer, so
-// it is an error, a separate return from "no live worker".
-func defaultWorkerActive(socket, session, pr, workflow string) (bool, error) {
-	stdout, stderr, err := execTmux(socket, "list-panes", "-s", "-t", "="+session, "-F", "#{window_name}\t#{pane_dead}")
+// observeWorkers reads the recorded session's pane inventory once and derives
+// both CI and merge liveness for s.PR (#1457). Only an exact `<PR>-ci-repair`
+// or `<PR>-merge-repair` window with a live pane counts. Its @cenci-repo-dir
+// decides ownership: Clean-equal to LaunchDir or RepoRoot is ours; otherwise
+// the git common dirs are compared, equal is ours and different is another
+// repository's worker, which is ignored with a printed note. An empty or
+// relative repo-dir, or a lookup that fails on either side, is unknown: it
+// counts as live (it blocks launches) and adds a recovery note. The note never
+// echoes the raw repo-dir. Our own common dir is resolved at most once.
+func observeWorkers(s *State) (workerLiveness, error) {
+	var w workerLiveness
+	out, err := tmuxPaneInventory(s.LaunchSocket, s.LaunchSession)
 	if err != nil {
-		return false, fmt.Errorf("observe %s in tmux session %q: %s: %w", workflow, session, strings.TrimSpace(stderr), err)
+		return w, err
 	}
-	if stdout == "" {
-		return false, fmt.Errorf("observe %s in tmux session %q: empty pane inventory", workflow, session)
+	rows, err := parsePaneInventory(out)
+	if err != nil {
+		return w, fmt.Errorf("observe repair workers in tmux session %q: %w", s.LaunchSession, err)
 	}
-	active := false
-	for _, line := range strings.Split(strings.TrimSuffix(stdout, "\n"), "\n") {
-		fields := strings.Split(line, "\t")
-		if len(fields) != 2 || fields[0] == "" || (fields[1] != "0" && fields[1] != "1") {
-			return false, fmt.Errorf("observe %s in tmux session %q: malformed pane inventory", workflow, session)
+	ownCommonDir := sync.OnceValues(func() (string, error) {
+		dir := s.LaunchDir
+		if dir == "" {
+			dir = s.RepoRoot
 		}
-		if fields[0] == pr+"-"+workflow && fields[1] == "0" {
-			active = true
+		if dir == "" {
+			return "", errors.New("no launch directory or repository root recorded")
+		}
+		return gitCommonDir(dir)
+	})
+	classify := func(repoDir string) paneOwner {
+		if repoDir == "" || !filepath.IsAbs(repoDir) {
+			return paneUnknown
+		}
+		dir := filepath.Clean(repoDir)
+		for _, recorded := range []string{s.LaunchDir, s.RepoRoot} {
+			if recorded != "" && filepath.Clean(recorded) == dir {
+				return paneOwned
+			}
+		}
+		ours, err := ownCommonDir()
+		if err != nil {
+			return paneUnknown
+		}
+		theirs, err := gitCommonDir(dir)
+		if err != nil {
+			return paneUnknown
+		}
+		if theirs == ours {
+			return paneOwned
+		}
+		return paneForeign
+	}
+	for _, row := range rows {
+		var workflow string
+		switch row.window {
+		case s.PR + "-ci-repair":
+			workflow = "ci-repair"
+		case s.PR + "-merge-repair":
+			workflow = "merge-repair"
+		default:
+			continue
+		}
+		if row.dead {
+			continue
+		}
+		target := s.LaunchSession + ":" + row.window
+		switch classify(row.repoDir) {
+		case paneForeign:
+			fmt.Printf("PR #%s: ignoring live %s window %s: it belongs to another repository\n", s.PR, workflow, target)
+			continue
+		case paneUnknown:
+			note := fmt.Sprintf("%s window %s is live but its repository is unknown; let the worker finish, or close that window once its edits are preserved; cenci babysit reset %s re-arms the retry budget", workflow, target, s.PR)
+			if !slices.Contains(w.notes, note) {
+				w.notes = append(w.notes, note)
+				fmt.Printf("PR #%s: %s\n", s.PR, note)
+			}
+		}
+		if workflow == "ci-repair" {
+			w.ciLive = true
+		} else {
+			w.mergeLive = true
 		}
 	}
-	return active, nil
+	return w, nil
 }
 
 var currentTmuxSession = defaultCurrentTmuxSession

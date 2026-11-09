@@ -271,6 +271,32 @@ func argValue(call []string, flag string) (string, bool) {
 	return "", false
 }
 
+// #1457: a green tick while this PR's merge-repair worker (here of unknown
+// ownership) is live holds automerge under the new review-stage reason, and the
+// worker's recovery note leads AutomergeDetail.
+func TestTickAutomergeHeldWhileABranchRepairWorkerIsLive(t *testing.T) {
+	const issue = 782
+	withFleetAutomergeEnabled(t, true)
+	e := newCICapEnv(t, ciCapTickOf(ciCapOpen("head-a", issue), ciCapGreen), ciCapMerged(issue))
+	e.panes = panesAlways(paneRowOf("42-merge-repair", false, ""))
+	e.seed(State{Status: "running", FixAttempts: 1, RepairPending: true, LastRepairedSHA: "head-a", CIRepairTracked: true})
+
+	if err := e.run(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	s := e.after(1)
+	if s.AutomergeDecision != "held" || s.AutomergeReason != reasonRepairWorkerLive {
+		t.Fatalf("automerge = %q (%q), want held (%q)", s.AutomergeDecision, s.AutomergeReason, reasonRepairWorkerLive)
+	}
+	if !strings.HasPrefix(s.AutomergeDetail, "merge-repair window work:42-merge-repair is live but its repository is unknown") {
+		t.Errorf("AutomergeDetail = %q, want the unknown-ownership note first", s.AutomergeDetail)
+	}
+	if reasonRepairWorkerLive != "branch repair worker still running" {
+		t.Errorf("reasonRepairWorkerLive = %q, want the documented %q", reasonRepairWorkerLive, "branch repair worker still running")
+	}
+}
+
 // -- evaluateAutomerge: condition matrix (#824) ------------------------------
 //
 // One case per reason constant in the condition chain, each starting from an
@@ -291,6 +317,13 @@ func TestEvaluateAutomergeConditionMatrix(t *testing.T) {
 		{"no CI checks at all", func(in *automergeInputs) { in.Checks = nil }, reasonNoChecks},
 		{"CI not green (pending)", func(in *automergeInputs) { in.Checks = []check{{Bucket: "pending"}} }, reasonCICheckPending},
 		{"CI repair pending", func(in *automergeInputs) { in.RepairPending = true }, reasonRepairPending},
+		// #1457: a live CI or merge repair worker holds first in the review
+		// stage, ahead of the CI repair pending hold it usually comes with.
+		{"branch repair worker still running", func(in *automergeInputs) { in.RepairWorkerLive = true }, reasonRepairWorkerLive},
+		{"branch repair worker still running outranks CI repair pending", func(in *automergeInputs) {
+			in.RepairWorkerLive = true
+			in.RepairPending = true
+		}, reasonRepairWorkerLive},
 		{"comments detection read truncated", func(in *automergeInputs) { in.CommentsComplete = false }, reasonCommentsReadTruncated},
 		{"reviews detection read truncated", func(in *automergeInputs) { in.ReviewsComplete = false }, reasonReviewsReadTruncated},
 		{"review feedback pending", func(in *automergeInputs) { in.PendingKeys = []string{"comment:1"} }, reasonReviewPending},

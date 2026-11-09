@@ -667,13 +667,17 @@ func tickScriptFor(pr string, checks string) []string {
 	return []string{pr, checks, `[]`, `[]`}
 }
 
-// P22: the pause left lastRepairedCiHeadSha equal to the still-failing head, so
-// tick stays quiet until the reset clears it. The control tick on the
-// pre-reset state proves the cleared field is what changes the outcome.
+// P22, #1457: a legacy state (lastRepairedCiHeadSha equal to the still-failing
+// head, written before the ciRepairTracked marker existed) keeps the same-head
+// hold and reports the recovery instruction, so tick stays quiet until the
+// reset clears it. The control tick on the pre-reset state proves the cleared
+// field is what changes the outcome; the budget is below the cap so the control
+// cannot pass through the cap branch instead.
 func TestReset_ThenTickDispatchesCIRepairAtUnchangedFailingHead(t *testing.T) {
 	e := newResetEnv(t)
 	paused := pausedState()
 	paused.ConflictFixAttempts, paused.ConflictNotifiedSHA, paused.ConflictRepairSHA = 0, "", ""
+	paused.FixAttempts = 1
 	writeStateFile(t, e.path, paused)
 	failing := `[{"bucket":"fail","name":"test","state":"FAILURE"}]`
 
@@ -693,6 +697,12 @@ func TestReset_ThenTickDispatchesCIRepairAtUnchangedFailingHead(t *testing.T) {
 	if n := countWorkflowLaunches(controlCalls, "ci-repair"); n != 0 {
 		t.Fatalf("control: ci-repair launches before the reset = %d, want 0 (the head was already repaired)", n)
 	}
+	if n := countWorkflowLaunches(controlCalls, "babysit-attention"); n != 0 || control.FixAttempts != 1 {
+		t.Fatalf("control: attention launches=%d FixAttempts=%d, want 0/1", n, control.FixAttempts)
+	}
+	if !strings.Contains(control.AutomergeDetail, "cenci babysit reset 42") || !strings.Contains(control.AutomergeDetail, "work") {
+		t.Errorf("control: AutomergeDetail = %q, want the legacy recovery instruction naming the session and the reset", control.AutomergeDetail)
+	}
 
 	var calls [][]string
 	withCommands(t, tickScriptFor(cleanOpenPR("sha-x"), failing), &calls)
@@ -706,8 +716,8 @@ func TestReset_ThenTickDispatchesCIRepairAtUnchangedFailingHead(t *testing.T) {
 	if n := countWorkflowLaunches(calls, "babysit-attention"); n != 0 {
 		t.Errorf("babysit-attention launches = %d, want 0", n)
 	}
-	if s.FixAttempts != 1 || s.LastRepairedSHA != "sha-x" {
-		t.Errorf("after the dispatch FixAttempts=%d LastRepairedSHA=%q, want 1 and sha-x", s.FixAttempts, s.LastRepairedSHA)
+	if s.FixAttempts != 1 || s.LastRepairedSHA != "sha-x" || !s.CIRepairTracked {
+		t.Errorf("after the dispatch FixAttempts=%d LastRepairedSHA=%q ciRepairTracked=%v, want 1, sha-x and true", s.FixAttempts, s.LastRepairedSHA, s.CIRepairTracked)
 	}
 }
 
@@ -792,13 +802,14 @@ func TestBudgetReset_HasNoEventSocketKindOrDaemonHandler(t *testing.T) {
 func ciPausedLiveState(pid int) State {
 	s := pausedState()
 	s.PID = pid
-	s.CIRepairPaused, s.CICapNotified = true, true
+	s.CIRepairPaused, s.CICapNotified, s.CIRepairTracked = true, true, true
 	return s
 }
 
 // #1456 AC 8: a reset of a CI-paused state with a live verified supervisor
-// stops that process and clears the five budget fields plus both new markers.
-func TestReset_CIPausedLiveSupervisorClearsAllSevenFields(t *testing.T) {
+// stops that process and clears the five budget fields plus both cap markers;
+// #1457 adds the ci-repair tracking marker as the eighth.
+func TestReset_CIPausedLiveSupervisorClearsAllEightFields(t *testing.T) {
 	e := newResetEnv(t)
 	p := startOwnedFixture(t, false)
 	writeStateFile(t, e.path, ciPausedLiveState(p.pid))
@@ -823,13 +834,10 @@ func TestReset_CIPausedLiveSupervisorClearsAllSevenFields(t *testing.T) {
 	if !ok || !status.Signaled() || status.Signal() != syscall.SIGTERM {
 		t.Errorf("paused supervisor exit = %v, want it ended by SIGTERM", p.cmd.ProcessState)
 	}
-	s := mustReadState(t, e.path)
-	if s.FixAttempts != 0 || s.ConflictFixAttempts != 0 || s.RepairPending || s.LastRepairedSHA != "" || s.ConflictNotifiedSHA != "" {
-		t.Errorf("budget not zeroed: ciFixAttempts=%d conflictFixAttempts=%d ciRepairPending=%v lastRepairedCiHeadSha=%q conflictNotifiedHeadSha=%q",
-			s.FixAttempts, s.ConflictFixAttempts, s.RepairPending, s.LastRepairedSHA, s.ConflictNotifiedSHA)
-	}
-	if s.CIRepairPaused || s.CICapNotified {
-		t.Errorf("ciRepairPaused=%v ciCapNotified=%v, want both cleared by the reset", s.CIRepairPaused, s.CICapNotified)
+	requireEightFieldsCleared(t, mustReadState(t, e.path))
+	raw := string(readFileBytes(t, e.path))
+	if strings.Contains(raw, "ciRepairTracked") {
+		t.Errorf("state file %s still carries ciRepairTracked after the reset", raw)
 	}
 }
 
@@ -873,12 +881,12 @@ func TestFixCapStaysThree(t *testing.T) {
 
 // -- #1490: a recorded supervisor pid that has died -------------------------
 
-// requireSevenFieldsCleared pins the reset's seven cleared fields and pid 0.
-func requireSevenFieldsCleared(t *testing.T, s State) {
+// requireEightFieldsCleared pins the reset's eight cleared fields and pid 0.
+func requireEightFieldsCleared(t *testing.T, s State) {
 	t.Helper()
-	if s.FixAttempts != 0 || s.ConflictFixAttempts != 0 || s.RepairPending || s.LastRepairedSHA != "" || s.ConflictNotifiedSHA != "" || s.CIRepairPaused || s.CICapNotified || s.PID != 0 {
-		t.Errorf("reset fields not cleared: ciFixAttempts=%d conflictFixAttempts=%d ciRepairPending=%v lastRepairedCiHeadSha=%q conflictNotifiedHeadSha=%q ciRepairPaused=%v ciCapNotified=%v pid=%d",
-			s.FixAttempts, s.ConflictFixAttempts, s.RepairPending, s.LastRepairedSHA, s.ConflictNotifiedSHA, s.CIRepairPaused, s.CICapNotified, s.PID)
+	if s.FixAttempts != 0 || s.ConflictFixAttempts != 0 || s.RepairPending || s.LastRepairedSHA != "" || s.ConflictNotifiedSHA != "" || s.CIRepairPaused || s.CICapNotified || s.CIRepairTracked || s.PID != 0 {
+		t.Errorf("reset fields not cleared: ciFixAttempts=%d conflictFixAttempts=%d ciRepairPending=%v lastRepairedCiHeadSha=%q conflictNotifiedHeadSha=%q ciRepairPaused=%v ciCapNotified=%v ciRepairTracked=%v pid=%d",
+			s.FixAttempts, s.ConflictFixAttempts, s.RepairPending, s.LastRepairedSHA, s.ConflictNotifiedSHA, s.CIRepairPaused, s.CICapNotified, s.CIRepairTracked, s.PID)
 	}
 }
 
@@ -891,7 +899,7 @@ func requireMissing(t *testing.T, path, what string) {
 
 // AC1: a CI-paused supervisor that died (a reboot) leaves its state and lock.
 // Reset treats the proven-gone pid as already stopped, clears the lock before
-// the re-arm starts, zeroes all seven fields and re-arms exactly once.
+// the re-arm starts, zeroes all eight fields and re-arms exactly once.
 func TestReset_DeadPIDClearsStaleLockZeroesBudgetAndReArms(t *testing.T) {
 	e := newResetEnv(t)
 	dead := deadPID(t)
@@ -926,8 +934,8 @@ func TestReset_DeadPIDClearsStaleLockZeroesBudgetAndReArms(t *testing.T) {
 	if !lockGone {
 		t.Error("the dead supervisor's lock still existed when the new one started")
 	}
-	requireSevenFieldsCleared(t, atStart)
-	requireSevenFieldsCleared(t, mustReadState(t, e.path))
+	requireEightFieldsCleared(t, atStart)
+	requireEightFieldsCleared(t, mustReadState(t, e.path))
 	if !strings.Contains(out, "Reset the retry budget for PR #42.") {
 		t.Errorf("stdout = %q, want the reset line", out)
 	}
@@ -1129,7 +1137,7 @@ func (h *goneHarness) requireCleared(t *testing.T, err error) {
 		if h.starts() != 1 {
 			t.Errorf("supervisor starts = %d, want 1", h.starts())
 		}
-		requireSevenFieldsCleared(t, mustReadState(t, h.statePath))
+		requireEightFieldsCleared(t, mustReadState(t, h.statePath))
 	case "stop":
 		requireMissing(t, h.statePath, "state file")
 	}

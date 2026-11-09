@@ -2212,10 +2212,13 @@ CI repair launches as `cenci run ci-repair "<PR> PR #<PR> (<branch>) has failing
 checks: …"`: the leading PR number names the window `<PR>-ci-repair`, which the
 supervisor's liveness probe and the daemon's window cleanup both match on. The built-in
 template is one-shot (Claude `--print`, `codex exec`), so the worker exits when the
-repair ends. A live `<PR>-ci-repair` pane in the recorded session suppresses another
-launch without consuming an attempt, and an unreadable pane inventory fails the tick
-without launching. A `cenci run` exit status 3 (window spawned, post-spawn setup
-failed) counts as a dispatched attempt. Details: `watch/docs/babysit.md`.
+repair ends. A live `<PR>-ci-repair` or `<PR>-merge-repair` pane of this repository in
+the recorded session (one pane inventory per tick, matched on its `@cenci-repo-dir`)
+suppresses another launch without consuming an attempt, and an unreadable pane inventory,
+or a recorded session that no longer exists, fails the tick without launching. An ended
+worker (dead pane or no window) is retried at the same head until the budget is used.
+A `cenci run` exit status 3 (window spawned, post-spawn setup failed) counts as a
+dispatched attempt. Details: `watch/docs/babysit.md`.
 
 Running `cenci babysit` from inside a `cenci sandbox`-launched
 container (`CENCI_SANDBOX=1`) never supervises locally — the container has no host
@@ -2287,7 +2290,7 @@ naming the exact host command) and sends nothing over the event socket; no socke
 or daemon handler carries it. On the host it zeroes `ciFixAttempts`, `ciRepairPending`,
 `lastRepairedCiHeadSha`, `conflictFixAttempts` and `conflictNotifiedHeadSha` (for both
 budgets, whatever the launch reason) and clears the CI-cap markers `ciRepairPaused` and
-`ciCapNotified`. It keeps the feedback bookkeeping
+`ciCapNotified` and the launch-tracking marker `ciRepairTracked`. It keeps the feedback bookkeeping
 (`addressedCommentKeys`, `pendingCommentKeys`, `launchedFeedbackKeys`,
 `lastCommentTimestamp`) and `conflictRepairHeadSha`. A live supervisor is sent SIGTERM,
 awaited for up to 10s and its lock removed first. A recorded PID that is no longer
@@ -2356,7 +2359,9 @@ empty state: the stop is refused with a fixed reason and the file is kept.
   ticket passes its eligibility checks; the default is `"off"`. Planning autonomy,
   planning pickup and attended mode do not gate automerge. Configure offers these
   choices independently; the merge policy and the checks below still apply.
-- CI is green, no CI repair is in flight, and no review feedback is pending —
+- CI is green, no CI repair is in flight, no CI or merge repair worker for the PR is
+  still running (held under `branch repair worker still running`), and no review
+  feedback is pending —
   resolution is GitHub-authoritative, not push-based: a pushed commit no longer
   clears feedback by itself. An inline comment thread clears only when GitHub
   reports it `isResolved`; a `CHANGES_REQUESTED` review clears only when it's
@@ -2420,24 +2425,27 @@ build/test/lint checks, and updates that branch with a SHA-pinned `--force-with-
 It preserves both branches' intent and stops for a concrete unresolved decision.
 The supervisor stays `running` while the repair window has a live worker and
 keeps polling, without launching duplicates even if the head changes. If the worker
-exits while conflicts remain, it retries at the same head SHA. It defers CI and
-review repair dispatch during the conflict episode. After three repair launches,
+exits while conflicts remain, it retries at the same head SHA. A GitHub read that
+reports no conflict while that worker still runs keeps the episode until it ends. It
+defers CI and review repair dispatch during the conflict episode. After three repair launches,
 an unresolved conflict opens a deduplicated `babysit-attention` window and sets
 `Status = "needs-input"`; polling continues so a later confirmed conflict-free state
 releases the hold and resets the budget. Unknown mergeability never resets that budget.
 
-CI repair has its own, separate budget, also capped at `fixCap` (3). After three
-`ci-repair` launches the next failing, non-conflicting tick records `ciRepairPaused`,
+CI repair has its own, separate budget, also capped at `fixCap` (3). A worker that
+ended without the checks going green is retried at the same head, one launch per tick,
+while a live CI or merge worker suppresses every other repair launch. After three
+`ci-repair` launches, the next failing, non-conflicting tick with no live worker records `ciRepairPaused`,
 sets `Status = "needs-input"` and opens one `babysit-attention` window for that
 episode (`ciCapNotified` marks it sent, so later failing heads and supervisor restarts
 do not reopen it; a failed launch is retried with backoff). The supervisor does not
 exit: it keeps its PID and keeps polling, reconciling review feedback, repairing
 conflicts on the merge-repair budget and detecting MERGED or CLOSED. Only a fresh green
-read of the current head on a tick with no conflict hold ends the episode, including a
-rerun that goes green at the same head: it resets `ciFixAttempts` and
+read of the current head on a tick with no conflict hold and no live CI or merge worker
+ends the episode, including a rerun that goes green at the same head: it resets `ciFixAttempts` and
 `ciRepairPending`, clears both markers and returns the status to `running`. Pending,
 unknown or zero checks, read errors and a head change alone never reset it, and
-automerge stays held while the CI repair is pending.
+automerge stays held while the CI repair is pending or a repair worker is still running.
 
 A denied or held tick is logged once, e.g.:
 
