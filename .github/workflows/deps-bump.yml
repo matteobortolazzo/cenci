@@ -16,7 +16,7 @@ name: sandbox — Deps Bump
 # - Node major (NODE_MAJOR): only proposed once the currently-pinned major's LTS
 #   support has ended; always opens a manual-merge PR, never auto-merged.
 #
-# See sandbox/CLAUDE.md's "Dependency version pins" section for the full tiering.
+# See sandbox/AGENTS.md's "Dependency version pins" section for the full tiering.
 #
 # PR creation requires Actions' "Allow GitHub Actions to create and approve
 # pull requests" setting. `gh pr merge --auto` also needs allow_auto_merge=true.

@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -24,9 +25,13 @@ func TestRepositoryAutomergePolicyDogfood(t *testing.T) {
 		"watch/.goreleaser.yml",
 		"sandbox/Dockerfile.base",
 		"sandbox/skills/setup/SKILL.md",
+		"flow/CLAUDE.md",
+		"flow/CLAUDE.local.md",
+		"watch/CLAUDE.local.md",
+		"sandbox/CLAUDE.local.md",
 	}
 	for _, path := range protected {
-		t.Run("protected_"+filepath.Base(path), func(t *testing.T) {
+		t.Run("protected_"+strings.ReplaceAll(path, "/", "_"), func(t *testing.T) {
 			policy, reason := resolvePolicy(cfg, []string{path})
 			if reason != "" {
 				t.Fatalf("resolvePolicy(%q) reason = %q, want a project policy", path, reason)
@@ -42,6 +47,7 @@ func TestRepositoryAutomergePolicyDogfood(t *testing.T) {
 		maxFiles, maxLines int
 	}{
 		{"flow/docs/orchestration.md", 8, 400},
+		{"flow/docs/claude-instruction-files.md", 8, 400},
 		{"flow/tests/example.test.sh", 8, 400},
 		{"watch/docs/tmux.md", 10, 400},
 		{"watch/tests/example.test.sh", 10, 400},

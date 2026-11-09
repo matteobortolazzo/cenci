@@ -11,8 +11,8 @@
 // privileges), the HOST_UID/HOST_GID/WORKSPACE_SCOPE env contract, the PID-1
 // `touch /tmp/cenci-ready && exec sleep infinity` readiness command, and
 // explicit `-u dev` on every exec after the privilege-drop entrypoint (see
-// sandbox/CLAUDE.md: `--user` persists as Config.User for the container's
-// whole lifetime).
+// sandbox/AGENTS.md's routed docs/entrypoint.md: `--user` persists as
+// Config.User for the container's whole lifetime).
 package launcher
 
 // MonolithImage is the shared image tag used when a repo does not opt into

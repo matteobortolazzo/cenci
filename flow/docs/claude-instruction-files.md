@@ -54,9 +54,8 @@ file is an ancestor of every worktree session and suppresses the worktree's `AGE
 default mode, even though the worktree's own tree has none. This is the same walk as scenario
 (c), applied to a worktree path; no separate worktree run was recorded (documented, not
 observed). The case disappears once the main checkout's `CLAUDE.md` files are gone. Until then, use
-the user-scope remedy below or the opt-in fallback. This repository is in that state for its four
-inert adapters until #1449 removes them, so a session in its worktree reports an ancestor
-`../../CLAUDE.md` warn; that is intended.
+the user-scope remedy below or the opt-in fallback. This repository no longer carries a root or
+project `CLAUDE.md` (removed in #1449), so its worktree sessions report no ancestor warn.
 
 ## User-scope remedy
 

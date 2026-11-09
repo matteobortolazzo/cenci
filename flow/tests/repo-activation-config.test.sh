@@ -91,7 +91,7 @@ if [[ -f "${CONFIG}" ]] && jq empty "${CONFIG}" >/dev/null 2>&1; then
     flow/.claude-plugin/ \
     flow/.codex-plugin/ \
     flow/AGENTS.md \
-    flow/CLAUDE.md \
+    'flow/CLAUDE*.md' \
     '*credential*' \
     '*secret*'
   do
@@ -112,7 +112,7 @@ if [[ -f "${CONFIG}" ]] && jq empty "${CONFIG}" >/dev/null 2>&1; then
     watch/Makefile \
     watch/.goreleaser.yml \
     watch/AGENTS.md \
-    watch/CLAUDE.md \
+    'watch/CLAUDE*.md' \
     '*credential*' \
     '*secret*'
   do
@@ -128,7 +128,7 @@ if [[ -f "${CONFIG}" ]] && jq empty "${CONFIG}" >/dev/null 2>&1; then
     sandbox/.claude-plugin/ \
     sandbox/.codex-plugin/ \
     sandbox/AGENTS.md \
-    sandbox/CLAUDE.md \
+    'sandbox/CLAUDE*.md' \
     '*credential*' \
     '*secret*'
   do

@@ -52,8 +52,7 @@ automatically, so a new suite is covered the moment it is added — do not
 replace that discovery loop with an enumerated list. Only `fragments-drift`
 and `smoke` are excluded there, because they own separate jobs.
 
-Note: docs-only edits to `sandbox/AGENTS.md`, `sandbox/CLAUDE.md`, or
-`sandbox/README.md` do **not** trigger the sandbox suite —
+Note: docs-only edits to `sandbox/AGENTS.md` or `sandbox/README.md` do **not** trigger the sandbox suite —
 `sandbox-ci.yml`'s `sandbox` filter excludes them, an exclusion that only
 became real once the filter moved to `predicate-quantifier: 'every'` (#950).
 

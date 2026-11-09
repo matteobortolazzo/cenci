@@ -330,7 +330,7 @@ func TestReapOrphans_DeadPaneOrphanIsTermed(t *testing.T) {
 // The in-container /proc/*/environ scan must run as -u dev (same-uid reads
 // need no CAP_SYS_PTRACE, so dev-owned agent processes become visible),
 // while SIGTERM keeps running as -u root (see ScanContainer's comment in internal/sandbox/orphans.go and the
-// sandbox CLAUDE.md's "docker run --user X persists" entrypoint pattern for
+// sandbox/AGENTS.md's routed docs/entrypoint.md "docker run --user X persists" entrypoint pattern for
 // why every exec call site needs its own explicit -u flag). writeReapFakes'
 // mock docker doesn't guard on the -u value, so this only pins the exec
 // call log shape.

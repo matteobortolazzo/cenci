@@ -93,8 +93,8 @@
 #     yields an empty live set for that socket (its panes are orphans,
 #     reaped), with the same "No tmux server detected" note scoped to that
 #     socket.
-#   - Liveness / signaling, always `-u root` (see sandbox/CLAUDE.md's
-#     "docker run --user X persists" entrypoint pattern for why):
+#   - Liveness / signaling, always `-u root` (see sandbox/AGENTS.md's routed
+#     docs/entrypoint.md, "docker run --user X persists", for why):
 #       `<runtime> exec -u root <container> kill -TERM <pid>`
 #       Pre-SIGKILL probe (replaces the ambiguous `kill -0`): an in-container
 #       `sh -c '<script>' _ <pid>` that reads /proc/<pid>/stat field 22,
