@@ -223,6 +223,10 @@ func TestSweepSweepsPaneGoneFromItsOwnSocketEvenIfLiveElsewhere(t *testing.T) {
 func TestSweepSkipsOnlyTheSocketWhoseListingFails(t *testing.T) {
 	mc := twoSocketMock()
 	f := New(config.Default(), mc)
+	// sockA looks like a real trusted-directory path, so the default socketGone
+	// would read the ambient filesystem and could declare it dead (#1462): this
+	// test is about a failed listing alone, with no evidence the file is gone.
+	f.socketGone = func(string) bool { return false }
 	a, b := runningOn("a", "%5", sockA), runningOn("b", "%5", sockB)
 	touch(f, a)
 	touch(f, b)

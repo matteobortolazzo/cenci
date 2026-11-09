@@ -170,6 +170,11 @@ type Daemon struct {
 	// directly under to be trusted (#1429). Production is tmux.TrustedSocketDir;
 	// tests point it at a 0700 fixture directory.
 	tmuxSocketDir func() (string, error)
+
+	// tmuxSocketFile checks that a trusted tmux_socket exists as a Unix socket
+	// owned by the daemon's uid (#1462). Production is tmux.CheckSocketFile;
+	// tests stub it to accept, or restore the real check over a real listener.
+	tmuxSocketFile func(socket string) error
 }
 
 // newDaemon creates a Daemon with the given dependencies.
@@ -188,10 +193,11 @@ func newDaemon(cfg config.Config, fe frontend.Frontend, events <-chan ipc.HookEv
 		closeGuard: func(ticket string) (bool, string) {
 			return babysit.BlocksClose(ticket, "", "")
 		},
-		armSpawn:      defaultArmSpawn,
-		babysitStop:   defaultBabysitStop,
-		babysitStatus: defaultBabysitStatus,
-		tmuxSocketDir: tmux.TrustedSocketDir,
+		armSpawn:       defaultArmSpawn,
+		babysitStop:    defaultBabysitStop,
+		babysitStatus:  defaultBabysitStatus,
+		tmuxSocketDir:  tmux.TrustedSocketDir,
+		tmuxSocketFile: tmux.CheckSocketFile,
 		// cleanupReader stays nil here: installHostSeams installs the real one.
 		cleanupEnabled: ticketstate.CleanupEnabled,
 		cleanupResults: make(chan windowCleanupResult, 1),

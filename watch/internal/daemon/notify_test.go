@@ -284,14 +284,16 @@ func seedHookHealthRecord(t *testing.T, name, client string, age time.Duration) 
 }
 
 // listenShortSocket listens on a unix socket at path (pair with shortSocketPath
-// to stay under sun_path) and closes it on cleanup.
-func listenShortSocket(t *testing.T, path string) {
+// to stay under sun_path) and closes it on cleanup. The returned function closes
+// it earlier, which removes the socket file as a cleanly exiting tmux server does.
+func listenShortSocket(t *testing.T, path string) (closeListener func()) {
 	t.Helper()
 	ln, err := net.Listen("unix", path)
 	if err != nil {
 		t.Fatalf("listen %s: %v", path, err)
 	}
 	t.Cleanup(func() { _ = ln.Close() })
+	return func() { _ = ln.Close() }
 }
 
 // listenUnreachableSocket listens on path, then strips every permission bit so

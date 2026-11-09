@@ -30,6 +30,14 @@ type Frontend struct {
 	// lastHeadroom is the agent → value map the latest RenderHeadroom rendered,
 	// pushed to a server when its first window is tracked.
 	lastHeadroom map[string]string
+
+	// now is the clock the dead-socket rules read; tests overwrite it (#1462).
+	now func() time.Time
+	// socketGone reports that a non-empty socket's file is gone under a trusted
+	// directory (rule (a), #1462); tests overwrite it.
+	socketGone func(socket string) bool
+	// failingSince is when each socket's listing started failing continuously.
+	failingSince map[string]time.Time
 }
 
 var _ frontend.Frontend = (*Frontend)(nil)
@@ -50,6 +58,12 @@ func New(cfg config.Config, client tmuxc.Client) *Frontend {
 		panes:        make(map[paneKey]string),
 		sessionKeys:  make(map[string]windowKey),
 		headroomVars: make(map[string]map[string]string),
+		now:          time.Now,
+		socketGone: func(socket string) bool {
+			dir, err := tmuxc.TrustedSocketDir()
+			return err == nil && tmuxc.SocketGone(dir, socket)
+		},
+		failingSince: make(map[string]time.Time),
 	}
 }
 
@@ -305,13 +319,17 @@ func (f *Frontend) Sweep(sessions map[string]*frontend.SessionState) []frontend.
 		}
 	}
 	if len(f.windows) == 0 && !paneBacked {
+		clear(f.failingSince)
 		return nil
 	}
+	now := f.now()
 
 	// One listing per distinct socket that hosts a tracked window or a
 	// pane-backed session, in sorted order ("" first). A socket whose listing
 	// fails is left alone for this tick: a failed listing is never read as "pane
-	// gone", and the other servers are swept normally.
+	// gone", and the other servers are swept normally. A failed listing alone
+	// still removes nothing; only the dead-socket rules below (#1462), which need
+	// evidence beyond the failure, drop a non-empty socket's windows and sessions.
 	socketSet := make(map[string]bool)
 	for wk := range f.windows {
 		socketSet[wk.socket] = true
@@ -337,11 +355,15 @@ func (f *Frontend) Sweep(sessions map[string]*frontend.SessionState) []frontend.
 		panes, err := f.client.ListPanes(socket)
 		if err != nil {
 			unlisted[socket] = true
+			if _, failing := f.failingSince[socket]; !failing && socket != "" {
+				f.failingSince[socket] = now
+			}
 			if f.cfg.Verbose {
 				log.Printf("sweep: error listing panes%s: %v", socketLogSuffix(socket), err)
 			}
 			continue
 		}
+		delete(f.failingSince, socket)
 		for i, p := range panes {
 			pk := paneKey{socket, p.PaneID}
 			paneToTarget[pk] = p.WindowTarget()
@@ -350,8 +372,21 @@ func (f *Frontend) Sweep(sessions map[string]*frontend.SessionState) []frontend.
 			paneByID[pk] = &panes[i]
 		}
 	}
+	for socket := range f.failingSince {
+		if !socketSet[socket] {
+			delete(f.failingSince, socket)
+		}
+	}
 
 	remove := make(map[string]bool)
+	for _, socket := range sockets {
+		if !unlisted[socket] || socket == "" {
+			continue
+		}
+		if rule := f.deadSocketRule(socket, sessions, now); rule != "" {
+			f.dropDeadSocket(socket, rule, sessions, remove)
+		}
+	}
 	var updates []frontend.SweepAction
 	displayChanged := false
 
@@ -581,6 +616,59 @@ func (f *Frontend) Sweep(sessions map[string]*frontend.SessionState) []frontend.
 		actions = append(actions, frontend.SweepAction{PaneGone: true})
 	}
 	return actions
+}
+
+// deadSocketRule names the rule that declares a non-empty socket, whose listing
+// failed on this tick, dead (#1462), or returns "" when there is no evidence
+// beyond the failed listing. Rule (a): the socket file is gone under a trusted
+// directory. Rule (b), disabled by a non-positive -session-ttl: the listing has
+// failed continuously for at least the TTL and every session on the socket has
+// been silent for at least the TTL.
+func (f *Frontend) deadSocketRule(socket string, sessions map[string]*frontend.SessionState, now time.Time) string {
+	if f.socketGone(socket) {
+		return "socket file gone"
+	}
+	ttl := f.cfg.SessionTTL
+	if ttl <= 0 || now.Sub(f.failingSince[socket]) < ttl {
+		return ""
+	}
+	for _, s := range sessions {
+		if s.TmuxPane != "" && s.TmuxSocket == socket && now.Sub(s.LastEvent) < ttl {
+			return ""
+		}
+	}
+	return "listing failed and sessions silent for the session ttl"
+}
+
+// dropDeadSocket discards every window tracked on a dead socket without any tmux
+// call (the server is gone or unreachable, so a restore would only add failing
+// calls) and marks its sessions for removal without PaneGone, so the daemon drops
+// them without a reap pass. The socket then leaves the listing set.
+func (f *Frontend) dropDeadSocket(socket, rule string, sessions map[string]*frontend.SessionState, remove map[string]bool) {
+	if f.cfg.Verbose {
+		log.Printf("sweep: tmux socket %s is dead (%s), dropping its windows and sessions", socket, rule)
+	}
+	for key, s := range sessions {
+		if s.TmuxPane != "" && s.TmuxSocket == socket {
+			remove[key] = true
+		}
+	}
+	for wk, ws := range f.windows {
+		if wk.socket != socket {
+			continue
+		}
+		if _, ok := sessions[ws.SessionKey]; ws.SessionKey != "" && !ok {
+			remove[ws.SessionKey] = true
+		}
+		f.forgetWindow(wk)
+	}
+	for pk := range f.panes {
+		if pk.socket == socket {
+			delete(f.panes, pk)
+		}
+	}
+	delete(f.headroomVars, socket)
+	delete(f.failingSince, socket)
 }
 
 func firstRune(s string) rune {
