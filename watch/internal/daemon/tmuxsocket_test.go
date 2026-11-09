@@ -38,12 +38,15 @@ func privateDir(t *testing.T) string {
 }
 
 // trustedSocketDir points d's ingest check at a fresh 0700 fixture directory and
-// returns it. A socket directly under it passes the check; the socket file need
-// not exist, because the daemon only validates the path.
+// returns it. A socket directly under it passes the path check; the socket file
+// need not exist, because the file check (tmuxSocketFile, #1462) is stubbed to
+// accept. The tests of that check itself restore the real one over a real
+// listener (realTrustedSocketDir).
 func trustedSocketDir(t *testing.T, d *Daemon) string {
 	t.Helper()
 	dir := privateDir(t)
 	d.tmuxSocketDir = func() (string, error) { return dir, nil }
+	d.tmuxSocketFile = func(string) error { return nil }
 	return dir
 }
 
@@ -323,6 +326,88 @@ func TestUntrustedTmuxSocketLogIsVerboseGated(t *testing.T) {
 		if wi := d.frontend.WindowInfo("raw-1"); wi == nil || wi.Socket != "" {
 			t.Errorf("verbose=%v: WindowInfo = %+v, want tracked with an empty socket", tc.verbose, wi)
 		}
+	}
+}
+
+// #1462 AC1 and AC2: a socket path directly under the trusted directory that is
+// not an existing Unix socket (no file, or a regular file) is rejected at ingest
+// like any other untrusted value: the event is tracked on the default server and
+// exactly one verbose-gated line names `untrusted`. The real file check runs
+// over a real fixture directory; PanesBySocket gives the forged socket a pane
+// too, so a wrongly kept socket shows as a socket on WindowInfo, not as a
+// missing window.
+func TestRawHookEventWhoseSocketIsNotAnExistingSocketIsTrackedWithEmptySocket(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(t *testing.T, path string)
+	}{
+		{"no file at the path", func(t *testing.T, path string) {}},
+		{"a regular file", func(t *testing.T, path string) {
+			if err := os.WriteFile(path, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			mc := &tmuxtest.MockClient{Panes: []tmux.PaneInfo{claudePane("bash", "0", "%5", "writing tests")}}
+			d := newTestDaemon(mc)
+			d.cfg.Verbose = true
+			socket := filepath.Join(realTrustedSocketDir(t, d), "default")
+			tc.setup(t, socket)
+			mc.PanesBySocket = map[string][]tmux.PaneInfo{socket: {claudePane("bash", "0", "%5", "writing tests")}}
+			logs := captureLog(t)
+
+			newRawFeeder(t, d)(rawHookLine(t, "SessionStart", "raw-1", "%5", &socket))
+
+			wi := d.frontend.WindowInfo("raw-1")
+			if wi == nil {
+				t.Fatal("WindowInfo = nil, want the window tracked on the ambient server")
+			}
+			if wi.Socket != "" {
+				t.Errorf("WindowInfo.Socket = %q, want empty: the path is not an existing socket", wi.Socket)
+			}
+			if sess := d.sessions["raw-1"]; sess == nil || sess.TmuxSocket != "" {
+				t.Errorf("session = %+v, want it recorded with an empty socket", sess)
+			}
+			for i, s := range mc.Sockets {
+				if s != "" {
+					t.Errorf("call %d went to socket %q, want every call on the ambient server", i, s)
+				}
+			}
+			lines := linesContaining(logs.String(), "untrusted")
+			if len(lines) != 1 {
+				t.Fatalf("log has %d untrusted lines %q, want exactly one", len(lines), lines)
+			}
+			for _, want := range []string{"SessionStart", "raw-1", "tmux_socket"} {
+				if !strings.Contains(lines[0], want) {
+					t.Errorf("log line %q does not name %q", lines[0], want)
+				}
+			}
+		})
+	}
+}
+
+// #1462 AC3: an existing Unix socket directly under the trusted directory,
+// owned by the current uid, is still tracked on that socket (unchanged from
+// #1429). The control that the rejections above are not a blanket drop.
+func TestRawHookEventWithAnExistingSocketKeepsItWithNoRejectionLog(t *testing.T) {
+	mc := &tmuxtest.MockClient{}
+	d := newTestDaemon(mc)
+	d.cfg.Verbose = true
+	socket := filepath.Join(realTrustedSocketDir(t, d), "default")
+	listenShortSocket(t, socket)
+	mc.PanesBySocket = map[string][]tmux.PaneInfo{socket: {claudePane("bash", "0", "%5", "writing tests")}}
+	logs := captureLog(t)
+
+	newRawFeeder(t, d)(rawHookLine(t, "SessionStart", "raw-1", "%5", &socket))
+
+	wi := d.frontend.WindowInfo("raw-1")
+	if wi == nil || wi.Socket != socket {
+		t.Fatalf("WindowInfo = %+v, want the window tracked on the existing socket %q", wi, socket)
+	}
+	if lines := linesContaining(logs.String(), "untrusted"); len(lines) != 0 {
+		t.Errorf("an existing socket logged %q, want nothing", lines)
 	}
 }
 

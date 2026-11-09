@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -99,6 +100,44 @@ func RunSocket(ctx context.Context, socket string, stdout, stderr io.Writer, arg
 // variable only so a test can stand in for a foreign owner, following
 // dirOwnerUID in pkg/watch/socket.go.
 var socketOwnerUID = os.Getuid
+
+// socketLstat is the Lstat CheckSocketFile and SocketGone use on a socket path.
+// It is a variable only so a test can inject an error a real filesystem cannot
+// produce when the tests run as root (EACCES), following socketOwnerUID.
+var socketLstat = os.Lstat
+
+// CheckSocketFile reports (as a nil error) that socket exists as a Unix socket
+// owned by the current uid. It uses Lstat only and never connects, so a symlink
+// is rejected (Lstat does not follow it) and a forged path costs the daemon no
+// contact with any server. Every rejection wraps ErrUntrustedSocket; an Lstat
+// failure also wraps its cause, so errors.Is(err, fs.ErrNotExist) still tells a
+// missing file apart.
+func CheckSocketFile(socket string) error {
+	info, err := socketLstat(socket)
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrUntrustedSocket, err)
+	}
+	if info.Mode().Type() != fs.ModeSocket {
+		return fmt.Errorf("%w: %q is not a socket", ErrUntrustedSocket, socket)
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || int(st.Uid) != socketOwnerUID() {
+		return fmt.Errorf("%w: %q is not owned by the current user", ErrUntrustedSocket, socket)
+	}
+	return nil
+}
+
+// SocketGone reports that socket's file is gone under a directory that is still
+// trusted: CheckTrustedSocket(dir, socket) passes and Lstat reports that the path
+// does not exist. Anything else (an untrusted directory, or an Lstat error other
+// than "does not exist") is unknown, not gone.
+func SocketGone(dir, socket string) bool {
+	if CheckTrustedSocket(dir, socket) != nil {
+		return false
+	}
+	_, err := socketLstat(socket)
+	return errors.Is(err, fs.ErrNotExist)
+}
 
 // TrustedSocketDir returns the directory a trusted tmux socket lives in:
 // EvalSymlinks(${TMUX_TMPDIR:-/tmp})/tmux-<uid>. It does not touch the

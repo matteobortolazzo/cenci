@@ -38,8 +38,9 @@ func sessionKeyForEvent(event ipc.HookEvent) string {
 // check. A value passes only when it has the socket shape, is valid UTF-8 made
 // of printable runes only (it is later printed in verbose logs, where a raw ESC,
 // CR, C1 control or bidi override would forge log output), the trusted socket
-// directory resolves, and the value is exactly
-// one name directly under it. Any failure (an error resolving the directory
+// directory resolves, the value is exactly one name directly under it, and that
+// path exists as a Unix socket owned by the daemon's uid (an Lstat check that
+// never connects, #1462). Any failure (an error resolving the directory
 // included) yields an empty socket, i.e. the default server, plus a rejection
 // description for the verbose log. A malformed value is never echoed into that
 // description.
@@ -53,6 +54,9 @@ func (d *Daemon) sanitizeTmuxSocket(socket string) (clean, rejection string) {
 	dir, err := d.tmuxSocketDir()
 	if err == nil {
 		err = tmux.CheckTrustedSocket(dir, socket)
+	}
+	if err == nil {
+		err = d.tmuxSocketFile(socket)
 	}
 	if err != nil {
 		return "", "untrusted: " + err.Error()

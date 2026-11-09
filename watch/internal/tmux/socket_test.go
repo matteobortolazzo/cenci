@@ -13,7 +13,8 @@ package tmux
 // env), and an empty calls directory is the "no tmux was exec'd" marker.
 //
 // The only seams overridden are windowCmdTimeout (shortened, like
-// TestListLivePanes_MissingBinaryAndTimeoutFailClosed) and socketOwnerUID.
+// TestListLivePanes_MissingBinaryAndTimeoutFailClosed), socketOwnerUID and
+// socketLstat (#1462: an EACCES a root test run cannot produce for real).
 
 import (
 	"bytes"
@@ -21,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"os"
 	"os/exec"
@@ -769,6 +771,170 @@ func TestCheckTrustedSocket_RejectsEverySocketWhenTheDirectoryIsNotTrusted(t *te
 
 		if !errors.Is(err, ErrUntrustedSocket) {
 			t.Errorf("CheckTrustedSocket = %v, want it to wrap ErrUntrustedSocket", err)
+		}
+	})
+}
+
+// liveSocket binds a real Unix socket at <short private dir>/<name> and returns
+// its path. The directory is short because a Unix socket path is length-bound
+// (t.TempDir() embeds the test name); closing the listener removes the file, as
+// tmux does on a clean exit.
+func liveSocket(t *testing.T, name string) (path string, closeListener func()) {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "cenci")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path = filepath.Join(dir, name)
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	return path, func() { _ = ln.Close() }
+}
+
+func setSocketLstat(t *testing.T, fn func(string) (os.FileInfo, error)) {
+	t.Helper()
+	old := socketLstat
+	socketLstat = fn
+	t.Cleanup(func() { socketLstat = old })
+}
+
+// #1462: a socket path passes the file check only when it is an existing Unix
+// socket owned by the daemon's uid. Every rejection wraps ErrUntrustedSocket.
+func TestCheckSocketFile_AcceptsAnExistingSocketOwnedByTheCurrentUser(t *testing.T) {
+	socket, _ := liveSocket(t, "default")
+
+	if err := CheckSocketFile(socket); err != nil {
+		t.Errorf("CheckSocketFile = %v, want nil", err)
+	}
+}
+
+func TestCheckSocketFile_Rejects(t *testing.T) {
+	t.Run("a missing path, keeping the not-exist cause matchable", func(t *testing.T) {
+		socket, closeListener := liveSocket(t, "default")
+		closeListener() // the listener removes its socket file
+
+		err := CheckSocketFile(socket)
+
+		if !errors.Is(err, ErrUntrustedSocket) {
+			t.Errorf("CheckSocketFile = %v, want it to wrap ErrUntrustedSocket", err)
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("CheckSocketFile = %v, want it to wrap fs.ErrNotExist", err)
+		}
+	})
+
+	t.Run("a regular file", func(t *testing.T) {
+		dir := trustedFixture(t, 0o700)
+		socket := filepath.Join(dir, "default")
+		if err := os.WriteFile(socket, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := CheckSocketFile(socket); !errors.Is(err, ErrUntrustedSocket) {
+			t.Errorf("CheckSocketFile = %v, want it to wrap ErrUntrustedSocket", err)
+		}
+	})
+
+	t.Run("a symlink to a live socket", func(t *testing.T) {
+		target, _ := liveSocket(t, "real")
+		link := filepath.Join(filepath.Dir(target), "link")
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := CheckSocketFile(link); !errors.Is(err, ErrUntrustedSocket) {
+			t.Errorf("CheckSocketFile(symlink) = %v, want it to wrap ErrUntrustedSocket: Lstat does not follow it", err)
+		}
+		if err := CheckSocketFile(target); err != nil {
+			t.Errorf("CheckSocketFile(target) = %v, want nil: the control that the target itself is accepted", err)
+		}
+	})
+
+	t.Run("a socket owned by another uid", func(t *testing.T) {
+		socket, _ := liveSocket(t, "default")
+		setSocketOwnerUID(t, os.Getuid()+1)
+
+		if err := CheckSocketFile(socket); !errors.Is(err, ErrUntrustedSocket) {
+			t.Errorf("CheckSocketFile = %v, want it to wrap ErrUntrustedSocket", err)
+		}
+	})
+}
+
+// #1462: SocketGone is true only with independent evidence: the directory still
+// passes CheckTrustedSocket and Lstat of the socket path says "does not exist".
+// Anything else (an untrusted directory, any other Lstat error, an existing
+// file) is unknown, never gone.
+func TestSocketGone(t *testing.T) {
+	t.Run("absent under a trusted directory is gone", func(t *testing.T) {
+		dir := trustedFixture(t, 0o700)
+
+		if !SocketGone(dir, filepath.Join(dir, "default")) {
+			t.Error("SocketGone = false, want true for an absent socket under a trusted directory")
+		}
+	})
+
+	t.Run("an existing file is not gone", func(t *testing.T) {
+		dir := trustedFixture(t, 0o700)
+		socket := filepath.Join(dir, "default")
+		if err := os.WriteFile(socket, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		if SocketGone(dir, socket) {
+			t.Error("SocketGone = true, want false: the file exists")
+		}
+	})
+
+	t.Run("a group-writable directory is never trusted, so never gone", func(t *testing.T) {
+		dir := trustedFixture(t, 0o770)
+
+		if SocketGone(dir, filepath.Join(dir, "default")) {
+			t.Error("SocketGone = true, want false: the directory fails CheckTrustedSocket")
+		}
+	})
+
+	t.Run("a symlinked directory is never trusted, so never gone", func(t *testing.T) {
+		tmp := resolvedTempDir(t)
+		t.Setenv("TMUX_TMPDIR", tmp)
+		target := filepath.Join(tmp, "elsewhere")
+		if err := os.Mkdir(target, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		dir := filepath.Join(tmp, uidDirName())
+		if err := os.Symlink(target, dir); err != nil {
+			t.Fatal(err)
+		}
+
+		if SocketGone(dir, filepath.Join(dir, "default")) {
+			t.Error("SocketGone = true, want false: the directory is a symlink")
+		}
+	})
+
+	t.Run("an Lstat error other than not-exist is not gone", func(t *testing.T) {
+		dir := trustedFixture(t, 0o700)
+		socket := filepath.Join(dir, "default")
+
+		// Control: the same seam reporting not-exist is gone, so the false below
+		// proves the seam's error is what is classified, not a vacuous false.
+		setSocketLstat(t, func(string) (os.FileInfo, error) {
+			return nil, &fs.PathError{Op: "lstat", Path: socket, Err: syscall.ENOENT}
+		})
+		if !SocketGone(dir, socket) {
+			t.Fatal("SocketGone = false for an injected ENOENT, want true: the seam is not consulted")
+		}
+
+		setSocketLstat(t, func(string) (os.FileInfo, error) {
+			return nil, &fs.PathError{Op: "lstat", Path: socket, Err: syscall.EACCES}
+		})
+		if SocketGone(dir, socket) {
+			t.Error("SocketGone = true for an injected EACCES, want false")
 		}
 	})
 }
