@@ -4165,6 +4165,9 @@ $ cenci status
 daemon: running (pid 12345)
 sessions (1):
   main:0 - implement thing (claude) (running)
+    context: percent 23.5%, tokens 47000, window 200000 — source: claude session.measure, measured 3m ago
+    plan quota (native, session-scoped): five_hour 41% used, resets in 2h, weekly 12.5% used, resets in 3d — source: claude session.measure, measured 3m ago
+budget headroom (configured estimate): claude 73%  codex 15%
 Dispatch loop: enabled
   daemon:   running
   interval: 5m
@@ -4172,6 +4175,39 @@ Dispatch loop: enabled
   last_dispatched: 2
   last_skipped: 0
 ```
+
+The two indented `context:` and `plan quota (native, session-scoped):` lines appear
+only under a session that has sent a native measurement (see
+[Native measurements in Claude Code](#native-measurements-in-claude-code-nativemeasurements));
+a session without one prints exactly what it always did. They follow the session's
+model-switch lines. Both are display-only: nothing in them is read by dispatch.
+
+- **Source and age**: each line ends `source: claude <source>, measured <age> ago`,
+  where the age is one compact unit rounded down (`45s`, `3m`, `2h`, then days from
+  48 hours). A sample older than 15 minutes adds ` (stale)` after the age.
+- **`context:`** shows `percent`, `tokens` and `window`. A percentage above 100 reads
+  `(over window)`. Percentages show at most one decimal, so a real 0.4% is never printed
+  as `0%`.
+- **`plan quota (native, session-scoped):`** lists each rate-limit window as
+  `<kind> <p>% used, resets in <age>`, where `<kind>` is `five_hour`, `weekly` or
+  `unknown:<label>`. A window whose reset time has passed reads
+  `<kind> expired (reset passed)` and shows no percentage. A sample that reported an
+  empty rate-limit list reads `none reported`.
+- **Missing values**: a field the sample did not report reads `unknown (not reported)`,
+  and a field the daemon rejected (or that fails the check again at render time) reads
+  `unknown (invalid)`. A missing or invalid value is never printed as `0%` or `100%`. A
+  sample whose time is unreadable, or more than 5 minutes ahead of the clock `cenci
+  status` runs on, reads `measured unknown (invalid)`; a time at most 5 minutes ahead
+  reads `measured 0s ago`.
+- **Quota is not context, and neither is headroom**: the context line never carries the
+  word quota, and no native line ever carries a headroom value.
+
+The `budget headroom (configured estimate):` line is a separate line printed after the
+sessions block and before the `Dispatch loop:` section, one `<agent> <percent>` pair per
+configured agent type (`claude 73%  codex 15%`). It appears only when the daemon reports
+headroom, so a snapshot without it prints no such line. This configured estimate, the
+same one the [`widget-json`](#budget-headroom) widget shows, stays the input dispatch
+decides on; the native lines above never change a dispatch decision.
 
 #### `/cenci-status` in Claude Code
 
@@ -4247,6 +4283,11 @@ figures to the cenci daemon, which stores them display-only on the matching sess
 - **Bounded and silent**: each send is bounded at 5 seconds, at most one send per
   session is in flight and a newer sample replaces the one queued behind it. Failures
   never show a toast, an error or a hook-health record, and never delay the session.
+- **Where it shows**: `cenci status` prints a stored sample as the `context:` and
+  `plan quota (native, session-scoped):` lines under its session, with the source, the
+  age and a `(stale)` label; see
+  [Human status overview](#human-status-overview-cenci-status). It is not in
+  `cenci widget-json`.
 
 Verified API facts, the producer contract and the evidence still required before native
 quota may control dispatch are in

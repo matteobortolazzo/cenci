@@ -1,17 +1,20 @@
 package main_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/ipc"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/measurement"
 	"github.com/matteobortolazzo/cenci/watch/v2/pkg/watch"
 )
 
@@ -658,5 +661,554 @@ func TestWidgetJSON_ExposesModelSwitchesField(t *testing.T) {
 	}
 	if second := entry.Switches[1]; !second.Subagent || second.AgentType != "cenci:reviewer" {
 		t.Errorf("second switch = %+v", second)
+	}
+}
+
+// --- Native measurements and budget headroom (#1452) ------------------------
+
+const (
+	nativeSuffixFresh = "source: claude session.measure, measured 3m ago"
+	nativeQuotaLabel  = "    plan quota (native, session-scoped): "
+	nativeContextLead = "    context: "
+
+	// nativeDispatchText is what the Dispatch section prints for
+	// nativeDispatchState, so a golden output never reads the ambient config.
+	nativeDispatchText = "Dispatch loop: enabled\n  daemon:   running\n  interval: 5m\n  pass_running: false\n  last_dispatched: 0\n  last_skipped: 0\n"
+
+	nativeHeadroomLine = "budget headroom (configured estimate): claude 73%  codex 15%"
+)
+
+func ptrTo[T any](v T) *T { return &v }
+
+// runNativeStatus serves snap on a throwaway broadcast socket and returns the
+// stdout of `cenci status` against it. The run is isolated from the developer's
+// real config, state and daemon socket (watch/docs/test-isolation.md): its own
+// XDG_CONFIG_HOME, XDG_STATE_HOME and CENCI_SOCKET_DIR, and an event socket
+// nobody listens on, so "daemon: not running" is deterministic. The directory is
+// shallow (os.MkdirTemp) to stay under the unix socket path limit.
+func runNativeStatus(t *testing.T, snap ipc.StateSnapshot) string {
+	t.Helper()
+	base, err := os.MkdirTemp("", "cenci")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(base) })
+	socketDir := filepath.Join(base, "run")
+	if err := os.Mkdir(socketDir, 0o700); err != nil {
+		t.Fatalf("mkdir socket dir: %v", err)
+	}
+
+	socket := filepath.Join(base, "ms.sock")
+	srv, err := ipc.NewServer(socket)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	t.Cleanup(func() { _ = srv.Close() })
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go srv.Accept(ctx)
+	time.Sleep(20 * time.Millisecond)
+
+	snap.Dispatch = &watch.DispatchState{Enabled: true, DaemonRunning: true, Interval: "5m"}
+	srv.Broadcast(snap)
+	time.Sleep(20 * time.Millisecond)
+
+	cmd := exec.Command(binaryPath, "status",
+		"-socket", socket,
+		"-event-socket", filepath.Join(base, "nope-events.sock"))
+	cmd.Env = append(os.Environ(),
+		"XDG_CONFIG_HOME="+filepath.Join(base, "config"),
+		"XDG_STATE_HOME="+filepath.Join(base, "state"),
+		"CENCI_SOCKET_DIR="+socketDir,
+	)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("status: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+	return stdout.String()
+}
+
+// nativeBody is the body shape `cenci notify -measurement` sends: the session,
+// the sample time, the constant source, plus the fields a test adds.
+func nativeBody(measuredAt time.Time, fields map[string]any) map[string]any {
+	body := map[string]any{
+		"session_id":  "sess-a",
+		"measured_at": isoTime(measuredAt),
+		"source":      "session.measure",
+	}
+	for k, v := range fields {
+		body[k] = v
+	}
+	return body
+}
+
+// parseNative runs the real validator over body, as the daemon does, and
+// returns the stored snapshot a status reader would see.
+func parseNative(t *testing.T, now time.Time, body map[string]any) *watch.NativeMeasurement {
+	t.Helper()
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal body: %v", err)
+	}
+	sample, err := measurement.Parse(raw, now)
+	if err != nil {
+		t.Fatalf("measurement.Parse: %v", err)
+	}
+	return &sample.Snapshot
+}
+
+func nativeWindow(index, task string, m *watch.NativeMeasurement) watch.WindowState {
+	return watch.WindowState{
+		Session: "sess-a", WindowIndex: index, WindowName: index + "-implement", TaskName: task,
+		Agent: "claude", Status: "running", NativeMeasurement: m,
+	}
+}
+
+func isoTime(t time.Time) string { return t.UTC().Format(time.RFC3339Nano) }
+
+// assertContiguousLines requires want to appear as consecutive whole lines.
+func assertContiguousLines(t *testing.T, output string, want ...string) {
+	t.Helper()
+	if !strings.Contains("\n"+output, "\n"+strings.Join(want, "\n")+"\n") {
+		t.Errorf("expected these consecutive lines:\n%s\ngot:\n%s", strings.Join(want, "\n"), output)
+	}
+}
+
+// nativeLines returns every native context and quota line in output.
+func nativeLines(output string) []string {
+	var lines []string
+	for _, line := range strings.Split(output, "\n") {
+		if strings.HasPrefix(line, nativeContextLead) || strings.HasPrefix(line, nativeQuotaLabel) {
+			lines = append(lines, line)
+		}
+	}
+	return lines
+}
+
+// TestStatusSubcommand_NativeMeasurement_RendersContextAndQuotaUnderSession
+// covers P1 and P3's "no native line carries headroom": a sample that went
+// through measurement.Parse (the body `notify -measurement` sends) renders a
+// context line and a plan-quota line directly after the session's model-switch
+// lines, each ending with the source and the sample age. The idle window has no
+// native sample, so it gets no native lines.
+func TestStatusSubcommand_NativeMeasurement_RendersContextAndQuotaUnderSession(t *testing.T) {
+	now := time.Now()
+	sample := parseNative(t, now, nativeBody(now.Add(-3*time.Minute), map[string]any{
+		"context": map[string]any{"tokens": 47000, "window": 200000, "percent": 23.5},
+		"rate_limits": []any{
+			map[string]any{"kind": "five_hour", "percent_used": 41, "resets_at": isoTime(now.Add(150 * time.Minute))},
+			map[string]any{"kind": "seven_day", "percent_used": 12.5, "resets_at": isoTime(now.Add(80 * time.Hour))},
+		},
+	}))
+
+	withNative := nativeWindow("0", "implement thing", sample)
+	withNative.ModelSwitches = []watch.ModelSwitch{
+		{FromModel: "claude-sonnet-5-5", ToModel: "claude-opus-5-5", Source: "auto", Fallback: true},
+	}
+	idle := nativeWindow("1", "plan thing", nil)
+	idle.Status = "idle"
+
+	output := runNativeStatus(t, ipc.StateSnapshot{
+		Windows:  []ipc.WindowState{withNative, idle},
+		Summary:  ipc.StatusSummary{Total: 2, Running: 1, Idle: 1},
+		Headroom: map[string]float64{"claude": 0.73, "codex": 0.15},
+	})
+
+	assertContiguousLines(t, output,
+		"  sess-a:0 - implement thing (claude) (running)",
+		"    Model switch: claude-sonnet-5-5 → claude-opus-5-5 (main session) — fallback",
+		"    context: percent 23.5%, tokens 47000, window 200000 — "+nativeSuffixFresh,
+		"    plan quota (native, session-scoped): five_hour 41% used, resets in 2h, weekly 12.5% used, resets in 3d — "+nativeSuffixFresh,
+		"  sess-a:1 - plan thing (claude) (idle)",
+	)
+	if got := len(nativeLines(output)); got != 2 {
+		t.Errorf("expected exactly 2 native lines (the idle window has no sample), got %d:\n%s", got, output)
+	}
+	for _, line := range nativeLines(output) {
+		if strings.Contains(strings.ToLower(line), "headroom") {
+			t.Errorf("a native line carries headroom: %q", line)
+		}
+	}
+	if n := strings.Count(output, "quota"); n != 1 {
+		t.Errorf("expected the word quota on the plan-quota line only, found %d occurrences in:\n%s", n, output)
+	}
+	if !strings.Contains(output, "\n"+nativeHeadroomLine+"\n") {
+		t.Errorf("expected the configured-estimate line %q in:\n%s", nativeHeadroomLine, output)
+	}
+}
+
+// TestStatusSubcommand_BudgetHeadroomLine covers P3's line and its placement:
+// one line after the sessions block (also after `sessions: none`) and before the
+// Dispatch loop section.
+func TestStatusSubcommand_BudgetHeadroomLine(t *testing.T) {
+	headroom := map[string]float64{"claude": 0.73, "codex": 0.15}
+
+	t.Run("after the session lines", func(t *testing.T) {
+		output := runNativeStatus(t, ipc.StateSnapshot{
+			Windows:  []ipc.WindowState{nativeWindow("0", "implement thing", nil)},
+			Summary:  ipc.StatusSummary{Total: 1, Running: 1},
+			Headroom: headroom,
+		})
+		want := "daemon: not running\n" +
+			"sessions (1):\n" +
+			"  sess-a:0 - implement thing (claude) (running)\n" +
+			nativeHeadroomLine + "\n" +
+			nativeDispatchText
+		if output != want {
+			t.Errorf("output mismatch.\nwant:\n%s\ngot:\n%s", want, output)
+		}
+	})
+
+	t.Run("after sessions none", func(t *testing.T) {
+		output := runNativeStatus(t, ipc.StateSnapshot{Headroom: headroom})
+		want := "daemon: not running\n" +
+			"sessions: none\n" +
+			nativeHeadroomLine + "\n" +
+			nativeDispatchText
+		if output != want {
+			t.Errorf("output mismatch.\nwant:\n%s\ngot:\n%s", want, output)
+		}
+	})
+}
+
+// TestStatusSubcommand_NoNativeData_OutputIsUnchangedExceptHeadroomLine covers
+// P10: with no native sample the output is byte-identical to the pre-change
+// rendering, and a snapshot that also carries headroom differs from it by the
+// one inserted headroom line and nothing else.
+func TestStatusSubcommand_NoNativeData_OutputIsUnchangedExceptHeadroomLine(t *testing.T) {
+	windows := []ipc.WindowState{nativeWindow("0", "implement thing", nil)}
+	summary := ipc.StatusSummary{Total: 1, Running: 1}
+
+	const golden = "daemon: not running\n" +
+		"sessions (1):\n" +
+		"  sess-a:0 - implement thing (claude) (running)\n" +
+		nativeDispatchText
+
+	without := runNativeStatus(t, ipc.StateSnapshot{Windows: windows, Summary: summary})
+	if without != golden {
+		t.Errorf("no-native, no-headroom output changed.\nwant:\n%s\ngot:\n%s", golden, without)
+	}
+
+	// An empty (non-nil) headroom map is "no headroom" too.
+	empty := runNativeStatus(t, ipc.StateSnapshot{Windows: windows, Summary: summary, Headroom: map[string]float64{}})
+	if empty != golden {
+		t.Errorf("an empty headroom map must not add a line.\nwant:\n%s\ngot:\n%s", golden, empty)
+	}
+
+	with := runNativeStatus(t, ipc.StateSnapshot{
+		Windows: windows, Summary: summary, Headroom: map[string]float64{"claude": 0.73, "codex": 0.15},
+	})
+	wantWith := strings.Replace(golden, "Dispatch loop:", nativeHeadroomLine+"\nDispatch loop:", 1)
+	if with != wantWith {
+		t.Errorf("headroom output differs from the golden by more than the inserted line.\nwant:\n%s\ngot:\n%s", wantWith, with)
+	}
+
+	// Positive control: the comparison can fail, because the golden and the
+	// headroom output are different strings and a native sample changes the output.
+	if with == without {
+		t.Errorf("positive control: headroom output equals the no-headroom output")
+	}
+	now := time.Now()
+	sample := parseNative(t, now, nativeBody(now.Add(-3*time.Minute), map[string]any{"rate_limits": []any{}}))
+	withSample := runNativeStatus(t, ipc.StateSnapshot{
+		Windows: []ipc.WindowState{nativeWindow("0", "implement thing", sample)}, Summary: summary,
+	})
+	if withSample == golden {
+		t.Errorf("positive control: a native sample did not change the output:\n%s", withSample)
+	}
+}
+
+// TestStatusSubcommand_NativeMeasurement_UnknownStatesNeverRenderAsZero covers
+// P5: a missing field reads `unknown (not reported)`, a rejected one reads
+// `unknown (invalid)`, in the right place, and no native line shows 0% or 100%.
+// The third window has a non-object rate_limits entry ahead of the valid ones:
+// the stored Quota skips it, so the path index (rate_limits[1]) is the input
+// position and must be mapped back, or the rejected percentage would read as
+// not reported.
+func TestStatusSubcommand_NativeMeasurement_UnknownStatesNeverRenderAsZero(t *testing.T) {
+	now := time.Now()
+	measured := now.Add(-3 * time.Minute)
+	resets := isoTime(now.Add(150 * time.Minute))
+
+	output := runNativeStatus(t, ipc.StateSnapshot{
+		Windows: []ipc.WindowState{
+			// context.percent rejected, tokens absent; rate_limits rejected as a whole.
+			nativeWindow("0", "t0", parseNative(t, now, nativeBody(measured, map[string]any{
+				"context":     map[string]any{"window": 200000, "percent": -1},
+				"rate_limits": "nope",
+			}))),
+			// a real zero token count; a window whose percent_used is absent.
+			nativeWindow("1", "t1", parseNative(t, now, nativeBody(measured, map[string]any{
+				"context":     map[string]any{"tokens": 0, "window": 200000},
+				"rate_limits": []any{map[string]any{"kind": "five_hour", "resets_at": resets}},
+			}))),
+			// context rejected as a whole; index shift behind a non-object entry.
+			nativeWindow("2", "t2", parseNative(t, now, nativeBody(measured, map[string]any{
+				"context": "bad",
+				"rate_limits": []any{
+					"junk",
+					map[string]any{"kind": "five_hour", "percent_used": 150, "resets_at": resets},
+					map[string]any{"kind": "seven_day", "percent_used": 35},
+				},
+			}))),
+			// neither context nor rate_limits reported.
+			nativeWindow("3", "t3", parseNative(t, now, nativeBody(measured, nil))),
+		},
+		Summary: ipc.StatusSummary{Total: 4, Running: 4},
+	})
+
+	assertContiguousLines(t, output,
+		"  sess-a:0 - t0 (claude) (running)",
+		"    context: percent unknown (invalid), tokens unknown (not reported), window 200000 — "+nativeSuffixFresh,
+		"    plan quota (native, session-scoped): unknown (invalid) — "+nativeSuffixFresh,
+		"  sess-a:1 - t1 (claude) (running)",
+		"    context: percent unknown (not reported), tokens 0, window 200000 — "+nativeSuffixFresh,
+		"    plan quota (native, session-scoped): five_hour used unknown (not reported), resets in 2h — "+nativeSuffixFresh,
+		"  sess-a:2 - t2 (claude) (running)",
+		"    context: unknown (invalid) — "+nativeSuffixFresh,
+		"    plan quota (native, session-scoped): five_hour used unknown (invalid), resets in 2h, weekly 35% used, resets unknown (not reported) — "+nativeSuffixFresh,
+		"  sess-a:3 - t3 (claude) (running)",
+		"    context: unknown (not reported) — "+nativeSuffixFresh,
+		"    plan quota (native, session-scoped): unknown (not reported) — "+nativeSuffixFresh,
+	)
+	lines := nativeLines(output)
+	if len(lines) != 8 {
+		t.Fatalf("expected 8 native lines, got %d:\n%s", len(lines), output)
+	}
+	for _, line := range lines {
+		if strings.Contains(line, "0%") || strings.Contains(line, "100%") {
+			t.Errorf("a missing or invalid field rendered as a percentage: %q", line)
+		}
+	}
+}
+
+// TestStatusSubcommand_NativeMeasurement_EmptyRateLimitsRendersNoneReported
+// covers P15: rate_limits [] stores an empty quota and renders `none reported`
+// (with the source suffix), while an absent rate_limits stays `unknown (not
+// reported)`, so the two are told apart.
+func TestStatusSubcommand_NativeMeasurement_EmptyRateLimitsRendersNoneReported(t *testing.T) {
+	now := time.Now()
+	measured := now.Add(-3 * time.Minute)
+	ctxFields := map[string]any{"tokens": 47000, "window": 200000, "percent": 23.5}
+
+	output := runNativeStatus(t, ipc.StateSnapshot{
+		Windows: []ipc.WindowState{
+			nativeWindow("0", "empty", parseNative(t, now, nativeBody(measured, map[string]any{
+				"context": ctxFields, "rate_limits": []any{},
+			}))),
+			nativeWindow("1", "absent", parseNative(t, now, nativeBody(measured, map[string]any{
+				"context": ctxFields,
+			}))),
+		},
+		Summary: ipc.StatusSummary{Total: 2, Running: 2},
+	})
+
+	assertContiguousLines(t, output,
+		"  sess-a:0 - empty (claude) (running)",
+		"    context: percent 23.5%, tokens 47000, window 200000 — "+nativeSuffixFresh,
+		"    plan quota (native, session-scoped): none reported — "+nativeSuffixFresh,
+		"  sess-a:1 - absent (claude) (running)",
+		"    context: percent 23.5%, tokens 47000, window 200000 — "+nativeSuffixFresh,
+		"    plan quota (native, session-scoped): unknown (not reported) — "+nativeSuffixFresh,
+	)
+	if n := strings.Count(output, "none reported"); n != 1 {
+		t.Errorf("expected `none reported` for the empty list only, found %d in:\n%s", n, output)
+	}
+}
+
+// TestStatusSubcommand_NativeMeasurement_StaleAndExpiredLabels covers P21: a
+// sample older than 15m carries `(stale)` after its age, an expired quota window
+// reads `expired (reset passed)` without its percentage, and a fresh sample with
+// a current window carries neither.
+func TestStatusSubcommand_NativeMeasurement_StaleAndExpiredLabels(t *testing.T) {
+	now := time.Now()
+	ctxFields := map[string]any{"tokens": 47000, "window": 200000, "percent": 23.5}
+
+	stale := parseNative(t, now, nativeBody(now.Add(-20*time.Minute), map[string]any{
+		"context": ctxFields,
+		"rate_limits": []any{
+			map[string]any{"kind": "five_hour", "percent_used": 77, "resets_at": isoTime(now.Add(-10 * time.Minute))},
+			map[string]any{"kind": "seven_day", "percent_used": 12, "resets_at": isoTime(now.Add(80 * time.Hour))},
+		},
+	}))
+	fresh := parseNative(t, now, nativeBody(now.Add(-3*time.Minute), map[string]any{
+		"context": ctxFields,
+		"rate_limits": []any{
+			map[string]any{"kind": "five_hour", "percent_used": 41, "resets_at": isoTime(now.Add(150 * time.Minute))},
+		},
+	}))
+
+	output := runNativeStatus(t, ipc.StateSnapshot{
+		Windows: []ipc.WindowState{nativeWindow("0", "old", stale), nativeWindow("1", "new", fresh)},
+		Summary: ipc.StatusSummary{Total: 2, Running: 2},
+	})
+
+	const staleSuffix = "source: claude session.measure, measured 20m ago (stale)"
+	assertContiguousLines(t, output,
+		"  sess-a:0 - old (claude) (running)",
+		"    context: percent 23.5%, tokens 47000, window 200000 — "+staleSuffix,
+		"    plan quota (native, session-scoped): five_hour expired (reset passed), weekly 12% used, resets in 3d — "+staleSuffix,
+		"  sess-a:1 - new (claude) (running)",
+		"    context: percent 23.5%, tokens 47000, window 200000 — "+nativeSuffixFresh,
+		"    plan quota (native, session-scoped): five_hour 41% used, resets in 2h — "+nativeSuffixFresh,
+	)
+	if n := strings.Count(output, "(stale)"); n != 2 {
+		t.Errorf("expected (stale) on the two lines of the old sample only, found %d in:\n%s", n, output)
+	}
+	for _, line := range nativeLines(output) {
+		if strings.Contains(line, "expired (reset passed)") && strings.Contains(line, "77") {
+			t.Errorf("an expired window shows its percentage: %q", line)
+		}
+	}
+}
+
+// TestStatusSubcommand_NativeMeasurement_AgeUnderAMinuteRendersSeconds covers
+// the `s` unit of the compact age: a sample measured 30s ago reads `measured
+// <n>s ago`, rounded down, with no minute unit and no (stale) label. The test
+// binary runs after the sample time is fixed, so the rendered seconds are 30
+// plus the process start-up time; the pattern bounds that drift.
+func TestStatusSubcommand_NativeMeasurement_AgeUnderAMinuteRendersSeconds(t *testing.T) {
+	now := time.Now()
+	sample := parseNative(t, now, nativeBody(now.Add(-30*time.Second), map[string]any{
+		"context": map[string]any{"tokens": 47000, "window": 200000, "percent": 23.5},
+	}))
+
+	output := runNativeStatus(t, ipc.StateSnapshot{
+		Windows: []ipc.WindowState{nativeWindow("0", "secs", sample)},
+		Summary: ipc.StatusSummary{Total: 1, Running: 1},
+	})
+
+	lines := nativeLines(output)
+	if len(lines) != 2 {
+		t.Fatalf("expected 2 native lines, got %d:\n%s", len(lines), output)
+	}
+	want := regexp.MustCompile(` — source: claude session\.measure, measured 3[0-5]s ago$`)
+	for _, line := range lines {
+		if !want.MatchString(line) {
+			t.Errorf("native line does not end with a seconds age of about 30s: %q", line)
+		}
+	}
+}
+
+// TestStatusSubcommand_NativeMeasurement_FutureMeasuredAtClampsToZeroSeconds
+// covers the clamp: the parser accepts a measured_at up to 5m ahead of the
+// daemon clock, and the renderer shows such a sample as `measured 0s ago`, never
+// a negative age, never (stale).
+func TestStatusSubcommand_NativeMeasurement_FutureMeasuredAtClampsToZeroSeconds(t *testing.T) {
+	now := time.Now()
+	sample := parseNative(t, now, nativeBody(now.Add(2*time.Minute), map[string]any{
+		"context": map[string]any{"tokens": 47000, "window": 200000, "percent": 23.5},
+	}))
+
+	output := runNativeStatus(t, ipc.StateSnapshot{
+		Windows: []ipc.WindowState{nativeWindow("0", "future", sample)},
+		Summary: ipc.StatusSummary{Total: 1, Running: 1},
+	})
+
+	const futureSuffix = "source: claude session.measure, measured 0s ago"
+	assertContiguousLines(t, output,
+		"  sess-a:0 - future (claude) (running)",
+		"    context: percent 23.5%, tokens 47000, window 200000 — "+futureSuffix,
+		"    plan quota (native, session-scoped): unknown (not reported) — "+futureSuffix,
+	)
+}
+
+// TestStatusSubcommand_NativeMeasurement_FarFutureMeasuredAtIsInvalid pins that
+// the renderer re-applies the parser's future cap: a socket writer that skipped
+// daemon validation and sent a measured_at past the 5m tolerance is shown as
+// `measured unknown (invalid)`, not as a fresh `0s ago` sample, and carries no
+// (stale) label. The snapshot is hand-built because the parser rejects it.
+func TestStatusSubcommand_NativeMeasurement_FarFutureMeasuredAtIsInvalid(t *testing.T) {
+	farFuture := &watch.NativeMeasurement{
+		MeasuredAt: isoTime(time.Now().Add(time.Hour)), Source: "session.measure",
+		Context: &watch.NativeContext{
+			Tokens: ptrTo(int64(100)), Window: ptrTo(int64(200)), Percent: ptrTo(50.0),
+		},
+		Quota:   []watch.NativeQuotaWindow{},
+		Missing: []string{}, Invalid: []string{},
+	}
+
+	output := runNativeStatus(t, ipc.StateSnapshot{
+		Windows: []ipc.WindowState{nativeWindow("0", "farfuture", farFuture)},
+		Summary: ipc.StatusSummary{Total: 1, Running: 1},
+	})
+
+	lines := nativeLines(output)
+	if len(lines) != 2 {
+		t.Fatalf("expected 2 native lines, got %d:\n%s", len(lines), output)
+	}
+	for _, line := range lines {
+		if !strings.HasSuffix(line, " — source: claude session.measure, measured unknown (invalid)") {
+			t.Errorf("native line does not end with the invalid-age placeholder: %q", line)
+		}
+		if strings.Contains(line, "0s ago") || strings.Contains(line, "(stale)") {
+			t.Errorf("far-future measured_at rendered as a real age: %q", line)
+		}
+	}
+}
+
+// TestStatusSubcommand_NativeMeasurement_ResanitizesSocketValues pins that the
+// renderer does not trust the snapshot: a socket writer that skips the daemon's
+// validation cannot put an escape sequence, an out-of-range percentage or a
+// forged headroom key on the terminal. Values re-checked here are the kind,
+// the source, the percentages, the token count, the reset time, the sample time
+// and the headroom keys and values; a stored OverWindow flag is not trusted.
+func TestStatusSubcommand_NativeMeasurement_ResanitizesSocketValues(t *testing.T) {
+	now := time.Now()
+	measured := isoTime(now.Add(-3 * time.Minute))
+
+	hostile := &watch.NativeMeasurement{
+		MeasuredAt: measured,
+		Source:     "sess\x1b[31mion.evil\x07",
+		Context: &watch.NativeContext{
+			Tokens: ptrTo(int64(-5)), Window: ptrTo(int64(200000)), Percent: ptrTo(120.0),
+		},
+		Quota: []watch.NativeQuotaWindow{
+			{Kind: "unknown:\x1b[31mevil", PercentUsed: ptrTo(250.0), ResetsAt: isoTime(now.Add(150 * time.Minute))},
+			{Kind: "bogus\x1b[1m", PercentUsed: ptrTo(35.0), ResetsAt: "tomorrow\x1b[0m"},
+		},
+		Missing: []string{}, Invalid: []string{},
+	}
+	badTime := &watch.NativeMeasurement{
+		MeasuredAt: "garbage\x07", Source: "session.measure", Missing: []string{}, Invalid: []string{},
+	}
+	staleFlag := &watch.NativeMeasurement{
+		MeasuredAt: measured, Source: "session.measure",
+		Context: &watch.NativeContext{
+			Tokens: ptrTo(int64(100)), Window: ptrTo(int64(200)), Percent: ptrTo(50.0), OverWindow: true,
+		},
+		Quota:   []watch.NativeQuotaWindow{},
+		Missing: []string{}, Invalid: []string{},
+	}
+
+	output := runNativeStatus(t, ipc.StateSnapshot{
+		Windows: []ipc.WindowState{
+			nativeWindow("0", "hostile", hostile),
+			nativeWindow("1", "badtime", badTime),
+			nativeWindow("2", "flag", staleFlag),
+		},
+		Summary:  ipc.StatusSummary{Total: 3, Running: 3},
+		Headroom: map[string]float64{"claude": 0.5, "codex": 1.7, "evil\x1b[31m": 0.1},
+	})
+
+	if strings.ContainsAny(output, "\x1b\x07") {
+		t.Errorf("raw snapshot bytes reached the terminal: %q", output)
+	}
+	const hostileSuffix = "source: claude session.evil, measured 3m ago"
+	assertContiguousLines(t, output,
+		"  sess-a:0 - hostile (claude) (running)",
+		"    context: percent 120% (over window), tokens unknown (invalid), window 200000 — "+hostileSuffix,
+		"    plan quota (native, session-scoped): unknown:evil used unknown (invalid), resets in 2h, unknown:bogus 35% used, resets unknown (invalid) — "+hostileSuffix,
+		"  sess-a:1 - badtime (claude) (running)",
+		"    context: unknown (not reported) — source: claude session.measure, measured unknown (invalid)",
+		"    plan quota (native, session-scoped): unknown (not reported) — source: claude session.measure, measured unknown (invalid)",
+		"  sess-a:2 - flag (claude) (running)",
+		"    context: percent 50%, tokens 100, window 200 — "+nativeSuffixFresh,
+		"    plan quota (native, session-scoped): none reported — "+nativeSuffixFresh,
+	)
+	if want := "\nbudget headroom (configured estimate): claude 50%  codex unknown (invalid)  evil 10%\n"; !strings.Contains(output, want) {
+		t.Errorf("expected the sanitized headroom line %q in:\n%s", want, output)
 	}
 }
