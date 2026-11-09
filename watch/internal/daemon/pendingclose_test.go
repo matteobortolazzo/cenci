@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -736,8 +737,23 @@ func TestInstallHostSeams_InstallsTheRealTicketReader(t *testing.T) {
 	if d.cleanupEnabled == nil {
 		t.Error("cleanupEnabled = nil on a newDaemon daemon, want ticketstate.CleanupEnabled as the default")
 	}
+	if d.cleanupInventory != nil || d.cleanupRevalidate != nil {
+		t.Fatal("test daemon retained-window readers are wired, want nil so tests never shell out to tmux")
+	}
 
 	d.installHostSeams(func(agent, workflow string) bool { return true })
+
+	// The two retained-window readers (#1458) are the real tmux ones: each refuses
+	// a malformed socket before it execs anything, which a fake would not.
+	if d.cleanupInventory == nil || d.cleanupRevalidate == nil {
+		t.Fatal("cleanupInventory/cleanupRevalidate not installed, want tmux.ListCleanupInventory and tmux.ReadCleanupWindow")
+	}
+	if _, err := d.cleanupInventory("relative/socket"); !errors.Is(err, tmux.ErrMalformedSocket) {
+		t.Errorf("cleanupInventory(malformed socket) error = %v, want tmux.ErrMalformedSocket from the real reader", err)
+	}
+	if _, err := d.cleanupRevalidate("relative/socket", "%1"); !errors.Is(err, tmux.ErrMalformedSocket) {
+		t.Errorf("cleanupRevalidate(malformed socket) error = %v, want tmux.ErrMalformedSocket from the real reader", err)
+	}
 
 	reader, ok := d.cleanupReader.(*ticketstate.Reader)
 	if !ok || reader == nil {

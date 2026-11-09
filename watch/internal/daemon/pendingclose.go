@@ -102,7 +102,7 @@ func (d *Daemon) killPendingClose(wi *frontend.WindowInfo) {
 		return
 	}
 	delete(d.pending, key)
-	d.killWindowTarget(key.socket, key.pane, key.pane, "pending-close")
+	d.killWindowTarget(key.socket, key.pane, key.pane, "pending-close", nil)
 }
 
 // retryBlockedPendingCloses re-evaluates every pending-close the babysit
@@ -129,7 +129,7 @@ func (d *Daemon) retryBlockedPendingCloses() {
 		if d.cfg.Verbose {
 			log.Printf("pending-close: babysit guard cleared for %s (%s), closing now", key.pane, entry.pc.WindowName)
 		}
-		d.killWindowTarget(key.socket, key.pane, key.pane, "pending-close")
+		d.killWindowTarget(key.socket, key.pane, key.pane, "pending-close", nil)
 	}
 }
 
@@ -157,17 +157,68 @@ func (d *Daemon) babysitBlocks(entry *pendingCloseEntry) (bool, string) {
 // scheduling and the kill: a "=session:index" is resolved again at kill time,
 // after the grace wait, so a renumber or index reuse in between would hit the
 // wrong window; a pane id ("%N") is never reused while the tmux server runs.
-func (d *Daemon) killWindowTarget(socket, target, desc, prefix string) {
+//
+// check, when non-nil, revalidates the window against tmux (#1458): it runs
+// before the process cleanup and again before kill-window, and an error from it
+// keeps the window open -- logged as kept, or, for a tmux.ErrWindowGone (the
+// target is already gone), as closed under -verbose, with no other target tried.
+// The pending-close and tracked-window callers pass nil.
+//
+// ctx is checked before every revalidation, before the process kill and before
+// kill-window, so a cancelled daemon or an exhausted bound never issues the next
+// irreversible step; the window then stays open. An exhausted bound is logged
+// whatever -verbose says (nothing retries the window); a daemon-shutdown cancel
+// only under -verbose.
+func (d *Daemon) killWindowTarget(socket, target, desc, prefix string, check func(ctx context.Context) error) {
 	if !sandbox.ValidPaneID(target) {
 		log.Printf("%s: refusing to close %q: missing or invalid stable pane identity %q", prefix, desc, target)
 		return
 	}
 	killer, procKiller, verbose := d.killer, d.procKiller, d.cfg.Verbose
 	d.runOffLoop(sandbox.GraceFromEnv()+sandbox.CloseKillMargin, func(ctx context.Context) {
+		// live reports whether the context still allows the next step. An exhausted
+		// bound is always logged: the registry entry is already gone, so nothing
+		// retries the window. A daemon-shutdown cancel is expected and logs only under
+		// -verbose.
+		live := func() bool {
+			err := ctx.Err()
+			if err != nil && (verbose || errors.Is(err, context.DeadlineExceeded)) {
+				log.Printf("%s: not closing %s: %v", prefix, desc, err)
+			}
+			return err == nil
+		}
+		// revalidated reports whether the window still passes its revalidation (always,
+		// with no check).
+		revalidated := func() bool {
+			if check == nil {
+				return true
+			}
+			err := check(ctx)
+			switch {
+			case err == nil:
+				return true
+			case errors.Is(err, tmux.ErrWindowGone):
+				if verbose {
+					log.Printf("%s: %s already gone, counted as closed", prefix, desc)
+				}
+			default:
+				log.Printf("%s: keeping %s: %v", prefix, desc, err)
+			}
+			return false
+		}
+		// mayProceed gates each irreversible step: the context first, then the
+		// revalidation (which can itself have taken the rest of the bound).
+		mayProceed := func() bool { return live() && revalidated() && live() }
+		if !mayProceed() {
+			return
+		}
 		if procKiller != nil {
 			if err := procKiller.KillWindowProcesses(ctx, socket, target); err != nil {
 				log.Printf("%s: error killing processes of %s: %v", prefix, desc, err)
 			}
+		}
+		if !mayProceed() {
+			return
 		}
 		err := killer.KillWindow(socket, target)
 		switch {

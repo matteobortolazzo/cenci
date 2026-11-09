@@ -42,8 +42,11 @@ const (
 	// in a logged line (substituted only on an exact match, like PaneFormatToken).
 	OwnedFormatToken = "<owned-format>"
 	// OwnedFormat is the exact `list-panes -F` format of tmux's own fields
-	// (pane_id, pane_pid), which no pane option can forge.
-	OwnedFormat = "#{pane_id}\t#{pane_pid}"
+	// (pane_id, pane_pid, pane_dead), which no pane option can forge.
+	OwnedFormat = "#{pane_id}\t#{pane_pid}\t#{pane_dead}"
+	// DeadNo and DeadYes are the two values tmux prints for #{pane_dead}.
+	DeadNo  = "0"
+	DeadYes = "1"
 
 	// TransportMarker is the stderr text of a failing fake runtime exec (the
 	// container is gone), so a test can assert the cause reached the error.
@@ -84,9 +87,14 @@ type Proc struct {
 	ExitsBeforeKill bool
 }
 
-// Pane is one row `tmux list-panes -F PaneFormat` prints.
+// Pane is one row `tmux list-panes -F PaneFormat` prints, plus the tmux-owned
+// #{pane_dead} the OwnedFormat listing reports for it.
 type Pane struct {
 	ID, PanePID, LaunchID, Container, Runtime string
+	// Dead is the raw #{pane_dead} value: empty means DeadNo, so a pane is live
+	// unless a test says otherwise. Any other string (even a malformed one) is
+	// printed verbatim.
+	Dead string
 }
 
 // Spec configures the fake binaries.
@@ -113,11 +121,11 @@ type Spec struct {
 	Panes []Pane
 	// ListOutput, when non-nil, replaces the formatted Panes verbatim as the
 	// option listing (PaneFormat). The tmux-owned listing (OwnedFormat) is derived
-	// from it -- the first two TAB fields of every line, empty when missing --
-	// unless OwnedOutput is set.
+	// from it -- the first two TAB fields of every line, empty when missing, and a
+	// live pane_dead of DeadNo -- unless OwnedOutput is set.
 	ListOutput *string
 	// OwnedOutput, when non-nil, replaces the derived tmux-owned listing verbatim:
-	// what real tmux prints for the pane_id and pane_pid it owns.
+	// what real tmux prints for the pane_id, pane_pid and pane_dead it owns.
 	OwnedOutput *string
 	// ListGone: list-panes fails with tmux's missing-window message.
 	ListGone bool
@@ -252,12 +260,16 @@ func tmuxScript(callLog string, spec Spec) string {
 			for len(f) < 2 {
 				f = append(f, "")
 			}
-			owned += f[0] + "\t" + f[1] + "\n"
+			owned += f[0] + "\t" + f[1] + "\t" + DeadNo + "\n"
 		}
 	} else {
 		for _, p := range spec.Panes {
+			dead := p.Dead
+			if dead == "" {
+				dead = DeadNo
+			}
 			out += strings.Join([]string{p.ID, p.PanePID, p.LaunchID, p.Container, p.Runtime}, "\t") + "\n"
-			owned += p.ID + "\t" + p.PanePID + "\n"
+			owned += p.ID + "\t" + p.PanePID + "\t" + dead + "\n"
 		}
 	}
 	if spec.OwnedOutput != nil {

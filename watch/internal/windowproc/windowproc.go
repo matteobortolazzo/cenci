@@ -6,6 +6,15 @@
 // can write through the tmux socket, so each is validated default-deny before it
 // reaches an exec argv or a signal: a malformed value is a reported error and
 // nothing is signaled for that pane.
+//
+// A dead pane (tmux's own #{pane_dead}, kept by remain-on-exit, #1458) keeps its
+// pane_pid after the process exits, so a long-retained one may name an unrelated
+// process group that reused the pid. It gets no pid or process-group signal --
+// not even a Getpgid -- and the skip is reported; a dead sandbox pane is still
+// killed by launch ID, which a reused pid cannot redirect, and a dead pane that
+// records a container without a launch ID still reports its unkilled in-container
+// processes. pane_dead must be exactly "0" or "1": any other value rejects the
+// pane.
 package windowproc
 
 import (
@@ -83,6 +92,8 @@ func (k *Killer) KillWindowProcesses(ctx context.Context, socket, target string)
 type pane struct {
 	id  string
 	pid int
+	// dead is tmux's #{pane_dead}: the pane's process has exited and pid is stale.
+	dead bool
 	// Set only for a sandbox pane (launch ID, container and runtime all recorded).
 	launchID, container, runtime string
 	// strandedContainer is set for a pane that records a container but no launch
@@ -93,14 +104,28 @@ type pane struct {
 
 func (p pane) sandboxed() bool { return p.launchID != "" }
 
+// strandedContainerNote reports the in-container processes of a pane that records
+// a container but no launch ID: no launch ID says which of them belong to the
+// pane, so they are not killed. It is nil for any other pane.
+func (p pane) strandedContainerNote() error {
+	if p.strandedContainer == "" {
+		return nil
+	}
+	return fmt.Errorf("%s is set but %s is empty: processes inside container %s were not killed (the orphan reaper covers them once the pane is gone)",
+		sandbox.PaneOptionContainer, sandbox.PaneOptionLaunchID, p.strandedContainer)
+}
+
 // parsePane validates every field of p, default-deny. A pane with no launch ID
 // takes the host path -- including one with only a container and runtime: the ID
 // is written last, so that is a partial tag failure, not a sandbox pane. A
 // non-empty malformed value, or a launch ID without its container and runtime,
-// is an error.
+// is an error, and so is a pane_dead other than exactly "0" or "1".
 func parsePane(p tmux.PaneProc) (pane, error) {
 	if !sandbox.ValidPaneID(p.PaneID) {
 		return pane{}, fmt.Errorf("pane %q: invalid pane_id", p.PaneID)
+	}
+	if p.PaneDead != "0" && p.PaneDead != "1" {
+		return pane{}, fmt.Errorf("pane %s: invalid pane_dead %q: want 0 or 1", p.PaneID, p.PaneDead)
 	}
 	// Digits only (Atoi alone would accept a sign), and above 1 so neither
 	// Getpgid(0) nor Kill(-0) can resolve to the caller's own group and the init
@@ -122,7 +147,7 @@ func parsePane(p tmux.PaneProc) (pane, error) {
 		return pane{}, fmt.Errorf("pane %s: invalid %s %q", p.PaneID, sandbox.PaneOptionRuntime, p.Runtime)
 	}
 
-	out := pane{id: p.PaneID, pid: pid}
+	out := pane{id: p.PaneID, pid: pid, dead: p.PaneDead == "1"}
 	if p.LaunchID == "" {
 		out.strandedContainer = p.Container
 		return out, nil
@@ -142,17 +167,23 @@ func (k *Killer) killPane(ctx context.Context, raw tmux.PaneProc, grace time.Dur
 	if err != nil {
 		return err
 	}
-	if p.sandboxed() {
+	switch {
+	case p.sandboxed():
+		// Dead or live: the launch-ID match is by a 32-hex ID, so a stale pane_pid
+		// cannot redirect it.
 		err = sandbox.KillLaunch(ctx, p.runtime, p.container, p.launchID, grace, k.stderr, k.stderr)
-	} else {
-		err = killHostGroup(ctx, p, grace)
-		if p.strandedContainer != "" {
-			// Non-fatal: the host group was still signaled above, but the agent
-			// itself runs inside the container and no launch ID says which of its
-			// processes belong to this pane.
-			err = errors.Join(err, fmt.Errorf("%s is set but %s is empty: processes inside container %s were not killed (the orphan reaper covers them once the pane is gone)",
-				sandbox.PaneOptionContainer, sandbox.PaneOptionLaunchID, p.strandedContainer))
-		}
+	case p.dead:
+		// A dead host pane's pane_pid is stale and may have been reused: nothing is
+		// resolved or signaled for it. A container recorded without a launch ID is
+		// skipped the same way, but its unkilled in-container processes are still
+		// reported (the orphan reaper covers them once the pane is gone).
+		_, _ = fmt.Fprintf(k.stderr, "pane %s: host process cleanup skipped (stale pane_pid)\n", p.id)
+		err = p.strandedContainerNote()
+	default:
+		// The container note is non-fatal: the host group was still signaled, but the
+		// agent itself runs inside the container and no launch ID says which of its
+		// processes belong to this pane.
+		err = errors.Join(killHostGroup(ctx, p, grace), p.strandedContainerNote())
 	}
 	if err != nil {
 		return fmt.Errorf("pane %s: %w", p.id, err)

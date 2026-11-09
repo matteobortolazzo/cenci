@@ -252,7 +252,7 @@ func TestKillWindowProcesses_ForgedOptionRowNeverSignalsItsPid(t *testing.T) {
 	sys.groups[wpPGID] = &fakeGroup{alive: true}
 	sys.pgids[forgedPID] = 9999
 	sys.groups[9999] = &fakeGroup{alive: true}
-	owned := "%1\t" + fmt.Sprint(wpPanePID) + "\n%2\t4243\n"
+	owned := "%1\t" + fmt.Sprint(wpPanePID) + "\t0\n%2\t4243\t0\n"
 	spec := windowproctest.Spec{
 		OwnedOutput: &owned,
 		// %2's launch-id option is "x\n%9\t31337": a truncated row for %2, then a
@@ -601,7 +601,275 @@ func TestKillWindowProcesses_ExpiredContextFailsTheRuntimeExecs(t *testing.T) {
 	}
 }
 
+// -- dead panes (#1458) -------------------------------------------------------
+
+// skipLine is the report a dead host pane's skipped process cleanup writes.
+const skipLine = "host process cleanup skipped (stale pane_pid)"
+
+// runKillerReporting is runKiller with the killer's diagnostics captured.
+func runKillerReporting(t *testing.T, spec windowproctest.Spec) (*windowproctest.Fakes, string, error) {
+	t.Helper()
+	t.Setenv("CENCI_SANDBOX_REAP_GRACE_SECS", "0")
+	fakes := windowproctest.Install(t, spec)
+	var report strings.Builder
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	err := New(&report).KillWindowProcesses(ctx, "", wpTarget)
+	return fakes, report.String(), err
+}
+
+// tmux keeps a dead pane's pane_pid after the process exits, so after a long
+// retention it may name an unrelated process group that reused the pid. A dead
+// host pane therefore gets no Getpgid, no signal and no probe -- the skip is
+// reported -- while the identical pane, live, still gets its group TERMed.
+func TestKillWindowProcesses_DeadHostPaneIsNeverSignaledAndTheSkipIsReported(t *testing.T) {
+	newSys := func(t *testing.T) *fakeSys {
+		sys := installFakeSys(t)
+		sys.pgids[wpPanePID] = wpPGID
+		sys.groups[wpPGID] = &fakeGroup{alive: true}
+		return sys
+	}
+
+	t.Run("dead", func(t *testing.T) {
+		sys := newSys(t)
+		pane := hostPane()
+		pane.Dead = windowproctest.DeadYes
+
+		fakes, report, err := runKillerReporting(t, windowproctest.Spec{Panes: []windowproctest.Pane{pane}})
+
+		if err != nil {
+			t.Fatalf("KillWindowProcesses = %v, want nil: a skipped dead pane is reported, not failed", err)
+		}
+		if len(sys.getpgidCalls) != 0 || len(sys.calls) != 0 {
+			t.Errorf("getpgid = %v, kill calls = %v, want none for a dead host pane", sys.getpgidCalls, sys.calls)
+		}
+		if !strings.Contains(report, skipLine) || !strings.Contains(report, "%1") {
+			t.Errorf("report = %q, want %q for pane %%1", report, skipLine)
+		}
+		if calls := fakes.Calls(t); hasExec(calls) {
+			t.Errorf("a runtime exec was issued for a dead host pane; calls:\n%s", strings.Join(calls, "\n"))
+		}
+	})
+	t.Run("live control", func(t *testing.T) {
+		sys := newSys(t)
+
+		_, report, err := runKillerReporting(t, windowproctest.Spec{Panes: []windowproctest.Pane{hostPane()}})
+
+		if err != nil {
+			t.Fatalf("KillWindowProcesses: %v", err)
+		}
+		if got, want := sys.signals(), []string{fmt.Sprintf("TERM -%d", wpPGID)}; !slices.Equal(got, want) {
+			t.Errorf("signals = %v, want the live pane's group %v", got, want)
+		}
+		if strings.Contains(report, skipLine) {
+			t.Errorf("report = %q, a live pane must not be reported as skipped", report)
+		}
+	})
+}
+
+// A pane that records a container but no launch ID (a partial tag failure) takes
+// the host path while live; dead, it is skipped like any host pane, but its
+// in-container processes still go unkilled and that is reported (the error a live
+// one returns), never dropped.
+func TestKillWindowProcesses_DeadPartiallyTaggedPaneIsNotSignaled(t *testing.T) {
+	sys := installFakeSys(t)
+	sys.pgids[wpPanePID] = wpPGID
+	sys.groups[wpPGID] = &fakeGroup{alive: true}
+	pane := windowproctest.Pane{ID: "%1", PanePID: fmt.Sprint(wpPanePID), Container: wpContainer, Runtime: "docker", Dead: windowproctest.DeadYes}
+
+	fakes, report, err := runKillerReporting(t, windowproctest.Spec{Panes: []windowproctest.Pane{pane}})
+
+	if err == nil || !strings.Contains(err.Error(), "processes inside container "+wpContainer+" were not killed") {
+		t.Errorf("err = %v, want the note that the processes inside container %s were not killed", err, wpContainer)
+	}
+	if len(sys.getpgidCalls) != 0 || len(sys.calls) != 0 {
+		t.Errorf("getpgid = %v, kill calls = %v, want none for a dead pane", sys.getpgidCalls, sys.calls)
+	}
+	if !strings.Contains(report, skipLine) {
+		t.Errorf("report = %q, want %q", report, skipLine)
+	}
+	if calls := fakes.Calls(t); hasExec(calls) {
+		t.Errorf("a runtime exec was issued without a launch ID; calls:\n%s", strings.Join(calls, "\n"))
+	}
+}
+
+// A dead sandbox pane is still killed by launch ID, exactly as a live one: that
+// match is by a 32-hex ID in the container's environments, so pid reuse cannot
+// redirect it. Nothing is signaled on the host for either.
+func TestKillWindowProcesses_DeadSandboxPaneStillGetsTheLaunchIDKill(t *testing.T) {
+	for _, f := range windowproctest.Flavors {
+		t.Run(f.Name, func(t *testing.T) {
+			sys := installFakeSys(t)
+			spec := f.SandboxSpec(wpLaunchID, fmt.Sprint(wpPanePID), windowproctest.Proc{PID: "301", Start: "9", IgnoreTerm: true})
+			spec.Panes[0].Dead = windowproctest.DeadYes
+
+			fakes, report, err := runKillerReporting(t, spec)
+
+			if err != nil {
+				t.Fatalf("KillWindowProcesses: %v", err)
+			}
+			want := windowproctest.SandboxCloseCalls(f.Runtime, f.Container, wpLaunchID, wpTarget, "301")
+			want = want[:len(want)-1] // the killer never closes the window itself
+			if got := fakes.Calls(t); !slices.Equal(got, want) {
+				t.Errorf("calls:\n%s\nwant exactly one launch-ID kill:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+			}
+			if len(sys.calls) != 0 || len(sys.getpgidCalls) != 0 {
+				t.Errorf("host signals = %v, getpgid = %v, want none for a sandbox pane", sys.calls, sys.getpgidCalls)
+			}
+			if strings.Contains(report, skipLine) {
+				t.Errorf("report = %q, a sandbox pane's launch-ID kill is not a skipped cleanup", report)
+			}
+		})
+	}
+}
+
+// pane_dead is a tmux-owned field that must be exactly 0 or 1: anything else
+// rejects that pane (an error naming the field), and not a single signal, probe
+// or exec is issued for it. The same pane with a valid value is the control.
+func TestKillWindowProcesses_InvalidPaneDeadRejectsThePaneWithoutSignalling(t *testing.T) {
+	for _, bad := range []string{"2", "", "x", "01", " 1", "true", "-1", "1\t1"} {
+		t.Run(fmt.Sprintf("%q", bad), func(t *testing.T) {
+			sys := installFakeSys(t)
+			sys.pgids[wpPanePID] = wpPGID
+			sys.groups[wpPGID] = &fakeGroup{alive: true}
+			owned := "%1\t" + fmt.Sprint(wpPanePID) + "\t" + bad + "\n"
+			spec := windowproctest.Spec{
+				OwnedOutput: &owned,
+				ListOutput:  rawList(row("%1", fmt.Sprint(wpPanePID), "", "", "")),
+			}
+
+			fakes, _, err := runKillerReporting(t, spec)
+
+			if err == nil || !strings.Contains(err.Error(), "pane_dead") {
+				t.Fatalf("error = %v, want one naming pane_dead", err)
+			}
+			if len(sys.getpgidCalls) != 0 || len(sys.calls) != 0 {
+				t.Errorf("getpgid = %v, kill calls = %v, want none for a rejected pane", sys.getpgidCalls, sys.calls)
+			}
+			if calls := fakes.Calls(t); hasExec(calls) {
+				t.Errorf("a runtime exec was issued for a rejected pane; calls:\n%s", strings.Join(calls, "\n"))
+			}
+		})
+	}
+	t.Run("valid value control", func(t *testing.T) {
+		sys := installFakeSys(t)
+		sys.pgids[wpPanePID] = wpPGID
+		sys.groups[wpPGID] = &fakeGroup{alive: true}
+		owned := "%1\t" + fmt.Sprint(wpPanePID) + "\t0\n"
+		spec := windowproctest.Spec{
+			OwnedOutput: &owned,
+			ListOutput:  rawList(row("%1", fmt.Sprint(wpPanePID), "", "", "")),
+		}
+
+		if _, _, err := runKillerReporting(t, spec); err != nil {
+			t.Fatalf("KillWindowProcesses: %v", err)
+		}
+		if got, want := sys.signals(), []string{fmt.Sprintf("TERM -%d", wpPGID)}; !slices.Equal(got, want) {
+			t.Errorf("signals = %v, want %v", got, want)
+		}
+	})
+}
+
+// A launch ID recorded without its container is an incomplete sandbox identity.
+// Dead or live, the pane is rejected as malformed (the error names both options)
+// and gets no host signal, no probe, no runtime exec and no launch-ID kill: a dead
+// pane is not downgraded to the host-style skip, because that skip is reported as
+// a clean "stale pane_pid" no-op and would hide the malformed identity. The window
+// itself stays killable by kill-window, which is the caller's step, not the
+// killer's.
+func TestKillWindowProcesses_DeadPaneWithLaunchIDButNoContainerIsRejectedNotSkipped(t *testing.T) {
+	for _, tc := range []struct{ name, dead string }{
+		{"dead pane", "1"},
+		{"live control", "0"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sys := installFakeSys(t)
+			sys.pgids[wpPanePID] = wpPGID
+			sys.groups[wpPGID] = &fakeGroup{alive: true}
+			owned := "%1\t" + fmt.Sprint(wpPanePID) + "\t" + tc.dead + "\n"
+			spec := windowproctest.Spec{
+				Launches:    map[string][]windowproctest.Proc{wpLaunchID: {{PID: "301", Start: "9", IgnoreTerm: true}}},
+				OwnedOutput: &owned,
+				ListOutput:  rawList(row("%1", fmt.Sprint(wpPanePID), wpLaunchID, "", "docker")),
+			}
+
+			fakes, report, err := runKillerReporting(t, spec)
+
+			if err == nil {
+				t.Fatal("KillWindowProcesses = nil, want an error for a launch ID without a container")
+			}
+			for _, sub := range []string{"%1", "@cenci-launch-id", "@cenci-container"} {
+				if !strings.Contains(err.Error(), sub) {
+					t.Errorf("error = %q, want it to name %q", err, sub)
+				}
+			}
+			if len(sys.getpgidCalls) != 0 || len(sys.calls) != 0 {
+				t.Errorf("getpgid = %v, kill calls = %v, want none for a malformed pane", sys.getpgidCalls, sys.calls)
+			}
+			if calls := fakes.Calls(t); hasExec(calls) {
+				t.Errorf("a runtime exec (launch-ID kill) was issued for a malformed pane; calls:\n%s", strings.Join(calls, "\n"))
+			}
+			if strings.Contains(report, skipLine) {
+				t.Errorf("report = %q, a malformed pane is rejected with an error, not skipped as a stale host pane", report)
+			}
+		})
+	}
+}
+
+// A rejected pane never shields its sibling: the dead sandbox pane next to it is
+// still killed by launch ID.
+func TestKillWindowProcesses_InvalidPaneDeadDoesNotBlockAValidSibling(t *testing.T) {
+	installFakeSys(t)
+	owned := "%1\t4242\t9\n%2\t4243\t1\n"
+	spec := windowproctest.Spec{
+		Launches:    map[string][]windowproctest.Proc{wpLaunchID2: {{PID: "201", Start: "9", IgnoreTerm: true}}},
+		OwnedOutput: &owned,
+		ListOutput: rawList(
+			row("%1", "4242", "", "", ""),
+			row("%2", "4243", wpLaunchID2, wpContainer, "docker"),
+		),
+	}
+
+	fakes, _, err := runKillerReporting(t, spec)
+
+	if err == nil || !strings.Contains(err.Error(), "%1") {
+		t.Fatalf("error = %v, want the rejected pane %%1 named", err)
+	}
+	if calls := fakes.Calls(t); !slices.Contains(calls, "docker exec -u root "+wpContainer+" kill -KILL 201") {
+		t.Errorf("the valid dead sandbox sibling was not killed; calls:\n%s", strings.Join(calls, "\n"))
+	}
+}
+
 // -- real host processes -----------------------------------------------------
+
+// A window with one dead host pane and one live one (`cenci close` on a window
+// whose agent exited in one pane): only the live pane's process group is
+// signaled; the group under the dead pane's stale pid is left alone, even though
+// it is a perfectly signalable real group.
+func TestKillWindowProcesses_DeadAndLiveHostPanesSignalOnlyTheLiveGroup(t *testing.T) {
+	liveLeader, liveMember, _ := windowproctest.StartCooperativeGroup(t) // before the fakes replace PATH
+	staleLeader, staleMember, _ := windowproctest.StartCooperativeGroup(t)
+
+	t.Setenv("CENCI_SANDBOX_REAP_GRACE_SECS", "20")
+	windowproctest.Install(t, windowproctest.Spec{Panes: []windowproctest.Pane{
+		{ID: "%1", PanePID: fmt.Sprint(staleLeader.PID), Dead: windowproctest.DeadYes},
+		{ID: "%2", PanePID: fmt.Sprint(liveLeader.PID)},
+	}})
+	var report strings.Builder
+
+	err := New(&report).KillWindowProcesses(context.Background(), "", wpTarget)
+
+	if err != nil {
+		t.Fatalf("KillWindowProcesses: %v", err)
+	}
+	liveLeader.RequireDeathBy(t, "live pane's group leader", syscall.SIGTERM)
+	liveMember.RequireDeathBy(t, "live pane's group member", syscall.SIGTERM)
+	staleLeader.RequireAlive(t, "dead pane's group leader (stale pane_pid)")
+	staleMember.RequireAlive(t, "dead pane's group member (stale pane_pid)")
+	if !strings.Contains(report.String(), skipLine) {
+		t.Errorf("report = %q, want %q for the dead pane", report.String(), skipLine)
+	}
+}
 
 // A host pane's process group gets SIGTERM, which ends a cooperative group
 // promptly; a process started under Setsid (the babysit supervisor shape) is in

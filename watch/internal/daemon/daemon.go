@@ -58,7 +58,8 @@ type Daemon struct {
 	// runOffLoop runs fn off the event loop with a ctx bounded by timeout
 	// (#1253): the process kill waits out a SIGTERM->SIGKILL grace window and
 	// runtime execs can hang, neither of which may stall d.loop. Production
-	// (newDaemon) is a goroutine; newTestDaemon installs a synchronous runner.
+	// (newDaemon) is a goroutine whose context derives from baseCtx;
+	// newTestDaemon installs a synchronous runner.
 	// fn must not touch d.sessions, d.pending or any other loop-owned field.
 	runOffLoop func(timeout time.Duration, fn func(ctx context.Context))
 
@@ -113,15 +114,30 @@ type Daemon struct {
 	// this package. Nil (newDaemon's default) must refuse every arm request.
 	armCapable func(agent, workflow string) bool
 
+	// baseCtx is the context loop runs under, recorded so the production
+	// runOffLoop derives every worker's context from it: cancelling the daemon
+	// cancels in-flight off-loop work, and an irreversible step re-checks it (#1458).
+	// Loop-owned; nil outside loop (tests that call handleEvent directly), which
+	// means context.Background().
+	baseCtx context.Context
+
 	// Window-cleanup pass seams and state (#1251); see windowcleanup.go.
 	// cleanupReader is nil (newDaemon's default) so the pass does nothing and
 	// newDaemon-based tests never shell out to gh; installHostSeams installs the
 	// real reader and resolver factory. cleanupInFlight is loop-owned; the worker
 	// reports through cleanupResults, whose capacity of 1 lets it finish without
 	// the loop receiving.
+	//
+	// cleanupInventory and cleanupRevalidate (#1458) are the retained-window
+	// readers: the per-socket inventory the worker turns into untracked candidates,
+	// and the re-read of one window by pane id that the kill revalidates against.
+	// Both are nil in newDaemon, so newDaemon-based tests never shell out to tmux;
+	// installHostSeams installs tmux.ListCleanupInventory and tmux.ReadCleanupWindow.
 	cleanupReader      ticketReader
 	newCleanupResolver func() repoResolver
 	cleanupEnabled     func(toplevel string) (bool, error)
+	cleanupInventory   func(socket string) (tmux.CleanupInventory, error)
+	cleanupRevalidate  func(socket, pane string) (tmux.CleanupWindow, error)
 	cleanupInFlight    bool
 	cleanupResults     chan windowCleanupResult
 
@@ -179,7 +195,7 @@ type Daemon struct {
 
 // newDaemon creates a Daemon with the given dependencies.
 func newDaemon(cfg config.Config, fe frontend.Frontend, events <-chan ipc.HookEvent, reaper reap.Reaper) *Daemon {
-	return &Daemon{
+	d := &Daemon{
 		cfg:      cfg,
 		frontend: fe,
 		sessions: make(map[string]*frontend.SessionState),
@@ -189,7 +205,6 @@ func newDaemon(cfg config.Config, fe frontend.Frontend, events <-chan ipc.HookEv
 		killer:   &tmux.ExecClient{},
 		pending:  make(map[pendingKey]*pendingCloseEntry),
 		// procKiller stays nil here: Run installs the real one.
-		runOffLoop: runInGoroutine,
 		closeGuard: func(ticket string) (bool, string) {
 			return babysit.BlocksClose(ticket, "", "")
 		},
@@ -198,7 +213,8 @@ func newDaemon(cfg config.Config, fe frontend.Frontend, events <-chan ipc.HookEv
 		babysitStatus:  defaultBabysitStatus,
 		tmuxSocketDir:  tmux.TrustedSocketDir,
 		tmuxSocketFile: tmux.CheckSocketFile,
-		// cleanupReader stays nil here: installHostSeams installs the real one.
+		// cleanupReader, cleanupInventory and cleanupRevalidate stay nil here:
+		// installHostSeams installs the real ones.
 		cleanupEnabled: ticketstate.CleanupEnabled,
 		cleanupResults: make(chan windowCleanupResult, 1),
 		// worktreeReader stays nil here: installHostSeams installs the real one.
@@ -207,6 +223,8 @@ func newDaemon(cfg config.Config, fe frontend.Frontend, events <-chan ipc.HookEv
 		worktreeEvalResults: make(chan worktreeEvalResult, 1),
 		worktreeRemoveDone:  make(chan struct{}, 1),
 	}
+	d.runOffLoop = d.runInGoroutine
+	return d
 }
 
 // attachReceiver wires the event receiver's side channels into the daemon: the
@@ -224,10 +242,12 @@ func (d *Daemon) attachReceiver(recv *ipc.EventReceiver) {
 // (#1390, TestInstallHostSeams_InstallsTheRealBabysitControlSeams pins them),
 // and the window-process killer (#1253, its diagnostics going to the daemon
 // log), and the window-cleanup pass's ticket reader and resolver factory
-// (#1251), and the worktree-cleanup pass's outcome reader, resolver factory,
+// (#1251) with its retained-window inventory and revalidation readers (#1458),
+// and the worktree-cleanup pass's outcome reader, resolver factory,
 // tmux pane lister, sandbox gate and registry and user-config paths (#1267).
 // newDaemon leaves them inert -- the arm and stop/status seams nack,
-// procKiller, cleanupReader and worktreeReader are nil -- so newDaemon-based
+// procKiller, cleanupReader, cleanupInventory, cleanupRevalidate and
+// worktreeReader are nil -- so newDaemon-based
 // tests never shell out or signal real processes. Run is the only production caller,
 // and TestInstallHostSeams_InstallsTheRealProcessKiller,
 // TestInstallHostSeams_InstallsTheRealTicketReader and
@@ -241,6 +261,8 @@ func (d *Daemon) installHostSeams(armCapable func(agent, workflow string) bool) 
 	d.procKiller = windowproc.New(log.Writer())
 	d.cleanupReader = &ticketstate.Reader{}
 	d.newCleanupResolver = func() repoResolver { return &ticketstate.Resolver{} }
+	d.cleanupInventory = tmux.ListCleanupInventory
+	d.cleanupRevalidate = tmux.ReadCleanupWindow
 	d.worktreeReader = &ticketstate.Reader{}
 	d.newWorktreeResolver = func() repoResolver { return &ticketstate.Resolver{} }
 	d.worktreeListPanes = tmux.ListLivePanes
@@ -250,10 +272,16 @@ func (d *Daemon) installHostSeams(armCapable func(agent, workflow string) bool) 
 }
 
 // runInGoroutine is the production Daemon.runOffLoop: fn runs on its own
-// goroutine with a context that expires after timeout.
-func runInGoroutine(timeout time.Duration, fn func(ctx context.Context)) {
+// goroutine with a context that expires after timeout, or when the daemon's loop
+// context (baseCtx) is cancelled, whichever comes first. It is called on the
+// loop, the only writer of baseCtx.
+func (d *Daemon) runInGoroutine(timeout time.Duration, fn func(ctx context.Context)) {
+	parent := d.baseCtx
+	if parent == nil {
+		parent = context.Background()
+	}
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		ctx, cancel := context.WithTimeout(parent, timeout)
 		defer cancel()
 		fn(ctx)
 	}()
@@ -349,6 +377,7 @@ func socketTierWarning(res watch.SocketDirResolution, usingDefaults bool) string
 // RunCombinedLoop, per #220); disabled dispatch state flows through
 // u.Dispatch.Enabled rather than through a nil channel.
 func (d *Daemon) loop(ctx context.Context, attention <-chan ipc.AttentionUpdate) error {
+	d.baseCtx = ctx
 	d.reapOnStartup()
 
 	sweep := time.NewTicker(d.cfg.SweepInterval)

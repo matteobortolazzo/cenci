@@ -202,9 +202,10 @@ func TestListWindowPaneProcs_UnrelatedFailureIsNotErrWindowGone(t *testing.T) {
 }
 
 // ownedFormat / optionFormat are the two list-panes formats the listing issues:
-// tmux's own fields alone, then the same fields plus the user-writable options.
+// tmux's own fields alone (the pane's liveness included, #1458), then the same
+// pane id and pid plus the user-writable options.
 const (
-	ownedFormat  = "#{pane_id}\t#{pane_pid}"
+	ownedFormat  = "#{pane_id}\t#{pane_pid}\t#{pane_dead}"
 	optionFormat = "#{pane_id}\t#{pane_pid}\t#{@cenci-launch-id}\t#{@cenci-container}\t#{@cenci-runtime}"
 )
 
@@ -217,13 +218,16 @@ func twoListTmux(t *testing.T, argsFile, owned, options string) {
 		"if [ \"$5\" = "+exectest.ShellQuote(ownedFormat)+" ]; then printf '%s' "+exectest.ShellQuote(owned)+"; else printf '%s' "+exectest.ShellQuote(options)+"; fi\n")
 }
 
-// The five columns are split on TAB with only the trailing newline trimmed: a
-// pane whose launch options were never set prints trailing TABs, and a
-// TrimSpace-based parser would collapse them and shift or drop the columns.
+// The five option columns are split on TAB with only the trailing newline
+// trimmed: a pane whose launch options were never set prints trailing TABs, and a
+// TrimSpace-based parser would collapse them and shift or drop the columns. The
+// tmux-owned pane_dead column of each pane rides along raw (#1458): the second
+// pane is dead, the others are not, and a value outside 0/1 is carried verbatim
+// for the caller to reject.
 func TestListWindowPaneProcs_ParsesFiveTabFieldsKeepingEmptyColumns(t *testing.T) {
 	argsFile := filepath.Join(t.TempDir(), "args")
 	const launchID = "0123456789abcdef0123456789abcdef"
-	owned := "%1\t123\n%2\t456\n%3\t789\n"
+	owned := "%1\t123\t0\n%2\t456\t1\n%3\t789\tmaybe\n"
 	rows := "%1\t123\t\t\t\n" +
 		"%2\t456\t" + launchID + "\tclaude-cenci-x\tdocker\n" +
 		"%3\t789\t" + launchID + "\tcodex-cenci-y\t\n"
@@ -235,9 +239,9 @@ func TestListWindowPaneProcs_ParsesFiveTabFieldsKeepingEmptyColumns(t *testing.T
 	}
 
 	want := []PaneProc{
-		{PaneID: "%1", PanePID: "123"},
-		{PaneID: "%2", PanePID: "456", LaunchID: launchID, Container: "claude-cenci-x", Runtime: "docker"},
-		{PaneID: "%3", PanePID: "789", LaunchID: launchID, Container: "codex-cenci-y"},
+		{PaneID: "%1", PanePID: "123", PaneDead: "0"},
+		{PaneID: "%2", PanePID: "456", PaneDead: "1", LaunchID: launchID, Container: "claude-cenci-x", Runtime: "docker"},
+		{PaneID: "%3", PanePID: "789", PaneDead: "maybe", LaunchID: launchID, Container: "codex-cenci-y"},
 	}
 	if len(got) != len(want) {
 		t.Fatalf("panes = %+v, want %+v", got, want)
@@ -266,7 +270,7 @@ func TestListWindowPaneProcs_ParsesFiveTabFieldsKeepingEmptyColumns(t *testing.T
 // and reported, while the genuine panes still come back.
 func TestListWindowPaneProcs_ForgedOrMismatchedRowsAreDroppedAndReported(t *testing.T) {
 	const launchID = "0123456789abcdef0123456789abcdef"
-	genuine := PaneProc{PaneID: "%1", PanePID: "123"}
+	genuine := PaneProc{PaneID: "%1", PanePID: "123", PaneDead: "0"}
 	tests := []struct {
 		name    string
 		owned   string
@@ -276,7 +280,7 @@ func TestListWindowPaneProcs_ForgedOrMismatchedRowsAreDroppedAndReported(t *test
 	}{
 		{
 			name:  "extra row for a pane id tmux never listed",
-			owned: "%1\t123\n%2\t456\n",
+			owned: "%1\t123\t0\n%2\t456\t0\n",
 			// %2's launch-id option holds "x\n%9\t777" (container and runtime unset), so
 			// tmux prints a truncated row for %2 followed by a forged five-field %9 row.
 			options: "%1\t123\t\t\t\n%2\t456\tx\n%9\t777\t\t\t\n",
@@ -285,24 +289,33 @@ func TestListWindowPaneProcs_ForgedOrMismatchedRowsAreDroppedAndReported(t *test
 		},
 		{
 			name:    "row whose pane_pid differs from tmux's own",
-			owned:   "%1\t123\n",
+			owned:   "%1\t123\t0\n",
 			options: "%1\t999\t\t\t\n",
 			want:    nil,
 			errHas:  []string{"%1", "999"},
 		},
 		{
 			name:    "pane id forged a second time with another pid",
-			owned:   "%1\t123\n%2\t456\n",
+			owned:   "%1\t123\t0\n%2\t456\t0\n",
 			options: "%1\t123\t\t\t\n%2\t456\tx\n%1\t999\t" + launchID + "\tclaude-cenci-x\tdocker\n",
 			want:    nil,
 			errHas:  []string{"%1", "more than once"},
 		},
 		{
 			name:    "genuine pane whose option row is missing",
-			owned:   "%1\t123\n%2\t456\n",
+			owned:   "%1\t123\t0\n%2\t456\t0\n",
 			options: "%1\t123\t\t\t\n",
 			want:    []PaneProc{genuine},
 			errHas:  []string{"%2", "no matching option row"},
+		},
+		{
+			// An owned line without the pane_dead column is not a line this parser
+			// can vouch for: it is reported and its pane never reaches a caller.
+			name:    "owned line without the pane_dead column",
+			owned:   "%1\t123\n%2\t456\t0\n",
+			options: "%1\t123\t\t\t\n%2\t456\t\t\t\n",
+			want:    []PaneProc{{PaneID: "%2", PanePID: "456", PaneDead: "0"}},
+			errHas:  []string{"%1", "pane_dead"},
 		},
 	}
 	for _, tt := range tests {

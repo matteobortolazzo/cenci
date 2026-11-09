@@ -2039,11 +2039,54 @@ The kill targets the window's tracked tmux pane id (`%N`), not `session:index`, 
 it runs after the close grace wait; renumbering or index reuse in between cannot
 redirect it to another window.
 
+#### Retained windows after SessionEnd or a restart
+
+A window can outlive the session that launched it: when the agent exits, tmux keeps the
+dead pane (`remain-on-exit`), the `SessionEnd` hook deletes the session, and the pass above
+no longer sees a tracked window. A daemon restart loses the tracked windows the same way.
+So each pass also reads tmux's own window inventory, independently of agent-session
+tracking, on the daemon's own tmux server and on every socket a tracked session recorded, and treats
+a window as a candidate when:
+- its name starts with a ticket number, by the same rule as above;
+- `@cenci-repo-dir` is set;
+- every one of its panes is dead (`pane_dead`), so a live agent is never a candidate;
+- no tracked session owns one of its panes (a window that is both tracked and in the
+  inventory is closed once, by the tracked path).
+
+A retained window goes through the same evaluation as a tracked one, so it is closed only
+on a terminal verdict: the ticket is *finished*. A clean session end is not evidence that
+the work is done, so an open PR, an unfinished issue, an `Unknown` verdict, a read error
+and an opted-out repo all keep the window. Live windows, windows whose name is not a
+ticket number (a legacy prose slug such as `pr-1455-has-failing-ci-checks`, older than the
+`<PR>-ci-repair` naming) and windows with no `@cenci-repo-dir` are kept too, because the
+daemon cannot tell what they belong to. A window with a malformed or ambiguous inventory
+row is kept and the row is logged.
+
+Having no session is never a reason to hold a window, but the babysit guard still applies.
+The kill is by the window's lowest pane id (`%N`) on its own socket, and the window is
+re-read from tmux twice, right before the process cleanup and again right before
+`kill-window`: a respawned pane, a rename, a changed `@cenci-repo-dir` or any other
+difference keeps the window open and is logged. A dead pane of the host is never sent a
+signal (its recorded `pane_pid` is stale and may have been reused; the skip is logged), while
+a dead sandbox pane still gets the launch-ID kill.
+
 Limitations:
 - Windows launched before `@cenci-repo-dir` was recorded (or where recording it failed)
   are skipped.
-- After a daemon restart a window is not tracked again until its next hook event, so it
-  is not a candidate until then (see [Daemon restart](#daemon-restart)).
+- After a daemon restart a still-running window is not tracked again until its next hook
+  event, so it is not a tracked candidate until then (see
+  [Daemon restart](#daemon-restart)); a retained window with all panes dead is found from
+  tmux at once. Only the daemon's own server and the sockets of tracked sessions are read,
+  so a retained window on another socket waits until a session records that socket. The
+  daemon's own (`""`) server is the first field of its `$TMUX` when set (a daemon started
+  from a pane of another tmux server is on that server), else `<trusted dir>/default`; a
+  session that records that socket is on the same server and it is read once, not as a
+  second socket. Any other recorded socket, the real default server's path included while
+  the daemon is on another server, is a different server and is read on its own. When
+  `$TMUX` does not name the server and the trusted socket directory cannot be resolved
+  (for example a `TMUX_TMPDIR` that does not exist), the path cannot be folded: each pass
+  logs `tmux socket directory unresolved`, and a window of a tracked session is kept
+  open rather than risk a second kill.
 - The repo is identified from the checkout's `origin` remote. A fork checkout looks the
   ticket number up in the fork, not the upstream.
 
@@ -4725,7 +4768,10 @@ automatically. To restart deliberately (e.g. after a config change), use `cenci
 daemon restart` instead of waiting for the next hook — see
 [Daemon lifecycle](#daemon-lifecycle-cenci-daemon-startstoprestartstatushook-healthmodel-switches) above.
 Until a window's next hook event the daemon does not track it, so the
-[finished-ticket window cleanup](#automatic-cleanup-of-finished-tickets) skips it.
+[finished-ticket window cleanup](#automatic-cleanup-of-finished-tickets) skips a window that
+is still running. A retained window whose panes are all dead is the exception: it is found
+from tmux's own inventory without waiting for a hook event (see
+[Retained windows after SessionEnd or a restart](#retained-windows-after-sessionend-or-a-restart)).
 
 **Upgrading past the socket-directory nesting change**: sockets moved from
 `$XDG_RUNTIME_DIR/cenci*.sock` to `$XDG_RUNTIME_DIR/cenci/cenci*.sock`
