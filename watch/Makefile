@@ -32,8 +32,8 @@ test-plugins:
 	./plugin/opencode/test.sh
 
 # Manifest validation and the mods-module tests for the Claude Code plugin
-# (hooks/register.test.ts, #1183). Not part of `test`: it needs the claude CLI,
-# so it prints SKIP when that is missing.
+# (hooks/register.test.ts, #1183, and hooks/measure.test.ts, #1451). Not part of
+# `test`: it needs the claude CLI, so it prints SKIP when that is missing.
 test-claude-plugin:
 	@if command -v claude >/dev/null 2>&1; then \
 		claude plugin validate ./plugin && claude plugin test ./plugin; \

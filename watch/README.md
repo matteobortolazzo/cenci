@@ -4111,6 +4111,35 @@ Maintainers run the module's `claude plugin test` and `claude plugin validate` c
 with `make -C watch test-claude-plugin`; the target prints `SKIP: claude not installed`
 when `claude` is missing.
 
+#### Native measurements in Claude Code (nativeMeasurements)
+
+The same mods module can send Claude Code's own context-window and rate-limit
+figures to the cenci daemon, which stores them display-only on the matching session
+(#1450). Nothing is read from the transcript and no credentials are touched.
+
+- **Enable or disable**: the plugin option `nativeMeasurements` (a boolean, default
+  `false`, so it is off until you opt in), independent of `statusCommand`. While it is
+  not exactly `true` the module registers no `session.measure` hook and starts no
+  process for measurements.
+- **Minimum Claude Code**: v2.1.319, the version the `session.measure` event and
+  `$.session.usage()` were verified against (see the evidence document).
+- **What is sent**: per `session.measure` event, the session id, the read time, the
+  context figures (`tokens`, `window`, `percent`) and each rate limit's `kind`,
+  `percent_used` and `resets_at`. No `cost` and nothing else leaves the module.
+- **No daemon autostart**: delivery goes through `hooks/measure.sh`, which runs the
+  hidden `cenci notify -agent claude -measurement` mode. With no daemon running the
+  sample is dropped and no daemon is started.
+- **`watch.excludeCwd`**: a sample from a session whose working directory is listed
+  there (see [Excluding headless probe sessions](#excluding-headless-probe-sessions-watchexcludecwd))
+  is not sent.
+- **Bounded and silent**: each send is bounded at 5 seconds, at most one send per
+  session is in flight and a newer sample replaces the one queued behind it. Failures
+  never show a toast, an error or a hook-health record, and never delay the session.
+
+Verified API facts, the producer contract and the evidence still required before native
+quota may control dispatch are in
+[claude-native-measurements.md](docs/claude-native-measurements.md).
+
 ### Machine-readable status for widgets (`cenci widget-json`)
 
 `cenci widget-json` connects to the daemon's broadcast socket, reads the current state, prints a single line of JSON in the [Waybar custom module protocol](https://github.com/Alexays/Waybar/wiki/Module:-Custom), and exits. This is the hidden plumbing subcommand every bar widget (Waybar itself, noctalia, DMS, GNOME Shell, KDE Plasma, macOS/SwiftBar) polls — it used to be named `cenci status` before `status` became the human-readable overview above. (`cenci waybar` remains a backwards-compatible hidden alias for `widget-json`.)

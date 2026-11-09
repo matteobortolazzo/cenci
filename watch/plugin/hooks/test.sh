@@ -21,8 +21,9 @@ CLIENT="claude"
 # client_extra_cases runs from test-common.sh just before its summary, with
 # every hh_* helper available. Claude Code only: the hooks.json contract (the
 # settings hooks stay byte-for-byte what they were, beside one `modules` entry
-# for the /cenci-status mods module) and the status.sh wrapper behind
-# /cenci-status (#1183).
+# for the /cenci-status mods module), the status.sh wrapper behind
+# /cenci-status (#1183) and the measure.sh wrapper behind nativeMeasurements
+# (#1451).
 client_extra_cases() {
   local notify_cmd session_cmd events ev expected actual
 
@@ -126,6 +127,81 @@ STUB
     hh_assert "$tag runs the plugin-local bin/cenci with 'status' ahead of CENCI_BIN" \
       test "$HH_RC" -eq 0 -a "$(cat "$HH_OUT")" = "daemon: local" -a \
       "$(cat "$calls" 2>/dev/null)" = "$(printf 'argc=1\nstatus')"
+    hh_assert "$tag never runs the CENCI_BIN stub when bin/cenci exists" \
+      test ! -e "$HH_TMPD/env-called"
+
+    # --- measure.sh (the nativeMeasurements wrapper, #1451) -----------------------
+    # It copies status.sh's resolution and `exec`s `cenci notify -agent claude
+    # -measurement` with its stdin passed through untouched. The payload is never
+    # an argument, so cost-bearing or session text never reaches a process list.
+    tag="[$shell][measure.sh]"
+
+    hh_assert "$tag the wrapper is shipped next to status.sh and executable" \
+      test -x "$DIR/measure.sh"
+
+    # No binary anywhere: exit 127, the reason on stderr, nothing on stdout, and
+    # no hook-health record (measure.sh is not a settings hook).
+    hh_setup "$shell" measure-nobin
+    printf '%s' '{"cwd":"/work","measurement":{}}' >"$HH_TMPD/payload"
+    hh_env "$HH_ROOT/hooks/measure.sh" <"$HH_TMPD/payload" >"$HH_OUT" 2>"$HH_ERR"
+    HH_RC=$?
+    hh_assert "$tag exits 127 when no binary resolves" test "$HH_RC" -eq 127
+    hh_assert "$tag says 'cenci binary not found' on stderr when no binary resolves" \
+      grep -q "cenci binary not found" "$HH_ERR"
+    hh_assert "$tag prints nothing on stdout when no binary resolves" test ! -s "$HH_OUT"
+    hh_assert "$tag writes no hook-health record when no binary resolves" \
+      test ! -e "$HH_STATE/cenci"
+
+    # CENCI_BIN reaches a working binary: exactly `notify -agent claude
+    # -measurement` (argc 4), stdin forwarded byte for byte (no trailing newline,
+    # multi-byte and escaped characters included).
+    hh_setup "$shell" measure-envbin
+    calls="$HH_TMPD/env-calls"
+    printf '%s' '{"cwd":"/work/caf'"$(printf '\303\251')"'","measurement":{"kind":"a\\nb"}}' >"$HH_TMPD/payload"
+    cat >"$HH_STUBS/env-cenci" <<STUB
+#!/bin/sh
+[ "\$1" = "--version" ] && exit 0
+printf 'argc=%s\n' "\$#" >>"$calls"
+for a in "\$@"; do printf '%s\n' "\$a" >>"$calls"; done
+cat >"$HH_TMPD/stdin-seen"
+STUB
+    chmod +x "$HH_STUBS/env-cenci"
+    hh_env CENCI_BIN="$HH_STUBS/env-cenci" "$HH_ROOT/hooks/measure.sh" <"$HH_TMPD/payload" >"$HH_OUT" 2>"$HH_ERR"
+    HH_RC=$?
+    hh_assert "$tag exits 0 when a CENCI_BIN stub answers" test "$HH_RC" -eq 0
+    hh_assert "$tag runs the CENCI_BIN stub with exactly 'notify -agent claude -measurement'" \
+      test "$(cat "$calls" 2>/dev/null)" = "$(printf 'argc=4\nnotify\n-agent\nclaude\n-measurement')"
+    hh_assert "$tag forwards stdin to the stub byte for byte" \
+      cmp -s "$HH_TMPD/payload" "$HH_TMPD/stdin-seen"
+    hh_assert "$tag stays silent on stdout and stderr when a CENCI_BIN stub answers" \
+      test ! -s "$HH_OUT" -a ! -s "$HH_ERR"
+
+    # The plugin-local bin/cenci wins over CENCI_BIN.
+    hh_setup "$shell" measure-localbin
+    mkdir -p "$HH_ROOT/bin"
+    calls="$HH_TMPD/local-calls"
+    printf '%s' '{"cwd":"/work","measurement":{}}' >"$HH_TMPD/payload"
+    cat >"$HH_ROOT/bin/cenci" <<STUB
+#!/bin/sh
+[ "\$1" = "--version" ] && exit 0
+printf 'argc=%s\n' "\$#" >>"$calls"
+for a in "\$@"; do printf '%s\n' "\$a" >>"$calls"; done
+cat >"$HH_TMPD/stdin-seen"
+STUB
+    chmod +x "$HH_ROOT/bin/cenci"
+    cat >"$HH_STUBS/env-cenci" <<STUB
+#!/bin/sh
+[ "\$1" = "--version" ] && exit 0
+printf 'called\n' >>"$HH_TMPD/env-called"
+STUB
+    chmod +x "$HH_STUBS/env-cenci"
+    hh_env CENCI_BIN="$HH_STUBS/env-cenci" "$HH_ROOT/hooks/measure.sh" <"$HH_TMPD/payload" >"$HH_OUT" 2>"$HH_ERR"
+    HH_RC=$?
+    hh_assert "$tag runs the plugin-local bin/cenci with 'notify -agent claude -measurement' ahead of CENCI_BIN" \
+      test "$HH_RC" -eq 0 -a \
+      "$(cat "$calls" 2>/dev/null)" = "$(printf 'argc=4\nnotify\n-agent\nclaude\n-measurement')"
+    hh_assert "$tag forwards stdin to the plugin-local binary byte for byte" \
+      cmp -s "$HH_TMPD/payload" "$HH_TMPD/stdin-seen"
     hh_assert "$tag never runs the CENCI_BIN stub when bin/cenci exists" \
       test ! -e "$HH_TMPD/env-called"
   done
