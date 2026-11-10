@@ -35,8 +35,9 @@ import (
 //     selected). Detection is never gated on the markers existing.
 //  5. The dotnet fragment's "ARG DOTNET_SDK_VERSION=" value (and the optional
 //     auto-detect-failure comment SKILL.md inserts right after it) is
-//     normalized before comparing — the one false positive that would sink
-//     the feature. No other ARG line is touched.
+//     normalized before comparing. The Node fragment's ARG NODE_MAJOR=
+//     default is also normalized to allow per-repo runtime requirements.
+//     No other ARG line is touched.
 
 const (
 	managedBeginMarker = "# cenci:managed-begin"
@@ -46,6 +47,9 @@ const (
 	fragmentMarkerEndPrefix   = "# cenci:fragment-end "
 
 	bannerLinePrefix = "# ── " // "# ── " — sandbox/fragments/*.dockerfile's title banner
+
+	nodeArgPrefix         = "ARG NODE_MAJOR="
+	nodeNormalizedArgLine = "ARG NODE_MAJOR=<normalized>"
 
 	dotnetArgPrefix         = "ARG DOTNET_SDK_VERSION="
 	dotnetNormalizedArgLine = "ARG DOTNET_SDK_VERSION=<normalized>"
@@ -208,8 +212,10 @@ func selectedRegion(block string, f fragment) (region string, selected bool) {
 	return "", false
 }
 
-// normalizeManagedContent narrowly normalizes exactly the dotnet fragment's
-// substituted line (constraint 5): the "ARG DOTNET_SDK_VERSION=" value is a
+// normalizeManagedContent narrowly normalizes the Node major default and the
+// dotnet fragment's substituted line (constraint 5). NODE_MAJOR may be pinned
+// to a repo's required runtime instead of the installed fragment default.
+// The "ARG DOTNET_SDK_VERSION=" value is a
 // per-repo substitution made by /cenci:configure (SKILL.md's ".NET version
 // substitution"), never verbatim in a per-repo block, so it must not be
 // compared literally. The auto-detect-failure comment SKILL.md:499 inserts
@@ -221,6 +227,10 @@ func normalizeManagedContent(content string) string {
 	out := make([]string, 0, len(lines))
 	for _, line := range lines {
 		if line == dotnetAutoDetectComment {
+			continue
+		}
+		if strings.HasPrefix(line, nodeArgPrefix) {
+			out = append(out, nodeNormalizedArgLine)
 			continue
 		}
 		if strings.HasPrefix(line, dotnetArgPrefix) {

@@ -687,3 +687,47 @@ func TestEngineWarnFragmentDrift_DockerfileUnreadablePermissions_OneWarningBuild
 		t.Errorf("expected the warning to name the failing probe (.cenci/Dockerfile), got:\n%s", warning)
 	}
 }
+
+// Exercise the on-disk detector with both supported fragment selection formats.
+// A runtime override must not hide changes to the rest of the recipe.
+func TestDetectFragmentDrift_NodeVersionOverride(t *testing.T) {
+	installed := "ARG NODE_MAJOR=24\n\nUSER root\n# ── Node.js + npm ──\nRUN install-node ${NODE_MAJOR}\nARG OTHER_VERSION=1\nUSER dev\n"
+	overridden := strings.Replace(installed, "NODE_MAJOR=24", "NODE_MAJOR=26", 1)
+	for _, marked := range []bool{false, true} {
+		for _, tt := range []struct {
+			name      string
+			content   string
+			wantDrift bool
+		}{
+			{"version only", overridden, false},
+			{"changed command", strings.Replace(overridden, "RUN install-node", "RUN different-install", 1), true},
+			{"unrelated ARG", strings.Replace(overridden, "OTHER_VERSION=1", "OTHER_VERSION=2", 1), true},
+			{"similar ARG name", strings.Replace(overridden, "ARG NODE_MAJOR=26", "ARG NODE_MAJOR_EXTRA=26", 1), true},
+			{"missing ARG", strings.Replace(overridden, "ARG NODE_MAJOR=26\n", "", 1), true},
+		} {
+			format := "legacy/"
+			if marked {
+				format = "marked/"
+			}
+			t.Run(format+tt.name, func(t *testing.T) {
+				assetDir := writeFragmentAssetFixture(t, fragmentFixture{"node.dockerfile", installed})
+				content := tt.content
+				if marked {
+					content = "# cenci:fragment-begin node\n" + content + "# cenci:fragment-end node\n"
+				}
+				repoRoot := writeRepoDockerfile(t, managedBlock(content))
+				drifted, err := detectFragmentDrift(assetDir, repoRoot)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if tt.wantDrift {
+					if len(drifted) != 1 || drifted[0] != "node" {
+						t.Fatalf("expected node drift, got %v", drifted)
+					}
+				} else if len(drifted) != 0 {
+					t.Fatalf("expected no drift for Node version override, got %v", drifted)
+				}
+			})
+		}
+	}
+}
