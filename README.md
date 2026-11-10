@@ -69,7 +69,7 @@ isolation, monitoring, portable conventions, and PR babysitting.
 
 The current installer reconciles all three internal components; you can use only the
 outcomes you need. Selective installation and installed-set-preserving updates are the
-ordered [2.1 milestone](https://github.com/matteobortolazzo/cenci/milestone/2), tracked
+ordered [sandbox setup milestone](https://github.com/matteobortolazzo/cenci/milestone/21), tracked
 by [#938](https://github.com/matteobortolazzo/cenci/issues/938).
 
 Those outcomes are built from three cooperating layers:
@@ -166,8 +166,8 @@ Automatic planning and merging are off by default and independently reversible.
 Refinement applies after its questions are settled; optional final review and
 eligible per-ticket merge grants are separate configure choices. Merge grants are
 off by default and still subject to the repository policy and supervisor checks.
-The [3.0 Trusted autonomy
-milestone](https://github.com/matteobortolazzo/cenci/milestone/9) tracks the remaining
+The [reliable delivery
+milestone](https://github.com/matteobortolazzo/cenci/milestone/20) tracks the remaining
 correctness and authorization hardening before this becomes the recommended default
 for unattended work.
 
