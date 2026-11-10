@@ -1,89 +1,125 @@
 # cenci roadmap
 
-cenci is one product with three cooperating layers: Watch makes sessions visible,
-Sandbox contains full-permission execution, and Flow adds the guarded GitHub delivery
-workflow. Users can stop after any outcome; unattended dispatch and automerge are an
-explicit final step, not an installation side effect.
+Finish cenci's current Claude/Codex workflow on tmux, then evaluate Herdr as a
+second terminal runtime. Tmux remains supported throughout that work.
 
-GitHub milestones are the authoritative work queues. Their P1–P4 prefixes show the
-intended priority; dependencies can cross milestone boundaries and still take precedence.
-An umbrella issue tracks its children and is not a second unit of work. Each implementation
-ticket delivers one PR.
+The owner-authorized [2026-11-10 reset](roadmap-reset-2026-11-10.md) replaces the
+parallel P1–P4 and Later queues. Historical milestones are archived, not declared
+completed releases. Dropped work is closed as **not planned**, with its original
+scope and the reason retained.
 
 ## Delivery order
 
-| Order | Milestone | Outcome |
+Only the first unfinished stage is the active delivery queue. Finish its stated
+outcome before starting the next stage; a milestone percentage is not acceptance.
+Existing dependency chains still order work within each stage.
+
+| Stage | Milestone | Exit outcome |
 |---|---|---|
-| P1 | [Safe execution and reliable Codex workflows](https://github.com/matteobortolazzo/cenci/milestone/17) | Close shared capability, sandbox-fallback, and container-resource gaps; deliver native Codex planning, recovery, guards, repair, and end-to-end acceptance |
-| P2 | [Lean workflows and reliable recovery](https://github.com/matteobortolazzo/cenci/milestone/13) | Reduce unnecessary questions while preserving material decisions; repair stage/label and checkpoint recovery |
-| P3 | [Pipeline efficiency and maintainability](https://github.com/matteobortolazzo/cenci/milestone/14) | Reduce measured context use, repeated verification, and duplicated guidance without weakening correctness |
-| P4 | [Runtime reliability and daily usability](https://github.com/matteobortolazzo/cenci/milestone/15) | Improve daemon startup, diagnostics, health gates, sandbox usability, and the dedicated tmux workspace |
-| Later | [Optional capabilities and advanced hardening](https://github.com/matteobortolazzo/cenci/milestone/16) | Unscheduled selective setup, enterprise connectivity, stacked delivery, optional integrations, and additional trust hardening |
-| Owner opt-in | [Deferred — OpenCode](https://github.com/matteobortolazzo/cenci/milestone/18) | OpenCode-only work is paused with no due date; resume only when the owner decides it is worth pursuing |
+| 1 | [Finish planned work and tmux baseline](https://github.com/matteobortolazzo/cenci/milestone/19) | The three saved plans, current tmux integration, instruction-file correctness and missing native measurement evidence are finished and verified |
+| 2 | [Verify reliable Claude and Codex delivery](https://github.com/matteobortolazzo/cenci/milestone/20) | Installed ticket-to-PR workflows, feedback handling, capacity and recovery are demonstrated; retained authorization findings and native evidence are resolved |
+| 3 | [Finish everyday sandbox setup](https://github.com/matteobortolazzo/cenci/milestone/21) | Selective installation/provisioning and approved host inheritance work; supported authentication behavior and its limits are established |
+| 4 | [Prove Herdr alongside tmux](https://github.com/matteobortolazzo/cenci/milestone/22) | A bounded runtime-contract/mobile pilot yields evidence and a proceed/defer decision before implementation is expanded |
 
-Work follows the dependency chains in milestone descriptions and native issue links;
-independent tickets may proceed together. For example, P1's Codex acceptance consumes
-the shared stage/label recovery fixes in P2. Later is not a promised release, and
-`Followup` remains an untriaged capture label rather than a release gate.
+These are scheduling gates, not new daemon behavior. Milestone numbers alone do
+not constrain dispatch. On an automated runner, use the existing machine-local
+`dispatch.repos[].filters.milestones` to select the active milestone (initially
+`[19]`), then advance it after acceptance. See
+[the machine-local filters reference](../watch/README.md#machine-local-filters).
+This reset changes no machine configuration, enrollment, merge grant or running
+worker. The Herdr investigation also has native issue blockers on the retained
+top-level work.
 
-The previous [Babysit works end to end](https://github.com/matteobortolazzo/cenci/milestone/12)
-milestone is complete and closed. That records delivery of its scoped tickets, not a
-claim that every client adapter or deferred trust-hardening item is complete.
+Parent trackers are not extra implementation PRs. Their children being closed
+does not prove acceptance: inspect merged work and missing native evidence before
+closing a parent. New bugs can enter the relevant stage; optional ideas do not
+automatically extend its exit criteria or recreate a Later queue.
 
-## Current delivery groups
+## Stage 1: finish work already in hand
 
-- Codex: [#1191](https://github.com/matteobortolazzo/cenci/issues/1191) agent configuration,
-  [#1193](https://github.com/matteobortolazzo/cenci/issues/1193) runtime/recovery,
-  [#1190](https://github.com/matteobortolazzo/cenci/issues/1190) watch lifecycle,
-  [#1041](https://github.com/matteobortolazzo/cenci/issues/1041) guards, and
-  [#1156](https://github.com/matteobortolazzo/cenci/issues/1156) repair feed
-  [#1196](https://github.com/matteobortolazzo/cenci/issues/1196) native acceptance.
-- Lean planning: [#1199](https://github.com/matteobortolazzo/cenci/issues/1199)
-  consolidates #1070/#1071; broader decide-and-notify policy remains #1131.
-- Health gates: [#1200](https://github.com/matteobortolazzo/cenci/issues/1200)
-  consolidates #992/#993. Sandbox forwarding: [#1201](https://github.com/matteobortolazzo/cenci/issues/1201)
-  consolidates #1012/#1015 before the separate user-configuration feature #1016.
-- The workspace migration remains under [#646](https://github.com/matteobortolazzo/cenci/issues/646).
-  Reaper safety (#1007) is complete; #645 and #1008 precede #1009, then #1010 integrates
-  the result. #1008 still needs its explicit socket-security decision.
-- Existing parents #938 (installer selection), #939 (plugin provisioning), and #1100
-  (pipeline token usage) retain their child scopes. Grouping does not turn them into
-  additional implementation PRs.
-- OpenCode is temporarily disabled by [#1219](https://github.com/matteobortolazzo/cenci/issues/1219).
-  Host registration (#1018), skill distribution (#1217), diagnostics (#1220), provisioning
-  (#1221), and re-enablement (#1222) are deferred. Shared safety (#1019/#1214/#1215),
-  diagnostics polish (#762), and Claude/Codex provisioning (#1003) keep their milestones.
+- Preserve saved plans [#1509](https://github.com/matteobortolazzo/cenci/issues/1509),
+  [#1510](https://github.com/matteobortolazzo/cenci/issues/1510) and
+  [#1472](https://github.com/matteobortolazzo/cenci/issues/1472).
+  Run #1510's attended configure evidence after #1509's classifier fix.
+  Parent [#1182](https://github.com/matteobortolazzo/cenci/issues/1182) retains
+  its acceptance requirements.
+- Finish [#1433](https://github.com/matteobortolazzo/cenci/issues/1433), then audit
+  [#646](https://github.com/matteobortolazzo/cenci/issues/646)'s dedicated-socket
+  workspace outcome. Repair host Codex association in
+  [#1514](https://github.com/matteobortolazzo/cenci/issues/1514).
+- Record [#1184](https://github.com/matteobortolazzo/cenci/issues/1184)'s missing
+  live measurement evidence. Its code children are merged; parent acceptance
+  remains incomplete. Resolve current maintenance drift
+  [#1511](https://github.com/matteobortolazzo/cenci/issues/1511).
+- Retained-window cleanup [#1458](https://github.com/matteobortolazzo/cenci/issues/1458)
+  shipped in [#1515](https://github.com/matteobortolazzo/cenci/pull/1515) during
+  this reset. It is not remaining work.
 
-## Available now
+## Stage 2: demonstrate reliable delivery
 
-- One verified installer and updater for Claude Code, Codex, or a dual-client setup
-- Docker/Podman isolation with per-repository mounts and tailored images
-- Claude Code's gated ticket-to-reviewed-PR workflow
-- Native Claude Code and Codex monitoring
-- tmux and optional Linux desktop/macOS menu-bar status surfaces; no board required
-- Persisted-plan handoff, planned-ticket pickup, capacity gates, and reconciliation
-- Client-neutral persistent PR babysitting, subject to each client's corrective-workflow capability
-- On-demand maintenance of workflow structure, documentation, client adapters, and rules
+The Claude rollout chain is #1472 → #1469 → #1475 → #1026, tracked by
+[#1463](https://github.com/matteobortolazzo/cenci/issues/1463).
+Keep that scope; do not create another overlapping rollout epic.
 
-## Capability boundaries
+Codex evidence follows #1395 → #1397 under #1193, and #1396 → #1398 under #1156.
+[#1196](https://github.com/matteobortolazzo/cenci/issues/1196) consumes those
+results for native end-to-end acceptance. The Claude pilot need not wait for
+Codex-only evidence, but both are required before this stage is complete.
 
-- The installer currently reconciles all three components. Selective installation is
-  deferred under [#938](https://github.com/matteobortolazzo/cenci/issues/938).
-- The complete interactive ticket-to-PR path is stable for Claude Code. Codex has the
-  native workflow foundation but remains in behavioral end-to-end acceptance.
-- OpenCode is temporarily disabled. New sessions, workflows, dispatch, babysit,
-  installation, and updates refuse; existing resources remain available for diagnosis,
-  stopping, and cleanup. Implementation is retained for an owner-authorized restart.
-- Full autonomy remains an advanced opt-in. P1/P2 address current execution and
-  recovery gaps; additional trust hardening remains explicitly deferred in Later.
-  Every switch remains off by default and the per-ticket merge grant remains explicit.
-- GitHub is the workflow, dispatch, and automerge host today. Watch and Sandbox are the
-  layers intended to grow corporate/Azure DevOps connectivity first.
-- Ordered split children are serialized: every PR targets `main`, and a child cannot
-  start until its blocker merges. Stacked delivery (#1061–#1067) is deferred, with
-  adoption still gated on GitHub's feature leaving public preview. Its spike must
-  verify the then-current availability and squash/retarget behavior before implementation;
-  scheduling must also account for the gate and merge hardening it depends on.
+Retained authorization, policy and recovery findings are listed in the
+[reset record](roadmap-reset-2026-11-10.md#stage-2). Revalidate old implementation
+details during refinement. Resolve the relevant findings before final
+eligible-automerge acceptance; a milestone move is not a security waiver.
+The already-built Azure identity still needs owner-run staging evidence in
+#1408 under #1210.
 
-Small bugs and maintenance work stay in the issue tracker rather than being repeated
-here. A user-visible claim moves sections only when the shipped behavior changes.
+## Stage 3: finish daily sandbox use
+
+- Selective host installation: #1004 → #1005 → #1006, tracked by #938.
+- In-container plugin selection: #1003 completes #939.
+- Host inheritance: #1516 supplies the shared policy/content contract, then
+  #1517 (preferences), #1518 (versions) and #1519 (plugins). #1519 also needs #1003.
+- #1520 investigates supported authentication lifecycle options. An evidenced
+  conclusion that seamless shared login is unsupported is a valid investigation
+  result; it does not authorize a custom credential broker or promise a feature.
+
+Keep the container boundary and per-client compatibility requirements. Private
+company sources, enterprise proxy/CA expansion and Azure DevOps credential
+brokerage are not scheduled baseline requirements.
+
+## Stage 4: prove Herdr before expanding scope
+
+[#1524](https://github.com/matteobortolazzo/cenci/issues/1524) owns one bounded
+design and compatibility pilot after the preceding stages are accepted. It
+evaluates a backend-neutral launch/lifecycle contract and a Herdr implementation
+path while keeping tmux as a supported backend.
+
+Cenci retains workflow policy, ticket/PR state and sandbox isolation. Runtime
+backends supply launch, stable identity, inspection, attach/focus and stop.
+Backend selection applies to new launches; existing runs retain their backend.
+Unknown or unreachable runtime state is never proof that a run exited.
+
+Demonstrate ticket → sandboxed agent → phone interaction → PR/check visibility →
+cleanup, including disconnect/reconnect and partial launch failures. Verify
+desktop/mobile capabilities rather than assuming mods are webviews or
+automatically work on phones.
+
+Only then scope the necessary implementation tickets. PR-review views, Actions
+views and Azure alert dashboards are possible subsequent integrations, not
+precommitted prerequisites or claimed Herdr features.
+
+## Scope retained and retired
+
+Claude Code and Codex remain the selected clients. OpenCode stays disabled;
+its unscheduled re-enablement tickets are archived without removing retained
+implementation. Reopening it requires an explicit owner decision.
+
+Stacked PR delivery, the Paseo experiment, separate optional status surfaces,
+cosmetic plan relocation, speculative testing MCPs and optional installer/repair
+refactors are not scheduled. Shipped improvements remain. No closure in this
+reset claims an unperformed experiment passed.
+
+The [issue-by-issue record](roadmap-reset-2026-11-10.md) is the audit trail; live
+milestones are the current queues. Operational capabilities and limits remain
+documented in [getting started](getting-started.md) and
+[the autonomous loop](autonomous-loop.md).

@@ -22,7 +22,7 @@ its three internal components for every supported client it detects.
 The installer does not offer component selection yet: it reconciles all three and you
 use only the layers you need. Selective installation is tracked in
 [#938](https://github.com/matteobortolazzo/cenci/issues/938) and sequenced in milestone
-[2.1 — Selective setup](https://github.com/matteobortolazzo/cenci/milestone/2).
+[3 — Finish everyday sandbox setup](https://github.com/matteobortolazzo/cenci/milestone/21).
 
 ## 1. Prerequisites
 
@@ -279,8 +279,8 @@ per-ticket merge grant stays a human decision.
 [The autonomous loop](autonomous-loop.md) has the switch table, a quick start with
 working config for both `~/.config/cenci/config.json` and the repo's
 `.cenci/config.json`, what still stops the machine, and how to read a held-merge log
-line. Treat it as an advanced opt-in while the [3.0 Trusted autonomy
-milestone](https://github.com/matteobortolazzo/cenci/milestone/9) closes the remaining
+line. Treat it as an advanced opt-in while the [reliable delivery
+milestone](https://github.com/matteobortolazzo/cenci/milestone/20) closes the remaining
 correctness and authorization gaps.
 
 ## Selective adoption
@@ -308,11 +308,12 @@ to the host `opencode.json`. If that file still grants global allow-all permissi
 yourself. cenci never edits the file, and its sandbox permission seeding stays
 container-only.
 
-OpenCode-only fixes and scope extracted from shared tickets are parked in the
-[owner-opt-in milestone](https://github.com/matteobortolazzo/cenci/milestone/18),
-with no due date. Re-enablement is tracked by
-[#1222](https://github.com/matteobortolazzo/cenci/issues/1222) and requires an explicit
-owner decision. Shared Claude/Codex work continues in its existing milestones.
+OpenCode-only fixes and re-enablement proposals are archived as not planned in the
+[historical owner-opt-in milestone](https://github.com/matteobortolazzo/cenci/milestone/18).
+The original re-enablement scope remains in
+[#1222](https://github.com/matteobortolazzo/cenci/issues/1222); reopening it requires
+an explicit owner decision. Shared Claude/Codex work follows the
+[current roadmap](roadmap.md).
 
 ## Update
 
