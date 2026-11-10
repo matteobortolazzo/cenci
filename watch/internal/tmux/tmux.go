@@ -179,10 +179,10 @@ func (c *ExecClient) KillWindow(socket, target string) error {
 }
 
 // ErrWindowGone marks a tmux target (window or session) that no longer exists:
-// KillWindow and ListWindowPaneProcs wrap it when tmux's stderr says it cannot
-// find the window, session or pane. Every other tmux failure (no server, a protocol
-// mismatch, a timeout) stays a plain error so a real problem is never read as
-// "already closed".
+// KillWindow, ListWindowPaneProcs and ReadCleanupWindow wrap it when tmux's
+// stderr says it cannot find the window, session or pane. Every other tmux
+// failure (no server, a protocol mismatch, a timeout) stays a plain error so a
+// real problem is never read as "already closed".
 var ErrWindowGone = errors.New("tmux window is gone")
 
 // missingTargetMessages are the tmux stderr texts for a window or session that
@@ -240,34 +240,44 @@ func windowCmd(socket string, args ...string) (string, error) {
 
 // PaneProc is one pane of a window as ListWindowPaneProcs reads it: the raw,
 // unvalidated tmux fields. The launch options are empty for a pane that never
-// had them set.
+// had them set. PaneDead is tmux's own #{pane_dead} ("1" once the pane's process
+// has exited and tmux kept the pane, "0" while it runs), carried verbatim: the
+// caller decides what any other value means.
 type PaneProc struct {
-	PaneID, PanePID, LaunchID, Container, Runtime string
+	PaneID, PanePID, PaneDead, LaunchID, Container, Runtime string
 }
 
 // paneProcFormat is the `list-panes -F` format ListWindowPaneProcs requests for
-// the options: five TAB-separated columns, matching PaneProc's fields in order.
+// the options: five TAB-separated columns (the pane id and pid, then the three
+// launch options in PaneProc's order). pane_dead is not here: it comes from the
+// tmux-owned listing.
 const paneProcFormat = "#{pane_id}\t#{pane_pid}\t#{@cenci-launch-id}\t#{@cenci-container}\t#{@cenci-runtime}"
 
 // paneOwnedFormat lists only the fields tmux itself owns. No pane option can put
 // a newline or tab into them, so this listing is the authority on which
-// (pane_id, pane_pid) pairs exist.
-const paneOwnedFormat = "#{pane_id}\t#{pane_pid}"
+// (pane_id, pane_pid) pairs exist and on whether each pane is dead (#1458).
+const paneOwnedFormat = "#{pane_id}\t#{pane_pid}\t#{pane_dead}"
 
-// paneProcFields is the column count of paneProcFormat.
-const paneProcFields = 5
+// paneProcFields is the column count of paneProcFormat; paneOwnedFields that of
+// paneOwnedFormat.
+const (
+	paneProcFields  = 5
+	paneOwnedFields = 3
+)
 
 // ListWindowPaneProcs lists the panes of the window at target with their pid
 // and recorded launch options, against the same server KillWindow targets (the
 // ambient one for an empty socket). It returns the raw fields: validating their
-// values is the caller's job. A missing target wraps ErrWindowGone.
+// values (pane_dead included) is the caller's job. A missing target wraps
+// ErrWindowGone.
 //
 // The options are user-writable and printed raw, so a newline or tab inside one
 // can forge extra, well-formed five-field rows with an attacker-chosen pane_pid.
-// The window is therefore listed twice: once for tmux's own fields alone, then
-// with the options. An option row is trusted only if its (pane_id, pane_pid)
-// matches a tmux-owned pair exactly and its pane_id appears once in both
-// listings. Every other row (forged, mismatched, duplicated, malformed) is
+// The window is therefore listed twice: once for tmux's own fields alone
+// (pane_id, pane_pid, pane_dead), then with the options. An option row is
+// trusted only if its (pane_id, pane_pid) matches a tmux-owned pair exactly and
+// its pane_id appears once in both listings; the accepted pane carries the
+// tmux-owned pane_dead. Every other row (forged, mismatched, duplicated, malformed) is
 // dropped, and so is a tmux-owned pane left without a trusted row; each is
 // reported in the returned error alongside the panes that did pass, so one bad
 // row neither hides nor shields its siblings. Only the trailing newline is
@@ -289,18 +299,20 @@ func ListWindowPaneProcs(socket, target string) ([]PaneProc, error) {
 
 	var errs []error
 	ownedPID := map[string]string{}
+	ownedDead := map[string]string{}
 	ownedCount := map[string]int{}
 	var ownedOrder []string
 	for _, line := range strings.Split(ownedOut, "\n") {
-		id, pid, ok := strings.Cut(line, "\t")
-		if !ok || strings.Contains(pid, "\t") {
-			errs = append(errs, fmt.Errorf("tmux list-panes: unexpected line %q: want pane_id and pane_pid", line))
+		f := strings.Split(line, "\t")
+		if len(f) != paneOwnedFields {
+			errs = append(errs, fmt.Errorf("tmux list-panes: unexpected line %q: want pane_id, pane_pid and pane_dead", line))
 			continue
 		}
+		id := f[0]
 		if ownedCount[id] == 0 {
 			ownedOrder = append(ownedOrder, id)
 		}
-		ownedPID[id] = pid
+		ownedPID[id], ownedDead[id] = f[1], f[2]
 		ownedCount[id]++
 	}
 
@@ -327,6 +339,7 @@ func ListWindowPaneProcs(socket, target string) ([]PaneProc, error) {
 		case ownedPID[r.PaneID] != r.PanePID:
 			errs = append(errs, fmt.Errorf("tmux list-panes: ignoring row for pane %q: pane_pid %q does not match tmux's own %q", r.PaneID, r.PanePID, ownedPID[r.PaneID]))
 		default:
+			r.PaneDead = ownedDead[r.PaneID]
 			panes = append(panes, r)
 			accepted[r.PaneID] = true
 		}
@@ -414,8 +427,12 @@ func readLivePanes() ([]LivePane, error) {
 }
 
 // isPaneID reports whether s is a tmux pane id: "%" and one or more ASCII digits.
-func isPaneID(s string) bool {
-	digits, ok := strings.CutPrefix(s, "%")
+func isPaneID(s string) bool { return isTmuxID(s, "%") }
+
+// isTmuxID reports whether s is prefix and one or more ASCII digits: the shape of
+// a tmux pane id ("%") and of a window id ("@").
+func isTmuxID(s, prefix string) bool {
+	digits, ok := strings.CutPrefix(s, prefix)
 	if !ok || digits == "" {
 		return false
 	}

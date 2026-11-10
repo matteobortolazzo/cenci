@@ -3,6 +3,9 @@
 package tmuxtest
 
 import (
+	"fmt"
+	"sync"
+
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/tmux"
 )
 
@@ -267,4 +270,184 @@ func (r *PaneOptionRecorder) Values() map[string]string {
 		out[c.Key] = c.Value
 	}
 	return out
+}
+
+// RetainedPane is one pane of a RetainedWindow.
+type RetainedPane struct {
+	ID   string
+	Dead bool
+}
+
+// RetainedWindow is one window of a RetainedServer: tmux's window id ("@N"), the
+// user-writable name and @cenci-repo-dir, and its panes.
+type RetainedWindow struct {
+	ID, Name, RepoDir string
+	Panes             []RetainedPane
+}
+
+// RetainedReadKind tells the two reads a RetainedServer serves apart.
+type RetainedReadKind string
+
+const (
+	// InventoryRead is a ListCleanupInventory call (pane is empty).
+	InventoryRead RetainedReadKind = "inventory"
+	// WindowRead is a ReadCleanupWindow call (the revalidation of one window).
+	WindowRead RetainedReadKind = "window"
+)
+
+// RetainedRead records one read of a RetainedServer.
+type RetainedRead struct {
+	Kind   RetainedReadKind
+	Socket string
+	// Pane is the pane id a WindowRead was asked for; empty for an InventoryRead.
+	Pane string
+}
+
+// RetainedServer is a fake for the retained-window readers
+// (tmux.ListCleanupInventory and tmux.ReadCleanupWindow): per-socket windows,
+// per-socket read errors, a call record, and a hook that runs before each read.
+// Its two methods are shaped to be installed in the daemon's cleanupInventory and
+// cleanupRevalidate seams, and a window on one socket is invisible to the others,
+// so the same %N on two sockets is two panes, as in real tmux. The empty socket
+// is the default server.
+//
+// Set the exported fields before the first read. To change the server while a
+// pass is running (a respawn, a rename), do it through Edit or AddWindow, which
+// are safe to call from BeforeRead or from another goroutine: the fake
+// snapshots a window under its own lock and never holds it across BeforeRead.
+type RetainedServer struct {
+	// Windows is the windows of each socket.
+	Windows map[string][]RetainedWindow
+	// Dropped is the per-socket list of dropped-row reports the inventory returns
+	// next to its windows: what the real reader reports for a malformed row, whose
+	// window it already left out of Windows.
+	Dropped map[string][]string
+	// InventoryErrs makes the inventory read of that socket fail (tmux.ErrNoServer
+	// for a socket with no server, any other error for an unreadable one).
+	InventoryErrs map[string]error
+	// ReadErrs makes the revalidation read of that socket fail with the given
+	// error (not tmux.ErrWindowGone: a missing pane already reports that).
+	ReadErrs map[string]error
+	// BeforeRead, when set, runs at the start of every read, outside the server's
+	// lock, with the read and the 1-based count of reads of that kind so far
+	// (across all sockets). It may mutate the server through Edit or block.
+	BeforeRead func(read RetainedRead, n int)
+
+	mu    sync.Mutex
+	reads []RetainedRead
+}
+
+// Edit runs fn with the server locked, so a test can change its fields while a
+// pass reads them.
+func (s *RetainedServer) Edit(fn func(s *RetainedServer)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	fn(s)
+}
+
+// AddWindow appends w to the windows of socket.
+func (s *RetainedServer) AddWindow(socket string, w RetainedWindow) {
+	s.Edit(func(s *RetainedServer) {
+		if s.Windows == nil {
+			s.Windows = map[string][]RetainedWindow{}
+		}
+		s.Windows[socket] = append(s.Windows[socket], w)
+	})
+}
+
+// Reads returns every read so far, in call order.
+func (s *RetainedServer) Reads() []RetainedRead {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]RetainedRead(nil), s.reads...)
+}
+
+// Count returns how many reads of kind were made so far.
+func (s *RetainedServer) Count(kind RetainedReadKind) int {
+	n := 0
+	for _, r := range s.Reads() {
+		if r.Kind == kind {
+			n++
+		}
+	}
+	return n
+}
+
+// InventorySockets returns the socket of each inventory read, in call order.
+func (s *RetainedServer) InventorySockets() []string {
+	var sockets []string
+	for _, r := range s.Reads() {
+		if r.Kind == InventoryRead {
+			sockets = append(sockets, r.Socket)
+		}
+	}
+	return sockets
+}
+
+// record notes a read and returns the count of reads of its kind so far.
+func (s *RetainedServer) record(r RetainedRead) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.reads = append(s.reads, r)
+	n := 0
+	for _, prev := range s.reads {
+		if prev.Kind == r.Kind {
+			n++
+		}
+	}
+	return n
+}
+
+func (s *RetainedServer) before(r RetainedRead, n int) {
+	if s.BeforeRead != nil {
+		s.BeforeRead(r, n)
+	}
+}
+
+func toCleanupWindow(w RetainedWindow) tmux.CleanupWindow {
+	out := tmux.CleanupWindow{WindowID: w.ID, Name: w.Name, RepoDir: w.RepoDir}
+	for _, p := range w.Panes {
+		out.Panes = append(out.Panes, tmux.CleanupPane{ID: p.ID, Dead: p.Dead})
+	}
+	return out
+}
+
+// ListCleanupInventory is the fake tmux.ListCleanupInventory for socket.
+func (s *RetainedServer) ListCleanupInventory(socket string) (tmux.CleanupInventory, error) {
+	read := RetainedRead{Kind: InventoryRead, Socket: socket}
+	s.before(read, s.record(read))
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.InventoryErrs[socket]; err != nil {
+		return tmux.CleanupInventory{}, err
+	}
+	var inv tmux.CleanupInventory
+	for _, w := range s.Windows[socket] {
+		inv.Windows = append(inv.Windows, toCleanupWindow(w))
+	}
+	inv.Dropped = append(inv.Dropped, s.Dropped[socket]...)
+	return inv, nil
+}
+
+// ReadCleanupWindow is the fake tmux.ReadCleanupWindow: the window of socket
+// that contains pane, or an error wrapping tmux.ErrWindowGone when no window of
+// that socket does.
+func (s *RetainedServer) ReadCleanupWindow(socket, pane string) (tmux.CleanupWindow, error) {
+	read := RetainedRead{Kind: WindowRead, Socket: socket, Pane: pane}
+	s.before(read, s.record(read))
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.ReadErrs[socket]; err != nil {
+		return tmux.CleanupWindow{}, err
+	}
+	for _, w := range s.Windows[socket] {
+		for _, p := range w.Panes {
+			if p.ID == pane {
+				return toCleanupWindow(w), nil
+			}
+		}
+	}
+	return tmux.CleanupWindow{}, fmt.Errorf("tmux list-panes: can't find pane: %s: %w", pane, tmux.ErrWindowGone)
 }

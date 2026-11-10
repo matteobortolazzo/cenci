@@ -327,8 +327,11 @@ window-cleanup pass is the backstop for when none is: every `-window-cleanup-int
 (default `2m`, `0` disables it) it closes the windows of tickets whose issue is closed or
 whose closing PR has merged, under the same busy and babysit guards. It is additive and
 idempotent alongside `cleanup`. A repo opts out with `windowCleanup.enabled: false` in
-`.cenci/config.json`. Windows without a recorded launch checkout, and windows the daemon
-has not seen a hook event from since its last restart, are skipped. See
+`.cenci/config.json`. Windows without a recorded launch checkout are skipped, and so is a
+running window the daemon has not seen a hook event from since its last restart. A
+retained window whose panes are all dead (for example under `remain-on-exit`, after
+`SessionEnd` or a daemon restart) is found from tmux's own inventory instead and is
+closed only on the same finished verdict. See
 [Automatic cleanup of finished tickets](../watch/README.md#automatic-cleanup-of-finished-tickets).
 
 The daemon reclaims disk the same way for worktrees: every `-worktree-cleanup-interval`

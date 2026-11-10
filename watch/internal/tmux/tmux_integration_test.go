@@ -2,10 +2,12 @@ package tmux
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -207,6 +209,122 @@ func TestSetPaneOptionFailsForAPaneThatDoesNotExist(t *testing.T) {
 
 	if err := SetPaneOption(socket, "%999", "@cenci-launch-id", "x"); err == nil {
 		t.Fatal("SetPaneOption on a nonexistent pane returned nil, want an error")
+	}
+}
+
+// newNamedWindow opens a detached window named name running command on a
+// scratch server and records repoDir as its @cenci-repo-dir (as `cenci run`
+// does), returning the window id and the pane id tmux gave it.
+func newNamedWindow(t *testing.T, run func(args ...string) string, name, repoDir, command string) (windowID, paneID string) {
+	t.Helper()
+	ids := strings.Fields(run("new-window", "-d", "-P", "-F", "#{window_id} #{pane_id}", "-t", "main:", "-n", name, command))
+	if len(ids) != 2 {
+		t.Fatalf("new-window printed %q, want a window id and a pane id", ids)
+	}
+	run("set-option", "-w", "-t", ids[0], "@cenci-repo-dir", repoDir)
+	return ids[0], ids[1]
+}
+
+// requirePaneDead polls until tmux reports the pane dead (remain-on-exit keeps
+// it listed once its command has exited).
+func requirePaneDead(t *testing.T, run func(args ...string) string, pane string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for strings.TrimSpace(run("display-message", "-p", "-t", pane, "#{pane_dead}")) != "1" {
+		if time.Now().After(deadline) {
+			t.Fatalf("pane %s never became dead", pane)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
+// TestRetainedWindowInventoryAgainstARealServer runs the whole retained-window
+// read path (#1458) on an isolated tmux server with remain-on-exit: a window
+// whose command has exited stays listed with every pane dead, the inventory and
+// the revalidation read agree on it, the real `pane_dead` prints exactly 0/1 so
+// a live window is never reported dead, and killing its pane id closes it. The
+// missing-pane wording is the one watch/docs/tmux.md calls unverified; this test
+// pins it on a machine that has tmux. Skipped when tmux is absent.
+func TestRetainedWindowInventoryAgainstARealServer(t *testing.T) {
+	requireTmux(t)
+
+	socket, _, run := startScratchServer(t, "main")
+	run("set-option", "-g", "remain-on-exit", "on")
+	retainedWin, retainedPane := newNamedWindow(t, run, "4242-implement", "/repo/retained", "true")
+	liveWin, livePane := newNamedWindow(t, run, "4243-implement", "/repo/live", "sleep 300")
+	requirePaneDead(t, run, retainedPane)
+
+	inv, err := ListCleanupInventory(socket)
+	if err != nil {
+		t.Fatalf("ListCleanupInventory: %v", err)
+	}
+	if len(inv.Dropped) != 0 {
+		t.Errorf("dropped = %v, want a clean inventory from a real server", inv.Dropped)
+	}
+	byID := map[string]CleanupWindow{}
+	for _, w := range inv.Windows {
+		byID[w.WindowID] = w
+	}
+	retained, ok := byID[retainedWin]
+	if !ok {
+		t.Fatalf("inventory %+v has no window %s", inv.Windows, retainedWin)
+	}
+	wantRetained := CleanupWindow{WindowID: retainedWin, Name: "4242-implement", RepoDir: "/repo/retained", Panes: []CleanupPane{{ID: retainedPane, Dead: true}}}
+	if !reflect.DeepEqual(retained, wantRetained) {
+		t.Errorf("retained window = %+v, want %+v (@cenci-repo-dir resolves through the window listing)", retained, wantRetained)
+	}
+	live, ok := byID[liveWin]
+	if !ok {
+		t.Fatalf("inventory %+v has no window %s", inv.Windows, liveWin)
+	}
+	if live.AllDead() || live.Panes[0].Dead {
+		t.Errorf("live window = %+v, a running pane must never be reported dead", live)
+	}
+
+	// The revalidation read sees the same window as the inventory did.
+	got, err := ReadCleanupWindow(socket, retainedPane)
+	if err != nil {
+		t.Fatalf("ReadCleanupWindow: %v", err)
+	}
+	if !reflect.DeepEqual(got, retained) {
+		t.Errorf("revalidation = %+v, want the inventory's %+v", got, retained)
+	}
+
+	// The tmux-owned listing the process killer reads prints pane_dead as 0/1.
+	procs, err := ListWindowPaneProcs(socket, retainedPane)
+	if err != nil || len(procs) != 1 || procs[0].PaneDead != "1" {
+		t.Errorf("ListWindowPaneProcs(retained) = %+v, %v; want one pane with pane_dead 1", procs, err)
+	}
+	procs, err = ListWindowPaneProcs(socket, livePane)
+	if err != nil || len(procs) != 1 || procs[0].PaneDead != "0" {
+		t.Errorf("ListWindowPaneProcs(live) = %+v, %v; want one pane with pane_dead 0", procs, err)
+	}
+
+	// A pane that does not exist is gone, in tmux's real words.
+	_, err = ReadCleanupWindow(socket, "%9999")
+	if !errors.Is(err, ErrWindowGone) {
+		t.Errorf("ReadCleanupWindow(%%9999) err = %v, want errors.Is(err, ErrWindowGone)", err)
+	}
+	t.Logf("tmux's missing-pane error: %v", err)
+
+	// Killing the retained window by its pane id closes exactly that window.
+	if err := (&ExecClient{}).KillWindow(socket, retainedPane); err != nil {
+		t.Fatalf("KillWindow(%s): %v", retainedPane, err)
+	}
+	if _, err := ReadCleanupWindow(socket, retainedPane); !errors.Is(err, ErrWindowGone) {
+		t.Errorf("ReadCleanupWindow after the kill err = %v, want ErrWindowGone", err)
+	}
+	after, err := ListCleanupInventory(socket)
+	if err != nil {
+		t.Fatalf("ListCleanupInventory after the kill: %v", err)
+	}
+	for _, w := range after.Windows {
+		if w.WindowID == retainedWin {
+			t.Errorf("window %s is still listed after kill-window", retainedWin)
+		}
+	}
+	if _, err := ReadCleanupWindow(socket, livePane); err != nil {
+		t.Errorf("the live window did not survive the kill of the retained one: %v", err)
 	}
 }
 

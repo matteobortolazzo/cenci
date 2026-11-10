@@ -1655,20 +1655,35 @@ func TestLoop_WorktreeCleanupRunsOnlyOnItsOwnPositiveInterval(t *testing.T) {
 			fx.tracker.addWindow(999, "")
 			listsBefore := counter.lists.Load()
 
+			// Count the off-loop workers in flight: the loop's context bounds every worker,
+			// so stopping the loop cancels a step that is still running.
+			var workers atomic.Int32
+			startWorker := d.runOffLoop
+			d.runOffLoop = func(timeout time.Duration, fn func(ctx context.Context)) {
+				workers.Add(1)
+				startWorker(timeout, func(ctx context.Context) {
+					defer workers.Add(-1)
+					fn(ctx)
+				})
+			}
+
 			until := func() bool { return counter.lists.Load()-listsBefore >= wantSweeps }
 			if tc.wantRun {
-				until = func() bool { return !w.exists() }
+				// Done only once the remove step has finished, not when the directory
+				// disappears: the step is still deleting the admin dir and the branch
+				// then, and cancelling the loop would cancel it half way. A worker
+				// counted before the loop runs it makes the check race-free.
+				until = func() bool { return !w.exists() && workers.Load() == 0 }
 			}
 			runLoop(t, d, until, 10*time.Second)
 
 			if tc.wantRun {
-				// The loop stops as soon as the worktree directory is gone, while the remove
-				// step is still deleting the admin dir and the branch; let it report done
-				// before asserting and before the test's TempDir is cleaned up under it. The
-				// loop has exited, so worktreeInFlight can be read race-free.
-				for deadline := time.Now().Add(5 * time.Second); d.worktreeInFlight && len(d.worktreeRemoveDone) == 0; {
+				// A pass started between the removal and the loop's stop is cancelled with
+				// it; let it return before asserting and before the test's TempDir is
+				// cleaned up under it.
+				for deadline := time.Now().Add(5 * time.Second); workers.Load() != 0; {
 					if time.Now().After(deadline) {
-						t.Fatal("the remove step never reported done")
+						t.Fatal("a worker step was still running after the loop stopped")
 					}
 					time.Sleep(5 * time.Millisecond)
 				}

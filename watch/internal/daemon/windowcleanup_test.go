@@ -99,6 +99,8 @@ type wcFixture struct {
 	resolver *fakeResolver
 	fk       *fakeKiller // nil on the production-runner fixture
 	order    *killOrder  // nil on the production-runner fixture
+	runner   *syncOffLoop
+	rs       *tmuxtest.RetainedServer // nil until retained() installs it
 	windows  int
 }
 
@@ -108,8 +110,9 @@ type wcFixture struct {
 func newWCFixture(t *testing.T) *wcFixture {
 	t.Helper()
 	mc := &tmuxtest.MockClient{}
-	d := newTestDaemon(mc)
+	d, runner := newTestDaemonWithRunner(mc)
 	fx := newWCFixtureFor(t, d, mc)
+	fx.runner = runner
 	fx.fk = d.killer.(*fakeKiller)
 	fx.order = &killOrder{}
 	d.killer = &orderedWindowKiller{inner: fx.fk, order: fx.order}
@@ -181,12 +184,54 @@ func (fx *wcFixture) event(w wcWindow, eventType string) {
 }
 
 func (fx *wcFixture) deps() cleanupDeps {
-	return cleanupDeps{resolver: fx.d.newCleanupResolver(), enabled: fx.d.cleanupEnabled, reader: fx.d.cleanupReader}
+	return cleanupDeps{
+		resolver: fx.d.newCleanupResolver(), enabled: fx.d.cleanupEnabled, reader: fx.d.cleanupReader,
+		inventory: fx.d.cleanupInventory, verbose: fx.d.cfg.Verbose,
+	}
 }
 
-// evaluate runs the snapshot (loop side) and evaluate (worker side) steps.
+// evaluate runs the snapshot (loop side) and the worker's discover-and-evaluate
+// steps.
 func (fx *wcFixture) evaluate() windowCleanupResult {
-	return evaluateWindowCleanup(context.Background(), fx.deps(), fx.d.snapshotCleanupCandidates())
+	return runCleanupPass(context.Background(), fx.deps(), fx.d.snapshotCleanup())
+}
+
+// retained installs a RetainedServer as the daemon's inventory and revalidation
+// seams, so the pass also finds the windows tmux still holds that no session
+// tracks.
+func (fx *wcFixture) retained() *tmuxtest.RetainedServer {
+	fx.t.Helper()
+	fx.rs = &tmuxtest.RetainedServer{}
+	fx.d.cleanupInventory = fx.rs.ListCleanupInventory
+	fx.d.cleanupRevalidate = fx.rs.ReadCleanupWindow
+	return fx.rs
+}
+
+// addRetained puts a window of dead panes on socket in the fake tmux, with
+// tmux's own window id, and returns it as the wcWindow the pass must close: its
+// kill target is the lowest pane id.
+func (fx *wcFixture) addRetained(socket, windowID, name, repoDir string, paneIDs ...string) wcWindow {
+	fx.t.Helper()
+	w := tmuxtest.RetainedWindow{ID: windowID, Name: name, RepoDir: repoDir}
+	for _, id := range paneIDs {
+		w.Panes = append(w.Panes, tmuxtest.RetainedPane{ID: id, Dead: true})
+	}
+	fx.rs.AddWindow(socket, w)
+	return wcWindow{key: windowID, pane: paneIDs[0], index: windowID}
+}
+
+// startAndApply runs a pass through the production entry point: startWindowCleanup
+// on the loop, the worker on the synchronous runner, then the loop applying the
+// result it delivered.
+func (fx *wcFixture) startAndApply() {
+	fx.t.Helper()
+	fx.d.startWindowCleanup()
+	select {
+	case res := <-fx.d.cleanupResults:
+		fx.d.applyWindowCleanup(res)
+	default:
+		fx.t.Fatal("startWindowCleanup delivered no result")
+	}
 }
 
 // runPass runs one whole pass: snapshot, evaluate, apply.
