@@ -247,6 +247,10 @@ func TestDaemonRestart_StopsOldAndStartsNew(t *testing.T) {
 	// and the sandbox gate: a real installed unit must never be restarted here.
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	// Each daemon start runs an asynchronous orphan-reap pass. Keep that pass
+	// from resolving the runner's real container runtime: it can create
+	// root-owned Podman storage below HOME that t.TempDir cannot clean up.
+	t.Setenv("PATH", t.TempDir())
 	t.Setenv("CENCI_SANDBOX", "")
 	t.Setenv("CENCI_SOCKET_DIR", t.TempDir())
 	oldBg := startDaemonBackground(t)
