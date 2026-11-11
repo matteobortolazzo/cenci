@@ -465,8 +465,8 @@ Everything persists in the home volume — only needs to happen once per instanc
 
 | Tool | Version | Override / update |
 |------|---------|-------------------|
-| .NET SDK | 10.0.100 | `DOTNET_SDK_VERSION` |
-| Node.js | 24.x | `NODE_MAJOR` |
+| .NET SDK | 11.0.100 | `DOTNET_SDK_VERSION` |
+| Node.js | 26.x | `NODE_MAJOR` |
 | Go | 1.24.1 | `GO_VERSION` |
 | Playwright | 1.62.1 | `PLAYWRIGHT_VERSION` |
 | Codex CLI | verified latest in shared volume | `cenci sandbox update-agent --agent codex [--version X.Y.Z]` |

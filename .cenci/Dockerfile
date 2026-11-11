@@ -5,7 +5,7 @@ FROM cenci-sandbox-base:${BASE_VERSION}
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 # cenci:fragment-begin node
-ARG NODE_MAJOR=24
+ARG NODE_MAJOR=26
 
 USER root
 
