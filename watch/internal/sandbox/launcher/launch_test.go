@@ -51,7 +51,7 @@ func TestDefaultModel(t *testing.T) {
 		want  string
 	}{
 		{"claude", "sonnet"},
-		{"codex", "gpt-5.6-terra"},
+		{"codex", "gpt-6.1-terra"},
 		{"opencode", ""},
 	}
 	for _, tc := range cases {

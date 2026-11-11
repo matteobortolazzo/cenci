@@ -3275,12 +3275,12 @@ period on any host that keeps launching sandboxes — set
 | Shortcut | Agent | Model |
 |---|---|---|
 | `ch` / `cs` / `co` / `cf` | claude | haiku / sonnet / opus / fable |
-| `xl` / `xt` / `xa` / `xs` | codex | gpt-6-luna / gpt-5.6-terra / gpt-6-astra / gpt-6.1-sol |
+| `xl` / `xt` / `xa` / `xs` | codex | gpt-6-luna / gpt-6.1-terra / gpt-6-astra / gpt-6.1-sol |
 
 OpenCode is temporarily disabled; `--agent opencode` refuses, including dry runs.
 
 Without a shortcut or `--model`, the model defaults per agent (claude→`sonnet`,
-codex→`gpt-5.6-terra`, opencode→ no default, config-driven). A shortcut and a
+codex→`gpt-6.1-terra`, opencode→ no default, config-driven). A shortcut and a
 conflicting explicit `--agent` (e.g. `open ch --agent codex`) is a usage error
 rather than silently picking one; all usage errors (unknown flag, unknown
 verb, stray positional, conflicts) exit 2.

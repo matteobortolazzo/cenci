@@ -119,13 +119,14 @@ an existing agent file; the script skips it.
   applied to a newly created file only. If `install-agents.sh` exits 2 (a refusal; nothing was
   written), stop, report its refusal message, and re-ask the override question instead of continuing.
 - **Migration of old pins.** In Plan mode, run `sh "${PLUGIN_ROOT}/codex/install-agents.sh" .
-  --migrate-preview` (read-only) and show its `diff -u` output; it lists a role file only when
-  its `model` and `model_reasoning_effort` exactly match a default that role's template once
-  shipped, so a user-chosen pin or a file with no pin is never offered. Ask for approval per file
-  (also ID-less) and carry the approved role names in the plan artifact. In apply, run
-  `sh "${PLUGIN_ROOT}/codex/install-agents.sh" . --migrate-apply <role>...` for the approved
-  roles only; it removes exactly those two lines and refuses (exit 2, nothing written) a role that
-  is no longer eligible. A declined file stays byte-identical.
+  --migrate-preview` (read-only) and show its `diff -u` output in the plan; it lists a role file
+  only when its `model` and `model_reasoning_effort` exactly match a default that role's template
+  once shipped, so a user-chosen pin or a file with no pin is never listed. Do not ask: a listed
+  pin is a stale shipped default, so it is migrated to the latest (inherit). Carry the listed role
+  names in the plan artifact. In apply, run
+  `sh "${PLUGIN_ROOT}/codex/install-agents.sh" . --migrate-apply <role>...` for every listed
+  role; it removes exactly those two lines and refuses (exit 2, nothing written) a role that is no
+  longer eligible. On exit 2, stop and report the refusal message.
 - **Validate.** Then run `bash "${PLUGIN_ROOT}/codex/validate-agent-roles.sh" .codex/agents`, in
   addition to the existing read-only `--strict-config` Codex smoke check. Exit 3 means Python 3.11+
   with `tomllib` is missing or unusable (the validator printed `found: unusable`): report that

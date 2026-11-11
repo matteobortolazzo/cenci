@@ -257,8 +257,9 @@ skipped with a one-line stderr notice and exit 0. Configure asks one question pe
 (default: inherit) and passes the answers through this flag. Overrides live in the role TOML, not in
 `.cenci/config.json`.
 
-**Migration of old pins.** Earlier templates pinned a model and effort. An existing role file stays
-byte-identical unless the user approves a per-file migration during a configure re-run.
+**Migration of old pins.** Earlier templates pinned a model and effort. A configure re-run migrates
+every role file still carrying such a shipped pin to the latest default (inherit) without asking;
+every other existing role file stays byte-identical.
 `install-agents.sh --migrate-preview` is read-only and prints a `diff -u` for each file whose
 `model` and `model_reasoning_effort` exactly match a pair that role's template once shipped:
 `planner`, `implementer` and `critical-reviewer` `gpt-5.6` or `gpt-6.1-sol` with `high`;

@@ -45,7 +45,7 @@ var ClaudeModelShortcuts = map[string]string{
 // shortcuts: xl/xt/xa/xs select Codex with the luna/terra/astra/sol models.
 var CodexModelShortcuts = map[string]string{
 	"xl": "gpt-6-luna",
-	"xt": "gpt-5.6-terra",
+	"xt": "gpt-6.1-terra",
 	"xa": "gpt-6-astra",
 	"xs": "gpt-6.1-sol",
 }

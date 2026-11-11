@@ -52,7 +52,7 @@ func TestOpenAllShortcuts_AttachTheirAgentAndModel(t *testing.T) {
 		// it, so without the flag the cenci-watch hooks are silently skipped
 		// as "pending review" and sandbox sessions never report (#426).
 		{"xl", "codex", "gpt-6-luna", "--dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust"},
-		{"xt", "codex", "gpt-5.6-terra", "--dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust"},
+		{"xt", "codex", "gpt-6.1-terra", "--dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust"},
 		{"xa", "codex", "gpt-6-astra", "--dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust"},
 		{"xs", "codex", "gpt-6.1-sol", "--dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust"},
 	}
@@ -2934,7 +2934,7 @@ func TestOpenAddDir_Codex_ForwardsTheSameSingleTokensAfterTheModel(t *testing.T)
 			t.Errorf("create argv missing %q:\n%s", "-v "+pair, create)
 		}
 	}
-	wantTail := "/opt/cenci-agent/current/node_modules/.bin/codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust --model gpt-5.6-terra --add-dir=/repos/notes-repo --add-dir=/repos/other"
+	wantTail := "/opt/cenci-agent/current/node_modules/.bin/codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust --model gpt-6.1-terra --add-dir=/repos/notes-repo --add-dir=/repos/other"
 	if attach := attachLine(t, lines); !strings.HasSuffix(attach, wantTail) {
 		t.Errorf("attach argv = %q, want it to end with %q", attach, wantTail)
 	}
