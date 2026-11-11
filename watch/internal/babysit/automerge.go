@@ -137,6 +137,23 @@ const (
 	reasonCommentsReadTruncated = "PR comments detection read truncated"
 	reasonReviewsReadTruncated  = "PR reviews detection read truncated"
 
+	// Ordinary PR discussion (#1472). reasonDiscussionReadTruncated is the
+	// discussion twin of the two reasons above: a conversation read that hit
+	// its page cap holds, makes no discussion mutation and launches nothing.
+	// reasonUpstreamDiscussionUnreadable is its read-failure twin (a gh failure,
+	// an undecodable page or a malformed comment object), recorded by tick and
+	// by the recheck. reasonReviewWorkerEndedWithoutReceipt holds a launched
+	// babysit-review key whose window ended with no valid receipt: it stays
+	// pending and launched (no relaunch for the same revision) until
+	// `cenci babysit resolve <pr> <key>` or an edit of the comment.
+	// reasonStateUnreadable names an undecodable or unreadable state file at
+	// arm and in `status`: the supervisor never starts from an empty
+	// PendingKeys, and `cenci babysit stop` removes the file (the recovery).
+	reasonDiscussionReadTruncated         = "PR discussion detection read truncated"
+	reasonUpstreamDiscussionUnreadable    = "PR discussion unreadable"
+	reasonReviewWorkerEndedWithoutReceipt = "review worker ended without receipt"
+	reasonStateUnreadable                 = "babysit state unreadable"
+
 	// Post-merge verification (Decisions 5/6): a zero-exit `gh pr merge`
 	// followed by a single refetch that does not report MERGED is
 	// indeterminate, never success (Q5: one refetch, no polling); a refetch
@@ -169,7 +186,7 @@ const (
 
 	// reasonWorkflowLaunchFailed covers the same one-decision-per-tick gap
 	// (Decision 7) for the three launch() call sites in tick() (babysit-
-	// attention, ci-repair, address-review): a failed workflow dispatch
+	// attention, ci-repair, babysit-review): a failed workflow dispatch
 	// previously returned tick's error without ever recording an automerge
 	// decision, leaving a stale decision from the previous tick displayed.
 	reasonWorkflowLaunchFailed = "workflow launch failed"
@@ -405,6 +422,9 @@ type automergeInputs struct {
 	// silently treating a partial detection read as complete.
 	CommentsComplete bool
 	ReviewsComplete  bool
+	// DiscussionComplete (#1472) is the same signal for the PR conversation
+	// read; it is checked right after ReviewsComplete.
+	DiscussionComplete bool
 }
 
 // automergeCIHold classifies checks under the #1129 relaxed-skipping rule
@@ -564,6 +584,9 @@ func evaluateAutomerge(in automergeInputs) automergeDecision {
 	}
 	if !in.ReviewsComplete {
 		return fail("review", reasonReviewsReadTruncated)
+	}
+	if !in.DiscussionComplete {
+		return fail("review", reasonDiscussionReadTruncated)
 	}
 	// #850: FeedbackHold is checked before the ordinary PendingKeys check so
 	// an unreadable/truncated/unknown/unsupported feedback state is never
@@ -1154,34 +1177,38 @@ func recordUpstreamReadFailure(s *State, reason string, err error) {
 // reconcileFeedback once, unconditionally, right after the reviews fetch --
 // before this tick's new keys are even detected via detectNewFeedbackKeys and
 // appended onto PendingKeys, and before the single PendingKeys-\-LaunchedKeys
-// address-review launch (#897: reordered so a brand-new comment on an
+// babysit-review launch (#897: reordered so a brand-new comment on an
 // already-resolved thread is not silently classified away in the same tick it
 // lands) -- immediately before calling runAutomerge, so s.PendingKeys/
 // s.AddressedKeys already reflect GitHub-authoritative resolution (including
-// any reopen) by the time runAutomerge reads them below. It persists exactly one decision via
-// recordDecision and returns whether a merge was actually issued this tick,
-// so tick can reset the backoff delay. workerLive is tick's pane inventory
-// verdict (#1457) and workerNote its recovery instructions (unknown ownership,
-// legacy hold); the note leads the recorded Detail for every outcome,
-// including automerge disabled, so `cenci babysit status` readers see it.
-func runAutomerge(s *State, pr prView, checks []check, verdict feedbackVerdict, commentsComplete, reviewsComplete, workerLive bool, workerNote string) bool {
+// any reopen) by the time runAutomerge reads them below. It persists exactly
+// one decision via recordDecision and returns whether a merge was actually
+// issued this tick, so tick can reset the backoff delay. fleetEnabled is the
+// fleet switch tick already read once this tick (#1472: it also decides whether
+// the pane inventory is read), so the first-pass read count is unchanged.
+// workerLive is tick's pane inventory verdict (#1457) and workerNote its
+// recovery instructions (unknown ownership, legacy hold); the note leads the
+// recorded Detail for every outcome, including automerge disabled, so `cenci
+// babysit status` readers see it.
+func runAutomerge(s *State, pr prView, checks []check, verdict feedbackVerdict, commentsComplete, reviewsComplete, discussionComplete, workerLive, fleetEnabled bool, workerNote string) bool {
 	in := automergeInputs{
-		Enabled:          loadFleetEnabled(),
-		Checks:           checks,
-		RepairWorkerLive: workerLive,
-		RepairPending:    s.RepairPending,
-		PendingKeys:      s.PendingKeys,
-		FeedbackHold:     verdict.Hold,
-		FeedbackDetail:   verdict.Detail,
-		IsDraft:          pr.IsDraft,
-		Mergeable:        pr.Mergeable,
-		MergeStateStatus: pr.MergeStateStatus,
-		HeadRefOID:       pr.HeadRefOID,
-		ChangedFiles:     pr.ChangedFiles,
-		Additions:        pr.Additions,
-		Deletions:        pr.Deletions,
-		CommentsComplete: commentsComplete,
-		ReviewsComplete:  reviewsComplete,
+		Enabled:            fleetEnabled,
+		Checks:             checks,
+		RepairWorkerLive:   workerLive,
+		RepairPending:      s.RepairPending,
+		PendingKeys:        s.PendingKeys,
+		FeedbackHold:       verdict.Hold,
+		FeedbackDetail:     verdict.Detail,
+		IsDraft:            pr.IsDraft,
+		Mergeable:          pr.Mergeable,
+		MergeStateStatus:   pr.MergeStateStatus,
+		HeadRefOID:         pr.HeadRefOID,
+		ChangedFiles:       pr.ChangedFiles,
+		Additions:          pr.Additions,
+		Deletions:          pr.Deletions,
+		CommentsComplete:   commentsComplete,
+		ReviewsComplete:    reviewsComplete,
+		DiscussionComplete: discussionComplete,
 	}
 	for _, i := range pr.ClosingIssuesReferences {
 		in.ClosingIssues = append(in.ClosingIssues, i.Number)

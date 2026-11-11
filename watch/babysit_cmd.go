@@ -128,6 +128,46 @@ func runBabysitReset(args []string) {
 	}
 }
 
+// babysitResolveUsage is the usage line for `cenci babysit resolve <pr> <key>`,
+// printed to stderr on a malformed invocation (exit 2).
+const babysitResolveUsage = "cenci babysit resolve: usage: cenci babysit resolve <pr> discussion:<id> [--state-dir <dir>]"
+
+// runBabysitResolve implements the host-only, attended-only `cenci babysit
+// resolve <pr> discussion:<id>` (#1472): record one pending discussion comment as
+// addressed by a human (receipt source human-cli) and re-arm the supervisor with
+// its recorded settings, unless it was stopped. A malformed invocation or a
+// refused agent exits 2; every runtime refusal or failure (inside a sandbox, an
+// unattended session, a comment: or review: key, a key that is not pending, no
+// supervisor, an unreadable state, a supervisor that will not stop, a failed
+// re-arm) exits 1.
+func runBabysitResolve(args []string) {
+	fs := flag.NewFlagSet("babysit resolve", flag.ExitOnError)
+	stateDir := fs.String("state-dir", "", "state directory (default: $XDG_STATE_HOME/cenci/babysit)")
+	if len(args) < 2 {
+		fmt.Fprintln(os.Stderr, babysitResolveUsage)
+		os.Exit(2)
+	}
+	pr, key := args[0], args[1]
+	_ = fs.Parse(args[2:])
+	rejectExtraWithUsage("cenci babysit resolve", fs.Args(), babysitResolveUsage)
+	if n, err := strconv.Atoi(strings.TrimPrefix(pr, "#")); err != nil || n <= 0 {
+		fmt.Fprintf(os.Stderr, "cenci babysit resolve: PR must be a positive integer, got %q\n%s\n", pr, babysitResolveUsage)
+		os.Exit(2)
+	}
+	if !babysit.ValidResolveKey(key) {
+		fmt.Fprintf(os.Stderr, "cenci babysit resolve: key must be discussion:<id>, got %q\n%s\n", key, babysitResolveUsage)
+		os.Exit(2)
+	}
+	refusal := func(agent string) string { return babysitAgentRefusal(agent, run.BuiltinCapability) }
+	if err := babysit.Resolve(pr, key, *stateDir, refusal); err != nil {
+		fmt.Fprintf(os.Stderr, "cenci babysit resolve: %v\n", err)
+		if errors.Is(err, babysit.ErrAgentRefused) || errors.Is(err, babysit.ErrResolveUsage) {
+			os.Exit(2)
+		}
+		os.Exit(1)
+	}
+}
+
 func runBabysit(args []string) {
 	if len(args) > 0 && args[0] == "stop" {
 		fs := flag.NewFlagSet("babysit stop", flag.ExitOnError)
@@ -152,6 +192,10 @@ func runBabysit(args []string) {
 	}
 	if len(args) > 0 && args[0] == "reset" {
 		runBabysitReset(args[1:])
+		return
+	}
+	if len(args) > 0 && args[0] == "resolve" {
+		runBabysitResolve(args[1:])
 		return
 	}
 

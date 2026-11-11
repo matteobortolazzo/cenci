@@ -211,13 +211,13 @@ func TestLaunchPassesRecordedSessionAndDir(t *testing.T) {
 			wantArg:   "42 merge repair retry cap reached",
 		},
 		{
-			name: "address-review",
+			name: "babysit-review",
 			state: State{
 				PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 300, CurrentDelaySeconds: 900,
 				LaunchSession: "work", LaunchDir: "/repo/root",
 			},
 			responses: []string{openPR(), `[]`, `[{"id":7,"updated_at":"2026-01-02T00:00:00Z","user":{"login":"reviewer"}}]`, `[]`, unresolvedThreadFor(7)},
-			workflow:  "address-review",
+			workflow:  "babysit-review",
 		},
 		{
 			name: "merge-repair-conflict",
@@ -850,7 +850,7 @@ func TestLaunchPinsEveryWorkflowUnattended(t *testing.T) {
 		name, workflow, arg, agent, launchDir string
 		wantTail                              []string // everything after `run <workflow> <arg>`
 	}{
-		{"address-review", "address-review", "42", "codex", dir,
+		{"babysit-review", "babysit-review", "42 --receipt-nonce " + testReviewNonce, "codex", dir,
 			[]string{"--agent", "codex", "--session", session, "--dir", dir, "--unattended"}},
 		{"ci-repair", "ci-repair", "42 PR #42 (feature) has failing CI checks: test.", "codex", dir,
 			[]string{"--agent", "codex", "--session", session, "--dir", dir, "--unattended"}},
@@ -860,7 +860,7 @@ func TestLaunchPinsEveryWorkflowUnattended(t *testing.T) {
 			[]string{"--agent", "codex", "--session", session, "--dir", dir, "--unattended"}},
 		{"babysit-attention merge repair retry cap", "babysit-attention", "42 merge repair retry cap reached", "claude", dir,
 			[]string{"--agent", "claude", "--session", session, "--dir", dir, "--unattended"}},
-		{"empty LaunchDir still pinned", "address-review", "42", "codex", "",
+		{"empty LaunchDir still pinned", "babysit-review", "42 --receipt-nonce " + testReviewNonce, "codex", "",
 			[]string{"--agent", "codex", "--session", session, "--unattended"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

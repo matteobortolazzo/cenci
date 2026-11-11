@@ -26,16 +26,17 @@ func intp(n int) *int { return &n }
 // a shared pointer would let one case's mutation silently corrupt another's).
 func greenAutomergeInputs() automergeInputs {
 	return automergeInputs{
-		Enabled:          true,
-		ClosingIssues:    []int{9},
-		IssueLabels:      map[int][]string{9: {"automerge:ok"}},
-		Checks:           []check{{Bucket: "pass", Name: "test"}},
-		RepairPending:    false,
-		PendingKeys:      nil,
-		CommentsComplete: true,
-		ReviewsComplete:  true,
-		IsDraft:          false,
-		Mergeable:        "MERGEABLE",
+		Enabled:            true,
+		ClosingIssues:      []int{9},
+		IssueLabels:        map[int][]string{9: {"automerge:ok"}},
+		Checks:             []check{{Bucket: "pass", Name: "test"}},
+		RepairPending:      false,
+		PendingKeys:        nil,
+		CommentsComplete:   true,
+		ReviewsComplete:    true,
+		DiscussionComplete: true,
+		IsDraft:            false,
+		Mergeable:          "MERGEABLE",
 		// MergeStateStatus "CLEAN" (#995) is GitHub's ordinary green-mergeable
 		// pairing with Mergeable == "MERGEABLE" -- neither "DIRTY" nor
 		// "BEHIND", so it never perturbs any pre-#995 condition-matrix case
@@ -81,6 +82,11 @@ func withScriptedCommands(t *testing.T, script []scriptedCall, calls *[][]string
 		return []byte(""), nil
 	}
 	execGh = func(args ...string) (string, string, error) {
+		// #1472: the PR conversation read is answered by path (see ghPathAnswer),
+		// never consuming a script slot nor appearing in calls.
+		if out, err, ok := ghPathAnswer(args); ok {
+			return out, "", err
+		}
 		*calls = append(*calls, append([]string{"gh"}, args...))
 		if i >= len(script) {
 			return "", "", fmt.Errorf("unexpected command: %s", strings.Join(args, " "))
@@ -326,6 +332,15 @@ func TestEvaluateAutomergeConditionMatrix(t *testing.T) {
 		}, reasonRepairWorkerLive},
 		{"comments detection read truncated", func(in *automergeInputs) { in.CommentsComplete = false }, reasonCommentsReadTruncated},
 		{"reviews detection read truncated", func(in *automergeInputs) { in.ReviewsComplete = false }, reasonReviewsReadTruncated},
+		// #1472: the discussion detection read is checked right after reviews; the
+		// three new feedback-side reasons are plain constants with fixed text.
+		{"discussion detection read truncated", func(in *automergeInputs) { in.DiscussionComplete = false }, reasonDiscussionReadTruncated},
+		{"discussion truncation is checked after reviews", func(in *automergeInputs) {
+			in.ReviewsComplete, in.DiscussionComplete = false, false
+		}, reasonReviewsReadTruncated},
+		{"review worker ended without receipt", func(in *automergeInputs) {
+			in.FeedbackHold = reasonReviewWorkerEndedWithoutReceipt
+		}, reasonReviewWorkerEndedWithoutReceipt},
 		{"review feedback pending", func(in *automergeInputs) { in.PendingKeys = []string{"comment:1"} }, reasonReviewPending},
 		// The four new #850 feedback-hold reasons: FeedbackHold is checked
 		// after RepairPending and before len(PendingKeys), so any of these
@@ -2050,6 +2065,9 @@ func TestTickRecordsAutomergeHoldWhenAddressReviewLaunchFails(t *testing.T) {
 	originalExecGh := execGh
 	i := 0
 	execGh = func(args ...string) (string, string, error) {
+		if out, err, ok := ghPathAnswer(args); ok {
+			return out, "", err
+		}
 		calls = append(calls, append([]string{"gh"}, args...))
 		if i >= len(responses) {
 			return "", "", fmt.Errorf("unexpected command: %s", strings.Join(args, " "))
@@ -2076,13 +2094,13 @@ func TestTickRecordsAutomergeHoldWhenAddressReviewLaunchFails(t *testing.T) {
 
 	s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 300, CurrentDelaySeconds: 900, LaunchSession: "work"}
 	if _, _, err := tick(&s); err == nil {
-		t.Fatal("tick: err = nil, want the address-review launch failure to still surface as a tick error")
+		t.Fatal("tick: err = nil, want the babysit-review launch failure to still surface as a tick error")
 	}
 	if s.AutomergeReason != reasonWorkflowLaunchFailed {
 		t.Fatalf("AutomergeReason = %q, want %q", s.AutomergeReason, reasonWorkflowLaunchFailed)
 	}
 	if s.AutomergeCheckedAt.IsZero() {
-		t.Fatal("AutomergeCheckedAt was not stamped when the address-review launch failed")
+		t.Fatal("AutomergeCheckedAt was not stamped when the babysit-review launch failed")
 	}
 }
 
@@ -2528,6 +2546,67 @@ func TestTickPreMergeRecheckHoldsWhenReviewsReadNotProvenComplete(t *testing.T) 
 		if len(c) > 2 && c[1] == "pr" && c[2] == "merge" {
 			t.Fatalf("gh pr merge must not be issued: %#v", calls)
 		}
+	}
+}
+
+// #1472: the pre-merge recheck re-reads the PR conversation read-only. A comment
+// that appeared after the tick's own read holds the merge with a recheck-prefixed
+// detail and zero `gh pr merge` calls; an unreadable or truncated re-read holds
+// under its own reason; an edit of an addressed key reopens it. None mutates s.
+func TestTickPreMergeRecheckHoldsOnDiscussionChangedSinceTheTickRead(t *testing.T) {
+	page := func(n int) string {
+		items := make([]string, n)
+		for i := range items {
+			items[i] = humanComment(int64(100+i), "filler")
+		}
+		return jsonArray(items...)
+	}
+	const r1, r2 = "the original ask", "the original ask, but edited"
+	addressed := func() State {
+		s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 900}
+		s.AddressedKeys = []string{"discussion:11"}
+		s.DiscussionRevisions = map[string]string{"discussion:11": bodyRevision(r1)}
+		s.DiscussionReceipts = map[string]discussionReceipt{"discussion:11": {CommentID: 11, Revision: bodyRevision(r1), Outcome: "addressed", ReceiptCommentID: 12, Source: receiptSourceReceipt}}
+		return s
+	}
+	for _, tc := range []struct {
+		name       string
+		state      State
+		sequence   []string
+		wantReason string
+		wantDetail string
+	}{
+		{"a comment present only at the recheck", State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 900},
+			[]string{`[]`, jsonArray(humanComment(11, "late"))}, reasonReviewPending, "recheck"},
+		{"an unreadable recheck read", State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 900},
+			[]string{`[]`, "not json"}, reasonUpstreamDiscussionUnreadable, "recheck: "},
+		{"a truncated recheck read", State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 900},
+			[]string{`[]`, page(feedbackPageSize)}, reasonDiscussionReadTruncated, "recheck"},
+		{"an addressed comment edited after the tick read", addressed(),
+			[]string{jsonArray(humanComment(11, r1)), jsonArray(humanComment(11, r2))}, reasonFeedbackReopened, "recheck"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withFleetAutomergeEnabled(t, true)
+			var calls [][]string
+			script := append(automergeFirstPassScript(), automergeGreenRecheckScript()...)
+			withScriptedCommands(t, script, &calls)
+			serveDiscussionSequence(t, tc.sequence...)
+			s := tc.state
+			before := s
+
+			if _, _, err := tick(&s); err != nil {
+				t.Fatal(err)
+			}
+			if n := mergeCallCount(calls); n != 0 {
+				t.Fatalf("gh pr merge calls = %d, want 0: %#v", n, calls)
+			}
+			if s.AutomergeDecision != "held" || s.AutomergeReason != tc.wantReason || !strings.HasPrefix(s.AutomergeDetail, tc.wantDetail) {
+				t.Errorf("decision %q reason %q detail %q, want held / %q / a detail starting %q", s.AutomergeDecision, s.AutomergeReason, s.AutomergeDetail, tc.wantReason, tc.wantDetail)
+			}
+			if strings.Join(s.PendingKeys, ",") != strings.Join(before.PendingKeys, ",") || strings.Join(s.AddressedKeys, ",") != strings.Join(before.AddressedKeys, ",") {
+				t.Errorf("the recheck mutated the keys: pending %v addressed %v", s.PendingKeys, s.AddressedKeys)
+			}
+		})
 	}
 }
 

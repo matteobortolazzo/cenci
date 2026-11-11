@@ -28,9 +28,21 @@ const (
 // deletion from builtinConfig() fails a test (#1214 AC 5: Claude and Codex
 // built-in capabilities are kept).
 var (
-	wantClaudeWorkflows = []string{"address-review", "babysit", "babysit-attention", "ci-repair", "implement", "merge-repair", "refine"}
-	wantCodexWorkflows  = []string{"address-review", "babysit", "babysit-attention", "ci-repair", "configure", "implement", "maintain", "refactor", "refine", "review", "sync"}
+	wantClaudeWorkflows = []string{"address-review", "babysit", "babysit-attention", "babysit-review", "ci-repair", "implement", "merge-repair", "refine"}
+	wantCodexWorkflows  = []string{"address-review", "babysit", "babysit-attention", "babysit-review", "ci-repair", "configure", "implement", "maintain", "refactor", "refine", "review", "sync"}
 )
+
+// skillOf names the flow skill a built-in workflow key runs. Every key runs the
+// skill of the same name except babysit-review, the supervisor-only finite
+// registration of address-review (#1472): flow's dispatch-target-invocable
+// contract requires a skills/<name>/codex.md for each codexWF("<name>") target,
+// so the key and the skill differ.
+func skillOf(workflow string) string {
+	if workflow == "babysit-review" {
+		return "address-review"
+	}
+	return workflow
+}
 
 // acmeConfig defines a custom, unsupported agent with a refine workflow only
 // and no sandboxCommand -- the generic stand-in for missing-template and
@@ -159,10 +171,12 @@ func TestCodexNativeWorkflowTemplates(t *testing.T) {
 		{"babysit", "$cenci:babysit 42"},
 		{"babysit-attention", "$cenci:babysit-attention 42"},
 	}
-	// ci-repair is the one finite (`codex exec`) Codex workflow (#1455); its
-	// expectation lives in TestBuiltinCIRepairTemplatesAreFinite.
-	if len(workflows)+1 != len(wantCodexWorkflows) {
-		t.Fatalf("table covers %d workflows, want every built-in Codex workflow except ci-repair (%d)", len(workflows), len(wantCodexWorkflows)-1)
+	// ci-repair (#1455) and babysit-review (#1472) are the finite (`codex exec`)
+	// Codex workflows; their expectations live in
+	// TestBuiltinCIRepairTemplatesAreFinite and
+	// TestBuiltinBabysitReviewTemplatesAreFinite.
+	if len(workflows)+2 != len(wantCodexWorkflows) {
+		t.Fatalf("table covers %d workflows, want every built-in Codex workflow except ci-repair and babysit-review (%d)", len(workflows), len(wantCodexWorkflows)-2)
 	}
 	sandboxCommand := []string{"cenci", "open", "--agent", "codex", "--"}
 	modelCommand := []string{"cenci", "open", "--model", "m", "--agent", "codex", "--"}
@@ -229,6 +243,96 @@ func TestBuiltinCIRepairTemplatesAreFinite(t *testing.T) {
 				t.Errorf("argv = %q, want %q", argv, tc.want)
 			}
 		})
+	}
+}
+
+// babysitReviewTicket is the launch argument the supervisor passes (#1472): the
+// PR number, the per-launch receipt nonce and one `discussion:<id>=<sha256>`
+// token per pending discussion key.
+const babysitReviewTicket = "42 --receipt-nonce 0123456789abcdef0123456789abcdef " +
+	"discussion:1001=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa " +
+	"discussion:1002=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+// #1472 AC 75 (argv half): the supervisor-only babysit-review templates are
+// one-shot -- Claude print mode and `codex exec` -- on host and through
+// `cenci open`, so a finished review worker never leaves an interactive prompt
+// (address-review's Phase 3F) behind. The key registers the address-review
+// skill, so the prompt names address-review while the template key stays
+// babysit-review. The arguments (PR, nonce, per-key revisions) pass through
+// intact as the tail of the single prompt element.
+func TestBuiltinBabysitReviewTemplatesAreFinite(t *testing.T) {
+	claudePrompt := "/cenci:address-review " + babysitReviewTicket
+	codexPrompt := "$cenci:address-review " + babysitReviewTicket
+	for _, tc := range []struct {
+		name, agent, model string
+		sandbox            bool
+		want               []string
+	}{
+		{"claude/host", "claude", "", false, []string{"claude", "--print", "--", claudePrompt}},
+		{"claude/sandbox", "claude", "", true, []string{"cenci", "open", "--", "--print", claudePrompt}},
+		{"codex/host", "codex", "", false, []string{"codex", "exec", codexPrompt}},
+		{"codex/sandbox", "codex", "", true, []string{"cenci", "open", "--agent", "codex", "--", "exec", codexPrompt}},
+		{"claude/host/model", "claude", "m", false, []string{"claude", "--model", "m", "--print", "--", claudePrompt}},
+		{"codex/host/model", "codex", "m", false, []string{"codex", "exec", "--model", "m", codexPrompt}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			argv, err := builtinConfig().BuildCommand(tc.agent, "babysit-review", babysitReviewTicket, tc.model, tc.sandbox)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !equalArgs(argv, tc.want) {
+				t.Errorf("argv = %q, want %q", argv, tc.want)
+			}
+		})
+	}
+}
+
+// #1472 AC 75: the interactive address-review templates a human launches keep
+// their exact argv -- no print or exec mode leaks in from babysit-review, on
+// host and in the sandbox, for both clients -- and babysit-review is a separate
+// capability, not an alias of it.
+func TestBuiltinAddressReviewTemplatesStayInteractive(t *testing.T) {
+	const ticket = "42"
+	for _, tc := range []struct {
+		name, agent string
+		sandbox     bool
+		want        []string
+	}{
+		{"claude/host", "claude", false, []string{"claude", "--", "/cenci:address-review 42"}},
+		{"claude/sandbox", "claude", true, []string{"cenci", "open", "--", "/cenci:address-review 42"}},
+		{"codex/host", "codex", false, []string{"codex", "$cenci:address-review 42"}},
+		{"codex/sandbox", "codex", true, []string{"cenci", "open", "--agent", "codex", "--", "$cenci:address-review 42"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			argv, err := builtinConfig().BuildCommand(tc.agent, "address-review", ticket, "", tc.sandbox)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !equalArgs(argv, tc.want) {
+				t.Errorf("address-review argv = %q, want unchanged %q", argv, tc.want)
+			}
+		})
+	}
+	for _, agent := range []string{"claude", "codex"} {
+		if !BuiltinCapability(agent, "babysit-review") || !BuiltinCapability(agent, "address-review") {
+			t.Errorf("%s must keep address-review and add babysit-review as separate built-in capabilities", agent)
+		}
+	}
+}
+
+// #1472: `cenci run babysit-review <pr> --receipt-nonce ...` names its tmux
+// window `<pr>-babysit-review`, the name babysit's liveness probe looks for, even
+// though the template runs the address-review skill: the window name takes the
+// leading PR token and the workflow key, never the prompt or the nonce.
+func TestBuiltinBabysitReviewWindowNameIsPRAndWorkflowKey(t *testing.T) {
+	for _, tc := range []struct{ ticketArg, workflow, want string }{
+		{babysitReviewTicket, "babysit-review", "42-babysit-review"},
+		{"7", "babysit-review", "7-babysit-review"},
+		{babysitReviewTicket, "address-review", "42-address-review"},
+	} {
+		if got := windowName(tc.ticketArg, tc.workflow, ""); got != tc.want {
+			t.Errorf("windowName(%q, %q) = %q, want %q", tc.ticketArg, tc.workflow, got, tc.want)
+		}
 	}
 }
 
@@ -325,7 +429,7 @@ func TestCodexPromptNeverStagesPlanMode(t *testing.T) {
 					if err != nil {
 						t.Fatal(err)
 					}
-					got, want := argv[len(argv)-1], "$cenci:"+workflow+" "+target
+					got, want := argv[len(argv)-1], "$cenci:"+skillOf(workflow)+" "+target
 					if got != want {
 						t.Fatalf("prompt = %q, want %q", got, want)
 					}
@@ -477,7 +581,7 @@ func TestOpenCodeIsNeverEligibleCapability(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, wf := range []string{"refine", "implement", "address-review", "babysit", "babysit-attention", "ci-repair", "custom"} {
+	for _, wf := range []string{"refine", "implement", "address-review", "babysit", "babysit-attention", "babysit-review", "ci-repair", "custom"} {
 		if BuiltinCapability("opencode", wf) {
 			t.Errorf("BuiltinCapability(opencode, %s) = true, want false", wf)
 		}
@@ -800,11 +904,12 @@ func TestBuiltinCapabilityAdaptersExistInFlow(t *testing.T) {
 				return
 			}
 			checkedCompanions++
-			skill, err := os.ReadFile(filepath.Join(flow, "skills", c.Workflow, "SKILL.md"))
+			name := skillOf(c.Workflow)
+			skill, err := os.ReadFile(filepath.Join(flow, "skills", name, "SKILL.md"))
 			if err != nil {
-				t.Fatalf("skills/%s/SKILL.md: %v", c.Workflow, err)
+				t.Fatalf("skills/%s/SKILL.md: %v", name, err)
 			}
-			needle := "> **Client dispatch**: In Codex, read `codex-runtime` and `" + c.Workflow + "/codex.md`"
+			needle := "> **Client dispatch**: In Codex, read `codex-runtime` and `" + name + "/codex.md`"
 			found := false
 			for _, line := range strings.Split(string(skill), "\n") {
 				if strings.HasPrefix(line, needle) {
@@ -812,7 +917,7 @@ func TestBuiltinCapabilityAdaptersExistInFlow(t *testing.T) {
 				}
 			}
 			if !found {
-				t.Errorf("skills/%s/SKILL.md has no line starting %q: Codex would not be routed to codex.md", c.Workflow, needle)
+				t.Errorf("skills/%s/SKILL.md has no line starting %q: Codex would not be routed to codex.md", name, needle)
 			}
 		})
 	}
@@ -830,6 +935,10 @@ func TestBuiltinAdapterExactValues(t *testing.T) {
 		{"claude", "babysit", "skills/babysit/SKILL.md"},
 		{"claude", "merge-repair", "skills/merge-repair/SKILL.md"},
 		{"codex", "ci-repair", "skills/ci-repair/codex.md"},
+		// babysit-review reuses the address-review skill (#1472): no
+		// skills/babysit-review exists, so both clients adapt to address-review.
+		{"claude", "babysit-review", "skills/address-review/SKILL.md"},
+		{"codex", "babysit-review", "skills/address-review/codex.md"},
 		{"codex", "implement", "skills/implement/codex.md"},
 		{"codex", "babysit-attention", "skills/babysit-attention/codex.md"},
 		{"codex", "babysit", "skills/babysit/SKILL.md"}, // portable: no codex.md

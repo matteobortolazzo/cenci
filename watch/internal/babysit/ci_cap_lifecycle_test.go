@@ -63,6 +63,9 @@ type ciCapStep struct {
 	// comments is the pull-request review-comments page served to this tick;
 	// empty means no comments.
 	comments string
+	// discussion is the PR conversation page (`issues/<pr>/comments`, #1472)
+	// served to this tick; empty means no comments.
+	discussion string
 }
 
 func ciCapTickOf(view, checks string) ciCapStep {
@@ -99,6 +102,8 @@ type ciCapEnv struct {
 	// reconciling review feedback.
 	commentReads map[int]int
 	reviewReads  map[int]int
+	// discussionReads[k] counts the PR conversation reads tick k performed.
+	discussionReads map[int]int
 	// attempts counts launch() attempts, which are the only callers of the
 	// tmuxHasSession seam; sessionUp decides each attempt's outcome (nil: all
 	// succeed).
@@ -118,7 +123,7 @@ func newCICapEnv(t *testing.T, steps ...ciCapStep) *ciCapEnv {
 	t.Helper()
 	t.Setenv("CENCI_SANDBOX", "")
 	t.Setenv("CENCI_BABYSIT_SUPERVISOR", "1")
-	e := &ciCapEnv{t: t, dir: t.TempDir(), steps: steps, commentReads: map[int]int{}, reviewReads: map[int]int{}, inventoryReads: map[int]int{}, agent: "claude"}
+	e := &ciCapEnv{t: t, dir: t.TempDir(), steps: steps, commentReads: map[int]int{}, reviewReads: map[int]int{}, discussionReads: map[int]int{}, inventoryReads: map[int]int{}, agent: "claude"}
 	e.path = statePath(e.dir, "o/r", "42")
 
 	originalGh, originalCommand := execGh, command
@@ -203,6 +208,16 @@ func (e *ciCapEnv) gh(args ...string) (string, string, error) {
 			}
 		case len(args) > 1 && strings.Contains(args[1], "/pulls/42/reviews"):
 			e.reviewReads[e.viewN]++
+		case len(args) > 1 && strings.Contains(args[1], "/issues/42/comments"):
+			// #1472: the PR conversation page served to this tick.
+			e.discussionReads[e.viewN]++
+			if c := e.steps[e.viewN-1].discussion; c != "" {
+				return c, "", nil
+			}
+		case len(args) > 1 && strings.Contains(args[1], "/collaborators/"):
+			if out, err, ok := ghPathAnswer(args); ok {
+				return out, "", err
+			}
 		}
 		return "[]", "", nil
 	case len(args) > 1 && args[0] == "issue" && args[1] == "view":
@@ -399,8 +414,8 @@ func TestCICap_ReviewFeedbackIsStillAddressedWhileCIIsPaused(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 
-	if n := e.launches("address-review"); n != 1 {
-		t.Errorf("address-review launches = %d, want 1 for the comment that arrived while CI was paused", n)
+	if n := e.launches("babysit-review"); n != 1 {
+		t.Errorf("babysit-review launches = %d, want 1 for the comment that arrived while CI was paused", n)
 	}
 	if n := e.launches("ci-repair"); n != 0 {
 		t.Errorf("ci-repair launches = %d, want 0", n)

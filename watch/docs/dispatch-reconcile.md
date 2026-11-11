@@ -692,7 +692,7 @@ planning.attended ...` line (`warnAttendedConfigUnreadable`), silent when
   edits the plan before Phase 2 would turn every approved plan into
   `plan changed since approval`.
 - Babysit-launched sessions count as unattended (#1497). `babysit`'s `launch` self-execs
-  `cenci run <workflow> ... --unattended` for `address-review`, `ci-repair`,
+  `cenci run <workflow> ... --unattended` for `babysit-review`, `ci-repair`,
   `merge-repair` and both `babysit-attention` launches, so every one reaches
   `run.Opts.Unattended` and pins `CENCI_ATTENDED=0`, whatever the host's
   `planning.attended` says. These sessions read untrusted PR review text, so they are

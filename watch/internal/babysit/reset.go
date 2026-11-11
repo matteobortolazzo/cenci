@@ -47,6 +47,10 @@ const defaultResetInterval = 15 * time.Minute
 //   - live but not ours: any other probe result is refused ("refusing to
 //     signal pid") with state and lock untouched.
 //
+// The pid sequence is quiesceSupervisor, shared with Resolve (#1472). A state
+// `cenci babysit stop` left (status stopped) has no agent and no budget: Reset
+// refuses it with the re-arm hint.
+//
 // The supervisor has no SIGTERM handler, so its deferred lock removal never
 // runs and Reset removes the lock itself. refusal is the CLI's agent check
 // (babysitAgentRefusal); it lives in package main, so it is passed in and
@@ -82,50 +86,19 @@ func Reset(pr, explicit string, refusal func(agent string) string) error {
 		return err
 	}
 	path := statePath(dir, repo, cleanPR)
-	lockPath := path + ".lock"
 
-	s, err := readStateStrict(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return &classifiedError{class: ErrNoSupervisor, cause: err, msg: fmt.Sprintf("no supervisor found for PR #%s", cleanPR)}
-	}
+	s, err := quiesceSupervisor(path, cleanPR, func(s State) error {
+		if stoppedFeedbackOnly(s) {
+			return fmt.Errorf("PR #%s is stopped: it has no agent or retry budget to reset; re-arm it with cenci babysit %s --agent <claude|codex>", cleanPR, cleanPR)
+		}
+		if refusal != nil {
+			if reason := refusal(s.Agent); reason != "" {
+				return &classifiedError{class: ErrAgentRefused, msg: reason}
+			}
+		}
+		return nil
+	})
 	if err != nil {
-		return err
-	}
-	if refusal != nil {
-		if reason := refusal(s.Agent); reason != "" {
-			return &classifiedError{class: ErrAgentRefused, msg: reason}
-		}
-	}
-
-	if s.PID > 0 {
-		if !processOwned(s.PID, cleanPR) {
-			if !processGone(s.PID) {
-				return &classifiedError{class: ErrSupervisorUnverified, msg: fmt.Sprintf("refusing to signal pid %d: it is not the recorded cenci babysit process", s.PID)}
-			}
-			// Gone: nothing is signalled and nothing was dying, so the first
-			// strict read stays current (no re-read). The stale lock goes
-			// before the state is saved and Run re-arms.
-			if err := clearStaleLock(lockPath, cleanPR); err != nil {
-				return err
-			}
-			fmt.Fprintln(os.Stderr, staleStateNote(s.PID, cleanPR))
-		} else {
-			if err := terminateAndWait(s.PID, cleanPR); err != nil {
-				return err
-			}
-			if err := os.Remove(lockPath); err != nil && !os.IsNotExist(err) {
-				return err
-			}
-			// Re-read only now: the supervisor may have saved while it was dying,
-			// and zeroing the first read would overwrite that with stale data.
-			if s, err = readStateStrict(path); err != nil {
-				return err
-			}
-		}
-	} else if _, err := os.Stat(lockPath); err == nil {
-		owner, _ := os.ReadFile(lockPath)
-		return fmt.Errorf("supervisor already running for PR #%s (%s)", cleanPR, strings.TrimSpace(string(owner)))
-	} else if !os.IsNotExist(err) {
 		return err
 	}
 
@@ -140,18 +113,94 @@ func Reset(pr, explicit string, refusal func(agent string) string) error {
 	s.PID = 0
 	s.UpdatedAt = time.Now().UTC()
 	if err := save(path, s); err != nil {
-		return err
+		return fmt.Errorf("any supervisor for PR #%s was stopped, but the retry budget was not reset and nothing was re-armed: %w; fix the cause, then re-arm with cenci babysit %s --agent %s", cleanPR, err, cleanPR, s.Agent)
 	}
 
+	fmt.Printf("Reset the retry budget for PR #%s.\n", cleanPR)
+	if err := reArm(dir, cleanPR, s); err != nil {
+		return fmt.Errorf("budget reset for PR #%s but not re-armed: %w; re-arm with cenci babysit %s --agent %s", cleanPR, err, cleanPR, s.Agent)
+	}
+	return nil
+}
+
+// stoppedFeedbackOnly reports whether s is what `cenci babysit stop` leaves
+// behind (#1472): feedback bookkeeping with no agent, budget or supervisor. Reset
+// has nothing to zero or re-arm in it, and Resolve writes it without re-arming.
+func stoppedFeedbackOnly(s State) bool { return s.Status == "stopped" }
+
+// reArm starts a supervisor for s's PR with the settings s recorded: its agent,
+// polling interval (defaultResetInterval when none was recorded) and launch
+// target.
+func reArm(dir, pr string, s State) error {
 	interval := time.Duration(s.IntervalSeconds) * time.Second
 	if s.IntervalSeconds <= 0 {
 		interval = defaultResetInterval
 	}
-	fmt.Printf("Reset the retry budget for PR #%s.\n", cleanPR)
-	if err := Run(Options{PR: cleanPR, Agent: s.Agent, Interval: interval, StateDir: dir, Session: s.LaunchSession, TmuxSocket: s.LaunchSocket, Dir: s.LaunchDir}); err != nil {
-		return fmt.Errorf("budget reset for PR #%s but not re-armed: %w; re-arm with cenci babysit %s --agent %s", cleanPR, err, cleanPR, s.Agent)
+	return Run(Options{PR: pr, Agent: s.Agent, Interval: interval, StateDir: dir, Session: s.LaunchSession, TmuxSocket: s.LaunchSocket, Dir: s.LaunchDir})
+}
+
+// quiesceSupervisor is the verify/terminate/lock/re-read sequence Reset and
+// Resolve share (#1472): it reads the state at path strictly, lets check refuse
+// before anything is signalled or written, and leaves no supervisor running and
+// no lock behind, returning the state the caller may now rewrite. Its states:
+//   - no state file: ErrNoSupervisor. An unreadable one: an error wrapping
+//     ErrStateUnreadable, text and path as readStateStrict gives them.
+//   - a recorded pid that processOwned verifies is sent SIGTERM and awaited, its
+//     lock removed, and the state re-read: the supervisor may have saved while it
+//     was dying, and rewriting the first read would overwrite that save.
+//   - a pid that is provably gone: nothing is signalled, the stale lock is
+//     cleared (a live or unparseable one refuses) and the first read stays
+//     current; a stderr note says so.
+//   - a live pid that is not ours: refused, state and lock untouched.
+//   - no pid: a lock file still refuses ("supervisor already running").
+func quiesceSupervisor(path, pr string, check func(State) error) (State, error) {
+	lockPath := path + ".lock"
+	s, err := readStateStrict(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return State{}, &classifiedError{class: ErrNoSupervisor, cause: err, msg: fmt.Sprintf("no supervisor found for PR #%s", pr)}
 	}
-	return nil
+	if err != nil {
+		return State{}, &classifiedError{class: ErrStateUnreadable, cause: err, msg: err.Error()}
+	}
+	if check != nil {
+		if err := check(s); err != nil {
+			return State{}, err
+		}
+	}
+
+	if s.PID > 0 {
+		if !processOwned(s.PID, pr) {
+			if !processGone(s.PID) {
+				return State{}, &classifiedError{class: ErrSupervisorUnverified, msg: fmt.Sprintf("refusing to signal pid %d: it is not the recorded cenci babysit process", s.PID)}
+			}
+			if err := clearStaleLock(lockPath, pr); err != nil {
+				return State{}, err
+			}
+			fmt.Fprintln(os.Stderr, staleStateNote(s.PID, pr))
+			return s, nil
+		}
+		if err := terminateAndWait(s.PID, pr); err != nil {
+			return State{}, err
+		}
+		if err := os.Remove(lockPath); err != nil && !os.IsNotExist(err) {
+			return State{}, err
+		}
+		fresh, err := readStateStrict(path)
+		switch {
+		case errors.Is(err, os.ErrNotExist):
+			return State{}, err
+		case err != nil:
+			return State{}, &classifiedError{class: ErrStateUnreadable, cause: err, msg: err.Error()}
+		}
+		return fresh, nil
+	}
+	if _, err := os.Stat(lockPath); err == nil {
+		owner, _ := os.ReadFile(lockPath)
+		return State{}, fmt.Errorf("supervisor already running for PR #%s (%s)", pr, strings.TrimSpace(string(owner)))
+	} else if !os.IsNotExist(err) {
+		return State{}, err
+	}
+	return s, nil
 }
 
 // terminateAndWait sends SIGTERM to the verified supervisor pid and polls
@@ -167,7 +216,7 @@ func terminateAndWait(pid int, pr string) error {
 	deadline := time.Now().Add(resetExitWait)
 	for processOwned(pid, pr) {
 		if !time.Now().Before(deadline) {
-			return fmt.Errorf("supervisor for PR #%s did not exit within %s of SIGTERM; nothing was reset", pr, resetExitWait)
+			return fmt.Errorf("supervisor for PR #%s did not exit within %s of SIGTERM; its state was not changed", pr, resetExitWait)
 		}
 		time.Sleep(resetPollInterval)
 	}

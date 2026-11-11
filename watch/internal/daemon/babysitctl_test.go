@@ -440,8 +440,11 @@ func TestBabysitControl_EndToEnd_ForwardedStopRemovesTheHostState(t *testing.T) 
 	if out != "Stopped babysitting PR #42 on the host.\n" {
 		t.Errorf("stdout = %q, want %q", out, "Stopped babysitting PR #42 on the host.\n")
 	}
-	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
-		t.Errorf("host state file still exists (stat err = %v)", statErr)
+	// #1472: stop keeps a feedback-only state so unresolved feedback survives a
+	// re-arm; status becomes stopped.
+	kept, readErr := os.ReadFile(path)
+	if readErr != nil || !strings.Contains(string(kept), `"status": "stopped"`) {
+		t.Errorf("host state after the forwarded stop = %q (read err %v), want a stopped state kept", kept, readErr)
 	}
 }
 
@@ -490,8 +493,9 @@ func TestBabysitControl_EndToEnd_ForwardedStopClearsADeadSupervisor(t *testing.T
 	if out != "Stopped babysitting PR #42 on the host.\n" {
 		t.Errorf("stdout = %q, want %q", out, "Stopped babysitting PR #42 on the host.\n")
 	}
-	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
-		t.Errorf("host state file still exists (stat err = %v)", statErr)
+	kept, readErr := os.ReadFile(path)
+	if readErr != nil || !strings.Contains(string(kept), `"status": "stopped"`) {
+		t.Errorf("host state after the forwarded stop = %q (read err %v), want a stopped state kept", kept, readErr)
 	}
 	if _, statErr := os.Stat(lock); !os.IsNotExist(statErr) {
 		t.Errorf("host lock file still exists (stat err = %v)", statErr)

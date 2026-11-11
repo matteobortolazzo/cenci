@@ -4,8 +4,10 @@ import "fmt"
 
 // ArmWorkflows lists the built-in workflows an agent must have before babysit
 // may arm supervision with it (#1215). merge-repair is excluded: it is pinned to
-// Claude regardless of the arming agent.
-var ArmWorkflows = []string{"address-review", "babysit-attention", "ci-repair"}
+// Claude regardless of the arming agent. babysit-review (#1472) is the finite
+// review worker the supervisor launches in place of the interactive
+// address-review, which it no longer launches and so no longer requires.
+var ArmWorkflows = []string{"babysit-attention", "babysit-review", "ci-repair"}
 
 // CapabilityRefusal returns the reason agent may not arm babysit, or "" when
 // it may. The reason names the first workflow in ArmWorkflows the agent lacks.

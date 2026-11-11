@@ -171,7 +171,7 @@ func TestConflictDefersFeedbackUntilClear(t *testing.T) {
 	if _, _, err := tick(&s); err != nil {
 		t.Fatal(err)
 	}
-	args, ok := launchCallArgs(calls, "address-review")
+	args, ok := launchCallArgs(calls, "babysit-review")
 	if !ok || !slices.Equal(s.LaunchedKeys, []string{"comment:7"}) {
 		t.Fatalf("deferred feedback did not launch: state=%+v, calls=%v", s, calls)
 	}

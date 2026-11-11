@@ -23,7 +23,7 @@ func hasAllExcept(denied ...[2]string) func(agent, workflow string) bool {
 }
 
 func TestArmWorkflowsAreTheThreeSortedArmingWorkflows(t *testing.T) {
-	want := []string{"address-review", "babysit-attention", "ci-repair"}
+	want := []string{"babysit-attention", "babysit-review", "ci-repair"}
 	if !slices.Equal(ArmWorkflows, want) {
 		t.Fatalf("ArmWorkflows = %v, want %v", ArmWorkflows, want)
 	}
@@ -59,14 +59,28 @@ func TestCapabilityRefusal(t *testing.T) {
 		if got == "" {
 			t.Fatal("CapabilityRefusal accepted an agent with no workflows")
 		}
-		if !strings.Contains(got, "address-review") || !strings.Contains(got, "fakeagent") {
-			t.Fatalf("reason %q must name the agent and address-review (the first missing workflow)", got)
+		if !strings.Contains(got, "babysit-attention") || !strings.Contains(got, "fakeagent") {
+			t.Fatalf("reason %q must name the agent and babysit-attention (the first missing workflow)", got)
 		}
 	})
 
 	t.Run("nil predicate refuses", func(t *testing.T) {
 		if got := CapabilityRefusal("claude", nil); got == "" {
 			t.Fatal("CapabilityRefusal accepted a nil predicate")
+		}
+	})
+
+	t.Run("missing babysit-review is refused naming babysit-review", func(t *testing.T) {
+		got := CapabilityRefusal("codex", hasAllExcept([2]string{"codex", "babysit-review"}))
+		if got == "" || !strings.Contains(got, "babysit-review") {
+			t.Fatalf("reason %q must be non-empty and name babysit-review", got)
+		}
+	})
+
+	t.Run("address-review is no longer an arm-time requirement", func(t *testing.T) {
+		got := CapabilityRefusal("codex", hasAllExcept([2]string{"codex", "address-review"}))
+		if got != "" {
+			t.Fatalf("CapabilityRefusal = %q; the supervisor no longer launches address-review", got)
 		}
 	})
 

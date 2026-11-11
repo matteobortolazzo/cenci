@@ -173,21 +173,53 @@ func defaultGitCommonDir(dir string) (string, error) {
 // ownership, plus the recovery note for each unknown one.
 type workerLiveness struct {
 	ciLive, mergeLive bool
-	notes             []string
+	// reviewLive is a live `<PR>-babysit-review` pane (#1472), the supervisor's
+	// finite review worker; addressReviewLive is a live `<PR>-address-review`
+	// pane: a human-launched (or pre-upgrade) interactive review, which never
+	// exits by itself. Both are branch writers.
+	reviewLive, addressReviewLive bool
+	notes                         []string
 }
 
-func (w workerLiveness) any() bool { return w.ciLive || w.mergeLive }
+func (w workerLiveness) any() bool {
+	return w.ciLive || w.mergeLive || w.reviewLive || w.addressReviewLive
+}
 
-// describe names the live workers for a log line.
+// addressReviewCloseNote is what a live address-review window adds to the hold:
+// it is interactive, so only a human can end it.
+const addressReviewCloseNote = "close it once its edits are preserved"
+
+// describe names the live workers for a log line. The ci/merge wording is
+// unchanged; an address-review window always adds how to end its hold.
 func (w workerLiveness) describe(pr string) string {
-	switch {
-	case w.ciLive && w.mergeLive:
-		return pr + "-ci-repair and " + pr + "-merge-repair are still running"
-	case w.ciLive:
-		return "ci-repair window " + pr + "-ci-repair is still running"
-	default:
-		return "merge-repair window " + pr + "-merge-repair is still running"
+	type live struct{ kind, window string }
+	var windows []live
+	if w.ciLive {
+		windows = append(windows, live{"ci-repair", pr + "-ci-repair"})
 	}
+	if w.mergeLive {
+		windows = append(windows, live{"merge-repair", pr + "-merge-repair"})
+	}
+	if w.reviewLive {
+		windows = append(windows, live{"babysit-review", pr + "-babysit-review"})
+	}
+	if w.addressReviewLive {
+		windows = append(windows, live{"address-review", pr + "-address-review"})
+	}
+	var out string
+	if len(windows) == 1 {
+		out = windows[0].kind + " window " + windows[0].window + " is still running"
+	} else {
+		names := make([]string, len(windows))
+		for i, win := range windows {
+			names[i] = win.window
+		}
+		out = strings.Join(names[:len(names)-1], ", ") + " and " + names[len(names)-1] + " are still running"
+	}
+	if w.addressReviewLive {
+		out += "; " + addressReviewCloseNote
+	}
+	return out
 }
 
 type paneOwner int
@@ -199,8 +231,9 @@ const (
 )
 
 // observeWorkers reads the recorded session's pane inventory once and derives
-// both CI and merge liveness for s.PR (#1457). Only an exact `<PR>-ci-repair`
-// or `<PR>-merge-repair` window with a live pane counts. Its @cenci-repo-dir
+// CI, merge and review liveness for s.PR (#1457, #1472). Only an exact
+// `<PR>-ci-repair`, `<PR>-merge-repair`, `<PR>-babysit-review` or
+// `<PR>-address-review` window with a live pane counts. Its @cenci-repo-dir
 // decides ownership: Clean-equal to LaunchDir or RepoRoot is ours; otherwise
 // the git common dirs are compared, equal is ours and different is another
 // repository's worker, which is ignored with a printed note. An empty or
@@ -257,6 +290,10 @@ func observeWorkers(s *State) (workerLiveness, error) {
 			workflow = "ci-repair"
 		case s.PR + "-merge-repair":
 			workflow = "merge-repair"
+		case s.PR + "-babysit-review":
+			workflow = "babysit-review"
+		case s.PR + "-address-review":
+			workflow = "address-review"
 		default:
 			continue
 		}
@@ -269,16 +306,33 @@ func observeWorkers(s *State) (workerLiveness, error) {
 			fmt.Printf("PR #%s: ignoring live %s window %s: it belongs to another repository\n", s.PR, workflow, target)
 			continue
 		case paneUnknown:
-			note := fmt.Sprintf("%s window %s is live but its repository is unknown; let the worker finish, or close that window once its edits are preserved; cenci babysit reset %s re-arms the retry budget", workflow, target, s.PR)
+			note := fmt.Sprintf("%s window %s is live but its repository is unknown; let the worker finish, or close that window once its edits are preserved", workflow, target)
+			// The retry budget belongs to the CI and merge repair workers; a review
+			// window has none, so `reset` is no advice for it.
+			if workflow == "ci-repair" || workflow == "merge-repair" {
+				note += fmt.Sprintf("; cenci babysit reset %s re-arms the retry budget", s.PR)
+			}
 			if !slices.Contains(w.notes, note) {
 				w.notes = append(w.notes, note)
 				fmt.Printf("PR #%s: %s\n", s.PR, note)
 			}
 		}
-		if workflow == "ci-repair" {
+		switch workflow {
+		case "ci-repair":
 			w.ciLive = true
-		} else {
+		case "merge-repair":
 			w.mergeLive = true
+		case "babysit-review":
+			w.reviewLive = true
+		case "address-review":
+			w.addressReviewLive = true
+			// An interactive review never exits by itself: always say how to end
+			// its hold, owned or not.
+			note := fmt.Sprintf("address-review window %s is live and holds this PR; it never exits by itself: %s", target, addressReviewCloseNote)
+			if !slices.Contains(w.notes, note) {
+				w.notes = append(w.notes, note)
+				fmt.Printf("PR #%s: %s\n", s.PR, note)
+			}
 		}
 	}
 	return w, nil

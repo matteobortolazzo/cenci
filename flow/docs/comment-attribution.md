@@ -31,7 +31,10 @@ forged or quoted banner can only suppress that *same* comment's own ability
 to register as new feedback — it can never forge resolution of another
 comment, and it authenticates nothing. Every other consumer, and the
 `<!-- cenci-<kind> -->` marker's own role as the sole *authentication*
-signal, are unchanged by this exception.
+signal, are unchanged by this exception. The same first-line match now also
+filters the supervisor's PR conversation comments (`issues/<pr>/comments`), so
+a banner-first comment, including every review receipt, never registers as new
+discussion feedback; a quoted or forged banner suppresses only that same comment.
 
 ## The convention
 
@@ -64,7 +67,7 @@ different quoting — the banner blockquoted, the marker/anchor bare.
 
 Every marker-bearing flow comment uses one of the `<kind>` values below;
 `<kind>` is unique per call site so a consumer can tell which flow code path
-produced a given comment. flow's eight kinds:
+produced a given comment. flow's nine kinds:
 
 | Kind | File / call site | Marker | Consumers |
 |---|---|---|---|
@@ -76,6 +79,7 @@ produced a given comment. flow's eight kinds:
 | `oversize-child` | `skills/implement/phases/phase-1-plan.md` — the Split Gate's split-child Stop branch and its lean-ticket-mode escalation branch (two call sites) | `<!-- cenci-oversize-child -->` | `isCenciAuthored` (`watch/internal/dispatch/resume.go`) |
 | `decision` | `skills/implement/phases/phase-1-plan.md` — `## Decision Comment` and its three call sites (Lean Approval Path step 4, `## Persist the Plan`'s Mark-Planned prose, `## Resume From Draft` step 7) | `<!-- cenci-decision -->` | `isCenciAuthored` (`watch/internal/dispatch/resume.go`) |
 | `parent-close-review` | `skills/close/scripts/close-parent.sh` (invoked by `skills/close/SKILL.md` step 5 and `skills/close/codex.md`) — the split-parent coverage review posted on the parent before it is closed or gains gap children | `<!-- cenci-parent-close-review -->` | `isCenciAuthored` (`watch/internal/dispatch/resume.go`); human triage of the parent |
+| `review-receipt` | `skills/address-review/SKILL.md` and `skills/address-review/codex.md` — the `## Finite Receipt Branch (babysit-review)`'s one receipt comment, posted on the **PR** conversation thread | `<!-- cenci-review-receipt:<32-hex> -->` | `watch/internal/babysit` receipt verification (`watch/internal/babysit/discussion.go`) — see the machine-read below; not `isCenciAuthored`, which never scans a PR thread |
 
 ### `parent-gap-report` is a cross-project contract
 
@@ -160,6 +164,42 @@ marker alongside the nonce-bearing one — the nonce-bearing marker already
 carries the `<!-- cenci-` prefix `isCenciAuthored` scans for, so it already
 satisfies the marker invariant on its own.
 
+### `review-receipt` is the one sanctioned PR-thread marker
+
+Every other marker lives on the ticket's **issue** thread. `review-receipt` is
+the exception: the finite `babysit-review` worker posts it on the **PR**
+conversation thread, so `cenci babysit` can learn which `discussion:<id>` keys
+the worker handled. It is nonce-bearing like `planner-escalation`, but the nonce
+is a per-launch secret the supervisor mints and passes in the launch argument
+(`<pr> --receipt-nonce <nonce> discussion:<id>=<sha256> …`), not an anchor the
+worker mints. The grammar is load-bearing and strict:
+
+```markdown
+> 🤖 **cenci** — review receipt posted by `/cenci:address-review` (babysit-review).
+<!-- cenci-review-receipt:<32-hex> -->
+head: <40|64-hex>
+- discussion:<id> revision=<64-hex> outcome=<addressed|no-action|blocked|failed>
+```
+
+The banner is blockquoted and first; the marker is on its own non-blockquoted
+line; the body has exactly one marker line and exactly one `head:` line, one
+`- discussion:` line per listed key (zero lines for a launch carrying only
+inline or review keys), and no duplicate keys. A `- discussion:` line that does
+not match rejects the whole receipt.
+
+**The sanctioned machine-read.** The babysit supervisor reads this marker, and
+only after stripping every `>`-blockquote line (the `stripBlockquoteLines`
+rule above), so a banner-only or quoted-marker comment never counts. It accepts
+a receipt only when all of these hold: the nonce exactly matches the
+supervisor's recorded outstanding nonce (and was not already consumed); the
+author has write permission on the repository (`admin` or `write`); `created_at`
+is after the launch; the comment is unedited (`updated_at` equals `created_at`);
+and each listed revision equals the current body hash of that discussion
+comment. The banner stays a non-trust signal: authentication rests on the nonce
+and the permission check, never on the banner text. The literals are pinned
+across `watch/internal/babysit/discussion.go`, the address-review procedures
+and this doc by `flow/tests/review-receipt-contract.test.sh`.
+
 ## Why every issue comment gets a marker (defense in depth)
 
 This is defense in depth, not a fix for a reproducible bug today.
@@ -190,6 +230,14 @@ the tree, not because either one carries an attribution banner:
 | `refine-create` | `skills/refine/scripts/ensure-issue.sh` | `<!-- cenci-refine-create:<nonce> -->` | The pre-existing issue-creation dedup marker `/cenci:refine` embeds in a newly created child/companion issue's **body** (never a comment), so a resumed refine session can recover the same issue by nonce instead of re-POSTing. |
 
 ## PR comments: banner only, no marker
+
+**Precedence (#979):** the `review-receipt` comment above is the one sanctioned
+PR-thread marker. Where this section says a PR comment carries "no marker",
+that holds for every PR-thread call site *except* the review receipt, and the
+receipt exception takes precedence for that comment only: `cenci babysit` reads
+`issues/<pr>/comments` and does consume `<!-- cenci-review-receipt:<32-hex> -->`
+(after stripping blockquote lines). The inline replies and general PR comments
+below stay marker-less, and no other kind may borrow the exception.
 
 Four call sites post to a **PR** thread rather than the ticket's issue
 thread — `skills/review/SKILL.md`'s Phase 4 report,

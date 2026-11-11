@@ -27,14 +27,14 @@ const fixCap = 3
 // resolution truth and launch-dedup marker -- a dedup key must never double
 // as merge authorization. load()'s migration seeds LaunchedKeys from
 // PendingKeys for any state below this version, so a supervisor upgraded
-// mid-episode does not fire one spurious address-review relaunch for work
+// mid-episode does not fire one spurious review relaunch for work
 // already dispatched under the old schema.
 //
 // #924 adds ChecksAbsentSince/ChecksAbsentHeadSHA without bumping this: both
 // are purely additive `omitempty` fields with no migration to run (their
 // zero value already means "clock not running" / "already elapsed"), and a
 // bump would re-run the LaunchedKeys migration above on every already-healthy
-// v2 state file, which can suppress an address-review dispatch (#885).
+// v2 state file, which can suppress a review dispatch (#885).
 const stateSchemaVersion = 2
 
 type Options struct {
@@ -89,7 +89,7 @@ type State struct {
 	AddressedKeys   []string `json:"addressedCommentKeys,omitempty"`
 	PendingKeys     []string `json:"pendingCommentKeys,omitempty"`
 	// LaunchedKeys records which currently-pending keys already had an
-	// address-review workflow dispatched for their *current* resolution
+	// review workflow (babysit-review) dispatched for their *current* resolution
 	// episode (#885). It is launch-dedup bookkeeping ONLY -- a key's
 	// presence here means nothing more than "don't relaunch this episode's
 	// workflow again"; it is never merge authorization, and resolution truth
@@ -120,7 +120,7 @@ type State struct {
 	// LaunchSession is the tmux session every launch() call targets,
 	// resolved once at arm time (#975) rather than inherited from whatever
 	// $TMUX_PANE happens to be live when a much-later tick actually
-	// launches a repair/attention/address-review workflow -- the arming
+	// launches a repair/attention/review workflow -- the arming
 	// pane can be long gone by then. Additive; re-resolved on every arm, no
 	// stateSchemaVersion bump needed (contrast #885's LaunchedKeys
 	// migration).
@@ -151,6 +151,32 @@ type State struct {
 	// board open forever with no self-heal); `cenci close --force` and
 	// `cenci babysit stop <pr>` remain the documented remedies.
 	CIStatus string `json:"ciStatus,omitempty"`
+
+	// Ordinary PR discussion (#1472). All four are additive `omitempty` fields
+	// with no stateSchemaVersion bump (a bump would re-run the LaunchedKeys
+	// migration on every healthy v2 file): a v2 file without them loads with an
+	// empty seen-set and its first tick re-detects every non-excluded human
+	// discussion comment.
+	//
+	// DiscussionRevisions is the seen-set: each `discussion:<id>` key the
+	// supervisor has detected, with the body revision (SHA-256) it last saw. It
+	// is what detects edits and what makes equal created_at values on different
+	// ticks both count (an id seen-set, not a `>=` watermark).
+	DiscussionRevisions map[string]string `json:"discussionRevisions,omitempty"`
+	// DiscussionReceipts is the evidence per addressed (or blocked/failed)
+	// discussion key: comment id, revision, processed head SHA, outcome, the
+	// receipt comment and its source (receipt or human-cli).
+	DiscussionReceipts map[string]discussionReceipt `json:"discussionReceipts,omitempty"`
+	// ReviewLaunch is the outstanding babysit-review launch a receipt is
+	// verified against: its nonce, launch time and key set. It is cleared once
+	// the nonce is consumed (or every key resolved) and the window has ended.
+	ReviewLaunch *reviewLaunchRecord `json:"reviewLaunch,omitempty"`
+	// ConsumedReviewNonces maps each consumed nonce to the comment that consumed
+	// it (0 for a nonce a newer launch superseded), so the original receipt,
+	// re-read every tick, is skipped silently while any other comment carrying
+	// it is a recorded rejection.
+	ConsumedReviewNonces map[string]int64 `json:"consumedReviewNonces,omitempty"`
+
 	// ChecksAbsentSince records when ciStatusUnknown was first observed for
 	// the current ChecksAbsentHeadSHA (#924): set/maintained by
 	// noteChecksUnknown at every tick site that publishes ciStatusUnknown
@@ -299,6 +325,16 @@ type review struct {
 	SubmittedAt string `json:"submitted_at"`
 	User        struct{ Login string }
 }
+
+// maxReviewLaunchKeys bounds the discussion keys (each carried with its
+// revision on the tmux command line) one babysit-review launch takes (#1472
+// Q&A 5). The rest stay pending and unlaunched and go out on a later tick with
+// no live writer: a safe deferred launch, not a retry policy.
+const maxReviewLaunchKeys = 40
+
+// launchClock is a test seam over the clock a babysit-review launch is stamped
+// with: the receipt's created_at must be strictly later than this.
+var launchClock = func() time.Time { return time.Now().UTC() }
 
 // sleep is a test seam over time.Sleep for Run's poll and retry waits, mirroring
 // the command/processOwned/startSupervisor seams (a var pointing at a default
@@ -467,8 +503,18 @@ func Run(o Options) error {
 		ghErr := ghJSON(&pr, "pr", "view", o.PR, "--repo", repo, "--json", prViewFields)
 		_, statErr := os.Stat(path)
 		preexisting := statErr == nil
-		s := load(path)
-		if s.Repo != "" && (s.Repo != repo || s.Agent != o.Agent) {
+		// #1472: strict. An unreadable or undecodable state is never mistaken for an
+		// empty one (the old fail-open load started from empty PendingKeys and
+		// overwrote the file): arming refuses, names the path, leaves the file
+		// byte-identical and starts no supervisor. `cenci babysit stop` removes the
+		// file, which is the documented recovery.
+		s, err := readStrictForRun(path)
+		if err != nil {
+			return err
+		}
+		// A stopped state (and one an earlier supervisor cleared) records no agent:
+		// any agent may adopt it, keeping its feedback bookkeeping.
+		if s.Repo != "" && (s.Repo != repo || (s.Agent != "" && s.Agent != o.Agent)) {
 			return errors.New("existing supervisor state belongs to different repository or agent")
 		}
 		// Before the "arming" overwrite below, which would hide the old
@@ -577,8 +623,11 @@ func Run(o Options) error {
 	defer func() {
 		_ = os.Remove(lockPath)
 	}()
-	s := load(path)
-	if s.Repo != "" && (s.Repo != repo || s.Agent != o.Agent) {
+	s, err := readStrictForRun(path)
+	if err != nil {
+		return err
+	}
+	if s.Repo != "" && (s.Repo != repo || (s.Agent != "" && s.Agent != o.Agent)) {
 		return errors.New("existing supervisor state belongs to different repository or agent")
 	}
 	// Before the startup status write below, which would hide the old
@@ -781,7 +830,7 @@ func tick(s *State) (bool, time.Duration, error) {
 		}
 	}
 	// At most one branch writer launches per tick, in priority order: merge
-	// repair for an observed conflict, then CI repair, then address-review
+	// repair for an observed conflict, then CI repair, then babysit-review
 	// below. A live CI or merge worker for this PR suppresses all of them.
 	ciLaunched := false
 	switch {
@@ -916,6 +965,32 @@ func tick(s *State) (bool, time.Duration, error) {
 		recordUpstreamReadFailure(s, reasonUpstreamReviewsUnreadable, err)
 		return false, 0, err
 	}
+	// #1472: ordinary PR discussion (`issues/<pr>/comments`). An unreadable read
+	// returns before anything is touched (every key byte-identical, never an empty
+	// set). A read that is not proven complete makes no discussion mutation, no
+	// receipt consumption and no babysit-review launch, while the comment:/review:
+	// pass below runs unchanged (Q&A 13). A complete read first consumes the
+	// receipt of the outstanding launch (the only way a key becomes addressed from
+	// here), then reconciles and detects discussion keys; reconcileFeedback's own
+	// pass leaves discussion keys alone.
+	discussion, discussionComplete, err := fetchDiscussion(s.Repo, s.PR)
+	if err != nil {
+		recordUpstreamReadFailure(s, reasonUpstreamDiscussionUnreadable, err)
+		return false, 0, err
+	}
+	var discussionVerdict feedbackVerdict
+	var receiptRejections []string
+	// One lookup per login per tick, shared by receipt verification and the
+	// launch's author-trust marking.
+	permission := permissionResolver(s.Repo)
+	if discussionComplete {
+		receiptRejections = consumeReviewReceipt(s, discussion, permission)
+		var changed bool
+		discussionVerdict, changed = reconcileDiscussion(s, discussion)
+		if changed {
+			actionable = true
+		}
+	}
 	// #897: snapshot the entry-time watermark before reconcileFeedback runs
 	// below -- reconcileFeedback can advance s.LastCommentAt, so
 	// detectNewFeedbackKeys compares this tick's new comments against this
@@ -991,8 +1066,8 @@ func tick(s *State) (bool, time.Duration, error) {
 			s.PendingCommentAt, s.PendingHeadSHA = "", ""
 		}
 	}
-	// #885/#897: the single per-tick address-review launch trigger, driven by
-	// PendingKeys \ LaunchedKeys -- covers both this tick's brand-new keys
+	// #885/#897/#1472: the single per-tick review launch trigger
+	// (babysit-review), driven by PendingKeys \ LaunchedKeys -- covers both this tick's brand-new keys
 	// (detected above, after reconcileFeedback) and any key reconcileFeedback
 	// just reopened above, exactly once per resolution episode (Decision 3).
 	// Runs last, after both reconcileFeedback and detectNewFeedbackKeys, so
@@ -1004,22 +1079,74 @@ func tick(s *State) (bool, time.Duration, error) {
 	// it waits while a conflict is held, when ci-repair launched this tick, and
 	// while this PR's CI or merge worker is live. Deferred keys stay pending and
 	// out of LaunchedKeys, so the first tick with no writer launches them.
-	if toLaunch := removeKeys(s.PendingKeys, s.LaunchedKeys); !conflictHeld && !ciLaunched && len(toLaunch) > 0 {
+	// #1472 (Q&A 8): the pane inventory is also read when a review launch is
+	// outstanding, a launched discussion key still has no receipt, or the fleet
+	// automerge switch is on, so a live review window holds automerge and the
+	// ended-without-receipt hold knows the window has ended. A quiet tick with
+	// automerge off and nothing outstanding still skips the probe.
+	unreceipted := unreceiptedDiscussionKeys(s)
+	fleetEnabled := loadFleetEnabled()
+	if s.ReviewLaunch != nil || len(unreceipted) > 0 || fleetEnabled {
+		if _, err := live(); err != nil {
+			return false, 0, err
+		}
+	}
+	reviewWindowLive := observed != nil && observed.reviewLive
+	launchedNow := false
+	// A launched key whose worker has ended with no receipt for its revision
+	// holds, lowest precedence, with no relaunch (it is still in LaunchedKeys)
+	// until `cenci babysit resolve` or an edit. Evaluated before this tick's own
+	// launch so a key launched just now is never "ended".
+	if discussionComplete && !reviewWindowLive && len(unreceipted) > 0 {
+		discussionVerdict = combineHolds(discussionVerdict, feedbackVerdict{
+			Hold:   reasonReviewWorkerEndedWithoutReceipt,
+			Detail: unreceipted[0] + ": the review worker ended without a valid receipt; once handled, run " + resolveHint(s.PR, unreceipted),
+		})
+	}
+	verdict = combineHolds(verdict, discussionVerdict)
+	// The launch trigger described above is skipped on an unproven-complete
+	// discussion read (a partial read cannot say which keys are pending).
+	if toLaunch := removeKeys(s.PendingKeys, s.LaunchedKeys); discussionComplete && !conflictHeld && !ciLaunched && len(toLaunch) > 0 {
 		w, err := live()
 		if err != nil {
 			return false, 0, err
 		}
 		if w.any() {
-			fmt.Printf("PR #%s has new review feedback, but %s; address-review waits for it\n", s.PR, w.describe(s.PR))
+			fmt.Printf("PR #%s has new review feedback, but %s; babysit-review waits for it\n", s.PR, w.describe(s.PR))
 		} else {
-			if err := launch(s, "address-review", s.PR); err != nil {
-				recordUpstreamReadFailure(s, reasonWorkflowLaunchFailed, err)
-				return false, 0, err
+			keys, trusted, skipped := reviewLaunchKeys(s, toLaunch, discussion, permission)
+			for _, k := range skipped {
+				workerNotes = append(workerNotes, "author permission lookup failed for "+k+"; will retry")
 			}
-			s.LaunchedKeys = append(s.LaunchedKeys, toLaunch...)
-			actionable = true
+			if len(keys) > 0 {
+				if err := launchBabysitReview(s, keys, trusted); err != nil {
+					recordUpstreamReadFailure(s, reasonWorkflowLaunchFailed, err)
+					return false, 0, err
+				}
+				launchedNow = true
+				actionable = true
+			}
 		}
 	}
+	// The outstanding launch is cleared once its nonce is consumed (or every
+	// discussion key it carried is resolved) and its window has ended. The pane
+	// inventory was read before this tick's own launch, so a launch made now is
+	// never cleared in the same tick: a comment:/review:-only launch is settled
+	// the moment it exists and would otherwise lose its nonce before the worker's
+	// zero-key receipt could consume it.
+	if s.ReviewLaunch != nil && !launchedNow && !reviewWindowLive && reviewLaunchSettled(s) {
+		s.ReviewLaunch = nil
+	}
+	// blocked/failed receipts and the recovery for every hold the supervisor
+	// cannot clear itself lead AutomergeDetail; status is recomputed every tick,
+	// after the green reset above.
+	if needsHuman := needsHumanDiscussionKeys(s); len(needsHuman) > 0 {
+		s.Status = "needs-input"
+		workerNotes = append(workerNotes, "the review worker reported blocked or failed (or the comment's author lacks write permission); once handled by a write-access human, run "+resolveHint(s.PR, needsHuman))
+	} else if s.Status == "needs-input" && !s.CIRepairPaused && s.ConflictNotifiedSHA == "" {
+		s.Status = "running"
+	}
+	workerNotes = append(workerNotes, receiptRejections...)
 	// A live writer keeps the tick actionable, holds automerge, and its
 	// unknown-ownership notes lead the recorded AutomergeDetail.
 	workerLive := observed != nil && observed.any()
@@ -1027,7 +1154,7 @@ func tick(s *State) (bool, time.Duration, error) {
 	if observed != nil {
 		workerNotes = append(slices.Clone(observed.notes), workerNotes...)
 	}
-	if runAutomerge(s, pr, checks, verdict, commentsComplete, reviewsComplete, workerLive, strings.Join(workerNotes, "; ")) {
+	if runAutomerge(s, pr, checks, verdict, commentsComplete, reviewsComplete, discussionComplete, workerLive, fleetEnabled, strings.Join(workerNotes, "; ")) {
 		actionable = true
 	}
 	if actionable {
@@ -1100,6 +1227,178 @@ func dispatchCIRepair(s *State, pr prView, failing []string) error {
 		fmt.Printf("warning: PR #%s: %v; the ci-repair window was spawned, counting the attempt as dispatched\n", s.PR, err)
 	}
 	return nil
+}
+
+// consumeReviewReceipt verifies the outstanding launch's receipt against the
+// complete discussion read and applies it onto s (#1472). The receipt is the only
+// evidence that moves a discussion key to addressed: the nonce must be the
+// recorded one, the author must have write permission (looked up only for a
+// comment carrying the outstanding nonce), created_at must be after the launch,
+// and each listed revision must equal the key's current body hash. An accepted
+// receipt consumes the nonce; `addressed` and `no-action` keys move to
+// AddressedKeys with their evidence, `blocked` and `failed` keys stay pending and
+// launched (recorded, no relaunch for the same revision). It returns the
+// rejection notes for automergeDetail.
+func consumeReviewReceipt(s *State, comments []discussionComment, permission func(login string) writePermission) []string {
+	res := verifyReceipt(s.ReviewLaunch, s.ConsumedReviewNonces, comments, discussionRevisionMap(comments), permission)
+	var notes []string
+	for _, r := range res.Rejections {
+		notes = append(notes, r.String())
+	}
+	if !res.Accepted {
+		return notes
+	}
+	notes = append(notes, res.Refused...)
+	if s.ConsumedReviewNonces == nil {
+		s.ConsumedReviewNonces = map[string]int64{}
+	}
+	s.ConsumedReviewNonces[res.Nonce] = res.ReceiptCommentID
+	if s.DiscussionReceipts == nil {
+		s.DiscussionReceipts = map[string]discussionReceipt{}
+	}
+	for _, key := range sortedKeys(res.Addressed) {
+		rec := res.Addressed[key]
+		markDiscussionAddressed(s, key, rec)
+		if s.DiscussionRevisions == nil {
+			s.DiscussionRevisions = map[string]string{}
+		}
+		s.DiscussionRevisions[key] = rec.Revision
+	}
+	for _, key := range sortedKeys(res.Unresolved) {
+		s.DiscussionReceipts[key] = res.Unresolved[key]
+	}
+	return notes
+}
+
+// sortedKeys returns m's keys in comment-id order, so applying a receipt is
+// deterministic.
+func sortedKeys(m map[string]discussionReceipt) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	slices.SortFunc(keys, compareDiscussionKeys)
+	return keys
+}
+
+// reviewLaunchKeys picks the feedback keys one babysit-review launch carries from
+// the pending-and-unlaunched toLaunch: every comment:/review: key, plus at most
+// maxReviewLaunchKeys discussion keys whose comment is still on the PR at the
+// recorded revision (a deleted or just-edited comment is not launched; the rest
+// stay pending and unlaunched for a later tick).
+//
+// It also returns the carried discussion keys whose comment author is trusted
+// (the repository permission lookup answered `admin` or `write`): the launch
+// records exactly these as its allow-list, and every other carried discussion
+// key is untrusted, so the unattended worker must never act on it (the launch
+// argument marks it `:untrusted`). A definitely denied author is carried as
+// untrusted. A failed lookup (`unknown`: a gh error, timeout or decode failure)
+// is not a denial: that key is skipped for this launch -- left pending and
+// unlaunched, not carried -- so the next tick looks again, exactly as the
+// receipt-author lookup retries; skipped names those keys for the tick's detail.
+func reviewLaunchKeys(s *State, toLaunch []string, comments []discussionComment, permission func(login string) writePermission) (keys, trusted, skipped []string) {
+	current := discussionRevisionMap(comments)
+	authors := map[string]string{}
+	for _, c := range humanDiscussion(comments) {
+		authors[discussionKey(c.ID)] = c.Login
+	}
+	discussionKeys := 0
+	for _, k := range toLaunch {
+		if !isDiscussionKey(k) {
+			keys = append(keys, k)
+			continue
+		}
+		if discussionKeys >= maxReviewLaunchKeys {
+			continue
+		}
+		if rev := s.DiscussionRevisions[k]; rev == "" || current[k] != rev {
+			continue
+		}
+		switch permission(authors[k]) {
+		case writePermissionGranted:
+			trusted = append(trusted, k)
+		case writePermissionDenied:
+			// Definitely untrusted: carried, marked `:untrusted`, not recorded as trusted.
+		default:
+			skipped = append(skipped, k)
+			continue
+		}
+		keys = append(keys, k)
+		discussionKeys++
+	}
+	return keys, trusted, skipped
+}
+
+// untrustedSuffix marks a discussion key in the babysit-review launch argument
+// whose comment author lacks write permission.
+const untrustedSuffix = ":untrusted"
+
+// reviewLaunchArg renders the babysit-review argument: `<pr> --receipt-nonce
+// <nonce>` followed by each carried discussion key with its revision,
+// `discussion:<id>=<sha256>`, so the worker echoes revisions it was given rather
+// than hashing bodies itself. comment:/review: keys ride in the launch record
+// only (the worker resolves them from GitHub), exactly as the old launch passed
+// just the PR. A discussion key not in trusted carries the `:untrusted` suffix
+// (`discussion:<id>=<sha256>:untrusted`); trusted keys are unchanged.
+func reviewLaunchArg(s *State, nonce string, keys, trusted []string) string {
+	parts := []string{s.PR, "--receipt-nonce", nonce}
+	for _, k := range keys {
+		if isDiscussionKey(k) {
+			token := k + "=" + s.DiscussionRevisions[k]
+			if !slices.Contains(trusted, k) {
+				token += untrustedSuffix
+			}
+			parts = append(parts, token)
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
+// launchBabysitReview dispatches one finite babysit-review worker for keys, with
+// a fresh nonce bound to this launch (#1472). `cenci run` exit status 3 (window
+// spawned, post-spawn setup failed) counts as dispatched, like ci-repair: the
+// worker is starting. Any other failure consumes nothing: no nonce is recorded
+// and the keys stay unlaunched. A still-outstanding earlier nonce is superseded
+// (recorded in ConsumedReviewNonces with comment id 0), so a late receipt for it
+// is a rejection.
+func launchBabysitReview(s *State, keys, trusted []string) error {
+	nonce, err := newReviewNonce()
+	if err != nil {
+		return err
+	}
+	launchedAt := launchClock()
+	if err := launch(s, "babysit-review", reviewLaunchArg(s, nonce, keys, trusted)); err != nil {
+		if !errors.Is(err, errWindowSpawned) {
+			return err
+		}
+		fmt.Printf("warning: PR #%s: %v; the babysit-review window was spawned, counting the launch as dispatched\n", s.PR, err)
+	}
+	if old := s.ReviewLaunch; old != nil {
+		if _, used := s.ConsumedReviewNonces[old.Nonce]; !used {
+			if s.ConsumedReviewNonces == nil {
+				s.ConsumedReviewNonces = map[string]int64{}
+			}
+			s.ConsumedReviewNonces[old.Nonce] = 0
+		}
+	}
+	s.ReviewLaunch = &reviewLaunchRecord{Nonce: nonce, LaunchedAt: launchedAt, Keys: slices.Clone(keys), TrustedKeys: slices.Clone(trusted)}
+	s.LaunchedKeys = append(s.LaunchedKeys, keys...)
+	return nil
+}
+
+// reviewLaunchSettled reports whether the outstanding launch needs no further
+// receipt: its nonce was consumed by an accepted receipt, or no discussion key it
+// carried is pending any more (resolved, or addressed some other way).
+func reviewLaunchSettled(s *State) bool {
+	if id, ok := s.ConsumedReviewNonces[s.ReviewLaunch.Nonce]; ok && id != 0 {
+		return true
+	}
+	for _, k := range s.ReviewLaunch.Keys {
+		if isDiscussionKey(k) && slices.Contains(s.PendingKeys, k) {
+			return false
+		}
+	}
+	return true
 }
 
 // cenciRunExitWindowSpawned is the `cenci run` exit status for "the window was
@@ -1292,6 +1591,22 @@ func load(path string) State {
 	return s
 }
 
+// readStrictForRun is Run's state load (#1472): a missing file is a fresh state,
+// but an unreadable or undecodable one fails with reasonStateUnreadable and the
+// path (readStateStrict's error names it), so neither the arm nor the supervisor
+// child ever starts from an empty PendingKeys.
+func readStrictForRun(path string) (State, error) {
+	s, err := readStateStrict(path)
+	if errors.Is(err, os.ErrNotExist) {
+		migrateState(&s)
+		return s, nil
+	}
+	if err != nil {
+		return State{}, fmt.Errorf("%s: %w; `cenci babysit stop` removes the file if it cannot be recovered", reasonStateUnreadable, err)
+	}
+	return s, nil
+}
+
 // readStateStrict is load for callers that must not mistake an unreadable
 // state for an empty one (#1300). It returns the migrated State it managed to
 // decode -- zero when the file could not be read, possibly partly filled when
@@ -1316,7 +1631,7 @@ func readStateStrict(path string) (State, error) {
 // represents in-flight feedback dispatched under the old AddressedKeys-as-dedup
 // scheme, so seed LaunchedKeys from it here, before Run() (or any other
 // caller) ever overwrites s.SchemaVersion, so an upgraded supervisor with
-// in-flight feedback does not fire one spurious address-review relaunch for
+// in-flight feedback does not fire one spurious review relaunch for
 // work already dispatched. Both the standalone `load()` callers (BlocksClose,
 // `cenci babysit status`) and Run()'s own startup load see the migrated value.
 func migrateState(s *State) {
@@ -1448,30 +1763,41 @@ func stopRepo(repo, pr, explicit string, strict bool) (gonePID int, err error) {
 	}
 	cleanPR := strings.TrimPrefix(pr, "#")
 	path := statePath(dir, repo, cleanPR)
-	var s State
-	if strict {
-		var rerr error
-		s, rerr = readStateStrict(path)
-		if errors.Is(rerr, os.ErrNotExist) {
-			return 0, &classifiedError{class: ErrNoSupervisor, msg: fmt.Sprintf("no supervisor found for PR #%s", pr)}
-		}
-		if rerr != nil {
-			return 0, &classifiedError{class: ErrStateUnreadable, cause: rerr, msg: fmt.Sprintf("babysit state for PR #%s could not be read", cleanPR)}
-		}
-	} else {
-		if _, err := os.Stat(path); os.IsNotExist(err) {
-			return 0, &classifiedError{class: ErrNoSupervisor, msg: fmt.Sprintf("no supervisor found for PR #%s", pr)}
-		}
-		s = load(path)
+	// The host CLI reads leniently: an unreadable file is the documented recovery
+	// case for `stop`, so it is removed below instead of kept. The daemon's
+	// container-driven stop reads strictly and keeps it.
+	s, rerr := readStateStrict(path)
+	if errors.Is(rerr, os.ErrNotExist) {
+		return 0, &classifiedError{class: ErrNoSupervisor, msg: fmt.Sprintf("no supervisor found for PR #%s", pr)}
+	}
+	unreadable := rerr != nil
+	if unreadable && strict {
+		return 0, &classifiedError{class: ErrStateUnreadable, cause: rerr, msg: fmt.Sprintf("babysit state for PR #%s could not be read", cleanPR)}
 	}
 	if s.PID > 0 {
 		if processOwned(s.PID, cleanPR) {
-			proc, e := os.FindProcess(s.PID)
-			if e != nil {
+			// SIGTERM the verified supervisor, wait for it to exit and remove its
+			// lock (it has no SIGTERM handler, so its deferred lock removal never
+			// runs): Reset's sequence. The state is only rewritten after the
+			// supervisor can no longer save over it (#1472).
+			if e := terminateAndWait(s.PID, cleanPR); e != nil {
 				return 0, &classifiedError{class: ErrStopFailed, cause: e, msg: e.Error()}
 			}
-			if e = proc.Signal(syscall.SIGTERM); e != nil {
-				return 0, &classifiedError{class: ErrStopFailed, cause: e, msg: fmt.Sprintf("stop pid %d: %v", s.PID, e)}
+			if e := os.Remove(path + ".lock"); e != nil && !os.IsNotExist(e) {
+				return 0, &classifiedError{class: ErrStopFailed, cause: e, msg: e.Error()}
+			}
+			// The supervisor may have saved while it was dying: re-read before
+			// rewriting.
+			fresh, e := readStateStrict(path)
+			switch {
+			case errors.Is(e, os.ErrNotExist):
+				return 0, nil // it finished (MERGED/CLOSED) and removed its own state
+			case e != nil && strict:
+				return 0, &classifiedError{class: ErrStateUnreadable, cause: e, msg: fmt.Sprintf("babysit state for PR #%s could not be read", cleanPR)}
+			case e != nil:
+				unreadable = true
+			default:
+				s, unreadable = fresh, false
 			}
 		} else {
 			if !processGone(s.PID) {
@@ -1486,10 +1812,47 @@ func stopRepo(repo, pr, explicit string, strict bool) (gonePID int, err error) {
 			gonePID = s.PID
 		}
 	}
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+	if unreadable {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return 0, &classifiedError{class: ErrStopFailed, cause: err, msg: err.Error()}
+		}
+		// The documented recovery for an unreadable state discards its feedback
+		// bookkeeping; say so, so the loss is never silent.
+		fmt.Fprintf(os.Stderr, "babysit state unreadable: %s: removed; the pending and addressed feedback bookkeeping for PR #%s was discarded, so every comment is detected again after a re-arm\n", path, cleanPR)
+		return gonePID, nil
+	}
+	if err := save(path, stoppedState(s, repo, cleanPR)); err != nil {
 		return 0, &classifiedError{class: ErrStopFailed, cause: err, msg: err.Error()}
 	}
 	return gonePID, nil
+}
+
+// stoppedState is what `cenci babysit stop` leaves behind (#1472, Q&A 1): only the
+// feedback bookkeeping a re-arm must restore -- the pending, addressed and
+// launched keys, the comment watermarks, the discussion revisions and receipts,
+// the outstanding review launch and the consumed nonces -- with status stopped
+// and no pid. The agent, retry budgets, CI status and closing issues are
+// cleared: a re-arm adopts a fresh agent and its budgets restart as they do
+// today, and a stopped state never blocks a ticket close. Unresolved feedback
+// therefore survives stop and keeps the review-stage hold after a re-arm.
+func stoppedState(s State, repo, pr string) State {
+	return State{
+		SchemaVersion:        stateSchemaVersion,
+		PR:                   pr,
+		Repo:                 repo,
+		Status:               "stopped",
+		UpdatedAt:            time.Now().UTC(),
+		LastCommentAt:        s.LastCommentAt,
+		PendingCommentAt:     s.PendingCommentAt,
+		PendingHeadSHA:       s.PendingHeadSHA,
+		AddressedKeys:        s.AddressedKeys,
+		PendingKeys:          s.PendingKeys,
+		LaunchedKeys:         s.LaunchedKeys,
+		DiscussionRevisions:  s.DiscussionRevisions,
+		DiscussionReceipts:   s.DiscussionReceipts,
+		ReviewLaunch:         s.ReviewLaunch,
+		ConsumedReviewNonces: s.ConsumedReviewNonces,
+	}
 }
 
 // Status prints the supervisor summary for pr as one JSON object (#1390):
@@ -1505,6 +1868,16 @@ func Status(pr, explicit string) error {
 		return statusOnHost(repo, cleanPR)
 	}
 	st, err := StatusRepo(repo, cleanPR, explicit)
+	if errors.Is(err, ErrStateUnreadable) {
+		// #1472: on the host the unreadable state is a named failure with the
+		// path and the cause (exit 1 at the CLI); the daemon-relayed class stays
+		// path-free (#1390 P33).
+		dir, derr := stateDir(explicit)
+		if derr != nil {
+			return err
+		}
+		return unreadableStateError(statePath(dir, repo, cleanPR), err)
+	}
 	if err != nil {
 		return err
 	}

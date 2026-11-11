@@ -126,6 +126,9 @@ func newAdapterLaunchWorld(t *testing.T, pluginList string, installAdapter bool)
 	// anything else fails (and is logged, so an unexpected call is visible).
 	write(filepath.Join(fixtures, "pr.json"), `{"number":42,"title":"Change","state":"OPEN","headRefName":"feature","headRefOid":"abc","url":"https://example/pr/42","closingIssuesReferences":[]}`)
 	write(filepath.Join(fixtures, "checks.json"), `[{"bucket":"fail","name":"test","state":"FAILURE"}]`)
+	// #1472: the PR conversation read (`issues/<pr>/comments`) is served from a
+	// fixture, `[]` by default.
+	write(filepath.Join(fixtures, "discussion.json"), `[]`)
 	exectest.WriteExecutable(t, filepath.Join(binDir, "gh"), "#!/bin/sh\n"+
 		`printf '%s\000' "$#" "$@" >> `+exectest.ShellQuote(w.ghLog)+"\n"+
 		`case "$1 $2" in`+"\n"+
@@ -133,6 +136,7 @@ func newAdapterLaunchWorld(t *testing.T, pluginList string, installAdapter bool)
 		`  "pr view") cat `+exectest.ShellQuote(filepath.Join(fixtures, "pr.json"))+` ;;`+"\n"+
 		`  "pr checks") cat `+exectest.ShellQuote(filepath.Join(fixtures, "checks.json"))+` ;;`+"\n"+
 		`  api\ repos/*/pulls/*/comments*|api\ repos/*/pulls/*/reviews*) echo '[]' ;;`+"\n"+
+		`  api\ repos/*/issues/*/comments*) cat `+exectest.ShellQuote(filepath.Join(fixtures, "discussion.json"))+` ;;`+"\n"+
 		`  *) exit 1 ;;`+"\n"+
 		"esac\n")
 

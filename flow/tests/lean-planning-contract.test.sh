@@ -1397,18 +1397,18 @@ fi
 ATTRIBUTION_DOC_PATH="${FLOW_DIR}/docs/comment-attribution.md"
 ATTR_DECISION_ROW_MARKER='| `decision` | `skills/implement/phases/phase-1-plan.md` — `## Decision Comment`'
 ATTR_DECISION_MARKER_MARKER='`<!-- cenci-decision -->`'
-ATTR_SIX_KINDS_MARKER="flow's eight kinds:"
-ATTR_FIVE_KINDS_MARKER="flow's seven kinds:"
+ATTR_CURRENT_KINDS_MARKER="flow's nine kinds:"
+ATTR_PREVIOUS_KINDS_MARKER="flow's eight kinds:"
 
 if require_content ATTR_CONTENT "${ATTRIBUTION_DOC_PATH}" "comment-attribution.md"; then
   assert_contains_ws "${ATTR_CONTENT}" "${ATTR_DECISION_ROW_MARKER}" \
     "comment-attribution.md registry must add the decision kind row pointing at phase-1-plan.md's ## Decision Comment (AC3)"
   assert_contains_ws "${ATTR_CONTENT}" "${ATTR_DECISION_MARKER_MARKER}" \
     "comment-attribution.md registry must record the <!-- cenci-decision --> marker (AC3)"
-  assert_contains_ws "${ATTR_CONTENT}" "${ATTR_SIX_KINDS_MARKER}" \
-    "comment-attribution.md must count six flow kinds once decision is registered"
-  assert_absent_paired_ws "${ATTR_CONTENT}" "${ATTR_SIX_KINDS_MARKER}" "${ATTR_FIVE_KINDS_MARKER}" \
-    "comment-attribution.md must drop the stale five-kinds count"
+  assert_contains_ws "${ATTR_CONTENT}" "${ATTR_CURRENT_KINDS_MARKER}" \
+    "comment-attribution.md must count nine flow kinds once the review-receipt kind is registered"
+  assert_absent_paired_ws "${ATTR_CONTENT}" "${ATTR_CURRENT_KINDS_MARKER}" "${ATTR_PREVIOUS_KINDS_MARKER}" \
+    "comment-attribution.md must drop the stale eight-kinds count"
 fi
 
 echo "lean-planning-contract.test.sh: failures=${failures}"

@@ -322,8 +322,10 @@ changes and ask you to type `/plan` and resend. Refine follows the same
 plan, persist and apply handoff as the others, and
 `refinement.confirmBeforeApply: true` still requests final review before it
 writes. Explicit Codex Plan mode remains read-only. An unattended Codex launch
-of a planning workflow (for example babysit's `address-review`) therefore stops
-at that message instead of planning.
+of a planning workflow therefore stops at that message instead of planning.
+The exception is babysit's `babysit-review` (the `address-review` skill's finite
+receipt branch, run through `codex exec` with `CENCI_ATTENDED=0` and a
+`--receipt-nonce` argument), which needs no Plan-mode turn.
 
 Built-in Go templates cover the Claude and Codex workflows below with zero config. An
 optional `config.json` (respecting `$XDG_CONFIG_HOME`, or `--config`) overrides the
@@ -340,6 +342,7 @@ TestReadmeCapabilityTableInSync -update-readme` regenerates it):
 | `address-review` | yes | yes |
 | `babysit` | yes | yes |
 | `babysit-attention` | yes | yes |
+| `babysit-review` | yes | yes |
 | `ci-repair` | yes | yes |
 | `configure` | — | yes |
 | `implement` | yes | yes |
@@ -419,8 +422,8 @@ Codex adapter check does not (see its entry):
 new window only prints a warning); `1` refused or failed before the window was
 spawned; `2` usage error; `3` the window was spawned but a post-spawn step (setting
 `automatic-rename off`) failed, so an agent session is starting even though `run`
-reports an error. `cenci babysit` counts a `3` from a `ci-repair` launch as a
-dispatched attempt instead of launching a second worker.
+reports an error. `cenci babysit` counts a `3` from a `ci-repair` or `babysit-review`
+launch as dispatched instead of launching a second worker.
 
 The `2` cases for `--tmux-socket` (ticket #1431) both print one stderr line and
 create no window: a value that is not an absolute path, or that holds a tab or newline
@@ -455,8 +458,8 @@ launches (`--no-sandbox`) only; sandbox launches keep the built-in `sandboxArgs`
 change a sandbox launch, set `sandboxArgs` too. A workflow you define yourself with no
 `sandboxArgs` runs as `cenci open <its args>`, with no injected `--agent`.
 
-`ci-repair` is the one-shot exception among the built-in workflows, so a finished
-repair never leaves an interactive prompt behind:
+`ci-repair` (and `babysit-review`, below) is a one-shot exception among the built-in
+workflows, so a finished repair never leaves an interactive prompt behind:
 
 - Claude host: `claude --print -- "/cenci:ci-repair {ticket}"` (`args: ["--print", "--",
   "<prompt>"]`); sandbox: `cenci open -- --print "/cenci:ci-repair {ticket}"`
@@ -475,6 +478,18 @@ number. A custom `agents.<agent>.workflows.ci-repair` template is used verbatim,
 rewritten to `--print` or `exec`, and must itself be finite, because babysit reads a
 live `<PR>-ci-repair` pane as a repair still running. Overriding only its `args` keeps
 the built-in finite `sandboxArgs` for sandbox launches.
+
+`babysit-review` (#1472) is the supervisor-only review worker, one-shot the same way as
+`ci-repair`: Claude `--print` and `codex exec`, host and sandbox argv built like the
+`ci-repair` rows above, but running the `address-review` skill's finite receipt branch
+(the template key, not the skill, names the `<PR>-babysit-review` window). Its argument is
+`<PR> --receipt-nonce <nonce> discussion:<id>=<sha256>[:untrusted] …` (the suffix marks a
+comment whose author lacks write permission, which the worker never acts on and a receipt
+can never mark `addressed`; inline and review feedback from non-write authors is likewise never
+acted on) and `cenci babysit` launches it
+with `--unattended`. The `address-review` template itself is unchanged, so a human-launched
+interactive review keeps its behavior. A live `<PR>-babysit-review` pane is read as a branch
+writer, like `<PR>-ci-repair` (see Automerge below).
 
 **OpenCode (paused):** the retained adapter targets OpenCode 1.18.3 or newer. Doctor
 reports the pause and inspects legacy integration state (see
@@ -2263,8 +2278,9 @@ cenci worktrees prune --dry-run   # print what prune would remove, change nothin
 The same `cenci babysit` supervisor that watches CI and review feedback can also
 merge a PR itself, once every one of these holds on a given tick:
 
-Arming requires the agent to have the built-in `address-review`, `babysit-attention`
-and `ci-repair` workflows, since those are what the supervisor launches; an agent
+Arming requires the agent to have the built-in `babysit-attention`, `babysit-review`
+and `ci-repair` workflows, since those are what the supervisor launches (it no longer
+launches the interactive `address-review`); an agent
 without them (OpenCode, or any custom agent) is refused before any state is written,
 with exit code 2 from `cenci babysit` and a nack from the host daemon for a forwarded
 request. `merge-repair` is not required: it stays pinned to Claude.
@@ -2274,7 +2290,7 @@ resolves the tmux session and start directory it will target — the current
 tmux session (`$TMUX_PANE`) and `git rev-parse --show-toplevel`, or the
 explicit `--session`/`--dir` flags when passed — and persists both into the
 state file *before* the first poll. Every later `ci-repair`/`merge-repair`/`babysit-attention`/
-`address-review` launch targets that recorded session explicitly, rather than
+`babysit-review` launch targets that recorded session explicitly, rather than
 whatever tmux pane happens to be live by the time a much-later tick actually
 fires; if the recorded session is gone, the launch fails loudly (retried next
 tick) instead of silently falling back to another session or creating one.
@@ -2302,9 +2318,11 @@ CI repair launches as `cenci run ci-repair "<PR> PR #<PR> (<branch>) has failing
 checks: …"`: the leading PR number names the window `<PR>-ci-repair`, which the
 supervisor's liveness probe and the daemon's window cleanup both match on. The built-in
 template is one-shot (Claude `--print`, `codex exec`), so the worker exits when the
-repair ends. A live `<PR>-ci-repair` or `<PR>-merge-repair` pane of this repository in
-the recorded session (one pane inventory per tick, matched on its `@cenci-repo-dir`)
-suppresses another launch without consuming an attempt, and an unreadable pane inventory,
+repair ends. A live `<PR>-ci-repair`, `<PR>-merge-repair` or `<PR>-babysit-review` pane
+of this repository in the recorded session (one pane inventory per tick, matched on its
+`@cenci-repo-dir`) suppresses another launch without consuming an attempt, and so does a live
+human-launched `<PR>-address-review` pane (it never exits by itself, so the hold note says to
+close it once its edits are preserved). An unreadable pane inventory,
 or a recorded session that no longer exists, fails the tick without launching. An ended
 worker (dead pane or no window) is retried at the same head until the budget is used.
 A `cenci run` exit status 3 (window spawned, post-spawn setup failed) counts as a
@@ -2333,8 +2351,9 @@ counts without access to the host state directory. A forwarded stop reports one 
 three outcomes:
 
 - **stopped** — prints `Stopped babysitting PR #<pr> on the host.` and exits 0; the
-  host state file is gone. A recorded PID that is no longer running is treated as
-  gone: nothing is signalled, its stale lock is cleared and the state file is removed.
+  supervisor is gone and its lock removed, but the host state file is kept as a `stopped`
+  state (see below). A recorded PID that is no longer running is treated as gone: nothing
+  is signalled, its stale lock is cleared and the state is rewritten as `stopped`.
   A lock naming a live supervisor for the PR, or an empty or unparseable lock, is
   refused instead and nothing is changed (see **not stopped**).
 - **not stopped** — the host rejected the request, or no daemon is reachable on the
@@ -2352,6 +2371,18 @@ three outcomes:
   does). Exit 1, with the same host command; the supervisor may or may not have been
   stopped, and re-running the stop is safe.
 
+A stop leaves a `stopped` state rather than deleting the file (#1472): the supervisor is
+terminated and awaited as `reset` does (SIGTERM, up to 10s, lock removed), then the state is
+rewritten with status `stopped`, PID 0 and only the feedback bookkeeping kept (pending,
+addressed and launched keys, the comment watermarks, discussion revisions and receipts, the
+outstanding review launch and consumed nonces). The agent, retry budgets, CI status and
+closing issues are cleared, so a re-arm adopts a fresh agent, budgets restart, and unresolved
+feedback keeps its automerge hold. A stopped state does not block closing the ticket's window.
+Stale `stopped` files of abandoned PRs persist until a re-armed supervisor sees the PR merged
+or closed. The one exception is a state file that cannot be read or decoded: a host
+`cenci babysit stop <pr>` removes it (the documented recovery for `babysit state
+unreadable`, below), while a forwarded stop refuses it and keeps the file.
+
 `cenci babysit status <pr>` prints exactly one JSON object and exits 0:
 
 ```json
@@ -2366,8 +2397,12 @@ supervisor paused as `needs-input` after a CI or merge-repair retry cap keeps po
 under its own PID, so it reports `true`, as in the example. A state file written before
 the CI cap kept the supervisor running (`needs-input` with PID 0 and no process) reports
 `false` until it is armed again, and still blocks closing the window. The output contains no filesystem path. On the host it is read from
-the state file; in a sandbox it comes from the host daemon. With no state for the PR
-it exits 1 with `no supervisor found for PR #<pr>`; in a sandbox a rejection or a
+the state file; in a sandbox it comes from the host daemon. A stopped PR prints
+`"status":"stopped"` with `"supervisorLive":false`. With no state for the PR
+it exits 1 with `no supervisor found for PR #<pr>`. A state file that cannot be read or
+decoded exits 1 with `babysit state unreadable: <path>: <cause>` on stderr (a daemon-relayed
+status keeps the reason path-free); recover with a host `cenci babysit stop <pr>`, then
+re-arm. In a sandbox a rejection or a
 missing reply exits 1 and prints the host command `cenci babysit status <pr>`. A
 malformed invocation (no PR, a PR that is not a positive integer, extra arguments)
 exits 2. `--state-dir` is honored on the host and accepted but ignored in a sandbox,
@@ -2390,7 +2425,9 @@ re-arms through the normal arming path with the recorded agent, interval (15m wh
 was recorded), launch session and launch directory, and prints
 `Reset the retry budget for PR #<pr>.`.
 It refuses, changing nothing and exiting 1, when no supervisor exists
-(`no supervisor found for PR #<pr>`), the state cannot be read or decoded, the recorded
+(`no supervisor found for PR #<pr>`), the state cannot be read or decoded, the state is
+`stopped` (no agent or budget to reset; the message gives the `cenci babysit <pr> --agent
+<agent>` re-arm command), the recorded
 PID is a live process that is not this PR's babysit process (`refusing to signal pid
 <n>`), the supervisor did not exit in time (`supervisor for PR #<pr> did not exit`), a
 lock exists with no recorded PID (`supervisor already running for PR #<pr>`), or the
@@ -2405,6 +2442,29 @@ write or signal; a malformed invocation (no PR, a PR that is not a positive inte
 extra arguments) also exits 2. If the budget was zeroed but re-arming failed, it exits
 1 with `budget reset for PR #<pr> but not re-armed: …` and the `cenci babysit <pr>
 --agent <agent>` command to re-arm with.
+
+`cenci babysit resolve <pr> discussion:<id> [--state-dir <dir>]` (#1472) is how a human
+records one pending PR conversation comment as addressed. It is **host-only and
+attended-only**: it exits 1 and leaves the state file byte-identical inside a sandbox
+(`CENCI_SANDBOX=1`), when `CENCI_ATTENDED=0` is set (whatever set it, so a
+supervisor-launched worker, which is always unattended, can never use it), or inside a
+supervisor (`CENCI_BABYSIT_SUPERVISOR` set); no socket kind carries it. It accepts only a
+`discussion:<id>` key that is in `pendingCommentKeys`: a `comment:` or `review:` key exits 1
+with a message to resolve it on GitHub, and a key that is not pending (addressed or unknown)
+exits 1. On success it records the key under `addressedCommentKeys` with a receipt whose
+source is `human-cli` (no receipt comment id) at the revision the supervisor last saw, so a
+later edit of the comment still reopens it, and prints `Resolved discussion:<id> for PR
+#<pr>.`. It then follows `reset`: a live owned supervisor is sent SIGTERM and awaited, the
+state written, and the supervisor re-armed with its recorded settings; a `stopped` state is
+written but not re-armed (the output says so and gives the arm command), so it never restarts
+a supervisor you stopped. A state that cannot be read exits 1 with `babysit state
+unreadable: <path>: <cause>` and nothing changed. Exit codes: `0` resolved, `1` any refusal
+or runtime failure (including a failed re-arm, which still leaves the key resolved), `2` a
+usage error (no PR or key, a PR that is not a positive integer, a key that is not
+`discussion:<id>`, `comment:<id>` or `review:<id>`-shaped, extra arguments) or a recorded
+agent that arming would refuse. It is the recovery for `review worker ended without
+receipt`, for a `blocked` or `failed` receipt and for `review feedback state unknown` on a
+deleted pending comment.
 
 On a forwarded arm request, the host daemon resolves the target checkout itself by
 inspecting running sandbox containers' `/workspace` bind sources under both docker
@@ -2449,13 +2509,16 @@ empty state: the stop is refused with a fixed reason and the file is kept.
   ticket passes its eligibility checks; the default is `"off"`. Planning autonomy,
   planning pickup and attended mode do not gate automerge. Configure offers these
   choices independently; the merge policy and the checks below still apply.
-- CI is green, no CI repair is in flight, no CI or merge repair worker for the PR is
-  still running (held under `branch repair worker still running`), and no review
-  feedback is pending —
+- CI is green, no CI repair is in flight, no CI, merge or review worker for the PR
+  (`<PR>-ci-repair`, `<PR>-merge-repair`, `<PR>-babysit-review`, or a human-launched
+  `<PR>-address-review` window) is still running (held under `branch repair worker still
+  running`), and no review feedback is pending —
   resolution is GitHub-authoritative, not push-based: a pushed commit no longer
   clears feedback by itself. An inline comment thread clears only when GitHub
   reports it `isResolved`; a `CHANGES_REQUESTED` review clears only when it's
-  `DISMISSED` or the reviewer's latest effective review is `APPROVED`. "Green"
+  `DISMISSED` or the reviewer's latest effective review is `APPROVED`. An ordinary PR
+  comment has no resolved state on GitHub, so it follows the discussion bullets
+  below. "Green"
   requires at least one check to exist and be `pass`; every other check may be
   `pass` or `skipping` — a paths-filtered monorepo's unaffected-project checks
   (routinely `skipping`) no longer hold automerge on their own. `fail`,
@@ -2472,20 +2535,57 @@ empty state: the stop is refused with a fixed reason and the file is kept.
   first line is the cenci attribution banner is excluded from detection
   entirely — cenci's own address-review replies never count as new feedback
   and never re-trigger a dispatch.
+- Ordinary PR discussion (`issues/<pr>/comments`, #1472) is read in every tick and again in
+  the final pre-merge recheck, with the same pagination and completeness signal. Each comment
+  by a non-`[bot]` login whose first line is not the cenci banner is a `discussion:<id>` key
+  bound to a body revision (the SHA-256 of the body); it holds automerge under `review
+  feedback pending` and launches one finite `babysit-review` worker. It clears only through a
+  receipt comment bound to a nonce minted for that launch (accepted when the nonce matches,
+  the author has `admin`/`write` permission, the receipt is unedited and created after the
+  launch, and each listed revision still equals the comment's body hash), or through `cenci
+  babysit resolve`. A worker launching, exiting or pushing never counts, and neither does a
+  banner. Editing an addressed comment reopens it (`review feedback reopened`). A receipt
+  with a wrong, unknown or already-used nonce, an unauthorized author or an early timestamp
+  addresses nothing and is noted in the decision detail. The unattended worker only acts on
+  feedback from write-access authors: a discussion comment whose author is definitely denied
+  (not `admin`/`write`) is launched marked `:untrusted`, and a receipt can never mark it
+  `addressed` (it stays pending for a human to handle and `resolve`; trust is default-deny, so
+  a launch with no trust record reads as untrusted). A failed permission lookup is not a denial:
+  that comment is skipped for the launch and retried on the next tick. Inline and review
+  feedback from a non-write author is never acted on by the worker and stays pending on
+  GitHub. A live review window holds automerge
+  even after a valid receipt. Details and the receipt grammar: `watch/docs/babysit.md`.
 - Any review-feedback state babysit can't positively confirm holds automerge
   under its own reason: unreadable (API/parse failure), truncated (incomplete
   pagination), unknown (GitHub stopped reporting the item, or reported an
   unrecognized review state), or unsupported (a feedback key type babysit
   doesn't recognize). An item GitHub stops reporting at all — deleted comment,
   purged thread — holds indefinitely, whether it was still pending or already
-  addressed; merge it manually.
+  addressed; merge it manually. The discussion exceptions: a deleted pending PR comment
+  holds under `review feedback state unknown` until `cenci babysit resolve` clears it,
+  and a deleted already-addressed one stays addressed with no hold.
+- The discussion read adds four hold reasons, each with its recovery. `PR discussion
+  unreadable` (a `gh` failure, a page that does not decode, or a comment missing `id`,
+  `user.login` or `body`): every key is left byte-identical, never an empty set, and the
+  next tick retries. `PR discussion detection read truncated` (page cap reached with a
+  full last page): that tick makes no discussion mutation, consumes no receipt and launches
+  no worker, and it clears on the first tick whose read is proven complete. `review worker
+  ended without receipt` (a launched key is still pending and its `<PR>-babysit-review`
+  window has ended): there is no relaunch for the same revision, the detail names `cenci
+  babysit resolve <pr> <key>`, and editing the comment starts a new launch. `babysit state
+  unreadable` (the state file cannot be read or decoded): arming exits 1 with the path and
+  starts nothing, `cenci babysit status` prints it, and a host `cenci babysit stop <pr>`
+  removes the file so a re-arm can start fresh. A receipt that lists `blocked` or `failed`
+  keeps the key pending, sets status `needs-input` and names `resolve` in the detail.
 - Immediately before merge, babysit revalidates every known feedback key —
   still-pending and previously-addressed alike — against fresh GitHub thread
   and review state, rather than reusing the tick's earlier verdict. If a
   previously-addressed inline comment's thread now comes back unresolved, it
   moves back to pending and holds the merge under its own reason, distinct
   from ordinary pending feedback, since GitHub revoked a resolution babysit
-  had already relied on.
+  had already relied on. The recheck re-reads the PR discussion read-only (it never
+  consumes a receipt): a new or edited comment holds the merge, and an unreadable or
+  truncated read holds it under the reasons above.
 - The PR is not a draft and GitHub reports it `MERGEABLE`. A conflicting PR
   (`mergeStateStatus` `DIRTY`) holds under `PR has merge conflicts`; a branch
   merely behind its base (`mergeStateStatus` `BEHIND`) holds under `PR branch is
@@ -2524,18 +2624,21 @@ releases the hold and resets the budget. Unknown mergeability never resets that 
 
 CI repair has its own, separate budget, also capped at `fixCap` (3). A worker that
 ended without the checks going green is retried at the same head, one launch per tick,
-while a live CI or merge worker suppresses every other repair launch. After three
+while a live CI, merge or review worker suppresses every other repair launch. After three
 `ci-repair` launches, the next failing, non-conflicting tick with no live worker records `ciRepairPaused`,
 sets `Status = "needs-input"` and opens one `babysit-attention` window for that
 episode (`ciCapNotified` marks it sent, so later failing heads and supervisor restarts
 do not reopen it; a failed launch is retried with backoff). The supervisor does not
 exit: it keeps its PID and keeps polling, reconciling review feedback, repairing
 conflicts on the merge-repair budget and detecting MERGED or CLOSED. Only a fresh green
-read of the current head on a tick with no conflict hold and no live CI or merge worker
+read of the current head on a tick with no conflict hold and no live CI, merge or review worker
 ends the episode, including a rerun that goes green at the same head: it resets `ciFixAttempts` and
 `ciRepairPending`, clears both markers and returns the status to `running`. Pending,
 unknown or zero checks, read errors and a head change alone never reset it, and
 automerge stays held while the CI repair is pending or a repair worker is still running.
+At most one branch writer launches per tick, in the priority conflict repair, then CI
+repair, then review (`babysit-review`); review feedback waits, unlaunched, until none is
+live.
 
 A denied or held tick is logged once, e.g.:
 

@@ -684,3 +684,214 @@ func TestBabysitResetUsageErrorsExitTwo(t *testing.T) {
 		})
 	}
 }
+
+// -- #1472: host-only, attended-only `babysit resolve` ------------------------
+
+// resolveChildEnv is the host-mode child with an attended session: the ambient
+// CENCI_ATTENDED (the dev sandbox sets it to 0) and its origin marker are cleared
+// (watch/docs/test-isolation.md), so each case sets the gates it exercises.
+func resolveChildEnv(t *testing.T, extra ...string) []string {
+	t.Helper()
+	return append(hostChildEnv(t), append([]string{"CENCI_ATTENDED=", "CENCI_ATTENDED_ORIGIN="}, extra...)...)
+}
+
+// resolveStateBody is a stopped supervisor state for owner/repo PR pr holding
+// two pending discussion keys and one addressed key.
+func resolveStateBody(pr string) string {
+	rev := strings.Repeat("b", 64)
+	return `{"schemaVersion":2,"pr":"` + pr + `","repo":"owner/repo","status":"stopped",` +
+		`"addressedCommentKeys":["discussion:9"],"pendingCommentKeys":["comment:2","discussion:11","discussion:12"],` +
+		`"launchedFeedbackKeys":["discussion:11"],"discussionRevisions":{"discussion:11":"` + rev + `","discussion:12":"` + rev + `"}}`
+}
+
+// TestBabysitResolveExitCodes covers AC 80 through the real binary: exit 0 on a
+// host with an attended environment (the resolution recorded as a human-cli
+// receipt; a stopped state is not re-armed), exit 1 for every refusal with the
+// state file byte-identical, and exit 2 for usage errors.
+func TestBabysitResolveExitCodes(t *testing.T) {
+	armTestSocketPath(t) // isolates CENCI_SOCKET_DIR and XDG_STATE_HOME
+
+	t.Run("a pending discussion key on an attended host exits 0", func(t *testing.T) {
+		path := hostResetStatePath(t, "50")
+		if err := os.WriteFile(path, []byte(resolveStateBody("50")), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		stdout, stderr, code := runBabysitCLI(t, resolveChildEnv(t), "babysit", "resolve", "50", "discussion:11")
+
+		if code != 0 {
+			t.Fatalf("exit code = %d, want 0 (stderr %q)", code, stderr)
+		}
+		if !strings.Contains(stdout, "Resolved discussion:11 for PR #50") {
+			t.Errorf("stdout = %q, want the resolved line", stdout)
+		}
+		saved, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got struct {
+			Status   string                    `json:"status"`
+			Pending  []string                  `json:"pendingCommentKeys"`
+			Resolved []string                  `json:"addressedCommentKeys"`
+			Launched []string                  `json:"launchedFeedbackKeys"`
+			Receipts map[string]map[string]any `json:"discussionReceipts"`
+		}
+		if err := json.Unmarshal(saved, &got); err != nil {
+			t.Fatalf("state = %s, want valid JSON: %v", saved, err)
+		}
+		if got.Status != "stopped" {
+			t.Errorf("status = %q, want the stopped state kept (not re-armed)", got.Status)
+		}
+		if strings.Join(got.Pending, ",") != "comment:2,discussion:12" || strings.Join(got.Resolved, ",") != "discussion:9,discussion:11" || len(got.Launched) != 0 {
+			t.Errorf("pending %v addressed %v launched %v, want discussion:11 moved to addressed", got.Pending, got.Resolved, got.Launched)
+		}
+		if src := got.Receipts["discussion:11"]["source"]; src != "human-cli" {
+			t.Errorf("receipt source = %v, want human-cli (state %s)", src, saved)
+		}
+	})
+
+	refusals := []struct {
+		name   string
+		pr     string
+		key    string
+		env    []string
+		stderr string
+	}{
+		{"CENCI_SANDBOX=1 exits 1", "51", "discussion:11", []string{"CENCI_SANDBOX=1"}, "runs on the host"},
+		{"CENCI_ATTENDED=0 exits 1", "52", "discussion:11", []string{"CENCI_ATTENDED=0"}, "CENCI_ATTENDED=0"},
+		{"CENCI_ATTENDED=0 with the host-config origin still exits 1", "53", "discussion:11", []string{"CENCI_ATTENDED=0", "CENCI_ATTENDED_ORIGIN=host-config"}, "CENCI_ATTENDED=0"},
+		{"a babysit supervisor environment exits 1", "54", "discussion:11", []string{"CENCI_BABYSIT_SUPERVISOR=1"}, "inside a babysit supervisor"},
+		{"a comment key exits 1 naming GitHub", "55", "comment:2", nil, "resolve it on GitHub"},
+		{"a review key exits 1 naming GitHub", "56", "review:7", nil, "resolve it on GitHub"},
+		{"an addressed key exits 1", "57", "discussion:9", nil, "is not pending"},
+		{"an unknown key exits 1", "58", "discussion:99", nil, "is not pending"},
+	}
+	for _, tc := range refusals {
+		t.Run(tc.name, func(t *testing.T) {
+			path := hostResetStatePath(t, tc.pr)
+			body := resolveStateBody(tc.pr)
+			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			stdout, stderr, code := runBabysitCLI(t, resolveChildEnv(t, tc.env...), "babysit", "resolve", tc.pr, tc.key)
+
+			if code != 1 {
+				t.Errorf("exit code = %d, want 1 (stderr %q)", code, stderr)
+			}
+			if !strings.Contains(stderr, tc.stderr) {
+				t.Errorf("stderr = %q, want it to contain %q", stderr, tc.stderr)
+			}
+			if stdout != "" {
+				t.Errorf("stdout = %q, want nothing", stdout)
+			}
+			if got, _ := os.ReadFile(path); string(got) != body {
+				t.Errorf("state file = %q, want it byte-identical", got)
+			}
+		})
+	}
+
+	t.Run("an unreadable state exits 1 naming the path and keeps the file", func(t *testing.T) {
+		path := hostResetStatePath(t, "59")
+		const garbage = `{"schemaVersion":2,"pr":"59","pendingCommentKeys":["discussion:11"`
+		if err := os.WriteFile(path, []byte(garbage), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		_, stderr, code := runBabysitCLI(t, resolveChildEnv(t), "babysit", "resolve", "59", "discussion:11")
+
+		if code != 1 {
+			t.Errorf("exit code = %d, want 1 (stderr %q)", code, stderr)
+		}
+		if !strings.Contains(stderr, "babysit state unreadable: "+path+": ") {
+			t.Errorf("stderr = %q, want the unreadable reason naming %s", stderr, path)
+		}
+		if got, _ := os.ReadFile(path); string(got) != garbage {
+			t.Errorf("state file = %q, want it byte-identical", got)
+		}
+	})
+
+	t.Run("no state exits 1", func(t *testing.T) {
+		_, stderr, code := runBabysitCLI(t, resolveChildEnv(t), "babysit", "resolve", "60", "discussion:11")
+
+		if code != 1 || !strings.Contains(stderr, "no supervisor found for PR #60") {
+			t.Errorf("exit code = %d stderr = %q, want 1 and the no-supervisor message", code, stderr)
+		}
+	})
+
+	t.Run("a refused agent exits 2 before any change", func(t *testing.T) {
+		path := hostResetStatePath(t, "61")
+		body := `{"schemaVersion":2,"pr":"61","repo":"owner/repo","agent":"opencode","status":"needs-input","pendingCommentKeys":["discussion:11"],"discussionRevisions":{"discussion:11":"` + strings.Repeat("b", 64) + `"}}`
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		_, stderr, code := runBabysitCLI(t, resolveChildEnv(t), "babysit", "resolve", "61", "discussion:11")
+
+		if code != 2 {
+			t.Errorf("exit code = %d, want 2 (stderr %q)", code, stderr)
+		}
+		if reason := sandbox.AgentDisabledReason("opencode"); !strings.Contains(stderr, reason) {
+			t.Errorf("stderr = %q, want the refusal %q", stderr, reason)
+		}
+		if got, _ := os.ReadFile(path); string(got) != body {
+			t.Errorf("state file = %q, want it byte-identical", got)
+		}
+	})
+}
+
+func TestBabysitResolveUsageErrorsExitTwo(t *testing.T) {
+	armTestSocketPath(t)
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"no pr", []string{"babysit", "resolve"}},
+		{"no key", []string{"babysit", "resolve", "42"}},
+		{"extra argument", []string{"babysit", "resolve", "42", "discussion:11", "extra"}},
+		{"non-numeric pr", []string{"babysit", "resolve", "abc", "discussion:11"}},
+		{"non-positive pr", []string{"babysit", "resolve", "0", "discussion:11"}},
+		{"malformed key", []string{"babysit", "resolve", "42", "foo"}},
+		{"discussion key without an id", []string{"babysit", "resolve", "42", "discussion:"}},
+		{"discussion key with a non-numeric id", []string{"babysit", "resolve", "42", "discussion:abc"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, stderr, code := runBabysitCLI(t, resolveChildEnv(t), tc.args...)
+			if code != 2 {
+				t.Errorf("exit code = %d, want 2 (stderr %q)", code, stderr)
+			}
+			if !strings.Contains(stderr, "cenci babysit resolve") {
+				t.Errorf("stderr = %q, want a usage line naming the command", stderr)
+			}
+		})
+	}
+}
+
+// TestBabysitArmRefusesAnUnreadableStateAtArm covers AC 91 through the real
+// binary: an arm over an undecodable state file exits 1 naming the reason and the
+// path, leaves the file byte-identical and starts no supervisor (no lock, no log).
+func TestBabysitArmRefusesAnUnreadableStateAtArm(t *testing.T) {
+	armTestSocketPath(t) // isolates CENCI_SOCKET_DIR and XDG_STATE_HOME
+	path := hostResetStatePath(t, "62")
+	const garbage = `{"schemaVersion":2,"pr":"62","repo":"owner/repo","pendingCommentKeys":["discussion:11"`
+	if err := os.WriteFile(path, []byte(garbage), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, stderr, code := runBabysitCLI(t, hostChildEnv(t), "babysit", "62", "--agent", "claude")
+
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1 (stdout %q stderr %q)", code, stdout, stderr)
+	}
+	if !strings.Contains(stderr, "babysit state unreadable") || !strings.Contains(stderr, path) {
+		t.Errorf("stderr = %q, want the unreadable reason naming %s", stderr, path)
+	}
+	if got, _ := os.ReadFile(path); string(got) != garbage {
+		t.Errorf("state file = %q, want it byte-identical", got)
+	}
+	for _, leftover := range []string{path + ".lock", strings.TrimSuffix(path, ".json") + ".log"} {
+		if _, err := os.Stat(leftover); !os.IsNotExist(err) {
+			t.Errorf("%s exists (stat err = %v), want no supervisor started", leftover, err)
+		}
+	}
+}

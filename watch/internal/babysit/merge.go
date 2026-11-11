@@ -56,7 +56,7 @@ const mergeQueueQuery = `query($owner:String!,$name:String!,$number:Int!){reposi
 // state, per the plan's Assumption). revalidateFeedback is read-only --
 // unlike tick's own reconcileFeedback, it never mutates s, so a reopen
 // discovered here holds this merge attempt but is only persisted (and its
-// address-review relaunch dispatched) by the *next* tick's own reconcile
+// babysit-review relaunch dispatched) by the *next* tick's own reconcile
 // pass; this preserves the "no double-bookkeeping in the recheck" property
 // #854 already established (reconcileFeedback's own doc comment). A
 // revalidateFeedback fetch failure is routed into FeedbackHold/FeedbackDetail
@@ -88,25 +88,42 @@ func recheckAutomergeInputs(s *State, first automergeInputs) (automergeInputs, s
 		return automergeInputs{}, reasonUpstreamReviewsUnreadable, err
 	}
 
+	// #1472: the PR conversation is re-read read-only -- no receipt is consumed
+	// here (Q&A 6; receipts are consumed only in tick). An unreadable read fails
+	// the recheck under its own reason; new or edited keys join the pending set;
+	// a read that is not proven complete holds via DiscussionComplete.
+	discussion, discussionComplete, err := fetchDiscussion(s.Repo, s.PR)
+	if err != nil {
+		return automergeInputs{}, reasonUpstreamDiscussionUnreadable, err
+	}
+
 	revalidatedPending, verdict := revalidateFeedback(s, reviews, reviewsComplete)
+	_, recordedDiscussionPending := splitDiscussionKeys(s.PendingKeys)
+	discussionPending := recordedDiscussionPending
+	if discussionComplete {
+		var discussionVerdict feedbackVerdict
+		discussionPending, discussionVerdict = revalidateDiscussion(s, discussion)
+		verdict = combineHolds(verdict, discussionVerdict)
+	}
 
 	in := automergeInputs{
-		Checks:            checks,
-		RepairPending:     s.RepairPending,
-		RepairWorkerLive:  first.RepairWorkerLive,
-		FeedbackHold:      verdict.Hold,
-		FeedbackDetail:    verdict.Detail,
-		IsDraft:           pr.IsDraft,
-		Mergeable:         pr.Mergeable,
-		MergeStateStatus:  pr.MergeStateStatus,
-		HeadRefOID:        pr.HeadRefOID,
-		ChangedFiles:      pr.ChangedFiles,
-		Additions:         pr.Additions,
-		Deletions:         pr.Deletions,
-		CommentsComplete:  commentsComplete,
-		ReviewsComplete:   reviewsComplete,
-		AllowedMethods:    first.AllowedMethods,
-		AllowedMethodsErr: first.AllowedMethodsErr,
+		Checks:             checks,
+		RepairPending:      s.RepairPending,
+		RepairWorkerLive:   first.RepairWorkerLive,
+		FeedbackHold:       verdict.Hold,
+		FeedbackDetail:     verdict.Detail,
+		IsDraft:            pr.IsDraft,
+		Mergeable:          pr.Mergeable,
+		MergeStateStatus:   pr.MergeStateStatus,
+		HeadRefOID:         pr.HeadRefOID,
+		ChangedFiles:       pr.ChangedFiles,
+		Additions:          pr.Additions,
+		Deletions:          pr.Deletions,
+		CommentsComplete:   commentsComplete,
+		ReviewsComplete:    reviewsComplete,
+		DiscussionComplete: discussionComplete,
+		AllowedMethods:     first.AllowedMethods,
+		AllowedMethodsErr:  first.AllowedMethodsErr,
 	}
 	for _, i := range pr.ClosingIssuesReferences {
 		in.ClosingIssues = append(in.ClosingIssues, i.Number)
@@ -119,7 +136,7 @@ func recheckAutomergeInputs(s *State, first automergeInputs) (automergeInputs, s
 	}
 
 	newKeys, _ := detectNewFeedbackKeys(s, comments, reviews, s.LastCommentAt)
-	in.PendingKeys = append(append([]string{}, revalidatedPending...), newKeys...)
+	in.PendingKeys = append(append(append([]string{}, revalidatedPending...), discussionPending...), newKeys...)
 
 	cfg, err := fetchPolicy(s.Repo, pr.BaseRefName)
 	switch {

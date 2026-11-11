@@ -1,9 +1,11 @@
 package babysit
 
 import (
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -458,12 +460,18 @@ func fetchFeedbackState(repo, pr string, keys []string, reviews []review, review
 // and c is the zero value -- callers must not classify or mutate anything in
 // that case (fail closed).
 func fetchAndClassifyFeedback(s *State, reviews []review, reviewsComplete bool) (c feedbackClassification, hold, detail string, ok bool) {
-	keys := append(append([]string{}, s.PendingKeys...), s.AddressedKeys...)
+	// #1472: `discussion:` keys are partitioned out ahead of this classifier --
+	// they are neither a thread nor a review, never go through review-thread
+	// lookup, and would otherwise classify as an unsupported key type. The
+	// comment:/review: pass below is byte-identical for a state without them.
+	pending, _ := splitDiscussionKeys(s.PendingKeys)
+	addressed, _ := splitDiscussionKeys(s.AddressedKeys)
+	keys := append(append([]string{}, pending...), addressed...)
 	fs, fetchHold, fetchDetail := fetchFeedbackState(s.Repo, s.PR, keys, reviews, reviewsComplete)
 	if fetchHold != "" {
 		return feedbackClassification{}, fetchHold, fetchDetail, false
 	}
-	return classifyFeedback(s.PendingKeys, s.AddressedKeys, fs), "", "", true
+	return classifyFeedback(pending, addressed, fs), "", "", true
 }
 
 // reconcileFeedback is tick's GitHub-authoritative resolution pass (Q6,
@@ -495,7 +503,9 @@ func reconcileFeedback(s *State, reviews []review, reviewsComplete bool) feedbac
 		return feedbackVerdict{Hold: fetchHold, Detail: fetchDetail}
 	}
 
-	s.PendingKeys = append(append([]string{}, c.Pending...), c.Reopened...)
+	// The discussion keys pass through untouched (reconcileDiscussion owns them).
+	_, discussionPending := splitDiscussionKeys(s.PendingKeys)
+	s.PendingKeys = append(append(append([]string{}, c.Pending...), c.Reopened...), discussionPending...)
 	if len(c.Resolved) > 0 {
 		s.AddressedKeys = append(s.AddressedKeys, c.Resolved...)
 		s.LaunchedKeys = removeKeys(s.LaunchedKeys, c.Resolved)
@@ -534,11 +544,256 @@ func revalidateFeedback(s *State, reviews []review, reviewsComplete bool) (pendi
 	return pending, feedbackVerdict{Hold: c.Hold, Detail: c.Detail, Reopened: c.Reopened}
 }
 
+// -- ordinary PR discussion (#1472) -------------------------------------------
+//
+// `discussion:<id>` keys are resolved only by authorized evidence (a receipt
+// bound to a launch nonce, or `cenci babysit resolve`), never by GitHub state, so
+// they have their own classifier. A key's body revision (State.DiscussionRevisions)
+// is what detects an edit.
+
+// isDiscussionKey reports whether key is a `discussion:<id>` feedback key.
+func isDiscussionKey(key string) bool { return strings.HasPrefix(key, discussionKeyPrefix) }
+
+// splitDiscussionKeys partitions keys into the non-discussion keys and the
+// discussion keys, each in its original order.
+func splitDiscussionKeys(keys []string) (other, discussion []string) {
+	for _, k := range keys {
+		if isDiscussionKey(k) {
+			discussion = append(discussion, k)
+		} else {
+			other = append(other, k)
+		}
+	}
+	return other, discussion
+}
+
+// discussionKeyID parses the comment id out of a discussion key (0 when malformed).
+func discussionKeyID(key string) int64 {
+	id, err := strconv.ParseInt(strings.TrimPrefix(key, discussionKeyPrefix), 10, 64)
+	if err != nil {
+		return 0
+	}
+	return id
+}
+
+// compareDiscussionKeys orders discussion keys by comment id.
+func compareDiscussionKeys(a, b string) int {
+	return cmp.Compare(discussionKeyID(a), discussionKeyID(b))
+}
+
+// discussionClassification is classifyDiscussion's pure output. New are human
+// comments never seen; Edited are pending keys whose body changed since last
+// seen (their launch episode is over); Reopened are addressed keys whose body
+// changed since they were addressed; Unknown are pending keys whose comment is
+// gone. Hold/Detail carry the single verdict: Unknown outranks Reopened, as
+// classifyFeedback's classification-level holds do.
+type discussionClassification struct {
+	New, Edited, Reopened, Unknown []string
+	Hold, Detail                   string
+}
+
+// addressedRevision is the body revision an addressed discussion key was
+// addressed at: its receipt's revision, else the last revision seen.
+func addressedRevision(s *State, key string) string {
+	if r, ok := s.DiscussionReceipts[key]; ok && r.Revision != "" {
+		return r.Revision
+	}
+	return s.DiscussionRevisions[key]
+}
+
+// classifyDiscussion classifies s's discussion keys against current, the body
+// revision of every human discussion comment GitHub reports now (a key absent
+// from current is deleted or excluded). It is pure and read-only. A deleted
+// pending key is unknown, never resolved; a deleted addressed key is a no-op
+// (resolve only accepts pending keys, so a hold on it would have no recovery,
+// Q&A 7).
+func classifyDiscussion(s *State, current map[string]string) discussionClassification {
+	var out discussionClassification
+	known := map[string]bool{}
+	_, pending := splitDiscussionKeys(s.PendingKeys)
+	_, addressed := splitDiscussionKeys(s.AddressedKeys)
+	for _, key := range pending {
+		known[key] = true
+		cur, ok := current[key]
+		switch {
+		case !ok:
+			out.Unknown = append(out.Unknown, key)
+		case cur != s.DiscussionRevisions[key]:
+			out.Edited = append(out.Edited, key)
+		}
+	}
+	for _, key := range addressed {
+		known[key] = true
+		if cur, ok := current[key]; ok && cur != addressedRevision(s, key) {
+			out.Reopened = append(out.Reopened, key)
+		}
+	}
+	for key := range current {
+		if _, seen := s.DiscussionRevisions[key]; !seen && !known[key] {
+			out.New = append(out.New, key)
+		}
+	}
+	slices.SortFunc(out.New, compareDiscussionKeys)
+
+	switch {
+	case len(out.Unknown) > 0:
+		out.Hold, out.Detail = reasonReviewStateUnknown, out.Unknown[0]+": not found or in an unrecognized state"
+	case len(out.Reopened) > 0:
+		out.Hold, out.Detail = reasonFeedbackReopened, out.Reopened[0]+": review feedback reopened"
+	}
+	return out
+}
+
+// reconcileDiscussion applies classifyDiscussion onto s: new comments become
+// pending keys, an edited pending key leaves LaunchedKeys (a new episode), a
+// reopened key moves back to pending (its receipt no longer describes the
+// current body), and every recorded revision follows the comment. comments must
+// be a complete read: a partial one would turn a missing comment into a
+// deletion. changed reports whether anything moved.
+func reconcileDiscussion(s *State, comments []discussionComment) (verdict feedbackVerdict, changed bool) {
+	current := discussionRevisionMap(comments)
+	c := classifyDiscussion(s, current)
+	if len(c.New)+len(c.Edited)+len(c.Reopened) > 0 && s.DiscussionRevisions == nil {
+		s.DiscussionRevisions = map[string]string{}
+	}
+	for _, key := range c.Reopened {
+		s.AddressedKeys = removeKeys(s.AddressedKeys, []string{key})
+		s.PendingKeys = append(s.PendingKeys, key)
+		s.LaunchedKeys = removeKeys(s.LaunchedKeys, []string{key})
+		delete(s.DiscussionReceipts, key)
+		s.DiscussionRevisions[key] = current[key]
+	}
+	for _, key := range c.Edited {
+		s.LaunchedKeys = removeKeys(s.LaunchedKeys, []string{key})
+		delete(s.DiscussionReceipts, key)
+		s.DiscussionRevisions[key] = current[key]
+	}
+	for _, key := range c.New {
+		s.PendingKeys = append(s.PendingKeys, key)
+		s.DiscussionRevisions[key] = current[key]
+	}
+	return feedbackVerdict{Hold: c.Hold, Detail: c.Detail, Reopened: c.Reopened}, len(c.New)+len(c.Edited)+len(c.Reopened) > 0
+}
+
+// revalidateDiscussion is reconcileDiscussion's non-mutating counterpart for the
+// pre-merge recheck (merge.go): it never writes onto s and never consumes a
+// receipt (Q&A 6). It returns every discussion key that is pending now: the
+// recorded pending keys, reopened keys and keys not seen before. A comment that
+// appeared, or an edit that landed, after the tick's own read therefore holds the
+// merge.
+func revalidateDiscussion(s *State, comments []discussionComment) (pending []string, verdict feedbackVerdict) {
+	c := classifyDiscussion(s, discussionRevisionMap(comments))
+	_, recorded := splitDiscussionKeys(s.PendingKeys)
+	pending = append(append(append([]string{}, recorded...), c.Reopened...), c.New...)
+	return pending, feedbackVerdict{Hold: c.Hold, Detail: c.Detail, Reopened: c.Reopened}
+}
+
+// holdRank orders feedback holds for combineHolds: a classification-level or
+// read-level hold outranks a revoked resolution, which outranks the
+// ended-without-receipt hold (lowest precedence).
+func holdRank(hold string) int {
+	switch hold {
+	case "":
+		return 0
+	case reasonReviewWorkerEndedWithoutReceipt:
+		return 1
+	case reasonFeedbackReopened:
+		return 2
+	default:
+		return 3
+	}
+}
+
+// combineHolds returns the higher-ranked of two holds; on a tie the first wins,
+// so the comment:/review: verdict is never displaced by an equal discussion one.
+func combineHolds(a, b feedbackVerdict) feedbackVerdict {
+	out := a
+	if holdRank(b.Hold) > holdRank(a.Hold) {
+		out.Hold, out.Detail = b.Hold, b.Detail
+	}
+	out.Reopened = append(append([]string{}, a.Reopened...), b.Reopened...)
+	if len(out.Reopened) == 0 {
+		out.Reopened = nil
+	}
+	return out
+}
+
+// markDiscussionAddressed moves key from pending and launched to addressed and
+// records rec as its evidence. Shared by an accepted receipt and `resolve`.
+func markDiscussionAddressed(s *State, key string, rec discussionReceipt) {
+	s.PendingKeys = removeKeys(s.PendingKeys, []string{key})
+	s.LaunchedKeys = removeKeys(s.LaunchedKeys, []string{key})
+	if !slices.Contains(s.AddressedKeys, key) {
+		s.AddressedKeys = append(s.AddressedKeys, key)
+	}
+	if s.DiscussionReceipts == nil {
+		s.DiscussionReceipts = map[string]discussionReceipt{}
+	}
+	s.DiscussionReceipts[key] = rec
+}
+
+// receiptedAtCurrentRevision reports whether key has a receipt (any outcome)
+// recorded for its current revision.
+func receiptedAtCurrentRevision(s *State, key string) bool {
+	r, ok := s.DiscussionReceipts[key]
+	return ok && r.Revision != "" && r.Revision == s.DiscussionRevisions[key]
+}
+
+// unreceiptedDiscussionKeys are the pending discussion keys already launched to
+// a worker with no receipt for their current revision: once the worker's window
+// has ended they hold under reasonReviewWorkerEndedWithoutReceipt, with no
+// relaunch for the same revision, until `cenci babysit resolve` or an edit.
+func unreceiptedDiscussionKeys(s *State) []string {
+	_, pending := splitDiscussionKeys(s.PendingKeys)
+	var out []string
+	for _, key := range pending {
+		if slices.Contains(s.LaunchedKeys, key) && !receiptedAtCurrentRevision(s, key) {
+			out = append(out, key)
+		}
+	}
+	return out
+}
+
+// needsHumanDiscussionKeys are the pending discussion keys whose worker reported
+// `blocked` or `failed` for the current revision: no relaunch, status
+// needs-input, `cenci babysit resolve` names the way out.
+func needsHumanDiscussionKeys(s *State) []string {
+	_, pending := splitDiscussionKeys(s.PendingKeys)
+	var out []string
+	for _, key := range pending {
+		if !receiptedAtCurrentRevision(s, key) {
+			continue
+		}
+		switch s.DiscussionReceipts[key].Outcome {
+		case receiptOutcomeBlocked, receiptOutcomeFailed:
+			out = append(out, key)
+		}
+	}
+	return out
+}
+
+// resolveHint renders the human recovery for keys, naming at most three.
+func resolveHint(pr string, keys []string) string {
+	shown := keys
+	if len(shown) > 3 {
+		shown = shown[:3]
+	}
+	hints := make([]string, len(shown))
+	for i, k := range shown {
+		hints[i] = "`cenci babysit resolve " + pr + " " + k + "`"
+	}
+	out := strings.Join(hints, ", ")
+	if len(keys) > len(shown) {
+		out += fmt.Sprintf(" (and %d more)", len(keys)-len(shown))
+	}
+	return out
+}
+
 // removeKeys returns a new slice containing every element of keys not
 // present in remove -- keys \ remove. Used both here (dropping resolved keys
 // out of LaunchedKeys and reopened keys out of AddressedKeys, #885's split of
 // resolution truth from launch-dedup bookkeeping) and in babysit.go's tick
-// (PendingKeys \ LaunchedKeys, the single per-tick address-review launch
+// (PendingKeys \ LaunchedKeys, the single per-tick babysit-review launch
 // trigger). keys itself is never mutated in place.
 func removeKeys(keys, remove []string) []string {
 	if len(remove) == 0 {

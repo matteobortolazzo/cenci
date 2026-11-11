@@ -8,7 +8,9 @@ user-invocable: false
 
 This is the single source of truth for "is this PR comment actionable?". `address-review` (Phase 1D) applies this filter in-session, evaluating every comment against the Include/Exclude lists below directly — never restate the lists inline in a calling skill; reference this skill instead.
 
-`babysit` is a thin adapter over the client-neutral `cenci babysit` Go supervisor (`watch/internal/babysit/`), which forbids in-session polling. The supervisor itself applies only the **mechanical** subset of the Exclude list below — bot logins, cenci's own review replies (banner-prefix match), and resolved threads with no new activity since resolution — nothing semantic. It cannot judge whether a comment is "purely informational" or a genuine change request; that semantic judgment is applied by the model session the supervisor dispatches when new PR activity is detected. This skill remains the single source of truth: if the Include/Exclude lists below ever change, edit this file first — the supervisor and every calling skill read from it, never the reverse.
+**Scope.** Three comment sources are in scope: inline review comments (`pulls/<n>/comments`), reviews (`pulls/<n>/reviews`), and PR conversation comments (`issues/<n>/comments`, ordinary discussion on the PR). The same Include/Exclude lists apply to all three.
+
+`babysit` is a thin adapter over the client-neutral `cenci babysit` Go supervisor (`watch/internal/babysit/`), which forbids in-session polling. The supervisor itself applies only the **mechanical** subset of the Exclude list below — bot logins, cenci's own review replies and receipts (banner-prefix match on the first line, now also for PR conversation comments), and resolved threads with no new activity since resolution — nothing semantic. It cannot judge whether a comment is "purely informational" or a genuine change request; that semantic judgment is applied by the model session the supervisor dispatches when new PR activity is detected. This skill remains the single source of truth: if the Include/Exclude lists below ever change, edit this file first — the supervisor and every calling skill read from it, never the reverse.
 
 **Include**:
 - Unresolved comments/threads
@@ -19,6 +21,7 @@ This is the single source of truth for "is this PR comment actionable?". `addres
 **Exclude**:
 - Bot-generated comments (author is a known bot: `github-actions[bot]`, `dependabot[bot]`, etc.)
 - Cenci's own review replies (comment body's first line opens with the cenci attribution banner — see `flow/docs/comment-attribution.md`; never suppresses a genuine reviewer's own comment, only cenci's own posted replies)
+- Review receipt comments (banner-first, carrying the `cenci-review-receipt` marker; posted by the finite `babysit-review` worker and read only by the supervisor — see `flow/docs/comment-attribution.md`); they are never actionable feedback
 - Already-resolved threads with no new activity since resolution
 - Comments that are purely informational with no action requested
 - Outdated comments on code that no longer exists (GitHub `outdated` flag)

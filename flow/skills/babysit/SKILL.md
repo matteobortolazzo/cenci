@@ -108,7 +108,10 @@ the recorded agent, interval, launch session and launch dir. Run it from a host 
 **Verify with `status`.** `cenci babysit status <pr>` works on the host and inside a sandbox
 (where it is forwarded to the host daemon). It prints one JSON line with `pr`, `repo`, `status`,
 `ciFixAttempts`, `conflictFixAttempts`, `fixCap` and `supervisorLive`, and exits 1 with
-`no supervisor found for PR #<pr>` when no state exists. Inside a sandbox, a rejected or
+`no supervisor found for PR #<pr>` when no state exists. After `cenci babysit stop <pr>` the state is kept
+as `"status":"stopped"` (only the unresolved and addressed feedback bookkeeping survives, so a re-arm
+restores the holds); an unreadable state file exits 1 with `babysit state unreadable: <path>: <cause>`.
+Inside a sandbox, a rejected or
 unanswered status request exits 1 and names `cenci babysit status <pr>` as the host command.
 
 **On the host**, the supervisor's own state directory holds the same data:

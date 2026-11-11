@@ -6,10 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"syscall"
 	"testing"
@@ -211,6 +213,12 @@ func withCommands(t *testing.T, responses []string, calls *[][]string) {
 		return []byte(""), nil
 	}
 	execGh = func(args ...string) (string, string, error) {
+		// #1472: the PR conversation read and the collaborator-permission lookup
+		// are answered by path, never consuming a positional slot nor appearing in
+		// calls, so every positional script keeps its pre-#1472 shape.
+		if out, err, ok := ghPathAnswer(args); ok {
+			return out, "", err
+		}
 		*calls = append(*calls, append([]string{"gh"}, args...))
 		if i >= len(responses) {
 			return "", "", fmt.Errorf("unexpected command: %s", strings.Join(args, " "))
@@ -229,6 +237,153 @@ func withCommands(t *testing.T, responses []string, calls *[][]string) {
 		tmuxHasSession = originalTmuxHasSession
 		tmuxPaneInventory = originalInventory
 	})
+}
+
+// -- #1472: PR conversation comments and collaborator permission -------------
+
+var (
+	// discussionServed is the page body every fake gh serves, for any page, on
+	// `repos/<repo>/issues/<n>/comments` (default: no comments); discussionErr, when
+	// set, makes that read fail. permissionServed maps a login to the
+	// `permission` value `repos/<repo>/collaborators/<login>/permission` answers
+	// (an unlisted login is `none`; humanComment's author defaults to `write` so a
+	// launch over her comments is trusted unless a test says otherwise).
+	// permissionFailing lists logins whose lookup errors. All are restored by the
+	// serve* helpers' cleanup.
+	discussionServed = "[]"
+	discussionErr    error
+	// discussionSequence, when set, serves its k-th body (the last repeats) on
+	// the k-th discussion read instead of discussionServed; discussionReads counts
+	// the reads (a one-page read is one request).
+	discussionSequence []string
+	discussionReads    int
+	permissionServed   = map[string]string{humanLogin: "write"}
+	permissionFailing  = map[string]bool{}
+
+	discussionPathRe = regexp.MustCompile(`^repos/[^/]+/[^/]+/issues/[0-9]+/comments\?`)
+	permissionPathRe = regexp.MustCompile(`^repos/[^/]+/[^/]+/collaborators/([^/]+)/permission$`)
+)
+
+// ghPathAnswer answers the two #1472 gh reads by path. Every fake gh in this
+// package that serves a tick calls it first, so a discussion read never shifts a
+// positional script.
+func ghPathAnswer(args []string) (out string, err error, ok bool) {
+	if len(args) != 2 || args[0] != "api" {
+		return "", nil, false
+	}
+	switch {
+	case discussionPathRe.MatchString(args[1]):
+		discussionReads++
+		if len(discussionSequence) > 0 {
+			return discussionSequence[min(discussionReads, len(discussionSequence))-1], nil, true
+		}
+		return discussionServed, discussionErr, true
+	case permissionPathRe.MatchString(args[1]):
+		login := permissionPathRe.FindStringSubmatch(args[1])[1]
+		if permissionFailing[login] {
+			return "", errors.New("gh: permission lookup failed"), true
+		}
+		p, listed := permissionServed[login]
+		if !listed {
+			p = "none"
+		}
+		return fmt.Sprintf(`{"permission":%q}`, p), nil, true
+	}
+	return "", nil, false
+}
+
+// serveDiscussion makes every fake gh answer the PR conversation read with the
+// given comment objects (see discussionJSON).
+func serveDiscussion(t *testing.T, comments ...string) {
+	t.Helper()
+	serveDiscussionBody(t, jsonArray(comments...), nil)
+}
+
+// serveDiscussionBody serves a raw page body and error for every page.
+func serveDiscussionBody(t *testing.T, body string, err error) {
+	t.Helper()
+	originalBody, originalErr := discussionServed, discussionErr
+	discussionServed, discussionErr = body, err
+	t.Cleanup(func() { discussionServed, discussionErr = originalBody, originalErr })
+}
+
+// serveDiscussionSequence serves one body per discussion read, in order (the last
+// repeats), and restarts the read count: a tick's read, then the pre-merge
+// recheck's read, can differ.
+func serveDiscussionSequence(t *testing.T, bodies ...string) {
+	t.Helper()
+	discussionSequence, discussionReads = bodies, 0
+	t.Cleanup(func() { discussionSequence, discussionReads = nil, 0 })
+}
+
+// servePermission grants login the named collaborator permission.
+func servePermission(t *testing.T, login, permission string) {
+	t.Helper()
+	original := permissionServed
+	permissionServed = maps.Clone(original)
+	permissionServed[login] = permission
+	t.Cleanup(func() { permissionServed = original })
+}
+
+// servePermissionFailure makes the collaborator-permission lookup for login
+// fail (a gh error), as a timeout or a decode failure would.
+func servePermissionFailure(t *testing.T, login string) {
+	t.Helper()
+	original := permissionFailing
+	permissionFailing = maps.Clone(original)
+	permissionFailing[login] = true
+	t.Cleanup(func() { permissionFailing = original })
+}
+
+// servePermission must override a login the fake already serves (alice defaults
+// to write): the override wins, and the default is back once the test ends.
+func TestServePermissionOverridesAnAlreadyServedLogin(t *testing.T) {
+	path := "repos/o/r/collaborators/" + humanLogin + "/permission"
+	served := func() string {
+		out, _, _ := ghPathAnswer([]string{"api", path})
+		return out
+	}
+	t.Run("override", func(t *testing.T) {
+		servePermission(t, humanLogin, "read")
+		if got, want := served(), `{"permission":"read"}`; got != want {
+			t.Fatalf("permission for %s = %s, want %s", humanLogin, got, want)
+		}
+	})
+	if got, want := served(), `{"permission":"write"}`; got != want {
+		t.Fatalf("after the override's cleanup: permission = %s, want the default %s", got, want)
+	}
+}
+
+// servePermissionFailure must make an already-failing-or-served login fail, and
+// restore it afterwards.
+func TestServePermissionFailureOverridesAnAlreadyServedLogin(t *testing.T) {
+	path := "repos/o/r/collaborators/" + humanLogin + "/permission"
+	t.Run("failure", func(t *testing.T) {
+		permissionFailing[humanLogin] = false
+		t.Cleanup(func() { delete(permissionFailing, humanLogin) })
+		servePermissionFailure(t, humanLogin)
+		if _, err, _ := ghPathAnswer([]string{"api", path}); err == nil {
+			t.Fatalf("lookup for %s succeeded, want the failure to win over the earlier false entry", humanLogin)
+		}
+	})
+}
+
+// withReviewSeams pins the two review-launch seams: the nonces newReviewNonce
+// mints, in order (the last repeats), and the launch clock.
+func withReviewSeams(t *testing.T, at time.Time, nonces ...string) {
+	t.Helper()
+	originalNonce, originalClock := newReviewNonce, launchClock
+	n := 0
+	newReviewNonce = func() (string, error) {
+		i := n
+		if i >= len(nonces) {
+			i = len(nonces) - 1
+		}
+		n++
+		return nonces[i], nil
+	}
+	launchClock = func() time.Time { return at }
+	t.Cleanup(func() { newReviewNonce, launchClock = originalNonce, originalClock })
 }
 
 func openPR() string {
@@ -278,7 +433,7 @@ func TestTickLaunchesAddressReviewForNewFeedback(t *testing.T) {
 	}
 	found := false
 	for _, c := range calls {
-		if len(c) > 3 && c[1] == "run" && c[2] == "address-review" && c[3] == "42" {
+		if len(c) > 3 && c[1] == "run" && c[2] == "babysit-review" && strings.HasPrefix(c[3], "42 --receipt-nonce ") {
 			found = true
 		}
 	}
@@ -2675,7 +2830,7 @@ func TestTickUnrelatedPushLeavesFeedbackPending(t *testing.T) {
 }
 
 // TestTickRepairPushWithoutResolutionLeavesFeedbackPending is AC 2: a push
-// from babysit's own repair session (ci-repair or address-review) is still
+// from babysit's own repair session (ci-repair or babysit-review) is still
 // just a local signal -- proving an attempt, not reviewer acceptance -- so it
 // must not clear PendingKeys either, even though it advances the head exactly
 // the way the deleted rule keyed off of (PendingHeadSHA no longer proves
@@ -2995,7 +3150,7 @@ func TestTickFreshlyDetectedReviewSupersededSameTickClears(t *testing.T) {
 				t.Fatalf("AddressedKeys = %v, want [review:10]", s.AddressedKeys)
 			}
 			for _, c := range calls {
-				if len(c) > 2 && c[1] == "run" && c[2] == "address-review" {
+				if len(c) > 2 && c[1] == "run" && c[2] == "babysit-review" {
 					t.Fatalf("a freshly-detected review already superseded in the same tick must never trigger an address-review launch: %#v", calls)
 				}
 			}
@@ -3045,7 +3200,7 @@ func TestTickDoesNotRelaunchAddressReviewForStillPendingFeedback(t *testing.T) {
 	}
 	launches := 0
 	for _, c := range calls {
-		if len(c) > 3 && c[1] == "run" && c[2] == "address-review" {
+		if len(c) > 3 && c[1] == "run" && c[2] == "babysit-review" {
 			launches++
 		}
 	}
@@ -3059,7 +3214,7 @@ func TestTickDoesNotRelaunchAddressReviewForStillPendingFeedback(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, c := range calls {
-		if len(c) > 3 && c[1] == "run" && c[2] == "address-review" {
+		if len(c) > 3 && c[1] == "run" && c[2] == "babysit-review" {
 			t.Fatalf("second tick: address-review must not relaunch for a comment that is already pending and still unresolved: %#v", calls)
 		}
 	}
@@ -3086,7 +3241,7 @@ func TestTickDoesNotRelaunchAddressReviewForStillPendingFeedback(t *testing.T) {
 func countAddressReviewLaunches(calls [][]string) int {
 	n := 0
 	for _, c := range calls {
-		if len(c) > 3 && c[1] == "run" && c[2] == "address-review" {
+		if len(c) > 3 && c[1] == "run" && c[2] == "babysit-review" {
 			n++
 		}
 	}
@@ -3173,6 +3328,9 @@ func TestTickReopenLaunchFailureRetriesNextTickAndPreservesReopenState(t *testin
 	originalExecGh := execGh
 	i := 0
 	execGh = func(args ...string) (string, string, error) {
+		if out, err, ok := ghPathAnswer(args); ok {
+			return out, "", err
+		}
 		calls = append(calls, append([]string{"gh"}, args...))
 		if i >= len(responses) {
 			return "", "", fmt.Errorf("unexpected command: %s", strings.Join(args, " "))
@@ -3185,7 +3343,7 @@ func TestTickReopenLaunchFailureRetriesNextTickAndPreservesReopenState(t *testin
 		calls = append(calls, append([]string{name}, args...))
 		return []byte("boom"), errors.New("exit status 1")
 	}
-	// #975: a stubbed tmuxHasSession is required so the address-review
+	// #975: a stubbed tmuxHasSession is required so the review
 	// launch attempt below reaches the command() self-exec (and fails
 	// there, as intended) rather than short-circuiting on the recorded-
 	// session gate before command() is ever called.
@@ -4021,7 +4179,7 @@ func writeStateFile(t *testing.T, path string, s State) {
 // StopRepo plus a wrapper: the success line, the no-supervisor error, and the
 // refusal to signal an unverified pid.
 func TestStop_HostOutputAndErrorsUnchanged(t *testing.T) {
-	t.Run("stopped prints the host message and removes the state", func(t *testing.T) {
+	t.Run("stopped prints the host message and keeps only the feedback bookkeeping", func(t *testing.T) {
 		dir, path := hostStopFixture(t, "o/r", "42")
 		writeStateFile(t, path, State{PR: "42", Repo: "o/r", Status: "running"})
 
@@ -4034,8 +4192,8 @@ func TestStop_HostOutputAndErrorsUnchanged(t *testing.T) {
 		if out != "Stopped babysitting PR #42.\n" {
 			t.Errorf("stdout = %q, want %q", out, "Stopped babysitting PR #42.\n")
 		}
-		if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
-			t.Errorf("state file still exists after Stop (stat err = %v)", statErr)
+		if got := mustReadState(t, path); got.Status != "stopped" || got.PID != 0 {
+			t.Errorf("state after Stop = status %q pid %d, want a stopped state with no pid", got.Status, got.PID)
 		}
 	})
 
@@ -4119,7 +4277,10 @@ func TestStopRepo_ClassifiesFailuresBySentinel(t *testing.T) {
 	t.Run("a failed signal is ErrStopFailed and keeps the state", func(t *testing.T) {
 		dir := t.TempDir()
 		stubProcessOwned(t, true)
-		const gonePID = 2147483000 // above any real pid_max: signalling it must fail
+		originalWait := resetExitWait
+		resetExitWait = 50 * time.Millisecond
+		t.Cleanup(func() { resetExitWait = originalWait })
+		const gonePID = 2147483000 // above any real pid_max: the supervisor never exits
 		path := statePath(dir, "o/r", "42")
 		writeStateFile(t, path, State{PR: "42", Repo: "o/r", PID: gonePID})
 		err := StopRepo("o/r", "42", dir)
@@ -4184,21 +4345,21 @@ func TestStopRepo_ClassifiesFailuresBySentinel(t *testing.T) {
 		}
 	})
 
-	t.Run("a stopped supervisor removes the state and returns nil", func(t *testing.T) {
+	t.Run("a stopped supervisor keeps a stopped feedback-only state and returns nil", func(t *testing.T) {
 		dir := t.TempDir()
 		path := statePath(dir, "o/r", "42")
 		writeStateFile(t, path, State{PR: "42", Repo: "o/r", Status: "running"})
 		if err := StopRepo("o/r", "#42", dir); err != nil {
 			t.Fatalf("StopRepo: %v", err)
 		}
-		if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
-			t.Errorf("state file still exists (stat err = %v)", statErr)
+		if got := mustReadState(t, path); got.Status != "stopped" {
+			t.Errorf("Status = %q, want stopped", got.Status)
 		}
 	})
 
 	// #1490: the daemon-forwarded stop inherits the gone path, but it prints
 	// nothing: the host-only stderr note belongs to the host Stop.
-	t.Run("a dead recorded pid returns nil, removes the state and the lock and prints nothing", func(t *testing.T) {
+	t.Run("a dead recorded pid returns nil, keeps a stopped state, removes the lock and prints nothing", func(t *testing.T) {
 		dir := t.TempDir()
 		path := statePath(dir, "o/r", "42")
 		lock := path + ".lock"
@@ -4214,7 +4375,9 @@ func TestStopRepo_ClassifiesFailuresBySentinel(t *testing.T) {
 		if err != nil {
 			t.Fatalf("StopRepo: %v", err)
 		}
-		requireMissing(t, path, "state file")
+		if got := mustReadState(t, path); got.Status != "stopped" || got.PID != 0 {
+			t.Errorf("state = status %q pid %d, want stopped with no pid", got.Status, got.PID)
+		}
 		requireMissing(t, lock, "lock file")
 		if out != "" || errOut != "" {
 			t.Errorf("StopRepo wrote stdout %q stderr %q, want nothing", out, errOut)
@@ -4556,19 +4719,21 @@ func TestTickCIRepairOrdinaryLaunchFailureConsumesNothing(t *testing.T) {
 	}
 }
 
-// Exit 3 counts as dispatched for ci-repair only: an address-review launch
-// that exits 3 is still a failed launch, so its keys stay unlaunched.
-func TestTickWindowSpawnedIsStillAFailureOutsideCIRepair(t *testing.T) {
+// Exit 3 counts as dispatched for ci-repair and, since #1472, babysit-review
+// (the nonce is saved and the keys are launched); a babysit-attention launch
+// that exits 3 is still a failed launch.
+func TestTickWindowSpawnedIsStillAFailureOutsideTheFiniteWorkers(t *testing.T) {
 	var calls [][]string
-	withCommands(t, []string{openPR(), `[]`, `[{"id":7,"updated_at":"2026-01-02T00:00:00Z","user":{"login":"reviewer"}}]`, `[]`, unresolvedThreadFor(7)}, &calls)
+	withCommands(t, ciRepairTickResponses("sha-new"), &calls)
 	stubCenciRunExit(t, &calls, 3, "cenci run: tmux window already spawned")
-	s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 300, CurrentDelaySeconds: 900, LaunchSession: "work"}
+	s := ciRepairSeedState()
+	s.FixAttempts = fixCap
 
 	if _, _, err := tick(&s); err == nil {
-		t.Fatal("tick: err = nil, want an address-review exit 3 to stay a launch failure")
+		t.Fatal("tick: err = nil, want a babysit-attention exit 3 to stay a launch failure")
 	}
-	if len(s.LaunchedKeys) != 0 {
-		t.Errorf("LaunchedKeys = %v, want none after a failed address-review launch", s.LaunchedKeys)
+	if s.CICapNotified {
+		t.Errorf("CICapNotified = true, want false after a failed babysit-attention launch")
 	}
 }
 
@@ -4601,5 +4766,688 @@ func TestTickCIRetryCapLaunchesAttentionUnchanged(t *testing.T) {
 	arg, ok := launchArg(calls, "babysit-attention")
 	if !ok || arg != "42 CI retry cap reached" {
 		t.Errorf("babysit-attention arg = %q (found %v), want %q", arg, ok, "42 CI retry cap reached")
+	}
+}
+
+// -- #1472: ordinary PR discussion, receipts and the finite babysit-review worker --
+
+const (
+	humanBody  = "please also cover the empty input"
+	maintainer = "maintainer"
+	humanLogin = "alice"
+)
+
+// humanComment renders a never-edited human discussion comment; every comment
+// shares one created_at/updated_at pair on purpose (equal timestamps).
+func humanComment(id int64, body string) string {
+	return humanCommentBy(id, humanLogin, body)
+}
+
+// humanCommentBy is humanComment authored by login.
+func humanCommentBy(id int64, login, body string) string {
+	return discussionJSON(id, login, body, "2026-11-10T11:00:00Z", "2026-11-10T11:00:00Z")
+}
+
+// reviewState is a supervisor for PR 42 with a recorded session and directory.
+func reviewState() State {
+	return State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 300, CurrentDelaySeconds: 900, LaunchSession: "work", LaunchDir: ownedRepoDir}
+}
+
+// outstandingReviewState is reviewState with discussion:11 launched to a
+// babysit-review worker (nonce testReviewNonce) and no receipt yet.
+func outstandingReviewState() State {
+	s := reviewState()
+	s.PendingKeys = []string{"discussion:11"}
+	s.LaunchedKeys = []string{"discussion:11"}
+	s.DiscussionRevisions = map[string]string{"discussion:11": bodyRevision(humanBody)}
+	s.ReviewLaunch = &reviewLaunchRecord{Nonce: testReviewNonce, LaunchedAt: testLaunchAt, Keys: []string{"discussion:11"}, TrustedKeys: []string{"discussion:11"}}
+	return s
+}
+
+// serveReceipt serves discussion:11 and a receipt for it with outcome, posted by
+// a maintainer who has write permission.
+func serveReceipt(t *testing.T, outcome string) {
+	t.Helper()
+	servePermission(t, maintainer, "write")
+	body := testReceiptBody(testReviewNonce, testReceiptHead, receiptEntry{ID: 11, Revision: bodyRevision(humanBody), Outcome: outcome})
+	serveDiscussion(t, humanComment(11, humanBody), discussionJSON(12, maintainer, body, afterLaunch, afterLaunch))
+}
+
+// automergeOnResponses scripts one tick on an eligible PR whose automerge chain
+// stops at the review stage: pr view, green checks, comments, reviews, labels.
+func automergeOnResponses() []string {
+	return []string{automergeEligiblePR(), ciCapGreen, `[]`, `[]`, `{"labels":[{"name":"automerge:ok"}]}`}
+}
+
+func graphqlCalls(calls [][]string) int {
+	n := 0
+	for _, c := range calls {
+		if len(c) > 2 && c[0] == "gh" && c[1] == "api" && c[2] == "graphql" {
+			n++
+		}
+	}
+	return n
+}
+
+func liveReview() string { return paneRowOf("42-babysit-review", false, ownedRepoDir) }
+
+// tickOK runs one tick and fails the test on an error.
+func tickOK(t *testing.T, s *State) {
+	t.Helper()
+	if _, _, err := tick(s); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+}
+
+// AC: a human PR conversation comment becomes a pending discussion key bound to
+// its body revision; automerge holds on it; exactly one babysit-review launch
+// carries the nonce and the revision; a discussion-only state never reads
+// review threads.
+func TestTickDiscussionCommentBecomesPendingAndLaunchesBabysitReviewOnce(t *testing.T) {
+	withFleetAutomergeEnabled(t, true)
+	var calls [][]string
+	withCommands(t, automergeOnResponses(), &calls)
+	withReviewSeams(t, testLaunchAt, testReviewNonce)
+	serveDiscussion(t, humanComment(11, humanBody))
+	s := reviewState()
+
+	tickOK(t, &s)
+
+	rev := bodyRevision(humanBody)
+	if !reflect.DeepEqual(s.PendingKeys, []string{"discussion:11"}) || !reflect.DeepEqual(s.LaunchedKeys, []string{"discussion:11"}) {
+		t.Fatalf("pending/launched = %v/%v, want [discussion:11] both", s.PendingKeys, s.LaunchedKeys)
+	}
+	if !reflect.DeepEqual(s.DiscussionRevisions, map[string]string{"discussion:11": rev}) {
+		t.Errorf("DiscussionRevisions = %v, want discussion:11 at %s", s.DiscussionRevisions, rev)
+	}
+	if s.AutomergeReason != reasonReviewPending {
+		t.Errorf("AutomergeReason = %q, want %q", s.AutomergeReason, reasonReviewPending)
+	}
+	if n := countWorkflowLaunches(calls, "babysit-review"); n != 1 {
+		t.Fatalf("babysit-review launches = %d, want exactly 1: %#v", n, calls)
+	}
+	if arg, _ := launchArg(calls, "babysit-review"); arg != "42 --receipt-nonce "+testReviewNonce+" discussion:11="+rev {
+		t.Errorf("launch argument = %q, want the pr, the nonce and discussion:11=<revision>", arg)
+	}
+	if n := countWorkflowLaunches(calls, "address-review"); n != 0 {
+		t.Errorf("address-review launches = %d, want 0: the supervisor no longer launches the interactive workflow", n)
+	}
+	want := &reviewLaunchRecord{Nonce: testReviewNonce, LaunchedAt: testLaunchAt, Keys: []string{"discussion:11"}, TrustedKeys: []string{"discussion:11"}}
+	if !reflect.DeepEqual(s.ReviewLaunch, want) {
+		t.Errorf("ReviewLaunch = %+v, want %+v", s.ReviewLaunch, want)
+	}
+	if n := graphqlCalls(calls); n != 0 {
+		t.Errorf("gh api graphql calls = %d, want 0 for a discussion-only state", n)
+	}
+}
+
+// AC: an unreadable discussion read leaves every key byte-identical and records
+// the named reason, never an empty discussion set.
+func TestTickDiscussionUnreadableLeavesKeysUntouchedAndRecordsTheReason(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		err  error
+	}{
+		{"gh exits non-zero", "", errors.New("exit status 1")},
+		{"page does not decode", "not json", nil},
+		{"object without id", `[{"user":{"login":"a"},"body":"x"}]`, nil},
+		{"object without user.login", `[{"id":5,"user":{},"body":"x"}]`, nil},
+		{"object without body", `[{"id":5,"user":{"login":"a"}}]`, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withFleetAutomergeEnabled(t, true)
+			var calls [][]string
+			withCommands(t, []string{openPR(), ciCapGreen, `[]`, `[]`}, &calls)
+			serveDiscussionBody(t, tc.body, tc.err)
+			s := outstandingReviewState()
+			s.AddressedKeys = []string{"discussion:9"}
+			before := s
+
+			if _, _, err := tick(&s); err == nil {
+				t.Fatal("tick: err = nil, want the unreadable discussion to fail the tick")
+			}
+			if !reflect.DeepEqual(s.PendingKeys, before.PendingKeys) || !reflect.DeepEqual(s.AddressedKeys, before.AddressedKeys) || !reflect.DeepEqual(s.LaunchedKeys, before.LaunchedKeys) {
+				t.Errorf("keys changed on an unreadable read: pending %v addressed %v launched %v", s.PendingKeys, s.AddressedKeys, s.LaunchedKeys)
+			}
+			if s.AutomergeReason != reasonUpstreamDiscussionUnreadable {
+				t.Errorf("AutomergeReason = %q, want %q", s.AutomergeReason, reasonUpstreamDiscussionUnreadable)
+			}
+			if n := countWorkflowLaunches(calls, "babysit-review"); n != 0 {
+				t.Errorf("babysit-review launches = %d, want 0", n)
+			}
+		})
+	}
+}
+
+// AC (Q&A 13): a discussion read the page cap cut short holds with its own
+// reason, mutates no discussion state, consumes no receipt and launches nothing,
+// while the comment:/review: reconcile pass runs unchanged.
+func TestTickDiscussionTruncatedReadHoldsWithoutDiscussionMutation(t *testing.T) {
+	withFleetAutomergeEnabled(t, true)
+	var calls [][]string
+	withCommands(t, []string{automergeEligiblePR(), ciCapGreen, `[]`, `[]`, resolvedThreadFor(7), `{"labels":[{"name":"automerge:ok"}]}`}, &calls)
+	withReviewSeams(t, testLaunchAt, testWrongNonce)
+	servePermission(t, maintainer, "write")
+	receipt := testReceiptBody(testReviewNonce, testReceiptHead, receiptEntry{ID: 11, Revision: bodyRevision(humanBody), Outcome: "addressed"})
+	page := []string{humanComment(11, humanBody), discussionJSON(12, maintainer, receipt, afterLaunch, afterLaunch)}
+	for id := int64(100); len(page) < feedbackPageSize; id++ {
+		page = append(page, humanComment(id, "filler"))
+	}
+	serveDiscussionBody(t, jsonArray(page...), nil)
+	s := outstandingReviewState()
+	s.PendingKeys = []string{"comment:7", "discussion:11"}
+	s.LaunchedKeys = []string{"comment:7"}
+	before := s
+
+	tickOK(t, &s)
+
+	if !reflect.DeepEqual(s.PendingKeys, []string{"discussion:11"}) || !reflect.DeepEqual(s.AddressedKeys, []string{"comment:7"}) {
+		t.Errorf("pending/addressed = %v/%v, want the resolved thread moved and discussion:11 untouched", s.PendingKeys, s.AddressedKeys)
+	}
+	if !reflect.DeepEqual(s.DiscussionRevisions, before.DiscussionRevisions) || !reflect.DeepEqual(s.ReviewLaunch, before.ReviewLaunch) || len(s.ConsumedReviewNonces) != 0 || len(s.DiscussionReceipts) != 0 {
+		t.Errorf("discussion state changed on a truncated read: %+v", s)
+	}
+	if s.AutomergeReason != reasonDiscussionReadTruncated {
+		t.Errorf("AutomergeReason = %q, want %q", s.AutomergeReason, reasonDiscussionReadTruncated)
+	}
+	if n := countWorkflowLaunches(calls, "babysit-review"); n != 0 {
+		t.Errorf("babysit-review launches = %d, want 0 on a truncated read", n)
+	}
+}
+
+// AC: a valid receipt addresses exactly the keys it lists with addressed or
+// no-action; the state records the evidence and the nonce is consumed.
+func TestTickDiscussionValidReceiptAddressesTheListedKey(t *testing.T) {
+	for _, outcome := range []string{"addressed", "no-action"} {
+		t.Run(outcome, func(t *testing.T) {
+			var calls [][]string
+			withCommands(t, []string{openPR(), ciCapGreen, `[]`, `[]`}, &calls)
+			serveReceipt(t, outcome)
+			s := outstandingReviewState()
+
+			tickOK(t, &s)
+
+			if len(s.PendingKeys) != 0 || !reflect.DeepEqual(s.AddressedKeys, []string{"discussion:11"}) || len(s.LaunchedKeys) != 0 {
+				t.Fatalf("pending/addressed/launched = %v/%v/%v, want discussion:11 addressed and out of launched", s.PendingKeys, s.AddressedKeys, s.LaunchedKeys)
+			}
+			want := map[string]discussionReceipt{"discussion:11": {CommentID: 11, Revision: bodyRevision(humanBody), HeadSHA: testReceiptHead, Outcome: outcome, ReceiptCommentID: 12, Source: receiptSourceReceipt}}
+			if !reflect.DeepEqual(s.DiscussionReceipts, want) {
+				t.Errorf("DiscussionReceipts = %+v, want %+v", s.DiscussionReceipts, want)
+			}
+			if !reflect.DeepEqual(s.ConsumedReviewNonces, map[string]int64{testReviewNonce: 12}) {
+				t.Errorf("ConsumedReviewNonces = %v, want the nonce consumed by comment 12", s.ConsumedReviewNonces)
+			}
+			if s.ReviewLaunch != nil {
+				t.Errorf("ReviewLaunch = %+v, want cleared: consumed and the window has ended", s.ReviewLaunch)
+			}
+			if n := countWorkflowLaunches(calls, "babysit-review"); n != 0 {
+				t.Errorf("babysit-review launches = %d, want 0 once addressed", n)
+			}
+		})
+	}
+}
+
+// AC: blocked and failed keys stay pending and launched (no relaunch), the status
+// is needs-input and the hold names `cenci babysit resolve`.
+func TestTickDiscussionBlockedReceiptKeepsTheKeyPendingAndNeedsInput(t *testing.T) {
+	for _, outcome := range []string{"blocked", "failed"} {
+		t.Run(outcome, func(t *testing.T) {
+			withFleetAutomergeEnabled(t, true)
+			var calls [][]string
+			withCommands(t, append(automergeOnResponses(), automergeOnResponses()...), &calls)
+			serveReceipt(t, outcome)
+			s := outstandingReviewState()
+
+			tickOK(t, &s)
+			tickOK(t, &s)
+
+			if !reflect.DeepEqual(s.PendingKeys, []string{"discussion:11"}) || !reflect.DeepEqual(s.LaunchedKeys, []string{"discussion:11"}) {
+				t.Fatalf("pending/launched = %v/%v, want discussion:11 still both", s.PendingKeys, s.LaunchedKeys)
+			}
+			if s.Status != "needs-input" {
+				t.Errorf("Status = %q, want needs-input recomputed every tick", s.Status)
+			}
+			if !strings.Contains(s.AutomergeDetail, "cenci babysit resolve 42 discussion:11") {
+				t.Errorf("AutomergeDetail = %q, want it to name `cenci babysit resolve 42 discussion:11`", s.AutomergeDetail)
+			}
+			if s.DiscussionReceipts["discussion:11"].Outcome != outcome {
+				t.Errorf("recorded receipt = %+v, want outcome %s", s.DiscussionReceipts["discussion:11"], outcome)
+			}
+			if n := countWorkflowLaunches(calls, "babysit-review"); n != 0 {
+				t.Errorf("babysit-review launches = %d, want 0: no relaunch for the same revision", n)
+			}
+		})
+	}
+}
+
+// Edge case: a receipt posted while its pane is still live addresses its keys,
+// but automerge stays held until the pane ends.
+func TestTickDiscussionReceiptWhileThePaneIsLiveStillHoldsAutomerge(t *testing.T) {
+	withFleetAutomergeEnabled(t, true)
+	var calls [][]string
+	withCommands(t, automergeOnResponses(), &calls)
+	stubPanes(t, panesAlways(liveReview()))
+	serveReceipt(t, "addressed")
+	s := outstandingReviewState()
+
+	tickOK(t, &s)
+
+	if !reflect.DeepEqual(s.AddressedKeys, []string{"discussion:11"}) || len(s.PendingKeys) != 0 {
+		t.Errorf("pending/addressed = %v/%v, want discussion:11 addressed", s.PendingKeys, s.AddressedKeys)
+	}
+	if s.AutomergeReason != reasonRepairWorkerLive {
+		t.Errorf("AutomergeReason = %q, want %q while 42-babysit-review is live", s.AutomergeReason, reasonRepairWorkerLive)
+	}
+	if s.ReviewLaunch == nil {
+		t.Error("ReviewLaunch cleared while the window is live, want it kept until the window ends")
+	}
+}
+
+// AC/edge cases: a receipt with a wrong, spoofed or already-used nonce, or from an
+// author without write permission, addresses nothing; each rejection is recorded
+// in automergeDetail.
+func TestTickDiscussionRejectedReceiptsAddressNothingAndAreRecorded(t *testing.T) {
+	withFleetAutomergeEnabled(t, true)
+	var calls [][]string
+	withCommands(t, automergeOnResponses(), &calls)
+	servePermission(t, maintainer, "write")
+	entry := receiptEntry{ID: 11, Revision: bodyRevision(humanBody), Outcome: "addressed"}
+	serveDiscussion(t,
+		humanComment(11, humanBody),
+		discussionJSON(21, maintainer, testReceiptBody(testWrongNonce, testReceiptHead, entry), afterLaunch, afterLaunch),
+		discussionJSON(22, "stranger", testReceiptBody(testReviewNonce, testReceiptHead, entry), afterLaunch, afterLaunch),
+		discussionJSON(23, maintainer, testReceiptBody("ffffffffffffffffffffffffffffffff", testReceiptHead, entry), afterLaunch, afterLaunch),
+	)
+	s := outstandingReviewState()
+	s.ConsumedReviewNonces = map[string]int64{"ffffffffffffffffffffffffffffffff": 99}
+
+	tickOK(t, &s)
+
+	if !reflect.DeepEqual(s.PendingKeys, []string{"discussion:11"}) || len(s.AddressedKeys) != 0 {
+		t.Fatalf("pending/addressed = %v/%v, want nothing addressed", s.PendingKeys, s.AddressedKeys)
+	}
+	if got := s.ConsumedReviewNonces[testReviewNonce]; got != 0 {
+		t.Errorf("outstanding nonce consumed by comment %d, want it left outstanding", got)
+	}
+	for _, rejection := range []string{
+		receiptRejection{CommentID: 21, Reason: receiptRejectNonceUnknown}.String(),
+		receiptRejection{CommentID: 22, Reason: receiptRejectNoWritePermission}.String(),
+		receiptRejection{CommentID: 23, Reason: receiptRejectNonceConsumed}.String(),
+	} {
+		if !strings.Contains(s.AutomergeDetail, rejection) {
+			t.Errorf("AutomergeDetail = %q, want the rejection %q", s.AutomergeDetail, rejection)
+		}
+	}
+}
+
+// AC: a window that ended without a valid receipt leaves its keys pending and
+// launched (no relaunch for the same revision) and holds under its own reason,
+// naming `cenci babysit resolve`.
+func TestTickDiscussionEndedWithoutReceiptHoldsAndDoesNotRelaunch(t *testing.T) {
+	withFleetAutomergeEnabled(t, true)
+	var calls [][]string
+	withCommands(t, append(automergeOnResponses(), automergeOnResponses()...), &calls)
+	serveDiscussion(t, humanComment(11, humanBody))
+	s := outstandingReviewState()
+
+	tickOK(t, &s)
+	tickOK(t, &s)
+
+	if !reflect.DeepEqual(s.PendingKeys, []string{"discussion:11"}) || !reflect.DeepEqual(s.LaunchedKeys, []string{"discussion:11"}) {
+		t.Errorf("pending/launched = %v/%v, want discussion:11 kept in both", s.PendingKeys, s.LaunchedKeys)
+	}
+	if s.AutomergeReason != reasonReviewWorkerEndedWithoutReceipt {
+		t.Errorf("AutomergeReason = %q, want %q", s.AutomergeReason, reasonReviewWorkerEndedWithoutReceipt)
+	}
+	if !strings.Contains(s.AutomergeDetail, "cenci babysit resolve 42 discussion:11") {
+		t.Errorf("AutomergeDetail = %q, want it to name `cenci babysit resolve 42 discussion:11`", s.AutomergeDetail)
+	}
+	if n := countWorkflowLaunches(calls, "babysit-review"); n != 0 {
+		t.Errorf("babysit-review launches = %d, want 0: no relaunch for the same revision", n)
+	}
+}
+
+// AC: an addressed key whose comment is edited (new body SHA-256) goes back to
+// pending under `review feedback reopened`, and a new launch carries the new
+// revision.
+func TestTickDiscussionEditedAddressedCommentReopensAndRelaunches(t *testing.T) {
+	withFleetAutomergeEnabled(t, true)
+	var calls [][]string
+	withCommands(t, automergeOnResponses(), &calls)
+	withReviewSeams(t, testLaunchAt, testWrongNonce)
+	const edited = "actually, handle the nil case too"
+	serveDiscussion(t, humanComment(11, edited))
+	s := reviewState()
+	s.AddressedKeys = []string{"discussion:11"}
+	s.DiscussionRevisions = map[string]string{"discussion:11": bodyRevision(humanBody)}
+	s.DiscussionReceipts = map[string]discussionReceipt{"discussion:11": {CommentID: 11, Revision: bodyRevision(humanBody), Outcome: "addressed", ReceiptCommentID: 12, Source: receiptSourceReceipt}}
+
+	tickOK(t, &s)
+
+	if !reflect.DeepEqual(s.PendingKeys, []string{"discussion:11"}) || len(s.AddressedKeys) != 0 {
+		t.Fatalf("pending/addressed = %v/%v, want the edited key reopened", s.PendingKeys, s.AddressedKeys)
+	}
+	if s.AutomergeReason != reasonFeedbackReopened {
+		t.Errorf("AutomergeReason = %q, want %q", s.AutomergeReason, reasonFeedbackReopened)
+	}
+	if arg, ok := launchArg(calls, "babysit-review"); !ok || !strings.HasSuffix(arg, "discussion:11="+bodyRevision(edited)) {
+		t.Errorf("launch argument = %q (found %v), want discussion:11 at the edited revision", arg, ok)
+	}
+	if s.DiscussionRevisions["discussion:11"] != bodyRevision(edited) {
+		t.Errorf("DiscussionRevisions = %v, want the edited revision recorded", s.DiscussionRevisions)
+	}
+}
+
+// AC: an edit of a pending, already-launched key leaves LaunchedKeys, so a new
+// episode launches (superseding the old nonce, recorded with comment id 0).
+func TestTickDiscussionEditedLaunchedKeyRelaunchesAndSupersedesTheNonce(t *testing.T) {
+	var calls [][]string
+	withCommands(t, openPR2(), &calls)
+	withReviewSeams(t, testLaunchAt.Add(time.Hour), testWrongNonce)
+	const edited = "actually, handle the nil case too"
+	serveDiscussion(t, humanComment(11, edited))
+	s := outstandingReviewState()
+
+	tickOK(t, &s)
+
+	if arg, ok := launchArg(calls, "babysit-review"); !ok || arg != "42 --receipt-nonce "+testWrongNonce+" discussion:11="+bodyRevision(edited) {
+		t.Fatalf("launch argument = %q (found %v), want a relaunch at the edited revision with the new nonce", arg, ok)
+	}
+	if s.ReviewLaunch == nil || s.ReviewLaunch.Nonce != testWrongNonce {
+		t.Errorf("ReviewLaunch = %+v, want the new launch", s.ReviewLaunch)
+	}
+	if got, ok := s.ConsumedReviewNonces[testReviewNonce]; !ok || got != 0 {
+		t.Errorf("ConsumedReviewNonces = %v, want the superseded nonce recorded with comment id 0", s.ConsumedReviewNonces)
+	}
+}
+
+func openPR2() []string { return []string{openPR(), ciCapGreen, `[]`, `[]`} }
+
+// AC: two comments with identical timestamps arriving on different ticks are both
+// pending (a seen-set of ids, not a `>=` watermark).
+func TestTickDiscussionEqualTimestampsOnDifferentTicksAreBothDetected(t *testing.T) {
+	var calls [][]string
+	withCommands(t, append(openPR2(), openPR2()...), &calls)
+	serveDiscussion(t, humanComment(11, "first"))
+	s := reviewState()
+	tickOK(t, &s)
+	serveDiscussion(t, humanComment(11, "first"), humanComment(12, "second"))
+
+	tickOK(t, &s)
+
+	if !reflect.DeepEqual(s.PendingKeys, []string{"discussion:11", "discussion:12"}) {
+		t.Errorf("PendingKeys = %v, want both discussion comments", s.PendingKeys)
+	}
+}
+
+// Edge cases: a deleted pending key holds as unknown; a deleted addressed key is
+// a no-op; bot comments and cenci-banner comments never become keys; a PR with no
+// discussion is quiet and skips the pane probe.
+func TestTickDiscussionDeletedExcludedAndQuietCases(t *testing.T) {
+	t.Run("a deleted pending key holds as unknown", func(t *testing.T) {
+		withFleetAutomergeEnabled(t, true)
+		var calls [][]string
+		withCommands(t, automergeOnResponses(), &calls)
+		serveDiscussion(t)
+		s := outstandingReviewState()
+		tickOK(t, &s)
+		if s.AutomergeReason != reasonReviewStateUnknown || !reflect.DeepEqual(s.PendingKeys, []string{"discussion:11"}) {
+			t.Errorf("reason %q pending %v, want %q with the key still pending", s.AutomergeReason, s.PendingKeys, reasonReviewStateUnknown)
+		}
+	})
+	t.Run("a deleted addressed key is a no-op", func(t *testing.T) {
+		withFleetAutomergeEnabled(t, true)
+		var calls [][]string
+		withCommands(t, automergeOnResponses(), &calls)
+		serveDiscussion(t)
+		s := reviewState()
+		s.AddressedKeys = []string{"discussion:11"}
+		s.DiscussionRevisions = map[string]string{"discussion:11": bodyRevision(humanBody)}
+		tickOK(t, &s)
+		if !reflect.DeepEqual(s.AddressedKeys, []string{"discussion:11"}) || len(s.PendingKeys) != 0 || !hasCondition(s.AutomergeConditions, "review", true) {
+			t.Errorf("addressed %v pending %v review-stage conditions %v, want no hold", s.AddressedKeys, s.PendingKeys, s.AutomergeConditions)
+		}
+	})
+	t.Run("bot and banner comments never become keys", func(t *testing.T) {
+		var calls [][]string
+		withCommands(t, openPR2(), &calls)
+		banner := "> 🤖 **cenci** — review reply posted by `/cenci:address-review` (posting replies).\n\nre-checking"
+		serveDiscussion(t, discussionJSON(31, "dependabot[bot]", "bump", "2026-11-10T11:00:00Z", "2026-11-10T11:00:00Z"), discussionJSON(32, "alice", banner, "2026-11-10T11:00:00Z", "2026-11-10T11:00:00Z"))
+		s := reviewState()
+		tickOK(t, &s)
+		if len(s.PendingKeys) != 0 || len(s.DiscussionRevisions) != 0 || countWorkflowLaunches(calls, "babysit-review") != 0 {
+			t.Errorf("pending %v revisions %v launches %d, want a quiet tick", s.PendingKeys, s.DiscussionRevisions, countWorkflowLaunches(calls, "babysit-review"))
+		}
+	})
+	t.Run("zero comments is quiet and never probes", func(t *testing.T) {
+		var calls [][]string
+		withCommands(t, openPR2(), &calls)
+		reads := stubPanes(t, panesAlways(noWorkerInventory))
+		s := reviewState()
+		tickOK(t, &s)
+		if len(*reads) != 0 || countWorkflowLaunches(calls, "babysit-review") != 0 {
+			t.Errorf("pane reads %v launches %d, want a quiet tick with no probe", *reads, countWorkflowLaunches(calls, "babysit-review"))
+		}
+		if s.CurrentDelaySeconds <= s.IntervalSeconds {
+			t.Errorf("CurrentDelaySeconds = %d, want it backed off past %d", s.CurrentDelaySeconds, s.IntervalSeconds)
+		}
+	})
+}
+
+// Priority and one writer per PR: a live babysit-review pane suppresses every
+// other branch writer; a discussion comment created while it is live is pending
+// and unlaunched; a conflict seen while it is live records the episode and the
+// first tick after it ends launches merge-repair first.
+func TestTickLiveBabysitReviewWindowSuppressesEveryOtherWriter(t *testing.T) {
+	failingDirty := func(head string) []string { return []string{conflictingOpenPR(head), ciCapFailing, `[]`, `[]`} }
+	failingClean := func(head string) []string { return []string{cleanOpenPR(head), ciCapFailing, `[]`, `[]`} }
+	for _, tc := range []struct {
+		name      string
+		responses []string
+	}{
+		{"unchanged head", append(failingClean("sha-a"), failingClean("sha-a")...)},
+		{"after a head change", append(failingClean("sha-a"), failingClean("sha-b")...)},
+		{"conflicting", append(failingDirty("sha-a"), failingDirty("sha-b")...)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls [][]string
+			withCommands(t, tc.responses, &calls)
+			stubPanes(t, panesAlways(liveReview()))
+			serveDiscussion(t, humanComment(11, humanBody))
+			s := outstandingReviewState()
+			s.DiscussionRevisions = nil
+			s.PendingKeys, s.LaunchedKeys = nil, nil
+
+			tickOK(t, &s)
+			tickOK(t, &s)
+
+			if got := runOrder(calls); len(got) != 0 {
+				t.Errorf("cenci run calls = %q, want none while 42-babysit-review is live", got)
+			}
+			if !reflect.DeepEqual(s.PendingKeys, []string{"discussion:11"}) || len(s.LaunchedKeys) != 0 {
+				t.Errorf("pending/launched = %v/%v, want the comment pending and unlaunched", s.PendingKeys, s.LaunchedKeys)
+			}
+		})
+	}
+
+	t.Run("conflict then merge-repair first after the window ends", func(t *testing.T) {
+		var calls [][]string
+		withCommands(t, append(append(failingDirty("sha-a"), failingDirty("sha-a")...), failingDirty("sha-a")...), &calls)
+		stubPanes(t, panesByTick(liveReview(), liveReview(), deadReview()))
+		serveDiscussion(t, humanComment(11, humanBody))
+		s := reviewState()
+
+		tickOK(t, &s)
+		if s.ConflictRepairSHA != "sha-a" || len(runOrder(calls)) != 0 {
+			t.Fatalf("tick 1: conflictRepairHeadSha %q launches %q, want the episode recorded and nothing launched", s.ConflictRepairSHA, runOrder(calls))
+		}
+		tickOK(t, &s)
+		tickOK(t, &s)
+		if got := runOrder(calls); !reflect.DeepEqual(got, []string{"merge-repair"}) {
+			t.Errorf("cenci run calls = %q, want exactly merge-repair first after the window ended", got)
+		}
+	})
+}
+
+func deadReview() string { return paneRowOf("42-babysit-review", true, ownedRepoDir) }
+
+// A failing-CI tick with a new discussion comment makes exactly one `cenci run`
+// (ci-repair); the first green tick after that window ends launches babysit-review.
+func TestTickFailingCIAndNewDiscussionLaunchesOnlyCIRepairFirst(t *testing.T) {
+	var calls [][]string
+	withCommands(t, append(ciRepairTickResponses("sha-a"), cleanOpenPR("sha-b"), ciCapGreen, `[]`, `[]`), &calls)
+	stubPanes(t, panesByTick("", deadCI()))
+	serveDiscussion(t, humanComment(11, humanBody))
+	s := reviewState()
+
+	tickOK(t, &s)
+	if got := runOrder(calls); !reflect.DeepEqual(got, []string{"ci-repair"}) {
+		t.Fatalf("tick 1: cenci run calls = %q, want exactly ci-repair", got)
+	}
+	if !reflect.DeepEqual(s.PendingKeys, []string{"discussion:11"}) || len(s.LaunchedKeys) != 0 {
+		t.Errorf("tick 1: pending/launched = %v/%v, want pending and unlaunched", s.PendingKeys, s.LaunchedKeys)
+	}
+	tickOK(t, &s)
+	if got := runOrder(calls); !reflect.DeepEqual(got, []string{"ci-repair", "babysit-review"}) {
+		t.Errorf("cenci run calls = %q, want babysit-review on the first tick with no writer live", got)
+	}
+}
+
+// Launch safety: an unreadable inventory, a vanished session, an address-review
+// window, a live same-name window of another repository and exit 3.
+func TestTickBabysitReviewLaunchGuards(t *testing.T) {
+	t.Run("an unreadable pane inventory launches nothing and records the failure", func(t *testing.T) {
+		withFleetAutomergeEnabled(t, true)
+		var calls [][]string
+		withCommands(t, openPR2(), &calls)
+		stubPanes(t, func(int) (string, error) { return "42-babysit-review\t0\n", nil })
+		serveDiscussion(t, humanComment(11, humanBody))
+		s := reviewState()
+		if _, _, err := tick(&s); err == nil {
+			t.Fatal("tick: err = nil, want the inventory failure")
+		}
+		if n := countWorkflowLaunches(calls, "babysit-review"); n != 0 || s.AutomergeReason != reasonWorkflowLaunchFailed || len(s.LaunchedKeys) != 0 {
+			t.Errorf("launches %d reason %q launched %v, want 0 / %q / none", n, s.AutomergeReason, s.LaunchedKeys, reasonWorkflowLaunchFailed)
+		}
+	})
+	t.Run("a recorded session that no longer exists launches nothing", func(t *testing.T) {
+		withFleetAutomergeEnabled(t, true)
+		var calls [][]string
+		withCommands(t, openPR2(), &calls)
+		tmuxHasSession = func(string, string) (bool, error) { return false, nil }
+		serveDiscussion(t, humanComment(11, humanBody))
+		s := reviewState()
+		if _, _, err := tick(&s); err == nil {
+			t.Fatal("tick: err = nil, want the missing-session failure")
+		}
+		if n := countWorkflowLaunches(calls, "babysit-review"); n != 0 || s.AutomergeReason != reasonWorkflowLaunchFailed {
+			t.Errorf("launches %d reason %q, want 0 / %q", n, s.AutomergeReason, reasonWorkflowLaunchFailed)
+		}
+		if !reflect.DeepEqual(s.PendingKeys, []string{"discussion:11"}) || len(s.LaunchedKeys) != 0 || s.ReviewLaunch != nil {
+			t.Errorf("pending/launched/launch = %v/%v/%v, want the key pending and nothing recorded", s.PendingKeys, s.LaunchedKeys, s.ReviewLaunch)
+		}
+	})
+	t.Run("exit 3 counts as dispatched", func(t *testing.T) {
+		var calls [][]string
+		withCommands(t, openPR2(), &calls)
+		stubCenciRunExit(t, &calls, 3, "cenci run: setting automatic-rename off: boom: tmux window already spawned")
+		withReviewSeams(t, testLaunchAt, testReviewNonce)
+		serveDiscussion(t, humanComment(11, humanBody))
+		s := reviewState()
+		tickOK(t, &s)
+		if !reflect.DeepEqual(s.LaunchedKeys, []string{"discussion:11"}) || s.ReviewLaunch == nil || s.ReviewLaunch.Nonce != testReviewNonce {
+			t.Errorf("launched %v launch %+v, want the keys launched and the nonce saved", s.LaunchedKeys, s.ReviewLaunch)
+		}
+	})
+	t.Run("a live window of another repository does not block", func(t *testing.T) {
+		var calls [][]string
+		withCommands(t, openPR2(), &calls)
+		stubGitCommonDir(t, map[string]string{ownedRepoDir: "/repo/root/.git", "/elsewhere/repo": "/elsewhere/repo/.git"})
+		stubPanes(t, panesAlways(paneRowOf("42-babysit-review", false, "/elsewhere/repo")))
+		serveDiscussion(t, humanComment(11, humanBody))
+		s := reviewState()
+		tickOK(t, &s)
+		if n := countWorkflowLaunches(calls, "babysit-review"); n != 1 {
+			t.Errorf("babysit-review launches = %d, want 1: a foreign window never blocks", n)
+		}
+	})
+	t.Run("a live address-review window blocks every launch and automerge", func(t *testing.T) {
+		withFleetAutomergeEnabled(t, true)
+		var calls [][]string
+		withCommands(t, automergeOnResponses(), &calls)
+		stubPanes(t, panesAlways(paneRowOf("42-address-review", false, ownedRepoDir)))
+		serveDiscussion(t, humanComment(11, humanBody))
+		s := reviewState()
+		tickOK(t, &s)
+		if got := runOrder(calls); len(got) != 0 {
+			t.Errorf("cenci run calls = %q, want none while 42-address-review is live", got)
+		}
+		if s.AutomergeReason != reasonRepairWorkerLive || !strings.Contains(s.AutomergeDetail, "work:42-address-review") || !strings.Contains(s.AutomergeDetail, "close it once its edits are preserved") {
+			t.Errorf("reason %q detail %q, want the live hold naming the window and the close instruction", s.AutomergeReason, s.AutomergeDetail)
+		}
+	})
+}
+
+// Q&A 5: a launch carries at most maxReviewLaunchKeys discussion keys; the rest
+// stay pending and unlaunched for a later tick.
+func TestTickBabysitReviewLaunchCarriesAtMostFortyDiscussionKeys(t *testing.T) {
+	var calls [][]string
+	withCommands(t, openPR2(), &calls)
+	withReviewSeams(t, testLaunchAt, testReviewNonce)
+	var comments []string
+	for id := int64(1); id <= 45; id++ {
+		comments = append(comments, humanComment(id, fmt.Sprintf("comment %d", id)))
+	}
+	serveDiscussion(t, comments...)
+	s := reviewState()
+
+	tickOK(t, &s)
+
+	arg, _ := launchArg(calls, "babysit-review")
+	if n := strings.Count(arg, "discussion:"); n != maxReviewLaunchKeys {
+		t.Errorf("launch carries %d discussion keys, want %d", n, maxReviewLaunchKeys)
+	}
+	if len(s.PendingKeys) != 45 || len(s.LaunchedKeys) != 40 {
+		t.Errorf("pending %d launched %d, want 45 pending and 40 launched", len(s.PendingKeys), len(s.LaunchedKeys))
+	}
+}
+
+// Save and reload preserve the new discussion fields exactly; a v2 file without
+// them loads with an empty seen-set and its first tick re-detects every human
+// discussion comment.
+func TestStateDiscussionFieldsRoundTripAndV2UpgradeRedetects(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	want := outstandingReviewState()
+	want.SchemaVersion = stateSchemaVersion
+	want.AddressedKeys = []string{"discussion:9"}
+	want.DiscussionReceipts = map[string]discussionReceipt{"discussion:9": {CommentID: 9, Revision: strings.Repeat("a", 64), HeadSHA: testReceiptHead, Outcome: "no-action", ReceiptCommentID: 8, Source: receiptSourceHumanCLI}}
+	want.ConsumedReviewNonces = map[string]int64{testWrongNonce: 8, "cccccccccccccccccccccccccccccccc": 0}
+	if err := save(path, want); err != nil {
+		t.Fatal(err)
+	}
+	got, err := readStateStrict(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("reloaded state differs:\n got %+v\nwant %+v", got, want)
+	}
+
+	v2 := filepath.Join(t.TempDir(), "v2.json")
+	if err := os.WriteFile(v2, []byte(`{"schemaVersion":2,"pr":"42","repo":"o/r","agent":"codex","status":"running"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := readStateStrict(v2)
+	if err != nil || len(s.DiscussionRevisions) != 0 {
+		t.Fatalf("v2 load: %v revisions %v, want an empty seen-set", err, s.DiscussionRevisions)
+	}
+	var calls [][]string
+	withCommands(t, openPR2(), &calls)
+	serveDiscussion(t, humanComment(11, "one"), humanComment(12, "two"))
+	s.LaunchSession, s.LaunchDir = "work", ownedRepoDir
+	tickOK(t, &s)
+	if !reflect.DeepEqual(s.PendingKeys, []string{"discussion:11", "discussion:12"}) {
+		t.Errorf("PendingKeys = %v, want every human discussion comment re-detected", s.PendingKeys)
 	}
 }
