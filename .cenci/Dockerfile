@@ -19,7 +19,7 @@ USER dev
 # cenci:fragment-end node
 
 # cenci:fragment-begin go
-ARG GO_VERSION=1.27.3
+ARG GO_VERSION=1.27.4
 
 USER root
 
