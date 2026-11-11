@@ -354,7 +354,7 @@ suite when fish is installed; no fish row is listed because it has not been obse
 |---|---|---|---|---|---|
 | 0 | none | The handler ran and allowed the call, or a lifecycle handler returned its payload. | allowed | Continues; lifecycle stdout is used as the hook output. | None needed. |
 | 0 | `hook-output.sh: jq not found on PATH; emitting no additionalContext.` | `jq` is missing from the login-shell PATH; `hook-output.sh` degrades to an empty payload. | allowed (degraded: no additionalContext) | Continues, but the SessionStart, PreCompact, or Stop context is not injected. | Install `jq` where a login shell finds it (`~/.profile`, not only `~/.bashrc`). |
-| 2 | Policy marker such as `Refusing to write` or `targets the main worktree` | A guard ran and refused the call by policy. | denied | Blocked: the tool call does not run and stderr is shown as the reason. | Make the change from a worktree or a non-sensitive path; this is the guard working. |
+| 2 | Policy marker such as `Refusing to write` or `targets the main worktree` | A guard ran and refused the call by policy. | denied | Blocked: the tool call does not run and stderr is shown as the reason. | For a planned [guard canary probe](#guard-canary-preflight), record `denied`, complete the remaining probes and run `check`; proceed only on `CANARY_STATUS=active`. Otherwise, make the change from a worktree or a non-sensitive path. |
 | 2 | `BLOCKED: jq is required ...` or `... requires awk ...` | A required tool is missing from the login-shell PATH; the guard fails closed. | denied | Blocked: every tool call the guard matches is refused until the tool is available. | Install `jq` and `awk` where a login shell finds them. |
 | 2 | empty | `${PLUGIN_ROOT}` was substituted into the path but not exported, so `hook-output.sh` aborts without a reason. | handler not running | Failed (exit 2 without stderr is not Blocked); the tool call is not blocked. | Run the hook from a plugin-bundled source; config-layer hook files do not get `PLUGIN_ROOT` exported. |
 | 126 | `Permission denied` naming the full script path | The script lost its execute bit (a lossy copy, archive, or checkout). | guard not running for PreToolUse guards; handler not running otherwise | Failed; the tool call is not blocked, so a guard that should refuse does not. | Restore the bit with `chmod +x` or reinstall the plugin. |
@@ -401,6 +401,13 @@ before its first checkpoint write.
   `COMMAND<TAB><n><TAB>printf x > '<target>'` line with the target single-quoted (an embedded `'`
   is written `'\''`), and the session runs that line verbatim, so a repository path with spaces
   or shell metacharacters creates no stray file.
+- **Expected denials.** A planned main-worktree canary probe is intentionally denied. The
+  guard's diagnostic gives conditional guidance: record `denied`, complete all remaining
+  planned probes, then run `guard-canary.sh check`; proceed only on `CANARY_STATUS=active`.
+  Never retry, relocate or bypass a planned probe, or manufacture a success. A canary-shaped
+  filename alone proves neither a receipt nor a successful preflight. For accidental
+  main-worktree writes, the diagnostic retains the feature-worktree remediation below that
+  conditional guidance; it does not change any guard decision or receipt requirement.
 - **Guard receipts.** When a guard blocks a canary-shaped probe target, it writes a guard
   receipt into the run directory: `V1`, the guard, the run id, the probe number and the tool
   name, never the command or the diff. It writes one only when the run directory's `probes.tsv`
