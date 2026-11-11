@@ -196,7 +196,7 @@ func TestCIWorker_SiblingConflictWaitsForTheCIWorkerThenMergeRepairGoesFirst(t *
 	if s := e.after(2); s.ConflictFixAttempts != 1 {
 		t.Errorf("tick 2: conflictFixAttempts = %d, want 1", s.ConflictFixAttempts)
 	}
-	want := []string{"merge-repair", "address-review", "merge-repair"}
+	want := []string{"merge-repair", "babysit-review", "merge-repair"}
 	if got := runOrder(e.calls); !slices.Equal(got, want) {
 		t.Fatalf("cenci run calls = %q, want %q", got, want)
 	}
@@ -226,8 +226,8 @@ func TestCIWorker_SameTickCIAndFeedbackLaunchesOnlyCIRepair(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 
-	if got := runOrder(e.calls); !slices.Equal(got, []string{"ci-repair", "address-review"}) {
-		t.Fatalf("cenci run calls = %q, want ci-repair then address-review", got)
+	if got := runOrder(e.calls); !slices.Equal(got, []string{"ci-repair", "babysit-review"}) {
+		t.Fatalf("cenci run calls = %q, want ci-repair then babysit-review", got)
 	}
 	for _, tick := range []int{1, 2} {
 		if s := e.after(tick); !slices.Equal(s.PendingKeys, []string{"comment:7"}) || len(s.LaunchedKeys) != 0 {

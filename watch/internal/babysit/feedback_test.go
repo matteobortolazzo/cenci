@@ -826,3 +826,82 @@ func TestReconcileFeedbackGraphQLGateWidenedToAddressedCommentKeys(t *testing.T)
 		t.Fatal("reconcileFeedback issued no GraphQL call: the lazy gate must fire for an addressed comment: key too, not just a pending one")
 	}
 }
+
+// -- ordinary PR discussion (#1472) -------------------------------------------
+
+// AC: a state holding only discussion: keys makes zero GraphQL calls, never
+// classifies a discussion key as unsupported, and leaves every key untouched; the
+// comment:/review: pass is otherwise unchanged (the cases above).
+func TestReconcileFeedbackDiscussionOnlyStateMakesNoGraphQLCallAndKeepsEveryKey(t *testing.T) {
+	var calls [][]string
+	scriptedGraphQLCommand(t, nil, &calls) // any call fails the test
+	s := &State{Repo: "o/r", PR: "42", PendingKeys: []string{"discussion:11"}, AddressedKeys: []string{"discussion:9"}, LaunchedKeys: []string{"discussion:11"}}
+
+	verdict := reconcileFeedback(s, nil, true)
+
+	if verdict.Hold != "" || len(verdict.Reopened) != 0 {
+		t.Errorf("verdict = %+v, want clean: a discussion key is not an unsupported key type", verdict)
+	}
+	if !reflect.DeepEqual(s.PendingKeys, []string{"discussion:11"}) || !reflect.DeepEqual(s.AddressedKeys, []string{"discussion:9"}) || !reflect.DeepEqual(s.LaunchedKeys, []string{"discussion:11"}) {
+		t.Errorf("keys changed: pending %v addressed %v launched %v", s.PendingKeys, s.AddressedKeys, s.LaunchedKeys)
+	}
+	if len(calls) != 0 {
+		t.Errorf("gh calls = %v, want none", calls)
+	}
+}
+
+// A mixed state still resolves its comment: keys and leaves its discussion keys
+// pending in their original positions' relative order.
+func TestReconcileFeedbackMixedStateResolvesOnlyTheCommentKeys(t *testing.T) {
+	var calls [][]string
+	scriptedGraphQLCommand(t, []string{threadPage(false, "", threadNode(true, 1, 7))}, &calls)
+	s := &State{Repo: "o/r", PR: "42", PendingKeys: []string{"discussion:11", "comment:7"}, LaunchedKeys: []string{"discussion:11", "comment:7"}}
+
+	reconcileFeedback(s, nil, true)
+
+	if !reflect.DeepEqual(s.PendingKeys, []string{"discussion:11"}) || !reflect.DeepEqual(s.AddressedKeys, []string{"comment:7"}) || !reflect.DeepEqual(s.LaunchedKeys, []string{"discussion:11"}) {
+		t.Errorf("pending %v addressed %v launched %v, want comment:7 resolved and discussion:11 untouched", s.PendingKeys, s.AddressedKeys, s.LaunchedKeys)
+	}
+}
+
+// classifyDiscussion is pure: new human comments, edits of pending keys, reopened
+// addressed keys and deleted pending keys, each with its own reason; a deleted
+// addressed key is a no-op.
+func TestClassifyDiscussion(t *testing.T) {
+	r1, r2 := strings.Repeat("1", 64), strings.Repeat("2", 64)
+	for _, tc := range []struct {
+		name    string
+		state   State
+		current map[string]string
+		want    discussionClassification
+	}{
+		{"a never-seen comment is new", State{}, map[string]string{"discussion:1": r1},
+			discussionClassification{New: []string{"discussion:1"}}},
+		{"a pending key at its recorded revision is unchanged", State{PendingKeys: []string{"discussion:1"}, DiscussionRevisions: map[string]string{"discussion:1": r1}},
+			map[string]string{"discussion:1": r1}, discussionClassification{}},
+		{"an edited pending key is edited, not reopened", State{PendingKeys: []string{"discussion:1"}, DiscussionRevisions: map[string]string{"discussion:1": r1}},
+			map[string]string{"discussion:1": r2}, discussionClassification{Edited: []string{"discussion:1"}}},
+		{"an edited addressed key reopens", State{AddressedKeys: []string{"discussion:2"}, DiscussionRevisions: map[string]string{"discussion:2": r1},
+			DiscussionReceipts: map[string]discussionReceipt{"discussion:2": {Revision: r1}}},
+			map[string]string{"discussion:2": r2},
+			discussionClassification{Reopened: []string{"discussion:2"}, Hold: reasonFeedbackReopened, Detail: "discussion:2: review feedback reopened"}},
+		{"an addressed key at its revision is a no-op", State{AddressedKeys: []string{"discussion:2"}, DiscussionRevisions: map[string]string{"discussion:2": r1}},
+			map[string]string{"discussion:2": r1}, discussionClassification{}},
+		{"a deleted pending key is unknown", State{PendingKeys: []string{"discussion:1"}, DiscussionRevisions: map[string]string{"discussion:1": r1}},
+			map[string]string{}, discussionClassification{Unknown: []string{"discussion:1"}, Hold: reasonReviewStateUnknown, Detail: "discussion:1: not found or in an unrecognized state"}},
+		{"a deleted addressed key is a no-op", State{AddressedKeys: []string{"discussion:2"}, DiscussionRevisions: map[string]string{"discussion:2": r1}},
+			map[string]string{}, discussionClassification{}},
+		{"unknown outranks reopened", State{PendingKeys: []string{"discussion:1"}, AddressedKeys: []string{"discussion:2"},
+			DiscussionRevisions: map[string]string{"discussion:1": r1, "discussion:2": r1}},
+			map[string]string{"discussion:2": r2},
+			discussionClassification{Reopened: []string{"discussion:2"}, Unknown: []string{"discussion:1"}, Hold: reasonReviewStateUnknown, Detail: "discussion:1: not found or in an unrecognized state"}},
+		{"new keys are ordered by comment id", State{}, map[string]string{"discussion:12": r1, "discussion:3": r2},
+			discussionClassification{New: []string{"discussion:3", "discussion:12"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := classifyDiscussion(&tc.state, tc.current); !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("classifyDiscussion = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}

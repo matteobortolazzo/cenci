@@ -225,8 +225,13 @@ decisions instead of the auto-approved one:
 ```
 
 Overruling happens on the pull request: to overrule a decision, comment on the pull request
-this run opens. Babysit already relaunches `address-review` for any new non-bot PR comment,
-so no new mechanism is involved, and a reply left only on the ticket is not acted on. A
+this run opens. An ordinary PR comment (one in the pull request's conversation, by a non-bot
+author, not opening with the cenci banner) holds automerge until a nonce-bound review receipt
+or `cenci babysit resolve` records it addressed: babysit launches one finite review worker
+for it, and launching, exiting or pushing never clears the hold by itself; a reply left only
+on the ticket is not acted on. The unattended worker only acts on feedback from authors with
+write access: a comment from anyone else still holds automerge but is left for a write-access
+human to handle and `cenci babysit resolve`. A
 failed decision comment does not hold back the run — the pull request body is the durable
 notice. Security-sensitive, destructive/irreversible, and scope-blowup questions are never
 decided, and neither is a contradiction that would make an acceptance criterion
@@ -536,7 +541,11 @@ Babysit adds no new probe for that case — the backstop is GitHub's own merge r
 which surfaces as its own distinct hold reason (logged and retried, never bypassed) if
 the merge is actually rejected.
 Review feedback resolution is GitHub-authoritative — pushing a commit does not clear
-a thread; only `isResolved`, a `DISMISSED` review, or a newer `APPROVED` does. Any
+a thread; only `isResolved`, a `DISMISSED` review, or a newer `APPROVED` does. The one
+exception is an ordinary PR comment (`discussion:<id>`), which GitHub has no resolved
+state for: it clears only through a nonce-bound receipt from the worker babysit launched
+for it, or `cenci babysit resolve` (host-only, attended-only), and editing the comment
+reopens it. Inline-thread and review feedback stay GitHub-authoritative. Any
 state babysit cannot positively confirm (unreadable, truncated pagination, unknown,
 unsupported) holds rather than proceeding.
 
@@ -602,7 +611,7 @@ it was evaluated.
 | `enabled` | Fleet kill switch | `automerge.enabled` is not `true` in `~/.config/cenci/config.json` |
 | `label` | Per-ticket grant | The PR closes no issue, an issue's labels are unreadable, or any closed issue lacks `automerge:ok` |
 | `ci` | CI green (≥1 `pass`, rest `pass`/`skipping`) | No checks reported, zero `pass` with the rest `skipping`, or any check's bucket is `fail`, `pending`, `cancel`, empty, or unrecognized |
-| `review` | Feedback | A CI or merge repair worker still running (`branch repair worker still running`), CI repair in flight, pending feedback, a reopened resolution, or a detection read that couldn't be proven complete |
+| `review` | Feedback | A CI, merge or review worker still running (`branch repair worker still running`), CI repair in flight, pending feedback (an unreceipted PR comment included), a reopened resolution, a review worker that ended without a receipt, or a detection read that couldn't be proven complete |
 | `mergeable` | PR state | Draft, `MERGEABLE` unknown, or not mergeable (`PR has merge conflicts` when `mergeStateStatus` is `DIRTY`, `PR branch is behind base` when `BEHIND`) |
 | `headsha` | Head commit | The PR's head SHA is unreadable at evaluation time |
 | `files` | Diff readability | Zero changed files, or a truncated file list |
@@ -627,7 +636,8 @@ unreached `ci` stage still renders the plain `-` (as in the example above, where
 Three reasons need a human and will not clear on their own: `review feedback state
 unreadable`, `review feedback state unknown` (GitHub stopped reporting a comment or
 thread — deleted or purged), and `unsupported review feedback type`. Merge those by
-hand.
+hand. A deleted pending PR comment is the exception: `cenci babysit resolve <pr>
+discussion:<id>` clears it (see [cenci-watch README — Automerge](../watch/README.md#automerge-cenci-babysit)).
 
 `PR has merge conflicts` automatically launches Claude Opus to resolve the conflicts
 against the fetched remote base, run local verification, and update the same PR with

@@ -10,7 +10,7 @@ import (
 )
 
 // The real run.BuiltinCapability query wired through the arm path (#1215):
-// claude and codex have built-in address-review, babysit-attention and
+// claude and codex have built-in babysit-review, babysit-attention and
 // ci-repair, so each reaches the spawn seam exactly once; opencode has none (and
 // is disabled), so it never does. This lives in an external test package because
 // internal/run imports internal/daemon.

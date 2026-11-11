@@ -15,6 +15,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -43,14 +44,22 @@ func TestBabysitCodexLaunchResolvesToSandboxAgentArgv(t *testing.T) {
 	// #1455: the ci-repair argument leads with the PR number (the window's
 	// numeric identity) and its finite template routes through `codex exec`.
 	const ciRepairPrompt = "103 PR #103 (main) has failing CI checks: build. Diagnose, fix, test, commit, and push without force-pushing."
+	// #1472: the finite babysit-review launch carries a random per-launch
+	// receipt nonce (`newReviewNonce` is unexported), so its recorded ticket
+	// argument is matched by shape; ticketRe must match the whole argument, and
+	// the resolved passthrough is then built from the real recorded value.
+	exactTicket := func(s string) *regexp.Regexp { return regexp.MustCompile("^" + regexp.QuoteMeta(s) + "$") }
 	for _, tc := range []struct {
-		name, workflow, ticket string
-		passthrough            []string
-		seed                   func(h *chainHarness)
+		name, workflow string
+		ticketRe       *regexp.Regexp
+		passthrough    func(ticket string) []string
+		seed           func(h *chainHarness)
 	}{
-		{"address-review", "address-review", "103", []string{"$cenci:address-review 103"},
+		{"babysit-review", "babysit-review", regexp.MustCompile(`^103 --receipt-nonce [0-9a-f]{32}$`),
+			func(ticket string) []string { return []string{"exec", "$cenci:address-review " + ticket} },
 			func(h *chainHarness) { h.seedReview(103, "reviewer", "CHANGES_REQUESTED", "2026-01-01T00:00:00Z") }},
-		{"ci-repair", "ci-repair", ciRepairPrompt, []string{"exec", "$cenci:ci-repair " + ciRepairPrompt},
+		{"ci-repair", "ci-repair", exactTicket(ciRepairPrompt),
+			func(ticket string) []string { return []string{"exec", "$cenci:ci-repair " + ticket} },
 			func(h *chainHarness) { h.seedChecks(103, ghCheck{Bucket: "fail", Name: "build", State: "FAILURE"}) }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -78,10 +87,17 @@ func TestBabysitCodexLaunchResolvesToSandboxAgentArgv(t *testing.T) {
 				t.Fatalf("babysit never ran the recorded %s launch: %v", tc.workflow, err)
 			}
 			argv := strings.Split(strings.TrimSuffix(string(data), "\x00"), "\x00")
-			wantHead := []string{"run", tc.workflow, tc.ticket, "--agent", "codex", "--session", chainFakeTmuxSession, "--dir"}
+			if len(argv) < 3 {
+				t.Fatalf("recorded self-exec argv = %q, too short to carry a ticket argument", argv)
+			}
+			// argv[2] is the ticket argument, checked by shape below.
+			wantHead := []string{"run", tc.workflow, argv[2], "--agent", "codex", "--session", chainFakeTmuxSession, "--dir"}
 			// #1497: babysit appends `--unattended` after the launch dir.
 			if len(argv) != len(wantHead)+2 || !slices.Equal(argv[:len(wantHead)], wantHead) || argv[len(wantHead)] == "" || argv[len(wantHead)+1] != "--unattended" {
 				t.Fatalf("recorded self-exec argv = %q, want %q followed by the launch dir and --unattended", argv, wantHead)
+			}
+			if !tc.ticketRe.MatchString(argv[2]) {
+				t.Fatalf("recorded ticket argument = %q, want it to match %s", argv[2], tc.ticketRe)
 			}
 
 			var out bytes.Buffer
@@ -97,7 +113,7 @@ func TestBabysitCodexLaunchResolvesToSandboxAgentArgv(t *testing.T) {
 				t.Errorf("dry-run consulted the controller: %v", ctrl.hasSessionCalls)
 			}
 			got := exectest.ShellArgv(t, exectest.DryRunCommand(t, out.String()), "cenci")
-			if want := append([]string{"cenci", "open", "--agent", "codex", "--"}, tc.passthrough...); !slices.Equal(got, want) {
+			if want := append([]string{"cenci", "open", "--agent", "codex", "--"}, tc.passthrough(argv[2])...); !slices.Equal(got, want) {
 				t.Errorf("resolved argv = %q, want %q", got, want)
 			}
 		})

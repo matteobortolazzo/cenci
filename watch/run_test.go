@@ -565,7 +565,12 @@ func TestRunDryRunCodexSandboxRoutesPromptAfterAgentFlag(t *testing.T) {
 		}
 		codexWorkflows++
 		for _, target := range targets {
-			prompt := "$cenci:" + c.Workflow + " " + target
+			skill := c.Workflow
+			if skill == "babysit-review" {
+				// #1472: the key names the window; the skill stays address-review.
+				skill = "address-review"
+			}
+			prompt := "$cenci:" + skill + " " + target
 			for _, model := range []string{"", "m"} {
 				flags := []string{"--agent", "codex", "--sandbox", "--config", noCfg}
 				want := []string{"cenci", "open"}
@@ -574,8 +579,8 @@ func TestRunDryRunCodexSandboxRoutesPromptAfterAgentFlag(t *testing.T) {
 					want = append(want, "--model", model)
 				}
 				want = append(want, "--agent", "codex", "--")
-				if c.Workflow == "ci-repair" {
-					// #1455: the one finite Codex template runs `codex exec`.
+				if c.Workflow == "ci-repair" || c.Workflow == "babysit-review" {
+					// #1455, #1472: the finite Codex templates run `codex exec`.
 					want = append(want, "exec")
 				}
 				want = append(want, prompt)

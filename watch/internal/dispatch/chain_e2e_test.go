@@ -425,7 +425,7 @@ func TestAutonomousChain_PositiveEndToEnd(t *testing.T) {
 
 	// babysit's launch() has three call sites: ci-repair and babysit-attention
 	// (both gated on a FAILING check, babysit.go -- never applicable here, CI
-	// is pass-only) and address-review, whose #885 launch trigger
+	// is pass-only) and babysit-review (#1472; formerly address-review), whose #885 launch trigger
 	// (PendingKeys \ LaunchedKeys) is evaluated only *after*
 	// reconcileFeedback's own end-of-tick resolution pass has run, so it
 	// fires only for a key still genuinely pending once that pass completes
@@ -434,7 +434,7 @@ func TestAutonomousChain_PositiveEndToEnd(t *testing.T) {
 	// CHANGES_REQUESTED immediately superseded by the same reviewer's later
 	// APPROVED, both already on GitHub by babysit's very first tick), so the
 	// review resolves before the launch trigger is ever evaluated -- zero
-	// address-review invocations are expected on either tick here, and never
+	// babysit-review invocations are expected on either tick here, and never
 	// ci-repair/babysit-attention either.
 	wantInvocations := []string{}
 	if invs := chainCenciInvocations(t, h.cenciLogPath); !slices.Equal(invs, wantInvocations) {
@@ -723,7 +723,7 @@ func TestAutonomousChain_UnresolvedReviewStopsBeforeMerge(t *testing.T) {
 	h.seedReview(103, "reviewer", "CHANGES_REQUESTED", "2026-01-01T00:00:00Z")
 
 	// The unresolved CHANGES_REQUESTED review is still un-launched, so
-	// tick's address-review launch trigger fires before automerge's own
+	// tick's babysit-review launch trigger fires before automerge's own
 	// hold reason is even evaluated (#975 gates every launch() call on a
 	// recorded tmux session).
 	installFakeTmux(t)

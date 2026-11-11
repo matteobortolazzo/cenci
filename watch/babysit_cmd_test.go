@@ -145,7 +145,7 @@ func TestBabysitAgentRefusal(t *testing.T) {
 
 // TestBabysitCapabilityRefusal_UsesBuiltinCapabilityQuery pins the real query
 // runBabysit hands to babysit.CapabilityRefusal (#1215): claude and codex have
-// built-in address-review, babysit-attention and ci-repair; opencode (disabled,
+// built-in babysit-attention, babysit-review and ci-repair; opencode (disabled,
 // no workflows) and a custom agent do not. A config.json that defines
 // fakeagent's workflows must not change the answer, because unattended arming
 // accepts only built-in pairs.
@@ -171,7 +171,7 @@ func TestBabysitCapabilityRefusal_UsesBuiltinCapabilityQuery(t *testing.T) {
 			t.Fatal(err)
 		}
 		cfg := `{"agents":{"fakeagent":{"command":"fakeagent","sandboxCommand":"cenci open","workflows":{` +
-			`"address-review":{"args":["x"]},"babysit-attention":{"args":["x"]},"ci-repair":{"args":["x"]}}}}}`
+			`"babysit-attention":{"args":["x"]},"babysit-review":{"args":["x"]},"ci-repair":{"args":["x"]}}}}}`
 		if err := os.WriteFile(filepath.Join(xdg, "cenci", "config.json"), []byte(cfg), 0o644); err != nil {
 			t.Fatal(err)
 		}

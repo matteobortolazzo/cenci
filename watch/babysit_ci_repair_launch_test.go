@@ -212,12 +212,16 @@ func newCIRepairWorld(t *testing.T, cell ciRepairCell, opts ciRepairWorldOpts) *
 	// reviews; anything else fails.
 	w.setPR(t, ciRepairHead)
 	ciRepairWrite(t, filepath.Join(w.fixtures, "checks.json"), `[{"bucket":"fail","name":"lint","state":"FAILURE"},{"bucket":"fail","name":"test (3.11)","state":"FAILURE"},{"bucket":"fail","name":"e2e #2","state":"FAILURE"},{"bucket":"pass","name":"py3.11-shard-2","state":"SUCCESS"}]`)
+	// #1472: the PR conversation read (`issues/<pr>/comments`) is served from a
+	// fixture, `[]` by default.
+	ciRepairWrite(t, filepath.Join(w.fixtures, "discussion.json"), `[]`)
 	exectest.WriteExecutable(t, filepath.Join(w.binDir, "gh"), "#!/bin/sh\n"+
 		`case "$1 $2" in`+"\n"+
 		`  "repo view") echo `+ciRepairRepo+` ;;`+"\n"+
 		`  "pr view") cat `+exectest.ShellQuote(filepath.Join(w.fixtures, "pr.json"))+` ;;`+"\n"+
 		`  "pr checks") cat `+exectest.ShellQuote(filepath.Join(w.fixtures, "checks.json"))+` ;;`+"\n"+
 		`  api\ repos/*/pulls/*/comments*|api\ repos/*/pulls/*/reviews*) echo '[]' ;;`+"\n"+
+		`  api\ repos/*/issues/*/comments*) cat `+exectest.ShellQuote(filepath.Join(w.fixtures, "discussion.json"))+` ;;`+"\n"+
 		`  *) exit 1 ;;`+"\n"+
 		"esac\n")
 

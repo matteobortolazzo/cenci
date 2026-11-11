@@ -477,7 +477,7 @@ func TestHandleArmRequest_AgentLackingArmCapabilityNacksWithoutSpawn(t *testing.
 // TestHandleArmRequest_DenyingEachArmWorkflowNacks pins that every required arm
 // workflow gates arming, not just the one the previous test denies.
 func TestHandleArmRequest_DenyingEachArmWorkflowNacks(t *testing.T) {
-	for _, wf := range []string{"address-review", "babysit-attention", "ci-repair"} {
+	for _, wf := range []string{"babysit-attention", "babysit-review", "ci-repair"} {
 		t.Run(wf, func(t *testing.T) {
 			spawn := &recordingArmSpawn{resp: ipc.ArmResponse{OK: true}}
 			d := newTestDaemon(&tmuxtest.MockClient{})

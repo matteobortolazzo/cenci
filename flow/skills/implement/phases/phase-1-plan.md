@@ -146,7 +146,7 @@ The banner above is blockquoted; the anchor itself must remain on its own non-bl
 
 ## Decision Comment
 
-Phase 1 posts exactly one decision comment per run that made decisions: a plan whose `## Q&A from Planning` carries at least one `decided:` entry (`agents/planner.md`'s **Decide and notify**). The comment is how the ticket's readers learn what the planner decided without being asked; overruling happens on the pull request this run opens, where babysit already relaunches `address-review` for any new non-bot PR comment, so no new mechanism is introduced. Detection is deterministic — this section never re-judges the planner's classification.
+Phase 1 posts exactly one decision comment per run that made decisions: a plan whose `## Q&A from Planning` carries at least one `decided:` entry (`agents/planner.md`'s **Decide and notify**). The comment is how the ticket's readers learn what the planner decided without being asked; overruling happens on the pull request this run opens, where babysit already launches its finite `babysit-review` worker for any new non-bot PR comment, so no new mechanism is introduced. Detection is deterministic — this section never re-judges the planner's classification.
 
 **Ticket mode only.** Ticketless mode has no ticket to post on; the plan and the pull request body still record every decision.
 

@@ -455,6 +455,33 @@ func TestReset_ReArmFailureReportsBudgetResetButNotReArmed(t *testing.T) {
 	}
 }
 
+// A save that fails after the supervisor was quiesced says it was stopped and not
+// re-armed, and how to re-arm; the cause stays matchable. The temp file's path is a
+// directory, which fails the write whatever the uid.
+func TestReset_FailedSaveAfterTheSupervisorWasStoppedSaysSoAndKeepsTheCause(t *testing.T) {
+	e := newResetEnv(t)
+	writeStateFile(t, e.path, pausedState())
+	if err := os.Mkdir(e.path+".tmp", 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	err := Reset("42", e.dir, nil)
+
+	if err == nil {
+		t.Fatal("Reset: err = nil, want the failed save reported")
+	}
+	for _, want := range []string{"stopped", "retry budget was not reset", "nothing was re-armed", "cenci babysit 42 --agent codex"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("Reset err = %q, want it to contain %q", err, want)
+		}
+	}
+	var pathErr *os.PathError
+	if !errors.As(err, &pathErr) {
+		t.Errorf("Reset err = %v, want the underlying *os.PathError kept for errors.As", err)
+	}
+	e.requireNoStart(t)
+}
+
 func TestReset_MissingStateRefusesAndStartsNothing(t *testing.T) {
 	e := newResetEnv(t)
 
@@ -867,9 +894,18 @@ func TestStop_CIPausedLiveSupervisorIsSignalledAndStateRemoved(t *testing.T) {
 	if !ok || !status.Signaled() || status.Signal() != syscall.SIGTERM {
 		t.Errorf("paused supervisor exit = %v, want it ended by SIGTERM", p.cmd.ProcessState)
 	}
-	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
-		t.Errorf("state file still exists after Stop (stat err = %v)", statErr)
+	requireStoppedState(t, path)
+}
+
+// requireStoppedState pins what `stop` leaves behind (#1472): a state with status
+// stopped, no pid and no retry budget, rather than a removed file.
+func requireStoppedState(t *testing.T, path string) State {
+	t.Helper()
+	got := mustReadState(t, path)
+	if got.Status != "stopped" || got.PID != 0 || got.FixAttempts != 0 || got.CIRepairPaused || got.Agent != "" {
+		t.Errorf("state after stop = status %q pid %d fixAttempts %d paused %v agent %q, want a stopped, budget-free state", got.Status, got.PID, got.FixAttempts, got.CIRepairPaused, got.Agent)
 	}
+	return got
 }
 
 // P35: a reset lifts the cap's counters, never the cap itself.
@@ -964,7 +1000,7 @@ func TestStop_DeadPIDRemovesStateAndLock(t *testing.T) {
 	if out != "Stopped babysitting PR #42.\n" {
 		t.Errorf("stdout = %q, want %q", out, "Stopped babysitting PR #42.\n")
 	}
-	requireMissing(t, path, "state file")
+	requireStoppedState(t, path)
 	requireMissing(t, lock, "lock file")
 	if !strings.Contains(errOut, goneNote(dead)) {
 		t.Errorf("stderr = %q, want it to contain %q", errOut, goneNote(dead))
@@ -1016,7 +1052,7 @@ func TestStop_GonePIDIsNeverSignalled(t *testing.T) {
 	if out != "Stopped babysitting PR #42.\n" {
 		t.Errorf("stdout = %q, want %q", out, "Stopped babysitting PR #42.\n")
 	}
-	requireMissing(t, path, "state file")
+	requireStoppedState(t, path)
 	if !strings.Contains(errOut, goneNote(p.pid)) {
 		t.Errorf("stderr = %q, want the gone note, which proves the gone branch ran", errOut)
 	}
@@ -1139,7 +1175,7 @@ func (h *goneHarness) requireCleared(t *testing.T, err error) {
 		}
 		requireEightFieldsCleared(t, mustReadState(t, h.statePath))
 	case "stop":
-		requireMissing(t, h.statePath, "state file")
+		requireStoppedState(t, h.statePath)
 	}
 }
 
@@ -1307,4 +1343,156 @@ func TestReset_DeadPIDHostOnlyGuardsKeepTheirMessages(t *testing.T) {
 			e.requireNoStart(t)
 		})
 	}
+}
+
+// -- #1472: stop keeps the feedback bookkeeping; arm is strict ----------------
+
+// feedbackRichState is a CI-paused supervisor whose feedback bookkeeping (every
+// key list, the watermarks, the discussion fields) a stop must keep, and whose
+// budgets, agent and CI verdict it must clear.
+func feedbackRichState(pid int) State {
+	s := ciPausedLiveState(pid)
+	s.CIStatus, s.ClosingIssues, s.RepoRoot = ciStatusFailing, []int{9}, "/repo/root"
+	s.PendingCommentAt, s.PendingHeadSHA = "2026-10-02T10:00:00Z", "sha-p"
+	s.PendingKeys = []string{"comment:2", "discussion:11"}
+	s.LaunchedKeys = []string{"comment:2", "discussion:11"}
+	s.AddressedKeys = []string{"comment:1", "discussion:9"}
+	s.DiscussionRevisions = map[string]string{"discussion:11": strings.Repeat("b", 64), "discussion:9": strings.Repeat("a", 64)}
+	s.DiscussionReceipts = map[string]discussionReceipt{"discussion:9": {CommentID: 9, Revision: strings.Repeat("a", 64), Outcome: "addressed", ReceiptCommentID: 8, Source: receiptSourceReceipt}}
+	s.ReviewLaunch = &reviewLaunchRecord{Nonce: testReviewNonce, LaunchedAt: testLaunchAt, Keys: []string{"comment:2", "discussion:11"}}
+	s.ConsumedReviewNonces = map[string]int64{testWrongNonce: 8}
+	return s
+}
+
+// Q&A 1 (P2): stop SIGTERMs the verified supervisor, waits for it to exit,
+// removes the lock and rewrites the state keeping only the feedback bookkeeping,
+// with status `stopped` and no pid.
+func TestStopKeepsOnlyTheFeedbackBookkeepingAfterTheSupervisorExits(t *testing.T) {
+	e := newResetEnv(t)
+	owner := startOwnedFixture(t, false)
+	writeStateFile(t, e.path, feedbackRichState(owner.pid))
+	writeLock(t, e.lock, owner.pid)
+
+	if err := StopRepo("o/r", "42", e.dir); err != nil {
+		t.Fatalf("StopRepo: %v", err)
+	}
+
+	select {
+	case <-owner.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the supervisor was not terminated")
+	}
+	requireMissing(t, e.lock, "supervisor lock")
+	want := feedbackRichState(0)
+	got := mustReadState(t, e.path)
+	for name, pair := range map[string][2]any{
+		"pending":   {got.PendingKeys, want.PendingKeys},
+		"launched":  {got.LaunchedKeys, want.LaunchedKeys},
+		"addressed": {got.AddressedKeys, want.AddressedKeys},
+		"revisions": {got.DiscussionRevisions, want.DiscussionRevisions},
+		"receipts":  {got.DiscussionReceipts, want.DiscussionReceipts},
+		"launch":    {got.ReviewLaunch, want.ReviewLaunch},
+		"consumed":  {got.ConsumedReviewNonces, want.ConsumedReviewNonces},
+		"pendingAt": {got.PendingCommentAt, want.PendingCommentAt},
+		"pendingHd": {got.PendingHeadSHA, want.PendingHeadSHA},
+		"lastAt":    {got.LastCommentAt, want.LastCommentAt},
+	} {
+		if !reflect.DeepEqual(pair[0], pair[1]) {
+			t.Errorf("%s = %v, want %v kept across stop", name, pair[0], pair[1])
+		}
+	}
+	if got.Status != "stopped" || got.PID != 0 || got.Repo != "o/r" || got.PR != "42" {
+		t.Errorf("status/pid/repo/pr = %q/%d/%q/%q, want stopped/0/o/r/42", got.Status, got.PID, got.Repo, got.PR)
+	}
+	if got.Agent != "" || got.FixAttempts != 0 || got.ConflictFixAttempts != 0 || got.RepairPending || got.CIRepairPaused || got.CICapNotified ||
+		got.CIStatus != "" || len(got.ClosingIssues) != 0 || got.LastRepairedSHA != "" || got.ConflictNotifiedSHA != "" {
+		t.Errorf("agent, budgets, CI status and closing issues must be cleared by stop, got %+v", got)
+	}
+}
+
+// P2: a re-arm over a stopped state adopts a fresh agent, keeps the pending keys
+// and so keeps the review-stage hold, and never starts from empty PendingKeys.
+func TestArmOverAStoppedStateAdoptsANewAgentAndKeepsTheFeedback(t *testing.T) {
+	e := newResetEnv(t)
+	writeStateFile(t, e.path, feedbackRichState(0))
+	if err := StopRepo("o/r", "42", e.dir); err != nil {
+		t.Fatalf("StopRepo: %v", err)
+	}
+
+	if err := Run(Options{PR: "42", Agent: "claude", StateDir: e.dir, Interval: time.Minute, Session: "work", Dir: "/repo/root"}); err != nil {
+		t.Fatalf("Run (re-arm): %v", err)
+	}
+
+	got := mustReadState(t, e.path)
+	if got.Agent != "claude" || got.Status != "arming" || !reflect.DeepEqual(got.PendingKeys, []string{"comment:2", "discussion:11"}) {
+		t.Errorf("agent/status/pending = %q/%q/%v, want claude/arming/the kept pending keys", got.Agent, got.Status, got.PendingKeys)
+	}
+	if len(e.started) != 1 {
+		t.Errorf("supervisor starts = %d, want 1", len(e.started))
+	}
+}
+
+// P3 / AC: an unreadable or undecodable state at arm exits with the named reason
+// and the path, never overwrites the file, never starts a supervisor and never
+// starts from empty PendingKeys; the same holds in the supervisor child.
+func TestArmRefusesAnUnreadableStateAndLeavesItByteIdentical(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		content string
+		child   bool
+	}{
+		{"truncated JSON at arm", `{"schemaVersion":2,"pr":"42","repo":"o/r","pendingCommentKeys":["discussion:1"`, false},
+		{"empty file at arm", "", false},
+		{"truncated JSON in the supervisor child", `{"schemaVersion":2,"pr":"42","repo":"o/r","pendingCommentKeys":[`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newResetEnv(t)
+			if tc.child {
+				t.Setenv("CENCI_BABYSIT_SUPERVISOR", "1")
+			}
+			if err := os.WriteFile(e.path, []byte(tc.content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			err := Run(Options{PR: "42", Agent: "claude", StateDir: e.dir, Interval: time.Minute, Once: tc.child, Session: "work", Dir: "/repo/root"})
+
+			if err == nil || !strings.Contains(err.Error(), reasonStateUnreadable) || !strings.Contains(err.Error(), e.path) {
+				t.Fatalf("Run err = %v, want %q naming %s", err, reasonStateUnreadable, e.path)
+			}
+			if !bytes.Equal(readFileBytes(t, e.path), []byte(tc.content)) {
+				t.Error("the unreadable state file was overwritten")
+			}
+			e.requireNoStart(t)
+			requireMissing(t, e.lock, "supervisor lock")
+		})
+	}
+}
+
+// AC: the host `status` of an unreadable state names the path and the cause and
+// fails; the daemon-relayed class stays path-free; a stopped state reports
+// `stopped`.
+func TestStatusNamesTheUnreadablePathOnTheHostAndReportsStopped(t *testing.T) {
+	t.Run("unreadable state", func(t *testing.T) {
+		dir, path := hostStopFixture(t, "o/r", "42")
+		if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		err := Status("42", dir)
+		if err == nil || !strings.HasPrefix(err.Error(), reasonStateUnreadable+": "+path+": ") {
+			t.Fatalf("Status err = %v, want %q followed by the path and the cause", err, reasonStateUnreadable+": "+path+": ")
+		}
+		if _, relayed := StatusRepo("o/r", "42", dir); strings.Contains(relayed.Error(), path) {
+			t.Errorf("StatusRepo error %q names the state path", relayed)
+		}
+	})
+	t.Run("stopped state", func(t *testing.T) {
+		dir, path := hostStopFixture(t, "o/r", "42")
+		writeStateFile(t, path, State{PR: "42", Repo: "o/r", Status: "stopped"})
+		done := captureStdout(t)
+		err := Status("42", dir)
+		out := done()
+		if err != nil || !strings.Contains(out, `"status":"stopped"`) {
+			t.Errorf("Status = %v, stdout %q, want a stopped report", err, out)
+		}
+	})
 }

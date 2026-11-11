@@ -270,8 +270,9 @@ func CapabilityTableMarkdown() string {
 // matching cenci skill, with `cenci open` as their sandbox command. Claude's
 // sandbox launch is `cenci open -- <prompt>`; Codex's is `cenci open --agent
 // codex -- <prompt>` (its SandboxArgs), since `cenci open` defaults to Claude.
-// ci-repair (printMode/execMode) and merge-repair are the one-shot exceptions:
-// Claude print mode and `codex exec`, which exit once the procedure ends.
+// ci-repair and babysit-review (printMode/execMode) and merge-repair are the
+// one-shot exceptions: Claude print mode and `codex exec`, which exit once the
+// procedure ends.
 // Fresh maps are constructed on each call so callers may mutate the result freely.
 func builtinConfig() FileConfig {
 	claudeWF := func(wf string) WorkflowTemplate {
@@ -308,6 +309,12 @@ func builtinConfig() FileConfig {
 					// CI repair is a finite worker (#1455): babysit reads a live
 					// `<PR>-ci-repair` pane as a repair still executing.
 					"ci-repair": claudeWF("ci-repair").printMode(),
+					// The supervisor's review worker (#1472): the address-review
+					// skill in print mode, so it exits after posting its receipt.
+					// The key (not the skill) names the `<PR>-babysit-review`
+					// window. It stays under the address-review skill because
+					// flow requires skills/<name>/codex.md for every codexWF target.
+					"babysit-review": claudeWF("address-review").printMode(),
 					// Babysit selects Claude Opus explicitly for conflict repair,
 					// regardless of the client that originally armed supervision.
 					"merge-repair": {
@@ -329,6 +336,8 @@ func builtinConfig() FileConfig {
 					// Babysit has no codex.md: it runs from its portable SKILL.md.
 					// CI repair is a finite `codex exec` worker (#1455).
 					"babysit": codexWF("babysit").portable(), "babysit-attention": codexWF("babysit-attention"), "ci-repair": codexWF("ci-repair").execMode(),
+					// Finite `codex exec` review worker (#1472), see the claude entry.
+					"babysit-review": codexWF("address-review").execMode(),
 				},
 			},
 			// OpenCode is disabled (see DisabledAgent). The entry keeps its

@@ -287,6 +287,69 @@ func TestObserveWorkersOwnership(t *testing.T) {
 	}
 }
 
+// #1472: `<pr>-babysit-review` and `<pr>-address-review` are branch writers too,
+// under the same ownership rules; a live address-review window always adds the
+// close-it-once-its-edits-are-preserved note (it never exits by itself).
+func TestObserveWorkersReviewWindows(t *testing.T) {
+	commonDirs := map[string]string{"/repo/wt": "/repo/root/.git", "/elsewhere/repo": "/elsewhere/repo/.git"}
+	for _, tc := range []struct {
+		name, output         string
+		wantReview, wantAddr bool
+		wantNotes            int
+	}{
+		{"live owned babysit-review", "42-babysit-review\t0\t/repo/wt\n", true, false, 0},
+		{"retained dead babysit-review is ended", "42-babysit-review\t1\t/repo/wt\n", false, false, 0},
+		{"foreign babysit-review is ignored", "42-babysit-review\t0\t/elsewhere/repo\n", false, false, 0},
+		{"babysit-review of unknown ownership blocks with a note", "42-babysit-review\t0\t\n", true, false, 1},
+		{"prefix sibling and another PR are ignored", "42-babysit-review-old\t0\t/repo/wt\n142-babysit-review\t0\t/repo/wt\n", false, false, 0},
+		{"live owned address-review adds the close note", "42-address-review\t0\t/repo/wt\n", false, true, 1},
+		{"foreign address-review is ignored", "42-address-review\t0\t/elsewhere/repo\n", false, false, 0},
+		{"dead address-review is ended", "42-address-review\t1\t/repo/wt\n", false, false, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stubGitCommonDir(t, commonDirs)
+			got, err := observeOver(t, ownedState(), tc.output)
+			if err != nil {
+				t.Fatalf("observeWorkers: %v", err)
+			}
+			if got.reviewLive != tc.wantReview || got.addressReviewLive != tc.wantAddr || len(got.notes) != tc.wantNotes {
+				t.Fatalf("observeWorkers(%q) = review %v address-review %v notes %q, want %v %v and %d notes",
+					tc.output, got.reviewLive, got.addressReviewLive, got.notes, tc.wantReview, tc.wantAddr, tc.wantNotes)
+			}
+			if got.any() != (tc.wantReview || tc.wantAddr) {
+				t.Errorf("any() = %v, want %v", got.any(), tc.wantReview || tc.wantAddr)
+			}
+			if tc.wantAddr && (!strings.Contains(got.notes[0], "work:42-address-review") || !strings.Contains(got.notes[0], "close it once its edits are preserved")) {
+				t.Errorf("note %q, want it to name the window and say to close it once its edits are preserved", got.notes[0])
+			}
+		})
+	}
+}
+
+func TestWorkerLivenessDescribeNamesEveryLiveWriter(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		w    workerLiveness
+		want []string
+	}{
+		{"ci only", workerLiveness{ciLive: true}, []string{"ci-repair window 42-ci-repair is still running"}},
+		{"merge only", workerLiveness{mergeLive: true}, []string{"merge-repair window 42-merge-repair is still running"}},
+		{"ci and merge keep their wording", workerLiveness{ciLive: true, mergeLive: true}, []string{"42-ci-repair and 42-merge-repair are still running"}},
+		{"review", workerLiveness{reviewLive: true}, []string{"babysit-review window 42-babysit-review is still running"}},
+		{"address-review", workerLiveness{addressReviewLive: true}, []string{"42-address-review", "close it once its edits are preserved"}},
+		{"review and ci", workerLiveness{ciLive: true, reviewLive: true}, []string{"42-ci-repair", "42-babysit-review", "are still running"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.w.describe("42")
+			for _, want := range tc.want {
+				if !strings.Contains(got, want) {
+					t.Errorf("describe = %q, want it to contain %q", got, want)
+				}
+			}
+		})
+	}
+}
+
 // The repo-dir matching LaunchDir/RepoRoot is decided without running git; a
 // differing one costs one lookup for it and one, memoized, for our own dir.
 func TestObserveWorkersCommonDirLookupsAreBoundedAndMemoized(t *testing.T) {

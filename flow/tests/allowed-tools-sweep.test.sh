@@ -469,7 +469,8 @@ Bash(git add:*)
 Bash(git commit:*)
 Bash(git push origin:*)
 Bash(jq -n:*)
-Bash(rm -f ${TMPDIR:-/tmp}/cenci/:*)'
+Bash(rm -f ${TMPDIR:-/tmp}/cenci/:*)
+Bash(printenv CENCI_ATTENDED)'
   check_bash_grant_set "${address_review_path}" "${ADDRESS_REVIEW_EXPECTED_GRANTS}" "skills/address-review/SKILL.md"
   assert_dropped_blanket_grants "${address_review}" "skills/address-review/SKILL.md"
 
