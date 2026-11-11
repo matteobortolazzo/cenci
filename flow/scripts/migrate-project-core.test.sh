@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Tests for migrate-project-core.sh (#1448): AGENTS.md is the only guidance file the
-# script writes. Cases M1-M8 each name the behaviour they prove; every case builds
-# its own fixture under one mktemp root.
+# Tests for migrate-project-core.sh (#1448, #1509): AGENTS.md is the only guidance file
+# the script writes, and a CLAUDE.md is removed only when it is exactly one of the three
+# inert adapter shapes (#1509). Cases M1-M38 each name the behaviour they prove; every
+# case builds its own fixture under one mktemp root.
 set -euo pipefail
 FLOW_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)" || { echo "failed to resolve flow directory" >&2; exit 2; }
 SCRIPT="${FLOW_DIR}/scripts/migrate-project-core.sh"
@@ -478,6 +479,229 @@ case_M19_line_terminator_project_rejected() {
   done
 }
 
+# --- #1509: a CLAUDE.md is inert only when it is exactly one of three shapes -----------
+# After CR, trailing whitespace and blank lines are stripped, the lines must be exactly
+#   (a) @AGENTS.md
+#   (b) @AGENTS.md, the start marker, the end marker
+#   (c) @AGENTS.md, the start marker, the template comment, the end marker
+# Everything else is substantive, including an empty file. M20-M23 are the inert shapes,
+# M24-M33 the near-misses the old per-line allow-list wrongly accepted, M34-M37 the edges.
+IMPORT_LINE='@AGENTS.md'
+START_MARKER='<!-- cenci:claude-only:start -->'
+END_MARKER='<!-- cenci:claude-only:end -->'
+TEMPLATE_COMMENT='<!-- Optional Claude Code-only guidance belongs inside this block. -->'
+
+# fixture_beside_agents <name> -- a new fixture holding an AGENTS.md; its path is left in
+# FIXTURE_DIR (not printed), so the helper can call fail outside any command substitution.
+FIXTURE_DIR=""
+fixture_beside_agents() {
+  FIXTURE_DIR="$(new_fixture "$1")"
+  printf '# Root guidance\n' > "${FIXTURE_DIR}/AGENTS.md" || fail "could not write AGENTS.md in fixture $1"
+}
+
+# expect_inert_removed <label> <dir> -- the preview names the CLAUDE.md as removed and
+# leaves it in place; --apply deletes it and leaves AGENTS.md unchanged.
+expect_inert_removed() {
+  local label="$1" dir="$2" agents_before agents_after
+  agents_before="$(sha256sum "${dir}/AGENTS.md")" || fail "${label}: cannot hash AGENTS.md"
+  "${SCRIPT}" "${dir}" >"${ROOT}/${label}.preview" 2>"${ROOT}/${label}.preview.err" || fail "${label}: preview failed"
+  grep -qxF "remove: ${dir}/CLAUDE.md" "${ROOT}/${label}.preview" || fail "${label}: preview does not plan to remove the CLAUDE.md"
+  [[ -f "${dir}/CLAUDE.md" ]] || fail "${label}: preview removed the CLAUDE.md"
+  "${SCRIPT}" "${dir}" --apply >/dev/null 2>&1 || fail "${label}: apply failed"
+  [[ ! -e "${dir}/CLAUDE.md" ]] || fail "${label}: apply did not delete the inert CLAUDE.md"
+  agents_after="$(sha256sum "${dir}/AGENTS.md")" || fail "${label}: AGENTS.md is gone after apply"
+  [[ "${agents_before}" == "${agents_after}" ]] || fail "${label}: AGENTS.md changed"
+}
+
+# expect_substantive_kept <label> <dir> -- the preview names the CLAUDE.md as kept and
+# never as removed; its sha256 is the same after --apply.
+expect_substantive_kept() {
+  local label="$1" dir="$2" claude_before claude_after
+  claude_before="$(sha256sum "${dir}/CLAUDE.md")" || fail "${label}: cannot hash CLAUDE.md"
+  "${SCRIPT}" "${dir}" >"${ROOT}/${label}.preview" 2>"${ROOT}/${label}.preview.err" || fail "${label}: preview failed"
+  grep -qxF "keep: ${dir}/CLAUDE.md" "${ROOT}/${label}.preview" || fail "${label}: preview does not keep the CLAUDE.md"
+  if grep -qxF "remove: ${dir}/CLAUDE.md" "${ROOT}/${label}.preview"; then
+    fail "${label}: preview plans to remove a substantive CLAUDE.md"
+  fi
+  "${SCRIPT}" "${dir}" --apply >/dev/null 2>&1 || fail "${label}: apply failed"
+  claude_after="$(sha256sum "${dir}/CLAUDE.md")" || fail "${label}: the substantive CLAUDE.md was deleted by apply"
+  [[ "${claude_before}" == "${claude_after}" ]] || fail "${label}: the substantive CLAUDE.md changed"
+}
+
+# M20: shape (a), a bare import, is removed.
+case_M20_bare_import_removed() {
+  fixture_beside_agents m20
+  printf '%s\n' "${IMPORT_LINE}" > "${FIXTURE_DIR}/CLAUDE.md"
+  expect_inert_removed M20 "${FIXTURE_DIR}"
+}
+
+# M21: shape (b), the import plus an empty block, is removed.
+case_M21_empty_block_removed() {
+  fixture_beside_agents m21
+  printf '%s\n%s\n%s\n' "${IMPORT_LINE}" "${START_MARKER}" "${END_MARKER}" > "${FIXTURE_DIR}/CLAUDE.md"
+  expect_inert_removed M21 "${FIXTURE_DIR}"
+}
+
+# M22: shape (c), the import plus a block holding only the template comment, is removed.
+case_M22_template_block_removed() {
+  fixture_beside_agents m22
+  printf '%s\n%s\n%s\n%s\n' "${IMPORT_LINE}" "${START_MARKER}" "${TEMPLATE_COMMENT}" "${END_MARKER}" > "${FIXTURE_DIR}/CLAUDE.md"
+  expect_inert_removed M22 "${FIXTURE_DIR}"
+}
+
+# M23: blank lines between and around the lines, blank lines holding spaces or tabs, and
+# trailing spaces and tabs after every line do not change the shape.
+case_M23_blank_lines_and_trailing_whitespace_ignored() {
+  fixture_beside_agents m23-c
+  printf '\n\n%s  \n\n \t \n%s\t\n%s \t \n\n%s   \n\n\n' "${IMPORT_LINE}" "${START_MARKER}" "${TEMPLATE_COMMENT}" "${END_MARKER}" > "${FIXTURE_DIR}/CLAUDE.md"
+  expect_inert_removed M23-c "${FIXTURE_DIR}"
+  fixture_beside_agents m23-b
+  printf '%s\t\n\n  \n%s \n\n%s\t \t\n' "${IMPORT_LINE}" "${START_MARKER}" "${END_MARKER}" > "${FIXTURE_DIR}/CLAUDE.md"
+  expect_inert_removed M23-b "${FIXTURE_DIR}"
+}
+
+# M24: an empty (0-byte) file is substantive.
+case_M24_empty_file_kept() {
+  fixture_beside_agents m24
+  : > "${FIXTURE_DIR}/CLAUDE.md"
+  expect_substantive_kept M24 "${FIXTURE_DIR}"
+}
+
+# M25: a file of only whitespace and blank lines is substantive.
+case_M25_whitespace_only_kept() {
+  fixture_beside_agents m25
+  printf ' \t\n\n   \n\t\n' > "${FIXTURE_DIR}/CLAUDE.md"
+  expect_substantive_kept M25 "${FIXTURE_DIR}"
+}
+
+# M26: a lone start marker, with no import and no end marker, is substantive. This is the
+# reproduction from #1509: the old per-line allow-list accepted it and planned its removal.
+case_M26_start_marker_only_kept() {
+  fixture_beside_agents m26
+  printf '%s\n' "${START_MARKER}" > "${FIXTURE_DIR}/CLAUDE.md"
+  expect_substantive_kept M26 "${FIXTURE_DIR}"
+}
+
+# M27: the import followed by a start marker with no end marker is substantive.
+case_M27_start_without_end_kept() {
+  fixture_beside_agents m27
+  printf '%s\n%s\n' "${IMPORT_LINE}" "${START_MARKER}" > "${FIXTURE_DIR}/CLAUDE.md"
+  expect_substantive_kept M27 "${FIXTURE_DIR}"
+}
+
+# M28: the import followed by an end marker with no start marker is substantive.
+case_M28_end_without_start_kept() {
+  fixture_beside_agents m28
+  printf '%s\n%s\n' "${IMPORT_LINE}" "${END_MARKER}" > "${FIXTURE_DIR}/CLAUDE.md"
+  expect_substantive_kept M28 "${FIXTURE_DIR}"
+}
+
+# M29: the import followed by the end marker before the start marker is substantive.
+case_M29_end_before_start_kept() {
+  fixture_beside_agents m29
+  printf '%s\n%s\n%s\n' "${IMPORT_LINE}" "${END_MARKER}" "${START_MARKER}" > "${FIXTURE_DIR}/CLAUDE.md"
+  expect_substantive_kept M29 "${FIXTURE_DIR}"
+}
+
+# M30: the import line twice is substantive.
+case_M30_import_twice_kept() {
+  fixture_beside_agents m30
+  printf '%s\n%s\n' "${IMPORT_LINE}" "${IMPORT_LINE}" > "${FIXTURE_DIR}/CLAUDE.md"
+  expect_substantive_kept M30 "${FIXTURE_DIR}"
+}
+
+# M31: the template comment directly after the import, with no block, is substantive.
+case_M31_template_comment_outside_block_kept() {
+  fixture_beside_agents m31
+  printf '%s\n%s\n' "${IMPORT_LINE}" "${TEMPLATE_COMMENT}" > "${FIXTURE_DIR}/CLAUDE.md"
+  expect_substantive_kept M31 "${FIXTURE_DIR}"
+}
+
+# M32: two blocks after the import are substantive.
+case_M32_two_blocks_kept() {
+  fixture_beside_agents m32
+  printf '%s\n%s\n%s\n%s\n%s\n' "${IMPORT_LINE}" "${START_MARKER}" "${END_MARKER}" "${START_MARKER}" "${END_MARKER}" > "${FIXTURE_DIR}/CLAUDE.md"
+  expect_substantive_kept M32 "${FIXTURE_DIR}"
+}
+
+# M33: the template comment twice inside one block is substantive (at most once).
+case_M33_template_comment_twice_kept() {
+  fixture_beside_agents m33
+  printf '%s\n%s\n%s\n%s\n%s\n' "${IMPORT_LINE}" "${START_MARKER}" "${TEMPLATE_COMMENT}" "${TEMPLATE_COMMENT}" "${END_MARKER}" > "${FIXTURE_DIR}/CLAUDE.md"
+  expect_substantive_kept M33 "${FIXTURE_DIR}"
+}
+
+# M34: with no AGENTS.md beside it, a lone marker-only CLAUDE.md, and a lone empty one,
+# take the lone-substantive path: AGENTS.md is a byte-identical copy and CLAUDE.md is gone.
+case_M34_lone_marker_only_and_empty_migrate_verbatim() {
+  local d
+  d="${ROOT}/m34-marker"
+  mkdir -p "${d}" || fail "M34: could not create fixture m34-marker"
+  printf '%s\n' "${START_MARKER}" > "${d}/CLAUDE.md"
+  cp "${d}/CLAUDE.md" "${ROOT}/m34-marker.original"
+  "${SCRIPT}" "${d}" --apply >/dev/null 2>&1 || fail "M34 [marker only]: apply failed"
+  cmp -s "${ROOT}/m34-marker.original" "${d}/AGENTS.md" || fail "M34 [marker only]: AGENTS.md is not byte-identical to the original CLAUDE.md"
+  [[ ! -e "${d}/CLAUDE.md" ]] || fail "M34 [marker only]: CLAUDE.md was not removed"
+
+  d="${ROOT}/m34-empty"
+  mkdir -p "${d}" || fail "M34: could not create fixture m34-empty"
+  : > "${d}/CLAUDE.md"
+  : > "${ROOT}/m34-empty.original"
+  "${SCRIPT}" "${d}" --apply >/dev/null 2>&1 || fail "M34 [empty]: apply failed"
+  [[ -f "${d}/AGENTS.md" ]] || fail "M34 [empty]: AGENTS.md was not written"
+  cmp -s "${ROOT}/m34-empty.original" "${d}/AGENTS.md" || fail "M34 [empty]: AGENTS.md is not a 0-byte copy of the empty CLAUDE.md"
+  [[ ! -e "${d}/CLAUDE.md" ]] || fail "M34 [empty]: CLAUDE.md was not removed"
+}
+
+# M35: @../AGENTS.md is the import of configure's .claude/CLAUDE.md only; in a root
+# CLAUDE.md it is substantive.
+case_M35_root_parent_import_kept() {
+  fixture_beside_agents m35
+  printf '@../AGENTS.md\n' > "${FIXTURE_DIR}/CLAUDE.md"
+  expect_substantive_kept M35 "${FIXTURE_DIR}"
+}
+
+# M36: an import with leading whitespace is substantive (only trailing whitespace is ignored).
+case_M36_indented_import_kept() {
+  fixture_beside_agents m36
+  printf '  @AGENTS.md\n' > "${FIXTURE_DIR}/CLAUDE.md"
+  expect_substantive_kept M36 "${FIXTURE_DIR}"
+}
+
+# M37: shape (c) with CRLF line endings is still inert and is removed.
+case_M37_crlf_template_block_removed() {
+  fixture_beside_agents m37
+  printf '%s\r\n\r\n%s\r\n%s\r\n%s\r\n' "${IMPORT_LINE}" "${START_MARKER}" "${TEMPLATE_COMMENT}" "${END_MARKER}" > "${FIXTURE_DIR}/CLAUDE.md"
+  expect_inert_removed M37 "${FIXTURE_DIR}"
+}
+
+# M38: a root CLAUDE.local.md is never listed. The fixture also holds an inert root
+# CLAUDE.md (a remove: line) and a substantive project CLAUDE.md (a keep: line), so the
+# output is non-trivial; neither the --preview nor the --apply output (stdout and stderr)
+# mentions CLAUDE.local.md on any line, and its sha256 is unchanged after --apply.
+case_M38_claude_local_never_listed() {
+  local d mode before after
+  d="$(new_fixture m38)"
+  mkdir -p "${d}/.cenci" "${d}/apps/api"
+  printf '{"projects":[{"path":"apps/api"}]}\n' > "${d}/.cenci/config.json"
+  printf '# Root guidance\n' > "${d}/AGENTS.md"
+  printf '# Api guidance\n' > "${d}/apps/api/AGENTS.md"
+  printf '%s\n' "${IMPORT_LINE}" > "${d}/CLAUDE.md"
+  printf '@AGENTS.md\n\n- Api-only rule that must not be lost\n' > "${d}/apps/api/CLAUDE.md"
+  printf '@AGENTS.md\n\n- my private claude setting\n' > "${d}/CLAUDE.local.md"
+  before="$(sha256sum "${d}/CLAUDE.local.md")" || fail "M38: cannot hash CLAUDE.local.md"
+  for mode in --preview --apply; do
+    "${SCRIPT}" "${d}" "${mode}" >"${ROOT}/m38${mode}.out" 2>&1 || fail "M38 [${mode}]: the script failed"
+    grep -qxF "remove: ${d}/CLAUDE.md" "${ROOT}/m38${mode}.out" || fail "M38 [${mode}]: output has no remove: line, so the case proves nothing"
+    grep -qxF "keep: ${d}/apps/api/CLAUDE.md" "${ROOT}/m38${mode}.out" || fail "M38 [${mode}]: output has no keep: line, so the case proves nothing"
+    if grep -qF 'CLAUDE.local.md' "${ROOT}/m38${mode}.out"; then
+      fail "M38 [${mode}]: output mentions CLAUDE.local.md"
+    fi
+  done
+  after="$(sha256sum "${d}/CLAUDE.local.md")" || fail "M38: CLAUDE.local.md is gone after apply"
+  [[ "${before}" == "${after}" ]] || fail "M38: CLAUDE.local.md changed after apply"
+}
+
 case_legacy_config_migration
 case_M1_lone_substantive_migrates
 case_M2_removal_only_after_agents_write
@@ -498,5 +722,24 @@ case_M16_identical_agents_not_rewritten
 case_M17_crlf_fallback_kept
 case_M18_control_char_project_skipped
 case_M19_line_terminator_project_rejected
+case_M20_bare_import_removed
+case_M21_empty_block_removed
+case_M22_template_block_removed
+case_M23_blank_lines_and_trailing_whitespace_ignored
+case_M24_empty_file_kept
+case_M25_whitespace_only_kept
+case_M26_start_marker_only_kept
+case_M27_start_without_end_kept
+case_M28_end_without_start_kept
+case_M29_end_before_start_kept
+case_M30_import_twice_kept
+case_M31_template_comment_outside_block_kept
+case_M32_two_blocks_kept
+case_M33_template_comment_twice_kept
+case_M34_lone_marker_only_and_empty_migrate_verbatim
+case_M35_root_parent_import_kept
+case_M36_indented_import_kept
+case_M37_crlf_template_block_removed
+case_M38_claude_local_never_listed
 
 echo "migrate-project-core.test.sh: passed"
