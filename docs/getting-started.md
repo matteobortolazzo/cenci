@@ -151,14 +151,16 @@ When `cenci-watch` is installed, the installer also offers cenci's tmux defaults
 for a dedicated tmux server named `cenci`, installed as a managed copy at
 `${XDG_CONFIG_HOME:-$HOME/.config}/cenci/tmux.conf`. Your own tmux server, sessions and
 tmux config are never touched. Pass `--tmux-defaults` to force the step or
-`--no-tmux-defaults` to skip it (the last flag given wins). Start the cenci server with:
+`--no-tmux-defaults` to skip it (the last flag given wins). Start the cenci server, or
+enter it when it is already running, with:
 
 ```bash
-tmux -L cenci -f "${XDG_CONFIG_HOME:-$HOME/.config}/cenci/tmux.conf" new-session -A -s cenci
+cenci up
 ```
 
-The installer prints this command when the copy is installed, and `cenci doctor`
-reports its state. A copy you edited, or a file at that path that is not cenci-managed,
+See [`cenci up`](../watch/README.md#starting-the-cenci-session-cenci-up) for what it
+does and its exit codes. The installer prints the raw `tmux -L cenci ... new-session -A
+-s cenci` equivalent when the copy is installed, and `cenci doctor` reports its state. A copy you edited, or a file at that path that is not cenci-managed,
 is never overwritten or removed, even with `--tmux-defaults`: remove the file and
 re-run to get the shipped defaults back.
 

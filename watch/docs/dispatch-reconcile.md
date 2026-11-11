@@ -725,10 +725,14 @@ before `Decide`, and hands it in as `Inputs.SessionEligibility`. `gateSessions` 
   resolved, in config order. Each logs one line with its remedy when ineligible.
 - **Verdicts.** An empty or whitespace-only `repos[].session` is `session unconfigured`
   (sentinel `ErrSessionUnconfigured`). Otherwise the trimmed name is probed with
-  `ctrl.HasSession` on the default socket, at most once per distinct name per pass, so
-  repos sharing a session share one probe. An error gives `session probe failed`
-  (`ErrSessionProbeFailed`), `false` gives `session absent` (`ErrSessionMissing`), and
-  `true` makes the repo eligible. An error and a `false` in the same pass stay two
+  `ctrl.HasSession` on the pass's resolved launch socket (the first field of `$TMUX`,
+  else the cenci socket; the one socket the spawn launches on), at most once per
+  distinct name per pass, so repos sharing a session share one probe. An error gives
+  `session probe failed` (`ErrSessionProbeFailed`), `false` gives `session absent`
+  (`ErrSessionMissing`), and `true` makes the repo eligible. Both ineligible lines name
+  the probed socket and `cenci up` (the absent one also offers `cenci dispatch enroll
+  --session <name>`), never a bare `tmux new-session`/`has-session` command, which
+  would act on the default server. An error and a `false` in the same pass stay two
   distinct reasons. `ctrl.CurrentSession()` is never consulted: config is the only
   source of the target, and the spawn uses the same trimmed string the probe proved.
 - **Gate order in `decideTicket`.** After the OOM backoff: daemon unreachable →

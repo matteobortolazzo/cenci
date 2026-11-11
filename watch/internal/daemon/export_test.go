@@ -16,3 +16,23 @@ func HandleArmRequestWith(capable func(agent, workflow string) bool, spawn func(
 	d.armSpawn = spawn
 	return d.handleArmRequest(req)
 }
+
+// TestDaemon is the slice of a test daemon the external daemon_test package may
+// drive: it feeds hook events in and reads the broadcast snapshot out. It exists
+// for the same import cycle as HandleArmRequestWith: the join-key proof wires
+// the real run.Run, which this package cannot import.
+type TestDaemon struct{ d *Daemon }
+
+// NewSocketTestDaemon builds a test daemon over mc (a real tmux frontend over the
+// mock) that keeps the real tmux socket ingest checks: the trusted directory
+// resolves from $TMUX_TMPDIR and a hook event's tmux_socket must exist as a Unix
+// socket there, exactly as in production.
+func NewSocketTestDaemon(mc *tmuxtest.MockClient) *TestDaemon {
+	return &TestDaemon{d: newTestDaemon(mc)}
+}
+
+// HandleEvent runs one hook event through the daemon's synchronous ingest path.
+func (t *TestDaemon) HandleEvent(event ipc.HookEvent) { t.d.handleEvent(event) }
+
+// Snapshot returns the state snapshot the daemon would broadcast now.
+func (t *TestDaemon) Snapshot() ipc.StateSnapshot { return t.d.buildSnapshot() }

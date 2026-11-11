@@ -620,29 +620,35 @@ func recordClears(t *testing.T) *[]string {
 // TestSessionGate_ThreeDistinctFailures: a missing repos[].session, an absent
 // configured session and a HasSession error give three distinct reasons and
 // three distinct sentinels, each with zero EditLabels and zero launch-state
-// clears for the failed repo.
+// clears for the failed repo. The two tmux remedies name `cenci up` and the
+// probed server (#1433), never a bare default-server tmux command.
 func TestSessionGate_ThreeDistinctFailures(t *testing.T) {
+	const probedSocket = "/s/probed"
 	sentinels := []error{ErrSessionUnconfigured, ErrSessionMissing, ErrSessionProbeFailed}
 	tests := []struct {
-		name     string
-		session  string
-		ctrl     func(t *testing.T) *sessionProbeController
-		reason   string
-		sentinel error
-		remedy   string
+		name      string
+		session   string
+		ctrl      func(t *testing.T) *sessionProbeController
+		reason    string
+		sentinel  error
+		remedy    string
+		forbidden string
+		onServer  bool   // the line names `cenci up` and the probed tmux server
+		alsoNames string // a second option the line must also offer, when non-empty
 	}{
 		{"unconfigured", "", func(t *testing.T) *sessionProbeController {
 			return &sessionProbeController{t: t}
-		}, "session unconfigured", ErrSessionUnconfigured, "set repos[].session in"},
+		}, "session unconfigured", ErrSessionUnconfigured, "set repos[].session in", "", false, ""},
 		{"absent", "ghost", func(t *testing.T) *sessionProbeController {
 			return &sessionProbeController{t: t, live: map[string]bool{}}
-		}, "session absent", ErrSessionMissing, "tmux new-session -d -s"},
+		}, "session absent", ErrSessionMissing, "cenci up", "tmux new-session -d -s", true, "cenci dispatch enroll --session"},
 		{"probe error", "ghost", func(t *testing.T) *sessionProbeController {
 			return &sessionProbeController{t: t, probeErrs: map[string]error{"ghost": errors.New("tmux: lost server")}}
-		}, "session probe failed", ErrSessionProbeFailed, "tmux: lost server"},
+		}, "session probe failed", ErrSessionProbeFailed, "tmux: lost server", "tmux has-session -t", true, ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("TMUX", probedSocket+",4242,0")
 			failOnSpawn(t)
 			cleared := recordClears(t)
 			for _, deps := range []dispatchDeps{dispatchableDeps(time.Now()), resumeDispatchDeps(time.Now())} {
@@ -663,6 +669,19 @@ func TestSessionGate_ThreeDistinctFailures(t *testing.T) {
 				}
 				if !strings.Contains(buf.String(), tt.remedy) {
 					t.Errorf("log missing the repo's remedy %q:\n%s", tt.remedy, buf.String())
+				}
+				if tt.forbidden != "" && strings.Contains(buf.String(), tt.forbidden) {
+					t.Errorf("log still prints the default-server command %q:\n%s", tt.forbidden, buf.String())
+				}
+				if tt.alsoNames != "" && !strings.Contains(buf.String(), tt.alsoNames) {
+					t.Errorf("log must also offer %q:\n%s", tt.alsoNames, buf.String())
+				}
+				if tt.onServer {
+					for _, want := range []string{"cenci up", probedSocket} {
+						if !strings.Contains(buf.String(), want) {
+							t.Errorf("log must name %q:\n%s", want, buf.String())
+						}
+					}
 				}
 			}
 			if len(*cleared) != 0 {
