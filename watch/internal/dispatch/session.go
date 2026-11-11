@@ -121,10 +121,10 @@ func resolveSessionEligibility(repos []RepoConfig, tickets []Ticket, ctrl run.Co
 		switch {
 		case p.err != nil:
 			eligibility[rc.Repo] = SessionProbeFailed
-			logf(out, "dispatch: probing configured session %q for %s failed: %v; check that tmux is running and reachable (`tmux has-session -t %q`)\n", session, rc.Repo, p.err, session)
+			logf(out, "dispatch: probing configured session %q for %s on tmux server %s failed: %v; check that the server is running and reachable (`cenci up` starts the cenci server)\n", session, rc.Repo, socket, p.err)
 		case !p.live:
 			eligibility[rc.Repo] = SessionAbsent
-			logf(out, "dispatch: configured session %q for %s not found in tmux; create it (`tmux new-session -d -s %q`)\n", session, rc.Repo, session)
+			logf(out, "dispatch: configured session %q for %s not found on tmux server %s; run `cenci up` (starts the cenci server and its `cenci` session) or point repos[].session at an existing session with `cenci dispatch enroll --session <name>`\n", session, rc.Repo, socket)
 		default:
 			eligibility[rc.Repo] = SessionEligible
 		}

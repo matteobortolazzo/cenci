@@ -53,11 +53,19 @@ budget and the session name on the right, plus `mouse on`, `base-index 1`,
 config are never touched or restyled. Start it with:
 
 ```bash
+cenci up
+```
+
+[`cenci up`](#starting-the-cenci-session-cenci-up) creates the server and its `cenci`
+session when they are missing and attaches you to it. The raw equivalent, which the
+installer prints when it installs the config, is:
+
+```bash
 tmux -L cenci -f "${XDG_CONFIG_HOME:-$HOME/.config}/cenci/tmux.conf" new-session -A -s cenci
 ```
 
 The installer keeps a managed copy of the shipped config at that path (the installer
-prints this start command when the copy is installed). It is installed by default; pass
+prints that start command when the copy is installed). It is installed by default; pass
 `--no-tmux-defaults` to `cenci-installer` to skip it, or `--tmux-defaults` to
 `cenci-installer update` to create a missing copy (see
 [Installer integration](#installer-integration-cenci-doctor-cenci-update-cenci-uninstall)).
@@ -70,10 +78,47 @@ read `@cenci-symbol`, `@cenci-style` and `@cenci-headroom-<agent>`. If you run y
 tmux server, keep your theme and wire those variables in yourself; see
 [Custom status-format integration](#custom-status-format-integration).
 
-Until [#646](https://github.com/matteobortolazzo/cenci/issues/646) lands, the daemon
-writes the `@cenci-*` markers on the tmux server named by its own ambient `$TMUX`, not
-on the `cenci` server by itself, so state markers reach the cenci server only when the
-daemon runs inside it.
+The daemon writes the `@cenci-*` markers on each window's own recorded tmux server: a
+window that `cenci run` opened on the `cenci` server is badged there, and a window on
+your default server is badged on your default server, wherever the daemon itself was
+started. Windows are never moved between servers.
+
+## Starting the cenci session (`cenci up`)
+
+```bash
+cenci up
+```
+
+`cenci up` takes no flags (`-h`/`--help` prints the usage and exits 0). It makes sure
+the dedicated cenci tmux server (socket `${TMUX_TMPDIR:-/tmp}/tmux-<uid>/cenci`, the
+`tmux -L cenci` server) and its `cenci` session exist, then hands you over to it. Every
+tmux call it makes targets that server only; it never touches your own tmux server.
+
+What it does, in order:
+
+1. Checks for the tmux config the installer ships, `tmux.conf` beside `config.json`
+   (default `${XDG_CONFIG_HOME:-$HOME/.config}/cenci/tmux.conf`). When it is missing,
+   `cenci up` exits 1 and tells you to run `cenci-installer --tmux-defaults`.
+2. Ensures the daemon is running. A daemon that does not become reachable only prints a
+   warning, and `cenci up` continues without it.
+3. Creates the `cenci` session on the cenci server when it is absent. Only a session
+   this run created gets a `board` window running `lazyboards` (skipped when
+   `lazyboards` is not installed; a failed window creation only warns). An existing
+   session is left as it is.
+4. Enters the session, depending on where you ran it:
+   - outside tmux: attaches to the `cenci` session;
+   - inside the cenci server (`$TMUX` names the cenci socket): switches the current
+     client to the `cenci` session;
+   - inside any other tmux server: refuses with exit 1 and prints how to attach from
+     another terminal (`tmux -L cenci attach -t cenci`). It never nests tmux.
+
+Exit codes: `0` success, `1` any failure (missing config, no `tmux` binary, a failed
+tmux call) or the personal-server refusal, `2` usage error (an unknown flag or extra
+argument).
+
+`cenci up` only creates the session named `cenci`. A repo whose `repos[].session` names
+a different session needs that session to exist on the server dispatch probes, or its
+`session` re-pointed with `cenci dispatch enroll --session <name>`.
 
 ## How live status reaches you
 
@@ -1013,7 +1058,9 @@ failing gate is the logged skip reason):
    resolved once per pass, before any decision, for every repo holding a `Planned`,
    `Input Needed` or `Refined` ticket, with one probe per distinct trimmed session
    name, so repos sharing a session share one probe. Each ineligible repo logs one
-   `dispatch:` line naming its remedy. It applies to every pickup type, and because it
+   `dispatch:` line naming its remedy (for an absent or unreachable session, the probed
+   tmux server and `cenci up`, which starts the cenci server and its `cenci` session).
+   It applies to every pickup type, and because it
    sits ahead of the cap a misconfigured repo's ticket never takes a slot a healthy
    repo could use. The probe and the spawn both use the trimmed configured name;
    the ambient/current tmux session is never consulted. The probe runs on the one tmux
@@ -1612,7 +1659,7 @@ Dispatch reads the same `config.json` as `run`, under a top-level `"dispatch"` b
 
 | Key | Default | Purpose |
 |-----|---------|---------|
-| `repos` | — | Repos to scan; each entry requires `repo`, `dir` (holds that repo's `.plans/` and git tree), and `session` (the tmux session that repo's dispatched windows target — never an ambient/current session). Normally managed via `cenci dispatch enroll`/`unenroll` (see [Enrollment](#enrollment-cenci-dispatch-enrollunenrollstatus)) rather than hand-edited, though hand-editing remains supported. A repo whose `session` is empty, names a tmux session that doesn't exist, or whose `tmux has-session` probe fails has its tickets skipped for that pass with `session unconfigured`, `session absent` or `session probe failed` (each logged once: `dispatch: no target tmux session for <repo>; set repos[].session in <config path>`, the "not found in tmux" line naming the remedy `tmux new-session -d -s <name>`, or the "probing configured session ... failed" line). The check runs before the concurrency cap, so every other enrolled repo still dispatches normally in the same pass and never loses a slot to it (see [Pickup rules and gates](#pickup-rules-and-gates)). |
+| `repos` | — | Repos to scan; each entry requires `repo`, `dir` (holds that repo's `.plans/` and git tree), and `session` (the tmux session that repo's dispatched windows target — never an ambient/current session). Normally managed via `cenci dispatch enroll`/`unenroll` (see [Enrollment](#enrollment-cenci-dispatch-enrollunenrollstatus)) rather than hand-edited, though hand-editing remains supported. A repo whose `session` is empty, names a tmux session that doesn't exist on the probed server, or whose session probe fails has its tickets skipped for that pass with `session unconfigured`, `session absent` or `session probe failed` (each logged once: `dispatch: no target tmux session for <repo>; set repos[].session in <config path>`, the "not found on tmux server <socket>" line whose remedy is [`cenci up`](#starting-the-cenci-session-cenci-up) (which creates the `cenci` session) or `cenci dispatch enroll --session <name>` for another existing session, or the "probing configured session ... failed" line, which names the probed server and `cenci up`). The probed server is the one the spawn would launch on: the first field of `$TMUX` when dispatch runs inside tmux, else the cenci server. The check runs before the concurrency cap, so every other enrolled repo still dispatches normally in the same pass and never loses a slot to it (see [Pickup rules and gates](#pickup-rules-and-gates)). |
 | `repos[].filters` | none | Optional machine-local pickup filter on a `repos` entry: `milestones` (repo-local numbers), `labelsAll`, `labelsAny`, `labelsNone`. Dimensions AND together; omitted, `{}` and empty lists mean no restriction; an unknown key, `null`, wrong type or invalid entry is a config error that stops every repo for that pass. Read only from this user config, never a committed `.cenci/config.json`. See [Machine-local filters](#machine-local-filters) |
 | `concurrencyCap` | `3` | Max concurrent running sessions (counts in-flight windows, orphaned container sessions still alive after their pane closed, and this pass's dispatches) |
 | `needInputThreshold` | `1` | Pause dispatch when at least this many windows await input |

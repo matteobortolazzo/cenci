@@ -251,6 +251,50 @@ func TestClose_TargetsTheWindowsRecordedSocket(t *testing.T) {
 	}
 }
 
+// P14 and P38 against the real binary (#1433): one snapshot holds windows on the
+// cenci server and on the user's default server, so `cenci close <number>`
+// resolves each on the server it is recorded on. 40-implement (cenci) and
+// 40-refine (default) share the number, and each is listed and killed with `-S`
+// to its own socket; 400-implement shares only the digits' prefix and is never
+// touched.
+func TestClose_ResolvesWindowsOnEachRecordedServer(t *testing.T) {
+	cenciSocket := fmt.Sprintf("/tmp/tmux-%d/cenci", os.Getuid())
+	defaultSocket := fmt.Sprintf("/tmp/tmux-%d/default", os.Getuid())
+	socket := startCloseIPCServer(t, ipc.StateSnapshot{
+		Windows: []ipc.WindowState{
+			{Session: "cenci", WindowIndex: "1", WindowName: "40-implement", Status: "done", PaneID: "%40", Socket: cenciSocket},
+			{Session: "main", WindowIndex: "2", WindowName: "40-refine", Status: "done", PaneID: "%41", Socket: defaultSocket},
+			{Session: "cenci", WindowIndex: "3", WindowName: "400-implement", Status: "done", PaneID: "%42", Socket: cenciSocket},
+		},
+	})
+	fakes := windowproctest.Install(t, windowproctest.Spec{ListGone: true})
+	cmd := exec.Command(binaryPath, "close", "40", "--socket", socket)
+	cmd.Env = emptyStateHome(t)
+
+	output, err := cmd.CombinedOutput()
+
+	if err != nil {
+		t.Fatalf("close: %v\n%s", err, output)
+	}
+	wantCalls := []string{
+		"tmux -S " + cenciSocket + " list-panes -t %40 -F " + windowproctest.OwnedFormatToken,
+		"tmux -S " + cenciSocket + " kill-window -t %40",
+		"tmux -S " + defaultSocket + " list-panes -t %41 -F " + windowproctest.OwnedFormatToken,
+		"tmux -S " + defaultSocket + " kill-window -t %41",
+	}
+	if got := fakes.Calls(t); !slices.Equal(got, wantCalls) {
+		t.Errorf("calls:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(wantCalls, "\n"))
+	}
+	for _, line := range []string{"closed 40-implement (cenci:1)", "closed 40-refine (main:2)"} {
+		if !strings.Contains(string(output), line) {
+			t.Errorf("output missing %q, got:\n%s", line, output)
+		}
+	}
+	if strings.Contains(string(output), "400-implement") {
+		t.Errorf("close 40 must not match 400-implement, got:\n%s", output)
+	}
+}
+
 // TestClose_ArmingZeroChecksWindow_GraceBounded covers two #924 additions at
 // once against the real binary: a supervisor recorded as "arming" (PID 0, no
 // process to check) now counts as live, and an "unknown" CI verdict blocks

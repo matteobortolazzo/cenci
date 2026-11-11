@@ -578,7 +578,7 @@ follow the reason after `; `; it never changes the outcome.
 | `skip: plan authorization unrecorded (legacy plan; run cenci dispatch approve)` | No authorization was recorded for a plan that has not started executing |
 | `skip: plan authorization unreadable` | The authorization record or the ticket's pipeline state file cannot be read |
 | `skip: session unconfigured` | The repo has no `repos[].session`; set one with `cenci dispatch enroll --session <name>` |
-| `skip: session absent` | The configured tmux session does not exist; create it |
+| `skip: session absent` | The configured tmux session does not exist on the probed server; start it with `cenci up` (session `cenci`) or point `repos[].session` at an existing session |
 | `skip: session probe failed` | tmux could not be asked whether the session exists |
 | `...; session not probed (dry-run)` | A preview: dry runs never ask tmux, so the session is unverified |
 | `...; legacy approval (unrecorded provenance)` | An execution already under way before authorization records existed; it continues |
