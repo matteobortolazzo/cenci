@@ -1,5 +1,5 @@
 {
-  "configVersion": "1.33.0",
+  "configVersion": "1.35.6",
   "branchPattern": "feature/<id>-<description>",
   "isMonorepo": true,
   "stack": {
@@ -152,6 +152,7 @@
   "configureOffered": [
     "automerge.enabled",
     "cicd",
+    "dispatch.planRefined",
     "planning.attended",
     "refinement.automerge",
     "refinement.confirmBeforeApply",
