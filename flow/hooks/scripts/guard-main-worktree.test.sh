@@ -3187,7 +3187,7 @@ rg_write_probes() {
     } > "${run}/probes.tsv" || { echo "FAIL: test setup: probes.tsv in ${run}" >&2; exit 1; }
 }
 
-rg_json() { # <shell|apply_patch|write> <target>
+rg_json() { # <shell|apply_patch|write|edit> <target>
     case "$1" in
         shell)
             jq -n --arg c "printf x > '$2'" --arg cwd "${RG_ROOT}" \
@@ -3197,8 +3197,11 @@ rg_json() { # <shell|apply_patch|write> <target>
             jq -n --arg c "$(printf '*** Begin Patch\n*** Add File: %s\n+x\n*** End Patch' "$2")" --arg cwd "${RG_ROOT}" \
                 '{hook_event_name: "PreToolUse", tool_name: "apply_patch", cwd: $cwd, tool_input: {command: $c}}'
             ;;
-        write)
-            jq -n --arg f "$2" --arg cwd "${RG_ROOT}" '{tool_name: "Write", cwd: $cwd, tool_input: {file_path: $f, content: "x"}}'
+        write|edit)
+            local tool=Write
+            [[ "$1" == edit ]] && tool=Edit
+            jq -n --arg f "$2" --arg cwd "${RG_ROOT}" --arg tool "${tool}" \
+                '{tool_name: $tool, cwd: $cwd, tool_input: {file_path: $f, content: "x"}}'
             ;;
     esac
 }
@@ -3303,7 +3306,32 @@ rg_assert_one_receipt() {
     fi
 }
 
-for rg_case in "shell|4|Bash|${RG_TMP}" "apply_patch|2|apply_patch|${RG_TMP}" "write|2|Write|${RG_TMP}" "shell|4|Bash|${RG_TMP}/"; do
+# Guidance is conditional prose: neither a canary-shaped filename nor this
+# message proves a receipt or a successful preflight. Ordinary writes still
+# receive their feature-worktree remediation.
+assert_canary_guidance() {
+    assert_stderr_has "$1" "If this is a planned guard-canary.sh probe, this denial is expected."
+    assert_stderr_has "$1" "Record denied, complete all remaining planned probes, then run guard-canary.sh check."
+    assert_stderr_has "$1" "Proceed only on CANARY_STATUS=active."
+    assert_stderr_has "$1" "Never retry, relocate or bypass a planned probe, or manufacture a success."
+    assert_stderr_has "$1" "Otherwise, for an accidental main-worktree write:"
+    assert_stderr_lacks "$1" "THE ONLY CORRECT FIX"
+}
+
+echo "case: ordinary Write/Edit and Bash denials retain feature-worktree remediation"
+for rg_shape in write edit shell; do
+    rg_run "${RG_TMP}" "$(rg_json "${rg_shape}" "${RG_ROOT}/src/ordinary.txt")"
+    assert_exit "ordinary ${rg_shape} remediation" 2
+    assert_stderr_has "ordinary ${rg_shape} remediation" "targets the main worktree"
+    if [[ "${rg_shape}" == shell ]]; then
+        assert_stderr_has "ordinary shell remediation" "redirect to an absolute path rooted at the feature"
+    else
+        assert_stderr_has "ordinary ${rg_shape} remediation" "re-issue the SAME Write/Edit with an absolute path rooted"
+    fi
+    assert_canary_guidance "ordinary ${rg_shape} conditional guidance"
+done
+
+for rg_case in "shell|4|Bash|${RG_TMP}" "apply_patch|2|apply_patch|${RG_TMP}" "write|2|Write|${RG_TMP}" "edit|2|Edit|${RG_TMP}" "shell|4|Bash|${RG_TMP}/"; do
     IFS='|' read -r rg_shape rg_n rg_tool rg_tmpdir <<< "${rg_case}"
     echo "case: a denied ${rg_shape} canary probe (TMPDIR=${rg_tmpdir##*/receipt-}) leaves exactly one receipt with the right fields (#1411)"
     rg_new_run
@@ -3312,8 +3340,10 @@ for rg_case in "shell|4|Bash|${RG_TMP}" "apply_patch|2|apply_patch|${RG_TMP}" "w
     rg_j="$(rg_json "${rg_shape}" "${rg_target}")"
     rg_run "${rg_tmpdir}" "${rg_j}"
     rg_assert_one_receipt "receipt (${rg_shape}, TMPDIR ${rg_tmpdir})" "${RG_RUN}" "${RG_HEX}" "${rg_n}" "${rg_tool}" "${rg_target}"
+    assert_canary_guidance "planned ${rg_shape} probe"
     rm -rf "${RG_RUN}"
     rg_parity "receipt (${rg_shape}, TMPDIR ${rg_tmpdir})" "${rg_tmpdir}" "${rg_j}"
+    assert_canary_guidance "${rg_shape} canary-shaped filename without a run directory"
 done
 
 echo "case: with no run dir under TMPDIR the receipt goes to the /tmp run dir, and TMPDIR wins when both exist (#1411)"
