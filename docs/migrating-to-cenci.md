@@ -18,8 +18,9 @@ Project workflow configuration now lives in `.cenci/config.json`, and shared gui
 lives in `AGENTS.md`. Existing `.claude/config.json` projects remain readable as a
 legacy fallback. Run `cenci:configure` to preview and approve migration; unknown keys
 and substantive guidance are preserved. Claude Code and Codex read `AGENTS.md` natively,
-so configure generates no `CLAUDE.md` and removes inert generated adapters (a bare `@AGENTS.md`
-import); settings and native agent files remain client-specific adapters. A fallback adapter is
+so configure generates no `CLAUDE.md` and removes inert generated adapters (exactly an `@AGENTS.md`
+import, optionally followed by one `cenci:claude-only` block that is empty or holds only the template
+comment); settings and native agent files remain client-specific adapters. A fallback adapter is
 opt-in, see [`flow/docs/claude-instruction-files.md`](../flow/docs/claude-instruction-files.md).
 
 ## Old → new name reference

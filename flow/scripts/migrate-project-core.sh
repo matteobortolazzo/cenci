@@ -15,6 +15,9 @@ esac
 CANONICAL="${ROOT}/.cenci/config.json"
 LEGACY="${ROOT}/.claude/config.json"
 FALLBACK_MARKER='<!-- cenci:agents-md-fallback -->'
+INERT_BARE='@AGENTS.md'
+INERT_EMPTY_BLOCK=$'@AGENTS.md\n<!-- cenci:claude-only:start -->\n<!-- cenci:claude-only:end -->'
+INERT_TEMPLATE_BLOCK=$'@AGENTS.md\n<!-- cenci:claude-only:start -->\n<!-- Optional Claude Code-only guidance belongs inside this block. -->\n<!-- cenci:claude-only:end -->'
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/cenci-core.XXXXXX")" || { echo "mktemp failed" >&2; exit 3; }
 trap 'rm -rf "${TMP}"' EXIT
 # One tab-separated line per planned action: "agents<TAB><rel>AGENTS.md" is a guidance
@@ -40,15 +43,19 @@ fi
 
 # classify_claude_md <file> -- prints none | fallback | inert | substantive. The same
 # rules as step 1 of skills/configure/phases/guidance-settings.md, which configure
-# applies to a CLAUDE.md it finds.
+# applies to a CLAUDE.md it finds (including its .claude/CLAUDE.md and @../AGENTS.md
+# import, which this script never handles).
 #   fallback:    a line equal to the fallback marker (never touched)
-#   inert:       no line other than @AGENTS.md, the two claude-only markers and the
-#                template comment line; blank lines are ignored
-#   substantive: anything else
+#   inert:       after stripping CR and each line's trailing whitespace and dropping
+#                blank lines, the remaining lines are exactly one of the three shapes
+#                above (INERT_*): the @AGENTS.md import alone, or followed by one
+#                claude-only start/end block that is empty or holds only the template
+#                comment line. Leading whitespace is not ignored.
+#   substantive: anything else, including an empty file
 # A file that exists but cannot be read is reported on stderr and fails (exit 3): it must
 # never be classified inert, because inert files are removed.
 classify_claude_md() {
-  local file="$1" line content marker_rc=0
+  local file="$1" content filtered marker_rc=0
   if [[ ! -f "${file}" ]]; then
     printf 'none\n'
     return 0
@@ -68,17 +75,11 @@ classify_claude_md() {
       return 3
       ;;
   esac
-  while IFS= read -r line || [[ -n "${line}" ]]; do
-    [[ -n "${line//[[:space:]]/}" ]] || continue
-    case "${line}" in
-      '@AGENTS.md' | '<!-- cenci:claude-only:start -->' | '<!-- cenci:claude-only:end -->' | '<!-- Optional Claude Code-only guidance belongs inside this block. -->') ;;
-      *)
-        printf 'substantive\n'
-        return 0
-        ;;
-    esac
-  done <<<"${content}"
-  printf 'inert\n'
+  filtered="$(LC_ALL=C sed -e 's/[[:space:]]*$//' -e '/^$/d' <<<"${content}")" || { echo "cannot scan ${file} for inert shapes" >&2; return 3; }
+  case "${filtered}" in
+    "${INERT_BARE}" | "${INERT_EMPTY_BLOCK}" | "${INERT_TEMPLATE_BLOCK}") printf 'inert\n' ;;
+    *) printf 'substantive\n' ;;
+  esac
 }
 
 # propose_guidance <dir> <relative-prefix> -- plans one directory. AGENTS.md comes from

@@ -65,14 +65,17 @@ Read this file on every run, after the questions and `### Auth Verification` in 
    - **Fallback-marked**: a line `<!-- cenci:agents-md-fallback -->` means the user opted in to
      the fallback adapter. Never remove or rewrite it, even when the rest of its content is
      inert.
-   - **Inert**: no line other than `@AGENTS.md`, the two markers
-     `<!-- cenci:claude-only:start -->` and `<!-- cenci:claude-only:end -->`, and the template
-     comment line `<!-- Optional Claude Code-only guidance belongs inside this block. -->`,
-     ignoring blank lines. For `.claude/CLAUDE.md` the import line is `@../AGENTS.md`. Remove
-     it with `git -C <worktree-path> rm --quiet -- <path>`, without a prompt, but only once
+   - **Inert**: after stripping CR and each line's trailing whitespace and dropping blank lines
+     (leading whitespace is not ignored), the remaining lines are exactly one import line,
+     `@AGENTS.md`, optionally followed by a single block: the start marker
+     `<!-- cenci:claude-only:start -->`, then at most the template comment line
+     `<!-- Optional Claude Code-only guidance belongs inside this block. -->`, then the end marker
+     `<!-- cenci:claude-only:end -->`. For `.claude/CLAUDE.md` the import line is `@../AGENTS.md`.
+     Remove it with `git -C <worktree-path> rm --quiet -- <path>`, without a prompt, but only once
      that directory's `AGENTS.md` exists in the worktree. If the `git rm` fails, stop and report
      the path; never skip a failed removal silently.
-   - **Substantive**: any other line, so any other `.claude/CLAUDE.md` content too. Render the
+   - **Substantive**: any other content, including an empty file, a `.claude/CLAUDE.md` that
+     imports `@AGENTS.md`, and any other `CLAUDE.md` that imports `@../AGENTS.md`. Render the
      complete merge into `AGENTS.md` with `git diff --no-index` and require approval through
      `AskUserQuestion`, with two options: merge it into `AGENTS.md` (then remove the file the
      same way), or decline. A declined file stays byte-identical, and its path goes to the

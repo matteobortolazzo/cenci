@@ -490,7 +490,7 @@ RUNTIME_OPEN_POINTER='steps 5d and 5e in `phases/ci-dockerfile.md`'
 OLD_RUNTIME_OPEN_POINTER='steps 5d and 5e use them'
 MONOREPO_ANCHOR='**Monorepo**: fragments are'
 
-# P30 (#1343, re-pinned by #1448): step 1's guidance generation lives in
+# P30 (#1343, re-pinned by #1448 and #1509): step 1's guidance generation lives in
 # phases/guidance-settings.md. #1343 moved it verbatim from SKILL.md; #1448 made
 # AGENTS.md the only generated guidance file, so the CLAUDE.md import-adapter
 # bullets are gone and the text now states the fallback-marked, inert and
@@ -499,7 +499,10 @@ MONOREPO_ANCHOR='**Monorepo**: fragments are'
 # test. Mirrors the P5 pins in configure-fragment-markers.test.sh. #1448 review
 # round B added the stop-on-failure obligations to the inert rule (AGENTS.md exists
 # before any removal, a failing `git rm` stops and reports the path) and the
-# untracked-or-gitignored suppressor bullet.
+# untracked-or-gitignored suppressor bullet. #1509 replaced the old per-line
+# allow-list in the inert rule with the three exact inert shapes (the import alone,
+# plus an empty block, plus a block holding only the template comment) and widened
+# the substantive rule to match.
 IFS= read -r -d '' P30_STEP1_BLOCK <<'PINNED_BLOCK'
 1. **Generate canonical AGENTS.md guidance**:
    - `AGENTS.md` at the repository root is the only generated guidance file. Use
@@ -516,14 +519,17 @@ IFS= read -r -d '' P30_STEP1_BLOCK <<'PINNED_BLOCK'
    - **Fallback-marked**: a line `<!-- cenci:agents-md-fallback -->` means the user opted in to
      the fallback adapter. Never remove or rewrite it, even when the rest of its content is
      inert.
-   - **Inert**: no line other than `@AGENTS.md`, the two markers
-     `<!-- cenci:claude-only:start -->` and `<!-- cenci:claude-only:end -->`, and the template
-     comment line `<!-- Optional Claude Code-only guidance belongs inside this block. -->`,
-     ignoring blank lines. For `.claude/CLAUDE.md` the import line is `@../AGENTS.md`. Remove
-     it with `git -C <worktree-path> rm --quiet -- <path>`, without a prompt, but only once
+   - **Inert**: after stripping CR and each line's trailing whitespace and dropping blank lines
+     (leading whitespace is not ignored), the remaining lines are exactly one import line,
+     `@AGENTS.md`, optionally followed by a single block: the start marker
+     `<!-- cenci:claude-only:start -->`, then at most the template comment line
+     `<!-- Optional Claude Code-only guidance belongs inside this block. -->`, then the end marker
+     `<!-- cenci:claude-only:end -->`. For `.claude/CLAUDE.md` the import line is `@../AGENTS.md`.
+     Remove it with `git -C <worktree-path> rm --quiet -- <path>`, without a prompt, but only once
      that directory's `AGENTS.md` exists in the worktree. If the `git rm` fails, stop and report
      the path; never skip a failed removal silently.
-   - **Substantive**: any other line, so any other `.claude/CLAUDE.md` content too. Render the
+   - **Substantive**: any other content, including an empty file, a `.claude/CLAUDE.md` that
+     imports `@AGENTS.md`, and any other `CLAUDE.md` that imports `@../AGENTS.md`. Render the
      complete merge into `AGENTS.md` with `git diff --no-index` and require approval through
      `AskUserQuestion`, with two options: merge it into `AGENTS.md` (then remove the file the
      same way), or decline. A declined file stays byte-identical, and its path goes to the
