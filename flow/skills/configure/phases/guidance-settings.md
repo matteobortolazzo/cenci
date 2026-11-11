@@ -7,9 +7,9 @@ Read this file on every run, after the questions and `### Auth Verification` in 
    the questions below are answered, so one install run carries every answer. Preserve unknown
    user-authored agent files: the script never rewrites an existing role file. These steps use no
    question ID and write nothing to `question-keys.json`; every question below goes through
-   `AskUserQuestion`. Order: override question, then `--migrate-preview` and per-file approval,
-   then one `install-agents.sh .` run with the collected `--role-override` flags, then
-   `--migrate-apply` for approved files, then the validator.
+   `AskUserQuestion`. Order: override question, then `--migrate-preview`, then one
+   `install-agents.sh .` run with the collected `--role-override` flags, then `--migrate-apply`
+   for every listed file, then the validator.
    - **Inherit by default.** The six normal roles (`planner`, `implementer`,
      `critical-reviewer`, `acceptance-reviewer`, `context-gatherer`, `structure-analyzer`)
      carry no `model` or `model_reasoning_effort`, so a spawned role follows the parent session's
@@ -34,11 +34,12 @@ Read this file on every run, after the questions and `### Auth Verification` in 
    - **Migration of existing pins.** Run `sh "${CLAUDE_PLUGIN_ROOT}/codex/install-agents.sh" .
      --migrate-preview` (read-only, so it may run before the install). It prints a `diff -u` only
      for a role file whose `model` and `model_reasoning_effort` exactly match a default that role's
-     template once shipped; a user-chosen pin or a file with no pin is never listed. When it lists
-     a file, show the diff and ask per file through `AskUserQuestion` whether to apply it; after the
-     install run, for each approved file run `--migrate-apply <role>...`, which removes exactly
-     those two lines and refuses (exit 2, nothing written) a role that is not eligible. A declined
-     file stays byte-identical.
+     template once shipped; a user-chosen pin or a file with no pin is never listed. Do not ask:
+     a listed pin is a stale shipped default, so migrate it to the latest (inherit). After the
+     install run, run `--migrate-apply <role>...` once with every listed role, which removes
+     exactly those two lines and refuses (exit 2, nothing written) a role that is not eligible.
+     Report the migrated roles and show the diff in the run summary. On exit 2, stop and report
+     the refusal message.
    - **Validate.** Then run `bash "${CLAUDE_PLUGIN_ROOT}/codex/validate-agent-roles.sh" .codex/agents`.
      Exit 3 means Python 3.11+ with `tomllib` is missing or unusable (the validator printed
      `found: unusable`): report that prerequisite, not an invalid role. Exit 1 means at least one

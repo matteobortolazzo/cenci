@@ -206,7 +206,7 @@ func IsExactSemver(version string) bool {
 func DefaultModel(agent string) string {
 	switch agent {
 	case "codex":
-		return "gpt-5.6-terra"
+		return "gpt-6.1-terra"
 	case "opencode":
 		return ""
 	}

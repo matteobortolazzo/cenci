@@ -146,10 +146,10 @@ func TestOpenDryRun_CodexPassthroughIsNeverReadAsShortcut(t *testing.T) {
 		args    []string
 		wantEnd string
 	}{
-		{"prompt xs", []string{"--agent", "codex", "--dry-run", "--", "xs"}, " --model gpt-5.6-terra xs"},
-		{"prompt ch", []string{"--agent", "codex", "--dry-run", "--", "ch"}, " --model gpt-5.6-terra ch"},
+		{"prompt xs", []string{"--agent", "codex", "--dry-run", "--", "xs"}, " --model gpt-6.1-terra xs"},
+		{"prompt ch", []string{"--agent", "codex", "--dry-run", "--", "ch"}, " --model gpt-6.1-terra ch"},
 		{"model then prompt xs", []string{"--model", "m", "--agent", "codex", "--dry-run", "--", "xs"}, " --model m xs"},
-		{"full prompt", []string{"--agent", "codex", "--dry-run", "--", "$cenci:implement 42 -- xs"}, " --model gpt-5.6-terra '$cenci:implement 42 -- xs'"},
+		{"full prompt", []string{"--agent", "codex", "--dry-run", "--", "$cenci:implement 42 -- xs"}, " --model gpt-6.1-terra '$cenci:implement 42 -- xs'"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fakeDir := t.TempDir()
