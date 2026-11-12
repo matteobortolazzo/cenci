@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"errors"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -84,12 +85,28 @@ func TestDaemon_StalePaneFallbackIsNarrow(t *testing.T) {
 	}
 }
 
+// The %136 cases carry a trusted socket and the hook's server pid (#1529): the
+// once-rejected pair re-attaches only when the live server pid matches it.
 func TestDaemon_CodexStalePaneSurvivesIgnoredToolCompletion(t *testing.T) {
-	for _, freshPane := range []string{"%171", "%136"} {
-		t.Run(freshPane, func(t *testing.T) {
+	for _, tc := range []struct {
+		name, freshPane string
+		socket          bool
+		livePID         string
+		wantAttach      bool
+	}{
+		{name: "%171", freshPane: "%171", wantAttach: true},
+		{name: "%136", freshPane: "%136", socket: true, livePID: "4242", wantAttach: true},
+		{name: "%136 under another server pid", freshPane: "%136", socket: true, livePID: "7777"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			mc := &tmuxtest.MockClient{}
 			d := newTestDaemon(mc)
 			event := ipc.HookEvent{EventType: "PreToolUse", SessionID: "waiting-thread", Agent: "codex", TmuxPane: "%136", ToolName: "request_user_input"}
+			if tc.socket {
+				event.TmuxSocket = filepath.Join(trustedSocketDir(t, d), "default")
+				event.TmuxServerPID = "4242"
+				mc.ServerPIDBySocket = map[string]string{event.TmuxSocket: tc.livePID}
+			}
 			d.handleEvent(event)
 			// A parallel tool's delayed completion must preserve both the input
 			// request and the already rejected pane association.
@@ -102,11 +119,23 @@ func TestDaemon_CodexStalePaneSurvivesIgnoredToolCompletion(t *testing.T) {
 			}
 			// Applied events recheck even a previously rejected pair, allowing
 			// attachment after a server restart reuses the pane ID.
-			mc.Panes = []tmux.PaneInfo{{SessionName: "main", WindowIndex: "1", PaneID: freshPane, PaneCurrentCmd: "codex"}}
-			event.EventType, event.TmuxPane = "PreToolUse", freshPane
+			fresh := []tmux.PaneInfo{{SessionName: "main", WindowIndex: "1", PaneID: tc.freshPane, PaneCurrentCmd: "codex"}}
+			if tc.socket {
+				mc.PanesBySocket = map[string][]tmux.PaneInfo{event.TmuxSocket: fresh}
+			} else {
+				mc.Panes = fresh
+			}
+			event.EventType, event.TmuxPane = "PreToolUse", tc.freshPane
 			d.handleEvent(event)
 			d.runSweep()
-			if snap = d.buildSnapshot(); len(snap.Windows) != 1 || snap.Windows[0].PaneID != freshPane || snap.Windows[0].Status != "running" {
+			snap = d.buildSnapshot()
+			if !tc.wantAttach {
+				if len(snap.Windows) != 1 || snap.Windows[0].PaneID != "" || len(mc.WindowOpts) != 0 {
+					t.Fatalf("a pane under another server pid attached: %+v, window writes %+v", snap, mc.WindowOpts)
+				}
+				return
+			}
+			if len(snap.Windows) != 1 || snap.Windows[0].PaneID != tc.freshPane || snap.Windows[0].Status != "running" {
 				t.Fatalf("valid pane did not attach after ignored completion: %+v", snap)
 			}
 		})

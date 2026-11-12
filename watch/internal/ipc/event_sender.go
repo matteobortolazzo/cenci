@@ -131,6 +131,35 @@ func SendBabysitStatus(socketPath string, req BabysitStatusRequest) (BabysitStat
 	return resp, nil
 }
 
+// bindResponseDeadline bounds how long SendBind waits for the daemon's reply
+// (#1529). A bind is applied on the daemon's event loop and checks the pane with
+// a live tmux listing (itself bounded at 5s), so the reply can legitimately take
+// longer than a babysit control reply. The daemon's own bind budget is shorter
+// than this on purpose: a slow bind is answered with a nack by the daemon, and
+// the client times out only when the daemon never answers. A var only so a test
+// can shorten it.
+var bindResponseDeadline = 15 * time.Second
+
+// bindWire is the on-wire envelope for a BindRequest: the "kind" discriminator
+// plus the promoted request fields.
+type bindWire struct {
+	Kind string `json:"kind"`
+	BindRequest
+}
+
+// SendBind sends a codex-bind request and reads the daemon's single ack-or-nack
+// line under bindResponseDeadline (#1529). Failures classify exactly like
+// SendArmRequest's: ErrArmUndelivered for a dial failure (nothing was written,
+// so nothing was bound), ErrArmNoResponse for every other failure, a daemon
+// that predates the kind included (it closes without replying).
+func SendBind(socketPath string, req BindRequest) (BindResponse, error) {
+	var resp BindResponse
+	if err := roundTrip(socketPath, bindResponseDeadline, bindWire{Kind: bindKind, BindRequest: req}, &resp); err != nil {
+		return BindResponse{}, err
+	}
+	return resp, nil
+}
+
 // roundTrip is the shared request/response transport behind SendArmRequest
 // and the control senders: dial, write wire as one JSON line, read one reply
 // line under deadline, decode it into resp. A dial or marshal failure is

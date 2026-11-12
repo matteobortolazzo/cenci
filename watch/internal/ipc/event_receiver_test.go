@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"reflect"
@@ -763,6 +764,284 @@ func TestEventReceiver_DecodesTmuxSocket(t *testing.T) {
 			}
 		case <-time.After(2 * time.Second):
 			t.Fatal("timed out waiting for the hook event")
+		}
+	})
+}
+
+// #1529: the receiver decodes the wire key "tmux_server_pid" into
+// HookEvent.TmuxServerPID, from a raw line (the shape any in-container process can
+// write, whose value the daemon validates at ingest) and from what SendEvent
+// marshals; a line from an older `cenci notify` decodes with an empty pid.
+func TestEventReceiver_DecodesTmuxServerPID(t *testing.T) {
+	t.Run("raw line", func(t *testing.T) {
+		got := receiveRawLine(t, `{"event_type":"Stop","session_id":"sess-pid","agent":"codex","tmux_pane":"%5","tmux_socket":"/run/tmux-1000/default","tmux_server_pid":"4242","timestamp":"2024-01-01T00:00:00Z"}`)
+		if got.TmuxServerPID != "4242" {
+			t.Errorf("TmuxServerPID = %q, want %q", got.TmuxServerPID, "4242")
+		}
+		if got.TmuxSocket != "/run/tmux-1000/default" || got.TmuxPane != "%5" {
+			t.Errorf("event = %+v, want the neighbouring socket and pane decoded too", got)
+		}
+	})
+
+	t.Run("raw line with a non-numeric value is carried verbatim", func(t *testing.T) {
+		got := receiveRawLine(t, `{"event_type":"Stop","session_id":"sess-pid","tmux_pane":"%5","tmux_server_pid":"12; rm -rf /","timestamp":"2024-01-01T00:00:00Z"}`)
+		if got.TmuxServerPID != "12; rm -rf /" {
+			t.Errorf("TmuxServerPID = %q, want the raw value: shape checks belong to the daemon", got.TmuxServerPID)
+		}
+	})
+
+	t.Run("older notify, no key", func(t *testing.T) {
+		got := receiveRawLine(t, `{"event_type":"Stop","session_id":"sess-old","tmux_pane":"%5","tmux_socket":"/run/tmux-1000/default","timestamp":"2024-01-01T00:00:00Z"}`)
+		if got.TmuxServerPID != "" {
+			t.Errorf("TmuxServerPID = %q, want empty for a line without the key", got.TmuxServerPID)
+		}
+	})
+
+	t.Run("SendEvent round trip", func(t *testing.T) {
+		recv, path := startReceiver(t)
+		if err := SendEvent(path, HookEvent{EventType: "Stop", SessionID: "sess-rt", TmuxPane: "%5", TmuxServerPID: "777"}); err != nil {
+			t.Fatalf("SendEvent: %v", err)
+		}
+		select {
+		case got := <-recv.Events():
+			if got.TmuxServerPID != "777" {
+				t.Errorf("TmuxServerPID = %q, want %q after a SendEvent round trip", got.TmuxServerPID, "777")
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for the hook event")
+		}
+	})
+}
+
+// -- codex-bind (#1529) -------------------------------------------------------
+
+// exchangeRawLine writes line verbatim to the event socket and returns the one
+// reply line the receiver wrote back, without any sender in between.
+func exchangeRawLine(t *testing.T, path, line string) string {
+	t.Helper()
+	conn, err := net.Dial("unix", path)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+	if _, err := conn.Write([]byte(line + "\n")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	reply, err := bufio.NewReader(conn).ReadString('\n')
+	if err != nil {
+		t.Fatalf("read reply: %v", err)
+	}
+	return reply
+}
+
+// assertNothingOnEvents fails when anything reaches Events() or the other
+// channels within a short window: a bind and its reply are never a hook event.
+func assertNothingOnEvents(t *testing.T, recv *EventReceiver) {
+	t.Helper()
+	select {
+	case evt := <-recv.Events():
+		t.Fatalf("a bind exchange reached Events(): %+v", evt)
+	case pc := <-recv.PendingCloses():
+		t.Fatalf("a bind exchange reached PendingCloses(): %+v", pc)
+	case <-time.After(150 * time.Millisecond):
+	}
+}
+
+// TestSendBind_RoundTripsThroughTheHandler asserts the request reaches the
+// handler field for field, the handler's reply comes back to the sender intact,
+// and neither the request nor the reply is ever delivered as a hook event.
+func TestSendBind_RoundTripsThroughTheHandler(t *testing.T) {
+	recv, path := startReceiver(t)
+	got := make(chan BindRequest, 1)
+	recv.SetBindHandler(func(req BindRequest) BindResponse {
+		got <- req
+		return BindResponse{OK: true, Pane: req.TmuxPane}
+	})
+
+	req := BindRequest{SessionID: "sess-1", TmuxPane: "%7", TmuxSocket: "/run/tmux-1000/default", TmuxServerPID: "4242"}
+	resp, err := SendBind(path, req)
+	if err != nil {
+		t.Fatalf("SendBind: %v", err)
+	}
+	if want := (BindResponse{OK: true, Pane: "%7"}); resp != want {
+		t.Errorf("response = %+v, want %+v", resp, want)
+	}
+	select {
+	case seen := <-got:
+		if seen != req {
+			t.Errorf("handler saw %+v, want %+v", seen, req)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the bind handler was never invoked")
+	}
+	assertNothingOnEvents(t, recv)
+}
+
+// TestSendBind_RelaysANack asserts a refusal reaches the sender verbatim.
+func TestSendBind_RelaysANack(t *testing.T) {
+	recv, path := startReceiver(t)
+	recv.SetBindHandler(func(BindRequest) BindResponse {
+		return BindResponse{OK: false, Reason: "unknown session"}
+	})
+
+	resp, err := SendBind(path, BindRequest{SessionID: "nope", TmuxPane: "%7"})
+	if err != nil {
+		t.Fatalf("SendBind: %v", err)
+	}
+	if resp.OK || resp.Reason != "unknown session" || resp.Pane != "" {
+		t.Errorf("response = %+v, want a nack with reason %q and no pane", resp, "unknown session")
+	}
+	assertNothingOnEvents(t, recv)
+}
+
+// TestSendBind_WireShape pins the request line: kind "codex-bind" plus the
+// request keys, with the socket and pid keys omitted when empty.
+func TestSendBind_WireShape(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		req  BindRequest
+		want map[string]string
+	}{
+		{
+			name: "all fields",
+			req:  BindRequest{SessionID: "s1", TmuxPane: "%7", TmuxSocket: "/run/tmux-1000/default", TmuxServerPID: "4242"},
+			want: map[string]string{"kind": "codex-bind", "session_id": "s1", "tmux_pane": "%7", "tmux_socket": "/run/tmux-1000/default", "tmux_server_pid": "4242"},
+		},
+		{
+			name: "no socket and no pid",
+			req:  BindRequest{SessionID: "s1", TmuxPane: "%7"},
+			want: map[string]string{"kind": "codex-bind", "session_id": "s1", "tmux_pane": "%7"},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			path := tempSocket(t)
+			ln, err := net.Listen("unix", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = ln.Close() }()
+			lines := make(chan string, 1)
+			go func() {
+				conn, err := ln.Accept()
+				if err != nil {
+					return
+				}
+				defer func() { _ = conn.Close() }()
+				_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+				line, _ := bufio.NewReader(conn).ReadString('\n')
+				lines <- line
+				_, _ = conn.Write([]byte(`{"ok":true}` + "\n"))
+			}()
+
+			if _, err := SendBind(path, tt.req); err != nil {
+				t.Fatalf("SendBind: %v", err)
+			}
+			select {
+			case line := <-lines:
+				var got map[string]string
+				if err := json.Unmarshal([]byte(line), &got); err != nil {
+					t.Fatalf("decode %q: %v", line, err)
+				}
+				if !reflect.DeepEqual(got, tt.want) {
+					t.Errorf("wire line = %v, want %v", got, tt.want)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("timed out waiting for the line")
+			}
+		})
+	}
+}
+
+// TestEventReceiver_BindWithoutAHandlerFailsClosed asserts a bind that arrives
+// before SetBindHandler is nacked on the connection, and never falls through to
+// Events().
+func TestEventReceiver_BindWithoutAHandlerFailsClosed(t *testing.T) {
+	recv, path := startReceiver(t)
+
+	resp, err := SendBind(path, BindRequest{SessionID: "sess-1", TmuxPane: "%7"})
+	if err != nil {
+		t.Fatalf("SendBind: %v", err)
+	}
+	if resp.OK || resp.Reason == "" {
+		t.Errorf("response = %+v, want a nack with a reason", resp)
+	}
+	assertNothingOnEvents(t, recv)
+}
+
+// TestEventReceiver_MalformedBindNacksWithoutCallingTheHandler asserts a bind
+// whose body does not decode into a BindRequest is nacked on the connection and
+// never reaches the handler or Events().
+func TestEventReceiver_MalformedBindNacksWithoutCallingTheHandler(t *testing.T) {
+	recv, path := startReceiver(t)
+	calls := make(chan BindRequest, 4)
+	recv.SetBindHandler(func(req BindRequest) BindResponse {
+		calls <- req
+		return BindResponse{OK: true}
+	})
+
+	for _, line := range []string{
+		`{"kind":"codex-bind","session_id":5,"tmux_pane":"%7"}`,
+		`{"kind":"codex-bind","session_id":"s","tmux_pane":["%7"]}`,
+		`{"kind":"codex-bind","session_id":"s","tmux_server_pid":{"x":1}}`,
+	} {
+		var resp BindResponse
+		if err := json.Unmarshal([]byte(exchangeRawLine(t, path, line)), &resp); err != nil {
+			t.Fatalf("reply to %s is not a BindResponse: %v", line, err)
+		}
+		if resp.OK || resp.Reason == "" {
+			t.Errorf("reply to %s = %+v, want a nack with a reason", line, resp)
+		}
+	}
+
+	// A line that is not even a JSON object has no readable kind: it is dropped
+	// like any other invalid line, with no reply and no handler call.
+	writeRawLine(t, path, `{"kind":"codex-bind","session_id":`)
+
+	select {
+	case req := <-calls:
+		t.Fatalf("the handler was invoked for a malformed bind: %+v", req)
+	case <-time.After(150 * time.Millisecond):
+	}
+	assertNothingOnEvents(t, recv)
+}
+
+// TestSendBind_FailureClassification asserts a dial failure is ErrArmUndelivered
+// (nothing was written) and a connection that is held open without a reply is
+// ErrArmNoResponse once the deadline passes.
+func TestSendBind_FailureClassification(t *testing.T) {
+	t.Run("no daemon", func(t *testing.T) {
+		_, err := SendBind(tempSocket(t), BindRequest{SessionID: "s", TmuxPane: "%7"})
+		if !errors.Is(err, ErrArmUndelivered) {
+			t.Errorf("err = %v, want ErrArmUndelivered", err)
+		}
+	})
+
+	t.Run("no reply", func(t *testing.T) {
+		old := bindResponseDeadline
+		bindResponseDeadline = 100 * time.Millisecond
+		t.Cleanup(func() { bindResponseDeadline = old })
+
+		path := tempSocket(t)
+		ln, err := net.Listen("unix", path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = ln.Close() }()
+		release := make(chan struct{})
+		defer close(release)
+		go func() {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			defer func() { _ = conn.Close() }()
+			<-release
+		}()
+
+		_, err = SendBind(path, BindRequest{SessionID: "s", TmuxPane: "%7"})
+		if !errors.Is(err, ErrArmNoResponse) {
+			t.Errorf("err = %v, want ErrArmNoResponse", err)
 		}
 	})
 }

@@ -57,6 +57,13 @@ var (
 	labelPattern     = regexp.MustCompile(`^[A-Za-z0-9._+-]+$`)
 )
 
+// ValidSessionID reports whether s has the agent session-id shape: the one the
+// measurement validator accepts, and that `cenci bind` (#1529) names and the
+// daemon checks again.
+func ValidSessionID(s string) bool {
+	return sessionIDPattern.MatchString(s)
+}
+
 // kindTable maps a raw rate-limit kind to its window label. It is closed. The
 // kinds Claude Code 2.1.319's $.session.usage() produces are five_hour,
 // seven_day and, on a gateway provider only, spend_limit; the last is a spend

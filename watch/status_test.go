@@ -1212,3 +1212,92 @@ func TestStatusSubcommand_NativeMeasurement_ResanitizesSocketValues(t *testing.T
 		t.Errorf("expected the sanitized headroom line %q in:\n%s", want, output)
 	}
 }
+
+// --- cenci bind hint (#1529) -------------------------------------------------
+
+// bindHintFor is the hint line `cenci status` prints under an unproven Codex
+// session.
+func bindHintFor(id string) string {
+	return "    hint: hooks were delivered but no tmux association is proven; run 'cenci bind " + id + "' in the session's tmux pane"
+}
+
+// lineAfter returns the line that follows the first line containing marker.
+func lineAfter(t *testing.T, output, marker string) string {
+	t.Helper()
+	lines := strings.Split(output, "\n")
+	for i, l := range lines {
+		if strings.Contains(l, marker) && i+1 < len(lines) {
+			return lines[i+1]
+		}
+	}
+	t.Fatalf("no line containing %q in:\n%s", marker, output)
+	return ""
+}
+
+// P6: an unproven Codex session gets one hint line naming its id and the bind
+// command, directly under its session line. Bound and Claude sessions get none,
+// and a session id that fails the id pattern is never printed.
+func TestStatusSubcommand_HumanReadable_UnprovenCodexShowsBindHint(t *testing.T) {
+	output := runNativeStatus(t, ipc.StateSnapshot{
+		Windows: []ipc.WindowState{
+			{Session: "main", WindowIndex: "2", PaneID: "%20", TaskName: "bound work", Status: "running", Agent: "codex", Association: watch.AssociationBound},
+			{TaskName: "claude work", WindowName: "claude work", Status: "running", Agent: "claude"},
+			{TaskName: "stale thread", WindowName: "stale thread", Status: "running", Agent: "codex", Association: watch.AssociationUnproven, SessionID: "019a2b3c-thread"},
+			{TaskName: "forged id", WindowName: "forged id", Status: "done", Agent: "codex", Association: watch.AssociationUnproven, SessionID: "x\x1b[2Jy"},
+		},
+		Summary: ipc.StatusSummary{Total: 4, Running: 3, Done: 1},
+	})
+
+	if got := lineAfter(t, output, "stale thread"); got != bindHintFor("019a2b3c-thread") {
+		t.Errorf("line after the unproven session = %q, want %q", got, bindHintFor("019a2b3c-thread"))
+	}
+	if got := lineAfter(t, output, "forged id"); got != bindHintFor("<session-id>") {
+		t.Errorf("line after the forged id = %q, want the placeholder hint", got)
+	}
+	if strings.ContainsRune(output, '\x1b') {
+		t.Errorf("a raw session id reached the terminal: %q", output)
+	}
+	if n := strings.Count(output, "hint: "); n != 2 {
+		t.Errorf("%d hint lines, want one per unproven session:\n%s", n, output)
+	}
+	for _, marker := range []string{"bound work", "claude work"} {
+		if got := lineAfter(t, output, marker); strings.Contains(got, "hint:") {
+			t.Errorf("%s got a hint %q, want none", marker, got)
+		}
+	}
+}
+
+// widget-json never shows the association fields: its output for a snapshot
+// with them is byte-identical to the same snapshot without them.
+func TestWidgetJSON_ShapeUnchangedByAssociationFields(t *testing.T) {
+	socket := filepath.Join(t.TempDir(), "aw.sock")
+	srv, err := ipc.NewServer(socket)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	defer func() { _ = srv.Close() }()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go srv.Accept(ctx)
+	time.Sleep(20 * time.Millisecond)
+
+	plain := ipc.WindowState{TaskName: "stale thread", WindowName: "stale thread", Status: "running", Agent: "codex"}
+	associated := plain
+	associated.Association, associated.SessionID = watch.AssociationUnproven, "019a-thread"
+	var outputs []string
+	for _, w := range []ipc.WindowState{plain, associated} {
+		srv.Broadcast(ipc.StateSnapshot{Windows: []ipc.WindowState{w}, Summary: ipc.StatusSummary{Total: 1, Running: 1}})
+		time.Sleep(20 * time.Millisecond)
+		out, err := exec.Command(binaryPath, "widget-json", "-socket", socket).CombinedOutput()
+		if err != nil {
+			t.Fatalf("widget-json: %v\n%s", err, out)
+		}
+		outputs = append(outputs, string(out))
+	}
+	if outputs[0] != outputs[1] {
+		t.Errorf("widget-json changed with the association fields:\nwithout: %s\nwith:    %s", outputs[0], outputs[1])
+	}
+	if strings.Contains(outputs[1], "association") || strings.Contains(outputs[1], "019a-thread") {
+		t.Errorf("widget-json leaked the association fields: %s", outputs[1])
+	}
+}

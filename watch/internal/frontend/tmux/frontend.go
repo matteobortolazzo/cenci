@@ -5,6 +5,7 @@
 package tmux
 
 import (
+	"fmt"
 	"log"
 	"sort"
 	"strings"
@@ -98,6 +99,9 @@ func (f *Frontend) OnEvent(sess *frontend.SessionState, event ipc.HookEvent) fro
 		_, tracked := f.sessionKeys[sess.Key()]
 		return frontend.Observations{UntrackedPaneMissing: !tracked}
 	}
+	if f.forgetOnServerPIDMismatch(sess, paneInfo) {
+		return frontend.Observations{ServerPIDMismatch: true}
+	}
 
 	wk := windowKey{pk.socket, paneInfo.WindowTarget()}
 	f.panes[pk] = wk.target
@@ -158,6 +162,53 @@ func (f *Frontend) OnEvent(sess *frontend.SessionState, event ipc.HookEvent) fro
 
 	f.applyStatus(wk, ws, sess.Status, taskName)
 	return obs
+}
+
+// forgetOnServerPIDMismatch reports whether the session's association was
+// claimed under a server pid (#1529) that paneInfo, the listed pane, does not
+// carry. Such a pane is a different pane (a reused id after a server restart, or
+// another server), so no tmux write may reach it: any window still tracked for
+// the session is forgotten unrestored, because its pane id may now belong to
+// someone else's window. OnEvent, OnSessionEnd and OnSessionHandoff all call it
+// right after locating the pane in their one listing.
+func (f *Frontend) forgetOnServerPIDMismatch(sess *frontend.SessionState, paneInfo *tmuxc.PaneInfo) bool {
+	if !sess.RequireServerPID || (paneInfo.ServerPID != "" && paneInfo.ServerPID == sess.TmuxServerPID) {
+		return false
+	}
+	pk := paneKey{sess.TmuxSocket, sess.TmuxPane}
+	if f.cfg.Verbose {
+		log.Printf("event: pane %s is listed under another tmux server pid; not writing to it for session %q", pk, sess.Key())
+	}
+	if wk, ok := f.sessionKeys[sess.Key()]; ok {
+		if ws := f.windows[wk]; ws != nil {
+			delete(f.panes, paneKey{wk.socket, ws.PaneID})
+		}
+		f.forgetWindow(wk)
+		delete(f.sessionKeys, sess.Key())
+	}
+	return true
+}
+
+// CheckPane proves pane is listed on socket's server and that the server's live
+// pid, from the same listing, is pid (#1529), and returns the pane's window
+// target (session:window_index) on that server. It never writes to tmux. A pane
+// listed without a pid (a tmux that does not report #{pid}) counts as a
+// mismatch: nothing proves it is the caller's server.
+func (f *Frontend) CheckPane(socket, pane, pid string) (string, error) {
+	panes, err := f.client.ListPanes(socket)
+	if err != nil {
+		return "", fmt.Errorf("%w: %v", frontend.ErrPaneListing, err)
+	}
+	for _, p := range panes {
+		if p.PaneID != pane {
+			continue
+		}
+		if p.ServerPID == "" || p.ServerPID != pid {
+			return "", frontend.ErrServerPIDMismatch
+		}
+		return p.WindowTarget(), nil
+	}
+	return "", frontend.ErrPaneNotListed
 }
 
 // taskNameFromPane derives the fallback display task name from the pane title.
@@ -224,6 +275,10 @@ func (f *Frontend) OnSessionEnd(sess *frontend.SessionState) {
 		}
 	}
 
+	if paneInfo != nil && f.forgetOnServerPIDMismatch(sess, paneInfo) {
+		return
+	}
+
 	// Determine the window from fresh data or cache.
 	var wk windowKey
 	if paneInfo != nil {
@@ -281,15 +336,20 @@ func (f *Frontend) OnSessionHandoff(sess *frontend.SessionState) {
 		}
 		return
 	}
-	alive := false
+	var paneInfo *tmuxc.PaneInfo
 	for i := range panes {
 		if panes[i].PaneID == sess.TmuxPane {
-			alive = true
+			paneInfo = &panes[i]
 			break
 		}
 	}
-	if !alive {
+	if paneInfo == nil {
 		f.OnSessionEnd(sess)
+		return
+	}
+	// A pane listed under another server pid is not the session's pane, so
+	// there is no successor to keep the window for (#1529).
+	if f.forgetOnServerPIDMismatch(sess, paneInfo) {
 		return
 	}
 

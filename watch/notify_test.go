@@ -1504,3 +1504,62 @@ func TestNotifyOmitsTmuxSocketWhenTMUXUnsetOrEmptyField(t *testing.T) {
 		})
 	}
 }
+
+// --- tmux_server_pid (#1529) ------------------------------------------------
+
+// The server pid is the second comma-separated field of $TMUX (tmux's own
+// "<socket>,<server pid>,<session id>" value), sent through the real binary next
+// to the socket it belongs to. The daemon validates its shape at ingest.
+func TestNotifySendsTmuxServerPIDFromSecondFieldOfTMUX(t *testing.T) {
+	const socket = "/x/tmux-1/default"
+	fx := newNotifyFixture(t)
+
+	notifyRun(t, fx.socket, "codex", hookPayload(t, "Stop", "pid-session", nil), "TMUX_PANE=%5", "TMUX="+socket+",4242,0")
+
+	select {
+	case ev := <-fx.receiver.Events():
+		if ev.TmuxServerPID != "4242" {
+			t.Errorf("TmuxServerPID = %q, want %q (the second field of $TMUX)", ev.TmuxServerPID, "4242")
+		}
+		if ev.TmuxSocket != socket || ev.TmuxPane != "%5" {
+			t.Errorf("event = %+v, want the socket %q and pane %q sent with the pid", ev, socket, "%5")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for notify event")
+	}
+}
+
+// The key is omitted, not sent empty, when $TMUX is unset or has no second field
+// (hook-events rule 1: absent means an older or non-tmux caller). The first
+// subtest is the control that proves the wire key is sent at all, so the absences
+// below cannot pass vacuously.
+func TestNotifyOmitsTmuxServerPIDWhenTMUXUnsetOrEmptyField(t *testing.T) {
+	t.Run("control: TMUX set puts the key on the wire", func(t *testing.T) {
+		tmux := "/x/tmux-1/default,123,0"
+		line := notifyRawLineWithTMUX(t, &tmux)
+		if !strings.Contains(line, `"tmux_server_pid":"123"`) {
+			t.Errorf("raw line = %s, want a %q key", line, `"tmux_server_pid":"123"`)
+		}
+	})
+
+	empty, noPID, emptyPID := "", "/x/tmux-1/default", "/x/tmux-1/default,,0"
+	for _, tc := range []struct {
+		name string
+		tmux *string
+	}{
+		{"TMUX unset", nil},
+		{"TMUX empty", &empty},
+		{"TMUX with only a socket field", &noPID},
+		{"TMUX with an empty second field", &emptyPID},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			line := notifyRawLineWithTMUX(t, tc.tmux)
+			if strings.Contains(line, "tmux_server_pid") {
+				t.Errorf("raw line = %s, want no tmux_server_pid key", line)
+			}
+			if !strings.Contains(line, `"tmux_pane":"%5"`) {
+				t.Errorf("raw line = %s, want the event itself still delivered with its pane", line)
+			}
+		})
+	}
+}

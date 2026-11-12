@@ -4395,6 +4395,24 @@ model-switch lines. Both are display-only: nothing in them is read by dispatch.
 - **Quota is not context, and neither is headroom**: the context line never carries the
   word quota, and no native line ever carries a headroom value.
 
+A Codex session whose hooks arrive but whose tmux pane could not be proven (a stale pane
+from a shared app-server, a server pid that does not match, or an older `notify` binary
+that sends no pid) stays listed without a window and carries a hint line under it:
+
+```console
+  (no session) - implement thing (codex) (running)
+    hint: hooks were delivered but no tmux association is proven; run 'cenci bind <id>' in the session's tmux pane
+```
+
+`<id>` is the session id. The line appears only for such sessions, never for Claude
+sessions or a Codex session outside tmux. See [`cenci bind`](#pinning-a-codex-session-to-a-tmux-pane-cenci-bind).
+
+The snapshot behind it carries two additive keys. `association` (`bound`, `proven` or
+`unproven`) is set on Codex entries that have an association and omitted otherwise.
+`session_id` is present only on `unproven` entries: it feeds the hint above, and since
+the broadcast socket is mounted into sandboxes, `proven` and `bound` entries keep host
+session ids off it. `cenci widget-json` is unchanged and carries neither.
+
 The `budget headroom (configured estimate):` line is a separate line printed after the
 sessions block and before the `Dispatch loop:` section, one `<agent> <percent>` pair per
 configured agent type (`claude 73%  codex 15%`). It appears only when the daemon reports
@@ -4485,6 +4503,41 @@ figures to the cenci daemon, which stores them display-only on the matching sess
 Verified API facts, the producer contract and the evidence still required before native
 quota may control dispatch are in
 [claude-native-measurements.md](docs/claude-native-measurements.md).
+
+### Pinning a Codex session to a tmux pane (`cenci bind`)
+
+Codex's shared app-server can keep the tmux pane of the terminal that first started
+it, so a session's hooks can name a stale pane or one from another tmux server. The
+daemon only attaches a Codex hook pane when the pane is listed on its socket under the
+same tmux server pid; otherwise the session stays listed without a window (see
+[Human status overview](#human-status-overview-cenci-status)). `cenci bind` pins it by
+hand:
+
+```bash
+# In the tmux pane that shows the Codex session
+cenci bind 0198a3c4-example-session-id
+# bound Codex session 0198a3c4-example-session-id to tmux pane %7
+```
+
+```text
+cenci bind <session-id>
+```
+
+The session id is the one `cenci status` prints in the hint. The pane, socket and
+server pid are the caller's own `$TMUX_PANE` and `$TMUX`; the command dials the default
+event socket and has no `--event-socket` flag. Only Codex sessions can be bound.
+
+Exit codes: `0` bound (one `bound Codex session <id> to tmux pane <pane>` line on
+stdout); `1` refused or no daemon (one `cenci bind: <reason>` line on stderr: not inside
+a tmux pane, with nothing sent; the daemon's reason; the daemon is not reachable; or the
+daemon did not answer, so the binding status is unknown); `2` usage error. `-h`/`--help`
+prints usage to stdout and exits `0`.
+
+Bindings live in memory and are dropped on daemon restart. A second bind to a bound pane
+detaches the earlier session (it stays listed, paneless), and re-binding a session to
+another pane restores the previous window. The refusal reasons, limits, accepted risks
+and the native verification record are in
+[codex-tmux-association.md](docs/codex-tmux-association.md).
 
 ### Machine-readable status for widgets (`cenci widget-json`)
 

@@ -289,8 +289,12 @@ func runNotify(args []string) {
 
 	// $TMUX is "<socket>,<server pid>,<session>". The first field is sent as-is:
 	// the daemon's trusted-directory check at ingest is the authority, so notify
-	// does not filter. An unset $TMUX or an empty first field omits the key.
-	tmuxSocket, _, _ := strings.Cut(os.Getenv("TMUX"), ",")
+	// does not filter. An unset $TMUX or an empty first field omits the key. The
+	// second field, the server pid (#1529), is sent as-is for the same reason: the
+	// daemon checks its shape and compares it with the live server's. An unset
+	// $TMUX or an empty second field omits that key.
+	tmuxSocket, tmuxRest, _ := strings.Cut(os.Getenv("TMUX"), ",")
+	tmuxServerPID, _, _ := strings.Cut(tmuxRest, ",")
 
 	event := ipc.HookEvent{
 		EventType:        hookInput.HookEventName,
@@ -298,6 +302,7 @@ func runNotify(args []string) {
 		Agent:            agentName,
 		TmuxPane:         tmuxPane,
 		TmuxSocket:       tmuxSocket,
+		TmuxServerPID:    tmuxServerPID,
 		NotificationType: hookInput.Notification.Type,
 		ToolName:         hookInput.ToolName,
 		IsInterrupt:      hookInput.IsInterrupt,

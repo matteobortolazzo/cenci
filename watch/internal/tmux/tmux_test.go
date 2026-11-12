@@ -98,6 +98,32 @@ func TestParsePanesMalformed(t *testing.T) {
 	}
 }
 
+// TestParsePanesReadsServerPID pins the 8th listing column (#{pid}, the tmux
+// server pid) onto every pane of the listing, and that a 7-field row from a
+// listing without the column still parses, with an empty ServerPID.
+func TestParsePanesReadsServerPID(t *testing.T) {
+	input := "main\t0\tbash\t0\tbash\t~\t%0\t4242\n" +
+		"work\t1\tcodex\t0\tcodex\ttitle with spaces\t%7\t4242\n" +
+		"legacy\t0\tvim\t0\tvim\tt\t%9\n"
+
+	panes := parsePanes(input)
+
+	if len(panes) != 3 {
+		t.Fatalf("expected 3 panes, got %d: %+v", len(panes), panes)
+	}
+	want := []struct{ paneID, serverPID string }{
+		{"%0", "4242"},
+		{"%7", "4242"},
+		{"%9", ""},
+	}
+	for i, w := range want {
+		if panes[i].PaneID != w.paneID || panes[i].ServerPID != w.serverPID {
+			t.Errorf("pane[%d] = (id %q, server pid %q), want (id %q, server pid %q)",
+				i, panes[i].PaneID, panes[i].ServerPID, w.paneID, w.serverPID)
+		}
+	}
+}
+
 // -- ErrWindowGone and ListWindowPaneProcs (#1253) ---------------------------
 
 // failingTmux installs a fake tmux that prints stderrText to stderr and exits 1.

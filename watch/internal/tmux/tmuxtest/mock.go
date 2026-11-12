@@ -45,6 +45,15 @@ type MockClient struct {
 	// key: socket → "target:key" → value. The ambient server's stay in
 	// WindowOptValues.
 	SocketWindowOptValues map[string]map[string]string
+
+	// ServerPID is the tmux server pid ListPanes reports (PaneInfo.ServerPID, the
+	// #{pid} column) for every pane that carries none of its own, on any server
+	// without an entry in ServerPIDBySocket. Empty means no pid is stamped, so a
+	// test that never sets it sees the rows exactly as it wrote them.
+	ServerPID string
+	// ServerPIDBySocket overrides ServerPID for one server (the empty socket is
+	// the ambient server), so two sockets can have different live pids.
+	ServerPIDBySocket map[string]string
 }
 
 type RenameCall struct {
@@ -80,9 +89,31 @@ func (m *MockClient) ListPanes(socket string) ([]tmux.PaneInfo, error) {
 	m.ListSockets = append(m.ListSockets, socket)
 	m.ListCalls++
 	if socket == "" {
-		return m.Panes, m.ListErr
+		return m.stampServerPID(socket, m.Panes), m.ListErr
 	}
-	return m.PanesBySocket[socket], m.ListErrBySocket[socket]
+	return m.stampServerPID(socket, m.PanesBySocket[socket]), m.ListErrBySocket[socket]
+}
+
+// stampServerPID returns panes with the server's configured pid set on every
+// pane that has none, on a copy so the stored rows (which RenameWindow edits in
+// place) never change. With no pid configured for the server it returns panes
+// itself, untouched.
+func (m *MockClient) stampServerPID(socket string, panes []tmux.PaneInfo) []tmux.PaneInfo {
+	pid, ok := m.ServerPIDBySocket[socket]
+	if !ok {
+		pid = m.ServerPID
+	}
+	if pid == "" || panes == nil {
+		return panes
+	}
+	stamped := make([]tmux.PaneInfo, len(panes))
+	copy(stamped, panes)
+	for i := range stamped {
+		if stamped[i].ServerPID == "" {
+			stamped[i].ServerPID = pid
+		}
+	}
+	return stamped
 }
 
 func (m *MockClient) RenameWindow(socket, target string, name string) error {
