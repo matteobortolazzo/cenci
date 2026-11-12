@@ -16,9 +16,11 @@ Nothing in the second group is presented as tested.
 Claude Code >= 2.1.319
 
 Earlier builds are untested and unsupported. 2.1.319 is the floor because it is the only build
-the evidence below was recorded on. A lower floor would need the same runs repeated on older
-builds, and that bisect was declined (see "Floor decision"), so the floor is not a measured
-minimum. It is simply the lowest build that has been tested.
+the canary evidence below was recorded on. A lower floor would need the same runs repeated on
+older builds, and that bisect was declined (see "Floor decision"), so the floor is not a measured
+minimum. It is simply the lowest build that has been tested. The canary evidence was recorded on
+2.1.319 only: the 2026-11-12 configure runs (see "Configure runs") used a newer build and did not
+repeat the canary scenarios.
 
 ## Default-mode suppression
 
@@ -213,21 +215,73 @@ floor is a possible follow-up that needs those old-build runs.
 
 ### Configure runs
 
-User-attended, 2026-11-08, with this branch's `flow/` loaded through `claude --plugin-dir`, on
-Claude Code 2.1.319, in a throwaway two-project repository (a Go `apps/api` and a Node
-`apps/web`) with a local bare origin.
+The two 2026-11-12 runs below were user-attended, in a throwaway two-project repository (a Go
+`apps/api` and a Node `apps/web`) with only a local bare origin. The repository sat under
+`${TMPDIR:-/tmp}/cenci/<scope>/`, never in this monorepo or a real repository. Both runs were done
+inside the cenci sandbox container (configure's own reports said so), so "user-scope" below means
+that container's home, not a host file. The runs used the maintainer's existing authenticated
+session: no new login was done and no credential file was copied into the repository. The
+maintainer confirmed that neither they nor configure deliberately edited `~/.claude.json` or
+managed settings (Claude Code's own routine session writes to `~/.claude.json` are not covered by
+that statement), and the container's user-scope settings file had an unchanged checksum. The flow
+plugin was loaded through `claude --plugin-dir` from the feature worktree's `flow/`.
+`claude --version` printed
+`2.1.321 (Claude Code)`. Plugin revision: short commit SHA `2a79cc72` of the `--plugin-dir`
+checkout, and `flow/.claude-plugin/plugin.json` `version` `1.36.1`. The canary scenarios (a)-(e)
+were not repeated on this build; they were recorded on 2.1.319 only.
 
-- **Run 1, fresh: done.** The configure branch held `AGENTS.md` at the root, in `apps/api` and in
-  `apps/web`, and no `CLAUDE.md` anywhere (none existed before). This was checked with
-  `git ls-tree -r --name-only` on the branch, which was then fast-forwarded into the throwaway
-  repository's `main`.
-- **Compatibility notice: omitted in run 1.** The notice reads its `Claude Code >= <version>` line
-  from this doc, which did not exist yet. Configure reported that it omitted the notice, with
-  the reason that the doc could not be read, instead of guessing a version. That matches the
-  specified behavior: the rest of the final report still prints, and the notice is reported as
-  omitted, with the reason. The notice text has therefore **not been observed in a real run**.
-- **Run 2, rerun with an empty `git status --porcelain` for the guidance files: not run.** The
-  maintainer skipped it for time, so no idempotence claim is made from a real configure re-run.
-  Script-level idempotence is covered only by case M8 of
-  `flow/scripts/migrate-project-core.test.sh`, which is a different mechanism from configure's
-  own procedure.
+- **Run 1, fresh, 2026-11-12: done.** `/cenci:configure` with no flags. The repository already had
+  root and project `AGENTS.md` files and no `CLAUDE.md` family file. Configure wrote 19 files on a
+  configure branch, merging into the existing `AGENTS.md` files (its report said it kept their text). They
+  include `.cenci/config.json`, `.cenci/Dockerfile`, `.claude/settings.json`, `.mcp.json`,
+  `.lsp.json`, `.gitignore`, `.claudeignore`, `.lazyboards.yml`, seven `.codex/agents/*.toml`
+  files and `docs/git-workflow.md`. The branch was fast-forwarded into `main`, and its worktree
+  and branch were then removed. The baseline was checked before run 2:
+  `git ls-tree -r --name-only main` shows `AGENTS.md` at the root, in `apps/api` and in
+  `apps/web`, and no `CLAUDE.md`,
+  `.claude/CLAUDE.md` or `CLAUDE.local.md` anywhere; the full-tree `git status --porcelain` was
+  empty; `.worktrees/` was ignored through the repository's `.gitignore`.
+- **Run 1 of 2026-11-08 (history, Claude Code 2.1.319).** The first fresh run produced a configure
+  branch with `AGENTS.md` at the root, in `apps/api` and in `apps/web`, and no `CLAUDE.md`
+  anywhere, checked with `git ls-tree -r --name-only` on the branch. It was not reused as the
+  baseline for the rerun: a fresh run 1 was done in a new throwaway repository on 2026-11-12
+  (the run above), and its state is the one recorded for run 2.
+- **Compatibility notice: printed in both runs of 2026-11-12, with different wording.** Run 1's
+  report said "you need `Claude Code >= 2.1.319`; earlier builds are untested and unsupported". Run
+  2's report worded the floor differently: "tested only on Claude Code 2.1.319 and later; earlier
+  builds are unsupported". That is not the `Claude Code >= <version>` form that configure's
+  commit-and-PR phase specifies, and it does not say "untested". This difference is recorded as
+  observed and not assessed here. Both reports also said that a `CLAUDE.md`, `.claude/CLAUDE.md`
+  or `CLAUDE.local.md` in the working or a parent directory makes Claude Code skip `AGENTS.md`, and
+  both gave the same two remedies. Configure's report for the run of 2026-11-08 gave the doc being
+  unreadable (it did not exist yet) as its reason for omitting the notice, so a notice has now been
+  **observed in a real run**, with run 2's floor wording departing from the specified form.
+- **Run 2, rerun, 2026-11-12: done, no changes; one deviation and one observation are noted, not
+  assessed.** Claude Code 2.1.321, plugin revision `2a79cc72` (`1.36.1`), `/cenci:configure` with no
+  flags (default delta mode), in the same repository. It asked no questions. Its report gave these
+  reasons: the UI-conventions and Playwright steps were skipped because neither project uses a
+  frontend framework, and fleet dispatch enrollment was skipped because it ran inside the sandbox
+  container. The final report said the configuration was already up to date, so nothing was
+  committed and no PR was opened. Deviation: it did not print the exact phrase "No configuration
+  changes — nothing to commit", which configure's commit-and-PR phase specifies for the
+  nothing-staged case. Observation: it left an empty `chore/configure-update` branch and worktree
+  at the baseline commit, with no new commit, and both were still present when the checks below
+  ran; no requirement for this case was checked. Its report also said it created no GitHub board
+  labels because the origin is a local bare repository, and that it left auto-compact and the
+  subagent-model setting unchanged; the settings checksum below is the only independent check of
+  both.
+- **Guidance-file checks for run 2: all empty.** The pathspec was:
+
+  ```text
+  git status --porcelain -- AGENTS.md '**/AGENTS.md' CLAUDE.md '**/CLAUDE.md' '**/.claude/CLAUDE.md' CLAUDE.local.md '**/CLAUDE.local.md'
+  ```
+
+  It printed nothing in the throwaway main checkout and in run 2's configure worktree.
+  `git diff --name-only main <configure-branch>` for that same pathspec printed nothing, the
+  whole-branch diff against `main` was also empty, and the full-tree `git status --porcelain` was
+  empty. The container's user-scope settings file had an identical checksum before and after both
+  runs.
+
+Script-level idempotence is separately covered by case M8 of
+`flow/scripts/migrate-project-core.test.sh`, which is a different mechanism from configure's own
+procedure and is not evidence for the runs above.
