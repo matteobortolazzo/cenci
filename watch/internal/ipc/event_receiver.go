@@ -39,6 +39,12 @@ type EventReceiver struct {
 	// setter is called; a request arriving before then nacks (fail closed).
 	babysitStopHandler   func(BabysitStopRequest) BabysitStopResponse
 	babysitStatusHandler func(BabysitStatusRequest) BabysitStatusResponse
+
+	// bindHandler is the synchronous, injectable handler for the codex-bind kind
+	// (#1529), run on the connection goroutine like armHandler. Nil until
+	// SetBindHandler is called; a request arriving before then nacks (fail
+	// closed) and never reaches Events().
+	bindHandler func(BindRequest) BindResponse
 }
 
 // NewEventReceiver creates a receiver listening on the given Unix socket path.
@@ -93,6 +99,14 @@ func (r *EventReceiver) SetBabysitStopHandler(h func(BabysitStopRequest) Babysit
 // incoming babysit-status request (#1390); call before Accept.
 func (r *EventReceiver) SetBabysitStatusHandler(h func(BabysitStatusRequest) BabysitStatusResponse) {
 	r.babysitStatusHandler = h
+}
+
+// SetBindHandler installs the synchronous handler invoked for each incoming
+// codex-bind request (#1529); call before Accept. The handler runs on the
+// connection goroutine, so it must be bounded. A request that arrives before any
+// handler is installed still gets a nack.
+func (r *EventReceiver) SetBindHandler(h func(BindRequest) BindResponse) {
+	r.bindHandler = h
 }
 
 // Accept accepts connections until ctx is cancelled. Each connection sends one
@@ -174,6 +188,11 @@ func (r *EventReceiver) handleConn(conn net.Conn) {
 
 	if envelope.Kind == babysitStatusKind {
 		r.handleBabysitStatusConn(conn, scanner.Bytes())
+		return
+	}
+
+	if envelope.Kind == bindKind {
+		r.handleBindConn(conn, scanner.Bytes())
 		return
 	}
 
@@ -286,6 +305,32 @@ func (r *EventReceiver) handleBabysitStatusConn(conn net.Conn, raw []byte) {
 		resp = r.babysitStatusHandler(req)
 	}
 	writeResponseLine(conn, "babysit-status", resp)
+}
+
+// Stable nack reasons for the codex-bind envelope (#1529), mirroring the arm
+// ones above. They carry no host detail.
+const (
+	bindUnmarshalNack = "malformed bind request"
+	bindNoHandlerNack = "no bind handler installed"
+)
+
+// handleBindConn is the codex-bind counterpart of handleArmRequestConn: fail
+// closed on a malformed body or a missing handler without invoking anything,
+// otherwise run the handler, then write exactly one reply line before the caller
+// closes the connection. A bind, and its reply, never reach Events().
+func (r *EventReceiver) handleBindConn(conn net.Conn, raw []byte) {
+	var resp BindResponse
+	var req BindRequest
+	if err := json.Unmarshal(raw, &req); err != nil {
+		log.Printf("event: invalid bind JSON: %v", err)
+		resp = BindResponse{OK: false, Reason: bindUnmarshalNack}
+	} else if r.bindHandler == nil {
+		log.Printf("event: bind request received with no handler installed")
+		resp = BindResponse{OK: false, Reason: bindNoHandlerNack}
+	} else {
+		resp = r.bindHandler(req)
+	}
+	writeResponseLine(conn, "bind", resp)
 }
 
 // writeResponseLine marshals resp and writes it as one newline-terminated

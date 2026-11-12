@@ -80,6 +80,27 @@ infer which other terminal belongs to the thread, so this fallback does not
 rename/style that terminal's tmux window. A previously tracked pane closing keeps
 the normal cleanup behavior; a failed tmux listing never proves a pane missing.
 
+Watch also checks the tmux server pid. `cenci notify` sends the second field of
+`$TMUX` with a Codex event, and the daemon attaches the pane only when that pid
+equals the live server's `#{pid}` from the same pane listing. A pane that is
+listed under another server (an equal pane id on a different tmux server, or an id
+reused after a restart) and an event with no pid (an older `notify` binary) are
+refused the same way: the session is retained without a pane. Events with no tmux
+socket at all (sandboxed sessions) keep the existing attach path.
+
+A session in that state is shown by `cenci status` with a hint line:
+
+```text
+hint: hooks were delivered but no tmux association is proven; run 'cenci bind <id>' in the session's tmux pane
+```
+
+Run `cenci bind <session-id>` in the tmux pane that shows the session (Codex
+sessions only). The daemon verifies the pane and server pid, then styles that
+window and keeps using it even when later events still carry the stale pane.
+Bindings live in memory and are dropped on daemon restart. Exit codes, refusal
+reasons and limits are in [codex-tmux-association.md](../../docs/codex-tmux-association.md);
+the CLI is in the [main README](../../README.md#pinning-a-codex-session-to-a-tmux-pane-cenci-bind).
+
 ## Trust model
 
 Codex records approval against the current hook definition and plugin contents,

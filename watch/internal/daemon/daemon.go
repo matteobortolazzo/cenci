@@ -173,6 +173,17 @@ type Daemon struct {
 	// goroutine, never touching a d.loop-owned field.
 	ctlLimiter armTokenBucket
 
+	// bindLimiter is the codex-bind token bucket (#1529), separate from the
+	// arm and control buckets, under the same rules: mutex-guarded and taken
+	// only on the connection goroutine (handleBind).
+	bindLimiter armTokenBucket
+
+	// binds carries a validated bind from the connection goroutine to the
+	// loop, which owns d.sessions and applies it (applyBind, #1529). Each call
+	// carries its own buffered reply channel, so the loop never blocks on a
+	// handler that gave up waiting.
+	binds chan bindCall
+
 	// babysitStop and babysitStatus are the injectable seams a validated,
 	// host-matched stop/status request delegates to (#1390). They run on the
 	// connection goroutine. newDaemon leaves them inert (they report
@@ -204,6 +215,7 @@ func newDaemon(cfg config.Config, fe frontend.Frontend, events <-chan ipc.HookEv
 		reaper:   reaper,
 		killer:   &tmux.ExecClient{},
 		pending:  make(map[pendingKey]*pendingCloseEntry),
+		binds:    make(chan bindCall),
 		// procKiller stays nil here: Run installs the real one.
 		closeGuard: func(ticket string) (bool, string) {
 			return babysit.BlocksClose(ticket, "", "")
@@ -328,14 +340,15 @@ func Run(ctx context.Context, cfg config.Config, fe frontend.Frontend, attention
 	// keeps its inert defaults so newDaemon-based tests never shell out or
 	// signal real processes, and only a live Run installs the real ones.
 	d.installHostSeams(armCapable)
-	// Install the arm and babysit stop/status handlers before Accept starts
-	// serving connections (#1094, #1390): nothing between NewEventReceiver
+	// Install the arm, babysit stop/status and bind handlers before Accept
+	// starts serving connections (#1094, #1390, #1529): nothing between NewEventReceiver
 	// and Accept depends on accepting, and a nil handler still nacks, but
 	// installing them first keeps the window where a request could race an
 	// unset handler at zero rather than merely small.
 	recv.SetArmHandler(d.handleArmRequest)
 	recv.SetBabysitStopHandler(d.handleBabysitStop)
 	recv.SetBabysitStatusHandler(d.handleBabysitStatus)
+	recv.SetBindHandler(d.handleBind)
 	go recv.Accept(ctx)
 
 	if cfg.SocketPath != "" {
@@ -423,6 +436,8 @@ func (d *Daemon) loop(ctx context.Context, attention <-chan ipc.AttentionUpdate)
 			d.registerPendingClose(pc)
 		case m := <-d.nativeMeasurements:
 			d.applyNativeMeasurement(m)
+		case call := <-d.binds:
+			call.reply <- d.applyBind(call.req)
 		case <-sweep.C:
 			d.runSweep()
 		case <-reapC:

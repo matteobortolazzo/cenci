@@ -1,7 +1,9 @@
 package daemon
 
 import (
+	"errors"
 	"log"
+	"regexp"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -79,9 +81,26 @@ func hasUnprintable(s string) bool {
 	return false
 }
 
+// serverPIDPattern is the shape of a tmux server pid (#1529): a positive decimal
+// without a leading zero, at most 10 digits.
+var serverPIDPattern = regexp.MustCompile(`^[1-9][0-9]{0,9}$`)
+
+// validServerPID reports whether pid has the tmux server pid shape.
+func validServerPID(pid string) bool {
+	return serverPIDPattern.MatchString(pid)
+}
+
 func (d *Daemon) handleEvent(event ipc.HookEvent) {
+	// The pid rule applies only to events that sent a socket at all (#1529):
+	// read before sanitizing, since an untrusted socket falls back to the
+	// default server and its pid is then compared against that server's.
+	sentSocket := event.TmuxSocket != ""
 	var rejection string
 	event.TmuxSocket, rejection = d.sanitizeTmuxSocket(event.TmuxSocket)
+	malformedPID := event.TmuxServerPID != "" && !validServerPID(event.TmuxServerPID)
+	if malformedPID {
+		event.TmuxServerPID = ""
+	}
 	key := sessionKeyForEvent(event)
 	if key == "" {
 		if d.cfg.Verbose {
@@ -92,6 +111,9 @@ func (d *Daemon) handleEvent(event ipc.HookEvent) {
 	if rejection != "" && d.cfg.Verbose {
 		log.Printf("event: %s event on session %s: tmux_socket %s, using the default server", event.EventType, key, rejection)
 	}
+	if malformedPID && d.cfg.Verbose {
+		log.Printf("event: %q event on session %q: tmux_server_pid malformed, treating it as absent", event.EventType, key)
+	}
 
 	sess := d.sessions[key]
 	if sess == nil {
@@ -99,17 +121,18 @@ func (d *Daemon) handleEvent(event ipc.HookEvent) {
 		d.sessions[key] = sess
 	}
 	sess.LastEvent = d.now()
+	if event.Agent != "" {
+		sess.Agent = event.Agent
+	}
 	// Upgrade paneless→pane when a later event carries a pane; never clear a
 	// known pane on an empty-pane event. The socket travels with the pane: they
 	// are set together, and an event without a pane changes neither.
-	recheckMissingPane := sess.TmuxPane == "" && event.TmuxPane != "" &&
+	adopt := d.paneAdoptable(key, sess, event, sentSocket)
+	recheckMissingPane := adopt && sess.TmuxPane == "" &&
 		event.TmuxPane == sess.MissingTmuxPane && event.TmuxSocket == sess.MissingTmuxSocket
-	if event.TmuxPane != "" && !recheckMissingPane {
-		sess.TmuxPane = event.TmuxPane
-		sess.TmuxSocket = event.TmuxSocket
-	}
-	if event.Agent != "" {
-		sess.Agent = event.Agent
+	requirePID := sentSocket && sess.Agent == "codex" && sess.SessionID != ""
+	if adopt && !recheckMissingPane {
+		adoptEventPane(sess, event, requirePID)
 	}
 	if event.EventType == "UserPromptSubmit" && event.TaskName != "" && !sess.PromptTaskName {
 		sess.TaskName = event.TaskName
@@ -126,6 +149,27 @@ func (d *Daemon) handleEvent(event ipc.HookEvent) {
 		// session key, so WindowInfo would return nil afterward (#522).
 		wi := d.frontend.WindowInfo(key)
 		delete(d.sessions, key)
+		// SessionEnd never reaches frontend.OnEvent, so the pid proof runs here
+		// (#1529): a pane listed under another server pid is a reused id that
+		// names an unrelated window. The frontend's teardown forgets the window
+		// without a tmux write; the pending-close entry on that id is dropped,
+		// never fired. A failed listing proves nothing and changes nothing extra.
+		if sess.RequireServerPID && sess.TmuxPane != "" {
+			if _, err := d.frontend.CheckPane(sess.TmuxSocket, sess.TmuxPane, sess.TmuxServerPID); errors.Is(err, frontend.ErrServerPIDMismatch) {
+				if d.cfg.Verbose {
+					log.Printf("event: SessionEnd on Codex session %q: pane %q is listed under another tmux server pid; forgetting its window without a tmux write", key, sess.TmuxPane)
+				}
+				d.frontend.OnSessionEnd(sess)
+				if wi != nil {
+					delete(d.pending, pendingKey{socket: wi.Socket, pane: wi.PaneID})
+				}
+				if event.SessionEndReason != "clear" && event.SessionEndReason != "resume" {
+					d.triggerReap()
+				}
+				d.broadcast()
+				return
+			}
+		}
 		// "clear" and an interactive "resume" switch end the session id, not
 		// the pane: a successor session continues in the same window
 		// immediately, so hand the window over instead of restoring it
@@ -220,23 +264,111 @@ func (d *Daemon) handleEvent(event ipc.HookEvent) {
 	// events recheck it through the frontend, including a reused pane ID after
 	// a tmux server restart.
 	if recheckMissingPane {
-		sess.TmuxPane = event.TmuxPane
-		sess.TmuxSocket = event.TmuxSocket
+		adoptEventPane(sess, event, requirePID)
 	}
 	obs := d.frontend.OnEvent(sess, event)
-	// Codex's shared app-server can inherit the tmux environment of a client
-	// that has since closed. A new thread's events still carry that dead pane.
-	// Keep the independently identified session visible in status/counts rather
-	// than letting the pane-gone sweep immediately delete it. Previously tracked
-	// windows retain normal pane-gone cleanup; a listing error is not evidence.
-	if obs.UntrackedPaneMissing && sess.Agent == "codex" && sess.SessionID != "" {
+	d.applyObservations(key, sess, obs)
+	d.broadcast()
+}
+
+// paneAdoptable decides whether the event's pane may become the session's
+// association, before the #1500 missing-pair recheck (#1529). A binding outranks
+// every hook pane. A Codex event that sent a socket must carry a server pid, and
+// may not take a pane another session is bound to. Every other event (Claude,
+// sandboxed Codex without a socket, a pane-only event) keeps the earlier rule:
+// any non-empty pane is adopted.
+func (d *Daemon) paneAdoptable(key string, sess *frontend.SessionState, event ipc.HookEvent, sentSocket bool) bool {
+	if event.TmuxPane == "" {
+		return false
+	}
+	if b := sess.Binding; b != nil {
+		if d.cfg.Verbose && (event.TmuxPane != b.Pane || event.TmuxSocket != b.Socket) {
+			log.Printf("event: Codex session %q is bound to pane %q; ignoring the hook pane %q", key, b.Pane, event.TmuxPane)
+		}
+		return false
+	}
+	if !sentSocket || sess.Agent != "codex" || sess.SessionID == "" {
+		return true
+	}
+	refuse := ""
+	switch {
+	case event.TmuxServerPID == "":
+		refuse = "carries no tmux server pid"
+	case d.boundElsewhere(key, event.TmuxSocket, event.TmuxPane):
+		refuse = "names a pane another session is bound to"
+	default:
+		return true
+	}
+	if sess.TmuxPane == "" {
+		sess.Unproven = true
+	}
+	if d.cfg.Verbose {
+		log.Printf("event: Codex %q event on session %q %s; not attaching pane %q", event.EventType, key, refuse, event.TmuxPane)
+	}
+	return false
+}
+
+// boundElsewhere reports whether a session other than key is bound to the pane.
+func (d *Daemon) boundElsewhere(key, socket, pane string) bool {
+	for k, s := range d.sessions {
+		if k != key && s.Binding != nil && s.Binding.Socket == socket && s.Binding.Pane == pane {
+			return true
+		}
+	}
+	return false
+}
+
+// adoptEventPane makes the event's pane the session's association. The socket
+// and the claimed server pid travel with the pane.
+func adoptEventPane(sess *frontend.SessionState, event ipc.HookEvent, requirePID bool) {
+	sess.TmuxPane = event.TmuxPane
+	sess.TmuxSocket = event.TmuxSocket
+	sess.RequireServerPID = requirePID
+	sess.TmuxServerPID = ""
+	if requirePID {
+		sess.TmuxServerPID = event.TmuxServerPID
+	}
+}
+
+// detachPaneless drops the session's pane association and binding, keeping the
+// session itself, and marks it unproven. With remember it records the refused
+// (pane, socket) pair so ignored events cannot re-attach it (#1500).
+func detachPaneless(sess *frontend.SessionState, remember bool) {
+	if remember {
+		sess.MissingTmuxPane = sess.TmuxPane
+		sess.MissingTmuxSocket = sess.TmuxSocket
+	}
+	sess.TmuxPane = ""
+	sess.TmuxSocket = ""
+	sess.TmuxServerPID = ""
+	sess.RequireServerPID = false
+	sess.Binding = nil
+	sess.Unproven = true
+}
+
+// applyObservations applies what the frontend learned while handling an event
+// (or a bind's restyle) to the session.
+func (d *Daemon) applyObservations(key string, sess *frontend.SessionState, obs frontend.Observations) {
+	switch {
+	case obs.ServerPIDMismatch:
+		// The pane is listed under another server pid (#1529): a different
+		// server lifetime, or a reused pane id. The frontend wrote nothing;
+		// the session stays listed, paneless, and any binding is void.
+		if d.cfg.Verbose {
+			log.Printf("event: Codex session %q pane %q is listed under another tmux server pid; retaining as paneless", key, sess.TmuxPane)
+		}
+		detachPaneless(sess, true)
+	case obs.UntrackedPaneMissing && sess.Agent == "codex" && sess.SessionID != "":
+		// Codex's shared app-server can inherit the tmux environment of a
+		// client that has since closed. A new thread's events still carry that
+		// dead pane. Keep the independently identified session visible in
+		// status/counts rather than letting the pane-gone sweep immediately
+		// delete it. Previously tracked windows retain normal pane-gone
+		// cleanup; a listing error is not evidence.
 		if d.cfg.Verbose {
 			log.Printf("event: Codex session %s supplied an untracked missing pane; retaining as paneless", key)
 		}
-		sess.MissingTmuxPane = sess.TmuxPane
-		sess.MissingTmuxSocket = sess.TmuxSocket
-		sess.TmuxPane = ""
-		sess.TmuxSocket = ""
+		detachPaneless(sess, true)
 	}
 	for _, evicted := range obs.EvictedKeys {
 		if evicted != key {
@@ -249,8 +381,6 @@ func (d *Daemon) handleEvent(event ipc.HookEvent) {
 	if obs.TaskNameHint != "" {
 		sess.TaskName = obs.TaskNameHint
 	}
-
-	d.broadcast()
 }
 
 // recordModelSwitch appends a PostModelSwitch event to the session's display

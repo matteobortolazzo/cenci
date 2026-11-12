@@ -112,6 +112,9 @@ func renderHumanStatus(info daemon.StatusInfo, socketPath string) string {
 		fmt.Fprintf(&b, "sessions (%d):\n", len(snap.Windows))
 		for _, w := range snap.Windows {
 			fmt.Fprintf(&b, "  %s\n", status.FormatSessionLine(w, status.Identity))
+			if w.Association == watch.AssociationUnproven {
+				fmt.Fprintf(&b, "    %s\n", bindHint(w.SessionID))
+			}
 			for _, sw := range w.ModelSwitches {
 				// The snapshot comes from a socket, so the values are
 				// sanitized again before they reach the terminal.
@@ -138,6 +141,17 @@ func renderHumanStatus(info daemon.StatusInfo, socketPath string) string {
 	b.WriteString(renderDispatchState(dstate))
 
 	return b.String()
+}
+
+// bindHint is the line under an unproven Codex session (#1529): its hooks
+// arrive, but no tmux pane could be proven, so the user binds it by hand. The
+// id came from a socket, so it is printed only when it matches the session-id
+// pattern `cenci bind` accepts; anything else becomes a placeholder.
+func bindHint(sessionID string) string {
+	if !measurement.ValidSessionID(sessionID) {
+		sessionID = "<session-id>"
+	}
+	return "hint: hooks were delivered but no tmux association is proven; run 'cenci bind " + sessionID + "' in the session's tmux pane"
 }
 
 const (

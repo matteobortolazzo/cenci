@@ -5,7 +5,9 @@ import (
 	"time"
 
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/detect"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/frontend"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/ipc"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/measurement"
 	"github.com/matteobortolazzo/cenci/watch/v2/pkg/watch"
 )
 
@@ -39,7 +41,18 @@ func (d *Daemon) buildSnapshot() ipc.StateSnapshot {
 			NativeMeasurement: sess.NativeMeasurement,
 		}
 		e := entry{sortKey: key, paneless: true}
-		if wi := d.frontend.WindowInfo(key); wi != nil {
+		wi := d.frontend.WindowInfo(key)
+		if sess.Agent == "codex" {
+			w.Association = association(sess, wi != nil)
+			// Only the unproven hint needs the id. The broadcast socket is
+			// mounted into sandboxes, so proven and bound entries never carry a
+			// host session id, and an id without the session-id shape is never
+			// sent at all.
+			if w.Association == watch.AssociationUnproven && measurement.ValidSessionID(sess.SessionID) {
+				w.SessionID = sess.SessionID
+			}
+		}
+		if wi != nil {
 			w.Session = wi.Session
 			w.WindowIndex = wi.WindowIndex
 			w.PaneID = wi.PaneID
@@ -86,6 +99,23 @@ func (d *Daemon) buildSnapshot() ipc.StateSnapshot {
 		countAttentionStatus(&snap.Summary, w.Status)
 	}
 	return snap
+}
+
+// association classifies a Codex session's tmux association for the snapshot
+// (#1529): bound (a binding with a window), proven (a window from a hook pane),
+// unproven (a refused pane-carrying event left it paneless) or "" (no
+// association to report, e.g. a session that never reported a pane).
+func association(sess *frontend.SessionState, hasWindow bool) string {
+	switch {
+	case hasWindow && sess.Binding != nil:
+		return watch.AssociationBound
+	case hasWindow:
+		return watch.AssociationProven
+	case sess.Unproven:
+		return watch.AssociationUnproven
+	default:
+		return ""
+	}
 }
 
 // countAttentionStatus increments the summary counter matching a synthetic

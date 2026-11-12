@@ -159,6 +159,42 @@ func TestCurrentSessionTargetsTmuxPaneSession(t *testing.T) {
 	}
 }
 
+// TestListPanesReportsTheServerPID verifies the assumption the Codex association
+// check rests on: the #{pid} column of the pane listing is the tmux server pid,
+// the same value as the second field of $TMUX, on every pane of the server.
+// Skipped when tmux is absent.
+func TestListPanesReportsTheServerPID(t *testing.T) {
+	requireTmux(t)
+
+	socket, pid, run := startScratchServer(t, "A", "B")
+	if pid == "" {
+		t.Fatal("scratch server reported no pid")
+	}
+
+	// A pane's own $TMUX is "<socket>,<server pid>,<session>": read the second
+	// field from a real pane so the check does not lean on #{pid} alone.
+	envFile := filepath.Join(t.TempDir(), "env")
+	run("new-window", "-d", "-t", "A:", fmt.Sprintf("env > '%s.tmp' && mv '%s.tmp' '%s'", envFile, envFile, envFile))
+	paneTMUX := readWindowEnv(t, envFile)["TMUX"]
+	_, rest, _ := strings.Cut(paneTMUX, ",")
+	if got, _, _ := strings.Cut(rest, ","); got != pid {
+		t.Fatalf("a pane's $TMUX = %q, want the server pid %q as its second field", paneTMUX, pid)
+	}
+
+	panes, err := (&ExecClient{}).ListPanes(socket)
+	if err != nil {
+		t.Fatalf("ListPanes: %v", err)
+	}
+	if len(panes) < 2 {
+		t.Fatalf("ListPanes returned %d panes, want at least 2: %+v", len(panes), panes)
+	}
+	for _, p := range panes {
+		if p.ServerPID != pid {
+			t.Errorf("pane %s ServerPID = %q, want the tmux server pid %q", p.PaneID, p.ServerPID, pid)
+		}
+	}
+}
+
 // reaperListFormat is the `list-panes -F` format the orphan reaper queries a
 // socket with (sandbox.socketListFormat, #1252): pane id, a literal TAB, the
 // pane's recorded launch ID.

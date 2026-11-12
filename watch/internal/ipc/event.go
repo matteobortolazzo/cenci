@@ -12,6 +12,7 @@ type HookEvent struct {
 	Agent            string `json:"agent,omitempty"`              // claude, codex, opencode, or empty when unknown
 	TmuxPane         string `json:"tmux_pane"`                    // $TMUX_PANE (e.g. %5)
 	TmuxSocket       string `json:"tmux_socket,omitempty"`        // first field of $TMUX; the daemon validates it at ingest
+	TmuxServerPID    string `json:"tmux_server_pid,omitempty"`    // second field of $TMUX, the tmux server pid; the daemon validates its shape at ingest (#1529)
 	NotificationType string `json:"notification_type,omitempty"`  // Notification events only
 	ToolName         string `json:"tool_name,omitempty"`          // PreToolUse, PermissionRequest, PostToolUse events
 	TaskName         string `json:"task_name,omitempty"`          // compact first-prompt label; raw prompt is never sent
@@ -101,6 +102,37 @@ type ArmRequest struct {
 type ArmResponse struct {
 	OK     bool   `json:"ok"`
 	Reason string `json:"reason,omitempty"`
+}
+
+// bindKind is the "kind" discriminator value for the `cenci bind` request to the
+// host daemon (#1529). It reuses the babysit-arm envelope: one request line,
+// exactly one reply line, then the daemon closes. An absent/unknown "kind"
+// still routes to Events() unchanged -- see event_receiver.go. A daemon that
+// predates the kind decodes the line as a HookEvent with no event_type, routes
+// it to Events() and closes without a reply, which the client sees as no
+// response.
+const bindKind = "codex-bind"
+
+// BindRequest asks the host daemon to pin the Codex session SessionID to the
+// tmux pane the caller runs in (#1529). Every field crosses the container->host
+// trust boundary and is validated daemon-side before it is used. TmuxSocket and
+// TmuxServerPID are the first two fields of the caller's own $TMUX, omitted when
+// empty; the daemon decides what a missing or untrusted value means.
+type BindRequest struct {
+	SessionID     string `json:"session_id"`
+	TmuxPane      string `json:"tmux_pane"`
+	TmuxSocket    string `json:"tmux_socket,omitempty"`
+	TmuxServerPID string `json:"tmux_server_pid,omitempty"`
+}
+
+// BindResponse is the daemon's single ack-or-nack reply to a BindRequest.
+// Reason is only meaningful when OK is false; the client relays it verbatim and
+// never re-derives or re-words it. Pane is the pane id the daemon recorded, set
+// on an ack only.
+type BindResponse struct {
+	OK     bool   `json:"ok"`
+	Reason string `json:"reason,omitempty"`
+	Pane   string `json:"pane,omitempty"`
 }
 
 // babysitStopKind and babysitStatusKind are the "kind" discriminator values

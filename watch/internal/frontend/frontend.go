@@ -6,6 +6,7 @@
 package frontend
 
 import (
+	"errors"
 	"time"
 
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/detect"
@@ -30,6 +31,23 @@ type SessionState struct {
 	// applied events still check it again so a live pane can attach normally.
 	MissingTmuxPane   string
 	MissingTmuxSocket string
+	// TmuxServerPID is the tmux server pid the association with TmuxPane was
+	// claimed under: the event's $TMUX pid, or the binding's. RequireServerPID
+	// makes OnEvent compare it with the live pid from the same listing before
+	// any tmux write (#1529). It is set only for Codex sessions whose event
+	// carried a tmux socket, and for bound sessions; every other association
+	// keeps the pre-#1529 path.
+	TmuxServerPID    string
+	RequireServerPID bool
+	// Binding is the pane `cenci bind` pinned this session to (#1529). While
+	// set it outranks the pane the session's hook events carry. In memory
+	// only: a daemon restart drops it.
+	Binding *PaneBinding
+	// Unproven is true after a pane-carrying Codex event was refused (missing
+	// pane, an empty, malformed or mismatched server pid) or a bind elsewhere
+	// detached the session. The snapshot reports it only while the session has
+	// no window.
+	Unproven bool
 	// BackgroundHold is true while the session's latest main-agent Stop was
 	// held at running because in-flight background work will wake it (#698).
 	// While set, the tmux sweep's idle-title detection must not flip the
@@ -53,6 +71,24 @@ type SessionState struct {
 	NativeMeasurement *watch.NativeMeasurement
 	NativeMeasuredAt  time.Time
 }
+
+// PaneBinding is the (socket, pane, server pid) a `cenci bind` recorded for a
+// Codex session after the frontend proved the pane is listed on that socket
+// under that pid (#1529).
+type PaneBinding struct {
+	Socket    string
+	Pane      string
+	ServerPID string
+}
+
+// CheckPane's failure classes (#1529). ErrPaneListing is a failed listing,
+// which proves nothing about the pane; the other two are proof from a
+// successful listing.
+var (
+	ErrPaneListing       = errors.New("tmux pane listing failed")
+	ErrPaneNotListed     = errors.New("pane is not listed on that tmux server")
+	ErrServerPIDMismatch = errors.New("tmux server pid does not match the live server")
+)
 
 // BackgroundHoldTTL releases timer-only and legacy background holds after
 // event silence (#1079). Explicitly reported active tasks are exempt: shells
@@ -118,11 +154,19 @@ type Frontend interface {
 	// user variables). Agents absent from headroom that were previously
 	// present must have their presentation state cleared.
 	RenderHeadroom(headroom map[string]float64)
+	// CheckPane proves pane is listed on the tmux server at socket and that
+	// the server's live pid is pid, from one listing and with no tmux write
+	// (#1529). On success it returns the pane's window target on that server
+	// (session:window_index, the WindowInfo Session and WindowIndex joined by
+	// ":"); otherwise an error matching ErrPaneListing, ErrPaneNotListed or
+	// ErrServerPIDMismatch.
+	CheckPane(socket, pane, pid string) (window string, err error)
 }
 
 // Observations carries facts a frontend learned while handling an event.
 type Observations struct {
 	UntrackedPaneMissing bool     // successful listing proved the supplied pane absent; no prior window was tracked
+	ServerPIDMismatch    bool     // the pane is listed, but under a server pid other than sess.TmuxServerPID; nothing was written (#1529)
 	TaskNameHint         string   // task name resolved from the pane (title-derived; codex path)
 	AgentHint            string   // agent inferred from the pane's running command
 	EvictedKeys          []string // core sessions whose presentation state was discarded (dead panes)

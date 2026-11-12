@@ -82,7 +82,26 @@ type WindowState struct {
 	// NativeMeasurement is the latest validated native Claude measurement for
 	// the session (#1450). Display only: it never feeds Status.
 	NativeMeasurement *NativeMeasurement `json:"native_measurement,omitempty"`
+	// Association is how a Codex session's tmux window was established
+	// (#1529): "bound" (a `cenci bind` binding with a window), "proven" (a
+	// window from a hook pane, server pid matched or no socket sent) or
+	// "unproven" (hooks arrived but a pane-carrying event was refused, so the
+	// session is paneless). Omitted for every other entry, including a Codex
+	// session that never reported a pane.
+	Association string `json:"association,omitempty"`
+	// SessionID is the agent session id, set only on "unproven" entries, so
+	// `cenci status` can name it in the `cenci bind` hint. Proven and bound
+	// entries omit it: the broadcast socket is mounted into sandboxes, and host
+	// session ids stay off it wherever the hint does not need them.
+	SessionID string `json:"session_id,omitempty"`
 }
+
+// Association values of WindowState.Association (#1529).
+const (
+	AssociationBound    = "bound"
+	AssociationProven   = "proven"
+	AssociationUnproven = "unproven"
+)
 
 // NativeMeasurement is the validated snapshot of one native Claude
 // measurement sample (#1450), stored per session. Freshness ("fresh|stale") and

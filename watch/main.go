@@ -62,6 +62,8 @@ Details: docs/migrating-to-cenci.md in the cenci repo.
 		runWidgetJSON(os.Args[2:])
 	case "notify":
 		runNotify(os.Args[2:])
+	case "bind":
+		runBind(os.Args[2:])
 	case "run":
 		runRun(os.Args[2:])
 	case "up":
@@ -129,6 +131,7 @@ Commands:
   status                             human-readable session/daemon/dispatch overview
   widget-json                        machine-readable status for bar widgets (Waybar custom module protocol); "waybar" is a hidden alias
   notify                             deliver a hook event to the daemon (used by installed hooks)
+  bind <session-id>                  pin a Codex session to the tmux pane this runs in (after the daemon checks the pane, socket and server pid)
   up                                 start or enter the cenci tmux server and session (tmux -L cenci) and make sure the daemon is running
   run                                dispatch a workflow into a new tmux window
   babysit                            supervise an open PR until it merges or closes
