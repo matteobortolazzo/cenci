@@ -1815,6 +1815,7 @@ func TestRunReconcileOnce_LaunchProbeWiring(t *testing.T) {
 case "$1 $2" in
   "issue list") printf '[{"number":42,"title":"Fix thing","labels":[{"name":"Working"}],"assignees":[]}]' ;;
   "issue view") printf '{"comments":[]}' ;;
+  "api user") printf 'octocat\n' ;;
   "api graphql") printf '`+emptyOpenPRPageJSON+`' ;;
   *) exit 1 ;;
 esac
@@ -1886,6 +1887,7 @@ func TestRunReconcileOnce_DeadVerdictBesideSurvivingWindowNeverKills(t *testing.
 case "$1 $2" in
   "issue list") printf '[{"number":42,"title":"Fix thing","labels":[{"name":"Working"}],"assignees":[]}]' ;;
   "issue view") printf '{"comments":[]}' ;;
+  "api user") printf 'octocat\n' ;;
   "api graphql") printf '` + emptyOpenPRPageJSON + `' ;;
   *) exit 1 ;;
 esac
@@ -1982,6 +1984,7 @@ func installWorkingTicketGH(t *testing.T, onPath bool) {
 case "$1 $2" in
   "issue list") printf '[{"number":42,"title":"Fix thing","labels":[{"name":"Working"}],"assignees":[]}]' ;;
   "issue view") printf '{"comments":[]}' ;;
+  "api user") printf 'octocat\n' ;;
   "api graphql") printf '` + emptyOpenPRPageJSON + `' ;;
   *) exit 1 ;;
 esac
@@ -2063,7 +2066,7 @@ func TestRunReconcileOnce_OOMRetryAcrossPassesOverRealStateFile(t *testing.T) {
 	}
 
 	installFakeGHComments(t, mut.comments[0].body)
-	attempts, ooms, err := countAttempts("o/r", 42)
+	attempts, ooms, err := countAttempts("o/r", 42, fakeViewer)
 	if err != nil || attempts != 0 || ooms != 1 {
 		t.Errorf("countAttempts = (%d, %d, %v), want (0, 1, nil): an OOM retry is never a dispatch attempt", attempts, ooms, err)
 	}
@@ -2271,6 +2274,7 @@ func TestRunReconcileOnce_FilterExcludedStrandedWorkingTicketIsRecoveredThenStay
 case "$1 $2" in
   "issue list") printf '[{"number":42,"title":"Fix thing","labels":[{"name":"Working"}],"assignees":[{"login":"octocat"}],"milestone":{"number":7,"title":"v7"}}]' ;;
   "issue view") printf '{"comments":[]}' ;;
+  "api user") printf 'octocat\n' ;;
   "api graphql") printf '`+emptyOpenPRPageJSON+`' ;;
   *) exit 1 ;;
 esac
@@ -2338,5 +2342,215 @@ esac
 	assertDecisions(t, decisions, []wantDecision{{42, ActionSkip, "filter: milestone 7 not in [3]", ""}})
 	if len(mut.labelEdits) != 0 || prior != 0 {
 		t.Errorf("the recovered ticket must not be claimed: edits %+v prior %d", mut.labelEdits, prior)
+	}
+}
+
+// -- #868: attempt counting trusts only the operator's own markers -----------
+
+// Issue-list payloads for the #868 run-level tests.
+const (
+	workingTicket42JSON    = `[{"number":42,"title":"Fix thing","labels":[{"name":"Working"}],"assignees":[]}]`
+	workingTickets4243JSON = `[{"number":42,"title":"Fix thing","labels":[{"name":"Working"}],"assignees":[]},` +
+		`{"number":43,"title":"Fix other","labels":[{"name":"Working"}],"assignees":[]}]`
+	plannedTicket42JSON = `[{"number":42,"title":"Fix thing","labels":[{"name":"Planned"}],"assignees":[]}]`
+)
+
+// installLoggingReconcileGH installs a fake gh (on PATH, for the real cat)
+// that appends every invocation's argv to a call log and answers `issue list`
+// with issuesJSON, every `issue view` with the comments fixture, `api user`
+// with the apiUser shell snippet, and `api graphql` with an empty open-PR page.
+// It returns the call log's path.
+func installLoggingReconcileGH(t *testing.T, issuesJSON, commentsFixture, apiUser string) string {
+	t.Helper()
+	callLog := filepath.Join(t.TempDir(), "gh-calls.log")
+	installFakeGHOnPath(t, fmt.Sprintf(`printf '%%s\n' "$*" >> %q
+case "$1 $2" in
+  "issue list") printf '%%s' '%s' ;;
+  "issue view") cat %q ;;
+  "api user") %s ;;
+  "api graphql") printf '%s' ;;
+  *) exit 1 ;;
+esac
+`, callLog, issuesJSON, commentsFixture, apiUser, emptyOpenPRPageJSON))
+	return callLog
+}
+
+// ghCallsWithPrefix returns the logged gh invocations starting with prefix,
+// reading the log through collect_test.go's readGHCalls (every pass here
+// lists issues first, so the log always exists).
+func ghCallsWithPrefix(t *testing.T, callLog, prefix string) []string {
+	t.Helper()
+	var out []string
+	for _, line := range readGHCalls(t, callLog) {
+		if strings.HasPrefix(line, prefix) {
+			out = append(out, line)
+		}
+	}
+	return out
+}
+
+// AC5 (#868): a pass resolves the active gh login at most once, however many
+// Working tickets it counts, and never when it has no Working ticket.
+func TestRunReconcileOnce_ResolvesViewerOncePerPassOnlyWithWorkingTicket(t *testing.T) {
+	cases := []struct {
+		name          string
+		issues        string
+		wantUserCalls int
+	}{
+		{"two Working tickets", workingTickets4243JSON, 1},
+		{"no Working ticket", plannedTicket42JSON, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			callLog := installLoggingReconcileGH(t, tc.issues, writeAuthoredCommentsFixture(t), `printf 'octocat\n'`)
+			serveChainSnapshot(t, watch.StateSnapshot{})
+			stubOOMProbe(t)
+			cfg := reconcileConfig()
+			cfg.Repos = []RepoConfig{{Repo: "o/r", Dir: t.TempDir(), Session: "test-session"}}
+
+			_, _ = RunReconcileOnce(cfg, &fakeMutator{}, false, io.Discard, &memStore{})
+
+			if got := ghCallsWithPrefix(t, callLog, "api user"); len(got) != tc.wantUserCalls {
+				t.Errorf("gh api user calls = %q, want %d", got, tc.wantUserCalls)
+			}
+		})
+	}
+}
+
+// AC6 (#868): when the active login cannot be resolved in a pass with Working
+// tickets, every Working ticket defers (observation kept, no label edit, no
+// comment, no comment-thread read) and the pass returns an error. The control
+// case runs the same fixture with a resolvable login and must recover both
+// tickets, so the deferral is never vacuous.
+func TestRunReconcileOnce_UnresolvedViewerDefersEveryWorkingTicket(t *testing.T) {
+	cases := []struct {
+		name      string
+		apiUser   string
+		wantDefer bool
+	}{
+		{"gh api user fails", "exit 1", true},
+		{"gh api user returns an empty login", "exit 0", true},
+		{"control: resolved login recovers both", `printf 'octocat\n'`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			callLog := installLoggingReconcileGH(t, workingTickets4243JSON, writeAuthoredCommentsFixture(t), tc.apiUser)
+			serveChainSnapshot(t, watch.StateSnapshot{})
+			stubOOMProbe(t)
+			cfg := reconcileConfig()
+			cfg.Repos = []RepoConfig{{Repo: "o/r", Dir: t.TempDir(), Session: "test-session"}}
+			seed := time.Now().Add(-10 * time.Minute)
+			store := &memStore{state: ReconcileState{Observations: map[string]time.Time{"o/r#42": seed, "o/r#43": seed}}}
+			mut := &fakeMutator{}
+			var buf bytes.Buffer
+
+			_, err := RunReconcileOnce(cfg, mut, false, &buf, store)
+
+			if !tc.wantDefer {
+				if err != nil {
+					t.Fatalf("control pass: RunReconcileOnce = %v, want nil\n%s", err, buf.String())
+				}
+				if len(mut.labelEdits) != 2 || len(mut.comments) != 2 {
+					t.Fatalf("control pass: edits %+v comments %+v, want both tickets recovered", mut.labelEdits, mut.comments)
+				}
+				return
+			}
+			if err == nil {
+				t.Error("RunReconcileOnce returned nil error, want the login failure surfaced")
+			}
+			if !strings.Contains(buf.String(), "reconcile: detecting current GitHub user: ") {
+				t.Errorf("log has no \"reconcile: detecting current GitHub user: \" line:\n%s", buf.String())
+			}
+			if len(mut.labelEdits) != 0 || len(mut.comments) != 0 {
+				t.Errorf("edits %+v comments %+v, want none: an unresolved login must defer every Working ticket", mut.labelEdits, mut.comments)
+			}
+			for _, key := range []string{"o/r#42", "o/r#43"} {
+				if ts, ok := store.state.Observations[key]; !ok || !ts.Equal(seed) {
+					t.Errorf("observation %s = %v (present=%v), want the seeded %v kept", key, ts, ok, seed)
+				}
+			}
+			if views := ghCallsWithPrefix(t, callLog, "issue view"); len(views) != 0 {
+				t.Errorf("issue view calls = %q, want none: no thread is counted without a login", views)
+			}
+		})
+	}
+}
+
+// AC7 (#868): an interrupted resume whose thread holds RetryBudget-1 genuine
+// attempt comments plus foreign-authored attemptMarker comments still gets
+// its +Input Needed -Working restore and the next attempt's comment; the
+// forged markers never exhaust the budget into dispatch-failed.
+func TestRunReconcileOnce_ForeignAttemptMarkersNeverExhaustInterruptedResume(t *testing.T) {
+	cfg := reconcileConfig()
+	var comments []fakeAuthoredComment
+	for i := 1; i < cfg.RetryBudget; i++ {
+		comments = append(comments, commentBy(fakeViewer, resumeInterruptedComment(i, "42", "gone")))
+	}
+	comments = append(comments,
+		commentBy("mallory", resumeInterruptedComment(1, "42", "gone")),
+		commentBy("mallory", retryComment(1, "42", "gone")),
+		commentBy("mallory", attemptMarker),
+	)
+	installLoggingReconcileGH(t, workingTicket42JSON, writeAuthoredCommentsFixture(t, comments...), `printf 'octocat\n'`)
+	serveChainSnapshot(t, watch.StateSnapshot{})
+	stubOOMProbe(t)
+	dir := t.TempDir()
+	writePlan(t, dir, "42-x.md", "---\nticketId: 42\nstatus: awaiting-input\n---\nbody\n")
+	cfg.Repos = []RepoConfig{{Repo: "o/r", Dir: dir, Session: "test-session"}}
+	store := &memStore{state: ReconcileState{Observations: map[string]time.Time{"o/r#42": time.Now().Add(-10 * time.Minute)}}}
+	mut := &fakeMutator{}
+	var buf bytes.Buffer
+
+	res, err := RunReconcileOnce(cfg, mut, false, &buf, store)
+	if err != nil {
+		t.Fatalf("RunReconcileOnce: %v\n%s", err, buf.String())
+	}
+
+	if len(mut.labelEdits) != 1 ||
+		!slices.Equal(mut.labelEdits[0].add, []string{labelInputNeeded}) ||
+		!slices.Equal(mut.labelEdits[0].remove, []string{labelWorking}) {
+		t.Fatalf("label edits = %+v, want one +%s -%s restore", mut.labelEdits, labelInputNeeded, labelWorking)
+	}
+	if want := resumeInterruptedComment(cfg.RetryBudget, "42", "gone"); len(mut.comments) != 1 || mut.comments[0].body != want {
+		t.Fatalf("comments = %+v, want exactly %q", mut.comments, want)
+	}
+	if hasFailed(res, "o/r", 42) {
+		t.Error("forged attempt markers drove the ticket to dispatch-failed")
+	}
+}
+
+// Edge case 2 (#868), run level: after the operator switches gh accounts, a
+// full RetryBudget of attempt comments posted under the old account no longer
+// counts, so the ticket gets its first retry under the new account rather
+// than dispatch-failed, and the pass raises no error.
+func TestRunReconcileOnce_OldAccountAttemptsDoNotCountAfterAccountSwitch(t *testing.T) {
+	cfg := reconcileConfig()
+	var comments []fakeAuthoredComment
+	for i := 1; i <= cfg.RetryBudget; i++ {
+		comments = append(comments, commentBy("old-acct", retryComment(i, "42", "gone")))
+	}
+	installLoggingReconcileGH(t, workingTicket42JSON, writeAuthoredCommentsFixture(t, comments...), `printf 'octocat\n'`)
+	serveChainSnapshot(t, watch.StateSnapshot{})
+	stubOOMProbe(t)
+	cfg.Repos = []RepoConfig{{Repo: "o/r", Dir: t.TempDir(), Session: "test-session"}}
+	store := &memStore{state: ReconcileState{Observations: map[string]time.Time{"o/r#42": time.Now().Add(-10 * time.Minute)}}}
+	mut := &fakeMutator{}
+	var buf bytes.Buffer
+
+	res, err := RunReconcileOnce(cfg, mut, false, &buf, store)
+	if err != nil {
+		t.Fatalf("RunReconcileOnce: %v\n%s", err, buf.String())
+	}
+
+	if len(mut.labelEdits) != 1 ||
+		!slices.Equal(mut.labelEdits[0].add, []string{labelPlanned}) ||
+		!slices.Equal(mut.labelEdits[0].remove, []string{labelWorking}) {
+		t.Fatalf("label edits = %+v, want one +%s -%s retry", mut.labelEdits, labelPlanned, labelWorking)
+	}
+	if want := retryComment(1, "42", "gone"); len(mut.comments) != 1 || mut.comments[0].body != want {
+		t.Fatalf("comments = %+v, want exactly %q", mut.comments, want)
+	}
+	if hasFailed(res, "o/r", 42) {
+		t.Error("old-account attempt comments drove the ticket to dispatch-failed")
 	}
 }

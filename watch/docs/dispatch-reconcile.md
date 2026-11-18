@@ -50,7 +50,11 @@ that alternates between ordinary retries and interrupted resumes for any
 reason still terminates once `attempts >= RetryBudget`, escalating to the
 existing `RecoveryFailed` branch (`+dispatch-failed −Working`) exactly like
 any other stranded `Working` ticket. No unbounded restore loop, and no
-distinct marker to double the budget.
+distinct marker to double the budget. The tally counts only the comments the
+active gh login posted, with the marker outside `>` lines (see
+"Attempt-counting trust rule (#868)" below), so another user's forged or
+quoted `attemptMarker` can never spend this shared budget and push a genuine
+interrupted resume into `dispatch-failed`.
 
 **Crash-after-partial-label-mutation cleanup.** The `Input Needed`
 short-circuit (the branch that ordinarily records a ticket into
@@ -381,8 +385,9 @@ selects `RecoveryRetryOOM`: the ordinary retry's labels (stage-aware like #828, 
 `oomRetryBudget` (default `3`; an explicit `0` sends the first OOM recovery straight to
 failed). `countAttempts` tallies the two markers separately from the same `gh issue view`
 read, so an OOM retry is never counted by `retryBudget` and an ordinary retry never by
-`oomRetryBudget`; both share `AttemptsUnknown`, so a failed comment read defers the ticket
-with its baseline kept.
+`oomRetryBudget`; both count only the active gh login's unquoted markers (#868, see
+"Attempt-counting trust rule (#868)" below) and share `AttemptsUnknown`, so a failed comment
+read or an unresolved login defers the ticket with its baseline kept.
 When the budget is spent the recovery is `RecoveryFailed` with `failedMarker`, so the badge,
 the `Failed` aggregation and the terminal short-circuit treat it like any `dispatch-failed`
 ticket. The #853 interrupted-resume branch (a plan at `awaiting-input`) takes precedence
@@ -517,11 +522,47 @@ that posts to a ticket cenci also dispatches) must embed a `<!-- cenci-<kind>
 `reconcile-stuck` were back-filled with markers for exactly this reason
 (`failedMarker`/`planInvalidMarker`/`reconcileStuckMarker`) — they previously
 had none, since the classifier that would have cared about them didn't exist
-yet. `attemptMarker`'s own `strings.Contains` check in `countAttempts` is
-unaffected: each marker is a distinct string, so back-filling the other three
-never inflates the attempt tally.
+yet. `countAttempts`' own marker match is unaffected: it looks for the exact
+`attemptMarker` (and, separately, `oomRetryMarker`) string in the
+blockquote-stripped body of the active gh login's comments (see
+"Attempt-counting trust rule (#868)" below), and each marker is a distinct
+string, so back-filling the other three never inflates the attempt tally.
 
 - **Strip blockquote-prefixed lines before verifying the anchor's marker:** Strip `>`-prefixed blockquote lines from a comment's body before checking whether it contains the escalation anchor's marker. A human using GitHub's "Quote reply" on the escalation comment copies the marker verbatim into their own body's blockquoted lines; if the check does not strip blockquotes first, a quote-reply comment could be misread as carrying a genuine marker of its own (#827; still load-bearing under #849's exact-ID anchor matching, since the stripped check now runs both on the anchor comment's own body and on every candidate answer after it).
+
+### Attempt-counting trust rule (#868)
+
+`countAttempts(repo, number, viewer)` (`reconcile_run.go`) counts an
+`attemptMarker` (for `RetryBudget`) or an `oomRetryMarker` (for
+`OOMRetryBudget`) only on a comment cenci itself posted, under the
+operator's own GitHub identity (`flow/docs/comment-attribution.md`):
+
+- **Only the active gh login's comments count.** A comment counts only when
+  its `author.login` (decoded from the same `gh issue view --json comments`
+  read, so no extra call per ticket) equals `viewer`, compared with
+  `strings.EqualFold`. Any other commenter's markers are ignored, so on a
+  public or wide-collaborator repo nobody else can pre-load either counter.
+- **Blockquoted markers are ignored.** The marker check runs on
+  `stripBlockquoteLines(body)`, the rule `isCenciAuthored` already uses, so a
+  human's "Quote reply" of a cenci comment is never an attempt. cenci's own
+  comments put the marker on their unquoted first line.
+- **Empty or ghost authors are ignored.** A deleted user's comment decodes to
+  an empty login (`"author": {"login": ""}` or `"author": null`) and never
+  counts. An empty `viewer` is an error, never a login to compare against.
+- **An account switch resets the count.** Comments posted under the
+  operator's previous gh account no longer match, so the ticket gets up to
+  `RetryBudget` more retries under the new account, with no error.
+- **An unresolved login means `AttemptsUnknown`.** `RunReconcileOnce`
+  resolves `viewer` with `currentGitHubLogin` (`gh api user --jq .login`). If
+  that call fails or returns an empty login, the pass logs
+  `reconcile: detecting current GitHub user: <err>`, marks every `Working`
+  ticket `AttemptsUnknown` (so `Reconcile` defers it with its grace
+  observation kept, and makes no retry, interrupted-resume or failed label
+  edit or comment), reads no comment thread, and returns the error. It never
+  assumes zero attempts and never drops the filter.
+- **One `gh api user` call per pass.** The login is resolved once, before the
+  counting loop, and only when the pass collected at least one `Working`
+  ticket, mirroring `dispatch.go`'s "empty passes need no identity" rule.
 
 ## Reconciliation state persistence (#883)
 

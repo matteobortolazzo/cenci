@@ -1764,6 +1764,12 @@ and that signal has held continuously for `gracePeriod`. When it strands:
 - **at `retryBudget`** → `Working` → `dispatch-failed`, surfaced for a human and never
   touched again.
 
+Only attempt comments posted by the active `gh` login (compared ignoring case), with the
+marker outside `>`-quoted lines, count toward `retryBudget` and `oomRetryBudget` (ticket
+#868): another user's forged or quoted comment cannot spend either budget, and switching
+`gh` accounts starts the count afresh. When a pass has a `Working` ticket but cannot
+resolve the active login, it defers every `Working` ticket and reports the error.
+
 **OOM classification (ticket #1291).** Before the budget split, the reconciler asks
 whether the kernel's out-of-memory killer ended the session. Each pass it reads the
 `oom_kill` counter in `memory.events` of the container the ticket ran in (its recorded

@@ -1586,9 +1586,12 @@ func chainIssueView(world *ghWorld, args []string) (stdout, stderr string, code 
 		case "updatedAt":
 			obj["updatedAt"] = is.UpdatedAt
 		case "comments":
-			var arr []map[string]string
+			// author.login mirrors gh's `--json comments` shape, so the
+			// reconciler's countAttempts author filter (#868) sees who posted
+			// each comment.
+			var arr []map[string]any
 			for _, c := range world.Comments[id] {
-				arr = append(arr, map[string]string{"body": c.Body})
+				arr = append(arr, map[string]any{"author": map[string]string{"login": c.Login}, "body": c.Body})
 			}
 			obj["comments"] = arr
 		}

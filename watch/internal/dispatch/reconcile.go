@@ -53,7 +53,11 @@ const cenciMarkerPrefix = "<!-- cenci-"
 
 // attemptMarker is the hidden HTML comment stamped on every retry comment so
 // countAttempts can tally durable attempts from the ticket thread across cron
-// invocations and daemon restarts (in-memory state would be amnesiac).
+// invocations and daemon restarts (in-memory state would be amnesiac). The
+// tally trusts the marker only on a comment the active gh login authored, and
+// only outside `>`-blockquoted lines (#868): every comment helper here puts it
+// on the body's unquoted first line, and cenci posts under the operator's own
+// identity, so a foreign-authored or quote-replied copy never counts.
 const attemptMarker = cenciMarkerPrefix + "dispatch-attempt -->"
 
 // failedMarker, planInvalidMarker, and reconcileStuckMarker (#827) back-fill
@@ -61,7 +65,8 @@ const attemptMarker = cenciMarkerPrefix + "dispatch-attempt -->"
 // none, so they are never mistaken for a human escalation answer by
 // resume.go's classifier. Each is distinct from attemptMarker and from each
 // other, per watch/docs/error-handling.md #446 -- countAttempts' own
-// strings.Contains(c.Body, attemptMarker) check must never match any of them.
+// attemptMarker match (on the blockquote-stripped body of the active gh
+// login's comments, #868) must never match any of them.
 const (
 	failedMarker         = cenciMarkerPrefix + "dispatch-failed -->"
 	planInvalidMarker    = cenciMarkerPrefix + "plan-invalid -->"
@@ -78,7 +83,8 @@ const planHealMarker = cenciMarkerPrefix + "plan-heal -->"
 
 // oomRetryMarker (#1291) is stamped on every OOM retry comment. It is distinct
 // from attemptMarker, so countAttempts never charges an OOM death against
-// RetryBudget; countAttempts tallies it separately for OOMRetryBudget.
+// RetryBudget; countAttempts tallies it separately for OOMRetryBudget, under
+// the same author and blockquote filter as attemptMarker (#868).
 const oomRetryMarker = cenciMarkerPrefix + "dispatch-oom-retry -->"
 
 // RecoveryKind is the class of leak a Recovery addresses.
@@ -136,9 +142,10 @@ type ReconcileInputs struct {
 	Observations map[string]time.Time // ticketKey → first-seen-failing
 	Attempts     map[string]int       // ticketKey → prior attempt-comment count
 	// AttemptsUnknown holds ticket keys whose durable attempt count could not be
-	// read this pass (a gh error). Reconcile refuses to pick retry-vs-fail on an
-	// assumed-zero count for these — acting blind would exceed the retry budget —
-	// so it preserves the grace clock and defers the decision to a later pass.
+	// read this pass (a gh error, or an unresolved active gh login, #868).
+	// Reconcile refuses to pick retry-vs-fail on an assumed-zero count for these
+	// — acting blind would exceed the retry budget — so it preserves the grace
+	// clock and defers the decision to a later pass.
 	AttemptsUnknown map[string]bool
 	Config          Config
 
@@ -1099,7 +1106,9 @@ func retryComment(attempt int, window, status string) string {
 // It deliberately embeds the SAME attemptMarker retryComment uses, so
 // countAttempts' shared durable tally is not doubled by a distinct marker
 // (Q2's bounded-restore requirement) -- its text is otherwise content-
-// distinct from retryComment (#446).
+// distinct from retryComment (#446). The tally counts it only when the active
+// gh login posted it and the marker sits outside `>` lines (#868), so forged
+// or quoted copies never spend this shared budget.
 func resumeInterruptedComment(attempt int, window, status string) string {
 	return fmt.Sprintf("%s\n↩️ cenci dispatch attempt %d: the resumed session's window `%s` is gone (last status %s) "+
 		"before it could finish. Restoring `%s` so the escalation can be re-triggered.", attemptMarker, attempt, window, status, labelInputNeeded)

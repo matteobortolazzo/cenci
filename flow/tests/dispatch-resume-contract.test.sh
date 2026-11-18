@@ -466,5 +466,172 @@ else
   fi
 fi
 
+# =====================================================================
+# #868: the pre-Phase-1 window. `--transition working` can return errors[]
+# after its `+Working -Input Needed` edit already landed, and any stop
+# between that call and `## Resume From Draft` step 1 strands the ticket at
+# bare `Working`. SKILL.md's `## Ticket Ownership` restores it on a resume
+# run (restating both commands next to `resumeFromDraft`), phase-1-plan.md's
+# Abort contract names that call as its start, and a note after the
+# Hard-Stop Inventory table records the window as outside the table.
+# Each check function is pure: it prints one problem per line and never
+# calls fail(), so the non-vacuity controls below can run it on mutated
+# in-memory copies and require a non-empty result.
+# =====================================================================
+
+AWAIT_INPUT_CMD='cenci pipeline await-input <id>'
+INPUT_NEEDED_CMD='cenci pipeline label <id> --transition input-needed'
+NON_RESUME_SENTENCE='if it returns non-empty `errors[]` (foreign/multiple assignee, wrong pipeline stage), surface them and stop before proceeding to triage or the pipeline.'
+ABORT_START_PHRASE='starts at Ticket Ownership'"'"'s `cenci pipeline label <id> --transition working` call, not at the start of this section'
+ABORT_POINTER_PHRASE='`SKILL.md`'"'"'s `## Ticket Ownership`'
+
+# extract_h2_section <content> <heading> -- fence-aware awk extraction of the
+# "## <heading>" section, bounded to the next real (unfenced) "## " heading.
+# Used for SKILL.md's "Ticket Ownership" and phase-1-plan.md's "Hard-Stop
+# Inventory". Pure, no fail() side effect.
+extract_h2_section() {
+  H="## $2" awk '
+    $0 == ENVIRON["H"] && !on { on=1; print; next }
+    /^```/ { infence = !infence; if (on) print; next }
+    on && !infence && /^## / { exit }
+    on { print }
+  ' <<<"$1"
+}
+
+# extract_abort_contract_paragraph <content> -- the `**Abort contract**`
+# paragraph (a single blank-line-bounded block) from the given content. Pure.
+extract_abort_contract_paragraph() {
+  awk '
+    /^\*\*Abort contract\*\*/ { on=1; print; next }
+    on && /^$/ { exit }
+    on { print }
+  ' <<<"$1"
+}
+
+# count_paragraphs_with_all <content> <needle>... -- number of blank-line
+# separated paragraphs containing every needle. Pure.
+count_paragraphs_with_all() {
+  local content="$1"; shift
+  local n1="$1" n2="$2" n3="$3"
+  N1="${n1}" N2="${n2}" N3="${n3}" awk -v RS='' '
+    index($0, ENVIRON["N1"]) && index($0, ENVIRON["N2"]) && index($0, ENVIRON["N3"]) { n++ }
+    END { print n + 0 }
+  ' <<<"${content}"
+}
+
+# check_ticket_ownership_restore <ticket-ownership-section> -- prints one
+# problem per line; empty output means the restore contract is intact.
+check_ticket_ownership_restore() {
+  local section="$1" needle count
+  if [[ -z "${section}" ]]; then
+    echo "section is empty"
+    return 0
+  fi
+  for needle in \
+    'resumeFromDraft' \
+    'gh issue view <id> --json labels' \
+    'Restore Awaiting-Input State' \
+    'RecoveryResumeInterrupted' \
+    '#828' \
+    "${NON_RESUME_SENTENCE}"; do
+    [[ "${section}" == *"${needle}"* ]] || echo "missing: [${needle}]"
+  done
+  for needle in "${AWAIT_INPUT_CMD}" "${INPUT_NEEDED_CMD}"; do
+    count="$(grep -oF -- "${needle}" <<<"${section}" | wc -l)"
+    if [[ "${count}" -lt 2 ]]; then
+      echo "command [${needle}] restated ${count} time(s), want >= 2 (errors[] branch and pre-step-1 window rule)"
+    fi
+  done
+  count="$(count_paragraphs_with_all "${section}" 'resumeFromDraft' "${AWAIT_INPUT_CMD}" "${INPUT_NEEDED_CMD}")"
+  if [[ "${count}" -lt 2 ]]; then
+    echo "both restore commands sit next to resumeFromDraft in ${count} paragraph(s), want >= 2"
+  fi
+}
+
+# check_abort_start <abort-contract-paragraph> -- prints one problem per line.
+check_abort_start() {
+  local para="$1" needle
+  if [[ -z "${para}" ]]; then
+    echo "Abort contract paragraph is empty"
+    return 0
+  fi
+  for needle in "${ABORT_START_PHRASE}" "${ABORT_POINTER_PHRASE}" "${ABORT_RESTORE_PHRASE}"; do
+    [[ "${para}" == *"${needle}"* ]] || echo "Abort contract missing: [${needle}]"
+  done
+}
+
+# check_inventory_note <hardstop-inventory-section> -- the note about the
+# pre-Phase-1 window must sit after both the table's last row and the
+# existing step-7 note, and must name no HS-<id>. Prints one problem per line.
+check_inventory_note() {
+  local section="$1" last_row step7 note_para note_line
+  if [[ -z "${section}" ]]; then
+    echo "inventory section is empty"
+    return 0
+  fi
+  last_row="$(grep -n '^| HS-' <<<"${section}" | tail -n1 | cut -d: -f1)"
+  step7="$(first_line_of "${section}" 'step 7'"'"'s post-finalize failures')"
+  note_line="$(first_line_of "${section}" 'handled in '"${ABORT_POINTER_PHRASE}")"
+  if [[ -z "${last_row}" ]]; then
+    echo "no inventory table rows found"
+  fi
+  if [[ -z "${step7}" ]]; then
+    echo "existing step-7 note not found"
+  fi
+  if [[ -z "${note_line}" ]]; then
+    echo "pre-Phase-1 window note not found (expected: handled in ${ABORT_POINTER_PHRASE})"
+    return 0
+  fi
+  [[ -z "${last_row}" || "${note_line}" -gt "${last_row}" ]] || echo "note (line ${note_line}) must sit after the table's last row (line ${last_row})"
+  [[ -z "${step7}" || "${note_line}" -gt "${step7}" ]] || echo "note (line ${note_line}) must sit after the step-7 note (line ${step7})"
+  note_para="$(awk -v L="${note_line}" 'NR==L' <<<"${section}")"
+  [[ "${note_para}" == *'outside this table'* ]] || echo "note must say the window is outside this table"
+  [[ "${note_para}" != *'HS-'* ]] || echo "note must not name any HS-<id> (resume-abort-contract.test.sh pins each ID to exactly one call site)"
+}
+
+TICKET_OWNERSHIP_SECTION="$(extract_h2_section "${IMPLEMENT_SKILL_CONTENT}" 'Ticket Ownership')"
+ABORT_PARAGRAPH="$(extract_abort_contract_paragraph "${RESUME_SECTION}")"
+INVENTORY_SECTION="$(extract_h2_section "${PHASE1_CONTENT}" 'Hard-Stop Inventory')"
+
+report_problems() {
+  # $1=label, $2=newline-separated problems (empty means none)
+  local label="$1" problems="$2" line
+  [[ -z "${problems}" ]] && return 0
+  while IFS= read -r line; do
+    fail "${label}: ${line}"
+  done <<<"${problems}"
+}
+
+report_problems "SKILL.md (## Ticket Ownership)" "$(check_ticket_ownership_restore "${TICKET_OWNERSHIP_SECTION}")"
+report_problems "phase-1-plan.md (Abort contract)" "$(check_abort_start "${ABORT_PARAGRAPH}")"
+report_problems "phase-1-plan.md (## Hard-Stop Inventory note)" "$(check_inventory_note "${INVENTORY_SECTION}")"
+
+# --- Non-vacuity controls: the same checks on mutated in-memory copies
+#     must FAIL. A control that passes means the check is vacuous. -----------
+require_problems() {
+  # $1=control label, $2=problems output of the check on the mutated copy
+  [[ -n "$2" ]] || fail "non-vacuity control '$1': check passed on a mutated copy (the check is vacuous)"
+}
+
+require_problems "Ticket Ownership without the await-input command" \
+  "$(check_ticket_ownership_restore "${TICKET_OWNERSHIP_SECTION//"${AWAIT_INPUT_CMD}"/}")"
+require_problems "Ticket Ownership without the --transition input-needed command" \
+  "$(check_ticket_ownership_restore "${TICKET_OWNERSHIP_SECTION//"${INPUT_NEEDED_CMD}"/}")"
+require_problems "Ticket Ownership without resumeFromDraft" \
+  "$(check_ticket_ownership_restore "${TICKET_OWNERSHIP_SECTION//resumeFromDraft/resumeX}")"
+LABELS_READ_CMD='gh issue view <id> --json labels'
+INVENTORY_NOTE_ANCHOR='handled in '"${ABORT_POINTER_PHRASE}"
+INVENTORY_NOTE_SCOPE='outside this table'
+require_problems "Ticket Ownership without the labels read" \
+  "$(check_ticket_ownership_restore "${TICKET_OWNERSHIP_SECTION//"${LABELS_READ_CMD}"/}")"
+require_problems "Ticket Ownership without the non-resume sentence" \
+  "$(check_ticket_ownership_restore "${TICKET_OWNERSHIP_SECTION//"${NON_RESUME_SENTENCE}"/}")"
+require_problems "Abort contract without the Ticket Ownership start phrase" \
+  "$(check_abort_start "${ABORT_PARAGRAPH//"${ABORT_START_PHRASE}"/}")"
+require_problems "Hard-Stop Inventory without the pre-Phase-1 note" \
+  "$(check_inventory_note "${INVENTORY_SECTION//"${INVENTORY_NOTE_ANCHOR}"/}")"
+require_problems "Hard-Stop Inventory note naming an HS id" \
+  "$(check_inventory_note "${INVENTORY_SECTION//"${INVENTORY_NOTE_SCOPE}"/${INVENTORY_NOTE_SCOPE} HS-R1}")"
+
 echo "dispatch-resume-contract.test.sh: failures=${failures}"
 [[ "${failures}" -eq 0 ]]
