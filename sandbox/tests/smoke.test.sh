@@ -297,6 +297,7 @@ fi
 # image must carry the language-server binaries — outside /home/dev, which the
 # home volume replaces at runtime. Runs as the default non-root dev user.
 echo "case: monolith carries the lsp-* language servers under /usr/local"
+# shellcheck disable=SC2016  # $(...) and $b/$p must expand in the container bash, not here
 if "${RUNTIME}" run --rm --entrypoint /bin/bash cenci-sandbox:latest -c \
     'set -e
      for b in typescript-language-server pyright-langserver gopls csharp-ls; do
@@ -309,6 +310,7 @@ else
 fi
 
 echo "case: this repo's per-repo image carries its lspServers (pyright, gopls)"
+# shellcheck disable=SC2016  # $(command -v ...) must expand in the container bash, not here
 if "${RUNTIME}" run --rm --entrypoint /bin/bash cenci-sandbox-smoke-repo:latest -c \
     'pyright --version && gopls version \
         && test "$(command -v pyright-langserver)" = /usr/local/bin/pyright-langserver \
