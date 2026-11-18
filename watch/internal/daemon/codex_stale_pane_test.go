@@ -85,18 +85,23 @@ func TestDaemon_StalePaneFallbackIsNarrow(t *testing.T) {
 	}
 }
 
-// The %136 cases carry a trusted socket and the hook's server pid (#1529): the
-// once-rejected pair re-attaches only when the live server pid matches it.
+// The %136 cases carry a trusted socket, the hook's server pid (#1529) and its
+// process-ancestry proof (#1530): the once-rejected pair re-attaches only when
+// the live server pid matches it and the pane's pane_pid is in the hook's
+// ancestry.
 func TestDaemon_CodexStalePaneSurvivesIgnoredToolCompletion(t *testing.T) {
+	const freshPanePID = "8136"
 	for _, tc := range []struct {
 		name, freshPane string
 		socket          bool
 		livePID         string
+		noProof         bool
 		wantAttach      bool
 	}{
 		{name: "%171", freshPane: "%171", wantAttach: true},
 		{name: "%136", freshPane: "%136", socket: true, livePID: "4242", wantAttach: true},
 		{name: "%136 under another server pid", freshPane: "%136", socket: true, livePID: "7777"},
+		{name: "%136 without an ancestry proof", freshPane: "%136", socket: true, livePID: "4242", noProof: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			mc := &tmuxtest.MockClient{}
@@ -105,6 +110,9 @@ func TestDaemon_CodexStalePaneSurvivesIgnoredToolCompletion(t *testing.T) {
 			if tc.socket {
 				event.TmuxSocket = filepath.Join(trustedSocketDir(t, d), "default")
 				event.TmuxServerPID = "4242"
+				if !tc.noProof {
+					event.AncestryPIDs, event.AncestrySingleClient = []string{"9001", freshPanePID, "1"}, true
+				}
 				mc.ServerPIDBySocket = map[string]string{event.TmuxSocket: tc.livePID}
 			}
 			d.handleEvent(event)
@@ -119,7 +127,7 @@ func TestDaemon_CodexStalePaneSurvivesIgnoredToolCompletion(t *testing.T) {
 			}
 			// Applied events recheck even a previously rejected pair, allowing
 			// attachment after a server restart reuses the pane ID.
-			fresh := []tmux.PaneInfo{{SessionName: "main", WindowIndex: "1", PaneID: tc.freshPane, PaneCurrentCmd: "codex"}}
+			fresh := []tmux.PaneInfo{{SessionName: "main", WindowIndex: "1", PaneID: tc.freshPane, PaneCurrentCmd: "codex", PanePID: freshPanePID}}
 			if tc.socket {
 				mc.PanesBySocket = map[string][]tmux.PaneInfo{event.TmuxSocket: fresh}
 			} else {
@@ -131,7 +139,7 @@ func TestDaemon_CodexStalePaneSurvivesIgnoredToolCompletion(t *testing.T) {
 			snap = d.buildSnapshot()
 			if !tc.wantAttach {
 				if len(snap.Windows) != 1 || snap.Windows[0].PaneID != "" || len(mc.WindowOpts) != 0 {
-					t.Fatalf("a pane under another server pid attached: %+v, window writes %+v", snap, mc.WindowOpts)
+					t.Fatalf("a pane without a full proof attached: %+v, window writes %+v", snap, mc.WindowOpts)
 				}
 				return
 			}

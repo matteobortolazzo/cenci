@@ -153,6 +153,9 @@ func (d *Daemon) applyBind(req ipc.BindRequest) ipc.BindResponse {
 	sess.Binding = &frontend.PaneBinding{Socket: socket, Pane: req.TmuxPane, ServerPID: req.TmuxServerPID}
 	sess.TmuxPane, sess.TmuxSocket = req.TmuxPane, socket
 	sess.TmuxServerPID, sess.RequireServerPID = req.TmuxServerPID, true
+	// A binding outranks any process-ancestry proof (#1530): the bound pane is
+	// the caller's own, and a proof's pane_pid check would never match it.
+	sess.AncestryPIDs, sess.RequireAncestry = nil, false
 	sess.MissingTmuxPane, sess.MissingTmuxSocket = "", ""
 	sess.Unproven = false
 	obs := d.frontend.OnEvent(sess, ipc.HookEvent{SessionID: sess.SessionID, Agent: sess.Agent})

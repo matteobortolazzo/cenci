@@ -32,7 +32,13 @@ type HookEvent struct {
 	ToModel           string `json:"to_model,omitempty"`
 	ModelSwitchSource string `json:"model_switch_source,omitempty"` // "auto" marks Claude Code's own automatic switch (the flag fallback)
 	AgentType         string `json:"agent_type,omitempty"`          // subagent type, only with AgentID on PostModelSwitch
-	Timestamp         string `json:"timestamp"`
+	// AncestryPIDs is the hook's process chain, nearest first, as decimal pids
+	// (#1530). AncestrySingleClient is true only when the nearest Codex ancestor
+	// is not the shared app-server. Only pids and this one boolean cross IPC: no
+	// command line ever does. The daemon validates both at ingest.
+	AncestryPIDs         []string `json:"ancestry_pids,omitempty"`
+	AncestrySingleClient bool     `json:"ancestry_single_client,omitempty"`
+	Timestamp            string   `json:"timestamp"`
 }
 
 // pendingCloseKind is the "kind" discriminator value for a PendingClose

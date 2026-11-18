@@ -9,8 +9,8 @@ How the daemon decides which tmux window belongs to a Codex session, and how a u
 | State | Meaning |
 |---|---|
 | `bound` | A binding from `cenci bind` and a tracked window. Hook panes no longer move it. |
-| `proven` | A tracked window from a legacy attachment (an event with no tmux socket) or from a hook pane whose server pid matched the live server. |
-| `unproven` | A pane-carrying Codex event was refused: a missing pane (#1500), an empty or malformed server pid (an older notify binary sends none), or a pid that does not match the live server. The session stays listed, paneless. |
+| `proven` | A tracked window from a legacy attachment (an event with no tmux socket) or from a hook pane whose server pid matched the live server and whose process ancestry proved a single-client Codex in that pane (see "The process-ancestry rule"). |
+| `unproven` | A pane-carrying Codex event was refused: a missing pane (#1500), an empty or malformed server pid (an older notify binary sends none), a pid that does not match the live server, or no process-ancestry proof (#1530). The session stays listed, paneless. |
 
 A Codex session that never reported a pane has no association and no hint. Claude sessions never carry an association.
 
@@ -30,9 +30,29 @@ A pane is attached only when the live tmux server is the one the event came from
 - **Exempt**: events with no socket at all (sandboxed sessions send `TMUX_PANE` without `$TMUX` and keep today's attach path) and events with no session id. Claude events are untouched.
 - **Untrusted socket on an event**: it falls back to `""` (the default server) as before, and its pid is then compared against the default server's, so an equal pane id on another server never styles a window. A rejected bind socket never falls back.
 - **Ingest**: `tmux_server_pid` must match `^[1-9][0-9]{0,9}$`; anything else is treated as absent, with a verbose log line.
-- **Mismatch**: the session goes paneless without any tmux write, the refused (pane, socket) pair is remembered (#1500) and any binding is voided. A #1500 re-attach of that pair succeeds only when the pid matches.
+- **Mismatch**: the session goes paneless without any tmux write, the refused (pane, socket) pair is remembered (#1500) and any binding is voided. A #1500 re-attach of that pair succeeds only when the pid matches and the event carries the ancestry proof below.
 - **SessionEnd**: it never reaches the per-event check, so the daemon proves the pid before teardown. On a mismatch the window is forgotten without a restore or rename, a pending-close registered on that pane id is dropped without a kill, and the session is still deleted. A failed listing changes nothing beyond today's teardown. The clear/resume handoff follows the same rule.
 - **No adoption of a bound pane**: a Codex hook pane already bound to another session is not adopted, so a second session never steals a bound window from its hook events.
+
+## The process-ancestry rule
+
+The server pid proves the pane is on the live server, not that the session runs in it: the shared app-server can keep a pane that is still alive. A hook pane is therefore attached as `proven` only when all three hold (#1530):
+
+1. The hook's process ancestry includes the hook-supplied pane's `pane_pid`.
+2. The event's server pid matches the live server (the server-pid rule above).
+3. The nearest Codex ancestor of the hook is not the shared app-server.
+
+When the ancestry holds but the nearest Codex ancestor is the shared app-server, or the proof is missing, the session stays `unproven` even while the supplied pane is alive.
+
+- **Applies to** the same events as the server-pid rule: Codex events with a session id whose raw `tmux_socket` was non-empty before sanitizing. **Exempt**: events with no socket (sandboxed sessions, which have no `$TMUX` and see container pids that could never match a host `pane_pid`), pane-only events (no session id), and Claude events. `cenci notify` reads the ancestry only for `-agent codex` main-agent events (empty `agent_id`) that carry both `TMUX_PANE` and a `$TMUX` socket, after the `watch.excludeCwd` check.
+- **Read bound**: one `ps -A -o pid= -o ppid= -o args=` call from `internal/procancestry`, under a 1s context plus a 500ms `WaitDelay`, so it fits the 3s `Interrupt`/`SessionEnd` hook timeouts. Stdout is capped (overflow is an error), stderr is discarded and the walk is capped at 32 entries (`procancestry.MaxDepth`); a repeated pid is a cycle error. Codex is identified as the first process above `cenci notify` whose argv[0] basename is exactly `codex`.
+- **Wire keys**: `ancestry_pids` (string array, omitted when empty) and `ancestry_single_client` (bool, omitted when false). Only pids and one boolean cross IPC, never command lines. The daemon checks every pid against the server-pid pattern and rejects more than 32 entries at ingest, treating both keys as absent with a verbose log line that does not echo the values.
+- **Fail closed**: an absent key, a malformed or too-deep chain, a failed or timed-out read or an older notify binary all mean unproven. `cenci notify` stays silent on a failed read, still delivers the event and exits 0, and writes no hook-health record. An event with no proof never detaches a session that is already `proven`: a paneless session becomes `unproven`, and an existing proven association is kept.
+- **No recorded marker means always unproven**: the shared app-server is told apart from a client by a marker in the nearest Codex ancestor's argv. The production marker table is empty, because the native record's "Marker identifying the shared app-server" row is `not run`, and a guessed marker that misses the shared server would bring back the cross-association (P8). With an empty table the notify side never reports a single client, so every host Codex hook pane in tmux is unproven and `cenci bind` is the only way to attach it. The upstream gap: Codex hook input carries no client identity. Filling the marker row is a one-entry change to the table plus its tests.
+- **Mismatch on a tracked window**: when `RequireAncestry` is set and the live listing shows a `pane_pid` that is empty or not in the stored chain, the tracked window is forgotten without a restore or rename and without any tmux write, as on a server-pid mismatch. This happens only for anomalous or forged events (a single-client claim whose chain does not contain the pane). A session that does not own the pane (a paneless adopter with a failed proof) fires no pending-close kill, which `TestDaemon_CodexSessionEndWithFailedProofTouchesNothing` covers. For the owning tracked session the daemon's SessionEnd `CheckPane` pre-check covers only the server pid, so a tracked window whose `pane_pid` left the stored chain is forgotten without a write but its pending-close kill still runs. This is accepted because a live pane's `pane_pid` does not change within a server lifetime (the pane-id stability assumption).
+- **`agent_id` never rebinds**: for every Codex session with a session id, with or without a socket, an event with `agent_id` set never adopts or moves a pane, never sets `unproven` and never ends the parent. Claude is untouched.
+- **A binding outranks a proof**: `cenci bind` clears the stored ancestry, a bound session is never moved by a hook pane, and a pane bound to another session is never adopted from an event. `cenci bind` itself carries no ancestry proof.
+- **Nothing is inferred**: ownership is never derived from cwd, title, active window or a single matching pane.
 
 ## `cenci bind <session-id>`
 
@@ -79,12 +99,13 @@ Codex sessions only. The identity is the caller's own `$TMUX_PANE` and `$TMUX` (
 
 ## Risks and trust
 
-- **Accepted risk: forged binds.** A container can send a bind that names any trusted host pane. The impact is limited to window styling and detaching a Codex session to paneless, the same reach forged hook events already have. Two side effects stay inside that reach: a pending-close registered on the bound pane fires on the binder's SessionEnd, and a Codex session detached by a bind becomes `unproven`, so its `session_id` appears in the snapshot on the broadcast socket that sandboxes can read. Keeping session ids off that socket altogether (a host-only query) is not part of this change. It is the same class as the accepted arm-path risk in `watch/docs/tmux.md`. Proving that the caller belongs to the pane is the process-ancestry work in #1530. The bind rate limiter is shared by every caller (the same design as the arm and control limiters), so a container can drain it and delay a host user's bind until it refills.
+- **Accepted risk: forged binds.** A container can send a bind that names any trusted host pane. The impact is limited to window styling and detaching a Codex session to paneless, the same reach forged hook events already have. Two side effects stay inside that reach: a pending-close registered on the bound pane fires on the binder's SessionEnd, and a Codex session detached by a bind becomes `unproven`, so its `session_id` appears in the snapshot on the broadcast socket that sandboxes can read. Keeping session ids off that socket altogether (a host-only query) is not part of this change. It is the same class as the accepted arm-path risk in `watch/docs/tmux.md`. `cenci bind` carries no process-ancestry proof of its own, so a forged bind stays an accepted risk (#1530 adds ancestry to hook events only, and a binding always outranks a proof). The bind rate limiter is shared by every caller (the same design as the arm and control limiters), so a container can drain it and delay a host user's bind until it refills.
+- **Accepted risk: forged ancestry.** A process on the event socket, a container included, can send any `ancestry_pids` and `ancestry_single_client: true` with a forged event. The reach is the same as forged hook events and forged binds: window styling and detaching a session to paneless. It is the same class as the accepted arm-path risk in `watch/docs/tmux.md`.
 - **Pane id reuse after a tmux restart** on a tracked window is caught only at the next Codex event, its SessionEnd included; the sweep does not check the pid.
 - **Pending-close on a window released by a bind**: an entry registered on the old window is not moved to the new one. Sweep pruning still reclaims it.
 - No shared app-server process is killed or restarted, and hook trust is never bypassed or changed.
 
-## Native host record (P1, P22)
+## Native host record (P1, P22, P23)
 
 These rows need a host with Codex and tmux; the implementation sandbox has neither. They are filled by a person running the steps below. Home paths, user and host names and session IDs are replaced with placeholders (`<home>`, `<user>`, `<host>`, `<session-id>`) before anything is pasted here. Nothing in this section is a claimed result until the row stops reading `not run`.
 
@@ -92,6 +113,7 @@ These rows need a host with Codex and tmux; the implementation sandbox has neith
 
 - P1 native reproduction: not run: native host session required (no Codex or tmux in the implementation sandbox)
 - P22 native `cenci bind` verification: not run: native host session required (no Codex or tmux in the implementation sandbox)
+- P23 native automatic association and two-client verification: not run: native host session required (needs a host with Codex and tmux)
 
 ### Versions
 
@@ -130,7 +152,9 @@ The shared app-server is started from pane A, A is closed, and a thread runs fro
 
 ### Unverified assumption
 
-tmux's `#{pid}` is assumed to equal the second field of `$TMUX`. `TestListPanesReportsTheServerPID` checks it against a scratch server but skipped in the implementation sandbox because tmux is absent, so it is confirmed only once the native record above is filled. The same record confirms the assumption that tmux pane ids are not reused within one server lifetime.
+tmux's `#{pid}` is assumed to equal the second field of `$TMUX`. `TestListPanesReportsTheServerPID` checks it against a scratch server but skipped in the implementation sandbox because tmux is absent, so it is confirmed only once the native record above is filled. The same record confirms the assumption that tmux pane ids are not reused within one server lifetime. That assumption also covers the ancestry check: a live pane's `pane_pid` stays the same, so checking it on every event is enough.
+
+The ancestry rule adds two more assumptions that the native record confirms. Codex is identified by an argv[0] basename of exactly `codex`, the native binary the npm wrapper launches; this has not been checked on a host. BSD/macOS `ps` may truncate the `args` column, which only matters once a shared-app-server marker exists, because the marker table is empty today.
 
 ## Deterministic fixture results
 
@@ -147,3 +171,22 @@ These cover the behavior on mock tmux sockets and run in `make test`; they are s
 | Bind round trip through the loop | `TestHandleBindRoundTripsThroughTheLoop` |
 | CLI contract and exit codes (P3, P11) | `TestBindCmd_*` |
 | Server pid from a real tmux server | `TestListPanesReportsTheServerPID` (skips without tmux) |
+| Ancestry attaches the hook pane; the shared app-server, a missing `pane_pid` or a server pid mismatch stay unproven (P7) | `TestDaemon_CodexAncestryProofAttachesHookPane`, `TestDaemon_CodexSharedAppServerAncestryStaysUnprovenWhilePaneAlive`, `TestDaemon_CodexAncestryWithoutPanePIDStaysUnproven`, `TestDaemon_CodexAncestryNeedsServerPIDMatch` |
+| SessionEnd and handoff with a failed proof touch nothing (P7) | `TestDaemon_CodexSessionEndWithFailedProofTouchesNothing` |
+| Two clients on one app-server bind their own panes (P8) | `TestDaemon_CodexTwoClientsOnOneAppServerBindTheirOwnPanes` |
+| Bound and proven lifecycles touch only their own window (P9) | `TestDaemon_CodexBoundAndProvenLifecycleTouchesOnlyOwnWindow` |
+| `agent_id` events never rebind or end the parent (P9) | `TestDaemon_CodexSubagentEventNeverRebindsOrEndsParent` |
+| The `agent_id` guard leaves Claude untouched: a Claude event with `agent_id` naming another live pane moves the session as the same event without `agent_id` does, never unproven; the same shape for Codex is refused | `TestDaemon_ClaudeAgentIDEventKeepsTodaysPaneBehavior` |
+| No ancestry is unproven; a proven session is kept (P20) | `TestDaemon_CodexEventWithoutAncestryIsUnproven` |
+| Ancestry deeper than the cap is unproven (P21) | `TestDaemon_CodexAncestryDeeperThanCapIsUnproven` |
+| A tracked window is forgotten unrestored when the live `pane_pid` leaves the stored chain (P7) | `TestDaemon_CodexTrackedWindowForgottenWithoutRestoreOnAncestryMismatch` |
+| Ownership never inferred from a pane title, window name or a single pane (P28); the cwd and the active window never reach the association path (`paneAdoptable`, `adoptEventPane`, the frontend's `OnEvent` and identity check): `ipc.HookEvent` carries no cwd, and `tmux.PaneInfo`, the listing that path reads, carries neither a current path nor an active flag, so no test can feed them to it (a pane's cwd is read only by the unrelated worktree-cleanup and window-restyle code) | `TestDaemon_CodexOwnershipNeverInferredFromTitleWindowNameOrSinglePane` |
+| A binding outranks an ancestry proof | `TestDaemon_CodexBindingOutranksAncestryProof` |
+| Malformed ancestry keys are treated as absent | `TestRawHookEventWithMalformedAncestryIsTreatedAsAbsent`, `TestEventReceiver_DecodesAncestryKeys` |
+| Notify sends pids only, never command lines (P30) | `TestNotifyCodexSendsAncestryPIDsOnlyAndNoCommandLines` |
+| A failed or timed-out read still delivers the event (P20) | `TestNotifyCodexAncestryReadFailureStillDelivers` |
+| A failed read is silent and writes no hook-health failure record, only the delivery's own `last-ok` (P20) | `TestNotifyCodexAncestryReadFailureIsSilentAndWritesNoHookHealthRecord` |
+| Ancestry deeper than the cap sends nothing (P21) | `TestNotifyCodexAncestryDeeperThanCapSendsNone` |
+| Notify reads the ancestry only for Codex main-agent events in tmux | `TestNotifyReadsAncestryOnlyForCodexMainAgentEventsInTmux` |
+| Bounded `ps` parser, walk, depth cap, cycle, nearest-Codex classifier, empty marker table | `TestReadWith*`, `TestProductionMarkerTableIsEmptyAndNeverReportsASingleClient`, `TestReadRunsTheRealPS` in `internal/procancestry` |
+| `pane_pid` column of the pane listing | `TestParsePanesReadsPanePID`, `TestExecClientListPanesAsksForPanePID` |

@@ -7,6 +7,7 @@ package tmux
 import (
 	"fmt"
 	"log"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -99,8 +100,8 @@ func (f *Frontend) OnEvent(sess *frontend.SessionState, event ipc.HookEvent) fro
 		_, tracked := f.sessionKeys[sess.Key()]
 		return frontend.Observations{UntrackedPaneMissing: !tracked}
 	}
-	if f.forgetOnServerPIDMismatch(sess, paneInfo) {
-		return frontend.Observations{ServerPIDMismatch: true}
+	if obs, mismatch := f.forgetOnIdentityMismatch(sess, paneInfo); mismatch {
+		return obs
 	}
 
 	wk := windowKey{pk.socket, paneInfo.WindowTarget()}
@@ -164,20 +165,33 @@ func (f *Frontend) OnEvent(sess *frontend.SessionState, event ipc.HookEvent) fro
 	return obs
 }
 
-// forgetOnServerPIDMismatch reports whether the session's association was
-// claimed under a server pid (#1529) that paneInfo, the listed pane, does not
-// carry. Such a pane is a different pane (a reused id after a server restart, or
-// another server), so no tmux write may reach it: any window still tracked for
-// the session is forgotten unrestored, because its pane id may now belong to
-// someone else's window. OnEvent, OnSessionEnd and OnSessionHandoff all call it
-// right after locating the pane in their one listing.
-func (f *Frontend) forgetOnServerPIDMismatch(sess *frontend.SessionState, paneInfo *tmuxc.PaneInfo) bool {
-	if !sess.RequireServerPID || (paneInfo.ServerPID != "" && paneInfo.ServerPID == sess.TmuxServerPID) {
-		return false
+// forgetOnIdentityMismatch reports whether paneInfo, the listed pane, is not the
+// pane the session's association was claimed for, and says which check failed.
+// The server pid (#1529) is checked first: a pane listed under another pid is a
+// different pane (a reused id after a server restart, or another server). Then,
+// when the association rests on a process-ancestry proof (#1530), the pane's live
+// #{pane_pid} must be one of the hook's ancestry pids; a pane without one (a
+// listing without the column) never passes. A mismatch means no tmux write may
+// reach the pane: any window still tracked for the session is forgotten
+// unrestored, because its pane id may now belong to someone else's window.
+// OnEvent, OnSessionEnd and OnSessionHandoff all call it right after locating
+// the pane in their one listing.
+func (f *Frontend) forgetOnIdentityMismatch(sess *frontend.SessionState, paneInfo *tmuxc.PaneInfo) (frontend.Observations, bool) {
+	var obs frontend.Observations
+	reason := ""
+	switch {
+	case sess.RequireServerPID && (paneInfo.ServerPID == "" || paneInfo.ServerPID != sess.TmuxServerPID):
+		obs.ServerPIDMismatch = true
+		reason = "is listed under another tmux server pid"
+	case sess.RequireAncestry && (paneInfo.PanePID == "" || !slices.Contains(sess.AncestryPIDs, paneInfo.PanePID)):
+		obs.AncestryUnproven = true
+		reason = "is not in the hook's process ancestry"
+	default:
+		return obs, false
 	}
 	pk := paneKey{sess.TmuxSocket, sess.TmuxPane}
 	if f.cfg.Verbose {
-		log.Printf("event: pane %s is listed under another tmux server pid; not writing to it for session %q", pk, sess.Key())
+		log.Printf("event: pane %s %s; not writing to it for session %q", pk, reason, sess.Key())
 	}
 	if wk, ok := f.sessionKeys[sess.Key()]; ok {
 		if ws := f.windows[wk]; ws != nil {
@@ -186,7 +200,7 @@ func (f *Frontend) forgetOnServerPIDMismatch(sess *frontend.SessionState, paneIn
 		f.forgetWindow(wk)
 		delete(f.sessionKeys, sess.Key())
 	}
-	return true
+	return obs, true
 }
 
 // CheckPane proves pane is listed on socket's server and that the server's live
@@ -275,8 +289,10 @@ func (f *Frontend) OnSessionEnd(sess *frontend.SessionState) {
 		}
 	}
 
-	if paneInfo != nil && f.forgetOnServerPIDMismatch(sess, paneInfo) {
-		return
+	if paneInfo != nil {
+		if _, mismatch := f.forgetOnIdentityMismatch(sess, paneInfo); mismatch {
+			return
+		}
 	}
 
 	// Determine the window from fresh data or cache.
@@ -347,9 +363,10 @@ func (f *Frontend) OnSessionHandoff(sess *frontend.SessionState) {
 		f.OnSessionEnd(sess)
 		return
 	}
-	// A pane listed under another server pid is not the session's pane, so
-	// there is no successor to keep the window for (#1529).
-	if f.forgetOnServerPIDMismatch(sess, paneInfo) {
+	// A pane listed under another server pid, or outside the proof's process
+	// ancestry, is not the session's pane, so there is no successor to keep the
+	// window for (#1529, #1530).
+	if _, mismatch := f.forgetOnIdentityMismatch(sess, paneInfo); mismatch {
 		return
 	}
 

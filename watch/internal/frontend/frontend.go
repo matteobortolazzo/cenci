@@ -39,6 +39,14 @@ type SessionState struct {
 	// keeps the pre-#1529 path.
 	TmuxServerPID    string
 	RequireServerPID bool
+	// AncestryPIDs is the hook's process chain (pids only, nearest first) that
+	// the association with TmuxPane was claimed under (#1530). RequireAncestry
+	// makes OnEvent, OnSessionEnd and OnSessionHandoff check that the pane's live
+	// #{pane_pid} is in it, next to the server-pid check, before any tmux write.
+	// It is set only for a Codex hook pane that sent a socket; a binding clears
+	// both, because a binding outranks any proof.
+	AncestryPIDs    []string
+	RequireAncestry bool
 	// Binding is the pane `cenci bind` pinned this session to (#1529). While
 	// set it outranks the pane the session's hook events carry. In memory
 	// only: a daemon restart drops it.
@@ -167,6 +175,7 @@ type Frontend interface {
 type Observations struct {
 	UntrackedPaneMissing bool     // successful listing proved the supplied pane absent; no prior window was tracked
 	ServerPIDMismatch    bool     // the pane is listed, but under a server pid other than sess.TmuxServerPID; nothing was written (#1529)
+	AncestryUnproven     bool     // the pane is listed under the right server, but its pane_pid is not in sess.AncestryPIDs; nothing was written (#1530)
 	TaskNameHint         string   // task name resolved from the pane (title-derived; codex path)
 	AgentHint            string   // agent inferred from the pane's running command
 	EvictedKeys          []string // core sessions whose presentation state was discarded (dead panes)

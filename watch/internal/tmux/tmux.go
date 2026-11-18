@@ -27,6 +27,9 @@ type PaneInfo struct {
 	// listing that proves the pane, so it describes the same moment. Empty for a
 	// row from a listing without the column.
 	ServerPID string
+	// PanePID is tmux's #{pane_pid}: the pid of the pane's first process. Empty
+	// for a row from a listing without the column.
+	PanePID string
 }
 
 // target returns the tmux target string for this pane (session:window.pane).
@@ -57,7 +60,7 @@ type Client interface {
 // ExecClient implements Client by shelling out to the tmux binary.
 type ExecClient struct{}
 
-const listFormat = "#{session_name}\t#{window_index}\t#{window_name}\t#{pane_index}\t#{pane_current_command}\t#{pane_title}\t#{pane_id}\t#{pid}"
+const listFormat = "#{session_name}\t#{window_index}\t#{window_name}\t#{pane_index}\t#{pane_current_command}\t#{pane_title}\t#{pane_id}\t#{pid}\t#{pane_pid}"
 
 func (c *ExecClient) ListPanes(socket string) ([]PaneInfo, error) {
 	out, err := tmuxCmd(socket, "list-panes", "-a", "-F", listFormat)
@@ -511,21 +514,25 @@ func tmuxCmd(socket string, args ...string) (string, error) {
 }
 
 // parsePanes parses the tab-separated output of tmux list-panes. A row needs the
-// first seven columns; the eighth (the server pid) is optional, so a row from a
-// listing without it parses with an empty ServerPID.
+// first seven columns; the eighth (the server pid) and the ninth (the pane's
+// first process pid) are optional, so a row from a listing without them parses
+// with an empty ServerPID and PanePID.
 func parsePanes(output string) []PaneInfo {
 	var panes []PaneInfo
 	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
 		if line == "" {
 			continue
 		}
-		fields := strings.SplitN(line, "\t", 8)
+		fields := strings.SplitN(line, "\t", 9)
 		if len(fields) < 7 {
 			continue
 		}
-		serverPID := ""
-		if len(fields) == 8 {
+		serverPID, panePID := "", ""
+		if len(fields) >= 8 {
 			serverPID = fields[7]
+		}
+		if len(fields) == 9 {
+			panePID = fields[8]
 		}
 		panes = append(panes, PaneInfo{
 			SessionName:    fields[0],
@@ -536,6 +543,7 @@ func parsePanes(output string) []PaneInfo {
 			PaneTitle:      fields[5],
 			PaneID:         fields[6],
 			ServerPID:      serverPID,
+			PanePID:        panePID,
 		})
 	}
 	return panes

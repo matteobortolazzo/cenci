@@ -88,6 +88,26 @@ reused after a restart) and an event with no pid (an older `notify` binary) are
 refused the same way: the session is retained without a pane. Events with no tmux
 socket at all (sandboxed sessions) keep the existing attach path.
 
+The server pid does not prove the session runs in that pane, because the shared
+app-server can keep a pane that is still alive. Automatic association therefore
+also needs a process-ancestry proof. For a Codex main-agent event inside tmux,
+`cenci notify` reads the hook's process chain with one bounded `ps` call (1s, and
+the hook still delivers and exits 0 when the read fails) and sends only the pids
+and one single-client flag, never command lines. Watch attaches the pane without
+a bind only when all three hold: the chain includes the hook-supplied pane's
+`pane_pid`, the server pid matches the live server, and the nearest Codex
+ancestor is not the shared app-server. An event whose nearest Codex ancestor is
+the shared app-server stays unproven even while the supplied pane is alive, which
+keeps two simultaneous clients on one app-server from sharing that pane.
+
+Today that proof never succeeds on host tmux. Codex hook input carries no client
+identity, so watch has no recorded marker that tells the shared app-server from a
+client; the marker table ships empty, and every host Codex hook pane stays
+unproven. This is an upstream gap, not a hook trust problem. `cenci bind` is the
+only way to attach a host Codex session until a marker is recorded from a native
+run (see [codex-tmux-association.md](../../docs/codex-tmux-association.md)).
+Sandboxed sessions (no tmux socket) and Claude sessions are not affected.
+
 A session in that state is shown by `cenci status` with a hint line:
 
 ```text
@@ -96,8 +116,10 @@ hint: hooks were delivered but no tmux association is proven; run 'cenci bind <i
 
 Run `cenci bind <session-id>` in the tmux pane that shows the session (Codex
 sessions only). The daemon verifies the pane and server pid, then styles that
-window and keeps using it even when later events still carry the stale pane.
-Bindings live in memory and are dropped on daemon restart. Exit codes, refusal
+window and keeps using it even when later events still carry the stale pane; a
+binding always outranks an ancestry proof, and an event with `agent_id` set
+never moves the parent's pane. Bindings live in memory and are dropped on daemon
+restart, so bind again after a restart. Exit codes, refusal
 reasons and limits are in [codex-tmux-association.md](../../docs/codex-tmux-association.md);
 the CLI is in the [main README](../../README.md#pinning-a-codex-session-to-a-tmux-pane-cenci-bind).
 
