@@ -187,7 +187,7 @@ Other paths reach a plan without human review and are labelled distinctly:
 ticket, and the plan those answers produced was never shown to you),
 and `approval: lean-decided` (the plan carries at least one planner decision, and its plan comment names them).
 `approval: pending-human` is a plan saved for you to review: planning stopped short of
-self-approval (a sensitive path, an unresolved Open Question, or an attended session),
+self-approval (a sensitive path, a destructive-operation signal, an unresolved Open Question, or an attended session),
 and the plan is held until you release it. Its plan comment uses the ordinary banner.
 `approval: human` is still read on old plans but is no longer written by any path.
 Plans written before this key existed carry none — that means unrecorded, not unapproved.
@@ -499,6 +499,11 @@ the fast path:
 - no file in `### Files to Modify`/`### Files to Create` matching the sensitive-path
   set (auth, session, credential, token, `.pem`, `.env`, permission, rbac, crypto,
   payment, migration, schema, … unioned with your `security.sensitivePaths`);
+- no destructive-operation signal (`drop table`, `delete from`, `push --force`,
+  `reset --hard`, `rm -rf`, `irreversible`, `data loss`, … a built-in list) in
+  `### Files to Modify`, `### Files to Create`, `### Implementation Order` or `### Risks`,
+  matched as a case-insensitive substring with no semantic parsing, so even a negated
+  mention holds the plan for you;
 - size estimate is not `L` unless the planner's `### Split Recommendation` is a
   well-formed `None — <rationale>`, and there's no real split recommendation;
 - no `awaiting-input` draft already on disk for the ticket.
