@@ -68,6 +68,67 @@ ENV PATH="/usr/local/go/bin:${PATH}"
 
 USER dev
 
+ARG TYPESCRIPT_LANGUAGE_SERVER_VERSION=6.1.0
+ARG TYPESCRIPT_VERSION=6.0.3
+
+USER root
+
+# ── TypeScript language server (LSP) ────────────────────────────
+# Installed under /usr/local, not NPM_CONFIG_PREFIX (/home/dev/.local): the
+# per-scope home volume replaces /home/dev at runtime. typescript stays on 6.x
+# because 7.x (the native port) no longer ships the tsserver this server
+# drives; a workspace's own node_modules/typescript still takes precedence.
+RUN npm install -g --prefix /usr/local \
+        "typescript-language-server@${TYPESCRIPT_LANGUAGE_SERVER_VERSION}" \
+        "typescript@${TYPESCRIPT_VERSION}" \
+    && npm cache clean --force
+
+USER dev
+
+ARG PYRIGHT_VERSION=1.1.414
+
+USER root
+
+# ── Pyright language server (LSP) ───────────────────────────────
+# npm-distributed, so it needs only the mandatory Node runtime. Installed under
+# /usr/local because the home volume replaces /home/dev at runtime.
+RUN npm install -g --prefix /usr/local "pyright@${PYRIGHT_VERSION}" \
+    && npm cache clean --force
+
+USER dev
+
+ARG GOPLS_VERSION=0.24.0
+
+USER root
+
+# ── gopls (Go LSP) ──────────────────────────────────────────────
+# Requires the go fragment. Built with a throwaway GOPATH/GOCACHE and installed
+# to /usr/local/bin, because the home volume replaces /home/dev/go at runtime.
+RUN GOBIN=/usr/local/bin GOPATH=/tmp/gopls-gopath GOCACHE=/tmp/gopls-cache \
+        go install "golang.org/x/tools/gopls@v${GOPLS_VERSION}" \
+    && rm -rf /tmp/gopls-gopath /tmp/gopls-cache
+
+USER dev
+
+ARG CSHARP_LS_VERSION=0.29.0
+ARG CSHARP_LS_DOTNET_CHANNEL=11.0
+
+USER root
+
+# ── csharp-ls (C# LSP) ──────────────────────────────────────────
+# Requires the dotnet fragment. csharp-ls targets net11, so the matching
+# runtime is installed alongside a lower pinned SDK (a no-op when the SDK
+# already carries it). The tool goes under /usr/local, outside the home volume.
+RUN curl -fsSL https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh \
+    && chmod +x /tmp/dotnet-install.sh \
+    && /tmp/dotnet-install.sh --runtime dotnet --channel "${CSHARP_LS_DOTNET_CHANNEL}" --install-dir /usr/share/dotnet \
+    && rm /tmp/dotnet-install.sh \
+    && dotnet tool install --tool-path /usr/local/lib/csharp-ls --version "${CSHARP_LS_VERSION}" csharp-ls \
+    && ln -s /usr/local/lib/csharp-ls/csharp-ls /usr/local/bin/csharp-ls \
+    && rm -rf /root/.nuget /root/.dotnet
+
+USER dev
+
 USER root
 
 # ── Docker CLI + inner engine (dind, #586) ────────────────────────

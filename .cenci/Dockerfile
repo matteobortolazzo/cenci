@@ -30,4 +30,33 @@ ENV PATH="/usr/local/go/bin:${PATH}"
 
 USER dev
 # cenci:fragment-end go
+
+# cenci:fragment-begin lsp-pyright
+ARG PYRIGHT_VERSION=1.1.414
+
+USER root
+
+# ── Pyright language server (LSP) ───────────────────────────────
+# npm-distributed, so it needs only the mandatory Node runtime. Installed under
+# /usr/local because the home volume replaces /home/dev at runtime.
+RUN npm install -g --prefix /usr/local "pyright@${PYRIGHT_VERSION}" \
+    && npm cache clean --force
+
+USER dev
+# cenci:fragment-end lsp-pyright
+
+# cenci:fragment-begin lsp-gopls
+ARG GOPLS_VERSION=0.24.0
+
+USER root
+
+# ── gopls (Go LSP) ──────────────────────────────────────────────
+# Requires the go fragment. Built with a throwaway GOPATH/GOCACHE and installed
+# to /usr/local/bin, because the home volume replaces /home/dev/go at runtime.
+RUN GOBIN=/usr/local/bin GOPATH=/tmp/gopls-gopath GOCACHE=/tmp/gopls-cache \
+        go install "golang.org/x/tools/gopls@v${GOPLS_VERSION}" \
+    && rm -rf /tmp/gopls-gopath /tmp/gopls-cache
+
+USER dev
+# cenci:fragment-end lsp-gopls
 # cenci:managed-end

@@ -479,6 +479,11 @@ Everything persists in the home volume — only needs to happen once per instanc
 | Python 3 | latest | — |
 | uv | latest | `UV_VERSION` |
 | Docker CLI + engine | latest | — (monolith and `dind`-enabled per-repo images only) |
+| typescript-language-server (+ typescript) | 6.1.0 (6.0.3) | `TYPESCRIPT_LANGUAGE_SERVER_VERSION`, `TYPESCRIPT_VERSION` (monolith and `lspServers.typescript` repos) |
+| pyright | 1.1.414 | `PYRIGHT_VERSION` (monolith and `lspServers.pyright` repos) |
+| gopls | 0.24.0 | `GOPLS_VERSION` (monolith and `lspServers.gopls` Go repos) |
+| csharp-ls | 0.29.0 | `CSHARP_LS_VERSION` (monolith and `lspServers.csharp-ls` .NET repos) |
+| rust-analyzer | follows `RUST_VERSION` | — (`lspServers.rust-analyzer` Rust repos only) |
 
 The baked `PLAYWRIGHT_VERSION` fixes a Chromium *build revision*, and a repo pinning a
 different `@playwright/test` needs a different one. That drift is recoverable rather than
@@ -566,8 +571,8 @@ It builds small isolated test images, verifies dependency reuse after script cha
 and invalidation after a toolchain change, and removes its temporary image tags.
 
 `sandbox/fragments/*.dockerfile` holds the same composable blocks (`dotnet`, `node`,
-`playwright`, `go`, `python`, `rust`, `docker`, `azure`) used for per-project image
-composition. Each monolith-backed fragment and its corresponding block in `Dockerfile`
+`playwright`, `go`, `python`, `rust`, `docker`, `azure`, and the `lsp-*` language
+servers) used for per-project image composition. Each monolith-backed fragment and its corresponding block in `Dockerfile`
 are kept byte-identical by hand; when you change one, change the other the same way.
 
 ### Per-repo images
@@ -729,6 +734,20 @@ Limits are fixed when a container is created and running containers are never re
 ### MCP servers
 
 MCP servers are picked up from project-scoped `.mcp.json` files inside the workspace (e.g. `./.mcp.json` under the project you're working on). The launcher forwards `CONTEXT7_API_KEY` from the host when set, once per agent session (`exec`) at each `cenci open` and never at container creation, so `.mcp.json` entries referencing `${CONTEXT7_API_KEY}` resolve correctly inside the agent session. A container created before this change keeps a stale create-time copy of the key until you run `cenci sandbox stop <name>` and relaunch.
+
+### Language servers
+
+`.lsp.json` (written by `/cenci:configure` from `lspServers`), and Claude Code's own
+`*-lsp` plugins, only name the command to start. The binary has to be in the image. Each
+LSP catalog entry has its own fragment, `fragments/lsp-<server>.dockerfile` (`typescript`,
+`pyright`, `gopls`, `rust-analyzer`, `csharp-ls`), which installs a pinned build under
+`/usr/local`. It cannot go under `/home/dev`, because the home volume replaces that
+directory at runtime. `/cenci:configure` adds a server's fragment to `.cenci/Dockerfile`
+when `lspServers.<server>` is `true` and the runtime the server needs is in the image.
+Node is always in the image; gopls needs Go, rust-analyzer needs Rust, csharp-ls needs
+.NET. The monolith carries `typescript`, `pyright`, `gopls` and `csharp-ls`. If a server
+reports that its program "wasn't found", re-run `/cenci:configure`, merge its PR, and
+run `cenci sandbox build`.
 
 ### Azure CLI
 

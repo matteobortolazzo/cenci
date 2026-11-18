@@ -5,7 +5,8 @@
 #
 # Two fragment classes exist, and this suite distinguishes them:
 #   * monolith-backed — the fragment has a corresponding block in Dockerfile
-#     and must match it byte-for-byte (dotnet, node, playwright, go, docker).
+#     and must match it byte-for-byte (dotnet, node, playwright, go, docker,
+#     and the lsp-typescript, lsp-pyright, lsp-gopls, lsp-csharp-ls servers).
 #   * monolith-less — the fragment is config- or stack-selected only and this
 #     repo's own stack does not use it, so Dockerfile deliberately carries no
 #     such block (see MONOLITH_LESS below). These are asserted to be absent
@@ -35,6 +36,7 @@ MONOLITH_LESS=(
     python.dockerfile
     rust.dockerfile
     azure.dockerfile
+    lsp-rust-analyzer.dockerfile
 )
 
 FAILURES=0

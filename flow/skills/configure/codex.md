@@ -182,7 +182,9 @@ are never asked, so the flag for a carried ID is derived from the existing `sand
 an opt-in; an ID listed in `ask` (for example `sandbox.dind` and `sandbox.azure` on a config that
 predates them) uses the answer collected this run, so a just-answered Yes is written and consumed.
 Generate or refresh the managed `.cenci/Dockerfile` whenever the effective `sandbox.enabled` is
-`true`, carried or just answered.
+`true`, carried or just answered. Select fragments exactly as the Claude procedure does, including
+one `lsp-<server>` fragment for each `lspServers` entry set to `true` whose runtime fragment is also
+selected (see the LSP rule under question 9 in `phases/runtime-ci-sandbox-questions.md`).
 
 Every write stamps `configureOffered`: Codex stamps `configureOffered` with the same sorted, de-duplicated union as the Claude procedure,
 recording only the questions actually put to the user and applied or explicitly declined. The question 13/14/15 overlays and

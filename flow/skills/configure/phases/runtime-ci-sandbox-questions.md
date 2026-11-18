@@ -86,6 +86,7 @@ Read this file on every run, after `phases/mcp-lsp-ui-questions.md` (see `SKILL.
    | `rust` | Rust block |
    | *(none — config-selected)* | Docker block, when `sandbox.dind: true` (question 9b) |
    | *(none — config-selected)* | Azure block, when `sandbox.azure: true` (question 9c) |
+   | *(none — config-selected)* | One `lsp-<server>` block per enabled LSP server, when `lspServers.<server>: true` (question 6) and the server's runtime is present (see the LSP rule below) |
 
    Playwright is scoped to the frontend-framework tokens, not plain `node` — a Node-based
    backend/API project gets the Node block without paying Chromium's image-size cost for a
@@ -114,13 +115,38 @@ Read this file on every run, after `phases/mcp-lsp-ui-questions.md` (see `SKILL.
    answers Yes to Q9c but No to Q9 gets no Azure CLI at all; tell the user Q9 must also be
    Yes for the CLI to reach their sandbox.
 
+   **LSP fragments** (config-selected, not stack-token-selected): `.lsp.json` (step 1b in
+   `phases/guidance-settings.md`) only tells Claude Code which command to start, so the
+   image itself has to carry the binary. Installing under `/home/dev` does not work, because
+   the per-scope home volume replaces that directory at runtime. For every server set to
+   `true` in the effective `lspServers` (the question 6 answer, or the carried
+   `existingConfig.lspServers` on a delta run), include its
+   `sandbox/fragments/lsp-<server>.dockerfile`, which installs a pinned build under
+   `/usr/local`, as long as the runtime fragment that server needs is also selected:
+
+   | `lspServers` key | Fragment | Requires |
+   |---|---|---|
+   | `typescript` | `lsp-typescript` | node (always present) |
+   | `pyright` | `lsp-pyright` | node (always present) |
+   | `gopls` | `lsp-gopls` | go |
+   | `rust-analyzer` | `lsp-rust-analyzer` | rust |
+   | `csharp-ls` | `lsp-csharp-ls` | dotnet |
+
+   If an enabled server's runtime fragment is not selected (for example `gopls: true` in a
+   repo whose stack tokens select no Go block), skip that server's fragment; this is not an
+   error. Tell the user the server stays unavailable in the sandbox until its stack is
+   detected or added. A server set to `false`, or absent from `lspServers`, contributes no
+   fragment. The shared `cenci-sandbox:latest` monolith already carries `lsp-typescript`,
+   `lsp-pyright`, `lsp-gopls` and `lsp-csharp-ls`, so a repo without a `.cenci/Dockerfile`
+   needs no action for those four.
+
    **Monorepo**: take the union of all `projects[].stack.framework` values, deduplicated — e.g. a repo with a Go API project and a React web client project selects both the Go and Node fragments. Node is still emitted only once because the mandatory runtime set and stack-selected set are deduplicated.
 
    A stack token that matches no row above (e.g. `markdown-shell`, `docker-shell`) contributes no additional project fragment. This is not an error — the generated Dockerfile still contains the mandatory Node runtime fragment.
 
-   **.NET version substitution** (the only row with a version-from-token adjustment): `sandbox/fragments/dotnet.dockerfile` ships with `ARG DOTNET_SDK_VERSION=10.0.100` as its own default. When including this fragment, replace that default's version with `<major>.0.100`, where `<major>` is extracted from the stack token using the same extraction as the CI mapping's version-pinning table above (`dotnet10` → `10`) — e.g. a `dotnet8` stack writes `ARG DOTNET_SDK_VERSION=8.0.100`. **Monorepo tie-break**: when multiple projects map to the dotnet fragment with different major versions (e.g. one project on `dotnet8`, another on `dotnet10`), use the **highest** major version found across all matching projects. If no major version can be extracted from the token, leave the fragment's own default (`10.0.100`) unmodified — and add an inline comment immediately after the `ARG DOTNET_SDK_VERSION` line noting the version could not be auto-detected from the stack token and the fragment's default was used instead, e.g. `# .NET version could not be auto-detected from the stack token — using fragment default. See sandbox/README.md to pin manually.` The other fragments (node, playwright, go, python, rust, docker, azure) are included verbatim with their own `ARG` defaults unmodified — every fragment `ARG` (including `DOTNET_SDK_VERSION` and `BASE_VERSION`) remains overridable at build time via `--build-arg`, so an unmodified default is never a hard lock-in.
+   **.NET version substitution** (the only row with a version-from-token adjustment): `sandbox/fragments/dotnet.dockerfile` ships with `ARG DOTNET_SDK_VERSION=10.0.100` as its own default. When including this fragment, replace that default's version with `<major>.0.100`, where `<major>` is extracted from the stack token using the same extraction as the CI mapping's version-pinning table above (`dotnet10` → `10`) — e.g. a `dotnet8` stack writes `ARG DOTNET_SDK_VERSION=8.0.100`. **Monorepo tie-break**: when multiple projects map to the dotnet fragment with different major versions (e.g. one project on `dotnet8`, another on `dotnet10`), use the **highest** major version found across all matching projects. If no major version can be extracted from the token, leave the fragment's own default (`10.0.100`) unmodified — and add an inline comment immediately after the `ARG DOTNET_SDK_VERSION` line noting the version could not be auto-detected from the stack token and the fragment's default was used instead, e.g. `# .NET version could not be auto-detected from the stack token — using fragment default. See sandbox/README.md to pin manually.` The other fragments (node, playwright, go, python, rust, the `lsp-*` blocks, docker, azure) are included verbatim with their own `ARG` defaults unmodified — every fragment `ARG` (including `DOTNET_SDK_VERSION` and `BASE_VERSION`) remains overridable at build time via `--build-arg`, so an unmodified default is never a hard lock-in.
 
-   > **Sync obligation**: `sandbox/fragments/*.dockerfile` is the source of truth for these blocks; the mapping table above mirrors their content and existence, not their byte contents (generation reads the fragment files directly — see step 5e in `phases/ci-dockerfile.md`). If a fragment is added, removed, or renamed, this table needs a matching manual update. Low risk in practice — both live in the same monorepo and are maintained together — but currently unenforced by tooling.
+   > **Sync obligation**: `sandbox/fragments/*.dockerfile` is the source of truth for these blocks; the mapping table above mirrors their content and existence, not their byte contents (generation reads the fragment files directly — see step 5e in `phases/ci-dockerfile.md`). If a fragment is added, removed, or renamed, this table (or the LSP table, for `lsp-*` fragments) needs a matching manual update. Low risk in practice — both live in the same monorepo and are maintained together — but currently unenforced by tooling.
 
    > **Trust / security note**: `.cenci/Dockerfile` is committed to the repo, so it is reviewed like any other file in the PR that adds or changes it. It only runs `docker build` steps assembled from `sandbox/fragments/*.dockerfile` — no arbitrary runtime hooks execute during configure or during the build it produces.
 

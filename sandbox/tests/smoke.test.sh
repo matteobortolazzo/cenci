@@ -293,6 +293,33 @@ else
     fail "one or more toolchain checks failed inside cenci-sandbox:latest"
 fi
 
+# #1555: .lsp.json and Claude Code's *-lsp plugins only name a command, so the
+# image must carry the language-server binaries — outside /home/dev, which the
+# home volume replaces at runtime. Runs as the default non-root dev user.
+echo "case: monolith carries the lsp-* language servers under /usr/local"
+# shellcheck disable=SC2016  # $(...) and $b/$p must expand in the container bash, not here
+if "${RUNTIME}" run --rm --entrypoint /bin/bash cenci-sandbox:latest -c \
+    'set -e
+     for b in typescript-language-server pyright-langserver gopls csharp-ls; do
+         p="$(command -v "$b")"; case "$p" in /usr/local/*) ;; *) echo "$b at [$p]"; exit 1;; esac
+     done
+     typescript-language-server --version && pyright --version && gopls version && csharp-ls --version'; then
+    pass
+else
+    fail "an lsp-* language server is missing, outside /usr/local, or fails to run inside cenci-sandbox:latest"
+fi
+
+echo "case: this repo's per-repo image carries its lspServers (pyright, gopls)"
+# shellcheck disable=SC2016  # $(command -v ...) must expand in the container bash, not here
+if "${RUNTIME}" run --rm --entrypoint /bin/bash cenci-sandbox-smoke-repo:latest -c \
+    'pyright --version && gopls version \
+        && test "$(command -v pyright-langserver)" = /usr/local/bin/pyright-langserver \
+        && test "$(command -v gopls)" = /usr/local/bin/gopls'; then
+    pass
+else
+    fail "the per-repo image built from .cenci/Dockerfile lacks pyright-langserver or gopls under /usr/local/bin"
+fi
+
 # Regression guard for the gap this fragment closes: Chromium and its OS-level
 # deps (fonts, libnss3, etc.) must actually launch and render, not just have
 # `playwright --version` report a binary is present. Runs as the image's
