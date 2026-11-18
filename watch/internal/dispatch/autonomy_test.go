@@ -513,3 +513,117 @@ func TestProbeRepoAutonomies_MissingSyncsMapEntry_NoLongerFallsBackToLocalHEAD(t
 		t.Errorf(`probeRepoAutonomies()["o/r"] = RepoAutonomyLean via the "HEAD" map-miss fallback -- a repo this pass never confirmed a fetch for must never authorize off local HEAD`)
 	}
 }
+
+// -- #903: AutonomyRef is a remote-confirmed OID ------------------------------
+
+// TestProbeRepoAutonomies_RemoteMainDeleted_StaleLeanTrackingRefIsDenied: the
+// remote main is deleted after a prior fetch, so the local tracking ref keeps
+// a stale lean grant. Through the real syncMains -> probeRepoAutonomies
+// wiring, the repo must deny as fetch_unconfirmed (never lean) and the log
+// line must say why.
+func TestProbeRepoAutonomies_RemoteMainDeleted_StaleLeanTrackingRefIsDenied(t *testing.T) {
+	mainSyncGitEnv(t)
+	local, bare := initBareOriginAndLocal(t)
+	pushCommit(t, bare, ".cenci/config.json", leanConfigJSON)
+	gitTest(t, local, "fetch", "origin") // the stale tracking ref now carries the lean grant
+	gitTest(t, bare, "update-ref", "-d", "refs/heads/main")
+	if got := probeRepoAutonomy(local, remoteMainAuthRef); got != RepoAutonomyLean {
+		t.Fatalf("test setup: the stale tracking ref reads %q, want RepoAutonomyLean (otherwise this test proves nothing)", got)
+	}
+
+	repos := []RepoConfig{{Repo: "o/r", Dir: local}}
+	syncs := syncMains(repos, io.Discard, false)
+	if syncs["o/r"].Status == MainSyncFetchFailed {
+		t.Fatalf("main sync = fetch_failed (%q), want a successful fetch so the ls-remote path ran", syncs["o/r"].Detail)
+	}
+
+	var buf bytes.Buffer
+	got := probeRepoAutonomies(repos, syncs, &buf)
+	if got["o/r"] != RepoAutonomyFetchUnconfirmed {
+		t.Errorf(`probeRepoAutonomies()["o/r"] = %q, want RepoAutonomyFetchUnconfirmed`, got["o/r"])
+	}
+	log := buf.String()
+	if !strings.Contains(log, "dispatch: repo autonomy o/r: fetch_unconfirmed (") {
+		t.Errorf("log = %q, want a fetch_unconfirmed line carrying a reason", log)
+	}
+	if !strings.Contains(log, "not advertised") {
+		t.Errorf("log = %q, want the reason to name remote main as not advertised", log)
+	}
+}
+
+// TestProbeRepoAutonomies_ConfirmedOID_IsTheProbedObjectAndLoggedSuffix: the
+// probe reads the confirmed OID (`<oid>`, `<oid>:.cenci/config.json`), shown
+// by the logged `(ref <oid>)` suffix equalling the bare origin's rev-parse --
+// never the ref name.
+func TestProbeRepoAutonomies_ConfirmedOID_IsTheProbedObjectAndLoggedSuffix(t *testing.T) {
+	mainSyncGitEnv(t)
+	local, bare := initBareOriginAndLocal(t)
+	pushCommit(t, bare, ".cenci/config.json", leanConfigJSON)
+
+	repos := []RepoConfig{{Repo: "o/r", Dir: local}}
+	syncs := syncMains(repos, io.Discard, false)
+	var buf bytes.Buffer
+	got := probeRepoAutonomies(repos, syncs, &buf)
+
+	if got["o/r"] != RepoAutonomyLean {
+		t.Fatalf(`probeRepoAutonomies()["o/r"] = %q, want RepoAutonomyLean`, got["o/r"])
+	}
+	want := "dispatch: repo autonomy o/r: lean (ref " + bareMainOID(t, bare) + ")\n"
+	if buf.String() != want {
+		t.Errorf("log = %q, want %q", buf.String(), want)
+	}
+	if strings.Contains(buf.String(), remoteMainAuthRef) {
+		t.Errorf("log = %q must not name the ref %q", buf.String(), remoteMainAuthRef)
+	}
+}
+
+// TestProbeRepoAutonomies_FetchUnconfirmedLogAlwaysCarriesAReason: every
+// fetch_unconfirmed line is one line of one shape, `fetch_unconfirmed
+// (<reason>)`: AutonomyDetail when set (newlines collapsed), else `main sync
+// <status>`, else "no main sync result this pass".
+func TestProbeRepoAutonomies_FetchUnconfirmedLogAlwaysCarriesAReason(t *testing.T) {
+	cases := []struct {
+		name  string
+		syncs map[string]mainSyncResult
+		want  string
+	}{
+		{
+			name:  "AutonomyDetail",
+			syncs: map[string]mainSyncResult{"o/r": {Status: MainSyncSynced, AutonomyDetail: "remote main not advertised by origin"}},
+			want:  "remote main not advertised by origin",
+		},
+		{
+			name:  "AutonomyDetail newlines collapsed",
+			syncs: map[string]mainSyncResult{"o/r": {Status: MainSyncSynced, AutonomyDetail: "first\nsecond"}},
+			want:  "first; second",
+		},
+		{
+			name:  "main sync status when no detail",
+			syncs: map[string]mainSyncResult{"o/r": {Status: MainSyncFetchFailed}},
+			want:  "main sync fetch_failed",
+		},
+		{
+			name:  "no syncs entry",
+			syncs: map[string]mainSyncResult{},
+			want:  "no main sync result this pass",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			repos := []RepoConfig{{Repo: "o/r", Dir: filepath.Join(t.TempDir(), "never-created")}}
+			var buf bytes.Buffer
+			got := probeRepoAutonomies(repos, tc.syncs, &buf)
+
+			if got["o/r"] != RepoAutonomyFetchUnconfirmed {
+				t.Errorf(`probeRepoAutonomies()["o/r"] = %q, want RepoAutonomyFetchUnconfirmed`, got["o/r"])
+			}
+			want := "dispatch: repo autonomy o/r: fetch_unconfirmed (" + tc.want + ")\n"
+			if buf.String() != want {
+				t.Errorf("log = %q, want %q", buf.String(), want)
+			}
+			if strings.Contains(buf.String(), " skip:") || strings.Contains(buf.String(), " dispatch ") {
+				t.Errorf("log = %q must avoid the lazyboards-reserved substrings", buf.String())
+			}
+		})
+	}
+}

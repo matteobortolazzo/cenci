@@ -31,11 +31,14 @@ type repoAutonomyProbe struct {
 // the working tree), is the authoritative grant -- fleet configuration
 // (dispatch.planRefined) can only disable, never independently authorize,
 // lean planning. Callers of this package's production entry point,
-// probeRepoAutonomies, must always pass a remote-confirmed ref (the fully
-// qualified remoteMainAuthRef, threaded through mainSyncResult.AutonomyRef)
-// -- never a bare local ref that could be stale or unpushed -- so the
-// authorization decision can only ever be traced to an object `git fetch
-// origin` actually confirmed this pass, with no fallback to local HEAD.
+// probeRepoAutonomies, must always pass a remote-confirmed ref: the confirmed
+// object ID (#903) threaded through mainSyncResult.AutonomyRef, which equals
+// the remote's current main tip as `git ls-remote origin refs/heads/main`
+// reported it this pass -- never a ref name, which could be stale or
+// unpushed -- so the authorization decision can only ever be traced to an
+// object the remote confirmed this pass, with no fallback to local HEAD. In
+// that case ref is the bare OID, and the reads are `git ls-tree ... <oid>` and
+// `git show <oid>:.cenci/config.json`.
 //
 // dir == "" is never probed (mirrors probeStage/syncMain's own dir == ""
 // convention): resolving a repo root from the daemon's own cwd would risk
@@ -141,19 +144,38 @@ func gitFailureDetail(prefix string, err error, stderr string) string {
 	return detail
 }
 
+// fetchUnconfirmedReason is the one-line reason probeRepoAutonomies logs for a
+// repo with no confirmed AutonomyRef this pass: the remote-tip confirmation's
+// own AutonomyDetail when it set one (#903), else the main sync's status (a
+// fetch failure or any pre-fetch gate -- `main sync fetch_failed`), else the
+// fact that the syncs map had no entry for the repo at all. Never config
+// content.
+func fetchUnconfirmedReason(s mainSyncResult, hasSync bool) string {
+	switch {
+	case !hasSync:
+		return "no main sync result this pass"
+	case s.AutonomyDetail != "":
+		return s.AutonomyDetail
+	default:
+		return "main sync " + string(s.Status)
+	}
+}
+
 // probeRepoAutonomies runs probeRepoAutonomy once per repo in repos, reading
 // each one's own resolved AutonomyRef from syncs (#877), and unconditionally
 // logs one line per repo. Mirrors syncMains' per-repo map/logging contract.
 //
 // Unlike the pre-#877 FreshRef convention, a repo with no confirmed
-// AutonomyRef this pass -- either an explicit fetch-failure result
-// (AutonomyRef == "") or a syncs map lookup miss for a configured repo (no
-// entry at all) -- is classified RepoAutonomyFetchUnconfirmed WITHOUT
-// running any git command at all: there is deliberately no "HEAD" fallback
-// here (removed by #877), since falling back to local HEAD would let a
-// fetch outage silently authorize off a stale or unpushed local grant. Only
-// when AutonomyRef is non-empty does this call probeRepoAutonomyDetailed, at
-// that exact ref.
+// AutonomyRef this pass -- an explicit fetch-failure result, a successful
+// fetch whose remote main tip could not be confirmed (#903: a deleted or
+// renamed remote main, a stale tracking ref, an unreachable ls-remote), or a
+// syncs map lookup miss for a configured repo (no entry at all) -- is
+// classified RepoAutonomyFetchUnconfirmed WITHOUT running any git command at
+// all: there is deliberately no "HEAD" fallback here (removed by #877), since
+// falling back to local HEAD would let a fetch outage silently authorize off
+// a stale or unpushed local grant. Only when AutonomyRef (the confirmed
+// object ID) is non-empty does this call probeRepoAutonomyDetailed, at that
+// exact OID.
 //
 // A RepoAutonomyUnreadable result additionally logs the underlying git
 // failure detail (probeRepoAutonomyDetailed's Detail), so an operator can
@@ -171,10 +193,14 @@ func probeRepoAutonomies(repos []RepoConfig, syncs map[string]mainSyncResult, ou
 	for _, rc := range repos {
 		s, ok := syncs[rc.Repo]
 		if !ok || s.AutonomyRef == "" {
-			// No remote-confirmed object this pass (fetch failed, or the repo
-			// has no syncs entry at all) -- never probe.
+			// No remote-confirmed object this pass (fetch failed, the remote
+			// main tip could not be confirmed, or the repo has no syncs entry
+			// at all) -- never probe. The log line always carries a reason so
+			// an operator can tell these apart (newlines collapsed: one line
+			// per repo).
 			result[rc.Repo] = RepoAutonomyFetchUnconfirmed
-			logf(out, "dispatch: repo autonomy %s: %s\n", rc.Repo, RepoAutonomyFetchUnconfirmed)
+			reason := strings.ReplaceAll(fetchUnconfirmedReason(s, ok), "\n", "; ")
+			logf(out, "dispatch: repo autonomy %s: %s (%s)\n", rc.Repo, RepoAutonomyFetchUnconfirmed, reason)
 			continue
 		}
 		ref := s.AutonomyRef

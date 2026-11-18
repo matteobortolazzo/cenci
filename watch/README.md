@@ -827,10 +827,13 @@ Because the fleet flag alone never authorizes a planning pickup (#851/#877),
 `status` run inside a git repository (or with `--dir`) also reports that repo's
 half of the grant chain: `repo_autonomy` is the committed `planning.autonomy`
 verdict read at `refs/remotes/origin/main` **as of the last fetch** (the command
-never fetches; a dispatch pass always fetches first, so its live decision can be
-fresher), and `authorized` is the combined verdict — `true` only when the fleet
+never fetches and, unlike a dispatch pass, does not confirm that ref against the
+remote's current `main` tip, so after a deleted or renamed remote `main` it can still
+read a stale ref; a dispatch pass always fetches and confirms first, so its live
+decision can be fresher and is the only one that authorizes a pickup), and `authorized`
+is the combined verdict — `true` only when the fleet
 flag is on, the fleet-wide [attended mode](#attended-mode-cenci-planning-attended-onoffstatus)
-switch is off, **and** the remote-confirmed value is exactly `"lean"`. A directory
+switch is off, **and** the tracking-ref value is exactly `"lean"`. A directory
 that isn't a git repo omits the repo fields; a repo with no fetched
 `origin/main` ref reports `unreadable`, the same fail-closed verdict the
 dispatch gate itself uses. A malformed fleet `planning` block makes `status`
@@ -862,9 +865,10 @@ key-preserving write every fleet switch here uses, creating the config file
 (and parent directory) when none exists yet.
 
 `status` prints the fleet flag, and — inside a git repository or with `--dir`
-— that repo's remote-confirmed `planning.autonomy` verdict
-(`repo_autonomy`, unnarrowed: this probe always reports the repo's true
-committed value, never the attended-narrowed one), `dispatch.planRefined`
+— that repo's `planning.autonomy` verdict as of the last fetch, not confirmed
+against the remote (`repo_autonomy`, unnarrowed: this probe always reports the repo's true
+committed value, never the attended-narrowed one; like `dispatch plan-refined
+status` it can lag the dispatch gate), `dispatch.planRefined`
 (`plan_refined`), and the same three-factor combined `authorized` verdict
 `cenci dispatch plan-refined status` prints — the two commands can never
 disagree about whether a repo's pickups would actually fire. `--json` emits
@@ -1230,14 +1234,22 @@ decision table matches exactly what the subsequent real (fast-forwarded) pass wo
 produce. In every other outcome — already up to date, local `main` ahead, or any
 gated state — `FreshRef` is `HEAD`.
 
-**Authorization-ref parity (#877).** `AutonomyRef` is a separate per-repo value
-from `FreshRef`, resolved once per pass alongside it: non-empty (always the
-fully-qualified `refs/remotes/origin/main`) if and only if this pass's `git fetch
-origin` succeeded, empty on every pre-fetch or fetch-failed path. Unlike
-`FreshRef`, `AutonomyRef` never falls back to local `HEAD` — the repo-local
+**Authorization-ref parity (#877, #903).** `AutonomyRef` is a separate per-repo value
+from `FreshRef`, resolved once per pass alongside it: the **confirmed object ID** of the
+remote's `main` tip, non-empty if and only if this pass's `git fetch origin` succeeded
+**and** `refs/remotes/origin/main` equals what `git ls-remote --exit-code origin
+refs/heads/main` reports (a successful fetch alone does not prove the tracking ref
+moved: a deleted or renamed remote `main` leaves it stale, and a non-standard
+`remote.origin.fetch` may never update it). It is empty on every pre-fetch or
+fetch-failed path and whenever the remote tip cannot be confirmed — `ls-remote`
+failing, the remote not advertising `main`, a mismatch, or a push landing between the
+fetch and the `ls-remote` (a one-pass denial; the next pass confirms) — and the repo
+then resolves `fetch_unconfirmed`, with the reason in its `repo autonomy` log line.
+Unlike `FreshRef`, `AutonomyRef` never falls back to local `HEAD` — the repo-local
 lean-authorization config read (below) always reads at `AutonomyRef`, so it is
-identical between a dry-run pass and its subsequent real pass (the fetch runs in
-both; only the merge doesn't), giving the same authorization decision either way.
+identical between a dry-run pass and its subsequent real pass (the fetch and the
+confirmation run in both; only the merge doesn't), giving the same authorization
+decision either way.
 
 Gate 2's pipeline-stage check reads the ticket's persisted `cenci pipeline` state
 (`.cenci/pipeline/<id>.json`) and skips only on `finalized` — deliberately not "at or
@@ -1506,8 +1518,8 @@ dependency gate](#ticket-dependency-gate) above.
 switch, but it is no longer sufficient authorization on its own (#851): after the
 local main sync above, dispatch also reads the repo's own committed
 `.cenci/config.json` at the remote-confirmed `AutonomyRef` (via `git show
-refs/remotes/origin/main:.cenci/config.json`, never local `HEAD` and never the
-working tree) and requires the literal value `planning.autonomy == "lean"`
+<confirmed-oid>:.cenci/config.json`, where the OID is the remote's `main` tip confirmed
+this pass; never local `HEAD` and never the working tree) and requires the literal value `planning.autonomy == "lean"`
 before treating a planning pickup or autonomous re-plan as authorized. A
 missing, unreadable, malformed, or non-`"lean"` repo config denies both with its
 own distinct skip reason — exactly as if `dispatch.planRefined` were `false` for
@@ -1521,8 +1533,9 @@ suppressed on that machine specifically, with their own distinct skip reason
 naming attended mode as the cause — for when a human is sitting at this
 machine's keyboard and could just answer a clarifying question instead.
 
-**Remote-confirmed authorization (#877).** The config read above requires a
-successful `git fetch origin` in *this pass* — it is never read from local
+**Remote-confirmed authorization (#877, #903).** The config read above requires a
+successful `git fetch origin` in *this pass* and a remote `main` tip confirmed
+against `git ls-remote` (see "Authorization-ref parity (#877, #903)" above) — it is never read from local
 `HEAD`, and a repo whose local `main` checkout is ahead of `origin/main` with
 unpushed commits cannot use its own unpushed config to grant (or revoke)
 authorization; only the fetched remote object counts. Symmetrically, a lean
@@ -1530,7 +1543,9 @@ grant that was revoked on the remote (`origin/main`'s config no longer says
 `"lean"`) is honored immediately, even if the local checkout's last successful
 pass still has `"lean"` cached in its working tree or `HEAD`. **User-visible
 behavior change:** when `git fetch origin` fails this pass
-(`MainSyncFetchFailed` above), planning pickup and autonomous re-plan are held
+(`MainSyncFetchFailed` above), or the remote's `main` was deleted, renamed or
+otherwise cannot be confirmed (#903, see the Authorization-ref parity paragraph
+above), planning pickup and autonomous re-plan are held
 with a distinct retryable reason and launch nothing for that repo — where they
 previously fell back to whatever `planning.autonomy` local `HEAD` last had
 committed. Ordinary `Planned` pickup in the same repo is unaffected by the same
@@ -1934,10 +1949,14 @@ cenci dispatch --reconcile
 
 **Corrupt reconciliation state (ticket #883).** Reconciliation's grace-observation and
 apply-retry-counter state lives at
-`$XDG_STATE_HOME/cenci/reconcile.json` (falling back to `~/.local/state/cenci/reconcile.json`
-when `XDG_STATE_HOME` is unset). It is safety state, not disposable cache — resetting it
-resets every ticket's grace clock and apply-retry budget, which can trigger premature or
-indefinitely repeated recovery decisions.
+`$XDG_STATE_HOME/cenci/reconcile.json` (falling back to `$HOME/.local/state/cenci/reconcile.json`
+when `XDG_STATE_HOME` is unset or not an absolute path). It is safety state, not disposable
+cache — resetting it resets every ticket's grace clock and apply-retry budget, which can
+trigger premature or indefinitely repeated recovery decisions. When neither `XDG_STATE_HOME`
+nor `HOME` is an absolute path the location cannot be resolved, and that is a hold too — the
+reconcile pass holds with `last_error` `reconcile_state_unreadable`, exactly as for an
+unreadable file below, and never reads or writes a state file relative to the daemon's
+working directory.
 
 Every save is crash-safe: a same-directory randomized temp file is written, fsynced, and
 atomically renamed over the final path (fsyncing the directory too), so a crash mid-save

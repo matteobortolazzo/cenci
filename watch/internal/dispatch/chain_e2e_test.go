@@ -756,9 +756,9 @@ func TestAutonomousChain_NonLeanRepoConfigStopsBeforeUnattendedPlanning(t *testi
 	// #877: use commitAndPushConfig (commits on origin, then fetches +
 	// ff-only merges into local), not a bare writeCommittedConfig(h.local,
 	// ...) -- the autonomy probe now only ever reads the remote-confirmed
-	// refs/remotes/origin/main object (mainSyncResult.AutonomyRef), so a
+	// object ID of origin's main tip (mainSyncResult.AutonomyRef, #903), so a
 	// config committed solely to local's main (never pushed) would resolve
-	// RepoAutonomyMissing at that ref instead of the intended interactive
+	// RepoAutonomyMissing at that object instead of the intended interactive
 	// denial, defeating this test's purpose.
 	h.commitAndPushConfig(interactiveConfigJSON)
 

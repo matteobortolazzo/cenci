@@ -58,6 +58,61 @@ func initOriginAndLocal(t *testing.T) (local, origin string) {
 	return local, origin
 }
 
+// initBareOriginAndLocal (#903) is initOriginAndLocal's bare-origin twin: a
+// bare "origin" seeded with one commit on main through a scratch clone, and a
+// "local" clone of it. A bare origin is what a real remote looks like, and its
+// `git rev-parse refs/heads/main` is the exact OID the autonomy probe must be
+// pinned to. Only the #903 OID-confirmation tests need it; every other test
+// keeps the non-bare helper.
+func initBareOriginAndLocal(t *testing.T) (local, bare string) {
+	t.Helper()
+	bare = t.TempDir()
+	gitTest(t, bare, "init", "--bare", "-b", "main")
+
+	seed := t.TempDir()
+	gitTest(t, seed, "init", "-b", "main")
+	commitFile(t, seed, "base.txt", "base")
+	gitTest(t, seed, "remote", "add", "origin", bare)
+	gitTest(t, seed, "push", "origin", "main")
+
+	local = filepath.Join(t.TempDir(), "local")
+	gitTestNoDir(t, "clone", bare, local)
+	return local, bare
+}
+
+// pushCommit advances a bare origin's main by one commit, made through a
+// scratch clone (a bare repo has no working tree to commit in).
+func pushCommit(t *testing.T, bare, name, content string) {
+	t.Helper()
+	scratch := filepath.Join(t.TempDir(), "scratch")
+	gitTestNoDir(t, "clone", bare, scratch)
+	commitFile(t, scratch, name, content)
+	gitTest(t, scratch, "push", "origin", "main")
+}
+
+// bareMainOID is the object ID the bare origin's main currently points at.
+func bareMainOID(t *testing.T, bare string) string {
+	t.Helper()
+	return gitTest(t, bare, "rev-parse", "refs/heads/main")
+}
+
+// installGitShim writes a `git` shim to a temp dir and puts it first on PATH.
+// body is a POSIX-sh fragment run before delegating; $REAL_GIT is the real git,
+// and a body that does not exit falls through to `exec "$REAL_GIT" "$@"`.
+func installGitShim(t *testing.T, body string) {
+	t.Helper()
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	shimDir := t.TempDir()
+	script := fmt.Sprintf("#!/bin/sh\nREAL_GIT=%q\n%s\nexec \"$REAL_GIT\" \"$@\"\n", realGit, body)
+	if err := os.WriteFile(filepath.Join(shimDir, "git"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", shimDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
 // -- 1-12: syncMain / syncMains classifier suite (real temp repos) ----------
 
 // TestSyncMain_BehindOrigin_FastForwardsAndReportsSynced covers plan test 1:
@@ -746,12 +801,14 @@ func TestRunOnce_SyncsMainOncePerPassIndependentOfTicketCount(t *testing.T) {
 // -- #877: mainSyncResult.AutonomyRef ----------------------------------------
 //
 // AutonomyRef is the exact object the repo-autonomy probe (autonomy.go) must
-// read authorization from this pass: non-empty if and only if `git fetch
-// origin` succeeded in this pass, and always the fully-qualified
-// refs/remotes/origin/main -- never the short "origin/main" (git's
-// rev-parse precedence resolves refs/heads/<name> before
-// refs/remotes/<name>, so the short form could be shadowed by a local
-// branch of that name; see autonomy_test.go's Q1 regression test).
+// read authorization from this pass (#903): the object ID of the remote's
+// current main tip, set if and only if `git fetch origin` succeeded this pass
+// AND `refs/remotes/origin/main` equals what `git ls-remote origin
+// refs/heads/main` reports. It is never a ref name (git's rev-parse precedence
+// resolves refs/heads/<name> before refs/remotes/<name>, so a name could be
+// shadowed by a local branch; see autonomy_test.go's Q1 regression test), and
+// it is empty whenever the remote tip cannot be confirmed -- a deleted or
+// renamed remote main, a non-standard remote.origin.fetch, a concurrent push.
 
 // TestRemoteMainAuthRef_IsFullyQualified pins the authorization ref
 // constant's literal value.
@@ -761,82 +818,93 @@ func TestRemoteMainAuthRef_IsFullyQualified(t *testing.T) {
 	}
 }
 
+// assertConfirmedOID fails unless result.AutonomyRef is the bare origin's
+// current main object ID (what `git -C <bare> rev-parse refs/heads/main`
+// reports) and no reason is carried -- and never the ref name.
+func assertConfirmedOID(t *testing.T, result mainSyncResult, bare string) {
+	t.Helper()
+	want := bareMainOID(t, bare)
+	if len(want) != 40 && len(want) != 64 {
+		t.Fatalf("test setup: bare rev-parse = %q, want a 40- or 64-hex object ID", want)
+	}
+	if result.AutonomyRef != want {
+		t.Errorf("AutonomyRef = %q, want the bare origin's main OID %q (never the ref name %q)", result.AutonomyRef, want, remoteMainAuthRef)
+	}
+	if result.AutonomyDetail != "" {
+		t.Errorf("AutonomyDetail = %q, want empty when the OID is confirmed", result.AutonomyDetail)
+	}
+}
+
 // TestSyncMain_AutonomyRef_Table asserts mainSyncResult.AutonomyRef across
-// every syncMain outcome family: non-empty and exactly remoteMainAuthRef on
-// every path reached after a successful `git fetch origin` (synced/
-// up-to-date/ahead/diverged/strictly-behind, dry-run and real alike, and a
-// branch change discovered only AFTER the fetch itself already succeeded),
-// and empty ("") on every pre-fetch or fetch-failed path (an unresolvable
-// remote, or a fetch that never completes at all).
+// every syncMain outcome family against a local bare origin (#903): the exact
+// object ID `git -C <bare> rev-parse refs/heads/main` reports on all seven
+// outcomes reached after a successful fetch (already up to date, local ahead,
+// diverged, dry-run strictly-behind, real fast-forward, a branch change
+// discovered only AFTER the fetch, and a failing fast-forward merge), and
+// empty ("") on every fetch-failed path (an unresolvable remote, or a fetch
+// that never completes at all).
 func TestSyncMain_AutonomyRef_Table(t *testing.T) {
-	t.Run("behind origin, real pass: fetched", func(t *testing.T) {
+	t.Run("behind origin, real fast-forward: confirmed OID", func(t *testing.T) {
 		mainSyncGitEnv(t)
-		local, origin := initOriginAndLocal(t)
-		commitFile(t, origin, "advance.txt", "advance")
+		local, bare := initBareOriginAndLocal(t)
+		pushCommit(t, bare, "advance.txt", "advance")
 
 		result := syncMain(local, false)
 		if result.Status != MainSyncSynced {
 			t.Fatalf("status = %q, want MainSyncSynced", result.Status)
 		}
-		if result.AutonomyRef != remoteMainAuthRef {
-			t.Errorf("AutonomyRef = %q, want %q (a real strictly-behind pass fetched successfully)", result.AutonomyRef, remoteMainAuthRef)
-		}
+		assertConfirmedOID(t, result, bare)
 	})
 
-	t.Run("behind origin, dry run: fetched", func(t *testing.T) {
+	t.Run("behind origin, dry run: confirmed OID", func(t *testing.T) {
 		mainSyncGitEnv(t)
-		local, origin := initOriginAndLocal(t)
-		commitFile(t, origin, "advance.txt", "advance")
+		local, bare := initBareOriginAndLocal(t)
+		pushCommit(t, bare, "advance.txt", "advance")
 
 		result := syncMain(local, true)
 		if result.Status != MainSyncSynced {
 			t.Fatalf("status = %q, want MainSyncSynced", result.Status)
 		}
-		if result.AutonomyRef != remoteMainAuthRef {
-			t.Errorf("AutonomyRef = %q, want %q (dry-run also fetches -- only the merge is skipped)", result.AutonomyRef, remoteMainAuthRef)
-		}
+		assertConfirmedOID(t, result, bare)
 	})
 
-	t.Run("already up to date: fetched", func(t *testing.T) {
+	t.Run("already up to date: confirmed OID", func(t *testing.T) {
 		mainSyncGitEnv(t)
-		local, _ := initOriginAndLocal(t)
+		local, bare := initBareOriginAndLocal(t)
 
 		result := syncMain(local, false)
 		if result.Status != MainSyncSynced {
 			t.Fatalf("status = %q, want MainSyncSynced", result.Status)
 		}
-		if result.AutonomyRef != remoteMainAuthRef {
-			t.Errorf("AutonomyRef = %q, want %q", result.AutonomyRef, remoteMainAuthRef)
-		}
+		assertConfirmedOID(t, result, bare)
 	})
 
-	t.Run("local ahead: fetched", func(t *testing.T) {
+	t.Run("local ahead: confirmed OID is the remote's, not local HEAD", func(t *testing.T) {
 		mainSyncGitEnv(t)
-		local, _ := initOriginAndLocal(t)
+		local, bare := initBareOriginAndLocal(t)
 		commitFile(t, local, "ahead.txt", "local ahead")
 
 		result := syncMain(local, false)
 		if result.Status != MainSyncSynced {
 			t.Fatalf("status = %q, want MainSyncSynced", result.Status)
 		}
-		if result.AutonomyRef != remoteMainAuthRef {
-			t.Errorf("AutonomyRef = %q, want %q (local-ahead still fetched successfully -- but AutonomyRef, unlike FreshRef, never falls back to local HEAD)", result.AutonomyRef, remoteMainAuthRef)
+		assertConfirmedOID(t, result, bare)
+		if localHead := gitTest(t, local, "rev-parse", "HEAD"); result.AutonomyRef == localHead {
+			t.Errorf("AutonomyRef = local HEAD %q, want the remote's tip (an unpushed local commit must never authorize)", localHead)
 		}
 	})
 
-	t.Run("diverged: fetched", func(t *testing.T) {
+	t.Run("diverged: confirmed OID", func(t *testing.T) {
 		mainSyncGitEnv(t)
-		local, origin := initOriginAndLocal(t)
+		local, bare := initBareOriginAndLocal(t)
 		commitFile(t, local, "local-only.txt", "local change")
-		commitFile(t, origin, "origin-only.txt", "origin change")
+		pushCommit(t, bare, "origin-only.txt", "origin change")
 
 		result := syncMain(local, false)
 		if result.Status != MainSyncDiverged {
 			t.Fatalf("status = %q, want MainSyncDiverged", result.Status)
 		}
-		if result.AutonomyRef != remoteMainAuthRef {
-			t.Errorf("AutonomyRef = %q, want %q (diverged still fetched successfully)", result.AutonomyRef, remoteMainAuthRef)
-		}
+		assertConfirmedOID(t, result, bare)
 	})
 
 	t.Run("fetch failed (unresolvable remote): empty", func(t *testing.T) {
@@ -855,15 +923,15 @@ func TestSyncMain_AutonomyRef_Table(t *testing.T) {
 		}
 	})
 
-	t.Run("branch changed mid-pass (after a successful fetch): still fetched", func(t *testing.T) {
+	t.Run("branch changed mid-pass (after a successful fetch): confirmed OID", func(t *testing.T) {
 		// Reuses the #822 review-fix-#4 TOCTOU shim: the fetch itself
-		// succeeds for real (so AutonomyRef must still be set), and only
+		// succeeds for real (so AutonomyRef must still be confirmed), and only
 		// the checkout changes afterward, blocking the subsequent merge --
 		// MainSyncNotMain. AutonomyRef's invariant is about the fetch, not
 		// the merge, so it must stay set even though the merge never runs.
 		mainSyncGitEnv(t)
-		local, origin := initOriginAndLocal(t)
-		commitFile(t, origin, "advance.txt", "advance")
+		local, bare := initBareOriginAndLocal(t)
+		pushCommit(t, bare, "advance.txt", "advance")
 
 		realGit, err := exec.LookPath("git")
 		if err != nil {
@@ -892,9 +960,31 @@ exec "%s" "$@"
 		if result.Status != MainSyncNotMain {
 			t.Fatalf("status = %q, want MainSyncNotMain", result.Status)
 		}
-		if result.AutonomyRef != remoteMainAuthRef {
-			t.Errorf("AutonomyRef = %q, want %q (fetch succeeded before the mid-pass branch change blocked only the merge)", result.AutonomyRef, remoteMainAuthRef)
+		// The fetch succeeded before the mid-pass branch change blocked only
+		// the merge.
+		assertConfirmedOID(t, result, bare)
+	})
+
+	t.Run("fast-forward merge fails: confirmed OID", func(t *testing.T) {
+		// A shim fails only `merge --ff-only` and passes every other git call
+		// (fetch, ls-remote, for-each-ref, merge-base, symbolic-ref) to the
+		// real git, so the fetch and the remote-tip confirmation succeed and
+		// only the final merge step fails -- MainSyncFailed.
+		mainSyncGitEnv(t)
+		local, bare := initBareOriginAndLocal(t)
+		pushCommit(t, bare, "advance.txt", "advance")
+		installGitShim(t, `for arg in "$@"; do
+  if [ "$arg" = "merge" ]; then echo "simulated merge failure" >&2; exit 1; fi
+done`)
+
+		result := syncMain(local, false)
+		if result.Status != MainSyncFailed {
+			t.Fatalf("status = %q, detail = %q, want MainSyncFailed", result.Status, result.Detail)
 		}
+		if !strings.Contains(result.Detail, "merge --ff-only") {
+			t.Fatalf("detail = %q, want the failure to come from the merge step", result.Detail)
+		}
+		assertConfirmedOID(t, result, bare)
 	})
 
 	t.Run("fetch timeout (WaitDelay-forced close): empty", func(t *testing.T) {
@@ -941,4 +1031,389 @@ exec "%s" "$@"
 			t.Fatalf("syncMain took %v, want it to return well within gitTimeout thanks to WaitDelay (~%v)", elapsed, gitWaitDelay)
 		}
 	})
+}
+
+// -- #903: remote-tip confirmation of AutonomyRef ----------------------------
+//
+// A successful `git fetch origin` does not prove refs/remotes/origin/main was
+// updated: a deleted or renamed remote main leaves the local tracking ref
+// stale (fetch does not prune), and a non-standard remote.origin.fetch may
+// never write it. So syncMain confirms the tracking ref's OID against
+// `git ls-remote --exit-code origin refs/heads/main` and pins AutonomyRef to
+// it only when the two agree; every failure leaves AutonomyRef empty (the
+// probe then reports RepoAutonomyFetchUnconfirmed) with the reason in
+// AutonomyDetail, and never touches Status/Detail/FreshRef.
+
+// TestSyncMain_FetchFailed_NeverRunsLsRemote: a failed fetch leaves
+// AutonomyRef empty and git ls-remote is never invoked.
+func TestSyncMain_FetchFailed_NeverRunsLsRemote(t *testing.T) {
+	mainSyncGitEnv(t)
+	local := t.TempDir()
+	gitTest(t, local, "init", "-b", "main")
+	commitFile(t, local, "base.txt", "base")
+	gitTest(t, local, "remote", "add", "origin", filepath.Join(t.TempDir(), "does-not-exist"))
+
+	invocations := filepath.Join(t.TempDir(), "invocations.log")
+	installGitShim(t, fmt.Sprintf(`printf '%%s\n' "$*" >> %q`, invocations))
+
+	result := syncMain(local, false)
+	if result.Status != MainSyncFetchFailed {
+		t.Fatalf("status = %q, want MainSyncFetchFailed", result.Status)
+	}
+	if result.AutonomyRef != "" {
+		t.Errorf("AutonomyRef = %q, want empty after a failed fetch", result.AutonomyRef)
+	}
+	data, err := os.ReadFile(invocations)
+	if err != nil {
+		t.Fatalf("reading the shim's invocation log: %v", err)
+	}
+	if !strings.Contains(string(data), "fetch") {
+		t.Fatalf("shim never saw the fetch, so this test proves nothing; log:\n%s", data)
+	}
+	if strings.Contains(string(data), "ls-remote") {
+		t.Errorf("git ls-remote ran after a failed fetch; invocations:\n%s", data)
+	}
+}
+
+// TestSyncMain_RemoteMainDeleted_AutonomyUnconfirmedWhileTrackingRefStaysStale
+// covers a deleted remote main: `git fetch origin` still exits 0 (so the
+// outcome is not MainSyncFetchFailed -- proving the ls-remote path ran) and
+// the local tracking ref keeps its old value, but the remote does not
+// advertise refs/heads/main, so the stale ref must not be trusted.
+func TestSyncMain_RemoteMainDeleted_AutonomyUnconfirmedWhileTrackingRefStaysStale(t *testing.T) {
+	mainSyncGitEnv(t)
+	local, bare := initBareOriginAndLocal(t)
+	staleOID := gitTest(t, local, "rev-parse", remoteMainAuthRef)
+	gitTest(t, bare, "update-ref", "-d", "refs/heads/main")
+
+	result := syncMain(local, false)
+	if result.Status == MainSyncFetchFailed {
+		t.Fatalf("status = MainSyncFetchFailed (%q): the fetch must succeed against an origin with no main, otherwise the ls-remote path never ran", result.Detail)
+	}
+	if got := gitTest(t, local, "rev-parse", remoteMainAuthRef); got != staleOID {
+		t.Fatalf("test setup: tracking ref = %q, want it left stale at %q (fetch does not prune)", got, staleOID)
+	}
+	if result.AutonomyRef != "" {
+		t.Errorf("AutonomyRef = %q, want empty: the remote no longer advertises main", result.AutonomyRef)
+	}
+	if !strings.Contains(result.AutonomyDetail, "not advertised") {
+		t.Errorf("AutonomyDetail = %q, want it to name remote main as not advertised", result.AutonomyDetail)
+	}
+	if result.Status != MainSyncSynced || result.Detail != "already up to date" {
+		t.Errorf("status/detail = %q/%q, want the unchanged merge-classification outcome synced/already up to date", result.Status, result.Detail)
+	}
+}
+
+// TestSyncMain_NonStandardFetchRefspec_StaleTrackingRefIsUnconfirmed covers a
+// remote.origin.fetch that never writes refs/remotes/origin/main: the remote
+// main advances, the fetch succeeds, but the tracking ref stays at the old
+// tip -- a mismatch with the remote's actual tip.
+func TestSyncMain_NonStandardFetchRefspec_StaleTrackingRefIsUnconfirmed(t *testing.T) {
+	mainSyncGitEnv(t)
+	local, bare := initBareOriginAndLocal(t)
+	gitTest(t, local, "config", "--replace-all", "remote.origin.fetch", "+refs/heads/main:refs/remotes/origin/mirror-main")
+	pushCommit(t, bare, "advance.txt", "advance")
+
+	result := syncMain(local, false)
+	if result.Status == MainSyncFetchFailed {
+		t.Fatalf("status = MainSyncFetchFailed (%q), want the fetch to succeed", result.Detail)
+	}
+	if got := gitTest(t, local, "rev-parse", remoteMainAuthRef); got == bareMainOID(t, bare) {
+		t.Fatalf("test setup: tracking ref was updated to %q, want it stale", got)
+	}
+	if result.AutonomyRef != "" {
+		t.Errorf("AutonomyRef = %q, want empty for a stale tracking ref", result.AutonomyRef)
+	}
+	if !strings.Contains(result.AutonomyDetail, "does not match remote main tip") {
+		t.Errorf("AutonomyDetail = %q, want a tracking-ref/remote-tip mismatch reason", result.AutonomyDetail)
+	}
+}
+
+// TestSyncMain_LsRemoteFailsAfterFetch_OnlyAutonomyIsUnconfirmed: an ls-remote
+// failure after a good fetch (origin unreachable between the two calls)
+// leaves AutonomyRef empty but Status/Detail/FreshRef exactly what the
+// merge-classification path would otherwise produce, and never leaks git's
+// stderr (which can echo a remote URL) into the logged reason.
+func TestSyncMain_LsRemoteFailsAfterFetch_OnlyAutonomyIsUnconfirmed(t *testing.T) {
+	cases := []struct {
+		name       string
+		dryRun     bool
+		wantDetail string
+		wantFresh  string
+	}{
+		{"real pass", false, "fast-forwarded to origin/main", "HEAD"},
+		{"dry run", true, "would fast-forward origin/main (dry-run, not merged)", "origin/main"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mainSyncGitEnv(t)
+			local, bare := initBareOriginAndLocal(t)
+			pushCommit(t, bare, "advance.txt", "advance")
+			installGitShim(t, `for arg in "$@"; do
+  if [ "$arg" = "ls-remote" ]; then
+    echo "fatal: unable to access 'https://secret.example/repo.git/'" >&2
+    exit 128
+  fi
+done`)
+
+			result := syncMain(local, tc.dryRun)
+			if result.Status != MainSyncSynced || result.Detail != tc.wantDetail || result.FreshRef != tc.wantFresh {
+				t.Errorf("status/detail/freshRef = %q/%q/%q, want %q/%q/%q (unchanged by the ls-remote failure)",
+					result.Status, result.Detail, result.FreshRef, MainSyncSynced, tc.wantDetail, tc.wantFresh)
+			}
+			if result.AutonomyRef != "" {
+				t.Errorf("AutonomyRef = %q, want empty when ls-remote fails", result.AutonomyRef)
+			}
+			if !strings.Contains(result.AutonomyDetail, "ls-remote") {
+				t.Errorf("AutonomyDetail = %q, want it to name the failed ls-remote", result.AutonomyDetail)
+			}
+			if strings.Contains(result.AutonomyDetail, "secret.example") {
+				t.Errorf("AutonomyDetail = %q leaks git's stderr (a network call's stderr can echo a remote URL)", result.AutonomyDetail)
+			}
+		})
+	}
+}
+
+// TestSyncMain_PushBetweenFetchAndLsRemote_UnconfirmedThisPassConfirmedNext
+// covers a concurrent push: the remote tip advances after the fetch, so the
+// tracking ref and the ls-remote tip disagree for that one pass (fail
+// closed), and the next pass -- fetch and ls-remote agreeing again -- confirms
+// normally. A fetch shim does the racing push right after the real fetch.
+func TestSyncMain_PushBetweenFetchAndLsRemote_UnconfirmedThisPassConfirmedNext(t *testing.T) {
+	mainSyncGitEnv(t)
+	local, bare := initBareOriginAndLocal(t)
+	scratch := filepath.Join(t.TempDir(), "scratch")
+	gitTestNoDir(t, "clone", bare, scratch)
+	commitFile(t, scratch, "racing.txt", "racing")
+	oldTip := bareMainOID(t, bare)
+	marker := filepath.Join(t.TempDir(), "pushed")
+	installGitShim(t, fmt.Sprintf(`is_fetch=0
+for arg in "$@"; do
+  if [ "$arg" = "fetch" ]; then is_fetch=1; fi
+done
+if [ "$is_fetch" = "1" ] && [ ! -e %[1]q ]; then
+  "$REAL_GIT" "$@"
+  status=$?
+  : > %[1]q
+  "$REAL_GIT" -C %[2]q push origin main >/dev/null 2>&1
+  exit $status
+fi`, marker, scratch))
+
+	first := syncMain(local, false)
+	if got := bareMainOID(t, bare); got == oldTip {
+		t.Fatal("test setup: the racing push never happened")
+	}
+	if first.AutonomyRef != "" {
+		t.Errorf("first pass AutonomyRef = %q, want empty (remote tip moved after the fetch)", first.AutonomyRef)
+	}
+	if !strings.Contains(first.AutonomyDetail, "does not match remote main tip") {
+		t.Errorf("first pass AutonomyDetail = %q, want a tracking-ref/remote-tip mismatch reason", first.AutonomyDetail)
+	}
+
+	second := syncMain(local, false)
+	assertConfirmedOID(t, second, bare)
+}
+
+// TestSyncMain_TrackingRefAbsentButMainSlashXExists_IsNotMatched: `git
+// for-each-ref refs/remotes/origin/main` matches refs/remotes/origin/main/x as
+// a prefix, so only an exact refname may count. The fetch refspec here does
+// not write refs/remotes/origin/main (otherwise the directory/file conflict
+// would fail the fetch before the confirmation ever ran).
+func TestSyncMain_TrackingRefAbsentButMainSlashXExists_IsNotMatched(t *testing.T) {
+	mainSyncGitEnv(t)
+	local, _ := initBareOriginAndLocal(t)
+	gitTest(t, local, "config", "--replace-all", "remote.origin.fetch", "+refs/heads/main:refs/remotes/origin/mirror-main")
+	oid := gitTest(t, local, "rev-parse", remoteMainAuthRef)
+	gitTest(t, local, "update-ref", "-d", remoteMainAuthRef)
+	gitTest(t, local, "update-ref", remoteMainAuthRef+"/x", oid)
+
+	result := syncMain(local, false)
+	if result.Status == MainSyncFetchFailed {
+		t.Fatalf("status = MainSyncFetchFailed (%q), want the fetch to succeed", result.Detail)
+	}
+	if result.AutonomyRef != "" {
+		t.Errorf("AutonomyRef = %q, want empty: only refs/remotes/origin/main/x exists, which must not match", result.AutonomyRef)
+	}
+	if !strings.Contains(result.AutonomyDetail, "absent") {
+		t.Errorf("AutonomyDetail = %q, want the tracking-ref-absent reason (not a prefix match on main/x)", result.AutonomyDetail)
+	}
+}
+
+// TestSyncMain_ConfirmationParsesStdoutSeparatelyFromStderr proves each
+// confirmation call reads stdout alone, one call per subtest: a shim makes ONE
+// of the two calls write to stderr on success before running the real git.
+// The exactly-one-line parsers reject a merged stream, so the bare origin's
+// OID still being confirmed is what distinguishes execGitSeparate from
+// execGit's combined output for that call.
+//   - ls-remote: a junk line, so merged output is two lines and malformed.
+//   - for-each-ref: a line shaped like a real answer for a DIFFERENT object
+//     (the parser skips a junk line as a non-match, so only an
+//     answer-shaped one turns a merge into two matching lines).
+//
+// Timeout and WaitDelay bounding of execGitSeparate is covered by
+// TestExecGitSeparate_HungGrandchildHoldingStdout_ReturnsWithinWaitDelay.
+func TestSyncMain_ConfirmationParsesStdoutSeparatelyFromStderr(t *testing.T) {
+	const (
+		lsRemoteNoise = "warning: stderr noise that must not reach the parser"
+		// A valid 40-hex object ID that is not the bare origin's tip.
+		otherOID = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+	)
+	forEachRefNoise := otherOID + " " + remoteMainAuthRef
+
+	calls := []struct {
+		name  string
+		verb  string
+		noise string
+	}{
+		{"ls-remote", "ls-remote", lsRemoteNoise},
+		{"for-each-ref", "for-each-ref", forEachRefNoise},
+	}
+	for _, call := range calls {
+		for _, dryRun := range []bool{false, true} {
+			name := call.name + " noisy, real pass"
+			if dryRun {
+				name = call.name + " noisy, dry run"
+			}
+			t.Run(name, func(t *testing.T) {
+				mainSyncGitEnv(t)
+				local, bare := initBareOriginAndLocal(t)
+				pushCommit(t, bare, "advance.txt", "advance")
+				if want := bareMainOID(t, bare); want == otherOID {
+					t.Fatalf("test setup: the bare tip %q collides with the decoy OID", want)
+				}
+				installGitShim(t, fmt.Sprintf(`for arg in "$@"; do
+  if [ "$arg" = %q ]; then
+    echo %q >&2
+  fi
+done`, call.verb, call.noise))
+
+				result := syncMain(local, dryRun)
+				if result.Status != MainSyncSynced {
+					t.Fatalf("status = %q (%q), want MainSyncSynced", result.Status, result.Detail)
+				}
+				assertConfirmedOID(t, result, bare)
+				if strings.Contains(result.AutonomyDetail, call.noise) || strings.Contains(result.Detail, call.noise) {
+					t.Errorf("stderr noise leaked into detail: AutonomyDetail=%q Detail=%q", result.AutonomyDetail, result.Detail)
+				}
+			})
+		}
+	}
+}
+
+// TestExecGitSeparate_HungGrandchildHoldingStdout_ReturnsWithinWaitDelay is
+// the execGitSeparate twin of the execGit WaitDelay test: a `git` whose
+// process exits normally but leaves a background grandchild holding the
+// stdout/stderr pipes open must not stall execGitSeparate past its bounded
+// WaitDelay. The shim also writes distinct text to each stream first, so the
+// returned stdout and stderr are asserted to stay separate values. (The 60s
+// gitTimeout is not exercised here: it is far too slow for a unit run.)
+func TestExecGitSeparate_HungGrandchildHoldingStdout_ReturnsWithinWaitDelay(t *testing.T) {
+	const (
+		outText = "answer on stdout"
+		errText = "noise on stderr"
+	)
+	shimDir := t.TempDir()
+	script := fmt.Sprintf("#!/bin/sh\necho %q\necho %q >&2\n(sleep 30 &) \nexit 0\n", outText, errText)
+	if err := os.WriteFile(filepath.Join(shimDir, "git"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", shimDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	start := time.Now()
+	// The grandchild keeps the pipes open well past WaitDelay, so Wait forces
+	// them closed and returns an error wrapping ErrWaitDelay -- the fix working
+	// as designed (bounded, not a hang), so it is expected here.
+	stdout, stderr, err := execGitSeparate(t.TempDir(), "status")
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatalf("execGitSeparate returned nil error; expected the documented WaitDelay-forced-close error")
+	}
+	if elapsed > 20*time.Second {
+		t.Fatalf("execGitSeparate took %v, want it to return well within gitTimeout thanks to WaitDelay (~%v)", elapsed, gitWaitDelay)
+	}
+	if elapsed < gitWaitDelay {
+		t.Fatalf("execGitSeparate returned in %v, faster than gitWaitDelay (%v) -- test may not be exercising the intended lingering-grandchild path", elapsed, gitWaitDelay)
+	}
+	if stdout != outText {
+		t.Errorf("stdout = %q, want %q", stdout, outText)
+	}
+	if stderr != errText {
+		t.Errorf("stderr = %q, want %q", stderr, errText)
+	}
+}
+
+const (
+	testOID40 = "0123456789abcdef0123456789abcdef01234567"
+	testOID64 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+)
+
+// TestParseLsRemoteMainOID_Table: only exactly one line whose refname is
+// exactly refs/heads/main with a 40- or 64-lowercase-hex object ID yields an
+// OID. Real git against a local origin cannot produce the malformed shapes.
+func TestParseLsRemoteMainOID_Table(t *testing.T) {
+	cases := []struct {
+		name   string
+		out    string
+		want   string
+		wantOK bool
+	}{
+		{"one line sha1", testOID40 + "\trefs/heads/main", testOID40, true},
+		{"one line sha256", testOID64 + "\trefs/heads/main", testOID64, true},
+		{"trailing newline", testOID40 + "\trefs/heads/main\n", testOID40, true},
+		{"zero lines", "", "", false},
+		{"blank only", "\n", "", false},
+		{"multiple lines", testOID40 + "\trefs/heads/main\n" + testOID64 + "\trefs/heads/main", "", false},
+		{"wrong refname", testOID40 + "\trefs/heads/other", "", false},
+		{"refname with main prefix", testOID40 + "\trefs/heads/main-old", "", false},
+		{"refname nested under main", testOID40 + "\trefs/heads/main/x", "", false},
+		{"tag refname", testOID40 + "\trefs/tags/main", "", false},
+		{"no refname", testOID40, "", false},
+		{"uppercase hex", strings.ToUpper(testOID40) + "\trefs/heads/main", "", false},
+		{"short oid", "abc123\trefs/heads/main", "", false},
+		{"41 hex chars", testOID40 + "0\trefs/heads/main", "", false},
+		{"non-hex chars", strings.Repeat("g", 40) + "\trefs/heads/main", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := parseLsRemoteMainOID(tc.out)
+			if ok != tc.wantOK || got != tc.want {
+				t.Errorf("parseLsRemoteMainOID(%q) = (%q, %v), want (%q, %v)", tc.out, got, ok, tc.want, tc.wantOK)
+			}
+		})
+	}
+}
+
+// TestParseTrackingRefOID_Table: exactly one line whose refname equals
+// remoteMainAuthRef counts; every other line (refs/remotes/origin/main/x,
+// which a prefix match returns) is ignored; the OID must be 40 or 64
+// lowercase hex.
+func TestParseTrackingRefOID_Table(t *testing.T) {
+	const ref = "refs/remotes/origin/main"
+	cases := []struct {
+		name   string
+		out    string
+		want   string
+		wantOK bool
+	}{
+		{"exact line sha1", testOID40 + " " + ref, testOID40, true},
+		{"exact line sha256", testOID64 + " " + ref, testOID64, true},
+		{"trailing newline", testOID40 + " " + ref + "\n", testOID40, true},
+		{"exact line plus main/x ignored", testOID64 + " " + ref + "/x\n" + testOID40 + " " + ref, testOID40, true},
+		{"zero lines", "", "", false},
+		{"only main/x", testOID40 + " " + ref + "/x", "", false},
+		{"duplicate exact lines", testOID40 + " " + ref + "\n" + testOID40 + " " + ref, "", false},
+		{"other remote's main", testOID40 + " refs/remotes/upstream/main", "", false},
+		{"uppercase hex", strings.ToUpper(testOID40) + " " + ref, "", false},
+		{"short oid", "abc123 " + ref, "", false},
+		{"non-hex chars", strings.Repeat("z", 40) + " " + ref, "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := parseTrackingRefOID(tc.out)
+			if ok != tc.wantOK || got != tc.want {
+				t.Errorf("parseTrackingRefOID(%q) = (%q, %v), want (%q, %v)", tc.out, got, ok, tc.want, tc.wantOK)
+			}
+		})
+	}
 }

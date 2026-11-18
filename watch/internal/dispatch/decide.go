@@ -67,8 +67,9 @@ const (
 	// reason above, including reasonAutonomyUnknown: it is not an
 	// unrecognized enum value, it is the documented RepoAutonomyFetchUnconfirmed
 	// classification for "no remote-confirmed object this pass" (`git fetch
-	// origin` failed, or the repo carries no syncs entry at all) -- explicitly
-	// retryable, since the very next pass may confirm a fetch.
+	// origin` failed, the repo carries no syncs entry at all, or the remote
+	// main tip could not be confirmed, #903) -- explicitly retryable, since
+	// the very next pass may confirm a fetch.
 	reasonAutonomyFetchUnconfirmed = "remote main not fetched this pass (retryable)"
 	// reasonAutonomyAttended (#1086) is content-distinct from every reason
 	// above, including reasonAutonomyInteractive: it names the fleet-wide
@@ -326,12 +327,14 @@ type Inputs struct {
 	//
 	// #877: every non-fetch-unconfirmed value here is remote-confirmed --
 	// probeRepoAutonomies only ever probes at a repo's confirmed AutonomyRef
-	// (mainSyncResult.AutonomyRef, always the fully-qualified
-	// remoteMainAuthRef when set), never a bare local ref that could be stale
-	// or unpushed. A repo whose fetch did not succeed this pass (or that
-	// carries no syncs entry at all) resolves RepoAutonomyFetchUnconfirmed --
-	// the probe never ran, and the gate denies with its own explicitly
-	// retryable reason, distinct from every other denial.
+	// (mainSyncResult.AutonomyRef: the object ID of the remote's main tip,
+	// confirmed against `git ls-remote` this pass, #903), never a bare local
+	// ref that could be stale or unpushed. A repo whose fetch did not succeed
+	// this pass, whose remote main tip could not be confirmed (a deleted or
+	// renamed remote main, a stale tracking ref), or that carries no syncs
+	// entry at all resolves RepoAutonomyFetchUnconfirmed -- the probe never
+	// ran, and the gate denies with its own explicitly retryable reason,
+	// distinct from every other denial.
 	RepoAutonomy map[string]RepoAutonomy
 
 	// PlanProbes maps planKey(repo, ticketId) -> the resolved PlanProbe for

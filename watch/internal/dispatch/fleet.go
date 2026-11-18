@@ -228,14 +228,15 @@ func QueryPlanningAttended(path string) (bool, error) {
 	return attended, nil
 }
 
-// QueryRepoAutonomy reports dir's committed planning.autonomy verdict at
-// the remote-confirmed ref (refs/remotes/origin/main) as of the last
-// successful fetch — the same probe the dispatch gate chain authorizes
-// planning pickups with (#851/#877), exported for the status surface. It
-// runs no fetch itself, so the verdict can lag the remote until the next
-// dispatch pass (which always fetches first). Fail-closed like the gate: a
-// non-repo dir or unresolvable ref is RepoAutonomyUnreadable, never a
-// guess.
+// QueryRepoAutonomy reports dir's committed planning.autonomy verdict as read
+// at the refs/remotes/origin/main tracking ref, by name — a status surface
+// (#851/#877), exported for the status commands. Unlike the dispatch gate
+// chain (which probes at the OID confirmed against the remote's current main
+// tip, #903), it runs no fetch and no remote-tip confirmation, so the verdict
+// can lag the remote and a deleted or renamed remote main leaves it reading a
+// stale ref. It is therefore never confirmed against the remote and never
+// authorizes a pickup. Fail-closed on its own failures: a non-repo dir or
+// unresolvable ref is RepoAutonomyUnreadable, never a guess.
 func QueryRepoAutonomy(dir string) RepoAutonomy {
 	return probeRepoAutonomy(dir, remoteMainAuthRef)
 }

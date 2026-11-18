@@ -168,10 +168,13 @@ and applies after questions and checks complete. Set
 and has not been offered before, defaulting to `interactive`; `/cenci:configure --all`
 re-offers it with the committed value pre-selected.
 
-**Commit and push this to `main`.** Dispatch reads it from
-`refs/remotes/origin/main` after a successful `git fetch`, never from your working
-tree and never from local `HEAD`. An unpushed local edit grants nothing; a revocation
-pushed to `origin/main` takes effect on the next pass.
+**Commit and push this to `main`.** On each pass dispatch runs `git fetch`, then reads
+it from the `origin/main` commit it has confirmed against the remote's current `main`
+tip (`git ls-remote origin refs/heads/main`), never from your working tree and never
+from local `HEAD`. An unpushed local edit grants nothing; a revocation pushed to
+`origin/main` takes effect on the next pass. A `main` that was deleted or renamed on
+the remote, or whose tip dispatch cannot confirm, denies unattended planning for that
+pass (`fetch_unconfirmed`, retryable) instead of trusting a stale local copy.
 
 A plan approved this way says so. Its front matter carries `approval: lean`, and the
 plan comment posted to the ticket opens with the auto-approved banner instead of the
@@ -306,7 +309,7 @@ The switch itself doesn't need hand-editing:
 
 ```bash
 cenci dispatch plan-refined on       # or: off
-cenci dispatch plan-refined status   # fleet flag + this repo's remote-confirmed autonomy + combined verdict
+cenci dispatch plan-refined status   # fleet flag + this repo's autonomy (tracking ref as of the last fetch, unconfirmed) + combined verdict
 ```
 
 writes `planRefined` with an atomic, key-preserving update (creating the file if
@@ -339,9 +342,10 @@ than `planStalenessTolerance` commits behind becomes an autonomous re-plan.
 > suppresses unattended planning pickups/re-plans for lean repos here — narrowing
 > only, per machine: it never grants lean to a repo that hasn't committed it, and a
 > repo whose commit was already denied for another reason keeps that reason. `cenci
-> planning attended status` shows the fleet flag, this repo's remote-confirmed
-> autonomy, `dispatch.planRefined`, and the same combined verdict `dispatch
-> plan-refined status` prints — the two commands can never disagree. It also changes how
+> planning attended status` shows the fleet flag, this repo's autonomy (the
+> tracking-ref value as of the last fetch, not confirmed against the remote, so it
+> can lag the dispatch gate), `dispatch.planRefined`, and the same combined
+> verdict `dispatch plan-refined status` prints — the two commands can never disagree. It also changes how
 > a planning session that *does* run behaves; see [The attended override](#the-attended-override).
 
 ### 3. Declare what a merge is allowed to touch
@@ -710,7 +714,7 @@ comment at all — if there is no comment, no automerge landed.
 | Merging for one repo | Remove/narrow the repo's `automerge` block on the base branch | Next tick |
 | Merging for one ticket | Remove `automerge:ok` from the issue | Next tick |
 | Autonomous planning, everywhere | `cenci dispatch plan-refined off` | Next pass |
-| Autonomous planning for one repo | Push `planning.autonomy` off `"lean"` to `origin/main` | Next pass with a successful fetch |
+| Autonomous planning for one repo | Push `planning.autonomy` off `"lean"` to `origin/main` | Next pass whose fetch confirms the remote `main` tip |
 | Autonomous planning on this machine only, while a human is around | `cenci planning attended on` | Next dispatch pass; and the next planning session you launch |
 | Lean refinement for one repo | Set `refinement.autonomy` to anything other than `"lean"` | Next `/cenci:refine` |
 | Applying refinement without final review | Set `refinement.confirmBeforeApply: true` | Next `/cenci:refine` |
@@ -718,7 +722,11 @@ comment at all — if there is no comment, no automerge landed.
 | All dispatch | `cenci dispatch loop off` | Immediately; in-flight sessions finish |
 
 A revocation pushed to `origin/main` is honored even if your local checkout still has
-`"lean"` cached — the remote object is the only authority.
+`"lean"` cached — the remote object is the only authority. Deleting or renaming the
+remote `main` is honored too: the local `origin/main` copy is only trusted while it
+matches the remote's current `main` tip, so a deleted, renamed or unconfirmable remote
+`main` (including a custom `remote.origin.fetch` that never updates it) denies
+unattended planning with `fetch_unconfirmed` until a pass confirms the tip again.
 
 ## Known limits
 
