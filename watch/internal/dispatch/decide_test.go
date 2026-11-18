@@ -1408,9 +1408,205 @@ func planningCandidateInputs() Inputs {
 	in := baseInputs()
 	in.Config.PlanRefined = true
 	in.RepoAutonomy = leanAutonomy("o/r")
+	in.PlanningTrust = trustedPlanning("o/r#42")
 	in.Tickets[0].Labels = []string{"Refined"}
 	in.Plans = nil
 	return in
+}
+
+// trustedPlanning builds an Inputs.PlanningTrust map marking every key
+// trusted (#847). The trust gate is default-deny on a map miss, so every
+// planning or re-plan fixture that expects to reach a later gate carries an
+// explicit trusted entry for its own ticket, mirroring leanAutonomy.
+func trustedPlanning(keys ...string) map[string]PlanningTrustProbe {
+	m := make(map[string]PlanningTrustProbe, len(keys))
+	for _, k := range keys {
+		m[k] = PlanningTrustProbe{Class: PlanningTrustTrusted}
+	}
+	return m
+}
+
+// -- #847: planning trust gate ------------------------------------------------
+
+// planningTrustReasonCases is every trust-map entry shape and the exact
+// fresh-pickup reason it must produce.
+var planningTrustReasonCases = []struct {
+	name     string
+	entry    *PlanningTrustProbe // nil is a map miss
+	reason   string
+	dispatch bool
+}{
+	{"trusted", &PlanningTrustProbe{Class: PlanningTrustTrusted}, "plan — Refined, no plan file", true},
+	{"author denied", &PlanningTrustProbe{Class: PlanningTrustAuthorDenied}, "planning held: ticket author lacks write permission", false},
+	{"comment denied", &PlanningTrustProbe{Class: PlanningTrustCommentDenied, CommentID: 1234567}, "planning held: comment 1234567 author not trusted", false},
+	{"trust unresolved", &PlanningTrustProbe{Class: PlanningTrustUnresolved}, "planning held: ticket trust unresolved", false},
+	{"permission unresolved", &PlanningTrustProbe{Class: PlanningTrustPermissionUnresolved}, "planning held: ticket trust permission unresolved", false},
+	{"map miss", nil, "planning held: ticket trust probe unrecognized", false},
+	{"zero-value class", &PlanningTrustProbe{}, "planning held: ticket trust probe unrecognized", false},
+	{"unknown class", &PlanningTrustProbe{Class: PlanningTrust("bogus")}, "planning held: ticket trust probe unrecognized", false},
+	{"comment denied with zero id", &PlanningTrustProbe{Class: PlanningTrustCommentDenied}, "planning held: ticket trust probe unrecognized", false},
+	{"comment denied with negative id", &PlanningTrustProbe{Class: PlanningTrustCommentDenied, CommentID: -3}, "planning held: ticket trust probe unrecognized", false},
+	{"trusted class carrying an id stays trusted", &PlanningTrustProbe{Class: PlanningTrustTrusted, CommentID: 5}, "plan — Refined, no plan file", true},
+}
+
+// TestDecidePlanningTrust_FreshPickupReasons covers AC1-AC5 and AC7 on the
+// fresh Refined pickup: each trust class maps to its exact, content-distinct
+// reason, and only a trusted entry dispatches.
+func TestDecidePlanningTrust_FreshPickupReasons(t *testing.T) {
+	for _, c := range planningTrustReasonCases {
+		t.Run(c.name, func(t *testing.T) {
+			in := planningCandidateInputs()
+			in.PlanningTrust = map[string]PlanningTrustProbe{}
+			if c.entry != nil {
+				in.PlanningTrust["o/r#42"] = *c.entry
+			}
+			got := Decide(in)
+			if len(got) != 1 {
+				t.Fatalf("got %d decisions, want 1", len(got))
+			}
+			d := got[0]
+			if d.Reason != c.reason {
+				t.Errorf("reason = %q, want %q", d.Reason, c.reason)
+			}
+			if c.dispatch != (d.Action == ActionDispatch) {
+				t.Errorf("action = %q, want dispatch=%v", d.Action, c.dispatch)
+			}
+			if c.dispatch && !d.Planning {
+				t.Error("a trusted pickup must still dispatch with Planning: true")
+			}
+		})
+	}
+}
+
+// TestDecidePlanningTrust_NilMapHoldsFreshPickup: a nil trust map (a pass that
+// never probed) is a map miss and fails closed.
+func TestDecidePlanningTrust_NilMapHoldsFreshPickup(t *testing.T) {
+	in := planningCandidateInputs()
+	in.PlanningTrust = nil
+	assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, "planning held: ticket trust probe unrecognized", ""}})
+}
+
+// TestDecidePlanningTrust_ReplanReasons covers AC8 (and AC7 on the re-plan
+// path): a stale Planned ticket that fails the trust gate composes the trust
+// reason with the existing "plan stale, re-plan blocked: " prefix.
+func TestDecidePlanningTrust_ReplanReasons(t *testing.T) {
+	for _, c := range planningTrustReasonCases {
+		t.Run(c.name, func(t *testing.T) {
+			in := staleReplanInputs()
+			in.PlanningTrust = map[string]PlanningTrustProbe{}
+			if c.entry != nil {
+				in.PlanningTrust["o/r#42"] = *c.entry
+			}
+			want := "plan stale, re-plan blocked: " + c.reason
+			if c.dispatch {
+				want = "re-plan — plan stale"
+			}
+			got := Decide(in)
+			if len(got) != 1 {
+				t.Fatalf("got %d decisions, want 1", len(got))
+			}
+			if got[0].Reason != want {
+				t.Errorf("reason = %q, want %q", got[0].Reason, want)
+			}
+			if c.dispatch != (got[0].Action == ActionDispatch) {
+				t.Errorf("action = %q, want dispatch=%v", got[0].Action, c.dispatch)
+			}
+			if c.dispatch && (!got[0].Planning || !got[0].Replan) {
+				t.Error("a trusted re-plan must still dispatch with Planning and Replan set")
+			}
+		})
+	}
+}
+
+// TestDecidePlanningTrust_NonCandidatesKeepTheirReasons: a ticket the
+// candidate predicate rejects never consults the trust map, so an empty map
+// leaves today's reasons byte-identical.
+func TestDecidePlanningTrust_NonCandidatesKeepTheirReasons(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(in *Inputs)
+		reason string
+	}{
+		{"assigned to someone else", func(in *Inputs) { in.Tickets[0].Assignees = []string{"someone"} }, "assigned to @someone"},
+		{"multiple assignees", func(in *Inputs) { in.Tickets[0].Assignees = []string{"octocat", "someone"} }, "multiple assignees"},
+		{"unassigned", func(in *Inputs) { in.Tickets[0].Assignees = nil }, "unassigned"},
+		{"already Working", func(in *Inputs) { in.Tickets[0].Labels = []string{"Refined", "Working"} }, "already Working"},
+		{"Blocked", func(in *Inputs) { in.Tickets[0].Labels = []string{"Refined", "Blocked"} }, "blocked"},
+		{"repo not lean", func(in *Inputs) { in.RepoAutonomy = map[string]RepoAutonomy{"o/r": RepoAutonomyInteractive} }, "repo autonomy not lean"},
+		{"attended-narrowed repo", func(in *Inputs) { in.RepoAutonomy = map[string]RepoAutonomy{"o/r": RepoAutonomyAttended} }, reasonAutonomyAttended},
+		{"planRefined off", func(in *Inputs) { in.Config.PlanRefined = false }, "not Planned"},
+		{"main sync diverged", func(in *Inputs) { in.Tickets[0].MainSync = MainSyncDiverged }, "local main diverged"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			in := planningCandidateInputs()
+			in.PlanningTrust = nil
+			c.mutate(&in)
+			assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, c.reason, ""}})
+		})
+	}
+}
+
+// TestDecidePlanningTrust_CaseInsensitiveSoleAssigneeIsACandidate: the
+// predicate compares the assignee with CurrentUser case-insensitively, like
+// rule 2, so a differently-cased sole assignee is still gated.
+func TestDecidePlanningTrust_CaseInsensitiveSoleAssigneeIsACandidate(t *testing.T) {
+	in := planningCandidateInputs()
+	in.Tickets[0].Assignees = []string{"OctoCat"}
+	in.PlanningTrust = nil
+	assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, "planning held: ticket trust probe unrecognized", ""}})
+}
+
+// TestDecidePlanningTrust_HeldPickupTakesNoSlot: a held planning candidate
+// never counts against the concurrency cap, so a later trusted candidate in
+// the same pass still dispatches at cap 1.
+func TestDecidePlanningTrust_HeldPickupTakesNoSlot(t *testing.T) {
+	in := planningCandidateInputs()
+	in.Config.ConcurrencyCap = 1
+	in.Tickets = []Ticket{
+		{Repo: "o/r", Number: 41, Labels: []string{"Refined"}, Assignees: []string{"octocat"}},
+		{Repo: "o/r", Number: 42, Labels: []string{"Refined"}, Assignees: []string{"octocat"}},
+	}
+	in.PlanningTrust = map[string]PlanningTrustProbe{
+		"o/r#41": {Class: PlanningTrustCommentDenied, CommentID: 77},
+		"o/r#42": {Class: PlanningTrustTrusted},
+	}
+	got := Decide(in)
+	if len(got) != 2 || got[0].Reason != "planning held: comment 77 author not trusted" || got[1].Action != ActionDispatch {
+		t.Fatalf("decisions = %+v, want #41 held and #42 dispatched", got)
+	}
+}
+
+// TestDecidePlanningTrust_OrdinaryPlannedAndResumeIgnoreTrust covers AC13:
+// ordinary Planned dispatch and an answered Input Needed resume never consult
+// the trust map, whatever it holds.
+func TestDecidePlanningTrust_OrdinaryPlannedAndResumeIgnoreTrust(t *testing.T) {
+	denied := map[string]PlanningTrustProbe{"o/r#42": {Class: PlanningTrustAuthorDenied}}
+
+	t.Run("ordinary Planned", func(t *testing.T) {
+		for _, trust := range []map[string]PlanningTrustProbe{nil, denied} {
+			in := baseInputs()
+			in.Config.PlanRefined = true
+			in.RepoAutonomy = leanAutonomy("o/r")
+			in.PlanningTrust = trust
+			assertDecisions(t, Decide(in), []wantDecision{{42, ActionDispatch, "dispatch", "claude"}})
+		}
+	})
+	t.Run("resume", func(t *testing.T) {
+		for _, trust := range []map[string]PlanningTrustProbe{nil, denied} {
+			in := baseInputs()
+			in.Config.PlanRefined = true
+			in.RepoAutonomy = leanAutonomy("o/r")
+			in.Tickets[0].Labels = []string{"Input Needed"}
+			in.Plans[0].Status = "awaiting-input"
+			in.Answers = map[string]AnswerProbe{"o/r#42": AnswerProbeAnswered}
+			in.PlanningTrust = trust
+			got := Decide(in)
+			if len(got) != 1 || got[0].Action != ActionDispatch || !got[0].Resume || got[0].Reason != "resume — human answered" {
+				t.Errorf("decisions = %+v, want an unchanged resume dispatch", got)
+			}
+		}
+	})
 }
 
 // TestDecidePlanRefinedFlagOff_RefinedNoPlanSkipsNotPlanned locks in the
@@ -1624,6 +1820,7 @@ func TestDecidePlanningPickup_CountsIntoDispatchedThisPass(t *testing.T) {
 	in := planningCandidateInputs()
 	in.Config.ConcurrencyCap = 1
 	in.Tickets = append(in.Tickets, Ticket{Repo: "o/r", Number: 43, Labels: []string{"Refined"}, Assignees: []string{"octocat"}})
+	in.PlanningTrust = trustedPlanning("o/r#42", "o/r#43")
 
 	got := Decide(in)
 	if len(got) != 2 {
@@ -1644,6 +1841,7 @@ func TestDecideReplan_StalePlanFlagOnDispatches(t *testing.T) {
 	in := baseInputs()
 	in.Config.PlanRefined = true
 	in.RepoAutonomy = leanAutonomy("o/r")
+	in.PlanningTrust = trustedPlanning("o/r#42")
 	in.Plans[0].CommitsBehind = 10 // stale: exceeds testConfig's tolerance of 5
 
 	got := Decide(in)
@@ -1676,6 +1874,7 @@ func TestDecideReplan_StillBlockedByDependencyGate(t *testing.T) {
 	in := baseInputs()
 	in.Config.PlanRefined = true
 	in.RepoAutonomy = leanAutonomy("o/r")
+	in.PlanningTrust = trustedPlanning("o/r#42")
 	in.Plans[0].CommitsBehind = 10 // stale
 	in.Tickets[0].DependsOn = []int{100}
 	in.Tickets[0].DependencyStates = map[int]DependencyState{100: DependencyStateOpen}
@@ -1692,6 +1891,7 @@ func TestDecideReplan_StillBlockedBySiblingSerialization(t *testing.T) {
 	in := baseInputs()
 	in.Config.PlanRefined = true
 	in.RepoAutonomy = leanAutonomy("o/r")
+	in.PlanningTrust = trustedPlanning("o/r#42")
 	in.Tickets = []Ticket{
 		{Repo: "o/r", Number: 41, Labels: []string{"Working"}},
 		{Repo: "o/r", Number: 42, Labels: []string{"Planned"}, Assignees: []string{"octocat"}},
@@ -1742,6 +1942,7 @@ func TestDecideReplan_StillBlockedByCapacityAndBudgetGates(t *testing.T) {
 			in := baseInputs()
 			in.Config.PlanRefined = true
 			in.RepoAutonomy = leanAutonomy("o/r")
+			in.PlanningTrust = trustedPlanning("o/r#42")
 			in.Plans[0].CommitsBehind = 10
 			tc.mutate(&in)
 			assertDecisions(t, Decide(in), []wantDecision{tc.want})
@@ -2027,6 +2228,7 @@ func TestDecideAutonomyGate_ReplanLeanDispatches(t *testing.T) {
 	in := baseInputs()
 	in.Config.PlanRefined = true
 	in.RepoAutonomy = leanAutonomy("o/r")
+	in.PlanningTrust = trustedPlanning("o/r#42")
 	in.Plans[0].CommitsBehind = 10 // stale
 	assertDecisions(t, Decide(in), []wantDecision{{42, ActionDispatch, "re-plan — plan stale", "claude"}})
 }
@@ -3280,6 +3482,7 @@ func staleReplanInputs() Inputs {
 	in := baseInputs()
 	in.Config.PlanRefined = true
 	in.RepoAutonomy = leanAutonomy("o/r")
+	in.PlanningTrust = trustedPlanning("o/r#42")
 	in.Plans[0].CommitsBehind = 10
 	return in
 }
@@ -3924,6 +4127,7 @@ func TestDecideAuthorizationHold_NotAppliedToResumePlanningOrReplan(t *testing.T
 		in := baseInputs()
 		in.Config.PlanRefined = true
 		in.RepoAutonomy = leanAutonomy("o/r")
+		in.PlanningTrust = trustedPlanning("o/r#42")
 		in.Plans[0].CommitsBehind = 10
 		in.Tickets[0].Authorization.Kind = pipeline.AuthorizationHeld
 		got := Decide(in)

@@ -318,10 +318,21 @@ file becomes a planning pickup, and a `Planned` ticket whose plan has fallen mor
 than `planStalenessTolerance` commits behind becomes an autonomous re-plan.
 
 > **Trust boundary.** A planning pickup consumes the ticket body and comments as its
-> primary input, with no author-authorization check on that text. Do not enable
+> primary input, so dispatch holds a planning pickup or autonomous re-plan unless the
+> issue author and every commenter currently hold `write` or `admin` on the repo
+> (bots never count). The check is re-resolved every pass, with nothing carried over,
+> and a held ticket reads `planning held: ...` (a held re-plan reads `plan stale,
+> re-plan blocked: planning held: ...`). To release a held ticket, delete the
+> untrusted comment (the next pass releases it), grant the author or commenter
+> `write` access, or plan the ticket attended (`/cenci:implement <id>` in an attended
+> session). **Not covered:** a comment posted between the gate and the launched
+> session's own read of the ticket is not caught (a time-of-check/time-of-use window);
+> closing it needs flow-side filtering inside the session. Still, do not enable
 > `planRefined` for a repo that accepts issues from untrusted parties. (The
-> `Input Needed` resume path is stricter: the replying author must currently hold
-> `admin` or `write` on the repo, re-resolved every pass.)
+> `Input Needed` resume path has its own, unchanged rule: the replying author must
+> currently hold `admin` or `write`, re-resolved every pass. Ordinary `Planned`
+> pickup carries the plan-authorization hold instead.) Details:
+> [watch's dispatch-reconcile rules](../watch/docs/dispatch-reconcile.md#planning-trust-gate-847).
 
 > **Attended mode (switch 5).** When you're sitting at this machine's keyboard and
 > could just answer a clarifying question yourself, `cenci planning attended on`
@@ -592,6 +603,7 @@ follow the reason after `; `; it never changes the outcome.
 | `skip: session unconfigured` | The repo has no `repos[].session`; set one with `cenci dispatch enroll --session <name>` |
 | `skip: session absent` | The configured tmux session does not exist on the probed server; start it with `cenci up` (session `cenci`) or point `repos[].session` at an existing session |
 | `skip: session probe failed` | tmux could not be asked whether the session exists |
+| `skip: planning held: <why>` (a re-plan: `skip: plan stale, re-plan blocked: planning held: <why>`) | The planning trust gate held an unattended pickup or re-plan; `<why>` is `ticket author lacks write permission`, `comment <id> author not trusted`, `ticket trust unresolved`, `ticket trust permission unresolved` or `ticket trust probe unrecognized`. See the Trust boundary note above and [watch's planning trust gate](../watch/docs/dispatch-reconcile.md#planning-trust-gate-847) |
 | `...; session not probed (dry-run)` | A preview: dry runs never ask tmux, so the session is unverified |
 | `...; legacy approval (unrecorded provenance)` | An execution already under way before authorization records existed; it continues |
 

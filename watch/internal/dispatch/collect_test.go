@@ -121,6 +121,43 @@ esac
 	}
 }
 
+// TestCollectRepoTickets_AuthorFromIssueList covers #847's author source: the
+// issue author comes from the one `gh issue list` call (`author` in its --json
+// list), never from an extra per-ticket gh call. A user author, a GitHub App
+// author (`app/<slug>`, `is_bot`) and a missing author key all decode without
+// failing the repo.
+func TestCollectRepoTickets_AuthorFromIssueList(t *testing.T) {
+	callLog := installMilestoneFakeGH(t, `[`+
+		`{"number":1,"title":"A","labels":[],"assignees":[],"author":{"id":"U_1","is_bot":false,"login":"octocat","name":"Octo Cat"}},`+
+		`{"number":2,"title":"B","labels":[],"assignees":[],"author":{"id":"BOT_1","is_bot":true,"login":"app/github-actions","name":""}},`+
+		`{"number":3,"title":"C","labels":[],"assignees":[]},`+
+		`{"number":4,"title":"D","labels":[],"assignees":[],"author":null}`+
+		`]`)
+
+	tickets, err := collectRepoTickets(RepoConfig{Repo: "o/r"}, MainSyncSkipped, true, io.Discard)
+	if err != nil {
+		t.Fatalf("collectRepoTickets returned unexpected error: %v", err)
+	}
+	want := map[int]struct {
+		login string
+		isBot bool
+	}{1: {"octocat", false}, 2: {"app/github-actions", true}, 3: {"", false}, 4: {"", false}}
+	if len(tickets) != len(want) {
+		t.Fatalf("got %d tickets, want %d", len(tickets), len(want))
+	}
+	for _, tk := range tickets {
+		w := want[tk.Number]
+		if tk.Author != w.login || tk.AuthorIsBot != w.isBot {
+			t.Errorf("#%d author = (%q, %v), want (%q, %v)", tk.Number, tk.Author, tk.AuthorIsBot, w.login, w.isBot)
+		}
+	}
+	for _, call := range readGHCalls(t, callLog) {
+		if !strings.HasPrefix(call, "issue list ") && !strings.HasPrefix(call, "api graphql") {
+			t.Errorf("unexpected gh call %q: the author must come from the issue list alone", call)
+		}
+	}
+}
+
 // -- #1385: milestone collection for the machine-local pickup filter --------
 
 // installMilestoneFakeGH installs a fake gh that serves issuesJSON for every
@@ -225,8 +262,8 @@ func TestCollectRepoTickets_MilestoneShapes(t *testing.T) {
 		switch {
 		case strings.HasPrefix(call, "issue list "):
 			issueLists++
-			if !strings.Contains(call, " --json number,title,body,labels,assignees,blockedBy,milestone ") {
-				t.Errorf("issue list argv = %q, want the --json field list ending in milestone", call)
+			if !strings.Contains(call, " --json number,title,body,labels,assignees,blockedBy,milestone,author ") {
+				t.Errorf("issue list argv = %q, want the --json field list ending in milestone,author", call)
 			}
 			if strings.Contains(call, "--milestone") || strings.Contains(call, "--label") || strings.Contains(call, "--search") {
 				t.Errorf("issue list argv = %q, must stay unfiltered (no --milestone/--label/--search)", call)
@@ -408,7 +445,7 @@ esac
 // TestCollectRepoTickets_IssueListLargeGhOutputOnFailure_ErrorBounded pins
 // #852 second review round, finding B: the `gh issue list` error path was
 // newly introduced by this ticket's execGh migration and left unbounded --
-// `--json number,title,body,labels,assignees,blockedBy,milestone --limit 200` can return up to
+// `--json number,title,body,labels,assignees,blockedBy,milestone,author --limit 200` can return up to
 // 200 full issue bodies (potentially attacker-authored content on a public
 // repo), and a ghTimeout/WaitDelay kill mid-stream can leave a large partial
 // payload spliced into the propagated error verbatim. Uses

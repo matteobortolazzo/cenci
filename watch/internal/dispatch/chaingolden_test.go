@@ -278,6 +278,9 @@ func TestGoldenGraph_RoundTripsThroughCollectAndDecide(t *testing.T) {
 		})
 	}
 	h.commitAndPushConfig(chainRepoConfigLean)
+	// The planning trust gate (#847) needs the issue author (the world's
+	// current login) to hold write permission for the pickup verdict.
+	h.seedPermission("octocat", "admin")
 
 	cfg := chainConfig(h)
 	decisions, _ := chainRunOnce(t, cfg, mut, true /* dry-run: this test only observes collection/decision, never a real dispatch */)

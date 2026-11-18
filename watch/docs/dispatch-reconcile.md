@@ -796,3 +796,92 @@ that is never persisted.
 
 These are pinned by the chain suite in `chain_negative_dispatch_test.go`
 (`docs/pipeline-coverage-map.md`'s `#1464` table).
+
+## Planning trust gate (#847)
+
+An unattended planning session (a fresh `Refined` pickup or an autonomous re-plan)
+reads the ticket body and every comment as its main input. `Decide` therefore holds
+the pickup unless the issue author and every commenter are trusted, the same rule as
+the `Input Needed` resume path (#827/#882) applied to the planning paths. Ordinary
+`Planned` dispatch (the #1464 plan-authorization hold) and the resume gate are
+unchanged, and their reasons stay byte-identical.
+
+**The trust rule.** A login is trusted when it is not a bot (`isBotLogin`, which covers
+`app/<slug>` and `*[bot]`, or gh's `is_bot` for the author and REST `user.type == "Bot"`
+for a commenter), matches `githubLoginPattern`, and currently holds `admin` or `write`
+in the top-level `permission` field of
+`repos/<o>/<r>/collaborators/<login>/permission` (`role_name` is never consulted). A
+commenter must also pass the `OWNER`/`MEMBER`/`COLLABORATOR` `author_association`
+prefilter, so a failing comment never costs a permission lookup. The issue author has
+no prefilter: `gh issue list --json author` carries no association, so the permission
+endpoint is the only signal. The `<!-- cenci-` marker is never consulted and never
+grants trust. An invalid login is *denied* here, unlike the resume path, which reports
+it as unresolved.
+
+**Where it sits.** The probe is `resolvePlanningTrust` (`planningtrust.go`), called in
+`RunOnce` right after `resolveAnswerProbes` (dry runs included: it is read-only) and
+fed into `Inputs.PlanningTrust`, keyed by `planKey`. `Decide` stays pure and consults
+the map in three places:
+
+1. Fresh `Refined` pickup: right after `autonomyGateSkip`, ahead of the board-state
+   and assignee rules, but only for a real candidate (`planningTrustCandidate`). A
+   ticket that is not one (assigned to someone else, `Working`, `Blocked`, ...) falls
+   through to today's reason, e.g. `assigned to @x`.
+2. Autonomous re-plan: right after the re-plan's own `autonomyGateSkip`.
+3. Backstop: the final `Planning: true` return. A planning or re-plan decision is
+   never emitted without an explicit `PlanningTrustTrusted` entry, even if the two
+   sites above and the probe ever drift apart.
+
+`planningTrustCandidate` is one pure predicate shared by the probe and the fresh-pickup
+site: not `Input Needed`, `planRefined` on, the repo resolved `RepoAutonomyLean` (after
+the `planning.attended` narrowing), assigned only to `CurrentUser`
+(case-insensitive), not `Working`/`Blocked`, not already held by the main-sync, plan
+inventory, machine-local filter or plan-probe gates, and either a fresh pickup or a
+stale re-plan. With `planRefined` off, a non-lean (including attended-narrowed) repo or
+no candidate, the probe makes zero `gh` calls.
+
+**The classes** (`PlanningTrust`, a closed set with no permissive zero value) and their
+reasons. A held re-plan reads `plan stale, re-plan blocked: <reason>`.
+
+| Class | Reason |
+|---|---|
+| `author_denied` | `planning held: ticket author lacks write permission` |
+| `comment_denied` | `planning held: comment <id> author not trusted` (the REST comment ID, lowest first; never a login or body text) |
+| `unresolved` | `planning held: ticket trust unresolved` (comments call failed, timed out, went over `maxProbeStdoutBytes`, or returned malformed JSON or a non-positive comment ID; or the probe budget is spent) |
+| `permission_unresolved` | `planning held: ticket trust permission unresolved` (a permission lookup could not settle: API error, timeout, truncation, malformed or missing `permission`, an unknown value, or the lookup cap reached) |
+| map miss, unknown class, `comment_denied` with ID <= 0 | `planning held: ticket trust probe unrecognized` |
+
+**Precedence.** Every comment is evaluated with no short-circuit, so the reported
+reason never depends on scan order. Unresolved beats denied (#882): comments-read
+unresolved, then permission unresolved, then author denied, then comment denied (lowest
+ID). The comments read happens first, and when it fails no permission lookup is made.
+
+**Budgets.** One comments call per candidate, at most `maxPlanningTrustProbes` (50) per
+pass, ordered by ticket number ascending (the key `Decide` sorts by), then by repo
+ascending. The repo tie-break is the probe's own: `Decide` sorts by number only and
+leaves equal numbers in no defined order, so when one number appears in several repos at
+the budget boundary, the held candidate may not be the one `Decide` reaches first. That
+is fail-safe, because the held candidate reports `planning held: ticket trust
+unresolved` and is never wrongly trusted. Each
+call goes through `execGhBoundedCtx` (`gh api repos/<o>/<r>/issues/<n>/comments?per_page=100
+--paginate`), capped at `maxProbeStdoutBytes` and bounded by `planningTrustProbeTimeout`.
+Permission lookups go through the probe's own per-pass `permissionCache`, capped at
+`maxPermissionLookupsPerRepo`, with one call per distinct login per repo. That cache is
+separate from the resume path's, so planning lookups never spend the resume path's
+budget. Probe failures are only logged and never feed `collectErr`. Log lines carry
+only repo#n, the failure class and collapsed, truncated stderr: never comment or issue
+body text, and never ` skip:` or ` dispatch ` outside the decision line.
+
+**No state is carried across passes.** The cache and the verdicts die with the pass, so
+deleting the untrusted comment, or the author gaining write access, releases the ticket
+on the next pass, and a revoked collaborator holds it on the next pass.
+
+**Operator remedies.** Delete the untrusted comment, grant the author or commenter
+`write` access, or plan the ticket attended (`/cenci:implement <id>` in an attended
+session).
+
+**Known gap (TOCTOU).** A comment posted between the gate and the launched session's own
+read of the ticket is not caught. `Decide` can only allow or refuse a launch, and the
+session reads the ticket itself, so closing the window needs flow-side session filtering,
+a cross-project change that is out of scope here. Body edits are not traced separately:
+GitHub lets only the author and users with write access edit an issue body.

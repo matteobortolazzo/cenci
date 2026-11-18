@@ -79,10 +79,10 @@ func collectRepoTickets(rc RepoConfig, sync MainSync, resolveDeps bool, out io.W
 	repo := rc.Repo
 	stdout, stderr, err := execGh("issue", "list",
 		"--repo", repo, "--state", "open",
-		"--json", "number,title,body,labels,assignees,blockedBy,milestone", "--limit", "200")
+		"--json", "number,title,body,labels,assignees,blockedBy,milestone,author", "--limit", "200")
 	if err != nil {
 		// Detail is truncated to maxProbeLogDetailBytes (#852 second review
-		// round, finding B): `--json number,title,body,labels,assignees,blockedBy,milestone
+		// round, finding B): `--json number,title,body,labels,assignees,blockedBy,milestone,author
 		// --limit 200` can return up to 200 full issue bodies (potentially
 		// attacker-authored content on a public repo) in stdout, and a
 		// ghTimeout/WaitDelay kill mid-stream can leave that large partial
@@ -114,6 +114,13 @@ func collectRepoTickets(rc RepoConfig, sync MainSync, resolveDeps bool, out io.W
 		// unknown for this one ticket (classifyMilestone), never fail the
 		// decode of the whole inventory. A missing key leaves it nil.
 		Milestone json.RawMessage `json:"milestone"`
+		// Author (#847) feeds the planning trust probe; it comes from this
+		// call so no per-ticket gh call is needed to find it. A missing key or
+		// null leaves the login empty, which the trust classifier denies.
+		Author struct {
+			Login string `json:"login"`
+			IsBot bool   `json:"is_bot"`
+		} `json:"author"`
 	}
 	if err := json.Unmarshal([]byte(stdout), &issues); err != nil {
 		return nil, fmt.Errorf("parsing issues for %s: %w", repo, err)
@@ -195,6 +202,8 @@ func collectRepoTickets(rc RepoConfig, sync MainSync, resolveDeps bool, out io.W
 			Assignees:           assignees,
 			HasOpenPR:           openPR[is.Number],
 			Agent:               agentFromLabels(labels),
+			Author:              is.Author.Login,
+			AuthorIsBot:         is.Author.IsBot,
 			Stage:               state.Stage,
 			StageProbe:          state.Probe,
 			MainSync:            sync,
