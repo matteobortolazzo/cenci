@@ -1173,24 +1173,42 @@ func TestResumeInterruptedComment_SharesAttemptMarkerButContentDistinctFromRetry
 	}
 }
 
-// installFakeGHComments installs a fake `gh` that answers with a
-// `{"comments":[{"body":...}]}` payload holding the given comment bodies. The
-// payload is written to a file and `cat`, rather than shell-quoted inline,
-// since comment bodies contain apostrophes (e.g. "ticket's") that would break a
-// single-quoted shell literal. It uses installFakeGHOnPath (not installFakeGH)
-// because the script shells out to the real `cat`, which installFakeGH's
-// wholesale PATH replacement would make unresolvable.
-func installFakeGHComments(t *testing.T, bodies ...string) {
+// fakeCommentAuthor is the `author` object `gh issue view --json comments`
+// reports for each comment.
+type fakeCommentAuthor struct {
+	Login string `json:"login"`
+}
+
+// fakeAuthoredComment is one comment in a `--json comments` fixture. A nil
+// Author encodes as `"author": null` (#868 edge case 1: a deleted user).
+type fakeAuthoredComment struct {
+	Author *fakeCommentAuthor `json:"author"`
+	Body   string             `json:"body"`
+}
+
+// commentBy is a fixture comment authored by login.
+func commentBy(login, body string) fakeAuthoredComment {
+	return fakeAuthoredComment{Author: &fakeCommentAuthor{Login: login}, Body: body}
+}
+
+// fakeViewer is the active gh login every authored-comment fixture and fake
+// `gh api user` answer agree on, so a fixture comment by fakeViewer is the
+// operator's own (#868).
+const fakeViewer = "octocat"
+
+// writeAuthoredCommentsFixture writes a `{"comments":[{"author":{"login":...},
+// "body":...}]}` payload to a temp file and returns its path. The payload is
+// written to a file and `cat`, rather than shell-quoted inline, since comment
+// bodies contain apostrophes (e.g. "ticket's") that would break a
+// single-quoted shell literal.
+func writeAuthoredCommentsFixture(t *testing.T, comments ...fakeAuthoredComment) string {
 	t.Helper()
-	type payloadComment struct {
-		Body string `json:"body"`
+	if comments == nil {
+		comments = []fakeAuthoredComment{} // gh reports an empty thread as [], never null
 	}
 	payload := struct {
-		Comments []payloadComment `json:"comments"`
-	}{}
-	for _, b := range bodies {
-		payload.Comments = append(payload.Comments, payloadComment{Body: b})
-	}
+		Comments []fakeAuthoredComment `json:"comments"`
+	}{Comments: comments}
 	data, err := json.Marshal(payload)
 	if err != nil {
 		t.Fatalf("marshaling fixture payload: %v", err)
@@ -1199,7 +1217,118 @@ func installFakeGHComments(t *testing.T, bodies ...string) {
 	if err := os.WriteFile(fixture, data, 0o644); err != nil {
 		t.Fatalf("writing fixture payload: %v", err)
 	}
-	installFakeGHOnPath(t, fmt.Sprintf("cat %q\n", fixture))
+	return fixture
+}
+
+// installFakeGHAuthoredComments installs a fake `gh` that answers every call
+// with the given authored comments. It uses installFakeGHOnPath (not
+// installFakeGH) because the script shells out to the real `cat`, which
+// installFakeGH's wholesale PATH replacement would make unresolvable.
+func installFakeGHAuthoredComments(t *testing.T, comments ...fakeAuthoredComment) {
+	t.Helper()
+	installFakeGHOnPath(t, fmt.Sprintf("cat %q\n", writeAuthoredCommentsFixture(t, comments...)))
+}
+
+// installFakeGHComments installs a fake `gh` whose comments carry the given
+// bodies, every one authored by fakeViewer (the operator's own comments).
+func installFakeGHComments(t *testing.T, bodies ...string) {
+	t.Helper()
+	comments := make([]fakeAuthoredComment, 0, len(bodies))
+	for _, b := range bodies {
+		comments = append(comments, commentBy(fakeViewer, b))
+	}
+	installFakeGHAuthoredComments(t, comments...)
+}
+
+// blockquoted prefixes every line of body with "> ", the shape GitHub's
+// "Quote reply" gives a copied comment.
+func blockquoted(body string) string {
+	return "> " + strings.ReplaceAll(body, "\n", "\n> ")
+}
+
+// -- #868: countAttempts trusts only the operator's own unquoted markers --
+
+// TestCountAttempts_TrustRule covers #868 AC1-AC4 and edge cases 1-2 at the
+// gh boundary: only comments whose author.login matches the viewer (ignoring
+// case) count, and only for markers outside `>` lines. Every case decodes a
+// real `--json comments` payload through execGh.
+func TestCountAttempts_TrustRule(t *testing.T) {
+	cases := []struct {
+		name                   string
+		viewer                 string
+		comments               []fakeAuthoredComment
+		wantAttempts, wantOOMs int
+	}{
+		{
+			name:     "AC1: foreign-authored markers only",
+			viewer:   fakeViewer,
+			comments: []fakeAuthoredComment{commentBy("mallory", retryComment(1, "42", "gone")), commentBy("mallory", oomRetryComment(1, 3, 1))},
+		},
+		{
+			name:   "AC2: operator's markers plus foreign copies of each",
+			viewer: fakeViewer,
+			comments: []fakeAuthoredComment{
+				commentBy(fakeViewer, retryComment(1, "42", "gone")),
+				commentBy(fakeViewer, oomRetryComment(1, 3, 1)),
+				commentBy("mallory", retryComment(2, "42", "gone")),
+				commentBy("mallory", oomRetryComment(2, 3, 1)),
+			},
+			wantAttempts: 1, wantOOMs: 1,
+		},
+		{
+			name:         "AC3: author login differs only in case",
+			viewer:       fakeViewer,
+			comments:     []fakeAuthoredComment{commentBy("OctoCat", retryComment(1, "42", "gone")), commentBy("OctoCat", oomRetryComment(1, 3, 1))},
+			wantAttempts: 1, wantOOMs: 1,
+		},
+		{
+			name:   "AC4: operator's markers only on blockquoted lines",
+			viewer: fakeViewer,
+			comments: []fakeAuthoredComment{
+				commentBy(fakeViewer, blockquoted(retryComment(1, "42", "gone"))+"\nQuoting the last retry."),
+				commentBy(fakeViewer, blockquoted(oomRetryComment(1, 3, 1))+"\nQuoting the OOM retry."),
+			},
+		},
+		{
+			name:   "edge case 1: ghost (empty-login) and null authors",
+			viewer: fakeViewer,
+			comments: []fakeAuthoredComment{
+				commentBy("", retryComment(1, "42", "gone")),
+				{Author: nil, Body: retryComment(2, "42", "gone")},
+				{Author: nil, Body: oomRetryComment(1, 3, 1)},
+			},
+		},
+		{
+			name:     "edge case 2: comments posted under the operator's previous account",
+			viewer:   "new-acct",
+			comments: []fakeAuthoredComment{commentBy("old-acct", retryComment(1, "42", "gone")), commentBy("old-acct", oomRetryComment(1, 3, 1))},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			installFakeGHAuthoredComments(t, tc.comments...)
+
+			attempts, ooms, err := countAttempts("o/r", 42, tc.viewer)
+			if err != nil {
+				t.Fatalf("countAttempts returned unexpected error: %v", err)
+			}
+			if attempts != tc.wantAttempts || ooms != tc.wantOOMs {
+				t.Errorf("countAttempts = (%d, %d), want (%d, %d)", attempts, ooms, tc.wantAttempts, tc.wantOOMs)
+			}
+		})
+	}
+}
+
+// TestCountAttempts_EmptyViewerIsAnError pins the #868 default-deny guard: an
+// empty viewer is never a login to compare against, so a ghost comment (empty
+// author login) can never match it -- countAttempts reports an error instead,
+// which RunReconcileOnce turns into an AttemptsUnknown deferral.
+func TestCountAttempts_EmptyViewerIsAnError(t *testing.T) {
+	installFakeGHAuthoredComments(t, commentBy("", retryComment(1, "42", "gone")))
+
+	if _, _, err := countAttempts("o/r", 42, ""); err == nil {
+		t.Fatal("countAttempts with an empty viewer returned nil error, want an error")
+	}
 }
 
 // TestCountAttempts_CountsResumeInterruptedComment is the direct
@@ -1211,7 +1340,7 @@ func installFakeGHComments(t *testing.T, bodies ...string) {
 func TestCountAttempts_CountsResumeInterruptedComment(t *testing.T) {
 	installFakeGHComments(t, resumeInterruptedComment(1, "42-x", "gone"))
 
-	n, _, err := countAttempts("o/r", 42)
+	n, _, err := countAttempts("o/r", 42, fakeViewer)
 	if err != nil {
 		t.Fatalf("countAttempts returned unexpected error: %v", err)
 	}
@@ -1221,15 +1350,15 @@ func TestCountAttempts_CountsResumeInterruptedComment(t *testing.T) {
 }
 
 // TestCountAttemptsRegressionAgainstTheThreeNewMarkers pins that
-// countAttempts' strings.Contains(c.Body, attemptMarker) check still returns
-// 0 for a comment thread containing only the three newly back-filled markers
+// countAttempts' attemptMarker match (on the operator's own comments, #868)
+// still returns 0 for a thread containing only the three newly back-filled markers
 // (failedMarker/planInvalidMarker/reconcileStuckMarker) and no
 // attemptMarker -- none of them must be misclassified as a dispatch-attempt
 // comment.
 func TestCountAttemptsRegressionAgainstTheThreeNewMarkers(t *testing.T) {
 	installFakeGHComments(t, failedComment(3, "42-x", "gone"), planInvalidComment(), reconcileStuckComment())
 
-	n, _, err := countAttempts("o/r", 42)
+	n, _, err := countAttempts("o/r", 42, fakeViewer)
 	if err != nil {
 		t.Fatalf("countAttempts returned unexpected error: %v", err)
 	}
@@ -1254,7 +1383,7 @@ func TestCountAttempts_CountsOOMRetriesSeparately(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			installFakeGHComments(t, tc.bodies...)
 
-			attempts, ooms, err := countAttempts("o/r", 42)
+			attempts, ooms, err := countAttempts("o/r", 42, fakeViewer)
 			if err != nil {
 				t.Fatalf("countAttempts: %v", err)
 			}
@@ -1273,7 +1402,7 @@ func TestCountAttempts_CountsOOMRetriesSeparately(t *testing.T) {
 func TestCountAttempts_LargeGhOutputOnFailure_ErrorBounded(t *testing.T) {
 	installFakeGHOnPath(t, "yes x | tr -d '\\n' | head -c 5000 >&2\nexit 1\n")
 
-	_, _, err := countAttempts("o/r", 42)
+	_, _, err := countAttempts("o/r", 42, fakeViewer)
 	if err == nil {
 		t.Fatal("expected an error")
 	}
@@ -2018,7 +2147,7 @@ func TestReconcilePlanHeal_PlannedAwaitingInput_TerminalLabelsLeftAlone(t *testi
 func TestCountAttempts_DoesNotCountPlanHealComment(t *testing.T) {
 	installFakeGHComments(t, planHealComment())
 
-	n, _, err := countAttempts("o/r", 42)
+	n, _, err := countAttempts("o/r", 42, fakeViewer)
 	if err != nil {
 		t.Fatalf("countAttempts returned unexpected error: %v", err)
 	}
@@ -2040,7 +2169,7 @@ func TestCountAttempts_DoesNotCountPlanHealAwaitingInputComment(t *testing.T) {
 	}
 	installFakeGHComments(t, body)
 
-	n, _, err := countAttempts("o/r", 42)
+	n, _, err := countAttempts("o/r", 42, fakeViewer)
 	if err != nil {
 		t.Fatalf("countAttempts returned unexpected error: %v", err)
 	}

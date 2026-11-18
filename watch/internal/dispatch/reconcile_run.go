@@ -219,7 +219,18 @@ func (m *GHMutator) Comment(repo string, number int, body string) error {
 // error is returned rather than swallowed to 0: the caller must not confuse
 // "no attempts yet" with "could not read", since the counts gate the
 // retry-vs-fail decision.
-func countAttempts(repo string, number int) (attempts, ooms int, err error) {
+//
+// Only cenci's own markers count (#868): a comment is tallied only when its
+// author.login equals viewer (the active gh login, compared ignoring case --
+// cenci posts under the operator's own identity), and only for a marker
+// outside `>`-blockquoted lines (stripBlockquoteLines, the isCenciAuthored
+// rule). A foreign-authored, quote-replied or ghost-authored (empty login)
+// marker therefore never spends RetryBudget or OOMRetryBudget. An empty
+// viewer is an error, never a login to compare against.
+func countAttempts(repo string, number int, viewer string) (attempts, ooms int, err error) {
+	if viewer == "" {
+		return 0, 0, fmt.Errorf("counting attempts for #%d in %s: no active GitHub login to trust", number, repo)
+	}
 	stdout, stderr, err := execGh("issue", "view", strconv.Itoa(number),
 		"--repo", repo, "--json", "comments")
 	if err != nil {
@@ -230,8 +241,13 @@ func countAttempts(repo string, number int) (attempts, ooms int, err error) {
 		// otherwise flood this error string unbounded.
 		return 0, 0, fmt.Errorf("gh issue view #%d in %s: %w: %s", number, repo, err, truncateDetail(collapseLines(stdout+stderr), maxProbeLogDetailBytes))
 	}
+	// A null author (a deleted user) decodes to the zero Login, like an
+	// empty one, and is skipped below.
 	var v struct {
 		Comments []struct {
+			Author struct {
+				Login string `json:"login"`
+			} `json:"author"`
 			Body string `json:"body"`
 		} `json:"comments"`
 	}
@@ -239,10 +255,14 @@ func countAttempts(repo string, number int) (attempts, ooms int, err error) {
 		return 0, 0, fmt.Errorf("parsing comments for #%d in %s: %w", number, repo, err)
 	}
 	for _, c := range v.Comments {
-		if strings.Contains(c.Body, attemptMarker) {
+		if c.Author.Login == "" || !strings.EqualFold(c.Author.Login, viewer) {
+			continue
+		}
+		body := stripBlockquoteLines(c.Body)
+		if strings.Contains(body, attemptMarker) {
 			attempts++
 		}
-		if strings.Contains(c.Body, oomRetryMarker) {
+		if strings.Contains(body, oomRetryMarker) {
 			ooms++
 		}
 	}
@@ -287,7 +307,7 @@ type reconcileDeps struct {
 // attempt counts, runs the pure Reconcile engine, logs every recovery, applies
 // the gh mutations (unless dryRun), and persists the grace map. The daemon
 // consumes result.Failed to badge the snapshot. It also returns the first of
-// the collection/plan/attempt errors encountered during the pass, if any —
+// the collection/plan/login/attempt errors encountered during the pass, if any —
 // all existing logging is unchanged, this only additionally surfaces the
 // error to the caller instead of swallowing it.
 func RunReconcileOnce(cfg Config, mut TicketMutator, dryRun bool, out io.Writer, store ReconcileStore) (ReconcileResult, error) {
@@ -367,11 +387,39 @@ func RunReconcileOnce(cfg Config, mut TicketMutator, dryRun bool, out io.Writer,
 	attempts := make(map[string]int)
 	oomRetries := make(map[string]int)
 	attemptsUnknown := make(map[string]bool)
+
+	// The tally trusts only the active gh login's own markers (#868), so the
+	// login is resolved once per pass -- and, like dispatch.go's "empty passes
+	// need no identity", only when a Working ticket will be counted. An
+	// unresolved login fails closed: every Working ticket is marked unknown
+	// (Reconcile defers it, no retry/interrupted-resume/failed mutation), no
+	// thread is read, and the pass reports the error. Never an assumed zero.
+	var working []Ticket
 	for _, t := range tickets {
-		if !hasLabel(t.Labels, labelWorking) {
+		if hasLabel(t.Labels, labelWorking) {
+			working = append(working, t)
+		}
+	}
+	viewer := ""
+	if len(working) > 0 {
+		login, err := currentGitHubLogin()
+		if err != nil {
+			logf(out, "reconcile: detecting current GitHub user: %v\n", err)
+			if collectErr == nil {
+				collectErr = fmt.Errorf("detecting current GitHub user: %w", err)
+			}
+			for _, t := range working {
+				attemptsUnknown[planKey(t.Repo, t.Number)] = true
+			}
+		}
+		viewer = login
+	}
+
+	for _, t := range working {
+		if attemptsUnknown[planKey(t.Repo, t.Number)] {
 			continue
 		}
-		n, ooms, err := countAttempts(t.Repo, t.Number)
+		n, ooms, err := countAttempts(t.Repo, t.Number, viewer)
 		if err != nil {
 			logf(out, "reconcile: #%d counting attempts: %v\n", t.Number, err)
 			attemptsUnknown[planKey(t.Repo, t.Number)] = true
