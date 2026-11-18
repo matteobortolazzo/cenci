@@ -4,6 +4,7 @@ import (
 	"errors"
 	"log"
 	"regexp"
+	"slices"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -12,6 +13,7 @@ import (
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/frontend"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/ipc"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/modelswitch"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/procancestry"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/tmux"
 	"github.com/matteobortolazzo/cenci/watch/v2/pkg/watch"
 )
@@ -101,6 +103,14 @@ func (d *Daemon) handleEvent(event ipc.HookEvent) {
 	if malformedPID {
 		event.TmuxServerPID = ""
 	}
+	// The ancestry is validated whole at ingest (#1530): one bad entry or too
+	// many entries voids the chain and its single-client flag, so a forged or
+	// corrupt proof reads as absent.
+	malformedAncestry := len(event.AncestryPIDs) > procancestry.MaxDepth ||
+		slices.ContainsFunc(event.AncestryPIDs, func(pid string) bool { return !validServerPID(pid) })
+	if malformedAncestry {
+		event.AncestryPIDs, event.AncestrySingleClient = nil, false
+	}
 	key := sessionKeyForEvent(event)
 	if key == "" {
 		if d.cfg.Verbose {
@@ -113,6 +123,9 @@ func (d *Daemon) handleEvent(event ipc.HookEvent) {
 	}
 	if malformedPID && d.cfg.Verbose {
 		log.Printf("event: %q event on session %q: tmux_server_pid malformed, treating it as absent", event.EventType, key)
+	}
+	if malformedAncestry && d.cfg.Verbose {
+		log.Printf("event: %q event on session %q: ancestry_pids malformed, treating it as absent", event.EventType, key)
 	}
 
 	sess := d.sessions[key]
@@ -273,10 +286,14 @@ func (d *Daemon) handleEvent(event ipc.HookEvent) {
 
 // paneAdoptable decides whether the event's pane may become the session's
 // association, before the #1500 missing-pair recheck (#1529). A binding outranks
-// every hook pane. A Codex event that sent a socket must carry a server pid, and
-// may not take a pane another session is bound to. Every other event (Claude,
-// sandboxed Codex without a socket, a pane-only event) keeps the earlier rule:
-// any non-empty pane is adopted.
+// every hook pane. A subagent's event (agent_id set) of a Codex session never
+// adopts a pane: only the main agent's events place the session (#1530). A Codex
+// event that sent a socket must carry a server pid and a process-ancestry proof
+// (ancestry_pids plus a single-client flag), and may not take a pane another
+// session is bound to. Every other event (Claude, sandboxed Codex without a
+// socket, a pane-only event) keeps the earlier rule: any non-empty pane is
+// adopted. A refusal marks only a paneless session unproven, so one event
+// without a proof never detaches a session that is already attached.
 func (d *Daemon) paneAdoptable(key string, sess *frontend.SessionState, event ipc.HookEvent, sentSocket bool) bool {
 	if event.TmuxPane == "" {
 		return false
@@ -287,6 +304,12 @@ func (d *Daemon) paneAdoptable(key string, sess *frontend.SessionState, event ip
 		}
 		return false
 	}
+	if sess.Agent == "codex" && sess.SessionID != "" && event.AgentID != "" {
+		if d.cfg.Verbose {
+			log.Printf("event: Codex %q event on session %q comes from subagent %q; not attaching pane %q", event.EventType, key, event.AgentID, event.TmuxPane)
+		}
+		return false
+	}
 	if !sentSocket || sess.Agent != "codex" || sess.SessionID == "" {
 		return true
 	}
@@ -294,6 +317,11 @@ func (d *Daemon) paneAdoptable(key string, sess *frontend.SessionState, event ip
 	switch {
 	case event.TmuxServerPID == "":
 		refuse = "carries no tmux server pid"
+	case !event.AncestrySingleClient || len(event.AncestryPIDs) == 0:
+		refuse = "carries no process-ancestry proof (no ancestry read: the hook-side read failed or was not attempted)"
+		if len(event.AncestryPIDs) > 0 {
+			refuse = "carries no process-ancestry proof (ancestry names no single Codex client: shared app-server, no Codex ancestor, or no shared-server marker recorded)"
+		}
 	case d.boundElsewhere(key, event.TmuxSocket, event.TmuxPane):
 		refuse = "names a pane another session is bound to"
 	default:
@@ -319,14 +347,18 @@ func (d *Daemon) boundElsewhere(key, socket, pane string) bool {
 }
 
 // adoptEventPane makes the event's pane the session's association. The socket
-// and the claimed server pid travel with the pane.
+// and the claimed server pid and process-ancestry proof (a copy of its pids)
+// travel with the pane.
 func adoptEventPane(sess *frontend.SessionState, event ipc.HookEvent, requirePID bool) {
 	sess.TmuxPane = event.TmuxPane
 	sess.TmuxSocket = event.TmuxSocket
 	sess.RequireServerPID = requirePID
+	sess.RequireAncestry = requirePID
 	sess.TmuxServerPID = ""
+	sess.AncestryPIDs = nil
 	if requirePID {
 		sess.TmuxServerPID = event.TmuxServerPID
+		sess.AncestryPIDs = slices.Clone(event.AncestryPIDs)
 	}
 }
 
@@ -342,6 +374,8 @@ func detachPaneless(sess *frontend.SessionState, remember bool) {
 	sess.TmuxSocket = ""
 	sess.TmuxServerPID = ""
 	sess.RequireServerPID = false
+	sess.AncestryPIDs = nil
+	sess.RequireAncestry = false
 	sess.Binding = nil
 	sess.Unproven = true
 }
@@ -356,6 +390,14 @@ func (d *Daemon) applyObservations(key string, sess *frontend.SessionState, obs 
 		// the session stays listed, paneless, and any binding is void.
 		if d.cfg.Verbose {
 			log.Printf("event: Codex session %q pane %q is listed under another tmux server pid; retaining as paneless", key, sess.TmuxPane)
+		}
+		detachPaneless(sess, true)
+	case obs.AncestryUnproven:
+		// The pane is listed under the right server, but its pane_pid is not in
+		// the process ancestry the association was claimed under (#1530). The
+		// frontend wrote nothing; the session stays listed, paneless.
+		if d.cfg.Verbose {
+			log.Printf("event: Codex session %q pane %q is not in the hook's process ancestry; retaining as paneless", key, sess.TmuxPane)
 		}
 		detachPaneless(sess, true)
 	case obs.UntrackedPaneMissing && sess.Agent == "codex" && sess.SessionID != "":

@@ -39,11 +39,28 @@ const (
 	stalePane   = "%99"
 )
 
+// hookPID is the pid of the fixture's `cenci notify`, the first entry of every
+// hook ancestry chain.
+const hookPID = "9001"
+
+// panePID is the fixture's tmux #{pane_pid} for pane id (#1530): the pid of the
+// process a pane's shell runs as, which a genuine hook's ancestry contains.
+func panePID(id string) string { return "7" + strings.TrimPrefix(id, "%") }
+
 func codexPane(index, id string) tmux.PaneInfo {
 	return tmux.PaneInfo{
 		SessionName: "main", WindowIndex: index, WindowName: "bash", PaneIndex: "0",
-		PaneCurrentCmd: "codex", PaneTitle: "codex", PaneID: id,
+		PaneCurrentCmd: "codex", PaneTitle: "codex", PaneID: id, PanePID: panePID(id),
 	}
+}
+
+// withProof attaches a valid process-ancestry proof for pane to event: the
+// hook's chain contains the pane's pane_pid and the nearest Codex ancestor is a
+// single client (#1530).
+func withProof(event ipc.HookEvent, pane string) ipc.HookEvent {
+	event.AncestryPIDs = []string{hookPID, panePID(pane), "1"}
+	event.AncestrySingleClient = true
+	return event
 }
 
 type bindEnv struct {
@@ -67,10 +84,18 @@ func newBindEnv(t *testing.T, panes ...tmux.PaneInfo) *bindEnv {
 	return &bindEnv{d: d, mc: mc, socket: socket}
 }
 
-// event delivers a Codex hook event carrying pane on the trusted socket.
+// hookEvent is a Codex hook event naming pane on the trusted socket under pid,
+// without any ancestry proof.
+func (e *bindEnv) hookEvent(eventType, session, pane, pid string) ipc.HookEvent {
+	return ipc.HookEvent{EventType: eventType, SessionID: session, Agent: "codex", TaskName: session,
+		TmuxPane: pane, TmuxSocket: e.socket, TmuxServerPID: pid}
+}
+
+// event delivers a Codex hook event carrying pane on the trusted socket, with a
+// valid ancestry proof for that pane (#1530): its pane_pid is in the chain and
+// the client is single.
 func (e *bindEnv) event(eventType, session, pane, pid string) {
-	e.d.handleEvent(ipc.HookEvent{EventType: eventType, SessionID: session, Agent: "codex", TaskName: session,
-		TmuxPane: pane, TmuxSocket: e.socket, TmuxServerPID: pid})
+	e.d.handleEvent(withProof(e.hookEvent(eventType, session, pane, pid), pane))
 }
 
 // bind applies a bind from pane on the trusted socket under the live pid.
@@ -184,7 +209,7 @@ func TestDaemon_CodexEqualPaneIDOnOtherSocketNeverStyled(t *testing.T) {
 	assertPaneless(t, d, "on-x")
 	assertPaneless(t, d, "untrusted-x")
 
-	d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "on-y", Agent: "codex", TmuxPane: "%5", TmuxSocket: sockY, TmuxServerPID: "200"})
+	d.handleEvent(withProof(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "on-y", Agent: "codex", TmuxPane: "%5", TmuxSocket: sockY, TmuxServerPID: "200"}, "%5"))
 	if got, ok := tmuxtest.FindSocketWindowOpt(mc.WindowOpts, sockY, "main:1", "@cenci-symbol"); !ok || got != d.cfg.SymbolRunning {
 		t.Errorf("control: %%5 on Y under Y's pid set @cenci-symbol = (%q, %v), want %q", got, ok, d.cfg.SymbolRunning)
 	}
@@ -528,8 +553,12 @@ func TestBind_SplitWindowHolderOnAnotherPane(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			e := newBindEnv(t, splitPane("0", heldPane), splitPane("1", bindPane))
-			e.d.handleEvent(ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "holder", Agent: tc.holderAgent, TaskName: "holder",
-				TmuxPane: heldPane, TmuxSocket: e.socket, TmuxServerPID: livePID})
+			holderEvent := ipc.HookEvent{EventType: "UserPromptSubmit", SessionID: "holder", Agent: tc.holderAgent, TaskName: "holder",
+				TmuxPane: heldPane, TmuxSocket: e.socket, TmuxServerPID: livePID}
+			if tc.holderAgent == "codex" {
+				holderEvent = withProof(holderEvent, heldPane)
+			}
+			e.d.handleEvent(holderEvent)
 			if wi := e.d.frontend.WindowInfo("holder"); wi == nil || wi.PaneID != heldPane {
 				t.Fatalf("control: holder's WindowInfo = %+v, want %s tracked", wi, heldPane)
 			}
@@ -676,9 +705,10 @@ func TestRawHookEventWithMalformedTmuxServerPIDIsTreatedAsAbsent(t *testing.T) {
 			e := newBindEnv(t)
 			e.d.cfg.Verbose = true
 			logs := captureLog(t)
-			b, err := json.Marshal(map[string]string{
+			b, err := json.Marshal(map[string]any{
 				"event_type": "UserPromptSubmit", "session_id": "raw-1", "agent": "codex", "tmux_pane": paneB,
 				"tmux_socket": e.socket, "tmux_server_pid": tc.pid, "timestamp": "2024-01-01T00:00:00Z",
+				"ancestry_pids": []string{hookPID, panePID(paneB), "1"}, "ancestry_single_client": true,
 			})
 			if err != nil {
 				t.Fatal(err)

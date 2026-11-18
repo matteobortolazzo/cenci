@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"io"
@@ -15,6 +16,7 @@ import (
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/ipc"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/measurement"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/modelswitch"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/procancestry"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/run"
 )
 
@@ -363,6 +365,19 @@ func runNotify(args []string) {
 	if hookInput.Cwd != "" && filepath.IsAbs(hookInput.Cwd) &&
 		cwdExcluded(hookInput.Cwd, loadExcludeCwd(run.DefaultConfigPath())) {
 		return
+	}
+
+	// A Codex main-agent event from a host tmux pane carries its process-ancestry
+	// proof (#1530): pids and one single-client flag, never a command line. Only
+	// these events are weighed by the daemon's ancestry rule, so no other event
+	// pays for the `ps` read. A failed or timed-out read sends neither key, which
+	// the daemon treats as unproven; it is silent and records no hook health.
+	if event.Agent == "codex" && event.AgentID == "" && event.TmuxPane != "" && event.TmuxSocket != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), procancestry.ReadTimeout)
+		if ancestry, err := procancestry.Read(ctx); err == nil {
+			event.AncestryPIDs, event.AncestrySingleClient = ancestry.PIDs, ancestry.SingleClient
+		}
+		cancel()
 	}
 
 	// Persist a Claude model switch on the hook side so a later process (Phase 9)

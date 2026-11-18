@@ -9,10 +9,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/exectest"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/hookhealth"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/ipc"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/modelswitch"
 )
@@ -1382,6 +1386,33 @@ func TestClaudeHooksRegisterPostModelSwitchThroughTheNotifyWrapper(t *testing.T)
 // CENCI_TMUX_SOCKET is always removed, so only extraEnv can set it.
 func notifyRawLineWithTMUX(t *testing.T, tmux *string, extraEnv ...string) string {
 	t.Helper()
+	return runNotifyRaw(t, rawNotify{agent: "claude", payload: rawNotifyPayload, tmux: tmux, pane: "%5", env: extraEnv})
+}
+
+const rawNotifyPayload = `{"hook_event_name":"Stop","session_id":"sock-session"}`
+
+// rawNotify is one real `cenci notify` run for runNotifyRaw. An empty pane
+// leaves TMUX_PANE empty.
+type rawNotify struct {
+	agent, payload string
+	tmux           *string
+	pane           string
+	env            []string
+}
+
+// runNotifyRaw runs the real binary per r against a plain unix listener and
+// returns the one raw JSON line it wrote. It fails the test when notify exits
+// non-zero or writes nothing.
+func runNotifyRaw(t *testing.T, r rawNotify) string {
+	t.Helper()
+	line, _ := runNotifyRawOutput(t, r)
+	return line
+}
+
+// runNotifyRawOutput is runNotifyRaw that also returns what the notify process
+// wrote to stdout and stderr combined.
+func runNotifyRawOutput(t *testing.T, r rawNotify) (line, combined string) {
+	t.Helper()
 	setTempSocketDir(t)
 	dir, err := os.MkdirTemp("", "cenci")
 	if err != nil {
@@ -1403,7 +1434,7 @@ func notifyRawLineWithTMUX(t *testing.T, tmux *string, extraEnv ...string) strin
 			return
 		}
 		defer func() { _ = conn.Close() }()
-		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		_ = conn.SetReadDeadline(time.Now().Add(4 * time.Second))
 		raw, _ := io.ReadAll(conn)
 		lines <- string(raw)
 	}()
@@ -1414,28 +1445,29 @@ func notifyRawLineWithTMUX(t *testing.T, tmux *string, extraEnv ...string) strin
 			env = append(env, kv)
 		}
 	}
-	env = append(env, "TMUX_PANE=%5", "CENCI_SANDBOX=")
-	if tmux != nil {
-		env = append(env, "TMUX="+*tmux)
+	env = append(env, "TMUX_PANE="+r.pane, "CENCI_SANDBOX=")
+	if r.tmux != nil {
+		env = append(env, "TMUX="+*r.tmux)
 	}
-	env = append(env, extraEnv...)
-	cmd := exec.Command(binaryPath, "notify", "-agent", "claude", "-event-socket", socket)
-	cmd.Stdin = strings.NewReader(`{"hook_event_name":"Stop","session_id":"sock-session"}`)
+	env = append(env, r.env...)
+	cmd := exec.Command(binaryPath, "notify", "-agent", r.agent, "-event-socket", socket)
+	cmd.Stdin = strings.NewReader(r.payload)
 	cmd.Env = env
-	if output, err := cmd.CombinedOutput(); err != nil {
+	output, err := cmd.CombinedOutput()
+	if err != nil {
 		t.Fatalf("notify: %v: %s", err, output)
 	}
 
 	select {
-	case line := <-lines:
-		if line == "" {
+	case raw := <-lines:
+		if raw == "" {
 			t.Fatal("notify wrote nothing to the event socket")
 		}
-		return line
-	case <-time.After(3 * time.Second):
+		return raw, string(output)
+	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for the raw event line")
 	}
-	return ""
+	return "", ""
 }
 
 // The socket is the first comma-separated field of $TMUX (tmux's own
@@ -1559,6 +1591,283 @@ func TestNotifyOmitsTmuxServerPIDWhenTMUXUnsetOrEmptyField(t *testing.T) {
 			}
 			if !strings.Contains(line, `"tmux_pane":"%5"`) {
 				t.Errorf("raw line = %s, want the event itself still delivered with its pane", line)
+			}
+		})
+	}
+}
+
+// --- process ancestry (#1530) -------------------------------------------------
+//
+// Every test puts a fake `ps` first on PATH, so the real binary reads a chain
+// the test controls. The fake logs each invocation's argv to a marker file, which
+// both pins the command shape and lets the no-read cases prove it never ran (the
+// control case proves the fake is the one in use).
+
+const (
+	psArgs      = "-A -o pid= -o ppid= -o args="
+	tmuxForPS   = "/x/tmux-1/default,4242,0"
+	psSentinel  = "SENTINEL"
+	psHookEvent = `{"hook_event_name":"Stop","session_id":"anc-session"}`
+)
+
+// fakeAncestryPS installs an executable `ps` that appends its argv to a marker file and
+// then runs body. It returns the PATH entry for a notify run and the marker file.
+func fakeAncestryPS(t *testing.T, body string) (pathEnv, marker string) {
+	t.Helper()
+	dir := t.TempDir()
+	marker = filepath.Join(dir, "ps-argv")
+	script := "#!/bin/sh\necho \"$*\" >> " + exectest.ShellQuote(marker) + "\n" + body + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "ps"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return "PATH=" + dir + string(os.PathListSeparator) + os.Getenv("PATH"), marker
+}
+
+// psCalls is the argv of each run of the fake ps.
+func psCalls(t *testing.T, marker string) []string {
+	t.Helper()
+	b, err := os.ReadFile(marker)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.Split(strings.TrimSuffix(string(b), "\n"), "\n")
+}
+
+// wireKeys decodes one raw event line into its top-level keys.
+func wireKeys(t *testing.T, line string) map[string]json.RawMessage {
+	t.Helper()
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(line), &m); err != nil {
+		t.Fatalf("decode %s: %v", line, err)
+	}
+	return m
+}
+
+func codexInTmux(payload string, env ...string) rawNotify {
+	tmux := tmuxForPS
+	return rawNotify{agent: "codex", payload: payload, tmux: &tmux, pane: "%5", env: env}
+}
+
+// P30: only pids cross IPC. The fake ps prints the notify process's own pid
+// ($PPID of the fake), then a fixed chain to pid 1 whose command lines carry a
+// sentinel. The wire line holds that chain's pids in order, no sentinel anywhere,
+// no single-client key (the production marker table is empty, so a real hook
+// never reports one), and no key outside the event allowlist. ps ran once with
+// the one bounded command.
+func TestNotifyCodexSendsAncestryPIDsOnlyAndNoCommandLines(t *testing.T) {
+	pidFile := filepath.Join(t.TempDir(), "notify-pid")
+	pathEnv, marker := fakeAncestryPS(t, `echo "$PPID" > `+exectest.ShellQuote(pidFile)+`
+cat <<EOF
+$PPID 5000 /usr/local/bin/cenci notify -agent codex --token=SENTINEL-NOTIFY
+5000 4000 codex --model SENTINEL-CODEX --secret=SENTINEL-SECRET
+4000 3000 -bash SENTINEL-SHELL
+3000 1 tmux: server SENTINEL-TMUX
+1 0 /sbin/init SENTINEL-INIT
+EOF`)
+
+	line := runNotifyRaw(t, codexInTmux(psHookEvent, pathEnv))
+
+	if got := psCalls(t, marker); len(got) != 1 || got[0] != psArgs {
+		t.Fatalf("ps ran as %q, want exactly one call of %q", got, psArgs)
+	}
+	notifyPID, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ev ipc.HookEvent
+	if err := json.Unmarshal([]byte(line), &ev); err != nil {
+		t.Fatalf("decode %s: %v", line, err)
+	}
+	want := []string{strings.TrimSpace(string(notifyPID)), "5000", "4000", "3000", "1"}
+	if !reflect.DeepEqual(ev.AncestryPIDs, want) {
+		t.Errorf("AncestryPIDs = %v, want %v: the chain from the notify process up to pid 1", ev.AncestryPIDs, want)
+	}
+	if ev.AncestrySingleClient || strings.Contains(line, "ancestry_single_client") {
+		t.Errorf("raw line = %s, want no ancestry_single_client key: the empty production marker table never reports a single client", line)
+	}
+	if strings.Contains(line, psSentinel) || strings.Contains(line, "secret") || strings.Contains(line, "tmux: server") {
+		t.Errorf("raw line = %s, want no command line anywhere on the wire", line)
+	}
+	allowed := map[string]bool{
+		"event_type": true, "session_id": true, "agent": true, "tmux_pane": true, "tmux_socket": true,
+		"tmux_server_pid": true, "ancestry_pids": true, "timestamp": true,
+	}
+	for key := range wireKeys(t, line) {
+		if !allowed[key] {
+			t.Errorf("wire key %q is outside the allowlist: %s", key, line)
+		}
+	}
+}
+
+// P20: a failed, malformed or timed-out ancestry read never drops or delays the
+// event past the hook's manifest timeout: it is delivered with neither ancestry
+// key, notify exits 0 and stays silent, and the daemon then treats the session as
+// unproven. The hang case execs `sleep 30` in place of ps.
+func TestNotifyCodexAncestryReadFailureStillDelivers(t *testing.T) {
+	for _, tc := range []struct {
+		name, body string
+		noPS       bool
+	}{
+		{name: "ps exits 1", body: "echo 'ps: failure' >&2\nexit 1"},
+		{name: "ps prints garbage", body: "echo 'this is not a process table'"},
+		{name: "ps hangs", body: "exec sleep 30"},
+		{name: "ps is not on PATH", noPS: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pathEnv, marker := fakeAncestryPS(t, tc.body)
+			if tc.noPS {
+				pathEnv = "PATH=" + t.TempDir()
+			}
+			start := time.Now()
+
+			line := runNotifyRaw(t, codexInTmux(psHookEvent, pathEnv))
+
+			if elapsed := time.Since(start); elapsed > 3*time.Second {
+				t.Errorf("notify took %s, want it inside the 3s hook timeout", elapsed)
+			}
+			if got := len(psCalls(t, marker)); !tc.noPS && got != 1 {
+				t.Errorf("ps ran %d times, want the fake called once", got)
+			}
+			if strings.Contains(line, "ancestry") {
+				t.Errorf("raw line = %s, want neither ancestry key after a failed read", line)
+			}
+			for _, want := range []string{`"event_type":"Stop"`, `"session_id":"anc-session"`, `"tmux_pane":"%5"`, `"tmux_server_pid":"4242"`} {
+				if !strings.Contains(line, want) {
+					t.Errorf("raw line = %s, want the event itself delivered with %s", line, want)
+				}
+			}
+		})
+	}
+}
+
+// hookHealthRecords lists the record files in the hook-health store under
+// stateHome ($XDG_STATE_HOME/cenci/hook-health); a store that was never created
+// has none.
+func hookHealthRecords(t *testing.T, stateHome string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(filepath.Join(stateHome, "cenci", "hook-health"))
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	return names
+}
+
+// P20: a failed ancestry read is silent and writes no hook-health failure
+// record: notify prints nothing to stdout or stderr and the store under an
+// isolated $XDG_STATE_HOME holds only the last-ok record that notify's delivery
+// of the event itself writes (it does so for every delivered event, whatever the
+// ancestry), never a failure category, whatever way the read failed.
+// The control runs a payload notify does record a failure for (malformed JSON)
+// against the same store, so the absence below cannot pass vacuously.
+func TestNotifyCodexAncestryReadFailureIsSilentAndWritesNoHookHealthRecord(t *testing.T) {
+	t.Run("control: a malformed payload records a failure in this store", func(t *testing.T) {
+		state := t.TempDir()
+		notifyRun(t, "", "codex", "this is not json", "XDG_STATE_HOME="+state)
+		got := hookHealthRecords(t, state)
+		if want := string(hookhealth.MalformedInput); !slices.Contains(got, want) {
+			t.Fatalf("the control run left hook-health records %v, want %q: the store under test is not the one notify writes", got, want)
+		}
+	})
+
+	for _, tc := range []struct {
+		name, body string
+		noPS       bool
+	}{
+		{name: "ps exits 1", body: "echo 'ps: failure' >&2\nexit 1"},
+		{name: "ps prints garbage", body: "echo 'this is not a process table'"},
+		{name: "ps hangs", body: "exec sleep 30"},
+		{name: "ps is not on PATH", noPS: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pathEnv, marker := fakeAncestryPS(t, tc.body)
+			if tc.noPS {
+				pathEnv = "PATH=" + t.TempDir()
+			}
+			state := t.TempDir()
+
+			line, output := runNotifyRawOutput(t, codexInTmux(psHookEvent, pathEnv, "XDG_STATE_HOME="+state))
+
+			if !tc.noPS && len(psCalls(t, marker)) != 1 {
+				t.Errorf("ps ran %v, want the fake called once so the read really failed", psCalls(t, marker))
+			}
+			if strings.Contains(line, "ancestry") {
+				t.Errorf("raw line = %s, want neither ancestry key", line)
+			}
+			if output != "" {
+				t.Errorf("notify wrote %q to stdout/stderr, want it silent after a failed read", output)
+			}
+			if got := hookHealthRecords(t, state); !slices.Equal(got, []string{string(hookhealth.LastOK)}) {
+				t.Errorf("hook-health records %v, want only %q (the delivery itself) and no failure record after a failed ancestry read", got, hookhealth.LastOK)
+			}
+		})
+	}
+}
+
+// P21: a chain deeper than the cap sends no ancestry at all, never a truncated
+// chain. The fake reports 42 entries from the notify process to pid 1.
+func TestNotifyCodexAncestryDeeperThanCapSendsNone(t *testing.T) {
+	pathEnv, marker := fakeAncestryPS(t, `echo "$PPID 7040 proc"
+i=7040
+while [ $i -gt 7001 ]; do echo "$i $((i-1)) proc"; i=$((i-1)); done
+echo "7001 1 proc"
+echo "1 0 init"`)
+
+	line := runNotifyRaw(t, codexInTmux(psHookEvent, pathEnv))
+
+	if got := len(psCalls(t, marker)); got != 1 {
+		t.Fatalf("ps ran %d times, want the fake called once", got)
+	}
+	if strings.Contains(line, "ancestry") {
+		t.Errorf("raw line = %s, want neither ancestry key for a chain over the depth cap", line)
+	}
+	if !strings.Contains(line, `"session_id":"anc-session"`) {
+		t.Errorf("raw line = %s, want the event delivered", line)
+	}
+}
+
+// The ancestry is read only for a Codex main-agent event that has both
+// TMUX_PANE and a $TMUX socket, after the watch.excludeCwd check. Every other
+// event never runs ps. The first case is the control that proves the fake is the
+// ps in use, so the absences below cannot pass vacuously.
+func TestNotifyReadsAncestryOnlyForCodexMainAgentEventsInTmux(t *testing.T) {
+	const childPayload = `{"hook_event_name":"Stop","session_id":"anc-session","agent_id":"child-1"}`
+	excluded := t.TempDir()
+	for _, tc := range []struct {
+		name, agent, payload string
+		tmux, pane           string
+		cwd                  string // set to run through excludeCwd
+		wantRead             bool
+	}{
+		{"control: Codex main agent in tmux", "codex", psHookEvent, tmuxForPS, "%5", "", true},
+		{"Claude in tmux", "claude", psHookEvent, tmuxForPS, "%5", "", false},
+		{"Codex without $TMUX (sandbox)", "codex", psHookEvent, "", "%5", "", false},
+		{"Codex without TMUX_PANE", "codex", psHookEvent, tmuxForPS, "", "", false},
+		{"Codex subagent event (agent_id)", "codex", childPayload, tmuxForPS, "%5", "", false},
+		{"Codex event excluded by watch.excludeCwd", "codex", "", tmuxForPS, "%5", excluded, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fx := newNotifyFixture(t)
+			pathEnv, marker := fakeAncestryPS(t, "echo '1 0 init'")
+			payload := tc.payload
+			if tc.cwd != "" {
+				writeFleetConfig(t, excludeConfig(t, tc.cwd))
+				payload = hookPayload(t, "Stop", "anc-session", strPtr(tc.cwd))
+			}
+
+			notifyRun(t, fx.socket, tc.agent, payload, pathEnv, "TMUX_PANE="+tc.pane, "TMUX="+tc.tmux)
+
+			if got := len(psCalls(t, marker)) > 0; got != tc.wantRead {
+				t.Errorf("ps ran = %v, want %v", got, tc.wantRead)
 			}
 		})
 	}

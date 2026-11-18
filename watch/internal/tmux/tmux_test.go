@@ -124,6 +124,61 @@ func TestParsePanesReadsServerPID(t *testing.T) {
 	}
 }
 
+// TestParsePanesReadsPanePID pins the 9th listing column (#{pane_pid}, #1530)
+// next to the 8th (#{pid}): a 9-column row carries both, an 8-column row (a
+// listing without pane_pid) has an empty PanePID and keeps its ServerPID, and a
+// 7-column row has neither. The pane_pid column is optional, so a short row is
+// never dropped.
+func TestParsePanesReadsPanePID(t *testing.T) {
+	input := "main\t0\tbash\t0\tbash\t~\t%0\t4242\t7001\n" +
+		"work\t1\tcodex\t0\tcodex\ttitle with spaces\t%7\t4242\t7002\n" +
+		"older\t0\tvim\t0\tvim\tt\t%8\t4242\n" +
+		"legacy\t0\tvim\t0\tvim\tt\t%9\n"
+
+	panes := parsePanes(input)
+
+	if len(panes) != 4 {
+		t.Fatalf("expected 4 panes, got %d: %+v", len(panes), panes)
+	}
+	want := []struct{ paneID, serverPID, panePID string }{
+		{"%0", "4242", "7001"},
+		{"%7", "4242", "7002"},
+		{"%8", "4242", ""},
+		{"%9", "", ""},
+	}
+	for i, w := range want {
+		p := panes[i]
+		if p.PaneID != w.paneID || p.ServerPID != w.serverPID || p.PanePID != w.panePID {
+			t.Errorf("pane[%d] = (id %q, server pid %q, pane pid %q), want (id %q, server pid %q, pane pid %q)",
+				i, p.PaneID, p.ServerPID, p.PanePID, w.paneID, w.serverPID, w.panePID)
+		}
+	}
+}
+
+// ExecClient.ListPanes asks tmux for #{pane_pid} as the column right after
+// #{pid}, and returns it as PanePID. The fake tmux logs its argv and answers one
+// nine-column row.
+func TestExecClientListPanesAsksForPanePID(t *testing.T) {
+	argsFile := filepath.Join(t.TempDir(), "args")
+	installFakeTmuxOnPath(t, "printf '%s\\n' \"$@\" >> "+exectest.ShellQuote(argsFile)+"\n"+
+		"printf 'main\\t1\\tcodex\\t0\\tcodex\\ttitle\\t%%5\\t4242\\t7001\\n'\n")
+
+	panes, err := (&ExecClient{}).ListPanes("")
+	if err != nil {
+		t.Fatalf("ListPanes: %v", err)
+	}
+	if len(panes) != 1 || panes[0].PaneID != "%5" || panes[0].ServerPID != "4242" || panes[0].PanePID != "7001" {
+		t.Fatalf("panes = %+v, want %%5 under server pid 4242 with pane_pid 7001", panes)
+	}
+	args, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(args), "\t#{pid}\t#{pane_pid}\n") {
+		t.Errorf("tmux argv = %q, want the -F format to end with \\t#{pid}\\t#{pane_pid}", args)
+	}
+}
+
 // -- ErrWindowGone and ListWindowPaneProcs (#1253) ---------------------------
 
 // failingTmux installs a fake tmux that prints stderrText to stderr and exits 1.

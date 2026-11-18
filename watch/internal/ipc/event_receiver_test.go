@@ -813,6 +813,80 @@ func TestEventReceiver_DecodesTmuxServerPID(t *testing.T) {
 	})
 }
 
+// #1530: the receiver decodes the wire keys "ancestry_pids" (a string array) and
+// "ancestry_single_client" (a bool) into HookEvent, from a raw line (the shape any
+// in-container process can write, whose values the daemon validates at ingest)
+// and from what SendEvent marshals; a line from an older `cenci notify` decodes
+// with neither. Both keys are omitted from the wire when empty, so a Claude event
+// and an older daemon never see them.
+func TestEventReceiver_DecodesAncestryKeys(t *testing.T) {
+	t.Run("raw line", func(t *testing.T) {
+		got := receiveRawLine(t, `{"event_type":"Stop","session_id":"sess-anc","agent":"codex","tmux_pane":"%5","tmux_socket":"/run/tmux-1000/default","tmux_server_pid":"4242","ancestry_pids":["500","400","1"],"ancestry_single_client":true,"timestamp":"2024-01-01T00:00:00Z"}`)
+		if want := []string{"500", "400", "1"}; !reflect.DeepEqual(got.AncestryPIDs, want) {
+			t.Errorf("AncestryPIDs = %v, want %v", got.AncestryPIDs, want)
+		}
+		if !got.AncestrySingleClient {
+			t.Error("AncestrySingleClient = false, want true")
+		}
+		if got.TmuxServerPID != "4242" || got.TmuxPane != "%5" {
+			t.Errorf("event = %+v, want the neighbouring fields decoded too", got)
+		}
+	})
+
+	t.Run("raw line with non-numeric pids is carried verbatim", func(t *testing.T) {
+		got := receiveRawLine(t, `{"event_type":"Stop","session_id":"sess-anc","tmux_pane":"%5","ancestry_pids":["12; rm -rf /"],"timestamp":"2024-01-01T00:00:00Z"}`)
+		if want := []string{"12; rm -rf /"}; !reflect.DeepEqual(got.AncestryPIDs, want) {
+			t.Errorf("AncestryPIDs = %v, want the raw value: shape checks belong to the daemon", got.AncestryPIDs)
+		}
+	})
+
+	t.Run("older notify, no keys", func(t *testing.T) {
+		got := receiveRawLine(t, `{"event_type":"Stop","session_id":"sess-old","tmux_pane":"%5","tmux_socket":"/run/tmux-1000/default","tmux_server_pid":"4242","timestamp":"2024-01-01T00:00:00Z"}`)
+		if len(got.AncestryPIDs) != 0 || got.AncestrySingleClient {
+			t.Errorf("ancestry = %v single client %v, want none for a line without the keys", got.AncestryPIDs, got.AncestrySingleClient)
+		}
+	})
+
+	t.Run("SendEvent round trip", func(t *testing.T) {
+		recv, path := startReceiver(t)
+		if err := SendEvent(path, HookEvent{EventType: "Stop", SessionID: "sess-rt", TmuxPane: "%5", AncestryPIDs: []string{"9", "1"}, AncestrySingleClient: true}); err != nil {
+			t.Fatalf("SendEvent: %v", err)
+		}
+		select {
+		case got := <-recv.Events():
+			if !reflect.DeepEqual(got.AncestryPIDs, []string{"9", "1"}) || !got.AncestrySingleClient {
+				t.Errorf("ancestry = %v single client %v after a SendEvent round trip, want [9 1] true", got.AncestryPIDs, got.AncestrySingleClient)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for the hook event")
+		}
+	})
+
+	t.Run("both keys are omitted from the wire when empty", func(t *testing.T) {
+		withKeys, err := json.Marshal(HookEvent{EventType: "Stop", AncestryPIDs: []string{"9"}, AncestrySingleClient: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(withKeys), `"ancestry_pids":["9"]`) || !strings.Contains(string(withKeys), `"ancestry_single_client":true`) {
+			t.Fatalf("control: %s, want both wire keys present when set", withKeys)
+		}
+		for name, ev := range map[string]HookEvent{
+			"zero":            {EventType: "Stop"},
+			"empty pids":      {EventType: "Stop", AncestryPIDs: []string{}},
+			"false single":    {EventType: "Stop", AncestrySingleClient: false},
+			"claude, no tmux": {EventType: "Stop", Agent: "claude", TmuxPane: "%5"},
+		} {
+			b, err := json.Marshal(ev)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(b), "ancestry") {
+				t.Errorf("%s: wire line %s, want no ancestry key", name, b)
+			}
+		}
+	})
+}
+
 // -- codex-bind (#1529) -------------------------------------------------------
 
 // exchangeRawLine writes line verbatim to the event socket and returns the one
@@ -1059,7 +1133,8 @@ func TestEventReceiver_HookEventWithoutTmuxSocketDecodesAsBefore(t *testing.T) {
 		ToolName:  "Write",
 		Timestamp: "2024-01-01T00:00:00Z",
 	}
-	if got != want {
+	// HookEvent holds a slice since #1530, so it is no longer comparable with ==.
+	if !reflect.DeepEqual(got, want) {
 		t.Errorf("decoded event = %+v, want %+v", got, want)
 	}
 }
