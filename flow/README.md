@@ -218,6 +218,7 @@ companion) for every skill, including the internal ones not listed above.
 **Core workflow docs**
 - `docs/adapter-contract.md`
 - `docs/board-labels.md`
+- `docs/claude-bash-matcher-evidence.md`
 - `docs/claude-instruction-files.md`
 - `docs/codex-native-evidence.md`
 - `docs/comment-attribution.md`
