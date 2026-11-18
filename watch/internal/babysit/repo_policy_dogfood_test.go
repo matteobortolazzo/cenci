@@ -20,6 +20,9 @@ func TestRepositoryAutomergePolicyDogfood(t *testing.T) {
 		"flow/skills/refine/SKILL.md",
 		"watch/internal/daemon/daemon.go",
 		"watch/cli_helpers.go",
+		"watch/main.go",
+		"flow/AGENTS.md",
+		"sandbox/entrypoint.sh",
 		"watch/pkg/watch/client.go",
 		"watch/plugin/hooks/install.sh",
 		"watch/.goreleaser.yml",
@@ -77,13 +80,18 @@ func TestRepositoryAutomergePolicyDogfood(t *testing.T) {
 	}
 }
 
-func loadRepositoryPolicyForTest(t *testing.T) repoConfigFile {
+func repositoryConfigPathForTest(t *testing.T) string {
 	t.Helper()
 	_, source, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("runtime.Caller could not locate the dogfood test")
 	}
-	configPath := filepath.Clean(filepath.Join(filepath.Dir(source), "..", "..", "..", ".cenci", "config.json"))
+	return filepath.Clean(filepath.Join(filepath.Dir(source), "..", "..", "..", ".cenci", "config.json"))
+}
+
+func loadRepositoryPolicyForTest(t *testing.T) repoConfigFile {
+	t.Helper()
+	configPath := repositoryConfigPathForTest(t)
 	body, err := os.ReadFile(configPath)
 	if err != nil {
 		t.Fatalf("read repository policy %s: %v", configPath, err)

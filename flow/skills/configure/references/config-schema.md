@@ -62,6 +62,8 @@ on a delta run; `--all` re-offers it. Declining — keeping `interactive` — wr
 
 Both consumers name the unconditional questions a re-run would ask, computed by `scripts/resolve-delta.sh` from the committed `question-keys.json` table (tested by its own `scripts/resolve-delta.test.sh`). The configure flow calls this resolver itself — see `### Delta Resolution` in `phases/detection-and-delta.md`.
 
+The automerge policy engine (`cenci babysit`) does not read `configVersion`: it evaluates the base-ref `automerge` block the same way whatever the stamp is, so a lagging stamp never blocks or changes a merge (see `docs/autonomous-loop.md` §3).
+
 Patch-only drift is deliberately silent: configure features that warrant a re-run land in minor (`feat`) or major bumps per the plugin-version-bump workflow. Do **not** add `configVersion` to the migration-removal list below — it is a managed field, not a legacy one.
 
 The `cenci` field is optional. If present, preserve existing user values during reconfiguration. Schema:
@@ -274,7 +276,11 @@ legacy one.
     Unlike `security.sensitivePaths`, each pattern here is anchored against the
     **whole repo-relative path from the root** (not substring-matched), and a pattern
     ending in `/` with no trailing `*` matches that directory and everything under it
-    — see `docs/autonomous-loop.md`. A changed file matching any pattern denies
+    — see `docs/autonomous-loop.md`.
+    A pattern with neither `*` nor a trailing `/` matches that exact path and everything under it
+    when it names a directory (e.g. `flow/skills`), so a file literal such as `watch/main.go`
+    keeps matching only itself; a pattern containing `*` gets no directory extension.
+    A changed file matching any pattern denies
     automerge for that PR. Absent means an empty denylist — a genuine "nothing is
     protected" statement, not a malformed block.
   - `automerge.maxChangedFiles` — required whenever an `automerge` block is present; a

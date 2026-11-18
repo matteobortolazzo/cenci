@@ -375,6 +375,10 @@ fallback thresholds.
   case-insensitive. Any changed file matching any pattern denies that PR. A pattern
   ending in `/` with no trailing `*` matches that directory and everything under it
   (e.g. `flow/skills/` protects the whole directory, not a literal-string match).
+  A pattern with neither `*` nor a trailing `/` matches that exact path and everything under it
+  when it names a directory (e.g. `flow/skills` covers the whole directory, while
+  `watch/main.go` still matches only that file, not `watch/main.go.bak`).
+  A pattern containing `*` gets no directory extension, because `*` already spans `/`.
   Each pattern is anchored against the **whole repo-relative path from the root**, so
   a bare pattern with no leading `*` (e.g. `install.sh`) only matches a file literally
   at the repo root — prefix with `*` to match anywhere (e.g. `*install.sh`).
@@ -387,6 +391,13 @@ In a monorepo, put a block on each `projects[]` entry (a file falls to the entry
 the longest matching `path` prefix, then to the top-level block). When one PR spans
 several blocks the effective policy is the *most restrictive* merge: the minimum of
 each cap and the union of every `protectedPaths`.
+
+Policy evaluation ignores `configVersion`: the block is interpreted the same way
+whether the base branch's stamp is missing, older or newer, and no repo is blocked from
+automerge because its stamp lags.
+Changes to how a policy is interpreted only ever add protection, and removing protection requires a new explicit key.
+A lagging stamp is reported only by the SessionStart nudge and by
+`/cenci:maintain`'s `config-version` check, both advisory.
 
 `/cenci:configure` offers to scaffold this block on a delta run only when `automerge`
 is absent and has not been offered before — an existing block is reported verbatim and
