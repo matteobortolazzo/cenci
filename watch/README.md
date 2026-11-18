@@ -1011,8 +1011,10 @@ failing gate is the logged skip reason):
 2. carries `Planned`, **or** carries `Refined` (and not yet `Planned`) in a
    lean-planning repo with `dispatch.planRefined: true` — a *planning pickup* (see
    [Planning pickup and autonomous re-plan](#planning-pickup-and-autonomous-re-plan)
-   below) — **or** carries `Input Needed` with a human answer newer than the
-   escalation anchor (see [Escalation auto-resume](#escalation-auto-resume) below);
+   below; a planning pickup or re-plan is held unless the ticket author and every
+   commenter currently hold `write`/`admin`, #847) — **or** carries `Input Needed`
+   with a human answer newer than the escalation anchor (see [Escalation
+   auto-resume](#escalation-auto-resume) below);
    not `Blocked`, has a provably-complete open-PR inventory with no open linked PR
    (see [Open-PR inventory completeness](#open-pr-inventory-completeness) below),
    and its persisted pipeline stage is not `finalized`;
@@ -1535,16 +1537,26 @@ committed. Ordinary `Planned` pickup in the same repo is unaffected by the same
 fetch failure; only freshness-dependent planning/re-plan authorization is gated
 by it.
 
-**Trust boundary.** Enabling `dispatch.planRefined` treats the `Refined` label
-(plus the existing assignee-ownership gate) as sufficient authorization to
-launch an unattended planning session whose primary input is the ticket's own
-body/comment text. Unlike the [escalation auto-resume](#escalation-auto-resume)
-path (#827/#882), which requires the human reply's author to currently hold
-`admin` or `write` repository permission (resolved via the authoritative
-collaborator-permission endpoint, not merely an `authorAssociation` value read
-off the comment), there is no author-authorization check on the issue text a
-planning pickup consumes. Do not enable this flag on a repo that accepts
-externally-authored issues from untrusted parties.
+**Trust boundary (#847).** A planning pickup or autonomous re-plan launches an
+unattended session whose primary input is the ticket's own body/comment text, so
+the `Refined` label (plus the assignee-ownership gate) is not enough on its own.
+Dispatch also requires that the issue author and every commenter currently hold
+`admin` or `write` repository permission, resolved through the authoritative
+collaborator-permission endpoint (`repos/<o>/<r>/collaborators/<login>/permission`,
+the same rule as the [escalation auto-resume](#escalation-auto-resume) path,
+#827/#882). Bots never count, and a commenter whose `author_association` is not
+`OWNER`/`MEMBER`/`COLLABORATOR` is refused without a lookup. Any failure holds the
+ticket with a `planning held: ...` reason (`plan stale, re-plan blocked: planning
+held: ...` for a re-plan), re-evaluated from scratch every pass with nothing
+carried over: delete the untrusted comment, grant the author or commenter write
+access, or plan the ticket attended (`/cenci:implement <id>`) to release it. The
+check runs only for real candidates, so with `dispatch.planRefined` off, a
+non-lean repo or no candidate it makes zero `gh` calls. Gate order, failure
+classes and budgets are in [`docs/dispatch-reconcile.md`](docs/dispatch-reconcile.md#planning-trust-gate-847).
+**Residual gap:** a comment posted between the gate and the launched session's own
+read of the ticket is not caught; closing it needs flow-side filtering inside the
+session. Still avoid enabling this flag on a repo that accepts issues from
+untrusted parties.
 
 **Launch shapes.** A planning pickup launches with the bare ticket number
 (`cenci run implement <n>`) since there is no plan file yet for the implement

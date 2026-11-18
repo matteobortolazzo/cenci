@@ -247,6 +247,23 @@ const (
 	reasonAnswerPermissionCapExhausted = "write-permission lookup cap reached"
 )
 
+// Planning trust gate skip reasons (#847), one per PlanningTrust failure
+// class plus a distinct one for a map miss or unrecognized value, each
+// content-distinct from every other reason in this file (#446/#598). A held
+// re-plan composes these behind "plan stale, re-plan blocked: ". Reasons name
+// only the numeric comment ID, never a login or body text.
+const (
+	reasonPlanningAuthorDenied              = "planning held: ticket author lacks write permission"
+	reasonPlanningCommentDeniedFmt          = "planning held: comment %d author not trusted"
+	reasonPlanningTrustUnresolved           = "planning held: ticket trust unresolved"
+	reasonPlanningTrustPermissionUnresolved = "planning held: ticket trust permission unresolved"
+	reasonPlanningTrustUnknown              = "planning held: ticket trust probe unrecognized"
+)
+
+// reasonReplanBlockedFmt composes a re-plan denial with the staleness fact
+// (#851, #847).
+const reasonReplanBlockedFmt = "plan stale, re-plan blocked: %s"
+
 // Open-PR-inventory-completeness gate skip reasons (#881).
 // reasonOpenPRProbeUnknown is deliberately distinct from every other reason
 // here, for the same reason reasonStageProbeUnknown/reasonMainSyncUnknown/
@@ -365,6 +382,14 @@ type Inputs struct {
 	// is ever called. A missing entry is permissive, mirroring RepoMemory; the
 	// spawn loop still launches only for an explicit SessionEligible.
 	SessionEligibility map[string]SessionEligibility
+
+	// PlanningTrust maps planKey(repo, number) -> the planning trust verdict
+	// (#847) for every unattended planning pickup or re-plan candidate,
+	// resolved by resolvePlanningTrust (planningtrust.go) before Decide is
+	// ever called. Unlike RepoMemory a missing entry is NOT permissive: a
+	// candidate with no entry is held as "ticket trust probe unrecognized".
+	// Never consulted for ordinary Planned dispatch or a resume.
+	PlanningTrust map[string]PlanningTrustProbe
 }
 
 // Decide is pure: identical Inputs yield an identical ordered []Decision with no
@@ -527,6 +552,16 @@ func decideTicket(t Ticket, in Inputs, planByTicket map[string]*Plan, filterByRe
 		if reason, gated := autonomyGateSkip(in.RepoAutonomy[t.Repo]); gated {
 			return skip(reason)
 		}
+		// Planning trust gate (#847), right after the autonomy gate. Only a
+		// real candidate (planningTrustCandidate, shared with the probe)
+		// consults the trust map here; any other ticket falls through to the
+		// board-state and assignee gates below with today's reasons
+		// ("already Working", "assigned to @x", ...).
+		if planningTrustCandidate(t, in, plan, filterByRepo[t.Repo]) {
+			if reason, gated := planningTrustSkip(in.PlanningTrust, planKey(t.Repo, t.Number)); gated {
+				return skip(reason)
+			}
+		}
 	}
 
 	// Pickup rule 1: board state.
@@ -631,7 +666,14 @@ func decideTicket(t Ticket, in Inputs, planByTicket map[string]*Plan, filterByRe
 			// itself is off) or the bare autonomy reason alone (which would lose
 			// the staleness context).
 			if reason, gated := autonomyGateSkip(in.RepoAutonomy[t.Repo]); gated {
-				return skip(fmt.Sprintf("plan stale, re-plan blocked: %s", reason))
+				return skip(fmt.Sprintf(reasonReplanBlockedFmt, reason))
+			}
+			// Planning trust gate (#847) on the re-plan path, right after its
+			// autonomy gate: every gate that planningTrustCandidate checks has
+			// already passed by here, so the trust map is consulted directly
+			// and a map miss fails closed.
+			if reason, gated := planningTrustSkip(in.PlanningTrust, planKey(t.Repo, t.Number)); gated {
+				return skip(fmt.Sprintf(reasonReplanBlockedFmt, reason))
 			}
 			replanning = true
 		}
@@ -735,12 +777,49 @@ func decideTicket(t Ticket, in Inputs, planByTicket map[string]*Plan, filterByRe
 		return Decision{Ticket: t, Plan: plan, Action: ActionDispatch, Resume: true, Reason: "resume — human answered", Agent: agent}
 	}
 	if planning || replanning {
+		// Trust backstop (#847): a planning session is never launched without
+		// an explicit trusted verdict, even if planningTrustCandidate and the
+		// gate sites above ever drift apart.
+		if p, ok := in.PlanningTrust[planKey(t.Repo, t.Number)]; !ok || p.Class != PlanningTrustTrusted {
+			if replanning {
+				return skip(fmt.Sprintf(reasonReplanBlockedFmt, reasonPlanningTrustUnknown))
+			}
+			return skip(reasonPlanningTrustUnknown)
+		}
 		if replanning {
 			return Decision{Ticket: t, Plan: plan, Action: ActionDispatch, Planning: true, Replan: true, Reason: "re-plan — plan stale", Agent: agent}
 		}
 		return Decision{Ticket: t, Plan: nil, Action: ActionDispatch, Planning: true, Reason: "plan — Refined, no plan file", Agent: agent}
 	}
 	return Decision{Ticket: t, Plan: plan, Action: ActionDispatch, Reason: "dispatch", Agent: agent, Note: note}
+}
+
+// planningTrustSkip evaluates the planning trust gate (#847) for key, with zero
+// I/O. Only an explicit PlanningTrustTrusted entry passes. A map miss, the
+// zero value, an unrecognized class and a comment-denied entry with a
+// non-positive comment ID all default-deny with reasonPlanningTrustUnknown.
+func planningTrustSkip(trust map[string]PlanningTrustProbe, key string) (string, bool) {
+	p, ok := trust[key]
+	if !ok {
+		return reasonPlanningTrustUnknown, true
+	}
+	switch p.Class {
+	case PlanningTrustTrusted:
+		return "", false
+	case PlanningTrustAuthorDenied:
+		return reasonPlanningAuthorDenied, true
+	case PlanningTrustCommentDenied:
+		if p.CommentID <= 0 {
+			return reasonPlanningTrustUnknown, true
+		}
+		return fmt.Sprintf(reasonPlanningCommentDeniedFmt, p.CommentID), true
+	case PlanningTrustUnresolved:
+		return reasonPlanningTrustUnresolved, true
+	case PlanningTrustPermissionUnresolved:
+		return reasonPlanningTrustPermissionUnresolved, true
+	default:
+		return reasonPlanningTrustUnknown, true
+	}
 }
 
 // sessionEligibilitySkip evaluates the session-eligibility gate (#1464) for

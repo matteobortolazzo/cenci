@@ -61,6 +61,11 @@ type ghIssue struct {
 	Assignees []string `json:"assignees"`
 	UpdatedAt string   `json:"updatedAt"`
 
+	// Author is the issue author's login (#847), rendered into the `gh issue
+	// list` payload as `"author":{"login":...}` for the planning trust gate.
+	// Empty defaults to the world's CurrentLogin (chainIssueList).
+	Author string `json:"author,omitempty"`
+
 	// BlockedBy is the issue's native GitHub dependency set -- the numbers
 	// this issue is "Blocked by". Unlike Milestone/SubIssues below this is
 	// NOT fidelity-only: the collector reads it from `gh issue list --json
@@ -497,7 +502,8 @@ func (h *chainHarness) seedReview(pr int, login, state, submittedAt string) int6
 // keyed case-insensitively (mirrors GitHub's own case-insensitive login
 // matching) so a test can seed "octocat" and answer as "Octocat" without
 // drift. A login with no seeded entry defaults to "none" in
-// chainCollaboratorPermission below.
+// chainCollaboratorPermission below, except the world's CurrentLogin, which
+// defaults to "admin" (#847).
 func (h *chainHarness) seedPermission(login, permission string) {
 	h.mutate(func(w *ghWorld) {
 		if w.Permissions == nil {
@@ -1442,8 +1448,13 @@ func chainIssueList(world *ghWorld) string {
 		assignees, _ := json.Marshal(assigneeObjs(is.Assignees))
 		body, _ := json.Marshal(is.Body)
 		title, _ := json.Marshal(is.Title)
-		fmt.Fprintf(&sb, `{"number":%d,"title":%s,"body":%s,"labels":%s,"assignees":%s,"blockedBy":%s}`,
-			is.Number, title, body, labels, assignees, blockedByJSON(world, is))
+		authorLogin := is.Author
+		if authorLogin == "" {
+			authorLogin = world.CurrentLogin
+		}
+		author, _ := json.Marshal(map[string]string{"login": authorLogin})
+		fmt.Fprintf(&sb, `{"number":%d,"title":%s,"body":%s,"labels":%s,"assignees":%s,"blockedBy":%s,"author":%s}`,
+			is.Number, title, body, labels, assignees, blockedByJSON(world, is), author)
 	}
 	sb.WriteString("]")
 	return sb.String()
@@ -1901,13 +1912,20 @@ func chainAllowedMethods(world *ghWorld) string {
 // `gh api repos/<owner>/<repo>/collaborators/<login>/permission`. A login
 // with no seeded world.Permissions entry defaults to "none" (an org member
 // or removed collaborator with no repo access, per the plan's Assumptions --
-// GitHub returns HTTP 200 permission:"none" here, never a 404).
+// GitHub returns HTTP 200 permission:"none" here, never a 404). The one
+// exception is world.CurrentLogin, the operator whose gh login runs cenci and
+// who authors every seeded issue by default (ghIssue.Author): unseeded, it
+// reads "admin", modelling the solo-maintainer repo the #847 planning trust
+// gate must leave unaffected. An explicit seedPermission still wins.
 func chainCollaboratorPermission(world *ghWorld, args []string) string {
 	endpoint := pathArg(args)
 	login := extractStringBetween(endpoint, "/collaborators/", "/permission")
 	permission, ok := world.Permissions[strings.ToLower(login)]
 	if !ok {
 		permission = "none"
+		if strings.EqualFold(login, world.CurrentLogin) {
+			permission = "admin"
+		}
 	}
 	data, _ := json.Marshal(map[string]string{"permission": permission})
 	return string(data)

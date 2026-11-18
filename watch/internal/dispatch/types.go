@@ -318,6 +318,48 @@ const (
 	WritePermissionCapExhausted WritePermission = "cap_exhausted"
 )
 
+// PlanningTrust classifies the planning trust probe's verdict on one
+// unattended planning or re-plan candidate (#847, planningtrust.go): whether
+// the issue author and every commenter currently hold repository write
+// permission. Like AnswerProbe above there is deliberately NO permissive zero
+// value: a candidate resolvePlanningTrust never covered (an
+// Inputs.PlanningTrust map miss), the zero value and any unrecognized value
+// all fail closed through decide.go's planningTrustSkip default.
+type PlanningTrust string
+
+const (
+	// PlanningTrustTrusted means the author and every comment's author were
+	// positively granted `admin` or `write` this pass -- the only class that
+	// lets a planning pickup or re-plan proceed.
+	PlanningTrustTrusted PlanningTrust = "trusted"
+	// PlanningTrustAuthorDenied means the issue author is a bot, has an
+	// invalid or empty login, or currently holds `read`/`triage`/`none`.
+	PlanningTrustAuthorDenied PlanningTrust = "author_denied"
+	// PlanningTrustCommentDenied means at least one comment's author failed
+	// the trust rule (bot, association outside OWNER/MEMBER/COLLABORATOR,
+	// invalid login, or a recognized non-write permission).
+	// PlanningTrustProbe.CommentID names the lowest such REST comment ID.
+	PlanningTrustCommentDenied PlanningTrust = "comment_denied"
+	// PlanningTrustUnresolved means the comment thread could not be read:
+	// the call failed, timed out, exceeded maxProbeStdoutBytes, returned
+	// malformed JSON or a non-positive comment ID, or the per-pass trust probe
+	// budget was already spent.
+	PlanningTrustUnresolved PlanningTrust = "unresolved"
+	// PlanningTrustPermissionUnresolved means a permission lookup the verdict
+	// needed could not settle the question (any WritePermission other than
+	// granted or denied, maxPermissionLookupsPerRepo included).
+	PlanningTrustPermissionUnresolved PlanningTrust = "permission_unresolved"
+)
+
+// PlanningTrustProbe is one candidate's trust verdict (#847). CommentID is the
+// REST numeric ID of the first untrusted comment in ascending-ID order and is
+// meaningful only for PlanningTrustCommentDenied; a comment-denied verdict
+// with a non-positive ID is default-denied as unrecognized.
+type PlanningTrustProbe struct {
+	Class     PlanningTrust
+	CommentID int64
+}
+
 // RepoAutonomy classifies the resolved per-repository `planning.autonomy`
 // authorization (#851), read from the enrolled repo's committed
 // `.cenci/config.json` after main sync, into a closed set, rather than
@@ -668,6 +710,13 @@ type Ticket struct {
 	Assignees []string // GitHub logins; dispatch requires exactly CurrentUser
 	HasOpenPR bool     // an open linked PR exists
 	Agent     string   // resolved from an `agent:<name>` label, else ""
+
+	// Author is the issue author's login and AuthorIsBot gh's `author.is_bot`
+	// flag (collector-filled from the one `gh issue list` call, #847). Both
+	// feed only the planning trust probe. An empty Author fails
+	// githubLoginPattern there, so a Ticket built without it is never trusted.
+	Author      string
+	AuthorIsBot bool
 
 	// Milestone is the repo-local milestone number (never the title or global
 	// ID), meaningful only when MilestoneProbe is MilestoneProbePresent

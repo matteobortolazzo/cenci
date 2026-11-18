@@ -107,6 +107,12 @@ type dispatchDeps struct {
 	// keyed by planKey and loaded once per pass by RunOnce through
 	// oomBackoffLoadFn -- threaded straight through to Inputs.OOMBackoffSince.
 	OOMBackoffSince map[string]time.Time
+
+	// PlanningTrust (#847) is the once-per-pass planning trust verdict per
+	// candidate, keyed by planKey and resolved by resolvePlanningTrust before
+	// applyDispatch/Decide ever run -- threaded straight through to
+	// Inputs.PlanningTrust.
+	PlanningTrust map[string]PlanningTrustProbe
 }
 
 // RunOnce gathers inputs (tickets, plans, snapshot, clock), runs the pure
@@ -214,6 +220,23 @@ func RunOnce(cfg Config, ctrl run.Controller, mut TicketMutator, dryRun bool, ou
 	// dispatch_pass_failed.
 	answers := resolveAnswerProbes(tickets, indexPlans(plans), out)
 
+	// Planning trust probe (#847): for every unattended planning pickup or
+	// re-plan candidate in a lean repo (after the attended narrowing above),
+	// read the comment thread and check the author's and every commenter's
+	// current write permission. Same shape as the answers probe: read-only,
+	// also run in a dry run, its own per-pass permission cache, and a failure
+	// only logs and fails that candidate closed -- it never feeds collectErr.
+	// Zero gh calls with planRefined off or no candidate.
+	planningTrust := resolvePlanningTrust(Inputs{
+		Tickets:         tickets,
+		Plans:           plans,
+		CurrentUser:     currentUser,
+		Config:          cfg,
+		RepoAutonomy:    autonomies,
+		PlanProbes:      planProbes,
+		PlanInventories: planInventories,
+	}, out)
+
 	// #927: a leftover top-level dispatch.session is read-only detection --
 	// it never gates a pass -- so this logs at most once per pass and never
 	// feeds collectErr/applyErr.
@@ -233,6 +256,7 @@ func RunOnce(cfg Config, ctrl run.Controller, mut TicketMutator, dryRun bool, ou
 		ContainerSessionProbe:     sessionProbe,
 		RepoMemory:                repoMemory,
 		OOMBackoffSince:           oomBackoffSince,
+		PlanningTrust:             planningTrust,
 	}, ctrl, mut, dryRun, out, prior)
 
 	// #927, #1464: the per-repo session sentinel(s) must outrank a same-pass
@@ -402,6 +426,7 @@ func applyDispatch(cfg Config, deps dispatchDeps, ctrl run.Controller, mut Ticke
 		RepoMemory:                deps.RepoMemory,
 		OOMBackoffSince:           deps.OOMBackoffSince,
 		SessionEligibility:        eligibility,
+		PlanningTrust:             deps.PlanningTrust,
 	})
 
 	if dryRun {

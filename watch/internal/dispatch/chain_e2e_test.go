@@ -103,6 +103,9 @@ func TestAutonomousChain_PositiveEndToEnd(t *testing.T) {
 	mut := &GHMutator{}
 
 	h.commitAndPushConfig(chainRepoConfigLean)
+	// The planning trust gate (#847) needs the issue author (the world's
+	// current login) to hold write permission for the pickup verdicts below.
+	h.seedPermission("octocat", "admin")
 
 	// -- A. Seed the shared golden fixture graph and assert the exact
 	// three-ticket decision map ----------------------------------------------

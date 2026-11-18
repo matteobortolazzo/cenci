@@ -219,7 +219,10 @@ a missing, unreadable, malformed, or non-`"lean"` repo config denies both, with
 its own distinct skip reason, and so does a fetch failure this pass (a
 distinct, retryable reason — ordinary `Planned` pickup in the same repo is
 unaffected). A repo's own unpushed local commits can never grant or revoke this
-authorization; only the fetched remote object counts. See [cenci-watch's
+authorization; only the fetched remote object counts. A planning pickup or
+re-plan is also held unless the ticket author and every commenter currently hold
+`write` or `admin` (#847; see the "Trust boundary" note in
+[the autonomous loop guide](autonomous-loop.md)). See [cenci-watch's
 README](../watch/README.md#planning-pickup-and-autonomous-re-plan) for the
 sibling-serialization and unbounded-re-plan limitations this loop accepts.
 
