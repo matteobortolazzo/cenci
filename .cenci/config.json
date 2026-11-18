@@ -1,5 +1,5 @@
 {
-  "configVersion": "1.35.6",
+  "configVersion": "1.36.1",
   "branchPattern": "feature/<id>-<description>",
   "isMonorepo": true,
   "stack": {
