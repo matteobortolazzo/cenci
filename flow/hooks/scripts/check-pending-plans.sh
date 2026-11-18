@@ -56,7 +56,7 @@ fi
 # NUL-safe, checked-temp-file enumeration (flow/scripts/run-checks.sh:62-89
 # precedent; root AGENTS.md forbids unchecked command substitution for
 # security-critical paths). mktemp failure must exit 0 silently and must
-# never fall back to /dev/null (flow/docs/shell-scripting-gotchas.md line 25).
+# never fall back to /dev/null (flow/docs/shell-scripting-gotchas.md, `jq_err_cleanup` fd-9 rule).
 LIST="$(mktemp)" || exit 0
 if [[ -z "$LIST" ]]; then
   exit 0
