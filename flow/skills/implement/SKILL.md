@@ -139,7 +139,7 @@ Runs **after** the Pre-flight Check above — the `gh auth status` check is the 
 **If ticket mode:** Delegate to the `context-gatherer` agent. Pass:
 
 - The ticket number and `owner/repo`
-- The bundle output path: `${TMPDIR:-/tmp}/cenci/cenci-context-<ticket-id>.md`
+- The bundle output path: `${TMPDIR:-/tmp}/cenci/cenci-context-<ticket-id>-<session-uuid>.md`
 - Config facts: `isMonorepo` and `projects`
 
 The gatherer fetches the ticket and comments, performs parent-child detection, discovers attachments, loads per-project context, writes the bundle file, and returns a compact digest. From the digest, store:
@@ -155,7 +155,7 @@ If the digest reports errors (ticket not found, auth failure), surface them to t
 
 After the digest is stored, invoke `cenci pipeline prepare <id>` to record `prepared` state and confirm the ticket exists (the command itself re-verifies via a retried `gh issue view <id>`). Render the returned `next_actions` and `warnings` as the pre-flight status update instead of narrating what comes next — a `warnings` entry here means this `prepare` call was a monotonic no-op (the ticket's persisted stage was already at or past `prepared`), which is worth showing in the transcript like every other stage call site. If it returns non-empty `errors[]`, surface them to the user and stop — do not proceed to Attachments/Ticket Readiness. Ticketless mode: skip this call — the pipeline commands operate on ticket IDs.
 
-**If ticketless mode:** Delegate to the `context-gatherer` only when there is context to bundle (a monorepo), with the task description in place of the ticket and bundle path `${TMPDIR:-/tmp}/cenci/cenci-context-<slug>.md`. Otherwise skip — the task description is the entire input.
+**If ticketless mode:** Delegate to the `context-gatherer` only when there is context to bundle (a monorepo), with the task description in place of the ticket and bundle path `${TMPDIR:-/tmp}/cenci/cenci-context-<slug>-<session-uuid>.md`. Otherwise skip — the task description is the entire input.
 
 **Parent-child edge cases** (resolved inside the gatherer, recorded here for downstream phases):
 - Parent already closed → `isLastChild = false` (skip auto-close)

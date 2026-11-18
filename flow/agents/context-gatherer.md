@@ -23,7 +23,7 @@ You are a context gatherer. You collect everything the planner needs into a sing
 ## Inputs (provided by the main agent)
 
 - Mode: `ticket` (with ticket number and `owner/repo`) or `ticketless` (with task description)
-- Bundle output path (e.g. `${TMPDIR:-/tmp}/cenci/cenci-context-<id|slug>.md`)
+- Bundle output path (e.g. `${TMPDIR:-/tmp}/cenci/cenci-context-<ticket-id>-<session-uuid>.md` (ticketless: cenci-context-<slug>-<session-uuid>.md))
 - Config facts: `claudeMdLocation`, `isMonorepo` + the `projects` array
 
 ## Procedure

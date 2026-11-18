@@ -92,7 +92,7 @@ assert_eq "${OUT_C}" "" "case2 non-directory TMPDIR must print no path to stdout
 # artifact paths may reappear in the phase files or the two SKILL.md docs
 # that reference diffContextMode. Scope is locked to exactly these 4
 # basenames (Q&A decision above) — not the other ticket-slug-scoped temp
-# files (explore-*, pr-body, followup-*, cenci-context-*, screenshots dir),
+# files (explore-*, pr-body, followup-*, screenshots dir),
 # which stay out of scope for this ticket.
 # =====================================================================
 for pattern in \

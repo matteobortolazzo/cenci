@@ -614,8 +614,10 @@ rm -f \
   ${TMPDIR:-/tmp}/cenci/cenci-<ticket-id-or-slug>-amend-msg.txt \
   ${TMPDIR:-/tmp}/cenci/cenci-<ticket-id-or-slug>-explore-1.md \
   ${TMPDIR:-/tmp}/cenci/cenci-<ticket-id-or-slug>-explore-2.md \
-  ${TMPDIR:-/tmp}/cenci/cenci-context-<ticket-id-or-slug>.md
+  ${TMPDIR:-/tmp}/cenci/cenci-context-<ticket-id-or-slug>-<session-uuid>.md
 ```
+
+This run removes only its own session-scoped bundle, `cenci-context-<ticket-id>-<session-uuid>.md` (ticketless: cenci-context-<slug>-<session-uuid>.md), never another session's. A context bundle left by an earlier session (a plan-file-mode run resumed in a later session skips Context Gathering) or an unscoped bundle from an older run is not removed here; it stays as an accepted ephemeral `/tmp` leftover, like an unknown `$RUN_DIR`.
 
 The shared temp-file escalation marker this list used to remove here (#849) no longer exists at all — it was retired in favor of the persisted `awaiting-input` draft itself as the durable lean-approval blocker (see `phases/phase-1-plan.md`'s `## Lean Approval Path` entry conditions), so there is nothing left for this cleanup step to remove for it. The escalation-anchor questions staging files (`cenci-escalation-<id-or-slug>-<session-uuid>.md`) also need no entry here: every path that writes one (`## Unattended Escalation Path` step 2, `## Repair Escalation Anchor` case (ii)/(iii), `## Resume From Draft` step 3) removes it inline immediately after its comment posts successfully, and every escalating path stops the session at Phase 1 — Phase 9 is only ever reached by a run that did *not* escalate this session, so no escalation staging file can still be on disk by the time this cleanup step runs.
 

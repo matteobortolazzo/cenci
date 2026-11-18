@@ -1411,5 +1411,231 @@ if require_content ATTR_CONTENT "${ATTRIBUTION_DOC_PATH}" "comment-attribution.m
     "comment-attribution.md must drop the stale eight-kinds count"
 fi
 
+# =====================================================================
+# #838 (item 1) -- the deterministic destructive-operation backstop in
+# phase-1-plan.md's ## Lean Approval Path, plus the matching docs/autonomous-loop.md
+# sync. (Item 2, the session-scoped context bundle, is pinned by
+# flow/tests/context-bundle-scoping-contract.test.sh.)
+#
+# The backstop is a sibling of the sensitive-path, Open-Questions and Split Gate
+# disqualifiers: skill prose over planner output already in hand, zero new tool
+# calls, built-in pattern set only (no config key), case-insensitive substring
+# match over `### Files to Modify`, `### Files to Create`, `### Implementation
+# Order` and `### Risks`. It can only disqualify, never promote, and it fails
+# closed.
+#
+# Acceptance-criterion / edge-case map (each has an explicit assertion below):
+#   - AC1 marker + four headings + case-insensitive substring + disqualify-only
+#       -> D838_MARKER, the four-heading loop, D838_SUBSTRING_MARKER, D838_DISQUALIFY_ONLY_MARKER
+#   - AC2 every Decisions pattern present verbatim -> the 21-pattern loop (count pinned)
+#   - AC3 any match falls through to ## New Plan, saved held, never authorized
+#     lean/lean-decided -> D838_FALLTHROUGH_MARKER, D838_FRONT_MATTER_MARKER
+#   - AC4 fail-closed on a missing scanned heading -> D838_FAIL_CLOSED_MARKER (+ section
+#     boundary / empty-body markers)
+#   - AC5 exactly one status line, matched pattern literal only -> D838_STATUS_*
+#   - AC6 the retired "Two further ... Either one" intro count -> assert_absent_paired_ws
+#   - AC7 docs/autonomous-loop.md bullet + pending-human sentence -> D838_DOC_*
+#   - edge 1 negated phrase still disqualifies -> D838_NEGATION_MARKER
+#   - edge 2 a pattern only outside the four sections does not disqualify
+#       -> D838_OUTSIDE_SECTIONS_MARKER
+#   - edge 3 a held plan with decided: entries keeps the existing lean-decided
+#     front-matter override (Q1) -> D838_FRONT_MATTER_MARKER
+#   - edge 4 ticket mode only -> D838_TICKET_ONLY_MARKER
+# The pinned #1131 bullets stay byte-identical -> the regression guards at the end.
+# =====================================================================
+
+D838_MARKER='**Deterministic destructive-operation backstop.**'
+D838_BULLET_START='- **Deterministic destructive-operation backstop.**'
+D838_SUBSTRING_MARKER='matching case-insensitive substrings'
+D838_DISQUALIFY_ONLY_MARKER='This backstop can only **disqualify** a plan from the Lean Approval Path; it never promotes one.'
+D838_FALLTHROUGH_MARKER='Any match falls through to `## New Plan`, where the plan is saved `held` and never authorized `lean` or `lean-decided`'
+D838_FRONT_MATTER_MARKER='its front matter is `approval: pending-human`, or `approval: lean-decided` when it carries a `decided:` entry'
+D838_FAIL_CLOSED_MARKER='if any of the four scanned headings cannot be found in the planner output, the check counts as matched and falls through to `## New Plan`'
+D838_SECTION_BOUNDARY_MARKER='scanned section runs from its exact `### <name>` line to just before the next line that starts with `## ` or `### `'
+D838_EMPTY_BODY_MARKER='a heading that is present with an empty body counts as present, not missing'
+D838_NEGATION_MARKER='The match is substring-only, with no semantic parsing, so a pattern inside a negated phrase (for example "no `DROP TABLE` needed") still disqualifies.'
+D838_OUTSIDE_SECTIONS_MARKER='A pattern that appears only outside these four sections (for example in `### Alternatives Considered` or `## Architectural Context`) does not disqualify.'
+D838_TICKET_ONLY_MARKER='This backstop never runs in ticketless mode or interactive mode, because `## Lean Approval Path` is ticket mode and lean only.'
+D838_STATUS_TEMPLATE='`` Lean planning: destructive-operation backstop matched `<pattern>` under `<heading>` — plan held for human release ``'
+D838_STATUS_ONE_LINE_MARKER='On a match, print exactly one line: '"${D838_STATUS_TEMPLATE}"
+D838_STATUS_FIRST_MATCH_MARKER='headings are checked in the order `### Files to Modify`, `### Files to Create`, `### Implementation Order`, `### Risks`, and the patterns in the order listed, and only the first match is printed'
+D838_STATUS_SECRECY_MARKER='only the matched pattern literal and the heading literal are printed, never surrounding plan text'
+D838_STATUS_MISSING_MARKER='a missing heading uses the same line with `<pattern>` set to the literal `missing heading` and `<heading>` set to the missing heading literal'
+D838_FENCE_MARKER='Section boundaries are fence-aware: a line that starts with `## ` or `### ` inside a fenced code block does not end a scanned section, and a section whose fences cannot be bounded (an unclosed fence) counts as matched and falls through to `## New Plan`.'
+D838_DUPLICATE_HEADING_MARKER='Scan every occurrence of each of the four headings: a heading that appears more than once counts as matched and falls through to `## New Plan`.'
+D838_WHITESPACE_MARKER='Before matching, runs of whitespace in the scanned text, including newlines, are collapsed to a single space, and the patterns are matched as written, case-insensitive.'
+D838_STATUS_FAILCLOSED_LITERALS_MARKER='a duplicated heading or an unbounded section uses the same line with `<pattern>` set to the literal `duplicate heading` or `unclosed fence` and `<heading>` set to that heading literal'
+D838_INTRO_MARKER='Further deterministic disqualifiers run over the planner output already in hand at routing time'
+D838_INTRO_RETIRED_COUNT_MARKER='Two further deterministic disqualifiers'
+D838_INTRO_RETIRED_EITHER_MARKER='Either one disqualifies the path'
+D838_INTRO_ANY_MARKER='Any one of them disqualifies the path and falls through to `## New Plan` instead; none can ever promote a ticket onto this path'
+D838_SPLIT_WAIVE_MARKER='never waives any other disqualifier in this list'
+D838_SPLIT_WAIVE_RETIRED_MARKER='never waives the other two'
+
+# The ticket's ### Decisions pattern set, verbatim (built-in, case-insensitive substring).
+D838_PATTERNS=(
+  'drop table'
+  'drop column'
+  'drop database'
+  'truncate table'
+  'delete from'
+  'alter table'
+  'push --force'
+  '--force-with-lease'
+  'reset --hard'
+  'filter-branch'
+  'filter-repo'
+  'branch -D'
+  'push --delete'
+  'rm -rf'
+  'gh repo delete'
+  'gh release delete'
+  'gh issue delete'
+  'irreversible'
+  'data loss'
+  'cannot be rolled back'
+  'no rollback'
+)
+D838_HEADINGS=(
+  '### Files to Modify'
+  '### Files to Create'
+  '### Implementation Order'
+  '### Risks'
+)
+
+[[ "${#D838_PATTERNS[@]}" -eq 21 ]] \
+  || fail "#838 test bug: the Decisions pattern set has 21 entries, this test lists ${#D838_PATTERNS[@]}"
+
+if [[ -n "${PHASE1_CONTENT:-}" ]]; then
+  # The marker must open exactly one bullet (gotchas rule 4: -o | wc -l, never -c).
+  D838_MARKER_COUNT="$(grep -oF -- "${D838_MARKER}" "${PHASE1_PLAN}" | wc -l | tr -d '[:space:]')"
+  [[ "${D838_MARKER_COUNT}" -eq 1 ]] \
+    || fail "phase-1-plan.md must carry ${D838_MARKER} exactly once (#838) -- found ${D838_MARKER_COUNT}"
+
+  if require_section LEAN_838 "${PHASE1_CONTENT}" "## Lean Approval Path" "phase-1-plan.md (#838)"; then
+    # --- the bullet itself: scoped to the one bullet, never file-wide ----------
+    if require_block D838_BULLET "${LEAN_838}" "${D838_BULLET_START}" "phase-1-plan.md (## Lean Approval Path) destructive-operation backstop bullet (AC1)"; then
+      for d838_heading in "${D838_HEADINGS[@]}"; do
+        assert_contains_ws "${D838_BULLET}" "\`${d838_heading}\`" \
+          "phase-1-plan.md destructive-operation backstop bullet must name the scanned heading ${d838_heading} (AC1)"
+      done
+      assert_contains_ws "${D838_BULLET}" "${D838_SUBSTRING_MARKER}" \
+        "phase-1-plan.md destructive-operation backstop bullet must match case-insensitive substrings (AC1)"
+      assert_contains_ws "${D838_BULLET}" 'built-in pattern set' \
+        "phase-1-plan.md destructive-operation backstop bullet must say the pattern set is built in, with no config key (Decisions)"
+      for d838_pattern in "${D838_PATTERNS[@]}"; do
+        assert_contains_ws "${D838_BULLET}" "\`${d838_pattern}\`" \
+          "phase-1-plan.md destructive-operation backstop bullet must list the pattern \`${d838_pattern}\` verbatim (AC2)"
+      done
+      assert_contains_ws "${D838_BULLET}" "${D838_DISQUALIFY_ONLY_MARKER}" \
+        "phase-1-plan.md destructive-operation backstop bullet must state it can only disqualify and never promote (AC1)"
+      assert_contains_ws "${D838_BULLET}" "${D838_FALLTHROUGH_MARKER}" \
+        "phase-1-plan.md destructive-operation backstop bullet must state a match falls through to ## New Plan, saved held, never authorized lean or lean-decided (AC3)"
+      assert_contains_ws "${D838_BULLET}" "${D838_FRONT_MATTER_MARKER}" \
+        "phase-1-plan.md destructive-operation backstop bullet must keep the existing front-matter override: pending-human, or lean-decided when the plan carries a decided: entry (Q1, edge case 3)"
+      assert_contains_ws "${D838_BULLET}" "${D838_FAIL_CLOSED_MARKER}" \
+        "phase-1-plan.md destructive-operation backstop bullet must state the fail-closed rule for a missing scanned heading (AC4)"
+      assert_contains_ws "${D838_BULLET}" "${D838_SECTION_BOUNDARY_MARKER}" \
+        "phase-1-plan.md destructive-operation backstop bullet must define each scanned section's boundaries (Q6)"
+      assert_contains_ws "${D838_BULLET}" "${D838_EMPTY_BODY_MARKER}" \
+        "phase-1-plan.md destructive-operation backstop bullet must say a present-but-empty heading is present, not missing (Q6)"
+      assert_contains_ws "${D838_BULLET}" "${D838_NEGATION_MARKER}" \
+        "phase-1-plan.md destructive-operation backstop bullet must say the match is substring-only and a negated phrase still disqualifies (edge case 1)"
+      assert_contains_ws "${D838_BULLET}" "${D838_OUTSIDE_SECTIONS_MARKER}" \
+        "phase-1-plan.md destructive-operation backstop bullet must say a pattern only outside the four sections does not disqualify (edge case 2)"
+      assert_contains_ws "${D838_BULLET}" "${D838_TICKET_ONLY_MARKER}" \
+        "phase-1-plan.md destructive-operation backstop bullet must state its ticket-mode-and-lean-only scope (edge case 4)"
+      assert_contains_ws "${D838_BULLET}" "${D838_STATUS_ONE_LINE_MARKER}" \
+        "phase-1-plan.md destructive-operation backstop bullet must print exactly one status line with the fixed template (AC5)"
+      assert_contains_ws "${D838_BULLET}" "${D838_STATUS_FIRST_MATCH_MARKER}" \
+        "phase-1-plan.md destructive-operation backstop bullet must print only the first match in the fixed scan order (Q4)"
+      assert_contains_ws "${D838_BULLET}" "${D838_STATUS_SECRECY_MARKER}" \
+        "phase-1-plan.md destructive-operation backstop bullet must print only the pattern and heading literals, never plan text (AC5, Q8)"
+      assert_contains_ws "${D838_BULLET}" "${D838_STATUS_MISSING_MARKER}" \
+        "phase-1-plan.md destructive-operation backstop bullet must define the status line for a missing heading (Q5)"
+      assert_contains_ws "${D838_BULLET}" "${D838_FENCE_MARKER}" \
+        "phase-1-plan.md destructive-operation backstop bullet must make section boundaries fence-aware and fail closed on an unclosed fence (review fix a)"
+      assert_contains_ws "${D838_BULLET}" "${D838_DUPLICATE_HEADING_MARKER}" \
+        "phase-1-plan.md destructive-operation backstop bullet must scan every heading occurrence and fail closed on a duplicate (review fix b)"
+      assert_contains_ws "${D838_BULLET}" "${D838_WHITESPACE_MARKER}" \
+        "phase-1-plan.md destructive-operation backstop bullet must collapse whitespace runs, including newlines, before matching (review fix c)"
+      assert_contains_ws "${D838_BULLET}" "${D838_STATUS_FAILCLOSED_LITERALS_MARKER}" \
+        "phase-1-plan.md destructive-operation backstop bullet must define the status-line literals for a duplicate heading and an unclosed fence (review fix a, b)"
+    fi
+
+    # --- the retired "Two further ... Either one" count (AC6) -------------------
+    assert_absent_paired_ws "${LEAN_838}" "${D838_INTRO_MARKER}" "${D838_INTRO_RETIRED_COUNT_MARKER}" \
+      "phase-1-plan.md (## Lean Approval Path) intro must drop the retired two-disqualifier count (AC6)"
+    assert_absent_paired_ws "${LEAN_838}" "${D838_INTRO_MARKER}" "${D838_INTRO_RETIRED_EITHER_MARKER}" \
+      "phase-1-plan.md (## Lean Approval Path) intro must drop the retired \"Either one disqualifies\" wording (AC6)"
+    assert_contains_ws "${LEAN_838}" "${D838_INTRO_ANY_MARKER}" \
+      "phase-1-plan.md (## Lean Approval Path) intro must say any one of the listed disqualifiers disqualifies and none can promote, without a count (AC6, Q7)"
+    assert_absent_paired_ws "${LEAN_838}" "${D838_SPLIT_WAIVE_MARKER}" "${D838_SPLIT_WAIVE_RETIRED_MARKER}" \
+      "phase-1-plan.md (## Lean Approval Path) Split Gate carve-out must stop counting 'the other two' disqualifiers (Q7, #979 restated-rule update)"
+
+    # --- guards: the sibling bullets and the ticket-mode paragraph are untouched
+    assert_contains_ws "${LEAN_838}" '**Ticket mode only.**' \
+      "phase-1-plan.md (## Lean Approval Path) must keep the existing **Ticket mode only.** paragraph (#838 edge case 4 matches it)"
+  fi
+else
+  fail "#838: phase-1-plan.md content empty or unloaded"
+fi
+
+# --- agents/planner.md is not edited (Q9): the destructive stop-class bullet stays
+#     byte-identical, and the five stop-class markers above still pass. ----------
+assert_file_has_line "${PLANNER_AGENT}" "${DESTRUCTIVE_BULLET_LINE}" \
+  "#838 regression: the destructive-or-irreversible stop-class bullet must stay byte-for-byte unchanged (Q9)"
+assert_file_contains "${PHASE1_PLAN}" "${SENSITIVE_PATH_BACKSTOP_MARKER}" \
+  "#838 regression: the sensitive-path backstop bullet must keep its marker"
+assert_file_contains "${PHASE1_PLAN}" "${OPEN_QUESTIONS_DISQUALIFIER_MARKER}" \
+  "#838 regression: the Open-Questions disqualifier bullet must keep its marker"
+
+# --- docs/autonomous-loop.md (AC7) ---------------------------------------------
+
+D838_DOC_BULLET_MARKER='no destructive-operation signal'
+D838_DOC_HEADINGS_MARKER='in `### Files to Modify`, `### Files to Create`, `### Implementation Order` or `### Risks`'
+D838_DOC_SUBSTRING_MARKER='case-insensitive substring'
+D838_DOC_PENDING_MARKER='a sensitive path, a destructive-operation signal, an unresolved Open Question, or an attended session'
+D838_DOC_PENDING_RETIRED_MARKER='a sensitive path, an unresolved Open Question, or an attended session'
+
+if [[ -n "${LOOP_CONTENT:-}" ]]; then
+  # The Planning-refuses-to-guess bullet list: from the bold lead-in through the
+  # line before the closing "Anything inconclusive" paragraph. A literal anchor,
+  # never a phrase heuristic (gotchas: awk section-boundary fragility).
+  # The end anchor must actually be found: the awk prints a trailing sentinel line
+  # only when it exits on the anchor, so a reworded doc cannot silently over-extract.
+  D838_DOC_REFUSES_RAW="$(awk '
+    !on && index($0, "**Planning refuses to guess.**") { on=1; print; next }
+    on && index($0, "Anything inconclusive") == 1 { print "D838_END_ANCHOR_FOUND"; exit }
+    on { print }
+  ' <<<"${LOOP_CONTENT}")"
+  D838_DOC_REFUSES="${D838_DOC_REFUSES_RAW%D838_END_ANCHOR_FOUND}"
+  if [[ -z "${D838_DOC_REFUSES}" ]]; then
+    fail "docs/autonomous-loop.md (#838): could not locate the Planning refuses to guess bullet list"
+  elif [[ "${D838_DOC_REFUSES_RAW}" == "${D838_DOC_REFUSES}" ]]; then
+    fail "docs/autonomous-loop.md (#838): the Planning refuses to guess bullet list has no closing 'Anything inconclusive' anchor (over-extraction guard)"
+  else
+    assert_contains_ws "${D838_DOC_REFUSES}" "${D838_DOC_BULLET_MARKER}" \
+      "docs/autonomous-loop.md Planning refuses to guess must add a destructive-operation-signal bullet (AC7)"
+    assert_contains_ws "${D838_DOC_REFUSES}" "${D838_DOC_HEADINGS_MARKER}" \
+      "docs/autonomous-loop.md destructive-operation bullet must name the four scanned sections (AC7)"
+    assert_contains_ws "${D838_DOC_REFUSES}" "${D838_DOC_SUBSTRING_MARKER}" \
+      "docs/autonomous-loop.md destructive-operation bullet must say the match is a case-insensitive substring match (AC7)"
+    # The #1131 edit-guard bullets must stay byte-identical (the whole-bullet pins
+    # above also assert this file-wide; this scopes them to the refuses-to-guess list).
+    assert_contains_ws "${D838_DOC_REFUSES}" "${LOOP_REFUSES_STOP_CLASSES_MARKER}" \
+      "#838 regression: docs/autonomous-loop.md stop-class bullet must stay unchanged (#1131 edit guard)"
+    assert_contains_ws "${D838_DOC_REFUSES}" "${LOOP_REFUSES_SENSITIVE_PATH_MARKER}" \
+      "#838 regression: docs/autonomous-loop.md sensitive-path bullet must stay unchanged (#1131 edit guard)"
+  fi
+
+  if require_block D838_DOC_PENDING "${LOOP_CONTENT}" '`approval: pending-human` is a plan saved for you to review' "docs/autonomous-loop.md (#838 pending-human sentence)"; then
+    assert_absent_paired_ws "${D838_DOC_PENDING}" "${D838_DOC_PENDING_MARKER}" "${D838_DOC_PENDING_RETIRED_MARKER}" \
+      "docs/autonomous-loop.md approval: pending-human sentence must name a destructive-operation signal alongside the sensitive path (AC7)"
+  fi
+else
+  fail "#838: docs/autonomous-loop.md content empty or unloaded"
+fi
+
 echo "lean-planning-contract.test.sh: failures=${failures}"
 [[ "${failures}" -eq 0 ]]
