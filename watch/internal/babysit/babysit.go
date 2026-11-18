@@ -273,6 +273,20 @@ type State struct {
 	// unconditionally on every call so a stale class from a previous failed
 	// tick never survives into a later clean tick's persisted state.
 	AutomergeFailureClass string `json:"automergeFailureClass,omitempty"`
+
+	// AutomergePin (#870) is the grant inputs recorded on the first successful
+	// `gh pr view`: additive `omitempty`, no stateSchemaVersion bump, kept by
+	// stop, re-arm and reset, gone only with the state file. Nil means no pin.
+	AutomergePin *automergePin `json:"automergePin,omitempty"`
+}
+
+// automergePin is State.AutomergePin (#870): the sorted, de-duplicated closing
+// issues and the base ref the PR had when babysit first read it. ClosingIssues
+// has no omitempty so an empty pin is stored as [].
+type automergePin struct {
+	ClosingIssues []int     `json:"closingIssues"`
+	BaseRef       string    `json:"baseRef"`
+	PinnedAt      time.Time `json:"pinnedAt"`
 }
 
 // headMoveHold is State.HeadMoveHold (#1539): HeadSHA is the live PR head the
@@ -308,12 +322,46 @@ type prView struct {
 	Additions               int                    `json:"additions"`
 	Deletions               int                    `json:"deletions"`
 	Files                   []prFile               `json:"files"`
+	// IsCrossRepository (#870) is a pointer so an absent field is told apart
+	// from an explicit false.
+	IsCrossRepository *bool `json:"isCrossRepository"`
 }
 
 // prViewFields is the --json field set every `gh pr view` call in this
 // package requests -- shared by tick's own fetch and merge.go's post-merge
-// verification refetch so both decode the identical prView shape.
-const prViewFields = "number,title,state,headRefName,headRefOid,mergedAt,closingIssuesReferences,url,baseRefName,mergeable,mergeStateStatus,isDraft,changedFiles,additions,deletions,files"
+// verification refetch so both decode the identical prView shape. It ends with
+// isCrossRepository (#870); internal/dispatch's chainPRViewFields test mirror
+// must stay byte-identical.
+const prViewFields = "number,title,state,headRefName,headRefOid,mergedAt,closingIssuesReferences,url,baseRefName,mergeable,mergeStateStatus,isDraft,changedFiles,additions,deletions,files,isCrossRepository"
+
+// normalizeIssues returns issues sorted ascending and de-duplicated as a new,
+// non-nil slice (an empty set marshals as [] rather than null, per
+// watch/docs/go-gotchas.md), leaving the caller's slice untouched.
+func normalizeIssues(issues []int) []int {
+	out := make([]int, len(issues))
+	copy(out, issues)
+	slices.Sort(out)
+	return slices.Compact(out)
+}
+
+// pinGrantIfAbsent records pr's closing issues and base ref as s.AutomergePin
+// (#870) unless a pin already exists: an existing pin is never overwritten, so
+// a PR that changes its own grant inputs while supervised is compared against
+// what babysit first saw. Only arm and tick call it.
+func pinGrantIfAbsent(s *State, pr prView) {
+	if s.AutomergePin != nil {
+		return
+	}
+	issues := make([]int, 0, len(pr.ClosingIssuesReferences))
+	for _, i := range pr.ClosingIssuesReferences {
+		issues = append(issues, i.Number)
+	}
+	s.AutomergePin = &automergePin{
+		ClosingIssues: normalizeIssues(issues),
+		BaseRef:       pr.BaseRefName,
+		PinnedAt:      time.Now().UTC(),
+	}
+}
 
 // prConflicting is the pure, fail-safe OR predicate #995's escalation branch
 // gates on: MergeStateStatus == "DIRTY" is authoritative on its own,
@@ -568,6 +616,10 @@ func Run(o Options) error {
 			for _, i := range pr.ClosingIssuesReferences {
 				s.ClosingIssues = append(s.ClosingIssues, i.Number)
 			}
+			// #870: pin the automerge grant inputs before the save below, so the
+			// state file carries the pin before the supervisor ever starts. An
+			// existing pin (a re-arm) is never replaced.
+			pinGrantIfAbsent(&s, pr)
 			// Never downgrade an already-recorded verdict on a re-arm
 			// (Decision, AC 12/13) -- only fill it in when nothing has
 			// published one yet.
@@ -794,6 +846,10 @@ func tick(s *State) (bool, time.Duration, error) {
 	for _, i := range pr.ClosingIssuesReferences {
 		s.ClosingIssues = append(s.ClosingIssues, i.Number)
 	}
+	// #870: the first successful view of a state with no pin (a failed arm read,
+	// or a state written before the pin existed) pins here, before the checks
+	// fetch, so a checks failure still leaves the pin persisted.
+	pinGrantIfAbsent(s, pr)
 	checks, err := fetchChecks(s.PR, s.Repo)
 	if err != nil {
 		s.CIStatus = ciStatusUnknown
@@ -2031,7 +2087,9 @@ func stopRepo(repo, pr, explicit string, strict bool) (gonePID int, err error) {
 // launched keys, the comment watermarks, the discussion revisions and receipts,
 // the outstanding review launch and the consumed nonces, and the untrusted-author
 // limits (#1539: the held untrusted keys, the per-key untrusted launch counts and
-// the head-move hold) -- with status stopped
+// the head-move hold) and the automerge grant pin (#870: arm and stop can both be
+// forwarded from the sandbox, so a re-arm that re-pinned would let the PR's own
+// agent widen its grant) -- with status stopped
 // and no pid. The agent, retry budgets, CI status and closing issues are
 // cleared: a re-arm adopts a fresh agent and its budgets restart as they do
 // today, and a stopped state never blocks a ticket close. Unresolved feedback
@@ -2057,6 +2115,8 @@ func stoppedState(s State, repo, pr string) State {
 		HeldUntrustedKeys:     s.HeldUntrustedKeys,
 		UntrustedLaunchCounts: s.UntrustedLaunchCounts,
 		HeadMoveHold:          s.HeadMoveHold,
+		// #870: dropping this would silently let a re-arm re-pin a drifted grant.
+		AutomergePin: s.AutomergePin,
 	}
 }
 

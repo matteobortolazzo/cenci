@@ -42,7 +42,7 @@ func ciCapPR(state, head, mergeState string, closing ...int) string {
 	for _, n := range closing {
 		refs = append(refs, fmt.Sprintf(`{"number":%d}`, n))
 	}
-	return fmt.Sprintf(`{"number":42,"title":"Change","state":%q,"headRefName":"feature","headRefOid":%q,"mergeable":%q,"mergeStateStatus":%q,"url":"https://example/pr/42","closingIssuesReferences":[%s]}`,
+	return fmt.Sprintf(`{"number":42,"title":"Change","state":%q,"headRefName":"feature","headRefOid":%q,"isCrossRepository":false,"baseRefName":"main","mergeable":%q,"mergeStateStatus":%q,"url":"https://example/pr/42","closingIssuesReferences":[%s]}`,
 		state, head, mergeable, mergeState, strings.Join(refs, ","))
 }
 

@@ -405,7 +405,9 @@ to exit, removes the lock and rewrites the state with status `stopped` and PID 0
 the feedback bookkeeping: pending, addressed and launched keys, the comment watermarks, discussion
 revisions and receipts, the outstanding review launch and consumed nonces, plus the untrusted
 bookkeeping (`heldUntrustedKeys`, `untrustedLaunchCounts` and `headMoveHold`, so a stop and
-re-arm never drops a security hold). Budgets, the agent,
+re-arm never drops a security hold) and `automergePin` (#870: the closing-issue set and base
+ref pinned at arm or on the first successful tick; it survives stop, re-arm and `reset`, is
+never overwritten, and is gone only with the state file). Budgets, the agent,
 CI status and closing issues are cleared, so a re-arm adopts a fresh agent, the retry budgets
 restart as they always have and unresolved feedback keeps its hold. A comment posted while
 supervision was down is collected on the first tick after re-arm. `status` prints `stopped` for

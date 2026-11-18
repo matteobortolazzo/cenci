@@ -20,6 +20,10 @@ import (
 // intp returns a pointer to n, for policyBlock's pointer-typed cap fields.
 func intp(n int) *int { return &n }
 
+// boolp returns a pointer to b, for the pointer-typed fork-state fields whose
+// nil means "absent" (#870).
+func boolp(b bool) *bool { return &b }
+
 // greenAutomergeInputs returns an automergeInputs value that satisfies every
 // stage of the condition chain -- the starting point for the condition-matrix
 // table below, which mutates exactly one field per case to isolate a single
@@ -28,9 +32,15 @@ func intp(n int) *int { return &n }
 // a shared pointer would let one case's mutation silently corrupt another's).
 func greenAutomergeInputs() automergeInputs {
 	return automergeInputs{
-		Enabled:            true,
-		ClosingIssues:      []int{9},
-		IssueLabels:        map[int][]string{9: {"automerge:ok"}},
+		Enabled:       true,
+		ClosingIssues: []int{9},
+		IssueLabels:   map[int][]string{9: {"automerge:ok"}},
+		// #870: the grant pin matches what the PR reports, the PR is not from a
+		// fork and its base is the repository's default branch.
+		Pin:                &automergePin{ClosingIssues: []int{9}, BaseRef: "main"},
+		BaseRef:            "main",
+		IsCrossRepository:  boolp(false),
+		DefaultBranch:      "main",
 		Checks:             []check{{Bucket: "pass", Name: "test"}},
 		RepairPending:      false,
 		PendingKeys:        nil,
@@ -189,7 +199,7 @@ func withFleetAutomergeSequence(t *testing.T, bodies ...string) {
 // from the head ref -- so a test asserting the policy fetch used baseRefName
 // (never headRefName) has something to actually distinguish.
 func automergeEligiblePR() string {
-	return `{"number":42,"title":"Change","state":"OPEN","headRefName":"feature","headRefOid":"abc","baseRefName":"main","mergeable":"MERGEABLE","isDraft":false,"changedFiles":1,"additions":5,"deletions":2,"files":[{"path":"watch/internal/babysit/x.go"}],"url":"https://example/pr/42","closingIssuesReferences":[{"number":9}]}`
+	return `{"number":42,"title":"Change","state":"OPEN","headRefName":"feature","headRefOid":"abc","baseRefName":"main","mergeable":"MERGEABLE","isDraft":false,"isCrossRepository":false,"changedFiles":1,"additions":5,"deletions":2,"files":[{"path":"watch/internal/babysit/x.go"}],"url":"https://example/pr/42","closingIssuesReferences":[{"number":9}]}`
 }
 
 // queueProbeResponse renders the merge-queue GraphQL probe's response body
@@ -203,7 +213,8 @@ func queueProbeResponse(inQueue, enabled bool, headRefOID string) string {
 
 // automergeFirstPassScript renders the first, genuine full-evaluation
 // pass's script (Decisions 1-4): pr view, checks, comments, reviews,
-// closing-issue labels, base-ref policy, repo allowed-methods, merge-queue
+// closing-issue labels, default branch (#870), base-ref policy, repo
+// allowed-methods, merge-queue
 // probe -- every field green, head commit pinned to automergeEligiblePR's
 // "abc" throughout -- the common prefix every merge-eligible tick test
 // shares before #854's pre-merge re-evaluation (recheckAutomergeInputs)
@@ -215,6 +226,7 @@ func automergeFirstPassScript() []scriptedCall {
 		{out: `[]`},
 		{out: `[]`},
 		{out: `{"labels":[{"name":"automerge:ok"}]}`},
+		{out: grantDefaultMain},
 		{out: `{"automerge":{"maxChangedFiles":10,"maxDiffLines":500,"mergeMethod":"squash"}}`},
 		{out: `{"squash":true,"merge":false,"rebase":true}`},
 		{out: queueProbeResponse(false, false, "abc")},
@@ -223,7 +235,8 @@ func automergeFirstPassScript() []scriptedCall {
 
 // automergeGreenRecheckScript renders the pre-merge re-evaluation's own
 // full re-fetch (Decision 9, #854, merge.go's recheckAutomergeInputs): pr
-// view, checks, comments, reviews, closing-issue labels, base-ref policy,
+// view, checks, comments, reviews, closing-issue labels, default branch
+// (#870), base-ref policy,
 // merge-queue probe -- no allowed-methods re-fetch, since that carries over
 // unchanged from the first pass. Every field green by default (matching
 // automergeFirstPassScript's evidence), for tests that only care about the
@@ -243,7 +256,9 @@ func automergeGreenRecheckScript() []scriptedCall {
 // automergeRecheckScript renders the pre-merge re-evaluation's full re-
 // fetch script from explicit bodies, so a test can mutate exactly one call
 // to isolate the recheck holding on that single piece of newly-changed
-// evidence.
+// evidence. The default-branch answer (#870) is always the green "main": the
+// recheck reads it between the labels and the policy whether or not a
+// stage before it holds.
 func automergeRecheckScript(pr, checks, comments, reviews, labels, policy, queue string) []scriptedCall {
 	return []scriptedCall{
 		{out: pr},
@@ -251,6 +266,7 @@ func automergeRecheckScript(pr, checks, comments, reviews, labels, policy, queue
 		{out: comments},
 		{out: reviews},
 		{out: labels},
+		{out: grantDefaultMain},
 		{out: policy},
 		{out: queue},
 	}
@@ -319,7 +335,12 @@ func TestEvaluateAutomergeConditionMatrix(t *testing.T) {
 		wantReason string
 	}{
 		{"fleet automerge disabled", func(in *automergeInputs) { in.Enabled = false }, reasonAutomergeDisabled},
-		{"no closing issue", func(in *automergeInputs) { in.ClosingIssues = nil }, reasonNoClosingIssue},
+		// #870: a PR that never closed an issue pins an empty set, so the "PR
+		// closes no issue" hold is only reachable with the pin cleared as well.
+		{"no closing issue", func(in *automergeInputs) {
+			in.ClosingIssues = nil
+			in.Pin.ClosingIssues = []int{}
+		}, reasonNoClosingIssue},
 		{"closing issue labels unreadable", func(in *automergeInputs) { in.LabelsErr = errors.New("boom") }, reasonLabelUnreadable},
 		{"closing issue lacks automerge:ok", func(in *automergeInputs) { in.IssueLabels = map[int][]string{9: {"bug"}} }, reasonLabelMissing},
 		{"no CI checks at all", func(in *automergeInputs) { in.Checks = nil }, reasonNoChecks},
@@ -437,6 +458,7 @@ func TestEvaluateAutomergeConditionMatrix(t *testing.T) {
 func TestEvaluateAutomergeRequiresEveryClosingIssueLabeled(t *testing.T) {
 	in := greenAutomergeInputs()
 	in.ClosingIssues = []int{9, 10}
+	in.Pin.ClosingIssues = []int{9, 10}
 	in.IssueLabels = map[int][]string{9: {"automerge:ok"}, 10: {"bug"}}
 	got := evaluateAutomerge(in)
 	if got.Merge {
@@ -1240,6 +1262,7 @@ func TestTickAutomergeSquashOnlyHoldsOnNonSquashPolicy(t *testing.T) {
 		{out: `[]`},
 		{out: `[]`},
 		{out: `{"labels":[{"name":"automerge:ok"}]}`},
+		{out: grantDefaultMain},
 		{out: `{"automerge":{"maxChangedFiles":10,"maxDiffLines":500,"mergeMethod":"rebase"}}`},
 	}, &calls)
 
@@ -1275,6 +1298,7 @@ func TestTickAutomergeSquashDisallowedByRepoStillHoldsDistinctReason(t *testing.
 		{out: `[]`},
 		{out: `[]`},
 		{out: `{"labels":[{"name":"automerge:ok"}]}`},
+		{out: grantDefaultMain},
 		{out: `{"automerge":{"maxChangedFiles":10,"maxDiffLines":500,"mergeMethod":"squash"}}`},
 		{out: `{"squash":false,"merge":true,"rebase":true}`},
 	}, &calls)
@@ -1311,6 +1335,7 @@ func TestTickAutomergeHoldsOnMergeQueueProbeNullPullRequest(t *testing.T) {
 		{out: `[]`},
 		{out: `[]`},
 		{out: `{"labels":[{"name":"automerge:ok"}]}`},
+		{out: grantDefaultMain},
 		{out: `{"automerge":{"maxChangedFiles":10,"maxDiffLines":500,"mergeMethod":"squash"}}`},
 		{out: `{"squash":true,"merge":false,"rebase":true}`},
 		{out: `{"data":{"repository":{"pullRequest":null}}}`}, // genuinely probed: zero exit, no errors[], but pullRequest is null
@@ -1493,7 +1518,7 @@ func TestTickAutomergeHeldWhenMergeRejected(t *testing.T) {
 // instead of failing closed.
 func TestTickAutomergeHoldsWhenHeadSHAUnknown(t *testing.T) {
 	withFleetAutomergeEnabled(t, true)
-	pr := `{"number":42,"title":"Change","state":"OPEN","headRefName":"feature","headRefOid":"","baseRefName":"main","mergeable":"MERGEABLE","isDraft":false,"changedFiles":1,"additions":5,"deletions":2,"files":[{"path":"watch/internal/babysit/x.go"}],"url":"https://example/pr/42","closingIssuesReferences":[{"number":9}]}`
+	pr := `{"number":42,"title":"Change","state":"OPEN","headRefName":"feature","headRefOid":"","baseRefName":"main","mergeable":"MERGEABLE","isDraft":false,"isCrossRepository":false,"changedFiles":1,"additions":5,"deletions":2,"files":[{"path":"watch/internal/babysit/x.go"}],"url":"https://example/pr/42","closingIssuesReferences":[{"number":9}]}`
 	var calls [][]string
 	withScriptedCommands(t, []scriptedCall{
 		{out: pr},
@@ -2015,7 +2040,7 @@ func TestTickAutomergePreMergeRecheckHoldsOnChangedEvidence(t *testing.T) {
 	// wiring (MergeStateStatus: pr.MergeStateStatus onto automergeInputs): a
 	// pure evaluateAutomerge test cannot catch an unwired struct field, only
 	// this tick-level recheck path can (root AGENTS.md #824).
-	conflictingPR := `{"number":42,"title":"Change","state":"OPEN","headRefName":"feature","headRefOid":"abc","baseRefName":"main","mergeable":"CONFLICTING","mergeStateStatus":"DIRTY","isDraft":false,"changedFiles":1,"additions":5,"deletions":2,"files":[{"path":"watch/internal/babysit/x.go"}],"url":"https://example/pr/42","closingIssuesReferences":[{"number":9}]}`
+	conflictingPR := `{"number":42,"title":"Change","state":"OPEN","headRefName":"feature","headRefOid":"abc","baseRefName":"main","mergeable":"CONFLICTING","mergeStateStatus":"DIRTY","isDraft":false,"isCrossRepository":false,"changedFiles":1,"additions":5,"deletions":2,"files":[{"path":"watch/internal/babysit/x.go"}],"url":"https://example/pr/42","closingIssuesReferences":[{"number":9}]}`
 
 	for _, tc := range []struct {
 		name                                                 string
@@ -2373,6 +2398,7 @@ func automergeFirstPassScriptWithFeedbackThread(thread string) []scriptedCall {
 		{out: `[]`},
 		{out: thread},
 		{out: `{"labels":[{"name":"automerge:ok"}]}`},
+		{out: grantDefaultMain},
 		{out: `{"automerge":{"maxChangedFiles":10,"maxDiffLines":500,"mergeMethod":"squash"}}`},
 		{out: `{"squash":true,"merge":false,"rebase":true}`},
 		{out: queueProbeResponse(false, false, "abc")},
@@ -2390,7 +2416,7 @@ func automergeRecheckScriptWithFeedbackThreadPages(pr, checks, comments, reviews
 	for _, p := range threadPages {
 		calls = append(calls, scriptedCall{out: p})
 	}
-	calls = append(calls, scriptedCall{out: labels}, scriptedCall{out: policy}, scriptedCall{out: queue})
+	calls = append(calls, scriptedCall{out: labels}, scriptedCall{out: grantDefaultMain}, scriptedCall{out: policy}, scriptedCall{out: queue})
 	return calls
 }
 
@@ -3163,4 +3189,960 @@ func TestHeadMoveHoldOutranksEveryOtherFeedbackHold(t *testing.T) {
 	if holdRank(reasonHeadMovedUntrustedReview) != holdRank(reasonReviewStateUnknown) || holdRank(reasonHeadMovedUntrustedReview) <= holdRank(reasonFeedbackReopened) {
 		t.Errorf("holdRank(head move) = %d, want the top tier", holdRank(reasonHeadMovedUntrustedReview))
 	}
+}
+
+// -- #870: grant-input pin, fork refusal and default-branch base --------------
+
+const (
+	grantGreenChecks  = `[{"bucket":"pass","name":"test","state":"SUCCESS"}]`
+	grantLabelsOK     = `{"labels":[{"name":"automerge:ok"}]}`
+	grantDefaultMain  = `{"default_branch":"main"}`
+	grantMethods      = `{"squash":true,"merge":false,"rebase":true}`
+	grantSquashPolicy = `{"automerge":{"maxChangedFiles":10,"maxDiffLines":500,"mergeMethod":"squash"}}`
+	grantRebasePolicy = `{"automerge":{"maxChangedFiles":10,"maxDiffLines":500,"mergeMethod":"rebase"}}`
+
+	// The isCrossRepository fragments grantPRBody splices in: an explicit false,
+	// an explicit true, and a view that carries no such field at all.
+	grantNotFork    = `"isCrossRepository":false,`
+	grantFork       = `"isCrossRepository":true,`
+	grantForkAbsent = ``
+)
+
+// grantPRBody renders a `gh pr view` body with every field the automerge chain
+// needs at its green value, the given base ref and fork fragment, and the given
+// closing issues (in the order given, duplicates kept).
+func grantPRBody(base, cross string, closing ...int) string {
+	refs := make([]string, 0, len(closing))
+	for _, n := range closing {
+		refs = append(refs, fmt.Sprintf(`{"number":%d}`, n))
+	}
+	return fmt.Sprintf(`{"number":42,"title":"Change","state":"OPEN","headRefName":"feature","headRefOid":"abc","baseRefName":%q,"mergeable":"MERGEABLE","isDraft":false,%s"changedFiles":1,"additions":5,"deletions":2,"files":[{"path":"watch/internal/babysit/x.go"}],"url":"https://example/pr/42","closingIssuesReferences":[%s]}`,
+		base, cross, strings.Join(refs, ","))
+}
+
+// grantPinOf is a pin as babysit would have stored it: the issues as given,
+// never nil, with a fixed pinnedAt a test can compare exactly.
+func grantPinOf(base string, issues ...int) *automergePin {
+	return &automergePin{ClosingIssues: append([]int{}, issues...), BaseRef: base, PinnedAt: time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)}
+}
+
+func grantPRView(t *testing.T, body string) prView {
+	t.Helper()
+	var pr prView
+	if err := json.Unmarshal([]byte(body), &pr); err != nil {
+		t.Fatalf("decode pr view fixture: %v", err)
+	}
+	return pr
+}
+
+func isIssueViewCall(c []string) bool { return len(c) > 2 && c[1] == "issue" && c[2] == "view" }
+
+// isDefaultBranchCall matches the repository default-branch read: `gh api
+// repos/<repo>` projecting .default_branch.
+func isDefaultBranchCall(c []string) bool {
+	return len(c) > 3 && c[1] == "api" && c[2] == "repos/o/r" && strings.Contains(strings.Join(c[3:], " "), "default_branch")
+}
+
+// isPolicyCall matches fetchPolicy's read of the base ref's .cenci/config.json.
+func isPolicyCall(c []string) bool {
+	return len(c) > 2 && c[1] == "api" && strings.Contains(strings.Join(c, " "), "/contents/.cenci/config.json")
+}
+
+// callIndexes returns the positions in calls that satisfy pred, in call order.
+func callIndexes(calls [][]string, pred func([]string) bool) []int {
+	var idx []int
+	for i, c := range calls {
+		if pred(c) {
+			idx = append(idx, i)
+		}
+	}
+	return idx
+}
+
+// grantGh is a route-based fake gh for the #870 tick tests. Unlike
+// withScriptedCommands' positional queue, every route answers by what is asked,
+// so a test counts calls per route and does not depend on the order a new read
+// lands in. A `gh pr merge` fails the test: every test using it asserts a hold.
+type grantGh struct {
+	t      *testing.T
+	views  []string // the k-th `gh pr view` answer; the last one repeats
+	queues []string // the k-th merge-queue probe answer; the last one repeats
+
+	// branchReads, when set, answers the k-th default-branch read (the last one
+	// repeats) instead of defaultBranch, so a test can fail or empty that read in
+	// the recheck only. An entry with err set fails the read like a gh failure.
+	branchReads []scriptedCall
+
+	checks, labels, defaultBranch, policy, methods string
+
+	calls                  [][]string
+	viewN, queueN, branchN int
+}
+
+func newGrantGh(t *testing.T, views ...string) *grantGh {
+	t.Helper()
+	g := &grantGh{
+		t: t, views: views,
+		queues: []string{queueProbeResponse(false, false, "abc")},
+		checks: grantGreenChecks, labels: grantLabelsOK, defaultBranch: grantDefaultMain,
+		policy: grantRebasePolicy, methods: grantMethods,
+	}
+	originalCommand, originalExecGh := command, execGh
+	command = func(name string, args ...string) ([]byte, error) {
+		g.calls = append(g.calls, append([]string{name}, args...))
+		return []byte(""), nil
+	}
+	execGh = g.gh
+	t.Cleanup(func() { command, execGh = originalCommand, originalExecGh })
+	return g
+}
+
+func (g *grantGh) gh(args ...string) (string, string, error) {
+	if out, err, ok := ghPathAnswer(args); ok {
+		return out, "", err
+	}
+	g.calls = append(g.calls, append([]string{"gh"}, args...))
+	joined := strings.Join(args, " ")
+	switch {
+	case len(args) > 1 && args[0] == "pr" && args[1] == "view":
+		i := min(g.viewN, len(g.views)-1)
+		g.viewN++
+		return g.views[i], "", nil
+	case len(args) > 1 && args[0] == "pr" && args[1] == "checks":
+		return g.checks, "", nil
+	case len(args) > 1 && args[0] == "pr" && args[1] == "merge":
+		g.t.Errorf("gh pr merge must not be issued: %s", joined)
+		return "", "", errors.New("merge forbidden by the fixture")
+	case len(args) > 1 && args[0] == "issue" && args[1] == "view":
+		return g.labels, "", nil
+	case args[0] == "api" && strings.Contains(joined, "/pulls/42/comments"):
+		return "[]", "", nil
+	case args[0] == "api" && strings.Contains(joined, "/pulls/42/reviews"):
+		return "[]", "", nil
+	case args[0] == "api" && strings.Contains(joined, "default_branch"):
+		if len(g.branchReads) == 0 {
+			return g.defaultBranch, "", nil
+		}
+		c := g.branchReads[min(g.branchN, len(g.branchReads)-1)]
+		g.branchN++
+		if c.err != nil {
+			return "", c.out, c.err
+		}
+		return c.out, "", nil
+	case args[0] == "api" && strings.Contains(joined, "allow_squash_merge"):
+		return g.methods, "", nil
+	case args[0] == "api" && strings.Contains(joined, "/contents/.cenci/config.json"):
+		return g.policy, "", nil
+	case args[0] == "api" && strings.Contains(joined, "isInMergeQueue"):
+		i := min(g.queueN, len(g.queues)-1)
+		g.queueN++
+		return g.queues[i], "", nil
+	}
+	g.t.Errorf("unexpected gh call: %s", joined)
+	return "", "", fmt.Errorf("unexpected gh call: %s", joined)
+}
+
+func (g *grantGh) count(pred func([]string) bool) int { return len(callIndexes(g.calls, pred)) }
+
+// grantTick runs one tick over a fresh supervisor state carrying pin (nil: a
+// state with no pin yet) and fails the test on a tick error.
+func grantTick(t *testing.T, pin *automergePin) State {
+	t.Helper()
+	s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 900, AutomergePin: pin}
+	if _, _, err := tick(&s); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	return s
+}
+
+func requirePin(t *testing.T, label string, got *automergePin, base string, issues ...int) {
+	t.Helper()
+	if got == nil {
+		t.Fatalf("%s: AutomergePin is nil, want %v on %q", label, issues, base)
+	}
+	if !slices.Equal(got.ClosingIssues, issues) || got.BaseRef != base {
+		t.Errorf("%s: AutomergePin = %v on %q, want %v on %q", label, got.ClosingIssues, got.BaseRef, issues, base)
+	}
+}
+
+func detailIs(want string) func(*testing.T, string) {
+	return func(t *testing.T, got string) {
+		t.Helper()
+		if got != want {
+			t.Errorf("Detail = %q, want %q", got, want)
+		}
+	}
+}
+
+func detailHas(parts ...string) func(*testing.T, string) {
+	return func(t *testing.T, got string) {
+		t.Helper()
+		for _, p := range parts {
+			if !strings.Contains(got, p) {
+				t.Errorf("Detail = %q, want it to contain %q", got, p)
+			}
+		}
+	}
+}
+
+// AC "each of the seven new reasons is its own constant, asserted by its exact
+// string" (watch/docs/error-handling.md #446): a regression collapsing two of
+// them into one string must fail here, not pass a bare true/false check.
+func TestAutomergeGrantReasonConstantsHaveTheirExactStrings(t *testing.T) {
+	cases := []struct{ name, got, want string }{
+		{"reasonClosingIssuesChanged", reasonClosingIssuesChanged, "closing issues changed since arm"},
+		{"reasonBaseChanged", reasonBaseChanged, "base branch changed since arm"},
+		{"reasonForkPR", reasonForkPR, "PR head is in a different repository"},
+		{"reasonCrossRepositoryUnknown", reasonCrossRepositoryUnknown, "PR cross-repository state unknown"},
+		{"reasonGrantPinMissing", reasonGrantPinMissing, "automerge grant pin missing"},
+		{"reasonBaseNotDefault", reasonBaseNotDefault, "PR base is not the default branch"},
+		{"reasonDefaultBranchUnreadable", reasonDefaultBranchUnreadable, "default branch unreadable"},
+	}
+	seen := map[string]string{}
+	for _, tc := range cases {
+		if tc.got != tc.want {
+			t.Errorf("%s = %q, want %q", tc.name, tc.got, tc.want)
+		}
+		if other, dup := seen[tc.got]; dup {
+			t.Errorf("%s and %s share the reason %q: every hold needs its own", tc.name, other, tc.got)
+		}
+		seen[tc.got] = tc.name
+	}
+}
+
+// The grant holds live inside the existing stages, so the stage keys and the
+// rendered bracket (log line, attribution comment, docs) stay byte-identical.
+func TestAutomergeStageKeysAreUnchangedByTheGrantHolds(t *testing.T) {
+	wantKeys := []string{"enabled", "label", "ci", "review", "mergeable", "headsha", "policy", "files", "filecap", "lines", "protected", "method", "queue"}
+	if !slices.Equal(automergeStageKeys, wantKeys) {
+		t.Fatalf("automergeStageKeys = %v, want the unchanged %v", automergeStageKeys, wantKeys)
+	}
+}
+
+// The new holds render through the unchanged bracket: a drift hold reads
+// label=no with every later stage "-", the default-branch hold reads policy=no.
+func TestAutomergeGrantHoldsRenderThroughTheUnchangedBracket(t *testing.T) {
+	drift := greenAutomergeInputs()
+	drift.ClosingIssues = []int{12}
+	drift.IssueLabels = map[int][]string{12: {"automerge:ok"}}
+	d := evaluateAutomerge(drift)
+	d.PR = "42"
+	wantDrift := "babysit: automerge PR #42 held: closing issues changed since arm (merge by hand: pinned #9, observed #12) " +
+		"[enabled=yes label=no ci=- review=- mergeable=- headsha=- policy=- files=- filecap=- lines=- protected=- method=- queue=-]"
+	if got := d.logLine(); got != wantDrift {
+		t.Errorf("drift logLine() =\n %q\nwant\n %q", got, wantDrift)
+	}
+
+	notDefault := greenAutomergeInputs()
+	notDefault.DefaultBranch = "release"
+	p := evaluateAutomerge(notDefault)
+	p.PR = "42"
+	wantPolicy := "babysit: automerge PR #42 held: PR base is not the default branch " +
+		"[enabled=yes label=yes ci=yes review=yes mergeable=yes headsha=yes policy=no files=yes filecap=- lines=- protected=- method=- queue=-]"
+	if got := p.logLine(); got != wantPolicy {
+		t.Errorf("base-not-default logLine() =\n %q\nwant\n %q", got, wantPolicy)
+	}
+}
+
+// Each new hold in isolation: the exact reason, the stage it fails at, the
+// Detail it carries and the FailureClass (set only for a failed default-branch
+// read), plus the precedence between the new checks and the existing ones.
+func TestEvaluateAutomergeGrantInputsMatrix(t *testing.T) {
+	granted := map[int][]string{9: {"automerge:ok"}, 10: {"automerge:ok"}, 12: {"automerge:ok"}}
+	longBase := strings.Repeat("b", 300)
+	for _, tc := range []struct {
+		name       string
+		mutate     func(*automergeInputs)
+		wantReason string
+		wantStage  string
+		wantClass  string
+		wantDetail func(*testing.T, string) // nil: Detail must be empty
+	}{
+		// -- label stage -----------------------------------------------------
+		{"fork PR", func(in *automergeInputs) { in.IsCrossRepository = boolp(true) }, reasonForkPR, "label", "", nil},
+		{"fork state absent", func(in *automergeInputs) { in.IsCrossRepository = nil }, reasonCrossRepositoryUnknown, "label", "", nil},
+		{"no pin", func(in *automergeInputs) { in.Pin = nil }, reasonGrantPinMissing, "label", "", nil},
+		{"closing issue swapped for another granted ticket", func(in *automergeInputs) {
+			in.ClosingIssues, in.IssueLabels = []int{12}, granted
+		}, reasonClosingIssuesChanged, "label", "", detailIs("merge by hand: pinned #9, observed #12")},
+		{"closing issue added", func(in *automergeInputs) {
+			in.ClosingIssues, in.IssueLabels = []int{9, 12}, granted
+		}, reasonClosingIssuesChanged, "label", "", detailIs("merge by hand: pinned #9, observed #9, #12")},
+		{"one of two pinned closing issues removed", func(in *automergeInputs) {
+			in.Pin.ClosingIssues = []int{9, 10}
+			in.IssueLabels = granted
+		}, reasonClosingIssuesChanged, "label", "", detailIs("merge by hand: pinned #9, #10, observed #9")},
+		{"pin taken with no closing issue, PR later adds one", func(in *automergeInputs) {
+			in.Pin.ClosingIssues = []int{}
+		}, reasonClosingIssuesChanged, "label", "", detailHas("merge by hand", "#9")},
+		{"pin with a nil issue set, PR later adds one", func(in *automergeInputs) {
+			in.Pin.ClosingIssues = nil
+		}, reasonClosingIssuesChanged, "label", "", detailHas("merge by hand", "#9")},
+		{"pinned issues all removed from the PR", func(in *automergeInputs) {
+			in.ClosingIssues = nil
+		}, reasonClosingIssuesChanged, "label", "", detailHas("merge by hand", "#9")},
+		{"base retargeted", func(in *automergeInputs) { in.BaseRef = "release" },
+			reasonBaseChanged, "label", "", detailIs("merge by hand: pinned base main, observed base release")},
+		{"base with # & and a control byte shows only sanitized", func(in *automergeInputs) { in.BaseRef = "re\x1b[31m#1&x" },
+			reasonBaseChanged, "label", "", detailIs("merge by hand: pinned base main, observed base re [31m#1&x")},
+		{"a very long base name cuts the trailing value, not the instruction", func(in *automergeInputs) { in.BaseRef = longBase },
+			reasonBaseChanged, "label", "", func(t *testing.T, got string) {
+				t.Helper()
+				if want := "merge by hand: pinned base main, observed base "; !strings.HasPrefix(got, want) {
+					t.Errorf("Detail = %q, want the recovery text %q first", got, want)
+				}
+				if len(got) > detailMaxLen+len("...") || !strings.HasSuffix(got, "...") {
+					t.Errorf("Detail is %d bytes (%q...), want it bounded to %d plus the ellipsis", len(got), got[:20], detailMaxLen)
+				}
+			}},
+		{"closing drift outranks base drift", func(in *automergeInputs) {
+			in.ClosingIssues, in.IssueLabels, in.BaseRef = []int{12}, granted, "release"
+		}, reasonClosingIssuesChanged, "label", "", detailHas("#12")},
+		{"drift outranks unreadable labels", func(in *automergeInputs) {
+			in.ClosingIssues, in.LabelsErr = []int{12}, errors.New("boom")
+		}, reasonClosingIssuesChanged, "label", "", detailHas("#12")},
+		{"closing drift outranks a missing automerge:ok", func(in *automergeInputs) {
+			in.ClosingIssues, in.IssueLabels = []int{12}, map[int][]string{12: {"bug"}}
+		}, reasonClosingIssuesChanged, "label", "", detailHas("#12")},
+		{"base drift outranks a missing automerge:ok", func(in *automergeInputs) {
+			in.BaseRef, in.IssueLabels = "release", map[int][]string{9: {"bug"}}
+		}, reasonBaseChanged, "label", "", detailHas("release")},
+		{"fork outranks the missing pin", func(in *automergeInputs) {
+			in.IsCrossRepository, in.Pin = boolp(true), nil
+		}, reasonForkPR, "label", "", nil},
+		{"unknown fork state outranks the missing pin", func(in *automergeInputs) {
+			in.IsCrossRepository, in.Pin = nil, nil
+		}, reasonCrossRepositoryUnknown, "label", "", nil},
+		{"an unchanged empty set is still PR closes no issue, not drift", func(in *automergeInputs) {
+			in.ClosingIssues, in.Pin.ClosingIssues = nil, []int{}
+		}, reasonNoClosingIssue, "label", "", nil},
+		{"fleet switch off outranks drift", func(in *automergeInputs) {
+			in.Enabled, in.ClosingIssues, in.BaseRef = false, []int{12}, "release"
+		}, reasonAutomergeDisabled, "enabled", "", nil},
+
+		// -- policy stage ----------------------------------------------------
+		{"default branch not read yet", func(in *automergeInputs) { in.DefaultBranch = "" },
+			reasonDefaultBranchUnreadable, "policy", "", nil},
+		{"default branch read failed", func(in *automergeInputs) {
+			in.DefaultBranch, in.DefaultBranchErr = "", errors.New("boom")
+		}, reasonDefaultBranchUnreadable, "policy", failureClassCommand, detailHas("boom")},
+		{"default branch read timed out", func(in *automergeInputs) {
+			in.DefaultBranch, in.DefaultBranchErr = "", fmt.Errorf("gh api repos/o/r: %w", errGhTimeout)
+		}, reasonDefaultBranchUnreadable, "policy", failureClassTimeout, detailHas("timed out")},
+		{"a read error outranks a value that came with it", func(in *automergeInputs) {
+			in.DefaultBranchErr = errors.New("boom")
+		}, reasonDefaultBranchUnreadable, "policy", failureClassCommand, detailHas("boom")},
+		{"base is not the default branch", func(in *automergeInputs) {
+			in.Pin.BaseRef, in.BaseRef, in.DefaultBranch = "release", "release", "main"
+		}, reasonBaseNotDefault, "policy", "", nil},
+		{"default branch comparison is case sensitive", func(in *automergeInputs) { in.DefaultBranch = "Main" },
+			reasonBaseNotDefault, "policy", "", nil},
+		{"an empty base never equals a readable default", func(in *automergeInputs) {
+			in.Pin.BaseRef, in.BaseRef = "", ""
+		}, reasonBaseNotDefault, "policy", "", nil},
+		{"an empty base and an empty default never match", func(in *automergeInputs) {
+			in.Pin.BaseRef, in.BaseRef, in.DefaultBranch = "", "", ""
+		}, reasonDefaultBranchUnreadable, "policy", "", nil},
+		{"base-not-default outranks an unreadable policy", func(in *automergeInputs) {
+			in.Pin.BaseRef, in.BaseRef, in.DefaultBranch = "release", "release", "main"
+			in.PolicyErr = errors.New("boom")
+		}, reasonBaseNotDefault, "policy", "", nil},
+		{"default branch unreadable outranks an absent policy", func(in *automergeInputs) {
+			in.DefaultBranch, in.Policy, in.PolicyReason = "", nil, reasonPolicyAbsent
+		}, reasonDefaultBranchUnreadable, "policy", "", nil},
+		{"the files stage outranks the default branch read", func(in *automergeInputs) {
+			in.DefaultBranch, in.ChangedFiles = "", 0
+		}, reasonNoChanges, "files", "", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := greenAutomergeInputs()
+			tc.mutate(&in)
+			got := evaluateAutomerge(in)
+			if got.Merge {
+				t.Fatalf("Merge = true, want a hold under %q", tc.wantReason)
+			}
+			if got.Reason != tc.wantReason {
+				t.Fatalf("Reason = %q, want %q", got.Reason, tc.wantReason)
+			}
+			if len(got.Conditions) == 0 {
+				t.Fatal("no conditions recorded")
+			}
+			if last := got.Conditions[len(got.Conditions)-1]; last.Key != tc.wantStage || !last.Reached || last.Pass {
+				t.Errorf("last condition = %+v, want stage %q reached and failed", last, tc.wantStage)
+			}
+			if got.FailureClass != tc.wantClass {
+				t.Errorf("FailureClass = %q, want %q", got.FailureClass, tc.wantClass)
+			}
+			if tc.wantDetail == nil {
+				tc.wantDetail = detailIs("")
+			}
+			tc.wantDetail(t, got.Detail)
+		})
+	}
+}
+
+// Edge cases: the same issues in another order, and a duplicated issue, do not
+// hold; the comparison normalizes both sides without sorting either caller's
+// slice in place (the pin lives on State, ClosingIssues feeds the close guard).
+func TestEvaluateAutomergeGrantPinComparisonIgnoresOrderAndDuplicates(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		pin, observed []int
+	}{
+		{"the same issues in a different order", []int{9, 12}, []int{12, 9}},
+		{"a duplicated observed issue", []int{9}, []int{9, 9}},
+		{"an unsorted, duplicated pin", []int{12, 9, 9}, []int{9, 12}},
+		{"both sides unsorted and duplicated", []int{12, 9, 12}, []int{9, 12, 9}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := greenAutomergeInputs()
+			in.Pin.ClosingIssues = slices.Clone(tc.pin)
+			in.ClosingIssues = slices.Clone(tc.observed)
+			in.IssueLabels = map[int][]string{9: {"automerge:ok"}, 12: {"automerge:ok"}}
+			got := evaluateAutomerge(in)
+			if !got.Merge {
+				t.Fatalf("Merge = false (%q: %q), want the same issue set to pass", got.Reason, got.Detail)
+			}
+			if !slices.Equal(in.Pin.ClosingIssues, tc.pin) || !slices.Equal(in.ClosingIssues, tc.observed) {
+				t.Errorf("evaluateAutomerge reordered its inputs: pin %v (was %v), observed %v (was %v)", in.Pin.ClosingIssues, tc.pin, in.ClosingIssues, tc.observed)
+			}
+		})
+	}
+}
+
+// Edge case: a base ref containing `#` or `&` passes when it is the pinned base
+// and equals the default branch byte for byte -- the comparison is exact string
+// equality on the raw names, never on a query-escaped or sanitized form.
+func TestEvaluateAutomergeDefaultBranchComparisonIsExactEqualityOnRawNames(t *testing.T) {
+	const branch = "release#1&x"
+	in := greenAutomergeInputs()
+	in.Pin.BaseRef, in.BaseRef, in.DefaultBranch = branch, branch, branch
+	if got := evaluateAutomerge(in); !got.Merge {
+		t.Fatalf("Merge = false (%q: %q), want a base equal to the default branch to pass", got.Reason, got.Detail)
+	}
+
+	in.DefaultBranch = "release%231%26x" // the query-escaped spelling of the same name is a different branch
+	if got := evaluateAutomerge(in); got.Merge || got.Reason != reasonBaseNotDefault {
+		t.Errorf("Merge = %v, reason %q, want a hold under %q", got.Merge, got.Reason, reasonBaseNotDefault)
+	}
+}
+
+// -- runAutomerge: call sequences ---------------------------------------------
+
+// grantAutomergeState is the State runAutomerge reads in the call-sequence tests.
+func grantAutomergeState(pin *automergePin) *State {
+	return &State{PR: "42", Repo: "o/r", Agent: "codex", AutomergePin: pin}
+}
+
+// runGrantAutomerge calls runAutomerge directly (fleet switch on, every
+// evaluation stage before the grant checks green) over a positional gh script
+// and returns the recorded calls. Every test using it asserts a hold.
+func runGrantAutomerge(t *testing.T, s *State, pr prView, script ...scriptedCall) [][]string {
+	t.Helper()
+	withFleetAutomergeEnabled(t, true)
+	var calls [][]string
+	withScriptedCommands(t, script, &calls)
+	if runAutomerge(s, pr, []check{{Bucket: "pass", Name: "test"}}, feedbackVerdict{}, true, true, true, false, true, "") {
+		t.Fatalf("runAutomerge merged, want a hold: %#v", calls)
+	}
+	return calls
+}
+
+// AC: when any of the five label-stage holds applies, runAutomerge makes no
+// `gh issue view` label fetch. Every one of them in fact costs no gh call at
+// all, and runAutomerge never pins an unpinned state on its own.
+func TestRunAutomergeLabelStageHoldsMakeNoGhCalls(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		pin        *automergePin
+		pr         string
+		wantReason string
+		wantDetail string
+	}{
+		{"closing issues drifted", grantPinOf("main", 9), grantPRBody("main", grantNotFork, 12), reasonClosingIssuesChanged, "merge by hand"},
+		{"base drifted", grantPinOf("main", 9), grantPRBody("release", grantNotFork, 9), reasonBaseChanged, "merge by hand"},
+		{"fork PR", grantPinOf("main", 9), grantPRBody("main", grantFork, 9), reasonForkPR, ""},
+		{"fork state unknown", grantPinOf("main", 9), grantPRBody("main", grantForkAbsent, 9), reasonCrossRepositoryUnknown, ""},
+		{"no pin", nil, grantPRBody("main", grantNotFork, 9), reasonGrantPinMissing, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := grantAutomergeState(tc.pin)
+			calls := runGrantAutomerge(t, s, grantPRView(t, tc.pr))
+
+			if n := len(callIndexes(calls, isIssueViewCall)); n != 0 {
+				t.Errorf("gh issue view calls = %d, want 0: a label-stage hold must not fetch labels", n)
+			}
+			if len(calls) != 0 {
+				t.Errorf("gh calls = %#v, want none: nothing past the grant checks may be read", calls)
+			}
+			if s.AutomergeDecision != "held" || s.AutomergeReason != tc.wantReason {
+				t.Errorf("automerge = %q (%q), want held for %q", s.AutomergeDecision, s.AutomergeReason, tc.wantReason)
+			}
+			if !strings.Contains(s.AutomergeDetail, tc.wantDetail) {
+				t.Errorf("AutomergeDetail = %q, want it to contain %q", s.AutomergeDetail, tc.wantDetail)
+			}
+			if !hasCondition(s.AutomergeConditions, "label", false) {
+				t.Errorf("AutomergeConditions = %v, want the label stage reached and failed", s.AutomergeConditions)
+			}
+			if tc.pin == nil && s.AutomergePin != nil {
+				t.Errorf("AutomergePin = %+v, want nil: runAutomerge never pins on its own", s.AutomergePin)
+			}
+			if tc.pin != nil && !reflect.DeepEqual(s.AutomergePin, tc.pin) {
+				t.Errorf("AutomergePin = %+v, want it unchanged at %+v", s.AutomergePin, tc.pin)
+			}
+		})
+	}
+}
+
+// AC: with every stage before policy passing, runAutomerge reads the default
+// branch (`gh api repos/<repo>` projecting .default_branch) exactly once and
+// strictly before fetchPolicy, and it reads the labels first.
+func TestRunAutomergeReadsTheDefaultBranchBeforeFetchingPolicy(t *testing.T) {
+	s := grantAutomergeState(grantPinOf("main", 9))
+	calls := runGrantAutomerge(t, s, grantPRView(t, grantPRBody("main", grantNotFork, 9)),
+		scriptedCall{out: grantLabelsOK},
+		scriptedCall{out: grantDefaultMain},
+		scriptedCall{out: grantRebasePolicy},
+	)
+
+	labels, branch, policy := callIndexes(calls, isIssueViewCall), callIndexes(calls, isDefaultBranchCall), callIndexes(calls, isPolicyCall)
+	if len(labels) != 1 || len(branch) != 1 || len(policy) != 1 {
+		t.Fatalf("calls: %d label reads, %d default-branch reads, %d policy reads, want one of each: %#v", len(labels), len(branch), len(policy), calls)
+	}
+	if labels[0] >= branch[0] || branch[0] >= policy[0] {
+		t.Errorf("call order labels=%d default-branch=%d policy=%d, want labels, then the default branch, then the policy", labels[0], branch[0], policy[0])
+	}
+	if call := calls[branch[0]]; !slices.Contains(call, "--jq") || !strings.Contains(strings.Join(call, " "), ".default_branch") {
+		t.Errorf("default-branch call = %v, want `gh api repos/o/r --jq` projecting .default_branch", call)
+	}
+	if s.AutomergeReason != reasonMergeMethodNotSquash {
+		t.Errorf("AutomergeReason = %q, want %q: a matching default branch lets the chain reach the policy", s.AutomergeReason, reasonMergeMethodNotSquash)
+	}
+}
+
+// AC: a PR whose base differs from the default branch holds at policy and
+// fetchPolicy is never called -- the base's own policy is never read, so a
+// looser policy on a retargeted branch has nothing to bite on.
+func TestRunAutomergeNonDefaultBaseHoldsWithoutFetchingPolicy(t *testing.T) {
+	s := grantAutomergeState(grantPinOf("release", 9)) // pinned there, so this is not drift
+	calls := runGrantAutomerge(t, s, grantPRView(t, grantPRBody("release", grantNotFork, 9)),
+		scriptedCall{out: grantLabelsOK},
+		scriptedCall{out: grantDefaultMain},
+	)
+
+	if n := len(callIndexes(calls, isPolicyCall)); n != 0 {
+		t.Errorf("policy reads = %d, want 0: fetchPolicy must never run for a non-default base: %#v", n, calls)
+	}
+	if n := len(callIndexes(calls, isDefaultBranchCall)); n != 1 {
+		t.Errorf("default-branch reads = %d, want exactly 1: %#v", n, calls)
+	}
+	if s.AutomergeDecision != "held" || s.AutomergeReason != reasonBaseNotDefault {
+		t.Errorf("automerge = %q (%q), want held for %q", s.AutomergeDecision, s.AutomergeReason, reasonBaseNotDefault)
+	}
+	if !hasCondition(s.AutomergeConditions, "policy", false) {
+		t.Errorf("AutomergeConditions = %v, want the policy stage reached and failed", s.AutomergeConditions)
+	}
+	if mergeCallCount(calls) != 0 {
+		t.Errorf("gh pr merge issued: %#v", calls)
+	}
+}
+
+// AC: a failed read, an empty value, a JSON null and a missing key all hold at
+// policy under `default branch unreadable`; only the gh failure carries a
+// FailureClass. A literal "null" can never be read as a branch name, and
+// fetchPolicy is never called after any of them.
+func TestRunAutomergeUnreadableDefaultBranchHolds(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		answer    scriptedCall
+		wantClass string
+	}{
+		{"gh failure", scriptedCall{out: "gh: HTTP 502", err: errors.New("exit status 1")}, failureClassCommand},
+		{"undecodable body", scriptedCall{out: "not json"}, failureClassParse},
+		{"empty string", scriptedCall{out: `{"default_branch":""}`}, ""},
+		{"JSON null", scriptedCall{out: `{"default_branch":null}`}, ""},
+		{"missing key", scriptedCall{out: `{}`}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := grantAutomergeState(grantPinOf("main", 9))
+			calls := runGrantAutomerge(t, s, grantPRView(t, grantPRBody("main", grantNotFork, 9)),
+				scriptedCall{out: grantLabelsOK},
+				tc.answer,
+			)
+
+			if s.AutomergeDecision != "held" || s.AutomergeReason != reasonDefaultBranchUnreadable {
+				t.Fatalf("automerge = %q (%q), want held for %q", s.AutomergeDecision, s.AutomergeReason, reasonDefaultBranchUnreadable)
+			}
+			if s.AutomergeFailureClass != tc.wantClass {
+				t.Errorf("AutomergeFailureClass = %q, want %q", s.AutomergeFailureClass, tc.wantClass)
+			}
+			if n := len(callIndexes(calls, isDefaultBranchCall)); n != 1 {
+				t.Errorf("default-branch reads = %d, want exactly 1 (the loop fetches once): %#v", n, calls)
+			}
+			if n := len(callIndexes(calls, isPolicyCall)); n != 0 {
+				t.Errorf("policy reads = %d, want 0 after an unreadable default branch: %#v", n, calls)
+			}
+			if !hasCondition(s.AutomergeConditions, "policy", false) {
+				t.Errorf("AutomergeConditions = %v, want the policy stage reached and failed", s.AutomergeConditions)
+			}
+		})
+	}
+}
+
+// -- tick: pin, recheck, kill switch and retargeting ---------------------------
+
+// AC: the pre-merge recheck applies the same pin comparison. The closing-issue
+// set changes only between the first pass and the recheck: no `gh pr merge`, the
+// recorded reason is `closing issues changed since arm`, the recheck fetched no
+// labels (the grant hold short-circuits them) and the pin is untouched.
+func TestTickRecheckOnlyClosingIssueDriftHoldsWithoutMerging(t *testing.T) {
+	withFleetAutomergeEnabled(t, true)
+	g := newGrantGh(t, grantPRBody("main", grantNotFork, 9), grantPRBody("main", grantNotFork, 12))
+	g.policy = grantSquashPolicy
+
+	s := grantTick(t, nil) // no pin yet: the first tick pins [9] on main
+
+	if n := mergeCallCount(g.calls); n != 0 {
+		t.Fatalf("gh pr merge calls = %d, want 0: %#v", n, g.calls)
+	}
+	if g.viewN != 2 {
+		t.Fatalf("pr views = %d, want the first pass and the recheck (2): the first pass must have reached a Merge verdict", g.viewN)
+	}
+	if s.AutomergeDecision != "held" || s.AutomergeReason != reasonClosingIssuesChanged {
+		t.Fatalf("automerge = %q (%q), want held for %q", s.AutomergeDecision, s.AutomergeReason, reasonClosingIssuesChanged)
+	}
+	if !strings.HasPrefix(s.AutomergeDetail, "recheck: merge by hand: pinned #9, observed #12") {
+		t.Errorf("AutomergeDetail = %q, want the recheck-prefixed merge-by-hand text", s.AutomergeDetail)
+	}
+	if !hasCondition(s.AutomergeConditions, "label", false) {
+		t.Errorf("AutomergeConditions = %v, want the recheck's own label stage reached and failed", s.AutomergeConditions)
+	}
+	if n := g.count(isIssueViewCall); n != 1 {
+		t.Errorf("gh issue view calls = %d, want 1 (the first pass only; the recheck's grant hold skips the label fetch)", n)
+	}
+	if s.AutomergeFailureClass != "" {
+		t.Errorf("AutomergeFailureClass = %q, want empty for a condition-chain hold", s.AutomergeFailureClass)
+	}
+	requirePin(t, "after the recheck", s.AutomergePin, "main", 9)
+}
+
+// AC: the recheck reads the default branch before fetchPolicy, in the same order
+// as the first pass. The recheck passes the grant stages and is held later by the
+// merge queue turning on, so both reads happened.
+func TestTickRecheckReadsTheDefaultBranchBeforeFetchingPolicy(t *testing.T) {
+	withFleetAutomergeEnabled(t, true)
+	g := newGrantGh(t, grantPRBody("main", grantNotFork, 9))
+	g.policy = grantSquashPolicy
+	g.queues = []string{queueProbeResponse(false, false, "abc"), queueProbeResponse(true, false, "abc")}
+
+	s := grantTick(t, nil)
+
+	if s.AutomergeReason != reasonMergeQueueRequired {
+		t.Fatalf("AutomergeReason = %q, want %q: the recheck must get past the grant stages to the queue", s.AutomergeReason, reasonMergeQueueRequired)
+	}
+	branch, policy := callIndexes(g.calls, isDefaultBranchCall), callIndexes(g.calls, isPolicyCall)
+	if len(branch) != 2 || len(policy) != 2 {
+		t.Fatalf("default-branch reads %d, policy reads %d, want 2 each (first pass and recheck): %#v", len(branch), len(policy), g.calls)
+	}
+	for pass := range 2 {
+		if branch[pass] > policy[pass] {
+			t.Errorf("pass %d: default branch read at call %d after the policy read at call %d, want it first", pass+1, branch[pass], policy[pass])
+		}
+	}
+	if mergeCallCount(g.calls) != 0 {
+		t.Errorf("gh pr merge issued: %#v", g.calls)
+	}
+}
+
+// The recheck's base check: the base is retargeted only between the passes. It
+// holds under `base branch changed since arm` and, because the new base is not
+// the default branch, never reads that base's policy.
+func TestTickRecheckOnlyBaseDriftHoldsAndNeverReadsTheNonDefaultPolicy(t *testing.T) {
+	withFleetAutomergeEnabled(t, true)
+	g := newGrantGh(t, grantPRBody("main", grantNotFork, 9), grantPRBody("release", grantNotFork, 9))
+	g.policy = grantSquashPolicy
+
+	s := grantTick(t, nil)
+
+	if mergeCallCount(g.calls) != 0 {
+		t.Fatalf("gh pr merge issued: %#v", g.calls)
+	}
+	if s.AutomergeReason != reasonBaseChanged || !strings.HasPrefix(s.AutomergeDetail, "recheck: merge by hand: pinned base main, observed base release") {
+		t.Errorf("automerge reason %q detail %q, want %q with the recheck-prefixed merge-by-hand text", s.AutomergeReason, s.AutomergeDetail, reasonBaseChanged)
+	}
+	if n := g.count(isPolicyCall); n != 1 {
+		t.Errorf("policy reads = %d, want 1 (the first pass only): the recheck must not read the policy of a retargeted base", n)
+	}
+	requirePin(t, "after the recheck", s.AutomergePin, "main", 9)
+}
+
+// AC: the recheck's cross-repository check. The first pass sees a same-repository
+// PR and reaches a Merge verdict; the fresh view the recheck reads then reports a
+// fork, or drops the field. Either ends with no `gh pr merge`, under the reason of
+// the matching label-stage hold, and the recheck's grant hold costs it the label
+// fetch.
+func TestTickRecheckOnlyForkStateChangeHoldsWithoutMerging(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		cross      string
+		wantReason string
+	}{
+		{"flips to a fork", grantFork, reasonForkPR},
+		{"field dropped", grantForkAbsent, reasonCrossRepositoryUnknown},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withFleetAutomergeEnabled(t, true)
+			g := newGrantGh(t, grantPRBody("main", grantNotFork, 9), grantPRBody("main", tc.cross, 9))
+			g.policy = grantSquashPolicy
+
+			s := grantTick(t, nil)
+
+			if mergeCallCount(g.calls) != 0 {
+				t.Fatalf("gh pr merge issued: %#v", g.calls)
+			}
+			if g.viewN != 2 {
+				t.Fatalf("pr views = %d, want the first pass and the recheck (2): the first pass must have reached a Merge verdict", g.viewN)
+			}
+			if s.AutomergeDecision != "held" || s.AutomergeReason != tc.wantReason {
+				t.Fatalf("automerge = %q (%q), want held for %q", s.AutomergeDecision, s.AutomergeReason, tc.wantReason)
+			}
+			if !strings.HasPrefix(s.AutomergeDetail, "recheck") {
+				t.Errorf("AutomergeDetail = %q, want the recheck prefix", s.AutomergeDetail)
+			}
+			if !hasCondition(s.AutomergeConditions, "label", false) {
+				t.Errorf("AutomergeConditions = %v, want the recheck's own label stage reached and failed", s.AutomergeConditions)
+			}
+			if s.AutomergeFailureClass != "" {
+				t.Errorf("AutomergeFailureClass = %q, want empty for a condition-chain hold", s.AutomergeFailureClass)
+			}
+			if n := g.count(isIssueViewCall); n != 1 {
+				t.Errorf("gh issue view calls = %d, want 1 (the first pass only; the recheck's grant hold skips the label fetch)", n)
+			}
+		})
+	}
+}
+
+// AC: the recheck's default-branch read. The first pass reads `main`; the read
+// the recheck makes then fails, or returns an empty string. Either ends with no
+// `gh pr merge` under `default branch unreadable`, the policy is never read a
+// second time, and only the gh failure carries a FailureClass.
+func TestTickRecheckOnlyUnreadableDefaultBranchHoldsWithoutMerging(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		recheck   scriptedCall
+		wantClass string
+	}{
+		{"gh failure", scriptedCall{out: "gh: HTTP 502", err: errors.New("exit status 1")}, failureClassCommand},
+		{"empty string", scriptedCall{out: `{"default_branch":""}`}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withFleetAutomergeEnabled(t, true)
+			g := newGrantGh(t, grantPRBody("main", grantNotFork, 9))
+			g.policy = grantSquashPolicy
+			g.branchReads = []scriptedCall{{out: grantDefaultMain}, tc.recheck}
+
+			s := grantTick(t, nil)
+
+			if mergeCallCount(g.calls) != 0 {
+				t.Fatalf("gh pr merge issued: %#v", g.calls)
+			}
+			if g.branchN != 2 {
+				t.Fatalf("default-branch reads = %d, want the first pass and the recheck (2): the first pass must have reached a Merge verdict", g.branchN)
+			}
+			if s.AutomergeDecision != "held" || s.AutomergeReason != reasonDefaultBranchUnreadable {
+				t.Fatalf("automerge = %q (%q), want held for %q", s.AutomergeDecision, s.AutomergeReason, reasonDefaultBranchUnreadable)
+			}
+			if !strings.HasPrefix(s.AutomergeDetail, "recheck") {
+				t.Errorf("AutomergeDetail = %q, want the recheck prefix", s.AutomergeDetail)
+			}
+			if s.AutomergeFailureClass != tc.wantClass {
+				t.Errorf("AutomergeFailureClass = %q, want %q", s.AutomergeFailureClass, tc.wantClass)
+			}
+			if !hasCondition(s.AutomergeConditions, "policy", false) {
+				t.Errorf("AutomergeConditions = %v, want the recheck's policy stage reached and failed", s.AutomergeConditions)
+			}
+			if n := g.count(isPolicyCall); n != 1 {
+				t.Errorf("policy reads = %d, want 1 (the first pass only): the recheck must not read the policy after an unreadable default branch", n)
+			}
+		})
+	}
+}
+
+// AC: the recheck's default-branch comparison. The PR's base is unchanged and
+// matches its pin, but the repository's default branch is read as another branch
+// only in the recheck (a rename between the passes). It holds under `PR base is
+// not the default branch`, issues no `gh pr merge` and never reads the policy of
+// the base that is no longer the default.
+func TestTickRecheckOnlyNonDefaultBaseHoldsWithoutReadingThePolicy(t *testing.T) {
+	withFleetAutomergeEnabled(t, true)
+	g := newGrantGh(t, grantPRBody("main", grantNotFork, 9))
+	g.policy = grantSquashPolicy
+	g.branchReads = []scriptedCall{{out: grantDefaultMain}, {out: `{"default_branch":"develop"}`}}
+
+	s := grantTick(t, nil)
+
+	if mergeCallCount(g.calls) != 0 {
+		t.Fatalf("gh pr merge issued: %#v", g.calls)
+	}
+	if g.branchN != 2 {
+		t.Fatalf("default-branch reads = %d, want the first pass and the recheck (2): the first pass must have reached a Merge verdict", g.branchN)
+	}
+	if s.AutomergeDecision != "held" || s.AutomergeReason != reasonBaseNotDefault {
+		t.Fatalf("automerge = %q (%q), want held for %q", s.AutomergeDecision, s.AutomergeReason, reasonBaseNotDefault)
+	}
+	if !strings.HasPrefix(s.AutomergeDetail, "recheck") {
+		t.Errorf("AutomergeDetail = %q, want the recheck prefix", s.AutomergeDetail)
+	}
+	if !hasCondition(s.AutomergeConditions, "policy", false) {
+		t.Errorf("AutomergeConditions = %v, want the recheck's policy stage reached and failed", s.AutomergeConditions)
+	}
+	if n := g.count(isPolicyCall); n != 1 {
+		t.Errorf("policy reads = %d, want 1 (the first pass only): fetchPolicy must not run for a base that is not the default branch", n)
+	}
+}
+
+// AC: a fork PR, and a PR whose view carries no isCrossRepository, hold at the
+// label stage, and a tick makes no label, default-branch or policy read for them.
+func TestTickHoldsForkPRsAndPRsWithUnknownForkState(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		cross      string
+		wantReason string
+	}{
+		{"fork", grantFork, reasonForkPR},
+		{"fork state absent", grantForkAbsent, reasonCrossRepositoryUnknown},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withFleetAutomergeEnabled(t, true)
+			g := newGrantGh(t, grantPRBody("main", tc.cross, 9))
+
+			s := grantTick(t, nil)
+
+			if s.AutomergeDecision != "held" || s.AutomergeReason != tc.wantReason {
+				t.Fatalf("automerge = %q (%q), want held for %q", s.AutomergeDecision, s.AutomergeReason, tc.wantReason)
+			}
+			for name, pred := range map[string]func([]string) bool{"issue view": isIssueViewCall, "default branch": isDefaultBranchCall, "policy": isPolicyCall} {
+				if n := g.count(pred); n != 0 {
+					t.Errorf("%s calls = %d, want 0 for a PR held at the fork check", name, n)
+				}
+			}
+			requirePin(t, "a fork view is pinned like any other", s.AutomergePin, "main", 9)
+		})
+	}
+}
+
+// Edge case: with the fleet switch off a drifted PR still records `automerge
+// disabled (fleet config)` -- the enabled stage comes first -- the supervisor
+// makes no grant, label, default-branch or policy read, and the pin is unchanged.
+func TestTickDriftedPRWithFleetSwitchOffRecordsDisabledAndKeepsTheirPin(t *testing.T) {
+	withFleetAutomergeEnabled(t, false)
+	g := newGrantGh(t, grantPRBody("release", grantNotFork, 12))
+	pin := grantPinOf("main", 9)
+
+	s := grantTick(t, pin)
+
+	if s.AutomergeDecision != "held" || s.AutomergeReason != reasonAutomergeDisabled {
+		t.Fatalf("automerge = %q (%q), want held for %q", s.AutomergeDecision, s.AutomergeReason, reasonAutomergeDisabled)
+	}
+	if !reflect.DeepEqual(s.AutomergePin, grantPinOf("main", 9)) {
+		t.Errorf("AutomergePin = %+v, want it unchanged at %+v", s.AutomergePin, grantPinOf("main", 9))
+	}
+	for name, pred := range map[string]func([]string) bool{"issue view": isIssueViewCall, "default branch": isDefaultBranchCall, "policy": isPolicyCall} {
+		if n := g.count(pred); n != 0 {
+			t.Errorf("%s calls = %d, want 0 with the fleet switch off", name, n)
+		}
+	}
+}
+
+// Edge case: if the default branch is renamed mid-supervision, GitHub retargets
+// the PR onto the new name; the tick holds under `base branch changed since arm`
+// and the pin is not updated to follow it.
+func TestTickDefaultBranchRenameHoldsUnderBaseChangedAndKeepsThePin(t *testing.T) {
+	withFleetAutomergeEnabled(t, true)
+	g := newGrantGh(t, grantPRBody("main", grantNotFork, 9)) // renamed from master; default_branch now reads main
+
+	s := grantTick(t, grantPinOf("master", 9))
+
+	if s.AutomergeDecision != "held" || s.AutomergeReason != reasonBaseChanged {
+		t.Fatalf("automerge = %q (%q), want held for %q", s.AutomergeDecision, s.AutomergeReason, reasonBaseChanged)
+	}
+	if !strings.HasPrefix(s.AutomergeDetail, "merge by hand: pinned base master, observed base main") {
+		t.Errorf("AutomergeDetail = %q, want the merge-by-hand text naming master and main", s.AutomergeDetail)
+	}
+	requirePin(t, "after the rename", s.AutomergePin, "master", 9)
+	if n := g.count(isDefaultBranchCall); n != 0 {
+		t.Errorf("default-branch reads = %d, want 0: the label-stage hold comes first", n)
+	}
+}
+
+// Edge case: a PR retargeted back to its pinned base no longer holds on the next
+// tick. The comparison is stateless against the pin and records no lasting hold.
+func TestTickRetargetingBackToThePinnedBaseClearsTheHoldOnTheNextTick(t *testing.T) {
+	withFleetAutomergeEnabled(t, true)
+	g := newGrantGh(t, grantPRBody("release", grantNotFork, 9), grantPRBody("main", grantNotFork, 9))
+	s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 900, AutomergePin: grantPinOf("main", 9)}
+
+	if _, _, err := tick(&s); err != nil {
+		t.Fatalf("tick 1: %v", err)
+	}
+	if s.AutomergeReason != reasonBaseChanged {
+		t.Fatalf("after the drifted tick: reason %q, want %q", s.AutomergeReason, reasonBaseChanged)
+	}
+
+	if _, _, err := tick(&s); err != nil {
+		t.Fatalf("tick 2: %v", err)
+	}
+	// The rebase policy makes the chain stop after the grant checks, proving the
+	// retargeted-back PR got past them.
+	if s.AutomergeReason != reasonMergeMethodNotSquash {
+		t.Errorf("after retargeting back: reason %q, want %q (no grant hold)", s.AutomergeReason, reasonMergeMethodNotSquash)
+	}
+	if n := g.count(isDefaultBranchCall); n != 1 {
+		t.Errorf("default-branch reads = %d, want 1 (only the tick that passed the label stage)", n)
+	}
+	requirePin(t, "after both ticks", s.AutomergePin, "main", 9)
+}
+
+// AC: a PR whose pin matches, whose isCrossRepository is false and whose base is
+// the default branch still merges through the existing chain: first pass and
+// recheck each read the labels, then the default branch, then the policy, and the
+// merge is pinned to the evaluated head.
+func TestTickMergesWhenThePinMatchesTheFetchIsNotAForkAndTheBaseIsTheDefaultBranch(t *testing.T) {
+	withFleetAutomergeEnabled(t, true)
+	pass := func() []scriptedCall {
+		return []scriptedCall{
+			{out: grantPRBody("main", grantNotFork, 9)},
+			{out: grantGreenChecks},
+			{out: `[]`},
+			{out: `[]`},
+			{out: grantLabelsOK},
+			{out: grantDefaultMain},
+			{out: grantSquashPolicy},
+		}
+	}
+	script := pass()
+	script = append(script, scriptedCall{out: grantMethods}, scriptedCall{out: queueProbeResponse(false, false, "abc")})
+	recheck := pass() // the recheck re-reads the view, checks, comments, reviews, labels, default branch and policy, then the queue
+	script = append(script, recheck...)
+	script = append(script,
+		scriptedCall{out: queueProbeResponse(false, false, "abc")},
+		scriptedCall{out: "Merged pull request #42 (o/r)"},
+		scriptedCall{out: strings.Replace(grantPRBody("main", grantNotFork, 9), `"state":"OPEN"`, `"state":"MERGED"`, 1)}, // post-merge refetch
+		scriptedCall{out: "https://example/pr/42#issuecomment-1"},                                                         // the attribution comment
+	)
+	var calls [][]string
+	withScriptedCommands(t, script, &calls)
+
+	s := grantTick(t, nil)
+
+	if s.AutomergeDecision != "merge" || s.AutomergeReason != "" {
+		t.Fatalf("automerge = %q (%q), want a merge with no reason", s.AutomergeDecision, s.AutomergeReason)
+	}
+	if n := mergeCallCount(calls); n != 1 {
+		t.Fatalf("gh pr merge calls = %d, want 1: %#v", n, calls)
+	}
+	if n := len(callIndexes(calls, isDefaultBranchCall)); n != 2 {
+		t.Errorf("default-branch reads = %d, want 2 (first pass and recheck)", n)
+	}
+	requirePin(t, "after the merge tick", s.AutomergePin, "main", 9)
 }

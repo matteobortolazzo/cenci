@@ -1361,6 +1361,8 @@ func feedbackRichState(pid int) State {
 	s.DiscussionReceipts = map[string]discussionReceipt{"discussion:9": {CommentID: 9, Revision: strings.Repeat("a", 64), Outcome: "addressed", ReceiptCommentID: 8, Source: receiptSourceReceipt}}
 	s.ReviewLaunch = &reviewLaunchRecord{Nonce: testReviewNonce, LaunchedAt: testLaunchAt, Keys: []string{"comment:2", "discussion:11"}}
 	s.ConsumedReviewNonces = map[string]int64{testWrongNonce: 8}
+	// #870: the automerge grant pin is a security record, kept by stop.
+	s.AutomergePin = grantPinOf("main", 9)
 	return s
 }
 
@@ -1408,6 +1410,15 @@ func TestStopKeepsOnlyTheFeedbackBookkeepingAfterTheSupervisorExits(t *testing.T
 		got.CIStatus != "" || len(got.ClosingIssues) != 0 || got.LastRepairedSHA != "" || got.ConflictNotifiedSHA != "" {
 		t.Errorf("agent, budgets, CI status and closing issues must be cleared by stop, got %+v", got)
 	}
+	// #870: stoppedState copies the pin, so a stop (which the sandbox can forward)
+	// never gives the next arm a chance to pin a widened grant.
+	requirePin(t, "stopped state", got.AutomergePin, "main", 9)
+	if !got.AutomergePin.PinnedAt.Equal(want.AutomergePin.PinnedAt) {
+		t.Errorf("stopped pinnedAt = %v, want %v", got.AutomergePin.PinnedAt, want.AutomergePin.PinnedAt)
+	}
+	if !bytes.Contains(readFileBytes(t, e.path), []byte(`"automergePin"`)) {
+		t.Error("the stopped state file lacks automergePin")
+	}
 }
 
 // P2: a re-arm over a stopped state adopts a fresh agent, keeps the pending keys
@@ -1429,6 +1440,42 @@ func TestArmOverAStoppedStateAdoptsANewAgentAndKeepsTheFeedback(t *testing.T) {
 	}
 	if len(e.started) != 1 {
 		t.Errorf("supervisor starts = %d, want 1", len(e.started))
+	}
+	// #870: the re-arm read the PR (no closing issues, no base) and still did not
+	// re-pin over the kept pin.
+	requirePin(t, "re-armed state", got.AutomergePin, "main", 9)
+}
+
+// #870: `cenci babysit reset <pr>` re-arms through the arming branch of Run and
+// leaves the automerge pin unchanged, even though the PR it re-reads reports no
+// closing issues and no base ref: a reset zeroes the retry budget, it never
+// clears a security record.
+func TestReset_KeepsTheAutomergePin(t *testing.T) {
+	e := newResetEnv(t)
+	seeded := pausedState()
+	seeded.AutomergePin = grantPinOf("main", 9, 12)
+	writeStateFile(t, e.path, seeded)
+
+	done := captureStdout(t)
+	err := Reset("42", e.dir, nil)
+	_ = done()
+	if err != nil {
+		t.Fatalf("Reset: %v", err)
+	}
+
+	if len(e.started) != 1 {
+		t.Fatalf("supervisor starts = %d, want 1 (the reset re-armed)", len(e.started))
+	}
+	s := mustReadState(t, e.path)
+	requirePin(t, "after reset", s.AutomergePin, "main", 9, 12)
+	if !s.AutomergePin.PinnedAt.Equal(seeded.AutomergePin.PinnedAt) {
+		t.Errorf("pinnedAt = %v, want the seeded %v", s.AutomergePin.PinnedAt, seeded.AutomergePin.PinnedAt)
+	}
+	if s.FixAttempts != 0 {
+		t.Errorf("ciFixAttempts = %d, want the budget reset to zero (the reset itself ran)", s.FixAttempts)
+	}
+	if !bytes.Contains(readFileBytes(t, e.path), []byte(`"automergePin"`)) {
+		t.Error("the state file lacks automergePin after the reset")
 	}
 }
 

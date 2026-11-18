@@ -480,6 +480,68 @@ func TestHoldDurability_DiscussionFieldsSurviveSaveReloadAndATickExactly(t *test
 	}
 }
 
+// -- #870: the automerge grant pin is durable ----------------------------------
+
+// The pin survives a stop and a re-arm even when the PR now reports another
+// closing-issue set: if a re-arm re-pinned, the PR's own agent could widen its
+// grant by stopping and re-arming (both can be forwarded from the sandbox). The
+// first re-armed tick sees the drifted set and holds under `closing issues
+// changed since arm`, with the pin unchanged and the supervisor status untouched
+// (no command clears the hold: a human merges by hand).
+func TestHoldDurability_Pin_StopAndReArmKeepThePinAndTheNextDriftedTickHolds(t *testing.T) {
+	const drifted = 900
+	e := newRWEnv(t, true, nil,
+		rwGreen("head-a"), // 1: pins [782] on main; killed after this save
+		rwStep(ciCapOpen("head-a", drifted), ciCapGreen), // 2: the arming parent's read: the PR now reports #900
+		rwStep(ciCapOpen("head-a", drifted), ciCapGreen), // 3: the re-armed supervisor's first tick, drifted
+		ciCapMerged(rwIssue),
+	)
+	runs := rwTrackRuns(e, 0)
+	e.seed(State{Status: "running"})
+
+	e.runKilledAtSleep(1)
+	pinned := load(e.path).AutomergePin
+	requirePin(t, "before the stop", pinned, "main", rwIssue)
+
+	stopped := hdStop(t, e)
+	requirePin(t, "stopped state", stopped.AutomergePin, "main", rwIssue)
+	if !stopped.AutomergePin.PinnedAt.Equal(pinned.PinnedAt) {
+		t.Errorf("stopped pinnedAt = %v, want the original %v", stopped.AutomergePin.PinnedAt, pinned.PinnedAt)
+	}
+	if !bytes.Contains(readFileBytes(t, e.path), []byte(`"automergePin"`)) {
+		t.Error("the stopped state file lacks automergePin")
+	}
+
+	armed, started := hdArm(t, e)
+	if started != 1 {
+		t.Errorf("supervisors started = %d, want 1", started)
+	}
+	requirePin(t, "armed state", armed.AutomergePin, "main", rwIssue)
+	if !armed.AutomergePin.PinnedAt.Equal(pinned.PinnedAt) {
+		t.Errorf("armed pinnedAt = %v, want the original %v: a re-arm must not re-pin", armed.AutomergePin.PinnedAt, pinned.PinnedAt)
+	}
+
+	if err := e.run(); err != nil {
+		t.Fatalf("re-armed Run: %v", err)
+	}
+
+	held := e.after(3)
+	if held.AutomergeDecision != "held" || held.AutomergeReason != reasonClosingIssuesChanged {
+		t.Fatalf("after the drifted tick: automerge %q (%q), want held for %q", held.AutomergeDecision, held.AutomergeReason, reasonClosingIssuesChanged)
+	}
+	if !strings.Contains(held.AutomergeDetail, "merge by hand") || !strings.Contains(held.AutomergeDetail, "#782") || !strings.Contains(held.AutomergeDetail, "#900") {
+		t.Errorf("AutomergeDetail = %q, want the merge-by-hand text naming #782 and #900", held.AutomergeDetail)
+	}
+	if !hasCondition(held.AutomergeConditions, "label", false) {
+		t.Errorf("AutomergeConditions = %v, want the label stage reached and failed", held.AutomergeConditions)
+	}
+	requirePin(t, "after the drifted tick", held.AutomergePin, "main", rwIssue)
+	if held.Status != "running" {
+		t.Errorf("status = %q, want running: a drift hold changes only the automerge decision", held.Status)
+	}
+	runs.requireNone(t)
+}
+
 // -- #1539: the untrusted-author bookkeeping is durable -----------------------
 
 // heldUntrustedSeed is a supervisor holding PR 42 after an untrusted launch moved

@@ -113,6 +113,7 @@ func TestConfirmedMergeAttributionBodyCarriesSkippedSuffix(t *testing.T) {
 		{out: `[]`},
 		{out: `[]`},
 		{out: `{"labels":[{"name":"automerge:ok"}]}`},
+		{out: grantDefaultMain},
 		{out: `{"automerge":{"maxChangedFiles":10,"maxDiffLines":500,"mergeMethod":"squash"}}`},
 		{out: `{"squash":true,"merge":false,"rebase":true}`},
 		{out: queueProbeResponse(false, false, "abc")},

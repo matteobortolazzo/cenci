@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -200,6 +201,18 @@ const (
 	reasonWorkflowLaunchFailed = "workflow launch failed"
 )
 
+// The seven #870 grant-input holds: the pin-drift, fork and missing-pin holds
+// sit in the "label" stage, the default-branch holds in the "policy" stage.
+const (
+	reasonClosingIssuesChanged    = "closing issues changed since arm"
+	reasonBaseChanged             = "base branch changed since arm"
+	reasonForkPR                  = "PR head is in a different repository"
+	reasonCrossRepositoryUnknown  = "PR cross-repository state unknown"
+	reasonGrantPinMissing         = "automerge grant pin missing"
+	reasonBaseNotDefault          = "PR base is not the default branch"
+	reasonDefaultBranchUnreadable = "default branch unreadable"
+)
+
 // The five kill-switch recheck reasons (#886): recheckAutomergeInputs' final
 // pre-merge re-read of the fleet automerge.enabled switch (loadFleetSwitch)
 // distinguishes each way that re-read can come back disabled -- distinct
@@ -338,6 +351,15 @@ type automergeInputs struct {
 	ClosingIssues []int
 	IssueLabels   map[int][]string
 	LabelsErr     error
+
+	// #870 grant inputs: Pin is State.AutomergePin (nil: no pin), BaseRef the
+	// observed base, IsCrossRepository the observed fork state (nil: absent),
+	// DefaultBranch/DefaultBranchErr the repository's default branch read.
+	Pin               *automergePin
+	BaseRef           string
+	IsCrossRepository *bool
+	DefaultBranch     string
+	DefaultBranchErr  error
 
 	RepairPending bool
 	// RepairWorkerLive (#1457) is this tick's pane inventory verdict: a live
@@ -521,6 +543,48 @@ func automergeQueueHold(inQueue, enabled *bool, err error, probed bool) string {
 	return ""
 }
 
+// formatIssues renders an issue set for a drift Detail: "#9, #12", or "none"
+// for an empty set.
+func formatIssues(issues []int) string {
+	if len(issues) == 0 {
+		return "none"
+	}
+	parts := make([]string, len(issues))
+	for i, n := range issues {
+		parts[i] = "#" + strconv.Itoa(n)
+	}
+	return strings.Join(parts, ", ")
+}
+
+// automergeGrantHold is the #870 label-stage grant check, pure so runAutomerge
+// and recheckAutomergeInputs can ask it before spending a label fetch. It
+// returns the hold reason and its sanitized Detail, or "" when the grant inputs
+// are intact. Order: fork state unknown, fork, no pin, closing issues drifted,
+// base drifted. The fork checks need no pin; the drift checks run ahead of
+// reasonNoClosingIssue so a pin taken with no closing issue followed by a PR
+// that later adds one reads as drift. Both sets are compared normalized (sorted,
+// de-duplicated) without reordering the caller's slices. A drift Detail leads
+// with the recovery, so sanitizeDetail's length cut can only drop trailing
+// values, never the instruction.
+func automergeGrantHold(in automergeInputs) (reason, detail string) {
+	switch {
+	case in.IsCrossRepository == nil:
+		return reasonCrossRepositoryUnknown, ""
+	case *in.IsCrossRepository:
+		return reasonForkPR, ""
+	case in.Pin == nil:
+		return reasonGrantPinMissing, ""
+	}
+	pinned, observed := normalizeIssues(in.Pin.ClosingIssues), normalizeIssues(in.ClosingIssues)
+	if !slices.Equal(pinned, observed) {
+		return reasonClosingIssuesChanged, sanitizeDetail(fmt.Sprintf("merge by hand: pinned %s, observed %s", formatIssues(pinned), formatIssues(observed)))
+	}
+	if in.BaseRef != in.Pin.BaseRef {
+		return reasonBaseChanged, sanitizeDetail(fmt.Sprintf("merge by hand: pinned base %s, observed base %s", in.Pin.BaseRef, in.BaseRef))
+	}
+	return "", ""
+}
+
 // evaluateAutomerge is pure: identical automergeInputs yield an identical
 // automergeDecision, no I/O. It follows the condition chain's exact order
 // (see the plan's "Condition chain" section) and returns the first failing
@@ -549,7 +613,15 @@ func evaluateAutomerge(in automergeInputs) automergeDecision {
 	}
 	pass("enabled")
 
-	// 2. Closing issues exist; labels readable; all carry automerge:ok.
+	// 2. Grant inputs intact (#870): no fork, a pin, no closing-issue or base
+	// drift -- then closing issues exist; labels readable; all carry
+	// automerge:ok. The grant holds live in this stage so automergeStageKeys
+	// stays unchanged.
+	if reason, detail := automergeGrantHold(in); reason != "" {
+		d := fail("label", reason)
+		d.Detail = detail
+		return d
+	}
 	if len(in.ClosingIssues) == 0 {
 		return fail("label", reasonNoClosingIssue)
 	}
@@ -649,7 +721,25 @@ func evaluateAutomerge(in automergeInputs) automergeDecision {
 	}
 	pass("files")
 
-	// 7. Policy fetch/resolve.
+	// 7. Default-branch base (#870), ahead of any policy fetch so a non-default
+	// base's .cenci/config.json is never read: a failed or empty default-branch
+	// read holds (an unread value is never a match), then the base must equal it
+	// exactly. An empty DefaultBranch with no error is also runAutomerge's "not
+	// fetched yet" sentinel, so a caller that forgets the fetch still holds.
+	if in.DefaultBranchErr != nil {
+		d := fail("policy", reasonDefaultBranchUnreadable)
+		d.Detail = sanitizeDetail(in.DefaultBranchErr.Error())
+		d.FailureClass = classifyGhFailure(in.DefaultBranchErr)
+		return d
+	}
+	if in.DefaultBranch == "" {
+		return fail("policy", reasonDefaultBranchUnreadable)
+	}
+	if in.BaseRef != in.DefaultBranch {
+		return fail("policy", reasonBaseNotDefault)
+	}
+
+	// Policy fetch/resolve.
 	if in.PolicyErr != nil {
 		d := fail("policy", reasonPolicyUnreadable)
 		d.Detail = sanitizeDetail(in.PolicyErr.Error())
@@ -1136,6 +1226,24 @@ func fetchAllowedMethods(repo string) (map[string]bool, error) {
 	return map[string]bool{"squash": resp.Squash, "merge": resp.Merge, "rebase": resp.Rebase}, nil
 }
 
+// defaultBranchResp is the default-branch probe's --jq-projected shape. A JSON
+// null or a missing key decodes to "", which holds: a literal "null" can never
+// be read as a branch name.
+type defaultBranchResp struct {
+	DefaultBranch string `json:"default_branch"`
+}
+
+// fetchDefaultBranch reads the repository's current default branch (#870), the
+// only base a PR may target before its policy is read. It mirrors
+// fetchAllowedMethods's `gh api repos/<repo> --jq` object projection.
+func fetchDefaultBranch(repo string) (string, error) {
+	var resp defaultBranchResp
+	if err := ghJSON(&resp, "api", "repos/"+repo, "--jq", "{default_branch:.default_branch}"); err != nil {
+		return "", err
+	}
+	return resp.DefaultBranch, nil
+}
+
 // recordDecision persists d onto s (for the detached supervisor, whose
 // cmd.Stdout is nil) and emits automerge's one-line-per-tick log line
 // (Decision 7, #854) -- the single place both runAutomerge's own outcomes
@@ -1192,12 +1300,17 @@ func recordUpstreamReadFailure(s *State, reason string, err error) {
 // commit evaluateAutomerge actually evaluated via --match-head-commit -- so
 // a push landing between evaluation and merge can never get content merged
 // that was never checked. It fetches lazily: labels are fetched only when
-// automerge is enabled and the PR closes an issue; the base-ref policy, the
-// repo's allowed-merge-methods, and the merge-queue/head-SHA probe are each
-// fetched only once evaluateAutomerge's trial verdict (with that stage's
-// inputs still zero-valued) shows every earlier stage already passed -- so
-// a PR held by an earlier stage costs zero extra `gh` calls beyond the
-// labels fetch. verdict is reconcileFeedback's already-computed result
+// automerge is enabled, the PR closes an issue and no #870 grant hold applies
+// (a fork, a missing pin, or closing-issue/base drift costs no `gh` call at
+// all); the repo's default branch (#870), the base-ref policy, the repo's
+// allowed-merge-methods, and the merge-queue/head-SHA probe are each fetched
+// only once evaluateAutomerge's trial verdict (with that stage's inputs still
+// zero-valued) shows every earlier stage already passed -- the default branch
+// strictly before the policy, so a non-default base's policy is never read --
+// so a PR held by an earlier stage costs zero extra `gh` calls beyond the
+// labels fetch. s.AutomergePin is the pin tick or arm wrote; runAutomerge never
+// pins, so an unpinned state holds under reasonGrantPinMissing.
+// verdict is reconcileFeedback's already-computed result
 // (#850, generalized by #885 to reclassify AddressedKeys too): tick calls
 // reconcileFeedback once, unconditionally, right after the reviews fetch --
 // before this tick's new keys are even detected via detectNewFeedbackKeys and
@@ -1234,6 +1347,9 @@ func runAutomerge(s *State, pr prView, checks []check, verdict feedbackVerdict, 
 		CommentsComplete:   commentsComplete,
 		ReviewsComplete:    reviewsComplete,
 		DiscussionComplete: discussionComplete,
+		Pin:                s.AutomergePin,
+		BaseRef:            pr.BaseRefName,
+		IsCrossRepository:  pr.IsCrossRepository,
 	}
 	for _, i := range pr.ClosingIssuesReferences {
 		in.ClosingIssues = append(in.ClosingIssues, i.Number)
@@ -1241,14 +1357,22 @@ func runAutomerge(s *State, pr prView, checks []check, verdict feedbackVerdict, 
 	for _, f := range pr.Files {
 		in.Files = append(in.Files, f.Path)
 	}
-	if in.Enabled && len(in.ClosingIssues) > 0 {
+	if grantHold, _ := automergeGrantHold(in); in.Enabled && grantHold == "" && len(in.ClosingIssues) > 0 {
 		in.IssueLabels, in.LabelsErr = fetchClosingIssueLabels(s.Repo, in.ClosingIssues)
 	}
 
-	policyFetched, methodsFetched, queueFetched := false, false, false
+	defaultBranchFetched, policyFetched, methodsFetched, queueFetched := false, false, false, false
 	var decision automergeDecision
 	for {
 		decision = evaluateAutomerge(in)
+		// #870: an empty DefaultBranch with no error is the "not read yet"
+		// sentinel evaluateAutomerge holds on; fetching exactly once keeps a
+		// genuinely empty read a hold rather than a loop.
+		if !defaultBranchFetched && decision.Reason == reasonDefaultBranchUnreadable && in.DefaultBranch == "" && in.DefaultBranchErr == nil {
+			defaultBranchFetched = true
+			in.DefaultBranch, in.DefaultBranchErr = fetchDefaultBranch(s.Repo)
+			continue
+		}
 		if !policyFetched && decision.Reason == reasonPolicyAbsent {
 			policyFetched = true
 			cfg, err := fetchPolicy(s.Repo, pr.BaseRefName)

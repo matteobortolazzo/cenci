@@ -266,12 +266,15 @@ func ciRepairWrite(t *testing.T, path, body string) {
 }
 
 // setPR rewrites the fixture PR at head, keeping the shell-hostile branch and a
-// closing issue numbered 7 (which must never name the window).
+// closing issue numbered 7 (which must never name the window). The PR reports
+// a same-repository head and a base branch, so the #870 grant checks pass and
+// the ticks reach the stages these tests assert on.
 func (w *ciRepairWorld) setPR(t *testing.T, head string) {
 	t.Helper()
 	pr, err := json.Marshal(map[string]any{
 		"number": 42, "title": "Change", "state": "OPEN", "headRefName": ciRepairBranch, "headRefOid": head,
 		"url": "https://example/pr/42", "closingIssuesReferences": []map[string]any{{"number": 7}},
+		"isCrossRepository": false, "baseRefName": "main",
 	})
 	if err != nil {
 		t.Fatal(err)

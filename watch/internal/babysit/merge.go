@@ -42,8 +42,10 @@ const mergeQueueQuery = `query($owner:String!,$name:String!,$number:Int!){reposi
 // (Decision 9, #854) requires, immediately before runAutomerge ever issues
 // `gh pr merge` on a first-pass Merge==true verdict: PR view (head SHA,
 // mergeable, changed files), checks, closing-issue labels, base-ref policy,
-// paginated comments/reviews (feeding a read-only new-feedback detection
-// pass via detectNewFeedbackKeys), a full revalidation of every known
+// default branch (#870: read before the policy, which is read only for a base
+// equal to it; the pin, base and fork-state checks run on this fresh view, and
+// a grant hold skips the label fetch), paginated comments/reviews (feeding a
+// read-only new-feedback detection pass via detectNewFeedbackKeys), a full revalidation of every known
 // feedback key -- pending AND previously addressed -- via revalidateFeedback
 // (#885: this pass rereads authoritative GraphQL thread/review state fresh,
 // it never carries the first pass's already-computed FeedbackHold/
@@ -124,6 +126,9 @@ func recheckAutomergeInputs(s *State, first automergeInputs) (automergeInputs, s
 		DiscussionComplete: discussionComplete,
 		AllowedMethods:     first.AllowedMethods,
 		AllowedMethodsErr:  first.AllowedMethodsErr,
+		Pin:                s.AutomergePin,
+		BaseRef:            pr.BaseRefName,
+		IsCrossRepository:  pr.IsCrossRepository,
 	}
 	for _, i := range pr.ClosingIssuesReferences {
 		in.ClosingIssues = append(in.ClosingIssues, i.Number)
@@ -131,23 +136,32 @@ func recheckAutomergeInputs(s *State, first automergeInputs) (automergeInputs, s
 	for _, f := range pr.Files {
 		in.Files = append(in.Files, f.Path)
 	}
-	if len(in.ClosingIssues) > 0 {
+	// #870: the same grant check the first pass runs, on this fresh view. A
+	// grant hold costs no label fetch (evaluateAutomerge returns before it).
+	if grantHold, _ := automergeGrantHold(in); grantHold == "" && len(in.ClosingIssues) > 0 {
 		in.IssueLabels, in.LabelsErr = fetchClosingIssueLabels(s.Repo, in.ClosingIssues)
 	}
 
 	newKeys, _ := detectNewFeedbackKeys(s, comments, reviews, s.LastCommentAt)
 	in.PendingKeys = append(append(append([]string{}, revalidatedPending...), discussionPending...), newKeys...)
 
-	cfg, err := fetchPolicy(s.Repo, pr.BaseRefName)
-	switch {
-	case err != nil:
-		in.PolicyErr = err
-	default:
-		if policy, reason := resolvePolicy(cfg, in.Files); reason != "" {
-			in.PolicyReason = reason
-		} else {
-			in.Policy = &policy
-			in.MergeMethod = policy.MergeMethod
+	// #870: the default branch is read before the policy, and the policy only
+	// when the base is that branch -- a retargeted base's .cenci/config.json is
+	// never read. Any other outcome leaves the policy inputs zero:
+	// evaluateAutomerge holds on the default-branch inputs first.
+	in.DefaultBranch, in.DefaultBranchErr = fetchDefaultBranch(s.Repo)
+	if in.DefaultBranchErr == nil && in.DefaultBranch != "" && in.DefaultBranch == pr.BaseRefName {
+		cfg, err := fetchPolicy(s.Repo, pr.BaseRefName)
+		switch {
+		case err != nil:
+			in.PolicyErr = err
+		default:
+			if policy, reason := resolvePolicy(cfg, in.Files); reason != "" {
+				in.PolicyReason = reason
+			} else {
+				in.Policy = &policy
+				in.MergeMethod = policy.MergeMethod
+			}
 		}
 	}
 

@@ -2394,7 +2394,8 @@ terminated and awaited as `reset` does (SIGTERM, up to 10s, lock removed), then 
 rewritten with status `stopped`, PID 0 and only the feedback bookkeeping kept (pending,
 addressed and launched keys, the comment watermarks, discussion revisions and receipts, the
 outstanding review launch and consumed nonces, plus `heldUntrustedKeys`, `untrustedLaunchCounts`
-and `headMoveHold`). The agent, retry budgets, CI status and
+and `headMoveHold`) and the automerge pin (`automergePin`, so a stop and re-arm can never
+re-pin a widened grant). The agent, retry budgets, CI status and
 closing issues are cleared, so a re-arm adopts a fresh agent, budgets restart, and unresolved
 feedback keeps its automerge hold. A stopped state does not block closing the ticket's window.
 Stale `stopped` files of abandoned PRs persist until a re-armed supervisor sees the PR merged
@@ -2531,6 +2532,19 @@ empty state: the stop is refused with a fixed reason and the file is kept.
   per-scope summary of the current repo's `.cenci/config.json` policy blocks
   (working tree; enforcement below always reads the PR's base branch), plus
   `--json` for scripting.
+- The grant inputs match the pin and the PR is not a fork. At arm (or on the first
+  tick whose `gh pr view` succeeds, when arming's read failed) babysit pins the PR's
+  closing-issue set (sorted, de-duplicated) and its base ref as `automergePin`, and never
+  overwrites it. Every later evaluation, the pre-merge recheck included, holds when the
+  closing issues differ (`closing issues changed since arm`) or the base ref differs
+  (`base branch changed since arm`); the detail names the pinned and observed values and
+  says to merge by hand. No command clears the hold; the comparison is stateless, so it
+  ends only if the PR returns to the pinned values. A state with no pin holds under
+  `automerge grant pin missing`. A PR whose head is in another repository
+  (`isCrossRepository` true) holds under `PR head is in a different repository`, and one
+  whose view carries no `isCrossRepository` holds under `PR cross-repository state
+  unknown`: fork PRs never automerge. All of these are `label`-stage holds and cost no
+  label fetch.
 - Every issue the PR closes carries the `automerge:ok` label. Refinement grants it
   per ticket only when `refinement.automerge: "eligible"` is configured and that
   ticket passes its eligibility checks; the default is `"off"`. Planning autonomy,
@@ -2632,6 +2646,12 @@ empty state: the stop is refused with a fixed reason and the file is kept.
   GraphQL probe (`isInMergeQueue`/`isMergeQueueEnabled`) checked as the final
   gate before mutation. Required, already-queued, or unreadable/unknown queue
   state all hold; babysit never enqueues a PR as a side effect.
+- The PR's base is the repository's current `default_branch`. Before the policy is read,
+  in the first pass and again in the pre-merge recheck, babysit reads `default_branch`
+  and holds unless it equals the PR's `baseRefName` exactly: `PR base is not the
+  default branch`, or `default branch unreadable` when the read fails or returns an
+  empty value (a `gh` failure also carries its `class=`). A non-default base's policy
+  is never read. Branch protection is not checked.
 - The diff stays within the supervised repo's `.cenci/config.json` `automerge`
   policy block (`protectedPaths`, `maxChangedFiles`, `maxDiffLines`, `mergeMethod`)
   — read from the PR's **base branch**, never its own head branch, so a PR can
