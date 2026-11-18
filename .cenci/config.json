@@ -153,6 +153,7 @@
     "automerge.enabled",
     "cicd",
     "dispatch.planRefined",
+    "dispatchEnroll",
     "planning.attended",
     "refinement.automerge",
     "refinement.confirmBeforeApply",
