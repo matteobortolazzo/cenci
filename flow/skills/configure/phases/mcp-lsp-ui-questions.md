@@ -171,3 +171,5 @@ which <command>
 - **Not found**: Warn with install command: "⚠ `<command>` not found. Install with: `<install-command>`. Server will activate once installed."
 
 Include the server in `.lsp.json` regardless — it activates once the binary is installed.
+
+This `which` check only describes the environment configure runs in, which is often not the sandbox. Inside the sandbox, the binary comes from the server's `lsp-<server>` fragment, which step 5e bakes into `.cenci/Dockerfile` (see the LSP rule under question 9 in `phases/runtime-ci-sandbox-questions.md`). When the sandbox is enabled, don't print the install command; tell the user the server reaches the container once the configure PR is merged and they run `cenci sandbox build`.

@@ -113,7 +113,9 @@ the last *published* plugin version, not your working tree — un-merged edits t
 `flow/skills/` only reach it after the plugin version bumps.
 
 `fragments/*.dockerfile` holds the same composable blocks (`dotnet`, `node`, `playwright`,
-`go`, `python`, `rust`, `docker`, `azure`) as standalone snippets used to assemble per-project images.
+`go`, `python`, `rust`, `docker`, `azure`, and the `lsp-*` language servers) as standalone snippets used to assemble per-project images.
+The `lsp-<server>` fragments (#1555) are config-selected from `lspServers`, each only when its runtime is also
+selected. They install pinned builds under `/usr/local`, never `/home/dev`, which the home volume replaces at runtime.
 Generated images always include Node so the isolated updater can install either npm package;
 the remaining fragments (including `playwright`, used for `verify-ui`'s Chromium
 screenshot capture) follow the detected project stack. `docker` is instead config-selected
@@ -132,9 +134,9 @@ copy could splice the host's profile onto a container-side token cache. Cloud cr
 Node runtime, never the agent packages. **Invariant:** each fragment and its corresponding block in `Dockerfile` must stay
 byte-identical — hand-duplicated on every change (e.g. bumping `DOTNET_SDK_VERSION` or adding a
 package to a stack block means editing both `Dockerfile` and `fragments/<stack>.dockerfile`
-identically). The exceptions are `python`, `rust` and `azure`, which deliberately have **no** monolith
-block because this repo's own stack doesn't use them; `fragments-drift.test.sh` enforces both directions
-(byte-identity for monolith-backed fragments, deliberate absence for the three monolith-less ones), so
+identically). The exceptions are `python`, `rust`, `azure` and `lsp-rust-analyzer`, which deliberately have **no** monolith
+block because the monolith carries no runtime they need or this repo's own stack doesn't use them; `fragments-drift.test.sh` enforces both directions
+(byte-identity for monolith-backed fragments, deliberate absence for the four monolith-less ones), so
 adding a monolith block for one of them means removing it from that suite's `MONOLITH_LESS` list.
 
 **Fragment drift detection (#1048).** A per-repo `.cenci/Dockerfile` is generated once, by
@@ -190,6 +192,10 @@ Image dependency versions are pinned via Dockerfile `ARG`s, all checked daily by
     proposed once the currently-pinned major's LTS support has ended; the PR is never
     auto-merged — always reviewed, merged, and rebuild-dispatched by hand.
 - **Manual only (not yet wired into `deps-bump.yml`)**:
+  - LSP pins (#1555): `TYPESCRIPT_LANGUAGE_SERVER_VERSION`, `TYPESCRIPT_VERSION`,
+    `PYRIGHT_VERSION`, `GOPLS_VERSION`, `CSHARP_LS_VERSION` — `Dockerfile` (+ the matching
+    `fragments/lsp-*.dockerfile`, byte-identical). Keep `TYPESCRIPT_VERSION` on 6.x:
+    TypeScript 7 (the native port) ships no `tsserver`, which typescript-language-server drives.
   - `PLAYWRIGHT_VERSION` — `Dockerfile` (+ `fragments/playwright.dockerfile`,
     byte-identical). Bump by hand and rebuild; add it to the auto-bumped tier above in a
     follow-up if it proves stable enough to auto-merge like Go/uv.
