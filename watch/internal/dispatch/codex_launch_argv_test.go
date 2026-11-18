@@ -57,7 +57,12 @@ func TestBabysitCodexLaunchResolvesToSandboxAgentArgv(t *testing.T) {
 	}{
 		{"babysit-review", "babysit-review", regexp.MustCompile(`^103 --receipt-nonce [0-9a-f]{32}$`),
 			func(ticket string) []string { return []string{"exec", "$cenci:address-review " + ticket} },
-			func(h *chainHarness) { h.seedReview(103, "reviewer", "CHANGES_REQUESTED", "2026-01-01T00:00:00Z") }},
+			// #1539: a review key's author must hold write access to launch the
+			// worker, so the reviewer is seeded as a write collaborator.
+			func(h *chainHarness) {
+				h.seedReview(103, "reviewer", "CHANGES_REQUESTED", "2026-01-01T00:00:00Z")
+				h.seedPermission("reviewer", "write")
+			}},
 		{"ci-repair", "ci-repair", exactTicket(ciRepairPrompt),
 			func(ticket string) []string { return []string{"exec", "$cenci:ci-repair " + ticket} },
 			func(h *chainHarness) { h.seedChecks(103, ghCheck{Bucket: "fail", Name: "build", State: "FAILURE"}) }},

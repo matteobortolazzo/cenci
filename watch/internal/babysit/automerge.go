@@ -153,6 +153,14 @@ const (
 	reasonUpstreamDiscussionUnreadable    = "PR discussion unreadable"
 	reasonReviewWorkerEndedWithoutReceipt = "review worker ended without receipt"
 	reasonStateUnreadable                 = "babysit state unreadable"
+	// reasonHeadMovedUntrustedReview (#1539) is the PR-level security hold: a
+	// babysit-review launch that carried untrusted input (a key outside its
+	// trustedKeys, or a launch with no recorded head) ended with the PR head
+	// changed. The worker posts and pushes under the maintainer's own identity,
+	// so no GitHub-side signal clears it: only an attended host `cenci babysit
+	// resolve <pr> head:<sha>` naming State.HeadMoveHold's recorded head does.
+	// It blocks automerge and sets needs-input; repair and review launches go on.
+	reasonHeadMovedUntrustedReview = "head moved during untrusted review launch"
 
 	// Post-merge verification (Decisions 5/6): a zero-exit `gh pr merge`
 	// followed by a single refetch that does not report MERGED is

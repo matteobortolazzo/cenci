@@ -174,38 +174,70 @@ a hold on it would have no recovery. A state written before this feature has no 
 fields: its seen-set is empty, so on its first tick every non-excluded human discussion comment
 is pending and launches (one burst on upgrade).
 
-**Launch.** A review launch needs keys in `pendingCommentKeys` but not in
-`launchedFeedbackKeys`, a complete discussion read, no conflict hold, no CI repair launched
-this tick and no live writer. The call is `cenci run babysit-review "<pr> --receipt-nonce
+**Launch.** A review launch needs keys in `pendingCommentKeys` but neither in
+`launchedFeedbackKeys` nor in `heldUntrustedKeys` (the trigger is pending minus launched minus
+held-untrusted keys; see Author trust), a complete discussion read, no conflict hold, no CI
+repair launched this tick and no live writer. The call is `cenci run babysit-review "<pr> --receipt-nonce
 <nonce> discussion:<id>=<sha256> …"`, pinned `--unattended`. The nonce is 32 hex characters
 from `crypto/rand`, minted per launch; each discussion key rides with its revision, so the
 worker echoes what it was given.
 
 **Author trust.** The worker is unattended and reads untrusted text, so it may only act on
-feedback from someone with write access. Building a launch, the supervisor looks up each listed
-discussion comment author's repository permission (one lookup per login per tick). A key whose
-author is definitely denied (the lookup answered something other than `admin` or `write`) is
-marked `:untrusted` in the launch argument, `discussion:<id>=<sha256>:untrusted`; a trusted
-author's token is unchanged. A lookup that fails (a `gh` error, a timeout, an undecodable
-answer) is not a denial: that key is skipped for this launch, left pending and unlaunched, so
-the next tick looks again (with every candidate skipped there is no launch that tick and no
-nonce is minted), and `automergeDetail` notes `author permission lookup failed for <key>; will
-retry`. Trust is default-deny: the launch records the keys whose author was granted as an
-allow-list, `reviewLaunch.trustedKeys` (additive, no schema bump), and a discussion key in the
-launch that is not in it is untrusted, so a state with no such record reads as untrusted, never
-as trusted. For an untrusted key the worker never changes code, pushes or posts replies:
-its outcome is `no-action` (the comment requests nothing) or `blocked` (a write-access human
-must decide), and the supervisor refuses an `addressed` outcome for it (see Receipt). Inline
-(`comment:`) and review (`review:`) feedback carries no token: the worker checks each distinct
-author's permission itself and never acts on an item from a non-write author, leaving it
-pending on GitHub, where it keeps holding automerge. A launch carries at most 40 discussion
-keys. The rest stay
+feedback from someone with write access, and the supervisor enforces that in Go for every key
+type (#1539). Building a launch, it looks up each candidate's author through the per-tick
+permission resolver (one lookup per login per tick): a `discussion:` key's comment author, a
+`comment:` key's inline-comment `user.login` and a `review:` key's review `user.login`, the
+last two read from the tick's already-fetched lists. A key whose item is missing from that read
+or whose login is not a valid GitHub login is denied with no `gh` call. An author who is
+definitely denied (the lookup answered something other than `admin` or `write`) is untrusted; an
+untrusted `discussion:` key is marked `:untrusted` in the launch argument,
+`discussion:<id>=<sha256>:untrusted`, while a trusted author's token is unchanged and
+`comment:`/`review:` keys carry no token. A lookup that fails (a `gh` error, a timeout, an
+undecodable answer) is not a denial: that key is skipped for this launch, left pending and
+unlaunched, so the next tick looks again (with every candidate skipped there is no launch that
+tick and no nonce is minted), and `automergeDetail` notes `author permission lookup failed for
+<key>; will retry`. Trust is default-deny: the launch records the keys whose author was granted
+as an allow-list, `reviewLaunch.trustedKeys` (additive, no schema bump; it now covers
+`comment:` and `review:` keys as well), and a key in the launch that is not in it is untrusted,
+so a state with no such record (a launch saved by an earlier build) reads as untrusted, never as
+trusted. For an untrusted discussion key the worker never changes code, pushes or posts
+replies: its outcome is `no-action` (the comment requests nothing) or `blocked` (a write-access
+human must decide), and the supervisor refuses an `addressed` outcome for it (see Receipt). The
+worker still checks each author's permission itself, as defense in depth.
+
+*No untrusted-only launches.* Untrusted keys ride along only with a trusted one. When no
+candidate has a trusted author, nothing launches and no nonce is minted: every untrusted
+candidate is held for a write-access human in `heldUntrustedKeys` (additive state). A held key
+stays pending, so automerge holds under `review feedback pending`, status is `needs-input` and
+`automergeDetail` names the recovery: `cenci babysit resolve <pr> discussion:<id>` for a
+discussion key, and "resolve `<key>` on GitHub" for each `comment:`/`review:` key, which moves
+to addressed through the ordinary feedback path and leaves the held set (status returns to
+`running` once nothing else needs a human). A held key is never in `launchedFeedbackKeys`, so
+it never raises `review worker ended without receipt`. When no candidate is trusted but some
+lookup came back unknown, nothing launches and the unknown key is retried next tick; denied
+candidates are held once that lookup settles. The held set is left out of the launch trigger, so
+a held key is looked at again only when a human acts: an edit or reopen of a held `discussion:`
+key releases it, and the tick that reads the edit looks its author up afresh (still denied: held
+again with its launch count kept; now `admin`/`write`: launched as trusted). A `[bot]`
+author's inline comment or review is still excluded from detection and triggers no lookup.
+
+*Untrusted launch cap.* An untrusted `discussion:` key rides in at most `fixCap` (3) launches
+across all of its edits, counted per key in `untrustedLaunchCounts` (additive state; every
+dispatched launch counts, `cenci run` exit status 3 included). Once a key is at the cap and its
+author is still denied it is held like an untrusted-only key, so an outside author editing one
+comment over and over cannot drive unbounded launches. Trusted `discussion:` keys never count:
+a write-access author's edits keep launching once per revision. The count is kept when a
+held key is edited and survives `reset`. A key already at its cap stays held even on a tick where
+an unknown lookup defers holding the other untrusted candidates.
+
+A launch carries at most 40 discussion keys. The rest stay
 pending and unlaunched and go out on a later tick with no live writer (a deferred launch, not
 a retry policy). A key whose comment is no longer on the PR at its recorded revision is not
 launched.
 `comment:` and `review:` keys ride in the launch record only; the worker resolves them from
 GitHub. The built-in template runs Claude in `--print` mode and Codex through `exec`, so the
-window ends. The launch records the nonce, the launch time and the key set in `reviewLaunch`
+window ends. The launch records the nonce, the launch time, the key set and the PR head it
+started from (`reviewLaunch.headSha`, used by the head-move hold below) in `reviewLaunch`
 and adds the keys to `launchedFeedbackKeys`; a nonce it supersedes before consumption is
 recorded as consumed, so a late receipt for it is rejected. `cenci run` exit status 3 counts as
 dispatched. Any other failure consumes nothing: no nonce is saved and the keys stay
@@ -261,10 +293,20 @@ ticks; any other carrying it is a rejection), an edited receipt, one created bef
 an author without write permission, or a malformed grammar. A receipt posted while its worker
 pane is still live addresses its keys, but automerge stays held with `branch repair worker still
 running` until the pane ends. The outstanding launch is cleared once its nonce is consumed (or
-none of its discussion keys is pending) and its window has ended; it is never cleared in the
+none of its discussion keys is pending), its window has ended and its head-move check (below)
+has run; it is never cleared in the
 tick that created it, so a launch carrying only `comment:` or `review:` keys (settled the moment
 it exists) stays outstanding until the worker's zero-key receipt consumes its nonce, or, with no
 receipt, until a later tick sees its window ended.
+
+**Nonce pruning (#1539).** On a tick whose discussion read is complete (never a truncated one,
+which cannot say which receipts are still on the PR), `consumedReviewNonces` shrinks to the
+nonces a receipt marker in a current PR conversation comment still carries, plus the
+outstanding launch's nonce whether or not a comment carries it; the prune runs at the end of the
+tick, after any launch. A kept nonce keeps its comment's silent skip or its `nonce already
+consumed` rejection (a superseded nonce, recorded with comment id 0, stays while its late
+receipt comment is on the PR). A pruned nonce can only come back in a new comment, which is
+rejected as `nonce is not the outstanding launch's` and addresses nothing.
 
 **Liveness and priority.** `<pr>-babysit-review` is a counted branch writer beside
 `<pr>-ci-repair` and `<pr>-merge-repair`, under the same ownership rule. A live review
@@ -284,7 +326,8 @@ launch failed`, with every key still pending. A live `<pr>-babysit-review` pane 
 `@cenci-repo-dir` is provably another repository does not block.
 
 **Holds and their recovery.** Each reason below is a recorded `automergeReason`, except the last,
-which refuses at arm and in `status` because no tick runs.
+which refuses at arm and in `status` because no tick runs. (Held untrusted keys, above, are not a
+separate reason: they stay pending under `review feedback pending` with status `needs-input`.)
 
 - `PR discussion unreadable`: the `issues/<pr>/comments` read failed (a `gh` failure, a page that
   does not decode, or a comment object without `id`, `user.login` or `body`). The tick returns the
@@ -305,6 +348,31 @@ which refuses at arm and in `status` because no tick runs.
   (no relaunch for the same revision), at lowest precedence among feedback holds, and
   `automergeDetail` names `cenci babysit resolve <pr> <key>`. Recovery: handle the comment and
   run `resolve`, or edit the comment so a new revision starts a new launch.
+- `head moved during untrusted review launch` (#1539, `headMoveHold`): a review launch carried
+  an untrusted item (a key outside its `trustedKeys`, which for a launch saved by an earlier
+  build includes every `comment:`/`review:` key) and the PR head differs from the head the
+  launch recorded (`reviewLaunch.headSha`). The worker acts under the maintainer's GitHub
+  identity and could forge any GitHub-side signal, so only a human on the host clears this
+  hold. It is checked once per launch, on the first tick that sees the launch's
+  `<pr>-babysit-review` window ended (before that tick's own launch, with or without a receipt,
+  so a push made after the receipt is caught) and a known live head. An unknown live head defers
+  the check to the next tick with a known head: until it runs, `reviewLaunch` is kept even when
+  its receipt was accepted (or it carried only `comment:`/`review:` keys), and no new
+  babysit-review launch is made, so newly pending keys stay pending and launch on that tick. A
+  missing recorded head fails closed. No hold is raised for a launch whose keys
+  were all trusted, or whose head is unchanged. The hold records the head it saw. A second raise
+  while it is recorded replaces that head with the newer one, so a single resolve covers
+  everything up to it and a resolve naming the older SHA exits 1. It ranks at the top tier, above
+  every other feedback hold. It blocks automerge and sets status `needs-input` only: CI repair,
+  merge repair and review launches keep running. It survives a green CI read, a further head
+  change, `cenci babysit stop` followed by a re-arm, and `reset`; a re-armed supervisor starts
+  as `needs-input`. `automergeDetail` names `cenci babysit resolve <pr> head:<sha>` for the
+  recorded head. Recovery: review every change up to that head, then run
+  `cenci babysit resolve <pr> head:<sha>` (below). The guarantee that only an attended host
+  `resolve` clears it relies on the worker running in the sandbox, where the babysit state
+  directory is not mounted and `resolve`'s `CENCI_SANDBOX`/`CENCI_ATTENDED`/
+  `CENCI_BABYSIT_SUPERVISOR` refusals apply; a worker launched on the host as the same user is
+  outside that guarantee.
 - `babysit state unreadable`: the state file cannot be read or decoded. Arming exits 1 with
   `babysit state unreadable: <path>: <cause>`, leaves the file byte-identical and starts no
   supervisor (the old fail-open load started from an empty `pendingCommentKeys`). `cenci babysit
@@ -314,22 +382,30 @@ which refuses at arm and in `status` because no tick runs.
   lost, so every comment is detected again. A stop forwarded from a sandbox refuses it and keeps
   the file.
 
-**`cenci babysit resolve <pr> discussion:<id> [--state-dir <dir>]`** is how a human settles
-those holds. It is host-only and attended-only: it refuses, changing nothing and exiting 1, with
-`CENCI_SANDBOX=1`, with `CENCI_ATTENDED=0` (whatever set it, so a supervisor-launched worker can
-never use it) or with `CENCI_BABYSIT_SUPERVISOR` set. It accepts only a `discussion:` key that is
-in `pendingCommentKeys`: a `comment:` or `review:` key exits 1 with a pointer to resolve it on
-GitHub, and a key not pending exits 1. It records a receipt with source `human-cli` at the
-recorded revision (an edit still reopens the key) and follows reset: a live owned supervisor is
-terminated and re-armed with its recorded settings, while a `stopped` state is written but not
-re-armed. Exit codes: 0 resolved, 1 refusal or runtime failure, 2 usage error or an agent
-arming would refuse. It clears the `review feedback state unknown` hold of a deleted pending
-comment.
+**`cenci babysit resolve <pr> discussion:<id>|head:<sha> [--state-dir <dir>]`** is how a human
+settles those holds. It is host-only and attended-only: it refuses, changing nothing and exiting
+1, with `CENCI_SANDBOX=1`, with `CENCI_ATTENDED=0` (whatever set it, so a supervisor-launched
+worker can never use it) or with `CENCI_BABYSIT_SUPERVISOR` set. A `discussion:` key must be in
+`pendingCommentKeys` (this covers a held untrusted discussion key): a `comment:` or `review:` key
+exits 1 with a pointer to resolve it on GitHub, and a key not pending exits 1. It records a
+receipt with source `human-cli` at the recorded revision (an edit still reopens the key) and
+removes the key from `heldUntrustedKeys`. A `head:<sha>` target (#1539) is the only way to clear
+the `head moved during untrusted review launch` hold: `<sha>` must be 40 or 64 lowercase hex
+characters (anything else is a usage error, exit 2), and it must name the head the hold
+currently records. With no hold recorded, or a different SHA (including an older one after a
+second raise replaced the head), it exits 1 and leaves the state byte-identical; otherwise it
+clears `headMoveHold` and prints `Resolved the head-move hold at <sha> for PR #<pr>.`. Either
+target follows reset: a live owned supervisor is terminated and re-armed with its recorded
+settings, while a `stopped` state is written but not re-armed. Exit codes: 0 resolved, 1 refusal
+or runtime failure, 2 usage error or an agent arming would refuse. It clears the `review
+feedback state unknown` hold of a deleted pending comment.
 
 **Stop keeps feedback.** `cenci babysit stop <pr>` terminates a verified supervisor, waits for it
 to exit, removes the lock and rewrites the state with status `stopped` and PID 0, keeping only
 the feedback bookkeeping: pending, addressed and launched keys, the comment watermarks, discussion
-revisions and receipts, the outstanding review launch and consumed nonces. Budgets, the agent,
+revisions and receipts, the outstanding review launch and consumed nonces, plus the untrusted
+bookkeeping (`heldUntrustedKeys`, `untrustedLaunchCounts` and `headMoveHold`, so a stop and
+re-arm never drops a security hold). Budgets, the agent,
 CI status and closing issues are cleared, so a re-arm adopts a fresh agent, the retry budgets
 restart as they always have and unresolved feedback keeps its hold. A comment posted while
 supervision was down is collected on the first tick after re-arm. `status` prints `stopped` for

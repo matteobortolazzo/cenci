@@ -246,8 +246,9 @@ var (
 	// `repos/<repo>/issues/<n>/comments` (default: no comments); discussionErr, when
 	// set, makes that read fail. permissionServed maps a login to the
 	// `permission` value `repos/<repo>/collaborators/<login>/permission` answers
-	// (an unlisted login is `none`; humanComment's author defaults to `write` so a
-	// launch over her comments is trusted unless a test says otherwise).
+	// (an unlisted login is `none`; humanComment's author and the fixtures' inline
+	// and review author `reviewer` default to `write`, so a launch over their
+	// feedback is trusted unless a test says otherwise, #1539).
 	// permissionFailing lists logins whose lookup errors. All are restored by the
 	// serve* helpers' cleanup.
 	discussionServed = "[]"
@@ -257,7 +258,7 @@ var (
 	// the reads (a one-page read is one request).
 	discussionSequence []string
 	discussionReads    int
-	permissionServed   = map[string]string{humanLogin: "write"}
+	permissionServed   = map[string]string{humanLogin: "write", "reviewer": "write"}
 	permissionFailing  = map[string]bool{}
 
 	discussionPathRe = regexp.MustCompile(`^repos/[^/]+/[^/]+/issues/[0-9]+/comments\?`)
@@ -3248,6 +3249,11 @@ func countAddressReviewLaunches(calls [][]string) int {
 	return n
 }
 
+// reopenedComment5 is the inline comment page the reopen tests serve: comment 5
+// by the write-access reviewer. #1539 looks up every launched key's author, and a
+// key whose comment is missing from the read has no author and is held.
+const reopenedComment5 = `[{"id":5,"updated_at":"2026-01-01T00:00:00Z","user":{"login":"reviewer"}}]`
+
 // TestTickReopensAddressedKeyAndDedupsLaunchAcrossTicks is AC 1/AC 2/Decision
 // 3: a previously-addressed key whose thread GitHub now reports unresolved
 // moves back to PendingKeys and fires exactly one address-review launch for
@@ -3265,7 +3271,7 @@ func TestTickReopensAddressedKeyAndDedupsLaunchAcrossTicks(t *testing.T) {
 
 	// Tick 1: the reopen transition itself -- launches exactly once.
 	var calls1 [][]string
-	withCommands(t, []string{pr, `[{"bucket":"pass","name":"test","state":"SUCCESS"}]`, `[]`, `[]`, unresolvedThreadFor(5)}, &calls1)
+	withCommands(t, []string{pr, `[{"bucket":"pass","name":"test","state":"SUCCESS"}]`, reopenedComment5, `[]`, unresolvedThreadFor(5)}, &calls1)
 	if _, _, err := tick(&s); err != nil {
 		t.Fatal(err)
 	}
@@ -3284,7 +3290,7 @@ func TestTickReopensAddressedKeyAndDedupsLaunchAcrossTicks(t *testing.T) {
 
 	// Tick 2: still unresolved -- no relaunch for the same episode.
 	var calls2 [][]string
-	withCommands(t, []string{pr, `[{"bucket":"pass","name":"test","state":"SUCCESS"}]`, `[]`, `[]`, unresolvedThreadFor(5)}, &calls2)
+	withCommands(t, []string{pr, `[{"bucket":"pass","name":"test","state":"SUCCESS"}]`, reopenedComment5, `[]`, unresolvedThreadFor(5)}, &calls2)
 	if _, _, err := tick(&s); err != nil {
 		t.Fatal(err)
 	}
@@ -3298,7 +3304,7 @@ func TestTickReopensAddressedKeyAndDedupsLaunchAcrossTicks(t *testing.T) {
 	// Tick 3: still unresolved -- still no relaunch, proving the dedup
 	// persists across more than one subsequent tick.
 	var calls3 [][]string
-	withCommands(t, []string{pr, `[{"bucket":"pass","name":"test","state":"SUCCESS"}]`, `[]`, `[]`, unresolvedThreadFor(5)}, &calls3)
+	withCommands(t, []string{pr, `[{"bucket":"pass","name":"test","state":"SUCCESS"}]`, reopenedComment5, `[]`, unresolvedThreadFor(5)}, &calls3)
 	if _, _, err := tick(&s); err != nil {
 		t.Fatal(err)
 	}
@@ -3322,7 +3328,7 @@ func TestTickReopenLaunchFailureRetriesNextTickAndPreservesReopenState(t *testin
 		LaunchSession: "work",
 	}
 
-	responses := []string{pr, `[{"bucket":"pass","name":"test","state":"SUCCESS"}]`, `[]`, `[]`, unresolvedThreadFor(5)}
+	responses := []string{pr, `[{"bucket":"pass","name":"test","state":"SUCCESS"}]`, reopenedComment5, `[]`, unresolvedThreadFor(5)}
 	var calls [][]string
 	originalCommand := command
 	originalExecGh := execGh
@@ -3371,7 +3377,7 @@ func TestTickReopenLaunchFailureRetriesNextTickAndPreservesReopenState(t *testin
 	// Next tick: LaunchedKeys is still empty, so PendingKeys \ LaunchedKeys
 	// still contains comment:5 -- retry the launch, this time succeeding.
 	var calls2 [][]string
-	withCommands(t, []string{pr, `[{"bucket":"pass","name":"test","state":"SUCCESS"}]`, `[]`, `[]`, unresolvedThreadFor(5)}, &calls2)
+	withCommands(t, []string{pr, `[{"bucket":"pass","name":"test","state":"SUCCESS"}]`, reopenedComment5, `[]`, unresolvedThreadFor(5)}, &calls2)
 	if _, _, err := tick(&s); err != nil {
 		t.Fatal(err)
 	}
@@ -4872,7 +4878,8 @@ func TestTickDiscussionCommentBecomesPendingAndLaunchesBabysitReviewOnce(t *test
 	if n := countWorkflowLaunches(calls, "address-review"); n != 0 {
 		t.Errorf("address-review launches = %d, want 0: the supervisor no longer launches the interactive workflow", n)
 	}
-	want := &reviewLaunchRecord{Nonce: testReviewNonce, LaunchedAt: testLaunchAt, Keys: []string{"discussion:11"}, TrustedKeys: []string{"discussion:11"}}
+	// #1539: the launch records the PR head it started from (automergeEligiblePR's).
+	want := &reviewLaunchRecord{Nonce: testReviewNonce, LaunchedAt: testLaunchAt, Keys: []string{"discussion:11"}, TrustedKeys: []string{"discussion:11"}, HeadSHA: "abc"}
 	if !reflect.DeepEqual(s.ReviewLaunch, want) {
 		t.Errorf("ReviewLaunch = %+v, want %+v", s.ReviewLaunch, want)
 	}
@@ -5140,7 +5147,7 @@ func TestTickDiscussionEditedAddressedCommentReopensAndRelaunches(t *testing.T) 
 }
 
 // AC: an edit of a pending, already-launched key leaves LaunchedKeys, so a new
-// episode launches (superseding the old nonce, recorded with comment id 0).
+// episode launches (superseding the old nonce).
 func TestTickDiscussionEditedLaunchedKeyRelaunchesAndSupersedesTheNonce(t *testing.T) {
 	var calls [][]string
 	withCommands(t, openPR2(), &calls)
@@ -5157,8 +5164,12 @@ func TestTickDiscussionEditedLaunchedKeyRelaunchesAndSupersedesTheNonce(t *testi
 	if s.ReviewLaunch == nil || s.ReviewLaunch.Nonce != testWrongNonce {
 		t.Errorf("ReviewLaunch = %+v, want the new launch", s.ReviewLaunch)
 	}
-	if got, ok := s.ConsumedReviewNonces[testReviewNonce]; !ok || got != 0 {
-		t.Errorf("ConsumedReviewNonces = %v, want the superseded nonce recorded with comment id 0", s.ConsumedReviewNonces)
+	// #1539 (planning Q&A 7): the superseded nonce is recorded with comment id 0,
+	// then the tick-end prune drops it at once because no receipt comment on the PR
+	// carries it; a late receipt for it is still rejected (as not the outstanding
+	// launch's), and one already on the PR keeps it recorded (discussion_test.go).
+	if _, ok := s.ConsumedReviewNonces[testReviewNonce]; ok {
+		t.Errorf("ConsumedReviewNonces = %v, want the superseded, uncarried nonce pruned", s.ConsumedReviewNonces)
 	}
 }
 

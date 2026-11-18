@@ -174,8 +174,31 @@ type State struct {
 	// ConsumedReviewNonces maps each consumed nonce to the comment that consumed
 	// it (0 for a nonce a newer launch superseded), so the original receipt,
 	// re-read every tick, is skipped silently while any other comment carrying
-	// it is a recorded rejection.
+	// it is a recorded rejection. #1539: every tick with a complete discussion
+	// read prunes it to the nonces a current receipt comment still carries plus
+	// the outstanding launch's (pruneConsumedReviewNonces).
 	ConsumedReviewNonces map[string]int64 `json:"consumedReviewNonces,omitempty"`
+
+	// Untrusted-author limits (#1539). All three are additive `omitempty` fields
+	// with no stateSchemaVersion bump; `cenci babysit stop` keeps them and `reset`
+	// never clears them.
+	//
+	// HeldUntrustedKeys are pending keys whose author lacks write permission and
+	// that no launch may carry: untrusted feedback with no trusted company, or an
+	// untrusted discussion key past its launch cap. They are left out of the
+	// launch trigger and keep status needs-input until a write-access human acts:
+	// `cenci babysit resolve` for a discussion key, resolving it on GitHub for a
+	// comment:/review: key. An edit or reopen of a held discussion key releases it
+	// for a fresh author lookup.
+	HeldUntrustedKeys []string `json:"heldUntrustedKeys,omitempty"`
+	// UntrustedLaunchCounts counts, per discussion key, the dispatched launches
+	// that carried it as untrusted, across every edit. At fixCap the key is held.
+	UntrustedLaunchCounts map[string]int `json:"untrustedLaunchCounts,omitempty"`
+	// HeadMoveHold is the PR-level reasonHeadMovedUntrustedReview hold, raised
+	// when a launch that carried untrusted input ended with the PR head changed.
+	// Only an attended host `cenci babysit resolve <pr> head:<sha>` naming its
+	// HeadSHA clears it.
+	HeadMoveHold *headMoveHold `json:"headMoveHold,omitempty"`
 
 	// ChecksAbsentSince records when ciStatusUnknown was first observed for
 	// the current ChecksAbsentHeadSHA (#924): set/maintained by
@@ -251,6 +274,20 @@ type State struct {
 	// tick never survives into a later clean tick's persisted state.
 	AutomergeFailureClass string `json:"automergeFailureClass,omitempty"`
 }
+
+// headMoveHold is State.HeadMoveHold (#1539): HeadSHA is the live PR head the
+// check saw (the SHA `cenci babysit resolve <pr> head:<sha>` must name),
+// LaunchHeadSHA the head the launch recorded (empty for a legacy launch), Nonce
+// that launch's nonce and RaisedAt when the hold was first raised. A later
+// untrusted launch that also moved the head replaces HeadSHA, LaunchHeadSHA and
+// Nonce, so one resolve covers everything up to the newest head.
+type headMoveHold struct {
+	HeadSHA       string    `json:"headSha"`
+	LaunchHeadSHA string    `json:"launchHeadSha,omitempty"`
+	Nonce         string    `json:"nonce"`
+	RaisedAt      time.Time `json:"raisedAt"`
+}
+
 type prFile struct {
 	Path string `json:"path"`
 }
@@ -643,9 +680,10 @@ func Run(o Options) error {
 	}
 	s.PID = os.Getpid()
 	// A restarted supervisor over a CI-paused state stays needs-input until its
-	// first tick, rather than briefly reading as running (#1456).
+	// first tick, rather than briefly reading as running (#1456). So does one
+	// over a recorded head-move hold (#1539).
 	s.Status = "running"
-	if s.CIRepairPaused {
+	if s.CIRepairPaused || s.HeadMoveHold != nil {
 		s.Status = "needs-input"
 	}
 	s.RepoRoot = localRepoRoot()
@@ -1067,7 +1105,8 @@ func tick(s *State) (bool, time.Duration, error) {
 		}
 	}
 	// #885/#897/#1472: the single per-tick review launch trigger
-	// (babysit-review), driven by PendingKeys \ LaunchedKeys -- covers both this tick's brand-new keys
+	// (babysit-review), driven by PendingKeys \ LaunchedKeys \ HeldUntrustedKeys
+	// (#1539) -- covers both this tick's brand-new keys
 	// (detected above, after reconcileFeedback) and any key reconcileFeedback
 	// just reopened above, exactly once per resolution episode (Decision 3).
 	// Runs last, after both reconcileFeedback and detectNewFeedbackKeys, so
@@ -1093,6 +1132,22 @@ func tick(s *State) (bool, time.Duration, error) {
 	}
 	reviewWindowLive := observed != nil && observed.reviewLive
 	launchedNow := false
+	// #1539: the head-move check runs once per launch, on the first tick that sees
+	// its window ended with a known live head, before this tick's own launch and
+	// before the holds are combined, so it also catches a push made after the
+	// receipt was posted. An unknown live head defers it (automerge is already held
+	// by the headsha stage): while the check is owed (reviewHeadCheckOwed) the
+	// launch record is never cleared and no new babysit-review launch supersedes
+	// it, so the next tick with a known head still runs it. Once raised, the hold
+	// is re-asserted every tick until an attended host `resolve <pr> head:<sha>`
+	// clears it.
+	if s.ReviewLaunch != nil && !s.ReviewLaunch.HeadChecked && !reviewWindowLive && pr.HeadRefOID != "" {
+		checkReviewLaunchHead(s, pr.HeadRefOID)
+	}
+	var headMoveVerdict feedbackVerdict
+	if s.HeadMoveHold != nil {
+		headMoveVerdict = feedbackVerdict{Hold: reasonHeadMovedUntrustedReview, Detail: "the PR head is now " + s.HeadMoveHold.HeadSHA}
+	}
 	// A launched key whose worker has ended with no receipt for its revision
 	// holds, lowest precedence, with no relaunch (it is still in LaunchedKeys)
 	// until `cenci babysit resolve` or an edit. Evaluated before this tick's own
@@ -1103,23 +1158,42 @@ func tick(s *State) (bool, time.Duration, error) {
 			Detail: unreceipted[0] + ": the review worker ended without a valid receipt; once handled, run " + resolveHint(s.PR, unreceipted),
 		})
 	}
-	verdict = combineHolds(verdict, discussionVerdict)
+	// The head-move hold is combined first, so it wins a tie at the top rank.
+	verdict = combineHolds(headMoveVerdict, combineHolds(verdict, discussionVerdict))
+	// #1539: a held untrusted key stays held only while it is pending; one that
+	// resolved on GitHub (comment:/review:) or was resolved leaves the set.
+	s.HeldUntrustedKeys = slices.DeleteFunc(s.HeldUntrustedKeys, func(k string) bool { return !slices.Contains(s.PendingKeys, k) })
 	// The launch trigger described above is skipped on an unproven-complete
-	// discussion read (a partial read cannot say which keys are pending).
-	if toLaunch := removeKeys(s.PendingKeys, s.LaunchedKeys); discussionComplete && !conflictHeld && !ciLaunched && len(toLaunch) > 0 {
+	// discussion read (a partial read cannot say which keys are pending). Held
+	// untrusted keys are left out of it (#1539): only an edit, a reopen or a human
+	// releases them.
+	if toLaunch := removeKeys(removeKeys(s.PendingKeys, s.LaunchedKeys), s.HeldUntrustedKeys); discussionComplete && !conflictHeld && !ciLaunched && len(toLaunch) > 0 {
 		w, err := live()
 		if err != nil {
 			return false, 0, err
 		}
 		if w.any() {
 			fmt.Printf("PR #%s has new review feedback, but %s; babysit-review waits for it\n", s.PR, w.describe(s.PR))
+		} else if reviewHeadCheckOwed(s) {
+			// The window has ended, so the check was deferred by an unknown live head:
+			// a new launch would overwrite the record it needs. The keys stay pending
+			// and unlaunched, no nonce is minted, and a tick with a known head launches.
+			fmt.Printf("PR #%s has new review feedback, but the previous babysit-review launch's head check waits for a known PR head; babysit-review waits for it\n", s.PR)
 		} else {
-			keys, trusted, skipped := reviewLaunchKeys(s, toLaunch, discussion, permission)
-			for _, k := range skipped {
+			plan := reviewLaunchKeys(s, toLaunch, discussion, comments, reviews, permission)
+			for _, k := range plan.skipped {
 				workerNotes = append(workerNotes, "author permission lookup failed for "+k+"; will retry")
 			}
-			if len(keys) > 0 {
-				if err := launchBabysitReview(s, keys, trusted); err != nil {
+			if len(plan.held) > 0 {
+				for _, k := range plan.held {
+					if !slices.Contains(s.HeldUntrustedKeys, k) {
+						s.HeldUntrustedKeys = append(s.HeldUntrustedKeys, k)
+					}
+				}
+				fmt.Printf("PR #%s: holding untrusted review feedback for a write-access human, no worker launched for it: %s (capped: %s)\n", s.PR, strings.Join(plan.held, ", "), strings.Join(plan.capped, ", "))
+			}
+			if len(plan.keys) > 0 {
+				if err := launchBabysitReview(s, plan.keys, plan.trusted, pr.HeadRefOID); err != nil {
 					recordUpstreamReadFailure(s, reasonWorkflowLaunchFailed, err)
 					return false, 0, err
 				}
@@ -1133,29 +1207,60 @@ func tick(s *State) (bool, time.Duration, error) {
 	// inventory was read before this tick's own launch, so a launch made now is
 	// never cleared in the same tick: a comment:/review:-only launch is settled
 	// the moment it exists and would otherwise lose its nonce before the worker's
-	// zero-key receipt could consume it.
-	if s.ReviewLaunch != nil && !launchedNow && !reviewWindowLive && reviewLaunchSettled(s) {
+	// zero-key receipt could consume it. #1539: a launch whose head check is still
+	// owed is kept, settled or not, so the deferred check is not lost.
+	if s.ReviewLaunch != nil && !launchedNow && !reviewWindowLive && !reviewHeadCheckOwed(s) && reviewLaunchSettled(s) {
 		s.ReviewLaunch = nil
 	}
 	// blocked/failed receipts and the recovery for every hold the supervisor
 	// cannot clear itself lead AutomergeDetail; status is recomputed every tick,
 	// after the green reset above.
-	if needsHuman := needsHumanDiscussionKeys(s); len(needsHuman) > 0 {
-		s.Status = "needs-input"
+	// #1539: the head-move hold and the held untrusted keys also need a human, and
+	// their recovery notes go first, ahead of every other note, because the notes
+	// are capped at workerNoteMaxLen.
+	var leadingNotes []string
+	if s.HeadMoveHold != nil {
+		leadingNotes = append(leadingNotes, headMoveNote(s.PR, s.HeadMoveHold))
+	}
+	if len(s.HeldUntrustedKeys) > 0 {
+		leadingNotes = append(leadingNotes, heldUntrustedNote(s.PR, s.HeldUntrustedKeys))
+	}
+	needsHuman := needsHumanDiscussionKeys(s)
+	if len(needsHuman) > 0 {
 		workerNotes = append(workerNotes, "the review worker reported blocked or failed (or the comment's author lacks write permission); once handled by a write-access human, run "+resolveHint(s.PR, needsHuman))
+	}
+	if len(needsHuman) > 0 || len(leadingNotes) > 0 {
+		s.Status = "needs-input"
 	} else if s.Status == "needs-input" && !s.CIRepairPaused && s.ConflictNotifiedSHA == "" {
 		s.Status = "running"
 	}
 	workerNotes = append(workerNotes, receiptRejections...)
 	// A live writer keeps the tick actionable, holds automerge, and its
-	// unknown-ownership notes lead the recorded AutomergeDetail.
+	// unknown-ownership notes lead the recorded AutomergeDetail, after the
+	// human-recovery notes above.
 	workerLive := observed != nil && observed.any()
 	actionable = actionable || workerLive
 	if observed != nil {
 		workerNotes = append(slices.Clone(observed.notes), workerNotes...)
 	}
+	workerNotes = append(leadingNotes, workerNotes...)
 	if runAutomerge(s, pr, checks, verdict, commentsComplete, reviewsComplete, discussionComplete, workerLive, fleetEnabled, strings.Join(workerNotes, "; ")) {
 		actionable = true
+	}
+	// #1539: on a complete discussion read (never a partial one, which cannot say
+	// which receipts are still on the PR), the consumed nonces shrink to the ones a
+	// current receipt comment still carries plus the outstanding launch's, after
+	// this tick's own launch.
+	if discussionComplete {
+		outstanding := ""
+		if s.ReviewLaunch != nil {
+			outstanding = s.ReviewLaunch.Nonce
+		}
+		before := len(s.ConsumedReviewNonces)
+		s.ConsumedReviewNonces = pruneConsumedReviewNonces(s.ConsumedReviewNonces, discussion, outstanding)
+		if pruned := before - len(s.ConsumedReviewNonces); pruned > 0 {
+			fmt.Printf("PR #%s: pruned %d consumed review nonce(s) no current receipt comment carries\n", s.PR, pruned)
+		}
 	}
 	if actionable {
 		s.CurrentDelaySeconds = s.IntervalSeconds
@@ -1281,52 +1386,92 @@ func sortedKeys(m map[string]discussionReceipt) []string {
 	return keys
 }
 
+// reviewLaunchPlan is reviewLaunchKeys' decision for one tick (#1539). keys are
+// carried by the launch (none when no candidate is trusted) and trusted is the
+// subset recorded as the launch's allow-list. skipped are keys whose author lookup
+// failed (left pending, not held, retried next tick); held are the keys to hold
+// for a write-access human, of which capped are the untrusted discussion keys
+// past their launch cap.
+type reviewLaunchPlan struct {
+	keys, trusted, skipped, held, capped []string
+}
+
 // reviewLaunchKeys picks the feedback keys one babysit-review launch carries from
-// the pending-and-unlaunched toLaunch: every comment:/review: key, plus at most
-// maxReviewLaunchKeys discussion keys whose comment is still on the PR at the
+// the pending, unlaunched and unheld toLaunch: every comment:/review: key, plus at
+// most maxReviewLaunchKeys discussion keys whose comment is still on the PR at the
 // recorded revision (a deleted or just-edited comment is not launched; the rest
 // stay pending and unlaunched for a later tick).
 //
-// It also returns the carried discussion keys whose comment author is trusted
-// (the repository permission lookup answered `admin` or `write`): the launch
-// records exactly these as its allow-list, and every other carried discussion
-// key is untrusted, so the unattended worker must never act on it (the launch
-// argument marks it `:untrusted`). A definitely denied author is carried as
-// untrusted. A failed lookup (`unknown`: a gh error, timeout or decode failure)
-// is not a denial: that key is skipped for this launch -- left pending and
-// unlaunched, not carried -- so the next tick looks again, exactly as the
-// receipt-author lookup retries; skipped names those keys for the tick's detail.
-func reviewLaunchKeys(s *State, toLaunch []string, comments []discussionComment, permission func(login string) writePermission) (keys, trusted, skipped []string) {
-	current := discussionRevisionMap(comments)
+// Every candidate's author is looked up through permission (#1539): a discussion
+// key's comment author, a comment: key's inline-comment `user.login` and a
+// review: key's review `user.login`, read from this tick's already-fetched lists.
+// An author missing from them is the empty login, which fetchWritePermission
+// denies without a gh call. Granted (`admin`/`write`) keys are trusted: the launch
+// records exactly these as its allow-list. A failed lookup (`unknown`: a gh error,
+// timeout or decode failure) is not a denial: that key is skipped -- left pending
+// and unlaunched, not carried, not held -- so the next tick looks again, exactly
+// as the receipt-author lookup retries. A denied key is untrusted: a discussion
+// key already carried in fixCap launches is capped and held; any other denied key
+// rides along only with a trusted key (an untrusted discussion key marked
+// `:untrusted` in the argument). With no trusted key, nothing launches: every
+// denied key is held, unless some lookup was unknown, in which case only the
+// capped keys are held this tick (the retried key may yet be trusted company).
+func reviewLaunchKeys(s *State, toLaunch []string, discussion []discussionComment, comments []comment, reviews []review, permission func(login string) writePermission) reviewLaunchPlan {
+	current := discussionRevisionMap(discussion)
 	authors := map[string]string{}
-	for _, c := range humanDiscussion(comments) {
+	for _, c := range humanDiscussion(discussion) {
 		authors[discussionKey(c.ID)] = c.Login
 	}
+	for _, c := range comments {
+		authors["comment:"+strconv.FormatInt(c.ID, 10)] = c.User.Login
+	}
+	for _, r := range reviews {
+		authors["review:"+strconv.FormatInt(r.ID, 10)] = r.User.Login
+	}
+	var plan reviewLaunchPlan
+	var untrusted []string
+	carried := map[string]bool{}
 	discussionKeys := 0
 	for _, k := range toLaunch {
-		if !isDiscussionKey(k) {
-			keys = append(keys, k)
-			continue
-		}
-		if discussionKeys >= maxReviewLaunchKeys {
-			continue
-		}
-		if rev := s.DiscussionRevisions[k]; rev == "" || current[k] != rev {
-			continue
+		isDiscussion := isDiscussionKey(k)
+		if isDiscussion {
+			if discussionKeys >= maxReviewLaunchKeys {
+				continue
+			}
+			if rev := s.DiscussionRevisions[k]; rev == "" || current[k] != rev {
+				continue
+			}
 		}
 		switch permission(authors[k]) {
 		case writePermissionGranted:
-			trusted = append(trusted, k)
+			plan.trusted = append(plan.trusted, k)
 		case writePermissionDenied:
-			// Definitely untrusted: carried, marked `:untrusted`, not recorded as trusted.
+			if isDiscussion && s.UntrustedLaunchCounts[k] >= fixCap {
+				plan.capped = append(plan.capped, k)
+				continue
+			}
+			untrusted = append(untrusted, k)
 		default:
-			skipped = append(skipped, k)
+			plan.skipped = append(plan.skipped, k)
 			continue
 		}
-		keys = append(keys, k)
-		discussionKeys++
+		carried[k] = true
+		if isDiscussion {
+			discussionKeys++
+		}
 	}
-	return keys, trusted, skipped
+	plan.held = slices.Clone(plan.capped)
+	switch {
+	case len(plan.trusted) > 0:
+		for _, k := range toLaunch {
+			if carried[k] {
+				plan.keys = append(plan.keys, k)
+			}
+		}
+	case len(plan.skipped) == 0:
+		plan.held = append(plan.held, untrusted...)
+	}
+	return plan
 }
 
 // untrustedSuffix marks a discussion key in the babysit-review launch argument
@@ -1360,8 +1505,10 @@ func reviewLaunchArg(s *State, nonce string, keys, trusted []string) string {
 // worker is starting. Any other failure consumes nothing: no nonce is recorded
 // and the keys stay unlaunched. A still-outstanding earlier nonce is superseded
 // (recorded in ConsumedReviewNonces with comment id 0), so a late receipt for it
-// is a rejection.
-func launchBabysitReview(s *State, keys, trusted []string) error {
+// is a rejection. #1539: the launch records headSHA, the PR head it starts from,
+// for the head-move check, and every dispatched launch (exit 3 included) counts
+// once toward each untrusted discussion key's launch cap.
+func launchBabysitReview(s *State, keys, trusted []string, headSHA string) error {
 	nonce, err := newReviewNonce()
 	if err != nil {
 		return err
@@ -1381,9 +1528,61 @@ func launchBabysitReview(s *State, keys, trusted []string) error {
 			s.ConsumedReviewNonces[old.Nonce] = 0
 		}
 	}
-	s.ReviewLaunch = &reviewLaunchRecord{Nonce: nonce, LaunchedAt: launchedAt, Keys: slices.Clone(keys), TrustedKeys: slices.Clone(trusted)}
+	s.ReviewLaunch = &reviewLaunchRecord{Nonce: nonce, LaunchedAt: launchedAt, Keys: slices.Clone(keys), TrustedKeys: slices.Clone(trusted), HeadSHA: headSHA}
 	s.LaunchedKeys = append(s.LaunchedKeys, keys...)
+	for _, k := range keys {
+		if isDiscussionKey(k) && !slices.Contains(trusted, k) {
+			if s.UntrustedLaunchCounts == nil {
+				s.UntrustedLaunchCounts = map[string]int{}
+			}
+			s.UntrustedLaunchCounts[k]++
+		}
+	}
 	return nil
+}
+
+// checkReviewLaunchHead is the head-move check (#1539), run once per launch on
+// the first tick that sees its window ended with a known live head: it marks the
+// check done and, when the launch carried an untrusted key and its recorded head
+// (empty for a legacy launch, which fails closed) differs from the live head,
+// raises the head-move hold -- or, with one already recorded, replaces its head
+// with this newer one, so a single resolve covers everything up to it.
+func checkReviewLaunchHead(s *State, liveHead string) {
+	l := s.ReviewLaunch
+	l.HeadChecked = true
+	if !launchCarriedUntrusted(l) || l.HeadSHA == liveHead {
+		return
+	}
+	launchHead := l.HeadSHA
+	if launchHead == "" {
+		launchHead = "an unrecorded head"
+	}
+	fmt.Printf("PR #%s: the babysit-review launch that carried untrusted input started at %s and its window ended at head %s; holding for a human: %s\n", s.PR, launchHead, liveHead, headMoveResolveHint(s.PR, liveHead))
+	if s.HeadMoveHold != nil {
+		s.HeadMoveHold.HeadSHA, s.HeadMoveHold.LaunchHeadSHA, s.HeadMoveHold.Nonce = liveHead, l.HeadSHA, l.Nonce
+		return
+	}
+	s.HeadMoveHold = &headMoveHold{HeadSHA: liveHead, LaunchHeadSHA: l.HeadSHA, Nonce: l.Nonce, RaisedAt: launchClock().UTC()}
+}
+
+// reviewHeadCheckOwed reports whether the outstanding launch's head-move check
+// (#1539) has not run yet. The check sets HeadChecked whenever it runs with a known
+// live head, whatever the launch carried, so an unchecked launch whose window has
+// ended was deferred by an unknown head. It is the one predicate that gates both
+// clearing the launch record and superseding it with a new launch: either would
+// drop the recorded HeadSHA and skip the check, defaulting to allow (fail open).
+func reviewHeadCheckOwed(s *State) bool {
+	return s.ReviewLaunch != nil && !s.ReviewLaunch.HeadChecked
+}
+
+// headMoveResolveHint is the recovery for the head-move hold at head.
+func headMoveResolveHint(pr, head string) string {
+	return "review every change up to " + head + ", then run `cenci babysit resolve " + pr + " head:" + head + "`"
+}
+
+// headMoveNote is the head-move hold's AutomergeDetail note.
+func headMoveNote(pr string, h *headMoveHold) string {
+	return reasonHeadMovedUntrustedReview + ": the PR head is now " + h.HeadSHA + "; " + headMoveResolveHint(pr, h.HeadSHA)
 }
 
 // reviewLaunchSettled reports whether the outstanding launch needs no further
@@ -1830,7 +2029,9 @@ func stopRepo(repo, pr, explicit string, strict bool) (gonePID int, err error) {
 // stoppedState is what `cenci babysit stop` leaves behind (#1472, Q&A 1): only the
 // feedback bookkeeping a re-arm must restore -- the pending, addressed and
 // launched keys, the comment watermarks, the discussion revisions and receipts,
-// the outstanding review launch and the consumed nonces -- with status stopped
+// the outstanding review launch and the consumed nonces, and the untrusted-author
+// limits (#1539: the held untrusted keys, the per-key untrusted launch counts and
+// the head-move hold) -- with status stopped
 // and no pid. The agent, retry budgets, CI status and closing issues are
 // cleared: a re-arm adopts a fresh agent and its budgets restart as they do
 // today, and a stopped state never blocks a ticket close. Unresolved feedback
@@ -1852,6 +2053,10 @@ func stoppedState(s State, repo, pr string) State {
 		DiscussionReceipts:   s.DiscussionReceipts,
 		ReviewLaunch:         s.ReviewLaunch,
 		ConsumedReviewNonces: s.ConsumedReviewNonces,
+		// #1539: dropping these would silently release a security hold.
+		HeldUntrustedKeys:     s.HeldUntrustedKeys,
+		UntrustedLaunchCounts: s.UntrustedLaunchCounts,
+		HeadMoveHold:          s.HeadMoveHold,
 	}
 }
 

@@ -2375,7 +2375,8 @@ A stop leaves a `stopped` state rather than deleting the file (#1472): the super
 terminated and awaited as `reset` does (SIGTERM, up to 10s, lock removed), then the state is
 rewritten with status `stopped`, PID 0 and only the feedback bookkeeping kept (pending,
 addressed and launched keys, the comment watermarks, discussion revisions and receipts, the
-outstanding review launch and consumed nonces). The agent, retry budgets, CI status and
+outstanding review launch and consumed nonces, plus `heldUntrustedKeys`, `untrustedLaunchCounts`
+and `headMoveHold`). The agent, retry budgets, CI status and
 closing issues are cleared, so a re-arm adopts a fresh agent, budgets restart, and unresolved
 feedback keeps its automerge hold. A stopped state does not block closing the ticket's window.
 Stale `stopped` files of abandoned PRs persist until a re-armed supervisor sees the PR merged
@@ -2443,8 +2444,9 @@ extra arguments) also exits 2. If the budget was zeroed but re-arming failed, it
 1 with `budget reset for PR #<pr> but not re-armed: …` and the `cenci babysit <pr>
 --agent <agent>` command to re-arm with.
 
-`cenci babysit resolve <pr> discussion:<id> [--state-dir <dir>]` (#1472) is how a human
-records one pending PR conversation comment as addressed. It is **host-only and
+`cenci babysit resolve <pr> discussion:<id>|head:<sha> [--state-dir <dir>]` (#1472, #1539) is
+how a human records one pending PR conversation comment as addressed, or clears the `head moved
+during untrusted review launch` hold (the `head:<sha>` target, below). It is **host-only and
 attended-only**: it exits 1 and leaves the state file byte-identical inside a sandbox
 (`CENCI_SANDBOX=1`), when `CENCI_ATTENDED=0` is set (whatever set it, so a
 supervisor-launched worker, which is always unattended, can never use it), or inside a
@@ -2454,16 +2456,23 @@ with a message to resolve it on GitHub, and a key that is not pending (addressed
 exits 1. On success it records the key under `addressedCommentKeys` with a receipt whose
 source is `human-cli` (no receipt comment id) at the revision the supervisor last saw, so a
 later edit of the comment still reopens it, and prints `Resolved discussion:<id> for PR
-#<pr>.`. It then follows `reset`: a live owned supervisor is sent SIGTERM and awaited, the
+#<pr>.`; the key also leaves `heldUntrustedKeys`. The `head:<sha>` target (#1539) names the
+head the hold records: `<sha>` is 40 or 64 lowercase hex characters, and the command exits 1
+with the state file byte-identical when no head-move hold is recorded or `<sha>` is not the
+recorded head (a second raise replaces the recorded head with the newer one, so only the newest
+resolves); otherwise it clears `headMoveHold` and prints `Resolved the head-move hold at <sha>
+for PR #<pr>.`. It then follows `reset`: a live owned supervisor is sent SIGTERM and awaited, the
 state written, and the supervisor re-armed with its recorded settings; a `stopped` state is
 written but not re-armed (the output says so and gives the arm command), so it never restarts
 a supervisor you stopped. A state that cannot be read exits 1 with `babysit state
 unreadable: <path>: <cause>` and nothing changed. Exit codes: `0` resolved, `1` any refusal
 or runtime failure (including a failed re-arm, which still leaves the key resolved), `2` a
 usage error (no PR or key, a PR that is not a positive integer, a key that is not
-`discussion:<id>`, `comment:<id>` or `review:<id>`-shaped, extra arguments) or a recorded
+`discussion:<id>`, `head:<sha>`, `comment:<id>` or `review:<id>`-shaped, a `head:` value that
+is not 40 or 64 lowercase hex characters, extra arguments) or a recorded
 agent that arming would refuse. It is the recovery for `review worker ended without
-receipt`, for a `blocked` or `failed` receipt and for `review feedback state unknown` on a
+receipt`, for a `blocked` or `failed` receipt, for a held untrusted discussion key, for the
+`head moved during untrusted review launch` hold and for `review feedback state unknown` on a
 deleted pending comment.
 
 On a forwarded arm request, the host daemon resolves the target checkout itself by
@@ -2547,14 +2556,24 @@ empty state: the stop is refused with a fixed reason and the file is kept.
   banner. Editing an addressed comment reopens it (`review feedback reopened`). A receipt
   with a wrong, unknown or already-used nonce, an unauthorized author or an early timestamp
   addresses nothing and is noted in the decision detail. The unattended worker only acts on
-  feedback from write-access authors: a discussion comment whose author is definitely denied
-  (not `admin`/`write`) is launched marked `:untrusted`, and a receipt can never mark it
-  `addressed` (it stays pending for a human to handle and `resolve`; trust is default-deny, so
-  a launch with no trust record reads as untrusted). A failed permission lookup is not a denial:
-  that comment is skipped for the launch and retried on the next tick. Inline and review
-  feedback from a non-write author is never acted on by the worker and stays pending on
-  GitHub. A live review window holds automerge
-  even after a valid receipt. Details and the receipt grammar: `watch/docs/babysit.md`.
+  feedback from write-access authors, and the supervisor enforces it in Go for every key type
+  (#1539): the author of each `discussion:`, `comment:` and `review:` candidate is looked up
+  once per login per tick. A discussion comment whose author is definitely denied (not
+  `admin`/`write`) is launched marked `:untrusted` only alongside a trusted key, and a receipt
+  can never mark it `addressed` (it stays pending for a human to handle and `resolve`; trust is
+  default-deny, so a launch with no trust record, recorded in `reviewLaunch.trustedKeys`, reads
+  as untrusted). A failed permission lookup is not a denial: that key is skipped for the launch
+  and retried on the next tick. When no candidate is trusted, no worker is launched and no
+  nonce is minted: the untrusted keys are held in `heldUntrustedKeys` for a write-access human
+  (`cenci babysit resolve <pr> discussion:<id>`, or resolve the `comment:`/`review:` key on
+  GitHub), with status `needs-input`. An untrusted discussion key rides in at most 3 launches
+  across all its edits (`untrustedLaunchCounts`), then is held too. If a launch that carried
+  untrusted input leaves the PR head moved by the time its window ends, the PR holds under
+  `head moved during untrusted review launch` until a human runs `cenci babysit resolve <pr>
+  head:<sha>`. A live review window holds automerge
+  even after a valid receipt. On a complete discussion read, `consumedReviewNonces` keeps only
+  nonces a current receipt comment still carries plus the outstanding launch's. Details and the
+  receipt grammar: `watch/docs/babysit.md`.
 - Any review-feedback state babysit can't positively confirm holds automerge
   under its own reason: unreadable (API/parse failure), truncated (incomplete
   pagination), unknown (GitHub stopped reporting the item, or reported an

@@ -656,15 +656,20 @@ func reconcileDiscussion(s *State, comments []discussionComment) (verdict feedba
 	if len(c.New)+len(c.Edited)+len(c.Reopened) > 0 && s.DiscussionRevisions == nil {
 		s.DiscussionRevisions = map[string]string{}
 	}
+	// An edit or reopen also releases a held untrusted key (#1539): the launch
+	// trigger looks its author up again this tick, and a key still denied is held
+	// again with its untrusted launch count kept.
 	for _, key := range c.Reopened {
 		s.AddressedKeys = removeKeys(s.AddressedKeys, []string{key})
 		s.PendingKeys = append(s.PendingKeys, key)
 		s.LaunchedKeys = removeKeys(s.LaunchedKeys, []string{key})
+		s.HeldUntrustedKeys = removeKeys(s.HeldUntrustedKeys, []string{key})
 		delete(s.DiscussionReceipts, key)
 		s.DiscussionRevisions[key] = current[key]
 	}
 	for _, key := range c.Edited {
 		s.LaunchedKeys = removeKeys(s.LaunchedKeys, []string{key})
+		s.HeldUntrustedKeys = removeKeys(s.HeldUntrustedKeys, []string{key})
 		delete(s.DiscussionReceipts, key)
 		s.DiscussionRevisions[key] = current[key]
 	}
@@ -690,7 +695,9 @@ func revalidateDiscussion(s *State, comments []discussionComment) (pending []str
 
 // holdRank orders feedback holds for combineHolds: a classification-level or
 // read-level hold outranks a revoked resolution, which outranks the
-// ended-without-receipt hold (lowest precedence).
+// ended-without-receipt hold (lowest precedence). The head-move security hold
+// (#1539) is named explicitly at the top tier; tick combines it first, so it also
+// wins a tie.
 func holdRank(hold string) int {
 	switch hold {
 	case "":
@@ -699,6 +706,8 @@ func holdRank(hold string) int {
 		return 1
 	case reasonFeedbackReopened:
 		return 2
+	case reasonHeadMovedUntrustedReview:
+		return 3
 	default:
 		return 3
 	}
@@ -718,11 +727,12 @@ func combineHolds(a, b feedbackVerdict) feedbackVerdict {
 	return out
 }
 
-// markDiscussionAddressed moves key from pending and launched to addressed and
-// records rec as its evidence. Shared by an accepted receipt and `resolve`.
+// markDiscussionAddressed moves key from pending, launched and held to addressed
+// and records rec as its evidence. Shared by an accepted receipt and `resolve`.
 func markDiscussionAddressed(s *State, key string, rec discussionReceipt) {
 	s.PendingKeys = removeKeys(s.PendingKeys, []string{key})
 	s.LaunchedKeys = removeKeys(s.LaunchedKeys, []string{key})
+	s.HeldUntrustedKeys = removeKeys(s.HeldUntrustedKeys, []string{key})
 	if !slices.Contains(s.AddressedKeys, key) {
 		s.AddressedKeys = append(s.AddressedKeys, key)
 	}
@@ -787,6 +797,26 @@ func resolveHint(pr string, keys []string) string {
 		out += fmt.Sprintf(" (and %d more)", len(keys)-len(shown))
 	}
 	return out
+}
+
+// heldUntrustedNote renders the recovery for the held untrusted keys (#1539): a
+// write-access human handles the feedback, then runs `cenci babysit resolve` for
+// each discussion key or resolves each comment:/review: key on GitHub. Each list
+// names at most three keys.
+func heldUntrustedNote(pr string, held []string) string {
+	other, discussion := splitDiscussionKeys(held)
+	var steps []string
+	if len(discussion) > 0 {
+		steps = append(steps, "run "+resolveHint(pr, discussion))
+	}
+	for i, k := range other {
+		if i == 3 {
+			steps = append(steps, fmt.Sprintf("(and %d more on GitHub)", len(other)-3))
+			break
+		}
+		steps = append(steps, "resolve "+k+" on GitHub")
+	}
+	return "untrusted feedback held for a write-access human (its author lacks write permission, or its untrusted launch cap is used up); once handled, " + strings.Join(steps, "; ")
 }
 
 // removeKeys returns a new slice containing every element of keys not

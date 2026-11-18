@@ -230,8 +230,11 @@ author, not opening with the cenci banner) holds automerge until a nonce-bound r
 or `cenci babysit resolve` records it addressed: babysit launches one finite review worker
 for it, and launching, exiting or pushing never clears the hold by itself; a reply left only
 on the ticket is not acted on. The unattended worker only acts on feedback from authors with
-write access: a comment from anyone else still holds automerge but is left for a write-access
-human to handle and `cenci babysit resolve`. A
+write access, and the supervisor enforces that itself: it withholds the launch when every
+pending item is from an author without write access, so that comment still holds automerge but
+is left for a write-access human to handle and `cenci babysit resolve`; and after a launch that
+carried such input leaves the PR head moved, it holds the PR for a human until `cenci babysit
+resolve <pr> head:<sha>` names the new head. A
 failed decision comment does not hold back the run — the pull request body is the durable
 notice. Security-sensitive, destructive/irreversible, and scope-blowup questions are never
 decided, and neither is a contradiction that would make an acceptance criterion

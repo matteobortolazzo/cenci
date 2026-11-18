@@ -619,6 +619,308 @@ func TestResolve_AnEditAfterwardsReopensTheKey(t *testing.T) {
 	}
 }
 
+// -- #1539: `resolve <pr> head:<sha>` ------------------------------------------
+
+var (
+	// headHoldSHA is the newest head a head-move hold recorded; headOlderSHA the
+	// head an earlier raise recorded before a second raise replaced it;
+	// headLaunchSHA the head the launch started from.
+	headHoldSHA   = strings.Repeat("d", 40)
+	headOlderSHA  = strings.Repeat("e", 40)
+	headLaunchSHA = strings.Repeat("a", 40)
+	headRaisedAt  = time.Date(2026, 11, 18, 9, 0, 0, 0, time.UTC)
+)
+
+// headMoveState is resolveState with a head-move hold recorded at headHoldSHA.
+func headMoveState(pid int) State {
+	s := resolveState(pid)
+	s.HeadMoveHold = &headMoveHold{HeadSHA: headHoldSHA, LaunchHeadSHA: headLaunchSHA, Nonce: testReviewNonce, RaisedAt: headRaisedAt}
+	return s
+}
+
+// AC 54: the SHA the hold recorded, on an attended host session, exits 0, clears
+// the hold, prints a resolution line and re-arms with the recorded settings; every
+// other field (pending keys, the retry budget, the outstanding launch) is untouched.
+func TestResolve_HeadWithTheRecordedShaClearsTheHoldAndReArms(t *testing.T) {
+	e := newResolveEnv(t)
+	writeStateFile(t, e.path, headMoveState(0))
+
+	done := captureStdout(t)
+	err := Resolve("42", "head:"+headHoldSHA, e.dir, nil)
+	out := done()
+
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if want := "Resolved the head-move hold at " + headHoldSHA + " for PR #42."; !strings.Contains(out, want) {
+		t.Errorf("stdout = %q, want %q", out, want)
+	}
+	s := mustReadState(t, e.path)
+	if s.HeadMoveHold != nil {
+		t.Errorf("HeadMoveHold = %+v, want it cleared", s.HeadMoveHold)
+	}
+	want := resolveState(0)
+	if !reflect.DeepEqual(s.PendingKeys, want.PendingKeys) || !reflect.DeepEqual(s.LaunchedKeys, want.LaunchedKeys) || len(s.AddressedKeys) != len(want.AddressedKeys) {
+		t.Errorf("pending/launched/addressed = %v/%v/%v, want the feedback keys untouched", s.PendingKeys, s.LaunchedKeys, s.AddressedKeys)
+	}
+	if s.FixAttempts != 2 {
+		t.Errorf("FixAttempts = %d, want the retry budget untouched (resolve is not reset)", s.FixAttempts)
+	}
+	if s.ReviewLaunch == nil || s.ReviewLaunch.Nonce != testReviewNonce {
+		t.Errorf("ReviewLaunch = %+v, want the outstanding launch kept", s.ReviewLaunch)
+	}
+	if s.PID != 0 {
+		t.Errorf("PID = %d, want 0 for the re-arm", s.PID)
+	}
+	if len(e.started) != 1 {
+		t.Fatalf("supervisor starts = %d, want 1", len(e.started))
+	}
+	wantArgv := []string{os.Args[0], "babysit", "42", "--agent", "codex", "--interval", "5m0s", "--state-dir", e.dir, "--session", "work", "--dir", "/repo/work"}
+	if !reflect.DeepEqual(e.started[0], wantArgv) {
+		t.Errorf("supervisor argv = %q, want %q", e.started[0], wantArgv)
+	}
+}
+
+// A 64-hex (SHA-256 object format) head is accepted the same way.
+func TestResolve_HeadAcceptsASixtyFourCharacterRecordedSha(t *testing.T) {
+	e := newResolveEnv(t)
+	sha := strings.Repeat("9", 64)
+	s := headMoveState(0)
+	s.HeadMoveHold.HeadSHA = sha
+	writeStateFile(t, e.path, s)
+
+	done := captureStdout(t)
+	err := Resolve("42", "head:"+sha, e.dir, nil)
+	_ = done()
+
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if got := mustReadState(t, e.path); got.HeadMoveHold != nil {
+		t.Errorf("HeadMoveHold = %+v, want it cleared", got.HeadMoveHold)
+	}
+}
+
+// AC 54: after the resolve the next tick no longer holds with `head moved during
+// untrusted review launch`. The first tick proves the fixture really is held.
+func TestResolve_HeadNextTickIsNotHeldOnTheHeadMove(t *testing.T) {
+	e := newResolveEnv(t)
+	resetGh, resetCommand := execGh, command
+	withFleetAutomergeEnabled(t, true)
+	var calls [][]string
+	withCommands(t, automergeOnResponses(), &calls)
+	serveDiscussion(t)
+	s := reviewState()
+	s.SchemaVersion = stateSchemaVersion
+	s.HeadMoveHold = &headMoveHold{HeadSHA: headHoldSHA, LaunchHeadSHA: headLaunchSHA, Nonce: testReviewNonce, RaisedAt: headRaisedAt}
+	tickOK(t, &s)
+	if s.AutomergeReason != reasonHeadMovedUntrustedReview {
+		t.Fatalf("before resolve: reason %q, want %q", s.AutomergeReason, reasonHeadMovedUntrustedReview)
+	}
+	writeStateFile(t, e.path, s)
+	execGh, command = resetGh, resetCommand
+
+	done := captureStdout(t)
+	err := Resolve("42", "head:"+headHoldSHA, e.dir, nil)
+	_ = done()
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+
+	var next [][]string
+	withCommands(t, automergeOnResponses(), &next)
+	serveDiscussion(t)
+	after := mustReadState(t, e.path)
+	tickOK(t, &after)
+	if after.AutomergeReason == reasonHeadMovedUntrustedReview {
+		t.Errorf("after resolve: reason %q, want the head-move hold gone", after.AutomergeReason)
+	}
+	if after.HeadMoveHold != nil {
+		t.Errorf("after resolve: HeadMoveHold = %+v, want it still cleared", after.HeadMoveHold)
+	}
+}
+
+// A stopped state is written, never re-armed, and says so: the hold is cleared
+// and the agent check (which only guards a re-arm) is never consulted.
+func TestResolve_HeadOnAStoppedStateClearsTheHoldAndNeverReArms(t *testing.T) {
+	e := newResolveEnv(t)
+	writeStateFile(t, e.path, stoppedState(headMoveState(0), "o/r", "42"))
+	refusal := func(string) string { t.Error("the agent check ran for a stopped state"); return "refused" }
+
+	done := captureStdout(t)
+	err := Resolve("42", "head:"+headHoldSHA, e.dir, refusal)
+	out := done()
+
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	e.requireNoStart(t)
+	for _, want := range []string{"Resolved the head-move hold at " + headHoldSHA + " for PR #42", "not re-armed", "cenci babysit 42 --agent"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("stdout = %q, want it to contain %q", out, want)
+		}
+	}
+	s := mustReadState(t, e.path)
+	if s.Status != "stopped" || s.HeadMoveHold != nil {
+		t.Errorf("status/hold = %q/%+v, want a stopped state with the hold cleared", s.Status, s.HeadMoveHold)
+	}
+}
+
+// AC 55: a SHA other than the recorded one exits 1, naming the recorded head, with
+// the state byte-identical and nothing started.
+func TestResolve_HeadRefusesAShaThatIsNotTheRecordedHead(t *testing.T) {
+	e := newResolveEnv(t)
+	writeStateFile(t, e.path, headMoveState(0))
+	before := readFileBytes(t, e.path)
+	other := strings.Repeat("c", 40)
+
+	err := Resolve("42", "head:"+other, e.dir, nil)
+
+	e.requireRefused(t, err, "not resolved", before)
+	if !strings.Contains(err.Error(), headHoldSHA) || !strings.Contains(err.Error(), "head:"+headHoldSHA) {
+		t.Errorf("Resolve err = %q, want it to name the recorded head and the command that resolves it", err)
+	}
+}
+
+// A second raise replaced the recorded head with the newer one, so a resolve that
+// names the older head exits 1 and only the newest head resolves.
+func TestResolve_HeadRefusesTheOlderShaAfterASecondRaiseReplacedTheHead(t *testing.T) {
+	e := newResolveEnv(t)
+	s := headMoveState(0)
+	s.HeadMoveHold.HeadSHA, s.HeadMoveHold.LaunchHeadSHA = headHoldSHA, headOlderSHA
+	writeStateFile(t, e.path, s)
+	before := readFileBytes(t, e.path)
+
+	err := Resolve("42", "head:"+headOlderSHA, e.dir, nil)
+
+	e.requireRefused(t, err, "not resolved", before)
+	if !strings.Contains(err.Error(), headHoldSHA) {
+		t.Errorf("Resolve err = %q, want it to name the newest recorded head %s", err, headHoldSHA)
+	}
+}
+
+// AC 55: with no head-move hold recorded there is nothing to resolve.
+func TestResolve_HeadRefusesWhenNoHoldIsRecorded(t *testing.T) {
+	e := newResolveEnv(t)
+	writeStateFile(t, e.path, resolveState(0))
+	before := readFileBytes(t, e.path)
+
+	err := Resolve("42", "head:"+headHoldSHA, e.dir, nil)
+
+	e.requireRefused(t, err, "no head-move hold is recorded for PR #42", before)
+}
+
+// AC 55: the same three environment refusals as `discussion:` apply to `head:`,
+// each leaving the state file byte-identical.
+func TestResolve_HeadRefusesInASandboxAnUnattendedSessionAndASupervisor(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		env  map[string]string
+		want string
+	}{
+		{"CENCI_SANDBOX=1", map[string]string{"CENCI_SANDBOX": "1"}, "runs on the host"},
+		{"CENCI_ATTENDED=0", map[string]string{"CENCI_ATTENDED": "0"}, "CENCI_ATTENDED=0"},
+		{"CENCI_BABYSIT_SUPERVISOR set", map[string]string{"CENCI_BABYSIT_SUPERVISOR": "1"}, "inside a babysit supervisor"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newResolveEnv(t)
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+			writeStateFile(t, e.path, headMoveState(0))
+			before := readFileBytes(t, e.path)
+
+			err := Resolve("42", "head:"+headHoldSHA, e.dir, nil)
+
+			e.requireRefused(t, err, tc.want, before)
+			if after := mustReadState(t, e.path); after.HeadMoveHold == nil {
+				t.Error("the refused resolve cleared the hold")
+			}
+		})
+	}
+}
+
+// AC 55: a `head:` value that is not 40 or 64 lowercase hex characters is a usage
+// error (the CLI's exit 2), shared by ValidResolveKey and Resolve, with the state
+// byte-identical.
+func TestResolve_HeadKeyShapeIsFortyOrSixtyFourLowercaseHex(t *testing.T) {
+	valid := []string{"head:" + strings.Repeat("a", 40), "head:" + strings.Repeat("0", 64)}
+	invalid := map[string]string{
+		"empty":         "head:",
+		"too short":     "head:abc123",
+		"39 characters": "head:" + strings.Repeat("a", 39),
+		"41 characters": "head:" + strings.Repeat("a", 41),
+		"63 characters": "head:" + strings.Repeat("a", 63),
+		"65 characters": "head:" + strings.Repeat("a", 65),
+		"uppercase hex": "head:" + strings.Repeat("A", 40),
+		"non-hex":       "head:" + strings.Repeat("g", 40),
+		"padded":        "head: " + strings.Repeat("a", 40),
+	}
+	for _, key := range valid {
+		if !ValidResolveKey(key) {
+			t.Errorf("ValidResolveKey(%q) = false, want true", key)
+		}
+	}
+	for name, key := range invalid {
+		t.Run(name, func(t *testing.T) {
+			if ValidResolveKey(key) {
+				t.Errorf("ValidResolveKey(%q) = true, want false", key)
+			}
+			e := newResolveEnv(t)
+			writeStateFile(t, e.path, headMoveState(0))
+			before := readFileBytes(t, e.path)
+
+			err := Resolve("42", key, e.dir, nil)
+
+			if !errors.Is(err, ErrResolveUsage) {
+				t.Fatalf("Resolve(%q) err = %v, want errors.Is ErrResolveUsage", key, err)
+			}
+			if !bytes.Equal(readFileBytes(t, e.path), before) {
+				t.Error("state file changed")
+			}
+			e.requireNoStart(t)
+		})
+	}
+}
+
+// The recorded head is re-checked once the supervisor is quiesced: it saved a newer
+// head while it was dying, so a resolve naming the head the human reviewed is
+// refused, the newer hold is kept, and the stopped supervisor is not re-armed.
+func TestResolve_HeadRechecksTheHoldAfterTheSupervisorDied(t *testing.T) {
+	e := newResolveEnv(t)
+	if !procfsReadable() {
+		t.Skip("real ownership check needs a readable procfs")
+	}
+	staged := filepath.Join(t.TempDir(), "dying-save.json")
+	ready := filepath.Join(t.TempDir(), "ready")
+	script := `trap 'cp "$2" "$3"; exit 0' TERM; : > "$1"; sleep 30 & wait`
+	p := spawnFixture(t, exec.Command("sh", "-c", script, "babysit-42-fixture", ready, staged, e.path))
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(5 * time.Millisecond) {
+		if _, err := os.Stat(ready); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("fixture process never became ready")
+		}
+	}
+	writeStateFile(t, e.path, headMoveState(p.pid))
+	writeLock(t, e.lock, p.pid)
+
+	dying := headMoveState(p.pid)
+	dying.HeadMoveHold.HeadSHA = headOlderSHA
+	writeStateFile(t, staged, dying)
+
+	err := Resolve("42", "head:"+headHoldSHA, e.dir, nil)
+
+	if err == nil || !strings.Contains(err.Error(), "not resolved") || !strings.Contains(err.Error(), headOlderSHA) {
+		t.Fatalf("Resolve err = %v, want a refusal naming the head saved while the supervisor died (%s)", err, headOlderSHA)
+	}
+	if s := mustReadState(t, e.path); s.HeadMoveHold == nil || s.HeadMoveHold.HeadSHA != headOlderSHA {
+		t.Errorf("HeadMoveHold = %+v, want the hold the supervisor saved kept", s.HeadMoveHold)
+	}
+	e.requireNoStart(t)
+}
+
 // -- Reset on a stopped state --------------------------------------------------
 
 // A stopped state records no agent and no budget, so a reset has nothing to zero
