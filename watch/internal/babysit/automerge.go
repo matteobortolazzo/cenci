@@ -806,6 +806,11 @@ type projectPolicy struct {
 }
 
 // repoConfigFile is the base-ref .cenci/config.json shape resolvePolicy reads.
+// It deliberately has no configVersion field: policy evaluation ignores the
+// stamp, so a missing, older or newer value resolves identically (#841). Any
+// change to how policy is interpreted may only add protection; removing
+// protection needs a new explicit key (docs/autonomous-loop.md §3). A lagging
+// stamp is reported only by the advisory SessionStart nudge and /cenci:maintain.
 type repoConfigFile struct {
 	Automerge *policyBlock    `json:"automerge"`
 	Projects  []projectPolicy `json:"projects"`
@@ -931,21 +936,31 @@ func containsBlock(blocks []*policyBlock, b *policyBlock) bool {
 	return false
 }
 
-// matchesProtected reports whether path matches the glob pattern: "*" spans
-// "/" (a wildcard shell glob would not, but a protected-path denylist must
-// catch "everything under this directory"), matching is case-insensitive,
-// and every literal segment is regexp.QuoteMeta-escaped (watch/docs/go-
-// gotchas.md #528) so a metacharacter in a hand-written pattern (".", "+",
-// etc.) is never silently reinterpreted. An empty pattern is malformed --
-// unescaped, it would otherwise compile to a matches-everything regex.
+// matchesProtected reports whether path matches the pattern, which has one of
+// three shapes:
 //
-// A pattern ending in "/" (a bare directory-prefix entry, no trailing "*")
-// is treated as "this directory and everything under it": the config's
-// shipped protected-path entries are directory prefixes like
-// "watch/internal/sandbox/", and requiring every such entry to be hand-
-// rewritten with a trailing "*" would make them silently dead against any
-// real file path (they can only ever match that exact literal string
-// otherwise).
+//   - A pattern containing "*" is a glob: "*" spans "/" (a wildcard shell glob
+//     would not, but a protected-path denylist must catch "everything under
+//     this directory"). It gets no directory extension, so "watch/*_cmd.go"
+//     matches only paths that end in "_cmd.go".
+//   - A pattern ending in "/" (a bare directory-prefix entry, no "*") means
+//     "this directory and everything under it": the config's shipped
+//     protected-path entries are directory prefixes like
+//     "watch/internal/sandbox/", and requiring every such entry to be hand-
+//     rewritten with a trailing "*" would make them silently dead against any
+//     real file path.
+//   - A pattern with neither "*" nor a trailing "/" (#841) matches that exact
+//     path or anything below it ("flow/skills" covers "flow/skills/x.md"), the
+//     same exact-or-directory rule fileOwnedByProject uses. A file literal such
+//     as "watch/main.go" keeps its exact meaning, and a sibling whose name only
+//     starts with the pattern ("watch/plugins/x.go" for "watch/plugin") is
+//     never matched.
+//
+// Matching is case-insensitive, and every literal segment is
+// regexp.QuoteMeta-escaped (watch/docs/go-gotchas.md #528) so a metacharacter
+// in a hand-written pattern (".", "+", etc.) is never silently reinterpreted.
+// An empty pattern is malformed -- unescaped, it would otherwise compile to a
+// matches-everything regex.
 //
 // The compiled regex uses the "i" (case-insensitive) and "s" (dot matches
 // \n) flags together, and \A/\z anchors rather than ^/$, so a changed-file
@@ -966,6 +981,8 @@ func matchesProtected(pattern, path string) (bool, error) {
 	}
 	if strings.HasSuffix(pattern, "/") && !strings.HasSuffix(pattern, "*") {
 		sb.WriteString(".*")
+	} else if !strings.Contains(pattern, "*") {
+		sb.WriteString(`(?:/.*)?`)
 	}
 	sb.WriteString(`\z`)
 	re, err := regexp.Compile(sb.String())

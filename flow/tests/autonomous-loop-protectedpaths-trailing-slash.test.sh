@@ -17,6 +17,22 @@
 #   2. flow/skills/configure/references/config-schema.md's automerge.protectedPaths field
 #      description states or links that same rule.
 #
+# Ticket #841 extends the same contract in three ways:
+#   3. Both docs state the no-wildcard rule: a pattern with neither `*` nor a
+#      trailing `/` matches that exact path, or that path followed by `/` and
+#      anything after it (the same rule fileOwnedByProject uses), and a `*`
+#      pattern gets no directory extension. The windows below cover the WHOLE
+#      rewritten bullet/field, not a fixed number of lines after its anchor.
+#   4. docs/autonomous-loop.md §3 (scoped between the literal `### 3.` and
+#      `### 4.` headings) says policy evaluation ignores `configVersion`,
+#      interpretation changes only add protection, and a lagging stamp is
+#      reported only by the SessionStart nudge and maintain's `config-version`
+#      check.
+#   5. config-schema.md's `configVersion` consumer paragraph says the
+#      automerge policy engine (`cenci babysit`) does not read it.
+# Every asserted phrase is one source line in the docs, so line-wrapping
+# cannot split a marker (flow/docs/shell-scripting-gotchas.md).
+#
 # Follows the fixture-driven idiom of automerge-config-schema.test.sh: a
 # `failures=` counter, small assert_* helpers, self-contained, auto-
 # discovered by the flow gate's `*.test.sh` glob.
@@ -54,16 +70,63 @@ require_file() {
 
 assert_contains_any() {
   # assert_contains_any <content> <label> <pattern...> — pass if any
-  # <pattern> is a substring of <content>.
+  # <pattern> is a substring of <content>. An empty pattern is a caller bug
+  # (it would match vacuously), so it fails loudly.
   local content="$1" label="$2"
   shift 2
   local pattern
   for pattern in "$@"; do
+    if [[ -z "${pattern}" ]]; then
+      fail "${label}: empty pattern passed to assert_contains_any"
+      return 1
+    fi
     [[ "${content}" == *"${pattern}"* ]] && return 0
   done
   fail "${label}: expected one of [$*] not found"
   return 1
 }
+
+# extract_block <anchor> <end-regex> — reads a document on stdin and prints
+# the first line containing the literal <anchor> through the line before the
+# next line matching <end-regex> (or the next heading). Pure extraction with
+# no fail() side effect, so it is safe inside $(...).
+extract_block() {
+  awk -v anchor="$1" -v endre="$2" '
+    !on && index($0, anchor) { on = 1; print; next }
+    on && $0 ~ endre { exit }
+    on && /^#/ { exit }
+    on { print }
+  '
+}
+
+# extract_section3 — reads a document on stdin and prints the lines strictly
+# between the literal `### 3.` and `### 4.` headings, ignoring heading-shaped
+# lines inside code fences. Pure extraction, safe inside $(...).
+extract_section3() {
+  awk '
+    /^```/ { infence = !infence }
+    !infence && /^### 3\./ { on = 1; next }
+    !infence && /^### 4\./ { on = 0 }
+    on { print }
+  '
+}
+
+# The no-wildcard rule markers, shared by both docs. Each is a substring of
+# ONE source line in the doc.
+NOWILD_RULE='with neither `*` nor a trailing `/` matches that exact path and everything under it'
+NOWILD_STAR='pattern containing `*` gets no directory extension'
+
+# Non-vacuity self-test for extract_section3: a marker that lives only under
+# `### 4.` must NOT be found in the §3 window. fail() is called only on the
+# regression branch.
+SELFTEST_DOC=$'### 3. Declare\nnothing here\n### 4. Arm\nPolicy evaluation ignores `configVersion`'
+SELFTEST_SECTION="$(printf '%s\n' "${SELFTEST_DOC}" | extract_section3)"
+if [[ "${SELFTEST_SECTION}" == *'ignores `configVersion`'* ]]; then
+  fail "self-test: extract_section3 leaked text from the ### 4. section"
+fi
+if [[ "${SELFTEST_SECTION}" != *'nothing here'* ]]; then
+  fail "self-test: extract_section3 dropped text from the ### 3. section"
+fi
 
 # =====================================================================
 # docs/autonomous-loop.md §3 — the protectedPaths bullet must document the
@@ -71,7 +134,8 @@ assert_contains_any() {
 # =====================================================================
 FILE="${REPO_ROOT}/docs/autonomous-loop.md"
 if require_file CONTENT "${FILE}"; then
-  BULLET_BLOCK="$(printf '%s\n' "${CONTENT}" | grep -A 4 -F '`protectedPaths` are globs')"
+  # The whole bullet: from its anchor line to the next top-level bullet.
+  BULLET_BLOCK="$(printf '%s\n' "${CONTENT}" | extract_block '`protectedPaths` are globs' '^- ')"
   if [[ -z "${BULLET_BLOCK}" ]]; then
     fail "docs/autonomous-loop.md: protectedPaths bullet not found"
   else
@@ -81,6 +145,38 @@ if require_file CONTENT "${FILE}"; then
     assert_contains_any "${BULLET_BLOCK}" \
       "docs/autonomous-loop.md (protectedPaths bullet states directory-and-everything-under semantics)" \
       "everything under"
+    assert_contains_any "${BULLET_BLOCK}" \
+      "docs/autonomous-loop.md (protectedPaths bullet states the no-wildcard exact-or-directory rule)" \
+      "${NOWILD_RULE}"
+    assert_contains_any "${BULLET_BLOCK}" \
+      "docs/autonomous-loop.md (protectedPaths bullet uses flow/skills as the no-wildcard directory example)" \
+      "(e.g. \`flow/skills\` covers the whole directory, while"
+    assert_contains_any "${BULLET_BLOCK}" \
+      "docs/autonomous-loop.md (protectedPaths bullet says a * pattern gets no directory extension)" \
+      "${NOWILD_STAR}"
+    assert_contains_any "${BULLET_BLOCK}" \
+      "docs/autonomous-loop.md (protectedPaths bullet keeps the root-anchoring sentence)" \
+      "a bare pattern with no leading \`*\` (e.g. \`install.sh\`) only matches a file literally"
+  fi
+
+  # The configVersion paragraph, scoped to §3 so a mention elsewhere in the
+  # page cannot satisfy it.
+  SECTION3="$(printf '%s\n' "${CONTENT}" | extract_section3)"
+  if [[ -z "${SECTION3}" ]]; then
+    fail "docs/autonomous-loop.md: section ### 3. not found between the ### 3. and ### 4. headings"
+  else
+    assert_contains_any "${SECTION3}" \
+      "docs/autonomous-loop.md §3 (policy evaluation ignores configVersion)" \
+      "Policy evaluation ignores \`configVersion\`"
+    assert_contains_any "${SECTION3}" \
+      "docs/autonomous-loop.md §3 (interpretation changes only add protection; removal needs a new explicit key)" \
+      "only ever add protection, and removing protection requires a new explicit key"
+    assert_contains_any "${SECTION3}" \
+      "docs/autonomous-loop.md §3 (a lagging stamp is reported only by the SessionStart nudge)" \
+      "A lagging stamp is reported only by the SessionStart nudge"
+    assert_contains_any "${SECTION3}" \
+      "docs/autonomous-loop.md §3 (a lagging stamp is reported by maintain's config-version check)" \
+      "\`/cenci:maintain\`'s \`config-version\` check"
   fi
 fi
 
@@ -91,13 +187,31 @@ fi
 # =====================================================================
 FILE="${FLOW_DIR}/skills/configure/references/config-schema.md"
 if require_file CONTENT "${FILE}"; then
-  FIELD_BLOCK="$(printf '%s\n' "${CONTENT}" | grep -A 4 -F '`automerge.protectedPaths`')"
+  # The whole field description: from its anchor line to the next field.
+  FIELD_BLOCK="$(printf '%s\n' "${CONTENT}" | extract_block '`automerge.protectedPaths`' '^  - ')"
   if [[ -z "${FIELD_BLOCK}" ]]; then
     fail "flow/skills/configure/references/config-schema.md: automerge.protectedPaths field description not found"
   else
     assert_contains_any "${FIELD_BLOCK}" \
       "flow/skills/configure/references/config-schema.md (automerge.protectedPaths field description states or links the trailing-slash rule)" \
       "ending in \`/\`" "ending in \"/\"" "ends in \`/\`" "everything under" "docs/autonomous-loop.md"
+    assert_contains_any "${FIELD_BLOCK}" \
+      "flow/skills/configure/references/config-schema.md (automerge.protectedPaths field description states the no-wildcard exact-or-directory rule)" \
+      "${NOWILD_RULE}"
+    assert_contains_any "${FIELD_BLOCK}" \
+      "flow/skills/configure/references/config-schema.md (automerge.protectedPaths field description says a * pattern gets no directory extension)" \
+      "${NOWILD_STAR}"
+  fi
+
+  # The configVersion consumer paragraph: from its anchor to the next
+  # paragraph, so a mention elsewhere in the file cannot satisfy it.
+  CV_BLOCK="$(printf '%s\n' "${CONTENT}" | extract_block '`configVersion` records the flow plugin version' '^Patch-only drift is deliberately silent')"
+  if [[ -z "${CV_BLOCK}" ]]; then
+    fail "flow/skills/configure/references/config-schema.md: configVersion consumer paragraph not found"
+  else
+    assert_contains_any "${CV_BLOCK}" \
+      "flow/skills/configure/references/config-schema.md (configVersion paragraph says the automerge policy engine does not read it)" \
+      "The automerge policy engine (\`cenci babysit\`) does not read \`configVersion\`"
   fi
 fi
 

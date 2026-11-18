@@ -2,11 +2,13 @@ package babysit
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -858,6 +860,21 @@ func TestMatchesProtected(t *testing.T) {
 		// controlled changed-file path containing "\n" could dodge every
 		// "*"-wildcard protected-path pattern.
 		{"star wildcard spans an embedded newline", "watch/internal/sandbox/*", "watch/internal/sandbox/deep\nnested/file.go", true, false},
+		// A no-wildcard, no-trailing-"/" pattern matches the exact path or
+		// anything under it (#841), the same rule fileOwnedByProject uses; a
+		// file literal keeps its exact meaning and a sibling whose name only
+		// starts with the pattern is never matched.
+		{"no-wildcard directory pattern matches a nested file", "flow/skills", "flow/skills/refine/SKILL.md", true, false},
+		{"no-wildcard directory pattern matches its own exact path", "flow/skills", "flow/skills", true, false},
+		{"no-wildcard directory pattern does not match a name-prefix sibling", "watch/plugin", "watch/plugins/x.go", false, false},
+		{"file literal matches itself", "watch/main.go", "watch/main.go", true, false},
+		{"file literal does not match a suffixed sibling", "watch/main.go", "watch/main.go.bak", false, false},
+		{"no-wildcard directory pattern is case-insensitive", "Flow/Skills", "flow/skills/x.md", true, false},
+		{"no-wildcard directory pattern spans an embedded newline", "flow/skills", "flow/skills/a\nb.md", true, false},
+		{"star pattern spans a slash", "watch/*_cmd.go", "watch/sub/x_cmd.go", true, false},
+		{"star pattern gets no directory extension", "watch/*_cmd.go", "watch/x_cmd.go/y", false, false},
+		{"star pattern still matches its file", "flow/CLAUDE*.md", "flow/CLAUDE.md", true, false},
+		{"no-wildcard metacharacter stays escaped under the directory suffix", "a.b", "aXb/c", false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := matchesProtected(tc.pattern, tc.path)
@@ -921,6 +938,67 @@ func TestResolvePolicyProjectPrefixMapping(t *testing.T) {
 			t.Errorf("MaxChangedFiles = %d, want 100 (the top-level block)", got.MaxChangedFiles)
 		}
 	})
+}
+
+// TestResolvePolicyIgnoresConfigVersion pins the #841 rule that policy
+// evaluation never reads the base-ref configVersion stamp: the same automerge
+// block decoded with the stamp absent, empty, older, newer or equal to the
+// committed one resolves to the same policy and the same (empty) reason.
+func TestResolvePolicyIgnoresConfigVersion(t *testing.T) {
+	body, err := os.ReadFile(repositoryConfigPathForTest(t))
+	if err != nil {
+		t.Fatalf("read committed config: %v", err)
+	}
+	var stamp struct {
+		ConfigVersion string `json:"configVersion"`
+	}
+	if err := json.Unmarshal(body, &stamp); err != nil {
+		t.Fatalf("parse committed configVersion: %v", err)
+	}
+	if stamp.ConfigVersion == "" {
+		t.Fatal("committed .cenci/config.json has no configVersion, want a stamp to exercise")
+	}
+
+	variants := []struct {
+		name  string
+		stamp string
+	}{
+		{"absent", ""},
+		{"empty", `"configVersion": "",`},
+		{"older", `"configVersion": "0.1.0",`},
+		{"newer", `"configVersion": "99.0.0",`},
+		{"committed", `"configVersion": "` + stamp.ConfigVersion + `",`},
+	}
+	const template = `{
+  %s
+  "automerge": {"protectedPaths": ["flow/skills", "*secret*"], "maxChangedFiles": 20, "maxDiffLines": 800, "mergeMethod": "squash"},
+  "projects": [
+    {"path": "watch", "automerge": {"protectedPaths": ["watch/main.go", "watch/plugin/"], "maxChangedFiles": 10, "maxDiffLines": 400, "mergeMethod": "squash"}}
+  ]
+}`
+	files := []string{"watch/internal/x.go", "flow/docs/a.md"}
+
+	var baseline effectivePolicy
+	for i, v := range variants {
+		var cfg repoConfigFile
+		if err := json.Unmarshal([]byte(fmt.Sprintf(template, v.stamp)), &cfg); err != nil {
+			t.Fatalf("%s: decode config: %v", v.name, err)
+		}
+		got, reason := resolvePolicy(cfg, files)
+		if reason != "" {
+			t.Fatalf("%s: resolvePolicy reason = %q, want none (no deny, no new hold reason)", v.name, reason)
+		}
+		sorted := append([]string(nil), got.ProtectedPaths...)
+		slices.Sort(sorted)
+		got.ProtectedPaths = sorted
+		if i == 0 {
+			baseline = got
+			continue
+		}
+		if !reflect.DeepEqual(got, baseline) {
+			t.Errorf("%s: policy = %+v, want the same as the absent-stamp baseline %+v", v.name, got, baseline)
+		}
+	}
 }
 
 func TestResolvePolicyMostRestrictiveMerge(t *testing.T) {
