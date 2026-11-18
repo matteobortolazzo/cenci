@@ -341,6 +341,10 @@ func TestEvaluateAutomergeConditionMatrix(t *testing.T) {
 		{"review worker ended without receipt", func(in *automergeInputs) {
 			in.FeedbackHold = reasonReviewWorkerEndedWithoutReceipt
 		}, reasonReviewWorkerEndedWithoutReceipt},
+		// #1539: the head-move hold is its own reason, never folded into another.
+		{"head moved during untrusted review launch", func(in *automergeInputs) {
+			in.FeedbackHold = reasonHeadMovedUntrustedReview
+		}, reasonHeadMovedUntrustedReview},
 		{"review feedback pending", func(in *automergeInputs) { in.PendingKeys = []string{"comment:1"} }, reasonReviewPending},
 		// The four new #850 feedback-hold reasons: FeedbackHold is checked
 		// after RepairPending and before len(PendingKeys), so any of these
@@ -3065,5 +3069,20 @@ func TestAutomergeDecisionLogLineOmitsClassWhenEmpty(t *testing.T) {
 	got := d.logLine()
 	if strings.Contains(got, "class=") {
 		t.Fatalf("logLine() = %q, want no class= substring when FailureClass is empty", got)
+	}
+}
+
+// #1539 (planning Q&A 10): the head-move hold ranks at the top tier and, combined
+// first, wins a tie with any other top-tier feedback hold, so a security hold is
+// never masked. Unit-level: a real tick cannot pair it with every rank-3 hold.
+func TestHeadMoveHoldOutranksEveryOtherFeedbackHold(t *testing.T) {
+	headMove := feedbackVerdict{Hold: reasonHeadMovedUntrustedReview, Detail: "head moved"}
+	for _, other := range []string{reasonReviewWorkerEndedWithoutReceipt, reasonFeedbackReopened, reasonReviewStateUnknown, reasonFeedbackUnreadable} {
+		if got := combineHolds(headMove, feedbackVerdict{Hold: other, Detail: "other"}); got.Hold != reasonHeadMovedUntrustedReview || got.Detail != "head moved" {
+			t.Errorf("combineHolds(head move, %q) = %+v, want the head-move hold", other, got)
+		}
+	}
+	if holdRank(reasonHeadMovedUntrustedReview) != holdRank(reasonReviewStateUnknown) || holdRank(reasonHeadMovedUntrustedReview) <= holdRank(reasonFeedbackReopened) {
+		t.Errorf("holdRank(head move) = %d, want the top tier", holdRank(reasonHeadMovedUntrustedReview))
 	}
 }

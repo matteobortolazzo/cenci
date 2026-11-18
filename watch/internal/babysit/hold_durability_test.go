@@ -451,8 +451,11 @@ func TestHoldDurability_DiscussionFieldsSurviveSaveReloadAndATickExactly(t *test
 
 	// load -> tick -> save: a live review window changes nothing about the
 	// discussion fields (every key keeps its recorded revision, no receipt moves).
+	// Both consumed nonces are still carried by receipt comments on the PR, so the
+	// #1539 prune keeps them.
 	e := newRWEnv(t, false, nil,
-		rwGreen("head-a", humanComment(9, "a"), humanComment(10, "b"), humanComment(11, "c"), humanComment(13, "d")),
+		rwGreen("head-a", humanComment(9, "a"), humanComment(10, "b"), humanComment(11, "c"), humanComment(13, "d"),
+			rwReceipt(8, testWrongNonce), rwReceipt(20, "cccccccccccccccccccccccccccccccc")),
 		ciCapMerged(rwIssue),
 	)
 	rwTrackRuns(e, 0)
@@ -475,4 +478,108 @@ func TestHoldDurability_DiscussionFieldsSurviveSaveReloadAndATickExactly(t *test
 			t.Errorf("%s after load, tick and save = %v, want %v", name, pair[0], pair[1])
 		}
 	}
+}
+
+// -- #1539: the untrusted-author bookkeeping is durable -----------------------
+
+// heldUntrustedSeed is a supervisor holding PR 42 after an untrusted launch moved
+// the head from A to B: the head-move hold, plus discussion:11 by a `read`
+// author held after using up its untrusted launch cap.
+func heldUntrustedSeed() State {
+	return State{
+		Status:                "needs-input",
+		PendingKeys:           []string{"discussion:11"},
+		DiscussionRevisions:   map[string]string{"discussion:11": bodyRevision(humanBody)},
+		HeldUntrustedKeys:     []string{"discussion:11"},
+		UntrustedLaunchCounts: map[string]int{"discussion:11": fixCap},
+		HeadMoveHold:          &headMoveHold{HeadSHA: utHeadB, LaunchHeadSHA: utHeadA, Nonce: testReviewNonce, RaisedAt: testLaunchAt},
+	}
+}
+
+// requireUntrustedBookkeeping asserts s still carries heldUntrustedSeed's hold,
+// held set and counts.
+func requireUntrustedBookkeeping(t *testing.T, label string, s State) {
+	t.Helper()
+	want := heldUntrustedSeed()
+	if !reflect.DeepEqual(s.HeadMoveHold, want.HeadMoveHold) || !slices.Equal(s.HeldUntrustedKeys, want.HeldUntrustedKeys) || !reflect.DeepEqual(s.UntrustedLaunchCounts, want.UntrustedLaunchCounts) {
+		t.Errorf("%s: headMoveHold %+v held %v counts %v, want %+v %v %v", label, s.HeadMoveHold, s.HeldUntrustedKeys, s.UntrustedLaunchCounts, want.HeadMoveHold, want.HeldUntrustedKeys, want.UntrustedLaunchCounts)
+	}
+}
+
+// AC 56: `cenci babysit stop` keeps the head-move hold, the held-untrusted key set
+// and the per-key untrusted launch counts in the rewritten state.
+func TestHoldDurability_AC56_StopKeepsTheHeadMoveHoldHeldKeysAndUntrustedLaunchCounts(t *testing.T) {
+	e := newRWEnv(t, false, nil)
+	e.seed(heldUntrustedSeed())
+
+	stopped := hdStop(t, e)
+
+	requireUntrustedBookkeeping(t, "stopped state", stopped)
+	raw := readFileBytes(t, e.path)
+	for _, field := range []string{`"headMoveHold"`, `"heldUntrustedKeys"`, `"untrustedLaunchCounts"`, `"launchHeadSha"`, `"raisedAt"`} {
+		if !bytes.Contains(raw, []byte(field)) {
+			t.Errorf("the stopped state file lacks %s", field)
+		}
+	}
+}
+
+// AC 53: once raised, the head-move hold stays on every later tick until resolved:
+// through green CI reads, a further head change, a stop and re-arm (the re-armed
+// supervisor starts as needs-input) and a reset.
+func TestHoldDurability_AC53_HeadMoveHoldSurvivesGreenReadsAHeadChangeStopReArmAndReset(t *testing.T) {
+	servePermission(t, "stranger", "read")
+	page := humanCommentBy(11, "stranger", humanBody)
+	e := newRWEnv(t, true, nil,
+		rwGreen(utHeadB, page), // 1: green at the held head
+		rwGreen(utHeadC, page), // 2: green at a further head; killed after this save
+		rwGreen(utHeadC, page), // 3: the arming parent's own pr view
+		rwGreen(utHeadC, page), // 4: reset's re-arm, its parent's pr view
+		rwGreen(utHeadC, page), // 5: the re-armed supervisor's tick
+		ciCapMerged(rwIssue),
+	)
+	runs := rwTrackRuns(e, 0)
+	e.seed(heldUntrustedSeed())
+
+	e.runKilledAtSleep(2)
+	// Tick 1's save is captured at tick 2's pr view; tick 2's is the file the
+	// killed supervisor left.
+	for tick, s := range map[int]State{1: e.after(1), 2: load(e.path)} {
+		requireUntrustedBookkeeping(t, "a green tick", s)
+		if s.AutomergeDecision != "held" || s.AutomergeReason != reasonHeadMovedUntrustedReview || s.Status != "needs-input" {
+			t.Errorf("after tick %d: automerge %q (%q) status %q, want held for %q and needs-input", tick, s.AutomergeDecision, s.AutomergeReason, s.Status, reasonHeadMovedUntrustedReview)
+		}
+		if want := "cenci babysit resolve 42 head:" + utHeadB; !strings.Contains(s.AutomergeDetail, want) {
+			t.Errorf("after tick %d: detail %q, want it to name %q", tick, s.AutomergeDetail, want)
+		}
+	}
+
+	requireUntrustedBookkeeping(t, "stopped state", hdStop(t, e))
+	armed, _ := hdArm(t, e)
+	requireUntrustedBookkeeping(t, "armed state", armed)
+
+	t.Setenv("CENCI_BABYSIT_SUPERVISOR", "")
+	original := startSupervisor
+	startSupervisor = func(*exec.Cmd) error { return nil }
+	done := captureStdout(t)
+	err := Reset("42", e.dir, nil)
+	_ = done()
+	startSupervisor = original
+	t.Setenv("CENCI_BABYSIT_SUPERVISOR", "1")
+	if err != nil {
+		t.Fatalf("Reset: %v", err)
+	}
+	requireUntrustedBookkeeping(t, "reset state", mustReadState(t, e.path))
+
+	if err := e.run(); err != nil {
+		t.Fatalf("re-armed Run: %v", err)
+	}
+	if s := e.after(4); s.Status != "needs-input" {
+		t.Errorf("re-armed supervisor's startup save: status %q, want needs-input while the hold is set", s.Status)
+	}
+	s := e.after(5)
+	requireUntrustedBookkeeping(t, "after the re-armed tick", s)
+	if s.AutomergeReason != reasonHeadMovedUntrustedReview || s.Status != "needs-input" {
+		t.Errorf("after the re-armed tick: reason %q status %q, want %q and needs-input", s.AutomergeReason, s.Status, reasonHeadMovedUntrustedReview)
+	}
+	runs.requireNone(t)
 }

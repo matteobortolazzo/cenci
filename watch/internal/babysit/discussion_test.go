@@ -1007,3 +1007,89 @@ func TestReceiptMarkerRendersTheContractLiteral(t *testing.T) {
 		t.Fatalf("round trip: got=%+v err=%v", got, err)
 	}
 }
+
+// -- pruneConsumedReviewNonces (#1539) ----------------------------------------
+
+// carryingReceipt is a well-formed zero-key receipt comment id carrying nonce.
+func carryingReceipt(id int64, nonce string) discussionComment {
+	return receiptComment(id, maintainer, testReceiptBody(nonce, testReceiptHead), afterLaunch)
+}
+
+// AC 57/58 and edge cases 73/75: the prune keeps a nonce only while a parsed
+// receipt in the current comments carries it, or when it is the outstanding
+// launch's; everything else goes.
+func TestPruneConsumedReviewNoncesKeepsOnlyCarriedAndOutstandingNonces(t *testing.T) {
+	stale := utConsumed(50)
+	withOutstanding := func() map[string]int64 {
+		m := map[string]int64{testReviewNonce: 99}
+		for k, v := range stale {
+			m[k] = v
+		}
+		return m
+	}
+	human := discussionComment{ID: 11, Login: "alice", Body: "please fix", CreatedAt: afterLaunch, UpdatedAt: afterLaunch}
+	quoted := discussionComment{ID: 13, Login: "alice", Body: "> " + receiptMarker(testWrongNonce), CreatedAt: afterLaunch, UpdatedAt: afterLaunch}
+	for _, tc := range []struct {
+		name        string
+		consumed    map[string]int64
+		comments    []discussionComment
+		outstanding string
+		want        map[string]int64
+	}{
+		{"AC 57: 50 nonces whose receipts are gone, no launch", stale, []discussionComment{human}, "", map[string]int64{}},
+		{"AC 57: only the outstanding launch's nonce survives", withOutstanding(), []discussionComment{human}, testReviewNonce, map[string]int64{testReviewNonce: 99}},
+		{"edge 73: the outstanding nonce is kept with no comment carrying it", map[string]int64{testReviewNonce: 0}, nil, testReviewNonce, map[string]int64{testReviewNonce: 0}},
+		{"AC 58: a nonce whose accepting receipt is still on the PR is kept", map[string]int64{testWrongNonce: 12}, []discussionComment{human, carryingReceipt(12, testWrongNonce)}, "", map[string]int64{testWrongNonce: 12}},
+		{"edge 75: a superseded nonce whose late receipt is still on the PR is kept", map[string]int64{testWrongNonce: 0}, []discussionComment{carryingReceipt(30, testWrongNonce)}, testReviewNonce, map[string]int64{testWrongNonce: 0}},
+		{"a quoted marker is not a receipt and keeps nothing", map[string]int64{testWrongNonce: 12}, []discussionComment{quoted}, "", map[string]int64{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := pruneConsumedReviewNonces(tc.consumed, tc.comments, tc.outstanding)
+			if len(got) != len(tc.want) {
+				t.Fatalf("pruned = %v, want %v", got, tc.want)
+			}
+			for k, v := range tc.want {
+				if id, ok := got[k]; !ok || id != v {
+					t.Fatalf("pruned = %v, want %v", got, tc.want)
+				}
+			}
+		})
+	}
+}
+
+// AC 58 and edge cases 74/75 through verifyReceipt: after pruning, a kept
+// accepting receipt is still skipped silently, a superseded nonce's late receipt
+// is still `nonce already consumed`, and a receipt reusing a pruned nonce is
+// `nonce is not the outstanding launch's` and addresses nothing.
+func TestPrunedConsumedNoncesKeepEveryRejectionReasonForCommentsStillOnThePR(t *testing.T) {
+	launch := testLaunch("discussion:1")
+	revisions := map[string]string{"discussion:1": bodyRevision("first comment")}
+	entry := receiptEntry{ID: 1, Revision: revisions["discussion:1"], Outcome: receiptOutcomeAddressed}
+
+	t.Run("AC 58: the accepting receipt still on the PR is not rejected", func(t *testing.T) {
+		comments := []discussionComment{carryingReceipt(12, testWrongNonce)}
+		pruned := pruneConsumedReviewNonces(map[string]int64{testWrongNonce: 12}, comments, launch.Nonce)
+		res := verifyReceipt(launch, pruned, comments, revisions, allowAll)
+		if len(res.Rejections) != 0 || res.Accepted {
+			t.Fatalf("result = %+v, want the consumed receipt skipped silently", res)
+		}
+	})
+	t.Run("edge 75: a superseded nonce's late receipt is still already consumed", func(t *testing.T) {
+		comments := []discussionComment{carryingReceipt(30, testWrongNonce)}
+		pruned := pruneConsumedReviewNonces(map[string]int64{testWrongNonce: 0}, comments, launch.Nonce)
+		res := verifyReceipt(launch, pruned, comments, revisions, allowAll)
+		want := []receiptRejection{{CommentID: 30, Reason: receiptRejectNonceConsumed}}
+		if !reflect.DeepEqual(res.Rejections, want) || res.Accepted {
+			t.Fatalf("result = %+v, want %v", res, want)
+		}
+	})
+	t.Run("edge 74: a receipt reusing a pruned nonce addresses nothing", func(t *testing.T) {
+		pruned := pruneConsumedReviewNonces(map[string]int64{testWrongNonce: 12}, nil, launch.Nonce)
+		reuse := receiptComment(40, maintainer, testReceiptBody(testWrongNonce, testReceiptHead, entry), afterLaunch)
+		res := verifyReceipt(launch, pruned, []discussionComment{reuse}, revisions, allowAll)
+		want := []receiptRejection{{CommentID: 40, Reason: receiptRejectNonceUnknown}}
+		if !reflect.DeepEqual(res.Rejections, want) || res.Accepted || len(res.Addressed) != 0 {
+			t.Fatalf("result = %+v, want %v and nothing addressed", res, want)
+		}
+	})
+}

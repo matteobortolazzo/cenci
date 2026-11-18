@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -274,18 +275,64 @@ func parseReceipt(body string) (reviewReceipt, error) {
 // reviewLaunchRecord is the outstanding `babysit-review` launch a receipt is
 // verified against: the nonce minted for it, when the supervisor launched it
 // and the full feedback keys it carried (receipts only act on `discussion:`
-// keys inside this set). TrustedKeys is the allow-list of discussion keys in Keys
-// whose comment author's permission lookup answered `admin` or `write` when the
-// launch was built. Trust is default-deny: a discussion key in Keys that is not in
-// TrustedKeys -- a denied author, or a record with no trust field at all (a state
-// saved by an earlier build, a hand-edited or truncated file) -- is untrusted. The
-// launch argument marks each untrusted key with `:untrusted`, and a receipt can
-// never mark one `addressed`. The tick wiring stores it in State.
+// keys inside this set). TrustedKeys is the allow-list of keys in Keys -- of every
+// type, `discussion:`, `comment:` and `review:` (#1539) -- whose author's
+// permission lookup answered `admin` or `write` when the launch was built. Trust
+// is default-deny: a key in Keys that is not in TrustedKeys -- a denied author, or
+// a record with no trust field at all (a state saved by an earlier build, which
+// recorded only discussion keys, a hand-edited or truncated file) -- is untrusted.
+// The launch argument marks each untrusted discussion key with `:untrusted`, and a
+// receipt can never mark one `addressed`.
+//
+// HeadSHA is the PR head the launch started from and HeadChecked marks that the
+// head-move check (#1539) already ran, on the first tick that saw the launch's
+// window ended. A record without HeadSHA (an earlier build) fails closed: if it
+// carried an untrusted key, any live head counts as moved. The tick wiring stores
+// it in State.
 type reviewLaunchRecord struct {
 	Nonce       string    `json:"nonce"`
 	LaunchedAt  time.Time `json:"launchedAt"`
 	Keys        []string  `json:"keys"`
 	TrustedKeys []string  `json:"trustedKeys,omitempty"`
+	HeadSHA     string    `json:"headSha,omitempty"`
+	HeadChecked bool      `json:"headChecked,omitempty"`
+}
+
+// launchCarriedUntrusted reports whether launch carried any key its trust record
+// does not list: an untrusted author, or a legacy record's comment:/review: keys.
+func launchCarriedUntrusted(launch *reviewLaunchRecord) bool {
+	for _, k := range launch.Keys {
+		if !slices.Contains(launch.TrustedKeys, k) {
+			return true
+		}
+	}
+	return false
+}
+
+// pruneConsumedReviewNonces returns the consumed-nonce entries still worth
+// keeping (#1539): a nonce carried by a parsed receipt in comments (so that
+// comment, re-read every tick, keeps its silent skip or its `nonce already
+// consumed` rejection) and outstanding, the live launch's nonce, whether or not a
+// comment carries it. Every other nonce can only come back in a new comment, which
+// verifyReceipt rejects as not the outstanding launch's. comments must be a
+// complete read; consumed is not modified.
+func pruneConsumedReviewNonces(consumed map[string]int64, comments []discussionComment, outstanding string) map[string]int64 {
+	carried := map[string]bool{}
+	for _, c := range comments {
+		if r, err := parseReceipt(c.Body); err == nil {
+			carried[r.Nonce] = true
+		}
+	}
+	var kept map[string]int64
+	for nonce, id := range consumed {
+		if carried[nonce] || (outstanding != "" && nonce == outstanding) {
+			if kept == nil {
+				kept = map[string]int64{}
+			}
+			kept[nonce] = id
+		}
+	}
+	return kept
 }
 
 // discussionReceipt is the evidence recorded for one addressed or unresolved

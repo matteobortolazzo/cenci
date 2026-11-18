@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -17,12 +18,21 @@ var ErrResolveUsage = errors.New("malformed resolve arguments")
 const (
 	commentKeyPrefix = "comment:"
 	reviewKeyPrefix  = "review:"
+	headKeyPrefix    = "head:"
 )
 
-// ValidResolveKey reports whether key is shaped like a feedback key `resolve` can
-// be pointed at: `discussion:<positive id>`, or a `comment:`/`review:` key (which
+// headSHAPattern is the SHA a `head:` key names: a full 40 (SHA-1) or 64 (SHA-256)
+// character lowercase hex object id, the same shape a receipt's head line takes.
+var headSHAPattern = regexp.MustCompile(`^([0-9a-f]{40}|[0-9a-f]{64})$`)
+
+// ValidResolveKey reports whether key is shaped like a target `resolve` can be
+// pointed at: `discussion:<positive id>`, `head:<sha>` (the head-move hold, #1539:
+// exactly 40 or 64 lowercase hex characters), or a `comment:`/`review:` key (which
 // Resolve then refuses with a pointer to GitHub). Anything else is a usage error.
 func ValidResolveKey(key string) bool {
+	if rest, ok := strings.CutPrefix(key, headKeyPrefix); ok {
+		return headSHAPattern.MatchString(rest)
+	}
 	if rest, ok := strings.CutPrefix(key, discussionKeyPrefix); ok {
 		id, err := strconv.ParseInt(rest, 10, 64)
 		return err == nil && id > 0 && rest == strconv.FormatInt(id, 10)
@@ -51,6 +61,15 @@ func ValidResolveKey(key string) bool {
 //   - key is a `comment:` or `review:` key (GitHub is authoritative for those),
 //   - key is not in PendingKeys: an addressed or unknown key has nothing to resolve.
 //
+// A `head:<sha>` key (#1539) is the only way to clear State.HeadMoveHold, the
+// PR-level hold raised when a launch that carried untrusted input left the PR head
+// moved: the worker acts under the maintainer's GitHub identity and could forge any
+// GitHub-side signal, so only this attended host command may clear it. It runs the
+// same environment refusals, then refuses (changing nothing) when no hold is
+// recorded or <sha> is not the recorded head (a second raise replaces the head, so
+// only the newest resolves). It quiesces the supervisor, re-checks the hold in the
+// state it re-reads, clears it, saves and re-arms exactly as a discussion key does.
+//
 // It follows Reset (Q&A 12): quiesceSupervisor verifies and terminates a live
 // owned supervisor, the state is rewritten, and the supervisor is re-armed with
 // the recorded settings. A `stopped` state is only written: resolve never
@@ -69,7 +88,7 @@ func Resolve(pr, key, explicit string, refusal func(agent string) string) error 
 		return fmt.Errorf("%w: PR must be a positive integer", ErrResolveUsage)
 	}
 	if !ValidResolveKey(key) {
-		return fmt.Errorf("%w: key %q is not discussion:<id>", ErrResolveUsage, key)
+		return fmt.Errorf("%w: key %q is not discussion:<id> or head:<sha> (a 40 or 64 character lowercase hex SHA)", ErrResolveUsage, key)
 	}
 	if os.Getenv("CENCI_SANDBOX") == "1" {
 		return fmt.Errorf("not resolved: the babysit supervisor runs on the host and a resolution can only be recorded there; run `cenci babysit resolve %s %s` from a host tmux pane", cleanPR, key)
@@ -79,6 +98,9 @@ func Resolve(pr, key, explicit string, refusal func(agent string) string) error 
 	}
 	if os.Getenv("CENCI_ATTENDED") == "0" {
 		return fmt.Errorf("not resolved: CENCI_ATTENDED=0 marks this session as unattended, and only a human may record feedback as addressed; run `cenci babysit resolve %s %s` from an attended host session", cleanPR, key)
+	}
+	if sha, ok := strings.CutPrefix(key, headKeyPrefix); ok {
+		return resolveHeadMove(cleanPR, sha, explicit, refusal)
 	}
 	switch {
 	case strings.HasPrefix(key, commentKeyPrefix):
@@ -143,6 +165,79 @@ func Resolve(pr, key, explicit string, refusal func(agent string) string) error 
 	}
 	if err := reArm(dir, cleanPR, s); err != nil {
 		return fmt.Errorf("resolved %s for PR #%s but not re-armed: %w; re-arm with cenci babysit %s --agent %s", key, cleanPR, err, cleanPR, s.Agent)
+	}
+	return nil
+}
+
+// headMoveRefusal is why a resolve of head sha cannot clear s's head-move hold, or
+// nil when it can: no hold is recorded, or sha is not the recorded (newest) head.
+func headMoveRefusal(s State, pr, sha string) error {
+	if s.HeadMoveHold == nil {
+		return fmt.Errorf("not resolved: no head-move hold is recorded for PR #%s; head:<sha> resolves only the %q hold", pr, reasonHeadMovedUntrustedReview)
+	}
+	if recorded := s.HeadMoveHold.HeadSHA; recorded != sha {
+		return fmt.Errorf("not resolved: the head-move hold for PR #%s is recorded at %s, not %s; %s", pr, recorded, sha, headMoveResolveHint(pr, recorded))
+	}
+	return nil
+}
+
+// resolveHeadMove is Resolve's `head:<sha>` branch: the environment refusals have
+// already passed. It follows the discussion branch: quiesceSupervisor, clear the
+// hold, save, re-arm (a stopped state is written and never re-armed).
+func resolveHeadMove(pr, sha, explicit string, refusal func(agent string) string) error {
+	dir, err := stateDir(explicit)
+	if err != nil {
+		return err
+	}
+	repo, err := repository()
+	if err != nil {
+		return err
+	}
+	path := statePath(dir, repo, pr)
+
+	s, err := quiesceSupervisor(path, pr, func(s State) error {
+		if err := headMoveRefusal(s, pr, sha); err != nil {
+			return err
+		}
+		if !stoppedFeedbackOnly(s) && refusal != nil {
+			if reason := refusal(s.Agent); reason != "" {
+				return &classifiedError{class: ErrAgentRefused, msg: reason}
+			}
+		}
+		return nil
+	})
+	if errors.Is(err, ErrStateUnreadable) {
+		return unreadableStateError(path, err)
+	}
+	if err != nil {
+		return err
+	}
+
+	// The supervisor may have saved while it was dying: it may have recorded a newer
+	// head (a second raise), which the human has not reviewed.
+	if err := headMoveRefusal(s, pr, sha); err != nil {
+		if stoppedFeedbackOnly(s) {
+			return err
+		}
+		return fmt.Errorf("%w; the supervisor for PR #%s was stopped to resolve it and was not re-armed, so re-arm it with cenci babysit %s --agent %s", err, pr, pr, s.Agent)
+	}
+	s.HeadMoveHold = nil
+	s.PID = 0
+	s.UpdatedAt = time.Now().UTC()
+	if err := save(path, s); err != nil {
+		if stoppedFeedbackOnly(s) {
+			return err
+		}
+		return fmt.Errorf("any supervisor for PR #%s was stopped, but the head-move hold at %s was not resolved and nothing was re-armed: %w; fix the cause, then re-arm with cenci babysit %s --agent %s", pr, sha, err, pr, s.Agent)
+	}
+
+	if stoppedFeedbackOnly(s) {
+		fmt.Printf("Resolved the head-move hold at %s for PR #%s; the supervisor is stopped, so it was not re-armed. Re-arm it with cenci babysit %s --agent <claude|codex>.\n", sha, pr, pr)
+		return nil
+	}
+	fmt.Printf("Resolved the head-move hold at %s for PR #%s.\n", sha, pr)
+	if err := reArm(dir, pr, s); err != nil {
+		return fmt.Errorf("resolved the head-move hold at %s for PR #%s but not re-armed: %w; re-arm with cenci babysit %s --agent %s", sha, pr, err, pr, s.Agent)
 	}
 	return nil
 }

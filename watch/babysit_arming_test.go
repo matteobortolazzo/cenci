@@ -867,6 +867,44 @@ func TestBabysitResolveUsageErrorsExitTwo(t *testing.T) {
 	}
 }
 
+// TestBabysitResolveMalformedHeadExitsTwoWithTheHeadUsageLine covers #1539 AC 55
+// through the real binary: a `head:` value that is not 40 or 64 lowercase hex
+// characters exits 2 with the updated usage line (which names `head:<sha>`), and
+// a state file holding a head-move hold stays byte-identical.
+func TestBabysitResolveMalformedHeadExitsTwoWithTheHeadUsageLine(t *testing.T) {
+	armTestSocketPath(t)
+	for _, tc := range []struct {
+		name string
+		key  string
+	}{
+		{"empty", "head:"},
+		{"too short", "head:abc123"},
+		{"wrong length", "head:" + strings.Repeat("a", 41)},
+		{"uppercase hex", "head:" + strings.Repeat("A", 40)},
+		{"non-hex", "head:" + strings.Repeat("z", 40)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := hostResetStatePath(t, "63")
+			body := `{"schemaVersion":2,"pr":"63","repo":"owner/repo","status":"stopped","headMoveHold":{"headSha":"` + strings.Repeat("d", 40) + `","nonce":"n","raisedAt":"2026-11-18T09:00:00Z"}}`
+			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			_, stderr, code := runBabysitCLI(t, resolveChildEnv(t), "babysit", "resolve", "63", tc.key)
+
+			if code != 2 {
+				t.Errorf("exit code = %d, want 2 (stderr %q)", code, stderr)
+			}
+			if !strings.Contains(stderr, "cenci babysit resolve <pr> discussion:<id>|head:<sha>") {
+				t.Errorf("stderr = %q, want the usage line naming discussion:<id>|head:<sha>", stderr)
+			}
+			if got, _ := os.ReadFile(path); string(got) != body {
+				t.Errorf("state file = %q, want it byte-identical", got)
+			}
+		})
+	}
+}
+
 // TestBabysitArmRefusesAnUnreadableStateAtArm covers AC 91 through the real
 // binary: an arm over an undecodable state file exits 1 naming the reason and the
 // path, leaves the file byte-identical and starts no supervisor (no lock, no log).

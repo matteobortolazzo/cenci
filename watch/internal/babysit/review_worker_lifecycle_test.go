@@ -20,6 +20,7 @@ package babysit
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"os/exec"
 	"slices"
 	"strings"
@@ -758,6 +759,8 @@ func TestReviewWorker_AReplayedNonceAddressesNothingMore(t *testing.T) {
 	seed.LaunchedKeys = []string{"discussion:11", "discussion:12"}
 	seed.DiscussionRevisions["discussion:12"] = bodyRevision("second ask")
 	seed.ReviewLaunch.Keys = []string{"discussion:11", "discussion:12"}
+	// Both authors are trusted, so the #1539 head-move check has nothing to hold.
+	seed.ReviewLaunch.TrustedKeys = []string{"discussion:11", "discussion:12"}
 	e.seed(seed)
 
 	if err := e.run(); err != nil {
@@ -1357,5 +1360,1204 @@ func TestReviewWorker_CommentOnlyLaunchWithoutAReceiptIsClearedOnceTheWindowEnds
 	}
 	if s := e.after(3); s.ReviewLaunch != nil {
 		t.Errorf("after the window ended: ReviewLaunch = %+v, want it cleared even with no receipt", s.ReviewLaunch)
+	}
+}
+
+// -- #1539: untrusted-author limits enforced in Go -----------------------------
+//
+// The supervisor itself checks the author of every candidate key (discussion,
+// inline comment and review), never launches a worker for untrusted feedback
+// alone, caps how many launches an untrusted discussion key may ride in, raises a
+// PR-level hold when an untrusted-carrying launch moved the head, and prunes the
+// consumed-nonce map. Each case drives the real Run loop and asserts the saved
+// state, the `cenci run babysit-review` arguments and the recorded detail.
+
+// 40-hex PR heads, so a `resolve <pr> head:<sha>` hint names a well-formed SHA.
+const (
+	utHeadA = "1111111111111111111111111111111111111111"
+	utHeadB = "2222222222222222222222222222222222222222"
+	utHeadC = "3333333333333333333333333333333333333333"
+)
+
+// utInline renders one pull-request review comment by login.
+func utInline(id int64, login string) string {
+	return fmt.Sprintf(`{"id":%d,"updated_at":"2026-01-02T00:00:00Z","user":{"login":%q}}`, id, login)
+}
+
+// utReview renders one CHANGES_REQUESTED review by login.
+func utReview(id int64, login string) string {
+	return fmt.Sprintf(`{"id":%d,"state":"CHANGES_REQUESTED","submitted_at":"2026-01-02T00:00:00Z","user":{"login":%q}}`, id, login)
+}
+
+// utStep is a green tick at head serving the inline comments, the reviews and
+// the PR conversation comments given.
+func utStep(head string, inline, reviews []string, discussion ...string) ciCapStep {
+	s := rwGreen(head, discussion...)
+	if len(inline) > 0 {
+		s.comments = jsonArray(inline...)
+	}
+	if len(reviews) > 0 {
+		s.reviews = jsonArray(reviews...)
+	}
+	return s
+}
+
+// utNonces is n distinct 32-hex nonces, minted in order.
+func utNonces(n int) []string {
+	out := make([]string, n)
+	for i := range out {
+		out[i] = fmt.Sprintf("%032x", i+1)
+	}
+	return out
+}
+
+// utConsumed is n consumed nonces whose receipt comments are long gone.
+func utConsumed(n int) map[string]int64 {
+	out := map[string]int64{}
+	for i := range n {
+		out[fmt.Sprintf("%032x", 1000+i)] = int64(5000 + i)
+	}
+	return out
+}
+
+// sameKeys reports whether a and b hold the same keys, in any order.
+func sameKeys(a, b []string) bool {
+	return slices.Equal(slices.Sorted(slices.Values(a)), slices.Sorted(slices.Values(b)))
+}
+
+// permissionLookups counts the collaborator-permission reads per login.
+func permissionLookups(e *ciCapEnv) map[string]int {
+	out := map[string]int{}
+	for _, c := range e.calls {
+		if len(c) == 3 && c[0] == "gh" && c[1] == "api" {
+			if m := permissionPathRe.FindStringSubmatch(c[2]); m != nil {
+				out[m[1]]++
+			}
+		}
+	}
+	return out
+}
+
+// launchArgsContaining counts the babysit-review arguments that carry key.
+func launchArgsContaining(r *rwRuns, key string) int {
+	n := 0
+	for _, e := range r.entries {
+		if e.workflow == "babysit-review" && strings.Contains(e.arg, " "+key+"=") {
+			n++
+		}
+	}
+	return n
+}
+
+// AC 45: pending keys with no trusted author (a discussion key, an inline comment
+// and a review, all by a `read` login) launch nothing and mint no nonce; every key
+// is held for a write-access human, the status is needs-input, and the detail
+// names `resolve` for the discussion key and GitHub for the other two.
+func TestUntrustedReview_AC45_UntrustedOnlyTickLaunchesNothingAndHoldsEveryKey(t *testing.T) {
+	servePermission(t, "stranger", "read")
+	e := newRWEnv(t, true, nil,
+		utStep(utHeadA, []string{utInline(7, "stranger")}, []string{utReview(9, "stranger")}, humanCommentBy(11, "stranger", humanBody)),
+		ciCapMerged(rwIssue),
+	)
+	runs := rwTrackRuns(e, 0)
+	hdThreads(e, 7, func(int) bool { return false })
+	e.seed(State{Status: "running"})
+
+	if err := e.run(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	runs.requireNone(t)
+	s := e.after(1)
+	if s.ReviewLaunch != nil || len(s.ConsumedReviewNonces) != 0 {
+		t.Errorf("ReviewLaunch %+v consumed %v, want no launch and no nonce minted", s.ReviewLaunch, s.ConsumedReviewNonces)
+	}
+	want := []string{"discussion:11", "comment:7", "review:9"}
+	if !sameKeys(s.PendingKeys, want) || !sameKeys(s.HeldUntrustedKeys, want) || len(s.LaunchedKeys) != 0 {
+		t.Errorf("pending/held/launched = %v/%v/%v, want %v pending and held, none launched", s.PendingKeys, s.HeldUntrustedKeys, s.LaunchedKeys, want)
+	}
+	if s.Status != "needs-input" {
+		t.Errorf("status = %q, want needs-input", s.Status)
+	}
+	for _, need := range []string{"cenci babysit resolve 42 discussion:11", "resolve comment:7 on GitHub", "resolve review:9 on GitHub"} {
+		if !strings.Contains(s.AutomergeDetail, need) {
+			t.Errorf("detail %q, want it to contain %q", s.AutomergeDetail, need)
+		}
+	}
+}
+
+// AC 46: a launch carrying an inline comment by an `admin` author and a review by
+// a `read` author records only the inline key as trusted, and each distinct login
+// is looked up once in that tick (the review's author also wrote a discussion
+// comment).
+func TestUntrustedReview_AC46_InlineAndReviewAuthorsAreCheckedInGoOneLookupPerLogin(t *testing.T) {
+	servePermission(t, "boss", "admin")
+	servePermission(t, "stranger", "read")
+	e := newRWEnv(t, false, nil,
+		utStep(utHeadA, []string{utInline(7, "boss")}, []string{utReview(9, "stranger")}, humanCommentBy(11, "stranger", humanBody)),
+		ciCapMerged(rwIssue),
+	)
+	runs := rwTrackRuns(e, 0)
+	e.seed(State{Status: "running"})
+
+	if err := e.run(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	runs.requireAt(t, 1, "babysit-review")
+	launched := e.after(1).ReviewLaunch
+	if launched == nil {
+		t.Fatal("no ReviewLaunch recorded, want the mixed launch")
+	}
+	if !slices.Contains(launched.TrustedKeys, "comment:7") || slices.Contains(launched.TrustedKeys, "review:9") || slices.Contains(launched.TrustedKeys, "discussion:11") {
+		t.Errorf("trustedKeys = %v, want comment:7 and neither review:9 nor discussion:11", launched.TrustedKeys)
+	}
+	if !sameKeys(launched.Keys, []string{"comment:7", "review:9", "discussion:11"}) {
+		t.Errorf("keys = %v, want all three carried", launched.Keys)
+	}
+	if got, want := permissionLookups(e), map[string]int{"boss": 1, "stranger": 1}; !maps.Equal(got, want) {
+		t.Errorf("permission lookups = %v, want %v (one per distinct login)", got, want)
+	}
+}
+
+// AC 47: an inline or review key whose author lookup fails is neither launched nor
+// held that tick; it stays pending with the retry note, and the next tick's
+// answered lookup launches it as trusted.
+func TestUntrustedReview_AC47_UnknownInlineOrReviewAuthorLookupIsSkippedThenLaunchedOnRetry(t *testing.T) {
+	for _, tc := range []struct {
+		key     string
+		inline  []string
+		reviews []string
+	}{
+		{"comment:7", []string{utInline(7, "flaky")}, nil},
+		{"review:9", nil, []string{utReview(9, "flaky")}},
+	} {
+		t.Run(tc.key, func(t *testing.T) {
+			servePermission(t, "flaky", "write")
+			servePermissionFailure(t, "flaky")
+			e := newRWEnv(t, true, nil,
+				utStep(utHeadA, tc.inline, tc.reviews), // 1: the lookup fails
+				utStep(utHeadA, tc.inline, tc.reviews), // 2: the lookup answers
+				ciCapMerged(rwIssue),
+			)
+			runs := rwTrackRuns(e, 0)
+			hdThreads(e, 7, func(int) bool { return false })
+			e.panes = func(tick int) (string, error) {
+				if tick == 2 {
+					delete(permissionFailing, "flaky")
+				}
+				return noWorkerInventory, nil
+			}
+			e.seed(State{Status: "running"})
+
+			if err := e.run(); err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+
+			first := e.after(1)
+			runs.requireAt(t, 1)
+			if first.ReviewLaunch != nil || len(first.HeldUntrustedKeys) != 0 || !slices.Contains(first.PendingKeys, tc.key) {
+				t.Errorf("after tick 1: launch %+v held %v pending %v, want %s pending, not launched and not held", first.ReviewLaunch, first.HeldUntrustedKeys, first.PendingKeys, tc.key)
+			}
+			if want := "author permission lookup failed for " + tc.key + "; will retry"; !strings.Contains(first.AutomergeDetail, want) {
+				t.Errorf("after tick 1: detail %q, want %q", first.AutomergeDetail, want)
+			}
+			runs.requireAt(t, 2, "babysit-review")
+			if second := e.after(2); second.ReviewLaunch == nil || !slices.Equal(second.ReviewLaunch.TrustedKeys, []string{tc.key}) {
+				t.Errorf("after tick 2: ReviewLaunch = %+v, want %s launched as trusted", second.ReviewLaunch, tc.key)
+			}
+		})
+	}
+}
+
+// AC 48: a launch with a trusted key still carries an untrusted discussion key as
+// `discussion:<id>=<sha256>:untrusted`, unchanged.
+func TestUntrustedReview_AC48_MixedLaunchStillCarriesTheUntrustedDiscussionTokenUnchanged(t *testing.T) {
+	servePermission(t, "stranger", "read")
+	const second = "and one more"
+	e := newRWEnv(t, false, nil,
+		utStep(utHeadA, nil, nil, humanCommentBy(11, "stranger", humanBody), humanComment(13, second)),
+		ciCapMerged(rwIssue),
+	)
+	runs := rwTrackRuns(e, 0)
+	e.seed(State{Status: "running"})
+
+	if err := e.run(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	want := "42 --receipt-nonce " + testReviewNonce + " discussion:11=" + bodyRevision(humanBody) + ":untrusted discussion:13=" + bodyRevision(second)
+	if got := runs.argAt(t, 1, "babysit-review"); got != want {
+		t.Errorf("launch argument = %q, want %q", got, want)
+	}
+	if s := e.after(1); len(s.HeldUntrustedKeys) != 0 || s.UntrustedLaunchCounts["discussion:11"] != 1 {
+		t.Errorf("held %v counts %v, want nothing held and discussion:11 counted once", s.HeldUntrustedKeys, s.UntrustedLaunchCounts)
+	}
+}
+
+// AC 49 (and edge case 64's still-denied branch): a `read` author edits one
+// discussion comment 4 times while a trusted key is pending on every tick that
+// could launch. Exactly 3 launch arguments carry it; after the third it is held,
+// each later edit is looked up again and held again with its count kept, and the
+// status is needs-input naming `resolve`.
+func TestUntrustedReview_AC49_UntrustedDiscussionKeyRidesInAtMostThreeLaunchesAcrossEdits(t *testing.T) {
+	servePermission(t, "stranger", "read")
+	step := func(rev int) ciCapStep {
+		return utStep(utHeadA, nil, nil,
+			humanCommentBy(11, "stranger", fmt.Sprintf("untrusted ask v%d", rev)),
+			humanComment(13, fmt.Sprintf("trusted ask v%d", rev)))
+	}
+	e := newRWEnv(t, false, utNonces(6),
+		step(0), step(1), step(2), step(3), step(4), // 1-5: the original, then 4 edits
+		step(4), // 6: quiet
+		ciCapMerged(rwIssue),
+	)
+	runs := rwTrackRuns(e, 0)
+	e.seed(State{Status: "running"})
+
+	if err := e.run(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if n := launchArgsContaining(runs, "discussion:11"); n != 3 {
+		t.Errorf("launch arguments carrying discussion:11 = %d, want exactly 3", n)
+	}
+	for tick := 1; tick <= 5; tick++ {
+		runs.requireAt(t, tick, "babysit-review")
+	}
+	runs.requireAt(t, 6)
+	for _, tick := range []int{4, 5} {
+		if arg := runs.argAt(t, tick, "babysit-review"); strings.Contains(arg, "discussion:11") || !strings.Contains(arg, "discussion:13=") {
+			t.Errorf("tick %d: launch argument %q, want only the trusted discussion:13", tick, arg)
+		}
+	}
+	for _, tick := range []int{4, 5, 6} {
+		s := e.after(tick)
+		if !slices.Equal(s.HeldUntrustedKeys, []string{"discussion:11"}) || s.UntrustedLaunchCounts["discussion:11"] != 3 {
+			t.Errorf("after tick %d: held %v counts %v, want discussion:11 held with its count kept at 3", tick, s.HeldUntrustedKeys, s.UntrustedLaunchCounts)
+		}
+		if slices.Contains(s.LaunchedKeys, "discussion:11") {
+			t.Errorf("after tick %d: launched %v, want the held key out of launchedFeedbackKeys", tick, s.LaunchedKeys)
+		}
+		if s.Status != "needs-input" || !strings.Contains(s.AutomergeDetail, "cenci babysit resolve 42 discussion:11") {
+			t.Errorf("after tick %d: status %q detail %q, want needs-input naming `cenci babysit resolve 42 discussion:11`", tick, s.Status, s.AutomergeDetail)
+		}
+	}
+}
+
+// AC 50: a launch carried an untrusted item at head A and the first tick that
+// sees its window ended reads head B: that tick holds automerge under `head moved
+// during untrusted review launch`, sets needs-input and names `resolve <pr>
+// head:<B>`. A receipt consumed while the window was live does not prevent it.
+func TestUntrustedReview_AC50_HeadMovedDuringAnUntrustedLaunchRaisesAHeadMoveHold(t *testing.T) {
+	servePermission(t, "stranger", "read")
+	const second = "and one more"
+	page := []string{humanCommentBy(11, "stranger", humanBody), humanComment(13, second)}
+	withReceipt := append(slices.Clone(page), rwReceipt(21, testReviewNonce, rwEntry(11, humanBody, "no-action"), rwEntry(13, second, "addressed")))
+	e := newRWEnv(t, true, nil,
+		utStep(utHeadA, nil, nil, page...),        // 1: launch at A
+		utStep(utHeadB, nil, nil, withReceipt...), // 2: the worker pushed B and posted its receipt, window live
+		utStep(utHeadB, nil, nil, withReceipt...), // 3: the window ended
+		utStep(utHeadB, nil, nil, withReceipt...), // 4: still held
+		ciCapMerged(rwIssue),
+	)
+	runs := rwTrackRuns(e, 0)
+	e.panes = panesByTick("", liveReview(), deadReview(), deadReview())
+	e.seed(State{Status: "running"})
+
+	if err := e.run(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	runs.requireAt(t, 1, "babysit-review")
+	if s := e.after(1); s.ReviewLaunch == nil || s.ReviewLaunch.HeadSHA != utHeadA {
+		t.Fatalf("after the launch: ReviewLaunch = %+v, want headSha %s recorded", s.ReviewLaunch, utHeadA)
+	}
+	if s := e.after(2); s.HeadMoveHold != nil || s.AutomergeReason == reasonHeadMovedUntrustedReview {
+		t.Errorf("while the window is live: hold %+v reason %q, want no head-move hold yet", s.HeadMoveHold, s.AutomergeReason)
+	}
+	for _, tick := range []int{3, 4} {
+		s := e.after(tick)
+		if s.AutomergeDecision != "held" || s.AutomergeReason != reasonHeadMovedUntrustedReview || s.Status != "needs-input" {
+			t.Errorf("after tick %d: automerge %q (%q) status %q, want held for %q and needs-input", tick, s.AutomergeDecision, s.AutomergeReason, s.Status, reasonHeadMovedUntrustedReview)
+		}
+		if want := "cenci babysit resolve 42 head:" + utHeadB; !strings.Contains(s.AutomergeDetail, want) {
+			t.Errorf("after tick %d: detail %q, want it to name %q", tick, s.AutomergeDetail, want)
+		}
+		if h := s.HeadMoveHold; h == nil || h.HeadSHA != utHeadB || h.LaunchHeadSHA != utHeadA || h.Nonce != testReviewNonce || h.RaisedAt.IsZero() {
+			t.Errorf("after tick %d: headMoveHold = %+v, want head %s from a launch at %s (nonce %s) with a raise time", tick, h, utHeadB, utHeadA, testReviewNonce)
+		}
+	}
+}
+
+// AC 51: an untrusted-carrying launch whose window ends at the launch head raises
+// no head-move hold.
+func TestUntrustedReview_AC51_UntrustedLaunchWithAnUnchangedHeadRaisesNoHeadMoveHold(t *testing.T) {
+	servePermission(t, "stranger", "read")
+	page := []string{humanCommentBy(11, "stranger", humanBody), humanComment(13, "and one more")}
+	e := newRWEnv(t, true, nil,
+		utStep(utHeadA, nil, nil, page...), // 1: launch at A
+		utStep(utHeadA, nil, nil, page...), // 2: the window ended, head unchanged
+		ciCapMerged(rwIssue),
+	)
+	rwTrackRuns(e, 0)
+	e.panes = panesByTick("", deadReview())
+	e.seed(State{Status: "running"})
+
+	if err := e.run(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	s := e.after(2)
+	if s.HeadMoveHold != nil || s.AutomergeReason == reasonHeadMovedUntrustedReview {
+		t.Errorf("hold %+v reason %q, want no head-move hold at an unchanged head", s.HeadMoveHold, s.AutomergeReason)
+	}
+	if s.ReviewLaunch == nil || !s.ReviewLaunch.HeadChecked {
+		t.Errorf("ReviewLaunch = %+v, want the head check recorded as done", s.ReviewLaunch)
+	}
+}
+
+// AC 52: a launch whose keys were all trusted raises no head-move hold when the
+// head changed.
+func TestUntrustedReview_AC52_AllTrustedLaunchRaisesNoHeadMoveHoldWhenTheHeadChanged(t *testing.T) {
+	servePermission(t, "boss", "write")
+	e := newRWEnv(t, true, nil,
+		utStep(utHeadA, []string{utInline(7, "boss")}, nil, humanComment(13, "and one more")), // 1: launch at A
+		utStep(utHeadB, []string{utInline(7, "boss")}, nil, humanComment(13, "and one more")), // 2: ended at B
+		ciCapMerged(rwIssue),
+	)
+	rwTrackRuns(e, 0)
+	hdThreads(e, 7, func(int) bool { return false })
+	e.panes = panesByTick("", deadReview())
+	e.seed(State{Status: "running"})
+
+	if err := e.run(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if l := e.after(1).ReviewLaunch; l == nil || !sameKeys(l.TrustedKeys, l.Keys) {
+		t.Fatalf("ReviewLaunch = %+v, want every carried key trusted", l)
+	}
+	if s := e.after(2); s.HeadMoveHold != nil || s.AutomergeReason == reasonHeadMovedUntrustedReview {
+		t.Errorf("hold %+v reason %q, want no head-move hold for an all-trusted launch", s.HeadMoveHold, s.AutomergeReason)
+	}
+}
+
+// Planning Q&A 1: a second untrusted-carrying launch that also moved the head
+// replaces the recorded head with the newer one, so the human resolves once at
+// the newest head. Review launches keep running while the hold is set.
+func TestUntrustedReview_ASecondHeadMoveRaiseReplacesTheRecordedHeadWithTheNewerHead(t *testing.T) {
+	servePermission(t, "stranger", "read")
+	page := func(rev int) []string {
+		return []string{humanCommentBy(11, "stranger", fmt.Sprintf("untrusted v%d", rev)), humanComment(13, fmt.Sprintf("trusted v%d", rev))}
+	}
+	nonces := utNonces(2)
+	e := newRWEnv(t, true, nonces,
+		utStep(utHeadA, nil, nil, page(0)...), // 1: launch at A
+		utStep(utHeadB, nil, nil, page(1)...), // 2: ended at B -> hold B; both edited, launch again at B
+		utStep(utHeadC, nil, nil, page(1)...), // 3: ended at C -> hold replaced by C
+		ciCapMerged(rwIssue),
+	)
+	runs := rwTrackRuns(e, 0)
+	e.panes = panesByTick("", deadReview(), deadReview())
+	e.seed(State{Status: "running"})
+
+	if err := e.run(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	runs.requireAt(t, 2, "babysit-review")
+	if h := e.after(2).HeadMoveHold; h == nil || h.HeadSHA != utHeadB {
+		t.Errorf("after tick 2: headMoveHold = %+v, want head %s", h, utHeadB)
+	}
+	s := e.after(3)
+	if h := s.HeadMoveHold; h == nil || h.HeadSHA != utHeadC || h.LaunchHeadSHA != utHeadB || h.Nonce != nonces[1] {
+		t.Errorf("after tick 3: headMoveHold = %+v, want head %s from the second launch at %s", h, utHeadC, utHeadB)
+	}
+	if !strings.Contains(s.AutomergeDetail, "head:"+utHeadC) || strings.Contains(s.AutomergeDetail, "head:"+utHeadB) {
+		t.Errorf("after tick 3: detail %q, want it to name only head:%s", s.AutomergeDetail, utHeadC)
+	}
+}
+
+// Decision (#1539): the head-move hold blocks automerge and sets needs-input
+// only. With a recorded hold, failing CI still launches ci-repair and a conflict
+// still launches merge-repair, each spending its own budget, and the hold is
+// kept through the repair tick.
+func TestUntrustedReview_HeadMoveHoldKeepsCIRepairAndMergeRepairLaunching(t *testing.T) {
+	for _, tc := range []struct {
+		workflow string
+		step     ciCapStep
+		spent    func(State) int
+	}{
+		{"ci-repair", rwFailing(utHeadB), func(s State) int { return s.FixAttempts }},
+		{"merge-repair", rwDirtyFailing(utHeadB), func(s State) int { return s.ConflictFixAttempts }},
+	} {
+		t.Run(tc.workflow, func(t *testing.T) {
+			e := newRWEnv(t, true, nil, tc.step, ciCapMerged(rwIssue))
+			runs := rwTrackRuns(e, 0)
+			hold := &headMoveHold{HeadSHA: utHeadB, LaunchHeadSHA: utHeadA, Nonce: testReviewNonce, RaisedAt: testLaunchAt}
+			e.seed(State{Status: "needs-input", HeadMoveHold: hold})
+
+			if err := e.run(); err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+
+			runs.requireAt(t, 1, tc.workflow)
+			if got := runs.argAt(t, 1, tc.workflow); !strings.HasPrefix(got, "42") {
+				t.Errorf("%s argument = %q, want it to name PR 42", tc.workflow, got)
+			}
+			s := e.after(1)
+			if n := tc.spent(s); n != 1 {
+				t.Errorf("%s attempts after the launch = %d, want 1", tc.workflow, n)
+			}
+			if h := s.HeadMoveHold; h == nil || h.HeadSHA != utHeadB || h.LaunchHeadSHA != utHeadA {
+				t.Errorf("headMoveHold after the %s tick = %+v, want the recorded hold at %s kept", tc.workflow, h, utHeadB)
+			}
+			if s.AutomergeDecision != "held" || s.Status != "needs-input" {
+				t.Errorf("automerge %q status %q, want automerge held and needs-input while the hold is recorded", s.AutomergeDecision, s.Status)
+			}
+		})
+	}
+}
+
+// Planning Q&A 3: with no trusted candidate, a denied key and an unknown lookup,
+// nothing launches and nothing is held that tick; the unknown key gets the retry
+// note.
+func TestUntrustedReview_NoTrustedKeyWithAnUnknownLookupHoldsNothingThatTick(t *testing.T) {
+	servePermission(t, "stranger", "read")
+	servePermissionFailure(t, "flaky")
+	e := newRWEnv(t, false, nil,
+		utStep(utHeadA, []string{utInline(7, "flaky")}, nil, humanCommentBy(11, "stranger", humanBody)),
+		ciCapMerged(rwIssue),
+	)
+	runs := rwTrackRuns(e, 0)
+	e.seed(State{Status: "running"})
+
+	if err := e.run(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	runs.requireNone(t)
+	s := e.after(1)
+	if s.ReviewLaunch != nil || len(s.HeldUntrustedKeys) != 0 || !sameKeys(s.PendingKeys, []string{"discussion:11", "comment:7"}) {
+		t.Errorf("launch %+v held %v pending %v, want both pending, nothing launched or held", s.ReviewLaunch, s.HeldUntrustedKeys, s.PendingKeys)
+	}
+	if want := "author permission lookup failed for comment:7; will retry"; !strings.Contains(s.AutomergeDetail, want) {
+		t.Errorf("detail %q, want %q", s.AutomergeDetail, want)
+	}
+}
+
+// Planning Q&A 3 with a key already at its cap: no trusted candidate, an unknown
+// lookup, one denied discussion key at fixCap and one denied discussion key below
+// it. Nothing launches; the capped key is held by the cap rule anyway, while the
+// uncapped denied key stays pending and unheld (the unknown author may yet be
+// trusted company) and the unknown key gets the retry note.
+func TestUntrustedReview_NoTrustedKeyWithAnUnknownLookupStillHoldsAKeyAtItsCap(t *testing.T) {
+	servePermission(t, "stranger", "read")
+	servePermissionFailure(t, "flaky")
+	const second = "a second ask"
+	e := newRWEnv(t, false, nil,
+		utStep(utHeadA, []string{utInline(7, "flaky")}, nil, humanCommentBy(11, "stranger", humanBody), humanCommentBy(13, "stranger", second)),
+		ciCapMerged(rwIssue),
+	)
+	runs := rwTrackRuns(e, 0)
+	e.seed(State{
+		Status:                "running",
+		PendingKeys:           []string{"discussion:11"},
+		DiscussionRevisions:   map[string]string{"discussion:11": bodyRevision(humanBody)},
+		UntrustedLaunchCounts: map[string]int{"discussion:11": fixCap},
+	})
+
+	if err := e.run(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	runs.requireNone(t)
+	s := e.after(1)
+	if s.ReviewLaunch != nil || len(s.ConsumedReviewNonces) != 0 {
+		t.Errorf("ReviewLaunch %+v consumed %v, want no launch and no nonce minted", s.ReviewLaunch, s.ConsumedReviewNonces)
+	}
+	if !slices.Equal(s.HeldUntrustedKeys, []string{"discussion:11"}) {
+		t.Errorf("held = %v, want only the capped discussion:11 held", s.HeldUntrustedKeys)
+	}
+	if !sameKeys(s.PendingKeys, []string{"discussion:11", "discussion:13", "comment:7"}) || len(s.LaunchedKeys) != 0 {
+		t.Errorf("pending/launched = %v/%v, want all three pending and none launched", s.PendingKeys, s.LaunchedKeys)
+	}
+	if s.UntrustedLaunchCounts["discussion:11"] != fixCap || s.UntrustedLaunchCounts["discussion:13"] != 0 {
+		t.Errorf("counts = %v, want discussion:11 kept at %d and discussion:13 uncounted", s.UntrustedLaunchCounts, fixCap)
+	}
+	if want := "author permission lookup failed for comment:7; will retry"; !strings.Contains(s.AutomergeDetail, want) {
+		t.Errorf("detail %q, want %q", s.AutomergeDetail, want)
+	}
+	if !strings.Contains(s.AutomergeDetail, "cenci babysit resolve 42 discussion:11") || strings.Contains(s.AutomergeDetail, "discussion:13") {
+		t.Errorf("detail %q, want it to name the resolve for discussion:11 and nothing for the unheld discussion:13", s.AutomergeDetail)
+	}
+	if s.Status != "needs-input" {
+		t.Errorf("status = %q, want needs-input for the held capped key", s.Status)
+	}
+}
+
+// Edge case 64: an edit of a held untrusted discussion comment is looked up again
+// in the tick that reads it: still denied, it is held again with no launch and its
+// count kept; once its author has write access, the next edit launches it as
+// trusted.
+func TestUntrustedReview_Edge64_EditOfAHeldDiscussionKeyIsLookedUpAgainKeepsItsCountAndLaunchesOnceTrusted(t *testing.T) {
+	servePermission(t, "stranger", "read")
+	const v1, v2 = "edited once", "edited twice"
+	e := newRWEnv(t, true, nil,
+		utStep(utHeadA, nil, nil, humanCommentBy(11, "stranger", humanBody)), // 1: held, no edit
+		utStep(utHeadA, nil, nil, humanCommentBy(11, "stranger", v1)),        // 2: edited, still denied
+		utStep(utHeadA, nil, nil, humanCommentBy(11, "stranger", v2)),        // 3: edited, now write
+		ciCapMerged(rwIssue),
+	)
+	runs := rwTrackRuns(e, 0)
+	e.panes = func(tick int) (string, error) {
+		if tick == 3 {
+			permissionServed["stranger"] = "write"
+		}
+		return noWorkerInventory, nil
+	}
+	e.seed(State{
+		Status:                "running",
+		PendingKeys:           []string{"discussion:11"},
+		DiscussionRevisions:   map[string]string{"discussion:11": bodyRevision(humanBody)},
+		HeldUntrustedKeys:     []string{"discussion:11"},
+		UntrustedLaunchCounts: map[string]int{"discussion:11": fixCap},
+	})
+
+	if err := e.run(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	runs.requireAt(t, 1)
+	runs.requireAt(t, 2)
+	for _, tick := range []int{1, 2} {
+		s := e.after(tick)
+		if !slices.Equal(s.HeldUntrustedKeys, []string{"discussion:11"}) || s.UntrustedLaunchCounts["discussion:11"] != fixCap || s.ReviewLaunch != nil {
+			t.Errorf("after tick %d: held %v counts %v launch %+v, want discussion:11 held with its count kept and nothing launched", tick, s.HeldUntrustedKeys, s.UntrustedLaunchCounts, s.ReviewLaunch)
+		}
+	}
+	if got, want := runs.argAt(t, 3, "babysit-review"), "42 --receipt-nonce "+testReviewNonce+" discussion:11="+bodyRevision(v2); got != want {
+		t.Errorf("tick 3 launch argument = %q, want %q (trusted, no :untrusted suffix)", got, want)
+	}
+	if s := e.after(3); len(s.HeldUntrustedKeys) != 0 || s.ReviewLaunch == nil || !slices.Equal(s.ReviewLaunch.TrustedKeys, []string{"discussion:11"}) || s.UntrustedLaunchCounts["discussion:11"] != fixCap {
+		t.Errorf("after tick 3: held %v launch %+v counts %v, want discussion:11 launched as trusted, released, its count unchanged", s.HeldUntrustedKeys, s.ReviewLaunch, s.UntrustedLaunchCounts)
+	}
+}
+
+// Edge case 65: a held untrusted discussion key is never launched, so it never
+// raises `review worker ended without receipt`; its hold is the needs-human one.
+func TestUntrustedReview_Edge65_HeldDiscussionKeyNeverEndsWithoutAReceipt(t *testing.T) {
+	servePermission(t, "stranger", "read")
+	step := utStep(utHeadA, nil, nil, humanCommentBy(11, "stranger", humanBody))
+	e := newRWEnv(t, true, nil, step, step, step, ciCapMerged(rwIssue))
+	runs := rwTrackRuns(e, 0)
+	e.panes = panesByTick(deadReview(), deadReview(), deadReview())
+	e.seed(State{Status: "running"})
+
+	if err := e.run(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	runs.requireNone(t)
+	for tick := 1; tick <= 3; tick++ {
+		s := e.after(tick)
+		if len(s.LaunchedKeys) != 0 || !slices.Equal(s.HeldUntrustedKeys, []string{"discussion:11"}) {
+			t.Errorf("after tick %d: launched %v held %v, want discussion:11 held and never launched", tick, s.LaunchedKeys, s.HeldUntrustedKeys)
+		}
+		if s.AutomergeReason == reasonReviewWorkerEndedWithoutReceipt {
+			t.Errorf("after tick %d: reason %q for a key no worker ever carried", tick, s.AutomergeReason)
+		}
+		if s.Status != "needs-input" || !strings.Contains(s.AutomergeDetail, "cenci babysit resolve 42 discussion:11") {
+			t.Errorf("after tick %d: status %q detail %q, want needs-input naming the resolve", tick, s.Status, s.AutomergeDetail)
+		}
+	}
+}
+
+// Edge case 66: a held untrusted inline comment resolved on GitHub moves to
+// addressed through reconcileFeedback, leaves the held set, and the status goes
+// back to running.
+func TestUntrustedReview_Edge66_HeldInlineKeyResolvedOnGitHubLeavesTheHeldSet(t *testing.T) {
+	servePermission(t, "stranger", "read")
+	step := utStep(utHeadA, []string{utInline(7, "stranger")}, nil)
+	e := newRWEnv(t, true, nil, step, step, ciCapMerged(rwIssue))
+	runs := rwTrackRuns(e, 0)
+	hdThreads(e, 7, func(view int) bool { return view >= 2 })
+	e.seed(State{Status: "running"})
+
+	if err := e.run(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	runs.requireNone(t)
+	if s := e.after(1); !slices.Equal(s.HeldUntrustedKeys, []string{"comment:7"}) || s.Status != "needs-input" || !strings.Contains(s.AutomergeDetail, "resolve comment:7 on GitHub") {
+		t.Errorf("after tick 1: held %v status %q detail %q, want comment:7 held, needs-input, resolve on GitHub", s.HeldUntrustedKeys, s.Status, s.AutomergeDetail)
+	}
+	if s := e.after(2); len(s.HeldUntrustedKeys) != 0 || !slices.Equal(s.AddressedKeys, []string{"comment:7"}) || s.Status != "running" {
+		t.Errorf("after tick 2: held %v addressed %v status %q, want comment:7 addressed, released and running", s.HeldUntrustedKeys, s.AddressedKeys, s.Status)
+	}
+}
+
+// Edge case 66 (the review: half): a held untrusted inline comment and a held
+// untrusted review are each resolved on GitHub in turn. Each moves to addressed
+// through reconcileFeedback and leaves the held set; the status stays needs-input
+// while the review is still held and goes back to running once it is dismissed.
+func TestUntrustedReview_Edge66_HeldReviewKeyDismissedOnGitHubLeavesTheHeldSet(t *testing.T) {
+	servePermission(t, "stranger", "read")
+	const dismissed = `{"id":9,"state":"DISMISSED","submitted_at":"2026-01-02T00:00:00Z","user":{"login":"stranger"}}`
+	inline := []string{utInline(7, "stranger")}
+	e := newRWEnv(t, true, nil,
+		utStep(utHeadA, inline, []string{utReview(9, "stranger")}), // 1: both held
+		utStep(utHeadA, inline, []string{utReview(9, "stranger")}), // 2: the inline thread is resolved
+		utStep(utHeadA, inline, []string{dismissed}),               // 3: the review is dismissed
+		ciCapMerged(rwIssue),
+	)
+	runs := rwTrackRuns(e, 0)
+	hdThreads(e, 7, func(view int) bool { return view >= 2 })
+	e.seed(State{Status: "running"})
+
+	if err := e.run(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	runs.requireNone(t)
+	if s := e.after(1); !sameKeys(s.HeldUntrustedKeys, []string{"comment:7", "review:9"}) || s.Status != "needs-input" || !strings.Contains(s.AutomergeDetail, "resolve review:9 on GitHub") {
+		t.Errorf("after tick 1: held %v status %q detail %q, want comment:7 and review:9 held, needs-input, resolve review:9 on GitHub", s.HeldUntrustedKeys, s.Status, s.AutomergeDetail)
+	}
+	if s := e.after(2); !slices.Equal(s.HeldUntrustedKeys, []string{"review:9"}) || !slices.Equal(s.AddressedKeys, []string{"comment:7"}) || s.Status != "needs-input" {
+		t.Errorf("after tick 2: held %v addressed %v status %q, want only review:9 still held and needs-input", s.HeldUntrustedKeys, s.AddressedKeys, s.Status)
+	}
+	s := e.after(3)
+	if len(s.HeldUntrustedKeys) != 0 || !sameKeys(s.AddressedKeys, []string{"comment:7", "review:9"}) || slices.Contains(s.PendingKeys, "review:9") || s.Status != "running" {
+		t.Errorf("after tick 3: held %v addressed %v pending %v status %q, want review:9 addressed, released and running", s.HeldUntrustedKeys, s.AddressedKeys, s.PendingKeys, s.Status)
+	}
+	if strings.Contains(s.AutomergeDetail, "review:9") {
+		t.Errorf("after tick 3: detail %q still names review:9", s.AutomergeDetail)
+	}
+}
+
+// Edge case 67: a `[bot]` author's inline comment or review is still excluded by
+// detection and costs no permission lookup.
+func TestUntrustedReview_Edge67_BotInlineAndReviewAuthorsTriggerNoPermissionLookup(t *testing.T) {
+	e := newRWEnv(t, false, nil,
+		utStep(utHeadA, []string{utInline(7, "ci-helper[bot]")}, []string{utReview(9, "deps[bot]")}),
+		ciCapMerged(rwIssue),
+	)
+	runs := rwTrackRuns(e, 0)
+	e.seed(State{Status: "running"})
+
+	if err := e.run(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	runs.requireNone(t)
+	if s := e.after(1); len(s.PendingKeys) != 0 || len(s.HeldUntrustedKeys) != 0 {
+		t.Errorf("pending %v held %v, want bot feedback excluded", s.PendingKeys, s.HeldUntrustedKeys)
+	}
+	if got := permissionLookups(e); len(got) != 0 {
+		t.Errorf("permission lookups = %v, want none for bot authors", got)
+	}
+}
+
+// Edge case 68: an inline or review author whose login fails GitHub's login
+// grammar is denied without a gh call.
+func TestUntrustedReview_Edge68_InvalidInlineAndReviewLoginsAreDeniedWithoutAGhCall(t *testing.T) {
+	e := newRWEnv(t, false, nil,
+		utStep(utHeadA, []string{utInline(7, "-bad")}, []string{utReview(9, "bad_login")}),
+		ciCapMerged(rwIssue),
+	)
+	runs := rwTrackRuns(e, 0)
+	e.seed(State{Status: "running"})
+
+	if err := e.run(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	runs.requireNone(t)
+	if s := e.after(1); !sameKeys(s.HeldUntrustedKeys, []string{"comment:7", "review:9"}) {
+		t.Errorf("held %v, want both keys held as denied", s.HeldUntrustedKeys)
+	}
+	if got := permissionLookups(e); len(got) != 0 {
+		t.Errorf("permission lookups = %v, want no gh call for an invalid login", got)
+	}
+}
+
+// Q&A 4: a pending comment:/review: key whose inline comment or review is missing
+// from this tick's read has the empty login as its author, which
+// fetchWritePermission denies without a gh call. So the key is never trusted or
+// launched (a granted author would launch it, an unknown lookup would leave it
+// unheld): with no trusted company it is held for a write-access human.
+func TestUntrustedReview_QA4_KeyMissingFromTheTicksReadIsDeniedWithoutAGhCallAndHeld(t *testing.T) {
+	e := newRWEnv(t, false, nil,
+		utStep(utHeadA, nil, nil),
+		ciCapMerged(rwIssue),
+	)
+	runs := rwTrackRuns(e, 0)
+	hdThreads(e, 7, func(int) bool { return false })
+	e.seed(State{Status: "running", PendingKeys: []string{"comment:7", "review:9"}})
+
+	if err := e.run(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	runs.requireNone(t)
+	want := []string{"comment:7", "review:9"}
+	s := e.after(1)
+	if s.ReviewLaunch != nil || len(s.LaunchedKeys) != 0 {
+		t.Errorf("ReviewLaunch %+v launched %v, want nothing launched for a missing item's key", s.ReviewLaunch, s.LaunchedKeys)
+	}
+	if !sameKeys(s.PendingKeys, want) || !sameKeys(s.HeldUntrustedKeys, want) {
+		t.Errorf("pending/held = %v/%v, want %v pending and held as denied", s.PendingKeys, s.HeldUntrustedKeys, want)
+	}
+	if s.Status != "needs-input" {
+		t.Errorf("status = %q, want needs-input", s.Status)
+	}
+	if n := countCalls(e.calls, "collaborators/"); n != 0 {
+		t.Errorf("collaborator permission calls = %d, want none for an empty login", n)
+	}
+}
+
+// Edge case 69: a legacy outstanding launch with no recorded head and no trust
+// record raises the head-move hold when its window is seen ended (fail closed).
+func TestUntrustedReview_Edge69_LegacyLaunchWithNoHeadSHAThatCarriedUntrustedInputFailsClosed(t *testing.T) {
+	e := newRWEnv(t, true, nil,
+		utStep(utHeadA, nil, nil, humanComment(11, humanBody)),
+		ciCapMerged(rwIssue),
+	)
+	rwTrackRuns(e, 0)
+	e.panes = panesByTick(deadReview())
+	seed := outstandingReviewState()
+	seed.ReviewLaunch.TrustedKeys = nil
+	e.seed(seed)
+
+	if err := e.run(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	s := e.after(1)
+	if h := s.HeadMoveHold; h == nil || h.HeadSHA != utHeadA || h.LaunchHeadSHA != "" {
+		t.Errorf("headMoveHold = %+v, want a fail-closed hold at %s with no launch head", h, utHeadA)
+	}
+	if s.AutomergeReason != reasonHeadMovedUntrustedReview || s.Status != "needs-input" {
+		t.Errorf("reason %q status %q, want %q and needs-input", s.AutomergeReason, s.Status, reasonHeadMovedUntrustedReview)
+	}
+}
+
+// Edge case 70: a legacy launch whose trustedKeys lists only discussion keys
+// treats its carried inline key as untrusted for the head-move check.
+func TestUntrustedReview_Edge70_LegacyLaunchCarriedInlineKeysWithNoTrustRecordAreUntrusted(t *testing.T) {
+	e := newRWEnv(t, true, nil,
+		utStep(utHeadB, []string{utInline(7, "reviewer")}, nil, humanComment(11, humanBody)),
+		ciCapMerged(rwIssue),
+	)
+	rwTrackRuns(e, 0)
+	hdThreads(e, 7, func(int) bool { return false })
+	e.panes = panesByTick(deadReview())
+	seed := outstandingReviewState()
+	seed.PendingKeys = []string{"comment:7", "discussion:11"}
+	seed.LaunchedKeys = []string{"comment:7", "discussion:11"}
+	seed.LastCommentAt = "2026-01-02T00:00:00Z"
+	seed.ReviewLaunch.Keys = []string{"comment:7", "discussion:11"}
+	seed.ReviewLaunch.TrustedKeys = []string{"discussion:11"}
+	seed.ReviewLaunch.HeadSHA = utHeadA
+	e.seed(seed)
+
+	if err := e.run(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if h := e.after(1).HeadMoveHold; h == nil || h.HeadSHA != utHeadB || h.LaunchHeadSHA != utHeadA {
+		t.Errorf("headMoveHold = %+v, want a hold at %s for the launch at %s", h, utHeadB, utHeadA)
+	}
+}
+
+// Edge case 71: a launch whose window ends with no receipt is checked on the first
+// tick that sees the window ended, while the launch is still outstanding, and the
+// hold keeps the head it saw then.
+func TestUntrustedReview_Edge71_LaunchEndedWithoutAReceiptIsCheckedOnTheFirstEndedTick(t *testing.T) {
+	servePermission(t, "stranger", "read")
+	page := []string{humanCommentBy(11, "stranger", humanBody), humanComment(13, "and one more")}
+	e := newRWEnv(t, true, nil,
+		utStep(utHeadA, nil, nil, page...), // 1: launch at A
+		utStep(utHeadB, nil, nil, page...), // 2: live at B
+		utStep(utHeadB, nil, nil, page...), // 3: ended at B, no receipt
+		utStep(utHeadC, nil, nil, page...), // 4: the head moved again
+		ciCapMerged(rwIssue),
+	)
+	rwTrackRuns(e, 0)
+	e.panes = panesByTick("", liveReview(), deadReview(), deadReview())
+	e.seed(State{Status: "running"})
+
+	if err := e.run(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if s := e.after(2); s.HeadMoveHold != nil {
+		t.Errorf("after tick 2: headMoveHold = %+v, want none while the window is live", s.HeadMoveHold)
+	}
+	s := e.after(3)
+	if s.ReviewLaunch == nil || !s.ReviewLaunch.HeadChecked {
+		t.Errorf("after tick 3: ReviewLaunch = %+v, want it still outstanding with the head check done", s.ReviewLaunch)
+	}
+	for _, tick := range []int{3, 4} {
+		if h := e.after(tick).HeadMoveHold; h == nil || h.HeadSHA != utHeadB {
+			t.Errorf("after tick %d: headMoveHold = %+v, want head %s (the head the ended tick saw)", tick, h, utHeadB)
+		}
+	}
+}
+
+// Edge case 72: a tick with an incomplete discussion read (page cap reached)
+// prunes no consumed nonce.
+func TestUntrustedReview_Edge72_IncompleteDiscussionReadPrunesNoConsumedNonce(t *testing.T) {
+	e := newRWEnv(t, false, nil,
+		ciCapStep{view: ciCapOpen(utHeadA, rwIssue), checks: ciCapGreen, discussion: fullDiscussionPage(100)},
+		ciCapMerged(rwIssue),
+	)
+	rwTrackRuns(e, 0)
+	seeded := utConsumed(50)
+	e.seed(State{Status: "running", ConsumedReviewNonces: seeded})
+
+	if err := e.run(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if got := e.after(1).ConsumedReviewNonces; !maps.Equal(got, seeded) {
+		t.Errorf("consumedReviewNonces has %d entries after a truncated read, want all %d kept", len(got), len(seeded))
+	}
+}
+
+// AC 57 at tick level: one tick with a complete discussion read prunes 50 consumed
+// nonces whose receipt comments are gone, keeping only the outstanding launch's
+// nonce, also on a tick that launches (a nonce it superseded is dropped at once).
+func TestUntrustedReview_AC57_ACompleteDiscussionReadPrunesConsumedNoncesToTheOutstandingLaunch(t *testing.T) {
+	t.Run("no outstanding launch", func(t *testing.T) {
+		e := newRWEnv(t, false, nil, rwGreen(utHeadA), ciCapMerged(rwIssue))
+		rwTrackRuns(e, 0)
+		e.seed(State{Status: "running", ConsumedReviewNonces: utConsumed(50)})
+
+		if err := e.run(); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+
+		if got := e.after(1).ConsumedReviewNonces; len(got) != 0 {
+			t.Errorf("consumedReviewNonces = %v, want every stale entry pruned", got)
+		}
+	})
+	t.Run("outstanding launch nonce kept", func(t *testing.T) {
+		e := newRWEnv(t, false, nil, rwGreen(utHeadA, humanComment(11, humanBody)), ciCapMerged(rwIssue))
+		rwTrackRuns(e, 0)
+		e.panes = panesByTick(liveReview())
+		seed := outstandingReviewState()
+		seed.ConsumedReviewNonces = utConsumed(50)
+		seed.ConsumedReviewNonces[testReviewNonce] = 99
+		e.seed(seed)
+
+		if err := e.run(); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+
+		s := e.after(1)
+		if want := map[string]int64{testReviewNonce: 99}; s.ReviewLaunch == nil || !maps.Equal(s.ConsumedReviewNonces, want) {
+			t.Errorf("launch %+v consumedReviewNonces = %v, want only the outstanding launch's %v", s.ReviewLaunch, s.ConsumedReviewNonces, want)
+		}
+	})
+	t.Run("launching tick", func(t *testing.T) {
+		const second = "and one more"
+		e := newRWEnv(t, false, nil, rwGreen(utHeadA, humanComment(11, humanBody), humanComment(13, second)), ciCapMerged(rwIssue))
+		runs := rwTrackRuns(e, 0)
+		e.panes = panesByTick(deadReview())
+		seed := outstandingReviewState()
+		seed.ReviewLaunch.Nonce = testWrongNonce
+		seed.PendingKeys = []string{"discussion:11", "discussion:13"}
+		seed.DiscussionRevisions["discussion:13"] = bodyRevision(second)
+		seed.ConsumedReviewNonces = utConsumed(50)
+		e.seed(seed)
+
+		if err := e.run(); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+
+		runs.requireAt(t, 1, "babysit-review")
+		s := e.after(1)
+		if s.ReviewLaunch == nil || s.ReviewLaunch.Nonce != testReviewNonce || len(s.ConsumedReviewNonces) != 0 {
+			t.Errorf("launch %+v consumedReviewNonces = %v, want the new launch outstanding and every stale or superseded nonce pruned", s.ReviewLaunch, s.ConsumedReviewNonces)
+		}
+	})
+}
+
+// Edge case 76: trusted discussion keys are not counted toward the untrusted
+// launch cap; a write-access author's edits keep launching once per revision.
+func TestUntrustedReview_Edge76_TrustedDiscussionKeysAreNotCountedTowardTheCap(t *testing.T) {
+	step := func(rev int) ciCapStep {
+		return utStep(utHeadA, nil, nil, humanComment(13, fmt.Sprintf("trusted ask v%d", rev)))
+	}
+	e := newRWEnv(t, false, utNonces(5), step(0), step(1), step(2), step(3), step(4), ciCapMerged(rwIssue))
+	runs := rwTrackRuns(e, 0)
+	e.seed(State{Status: "running"})
+
+	if err := e.run(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if n := launchArgsContaining(runs, "discussion:13"); n != 5 {
+		t.Errorf("launch arguments carrying discussion:13 = %d, want 5 (one per revision)", n)
+	}
+	if s := e.after(5); len(s.UntrustedLaunchCounts) != 0 || len(s.HeldUntrustedKeys) != 0 {
+		t.Errorf("counts %v held %v, want no untrusted bookkeeping for a trusted author", s.UntrustedLaunchCounts, s.HeldUntrustedKeys)
+	}
+}
+
+// Q&A 5: an untrusted-carrying launch at head A whose window is first seen ended
+// while the live PR head is empty defers the head check: that tick leaves
+// headChecked unset and raises no head-move hold. The next tick with a known head
+// B runs the check once and raises the hold naming `head:<B>`.
+func TestUntrustedReview_QA5_EmptyLiveHeadDefersTheHeadCheckToTheNextKnownHead(t *testing.T) {
+	servePermission(t, "stranger", "read")
+	page := []string{humanCommentBy(11, "stranger", humanBody), humanComment(13, "and one more")}
+	e := newRWEnv(t, true, nil,
+		utStep(utHeadA, nil, nil, page...), // 1: launch at A
+		utStep("", nil, nil, page...),      // 2: the window ended, live head unknown
+		utStep(utHeadB, nil, nil, page...), // 3: the window still ended, head B known
+		ciCapMerged(rwIssue),
+	)
+	runs := rwTrackRuns(e, 0)
+	e.panes = panesByTick("", deadReview(), deadReview())
+	e.seed(State{Status: "running"})
+
+	if err := e.run(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	runs.requireAt(t, 1, "babysit-review")
+	if s := e.after(1); s.ReviewLaunch == nil || s.ReviewLaunch.HeadSHA != utHeadA {
+		t.Fatalf("after the launch: ReviewLaunch = %+v, want headSha %s recorded", s.ReviewLaunch, utHeadA)
+	}
+	deferred := e.after(2)
+	if deferred.ReviewLaunch == nil || deferred.ReviewLaunch.HeadChecked {
+		t.Errorf("after the empty-head tick: ReviewLaunch = %+v, want it outstanding with headChecked unset", deferred.ReviewLaunch)
+	}
+	if deferred.HeadMoveHold != nil || deferred.AutomergeReason == reasonHeadMovedUntrustedReview {
+		t.Errorf("after the empty-head tick: hold %+v reason %q, want no head-move hold", deferred.HeadMoveHold, deferred.AutomergeReason)
+	}
+	checked := e.after(3)
+	if checked.ReviewLaunch == nil || !checked.ReviewLaunch.HeadChecked {
+		t.Errorf("after the known-head tick: ReviewLaunch = %+v, want headChecked set", checked.ReviewLaunch)
+	}
+	if h := checked.HeadMoveHold; h == nil || h.HeadSHA != utHeadB || h.LaunchHeadSHA != utHeadA {
+		t.Errorf("after the known-head tick: headMoveHold = %+v, want head %s from the launch at %s", h, utHeadB, utHeadA)
+	}
+	if want := "cenci babysit resolve 42 head:" + utHeadB; checked.AutomergeReason != reasonHeadMovedUntrustedReview || !strings.Contains(checked.AutomergeDetail, want) {
+		t.Errorf("after the known-head tick: reason %q detail %q, want %q naming %q", checked.AutomergeReason, checked.AutomergeDetail, reasonHeadMovedUntrustedReview, want)
+	}
+}
+
+// requireDeferredHeadCheck asserts that the tick after which s was saved kept the
+// outstanding launch nonce with its head check still owed and raised no hold.
+func requireDeferredHeadCheck(t *testing.T, s State, nonce string) {
+	t.Helper()
+	if s.ReviewLaunch == nil || s.ReviewLaunch.Nonce != nonce || s.ReviewLaunch.HeadChecked {
+		t.Errorf("after the empty-head tick: ReviewLaunch = %+v, want launch %s kept with headChecked unset", s.ReviewLaunch, nonce)
+	}
+	if s.HeadMoveHold != nil || s.AutomergeReason == reasonHeadMovedUntrustedReview {
+		t.Errorf("after the empty-head tick: hold %+v reason %q, want no head-move hold yet", s.HeadMoveHold, s.AutomergeReason)
+	}
+}
+
+// requireHeadMoveHold asserts a head-move hold at head raised for the launch at
+// launchHead with nonce, named in the recorded detail.
+func requireHeadMoveHold(t *testing.T, s State, head, launchHead, nonce string) {
+	t.Helper()
+	if h := s.HeadMoveHold; h == nil || h.HeadSHA != head || h.LaunchHeadSHA != launchHead || h.Nonce != nonce {
+		t.Errorf("headMoveHold = %+v, want head %s from the launch at %s (nonce %s)", h, head, launchHead, nonce)
+	}
+	if want := "cenci babysit resolve 42 head:" + head; s.AutomergeReason != reasonHeadMovedUntrustedReview || !strings.Contains(s.AutomergeDetail, want) {
+		t.Errorf("reason %q detail %q, want %q naming %q", s.AutomergeReason, s.AutomergeDetail, reasonHeadMovedUntrustedReview, want)
+	}
+}
+
+// Q&A 5: the deferred head check is durable. An untrusted-carrying launch at head
+// A whose receipt was accepted (its nonce consumed, so the launch is settled) is
+// not cleared on an ended-window tick whose live head is empty: the record, with
+// its head and headChecked unset, waits for the next tick with a known head B,
+// which raises the head-move hold naming `head:<B>`.
+func TestUntrustedReview_QA5_EmptyLiveHeadWithAnAcceptedReceiptKeepsTheLaunchUntilTheHeadIsKnown(t *testing.T) {
+	servePermission(t, "stranger", "read")
+	const second = "and one more"
+	page := []string{humanCommentBy(11, "stranger", humanBody), humanComment(13, second)}
+	withReceipt := append(slices.Clone(page), rwReceipt(21, testReviewNonce, rwEntry(11, humanBody, "no-action"), rwEntry(13, second, "addressed")))
+	e := newRWEnv(t, true, nil,
+		utStep(utHeadA, nil, nil, page...),        // 1: launch at A
+		utStep(utHeadA, nil, nil, withReceipt...), // 2: receipt accepted, window live
+		utStep("", nil, nil, withReceipt...),      // 3: the window ended, live head unknown
+		utStep(utHeadB, nil, nil, withReceipt...), // 4: head B known
+		ciCapMerged(rwIssue),
+	)
+	runs := rwTrackRuns(e, 0)
+	e.panes = panesByTick("", liveReview(), deadReview(), deadReview())
+	e.seed(State{Status: "running"})
+
+	if err := e.run(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	runs.requireAt(t, 1, "babysit-review")
+	if s := e.after(2); s.ConsumedReviewNonces[testReviewNonce] != 21 {
+		t.Fatalf("after the receipt tick: consumed %v, want the nonce consumed by comment 21", s.ConsumedReviewNonces)
+	}
+	requireDeferredHeadCheck(t, e.after(3), testReviewNonce)
+	checked := e.after(4)
+	if checked.ReviewLaunch != nil && !checked.ReviewLaunch.HeadChecked {
+		t.Errorf("after the known-head tick: ReviewLaunch = %+v, want the head check done", checked.ReviewLaunch)
+	}
+	requireHeadMoveHold(t, checked, utHeadB, utHeadA, testReviewNonce)
+}
+
+// Q&A 5: a comment:/review:-only launch is settled the moment it exists, yet one
+// that carried an untrusted review is not cleared on an ended-window tick with an
+// empty live head; the next tick with a known head B runs the owed check and
+// raises the head-move hold.
+func TestUntrustedReview_QA5_EmptyLiveHeadWithACommentOnlyLaunchKeepsTheLaunchUntilTheHeadIsKnown(t *testing.T) {
+	servePermission(t, "stranger", "read")
+	inline, reviews := []string{utInline(7, "reviewer")}, []string{utReview(9, "stranger")}
+	e := newRWEnv(t, true, nil,
+		utStep(utHeadA, inline, reviews), // 1: launch at A
+		utStep("", inline, reviews),      // 2: the window ended, live head unknown
+		utStep(utHeadB, inline, reviews), // 3: head B known
+		ciCapMerged(rwIssue),
+	)
+	runs := rwTrackRuns(e, 0)
+	hdThreads(e, 7, func(int) bool { return false })
+	e.panes = panesByTick("", deadReview(), deadReview())
+	e.seed(State{Status: "running"})
+
+	if err := e.run(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	runs.requireAt(t, 1, "babysit-review")
+	if l := e.after(1).ReviewLaunch; l == nil || !sameKeys(l.Keys, []string{"comment:7", "review:9"}) || !slices.Equal(l.TrustedKeys, []string{"comment:7"}) {
+		t.Fatalf("after the launch: ReviewLaunch = %+v, want comment:7 trusted and review:9 untrusted", l)
+	}
+	requireDeferredHeadCheck(t, e.after(2), testReviewNonce)
+	requireHeadMoveHold(t, e.after(3), utHeadB, utHeadA, testReviewNonce)
+}
+
+// Q&A 5/6: while an ended-window untrusted launch still owes its head check (the
+// live head is empty), a newly pending trusted key does not launch and does not
+// overwrite it. Once the head is known, the owed check runs first (raising the
+// hold, since the head moved) and the new key then launches.
+func TestUntrustedReview_QA5_EmptyLiveHeadDoesNotSupersedeAnUncheckedLaunch(t *testing.T) {
+	servePermission(t, "stranger", "read")
+	page := []string{humanCommentBy(11, "stranger", humanBody), humanComment(13, "and one more")}
+	later := append(slices.Clone(page), humanComment(15, "one more trusted ask"))
+	nonces := utNonces(2)
+	e := newRWEnv(t, true, nonces,
+		utStep(utHeadA, nil, nil, page...),  // 1: launch at A
+		utStep("", nil, nil, later...),      // 2: ended, head unknown, a trusted key is new
+		utStep(utHeadB, nil, nil, later...), // 3: head B known
+		ciCapMerged(rwIssue),
+	)
+	runs := rwTrackRuns(e, 0)
+	e.panes = panesByTick("", deadReview(), deadReview())
+	e.seed(State{Status: "running"})
+
+	if err := e.run(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	runs.requireAt(t, 1, "babysit-review")
+	runs.requireAt(t, 2)
+	deferred := e.after(2)
+	requireDeferredHeadCheck(t, deferred, nonces[0])
+	if !slices.Contains(deferred.PendingKeys, "discussion:15") || slices.Contains(deferred.LaunchedKeys, "discussion:15") {
+		t.Errorf("after the empty-head tick: pending %v launched %v, want discussion:15 pending and not launched", deferred.PendingKeys, deferred.LaunchedKeys)
+	}
+	runs.requireAt(t, 3, "babysit-review")
+	checked := e.after(3)
+	requireHeadMoveHold(t, checked, utHeadB, utHeadA, nonces[0])
+	if l := checked.ReviewLaunch; l == nil || l.Nonce != nonces[1] || !slices.Equal(l.Keys, []string{"discussion:15"}) || l.HeadSHA != utHeadB {
+		t.Errorf("after the known-head tick: ReviewLaunch = %+v, want the new launch of discussion:15 at %s", l, utHeadB)
+	}
+}
+
+// Q&A 8: untrusted comment:/review: keys ride along in a mixed launch: they are
+// carried in reviewLaunch.keys but left out of trustedKeys, and only discussion:
+// keys count toward the untrusted launch cap, so neither gets a count entry or is
+// held across more than fixCap launches while it stays pending.
+func TestUntrustedReview_QA8_UntrustedInlineAndReviewKeysRideAlongUncountedAndNeverCapped(t *testing.T) {
+	servePermission(t, "stranger", "read")
+	step := func(rev int) ciCapStep {
+		return utStep(utHeadA, []string{utInline(7, "stranger")}, []string{utReview(9, "stranger")},
+			humanComment(13, fmt.Sprintf("trusted ask v%d", rev)))
+	}
+	launches := fixCap + 1
+	steps := make([]ciCapStep, 0, launches+1)
+	for rev := range launches {
+		steps = append(steps, step(rev)) // each tick edits the trusted key, so each one launches
+	}
+	e := newRWEnv(t, false, utNonces(launches), append(steps, ciCapMerged(rwIssue))...)
+	runs := rwTrackRuns(e, 0)
+	hdThreads(e, 7, func(int) bool { return false })
+	e.seed(State{Status: "running"})
+
+	if err := e.run(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	for tick := 1; tick <= launches; tick++ {
+		runs.requireAt(t, tick, "babysit-review")
+	}
+	first := e.after(1).ReviewLaunch
+	if first == nil {
+		t.Fatal("no ReviewLaunch recorded, want the mixed launch")
+	}
+	if !sameKeys(first.Keys, []string{"comment:7", "review:9", "discussion:13"}) {
+		t.Errorf("keys = %v, want the untrusted comment:7 and review:9 carried with discussion:13", first.Keys)
+	}
+	if !slices.Equal(first.TrustedKeys, []string{"discussion:13"}) {
+		t.Errorf("trustedKeys = %v, want only discussion:13", first.TrustedKeys)
+	}
+	for tick := 1; tick <= launches; tick++ {
+		s := e.after(tick)
+		for _, k := range []string{"comment:7", "review:9"} {
+			if _, counted := s.UntrustedLaunchCounts[k]; counted {
+				t.Errorf("after tick %d: untrustedLaunchCounts = %v, want no entry for %s", tick, s.UntrustedLaunchCounts, k)
+			}
+			if slices.Contains(s.HeldUntrustedKeys, k) || !slices.Contains(s.PendingKeys, k) {
+				t.Errorf("after tick %d: held %v pending %v, want %s pending and not held", tick, s.HeldUntrustedKeys, s.PendingKeys, k)
+			}
+		}
+	}
+}
+
+// Q&A 9: a launch counted as dispatched with `cenci run` exit 3 counts toward the
+// untrusted launch cap, like any other dispatched launch.
+func TestUntrustedReview_QA9_ExitThreeDispatchCountsTowardTheUntrustedLaunchCap(t *testing.T) {
+	servePermission(t, "stranger", "read")
+	page := []string{humanCommentBy(11, "stranger", humanBody), humanComment(13, "and one more")}
+	e := newRWEnv(t, false, nil,
+		utStep(utHeadA, nil, nil, page...), // 1: exit 3
+		utStep(utHeadA, nil, nil, page...), // 2: the spawned window is live
+		ciCapMerged(rwIssue),
+	)
+	runs := rwTrackRuns(e, 3)
+	e.panes = panesByTick("", liveReview())
+	e.seed(State{Status: "running"})
+
+	if err := e.run(); err != nil {
+		t.Fatalf("Run: %v, want a spawned window counted as dispatched", err)
+	}
+
+	if want := []string{"babysit-review"}; !slices.Equal(runs.all(), want) {
+		t.Errorf("cenci run calls = %q, want exactly one", runs.all())
+	}
+	s := e.after(1)
+	if s.ReviewLaunch == nil || s.ReviewLaunch.Nonce != testReviewNonce || !sameKeys(s.ReviewLaunch.Keys, []string{"discussion:11", "discussion:13"}) {
+		t.Errorf("ReviewLaunch = %+v, want the exit-3 launch recorded with both keys", s.ReviewLaunch)
+	}
+	for _, tick := range []int{1, 2} {
+		if got := e.after(tick).UntrustedLaunchCounts; got["discussion:11"] != 1 || len(got) != 1 {
+			t.Errorf("after tick %d: untrustedLaunchCounts = %v, want discussion:11 counted once", tick, got)
+		}
 	}
 }

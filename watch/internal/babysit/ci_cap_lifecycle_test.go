@@ -63,6 +63,9 @@ type ciCapStep struct {
 	// comments is the pull-request review-comments page served to this tick;
 	// empty means no comments.
 	comments string
+	// reviews is the pull-request reviews page (`pulls/<pr>/reviews`, #1539)
+	// served to this tick; empty means no reviews.
+	reviews string
 	// discussion is the PR conversation page (`issues/<pr>/comments`, #1472)
 	// served to this tick; empty means no comments.
 	discussion string
@@ -208,6 +211,9 @@ func (e *ciCapEnv) gh(args ...string) (string, string, error) {
 			}
 		case len(args) > 1 && strings.Contains(args[1], "/pulls/42/reviews"):
 			e.reviewReads[e.viewN]++
+			if r := e.steps[e.viewN-1].reviews; r != "" {
+				return r, "", nil
+			}
 		case len(args) > 1 && strings.Contains(args[1], "/issues/42/comments"):
 			// #1472: the PR conversation page served to this tick.
 			e.discussionReads[e.viewN]++
