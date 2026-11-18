@@ -403,7 +403,22 @@ fi
 # and fourth rounds, this is unverified empirically (no `claude` binary
 # available in this environment to confirm Claude Code's Bash-matcher
 # semantics against the new entries).
-MIN_DENY_LEN=194
+#
+# A sixth round (#758) ran the matcher checks the earlier rounds could not: a
+# one-time manual `claude -p` probe run, recorded in
+# flow/docs/claude-bash-matcher-evidence.md (tested version, procedure, S1-S7
+# semantics, final-template coverage and positive controls). It showed that
+# Claude Code matches deny rules case-sensitively (probe S1, S2), lets `*` span
+# spaces and several flags (S3), does not strip `-C <path>` or `--git-dir=`
+# before matching (S4a, S4b), matches deny rules through an env-var prefix (S5)
+# and through `&&` compounds (S7), but not past an unmirrored global flag
+# (S6). It adds 82 entries (MATCHER_GAP_DENY_FORMS below): the four
+# `--git-dir`/`--work-tree` rules, the two blanket `-c` rules (case-sensitive
+# matching, so they are safe next to the allowed `git -C <path>`), and a
+# `-C <path>` mirror of every base group that had none — bringing the total to
+# 276. The floor is raised to 276 to catch regressions; the earlier floors
+# remain valid under the pre-sixth-round counts.
+MIN_DENY_LEN=276
 
 DENY_LABELS=("flow/templates/settings.json" ".claude/settings.json" "${SETTINGS_REF_REL} marker block")
 DENY_FILES=("${TEMPLATE_DENY}" "${CLAUDE_DENY}" "${REF_DENY}")
@@ -516,13 +531,14 @@ done
 #     of each source's deny array (filter the source array down to the
 #     entries that are members of the expected 40-element set, in the
 #     source's own order, then compare that slice to the expected array for
-#     exact ordered equality) — NOT to the full 194-entry array. Pinning the
+#     exact ordered equality) — NOT to the full deny array (194 entries when
+#     this decision was made, 276 since the sixth round). Pinning the
 #     position of unrelated entries (git config, git clean, ...) in three
 #     files would be churn without security value.
 #   - Uniqueness applies to each FULL deny array (all three sources are
 #     verified duplicate-free today).
-#   - MIN_DENY_LEN=194 and the 40 per-entry membership checks above stay
-#     unchanged.
+#   - MIN_DENY_LEN (194 at the time of this decision, 276 since the sixth
+#     round) and the 40 per-entry membership checks above stay unchanged.
 #   - A cross-source identity assertion (template == root == skill) is
 #     deliberately OUT OF SCOPE — it would forbid .claude/settings.json from
 #     ever carrying a repo-specific deny entry, a policy decision beyond
@@ -729,6 +745,138 @@ else
     fail "self-test: cannot run gh api predicate self-tests — flow/templates/settings.json ordered extraction failed (see above)"
 fi
 
+# ── Bash-matcher gap rules (#758) ────────────────────────────────────────
+# Rules the one-time `claude -p` probe run (flow/docs/claude-bash-matcher-
+# evidence.md) showed are needed. Each must be present, verbatim, in all three
+# copies: per-entry membership (any(.[]; . == $e)) like the gh api loop above,
+# so one surviving entry cannot satisfy the whole group. The array is in the
+# order the entries land in the template (each next to its base group).
+#   - four `--git-dir`/`--work-tree` rules: no earlier rule matched either flag
+#     (probes N-GD*, N-WT*, S4b);
+#   - blanket `-c` rules, added because probe S1 showed case-sensitive matching;
+#   - `-C <path>` mirrors for every base group probe S4a showed is not
+#     normalized (probes K-* in the record).
+MATCHER_GAP_DENY_FORMS=(
+    "Bash(git -C * push * +*)"
+    "Bash(git -C * push --mirror*)"
+    "Bash(git -C * push * --mirror*)"
+    "Bash(git -C * push --delete *)"
+    "Bash(git -C * push * --delete *)"
+    "Bash(git -C * push --no-verify*)"
+    "Bash(git -C * push * --no-verify*)"
+    "Bash(git -C * commit --no-verify*)"
+    "Bash(git -C * commit * --no-verify*)"
+    "Bash(git -C * clean)"
+    "Bash(git -C * clean *)"
+    "Bash(git -C * checkout -- *)"
+    "Bash(git -C * checkout * -- *)"
+    "Bash(git -C * restore)"
+    "Bash(git -C * restore *)"
+    "Bash(git -C * reflog expire*)"
+    "Bash(git -C * reflog delete*)"
+    "Bash(git -C * gc --prune*)"
+    "Bash(git -C * gc * --prune*)"
+    "Bash(git -C * update-ref)"
+    "Bash(git -C * update-ref *)"
+    "Bash(git -C * replace)"
+    "Bash(git -C * replace *)"
+    "Bash(git -C * branch -f *)"
+    "Bash(git -C * branch --force *)"
+    "Bash(git -c *)"
+    "Bash(git -C * -c *)"
+    "Bash(git --git-dir*)"
+    "Bash(git --work-tree*)"
+    "Bash(git -C * --git-dir*)"
+    "Bash(git -C * --work-tree*)"
+    "Bash(git -C * --config-env*)"
+    "Bash(git -C * --exec-path*)"
+    "Bash(git -C * config --global*)"
+    "Bash(git -C * config --system*)"
+    "Bash(git -C * config --local*)"
+    "Bash(git -C * config --file*)"
+    "Bash(git -C * config -f *)"
+    "Bash(git -C * config --unset*)"
+    "Bash(git -C * config * --unset*)"
+    "Bash(git -C * config --add *)"
+    "Bash(git -C * config * --add *)"
+    "Bash(git -C * config --replace-all*)"
+    "Bash(git -C * config * --replace-all*)"
+    "Bash(git -C * config --edit*)"
+    "Bash(git -C * config -e*)"
+    "Bash(git -C * config set *)"
+    "Bash(git -C * config unset *)"
+    "Bash(git -C * config core.hooksPath*)"
+    "Bash(git -C * config core.hookspath*)"
+    "Bash(git -C * config * core.hooksPath*)"
+    "Bash(git -C * config * core.hookspath*)"
+    "Bash(git -C * config core.sshCommand*)"
+    "Bash(git -C * config core.sshcommand*)"
+    "Bash(git -C * config * core.sshCommand*)"
+    "Bash(git -C * config * core.sshcommand*)"
+    "Bash(git -C * config core.pager*)"
+    "Bash(git -C * config * core.pager*)"
+    "Bash(git -C * config core.editor*)"
+    "Bash(git -C * config * core.editor*)"
+    "Bash(git -C * config core.fsmonitor*)"
+    "Bash(git -C * config * core.fsmonitor*)"
+    "Bash(git -C * config alias.*)"
+    "Bash(git -C * config * alias.*)"
+    "Bash(git -C * config credential.helper*)"
+    "Bash(git -C * config * credential.helper*)"
+    "Bash(git -C * config core.gitProxy*)"
+    "Bash(git -C * config core.gitproxy*)"
+    "Bash(git -C * config * core.gitProxy*)"
+    "Bash(git -C * config * core.gitproxy*)"
+    "Bash(git -C * config core.askPass*)"
+    "Bash(git -C * config core.askpass*)"
+    "Bash(git -C * config * core.askPass*)"
+    "Bash(git -C * config * core.askpass*)"
+    "Bash(git -C * config sequence.editor*)"
+    "Bash(git -C * config * sequence.editor*)"
+    "Bash(git -C * config gpg.program*)"
+    "Bash(git -C * config * gpg.program*)"
+    "Bash(git -C * config diff.external*)"
+    "Bash(git -C * config * diff.external*)"
+    "Bash(git -C * remote set-url*)"
+    "Bash(git -C * config remote.*)"
+)
+MATCHER_GAP_COUNT=82
+
+echo "case: MATCHER_GAP_DENY_FORMS has exactly ${MATCHER_GAP_COUNT} elements"
+if [[ "${#MATCHER_GAP_DENY_FORMS[@]}" -eq "${MATCHER_GAP_COUNT}" ]]; then
+    pass
+else
+    fail "MATCHER_GAP_DENY_FORMS: expected exactly ${MATCHER_GAP_COUNT} elements, found ${#MATCHER_GAP_DENY_FORMS[@]}"
+fi
+
+echo "case: MATCHER_GAP_DENY_FORMS has ${MATCHER_GAP_COUNT} distinct elements (no self-duplicates)"
+if ! MATCHER_GAP_DISTINCT_COUNT="$(printf '%s\n' "${MATCHER_GAP_DENY_FORMS[@]}" | sort -u | wc -l | tr -d ' ')"; then
+    fail "MATCHER_GAP_DENY_FORMS: failed to compute distinct element count: ${MATCHER_GAP_DISTINCT_COUNT}"
+elif [[ "${MATCHER_GAP_DISTINCT_COUNT}" -eq "${MATCHER_GAP_COUNT}" ]]; then
+    pass
+else
+    fail "MATCHER_GAP_DENY_FORMS: expected ${MATCHER_GAP_COUNT} distinct elements, found ${MATCHER_GAP_DISTINCT_COUNT}"
+fi
+
+for i in 0 1 2; do
+    label="${DENY_LABELS[$i]}"
+    file="${DENY_FILES[$i]}"
+    ok="${DENY_OKS[$i]}"
+
+    for form in "${MATCHER_GAP_DENY_FORMS[@]}"; do
+        echo "case: ${label} denies matcher-gap form '${form}'"
+        if [[ "${ok}" -ne 1 ]]; then
+            fail "${label}: cannot verify presence of '${form}' — extraction failed (see above)"
+            continue
+        fi
+        if jq -e --arg e "${form}" 'any(.[]; . == $e)' "${file}" >/dev/null 2>&1; then
+            pass
+        else
+            fail "${label}: permissions.deny missing matcher-gap entry '${form}'"
+        fi
+    done
+done
+
 # ── Negative guard: boundary-unsafe legacy forms (#739, Q3) ──────────────
 # Bash(git push --force:*) and Bash(git push --force*) also match
 # `git push --force-with-lease`, which Phase 9's re-run push path in
@@ -840,9 +988,13 @@ fi
 # and in neither SKILL.md nor phases/guidance-settings.md. The existence
 # check on the reference file pairs with the absence checks, so a zero count
 # elsewhere cannot pass because a file was emptied.
+# #758 replaced the pre-move `-C <path>` coverage sentence (it said coverage
+# was only for the highest-value groups, pending a Bash-matcher check that
+# could not run) with the verified wording below, so the `-C` anchor now pins
+# the rewritten prose rather than the pre-move text.
 RATIONALE_SENTENCES=(
     'Deny always overrides allow, so a permitted form must never be caught by a deny rule.'
-    '`-C <path>` prefix coverage is now added for the highest-value groups'
+    'Claude Code does not strip `-C <path>` or `--git-dir=<path>` before matching a deny rule, so every deny group carries its own `-C`-prefixed mirror (probe S4a, probe S4b).'
     '`gh api` destructive-method coverage denies `DELETE`/`PUT`'
     'this residual list is illustrative of known gaps under literal prefix matching, not exhaustive.'
 )
@@ -864,6 +1016,427 @@ if SETTINGS_REF_CONTENT="$(cat "${SETTINGS_REF_MD}" 2>&1)" \
     done
 else
     fail "could not read settings-template.md, SKILL.md or guidance-settings.md for the rationale-prose check"
+fi
+
+# ── Evidence-doc contract (#758) ─────────────────────────────────────
+# The unverified-matcher history above was closed by a one-time manual
+# `claude -p` probe run recorded in flow/docs/claude-bash-matcher-evidence.md.
+# These cases keep the prose and the record honest: the retired phrases are
+# gone (paired with an existence anchor so an emptied file cannot pass), every
+# `probe <ID>` the prose cites resolves to a row in the record, and the
+# committed record carries no host paths, accounts, tokens or session IDs.
+EVIDENCE_REL="flow/docs/claude-bash-matcher-evidence.md"
+EVIDENCE_MD="${REPO_ROOT}/${EVIDENCE_REL}"
+
+RETIRED_PHRASES=(
+    'pending empirical Claude Code Bash-matcher verification'
+    'no `claude` CLI installed'
+)
+RETIRED_EXISTENCE_ANCHOR='Deny always overrides allow, so a permitted form must never be caught by a deny rule.'
+
+echo "case: ${EVIDENCE_REL} exists and is non-empty"
+if [[ -r "${EVIDENCE_MD}" && -s "${EVIDENCE_MD}" ]]; then
+    pass
+else
+    fail "${EVIDENCE_REL}: evidence doc missing, unreadable or empty"
+fi
+
+echo "case: settings-template.md no longer carries the retired unverified-matcher phrases"
+if RETIRED_REF_CONTENT="$(cat "${SETTINGS_REF_MD}" 2>&1)"; then
+    if [[ "${RETIRED_REF_CONTENT}" != *"${RETIRED_EXISTENCE_ANCHOR}"* ]]; then
+        fail "${SETTINGS_REF_REL}: cannot verify absence of the retired phrases — existence anchor missing: [${RETIRED_EXISTENCE_ANCHOR}]"
+    else
+        for phrase in "${RETIRED_PHRASES[@]}"; do
+            if [[ "${RETIRED_REF_CONTENT}" == *"${phrase}"* ]]; then
+                fail "${SETTINGS_REF_REL}: still carries retired phrase: [${phrase}]"
+            else
+                pass
+            fi
+        done
+    fi
+else
+    fail "${SETTINGS_REF_REL}: could not read file for the retired-phrase check: ${RETIRED_REF_CONTENT}"
+fi
+
+# Probe IDs start with one capital letter (S semantics, K -C coverage, G gh api,
+# N new forms, H hardening forms, P positive controls) and take one of two
+# shapes: digits with an optional lowercase suffix of at most two letters (S4a,
+# S4ac for the paired control of S4a, G01, H10), or a
+# hyphenated capital tag with optional digits (K-FP1, K-PX, N-CU1). Each cited
+# ID must head a table row in the evidence doc.
+#
+# Extraction captures the WHOLE token after `probe ` (every letter, digit and
+# hyphen up to the next other character) and validates it against the shape
+# afterwards, so a cited `probe S4ac` can never be truncated to `S4a` and then
+# resolve against a different row, and a `probe <Token>` the shape does not
+# accept fails instead of being silently skipped. Lowercase prose such as
+# "probe run" or "probe rows" is not a citation and is not captured.
+PROBE_ID_SHAPE='^[SKGNHP](-[A-Z]+[0-9]*|[0-9]+[a-z]{0,2})$'
+# probe_id_shape_ok <id> — pure: returns 0 only for a well-formed probe ID.
+probe_id_shape_ok() {
+    [[ "$1" =~ ${PROBE_ID_SHAPE} ]]
+}
+# probe_tokens <file> — pure: prints every `probe <Token>` citation, one per line.
+probe_tokens() {
+    grep -oE 'probe [A-Z0-9][A-Za-z0-9-]*' "$1"
+}
+# evidence_row_exists <id> <file> — pure: 0 when a table row heads with the ID.
+evidence_row_exists() {
+    grep -Eq "^[|] $1 [|]" "$2"
+}
+# evidence_observed <id> <file> — pure (no fail()): prints the `observed`
+# column (the 5th data column: ID, probe command, rule(s), expected, observed)
+# of the row headed by the ID and returns 0. Returns non-zero when the row is
+# missing, grep itself failed, the ID heads more than one row, or the row does
+# not have exactly EVIDENCE_ROW_PIPES `|` characters (six cells): a cell that
+# holds a literal pipe shifts every later column, so the value read as
+# `observed` would come from the wrong cell.
+EVIDENCE_ROW_PIPES=7
+evidence_observed() {
+    local id="$1" file="$2" rows rc pipes _lead _id _cmd _rules _expected obs _rest
+    rows="$(grep -E "^[|] ${id} [|]" "${file}")"
+    rc=$?
+    [[ "${rc}" -eq 0 && -n "${rows}" ]] || return 1
+    [[ "${rows}" != *$'\n'* ]] || return 1
+    pipes="${rows//[^|]/}"
+    [[ "${#pipes}" -eq "${EVIDENCE_ROW_PIPES}" ]] || return 1
+    IFS='|' read -r _lead _id _cmd _rules _expected obs _rest <<< "${rows}"
+    obs="${obs//[[:space:]]/}"
+    printf '%s' "${obs}"
+    [[ -n "${obs}" ]]
+}
+
+PROBE_FIXTURE="${WORK_DIR}/probe-token-fixture.md"
+printf '%s\n' 'bogus probe Z99x and probe S4acd, then probe S4a, probe S4ac, probe S4bc, probe S4b, probe G01, probe H10, probe N-CU1, probe P1, probe K-CG01 and probe N-NP2; a probe run and probe rows are prose.' > "${PROBE_FIXTURE}"
+PROBE_FIXTURE_EXPECTED=$'probe Z99x\nprobe S4acd\nprobe S4a\nprobe S4ac\nprobe S4bc\nprobe S4b\nprobe G01\nprobe H10\nprobe N-CU1\nprobe P1\nprobe K-CG01\nprobe N-NP2'
+# S4ac and S4bc are real rows (the paired no-deny controls of S4a and S4b), so
+# a citation of either is legitimate and must be accepted. Z99x has no valid
+# prefix and S4acd has a third suffix letter: both must be rejected, and S4acd
+# must be captured whole rather than truncated to the real row S4ac.
+echo "case: probe citation extraction self-test — whole tokens captured, real suffixed IDs accepted, bogus shapes rejected"
+if ! fixture_tokens="$(probe_tokens "${PROBE_FIXTURE}")"; then
+    fail "self-test: probe_tokens failed on the citation fixture"
+elif [[ "${fixture_tokens}" != "${PROBE_FIXTURE_EXPECTED}" ]]; then
+    fail "self-test: probe_tokens did not capture whole tokens, got: ${fixture_tokens}"
+else
+    shape_failures=""
+    for shape_id in Z99x S4acd; do
+        if probe_id_shape_ok "${shape_id}"; then
+            shape_failures="${shape_failures} ${shape_id}(accepted)"
+        fi
+    done
+    for shape_id in S4a S4b S4ac S4bc S1c G01 H10 N-CU1 P1 K-CG01 N-NP2 N-EV1; do
+        probe_id_shape_ok "${shape_id}" || shape_failures="${shape_failures} ${shape_id}(rejected)"
+    done
+    if [[ -n "${shape_failures}" ]]; then
+        fail "self-test: probe_id_shape_ok misjudged IDs:${shape_failures}"
+    else
+        pass
+    fi
+fi
+
+# A well-formed row has six cells, so exactly seven unescaped `|` characters.
+# A cell with a literal pipe (escaped `\|` or not) shifts every later column,
+# so the observed value would be read from the wrong cell; and a repeated row
+# ID would silently resolve to whichever row came first.
+OBSERVED_FIXTURE="${WORK_DIR}/observed-fixture.md"
+printf '%s\n' \
+    '| X1 | cmd | rule | denied (desired); executed is a known gap | executed | stub log |' \
+    '| X2 | cmd | rule | executed | denied | tool result |' \
+    '| X4 | a \| b | rule | executed | denied | tool result |' \
+    '| X5 | cmd | rule | extra | executed | denied | tool result |' \
+    '| X6 | cmd | rule | executed | denied | tool result |' \
+    '| X6 | cmd | rule | executed | executed | tool result |' > "${OBSERVED_FIXTURE}"
+echo "case: evidence_observed self-test — reads the observed column, rejects shifted columns and duplicate IDs"
+if ! x1="$(evidence_observed X1 "${OBSERVED_FIXTURE}")" || ! x2="$(evidence_observed X2 "${OBSERVED_FIXTURE}")"; then
+    fail "self-test: evidence_observed failed on a well-formed fixture row"
+elif [[ "${x1}" != "executed" || "${x2}" != "denied" ]]; then
+    fail "self-test: evidence_observed read the wrong column (X1=${x1}, X2=${x2})"
+elif evidence_observed X3 "${OBSERVED_FIXTURE}" >/dev/null; then
+    fail "self-test: evidence_observed returned success for a row that does not exist"
+elif evidence_observed X4 "${OBSERVED_FIXTURE}" >/dev/null; then
+    fail "self-test: evidence_observed accepted a row with an escaped pipe in a cell (columns shifted)"
+elif evidence_observed X5 "${OBSERVED_FIXTURE}" >/dev/null; then
+    fail "self-test: evidence_observed accepted a row with an extra column separator"
+elif evidence_observed X6 "${OBSERVED_FIXTURE}" >/dev/null; then
+    fail "self-test: evidence_observed accepted a duplicated row ID instead of failing"
+else
+    pass
+fi
+
+CITED_IDS_FILE="${WORK_DIR}/cited-probe-ids.txt"
+echo "case: settings-template.md cites at least one 'probe <ID>' (non-vacuity)"
+probe_tokens "${SETTINGS_REF_MD}" > "${CITED_IDS_FILE}"
+cited_status=$?
+if [[ "${cited_status}" -gt 1 ]]; then
+    fail "${SETTINGS_REF_REL}: grep failed to extract probe citations (exit ${cited_status})"
+elif [[ ! -s "${CITED_IDS_FILE}" ]]; then
+    fail "${SETTINGS_REF_REL}: no 'probe <ID>' citation found — every remaining gap sentence must cite its evidence row"
+else
+    pass
+fi
+
+echo "case: every 'probe <Token>' in settings-template.md is a well-formed probe ID"
+if [[ ! -s "${CITED_IDS_FILE}" ]]; then
+    fail "${SETTINGS_REF_REL}: cannot check citation shapes — none extracted (see above)"
+else
+    malformed=""
+    while IFS= read -r cited; do
+        probe_id_shape_ok "${cited#probe }" || malformed="${malformed} ${cited#probe }"
+    done < "${CITED_IDS_FILE}"
+    if [[ -n "${malformed}" ]]; then
+        fail "${SETTINGS_REF_REL}: 'probe <Token>' citations that are not a well-formed probe ID:${malformed}"
+    else
+        pass
+    fi
+fi
+
+echo "case: every probe <ID> cited in settings-template.md resolves to a row in ${EVIDENCE_REL}"
+if [[ ! -r "${EVIDENCE_MD}" ]]; then
+    fail "${EVIDENCE_REL}: cannot resolve probe citations — evidence doc missing or unreadable"
+elif [[ ! -s "${CITED_IDS_FILE}" ]]; then
+    fail "${SETTINGS_REF_REL}: cannot resolve probe citations — none extracted (see above)"
+else
+    unresolved=""
+    resolved_count=0
+    while IFS= read -r cited; do
+        cited_id="${cited#probe }"
+        if evidence_row_exists "${cited_id}" "${EVIDENCE_MD}"; then
+            resolved_count=$((resolved_count + 1))
+        else
+            unresolved="${unresolved} ${cited_id}"
+        fi
+    done < "${CITED_IDS_FILE}"
+    if [[ -n "${unresolved}" ]]; then
+        fail "${SETTINGS_REF_REL}: cites probe IDs with no row in ${EVIDENCE_REL}:${unresolved}"
+    elif [[ "${resolved_count}" -eq 0 ]]; then
+        fail "probe citation resolution is vacuous: no citation was checked"
+    else
+        pass
+    fi
+fi
+
+# Direction check: a row existing is not enough, the prose cites some rows as
+# denied coverage and others as known gaps (`executed`), and a row whose
+# observed column says the opposite would turn the citation into a false claim.
+# The three lists below pin the observed value of every row the prose leans on;
+# they are set from the final-template table as recorded, and an ID in the
+# wrong list (or a row edited to a different observed value) fails here.
+# Rows judged `inconclusive` (S5c, H10, N-EV1) are cited only as "unjudged".
+EVIDENCE_DENIED_IDS=(
+    S3 S4p S5 S7
+    N-CU1 N-CU2 N-BL3 N-GD1 N-WT1 N-FD1 N-FD2 N-FD3
+    G01 G02 G03 G04 G05 G06 G07 G08 G09 G10 G13 G14 G15 G16
+    K-CG01 H1 H2 H3 H4 H6 H9
+)
+EVIDENCE_EXECUTED_IDS=(
+    S1 S2 S4a S4b S6
+    P1 P2 P3 P4 P5
+    N-CG1 N-CG2 N-NP1 N-NP2 N-NP3 N-NP4 N-FD4 N-FD5
+    G11 H11 H12 H13 H14 H15 H16
+)
+EVIDENCE_INCONCLUSIVE_IDS=(S5c H10 N-EV1)
+
+# Coverage of the lists themselves: the direction check below only looks at the
+# IDs the lists name, so a cited probe ID that is in none of them would never
+# have its observed value checked, and an ID in two lists would be demanded to
+# be both denied and executed (or silently satisfied by whichever list agrees).
+# direction_list_problems <cited-ids-file> — pure (no fail(), safe in $(...)):
+# prints one problem per line and returns non-zero when there is any.
+direction_list_problems() {
+    local cited_file="$1" cited cited_id member other count hits problems="" seen=" " dup_seen=" "
+    local -a all_ids=("${EVIDENCE_DENIED_IDS[@]}" "${EVIDENCE_EXECUTED_IDS[@]}" "${EVIDENCE_INCONCLUSIVE_IDS[@]}")
+    while IFS= read -r cited; do
+        cited_id="${cited#probe }"
+        case "${seen}" in *" ${cited_id} "*) continue ;; esac
+        seen="${seen}${cited_id} "
+        hits=0
+        for member in "${all_ids[@]}"; do
+            if [[ "${member}" == "${cited_id}" ]]; then
+                hits=$((hits + 1))
+            fi
+        done
+        if [[ "${hits}" -eq 0 ]]; then
+            problems="${problems}cited probe ${cited_id} is in none of the direction lists (its observed value is never checked)"$'\n'
+        fi
+    done < "${cited_file}"
+    for member in "${all_ids[@]}"; do
+        case "${dup_seen}" in *" ${member} "*) continue ;; esac
+        count=0
+        for other in "${all_ids[@]}"; do
+            if [[ "${other}" == "${member}" ]]; then
+                count=$((count + 1))
+            fi
+        done
+        if [[ "${count}" -gt 1 ]]; then
+            dup_seen="${dup_seen}${member} "
+            problems="${problems}probe ${member} appears ${count} times across the direction lists (it must be in exactly one)"$'\n'
+        fi
+    done
+    printf '%s' "${problems}"
+    [[ -z "${problems}" ]]
+}
+
+LIST_FIXTURE_CITED="${WORK_DIR}/direction-list-cited.txt"
+printf '%s\n' 'probe A1' 'probe A2' 'probe A2' 'probe B1' > "${LIST_FIXTURE_CITED}"
+echo "case: direction-list coverage self-test — an unlisted citation and a duplicated ID are each reported"
+list_clean_out="$(EVIDENCE_DENIED_IDS=(A1) EVIDENCE_EXECUTED_IDS=(A2) EVIDENCE_INCONCLUSIVE_IDS=(B1 C1); direction_list_problems "${LIST_FIXTURE_CITED}")"
+list_clean_rc=$?
+list_missing_out="$(EVIDENCE_DENIED_IDS=(A1) EVIDENCE_EXECUTED_IDS=(A2) EVIDENCE_INCONCLUSIVE_IDS=(C1); direction_list_problems "${LIST_FIXTURE_CITED}")"
+list_missing_rc=$?
+list_dup_out="$(EVIDENCE_DENIED_IDS=(A1 A2) EVIDENCE_EXECUTED_IDS=(A2) EVIDENCE_INCONCLUSIVE_IDS=(B1); direction_list_problems "${LIST_FIXTURE_CITED}")"
+list_dup_rc=$?
+if [[ "${list_clean_rc}" -ne 0 ]]; then
+    fail "self-test: direction_list_problems rejected a consistent fixture: ${list_clean_out}"
+elif [[ "${list_missing_rc}" -eq 0 || "${list_missing_out}" != *"cited probe B1 is in none"* ]]; then
+    fail "self-test: direction_list_problems missed a cited ID that is in no list (rc=${list_missing_rc}, out=${list_missing_out})"
+elif [[ "${list_dup_rc}" -eq 0 || "${list_dup_out}" != *"probe A2 appears 2 times"* ]]; then
+    fail "self-test: direction_list_problems missed an ID present in two lists (rc=${list_dup_rc}, out=${list_dup_out})"
+else
+    pass
+fi
+
+echo "case: every cited probe ID is in exactly one direction list, and no ID is in two"
+if [[ ! -s "${CITED_IDS_FILE}" ]]; then
+    fail "${SETTINGS_REF_REL}: cannot check direction-list coverage — no citations extracted (see above)"
+elif list_problems="$(direction_list_problems "${CITED_IDS_FILE}")"; then
+    pass
+else
+    fail "direction-list coverage: ${list_problems//$'\n'/; }"
+fi
+
+# check_evidence_direction <observed> <id>... — one pass/fail per ID.
+check_evidence_direction() {
+    local want="$1" id got
+    shift
+    for id in "$@"; do
+        if ! got="$(evidence_observed "${id}" "${EVIDENCE_MD}")"; then
+            fail "${EVIDENCE_REL}: no readable row (or no observed column) for ${id}; expected ${want}"
+        elif [[ "${got}" != "${want}" ]]; then
+            fail "${EVIDENCE_REL}: row ${id} observed '${got}', but the direction list expects ${want} (the settings-template.md prose and the evidence-doc rows that lean on it cite it that way)"
+        else
+            pass
+        fi
+    done
+}
+
+echo "case: direction allowlists are non-empty (non-vacuity)"
+if [[ "${#EVIDENCE_DENIED_IDS[@]}" -eq 0 || "${#EVIDENCE_EXECUTED_IDS[@]}" -eq 0 || "${#EVIDENCE_INCONCLUSIVE_IDS[@]}" -eq 0 ]]; then
+    fail "evidence direction allowlists are empty: the direction check would be vacuous"
+else
+    pass
+fi
+
+echo "case: rows cited as denied coverage are observed denied"
+check_evidence_direction denied "${EVIDENCE_DENIED_IDS[@]}"
+echo "case: rows cited as known gaps, controls or scope statements are observed executed"
+check_evidence_direction executed "${EVIDENCE_EXECUTED_IDS[@]}"
+echo "case: rows cited as unjudged are observed inconclusive"
+check_evidence_direction inconclusive "${EVIDENCE_INCONCLUSIVE_IDS[@]}"
+
+# evidence_leak_hits <file> — pure (no fail(), safe in $(...)): prints a
+# comma-separated list of leak patterns found and returns 0 only when none.
+# A grep exit status above 1 (unreadable or missing file, bad pattern) is
+# reported as a hit too: "could not scan" must never read as "no match".
+EVIDENCE_LEAK_LITERALS=('/home/' '/Users/' '/workspace' '/root/' '/mnt/' '/var/' '/private/' '/tmp/claude' '/tmp/cenci/' 'ghp_' 'gho_' 'github_pat_' 'sk-ant' 'toolu_')
+EVIDENCE_UUID_RE='[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
+evidence_leak_hits() {
+    local file="$1" pat hits="" rc
+    for pat in "${EVIDENCE_LEAK_LITERALS[@]}"; do
+        grep -Fq -- "${pat}" "${file}" 2>/dev/null
+        rc=$?
+        if [[ "${rc}" -eq 0 ]]; then
+            hits="${hits}${hits:+, }${pat}"
+        elif [[ "${rc}" -gt 1 ]]; then
+            hits="${hits}${hits:+, }scan error (grep exit ${rc}) for ${pat}"
+        fi
+    done
+    grep -Eq -- "${EVIDENCE_UUID_RE}" "${file}" 2>/dev/null
+    rc=$?
+    if [[ "${rc}" -eq 0 ]]; then
+        hits="${hits}${hits:+, }session-id-shaped UUID"
+    elif [[ "${rc}" -gt 1 ]]; then
+        hits="${hits}${hits:+, }scan error (grep exit ${rc}) for the UUID pattern"
+    fi
+    printf '%s' "${hits}"
+    [[ -z "${hits}" ]]
+}
+
+# Self-test: the detector is not vacuous (a leaking fixture is rejected, a
+# clean placeholder-only fixture is accepted).
+LEAK_FIXTURE="${WORK_DIR}/evidence-leak-fixture.md"
+CLEAN_FIXTURE="${WORK_DIR}/evidence-clean-fixture.md"
+printf '%s\n' '| S1 | git -C /home/someone/repo status |' > "${LEAK_FIXTURE}"
+printf '%s\n' '| S1 | git -C <repo> status |' > "${CLEAN_FIXTURE}"
+echo "case: evidence leak detector self-test — leaking and clean fixtures"
+if evidence_leak_hits "${LEAK_FIXTURE}" >/dev/null; then
+    fail "self-test: evidence_leak_hits accepted a fixture containing a home path (detector is vacuous)"
+elif ! evidence_leak_hits "${CLEAN_FIXTURE}" >/dev/null; then
+    fail "self-test: evidence_leak_hits rejected a placeholder-only fixture (positive control failed)"
+else
+    pass
+fi
+
+# Every branch of the detector gets its own fixture: one for the UUID pattern
+# (its text is assembled at runtime from fragments so this test file never
+# contains a real-looking UUID that a scan of the repository would flag) and one
+# generated per entry of EVIDENCE_LEAK_LITERALS, so adding a literal to the
+# detector automatically adds a fixture that must trip it. The three arrays are
+# parallel (name, text, the pattern the report must name); the loop is driven by
+# their length, and a length mismatch or an empty want pattern (`*""*` matches
+# any report) fails the case instead of letting a fixture pass vacuously.
+LEAK_FIXTURE_NAMES=(uuid)
+LEAK_FIXTURE_WANTS=('UUID')
+LEAK_FIXTURE_TEXTS=("$(printf '| S1 | session %s-%s-%s-%s-%s |' 12345678 1234 1234 1234 123456789012)")
+for leak_literal in "${EVIDENCE_LEAK_LITERALS[@]}"; do
+    LEAK_FIXTURE_NAMES+=("literal-${#LEAK_FIXTURE_NAMES[@]}")
+    LEAK_FIXTURE_WANTS+=("${leak_literal}")
+    LEAK_FIXTURE_TEXTS+=("$(printf '| S1 | x%sx |' "${leak_literal}")")
+done
+echo "case: evidence leak detector self-test — the UUID and every leak literal each get a fixture that is rejected"
+leak_branch_failures=""
+leak_fixture_count="${#LEAK_FIXTURE_TEXTS[@]}"
+if [[ "${#LEAK_FIXTURE_NAMES[@]}" -ne "${leak_fixture_count}" || "${#LEAK_FIXTURE_WANTS[@]}" -ne "${leak_fixture_count}" ]]; then
+    leak_branch_failures=" parallel fixture arrays differ in length (names=${#LEAK_FIXTURE_NAMES[@]}, texts=${leak_fixture_count}, wants=${#LEAK_FIXTURE_WANTS[@]})"
+elif [[ "${leak_fixture_count}" -ne $(( ${#EVIDENCE_LEAK_LITERALS[@]} + 1 )) ]]; then
+    leak_branch_failures=" expected one UUID fixture plus one per leak literal, got ${leak_fixture_count} fixtures for ${#EVIDENCE_LEAK_LITERALS[@]} literals"
+else
+    for ((idx = 0; idx < leak_fixture_count; idx++)); do
+        if [[ -z "${LEAK_FIXTURE_WANTS[$idx]}" ]]; then
+            leak_branch_failures="${leak_branch_failures} ${LEAK_FIXTURE_NAMES[$idx]}(empty want pattern)"
+            continue
+        fi
+        leak_file="${WORK_DIR}/evidence-leak-${LEAK_FIXTURE_NAMES[$idx]}.md"
+        printf '%s\n' "${LEAK_FIXTURE_TEXTS[$idx]}" > "${leak_file}"
+        if leak_out="$(evidence_leak_hits "${leak_file}")"; then
+            leak_branch_failures="${leak_branch_failures} ${LEAK_FIXTURE_NAMES[$idx]}(accepted)"
+        elif [[ "${leak_out}" != *"${LEAK_FIXTURE_WANTS[$idx]}"* ]]; then
+            leak_branch_failures="${leak_branch_failures} ${LEAK_FIXTURE_NAMES[$idx]}(reported: ${leak_out})"
+        fi
+    done
+fi
+if [[ -n "${leak_branch_failures}" ]]; then
+    fail "self-test: evidence_leak_hits missed or mislabelled fixtures:${leak_branch_failures}"
+else
+    pass
+fi
+
+echo "case: evidence leak detector self-test — an unreadable file is a failure, not 'no match'"
+if evidence_leak_hits "${WORK_DIR}/no-such-evidence-file.md" >/dev/null; then
+    fail "self-test: evidence_leak_hits reported a nonexistent file as clean (grep exit status >1 was read as no match)"
+else
+    pass
+fi
+
+echo "case: ${EVIDENCE_REL} contains no absolute host paths, accounts, tokens or session IDs"
+if [[ ! -r "${EVIDENCE_MD}" ]]; then
+    fail "${EVIDENCE_REL}: cannot verify sanitization — evidence doc missing or unreadable"
+elif ! grep -Fq -- '<repo>' "${EVIDENCE_MD}"; then
+    fail "${EVIDENCE_REL}: sanitization check is vacuous — no '<repo>' placeholder found in the record"
+elif leak_hits="$(evidence_leak_hits "${EVIDENCE_MD}")"; then
+    pass
+else
+    fail "${EVIDENCE_REL}: contains host-specific or sensitive content: ${leak_hits}"
 fi
 
 # ── Summary ──────────────────────────────────────────────────────────

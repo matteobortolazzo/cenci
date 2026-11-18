@@ -155,7 +155,7 @@ markers the hook blocks:
 
 This block lives in the same `.claude/settings.json` as the `enabledPlugins` key shown above;
 if the repo already has a settings file — including this repo's own, which already has
-roughly 200 lines of `permissions.deny` — merge these keys in rather than replacing the file:
+roughly 275 lines of `permissions.deny` — merge these keys in rather than replacing the file:
 `permissions.deny` is a list to append to, not replace.
 
 Bare `**/`-prefixed patterns only cover the project tree (they resolve relative to the
