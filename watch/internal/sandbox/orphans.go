@@ -45,14 +45,14 @@ import (
 // If a process's environ fails to read, parentEnvironScript first tries its
 // same-user launcher ancestry. The child retains its own PID/start time. If
 // ownership remains unknown and the process still exists, the scan emits a
-// raw I/O fact — `__UNREADABLE__\t<pid>` — rather than
-// silently skipping it. All classification — skip-empty-pane,
-// skip-malformed-pane, skip-init, launch-ID and (socket, pane) liveness,
-// fail-open on a missing/malformed socket or launch ID, reap-dead, and
-// counting/reporting __UNREADABLE__ markers (including PID-1 exclusion) —
-// happens host-side in OrphanScanner.ScanContainer, never inside this canned
-// scan; the reaper's signaling stays in launcher.ReapOrphans, which drives the
-// TERM→poll→KILL escalation and PID-reuse detection in escalate.go.
+// raw I/O fact — `__UNREADABLE__\t<pid>` — rather than silently skipping it.
+// All classification — skip-empty-pane, skip-malformed-pane, skip-init,
+// launch-ID and (socket, pane) liveness, fail-open on a missing/malformed/
+// unresolved socket or malformed launch ID, reap-dead, and counting/reporting
+// __UNREADABLE__ markers (including PID-1 exclusion) — happens host-side in
+// OrphanScanner.ScanContainer, never inside this canned scan; the reaper's
+// signaling stays in launcher.ReapOrphans, which drives the TERM→poll→KILL
+// escalation and PID-reuse detection in escalate.go.
 const reapScanScript = parentEnvironScript + `for e in /proc/[0-9]*/environ; do
   [ -f "$e" ] || continue
   p=${e#/proc/}; p=${p%/environ}
@@ -106,11 +106,11 @@ const containerCmdWaitDelay = 5 * time.Second
 
 // OrphanRowClass is the host-side classification of one scanned process row.
 // The precedence ScanContainer applies is: malformed pane, container init,
-// missing/malformed/unresolved socket, malformed launch ID, then liveness: a
-// row carrying a launch ID is live iff that ID is recorded (@cenci-launch-id)
-// on a live pane of its socket (strict: a live pane without that ID does not
-// keep it alive); a row without one is live iff its (socket, pane) pair is a
-// live pane (the pre-#1252 rule).
+// missing/malformed socket, unresolved socket (its query failed), malformed
+// launch ID, then liveness: a row carrying a launch ID is live iff that ID is
+// recorded (@cenci-launch-id) on a live pane of its socket (strict: a live pane
+// without that ID does not keep it alive); a row without one is live iff its
+// (socket, pane) pair is a live pane (the pre-#1252 rule).
 type OrphanRowClass int
 
 const (
@@ -121,8 +121,8 @@ const (
 	// OrphanContainerInit: PID 1, the container init. Never a target,
 	// whatever its pane says.
 	OrphanContainerInit
-	// OrphanNoSocket: no CENCI_TMUX_SOCKET, a malformed one, or one that did
-	// not resolve. Fails open: treated as live, never a target.
+	// OrphanNoSocket: no CENCI_TMUX_SOCKET, or a malformed one. Fails open:
+	// treated as live, never a target.
 	OrphanNoSocket
 	// OrphanLive: the row's launch ID is recorded on a live pane of its
 	// socket, or (no launch ID) its (socket, pane) pair is a live pane.
@@ -136,6 +136,12 @@ const (
 	// hex (including the scan's malformed marker). Fails open: treated as live,
 	// never a target.
 	OrphanMalformedLaunchID
+	// OrphanUnresolvedSocket: the row's well-formed socket was queried and the
+	// query failed (a tmux error, a stall, or output that breaks the list-panes
+	// format), so its liveness is unknown. Fails open like OrphanNoSocket, but
+	// is not counted in NoSocketCount: the failure is reported once per socket in
+	// ContainerOrphanScan.SocketFailures.
+	OrphanUnresolvedSocket
 )
 
 // OrphanScanRow is one scanned process with its classification.
@@ -148,10 +154,24 @@ type OrphanScanRow struct {
 	Class    OrphanRowClass
 }
 
+// SocketFailure is one tmux socket whose liveness query failed. Err names the
+// socket and the cause as a single line: the run error's text and every other
+// untrusted value in it are quoted, so no raw newline survives.
+type SocketFailure struct {
+	Socket string
+	Err    error
+}
+
 // ContainerOrphanScan is one container's classified scan: Rows in scan order,
 // plus the aggregate counts the reaper reports as Notes.
 type ContainerOrphanScan struct {
 	Rows []OrphanScanRow
+	// SocketFailures lists each distinct socket this container's rows reference
+	// whose query failed, in first-seen order, once per container. A failure
+	// memoized by an earlier container of the same scanner is reported here
+	// again, without being re-dialed or re-printed. Rows on those sockets are
+	// classed OrphanUnresolvedSocket.
+	SocketFailures []SocketFailure
 	// UnreadableCount counts __UNREADABLE__ markers, excluding PID 1.
 	UnreadableCount int
 	// NoSocketCount counts rows classified OrphanNoSocket.
@@ -181,10 +201,17 @@ func (e *ScanError) Unwrap() error { return e.Err }
 // socketLiveness is the memoized per-socket resolution result: the set of
 // live pane ids on that socket, and the set of well-formed launch IDs recorded
 // (@cenci-launch-id) on those live panes. Populated once per distinct socket
-// per sweep by resolveSocketLiveness and cached in the scanner's map.
+// per sweep by resolveSocketLiveness and cached in the scanner's map. err is
+// non-nil when the query failed: the failure is memoized for the whole sweep so
+// the socket is not dialed again, and live/launchIDs are then unset. resolvedAt
+// is the moment a successful snapshot's query started (never later than the
+// listing it holds); the snapshot is reused only by a container whose scan
+// finished at or before it, and is otherwise discarded and re-resolved.
 type socketLiveness struct {
-	live      map[string]bool
-	launchIDs map[string]bool
+	live       map[string]bool
+	launchIDs  map[string]bool
+	err        error
+	resolvedAt time.Time
 }
 
 // OrphanScanner runs the shared orphan scan: container listing, the
@@ -196,11 +223,14 @@ type socketLiveness struct {
 type OrphanScanner struct {
 	stdout, stderr io.Writer
 	socketCache    map[string]socketLiveness
+	// now is the clock that orders a container's scan against a socket snapshot's
+	// start (see resolveSocketLiveness); tests inject a fake.
+	now func() time.Time
 }
 
 // NewOrphanScanner returns a scanner that writes diagnostics to stdout/stderr.
 func NewOrphanScanner(stdout, stderr io.Writer) *OrphanScanner {
-	return &OrphanScanner{stdout: stdout, stderr: stderr, socketCache: map[string]socketLiveness{}}
+	return &OrphanScanner{stdout: stdout, stderr: stderr, socketCache: map[string]socketLiveness{}, now: time.Now}
 }
 
 // maxErrorTextBytes caps how much of an untrusted string (a runtime/tmux
@@ -284,9 +314,16 @@ func RunningContainerNames(ctx context.Context, rt string) ([]string, error) {
 
 // ScanContainer runs the in-container environ scan on one container, resolves
 // every distinct, shape-validated socket its output references, and returns
-// the rows classified in scan order. A failing scan command is a *ScanError; a
-// genuine tmux failure is returned as-is (its "Error:" line already written to
-// the scanner's stderr). Nothing is signaled here.
+// the rows classified in scan order. A failing scan command is a *ScanError, and
+// a caller context that ends while a socket is being resolved is returned as an
+// error wrapping the context error; both abort the scan with no rows. The
+// context abort still returns the SocketFailures recorded before it, so the
+// caller can report them with the error. A tmux
+// failure on one socket does not: it is scoped to that socket, recorded once in
+// the result's SocketFailures (its "Error:" line already written to the
+// scanner's stderr), and the rows carrying it are classed OrphanUnresolvedSocket
+// while every other socket in the container is still resolved and classified.
+// Nothing is signaled here.
 func (s *OrphanScanner) ScanContainer(ctx context.Context, rt, container string) (ContainerOrphanScan, error) {
 	// -u dev: the scan runs as the fixed sandbox agent user so
 	// same-uid /proc/<pid>/environ reads succeed without
@@ -313,6 +350,10 @@ func (s *OrphanScanner) ScanContainer(ctx context.Context, rt, container string)
 			Err:       classifyExecTimeout(cctx, err),
 		}
 	}
+	// The moment this container's scan finished: any process in its output was
+	// launched, and its pane already tagged, before this instant, so only a
+	// socket snapshot taken at or after it can be trusted to list that pane.
+	scannedAt := s.now()
 
 	var scanned ContainerOrphanScan
 	var rows []OrphanScanRow
@@ -347,9 +388,12 @@ func (s *OrphanScanner) ScanContainer(ctx context.Context, rt, container string)
 
 	// Pre-resolve every distinct, shape-validated socket this
 	// container's scan output references *before* classifying anything
-	// (#1007) — preserves the existing "a genuine tmux error hard-fails and
-	// reaps nothing before any kill" ordering/contract
-	// (tests/reap-orphans.test.sh case 6).
+	// (#1007), so nothing in a container is classified as dead before every
+	// socket it references has been resolved. A socket whose query fails is
+	// recorded once and the loop continues (tests/reap-orphans.test.sh case 6
+	// still sees its Error: line and non-zero exit through the caller); only an
+	// ended caller context stops the scan.
+	failed := map[string]bool{}
 	for _, r := range rows {
 		if r.PID == "1" || !panePattern.MatchString(r.Pane) {
 			continue
@@ -357,8 +401,13 @@ func (s *OrphanScanner) ScanContainer(ctx context.Context, rt, container string)
 		if !tmux.ValidSocket(r.Socket) {
 			continue
 		}
-		if _, err := s.resolveSocketLiveness(ctx, r.Socket); err != nil {
-			return ContainerOrphanScan{}, err
+		sl, err := s.resolveSocketLiveness(ctx, r.Socket, scannedAt)
+		if err != nil {
+			return ContainerOrphanScan{SocketFailures: scanned.SocketFailures}, err
+		}
+		if sl.err != nil && !failed[r.Socket] {
+			failed[r.Socket] = true
+			scanned.SocketFailures = append(scanned.SocketFailures, SocketFailure{Socket: r.Socket, Err: sl.err})
 		}
 	}
 
@@ -412,6 +461,12 @@ func (s *OrphanScanner) classify(r OrphanScanRow) OrphanRowClass {
 		return OrphanNoSocket
 	}
 
+	// The socket's query failed (memoized by resolveSocketLiveness): its
+	// liveness is unknown, so the row fails open whatever launch ID it carries.
+	if sl.err != nil {
+		return OrphanUnresolvedSocket
+	}
+
 	// A row with a launch ID is judged by that ID alone: live iff it is
 	// recorded on a live pane of this socket. A live pane that records no ID
 	// (a pane id reused after a tmux server restart) does not keep it alive.
@@ -444,29 +499,54 @@ const socketListFormat = "#{pane_id}\t#{" + PaneOptionLaunchID + "}"
 // (socketListFormat; a line with no tab or an empty second column is a pane
 // with no ID; a non-empty line whose pane part is not a pane id, or whose
 // second column is non-empty but fails ValidLaunchID, is an unexpected tmux
-// format and hard-fails like any other tmux resolution error), run through
+// format and fails the socket like any other tmux resolution error), run through
 // tmux.RunSocket: a minimal allowlisted env so no ambient secret is ever
 // available to hand to a hostile peer, and bounded by its timeout and WaitDelay
 // (and the caller's ctx) so a peer that never completes the handshake can't
 // block a scan indefinitely. A "no server running" stderr
 // substring resolves to an empty live set (every pane on that socket is
 // therefore an orphan) with a per-socket "Note:" retaining the existing "No
-// tmux server detected" substring pinned by tests/reap-orphans.test.sh case 5;
-// any other tmux failure is a hard "Error:" + non-zero return, never folded
-// into the negative/empty-set case (watch/docs/error-handling.md's rule
-// against folding a probe error into a benign negative condition). The
-// socket path is attacker-controlled, so it's interpolated with %q (not %s)
-// into both diagnostics below — an escaped rendering rather than raw control
+// tmux server detected" substring pinned by tests/reap-orphans.test.sh case 5.
+// Any other tmux failure is that socket's own failure, never folded into the
+// negative/empty-set case (watch/docs/error-handling.md's rule against folding
+// a probe error into a benign negative condition): it prints one "Error:" line
+// and is memoized as socketLiveness.err, so the socket is not dialed or
+// reported again this sweep (a failure is never re-dialed: a stalling socket
+// would otherwise cost its full timeout again per container). A successful
+// snapshot is reused only by a container whose environ scan finished at or
+// before the snapshot's query started (scannedAt). The launcher tags the pane
+// before it execs the agent, so a listing started after a container's scan
+// includes every agent that scan saw; an earlier one can miss an agent launched
+// in between, which would class it a dead pane. A cache hit that predates
+// scannedAt is discarded and the socket re-resolved through this same path (the
+// new snapshot replaces the old one), and a re-resolution that fails is recorded
+// and reported like any other failure. A socket referenced by several rows of one
+// container is therefore dialed once for that container, and a healthy socket
+// shared by several containers once per container. A "no server running" result
+// counts as a successful resolution: it is cached the same way, so it may be
+// re-resolved, and its Note printed again, for a later container. A failed
+// resolution is returned on the result's err, not as the error return, which is
+// reserved for the caller's context ending while the query ran: that is not the
+// socket's fault, so nothing is printed or cached and the returned error wraps
+// both the run error and ctx.Err() (it may span several lines, since
+// tmux.RunSocket joins its own timeout error with a newline; the per-socket
+// failure error, by contrast, is a single line). The socket path is
+// attacker-controlled, so it's interpolated with %q (not %s) into both
+// diagnostics below — an escaped rendering rather than raw control
 // bytes/ANSI escapes reaching reaper stdout/stderr.
-func (s *OrphanScanner) resolveSocketLiveness(ctx context.Context, socket string) (socketLiveness, error) {
-	if sl, ok := s.socketCache[socket]; ok {
+func (s *OrphanScanner) resolveSocketLiveness(ctx context.Context, socket string, scannedAt time.Time) (socketLiveness, error) {
+	if sl, ok := s.socketCache[socket]; ok && (sl.err != nil || !sl.resolvedAt.Before(scannedAt)) {
 		return sl, nil
 	}
 
+	started := s.now()
 	var tmuxStdout, tmuxStderr bytes.Buffer
 	runErr := tmux.RunSocket(ctx, socket, &tmuxStdout, &tmuxStderr, "list-panes", "-a", "-F", socketListFormat)
+	if ctxErr := ctx.Err(); runErr != nil && ctxErr != nil {
+		return socketLiveness{}, fmt.Errorf("tmux -S %s list-panes: %w: %w%s", logSafeText(socket), runErr, ctxErr, stderrSuffix(&tmuxStderr))
+	}
 
-	sl := socketLiveness{live: map[string]bool{}, launchIDs: map[string]bool{}}
+	sl := socketLiveness{live: map[string]bool{}, launchIDs: map[string]bool{}, resolvedAt: started}
 	if runErr == nil {
 		for _, line := range SplitLines(tmuxStdout.String()) {
 			if line == "" {
@@ -476,14 +556,15 @@ func (s *OrphanScanner) resolveSocketLiveness(ctx context.Context, socket string
 			// A line whose pane part is not a pane id means tmux did not
 			// honor the format (an escaped tab, an unexpected build): folding
 			// it into the live set would silently drop that pane's launch ID
-			// and reap its agent. Hard-fail like any other tmux resolution
-			// error, before anything is signaled. The same holds for a valid
-			// pane whose launch-ID column is non-empty but malformed: dropping
-			// it would class the process carrying that pane's real ID as a
-			// dead pane. Only an empty column means "no launch ID".
+			// and reap its agent. Fail the socket like any other tmux
+			// resolution error, so none of its rows is ever signaled. The same
+			// holds for a valid pane whose launch-ID column is non-empty but
+			// malformed: dropping it would class the process carrying that
+			// pane's real ID as a dead pane. Only an empty column means "no
+			// launch ID".
 			if !ValidPaneID(pane) || (id != "" && !ValidLaunchID(id)) {
 				_, _ = fmt.Fprintf(s.stderr, "Error: unexpected tmux list-panes output on %q: line %q\n", socket, line)
-				return socketLiveness{}, fmt.Errorf("tmux -S %s list-panes: unexpected output line %s", logSafeText(socket), logSafeText(line))
+				return s.failSocket(socket, fmt.Errorf("tmux -S %s list-panes: unexpected output line %s", logSafeText(socket), logSafeText(line))), nil
 			}
 			sl.live[pane] = true
 			if id != "" {
@@ -495,11 +576,23 @@ func (s *OrphanScanner) resolveSocketLiveness(ctx context.Context, socket string
 	} else {
 		errText := strings.TrimRight(tmuxStderr.String(), "\n")
 		_, _ = fmt.Fprintf(s.stderr, "Error: failed to query tmux panes on %q: %q\n", socket, errText)
-		return socketLiveness{}, fmt.Errorf("tmux -S %s list-panes: %w%s", logSafeText(socket), runErr, stderrSuffix(&tmuxStderr))
+		// runErr's text is quoted, not wrapped with %w: tmux.RunSocket joins
+		// context.DeadlineExceeded into its own timeout error with a newline,
+		// and this error must stay one line (see SocketFailure). Failures are
+		// recognised through SocketFailures, never errors.Is.
+		return s.failSocket(socket, fmt.Errorf("tmux -S %s list-panes: %s%s", logSafeText(socket), logSafeText(runErr.Error()), stderrSuffix(&tmuxStderr))), nil
 	}
 
 	s.socketCache[socket] = sl
 	return sl, nil
+}
+
+// failSocket memoizes err as socket's failed resolution and returns the cached
+// entry.
+func (s *OrphanScanner) failSocket(socket string, err error) socketLiveness {
+	sl := socketLiveness{err: err}
+	s.socketCache[socket] = sl
+	return sl
 }
 
 // CountOrphanedSessions returns the number of distinct orphaned sessions that
@@ -512,8 +605,15 @@ func (s *OrphanScanner) resolveSocketLiveness(ctx context.Context, socket string
 // it issues the -u dev environ scan and the tmux list-panes query only, and
 // never signals any process. Any listing, scan, or tmux failure (including a
 // ctx timeout) returns an error and no partial count, so a caller can fail
-// closed. The container and runtime are not part of the identity: the same
-// session seen from several containers counts once.
+// closed. That holds for a single failing socket too, even when another socket
+// in the same container resolved: the reaper scopes a socket failure to that
+// socket's rows (ContainerOrphanScan.SocketFailures) and carries on, but a
+// count missing the failed socket's sessions could under-report, so this
+// returns the first recorded failure, a single line (SocketFailure.Err) because
+// it reaches the line-classified dispatch log. A caller context that ends
+// mid-scan returns an error wrapping the context error, which may span lines.
+// The container and runtime are not part of the identity: the same session seen
+// from several containers counts once.
 func CountOrphanedSessions(ctx context.Context, runtimes []string, stdout, stderr io.Writer) (int, error) {
 	scanner := NewOrphanScanner(stdout, stderr)
 	sessions := map[[3]string]struct{}{}
@@ -526,6 +626,9 @@ func CountOrphanedSessions(ctx context.Context, runtimes []string, stdout, stder
 			scanned, err := scanner.ScanContainer(ctx, rt, container)
 			if err != nil {
 				return 0, err
+			}
+			if len(scanned.SocketFailures) > 0 {
+				return 0, scanned.SocketFailures[0].Err
 			}
 			for _, r := range scanned.Rows {
 				if r.Class == OrphanDeadPane {

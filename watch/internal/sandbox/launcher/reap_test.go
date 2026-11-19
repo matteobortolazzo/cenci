@@ -3,10 +3,13 @@ package launcher
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -91,24 +94,20 @@ exit 0
 // running" — an unscoped/unexpected query must never accidentally observe
 // live panes. Sets HOME to dir so the fake tmux process (run under
 // production's minimal allowlisted env) can find those config files.
+//
+// #1127 additions, all opt-in so the parity tests above keep their behavior:
+//   - a slot's FAKE_TMUX_MODE_<n> may also be "error" (a genuine tmux failure)
+//     or "stall" (sleeps far past tmux.RunSocket's bound; needs the real sleep
+//     binary on PATH behind dir, see newReapSweep);
+//   - a container whose FAKE_SCAN_<container> file exists gets that file as its
+//     scan output instead of the shared FAKE_SCAN (the fake docker runs under
+//     the full ambient env, so it finds the file through HOME);
+//   - writeSocketAwareReapPodman adds a second runtime with its own ps list
+//     and call log.
 func writeSocketAwareReapFakes(t *testing.T, dir, callLog string) {
 	t.Helper()
 	t.Setenv("HOME", dir)
-	docker := `#!/bin/sh
-printf '%s\n' "$*" >> ` + exectest.ShellQuote(callLog) + `
-case "$1" in
-ps) printf '%s' "${FAKE_PS:-}" ;;
-exec)
-  case "$*" in
-  *TMUX_PANE=*) printf '%s' "${FAKE_SCAN:-}" ;;
-  *__GONE__*) printf '__GONE__\n' ;;
-  *"kill -TERM"*) [ -n "${FAKE_TERM_FAIL:-}" ] && exit 1 ;;
-  esac
-  ;;
-esac
-exit 0
-`
-	exectest.WriteExecutable(t, filepath.Join(dir, "docker"), docker)
+	exectest.WriteExecutable(t, filepath.Join(dir, "docker"), socketAwareReapRuntimeScript(callLog, "FAKE_PS"))
 	tmux := `#!/bin/sh
 ` + readFakeCfg + `
 printf '%s\n' "$*" >> ` + exectest.ShellQuote(callLog) + `
@@ -135,6 +134,15 @@ case "$mode" in
     echo "no server running on $socket" >&2
     exit 1
     ;;
+  error)
+    echo "protocol version mismatch (client 8, server 7)" >&2
+    exit 1
+    ;;
+  stall)
+    # exec so a kill on deadline reaches the sleeper itself, not a shell parent
+    # holding the pipes open (watch/docs/go-gotchas.md, #886).
+    exec sleep 30
+    ;;
   *)
     printf '%s\n' "$panes"
     exit 0
@@ -142,6 +150,50 @@ case "$mode" in
 esac
 `
 	exectest.WriteExecutable(t, filepath.Join(dir, "tmux"), tmux)
+}
+
+// socketAwareReapRuntimeScript is the fake docker/podman body: it logs every
+// invocation (bare args) to callLog, answers `ps` from the psVar env var,
+// serves the in-container environ scan from $HOME/FAKE_SCAN_<container> when
+// that file exists (read with the `read` builtin; the container is the 4th argv
+// slot of `exec -u <user> <container> sh -c <script>`) and from the shared
+// FAKE_SCAN otherwise, fails that container's scan (stderr "scan unavailable",
+// exit 23) when $HOME/FAKE_SCAN_FAIL_<container> exists, reports gone on the
+// liveness probe, and logs everything
+// else. FAKE_TERM_FAIL makes a `kill -TERM` fail.
+func socketAwareReapRuntimeScript(callLog, psVar string) string {
+	return `#!/bin/sh
+printf '%s\n' "$*" >> ` + exectest.ShellQuote(callLog) + `
+case "$1" in
+ps) printf '%s' "${` + psVar + `:-}" ;;
+exec)
+  case "$*" in
+  *TMUX_PANE=*)
+    scanfile="$HOME/FAKE_SCAN_$4"
+    if [ -f "$HOME/FAKE_SCAN_FAIL_$4" ]; then
+      echo 'scan unavailable' >&2
+      exit 23
+    elif [ -f "$scanfile" ]; then
+      while IFS= read -r scan_line || [ -n "$scan_line" ]; do printf '%s\n' "$scan_line"; done < "$scanfile"
+    else
+      printf '%s' "${FAKE_SCAN:-}"
+    fi
+    ;;
+  *__GONE__*) printf '__GONE__\n' ;;
+  *"kill -TERM"*) [ -n "${FAKE_TERM_FAIL:-}" ] && exit 1 ;;
+  esac
+  ;;
+esac
+exit 0
+`
+}
+
+// writeSocketAwareReapPodman writes a fake podman beside the fake docker: the
+// same behavior, but `ps` answers from FAKE_PS_PODMAN and every invocation goes
+// to its own call log, so a test can tell which runtime was scanned or signaled.
+func writeSocketAwareReapPodman(t *testing.T, dir, podmanCallLog string) {
+	t.Helper()
+	exectest.WriteExecutable(t, filepath.Join(dir, "podman"), socketAwareReapRuntimeScript(podmanCallLog, "FAKE_PS_PODMAN"))
 }
 
 // legacyNoSocketNoteText builds the exact aggregated "Note:" diagnostic
@@ -694,5 +746,831 @@ func TestReapOrphans_LaunchIDRowsMatchSharedOrphanCountAndMalformedIDNotes(t *te
 	wantNote := fmt.Sprintf("Note: 1 process(es) in container %s carried a malformed CENCI_LAUNCH_ID; failing open and treating as live so no in-flight agent work is ever killed.", container)
 	if strings.Count(out, wantNote) != 1 {
 		t.Errorf("want the aggregated malformed-launch-ID note exactly once:\n%s\ngot stdout:\n%s", wantNote, out)
+	}
+}
+
+// -- ticket #1127: a failing tmux socket fails open per socket ---------------
+//
+// A genuine tmux failure on one socket (a connection error, a stall, output that
+// breaks the list-panes format) must not stop the sweep: the rows that carry
+// that socket are never signaled and its Error: line is printed, but every other
+// socket, container and runtime is still swept, and the sweep still ends in an
+// error so `cenci sandbox reap-orphans` exits non-zero. All tests drive
+// reapOrphans directly (explicit runtimes, explicit context) through the
+// socket-aware fakes.
+
+const (
+	failingSocket = "/tmp/tmux-1000/failing"
+	healthySocket = "/tmp/tmux-1000/healthy"
+
+	// tmuxErrorCause is the stderr the fake tmux's "error" mode writes.
+	tmuxErrorCause = "protocol version mismatch"
+
+	// sweepTestTimeout bounds every sweep so a regression that hangs fails the
+	// test instead of the whole package.
+	sweepTestTimeout = 60 * time.Second
+)
+
+// newReapSweep sets up the socket-aware fake docker + tmux with no grace wait.
+// withSleep keeps the ambient PATH behind the fakes dir so a fake that runs
+// `exec sleep 30` finds the real sleep binary (the fakes still win).
+func newReapSweep(t *testing.T, withSleep bool) (dir, callLog string) {
+	t.Helper()
+	ambientPath := os.Getenv("PATH")
+	dir = t.TempDir()
+	callLog = filepath.Join(dir, "calls.txt")
+	writeSocketAwareReapFakes(t, dir, callLog)
+	path := dir
+	if withSleep {
+		if _, err := exec.LookPath("sleep"); err != nil {
+			t.Fatalf("the stalled-socket fixture needs a sleep binary on PATH: %v", err)
+		}
+		path = dir + string(os.PathListSeparator) + ambientPath
+	}
+	t.Setenv("PATH", path)
+	t.Setenv("CENCI_SANDBOX_REAP_GRACE_SECS", "0")
+	return dir, callLog
+}
+
+// sweepRow is one in-container scan row "<pid>\t<pane>\t<start>\t<socket>" (plus
+// "\t<launch id>" when one is given).
+func sweepRow(pid, pane, socket string, launchID ...string) string {
+	row := pid + "\t" + pane + "\t" + pid + "000\t" + socket
+	if len(launchID) > 0 {
+		row += "\t" + launchID[0]
+	}
+	return row + "\n"
+}
+
+// setSweepContainers makes the fake docker's `ps` list names.
+func setSweepContainers(t *testing.T, names ...string) {
+	t.Helper()
+	t.Setenv("FAKE_PS", strings.Join(names, "\n")+"\n")
+}
+
+// setContainerScan serves scan rows as one container's in-container scan.
+func setContainerScan(t *testing.T, dir, container string, rows ...string) {
+	t.Helper()
+	writeFakeTmuxValue(t, dir, "FAKE_SCAN_"+container, strings.Join(rows, ""))
+}
+
+// setContainerScanFails makes one container's in-container scan command fail
+// (exit 23, stderr "scan unavailable").
+func setContainerScanFails(t *testing.T, dir, container string) {
+	t.Helper()
+	writeFakeTmuxValue(t, dir, "FAKE_SCAN_FAIL_"+container, "1")
+}
+
+// setTmuxSocket configures fake tmux slot 1 or 2: the socket it answers for,
+// its mode ("ok", "noserver", "error", "stall") and, in "ok" mode, the first
+// line it prints (a pane id, or a malformed line).
+func setTmuxSocket(t *testing.T, dir string, slot int, socket, mode, panes string) {
+	t.Helper()
+	n := strconv.Itoa(slot)
+	writeFakeTmuxValue(t, dir, "FAKE_SOCKET_"+n, socket)
+	writeFakeTmuxValue(t, dir, "FAKE_TMUX_MODE_"+n, mode)
+	writeFakeTmuxValue(t, dir, "FAKE_LIVE_PANES_"+n, panes)
+}
+
+// runSweep runs reapOrphans over the given runtimes under ctx.
+func runSweep(ctx context.Context, runtimes []string, onlyContainer string) (stdout, stderr string, err error) {
+	var out, errOut bytes.Buffer
+	err = reapOrphans(ctx, runtimes, onlyContainer, &out, &errOut)
+	return out.String(), errOut.String(), err
+}
+
+// runSweepWithTimeout runs reapOrphans under a generous deadline.
+func runSweepWithTimeout(t *testing.T, runtimes []string, onlyContainer string) (stdout, stderr string, err error) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), sweepTestTimeout)
+	defer cancel()
+	return runSweep(ctx, runtimes, onlyContainer)
+}
+
+func reapedLine(container, pid, pane string) string {
+	return "reaped\t" + container + "\t" + pid + "\t" + pane + "\n"
+}
+
+// signalsTo returns the kill calls in calls aimed at pid.
+func signalsTo(calls []string, pid string) []string {
+	var out []string
+	for _, l := range calls {
+		if strings.Contains(l, "kill -") && strings.HasSuffix(l, " "+pid) {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
+// requireNoSignals fails the test if any kill call targets one of pids.
+func requireNoSignals(t *testing.T, calls []string, pids ...string) {
+	t.Helper()
+	for _, pid := range pids {
+		if sent := signalsTo(calls, pid); len(sent) != 0 {
+			t.Errorf("pid %s (a row on the failed socket) was signaled: %v", pid, sent)
+		}
+	}
+}
+
+// requireSocketError fails the test unless err is non-nil and names socket and
+// carries wantCause.
+func requireSocketError(t *testing.T, err error, socket, wantCause string) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("reapOrphans err = nil, want a non-nil error so the command exits non-zero after a failed socket")
+	}
+	if !strings.Contains(err.Error(), strconv.Quote(socket)) {
+		t.Errorf("err = %q, want it to name the failed socket %s", err, strconv.Quote(socket))
+	}
+	if !strings.Contains(err.Error(), wantCause) {
+		t.Errorf("err = %q, want it to carry the cause %q", err, wantCause)
+	}
+}
+
+// AC1: one container references two sockets, A failing and B healthy with no live
+// panes. The dead row on B is reaped, nothing carrying A is signaled (a
+// well-formed launch-ID row included), A's Error: line is printed, and the sweep
+// ends in an error after printing the reaped summary.
+func TestReapOrphans_FailingSocketFailsOpenAndHealthySocketStillReaped(t *testing.T) {
+	const container = "claude-cenci-mixedsockets"
+	dir, callLog := newReapSweep(t, false)
+	setSweepContainers(t, container)
+	setContainerScan(t, dir, container,
+		sweepRow("3001", "%1", failingSocket),
+		sweepRow("3002", "%2", healthySocket),
+		sweepRow("3003", "%3", failingSocket, "0123456789abcdef0123456789abcdef"),
+	)
+	setTmuxSocket(t, dir, 1, failingSocket, "error", "")
+	setTmuxSocket(t, dir, 2, healthySocket, "ok", "%99")
+
+	stdout, stderr, err := runSweepWithTimeout(t, []string{"docker"}, "")
+
+	requireSocketError(t, err, failingSocket, tmuxErrorCause)
+	if !strings.Contains(stdout, reapedLine(container, "3002", "%2")) {
+		t.Errorf("dead row on the healthy socket was not reaped; stdout:\n%s", stdout)
+	}
+	calls := readCallLog(t, callLog)
+	if !containsLine(calls, "exec -u root "+container+" kill -TERM 3002") {
+		t.Errorf("missing kill -TERM for the dead row on the healthy socket; calls:\n%s", strings.Join(calls, "\n"))
+	}
+	requireNoSignals(t, calls, "3001", "3003")
+	if strings.Contains(stdout, "\t3001\t") || strings.Contains(stdout, "\t3003\t") {
+		t.Errorf("a row on the failed socket was reported; stdout:\n%s", stdout)
+	}
+	wantErrLine := fmt.Sprintf("Error: failed to query tmux panes on %q: ", failingSocket)
+	if !strings.Contains(stderr, wantErrLine) || !strings.Contains(stderr, tmuxErrorCause) {
+		t.Errorf("stderr missing %q with the tmux cause %q:\n%s", wantErrLine, tmuxErrorCause, stderr)
+	}
+}
+
+// AC2: container C1's rows reference only the failing socket; C2, later on the
+// same runtime, has a dead row on the healthy socket. The sweep must still scan
+// C2 and reap it.
+func TestReapOrphans_FailingSocketInOneContainerStillSweepsTheNextContainer(t *testing.T) {
+	const (
+		first  = "claude-cenci-onlyfailing"
+		second = "codex-cenci-healthyone"
+	)
+	dir, callLog := newReapSweep(t, false)
+	setSweepContainers(t, first, second)
+	setContainerScan(t, dir, first, sweepRow("3001", "%1", failingSocket), sweepRow("3002", "%2", failingSocket))
+	setContainerScan(t, dir, second, sweepRow("3101", "%1", healthySocket))
+	setTmuxSocket(t, dir, 1, failingSocket, "error", "")
+	setTmuxSocket(t, dir, 2, healthySocket, "ok", "%99")
+
+	stdout, _, err := runSweepWithTimeout(t, []string{"docker"}, "")
+
+	requireSocketError(t, err, failingSocket, tmuxErrorCause)
+	if !strings.Contains(stdout, reapedLine(second, "3101", "%1")) {
+		t.Errorf("the second container's dead row was not reaped after the first container's socket failed; stdout:\n%s", stdout)
+	}
+	calls := readCallLog(t, callLog)
+	if !containsPrefix(calls, "exec -u dev "+second+" sh -c") {
+		t.Errorf("the second container was never scanned; calls:\n%s", strings.Join(calls, "\n"))
+	}
+	requireNoSignals(t, calls, "3001", "3002")
+}
+
+// AC2, across runtimes: C1 is on docker with a failing socket, C2 on podman has a
+// dead row on a healthy socket. The podman runtime is still scanned and reaped.
+func TestReapOrphans_FailingSocketOnOneRuntimeStillSweepsTheOtherRuntime(t *testing.T) {
+	const (
+		dockerContainer = "claude-cenci-dockerfailing"
+		podmanContainer = "codex-cenci-podmanhealthy"
+	)
+	dir, dockerLog := newReapSweep(t, false)
+	podmanLog := filepath.Join(dir, "podman-calls.txt")
+	writeSocketAwareReapPodman(t, dir, podmanLog)
+	setSweepContainers(t, dockerContainer)
+	t.Setenv("FAKE_PS_PODMAN", podmanContainer+"\n")
+	setContainerScan(t, dir, dockerContainer, sweepRow("3001", "%1", failingSocket))
+	setContainerScan(t, dir, podmanContainer, sweepRow("3101", "%1", healthySocket))
+	setTmuxSocket(t, dir, 1, failingSocket, "error", "")
+	setTmuxSocket(t, dir, 2, healthySocket, "ok", "%99")
+
+	stdout, _, err := runSweepWithTimeout(t, []string{"docker", "podman"}, "")
+
+	requireSocketError(t, err, failingSocket, tmuxErrorCause)
+	if !strings.Contains(stdout, reapedLine(podmanContainer, "3101", "%1")) {
+		t.Errorf("podman was not swept after docker's socket failed; stdout:\n%s", stdout)
+	}
+	if podmanCalls := readCallLog(t, podmanLog); !containsLine(podmanCalls, "exec -u root "+podmanContainer+" kill -TERM 3101") {
+		t.Errorf("missing podman kill -TERM for the healthy row; podman calls:\n%s", strings.Join(podmanCalls, "\n"))
+	}
+	requireNoSignals(t, readCallLog(t, dockerLog), "3001")
+}
+
+// AC3: socket A's list-panes prints a line that breaks the format. Each variant
+// prints the unexpected-output Error: line naming the line, signals nothing on A,
+// still reaps the dead row on healthy socket B in the same container, and ends in
+// an error.
+func TestReapOrphans_UnexpectedListPanesOutputIsScopedToItsSocket(t *testing.T) {
+	const container = "claude-cenci-badformat"
+	cases := map[string]string{
+		"garbage line":                      "garbage-line",
+		"valid pane, malformed launch id":   "%0\tnot-a-launch-id",
+		"valid pane, uppercase launch id":   "%0\t" + strings.ToUpper("0123456789abcdef0123456789abcdef"),
+		"empty pane part with a launch id":  "\t0123456789abcdef0123456789abcdef",
+		"escaped tab instead of a real tab": `%0\t0123456789abcdef0123456789abcdef`,
+	}
+	for name, badLine := range cases {
+		t.Run(name, func(t *testing.T) {
+			dir, callLog := newReapSweep(t, false)
+			setSweepContainers(t, container)
+			setContainerScan(t, dir, container,
+				sweepRow("3001", "%0", failingSocket),
+				sweepRow("3002", "%2", healthySocket),
+			)
+			setTmuxSocket(t, dir, 1, failingSocket, "ok", badLine)
+			setTmuxSocket(t, dir, 2, healthySocket, "ok", "%99")
+
+			stdout, stderr, err := runSweepWithTimeout(t, []string{"docker"}, "")
+
+			requireSocketError(t, err, failingSocket, "unexpected output line")
+			wantErrLine := fmt.Sprintf("Error: unexpected tmux list-panes output on %q: line %q", failingSocket, badLine)
+			if !strings.Contains(stderr, wantErrLine) {
+				t.Errorf("stderr missing %q:\n%s", wantErrLine, stderr)
+			}
+			if !strings.Contains(stdout, reapedLine(container, "3002", "%2")) {
+				t.Errorf("dead row on the healthy socket was not reaped; stdout:\n%s", stdout)
+			}
+			requireNoSignals(t, readCallLog(t, callLog), "3001")
+		})
+	}
+}
+
+// AC4: socket A stalls past tmux.RunSocket's bound. The sweep prints an Error: line
+// for A, reaps the dead row on healthy socket B, ends in an error, and finishes in
+// bounded time (an upper bound, not an exact figure: the stall costs about the 5s
+// child timeout).
+func TestReapOrphans_StalledSocketIsScopedToItsRows(t *testing.T) {
+	const (
+		container = "claude-cenci-stalled"
+		promptly  = 15 * time.Second
+	)
+	dir, callLog := newReapSweep(t, true)
+	setSweepContainers(t, container)
+	setContainerScan(t, dir, container,
+		sweepRow("3001", "%1", failingSocket),
+		sweepRow("3002", "%2", healthySocket),
+	)
+	setTmuxSocket(t, dir, 1, failingSocket, "stall", "")
+	setTmuxSocket(t, dir, 2, healthySocket, "ok", "%99")
+
+	start := time.Now()
+	stdout, stderr, err := runSweepWithTimeout(t, []string{"docker"}, "")
+	elapsed := time.Since(start)
+
+	if elapsed >= promptly {
+		t.Errorf("the sweep took %s, want it bounded under %s (the fake tmux sleeps 30s)", elapsed, promptly)
+	}
+	if err == nil {
+		t.Fatal("reapOrphans err = nil, want an error after the stalled socket")
+	}
+	if !strings.Contains(err.Error(), strconv.Quote(failingSocket)) {
+		t.Errorf("err = %q, want it to name the stalled socket %s", err, strconv.Quote(failingSocket))
+	}
+	if wantErrLine := fmt.Sprintf("Error: failed to query tmux panes on %q", failingSocket); !strings.Contains(stderr, wantErrLine) {
+		t.Errorf("stderr missing %q:\n%s", wantErrLine, stderr)
+	}
+	if !strings.Contains(stdout, reapedLine(container, "3002", "%2")) {
+		t.Errorf("dead row on the healthy socket was not reaped; stdout:\n%s", stdout)
+	}
+	requireNoSignals(t, readCallLog(t, callLog), "3001")
+}
+
+// AC5: a failed socket is dialed at most once per sweep. Two containers that both
+// reference failing socket A produce exactly one `-S A list-panes` call, signal
+// nothing carrying A, and still end in an error.
+func TestReapOrphans_FailedSocketIsDialedOncePerSweep(t *testing.T) {
+	const (
+		first  = "claude-cenci-dialonce1"
+		second = "codex-cenci-dialonce2"
+	)
+	dir, callLog := newReapSweep(t, false)
+	setSweepContainers(t, first, second)
+	setContainerScan(t, dir, first, sweepRow("3001", "%1", failingSocket))
+	setContainerScan(t, dir, second, sweepRow("3101", "%1", failingSocket), sweepRow("3102", "%2", failingSocket))
+	setTmuxSocket(t, dir, 1, failingSocket, "error", "")
+
+	_, stderr, err := runSweepWithTimeout(t, []string{"docker"}, "")
+
+	requireSocketError(t, err, failingSocket, tmuxErrorCause)
+	calls := readCallLog(t, callLog)
+	dials := 0
+	for _, l := range calls {
+		if strings.HasPrefix(l, "-S "+failingSocket+" list-panes") {
+			dials++
+		}
+	}
+	if dials != 1 {
+		t.Errorf("failing socket was dialed %d times, want exactly 1; calls:\n%s", dials, strings.Join(calls, "\n"))
+	}
+	if !containsPrefix(calls, "exec -u dev "+second+" sh -c") {
+		t.Errorf("the second container was never scanned; calls:\n%s", strings.Join(calls, "\n"))
+	}
+	requireNoSignals(t, calls, "3001", "3101", "3102")
+	if got := strings.Count(stderr, "Error: failed to query tmux panes on"); got != 1 {
+		t.Errorf("stderr has %d Error: lines for the one failed socket, want 1:\n%s", got, stderr)
+	}
+}
+
+// AC6: rows on a failed socket are their own fail-open class, not "no socket": the
+// aggregated carried-no-CENCI_TMUX_SOCKET Note counts only the one row that really
+// has no socket (a regression folding the failed socket's two rows in would say 3).
+func TestReapOrphans_FailedSocketRowsAreNotCountedAsNoSocket(t *testing.T) {
+	const container = "claude-cenci-notsocketnote"
+	dir, _ := newReapSweep(t, false)
+	setSweepContainers(t, container)
+	setContainerScan(t, dir, container,
+		sweepRow("3001", "%1", failingSocket),
+		sweepRow("3002", "%2", failingSocket),
+		sweepRow("3003", "%3", ""),
+		sweepRow("3004", "%4", healthySocket),
+	)
+	setTmuxSocket(t, dir, 1, failingSocket, "error", "")
+	setTmuxSocket(t, dir, 2, healthySocket, "ok", "%4")
+
+	stdout, _, err := runSweepWithTimeout(t, []string{"docker"}, "")
+
+	requireSocketError(t, err, failingSocket, tmuxErrorCause)
+	if want := legacyNoSocketNoteText(1, container); !strings.Contains(stdout, want) {
+		t.Errorf("want the no-socket Note for exactly the one row with no socket:\n%s\ngot stdout:\n%s", want, stdout)
+	}
+	if strings.Contains(stdout, legacyNoSocketNoteText(3, container)) {
+		t.Errorf("rows on the failed socket were counted into the no-socket Note; stdout:\n%s", stdout)
+	}
+}
+
+// AC7: the summary after a sweep where a socket failed. Nothing reaped: no "No
+// orphaned processes found." (the failed socket's rows are unknown, not absent).
+// N > 0 reaped: "Reaped N orphaned process(es)." and the sweep still errors. The
+// control with no failure keeps the old summary and a nil error.
+func TestReapOrphans_SummaryAfterSocketFailure(t *testing.T) {
+	const container = "claude-cenci-summary"
+	t.Run("nothing reaped prints no summary line", func(t *testing.T) {
+		dir, _ := newReapSweep(t, false)
+		setSweepContainers(t, container)
+		setContainerScan(t, dir, container, sweepRow("3001", "%1", failingSocket))
+		setTmuxSocket(t, dir, 1, failingSocket, "error", "")
+
+		stdout, _, err := runSweepWithTimeout(t, []string{"docker"}, "")
+
+		requireSocketError(t, err, failingSocket, tmuxErrorCause)
+		if strings.Contains(stdout, "No orphaned processes found.") {
+			t.Errorf("printed the no-op summary although a socket failed; stdout:\n%s", stdout)
+		}
+		if strings.Contains(stdout, "Reaped ") {
+			t.Errorf("printed a Reaped summary with nothing reaped; stdout:\n%s", stdout)
+		}
+	})
+	t.Run("reaped rows print the count and the sweep still errors", func(t *testing.T) {
+		dir, _ := newReapSweep(t, false)
+		setSweepContainers(t, container)
+		setContainerScan(t, dir, container,
+			sweepRow("3001", "%1", failingSocket),
+			sweepRow("3002", "%2", healthySocket),
+			sweepRow("3003", "%3", healthySocket),
+		)
+		setTmuxSocket(t, dir, 1, failingSocket, "error", "")
+		setTmuxSocket(t, dir, 2, healthySocket, "ok", "%99")
+
+		stdout, _, err := runSweepWithTimeout(t, []string{"docker"}, "")
+
+		requireSocketError(t, err, failingSocket, tmuxErrorCause)
+		if !strings.Contains(stdout, "Reaped 2 orphaned process(es).") {
+			t.Errorf("missing the Reaped 2 summary; stdout:\n%s", stdout)
+		}
+		if strings.Contains(stdout, "No orphaned processes found.") {
+			t.Errorf("printed the no-op summary after reaping; stdout:\n%s", stdout)
+		}
+	})
+	t.Run("no failure keeps the no-op summary and a nil error", func(t *testing.T) {
+		dir, _ := newReapSweep(t, false)
+		setSweepContainers(t, container)
+		setContainerScan(t, dir, container, sweepRow("3001", "%1", healthySocket))
+		setTmuxSocket(t, dir, 1, healthySocket, "ok", "%1")
+
+		stdout, stderr, err := runSweepWithTimeout(t, []string{"docker"}, "")
+
+		if err != nil {
+			t.Fatalf("reapOrphans: %v\nstderr: %s", err, stderr)
+		}
+		if !strings.Contains(stdout, "No orphaned processes found.") {
+			t.Errorf("missing the no-op summary; stdout:\n%s", stdout)
+		}
+	})
+}
+
+// Edge case: every socket in every container fails. Nothing is signaled, one
+// Error: line is printed per distinct socket, no summary line is printed, and the
+// returned error names every failed socket.
+func TestReapOrphans_AllSocketsFailPrintsOneErrorPerSocketAndNoSummary(t *testing.T) {
+	const (
+		first  = "claude-cenci-allfail1"
+		second = "codex-cenci-allfail2"
+	)
+	dir, callLog := newReapSweep(t, false)
+	setSweepContainers(t, first, second)
+	setContainerScan(t, dir, first, sweepRow("3001", "%1", failingSocket), sweepRow("3002", "%2", healthySocket))
+	setContainerScan(t, dir, second, sweepRow("3101", "%1", failingSocket))
+	setTmuxSocket(t, dir, 1, failingSocket, "error", "")
+	setTmuxSocket(t, dir, 2, healthySocket, "error", "")
+
+	stdout, stderr, err := runSweepWithTimeout(t, []string{"docker"}, "")
+
+	requireSocketError(t, err, failingSocket, tmuxErrorCause)
+	if !strings.Contains(err.Error(), strconv.Quote(healthySocket)) {
+		t.Errorf("err = %q, want it to name the second failed socket %s too", err, strconv.Quote(healthySocket))
+	}
+	for _, socket := range []string{failingSocket, healthySocket} {
+		wantErrLine := fmt.Sprintf("Error: failed to query tmux panes on %q: ", socket)
+		if got := strings.Count(stderr, wantErrLine); got != 1 {
+			t.Errorf("stderr has %d %q lines, want exactly one per distinct socket:\n%s", got, wantErrLine, stderr)
+		}
+	}
+	for _, l := range readCallLog(t, callLog) {
+		if strings.Contains(l, "kill -") {
+			t.Errorf("nothing may be signaled when every socket failed, got %q", l)
+		}
+	}
+	if strings.Contains(stdout, "reaped\t") || strings.Contains(stdout, "orphaned process") {
+		t.Errorf("want no reaped line and no summary line; stdout:\n%s", stdout)
+	}
+}
+
+// Edge case: a hostile socket path with control bytes and an ANSI escape is shown
+// %q-escaped in its Error: line and in the returned error; no raw escape byte
+// reaches stdout, stderr or the error text, and the healthy socket is still swept.
+func TestReapOrphans_HostileFailingSocketPathIsQuotedEverywhere(t *testing.T) {
+	const (
+		container      = "claude-cenci-hostile"
+		hostileSocket  = "/x\x1b[31m\rforged"
+		rawControlSet  = "\x1b\r"
+		healthyPidLine = "3002"
+	)
+	dir, _ := newReapSweep(t, false)
+	setSweepContainers(t, container)
+	setContainerScan(t, dir, container,
+		sweepRow("3001", "%1", hostileSocket),
+		sweepRow(healthyPidLine, "%2", healthySocket),
+	)
+	setTmuxSocket(t, dir, 1, hostileSocket, "error", "")
+	setTmuxSocket(t, dir, 2, healthySocket, "ok", "%99")
+
+	stdout, stderr, err := runSweepWithTimeout(t, []string{"docker"}, "")
+
+	requireSocketError(t, err, hostileSocket, tmuxErrorCause)
+	if wantErrLine := fmt.Sprintf("Error: failed to query tmux panes on %q: ", hostileSocket); !strings.Contains(stderr, wantErrLine) {
+		t.Errorf("stderr missing the %%q-escaped Error: line %q:\n%q", wantErrLine, stderr)
+	}
+	for name, text := range map[string]string{"stdout": stdout, "stderr": stderr, "error": err.Error()} {
+		if strings.ContainsAny(text, rawControlSet) {
+			t.Errorf("%s carries a raw control byte: %q", name, text)
+		}
+	}
+	if !strings.Contains(stdout, reapedLine(container, healthyPidLine, "%2")) {
+		t.Errorf("dead row on the healthy socket was not reaped; stdout:\n%s", stdout)
+	}
+}
+
+// AC8: when the caller's context ends while a socket is being resolved (a stall
+// under a short deadline, or an explicit cancel), reapOrphans stops: a non-nil
+// error wrapping the context error, no kill for any row, and the later container
+// is never scanned.
+func TestReapOrphans_EndedContextStopsTheSweepWithoutSignaling(t *testing.T) {
+	const (
+		first  = "claude-cenci-ctxfirst"
+		second = "codex-cenci-ctxsecond"
+	)
+	cases := []struct {
+		name    string
+		ctx     func() (context.Context, context.CancelFunc)
+		wantErr error
+	}{
+		{
+			name: "expired",
+			ctx: func() (context.Context, context.CancelFunc) {
+				return context.WithTimeout(context.Background(), time.Second)
+			},
+			wantErr: context.DeadlineExceeded,
+		},
+		{
+			name: "cancelled",
+			ctx: func() (context.Context, context.CancelFunc) {
+				ctx, cancel := context.WithCancel(context.Background())
+				timer := time.AfterFunc(time.Second, cancel)
+				return ctx, func() { timer.Stop(); cancel() }
+			},
+			wantErr: context.Canceled,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, callLog := newReapSweep(t, true)
+			setSweepContainers(t, first, second)
+			setContainerScan(t, dir, first, sweepRow("3001", "%1", failingSocket), sweepRow("3002", "%2", healthySocket))
+			setContainerScan(t, dir, second, sweepRow("3101", "%1", healthySocket))
+			setTmuxSocket(t, dir, 1, failingSocket, "stall", "")
+			setTmuxSocket(t, dir, 2, healthySocket, "ok", "%99")
+			ctx, cancel := tc.ctx()
+			defer cancel()
+
+			stdout, stderr, err := runSweep(ctx, []string{"docker"}, "")
+
+			if err == nil || !errors.Is(err, tc.wantErr) {
+				t.Fatalf("err = %v, want it to wrap %v", err, tc.wantErr)
+			}
+			calls := readCallLog(t, callLog)
+			if !containsLine(calls, "-S "+failingSocket+" list-panes -a -F #{pane_id}\t#{@cenci-launch-id}") {
+				t.Fatalf("the stalled socket was never queried, so the context end was not exercised; calls:\n%s", strings.Join(calls, "\n"))
+			}
+			for _, l := range calls {
+				if strings.Contains(l, "kill -") {
+					t.Errorf("a kill was issued after the context ended: %q", l)
+				}
+			}
+			if containsPrefix(calls, "exec -u dev "+second+" sh -c") {
+				t.Errorf("the later container was scanned after the context ended; calls:\n%s", strings.Join(calls, "\n"))
+			}
+			if strings.Contains(stdout, "reaped\t") || strings.Contains(stdout, "orphaned process") {
+				t.Errorf("stdout reports a reap or summary after the context ended:\n%s", stdout)
+			}
+			if strings.Contains(stderr, "failed to query tmux panes") {
+				t.Errorf("an ended caller context was reported as the socket's failure:\n%s", stderr)
+			}
+		})
+	}
+}
+
+// The Codex attach-time sweep (onlyContainer set, as launch.go calls it) behaves
+// the same way: the dead row on the healthy socket in that one container is
+// reaped, nothing on the failed socket is signaled, the runtime's container list
+// is never queried, and the returned error is non-nil so the launcher can print
+// its warning and carry on.
+func TestReapOrphans_AttachSweepReapsHealthyRowAndReturnsTheSocketError(t *testing.T) {
+	const container = "codex-cenci-attach"
+	dir, callLog := newReapSweep(t, false)
+	setContainerScan(t, dir, container,
+		sweepRow("3001", "%1", failingSocket),
+		sweepRow("3002", "%2", healthySocket),
+	)
+	setTmuxSocket(t, dir, 1, failingSocket, "error", "")
+	setTmuxSocket(t, dir, 2, healthySocket, "ok", "%99")
+
+	stdout, stderr, err := runSweepWithTimeout(t, []string{"docker"}, container)
+
+	requireSocketError(t, err, failingSocket, tmuxErrorCause)
+	if !strings.Contains(stdout, reapedLine(container, "3002", "%2")) {
+		t.Errorf("dead row on the healthy socket was not reaped; stdout:\n%s", stdout)
+	}
+	calls := readCallLog(t, callLog)
+	requireNoSignals(t, calls, "3001")
+	if containsPrefix(calls, "ps ") {
+		t.Errorf("an attach-time sweep must not list containers; calls:\n%s", strings.Join(calls, "\n"))
+	}
+	if !strings.Contains(stderr, fmt.Sprintf("Error: failed to query tmux panes on %q: ", failingSocket)) {
+		t.Errorf("stderr missing the failed socket's Error: line:\n%s", stderr)
+	}
+}
+
+// Edge case: a socket that fails tmux.ValidSocket is never dialed, is not a socket
+// failure, and its rows still count toward the carried-no-CENCI_TMUX_SOCKET Note,
+// unchanged by the per-socket failure scoping. The forms are a relative path, a
+// value over the 1000-byte bound, and the marker the in-container scan writes in
+// place of a socket holding any control character (a tab or newline in a value
+// can never reach the host as such: the scan replaces it, and tmux's own
+// RunSocket tests pin that a tab/newline socket is refused before any exec). The
+// healthy-socket row is the control: it proves the scan and the sweep really ran.
+func TestReapOrphans_MalformedSocketIsNeverDialedAndCountsTowardTheNoSocketNote(t *testing.T) {
+	const container = "claude-cenci-malformedsock"
+	cases := []struct{ name, socket string }{
+		{"relative path", "relative/sock"},
+		{"over 1000 bytes", "/" + strings.Repeat("a", 1001)},
+		{"control-character marker from the scan", "__MALFORMED__"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, callLog := newReapSweep(t, false)
+			setSweepContainers(t, container)
+			setContainerScan(t, dir, container,
+				sweepRow("3001", "%1", tc.socket),
+				sweepRow("3002", "%2", healthySocket),
+			)
+			// A dial that did happen would answer "no server running", which would
+			// make 3001 a dead row and kill it.
+			setTmuxSocket(t, dir, 1, tc.socket, "noserver", "")
+			setTmuxSocket(t, dir, 2, healthySocket, "ok", "%99")
+
+			stdout, stderr, err := runSweepWithTimeout(t, []string{"docker"}, "")
+
+			if err != nil {
+				t.Fatalf("reapOrphans: %v\nstderr: %s", err, stderr)
+			}
+			if want := legacyNoSocketNoteText(1, container); !strings.Contains(stdout, want) {
+				t.Errorf("want the no-socket Note for the malformed-socket row:\n%s\ngot stdout:\n%s", want, stdout)
+			}
+			if strings.Contains(stderr, "Error:") {
+				t.Errorf("a malformed socket was reported as a socket failure; stderr:\n%s", stderr)
+			}
+			if !strings.Contains(stdout, reapedLine(container, "3002", "%2")) {
+				t.Errorf("control row on the healthy socket was not reaped; stdout:\n%s", stdout)
+			}
+			calls := readCallLog(t, callLog)
+			for _, l := range calls {
+				if strings.Contains(l, "list-panes") && !strings.HasPrefix(l, "-S "+healthySocket+" list-panes") {
+					t.Errorf("tmux was asked about a socket other than the healthy one: %q", l)
+				}
+			}
+			requireNoSignals(t, calls, "3001")
+		})
+	}
+}
+
+// Edge case: a row on a failed socket carries a well-formed launch ID that is also
+// recorded on a dead row elsewhere (here on the healthy socket, where no live pane
+// records it). The healthy-socket row is reaped; the failed-socket row, whose
+// liveness is unknown, is never signaled whatever its launch ID says.
+func TestReapOrphans_FailedSocketRowIsNotSignaledWhenItsLaunchIDIsDeadElsewhere(t *testing.T) {
+	const (
+		container = "claude-cenci-sharedlaunchid"
+		launchID  = "0123456789abcdef0123456789abcdef"
+	)
+	dir, callLog := newReapSweep(t, false)
+	setSweepContainers(t, container)
+	setContainerScan(t, dir, container,
+		sweepRow("3001", "%1", failingSocket, launchID),
+		sweepRow("3002", "%2", healthySocket, launchID),
+	)
+	setTmuxSocket(t, dir, 1, failingSocket, "error", "")
+	setTmuxSocket(t, dir, 2, healthySocket, "ok", "%99")
+
+	stdout, _, err := runSweepWithTimeout(t, []string{"docker"}, "")
+
+	requireSocketError(t, err, failingSocket, tmuxErrorCause)
+	if !strings.Contains(stdout, reapedLine(container, "3002", "%2")) {
+		t.Errorf("the row carrying the dead launch ID on the healthy socket was not reaped; stdout:\n%s", stdout)
+	}
+	requireNoSignals(t, readCallLog(t, callLog), "3001")
+	if strings.Contains(stdout, "\t3001\t") {
+		t.Errorf("the failed-socket row was reported as reaped; stdout:\n%s", stdout)
+	}
+}
+
+// Q&A 8: a sweep that fails a socket and is then aborted by something that is not a
+// socket failure (an in-container scan failure, or the caller's context ending
+// while a later socket stalls) returns that error joined with the socket error
+// collected earlier, so neither is lost. The abort ends the sweep at once: no
+// summary line and nothing is signaled.
+func TestReapOrphans_MidSweepAbortIsJoinedWithTheEarlierSocketError(t *testing.T) {
+	const (
+		first  = "claude-cenci-abortfirst"
+		second = "codex-cenci-abortsecond"
+	)
+
+	t.Run("scan failure in a later container", func(t *testing.T) {
+		dir, callLog := newReapSweep(t, false)
+		setSweepContainers(t, first, second)
+		setContainerScan(t, dir, first, sweepRow("3001", "%1", failingSocket))
+		setContainerScanFails(t, dir, second)
+		setTmuxSocket(t, dir, 1, failingSocket, "error", "")
+
+		stdout, stderr, err := runSweepWithTimeout(t, []string{"docker"}, "")
+
+		requireSocketError(t, err, failingSocket, tmuxErrorCause)
+		var scanErr *sandbox.ScanError
+		if !errors.As(err, &scanErr) {
+			t.Fatalf("err = %v, want it to also carry the *sandbox.ScanError that aborted the sweep", err)
+		}
+		if scanErr.Container != second || scanErr.Stderr != "scan unavailable" {
+			t.Errorf("ScanError = {Container: %q, Stderr: %q}, want {%q, %q}", scanErr.Container, scanErr.Stderr, second, "scan unavailable")
+		}
+		if want := "Error: failed to scan processes in container " + second + ": scan unavailable"; !strings.Contains(stderr, want) {
+			t.Errorf("stderr missing %q:\n%s", want, stderr)
+		}
+		if strings.Contains(stdout, "orphaned process") {
+			t.Errorf("an aborted sweep printed a summary line:\n%s", stdout)
+		}
+		requireNoSignals(t, readCallLog(t, callLog), "3001")
+	})
+
+	t.Run("caller context ends on a later stalled socket", func(t *testing.T) {
+		const third = "claude-cenci-abortthird"
+		dir, callLog := newReapSweep(t, true)
+		setSweepContainers(t, first, second, third)
+		setContainerScan(t, dir, first, sweepRow("3001", "%1", failingSocket))
+		setContainerScan(t, dir, second, sweepRow("3101", "%1", healthySocket))
+		setContainerScan(t, dir, third, sweepRow("3201", "%1", failingSocket))
+		setTmuxSocket(t, dir, 1, failingSocket, "error", "")
+		setTmuxSocket(t, dir, 2, healthySocket, "stall", "")
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+
+		stdout, stderr, err := runSweep(ctx, []string{"docker"}, "")
+
+		requireSocketError(t, err, failingSocket, tmuxErrorCause)
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("err = %v, want it to also wrap context.DeadlineExceeded", err)
+		}
+		if !strings.Contains(err.Error(), strconv.Quote(healthySocket)) {
+			t.Errorf("err = %q, want the aborting error to name the stalled socket %s", err, strconv.Quote(healthySocket))
+		}
+		calls := readCallLog(t, callLog)
+		if !containsLine(calls, "-S "+healthySocket+" list-panes -a -F #{pane_id}\t#{@cenci-launch-id}") {
+			t.Fatalf("the later socket was never queried, so the abort was not exercised; calls:\n%s", strings.Join(calls, "\n"))
+		}
+		for _, l := range calls {
+			if strings.Contains(l, "kill -") {
+				t.Errorf("a kill was issued in an aborted sweep: %q", l)
+			}
+		}
+		if containsPrefix(calls, "exec -u dev "+third+" sh -c") {
+			t.Errorf("the container after the aborting one was scanned; calls:\n%s", strings.Join(calls, "\n"))
+		}
+		if strings.Contains(stdout, "orphaned process") {
+			t.Errorf("an aborted sweep printed a summary line:\n%s", stdout)
+		}
+		// The caller's context ending is the abort, not the stalled socket's own
+		// failure: no per-socket Error: line for it (RunSocket would otherwise
+		// have folded it into an ordinary timeout failure), while the earlier
+		// socket's own Error: line stays.
+		if want := fmt.Sprintf("Error: failed to query tmux panes on %q: ", failingSocket); !strings.Contains(stderr, want) {
+			t.Errorf("stderr missing the earlier socket's %q line:\n%s", want, stderr)
+		}
+		if bad := fmt.Sprintf("Error: failed to query tmux panes on %q", healthySocket); strings.Contains(stderr, bad) {
+			t.Errorf("the caller's context end was reported as the stalled socket's failure (%q):\n%s", bad, stderr)
+		}
+	})
+}
+
+// A caller context that ends on a stalled socket after an earlier socket of the
+// SAME container already failed: the abort error still carries that earlier
+// socket's failure (its Error: line was printed, so the returned error must not
+// drop it), together with the stalled socket and the context error. Nothing is
+// signaled and no summary is printed.
+func TestReapOrphans_ContextEndInOneContainerKeepsThatContainersEarlierSocketFailure(t *testing.T) {
+	const (
+		container = "claude-cenci-samecontainerabort"
+		stalled   = "/tmp/tmux-1000/stalled"
+	)
+	dir, callLog := newReapSweep(t, true)
+	setSweepContainers(t, container)
+	// The failing socket's row comes first, so it is resolved (and fails) before
+	// the stalled one is dialed.
+	setContainerScan(t, dir, container,
+		sweepRow("3001", "%1", failingSocket),
+		sweepRow("3002", "%2", stalled),
+	)
+	setTmuxSocket(t, dir, 1, failingSocket, "error", "")
+	setTmuxSocket(t, dir, 2, stalled, "stall", "")
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	stdout, stderr, err := runSweep(ctx, []string{"docker"}, "")
+
+	requireSocketError(t, err, failingSocket, tmuxErrorCause)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("err = %v, want it to also wrap context.DeadlineExceeded", err)
+	}
+	if !strings.Contains(err.Error(), strconv.Quote(stalled)) {
+		t.Errorf("err = %q, want the aborting error to name the stalled socket %s", err, strconv.Quote(stalled))
+	}
+	calls := readCallLog(t, callLog)
+	if !containsLine(calls, "-S "+stalled+" list-panes -a -F #{pane_id}\t#{@cenci-launch-id}") {
+		t.Fatalf("the stalled socket was never queried, so the abort was not exercised; calls:\n%s", strings.Join(calls, "\n"))
+	}
+	for _, l := range calls {
+		if strings.Contains(l, "kill -") {
+			t.Errorf("a kill was issued in an aborted sweep: %q", l)
+		}
+	}
+	if strings.Contains(stdout, "orphaned process") {
+		t.Errorf("an aborted sweep printed a summary line:\n%s", stdout)
+	}
+	if want := fmt.Sprintf("Error: failed to query tmux panes on %q: ", failingSocket); !strings.Contains(stderr, want) {
+		t.Errorf("stderr missing the earlier socket's %q line:\n%s", want, stderr)
+	}
+	if bad := fmt.Sprintf("Error: failed to query tmux panes on %q", stalled); strings.Contains(stderr, bad) {
+		t.Errorf("the caller's context end was reported as the stalled socket's failure (%q):\n%s", bad, stderr)
 	}
 }
