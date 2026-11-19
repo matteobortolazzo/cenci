@@ -348,9 +348,8 @@ func TestApplyDispatchResumeLaunchArgNamesTheAnswerComment(t *testing.T) {
 
 	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
 	mut := &orderRecordingMutator{}
-	prior := 0
 
-	if _, err := applyDispatch(dispatchTestConfig(), resumeDispatchDeps(now), fakeController{}, mut, false, nil, &prior); err != nil {
+	if _, err := applyDispatch(dispatchTestConfig(), resumeDispatchDeps(now), fakeController{}, mut, false, nil); err != nil {
 		t.Fatalf("applyDispatch returned unexpected error: %v", err)
 	}
 
@@ -386,13 +385,12 @@ func TestApplyDispatchResumeMissingAnswerCommentID_NeverSpawnsOrClaims(t *testin
 
 			now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
 			mut := &fakeMutator{}
-			prior := 0
 			var buf bytes.Buffer
 
 			deps := resumeDispatchDeps(now)
 			tc.mutate(&deps)
 
-			decisions, err := applyDispatch(testConfig(), deps, fakeController{}, mut, false, &buf, &prior)
+			decisions, err := applyDispatch(testConfig(), deps, fakeController{}, mut, false, &buf)
 			if err != nil {
 				t.Fatalf("applyDispatch returned unexpected error: %v", err)
 			}
@@ -404,9 +402,6 @@ func TestApplyDispatchResumeMissingAnswerCommentID_NeverSpawnsOrClaims(t *testin
 			}
 			if len(mut.labelEdits) != 0 {
 				t.Errorf("expected zero label mutations, got %+v", mut.labelEdits)
-			}
-			if prior != 0 {
-				t.Errorf("prior = %d, want 0 (nothing dispatched)", prior)
 			}
 		})
 	}
