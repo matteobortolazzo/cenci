@@ -245,7 +245,7 @@ The canonical, machine-verified order of every GitHub write this skill performs,
 3. `parent-body` — the parent ticket's title/body update (step 10).
 4. `child-create:1` immediately followed by its own `child-link:1`, then `child-create:2` immediately followed by its own `child-link:2`, immediately followed by its own `child-blockers:2`, and so on for every split child in dependency order (Pass 1) — every child's create+link(+blockers) group completes before the next step. This canonical illustration assumes no open parent blockers and child 2 depending on child 1. The blockers op is optional only when the child's effective blocker set is empty; with inherited open blockers, even the first child runs its blockers op immediately after its own link. (No additional backtick-quoted op token here: this section is machine-extracted as one illustrative sequence.)
 5. `parent-exec-order` — Pass 2's parent body append: the `### Coverage map` on every split, plus the Execution Order note when the split has real ordering (step 10 Pass 2(c), after the read-only self-check in 2(b)); unused when there is no split.
-6. `refined` — step 11's `Refined` label add / `Working` label removal.
+6. `refined` — step 11's `Refined` label add / `Working` label removal (on a re-refine the already-present `Refined` label is first removed, then re-added).
 7. `visual-check` — step 12's `ui:visual-check` label add.
 
 #### Manifest revalidation (read-only — before the first write)
@@ -466,6 +466,7 @@ gh label create "ui:visual-check" --repo <owner>/<repo> --color "FEF2C0" --descr
 
    The `automerge:ok` label was already ensured to exist before Pass 1 above.
 
+   - If the freshly fetched snapshot from `#### Manifest revalidation` shows the issue already carries `Refined` (a re-refine), first run the standalone `gh issue edit <number> --repo <owner>/<repo> --remove-label "Refined"`, verified by a label re-fetch showing `Refined` absent, before the existing add-label command below — a fresh `LabeledEvent` then postdates this run's step-10 body edit, which is what the planner's `refinedFresh:` freshness binding reads (#1076). Skip this bullet when `Refined` is not already present.
    - If `browserRequired` is true:
      `gh issue edit <number> --repo <owner>/<repo> --add-label "Refined" --add-label "Browser" --remove-label "Working"`
    - Otherwise:
@@ -478,7 +479,7 @@ gh label create "ui:visual-check" --repo <owner>/<repo> --color "FEF2C0" --descr
    gh issue view <number> --repo <owner>/<repo> --json labels --jq '.labels[].name'
    ```
 
-   If the edit or verification fails, follow the write-failure protocol: report the error, retry once, and if still failing, STOP and report which labels did and didn't apply on ticket #`<number>`.
+   If the edit or verification fails, follow the write-failure protocol: report the error, retry once, and if still failing, STOP and report which labels did and didn't apply on ticket #`<number>`. When the standalone `Refined` removal succeeded but the add did not, the partial-state report names that `Refined` is absent on ticket #`<number>`; the planner's gate then fails closed on the missing label.
 
 12. **Write `ui:visual-check` for the parent**: **use the parent's visual-check-signals-match result computed at the Confirmation Gate above (step 4) — evaluation already happened there; this step only performs the write.** If it matched, add the label:
    `gh issue edit <number> --repo <owner>/<repo> --add-label "ui:visual-check"`

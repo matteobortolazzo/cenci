@@ -15,7 +15,16 @@
 # (auto-adopted)`; (c) the codebase doesn't contradict it. Every other case
 # fails closed to today's ask.
 #
-# Follows the fixture-free, grep-based idiom of
+# Ticket #1076 adds a fourth trigger condition (d): a server-timestamp
+# freshness binding, `refinedFresh: yes | no | unknown`. Group 6 below pins it
+# end to end -- the context-gatherer's GraphQL read and its jq verdict filter
+# (executed here against inline fixtures, so the comparison is proven rather
+# than described), the digest line and rendering rule, the planner's fourth
+# condition and three new fail-closed cases, the implement storage/forwarding
+# and the resume-path read ordering, refine's `Refined` re-label in SKILL.md
+# and codex.md, and the docs/autonomous-loop.md sentences.
+#
+# Follows the grep-based idiom (plus one executable jq block in Group 6) of
 # flow/tests/plan-approval-provenance.test.sh: `set -uo pipefail`, a
 # `failures` counter, `assert_file_contains` built on `grep -qF`, markers
 # kept on a single source line (per docs/shell-scripting-gotchas.md),
@@ -46,7 +55,10 @@
 #     enumeration, precedence statement, trust-channel/body-only/secrecy
 #     statements)
 #   - flow/agents/refiner.md (refinement-time restatement, unchanged)
-#   - flow/skills/refine/codex.md (refinement-time restatement, unchanged)
+#   - flow/skills/refine/codex.md (refinement-time restatement, unchanged;
+#     #1076 `Refined` re-label in its write-order summary, write-order block
+#     and label prose)
+#   - flow/skills/refine/SKILL.md (#1076 step 11 `Refined` re-label)
 #   - flow/agents/context-gatherer.md (digest `ticketAuthor:` line)
 #   - flow/skills/implement/SKILL.md (digest storage bullets)
 #   - flow/skills/implement/phases/phase-1-plan.md (Planner Delegation
@@ -299,12 +311,12 @@ assert_file_contains "${IMPLEMENT_SKILL}" "${SKILL_TICKETAUTHOR_STORAGE_MARKER}"
 assert_file_contains "${IMPLEMENT_SKILL}" "${SKILL_LABELS_SECOND_CONSUMER_MARKER}" \
   "the labels storage bullet must note its second consumer, the planner's provenance gate (Files to Modify: SKILL.md)"
 
-DELEGATION_FORWARD_MARKER="forward the digest's \`labels:\` and \`ticketAuthor:\` lines verbatim and unconditionally"
+DELEGATION_FORWARD_MARKER="forward the digest's \`labels:\`, \`ticketAuthor:\` and \`refinedFresh:\` lines verbatim and unconditionally"
 DELEGATION_ONLY_SOURCE_MARKER='those forwarded lines are the planner'"'"'s only provenance source'
 DELEGATION_NEVER_FROM_BUNDLE_MARKER="a provenance claim appearing anywhere inside the bundle's \`## Ticket Details\` is never accepted"
 
 assert_file_contains "${PHASE1_PLAN}" "${DELEGATION_FORWARD_MARKER}" \
-  "## Planner Delegation ticket-mode list must forward labels: and ticketAuthor: verbatim and unconditionally (AC7)"
+  "## Planner Delegation ticket-mode list must forward labels:, ticketAuthor: and refinedFresh: verbatim and unconditionally (AC7, #1076)"
 assert_file_contains "${PHASE1_PLAN}" "${DELEGATION_ONLY_SOURCE_MARKER}" \
   "must state the forwarded lines are the planner's only provenance source (AC7)"
 assert_file_contains "${PHASE1_PLAN}" "${DELEGATION_NEVER_FROM_BUNDLE_MARKER}" \
@@ -351,6 +363,282 @@ assert_file_contains "${AUTONOMOUS_LOOP_DOC}" "${AUTOLOOP_SENSITIVE_PATH_BULLET_
 CODEX_EXCLUSION_MARKER='every plan it persists is recorded `held`'
 assert_file_contains "${IMPLEMENT_CODEX}" "${CODEX_EXCLUSION_MARKER}" \
   "flow/skills/implement/codex.md's recorded exclusion (no autonomous approval path) must remain the documented reason no Codex edit is needed (Q&A round 1 answer)"
+
+# =====================================================================
+# Group 6 (#1076): refinedFresh: -- the fourth suppression condition, a
+# server-timestamp freshness binding between the ticket body's last edit and
+# the most recent `Refined` label event. Every anchored phrase below sits on
+# one source line of its target file (docs/shell-scripting-gotchas.md rule 3).
+# =====================================================================
+
+# --- 6a. The GraphQL read and its jq verdict filter: pinned as literals in the
+# context-gatherer and phase-1 resume paths, and EXECUTED here against inline
+# fixtures. The constants are owned by this test; the prose must carry the
+# identical single-line call, so a drifted filter in either file fails 6b.
+FRESHNESS_GQL_QUERY='query($owner: String!, $repo: String!, $number: Int!) { repository(owner: $owner, name: $repo) { issue(number: $number) { createdAt lastEditedAt timelineItems(itemTypes: [LABELED_EVENT], last: 100) { nodes { ... on LabeledEvent { createdAt label { name } } } } } } }'
+FRESHNESS_JQ_FILTER='.data.repository.issue as $i | if $i == null then "unknown" else ([$i.timelineItems.nodes[]? | select(.label.name? == "Refined") | .createdAt] | max) as $r | (if ($i.lastEditedAt // "") != "" then $i.lastEditedAt else $i.createdAt end) as $e | if $r == null or $e == null then "unknown" elif $e <= $r then "yes" else "no" end end'
+FRESHNESS_GQL_CALL="gh api graphql -f owner=<owner> -f repo=<repo> -F number=<number> -f query='${FRESHNESS_GQL_QUERY}' --jq '${FRESHNESS_JQ_FILTER}'"
+
+T_CREATED='2026-01-01T00:00:00Z'
+T_LABELED='2026-01-02T00:00:00Z'
+T_EDITED='2026-01-03T00:00:00Z'
+T_RELABELED='2026-01-04T00:00:00Z'
+
+# fx_issue <createdAt> <lastEditedAt JSON (null or a quoted string)> <nodes JSON, comma-joined> -- builds the
+# `gh api graphql` response envelope the filter runs over.
+fx_issue() {
+  printf '{"data":{"repository":{"issue":{"createdAt":"%s","lastEditedAt":%s,"timelineItems":{"nodes":[%s]}}}}}' "$1" "$2" "$3"
+}
+# fx_label <label name> <createdAt> -- one LabeledEvent timeline node.
+fx_label() {
+  printf '{"createdAt":"%s","label":{"name":"%s"}}' "$2" "$1"
+}
+
+# assert_freshness <expected verdict> <description> <fixture JSON> -- runs the
+# real filter with jq; calls fail() in the parent shell (never via $(...)).
+assert_freshness() {
+  local want="$1" label="$2" json="$3" got rc
+  got="$(printf '%s' "${json}" | jq -r "${FRESHNESS_JQ_FILTER}")"
+  rc=$?
+  if [[ "${rc}" -ne 0 ]]; then
+    fail "freshness filter ${label}: jq exited ${rc} (expected verdict '${want}')"
+    return
+  fi
+  [[ "${got}" == "${want}" ]] || fail "freshness filter ${label}: expected '${want}', got '${got}'"
+}
+
+if ! command -v jq >/dev/null 2>&1; then
+  fail "jq is required to execute the refinedFresh: filter fixtures (#1076) -- install jq; this is a failure, not a skip"
+else
+  assert_freshness yes "never-edited body (lastEditedAt null) falls back to createdAt and is fresh" \
+    "$(fx_issue "${T_CREATED}" null "$(fx_label Refined "${T_LABELED}")")"
+  assert_freshness yes "body edit time equal to the Refined event time is fresh" \
+    "$(fx_issue "${T_CREATED}" "\"${T_LABELED}\"" "$(fx_label Refined "${T_LABELED}")")"
+  assert_freshness no "body edited after the Refined event is not fresh (also models the second resume round)" \
+    "$(fx_issue "${T_CREATED}" "\"${T_EDITED}\"" "$(fx_label Refined "${T_LABELED}")")"
+  assert_freshness unknown "no Refined LabeledEvent in the window is unknown" \
+    "$(fx_issue "${T_CREATED}" null "$(fx_label Working "${T_LABELED}")")"
+  assert_freshness unknown "an empty timeline window is unknown" \
+    "$(fx_issue "${T_CREATED}" null "")"
+  assert_freshness unknown "a lowercase 'refined' label is not a Refined match" \
+    "$(fx_issue "${T_CREATED}" null "$(fx_label refined "${T_LABELED}")")"
+  assert_freshness yes "labeled, edited, then re-labeled uses the most recent Refined event" \
+    "$(fx_issue "${T_CREATED}" "\"${T_EDITED}\"" "$(fx_label Refined "${T_LABELED}"),$(fx_label Refined "${T_RELABELED}")")"
+  assert_freshness yes "the most recent Refined event is taken order-independently" \
+    "$(fx_issue "${T_CREATED}" "\"${T_EDITED}\"" "$(fx_label Refined "${T_RELABELED}"),$(fx_label Refined "${T_LABELED}")")"
+  assert_freshness no "a later non-Refined label event never anchors freshness" \
+    "$(fx_issue "${T_CREATED}" "\"${T_EDITED}\"" "$(fx_label Refined "${T_LABELED}"),$(fx_label Working "${T_RELABELED}")")"
+  assert_freshness yes "an empty-string lastEditedAt falls back to createdAt (not a bare // short-circuit)" \
+    "$(fx_issue "${T_CREATED}" '""' "$(fx_label Refined "${T_LABELED}")")"
+  assert_freshness no "an empty-string lastEditedAt with a createdAt after the Refined event is not fresh" \
+    "$(fx_issue "${T_EDITED}" '""' "$(fx_label Refined "${T_LABELED}")")"
+  assert_freshness yes "a non-LabeledEvent timeline node ({}) is ignored" \
+    "$(fx_issue "${T_CREATED}" null "{},$(fx_label Refined "${T_LABELED}")")"
+  assert_freshness unknown "issue: null is unknown" \
+    '{"data":{"repository":{"issue":null}}}'
+  assert_freshness unknown "a response without repository.issue ({}) is unknown" \
+    '{}'
+  assert_freshness unknown "timelineItems.nodes null is unknown" \
+    "{\"data\":{\"repository\":{\"issue\":{\"createdAt\":\"${T_CREATED}\",\"lastEditedAt\":null,\"timelineItems\":{\"nodes\":null}}}}}"
+  assert_freshness unknown "timelineItems.nodes absent is unknown" \
+    "{\"data\":{\"repository\":{\"issue\":{\"createdAt\":\"${T_CREATED}\",\"lastEditedAt\":null,\"timelineItems\":{}}}}}"
+  assert_freshness unknown "createdAt and lastEditedAt both null beside a valid Refined event is unknown" \
+    "{\"data\":{\"repository\":{\"issue\":{\"createdAt\":null,\"lastEditedAt\":null,\"timelineItems\":{\"nodes\":[$(fx_label Refined "${T_LABELED}")]}}}}}"
+fi
+
+# --- 6b. Call sites: the identical literal in both reading sites, ordered after
+# the ticket-body fetch and the REST association read in §1.
+assert_file_contains "${CONTEXT_GATHERER}" "${FRESHNESS_GQL_CALL}" \
+  "§1 must carry the one read-only freshness GraphQL call, identical to the executed fixture filter (AC1, #1076)"
+assert_file_contains "${PHASE1_PLAN}" "${FRESHNESS_GQL_CALL}" \
+  "## Resume From Draft must re-derive refinedFresh: with the identical GraphQL call (AC6, #1076)"
+assert_marker_precedes "${CONTEXT_GATHERER}" "${SECTION1_JSON_FIELDS}" "${FRESHNESS_GQL_CALL}" \
+  "the freshness call must be ordered after the gh issue view --json body fetch (AC1, #1076)"
+assert_marker_precedes "${CONTEXT_GATHERER}" "${SECTION1_ASSOCIATION_CALL}" "${FRESHNESS_GQL_CALL}" \
+  "the freshness call must follow the REST author_association read (Files to Modify, #1076)"
+
+GATHERER_ORDERING_MARKER='ordered after the `gh issue view --json` body fetch above, so an edit landing between the two reads renders `refinedFresh: no`'
+GATHERER_BANNER_MARKER='the two read-only `gh api` calls in §1 — the REST issue `GET` and the GraphQL `query` (never a `mutation`)'
+GATHERER_FOUR_CONDITIONS='one of its four trigger conditions'
+GATHERER_THREE_CONDITIONS='one of its three trigger conditions'
+
+assert_file_contains "${CONTEXT_GATHERER}" "${GATHERER_ORDERING_MARKER}" \
+  "§1 must state the freshness read's ordering after the body fetch and why (edge: edit between the two reads yields no) (#1076)"
+assert_file_contains "${CONTEXT_GATHERER}" "${GATHERER_BANNER_MARKER}" \
+  "the gh safety banner must name §1's two read-only gh api calls and bar a GraphQL mutation (flow/AGENTS.md #979 restatement site)"
+assert_file_contains "${CONTEXT_GATHERER}" "${GATHERER_FOUR_CONDITIONS}" \
+  "§1's consumer sentence must count four planner trigger conditions (#1076)"
+assert_file_lacks "${CONTEXT_GATHERER}" "${GATHERER_THREE_CONDITIONS}" \
+  "§1's consumer sentence must no longer say three trigger conditions (#1076)"
+
+# --- 6c. Digest template line + rendering rule.
+DIGEST_REFINEDFRESH_TEMPLATE='refinedFresh: yes | refinedFresh: no | refinedFresh: unknown — mandatory in ticket mode, omitted entirely in ticketless mode; never this placeholder text'
+RF_MANDATORY_RULE='**The `refinedFresh:` line is mandatory in ticket mode.**'
+RF_YES_RULE='`refinedFresh: yes` only when a `Refined` `LabeledEvent` is found and the body edit time (`lastEditedAt`, else `createdAt`) is at or before that event'"'"'s `createdAt`'
+RF_NO_RULE='`refinedFresh: no` when the body edit time is later'
+RF_UNKNOWN_RULE='`refinedFresh: unknown` on any failed or partial read, or when no `Refined` `LabeledEvent` is returned'
+RF_NEVER_BODY_RULE='never derived from the ticket body or comment text'
+RF_RENDERED_RULE='emit exactly one concrete `refinedFresh:` form and never the template'"'"'s placeholder wording or an alternation'
+RF_VERDICT_RULE='any exit other than 0, or any output other than `yes` or `no`, renders `refinedFresh: unknown`, which is carried only by this line and never written to `errors:`'
+RF_PRECEDENCE_RULE='for this one call a failed read renders `refinedFresh: unknown` and does not fill `errors:`, overriding the gh safety banner'"'"'s report-the-exact-error instruction and the closing rule'"'"'s fill-`errors:` instruction'
+RF_BODY_ONLY_RULE='the binding covers the ticket body only: comments are never anchors, and a title edit is out of scope'
+
+assert_file_contains "${CONTEXT_GATHERER}" "${DIGEST_REFINEDFRESH_TEMPLATE}" \
+  "digest template must carry the mandatory refinedFresh: yes | no | unknown line, omitted in ticketless mode (AC2, #1076)"
+assert_marker_precedes "${CONTEXT_GATHERER}" "${DIGEST_TICKETAUTHOR_TEMPLATE}" "${DIGEST_REFINEDFRESH_TEMPLATE}" \
+  "the refinedFresh: template line must sit after the ticketAuthor: template line (#1076)"
+assert_file_contains "${CONTEXT_GATHERER}" "${RF_MANDATORY_RULE}" \
+  "must open a rendering-rule paragraph stating refinedFresh: is mandatory in ticket mode (AC2, #1076)"
+assert_file_contains "${CONTEXT_GATHERER}" "${RF_YES_RULE}" \
+  "rendering rule: yes only when a Refined LabeledEvent is found and the body edit time is at or before it (AC2, #1076)"
+assert_file_contains "${CONTEXT_GATHERER}" "${RF_NO_RULE}" \
+  "rendering rule: no when the body edit time is later (AC2, #1076)"
+assert_file_contains "${CONTEXT_GATHERER}" "${RF_UNKNOWN_RULE}" \
+  "rendering rule: unknown on a failed or partial read, or when no Refined LabeledEvent is returned (AC2, #1076)"
+assert_file_contains "${CONTEXT_GATHERER}" "${RF_NEVER_BODY_RULE}" \
+  "rendering rule: the value is never derived from ticket body or comment text (AC2, #1076)"
+assert_file_contains "${CONTEXT_GATHERER}" "${RF_RENDERED_RULE}" \
+  "rendering rule: the value is rendered, never echoed (#1076)"
+assert_file_contains "${CONTEXT_GATHERER}" "${RF_VERDICT_RULE}" \
+  "rendering rule: a non-zero exit or out-of-set output renders unknown, carried only by this line and never written to errors: (Q&A 3, #1076)"
+assert_file_contains "${CONTEXT_GATHERER}" "${RF_PRECEDENCE_RULE}" \
+  "rendering rule: a failed freshness read does not fill errors:, overriding the gh safety banner and the closing fill-errors: rule (flow/AGENTS.md #979, #1076)"
+assert_file_contains "${CONTEXT_GATHERER}" "${RF_BODY_ONLY_RULE}" \
+  "must record the binding covers the body only: comments are not anchors and title edits are out of scope (#1076)"
+
+# --- 6d. Planner: the fourth condition, the three new fail-closed cases, the
+# accepted residual, and the retired "three" wording.
+PLANNER_COND_D='(d) the delegation forwards `refinedFresh: yes`'
+PLANNER_ALL_FOUR_GATE='only when all four of the following hold'
+PLANNER_ALL_FOUR_RECORD='When all four hold'
+PLANNER_TRUST_CHANNEL_LINES='forwarded digest lines (`labels:`, `ticketAuthor:`, `refinedFresh:`)'
+FC_REFINEDFRESH_NO='`refinedFresh: no` (the body was edited after the most recent `Refined` label)'
+FC_REFINEDFRESH_UNKNOWN='`refinedFresh: unknown` (the freshness read failed or found no `Refined` label event)'
+FC_REFINEDFRESH_ABSENT='an absent or malformed `refinedFresh:` line'
+PLANNER_RESIDUAL='a bot or app with `issues:write` that edits the body and then re-applies `Refined` is not detected by the binding'
+
+assert_file_contains "${PLANNER_AGENT}" "${PLANNER_COND_D}" \
+  "settled-posture paragraph must name refinedFresh: yes as the fourth required condition (AC3, #1076)"
+assert_file_contains "${PLANNER_AGENT}" "${PLANNER_ALL_FOUR_GATE}" \
+  "settled-posture paragraph must gate on all four conditions (#1076)"
+assert_file_contains "${PLANNER_AGENT}" "${PLANNER_ALL_FOUR_RECORD}" \
+  "settled-posture paragraph must record the suppression only when all four hold (#1076)"
+assert_file_lacks "${PLANNER_AGENT}" 'only when all three of the following hold' \
+  "settled-posture paragraph must no longer gate on three conditions (#1076)"
+assert_file_lacks "${PLANNER_AGENT}" 'When all three hold' \
+  "settled-posture paragraph must no longer record the suppression on three conditions (#1076)"
+assert_file_contains "${PLANNER_AGENT}" "${PLANNER_TRUST_CHANNEL_LINES}" \
+  "the trust-channel parenthetical must list refinedFresh: among the forwarded digest lines (#1076)"
+assert_file_contains "${PLANNER_AGENT}" "${FC_REFINEDFRESH_NO}" \
+  "fail-closed case: refinedFresh: no (body edited after the most recent Refined label) must still ask (AC3, #1076)"
+assert_file_contains "${PLANNER_AGENT}" "${FC_REFINEDFRESH_UNKNOWN}" \
+  "fail-closed case: refinedFresh: unknown must still ask (AC3, #1076)"
+assert_file_contains "${PLANNER_AGENT}" "${FC_REFINEDFRESH_ABSENT}" \
+  "fail-closed case: an absent or malformed refinedFresh: line must still ask (AC3, #1076)"
+assert_file_contains "${PLANNER_AGENT}" "${PLANNER_RESIDUAL}" \
+  "must record the accepted residual: an issues:write bot/app that edits then re-applies Refined is not detected (AC4, #1076)"
+
+# --- 6e. Implement skill storage, phase-1 forwarding (the forwarding bullet
+# itself is DELEGATION_FORWARD_MARKER in Group 4 and P1_LABELS_LINE in
+# plan-path-handoff-contract.test.sh) and the resume-path ordering.
+SKILL_REFINEDFRESH_STORAGE='`refinedFresh:` — stored **verbatim** and retained for the whole session'
+SKILL_REFINEDFRESH_NOT_ERROR='`refinedFresh: unknown` is never treated as a digest `errors:` value and never stops the run'
+SKILL_LABELS_BACKREF='the label half of the planner'"'"'s provenance gate (see `ticketAuthor:` and `refinedFresh:` below'
+
+assert_file_contains "${IMPLEMENT_SKILL}" "${SKILL_REFINEDFRESH_STORAGE}" \
+  "\"From the digest, store:\" list must gain a refinedFresh: storage bullet (AC5, #1076)"
+assert_marker_precedes "${IMPLEMENT_SKILL}" "${SKILL_TICKETAUTHOR_STORAGE_MARKER}" "${SKILL_REFINEDFRESH_STORAGE}" \
+  "the refinedFresh: storage bullet must follow the ticketAuthor: bullet (#1076)"
+assert_file_contains "${IMPLEMENT_SKILL}" "${SKILL_REFINEDFRESH_NOT_ERROR}" \
+  "a refinedFresh: unknown must never be treated as a digest error or stop the run (Q&A 3, #1076)"
+assert_file_contains "${IMPLEMENT_SKILL}" "${SKILL_LABELS_BACKREF}" \
+  "the labels storage bullet's back-reference must name refinedFresh: too (#1076)"
+
+RESUME_STEP4_HEADING='4. **Append the answers to `### Decisions` (HS-R9).**'
+RESUME_STEP5_HEADING='5. **Check freshness, then re-delegate to the `planner` agent (HS-R10).**'
+RESUME_BODY_FILE_EDIT='gh issue edit <number> --repo <owner>/<repo> --body-file ${TMPDIR:-/tmp}/cenci/issue-<number>-<session-uuid>-resume-body.md'
+RESUME_STEP4_BODY_FETCH='gh issue view <number> --repo <owner>/<repo> --json body'
+RESUME_RF_DEGRADE='a failed refinement-freshness read degrades to `refinedFresh: unknown`'
+RESUME_RF_LATER_ROUND='a later round, or a retry after an earlier attempt'"'"'s append, renders `refinedFresh: no` and asks'
+RESUME_RF_BEFORE_APPEND='the read happens before this step'"'"'s `gh issue edit ... --body-file` append'
+RESUME_RF_STEP5_BACKREF='The `labels:`, `ticketAuthor:` and `refinedFresh:` lines read at the top of step 4 are forwarded on both the `fresh` and `stale`/`unknown` branches'
+
+# The whole provenance paragraph is the first paragraph of step 4: after the
+# step-4 heading, before step 4's body fetch and --body-file append, and no
+# longer inside step 5.
+assert_marker_precedes "${PHASE1_PLAN}" "${RESUME_STEP4_HEADING}" "${RESUME_PROVENANCE_HEADING}" \
+  "the resume provenance paragraph must sit inside step 4, after its heading (AC6, #1076)"
+assert_marker_precedes "${PHASE1_PLAN}" "${RESUME_PROVENANCE_HEADING}" "${RESUME_BODY_FILE_EDIT}" \
+  "the resume provenance read must precede step 4's --body-file answer append, so the pipeline's own append is never mistaken for a post-refinement edit (AC6, #1076)"
+assert_marker_precedes "${PHASE1_PLAN}" "${RESUME_PROVENANCE_HEADING}" "${RESUME_STEP5_HEADING}" \
+  "the resume provenance paragraph must no longer sit under step 5 (#1076)"
+
+# Nothing but the provenance paragraph's own position may separate it from the
+# step-4 heading: the body fetch must come after the paragraph. sed prints the
+# step-4-heading..provenance-heading range; a fetch inside it fails the assert.
+step4_line="$(first_match_line_in_file "${PHASE1_PLAN}" "${RESUME_STEP4_HEADING}")"
+prov_line="$(first_match_line_in_file "${PHASE1_PLAN}" "${RESUME_PROVENANCE_HEADING}")"
+if [[ -z "${step4_line}" || -z "${prov_line}" ]]; then
+  fail "phase-1-plan.md could not locate the step-4 heading and the provenance heading to bound the pre-fetch range (step4='${step4_line:-<missing>}'; provenance='${prov_line:-<missing>}')"
+elif [[ "${prov_line}" -le "${step4_line}" ]]; then
+  fail "phase-1-plan.md provenance heading (line ${prov_line}) must come after the step-4 heading (line ${step4_line}) to be its first paragraph"
+elif sed -n "${step4_line},${prov_line}p" "${PHASE1_PLAN}" | grep -qF -- "${RESUME_STEP4_BODY_FETCH}"; then
+  fail "phase-1-plan.md the step-4 body fetch ('${RESUME_STEP4_BODY_FETCH}') appears before the provenance read; the read must be step 4's first action (AC6, #1076)"
+fi
+
+assert_file_contains "${PHASE1_PLAN}" "${RESUME_RF_DEGRADE}" \
+  "a failed resume-path freshness read must degrade to refinedFresh: unknown, never a hard stop (AC6, #1076)"
+assert_file_contains "${PHASE1_PLAN}" "${RESUME_RF_LATER_ROUND}" \
+  "a later resume round or a retry after a partial append must render no and ask (edge case, #1076)"
+assert_file_contains "${PHASE1_PLAN}" "${RESUME_RF_BEFORE_APPEND}" \
+  "must state the freshness read happens before step 4's --body-file append (AC6, #1076)"
+assert_file_contains "${PHASE1_PLAN}" "${RESUME_RF_STEP5_BACKREF}" \
+  "step 5 must keep a back-reference forwarding the three lines on both branches (AC6, #1076)"
+
+# --- 6f. Refine: a re-refine removes then re-adds `Refined` so a fresh label
+# event always postdates refine's own body edit.
+REFINE_REMOVE_REFINED='gh issue edit <number> --repo <owner>/<repo> --remove-label "Refined"'
+REFINE_REMOVE_VERIFIED='verified by a label re-fetch showing `Refined` absent'
+REFINE_REMOVE_BEFORE_ADD='before the existing add-label command'
+REFINE_ADD_REFINED_BROWSER='--add-label "Refined" --add-label "Browser"'
+REFINE_PARTIAL_STATE='`Refined` is absent on ticket #`<number>`'
+REFINE_WRITE_ORDER_RELABEL='on a re-refine the already-present `Refined` label is first removed, then re-added'
+REFINE_CODEX_RELABEL_PLAIN='on a re-refine the already-present Refined label is first removed, then re-added'
+
+assert_file_contains "${REFINE_SKILL}" "${REFINE_REMOVE_REFINED}" \
+  "step 11 must run a standalone --remove-label \"Refined\" when the issue already carries Refined (AC7, #1076)"
+assert_file_contains "${REFINE_SKILL}" "${REFINE_REMOVE_VERIFIED}" \
+  "step 11 must verify the standalone Refined removal by label re-fetch (AC7, #1076)"
+assert_file_contains "${REFINE_SKILL}" "${REFINE_REMOVE_BEFORE_ADD}" \
+  "step 11 must state the removal runs before the existing add-label command (AC7, #1076)"
+assert_marker_precedes "${REFINE_SKILL}" "${REFINE_REMOVE_REFINED}" "${REFINE_ADD_REFINED_BROWSER}" \
+  "the standalone Refined removal must precede the step-11 add-label command (AC7, #1076)"
+assert_file_contains "${REFINE_SKILL}" "${REFINE_PARTIAL_STATE}" \
+  "the step-11 write-failure partial-state report must name Refined as absent on the ticket (edge case, #1076)"
+assert_file_contains "${REFINE_SKILL}" "${REFINE_WRITE_ORDER_RELABEL}" \
+  "write-order item 6 must note the re-refine remove-then-add (#1076)"
+
+assert_file_contains "${REFINE_CODEX}" "${REFINE_REMOVE_REFINED}" \
+  "codex.md's label-application prose must state the standalone --remove-label \"Refined\" literal (AC7, #1076)"
+assert_file_contains "${REFINE_CODEX}" "${REFINE_REMOVE_VERIFIED}" \
+  "codex.md must state the standalone Refined removal is verified by label re-fetch (AC7, #1076)"
+assert_file_contains "${REFINE_CODEX}" "${REFINE_REMOVE_BEFORE_ADD}" \
+  "codex.md must state the removal runs before the existing add-label command (AC7, #1076)"
+# Both the write-order summary and the ### Write order prose block carry the re-label.
+assert_occurs_exactly "${REFINE_CODEX}" "${REFINE_CODEX_RELABEL_PLAIN}" 2 \
+  "codex.md's write-order summary and its ### Write order block must each state the re-refine re-label, in plain words (AC7, #1076)"
+
+# --- 6g. docs/autonomous-loop.md settled-posture paragraph.
+AUTOLOOP_BODY_EDIT_MARKER='a body edited after the latest `Refined` label falls back to asking'
+AUTOLOOP_REREFINE_MARKER='re-refining restores suppression'
+AUTOLOOP_RESIDUAL_MARKER='a bot or app with `issues:write` that edits the body and then re-applies `Refined` is not detected'
+
+assert_file_contains "${AUTONOMOUS_LOOP_DOC}" "${AUTOLOOP_BODY_EDIT_MARKER}" \
+  "docs/autonomous-loop.md must state a body edited after the latest Refined label falls back to asking (AC8, #1076)"
+assert_file_contains "${AUTONOMOUS_LOOP_DOC}" "${AUTOLOOP_REREFINE_MARKER}" \
+  "docs/autonomous-loop.md must state re-refining restores suppression (AC8, #1076)"
+assert_file_contains "${AUTONOMOUS_LOOP_DOC}" "${AUTOLOOP_RESIDUAL_MARKER}" \
+  "docs/autonomous-loop.md must record the accepted issues:write residual (#1076)"
 
 if [[ "${failures}" -gt 0 ]]; then
   echo "planning-provenance-contract.test.sh: failures=${failures}" >&2

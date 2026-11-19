@@ -117,7 +117,9 @@ After verified persistence, report that every applied label and grant/withhold d
 
 Once policy-ready or confirmed, every write proceeds in this order: claim → Working → parent body →
 children+links → Pass 2 → Refined/-Working → ui:visual-check (see `### Write order`
-at the end of this file). Before any of those writes, re-fetch the parent's milestone/labels
+at the end of this file). For that Refined step,
+on a re-refine the already-present Refined label is first removed, then re-added.
+Before any of those writes, re-fetch the parent's milestone/labels
 (unconditionally, even on a parent-only run) and re-verify exclusive ownership; a conflict on
 the re-verify stops with zero writes, same as the pre-confirm check. Diff the re-fetched labels
 against the gate-time snapshot: **authorization-sensitive drift** (`automerge:ok`, `Browser`, or
@@ -136,7 +138,11 @@ true`; the color and description are the plugin's `docs/board-labels.md` row —
 `--remove-label "automerge:ok"` when it does not and the issue currently carries the label
 (re-refine), or nothing otherwise. Every proposed split child gets its own independently
 computed grant/withhold from the same gate, applied when that child is created (see below) —
-never inherited from the parent.
+never inherited from the parent. On a re-refine, when the freshly fetched snapshot shows the issue already carries `Refined`, first run the standalone
+`gh issue edit <number> --repo <owner>/<repo> --remove-label "Refined"`,
+verified by a label re-fetch showing `Refined` absent, before the existing add-label command,
+so a fresh `LabeledEvent` postdates this run's body edit (the planner's `refinedFresh:` freshness binding, #1076). If the add then fails, the write-failure
+protocol STOPs and its partial-state report names `Refined` as absent on the ticket.
 Before the Confirmation Gate renders its manifest, when a split is proposed, first verify each child block is structurally complete — every child in the
 adopted `### Suggested Split` has all six subsections present (`### Goal`, `### Size`, `### Decisions`, `### Assumptions (auto-adopted)`, `### Acceptance criteria`, `### Dependencies`), plus the mandatory `### Sizing Evidence`, each satisfying its emptiness
 rule: `### Goal` non-empty prose; `### Size` a real `<S|M|L>` bound and rationale (L requires the recorded inseparability reason and evidence within L), never empty and never the "None." sentinel; `### Dependencies` non-empty ("None." valid); `### Decisions` and
@@ -286,7 +292,8 @@ The first child runs its blockers op too when it inherits an open parent blocker
 only for an empty effective set, and so on,
 all before parent-exec-order → parent-exec-order (the Execution Order note when the split has
 real ordering; unused when there is no split) → refined (the Refined label add / Working label
-removal) → visual-check (the ui:visual-check label add).
+removal;
+on a re-refine the already-present Refined label is first removed, then re-added) → visual-check (the ui:visual-check label add).
 
 Op tokens, in canonical order for a 2-child split with no open parent blockers, where child 2 depends on child 1: `claim`
 `working` `parent-body` `child-create:1` `child-link:1` `child-create:2` `child-link:2`
