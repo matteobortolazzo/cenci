@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/ipc"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/sandbox"
 )
 
 // tempArmSocket returns a bind-safe Unix socket path, mirroring internal/ipc's
@@ -272,6 +273,36 @@ func TestRun_ArmRequestOmitsTheSocketKeyWhenUnset(t *testing.T) {
 	}
 	if !strings.Contains(raw, `"tmux_pane":"%7"`) {
 		t.Errorf("wire line %q lost the tmux_pane key", raw)
+	}
+}
+
+// #1135: the container's CENCI_LAUNCH_ID rides the arm request as launch_id, the
+// identity the daemon binds the request to. The raw wire line carries the key and
+// value, and the real receiver decodes the same value back.
+func TestRun_ForwardsCENCILaunchIDAsTheArmRequestLaunchID(t *testing.T) {
+	const launchID = "0123456789abcdef0123456789abcdef"
+	t.Setenv(sandbox.LaunchIDEnvName, launchID)
+
+	raw, req := forwardedArmLine(t, "")
+	if req.LaunchID != launchID {
+		t.Errorf("decoded arm request LaunchID = %q, want %q", req.LaunchID, launchID)
+	}
+	if !strings.Contains(raw, `"launch_id":"`+launchID+`"`) {
+		t.Errorf("wire line %q, want the launch_id key carrying %q", raw, launchID)
+	}
+}
+
+// Outside a launched sandbox there is no ID to send: the key is omitted (the
+// daemon refuses such a request), never sent as an empty string.
+func TestRun_ArmRequestOmitsTheLaunchIDKeyWhenUnset(t *testing.T) {
+	t.Setenv(sandbox.LaunchIDEnvName, "")
+
+	raw, req := forwardedArmLine(t, "")
+	if req.LaunchID != "" {
+		t.Errorf("decoded arm request LaunchID = %q, want empty", req.LaunchID)
+	}
+	if strings.Contains(raw, "launch_id") {
+		t.Errorf("wire line %q carries a launch_id key, want none when CENCI_LAUNCH_ID is unset", raw)
 	}
 }
 

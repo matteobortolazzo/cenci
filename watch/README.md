@@ -2522,31 +2522,57 @@ receipt`, for a `blocked` or `failed` receipt, for a held untrusted discussion k
 on a `comment:`/`review:` key and for `review feedback state unknown` on a deleted pending
 comment.
 
-On a forwarded arm request, the host daemon resolves the target checkout itself by
-inspecting running sandbox containers' `/workspace` bind sources under both docker
-and podman and matching each source's `origin` remote against the request's
-`owner/repo` — the container never supplies a host path. This requires the repo to
-be running under exactly one sandboxed checkout: zero matches nacks **host repo not
-found**, and two or more running sandboxes of the same repo (e.g. two worktrees)
-nacks **ambiguous** rather than guessing which one to target. A failed or
-unparsable container inspect nacks as a **probe failed** rather than being treated
-as "no match". The daemon also resolves the tmux session from the forwarded pane;
-an unresolvable pane nacks separately. All of these, plus a resolution that runs
-past its time budget, are relayed to the container as their own distinguishable
-reason, the same way an ordinary "not armed" reason is. The host also bounds the
-rate of forwarded arm requests — a burst past that bound nacks with its own
-distinguishable reason and is safe to retry once the rate has settled.
+A forwarded arm request is bound to the sandbox launch that sent it (ticket #1135).
+It carries the launch's `CENCI_LAUNCH_ID` as `launch_id`, and the host daemon reads
+the forwarded pane's session and the launch options the host launcher recorded on it
+(`@cenci-launch-id`, `@cenci-container`, `@cenci-runtime`) in one tmux call. The arm
+goes ahead only when the pane's launch ID equals the request's. The daemon then
+resolves the target checkout from that pane's own container only: the `/workspace`
+bind source of the recorded container under the recorded runtime, provided its
+`origin` remote matches the request's `owner/repo`. The container never supplies a
+host path, and no other container is inspected, so a second running sandbox of the
+same repo (e.g. two worktrees), or another sandbox's rewritten `origin`, can neither
+block nor redirect the arm; an arm is never nacked **ambiguous**. A missing,
+malformed or mismatched launch ID, a pane with no launch options and a bad recorded
+container or runtime all nack **arm request could not be matched to its sandbox
+launch**. A launch with no recorded ID (started before launch IDs, or whose pane tag
+failed) cannot arm until you relaunch the sandbox. A bound container that is gone
+(sandbox containers run with `--rm`, so a stopped one is removed and inspect reports
+it missing; the daemon does not read the container's running state), has no
+`/workspace` mount or whose `origin` does not match nacks **host repo not found**, and
+a failed or unparsable container inspect nacks as a **probe failed** rather than being
+treated as "no match". An unresolvable pane nacks separately.
+
+The host also caps live supervisors: a new (repo, PR) is refused with **arm supervisor
+limit reached** once that repo has 8 live supervisors or the host has 24, counting the
+host babysit state directory plus arms still spawning. The per-repo count is keyed by
+the repo the daemon verified against the container's `origin`, but the spawned
+supervisor resolves its own repo (`gh repo view`, which follows remotes and `gh repo
+set-default`) and records that one, so a container that adds an `upstream` remote or
+rewrites its `origin` can still consume slots under another repo's name and fill the
+shared host-wide limit. The caps bound resource use; they do not isolate repos or
+containers from one another. A re-arm of a PR that already
+has a live supervisor is never refused by the cap (the running supervisor's lock
+refuses it instead), and a state file that cannot be read counts toward the host
+total only. A state directory that cannot be listed nacks **supervisor count
+unavailable**, and the daemon logs that failure (with the state-directory error)
+whether or not `-verbose` is set. A supervisor that is no longer wanted, including one armed for a PR
+that does not exist, keeps its slot until `cenci babysit stop <pr>`. All of these,
+plus a resolution that runs past its time budget, are relayed to the container as
+their own distinguishable reason, the same way an ordinary "not armed" reason is; no
+reason and no host log line carries the launch ID. The host also bounds the rate of
+forwarded arm requests — a burst past that bound nacks with its own distinguishable
+reason and is safe to retry once the rate has settled.
 
 Forwarded stop and status requests are validated like arm requests (a positive
 integer PR, an `owner/repo`-shaped repo) and then need the repo to match a running
-sandbox, but they differ from arm in two ways. A repo matching two or more running
-sandboxes is **accepted**, not nacked, because the host state file depends only on
-the repo and the PR, not on which checkout is meant; zero matches and a failed
-container inspect still nack. And they share their own rate bound (a burst of 5, one
-more request every 30s), separate from the arm one. The match is against any running
-sandbox, not specifically the caller's, so a container can stop or inspect the
-supervisor of any repo that has a running sandbox — the same exposure forwarded arm
-has. Before signalling, the host re-checks the recorded PID (on Linux by inspecting the
+sandbox. Unlike arm, they carry no launch binding: the host inspects every running
+sandbox, and the match is against any of them, not specifically the caller's, so a
+container can stop or inspect the supervisor of any repo that has a running sandbox. A
+repo matching two or more running sandboxes is **accepted**, because the host state
+file depends only on the repo and the PR, not on which checkout is meant; zero matches
+and a failed container inspect still nack. They share their own rate bound (a burst of
+5, one more request every 30s), separate from the arm one. Before signalling, the host re-checks the recorded PID (on Linux by inspecting the
 process command line for this PR's babysit process; elsewhere it is a liveness check
 only), and every reply carries only a fixed reason: never a host path, a PID or
 command output. A state file that cannot be read or decoded is never treated as an

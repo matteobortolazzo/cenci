@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/ipc"
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/sandbox"
 )
 
 // armSocketPath is a test seam over ipc.DefaultEventSocketPath (#1094),
@@ -38,6 +39,9 @@ func armOnHost(o Options, repo string) error {
 		// The sandbox launcher exports the host server's socket as
 		// CENCI_TMUX_SOCKET; the daemon validates it on receipt (#1431).
 		TmuxSocket: os.Getenv("CENCI_TMUX_SOCKET"),
+		// The launcher exports this launch's ID per exec (#1252); the daemon
+		// binds the request to the pane's host-written @cenci-launch-id (#1135).
+		LaunchID: os.Getenv(sandbox.LaunchIDEnvName),
 	}
 
 	resp, err := ipc.SendArmRequest(armSocketPath(), req)

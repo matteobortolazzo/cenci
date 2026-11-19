@@ -1,8 +1,12 @@
-// Package hostrepo resolves the single host git checkout that a forwarded
-// babysit-arm request's "owner/repo" belongs to, by inspecting every running
-// sandbox container's `/workspace` bind-mount source under both container
-// runtimes (docker and podman) and matching each source's normalized
-// `origin` remote against the requested repo (#1095).
+// Package hostrepo resolves the host git checkout that a forwarded babysit
+// request's "owner/repo" belongs to. Resolve inspects every running sandbox
+// container's `/workspace` bind-mount source under both container runtimes
+// (docker and podman) and matches each source's normalized `origin` remote
+// against the requested repo (#1095); the stop/status forwards still use it.
+// ResolveContainer (#1135) serves the arm path instead: the request is already
+// bound to one container through its pane's launch ID, so it inspects only that
+// container (one `inspect`, one `git remote get-url origin`, never `ps`) and no
+// other container's mounts or `origin` can block or redirect the answer.
 package hostrepo
 
 import (
@@ -105,12 +109,16 @@ func classifyExecTimeout(ctx context.Context, runErr error) error {
 	return runErr
 }
 
-// execRuntime runs `<runtime> <args...>` bounded by ctx (the caller's own
+// runRuntime runs `<runtime> <args...>` bounded by ctx (the caller's own
 // resolution budget), with cmd.WaitDelay bounding a lingering grandchild,
 // separate bounded stdout/stderr buffers, and cmd.Stdin = nil -- mirrors
 // mainsync.go's execGit / babysit/tmux.go's execTmux bounded-subprocess
-// convention (watch/AGENTS.md rule #5).
-func execRuntime(ctx context.Context, runtime string, args ...string) (string, error) {
+// convention (watch/AGENTS.md rule #5). It returns the stderr text next to the
+// raw run error (classifyExecTimeout already applied, so a real timeout is
+// visible to errors.Is and the *exec.ExitError stays visible to errors.As):
+// ResolveContainer's narrow "the container is gone" check needs both, which a
+// pre-formatted message would hide.
+func runRuntime(ctx context.Context, runtime string, args ...string) (stdout, stderr string, err error) {
 	cmd := exec.CommandContext(ctx, runtime, args...)
 	cmd.WaitDelay = execWaitDelay
 	cmd.Stdin = nil
@@ -118,10 +126,20 @@ func execRuntime(ctx context.Context, runtime string, args ...string) (string, e
 	cmd.Stdout = &outBuf
 	cmd.Stderr = &errBuf
 	if err := cmd.Run(); err != nil {
-		err = classifyExecTimeout(ctx, err)
-		return "", fmt.Errorf("%s %s: %w (%s)", runtime, strings.Join(args, " "), err, strings.TrimSpace(errBuf.String()))
+		return "", errBuf.String(), classifyExecTimeout(ctx, err)
 	}
-	return outBuf.String(), nil
+	return outBuf.String(), errBuf.String(), nil
+}
+
+// execRuntime is runRuntime with the failure folded into one error that names
+// the command and carries the trimmed stderr, for callers (Resolve) that only
+// report a probe failure.
+func execRuntime(ctx context.Context, runtime string, args ...string) (string, error) {
+	out, stderr, err := runRuntime(ctx, runtime, args...)
+	if err != nil {
+		return "", fmt.Errorf("%s %s: %w (%s)", runtime, strings.Join(args, " "), err, strings.TrimSpace(stderr))
+	}
+	return out, nil
 }
 
 // execGit runs `git -C dir <args...>` bounded by ctx exactly like
@@ -217,6 +235,85 @@ func Resolve(ctx context.Context, repo string) (string, error) {
 		}
 	}
 	return "", ErrAmbiguous
+}
+
+// ResolveContainer maps one known sandbox container to its host checkout: the
+// /workspace bind source of container under runtime, provided that source's
+// `origin` remote normalizes to repo ("owner/repo"). Unlike Resolve it never
+// enumerates containers -- the forwarded arm path has already bound the request
+// to a container through the pane's launch ID (#1135), so no other container's
+// mounts or `origin` can block or redirect the answer.
+//
+// It runs exactly one `<runtime> inspect --type container` of container and,
+// when that reports a /workspace source, one `git remote get-url origin` on it;
+// never `<runtime> ps`. `--type container` keeps a same-named image or volume
+// from being inspected.
+//
+// It returns ErrNoMatch when the container is gone (inspect says "no such
+// container"; the check never reads `.State.Running`, so it relies on a launch's
+// container running with --rm, which removes a stopped one; see
+// containerVanished for the narrow match), has no /workspace mount, or its
+// source's origin does not name repo -- including a git read of the origin that
+// fails for any reason other than the context ending (no `origin` remote, not a
+// checkout), which fails closed like a mismatch; a wrapped ErrMalformedInspect
+// for an inspect answer that does not parse into exactly one record; and a probe
+// error for every other failure -- an unsupported runtime or non-sandbox
+// container name (re-validated here, never trusted from the caller: neither may
+// reach an exec argv), any other non-zero inspect exit, a runtime that could not
+// run, or the context ending during the inspect or the origin read (the deadline
+// stays visible to errors.Is, never ErrNoMatch). ErrAmbiguous cannot occur.
+func ResolveContainer(ctx context.Context, runtime, container, repo string) (string, error) {
+	if !sandbox.ValidLaunchRuntime(runtime) {
+		return "", errors.New("hostrepo: unsupported container runtime")
+	}
+	if !sandbox.IsSandboxContainerName(container) {
+		return "", errors.New("hostrepo: not a sandbox container name")
+	}
+
+	out, stderr, err := runRuntime(ctx, runtime, "inspect", "--type", "container", "--format", combinedInspectFormat, container)
+	if err != nil {
+		if containerVanished(err, stderr) {
+			return "", ErrNoMatch
+		}
+		return "", fmt.Errorf("hostrepo: %s inspect: %w (%s)", runtime, err, strings.TrimSpace(stderr))
+	}
+	sources, err := parseCombinedInspect(out, []string{container})
+	if err != nil {
+		return "", fmt.Errorf("hostrepo: %s inspect: %w", runtime, err)
+	}
+	source := sources[container]
+	if source == "" {
+		return "", ErrNoMatch
+	}
+	if !originMatches(ctx, source, repo) {
+		// originMatches swallows every git failure as a non-match, so a read
+		// that stalled past the deadline would otherwise read as "no match".
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return "", fmt.Errorf("hostrepo: reading origin of %s: %w", container, ctxErr)
+		}
+		return "", ErrNoMatch
+	}
+	return source, nil
+}
+
+// containerVanished reports whether a failed `inspect` says the container is no
+// longer there: err is a real *exec.ExitError (not a deadline, which kills the
+// runtime mid-call and must stay a probe error) and the stderr text, lower-cased,
+// names "no such container" or "no such object". It copies
+// watch/internal/sandbox/launcher/adddir.go's containerVanished, which this
+// package cannot import (daemon -> hostrepo -> sandbox stays acyclic), and keeps
+// its narrowness (watch/AGENTS.md's match-miss rule): anything else -- a runtime
+// that could not run, a timeout, any other stderr such as a permission or
+// daemon-connection failure -- says nothing about the container and is not
+// "gone". stderr is passed in because the buffer, not exitErr.Stderr (only
+// filled by Output), is where runRuntime captured it.
+func containerVanished(err error, stderr string) bool {
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	text := strings.ToLower(stderr)
+	return strings.Contains(text, "no such container") || strings.Contains(text, "no such object")
 }
 
 // parseCombinedInspect parses a combined per-runtime `inspect --format`

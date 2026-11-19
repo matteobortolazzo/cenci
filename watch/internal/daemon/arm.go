@@ -64,19 +64,23 @@ const (
 	// `tmux display-message` result, or the underlying command failing to
 	// run at all for a reason other than the resolution budget expiring).
 	ReasonArmPaneUnresolvable = "tmux pane could not be resolved to a session"
-	// ReasonArmHostRepoNotFound is returned when hostrepo.Resolve finds no
-	// running sandbox container whose origin remote matches the request's
-	// repo (hostrepo.ErrNoMatch).
+	// ReasonArmHostRepoNotFound is returned when the host repo cannot be
+	// matched (hostrepo.ErrNoMatch): on the arm path, the pane's bound
+	// container is not running, has no /workspace mount, or its origin does
+	// not name the request's repo (hostrepo.ResolveContainer, #1135); on
+	// stop/status, no running sandbox container's origin matches
+	// (hostrepo.Resolve).
 	ReasonArmHostRepoNotFound = "host repo could not be resolved"
-	// ReasonArmHostRepoAmbiguous is returned when hostrepo.Resolve finds
-	// more than one distinct host checkout matching the request's repo
-	// (hostrepo.ErrAmbiguous) -- e.g. two worktrees of the same repo, each
-	// running its own sandbox container.
+	// ReasonArmHostRepoAmbiguous maps hostrepo.ErrAmbiguous: more than one
+	// distinct host checkout matching the repo. Only hostrepo.Resolve's
+	// every-container scan can produce it; the arm path resolves the one bound
+	// container (#1135), so an arm is never refused with it, and stop/status
+	// accept a multi-match (#1390).
 	ReasonArmHostRepoAmbiguous = "host repo is ambiguous"
-	// ReasonArmHostRepoProbeFailed is returned when hostrepo.Resolve fails
-	// for any reason other than ErrNoMatch/ErrAmbiguous (a failed or
-	// unparsable container-runtime inspect) -- fail closed, never guessed
-	// (#1095 Decisions).
+	// ReasonArmHostRepoProbeFailed is returned when the host-repo resolution
+	// fails for any reason other than ErrNoMatch/ErrAmbiguous (a failed or
+	// unparsable container-runtime inspect, wrapped ErrMalformedInspect
+	// included) -- fail closed, never guessed (#1095 Decisions).
 	ReasonArmHostRepoProbeFailed = "host repo resolution failed"
 	// ReasonArmResolutionTimedOut is returned when the pane or host-repo
 	// resolution work does not complete inside hostArmSpawn's own bounded
@@ -95,6 +99,32 @@ const (
 	// required workflow is nacked with babysit.CapabilityRefusal's own text,
 	// which names the agent and the workflow.
 	ReasonArmCapabilityUnavailable = "babysit capability check unavailable"
+
+	// -- #1135: the launch binding and the live-supervisor caps. Same
+	// conventions as above: plain constants, no host detail, and never the
+	// launch ID.
+
+	// ReasonArmLaunchUnverified is returned for every launch-identity failure,
+	// whichever check failed: a launch_id that fails sandbox.ValidLaunchID
+	// (absent -- an older client or a launch with no recorded ID -- or
+	// malformed), a pane with no well-formed @cenci-launch-id, a pane launch ID
+	// that differs from the request's, a malformed pane read, and a pane whose
+	// @cenci-container or @cenci-runtime fails the sandbox validators. One
+	// reason for all of them tells the caller nothing about which check failed.
+	ReasonArmLaunchUnverified = "arm request could not be matched to its sandbox launch"
+	// ReasonArmSupervisorCapReached is returned when a new (repo, PR) would
+	// exceed armRepoSupervisorCap live supervisors for its repo or
+	// armHostSupervisorCap on the host, counting the babysit state directory
+	// plus this daemon's own arms that are spawning but not yet visible. A
+	// re-arm of a (repo, PR) that is already live or spawning is never refused
+	// with it. Carries no counts.
+	ReasonArmSupervisorCapReached = "arm supervisor limit reached"
+	// ReasonArmSupervisorCountUnavailable is returned when the host babysit
+	// state directory cannot be listed (for example permission denied): the cap
+	// cannot be checked, so the arm is refused rather than guessed
+	// (watch/docs/error-handling.md default-deny). A missing directory counts
+	// as zero and is not this reason.
+	ReasonArmSupervisorCountUnavailable = "supervisor count unavailable"
 )
 
 // armRepoPattern matches a single "owner/repo" pair shaped like GitHub's own
@@ -176,6 +206,12 @@ func (d *Daemon) handleArmRequest(req ipc.ArmRequest) ipc.ArmResponse {
 		d.logArmReject(req, ReasonInvalidTmuxPane)
 		return ipc.ArmResponse{OK: false, Reason: ReasonInvalidTmuxPane}
 	}
+	// The launch ID's shape (#1135), before any tmux, runtime or git call;
+	// armSpawn then matches it against the pane's own recorded ID.
+	if !sandbox.ValidLaunchID(req.LaunchID) {
+		d.logArmReject(req, ReasonArmLaunchUnverified)
+		return ipc.ArmResponse{OK: false, Reason: ReasonArmLaunchUnverified}
+	}
 	// The pane's server socket crosses the same trust boundary as the pane id
 	// (#1431). A rejected value becomes empty -- the daemon's ambient server and
 	// today's supervisor argv -- never a nack, and its description never echoes a
@@ -205,7 +241,8 @@ func isArmRepoDotSegment(repo string) bool {
 }
 
 // logArmReject logs a validation-reject branch under cfg.Verbose
-// (watch/docs/hook-events.md rule 2).
+// (watch/docs/hook-events.md rule 2). It names the PR, repo and agent only,
+// never the launch ID (#1135).
 func (d *Daemon) logArmReject(req ipc.ArmRequest, reason string) {
 	if !d.cfg.Verbose {
 		return
