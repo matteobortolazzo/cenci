@@ -23,8 +23,15 @@ import (
 // shape-validated socket a container's scan output references is resolved at
 // most once per sweep (memoized across containers/runtimes) before any signal
 // is sent in that container. A row carrying no socket (pre-#1007 launcher), a
-// malformed one, or a malformed launch ID fails open: treated as live, never
-// signaled — a false kill here is irreversible loss of in-flight agent work.
+// malformed one, a socket whose tmux query failed, or a malformed launch ID
+// fails open: treated as live, never signaled — a false kill here is
+// irreversible loss of in-flight agent work. A socket failure is scoped to the
+// rows carrying that socket: its "Error:" line is printed once, the sweep
+// continues with the other sockets, containers and runtimes (a failed socket is
+// never dialed twice), and after the summary the returned error joins every
+// distinct failed socket's error so the command still exits non-zero. A scan
+// failure, a signal failure or a caller context that ends still aborts the
+// sweep at once, joined with the socket errors collected so far.
 // It is a global sweep (not scoped to the current repo) and scans every
 // installed runtime, since
 // orphans can exist under either docker or podman regardless of which one
@@ -36,7 +43,10 @@ import (
 //
 // It prints its own "Error:"/"Note:" lines (errors to stderr, matching the
 // bash launcher whose retargeted test suite asserts these exact strings);
-// the returned error only signals a non-zero exit to the caller.
+// the returned error only signals a non-zero exit to the caller. The summary
+// prints "Reaped N orphaned process(es)." when N > 0 and "No orphaned processes
+// found." only when nothing was reaped and no socket failed (a failed socket's
+// rows are unknown, not absent).
 func ReapOrphans(stdout, stderr io.Writer) error {
 	runtimes, err := sandbox.AvailableRuntimes()
 	if err != nil {
@@ -57,6 +67,21 @@ func reapOrphans(ctx context.Context, runtimes []string, onlyContainer string, s
 	// container/runtime in this sweep (#1007).
 	scanner := sandbox.NewOrphanScanner(stdout, stderr)
 
+	// socketErrs collects one error per distinct failed socket across every
+	// container/runtime; the sweep keeps going past them and returns them joined
+	// after the summary. A socket's own "Error:" line was already printed by the
+	// scanner.
+	var socketErrs []error
+	failedSockets := map[string]bool{}
+	// abort ends the sweep on an error that is not a socket failure, keeping the
+	// socket errors collected so far visible alongside it.
+	abort := func(err error) error {
+		if len(socketErrs) == 0 {
+			return err
+		}
+		return errors.Join(append(socketErrs, err)...)
+	}
+
 	reapedCount := 0
 	for _, rt := range runtimes {
 		containers := []string{onlyContainer}
@@ -65,19 +90,27 @@ func reapOrphans(ctx context.Context, runtimes []string, onlyContainer string, s
 			containers, err = scanner.RunningContainers(ctx, rt)
 			if err != nil {
 				_, _ = fmt.Fprintf(stderr, "Error: failed to list running containers for %s.\n", rt)
-				return err
+				return abort(err)
 			}
 		}
 
 		for _, container := range containers {
 			scanned, err := scanner.ScanContainer(ctx, rt, container)
+			// Collected before the error branch: a context that ends mid-scan
+			// still returns the failures recorded before it, and abort must see
+			// them (their Error: lines are already printed).
+			for _, f := range scanned.SocketFailures {
+				if !failedSockets[f.Socket] {
+					failedSockets[f.Socket] = true
+					socketErrs = append(socketErrs, f.Err)
+				}
+			}
 			if err != nil {
-				// A tmux failure has already printed its own Error line.
 				var scanErr *sandbox.ScanError
 				if errors.As(err, &scanErr) {
 					_, _ = fmt.Fprintf(stderr, "Error: failed to scan processes in container %s: %s\n", container, scanErr.Stderr)
 				}
-				return err
+				return abort(err)
 			}
 
 			var termed []sandbox.ProcTarget
@@ -93,8 +126,8 @@ func reapOrphans(ctx context.Context, runtimes []string, onlyContainer string, s
 					continue
 				}
 				// Only a dead pane or dead launch is signaled; no-socket,
-				// malformed-launch-ID and live rows fail open, and a class
-				// unknown here is never signaled either.
+				// unresolved-socket, malformed-launch-ID and live rows fail open,
+				// and a class unknown here is never signaled either.
 				if r.Class != sandbox.OrphanDeadPane {
 					continue
 				}
@@ -104,7 +137,7 @@ func reapOrphans(ctx context.Context, runtimes []string, onlyContainer string, s
 				gone, err := sandbox.SignalTerm(ctx, rt, container, pid, stdout, stderr)
 				if err != nil {
 					_, _ = fmt.Fprintf(stderr, "Error: failed to send SIGTERM to pid %s in container %s.\n", pid, container)
-					return err
+					return abort(err)
 				}
 				if gone {
 					_, _ = fmt.Fprintf(stdout, "Note: process %s in container %s exited before SIGTERM could be delivered; skipping.\n", pid, container)
@@ -139,15 +172,18 @@ func reapOrphans(ctx context.Context, runtimes []string, onlyContainer string, s
 			// With a zero grace window the wait issues no probes at all.
 			sandbox.AwaitExit(ctx, rt, container, termed, grace)
 			if err := sandbox.KillSurvivors(ctx, rt, container, termed, stdout, stderr); err != nil {
-				return err
+				return abort(err)
 			}
 		}
 	}
 
+	// A failed socket's rows are unknown, not absent: with nothing reaped, the
+	// no-op summary would claim a clean sweep, so it is only for a sweep where
+	// no socket failed.
 	if reapedCount > 0 {
 		_, _ = fmt.Fprintf(stdout, "Reaped %d orphaned process(es).\n", reapedCount)
-	} else {
+	} else if len(socketErrs) == 0 {
 		_, _ = fmt.Fprintln(stdout, "No orphaned processes found.")
 	}
-	return nil
+	return errors.Join(socketErrs...)
 }

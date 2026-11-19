@@ -1415,8 +1415,9 @@ case_35_launch_id_row_on_no_server_socket_is_reaped() {
 # ---------------------------------------------------------------------------
 # A non-empty list-panes line whose pane part is not a pane id (garbage with no
 # tab, or an escaped tab) means tmux did not honor the format. It is a genuine
-# tmux-format error: the sweep hard-fails before any kill rather than folding
-# the line into a live pane that records no ID (which would reap its agent).
+# tmux-format error: the sweep fails open for that socket (Error: printed, exit
+# non-zero) rather than folding the line into a live pane that records no ID
+# (which would reap its agent).
 # A dead launch-ID row beside it proves nothing is signaled.
 case_36_unexpected_list_panes_line_hard_fails_without_killing() {
     local prefix container bad
@@ -1447,9 +1448,10 @@ case_36_unexpected_list_panes_line_hard_fails_without_killing() {
 # ---------------------------------------------------------------------------
 # A list-panes line with a valid pane but a NON-EMPTY, malformed launch-ID
 # column is equally unexpected: dropping it as "no ID" would class the process
-# carrying that pane's real ID as a dead pane and kill it. The sweep hard-fails
-# before any kill (an empty second column stays valid -- cases 29 and 35). A
-# dead launch-ID row beside it proves nothing is signaled.
+# carrying that pane's real ID as a dead pane and kill it. The sweep fails open
+# for that socket (Error: printed, exit non-zero; an empty second column stays
+# valid -- cases 29 and 35). A dead launch-ID row beside it proves nothing is
+# signaled.
 case_37_malformed_launch_id_column_hard_fails_without_killing() {
     local prefix container bad quoted reaped_needle
     reaped_needle=$'reaped\t'
@@ -1474,6 +1476,36 @@ case_37_malformed_launch_id_column_hard_fails_without_killing() {
             assert_not_contains "${reaped_needle}"
         done
     done
+}
+
+# ---------------------------------------------------------------------------
+# #1127: a genuine tmux error scopes to the rows carrying that socket. The row
+# on the failing socket (DEFAULT_SOCKET) is never signaled and its Error: line
+# is printed, but the dead row on the healthy socket (CENCI_SOCKET) in the same
+# container is still reaped, and the command still exits non-zero at the end.
+case_38_failing_socket_fails_open_healthy_socket_still_reaped() {
+    echo "case: a failing tmux socket fails open (never signaled, Error: printed, exit non-zero) while a dead row on a healthy socket in the same container is still reaped"
+    reset_state
+    local container="claude-cenci-onebadsocket"
+    add_podman_container "${container}"
+    local failing_row healthy_row
+    failing_row="$(printf '38001\t%%1\t38000\t%s' "${DEFAULT_SOCKET}")"
+    healthy_row="$(printf '38002\t%%2\t38001\t%s' "${CENCI_SOCKET}")"
+    write_scan_legacy "${container}" "${failing_row}" "${healthy_row}"
+    mock_set TMUX_MODE "error"
+    mock_set TMUX_MODE_CENCI "ok"
+    mock_set LIVE_PANES_CENCI "%99"
+    set_gone 38002
+    run_reap
+    assert_exit_nonzero
+    assert_contains "$(reaped_line "${container}" 38002 "%2")"
+    assert_calls_contains "podman exec -u root ${container} kill -TERM 38002"
+    assert_calls_not_contains "kill -TERM 38001"
+    assert_calls_not_contains "kill -KILL 38001"
+    assert_contains "Error: failed to query tmux panes on"
+    assert_contains "${DEFAULT_SOCKET}"
+    assert_contains "Reaped 1 orphaned process(es)."
+    assert_not_contains "No orphaned processes found."
 }
 
 # ---------------------------------------------------------------------------
@@ -1514,6 +1546,7 @@ case_34_marker_and_tabbed_launch_id_never_signaled
 case_35_launch_id_row_on_no_server_socket_is_reaped
 case_36_unexpected_list_panes_line_hard_fails_without_killing
 case_37_malformed_launch_id_column_hard_fails_without_killing
+case_38_failing_socket_fails_open_healthy_socket_still_reaped
 
 print_summary
 [[ "${FAILURES}" -eq 0 ]]

@@ -2,12 +2,14 @@ package sandbox
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -28,6 +30,7 @@ const (
 
 	orphanDockerContainer = "claude-cenci-orphans"
 	orphanDockerSecond    = "codex-cenci-orphans"
+	orphanDockerThird     = "claude-cenci-third"
 	orphanPodmanContainer = "claude-cenci-podman"
 
 	// orphanTestTimeout bounds the happy-path counts so a regression that
@@ -80,7 +83,9 @@ func writeOrphanFakeRuntime(t *testing.T, dir, callLog string, rt orphanFakeRunt
 
 // orphanTmuxSocket configures how the fake tmux answers `-S <socket>
 // list-panes`: mode "ok" (default) prints panes, "noserver" fails with tmux's
-// "no server running" stderr, "error" fails with a genuine tmux error.
+// "no server running" stderr, "error" fails with a genuine tmux error, "stall"
+// sleeps far past any bound (needs the real sleep binary on PATH behind the
+// fakes dir).
 type orphanTmuxSocket struct {
 	mode  string
 	panes []string
@@ -129,6 +134,11 @@ case "$mode" in
   error)
     echo "protocol version mismatch (client 8, server 7)" >&2
     exit 1
+    ;;
+  stall)
+    # exec so a kill on deadline reaches the sleeper itself, not a shell parent
+    # holding the pipes open (watch/docs/go-gotchas.md, #886).
+    exec sleep 30
     ;;
   *)
     if [ "$fmt" = '#{pane_id}' ]; then
@@ -973,4 +983,608 @@ func TestCountOrphanedSessions_LaunchIDRowWithMissingOrMalformedSocketIsNotCount
 		}
 		requireOnlySocketQueried(t, callLog, orphanSocketA)
 	})
+}
+
+// -- ticket #1127: a socket-resolution failure is scoped to its rows ----------
+//
+// A genuine tmux failure on one socket (a connection error, a stall, output that
+// breaks the list-panes format) fails open for the rows that carry that socket
+// and is recorded on the scan result; every other socket, container and runtime
+// is still resolved and classified. The read-only count still fails closed.
+
+const (
+	orphanSocketC = "/tmp/tmux-1000/dead-c"
+
+	// tmuxErrorCause is the stderr the fake tmux's "error" mode writes.
+	tmuxErrorCause = "protocol version mismatch"
+)
+
+// scanRowByPID returns the classified row for pid.
+func scanRowByPID(t *testing.T, scan ContainerOrphanScan, pid string) OrphanScanRow {
+	t.Helper()
+	for _, r := range scan.Rows {
+		if r.PID == pid {
+			return r
+		}
+	}
+	t.Fatalf("scan has no row for pid %s; rows: %+v", pid, scan.Rows)
+	return OrphanScanRow{}
+}
+
+// requireRowClass fails the test unless pid's row has the wanted class.
+func requireRowClass(t *testing.T, scan ContainerOrphanScan, pid string, want OrphanRowClass, why string) {
+	t.Helper()
+	if got := scanRowByPID(t, scan, pid).Class; got != want {
+		t.Errorf("pid %s class = %v, want %v (%s)", pid, got, want, why)
+	}
+}
+
+// socketFailureSockets lists the failed sockets of a scan in recorded order.
+func socketFailureSockets(scan ContainerOrphanScan) []string {
+	sockets := make([]string, 0, len(scan.SocketFailures))
+	for _, f := range scan.SocketFailures {
+		sockets = append(sockets, f.Socket)
+	}
+	return sockets
+}
+
+// One container references a failing socket A and a healthy socket B. Rows on A
+// are the new fail-open class (a well-formed launch-ID row included, and a
+// malformed-launch-ID row too: the socket check comes first), the failure is
+// recorded once on the scan, and the rows on B and the no-socket row keep their
+// own classes. A's rows must not leak into NoSocketCount.
+func TestScanContainer_FailingSocketScopesToItsRowsAndHealthySocketStillClassified(t *testing.T) {
+	dir, callLog := orphanFixture(t)
+	writeOrphanFakeRuntime(t, dir, callLog, orphanFakeRuntime{
+		name: "docker",
+		ps:   []string{orphanDockerContainer},
+		scans: map[string]string{
+			orphanDockerContainer: scanLine("3001", "%1", "1000", orphanSocketA) +
+				scanLine("3002", "%2", "2000", orphanSocketB) +
+				scanLineLaunch("3003", "%3", "3000", orphanSocketA, launchIDOne) +
+				scanLineLaunch("3004", "%4", "4000", orphanSocketA, malformedFieldMarker) +
+				scanLine("3005", "%5", "5000", "") +
+				scanLineLaunch("3006", "%6", "6000", orphanSocketB, launchIDTwo) +
+				scanLine("1", "%1", "50", orphanSocketA),
+		},
+	})
+	writeOrphanFakeTmux(t, dir, callLog, map[string]orphanTmuxSocket{
+		orphanSocketA: {mode: "error"},
+		orphanSocketB: {panes: panesWithLaunchIDs("%99=" + launchIDOne)},
+	})
+	var stdout, stderr strings.Builder
+	ctx, cancel := context.WithTimeout(context.Background(), orphanTestTimeout)
+	defer cancel()
+
+	scan, err := NewOrphanScanner(&stdout, &stderr).ScanContainer(ctx, "docker", orphanDockerContainer)
+
+	if err != nil {
+		t.Fatalf("ScanContainer err = %v, want nil: a failing socket is recorded on the scan, not returned", err)
+	}
+	requireRowClass(t, scan, "3001", OrphanUnresolvedSocket, "legacy row on the failing socket")
+	requireRowClass(t, scan, "3003", OrphanUnresolvedSocket, "well-formed launch-ID row on the failing socket is not dead")
+	requireRowClass(t, scan, "3004", OrphanUnresolvedSocket, "the socket check precedes the malformed-launch-ID check")
+	requireRowClass(t, scan, "3002", OrphanDeadPane, "legacy row on the healthy socket whose pane is absent")
+	requireRowClass(t, scan, "3006", OrphanDeadPane, "launch-ID row on the healthy socket whose ID is recorded on no live pane")
+	requireRowClass(t, scan, "3005", OrphanNoSocket, "a row with no socket")
+	requireRowClass(t, scan, "1", OrphanContainerInit, "PID 1 is never a target")
+
+	if scan.NoSocketCount != 1 {
+		t.Errorf("NoSocketCount = %d, want 1 (only the row with no socket; the failing socket's rows are their own class)", scan.NoSocketCount)
+	}
+	if scan.MalformedLaunchIDCount != 0 {
+		t.Errorf("MalformedLaunchIDCount = %d, want 0 (the malformed-ID row sits on the failing socket)", scan.MalformedLaunchIDCount)
+	}
+	if got := socketFailureSockets(scan); !slices.Equal(got, []string{orphanSocketA}) {
+		t.Fatalf("SocketFailures sockets = %v, want exactly [%s] (recorded once, healthy socket B absent)", got, orphanSocketA)
+	}
+	if !strings.Contains(scan.SocketFailures[0].Err.Error(), tmuxErrorCause) {
+		t.Errorf("SocketFailures[0].Err = %v, want it to carry the tmux cause %q", scan.SocketFailures[0].Err, tmuxErrorCause)
+	}
+
+	wantLine := fmt.Sprintf("Error: failed to query tmux panes on %q: ", orphanSocketA)
+	if got := strings.Count(stderr.String(), wantLine); got != 1 {
+		t.Errorf("stderr has %d %q lines, want exactly 1; stderr:\n%s", got, wantLine, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), tmuxErrorCause) {
+		t.Errorf("stderr = %q, want the Error: line to carry the tmux cause %q", stderr.String(), tmuxErrorCause)
+	}
+}
+
+// A row on a failed socket that carries a well-formed launch ID stays fail-open
+// even when that same launch ID is recorded on a dead row elsewhere: the healthy
+// socket's row is a dead launch, the failed socket's row is unresolved (its
+// liveness is unknown, so it is neither dead nor counted).
+func TestScanContainer_FailedSocketRowWithALaunchIDDeadElsewhereStaysUnresolved(t *testing.T) {
+	dir, callLog := orphanFixture(t)
+	writeOrphanFakeRuntime(t, dir, callLog, orphanFakeRuntime{
+		name: "docker",
+		ps:   []string{orphanDockerContainer},
+		scans: map[string]string{
+			orphanDockerContainer: scanLineLaunch("3001", "%1", "1000", orphanSocketA, launchIDOne) +
+				scanLineLaunch("3002", "%2", "2000", orphanSocketB, launchIDOne),
+		},
+	})
+	writeOrphanFakeTmux(t, dir, callLog, map[string]orphanTmuxSocket{
+		orphanSocketA: {mode: "error"},
+		// A live pane here records a different launch ID, so launchIDOne is dead on B.
+		orphanSocketB: {panes: panesWithLaunchIDs("%99=" + launchIDTwo)},
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), orphanTestTimeout)
+	defer cancel()
+
+	scan, err := NewOrphanScanner(io.Discard, io.Discard).ScanContainer(ctx, "docker", orphanDockerContainer)
+
+	if err != nil {
+		t.Fatalf("ScanContainer err = %v, want nil", err)
+	}
+	requireRowClass(t, scan, "3002", OrphanDeadPane, "the launch ID is recorded on no live pane of the healthy socket")
+	requireRowClass(t, scan, "3001", OrphanUnresolvedSocket, "the same launch ID on the failed socket must not be judged dead")
+}
+
+// A failed socket is dialed at most once per sweep: two containers that both
+// reference failing socket A cost exactly one `-S A list-panes`, both scans
+// still report the failure and class their A rows fail-open, and the Error: line
+// is printed once, not once per container.
+func TestScanContainer_FailedSocketIsDialedOnceAcrossContainers(t *testing.T) {
+	dir, callLog := orphanFixture(t)
+	writeOrphanFakeRuntime(t, dir, callLog, orphanFakeRuntime{
+		name: "docker",
+		ps:   []string{orphanDockerContainer, orphanDockerSecond},
+		scans: map[string]string{
+			// Two rows on A in the first container: one failure entry, not two.
+			orphanDockerContainer: scanLine("3001", "%1", "1000", orphanSocketA) + scanLine("3002", "%2", "2000", orphanSocketA),
+			orphanDockerSecond:    scanLine("3101", "%1", "1000", orphanSocketA) + scanLine("3102", "%2", "2000", orphanSocketB),
+		},
+	})
+	writeOrphanFakeTmux(t, dir, callLog, map[string]orphanTmuxSocket{
+		orphanSocketA: {mode: "error"},
+		orphanSocketB: {panes: []string{"%99"}},
+	})
+	var stderr strings.Builder
+	scanner := NewOrphanScanner(io.Discard, &stderr)
+	ctx, cancel := context.WithTimeout(context.Background(), orphanTestTimeout)
+	defer cancel()
+
+	first, err := scanner.ScanContainer(ctx, "docker", orphanDockerContainer)
+	if err != nil {
+		t.Fatalf("ScanContainer(first) err = %v, want nil", err)
+	}
+	second, err := scanner.ScanContainer(ctx, "docker", orphanDockerSecond)
+	if err != nil {
+		t.Fatalf("ScanContainer(second) err = %v, want nil", err)
+	}
+
+	dials := 0
+	for _, l := range readOrphanCallLog(t, callLog) {
+		if strings.HasPrefix(l, "-S "+orphanSocketA+" list-panes") {
+			dials++
+		}
+	}
+	if dials != 1 {
+		t.Errorf("failing socket A was dialed %d times, want exactly 1 per sweep", dials)
+	}
+	for name, scan := range map[string]ContainerOrphanScan{"first": first, "second": second} {
+		if got := socketFailureSockets(scan); !slices.Equal(got, []string{orphanSocketA}) {
+			t.Errorf("%s container SocketFailures sockets = %v, want [%s] (the memoized failure is still reported per container, once)", name, got, orphanSocketA)
+		}
+	}
+	requireRowClass(t, first, "3001", OrphanUnresolvedSocket, "first container, row on the failed socket")
+	requireRowClass(t, first, "3002", OrphanUnresolvedSocket, "first container, second row on the failed socket")
+	requireRowClass(t, second, "3101", OrphanUnresolvedSocket, "second container, row on the memoized failed socket")
+	requireRowClass(t, second, "3102", OrphanDeadPane, "second container, dead row on the healthy socket")
+	if got := strings.Count(stderr.String(), "Error: failed to query tmux panes on"); got != 1 {
+		t.Errorf("stderr has %d Error: lines, want 1 (the cache hit must not print again); stderr:\n%s", got, stderr.String())
+	}
+}
+
+// fakeSweepClock is the injectable clock behind OrphanScanner.now: time is
+// driven by the test, never by real sleeping. Every now() call returns a
+// strictly later instant than the previous one (the scanner orders "scan
+// finished" against "snapshot started" by the clock, so a frozen clock would
+// make every snapshot look as fresh as the scan), and advance() adds a jump on
+// top of that.
+type fakeSweepClock struct{ at time.Time }
+
+func (c *fakeSweepClock) now() time.Time {
+	c.at = c.at.Add(time.Millisecond)
+	return c.at
+}
+
+func (c *fakeSweepClock) advance(d time.Duration) { c.at = c.at.Add(d) }
+
+// newClockedScanner returns a scanner whose clock is a fake that ticks on every
+// read.
+func newClockedScanner(stderr io.Writer) (*OrphanScanner, *fakeSweepClock) {
+	clock := &fakeSweepClock{at: time.Date(2026, time.November, 18, 12, 0, 0, 0, time.UTC)}
+	scanner := NewOrphanScanner(io.Discard, stderr)
+	scanner.now = clock.now
+	return scanner, clock
+}
+
+// countSocketDials counts the `-S <socket> list-panes` calls in the fake tmux
+// call log.
+func countSocketDials(t *testing.T, callLog, socket string) int {
+	t.Helper()
+	dials := 0
+	for _, l := range readOrphanCallLog(t, callLog) {
+		if strings.HasPrefix(l, "-S "+socket+" list-panes") {
+			dials++
+		}
+	}
+	return dials
+}
+
+// twoContainerSharedSocketFixture serves two containers that both reference
+// socket A: the first holds an agent (launchIDOne on %1) and the second a
+// later-launched agent (launchIDTwo on %2). Socket A initially lists only the
+// first agent's pane, so launchIDTwo is recorded on no live pane yet.
+func twoContainerSharedSocketFixture(t *testing.T) (dir, callLog string) {
+	t.Helper()
+	dir, callLog = orphanFixture(t)
+	writeOrphanFakeRuntime(t, dir, callLog, orphanFakeRuntime{
+		name: "docker",
+		ps:   []string{orphanDockerContainer, orphanDockerSecond},
+		scans: map[string]string{
+			orphanDockerContainer: scanLineLaunch("3001", "%1", "1000", orphanSocketA, launchIDOne),
+			orphanDockerSecond:    scanLineLaunch("3101", "%2", "2000", orphanSocketA, launchIDTwo),
+		},
+	})
+	writeOrphanFakeTmux(t, dir, callLog, map[string]orphanTmuxSocket{
+		orphanSocketA: {panes: panesWithLaunchIDs("%1=" + launchIDOne)},
+	})
+	return dir, callLog
+}
+
+// A successful socket snapshot taken before the current container's scan
+// finished must not judge that container's rows, however young it is: the
+// launcher records the launch ID on the pane before it execs the agent, so an
+// agent launched into the container after the first container's snapshot is
+// listed by any list-panes started after that container's scan, yet absent from
+// the earlier snapshot, which would class the new, live agent a dead pane and get
+// it killed. The clock never jumps here: the rule is scan-relative, not an age.
+func TestScanContainer_SnapshotTakenBeforeTheContainersScanIsReResolvedSoANewLaunchIsLive(t *testing.T) {
+	dir, callLog := twoContainerSharedSocketFixture(t)
+	scanner, _ := newClockedScanner(io.Discard)
+	ctx, cancel := context.WithTimeout(context.Background(), orphanTestTimeout)
+	defer cancel()
+
+	first, err := scanner.ScanContainer(ctx, "docker", orphanDockerContainer)
+	if err != nil {
+		t.Fatalf("ScanContainer(first) err = %v, want nil", err)
+	}
+	requireRowClass(t, first, "3001", OrphanLive, "its launch ID is recorded on a live pane of socket A")
+
+	// A new agent is launched on socket A after the first container's snapshot.
+	writeOrphanFakeTmux(t, dir, callLog, map[string]orphanTmuxSocket{
+		orphanSocketA: {panes: panesWithLaunchIDs("%1="+launchIDOne, "%2="+launchIDTwo)},
+	})
+
+	second, err := scanner.ScanContainer(ctx, "docker", orphanDockerSecond)
+	if err != nil {
+		t.Fatalf("ScanContainer(second) err = %v, want nil", err)
+	}
+	requireRowClass(t, second, "3101", OrphanLive, "socket A was re-resolved after the second container's scan, so the launch recorded after the first snapshot is live, never a reap target")
+	if got := countSocketDials(t, callLog, orphanSocketA); got != 2 {
+		t.Errorf("socket A was dialed %d times, want 2 (the first container's snapshot, then a re-resolution for the second)", got)
+	}
+}
+
+// Within one container a socket referenced by several rows is dialed once: the
+// snapshot resolved after the scan stays reusable for every row of that
+// container, so the scan-relative rule costs no extra dial per row.
+func TestScanContainer_SocketReferencedByTwoRowsOfOneContainerIsDialedOnce(t *testing.T) {
+	dir, callLog := orphanFixture(t)
+	writeOrphanFakeRuntime(t, dir, callLog, orphanFakeRuntime{
+		name: "docker",
+		ps:   []string{orphanDockerContainer},
+		scans: map[string]string{
+			orphanDockerContainer: scanLineLaunch("3001", "%1", "1000", orphanSocketA, launchIDOne) +
+				scanLineLaunch("3002", "%2", "2000", orphanSocketA, launchIDTwo),
+		},
+	})
+	writeOrphanFakeTmux(t, dir, callLog, map[string]orphanTmuxSocket{
+		orphanSocketA: {panes: panesWithLaunchIDs("%1="+launchIDOne, "%9="+launchIDThree)},
+	})
+	scanner, _ := newClockedScanner(io.Discard)
+	ctx, cancel := context.WithTimeout(context.Background(), orphanTestTimeout)
+	defer cancel()
+
+	scan, err := scanner.ScanContainer(ctx, "docker", orphanDockerContainer)
+	if err != nil {
+		t.Fatalf("ScanContainer err = %v, want nil", err)
+	}
+
+	requireRowClass(t, scan, "3001", OrphanLive, "launchIDOne is recorded on a live pane of socket A")
+	requireRowClass(t, scan, "3002", OrphanDeadPane, "launchIDTwo is recorded on no live pane of socket A")
+	if got := countSocketDials(t, callLog, orphanSocketA); got != 1 {
+		t.Errorf("socket A was dialed %d times, want exactly 1 for two rows of one container", got)
+	}
+}
+
+// A failed socket stays memoized for the whole sweep whatever the clock says: the
+// scan-relative rule only distrusts an earlier successful snapshot, it never
+// re-dials a failure (a stalling socket would otherwise cost its 7s again per
+// container).
+func TestScanContainer_FailedSocketIsNotReDialedRegardlessOfClock(t *testing.T) {
+	dir, callLog := orphanFixture(t)
+	writeOrphanFakeRuntime(t, dir, callLog, orphanFakeRuntime{
+		name: "docker",
+		ps:   []string{orphanDockerContainer, orphanDockerSecond},
+		scans: map[string]string{
+			orphanDockerContainer: scanLine("3001", "%1", "1000", orphanSocketA),
+			orphanDockerSecond:    scanLine("3101", "%2", "2000", orphanSocketA),
+		},
+	})
+	writeOrphanFakeTmux(t, dir, callLog, map[string]orphanTmuxSocket{orphanSocketA: {mode: "error"}})
+	var stderr strings.Builder
+	scanner, clock := newClockedScanner(&stderr)
+	ctx, cancel := context.WithTimeout(context.Background(), orphanTestTimeout)
+	defer cancel()
+
+	if _, err := scanner.ScanContainer(ctx, "docker", orphanDockerContainer); err != nil {
+		t.Fatalf("ScanContainer(first) err = %v, want nil", err)
+	}
+	clock.advance(time.Hour)
+	second, err := scanner.ScanContainer(ctx, "docker", orphanDockerSecond)
+	if err != nil {
+		t.Fatalf("ScanContainer(second) err = %v, want nil", err)
+	}
+
+	if got := countSocketDials(t, callLog, orphanSocketA); got != 1 {
+		t.Errorf("failed socket A was dialed %d times, want exactly 1 per sweep whatever the clock says", got)
+	}
+	requireRowClass(t, second, "3101", OrphanUnresolvedSocket, "the memoized failure still applies for a later container")
+	if got := socketFailureSockets(second); !slices.Equal(got, []string{orphanSocketA}) {
+		t.Errorf("second container SocketFailures sockets = %v, want [%s]", got, orphanSocketA)
+	}
+	if got := strings.Count(stderr.String(), "Error: failed to query tmux panes on"); got != 1 {
+		t.Errorf("stderr has %d Error: lines, want 1; stderr:\n%s", got, stderr.String())
+	}
+}
+
+// A re-resolution for a later container that now fails is that socket's failure
+// like any other: its Error: line is printed once, the container records the
+// failure and its row fails open instead of being judged against the earlier
+// snapshot, and the failure is then memoized, so a third container neither
+// re-dials the socket nor re-prints the line but still reports the failure.
+func TestScanContainer_ReResolutionThatFailsFailsTheSocketOpenAndIsMemoized(t *testing.T) {
+	dir, callLog := twoContainerSharedSocketFixture(t)
+	var stderr strings.Builder
+	scanner, _ := newClockedScanner(&stderr)
+	ctx, cancel := context.WithTimeout(context.Background(), orphanTestTimeout)
+	defer cancel()
+
+	if _, err := scanner.ScanContainer(ctx, "docker", orphanDockerContainer); err != nil {
+		t.Fatalf("ScanContainer(first) err = %v, want nil", err)
+	}
+	// Socket A starts failing, and a third container also references it.
+	writeOrphanFakeTmux(t, dir, callLog, map[string]orphanTmuxSocket{orphanSocketA: {mode: "error"}})
+	writeOrphanFakeRuntime(t, dir, callLog, orphanFakeRuntime{
+		name: "docker",
+		ps:   []string{orphanDockerContainer, orphanDockerSecond, orphanDockerThird},
+		scans: map[string]string{
+			orphanDockerContainer: scanLineLaunch("3001", "%1", "1000", orphanSocketA, launchIDOne),
+			orphanDockerSecond:    scanLineLaunch("3101", "%2", "2000", orphanSocketA, launchIDTwo),
+			orphanDockerThird:     scanLineLaunch("3201", "%3", "3000", orphanSocketA, launchIDThree),
+		},
+	})
+
+	second, err := scanner.ScanContainer(ctx, "docker", orphanDockerSecond)
+	if err != nil {
+		t.Fatalf("ScanContainer(second) err = %v, want nil", err)
+	}
+	third, err := scanner.ScanContainer(ctx, "docker", orphanDockerThird)
+	if err != nil {
+		t.Fatalf("ScanContainer(third) err = %v, want nil", err)
+	}
+
+	requireRowClass(t, third, "3201", OrphanUnresolvedSocket, "the memoized failure applies to the third container")
+	if got := socketFailureSockets(third); !slices.Equal(got, []string{orphanSocketA}) {
+		t.Errorf("third container SocketFailures sockets = %v, want [%s] (the memoized failure is reported per container)", got, orphanSocketA)
+	}
+	requireRowClass(t, second, "3101", OrphanUnresolvedSocket, "the re-resolution failed, so the earlier snapshot must not classify the row")
+	if got := socketFailureSockets(second); !slices.Equal(got, []string{orphanSocketA}) {
+		t.Fatalf("second container SocketFailures sockets = %v, want [%s]", got, orphanSocketA)
+	}
+	if !strings.Contains(second.SocketFailures[0].Err.Error(), tmuxErrorCause) {
+		t.Errorf("SocketFailures[0].Err = %v, want the tmux cause %q", second.SocketFailures[0].Err, tmuxErrorCause)
+	}
+	if got := strings.Count(stderr.String(), fmt.Sprintf("Error: failed to query tmux panes on %q: ", orphanSocketA)); got != 1 {
+		t.Errorf("stderr has %d Error: lines for A, want 1; stderr:\n%s", got, stderr.String())
+	}
+	if got := countSocketDials(t, callLog, orphanSocketA); got != 2 {
+		t.Errorf("socket A was dialed %d times, want 2 (original plus one refresh)", got)
+	}
+}
+
+// The read-only count (the dispatch capacity gate) keeps failing closed when any
+// socket fails, even though another socket in the same container resolved and
+// holds a genuine dead row: an error and no count. With several failing sockets
+// the error is the first one seen and stays on one line, because it reaches the
+// line-classified dispatch log.
+func TestCountOrphanedSessions_MixedSocketFailureFailsClosed(t *testing.T) {
+	forEachAgentContainer(t, func(t *testing.T, container string) {
+		dir, callLog := orphanFixture(t)
+		writeOrphanFakeRuntime(t, dir, callLog, orphanFakeRuntime{
+			name: "docker",
+			ps:   []string{container},
+			scans: map[string]string{
+				container: scanLine("3001", "%1", "1000", orphanSocketB) + // healthy socket, a dead row
+					scanLine("3002", "%2", "2000", orphanSocketA) + // first failing socket
+					scanLine("3003", "%3", "3000", orphanSocketC), // second failing socket
+			},
+		})
+		writeOrphanFakeTmux(t, dir, callLog, map[string]orphanTmuxSocket{
+			orphanSocketA: {mode: "error"},
+			orphanSocketB: {panes: []string{"%99"}},
+			orphanSocketC: {mode: "error"},
+		})
+		var stderr strings.Builder
+		ctx, cancel := context.WithTimeout(context.Background(), orphanTestTimeout)
+		defer cancel()
+
+		got, err := CountOrphanedSessions(ctx, []string{"docker"}, io.Discard, &stderr)
+
+		if err == nil {
+			t.Fatalf("CountOrphanedSessions = (%d, nil), want an error: any failing socket fails the count closed", got)
+		}
+		if got != 0 {
+			t.Errorf("count = %d on error, want 0 (no partial count)", got)
+		}
+		text := err.Error()
+		if !strings.Contains(text, tmuxErrorCause) {
+			t.Errorf("error %q does not carry the tmux cause %q", text, tmuxErrorCause)
+		}
+		if !strings.Contains(text, strconv.Quote(orphanSocketA)) {
+			t.Errorf("error %q does not name the first failing socket %s", text, orphanSocketA)
+		}
+		if strings.Contains(text, orphanSocketC) {
+			t.Errorf("error %q names the second failing socket %s; want only the first failure", text, orphanSocketC)
+		}
+		if strings.ContainsAny(text, "\n\r") {
+			t.Errorf("error text spans lines: %q", text)
+		}
+		if !strings.Contains(stderr.String(), fmt.Sprintf("Error: failed to query tmux panes on %q: ", orphanSocketA)) {
+			t.Errorf("stderr = %q, want the Error: line for socket A", stderr.String())
+		}
+	})
+}
+
+// A socket that stalls past tmux.RunSocket's own 5s bound (the caller's context
+// is still alive) is that socket's failure, and the count's error stays one line
+// even though RunSocket joins context.DeadlineExceeded into its error with a
+// newline: the dispatch log is line-classified. The error still names the socket
+// and the timeout.
+func TestCountOrphanedSessions_StalledSocketErrorIsSingleLine(t *testing.T) {
+	// The fake's `exec sleep` needs the real sleep binary: keep the ambient PATH
+	// behind the fakes dir, which stays first so the fake docker/tmux still win.
+	ambientPath := os.Getenv("PATH")
+	dir, callLog := orphanFixture(t)
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+ambientPath)
+	if _, err := exec.LookPath("sleep"); err != nil {
+		t.Fatalf("the stalled-socket fixture needs a sleep binary on PATH: %v", err)
+	}
+	writeOrphanFakeRuntime(t, dir, callLog, orphanFakeRuntime{
+		name:  "docker",
+		ps:    []string{orphanDockerContainer},
+		scans: map[string]string{orphanDockerContainer: scanLine("3001", "%1", "1000", orphanSocketA)},
+	})
+	writeOrphanFakeTmux(t, dir, callLog, map[string]orphanTmuxSocket{orphanSocketA: {mode: "stall"}})
+	// The context outlives RunSocket's 5s child bound, so the bound is what ends
+	// the stall; the elapsed-time cap only guards a regression that hangs.
+	const promptly = 15 * time.Second
+	ctx, cancel := context.WithTimeout(context.Background(), orphanTestTimeout)
+	defer cancel()
+
+	start := time.Now()
+	got, err := CountOrphanedSessions(ctx, []string{"docker"}, io.Discard, io.Discard)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatalf("CountOrphanedSessions = (%d, nil), want an error for the stalled socket", got)
+	}
+	if elapsed >= promptly {
+		t.Errorf("returned after %s, want it bounded by the per-socket 5s limit (the tmux fake sleeps 30s)", elapsed)
+	}
+	text := err.Error()
+	if strings.ContainsAny(text, "\n\r") {
+		t.Errorf("error text spans lines: %q", text)
+	}
+	if !strings.Contains(text, strconv.Quote(orphanSocketA)) {
+		t.Errorf("error %q does not name the stalled socket %s", text, orphanSocketA)
+	}
+	if !strings.Contains(text, context.DeadlineExceeded.Error()) {
+		t.Errorf("error %q does not carry the timeout cause %q", text, context.DeadlineExceeded)
+	}
+}
+
+// A caller context that expires while a socket is being resolved is not that
+// socket's fault: the scan aborts with an error wrapping the context error, no
+// Error: line is printed for that socket, it is not recorded as a socket failure
+// and nothing about it is cached, so a later scan with a live context resolves it
+// normally. Failures of sockets resolved earlier in the same container are kept:
+// the abort returns them with the error so the caller can still report them.
+func TestScanContainer_ExpiredContextAbortsWithoutCachingASocketFailure(t *testing.T) {
+	// The fake's `exec sleep` needs the real sleep binary: keep the ambient PATH
+	// behind the fakes dir, which stays first so the fake docker/tmux still win.
+	ambientPath := os.Getenv("PATH")
+	dir, callLog := orphanFixture(t)
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+ambientPath)
+	if _, err := exec.LookPath("sleep"); err != nil {
+		t.Fatalf("the stalled-socket fixture needs a sleep binary on PATH: %v", err)
+	}
+	writeOrphanFakeRuntime(t, dir, callLog, orphanFakeRuntime{
+		name: "docker",
+		ps:   []string{orphanDockerContainer},
+		scans: map[string]string{
+			// B fails first (resolved before the stalled A), so its failure is the
+			// partial result the aborted scan returns.
+			orphanDockerContainer: scanLine("3002", "%2", "2000", orphanSocketB) + scanLine("3001", "%1", "1000", orphanSocketA),
+		},
+	})
+	writeOrphanFakeTmux(t, dir, callLog, map[string]orphanTmuxSocket{
+		orphanSocketA: {mode: "stall"},
+		orphanSocketB: {mode: "error"},
+	})
+	var stderr strings.Builder
+	scanner := NewOrphanScanner(io.Discard, &stderr)
+
+	const deadline = time.Second
+	const promptly = 10 * time.Second
+	ctx, cancel := context.WithTimeout(context.Background(), deadline)
+	start := time.Now()
+	scan, err := scanner.ScanContainer(ctx, "docker", orphanDockerContainer)
+	elapsed := time.Since(start)
+	cancel()
+
+	if err == nil {
+		t.Fatal("ScanContainer err = nil, want the caller's expired context to abort the scan")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("err = %v, want it to wrap context.DeadlineExceeded", err)
+	}
+	var scanErr *ScanError
+	if errors.As(err, &scanErr) {
+		t.Errorf("err = %v is a *ScanError, want the abort to come from resolving the socket, not from the in-container scan", err)
+	}
+	if elapsed >= promptly {
+		t.Errorf("returned after %s, want it bounded near the %s deadline (the tmux fake sleeps 30s)", elapsed, deadline)
+	}
+	if calls := readOrphanCallLog(t, callLog); !anyLineContains(calls, "-S "+orphanSocketA+" list-panes") {
+		t.Errorf("the stalled socket was never queried, so the expiry was not exercised; calls:\n%s", strings.Join(calls, "\n"))
+	}
+	// The aborted scan returns exactly the failure recorded before the abort (B),
+	// and not the expired socket A.
+	if got := socketFailureSockets(scan); !slices.Equal(got, []string{orphanSocketB}) {
+		t.Errorf("SocketFailures sockets = %v, want exactly [%s]: B failed before the abort, and an expired context is not A's failure", got, orphanSocketB)
+	}
+	if len(scan.Rows) != 0 {
+		t.Errorf("Rows = %+v, want none: an aborted scan classifies nothing", scan.Rows)
+	}
+	if !strings.Contains(stderr.String(), fmt.Sprintf("Error: failed to query tmux panes on %q: ", orphanSocketB)) {
+		t.Errorf("stderr = %q, want B's own Error: line", stderr.String())
+	}
+	if strings.Contains(stderr.String(), strconv.Quote(orphanSocketA)) {
+		t.Errorf("stderr = %q, want no per-socket Error: line for the expired caller context on A", stderr.String())
+	}
+
+	// A was not cached: with the socket healthy and a live context the same
+	// scanner resolves it and classifies the row from the real pane set. B's
+	// failure is memoized and still reported.
+	writeOrphanFakeTmux(t, dir, callLog, map[string]orphanTmuxSocket{
+		orphanSocketA: {panes: []string{"%99"}},
+		orphanSocketB: {mode: "error"},
+	})
+	retryCtx, retryCancel := context.WithTimeout(context.Background(), orphanTestTimeout)
+	defer retryCancel()
+	retry, err := scanner.ScanContainer(retryCtx, "docker", orphanDockerContainer)
+	if err != nil {
+		t.Fatalf("retry ScanContainer err = %v, want nil", err)
+	}
+	if got := socketFailureSockets(retry); !slices.Equal(got, []string{orphanSocketB}) {
+		t.Errorf("retry SocketFailures sockets = %v, want exactly [%s] (B's failure is memoized, A's expired attempt must not be)", got, orphanSocketB)
+	}
+	requireRowClass(t, retry, "3001", OrphanDeadPane, "after the retry socket A resolves and %1 is absent from its live panes")
+	requireRowClass(t, retry, "3002", OrphanUnresolvedSocket, "B's memoized failure still fails its row open")
 }
