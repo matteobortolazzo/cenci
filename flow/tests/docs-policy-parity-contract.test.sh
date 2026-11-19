@@ -25,12 +25,16 @@
 # Single-occurrence enforcement of the individual sentences stays with
 # doc-routing-contract.test.sh, docs-policy-minimal-contract.test.sh and
 # lessons-routing-contract.test.sh; this suite only requires presence on both
-# surfaces. Markers are single-source-line constants (gotchas rule 13), counted
-# with `grep -oF | wc -l` (rule 10(4)), and the matrix evaluator has non-vacuity
-# self-tests (rules 10, 29, 30): a missing marker, an unreadable site and an
-# empty or comma-only site list are each caught, a marker present at one site and
-# absent at another reports exactly the missing site, and an injected `implement`
-# in PORTABLE_SKILLS is caught.
+# surfaces, with one exception: a row may carry an optional fifth `once` field
+# (#1556, the at-cap precedence sentence), and then every listed site must hold
+# the marker exactly once, so a site that restates it twice fails here too.
+# `count_problem` is the pure evaluator behind both modes. Markers are
+# single-source-line constants (gotchas rule 13), counted with `grep -oF | wc -l`
+# (rule 10(4)), and the matrix evaluator has non-vacuity self-tests (rules 10,
+# 29, 30): a missing marker, an unreadable site and an empty or comma-only site
+# list are each caught, a marker present at one site and absent at another
+# reports exactly the missing site, and an injected `implement` in
+# PORTABLE_SKILLS is caught.
 #
 # Acceptance criteria covered: P14 (the parity matrix and the PORTABLE_SKILLS
 # check), P29 (both new contract-test headers carry the instruction-text-only
@@ -64,10 +68,31 @@ marker_count() {
   printf '%s\n' "${out}" | wc -l | tr -d '[:space:]'
 }
 
-# site_problem <repo-relative-path> <marker> -- prints why the file does not
-# carry the marker, or nothing when it does. Pure, no fail().
+# count_problem <content> <marker> <mode> -- prints why the content does not
+# carry the marker as the mode requires, or nothing when it does. Mode is empty
+# (present at least once) or `once` (present exactly once). Pure, no fail().
+count_problem() {
+  local content="$1" marker="$2" mode="${3:-}" count
+  count="$(marker_count "${content}" "${marker}")"
+  case "${count}" in
+    ERROR) echo "grep error while counting"; return ;;
+    0) echo "marker missing"; return ;;
+  esac
+  case "${mode}" in
+    "") ;;
+    once)
+      if [[ "${count}" -ne 1 ]]; then
+        echo "marker occurs ${count} times, expected exactly once"
+      fi
+      ;;
+    *) echo "unknown count mode [${mode}] (test bug)" ;;
+  esac
+}
+
+# site_problem <repo-relative-path> <marker> [<mode>] -- prints why the file
+# does not carry the marker, or nothing when it does. Pure, no fail().
 site_problem() {
-  local rel="$1" marker="$2" content count
+  local rel="$1" marker="$2" mode="${3:-}" content problem
   if [[ -z "${marker}" ]]; then
     echo "empty marker (test bug)"
     return
@@ -76,11 +101,10 @@ site_problem() {
     echo "${rel}: unreadable or missing"
     return
   fi
-  count="$(marker_count "${content}" "${marker}")"
-  case "${count}" in
-    ERROR) echo "${rel}: grep error while counting" ;;
-    0) echo "${rel}: marker missing" ;;
-  esac
+  problem="$(count_problem "${content}" "${marker}" "${mode}")"
+  if [[ -n "${problem}" ]]; then
+    echo "${rel}: ${problem}"
+  fi
 }
 
 # expand_sites <comma-separated-sites> -- one repo-relative path per line. A
@@ -103,12 +127,12 @@ expand_sites() {
   done
 }
 
-# row_problems <class> <marker-variable-name> <claude-sites> <codex-sites> --
-# one problem per line; nothing when every listed site carries the marker. An
-# unset marker, an empty site list on either surface, or an unreadable site is
-# a problem, never a silent pass. Pure.
+# row_problems <class> <marker-variable-name> <claude-sites> <codex-sites> [<mode>]
+# -- one problem per line; nothing when every listed site carries the marker (and,
+# in `once` mode, carries it exactly once). An unset marker, an empty site list
+# on either surface, or an unreadable site is a problem, never a silent pass. Pure.
 row_problems() {
-  local class="$1" var="$2" claude="$3" codex="$4" marker site problem claude_sites codex_sites
+  local class="$1" var="$2" claude="$3" codex="$4" mode="${5:-}" marker site problem claude_sites codex_sites
   marker="${MARKER[${var}]:-}"
   if [[ -z "${marker}" ]]; then
     echo "${class}/${var}: marker variable is unset or empty (test bug)"
@@ -126,7 +150,7 @@ row_problems() {
   fi
   while IFS= read -r site; do
     [[ -n "${site}" ]] || continue
-    problem="$(site_problem "${site}" "${marker}")"
+    problem="$(site_problem "${site}" "${marker}" "${mode}")"
     if [[ -n "${problem}" ]]; then
       echo "${class}/${var}: ${problem}"
     fi
@@ -244,6 +268,7 @@ MARKER[M_NOTES_RENDER]='Render each `Lesson dropped (minimal policy):` line as o
 MARKER[M_ONLY_MINIMAL_REACHES]="Only \`### Dropped (minimal policy)\` entries reach the lessons status file and the PR's \`## Notes\`; every other dropped entry stays in the collector's summary."
 MARKER[M_SKIPPED_WIRING]='Write each `validation: <label> — skipped (not named in the plan)` line for a collector-reported command into the maintenance status file with the other `validation:` lines, never as `pass`; Phase 9 renders it as an unchecked `Docs check skipped` line.'
 MARKER[M_SKIPPED_REDERIVE]="Re-derive that skipped line on every entry from the collector's \`### Lesson validation\` report; when the collector was not relaunched or reported none, read the earlier status file before the first-line rewrite and carry its \`skipped (not named in the plan)\` lines forward."
+MARKER[M_ATCAP_PRECEDENCE]='For a `docs/*.md` `## Rules` section that is at its bullet cap, the at-cap sub-item merge takes precedence over the "one flat bullet" fallback rule for that `## Rules` section only; every other section keeps the flat bullet (#979).'
 MARKER[F_DROPPED_LINE]='Lesson dropped (minimal policy):'
 MARKER[F_PLANNER_VALIDATION]='with a structured `Lessons:` line, list the validation command its admission doc names, if any'
 
@@ -255,7 +280,7 @@ IMPLEMENTER='flow/agents/implementer.md'
 COLLECTOR='flow/agents/lessons-collector.md'
 CODE_REVIEWER='flow/agents/code-reviewer.md'
 
-# class|marker-variable|Claude sites (comma-separated)|Codex sites (comma-separated)
+# class|marker-variable|Claude sites (comma-separated)|Codex sites (comma-separated)[|once]
 ROWS=(
   # --- documentation routing: phase-8 / planner.md <-> codex.md / planner role
   "routing|M_PROHIBIT|${PHASE8},${PLANNER}|${CODEX}"
@@ -314,6 +339,7 @@ ROWS=(
   "lesson-admission|M_SKIPPED_WIRING|${PHASE8}|${CODEX}"
   "lesson-admission|M_SKIPPED_REDERIVE|${PHASE8}|${CODEX}"
   "lesson-admission|M_NOTES_RENDER|${PHASE9}|${CODEX}"
+  "lesson-admission|M_ATCAP_PRECEDENCE|${COLLECTOR},${PHASE8}|${CODEX}|once"
   "lesson-admission|F_DROPPED_LINE|${PHASE8},${PHASE9}|${CODEX}"
   "lesson-admission|F_PLANNER_VALIDATION|${PLANNER}|toml:planner"
 )
@@ -326,14 +352,14 @@ CLASS_ROWS_minimal_policy=0
 CLASS_ROWS_routing=0
 CLASS_ROWS_lesson_admission=0
 for ROW in "${ROWS[@]}"; do
-  IFS='|' read -r ROW_CLASS ROW_VAR ROW_CLAUDE ROW_CODEX <<<"${ROW}"
+  IFS='|' read -r ROW_CLASS ROW_VAR ROW_CLAUDE ROW_CODEX ROW_MODE <<<"${ROW}"
   case "${ROW_CLASS}" in
     minimal-policy) CLASS_ROWS_minimal_policy=$((CLASS_ROWS_minimal_policy+1)) ;;
     routing) CLASS_ROWS_routing=$((CLASS_ROWS_routing+1)) ;;
     lesson-admission) CLASS_ROWS_lesson_admission=$((CLASS_ROWS_lesson_admission+1)) ;;
     *) fail "row [${ROW}]: unknown marker class [${ROW_CLASS}] (test bug)" ;;
   esac
-  PROBLEMS="$(row_problems "${ROW_CLASS}" "${ROW_VAR}" "${ROW_CLAUDE}" "${ROW_CODEX}")"
+  PROBLEMS="$(row_problems "${ROW_CLASS}" "${ROW_VAR}" "${ROW_CLAUDE}" "${ROW_CODEX}" "${ROW_MODE}")"
   if [[ -n "${PROBLEMS}" ]]; then
     while IFS= read -r PROBLEM; do
       fail "parity: ${PROBLEM}"
@@ -437,6 +463,57 @@ if [[ -z "$(row_problems selftest NO_SUCH_MARKER_VARIABLE "${PHASE8}" "${CODEX}"
 fi
 if [[ -z "$(site_problem 'flow/does-not-exist.md' "${MARKER[M_P28]}")" ]]; then
   fail "self-test: a missing file was not reported by site_problem (vacuous)"
+fi
+
+# (1b) #1556 the `once` mode: count_problem reports a missing marker and a
+# duplicated one, accepts exactly one, and the plain presence mode still accepts
+# a duplicate (so the mode, not the marker, is what makes a duplicate fail).
+COUNT_MARKER='sample marker sentence ZZ-count-selftest'
+if [[ -n "$(count_problem "text ${COUNT_MARKER} text" "${COUNT_MARKER}" once)" ]]; then
+  fail "self-test baseline: a marker present exactly once is reported in once mode: $(count_problem "text ${COUNT_MARKER} text" "${COUNT_MARKER}" once)"
+fi
+if [[ "$(count_problem 'no marker here' "${COUNT_MARKER}" once)" != *"marker missing"* ]]; then
+  fail "self-test: a missing marker was not reported in once mode (vacuous)"
+fi
+if [[ "$(count_problem "${COUNT_MARKER}"$'\n'"${COUNT_MARKER}" "${COUNT_MARKER}" once)" != *"occurs 2 times"* ]]; then
+  fail "self-test: a marker duplicated on two lines was not reported in once mode (vacuous)"
+fi
+if [[ "$(count_problem "${COUNT_MARKER} ${COUNT_MARKER}" "${COUNT_MARKER}" once)" != *"occurs 2 times"* ]]; then
+  fail "self-test: a marker duplicated on one line was not reported in once mode (vacuous)"
+fi
+if [[ -n "$(count_problem "${COUNT_MARKER}"$'\n'"${COUNT_MARKER}" "${COUNT_MARKER}" "")" ]]; then
+  fail "self-test: presence mode must accept a duplicated marker"
+fi
+if [[ "$(count_problem "${COUNT_MARKER}" "${COUNT_MARKER}" bogus)" != *"unknown count mode"* ]]; then
+  fail "self-test: an unknown count mode was not reported (vacuous)"
+fi
+# Through the real evaluator: a marker that occurs more than once in a real file
+# is reported by site_problem and row_problems only in once mode.
+DUP_MARKER="${MARKER[F_CONVENTION_NONE]}"
+DUP_CONTENT="$(cat "${REPO_DIR}/${PHASE8}" 2>/dev/null)"
+if [[ "$(marker_count "${DUP_CONTENT}" "${DUP_MARKER}")" =~ ^[0-9]+$ && "$(marker_count "${DUP_CONTENT}" "${DUP_MARKER}")" -ge 2 ]]; then
+  if [[ -n "$(site_problem "${PHASE8}" "${DUP_MARKER}")" ]]; then
+    fail "self-test: presence mode reported a marker that is present: $(site_problem "${PHASE8}" "${DUP_MARKER}")"
+  fi
+  if [[ "$(site_problem "${PHASE8}" "${DUP_MARKER}" once)" != *"${PHASE8}: marker occurs"* ]]; then
+    fail "self-test: site_problem did not report a duplicated real-file marker in once mode (vacuous)"
+  fi
+  MARKER[SELF_DUP]="${DUP_MARKER}"
+  if [[ "$(row_problems selftest SELF_DUP "${PHASE8}" "${CODEX}" once)" != *"${PHASE8}: marker occurs"* ]]; then
+    fail "self-test: row_problems did not pass the once mode through to site_problem (vacuous)"
+  fi
+else
+  fail "self-test: positive control failed -- ${PHASE8} no longer holds the duplicate-control marker more than once"
+fi
+if [[ "$(row_problems selftest M_P28 "${PHASE8}" "${CODEX}" bogus)" != *"unknown count mode"* ]]; then
+  fail "self-test: a row with an unknown mode was not reported (vacuous)"
+fi
+# The at-cap precedence row is declared in once mode, with a marker on one line.
+if ! printf '%s\n' "${ROWS[@]}" | grep -qxF "lesson-admission|M_ATCAP_PRECEDENCE|${COLLECTOR},${PHASE8}|${CODEX}|once"; then
+  fail "self-test: the M_ATCAP_PRECEDENCE row must be declared with the once mode at the collector, Phase 8 and codex.md"
+fi
+if [[ "${MARKER[M_ATCAP_PRECEDENCE]}" == *$'\n'* ]]; then
+  fail "self-test: M_ATCAP_PRECEDENCE must be one source line (gotchas rule 13)"
 fi
 
 # (2) expand_sites doubles a TOML token and drops an empty list.

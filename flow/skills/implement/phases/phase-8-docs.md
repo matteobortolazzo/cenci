@@ -118,6 +118,7 @@ The collector routes on the forwarded `Lessons:` line and the policy, with these
 - Deduplicate each candidate against existing owner docs and lesson records before any write; a duplicate produces no write and a `Dropped (already owned)` summary line.
 - With `Lessons: structured admission=<path> records=<dir>`, an admitted lesson is one new record in `<dir>` following the admission doc's format, never a flat bullet.
 - With `Lessons: fallback`, an admitted lesson is one flat bullet in the existing owner doc that owns its subject.
+- For a `docs/*.md` `## Rules` section that is at its bullet cap, the at-cap sub-item merge takes precedence over the "one flat bullet" fallback rule for that `## Rules` section only; every other section keeps the flat bullet (#979).
 - In `minimal` mode with no lesson system and no fitting existing owner, an admitted lesson is dropped and listed as one line in the PR's `## Notes`; no new `docs/<topic>.md` and no `## Critical Rules` bullet is written.
 - Only `### Dropped (minimal policy)` entries reach the lessons status file and the PR's `## Notes`; every other dropped entry stays in the collector's summary.
 

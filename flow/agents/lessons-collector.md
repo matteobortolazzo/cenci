@@ -78,13 +78,18 @@ When discovery is unavailable, its restriction to plan-named or router-named own
    Report the admission doc's validation command under `### Lesson validation` without running it; you have no shell, and the main agent runs only a command the plan names. Report none when the admission doc names none.
 2. With `Lessons: fallback`, an admitted lesson is one flat bullet in the existing owner doc that owns its subject.
    Append a bullet under the most relevant `##` section of the fitting existing owner, matching the format already there. This applies in both policies.
+   For a `docs/*.md` `## Rules` section that is at its bullet cap, the at-cap sub-item merge takes precedence over the "one flat bullet" fallback rule for that `## Rules` section only; every other section keeps the flat bullet (#979).
+   **At the cap.** When the target is a `## Rules` section of a `docs/*.md` file that already holds 25 or more top-level `- ` bullets (counted like `check.sh`, including bullets under `###` sub-headings: every `^- ` line between `## Rules` and the next `## ` heading), write the admitted lesson as one numbered sub-item under the closest existing bullet of that section, never a new top-level bullet. Step 6 has already run, so a duplicate never reaches this merge.
+   **Placement.** The closest existing bullet may sit under a `###` sub-heading; write the sub-item after the bullet's last continuation line and its last existing sub-item, never between them, indented two spaces and numbered one past the highest existing number (`1.` when there are none).
+   The at-cap merge never deletes, reorders or rewrites any existing line of the doc and only inserts the new sub-item line.
+   **At-cap scope.** The merge applies to only a `## Rules` section of a `docs/*.md` file; every other section, and `## Critical Rules` in `AGENTS.md` of any size, keeps the flat bullet.
 3. When no fitting existing owner exists, the policy decides:
    - In `minimal` mode with no lesson system and no fitting existing owner, an admitted lesson is dropped and listed as one line in the PR's `## Notes`; no new `docs/<topic>.md` and no `## Critical Rules` bullet is written.
      List it under `### Dropped (minimal policy)` as one line with a one-line summary of the lesson. The line reaches a PR body that can be public, so it carries repo-relative paths and identifiers only — never file content, secrets, environment values or command output.
    - In `default` mode, only when the routing reports `convention: none`: a project-wide invariant is appended under `## Critical Rules` in `AGENTS.md`, and 2+ findings that cluster on a new topic create a new `<project-root>/docs/<topic>.md` with both findings as bullets (lowercase, hyphenated topic name, e.g. `docs/caching.md`); create the `docs/` directory first if it does not exist.
    - In `default` mode with a discovered convention, drop it as `Dropped (no suitable home)`. Do NOT write to `lessons-learned.md`, and never create a `docs/<topic>.md` for a single one-off observation.
    Only `### Dropped (minimal policy)` entries reach the lessons status file and the PR's `## Notes`; every other dropped entry stays in the collector's summary.
-4. **Size check (maintain hint, flat-bullet writes only).** After writing flat bullets, count the rule bullets in each section you touched. If a `## Critical Rules` section now exceeds **10** bullets, or the rules section of a `docs/<topic>.md` exceeds **25** bullets, or if any `## Critical Rules` bullet you wrote or touched exceeds **300** characters on its raw source line, add a `### Maintain suggestion` section to your output summary naming the file and its count (or the over-length bullet). Do NOT edit, merge, or remove anything based on size — curation is `/cenci:maintain rules`'s job and is human-gated; your only action is the suggestion line. A structured record is never counted or curated here.
+4. **Size check (maintain hint, flat-bullet writes only).** After writing flat bullets, count the rule bullets in each section you touched. If a `## Critical Rules` section now exceeds **10** bullets, or the rules section of a `docs/<topic>.md` exceeds **25** bullets, or if any `## Critical Rules` bullet you wrote or touched exceeds **300** characters on its raw source line, add a `### Maintain suggestion` section to your output summary naming the file and its count (or the over-length bullet). Do NOT edit, merge, or remove anything based on size, apart from the at-cap sub-item insertion in step 2 — curation is `/cenci:maintain rules`'s job and is human-gated; your only action is the suggestion line. A merge at the cap adds a `### Maintain suggestion` line naming the file and its top-level bullet count. A structured record is never counted or curated here.
 
 ## Entry Formats
 
@@ -94,6 +99,15 @@ Append as bullet items matching the existing format in the target file. Lead wit
 
 ```markdown
 - Never use `fakeAsync`/`tick` in zoneless Angular tests — ZoneJS testing utilities are not loaded. Use `jasmine.clock()` instead.
+```
+
+### At-cap merge entries
+
+Leave every existing line byte-identical and insert the numbered sub-item at the position the Placement rule gives, indented two spaces; for a bullet with no continuation lines or sub-items that is the line right after it:
+
+```markdown
+- Run the full suite before opening a pull request, not only the changed tests.
+  1. A reviewer found a failure that only the full suite exposed.
 ```
 
 ### Structured records
@@ -131,6 +145,7 @@ After writing all entries (or finding nothing to write), output a summary:
 
 ### Routed to existing docs
 - `<project-root>/docs/git-workflow.md`: "Always create feature branch from latest main, not from stale local"
+- `<project-root>/docs/shell-gotchas.md`: "Quote every variable in a test expression" (merged as a sub-item under bullet <n> at the 25-bullet cap)
 
 ### Added to CLAUDE.md
 - `<project-root>/AGENTS.md`: "All migrations must be reversible — add a `down` step"
@@ -155,6 +170,7 @@ After writing all entries (or finding nothing to write), output a summary:
 
 ### Maintain suggestion
 - `<project-root>/AGENTS.md` Critical Rules now holds 12 bullets — consider running `/cenci:maintain rules` to consolidate.
+- `<project-root>/docs/shell-gotchas.md` Rules now holds 25 top-level bullets after an at-cap merge — consider running `/cenci:maintain rules` to consolidate.
 ```
 
 If a section has no entries, omit it. If you captured nothing at all, output:
