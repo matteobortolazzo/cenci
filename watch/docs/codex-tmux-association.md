@@ -48,7 +48,7 @@ When the ancestry holds but the nearest Codex ancestor is the shared app-server,
 - **Read bound**: one `ps -A -o pid= -o ppid= -o args=` call from `internal/procancestry`, under a 1s context plus a 500ms `WaitDelay`, so it fits the 3s `Interrupt`/`SessionEnd` hook timeouts. Stdout is capped (overflow is an error), stderr is discarded and the walk is capped at 32 entries (`procancestry.MaxDepth`); a repeated pid is a cycle error. Codex is identified as the first process above `cenci notify` whose argv[0] basename is exactly `codex`.
 - **Wire keys**: `ancestry_pids` (string array, omitted when empty) and `ancestry_single_client` (bool, omitted when false). Only pids and one boolean cross IPC, never command lines. The daemon checks every pid against the server-pid pattern and rejects more than 32 entries at ingest, treating both keys as absent with a verbose log line that does not echo the values.
 - **Fail closed**: an absent key, a malformed or too-deep chain, a failed or timed-out read or an older notify binary all mean unproven. `cenci notify` stays silent on a failed read, still delivers the event and exits 0, and writes no hook-health record. An event with no proof never detaches a session that is already `proven`: a paneless session becomes `unproven`, and an existing proven association is kept.
-- **No recorded marker means always unproven**: the shared app-server is told apart from a client by a marker in the nearest Codex ancestor's argv. The production marker table is empty, because the native record's "Marker identifying the shared app-server" row is `not run`, and a guessed marker that misses the shared server would bring back the cross-association (P8). With an empty table the notify side never reports a single client, so every host Codex hook pane in tmux is unproven and `cenci bind` is the only way to attach it. The upstream gap: Codex hook input carries no client identity. Filling the marker row is a one-entry change to the table plus its tests.
+- **The marker table is per platform; no recorded marker means always unproven**: Codex hook input carries no client identity, so the shared app-server is told apart from a client by a marker in the nearest Codex ancestor's argv. The table (`sharedServerMarkersByOS`, keyed by `runtime.GOOS`) holds `app-server` for Linux only, the marker the native record below found in every shared-app-server observation and in no single-client one, read whole from Linux `ps`. On Linux a single-client Codex in a pane (`codex exec`, or a TUI running in-process) is proven automatically; a thread on the shared app-server, a default TUI's path, stays unproven and needs `cenci bind`. A client whose own argv contains `app-server` (a prompt naming it) is also unproven, the safe direction. Every other platform, macOS included, has no native run, so its table is empty: the notify side never reports a single client there, and `cenci bind` is the only way to attach a host Codex hook pane. A guessed or truncated marker that misses the shared server would bring back the cross-association (P8), which is why a platform gets an entry only after a native run reads the marker whole.
 - **Mismatch on a tracked window**: when `RequireAncestry` is set and the live listing shows a `pane_pid` that is empty or not in the stored chain, the tracked window is forgotten without a restore or rename and without any tmux write, as on a server-pid mismatch. This happens only for anomalous or forged events (a single-client claim whose chain does not contain the pane). A session that does not own the pane (a paneless adopter with a failed proof) fires no pending-close kill, which `TestDaemon_CodexSessionEndWithFailedProofTouchesNothing` covers. For the owning tracked session the daemon's SessionEnd `CheckPane` pre-check covers only the server pid, so a tracked window whose `pane_pid` left the stored chain is forgotten without a write but its pending-close kill still runs. This is accepted because a live pane's `pane_pid` does not change within a server lifetime (the pane-id stability assumption).
 - **`agent_id` never rebinds**: for every Codex session with a session id, with or without a socket, an event with `agent_id` set never adopts or moves a pane, never sets `unproven` and never ends the parent. Claude is untouched.
 - **A binding outranks a proof**: `cenci bind` clears the stored ancestry, a bound session is never moved by a hook pane, and a pane bound to another session is never adopted from an event. `cenci bind` itself carries no ancestry proof.
@@ -107,54 +107,146 @@ Codex sessions only. The identity is the caller's own `$TMUX_PANE` and `$TMUX` (
 
 ## Native host record (P1, P22, P23)
 
-These rows need a host with Codex and tmux; the implementation sandbox has neither. They are filled by a person running the steps below. Home paths, user and host names and session IDs are replaced with placeholders (`<home>`, `<user>`, `<host>`, `<session-id>`) before anything is pasted here. Nothing in this section is a claimed result until the row stops reading `not run`.
+These rows are filled from output captured on a host with Codex and tmux, either by an agent running there or pasted by a person; the implementation sandbox has neither. A row is never filled by inference, and a step that was not run reads `not run: <reason>`. Home paths, user and host names and session IDs are replaced with placeholders (`<home>`, `<user>`, `<host>`, `<session-id>`) before anything is written here, and the tmux socket directory's uid with `<uid>`. Argv evidence keeps argv[0] (its basename, or a sanitized path) plus the subcommand and flag-name tokens; every other value is `<arg>`.
+
+### Commands
+
+Run everything on a dedicated scratch tmux server, so no existing server or pane is touched, and start Codex only from a folder Codex already trusts. A `-L` socket sits in the same per-uid socket directory as the default server, so the hooks are the installed ones. The record below ran on a server named `cenci-1550`, so its socket reads `/tmp/tmux-<uid>/cenci-1550`.
+
+```sh
+codex --version; cenci version; tmux -V; uname -sr; ps --version  # versions
+tmux -L cenci-native new-session -d -s repro -c "$PWD"
+tmux -L cenci-native new-window -d -n paneA -c "$PWD" -P -F '#{pane_id}'   # pane A
+```
+
+Hook capture (Linux, `/proc`; run it in its own pane and stop it with Ctrl-C). A hook lives for milliseconds, so it scans `/proc` directly instead of polling with `pgrep`. For each `cenci notify -agent codex` it prints the hook's `TMUX`/`TMUX_PANE` and its `ps -A -o pid= -o ppid= -o args=` rows up to pid 1:
+
+```sh
+python3 -I -c '
+import os, subprocess, sys, time
+seen = set()
+while True:
+    for d in os.listdir("/proc"):
+        if not d.isdigit() or d in seen:
+            continue
+        try:
+            argv = open(f"/proc/{d}/cmdline", "rb").read().split(b"\0")
+            if b"notify" not in argv or b"codex" not in argv:
+                continue
+            env = open(f"/proc/{d}/environ", "rb").read().split(b"\0")
+            rows = subprocess.run(["ps", "-A", "-o", "pid=", "-o", "ppid=", "-o", "args="], capture_output=True, text=True).stdout
+        except OSError:
+            continue
+        seen.add(d)
+        procs = {r.split(None, 2)[0]: r.split(None, 2) for r in rows.splitlines() if r.strip()}
+        print("==", time.strftime("%T"), "hook pid", d)
+        print(*[e.decode() for e in env if e.startswith((b"TMUX=", b"TMUX_PANE="))], sep="\n")
+        p = d
+        while p in procs:
+            print(" ".join(procs[p]))
+            p = procs[p][1]
+        sys.stdout.flush()
+    time.sleep(0.005)
+' > hooks.txt
+```
+
+P1 and P22 (`<A>` and `<B>` are the pane ids printed by `new-window`; stop the shared app-server first with `codex app-server daemon stop` so pane A starts it):
+
+```sh
+tmux -L cenci-native send-keys -t <A> 'codex "Reply with the single word ok and nothing else. Do not run any tools."' Enter
+pgrep -af 'codex app-server --listen'                          # the app-server pane A started
+tr '\0' '\n' < /proc/<app-server-pid>/environ | grep '^TMUX'   # the pane it keeps
+tmux -L cenci-native send-keys -t <A> /quit Enter              # quit the TUI; the app-server stays
+tmux -L cenci-native kill-pane -t <A>
+tmux -L cenci-native new-window -d -n paneB -c "$PWD" -P -F '#{pane_id}'   # pane B
+tmux -L cenci-native send-keys -t <B> 'echo "TMUX=$TMUX TMUX_PANE=$TMUX_PANE pid=$(tmux display -p "#{pid}")"' Enter
+tmux -L cenci-native send-keys -t <B> 'codex "Run the shell command sleep 90 exactly once, then reply with the single word ok."' Enter
+cenci status                                                   # unproven, with the hint
+```
+
+Bind while the turn is still running: the sweep's Codex exit backstop untracks a done session whose pane no longer runs `codex`, so a bind after the turn ends can be undone by the next sweep. Suspend the TUI, bind, read the window options and resume in one line:
+
+```sh
+tmux -L cenci-native send-keys -t <B> C-z
+tmux -L cenci-native send-keys -t <B> 'cenci bind <session-id>; echo exit=$?; tmux show-options -w | grep cenci; fg' Enter
+tmux -L cenci-native capture-pane -p -a -t <B>                 # the shell output, saved while the TUI is back
+```
+
+P23: a single-client `codex exec "<prompt>"` in a pane, then two default TUIs in two new panes with prompts that start differently (`Client C: ...`, `Client D: ...`), so `cenci status` names which session id runs in which pane. Bind each from its own pane as above. Pane-id reuse: create and kill panes on the scratch server and list their ids. Server pid: `cd watch && go test ./internal/tmux -run TestListPanesReportsTheServerPID -v`. Clean up with `tmux -L cenci-native kill-server` only.
 
 ### Status
 
-- P1 native reproduction: not run: native host session required (no Codex or tmux in the implementation sandbox)
-- P22 native `cenci bind` verification: not run: native host session required (no Codex or tmux in the implementation sandbox)
-- P23 native automatic association and two-client verification: not run: native host session required (needs a host with Codex and tmux)
+- P1 native reproduction: run on Linux (2026-11-19); results below.
+- P22 native `cenci bind` verification: run on Linux (2026-11-19); results below.
+- P23 native automatic association and two-client verification: run on Linux (2026-11-19) with the hook binary swapped for a build of this branch (the marker), then restored; results below.
+- macOS: not run: no macOS host.
 
 ### Versions
 
 | Component | Version |
 |---|---|
-| Codex | not run: native host session required (no Codex or tmux in the implementation sandbox) |
-| cenci | not run: native host session required (no Codex or tmux in the implementation sandbox) |
-| tmux | not run: native host session required (no Codex or tmux in the implementation sandbox) |
+| Codex | `codex-cli 0.167.2` (standalone, a static ELF at `<home>/.codex/packages/standalone/current/bin/codex`); the managed app-server daemon `0.170.0-x86_64-unknown-linux-musl` |
+| cenci | `cenci 2.61.1` (daemon and Codex hook binary). `cenci` on `PATH` linked to an older 2.58.0 binary, so `cenci status` and `cenci bind` ran the 2.61.1 binary by its full path. P23's hook binary was a `dev` build of this branch, restored afterwards to the same sha256 |
+| tmux | `tmux 3.8` |
+| Host | `Linux 7.3.1`, `ps from procps-ng 4.0.7` |
 
 ### Hook-supplied identity versus pane B
 
-The shared app-server is started from pane A, A is closed, and a thread runs from pane B through the installed host hook path.
+The shared app-server is started from pane A, A is closed, and a thread runs from pane B through the installed host hook path. Pane B's values come from `echo "TMUX=$TMUX TMUX_PANE=$TMUX_PANE pid=$(tmux display -p '#{pid}')"` in pane B; the hook's from the capture above.
 
 | Field | Hook-supplied | Pane B (real) |
 |---|---|---|
-| Pane id | not run: native host session required (no Codex or tmux in the implementation sandbox) | not run: native host session required (no Codex or tmux in the implementation sandbox) |
-| Socket | not run: native host session required (no Codex or tmux in the implementation sandbox) | not run: native host session required (no Codex or tmux in the implementation sandbox) |
-| Server pid | not run: native host session required (no Codex or tmux in the implementation sandbox) | not run: native host session required (no Codex or tmux in the implementation sandbox) |
+| Pane id | `%2` (pane A, already killed) | `%3` |
+| Socket | `/tmp/tmux-<uid>/cenci-1550` | `/tmp/tmux-<uid>/cenci-1550` |
+| Server pid | `3322126` | `3322126` (`#{pid}` and `$TMUX`'s second field) |
+
+An earlier run on the same host showed the cross-server case: a thread started from pane `%0` of the scratch server delivered hooks with `TMUX=/tmp/tmux-<uid>/default,17432,3` and `TMUX_PANE=%153`, the pane and the default server of the terminal that had first started a still-running app-server.
 
 ### Hook process ancestry
 
 | Item | Value |
 |---|---|
-| Process names, hook to root | not run: native host session required (no Codex or tmux in the implementation sandbox) |
-| Marker identifying the shared app-server | not run: native host session required (no Codex or tmux in the implementation sandbox) |
+| Process names, hook to root | P1 pane B: `cenci` ← `zsh` ← `codex` ← `systemd` (pid 1). While pane A's TUI was still running, its threads' hooks ran under `cenci` ← `zsh` ← `codex` (the app-server) ← `codex` (pane A's TUI) ← `-zsh` (pane A's `pane_pid`) ← `tmux` ← `systemd` |
+| Marker identifying the shared app-server | `app-server` (Linux only) |
+
+The marker is in the nearest Codex ancestor's argv in every shared-app-server observation and absent from every single-client one. Linux `ps` printed every chain row whole: across 54 captured hooks, each `args` value `ps` listed equalled that process's `/proc/<pid>/cmdline`, the longest at 328 characters (in 5 captures the short-lived hook rows had already exited before the `ps` snapshot, so they were missing, never different). The second shared observation matters most: the app-server pane A's TUI auto-starts is the TUI's child, so its hook chain contains pane A's `pane_pid`, and only the marker keeps that thread from being proven in pane A.
+
+| Observation | Kind | Nearest Codex ancestor's argv |
+|---|---|---|
+| Thread on a pre-existing managed app-server (hook pane `%153`, default server) | shared | `codex app-server --listen <arg> --analytics-default-enabled -c <arg> -c <arg> -c <arg> -c <arg> --managed-daemon` (its parent: `codex app-server daemon pid-update-loop`) |
+| Pane A's TUI auto-starts the app-server (hook pane `%2`) | shared | `codex app-server --listen <arg> --analytics-default-enabled -c <arg> -c <arg> -c <arg> -c <arg> --managed-daemon` (its parent: `codex <arg>`, pane A's TUI) |
+| P1 pane B after pane A closed (hook pane `%2`) | shared | the same argv, its parent now pid 1 |
+| P23 clients C and D (hook pane `%2`) | shared | the same argv, its parent pid 1 |
+| `codex exec` in a pane (hook pane `%1`, four runs) | single client | `codex exec <arg>` (its parent: `-zsh`, the pane's `pane_pid`) |
+| TUI with the daemon auto-start off (hook pane `%1`) | single client | `codex -c <arg> <arg>` (its parent: `-zsh`, the pane's `pane_pid`) |
 
 ### P22 steps
 
 | Step | Result |
 |---|---|
-| Shared app-server started from pane A | not run: native host session required (no Codex or tmux in the implementation sandbox) |
-| Pane A closed | not run: native host session required (no Codex or tmux in the implementation sandbox) |
-| Thread runs in pane B, `cenci status` shows it unproven with the hint | not run: native host session required (no Codex or tmux in the implementation sandbox) |
-| `cenci bind <session-id>` run from pane B | not run: native host session required (no Codex or tmux in the implementation sandbox) |
-| Pane B's window shows `@cenci-symbol`/`@cenci-style` | not run: native host session required (no Codex or tmux in the implementation sandbox) |
+| Shared app-server started from pane A | `codex <arg>` in pane `%2` auto-started `codex app-server --listen <arg> ... --managed-daemon` as its child. The app-server's environment: `TMUX=/tmp/tmux-<uid>/cenci-1550,3322126,0`, `TMUX_PANE=%2` |
+| Pane A closed | `/quit` ended the TUI; the app-server kept running, reparented to pid 1. `tmux kill-pane -t %2`; `list-panes -a` then listed `%0 %1` |
+| Thread runs in pane B, `cenci status` shows it unproven with the hint | Hooks carried `TMUX_PANE=%2`. `cenci status`: `(no session) - Run the shell command sleep... (codex) (running)` and `hint: hooks were delivered but no tmux association is proven; run 'cenci bind <session-id>' in the session's tmux pane` |
+| `cenci bind <session-id>` run from pane B | With the TUI suspended (Ctrl-Z) during the running turn: `bound Codex session <session-id> to tmux pane %3`, `exit=0`. `cenci status` then: `repro:3 - paneB (codex) (running)`; the snapshot: pane `%3`, association `bound` |
+| Pane B's window shows `@cenci-symbol`/`@cenci-style` | `tmux show-options -w -t %3` while running: `@cenci-style fg=blue,dim`, `@cenci-symbol ▶`; after the turn: `@cenci-style fg=green,dim`, `@cenci-symbol ✓`, and `cenci status`: `repro:3 - paneB (codex) (done)` |
 
-### Unverified assumption
+### P23 results
 
-tmux's `#{pid}` is assumed to equal the second field of `$TMUX`. `TestListPanesReportsTheServerPID` checks it against a scratch server but skipped in the implementation sandbox because tmux is absent, so it is confirmed only once the native record above is filled. The same record confirms the assumption that tmux pane ids are not reused within one server lifetime. That assumption also covers the ancestry check: a live pane's `pane_pid` stays the same, so checking it on every event is enough.
+| Check | Result |
+|---|---|
+| Automatic association | `codex exec "Run the shell command sleep 20 exactly once, then reply with the single word ok."` in pane `%1`, no bind: the snapshot showed pane `%1`, socket `/tmp/tmux-<uid>/cenci-1550`, status `running`, association `proven`; `tmux show-options -w -t %1`: `@cenci-style fg=blue,dim`, `@cenci-symbol ▶`. Its hooks' nearest Codex ancestor was `codex exec <arg>` |
+| Two clients | TUIs `Client C` in pane `%7` and `Client D` in pane `%8`, both on the shared app-server (hooks carried `TMUX_PANE=%2`, nearest Codex ancestor `codex app-server ...`): both listed `(no session) ... (codex) (running)` with the hint, association `unproven`. `cenci bind` from `%7`: `bound Codex session <session-id> to tmux pane %7`, `exit=0`; from `%8`: `bound Codex session <session-id> to tmux pane %8`, `exit=0`. The snapshot then: `Client C` on pane `%7`, `Client D` on pane `%8`, both `bound` |
 
-The ancestry rule adds two more assumptions that the native record confirms. Codex is identified by an argv[0] basename of exactly `codex`, the native binary the npm wrapper launches; this has not been checked on a host. BSD/macOS `ps` may truncate the `args` column, which only matters once a shared-app-server marker exists, because the marker table is empty today.
+The two-client prompts must start differently. A first attempt with one identical prompt in both panes was abandoned before binding, because nothing tied either session id to its pane; ordering by the time-sortable session id would have bound them crosswise, since `Client D`'s id sorted before `Client C`'s.
+
+### Assumptions
+
+| Assumption | Outcome | Evidence |
+|---|---|---|
+| tmux's `#{pid}` equals the second field of `$TMUX` | confirmed | `go test ./internal/tmux -run TestListPanesReportsTheServerPID -v`: `--- PASS: TestListPanesReportsTheServerPID (0.07s)`. In pane B, `$TMUX` was `/tmp/tmux-<uid>/cenci-1550,3322126,0` and `tmux display -p '#{pid}'` printed `3322126` |
+| Pane ids are not reused within one server lifetime (so a live pane's `pane_pid` stays the same) | confirmed | On the scratch server panes were created in the order `%0 %1 %2 %3 %4 %5 %6 %7 %8 %9`; `%2` was killed before `%3` was created, and `%4`, `%5` and `%6` were each created and killed in turn. After those kills, `list-panes -a` listed `%0 %1 %3`, and the next panes were `%7` and `%8`, never a killed id |
+| Codex's argv[0] basename is exactly `codex` | confirmed | Every Codex row in the ancestry evidence above: the standalone CLI runs as `codex`, the app-server as `<home>/.codex/packages/app-server-daemon/releases/<arg>/bin/codex`. No npm/Node install was observed on this host |
+| `ps` prints `args` untruncated | confirmed on Linux (procps-ng 4.0.7); not run: no macOS host | Every listed chain row's `args` equalled `/proc/<pid>/cmdline`. BSD/macOS `ps` may truncate the column, so the marker table has no macOS entry |
 
 ## Deterministic fixture results
 
@@ -188,5 +280,6 @@ These cover the behavior on mock tmux sockets and run in `make test`; they are s
 | A failed read is silent and writes no hook-health failure record, only the delivery's own `last-ok` (P20) | `TestNotifyCodexAncestryReadFailureIsSilentAndWritesNoHookHealthRecord` |
 | Ancestry deeper than the cap sends nothing (P21) | `TestNotifyCodexAncestryDeeperThanCapSendsNone` |
 | Notify reads the ancestry only for Codex main-agent events in tmux | `TestNotifyReadsAncestryOnlyForCodexMainAgentEventsInTmux` |
-| Bounded `ps` parser, walk, depth cap, cycle, nearest-Codex classifier, empty marker table | `TestReadWith*`, `TestProductionMarkerTableIsEmptyAndNeverReportsASingleClient`, `TestReadRunsTheRealPS` in `internal/procancestry` |
+| Bounded `ps` parser, walk, depth cap, cycle, nearest-Codex classifier | `TestReadWith*`, `TestReadRunsTheRealPS` in `internal/procancestry` |
+| The marker table holds `app-server` for Linux only; the recorded native chains (three shared-server, two single-client) classify as unproven and proven on Linux and all unproven on any other platform | `TestProductionMarkerTableHoldsAppServerForLinuxOnly`, `TestProductionMarkerTableClassifiesTheRecordedNativeChains`, `TestReadWithDefaultsToTheRunningPlatformsMarkers` in `internal/procancestry` |
 | `pane_pid` column of the pane listing | `TestParsePanesReadsPanePID`, `TestExecClientListPanesAsksForPanePID` |

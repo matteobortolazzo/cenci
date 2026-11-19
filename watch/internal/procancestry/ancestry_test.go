@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"reflect"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -202,9 +203,9 @@ func TestReadWithMapsCommandFailures(t *testing.T) {
 	})
 }
 
-// Classification against an injected marker table (the production table is
-// empty): the nearest Codex ancestor above the hook decides, and only an exact
-// argv[0] basename of "codex" is Codex.
+// Classification against an injected marker table (the production table and the
+// recorded native chains are pinned below): the nearest Codex ancestor above the
+// hook decides, and only an exact argv[0] basename of "codex" is Codex.
 func TestReadWithClassifiesTheNearestCodexAncestor(t *testing.T) {
 	const marker = "app-server"
 	for _, tc := range []struct {
@@ -241,27 +242,95 @@ func TestReadWithClassifiesTheNearestCodexAncestor(t *testing.T) {
 	}
 }
 
-// The production marker table is empty until the native record names a marker,
-// so no read reports a single client: every host Codex pane stays unproven. The
-// second case shows an injected table is what changes the answer.
-func TestProductionMarkerTableIsEmptyAndNeverReportsASingleClient(t *testing.T) {
-	if len(sharedServerMarkers) != 0 {
-		t.Fatalf("sharedServerMarkers = %v, want it empty until the native record fills the marker row", sharedServerMarkers)
+// Hook chains recorded on a Linux host (watch/docs/codex-tmux-association.md,
+// "Hook process ancestry"), sanitized the same way as the record: argv[0] plus
+// the subcommand and flag-name tokens, every other value <arg>. The pids are
+// renumbered; the process shapes are the captured ones.
+var nativeChains = []struct {
+	name   string
+	rows   []string
+	single bool
+}{
+	{"S1: a thread on a pre-existing managed app-server daemon", []string{
+		"50 40 <home>/.codex/plugins/data/<arg>/bin/cenci notify -agent codex",
+		"40 30 /bin/zsh -c <arg>",
+		"30 20 <home>/.codex/packages/app-server-daemon/releases/<arg>/bin/codex app-server --listen <arg> --analytics-default-enabled -c <arg> -c <arg> -c <arg> -c <arg> --managed-daemon",
+		"20 1 <home>/.codex/packages/app-server-daemon/releases/<arg>/bin/codex app-server daemon pid-update-loop",
+		"1 0 /usr/lib/systemd/systemd <arg>",
+	}, false},
+	{"S2: pane A's TUI auto-starts the app-server as its child, so the chain holds pane A's pane_pid", []string{
+		"50 40 <home>/.codex/plugins/data/<arg>/bin/cenci notify -agent codex",
+		"40 30 /bin/zsh -c <arg>",
+		"30 20 <home>/.codex/packages/app-server-daemon/releases/<arg>/bin/codex app-server --listen <arg> --analytics-default-enabled -c <arg> -c <arg> -c <arg> -c <arg> --managed-daemon",
+		"20 10 codex <arg>",
+		"10 5 -zsh",
+		"5 1 tmux -L <arg> new-session -d -s <arg> -x <arg> -y <arg> -c <arg>",
+		"1 0 /usr/lib/systemd/systemd <arg>",
+	}, false},
+	{"S3: pane B's thread after pane A closed and the app-server moved to pid 1", []string{
+		"50 40 <home>/.codex/plugins/data/<arg>/bin/cenci notify -agent codex",
+		"40 30 /bin/zsh -c <arg>",
+		"30 1 <home>/.codex/packages/app-server-daemon/releases/<arg>/bin/codex app-server --listen <arg> --analytics-default-enabled -c <arg> -c <arg> -c <arg> -c <arg> --managed-daemon",
+		"1 0 /usr/lib/systemd/systemd <arg>",
+	}, false},
+	{"C1: codex exec in a pane", []string{
+		"50 40 <home>/.codex/plugins/data/<arg>/bin/cenci notify -agent codex",
+		"40 30 /bin/zsh -c <arg>",
+		"30 20 codex exec <arg>",
+		"20 10 -zsh",
+		"10 1 tmux -L <arg> new-session -d -s <arg> -x <arg> -y <arg> -c <arg>",
+		"1 0 /usr/lib/systemd/systemd <arg>",
+	}, true},
+	{"C2: an in-process TUI with the daemon auto-start turned off", []string{
+		"50 40 <home>/.codex/plugins/data/<arg>/bin/cenci notify -agent codex",
+		"40 30 /bin/zsh -c <arg>",
+		"30 20 codex -c <arg> <arg>",
+		"20 10 -zsh",
+		"10 1 tmux -L <arg> new-session -d -s <arg> -x <arg> -y <arg> -c <arg>",
+		"1 0 /usr/lib/systemd/systemd <arg>",
+	}, true},
+}
+
+// The production marker table holds "app-server" for Linux only, the one
+// platform where the native record read the marker whole (#1550).
+func TestProductionMarkerTableHoldsAppServerForLinuxOnly(t *testing.T) {
+	want := map[string][]string{"linux": {"app-server"}}
+	if !reflect.DeepEqual(sharedServerMarkersByOS, want) {
+		t.Fatalf("sharedServerMarkersByOS = %v, want %v", sharedServerMarkersByOS, want)
 	}
-	out := ps("50 40 cenci notify", "40 30 codex --model x", "30 1 -bash", "1 0 init")
-	got, err := ReadWith(context.Background(), Options{Self: 50, Run: staticPS(out)})
+}
+
+// With the production table, the recorded shared-server chains are never a
+// single client and the recorded single-client chains are, on Linux. On a
+// platform with no native run the table resolves to empty, so every chain is
+// unproven.
+func TestProductionMarkerTableClassifiesTheRecordedNativeChains(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin", "freebsd", "windows"} {
+		for _, tc := range nativeChains {
+			t.Run(goos+"/"+tc.name, func(t *testing.T) {
+				got, err := ReadWith(context.Background(), Options{Self: 50, Run: staticPS(ps(tc.rows...)), GOOS: goos})
+				if err != nil {
+					t.Fatalf("ReadWith: %v", err)
+				}
+				if want := goos == "linux" && tc.single; got.SingleClient != want {
+					t.Errorf("SingleClient = %v, want %v", got.SingleClient, want)
+				}
+				if len(got.PIDs) != len(tc.rows) || got.PIDs[0] != "50" {
+					t.Errorf("PIDs = %v, want the whole chain from the hook", got.PIDs)
+				}
+			})
+		}
+	}
+}
+
+// With no GOOS override, the running platform's table applies.
+func TestReadWithDefaultsToTheRunningPlatformsMarkers(t *testing.T) {
+	got, err := ReadWith(context.Background(), Options{Self: 50, Run: staticPS(ps(nativeChains[3].rows...))})
 	if err != nil {
 		t.Fatalf("ReadWith: %v", err)
 	}
-	if got.SingleClient {
-		t.Error("the production marker table reported a single client")
-	}
-	if !reflect.DeepEqual(got.PIDs, []string{"50", "40", "30", "1"}) {
-		t.Errorf("PIDs = %v, want the chain still reported", got.PIDs)
-	}
-	got, err = ReadWith(context.Background(), Options{Self: 50, Run: staticPS(out), Markers: []string{"app-server"}})
-	if err != nil || !got.SingleClient {
-		t.Errorf("with an injected marker: %+v, %v, want a single client", got, err)
+	if want := len(sharedServerMarkersByOS[runtime.GOOS]) > 0; got.SingleClient != want {
+		t.Errorf("SingleClient = %v on %s, want %v", got.SingleClient, runtime.GOOS, want)
 	}
 }
 
@@ -284,8 +353,5 @@ func TestReadRunsTheRealPS(t *testing.T) {
 		if n, err := strconv.Atoi(pid); err != nil || n < 1 {
 			t.Errorf("pid %q is not a positive decimal", pid)
 		}
-	}
-	if got.SingleClient {
-		t.Error("the empty production marker table reported a single client")
 	}
 }

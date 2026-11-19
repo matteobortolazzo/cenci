@@ -100,13 +100,19 @@ ancestor is not the shared app-server. An event whose nearest Codex ancestor is
 the shared app-server stays unproven even while the supplied pane is alive, which
 keeps two simultaneous clients on one app-server from sharing that pane.
 
-Today that proof never succeeds on host tmux. Codex hook input carries no client
-identity, so watch has no recorded marker that tells the shared app-server from a
-client; the marker table ships empty, and every host Codex hook pane stays
-unproven. This is an upstream gap, not a hook trust problem. `cenci bind` is the
-only way to attach a host Codex session until a marker is recorded from a native
-run (see [codex-tmux-association.md](../../docs/codex-tmux-association.md)).
-Sandboxed sessions (no tmux socket) and Claude sessions are not affected.
+Codex hook input carries no client identity, so watch tells the shared
+app-server from a client by a marker in the nearest Codex ancestor's command
+line: `app-server`, recorded from a native run (see
+[codex-tmux-association.md](../../docs/codex-tmux-association.md)). The marker
+applies on **Linux only**, the one platform where it was read whole from `ps`.
+On Linux a single-client Codex (`codex exec`, or a TUI that runs in-process
+rather than on the shared app-server) in a tmux pane is attached automatically,
+with no bind. A thread on the shared app-server, which is how a default TUI runs,
+stays unproven and needs `cenci bind`; so does a client whose own command line
+contains `app-server` (a prompt naming it). On macOS and every other platform
+the marker table is empty, so every host Codex hook pane stays unproven and
+`cenci bind` is the only way to attach it. Sandboxed sessions (no tmux socket)
+and Claude sessions are not affected.
 
 A session in that state is shown by `cenci status` with a hint line:
 
