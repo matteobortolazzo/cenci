@@ -840,6 +840,154 @@ func TestBabysitResolveExitCodes(t *testing.T) {
 	})
 }
 
+// resolveActorStateBody is a stopped supervisor state for owner/repo PR pr holding an
+// inline comment key (resolved on GitHub by the automation login) and a review key
+// (dismissed by an unknown actor), both held for their resolution actor (#862).
+func resolveActorStateBody(pr string) string {
+	return `{"schemaVersion":2,"pr":"` + pr + `","repo":"owner/repo","status":"stopped",` +
+		`"addressedCommentKeys":["comment:1"],"pendingCommentKeys":["comment:2","review:7"],` +
+		`"launchedFeedbackKeys":["comment:2","review:7"],"heldUntrustedKeys":["comment:2","review:7"],` +
+		`"actorHeldKeys":{"comment:2":"cenci-automation","review:7":""}}`
+}
+
+// TestBabysitResolveActorHeldKeysExitCodes covers #862 AC 35-37 through the real
+// binary: a held comment:/review: key on an attended host exits 0 and records an
+// attestation (the key stays pending, GitHub decides), a key that is not held exits 1
+// naming GitHub, and every existing environment refusal still exits 1 -- each leaving
+// the state file byte-identical.
+func TestBabysitResolveActorHeldKeysExitCodes(t *testing.T) {
+	armTestSocketPath(t) // isolates CENCI_SOCKET_DIR and XDG_STATE_HOME
+
+	for _, tc := range []struct{ pr, key, actor, other string }{
+		{"70", "comment:2", "cenci-automation", "review:7"},
+		{"71", "review:7", "", "comment:2"},
+	} {
+		t.Run("a held "+tc.key+" on an attended host exits 0 and records an attestation", func(t *testing.T) {
+			path := hostResetStatePath(t, tc.pr)
+			if err := os.WriteFile(path, []byte(resolveActorStateBody(tc.pr)), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			stdout, stderr, code := runBabysitCLI(t, resolveChildEnv(t), "babysit", "resolve", tc.pr, tc.key)
+
+			if code != 0 {
+				t.Fatalf("exit code = %d, want 0 (stderr %q)", code, stderr)
+			}
+			if want := "Resolved " + tc.key + " for PR #" + tc.pr; !strings.Contains(stdout, want) {
+				t.Errorf("stdout = %q, want %q", stdout, want)
+			}
+			saved, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got struct {
+				Status       string            `json:"status"`
+				Pending      []string          `json:"pendingCommentKeys"`
+				Addressed    []string          `json:"addressedCommentKeys"`
+				Held         map[string]string `json:"actorHeldKeys"`
+				Untrusted    []string          `json:"heldUntrustedKeys"`
+				Attestations map[string]struct {
+					Actor      string `json:"actor"`
+					AttestedAt string `json:"attestedAt"`
+					Source     string `json:"source"`
+				} `json:"actorAttestations"`
+			}
+			if err := json.Unmarshal(saved, &got); err != nil {
+				t.Fatalf("state = %s, want valid JSON: %v", saved, err)
+			}
+			if got.Status != "stopped" {
+				t.Errorf("status = %q, want the stopped state kept (not re-armed)", got.Status)
+			}
+			if strings.Join(got.Pending, ",") != "comment:2,review:7" || strings.Join(got.Addressed, ",") != "comment:1" {
+				t.Errorf("pending %v addressed %v, want both untouched: the key is attested, not addressed", got.Pending, got.Addressed)
+			}
+			if len(got.Held) != 1 || got.Held[tc.other] != map[string]string{"comment:2": "cenci-automation", "review:7": ""}[tc.other] {
+				t.Errorf("actorHeldKeys = %v, want only %s still held", got.Held, tc.other)
+			}
+			if strings.Join(got.Untrusted, ",") != tc.other {
+				t.Errorf("heldUntrustedKeys = %v, want only %s still held", got.Untrusted, tc.other)
+			}
+			att, ok := got.Attestations[tc.key]
+			if !ok || len(got.Attestations) != 1 || att.Actor != tc.actor || att.Source != "human-cli" || att.AttestedAt == "" {
+				t.Errorf("actorAttestations = %+v, want one human-cli attestation for %s by %q (state %s)", got.Attestations, tc.key, tc.actor, saved)
+			}
+		})
+	}
+
+	refusals := []struct {
+		name   string
+		pr     string
+		key    string
+		env    []string
+		stderr string
+	}{
+		{"a comment key that is not held exits 1 naming GitHub", "72", "comment:99", nil, "resolve it on GitHub"},
+		{"a review key that is not held exits 1 naming GitHub", "73", "review:99", nil, "resolve it on GitHub"},
+		{"an addressed comment key exits 1 naming GitHub", "74", "comment:1", nil, "resolve it on GitHub"},
+		{"a held comment key with CENCI_SANDBOX=1 exits 1", "75", "comment:2", []string{"CENCI_SANDBOX=1"}, "runs on the host"},
+		{"a held review key with CENCI_SANDBOX=1 exits 1", "76", "review:7", []string{"CENCI_SANDBOX=1"}, "runs on the host"},
+		{"a held comment key with CENCI_ATTENDED=0 exits 1", "77", "comment:2", []string{"CENCI_ATTENDED=0"}, "CENCI_ATTENDED=0"},
+		{"a held review key with CENCI_ATTENDED=0 exits 1", "78", "review:7", []string{"CENCI_ATTENDED=0"}, "CENCI_ATTENDED=0"},
+		{"a held comment key inside a supervisor exits 1", "79", "comment:2", []string{"CENCI_BABYSIT_SUPERVISOR=1"}, "inside a babysit supervisor"},
+		{"a held review key inside a supervisor exits 1", "80", "review:7", []string{"CENCI_BABYSIT_SUPERVISOR=1"}, "inside a babysit supervisor"},
+	}
+	for _, tc := range refusals {
+		t.Run(tc.name, func(t *testing.T) {
+			path := hostResetStatePath(t, tc.pr)
+			body := resolveActorStateBody(tc.pr)
+			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			stdout, stderr, code := runBabysitCLI(t, resolveChildEnv(t, tc.env...), "babysit", "resolve", tc.pr, tc.key)
+
+			if code != 1 {
+				t.Errorf("exit code = %d, want 1 (stderr %q)", code, stderr)
+			}
+			if !strings.Contains(stderr, tc.stderr) {
+				t.Errorf("stderr = %q, want it to contain %q", stderr, tc.stderr)
+			}
+			if stdout != "" {
+				t.Errorf("stdout = %q, want nothing", stdout)
+			}
+			if got, _ := os.ReadFile(path); string(got) != body {
+				t.Errorf("state file = %q, want it byte-identical", got)
+			}
+		})
+	}
+}
+
+// resolveUsageLine is the usage line #862 AC 38 pins: every target the command accepts.
+const resolveUsageLine = "cenci babysit resolve <pr> discussion:<id>|comment:<id>|review:<id>|head:<sha> [--state-dir <dir>]"
+
+// TestBabysitResolveMalformedCommentOrReviewKeyExitsTwoWithTheFullUsageLine covers
+// #862 AC 38: a malformed comment:/review: id exits 2 with the usage line naming every
+// target, and leaves the state file byte-identical.
+func TestBabysitResolveMalformedCommentOrReviewKeyExitsTwoWithTheFullUsageLine(t *testing.T) {
+	armTestSocketPath(t)
+	for _, key := range []string{"comment:", "review:", "comment:abc", "review:abc", "comment:0", "review:0", "comment:-3", "review:007", "foo"} {
+		t.Run(key, func(t *testing.T) {
+			path := hostResetStatePath(t, "81")
+			body := resolveActorStateBody("81")
+			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			_, stderr, code := runBabysitCLI(t, resolveChildEnv(t), "babysit", "resolve", "81", key)
+
+			if code != 2 {
+				t.Errorf("exit code = %d, want 2 (stderr %q)", code, stderr)
+			}
+			if !strings.Contains(stderr, resolveUsageLine) {
+				t.Errorf("stderr = %q, want the usage line %q", stderr, resolveUsageLine)
+			}
+			if got, _ := os.ReadFile(path); string(got) != body {
+				t.Errorf("state file = %q, want it byte-identical", got)
+			}
+		})
+	}
+}
+
 func TestBabysitResolveUsageErrorsExitTwo(t *testing.T) {
 	armTestSocketPath(t)
 	for _, tc := range []struct {
@@ -895,8 +1043,8 @@ func TestBabysitResolveMalformedHeadExitsTwoWithTheHeadUsageLine(t *testing.T) {
 			if code != 2 {
 				t.Errorf("exit code = %d, want 2 (stderr %q)", code, stderr)
 			}
-			if !strings.Contains(stderr, "cenci babysit resolve <pr> discussion:<id>|head:<sha>") {
-				t.Errorf("stderr = %q, want the usage line naming discussion:<id>|head:<sha>", stderr)
+			if !strings.Contains(stderr, resolveUsageLine) {
+				t.Errorf("stderr = %q, want the usage line %q", stderr, resolveUsageLine)
 			}
 			if got, _ := os.ReadFile(path); string(got) != body {
 				t.Errorf("state file = %q, want it byte-identical", got)

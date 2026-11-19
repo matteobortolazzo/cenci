@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strconv"
 	"strings"
@@ -31,8 +32,13 @@ import (
 // under its own reasonFeedbackReopened hold, and an addressed key GitHub no
 // longer reports at all holds under reasonReviewStateUnknown rather than
 // being silently treated as still resolved.
+//
+// #862 adds an actor check to every one of those GitHub-side signals (actor.go):
+// a resolution, dismissal or superseding approval counts only when its actor is
+// not the automation login and is the item's own author or has admin/write
+// permission. Anything else holds the key pending in State.ActorHeldKeys.
 
-// keyStatus is classifyPendingKey's per-key classification outcome.
+// keyStatus is classifyKey's per-key classification outcome.
 type keyStatus int
 
 const (
@@ -48,18 +54,46 @@ const (
 	// keyUnsupported: a PendingKeys entry of a type this classifier does not
 	// recognize at all (not a "comment:" or "review:" key).
 	keyUnsupported
+	// keyActorDenied (#862): GitHub reports the item resolved, but its actor does
+	// not pass the actor rule (the automation login, an unknown actor, or a login
+	// that neither authored it nor has admin/write). The key stays pending in
+	// State.ActorHeldKeys.
+	keyActorDenied
+	// keyActorLookupFailed (#862): a lookup the actor rule needed failed (the
+	// automation login, the dismissal timeline, a permission, or no actorContext at
+	// all). Not a denial: the key stays where it was and the next tick retries.
+	keyActorLookupFailed
 )
 
-// feedbackState is the fully-explicit input classifyPendingKey/
-// partitionPendingKeys need: this tick's GraphQL review-thread resolution
+// threadState is one review thread as GitHub reports it (#862): whether it is
+// resolved, who resolved it (ResolvedByKnown is false for a null resolver, e.g. a
+// deleted account) and who wrote its first comment, the thread's own author.
+type threadState struct {
+	Resolved        bool
+	ResolvedBy      string
+	ResolvedByKnown bool
+	Author          string
+}
+
+// feedbackState is the fully-explicit input classifyKey/
+// partitionPending need: this tick's GraphQL review-thread resolution
 // state (keyed by comment databaseId, matching PendingKeys' "comment:<id>"
 // encoding), and this tick's already-fetched reviews payload. Pure and
 // I/O-free, mirroring evaluateAutomerge's automergeInputs discipline
 // (automerge.go:120-159) so the multi-reviewer/multi-thread matrix is
 // testable without any `gh` scripting.
 type feedbackState struct {
-	ThreadResolved map[int64]bool
-	Reviews        []review
+	Threads map[int64]threadState
+	Reviews []review
+
+	// Attestations is State.ActorAttestations (#862); Actors is the lazily-read
+	// automation login, dismissal timeline and permission lookups. A nil Actors
+	// fails closed: nothing resolves.
+	Attestations map[string]actorAttestation
+	Actors       *actorContext
+	// PR names the supervised PR in the `cenci babysit resolve <pr> <key>` recovery
+	// an actor hold's detail carries.
+	PR string
 
 	// ReviewsComplete records whether this tick's reviews detection read
 	// was proven complete via fetchPaged's completeness signal (#854) --
@@ -90,37 +124,87 @@ type feedbackVerdict struct {
 	Reopened []string
 }
 
-// classifyPendingKey classifies one PendingKeys entry against fs. Default-
-// deny throughout: a malformed key, an absent thread/review, or a review
-// state outside the recognized closed set all classify as keyUnknown, never
+// keyVerdict is classifyKey's output: the key's status and, for keyActorDenied,
+// the actor GitHub reports ("" when it is unknown) and why that actor was denied.
+type keyVerdict struct {
+	Status keyStatus
+	Actor  string
+	Why    string
+}
+
+// classifyKey classifies one PendingKeys entry against fs, with the actor
+// evidence (#862) a caller that records or reports a denial needs. Default-deny
+// throughout: a malformed key, an absent thread/review, or a review state
+// outside the recognized closed set all classify as keyUnknown, never
 // keyResolved.
-func classifyPendingKey(key string, fs feedbackState) keyStatus {
+func classifyKey(key string, fs feedbackState) keyVerdict {
 	switch {
 	case strings.HasPrefix(key, "comment:"):
-		return classifyCommentKey(strings.TrimPrefix(key, "comment:"), fs)
+		return classifyCommentKey(key, strings.TrimPrefix(key, "comment:"), fs)
 	case strings.HasPrefix(key, "review:"):
-		return classifyReviewKey(strings.TrimPrefix(key, "review:"), fs)
+		return classifyReviewKey(key, strings.TrimPrefix(key, "review:"), fs)
 	default:
-		return keyUnsupported
+		return keyVerdict{Status: keyUnsupported}
 	}
 }
 
+// checkActor is the actor rule (#862) for a resolution of key that GitHub reports
+// as made by actor (known is false for a null or unmatched actor, whyUnknown then
+// being the denial's reason; verb names what the actor did otherwise). A
+// feedbackState with no actorContext fails closed as a lookup failure, never a
+// resolution.
+func (fs feedbackState) checkActor(key, actor string, known bool, author, whyUnknown, verb string) keyVerdict {
+	if fs.Actors == nil {
+		return keyVerdict{Status: keyActorLookupFailed}
+	}
+	var attestation *actorAttestation
+	if a, ok := fs.Attestations[key]; ok {
+		attestation = &a
+	}
+	switch classifyActor(fs.Actors, actor, known, author, attestation) {
+	case actorAccepted:
+		return keyVerdict{Status: keyResolved}
+	case actorLookupFailed:
+		return keyVerdict{Status: keyActorLookupFailed}
+	}
+	why := whyUnknown
+	if known {
+		why = fmt.Sprintf("%s by %s, which is the automation login or lacks write access", verb, actor)
+	}
+	return keyVerdict{Status: keyActorDenied, Actor: actor, Why: why}
+}
+
+// checkDismissal applies checkActor to the dismissal of r, whose actor is read from
+// the dismissal timeline (the review's own author is the author the rule accepts).
+// A timeline that cannot be read (or an earlier pass failure) is a lookup failure.
+func (fs feedbackState) checkDismissal(key string, r review) keyVerdict {
+	if fs.Actors == nil || fs.Actors.err != nil {
+		return keyVerdict{Status: keyActorLookupFailed}
+	}
+	actor, known := fs.Actors.dismissalActor(r.ID)
+	if fs.Actors.err != nil {
+		return keyVerdict{Status: keyActorLookupFailed}
+	}
+	return fs.checkActor(key, actor, known, r.User.Login, "dismissal actor unknown", "dismissed")
+}
+
 // classifyCommentKey classifies a "comment:<id>" key: resolved only when
-// GitHub's thread map positively confirms it, unknown when the thread map
-// doesn't mention this id at all (absence is never proof of resolution).
-func classifyCommentKey(id string, fs feedbackState) keyStatus {
+// GitHub's thread map positively confirms it and the thread's resolver passes the
+// actor rule (#862), unknown when the thread map doesn't mention this id at all
+// (absence is never proof of resolution).
+func classifyCommentKey(key, id string, fs feedbackState) keyVerdict {
 	commentID, err := strconv.ParseInt(id, 10, 64)
 	if err != nil {
-		return keyUnknown
+		return keyVerdict{Status: keyUnknown}
 	}
-	resolved, ok := fs.ThreadResolved[commentID]
+	thread, ok := fs.Threads[commentID]
 	if !ok {
-		return keyUnknown
+		return keyVerdict{Status: keyUnknown}
 	}
-	if resolved {
-		return keyResolved
+	if !thread.Resolved {
+		return keyVerdict{Status: keyPending}
 	}
-	return keyPending
+	return fs.checkActor(key, thread.ResolvedBy, thread.ResolvedByKnown, thread.Author, "resolver unknown", "resolved")
 }
 
 // reviewsPageSize is GitHub's default REST per_page for the
@@ -134,7 +218,11 @@ const reviewsPageSize = 30
 // resolves directly -- GitHub rewrites a dismissed review's own state to
 // DISMISSED in place, no supersession lookup needed. A CHANGES_REQUESTED
 // review resolves only when the same reviewer's latest effective review
-// (latestEffectiveReview) is APPROVED or DISMISSED; any other state --
+// (latestEffectiveReview) is APPROVED or DISMISSED. #862: each of those
+// resolutions also has to pass the actor rule -- a dismissal through the actor of
+// its ReviewDismissedEvent (the review's own author being the author the rule
+// accepts), an APPROVED review through its own author (the reviewer, who is also
+// the target's author). Any other state --
 // including a review ID no longer present in fs.Reviews at all, or a state
 // outside {DISMISSED, CHANGES_REQUESTED} (PendingKeys entries are only ever
 // created for CHANGES_REQUESTED reviews, so anything else is anomalous) --
@@ -144,35 +232,37 @@ const reviewsPageSize = 30
 // resolution logic runs at all -- an incomplete fetch can never prove a
 // reviewer's visible "latest" review really is their latest, regardless of
 // how short the fetched slice happens to be.
-func classifyReviewKey(id string, fs feedbackState) keyStatus {
+func classifyReviewKey(key, id string, fs feedbackState) keyVerdict {
 	if !fs.ReviewsComplete {
-		return keyUnknown
+		return keyVerdict{Status: keyUnknown}
 	}
 	reviewID, err := strconv.ParseInt(id, 10, 64)
 	if err != nil {
-		return keyUnknown
+		return keyVerdict{Status: keyUnknown}
 	}
 	target := findReview(fs.Reviews, reviewID)
 	if target == nil {
-		return keyUnknown
+		return keyVerdict{Status: keyUnknown}
 	}
 	if target.State == "DISMISSED" {
-		return keyResolved
+		return fs.checkDismissal(key, *target)
 	}
 	if target.State != "CHANGES_REQUESTED" {
-		return keyUnknown
+		return keyVerdict{Status: keyUnknown}
 	}
 	latest, ok := latestEffectiveReview(fs.Reviews, target.User.Login)
 	if !ok {
-		return keyUnknown
+		return keyVerdict{Status: keyUnknown}
 	}
 	switch latest.State {
-	case "APPROVED", "DISMISSED":
-		return keyResolved
+	case "APPROVED":
+		return fs.checkActor(key, latest.User.Login, latest.User.Login != "", target.User.Login, "approver unknown", "approved")
+	case "DISMISSED":
+		return fs.checkDismissal(key, latest)
 	case "CHANGES_REQUESTED":
-		return keyPending
+		return keyVerdict{Status: keyPending}
 	default:
-		return keyUnknown
+		return keyVerdict{Status: keyUnknown}
 	}
 }
 
@@ -216,46 +306,61 @@ func latestEffectiveReview(reviews []review, login string) (review, bool) {
 	return best, found
 }
 
-// partitionPendingKeys splits pending by classifyPendingKey's verdict:
-// resolved keys move out into resolved, everything else (pending, unknown,
-// unsupported) stays in stillPending. A single keyUnknown or keyUnsupported
-// entry poisons the overall hold verdict (first one found wins, mirroring
-// evaluateAutomerge's first-failing-gate-wins discipline) even while other
-// keys in the same set resolve cleanly. detail names the specific offending
-// key, consistent with every other hold reason in this package carrying a
-// diagnostic Detail identifying the cause rather than just the reason
-// constant.
-func partitionPendingKeys(pending []string, fs feedbackState) (stillPending, resolved []string, hold, detail string) {
+// partitionPending splits pending by classifyKey's verdict: resolved keys move
+// out into Resolved, everything else (pending, unknown, unsupported) stays in
+// Pending. A single keyUnknown or keyUnsupported entry poisons the overall hold
+// verdict (first one found wins, mirroring evaluateAutomerge's
+// first-failing-gate-wins discipline) even while other keys in the same set
+// resolve cleanly. Detail names the specific offending key, consistent with
+// every other hold reason in this package carrying a diagnostic Detail
+// identifying the cause rather than just the reason constant. #862: a key whose
+// resolution fails the actor rule stays in Pending too, raising
+// reasonResolutionActorUnauthorized (a failed lookup, reasonFeedbackUnreadable)
+// the same way, and the result carries the actor facts of every pending key.
+func partitionPending(pending []string, fs feedbackState) feedbackClassification {
+	var out feedbackClassification
 	for _, key := range pending {
-		status := classifyPendingKey(key, fs)
-		if status == keyResolved {
-			resolved = append(resolved, key)
+		v := classifyKey(key, fs)
+		out.noteActor(key, v, fs)
+		if v.Status == keyResolved {
+			out.Resolved = append(out.Resolved, key)
 			continue
 		}
-		stillPending = append(stillPending, key)
-		if hold != "" {
-			continue
-		}
-		switch status {
-		case keyUnknown:
-			hold = reasonReviewStateUnknown
-			detail = key + ": not found or in an unrecognized state"
-		case keyUnsupported:
-			hold = reasonFeedbackUnsupported
-			detail = key + ": unsupported key type"
+		out.Pending = append(out.Pending, key)
+		if out.Hold == "" {
+			out.Hold, out.Detail = holdFor(key, v, fs.PR)
 		}
 	}
-	return stillPending, resolved, hold, detail
+	return out
+}
+
+// holdFor is the classification-level hold a verdict raises: reasonReviewStateUnknown,
+// reasonFeedbackUnsupported, reasonResolutionActorUnauthorized (#862, detail naming
+// the key, why and its `resolve` recovery) or, for a failed actor lookup that is not
+// a denial, reasonFeedbackUnreadable. A resolved or pending key raises none.
+func holdFor(key string, v keyVerdict, pr string) (hold, detail string) {
+	switch v.Status {
+	case keyUnknown:
+		return reasonReviewStateUnknown, key + ": not found or in an unrecognized state"
+	case keyUnsupported:
+		return reasonFeedbackUnsupported, key + ": unsupported key type"
+	case keyActorDenied:
+		return reasonResolutionActorUnauthorized, key + ": " + v.Why + "; run " + resolveHint(pr, []string{key})
+	case keyActorLookupFailed:
+		return reasonFeedbackUnreadable, "resolution actor permission lookup failed for " + key + "; will retry"
+	}
+	return "", ""
 }
 
 // feedbackClassification is classifyFeedback's pure output: Pending/Resolved
-// mirror partitionPendingKeys' outcome for the pending set exactly (today's
+// mirror partitionPending's outcome for the pending set exactly (today's
 // semantics, unchanged), Reopened names every previously-addressed key this
 // pass reclassified back to pending (#885, AC 1/AC 2), and Hold/Detail carry
 // the single overall verdict for the whole pass -- both sets combined --
 // under the plan's exact precedence: a fetch-level hold is decided by the
 // caller before classifyFeedback ever runs; within classifyFeedback itself, a
-// classification-level hold (reasonReviewStateUnknown / reasonFeedbackUnsupported,
+// classification-level hold (reasonReviewStateUnknown / reasonFeedbackUnsupported /
+// reasonResolutionActorUnauthorized / a failed actor lookup's reasonFeedbackUnreadable,
 // pending set scanned before addressed) always outranks reasonFeedbackReopened,
 // which itself only wins when nothing in either set is unknown/unsupported.
 // Deterministic output order: Pending/Resolved in original pending order,
@@ -266,12 +371,40 @@ type feedbackClassification struct {
 	Reopened []string
 	Hold     string
 	Detail   string
+
+	// #862: ActorHeld maps each key GitHub reports resolved but whose actor failed
+	// the actor rule to the actor login seen ("" for a null or unknown actor).
+	// ActorRevoked is the subset that was addressed and moves back to pending.
+	// ActorUndecided names keys the pass could not decide an actor verdict for (not
+	// reported by GitHub, an unsupported type, a failed lookup): their ActorHeldKeys
+	// membership is left as it was. AttestationDrops names attested keys GitHub now
+	// reports unresolved.
+	ActorHeld        map[string]string
+	ActorRevoked     []string
+	ActorUndecided   []string
+	AttestationDrops []string
 }
 
-// classifyFeedback generalizes partitionPendingKeys to also reclassify
+// noteActor records the #862 actor facts of key's verdict v.
+func (c *feedbackClassification) noteActor(key string, v keyVerdict, fs feedbackState) {
+	if _, attested := fs.Attestations[key]; attested && v.Status == keyPending {
+		c.AttestationDrops = append(c.AttestationDrops, key)
+	}
+	switch v.Status {
+	case keyActorDenied:
+		if c.ActorHeld == nil {
+			c.ActorHeld = map[string]string{}
+		}
+		c.ActorHeld[key] = v.Actor
+	case keyUnknown, keyUnsupported, keyActorLookupFailed:
+		c.ActorUndecided = append(c.ActorUndecided, key)
+	}
+}
+
+// classifyFeedback generalizes partitionPending to also reclassify
 // AddressedKeys against fresh GitHub state (#885): pending-set keys keep
-// partitionPendingKeys' exact semantics (classifyFeedback delegates to it
-// directly, so "no addressed keys" is byte-for-byte identical to the pre-#885
+// partitionPending's exact semantics (classifyFeedback delegates to
+// partitionPending, so "no addressed keys" is identical to the pre-#885
 // behavior); addressed-set keys contribute Reopened on keyPending (a
 // previously-resolved thread/review found blocking again), and extend the
 // classification-level hold to keyUnknown/keyUnsupported while staying
@@ -279,12 +412,16 @@ type feedbackClassification struct {
 // of resolution for a previously-addressed key either, and it is also never
 // proof of a reopen). A keyResolved addressed key is a silent no-op -- it
 // stays in AddressedKeys, appearing in none of Pending/Resolved/Reopened.
+// #862: an addressed key whose current resolution fails the actor rule is
+// ActorRevoked (not Reopened) and raises the actor hold, a classification-level
+// hold like unknown; a failed lookup leaves it addressed.
 func classifyFeedback(pending, addressed []string, fs feedbackState) feedbackClassification {
-	stillPending, resolved, hold, detail := partitionPendingKeys(pending, fs)
-	out := feedbackClassification{Pending: stillPending, Resolved: resolved, Hold: hold, Detail: detail}
+	out := partitionPending(pending, fs)
 
 	for _, key := range addressed {
-		switch classifyPendingKey(key, fs) {
+		v := classifyKey(key, fs)
+		out.noteActor(key, v, fs)
+		switch v.Status {
 		case keyResolved:
 			// No-op: GitHub still confirms this key resolved, it stays in
 			// AddressedKeys untouched.
@@ -294,15 +431,12 @@ func classifyFeedback(pending, addressed []string, fs feedbackState) feedbackCla
 				out.Hold = reasonFeedbackReopened
 				out.Detail = key + ": review feedback reopened"
 			}
-		case keyUnknown:
-			if out.Hold == "" || out.Hold == reasonFeedbackReopened {
-				out.Hold = reasonReviewStateUnknown
-				out.Detail = key + ": not found or in an unrecognized state"
+		default:
+			if v.Status == keyActorDenied {
+				out.ActorRevoked = append(out.ActorRevoked, key)
 			}
-		case keyUnsupported:
 			if out.Hold == "" || out.Hold == reasonFeedbackReopened {
-				out.Hold = reasonFeedbackUnsupported
-				out.Detail = key + ": unsupported key type"
+				out.Hold, out.Detail = holdFor(key, v, fs.PR)
 			}
 		}
 	}
@@ -339,10 +473,18 @@ type graphQLThreadsResponse struct {
 					} `json:"pageInfo"`
 					Nodes []struct {
 						IsResolved bool `json:"isResolved"`
-						Comments   struct {
+						// ResolvedBy is a pointer so a null resolver (an unresolved
+						// thread, or a deleted account) is detectable (#862).
+						ResolvedBy *struct {
+							Login string `json:"login"`
+						} `json:"resolvedBy"`
+						Comments struct {
 							TotalCount int `json:"totalCount"`
 							Nodes      []struct {
 								DatabaseID int64 `json:"databaseId"`
+								Author     *struct {
+									Login string `json:"login"`
+								} `json:"author"`
 							} `json:"nodes"`
 						} `json:"comments"`
 					} `json:"nodes"`
@@ -360,21 +502,22 @@ type graphQLThreadsResponse struct {
 // emits concatenated JSON documents ghJSON's single json.Unmarshal cannot
 // parse, and which hides the page count that "incomplete traversal" needs to
 // observe).
-const reviewThreadsQuery = `query($owner:String!,$name:String!,$number:Int!,$cursor:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$cursor){pageInfo{hasNextPage endCursor}nodes{isResolved comments(first:100){totalCount nodes{databaseId}}}}}}}`
+const reviewThreadsQuery = `query($owner:String!,$name:String!,$number:Int!,$cursor:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$cursor){pageInfo{hasNextPage endCursor}nodes{isResolved resolvedBy{login} comments(first:100){totalCount nodes{databaseId author{login}}}}}}}}`
 
-// fetchReviewThreads fetches every review thread's isResolved state for pr in
-// repo ("owner/name"), returning a map from each thread's comment databaseId
-// to that thread's isResolved value, merged across every page. Any of: a
+// fetchReviewThreads fetches every review thread's state for pr in repo
+// ("owner/name"), returning a map from each thread's comment databaseId to that
+// thread's threadState (#862: isResolved, who resolved it, and the first comment's
+// author, which is the thread's own author), merged across every page. Any of: a
 // non-2-field-clean decode, a non-empty top-level errors[] envelope, an
 // exhausted maxThreadPages with hasNextPage still true, or a per-thread
 // comments.totalCount exceeding the fetched node count -- all fail closed,
 // never a partial-but-treated-as-complete map.
-func fetchReviewThreads(repo, pr string) (map[int64]bool, error) {
+func fetchReviewThreads(repo, pr string) (map[int64]threadState, error) {
 	owner, name, ok := strings.Cut(repo, "/")
 	if !ok {
 		return nil, fmt.Errorf("%s: malformed repo %q, want owner/name", reasonFeedbackUnreadable, repo)
 	}
-	result := map[int64]bool{}
+	result := map[int64]threadState{}
 	cursor := ""
 	for page := 0; page < maxThreadPages; page++ {
 		args := []string{"api", "graphql",
@@ -406,8 +549,15 @@ func fetchReviewThreads(repo, pr string) (map[int64]bool, error) {
 			if node.Comments.TotalCount != len(node.Comments.Nodes) {
 				return nil, fmt.Errorf("%w: thread reports %d comments but only %d were returned", errFeedbackTruncated, node.Comments.TotalCount, len(node.Comments.Nodes))
 			}
+			state := threadState{Resolved: node.IsResolved}
+			if node.ResolvedBy != nil && node.ResolvedBy.Login != "" {
+				state.ResolvedBy, state.ResolvedByKnown = node.ResolvedBy.Login, true
+			}
+			if len(node.Comments.Nodes) > 0 && node.Comments.Nodes[0].Author != nil {
+				state.Author = node.Comments.Nodes[0].Author.Login
+			}
 			for _, c := range node.Comments.Nodes {
-				result[c.DatabaseID] = node.IsResolved
+				result[c.DatabaseID] = state
 			}
 		}
 		if !threads.PageInfo.HasNextPage {
@@ -425,8 +575,9 @@ func fetchReviewThreads(repo, pr string) (map[int64]bool, error) {
 // fetched by the caller. hold/detail are non-empty only on a
 // fetchReviewThreads failure (reasonFeedbackUnreadable/reasonFeedbackTruncated);
 // the caller must not classify or mutate anything when hold != "" -- the read
-// itself could not be trusted.
-func fetchFeedbackState(repo, pr string, keys []string, reviews []review, reviewsComplete bool) (fs feedbackState, hold, detail string) {
+// itself could not be trusted. #862: the state also carries s's attestations and
+// the pass's actorContext, whose reads stay lazy (nothing here calls them).
+func fetchFeedbackState(s *State, keys []string, reviews []review, reviewsComplete bool, actors *actorContext) (fs feedbackState, hold, detail string) {
 	hasCommentKey := false
 	for _, k := range keys {
 		if strings.HasPrefix(k, "comment:") {
@@ -435,20 +586,26 @@ func fetchFeedbackState(repo, pr string, keys []string, reviews []review, review
 		}
 	}
 
-	fs = feedbackState{Reviews: reviews, ReviewsComplete: reviewsComplete}
+	fs = feedbackState{Reviews: reviews, ReviewsComplete: reviewsComplete, Attestations: s.ActorAttestations, Actors: actors, PR: s.PR}
 	if !hasCommentKey {
 		return fs, "", ""
 	}
-	threads, err := fetchReviewThreads(repo, pr)
+	threads, err := fetchReviewThreads(s.Repo, s.PR)
 	if err != nil {
-		hold = reasonFeedbackUnreadable
-		if errors.Is(err, errFeedbackTruncated) {
-			hold = reasonFeedbackTruncated
-		}
-		return fs, hold, err.Error()
+		hold, detail = feedbackErrHold(err)
+		return fs, hold, detail
 	}
-	fs.ThreadResolved = threads
+	fs.Threads = threads
 	return fs, "", ""
+}
+
+// feedbackErrHold is the fetch-level hold for a failed (or truncated) read: its
+// reason and err's text as the detail.
+func feedbackErrHold(err error) (hold, detail string) {
+	if errors.Is(err, errFeedbackTruncated) {
+		return reasonFeedbackTruncated, err.Error()
+	}
+	return reasonFeedbackUnreadable, err.Error()
 }
 
 // fetchAndClassifyFeedback runs the fetch+classify sequence shared by
@@ -458,8 +615,10 @@ func fetchFeedbackState(repo, pr string, keys []string, reviews []review, review
 // s.PendingKeys and s.AddressedKeys via classifyFeedback. ok is false only on
 // a fetchFeedbackState failure, in which case hold/detail carry that failure
 // and c is the zero value -- callers must not classify or mutate anything in
-// that case (fail closed).
-func fetchAndClassifyFeedback(s *State, reviews []review, reviewsComplete bool) (c feedbackClassification, hold, detail string, ok bool) {
+// that case (fail closed). #862: the same holds for a failure of the pass's
+// automation-login or dismissal-timeline read (actors.err, sticky once set): it
+// is a fetch-level hold, so no key moves in either direction.
+func fetchAndClassifyFeedback(s *State, reviews []review, reviewsComplete bool, actors *actorContext) (c feedbackClassification, hold, detail string, ok bool) {
 	// #1472: `discussion:` keys are partitioned out ahead of this classifier --
 	// they are neither a thread nor a review, never go through review-thread
 	// lookup, and would otherwise classify as an unsupported key type. The
@@ -467,11 +626,16 @@ func fetchAndClassifyFeedback(s *State, reviews []review, reviewsComplete bool) 
 	pending, _ := splitDiscussionKeys(s.PendingKeys)
 	addressed, _ := splitDiscussionKeys(s.AddressedKeys)
 	keys := append(append([]string{}, pending...), addressed...)
-	fs, fetchHold, fetchDetail := fetchFeedbackState(s.Repo, s.PR, keys, reviews, reviewsComplete)
+	fs, fetchHold, fetchDetail := fetchFeedbackState(s, keys, reviews, reviewsComplete, actors)
 	if fetchHold != "" {
 		return feedbackClassification{}, fetchHold, fetchDetail, false
 	}
-	return classifyFeedback(pending, addressed, fs), "", "", true
+	c = classifyFeedback(pending, addressed, fs)
+	if actors != nil && actors.err != nil {
+		hold, detail = feedbackErrHold(actors.err)
+		return feedbackClassification{}, hold, detail, false
+	}
+	return c, "", "", true
 }
 
 // reconcileFeedback is tick's GitHub-authoritative resolution pass (Q6,
@@ -488,7 +652,7 @@ func fetchAndClassifyFeedback(s *State, reviews []review, reviewsComplete bool) 
 // LastCommentAt advances (clearing PendingCommentAt/PendingHeadSHA) only once
 // every key pending at this pass's *start* has cleared and this pass
 // actually resolved something -- scoped via classifyFeedback's Pending
-// output, which (per partitionPendingKeys' unchanged semantics) never
+// output, which (per partitionPending's unchanged semantics) never
 // includes a newly reopened key, so a reopen landing in the same pass a
 // resolution happens can never spuriously suppress -- or a reopen alone can
 // never spuriously trigger -- the watermark advance. A fetch failure holds
@@ -497,15 +661,22 @@ func fetchAndClassifyFeedback(s *State, reviews []review, reviewsComplete bool) 
 // tick's fetchPaged completeness signal (#854) for the reviews read:
 // threaded straight into feedbackState so classifyReviewKey fails closed on
 // an unproven-complete reviews list regardless of how short it happens to be.
-func reconcileFeedback(s *State, reviews []review, reviewsComplete bool) feedbackVerdict {
-	c, fetchHold, fetchDetail, ok := fetchAndClassifyFeedback(s, reviews, reviewsComplete)
+// #862: actors is the pass's lazily-read actor-rule input. A resolution that
+// fails the rule leaves its key pending (an addressed key moves back to pending,
+// ActorRevoked) and records it, with the actor seen, in State.ActorHeldKeys; a key
+// that resolves or reports unresolved again leaves that set, and one the pass
+// could not decide keeps its membership. An attestation is dropped whenever its
+// key reports unresolved; it is otherwise kept, since an addressed key is
+// re-checked every tick.
+func reconcileFeedback(s *State, reviews []review, reviewsComplete bool, actors *actorContext) feedbackVerdict {
+	c, fetchHold, fetchDetail, ok := fetchAndClassifyFeedback(s, reviews, reviewsComplete, actors)
 	if !ok {
 		return feedbackVerdict{Hold: fetchHold, Detail: fetchDetail}
 	}
 
 	// The discussion keys pass through untouched (reconcileDiscussion owns them).
 	_, discussionPending := splitDiscussionKeys(s.PendingKeys)
-	s.PendingKeys = append(append(append([]string{}, c.Pending...), c.Reopened...), discussionPending...)
+	s.PendingKeys = append(append(append(append([]string{}, c.Pending...), c.Reopened...), c.ActorRevoked...), discussionPending...)
 	if len(c.Resolved) > 0 {
 		s.AddressedKeys = append(s.AddressedKeys, c.Resolved...)
 		s.LaunchedKeys = removeKeys(s.LaunchedKeys, c.Resolved)
@@ -513,12 +684,37 @@ func reconcileFeedback(s *State, reviews []review, reviewsComplete bool) feedbac
 	if len(c.Reopened) > 0 {
 		s.AddressedKeys = removeKeys(s.AddressedKeys, c.Reopened)
 	}
+	if len(c.ActorRevoked) > 0 {
+		s.AddressedKeys = removeKeys(s.AddressedKeys, c.ActorRevoked)
+	}
+	s.ActorHeldKeys = nextActorHeldKeys(s.ActorHeldKeys, c)
+	for _, key := range c.AttestationDrops {
+		delete(s.ActorAttestations, key)
+	}
 
 	if len(c.Pending) == 0 && len(c.Resolved) > 0 && s.PendingCommentAt != "" {
 		s.LastCommentAt = s.PendingCommentAt
 		s.PendingCommentAt, s.PendingHeadSHA = "", ""
 	}
 	return feedbackVerdict{Hold: c.Hold, Detail: c.Detail, Reopened: c.Reopened}
+}
+
+// nextActorHeldKeys is State.ActorHeldKeys after a pass classified as c: every key
+// the pass denied (with the actor it saw), plus the old entries of the keys it could
+// not decide. A key that resolved or reports unresolved leaves the set. Nil when
+// empty, so the field stays omitted.
+func nextActorHeldKeys(old map[string]string, c feedbackClassification) map[string]string {
+	held := map[string]string{}
+	for _, key := range c.ActorUndecided {
+		if actor, wasHeld := old[key]; wasHeld {
+			held[key] = actor
+		}
+	}
+	maps.Copy(held, c.ActorHeld)
+	if len(held) == 0 {
+		return nil
+	}
+	return held
 }
 
 // revalidateFeedback is reconcileFeedback's non-mutating counterpart for the
@@ -534,13 +730,13 @@ func reconcileFeedback(s *State, reviews []review, reviewsComplete bool) feedbac
 // returned pending set falls back to s.PendingKeys unchanged (fail closed --
 // the caller is expected to route verdict.Hold into its own FeedbackHold
 // rather than treat this as success).
-func revalidateFeedback(s *State, reviews []review, reviewsComplete bool) (pending []string, verdict feedbackVerdict) {
-	c, fetchHold, fetchDetail, ok := fetchAndClassifyFeedback(s, reviews, reviewsComplete)
+func revalidateFeedback(s *State, reviews []review, reviewsComplete bool, actors *actorContext) (pending []string, verdict feedbackVerdict) {
+	c, fetchHold, fetchDetail, ok := fetchAndClassifyFeedback(s, reviews, reviewsComplete, actors)
 	if !ok {
 		return append([]string{}, s.PendingKeys...), feedbackVerdict{Hold: fetchHold, Detail: fetchDetail}
 	}
 
-	pending = append(append([]string{}, c.Pending...), c.Reopened...)
+	pending = append(append(append([]string{}, c.Pending...), c.Reopened...), c.ActorRevoked...)
 	return pending, feedbackVerdict{Hold: c.Hold, Detail: c.Detail, Reopened: c.Reopened}
 }
 
@@ -697,7 +893,8 @@ func revalidateDiscussion(s *State, comments []discussionComment) (pending []str
 // read-level hold outranks a revoked resolution, which outranks the
 // ended-without-receipt hold (lowest precedence). The head-move security hold
 // (#1539) is named explicitly at the top tier; tick combines it first, so it also
-// wins a tie.
+// wins a tie. reasonResolutionActorUnauthorized (#862) takes the default top tier,
+// as every classification-level hold does.
 func holdRank(hold string) int {
 	switch hold {
 	case "":
@@ -801,8 +998,10 @@ func resolveHint(pr string, keys []string) string {
 
 // heldUntrustedNote renders the recovery for the held untrusted keys (#1539): a
 // write-access human handles the feedback, then runs `cenci babysit resolve` for
-// each discussion key or resolves each comment:/review: key on GitHub. Each list
-// names at most three keys.
+// each discussion key, or resolves each comment:/review: key on GitHub and, #862,
+// runs `cenci babysit resolve` for it when it was resolved as the automation login
+// (a resolution by that login is held for its actor). Each list names at most
+// three keys.
 func heldUntrustedNote(pr string, held []string) string {
 	other, discussion := splitDiscussionKeys(held)
 	var steps []string
@@ -814,9 +1013,17 @@ func heldUntrustedNote(pr string, held []string) string {
 			steps = append(steps, fmt.Sprintf("(and %d more on GitHub)", len(other)-3))
 			break
 		}
-		steps = append(steps, "resolve "+k+" on GitHub")
+		steps = append(steps, "resolve "+k+" on GitHub, then run "+resolveHint(pr, []string{k})+" if it was resolved as the automation login")
 	}
 	return "untrusted feedback held for a write-access human (its author lacks write permission, or its untrusted launch cap is used up); once handled, " + strings.Join(steps, "; ")
+}
+
+// actorHeldNote renders the recovery for the keys held for an unauthorized
+// resolution actor (#862), in key order: an attended host human confirms the
+// resolution is theirs, then runs `cenci babysit resolve` for each key.
+func actorHeldNote(pr string, held map[string]string) string {
+	keys := slices.Sorted(maps.Keys(held))
+	return "resolution held for an unauthorized actor (the automation login, an unknown actor, or a login without write access); if it was yours, run " + resolveHint(pr, keys)
 }
 
 // removeKeys returns a new slice containing every element of keys not

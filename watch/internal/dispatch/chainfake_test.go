@@ -1379,6 +1379,12 @@ func dispatchChainGhCall(t *testing.T, world *ghWorld, args []string, localDir, 
 	case args[0] == "api" && flagValue(args, "--jq") == ".login":
 		stdout, stderr, code = world.CurrentLogin+"\n", "", 0
 
+	// #862: babysit's resolution-actor rule reads the automation login as the
+	// decoded `login` field of a bare `gh api user` (no --jq), the same identity
+	// the --jq .login route above serves.
+	case len(args) == 2 && args[0] == "api" && args[1] == "user":
+		stdout, stderr, code = fmt.Sprintf(`{"login":%q}`+"\n", world.CurrentLogin), "", 0
+
 	case len(args) >= 2 && args[0] == "api" && args[1] == "graphql":
 		stdout, stderr, code = chainGraphQL(world, args)
 

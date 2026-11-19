@@ -210,9 +210,11 @@ candidate has a trusted author, nothing launches and no nonce is minted: every u
 candidate is held for a write-access human in `heldUntrustedKeys` (additive state). A held key
 stays pending, so automerge holds under `review feedback pending`, status is `needs-input` and
 `automergeDetail` names the recovery: `cenci babysit resolve <pr> discussion:<id>` for a
-discussion key, and "resolve `<key>` on GitHub" for each `comment:`/`review:` key, which moves
-to addressed through the ordinary feedback path and leaves the held set (status returns to
-`running` once nothing else needs a human). A held key is never in `launchedFeedbackKeys`, so
+discussion key, and "resolve `<key>` on GitHub, then run `cenci babysit resolve <pr> <key>` if it
+was resolved as the automation login" for each `comment:`/`review:` key (#862, see Resolution
+actor below). Such a key moves to addressed through the ordinary feedback path once GitHub's
+resolution passes the actor rule, and leaves the held set (status returns to `running` once
+nothing else needs a human). A held key is never in `launchedFeedbackKeys`, so
 it never raises `review worker ended without receipt`. When no candidate is trusted but some
 lookup came back unknown, nothing launches and the unknown key is retried next tick; denied
 candidates are held once that lookup settles. The held set is left out of the launch trigger, so
@@ -325,6 +327,46 @@ inventory, or a recorded session that no longer exists, makes zero launches and 
 launch failed`, with every key still pending. A live `<pr>-babysit-review` pane whose
 `@cenci-repo-dir` is provably another repository does not block.
 
+**Resolution actor (#862).** GitHub stays authoritative for `comment:` and `review:` keys, but a
+GitHub-side resolution counts as reviewer acceptance only when its actor is acceptable. The
+signals are a resolved thread (`resolvedBy`), a `DISMISSED` review (the actor of its
+`ReviewDismissedEvent`, read from the PR timeline) and a newer same-reviewer `APPROVED` or
+`DISMISSED` review (its author, or its own dismissal actor); a newer `CHANGES_REQUESTED` review
+supersedes nothing and triggers no lookup. The rule, in order:
+
+1. An attestation recorded for exactly this key and this actor (`actorAttestations`, below)
+   accepts.
+2. A null or unmatched actor (a deleted account, or a dismissal with no event in a complete
+   timeline read) is denied: detail `resolver unknown` for a thread, `dismissal actor unknown` for
+   a dismissed review, `approver unknown` for a superseding approval with no author login.
+3. An actor that equals the automation login, compared case-insensitively (`strings.EqualFold`),
+   is denied, even when it is the thread's or review's own author. The automation login is the
+   login the supervisor's own `gh api user` reports.
+4. An actor equal to the thread's (first comment's) or review's own author is accepted with no
+   permission lookup.
+5. Anyone else needs `admin` or `write` collaborator permission, through the per-tick permission
+   resolver (one lookup per login). A login that does not look like a GitHub login (a `[bot]` or
+   App login) is denied with no `gh` call.
+
+The automation login, the dismissal timeline and each permission are read lazily, at most once per
+tick and once per pre-merge recheck, only when a `comment:`/`review:` key's verdict depends on them:
+a state with only `discussion:` keys makes none of those calls. The rule runs on every resolution
+path: the tick's feedback pass, its same-tick review-supersession block and the pre-merge recheck
+(which stays read-only). It also re-checks addressed keys on every tick, so a key already addressed
+whose current resolution fails the rule moves back to pending under the new hold below.
+
+*Upgrade wave.* Because addressed keys are re-checked, a PR already supervised when this rule
+shipped can hold once for each addressed key GitHub reports resolved by the automation login. And
+since the workers babysit launches act under the supervisor's own `gh` identity, every resolution a
+worker makes (and any a maintainer makes through that same login) now needs an attended host
+`cenci babysit resolve`, so expect more `needs-input` than before.
+
+*Residual risk.* GitHub reports no resolution timestamp for a review thread, so a thread that the
+same attested actor unresolves and re-resolves between two ticks is invisible: the attestation
+still matches. A worker that uses a different GitHub credential than the supervisor's `gh` is
+outside the automation-login match; it is accepted only if it is the thread's author or has write
+access.
+
 **Holds and their recovery.** Each reason below is a recorded `automergeReason`, except the last,
 which refuses at arm and in `status` because no tick runs. (Held untrusted keys, above, are not a
 separate reason: they stay pending under `review feedback pending` with status `needs-input`.)
@@ -373,6 +415,32 @@ separate reason: they stay pending under `review feedback pending` with status `
   directory is not mounted and `resolve`'s `CENCI_SANDBOX`/`CENCI_ATTENDED`/
   `CENCI_BABYSIT_SUPERVISOR` refusals apply; a worker launched on the host as the same user is
   outside that guarantee.
+- `review resolution actor not authorized` (#862): GitHub reports a `comment:`/`review:` key
+  resolved (a resolved thread, a dismissed review, a newer approval) but its actor fails the
+  actor rule above. The key stays pending (an addressed key moves back to pending) and is
+  recorded in `actorHeldKeys` (additive state, key to the actor login seen, `""` for an unknown
+  actor), automerge holds under this reason and status is `needs-input`. `automergeDetail` reads
+  `<key>: <why>; run cenci babysit resolve <pr> <key>`, where `<why>` is `resolver unknown`,
+  `dismissal actor unknown` or `approver unknown` (the actor is null or unmatched), or
+  `resolved by <login>, which is the automation login or lacks write access`, with `dismissed by`
+  (a dismissed review) or `approved by` (a superseding approval) in place of `resolved by`. A held key is never relaunched to `babysit-review`
+  (GitHub already reports it resolved, so a worker has nothing to address), nor is a key a human
+  attested (`actorAttestations`) while it is still pending; GitHub reporting the thread unresolved
+  drops the attestation, so a genuine reopen relaunches. Two lookup failures
+  are not denials and are not held under this reason: they hold under `review feedback state
+  unreadable` with the keys left exactly where they were, no `actorHeldKeys` change, and the next
+  tick retries. They are `automation identity lookup failed` (the `gh api user` read failed or
+  reported an unusable login; it fails the whole comment/review pass closed) and
+  `resolution actor permission lookup failed for <key>; will retry`. A dismissal-timeline read
+  that fails holds under `review feedback state unreadable`, and one that hits the page cap with
+  more pages reported holds under `review feedback state truncated`; neither resolves a `review:`
+  key that tick. Only a definite denial, the automation login or a null actor enters
+  `actorHeldKeys`; only the held-key case sets `needs-input`, while the unreadable and truncated
+  holds clear on their own. It ranks in the top tier with the other classification-level holds.
+  Recovery: if the resolution was yours, an attended host runs `cenci babysit resolve <pr>
+  <key>` (below), and the next tick moves the key to addressed; otherwise have an authorized
+  person resolve (or unresolve) the thread on GitHub. The note for a held
+  untrusted `comment:`/`review:` key (`heldUntrustedKeys`) gives the same two steps.
 - `babysit state unreadable`: the state file cannot be read or decoded. Arming exits 1 with
   `babysit state unreadable: <path>: <cause>`, leaves the file byte-identical and starts no
   supervisor (the old fail-open load started from an empty `pendingCommentKeys`). `cenci babysit
@@ -382,14 +450,23 @@ separate reason: they stay pending under `review feedback pending` with status `
   lost, so every comment is detected again. A stop forwarded from a sandbox refuses it and keeps
   the file.
 
-**`cenci babysit resolve <pr> discussion:<id>|head:<sha> [--state-dir <dir>]`** is how a human
-settles those holds. It is host-only and attended-only: it refuses, changing nothing and exiting
+**`cenci babysit resolve <pr> discussion:<id>|comment:<id>|review:<id>|head:<sha> [--state-dir <dir>]`**
+is how a human settles those holds. It is host-only and attended-only: it refuses, changing nothing and exiting
 1, with `CENCI_SANDBOX=1`, with `CENCI_ATTENDED=0` (whatever set it, so a supervisor-launched
 worker can never use it) or with `CENCI_BABYSIT_SUPERVISOR` set. A `discussion:` key must be in
-`pendingCommentKeys` (this covers a held untrusted discussion key): a `comment:` or `review:` key
-exits 1 with a pointer to resolve it on GitHub, and a key not pending exits 1. It records a
-receipt with source `human-cli` at the recorded revision (an edit still reopens the key) and
-removes the key from `heldUntrustedKeys`. A `head:<sha>` target (#1539) is the only way to clear
+`pendingCommentKeys` (this covers a held untrusted discussion key), and a key not pending exits 1.
+It records a receipt with source `human-cli` at the recorded revision (an edit still reopens the
+key) and removes the key from `heldUntrustedKeys`. A `comment:<id>` or `review:<id>` target (#862,
+positive integer id, otherwise a usage error) is accepted only while the key is pending and in
+`actorHeldKeys`; any other `comment:`/`review:` key exits 1, leaves the state byte-identical and
+points at resolving it on GitHub. It never marks the key addressed: it records an attestation
+(`actorAttestations`, key to the actor the supervisor saw, an attestation time and source
+`human-cli`) and removes the key from `actorHeldKeys` and `heldUntrustedKeys`, then prints
+`Resolved <key> for PR #<pr>.`. GitHub stays authoritative: on the next tick the key moves to
+addressed while GitHub still reports it resolved by that same actor. An attestation vouches only
+for that actor: a different resolver is re-evaluated under the actor rule, and one whose thread
+GitHub later reports unresolved is dropped, so a later re-resolution by the automation login holds
+the key again. A `head:<sha>` target (#1539) is the only way to clear
 the `head moved during untrusted review launch` hold: `<sha>` must be 40 or 64 lowercase hex
 characters (anything else is a usage error, exit 2), and it must name the head the hold
 currently records. With no hold recorded, or a different SHA (including an older one after a
@@ -405,9 +482,10 @@ to exit, removes the lock and rewrites the state with status `stopped` and PID 0
 the feedback bookkeeping: pending, addressed and launched keys, the comment watermarks, discussion
 revisions and receipts, the outstanding review launch and consumed nonces, plus the untrusted
 bookkeeping (`heldUntrustedKeys`, `untrustedLaunchCounts` and `headMoveHold`, so a stop and
-re-arm never drops a security hold) and `automergePin` (#870: the closing-issue set and base
-ref pinned at arm or on the first successful tick; it survives stop, re-arm and `reset`, is
-never overwritten, and is gone only with the state file). Budgets, the agent,
+re-arm never drops a security hold), the resolution-actor bookkeeping (`actorHeldKeys` and
+`actorAttestations`, #862; `reset` never clears either) and `automergePin` (#870: the
+closing-issue set and base ref pinned at arm or on the first successful tick; it survives stop,
+re-arm and `reset`, is never overwritten, and is gone only with the state file). Budgets, the agent,
 CI status and closing issues are cleared, so a re-arm adopts a fresh agent, the retry budgets
 restart as they always have and unresolved feedback keeps its hold. A comment posted while
 supervision was down is collected on the first tick after re-arm. `status` prints `stopped` for
@@ -416,3 +494,4 @@ such a state.
 ## Rules
 
 - **Distinguish comment staleness from review-resolution completeness.** In `tick()`, comments are detected asynchronously via `detectNewFeedbackKeys()` and can arrive mid-tick on already-resolved review threads (a new comment on a closed thread is a valid, late event). Review resolution, by contrast, is fully determined by the `reviews` slice fetched at tick-start and cannot become stale within the tick — a `CHANGES_REQUESTED` review that appears alongside a later `APPROVED` review in the same first-ever tick is a valid supersession, not a race. When reordering `tick()` operations (e.g., moving `reconcileFeedback` before `detectNewFeedbackKeys` to fix new-comment detection), verify the reorder's scope against the data source's guarantee: a reorder that protects asynchronous comment arrival must preserve the existing same-tick review-supersession logic for already-fetched data, or fix it separately with a narrowly-scoped block gated on `reviewsComplete`. Do not assume that breaking existing cross-package tests with a reorder means the old code was incorrect — audit the data source's completeness first (#897).
+- **When a hold set gates a launch, enumerate every key state that exists while the confirming read is failing, not only the held state.** An attestation or held set that suppresses a `babysit-review` launch must also exclude the attested or held key from the launch trigger itself: after a human attests a held key, a failed feedback read on the next tick leaves that key pending and unheld, and without that exclusion the tick relaunches a worker on a thread GitHub already reports resolved and attested. Two independent reviewers flagged this on #862; cover it with a test that fails the confirming read after the attestation.

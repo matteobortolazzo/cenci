@@ -2759,6 +2759,83 @@ func TestTickPreMergeRecheckAllGreenWithAddressedKeysReconfirmedResolvedStillMer
 	}
 }
 
+// AC 33 (#862): the pre-merge recheck applies the same actor rule as the tick. An
+// addressed key whose resolution was authorized when the tick read it, but which the
+// automation login re-resolves (a thread) or re-dismisses (a review) between the tick's
+// read and the merge attempt, holds the merge under `review resolution actor not
+// authorized`: no `gh pr merge`, and the recheck writes nothing to the State -- the key
+// stays addressed, nothing is held in it, nothing is attested. The automation login is
+// read once for the tick and once for the recheck (never more).
+func TestTickPreMergeRecheckHoldsWhenTheAutomationLoginResolvedAnAddressedKeySinceTheFirstPass(t *testing.T) {
+	const (
+		checks = `[{"bucket":"pass","name":"test","state":"SUCCESS"}]`
+		labels = `{"labels":[{"name":"automerge:ok"}]}`
+		policy = `{"automerge":{"maxChangedFiles":10,"maxDiffLines":500,"mergeMethod":"squash"}}`
+	)
+	dismissed := jsonArray(actorReview(10, "DISMISSED", actorT2, "alice"))
+	for _, tc := range []struct {
+		name   string
+		key    string
+		script func() []scriptedCall
+		serve  func(t *testing.T)
+	}{
+		{"a thread", "comment:5", func() []scriptedCall {
+			script := automergeFirstPassScriptWithFeedbackThread(resolvedThreadFor(5)) // authorized: resolved by its own author
+			return append(script, automergeRecheckScriptWithFeedbackThread(
+				automergeEligiblePR(), checks, `[]`, `[]`,
+				resolvedThreadBy(5, defaultAutomationLogin, "reviewer"), // the recheck's read: re-resolved by the automation login
+				labels, policy, queueProbeResponse(false, false, "abc"),
+			)...)
+		}, func(t *testing.T) {}},
+		{"a dismissed review", "review:10", func() []scriptedCall {
+			script := []scriptedCall{
+				{out: automergeEligiblePR()}, {out: checks}, {out: `[]`}, {out: dismissed},
+				{out: labels}, {out: grantDefaultMain}, {out: policy}, {out: `{"squash":true,"merge":false,"rebase":true}`}, {out: queueProbeResponse(false, false, "abc")},
+			}
+			return append(script, automergeRecheckScriptWithFeedbackThreadPages(
+				automergeEligiblePR(), checks, `[]`, dismissed, nil,
+				labels, policy, queueProbeResponse(false, false, "abc"),
+			)...)
+		}, func(t *testing.T) {
+			// The tick's timeline read is dismissed by the review's author; the recheck's own is by the automation login.
+			serveDismissals(t,
+				dismissalPage(false, "", dismissalEvent(10, "alice")),
+				dismissalPage(false, "", dismissalEvent(10, defaultAutomationLogin)),
+			)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withFleetAutomergeEnabled(t, true)
+			trackActorReads(t)
+			tc.serve(t)
+			var calls [][]string
+			withScriptedCommands(t, tc.script(), &calls)
+
+			s := State{PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 900, AddressedKeys: []string{tc.key}}
+			if _, _, err := tick(&s); err != nil {
+				t.Fatal(err)
+			}
+
+			if s.AutomergeReason != reasonResolutionActorUnauthorized {
+				t.Fatalf("AutomergeReason = %q, want %q: the recheck must apply the actor rule to a resolution made since the tick's read", s.AutomergeReason, reasonResolutionActorUnauthorized)
+			}
+			if s.AutomergeDecision == "merge" || mergeCallCount(calls) != 0 {
+				t.Fatalf("AutomergeDecision %q, merge calls %d, want held and no gh pr merge: %#v", s.AutomergeDecision, mergeCallCount(calls), calls)
+			}
+			if !strings.Contains(s.AutomergeDetail, tc.key) {
+				t.Errorf("AutomergeDetail = %q, want it to name %s", s.AutomergeDetail, tc.key)
+			}
+			if !reflect.DeepEqual(s.AddressedKeys, []string{tc.key}) || len(s.PendingKeys) != 0 || len(s.ActorHeldKeys) != 0 || len(s.ActorAttestations) != 0 {
+				t.Errorf("addressed/pending/held/attestations = %v/%v/%v/%v, want the recheck to write nothing: %s stays addressed",
+					s.AddressedKeys, s.PendingKeys, s.ActorHeldKeys, s.ActorAttestations, tc.key)
+			}
+			if automationLoginReads != 2 {
+				t.Errorf("automation login reads = %d, want 2: once for the tick, once for the recheck", automationLoginReads)
+			}
+		})
+	}
+}
+
 // -- #886: fail closed on command ambiguity, merge uncertainty, kill-switch changes --
 
 // mergeCallCount counts how many `gh pr merge` invocations appear in calls.
