@@ -2044,7 +2044,7 @@ func TestTickConflictHeldGreenTickDoesNotResetTheCIBudget(t *testing.T) {
 // ConflictRepairSHA, mergeability still UNKNOWN) while the checks are green.
 func TestTickAutomergeHeldOnCIRepairPendingWhileTheGreenResetIsSuppressed(t *testing.T) {
 	withFleetAutomergeEnabled(t, true)
-	pr := `{"number":42,"title":"Change","state":"OPEN","headRefName":"feature","headRefOid":"abc","baseRefName":"main","mergeable":"UNKNOWN","mergeStateStatus":"UNKNOWN","isDraft":false,"changedFiles":1,"additions":5,"deletions":2,"files":[{"path":"watch/internal/babysit/x.go"}],"url":"https://example/pr/42","closingIssuesReferences":[{"number":9}]}`
+	pr := `{"number":42,"title":"Change","state":"OPEN","headRefName":"feature","headRefOid":"abc","baseRefName":"main","mergeable":"UNKNOWN","mergeStateStatus":"UNKNOWN","isDraft":false,"isCrossRepository":false,"changedFiles":1,"additions":5,"deletions":2,"files":[{"path":"watch/internal/babysit/x.go"}],"url":"https://example/pr/42","closingIssuesReferences":[{"number":9}]}`
 	var calls [][]string
 	withScriptedCommands(t, []scriptedCall{
 		{out: pr},
@@ -5460,5 +5460,283 @@ func TestStateDiscussionFieldsRoundTripAndV2UpgradeRedetects(t *testing.T) {
 	tickOK(t, &s)
 	if !reflect.DeepEqual(s.PendingKeys, []string{"discussion:11", "discussion:12"}) {
 		t.Errorf("PendingKeys = %v, want every human discussion comment re-detected", s.PendingKeys)
+	}
+}
+
+// -- #870: the automerge grant pin ---------------------------------------------
+
+// armAt runs the arming parent (the detaching `cenci babysit <pr>` invocation)
+// for PR pr in dir over a stubbed gh that serves view for every `pr view` (an
+// empty view fails the read, like an unreachable network). It returns the state
+// and the raw state file exactly as they stood when the supervisor was started,
+// the one point guaranteed to run only after the parent's own save.
+func armAt(t *testing.T, dir, pr, view string) (State, []byte) {
+	t.Helper()
+	t.Setenv("CENCI_SANDBOX", "")
+	t.Setenv("CENCI_BABYSIT_SUPERVISOR", "")
+	originalCommand, originalExecGh := command, execGh
+	originalSession, originalStart := currentTmuxSession, startSupervisor
+	t.Cleanup(func() {
+		command, execGh = originalCommand, originalExecGh
+		currentTmuxSession, startSupervisor = originalSession, originalStart
+	})
+	command = func(name string, args ...string) ([]byte, error) {
+		if name == "git" {
+			return []byte("/repo/root\n"), nil
+		}
+		return []byte(""), nil
+	}
+	execGh = func(args ...string) (string, string, error) {
+		switch {
+		case len(args) > 0 && args[0] == "repo":
+			return "o/r\n", "", nil
+		case len(args) > 1 && args[0] == "pr" && args[1] == "view":
+			if view == "" {
+				return "", "", errors.New("exit status 1")
+			}
+			return view, "", nil
+		}
+		return "", "", nil
+	}
+	currentTmuxSession = func() (string, error) { return "host-session", nil }
+	var atStart State
+	var raw []byte
+	started := false
+	startSupervisor = func(*exec.Cmd) error {
+		started = true
+		path := statePath(dir, "o/r", pr)
+		atStart, raw = load(path), readFileBytes(t, path)
+		return nil
+	}
+	if err := Run(Options{PR: pr, Agent: "claude", StateDir: dir, Interval: time.Minute}); err != nil {
+		t.Fatalf("Run (arm PR %s): %v", pr, err)
+	}
+	if !started {
+		t.Fatalf("the supervisor for PR %s was never started", pr)
+	}
+	return atStart, raw
+}
+
+// rawPin decodes the `automergePin` object of a raw state file, so a test sees
+// the persisted JSON keys rather than the Go struct's view of them.
+func rawPin(t *testing.T, raw []byte) map[string]any {
+	t.Helper()
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("state file is not JSON: %v", err)
+	}
+	pin, ok := doc["automergePin"].(map[string]any)
+	if !ok {
+		t.Fatalf("state file has no automergePin object: %s", raw)
+	}
+	return pin
+}
+
+func requirePinnedRecently(t *testing.T, label string, pin *automergePin) {
+	t.Helper()
+	if pin == nil {
+		t.Fatalf("%s: AutomergePin is nil", label)
+	}
+	if age := time.Since(pin.PinnedAt); pin.PinnedAt.IsZero() || age < 0 || age > time.Minute {
+		t.Errorf("%s: pinnedAt = %v, want the time the pin was taken", label, pin.PinnedAt)
+	}
+}
+
+// AC: arming with a successful `gh pr view` and no pin writes `automergePin`
+// to the state file before the supervisor is started; the closing issues are
+// sorted ascending and de-duplicated, and the persisted keys are the documented
+// ones.
+func TestRunParentArmPinsTheSortedDedupedGrantInputsBeforeStart(t *testing.T) {
+	view := grantPRBody("main", grantNotFork, 12, 9, 9)
+
+	atStart, raw := armAt(t, t.TempDir(), "42", view)
+
+	requirePin(t, "state before Start", atStart.AutomergePin, "main", 9, 12)
+	requirePinnedRecently(t, "state before Start", atStart.AutomergePin)
+	pin := rawPin(t, raw)
+	if !reflect.DeepEqual(pin["closingIssues"], []any{float64(9), float64(12)}) || pin["baseRef"] != "main" {
+		t.Errorf("persisted automergePin = %v, want closingIssues [9 12] and baseRef main", pin)
+	}
+	if _, ok := pin["pinnedAt"].(string); !ok {
+		t.Errorf("persisted automergePin = %v, want a pinnedAt timestamp", pin)
+	}
+}
+
+// AC: an empty closing-issue set is pinned too, and stored as [] -- never as
+// null, which would make "pinned with nothing" read as "no pin" (the nil-slice
+// rule in watch/docs/go-gotchas.md).
+func TestRunParentArmStoresAnEmptyPinAsAnEmptyArray(t *testing.T) {
+	atStart, raw := armAt(t, t.TempDir(), "42", grantPRBody("main", grantNotFork))
+
+	requirePin(t, "state before Start", atStart.AutomergePin, "main")
+	pin := rawPin(t, raw)
+	if got, ok := pin["closingIssues"].([]any); !ok || len(got) != 0 {
+		t.Errorf("persisted closingIssues = %#v, want an empty array, not null", pin["closingIssues"])
+	}
+}
+
+// AC: a state that already has a pin is never re-pinned by arm or re-arm, even
+// when the PR now reports another closing-issue set and base: seed [9]/main,
+// arm against [12]/release, and the stored pin is still [9]/main, pinnedAt and
+// all.
+func TestRunParentArmNeverRepinsAnExistingPin(t *testing.T) {
+	dir := t.TempDir()
+	seeded := grantPinOf("main", 9)
+	if err := save(statePath(dir, "o/r", "42"), State{SchemaVersion: stateSchemaVersion, PR: "42", Repo: "o/r", Agent: "claude", AutomergePin: seeded}); err != nil {
+		t.Fatal(err)
+	}
+
+	atStart, raw := armAt(t, dir, "42", grantPRBody("release", grantNotFork, 12))
+
+	requirePin(t, "state before Start", atStart.AutomergePin, "main", 9)
+	if !atStart.AutomergePin.PinnedAt.Equal(seeded.PinnedAt) {
+		t.Errorf("pinnedAt = %v, want the seeded %v: a re-arm must not rewrite the pin", atStart.AutomergePin.PinnedAt, seeded.PinnedAt)
+	}
+	if pin := rawPin(t, raw); !reflect.DeepEqual(pin["closingIssues"], []any{float64(9)}) || pin["baseRef"] != "main" {
+		t.Errorf("persisted automergePin = %v, want it unchanged at [9] on main", pin)
+	}
+}
+
+// AC: the pin is an additive field -- the schema version is not bumped, the
+// pin survives a save and reload exactly, and a state without one omits the key.
+func TestStateAutomergePinRoundTripsAndIsOmittedWhenNil(t *testing.T) {
+	if stateSchemaVersion != 2 {
+		t.Fatalf("stateSchemaVersion = %d, want 2: #870's pin is additive and must not bump it", stateSchemaVersion)
+	}
+	path := filepath.Join(t.TempDir(), "state.json")
+	want := State{SchemaVersion: stateSchemaVersion, PR: "42", Repo: "o/r", AutomergePin: grantPinOf("main", 9, 12)}
+	if err := save(path, want); err != nil {
+		t.Fatal(err)
+	}
+	got, err := readStateStrict(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requirePin(t, "reloaded", got.AutomergePin, "main", 9, 12)
+	if !got.AutomergePin.PinnedAt.Equal(want.AutomergePin.PinnedAt) {
+		t.Errorf("reloaded pinnedAt = %v, want %v", got.AutomergePin.PinnedAt, want.AutomergePin.PinnedAt)
+	}
+
+	if err := save(path, State{SchemaVersion: stateSchemaVersion, PR: "42", Repo: "o/r"}); err != nil {
+		t.Fatal(err)
+	}
+	if raw := readFileBytes(t, path); bytes.Contains(raw, []byte("automergePin")) {
+		t.Errorf("a state with no pin still writes the key: %s", raw)
+	}
+}
+
+// AC: when arming's `gh pr view` fails, the first tick whose view succeeds writes
+// the pin before the checks fetch -- a tick whose checks read then fails still
+// leaves the pin persisted.
+func TestPin_FirstTickAfterAFailedArmReadPinsEvenWhenTheChecksReadFails(t *testing.T) {
+	e := newCICapEnv(t,
+		ciCapStep{view: "gh: no route to host"},                                                // 1: the arming parent's read does not decode
+		ciCapStep{view: ciCapOpen("head-a", 12, 9, 9), checksErr: errors.New("exit status 1")}, // 2: the first tick reads the PR, then its checks fail
+		ciCapMerged(9),
+	)
+	e.seed(State{Status: "running"})
+
+	armed, started := hdArm(t, e)
+	if started != 1 || armed.AutomergePin != nil {
+		t.Fatalf("after the failed arm read: %d supervisors started, pin %+v, want 1 and no pin", started, armed.AutomergePin)
+	}
+
+	e.runKilledAtSleep(1)
+
+	s := mustReadState(t, e.path)
+	if s.Status != "retrying" {
+		t.Fatalf("status = %q, want retrying: the tick must have failed at its checks read", s.Status)
+	}
+	requirePin(t, "after the failed tick", s.AutomergePin, "main", 9, 12)
+	requirePinnedRecently(t, "after the failed tick", s.AutomergePin)
+}
+
+// AC and Edge case: a state written before this change has no pin and pins on
+// its first successful tick, which holds under no grant reason (it has nothing
+// to differ from); a later tick that differs holds, and the pin it holds
+// against is the first one, untouched.
+func TestTickPinsALegacyStateOnItsFirstViewAndNeverRepinsLater(t *testing.T) {
+	withFleetAutomergeEnabled(t, true)
+	legacy := filepath.Join(t.TempDir(), "legacy.json")
+	if err := os.WriteFile(legacy, []byte(`{"schemaVersion":2,"pr":"42","repo":"o/r","agent":"codex","intervalSeconds":60,"currentDelaySeconds":60,"status":"running"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := readStateStrict(legacy)
+	if err != nil || s.AutomergePin != nil {
+		t.Fatalf("legacy load: err %v pin %+v, want it to load with no pin", err, s.AutomergePin)
+	}
+	g := newGrantGh(t, grantPRBody("main", grantNotFork, 9), grantPRBody("release", grantNotFork, 12))
+	g.checks = ciCapPending // the chain stops at the ci stage, after the label stage
+
+	if _, _, err := tick(&s); err != nil {
+		t.Fatalf("tick 1: %v", err)
+	}
+	requirePin(t, "after the first tick", s.AutomergePin, "main", 9)
+	requirePinnedRecently(t, "after the first tick", s.AutomergePin)
+	if s.AutomergeReason != reasonCICheckPending {
+		t.Errorf("first tick: reason %q, want %q: the tick that pins holds under no grant reason", s.AutomergeReason, reasonCICheckPending)
+	}
+	firstPinnedAt := s.AutomergePin.PinnedAt
+
+	if _, _, err := tick(&s); err != nil {
+		t.Fatalf("tick 2: %v", err)
+	}
+	if s.AutomergeReason != reasonClosingIssuesChanged {
+		t.Errorf("second tick: reason %q, want %q against the first view's pin", s.AutomergeReason, reasonClosingIssuesChanged)
+	}
+	requirePin(t, "after the second tick", s.AutomergePin, "main", 9)
+	if !s.AutomergePin.PinnedAt.Equal(firstPinnedAt) {
+		t.Errorf("pinnedAt = %v, want the first tick's %v: a tick never re-pins", s.AutomergePin.PinnedAt, firstPinnedAt)
+	}
+	if n := g.count(isDefaultBranchCall); n != 0 {
+		t.Errorf("default-branch reads = %d, want 0: neither tick got past the ci stage", n)
+	}
+}
+
+// Edge case: the state file removed on a MERGED terminal tick takes its pin with
+// it. A later arm for a different PR number never inherits it, and a later arm
+// for the same number pins what the PR reports then.
+func TestPin_TerminalTickRemovesThePinSoALaterArmPinsFresh(t *testing.T) {
+	e := newCICapEnv(t, ciCapMerged(9))
+	e.seed(State{Status: "running", AutomergePin: grantPinOf("main", 9)})
+
+	if err := e.run(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	e.requireStateRemoved()
+
+	other, _ := armAt(t, e.dir, "43", grantPRBody("develop", grantNotFork, 5))
+	requirePin(t, "PR 43", other.AutomergePin, "develop", 5)
+
+	again, _ := armAt(t, e.dir, "42", grantPRBody("main", grantNotFork, 7))
+	requirePin(t, "PR 42 armed again", again.AutomergePin, "main", 7)
+}
+
+// AC: every `gh pr view` requests isCrossRepository, and prView decodes it into
+// a pointer so a view with no such field is told apart from an explicit false
+// (the default-deny rule: absent is never read as "not a fork").
+func TestPRViewRequestsAndDecodesIsCrossRepositoryAsAPointer(t *testing.T) {
+	if !strings.Contains(","+prViewFields+",", ",isCrossRepository,") {
+		t.Errorf("prViewFields = %q, want it to request isCrossRepository", prViewFields)
+	}
+	for _, tc := range []struct {
+		name string
+		body string
+		want *bool
+	}{
+		{"explicit false", `{"isCrossRepository":false}`, boolp(false)},
+		{"explicit true", `{"isCrossRepository":true}`, boolp(true)},
+		{"absent", `{"number":42}`, nil},
+		{"null", `{"isCrossRepository":null}`, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var pr prView
+			if err := json.Unmarshal([]byte(tc.body), &pr); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(pr.IsCrossRepository, tc.want) {
+				t.Errorf("IsCrossRepository = %v, want %v", pr.IsCrossRepository, tc.want)
+			}
+		})
 	}
 }

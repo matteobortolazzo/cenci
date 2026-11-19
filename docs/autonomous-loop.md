@@ -644,13 +644,13 @@ it was evaluated.
 | Key | Stage | Fails when |
 |---|---|---|
 | `enabled` | Fleet kill switch | `automerge.enabled` is not `true` in `~/.config/cenci/config.json` |
-| `label` | Per-ticket grant | The PR closes no issue, an issue's labels are unreadable, or any closed issue lacks `automerge:ok` |
+| `label` | Per-ticket grant | The PR's closing issues or base branch differ from the pin taken at arm (`closing issues changed since arm`, `base branch changed since arm`), the PR head is in another repository or its fork state is unknown (`PR head is in a different repository`, `PR cross-repository state unknown`), the pin is missing (`automerge grant pin missing`), the PR closes no issue, an issue's labels are unreadable, or any closed issue lacks `automerge:ok` |
 | `ci` | CI green (≥1 `pass`, rest `pass`/`skipping`) | No checks reported, zero `pass` with the rest `skipping`, or any check's bucket is `fail`, `pending`, `cancel`, empty, or unrecognized |
 | `review` | Feedback | A CI, merge or review worker still running (`branch repair worker still running`), CI repair in flight, pending feedback (an unreceipted PR comment included), a reopened resolution, a review worker that ended without a receipt, or a detection read that couldn't be proven complete |
 | `mergeable` | PR state | Draft, `MERGEABLE` unknown, or not mergeable (`PR has merge conflicts` when `mergeStateStatus` is `DIRTY`, `PR branch is behind base` when `BEHIND`) |
 | `headsha` | Head commit | The PR's head SHA is unreadable at evaluation time |
 | `files` | Diff readability | Zero changed files, or a truncated file list |
-| `policy` | Policy block | `.cenci/config.json` on the base branch is unreadable, absent, or malformed |
+| `policy` | Policy block | The PR's base is not the repository's default branch (`PR base is not the default branch`), the default branch is unreadable (`default branch unreadable`), or `.cenci/config.json` on the base branch is unreadable, absent, or malformed |
 | `filecap` | `maxChangedFiles` | The diff changes more files than the cap |
 | `lines` | `maxDiffLines` | Additions + deletions exceed the cap |
 | `protected` | `protectedPaths` | A changed file matches a protected glob |
@@ -668,11 +668,19 @@ changes the verdict. A zero skipped count renders the plain `ci=yes`/`ci=no`, an
 unreached `ci` stage still renders the plain `-` (as in the example above, where
 `label` failed first and `ci` was never evaluated).
 
-Three reasons need a human and will not clear on their own: `review feedback state
+Five reasons need a human: `review feedback state
 unreadable`, `review feedback state unknown` (GitHub stopped reporting a comment or
-thread — deleted or purged), and `unsupported review feedback type`. Merge those by
-hand. A deleted pending PR comment is the exception: `cenci babysit resolve <pr>
-discussion:<id>` clears it (see [cenci-watch README — Automerge](../watch/README.md#automerge-cenci-babysit)).
+thread — deleted or purged), `unsupported review feedback type`, `closing issues
+changed since arm` and `base branch changed since arm`. Merge those by hand. The first
+three will not clear on their own. The last two are merge-by-hand holds with no
+clearing command: babysit pins the PR's closing issues and base branch when it first
+reads the PR, keeps that pin through `stop`, re-arm and `reset`, and holds automerge
+whenever the PR differs from it. The comparison is stateless, so the hold lasts only
+while the PR differs from the pin and ends if the PR returns to the pinned closing
+issues and base; otherwise a human merges the PR by hand. A
+deleted pending PR comment is the exception to the first three: `cenci babysit resolve
+<pr> discussion:<id>` clears it (see [cenci-watch README —
+Automerge](../watch/README.md#automerge-cenci-babysit)).
 
 `PR has merge conflicts` automatically launches Claude Opus to resolve the conflicts
 against the fetched remote base, run local verification, and update the same PR with

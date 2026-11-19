@@ -1397,6 +1397,14 @@ func dispatchChainGhCall(t *testing.T, world *ghWorld, args []string, localDir, 
 	case args[0] == "api" && strings.Contains(joined, "/pulls/") && strings.Contains(joined, "/reviews"):
 		stdout, stderr, code = chainPRReviewsAPI(world, args)
 
+	case args[0] == "api" && strings.Contains(flagValue(args, "--jq"), "default_branch") && strings.HasPrefix(pathArg(args), "repos/"):
+		// #870: babysit reads the repository's default branch before the base
+		// policy. Routed by its --jq projection ahead of the allowed-methods
+		// catch-all below, which would otherwise answer it with the
+		// {"squash":...} body: that decodes to an empty branch and silently
+		// holds every e2e merge.
+		stdout, stderr, code = chainDefaultBranch(), "", 0
+
 	case args[0] == "api" && flagValue(args, "--jq") != "" && strings.HasPrefix(pathArg(args), "repos/"):
 		stdout, stderr, code = chainAllowedMethods(world), "", 0
 
@@ -1702,6 +1710,7 @@ func chainPRView(world *ghWorld, args []string) (string, string, int) {
 		"closingIssuesReferences": refs,
 		"mergeable":               p.Mergeable,
 		"isDraft":                 p.IsDraft,
+		"isCrossRepository":       false, // #870: babysit refuses a PR whose fork state is absent; every chain PR is same-repository
 		"changedFiles":            p.ChangedFiles,
 		"additions":               p.Additions,
 		"deletions":               p.Deletions,
@@ -1897,6 +1906,11 @@ func chainPRReviewsAPI(world *ghWorld, args []string) (string, string, int) {
 	data, _ := json.Marshal(arr)
 	return string(data), "", 0
 }
+
+// chainDefaultBranch answers babysit's `gh api repos/<repo> --jq
+// {default_branch:.default_branch}` read: every chain repository's default
+// branch is main, the base every seeded chain PR targets.
+func chainDefaultBranch() string { return `{"default_branch":"main"}` }
 
 func chainAllowedMethods(world *ghWorld) string {
 	obj := map[string]bool{
