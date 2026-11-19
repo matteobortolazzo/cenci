@@ -39,6 +39,21 @@
 # marker removed (or moved after the writes) must be caught, and the marker
 # counter must report zero for an absent marker.
 #
+# #1556 adds the at-cap merge contract: when a `docs/*.md` `## Rules` section
+# already holds the checker's bullet cap, the collector writes the admitted
+# lesson as one numbered sub-item under the closest existing bullet instead of a
+# new top-level bullet. One precedence sentence (M_ATCAP_PRECEDENCE) is restated
+# exactly once at the collector, Phase 8's `## Capture Lessons` and codex.md; the
+# collector rows pin the rule, its placement, the no-rewrite guarantee, its scope,
+# the Size check additions, the `### At-cap merge entries` fence and the Output
+# Summary suffix; the at-cap anchor joins the dedup-before-write order check;
+# `cap_parity_problems` keeps the three cap literals in the collector equal to
+# `TOPIC_DOC_RULES_MAX` in the checker; and the README lines name the sub-item.
+# The checker-side behavior (no `context-budget` fail after the merge) is driven
+# against the real `check.sh` in maintain.test.sh case 98. The suite checks
+# instruction text and checker compatibility only; which bullet the collector
+# picks as the closest one is not exercised.
+#
 # No `read_*`-named helpers (flow/tests/read-helper-purity-contract.test.sh);
 # no permission-removing chmod (flow/tests/root-safe-perms-contract.test.sh).
 set -uo pipefail
@@ -227,7 +242,7 @@ dedup_order_problem() {
     echo "the dedup marker is absent"
     return
   fi
-  for candidate in "${M_STRUCTURED}" "${M_FALLBACK}" "${M_MINIMAL_DROP}"; do
+  for candidate in "${M_STRUCTURED}" "${M_FALLBACK}" "${M_MINIMAL_DROP}" "${ATCAP_ANCHOR}"; do
     at="$(line_of "${content}" "${candidate}")"
     if [[ -z "${at}" ]]; then
       echo "a write-step marker is absent: [${candidate}]"
@@ -240,6 +255,55 @@ dedup_order_problem() {
   if [[ "${dedup_at}" -ge "${first_write}" ]]; then
     echo "dedup (line ${dedup_at}) is not before the first write step (line ${first_write})"
   fi
+}
+
+# cap_parity_problems <collector-content> <check.sh-content> -- one problem per
+# line, nothing when the three numeric topic-doc cap sites of the collector (the
+# at-cap rule, the Size check's `exceeds **<n>** bullets`, and the Output Summary
+# `at the <n>-bullet cap)` suffix) each occur exactly once and equal the single
+# `^TOPIC_DOC_RULES_MAX=<n>$` line of the checker. Pure, no fail().
+CAP_SITE_LABELS=('at-cap rule' 'Size check' 'Output Summary suffix')
+CAP_SITE_PATTERNS=('already holds [0-9]+ or more top-level' 'rules section of a `docs/<topic>.md` exceeds \*\*[0-9]+\*\* bullets' 'at the [0-9]+-bullet cap\)')
+cap_parity_problems() {
+  local collector_doc="$1" checker_doc="$2" max_lines max i hits n value
+  max_lines="$(grep -cE '^TOPIC_DOC_RULES_MAX=[0-9]+$' <<<"${checker_doc}")"
+  if [[ "${max_lines}" != "1" ]]; then
+    echo "check.sh: expected exactly one ^TOPIC_DOC_RULES_MAX=<n>\$ line, found ${max_lines}"
+    return
+  fi
+  max="$(grep -E '^TOPIC_DOC_RULES_MAX=[0-9]+$' <<<"${checker_doc}")"
+  max="${max#TOPIC_DOC_RULES_MAX=}"
+  for i in "${!CAP_SITE_PATTERNS[@]}"; do
+    hits="$(grep -oE -e "${CAP_SITE_PATTERNS[i]}" <<<"${collector_doc}")"
+    n=0
+    if [[ -n "${hits}" ]]; then
+      n="$(printf '%s\n' "${hits}" | wc -l | tr -d '[:space:]')"
+    fi
+    if [[ "${n}" != "1" ]]; then
+      echo "collector ${CAP_SITE_LABELS[i]}: expected exactly 1 cap literal, found ${n}"
+      continue
+    fi
+    value="$(grep -oE '[0-9]+' <<<"${hits}")"
+    if [[ "${value}" != "${max}" ]]; then
+      echo "collector ${CAP_SITE_LABELS[i]} says ${value} but check.sh TOPIC_DOC_RULES_MAX is ${max}"
+    fi
+  done
+}
+
+# atcap_readme_problems <readme-content> -- one problem per line, nothing when
+# the `docs/<topic>.md` description and the rules lifecycle paragraph each name
+# the numbered sub-item. Pure, no fail().
+ATCAP_README_ANCHORS=('- `docs/<topic>.md` — on-demand reference docs' 'Rules only enter through the lessons-collector')
+atcap_readme_problems() {
+  local readme_doc="$1" anchor line
+  for anchor in "${ATCAP_README_ANCHORS[@]}"; do
+    line="$(extract_line "${readme_doc}" "${anchor}")"
+    if [[ -z "${line}" ]]; then
+      echo "README line not found: [${anchor}]"
+      continue
+    fi
+    [[ "${line}" == *'numbered sub-item'* ]] || echo "README line [${anchor}] does not mention a numbered sub-item"
+  done
 }
 
 # --------------------------------------------------------------------------
@@ -275,6 +339,8 @@ M_PLANNER_VALIDATION='with a structured `Lessons:` line, list the validation com
 M_ONLY_MINIMAL_REACHES="Only \`### Dropped (minimal policy)\` entries reach the lessons status file and the PR's \`## Notes\`; every other dropped entry stays in the collector's summary."
 M_SKIPPED_WIRING='Write each `validation: <label> — skipped (not named in the plan)` line for a collector-reported command into the maintenance status file with the other `validation:` lines, never as `pass`; Phase 9 renders it as an unchecked `Docs check skipped` line.'
 M_SKIPPED_REDERIVE="Re-derive that skipped line on every entry from the collector's \`### Lesson validation\` report; when the collector was not relaunched or reported none, read the earlier status file before the first-line rewrite and carry its \`skipped (not named in the plan)\` lines forward."
+M_ATCAP_PRECEDENCE='For a `docs/*.md` `## Rules` section that is at its bullet cap, the at-cap sub-item merge takes precedence over the "one flat bullet" fallback rule for that `## Rules` section only; every other section keeps the flat bullet (#979).'
+ATCAP_ANCHOR='**At the cap.**'
 DROPPED_LINE='Lesson dropped (minimal policy):'
 STATUS_FILE='lessons-status.txt'
 
@@ -284,7 +350,9 @@ PHASE9_REL="skills/implement/phases/phase-9-pr.md"
 CODEX_REL="skills/implement/codex.md"
 PLANNER_REL="agents/planner.md"
 README_REL="README.md"
+CHECKSH_REL="skills/maintain/scripts/check.sh"
 
+require_doc CHECKSH "${CHECKSH_REL}"
 require_doc COLLECTOR "${COLLECTOR_REL}"
 require_doc PHASE8 "${PHASE8_REL}"
 require_doc PHASE9 "${PHASE9_REL}"
@@ -682,6 +750,38 @@ add_req once codex 'doc' "${M_UNRECOGNISED_LINE}" 'G-codex-unrecognised-line-unr
 add_req once phase8 'section:## Capture Lessons' "${M_EMPTY_STATUS_READ}" 'H-phase8-empty-file-is-none'
 add_req once phase9 "${PARA9}" "${M_EMPTY_STATUS_READ}" 'H-phase9-empty-file-is-none'
 add_req once codex 'doc' "${M_EMPTY_STATUS_READ}" 'H-codex-empty-file-is-none'
+# #1556: the at-cap merge. One precedence sentence, exactly once at each site.
+add_req once collector 'doc' "${M_ATCAP_PRECEDENCE}" 'ATCAP-collector-precedence'
+add_req once phase8 'section:## Capture Lessons' "${M_ATCAP_PRECEDENCE}" 'ATCAP-phase8-precedence'
+add_req once codex 'doc' "${M_ATCAP_PRECEDENCE}" 'ATCAP-codex-precedence'
+# The at-cap rule (AC1, edge cases 33/35/36): threshold, check.sh-style counting
+# including `###` roll-up, one numbered sub-item under the closest bullet, never a
+# new top-level bullet, and the rule is stated once.
+add_req once collector 'doc' "${ATCAP_ANCHOR}" 'ATCAP-rule-stated-once'
+add_req contains collector "line:${ATCAP_ANCHOR}" 'already holds 25 or more top-level `- ` bullets' 'ATCAP-rule-threshold'
+add_req contains collector "line:${ATCAP_ANCHOR}" 'counted like `check.sh`, including bullets under `###` sub-headings' 'ATCAP-rule-counts-subheading-bullets'
+add_req contains collector "line:${ATCAP_ANCHOR}" 'one numbered sub-item under the closest existing bullet of that section' 'ATCAP-rule-one-subitem-under-closest-bullet'
+add_req contains collector "line:${ATCAP_ANCHOR}" 'never a new top-level bullet' 'ATCAP-rule-no-new-top-level-bullet'
+# Placement (edge cases 34/35, AC1): after the last continuation line and the last
+# existing sub-item, two-space indent, numbered one past the highest.
+add_req contains collector 'line:**Placement.**' 'may sit under a `###` sub-heading' 'ATCAP-placement-closest-bullet-may-be-under-subheading'
+add_req contains collector 'line:**Placement.**' "after the bullet's last continuation line and its last existing sub-item, never between them" 'ATCAP-placement-after-continuations-and-subitems'
+add_req contains collector 'line:**Placement.**' 'indented two spaces' 'ATCAP-placement-two-space-indent'
+add_req contains collector 'line:**Placement.**' 'numbered one past the highest existing number (`1.` when there are none)' 'ATCAP-placement-numbering'
+# AC3: the merge only inserts; it never deletes, reorders or rewrites.
+add_req once collector 'doc' 'never deletes, reorders or rewrites any existing line of the doc and only inserts the new sub-item line' 'ATCAP-no-rewrite-only-inserts'
+# Scope (edge cases 36 and 38): only a `## Rules` section; Critical Rules of any size keeps the flat bullet.
+add_req contains collector 'line:**At-cap scope.**' 'only a `## Rules` section of a `docs/*.md` file' 'ATCAP-scope-rules-section-only'
+add_req contains collector 'line:**At-cap scope.**' 'every other section, and `## Critical Rules` in `AGENTS.md` of any size, keeps the flat bullet' 'ATCAP-scope-excludes-other-sections-and-critical-rules'
+# AC4 / edge cases 32 and 37: the Size check line (existing R15 rows stay as is).
+add_req contains collector 'line:**Size check' 'A merge at the cap adds a `### Maintain suggestion` line naming the file and its top-level bullet count.' 'ATCAP-size-check-maintain-suggestion'
+add_req contains collector 'line:**Size check' 'apart from the at-cap sub-item insertion in step 2' 'ATCAP-size-check-merge-exception'
+# AC2: the Entry Formats fence.
+add_req once collector 'doc' '### At-cap merge entries' 'ATCAP-entry-formats-heading-once'
+add_req contains collector 'section:### At-cap merge entries' '```markdown' 'ATCAP-entry-formats-fence'
+# AC5: the Output Summary suffix and the at-cap Maintain suggestion example.
+add_req contains collector 'section:## Output Summary' '(merged as a sub-item under bullet <n> at the 25-bullet cap)' 'ATCAP-output-summary-suffix'
+add_req contains collector 'section:## Output Summary' 'top-level bullets after an at-cap merge — consider running `/cenci:maintain rules`' 'ATCAP-output-summary-maintain-suggestion'
 
 # scoped_text <content> <scope-spec> -- pure.
 scoped_text() {
@@ -796,6 +896,24 @@ check_round1_rows() {
   assert_contains "${PHASE9}" "\$RUN_DIR/${STATUS_FILE}" "${PHASE9_REL} (F2: Phase 9 names the status file it reads)"
 }
 
+# #1556 AC10 and AC11: the collector's cap literals equal the checker's
+# TOPIC_DOC_RULES_MAX, and the README names the numbered sub-item.
+check_atcap_parity_and_readme() {
+  local problems line
+  problems="$(cap_parity_problems "${COLLECTOR}" "${CHECKSH}")"
+  if [[ -n "${problems}" ]]; then
+    while IFS= read -r line; do
+      fail "${COLLECTOR_REL} (#1556 cap parity): ${line}"
+    done <<<"${problems}"
+  fi
+  problems="$(atcap_readme_problems "${README}")"
+  if [[ -n "${problems}" ]]; then
+    while IFS= read -r line; do
+      fail "${README_REL} (#1556 at-cap merge): ${line}"
+    done <<<"${problems}"
+  fi
+}
+
 case_tdd_red_green_no_lessons
 case_admitted_rework_one_entry
 case_already_owned_dropped
@@ -805,6 +923,7 @@ case_minimal_no_system_no_write
 check_p22_lesson_validation
 check_p25_readme
 check_round1_rows
+check_atcap_parity_and_readme
 
 # =====================================================================
 # Non-vacuity self-tests.
@@ -1074,6 +1193,90 @@ if [[ -z "$(wiring_order_problem "${MAINTENANCE_SECTION//"${M_SKIPPED_WIRING}"/}
 fi
 if [[ -z "$(wiring_order_problem "${MAINTENANCE_SECTION//"${M_SKIPPED_WIRING}"/}"$'\n'"${M_SKIPPED_WIRING}")" ]]; then
   fail "self-test: a skipped-line sentence moved after Restart-safety was not caught (vacuous)"
+fi
+
+# (7) #1556 cap parity. The checks run over synthetic documents so they stay
+# meaningful whatever the real collector says: a matching pair is clean, and a
+# collector doctored to 26 at one site, a checker doctored to 24, a missing
+# anchor, a duplicated anchor and a missing or duplicated checker constant are
+# each reported.
+CAP_GOOD_COLLECTOR=$'A section that already holds 25 or more top-level `- ` bullets gets a sub-item.\nIf a `## Critical Rules` section exceeds **10** bullets, or the rules section of a `docs/<topic>.md` exceeds **25** bullets, add a suggestion.\n- `docs/x.md`: "lesson" (merged as a sub-item under bullet 3 at the 25-bullet cap)\n'
+CAP_GOOD_CHECKER=$'#!/usr/bin/env bash\nCRITICAL_RULES_MAX=10\nTOPIC_DOC_RULES_MAX=25\n'
+if [[ -n "$(cap_parity_problems "${CAP_GOOD_COLLECTOR}" "${CAP_GOOD_CHECKER}")" ]]; then
+  fail "self-test baseline: matching cap literals are reported: $(cap_parity_problems "${CAP_GOOD_COLLECTOR}" "${CAP_GOOD_CHECKER}")"
+fi
+CAP_DOCTORED="${CAP_GOOD_COLLECTOR/exceeds \*\*25\*\*/exceeds **26**}"
+if [[ "${CAP_DOCTORED}" == "${CAP_GOOD_COLLECTOR}" ]] || [[ "$(cap_parity_problems "${CAP_DOCTORED}" "${CAP_GOOD_CHECKER}")" != *"Size check says 26"* ]]; then
+  fail "self-test: a collector Size check cap of 26 against a checker of 25 was not reported (vacuous)"
+fi
+CAP_DOCTORED="${CAP_GOOD_COLLECTOR/holds 25 or more/holds 26 or more}"
+if [[ "${CAP_DOCTORED}" == "${CAP_GOOD_COLLECTOR}" ]] || [[ "$(cap_parity_problems "${CAP_DOCTORED}" "${CAP_GOOD_CHECKER}")" != *"at-cap rule says 26"* ]]; then
+  fail "self-test: a collector at-cap rule cap of 26 against a checker of 25 was not reported (vacuous)"
+fi
+CAP_DOCTORED="${CAP_GOOD_COLLECTOR/at the 25-bullet cap/at the 26-bullet cap}"
+if [[ "${CAP_DOCTORED}" == "${CAP_GOOD_COLLECTOR}" ]] || [[ "$(cap_parity_problems "${CAP_DOCTORED}" "${CAP_GOOD_CHECKER}")" != *"Output Summary suffix says 26"* ]]; then
+  fail "self-test: a collector Output Summary suffix cap of 26 against a checker of 25 was not reported (vacuous)"
+fi
+CAP_DOCTORED_CHECKER="${CAP_GOOD_CHECKER/TOPIC_DOC_RULES_MAX=25/TOPIC_DOC_RULES_MAX=24}"
+if [[ "${CAP_DOCTORED_CHECKER}" == "${CAP_GOOD_CHECKER}" ]] || [[ "$(grep -c . <<<"$(cap_parity_problems "${CAP_GOOD_COLLECTOR}" "${CAP_DOCTORED_CHECKER}")")" != "3" ]]; then
+  fail "self-test: a checker TOPIC_DOC_RULES_MAX of 24 was not reported at all three collector sites (vacuous)"
+fi
+CAP_DOCTORED="${CAP_GOOD_COLLECTOR/exceeds \*\*25\*\* bullets/exceeds the cap}"
+if [[ "${CAP_DOCTORED}" == "${CAP_GOOD_COLLECTOR}" ]] || [[ "$(cap_parity_problems "${CAP_DOCTORED}" "${CAP_GOOD_CHECKER}")" != *"Size check: expected exactly 1 cap literal, found 0"* ]]; then
+  fail "self-test: a missing Size check cap anchor was not reported (vacuous)"
+fi
+if [[ "$(cap_parity_problems "${CAP_GOOD_COLLECTOR}"$'\n''The rules section of a `docs/<topic>.md` exceeds **25** bullets again.' "${CAP_GOOD_CHECKER}")" != *"Size check: expected exactly 1 cap literal, found 2"* ]]; then
+  fail "self-test: a duplicated Size check cap anchor was not reported (vacuous)"
+fi
+if [[ -z "$(cap_parity_problems "${CAP_GOOD_COLLECTOR}" $'#!/usr/bin/env bash\nCRITICAL_RULES_MAX=10\n')" ]]; then
+  fail "self-test: a checker without TOPIC_DOC_RULES_MAX was not reported (vacuous)"
+fi
+if [[ -z "$(cap_parity_problems "${CAP_GOOD_COLLECTOR}" "${CAP_GOOD_CHECKER}"$'\n''TOPIC_DOC_RULES_MAX=25')" ]]; then
+  fail "self-test: a checker with two TOPIC_DOC_RULES_MAX lines was not reported (vacuous)"
+fi
+if [[ -z "$(cap_parity_problems "" "")" ]]; then
+  fail "self-test: empty documents satisfied the cap parity check (vacuous)"
+fi
+
+# (8) #1556 the at-cap rule is a write step: the dedup marker must come before
+# it, so a duplicate in an at-cap doc produces no merge (edge case 37). The
+# synthetic order proves the anchor is among the candidates.
+ATCAP_ORDER_GOOD="${M_DEDUP}"$'\n'"${M_STRUCTURED}"$'\n'"${M_FALLBACK}"$'\n'"${ATCAP_ANCHOR} rule"$'\n'"${M_MINIMAL_DROP}"
+if [[ -n "$(dedup_order_problem "${ATCAP_ORDER_GOOD}")" ]]; then
+  fail "self-test baseline: a dedup-first order with the at-cap rule is reported: $(dedup_order_problem "${ATCAP_ORDER_GOOD}")"
+fi
+ATCAP_ORDER_BAD="${M_STRUCTURED}"$'\n'"${M_FALLBACK}"$'\n'"${M_MINIMAL_DROP}"$'\n'"${M_DEDUP}"$'\n'"${ATCAP_ANCHOR} rule"
+if [[ -z "$(dedup_order_problem "${ATCAP_ORDER_BAD}")" ]]; then
+  fail "self-test: dedup placed after the other write steps was not caught (vacuous)"
+fi
+ATCAP_ORDER_ONLY_ATCAP="${ATCAP_ANCHOR} rule"$'\n'"${M_DEDUP}"$'\n'"${M_STRUCTURED}"$'\n'"${M_FALLBACK}"$'\n'"${M_MINIMAL_DROP}"
+if [[ -z "$(dedup_order_problem "${ATCAP_ORDER_ONLY_ATCAP}")" ]]; then
+  fail "self-test: a dedup step placed after only the at-cap rule was not caught (vacuous)"
+fi
+if [[ -z "$(dedup_order_problem "${M_DEDUP}"$'\n'"${M_STRUCTURED}"$'\n'"${M_FALLBACK}"$'\n'"${M_MINIMAL_DROP}")" ]]; then
+  fail "self-test: a collector without the at-cap rule anchor was not reported (vacuous)"
+fi
+
+# (9) #1556 the README line check names the sub-item on both lines and reports a
+# missing mention and a missing line.
+README_ATCAP_GOOD=$'- `docs/<topic>.md` — on-demand reference docs; at the cap a numbered sub-item is written.\n\nRules only enter through the lessons-collector (append or a numbered sub-item).\n'
+if [[ -n "$(atcap_readme_problems "${README_ATCAP_GOOD}")" ]]; then
+  fail "self-test baseline: a README naming the sub-item on both lines is reported: $(atcap_readme_problems "${README_ATCAP_GOOD}")"
+fi
+if [[ "$(grep -c . <<<"$(atcap_readme_problems "${README_ATCAP_GOOD//numbered sub-item/flat bullet}")")" != "2" ]]; then
+  fail "self-test: a README without the numbered sub-item on both lines was not reported twice (vacuous)"
+fi
+if [[ -z "$(atcap_readme_problems 'unrelated readme text')" ]]; then
+  fail "self-test: a README without the anchored lines was not reported (vacuous)"
+fi
+
+# (10) #1556 the precedence marker is one source line and carries no cap literal
+# (the literal lives in the collector, where cap_parity_problems pins it).
+if [[ "${M_ATCAP_PRECEDENCE}" == *$'\n'* ]]; then
+  fail "self-test: M_ATCAP_PRECEDENCE must be one source line (gotchas rule 13)"
+fi
+if [[ "${M_ATCAP_PRECEDENCE}" =~ [0-9]+-bullet || "${M_ATCAP_PRECEDENCE}" == *' 25 '* ]]; then
+  fail "self-test: M_ATCAP_PRECEDENCE must not copy the cap number"
 fi
 
 echo "lessons-routing-contract.test.sh: failures=${failures}"

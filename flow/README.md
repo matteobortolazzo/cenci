@@ -354,14 +354,14 @@ Configure generates no `CLAUDE.md`. An optional fallback adapter is available fo
 
 **Where reference docs live**
 
-- `docs/<topic>.md` — on-demand reference docs read by skills/agents when their topic intersects the work. The lessons-collector appends a flat bullet here when a lesson's subject has an existing owner doc.
+- `docs/<topic>.md` — on-demand reference docs read by skills/agents when their topic intersects the work. The lessons-collector appends a flat bullet here when a lesson's subject has an existing owner doc; once a `## Rules` section is at the checker's topic-doc bullet cap, it writes a numbered sub-item under the closest bullet instead.
 - `AGENTS.md` — canonical shared critical rules and project-wide invariants.
 - `CLAUDE.md` — opt-in fallback adapter only (`templates/claude-md-adapter.md`, marked `<!-- cenci:agents-md-fallback -->`), copied to the root and every configured project; configure never generates it.
 - `.claude/rules/` — reserved for files explicitly `@`-imported by `AGENTS.md` or a fallback adapter (auto-loaded at session start). Configure does not create files here today.
 
 **Lesson lifecycle**
 
-Rules only enter through the lessons-collector (append, after implementation sessions) and only leave through `/cenci:maintain rules` (curation, human-gated). Because `AGENTS.md` is loaded into every session, each rule it holds is a permanent context cost — maintenance periodically merges duplicates, moves non-invariants into on-demand `docs/<topic>.md` files, demotes rules that a regression test or lint gate now enforces, and archives rules whose subject no longer exists. The collector suggests a maintenance run in its summary when a session pushes a rules section past its size threshold.
+Rules only enter through the lessons-collector (append or a numbered sub-item, after implementation sessions) and only leave through `/cenci:maintain rules` (curation, human-gated). Because `AGENTS.md` is loaded into every session, each rule it holds is a permanent context cost — maintenance periodically merges duplicates, moves non-invariants into on-demand `docs/<topic>.md` files, demotes rules that a regression test or lint gate now enforces, and archives rules whose subject no longer exists. The collector suggests a maintenance run in its summary when a session pushes a rules section past its size threshold or merges a lesson into a section at its cap.
 
 **Backward compatibility**
 

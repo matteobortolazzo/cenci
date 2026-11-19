@@ -3530,6 +3530,183 @@ assert_contains "$(instr_field warn "watch/CLAUDE.md" fix)" "a fallback set need
 rm -rf "${ROOT}"
 
 # =====================================================================
+# Case 98 (#1556): the lessons-collector's at-cap merge, driven against the real
+# checker. A topic doc whose `## Rules` section holds exactly 25 top-level
+# bullets (5 of them under a `###` sub-heading, which check.sh rolls up) takes the
+# collector's documented sub-item example without a `context-budget` fail; the
+# same lesson as a 26th top-level bullet fails. The example is extracted from the
+# collector's `### At-cap merge entries` fence, so the asserted shape is tied to
+# the contract text; a missing or malformed fence fails closed.
+# =====================================================================
+ATCAP_COLLECTOR="${FLOW_DIR}/agents/lessons-collector.md"
+ATCAP_DOC_REL="flow/docs/sample-topic.md"
+
+# atcap_example <collector-path> -- prints the body of the first fenced block under
+# the `### At-cap merge entries` heading; nothing when the heading or fence is absent.
+atcap_example() {
+  awk '
+    /^### At-cap merge entries$/ { on = 1; next }
+    !on { next }
+    /^```/ { if (infence) { exit } infence = 1; next }
+    infence { print; next }
+    /^#+ / { exit }
+  ' "$1"
+}
+
+# atcap_doc_body <total-bullets> <example-bullet> -- a topic doc whose Rules section
+# holds <total> top-level bullets: total-5 direct ones, then a `### Sub-heading`
+# with 5, the third of them being <example-bullet> byte for byte.
+atcap_doc_body() {
+  local total="$1" bullet="$2" direct i
+  direct=$((total - 5))
+  printf '# Sample topic\n\n## Rules\n'
+  for ((i = 1; i <= direct; i++)); do
+    printf -- '- Direct rule %d.\n' "${i}"
+  done
+  printf '\n### Sub-heading\n\n- Sub rule one.\n- Sub rule two.\n%s\n- Sub rule four.\n- Sub rule five.\n' "${bullet}"
+}
+
+# atcap_count <doc> -- check.sh's own top-level bullet count for a Rules section.
+atcap_count() {
+  awk '/^## Rules/{f=1;next} /^## /{f=0} f && /^- /{c++} END{print c+0}' "$1"
+}
+
+# atcap_fixture <root> <total-bullets> <example-bullet> -- base fixture with the
+# topic doc replaced, then bootstrapped so the generated README sections match.
+atcap_fixture() {
+  local root="$1"
+  setup_base "${root}"
+  atcap_doc_body "$2" "$3" > "${root}/${ATCAP_DOC_REL}" || fail "case98 could not write the fixture topic doc"
+  bootstrap_markers "${root}"
+}
+
+# atcap_insert_after <doc> <exact-line> <new-line> -- inserts <new-line> right after
+# the one line equal to <exact-line>, in place; fails when that line is not unique.
+atcap_insert_after() {
+  local doc="$1" tmp
+  tmp="${doc}.insert.tmp"
+  if ! AFTER="$2" NEWLINE="$3" awk '{ print } $0 == ENVIRON["AFTER"] { print ENVIRON["NEWLINE"]; n++ } END { if (n != 1) exit 3 }' "${doc}" > "${tmp}"; then
+    rm -f "${tmp}"
+    return 1
+  fi
+  mv "${tmp}" "${doc}"
+}
+
+# assert_budget_fail_on <doc-rel> <label> -- a context-budget fail whose target is the doc.
+assert_budget_fail_on() {
+  local target="$1" label="$2" n
+  n="$(printf '%s' "${REPORT_JSON}" | jq --arg t "${target}" \
+    '[.results[]? | select(.check=="context-budget" and .status=="fail" and .target==$t)] | length' 2>/dev/null)"
+  is_ge1 "${n}" || fail "${label}: expected a context-budget fail targeting ${target}, got '${n:-N/A}' (report: ${REPORT_JSON})"
+}
+
+ATCAP_TEXT="$(atcap_example "${ATCAP_COLLECTOR}")"
+ATCAP_BULLET="$(grep -E '^- ' <<<"${ATCAP_TEXT}")"
+ATCAP_SUBITEM="$(grep -E '^  [0-9]+\. ' <<<"${ATCAP_TEXT}")"
+ATCAP_BULLET_COUNT="$(grep -cE '^- ' <<<"${ATCAP_TEXT}")"
+ATCAP_SUBITEM_COUNT="$(grep -cE '^  [0-9]+\. ' <<<"${ATCAP_TEXT}")"
+ATCAP_BULLET_AT="$(grep -nE '^- ' <<<"${ATCAP_TEXT}" | cut -d: -f1)"
+ATCAP_SUBITEM_AT="$(grep -nE '^  [0-9]+\. ' <<<"${ATCAP_TEXT}" | cut -d: -f1)"
+ATCAP_FIRST_SUBITEM_RE='^  1\. '
+ATCAP_READY=1
+if [[ -z "${ATCAP_TEXT}" ]]; then
+  fail "case98 the collector has no fenced example under '### At-cap merge entries' (fail closed)"
+  ATCAP_READY=0
+elif [[ "${ATCAP_BULLET_COUNT}" != "1" || "${ATCAP_SUBITEM_COUNT}" != "1" ]]; then
+  fail "case98 the at-cap example must hold exactly one '- ' bullet and one numbered sub-item line (bullets=${ATCAP_BULLET_COUNT}, sub-items=${ATCAP_SUBITEM_COUNT})"
+  ATCAP_READY=0
+elif [[ ! "${ATCAP_SUBITEM}" =~ ${ATCAP_FIRST_SUBITEM_RE} ]]; then
+  fail "case98 the at-cap example sub-item must be indented two spaces and numbered 1 (got [${ATCAP_SUBITEM}])"
+  ATCAP_READY=0
+elif [[ "${ATCAP_SUBITEM_AT}" -ne $((ATCAP_BULLET_AT + 1)) ]]; then
+  fail "case98 the at-cap example sub-item must directly follow its bullet (bullet line ${ATCAP_BULLET_AT}, sub-item line ${ATCAP_SUBITEM_AT})"
+  ATCAP_READY=0
+fi
+
+if [[ "${ATCAP_READY}" -eq 1 ]]; then
+  ATCAP_LESSON="${ATCAP_SUBITEM#*. }"
+
+  # --- 98a: the merge at exactly 25 bullets adds no top-level bullet and no fail.
+  WORK="$(mktemp -d)" || WORK=""
+  ROOT="$(mktemp -d)" || ROOT=""
+  if [[ -z "${WORK}" || ! -d "${WORK}" || -z "${ROOT}" || ! -d "${ROOT}" ]]; then
+    fail "case98a: mktemp -d failed or produced no directory, sub-case skipped"
+    [[ -n "${WORK}" ]] && rm -rf "${WORK}"
+    [[ -n "${ROOT}" ]] && rm -rf "${ROOT}"
+  else
+    atcap_fixture "${ROOT}" 25 "${ATCAP_BULLET}"
+    DOC="${ROOT}/${ATCAP_DOC_REL}"
+    cp "${DOC}" "${WORK}/before.md" || fail "case98a could not save the before copy"
+    assert_eq "$(atcap_count "${DOC}")" "25" "case98a the fixture starts at exactly 25 top-level bullets"
+    assert_eq "$(grep -cxF -e "${ATCAP_BULLET}" "${DOC}")" "1" "case98a the example bullet is one of the 25 fixture bullets"
+    if ! atcap_insert_after "${DOC}" "${ATCAP_BULLET}" "${ATCAP_SUBITEM}"; then
+      fail "case98a could not insert the example sub-item after the example bullet"
+    fi
+    run_check "${ROOT}" --changed "${ATCAP_DOC_REL}"
+    assert_no_result_status "context-budget" "fail" "case98a the at-cap sub-item merge produces no context-budget fail"
+    assert_has_result "context-budget" "pass" "case98a the context-budget check ran and passed (non-vacuity)"
+    assert_exit_zero "case98a the at-cap sub-item merge exits 0"
+    assert_eq "$(atcap_count "${DOC}")" "25" "case98a the Rules section still holds 25 top-level bullets after the merge"
+    assert_eq "$(grep -cxF -e "${ATCAP_SUBITEM}" "${DOC}")" "1" "case98a the sub-item line was inserted exactly once"
+    # Byte-identity: every original bullet line, in order, and every other line.
+    grep '^- ' "${WORK}/before.md" > "${WORK}/before.bullets"
+    grep '^- ' "${DOC}" > "${WORK}/after.bullets"
+    cmp -s "${WORK}/before.bullets" "${WORK}/after.bullets" || fail "case98a the 25 original bullet lines are not byte-identical and in order after the merge"
+    grep -vxF -e "${ATCAP_SUBITEM}" "${DOC}" > "${WORK}/after.stripped.md"
+    cmp -s "${WORK}/before.md" "${WORK}/after.stripped.md" || fail "case98a the doc minus the inserted sub-item line is not byte-identical to the original"
+    rm -rf "${ROOT}" "${WORK}"
+  fi
+
+  # --- 98b: negative control. The same lesson as a 26th top-level bullet fails.
+  ROOT="$(mktemp -d)" || ROOT=""
+  if [[ -z "${ROOT}" || ! -d "${ROOT}" ]]; then
+    fail "case98b: mktemp -d failed or produced no directory, sub-case skipped"
+  else
+    atcap_fixture "${ROOT}" 25 "${ATCAP_BULLET}"
+    DOC="${ROOT}/${ATCAP_DOC_REL}"
+    printf -- '- %s\n' "${ATCAP_LESSON}" >> "${DOC}"
+    assert_eq "$(atcap_count "${DOC}")" "26" "case98b the appended lesson makes 26 top-level bullets (the ### bullets count toward the cap)"
+    run_check "${ROOT}" --changed "${ATCAP_DOC_REL}"
+    assert_budget_fail_on "${ATCAP_DOC_REL}" "case98b a 26th top-level bullet fails the context-budget check"
+    assert_exit_nonzero "case98b a 26th top-level bullet blocks"
+    rm -rf "${ROOT}"
+  fi
+
+  # --- 98c: edge case, 24 bullets plus one new top-level bullet is 25 and passes.
+  ROOT="$(mktemp -d)" || ROOT=""
+  if [[ -z "${ROOT}" || ! -d "${ROOT}" ]]; then
+    fail "case98c: mktemp -d failed or produced no directory, sub-case skipped"
+  else
+    atcap_fixture "${ROOT}" 24 "${ATCAP_BULLET}"
+    DOC="${ROOT}/${ATCAP_DOC_REL}"
+    printf -- '- %s\n' "${ATCAP_LESSON}" >> "${DOC}"
+    assert_eq "$(atcap_count "${DOC}")" "25" "case98c 24 bullets plus one new top-level bullet is 25"
+    run_check "${ROOT}" --changed "${ATCAP_DOC_REL}"
+    assert_no_result_status "context-budget" "fail" "case98c a 25th top-level bullet is below the fail threshold"
+    assert_has_result "context-budget" "pass" "case98c the context-budget check ran and passed (non-vacuity)"
+    assert_exit_zero "case98c a 25th top-level bullet exits 0"
+    rm -rf "${ROOT}"
+  fi
+
+  # --- 98d: edge case, a section already at 26 stays 26 with a sub-item and still fails.
+  ROOT="$(mktemp -d)" || ROOT=""
+  if [[ -z "${ROOT}" || ! -d "${ROOT}" ]]; then
+    fail "case98d: mktemp -d failed or produced no directory, sub-case skipped"
+  else
+    atcap_fixture "${ROOT}" 26 "${ATCAP_BULLET}"
+    DOC="${ROOT}/${ATCAP_DOC_REL}"
+    if ! atcap_insert_after "${DOC}" "${ATCAP_BULLET}" "${ATCAP_SUBITEM}"; then
+      fail "case98d could not insert the example sub-item after the example bullet"
+    fi
+    assert_eq "$(atcap_count "${DOC}")" "26" "case98d a sub-item leaves an over-cap section at 26 top-level bullets"
+    run_check "${ROOT}" --changed "${ATCAP_DOC_REL}"
+    assert_budget_fail_on "${ATCAP_DOC_REL}" "case98d the pre-existing overflow still fails (the sub-item hides nothing)"
+    assert_exit_nonzero "case98d the pre-existing overflow still blocks"
+    rm -rf "${ROOT}"
+  fi
+fi
+
+# =====================================================================
 # Skill markdown contract cases (ticket #545) -- grep-based anchor-phrase
 # assertions against flow/skills/maintain/{SKILL.md,codex.md,modes/*.md},
 # none of which exist yet at RED-phase time (the skill/mode/agent files are
