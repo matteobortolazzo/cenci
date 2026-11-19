@@ -431,9 +431,10 @@ func TestAutonomousChain_PermissionProbeFetchFailureNeverResumes(t *testing.T) {
 // LOCAL checkout's main, never pushed, must never authorize unattended
 // planning. syncMain classifies "local ahead of origin" as MainSyncSynced
 // (mainsync.go:265, verified) -- so the repo gate does not short-circuit and
-// the autonomy probe genuinely runs at AutonomyRef (origin/main, which never
-// received this commit): `git ls-tree` at that ref finds no .cenci/config.json
-// at all, resolving RepoAutonomyMissing.
+// the autonomy probe genuinely runs at AutonomyRef (the confirmed object ID of
+// origin's main tip, #903, which never received this commit): `git ls-tree` at
+// that object finds no .cenci/config.json at all, resolving
+// RepoAutonomyMissing.
 func TestAutonomousChain_LocalOnlyLeanGrantNeverAuthorizesPlanning(t *testing.T) {
 	h := newChainHarness(t)
 	writeCommittedConfig(t, h.local, chainRepoConfigLean)
@@ -483,7 +484,8 @@ func TestAutonomousChain_RemotelyRevokedLeanGrantStopsPlanning(t *testing.T) {
 	}
 
 	// Revocation observable only through the remote-confirmed AutonomyRef
-	// (Q1): committed to ORIGIN directly, never local.
+	// (the OID of origin's main tip, #903; Q1): committed to ORIGIN directly,
+	// never local.
 	writeCommittedConfig(t, h.origin, interactiveConfigJSON)
 
 	stubRunFn(t, func(run.Opts, run.Controller) error {

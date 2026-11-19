@@ -342,6 +342,7 @@ func TestCombinedTickClearsPriorBadgesWhenReconcileSucceeds(t *testing.T) {
 // for every other combination.
 func TestPassError(t *testing.T) {
 	sentinelErr := &StateLoadError{Probe: StateProbeDecodeError, Path: "reconcile.json", Err: errors.New("decode failed")}
+	pathUnresolvedErr := &StateLoadError{Probe: StateProbePathUnresolved, Err: errors.New("neither XDG_STATE_HOME nor HOME is an absolute path")}
 	genericReconcileErr := errors.New("some reconcile failure")
 	dispatchErr := errors.New("some dispatch failure")
 	unconfiguredErr := fmt.Errorf("dispatch: no target tmux session for o/r: %w", ErrSessionUnconfigured)
@@ -359,6 +360,10 @@ func TestPassError(t *testing.T) {
 		{name: "dispatch error outranks a generic reconcile error", dispatchErr: dispatchErr, reconcileErr: genericReconcileErr, want: "dispatch_pass_failed"},
 		{name: "generic reconcile error alone", dispatchErr: nil, reconcileErr: genericReconcileErr, want: "reconcile_pass_failed"},
 		{name: "both nil", dispatchErr: nil, reconcileErr: nil, want: ""},
+
+		// -- #903: an unresolvable default state path is the same hold --
+		{name: "path-unresolved state error alone (#903)", dispatchErr: nil, reconcileErr: pathUnresolvedErr, want: "reconcile_state_unreadable"},
+		{name: "path-unresolved state error outranks a dispatch error (#903)", dispatchErr: dispatchErr, reconcileErr: pathUnresolvedErr, want: "reconcile_state_unreadable"},
 
 		// -- #927: dispatch_session_unconfigured / dispatch_session_missing --
 		{name: "session-unconfigured dispatch error", dispatchErr: unconfiguredErr, reconcileErr: nil, want: "dispatch_session_unconfigured"},

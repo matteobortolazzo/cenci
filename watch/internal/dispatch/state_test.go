@@ -709,3 +709,228 @@ func TestDefaultOOMBackoffLoad(t *testing.T) {
 		})
 	}
 }
+
+// -- #903: an unresolvable default state path fails closed --
+
+// setStateEnv sets XDG_STATE_HOME and HOME for one test; an empty value
+// truly unsets the variable (t.Setenv alone can only set it to "", which
+// os.Getenv cannot tell apart from unset but a future os.LookupEnv could).
+// t.Setenv registers the cleanup that restores the ambient value, so the
+// os.Unsetenv after it is safe, as in mainsync_test.go's gitEnv test.
+func setStateEnv(t *testing.T, xdg, home string) {
+	t.Helper()
+	for k, v := range map[string]string{"XDG_STATE_HOME": xdg, "HOME": home} {
+		t.Setenv(k, v)
+		if v == "" {
+			if err := os.Unsetenv(k); err != nil {
+				t.Fatalf("unsetting %s: %v", k, err)
+			}
+		}
+	}
+}
+
+// unresolvableStateEnv makes the default state path unresolvable and moves the
+// process into an empty temp working directory, returned so a test can prove
+// nothing was written into it.
+func unresolvableStateEnv(t *testing.T) string {
+	t.Helper()
+	setStateEnv(t, "", "")
+	cwd := t.TempDir()
+	t.Chdir(cwd)
+	return cwd
+}
+
+func assertDirEmpty(t *testing.T, dir string) {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("reading %s: %v", dir, err)
+	}
+	if len(entries) != 0 {
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Errorf("%s must stay empty, found %v", dir, names)
+	}
+}
+
+func TestDefaultStatePath_EnvironmentMatrix(t *testing.T) {
+	tests := []struct {
+		name     string
+		xdg      string
+		home     string
+		wantPath string
+		wantErr  bool
+	}{
+		{name: "absolute XDG_STATE_HOME", xdg: "/abs/state", home: "/abs/home", wantPath: "/abs/state/cenci/reconcile.json"},
+		{name: "XDG unset and absolute HOME", home: "/abs/home", wantPath: "/abs/home/.local/state/cenci/reconcile.json"},
+		{name: "both unset", wantErr: true},
+		{name: "relative XDG is ignored when HOME is absolute", xdg: "state", home: "/abs/home", wantPath: "/abs/home/.local/state/cenci/reconcile.json"},
+		{name: "relative XDG and HOME unset", xdg: "state", wantErr: true},
+		{name: "XDG unset and relative HOME", home: "relative/home", wantErr: true},
+		{name: "relative XDG and relative HOME", xdg: "state", home: "relative/home", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			setStateEnv(t, tt.xdg, tt.home)
+
+			got, err := DefaultStatePath()
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("DefaultStatePath() = %q, nil; want an error", got)
+				}
+				if got != "" {
+					t.Errorf("DefaultStatePath() path = %q beside an error, want \"\"", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("DefaultStatePath() error: %v", err)
+			}
+			if got != tt.wantPath {
+				t.Errorf("DefaultStatePath() = %q, want %q", got, tt.wantPath)
+			}
+		})
+	}
+}
+
+func TestStateStore_PathUnresolved_LoadReturnsHoldProbe(t *testing.T) {
+	unresolvableStateEnv(t)
+
+	_, err := NewStateStore("").Load()
+	if !errors.Is(err, ErrReconcileStateUnreadable) {
+		t.Fatalf("Load err = %v, want errors.Is(err, ErrReconcileStateUnreadable)", err)
+	}
+	if probe := probeOf(t, err); probe != StateProbePathUnresolved {
+		t.Errorf("probe = %q, want %q", probe, StateProbePathUnresolved)
+	}
+	if StateProbePathUnresolved != "path_unresolved" {
+		t.Errorf("StateProbePathUnresolved = %q, want the closed-set value %q", StateProbePathUnresolved, "path_unresolved")
+	}
+}
+
+func TestStateStore_PathUnresolved_LoadNeverReadsRelativeToWorkingDirectory(t *testing.T) {
+	cwd := unresolvableStateEnv(t)
+	// A reconcile.json in the CWD must never be consulted as the state file.
+	if err := os.WriteFile(filepath.Join(cwd, "reconcile.json"), []byte(`{"observations":{}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := NewStateStore("").Load()
+	if !errors.Is(err, ErrReconcileStateUnreadable) {
+		t.Fatalf("Load err = %v, want the unreadable hold, not a read of ./reconcile.json", err)
+	}
+}
+
+func TestStateStore_PathUnresolved_SaveFailsAndLeavesWorkingDirectoryEmpty(t *testing.T) {
+	cwd := unresolvableStateEnv(t)
+
+	err := NewStateStore("").Save(emptyReconcileState())
+	if err == nil {
+		t.Fatal("Save under an unresolvable default path returned nil, want an error")
+	}
+	assertDirEmpty(t, cwd)
+}
+
+// A stateStore built without a path (never through NewStateStore) must fail
+// closed too, not read or write relative to the working directory.
+func TestStateStore_ZeroValuePathFailsClosed(t *testing.T) {
+	cwd := t.TempDir()
+	t.Chdir(cwd)
+	store := &stateStore{}
+
+	_, err := store.Load()
+	if !errors.Is(err, ErrReconcileStateUnreadable) {
+		t.Fatalf("Load err = %v, want errors.Is(err, ErrReconcileStateUnreadable)", err)
+	}
+	if probe := probeOf(t, err); probe != StateProbePathUnresolved {
+		t.Errorf("probe = %q, want %q", probe, StateProbePathUnresolved)
+	}
+	if err := store.Save(emptyReconcileState()); err == nil {
+		t.Error("Save on a pathless store returned nil, want an error")
+	}
+	assertDirEmpty(t, cwd)
+}
+
+func TestStateLoadError_PathUnresolvedOmitsEmptyPathFragment(t *testing.T) {
+	err := &StateLoadError{Probe: StateProbePathUnresolved, Err: errors.New("boom")}
+	if got, want := err.Error(), "reconcile state path_unresolved: boom"; got != want {
+		t.Errorf("Error() = %q, want %q", got, want)
+	}
+	withPath := &StateLoadError{Probe: StateProbeDecodeError, Path: "reconcile.json", Err: errors.New("boom")}
+	if got, want := withPath.Error(), "reconcile state decode_error at reconcile.json: boom"; got != want {
+		t.Errorf("Error() with a path = %q, want %q", got, want)
+	}
+}
+
+func TestStateLoadError_PathUnresolvedMessageNeverEchoesEnvironment(t *testing.T) {
+	const secret = "relative/secret-home-marker"
+	setStateEnv(t, "secret-xdg-marker", secret)
+
+	_, err := NewStateStore("").Load()
+	if err == nil {
+		t.Fatal("Load returned nil, want the path_unresolved hold")
+	}
+	msg := err.Error()
+	if !strings.HasPrefix(msg, "reconcile state path_unresolved: ") {
+		t.Errorf("Error() = %q, want the prefix %q", msg, "reconcile state path_unresolved: ")
+	}
+	if strings.Contains(msg, " at :") {
+		t.Errorf("Error() = %q, must not carry an empty `at :` fragment", msg)
+	}
+	for _, leaked := range []string{secret, "secret-xdg-marker"} {
+		if strings.Contains(msg, leaked) {
+			t.Errorf("Error() = %q, must not contain the environment value %q", msg, leaked)
+		}
+	}
+}
+
+func TestStateStore_ExplicitPathBypassesUnresolvableEnvironment(t *testing.T) {
+	unresolvableStateEnv(t)
+	path := filepath.Join(t.TempDir(), "explicit", "path.json")
+	store := NewStateStore(path)
+	want := emptyReconcileState()
+	want.Observations["o/r#7"] = time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)
+
+	if err := store.Save(want); err != nil {
+		t.Fatalf("Save at an explicit path under an unresolvable environment: %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("explicit path was not written: %v", err)
+	}
+	got, err := store.Load()
+	if err != nil {
+		t.Fatalf("Load at an explicit path under an unresolvable environment: %v", err)
+	}
+	if !got.Observations["o/r#7"].Equal(want.Observations["o/r#7"]) {
+		t.Errorf("Observations = %v, want %v", got.Observations, want.Observations)
+	}
+}
+
+func TestStateStore_ResolvedDefaultPathWithAbsentFileLoadsEmptyState(t *testing.T) {
+	setStateEnv(t, t.TempDir(), "")
+
+	state, err := NewStateStore("").Load()
+	if err != nil {
+		t.Fatalf("Load with a resolvable default path and no file: %v (absence is not corruption)", err)
+	}
+	if state.Observations == nil || len(state.Observations) != 0 || state.ApplyFailures == nil || len(state.ApplyFailures) != 0 {
+		t.Errorf("state = %+v, want empty initialized maps", state)
+	}
+}
+
+func TestDefaultOOMBackoffLoad_PathUnresolvedReturnsHold(t *testing.T) {
+	unresolvableStateEnv(t)
+
+	got, err := defaultOOMBackoffLoad()
+	if err == nil {
+		t.Fatalf("defaultOOMBackoffLoad = %v, nil; want the path_unresolved error", got)
+	}
+	if got != nil {
+		t.Errorf("map = %v, want nil beside an error", got)
+	}
+	if probe := probeOf(t, err); probe != StateProbePathUnresolved {
+		t.Errorf("probe = %q, want %q", probe, StateProbePathUnresolved)
+	}
+}

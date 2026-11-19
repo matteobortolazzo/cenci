@@ -400,8 +400,11 @@ const (
 	// RepoAutonomyFetchUnconfirmed means probeRepoAutonomies (#877) never ran
 	// the probe at all this pass, because the repo's mainSyncResult carried no
 	// confirmed AutonomyRef -- either `git fetch origin` itself failed this
-	// pass (MainSyncFetchFailed), or the repo had no entry at all in the
-	// syncs map. Distinct from RepoAutonomyUnreadable (the probe ran and the
+	// pass (MainSyncFetchFailed), the fetch succeeded but the remote main tip
+	// could not be confirmed (#903: a deleted or renamed remote main, a stale
+	// refs/remotes/origin/main, an ls-remote failure or a concurrent push --
+	// the reason is mainSyncResult.AutonomyDetail), or the repo had no entry
+	// at all in the syncs map. Distinct from RepoAutonomyUnreadable (the probe ran and the
 	// git command itself failed) and from RepoAutonomyMissing (the probe ran
 	// against a resolvable ref/dir but found no committed config, or dir ==
 	// "" -- never probed for an unrelated reason). Fails closed exactly like

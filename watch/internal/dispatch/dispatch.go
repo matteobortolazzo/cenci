@@ -137,9 +137,11 @@ func RunOnce(cfg Config, ctrl run.Controller, mut TicketMutator, dryRun bool, ou
 
 	// Repo-autonomy probe (#851, #877): reads each repo's committed
 	// `planning.autonomy` at its own resolved AutonomyRef (from syncs above)
-	// -- the remote-confirmed refs/remotes/origin/main object, never local
-	// HEAD or FreshRef -- so a Refined planning pickup or autonomous re-plan
-	// can no longer be authorized by dispatch.planRefined alone.
+	// -- the object ID of the remote's main tip, confirmed against `git
+	// ls-remote origin refs/heads/main` this pass (#903), never local HEAD,
+	// FreshRef or a possibly stale refs/remotes/origin/main -- so a Refined
+	// planning pickup or autonomous re-plan can no longer be authorized by
+	// dispatch.planRefined alone.
 	autonomies := probeRepoAutonomies(cfg.Repos, syncs, out)
 
 	// Attended narrowing (#1086), immediately after the probe above and

@@ -1225,10 +1225,10 @@ func isolateDaemonSocket(t *testing.T) {
 // daemon.
 //
 // #877: the config is committed on origin (never local-only) -- the
-// autonomy probe now only ever reads the remote-confirmed
-// refs/remotes/origin/main object (mainSyncResult.AutonomyRef), so a config
+// autonomy probe now only ever reads the remote-confirmed object ID of
+// origin's main tip (mainSyncResult.AutonomyRef, #903), so a config
 // committed solely to local's main (never pushed) would resolve
-// RepoAutonomyMissing at that ref instead of the intended interactive
+// RepoAutonomyMissing at that object instead of the intended interactive
 // denial, defeating this test's purpose.
 func TestRunOnce_InteractiveRepoConfigDeniesPlanningPickup(t *testing.T) {
 	mainSyncGitEnv(t)
@@ -1696,9 +1696,9 @@ esac
 // would produce" acceptance criterion.
 //
 // #877 additionally requires dry-run/real to agree on BOTH the
-// authorization ref itself (AutonomyRef -- always the fully-qualified
-// remote-tracking ref in both modes, since the merge, not the fetch, is the
-// only thing dry-run skips) and the staleness verdict (CommitsBehind),
+// authorization object itself (AutonomyRef -- the same remote-confirmed OID
+// in both modes (#903), since the merge, not the fetch, is the only thing
+// dry-run skips) and the staleness verdict (CommitsBehind),
 // computed against that same fetched object -- extended in place here
 // rather than split into a second test, so a regression that breaks parity
 // on only one of the two verdicts cannot hide behind the other still
@@ -1722,8 +1722,9 @@ func TestProbeRepoAutonomies_DryRunAndRealPassAgreeUsingSameFreshRef(t *testing.
 	if dryAutonomy["o/r"] != RepoAutonomyLean {
 		t.Errorf("dry-run autonomy = %q, want RepoAutonomyLean (fetched origin/main blob)", dryAutonomy["o/r"])
 	}
-	if dryRunSyncs["o/r"].AutonomyRef != remoteMainAuthRef {
-		t.Errorf("dry-run AutonomyRef = %q, want %q", dryRunSyncs["o/r"].AutonomyRef, remoteMainAuthRef)
+	originOID := gitTest(t, origin, "rev-parse", "refs/heads/main")
+	if dryRunSyncs["o/r"].AutonomyRef != originOID {
+		t.Errorf("dry-run AutonomyRef = %q, want the origin's main OID %q", dryRunSyncs["o/r"].AutonomyRef, originOID)
 	}
 	if len(dryPlans) != 1 {
 		t.Fatalf("got %d dry-run plans, want 1: %+v", len(dryPlans), dryPlans)
@@ -1738,8 +1739,11 @@ func TestProbeRepoAutonomies_DryRunAndRealPassAgreeUsingSameFreshRef(t *testing.
 	if realAutonomy["o/r"] != RepoAutonomyLean {
 		t.Errorf("real-pass autonomy = %q, want RepoAutonomyLean (post-fast-forward local HEAD blob)", realAutonomy["o/r"])
 	}
-	if realSyncs["o/r"].AutonomyRef != remoteMainAuthRef {
-		t.Errorf("real-pass AutonomyRef = %q, want %q -- both dry-run and real fetch, so AutonomyRef must agree", realSyncs["o/r"].AutonomyRef, remoteMainAuthRef)
+	if realSyncs["o/r"].AutonomyRef != originOID {
+		t.Errorf("real-pass AutonomyRef = %q, want the origin's main OID %q -- both dry-run and real fetch and confirm the same remote tip, so AutonomyRef must agree", realSyncs["o/r"].AutonomyRef, originOID)
+	}
+	if realSyncs["o/r"].AutonomyRef != dryRunSyncs["o/r"].AutonomyRef {
+		t.Errorf("real-pass AutonomyRef = %q, dry-run AutonomyRef = %q, want them equal", realSyncs["o/r"].AutonomyRef, dryRunSyncs["o/r"].AutonomyRef)
 	}
 	if len(realPlans) != 1 {
 		t.Fatalf("got %d real-pass plans, want 1: %+v", len(realPlans), realPlans)
@@ -1813,6 +1817,61 @@ esac
 	}
 	if len(spawnedTickets) != 1 || spawnedTickets[0] != "20" {
 		t.Errorf("spawned tickets = %v, want exactly [\"20\"] (o/b's ordinary Planned pickup unaffected by o/a's fetch outage)", spawnedTickets)
+	}
+}
+
+// TestRunOnce_RemoteMainDeleted_StaleLeanTrackingRefRevoked_HoldsPlanning is
+// the #903 revocation test through RunOnce: the local tracking ref still
+// holds `planning.autonomy: "lean"` from a prior fetch, but the remote main
+// has been deleted (a revocation, or a rename) so its tip cannot be
+// confirmed. The fetch itself still succeeds, so only the remote-tip
+// confirmation stands between the stale grant and an unattended pickup: the
+// Refined candidate must be held with the fetch-unconfirmed reason, nothing
+// may spawn, and the repo-autonomy line must say fetch_unconfirmed.
+func TestRunOnce_RemoteMainDeleted_StaleLeanTrackingRefRevoked_HoldsPlanning(t *testing.T) {
+	mainSyncGitEnv(t)
+	serveChainSnapshot(t, watch.StateSnapshot{}) // reachable, idle daemon
+
+	repo, bare := initBareOriginAndLocal(t)
+	pushCommit(t, bare, ".cenci/config.json", leanConfigJSON)
+	gitTest(t, repo, "fetch", "origin") // the stale tracking ref now carries the lean grant
+	gitTest(t, bare, "update-ref", "-d", "refs/heads/main")
+	if got := probeRepoAutonomy(repo, remoteMainAuthRef); got != RepoAutonomyLean {
+		t.Fatalf("test setup: the stale tracking ref reads %q, want RepoAutonomyLean (otherwise this test proves nothing)", got)
+	}
+
+	installFakeGHOnPath(t, `
+case "$1 $2" in
+  "issue list") printf '[{"number":10,"title":"T10","labels":[{"name":"Refined"}],"assignees":[{"login":"octocat"}]}]' ;;
+  "api graphql") printf '`+emptyOpenPRPageJSON+`' ;;
+  "api user") printf 'octocat\n' ;;
+  *) exit 1 ;;
+esac
+`)
+
+	stubRunFn(t, func(opts run.Opts, ctrl run.Controller) error {
+		t.Fatalf("a repo whose remote main cannot be confirmed must never spawn a planning session, got ticket %q", opts.WindowTicket)
+		return nil
+	})
+
+	cfg := testConfig()
+	cfg.PlanRefined = true
+	cfg.Repos = []RepoConfig{{Repo: "o/r", Dir: repo, Session: "session-r"}}
+
+	var buf bytes.Buffer
+	if _, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, &buf, nil); err != nil {
+		t.Fatalf("RunOnce returned unexpected error: %v", err)
+	}
+
+	log := buf.String()
+	if strings.Contains(log, "main sync o/r: "+string(MainSyncFetchFailed)) {
+		t.Fatalf("the fetch must succeed so the remote-tip confirmation is what denies, got log %q", log)
+	}
+	if !strings.Contains(log, "o/r#10 skip: "+reasonAutonomyFetchUnconfirmed) {
+		t.Errorf("expected o/r#10 to be held with the fetch-unconfirmed reason, got log %q", log)
+	}
+	if !strings.Contains(log, "repo autonomy o/r: fetch_unconfirmed (") {
+		t.Errorf("expected a fetch_unconfirmed repo-autonomy line carrying a reason, got log %q", log)
 	}
 }
 

@@ -393,7 +393,8 @@ func runDispatchLoop(args []string) {
 // dispatch.planRefined planning-pickup switch, mirroring runDispatchLoop's
 // shape. All three verbs print the same resolved state; on/off persist the
 // toggle first. When --dir is inside a git repository, the output also
-// reports that repo's remote-confirmed planning.autonomy verdict and the
+// reports that repo's planning.autonomy verdict (the tracking-ref value as of
+// the last fetch, not confirmed against the remote) and the
 // combined authorization — the fleet flag alone never authorizes a planning
 // pickup (#851/#877), so status makes the full grant chain visible.
 //
@@ -457,8 +458,9 @@ func runDispatchPlanRefined(args []string) {
 	// origin remote — status must work from anywhere, so a plain directory
 	// just gets the fleet flags. The autonomy probe reads the committed
 	// config at refs/remotes/origin/main as of the last fetch and fails
-	// closed (unreadable) when that ref doesn't resolve, same as the
-	// dispatch gate itself.
+	// closed (unreadable) when that ref doesn't resolve. Unlike the dispatch
+	// gate, it never fetches and does not confirm the ref against the
+	// remote's current main tip, so it can lag the gate.
 	var repoName string
 	var autonomy dispatch.RepoAutonomy
 	if identity, derr := dispatch.DetectRepoIdentity(*dir); derr == nil {

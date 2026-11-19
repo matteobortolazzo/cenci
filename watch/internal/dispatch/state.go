@@ -19,6 +19,10 @@ import (
 // exported constructor.
 type stateStore struct {
 	path string
+	// pathErr is why NewStateStore("") could not resolve a default path (#903).
+	// A store with a non-nil pathErr or an empty path never touches the
+	// filesystem: see unresolvedErr.
+	pathErr error
 
 	writeTemp  func(f *os.File, data []byte) (int, error)
 	syncTemp   func(f *os.File) error
@@ -151,6 +155,8 @@ func marshalOOMSection[M ~map[K]V, K comparable, V any](m M) (json.RawMessage, e
 var oomBackoffLoadFn = defaultOOMBackoffLoad
 
 // defaultOOMBackoffLoad reads the OOM retry times from the default state path.
+// An unresolvable default path (#903) returns the StateProbePathUnresolved
+// error and a nil map; the caller logs it and the gate stays fail-open.
 func defaultOOMBackoffLoad() (map[string]time.Time, error) {
 	st, err := NewStateStore("").Load()
 	if err != nil {
@@ -167,27 +173,40 @@ func defaultOOMBackoffLoad() (map[string]time.Time, error) {
 // migration step in migrateReconcileState.
 const currentReconcileSchema = 1
 
-// DefaultStatePath resolves $XDG_STATE_HOME/cenci/reconcile.json, falling
-// back to ~/.local/state when XDG_STATE_HOME is unset.
-func DefaultStatePath() string {
-	dir := os.Getenv("XDG_STATE_HOME")
-	if dir == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return ""
+// errStatePathUnresolved is the cause of every path_unresolved hold. Its text
+// is fixed on purpose: it never carries an environment variable's value.
+var errStatePathUnresolved = errors.New("neither XDG_STATE_HOME nor HOME is an absolute path")
+
+// DefaultStatePath resolves <state>/cenci/reconcile.json, where <state> is
+// $XDG_STATE_HOME when it is absolute, else $HOME/.local/state when $HOME is
+// absolute (the same rule as internal/hookhealth.Dir and
+// internal/modelswitch.Dir). When neither resolves it returns "" and an error:
+// a relative or empty path would read and write relative to the daemon's
+// working directory and silently reset the reconcile safety state (#903).
+func DefaultStatePath() (string, error) {
+	state := os.Getenv("XDG_STATE_HOME")
+	if !filepath.IsAbs(state) {
+		home := os.Getenv("HOME")
+		if !filepath.IsAbs(home) {
+			return "", errStatePathUnresolved
 		}
-		dir = filepath.Join(home, ".local", "state")
+		state = filepath.Join(home, ".local", "state")
 	}
-	return filepath.Join(dir, "cenci", "reconcile.json")
+	return filepath.Join(state, "cenci", "reconcile.json"), nil
 }
 
 // NewStateStore returns a disk-backed ReconcileStore. An empty path resolves
-// the XDG default.
+// the default through DefaultStatePath. If that cannot resolve, the error is
+// kept on the store rather than returned, so every caller lands in the #883
+// hold: Load returns a StateProbePathUnresolved *StateLoadError and Save
+// returns an error before touching the filesystem. An explicit path bypasses
+// the resolution entirely.
 func NewStateStore(path string) ReconcileStore {
-	if path == "" {
-		path = DefaultStatePath()
+	if path != "" {
+		return &stateStore{path: path}
 	}
-	return &stateStore{path: path}
+	resolved, err := DefaultStatePath()
+	return &stateStore{path: resolved, pathErr: err}
 }
 
 // emptyReconcileState is the zero-value ReconcileState with every map
@@ -234,6 +253,11 @@ const (
 	// observation timestamp, or a negative apply-failures counter). Must
 	// default-deny.
 	StateProbeInvalid StateProbe = "invalid"
+	// StateProbePathUnresolved means the default state path could not be
+	// resolved (no absolute XDG_STATE_HOME or HOME, #903), so there is no file
+	// to read or write. Must default-deny: reading or writing relative to the
+	// working directory would silently reset the safety state.
+	StateProbePathUnresolved StateProbe = "path_unresolved"
 )
 
 // ErrReconcileStateUnreadable is the sentinel every non-absence Load failure
@@ -253,6 +277,9 @@ type StateLoadError struct {
 }
 
 func (e *StateLoadError) Error() string {
+	if e.Path == "" {
+		return fmt.Sprintf("reconcile state %s: %v", e.Probe, e.Err)
+	}
 	return fmt.Sprintf("reconcile state %s at %s: %v", e.Probe, e.Path, e.Err)
 }
 
@@ -310,7 +337,25 @@ func validateReconcileState(st reconcileState) error {
 	return nil
 }
 
+// unresolvedErr reports why the store has no usable path, or nil when it has
+// one. A pathless store (a hand-built &stateStore{}) fails closed the same way
+// as one whose default resolution failed, so no code path can reach
+// os.ReadFile("") (reported as absent) or a write into filepath.Dir("") == ".".
+func (s *stateStore) unresolvedErr() error {
+	switch {
+	case s.pathErr != nil:
+		return s.pathErr
+	case s.path == "":
+		return errStatePathUnresolved
+	default:
+		return nil
+	}
+}
+
 func (s *stateStore) Load() (ReconcileState, error) {
+	if cause := s.unresolvedErr(); cause != nil {
+		return emptyReconcileState(), &StateLoadError{Probe: StateProbePathUnresolved, Err: cause}
+	}
 	data, err := os.ReadFile(s.path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -379,6 +424,9 @@ func sweepStaleTemps(dir, base string) {
 // has already committed at that point (state is durable at the OS level
 // either way): deliberate and conservative, visible over silent.
 func (s *stateStore) Save(state ReconcileState) error {
+	if cause := s.unresolvedErr(); cause != nil {
+		return fmt.Errorf("saving reconcile state: %w", &StateLoadError{Probe: StateProbePathUnresolved, Err: cause})
+	}
 	dir := filepath.Dir(s.path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("creating state dir %s: %w", dir, err)

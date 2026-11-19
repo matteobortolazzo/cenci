@@ -782,6 +782,32 @@ func TestRunReconcileOnceSentinelOutranksCollectionError(t *testing.T) {
 	}
 }
 
+// TestRunReconcileOnce_PathUnresolvedHoldsWithZeroMutations (#903): a store
+// built by NewStateStore("") under an unresolvable XDG_STATE_HOME/HOME must
+// hold the pass with the corruption sentinel instead of silently resetting
+// the safety state, mutate nothing, and write nothing into the working
+// directory.
+func TestRunReconcileOnce_PathUnresolvedHoldsWithZeroMutations(t *testing.T) {
+	cwd := unresolvableStateEnv(t)
+	cfg := reconcileConfig()
+	cfg.Repos = []RepoConfig{{Repo: "o/r", Dir: t.TempDir()}}
+	mut := &fakeMutator{}
+	var buf bytes.Buffer
+
+	_, err := RunReconcileOnce(cfg, mut, false, &buf, NewStateStore(""))
+	if !errors.Is(err, ErrReconcileStateUnreadable) {
+		t.Fatalf("RunReconcileOnce err = %v, want errors.Is(err, ErrReconcileStateUnreadable)", err)
+	}
+	if probe := probeOf(t, err); probe != StateProbePathUnresolved {
+		t.Errorf("probe = %q, want %q", probe, StateProbePathUnresolved)
+	}
+	if len(mut.labelEdits) != 0 || len(mut.comments) != 0 || len(mut.ensureCalls) != 0 {
+		t.Errorf("a held pass must record zero mutator calls, got labelEdits=%+v comments=%+v ensure=%+v",
+			mut.labelEdits, mut.comments, mut.ensureCalls)
+	}
+	assertDirEmpty(t, cwd)
+}
+
 // TestApplyReconcileMissingStateFileStillReconcilesAndMutates is the
 // regression guard that the hold must not catch first runs: a genuinely
 // missing state file (StateProbeAbsent) is valid empty initial state, not

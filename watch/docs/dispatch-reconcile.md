@@ -574,7 +574,7 @@ failure this ticket closes off.
 
 **Abort-before-mutation contract.** `stateStore.Load` classifies every failure into a
 closed `StateProbe` set (`StateProbeReadError`/`StateProbeDecodeError`/
-`StateProbeSchemaError`/`StateProbeInvalid`), wrapped in a `*StateLoadError` whose
+`StateProbeSchemaError`/`StateProbeInvalid`/`StateProbePathUnresolved`), wrapped in a `*StateLoadError` whose
 `Unwrap() []error` keeps both the sentinel `ErrReconcileStateUnreadable` and the
 underlying cause reachable via `errors.Is`/`errors.As`. `applyReconcile` treats **any**
 non-nil `Load` error (not only the sentinel — default-deny for a third-party
@@ -633,6 +633,16 @@ counters) and classifies a violation as `StateProbeInvalid`. Every `StateProbe` 
 besides the zero-value `StateProbeAbsent` is a broken-input class that must default-deny —
 adding a new failure class to `Load` without adding it to this closed set (and to the
 abort contract above) would silently let a new corruption shape slip past the hold.
+`StateProbePathUnresolved` (`path_unresolved`, #903) is the member for a store with no
+usable path: `DefaultStatePath` follows the `internal/hookhealth.Dir` rule (`$XDG_STATE_HOME`
+only when absolute, else `$HOME/.local/state` only when `$HOME` is absolute, else an error
+with a fixed message that never echoes either value), and `NewStateStore("")` keeps that
+error on the store. An unresolvable default path is a hold — `Load` returns the probe
+(so `errors.Is(err, ErrReconcileStateUnreadable)` holds) and `Save` returns an error
+before touching the filesystem — never a read or write relative to the working directory,
+which would silently reset the grace and apply-retry state on every pass. An explicit
+path bypasses the resolution, and a resolvable path whose file is absent is still
+`StateProbeAbsent` (valid empty state).
 
 ## Plan authorization hold (#1464)
 

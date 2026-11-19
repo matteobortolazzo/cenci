@@ -35,8 +35,9 @@ func runPlanning(args []string) {
 // (#1086): the CLI writer/reader for the fleet-wide planning.attended
 // narrowing switch, mirroring runDispatchPlanRefined's shape exactly. All
 // three verbs print the same resolved state; on/off persist the toggle
-// first. status prints the fleet flag, the repo's remote-confirmed
-// planning.autonomy verdict (QueryRepoAutonomy, unnarrowed), dispatch's own
+// first. status prints the fleet flag, the repo's planning.autonomy verdict
+// (QueryRepoAutonomy: the tracking-ref value as of the last fetch, not
+// confirmed against the remote; unnarrowed), dispatch's own
 // planRefined flag, and the three-factor combined verdict (Q1: attended +
 // planRefined + repo autonomy) -- the same shape `cenci dispatch plan-refined
 // status` prints, so the two commands can never disagree.
