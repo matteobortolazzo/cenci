@@ -1410,13 +1410,24 @@ func TestRunOnce_AttendedNarrowing_DryRunAndRealPassIdentical(t *testing.T) {
 // "planning" block at all must produce byte-identical RunOnce log output --
 // no narrowing-step log line, no RepoAutonomy narrowing, over the same
 // (lean, Refined-candidate) fleet.
+//
+// The "repo autonomy" log line prints origin's tip commit OID (#903), and each
+// pass builds its own origin, so unpinned commit dates make the two passes
+// differ whenever they straddle a second boundary (#1564). The test therefore
+// pins both git dates, with an explicit UTC offset so the OIDs do not depend on
+// the host's TZ. The pin is local rather than in mainSyncGitEnv because that
+// helper has ~100 callers whose fixtures need distinct commits.
 func TestRunOnce_AttendedOff_LogByteIdenticalToNoPlanningBlock(t *testing.T) {
 	mainSyncGitEnv(t)
+	const pinnedGitDate = "2005-04-07T22:13:13 +0000"
+	t.Setenv("GIT_AUTHOR_DATE", pinnedGitDate)
+	t.Setenv("GIT_COMMITTER_DATE", pinnedGitDate)
 
-	runPass := func(planningBlockJSON string) string {
+	runPass := func(planningBlockJSON string) (log, originOID string) {
 		isolateDaemonSocket(t)
 		local, origin := initOriginAndLocal(t)
 		writeCommittedConfig(t, origin, leanConfigJSON)
+		originOID = gitTest(t, origin, "rev-parse", "main")
 
 		installFakeGHOnPath(t, runOnceFakeGHWithIdentity(`{"name":"Refined"}`))
 		stubRunFn(t, func(run.Opts, run.Controller) error {
@@ -1439,12 +1450,18 @@ func TestRunOnce_AttendedOff_LogByteIdenticalToNoPlanningBlock(t *testing.T) {
 		if _, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, &buf, nil); err != nil {
 			t.Fatalf("RunOnce returned unexpected error: %v", err)
 		}
-		return buf.String()
+		return buf.String(), originOID
 	}
 
-	withExplicitFalse := runPass(`, "planning": {"attended": false}`)
-	withNoBlock := runPass("")
+	withExplicitFalse, explicitFalseOID := runPass(`, "planning": {"attended": false}`)
+	withNoBlock, noBlockOID := runPass("")
 
+	// The "repo autonomy" log line prints origin's tip OID, so the fixture must
+	// build the same history in both passes; fail with its own message rather
+	// than as a spurious production log difference.
+	if explicitFalseOID != noBlockOID {
+		t.Fatalf("fixture non-determinism: origin main OID differs between passes (explicit false %s, no block %s); the log comparison below is meaningless", explicitFalseOID, noBlockOID)
+	}
 	if withExplicitFalse != withNoBlock {
 		t.Errorf("log output differs between explicit attended:false and no planning block:\nexplicit false:\n%s\nno block:\n%s", withExplicitFalse, withNoBlock)
 	}
