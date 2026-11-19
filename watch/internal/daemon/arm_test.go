@@ -7,6 +7,7 @@ package daemon
 
 import (
 	"bytes"
+	"fmt"
 	"log"
 	"strings"
 	"testing"
@@ -44,8 +45,55 @@ func (s *recordingArmSpawn) spawn(req ipc.ArmRequest) ipc.ArmResponse {
 	return s.resp
 }
 
+// armTestLaunchID is the fixed, well-formed launch ID (32 lowercase hex, the
+// sandbox.ValidLaunchID contract) every valid test request carries (#1135).
+const armTestLaunchID = "0123456789abcdef0123456789abcdef"
+
 func validArmRequest() ipc.ArmRequest {
-	return ipc.ArmRequest{PR: "42", Repo: "o/r", Agent: "claude", Interval: 15 * time.Minute, TmuxPane: "%3"}
+	return ipc.ArmRequest{PR: "42", Repo: "o/r", Agent: "claude", Interval: 15 * time.Minute, TmuxPane: "%3", LaunchID: armTestLaunchID}
+}
+
+// -- validation: launch_id must be a well-formed launch ID (#1135) ----------
+
+// TestHandleArmRequest_InvalidLaunchIDRejectedWithoutInvokingSpawn covers the
+// shape half of the launch binding: an empty (an older client, or a launch
+// with no recorded ID) or malformed launch_id nacks with
+// ReasonArmLaunchUnverified before the spawn seam -- so before any tmux,
+// runtime or git call -- and the rejected value never reaches the verbose log.
+func TestHandleArmRequest_InvalidLaunchIDRejectedWithoutInvokingSpawn(t *testing.T) {
+	for _, id := range []string{
+		"",
+		"0123456789ABCDEF0123456789ABCDEF",  // upper case
+		"0123456789abcdef0123456789abcde",   // 31 chars
+		"0123456789abcdef0123456789abcdef0", // 33 chars
+		"zzzz456789abcdef0123456789abcdef",  // non-hex
+		"__MALFORMED__",
+	} {
+		t.Run(fmt.Sprintf("%q", id), func(t *testing.T) {
+			spawn := &recordingArmSpawn{resp: ipc.ArmResponse{OK: true}}
+			d := newTestDaemon(&tmuxtest.MockClient{})
+			d.armSpawn = spawn.spawn
+			d.cfg.Verbose = true
+			buf := captureLog(t)
+
+			req := validArmRequest()
+			req.LaunchID = id
+			resp := d.handleArmRequest(req)
+
+			if resp != (ipc.ArmResponse{OK: false, Reason: ReasonArmLaunchUnverified}) {
+				t.Errorf("resp = %+v, want {OK:false Reason:%q}", resp, ReasonArmLaunchUnverified)
+			}
+			if len(spawn.calls) != 0 {
+				t.Errorf("armSpawn calls = %d, want 0 -- the launch_id shape check must fail closed before the spawn seam", len(spawn.calls))
+			}
+			if buf.Len() == 0 {
+				t.Error("verbose log is empty, want the reject branch to log")
+			}
+			if id != "" && strings.Contains(buf.String(), id) {
+				t.Errorf("log = %q echoes the rejected launch_id", buf.String())
+			}
+		})
+	}
 }
 
 func TestHandleArmRequest_DisabledOpenCodeNeverSpawns(t *testing.T) {
@@ -327,6 +375,8 @@ func TestHandleArmRequest_ValidationReasonsAreDistinctPerCategory(t *testing.T) 
 	badInterval.Interval = 0
 	badTmuxPane := validArmRequest()
 	badTmuxPane.TmuxPane = "not-a-pane-id"
+	badLaunchID := validArmRequest()
+	badLaunchID.LaunchID = ""
 	// Capability categories (#1215): a codex request whose predicate denies
 	// ci-repair, and a daemon whose predicate was never injected (nil).
 	lacksCapability := validArmRequest()
@@ -338,6 +388,7 @@ func TestHandleArmRequest_ValidationReasonsAreDistinctPerCategory(t *testing.T) 
 	agentReason := d.handleArmRequest(badAgent).Reason
 	intervalReason := d.handleArmRequest(badInterval).Reason
 	tmuxPaneReason := d.handleArmRequest(badTmuxPane).Reason
+	launchIDReason := d.handleArmRequest(badLaunchID).Reason
 	lacksCapabilityReason := d.handleArmRequest(lacksCapability).Reason
 	d.armCapable = nil
 	capabilityUnavailableReason := d.handleArmRequest(validArmRequest()).Reason
@@ -348,6 +399,7 @@ func TestHandleArmRequest_ValidationReasonsAreDistinctPerCategory(t *testing.T) 
 		"agent":     agentReason,
 		"interval":  intervalReason,
 		"tmux_pane": tmuxPaneReason,
+		"launch_id": launchIDReason,
 
 		"lacks_capability":       lacksCapabilityReason,
 		"capability_unavailable": capabilityUnavailableReason,

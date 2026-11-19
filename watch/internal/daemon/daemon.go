@@ -166,6 +166,15 @@ type Daemon struct {
 	// any d.loop-owned field.
 	armLimiter armTokenBucket
 
+	// armReservations holds hostArmSpawn's admitted arms whose supervisor is
+	// not yet visible in the babysit state directory, counted toward the
+	// per-repo and per-host live-supervisor caps (armspawn.go, #1135). Its
+	// zero value holds none. Same rules as armLimiter: mutex-guarded, reached
+	// only from the ipc.EventReceiver connection goroutine (hostArmSpawn), and
+	// it must never touch d.sessions/d.pending/d.attention or any
+	// d.loop-owned field.
+	armReservations armReservations
+
 	// ctlLimiter is the babysit-stop / babysit-status token bucket (#1390),
 	// separate from armLimiter so a looping container cannot exhaust one
 	// through the other. Same tunables (armBucketBurst, armBucketRefill) and

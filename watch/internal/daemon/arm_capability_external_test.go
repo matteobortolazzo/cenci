@@ -20,7 +20,7 @@ func TestHandleArmRequest_RealBuiltinCapabilityQuery(t *testing.T) {
 			spawnCalls++
 			return ipc.ArmResponse{OK: true}
 		}
-		req := ipc.ArmRequest{PR: "42", Repo: "o/r", Agent: agent, Interval: 15 * time.Minute, TmuxPane: "%3"}
+		req := ipc.ArmRequest{PR: "42", Repo: "o/r", Agent: agent, Interval: 15 * time.Minute, TmuxPane: "%3", LaunchID: "0123456789abcdef0123456789abcdef"}
 		return daemon.HandleArmRequestWith(run.BuiltinCapability, spawn, req), spawnCalls
 	}
 

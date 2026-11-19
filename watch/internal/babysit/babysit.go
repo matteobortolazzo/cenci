@@ -2584,3 +2584,79 @@ func supervisorLive(s State) bool {
 	}
 	return s.Status == "arming" && time.Since(s.UpdatedAt) < armingLivenessGrace
 }
+
+// ArmingLivenessGrace is armingLivenessGrace for callers outside the package:
+// the daemon's arm reservations (#1135) expire on the same bound an orphaned
+// "arming" state stops counting as live, so the two never drift apart (#357).
+const ArmingLivenessGrace = armingLivenessGrace
+
+// LiveCounts is the set of live supervisors LiveSupervisors found in a state
+// directory: a count per repo, a host-wide total and the (repo, PR) keys.
+type LiveCounts struct {
+	// ByRepo counts live supervisors per lower-cased "owner/repo".
+	ByRepo map[string]int
+	// Total counts every live supervisor on the host, plus every state file that
+	// could not be read: an unreadable file may be a live supervisor, but it
+	// cannot be attributed to a repo or PR, so it counts here and nowhere else.
+	Total int
+
+	live map[liveKey]struct{}
+}
+
+// liveKey identifies one supervisor: the lower-cased repo and its PR number.
+type liveKey struct{ repo, pr string }
+
+// Live reports whether a live supervisor already owns (repo, pr), with repo
+// compared case-insensitively like the ByRepo keys.
+func (c LiveCounts) Live(repo, pr string) bool {
+	_, ok := c.live[liveKey{strings.ToLower(repo), pr}]
+	return ok
+}
+
+// LiveSupervisors counts the live supervisors in the babysit state directory
+// (stateDirOverride mirrors --state-dir; "" is the standard location), the
+// source of the daemon's per-repo and per-host arm caps (#1135). A state counts
+// exactly when supervisorLive accepts it. The detached grandchild supervisor
+// leaves no handle the daemon holds, so this directory is the only record.
+//
+// It follows BlocksCloseStrict's listing: a directory that does not exist means
+// nothing is armed (zero counts, nil error), a directory that cannot be listed
+// is an error (the caller must refuse rather than read "none"), only *.json
+// entries are state, and an entry that vanished between the listing and the read
+// is skipped. A state file that cannot be read or decoded adds to Total only
+// (see LiveCounts.Total): refusing to under-count keeps the cap fail-closed.
+func LiveSupervisors(stateDirOverride string) (LiveCounts, error) {
+	counts := LiveCounts{ByRepo: map[string]int{}, live: map[liveKey]struct{}{}}
+	dir, err := stateDir(stateDirOverride)
+	if err != nil {
+		return LiveCounts{}, fmt.Errorf("resolve babysit state directory: %w", err)
+	}
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return counts, nil
+	}
+	if err != nil {
+		return LiveCounts{}, fmt.Errorf("list babysit state directory %s: %w", dir, err)
+	}
+	for _, e := range entries {
+		if !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		s, err := readStateStrict(filepath.Join(dir, e.Name()))
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			counts.Total++
+			continue
+		}
+		if !supervisorLive(s) {
+			continue
+		}
+		repo := strings.ToLower(s.Repo)
+		counts.ByRepo[repo]++
+		counts.Total++
+		counts.live[liveKey{repo, s.PR}] = struct{}{}
+	}
+	return counts, nil
+}

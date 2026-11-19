@@ -2536,6 +2536,96 @@ func TestRunParentArmPreservesExistingStateFileOnStartFailure(t *testing.T) {
 	}
 }
 
+// TestRunParentArmRefusesWhenSupervisorLockIsHeld pins the `.lock` half of the
+// host re-arm edge case (#1135): a re-arm of a (repo, PR) that already has a
+// live supervisor is refused by Run itself with `supervisor already running
+// for PR #<n>`. It starts no second supervisor, publishes nothing over the
+// existing state file and leaves the held lock exactly as the live supervisor
+// wrote it. The daemon's arm cap deliberately skips such a re-arm and relies on
+// this refusal.
+func TestRunParentArmRefusesWhenSupervisorLockIsHeld(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CENCI_SANDBOX", "")
+	t.Setenv("CENCI_BABYSIT_SUPERVISOR", "")
+	t.Setenv("CENCI_LAUNCH_ID", "")
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+
+	path := statePath(dir, "o/r", "42")
+	if err := save(path, State{PR: "42", Repo: "o/r", Agent: "claude", Status: "watching", PID: 4242, CIStatus: "green"}); err != nil {
+		t.Fatal(err)
+	}
+	stateBefore, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lockPath := path + ".lock"
+	const lockOwner = "4242\n"
+	if err := os.WriteFile(lockPath, []byte(lockOwner), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	var ghPRViewCalls int
+	var started bool
+	originalCommand := command
+	command = func(name string, args ...string) ([]byte, error) {
+		if name == "git" {
+			return []byte("/repo/root\n"), nil
+		}
+		return []byte(""), nil
+	}
+	originalExecGh := execGh
+	execGh = func(args ...string) (string, string, error) {
+		switch {
+		case len(args) > 0 && args[0] == "repo":
+			return "o/r\n", "", nil
+		case len(args) > 1 && args[0] == "pr" && args[1] == "view":
+			ghPRViewCalls++
+		}
+		return "", "", nil
+	}
+	originalCurrentTmuxSession := currentTmuxSession
+	currentTmuxSession = func() (string, error) { return "host-session", nil }
+	originalStartSupervisor := startSupervisor
+	startSupervisor = func(cmd *exec.Cmd) error {
+		started = true
+		return nil
+	}
+	t.Cleanup(func() {
+		command = originalCommand
+		execGh = originalExecGh
+		currentTmuxSession = originalCurrentTmuxSession
+		startSupervisor = originalStartSupervisor
+	})
+
+	runErr := Run(Options{PR: "42", Agent: "claude", StateDir: dir, Interval: time.Minute})
+	if runErr == nil {
+		t.Fatal("Run (arm over a held lock): err = nil, want the already-running refusal")
+	}
+	if want := "supervisor already running for PR #42"; !strings.Contains(runErr.Error(), want) {
+		t.Errorf("Run error = %q, want it to contain %q", runErr, want)
+	}
+	if started {
+		t.Error("startSupervisor was invoked; a held lock must not spawn a second supervisor")
+	}
+	if ghPRViewCalls != 0 {
+		t.Errorf("gh pr view ran %d times; the refusal must come before any arming work", ghPRViewCalls)
+	}
+	stateAfter, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("state file gone after a refused re-arm: %v", err)
+	}
+	if string(stateAfter) != string(stateBefore) {
+		t.Errorf("state file changed by a refused re-arm:\nbefore: %s\nafter:  %s", stateBefore, stateAfter)
+	}
+	lockAfter, err := os.ReadFile(lockPath)
+	if err != nil {
+		t.Fatalf("held lock was removed by a refused re-arm: %v", err)
+	}
+	if string(lockAfter) != lockOwner {
+		t.Errorf("lock content = %q, want the live supervisor's %q untouched", lockAfter, lockOwner)
+	}
+}
+
 // TestRunParentArmRestartsClockForInheritedUnknownVerdict pins finding 1 from
 // the Phase 6+7 review of #924: the parent must call noteChecksUnknown
 // whenever the verdict it publishes is ciStatusUnknown, whether freshly
@@ -6671,5 +6761,221 @@ func TestPRViewRequestsAndDecodesIsCrossRepositoryAsAPointer(t *testing.T) {
 				t.Errorf("IsCrossRepository = %v, want %v", pr.IsCrossRepository, tc.want)
 			}
 		})
+	}
+}
+
+// -- #1135: LiveSupervisors, the live-supervisor counts behind the arm caps ---
+
+// liveTestPID is the one pid the pid-aware processOwned stub accepts, so a
+// "dead PID" state is a different number, not a stub toggle.
+const liveTestPID = 4242
+
+// stubLivePID makes processOwned accept only liveTestPID (pid-aware, unlike
+// stubProcessOwned's all-or-nothing answer).
+func stubLivePID(t *testing.T) {
+	t.Helper()
+	original := processOwned
+	processOwned = func(pid int, _ string) bool { return pid == liveTestPID }
+	t.Cleanup(func() { processOwned = original })
+}
+
+// writeLiveState writes s under its production file name (the repo hash and PR).
+func writeLiveState(t *testing.T, dir string, s State) {
+	t.Helper()
+	writeStateFile(t, statePath(dir, s.Repo, s.PR), s)
+}
+
+func TestLiveSupervisors_CountsExactlyTheStatesSupervisorLiveAccepts(t *testing.T) {
+	now := time.Now().UTC()
+	for _, tc := range []struct {
+		name  string
+		state State
+		live  bool
+	}{
+		{"a running supervisor whose pid is alive", State{PID: liveTestPID, Status: "running"}, true},
+		{"a needs-input state with no pid", State{Status: "needs-input"}, true},
+		{"an arming state under the grace window", State{Status: "arming", UpdatedAt: now.Add(-ArmingLivenessGrace / 4)}, true},
+		{"an arming state past the grace window", State{Status: "arming", UpdatedAt: now.Add(-ArmingLivenessGrace - time.Minute)}, false},
+		{"a running state whose pid is dead", State{PID: liveTestPID + 1, Status: "running"}, false},
+		{"a stopped state with no pid", State{Status: "stopped"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stubLivePID(t)
+			dir := t.TempDir()
+			tc.state.PR, tc.state.Repo = "7", "Acme/Widgets"
+			writeLiveState(t, dir, tc.state)
+
+			got, err := LiveSupervisors(dir)
+			if err != nil {
+				t.Fatalf("LiveSupervisors: %v", err)
+			}
+			want := LiveCounts{ByRepo: map[string]int{}}
+			if tc.live {
+				want = LiveCounts{ByRepo: map[string]int{"acme/widgets": 1}, Total: 1}
+			}
+			if got.Total != want.Total || !maps.Equal(got.ByRepo, want.ByRepo) {
+				t.Errorf("LiveSupervisors = {ByRepo:%v Total:%d}, want {ByRepo:%v Total:%d}", got.ByRepo, got.Total, want.ByRepo, want.Total)
+			}
+			if got.Live("acme/widgets", "7") != tc.live {
+				t.Errorf("Live(acme/widgets, 7) = %v, want %v", !tc.live, tc.live)
+			}
+		})
+	}
+}
+
+// Counts are per lower-cased repo (gh and the origin URL can disagree on case),
+// and Live answers for one (repo, pr) key whatever the case the caller passes.
+func TestLiveSupervisors_CountsPerLowerCasedRepoAndAnswersLiveByKey(t *testing.T) {
+	stubLivePID(t)
+	dir := t.TempDir()
+	live := func(repo, pr string) State { return State{Repo: repo, PR: pr, PID: liveTestPID, Status: "running"} }
+	writeLiveState(t, dir, live("Acme/Widgets", "1"))
+	writeLiveState(t, dir, live("acme/widgets", "2"))
+	writeLiveState(t, dir, live("other/repo", "1"))
+	writeLiveState(t, dir, State{Repo: "acme/widgets", PR: "3", PID: liveTestPID + 1, Status: "running"})
+
+	got, err := LiveSupervisors(dir)
+	if err != nil {
+		t.Fatalf("LiveSupervisors: %v", err)
+	}
+	if want := map[string]int{"acme/widgets": 2, "other/repo": 1}; !maps.Equal(got.ByRepo, want) {
+		t.Errorf("ByRepo = %v, want %v", got.ByRepo, want)
+	}
+	if got.Total != 3 {
+		t.Errorf("Total = %d, want 3", got.Total)
+	}
+	for _, tc := range []struct {
+		repo, pr string
+		want     bool
+	}{
+		{"acme/widgets", "1", true},
+		{"ACME/WIDGETS", "1", true},
+		{"acme/widgets", "2", true},
+		{"other/repo", "1", true},
+		{"other/repo", "2", false},
+		{"acme/widgets", "3", false}, // dead pid
+		{"acme/widgets", "99", false},
+		{"nobody/nothing", "1", false},
+	} {
+		if g := got.Live(tc.repo, tc.pr); g != tc.want {
+			t.Errorf("Live(%q, %q) = %v, want %v", tc.repo, tc.pr, g, tc.want)
+		}
+	}
+}
+
+// A file the strict read rejects cannot be attributed to a repo or PR, but it
+// may be a live supervisor, so it counts toward the host total only.
+func TestLiveSupervisors_ACorruptFileCountsTowardTheTotalOnly(t *testing.T) {
+	stubLivePID(t)
+	dir := t.TempDir()
+	writeLiveState(t, dir, State{Repo: "acme/widgets", PR: "1", PID: liveTestPID, Status: "running"})
+	if err := os.WriteFile(filepath.Join(dir, "corrupt.json"), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := LiveSupervisors(dir)
+	if err != nil {
+		t.Fatalf("LiveSupervisors: %v (a corrupt state file is counted, not an error)", err)
+	}
+	if got.Total != 2 {
+		t.Errorf("Total = %d, want 2 (the live state plus the unreadable file)", got.Total)
+	}
+	if want := map[string]int{"acme/widgets": 1}; !maps.Equal(got.ByRepo, want) {
+		t.Errorf("ByRepo = %v, want %v -- the corrupt file belongs to no repo", got.ByRepo, want)
+	}
+}
+
+// Only *.json entries are state; a lock, a log or a stray temp file that holds a
+// live-looking state is ignored, and an entry that vanishes between the listing
+// and the read (a dangling link stands in for the race) is skipped, not counted.
+func TestLiveSupervisors_IgnoresNonStateEntriesAndSkipsVanishedOnes(t *testing.T) {
+	stubLivePID(t)
+	dir := t.TempDir()
+	liveState := State{Repo: "acme/widgets", PR: "1", PID: liveTestPID, Status: "running"}
+	writeLiveState(t, dir, liveState)
+	body, err := json.Marshal(State{Repo: "decoy/repo", PR: "9", PID: liveTestPID, Status: "running"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"supervisor.log", "x.lock", "state.json.tmp"} {
+		if err := os.WriteFile(filepath.Join(dir, name), body, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(filepath.Join(dir, "never-existed"), filepath.Join(dir, "gone.json")); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := LiveSupervisors(dir)
+	if err != nil {
+		t.Fatalf("LiveSupervisors: %v", err)
+	}
+	if got.Total != 1 || !maps.Equal(got.ByRepo, map[string]int{"acme/widgets": 1}) {
+		t.Errorf("LiveSupervisors = {ByRepo:%v Total:%d}, want only the one real live state", got.ByRepo, got.Total)
+	}
+}
+
+func TestLiveSupervisors_AMissingDirectoryIsZeroAndNotAnError(t *testing.T) {
+	got, err := LiveSupervisors(filepath.Join(t.TempDir(), "never-created"))
+	if err != nil {
+		t.Fatalf("LiveSupervisors: %v, want nil for a directory that does not exist", err)
+	}
+	if got.Total != 0 || len(got.ByRepo) != 0 {
+		t.Errorf("LiveSupervisors = {ByRepo:%v Total:%d}, want zero counts", got.ByRepo, got.Total)
+	}
+	if got.Live("acme/widgets", "1") {
+		t.Error("Live = true on an empty directory")
+	}
+}
+
+// A directory that exists but cannot be listed is an error, never zero: the
+// caller must refuse the arm rather than read "no supervisors". The positive
+// control proves mode 000 really stops this uid's read -- a root runner, which
+// ignores the mode, fails here instead of passing without covering the branch.
+func TestLiveSupervisors_AnUnreadableDirectoryIsAnErrorNotZero(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "state")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeLiveState(t, dir, State{Repo: "acme/widgets", PR: "1", PID: liveTestPID, Status: "running"})
+	if err := os.Chmod(dir, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	if _, cerr := os.ReadDir(dir); cerr == nil {
+		t.Fatalf("positive control failed: %s is still listable at mode 000 (running as root?), so this test would not reach the error branch", dir)
+	}
+	stubLivePID(t)
+
+	got, err := LiveSupervisors(dir)
+	if err == nil {
+		t.Fatalf("LiveSupervisors = {ByRepo:%v Total:%d}, nil; want an error for an unreadable directory", got.ByRepo, got.Total)
+	}
+	if !strings.Contains(err.Error(), dir) {
+		t.Errorf("error %q does not name %s", err, dir)
+	}
+	if got.Total != 0 {
+		t.Errorf("Total = %d alongside an error, want zero", got.Total)
+	}
+}
+
+// An empty override resolves the standard location, $XDG_STATE_HOME/cenci/babysit
+// (the same directory the daemon's spawned supervisor writes to).
+func TestLiveSupervisors_EmptyOverrideUsesTheStandardStateDirectory(t *testing.T) {
+	stubLivePID(t)
+	home := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", home)
+	dir := filepath.Join(home, "cenci", "babysit")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeLiveState(t, dir, State{Repo: "acme/widgets", PR: "1", PID: liveTestPID, Status: "running"})
+
+	got, err := LiveSupervisors("")
+	if err != nil {
+		t.Fatalf("LiveSupervisors: %v", err)
+	}
+	if got.Total != 1 || !got.Live("acme/widgets", "1") {
+		t.Errorf("LiveSupervisors(\"\") = {ByRepo:%v Total:%d}, want the one state under %s", got.ByRepo, got.Total, dir)
 	}
 }

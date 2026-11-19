@@ -92,6 +92,13 @@ const armRequestKind = "babysit-arm"
 // arguments the host-side spawn (#1095's hostArmSpawn) needs. TmuxSocket is the
 // tmux server socket TmuxPane lives on (#1431), omitted when empty so an
 // unset socket keeps today's wire form; the daemon validates it on receipt.
+//
+// LaunchID is the sandbox launch's own CENCI_LAUNCH_ID (#1135), the identity the
+// request is bound to: the daemon accepts the request only when it equals the
+// named pane's host-written @cenci-launch-id, and resolves the host repo only
+// from the container recorded on that pane. It is omitted when empty (a client
+// outside a launched sandbox), which the daemon refuses. It is a bearer value
+// inside the launch: the daemon never echoes it in a reply or a log line.
 type ArmRequest struct {
 	PR         string        `json:"pr"`
 	Repo       string        `json:"repo"`
@@ -99,6 +106,7 @@ type ArmRequest struct {
 	Interval   time.Duration `json:"interval"`
 	TmuxPane   string        `json:"tmux_pane"`
 	TmuxSocket string        `json:"tmux_socket,omitempty"`
+	LaunchID   string        `json:"launch_id,omitempty"`
 }
 
 // ArmResponse is the daemon's single ack-or-nack reply to an ArmRequest,
