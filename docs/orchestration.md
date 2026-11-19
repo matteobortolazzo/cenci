@@ -142,7 +142,9 @@ working` uses) before relaunching the planning session against the persisted
 or unverifiable (the stored comment ID absent from the thread, or its body lacking the exact
 nonce marker) fails closed instead — dispatch never repairs an anchor itself, it only reports
 the gap; repair is a separate, human-triggered `/cenci:implement <id>` run. This is the same relaunch shape
-as an ordinary `Planned` pickup, just pointed at a draft instead of a finished plan.
+as an ordinary `Planned` pickup, just pointed at a draft instead of a finished plan. The relaunch
+names the one authorized reply (an `answer-comment=<id>` token on the launch argument), and the
+session re-checks that comment against GitHub and reads only its body, never the rest of the thread (#910).
 
 **Failed-launch rollback and interrupted-resume recovery (ticket #853).** A resume launch
 that fails to spawn a tmux window at all rolls the claim straight back to `+Input Needed`

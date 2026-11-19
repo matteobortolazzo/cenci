@@ -40,11 +40,24 @@ var clearLaunchFn = pipeline.ClearLaunch
 // before ever renaming it.
 const replanContextToken = "replan"
 
+// answerCommentContextToken (#910) is the prefix of the single token appended
+// to a resume launch's Ticket argument (".plans/<file> answer-comment=<id>"),
+// naming the one escalation-answer comment the dispatch probe found
+// authorized. The dispatched implement session's plan-file mode recognizes it
+// (flow/skills/implement/SKILL.md) and reads only that comment, after
+// re-checking it itself -- the ID is a pointer, never authorization.
+// Literal shared across projects (#357, watch/AGENTS.md): grep both ends
+// before ever renaming it; resume_crosslane_test.go pins the SKILL.md side.
+const answerCommentContextToken = "answer-comment="
+
 // dispatchTicketArg builds the run.Opts.Ticket argument for d, per kind
-// (#828): the ordinary and resume kinds launch the matched plan file exactly
-// as before; a planning-pickup dispatch (Plan == nil) launches the bare
-// ticket number so the implement session's Phase 1 discovers there is no
-// plan yet; an autonomous re-plan (Planning && Replan, Plan != nil) appends
+// (#828): the ordinary kind launches the matched plan file exactly as
+// before; a resume (#827) launches the same plan file and, when it carries an
+// answering comment ID (#910), appends " answer-comment=<id>" (only for
+// d.Resume && d.AnswerCommentID > 0 -- every other kind stays byte-identical);
+// a planning-pickup dispatch (Plan == nil) launches the bare ticket number so
+// the implement session's Phase 1 discovers there is no plan yet; an
+// autonomous re-plan (Planning && Replan, Plan != nil) appends
 // replanContextToken so the session's --replan-requested branch skips
 // Phase 1's human-confirmation gate on the stale-plan path. WindowTicket is
 // always the bare ticket number, set separately at the call site.
@@ -55,7 +68,11 @@ func dispatchTicketArg(d Decision) string {
 	if d.Planning && d.Replan {
 		return strconv.Itoa(d.Ticket.Number) + " " + replanContextToken
 	}
-	return filepath.Join(".plans", filepath.Base(d.Plan.Path))
+	arg := filepath.Join(".plans", filepath.Base(d.Plan.Path))
+	if d.Resume && d.AnswerCommentID > 0 {
+		arg += " " + answerCommentContextToken + strconv.FormatInt(d.AnswerCommentID, 10)
+	}
+	return arg
 }
 
 // dispatchDeps are the collected, impure inputs to a dispatch pass. Separating
@@ -70,6 +87,12 @@ type dispatchDeps struct {
 	// every `Input Needed` ticket this pass (#827), resolved by
 	// resolveAnswerProbes (resume.go) before applyDispatch/Decide ever run.
 	Answers map[string]AnswerProbe
+
+	// AnswerCommentIDs maps planKey(repo, number) -> the answering comment's
+	// ID for every ticket whose probe is AnswerProbeAnswered (#910), resolved
+	// by resolveAnswerProbes next to Answers and threaded straight through to
+	// Inputs.AnswerCommentIDs.
+	AnswerCommentIDs map[string]int64
 
 	// RepoAutonomy maps repo -> the resolved RepoAutonomy for that repo this
 	// pass (#851), resolved by probeRepoAutonomies before applyDispatch/
@@ -220,7 +243,7 @@ func RunOnce(cfg Config, ctrl run.Controller, mut TicketMutator, dryRun bool, ou
 	// rather than countAttempts (a destructive-verdict input): one
 	// transient gh hiccup must never paint the whole pass
 	// dispatch_pass_failed.
-	answers := resolveAnswerProbes(tickets, indexPlans(plans), out)
+	answers, answerCommentIDs := resolveAnswerProbes(tickets, indexPlans(plans), out)
 
 	// Planning trust probe (#847): for every unattended planning pickup or
 	// re-plan candidate in a lean repo (after the attended narrowing above),
@@ -251,6 +274,7 @@ func RunOnce(cfg Config, ctrl run.Controller, mut TicketMutator, dryRun bool, ou
 		Now:                       time.Now(),
 		CurrentUser:               currentUser,
 		Answers:                   answers,
+		AnswerCommentIDs:          answerCommentIDs,
 		RepoAutonomy:              autonomies,
 		PlanProbes:                planProbes,
 		PlanInventories:           planInventories,
@@ -420,6 +444,7 @@ func applyDispatch(cfg Config, deps dispatchDeps, ctrl run.Controller, mut Ticke
 		CurrentUser:               deps.CurrentUser,
 		Config:                    cfg,
 		Answers:                   deps.Answers,
+		AnswerCommentIDs:          deps.AnswerCommentIDs,
 		RepoAutonomy:              deps.RepoAutonomy,
 		PlanProbes:                deps.PlanProbes,
 		PlanInventories:           deps.PlanInventories,

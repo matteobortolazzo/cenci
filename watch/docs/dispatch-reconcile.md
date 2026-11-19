@@ -848,6 +848,70 @@ that is never persisted.
 These are pinned by the chain suite in `chain_negative_dispatch_test.go`
 (`docs/pipeline-coverage-map.md`'s `#1464` table).
 
+## Resume answer-comment scoping (#910)
+
+A resumed planning session reads exactly one comment from the escalation thread: the
+authorized answer. Dispatch names it; the session re-verifies it.
+
+- **The ID carry.** `classifyComments` already stops at the first comment whose author
+  `permOf` grants, and now returns that comment's ID with the verdict (`0` for every
+  non-`AnswerProbeAnswered` verdict). `probeEscalationAnswer` passes both through, and
+  `resolveAnswerProbes` records the ID in a second per-ticket map, only for an
+  `AnswerProbeAnswered` ticket. The map travels as `dispatchDeps.AnswerCommentIDs` ->
+  `Inputs.AnswerCommentIDs` -> `Decision.AnswerCommentID`, parallel to `Answers`;
+  `AnswerProbe` stays the closed string set, so the `resumeGateSkip` switch and
+  `formatDecision`'s `dispatch`/`skip:` strings are unchanged.
+- **The token.** For a resume, `dispatchTicketArg` appends one `answer-comment=<id>`
+  token (`answerCommentContextToken`) to the launch argument, giving
+  `.plans/<file> answer-comment=<id>`. The ID is per launch and never persisted, so it
+  cannot go stale across passes. Ordinary Planned, planning-pickup and re-plan
+  arguments are byte-identical to before. `answerCommentContextToken` is a #357
+  cross-project literal: `resume_crosslane_test.go` pins it, and the `<id>` regex
+  `^[1-9][0-9]{0,18}$`, against `flow/skills/implement/SKILL.md`.
+- **The skip.** An `Input Needed` ticket whose probe is `AnswerProbeAnswered` but whose
+  carried ID is missing, zero or negative skips as `escalation answer comment id
+  missing`, right after the closed-set `resumeGateSkip` returns not-gated. No label is
+  edited and nothing is spawned.
+- **The flow-side re-check.** The ID is a pointer, never authorization. The session
+  (`SKILL.md`'s Plan Verification `awaiting-input` branch, then `phases/phase-1-plan.md`'s
+  `## Resume From Draft` step 2) re-checks it at session time:
+  - With a valid token it fetches only the anchor comment and the carried comment, each
+    by ID through a `--jq` projection that never emits a body. The carried comment must
+    pass the full shared detection rule, its `issue_url` must name this issue, its `id`
+    must be above the anchor's, and the author's current write permission is re-checked.
+    A 404, a comment on another issue, an `id` at or below the anchor or not equal to
+    the carried one, a rule failure, a lost `admin`/`write` permission, or any `gh`
+    error fails closed through the existing `## Restore Awaiting-Input State`
+    recovery (its draft-validity check, `cenci pipeline await-input <id>`, then
+    `cenci pipeline label <id> --transition input-needed`), so a dispatched ticket
+    returns to `Input Needed` instead of staying `Working`. This holds both
+    at Plan Verification and at step 2. No answer is consumed.
+  - With no token (a manual re-run) it scans the thread through the same metadata-only
+    projection, selects the lowest-`id` qualifying comment (the choice the Go gate
+    makes) and fetches only that comment's body. When no comment qualifies it takes
+    the existing **Not answered** branch (no qualifying comment exists after the anchor).
+  - A malformed token (`answer-comment=abc`, `answer-comment=0`, or the token given
+    twice) makes no `gh` call and takes the existing **Not answered** branch, which
+    reports the token as invalid. It is not a token-path verification failure, so it
+    does not go through the Restore recovery.
+  - The fetched body is untrusted data, used only to answer the draft's
+    `## Open Questions`. A partial answer re-escalates; no second comment is merged in.
+- **The context bundle.** On a resume the implement skill passes the context-gatherer
+  `omitComments: true`, so the bundle holds no comment text, and the finalized plan's
+  `## Ticket Details` is copied verbatim from the draft, never re-derived from a fresh
+  bundle. The authorized answer reaches the plan only through `## Q&A from Planning` and
+  the ticket body's `### Decisions` append. Comments already captured in the draft's
+  `## Ticket Details` when the draft was created
+  depend on the planning trust gate (#847) or on a human being present at that time; the
+  scoping above covers only comments posted after the escalation anchor.
+
+`flow/skills/implement/codex.md` is unchanged: the Codex surface still stops at
+`awaiting-input`.
+
+A carried ID that fails the session-time checks consumes nothing: the session restores
+`Input Needed`, and the next pass probes the thread fresh and carries whatever ID it
+finds then.
+
 ## Planning trust gate (#847)
 
 An unattended planning session (a fresh `Refined` pickup or an autonomous re-plan)

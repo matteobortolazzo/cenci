@@ -84,8 +84,16 @@ type restIssueComment struct {
 // the sole reader of Plan.EscalationNonce/EscalationCommentID outside
 // Decide itself, since Decide's own gate chain must stay pure (no I/O).
 // Bounded by maxAnswerProbes across the whole call.
-func resolveAnswerProbes(tickets []Ticket, planByTicket map[string]*Plan, out io.Writer) map[string]AnswerProbe {
+//
+// The second return value (#910) maps the same planKey to the ID of the one
+// comment that answered the escalation -- the first comment whose author was
+// granted write permission (classifyComments). An entry exists ONLY for an
+// AnswerProbeAnswered ticket; every other verdict has no entry at all, so a
+// map miss and an ID <= 0 both mean "no usable answer comment" to Decide. The
+// ID is a pointer for the launched session to re-verify, never authorization.
+func resolveAnswerProbes(tickets []Ticket, planByTicket map[string]*Plan, out io.Writer) (map[string]AnswerProbe, map[string]int64) {
 	answers := make(map[string]AnswerProbe)
+	answerCommentIDs := make(map[string]int64)
 	budget := &answerProbeBudget{}
 	// permCache is the per-pass write-permission cache (#882 plan's
 	// Assumptions): constructed once here, threaded into every probe this
@@ -106,9 +114,14 @@ func resolveAnswerProbes(tickets []Ticket, planByTicket map[string]*Plan, out io
 		permOf := func(login string) WritePermission {
 			return permCache.resolveWritePermission(repo, login, out)
 		}
-		answers[planKey(t.Repo, t.Number)] = probeEscalationAnswer(t.Repo, t.Number, anchorID, nonce, budget, permOf, out)
+		key := planKey(t.Repo, t.Number)
+		probe, answerID := probeEscalationAnswer(t.Repo, t.Number, anchorID, nonce, budget, permOf, out)
+		answers[key] = probe
+		if probe == AnswerProbeAnswered {
+			answerCommentIDs[key] = answerID
+		}
 	}
-	return answers
+	return answers, answerCommentIDs
 }
 
 // validAnchor reports whether anchorID/nonce are well-formed enough to even
@@ -153,9 +166,13 @@ func validAnchor(anchorID int64, nonce string) bool {
 // (dispatch.go:193-210): probeEscalationAnswer/classifyComments stay free of
 // owning the permission cache's lifetime themselves, since it is
 // resolveAnswerProbes' per-pass construction that owns it.
-func probeEscalationAnswer(repo string, number int, anchorID int64, nonce string, budget *answerProbeBudget, permOf func(string) WritePermission, out io.Writer) AnswerProbe {
+//
+// The second return value (#910) is the ID of the answering comment, set only
+// with AnswerProbeAnswered (classifyComments) and 0 on every other path --
+// including every early return and gh failure below.
+func probeEscalationAnswer(repo string, number int, anchorID int64, nonce string, budget *answerProbeBudget, permOf func(string) WritePermission, out io.Writer) (AnswerProbe, int64) {
 	if !validAnchor(anchorID, nonce) {
-		return AnswerProbeAnchorUnset
+		return AnswerProbeAnchorUnset, 0
 	}
 
 	if budget.calls >= maxAnswerProbes {
@@ -163,7 +180,7 @@ func probeEscalationAnswer(repo string, number int, anchorID int64, nonce string
 			logf(out, "dispatch: escalation answer probe cap (%d) reached, remaining unresolved\n", maxAnswerProbes)
 			budget.logged = true
 		}
-		return AnswerProbeUnresolved
+		return AnswerProbeUnresolved, 0
 	}
 	budget.calls++
 
@@ -186,14 +203,14 @@ func probeEscalationAnswer(repo string, number int, anchorID int64, nonce string
 			detail := truncateDetail(collapseLines(stdout+stderr), maxProbeLogDetailBytes)
 			logf(out, "dispatch: escalation answer probe failed for %s#%d: %v (%s)\n", repo, number, err, detail)
 		}
-		return AnswerProbeUnresolved
+		return AnswerProbeUnresolved, 0
 	}
 
 	var comments []restIssueComment
 	if err := json.Unmarshal([]byte(stdout), &comments); err != nil {
 		detail := truncateDetail(collapseLines(stdout+stderr), maxProbeLogDetailBytes)
 		logf(out, "dispatch: escalation answer probe failed for %s#%d: %v (%s)\n", repo, number, err, detail)
-		return AnswerProbeUnresolved
+		return AnswerProbeUnresolved, 0
 	}
 	return classifyComments(comments, anchorID, nonce, permOf)
 }
@@ -271,7 +288,10 @@ func truncateDetail(s string, max int) string {
 // prefilters (#882 plan Assumptions): it continues past a permission-denied
 // or permission-unresolved commenter, so a genuinely authorized reply later
 // in the thread still resumes. The first candidate permOf grants is
-// immediately AnswerProbeAnswered. If none is granted, the reported verdict
+// immediately AnswerProbeAnswered, and its comment ID (#910) is the second
+// return value -- the one comment the resumed session is allowed to read. The
+// ID is 0 for every other verdict, and a denied or unresolved commenter's
+// comment is never the ID. If none is granted, the reported verdict
 // follows a precedence rule (watch/docs/error-handling.md #850's "unreliable
 // verdict is not the same as resolved deny"): an unresolved/error
 // permission-probe class outranks a positively-denied class for the
@@ -286,9 +306,9 @@ func truncateDetail(s string, max int) string {
 // comment copies the marker verbatim into their own reply's `>`-quoted
 // lines, and a raw (unstripped) scan would misclassify that quote-reply
 // (AC3).
-func classifyComments(comments []restIssueComment, anchorID int64, nonce string, permOf func(string) WritePermission) AnswerProbe {
+func classifyComments(comments []restIssueComment, anchorID int64, nonce string, permOf func(string) WritePermission) (AnswerProbe, int64) {
 	if !validAnchor(anchorID, nonce) {
-		return AnswerProbeAnchorUnset
+		return AnswerProbeAnchorUnset, 0
 	}
 
 	sorted := make([]restIssueComment, len(comments))
@@ -303,12 +323,12 @@ func classifyComments(comments []restIssueComment, anchorID int64, nonce string,
 		}
 	}
 	if anchorIdx < 0 {
-		return AnswerProbeAnchorMismatch
+		return AnswerProbeAnchorMismatch, 0
 	}
 
 	marker := escalationAnchorPrefix + nonce + " -->"
 	if !strings.Contains(stripBlockquoteLines(sorted[anchorIdx].Body), marker) {
-		return AnswerProbeAnchorMismatch
+		return AnswerProbeAnchorMismatch, 0
 	}
 
 	deniedSeen := false
@@ -322,7 +342,7 @@ func classifyComments(comments []restIssueComment, anchorID int64, nonce string,
 		}
 		perm := permOf(c.Author.Login)
 		if perm == WritePermissionGranted {
-			return AnswerProbeAnswered
+			return AnswerProbeAnswered, c.ID
 		}
 		probe := writePermissionAnswerProbe(perm)
 		if probe == AnswerProbeUnauthorized {
@@ -340,12 +360,12 @@ func classifyComments(comments []restIssueComment, anchorID int64, nonce string,
 		}
 	}
 	if unresolvedVerdict != "" {
-		return unresolvedVerdict
+		return unresolvedVerdict, 0
 	}
 	if deniedSeen {
-		return AnswerProbeUnauthorized
+		return AnswerProbeUnauthorized, 0
 	}
-	return AnswerProbeWaiting
+	return AnswerProbeWaiting, 0
 }
 
 // isBotLogin classifies a comment author login as bot-shaped: a `*[bot]`

@@ -79,7 +79,7 @@ func TestResumeCrossLane_ProducerTemplateThroughRealClassifyComments(t *testing.
 		{ID: anchorID, Body: "Question text.\n" + rendered, Author: restCommentAuthor{Login: "matteobortolazzo", Type: "User"}},
 		{ID: anchorID + 1, Body: "Here's my answer.", Author: restCommentAuthor{Login: "octocat", Type: "User"}, AuthorAssociation: "COLLABORATOR"},
 	}
-	got := classifyComments(comments, anchorID, nonce, grantAllPermission)
+	got, _ := classifyComments(comments, anchorID, nonce, grantAllPermission)
 	if got != AnswerProbeAnswered {
 		t.Errorf("classifyComments(real producer template, rendered) = %q, want AnswerProbeAnswered", got)
 	}
@@ -208,7 +208,7 @@ func TestResumeCrossLane_ReEscalationReplacementNonceThroughRealClassifyComments
 			{ID: newAnchorID, Body: "Still-open question.\n" + newRendered, Author: restCommentAuthor{Login: "matteobortolazzo", Type: "User"}},
 			{ID: newAnchorID + 1, Body: "Here's my answer.", Author: restCommentAuthor{Login: "octocat", Type: "User"}, AuthorAssociation: "COLLABORATOR"},
 		}
-		got := classifyComments(comments, newAnchorID, newNonce, grantAllPermission)
+		got, _ := classifyComments(comments, newAnchorID, newNonce, grantAllPermission)
 		if got != AnswerProbeAnswered {
 			t.Errorf("classifyComments(new anchor + qualifying reply) = %q, want AnswerProbeAnswered", got)
 		}
@@ -223,7 +223,7 @@ func TestResumeCrossLane_ReEscalationReplacementNonceThroughRealClassifyComments
 			{ID: oldAnchorID, Body: "Original question.\n" + oldRendered, Author: restCommentAuthor{Login: "matteobortolazzo", Type: "User"}},
 			{ID: oldAnchorID + 1, Body: "Here's my answer.", Author: restCommentAuthor{Login: "octocat", Type: "User"}, AuthorAssociation: "COLLABORATOR"},
 		}
-		got := classifyComments(comments, newAnchorID, newNonce, grantAllPermission)
+		got, _ := classifyComments(comments, newAnchorID, newNonce, grantAllPermission)
 		if got != AnswerProbeAnchorMismatch {
 			t.Errorf("classifyComments(reply to old/orphaned anchor only) = %q, want AnswerProbeAnchorMismatch", got)
 		}
@@ -236,7 +236,7 @@ func TestResumeCrossLane_ReEscalationReplacementNonceThroughRealClassifyComments
 		comments := []restIssueComment{
 			{ID: newAnchorID, Body: "Still-open question.\n" + newRendered, Author: restCommentAuthor{Login: "matteobortolazzo", Type: "User"}},
 		}
-		got := classifyComments(comments, 0, newNonce, grantAllPermission)
+		got, _ := classifyComments(comments, 0, newNonce, grantAllPermission)
 		if got != AnswerProbeAnchorUnset {
 			t.Errorf("classifyComments(nonce without ID) = %q, want AnswerProbeAnchorUnset", got)
 		}
@@ -276,6 +276,50 @@ func TestResumeCrossLane_AcceptedPermissionSetStatedInPhase1PlanMatchesGoAccepte
 	// Q1: custom org roles make it an open set).
 	if strings.Contains(section, "`role_name`") {
 		t.Errorf("cross-lane (#882): %s's '## Resume From Draft' section must never document `role_name` as a consulted signal (plan Q1)", path)
+	}
+}
+
+// -- #910: answer-comment launch-argument token cross-lane identity ---------
+
+// answerCommentIDRegexLiteral is the exact `<id>` pattern SKILL.md's plan-file
+// argument parsing documents (#910): a positive decimal of at most 19 digits,
+// no leading zero. Pinned here as a plain literal so the doc, not this file,
+// stays the source of the rule -- the test fails if SKILL.md drifts from it.
+const answerCommentIDRegexLiteral = `^[1-9][0-9]{0,18}$`
+
+// TestResumeCrossLane_AnswerCommentTokenMatchesSkill pins the #357 cross-project
+// literal: the Go constant dispatchTicketArg appends to a resume launch and the
+// token SKILL.md's plan-file mode recognizes must be the same string, and the
+// documented `<id>` regex must accept a real comment ID while rejecting zero and
+// non-numeric values. Same hard t.Fatal-never-t.Skip requirement as the rest of
+// this file: an unreadable SKILL.md is a failure, not a skip.
+func TestResumeCrossLane_AnswerCommentTokenMatchesSkill(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "flow", "skills", "implement", "SKILL.md")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("cross-lane (#910): could not read the consumer doc at %s: %v -- this is a hard failure, never a skip", path, err)
+	}
+	content := string(data)
+
+	wantToken := "`" + answerCommentContextToken + "<id>`"
+	if !strings.Contains(content, wantToken) {
+		t.Errorf("cross-lane (#910): %s does not contain the token literal %s built from the real Go constant answerCommentContextToken (%q)", path, wantToken, answerCommentContextToken)
+	}
+	if !strings.Contains(content, answerCommentIDRegexLiteral) {
+		t.Errorf("cross-lane (#910): %s does not state the id regex %s", path, answerCommentIDRegexLiteral)
+	}
+
+	re, err := regexp.Compile(answerCommentIDRegexLiteral)
+	if err != nil {
+		t.Fatalf("cross-lane (#910): documented id regex %s does not compile: %v", answerCommentIDRegexLiteral, err)
+	}
+	if !re.MatchString("12") {
+		t.Errorf("cross-lane (#910): documented id regex %s must accept a comment ID such as 12", answerCommentIDRegexLiteral)
+	}
+	for _, bad := range []string{"0", "abc"} {
+		if re.MatchString(bad) {
+			t.Errorf("cross-lane (#910): documented id regex %s must reject %q", answerCommentIDRegexLiteral, bad)
+		}
 	}
 }
 
@@ -354,7 +398,7 @@ func TestResumeCrossLane_BannerCarryingEscalationStillMatchesAnchorAndExcludesMa
 			{ID: anchorID, Body: escalationBody, Author: restCommentAuthor{Login: "matteobortolazzo", Type: "User"}},
 			{ID: anchorID + 1, Body: "Here's my answer.", Author: restCommentAuthor{Login: "octocat", Type: "User"}, AuthorAssociation: "COLLABORATOR"},
 		}
-		got := classifyComments(comments, anchorID, nonce, grantAllPermission)
+		got, _ := classifyComments(comments, anchorID, nonce, grantAllPermission)
 		if got != AnswerProbeAnswered {
 			t.Errorf("classifyComments(banner-carrying anchor + human reply) = %q, want AnswerProbeAnswered", got)
 		}
@@ -394,7 +438,7 @@ func TestResumeCrossLane_BannerCarryingEscalationStillMatchesAnchorAndExcludesMa
 			{ID: anchorID, Body: escalationBody, Author: restCommentAuthor{Login: "matteobortolazzo", Type: "User"}},
 			{ID: anchorID + 1, Body: markerBannerBody, Author: restCommentAuthor{Login: "octocat", Type: "User"}, AuthorAssociation: "COLLABORATOR"},
 		}
-		got := classifyComments(comments, anchorID, nonce, grantAllPermission)
+		got, _ := classifyComments(comments, anchorID, nonce, grantAllPermission)
 		if got != AnswerProbeWaiting {
 			t.Errorf("classifyComments(marker-bearing flow comment, no human reply) = %q, want AnswerProbeWaiting", got)
 		}
@@ -414,7 +458,7 @@ func TestResumeCrossLane_BannerCarryingEscalationStillMatchesAnchorAndExcludesMa
 			{ID: anchorID, Body: escalationBody, Author: restCommentAuthor{Login: "matteobortolazzo", Type: "User"}},
 			{ID: anchorID + 1, Body: unmarkedBody, Author: restCommentAuthor{Login: "octocat", Type: "User"}, AuthorAssociation: "COLLABORATOR"},
 		}
-		got := classifyComments(comments, anchorID, nonce, grantAllPermission)
+		got, _ := classifyComments(comments, anchorID, nonce, grantAllPermission)
 		if got != AnswerProbeAnswered {
 			t.Errorf("classifyComments(same comment without marker) = %q, want AnswerProbeAnswered", got)
 		}

@@ -130,8 +130,13 @@ else
     "must state the closed accepted-permission-value set verbatim (#882, plan Q1 -- role_name is never consulted)"
   assert_section_contains 'Any permission-probe failure — an API error, a timeout, truncated output, malformed JSON, a missing `permission` field, or an unrecognized value — fails closed exactly like an unanswered escalation' \
     "must state the fail-closed-on-probe-failure sentence verbatim (#882)"
-  assert_section_contains 'most recent qualifying comment' \
-    "must use most-recent language for the answer scan"
+  # #910: the answer text is exactly ONE selected comment's body, never a
+  # merge of the most recent qualifying comment(s). The detailed token/
+  # no-token path assertions live in resume-comment-scope-contract.test.sh.
+  assert_section_contains 'the answer text is exactly the selected comment'"'"'s body' \
+    "must scope the answer text to exactly the one selected comment's body (#910)"
+  [[ "${RESUME_SECTION}" != *'most recent qualifying comment'* ]] || \
+    fail "phase-1-plan.md (## Resume From Draft) must no longer take the most recent qualifying comment(s) as the answer (#910)"
   assert_section_contains 'never guess' \
     "must state the never-guess completeness rule"
   assert_section_contains 'This new nonce replaces the draft'"'"'s active `escalationNonce`' \

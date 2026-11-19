@@ -237,14 +237,16 @@ func TestAutonomousChain_PositiveEndToEnd(t *testing.T) {
 	// Order step 5: land this fixture/seed before the gate, not after, or
 	// this existing phase D would fail for the wrong reason).
 	h.seedPermission("octocat", "write")
-	h.addIssueComment(101, "octocat", "User", "OWNER", "Go with approach A.")
+	answerID := h.addIssueComment(101, "octocat", "User", "OWNER", "Go with approach A.")
 
 	decisions, _ = chainRunOnce(t, cfg, mut, false)
 	resumeDecision := decisionFor(t, decisions, 101)
 	if !resumeDecision.Resume || resumeDecision.Reason != "resume — human answered" {
 		t.Fatalf("phase D: #101 decision = %+v, want a resume dispatch", resumeDecision)
 	}
-	wantTicketArg := filepath.Join(".plans", filepath.Base(planPath))
+	// #910: the resume launch names the one authorized answer comment, the ID
+	// the real probe read back from the fake thread.
+	wantTicketArg := filepath.Join(".plans", filepath.Base(planPath)) + " " + answerCommentContextToken + strconv.FormatInt(answerID, 10)
 	if len(captured) != 1 || captured[0].Ticket != wantTicketArg {
 		t.Fatalf("phase D: runFn Opts = %+v, want Ticket=%q", captured, wantTicketArg)
 	}
