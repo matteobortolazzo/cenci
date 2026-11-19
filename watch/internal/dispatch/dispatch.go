@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/capacity"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/pipeline"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/planfile"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/run"
@@ -29,6 +30,33 @@ var resolveLaunchSocket = tmux.ResolveSocket
 // clearLaunchFn is the recorded-launch clearing seam (#1292): applyDispatch
 // calls it before each spawn so tests can inject a failure.
 var clearLaunchFn = pipeline.ClearLaunch
+
+// dailyQuotaFn is the persisted daily launch counter seam (#1566). applyDispatch
+// calls it only when Config.DailyQuota is set, so a pass with the quota off
+// never opens, reads or writes the capacity store. Tests point it at a temp
+// directory (TestMain, useQuotaDir) so no ambient state directory is touched.
+var dailyQuotaFn = func() *capacity.DailyQuota { return capacity.NewDailyQuota(capacity.Dir()) }
+
+// readDailyQuota resolves Inputs.DailyQuota for one pass (#1566). A nil counter
+// (quota off) reads nothing and returns the zero state, which the gate ignores.
+// A real pass reads under the store lock (Used); a dry run takes no lock and
+// creates nothing (Peek). A failed read yields the path-free reason as
+// Unreadable and logs it once per pass, so the gate blocks every dispatch.
+func readDailyQuota(q *capacity.DailyQuota, now time.Time, dryRun bool, out io.Writer) DailyQuotaState {
+	if q == nil {
+		return DailyQuotaState{}
+	}
+	read := q.Used
+	if dryRun {
+		read = q.Peek
+	}
+	used, err := read(now)
+	if err != nil {
+		logf(out, "dispatch: daily quota state unreadable: %s\n", err)
+		return DailyQuotaState{Unreadable: err.Error()}
+	}
+	return DailyQuotaState{Read: true, Used: used}
+}
 
 // replanContextToken (#828) is the escape-hatch token appended to the run
 // Ticket argument for an autonomous re-plan dispatch ("<number> replan"), so
@@ -117,12 +145,13 @@ type dispatchDeps struct {
 
 // RunOnce gathers inputs (tickets, plans, snapshot, clock), runs the pure
 // engine, logs every decision, then dispatches each ActionDispatch via run.Run
-// (unless dryRun). prior, when non-nil, is the daily-quota tally: it is read in
-// and incremented per successful dispatch. It returns the full decision table
-// alongside the first collection error encountered (CollectTickets, then
-// per-repo ReadPlans), if any -- all existing logging is unchanged, this only
-// additionally surfaces the error to the caller instead of swallowing it.
-func RunOnce(cfg Config, ctrl run.Controller, mut TicketMutator, dryRun bool, out io.Writer, prior *int) ([]Decision, error) {
+// (unless dryRun). The daily quota (#1566), when Config.DailyQuota is set, is
+// read from and recorded to the persisted capacity store by applyDispatch. It
+// returns the full decision table alongside the first collection error
+// encountered (CollectTickets, then per-repo ReadPlans), if any -- all existing
+// logging is unchanged, this only additionally surfaces the error to the caller
+// instead of swallowing it.
+func RunOnce(cfg Config, ctrl run.Controller, mut TicketMutator, dryRun bool, out io.Writer) ([]Decision, error) {
 	if out == nil {
 		out = os.Stdout
 	}
@@ -259,7 +288,7 @@ func RunOnce(cfg Config, ctrl run.Controller, mut TicketMutator, dryRun bool, ou
 		RepoMemory:                repoMemory,
 		OOMBackoffSince:           oomBackoffSince,
 		PlanningTrust:             planningTrust,
-	}, ctrl, mut, dryRun, out, prior)
+	}, ctrl, mut, dryRun, out)
 
 	// #927, #1464: the per-repo session sentinel(s) must outrank a same-pass
 	// collectErr (a likely co-occurrence -- both can be driven by the same
@@ -379,7 +408,18 @@ func readPlansForRepos(repos []RepoConfig, syncs map[string]mainSyncResult, out 
 // spawn→self-label window. A failed claim is logged and the pass continues —
 // the spawn already happened, and the reconciler recovers label drift. It is
 // the testable core of RunOnce.
-func applyDispatch(cfg Config, deps dispatchDeps, ctrl run.Controller, mut TicketMutator, dryRun bool, out io.Writer, prior *int) ([]Decision, error) {
+//
+// With Config.DailyQuota set (#1566), the persisted count is read once before
+// Decide (Used on a real pass, Peek on a dry run) and one launch is recorded
+// after each successful spawn, whether or not the Working claim then succeeds.
+// A failed spawn and a dry run record nothing, and a failed record is logged,
+// not returned (RunLoop treats a returned error as fatal). A corrupt,
+// unknown-schema or symlinked file fails closed on the next pass's read, but a
+// write failure that leaves a valid file (disk full, read-only capacity
+// directory, lock timeout) undercounts until the state is writable again: a
+// known limitation, tracked as a follow-up. With the quota off the store is
+// never opened.
+func applyDispatch(cfg Config, deps dispatchDeps, ctrl run.Controller, mut TicketMutator, dryRun bool, out io.Writer) ([]Decision, error) {
 	if out == nil {
 		out = os.Stdout
 	}
@@ -390,10 +430,13 @@ func applyDispatch(cfg Config, deps dispatchDeps, ctrl run.Controller, mut Ticke
 	}
 	sessionByRepo := buildSessionByRepo(cfg.Repos)
 
-	priorVal := 0
-	if prior != nil {
-		priorVal = *prior
+	// Daily quota (#1566): the seam is called, and the store touched, only when a
+	// quota is set. The read happens here, before Decide, so the gate stays pure.
+	var quota *capacity.DailyQuota
+	if cfg.DailyQuota != nil {
+		quota = dailyQuotaFn()
 	}
+	quotaState := readDailyQuota(quota, deps.Now, dryRun, out)
 
 	// Per-repo session eligibility (#1464), resolved before Decide so the gate
 	// sits ahead of the cap check and an ineligible repo never takes a slot. A
@@ -416,7 +459,7 @@ func applyDispatch(cfg Config, deps dispatchDeps, ctrl run.Controller, mut Ticke
 		Snapshot:                  deps.Snapshot,
 		Budgets:                   buildBudgetProvider(cfg, deps.Now),
 		Now:                       deps.Now,
-		Prior:                     priorVal,
+		DailyQuota:                quotaState,
 		CurrentUser:               deps.CurrentUser,
 		Config:                    cfg,
 		Answers:                   deps.Answers,
@@ -463,7 +506,8 @@ func applyDispatch(cfg Config, deps dispatchDeps, ctrl run.Controller, mut Ticke
 	sessionErr := sessionSkipSentinels(decisions)
 
 	var firstErr error
-	for _, d := range decisions {
+	for i := range decisions {
+		d := decisions[i]
 		// A planning-pickup dispatch (#828) carries Plan == nil by design (no
 		// plan file exists yet) -- admit it alongside the ordinary/resume/
 		// re-plan kinds, all of which carry a non-nil Plan.
@@ -565,8 +609,19 @@ func applyDispatch(cfg Config, deps dispatchDeps, ctrl run.Controller, mut Ticke
 			}
 			continue
 		}
-		if prior != nil {
-			*prior++
+		decisions[i].Spawned = true
+		// One launch per successful spawn (#1566), before the claim below: a spawn
+		// whose Working claim then fails still happened and still counts. Never on
+		// a dry run (returned above) or a failed spawn (continued above). A failed
+		// record is logged, not returned -- RunLoop treats a returned error as
+		// fatal. A corrupt, unknown-schema or symlinked file fails closed on the
+		// next pass's read, but a write failure that leaves a valid file undercounts
+		// until the state is writable again (known limitation, tracked as a
+		// follow-up).
+		if quota != nil {
+			if err := quota.Record(deps.Now); err != nil {
+				logf(out, "dispatch: #%d recording daily quota launch failed: %v\n", d.Ticket.Number, err)
+			}
 		}
 		// The resume path already claimed Working above, before the spawn;
 		// the ordinary path claims it here, synchronously after, so no later
@@ -597,13 +652,12 @@ func applyDispatch(cfg Config, deps dispatchDeps, ctrl run.Controller, mut Ticke
 var errConfigReload = errors.New("loading dispatch config")
 
 // RunLoop reloads Config from configPath and runs RunOnce immediately and then
-// on every interval tick, threading the daily-quota tally in memory (it resets
-// on process restart — acceptable for #45). modelOverride, when non-empty (the
-// --model CLI flag), is re-applied to Config every tick, since each tick
-// reloads Config fresh from disk and would otherwise drop it. It blocks until
-// the process exits.
+// on every interval tick. The daily quota (#1566), when set, lives in the
+// persisted capacity store, so it carries across ticks and restarts.
+// modelOverride, when non-empty (the --model CLI flag), is re-applied to Config
+// every tick, since each tick reloads Config fresh from disk and would
+// otherwise drop it. It blocks until the process exits.
 func RunLoop(configPath string, ctrl run.Controller, mut TicketMutator, interval time.Duration, out io.Writer, modelOverride string) error {
-	prior := 0
 	// #927: a session sentinel is a per-repo misconfiguration, not a
 	// loop-fatal condition -- the pass that produced it already logged the
 	// affected repo(s) via resolveSessionEligibility, so RunLoop just keeps ticking
@@ -613,13 +667,13 @@ func RunLoop(configPath string, ctrl run.Controller, mut TicketMutator, interval
 	// error logged, and the corrected file dispatches again on the next tick.
 	// The initial LoadConfig in runDispatch still exits 1, and every other
 	// error stays fatal exactly as today.
-	if err := dispatchTick(configPath, ctrl, mut, out, &prior, modelOverride); err != nil && !isLoopContinuable(err) {
+	if err := dispatchTick(configPath, ctrl, mut, out, modelOverride); err != nil && !isLoopContinuable(err) {
 		return err
 	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for range ticker.C {
-		if err := dispatchTick(configPath, ctrl, mut, out, &prior, modelOverride); err != nil && !isLoopContinuable(err) {
+		if err := dispatchTick(configPath, ctrl, mut, out, modelOverride); err != nil && !isLoopContinuable(err) {
 			return err
 		}
 	}
@@ -635,10 +689,10 @@ func isLoopContinuable(err error) bool {
 // dispatchTick is RunLoop's per-tick body: reload Config from configPath,
 // re-apply modelOverride (if set) since the reload otherwise wins, then run
 // one dispatch pass against the resulting config. On a reload error the tick
-// is skipped entirely (no dispatch, prior left untouched) and errConfigReload
+// is skipped entirely (no dispatch, no quota read or record) and errConfigReload
 // is returned, so a bad edit between ticks cannot crash the loop or silently
 // dispatch against a stale config (or against unrestricted defaults).
-func dispatchTick(configPath string, ctrl run.Controller, mut TicketMutator, out io.Writer, prior *int, modelOverride string) error {
+func dispatchTick(configPath string, ctrl run.Controller, mut TicketMutator, out io.Writer, modelOverride string) error {
 	cfg, ok := reloadConfig(configPath, out)
 	if !ok {
 		return errConfigReload
@@ -646,7 +700,7 @@ func dispatchTick(configPath string, ctrl run.Controller, mut TicketMutator, out
 	if modelOverride != "" {
 		cfg.Model = modelOverride
 	}
-	_, err := RunOnce(cfg, ctrl, mut, false, out, prior)
+	_, err := RunOnce(cfg, ctrl, mut, false, out)
 	return err
 }
 

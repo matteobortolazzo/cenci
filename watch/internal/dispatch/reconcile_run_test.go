@@ -2354,20 +2354,19 @@ esac
 	cfg.Repos = []RepoConfig{{Repo: "o/r", Session: "test-session", Filter: filter}}
 	failOnSpawn(t)
 	mut := &fakeMutator{}
-	prior := 0
 	decisions, err := applyDispatch(cfg, dispatchDeps{
 		Tickets:     []Ticket{recovered},
 		Plans:       []Plan{{Repo: "o/r", Path: ".plans/42-x.md", TicketID: 42, Status: "planned"}},
 		Snapshot:    &watch.StateSnapshot{},
 		Now:         reconcileNow,
 		CurrentUser: "octocat",
-	}, fakeController{}, mut, false, io.Discard, &prior)
+	}, fakeController{}, mut, false, io.Discard)
 	if err != nil {
 		t.Fatalf("applyDispatch: %v", err)
 	}
 	assertDecisions(t, decisions, []wantDecision{{42, ActionSkip, "filter: milestone 7 not in [3]", ""}})
-	if len(mut.labelEdits) != 0 || prior != 0 {
-		t.Errorf("the recovered ticket must not be claimed: edits %+v prior %d", mut.labelEdits, prior)
+	if len(mut.labelEdits) != 0 || countSpawned(decisions) != 0 {
+		t.Errorf("the recovered ticket must not be claimed: edits %+v decisions %+v", mut.labelEdits, decisions)
 	}
 }
 

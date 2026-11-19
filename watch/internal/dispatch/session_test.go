@@ -101,9 +101,7 @@ func TestSessionGate_UnconfiguredSentinelDirectlyDetectable(t *testing.T) {
 	cfg.Repos = []RepoConfig{{Repo: "o/r", Session: ""}}
 	ctrl := &sessionProbeController{t: t, live: map[string]bool{}}
 	mut := &fakeMutator{}
-	prior := 0
-
-	_, err := applyDispatch(cfg, dispatchableDeps(now), ctrl, mut, false, io.Discard, &prior)
+	_, err := applyDispatch(cfg, dispatchableDeps(now), ctrl, mut, false, io.Discard)
 	if !errors.Is(err, ErrSessionUnconfigured) {
 		t.Fatalf("applyDispatch err = %v, want errors.Is(err, ErrSessionUnconfigured)", err)
 	}
@@ -124,9 +122,7 @@ func TestSessionGate_MissingSentinelDirectlyDetectable(t *testing.T) {
 	cfg.Repos = []RepoConfig{{Repo: "o/r", Session: "ghost"}}
 	ctrl := &sessionProbeController{t: t, live: map[string]bool{}} // "ghost" absent
 	mut := &fakeMutator{}
-	prior := 0
-
-	_, err := applyDispatch(cfg, dispatchableDeps(now), ctrl, mut, false, io.Discard, &prior)
+	_, err := applyDispatch(cfg, dispatchableDeps(now), ctrl, mut, false, io.Discard)
 	if !errors.Is(err, ErrSessionMissing) {
 		t.Fatalf("applyDispatch err = %v, want errors.Is(err, ErrSessionMissing)", err)
 	}
@@ -146,9 +142,7 @@ func TestSessionGate_ProbeFailedSentinelDirectlyDetectable(t *testing.T) {
 	cfg.Repos = []RepoConfig{{Repo: "o/r", Session: "ghost"}}
 	ctrl := &sessionProbeController{t: t, probeErrs: map[string]error{"ghost": errors.New("tmux: no server running on socket")}}
 	mut := &fakeMutator{}
-	prior := 0
-
-	_, err := applyDispatch(cfg, dispatchableDeps(now), ctrl, mut, false, io.Discard, &prior)
+	_, err := applyDispatch(cfg, dispatchableDeps(now), ctrl, mut, false, io.Discard)
 	if !errors.Is(err, ErrSessionProbeFailed) || errors.Is(err, ErrSessionMissing) {
 		t.Fatalf("applyDispatch err = %v, want errors.Is(err, ErrSessionProbeFailed) and not ErrSessionMissing", err)
 	}
@@ -175,8 +169,6 @@ func TestApplyDispatchRoutesEachRepoToItsOwnSession(t *testing.T) {
 	}
 	ctrl := &sessionProbeController{t: t, live: map[string]bool{"session-a": true, "session-b": true}}
 	mut := &fakeMutator{}
-	prior := 0
-
 	deps := dispatchDeps{
 		Tickets: []Ticket{
 			{Repo: "o/a", Number: 1, Title: "A", Labels: []string{"Planned"}, Assignees: []string{"octocat"}},
@@ -192,7 +184,7 @@ func TestApplyDispatchRoutesEachRepoToItsOwnSession(t *testing.T) {
 	}
 	authorizedAll(deps.Tickets, deps.Plans)
 
-	if _, err := applyDispatch(cfg, deps, ctrl, mut, false, io.Discard, &prior); err != nil {
+	if _, err := applyDispatch(cfg, deps, ctrl, mut, false, io.Discard); err != nil {
 		t.Fatalf("applyDispatch returned unexpected error: %v", err)
 	}
 
@@ -230,8 +222,6 @@ func TestApplyDispatchIsolatesUnconfiguredRepoFromLiveRepo(t *testing.T) {
 	}
 	ctrl := &sessionProbeController{t: t, live: map[string]bool{"work": true}}
 	mut := &fakeMutator{}
-	prior := 0
-
 	deps := dispatchDeps{
 		Tickets: []Ticket{
 			{Repo: "o/live", Number: 1, Title: "A", Labels: []string{"Planned"}, Assignees: []string{"octocat"}},
@@ -247,7 +237,7 @@ func TestApplyDispatchIsolatesUnconfiguredRepoFromLiveRepo(t *testing.T) {
 	}
 	authorizedAll(deps.Tickets, deps.Plans)
 
-	_, err := applyDispatch(cfg, deps, ctrl, mut, false, io.Discard, &prior)
+	_, err := applyDispatch(cfg, deps, ctrl, mut, false, io.Discard)
 	if !errors.Is(err, ErrSessionUnconfigured) {
 		t.Fatalf("applyDispatch err = %v, want errors.Is(err, ErrSessionUnconfigured) (the pass still surfaces the skip)", err)
 	}
@@ -284,8 +274,6 @@ func TestApplyDispatchRealErrorSurvivesAlongsideSessionSentinel(t *testing.T) {
 	}
 	ctrl := &sessionProbeController{t: t, live: map[string]bool{"work": true}}
 	mut := &fakeMutator{}
-	prior := 0
-
 	deps := dispatchDeps{
 		Tickets: []Ticket{
 			{Repo: "o/unconfigured", Number: 1, Title: "A", Labels: []string{"Planned"}, Assignees: []string{"octocat"}},
@@ -301,7 +289,7 @@ func TestApplyDispatchRealErrorSurvivesAlongsideSessionSentinel(t *testing.T) {
 	}
 	authorizedAll(deps.Tickets, deps.Plans)
 
-	_, err := applyDispatch(cfg, deps, ctrl, mut, false, io.Discard, &prior)
+	_, err := applyDispatch(cfg, deps, ctrl, mut, false, io.Discard)
 	if !errors.Is(err, ErrSessionUnconfigured) {
 		t.Fatalf("applyDispatch err = %v, want errors.Is(err, ErrSessionUnconfigured) to still hold", err)
 	}
@@ -327,9 +315,7 @@ func TestApplyDispatchNeverConsultsAmbientCurrentSession(t *testing.T) {
 	cfg.Repos = []RepoConfig{{Repo: "o/r", Session: "work"}}
 	ctrl := &sessionProbeController{t: t, live: map[string]bool{"work": true}}
 	mut := &fakeMutator{}
-	prior := 0
-
-	if _, err := applyDispatch(cfg, dispatchableDeps(now), ctrl, mut, false, io.Discard, &prior); err != nil {
+	if _, err := applyDispatch(cfg, dispatchableDeps(now), ctrl, mut, false, io.Discard); err != nil {
 		t.Fatalf("applyDispatch returned unexpected error: %v", err)
 	}
 }
@@ -351,9 +337,7 @@ func TestApplyDispatchResumeGatedByUnconfiguredSession_NoLabelMutation(t *testin
 	cfg.Repos = []RepoConfig{{Repo: "o/r", Session: ""}}
 	ctrl := &sessionProbeController{t: t, live: map[string]bool{}}
 	mut := &fakeMutator{}
-	prior := 0
-
-	_, err := applyDispatch(cfg, resumeDispatchDeps(now), ctrl, mut, false, io.Discard, &prior)
+	_, err := applyDispatch(cfg, resumeDispatchDeps(now), ctrl, mut, false, io.Discard)
 	if !errors.Is(err, ErrSessionUnconfigured) {
 		t.Fatalf("applyDispatch err = %v, want errors.Is(err, ErrSessionUnconfigured)", err)
 	}
@@ -376,9 +360,7 @@ func TestApplyDispatchResumeGatedByMissingSession_NoLabelMutation(t *testing.T) 
 	cfg.Repos = []RepoConfig{{Repo: "o/r", Session: "ghost"}}
 	ctrl := &sessionProbeController{t: t, live: map[string]bool{}}
 	mut := &fakeMutator{}
-	prior := 0
-
-	_, err := applyDispatch(cfg, resumeDispatchDeps(now), ctrl, mut, false, io.Discard, &prior)
+	_, err := applyDispatch(cfg, resumeDispatchDeps(now), ctrl, mut, false, io.Discard)
 	if !errors.Is(err, ErrSessionMissing) {
 		t.Fatalf("applyDispatch err = %v, want errors.Is(err, ErrSessionMissing)", err)
 	}
@@ -404,8 +386,6 @@ func TestApplyDispatchNoDispatchableDecisions_ZeroHasSessionProbes(t *testing.T)
 	cfg.Repos = []RepoConfig{{Repo: "o/r", Session: ""}}
 	ctrl := &sessionProbeController{t: t, live: map[string]bool{}}
 	mut := &fakeMutator{}
-	prior := 0
-
 	// A Backlog ticket never becomes ActionDispatch -- zero ActionDispatch
 	// decisions this pass.
 	deps := dispatchDeps{
@@ -415,7 +395,7 @@ func TestApplyDispatchNoDispatchableDecisions_ZeroHasSessionProbes(t *testing.T)
 		CurrentUser: "octocat",
 	}
 
-	if _, err := applyDispatch(cfg, deps, ctrl, mut, false, io.Discard, &prior); err != nil {
+	if _, err := applyDispatch(cfg, deps, ctrl, mut, false, io.Discard); err != nil {
 		t.Fatalf("applyDispatch returned unexpected error: %v", err)
 	}
 	if len(ctrl.hasSessionCalls) != 0 {
@@ -438,8 +418,6 @@ func TestApplyDispatchGatedRepo_AtMostOneHasSessionProbe(t *testing.T) {
 	cfg.Repos = []RepoConfig{{Repo: "o/r", Session: "ghost"}}
 	ctrl := &sessionProbeController{t: t, live: map[string]bool{}}
 	mut := &fakeMutator{}
-	prior := 0
-
 	deps := dispatchDeps{
 		Tickets: []Ticket{
 			{Repo: "o/r", Number: 1, Title: "A", Labels: []string{"Planned"}, Assignees: []string{"octocat"}},
@@ -454,7 +432,7 @@ func TestApplyDispatchGatedRepo_AtMostOneHasSessionProbe(t *testing.T) {
 		CurrentUser: "octocat",
 	}
 
-	_, err := applyDispatch(cfg, deps, ctrl, mut, false, io.Discard, &prior)
+	_, err := applyDispatch(cfg, deps, ctrl, mut, false, io.Discard)
 	if !errors.Is(err, ErrSessionMissing) {
 		t.Fatalf("applyDispatch err = %v, want errors.Is(err, ErrSessionMissing)", err)
 	}
@@ -508,7 +486,7 @@ esac
 	}
 
 	var buf bytes.Buffer
-	_, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, &buf, nil)
+	_, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, &buf)
 	if !errors.Is(err, ErrSessionUnconfigured) {
 		t.Fatalf("RunOnce err = %v, want errors.Is(err, ErrSessionUnconfigured) even with a same-pass collection error", err)
 	}
@@ -589,7 +567,7 @@ func TestRunOnceDryRun_NoSessionsConfigured_NoProbesAndUnconfiguredSkip(t *testi
 	cfg.Repos = []RepoConfig{{Repo: "o/r", Dir: local, Session: ""}}
 
 	var buf bytes.Buffer
-	decisions, err := RunOnce(cfg, ctrl, &fakeMutator{}, true, &buf, nil)
+	decisions, err := RunOnce(cfg, ctrl, &fakeMutator{}, true, &buf)
 	if err != nil {
 		t.Fatalf("dry-run RunOnce returned unexpected error: %v", err)
 	}
@@ -657,7 +635,7 @@ func TestSessionGate_ThreeDistinctFailures(t *testing.T) {
 				cfg.Repos = []RepoConfig{{Repo: "o/r", Dir: t.TempDir(), Session: tt.session}}
 				mut := &fakeMutator{}
 				var buf bytes.Buffer
-				decisions, err := applyDispatch(cfg, deps, tt.ctrl(t), mut, false, &buf, nil)
+				decisions, err := applyDispatch(cfg, deps, tt.ctrl(t), mut, false, &buf)
 				assertDecisions(t, decisions, []wantDecision{{42, ActionSkip, tt.reason, ""}})
 				for _, s := range sentinels {
 					if got, want := errors.Is(err, s), s == tt.sentinel; got != want {
@@ -698,7 +676,7 @@ func TestSessionGate_ErrorAndFalseInSamePass(t *testing.T) {
 	cfg := testConfig()
 	cfg.Repos = []RepoConfig{{Repo: "o/a", Session: "a-work"}, {Repo: "o/b", Session: "b-work"}}
 	ctrl := &sessionProbeController{t: t, live: map[string]bool{"b-work": false}, probeErrs: map[string]error{"a-work": errors.New("tmux: timeout")}}
-	decisions, err := applyDispatch(cfg, plannedAcross(time.Now(), repoTicket{"o/a", 1}, repoTicket{"o/b", 2}), ctrl, &fakeMutator{}, false, io.Discard, nil)
+	decisions, err := applyDispatch(cfg, plannedAcross(time.Now(), repoTicket{"o/a", 1}, repoTicket{"o/b", 2}), ctrl, &fakeMutator{}, false, io.Discard)
 	assertDecisions(t, decisions, []wantDecision{{1, ActionSkip, "session probe failed", ""}, {2, ActionSkip, "session absent", ""}})
 	if !errors.Is(err, ErrSessionProbeFailed) || !errors.Is(err, ErrSessionMissing) {
 		t.Errorf("err = %v, want both ErrSessionProbeFailed and ErrSessionMissing", err)
@@ -717,7 +695,7 @@ func TestSessionGate_ProbeAndSpawnUseTrimmedConfiguredSession(t *testing.T) {
 	cfg := testConfig()
 	cfg.Repos = []RepoConfig{{Repo: "o/r", Session: "  work  "}}
 	ctrl := &sessionProbeController{t: t, live: map[string]bool{"work": true}}
-	if _, err := applyDispatch(cfg, dispatchableDeps(time.Now()), ctrl, &fakeMutator{}, false, io.Discard, nil); err != nil {
+	if _, err := applyDispatch(cfg, dispatchableDeps(time.Now()), ctrl, &fakeMutator{}, false, io.Discard); err != nil {
 		t.Fatalf("err = %v", err)
 	}
 	if got, want := ctrl.hasSessionCalls, []string{"work"}; !reflect.DeepEqual(got, want) {
@@ -770,7 +748,7 @@ func TestSessionGate_ProbeAndSpawnShareOneSocket(t *testing.T) {
 			cfg.Repos = []RepoConfig{{Repo: "o/r", Dir: t.TempDir(), Session: "work"}}
 			ctrl := &sessionProbeController{t: t, live: map[string]bool{"work": true}}
 
-			if _, err := applyDispatch(cfg, dispatchableDeps(time.Now()), ctrl, &fakeMutator{}, false, io.Discard, nil); err != nil {
+			if _, err := applyDispatch(cfg, dispatchableDeps(time.Now()), ctrl, &fakeMutator{}, false, io.Discard); err != nil {
 				t.Fatalf("applyDispatch: %v", err)
 			}
 
@@ -801,7 +779,7 @@ func TestSessionGate_UnresolvableSocketIsProbeFailed(t *testing.T) {
 	ctrl := &sessionProbeController{t: t, live: map[string]bool{"work": true}}
 	var buf bytes.Buffer
 
-	decisions, err := applyDispatch(cfg, dispatchableDeps(time.Now()), ctrl, &fakeMutator{}, false, &buf, nil)
+	decisions, err := applyDispatch(cfg, dispatchableDeps(time.Now()), ctrl, &fakeMutator{}, false, &buf)
 
 	assertDecisions(t, decisions, []wantDecision{{42, ActionSkip, "session probe failed", ""}})
 	if !errors.Is(err, ErrSessionProbeFailed) || errors.Is(err, ErrSessionMissing) {
@@ -830,7 +808,7 @@ func TestSessionGate_DryRunResolvesNoSocket(t *testing.T) {
 	cfg.Repos = []RepoConfig{{Repo: "o/r", Dir: t.TempDir(), Session: "work"}}
 	ctrl := &sessionProbeController{t: t, live: map[string]bool{"work": true}}
 
-	if _, err := applyDispatch(cfg, dispatchableDeps(time.Now()), ctrl, &fakeMutator{}, true, io.Discard, nil); err != nil {
+	if _, err := applyDispatch(cfg, dispatchableDeps(time.Now()), ctrl, &fakeMutator{}, true, io.Discard); err != nil {
 		t.Fatalf("dry-run applyDispatch: %v", err)
 	}
 	if len(ctrl.hasSessionCalls) != 0 {
@@ -922,8 +900,7 @@ func TestRunOnce_LegacyTopLevelSessionLogsDeprecationLine_NeverGates(t *testing.
 	}
 
 	var buf bytes.Buffer
-	prior := 0
-	_, runErr := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, &buf, &prior)
+	_, runErr := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, &buf)
 	if runErr == nil {
 		t.Fatal("expected RunOnce to return the gh-unavailable collection error")
 	}

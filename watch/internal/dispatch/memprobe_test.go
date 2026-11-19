@@ -223,7 +223,7 @@ func renameRepoDir(t *testing.T, cfg *Config, i int, base string) {
 func runMemoryPass(t *testing.T, cfg Config, dryRun bool) ([]Decision, string) {
 	t.Helper()
 	var buf bytes.Buffer
-	decisions, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, dryRun, &buf, nil)
+	decisions, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, dryRun, &buf)
 	if err != nil {
 		t.Fatalf("RunOnce returned %v; a memory probe failure must hold the pass, not fail it", err)
 	}

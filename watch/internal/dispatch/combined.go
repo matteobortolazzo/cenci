@@ -75,7 +75,6 @@ func RunCombinedLoop(ctx context.Context, configPath string, ctrl run.Controller
 		out = os.Stdout
 	}
 	store := NewStateStore("")
-	prior := 0
 	state := watch.DispatchState{DaemonRunning: true}
 	var windows []watch.WindowState
 	var headroom map[string]float64
@@ -99,7 +98,7 @@ func RunCombinedLoop(ctx context.Context, configPath string, ctrl run.Controller
 			headroom = nil
 			publish(ctx, attention, &state, nil, nil)
 		} else if runPass {
-			runCombinedPass(ctx, cfg, ctrl, mut, out, &prior, store, attention, &state, &windows, &headroom)
+			runCombinedPass(ctx, cfg, ctrl, mut, out, store, attention, &state, &windows, &headroom)
 			scheduler.complete(time.Now(), cfg)
 			wait = minDuration(loopCheckInterval, effectiveInterval(cfg.DaemonInterval))
 		}
@@ -129,7 +128,7 @@ func stateInterval(d time.Duration) string {
 
 // combinedTick remains a deterministic single-pass helper for direct tests.
 // Scheduling is deliberately owned by combinedScheduler above.
-func combinedTick(ctx context.Context, configPath string, ctrl run.Controller, mut TicketMutator, out io.Writer, prior *int, store ReconcileStore, attention chan<- watch.AttentionUpdate, state *watch.DispatchState, windows *[]watch.WindowState, headroom *map[string]float64) time.Duration {
+func combinedTick(ctx context.Context, configPath string, ctrl run.Controller, mut TicketMutator, out io.Writer, store ReconcileStore, attention chan<- watch.AttentionUpdate, state *watch.DispatchState, windows *[]watch.WindowState, headroom *map[string]float64) time.Duration {
 	cfg, ok := reloadConfig(configPath, out)
 	if !ok {
 		return loopCheckInterval
@@ -144,23 +143,22 @@ func combinedTick(ctx context.Context, configPath string, ctrl run.Controller, m
 		publish(ctx, attention, state, nil, nil)
 		return loopCheckInterval
 	}
-	runCombinedPass(ctx, cfg, ctrl, mut, out, prior, store, attention, state, windows, headroom)
+	runCombinedPass(ctx, cfg, ctrl, mut, out, store, attention, state, windows, headroom)
 	return effectiveInterval(cfg.DaemonInterval)
 }
 
-func runCombinedPass(ctx context.Context, cfg Config, ctrl run.Controller, mut TicketMutator, out io.Writer, prior *int, store ReconcileStore, attention chan<- watch.AttentionUpdate, state *watch.DispatchState, windows *[]watch.WindowState, headroom *map[string]float64) {
+func runCombinedPass(ctx context.Context, cfg Config, ctrl run.Controller, mut TicketMutator, out io.Writer, store ReconcileStore, attention chan<- watch.AttentionUpdate, state *watch.DispatchState, windows *[]watch.WindowState, headroom *map[string]float64) {
 	state.Enabled = true
 	state.Interval = stateInterval(cfg.DaemonInterval)
 	state.PassRunning = true
 	publish(ctx, attention, state, *windows, *headroom)
 
-	before := *prior
-	decisions, dispatchErr := RunOnce(cfg, ctrl, mut, false, out, prior)
+	decisions, dispatchErr := RunOnce(cfg, ctrl, mut, false, out)
 	result, reconcileErr := RunReconcileOnce(cfg, mut, false, out, store)
 
 	state.PassRunning = false
 	state.LastRunAt = time.Now().UTC().Format(time.RFC3339)
-	state.LastDispatched = *prior - before
+	state.LastDispatched = countSpawned(decisions)
 	state.LastSkipped = countSkipped(decisions)
 	state.LastError = sanitizeLastError(passError(dispatchErr, reconcileErr))
 	if errors.Is(reconcileErr, ErrReconcileStateUnreadable) {
@@ -238,6 +236,18 @@ func publish(ctx context.Context, attention chan<- watch.AttentionUpdate, state 
 	case attention <- u:
 	case <-ctx.Done():
 	}
+}
+
+// countSpawned counts the decisions whose spawn succeeded (#1566): the launches
+// of one pass, which DispatchState.LastDispatched reports.
+func countSpawned(decisions []Decision) int {
+	n := 0
+	for _, d := range decisions {
+		if d.Spawned {
+			n++
+		}
+	}
+	return n
 }
 
 func countSkipped(decisions []Decision) int {

@@ -89,7 +89,7 @@ func decisionFor(t *testing.T, decisions []Decision, number int) Decision {
 func chainRunOnce(t *testing.T, cfg Config, mut *GHMutator, dryRun bool) ([]Decision, string) {
 	t.Helper()
 	var buf bytes.Buffer
-	decisions, err := RunOnce(cfg, fakeController{}, mut, dryRun, &buf, nil)
+	decisions, err := RunOnce(cfg, fakeController{}, mut, dryRun, &buf)
 	if err != nil {
 		t.Fatalf("RunOnce returned unexpected error: %v\nlog:\n%s", err, buf.String())
 	}

@@ -299,11 +299,19 @@ In `~/.config/cenci/config.json`:
     "planRefined": true,
     "planStalenessTolerance": 5,
     "concurrencyCap": 3,
-    "dailyQuota": 20,
+    // Opt-in: N dispatch launches per local calendar day, persisted across restarts.
+    // Omit it (or write "off") for no daily limit; 0 pauses every dispatch.
+    // "dailyQuota": 20,
     "quietHours": { "startHour": 22, "endHour": 7 }
   }
 }
 ```
+
+`concurrencyCap` is the default limiter. `dailyQuota` is off unless you set it, and
+an unreadable quota file then blocks dispatch until it is removed by hand (see the
+`dailyQuota` row in [the watch README](../watch/README.md#configuration)). Token limits
+(`agentLimits`, `agentBudgetFloors`) are local estimates of your own usage, never the
+provider's entitlement, and a skip from them reads `estimated token budget exhausted`.
 
 The switch itself doesn't need hand-editing:
 
@@ -754,9 +762,9 @@ Accepted and documented, not bugs:
 
 - **Re-plans are unbounded.** Nothing caps how often a ticket can be re-planned. A
   successful re-plan rewrites the plan's commit baseline, which self-limits the common
-  case, but an over-broad `stalenessPaths` can re-plan repeatedly. `dailyQuota` and
-  `concurrencyCap` are the rate limiter; raising `planStalenessTolerance` raises the
-  trigger threshold.
+  case, but an over-broad `stalenessPaths` can re-plan repeatedly. `concurrencyCap` is
+  the default rate limiter, and `dailyQuota` adds a daily limit only when you set one;
+  raising `planStalenessTolerance` raises the trigger threshold.
 - **Sibling serialization is inert for planning pickups.** It's derived from plan-file
   front matter, which doesn't exist yet for a `Refined` ticket, so several children of
   one parent can enter planning in the same pass. Declared blocked-by chains

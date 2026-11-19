@@ -785,7 +785,7 @@ func TestRunOnce_SyncsMainOncePerPassIndependentOfTicketCount(t *testing.T) {
 	cfg := testConfig()
 	cfg.Repos = []RepoConfig{{Repo: "o/r", Dir: local}}
 	var buf bytes.Buffer
-	if _, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, &buf, nil); err != nil {
+	if _, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, &buf); err != nil {
 		t.Fatalf("RunOnce returned unexpected error: %v", err)
 	}
 

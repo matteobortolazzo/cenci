@@ -723,7 +723,7 @@ cenci dispatch status   [--dir <path>] [--config <path>] [--json]
 |------|-------|----------|
 | `enroll` | `--dir` (default cwd), `--config`, `--session` | Detects `owner/name` and the absolute dir from `--dir`'s git `origin` remote, then adds/updates the `repos` entry. Idempotent: a second run prints `Already enrolled owner/name (dir)` instead of duplicating the entry. `--session <name>` is optional and sets `repos[].session` — the tmux session that repo's dispatches target (see [Configuration](#configuration)). Omitting it preserves any existing session unchanged (this is how lazyboards' `d`-panel toggle, which never passes `--session`, avoids blanking an already-configured repo). An empty or whitespace-only `--session` is a usage error (exit `2`) rather than a silent clear — there is no un-set verb; unenrolling is how a repo leaves dispatch. Whenever the resulting entry's session is empty — on a fresh enrollment or a no-flag re-enrollment of an already session-less repo — the result line names the consequence and the fix: `Enrolled owner/name (dir); no tmux session set -- dispatch will skip this repo until you run: cenci dispatch enroll --session <name> (config: /abs/path)`. When the resulting entry has a session, the line instead ends `→ session <name>`. |
 | `unenroll` | `--dir`, `--config`, `--repo owner/name` | Removes the `repos` entry. Idempotent: unenrolling a repo that isn't enrolled exits `0` with `Not enrolled: owner/name`. `--repo` unenrolls by name without touching git — use it when the repo's directory has moved or been deleted. `--repo` and an explicitly-passed `--dir` are mutually exclusive (exit `2`) since only one can identify the target. |
-| `status` | `--dir`, `--config`, `--json` | Prints the current enrollment state without mutating anything. `--json` emits a single pinned line: `{"repo":"owner/name","dir":"/abs/path","enrolled":true,"session":"a-work","loop":{...}}`; when not enrolled, `dir` is still the **detected** absolute dir (not empty) and `session` is empty, even if the config file doesn't exist yet. Human output likewise names the session: `Enrolled owner/name (dir) → session a-work`, or `Enrolled owner/name (dir); no tmux session set` when unset. It then prints `Memory headroom: <N>%`, the repo's effective [machine-local filters](#machine-local-filters) and `Config: <path>`, the config file actually loaded. The filter lines are `Filters: unrestricted`, or one `Filters: <dimension> <values>` line per configured dimension in the order `milestones`, `labelsAll`, `labelsAny`, `labelsNone` (labels quoted, e.g. `Filters: labelsAny ["bug" "enhancement"]`). `--json` adds `"configPath":"/abs/config.json"` and `"filters":{"restricted":true,"milestones":[3],"labelsAll":[],"labelsAny":[],"labelsNone":[]}` — the four lists are always arrays, never `null`, and a repo with no filters, or that is not enrolled, reports `restricted:false` with empty arrays. Duplicates are already collapsed. Filters are read from the selected user config only; an invalid `filters` block makes `status` exit `1`. |
+| `status` | `--dir`, `--config`, `--json` | Prints the current enrollment state without mutating anything. `--json` emits a single pinned line: `{"repo":"owner/name","dir":"/abs/path","enrolled":true,"session":"a-work","loop":{...}}`; when not enrolled, `dir` is still the **detected** absolute dir (not empty) and `session` is empty, even if the config file doesn't exist yet. Human output likewise names the session: `Enrolled owner/name (dir) → session a-work`, or `Enrolled owner/name (dir); no tmux session set` when unset. It then prints `Memory headroom: <N>%`, then `dailyQuota: off` or `dailyQuota: N per local day (used X)` (the unreadable variant is `dailyQuota: N per local day (daily quota state unreadable: <reason>)`), the repo's effective [machine-local filters](#machine-local-filters) and `Config: <path>`, the config file actually loaded. The filter lines are `Filters: unrestricted`, or one `Filters: <dimension> <values>` line per configured dimension in the order `milestones`, `labelsAll`, `labelsAny`, `labelsNone` (labels quoted, e.g. `Filters: labelsAny ["bug" "enhancement"]`). `--json` adds `"configPath":"/abs/config.json"` and `"filters":{"restricted":true,"milestones":[3],"labelsAll":[],"labelsAny":[],"labelsNone":[]}` — the four lists are always arrays, never `null`, and a repo with no filters, or that is not enrolled, reports `restricted:false` with empty arrays. Duplicates are already collapsed. Filters are read from the selected user config only; an invalid `filters` block makes `status` exit `1`. |
 
 Exit codes are consistent across all three verbs: `0` when the verb ran successfully
 (enrolled/not-enrolled is a result, not a failure), `1` on a detection/IO error
@@ -1111,11 +1111,18 @@ failing gate is the logged skip reason):
    query error, or timeout) every candidate is skipped with `container session
    probe failed` (fail-closed); with no docker or podman on PATH the count is 0
    and dispatch proceeds;
-12. the daily quota is not yet spent;
+12. when [`dailyQuota`](#configuration) is set, the launches already recorded for the
+    current local day plus this pass's are below it. The quota is off by default, so
+    without it this gate never fires and the store is never read. When it is set, a
+    quota state that cannot be read with certainty (an unreadable, corrupt,
+    unknown-schema or symlinked file or directory) admits no dispatch: every
+    candidate is skipped with `daily quota state unreadable: <reason>`, and the pass
+    logs `dispatch: daily quota state unreadable: <reason>` once;
 13. the current local time is outside `quietHours`;
-14. the resolved agent still has budget (see [Usage budgets](#usage-budgets) — when
-    `agentLimits` is set this is computed from real token usage, otherwise from the
-    static `agentBudgetFloors`).
+14. the resolved agent still has estimated token budget (see [Usage
+    budgets](#usage-budgets) — when `agentLimits` is set this is computed from local
+    token usage estimates, otherwise from the static `agentBudgetFloors`); when no
+    agent does, the skip reason is `estimated token budget exhausted`.
 
 Gate 9's `needInputThreshold` reads only `StatusSummary.NeedInput` — a live
 session waiting mid-turn for a permission prompt or similar. It deliberately
@@ -1594,9 +1601,9 @@ the rest — there is no new sibling-detection logic for this case.
 **Unbounded re-plan (accepted, documented).** Nothing caps how many times a
 ticket can be autonomously re-planned; a successful re-plan rewrites
 `planCommitSha`, which self-limits the common case, but a repo with an
-over-broad `stalenessPaths` value can re-plan repeatedly. `dailyQuota` and
-`concurrencyCap` are the rate limiter, and raising `planStalenessTolerance`
-raises the trigger threshold.
+over-broad `stalenessPaths` value can re-plan repeatedly. `concurrencyCap` is the
+rate limiter (plus `dailyQuota` when you opt into one), and raising
+`planStalenessTolerance` raises the trigger threshold.
 
 A crashed planning pickup (a `Working` ticket that still carries `Refined`, not
 `Planned`, with no plan file) is recovered by the reconciler back to plain
@@ -1679,7 +1686,6 @@ Dispatch reads the same `config.json` as `run`, under a top-level `"dispatch"` b
     "concurrencyCap": 3,
     "needInputThreshold": 1,
     "memoryHeadroom": 25,
-    "dailyQuota": 20,
     "quietHours": { "startHour": 22, "endHour": 7 },
     "planStalenessTolerance": 5,
     "pipelineStageGate": true,
@@ -1706,7 +1712,7 @@ Dispatch reads the same `config.json` as `run`, under a top-level `"dispatch"` b
 | `concurrencyCap` | `3` | Max concurrent running sessions (counts in-flight windows, orphaned container sessions still alive after their pane closed, and this pass's dispatches) |
 | `needInputThreshold` | `1` | Pause dispatch when at least this many windows await input |
 | `memoryHeadroom` | `25` | Minimum percent of a repo's container memory limit that must be free before dispatch picks up into it (integer 0–100; `0` disables the gate; see [Pickup rules and gates](#pickup-rules-and-gates)); a non-integer, `null`, negative or >100 value is a config error |
-| `dailyQuota` | `20` | Max dispatches per process run (resets on restart) |
+| `dailyQuota` | `off` | Max dispatch launches per real local calendar day, persisted under `$XDG_STATE_HOME/cenci/capacity/` so the count carries across restarts and processes and starts at 0 on the next local date. Off by default: absent and the string `"off"` both mean no limit, and while off the store is never read or written. An integer `N` counts `N` launches per day and skips further pickups with `daily quota reached`; `0` pauses every dispatch; `null`, a negative number, a non-integer or any other string (`"OFF"` and `"5"` included) is a config error naming `dispatch.dailyQuota`. With a quota set, an unreadable, corrupt, unknown-schema or symlinked quota state blocks every dispatch (`daily quota state unreadable: <reason>`) and is never auto-reset: remove `daily-quota.json` under the capacity directory by hand to recover. `cenci dispatch status` prints `dailyQuota: off` or `dailyQuota: N per local day (used X)` |
 | `quietHours` | none | Local-clock window to suppress dispatch; `startHour > endHour` wraps midnight, `start == end` disables |
 | `planStalenessTolerance` | `5` | Max commits a plan may fall behind before it is skipped as stale (see [Path-aware staleness](#path-aware-staleness) for scoping the count via `stalenessPaths`) |
 | `pipelineStageGate` | `true` | Skip tickets whose persisted `cenci pipeline` stage is `finalized` (see [Pickup rules and gates](#pickup-rules-and-gates)); set `false` to disable the gate entirely |
@@ -1720,8 +1726,8 @@ Dispatch reads the same `config.json` as `run`, under a top-level `"dispatch"` b
 | `defaultAgent` | `claude` | Agent used when a ticket has no `agent:<name>` label. It must have a built-in `implement` workflow: a ticket whose primary agent (label or `defaultAgent`) lacks one is skipped with `agent "<name>" has no built-in "implement" workflow` and never falls through to another agent (a disabled agent such as OpenCode keeps its own disabled reason, the #1219 text, instead of the "no built-in implement workflow" reason) |
 | `model` | none | Model override for every dispatched session (overrides `agents.*.model`); the `--model` CLI flag overrides this. Pin this to avoid a dispatched session silently inheriting whatever ambient/account-level default model is active at spawn time |
 | `agentPreference` | none | Fallback agent order tried when the primary agent (label or `defaultAgent`) is out of budget; first agent with budget wins; entries without a built-in `implement` workflow are passed over |
-| `agentBudgetFloors` | none | Per-agent budget floor (see [Usage budgets](#usage-budgets)); with `agentLimits` it is a headroom safety margin, without it a static `Remaining` where `0` pins the agent to "budget exhausted" |
-| `agentLimits` | none | Per-agent token caps enabling real usage accounting; each agent takes `fiveHourTokens` and/or `weeklyTokens` (omit or `0` to disable that window) |
+| `agentBudgetFloors` | none | Per-agent budget floor (see [Usage budgets](#usage-budgets)); with `agentLimits` it is a headroom safety margin, without it a static `Remaining` where `0` pins the agent to "estimated token budget exhausted" |
+| `agentLimits` | none | Per-agent token caps enabling local usage estimates (never provider entitlement); each agent takes `fiveHourTokens` and/or `weeklyTokens` (omit or `0` to disable that window) |
 | `claudeSessionDir` | `~/.claude/projects` | Override for the Claude session-JSONL directory scanned for output-token usage |
 | `codexDBPath` | `~/.codex/state_5.sqlite` | Override for the Codex SQLite DB queried for per-thread token usage (requires the `sqlite3` CLI) |
 
@@ -1748,10 +1754,15 @@ switch:
 
 ### Usage budgets
 
-Each candidate agent must clear a budget gate before it can be dispatched. There are two
-modes, chosen per agent by whether `agentLimits` is configured:
+Each candidate agent must clear a budget gate before it can be dispatched. The limits
+and floors are **local estimates** — token counts cenci reads from the agent's own
+session data against caps you configure — and never a measure of the provider's
+entitlement or remaining quota; an agent with neither a limit nor a floor is
+unlimited, so by default nothing here restricts dispatch. A skip from this gate reads
+`estimated token budget exhausted`. There are two modes, chosen per agent by whether
+`agentLimits` is configured:
 
-- **Real usage accounting** (when `agentLimits[agent]` is set) — cenci reads the
+- **Estimated usage accounting** (when `agentLimits[agent]` is set) — cenci reads the
   agent's own local session data to compute how much of each rolling window remains:
   Claude from output-token counts in its session JSONL (`claudeSessionDir`), Codex from
   per-thread `tokens_used` in its SQLite DB (`codexDBPath`, via the `sqlite3` CLI). The
@@ -1760,7 +1771,7 @@ modes, chosen per agent by whether `agentLimits` is configured:
   stop dispatching before the true cap. A missing/unreadable data source is treated as
   the safe direction (no budget) rather than dispatching blind.
 - **Static floor** (no `agentLimits[agent]`) — the `agentBudgetFloors` value is used
-  directly as the remaining budget, so `0` pins the agent to "budget exhausted" and any
+  directly as the remaining budget, so `0` pins the agent to "estimated token budget exhausted" and any
   positive value lets it dispatch. An agent with neither a limit nor a floor is
   unlimited.
 

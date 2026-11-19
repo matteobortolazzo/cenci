@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/capacity"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/exectest"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/pipeline"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/run"
@@ -28,6 +29,75 @@ func stubRunFn(t *testing.T, fn func(run.Opts, run.Controller) error) {
 	restore := runFn
 	runFn = fn
 	t.Cleanup(func() { runFn = restore })
+}
+
+// useQuotaDir points the daily-quota seam (#1566) at a fresh capacity directory
+// owned by this test and returns a handle over the same directory, for seeding
+// launches and asserting the persisted count. The seam is restored on cleanup.
+func useQuotaDir(t *testing.T) *capacity.DailyQuota {
+	t.Helper()
+	q, _ := useQuotaDirPath(t)
+	return q
+}
+
+// useQuotaDirPath is useQuotaDir that also returns the capacity directory, for a
+// test that plants or inspects files in it. The parent is chmod 0700, so the
+// store's own directory checks pass whatever the umask: a test that expects an
+// untrusted-store error then gets it for the reason it set up, not by accident.
+func useQuotaDirPath(t *testing.T) (*capacity.DailyQuota, string) {
+	t.Helper()
+	root := t.TempDir()
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatalf("securing the quota root: %v", err)
+	}
+	dir := filepath.Join(root, "capacity")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatalf("creating the capacity directory: %v", err)
+	}
+	pointQuotaSeam(t, dir)
+	return capacity.NewDailyQuota(dir), dir
+}
+
+// pointQuotaSeam points dailyQuotaFn at dir for one test and returns a counter
+// of how many times a pass asked for the counter, so a test can prove a pass
+// with the quota off never touched the store at all.
+func pointQuotaSeam(t *testing.T, dir string) *int {
+	t.Helper()
+	calls := new(int)
+	prev := dailyQuotaFn
+	dailyQuotaFn = func() *capacity.DailyQuota {
+		*calls++
+		return capacity.NewDailyQuota(dir)
+	}
+	t.Cleanup(func() { dailyQuotaFn = prev })
+	return calls
+}
+
+// quotaUsed reads the persisted launch count on now's local day, failing the
+// test when the store cannot be read.
+func quotaUsed(t *testing.T, q *capacity.DailyQuota, now time.Time) int {
+	t.Helper()
+	used, err := q.Peek(now)
+	if err != nil {
+		t.Fatalf("reading the persisted daily quota: %v", err)
+	}
+	return used
+}
+
+// quotaUsedToday is quotaUsed for a RunOnce pass, which reads time.Now(): it
+// sums today's and yesterday's counts, so a test that straddles local midnight
+// stays deterministic (the store starts empty, so only one day can be non-zero).
+func quotaUsedToday(t *testing.T, q *capacity.DailyQuota) int {
+	t.Helper()
+	now := time.Now()
+	return quotaUsed(t, q, now) + quotaUsed(t, q, now.Add(-24*time.Hour))
+}
+
+// withQuota returns cfg with a daily quota of 100: generous enough that no gate
+// trips, so a test observes only whether the persisted count moved.
+func withQuota(cfg Config) Config {
+	cfg.DailyQuota = quotaPtr(100)
+	return cfg
 }
 
 // dispatchableDeps is the happy path: one Planned ticket #42 with a planned,
@@ -59,7 +129,7 @@ esac
 	var buf bytes.Buffer
 	cfg := testConfig()
 	cfg.Repos = []RepoConfig{{Repo: "o/r", Dir: t.TempDir(), Session: "test-session"}}
-	decisions, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, &buf, nil)
+	decisions, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, &buf)
 	if err == nil || !strings.Contains(err.Error(), "detecting current GitHub user") {
 		t.Fatalf("error = %v, want current-user detection failure", err)
 	}
@@ -78,7 +148,7 @@ func TestRunOnceEmptyPassDoesNotRequireGitHubIdentity(t *testing.T) {
 		return nil
 	})
 
-	decisions, err := RunOnce(testConfig(), fakeController{}, &fakeMutator{}, false, nil, nil)
+	decisions, err := RunOnce(testConfig(), fakeController{}, &fakeMutator{}, false, nil)
 	if err != nil {
 		t.Fatalf("RunOnce returned unexpected error: %v", err)
 	}
@@ -124,10 +194,11 @@ func TestApplyDispatchClaimsWorkingLabelAfterSpawn(t *testing.T) {
 
 	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
 	mut := &fakeMutator{}
-	prior := 0
+	q := useQuotaDir(t)
 	var buf bytes.Buffer
 
-	if _, err := applyDispatch(dispatchTestConfig(), dispatchableDeps(now), fakeController{}, mut, false, &buf, &prior); err != nil {
+	decisions, err := applyDispatch(withQuota(dispatchTestConfig()), dispatchableDeps(now), fakeController{}, mut, false, &buf)
+	if err != nil {
 		t.Fatalf("applyDispatch returned unexpected error: %v", err)
 	}
 
@@ -140,8 +211,11 @@ func TestApplyDispatchClaimsWorkingLabelAfterSpawn(t *testing.T) {
 	if e.repo != "o/r" || e.number != 42 || !containsStr(e.add, labelWorking) || len(e.remove) != 0 {
 		t.Errorf("unexpected claim edit: %+v, want add=[%s] remove=[] on o/r#42", e, labelWorking)
 	}
-	if prior != 1 {
-		t.Errorf("prior = %d, want 1 (incremented per successful dispatch)", prior)
+	if got := quotaUsed(t, q, now); got != 1 {
+		t.Errorf("persisted daily quota = %d, want 1 (one launch recorded per successful dispatch)", got)
+	}
+	if countSpawned(decisions) != 1 {
+		t.Errorf("spawned decisions = %d, want 1: %+v", countSpawned(decisions), decisions)
 	}
 }
 
@@ -153,17 +227,45 @@ func TestApplyDispatchDryRunSkipsClaim(t *testing.T) {
 
 	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
 	mut := &fakeMutator{}
-	prior := 0
+	q := useQuotaDir(t)
+	if err := q.Record(now); err != nil {
+		t.Fatalf("seeding the quota: %v", err)
+	}
+	cfg := testConfig()
+	cfg.DailyQuota = quotaPtr(2)
 
-	if _, err := applyDispatch(testConfig(), dispatchableDeps(now), fakeController{}, mut, true, nil, &prior); err != nil {
+	decisions, err := applyDispatch(cfg, dispatchableDeps(now), fakeController{}, mut, true, nil)
+	if err != nil {
 		t.Fatalf("dry-run returned unexpected error: %v", err)
 	}
 
 	if len(mut.labelEdits) != 0 {
 		t.Errorf("dry-run must not claim, got %+v", mut.labelEdits)
 	}
-	if prior != 0 {
-		t.Errorf("prior = %d, want 0 (dry-run must not consume quota)", prior)
+	if got := quotaUsed(t, q, now); got != 1 {
+		t.Errorf("persisted daily quota = %d, want 1 unchanged (dry-run must not consume quota)", got)
+	}
+	if countSpawned(decisions) != 0 {
+		t.Errorf("dry-run reported %d spawned decisions, want 0", countSpawned(decisions))
+	}
+}
+
+// TestApplyDispatchDryRunCreatesNoQuotaStore: a dry-run pass with a quota set
+// reads with Peek, so an absent capacity directory stays absent (#1566).
+func TestApplyDispatchDryRunCreatesNoQuotaStore(t *testing.T) {
+	stubRunFn(t, func(run.Opts, run.Controller) error {
+		t.Error("dry-run must not spawn")
+		return nil
+	})
+	dir := filepath.Join(t.TempDir(), "capacity")
+	pointQuotaSeam(t, dir)
+
+	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+	if _, err := applyDispatch(withQuota(testConfig()), dispatchableDeps(now), fakeController{}, &fakeMutator{}, true, nil); err != nil {
+		t.Fatalf("dry-run returned unexpected error: %v", err)
+	}
+	if _, err := os.Lstat(dir); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("a dry-run pass created the capacity directory (Lstat err = %v)", err)
 	}
 }
 
@@ -172,10 +274,10 @@ func TestApplyDispatchNoClaimOnSpawnFailure(t *testing.T) {
 
 	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
 	mut := &fakeMutator{}
-	prior := 0
+	q := useQuotaDir(t)
 	var buf bytes.Buffer
 
-	_, err := applyDispatch(dispatchTestConfig(), dispatchableDeps(now), fakeController{}, mut, false, &buf, &prior)
+	decisions, err := applyDispatch(withQuota(dispatchTestConfig()), dispatchableDeps(now), fakeController{}, mut, false, &buf)
 	if err == nil || !strings.Contains(err.Error(), "tmux exploded") {
 		t.Fatalf("spawn failure error = %v, want tmux exploded", err)
 	}
@@ -183,8 +285,11 @@ func TestApplyDispatchNoClaimOnSpawnFailure(t *testing.T) {
 	if len(mut.labelEdits) != 0 {
 		t.Errorf("a failed spawn must not claim the ticket, got %+v", mut.labelEdits)
 	}
-	if prior != 0 {
-		t.Errorf("prior = %d, want 0 (failed dispatch must not consume quota)", prior)
+	if got := quotaUsed(t, q, now); got != 0 {
+		t.Errorf("persisted daily quota = %d, want 0 (failed dispatch must not consume quota)", got)
+	}
+	if countSpawned(decisions) != 0 {
+		t.Errorf("a failed spawn reported %d spawned decisions, want 0", countSpawned(decisions))
 	}
 	if !strings.Contains(buf.String(), "run failed") {
 		t.Errorf("expected the spawn failure to be logged, got %q", buf.String())
@@ -196,18 +301,18 @@ func TestApplyDispatchClaimFailureLogsAndContinues(t *testing.T) {
 
 	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
 	mut := &failingMutator{}
-	prior := 0
+	q := useQuotaDir(t)
 	var buf bytes.Buffer
 
-	_, err := applyDispatch(dispatchTestConfig(), dispatchableDeps(now), fakeController{}, mut, false, &buf, &prior)
+	_, err := applyDispatch(withQuota(dispatchTestConfig()), dispatchableDeps(now), fakeController{}, mut, false, &buf)
 	if err == nil || !strings.Contains(err.Error(), "label edit") {
 		t.Fatalf("claim failure error = %v, want label edit error", err)
 	}
 
 	// The spawn already happened, so quota is consumed and the pass carries on;
 	// the failed claim is only logged (reconcile recovers the label drift).
-	if prior != 1 {
-		t.Errorf("prior = %d, want 1 (spawn succeeded; claim failure must not roll back quota)", prior)
+	if got := quotaUsed(t, q, now); got != 1 {
+		t.Errorf("persisted daily quota = %d, want 1 (spawn succeeded; claim failure must not roll back quota)", got)
 	}
 	if !strings.Contains(buf.String(), "claim") {
 		t.Errorf("expected the claim failure to be logged, got %q", buf.String())
@@ -267,8 +372,8 @@ func (m *orderRecordingMutator) EnsureLabels(string, []string) error { return ni
 // TestApplyDispatchResumeSwapsLabelBeforeSpawn covers the Test Strategy
 // table's swap-before-spawn ordering assertion: on a resume dispatch, the
 // Input Needed -> Working label swap must land BEFORE the spawn, exactly
-// once, with add=[Working] remove=[Input Needed] -- and prior increments
-// exactly as an ordinary dispatch would.
+// once, with add=[Working] remove=[Input Needed] -- and the persisted daily
+// quota records one launch exactly as an ordinary dispatch would.
 func TestApplyDispatchResumeSwapsLabelBeforeSpawn(t *testing.T) {
 	mut := &orderRecordingMutator{}
 	stubRunFn(t, func(run.Opts, run.Controller) error {
@@ -277,9 +382,9 @@ func TestApplyDispatchResumeSwapsLabelBeforeSpawn(t *testing.T) {
 	})
 
 	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
-	prior := 0
+	q := useQuotaDir(t)
 
-	if _, err := applyDispatch(dispatchTestConfig(), resumeDispatchDeps(now), fakeController{}, mut, false, nil, &prior); err != nil {
+	if _, err := applyDispatch(withQuota(dispatchTestConfig()), resumeDispatchDeps(now), fakeController{}, mut, false, nil); err != nil {
 		t.Fatalf("applyDispatch returned unexpected error: %v", err)
 	}
 
@@ -294,13 +399,13 @@ func TestApplyDispatchResumeSwapsLabelBeforeSpawn(t *testing.T) {
 	if e.repo != "o/r" || e.number != 42 || !containsStr(e.add, labelWorking) || !containsStr(e.remove, labelInputNeeded) {
 		t.Errorf("unexpected resume swap edit: %+v, want add=[%s] remove=[%s] on o/r#42", e, labelWorking, labelInputNeeded)
 	}
-	if prior != 1 {
-		t.Errorf("prior = %d, want 1 (incremented per successful resume dispatch)", prior)
+	if got := quotaUsed(t, q, now); got != 1 {
+		t.Errorf("persisted daily quota = %d, want 1 (one launch recorded per successful resume dispatch)", got)
 	}
 }
 
 // TestApplyDispatchResumeSwapFailurePreventsSpawnAndClaim covers: a failed
-// pre-spawn swap must never spawn, must never increment prior, and must
+// pre-spawn swap must never spawn, must never record a launch, and must
 // surface the error -- unlike the ordinary path's post-spawn claim failure
 // (which is logged-and-continue, since the spawn already happened there).
 func TestApplyDispatchResumeSwapFailurePreventsSpawnAndClaim(t *testing.T) {
@@ -311,18 +416,18 @@ func TestApplyDispatchResumeSwapFailurePreventsSpawnAndClaim(t *testing.T) {
 
 	mut := &orderRecordingMutator{failEditLabels: true}
 	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
-	prior := 0
+	q := useQuotaDir(t)
 	var buf bytes.Buffer
 
-	_, err := applyDispatch(dispatchTestConfig(), resumeDispatchDeps(now), fakeController{}, mut, false, &buf, &prior)
+	_, err := applyDispatch(withQuota(dispatchTestConfig()), resumeDispatchDeps(now), fakeController{}, mut, false, &buf)
 	if err == nil || !strings.Contains(err.Error(), "swap failed") {
 		t.Fatalf("error = %v, want the swap failure surfaced", err)
 	}
 	if !strings.Contains(buf.String(), "resume claim failed") {
 		t.Errorf("expected the resume claim failure to be logged, got %q", buf.String())
 	}
-	if prior != 0 {
-		t.Errorf("prior = %d, want 0 (a failed swap must never spawn or consume quota)", prior)
+	if got := quotaUsed(t, q, now); got != 0 {
+		t.Errorf("persisted daily quota = %d, want 0 (a failed swap must never spawn or consume quota)", got)
 	}
 }
 
@@ -338,10 +443,10 @@ func TestApplyDispatchResumeSpawnFailureAfterGoodSwapDoesNotDoubleEdit(t *testin
 
 	mut := &orderRecordingMutator{}
 	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
-	prior := 0
+	q := useQuotaDir(t)
 	var buf bytes.Buffer
 
-	_, err := applyDispatch(dispatchTestConfig(), resumeDispatchDeps(now), fakeController{}, mut, false, &buf, &prior)
+	_, err := applyDispatch(withQuota(dispatchTestConfig()), resumeDispatchDeps(now), fakeController{}, mut, false, &buf)
 	if err == nil || !strings.Contains(err.Error(), "tmux exploded") {
 		t.Fatalf("error = %v, want tmux exploded", err)
 	}
@@ -359,8 +464,8 @@ func TestApplyDispatchResumeSpawnFailureAfterGoodSwapDoesNotDoubleEdit(t *testin
 	if containsStr(rollback.add, labelWorking) {
 		t.Errorf("the rollback edit must never re-add Working (that would be a second claim): %+v", rollback)
 	}
-	if prior != 0 {
-		t.Errorf("prior = %d, want 0 (a failed spawn must not consume quota)", prior)
+	if got := quotaUsed(t, q, now); got != 0 {
+		t.Errorf("persisted daily quota = %d, want 0 (a failed spawn must not consume quota)", got)
 	}
 }
 
@@ -378,10 +483,10 @@ func TestApplyDispatchResumeSpawnFailureWithErrWindowSpawned_RetainsWorkingNoRol
 
 	mut := &orderRecordingMutator{}
 	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
-	prior := 0
+	q := useQuotaDir(t)
 	var buf bytes.Buffer
 
-	_, err := applyDispatch(dispatchTestConfig(), resumeDispatchDeps(now), fakeController{}, mut, false, &buf, &prior)
+	_, err := applyDispatch(withQuota(dispatchTestConfig()), resumeDispatchDeps(now), fakeController{}, mut, false, &buf)
 	if err == nil || !errors.Is(err, run.ErrWindowSpawned) {
 		t.Fatalf("error = %v, want errors.Is(_, run.ErrWindowSpawned)", err)
 	}
@@ -392,33 +497,33 @@ func TestApplyDispatchResumeSpawnFailureWithErrWindowSpawned_RetainsWorkingNoRol
 	if !containsStr(claim.add, labelWorking) || !containsStr(claim.remove, labelInputNeeded) {
 		t.Errorf("unexpected edit: %+v, want the claim swap retained (add=[%s] remove=[%s])", claim, labelWorking, labelInputNeeded)
 	}
-	if prior != 0 {
-		t.Errorf("prior = %d, want 0 (a failed spawn must not consume quota even when Working is retained)", prior)
+	if got := quotaUsed(t, q, now); got != 0 {
+		t.Errorf("persisted daily quota = %d, want 0 (a failed spawn must not consume quota even when Working is retained)", got)
 	}
 }
 
 // TestApplyDispatchResumeSpawnFailureRollbackAlsoFails_QuotaUntouchedErrorSurfaced
 // covers the rollback-failure case: the spawn fails (ordinary failure, not
-// ErrWindowSpawned), and the rollback edit itself also fails. Quota (prior)
-// must stay untouched and the error must surface -- both the spawn and
+// ErrWindowSpawned), and the rollback edit itself also fails. The persisted
+// quota must stay untouched and the error must surface -- both the spawn and
 // rollback failures are the caller's problem, never silently swallowed.
 func TestApplyDispatchResumeSpawnFailureRollbackAlsoFails_QuotaUntouchedErrorSurfaced(t *testing.T) {
 	stubRunFn(t, func(run.Opts, run.Controller) error { return errors.New("tmux exploded") })
 
 	mut := &orderRecordingMutator{failRollback: true}
 	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
-	prior := 0
+	q := useQuotaDir(t)
 	var buf bytes.Buffer
 
-	_, err := applyDispatch(dispatchTestConfig(), resumeDispatchDeps(now), fakeController{}, mut, false, &buf, &prior)
+	_, err := applyDispatch(withQuota(dispatchTestConfig()), resumeDispatchDeps(now), fakeController{}, mut, false, &buf)
 	if err == nil {
 		t.Fatal("expected an error when both the spawn and the rollback fail")
 	}
 	if !strings.Contains(err.Error(), "tmux exploded") && !strings.Contains(err.Error(), "rollback failed") {
 		t.Errorf("error = %v, want it to surface the spawn or rollback failure", err)
 	}
-	if prior != 0 {
-		t.Errorf("prior = %d, want 0 (a failed spawn must not consume quota, regardless of rollback outcome)", prior)
+	if got := quotaUsed(t, q, now); got != 0 {
+		t.Errorf("persisted daily quota = %d, want 0 (a failed spawn must not consume quota, regardless of rollback outcome)", got)
 	}
 	// Only the pre-spawn claim swap actually landed; the rollback attempt
 	// itself failed, so it never lands in edits.
@@ -440,10 +545,9 @@ func TestApplyDispatchResumeDryRunSkipsSwapButPrintsTable(t *testing.T) {
 
 	mut := &orderRecordingMutator{}
 	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
-	prior := 0
 	var buf bytes.Buffer
 
-	if _, err := applyDispatch(testConfig(), resumeDispatchDeps(now), fakeController{}, mut, true, &buf, &prior); err != nil {
+	if _, err := applyDispatch(testConfig(), resumeDispatchDeps(now), fakeController{}, mut, true, &buf); err != nil {
 		t.Fatalf("dry-run returned unexpected error: %v", err)
 	}
 	if len(mut.edits) != 0 {
@@ -482,13 +586,12 @@ func TestApplyDispatchPassesModelToRunOpts(t *testing.T) {
 
 	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
 	mut := &fakeMutator{}
-	prior := 0
 	var buf bytes.Buffer
 
 	cfg := dispatchTestConfig()
 	cfg.Model = "claude-sonnet-5"
 
-	if _, err := applyDispatch(cfg, dispatchableDeps(now), fakeController{}, mut, false, &buf, &prior); err != nil {
+	if _, err := applyDispatch(cfg, dispatchableDeps(now), fakeController{}, mut, false, &buf); err != nil {
 		t.Fatalf("applyDispatch returned unexpected error: %v", err)
 	}
 
@@ -513,10 +616,9 @@ func TestApplyDispatchOmitsModelWhenUnset(t *testing.T) {
 
 	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
 	mut := &fakeMutator{}
-	prior := 0
 	var buf bytes.Buffer
 
-	if _, err := applyDispatch(dispatchTestConfig(), dispatchableDeps(now), fakeController{}, mut, false, &buf, &prior); err != nil {
+	if _, err := applyDispatch(dispatchTestConfig(), dispatchableDeps(now), fakeController{}, mut, false, &buf); err != nil {
 		t.Fatalf("applyDispatch returned unexpected error: %v", err)
 	}
 
@@ -540,10 +642,9 @@ func TestApplyDispatchSetsWindowTicketToTicketNumber(t *testing.T) {
 
 	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
 	mut := &fakeMutator{}
-	prior := 0
 	var buf bytes.Buffer
 
-	if _, err := applyDispatch(dispatchTestConfig(), dispatchableDeps(now), fakeController{}, mut, false, &buf, &prior); err != nil {
+	if _, err := applyDispatch(dispatchTestConfig(), dispatchableDeps(now), fakeController{}, mut, false, &buf); err != nil {
 		t.Fatalf("applyDispatch returned unexpected error: %v", err)
 	}
 
@@ -656,13 +757,12 @@ func TestApplyDispatchPlanningPickupLaunchArgs(t *testing.T) {
 
 	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
 	mut := &fakeMutator{}
-	prior := 0
 	var buf bytes.Buffer
 
 	cfg := dispatchTestConfig()
 	cfg.PlanRefined = true
 
-	if _, err := applyDispatch(cfg, planningDispatchDeps(now), fakeController{}, mut, false, &buf, &prior); err != nil {
+	if _, err := applyDispatch(cfg, planningDispatchDeps(now), fakeController{}, mut, false, &buf); err != nil {
 		t.Fatalf("applyDispatch returned unexpected error: %v", err)
 	}
 
@@ -686,13 +786,12 @@ func TestApplyDispatchReplanLaunchArgs(t *testing.T) {
 
 	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
 	mut := &fakeMutator{}
-	prior := 0
 	var buf bytes.Buffer
 
 	cfg := dispatchTestConfig()
 	cfg.PlanRefined = true
 
-	if _, err := applyDispatch(cfg, replanDispatchDeps(now), fakeController{}, mut, false, &buf, &prior); err != nil {
+	if _, err := applyDispatch(cfg, replanDispatchDeps(now), fakeController{}, mut, false, &buf); err != nil {
 		t.Fatalf("applyDispatch returned unexpected error: %v", err)
 	}
 
@@ -716,8 +815,6 @@ func TestApplyDispatchPlanningPickupThreadsModelAndSession(t *testing.T) {
 
 	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
 	mut := &fakeMutator{}
-	prior := 0
-
 	cfg := dispatchTestConfig()
 	cfg.PlanRefined = true
 	cfg.Model = "claude-sonnet-5"
@@ -725,7 +822,7 @@ func TestApplyDispatchPlanningPickupThreadsModelAndSession(t *testing.T) {
 	// Config.Session field.
 	cfg.Repos[0].Session = "cenci"
 
-	if _, err := applyDispatch(cfg, planningDispatchDeps(now), fakeController{}, mut, false, nil, &prior); err != nil {
+	if _, err := applyDispatch(cfg, planningDispatchDeps(now), fakeController{}, mut, false, nil); err != nil {
 		t.Fatalf("applyDispatch returned unexpected error: %v", err)
 	}
 	if captured.Model != "claude-sonnet-5" || captured.Session != "cenci" {
@@ -741,13 +838,12 @@ func TestApplyDispatchPlanningPickupClaimsWorkingAfterSpawn(t *testing.T) {
 
 	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
 	mut := &fakeMutator{}
-	prior := 0
 	var buf bytes.Buffer
 
 	cfg := dispatchTestConfig()
 	cfg.PlanRefined = true
 
-	if _, err := applyDispatch(cfg, planningDispatchDeps(now), fakeController{}, mut, false, &buf, &prior); err != nil {
+	if _, err := applyDispatch(cfg, planningDispatchDeps(now), fakeController{}, mut, false, &buf); err != nil {
 		t.Fatalf("applyDispatch returned unexpected error: %v", err)
 	}
 
@@ -768,13 +864,12 @@ func TestApplyDispatchReplanClaimsWorkingAfterSpawn(t *testing.T) {
 
 	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
 	mut := &fakeMutator{}
-	prior := 0
 	var buf bytes.Buffer
 
 	cfg := dispatchTestConfig()
 	cfg.PlanRefined = true
 
-	if _, err := applyDispatch(cfg, replanDispatchDeps(now), fakeController{}, mut, false, &buf, &prior); err != nil {
+	if _, err := applyDispatch(cfg, replanDispatchDeps(now), fakeController{}, mut, false, &buf); err != nil {
 		t.Fatalf("applyDispatch returned unexpected error: %v", err)
 	}
 
@@ -795,13 +890,12 @@ func TestApplyDispatchPlanningPickupNoClaimOnSpawnFailure(t *testing.T) {
 
 	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
 	mut := &fakeMutator{}
-	prior := 0
 	var buf bytes.Buffer
 
 	cfg := dispatchTestConfig()
 	cfg.PlanRefined = true
 
-	_, err := applyDispatch(cfg, planningDispatchDeps(now), fakeController{}, mut, false, &buf, &prior)
+	_, err := applyDispatch(cfg, planningDispatchDeps(now), fakeController{}, mut, false, &buf)
 	if err == nil || !strings.Contains(err.Error(), "tmux exploded") {
 		t.Fatalf("spawn failure error = %v, want tmux exploded", err)
 	}
@@ -820,12 +914,10 @@ func TestApplyDispatchPlanningPickupDryRunSkipsClaim(t *testing.T) {
 
 	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
 	mut := &fakeMutator{}
-	prior := 0
-
 	cfg := testConfig()
 	cfg.PlanRefined = true
 
-	if _, err := applyDispatch(cfg, planningDispatchDeps(now), fakeController{}, mut, true, nil, &prior); err != nil {
+	if _, err := applyDispatch(cfg, planningDispatchDeps(now), fakeController{}, mut, true, nil); err != nil {
 		t.Fatalf("dry-run returned unexpected error: %v", err)
 	}
 	if len(mut.labelEdits) != 0 {
@@ -962,7 +1054,7 @@ func TestRunOnce_PlanningTrust_ZeroCallsWhenNoCandidate(t *testing.T) {
 			cfg.Repos = []RepoConfig{{Repo: "o/r", Dir: local, Session: "test-session"}}
 
 			var buf bytes.Buffer
-			if _, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, &buf, nil); err != nil {
+			if _, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, &buf); err != nil {
 				t.Fatalf("RunOnce returned unexpected error: %v", err)
 			}
 			if n := trustCallCount(t, callLog); n != 0 {
@@ -999,7 +1091,7 @@ func TestRunOnce_PlanningTrust_UntrustedCommentHoldsPickup(t *testing.T) {
 
 			mut := &fakeMutator{}
 			var buf bytes.Buffer
-			if _, err := RunOnce(cfg, fakeController{}, mut, dryRun, &buf, nil); err != nil {
+			if _, err := RunOnce(cfg, fakeController{}, mut, dryRun, &buf); err != nil {
 				t.Fatalf("RunOnce returned unexpected error: %v", err)
 			}
 			log := buf.String()
@@ -1124,7 +1216,7 @@ func TestRunOnce_PlanningTrust_ProbeFailureHoldsCandidateWithoutFailingPass(t *t
 			})
 
 			var buf bytes.Buffer
-			decisions, err := RunOnce(chainConfig(h), fakeController{}, &GHMutator{}, false, &buf, nil)
+			decisions, err := RunOnce(chainConfig(h), fakeController{}, &GHMutator{}, false, &buf)
 			log := buf.String()
 			if err != nil {
 				t.Fatalf("RunOnce error = %v, want nil: a trust-probe failure must never fail the pass\nlog:\n%s", err, log)
@@ -1247,7 +1339,7 @@ func TestRunOnce_InteractiveRepoConfigDeniesPlanningPickup(t *testing.T) {
 	cfg.Repos = []RepoConfig{{Repo: "o/r", Dir: local, Session: "test-session"}}
 
 	var buf bytes.Buffer
-	if _, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, &buf, nil); err != nil {
+	if _, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, &buf); err != nil {
 		t.Fatalf("RunOnce returned unexpected error: %v", err)
 	}
 
@@ -1288,7 +1380,7 @@ func TestRunOnce_LeanRepoConfigPassesAutonomyGate(t *testing.T) {
 	cfg.Repos = []RepoConfig{{Repo: "o/r", Dir: local, Session: "test-session"}}
 
 	var buf bytes.Buffer
-	if _, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, &buf, nil); err != nil {
+	if _, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, &buf); err != nil {
 		t.Fatalf("RunOnce returned unexpected error: %v", err)
 	}
 
@@ -1331,7 +1423,7 @@ func TestRunOnce_AttendedNarrowsLeanRepoDeniesPlanningPickup(t *testing.T) {
 	cfg.Repos = []RepoConfig{{Repo: "o/r", Dir: local, Session: "test-session"}}
 
 	var buf bytes.Buffer
-	if _, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, &buf, nil); err != nil {
+	if _, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, &buf); err != nil {
 		t.Fatalf("RunOnce returned unexpected error: %v", err)
 	}
 
@@ -1383,7 +1475,7 @@ func TestRunOnce_AttendedNarrowing_DryRunAndRealPassIdentical(t *testing.T) {
 		cfg.Repos = []RepoConfig{{Repo: "o/r", Dir: local, Session: "test-session"}}
 
 		var buf bytes.Buffer
-		decisions, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, dryRun, &buf, nil)
+		decisions, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, dryRun, &buf)
 		if err != nil {
 			t.Fatalf("RunOnce returned unexpected error: %v", err)
 		}
@@ -1447,7 +1539,7 @@ func TestRunOnce_AttendedOff_LogByteIdenticalToNoPlanningBlock(t *testing.T) {
 		cfg.Repos = []RepoConfig{{Repo: "o/r", Dir: local, Session: "test-session"}}
 
 		var buf bytes.Buffer
-		if _, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, &buf, nil); err != nil {
+		if _, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, &buf); err != nil {
 			t.Fatalf("RunOnce returned unexpected error: %v", err)
 		}
 		return buf.String(), originOID
@@ -1511,7 +1603,7 @@ esac
 	cfg.Repos = []RepoConfig{{Repo: "o/r", Dir: repo, Session: "test-session"}}
 
 	var buf bytes.Buffer
-	if _, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, &buf, nil); err != nil {
+	if _, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, &buf); err != nil {
 		t.Fatalf("RunOnce returned unexpected error: %v", err)
 	}
 
@@ -1824,7 +1916,7 @@ esac
 	cfg.Repos = []RepoConfig{{Repo: "o/a", Dir: repoA, Session: "session-a"}, {Repo: "o/b", Dir: repoB, Session: "session-b"}}
 
 	var buf bytes.Buffer
-	if _, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, &buf, nil); err != nil {
+	if _, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, &buf); err != nil {
 		t.Fatalf("RunOnce returned unexpected error: %v", err)
 	}
 
@@ -1876,7 +1968,7 @@ esac
 	cfg.Repos = []RepoConfig{{Repo: "o/r", Dir: repo, Session: "session-r"}}
 
 	var buf bytes.Buffer
-	if _, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, &buf, nil); err != nil {
+	if _, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, &buf); err != nil {
 		t.Fatalf("RunOnce returned unexpected error: %v", err)
 	}
 
@@ -2012,7 +2104,7 @@ esac
 	}
 
 	var buf bytes.Buffer
-	if _, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, &buf, nil); err != nil {
+	if _, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, &buf); err != nil {
 		t.Fatalf("RunOnce returned unexpected error: %v", err)
 	}
 	log := buf.String()
@@ -2055,13 +2147,12 @@ func TestApplyDispatchResumeUnauthorizedProbe_NeverSpawnsOrClaims(t *testing.T) 
 
 	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
 	mut := &fakeMutator{}
-	prior := 0
 	var buf bytes.Buffer
 
 	deps := resumeDispatchDeps(now)
 	deps.Answers["o/r#42"] = AnswerProbeUnauthorized
 
-	decisions, err := applyDispatch(testConfig(), deps, fakeController{}, mut, false, &buf, &prior)
+	decisions, err := applyDispatch(testConfig(), deps, fakeController{}, mut, false, &buf)
 	if err != nil {
 		t.Fatalf("applyDispatch returned unexpected error: %v", err)
 	}
@@ -2071,8 +2162,8 @@ func TestApplyDispatchResumeUnauthorizedProbe_NeverSpawnsOrClaims(t *testing.T) 
 	if len(mut.labelEdits) != 0 {
 		t.Errorf("expected zero label mutations, got %+v", mut.labelEdits)
 	}
-	if prior != 0 {
-		t.Errorf("prior = %d, want 0 (nothing dispatched)", prior)
+	if n := countSpawned(decisions); n != 0 {
+		t.Errorf("spawned = %d, want 0 (nothing dispatched)", n)
 	}
 }
 
@@ -2088,13 +2179,12 @@ func TestApplyDispatchResumePermissionProbeUnresolved_NeverSpawnsOrClaims(t *tes
 
 	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
 	mut := &fakeMutator{}
-	prior := 0
 	var buf bytes.Buffer
 
 	deps := resumeDispatchDeps(now)
 	deps.Answers["o/r#42"] = AnswerProbePermissionAPIError
 
-	decisions, err := applyDispatch(testConfig(), deps, fakeController{}, mut, false, &buf, &prior)
+	decisions, err := applyDispatch(testConfig(), deps, fakeController{}, mut, false, &buf)
 	if err != nil {
 		t.Fatalf("applyDispatch returned unexpected error: %v", err)
 	}
@@ -2104,8 +2194,8 @@ func TestApplyDispatchResumePermissionProbeUnresolved_NeverSpawnsOrClaims(t *tes
 	if len(mut.labelEdits) != 0 {
 		t.Errorf("expected zero label mutations, got %+v", mut.labelEdits)
 	}
-	if prior != 0 {
-		t.Errorf("prior = %d, want 0 (nothing dispatched)", prior)
+	if n := countSpawned(decisions); n != 0 {
+		t.Errorf("spawned = %d, want 0 (nothing dispatched)", n)
 	}
 }
 
@@ -2126,13 +2216,12 @@ func TestApplyDispatchOrdinaryPlannedPickup_IncompleteOpenPRInventory_NeverSpawn
 
 	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
 	mut := &fakeMutator{}
-	prior := 0
 	var buf bytes.Buffer
 
 	deps := dispatchableDeps(now)
 	deps.Tickets[0].OpenPRProbe = OpenPRProbeUnreadable
 
-	decisions, err := applyDispatch(testConfig(), deps, fakeController{}, mut, false, &buf, &prior)
+	decisions, err := applyDispatch(testConfig(), deps, fakeController{}, mut, false, &buf)
 	if err != nil {
 		t.Fatalf("applyDispatch returned unexpected error: %v", err)
 	}
@@ -2142,8 +2231,8 @@ func TestApplyDispatchOrdinaryPlannedPickup_IncompleteOpenPRInventory_NeverSpawn
 	if len(mut.labelEdits) != 0 {
 		t.Errorf("expected zero label mutations, got %+v", mut.labelEdits)
 	}
-	if prior != 0 {
-		t.Errorf("prior = %d, want 0 (nothing dispatched)", prior)
+	if n := countSpawned(decisions); n != 0 {
+		t.Errorf("spawned = %d, want 0 (nothing dispatched)", n)
 	}
 }
 
@@ -2160,7 +2249,6 @@ func TestApplyDispatchRefinedPlanningPickup_IncompleteOpenPRInventory_NeverSpawn
 
 	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
 	mut := &fakeMutator{}
-	prior := 0
 	var buf bytes.Buffer
 
 	cfg := testConfig()
@@ -2168,7 +2256,7 @@ func TestApplyDispatchRefinedPlanningPickup_IncompleteOpenPRInventory_NeverSpawn
 	deps := planningDispatchDeps(now)
 	deps.Tickets[0].OpenPRProbe = OpenPRProbeUnreadable
 
-	decisions, err := applyDispatch(cfg, deps, fakeController{}, mut, false, &buf, &prior)
+	decisions, err := applyDispatch(cfg, deps, fakeController{}, mut, false, &buf)
 	if err != nil {
 		t.Fatalf("applyDispatch returned unexpected error: %v", err)
 	}
@@ -2178,8 +2266,8 @@ func TestApplyDispatchRefinedPlanningPickup_IncompleteOpenPRInventory_NeverSpawn
 	if len(mut.labelEdits) != 0 {
 		t.Errorf("expected zero label mutations, got %+v", mut.labelEdits)
 	}
-	if prior != 0 {
-		t.Errorf("prior = %d, want 0 (nothing dispatched)", prior)
+	if n := countSpawned(decisions); n != 0 {
+		t.Errorf("spawned = %d, want 0 (nothing dispatched)", n)
 	}
 }
 
@@ -2236,7 +2324,7 @@ esac
 		cfg := testConfig()
 		cfg.Repos = []RepoConfig{{Repo: "o/r", Dir: local, Session: "test-session"}}
 		var buf bytes.Buffer
-		decisions, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, dryRun, &buf, nil)
+		decisions, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, dryRun, &buf)
 		if err != nil {
 			t.Fatalf("RunOnce returned unexpected error: %v", err)
 		}
@@ -2405,7 +2493,7 @@ func TestRunOnce_ContainerSessionProbe_RunsOncePerPassAcrossTicketsAndRepos(t *t
 	spawned := recordSpawns(t)
 
 	var buf bytes.Buffer
-	decisions, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, &buf, nil)
+	decisions, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, &buf)
 	if err != nil {
 		t.Fatalf("RunOnce returned unexpected error: %v", err)
 	}
@@ -2438,7 +2526,7 @@ func TestRunOnce_ContainerSessionProbe_NotCalledWhenNoTicketsCollected(t *testin
 	calls := stubContainerSessionProbe(t, 0, nil)
 	failOnSpawn(t)
 
-	decisions, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, io.Discard, nil)
+	decisions, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, io.Discard)
 	if err != nil {
 		t.Fatalf("RunOnce returned unexpected error: %v", err)
 	}
@@ -2451,8 +2539,8 @@ func TestRunOnce_ContainerSessionProbe_NotCalledWhenNoTicketsCollected(t *testin
 }
 
 // AC16: a failing probe holds every candidate at the capacity gate with the
-// fail-closed reason, spawns and claims nothing, leaves the daily-quota tally
-// alone, logs the cause, and is NOT a RunOnce error (a returned error would
+// fail-closed reason, spawns and claims nothing, records no launch,
+// logs the cause, and is NOT a RunOnce error (a returned error would
 // terminate RunLoop on a transient docker outage).
 func TestRunOnce_ContainerSessionProbeError_HoldsEveryCandidateAndSpawnsNothing(t *testing.T) {
 	cfg := setupGatePass(t, watch.StateSnapshot{},
@@ -2464,9 +2552,8 @@ func TestRunOnce_ContainerSessionProbeError_HoldsEveryCandidateAndSpawnsNothing(
 	failOnSpawn(t)
 
 	mut := &fakeMutator{}
-	prior := 0
 	var buf bytes.Buffer
-	decisions, err := RunOnce(cfg, fakeController{}, mut, false, &buf, &prior)
+	decisions, err := RunOnce(cfg, fakeController{}, mut, false, &buf)
 	if err != nil {
 		t.Fatalf("RunOnce returned %v; a probe failure must hold the pass, not fail it", err)
 	}
@@ -2485,8 +2572,8 @@ func TestRunOnce_ContainerSessionProbeError_HoldsEveryCandidateAndSpawnsNothing(
 	if len(mut.labelEdits) != 0 {
 		t.Errorf("label edits = %+v, want none (nothing may be claimed)", mut.labelEdits)
 	}
-	if prior != 0 {
-		t.Errorf("prior = %d, want 0", prior)
+	if n := countSpawned(decisions); n != 0 {
+		t.Errorf("spawned = %d, want 0", n)
 	}
 
 	var causeLine string
@@ -2510,7 +2597,7 @@ func TestRunOnce_ContainerSessionProbeError_DryRunStillProbesAndHolds(t *testing
 	calls := stubContainerSessionProbe(t, 0, errors.New("docker ps: boom"))
 	failOnSpawn(t)
 
-	decisions, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, true, io.Discard, nil)
+	decisions, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, true, io.Discard)
 	if err != nil {
 		t.Fatalf("RunOnce returned unexpected error: %v", err)
 	}
@@ -2532,7 +2619,7 @@ func TestRunOnce_ContainerSessionProbeCount_ReachesTheCapAndTheReason(t *testing
 		spawned := recordSpawns(t)
 
 		var buf bytes.Buffer
-		decisions, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, &buf, nil)
+		decisions, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, &buf)
 		if err != nil {
 			t.Fatalf("RunOnce returned unexpected error: %v", err)
 		}
@@ -2565,7 +2652,7 @@ func TestRunOnce_ContainerSessionProbeCount_ReachesTheCapAndTheReason(t *testing
 		stubContainerSessionProbe(t, 2, nil)
 		failOnSpawn(t)
 
-		decisions, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, io.Discard, nil)
+		decisions, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, io.Discard)
 		if err != nil {
 			t.Fatalf("RunOnce returned unexpected error: %v", err)
 		}
@@ -2585,7 +2672,7 @@ func TestRunOnce_RealContainerSessionProbe_NoRuntimeOnPathCountsZeroAndDispatche
 	spawned := recordSpawns(t)
 
 	var buf bytes.Buffer
-	decisions, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, &buf, nil)
+	decisions, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, &buf)
 	if err != nil {
 		t.Fatalf("RunOnce returned unexpected error: %v", err)
 	}
@@ -2611,7 +2698,7 @@ func TestRunOnce_RealContainerSessionProbe_RuntimePresentButPsFailsFailsClosed(t
 
 	mut := &fakeMutator{}
 	var buf bytes.Buffer
-	decisions, err := RunOnce(cfg, fakeController{}, mut, false, &buf, nil)
+	decisions, err := RunOnce(cfg, fakeController{}, mut, false, &buf)
 	if err != nil {
 		t.Fatalf("RunOnce returned unexpected error: %v", err)
 	}
@@ -2656,7 +2743,7 @@ func TestRunOnce_RealContainerSessionProbe_DeadlineOverrunFailsClosed(t *testing
 
 	var buf bytes.Buffer
 	start := time.Now()
-	decisions, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, &buf, nil)
+	decisions, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, &buf)
 	elapsed := time.Since(start)
 	if err != nil {
 		t.Fatalf("RunOnce returned unexpected error: %v", err)
@@ -2694,7 +2781,7 @@ exit 0
 		useRealContainerSessionProbe(t)
 		failOnSpawn(t)
 
-		decisions, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, io.Discard, nil)
+		decisions, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, io.Discard)
 		if err != nil {
 			t.Fatalf("RunOnce returned unexpected error: %v", err)
 		}
@@ -2711,7 +2798,7 @@ exit 0
 		useRealContainerSessionProbe(t)
 		spawned := recordSpawns(t)
 
-		decisions, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, io.Discard, nil)
+		decisions, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, io.Discard)
 		if err != nil {
 			t.Fatalf("RunOnce returned unexpected error: %v", err)
 		}
@@ -2763,16 +2850,17 @@ func TestUnsupportedAgentNeverSpawnsOrChangesLabels(t *testing.T) {
 					return nil
 				})
 				mut := &fakeMutator{}
-				prior := 0
-				got, err := applyDispatch(cfg, deps, fakeController{}, mut, false, nil, &prior)
+				q := useQuotaDir(t)
+				cfg.DailyQuota = quotaPtr(100)
+				got, err := applyDispatch(cfg, deps, fakeController{}, mut, false, nil)
 				if err != nil {
 					t.Fatal(err)
 				}
 				if len(got) != 1 || got[0].Action != ActionSkip || got[0].Reason != wantReason {
 					t.Fatalf("expected skip with reason %q: %+v", wantReason, got)
 				}
-				if len(mut.labelEdits) != 0 || prior != 0 {
-					t.Fatalf("refusal changed labels/quota: %+v, %d", mut.labelEdits, prior)
+				if used := quotaUsed(t, q, now); len(mut.labelEdits) != 0 || used != 0 {
+					t.Fatalf("refusal changed labels/quota: %+v, %d", mut.labelEdits, used)
 				}
 			})
 		}
@@ -2811,16 +2899,18 @@ func TestUserDefinedImplementTemplateDoesNotMakeAgentDispatchable(t *testing.T) 
 		return nil
 	})
 	mut := &fakeMutator{}
-	prior := 0
-	got, err := applyDispatch(cfg, deps, fakeController{}, mut, false, nil, &prior)
+	q := useQuotaDir(t)
+	cfg.DailyQuota = quotaPtr(100)
+	now := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
+	got, err := applyDispatch(cfg, deps, fakeController{}, mut, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if want := unsupportedAgentReason("fakeagent"); len(got) != 1 || got[0].Action != ActionSkip || got[0].Reason != want {
 		t.Fatalf("expected skip with reason %q: %+v", want, got)
 	}
-	if len(mut.labelEdits) != 0 || prior != 0 {
-		t.Fatalf("refusal changed labels/quota: %+v, %d", mut.labelEdits, prior)
+	if used := quotaUsed(t, q, now); len(mut.labelEdits) != 0 || used != 0 {
+		t.Fatalf("refusal changed labels/quota: %+v, %d", mut.labelEdits, used)
 	}
 }
 
@@ -2879,9 +2969,9 @@ func TestApplyDispatch_ClearsRecordedLaunchBeforeSpawn(t *testing.T) {
 				return nil
 			})
 
-			prior := 0
+			q := useQuotaDir(t)
 			now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
-			if _, err := applyDispatch(launchDispatchConfig(dir), tt.deps(now), fakeController{}, mut, false, nil, &prior); err != nil {
+			if _, err := applyDispatch(withQuota(launchDispatchConfig(dir)), tt.deps(now), fakeController{}, mut, false, nil); err != nil {
 				t.Fatalf("applyDispatch: %v", err)
 			}
 
@@ -2892,8 +2982,8 @@ func TestApplyDispatch_ClearsRecordedLaunchBeforeSpawn(t *testing.T) {
 			if !reflect.DeepEqual(sessionAtSpawn, want) {
 				t.Errorf("session at spawn = %v, want only %v (launch triple cleared, other keys kept)", sessionAtSpawn, want)
 			}
-			if prior != 1 {
-				t.Errorf("prior = %d, want 1 (the dispatch still happened)", prior)
+			if got := quotaUsed(t, q, now); got != 1 {
+				t.Errorf("persisted daily quota = %d, want 1 (the dispatch still happened)", got)
 			}
 		})
 	}
@@ -2920,18 +3010,18 @@ func TestApplyDispatch_FailedClear_SkipsTheTicketEntirely(t *testing.T) {
 				return nil
 			})
 
-			prior := 0
+			q := useQuotaDir(t)
 			var buf bytes.Buffer
 			now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
-			if _, err := applyDispatch(launchDispatchConfig(dir), tt.deps(now), fakeController{}, mut, false, &buf, &prior); err != nil {
+			if _, err := applyDispatch(withQuota(launchDispatchConfig(dir)), tt.deps(now), fakeController{}, mut, false, &buf); err != nil {
 				t.Fatalf("applyDispatch: %v (a skipped ticket must not fail the pass)", err)
 			}
 
 			if len(mut.callOrder) != 0 {
 				t.Errorf("label edits = %v, want none (no claim, no rollback)", mut.callOrder)
 			}
-			if prior != 0 {
-				t.Errorf("prior = %d, want 0", prior)
+			if got := quotaUsed(t, q, now); got != 0 {
+				t.Errorf("persisted daily quota = %d, want 0", got)
 			}
 			if !strings.Contains(buf.String(), "dispatch: #42 clearing recorded launch failed") {
 				t.Errorf("log = %q, want it to contain %q", buf.String(), "dispatch: #42 clearing recorded launch failed")
@@ -2963,12 +3053,12 @@ func TestApplyDispatch_FifoStateFile_SkipsTheTicketWithoutBlockingThePass(t *tes
 				return nil
 			})
 
-			prior := 0
+			q := useQuotaDir(t)
 			var buf bytes.Buffer
 			var passErr error
 			now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
 			returnsWithin(t, fifoDeadline, func() {
-				_, passErr = applyDispatch(launchDispatchConfig(dir), tt.deps(now), fakeController{}, mut, false, &buf, &prior)
+				_, passErr = applyDispatch(withQuota(launchDispatchConfig(dir)), tt.deps(now), fakeController{}, mut, false, &buf)
 			})
 
 			if passErr != nil {
@@ -2980,8 +3070,8 @@ func TestApplyDispatch_FifoStateFile_SkipsTheTicketWithoutBlockingThePass(t *tes
 			if len(mut.callOrder) != 0 {
 				t.Errorf("label edits = %v, want none (no claim, no rollback)", mut.callOrder)
 			}
-			if prior != 0 {
-				t.Errorf("prior = %d, want 0", prior)
+			if got := quotaUsed(t, q, now); got != 0 {
+				t.Errorf("persisted daily quota = %d, want 0", got)
 			}
 			if !strings.Contains(buf.String(), "dispatch: #42 clearing recorded launch failed") {
 				t.Errorf("log = %q, want it to contain %q", buf.String(), "dispatch: #42 clearing recorded launch failed")
@@ -2997,14 +3087,14 @@ func TestApplyDispatch_MissingStateFile_StillSpawnsAndCreatesNothing(t *testing.
 	spawned := 0
 	stubRunFn(t, func(run.Opts, run.Controller) error { spawned++; return nil })
 
-	prior := 0
+	q := useQuotaDir(t)
 	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
-	if _, err := applyDispatch(launchDispatchConfig(dir), dispatchableDeps(now), fakeController{}, &fakeMutator{}, false, nil, &prior); err != nil {
+	if _, err := applyDispatch(withQuota(launchDispatchConfig(dir)), dispatchableDeps(now), fakeController{}, &fakeMutator{}, false, nil); err != nil {
 		t.Fatalf("applyDispatch: %v", err)
 	}
 
-	if spawned != 1 || prior != 1 {
-		t.Errorf("spawned = %d, prior = %d, want 1 and 1", spawned, prior)
+	if used := quotaUsed(t, q, now); spawned != 1 || used != 1 {
+		t.Errorf("spawned = %d, persisted quota = %d, want 1 and 1", spawned, used)
 	}
 	if _, err := os.Stat(filepath.Join(dir, ".cenci")); !os.IsNotExist(err) {
 		t.Errorf("stat .cenci = %v, want it not to exist (clearing must create nothing)", err)
@@ -3041,7 +3131,7 @@ func TestRunOnce_OOMBackoff_LoadedMapHoldsOnlyTheRecordedTicket(t *testing.T) {
 	spawned := recordSpawns(t)
 
 	var buf bytes.Buffer
-	decisions, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, &buf, nil)
+	decisions, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, &buf)
 	if err != nil {
 		t.Fatalf("RunOnce returned unexpected error: %v", err)
 	}
@@ -3067,7 +3157,7 @@ func TestRunOnce_OOMBackoff_ElapsedEntryDispatchesWithoutExtraMutations(t *testi
 	spawned := recordSpawns(t)
 	mut := &fakeMutator{}
 
-	decisions, err := RunOnce(cfg, fakeController{}, mut, false, io.Discard, nil)
+	decisions, err := RunOnce(cfg, fakeController{}, mut, false, io.Discard)
 	if err != nil {
 		t.Fatalf("RunOnce returned unexpected error: %v", err)
 	}
@@ -3091,7 +3181,7 @@ func TestRunOnce_OOMBackoff_NotLoadedWhenNoTicketsOrBackoffDisabled(t *testing.T
 		calls := stubOOMBackoffLoad(t, map[string]time.Time{}, nil)
 		failOnSpawn(t)
 
-		if _, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, io.Discard, nil); err != nil {
+		if _, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, io.Discard); err != nil {
 			t.Fatalf("RunOnce returned unexpected error: %v", err)
 		}
 		if *calls != 0 {
@@ -3105,7 +3195,7 @@ func TestRunOnce_OOMBackoff_NotLoadedWhenNoTicketsOrBackoffDisabled(t *testing.T
 		calls := stubOOMBackoffLoad(t, map[string]time.Time{"o/a#42": time.Now()}, nil)
 		recordSpawns(t)
 
-		decisions, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, io.Discard, nil)
+		decisions, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, io.Discard)
 		if err != nil {
 			t.Fatalf("RunOnce returned unexpected error: %v", err)
 		}
@@ -3127,7 +3217,7 @@ func TestRunOnce_OOMBackoff_UnreadableStateLogsOnceAndSkipsNothing(t *testing.T)
 	spawned := recordSpawns(t)
 
 	var buf bytes.Buffer
-	decisions, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, &buf, nil)
+	decisions, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, false, &buf)
 	if err != nil {
 		t.Fatalf("RunOnce returned %v; an unreadable backoff state must not fail the pass", err)
 	}
@@ -3206,13 +3296,18 @@ func withMilestoneFilter(cfg Config, milestones ...int) Config {
 // An excluded issue produces no spawn, no Working claim, no comment, no
 // ensure-labels call and no quota increment -- only the filter skip decision.
 func TestRunOnce_FilterExcludedIssue_NoSpawnNoClaimNoCommentNoQuota(t *testing.T) {
-	cfg := withMilestoneFilter(setupFilterPass(t, watch.StateSnapshot{}, filterPassIssue{number: 42, milestone: 7}), 3)
+	cfg := withQuota(withMilestoneFilter(setupFilterPass(t, watch.StateSnapshot{}, filterPassIssue{number: 42, milestone: 7}), 3))
 	failOnSpawn(t)
+	q := useQuotaDir(t)
+	for range 2 {
+		if err := q.Record(time.Now()); err != nil {
+			t.Fatalf("seeding the quota: %v", err)
+		}
+	}
 
 	mut := &fakeMutator{}
-	prior := 2
 	var buf bytes.Buffer
-	decisions, err := RunOnce(cfg, fakeController{}, mut, false, &buf, &prior)
+	decisions, err := RunOnce(cfg, fakeController{}, mut, false, &buf)
 	if err != nil {
 		t.Fatalf("RunOnce returned unexpected error: %v", err)
 	}
@@ -3221,8 +3316,8 @@ func TestRunOnce_FilterExcludedIssue_NoSpawnNoClaimNoCommentNoQuota(t *testing.T
 	if len(mut.labelEdits) != 0 || len(mut.comments) != 0 || len(mut.ensureCalls) != 0 {
 		t.Errorf("an excluded issue must cause no gh mutation, got edits %+v comments %+v ensures %+v", mut.labelEdits, mut.comments, mut.ensureCalls)
 	}
-	if prior != 2 {
-		t.Errorf("prior = %d, want 2 unchanged (an excluded issue consumes no quota)", prior)
+	if got := quotaUsedToday(t, q); got != 2 {
+		t.Errorf("persisted daily quota = %d, want 2 unchanged (an excluded issue consumes no quota)", got)
 	}
 	if want := "o/r#42 skip: filter: milestone 7 not in [3]"; !strings.Contains(buf.String(), want) {
 		t.Errorf("log lacks the decision line %q:\n%s", want, buf.String())
@@ -3234,13 +3329,13 @@ func TestRunOnce_FilterExcludedIssue_NoSpawnNoClaimNoCommentNoQuota(t *testing.T
 func TestRunOnce_FilterCapOfOne_IncludedIssueTakesTheSlot(t *testing.T) {
 	cfg := setupFilterPass(t, watch.StateSnapshot{},
 		filterPassIssue{number: 41, milestone: 7}, filterPassIssue{number: 42, milestone: 3})
-	cfg = withMilestoneFilter(cfg, 3)
+	cfg = withQuota(withMilestoneFilter(cfg, 3))
 	cfg.ConcurrencyCap = 1
 	spawned := recordSpawns(t)
+	q := useQuotaDir(t)
 
 	mut := &fakeMutator{}
-	prior := 0
-	decisions, err := RunOnce(cfg, fakeController{}, mut, false, io.Discard, &prior)
+	decisions, err := RunOnce(cfg, fakeController{}, mut, false, io.Discard)
 	if err != nil {
 		t.Fatalf("RunOnce returned unexpected error: %v", err)
 	}
@@ -3255,8 +3350,8 @@ func TestRunOnce_FilterCapOfOne_IncludedIssueTakesTheSlot(t *testing.T) {
 	if len(mut.labelEdits) != 1 || mut.labelEdits[0].number != 42 || !containsStr(mut.labelEdits[0].add, labelWorking) {
 		t.Errorf("label edits = %+v, want the Working claim on #42 only", mut.labelEdits)
 	}
-	if prior != 1 {
-		t.Errorf("prior = %d, want 1 (only the included dispatch counts)", prior)
+	if got := quotaUsedToday(t, q); got != 1 {
+		t.Errorf("persisted daily quota = %d, want 1 (only the included dispatch counts)", got)
 	}
 }
 
@@ -3267,7 +3362,7 @@ func TestRunOnce_FilterDryRunAndRealPassPrintIdenticalFilterLines(t *testing.T) 
 			filterPassIssue{number: 40}, filterPassIssue{number: 41, milestone: 7}, filterPassIssue{number: 42, milestone: 3}), 3)
 		stubRunFn(t, func(run.Opts, run.Controller) error { return nil })
 		var buf bytes.Buffer
-		if _, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, dryRun, &buf, nil); err != nil {
+		if _, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, dryRun, &buf); err != nil {
 			t.Fatalf("RunOnce(dryRun=%v): %v", dryRun, err)
 		}
 		return logLinesWith(buf.String(), " skip: filter:")
@@ -3309,7 +3404,7 @@ func TestRunOnce_FilterTwoConfigFilesSelectDisjointSets(t *testing.T) {
 		cfg := base
 		cfg.Repos = loaded.Repos
 
-		decisions, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, true, io.Discard, nil)
+		decisions, err := RunOnce(cfg, fakeController{}, &fakeMutator{}, true, io.Discard)
 		if err != nil {
 			t.Fatalf("RunOnce under milestone %d: %v", milestone, err)
 		}
@@ -3346,17 +3441,16 @@ esac
 	failOnSpawn(t)
 
 	mut := &fakeMutator{}
-	prior := 0
 	var buf bytes.Buffer
-	decisions, err := RunOnce(cfg, fakeController{}, mut, false, &buf, &prior)
+	decisions, err := RunOnce(cfg, fakeController{}, mut, false, &buf)
 	if err == nil {
 		t.Fatal("RunOnce returned no error for a failed issue read")
 	}
 	if len(decisions) != 0 {
 		t.Errorf("decisions = %+v, want none", decisions)
 	}
-	if len(mut.labelEdits) != 0 || len(mut.comments) != 0 || prior != 0 {
-		t.Errorf("a failed read must change nothing: edits %+v comments %+v prior %d", mut.labelEdits, mut.comments, prior)
+	if len(mut.labelEdits) != 0 || len(mut.comments) != 0 {
+		t.Errorf("a failed read must change nothing: edits %+v comments %+v", mut.labelEdits, mut.comments)
 	}
 	if !strings.Contains(buf.String(), "collecting tickets") {
 		t.Errorf("log lacks the collection failure:\n%s", buf.String())
@@ -3378,7 +3472,7 @@ esac
 `)
 	recordSpawns(t)
 
-	held, err := RunOnce(withMilestoneFilter(cfg, 3), fakeController{}, &fakeMutator{}, true, io.Discard, nil)
+	held, err := RunOnce(withMilestoneFilter(cfg, 3), fakeController{}, &fakeMutator{}, true, io.Discard)
 	if err != nil {
 		t.Fatalf("RunOnce: %v", err)
 	}
@@ -3387,7 +3481,7 @@ esac
 	labelOnly := cfg
 	labelOnly.Repos = []RepoConfig{cfg.Repos[0]}
 	labelOnly.Repos[0].Filter = RepoFilter{LabelsAll: []string{"planned"}}
-	passed, err := RunOnce(labelOnly, fakeController{}, &fakeMutator{}, true, io.Discard, nil)
+	passed, err := RunOnce(labelOnly, fakeController{}, &fakeMutator{}, true, io.Discard)
 	if err != nil {
 		t.Fatalf("RunOnce: %v", err)
 	}
@@ -3460,7 +3554,7 @@ func TestApplyDispatch_HealthyRepoLaunchesAtCapOne(t *testing.T) {
 			cfg.ConcurrencyCap = 1
 			cfg.Repos = []RepoConfig{{Repo: "o/a", Session: tt.aSession}, {Repo: "o/b", Session: "b-work"}}
 			var buf bytes.Buffer
-			_, _ = applyDispatch(cfg, plannedAcross(time.Now(), repoTicket{"o/a", 1}, repoTicket{"o/b", 2}), tt.ctrl(t), &fakeMutator{}, false, &buf, nil)
+			_, _ = applyDispatch(cfg, plannedAcross(time.Now(), repoTicket{"o/a", 1}, repoTicket{"o/b", 2}), tt.ctrl(t), &fakeMutator{}, false, &buf)
 
 			if got, want := spawnIdentities(*spawns), []string{"2@b-work"}; !reflect.DeepEqual(got, want) {
 				t.Fatalf("spawns = %v, want %v", got, want)
@@ -3480,12 +3574,11 @@ func TestApplyDispatch_RepeatedPassesStayHealthy(t *testing.T) {
 	cfg := testConfig()
 	cfg.ConcurrencyCap = 1
 	cfg.Repos = []RepoConfig{{Repo: "o/a", Session: "a-work"}, {Repo: "o/b", Session: "b-work"}}
-	prior := 0
 	for pass := 1; pass <= 3; pass++ {
 		ctrl := &sessionProbeController{t: t, live: map[string]bool{"b-work": true}}
 		var buf bytes.Buffer
 		before := len(*spawns)
-		_, err := applyDispatch(cfg, plannedAcross(time.Now(), repoTicket{"o/a", 1}, repoTicket{"o/b", 10 + pass}), ctrl, &fakeMutator{}, false, &buf, &prior)
+		_, err := applyDispatch(cfg, plannedAcross(time.Now(), repoTicket{"o/a", 1}, repoTicket{"o/b", 10 + pass}), ctrl, &fakeMutator{}, false, &buf)
 		if !errors.Is(err, ErrSessionMissing) {
 			t.Errorf("pass %d: err = %v, want ErrSessionMissing", pass, err)
 		}
@@ -3500,8 +3593,8 @@ func TestApplyDispatch_RepeatedPassesStayHealthy(t *testing.T) {
 			t.Errorf("pass %d: the bad repo's ticket reported a capacity skip:\n%s", pass, log)
 		}
 	}
-	if prior != 3 {
-		t.Errorf("prior = %d, want 3 (one spawn per pass)", prior)
+	if len(*spawns) != 3 {
+		t.Errorf("spawns = %d, want 3 (one spawn per pass)", len(*spawns))
 	}
 }
 
@@ -3515,7 +3608,7 @@ func TestApplyDispatch_NoPhantomCapacity(t *testing.T) {
 		cfg.ConcurrencyCap = 1
 		cfg.Repos = []RepoConfig{{Repo: "o/a", Session: ""}, {Repo: "o/b", Session: "ghost"}, {Repo: "o/c", Session: "c-work"}}
 		ctrl := &sessionProbeController{t: t, live: map[string]bool{"c-work": true}}
-		_, _ = applyDispatch(cfg, plannedAcross(time.Now(), repoTicket{"o/a", 1}, repoTicket{"o/b", 2}, repoTicket{"o/c", 3}), ctrl, &fakeMutator{}, false, io.Discard, nil)
+		_, _ = applyDispatch(cfg, plannedAcross(time.Now(), repoTicket{"o/a", 1}, repoTicket{"o/b", 2}, repoTicket{"o/c", 3}), ctrl, &fakeMutator{}, false, io.Discard)
 		if got, want := spawnIdentities(*spawns), []string{"3@c-work"}; !reflect.DeepEqual(got, want) {
 			t.Errorf("spawns = %v, want %v", got, want)
 		}
@@ -3526,7 +3619,7 @@ func TestApplyDispatch_NoPhantomCapacity(t *testing.T) {
 		cfg.ConcurrencyCap = 1
 		cfg.Repos = []RepoConfig{{Repo: "o/good", Session: "good-work"}, {Repo: "o/bad", Session: "ghost"}}
 		ctrl := &sessionProbeController{t: t, live: map[string]bool{"good-work": true}}
-		decisions, _ := applyDispatch(cfg, plannedAcross(time.Now(), repoTicket{"o/bad", 1}, repoTicket{"o/good", 2}), ctrl, &fakeMutator{}, false, io.Discard, nil)
+		decisions, _ := applyDispatch(cfg, plannedAcross(time.Now(), repoTicket{"o/bad", 1}, repoTicket{"o/good", 2}), ctrl, &fakeMutator{}, false, io.Discard)
 		if got, want := spawnIdentities(*spawns), []string{"2@good-work"}; !reflect.DeepEqual(got, want) {
 			t.Errorf("spawns = %v, want %v", got, want)
 		}
@@ -3539,7 +3632,7 @@ func TestApplyDispatch_NoPhantomCapacity(t *testing.T) {
 			cfg.ConcurrencyCap = 2
 			cfg.Repos = []RepoConfig{{Repo: "o/a", Session: "shared"}, {Repo: "o/b", Session: " shared "}}
 			ctrl := &sessionProbeController{t: t, live: map[string]bool{"shared": live}}
-			decisions, _ := applyDispatch(cfg, plannedAcross(time.Now(), repoTicket{"o/a", 1}, repoTicket{"o/b", 2}), ctrl, &fakeMutator{}, false, io.Discard, nil)
+			decisions, _ := applyDispatch(cfg, plannedAcross(time.Now(), repoTicket{"o/a", 1}, repoTicket{"o/b", 2}), ctrl, &fakeMutator{}, false, io.Discard)
 			if got, want := ctrl.hasSessionCalls, []string{"shared"}; !reflect.DeepEqual(got, want) {
 				t.Errorf("HasSession calls = %v, want %v (one probe per distinct trimmed name)", got, want)
 			}
@@ -3555,19 +3648,19 @@ func TestApplyDispatch_NoPhantomCapacity(t *testing.T) {
 			assertDecisions(t, decisions, []wantDecision{{1, ActionSkip, "session absent", ""}, {2, ActionSkip, "session absent", ""}})
 		})
 	}
-	t.Run("daily quota tally prior increments only for actual spawns", func(t *testing.T) {
+	t.Run("daily quota records only actual spawns", func(t *testing.T) {
 		spawns := captureSpawns(t)
+		q := useQuotaDir(t)
 		cfg := testConfig()
-		cfg.DailyQuota = 1
+		cfg.DailyQuota = quotaPtr(1)
 		cfg.Repos = []RepoConfig{{Repo: "o/bad", Session: "ghost"}, {Repo: "o/good", Session: "good-work"}}
 		ctrl := &sessionProbeController{t: t, live: map[string]bool{"good-work": true}}
-		prior := 0
-		_, _ = applyDispatch(cfg, plannedAcross(time.Now(), repoTicket{"o/bad", 1}, repoTicket{"o/good", 2}), ctrl, &fakeMutator{}, false, io.Discard, &prior)
+		_, _ = applyDispatch(cfg, plannedAcross(time.Now(), repoTicket{"o/bad", 1}, repoTicket{"o/good", 2}), ctrl, &fakeMutator{}, false, io.Discard)
 		if got, want := spawnIdentities(*spawns), []string{"2@good-work"}; !reflect.DeepEqual(got, want) {
 			t.Errorf("spawns = %v, want %v (the bad repo's ticket must not use the only quota unit)", got, want)
 		}
-		if prior != 1 {
-			t.Errorf("prior = %d, want 1 (one actual spawn)", prior)
+		if got := quotaUsedToday(t, q); got != 1 {
+			t.Errorf("persisted daily quota = %d, want 1 (one actual spawn)", got)
 		}
 	})
 }
@@ -3582,7 +3675,7 @@ func TestApplyDispatchDryRun_SessionReporting(t *testing.T) {
 	ctrl := &sessionProbeController{t: t, live: map[string]bool{}}
 	mut := &fakeMutator{}
 	var buf bytes.Buffer
-	decisions, err := applyDispatch(cfg, plannedAcross(time.Now(), repoTicket{"o/a", 1}, repoTicket{"o/b", 2}), ctrl, mut, true, &buf, nil)
+	decisions, err := applyDispatch(cfg, plannedAcross(time.Now(), repoTicket{"o/a", 1}, repoTicket{"o/b", 2}), ctrl, mut, true, &buf)
 	if err != nil {
 		t.Fatalf("dry-run err = %v, want nil (no session sentinel from a dry-run pass)", err)
 	}
@@ -3608,7 +3701,7 @@ func TestApplyDispatchDryRun_AnsweredResumeShownWithoutMutation(t *testing.T) {
 	failOnSpawn(t)
 	ctrl := &sessionProbeController{t: t, live: map[string]bool{}}
 	mut := &fakeMutator{}
-	decisions, err := applyDispatch(dispatchTestConfig(), resumeDispatchDeps(time.Now()), ctrl, mut, true, io.Discard, nil)
+	decisions, err := applyDispatch(dispatchTestConfig(), resumeDispatchDeps(time.Now()), ctrl, mut, true, io.Discard)
 	if err != nil {
 		t.Fatalf("dry-run err = %v", err)
 	}
@@ -3641,7 +3734,7 @@ func TestApplyDispatch_AuthorizationHoldsMakeNoMutation(t *testing.T) {
 			deps := dispatchableDeps(time.Now())
 			tt.mutate(&deps.Tickets[0])
 			mut := &fakeMutator{}
-			decisions, err := applyDispatch(dispatchTestConfig(), deps, fakeController{}, mut, false, io.Discard, nil)
+			decisions, err := applyDispatch(dispatchTestConfig(), deps, fakeController{}, mut, false, io.Discard)
 			if err != nil {
 				t.Errorf("err = %v, want nil (a hold is a skip, not a pass failure)", err)
 			}
@@ -3660,7 +3753,7 @@ func TestApplyDispatch_LegacyApprovalNoteOnDecisionLine(t *testing.T) {
 	deps := dispatchableDeps(time.Now())
 	deps.Tickets[0] = Ticket{Repo: "o/r", Number: 42, Labels: []string{"Planned"}, Assignees: []string{"octocat"}, Stage: string(pipeline.StageExecuted), StageProbe: StageProbePresent}
 	var buf bytes.Buffer
-	if _, err := applyDispatch(dispatchTestConfig(), deps, fakeController{}, &fakeMutator{}, false, &buf, nil); err != nil {
+	if _, err := applyDispatch(dispatchTestConfig(), deps, fakeController{}, &fakeMutator{}, false, &buf); err != nil {
 		t.Fatalf("err = %v", err)
 	}
 	if got, want := spawnIdentities(*spawns), []string{"42@test-session"}; !reflect.DeepEqual(got, want) {
@@ -3668,5 +3761,355 @@ func TestApplyDispatch_LegacyApprovalNoteOnDecisionLine(t *testing.T) {
 	}
 	if want := `o/r#42 dispatch (claude, 42-x.md, session "test-session"): dispatch; legacy approval (unrecorded provenance)`; !strings.Contains(buf.String(), want) {
 		t.Errorf("log missing %q:\n%s", want, buf.String())
+	}
+}
+
+// -- #1566: the persisted daily quota ------------------------------------------
+
+// quotaFileName is the persisted counter's file inside the capacity directory.
+const quotaFileName = "daily-quota.json"
+
+// localAt builds a wall-clock time in the process's local zone, so a test about
+// the local calendar day crosses midnight whatever TZ the runner uses.
+func localAt(year int, month time.Month, day, hour, minute int) time.Time {
+	return time.Date(year, month, day, hour, minute, 0, 0, time.Local)
+}
+
+// With the default config -- no dailyQuota -- 25 sequential launches across a
+// local midnight all dispatch, none logs "daily quota reached", and the quota
+// store is never even opened.
+func TestApplyDispatch_DefaultConfigLaunchesPastTwentyAcrossMidnight(t *testing.T) {
+	spawns := recordSpawns(t)
+	calls := pointQuotaSeam(t, filepath.Join(t.TempDir(), "capacity"))
+	cfg := DefaultConfig()
+	cfg.Repos = []RepoConfig{{Repo: "o/r", Session: "test-session"}}
+
+	start := localAt(2026, time.July, 10, 23, 50)
+	if start.Add(24*time.Minute).Day() == start.Day() {
+		t.Fatal("fixture error: the 25 passes must straddle a local midnight")
+	}
+	var buf bytes.Buffer
+	for i := range 25 {
+		deps := dispatchableDeps(start.Add(time.Duration(i) * time.Minute))
+		// The default memory-headroom gate (25) is live: a probed repo with no
+		// memory limit passes it, so only the quota could stop these passes.
+		deps.RepoMemory = map[string]RepoMemory{"o/r": {Probe: MemoryProbeOK}}
+		if _, err := applyDispatch(cfg, deps, fakeController{}, &fakeMutator{}, false, &buf); err != nil {
+			t.Fatalf("pass %d: %v", i, err)
+		}
+	}
+
+	if len(*spawns) != 25 {
+		t.Errorf("spawns = %d, want 25 (the default config has no daily limit)", len(*spawns))
+	}
+	if strings.Contains(buf.String(), "daily quota") {
+		t.Errorf("the default config must never log a daily quota decision:\n%s", buf.String())
+	}
+	if *calls != 0 {
+		t.Errorf("the quota store was opened %d times with the quota off, want 0", *calls)
+	}
+}
+
+// With dailyQuota 2 and 2 launches recorded on local day D, a pass at 23:59 on D
+// skips with "daily quota reached" and a pass at 00:00 on D+1 admits; the count
+// then restarts from the new day's single launch.
+func TestApplyDispatch_DailyQuotaResetsAtLocalMidnight(t *testing.T) {
+	q := useQuotaDir(t)
+	spawns := recordSpawns(t)
+	before := localAt(2026, time.July, 10, 23, 59)
+	after := localAt(2026, time.July, 11, 0, 0)
+	for range 2 {
+		if err := q.Record(before); err != nil {
+			t.Fatalf("seeding the quota: %v", err)
+		}
+	}
+	cfg := dispatchTestConfig()
+	cfg.DailyQuota = quotaPtr(2)
+
+	decisions, err := applyDispatch(cfg, dispatchableDeps(before), fakeController{}, &fakeMutator{}, false, io.Discard)
+	if err != nil {
+		t.Fatalf("pass at 23:59: %v", err)
+	}
+	assertDecisions(t, decisions, []wantDecision{{42, ActionSkip, "daily quota reached", ""}})
+	if len(*spawns) != 0 {
+		t.Fatalf("spawned %v at 23:59 with the quota used up", *spawns)
+	}
+
+	decisions, err = applyDispatch(cfg, dispatchableDeps(after), fakeController{}, &fakeMutator{}, false, io.Discard)
+	if err != nil {
+		t.Fatalf("pass at 00:00: %v", err)
+	}
+	assertDecisions(t, decisions, []wantDecision{{42, ActionDispatch, "dispatch", ""}})
+	if len(*spawns) != 1 {
+		t.Errorf("spawns after midnight = %v, want one", *spawns)
+	}
+	if got := quotaUsed(t, q, after); got != 1 {
+		t.Errorf("used on the new day = %d, want 1", got)
+	}
+}
+
+// A quota of N counts across passes: the persisted count, not a per-pass
+// tally, decides, so a later pass sees the launches an earlier one recorded.
+func TestApplyDispatch_DailyQuotaCountsAcrossPasses(t *testing.T) {
+	q := useQuotaDir(t)
+	spawns := recordSpawns(t)
+	now := localAt(2026, time.July, 10, 12, 0)
+	cfg := dispatchTestConfig()
+	cfg.DailyQuota = quotaPtr(2)
+
+	for i := range 3 {
+		if _, err := applyDispatch(cfg, dispatchableDeps(now.Add(time.Duration(i)*time.Minute)), fakeController{}, &fakeMutator{}, false, io.Discard); err != nil {
+			t.Fatalf("pass %d: %v", i, err)
+		}
+	}
+	if len(*spawns) != 2 {
+		t.Errorf("spawns = %v, want exactly 2 under dailyQuota 2", *spawns)
+	}
+	if got := quotaUsed(t, q, now); got != 2 {
+		t.Errorf("persisted used = %d, want 2", got)
+	}
+}
+
+// dailyQuota 0 pauses every dispatch with the unchanged reason and records
+// nothing.
+func TestApplyDispatch_DailyQuotaZeroPausesEveryDispatch(t *testing.T) {
+	q := useQuotaDir(t)
+	failOnSpawn(t)
+	now := localAt(2026, time.July, 10, 12, 0)
+	cfg := dispatchTestConfig()
+	cfg.DailyQuota = quotaPtr(0)
+
+	var buf bytes.Buffer
+	decisions, err := applyDispatch(cfg, dispatchableDeps(now), fakeController{}, &fakeMutator{}, false, &buf)
+	if err != nil {
+		t.Fatalf("applyDispatch: %v", err)
+	}
+	assertDecisions(t, decisions, []wantDecision{{42, ActionSkip, "daily quota reached", ""}})
+	if want := "o/r#42 skip: daily quota reached"; !strings.Contains(buf.String(), want) {
+		t.Errorf("log lacks %q:\n%s", want, buf.String())
+	}
+	if got := quotaUsed(t, q, now); got != 0 {
+		t.Errorf("used = %d, want 0", got)
+	}
+}
+
+// With the quota off, a corrupt state file neither blocks dispatch nor is read
+// or rewritten: the seam is never called and the bytes stay exactly as planted.
+func TestApplyDispatch_CorruptQuotaFileIsLeftAloneWhileQuotaOff(t *testing.T) {
+	_, dir := useQuotaDirPath(t)
+	calls := pointQuotaSeam(t, dir)
+	garbage := []byte("{ definitely not a quota file")
+	path := filepath.Join(dir, quotaFileName)
+	if err := os.WriteFile(path, garbage, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	spawns := recordSpawns(t)
+
+	var buf bytes.Buffer
+	if _, err := applyDispatch(dispatchTestConfig(), dispatchableDeps(localAt(2026, time.July, 10, 12, 0)), fakeController{}, &fakeMutator{}, false, &buf); err != nil {
+		t.Fatalf("applyDispatch: %v", err)
+	}
+
+	if len(*spawns) != 1 {
+		t.Errorf("spawns = %v, want one (a corrupt file must not block an opted-out host)", *spawns)
+	}
+	if *calls != 0 {
+		t.Errorf("the quota store was opened %d times with the quota off, want 0", *calls)
+	}
+	if got, err := os.ReadFile(path); err != nil || !bytes.Equal(got, garbage) {
+		t.Errorf("state file = %q (err %v), want it untouched", got, err)
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 1 {
+		t.Errorf("capacity directory holds %d entries, want only the planted file", len(entries))
+	}
+	if strings.Contains(buf.String(), "daily quota") {
+		t.Errorf("a pass with the quota off must log nothing about it:\n%s", buf.String())
+	}
+}
+
+// A quota state that cannot be read with certainty admits no dispatch, logs the
+// reason once, names it on the ticket's skip line, and is never reset or
+// written through: a corrupt file, an unknown schema, a symlinked file and a
+// symlinked directory.
+func TestApplyDispatch_UnreadableQuotaStateBlocksDispatchAndWritesNothing(t *testing.T) {
+	const validState = `{"schema":1,"date":"2026-07-10","used":0}` + "\n"
+	cases := []struct {
+		name  string
+		want  error
+		plant func(t *testing.T) (dir string, guarded []string)
+	}{
+		{
+			name: "corrupt file", want: capacity.ErrCorrupt,
+			plant: func(t *testing.T) (string, []string) {
+				_, dir := useQuotaDirPath(t)
+				file := filepath.Join(dir, quotaFileName)
+				if err := os.WriteFile(file, []byte("{nope"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				return dir, []string{file}
+			},
+		},
+		{
+			name: "unknown schema", want: capacity.ErrUnknownSchema,
+			plant: func(t *testing.T) (string, []string) {
+				_, dir := useQuotaDirPath(t)
+				file := filepath.Join(dir, quotaFileName)
+				if err := os.WriteFile(file, []byte(`{"schema":2,"date":"2026-07-10","used":0}`), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				return dir, []string{file}
+			},
+		},
+		{
+			name: "symlinked file", want: capacity.ErrNotRegular,
+			plant: func(t *testing.T) (string, []string) {
+				_, dir := useQuotaDirPath(t)
+				target := filepath.Join(t.TempDir(), "elsewhere.json")
+				if err := os.WriteFile(target, []byte(validState), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(target, filepath.Join(dir, quotaFileName)); err != nil {
+					t.Fatal(err)
+				}
+				return dir, []string{target}
+			},
+		},
+		{
+			name: "symlinked directory", want: capacity.ErrUntrusted,
+			plant: func(t *testing.T) (string, []string) {
+				root := t.TempDir()
+				if err := os.Chmod(root, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				real := filepath.Join(root, "real")
+				if err := os.Mkdir(real, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				link := filepath.Join(root, "capacity")
+				if err := os.Symlink(real, link); err != nil {
+					t.Fatal(err)
+				}
+				pointQuotaSeam(t, link)
+				return link, []string{real}
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, guarded := tc.plant(t)
+			snapshotOf := func() map[string]string {
+				out := map[string]string{}
+				for _, p := range guarded {
+					info, err := os.Lstat(p)
+					if err != nil {
+						out[p] = "absent"
+						continue
+					}
+					if info.IsDir() {
+						entries, _ := os.ReadDir(p)
+						out[p] = fmt.Sprintf("dir with %d entries", len(entries))
+						continue
+					}
+					data, _ := os.ReadFile(p)
+					out[p] = string(data)
+				}
+				return out
+			}
+			before := snapshotOf()
+			failOnSpawn(t)
+			cfg := dispatchTestConfig()
+			cfg.DailyQuota = quotaPtr(5)
+
+			var buf bytes.Buffer
+			now := localAt(2026, time.July, 10, 12, 0)
+			decisions, err := applyDispatch(cfg, dispatchableDeps(now), fakeController{}, &fakeMutator{}, false, &buf)
+			if err != nil {
+				t.Fatalf("applyDispatch: %v (an unreadable state is a hold, not a pass failure)", err)
+			}
+
+			reason := "daily quota state unreadable: " + tc.want.Error()
+			assertDecisions(t, decisions, []wantDecision{{42, ActionSkip, reason, ""}})
+			log := buf.String()
+			if want := "dispatch: daily quota state unreadable: " + tc.want.Error() + "\n"; strings.Count(log, want) != 1 {
+				t.Errorf("log must carry %q exactly once:\n%s", want, log)
+			}
+			if want := "o/r#42 skip: " + reason; !strings.Contains(log, want) {
+				t.Errorf("log lacks the skip line %q:\n%s", want, log)
+			}
+			// The reason must keep both lazyboards substrings out of the skip line.
+			for _, line := range strings.Split(log, "\n") {
+				if strings.Contains(line, "o/r#42 skip:") && (strings.Count(line, " skip:") != 1 || strings.Contains(line, " dispatch ")) {
+					t.Errorf("skip line %q breaks the substring contract", line)
+				}
+			}
+			if after := snapshotOf(); !reflect.DeepEqual(before, after) {
+				t.Errorf("a pass wrote through or over the unreadable state:\n before %v\n after  %v", before, after)
+			}
+		})
+	}
+}
+
+// A dry-run pass with an unreadable state reports the same hold, from Peek, and
+// writes nothing.
+func TestApplyDispatchDryRun_UnreadableQuotaStateIsReported(t *testing.T) {
+	_, dir := useQuotaDirPath(t)
+	file := filepath.Join(dir, quotaFileName)
+	if err := os.WriteFile(file, []byte("{nope"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	failOnSpawn(t)
+	cfg := dispatchTestConfig()
+	cfg.DailyQuota = quotaPtr(5)
+
+	var buf bytes.Buffer
+	decisions, err := applyDispatch(cfg, dispatchableDeps(localAt(2026, time.July, 10, 12, 0)), fakeController{}, &fakeMutator{}, true, &buf)
+	if err != nil {
+		t.Fatalf("dry-run: %v", err)
+	}
+	assertDecisions(t, decisions, []wantDecision{{42, ActionSkip, "daily quota state unreadable: " + capacity.ErrCorrupt.Error(), ""}})
+	if got, _ := os.ReadFile(file); string(got) != "{nope" {
+		t.Errorf("state file = %q, want it untouched", got)
+	}
+}
+
+// A launch that cannot be recorded after a successful spawn is logged, not
+// returned (RunLoop treats a returned error as fatal), keeps the Spawned fact,
+// and makes the next pass fail closed on the now-corrupt file.
+func TestApplyDispatch_FailedQuotaRecordIsLoggedNotReturned(t *testing.T) {
+	_, dir := useQuotaDirPath(t)
+	file := filepath.Join(dir, quotaFileName)
+	spawns := 0
+	stubRunFn(t, func(run.Opts, run.Controller) error {
+		spawns++
+		// The file breaks between the pass's read and the launch's record.
+		return os.WriteFile(file, []byte("{broken mid-pass"), 0o600)
+	})
+	cfg := dispatchTestConfig()
+	cfg.DailyQuota = quotaPtr(5)
+	now := localAt(2026, time.July, 10, 12, 0)
+
+	var buf bytes.Buffer
+	decisions, err := applyDispatch(cfg, dispatchableDeps(now), fakeController{}, &fakeMutator{}, false, &buf)
+	if err != nil {
+		t.Fatalf("applyDispatch returned %v, want the record failure logged only", err)
+	}
+	if countSpawned(decisions) != 1 {
+		t.Errorf("decisions = %+v, want the launch still reported as spawned", decisions)
+	}
+	if want := "dispatch: #42 recording daily quota launch failed: " + capacity.ErrCorrupt.Error(); !strings.Contains(buf.String(), want) {
+		t.Errorf("log lacks %q:\n%s", want, buf.String())
+	}
+	if got, _ := os.ReadFile(file); string(got) != "{broken mid-pass" {
+		t.Errorf("a failed record rewrote the corrupt file: %q", got)
+	}
+
+	buf.Reset()
+	next, err := applyDispatch(cfg, dispatchableDeps(now.Add(time.Minute)), fakeController{}, &fakeMutator{}, false, &buf)
+	if err != nil {
+		t.Fatalf("next pass: %v", err)
+	}
+	assertDecisions(t, next, []wantDecision{{42, ActionSkip, "daily quota state unreadable: " + capacity.ErrCorrupt.Error(), ""}})
+	if spawns != 1 {
+		t.Errorf("spawns = %d, want the broken file to hold the next pass", spawns)
 	}
 }
