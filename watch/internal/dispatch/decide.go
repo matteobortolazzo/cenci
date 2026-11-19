@@ -222,6 +222,13 @@ const (
 	reasonDraftNotAwaitingInput = "draft not awaiting input"
 )
 
+// reasonAnswerCommentIDMissing (#910) is the skip for an Answered resume whose
+// answering comment ID is missing, zero or negative: the resume launch names
+// that one comment to the session, so a resume that cannot name it never
+// launches. Content-distinct from every reason above (#446/#598); it is
+// checked after resumeGateSkip, not inside its closed-set switch.
+const reasonAnswerCommentIDMissing = "escalation answer comment id missing"
+
 // Anchor-identity skip reasons (#849): resumeGateSkip's dedicated cases for
 // AnswerProbeAnchorUnset/AnswerProbeAnchorMismatch, each content-distinct
 // from reasonAnswerProbeUnknown and from each other (#446/#598).
@@ -319,6 +326,17 @@ type Inputs struct {
 	// missing field, unrecognized value, per-repo cap exhausted) has its own
 	// distinct AnswerProbe value and resumeGateSkip reason.
 	Answers map[string]AnswerProbe
+
+	// AnswerCommentIDs maps planKey(repo, number) -> the ID of the comment that
+	// answered the ticket's escalation (#910), resolved by resolveAnswerProbes
+	// next to Answers and recorded ONLY for an AnswerProbeAnswered ticket. A
+	// parallel map rather than a widened AnswerProbe, so the closed-set
+	// resumeGateSkip switch and every AnswerProbe comparison stay unchanged.
+	// Decide skips a resume whose entry is missing, zero or negative
+	// (reasonAnswerCommentIDMissing) and carries a positive one into
+	// Decision.AnswerCommentID. The ID is a pointer for the launched session
+	// to re-verify, never authorization.
+	AnswerCommentIDs map[string]int64
 
 	// RepoAutonomy maps repo -> the resolved RepoAutonomy for that repo this
 	// pass (#851, #877), resolved by probeRepoAutonomies (autonomy.go) before
@@ -637,6 +655,15 @@ func decideTicket(t Ticket, in Inputs, planByTicket map[string]*Plan, filterByRe
 		if reason, gated := resumeGateSkip(t, in.Answers[planKey(t.Repo, t.Number)]); gated {
 			return skip(reason)
 		}
+		// #910: an Answered probe must also carry the answering comment's
+		// ID, because the resume launch names that one comment to the
+		// session (dispatchTicketArg). A map miss, zero or negative ID fails
+		// closed here -- a separate check AFTER resumeGateSkip, so the
+		// closed-set probe switch stays untouched and every non-answered
+		// probe keeps its own reason.
+		if in.AnswerCommentIDs[planKey(t.Repo, t.Number)] <= 0 {
+			return skip(reasonAnswerCommentIDMissing)
+		}
 	}
 
 	// Pickup rule 4: plan freshness. Deliberately skipped when resuming,
@@ -782,7 +809,7 @@ func decideTicket(t Ticket, in Inputs, planByTicket map[string]*Plan, filterByRe
 	}
 
 	if resuming {
-		return Decision{Ticket: t, Plan: plan, Action: ActionDispatch, Resume: true, Reason: "resume — human answered", Agent: agent}
+		return Decision{Ticket: t, Plan: plan, Action: ActionDispatch, Resume: true, AnswerCommentID: in.AnswerCommentIDs[planKey(t.Repo, t.Number)], Reason: "resume — human answered", Agent: agent}
 	}
 	if planning || replanning {
 		// Trust backstop (#847): a planning session is never launched without

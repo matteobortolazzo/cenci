@@ -330,6 +330,117 @@ func resumeDispatchDeps(now time.Time) dispatchDeps {
 		Now:         now,
 		CurrentUser: "octocat",
 		Answers:     map[string]AnswerProbe{"o/r#42": AnswerProbeAnswered},
+		// #910: the answering comment's ID the probe carried for #42.
+		AnswerCommentIDs: map[string]int64{"o/r#42": 12},
+	}
+}
+
+// TestApplyDispatchResumeLaunchArgNamesTheAnswerComment (#910 AC3): the
+// resume launch's run.Opts.Ticket is the plan path plus exactly one
+// `answer-comment=<id>` token carrying the probed ID, while WindowTicket stays
+// the bare ticket number.
+func TestApplyDispatchResumeLaunchArgNamesTheAnswerComment(t *testing.T) {
+	var captured run.Opts
+	stubRunFn(t, func(opts run.Opts, _ run.Controller) error {
+		captured = opts
+		return nil
+	})
+
+	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+	mut := &orderRecordingMutator{}
+	prior := 0
+
+	if _, err := applyDispatch(dispatchTestConfig(), resumeDispatchDeps(now), fakeController{}, mut, false, nil, &prior); err != nil {
+		t.Fatalf("applyDispatch returned unexpected error: %v", err)
+	}
+
+	if captured.Ticket != ".plans/42-x.md answer-comment=12" {
+		t.Errorf("captured Opts.Ticket = %q, want %q", captured.Ticket, ".plans/42-x.md answer-comment=12")
+	}
+	if captured.WindowTicket != "42" {
+		t.Errorf("captured Opts.WindowTicket = %q, want %q (the numeric issue number, unchanged by the token)", captured.WindowTicket, "42")
+	}
+}
+
+// TestApplyDispatchResumeMissingAnswerCommentID_NeverSpawnsOrClaims (#910
+// AC5): an Answered probe whose carried ID is missing, zero or negative must
+// skip with the dedicated reason BEFORE the spawn loop -- zero runFn
+// invocations (the stub fatals) and zero label edits -- so a resume that
+// could not name the one authorized comment never launches.
+func TestApplyDispatchResumeMissingAnswerCommentID_NeverSpawnsOrClaims(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(deps *dispatchDeps)
+	}{
+		{"missing from the map", func(deps *dispatchDeps) { delete(deps.AnswerCommentIDs, "o/r#42") }},
+		{"nil map", func(deps *dispatchDeps) { deps.AnswerCommentIDs = nil }},
+		{"zero", func(deps *dispatchDeps) { deps.AnswerCommentIDs["o/r#42"] = 0 }},
+		{"negative", func(deps *dispatchDeps) { deps.AnswerCommentIDs["o/r#42"] = -1 }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			stubRunFn(t, func(run.Opts, run.Controller) error {
+				t.Fatal("a resume with no usable answer comment ID must never spawn")
+				return nil
+			})
+
+			now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+			mut := &fakeMutator{}
+			prior := 0
+			var buf bytes.Buffer
+
+			deps := resumeDispatchDeps(now)
+			tc.mutate(&deps)
+
+			decisions, err := applyDispatch(testConfig(), deps, fakeController{}, mut, false, &buf, &prior)
+			if err != nil {
+				t.Fatalf("applyDispatch returned unexpected error: %v", err)
+			}
+			if len(decisions) != 1 || decisions[0].Action != ActionSkip || decisions[0].Resume {
+				t.Fatalf("decisions = %+v, want a single skip with Resume=false", decisions)
+			}
+			if decisions[0].Reason != "escalation answer comment id missing" {
+				t.Errorf("reason = %q, want %q", decisions[0].Reason, "escalation answer comment id missing")
+			}
+			if len(mut.labelEdits) != 0 {
+				t.Errorf("expected zero label mutations, got %+v", mut.labelEdits)
+			}
+			if prior != 0 {
+				t.Errorf("prior = %d, want 0 (nothing dispatched)", prior)
+			}
+		})
+	}
+}
+
+// TestDispatchTicketArg (#910 AC3/AC4) pins the launch argument for every
+// decision kind: ordinary Planned, planning pickup and autonomous re-plan are
+// byte-identical to pre-#910, and only a resume appends the single
+// `answer-comment=<id>` token -- and only for a positive ID.
+func TestDispatchTicketArg(t *testing.T) {
+	ticket := Ticket{Repo: "o/r", Number: 42}
+	plan := &Plan{Repo: "o/r", Path: ".plans/42-x.md", TicketID: 42}
+
+	tests := []struct {
+		name string
+		d    Decision
+		want string
+	}{
+		{"ordinary Planned", Decision{Ticket: ticket, Plan: plan}, ".plans/42-x.md"},
+		{"planning pickup", Decision{Ticket: ticket, Planning: true}, "42"},
+		{"autonomous re-plan", Decision{Ticket: ticket, Plan: plan, Planning: true, Replan: true}, "42 replan"},
+		{"resume", Decision{Ticket: ticket, Plan: plan, Resume: true, AnswerCommentID: 12}, ".plans/42-x.md answer-comment=12"},
+		{"resume with a large ID", Decision{Ticket: ticket, Plan: plan, Resume: true, AnswerCommentID: 4567890123}, ".plans/42-x.md answer-comment=4567890123"},
+		{"resume with no ID carries no token", Decision{Ticket: ticket, Plan: plan, Resume: true}, ".plans/42-x.md"},
+		{"resume with a negative ID carries no token", Decision{Ticket: ticket, Plan: plan, Resume: true, AnswerCommentID: -1}, ".plans/42-x.md"},
+		{"a stray ID on a non-resume decision is never appended", Decision{Ticket: ticket, Plan: plan, AnswerCommentID: 12}, ".plans/42-x.md"},
+		{"a stray ID on a re-plan is never appended", Decision{Ticket: ticket, Plan: plan, Planning: true, Replan: true, AnswerCommentID: 12}, "42 replan"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := dispatchTicketArg(tc.d); got != tc.want {
+				t.Errorf("dispatchTicketArg = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 

@@ -1109,6 +1109,9 @@ func resumeInputs() Inputs {
 		CurrentUser: "octocat",
 		Config:      testConfig(),
 		Answers:     map[string]AnswerProbe{"o/r#42": AnswerProbeAnswered},
+		// #910: the probed answering comment's ID, carried into the resume
+		// Decision as a launch-argument pointer.
+		AnswerCommentIDs: map[string]int64{"o/r#42": 12},
 	}
 }
 
@@ -1127,12 +1130,53 @@ func TestDecideResumeGate(t *testing.T) {
 		wantAction Action
 		wantReason string
 		wantResume bool
+		// wantAnswerID is Decision.AnswerCommentID (#910): the probed ID on a
+		// resume dispatch, 0 on every skip.
+		wantAnswerID int64
 	}{
 		{
-			name:       "happy resume",
-			wantAction: ActionDispatch,
-			wantReason: "resume — human answered",
-			wantResume: true,
+			name:         "happy resume",
+			wantAction:   ActionDispatch,
+			wantReason:   "resume — human answered",
+			wantResume:   true,
+			wantAnswerID: 12,
+		},
+		{
+			// #910: an Answered probe with no ID entry at all fails closed --
+			// the resume launch could not name the one authorized comment.
+			name:       "answered probe with a missing answer comment ID skips (#910)",
+			mutate:     func(in *Inputs) { delete(in.AnswerCommentIDs, "o/r#42") },
+			wantAction: ActionSkip,
+			wantReason: reasonAnswerCommentIDMissing,
+		},
+		{
+			name:       "answered probe with a nil answer comment ID map skips (#910)",
+			mutate:     func(in *Inputs) { in.AnswerCommentIDs = nil },
+			wantAction: ActionSkip,
+			wantReason: reasonAnswerCommentIDMissing,
+		},
+		{
+			name:       "answered probe with answer comment ID 0 skips (#910)",
+			mutate:     func(in *Inputs) { in.AnswerCommentIDs["o/r#42"] = 0 },
+			wantAction: ActionSkip,
+			wantReason: reasonAnswerCommentIDMissing,
+		},
+		{
+			name:       "answered probe with answer comment ID -1 skips (#910)",
+			mutate:     func(in *Inputs) { in.AnswerCommentIDs["o/r#42"] = -1 },
+			wantAction: ActionSkip,
+			wantReason: reasonAnswerCommentIDMissing,
+		},
+		{
+			// #910: the ID gate sits AFTER resumeGateSkip, so a non-answered
+			// probe keeps its own reason even when the ID is also missing.
+			name: "a waiting probe keeps its own reason when the ID is also missing (#910)",
+			mutate: func(in *Inputs) {
+				in.Answers["o/r#42"] = AnswerProbeWaiting
+				delete(in.AnswerCommentIDs, "o/r#42")
+			},
+			wantAction: ActionSkip,
+			wantReason: reasonAnswerWaiting,
 		},
 		{
 			name:       "probe waiting skips with its own distinct reason",
@@ -1309,11 +1353,12 @@ func TestDecideResumeGate(t *testing.T) {
 			wantReason: "estimated token budget exhausted",
 		},
 		{
-			name:       "a stale draft still resumes (freshness deliberately skipped)",
-			mutate:     func(in *Inputs) { in.Plans[0].CommitsBehind = 999 },
-			wantAction: ActionDispatch,
-			wantReason: "resume — human answered",
-			wantResume: true,
+			name:         "a stale draft still resumes (freshness deliberately skipped)",
+			mutate:       func(in *Inputs) { in.Plans[0].CommitsBehind = 999 },
+			wantAction:   ActionDispatch,
+			wantReason:   "resume — human answered",
+			wantResume:   true,
+			wantAnswerID: 12,
 		},
 	}
 
@@ -1336,6 +1381,9 @@ func TestDecideResumeGate(t *testing.T) {
 			}
 			if d.Resume != tc.wantResume {
 				t.Errorf("Resume = %v, want %v", d.Resume, tc.wantResume)
+			}
+			if d.AnswerCommentID != tc.wantAnswerID {
+				t.Errorf("AnswerCommentID = %d, want %d", d.AnswerCommentID, tc.wantAnswerID)
 			}
 		})
 	}
@@ -1400,6 +1448,20 @@ func TestDecideResumeGate_PermissionReasonsAreAllPairwiseDistinct(t *testing.T) 
 			t.Fatalf("AnswerProbe values %q and %q both produced the identical reason %q, want pairwise-distinct reasons (#446/#598)", prior, p, reason)
 		}
 		seen[reason] = p
+	}
+
+	// #910: the missing-answer-comment-ID reason is not produced by
+	// resumeGateSkip (the closed-set switch is untouched), so it is checked
+	// against the same reason set separately -- plus the draft-status reason
+	// that also sits in the resume block.
+	if reasonAnswerCommentIDMissing != "escalation answer comment id missing" {
+		t.Errorf("reasonAnswerCommentIDMissing = %q, want the exact documented text", reasonAnswerCommentIDMissing)
+	}
+	if prior, ok := seen[reasonAnswerCommentIDMissing]; ok {
+		t.Errorf("reasonAnswerCommentIDMissing collides with the reason for AnswerProbe %q, want a distinct reason (#446/#598)", prior)
+	}
+	if reasonAnswerCommentIDMissing == reasonDraftNotAwaitingInput {
+		t.Errorf("reasonAnswerCommentIDMissing collides with reasonDraftNotAwaitingInput %q", reasonDraftNotAwaitingInput)
 	}
 }
 
@@ -1640,6 +1702,7 @@ func TestDecidePlanningTrust_OrdinaryPlannedAndResumeIgnoreTrust(t *testing.T) {
 			in.Tickets[0].Labels = []string{"Input Needed"}
 			in.Plans[0].Status = "awaiting-input"
 			in.Answers = map[string]AnswerProbe{"o/r#42": AnswerProbeAnswered}
+			in.AnswerCommentIDs = map[string]int64{"o/r#42": 12}
 			in.PlanningTrust = trust
 			got := Decide(in)
 			if len(got) != 1 || got[0].Action != ActionDispatch || !got[0].Resume || got[0].Reason != "resume — human answered" {

@@ -913,6 +913,18 @@ type Decision struct {
 	// contract byte-unchanged.
 	Resume bool
 
+	// AnswerCommentID (#910) is the ID of the one escalation-answer comment
+	// the dispatch probe found authorized (the first comment whose author
+	// was granted write permission). Set only on a Resume decision, and only
+	// to a positive ID: a resume without one is skipped
+	// (reasonAnswerCommentIDMissing), never launched. dispatchTicketArg
+	// carries it to the session as the `answer-comment=<id>` launch token.
+	// It is a pointer, never authorization: the launched session re-checks
+	// that comment (thread position, author association, current write
+	// permission) before reading its body, and stays 0 on every non-resume
+	// decision.
+	AnswerCommentID int64
+
 	// Planning (#828) is true when this dispatch is a stage-aware planning
 	// session rather than an ordinary status: planned pickup: either a
 	// Refined ticket with no plan yet (Plan == nil), or an autonomous

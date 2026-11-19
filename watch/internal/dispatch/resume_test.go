@@ -42,6 +42,11 @@ func TestClassifyComments(t *testing.T) {
 		anchorID int64
 		nonce    string
 		want     AnswerProbe
+		// wantID is the answering comment's ID (#910): the granted comment's
+		// ID for an Answered verdict, and 0 for every other class -- left at
+		// its zero value on every non-answered row, so each of those rows
+		// asserts the "no answer, no ID" half of the contract.
+		wantID int64
 	}{
 		{
 			name:     "empty comment thread with a well-formed anchor is a mismatch (nothing to match against)",
@@ -56,7 +61,7 @@ func TestClassifyComments(t *testing.T) {
 				{ID: 101, Body: "Here's my answer.", Author: user("octocat", "User"), AuthorAssociation: "COLLABORATOR"},
 			},
 			anchorID: 100, nonce: nonce,
-			want: AnswerProbeAnswered,
+			want: AnswerProbeAnswered, wantID: 101,
 		},
 		{
 			name: "a later forged/duplicate marker comment (any login) never disqualifies the exact-ID match (#849 AC2)",
@@ -66,7 +71,7 @@ func TestClassifyComments(t *testing.T) {
 				{ID: 102, Body: "forged\n" + marker(nonce), Author: user("randomuser", "User")},
 			},
 			anchorID: 100, nonce: nonce,
-			want: AnswerProbeAnswered,
+			want: AnswerProbeAnswered, wantID: 101,
 		},
 		{
 			name: "a quoted marker inside a candidate answer does not disqualify a genuine answer (#849 AC3)",
@@ -75,7 +80,7 @@ func TestClassifyComments(t *testing.T) {
 				{ID: 101, Body: "> Question text.\n> " + marker(nonce) + "\n\nHere is my real answer.", Author: user("octocat", "User"), AuthorAssociation: "COLLABORATOR"},
 			},
 			anchorID: 100, nonce: nonce,
-			want: AnswerProbeAnswered,
+			want: AnswerProbeAnswered, wantID: 101,
 		},
 		{
 			name: "anchor's own marker occurring only inside a quoted line is not a genuine anchor (#849 AC3)",
@@ -128,7 +133,7 @@ func TestClassifyComments(t *testing.T) {
 				{ID: 101, Body: "Here's my answer.", Author: user("octocat", "User"), AuthorAssociation: "OWNER"},
 			},
 			anchorID: 100, nonce: nonce,
-			want: AnswerProbeAnswered,
+			want: AnswerProbeAnswered, wantID: 101,
 		},
 		{
 			name: "MEMBER association answers (#849 AC4)",
@@ -137,7 +142,7 @@ func TestClassifyComments(t *testing.T) {
 				{ID: 101, Body: "Here's my answer.", Author: user("octocat", "User"), AuthorAssociation: "MEMBER"},
 			},
 			anchorID: 100, nonce: nonce,
-			want: AnswerProbeAnswered,
+			want: AnswerProbeAnswered, wantID: 101,
 		},
 		{
 			name: "CONTRIBUTOR association after a valid anchor is not authorized (#849 AC4)",
@@ -225,15 +230,83 @@ func TestClassifyComments(t *testing.T) {
 				{ID: 100, Body: "Question text.\n" + marker(nonce), Author: user("cenci-bot", "Bot")},
 			},
 			anchorID: 100, nonce: nonce,
-			want: AnswerProbeAnswered,
+			want: AnswerProbeAnswered, wantID: 101,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := classifyComments(tc.comments, tc.anchorID, tc.nonce, grantAllPermission)
+			got, gotID := classifyComments(tc.comments, tc.anchorID, tc.nonce, grantAllPermission)
 			if got != tc.want {
 				t.Errorf("classifyComments(...) = %q, want %q", got, tc.want)
+			}
+			if gotID != tc.wantID {
+				t.Errorf("classifyComments(...) answer comment ID = %d, want %d", gotID, tc.wantID)
+			}
+		})
+	}
+}
+
+// TestClassifyComments_AnswerCommentID_FirstGrantedAfterDenied (#910 AC1):
+// the carried ID is the FIRST comment permOf grants -- a denied OWNER comment
+// before it is never the ID, and a later granted comment never replaces it.
+// Thread: [10 anchor, 11 OWNER denied, 12 OWNER granted, 13 granted].
+func TestClassifyComments_AnswerCommentID_FirstGrantedAfterDenied(t *testing.T) {
+	marker := escalationAnchorPrefix + testNonce + " -->"
+	comments := []restIssueComment{
+		{ID: 10, Body: "Question.\n" + marker, Author: restCommentAuthor{Login: "cenci-bot", Type: "Bot"}},
+		{ID: 11, Body: "no write access", Author: restCommentAuthor{Login: "denied-owner", Type: "User"}, AuthorAssociation: "OWNER"},
+		{ID: 12, Body: "go with A", Author: restCommentAuthor{Login: "granted-owner", Type: "User"}, AuthorAssociation: "OWNER"},
+		{ID: 13, Body: "also A", Author: restCommentAuthor{Login: "granted-collab", Type: "User"}, AuthorAssociation: "COLLABORATOR"},
+	}
+	permOf := func(login string) WritePermission {
+		if login == "denied-owner" {
+			return WritePermissionDenied
+		}
+		return WritePermissionGranted
+	}
+	got, gotID := classifyComments(comments, 10, testNonce, permOf)
+	if got != AnswerProbeAnswered {
+		t.Fatalf("classifyComments verdict = %q, want AnswerProbeAnswered", got)
+	}
+	if gotID != 12 {
+		t.Fatalf("classifyComments answer comment ID = %d, want 12 (first granted comment, not the denied 11 or the later 13)", gotID)
+	}
+}
+
+// TestClassifyComments_PermissionClassesCarryZeroID (#910 AC2): every
+// permission-failure class (and the positively-denied class) is a
+// non-answered verdict, so none of them may leak a comment ID -- even though
+// a candidate comment (101) reached the permission seam.
+func TestClassifyComments_PermissionClassesCarryZeroID(t *testing.T) {
+	marker := escalationAnchorPrefix + testNonce + " -->"
+	comments := []restIssueComment{
+		{ID: 100, Body: "Question.\n" + marker, Author: restCommentAuthor{Login: "cenci-bot", Type: "Bot"}},
+		{ID: 101, Body: "an answer", Author: restCommentAuthor{Login: "octocat", Type: "User"}, AuthorAssociation: "OWNER"},
+	}
+	tests := []struct {
+		perm WritePermission
+		want AnswerProbe
+	}{
+		{WritePermissionDenied, AnswerProbeUnauthorized},
+		{WritePermissionLoginInvalid, AnswerProbeLoginInvalid},
+		{WritePermissionAPIError, AnswerProbePermissionAPIError},
+		{WritePermissionTimeout, AnswerProbePermissionTimeout},
+		{WritePermissionTruncated, AnswerProbePermissionTruncated},
+		{WritePermissionMalformed, AnswerProbePermissionMalformed},
+		{WritePermissionMissingField, AnswerProbePermissionMissingField},
+		{WritePermissionCapExhausted, AnswerProbePermissionCapExhausted},
+		{WritePermissionUnknownValue, AnswerProbePermissionUnknownValue},
+	}
+	for _, tc := range tests {
+		t.Run(string(tc.want), func(t *testing.T) {
+			permOf := func(string) WritePermission { return tc.perm }
+			got, gotID := classifyComments(comments, 100, testNonce, permOf)
+			if got != tc.want {
+				t.Fatalf("classifyComments verdict = %q, want %q", got, tc.want)
+			}
+			if gotID != 0 {
+				t.Fatalf("classifyComments answer comment ID = %d, want 0 for non-answered verdict %q", gotID, got)
 			}
 		})
 	}
@@ -269,9 +342,12 @@ func TestClassifyComments_ContinuesScanningPastDeniedCommenter(t *testing.T) {
 		}
 		return WritePermissionDenied
 	}
-	got := classifyComments(comments, 100, testNonce, permOf)
+	got, gotID := classifyComments(comments, 100, testNonce, permOf)
 	if got != AnswerProbeAnswered {
 		t.Fatalf("classifyComments = %q, want AnswerProbeAnswered (a later authorized reply must still resume past an earlier denied commenter)", got)
+	}
+	if gotID != 102 {
+		t.Fatalf("classifyComments answer comment ID = %d, want 102 (the authorized reply, not the denied 101)", gotID)
 	}
 }
 
@@ -286,7 +362,7 @@ func TestClassifyComments_AllCandidatesDenied_Unauthorized(t *testing.T) {
 		{ID: 101, Body: "no write access", Author: restCommentAuthor{Login: "octocat", Type: "User"}, AuthorAssociation: "COLLABORATOR"},
 	}
 	permOf := func(string) WritePermission { return WritePermissionDenied }
-	got := classifyComments(comments, 100, testNonce, permOf)
+	got, _ := classifyComments(comments, 100, testNonce, permOf)
 	if got != AnswerProbeUnauthorized {
 		t.Fatalf("classifyComments = %q, want AnswerProbeUnauthorized", got)
 	}
@@ -313,7 +389,7 @@ func TestClassifyComments_UnresolvedPermissionOutranksDeniedForReportedReason(t 
 		{ID: 101, Body: "reply 1", Author: restCommentAuthor{Login: "denied-first", Type: "User"}, AuthorAssociation: "COLLABORATOR"},
 		{ID: 102, Body: "reply 2", Author: restCommentAuthor{Login: "error-second", Type: "User"}, AuthorAssociation: "COLLABORATOR"},
 	}
-	got := classifyComments(comments, 100, testNonce, permOf)
+	got, _ := classifyComments(comments, 100, testNonce, permOf)
 	if got != AnswerProbePermissionAPIError {
 		t.Fatalf("classifyComments = %q, want AnswerProbePermissionAPIError (unresolved must outrank a positive denial for the reported reason)", got)
 	}
@@ -325,7 +401,7 @@ func TestClassifyComments_UnresolvedPermissionOutranksDeniedForReportedReason(t 
 		{ID: 101, Body: "reply 1", Author: restCommentAuthor{Login: "error-second", Type: "User"}, AuthorAssociation: "COLLABORATOR"},
 		{ID: 102, Body: "reply 2", Author: restCommentAuthor{Login: "denied-first", Type: "User"}, AuthorAssociation: "COLLABORATOR"},
 	}
-	got2 := classifyComments(commentsReversed, 100, testNonce, permOf)
+	got2, _ := classifyComments(commentsReversed, 100, testNonce, permOf)
 	if got2 != AnswerProbePermissionAPIError {
 		t.Fatalf("classifyComments (reversed scan order) = %q, want AnswerProbePermissionAPIError", got2)
 	}
@@ -346,7 +422,7 @@ func TestClassifyComments_AssociationPrefilterSkipsBeforeAnyPermissionCall(t *te
 		t.Fatalf("permOf must not be called for a commenter failing the coarse author-association prefilter, got login %q", login)
 		return WritePermissionDenied
 	}
-	got := classifyComments(comments, 100, testNonce, permOf)
+	got, _ := classifyComments(comments, 100, testNonce, permOf)
 	if got != AnswerProbeWaiting {
 		t.Fatalf("classifyComments = %q, want AnswerProbeWaiting", got)
 	}
@@ -366,7 +442,7 @@ func TestClassifyComments_BotAndCenciMarkedCommentsSkipPermissionCall(t *testing
 		t.Fatalf("permOf must not be called for a bot-shaped or cenci-marked commenter, got login %q", login)
 		return WritePermissionDenied
 	}
-	got := classifyComments(comments, 100, testNonce, permOf)
+	got, _ := classifyComments(comments, 100, testNonce, permOf)
 	if got != AnswerProbeWaiting {
 		t.Fatalf("classifyComments = %q, want AnswerProbeWaiting", got)
 	}
@@ -444,9 +520,12 @@ func TestProbeEscalationAnswer_AnchorUnset_NeverCallsGh(t *testing.T) {
 	installFakeGH(t, "echo 'gh must not be invoked for an unset anchor' >&2\nexit 1\n")
 
 	var buf bytes.Buffer
-	got := probeEscalationAnswer("o/r", 99, 0, "", &answerProbeBudget{}, grantAllPermission, &buf)
+	got, gotID := probeEscalationAnswer("o/r", 99, 0, "", &answerProbeBudget{}, grantAllPermission, &buf)
 	if got != AnswerProbeAnchorUnset {
 		t.Fatalf("probe = %q, want AnswerProbeAnchorUnset", got)
+	}
+	if gotID != 0 {
+		t.Fatalf("probe answer comment ID = %d, want 0 for an unset anchor", gotID)
 	}
 	if buf.Len() != 0 {
 		t.Fatalf("expected no log output (no gh call attempted), got: %q", buf.String())
@@ -457,7 +536,7 @@ func TestProbeEscalationAnswer_NonzeroExit_UnresolvedWithOneCollapsedLogLine(t *
 	installFakeGH(t, "printf 'boom\\nmore boom\\n' >&2\nexit 1\n")
 
 	var buf bytes.Buffer
-	got := probeEscalationAnswer("o/r", 99, 100, testNonce, &answerProbeBudget{}, grantAllPermission, &buf)
+	got, _ := probeEscalationAnswer("o/r", 99, 100, testNonce, &answerProbeBudget{}, grantAllPermission, &buf)
 	if got != AnswerProbeUnresolved {
 		t.Fatalf("probe = %q, want AnswerProbeUnresolved", got)
 	}
@@ -480,7 +559,7 @@ exit 1
 `)
 
 	var buf bytes.Buffer
-	got := probeEscalationAnswer("o/r", 99, 100, testNonce, &answerProbeBudget{}, grantAllPermission, &buf)
+	got, _ := probeEscalationAnswer("o/r", 99, 100, testNonce, &answerProbeBudget{}, grantAllPermission, &buf)
 	if got != AnswerProbeUnresolved {
 		t.Fatalf("probe = %q, want AnswerProbeUnresolved", got)
 	}
@@ -494,7 +573,7 @@ func TestProbeEscalationAnswer_MalformedJSON_Unresolved(t *testing.T) {
 	installFakeGH(t, "printf 'not valid json'\n")
 
 	var buf bytes.Buffer
-	got := probeEscalationAnswer("o/r", 99, 100, testNonce, &answerProbeBudget{}, grantAllPermission, &buf)
+	got, _ := probeEscalationAnswer("o/r", 99, 100, testNonce, &answerProbeBudget{}, grantAllPermission, &buf)
 	if got != AnswerProbeUnresolved {
 		t.Fatalf("probe = %q, want AnswerProbeUnresolved", got)
 	}
@@ -523,9 +602,12 @@ printf '%s'
 `, restCommentsJSON(testNonce)))
 
 	var buf bytes.Buffer
-	got := probeEscalationAnswer("o/r", 99, 100, testNonce, &answerProbeBudget{}, grantAllPermission, &buf)
+	got, gotID := probeEscalationAnswer("o/r", 99, 100, testNonce, &answerProbeBudget{}, grantAllPermission, &buf)
 	if got != AnswerProbeAnswered {
 		t.Fatalf("probe = %q, want AnswerProbeAnswered (stderr noise must not corrupt the decoded stdout JSON)", got)
+	}
+	if gotID != 101 {
+		t.Fatalf("probe answer comment ID = %d, want 101 (the decoded answering comment)", gotID)
 	}
 }
 
@@ -538,7 +620,7 @@ func TestProbeEscalationAnswer_OversizedPaginatePayload_Unresolved(t *testing.T)
 	installFakeGHOnPath(t, fmt.Sprintf("yes x | tr -d '\\n' | head -c %d\n", maxProbeStdoutBytes+1000))
 
 	var buf bytes.Buffer
-	got := probeEscalationAnswer("o/r", 99, 100, testNonce, &answerProbeBudget{}, grantAllPermission, &buf)
+	got, _ := probeEscalationAnswer("o/r", 99, 100, testNonce, &answerProbeBudget{}, grantAllPermission, &buf)
 	if got != AnswerProbeUnresolved {
 		t.Fatalf("probe = %q, want AnswerProbeUnresolved (oversized --paginate payload must fail closed)", got)
 	}
@@ -555,7 +637,7 @@ func TestProbeEscalationAnswer_OversizedStdout_LogsCapLine(t *testing.T) {
 	installFakeGHOnPath(t, fmt.Sprintf("yes x | tr -d '\\n' | head -c %d\n", maxProbeStdoutBytes+1000))
 
 	var buf bytes.Buffer
-	got := probeEscalationAnswer("o/r", 99, 100, testNonce, &answerProbeBudget{}, grantAllPermission, &buf)
+	got, _ := probeEscalationAnswer("o/r", 99, 100, testNonce, &answerProbeBudget{}, grantAllPermission, &buf)
 	if got != AnswerProbeUnresolved {
 		t.Fatalf("probe = %q, want AnswerProbeUnresolved", got)
 	}
@@ -577,7 +659,7 @@ func TestProbeEscalationAnswer_ExactlyCapStdout_Decoded(t *testing.T) {
 	installFakeGHOnPath(t, fmt.Sprintf("printf '['\nhead -c %d /dev/zero | tr '\\0' ' '\nprintf ']'\n", maxProbeStdoutBytes-2))
 
 	var buf bytes.Buffer
-	got := probeEscalationAnswer("o/r", 99, 100, testNonce, &answerProbeBudget{}, grantAllPermission, &buf)
+	got, _ := probeEscalationAnswer("o/r", 99, 100, testNonce, &answerProbeBudget{}, grantAllPermission, &buf)
 	if got != AnswerProbeAnchorMismatch {
 		t.Fatalf("probe = %q, want AnswerProbeAnchorMismatch (exactly-max payload must decode); log: %q", got, buf.String())
 	}
@@ -596,7 +678,7 @@ func TestProbeEscalationAnswer_LingeringGrandchild_TimedOutSingleLine(t *testing
 
 	var buf bytes.Buffer
 	start := time.Now()
-	got := probeEscalationAnswer("o/r", 99, 100, testNonce, &answerProbeBudget{}, grantAllPermission, &buf)
+	got, _ := probeEscalationAnswer("o/r", 99, 100, testNonce, &answerProbeBudget{}, grantAllPermission, &buf)
 	elapsed := time.Since(start)
 	if got != AnswerProbeUnresolved {
 		t.Fatalf("probe = %q, want AnswerProbeUnresolved", got)
@@ -632,13 +714,16 @@ printf '%s'
 	var buf bytes.Buffer
 	budget := &answerProbeBudget{}
 	for i := 0; i < maxAnswerProbes+extra; i++ {
-		got := probeEscalationAnswer("o/r", 1000+i, 100, testNonce, budget, grantAllPermission, &buf)
-		want := AnswerProbeAnswered
+		got, gotID := probeEscalationAnswer("o/r", 1000+i, 100, testNonce, budget, grantAllPermission, &buf)
+		want, wantID := AnswerProbeAnswered, int64(101)
 		if i >= maxAnswerProbes {
-			want = AnswerProbeUnresolved
+			want, wantID = AnswerProbeUnresolved, 0
 		}
 		if got != want {
 			t.Fatalf("probe[%d] = %q, want %q", i, got, want)
+		}
+		if gotID != wantID {
+			t.Fatalf("probe[%d] answer comment ID = %d, want %d", i, gotID, wantID)
 		}
 	}
 
@@ -672,12 +757,15 @@ func TestResolveAnswerProbes_OnlyProbesInputNeededTickets(t *testing.T) {
 		{Repo: "o/r", Number: 1, Labels: []string{"Planned"}},
 		{Repo: "o/r", Number: 2, Labels: []string{"Input Needed"}},
 	}
-	got := resolveAnswerProbes(tickets, map[string]*Plan{}, nil)
+	got, ids := resolveAnswerProbes(tickets, map[string]*Plan{}, nil)
 	if _, ok := got[planKey("o/r", 1)]; ok {
 		t.Errorf("a Planned ticket must never be probed, got entry: %+v", got)
 	}
 	if got[planKey("o/r", 2)] != AnswerProbeAnchorUnset {
 		t.Errorf("Input Needed ticket with no matched plan probe = %q, want AnswerProbeAnchorUnset", got[planKey("o/r", 2)])
+	}
+	if len(ids) != 0 {
+		t.Errorf("no ticket was answered, so the answer-comment-ID map must be empty, got: %+v", ids)
 	}
 }
 
@@ -708,13 +796,23 @@ func TestResolveAnswerProbes_UsesMatchedPlanAnchorFields(t *testing.T) {
 
 	tickets := []Ticket{
 		{Repo: "o/r", Number: 2, Labels: []string{"Input Needed"}},
+		{Repo: "o/r", Number: 3, Labels: []string{"Input Needed"}},
 	}
 	planByTicket := map[string]*Plan{
 		planKey("o/r", 2): {Repo: "o/r", TicketID: 2, EscalationCommentID: 100, EscalationNonce: testNonce},
 	}
-	got := resolveAnswerProbes(tickets, planByTicket, nil)
+	got, ids := resolveAnswerProbes(tickets, planByTicket, nil)
 	if got[planKey("o/r", 2)] != AnswerProbeAnswered {
 		t.Errorf("probe = %q, want AnswerProbeAnswered", got[planKey("o/r", 2)])
+	}
+	// #910: the ID map carries the answering comment for an Answered ticket
+	// and has no entry at all for a ticket that was not answered (ticket 3
+	// has no matched plan, so its anchor is unset).
+	if ids[planKey("o/r", 2)] != 101 {
+		t.Errorf("answer comment ID for the answered ticket = %d, want 101", ids[planKey("o/r", 2)])
+	}
+	if _, ok := ids[planKey("o/r", 3)]; ok {
+		t.Errorf("a non-answered ticket must have no answer-comment-ID entry, got: %+v", ids)
 	}
 }
 
@@ -750,9 +848,12 @@ esac
 		planKey("o/r", 1): {Repo: "o/r", TicketID: 1, EscalationCommentID: 100, EscalationNonce: testNonce},
 		planKey("o/r", 2): {Repo: "o/r", TicketID: 2, EscalationCommentID: 100, EscalationNonce: testNonce},
 	}
-	got := resolveAnswerProbes(tickets, planByTicket, nil)
+	got, ids := resolveAnswerProbes(tickets, planByTicket, nil)
 	if got[planKey("o/r", 1)] != AnswerProbeAnswered || got[planKey("o/r", 2)] != AnswerProbeAnswered {
 		t.Fatalf("got = %+v, want both tickets AnswerProbeAnswered", got)
+	}
+	if ids[planKey("o/r", 1)] != 101 || ids[planKey("o/r", 2)] != 101 {
+		t.Fatalf("answer comment IDs = %+v, want 101 for both tickets", ids)
 	}
 
 	data, err := os.ReadFile(permCountFile)

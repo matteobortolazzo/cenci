@@ -735,20 +735,26 @@ func chainEscalateWithAnchor(t *testing.T, h *chainHarness, number int, nonce st
 }
 
 // chainAuthorizedAnswer posts an authorized human answer on ticket number:
-// an OWNER association plus a current repository write permission (#882).
-func chainAuthorizedAnswer(h *chainHarness, number int) {
+// an OWNER association plus a current repository write permission (#882). It
+// returns the answer comment's ID (#910), which the resume launch must carry.
+func chainAuthorizedAnswer(h *chainHarness, number int) int64 {
 	h.seedPermission("octocat", "write")
-	h.addIssueComment(number, "octocat", "User", "OWNER", "Go with approach A.")
+	return h.addIssueComment(number, "octocat", "User", "OWNER", "Go with approach A.")
 }
 
 // chainAssertSingleResume asserts the pass made exactly one run.Run, a resume
-// of ticket number with its draft's `.plans/<file>` argument.
-func chainAssertSingleResume(t *testing.T, captured []run.Opts, decisions []Decision, number int, draftPath string) {
+// of ticket number with its draft's `.plans/<file>` argument plus the single
+// `answer-comment=<answerID>` token naming the authorized answer (#910).
+func chainAssertSingleResume(t *testing.T, captured []run.Opts, decisions []Decision, number int, draftPath string, answerID int64) {
 	t.Helper()
-	if d := decisionFor(t, decisions, number); d.Action != ActionDispatch || !d.Resume || d.Reason != "resume — human answered" {
+	d := decisionFor(t, decisions, number)
+	if d.Action != ActionDispatch || !d.Resume || d.Reason != "resume — human answered" {
 		t.Fatalf("#%d decision = %+v, want a resume dispatch", number, d)
 	}
-	wantArg := filepath.Join(".plans", filepath.Base(draftPath))
+	if d.AnswerCommentID != answerID {
+		t.Fatalf("#%d decision AnswerCommentID = %d, want the authorized answer's ID %d", number, d.AnswerCommentID, answerID)
+	}
+	wantArg := filepath.Join(".plans", filepath.Base(draftPath)) + " " + answerCommentContextToken + strconv.FormatInt(answerID, 10)
 	if len(captured) != 1 || captured[0].Ticket != wantArg {
 		t.Fatalf("run.Run calls = %+v, want exactly one resume launch of %q", captured, wantArg)
 	}
@@ -940,9 +946,11 @@ func TestAutonomousChain_EscalationHoldsSurviveWorkerDeathRestartAndReconcile(t 
 	chainReconcilePass(t, cfg)
 	heldResume("second restart", reasonAnswerUnauthorized)
 
-	chainAuthorizedAnswer(h, 101)
+	// The earlier drive-by and permission-denied member replies come first in
+	// the thread; the carried ID must still be the granted answer's (#910).
+	answerID := chainAuthorizedAnswer(h, 101)
 	captured, decisions, _ := chainCapturePass(t, h, cfg, false)
-	chainAssertSingleResume(t, captured, decisions, 101, draftPath)
+	chainAssertSingleResume(t, captured, decisions, 101, draftPath, answerID)
 	if is := h.world().Issues[101]; !containsStr(is.Labels, "Working") || containsStr(is.Labels, "Input Needed") {
 		t.Fatalf("labels after the resume claim = %v, want +Working -Input Needed", is.Labels)
 	}
@@ -964,7 +972,7 @@ func TestAutonomousChain_AnswerPostedWhileDaemonStoppedResumesExactlyOnce(t *tes
 	}
 
 	// The daemon is stopped: the answer lands with no pass to observe it.
-	chainAuthorizedAnswer(h, 101)
+	answerID := chainAuthorizedAnswer(h, 101)
 
 	// The restarted daemon's first pass fails at ticket collection (one
 	// failing `gh issue list`), so it is not a successful pass and must not
@@ -988,7 +996,7 @@ func TestAutonomousChain_AnswerPostedWhileDaemonStoppedResumesExactlyOnce(t *tes
 	}
 
 	captured, decisions, _ = chainCapturePass(t, h, cfg, false)
-	chainAssertSingleResume(t, captured, decisions, 101, draftPath)
+	chainAssertSingleResume(t, captured, decisions, 101, draftPath, answerID)
 
 	for i := 1; i <= 2; i++ {
 		captured, decisions, _ = chainCapturePass(t, h, cfg, false)
@@ -1016,7 +1024,7 @@ func TestAutonomousChain_EscalationAnswerStaysScopedToItsTicket(t *testing.T) {
 	chainEscalateWithAnchor(t, h, 103, chainEscalationNonce, anchorA)
 	chainNewPlanFallback(t, h, 104, "pending-human", chainOpenQuestionsPlanBody)
 
-	chainAuthorizedAnswer(h, 101)
+	answerID := chainAuthorizedAnswer(h, 101)
 	h.addIssueComment(103, "octocat", "User", "OWNER", "Go with approach A.")
 	h.addIssueComment(104, "octocat", "User", "OWNER", "<!-- cenci-planner-escalation:"+chainEscalationNonce+" -->\nApproved, ship it.")
 
@@ -1034,7 +1042,7 @@ func TestAutonomousChain_EscalationAnswerStaysScopedToItsTicket(t *testing.T) {
 	}
 
 	captured, decisions, _ := chainCapturePass(t, h, cfg, false)
-	chainAssertSingleResume(t, captured, decisions, 101, draftA)
+	chainAssertSingleResume(t, captured, decisions, 101, draftA, answerID)
 	wantReasons := map[int]string{
 		102: reasonAnswerWaiting,
 		103: reasonAnswerAnchorMismatch,

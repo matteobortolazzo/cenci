@@ -1460,6 +1460,11 @@ in the log/`--dry-run` table exactly like any other dispatch:
 owner/name#42 dispatch (claude, 42-slug.md): resume — human answered
 ```
 
+The resume launch argument is `.plans/<file> answer-comment=<id>` (#910): the `<id>` is
+the one authorized answer comment the probe found, and the relaunched session re-checks
+it against GitHub and reads only that comment's body, never the rest of the thread.
+Ordinary and re-plan launch arguments are unchanged.
+
 Every other probe outcome skips with its own distinct reason: `escalation still
 awaiting a human answer` (no qualifying comment yet), `escalation answer probe
 failed` (the `gh` call itself errored, returned malformed JSON, or its
@@ -1476,7 +1481,9 @@ never repairs an anchor itself, it only reports the gap; repair is exclusively a
 human-triggered `/cenci:implement <id>` run (see `## Repair Escalation Anchor` in
 `flow/skills/implement/phases/phase-1-plan.md`). `draft not awaiting input` fires
 when the matched plan's `status` isn't `awaiting-input` (e.g. it was already
-finalized).
+finalized). `escalation answer comment id missing` (#910) fires when the probe
+answered but carried no positive answer-comment ID to name in the launch argument;
+the ticket is skipped with no label edit and no spawn.
 
 **Write-permission reasons (#882).** Once a candidate reply passes the cheap
 association prefilter, its author's CURRENT repository write permission must also
