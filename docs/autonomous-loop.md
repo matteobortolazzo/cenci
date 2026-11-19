@@ -575,8 +575,14 @@ Babysit adds no new probe for that case — the backstop is GitHub's own merge r
 which surfaces as its own distinct hold reason (logged and retried, never bypassed) if
 the merge is actually rejected.
 Review feedback resolution is GitHub-authoritative — pushing a commit does not clear
-a thread; only `isResolved`, a `DISMISSED` review, or a newer `APPROVED` does. The one
-exception is an ordinary PR comment (`discussion:<id>`), which GitHub has no resolved
+a thread; only `isResolved`, a `DISMISSED` review, or a newer `APPROVED` does, and only
+when the actor behind it passes a check. A resolution, dismissal or approval counts only
+from someone who is not the automation login (the one the supervisor's own `gh` reports,
+which is also the identity of the workers babysit launches) and who is either the thread's
+or review's own author or has `admin`/`write` access; one by the automation login, a
+login without write access or an unknown actor holds under `review resolution actor not
+authorized` until a host human attests it with `cenci babysit resolve <pr>
+comment:<id>|review:<id>`. The one exception is an ordinary PR comment (`discussion:<id>`), which GitHub has no resolved
 state for: it clears only through a nonce-bound receipt from the worker babysit launched
 for it, or `cenci babysit resolve` (host-only, attended-only), and editing the comment
 reopens it. Inline-thread and review feedback stay GitHub-authoritative. Any
@@ -646,7 +652,7 @@ it was evaluated.
 | `enabled` | Fleet kill switch | `automerge.enabled` is not `true` in `~/.config/cenci/config.json` |
 | `label` | Per-ticket grant | The PR's closing issues or base branch differ from the pin taken at arm (`closing issues changed since arm`, `base branch changed since arm`), the PR head is in another repository or its fork state is unknown (`PR head is in a different repository`, `PR cross-repository state unknown`), the pin is missing (`automerge grant pin missing`), the PR closes no issue, an issue's labels are unreadable, or any closed issue lacks `automerge:ok` |
 | `ci` | CI green (≥1 `pass`, rest `pass`/`skipping`) | No checks reported, zero `pass` with the rest `skipping`, or any check's bucket is `fail`, `pending`, `cancel`, empty, or unrecognized |
-| `review` | Feedback | A CI, merge or review worker still running (`branch repair worker still running`), CI repair in flight, pending feedback (an unreceipted PR comment included), a reopened resolution, a review worker that ended without a receipt, or a detection read that couldn't be proven complete |
+| `review` | Feedback | A CI, merge or review worker still running (`branch repair worker still running`), CI repair in flight, pending feedback (an unreceipted PR comment included), a reopened resolution, a resolution or dismissal by an unauthorized actor (`review resolution actor not authorized`), a review worker that ended without a receipt, or a detection read that couldn't be proven complete |
 | `mergeable` | PR state | Draft, `MERGEABLE` unknown, or not mergeable (`PR has merge conflicts` when `mergeStateStatus` is `DIRTY`, `PR branch is behind base` when `BEHIND`) |
 | `headsha` | Head commit | The PR's head SHA is unreadable at evaluation time |
 | `files` | Diff readability | Zero changed files, or a truncated file list |
@@ -669,7 +675,7 @@ unreached `ci` stage still renders the plain `-` (as in the example above, where
 `label` failed first and `ci` was never evaluated).
 
 Five reasons need a human: `review feedback state
-unreadable`, `review feedback state unknown` (GitHub stopped reporting a comment or
+unreadable` (except a failed actor lookup, below), `review feedback state unknown` (GitHub stopped reporting a comment or
 thread — deleted or purged), `unsupported review feedback type`, `closing issues
 changed since arm` and `base branch changed since arm`. Merge those by hand. The first
 three will not clear on their own. The last two are merge-by-hand holds with no
@@ -681,6 +687,12 @@ issues and base; otherwise a human merges the PR by hand. A
 deleted pending PR comment is the exception to the first three: `cenci babysit resolve
 <pr> discussion:<id>` clears it (see [cenci-watch README —
 Automerge](../watch/README.md#automerge-cenci-babysit)).
+A sixth, `review resolution actor not authorized`, needs a human too but has its own
+recovery: if the resolution or dismissal was yours, run `cenci babysit resolve <pr>
+comment:<id>` (or `review:<id>`) from an attended host session, and the next tick treats the
+key as addressed; otherwise have an authorized person resolve it on GitHub. A failed actor
+lookup is not this hold: it holds under `review feedback state unreadable` and retries on its
+own.
 
 `PR has merge conflicts` automatically launches Claude Opus to resolve the conflicts
 against the fetched remote base, run local verification, and update the same PR with

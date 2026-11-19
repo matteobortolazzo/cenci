@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -261,6 +262,21 @@ var (
 	permissionServed   = map[string]string{humanLogin: "write", "reviewer": "write"}
 	permissionFailing  = map[string]bool{}
 
+	// #862: the fake `gh api user` answers automationLoginServed (distinct from
+	// `reviewer` and humanLogin, so a fixture's ordinary actors never collide with
+	// the automation identity) unless automationLoginErr is set. The dismissal
+	// timeline (a graphql call naming REVIEW_DISMISSED_EVENT) serves its k-th page
+	// from dismissalPagesServed (the last repeats; nil serves one empty, complete
+	// page) unless dismissalErr is set. The counters count every such read and
+	// every collaborator-permission read per login; trackActorReads zeroes them.
+	automationLoginServed = defaultAutomationLogin
+	automationLoginErr    error
+	automationLoginReads  int
+	dismissalPagesServed  []string
+	dismissalErr          error
+	dismissalReads        int
+	permissionReads       = map[string]int{}
+
 	discussionPathRe = regexp.MustCompile(`^repos/[^/]+/[^/]+/issues/[0-9]+/comments\?`)
 	permissionPathRe = regexp.MustCompile(`^repos/[^/]+/[^/]+/collaborators/([^/]+)/permission$`)
 )
@@ -269,10 +285,37 @@ var (
 // package that serves a tick calls it first, so a discussion read never shifts a
 // positional script.
 func ghPathAnswer(args []string) (out string, err error, ok bool) {
-	if len(args) != 2 || args[0] != "api" {
+	if len(args) < 2 || args[0] != "api" {
+		return "", nil, false
+	}
+	// #862: the dismissal-event timeline read is a graphql call matched by content
+	// (its query names REVIEW_DISMISSED_EVENT), never by position, so it can not
+	// shift a positional script and is never mistaken for the reviewThreads read.
+	if args[1] == "graphql" {
+		for _, a := range args[2:] {
+			if strings.Contains(a, "REVIEW_DISMISSED_EVENT") {
+				dismissalReads++
+				if dismissalErr != nil {
+					return "", dismissalErr, true
+				}
+				if len(dismissalPagesServed) > 0 {
+					return dismissalPagesServed[min(dismissalReads, len(dismissalPagesServed))-1], nil, true
+				}
+				return dismissalPage(false, ""), nil, true
+			}
+		}
+		return "", nil, false
+	}
+	if len(args) != 2 {
 		return "", nil, false
 	}
 	switch {
+	case args[1] == "user":
+		automationLoginReads++
+		if automationLoginErr != nil {
+			return "", automationLoginErr, true
+		}
+		return fmt.Sprintf(`{"login":%q}`, automationLoginServed), nil, true
 	case discussionPathRe.MatchString(args[1]):
 		discussionReads++
 		if len(discussionSequence) > 0 {
@@ -281,6 +324,7 @@ func ghPathAnswer(args []string) (out string, err error, ok bool) {
 		return discussionServed, discussionErr, true
 	case permissionPathRe.MatchString(args[1]):
 		login := permissionPathRe.FindStringSubmatch(args[1])[1]
+		permissionReads[login]++
 		if permissionFailing[login] {
 			return "", errors.New("gh: permission lookup failed"), true
 		}
@@ -334,6 +378,73 @@ func servePermissionFailure(t *testing.T, login string) {
 	permissionFailing = maps.Clone(original)
 	permissionFailing[login] = true
 	t.Cleanup(func() { permissionFailing = original })
+}
+
+// defaultAutomationLogin is the login the fake `gh api user` reports: the identity
+// the supervisor's own gh (and every worker it launches) acts under (#862).
+const defaultAutomationLogin = "cenci-automation"
+
+// serveAutomationLogin makes the fake `gh api user` answer login (an empty or
+// malformed one is served as is) or, when err is set, fail.
+func serveAutomationLogin(t *testing.T, login string, err error) {
+	t.Helper()
+	originalLogin, originalErr := automationLoginServed, automationLoginErr
+	automationLoginServed, automationLoginErr = login, err
+	t.Cleanup(func() { automationLoginServed, automationLoginErr = originalLogin, originalErr })
+}
+
+// serveDismissals serves one dismissal-event timeline page per read, in order (the
+// last repeats), and restarts the read count. Build pages with dismissalPage and
+// dismissalEvent.
+func serveDismissals(t *testing.T, pages ...string) {
+	t.Helper()
+	original := dismissalPagesServed
+	dismissalPagesServed, dismissalReads = pages, 0
+	t.Cleanup(func() { dismissalPagesServed, dismissalReads = original, 0 })
+}
+
+// serveDismissalFailure makes the fake dismissal-event timeline read fail.
+func serveDismissalFailure(t *testing.T, err error) {
+	t.Helper()
+	original := dismissalErr
+	dismissalErr = err
+	t.Cleanup(func() { dismissalErr = original })
+}
+
+// trackActorReads zeroes the identity, timeline and permission read counters for
+// this test and zeroes them again afterwards.
+func trackActorReads(t *testing.T) {
+	t.Helper()
+	zero := func() {
+		automationLoginReads, dismissalReads = 0, 0
+		permissionReads = map[string]int{}
+	}
+	zero()
+	t.Cleanup(zero)
+}
+
+// permissionReadTotal is the number of collaborator-permission reads, over every login.
+func permissionReadTotal() int {
+	n := 0
+	for _, c := range permissionReads {
+		n += c
+	}
+	return n
+}
+
+// dismissalEvent is one ReviewDismissedEvent timeline node for the review with
+// databaseId reviewID; an empty actor serves `"actor": null` (a deleted account).
+func dismissalEvent(reviewID int64, actor string) string {
+	if actor == "" {
+		return fmt.Sprintf(`{"actor":null,"review":{"databaseId":%d}}`, reviewID)
+	}
+	return fmt.Sprintf(`{"actor":{"login":%q},"review":{"databaseId":%d}}`, actor, reviewID)
+}
+
+// dismissalPage is one page of the dismissal-event timeline read.
+func dismissalPage(hasNextPage bool, endCursor string, events ...string) string {
+	return fmt.Sprintf(`{"data":{"repository":{"pullRequest":{"timelineItems":{"pageInfo":{"hasNextPage":%v,"endCursor":%q},"nodes":[%s]}}}}}`,
+		hasNextPage, endCursor, strings.Join(events, ","))
 }
 
 // servePermission must override a login the fake already serves (alice defaults
@@ -2790,16 +2901,50 @@ func TestStateSaveLoadRoundTripsAutomergeFields(t *testing.T) {
 
 // -- #850: GitHub-authoritative review-feedback resolution --------------------
 
-// unresolvedThreadFor builds a GraphQL reviewThreads response reporting a
-// single unresolved thread whose one comment carries id.
-func unresolvedThreadFor(id int64) string {
-	return fmt.Sprintf(`{"data":{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false,"endCursor":""},"nodes":[{"isResolved":false,"comments":{"totalCount":1,"nodes":[{"databaseId":%d}]}}]}}}}}`, id)
+// threadComment is one comment node of a thread, by author (#862); an empty
+// author serves `"author": null` (a deleted account).
+func threadComment(id int64, author string) string {
+	if author == "" {
+		return fmt.Sprintf(`{"databaseId":%d,"author":null}`, id)
+	}
+	return fmt.Sprintf(`{"databaseId":%d,"author":{"login":%q}}`, id, author)
 }
 
-// resolvedThreadFor builds a GraphQL reviewThreads response reporting a
-// single resolved thread whose one comment carries id.
+// actorThreadNode is one reviewThreads node (#862): its resolution state, who
+// resolved it (an empty resolver serves `"resolvedBy": null`, as GitHub does for
+// an unresolved thread or a deleted account) and its comments, oldest first.
+func actorThreadNode(resolved bool, resolver string, comments ...string) string {
+	resolvedBy := "null"
+	if resolver != "" {
+		resolvedBy = fmt.Sprintf(`{"login":%q}`, resolver)
+	}
+	return fmt.Sprintf(`{"isResolved":%v,"resolvedBy":%s,"comments":{"totalCount":%d,"nodes":[%s]}}`,
+		resolved, resolvedBy, len(comments), strings.Join(comments, ","))
+}
+
+// threadsResponse is a complete one-page GraphQL reviewThreads response.
+func threadsResponse(nodes ...string) string {
+	return threadPage(false, "", nodes...)
+}
+
+// unresolvedThreadFor builds a GraphQL reviewThreads response reporting a
+// single unresolved thread whose one comment, by the reviewer, carries id.
+func unresolvedThreadFor(id int64) string {
+	return threadsResponse(actorThreadNode(false, "", threadComment(id, "reviewer")))
+}
+
+// resolvedThreadFor builds a GraphQL reviewThreads response reporting a single
+// thread, resolved by its own author (the write-access reviewer, who is not the
+// automation login), whose one comment carries id. #862: an authorized resolution,
+// so a fixture that only needs a resolved thread keeps its expectations.
 func resolvedThreadFor(id int64) string {
-	return fmt.Sprintf(`{"data":{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false,"endCursor":""},"nodes":[{"isResolved":true,"comments":{"totalCount":1,"nodes":[{"databaseId":%d}]}}]}}}}}`, id)
+	return resolvedThreadBy(id, "reviewer", "reviewer")
+}
+
+// resolvedThreadBy is a single resolved thread, resolved by resolver, whose one
+// comment is by author and carries id.
+func resolvedThreadBy(id int64, resolver, author string) string {
+	return threadsResponse(actorThreadNode(true, resolver, threadComment(id, author)))
 }
 
 // TestTickUnrelatedPushLeavesFeedbackPending is AC 1: the PR's head commit
@@ -3077,11 +3222,16 @@ func TestTickDismissedOrSupersededChangeRequestClears(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		reviews string
+		// dismissals is the dismissal-event timeline the dismissed case needs (#862):
+		// the dismissal counts only through its event's actor.
+		dismissals []string
 	}{
-		{"blocking review dismissed", `[{"id":10,"state":"DISMISSED","submitted_at":"2026-01-02T00:00:00Z","user":{"login":"alice"}}]`},
-		{"reviewer's latest effective review is approved", `[{"id":10,"state":"CHANGES_REQUESTED","submitted_at":"2026-01-01T00:00:00Z","user":{"login":"alice"}},{"id":11,"state":"APPROVED","submitted_at":"2026-01-02T00:00:00Z","user":{"login":"alice"}}]`},
+		{"blocking review dismissed", `[{"id":10,"state":"DISMISSED","submitted_at":"2026-01-02T00:00:00Z","user":{"login":"alice"}}]`,
+			[]string{dismissalPage(false, "", dismissalEvent(10, "alice"))}},
+		{"reviewer's latest effective review is approved", `[{"id":10,"state":"CHANGES_REQUESTED","submitted_at":"2026-01-01T00:00:00Z","user":{"login":"alice"}},{"id":11,"state":"APPROVED","submitted_at":"2026-01-02T00:00:00Z","user":{"login":"alice"}}]`, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			serveDismissals(t, tc.dismissals...)
 			var calls [][]string
 			withCommands(t, []string{pr, `[{"bucket":"pass","name":"test","state":"SUCCESS"}]`, `[]`, tc.reviews}, &calls)
 			s := State{
@@ -3101,8 +3251,8 @@ func TestTickDismissedOrSupersededChangeRequestClears(t *testing.T) {
 				t.Fatalf("AddressedKeys = %v, want [review:10]", s.AddressedKeys)
 			}
 			for _, c := range calls {
-				if len(c) > 2 && c[1] == "api" && c[2] == "graphql" {
-					t.Fatalf("a review:-only pending set must never call the GraphQL thread fetch: %#v", calls)
+				if len(c) > 2 && c[1] == "api" && c[2] == "graphql" && strings.Contains(strings.Join(c, " "), "reviewThreads") {
+					t.Fatalf("a review:-only pending set must never call the GraphQL reviewThreads fetch: %#v", calls)
 				}
 			}
 		})
@@ -3115,7 +3265,7 @@ func TestTickDismissedOrSupersededChangeRequestClears(t *testing.T) {
 // key detectNewFeedbackKeys returns brand-new THIS tick -- unlike
 // TestTickDismissedOrSupersededChangeRequestClears above, which pre-seeds
 // PendingKeys with the review key and exercises the pre-existing
-// classifyPendingKey path. Here the CHANGES_REQUESTED review is never
+// classifyKey path. Here the CHANGES_REQUESTED review is never
 // pre-seeded: it is only ever discovered by this tick's own
 // detectNewFeedbackKeys call, already superseded by a later same-login
 // APPROVED/DISMISSED review in that very same reviews fetch. It must resolve
@@ -3124,13 +3274,16 @@ func TestTickDismissedOrSupersededChangeRequestClears(t *testing.T) {
 func TestTickFreshlyDetectedReviewSupersededSameTickClears(t *testing.T) {
 	pr := `{"number":42,"title":"Change","state":"OPEN","headRefName":"feature","headRefOid":"new-sha","closingIssuesReferences":[],"url":"https://example/pr/42"}`
 	for _, tc := range []struct {
-		name    string
-		reviews string
+		name       string
+		reviews    string
+		dismissals []string // #862: the later review's dismissal event, when it was dismissed
 	}{
-		{"superseded by approved", `[{"id":10,"state":"CHANGES_REQUESTED","submitted_at":"2026-01-01T00:00:00Z","user":{"login":"alice"}},{"id":11,"state":"APPROVED","submitted_at":"2026-01-02T00:00:00Z","user":{"login":"alice"}}]`},
-		{"superseded by dismissed", `[{"id":10,"state":"CHANGES_REQUESTED","submitted_at":"2026-01-01T00:00:00Z","user":{"login":"alice"}},{"id":11,"state":"DISMISSED","submitted_at":"2026-01-02T00:00:00Z","user":{"login":"alice"}}]`},
+		{"superseded by approved", `[{"id":10,"state":"CHANGES_REQUESTED","submitted_at":"2026-01-01T00:00:00Z","user":{"login":"alice"}},{"id":11,"state":"APPROVED","submitted_at":"2026-01-02T00:00:00Z","user":{"login":"alice"}}]`, nil},
+		{"superseded by dismissed", `[{"id":10,"state":"CHANGES_REQUESTED","submitted_at":"2026-01-01T00:00:00Z","user":{"login":"alice"}},{"id":11,"state":"DISMISSED","submitted_at":"2026-01-02T00:00:00Z","user":{"login":"alice"}}]`,
+			[]string{dismissalPage(false, "", dismissalEvent(11, "alice"))}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			serveDismissals(t, tc.dismissals...)
 			var calls [][]string
 			withCommands(t, []string{pr, `[{"bucket":"pass","name":"test","state":"SUCCESS"}]`, `[]`, tc.reviews}, &calls)
 			s := State{
@@ -3156,6 +3309,786 @@ func TestTickFreshlyDetectedReviewSupersededSameTickClears(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// -- #862: resolution-actor authorization at the tick boundary -----------------
+//
+// A GitHub-side resolution counts as reviewer acceptance only when its actor is
+// not the automation login (what the fake `gh api user` reports,
+// defaultAutomationLogin) and is either the item's own author or has admin/write
+// permission. Every test drives a real tick over the fake gh (ghPathAnswer
+// serves `api user`, the dismissal timeline and the collaborator permission by
+// content, so no positional script shifts) and asserts the saved State. The
+// identity, timeline and permission reads are counted (trackActorReads).
+
+const (
+	actorGreenChecks = `[{"bucket":"pass","name":"test","state":"SUCCESS"}]`
+	// actorLabelsOK lets the automerge chain reach its review stage; actorLabelsNone
+	// stops it at the label stage, for ticks whose feedback verdict is clean.
+	actorLabelsOK   = `{"labels":[{"name":"automerge:ok"}]}`
+	actorLabelsNone = `{"labels":[]}`
+	actorT1         = "2026-01-01T00:00:00Z"
+	actorT2         = "2026-01-02T00:00:00Z"
+)
+
+// actorReview is one REST review object.
+func actorReview(id int64, state, submittedAt, login string) string {
+	return fmt.Sprintf(`{"id":%d,"state":%q,"submitted_at":%q,"user":{"login":%q}}`, id, state, submittedAt, login)
+}
+
+// actorState is a supervisor state for PR 42 whose pending keys are all already
+// launched (so no review launch, and none of its author lookups, muddies the read
+// counts) and whose LastCommentAt is later than every fixture comment or review (so
+// detection finds nothing new).
+func actorState(pending ...string) State {
+	return State{
+		PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 60, CurrentDelaySeconds: 60,
+		LastHeadSHA: "abc", LastCommentAt: "2026-02-01T00:00:00Z", LaunchSession: "work",
+		PendingKeys: pending, LaunchedKeys: slices.Clone(pending),
+	}
+}
+
+// actorTickIn is the scripted reads of one actorTick: the inline comments, the
+// reviews, the reviewThreads response (omitted when empty: the tick makes no
+// thread call) and the closing issue's labels.
+type actorTickIn struct {
+	comments, reviews, thread, labels string
+}
+
+// actorTick runs one automerge-enabled tick over a green, eligible PR with in as
+// the scripted reads, zeroing the read counters first, and returns the recorded
+// calls. Defaults: no comments, no reviews, no labels.
+func actorTick(t *testing.T, s *State, in actorTickIn) [][]string {
+	t.Helper()
+	withFleetAutomergeEnabled(t, true)
+	trackActorReads(t)
+	or := func(v, def string) string {
+		if v == "" {
+			return def
+		}
+		return v
+	}
+	responses := []string{automergeEligiblePR(), actorGreenChecks, or(in.comments, `[]`), or(in.reviews, `[]`)}
+	if in.thread != "" {
+		responses = append(responses, in.thread)
+	}
+	responses = append(responses, or(in.labels, actorLabelsNone))
+	var calls [][]string
+	withCommands(t, responses, &calls)
+	if _, _, err := tick(s); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	return calls
+}
+
+// requireActorHeld asserts key is held for its actor: still pending, not addressed,
+// the only ActorHeldKeys entry, the automerge hold names the key and its `resolve`
+// recovery, and the status is needs-input.
+func requireActorHeld(t *testing.T, s State, key, actor string) {
+	t.Helper()
+	if !slices.Contains(s.PendingKeys, key) || slices.Contains(s.AddressedKeys, key) {
+		t.Errorf("pending/addressed = %v/%v, want %s still pending and not addressed", s.PendingKeys, s.AddressedKeys, key)
+	}
+	if want := map[string]string{key: actor}; !reflect.DeepEqual(s.ActorHeldKeys, want) {
+		t.Errorf("ActorHeldKeys = %#v, want %#v", s.ActorHeldKeys, want)
+	}
+	if s.AutomergeReason != reasonResolutionActorUnauthorized {
+		t.Errorf("AutomergeReason = %q, want %q", s.AutomergeReason, reasonResolutionActorUnauthorized)
+	}
+	if !strings.Contains(s.AutomergeDetail, key) || !strings.Contains(s.AutomergeDetail, "cenci babysit resolve 42 "+key) {
+		t.Errorf("AutomergeDetail = %q, want it to name %s and `cenci babysit resolve 42 %s`", s.AutomergeDetail, key, key)
+	}
+	if s.Status != "needs-input" {
+		t.Errorf("Status = %q, want needs-input", s.Status)
+	}
+}
+
+// requireActorAddressed asserts key moved to addressed with nothing held.
+func requireActorAddressed(t *testing.T, s State, key string) {
+	t.Helper()
+	if !slices.Contains(s.AddressedKeys, key) || slices.Contains(s.PendingKeys, key) {
+		t.Errorf("pending/addressed = %v/%v, want %s addressed", s.PendingKeys, s.AddressedKeys, key)
+	}
+	if len(s.ActorHeldKeys) != 0 {
+		t.Errorf("ActorHeldKeys = %#v, want empty", s.ActorHeldKeys)
+	}
+	if s.AutomergeReason == reasonResolutionActorUnauthorized {
+		t.Errorf("AutomergeReason = %q, want the actor hold cleared", s.AutomergeReason)
+	}
+}
+
+// AC 27: a comment key whose thread was resolved by the automation login stays
+// pending, is held in ActorHeldKeys, the automerge hold names the key and its
+// `resolve` recovery, the status is needs-input, no worker is launched for it and
+// the automation login costs no collaborator-permission lookup.
+func TestActor_AC27_AutomationResolvedThreadStaysPendingAndHoldsTheKey(t *testing.T) {
+	s := actorState("comment:5")
+	calls := actorTick(t, &s, actorTickIn{thread: resolvedThreadBy(5, defaultAutomationLogin, "reviewer"), labels: actorLabelsOK})
+
+	requireActorHeld(t, s, "comment:5", defaultAutomationLogin)
+	if n := countAddressReviewLaunches(calls); n != 0 {
+		t.Errorf("address-review launches = %d, want 0", n)
+	}
+	if n := permissionReadTotal(); n != 0 {
+		t.Errorf("collaborator-permission reads = %d, want 0 for the automation login", n)
+	}
+}
+
+// AC 28: a thread resolved by a login that is neither the automation login nor the
+// thread author, and has admin or write permission, moves to addressed in that tick
+// after exactly one permission lookup for it.
+func TestActor_AC28_ResolvedByAWriteAccessLoginIsAccepted(t *testing.T) {
+	for _, perm := range []string{"write", "admin"} {
+		t.Run(perm, func(t *testing.T) {
+			servePermission(t, "maintainer", perm)
+			s := actorState("comment:5")
+			actorTick(t, &s, actorTickIn{thread: resolvedThreadBy(5, "maintainer", "reviewer")})
+
+			requireActorAddressed(t, s, "comment:5")
+			if got := permissionReads["maintainer"]; got != 1 {
+				t.Errorf("permission reads for maintainer = %d, want exactly 1", got)
+			}
+		})
+	}
+}
+
+// AC 29: a thread resolved by its own first-comment author (not the automation
+// login) is accepted with no permission lookup for that login. The author is the
+// FIRST comment's, also when the key names a later reply (Assumption 3).
+func TestActor_AC29_ResolvedByTheThreadAuthorNeedsNoPermissionLookup(t *testing.T) {
+	t.Run("the key names the first comment", func(t *testing.T) {
+		s := actorState("comment:5")
+		actorTick(t, &s, actorTickIn{thread: resolvedThreadBy(5, "reviewer", "reviewer")})
+
+		requireActorAddressed(t, s, "comment:5")
+		if n := permissionReadTotal(); n != 0 {
+			t.Errorf("collaborator-permission reads = %d, want 0 (%v)", n, permissionReads)
+		}
+	})
+	thread := func(resolver string) string {
+		return threadsResponse(actorThreadNode(true, resolver, threadComment(5, "reviewer"), threadComment(6, "replier")))
+	}
+	t.Run("the key names a reply and the resolver is the thread's first author", func(t *testing.T) {
+		s := actorState("comment:6")
+		actorTick(t, &s, actorTickIn{thread: thread("reviewer")})
+
+		requireActorAddressed(t, s, "comment:6")
+		if n := permissionReadTotal(); n != 0 {
+			t.Errorf("collaborator-permission reads = %d, want 0 (%v)", n, permissionReads)
+		}
+	})
+	t.Run("the reply's own author is not the thread author", func(t *testing.T) {
+		servePermission(t, "replier", "read")
+		s := actorState("comment:6")
+		actorTick(t, &s, actorTickIn{thread: thread("replier"), labels: actorLabelsOK})
+
+		requireActorHeld(t, s, "comment:6", "replier")
+		if got := permissionReads["replier"]; got != 1 {
+			t.Errorf("permission reads for replier = %d, want 1: author equality is against the first comment only", got)
+		}
+	})
+}
+
+// AC 30: a thread resolved by a login that is neither the automation login nor the
+// author and whose permission is read, triage or none stays pending in ActorHeldKeys.
+func TestActor_AC30_ResolvedByALoginWithoutWriteAccessIsHeld(t *testing.T) {
+	for _, perm := range []string{"read", "triage", "none"} {
+		t.Run(perm, func(t *testing.T) {
+			servePermission(t, "outsider", perm)
+			s := actorState("comment:5")
+			calls := actorTick(t, &s, actorTickIn{thread: resolvedThreadBy(5, "outsider", "reviewer"), labels: actorLabelsOK})
+
+			requireActorHeld(t, s, "comment:5", "outsider")
+			if n := countAddressReviewLaunches(calls); n != 0 {
+				t.Errorf("address-review launches = %d, want 0", n)
+			}
+		})
+	}
+}
+
+// AC 31 (the classifyReviewKey path): a DISMISSED review counts only through the
+// actor of its ReviewDismissedEvent. The automation login or a login without write
+// access holds the key; the review's own author or a write-access login accepts it,
+// after one timeline read.
+func TestActor_AC31_DismissedReviewCountsOnlyThroughItsDismissalActor(t *testing.T) {
+	servePermission(t, "outsider", "read")
+	servePermission(t, "maintainer", "write")
+	dismissed := actorReview(10, "DISMISSED", actorT2, "alice")
+	for _, tc := range []struct {
+		name, actor string
+		held        bool
+		permReads   map[string]int
+	}{
+		{"dismissed by the automation login", defaultAutomationLogin, true, nil},
+		{"dismissed by a login without write access", "outsider", true, map[string]int{"outsider": 1}},
+		{"dismissed by the review's own author", "alice", false, nil},
+		{"dismissed by a write-access maintainer", "maintainer", false, map[string]int{"maintainer": 1}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			serveDismissals(t, dismissalPage(false, "", dismissalEvent(10, tc.actor)))
+			s := actorState("review:10")
+			in := actorTickIn{reviews: jsonArray(dismissed)}
+			if tc.held {
+				in.labels = actorLabelsOK
+			}
+			actorTick(t, &s, in)
+
+			if tc.held {
+				requireActorHeld(t, s, "review:10", tc.actor)
+			} else {
+				requireActorAddressed(t, s, "review:10")
+			}
+			if dismissalReads != 1 {
+				t.Errorf("dismissal timeline reads = %d, want exactly 1", dismissalReads)
+			}
+			if !reflect.DeepEqual(permissionReadsOrEmpty(), orEmpty(tc.permReads)) {
+				t.Errorf("permission reads = %v, want %v", permissionReads, tc.permReads)
+			}
+		})
+	}
+}
+
+// permissionReadsOrEmpty and orEmpty compare the permission read counters with an
+// expectation that may be nil.
+func permissionReadsOrEmpty() map[string]int { return orEmpty(permissionReads) }
+
+func orEmpty(m map[string]int) map[string]int {
+	if m == nil {
+		return map[string]int{}
+	}
+	return m
+}
+
+// supersessionCases are AC 32's four later reviews, shared by the two paths that
+// enforce it: a CHANGES_REQUESTED review (id 10) by alice, superseded by review 11.
+func supersessionCases() []struct {
+	name       string
+	reviews    string
+	dismissals []string
+	held       bool
+	heldActor  string
+	timeline   int // expected dismissal timeline reads
+} {
+	cr := actorReview(10, "CHANGES_REQUESTED", actorT1, "alice")
+	return []struct {
+		name       string
+		reviews    string
+		dismissals []string
+		held       bool
+		heldActor  string
+		timeline   int
+	}{
+		{"later review dismissed by the automation login",
+			jsonArray(cr, actorReview(11, "DISMISSED", actorT2, "alice")),
+			[]string{dismissalPage(false, "", dismissalEvent(11, defaultAutomationLogin))}, true, defaultAutomationLogin, 1},
+		{"later review dismissed by a write-access maintainer",
+			jsonArray(cr, actorReview(11, "DISMISSED", actorT2, "alice")),
+			[]string{dismissalPage(false, "", dismissalEvent(11, "maintainer"))}, false, "", 1},
+		{"later review approved by its author",
+			jsonArray(cr, actorReview(11, "APPROVED", actorT2, "alice")), nil, false, "", 0},
+		{"later review approved by the automation login",
+			jsonArray(actorReview(10, "CHANGES_REQUESTED", actorT1, defaultAutomationLogin), actorReview(11, "APPROVED", actorT2, defaultAutomationLogin)),
+			nil, true, defaultAutomationLogin, 0},
+	}
+}
+
+// AC 32, path 1 (classifyReviewKey): a CHANGES_REQUESTED review superseded by the
+// same reviewer's later review clears only when that later review passes the actor
+// check: its dismissal event's actor for a dismissal, its author for an approval.
+func TestActor_AC32_SupersededReviewClearsOnlyWhenTheLaterReviewPassesTheActorCheck(t *testing.T) {
+	servePermission(t, "maintainer", "write")
+	for _, tc := range supersessionCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			serveDismissals(t, tc.dismissals...)
+			s := actorState("review:10")
+			in := actorTickIn{reviews: tc.reviews}
+			if tc.held {
+				in.labels = actorLabelsOK
+			}
+			actorTick(t, &s, in)
+
+			if tc.held {
+				requireActorHeld(t, s, "review:10", tc.heldActor)
+			} else {
+				requireActorAddressed(t, s, "review:10")
+			}
+			if dismissalReads != tc.timeline {
+				t.Errorf("dismissal timeline reads = %d, want %d", dismissalReads, tc.timeline)
+			}
+		})
+	}
+}
+
+// AC 32, path 2 (the same-tick supersession block in tick): the review key is
+// freshly detected this tick, already superseded in the same reviews read. The same
+// four later reviews apply: a held key stays pending (never addressed, never
+// launched), an accepted one resolves straight to addressed.
+func TestActor_AC32_FreshlyDetectedSupersededReviewClearsOnlyWhenTheLaterReviewPassesTheActorCheck(t *testing.T) {
+	servePermission(t, "maintainer", "write")
+	for _, tc := range supersessionCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			serveDismissals(t, tc.dismissals...)
+			s := actorState()
+			s.LastCommentAt = "" // the review below is new this tick
+			in := actorTickIn{reviews: tc.reviews}
+			if tc.held {
+				in.labels = actorLabelsOK
+			}
+			calls := actorTick(t, &s, in)
+
+			if tc.held {
+				requireActorHeld(t, s, "review:10", tc.heldActor)
+				if len(s.LaunchedKeys) != 0 || countAddressReviewLaunches(calls) != 0 {
+					t.Errorf("LaunchedKeys %v, launches %d: a held key must never be launched", s.LaunchedKeys, countAddressReviewLaunches(calls))
+				}
+			} else {
+				requireActorAddressed(t, s, "review:10")
+				if len(s.LaunchedKeys) != 0 || countAddressReviewLaunches(calls) != 0 {
+					t.Errorf("LaunchedKeys %v, launches %d: an accepted supersession must never launch", s.LaunchedKeys, countAddressReviewLaunches(calls))
+				}
+			}
+			if dismissalReads != tc.timeline {
+				t.Errorf("dismissal timeline reads = %d, want %d", dismissalReads, tc.timeline)
+			}
+		})
+	}
+}
+
+// AC 34: an already-addressed key whose current GitHub resolution fails the actor
+// check moves back to pending and into ActorHeldKeys on the next tick, with no
+// worker relaunched for it.
+func TestActor_AC34_AddressedKeyReResolvedByTheAutomationLoginMovesBackAndHolds(t *testing.T) {
+	for _, tc := range []struct {
+		name, key string
+		in        actorTickIn
+	}{
+		{"an inline comment", "comment:5", actorTickIn{
+			comments: `[{"id":5,"updated_at":"2026-01-01T00:00:00Z","user":{"login":"reviewer"}}]`,
+			thread:   resolvedThreadBy(5, defaultAutomationLogin, "reviewer"), labels: actorLabelsOK}},
+		{"a dismissed review", "review:10", actorTickIn{
+			reviews: jsonArray(actorReview(10, "DISMISSED", actorT2, "alice")), labels: actorLabelsOK}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			serveDismissals(t, dismissalPage(false, "", dismissalEvent(10, defaultAutomationLogin)))
+			s := actorState()
+			s.AddressedKeys = []string{tc.key}
+			calls := actorTick(t, &s, tc.in)
+
+			requireActorHeld(t, s, tc.key, defaultAutomationLogin)
+			if len(s.LaunchedKeys) != 0 || countAddressReviewLaunches(calls) != 0 {
+				t.Errorf("LaunchedKeys %v, launches %d: the revoked key must not relaunch a worker on an already-resolved item", s.LaunchedKeys, countAddressReviewLaunches(calls))
+			}
+		})
+	}
+}
+
+// An attested key (`cenci babysit resolve`) that is pending but not launched -- it was
+// addressed, revoked back to pending, held, then released by the human -- must not
+// relaunch a babysit-review worker on a tick whose feedback pass returned early on a
+// fetch failure, so nothing moved it: GitHub reports the thread resolved and a human
+// attested it. Once GitHub reports the thread unresolved the attestation is dropped and
+// the key relaunches like any other pending key.
+func TestActor_AttestedPendingKeyIsNotRelaunchedAndReopenedOneIs(t *testing.T) {
+	attested := map[string]actorAttestation{"comment:5": {Actor: defaultAutomationLogin, Source: "cli"}}
+	comments := `[{"id":5,"updated_at":"2026-01-01T00:00:00Z","user":{"login":"reviewer"}}]`
+
+	t.Run("a fetch failure leaves the attested key unlaunched", func(t *testing.T) {
+		serveAutomationLogin(t, "", errors.New("gh: api user failed"))
+		s := actorState("comment:5")
+		s.LaunchedKeys = nil
+		s.ActorAttestations = attested
+		calls := actorTick(t, &s, actorTickIn{comments: comments, thread: resolvedThreadFor(5), labels: actorLabelsOK})
+
+		if s.AutomergeReason != reasonFeedbackUnreadable || !strings.Contains(s.AutomergeDetail, "automation identity lookup failed") {
+			t.Errorf("AutomergeReason/Detail = %q/%q, want %q naming `automation identity lookup failed`: the tick must take the fetch-level early return", s.AutomergeReason, s.AutomergeDetail, reasonFeedbackUnreadable)
+		}
+		if n := countAddressReviewLaunches(calls); n != 0 || len(s.LaunchedKeys) != 0 {
+			t.Errorf("launches %d, LaunchedKeys %v: an attested pending key must not relaunch a worker on a thread a human attested", n, s.LaunchedKeys)
+		}
+		if _, ok := s.ActorAttestations["comment:5"]; !ok {
+			t.Errorf("ActorAttestations = %v, want the attestation kept: a failed read proves nothing about the thread", s.ActorAttestations)
+		}
+	})
+
+	t.Run("a reopened thread drops the attestation and relaunches", func(t *testing.T) {
+		s := actorState("comment:5")
+		s.LaunchedKeys = nil
+		s.ActorAttestations = attested
+		calls := actorTick(t, &s, actorTickIn{comments: comments, thread: unresolvedThreadFor(5)})
+
+		if _, ok := s.ActorAttestations["comment:5"]; ok {
+			t.Errorf("ActorAttestations = %v, want the attestation dropped once the thread is unresolved", s.ActorAttestations)
+		}
+		if n := countAddressReviewLaunches(calls); n != 1 || !slices.Contains(s.LaunchedKeys, "comment:5") {
+			t.Errorf("launches %d, LaunchedKeys %v, want the reopened key relaunched once", n, s.LaunchedKeys)
+		}
+	})
+}
+
+// A held key is released the moment an authorized actor resolves it: the next
+// tick moves it to addressed, empties ActorHeldKeys and the status returns to
+// running.
+func TestActor_HeldKeyIsReleasedWhenAnAuthorizedActorResolvesIt(t *testing.T) {
+	s := actorState("comment:5")
+	s.Status = "needs-input"
+	s.ActorHeldKeys = map[string]string{"comment:5": defaultAutomationLogin}
+	actorTick(t, &s, actorTickIn{thread: resolvedThreadBy(5, "reviewer", "reviewer")})
+
+	requireActorAddressed(t, s, "comment:5")
+	if s.Status != "running" {
+		t.Errorf("Status = %q, want running once nothing is held", s.Status)
+	}
+}
+
+// ActorHeldKeys only ever names pending keys: an entry for a key that is not
+// pending (a stale entry) is pruned every tick.
+func TestActor_HeldKeysAreCappedToPendingKeys(t *testing.T) {
+	s := actorState()
+	s.ActorHeldKeys = map[string]string{"comment:9": defaultAutomationLogin}
+	actorTick(t, &s, actorTickIn{})
+
+	if len(s.ActorHeldKeys) != 0 {
+		t.Errorf("ActorHeldKeys = %#v, want the non-pending entry pruned", s.ActorHeldKeys)
+	}
+}
+
+// Edge 45: a resolved thread with `resolvedBy: null` (a deleted account) holds under
+// the actor reason with the detail `resolver unknown`, recording "" as the actor.
+func TestActor_Edge45_NullResolverIsHeldAsUnknown(t *testing.T) {
+	s := actorState("comment:5")
+	actorTick(t, &s, actorTickIn{thread: threadsResponse(actorThreadNode(true, "", threadComment(5, "reviewer"))), labels: actorLabelsOK})
+
+	requireActorHeld(t, s, "comment:5", "")
+	if !strings.Contains(s.AutomergeDetail, "resolver unknown") {
+		t.Errorf("AutomergeDetail = %q, want the detail `resolver unknown`", s.AutomergeDetail)
+	}
+}
+
+// Edge 46: a DISMISSED review whose dismissal actor cannot be established -- no
+// matching event in a complete timeline, an event with a null actor, or several
+// events naming different actors -- holds with the detail `dismissal actor unknown`.
+func TestActor_Edge46_DismissedReviewWithAnUnknownDismissalActorIsHeld(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		page string
+	}{
+		{"no event at all", dismissalPage(false, "")},
+		{"only events for other reviews", dismissalPage(false, "", dismissalEvent(99, "alice"))},
+		{"a null actor", dismissalPage(false, "", dismissalEvent(10, ""))},
+		{"conflicting events for the same review", dismissalPage(false, "", dismissalEvent(10, "alice"), dismissalEvent(10, "maintainer"))},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			servePermission(t, "maintainer", "write")
+			serveDismissals(t, tc.page)
+			s := actorState("review:10")
+			actorTick(t, &s, actorTickIn{reviews: jsonArray(actorReview(10, "DISMISSED", actorT2, "alice")), labels: actorLabelsOK})
+
+			requireActorHeld(t, s, "review:10", "")
+			if !strings.Contains(s.AutomergeDetail, "dismissal actor unknown") {
+				t.Errorf("AutomergeDetail = %q, want the detail `dismissal actor unknown`", s.AutomergeDetail)
+			}
+		})
+	}
+}
+
+// Edge 47: an actor that fails githubLoginPattern (a GitHub App or `[bot]` login) is
+// denied without any collaborator-permission call and the key goes to ActorHeldKeys.
+func TestActor_Edge47_BotActorIsDeniedWithoutAPermissionLookup(t *testing.T) {
+	t.Run("a bot dismisses the review", func(t *testing.T) {
+		serveDismissals(t, dismissalPage(false, "", dismissalEvent(10, "ci-helper[bot]")))
+		s := actorState("review:10")
+		actorTick(t, &s, actorTickIn{reviews: jsonArray(actorReview(10, "DISMISSED", actorT2, "alice")), labels: actorLabelsOK})
+
+		requireActorHeld(t, s, "review:10", "ci-helper[bot]")
+		if n := permissionReadTotal(); n != 0 {
+			t.Errorf("collaborator-permission reads = %d (%v), want 0 for a login that fails the pattern", n, permissionReads)
+		}
+	})
+	t.Run("a bot resolves the thread", func(t *testing.T) {
+		s := actorState("comment:5")
+		actorTick(t, &s, actorTickIn{thread: resolvedThreadBy(5, "ci-helper[bot]", "reviewer"), labels: actorLabelsOK})
+
+		requireActorHeld(t, s, "comment:5", "ci-helper[bot]")
+		if n := permissionReadTotal(); n != 0 {
+			t.Errorf("collaborator-permission reads = %d (%v), want 0 for a login that fails the pattern", n, permissionReads)
+		}
+	})
+}
+
+// Edge 48: the maintainer's own inline comment, resolved by the maintainer (thread
+// author == resolver == the automation login) is held: being the author does not
+// exempt the automation login.
+func TestActor_Edge48_AutomationAuthoredThreadResolvedByAutomationIsHeld(t *testing.T) {
+	s := actorState("comment:5")
+	actorTick(t, &s, actorTickIn{thread: resolvedThreadBy(5, defaultAutomationLogin, defaultAutomationLogin), labels: actorLabelsOK})
+
+	requireActorHeld(t, s, "comment:5", defaultAutomationLogin)
+}
+
+// Edge 49: a `gh api user` failure, an empty login or a login that fails
+// githubLoginPattern fails the whole comment/review pass closed under `review
+// feedback state unreadable` / `automation identity lookup failed`. No key moves in
+// either direction, and the next tick retries.
+func TestActor_Edge49_AutomationIdentityLookupFailureHoldsTheWholePass(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		login string
+		err   error
+	}{
+		{"gh api user fails", "", errors.New("gh: api user failed")},
+		{"an empty login", "", nil},
+		{"a login that fails the pattern", "not a login!", nil},
+	} {
+		for _, shape := range []string{"pending", "addressed"} {
+			t.Run(tc.name+", key "+shape, func(t *testing.T) {
+				serveAutomationLogin(t, tc.login, tc.err)
+				s := actorState()
+				if shape == "pending" {
+					s.PendingKeys, s.LaunchedKeys = []string{"comment:5"}, []string{"comment:5"}
+				} else {
+					s.AddressedKeys = []string{"comment:5"}
+				}
+				before := s
+				actorTick(t, &s, actorTickIn{thread: resolvedThreadFor(5), labels: actorLabelsOK})
+
+				if s.AutomergeReason != reasonFeedbackUnreadable || !strings.Contains(s.AutomergeDetail, "automation identity lookup failed") {
+					t.Errorf("AutomergeReason/Detail = %q/%q, want %q naming `automation identity lookup failed`", s.AutomergeReason, s.AutomergeDetail, reasonFeedbackUnreadable)
+				}
+				if !reflect.DeepEqual(s.PendingKeys, before.PendingKeys) || !reflect.DeepEqual(s.AddressedKeys, before.AddressedKeys) || len(s.ActorHeldKeys) != 0 {
+					t.Errorf("pending/addressed/held = %v/%v/%v, want every key where it was", s.PendingKeys, s.AddressedKeys, s.ActorHeldKeys)
+				}
+
+				// The next tick retries the lookup and, now that it succeeds, resolves.
+				serveAutomationLogin(t, defaultAutomationLogin, nil)
+				actorTick(t, &s, actorTickIn{thread: resolvedThreadFor(5)})
+				requireActorAddressed(t, s, "comment:5")
+			})
+		}
+	}
+}
+
+// Edge 50: a permission lookup for a resolver that comes back unknown leaves that key
+// where it was -- not in ActorHeldKeys -- under `review feedback state unreadable` /
+// `resolution actor permission lookup failed for <key>; will retry`, and the next
+// tick looks the actor up again.
+func TestActor_Edge50_UnknownPermissionLeavesTheKeyWhereItWasAndRetries(t *testing.T) {
+	thread := resolvedThreadBy(5, "outsider", "reviewer")
+	wantDetail := "resolution actor permission lookup failed for comment:5; will retry"
+
+	t.Run("a pending key stays pending and is looked up again", func(t *testing.T) {
+		servePermissionFailure(t, "outsider")
+		s := actorState("comment:5")
+		actorTick(t, &s, actorTickIn{thread: thread, labels: actorLabelsOK})
+
+		if s.AutomergeReason != reasonFeedbackUnreadable || !strings.Contains(s.AutomergeDetail, wantDetail) {
+			t.Errorf("AutomergeReason/Detail = %q/%q, want %q naming %q", s.AutomergeReason, s.AutomergeDetail, reasonFeedbackUnreadable, wantDetail)
+		}
+		if !slices.Contains(s.PendingKeys, "comment:5") || len(s.AddressedKeys) != 0 || len(s.ActorHeldKeys) != 0 {
+			t.Errorf("pending/addressed/held = %v/%v/%v, want comment:5 left pending and not held", s.PendingKeys, s.AddressedKeys, s.ActorHeldKeys)
+		}
+		if got := permissionReads["outsider"]; got != 1 {
+			t.Errorf("permission reads for outsider = %d, want 1", got)
+		}
+
+		servePermission(t, "outsider", "write")
+		delete(permissionFailing, "outsider") // servePermissionFailure's entry wins over a served value
+		actorTick(t, &s, actorTickIn{thread: thread})
+		requireActorAddressed(t, s, "comment:5")
+		if got := permissionReads["outsider"]; got != 1 {
+			t.Errorf("permission reads for outsider on the retry tick = %d, want it looked up again (1)", got)
+		}
+	})
+	t.Run("an addressed key stays addressed", func(t *testing.T) {
+		servePermissionFailure(t, "outsider")
+		s := actorState()
+		s.AddressedKeys = []string{"comment:5"}
+		actorTick(t, &s, actorTickIn{thread: thread, labels: actorLabelsOK})
+
+		if !slices.Equal(s.AddressedKeys, []string{"comment:5"}) || len(s.PendingKeys) != 0 || len(s.ActorHeldKeys) != 0 {
+			t.Errorf("pending/addressed/held = %v/%v/%v, want comment:5 left addressed", s.PendingKeys, s.AddressedKeys, s.ActorHeldKeys)
+		}
+		if s.AutomergeReason != reasonFeedbackUnreadable || !strings.Contains(s.AutomergeDetail, wantDetail) {
+			t.Errorf("AutomergeReason/Detail = %q/%q, want %q naming %q", s.AutomergeReason, s.AutomergeDetail, reasonFeedbackUnreadable, wantDetail)
+		}
+	})
+	t.Run("an already-held key stays held", func(t *testing.T) {
+		servePermissionFailure(t, "outsider")
+		s := actorState("comment:5")
+		s.ActorHeldKeys = map[string]string{"comment:5": defaultAutomationLogin}
+		actorTick(t, &s, actorTickIn{thread: thread, labels: actorLabelsOK})
+
+		if want := map[string]string{"comment:5": defaultAutomationLogin}; !reflect.DeepEqual(s.ActorHeldKeys, want) {
+			t.Errorf("ActorHeldKeys = %#v, want %#v: an unknown lookup must not change a key's membership", s.ActorHeldKeys, want)
+		}
+	})
+}
+
+// Edge 51 (and the timeline half of the identity rule): a dismissal timeline read that
+// hits its page cap with hasNextPage still true holds under `review feedback state
+// truncated`, a failed read under `review feedback state unreadable`; either way no key
+// moves in either direction.
+func TestActor_Edge51_UnreadableOrTruncatedDismissalTimelineHoldsTheWholePass(t *testing.T) {
+	pending := func() State {
+		s := actorState("review:10", "comment:5")
+		return s
+	}
+	in := actorTickIn{
+		reviews: jsonArray(actorReview(10, "DISMISSED", actorT2, "alice")),
+		thread:  resolvedThreadFor(5), labels: actorLabelsOK,
+	}
+	t.Run("hasNextPage still true at the page cap", func(t *testing.T) {
+		pages := make([]string, maxThreadPages)
+		for i := range pages {
+			pages[i] = dismissalPage(true, fmt.Sprintf("C%d", i), dismissalEvent(99, "alice"))
+		}
+		serveDismissals(t, pages...)
+		s := pending()
+		actorTick(t, &s, in)
+
+		if s.AutomergeReason != reasonFeedbackTruncated {
+			t.Errorf("AutomergeReason = %q, want %q", s.AutomergeReason, reasonFeedbackTruncated)
+		}
+		if dismissalReads != maxThreadPages {
+			t.Errorf("dismissal timeline reads = %d, want exactly maxThreadPages (%d)", dismissalReads, maxThreadPages)
+		}
+		if !slices.Equal(s.PendingKeys, []string{"review:10", "comment:5"}) || len(s.AddressedKeys) != 0 || len(s.ActorHeldKeys) != 0 {
+			t.Errorf("pending/addressed/held = %v/%v/%v, want every key where it was", s.PendingKeys, s.AddressedKeys, s.ActorHeldKeys)
+		}
+	})
+	t.Run("the timeline read fails", func(t *testing.T) {
+		serveDismissalFailure(t, errors.New("gh: timeline failed"))
+		s := pending()
+		actorTick(t, &s, in)
+
+		if s.AutomergeReason != reasonFeedbackUnreadable {
+			t.Errorf("AutomergeReason = %q, want %q", s.AutomergeReason, reasonFeedbackUnreadable)
+		}
+		if !slices.Equal(s.PendingKeys, []string{"review:10", "comment:5"}) || len(s.AddressedKeys) != 0 || len(s.ActorHeldKeys) != 0 {
+			t.Errorf("pending/addressed/held = %v/%v/%v, want every key where it was", s.PendingKeys, s.AddressedKeys, s.ActorHeldKeys)
+		}
+	})
+}
+
+// Edge 52: an attested key whose thread GitHub later reports isResolved:false drops its
+// attestation and returns to pending through the existing reopen path. A later
+// re-resolution by the automation login then holds it again in ActorHeldKeys.
+func TestActor_Edge52_ReopenedAttestedKeyDropsItsAttestationAndIsHeldAgainOnReResolution(t *testing.T) {
+	s := actorState()
+	s.AddressedKeys = []string{"comment:5"}
+	s.ActorAttestations = map[string]actorAttestation{"comment:5": {Actor: defaultAutomationLogin, AttestedAt: time.Unix(1_700_000_000, 0).UTC(), Source: "human-cli"}}
+
+	// Tick 1: GitHub reports the thread unresolved.
+	actorTick(t, &s, actorTickIn{comments: reopenedComment5, thread: unresolvedThreadFor(5), labels: actorLabelsOK})
+	if !slices.Contains(s.PendingKeys, "comment:5") || len(s.AddressedKeys) != 0 {
+		t.Fatalf("tick 1: pending/addressed = %v/%v, want comment:5 back in pending", s.PendingKeys, s.AddressedKeys)
+	}
+	if len(s.ActorAttestations) != 0 {
+		t.Fatalf("tick 1: ActorAttestations = %#v, want the attestation dropped", s.ActorAttestations)
+	}
+
+	// Tick 2: the automation login re-resolves it; the dropped attestation no longer vouches.
+	actorTick(t, &s, actorTickIn{comments: reopenedComment5, thread: resolvedThreadBy(5, defaultAutomationLogin, "reviewer"), labels: actorLabelsOK})
+	requireActorHeld(t, s, "comment:5", defaultAutomationLogin)
+}
+
+// Edge 53 and the attestation lifetime: an attestation for the actor GitHub still
+// reports accepts the key and is NOT consumed (an addressed key is re-checked every
+// tick); one for a different actor does not vouch, so the key is re-evaluated under
+// the actor rule.
+func TestActor_Edge53_AttestationVouchesOnlyForTheActorItRecorded(t *testing.T) {
+	attest := func(actor string) map[string]actorAttestation {
+		return map[string]actorAttestation{"comment:5": {Actor: actor, AttestedAt: time.Unix(1_700_000_000, 0).UTC(), Source: "human-cli"}}
+	}
+	t.Run("a matching attestation accepts the automation login's resolution and is kept", func(t *testing.T) {
+		s := actorState("comment:5")
+		s.ActorAttestations = attest(defaultAutomationLogin)
+		actorTick(t, &s, actorTickIn{thread: resolvedThreadBy(5, defaultAutomationLogin, "reviewer")})
+
+		requireActorAddressed(t, s, "comment:5")
+		if !reflect.DeepEqual(s.ActorAttestations, attest(defaultAutomationLogin)) {
+			t.Errorf("ActorAttestations = %#v, want the attestation kept after it accepted the key", s.ActorAttestations)
+		}
+		// The next tick re-checks the addressed key and keeps it addressed.
+		actorTick(t, &s, actorTickIn{thread: resolvedThreadBy(5, defaultAutomationLogin, "reviewer")})
+		requireActorAddressed(t, s, "comment:5")
+	})
+	t.Run("an attestation for another actor does not vouch for the automation login", func(t *testing.T) {
+		s := actorState("comment:5")
+		s.ActorAttestations = attest("maintainer")
+		actorTick(t, &s, actorTickIn{thread: resolvedThreadBy(5, defaultAutomationLogin, "reviewer"), labels: actorLabelsOK})
+
+		requireActorHeld(t, s, "comment:5", defaultAutomationLogin)
+	})
+	t.Run("an attestation for another actor does not vouch for a login without write access", func(t *testing.T) {
+		servePermission(t, "outsider", "read")
+		s := actorState("comment:5")
+		s.ActorAttestations = attest(defaultAutomationLogin)
+		actorTick(t, &s, actorTickIn{thread: resolvedThreadBy(5, "outsider", "reviewer"), labels: actorLabelsOK})
+
+		requireActorHeld(t, s, "comment:5", "outsider")
+	})
+}
+
+// Edge 54: a state with only discussion keys makes no `gh api user`, no dismissal
+// timeline and no collaborator-permission call in a tick.
+func TestActor_Edge54_DiscussionOnlyStateMakesNoActorLookups(t *testing.T) {
+	s := actorState("discussion:11")
+	calls := actorTick(t, &s, actorTickIn{})
+
+	if automationLoginReads != 0 || dismissalReads != 0 || permissionReadTotal() != 0 {
+		t.Errorf("api user / timeline / permission reads = %d/%d/%d, want none", automationLoginReads, dismissalReads, permissionReadTotal())
+	}
+	for _, c := range calls {
+		if strings.Contains(strings.Join(c, " "), "collaborators") {
+			t.Errorf("unexpected collaborator call %v", c)
+		}
+	}
+}
+
+// Edge 55: a tick in which no comment:/review: key would resolve or stay resolved
+// makes no `gh api user` call (and no timeline read).
+func TestActor_Edge55_NoResolvingKeyMeansNoIdentityLookup(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(s *State)
+		in    actorTickIn
+	}{
+		{"a pending comment on an unresolved thread", func(s *State) {},
+			actorTickIn{thread: unresolvedThreadFor(5), labels: actorLabelsOK}},
+		{"a pending review still the reviewer's latest", func(s *State) { s.PendingKeys, s.LaunchedKeys = []string{"review:10"}, []string{"review:10"} },
+			actorTickIn{reviews: jsonArray(actorReview(10, "CHANGES_REQUESTED", actorT1, "alice")), labels: actorLabelsOK}},
+		{"a pending comment GitHub no longer reports", func(s *State) {},
+			actorTickIn{thread: threadsResponse(actorThreadNode(true, "reviewer", threadComment(999, "reviewer"))), labels: actorLabelsOK}},
+		{"an addressed comment reopened", func(s *State) { s.PendingKeys, s.LaunchedKeys, s.AddressedKeys = nil, nil, []string{"comment:5"} },
+			actorTickIn{comments: reopenedComment5, thread: unresolvedThreadFor(5), labels: actorLabelsOK}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := actorState("comment:5")
+			tc.setup(&s)
+			actorTick(t, &s, tc.in)
+
+			if automationLoginReads != 0 || dismissalReads != 0 {
+				t.Errorf("api user / timeline reads = %d/%d, want none: no key would resolve or stay resolved", automationLoginReads, dismissalReads)
+			}
+		})
+	}
+}
+
+// Edge 56: a review key superseded by the same reviewer's later CHANGES_REQUESTED
+// review stays pending, and no actor lookup (identity, timeline, permission) runs.
+func TestActor_Edge56_SupersededByAnotherChangesRequestedMakesNoActorLookup(t *testing.T) {
+	s := actorState("review:10")
+	actorTick(t, &s, actorTickIn{
+		reviews: jsonArray(actorReview(10, "CHANGES_REQUESTED", actorT1, "alice"), actorReview(12, "CHANGES_REQUESTED", actorT2, "alice")),
+		labels:  actorLabelsOK,
+	})
+
+	if !slices.Contains(s.PendingKeys, "review:10") || len(s.AddressedKeys) != 0 || len(s.ActorHeldKeys) != 0 {
+		t.Errorf("pending/addressed/held = %v/%v/%v, want review:10 still pending and not held", s.PendingKeys, s.AddressedKeys, s.ActorHeldKeys)
+	}
+	if automationLoginReads != 0 || dismissalReads != 0 || permissionReadTotal() != 0 {
+		t.Errorf("api user / timeline / permission reads = %d/%d/%d, want none", automationLoginReads, dismissalReads, permissionReadTotal())
 	}
 }
 

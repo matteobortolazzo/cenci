@@ -28,6 +28,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 const (
@@ -48,6 +49,14 @@ func hdInline(head string) ciCapStep {
 func hdThreads(e *ciCapEnv, id int64, resolved func(view int) bool) {
 	base := execGh
 	execGh = func(args ...string) (string, string, error) {
+		// #862: `gh api user` and the dismissal-event timeline (also a graphql call)
+		// are served by ghPathAnswer, never by this thread answer or the positional
+		// script behind it.
+		if len(args) > 1 && args[0] == "api" && (args[1] == "user" || args[1] == "graphql") {
+			if out, err, ok := ghPathAnswer(args); ok {
+				return out, "", err
+			}
+		}
 		if len(args) > 1 && args[0] == "api" && args[1] == "graphql" {
 			if resolved(e.viewN) {
 				return resolvedThreadFor(id), "", nil
@@ -581,6 +590,106 @@ func TestHoldDurability_AC56_StopKeepsTheHeadMoveHoldHeldKeysAndUntrustedLaunchC
 	for _, field := range []string{`"headMoveHold"`, `"heldUntrustedKeys"`, `"untrustedLaunchCounts"`, `"launchHeadSha"`, `"raisedAt"`} {
 		if !bytes.Contains(raw, []byte(field)) {
 			t.Errorf("the stopped state file lacks %s", field)
+		}
+	}
+}
+
+// actorRetentionSeed is a supervisor state holding one actor-held key (and one
+// held for an unknown actor) and one attestation (#862).
+func actorRetentionSeed(pid int) State {
+	return State{
+		SchemaVersion: stateSchemaVersion, PR: "42", Repo: "o/r", Agent: "codex", IntervalSeconds: 300,
+		Status: "needs-input", PID: pid, LaunchSession: "work", LaunchDir: "/repo/work", FixAttempts: 2,
+		PendingKeys:       []string{"comment:7", "review:9"},
+		LaunchedKeys:      []string{"comment:7", "review:9"},
+		AddressedKeys:     []string{"comment:3"},
+		ActorHeldKeys:     map[string]string{"comment:7": defaultAutomationLogin, "review:9": ""},
+		ActorAttestations: map[string]actorAttestation{"comment:3": {Actor: defaultAutomationLogin, AttestedAt: time.Date(2026, 11, 18, 9, 0, 0, 0, time.UTC), Source: attestationSourceHumanCLI}},
+	}
+}
+
+// requireActorRetention asserts s still carries actorRetentionSeed's two fields, exactly.
+func requireActorRetention(t *testing.T, label string, s State) {
+	t.Helper()
+	want := actorRetentionSeed(0)
+	if !reflect.DeepEqual(s.ActorHeldKeys, want.ActorHeldKeys) || !reflect.DeepEqual(s.ActorAttestations, want.ActorAttestations) {
+		t.Errorf("%s: actorHeldKeys %v actorAttestations %v, want %v %v", label, s.ActorHeldKeys, s.ActorAttestations, want.ActorHeldKeys, want.ActorAttestations)
+	}
+}
+
+// AC 40: `cenci babysit stop` keeps actorHeldKeys and actorAttestations in the
+// rewritten state file (the head-move hold's precedent: a stop and re-arm must never
+// drop a security hold).
+func TestHoldDurability_AC40_StopKeepsTheActorHeldKeysAndAttestations(t *testing.T) {
+	e := newResetEnv(t)
+	owner := startOwnedFixture(t, false)
+	writeStateFile(t, e.path, actorRetentionSeed(owner.pid))
+	writeLock(t, e.lock, owner.pid)
+
+	if err := StopRepo("o/r", "42", e.dir); err != nil {
+		t.Fatalf("StopRepo: %v", err)
+	}
+
+	stopped := mustReadState(t, e.path)
+	if stopped.Status != "stopped" || stopped.PID != 0 {
+		t.Fatalf("status/pid = %q/%d, want a stopped state with no pid", stopped.Status, stopped.PID)
+	}
+	requireActorRetention(t, "stopped state", stopped)
+	raw := readFileBytes(t, e.path)
+	for _, field := range []string{`"actorHeldKeys"`, `"actorAttestations"`, `"attestedAt"`} {
+		if !bytes.Contains(raw, []byte(field)) {
+			t.Errorf("the stopped state file lacks %s", field)
+		}
+	}
+}
+
+// AC 40: `cenci babysit reset` zeroes the retry budget but clears neither field.
+func TestHoldDurability_AC40_ResetClearsNeitherActorHeldKeysNorAttestations(t *testing.T) {
+	e := newResetEnv(t)
+	writeStateFile(t, e.path, actorRetentionSeed(0))
+
+	done := captureStdout(t)
+	err := Reset("42", e.dir, nil)
+	_ = done()
+
+	if err != nil {
+		t.Fatalf("Reset: %v", err)
+	}
+	reset := mustReadState(t, e.path)
+	if reset.FixAttempts != 0 {
+		t.Fatalf("FixAttempts = %d, want the retry budget zeroed (the reset really ran)", reset.FixAttempts)
+	}
+	requireActorRetention(t, "reset state", reset)
+}
+
+// Edge 57: a state file written before #862, with neither field, loads with both
+// empty and the schema version unchanged, and a save of it writes neither key.
+func TestHoldDurability_Edge57_LegacyStateLoadsWithNoActorFieldsAndNoSchemaBump(t *testing.T) {
+	const legacy = `{"schemaVersion":2,"pr":"42","repo":"o/r","agent":"claude","intervalSeconds":60,"currentDelaySeconds":60,` +
+		`"pendingCommentKeys":["comment:7"],"launchedFeedbackKeys":["comment:7"],"heldUntrustedKeys":["comment:7"],"status":"running"}`
+	path := filepath.Join(t.TempDir(), "state.json")
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := readStateStrict(path)
+
+	if err != nil {
+		t.Fatalf("readStateStrict: %v", err)
+	}
+	if len(loaded.ActorHeldKeys) != 0 || len(loaded.ActorAttestations) != 0 {
+		t.Errorf("actorHeldKeys %v actorAttestations %v, want both empty", loaded.ActorHeldKeys, loaded.ActorAttestations)
+	}
+	if loaded.SchemaVersion != 2 || stateSchemaVersion != 2 {
+		t.Errorf("schema version loaded %d current %d, want no bump: still 2", loaded.SchemaVersion, stateSchemaVersion)
+	}
+	if err := save(path, loaded); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	raw := readFileBytes(t, path)
+	for _, key := range []string{`"actorHeldKeys"`, `"actorAttestations"`} {
+		if bytes.Contains(raw, []byte(key)) {
+			t.Errorf("the saved legacy state contains %s, want it omitted while empty", key)
 		}
 	}
 }

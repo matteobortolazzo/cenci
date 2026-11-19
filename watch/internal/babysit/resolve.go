@@ -26,20 +26,19 @@ const (
 var headSHAPattern = regexp.MustCompile(`^([0-9a-f]{40}|[0-9a-f]{64})$`)
 
 // ValidResolveKey reports whether key is shaped like a target `resolve` can be
-// pointed at: `discussion:<positive id>`, `head:<sha>` (the head-move hold, #1539:
-// exactly 40 or 64 lowercase hex characters), or a `comment:`/`review:` key (which
-// Resolve then refuses with a pointer to GitHub). Anything else is a usage error.
+// pointed at: `discussion:<positive id>`, `comment:<positive id>` or
+// `review:<positive id>` (#862: the keys held for their resolution actor; a
+// positive decimal integer without a sign or leading zeros, as a discussion id),
+// or `head:<sha>` (the head-move hold, #1539: exactly 40 or 64 lowercase hex
+// characters). Anything else is a usage error.
 func ValidResolveKey(key string) bool {
 	if rest, ok := strings.CutPrefix(key, headKeyPrefix); ok {
 		return headSHAPattern.MatchString(rest)
 	}
-	if rest, ok := strings.CutPrefix(key, discussionKeyPrefix); ok {
-		id, err := strconv.ParseInt(rest, 10, 64)
-		return err == nil && id > 0 && rest == strconv.FormatInt(id, 10)
-	}
-	for _, prefix := range []string{commentKeyPrefix, reviewKeyPrefix} {
-		if rest, ok := strings.CutPrefix(key, prefix); ok && rest != "" {
-			return true
+	for _, prefix := range []string{discussionKeyPrefix, commentKeyPrefix, reviewKeyPrefix} {
+		if rest, ok := strings.CutPrefix(key, prefix); ok {
+			id, err := strconv.ParseInt(rest, 10, 64)
+			return err == nil && id > 0 && rest == strconv.FormatInt(id, 10)
 		}
 	}
 	return false
@@ -58,8 +57,16 @@ func ValidResolveKey(key string) bool {
 //     (#1464) applied literally and fail closed: pipeline.Unattended exempts a
 //     host-config origin, this gate does not. A supervisor-launched worker is always
 //     unattended (#1497), so it can never use resolve to mark its own work done.
-//   - key is a `comment:` or `review:` key (GitHub is authoritative for those),
 //   - key is not in PendingKeys: an addressed or unknown key has nothing to resolve.
+//
+// A `comment:<id>` or `review:<id>` key (#862) is accepted only while it is pending
+// and in State.ActorHeldKeys: GitHub reports it resolved, but by an actor that fails
+// the actor rule (the automation login, an unknown actor, a login without write
+// access). Resolve then records an attestation (State.ActorAttestations) for the
+// key and the actor the supervisor saw, and removes it from ActorHeldKeys and
+// HeldUntrustedKeys. It never marks the key addressed: GitHub stays authoritative
+// for whether the thread or review is resolved, and the next tick moves the key. Any
+// other comment:/review: key is refused, pointing at GitHub.
 //
 // A `head:<sha>` key (#1539) is the only way to clear State.HeadMoveHold, the
 // PR-level hold raised when a launch that carried untrusted input left the PR head
@@ -88,7 +95,7 @@ func Resolve(pr, key, explicit string, refusal func(agent string) string) error 
 		return fmt.Errorf("%w: PR must be a positive integer", ErrResolveUsage)
 	}
 	if !ValidResolveKey(key) {
-		return fmt.Errorf("%w: key %q is not discussion:<id> or head:<sha> (a 40 or 64 character lowercase hex SHA)", ErrResolveUsage, key)
+		return fmt.Errorf("%w: key %q is not discussion:<id>, comment:<id>, review:<id> or head:<sha> (a 40 or 64 character lowercase hex SHA)", ErrResolveUsage, key)
 	}
 	if os.Getenv("CENCI_SANDBOX") == "1" {
 		return fmt.Errorf("not resolved: the babysit supervisor runs on the host and a resolution can only be recorded there; run `cenci babysit resolve %s %s` from a host tmux pane", cleanPR, key)
@@ -102,11 +109,8 @@ func Resolve(pr, key, explicit string, refusal func(agent string) string) error 
 	if sha, ok := strings.CutPrefix(key, headKeyPrefix); ok {
 		return resolveHeadMove(cleanPR, sha, explicit, refusal)
 	}
-	switch {
-	case strings.HasPrefix(key, commentKeyPrefix):
-		return fmt.Errorf("not resolved: %s is an inline review thread; resolve it on GitHub", key)
-	case strings.HasPrefix(key, reviewKeyPrefix):
-		return fmt.Errorf("not resolved: %s is a PR review; resolve it on GitHub", key)
+	if strings.HasPrefix(key, commentKeyPrefix) || strings.HasPrefix(key, reviewKeyPrefix) {
+		return resolveActorHeld(cleanPR, key, explicit, refusal)
 	}
 
 	dir, err := stateDir(explicit)
@@ -238,6 +242,87 @@ func resolveHeadMove(pr, sha, explicit string, refusal func(agent string) string
 	fmt.Printf("Resolved the head-move hold at %s for PR #%s.\n", sha, pr)
 	if err := reArm(dir, pr, s); err != nil {
 		return fmt.Errorf("resolved the head-move hold at %s for PR #%s but not re-armed: %w; re-arm with cenci babysit %s --agent %s", sha, pr, err, pr, s.Agent)
+	}
+	return nil
+}
+
+// actorHeldRefusal is why key cannot be attested in s, or nil when it can: it is
+// not pending, or not held for its resolution actor.
+func actorHeldRefusal(s State, pr, key string) error {
+	if _, held := s.ActorHeldKeys[key]; !held || !slices.Contains(s.PendingKeys, key) {
+		return fmt.Errorf("not resolved: %s is not held for an unauthorized resolution actor on PR #%s; resolve it on GitHub", key, pr)
+	}
+	return nil
+}
+
+// resolveActorHeld is Resolve's `comment:<id>`/`review:<id>` branch (#862): the
+// environment refusals have already passed. It follows resolveHeadMove:
+// quiesceSupervisor, re-check the key in the state it re-reads (the supervisor may
+// have moved it while dying), record the attestation, save, re-arm (a stopped state
+// is written and never re-armed).
+func resolveActorHeld(pr, key, explicit string, refusal func(agent string) string) error {
+	dir, err := stateDir(explicit)
+	if err != nil {
+		return err
+	}
+	repo, err := repository()
+	if err != nil {
+		return err
+	}
+	path := statePath(dir, repo, pr)
+
+	s, err := quiesceSupervisor(path, pr, func(s State) error {
+		if err := actorHeldRefusal(s, pr, key); err != nil {
+			return err
+		}
+		if !stoppedFeedbackOnly(s) && refusal != nil {
+			if reason := refusal(s.Agent); reason != "" {
+				return &classifiedError{class: ErrAgentRefused, msg: reason}
+			}
+		}
+		return nil
+	})
+	if errors.Is(err, ErrStateUnreadable) {
+		return unreadableStateError(path, err)
+	}
+	if err != nil {
+		return err
+	}
+
+	// The supervisor may have saved while it was dying: an authorized actor may have
+	// resolved the key in the meantime, and then there is nothing to attest.
+	if err := actorHeldRefusal(s, pr, key); err != nil {
+		if stoppedFeedbackOnly(s) {
+			return err
+		}
+		return fmt.Errorf("%w; the supervisor for PR #%s was stopped to resolve it and was not re-armed, so re-arm it with cenci babysit %s --agent %s", err, pr, pr, s.Agent)
+	}
+	if s.ActorAttestations == nil {
+		s.ActorAttestations = map[string]actorAttestation{}
+	}
+	now := time.Now().UTC()
+	s.ActorAttestations[key] = actorAttestation{Actor: s.ActorHeldKeys[key], AttestedAt: now, Source: attestationSourceHumanCLI}
+	delete(s.ActorHeldKeys, key)
+	if len(s.ActorHeldKeys) == 0 {
+		s.ActorHeldKeys = nil
+	}
+	s.HeldUntrustedKeys = removeKeys(s.HeldUntrustedKeys, []string{key})
+	s.PID = 0
+	s.UpdatedAt = now
+	if err := save(path, s); err != nil {
+		if stoppedFeedbackOnly(s) {
+			return err
+		}
+		return fmt.Errorf("any supervisor for PR #%s was stopped, but %s was not resolved and nothing was re-armed: %w; fix the cause, then re-arm with cenci babysit %s --agent %s", pr, key, err, pr, s.Agent)
+	}
+
+	if stoppedFeedbackOnly(s) {
+		fmt.Printf("Resolved %s for PR #%s; the supervisor is stopped, so it was not re-armed. Re-arm it with cenci babysit %s --agent <claude|codex>.\n", key, pr, pr)
+		return nil
+	}
+	fmt.Printf("Resolved %s for PR #%s.\n", key, pr)
+	if err := reArm(dir, pr, s); err != nil {
+		return fmt.Errorf("resolved %s for PR #%s but not re-armed: %w; re-arm with cenci babysit %s --agent %s", key, pr, err, pr, s.Agent)
 	}
 	return nil
 }

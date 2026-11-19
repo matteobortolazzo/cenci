@@ -130,22 +130,237 @@ func TestResolve_InsideASupervisorRefusesWithoutSignallingIt(t *testing.T) {
 	}
 }
 
-func TestResolve_InlineAndReviewKeysAreResolvedOnGitHub(t *testing.T) {
-	for _, key := range []string{"comment:2", "review:7"} {
-		t.Run(key, func(t *testing.T) {
+// -- #862: comment:/review: keys held for an unauthorized resolution actor --------
+
+// actorHeldResolveState is a supervisor for PR 42 with two pending keys, an inline
+// comment resolved on GitHub by the automation login and a review dismissed by an
+// unknown actor, both held in ActorHeldKeys and in HeldUntrustedKeys, plus an
+// addressed key and a retry budget a resolve must not touch.
+func actorHeldResolveState(pid int) State {
+	return State{
+		SchemaVersion: stateSchemaVersion, PR: "42", Repo: "o/r", Agent: "codex",
+		IntervalSeconds: 300, CurrentDelaySeconds: 300, Status: "needs-input", PID: pid,
+		LaunchSession: "work", LaunchDir: "/repo/work", FixAttempts: 2,
+		LastHeadSHA: "abc", LastCommentAt: "2026-02-01T00:00:00Z",
+		AddressedKeys:     []string{"comment:1"},
+		PendingKeys:       []string{"comment:2", "review:7"},
+		LaunchedKeys:      []string{"comment:2", "review:7"},
+		HeldUntrustedKeys: []string{"comment:2", "review:7"},
+		ActorHeldKeys:     map[string]string{"comment:2": defaultAutomationLogin, "review:7": ""},
+	}
+}
+
+// AC 35: a comment:/review: key that is pending and held for its actor is accepted
+// on an attended host. The resolve records an attestation for the key and the actor
+// the supervisor saw, removes the key from ActorHeldKeys and HeldUntrustedKeys, prints
+// `Resolved <key> for PR #42.` and re-arms -- and does NOT mark the key addressed: GitHub
+// stays authoritative, the next tick moves it.
+func TestResolve_AC35_AcceptsAHeldCommentOrReviewKeyAndRecordsAnAttestation(t *testing.T) {
+	for _, tc := range []struct {
+		key, actor, other string
+	}{
+		{"comment:2", defaultAutomationLogin, "review:7"},
+		{"review:7", "", "comment:2"},
+	} {
+		t.Run(tc.key, func(t *testing.T) {
 			e := newResolveEnv(t)
-			s := resolveState(0)
-			s.PendingKeys = append(s.PendingKeys, "review:7")
+			writeStateFile(t, e.path, actorHeldResolveState(0))
+			started := time.Now().UTC().Add(-time.Second)
+
+			done := captureStdout(t)
+			err := Resolve("42", tc.key, e.dir, nil)
+			out := done()
+
+			if err != nil {
+				t.Fatalf("Resolve: %v", err)
+			}
+			if want := "Resolved " + tc.key + " for PR #42."; !strings.Contains(out, want) {
+				t.Errorf("stdout = %q, want %q", out, want)
+			}
+			got := mustReadState(t, e.path)
+			want := actorHeldResolveState(0)
+			if !reflect.DeepEqual(got.PendingKeys, want.PendingKeys) || !reflect.DeepEqual(got.AddressedKeys, want.AddressedKeys) || !reflect.DeepEqual(got.LaunchedKeys, want.LaunchedKeys) {
+				t.Errorf("pending/addressed/launched = %v/%v/%v, want them untouched: %s stays pending until GitHub says otherwise", got.PendingKeys, got.AddressedKeys, got.LaunchedKeys, tc.key)
+			}
+			if !reflect.DeepEqual(got.ActorHeldKeys, map[string]string{tc.other: want.ActorHeldKeys[tc.other]}) {
+				t.Errorf("ActorHeldKeys = %v, want only %s still held", got.ActorHeldKeys, tc.other)
+			}
+			if !slices.Equal(got.HeldUntrustedKeys, []string{tc.other}) {
+				t.Errorf("HeldUntrustedKeys = %v, want only %s still held", got.HeldUntrustedKeys, tc.other)
+			}
+			att, ok := got.ActorAttestations[tc.key]
+			if !ok || len(got.ActorAttestations) != 1 {
+				t.Fatalf("ActorAttestations = %v, want exactly one entry, for %s", got.ActorAttestations, tc.key)
+			}
+			if att.Actor != tc.actor || att.Source != "human-cli" || att.AttestedAt.Before(started) || att.AttestedAt.After(time.Now().Add(time.Second)) {
+				t.Errorf("attestation = %+v, want actor %q, source human-cli and a timestamp from this resolve", att, tc.actor)
+			}
+			if got.FixAttempts != 2 {
+				t.Errorf("FixAttempts = %d, want the retry budget untouched", got.FixAttempts)
+			}
+			if got.PID != 0 || len(e.started) != 1 {
+				t.Errorf("PID %d, supervisor starts %d, want 0 and exactly one re-arm", got.PID, len(e.started))
+			}
+		})
+	}
+}
+
+// A stopped state records the attestation and is never re-armed, saying so.
+func TestResolve_AC35_StoppedStateIsWrittenAndNeverReArmed(t *testing.T) {
+	e := newResolveEnv(t)
+	writeStateFile(t, e.path, stoppedState(actorHeldResolveState(0), "o/r", "42"))
+	refusal := func(string) string { t.Error("the agent check ran for a stopped state"); return "refused" }
+
+	done := captureStdout(t)
+	err := Resolve("42", "comment:2", e.dir, refusal)
+	out := done()
+
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	e.requireNoStart(t)
+	if !strings.Contains(out, "Resolved comment:2 for PR #42") || !strings.Contains(out, "not re-armed") {
+		t.Errorf("stdout = %q, want the resolved line and the not-re-armed note", out)
+	}
+	s := mustReadState(t, e.path)
+	if s.Status != "stopped" || s.PID != 0 {
+		t.Errorf("status/pid = %q/%d, want a stopped state kept", s.Status, s.PID)
+	}
+	if att := s.ActorAttestations["comment:2"]; att.Actor != defaultAutomationLogin || len(s.ActorHeldKeys) != 1 {
+		t.Errorf("attestation %+v held %v, want comment:2 attested for the automation login and review:7 still held", att, s.ActorHeldKeys)
+	}
+}
+
+// AC 36: a comment:/review: key that is not in ActorHeldKeys -- pending but not held,
+// addressed, or unknown -- is refused with exit-1 semantics: the state is byte-identical,
+// no supervisor is started, and the message says to resolve it on GitHub.
+func TestResolve_AC36_RefusesACommentOrReviewKeyThatIsNotHeldAndLeavesTheStateByteIdentical(t *testing.T) {
+	for _, tc := range []struct {
+		name, key string
+		mutate    func(s *State)
+	}{
+		{"a pending comment key that is not held", "comment:2", func(s *State) { delete(s.ActorHeldKeys, "comment:2") }},
+		{"a pending review key that is not held", "review:7", func(s *State) { delete(s.ActorHeldKeys, "review:7") }},
+		{"an addressed comment key", "comment:1", func(s *State) {}},
+		{"an unknown comment key", "comment:99", func(s *State) {}},
+		{"an unknown review key", "review:99", func(s *State) {}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newResolveEnv(t)
+			s := actorHeldResolveState(0)
+			tc.mutate(&s)
 			writeStateFile(t, e.path, s)
 			before := readFileBytes(t, e.path)
 
-			err := Resolve("42", key, e.dir, nil)
+			err := Resolve("42", tc.key, e.dir, nil)
 
 			e.requireRefused(t, err, "resolve it on GitHub", before)
-			if !strings.Contains(err.Error(), key) {
-				t.Errorf("Resolve err = %q, want it to name %s", err, key)
+			if !strings.Contains(err.Error(), tc.key) {
+				t.Errorf("Resolve err = %q, want it to name %s", err, tc.key)
 			}
 		})
+	}
+}
+
+// AC 37: every existing refusal still applies to a comment:/review: key -- inside a
+// sandbox, in an unattended session, inside a supervisor -- and each leaves the state
+// byte-identical. The state HOLDS the key, so only the gate stands between the command
+// and an attestation.
+func TestResolve_AC37_ExistingRefusalsApplyToCommentAndReviewKeys(t *testing.T) {
+	for _, key := range []string{"comment:2", "review:7"} {
+		for _, tc := range []struct {
+			name, env, value, want string
+		}{
+			{"CENCI_SANDBOX=1", "CENCI_SANDBOX", "1", "runs on the host"},
+			{"CENCI_ATTENDED=0", "CENCI_ATTENDED", "0", "CENCI_ATTENDED=0"},
+			{"CENCI_BABYSIT_SUPERVISOR set", "CENCI_BABYSIT_SUPERVISOR", "1", "inside a babysit supervisor"},
+		} {
+			t.Run(key+" with "+tc.name, func(t *testing.T) {
+				e := newResolveEnv(t)
+				t.Setenv(tc.env, tc.value)
+				writeStateFile(t, e.path, actorHeldResolveState(0))
+				before := readFileBytes(t, e.path)
+
+				err := Resolve("42", key, e.dir, nil)
+
+				e.requireRefused(t, err, tc.want, before)
+			})
+		}
+	}
+}
+
+// The held key is re-checked once the supervisor is quiesced: it saved a state in
+// which it had already moved the key (an authorized actor resolved it) while dying, so
+// the resolve is refused, the supervisor's own state is kept with no attestation, and
+// nothing is re-armed.
+func TestResolve_AC35_RechecksTheHeldKeyAfterTheSupervisorDied(t *testing.T) {
+	e := newResolveEnv(t)
+	if !procfsReadable() {
+		t.Skip("real ownership check needs a readable procfs")
+	}
+	staged := filepath.Join(t.TempDir(), "dying-save.json")
+	ready := filepath.Join(t.TempDir(), "ready")
+	script := `trap 'cp "$2" "$3"; exit 0' TERM; : > "$1"; sleep 30 & wait`
+	p := spawnFixture(t, exec.Command("sh", "-c", script, "babysit-42-fixture", ready, staged, e.path))
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(5 * time.Millisecond) {
+		if _, err := os.Stat(ready); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("fixture process never became ready")
+		}
+	}
+	writeStateFile(t, e.path, actorHeldResolveState(p.pid))
+	writeLock(t, e.lock, p.pid)
+
+	dying := actorHeldResolveState(p.pid)
+	dying.PendingKeys = []string{"review:7"}
+	dying.AddressedKeys = []string{"comment:1", "comment:2"}
+	delete(dying.ActorHeldKeys, "comment:2")
+	writeStateFile(t, staged, dying)
+
+	err := Resolve("42", "comment:2", e.dir, nil)
+
+	if err == nil || !strings.Contains(err.Error(), "not resolved") || !strings.Contains(err.Error(), "comment:2") {
+		t.Fatalf("Resolve err = %v, want a refusal naming comment:2: the supervisor already moved it while dying", err)
+	}
+	s := mustReadState(t, e.path)
+	if !slices.Equal(s.AddressedKeys, []string{"comment:1", "comment:2"}) || len(s.ActorAttestations) != 0 {
+		t.Errorf("addressed %v attestations %v, want the supervisor's own save kept and nothing attested", s.AddressedKeys, s.ActorAttestations)
+	}
+	e.requireNoStart(t)
+}
+
+// After the resolve, the next tick moves the attested key to addressed -- GitHub still
+// reports it resolved by the automation login, which the attestation now vouches for --
+// and the attestation is kept (an addressed key is re-checked every tick).
+func TestResolve_AC35_NextTickMovesTheAttestedKeyToAddressed(t *testing.T) {
+	e := newResolveEnv(t)
+	writeStateFile(t, e.path, actorHeldResolveState(0))
+
+	done := captureStdout(t)
+	err := Resolve("42", "comment:2", e.dir, nil)
+	_ = done()
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+
+	after := mustReadState(t, e.path)
+	thread := threadsResponse(
+		actorThreadNode(true, defaultAutomationLogin, threadComment(2, "reviewer")),
+		actorThreadNode(true, "reviewer", threadComment(1, "reviewer")),
+	)
+	reviews := jsonArray(actorReview(7, "CHANGES_REQUESTED", actorT1, "alice"))
+	actorTick(t, &after, actorTickIn{reviews: reviews, thread: thread, labels: actorLabelsOK})
+
+	if !slices.Contains(after.AddressedKeys, "comment:2") || slices.Contains(after.PendingKeys, "comment:2") {
+		t.Errorf("pending/addressed = %v/%v, want comment:2 addressed by the next tick", after.PendingKeys, after.AddressedKeys)
+	}
+	if _, held := after.ActorHeldKeys["comment:2"]; held {
+		t.Errorf("ActorHeldKeys = %v, want comment:2 not held again", after.ActorHeldKeys)
+	}
+	if after.ActorAttestations["comment:2"].Actor != defaultAutomationLogin {
+		t.Errorf("ActorAttestations = %v, want the attestation kept after it accepted the key", after.ActorAttestations)
 	}
 }
 
@@ -172,6 +387,9 @@ func TestResolve_MalformedPRAndKeyAreUsageErrors(t *testing.T) {
 		{"abc", "discussion:11"}, {"0", "discussion:11"}, {"42", ""}, {"42", "foo"},
 		{"42", "discussion:"}, {"42", "discussion:abc"}, {"42", "discussion:0"}, {"42", "discussion:-3"},
 		{"42", "comment:"}, {"42", "review:"},
+		// #862: a comment:/review: id is a positive decimal integer, as a discussion id is.
+		{"42", "comment:abc"}, {"42", "review:abc"}, {"42", "comment:0"}, {"42", "review:0"},
+		{"42", "comment:-3"}, {"42", "review:007"}, {"42", "comment:1x"},
 	} {
 		t.Run(tc.pr+" "+tc.key, func(t *testing.T) {
 			e := newResolveEnv(t)

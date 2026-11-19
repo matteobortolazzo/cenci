@@ -2412,9 +2412,9 @@ A stop leaves a `stopped` state rather than deleting the file (#1472): the super
 terminated and awaited as `reset` does (SIGTERM, up to 10s, lock removed), then the state is
 rewritten with status `stopped`, PID 0 and only the feedback bookkeeping kept (pending,
 addressed and launched keys, the comment watermarks, discussion revisions and receipts, the
-outstanding review launch and consumed nonces, plus `heldUntrustedKeys`, `untrustedLaunchCounts`
-and `headMoveHold`) and the automerge pin (`automergePin`, so a stop and re-arm can never
-re-pin a widened grant). The agent, retry budgets, CI status and
+outstanding review launch and consumed nonces, plus `heldUntrustedKeys`, `untrustedLaunchCounts`,
+`headMoveHold`, `actorHeldKeys` and `actorAttestations`) and the automerge pin (`automergePin`, so
+a stop and re-arm can never re-pin a widened grant). The agent, retry budgets, CI status and
 closing issues are cleared, so a re-arm adopts a fresh agent, budgets restart, and unresolved
 feedback keeps its automerge hold. A stopped state does not block closing the ticket's window.
 Stale `stopped` files of abandoned PRs persist until a re-armed supervisor sees the PR merged
@@ -2482,19 +2482,27 @@ extra arguments) also exits 2. If the budget was zeroed but re-arming failed, it
 1 with `budget reset for PR #<pr> but not re-armed: …` and the `cenci babysit <pr>
 --agent <agent>` command to re-arm with.
 
-`cenci babysit resolve <pr> discussion:<id>|head:<sha> [--state-dir <dir>]` (#1472, #1539) is
-how a human records one pending PR conversation comment as addressed, or clears the `head moved
-during untrusted review launch` hold (the `head:<sha>` target, below). It is **host-only and
+`cenci babysit resolve <pr> discussion:<id>|comment:<id>|review:<id>|head:<sha> [--state-dir <dir>]`
+(#1472, #1539, #862) is how a human records one pending PR conversation comment as addressed,
+attests a `comment:`/`review:` key held under `review resolution actor not authorized` (below),
+or clears the `head moved during untrusted review launch` hold (the `head:<sha>` target,
+below). It is **host-only and
 attended-only**: it exits 1 and leaves the state file byte-identical inside a sandbox
 (`CENCI_SANDBOX=1`), when `CENCI_ATTENDED=0` is set (whatever set it, so a
 supervisor-launched worker, which is always unattended, can never use it), or inside a
 supervisor (`CENCI_BABYSIT_SUPERVISOR` set); no socket kind carries it. It accepts only a
-`discussion:<id>` key that is in `pendingCommentKeys`: a `comment:` or `review:` key exits 1
-with a message to resolve it on GitHub, and a key that is not pending (addressed or unknown)
-exits 1. On success it records the key under `addressedCommentKeys` with a receipt whose
-source is `human-cli` (no receipt comment id) at the revision the supervisor last saw, so a
-later edit of the comment still reopens it, and prints `Resolved discussion:<id> for PR
-#<pr>.`; the key also leaves `heldUntrustedKeys`. The `head:<sha>` target (#1539) names the
+`discussion:<id>` key that is in `pendingCommentKeys`, a `comment:<id>`/`review:<id>` key that is
+pending and in `actorHeldKeys`, or a `head:<sha>`; any other `comment:`/`review:` key exits 1 with
+the state byte-identical and a message to resolve it on GitHub, and a key that is not pending
+(addressed or unknown) exits 1. For a `discussion:` key, success records it under
+`addressedCommentKeys` with a receipt whose source is `human-cli` (no receipt comment id) at the
+revision the supervisor last saw, so a later edit of the comment still reopens it, and prints
+`Resolved discussion:<id> for PR #<pr>.`; the key also leaves `heldUntrustedKeys`. For a
+`comment:`/`review:` key (#862), success records an attestation in `actorAttestations` for the
+key and the actor the supervisor saw, removes it from `actorHeldKeys` and `heldUntrustedKeys`,
+prints `Resolved <key> for PR #<pr>.`, and leaves GitHub authoritative: the next tick moves the
+key to `addressedCommentKeys` while GitHub still reports it resolved by that actor. The
+`head:<sha>` target (#1539) names the
 head the hold records: `<sha>` is 40 or 64 lowercase hex characters, and the command exits 1
 with the state file byte-identical when no head-move hold is recorded or `<sha>` is not the
 recorded head (a second raise replaces the recorded head with the newer one, so only the newest
@@ -2510,8 +2518,9 @@ usage error (no PR or key, a PR that is not a positive integer, a key that is no
 is not 40 or 64 lowercase hex characters, extra arguments) or a recorded
 agent that arming would refuse. It is the recovery for `review worker ended without
 receipt`, for a `blocked` or `failed` receipt, for a held untrusted discussion key, for the
-`head moved during untrusted review launch` hold and for `review feedback state unknown` on a
-deleted pending comment.
+`head moved during untrusted review launch` hold, for `review resolution actor not authorized`
+on a `comment:`/`review:` key and for `review feedback state unknown` on a deleted pending
+comment.
 
 On a forwarded arm request, the host daemon resolves the target checkout itself by
 inspecting running sandbox containers' `/workspace` bind sources under both docker
@@ -2576,7 +2585,11 @@ empty state: the stop is refused with a fixed reason and the file is kept.
   resolution is GitHub-authoritative, not push-based: a pushed commit no longer
   clears feedback by itself. An inline comment thread clears only when GitHub
   reports it `isResolved`; a `CHANGES_REQUESTED` review clears only when it's
-  `DISMISSED` or the reviewer's latest effective review is `APPROVED`. An ordinary PR
+  `DISMISSED` or the reviewer's latest effective review is `APPROVED` — and in both
+  cases only when the resolving, dismissing or approving actor passes the resolution
+  actor check (not the automation login, and the item's own author or a login with
+  `admin`/`write` access; otherwise it holds under `review resolution actor not
+  authorized`, see below). An ordinary PR
   comment has no resolved state on GitHub, so it follows the discussion bullets
   below. "Green"
   requires at least one check to exist and be `pass`; every other check may be
@@ -2617,7 +2630,8 @@ empty state: the stop is refused with a fixed reason and the file is kept.
   and retried on the next tick. When no candidate is trusted, no worker is launched and no
   nonce is minted: the untrusted keys are held in `heldUntrustedKeys` for a write-access human
   (`cenci babysit resolve <pr> discussion:<id>`, or resolve the `comment:`/`review:` key on
-  GitHub), with status `needs-input`. An untrusted discussion key rides in at most 3 launches
+  GitHub, then run `cenci babysit resolve <pr> <key>` if it was resolved as the automation
+  login), with status `needs-input`. An untrusted discussion key rides in at most 3 launches
   across all its edits (`untrustedLaunchCounts`), then is held too. If a launch that carried
   untrusted input leaves the PR head moved by the time its window ends, the PR holds under
   `head moved during untrusted review launch` until a human runs `cenci babysit resolve <pr>
@@ -2634,6 +2648,16 @@ empty state: the stop is refused with a fixed reason and the file is kept.
   addressed; merge it manually. The discussion exceptions: a deleted pending PR comment
   holds under `review feedback state unknown` until `cenci babysit resolve` clears it,
   and a deleted already-addressed one stays addressed with no hold.
+- A `comment:`/`review:` resolution on GitHub (a resolved thread, a dismissed review, a newer
+  approval) counts only when its actor passes the actor rule (#862): not the automation login
+  (the login the supervisor's `gh api user` reports), and either the thread's or review's own
+  author or a login with `admin`/`write` permission. Otherwise the key stays pending in
+  `actorHeldKeys` and automerge holds under `review resolution actor not authorized` with status
+  `needs-input`; the recovery is an attended host `cenci babysit resolve <pr> <key>`, which
+  records an attestation for the actor seen. A failed lookup (`automation identity lookup
+  failed`, a permission or dismissal-timeline read) is not a denial: it holds under `review
+  feedback state unreadable` (or `truncated`) and the next tick retries. Rule, residuals and the
+  upgrade wave: `watch/docs/babysit.md`.
 - The discussion read adds four hold reasons, each with its recovery. `PR discussion
   unreadable` (a `gh` failure, a page that does not decode, or a comment missing `id`,
   `user.login` or `body`): every key is left byte-identical, never an empty set, and the

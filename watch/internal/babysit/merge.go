@@ -60,7 +60,13 @@ const mergeQueueQuery = `query($owner:String!,$name:String!,$number:Int!){reposi
 // discovered here holds this merge attempt but is only persisted (and its
 // babysit-review relaunch dispatched) by the *next* tick's own reconcile
 // pass; this preserves the "no double-bookkeeping in the recheck" property
-// #854 already established (reconcileFeedback's own doc comment). A
+// #854 already established (reconcileFeedback's own doc comment). #862: the
+// revalidation applies the same resolution-actor rule through a fresh
+// actorContext of its own (its own permission cache, the automation login and the
+// dismissal timeline each read at most once, and only when a key would resolve),
+// so a resolution by the automation login that appeared since the tick's read
+// holds this merge under reasonResolutionActorUnauthorized; it still writes
+// nothing to s. A
 // revalidateFeedback fetch failure is routed into FeedbackHold/FeedbackDetail
 // below, not the err return path, so the second evaluateAutomerge pass still
 // runs and produces its own fresh Conditions rather than the first pass's
@@ -99,7 +105,8 @@ func recheckAutomergeInputs(s *State, first automergeInputs) (automergeInputs, s
 		return automergeInputs{}, reasonUpstreamDiscussionUnreadable, err
 	}
 
-	revalidatedPending, verdict := revalidateFeedback(s, reviews, reviewsComplete)
+	actors := newLiveActorContext(s, permissionResolver(s.Repo))
+	revalidatedPending, verdict := revalidateFeedback(s, reviews, reviewsComplete, actors)
 	_, recordedDiscussionPending := splitDiscussionKeys(s.PendingKeys)
 	discussionPending := recordedDiscussionPending
 	if discussionComplete {

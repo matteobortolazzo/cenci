@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -188,8 +189,9 @@ type State struct {
 	// untrusted discussion key past its launch cap. They are left out of the
 	// launch trigger and keep status needs-input until a write-access human acts:
 	// `cenci babysit resolve` for a discussion key, resolving it on GitHub for a
-	// comment:/review: key. An edit or reopen of a held discussion key releases it
-	// for a fresh author lookup.
+	// comment:/review: key (then `cenci babysit resolve` too when the resolution
+	// was made as the automation login, #862). An edit or reopen of a held
+	// discussion key releases it for a fresh author lookup.
 	HeldUntrustedKeys []string `json:"heldUntrustedKeys,omitempty"`
 	// UntrustedLaunchCounts counts, per discussion key, the dispatched launches
 	// that carried it as untrusted, across every edit. At fixCap the key is held.
@@ -199,6 +201,21 @@ type State struct {
 	// Only an attended host `cenci babysit resolve <pr> head:<sha>` naming its
 	// HeadSHA clears it.
 	HeadMoveHold *headMoveHold `json:"headMoveHold,omitempty"`
+
+	// Resolution-actor authorization (#862). Both are additive `omitempty` fields
+	// with no stateSchemaVersion bump; `cenci babysit stop` keeps them and `reset`
+	// never clears them.
+	//
+	// ActorHeldKeys maps each pending comment:/review: key that GitHub reports
+	// resolved, but whose actor failed the actor rule (the automation login, an
+	// unknown actor, or a login that neither authored it nor has admin/write), to
+	// the actor login the tick saw ("" for a null or unknown actor). Held keys are
+	// left out of the launch trigger and keep status needs-input until an attended
+	// host `cenci babysit resolve <pr> <key>` attests the actor.
+	ActorHeldKeys map[string]string `json:"actorHeldKeys,omitempty"`
+	// ActorAttestations records that attestation per key. It vouches only for the
+	// recorded actor: GitHub stays authoritative for whether the key is resolved.
+	ActorAttestations map[string]actorAttestation `json:"actorAttestations,omitempty"`
 
 	// ChecksAbsentSince records when ciStatusUnknown was first observed for
 	// the current ChecksAbsentHeadSHA (#924): set/maintained by
@@ -1104,7 +1121,8 @@ func tick(s *State) (bool, time.Duration, error) {
 	// against fresh GitHub state (#885), so a reopened thread or review is
 	// caught here even though its key already lives in AddressedKeys;
 	// verdict.Reopened names any such key.
-	verdict := reconcileFeedback(s, reviews, reviewsComplete)
+	actors := newLiveActorContext(s, permission)
+	verdict := reconcileFeedback(s, reviews, reviewsComplete, actors)
 	if len(verdict.Reopened) > 0 {
 		actionable = true
 	}
@@ -1129,31 +1147,45 @@ func tick(s *State) (bool, time.Duration, error) {
 	// the comment-swallow bug the reorder above exists to fix. Gated on
 	// reviewsComplete (#854): an unproven-complete reviews read must never
 	// be trusted to declare a review already superseded.
+	// #862: the same actor rule as every other resolution path -- the keys go
+	// through classifyKey with this tick's actorContext, so a supersession by the
+	// automation login (or any actor that fails the rule) leaves the key pending in
+	// ActorHeldKeys, and a failed lookup leaves it pending under its own hold.
 	if reviewsComplete {
+		state := feedbackState{Reviews: reviews, ReviewsComplete: true, Attestations: s.ActorAttestations, Actors: actors, PR: s.PR}
+		judged := map[string]keyVerdict{}
+		for _, key := range keys {
+			if strings.HasPrefix(key, "review:") {
+				judged[key] = classifyKey(key, state)
+			}
+		}
+		// A failed identity or timeline read holds the whole pass: no key moves.
+		if actors.err != nil {
+			hold, detail := feedbackErrHold(actors.err)
+			verdict = combineHolds(verdict, feedbackVerdict{Hold: hold, Detail: detail})
+			judged = nil
+		}
 		resolvedAny := false
 		for _, key := range keys {
-			id, ok := strings.CutPrefix(key, "review:")
+			v, ok := judged[key]
 			if !ok {
 				continue
 			}
-			reviewID, err := strconv.ParseInt(id, 10, 64)
-			if err != nil {
-				continue
+			switch v.Status {
+			case keyResolved:
+				s.PendingKeys = removeKeys(s.PendingKeys, []string{key})
+				s.AddressedKeys = append(s.AddressedKeys, key)
+				resolvedAny = true
+			case keyActorDenied, keyActorLookupFailed:
+				if v.Status == keyActorDenied {
+					if s.ActorHeldKeys == nil {
+						s.ActorHeldKeys = map[string]string{}
+					}
+					s.ActorHeldKeys[key] = v.Actor
+				}
+				hold, detail := holdFor(key, v, s.PR)
+				verdict = combineHolds(verdict, feedbackVerdict{Hold: hold, Detail: detail})
 			}
-			target := findReview(reviews, reviewID)
-			if target == nil {
-				continue
-			}
-			latest, ok := latestEffectiveReview(reviews, target.User.Login)
-			if !ok || latest.ID == target.ID {
-				continue
-			}
-			if latest.State != "APPROVED" && latest.State != "DISMISSED" {
-				continue
-			}
-			s.PendingKeys = removeKeys(s.PendingKeys, []string{key})
-			s.AddressedKeys = append(s.AddressedKeys, key)
-			resolvedAny = true
 		}
 		if resolvedAny && len(s.PendingKeys) == 0 && s.PendingCommentAt != "" {
 			s.LastCommentAt = s.PendingCommentAt
@@ -1162,7 +1194,7 @@ func tick(s *State) (bool, time.Duration, error) {
 	}
 	// #885/#897/#1472: the single per-tick review launch trigger
 	// (babysit-review), driven by PendingKeys \ LaunchedKeys \ HeldUntrustedKeys
-	// (#1539) -- covers both this tick's brand-new keys
+	// (#1539) \ ActorHeldKeys (#862) \ ActorAttestations (#862) -- covers both this tick's brand-new keys
 	// (detected above, after reconcileFeedback) and any key reconcileFeedback
 	// just reopened above, exactly once per resolution episode (Decision 3).
 	// Runs last, after both reconcileFeedback and detectNewFeedbackKeys, so
@@ -1219,11 +1251,27 @@ func tick(s *State) (bool, time.Duration, error) {
 	// #1539: a held untrusted key stays held only while it is pending; one that
 	// resolved on GitHub (comment:/review:) or was resolved leaves the set.
 	s.HeldUntrustedKeys = slices.DeleteFunc(s.HeldUntrustedKeys, func(k string) bool { return !slices.Contains(s.PendingKeys, k) })
+	// #862: likewise a key held for its resolution actor stays held only while it is
+	// pending.
+	maps.DeleteFunc(s.ActorHeldKeys, func(k, _ string) bool { return !slices.Contains(s.PendingKeys, k) })
+	if len(s.ActorHeldKeys) == 0 {
+		s.ActorHeldKeys = nil
+	}
 	// The launch trigger described above is skipped on an unproven-complete
 	// discussion read (a partial read cannot say which keys are pending). Held
 	// untrusted keys are left out of it (#1539): only an edit, a reopen or a human
-	// releases them.
-	if toLaunch := removeKeys(removeKeys(s.PendingKeys, s.LaunchedKeys), s.HeldUntrustedKeys); discussionComplete && !conflictHeld && !ciLaunched && len(toLaunch) > 0 {
+	// releases them. So are the keys held for their resolution actor (#862): GitHub
+	// already reports them resolved, so a worker has nothing to address, and an
+	// addressed key that returned to pending must not relaunch one. Nor do the keys
+	// a human attested (`cenci babysit resolve`): a tick whose feedback pass returned
+	// early on a fetch failure has not yet moved one to addressed, and a relaunch
+	// there would run a worker on a thread a human vouched for. An attestation is
+	// dropped once GitHub reports the thread unresolved, so a reopen still relaunches.
+	// An attested key that stays keyUnknown (the thread was deleted or purged) stays
+	// excluded until the thread reappears or the attestation is dropped: it already
+	// holds under reasonReviewStateUnknown and a worker has nothing to act on.
+	heldKeys := slices.Concat(s.HeldUntrustedKeys, slices.Collect(maps.Keys(s.ActorHeldKeys)), slices.Collect(maps.Keys(s.ActorAttestations)))
+	if toLaunch := removeKeys(removeKeys(s.PendingKeys, s.LaunchedKeys), heldKeys); discussionComplete && !conflictHeld && !ciLaunched && len(toLaunch) > 0 {
 		w, err := live()
 		if err != nil {
 			return false, 0, err
@@ -1273,13 +1321,17 @@ func tick(s *State) (bool, time.Duration, error) {
 	// after the green reset above.
 	// #1539: the head-move hold and the held untrusted keys also need a human, and
 	// their recovery notes go first, ahead of every other note, because the notes
-	// are capped at workerNoteMaxLen.
+	// are capped at workerNoteMaxLen. #862: so do the keys held for their
+	// resolution actor.
 	var leadingNotes []string
 	if s.HeadMoveHold != nil {
 		leadingNotes = append(leadingNotes, headMoveNote(s.PR, s.HeadMoveHold))
 	}
 	if len(s.HeldUntrustedKeys) > 0 {
 		leadingNotes = append(leadingNotes, heldUntrustedNote(s.PR, s.HeldUntrustedKeys))
+	}
+	if len(s.ActorHeldKeys) > 0 {
+		leadingNotes = append(leadingNotes, actorHeldNote(s.PR, s.ActorHeldKeys))
 	}
 	needsHuman := needsHumanDiscussionKeys(s)
 	if len(needsHuman) > 0 {
@@ -2117,6 +2169,9 @@ func stoppedState(s State, repo, pr string) State {
 		HeadMoveHold:          s.HeadMoveHold,
 		// #870: dropping this would silently let a re-arm re-pin a drifted grant.
 		AutomergePin: s.AutomergePin,
+		// #862: like the #1539 holds, dropping these would release an actor hold.
+		ActorHeldKeys:     s.ActorHeldKeys,
+		ActorAttestations: s.ActorAttestations,
 	}
 }
 

@@ -130,19 +130,22 @@ func runBabysitReset(args []string) {
 
 // babysitResolveUsage is the usage line for `cenci babysit resolve <pr> <key>`,
 // printed to stderr on a malformed invocation (exit 2).
-const babysitResolveUsage = "cenci babysit resolve: usage: cenci babysit resolve <pr> discussion:<id>|head:<sha> [--state-dir <dir>]"
+const babysitResolveUsage = "cenci babysit resolve: usage: cenci babysit resolve <pr> discussion:<id>|comment:<id>|review:<id>|head:<sha> [--state-dir <dir>]"
 
 // runBabysitResolve implements the host-only, attended-only `cenci babysit
-// resolve <pr> discussion:<id>|head:<sha>`: with discussion:<id> (#1472), record
-// one pending discussion comment as addressed by a human (receipt source
-// human-cli); with head:<sha> (#1539, a 40 or 64 character lowercase hex SHA),
-// clear the head-move hold recorded at that head. Either re-arms the supervisor
-// with its recorded settings, unless it was stopped. A malformed invocation (a
-// head:<sha> that is not 40 or 64 lowercase hex included) or a refused agent exits
-// 2; every runtime refusal or failure (inside a sandbox, an unattended session, a
-// comment: or review: key, a key that is not pending, a head:<sha> that is not the
-// recorded head or with no hold recorded, no supervisor, an unreadable state, a
-// supervisor that will not stop, a failed re-arm) exits 1.
+// resolve <pr> discussion:<id>|comment:<id>|review:<id>|head:<sha>`: with
+// discussion:<id> (#1472), record one pending discussion comment as addressed by a
+// human (receipt source human-cli); with comment:<id> or review:<id> (#862), attest
+// the actor that resolved or dismissed a key held for its resolution actor; with
+// head:<sha> (#1539, a 40 or 64 character lowercase hex SHA), clear the head-move
+// hold recorded at that head. Each re-arms the supervisor with its recorded
+// settings, unless it was stopped. A malformed invocation (a comment:/review: id
+// that is not a positive integer, or a head:<sha> that is not 40 or 64 lowercase
+// hex, included) or a refused agent exits 2; every runtime refusal or failure
+// (inside a sandbox, an unattended session, a comment: or review: key that is not
+// held for its actor, a discussion key that is not pending, a head:<sha> that is
+// not the recorded head or with no hold recorded, no supervisor, an unreadable
+// state, a supervisor that will not stop, a failed re-arm) exits 1.
 func runBabysitResolve(args []string) {
 	fs := flag.NewFlagSet("babysit resolve", flag.ExitOnError)
 	stateDir := fs.String("state-dir", "", "state directory (default: $XDG_STATE_HOME/cenci/babysit)")
@@ -158,7 +161,7 @@ func runBabysitResolve(args []string) {
 		os.Exit(2)
 	}
 	if !babysit.ValidResolveKey(key) {
-		fmt.Fprintf(os.Stderr, "cenci babysit resolve: key must be discussion:<id> or head:<sha> (40 or 64 lowercase hex characters), got %q\n%s\n", key, babysitResolveUsage)
+		fmt.Fprintf(os.Stderr, "cenci babysit resolve: key must be discussion:<id>, comment:<id>, review:<id> or head:<sha> (40 or 64 lowercase hex characters), got %q\n%s\n", key, babysitResolveUsage)
 		os.Exit(2)
 	}
 	refusal := func(agent string) string { return babysitAgentRefusal(agent, run.BuiltinCapability) }

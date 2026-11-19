@@ -163,6 +163,14 @@ const (
 	// It blocks automerge and sets needs-input; repair and review launches go on.
 	reasonHeadMovedUntrustedReview = "head moved during untrusted review launch"
 
+	// reasonResolutionActorUnauthorized (#862): GitHub reports a thread resolved or
+	// a review dismissed/superseded, but the actor is the automation login (the
+	// login the supervisor's `gh` reports, which its workers inherit), an unknown
+	// actor, or a login that neither authored the item nor has admin/write. The
+	// key stays pending in State.ActorHeldKeys and status is needs-input; only an
+	// attended host `cenci babysit resolve <pr> comment:<id>|review:<id>` clears it.
+	reasonResolutionActorUnauthorized = "review resolution actor not authorized"
+
 	// Post-merge verification (Decisions 5/6): a zero-exit `gh pr merge`
 	// followed by a single refetch that does not report MERGED is
 	// indeterminate, never success (Q5: one refetch, no polling); a refetch

@@ -1479,7 +1479,13 @@ func TestUntrustedReview_AC45_UntrustedOnlyTickLaunchesNothingAndHoldsEveryKey(t
 	if s.Status != "needs-input" {
 		t.Errorf("status = %q, want needs-input", s.Status)
 	}
-	for _, need := range []string{"cenci babysit resolve 42 discussion:11", "resolve comment:7 on GitHub", "resolve review:9 on GitHub"} {
+	// #862: a comment:/review: key is resolved on GitHub, and `cenci babysit resolve`
+	// then records it when the automation login did the resolving.
+	for _, need := range []string{
+		"cenci babysit resolve 42 discussion:11",
+		"resolve comment:7 on GitHub, then run `cenci babysit resolve 42 comment:7` if it was resolved as the automation login",
+		"resolve review:9 on GitHub, then run `cenci babysit resolve 42 review:9` if it was resolved as the automation login",
+	} {
 		if !strings.Contains(s.AutomergeDetail, need) {
 			t.Errorf("detail %q, want it to contain %q", s.AutomergeDetail, need)
 		}
@@ -1990,8 +1996,8 @@ func TestUntrustedReview_Edge66_HeldInlineKeyResolvedOnGitHubLeavesTheHeldSet(t 
 	}
 
 	runs.requireNone(t)
-	if s := e.after(1); !slices.Equal(s.HeldUntrustedKeys, []string{"comment:7"}) || s.Status != "needs-input" || !strings.Contains(s.AutomergeDetail, "resolve comment:7 on GitHub") {
-		t.Errorf("after tick 1: held %v status %q detail %q, want comment:7 held, needs-input, resolve on GitHub", s.HeldUntrustedKeys, s.Status, s.AutomergeDetail)
+	if s := e.after(1); !slices.Equal(s.HeldUntrustedKeys, []string{"comment:7"}) || s.Status != "needs-input" || !strings.Contains(s.AutomergeDetail, "resolve comment:7 on GitHub, then run `cenci babysit resolve 42 comment:7`") {
+		t.Errorf("after tick 1: held %v status %q detail %q, want comment:7 held, needs-input, resolve on GitHub then `resolve`", s.HeldUntrustedKeys, s.Status, s.AutomergeDetail)
 	}
 	if s := e.after(2); len(s.HeldUntrustedKeys) != 0 || !slices.Equal(s.AddressedKeys, []string{"comment:7"}) || s.Status != "running" {
 		t.Errorf("after tick 2: held %v addressed %v status %q, want comment:7 addressed, released and running", s.HeldUntrustedKeys, s.AddressedKeys, s.Status)
@@ -2005,6 +2011,9 @@ func TestUntrustedReview_Edge66_HeldInlineKeyResolvedOnGitHubLeavesTheHeldSet(t 
 func TestUntrustedReview_Edge66_HeldReviewKeyDismissedOnGitHubLeavesTheHeldSet(t *testing.T) {
 	servePermission(t, "stranger", "read")
 	const dismissed = `{"id":9,"state":"DISMISSED","submitted_at":"2026-01-02T00:00:00Z","user":{"login":"stranger"}}`
+	// #862: the dismissal counts through its event's actor -- here a write-access
+	// maintainer (humanLogin), not the automation login.
+	serveDismissals(t, dismissalPage(false, "", dismissalEvent(9, humanLogin)))
 	inline := []string{utInline(7, "stranger")}
 	e := newRWEnv(t, true, nil,
 		utStep(utHeadA, inline, []string{utReview(9, "stranger")}), // 1: both held
@@ -2021,8 +2030,8 @@ func TestUntrustedReview_Edge66_HeldReviewKeyDismissedOnGitHubLeavesTheHeldSet(t
 	}
 
 	runs.requireNone(t)
-	if s := e.after(1); !sameKeys(s.HeldUntrustedKeys, []string{"comment:7", "review:9"}) || s.Status != "needs-input" || !strings.Contains(s.AutomergeDetail, "resolve review:9 on GitHub") {
-		t.Errorf("after tick 1: held %v status %q detail %q, want comment:7 and review:9 held, needs-input, resolve review:9 on GitHub", s.HeldUntrustedKeys, s.Status, s.AutomergeDetail)
+	if s := e.after(1); !sameKeys(s.HeldUntrustedKeys, []string{"comment:7", "review:9"}) || s.Status != "needs-input" || !strings.Contains(s.AutomergeDetail, "resolve review:9 on GitHub, then run `cenci babysit resolve 42 review:9`") {
+		t.Errorf("after tick 1: held %v status %q detail %q, want comment:7 and review:9 held, needs-input, resolve review:9 on GitHub then `resolve`", s.HeldUntrustedKeys, s.Status, s.AutomergeDetail)
 	}
 	if s := e.after(2); !slices.Equal(s.HeldUntrustedKeys, []string{"review:9"}) || !slices.Equal(s.AddressedKeys, []string{"comment:7"}) || s.Status != "needs-input" {
 		t.Errorf("after tick 2: held %v addressed %v status %q, want only review:9 still held and needs-input", s.HeldUntrustedKeys, s.AddressedKeys, s.Status)

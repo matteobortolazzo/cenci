@@ -10,7 +10,7 @@ import (
 
 // -- pure classifier (#850) ---------------------------------------------------
 //
-// classifyPendingKey / latestEffectiveReview / partitionPendingKeys are pure,
+// classifyKey / latestEffectiveReview / partitionPending are pure,
 // I/O-free functions (mirroring evaluateAutomerge's discipline,
 // automerge.go:161-166) so the multi-reviewer / multi-thread / mixed-state
 // matrix is testable without any `gh` scripting.
@@ -37,25 +37,25 @@ func TestClassifyPendingKeyMatrix(t *testing.T) {
 		{
 			"resolved-thread",
 			"comment:5",
-			feedbackState{ThreadResolved: map[int64]bool{5: true}},
+			feedbackState{Threads: map[int64]threadState{5: resolvedThread("alice", "alice")}, Actors: okActors(nil)},
 			keyResolved,
 		},
 		{
 			"unresolved-thread",
 			"comment:5",
-			feedbackState{ThreadResolved: map[int64]bool{5: false}},
+			feedbackState{Threads: map[int64]threadState{5: {}}},
 			keyPending,
 		},
 		{
 			"absent-thread: GitHub no longer reports this thread at all (deleted comment, force-push purge) -- never treated as resolved",
 			"comment:5",
-			feedbackState{ThreadResolved: map[int64]bool{6: true}},
+			feedbackState{Threads: map[int64]threadState{6: resolvedThread("alice", "alice")}},
 			keyUnknown,
 		},
 		{
 			"dismissed-review: GitHub rewrites a dismissed review's own state to DISMISSED in place",
 			"review:10",
-			feedbackState{Reviews: []review{{ID: 10, State: "DISMISSED", SubmittedAt: "2026-01-02T00:00:00Z", User: login("alice")}}, ReviewsComplete: true},
+			feedbackState{Reviews: []review{{ID: 10, State: "DISMISSED", SubmittedAt: "2026-01-02T00:00:00Z", User: login("alice")}}, ReviewsComplete: true, Actors: okActors(map[int64]string{10: "alice"})},
 			keyResolved,
 		},
 		{
@@ -64,7 +64,7 @@ func TestClassifyPendingKeyMatrix(t *testing.T) {
 			feedbackState{Reviews: []review{
 				{ID: 10, State: "CHANGES_REQUESTED", SubmittedAt: "2026-01-01T00:00:00Z", User: login("alice")},
 				{ID: 11, State: "APPROVED", SubmittedAt: "2026-01-02T00:00:00Z", User: login("alice")},
-			}, ReviewsComplete: true},
+			}, ReviewsComplete: true, Actors: okActors(nil)},
 			keyResolved,
 		},
 		{
@@ -96,9 +96,9 @@ func TestClassifyPendingKeyMatrix(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := classifyPendingKey(tc.key, tc.fs)
+			got := classifyKey(tc.key, tc.fs).Status
 			if got != tc.want {
-				t.Fatalf("classifyPendingKey(%q) = %v, want %v", tc.key, got, tc.want)
+				t.Fatalf("classifyKey(%q).Status = %v, want %v", tc.key, got, tc.want)
 			}
 		})
 	}
@@ -130,12 +130,13 @@ func TestClassifyReviewKeyFailsClosedWhenReviewsListPotentiallyTruncated(t *test
 	}
 
 	fs := feedbackState{Reviews: reviews}
-	got := classifyPendingKey("review:10", fs)
+	got := classifyKey("review:10", fs).Status
 	if got != keyUnknown {
-		t.Fatalf("classifyPendingKey(review:10) = %v, want keyUnknown: a reviews list at the page-size cap can never be trusted as complete, regardless of what the visible data suggests", got)
+		t.Fatalf("classifyKey(review:10).Status = %v, want keyUnknown: a reviews list at the page-size cap can never be trusted as complete, regardless of what the visible data suggests", got)
 	}
 
-	_, resolved, hold, _ := partitionPendingKeys([]string{"review:10"}, fs)
+	c := partitionPending([]string{"review:10"}, fs)
+	resolved, hold := c.Resolved, c.Hold
 	if len(resolved) != 0 {
 		t.Fatalf("resolved = %v, want empty: the possibly-truncated list must not resolve review:10", resolved)
 	}
@@ -155,9 +156,9 @@ func TestClassifyReviewKeyResolvesNormallyBelowPageSize(t *testing.T) {
 	if len(reviews) >= reviewsPageSize {
 		t.Fatalf("test setup: len(reviews) = %d, want below reviewsPageSize (%d)", len(reviews), reviewsPageSize)
 	}
-	got := classifyPendingKey("review:10", feedbackState{Reviews: reviews, ReviewsComplete: true})
+	got := classifyKey("review:10", feedbackState{Reviews: reviews, ReviewsComplete: true, Actors: okActors(nil)}).Status
 	if got != keyResolved {
-		t.Fatalf("classifyPendingKey(review:10) = %v, want keyResolved: below the page-size cap and proven complete, the reviewer's later APPROVED still supersedes normally", got)
+		t.Fatalf("classifyKey(review:10).Status = %v, want keyResolved: below the page-size cap and proven complete, the reviewer's later APPROVED still supersedes normally", got)
 	}
 }
 
@@ -176,10 +177,10 @@ func TestClassifyReviewKeyResolvesAtPageSizeWhenComplete(t *testing.T) {
 	if len(reviews) != reviewsPageSize {
 		t.Fatalf("test setup: len(reviews) = %d, want exactly reviewsPageSize (%d)", len(reviews), reviewsPageSize)
 	}
-	fs := feedbackState{Reviews: reviews, ReviewsComplete: true}
-	got := classifyPendingKey("review:10", fs)
+	fs := feedbackState{Reviews: reviews, ReviewsComplete: true, Actors: okActors(map[int64]string{10: "alice"})}
+	got := classifyKey("review:10", fs).Status
 	if got != keyResolved {
-		t.Fatalf("classifyPendingKey(review:10) = %v, want keyResolved: a proven-complete reviews list at exactly reviewsPageSize must resolve normally, not fail closed on length alone", got)
+		t.Fatalf("classifyKey(review:10).Status = %v, want keyResolved: a proven-complete reviews list at exactly reviewsPageSize must resolve normally, not fail closed on length alone", got)
 	}
 }
 
@@ -197,9 +198,9 @@ func TestClassifyReviewKeyFailsClosedWhenIncomplete(t *testing.T) {
 		t.Fatalf("test setup: len(reviews) = %d, want well under reviewsPageSize (%d)", len(reviews), reviewsPageSize)
 	}
 	fs := feedbackState{Reviews: reviews, ReviewsComplete: false}
-	got := classifyPendingKey("review:10", fs)
+	got := classifyKey("review:10", fs).Status
 	if got != keyUnknown {
-		t.Fatalf("classifyPendingKey(review:10) = %v, want keyUnknown: an explicitly-incomplete reviews read must fail closed even well under reviewsPageSize", got)
+		t.Fatalf("classifyKey(review:10).Status = %v, want keyUnknown: an explicitly-incomplete reviews read must fail closed even well under reviewsPageSize", got)
 	}
 }
 
@@ -229,14 +230,16 @@ func TestLatestEffectiveReviewIgnoresCommented(t *testing.T) {
 func TestPartitionPendingKeysMixedState(t *testing.T) {
 	pending := []string{"comment:1", "comment:2", "review:10", "review:11", "review:99"}
 	fs := feedbackState{
-		ThreadResolved: map[int64]bool{1: true, 2: false},
+		Threads: map[int64]threadState{1: resolvedThread("alice", "alice"), 2: {}},
 		Reviews: []review{
 			{ID: 10, State: "DISMISSED", SubmittedAt: "2026-01-01T00:00:00Z", User: login("bob")},
 			{ID: 11, State: "CHANGES_REQUESTED", SubmittedAt: "2026-01-01T00:00:00Z", User: login("carol")},
 		},
 		ReviewsComplete: true,
+		Actors:          okActors(map[int64]string{10: "bob"}),
 	}
-	stillPending, resolved, hold, detail := partitionPendingKeys(pending, fs)
+	c := partitionPending(pending, fs)
+	stillPending, resolved, hold, detail := c.Pending, c.Resolved, c.Hold, c.Detail
 
 	wantResolved := []string{"comment:1", "review:10"}
 	if !reflect.DeepEqual(resolved, wantResolved) {
@@ -258,7 +261,8 @@ func TestPartitionPendingKeysMixedState(t *testing.T) {
 // classification outcome (unsupported prefix) as its own distinct hold
 // reason, never collapsed into reasonReviewStateUnknown.
 func TestPartitionPendingKeysUnsupportedKeyPoisonsVerdict(t *testing.T) {
-	stillPending, resolved, hold, detail := partitionPendingKeys([]string{"label:1"}, feedbackState{})
+	c := partitionPending([]string{"label:1"}, feedbackState{})
+	stillPending, resolved, hold, detail := c.Pending, c.Resolved, c.Hold, c.Detail
 	if len(resolved) != 0 {
 		t.Errorf("resolved = %v, want empty", resolved)
 	}
@@ -328,7 +332,7 @@ func TestFetchReviewThreadsTraversesEveryPage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fetchReviewThreads: %v", err)
 	}
-	want := map[int64]bool{100: false, 200: true}
+	want := map[int64]threadState{100: {Resolved: false}, 200: {Resolved: true}}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("fetchReviewThreads = %v, want %v (merged across both pages)", got, want)
 	}
@@ -465,7 +469,7 @@ func TestReconcileSkipsGraphQLWhenOnlyReviewKeysPending(t *testing.T) {
 	s := &State{Repo: "o/r", PR: "42", PendingKeys: []string{"review:10"}, PendingCommentAt: "2026-01-01T00:00:00Z", PendingHeadSHA: "abc"}
 	reviews := []review{{ID: 10, State: "DISMISSED", SubmittedAt: "2026-01-02T00:00:00Z", User: login("alice")}}
 
-	verdict := reconcileFeedback(s, reviews, true)
+	verdict := reconcileFeedback(s, reviews, true, okActors(map[int64]string{10: "alice"}))
 
 	if verdict.Hold != "" {
 		t.Fatalf("verdict.Hold = %q, want empty (the dismissed review resolves cleanly)", verdict.Hold)
@@ -492,7 +496,7 @@ func TestReconcileSkipsGraphQLWhenOnlyReviewKeysPending(t *testing.T) {
 // silently overwriting LastCommentAt when nothing was reconciled.
 func TestReconcileNoPendingKeysLeavesLastCommentAtUnchanged(t *testing.T) {
 	s := &State{Repo: "o/r", PR: "42", LastCommentAt: "2025-12-01T00:00:00Z"}
-	verdict := reconcileFeedback(s, nil, true)
+	verdict := reconcileFeedback(s, nil, true, okActors(nil))
 	if verdict.Hold != "" {
 		t.Fatalf("verdict.Hold = %q, want empty", verdict.Hold)
 	}
@@ -503,7 +507,7 @@ func TestReconcileNoPendingKeysLeavesLastCommentAtUnchanged(t *testing.T) {
 
 // -- #885: reclassify all known feedback (pending AND previously addressed) --
 //
-// classifyFeedback generalizes partitionPendingKeys/classifyPendingKey to
+// classifyFeedback generalizes partitionPending/classifyKey to
 // also reclassify AddressedKeys against fresh GitHub state: a previously
 // resolved key that GitHub now reports outstanding again returns to pending
 // under its own distinct reasonFeedbackReopened hold (Q2), while an absent
@@ -587,7 +591,7 @@ func TestLatestEffectiveReviewSameTimestampTieBreakIndependentOfWhichStateHasHig
 // reasonFeedbackReopened hold (Q2 rejects collapsing this into the ordinary
 // reasonReviewPending), carrying the reopened key's name in Detail.
 func TestClassifyFeedbackReopensAddressedCommentKey(t *testing.T) {
-	fs := feedbackState{ThreadResolved: map[int64]bool{5: false}, ReviewsComplete: true}
+	fs := feedbackState{Threads: map[int64]threadState{5: {}}, ReviewsComplete: true}
 	got := classifyFeedback(nil, []string{"comment:5"}, fs)
 	if !reflect.DeepEqual(got.Reopened, []string{"comment:5"}) {
 		t.Fatalf("Reopened = %v, want [comment:5]", got.Reopened)
@@ -614,7 +618,7 @@ func TestClassifyFeedbackReopensAddressedCommentKey(t *testing.T) {
 // either. It stays addressed (classifyFeedback reports nothing for it at
 // all -- the caller leaves it untouched in AddressedKeys).
 func TestClassifyFeedbackAddressedKeyAbsentHoldsAsUnknownNotReopened(t *testing.T) {
-	fs := feedbackState{ThreadResolved: map[int64]bool{}, ReviewsComplete: true}
+	fs := feedbackState{Threads: map[int64]threadState{}, ReviewsComplete: true}
 	got := classifyFeedback(nil, []string{"comment:5"}, fs)
 	if len(got.Reopened) != 0 {
 		t.Fatalf("Reopened = %v, want empty: an absent thread must never be treated as reopened", got.Reopened)
@@ -666,29 +670,36 @@ func TestClassifyFeedbackPrecedenceOrder(t *testing.T) {
 			"an unknown key in the pending set beats a reopened key in the addressed set",
 			[]string{"comment:1"},
 			[]string{"comment:2"},
-			feedbackState{ThreadResolved: map[int64]bool{2: false}, ReviewsComplete: true}, // comment:1 absent -> unknown; comment:2 reopened
+			feedbackState{Threads: map[int64]threadState{2: {}}, ReviewsComplete: true}, // comment:1 absent -> unknown; comment:2 reopened
 			reasonReviewStateUnknown,
 		},
 		{
 			"an unsupported key in the pending set beats a reopened key in the addressed set",
 			[]string{"label:1"},
 			[]string{"comment:2"},
-			feedbackState{ThreadResolved: map[int64]bool{2: false}, ReviewsComplete: true},
+			feedbackState{Threads: map[int64]threadState{2: {}}, ReviewsComplete: true},
 			reasonFeedbackUnsupported,
 		},
 		{
 			"an unknown key in the addressed set beats a reopened key found earlier in addressed scan order",
 			nil,
 			[]string{"comment:2", "comment:3"}, // comment:2 reopens; comment:3 is absent (unknown)
-			feedbackState{ThreadResolved: map[int64]bool{2: false}, ReviewsComplete: true}, // comment:3 absent from the map entirely
+			feedbackState{Threads: map[int64]threadState{2: {}}, ReviewsComplete: true}, // comment:3 absent from the map entirely
 			reasonReviewStateUnknown,
 		},
 		{
 			"with no unknown/unsupported key anywhere, a reopened key wins the overall hold",
 			nil,
 			[]string{"comment:2"},
-			feedbackState{ThreadResolved: map[int64]bool{2: false}, ReviewsComplete: true},
+			feedbackState{Threads: map[int64]threadState{2: {}}, ReviewsComplete: true},
 			reasonFeedbackReopened,
+		},
+		{
+			"an actor-denied key in the pending set beats a reopened key in the addressed set (#862)",
+			[]string{"comment:1"},
+			[]string{"comment:2"},
+			feedbackState{Threads: map[int64]threadState{1: resolvedThread(defaultAutomationLogin, "alice"), 2: {}}, ReviewsComplete: true, Actors: okActors(nil)},
+			reasonResolutionActorUnauthorized,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -709,12 +720,13 @@ func TestClassifyFeedbackMixedState(t *testing.T) {
 	pending := []string{"comment:1", "comment:2", "review:10"}
 	addressed := []string{"comment:5", "comment:6", "review:20"}
 	fs := feedbackState{
-		ThreadResolved: map[int64]bool{
-			1: true,  // pending -> resolves
-			2: false, // pending -> stays pending
-			5: false, // addressed -> reopens
+		Threads: map[int64]threadState{
+			1: resolvedThread("alice", "alice"), // pending -> resolves
+			2: {},                               // pending -> stays pending
+			5: {},                               // addressed -> reopens
 			// 6 intentionally absent -> addressed -> unknown
 		},
+		Actors: okActors(map[int64]string{10: "carol"}),
 		Reviews: []review{
 			{ID: 10, State: "DISMISSED", SubmittedAt: "2026-01-01T00:00:00Z", User: login("carol")}, // pending -> resolves
 			{ID: 20, State: "CHANGES_REQUESTED", SubmittedAt: "2026-01-01T00:00:00Z", User: login("dave")},
@@ -748,14 +760,15 @@ func TestClassifyFeedbackMixedState(t *testing.T) {
 // the Implementation Order's explicit backward-compatibility requirement:
 // "Pending-set keys keep today's semantics exactly." With an empty
 // addressed set, classifyFeedback's Resolved/Pending/Hold output must match
-// the pre-#885 partitionPendingKeys behavior exactly (compare
+// the pre-#885 partitionPending behavior exactly (compare
 // TestPartitionPendingKeysMixedState above).
 func TestClassifyFeedbackWithNoAddressedKeysMatchesPendingOnlySemantics(t *testing.T) {
 	pending := []string{"comment:1", "comment:2", "review:10"}
 	fs := feedbackState{
-		ThreadResolved:  map[int64]bool{1: true, 2: false},
+		Threads:         map[int64]threadState{1: resolvedThread("alice", "alice"), 2: {}},
 		Reviews:         []review{{ID: 10, State: "DISMISSED", SubmittedAt: "2026-01-01T00:00:00Z", User: login("bob")}},
 		ReviewsComplete: true,
+		Actors:          okActors(map[int64]string{10: "bob"}),
 	}
 	got := classifyFeedback(pending, nil, fs)
 	wantResolved := []string{"comment:1", "review:10"}
@@ -798,7 +811,7 @@ func TestReconcileFeedbackFetchFailureLeavesAddressedKeysUnmovedInEitherDirectio
 			var calls [][]string
 			scriptedGraphQLCommand(t, []string{tc.body}, &calls)
 			s := &State{Repo: "o/r", PR: "42", PendingKeys: []string{"comment:1"}, AddressedKeys: []string{"comment:5"}}
-			verdict := reconcileFeedback(s, nil, true)
+			verdict := reconcileFeedback(s, nil, true, okActors(nil))
 			if verdict.Hold != tc.wantHold {
 				t.Fatalf("verdict.Hold = %q, want %q", verdict.Hold, tc.wantHold)
 			}
@@ -821,9 +834,559 @@ func TestReconcileFeedbackGraphQLGateWidenedToAddressedCommentKeys(t *testing.T)
 	var calls [][]string
 	scriptedGraphQLCommand(t, []string{threadPage(false, "", threadNode(true, 1, 5))}, &calls)
 	s := &State{Repo: "o/r", PR: "42", PendingKeys: nil, AddressedKeys: []string{"comment:5"}}
-	reconcileFeedback(s, nil, true)
+	reconcileFeedback(s, nil, true, okActors(nil))
 	if len(calls) == 0 {
 		t.Fatal("reconcileFeedback issued no GraphQL call: the lazy gate must fire for an addressed comment: key too, not just a pending one")
+	}
+}
+
+// -- resolution-actor authorization (#862) ------------------------------------
+
+// AC 26: the reviewThreads query asks GitHub who resolved each thread and who
+// wrote each comment -- the two facts the actor rule needs. Asserted on the query
+// text with its whitespace removed, so the check holds for any formatting.
+func TestReviewThreadsQueryRequestsResolverAndCommentAuthor(t *testing.T) {
+	compact := strings.Join(strings.Fields(reviewThreadsQuery), "")
+	if !strings.Contains(compact, "resolvedBy{login}") {
+		t.Errorf("reviewThreadsQuery = %q, want it to request each thread's resolvedBy { login }", reviewThreadsQuery)
+	}
+	if !strings.Contains(compact, "author{login}") {
+		t.Errorf("reviewThreadsQuery = %q, want it to request each comment's author { login }", reviewThreadsQuery)
+	}
+}
+
+// The thread state carries the resolver, whether it is known, and the thread's own
+// author: the FIRST comment's. A reply's key maps to the same thread state. A null
+// resolver (a deleted account) and a null author are both "unknown", not "".
+func TestFetchReviewThreadsParsesResolverAndThreadAuthor(t *testing.T) {
+	page := threadPage(false, "",
+		actorThreadNode(true, "bob", threadComment(100, "alice"), threadComment(101, "carol")),
+		actorThreadNode(true, "", threadComment(200, "alice")),
+		actorThreadNode(false, "", threadComment(300, "")),
+	)
+	var calls [][]string
+	scriptedGraphQLCommand(t, []string{page}, &calls)
+
+	got, err := fetchReviewThreads("o/r", "42")
+
+	if err != nil {
+		t.Fatalf("fetchReviewThreads: %v", err)
+	}
+	want := map[int64]threadState{
+		100: {Resolved: true, ResolvedBy: "bob", ResolvedByKnown: true, Author: "alice"},
+		101: {Resolved: true, ResolvedBy: "bob", ResolvedByKnown: true, Author: "alice"},
+		200: {Resolved: true, ResolvedBy: "", ResolvedByKnown: false, Author: "alice"},
+		300: {Resolved: false, ResolvedBy: "", ResolvedByKnown: false, Author: ""},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("fetchReviewThreads = %#v, want %#v", got, want)
+	}
+}
+
+// reviewsFor is a complete reviews read: CHANGES_REQUESTED review 10 by alice,
+// optionally followed by later reviews.
+func reviewsFor(later ...review) []review {
+	return append([]review{{ID: 10, State: "CHANGES_REQUESTED", SubmittedAt: "2026-01-01T00:00:00Z", User: login("alice")}}, later...)
+}
+
+var dismissedByAlice = []review{{ID: 10, State: "DISMISSED", SubmittedAt: "2026-01-02T00:00:00Z", User: login("alice")}}
+
+// The actor matrix for classifyKey, asserted as exact keyStatus values: a
+// resolution that fails the actor rule is keyActorDenied (distinct from keyPending,
+// keyUnknown and a lookup failure), a failed lookup is keyActorLookupFailed, and the
+// lazy reads (identity, dismissal timeline, permission) are counted per case.
+func TestClassifyPendingKeyActorMatrix(t *testing.T) {
+	const bot = defaultAutomationLogin
+	attest := func(key, actor string) map[string]actorAttestation {
+		return map[string]actorAttestation{key: {Actor: actor, Source: attestationSourceHumanCLI}}
+	}
+	for _, tc := range []struct {
+		name  string
+		key   string
+		build func(f *fakeActors) feedbackState
+		want  keyStatus
+		// reads is {identity, dismissal timeline, permission} when the case pins them.
+		reads   *[3]int
+		wantErr bool
+	}{
+		// -- comment keys: the thread's resolver --
+		{name: "comment: resolved by the thread's own author", key: "comment:5", want: keyResolved,
+			build: func(f *fakeActors) feedbackState {
+				return feedbackState{Threads: map[int64]threadState{5: resolvedThread("alice", "alice")}}
+			}, reads: &[3]int{1, 0, 0}},
+		{name: "comment: resolved by the automation login", key: "comment:5", want: keyActorDenied,
+			build: func(f *fakeActors) feedbackState {
+				return feedbackState{Threads: map[int64]threadState{5: resolvedThread(bot, "alice")}}
+			}, reads: &[3]int{1, 0, 0}},
+		{name: "comment: the automation login's own thread, resolved by it", key: "comment:5", want: keyActorDenied,
+			build: func(f *fakeActors) feedbackState {
+				return feedbackState{Threads: map[int64]threadState{5: resolvedThread(bot, bot)}}
+			}},
+		{name: "comment: resolved by a write-access login", key: "comment:5", want: keyResolved,
+			build: func(f *fakeActors) feedbackState {
+				f.perms["maintainer"] = writePermissionGranted
+				return feedbackState{Threads: map[int64]threadState{5: resolvedThread("maintainer", "alice")}}
+			}, reads: &[3]int{1, 0, 1}},
+		{name: "comment: resolved by a login without write access", key: "comment:5", want: keyActorDenied,
+			build: func(f *fakeActors) feedbackState {
+				return feedbackState{Threads: map[int64]threadState{5: resolvedThread("outsider", "alice")}}
+			}, reads: &[3]int{1, 0, 1}},
+		{name: "comment: an unknown permission is a lookup failure", key: "comment:5", want: keyActorLookupFailed,
+			build: func(f *fakeActors) feedbackState {
+				f.perms["outsider"] = writePermissionUnknown
+				return feedbackState{Threads: map[int64]threadState{5: resolvedThread("outsider", "alice")}}
+			}},
+		{name: "comment: a null resolver is denied", key: "comment:5", want: keyActorDenied,
+			build: func(f *fakeActors) feedbackState {
+				return feedbackState{Threads: map[int64]threadState{5: resolvedThread("", "alice")}}
+			}, reads: &[3]int{0, 0, 0}},
+		{name: "comment: an unresolved thread needs no actor lookup", key: "comment:5", want: keyPending,
+			build: func(f *fakeActors) feedbackState {
+				return feedbackState{Threads: map[int64]threadState{5: {Author: "alice"}}}
+			}, reads: &[3]int{0, 0, 0}},
+		{name: "comment: a thread GitHub no longer reports needs no actor lookup", key: "comment:5", want: keyUnknown,
+			build: func(f *fakeActors) feedbackState {
+				return feedbackState{Threads: map[int64]threadState{6: resolvedThread("alice", "alice")}}
+			}, reads: &[3]int{0, 0, 0}},
+		{name: "comment: an automation identity failure is a lookup failure with a sticky error", key: "comment:5", want: keyActorLookupFailed, wantErr: true,
+			build: func(f *fakeActors) feedbackState {
+				f.loginErr = errors.New("gh: api user failed")
+				return feedbackState{Threads: map[int64]threadState{5: resolvedThread("alice", "alice")}}
+			}},
+		{name: "comment: an attestation for the automation login accepts its resolution", key: "comment:5", want: keyResolved,
+			build: func(f *fakeActors) feedbackState {
+				return feedbackState{Threads: map[int64]threadState{5: resolvedThread(bot, "alice")}, Attestations: attest("comment:5", bot)}
+			}},
+		{name: "comment: an attestation for another actor does not vouch", key: "comment:5", want: keyActorDenied,
+			build: func(f *fakeActors) feedbackState {
+				return feedbackState{Threads: map[int64]threadState{5: resolvedThread(bot, "alice")}, Attestations: attest("comment:5", "maintainer")}
+			}},
+		{name: "comment: an attestation on another key does not vouch", key: "comment:5", want: keyActorDenied,
+			build: func(f *fakeActors) feedbackState {
+				return feedbackState{Threads: map[int64]threadState{5: resolvedThread(bot, "alice")}, Attestations: attest("comment:6", bot)}
+			}},
+
+		// -- review keys: the dismissal event's actor, or the superseding review's author --
+		{name: "review: dismissed by the review's own author", key: "review:10", want: keyResolved,
+			build: func(f *fakeActors) feedbackState {
+				f.dismissals = map[int64]string{10: "alice"}
+				return feedbackState{Reviews: dismissedByAlice, ReviewsComplete: true}
+			}, reads: &[3]int{1, 1, 0}},
+		{name: "review: dismissed by the automation login", key: "review:10", want: keyActorDenied,
+			build: func(f *fakeActors) feedbackState {
+				f.dismissals = map[int64]string{10: bot}
+				return feedbackState{Reviews: dismissedByAlice, ReviewsComplete: true}
+			}},
+		{name: "review: dismissed with no event in a complete timeline", key: "review:10", want: keyActorDenied,
+			build: func(f *fakeActors) feedbackState {
+				f.dismissals = map[int64]string{99: "alice"}
+				return feedbackState{Reviews: dismissedByAlice, ReviewsComplete: true}
+			}, reads: &[3]int{0, 1, 0}},
+		{name: "review: dismissed by an unknown actor (a null or conflicting event)", key: "review:10", want: keyActorDenied,
+			build: func(f *fakeActors) feedbackState {
+				f.dismissals = map[int64]string{10: ""}
+				return feedbackState{Reviews: dismissedByAlice, ReviewsComplete: true}
+			}},
+		{name: "review: dismissed by a write-access login", key: "review:10", want: keyResolved,
+			build: func(f *fakeActors) feedbackState {
+				f.dismissals = map[int64]string{10: "maintainer"}
+				f.perms["maintainer"] = writePermissionGranted
+				return feedbackState{Reviews: dismissedByAlice, ReviewsComplete: true}
+			}, reads: &[3]int{1, 1, 1}},
+		{name: "review: dismissed by a login without write access", key: "review:10", want: keyActorDenied,
+			build: func(f *fakeActors) feedbackState {
+				f.dismissals = map[int64]string{10: "outsider"}
+				return feedbackState{Reviews: dismissedByAlice, ReviewsComplete: true}
+			}},
+		{name: "review: an unreadable timeline is a lookup failure with a sticky error", key: "review:10", want: keyActorLookupFailed, wantErr: true,
+			build: func(f *fakeActors) feedbackState {
+				f.dismissalsErr = errors.New("gh: timeline failed")
+				return feedbackState{Reviews: dismissedByAlice, ReviewsComplete: true}
+			}},
+		{name: "review: superseded by the same reviewer's approval (its author)", key: "review:10", want: keyResolved,
+			build: func(f *fakeActors) feedbackState {
+				return feedbackState{Reviews: reviewsFor(review{ID: 11, State: "APPROVED", SubmittedAt: "2026-01-02T00:00:00Z", User: login("alice")}), ReviewsComplete: true}
+			}, reads: &[3]int{1, 0, 0}},
+		{name: "review: superseded by an approval from the automation login", key: "review:10", want: keyActorDenied,
+			build: func(f *fakeActors) feedbackState {
+				return feedbackState{Reviews: []review{
+					{ID: 10, State: "CHANGES_REQUESTED", SubmittedAt: "2026-01-01T00:00:00Z", User: login(bot)},
+					{ID: 11, State: "APPROVED", SubmittedAt: "2026-01-02T00:00:00Z", User: login(bot)},
+				}, ReviewsComplete: true}
+			}, reads: &[3]int{1, 0, 0}},
+		{name: "review: superseded by a dismissal by the automation login (the LATER review's event)", key: "review:10", want: keyActorDenied,
+			build: func(f *fakeActors) feedbackState {
+				f.dismissals = map[int64]string{11: bot, 10: "alice"}
+				return feedbackState{Reviews: reviewsFor(review{ID: 11, State: "DISMISSED", SubmittedAt: "2026-01-02T00:00:00Z", User: login("alice")}), ReviewsComplete: true}
+			}, reads: &[3]int{1, 1, 0}},
+		{name: "review: superseded by a dismissal by a write-access login", key: "review:10", want: keyResolved,
+			build: func(f *fakeActors) feedbackState {
+				f.dismissals = map[int64]string{11: "maintainer"}
+				f.perms["maintainer"] = writePermissionGranted
+				return feedbackState{Reviews: reviewsFor(review{ID: 11, State: "DISMISSED", SubmittedAt: "2026-01-02T00:00:00Z", User: login("alice")}), ReviewsComplete: true}
+			}},
+		{name: "review: superseded by a dismissal with no event", key: "review:10", want: keyActorDenied,
+			build: func(f *fakeActors) feedbackState {
+				return feedbackState{Reviews: reviewsFor(review{ID: 11, State: "DISMISSED", SubmittedAt: "2026-01-02T00:00:00Z", User: login("alice")}), ReviewsComplete: true}
+			}},
+		{name: "review: superseded by a later CHANGES_REQUESTED stays pending with no lookup at all (Edge 56)", key: "review:10", want: keyPending,
+			build: func(f *fakeActors) feedbackState {
+				return feedbackState{Reviews: reviewsFor(review{ID: 12, State: "CHANGES_REQUESTED", SubmittedAt: "2026-01-02T00:00:00Z", User: login("alice")}), ReviewsComplete: true}
+			}, reads: &[3]int{0, 0, 0}},
+		{name: "review: an unproven-complete reviews read is unknown with no lookup", key: "review:10", want: keyUnknown,
+			build: func(f *fakeActors) feedbackState {
+				f.dismissals = map[int64]string{10: "alice"}
+				return feedbackState{Reviews: dismissedByAlice, ReviewsComplete: false}
+			}, reads: &[3]int{0, 0, 0}},
+		{name: "review: an attestation for the dismissing actor accepts it", key: "review:10", want: keyResolved,
+			build: func(f *fakeActors) feedbackState {
+				f.dismissals = map[int64]string{10: bot}
+				return feedbackState{Reviews: dismissedByAlice, ReviewsComplete: true, Attestations: attest("review:10", bot)}
+			}},
+		{name: "review: an attestation for an unknown dismissal actor accepts it", key: "review:10", want: keyResolved,
+			build: func(f *fakeActors) feedbackState {
+				return feedbackState{Reviews: dismissedByAlice, ReviewsComplete: true, Attestations: attest("review:10", "")}
+			}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFakeActors()
+			fs := tc.build(f)
+			fs.Actors = f.ctx()
+
+			got := classifyKey(tc.key, fs).Status
+
+			if got != tc.want {
+				t.Fatalf("classifyKey(%q).Status = %v, want %v", tc.key, got, tc.want)
+			}
+			if tc.reads != nil {
+				if gotReads := [3]int{f.loginReads, f.dismissalReads, permTotal(f.permReads)}; gotReads != *tc.reads {
+					t.Errorf("reads {identity, timeline, permission} = %v, want %v", gotReads, *tc.reads)
+				}
+			}
+			if (fs.Actors.err != nil) != tc.wantErr {
+				t.Errorf("sticky error = %v, want an error = %v", fs.Actors.err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func permTotal(m map[string]int) int {
+	n := 0
+	for _, c := range m {
+		n += c
+	}
+	return n
+}
+
+// The pure classifier fails closed when it was handed no actorContext: a resolution
+// can never be accepted without the actor rule's inputs.
+func TestClassifyPendingKeyWithoutAnActorContextNeverResolves(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		key  string
+		fs   feedbackState
+	}{
+		{"a resolved thread", "comment:5", feedbackState{Threads: map[int64]threadState{5: resolvedThread("alice", "alice")}}},
+		{"a dismissed review", "review:10", feedbackState{Reviews: dismissedByAlice, ReviewsComplete: true}},
+		{"an approved-over review", "review:10", feedbackState{Reviews: reviewsFor(review{ID: 11, State: "APPROVED", SubmittedAt: "2026-01-02T00:00:00Z", User: login("alice")}), ReviewsComplete: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := classifyKey(tc.key, tc.fs).Status; got != keyActorLookupFailed {
+				t.Fatalf("classifyKey(%q).Status with no Actors = %v, want keyActorLookupFailed (never keyResolved)", tc.key, got)
+			}
+		})
+	}
+}
+
+// classifyFeedback's actor outputs: the hold reason and its detail, the actor each
+// held key is recorded with ("" when unknown), a revoked addressed key, a lookup
+// failure that is not a denial, and the attestations to drop.
+func TestClassifyFeedbackActorOutputs(t *testing.T) {
+	const bot = defaultAutomationLogin
+
+	t.Run("a pending key resolved by the automation login stays pending and held", func(t *testing.T) {
+		fs := feedbackState{Threads: map[int64]threadState{5: resolvedThread(bot, "alice")}, ReviewsComplete: true, Actors: okActors(nil)}
+		got := classifyFeedback([]string{"comment:5"}, nil, fs)
+
+		if !reflect.DeepEqual(got.Pending, []string{"comment:5"}) || len(got.Resolved) != 0 {
+			t.Errorf("Pending/Resolved = %v/%v, want [comment:5]/none", got.Pending, got.Resolved)
+		}
+		if got.Hold != reasonResolutionActorUnauthorized || !strings.Contains(got.Detail, "comment:5") {
+			t.Errorf("Hold/Detail = %q/%q, want %q naming comment:5", got.Hold, got.Detail, reasonResolutionActorUnauthorized)
+		}
+		if want := map[string]string{"comment:5": bot}; !reflect.DeepEqual(got.ActorHeld, want) {
+			t.Errorf("ActorHeld = %v, want %v", got.ActorHeld, want)
+		}
+	})
+	t.Run("a null resolver is held with the detail `resolver unknown` and an empty actor", func(t *testing.T) {
+		fs := feedbackState{Threads: map[int64]threadState{5: resolvedThread("", "alice")}, ReviewsComplete: true, Actors: okActors(nil)}
+		got := classifyFeedback([]string{"comment:5"}, nil, fs)
+
+		if got.Hold != reasonResolutionActorUnauthorized || !strings.Contains(got.Detail, "resolver unknown") {
+			t.Errorf("Hold/Detail = %q/%q, want %q with `resolver unknown`", got.Hold, got.Detail, reasonResolutionActorUnauthorized)
+		}
+		if actor, ok := got.ActorHeld["comment:5"]; !ok || actor != "" {
+			t.Errorf("ActorHeld = %v, want comment:5 held with an empty actor", got.ActorHeld)
+		}
+	})
+	t.Run("a dismissed review with no event is held with the detail `dismissal actor unknown`", func(t *testing.T) {
+		fs := feedbackState{Reviews: dismissedByAlice, ReviewsComplete: true, Actors: okActors(nil)}
+		got := classifyFeedback([]string{"review:10"}, nil, fs)
+
+		if got.Hold != reasonResolutionActorUnauthorized || !strings.Contains(got.Detail, "dismissal actor unknown") {
+			t.Errorf("Hold/Detail = %q/%q, want %q with `dismissal actor unknown`", got.Hold, got.Detail, reasonResolutionActorUnauthorized)
+		}
+		if actor, ok := got.ActorHeld["review:10"]; !ok || actor != "" {
+			t.Errorf("ActorHeld = %v, want review:10 held with an empty actor", got.ActorHeld)
+		}
+	})
+	t.Run("an addressed key re-resolved by the automation login is revoked, not reopened", func(t *testing.T) {
+		fs := feedbackState{Threads: map[int64]threadState{5: resolvedThread(bot, "alice")}, ReviewsComplete: true, Actors: okActors(nil)}
+		got := classifyFeedback(nil, []string{"comment:5"}, fs)
+
+		if !reflect.DeepEqual(got.ActorRevoked, []string{"comment:5"}) || len(got.Reopened) != 0 {
+			t.Errorf("ActorRevoked/Reopened = %v/%v, want [comment:5]/none", got.ActorRevoked, got.Reopened)
+		}
+		if got.Hold != reasonResolutionActorUnauthorized || !strings.Contains(got.Detail, "comment:5") {
+			t.Errorf("Hold/Detail = %q/%q, want %q naming comment:5", got.Hold, got.Detail, reasonResolutionActorUnauthorized)
+		}
+		if want := map[string]string{"comment:5": bot}; !reflect.DeepEqual(got.ActorHeld, want) {
+			t.Errorf("ActorHeld = %v, want %v", got.ActorHeld, want)
+		}
+	})
+	t.Run("an addressed key whose resolution still passes is a silent no-op", func(t *testing.T) {
+		fs := feedbackState{Threads: map[int64]threadState{5: resolvedThread("alice", "alice")}, ReviewsComplete: true, Actors: okActors(nil)}
+		got := classifyFeedback(nil, []string{"comment:5"}, fs)
+
+		if got.Hold != "" || len(got.ActorRevoked) != 0 || len(got.ActorHeld) != 0 || len(got.Reopened) != 0 {
+			t.Errorf("got %+v, want nothing: GitHub still confirms the key resolved by an authorized actor", got)
+		}
+	})
+	t.Run("a failed permission lookup is not a denial: the key stays where it was under the unreadable hold", func(t *testing.T) {
+		for _, tc := range []struct {
+			name               string
+			pending, addressed []string
+		}{
+			{"pending", []string{"comment:5"}, nil},
+			{"addressed", nil, []string{"comment:5"}},
+		} {
+			f := newFakeActors()
+			f.perms["outsider"] = writePermissionUnknown
+			fs := feedbackState{Threads: map[int64]threadState{5: resolvedThread("outsider", "alice")}, ReviewsComplete: true, Actors: f.ctx()}
+			got := classifyFeedback(tc.pending, tc.addressed, fs)
+
+			if got.Hold != reasonFeedbackUnreadable || !strings.Contains(got.Detail, "resolution actor permission lookup failed for comment:5; will retry") {
+				t.Errorf("%s: Hold/Detail = %q/%q, want %q with the retry detail", tc.name, got.Hold, got.Detail, reasonFeedbackUnreadable)
+			}
+			if len(got.ActorHeld) != 0 || len(got.ActorRevoked) != 0 || len(got.Resolved) != 0 || len(got.Reopened) != 0 {
+				t.Errorf("%s: got %+v, want no key moved or held", tc.name, got)
+			}
+			if !reflect.DeepEqual(got.Pending, tc.pending) {
+				t.Errorf("%s: Pending = %v, want %v", tc.name, got.Pending, tc.pending)
+			}
+		}
+	})
+	t.Run("attestations of keys GitHub now reports unresolved are dropped, the others kept", func(t *testing.T) {
+		fs := feedbackState{
+			Threads: map[int64]threadState{
+				5: {Author: "alice"},            // reopened: attested key, now unresolved
+				6: resolvedThread(bot, "alice"), // still resolved by the attested actor
+				// 7 absent: unknown never drops
+			},
+			ReviewsComplete: true,
+			Actors:          okActors(nil),
+			Attestations: map[string]actorAttestation{
+				"comment:5": {Actor: bot}, "comment:6": {Actor: bot}, "comment:7": {Actor: bot},
+			},
+		}
+		got := classifyFeedback([]string{"comment:6", "comment:7"}, []string{"comment:5"}, fs)
+
+		if !reflect.DeepEqual(got.AttestationDrops, []string{"comment:5"}) {
+			t.Errorf("AttestationDrops = %v, want [comment:5]", got.AttestationDrops)
+		}
+		if !reflect.DeepEqual(got.Reopened, []string{"comment:5"}) {
+			t.Errorf("Reopened = %v, want [comment:5]: the dropped attestation's key goes back through the ordinary reopen path", got.Reopened)
+		}
+		if !reflect.DeepEqual(got.Resolved, []string{"comment:6"}) {
+			t.Errorf("Resolved = %v, want [comment:6]: the attestation still vouches for the actor GitHub reports", got.Resolved)
+		}
+	})
+}
+
+// reconcileFeedback applies the actor verdict onto State.
+func TestReconcileFeedbackAppliesTheActorVerdict(t *testing.T) {
+	const bot = defaultAutomationLogin
+	run := func(t *testing.T, s *State, thread string, actors *actorContext) feedbackVerdict {
+		t.Helper()
+		var calls [][]string
+		scriptedGraphQLCommand(t, []string{thread}, &calls)
+		return reconcileFeedback(s, nil, true, actors)
+	}
+	resolvedBy := func(resolver string) string {
+		return threadsResponse(actorThreadNode(true, resolver, threadComment(5, "alice")))
+	}
+
+	t.Run("a pending key resolved by the automation login is held, not addressed", func(t *testing.T) {
+		s := &State{Repo: "o/r", PR: "42", PendingKeys: []string{"comment:5"}, LaunchedKeys: []string{"comment:5"}, PendingCommentAt: "2026-01-01T00:00:00Z"}
+		verdict := run(t, s, resolvedBy(bot), okActors(nil))
+
+		if verdict.Hold != reasonResolutionActorUnauthorized {
+			t.Errorf("Hold = %q, want %q", verdict.Hold, reasonResolutionActorUnauthorized)
+		}
+		if !reflect.DeepEqual(s.PendingKeys, []string{"comment:5"}) || len(s.AddressedKeys) != 0 || !reflect.DeepEqual(s.LaunchedKeys, []string{"comment:5"}) {
+			t.Errorf("pending/addressed/launched = %v/%v/%v, want comment:5 left pending and launched", s.PendingKeys, s.AddressedKeys, s.LaunchedKeys)
+		}
+		if want := map[string]string{"comment:5": bot}; !reflect.DeepEqual(s.ActorHeldKeys, want) {
+			t.Errorf("ActorHeldKeys = %v, want %v", s.ActorHeldKeys, want)
+		}
+		if s.PendingCommentAt == "" || s.LastCommentAt != "" {
+			t.Errorf("PendingCommentAt/LastCommentAt = %q/%q, want the watermark not advanced for a held key", s.PendingCommentAt, s.LastCommentAt)
+		}
+	})
+	t.Run("an addressed key re-resolved by the automation login moves back to pending, held", func(t *testing.T) {
+		s := &State{Repo: "o/r", PR: "42", AddressedKeys: []string{"comment:5"}}
+		run(t, s, resolvedBy(bot), okActors(nil))
+
+		if !reflect.DeepEqual(s.PendingKeys, []string{"comment:5"}) || len(s.AddressedKeys) != 0 {
+			t.Errorf("pending/addressed = %v/%v, want comment:5 back in pending", s.PendingKeys, s.AddressedKeys)
+		}
+		if want := map[string]string{"comment:5": bot}; !reflect.DeepEqual(s.ActorHeldKeys, want) {
+			t.Errorf("ActorHeldKeys = %v, want %v", s.ActorHeldKeys, want)
+		}
+	})
+	t.Run("a held key an authorized actor now resolves is addressed and leaves the held set", func(t *testing.T) {
+		s := &State{Repo: "o/r", PR: "42", PendingKeys: []string{"comment:5"}, LaunchedKeys: []string{"comment:5"}, ActorHeldKeys: map[string]string{"comment:5": bot}}
+		run(t, s, resolvedBy("alice"), okActors(nil))
+
+		if len(s.PendingKeys) != 0 || !reflect.DeepEqual(s.AddressedKeys, []string{"comment:5"}) || len(s.ActorHeldKeys) != 0 {
+			t.Errorf("pending/addressed/held = %v/%v/%v, want comment:5 addressed and released", s.PendingKeys, s.AddressedKeys, s.ActorHeldKeys)
+		}
+	})
+	t.Run("a held key GitHub reports unresolved again leaves the held set", func(t *testing.T) {
+		s := &State{Repo: "o/r", PR: "42", PendingKeys: []string{"comment:5"}, LaunchedKeys: []string{"comment:5"}, ActorHeldKeys: map[string]string{"comment:5": bot}}
+		run(t, s, threadsResponse(actorThreadNode(false, "", threadComment(5, "alice"))), okActors(nil))
+
+		if !reflect.DeepEqual(s.PendingKeys, []string{"comment:5"}) || len(s.ActorHeldKeys) != 0 {
+			t.Errorf("pending/held = %v/%v, want comment:5 pending and no longer held", s.PendingKeys, s.ActorHeldKeys)
+		}
+	})
+	t.Run("an unknown permission leaves a held key's membership unchanged", func(t *testing.T) {
+		f := newFakeActors()
+		f.perms["outsider"] = writePermissionUnknown
+		s := &State{Repo: "o/r", PR: "42", PendingKeys: []string{"comment:5"}, ActorHeldKeys: map[string]string{"comment:5": bot}}
+		verdict := run(t, s, resolvedBy("outsider"), f.ctx())
+
+		if verdict.Hold != reasonFeedbackUnreadable {
+			t.Errorf("Hold = %q, want %q", verdict.Hold, reasonFeedbackUnreadable)
+		}
+		if want := map[string]string{"comment:5": bot}; !reflect.DeepEqual(s.ActorHeldKeys, want) || !reflect.DeepEqual(s.PendingKeys, []string{"comment:5"}) {
+			t.Errorf("held/pending = %v/%v, want both unchanged", s.ActorHeldKeys, s.PendingKeys)
+		}
+	})
+	t.Run("a key GitHub no longer reports keeps its held membership", func(t *testing.T) {
+		s := &State{Repo: "o/r", PR: "42", PendingKeys: []string{"comment:5"}, ActorHeldKeys: map[string]string{"comment:5": bot}}
+		verdict := run(t, s, threadsResponse(actorThreadNode(true, "alice", threadComment(999, "alice"))), okActors(nil))
+
+		if verdict.Hold != reasonReviewStateUnknown {
+			t.Errorf("Hold = %q, want %q", verdict.Hold, reasonReviewStateUnknown)
+		}
+		if want := map[string]string{"comment:5": bot}; !reflect.DeepEqual(s.ActorHeldKeys, want) {
+			t.Errorf("ActorHeldKeys = %v, want %v unchanged", s.ActorHeldKeys, want)
+		}
+	})
+	t.Run("a key GitHub reports unresolved drops its attestation, a resolved one keeps it", func(t *testing.T) {
+		attest := func(keys ...string) map[string]actorAttestation {
+			m := map[string]actorAttestation{}
+			for _, k := range keys {
+				m[k] = actorAttestation{Actor: bot, Source: attestationSourceHumanCLI}
+			}
+			return m
+		}
+		s := &State{Repo: "o/r", PR: "42", AddressedKeys: []string{"comment:5", "comment:6"}, ActorAttestations: attest("comment:5", "comment:6")}
+		page := threadsResponse(
+			actorThreadNode(false, "", threadComment(5, "alice")),
+			actorThreadNode(true, bot, threadComment(6, "alice")),
+		)
+		run(t, s, page, okActors(nil))
+
+		if !reflect.DeepEqual(s.ActorAttestations, attest("comment:6")) {
+			t.Errorf("ActorAttestations = %v, want only comment:6 kept", s.ActorAttestations)
+		}
+		if !reflect.DeepEqual(s.PendingKeys, []string{"comment:5"}) || !reflect.DeepEqual(s.AddressedKeys, []string{"comment:6"}) {
+			t.Errorf("pending/addressed = %v/%v, want comment:5 reopened and comment:6 still addressed (the attestation vouches)", s.PendingKeys, s.AddressedKeys)
+		}
+	})
+}
+
+// A pass-level failure -- the automation identity, an unreadable timeline, a truncated
+// timeline -- is a fetch-level hold: it names its own reason, and NO key moves in either
+// direction, not even the ones that needed no lookup.
+func TestReconcileFeedbackActorLookupFailureHoldsTheWholePassWithNothingMoved(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		actors     func() *actorContext
+		wantHold   string
+		wantDetail string
+	}{
+		{"the automation identity lookup fails", func() *actorContext {
+			f := newFakeActors()
+			f.loginErr = errors.New("gh: api user failed")
+			return f.ctx()
+		}, reasonFeedbackUnreadable, "automation identity lookup failed"},
+		{"the dismissal timeline is unreadable", func() *actorContext {
+			f := newFakeActors()
+			f.dismissalsErr = errors.New("gh: timeline failed")
+			return f.ctx()
+		}, reasonFeedbackUnreadable, ""},
+		{"the dismissal timeline is truncated", func() *actorContext {
+			f := newFakeActors()
+			f.dismissalsErr = fmt.Errorf("%w: exceeded maxThreadPages", errFeedbackTruncated)
+			return f.ctx()
+		}, reasonFeedbackTruncated, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls [][]string
+			// comment:1 would resolve (its own author); review:10 needs the timeline.
+			scriptedGraphQLCommand(t, []string{threadsResponse(actorThreadNode(true, "alice", threadComment(1, "alice")))}, &calls)
+			s := &State{Repo: "o/r", PR: "42", PendingKeys: []string{"comment:1", "review:10"}, AddressedKeys: []string{"review:20"},
+				ActorHeldKeys: map[string]string{"review:10": "x"}}
+
+			verdict := reconcileFeedback(s, dismissedAndOther(), true, tc.actors())
+
+			if verdict.Hold != tc.wantHold {
+				t.Errorf("Hold = %q, want %q", verdict.Hold, tc.wantHold)
+			}
+			if !strings.Contains(verdict.Detail, tc.wantDetail) {
+				t.Errorf("Detail = %q, want it to contain %q", verdict.Detail, tc.wantDetail)
+			}
+			if !reflect.DeepEqual(s.PendingKeys, []string{"comment:1", "review:10"}) || !reflect.DeepEqual(s.AddressedKeys, []string{"review:20"}) || !reflect.DeepEqual(s.ActorHeldKeys, map[string]string{"review:10": "x"}) {
+				t.Errorf("pending/addressed/held = %v/%v/%v, want every key where it was", s.PendingKeys, s.AddressedKeys, s.ActorHeldKeys)
+			}
+		})
+	}
+}
+
+// dismissedAndOther is review 10 DISMISSED and review 20 DISMISSED, both by alice.
+func dismissedAndOther() []review {
+	return []review{
+		{ID: 10, State: "DISMISSED", SubmittedAt: "2026-01-02T00:00:00Z", User: login("alice")},
+		{ID: 20, State: "DISMISSED", SubmittedAt: "2026-01-02T00:00:00Z", User: login("alice")},
+	}
+}
+
+// AC 39: heldUntrustedNote renders, for each held comment:/review: key, `resolve <key>
+// on GitHub, then run `cenci babysit resolve <pr> <key>` if it was resolved as the
+// automation login`; a discussion key keeps its own `run `cenci babysit resolve ...“
+// step. The exact rendered string is asserted.
+func TestHeldUntrustedNoteRendersTheGitHubThenResolveRecovery(t *testing.T) {
+	const prefix = "untrusted feedback held for a write-access human (its author lacks write permission, or its untrusted launch cap is used up); once handled, "
+	got := heldUntrustedNote("42", []string{"discussion:11", "comment:7", "review:9"})
+	want := prefix +
+		"run `cenci babysit resolve 42 discussion:11`; " +
+		"resolve comment:7 on GitHub, then run `cenci babysit resolve 42 comment:7` if it was resolved as the automation login; " +
+		"resolve review:9 on GitHub, then run `cenci babysit resolve 42 review:9` if it was resolved as the automation login"
+	if got != want {
+		t.Fatalf("heldUntrustedNote =\n%q\nwant\n%q", got, want)
 	}
 }
 
@@ -837,7 +1400,7 @@ func TestReconcileFeedbackDiscussionOnlyStateMakesNoGraphQLCallAndKeepsEveryKey(
 	scriptedGraphQLCommand(t, nil, &calls) // any call fails the test
 	s := &State{Repo: "o/r", PR: "42", PendingKeys: []string{"discussion:11"}, AddressedKeys: []string{"discussion:9"}, LaunchedKeys: []string{"discussion:11"}}
 
-	verdict := reconcileFeedback(s, nil, true)
+	verdict := reconcileFeedback(s, nil, true, okActors(nil))
 
 	if verdict.Hold != "" || len(verdict.Reopened) != 0 {
 		t.Errorf("verdict = %+v, want clean: a discussion key is not an unsupported key type", verdict)
@@ -854,10 +1417,10 @@ func TestReconcileFeedbackDiscussionOnlyStateMakesNoGraphQLCallAndKeepsEveryKey(
 // pending in their original positions' relative order.
 func TestReconcileFeedbackMixedStateResolvesOnlyTheCommentKeys(t *testing.T) {
 	var calls [][]string
-	scriptedGraphQLCommand(t, []string{threadPage(false, "", threadNode(true, 1, 7))}, &calls)
+	scriptedGraphQLCommand(t, []string{threadsResponse(actorThreadNode(true, "alice", threadComment(7, "alice")))}, &calls)
 	s := &State{Repo: "o/r", PR: "42", PendingKeys: []string{"discussion:11", "comment:7"}, LaunchedKeys: []string{"discussion:11", "comment:7"}}
 
-	reconcileFeedback(s, nil, true)
+	reconcileFeedback(s, nil, true, okActors(nil))
 
 	if !reflect.DeepEqual(s.PendingKeys, []string{"discussion:11"}) || !reflect.DeepEqual(s.AddressedKeys, []string{"comment:7"}) || !reflect.DeepEqual(s.LaunchedKeys, []string{"discussion:11"}) {
 		t.Errorf("pending %v addressed %v launched %v, want comment:7 resolved and discussion:11 untouched", s.PendingKeys, s.AddressedKeys, s.LaunchedKeys)
