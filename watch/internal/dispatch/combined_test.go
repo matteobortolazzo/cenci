@@ -86,6 +86,39 @@ func TestOOMExhaustedTicketCountsOnceAsFailedWindow(t *testing.T) {
 	}
 }
 
+// After a combined (daemon) pass that spawns two workers, DispatchState reports
+// LastDispatched 2 (#1566): the count comes from the pass's own decisions, not
+// from an in-memory quota tally. A pass that spawns nothing reports 0.
+func TestCombinedTickLastDispatchedCountsSpawnedWorkers(t *testing.T) {
+	loop := newFilterLoop(t, watch.StateSnapshot{},
+		filterPassIssue{number: 42, milestone: 3}, filterPassIssue{number: 43, milestone: 3})
+	spawned := recordSpawns(t)
+	state := watch.DispatchState{DaemonRunning: true}
+	var windows []watch.WindowState
+	var headroom map[string]float64
+	attention := make(chan watch.AttentionUpdate, 2)
+	var buf bytes.Buffer
+
+	loop.write(t, "")
+	combinedTick(context.Background(), loop.path, fakeController{}, &fakeMutator{}, &buf, &memStore{}, attention, &state, &windows, &headroom)
+
+	if !reflect.DeepEqual(*spawned, []string{"42", "43"}) {
+		t.Fatalf("spawned %v, want tickets 42 and 43\n%s", *spawned, buf.String())
+	}
+	if state.LastDispatched != 2 {
+		t.Errorf("LastDispatched = %d, want 2", state.LastDispatched)
+	}
+
+	// Nothing eligible the next pass (a milestone filter excludes both): 0, not
+	// the running total.
+	drainAttention(attention)
+	loop.write(t, filterMilestone7)
+	combinedTick(context.Background(), loop.path, fakeController{}, &fakeMutator{}, &buf, &memStore{}, attention, &state, &windows, &headroom)
+	if state.LastDispatched != 0 {
+		t.Errorf("LastDispatched = %d after a pass that spawned nothing, want 0", state.LastDispatched)
+	}
+}
+
 // --- combinedTick headroom wiring (#169) ---
 //
 // combinedTick computes per-agent-type headroom from the same UsageProvider
@@ -114,8 +147,6 @@ func TestCombinedTickPushesHeadroomWhenAgentLimitsConfigured(t *testing.T) {
 	writeDispatchConfig(t, configPath, fmt.Sprintf(
 		`{"dispatch":{"loopEnabled":true,"repos":[],"agentLimits":{"claude":{"fiveHourTokens":10000,"weeklyTokens":100000}},"claudeSessionDir":%q}}`,
 		sessionDir))
-
-	prior := 0
 	mut := &fakeMutator{}
 	store := &memStore{}
 	// Capacity 2: an enabled tick sends a start-of-tick and an end-of-tick
@@ -127,7 +158,7 @@ func TestCombinedTickPushesHeadroomWhenAgentLimitsConfigured(t *testing.T) {
 	var windows []watch.WindowState
 	var headroom map[string]float64
 
-	combinedTick(ctx, configPath, fakeController{}, mut, &buf, &prior, store, attention, &state, &windows, &headroom)
+	combinedTick(ctx, configPath, fakeController{}, mut, &buf, store, attention, &state, &windows, &headroom)
 
 	<-attention // start-of-tick: headroom is computed only in the end-of-tick publish.
 
@@ -163,8 +194,6 @@ func TestCombinedTickStartOfTickReusesPreviousEndOfTickHeadroom(t *testing.T) {
 	writeDispatchConfig(t, configPath, fmt.Sprintf(
 		`{"dispatch":{"loopEnabled":true,"repos":[],"agentLimits":{"claude":{"fiveHourTokens":10000,"weeklyTokens":100000}},"claudeSessionDir":%q}}`,
 		sessionDir))
-
-	prior := 0
 	mut := &fakeMutator{}
 	store := &memStore{}
 	attention := make(chan watch.AttentionUpdate, 2)
@@ -174,7 +203,7 @@ func TestCombinedTickStartOfTickReusesPreviousEndOfTickHeadroom(t *testing.T) {
 	var windows []watch.WindowState
 	var headroom map[string]float64
 
-	combinedTick(ctx, configPath, fakeController{}, mut, &buf, &prior, store, attention, &state, &windows, &headroom)
+	combinedTick(ctx, configPath, fakeController{}, mut, &buf, store, attention, &state, &windows, &headroom)
 
 	<-attention // tick 1 start-of-tick: nothing published yet, headroom still nil.
 	tick1End := <-attention
@@ -182,7 +211,7 @@ func TestCombinedTickStartOfTickReusesPreviousEndOfTickHeadroom(t *testing.T) {
 		t.Fatalf("expected tick 1 end-of-tick to carry a non-empty headroom map, got %v", tick1End.Headroom)
 	}
 
-	combinedTick(ctx, configPath, fakeController{}, mut, &buf, &prior, store, attention, &state, &windows, &headroom)
+	combinedTick(ctx, configPath, fakeController{}, mut, &buf, store, attention, &state, &windows, &headroom)
 
 	tick2Start := <-attention
 	if !reflect.DeepEqual(tick2Start.Headroom, tick1End.Headroom) {
@@ -194,8 +223,6 @@ func TestCombinedTickStartOfTickReusesPreviousEndOfTickHeadroom(t *testing.T) {
 func TestCombinedTickHeadroomEmptyWhenNoAgentLimitsConfigured(t *testing.T) {
 	dir := t.TempDir()
 	path := seedDispatchConfig(t, dir, "o/A")
-
-	prior := 0
 	mut := &fakeMutator{}
 	store := &memStore{}
 	attention := make(chan watch.AttentionUpdate, 2)
@@ -205,7 +232,7 @@ func TestCombinedTickHeadroomEmptyWhenNoAgentLimitsConfigured(t *testing.T) {
 	var windows []watch.WindowState
 	var headroom map[string]float64
 
-	combinedTick(ctx, path, fakeController{}, mut, &buf, &prior, store, attention, &state, &windows, &headroom)
+	combinedTick(ctx, path, fakeController{}, mut, &buf, store, attention, &state, &windows, &headroom)
 
 	<-attention // start-of-tick: headroom is computed only in the end-of-tick publish.
 
@@ -263,8 +290,6 @@ func TestSanitizeLastError(t *testing.T) {
 func TestCombinedTickRetainsPriorBadgesWhenReconcileStateUnreadable(t *testing.T) {
 	dir := t.TempDir()
 	path := seedDispatchConfig(t, dir, "o/A")
-
-	prior := 0
 	mut := &fakeMutator{}
 	store := &sentinelLoadFailingStore{}
 	attention := make(chan watch.AttentionUpdate, 2)
@@ -277,7 +302,7 @@ func TestCombinedTickRetainsPriorBadgesWhenReconcileStateUnreadable(t *testing.T
 	}
 	var headroom map[string]float64
 
-	combinedTick(ctx, path, fakeController{}, mut, &buf, &prior, store, attention, &state, &windows, &headroom)
+	combinedTick(ctx, path, fakeController{}, mut, &buf, store, attention, &state, &windows, &headroom)
 
 	<-attention // start-of-tick
 	<-attention // end-of-tick
@@ -311,8 +336,6 @@ func TestCombinedTickClearsPriorBadgesWhenReconcileSucceeds(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
 	writeDispatchConfig(t, configPath, `{"dispatch":{"loopEnabled":true,"repos":[]}}`)
-
-	prior := 0
 	mut := &fakeMutator{}
 	store := &memStore{}
 	attention := make(chan watch.AttentionUpdate, 2)
@@ -325,7 +348,7 @@ func TestCombinedTickClearsPriorBadgesWhenReconcileSucceeds(t *testing.T) {
 	}
 	var headroom map[string]float64
 
-	combinedTick(ctx, configPath, fakeController{}, mut, &buf, &prior, store, attention, &state, &windows, &headroom)
+	combinedTick(ctx, configPath, fakeController{}, mut, &buf, store, attention, &state, &windows, &headroom)
 
 	<-attention // start-of-tick
 	<-attention // end-of-tick

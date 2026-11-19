@@ -9,7 +9,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/capacity"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/dispatch"
 	"github.com/matteobortolazzo/cenci/watch/v2/pkg/watch"
 )
@@ -1020,6 +1022,155 @@ func TestDispatchStatus_InvalidMemoryHeadroomExits1(t *testing.T) {
 				t.Errorf("output = %q must not render a status for an invalid config", output)
 			}
 		})
+	}
+}
+
+// -- dispatch status: the dailyQuota line (#1566) ------------------------------
+
+// quotaStatusRun runs `cenci dispatch status` for a repo whose config carries
+// the raw dailyQuota fragment (empty for none), with XDG_STATE_HOME pointed at
+// stateHome so the binary reads only the capacity store the test owns.
+func quotaStatusRun(t *testing.T, stateHome, extra string, extraArgs ...string) (string, error) {
+	t.Helper()
+	useTempSocketDir(t)
+	dir := initGitRemote(t, "git@github.com:owner/name.git")
+	configPath := writeStatusConfig(t, dir, extra)
+	args := append([]string{"dispatch", "status", "--dir", dir, "--config", configPath}, extraArgs...)
+	cmd := exec.Command(binaryPath, args...)
+	cmd.Env = append(os.Environ(), "XDG_STATE_HOME="+stateHome)
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+// seedQuotaFile writes content as the persisted quota file under stateHome and
+// returns its path. The directories are 0700, as the store requires.
+func seedQuotaFile(t *testing.T, stateHome, content string) string {
+	t.Helper()
+	capDir := filepath.Join(stateHome, "cenci", "capacity")
+	if err := os.MkdirAll(capDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range []string{stateHome, filepath.Join(stateHome, "cenci"), capDir} {
+		if err := os.Chmod(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	path := filepath.Join(capDir, "daily-quota.json")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// `dailyQuota: off` for an absent key and for the explicit "off", with the store
+// never created: an opted-out host's status read touches nothing.
+func TestDispatchStatus_HumanOutput_DailyQuotaOff(t *testing.T) {
+	for name, extra := range map[string]string{"absent": "", `"off"`: `"dailyQuota": "off"`} {
+		t.Run(name, func(t *testing.T) {
+			stateHome := t.TempDir()
+			out, err := quotaStatusRun(t, stateHome, extra)
+			if err != nil {
+				t.Fatalf("dispatch status: %v\n%s", err, out)
+			}
+			if !strings.Contains(out, "dailyQuota: off\n") {
+				t.Errorf("status output = %q, want the line %q", out, "dailyQuota: off")
+			}
+			if _, statErr := os.Lstat(filepath.Join(stateHome, "cenci")); !os.IsNotExist(statErr) {
+				t.Errorf("a status read with the quota off created the state tree (Lstat err = %v)", statErr)
+			}
+		})
+	}
+}
+
+// `dailyQuota: N per local day (used X)` from the persisted count: 0 before any
+// launch (and nothing created by the read), the seeded count for today, and 0
+// for a stored date that is not today.
+func TestDispatchStatus_HumanOutput_DailyQuotaUsed(t *testing.T) {
+	t.Run("no store yet reads 0 and creates nothing", func(t *testing.T) {
+		stateHome := t.TempDir()
+		out, err := quotaStatusRun(t, stateHome, `"dailyQuota": 3`)
+		if err != nil {
+			t.Fatalf("dispatch status: %v\n%s", err, out)
+		}
+		if want := "dailyQuota: 3 per local day (used 0)\n"; !strings.Contains(out, want) {
+			t.Errorf("status output = %q, want it to contain %q", out, want)
+		}
+		if _, statErr := os.Lstat(filepath.Join(stateHome, "cenci")); !os.IsNotExist(statErr) {
+			t.Errorf("a status read created the state tree (Lstat err = %v)", statErr)
+		}
+	})
+
+	t.Run("today's count", func(t *testing.T) {
+		const want = "dailyQuota: 3 per local day (used 2)\n"
+		// The only way a run can miss is a local midnight between the seed and
+		// the read; one retry reseeds against the new day.
+		var out string
+		var err error
+		for range 2 {
+			stateHome := t.TempDir()
+			seedQuotaFile(t, stateHome, fmt.Sprintf(`{"schema":1,"date":%q,"used":2}`, time.Now().Format("2006-01-02")))
+			out, err = quotaStatusRun(t, stateHome, `"dailyQuota": 3`)
+			if err == nil && strings.Contains(out, want) {
+				return
+			}
+		}
+		t.Errorf("status output = %q (err %v), want it to contain %q", out, err, want)
+	})
+
+	t.Run("another day's count reads 0", func(t *testing.T) {
+		stateHome := t.TempDir()
+		seedQuotaFile(t, stateHome, `{"schema":1,"date":"2000-01-01","used":9}`)
+		out, err := quotaStatusRun(t, stateHome, `"dailyQuota": 3`)
+		if err != nil {
+			t.Fatalf("dispatch status: %v\n%s", err, out)
+		}
+		if want := "dailyQuota: 3 per local day (used 0)\n"; !strings.Contains(out, want) {
+			t.Errorf("status output = %q, want it to contain %q", out, want)
+		}
+	})
+}
+
+// An unreadable state still exits 0 and names the reason in place of the count,
+// without rewriting the file.
+func TestDispatchStatus_HumanOutput_DailyQuotaUnreadable(t *testing.T) {
+	stateHome := t.TempDir()
+	path := seedQuotaFile(t, stateHome, "{definitely not a quota file")
+	out, err := quotaStatusRun(t, stateHome, `"dailyQuota": 3`)
+	if err != nil {
+		t.Fatalf("dispatch status exited non-zero for an unreadable quota state: %v\n%s", err, out)
+	}
+	if want := "dailyQuota: 3 per local day (daily quota state unreadable: " + capacity.ErrCorrupt.Error() + ")\n"; !strings.Contains(out, want) {
+		t.Errorf("status output = %q, want it to contain %q", out, want)
+	}
+	if got, _ := os.ReadFile(path); string(got) != "{definitely not a quota file" {
+		t.Errorf("a status read rewrote the quota file: %q", got)
+	}
+}
+
+// The line sits right after the memory-headroom line, and --json is unchanged:
+// no dailyQuota key appears.
+func TestDispatchStatus_DailyQuotaLinePlacementAndJSONUnchanged(t *testing.T) {
+	out, err := quotaStatusRun(t, t.TempDir(), `"dailyQuota": 3`)
+	if err != nil {
+		t.Fatalf("dispatch status: %v\n%s", err, out)
+	}
+	headroom := strings.Index(out, "Memory headroom: ")
+	quota := strings.Index(out, "dailyQuota: ")
+	filters := strings.Index(out, "Filters: ")
+	if headroom < 0 || quota < headroom || filters < quota {
+		t.Errorf("status output = %q, want the dailyQuota line after the memory-headroom line and before the filters", out)
+	}
+
+	jsonOut, err := quotaStatusRun(t, t.TempDir(), `"dailyQuota": 3`, "--json")
+	if err != nil {
+		t.Fatalf("dispatch status --json: %v\n%s", err, jsonOut)
+	}
+	var raw map[string]any
+	if uerr := json.Unmarshal([]byte(jsonOut), &raw); uerr != nil {
+		t.Fatalf("unmarshal status --json output %q: %v", jsonOut, uerr)
+	}
+	if _, present := raw["dailyQuota"]; present {
+		t.Errorf("status --json output %s gained a dailyQuota key; the JSON shape is unchanged", jsonOut)
 	}
 }
 

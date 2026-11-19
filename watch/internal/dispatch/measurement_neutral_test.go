@@ -84,7 +84,7 @@ func runNeutralPass(t *testing.T, cfg Config, deps dispatchDeps) []Decision {
 		t.Error("a dry-run pass must never spawn")
 		return nil
 	})
-	decisions, err := applyDispatch(cfg, deps, fakeController{}, &fakeMutator{}, true, io.Discard, nil)
+	decisions, err := applyDispatch(cfg, deps, fakeController{}, &fakeMutator{}, true, io.Discard)
 	if err != nil {
 		t.Fatalf("applyDispatch returned unexpected error: %v", err)
 	}
@@ -116,7 +116,7 @@ func TestNativeMeasurementNeutralDecisions(t *testing.T) {
 			want: []neutralWant{{42, ActionSkip, reasonConcurrencyCap}},
 		},
 		{
-			name: "budget exhausted through agentBudgetFloors",
+			name: "estimated token budget exhausted through agentBudgetFloors",
 			cfg: func(*testing.T) Config {
 				cfg := dispatchTestConfig()
 				cfg.AgentBudgetFloors = map[string]float64{"claude": 0}
@@ -126,7 +126,7 @@ func TestNativeMeasurementNeutralDecisions(t *testing.T) {
 				return withSnapshot(dispatchableDeps(now), 1,
 					watch.WindowState{WindowName: "7-implement", Status: "running", Agent: "claude"})
 			},
-			want: []neutralWant{{42, ActionSkip, "budget exhausted"}},
+			want: []neutralWant{{42, ActionSkip, "estimated token budget exhausted"}},
 			control: func(t *testing.T, cfg Config, now time.Time) {
 				t.Helper()
 				provider := buildBudgetProvider(cfg, now)

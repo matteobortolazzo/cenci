@@ -791,6 +791,19 @@ before `Decide`, and hands it in as `Inputs.SessionEligibility`. `gateSessions` 
   → **plan authorization** → concurrency cap → daily quota → quiet hours → agent checks.
   Both new gates are skips that sit ahead of the cap, so an ineligible or held ticket
   never holds a slot another repo could use, and never counts toward the daily quota.
+  The daily quota (#1566) is opt-in (`dispatch.dailyQuota`, absent or `"off"` means no
+  gate and no store access) and persisted per local day under
+  `$XDG_STATE_HOME/cenci/capacity/`, not counted in memory. `applyDispatch` reads it
+  once before `Decide` into `Inputs.DailyQuota` (so the gate stays pure) and records
+  one launch after each successful spawn, a dry run reading without a lock and
+  recording nothing. It fails closed while a quota is set: an unreadable, corrupt,
+  unknown-schema or symlinked state, or a set quota whose state was never populated
+  (`not read this pass`), skips with `daily quota state unreadable: <reason>`. A failed
+  record is logged, never returned (RunLoop treats a returned error as fatal). A
+  corrupt, unknown-schema or symlinked file fails closed on the next pass's read, but a
+  write failure that leaves a valid file (disk full, read-only capacity directory, lock
+  timeout) undercounts until the state is writable again: a known limitation, tracked
+  as a follow-up.
   Session eligibility applies to every pickup type, because each one launches into the
   repo's session. An unrecognized verdict default-denies with
   `session eligibility unrecognized`.

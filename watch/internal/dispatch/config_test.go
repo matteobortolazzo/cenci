@@ -730,6 +730,155 @@ func TestLoadConfig_OOM_RejectsInvalid(t *testing.T) {
 	}
 }
 
+// -- dispatch.dailyQuota (#1566) -------------------------------------------------
+
+// writeDailyQuotaConfig writes a config.json whose dispatch block carries raw
+// under dailyQuota (the key is left out when raw is empty) and returns its path.
+func writeDailyQuotaConfig(t *testing.T, raw string) string {
+	t.Helper()
+	body := `{"dispatch": {"concurrencyCap": 2`
+	if raw != "" {
+		body += `, "dailyQuota": ` + raw
+	}
+	body += `}}`
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("writing config: %v", err)
+	}
+	return path
+}
+
+// TestLoadConfig_DailyQuota_OffAndAbsentAreNil: an absent key and the explicit
+// "off" both leave the quota unset, whatever the shape of the file, so the two
+// behave identically across LoadConfig.
+func TestLoadConfig_DailyQuota_OffAndAbsentAreNil(t *testing.T) {
+	noDispatchBlock := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(noDispatchBlock, []byte(`{"planning": {"attended": false}}`), 0o600); err != nil {
+		t.Fatalf("writing config: %v", err)
+	}
+	paths := map[string]string{
+		"key absent":      writeDailyQuotaConfig(t, ""),
+		`"off"`:           writeDailyQuotaConfig(t, `"off"`),
+		"no dispatch key": noDispatchBlock,
+		"no config file":  filepath.Join(t.TempDir(), "absent.json"),
+	}
+	for name, path := range paths {
+		t.Run(name, func(t *testing.T) {
+			cfg, err := LoadConfig(path)
+			if err != nil {
+				t.Fatalf("LoadConfig: %v", err)
+			}
+			if cfg.DailyQuota != nil {
+				t.Errorf("cfg.DailyQuota = %d, want nil (off)", *cfg.DailyQuota)
+			}
+		})
+	}
+}
+
+// TestLoadConfig_DailyQuota_IntegersAreKept: an explicit integer restricts, and
+// an explicit 0 is kept (it pauses) rather than read as unset.
+func TestLoadConfig_DailyQuota_IntegersAreKept(t *testing.T) {
+	for _, tc := range []struct {
+		raw  string
+		want int
+	}{{`3`, 3}, {`0`, 0}, {`20`, 20}} {
+		t.Run(tc.raw, func(t *testing.T) {
+			cfg, err := LoadConfig(writeDailyQuotaConfig(t, tc.raw))
+			if err != nil {
+				t.Fatalf("LoadConfig: %v", err)
+			}
+			if cfg.DailyQuota == nil || *cfg.DailyQuota != tc.want {
+				t.Errorf("cfg.DailyQuota = %v, want %d", cfg.DailyQuota, tc.want)
+			}
+		})
+	}
+}
+
+// TestLoadConfig_DailyQuota_RejectsInvalid: null, negatives, non-integers and
+// every string other than the exact lowercase "off" (including "OFF" and "5") are
+// config errors that name dispatch.dailyQuota and the config path.
+func TestLoadConfig_DailyQuota_RejectsInvalid(t *testing.T) {
+	cases := []struct{ name, raw string }{
+		{"null", `null`},
+		{"negative", `-1`},
+		{"fractional", `1.5`},
+		{"uppercase off", `"OFF"`},
+		{"numeric string", `"5"`},
+		{"other string", `"unlimited"`},
+		{"empty string", `""`},
+		{"boolean", `true`},
+		{"object", `{}`},
+		{"array", `[3]`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeDailyQuotaConfig(t, tc.raw)
+			_, err := LoadConfig(path)
+			if err == nil {
+				t.Fatalf("LoadConfig with dailyQuota %s returned nil error, want an error", tc.raw)
+			}
+			if !strings.Contains(err.Error(), "dispatch.dailyQuota") {
+				t.Errorf("error %q must name dispatch.dailyQuota", err)
+			}
+			if !strings.Contains(err.Error(), path) {
+				t.Errorf("error %q must name the config path %s", err, path)
+			}
+		})
+	}
+}
+
+// TestLoadConfig_DailyQuota_InvalidReturnsUnmergedDefaults: an invalid quota
+// aborts the load before the merge, so a caller that ignores the error cannot
+// read a half-applied config.
+func TestLoadConfig_DailyQuota_InvalidReturnsUnmergedDefaults(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"dispatch": {"concurrencyCap": 9, "dailyQuota": "OFF"}}`), 0o600); err != nil {
+		t.Fatalf("writing config: %v", err)
+	}
+	cfg, err := LoadConfig(path)
+	if err == nil {
+		t.Fatal("LoadConfig returned nil error for dailyQuota \"OFF\"")
+	}
+	if cfg.ConcurrencyCap != DefaultConfig().ConcurrencyCap || cfg.DailyQuota != nil {
+		t.Errorf("failed load returned cap=%d quota=%v, want the unmerged defaults", cfg.ConcurrencyCap, cfg.DailyQuota)
+	}
+}
+
+// TestDefaultConfig_PinnedValues: the defaults #1566 must not disturb, plus the
+// new off-by-default quota.
+func TestDefaultConfig_PinnedValues(t *testing.T) {
+	def := DefaultConfig()
+	if def.MemoryHeadroom != 25 {
+		t.Errorf("MemoryHeadroom = %d, want 25", def.MemoryHeadroom)
+	}
+	if def.OOMRetryBudget != 3 {
+		t.Errorf("OOMRetryBudget = %d, want 3", def.OOMRetryBudget)
+	}
+	if def.OOMBackoff != 10*time.Minute {
+		t.Errorf("OOMBackoff = %s, want 10m", def.OOMBackoff)
+	}
+	if def.RetryBudget != 2 {
+		t.Errorf("RetryBudget = %d, want 2", def.RetryBudget)
+	}
+	if def.DailyQuota != nil {
+		t.Errorf("DailyQuota = %d, want nil (off by default)", *def.DailyQuota)
+	}
+}
+
+// TestBuildBudgetProvider_DefaultConfigIsUnlimited: with agentLimits and
+// agentBudgetFloors omitted, every agent's budget is Unlimited.
+func TestBuildBudgetProvider_DefaultConfigIsUnlimited(t *testing.T) {
+	now := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
+	provider := buildBudgetProvider(DefaultConfig(), now)
+	for _, agent := range []string{"claude", "codex", "opencode"} {
+		t.Run(agent, func(t *testing.T) {
+			if b := provider.Budget(agent); !b.Unlimited {
+				t.Errorf("Budget(%q) = %+v, want Unlimited with the default config", agent, b)
+			}
+		})
+	}
+}
+
 // -- dispatch.repos[].filters (#1385) -------------------------------------------
 
 // TestLoadConfig_Filters_OldConfigKeepsCurrentBehavior: AC1, a config written
@@ -890,9 +1039,9 @@ func TestLoadConfig_Filters_FailedLoadReturnsUnmergedDefaults(t *testing.T) {
 		t.Fatal("LoadConfig returned nil error for an unknown filters key")
 	}
 	def := DefaultConfig()
-	if len(cfg.Repos) != 0 || cfg.ConcurrencyCap != def.ConcurrencyCap || cfg.DailyQuota != def.DailyQuota {
-		t.Errorf("failed load returned repos=%d cap=%d quota=%d, want the unmerged defaults (0, %d, %d)",
-			len(cfg.Repos), cfg.ConcurrencyCap, cfg.DailyQuota, def.ConcurrencyCap, def.DailyQuota)
+	if len(cfg.Repos) != 0 || cfg.ConcurrencyCap != def.ConcurrencyCap || cfg.DailyQuota != nil {
+		t.Errorf("failed load returned repos=%d cap=%d quota=%v, want the unmerged defaults (0, %d, nil)",
+			len(cfg.Repos), cfg.ConcurrencyCap, cfg.DailyQuota, def.ConcurrencyCap)
 	}
 }
 

@@ -26,9 +26,8 @@ func TestApplyDispatchSpawnsUnattended(t *testing.T) {
 
 	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
 	var buf bytes.Buffer
-	prior := 0
 
-	if _, err := applyDispatch(dispatchTestConfig(), dispatchableDeps(now), fakeController{}, &fakeMutator{}, false, &buf, &prior); err != nil {
+	if _, err := applyDispatch(dispatchTestConfig(), dispatchableDeps(now), fakeController{}, &fakeMutator{}, false, &buf); err != nil {
 		t.Fatalf("applyDispatch returned unexpected error: %v", err)
 	}
 

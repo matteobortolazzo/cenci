@@ -296,9 +296,14 @@ type Inputs struct {
 	Snapshot    *watch.StateSnapshot // nil ⇒ daemon unreachable
 	Budgets     BudgetProvider
 	Now         time.Time // injected clock value
-	Prior       int       // dispatches already counted in the current quota window
 	CurrentUser string    // active gh login; tickets must be solely assigned to it
 	Config      Config
+
+	// DailyQuota (#1566) is the once-per-pass read of the persisted daily launch
+	// count, resolved by applyDispatch before Decide runs so the gate stays pure.
+	// It is consulted only when Config.DailyQuota is set; a set quota with a
+	// zero-value state is denied, never permitted.
+	DailyQuota DailyQuotaState
 
 	// Answers maps planKey(repo, number) -> the resolved AnswerProbe for
 	// every ticket that carried `Input Needed` this pass (#827), resolved by
@@ -751,8 +756,8 @@ func decideTicket(t Ticket, in Inputs, planByTicket map[string]*Plan, filterByRe
 		}
 		return skip(reasonConcurrencyCap)
 	}
-	if in.Prior+dispatchedThisPass >= in.Config.DailyQuota {
-		return skip("daily quota reached")
+	if reason, gated := dailyQuotaSkip(in.Config.DailyQuota, in.DailyQuota, dispatchedThisPass); gated {
+		return skip(reason)
 	}
 	if in.Config.QuietHours != nil && in.Config.QuietHours.Contains(in.Now) {
 		return skip("quiet hours")
@@ -773,7 +778,7 @@ func decideTicket(t Ticket, in Inputs, planByTicket map[string]*Plan, filterByRe
 	}
 	agent := resolveAgent(t, in)
 	if agent == "" {
-		return skip("budget exhausted")
+		return skip(reasonTokenBudgetExhausted)
 	}
 
 	if resuming {
@@ -1205,6 +1210,53 @@ func oomBackoffSkip(since time.Time, backoff time.Duration, now time.Time) (stri
 	}
 	minutes := int((remaining + time.Minute - 1) / time.Minute)
 	return fmt.Sprintf(reasonOOMBackoffFmt, max(minutes, 1)), true
+}
+
+const (
+	reasonDailyQuotaReached = "daily quota reached"
+	// reasonDailyQuotaUnreadableFmt is the fail-closed reason (#1566): the
+	// persisted count could not be read with certainty, so no launch is admitted.
+	// The reason inserted is path-free and never contains " dispatch " or
+	// " skip:", the formatDecision substrings lazyboards matches on.
+	reasonDailyQuotaUnreadableFmt = "daily quota state unreadable: %s"
+	// reasonDailyQuotaNotRead is the reason for a set quota whose Inputs.DailyQuota
+	// was never populated: a zero-value state is never permissive.
+	reasonDailyQuotaNotRead = "not read this pass"
+	// reasonTokenBudgetExhausted is the token gate's skip reason. The limits
+	// behind it are local estimates, never provider entitlement.
+	reasonTokenBudgetExhausted = "estimated token budget exhausted"
+)
+
+// DailyQuotaState is the once-per-pass reading of the persisted daily launch
+// count (#1566). Read is true once the store answered for this pass, with Used
+// launches recorded on the current local day. Unreadable, when non-empty, is the
+// path-free reason the store could not answer. The zero value (nothing read) is
+// treated as unreadable by dailyQuotaSkip.
+type DailyQuotaState struct {
+	Read       bool
+	Used       int
+	Unreadable string
+}
+
+// dailyQuotaSkip evaluates the daily-quota gate (#1566). A nil limit (quota off)
+// never gates, whatever the state. Otherwise it returns (reason, true) when the
+// state is unreadable or was never read (default-deny), or when the persisted
+// count plus the launches already admitted this pass reaches the limit; a limit
+// of 0 therefore pauses every dispatch. Otherwise ("", false).
+func dailyQuotaSkip(limit *int, state DailyQuotaState, dispatchedThisPass int) (string, bool) {
+	if limit == nil {
+		return "", false
+	}
+	if state.Unreadable != "" {
+		return fmt.Sprintf(reasonDailyQuotaUnreadableFmt, state.Unreadable), true
+	}
+	if !state.Read {
+		return fmt.Sprintf(reasonDailyQuotaUnreadableFmt, reasonDailyQuotaNotRead), true
+	}
+	if state.Used+dispatchedThisPass >= *limit {
+		return reasonDailyQuotaReached, true
+	}
+	return "", false
 }
 
 // memoryHeadroomSkip evaluates the memory-headroom gate (#1290) for repo's

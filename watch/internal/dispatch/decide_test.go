@@ -18,17 +18,30 @@ import (
 // gate, so no existing expectation changes. PlanRefined is pinned to false
 // (#828), matching DefaultConfig()'s default-deny value, so the whole
 // existing gate suite runs with stage-aware pickup off -- every flag-on
-// behavior is opted into explicitly per test.
+// behavior is opted into explicitly per test. DailyQuota is left nil (off, like
+// DefaultConfig(), #1566): a test that exercises the quota gate sets the limit
+// and the Inputs.DailyQuota state explicitly, so no unrelated test touches the
+// quota store.
 func testConfig() Config {
 	return Config{
 		ConcurrencyCap:         10,
 		NeedInputThreshold:     100,
-		DailyQuota:             100,
 		PlanStalenessTolerance: 5,
 		DefaultAgent:           "claude",
 		PipelineStageGate:      true,
 		PlanRefined:            false,
 	}
+}
+
+// quotaPtr returns a pointer to n, the Config.DailyQuota form of an explicit
+// integer limit (#1566).
+func quotaPtr(n int) *int { return &n }
+
+// setQuota configures a daily quota of limit with used launches already read
+// this pass: the settled state a quota-gate test starts from.
+func setQuota(in *Inputs, limit, used int) {
+	in.Config.DailyQuota = quotaPtr(limit)
+	in.DailyQuota = DailyQuotaState{Read: true, Used: used}
 }
 
 // dispatchTestConfig extends testConfig with a single enrolled repo ("o/r")
@@ -229,12 +242,39 @@ func TestDecideGates(t *testing.T) {
 			want: []wantDecision{{42, ActionSkip, "concurrency cap reached", ""}},
 		},
 		{
-			name: "daily quota reached",
+			name:   "daily quota reached",
+			mutate: func(in *Inputs) { setQuota(in, 1, 1) },
+			want:   []wantDecision{{42, ActionSkip, "daily quota reached", ""}},
+		},
+		{
+			name:   "daily quota below the limit dispatches",
+			mutate: func(in *Inputs) { setQuota(in, 2, 1) },
+			want:   []wantDecision{{42, ActionDispatch, "dispatch", ""}},
+		},
+		{
+			name:   "daily quota of zero pauses every dispatch",
+			mutate: func(in *Inputs) { setQuota(in, 0, 0) },
+			want:   []wantDecision{{42, ActionSkip, "daily quota reached", ""}},
+		},
+		{
+			name: "daily quota unreadable blocks dispatch with the reason",
 			mutate: func(in *Inputs) {
-				in.Config.DailyQuota = 1
-				in.Prior = 1
+				in.Config.DailyQuota = quotaPtr(5)
+				in.DailyQuota = DailyQuotaState{Unreadable: "quota state is corrupt"}
 			},
-			want: []wantDecision{{42, ActionSkip, "daily quota reached", ""}},
+			want: []wantDecision{{42, ActionSkip, "daily quota state unreadable: quota state is corrupt", ""}},
+		},
+		{
+			name:   "daily quota set but never read is denied, not permissive",
+			mutate: func(in *Inputs) { in.Config.DailyQuota = quotaPtr(5) },
+			want:   []wantDecision{{42, ActionSkip, "daily quota state unreadable: not read this pass", ""}},
+		},
+		{
+			name: "daily quota off ignores any state, even an unreadable one",
+			mutate: func(in *Inputs) {
+				in.DailyQuota = DailyQuotaState{Unreadable: "quota state is corrupt", Used: 999}
+			},
+			want: []wantDecision{{42, ActionDispatch, "dispatch", ""}},
 		},
 		{
 			name: "quiet hours",
@@ -247,7 +287,7 @@ func TestDecideGates(t *testing.T) {
 		{
 			name:   "budget exhausted",
 			mutate: func(in *Inputs) { in.Budgets = FloorProvider{Floors: map[string]float64{"claude": 0}} },
-			want:   []wantDecision{{42, ActionSkip, "budget exhausted", ""}},
+			want:   []wantDecision{{42, ActionSkip, "estimated token budget exhausted", ""}},
 		},
 
 		// -- #732: persisted pipeline stage gate --------------------------
@@ -397,7 +437,7 @@ func TestDecideAgentFallback(t *testing.T) {
 		in := baseInputs()
 		in.Budgets = exhausted("claude", "codex")
 		in.Config.AgentPreference = []string{"claude", "codex"}
-		assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, "budget exhausted", ""}})
+		assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, "estimated token budget exhausted", ""}})
 	})
 
 	t.Run("ticket label overrides default, falls back through prefs", func(t *testing.T) {
@@ -413,7 +453,7 @@ func TestDecideAgentFallback(t *testing.T) {
 		in := baseInputs()
 		in.Budgets = exhausted("claude")
 		// No AgentPreference set; default agent exhausted → skip
-		assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, "budget exhausted", ""}})
+		assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, "estimated token budget exhausted", ""}})
 	})
 
 	t.Run("unlimited agent always passes", func(t *testing.T) {
@@ -429,7 +469,7 @@ func TestDecideDisabledOpenCodeCannotBeBudgetFallback(t *testing.T) {
 	in := baseInputs()
 	in.Budgets = FloorProvider{Floors: map[string]float64{"claude": 0, "codex": 0}}
 	in.Config.AgentPreference = []string{"claude", "codex", "opencode"}
-	assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, "budget exhausted", ""}})
+	assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, "estimated token budget exhausted", ""}})
 }
 
 // unsupportedAgentReason is the exact skip reason for an agent with no built-in
@@ -501,7 +541,7 @@ func TestDecideEmptyPrimaryAgentIsNotGated(t *testing.T) {
 
 // During the budget fallback walk an unsupported agentPreference entry is
 // passed over silently; when nothing supported remains the reason stays
-// "budget exhausted" (#1215).
+// "estimated token budget exhausted" (#1215).
 func TestDecideUnsupportedAgentIsPassedOverInFallbackWalk(t *testing.T) {
 	claudeExhausted := FloorProvider{Floors: map[string]float64{"claude": 0}}
 
@@ -512,11 +552,11 @@ func TestDecideUnsupportedAgentIsPassedOverInFallbackWalk(t *testing.T) {
 		assertDecisions(t, Decide(in), []wantDecision{{42, ActionDispatch, "dispatch", "codex"}})
 	})
 
-	t.Run("only unsupported entries remaining keeps budget exhausted", func(t *testing.T) {
+	t.Run("only unsupported entries remaining keeps estimated token budget exhausted", func(t *testing.T) {
 		in := baseInputs()
 		in.Budgets = claudeExhausted
 		in.Config.AgentPreference = []string{"fakeagent"}
-		assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, "budget exhausted", ""}})
+		assertDecisions(t, Decide(in), []wantDecision{{42, ActionSkip, "estimated token budget exhausted", ""}})
 	})
 }
 
@@ -1266,7 +1306,7 @@ func TestDecideResumeGate(t *testing.T) {
 			name:       "budget exhausted still gates a resume",
 			mutate:     func(in *Inputs) { in.Budgets = FloorProvider{Floors: map[string]float64{"claude": 0}} },
 			wantAction: ActionSkip,
-			wantReason: "budget exhausted",
+			wantReason: "estimated token budget exhausted",
 		},
 		{
 			name:       "a stale draft still resumes (freshness deliberately skipped)",
@@ -1784,8 +1824,8 @@ func TestDecidePlanningPickup_StillGatedByLaterGates(t *testing.T) {
 		{
 			name: "daily quota reached",
 			mutate: func(in *Inputs) {
-				in.Config.DailyQuota = 1
-				in.Prior = 1
+				in.Config.DailyQuota = quotaPtr(1)
+				in.DailyQuota = DailyQuotaState{Read: true, Used: 1}
 			},
 			want: wantDecision{42, ActionSkip, "daily quota reached", ""},
 		},
@@ -1800,7 +1840,7 @@ func TestDecidePlanningPickup_StillGatedByLaterGates(t *testing.T) {
 		{
 			name:   "budget exhausted",
 			mutate: func(in *Inputs) { in.Budgets = FloorProvider{Floors: map[string]float64{"claude": 0}} },
-			want:   wantDecision{42, ActionSkip, "budget exhausted", ""},
+			want:   wantDecision{42, ActionSkip, "estimated token budget exhausted", ""},
 		},
 	}
 	for _, tc := range tests {
@@ -1926,15 +1966,15 @@ func TestDecideReplan_StillBlockedByCapacityAndBudgetGates(t *testing.T) {
 		{
 			name: "daily quota reached",
 			mutate: func(in *Inputs) {
-				in.Config.DailyQuota = 1
-				in.Prior = 1
+				in.Config.DailyQuota = quotaPtr(1)
+				in.DailyQuota = DailyQuotaState{Read: true, Used: 1}
 			},
 			want: wantDecision{42, ActionSkip, "daily quota reached", ""},
 		},
 		{
 			name:   "budget exhausted",
 			mutate: func(in *Inputs) { in.Budgets = FloorProvider{Floors: map[string]float64{"claude": 0}} },
-			want:   wantDecision{42, ActionSkip, "budget exhausted", ""},
+			want:   wantDecision{42, ActionSkip, "estimated token budget exhausted", ""},
 		},
 	}
 	for _, tc := range tests {
@@ -2865,8 +2905,8 @@ func TestDecideContainerSessionCapGate(t *testing.T) {
 		{
 			name: "probe failed outranks the daily quota gate",
 			mutate: func(in *Inputs) {
-				in.Config.DailyQuota = 1
-				in.Prior = 1
+				in.Config.DailyQuota = quotaPtr(1)
+				in.DailyQuota = DailyQuotaState{Read: true, Used: 1}
 				in.ContainerSessionProbe = ContainerSessionProbeFailed
 			},
 			want: wantDecision{42, ActionSkip, reasonProbeFailedWant, ""},
@@ -3137,8 +3177,8 @@ func TestDecideMemoryHeadroom_GateOrderInCapacityBlock(t *testing.T) {
 		{
 			name: "low memory is reported before the daily quota",
 			mutate: func(in *Inputs) {
-				in.Config.DailyQuota = 1
-				in.Prior = 1
+				in.Config.DailyQuota = quotaPtr(1)
+				in.DailyQuota = DailyQuotaState{Read: true, Used: 1}
 				in.RepoMemory = map[string]RepoMemory{"o/r": limitedMemory(90, 100)}
 			},
 			want: wantDecision{42, ActionSkip, "memory headroom below 25% (o/r container at 90%)", ""},
@@ -3690,8 +3730,8 @@ func TestDecideFilter_MatchingTicketStillMeetsEverySafetyGate(t *testing.T) {
 			in.Snapshot = snapshot(1, 0)
 		}, reasonConcurrencyCap},
 		{"daily quota", func(in *Inputs) {
-			in.Config.DailyQuota = 1
-			in.Prior = 1
+			in.Config.DailyQuota = quotaPtr(1)
+			in.DailyQuota = DailyQuotaState{Read: true, Used: 1}
 		}, "daily quota reached"},
 	}
 	for _, tc := range tests {
@@ -3860,7 +3900,8 @@ func TestDecideFilter_ExcludedTicketsConsumeNoSlotOrQuota(t *testing.T) {
 	})
 	t.Run("daily quota of one", func(t *testing.T) {
 		in := build()
-		in.Config.DailyQuota = 1
+		in.Config.DailyQuota = quotaPtr(1)
+		in.DailyQuota = DailyQuotaState{Read: true}
 		assertDecisions(t, Decide(in), want)
 	})
 }
@@ -4240,4 +4281,36 @@ func TestDecideSessionEligibility_IneligibleRepoTakesNoSlot(t *testing.T) {
 		{1, ActionSkip, "session unconfigured", ""},
 		{2, ActionDispatch, "dispatch", "claude"},
 	})
+}
+
+// TestDecideDailyQuota_ReasonsKeepTheDecisionLineContract: formatDecision output is
+// matched by lazyboards on the " dispatch " and " skip:" substrings, so no quota
+// skip reason may carry either, whatever the reason text says (#1566).
+func TestDecideDailyQuota_ReasonsKeepTheDecisionLineContract(t *testing.T) {
+	cases := map[string]func(in *Inputs){
+		"reached":  func(in *Inputs) { setQuota(in, 1, 1) },
+		"paused":   func(in *Inputs) { setQuota(in, 0, 0) },
+		"not read": func(in *Inputs) { in.Config.DailyQuota = quotaPtr(1) },
+		"unreadable": func(in *Inputs) {
+			in.Config.DailyQuota = quotaPtr(1)
+			in.DailyQuota = DailyQuotaState{Unreadable: "quota state is corrupt"}
+		},
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			in := baseInputs()
+			mutate(&in)
+			got := Decide(in)
+			if len(got) != 1 || got[0].Action != ActionSkip {
+				t.Fatalf("got %+v, want one skip", got)
+			}
+			line := formatDecision(got[0], nil)
+			if !strings.HasPrefix(line, "o/r#42 skip: ") {
+				t.Errorf("decision line %q lost the skip shape", line)
+			}
+			if strings.Count(line, " skip:") != 1 || strings.Contains(line, " dispatch ") {
+				t.Errorf("decision line %q carries a second \" skip:\" or a \" dispatch \" substring", line)
+			}
+		})
+	}
 }

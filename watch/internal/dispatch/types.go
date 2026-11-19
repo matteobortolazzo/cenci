@@ -933,4 +933,10 @@ type Decision struct {
 	// applyDispatch's dry-run `session not probed (dry-run)`. Never a skip
 	// reason: a noted dispatch is still a dispatch.
 	Note string
+
+	// Spawned (#1566) is true when applyDispatch's spawn for this dispatch
+	// succeeded. Set only by applyDispatch after run.Run returns nil -- Decide is
+	// pure and never sets it -- so a combined pass counts its real launches
+	// (DispatchState.LastDispatched) without an in-memory tally threaded in.
+	Spawned bool
 }

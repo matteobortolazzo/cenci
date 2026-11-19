@@ -20,7 +20,7 @@ import (
 // Ticket #122: RunLoop and RunCombinedLoop must reload dispatch.Config from a
 // configPath every tick (instead of once at startup), and must skip the whole
 // tick — no dispatch, no reconcile, no attention push — on a reload error,
-// preserving the in-memory quota tally. Per the approved plan, the per-tick
+// spawning nothing and recording no launch. Per the approved plan, the per-tick
 // body is extracted into unexported dispatchTick/combinedTick helpers so these
 // tests can drive single ticks deterministically without a real time.Ticker.
 //
@@ -99,22 +99,22 @@ func TestDispatchTickBadReloadSkipsTick(t *testing.T) {
 	dir := t.TempDir()
 	path := seedDispatchConfig(t, dir, "o/A")
 
-	prior := 3
+	spawned := recordSpawns(t)
 	var buf bytes.Buffer
 
 	// Baseline tick against a valid config.
-	_ = dispatchTick(path, fakeController{}, &fakeMutator{}, &buf, &prior, "")
+	_ = dispatchTick(path, fakeController{}, &fakeMutator{}, &buf, "")
 	buf.Reset()
 
 	// Config goes bad between ticks.
 	corruptConfig(t, path)
 
-	if err := dispatchTick(path, fakeController{}, &fakeMutator{}, &buf, &prior, ""); err == nil {
+	if err := dispatchTick(path, fakeController{}, &fakeMutator{}, &buf, ""); err == nil {
 		t.Error("expected bad reload to return an error")
 	}
 
-	if prior != 3 {
-		t.Errorf("prior quota tally changed on a skipped tick: got %d, want 3", prior)
+	if len(*spawned) != 0 {
+		t.Errorf("a skipped tick spawned %v, want no spawn", *spawned)
 	}
 	if !strings.Contains(buf.String(), "config") {
 		t.Errorf("expected the reload error to be logged to out, got %q", buf.String())
@@ -125,10 +125,9 @@ func TestDispatchTickReloadPicksUpEnrollment(t *testing.T) {
 	dir := t.TempDir()
 	path := seedDispatchConfig(t, dir, "o/A")
 
-	prior := 0
 	var buf bytes.Buffer
 
-	_ = dispatchTick(path, fakeController{}, &fakeMutator{}, &buf, &prior, "")
+	_ = dispatchTick(path, fakeController{}, &fakeMutator{}, &buf, "")
 
 	// Repo B is enrolled between ticks (e.g. via `dispatch enroll` or the
 	// board-driven flow from lazyboards#260).
@@ -137,7 +136,7 @@ func TestDispatchTickReloadPicksUpEnrollment(t *testing.T) {
 	}
 
 	buf.Reset()
-	_ = dispatchTick(path, fakeController{}, &fakeMutator{}, &buf, &prior, "")
+	_ = dispatchTick(path, fakeController{}, &fakeMutator{}, &buf, "")
 
 	// No gh seam exists for CollectTickets (by design, per the approved plan),
 	// so the reload is observed via the deterministic gh collection-error log
@@ -162,10 +161,9 @@ func TestDispatchTickModelOverrideWinsOverPersistedConfig(t *testing.T) {
 		t.Fatalf("writing config: %v", err)
 	}
 
-	prior := 0
 	var buf bytes.Buffer
 
-	_ = dispatchTick(path, fakeController{}, &fakeMutator{}, &buf, &prior, "claude-sonnet-5")
+	_ = dispatchTick(path, fakeController{}, &fakeMutator{}, &buf, "claude-sonnet-5")
 
 	if !strings.Contains(buf.String(), "claude-sonnet-5") {
 		t.Errorf("expected the --model override to be logged, got %q", buf.String())
@@ -177,7 +175,7 @@ func TestDispatchTickModelOverrideWinsOverPersistedConfig(t *testing.T) {
 	// Second tick: dispatchTick reloads Config from disk again, which would
 	// re-read "fable" if the override weren't re-applied every time.
 	buf.Reset()
-	_ = dispatchTick(path, fakeController{}, &fakeMutator{}, &buf, &prior, "claude-sonnet-5")
+	_ = dispatchTick(path, fakeController{}, &fakeMutator{}, &buf, "claude-sonnet-5")
 	if !strings.Contains(buf.String(), "claude-sonnet-5") {
 		t.Errorf("expected the override to survive a config reload on tick 2, got %q", buf.String())
 	}
@@ -189,7 +187,7 @@ func TestCombinedTickBadReloadSkipsTick(t *testing.T) {
 	dir := t.TempDir()
 	path := seedDispatchConfig(t, dir, "o/A")
 
-	prior := 5
+	spawned := recordSpawns(t)
 	mut := &fakeMutator{}
 	store := &memStore{}
 	// Capacity 2: an enabled tick sends a start-of-tick and an end-of-tick
@@ -203,19 +201,19 @@ func TestCombinedTickBadReloadSkipsTick(t *testing.T) {
 
 	// Baseline tick against a valid config; drain whatever it pushes so it
 	// can't be mistaken for (or block) the tick under test.
-	combinedTick(ctx, path, fakeController{}, mut, &buf, &prior, store, attention, &state, &windows, &headroom)
+	combinedTick(ctx, path, fakeController{}, mut, &buf, store, attention, &state, &windows, &headroom)
 	drainAttention(attention)
 	buf.Reset()
 
 	corruptConfig(t, path)
 
-	got := combinedTick(ctx, path, fakeController{}, mut, &buf, &prior, store, attention, &state, &windows, &headroom)
+	got := combinedTick(ctx, path, fakeController{}, mut, &buf, store, attention, &state, &windows, &headroom)
 
 	if got != loopCheckInterval {
 		t.Errorf("combinedTick returned %v on a bad reload, want loopCheckInterval (%v)", got, loopCheckInterval)
 	}
-	if prior != 5 {
-		t.Errorf("prior quota tally changed on a skipped tick: got %d, want 5", prior)
+	if len(*spawned) != 0 {
+		t.Errorf("a skipped tick spawned %v, want no spawn", *spawned)
 	}
 	if !strings.Contains(buf.String(), "config") {
 		t.Errorf("expected the reload error to be logged to out, got %q", buf.String())
@@ -234,7 +232,6 @@ func TestCombinedTickReloadPicksUpEnrollment(t *testing.T) {
 	dir := t.TempDir()
 	path := seedDispatchConfig(t, dir, "o/A")
 
-	prior := 0
 	mut := &fakeMutator{}
 	store := &memStore{}
 	attention := make(chan watch.AttentionUpdate, 2)
@@ -244,7 +241,7 @@ func TestCombinedTickReloadPicksUpEnrollment(t *testing.T) {
 	var windows []watch.WindowState
 	var headroom map[string]float64
 
-	combinedTick(ctx, path, fakeController{}, mut, &buf, &prior, store, attention, &state, &windows, &headroom)
+	combinedTick(ctx, path, fakeController{}, mut, &buf, store, attention, &state, &windows, &headroom)
 	drainAttention(attention)
 	buf.Reset()
 
@@ -252,7 +249,7 @@ func TestCombinedTickReloadPicksUpEnrollment(t *testing.T) {
 		t.Fatalf("enrolling repo B: %v", err)
 	}
 
-	got := combinedTick(ctx, path, fakeController{}, mut, &buf, &prior, store, attention, &state, &windows, &headroom)
+	got := combinedTick(ctx, path, fakeController{}, mut, &buf, store, attention, &state, &windows, &headroom)
 
 	if got != 5*time.Minute {
 		t.Errorf("combinedTick returned %v, want the configured 5m daemonInterval", got)
@@ -283,7 +280,6 @@ func TestCombinedTickDisabledPublishesClearedStateAndSkipsPasses(t *testing.T) {
 	path := filepath.Join(dir, "config.json")
 	writeFile(t, path, `{"dispatch": {"loopEnabled": false}}`)
 
-	prior := 0
 	mut := &fakeMutator{}
 	store := &memStore{}
 	attention := make(chan watch.AttentionUpdate, 2)
@@ -293,7 +289,7 @@ func TestCombinedTickDisabledPublishesClearedStateAndSkipsPasses(t *testing.T) {
 	var windows []watch.WindowState
 	var headroom map[string]float64
 
-	got := combinedTick(ctx, path, fakeController{}, mut, &buf, &prior, store, attention, &state, &windows, &headroom)
+	got := combinedTick(ctx, path, fakeController{}, mut, &buf, store, attention, &state, &windows, &headroom)
 
 	if got != loopCheckInterval {
 		t.Errorf("combinedTick returned %v for a disabled loop, want loopCheckInterval (%v)", got, loopCheckInterval)
@@ -347,7 +343,6 @@ func TestCombinedTickEnabledPublishesStartAndEndOfTick(t *testing.T) {
 	// body never executes).
 	writeFile(t, path, `{"dispatch": {"loopEnabled": true, "daemonInterval": "5m", "repos": []}}`)
 
-	prior := 0
 	mut := &fakeMutator{}
 	store := &memStore{}
 	attention := make(chan watch.AttentionUpdate, 2)
@@ -357,7 +352,7 @@ func TestCombinedTickEnabledPublishesStartAndEndOfTick(t *testing.T) {
 	var windows []watch.WindowState
 	var headroom map[string]float64
 
-	got := combinedTick(ctx, path, fakeController{}, mut, &buf, &prior, store, attention, &state, &windows, &headroom)
+	got := combinedTick(ctx, path, fakeController{}, mut, &buf, store, attention, &state, &windows, &headroom)
 
 	if got != 5*time.Minute {
 		t.Errorf("combinedTick returned %v, want the configured 5m daemonInterval", got)
@@ -410,7 +405,6 @@ func TestCombinedTickLastErrorNotSticky(t *testing.T) {
 	path := filepath.Join(dir, "config.json")
 	writeFile(t, path, `{"dispatch": {"loopEnabled": true, "daemonInterval": "5m", "repos": [{"repo": "o/A", "dir": "/tmp"}]}}`)
 
-	prior := 0
 	mut := &fakeMutator{}
 	store := &memStore{}
 	attention := make(chan watch.AttentionUpdate, 2)
@@ -420,7 +414,7 @@ func TestCombinedTickLastErrorNotSticky(t *testing.T) {
 	var windows []watch.WindowState
 	var headroom map[string]float64
 
-	combinedTick(ctx, path, fakeController{}, mut, &buf, &prior, store, attention, &state, &windows, &headroom)
+	combinedTick(ctx, path, fakeController{}, mut, &buf, store, attention, &state, &windows, &headroom)
 	<-attention // start-of-tick
 	errored := <-attention
 
@@ -430,7 +424,7 @@ func TestCombinedTickLastErrorNotSticky(t *testing.T) {
 
 	writeFile(t, path, `{"dispatch": {"loopEnabled": true, "daemonInterval": "5m", "repos": []}}`)
 
-	combinedTick(ctx, path, fakeController{}, mut, &buf, &prior, store, attention, &state, &windows, &headroom)
+	combinedTick(ctx, path, fakeController{}, mut, &buf, store, attention, &state, &windows, &headroom)
 	<-attention // start-of-tick
 	cleared := <-attention
 
@@ -499,27 +493,26 @@ func assertFilterSkipped(t *testing.T, log, reason string) {
 func TestDispatchTickFilterEditChangesDecisionsOnNextPass(t *testing.T) {
 	loop := newFilterLoop(t, watch.StateSnapshot{}, filterPassIssue{number: 42, milestone: 3})
 	spawned := recordSpawns(t)
-	prior := 0
 	var buf bytes.Buffer
 
 	loop.write(t, filterMilestone3)
-	if err := dispatchTick(loop.path, fakeController{}, &fakeMutator{}, &buf, &prior, ""); err != nil {
+	if err := dispatchTick(loop.path, fakeController{}, &fakeMutator{}, &buf, ""); err != nil {
 		t.Fatalf("dispatchTick under milestone 3: %v\n%s", err, buf.String())
 	}
 	assertFilterDispatched(t, buf.String(), 42)
-	if !reflect.DeepEqual(*spawned, []string{"42"}) || prior != 1 {
-		t.Fatalf("spawned %v prior %d, want ticket 42 spawned once", *spawned, prior)
+	if !reflect.DeepEqual(*spawned, []string{"42"}) {
+		t.Fatalf("spawned %v, want ticket 42 spawned once", *spawned)
 	}
 
 	// The operator re-points this machine at milestone 7; no restart.
 	loop.write(t, filterMilestone7)
 	buf.Reset()
-	if err := dispatchTick(loop.path, fakeController{}, &fakeMutator{}, &buf, &prior, ""); err != nil {
+	if err := dispatchTick(loop.path, fakeController{}, &fakeMutator{}, &buf, ""); err != nil {
 		t.Fatalf("dispatchTick under milestone 7: %v\n%s", err, buf.String())
 	}
 	assertFilterSkipped(t, buf.String(), "filter: milestone 3 not in [7]")
-	if len(*spawned) != 1 || prior != 1 {
-		t.Errorf("spawned %v prior %d after the edit, want no further dispatch", *spawned, prior)
+	if len(*spawned) != 1 {
+		t.Errorf("spawned %v after the edit, want no further dispatch", *spawned)
 	}
 }
 
@@ -527,18 +520,17 @@ func TestDispatchTickFilterBadEditSkipsPassAndCorrectedFileDispatchesAgain(t *te
 	loop := newFilterLoop(t, watch.StateSnapshot{}, filterPassIssue{number: 42, milestone: 3})
 	spawned := recordSpawns(t)
 	mut := &fakeMutator{}
-	prior := 0
 	var buf bytes.Buffer
 
 	loop.write(t, filterMilestone3)
-	if err := dispatchTick(loop.path, fakeController{}, mut, &buf, &prior, ""); err != nil {
+	if err := dispatchTick(loop.path, fakeController{}, mut, &buf, ""); err != nil {
 		t.Fatalf("baseline dispatchTick: %v\n%s", err, buf.String())
 	}
 	edits := len(mut.labelEdits)
 
 	loop.write(t, filterTypo)
 	buf.Reset()
-	err := dispatchTick(loop.path, fakeController{}, mut, &buf, &prior, "")
+	err := dispatchTick(loop.path, fakeController{}, mut, &buf, "")
 	if !errors.Is(err, errConfigReload) {
 		t.Fatalf("bad filter edit returned %v, want errConfigReload", err)
 	}
@@ -550,18 +542,98 @@ func TestDispatchTickFilterBadEditSkipsPassAndCorrectedFileDispatchesAgain(t *te
 	if strings.Contains(buf.String(), "o/r#42") {
 		t.Errorf("a skipped pass must record no decisions:\n%s", buf.String())
 	}
-	if len(*spawned) != 1 || prior != 1 || len(mut.labelEdits) != edits {
-		t.Errorf("skipped pass changed state: spawned %v prior %d edits %d (was %d)", *spawned, prior, len(mut.labelEdits), edits)
+	if len(*spawned) != 1 || len(mut.labelEdits) != edits {
+		t.Errorf("skipped pass changed state: spawned %v edits %d (was %d)", *spawned, len(mut.labelEdits), edits)
 	}
 
 	loop.write(t, filterMilestone3)
 	buf.Reset()
-	if err := dispatchTick(loop.path, fakeController{}, mut, &buf, &prior, ""); err != nil {
+	if err := dispatchTick(loop.path, fakeController{}, mut, &buf, ""); err != nil {
 		t.Fatalf("dispatchTick after the correction: %v\n%s", err, buf.String())
 	}
 	assertFilterDispatched(t, buf.String(), 42)
-	if len(*spawned) != 2 || prior != 2 {
-		t.Errorf("spawned %v prior %d after the correction, want dispatch restored", *spawned, prior)
+	if len(*spawned) != 2 {
+		t.Errorf("spawned %v after the correction, want dispatch restored", *spawned)
+	}
+}
+
+// writeQuota replaces the loop's config file with one whose dispatch
+// block carries the raw JSON value under dailyQuota (#1566).
+func (f filterLoop) writeQuota(t *testing.T, raw string) {
+	t.Helper()
+	body := fmt.Sprintf(`{"dispatch":{"loopEnabled":true,"dailyQuota":%s,"repos":[{"repo":"o/r","dir":%q,"session":"test-session"}]}}`, raw, f.dir)
+	writeFile(t, f.path, body)
+}
+
+// An invalid dispatch.dailyQuota on a hand edit skips the tick through the
+// existing reload path: errConfigReload, the error naming the key in the log, no
+// decision, no spawn and no quota-store access; the corrected file dispatches
+// again on the next tick, and "off" reads like an absent key (#1566).
+func TestDispatchTickInvalidDailyQuotaSkipsTickAndCorrectionDispatches(t *testing.T) {
+	loop := newFilterLoop(t, watch.StateSnapshot{}, filterPassIssue{number: 42, milestone: 3})
+	spawned := recordSpawns(t)
+	calls := pointQuotaSeam(t, filepath.Join(t.TempDir(), "capacity"))
+
+	for _, raw := range []string{`null`, `-1`, `1.5`, `"OFF"`, `"5"`} {
+		t.Run(raw, func(t *testing.T) {
+			loop.writeQuota(t, raw)
+			var buf bytes.Buffer
+			err := dispatchTick(loop.path, fakeController{}, &fakeMutator{}, &buf, "")
+			if !errors.Is(err, errConfigReload) {
+				t.Fatalf("dailyQuota %s returned %v, want errConfigReload", raw, err)
+			}
+			if !strings.Contains(buf.String(), "dispatch.dailyQuota") {
+				t.Errorf("log does not name dispatch.dailyQuota:\n%s", buf.String())
+			}
+			if strings.Contains(buf.String(), "o/r#42") {
+				t.Errorf("a skipped pass must record no decisions:\n%s", buf.String())
+			}
+		})
+	}
+	if len(*spawned) != 0 || *calls != 0 {
+		t.Fatalf("skipped ticks spawned %v and opened the quota store %d times, want neither", *spawned, *calls)
+	}
+
+	loop.writeQuota(t, `"off"`)
+	var buf bytes.Buffer
+	if err := dispatchTick(loop.path, fakeController{}, &fakeMutator{}, &buf, ""); err != nil {
+		t.Fatalf("dailyQuota \"off\": %v\n%s", err, buf.String())
+	}
+	assertFilterDispatched(t, buf.String(), 42)
+	if !reflect.DeepEqual(*spawned, []string{"42"}) || *calls != 0 {
+		t.Errorf("with \"off\": spawned %v, store opened %d times, want ticket 42 and no store access", *spawned, *calls)
+	}
+}
+
+// The same invalid edit skips the combined (daemon) tick: nothing dispatches or
+// reconciles, no attention update is pushed, and the short recheck interval is
+// returned.
+func TestCombinedTickInvalidDailyQuotaSkipsTick(t *testing.T) {
+	loop := newFilterLoop(t, watch.StateSnapshot{}, filterPassIssue{number: 42, milestone: 3})
+	spawned := recordSpawns(t)
+	mut := &fakeMutator{}
+	attention := make(chan watch.AttentionUpdate, 2)
+	state := watch.DispatchState{DaemonRunning: true}
+	var windows []watch.WindowState
+	var headroom map[string]float64
+	var buf bytes.Buffer
+
+	loop.writeQuota(t, `"OFF"`)
+	got := combinedTick(context.Background(), loop.path, fakeController{}, mut, &buf, &memStore{}, attention, &state, &windows, &headroom)
+
+	if got != loopCheckInterval {
+		t.Errorf("combinedTick returned %v on an invalid dailyQuota, want loopCheckInterval (%v)", got, loopCheckInterval)
+	}
+	if !strings.Contains(buf.String(), "dispatch.dailyQuota") {
+		t.Errorf("log does not name dispatch.dailyQuota:\n%s", buf.String())
+	}
+	if len(*spawned) != 0 || len(mut.labelEdits) != 0 || len(mut.comments) != 0 {
+		t.Errorf("a skipped tick changed state: spawned %v edits %v comments %v", *spawned, mut.labelEdits, mut.comments)
+	}
+	select {
+	case u := <-attention:
+		t.Errorf("a skipped tick must push no attention update, got %+v", u)
+	default:
 	}
 }
 
@@ -677,26 +749,25 @@ func TestCombinedTickFilterEditChangesDecisionsOnNextPass(t *testing.T) {
 	state := watch.DispatchState{DaemonRunning: true}
 	var windows []watch.WindowState
 	var headroom map[string]float64
-	prior := 0
 	var buf bytes.Buffer
 	tick := func() time.Duration {
 		defer drainAttention(attention)
-		return combinedTick(context.Background(), loop.path, fakeController{}, mut, &buf, &prior, store, attention, &state, &windows, &headroom)
+		return combinedTick(context.Background(), loop.path, fakeController{}, mut, &buf, store, attention, &state, &windows, &headroom)
 	}
 
 	loop.write(t, filterMilestone3)
 	tick()
 	assertFilterDispatched(t, buf.String(), 42)
-	if !reflect.DeepEqual(*spawned, []string{"42"}) || prior != 1 {
-		t.Fatalf("spawned %v prior %d, want ticket 42 spawned once", *spawned, prior)
+	if !reflect.DeepEqual(*spawned, []string{"42"}) {
+		t.Fatalf("spawned %v, want ticket 42 spawned once", *spawned)
 	}
 
 	loop.write(t, filterMilestone7)
 	buf.Reset()
 	tick()
 	assertFilterSkipped(t, buf.String(), "filter: milestone 3 not in [7]")
-	if len(*spawned) != 1 || prior != 1 {
-		t.Errorf("spawned %v prior %d after the edit, want no further dispatch", *spawned, prior)
+	if len(*spawned) != 1 {
+		t.Errorf("spawned %v after the edit, want no further dispatch", *spawned)
 	}
 }
 
@@ -709,10 +780,9 @@ func TestCombinedTickFilterBadEditSkipsPassAndCorrectedFileDispatchesAgain(t *te
 	state := watch.DispatchState{DaemonRunning: true}
 	var windows []watch.WindowState
 	var headroom map[string]float64
-	prior := 0
 	var buf bytes.Buffer
 	tick := func() time.Duration {
-		return combinedTick(context.Background(), loop.path, fakeController{}, mut, &buf, &prior, store, attention, &state, &windows, &headroom)
+		return combinedTick(context.Background(), loop.path, fakeController{}, mut, &buf, store, attention, &state, &windows, &headroom)
 	}
 
 	loop.write(t, filterMilestone3)
@@ -738,9 +808,9 @@ func TestCombinedTickFilterBadEditSkipsPassAndCorrectedFileDispatchesAgain(t *te
 		t.Errorf("a skipped pass must push no attention update, got %+v", got)
 	default:
 	}
-	if len(*spawned) != 1 || prior != 1 || len(mut.labelEdits) != edits || len(mut.comments) != 0 {
-		t.Errorf("skipped pass changed state: spawned %v prior %d edits %d (was %d) comments %v",
-			*spawned, prior, len(mut.labelEdits), edits, mut.comments)
+	if len(*spawned) != 1 || len(mut.labelEdits) != edits || len(mut.comments) != 0 {
+		t.Errorf("skipped pass changed state: spawned %v edits %d (was %d) comments %v",
+			*spawned, len(mut.labelEdits), edits, mut.comments)
 	}
 
 	loop.write(t, filterMilestone3)
@@ -748,8 +818,8 @@ func TestCombinedTickFilterBadEditSkipsPassAndCorrectedFileDispatchesAgain(t *te
 	tick()
 	drainAttention(attention)
 	assertFilterDispatched(t, buf.String(), 42)
-	if len(*spawned) != 2 || prior != 2 {
-		t.Errorf("spawned %v prior %d after the correction, want dispatch restored", *spawned, prior)
+	if len(*spawned) != 2 {
+		t.Errorf("spawned %v after the correction, want dispatch restored", *spawned)
 	}
 }
 
@@ -803,10 +873,9 @@ esac
 	state := watch.DispatchState{DaemonRunning: true}
 	var windows []watch.WindowState
 	var headroom map[string]float64
-	prior := 0
 	var buf bytes.Buffer
 	tick := func() {
-		combinedTick(context.Background(), loop.path, ctl, mut, &buf, &prior, store, attention, &state, &windows, &headroom)
+		combinedTick(context.Background(), loop.path, ctl, mut, &buf, store, attention, &state, &windows, &headroom)
 		drainAttention(attention)
 	}
 
@@ -821,9 +890,6 @@ esac
 	assertFilterSkipped(t, buf.String(), "filter: milestone 7 not in [3]")
 	if len(mut.labelEdits) != 0 || len(mut.comments) != 0 || len(mut.ensureCalls) != 0 {
 		t.Errorf("tightening must not touch the running ticket: edits %+v comments %+v ensures %+v", mut.labelEdits, mut.comments, mut.ensureCalls)
-	}
-	if prior != 0 {
-		t.Errorf("prior = %d, want 0", prior)
 	}
 	if !reflect.DeepEqual(store.state, before) {
 		t.Errorf("retry state changed by the edit:\n before %+v\n after  %+v", before, store.state)

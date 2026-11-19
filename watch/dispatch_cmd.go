@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/capacity"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/dispatch"
 	"github.com/matteobortolazzo/cenci/watch/v2/internal/tmux"
 	"github.com/matteobortolazzo/cenci/watch/v2/pkg/watch"
@@ -95,8 +97,7 @@ func runDispatch(args []string) {
 		}
 		return
 	}
-	prior := 0
-	if _, err := dispatch.RunOnce(cfg, ctrl, &dispatch.GHMutator{}, *dryRun, os.Stdout, &prior); err != nil {
+	if _, err := dispatch.RunOnce(cfg, ctrl, &dispatch.GHMutator{}, *dryRun, os.Stdout); err != nil {
 		fmt.Fprintf(os.Stderr, "cenci dispatch: %v\n", err)
 		os.Exit(1)
 	}
@@ -284,8 +285,26 @@ func runDispatchStatus(args []string) {
 	} else {
 		fmt.Printf("Memory headroom: %d%%\n", cfg.MemoryHeadroom)
 	}
+	fmt.Println(renderDailyQuotaLine(cfg.DailyQuota, capacity.NewDailyQuota(capacity.Dir()), time.Now()))
 	fmt.Print(renderFilterLines(filter))
 	fmt.Printf("Config: %s\n", cfg.Path)
+}
+
+// renderDailyQuotaLine renders the human `dailyQuota:` status line (#1566):
+// `dailyQuota: off` when no quota is set (the store is not touched), else
+// `dailyQuota: N per local day (used X)` from a read-only Peek (no lock, nothing
+// created), or `dailyQuota: N per local day (daily quota state unreadable:
+// <reason>)` when the persisted state cannot be read. The status verb reports
+// the state and still exits 0; the --json output is unchanged.
+func renderDailyQuotaLine(limit *int, counter *capacity.DailyQuota, now time.Time) string {
+	if limit == nil {
+		return "dailyQuota: off"
+	}
+	used, err := counter.Peek(now)
+	if err != nil {
+		return fmt.Sprintf("dailyQuota: %d per local day (daily quota state unreadable: %s)", *limit, err)
+	}
+	return fmt.Sprintf("dailyQuota: %d per local day (used %d)", *limit, used)
 }
 
 // statusFilters is the `filters` object of `dispatch status --json` (#1385):

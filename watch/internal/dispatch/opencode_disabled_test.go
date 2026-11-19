@@ -36,16 +36,15 @@ func TestDisabledOpenCodeDoesNotDispatchOrChangeLabels(t *testing.T) {
 					return nil
 				})
 				mut := &fakeMutator{}
-				prior := 0
-				got, err := applyDispatch(cfg, deps, fakeController{}, mut, false, nil, &prior)
+				got, err := applyDispatch(cfg, deps, fakeController{}, mut, false, nil)
 				if err != nil {
 					t.Fatal(err)
 				}
 				if len(got) != 1 || got[0].Action != ActionSkip || !strings.Contains(got[0].Reason, "OpenCode is temporarily disabled") {
 					t.Fatalf("expected disabled skip: %+v", got)
 				}
-				if len(mut.labelEdits) != 0 || prior != 0 {
-					t.Fatalf("refusal changed labels/quota: %+v, %d", mut.labelEdits, prior)
+				if len(mut.labelEdits) != 0 || countSpawned(got) != 0 {
+					t.Fatalf("refusal changed labels or spawned: %+v, %+v", mut.labelEdits, got)
 				}
 			})
 		}

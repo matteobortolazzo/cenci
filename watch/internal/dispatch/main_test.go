@@ -1,10 +1,14 @@
 package dispatch
 
 import (
+	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/matteobortolazzo/cenci/watch/v2/internal/capacity"
 )
 
 // TestMain installs a hermetic default for the container-session probe seam
@@ -25,10 +29,24 @@ import (
 // defaultOOMProbe directly over fakes, and the tests that exercise the wiring
 // swap in their own stub (stubContainerSessionProbe, stubMemoryProbe,
 // stubOOMProbe).
+//
+// dailyQuotaFn (#1566) is pointed at a fresh temp directory, so a test whose
+// config sets a daily quota can never read or write the developer's real
+// $XDG_STATE_HOME/cenci/capacity; tests that assert on the store use
+// useQuotaDir for a directory of their own. The directory is removed after the
+// run.
 func TestMain(m *testing.M) {
 	containerSessionProbeFn = func() (int, error) { return 0, nil }
 	memoryProbeFn = func([]RepoConfig, io.Writer) map[string]RepoMemory { return map[string]RepoMemory{} }
 	oomProbeFn = func([]Ticket, []RepoConfig, io.Writer) oomProbeResult { return oomProbeResult{} }
 	oomBackoffLoadFn = func() (map[string]time.Time, error) { return nil, nil }
-	os.Exit(m.Run())
+	quotaDir, err := os.MkdirTemp("", "cenci-quota-")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "creating the hermetic quota directory: %v\n", err)
+		os.Exit(1)
+	}
+	dailyQuotaFn = func() *capacity.DailyQuota { return capacity.NewDailyQuota(filepath.Join(quotaDir, "capacity")) }
+	code := m.Run()
+	_ = os.RemoveAll(quotaDir)
+	os.Exit(code)
 }

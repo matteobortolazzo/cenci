@@ -65,7 +65,7 @@ import (
 func chainRunOnceExpectingError(t *testing.T, cfg Config, mut *GHMutator, dryRun bool) ([]Decision, string, error) {
 	t.Helper()
 	var buf bytes.Buffer
-	decisions, err := RunOnce(cfg, fakeController{}, mut, dryRun, &buf, nil)
+	decisions, err := RunOnce(cfg, fakeController{}, mut, dryRun, &buf)
 	if err == nil {
 		t.Fatal("expected RunOnce to return a non-nil error (an unreadable .plans directory), got nil")
 	}

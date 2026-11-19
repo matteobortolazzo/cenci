@@ -58,13 +58,17 @@ type RepoConfig struct {
 // Config is the resolved dispatch policy: built-in defaults with a config.json
 // "dispatch" block merged over them.
 type Config struct {
-	Repos                  []RepoConfig
-	ConcurrencyCap         int
-	MemoryHeadroom         int           // percent of a container's memory limit that must be free to pick up (#1290); 0 disables
-	OOMRetryBudget         int           // OOM-classified recoveries per ticket before it is marked dispatch-failed (#1291); 0 fails the first
-	OOMBackoff             time.Duration // wait after an OOM retry before the ticket is picked up again (#1291); 0 disables
-	NeedInputThreshold     int
-	DailyQuota             int
+	Repos              []RepoConfig
+	ConcurrencyCap     int
+	MemoryHeadroom     int           // percent of a container's memory limit that must be free to pick up (#1290); 0 disables
+	OOMRetryBudget     int           // OOM-classified recoveries per ticket before it is marked dispatch-failed (#1291); 0 fails the first
+	OOMBackoff         time.Duration // wait after an OOM retry before the ticket is picked up again (#1291); 0 disables
+	NeedInputThreshold int
+	// DailyQuota (#1566) is the dispatch launches allowed per local calendar
+	// day, counted in the persisted capacity store. nil means off (the default,
+	// and the explicit "off"): nothing is counted, read or written. 0 pauses
+	// every dispatch.
+	DailyQuota             *int
 	QuietHours             *QuietHours
 	PlanStalenessTolerance int // commits
 	DefaultAgent           string
@@ -180,7 +184,6 @@ func DefaultConfig() Config {
 		OOMRetryBudget:         defaultOOMRetryBudget,
 		OOMBackoff:             defaultOOMBackoff,
 		NeedInputThreshold:     1,
-		DailyQuota:             20,
 		PlanStalenessTolerance: 5,
 		DefaultAgent:           "claude",
 		GracePeriod:            5 * time.Minute,
@@ -205,10 +208,13 @@ type dispatchFile struct {
 	// OOMRetryBudget and OOMBackoff (#1291) are RawMessage for the same reason
 	// as MemoryHeadroom: a JSON null must reach the parser and be rejected, and
 	// an explicit 0 / "0" must stay distinguishable from an unset key.
-	OOMRetryBudget         json.RawMessage       `json:"oomRetryBudget,omitempty"`
-	OOMBackoff             json.RawMessage       `json:"oomBackoff,omitempty"`
-	NeedInputThreshold     *int                  `json:"needInputThreshold"`
-	DailyQuota             *int                  `json:"dailyQuota"`
+	OOMRetryBudget     json.RawMessage `json:"oomRetryBudget,omitempty"`
+	OOMBackoff         json.RawMessage `json:"oomBackoff,omitempty"`
+	NeedInputThreshold *int            `json:"needInputThreshold"`
+	// DailyQuota (#1566) is a RawMessage for the same reason as MemoryHeadroom:
+	// a JSON null must reach parseDailyQuota and be rejected, and the string
+	// "off" must stay distinguishable from an integer.
+	DailyQuota             json.RawMessage       `json:"dailyQuota,omitempty"`
 	QuietHours             *QuietHours           `json:"quietHours"`
 	PlanStalenessTolerance *int                  `json:"planStalenessTolerance"`
 	DefaultAgent           string                `json:"defaultAgent"`
@@ -274,6 +280,10 @@ func LoadConfig(path string) (Config, error) {
 		if err != nil {
 			return cfg, fmt.Errorf("config %s: dispatch.oomBackoff %w", path, err)
 		}
+		dailyQuota, err := parseDailyQuota(f.Dispatch.DailyQuota)
+		if err != nil {
+			return cfg, fmt.Errorf("config %s: dispatch.dailyQuota %w", path, err)
+		}
 		// Validate every repo's filters before mergeConfig so an invalid block
 		// returns the unmerged defaults, like the errors above: the pass is
 		// skipped by the caller, never run with a widened (unrestricted) repo.
@@ -295,6 +305,7 @@ func LoadConfig(path string) (Config, error) {
 		if oomBackoff != nil {
 			cfg.OOMBackoff = *oomBackoff
 		}
+		cfg.DailyQuota = dailyQuota
 		cfg.LegacyTopLevelSession = legacyTopLevelSessionSet(f.Dispatch.LegacySession)
 	}
 	cfg.PlanningAttended, cfg.PlanningAttendedUnparseable = resolvePlanningAttended(f.Planning)
@@ -380,6 +391,41 @@ func parseOOMBackoff(raw json.RawMessage) (*time.Duration, error) {
 	return &d, nil
 }
 
+// dailyQuotaOff is the explicit spelling of "no daily quota" (#1566): exactly
+// this lowercase string, as in `cenci automerge on|off`.
+const dailyQuotaOff = "off"
+
+// parseDailyQuota validates dispatch.dailyQuota (#1566): nil (off) when the key
+// is absent or the exact string "off", else an integer >= 0 (0 pauses every
+// dispatch). A null, negative, non-integer or any other string (including
+// "OFF" and "5") is an error rather than a silent default, so a typo can never
+// quietly lift or tighten the limit. The error starts mid-sentence (see
+// parseMemoryHeadroom).
+func parseDailyQuota(raw json.RawMessage) (*int, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	const form = "must be an integer >= 0 or \"" + dailyQuotaOff + "\""
+	if isJSONNull(raw) {
+		return nil, errors.New(form + ", got null")
+	}
+	var text string
+	if err := json.Unmarshal(raw, &text); err == nil {
+		if text == dailyQuotaOff {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("%s, got the string %q", form, text)
+	}
+	var v int
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return nil, fmt.Errorf("%s: %w", form, err)
+	}
+	if v < 0 {
+		return nil, fmt.Errorf("%s, got %d", form, v)
+	}
+	return &v, nil
+}
+
 // resolvePlanningAttended decodes the fleet config's top-level "planning"
 // block leniently (#1086): unlike dispatchFile above, this is deliberately
 // NOT a typed struct, so a malformed value (a non-bool attended, or
@@ -448,9 +494,6 @@ func mergeConfig(base Config, o dispatchFile) Config {
 	}
 	if o.NeedInputThreshold != nil {
 		base.NeedInputThreshold = *o.NeedInputThreshold
-	}
-	if o.DailyQuota != nil {
-		base.DailyQuota = *o.DailyQuota
 	}
 	if o.QuietHours != nil {
 		base.QuietHours = o.QuietHours
