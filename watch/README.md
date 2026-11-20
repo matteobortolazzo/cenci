@@ -1117,7 +1117,17 @@ failing gate is the logged skip reason):
     quota state that cannot be read with certainty (an unreadable, corrupt,
     unknown-schema or symlinked file or directory) admits no dispatch: every
     candidate is skipped with `daily quota state unreadable: <reason>`, and the pass
-    logs `dispatch: daily quota state unreadable: <reason>` once;
+    logs `dispatch: daily quota state unreadable: <reason>` once. A launch whose
+    recording failed after its spawn (a read-only capacity directory, a full disk, a
+    lock timeout) is kept as a pending count in the running process. Before each real
+    pass reads the count it records today's pending launches in one write: on success
+    the pass gates on the corrected count, and on failure every candidate is skipped
+    with `daily quota state unreadable: <reason>` and nothing is spawned, until the
+    store is writable again. A dry run never writes, so with launches pending for
+    today it skips every candidate with `daily quota state unreadable: unrecorded
+    launch pending`. Pending launches from an earlier local day are discarded. The
+    pending count lives in memory only, so a process exit (a daemon restart, a
+    one-shot `cenci dispatch --once` pass) loses it;
 13. the current local time is outside `quietHours`;
 14. the resolved agent still has estimated token budget (see [Usage
     budgets](#usage-budgets) — when `agentLimits` is set this is computed from local
@@ -1719,7 +1729,7 @@ Dispatch reads the same `config.json` as `run`, under a top-level `"dispatch"` b
 | `concurrencyCap` | `3` | Max concurrent running sessions (counts in-flight windows, orphaned container sessions still alive after their pane closed, and this pass's dispatches) |
 | `needInputThreshold` | `1` | Pause dispatch when at least this many windows await input |
 | `memoryHeadroom` | `25` | Minimum percent of a repo's container memory limit that must be free before dispatch picks up into it (integer 0–100; `0` disables the gate; see [Pickup rules and gates](#pickup-rules-and-gates)); a non-integer, `null`, negative or >100 value is a config error |
-| `dailyQuota` | `off` | Max dispatch launches per real local calendar day, persisted under `$XDG_STATE_HOME/cenci/capacity/` so the count carries across restarts and processes and starts at 0 on the next local date. Off by default: absent and the string `"off"` both mean no limit, and while off the store is never read or written. An integer `N` counts `N` launches per day and skips further pickups with `daily quota reached`; `0` pauses every dispatch; `null`, a negative number, a non-integer or any other string (`"OFF"` and `"5"` included) is a config error naming `dispatch.dailyQuota`. With a quota set, an unreadable, corrupt, unknown-schema or symlinked quota state blocks every dispatch (`daily quota state unreadable: <reason>`) and is never auto-reset: remove `daily-quota.json` under the capacity directory by hand to recover. `cenci dispatch status` prints `dailyQuota: off` or `dailyQuota: N per local day (used X)` |
+| `dailyQuota` | `off` | Max dispatch launches per real local calendar day, persisted under `$XDG_STATE_HOME/cenci/capacity/` so the count carries across restarts and processes and starts at 0 on the next local date. Off by default: absent and the string `"off"` both mean no limit, and while off the store is never read or written. An integer `N` counts `N` launches per day and skips further pickups with `daily quota reached`; `0` pauses every dispatch; `null`, a negative number, a non-integer or any other string (`"OFF"` and `"5"` included) is a config error naming `dispatch.dailyQuota`. With a quota set, an unreadable, corrupt, unknown-schema or symlinked quota state blocks every dispatch (`daily quota state unreadable: <reason>`) and is never auto-reset: remove `daily-quota.json` under the capacity directory by hand to recover. A launch whose recording fails is kept as a pending count in the running process and recorded in one write before the next real pass reads the count; while that write fails the pass skips every candidate with `daily quota state unreadable: <reason>`, and a dry run with launches pending for today skips with `daily quota state unreadable: unrecorded launch pending`. Pending launches from an earlier day are discarded, and a process exit (daemon restart, `cenci dispatch --once`) loses the pending count. `cenci dispatch status` prints `dailyQuota: off` or `dailyQuota: N per local day (used X)` |
 | `quietHours` | none | Local-clock window to suppress dispatch; `startHour > endHour` wraps midnight, `start == end` disables |
 | `planStalenessTolerance` | `5` | Max commits a plan may fall behind before it is skipped as stale (see [Path-aware staleness](#path-aware-staleness) for scoping the count via `stalenessPaths`) |
 | `pipelineStageGate` | `true` | Skip tickets whose persisted `cenci pipeline` stage is `finalized` (see [Pickup rules and gates](#pickup-rules-and-gates)); set `false` to disable the gate entirely |

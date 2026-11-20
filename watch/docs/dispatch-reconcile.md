@@ -799,11 +799,18 @@ before `Decide`, and hands it in as `Inputs.SessionEligibility`. `gateSessions` 
   recording nothing. It fails closed while a quota is set: an unreadable, corrupt,
   unknown-schema or symlinked state, or a set quota whose state was never populated
   (`not read this pass`), skips with `daily quota state unreadable: <reason>`. A failed
-  record is logged, never returned (RunLoop treats a returned error as fatal). A
-  corrupt, unknown-schema or symlinked file fails closed on the next pass's read, but a
-  write failure that leaves a valid file (disk full, read-only capacity directory, lock
-  timeout) undercounts until the state is writable again: a known limitation, tracked
-  as a follow-up.
+  record is logged, never returned (RunLoop treats a returned error as fatal), and is
+  kept (#1572) as an in-process pending count tagged with its local day. Before each
+  real pass reads the count, `applyDispatch` records today's pending launches in one
+  `RecordN` write and fails closed if that write fails (every candidate skips with
+  `daily quota state unreadable: <reason>`, nothing spawns, one
+  `unrecorded launch(es) pending` log line per pass). A dry run never writes, so with
+  launches pending for today it skips with `daily quota state unreadable: unrecorded
+  launch pending`. Pending launches from another local day are discarded, since the
+  gate only counts today, and with the quota off the pending count is left untouched.
+  Residual: the count is memory-only (a persisted marker would hit the same write
+  failure), so a process exit (daemon restart, one-shot `cenci dispatch --once`) loses
+  it and the launches it held go uncounted.
   Session eligibility applies to every pickup type, because each one launches into the
   repo's session. An unrecognized verdict default-denies with
   `session eligibility unrecognized`.

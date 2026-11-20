@@ -4358,6 +4358,11 @@ func TestDecideDailyQuota_ReasonsKeepTheDecisionLineContract(t *testing.T) {
 			in.Config.DailyQuota = quotaPtr(1)
 			in.DailyQuota = DailyQuotaState{Unreadable: "quota state is corrupt"}
 		},
+		// The dry-run hold for launches whose record failed (#1572).
+		"record pending": func(in *Inputs) {
+			in.Config.DailyQuota = quotaPtr(1)
+			in.DailyQuota = DailyQuotaState{Unreadable: reasonDailyQuotaRecordPending}
+		},
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {
